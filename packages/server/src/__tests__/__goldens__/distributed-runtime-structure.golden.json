@@ -212,7 +212,8 @@
         "operationSummary: string;",
         "riskLevel?: string;",
         "expiresAt: number;",
-        "turnOrigin?: unknown;"
+        "turnOrigin?: unknown;",
+        "request?: ConfirmationRequest;"
       ],
       "kind": "interface",
       "name": "ConfirmationListItem"
@@ -280,6 +281,11 @@
       "definition": "() => void",
       "kind": "type",
       "name": "DisposeBridge"
+    },
+    {
+      "definition": "\"targets\" | \"prepare\" | \"commit\" | \"cancel\"",
+      "kind": "type",
+      "name": "DutyMigrationOperation"
     },
     {
       "definition": [
@@ -429,6 +435,7 @@
         "readonly authenticated: boolean;",
         "readonly loopback: boolean;",
         "readonly closed: boolean;",
+        "readonly surfacePrincipal?: string;",
         "notify(method: string, params?: unknown): void;"
       ],
       "kind": "interface",
@@ -547,6 +554,7 @@
     },
     {
       "definition": [
+        "requestId: string;",
         "reason?: string;",
         "timeoutMs?: number;",
         "strategy?: ServerShutdownStrategy;"
@@ -557,7 +565,8 @@
     {
       "definition": [
         "accepted: true;",
-        "phase: \"stopping\";",
+        "requestId: string;",
+        "phase: \"ready-to-stop\";",
         "strategy: ServerShutdownStrategy;",
         "estimatedCompleteAt: string;"
       ],
@@ -600,6 +609,11 @@
       ],
       "kind": "interface",
       "name": "SessionActivityPayload"
+    },
+    {
+      "definition": "| { status: \"ready\"; mergedConversationCount: number; appliedRuleCount: number; pendingScheduleCount: number; pendingRuleCount: number; message: string; } | { status: \"retry\"; mergedConversationCount: number; pendingScheduleCount: number; pendingRuleCount: number; message: string; }",
+      "kind": "type",
+      "name": "SessionAdoptionReviewResult"
     },
     {
       "definition": [
@@ -841,7 +855,8 @@
     },
     {
       "definition": [
-        "conversations: SessionConversationEntry[];"
+        "conversations: SessionConversationEntry[];",
+        "availability?: | { mode: \"anchor\" } | { mode: \"local-only\"; unavailableCapabilities: readonly string[]; };"
       ],
       "kind": "interface",
       "name": "SessionListResult"
@@ -905,7 +920,8 @@
         "name: string;",
         "active: boolean;",
         "busy: boolean;",
-        "advancement?: SessionAdvancementStateSnapshot;"
+        "advancement?: SessionAdvancementStateSnapshot;",
+        "adoptionReview?: SessionAdoptionReviewResult;"
       ],
       "kind": "interface",
       "name": "SessionResumeResult"
@@ -1078,13 +1094,13 @@
   "topologyEdges": [
     {
       "kind": "dynamic-import",
-      "references": 2,
+      "references": 3,
       "sourceZone": "cli/runtime",
       "target": "cli/serve"
     },
     {
       "kind": "import",
-      "references": 6,
+      "references": 12,
       "sourceZone": "cli/runtime",
       "target": "cli/serve"
     },
@@ -1096,7 +1112,7 @@
     },
     {
       "kind": "import",
-      "references": 20,
+      "references": 22,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/core"
     },
@@ -1111,6 +1127,12 @@
       "references": 3,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/mcp"
+    },
+    {
+      "kind": "import",
+      "references": 3,
+      "sourceZone": "cli/runtime",
+      "target": "package:@zhixing/mesh"
     },
     {
       "kind": "import",
@@ -1132,7 +1154,7 @@
     },
     {
       "kind": "import",
-      "references": 2,
+      "references": 3,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/providers"
     },
@@ -1144,19 +1166,19 @@
     },
     {
       "kind": "import",
-      "references": 2,
+      "references": 3,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/secrets"
     },
     {
       "kind": "import",
-      "references": 5,
+      "references": 7,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/server"
     },
     {
       "kind": "type-import",
-      "references": 18,
+      "references": 19,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/core"
     },
@@ -1186,7 +1208,7 @@
     },
     {
       "kind": "type-import",
-      "references": 2,
+      "references": 3,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/server"
     },
@@ -1209,6 +1231,12 @@
       "target": "package:@zhixing/executor"
     },
     {
+      "kind": "dynamic-import",
+      "references": 1,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/mesh"
+    },
+    {
       "kind": "import",
       "references": 9,
       "sourceZone": "cli/serve",
@@ -1228,7 +1256,7 @@
     },
     {
       "kind": "import",
-      "references": 86,
+      "references": 143,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1246,7 +1274,7 @@
     },
     {
       "kind": "import",
-      "references": 28,
+      "references": 96,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/mesh"
     },
@@ -1258,25 +1286,25 @@
     },
     {
       "kind": "import",
-      "references": 9,
+      "references": 14,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/owner-kernel"
     },
     {
       "kind": "import",
-      "references": 3,
+      "references": 4,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/owner-services"
     },
     {
       "kind": "import",
-      "references": 5,
+      "references": 10,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/providers"
     },
     {
       "kind": "import",
-      "references": 2,
+      "references": 3,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/rpc"
     },
@@ -1288,13 +1316,13 @@
     },
     {
       "kind": "import",
-      "references": 2,
+      "references": 5,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/secrets"
     },
     {
       "kind": "import",
-      "references": 9,
+      "references": 16,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/server"
     },
@@ -1306,37 +1334,37 @@
     },
     {
       "kind": "type-import",
-      "references": 84,
+      "references": 138,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "type-import",
-      "references": 15,
+      "references": 17,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/executor"
     },
     {
       "kind": "type-import",
-      "references": 2,
+      "references": 3,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/mcp"
     },
     {
       "kind": "type-import",
-      "references": 30,
+      "references": 57,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/mesh"
     },
     {
       "kind": "type-import",
-      "references": 7,
+      "references": 6,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/orchestrator"
     },
     {
       "kind": "type-import",
-      "references": 14,
+      "references": 16,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/owner-kernel"
     },
@@ -1348,13 +1376,13 @@
     },
     {
       "kind": "type-import",
-      "references": 6,
+      "references": 7,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/providers"
     },
     {
       "kind": "type-import",
-      "references": 3,
+      "references": 5,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/rpc"
     },
@@ -1366,7 +1394,13 @@
     },
     {
       "kind": "type-import",
-      "references": 7,
+      "references": 1,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/secrets"
+    },
+    {
+      "kind": "type-import",
+      "references": 10,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/server"
     },
@@ -1384,7 +1418,13 @@
     },
     {
       "kind": "import",
-      "references": 9,
+      "references": 10,
+      "sourceZone": "core/authority",
+      "target": "core/protocol"
+    },
+    {
+      "kind": "type-import",
+      "references": 1,
       "sourceZone": "core/authority",
       "target": "core/protocol"
     },
@@ -1396,7 +1436,7 @@
     },
     {
       "kind": "import",
-      "references": 2,
+      "references": 3,
       "sourceZone": "core/protocol",
       "target": "core/authority"
     },
@@ -1450,7 +1490,7 @@
     },
     {
       "kind": "import",
-      "references": 1,
+      "references": 7,
       "sourceZone": "mesh",
       "target": "package:@zhixing/core"
     },
@@ -1468,7 +1508,7 @@
     },
     {
       "kind": "type-import",
-      "references": 14,
+      "references": 20,
       "sourceZone": "mesh",
       "target": "package:@zhixing/core"
     },
@@ -1510,19 +1550,19 @@
     },
     {
       "kind": "import",
-      "references": 51,
+      "references": 57,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "type-import",
-      "references": 39,
+      "references": 46,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "import",
-      "references": 8,
+      "references": 9,
       "sourceZone": "owner-services",
       "target": "package:@zhixing/core"
     },
@@ -1534,7 +1574,7 @@
     },
     {
       "kind": "type-import",
-      "references": 9,
+      "references": 10,
       "sourceZone": "owner-services",
       "target": "package:@zhixing/core"
     },

@@ -3,7 +3,7 @@
  *
  * 把「任务列表 → 状态摘要」的计算抽成纯函数，让所有消费者共用同一逻辑、不各写一套：
  * - daemon 内 turn-context：持有 Scheduler 实例，过滤 internal 后直接调 computeStatusSummary（command.ts）
- * - cli turn-context：去自起 Scheduler 后没有实例，读 scheduler.json 从属投影后调（readSchedulerSummarySync）
+ * - cli/serve turn-context：从当前宿主 scheduler authority 投影后调用
  * 内部 / 外部过滤由调用方按视角决定（见下方 computeStatusSummary 注释），本模块只做纯计算。
  */
 

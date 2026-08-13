@@ -5,8 +5,10 @@ import type { McpServerStatus } from "@zhixing/mcp";
 import {
   createProvider,
   resolveProvider,
+  type ChannelCredentialProjection,
+  type McpCredentialProjection,
+  type ProviderCredentialProjection,
   type ZhixingConfig,
-  type ZhixingCredentials,
 } from "@zhixing/providers";
 import type { CredentialExposureRecord } from "@zhixing/core/contracts";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
@@ -22,13 +24,19 @@ interface CurrentCredentialBinding {
   readonly value: unknown;
 }
 
+interface CredentialRotationCredentials {
+  readonly providers?: ProviderCredentialProjection["providers"];
+  readonly channels?: ChannelCredentialProjection["channels"];
+  readonly mcp?: McpCredentialProjection["mcp"];
+}
+
 export interface CredentialRotationPublicationOptions {
   readonly authority: CredentialExposureAuthority;
   readonly deviceId: string;
   readonly config: ZhixingConfig;
-  readonly credentials: ZhixingCredentials;
+  readonly credentials: CredentialRotationCredentials;
   readonly credentialGeneration: string | null;
-  readonly readCredentials: () => Promise<ZhixingCredentials>;
+  readonly readCredentials: () => Promise<CredentialRotationCredentials>;
   readonly mcpStatuses: () => readonly McpServerStatus[];
   readonly channelStatuses: () => readonly ChannelStatus[];
   readonly waitForChannels?: () => Promise<void>;
@@ -36,7 +44,7 @@ export interface CredentialRotationPublicationOptions {
     readonly providerId: string;
     readonly model: string;
     readonly config: ZhixingConfig;
-    readonly credentials: ZhixingCredentials;
+    readonly credentials: ProviderCredentialProjection;
   }) => Promise<string>;
   readonly now?: () => string;
 }
@@ -171,7 +179,7 @@ function nextBindingRevision(
 }
 
 function credentialValue(
-  credentials: ZhixingCredentials,
+  credentials: CredentialRotationCredentials,
   binding: CurrentCredentialBinding,
 ): unknown {
   switch (binding.kind) {
@@ -199,7 +207,9 @@ function readinessFor(
             providerId: binding.id,
             model,
             config: options.config,
-            credentials: options.credentials,
+            credentials: options.credentials.providers
+              ? { providers: options.credentials.providers }
+              : {},
           });
           verified = true;
           return principal;
@@ -259,7 +269,7 @@ async function probeProviderCredential(input: {
   readonly providerId: string;
   readonly model: string;
   readonly config: ZhixingConfig;
-  readonly credentials: ZhixingCredentials;
+  readonly credentials: ProviderCredentialProjection;
 }): Promise<string> {
   const credentials = input.credentials.providers
     ? { providers: input.credentials.providers }

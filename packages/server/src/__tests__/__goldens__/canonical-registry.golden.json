@@ -123,6 +123,14 @@
         "requiresAuth": true
       },
       {
+        "name": "server.update.health",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.update.prepare",
+        "requiresAuth": true
+      },
+      {
         "name": "session.abort",
         "requiresAuth": true
       },
@@ -378,6 +386,14 @@
       },
       {
         "name": "server.uninstall.status",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.update.health",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.update.prepare",
         "requiresAuth": true
       },
       {
@@ -639,6 +655,14 @@
         "requiresAuth": true
       },
       {
+        "name": "server.update.health",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.update.prepare",
+        "requiresAuth": true
+      },
+      {
         "name": "session.abort",
         "requiresAuth": true
       },
@@ -894,6 +918,14 @@
       },
       {
         "name": "server.uninstall.status",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.update.health",
+        "requiresAuth": true
+      },
+      {
+        "name": "server.update.prepare",
         "requiresAuth": true
       },
       {
@@ -1171,6 +1203,8 @@
           "cleanup:anchor-local-executor:runtime:executorJobOwner.close",
           "cleanup:anchor-local-executor:runtime:localConversationOwner.close",
           "cli:zhixing",
+          "cli:zhixing app",
+          "cli:zhixing app remove",
           "cli:zhixing backup",
           "cli:zhixing backup recover",
           "cli:zhixing backup recover-finish",
@@ -1187,6 +1221,7 @@
           "cli:zhixing device list",
           "cli:zhixing device remove",
           "cli:zhixing device status",
+          "cli:zhixing doctor",
           "cli:zhixing duty",
           "cli:zhixing duty cancel",
           "cli:zhixing duty continue",
@@ -1197,7 +1232,7 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
-          "cli:zhixing uninstall",
+          "cli:zhixing update",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -1244,6 +1279,8 @@
           "rpc:server.uninstall.continue",
           "rpc:server.uninstall.preflight",
           "rpc:server.uninstall.status",
+          "rpc:server.update.health",
+          "rpc:server.update.prepare",
           "rpc:session.abort",
           "rpc:session.advancementCancel",
           "rpc:session.advancementConfirm",
@@ -1363,6 +1400,8 @@
           "cleanup:anchor-local-executor:runtime:executorJobOwner.close",
           "cleanup:anchor-local-executor:runtime:localConversationOwner.close",
           "cli:zhixing",
+          "cli:zhixing app",
+          "cli:zhixing app remove",
           "cli:zhixing backup",
           "cli:zhixing backup recover",
           "cli:zhixing backup recover-finish",
@@ -1379,6 +1418,7 @@
           "cli:zhixing device list",
           "cli:zhixing device remove",
           "cli:zhixing device status",
+          "cli:zhixing doctor",
           "cli:zhixing duty",
           "cli:zhixing duty cancel",
           "cli:zhixing duty continue",
@@ -1389,7 +1429,7 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
-          "cli:zhixing uninstall",
+          "cli:zhixing update",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -1436,6 +1476,8 @@
           "rpc:server.uninstall.continue",
           "rpc:server.uninstall.preflight",
           "rpc:server.uninstall.status",
+          "rpc:server.update.health",
+          "rpc:server.update.prepare",
           "rpc:session.abort",
           "rpc:session.advancementCancel",
           "rpc:session.advancementConfirm",
@@ -1547,6 +1589,8 @@
           "cleanup:anchor-host:server:server.close",
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
           "cli:zhixing",
+          "cli:zhixing app",
+          "cli:zhixing app remove",
           "cli:zhixing backup",
           "cli:zhixing backup recover",
           "cli:zhixing backup recover-finish",
@@ -1563,6 +1607,7 @@
           "cli:zhixing device list",
           "cli:zhixing device remove",
           "cli:zhixing device status",
+          "cli:zhixing doctor",
           "cli:zhixing duty",
           "cli:zhixing duty cancel",
           "cli:zhixing duty continue",
@@ -1573,7 +1618,7 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
-          "cli:zhixing uninstall",
+          "cli:zhixing update",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -1613,6 +1658,8 @@
           "rpc:server.uninstall.continue",
           "rpc:server.uninstall.preflight",
           "rpc:server.uninstall.status",
+          "rpc:server.update.health",
+          "rpc:server.update.prepare",
           "rpc:session.abort",
           "rpc:session.advancementCancel",
           "rpc:session.advancementConfirm",
@@ -1712,6 +1759,8 @@
           "cleanup:anchor-host:server:server.close",
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
           "cli:zhixing",
+          "cli:zhixing app",
+          "cli:zhixing app remove",
           "cli:zhixing backup",
           "cli:zhixing backup recover",
           "cli:zhixing backup recover-finish",
@@ -1728,6 +1777,7 @@
           "cli:zhixing device list",
           "cli:zhixing device remove",
           "cli:zhixing device status",
+          "cli:zhixing doctor",
           "cli:zhixing duty",
           "cli:zhixing duty cancel",
           "cli:zhixing duty continue",
@@ -1738,7 +1788,7 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
-          "cli:zhixing uninstall",
+          "cli:zhixing update",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -1778,6 +1828,8 @@
           "rpc:server.uninstall.continue",
           "rpc:server.uninstall.preflight",
           "rpc:server.uninstall.status",
+          "rpc:server.update.health",
+          "rpc:server.update.prepare",
           "rpc:session.abort",
           "rpc:session.advancementCancel",
           "rpc:session.advancementConfirm",
@@ -1848,6 +1900,8 @@
         "activeCleanupOwners": [],
         "entryKeys": [
           "cli:zhixing",
+          "cli:zhixing app",
+          "cli:zhixing app remove",
           "cli:zhixing backup",
           "cli:zhixing backup recover",
           "cli:zhixing backup recover-finish",
@@ -1864,6 +1918,7 @@
           "cli:zhixing device list",
           "cli:zhixing device remove",
           "cli:zhixing device status",
+          "cli:zhixing doctor",
           "cli:zhixing duty",
           "cli:zhixing duty cancel",
           "cli:zhixing duty continue",
@@ -1874,7 +1929,7 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
-          "cli:zhixing uninstall",
+          "cli:zhixing update",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -1941,6 +1996,8 @@
         "activeCleanupOwners": [],
         "entryKeys": [
           "cli:zhixing",
+          "cli:zhixing app",
+          "cli:zhixing app remove",
           "cli:zhixing backup",
           "cli:zhixing backup recover",
           "cli:zhixing backup recover-finish",
@@ -1957,6 +2014,7 @@
           "cli:zhixing device list",
           "cli:zhixing device remove",
           "cli:zhixing device status",
+          "cli:zhixing doctor",
           "cli:zhixing duty",
           "cli:zhixing duty cancel",
           "cli:zhixing duty continue",
@@ -1967,7 +2025,7 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
-          "cli:zhixing uninstall",
+          "cli:zhixing update",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -2031,6 +2089,8 @@
         "activeCleanupOwners": [],
         "entryKeys": [
           "cli:zhixing",
+          "cli:zhixing app",
+          "cli:zhixing app remove",
           "cli:zhixing backup",
           "cli:zhixing backup recover",
           "cli:zhixing backup recover-finish",
@@ -2047,6 +2107,7 @@
           "cli:zhixing device list",
           "cli:zhixing device remove",
           "cli:zhixing device status",
+          "cli:zhixing doctor",
           "cli:zhixing duty",
           "cli:zhixing duty cancel",
           "cli:zhixing duty continue",
@@ -2057,7 +2118,7 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
-          "cli:zhixing uninstall",
+          "cli:zhixing update",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -2103,6 +2164,8 @@
         "activeCleanupOwners": [],
         "entryKeys": [
           "cli:zhixing",
+          "cli:zhixing app",
+          "cli:zhixing app remove",
           "cli:zhixing backup",
           "cli:zhixing backup recover",
           "cli:zhixing backup recover-finish",
@@ -2119,6 +2182,7 @@
           "cli:zhixing device list",
           "cli:zhixing device remove",
           "cli:zhixing device status",
+          "cli:zhixing doctor",
           "cli:zhixing duty",
           "cli:zhixing duty cancel",
           "cli:zhixing duty continue",
@@ -2129,7 +2193,7 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
-          "cli:zhixing uninstall",
+          "cli:zhixing update",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -2548,6 +2612,27 @@
         }
       },
       {
+        "path": "zhixing app",
+        "hidden": false,
+        "hasAction": false,
+        "key": "cli:zhixing app",
+        "category": "cli",
+        "target": {
+          "exclusion": "composition",
+          "reason": "产品组合根或命令分组，本身不执行领域操作"
+        }
+      },
+      {
+        "path": "zhixing app remove",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing app remove",
+        "category": "cli",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
         "path": "zhixing backup",
         "hidden": false,
         "hasAction": false,
@@ -2711,6 +2796,17 @@
         }
       },
       {
+        "path": "zhixing doctor",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing doctor",
+        "category": "cli",
+        "target": {
+          "exclusion": "diagnostic",
+          "reason": "只读取或渲染设备本地诊断信息，无权威写"
+        }
+      },
+      {
         "path": "zhixing duty",
         "hidden": false,
         "hasAction": false,
@@ -2814,10 +2910,10 @@
         }
       },
       {
-        "path": "zhixing uninstall",
+        "path": "zhixing update",
         "hidden": false,
         "hasAction": true,
-        "key": "cli:zhixing uninstall",
+        "key": "cli:zhixing update",
         "category": "cli",
         "target": {
           "rowId": "shutdown"
@@ -3237,6 +3333,25 @@
         "name": "server.uninstall.status",
         "requiresAuth": true,
         "key": "rpc:server.uninstall.status",
+        "category": "rpc",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "name": "server.update.health",
+        "requiresAuth": true,
+        "key": "rpc:server.update.health",
+        "category": "rpc",
+        "target": {
+          "exclusion": "diagnostic",
+          "reason": "只读取或渲染设备本地诊断信息，无权威写"
+        }
+      },
+      {
+        "name": "server.update.prepare",
+        "requiresAuth": true,
+        "key": "rpc:server.update.prepare",
         "category": "rpc",
         "target": {
           "rowId": "shutdown"

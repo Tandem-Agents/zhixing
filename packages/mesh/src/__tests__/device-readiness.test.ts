@@ -48,7 +48,6 @@ describe("device readiness", () => {
         },
       ],
       secretStore: store(),
-      legacyPlaintextPresent: false,
       protocolVersionCompatible: true,
     });
     expect(configured.state).toBe("configured");
@@ -61,7 +60,6 @@ describe("device readiness", () => {
       requirements: [{ kind: "provider", id: "main" }],
       checks: [{ kind: "provider", id: "main", configured: true, ready: true }],
       secretStore: store(),
-      legacyPlaintextPresent: false,
       protocolVersionCompatible: true,
     });
     expect(ready.state).toBe("ready");
@@ -76,7 +74,6 @@ describe("device readiness", () => {
       requirements: [{ kind: "provider", id: "main" }],
       checks: [{ kind: "provider", id: "main", configured: true, ready: true }],
       secretStore: store("locked"),
-      legacyPlaintextPresent: false,
       protocolVersionCompatible: true,
     });
     expect(degraded.state).toBe("degraded");
@@ -91,7 +88,6 @@ describe("device readiness", () => {
       requirements: [],
       checks: [],
       secretStore: store(),
-      legacyPlaintextPresent: false,
       protocolVersionCompatible: true,
     });
     expect(nextDeviceOnboardingStep({ readiness: revoked, recoveryReady: true, dutySelected: true })).toEqual({
@@ -108,7 +104,6 @@ describe("device readiness", () => {
       requirements: [{ kind: "mcp", id: "github" }],
       checks: [],
       secretStore: store(),
-      legacyPlaintextPresent: false,
       protocolVersionCompatible: true,
     });
     expect(result.state).toBe("paired");
@@ -127,7 +122,6 @@ describe("device readiness", () => {
       requirements: [],
       checks: [],
       secretStore: store(),
-      legacyPlaintextPresent: false,
       protocolVersionCompatible: true,
     });
 
@@ -147,7 +141,6 @@ describe("device readiness", () => {
       requirements: [],
       checks: [],
       secretStore: store(),
-      legacyPlaintextPresent: false,
       protocolVersionCompatible: true,
     });
     await expect(
@@ -159,13 +152,12 @@ describe("device readiness", () => {
         requirements: [],
         checks: [],
         secretStore: store(),
-        legacyPlaintextPresent: false,
         protocolVersionCompatible: true,
       }),
     ).rejects.toThrow("lost an enrolled device");
   });
 
-  it("recovers degraded devices, keeps revocation terminal and exposes pending reenrollment", async () => {
+  it("keeps revocation terminal and exposes pending reenrollment", async () => {
     const ready = await evaluateDeviceReadiness({
       trust: trust(),
       deviceId: "device",
@@ -173,39 +165,8 @@ describe("device readiness", () => {
       requirements: [],
       checks: [],
       secretStore: store(),
-      legacyPlaintextPresent: false,
       protocolVersionCompatible: true,
     });
-    const degraded = await evaluateDeviceReadiness({
-      trust: trust(),
-      deviceId: "device",
-      previous: ready,
-      roleConfigurationComplete: true,
-      requirements: [],
-      checks: [],
-      secretStore: store(),
-      legacyPlaintextPresent: true,
-      protocolVersionCompatible: true,
-    });
-    expect(degraded.state).toBe("degraded");
-    expect(degraded.missing).toContainEqual({
-      kind: "plaintext-credential",
-      id: "legacy-file",
-      reason: "旧明文凭据尚未清退",
-    });
-    await expect(
-      evaluateDeviceReadiness({
-        trust: trust(),
-        deviceId: "device",
-        previous: degraded,
-        roleConfigurationComplete: true,
-        requirements: [],
-        checks: [],
-        secretStore: store(),
-        legacyPlaintextPresent: false,
-        protocolVersionCompatible: true,
-      }),
-    ).resolves.toMatchObject({ state: "ready" });
 
     const revoked = await evaluateDeviceReadiness({
       trust: trust("revoked"),
@@ -215,7 +176,6 @@ describe("device readiness", () => {
       requirements: [],
       checks: [],
       secretStore: store(),
-      legacyPlaintextPresent: false,
       protocolVersionCompatible: true,
     });
     await expect(
@@ -227,7 +187,6 @@ describe("device readiness", () => {
         requirements: [],
         checks: [],
         secretStore: store(),
-        legacyPlaintextPresent: false,
         protocolVersionCompatible: true,
       }),
     ).rejects.toThrow("cannot return");
@@ -239,7 +198,6 @@ describe("device readiness", () => {
       requirements: [],
       checks: [],
       secretStore: store(),
-      legacyPlaintextPresent: false,
       protocolVersionCompatible: true,
     });
     expect(pending.state).toBe("pending-reenroll");
@@ -261,7 +219,6 @@ describe("device readiness", () => {
         requirements: [{ kind: "provider", id: "main" }],
         checks: [{ kind: "provider", id: "main", configured: true, ready: false }],
         secretStore: store(),
-        legacyPlaintextPresent: false,
         protocolVersionCompatible: true,
       }),
     ).rejects.toThrow("actionable reason");
@@ -273,7 +230,6 @@ describe("device readiness", () => {
         requirements: [],
         checks: [],
         secretStore: store(),
-        legacyPlaintextPresent: false,
         protocolVersionCompatible: true,
       }),
     ).rejects.toThrow("identity is invalid");

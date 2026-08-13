@@ -4,7 +4,7 @@
  * 关键不变量：
  *   - config.providers 字段（任何形态）→ 整个字段都不允许，违反
  *   - config.channels 字段（旧名）→ 视为旧 schema 残留，违反并引导迁移
- *   - config.messaging.<id>.credentials 字段 → 违反，凭证字段必须在 credentials.json
+ *   - config.messaging.<id>.credentials 字段 → 违反，凭证必须进入 SecretStore
  *   - 干净 config（仅含 llm / messaging / workspace 等功能层字段）→ 通过
  *   - 多个 issue 一次扫出
  *   - issue 三段式（field / reason / fix）

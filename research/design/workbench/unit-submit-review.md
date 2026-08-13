@@ -259,210 +259,144 @@
 
 ## 审查清单
 
-### 当前状态
+### 当前单元
 
-- **当前单元**：第 37 单元 · generation 1
-- **单元身份**：S10 三路径停机、设备移除与值班设备永久卸载；只交付临时停机、executor 移除、current anchor 安全永久卸载三条互斥且可重放的生命周期路径。
-- **权威来源**：always-online-and-local-execution-requirements.md、distributed-runtime-charter.md、specification.md、s2-security-supply-chain-review.md，已定稿 D37-01～D37-09，以及第 30～36 单元已封版的 AuthorityTransfer、current-owner/trust、checkpoint、SecretStore、accepted-work、资源治理、managed supervisor 与 exact endpoint 合同。
-- **交付基线**：当前工作树中的 Unit37 完整生产实现、直接测试、字段级规格回填、S7 descriptor 与 registry golden；历史问题、开发过程和既有通过记录不得替代本轮独立判断。
-- **生产装配关系**：同一 device-lifecycle 判别协议写入承担路径的既有物理 AuthorityCommitLog；server.shutdown 经本机 lifecycle adapter 进入 HostStopCoordinator，device.list/remove/status/continue 经 current-anchor 管理面进入 current issuer 与 target 两根 removal runtime，server.uninstall.* 固定 loopback 进入 AnchorUninstallCoordinator。普通启动在公开准入前读取 authority/executor 两根 lifecycle journal，恢复未终态 gate，并拒绝 removed/retired 身份复活；cleanup 复用 existing storage governor、managed-service exact unregister、SecretStore exact delete 与既有安全停机链。
-- **目标提交边界**：strict lifecycle DTO/codec/reducer/journal；stop 三策略及 exact host generation；executor 本地域 authority transfer 或显式销毁、accepted-work 收束、撤销/暴露/清退；失控设备诚实远端撤销；anchor migration 或双次真实 recovery checkpoint 安全卸载；启动恢复、产品入口、隐私文案、S7/registry 与直接证据。
-- **明确排除**：Unit38 升级、schema/protocol 兼容门、包下载/替换、健康门禁、自动回滚、发布矩阵、支持包与仓库级最终 CI；自动 failover、quorum/witness、多 active anchor、全局/持续同步、灾难恢复应用、远程擦除、外部安装器删除 executable/package、通用 lifecycle/迁移/存储/事务/事件总线/registry、新 runner、监控、诊断、benchmark 或信息采集。
-- **架构空洞判定**：总纲 §10～§15、规格 §1～§12 与 §15 第 37 行/字段级协议、D37-01～D37-09 已唯一确定产品行为、稳定身份、阶段顺序、取消边界、恢复终态、体验和后继隔离；无须以实现假设补齐且会改变产品结果的真实架构空洞。
-- **状态约定**：[ ] 未审；[x] 已完成且无 P0/P1；[!] 存在 P0/P1；[~] 输入变化须重审。
+- 模块：distributed-runtime
+- 单元：第 38 单元（S10：升级兼容、发布与最终验收）
+- 清单代次：gen-1
+- 当前状态：独立审查清单已定稿，等待独立审查
+- 判定边界：本单元交付稳定版自动更新、五目标发布、升级兼容与恢复、应用移除、离线诊断、旧路径退役和模块最终验收；第 30～37 单元内部实现只作为冻结的上游合同，不重新审查其内部正确性，但本单元对这些合同的消费、兼容、保留与发布装配必须审查。
+- 明确排除：自动 failover、quorum、多活、全局或持续同步、恢复应用；多发布通道、灰度和企业策略；独立 updater daemon；远程批量管理和应用商店分发；通用 updater、lifecycle、manifest、storage、secret、诊断或遥测框架；benchmark、内部诊断采集；真实私钥、商店账号和外部发布动作。以上事项均无当前单元必要性，不构成提交门禁。
 
-> **清单状态**：0 项 `[ ]`、40 项 `[x]`、0 项 `[!]`、0 项 `[~]`；12个生产实现受影响节点已完成独立重审及反向价值裁决，封版时又对shutdown直接测试合同影响的IR37-33/IR37-36/IR37-37/IR37-40独立复审。上一轮把内部`ServeOptions.host/port`测试接缝误当作用户可达配置；真实产品入口只传`managed`，两根均使用固定loopback host与按home确定的非零端口，故P37-21已删除且不构成当前阻断。
+### 规范来源覆盖
 
-### 来源覆盖
+| 来源 | 章节或枚举 | 适用性判定 | 审查项落点 |
+|---|---|---|---|
+| research/design/modules/distributed-runtime/distributed-runtime-charter.md | 当前版本交付原则、架构总览、需求浓缩、§1 | 适用；规定最小完整产品、S10 身份、稳定升级和本地优先总边界 | IR38-01、IR38-02、IR38-08、IR38-31 |
+| 同上 | §2～§3 角色、包与依赖 | 适用到本单元装配交界；不重审冻结角色内部实现 | IR38-06、IR38-07、IR38-29、IR38-31 |
+| 同上 | §4 mesh 与安全、§10 凭据和服务生命周期 | 适用；升级必须维持认证、SecretStore、supervisor 和生命周期合同 | IR38-06、IR38-12～IR38-15、IR38-18、IR38-21 |
+| 同上 | §5～§9 权威、运行、环境、数据控制、离线与转移 | 仅冻结合同交界及最终验收适用；内部功能已由第 30～37 单元封版，本单元不得重做或扩面 | IR38-05、IR38-12～IR38-18、IR38-26～IR38-29 |
+| 同上 | §11 产品体验、§12/§12.1 故障与恢复、§13 十八项不变量、§14～§15 顺序与验收 | 直接适用；全部规范性枚举必须进入最终提交判定 | IR38-08、IR38-11、IR38-16、IR38-19～IR38-30 |
+| research/design/modules/distributed-runtime/always-online-and-local-execution-requirements.md | I～VI 问题、信息、事实、分析、总结与用户想法 | 作为已裁定的产品背景适用，不产生独立未来功能 | IR38-01、IR38-08、IR38-19～IR38-22、IR38-30 |
+| 同上 | VII 价值结论 | 直接适用；自动更新可见、应用移除与永久设备移除分离、高熵配对为当前体验合同 | IR38-06、IR38-08、IR38-11、IR38-19～IR38-22、IR38-30 |
+| 同上 | VIII 职责迁移要求 | 仅上游冻结合同交界适用；迁移和恢复应用本身不在本单元新增 | IR38-12、IR38-13、IR38-18、IR38-26～IR38-29 |
+| research/design/modules/distributed-runtime/specification.md | §1.1～§1.5 时钟、规范字节、导入、符号、映射和公开错误 | 直接适用到发布身份、签名、严格解码、时间和公开行动 | IR38-02～IR38-05、IR38-11、IR38-19、IR38-20 |
+| 同上 | §2.1～§2.5 身份、信任、SecretStore、暴露与 mesh | 适用到升级保留、安全供应链、协议兼容和移除边界；不新建第二事实源 | IR38-05、IR38-06、IR38-15、IR38-18、IR38-21、IR38-22、IR38-28 |
+| 同上 | §3.1～§3.8 端口 | 上游端口语义不重新设计；本单元消费、装配、失败和恢复交界适用 | IR38-08、IR38-12～IR38-19、IR38-21、IR38-29、IR38-31 |
+| 同上 | §4.1～§4.5 存储模型、提交日志、工件、流、批次与回收 | 直接适用到耐久 schema、升级 receipt、程序工件、指针、清理和最终不变量 | IR38-04、IR38-05、IR38-10～IR38-17、IR38-26 |
+| 同上 | §5.1～§5.2、§5.4～§5.7 控制、提交、状态、流与证据 | 冻结生产合同交界及最终验收适用 | IR38-11～IR38-19、IR38-26～IR38-29 |
+| 同上 | §5.3 版本与能力匹配 | 直接适用；current、candidate、previous 和远端 peer 的兼容判定是升级门禁 | IR38-02、IR38-05、IR38-15、IR38-16、IR38-18 |
+| 同上 | §6.1～§6.4 状态表 | 上游状态机内部已冻结；本单元必须验证升级前后状态与生命周期交界不破坏终态 | IR38-12～IR38-18、IR38-26、IR38-27 |
+| 同上 | §7 权威覆盖、§8 入口矩阵、§9 能力矩阵、§10/§10.1 治理与容量 | 直接适用到保留、入口退役、只读兼容、资源上界和发布验收 | IR38-05、IR38-07～IR38-10、IR38-17～IR38-19、IR38-23、IR38-27～IR38-31 |
+| 同上 | §11 产品旅程、§12 十八项不变量、§13 文档矩阵 | 直接适用；每个枚举行均须在 ledger、交付物和证据间闭合 | IR38-26、IR38-29、IR38-30 |
+| 同上 | §14 S1 固定计划 | 不适用；仅描述第 30 单元起始实现，不产生第 38 单元新义务 | 明确排除，不生成审查项 |
+| 同上 | §15 总执行计划、第 36～38 单元补充 | 第 38 单元行和补充直接适用；第 36～37 补充仅作为 supervisor、stop、removal、checkpoint 的冻结上游合同 | IR38-01、IR38-08～IR38-31 |
+| research/design/modules/distributed-runtime/s2-security-supply-chain-review.md | 全文及三项生产依赖、一项仅开发依赖枚举 | 直接适用；生产依赖必须锁定，PAKE 不得进入生产导出、构建或发布图 | IR38-06、IR38-24、IR38-25、IR38-28、IR38-31 |
+| research/design/modules/distributed-runtime/release-and-maintenance-guide.md | 安装、更新、离线 doctor、应用移除、永久设备移除、发布 runbook | 全部直接适用；既是用户操作合同也是发布验收入口 | IR38-07～IR38-11、IR38-16、IR38-19～IR38-25、IR38-30 |
+| research/design/modules/distributed-runtime/unit-38-final-acceptance-ledger.json | 18 invariant + 10 fault + 8 security + 2 topology + 12 journey，共 50 个固定 id | 全部直接适用；每个 id 必须独立判定，禁止只检查分类前缀、合并独立终态或用总测试结果代替逐行证据 | IR38-26～IR38-30 |
+| research/design/workbench/unit-development-workbench.md | D38-01～D38-10 | 全部适用为已知交付义务和交付物索引；勾选状态不能作为审查通过证据 | IR38-02～IR38-31 |
+| research/design/workbench/unit-review-ledgers/unit-30.gen-1.md ～ unit-37.gen-1.md | 已封版问题、已排除问题、重开条件与迟发现记录 | 仅本单元直接交界、重开条件和历史反证适用；不重复审查事实未变化的内部范围 | IR38-05、IR38-06、IR38-12～IR38-18、IR38-21～IR38-23、IR38-26～IR38-29 |
+| research/design/workbench/unit-submit-review.md 静态区 | 定位、范围与质量责任、来源覆盖、状态和动态区协议 | 全部适用为本清单的维护与判定规则；不产生产品功能义务 | 全部 IR38 项及两类问题列表 |
+| research/design/workbench/verification-runbook.md | 验证可行性门禁及全部已验证运行方式 | 适用于后续取得验收证据的方法，不改变产品范围，也不把环境噪声或 benchmark 变成独立审查项 | IR38-24～IR38-31 的证据执行 |
 
-| 来源 | 判定 | 归入审查项或不适用依据 |
-| --- | --- | --- |
-| requirements §一 | 适用 | 持续在线与真实本机执行归入 IR37-01、IR37-07～IR37-12、IR37-13～IR37-34。 |
-| requirements §二 | 不适用 | 外部产品回复整理不产生知行字段、状态或门禁。 |
-| requirements §三 | 不适用 | 外部事实核验不替代当前生命周期合同。 |
-| requirements §四 | 不适用 | 架构审核过程的最终裁决已进入总纲与规格。 |
-| requirements §五 | 不适用 | 外部现状归纳不形成当前实现义务。 |
-| requirements §六 | 适用 | 单机/多设备平权、真实环境留在设备、隐藏拓扑归入 IR37-01、IR37-13、IR37-26～IR37-34。 |
-| requirements §七 | 适用 | 最小完整产品、单机零额外代价、后台停止真实性归入IR37-01、IR37-07～IR37-12、IR37-35、IR37-39。 |
-| requirements §八 | 适用（前置） | planned migration readiness、唯一设备名、取消/只前滚和零术语归入 IR37-27～IR37-34。 |
-| charter 当前版本交付原则 | 适用 | 最小完整范围、架构优先和禁止预建归入 IR37-01、IR37-36～IR37-40。 |
-| charter 一 | 适用 | 单一产品、单机/分布式平权与current anchor归入IR37-01、IR37-33～IR37-35。 |
-| charter 二 | 适用 | 持久在线、完整本机执行与拓扑隐藏需求归入IR37-07～IR37-12、IR37-13～IR37-34。 |
-| charter 三 | 适用 | 角色、owner、包依赖、协议与产品基线由§1～§15逐节判定如下。 |
-| charter §1 | 适用 | 唯一 current anchor、同一 owner/端口归入 IR37-01、IR37-03～IR37-05、IR37-34。 |
-| charter §2 | 适用 | anchor/executor/surface 角色与 lifecycle 主体归入 IR37-03、IR37-13、IR37-25～IR37-34。 |
-| charter §3 | 适用 | core/server/CLI 单向依赖与无第二组合根归入 IR37-02、IR37-05、IR37-35、IR37-39～IR37-40。 |
-| charter §4 | 适用 | 认证身份、issuer、revoke、pairwise secret、失控边界归入 IR37-13、IR37-19～IR37-26、IR37-37。 |
-| charter §5 | 适用 | 本地域/锚点域 owner 与六类 authority 处置归入 IR37-15～IR37-22、IR37-28～IR37-31。 |
-| charter §6 | 适用 | accepted work、assignment/lease/outbox 收束归入 IR37-09～IR37-10、IR37-20、IR37-36。 |
-| charter §7 | 适用 | 本机环境 authority、清退与路由阻断归入 IR37-16～IR37-25。 |
-| charter §8 | 适用 | final/delivery/outbox 最终性与断线重放归入 IR37-09～IR37-10、IR37-20～IR37-23、IR37-36。 |
-| charter §9 | 适用 | 本地域 conversation exact-set transfer/delete 归入 IR37-15～IR37-19。 |
-| charter §10 | 适用（核心） | 三条 lifecycle 路径、撤销/暴露、SecretStore 与服务清退全部规范性条款归入 F37-01～F37-08、IR37-02～IR37-34。 |
-| charter §11 | 适用 | 零术语、唯一设备名、可行动状态与诚实告知归入 IR37-13、IR37-26～IR37-34。 |
-| charter §12 | 适用 | AuthorityTransfer中断、设备撤销、磁盘满、响应丢失、旧owner/endpoint与重启的适用行归入F37-06、IR37-12、IR37-19、IR37-23、IR37-26、IR37-31、IR37-36；其他前置故障行只作IR37-39兼容。 |
-| charter §12.1 | 适用 | 真解封、完整 checkpoint、独立目标、final checkpoint 归入 IR37-27、IR37-29～IR37-31。 |
-| charter §13 | 适用 | 唯一权威、terminal、秘密、资源和准入不变量归入 IR37-02～IR37-06、IR37-35～IR37-40。 |
-| charter §14 | 适用 | 36～38 顺序与不得提前发布升级归入 IR37-01、IR37-39。 |
-| charter §15 | 适用 | 三路径验收、结构不变量和有限故障证据归入 F37-01～F37-08、IR37-35～IR37-40；性能观测不作门禁。 |
-| specification §1.1 | 适用 | operation/request/home/device/epoch、时间与重放身份归入IR37-02～IR37-04、IR37-36。 |
-| specification §1.2 | 适用 | canonical bytes、digest、签名域与引用绑定归入IR37-02、IR37-06、IR37-21、IR37-37。 |
-| specification §1.3、§1.3b | 适用（兼容） | 所有外部符号仍来自权威包，新增lifecycle符号只有一个正式导出，归入IR37-02、IR37-39。 |
-| specification §1.4 | 适用（兼容） | 总纲构件名与代码落点必须一一对应，归入IR37-01、IR37-35、IR37-39。 |
-| specification §1.5 | 适用 | stable code/action、无raw error与公开错误形态归入IR37-12、IR37-33～IR37-34。 |
-| specification §2.1 | 适用 | current issuer、trust ancestor/member generation、revoke与后继身份归入IR37-14、IR37-19～IR37-23、IR37-26～IR37-28、IR37-30、IR37-32、IR37-37。 |
-| specification §2.2 | 适用（收束） | capability/lease/票据的现有激活与撤销合同归入IR37-08～IR37-10、IR37-20、IR37-22、IR37-37～IR37-38。 |
-| specification §2.3 | 适用 | SecretStore existing-only、exact delete与秘密不迁移归入IR37-24～IR37-25、IR37-31～IR37-32、IR37-37。 |
-| specification §2.4 | 适用（核心） | active exposure→compromised、外部账号行动与atomic publication归入IR37-21、IR37-26、IR37-30～IR37-31。 |
-| specification §2.5 | 适用 | 认证mesh、current-owner与有限target/issuer服务归入IR37-14～IR37-15、IR37-20、IR37-22～IR37-23、IR37-33、IR37-35、IR37-37。 |
-| specification §3.1 | 适用 | conversation owner/freeze/delete/transfer归入IR37-08～IR37-10、IR37-16～IR37-19。 |
-| specification §3.2 | 适用（边界） | global authority只由current anchor处置，归入IR37-21、IR37-28～IR37-31、IR37-35。 |
-| specification §3.2b | 适用 | DeferredGlobalIntent随本地conversation冻结、转移或删除，归入IR37-09、IR37-16～IR37-18。 |
-| specification §3.3 | 适用 | 环境事实只在本地清退且永不转移/备份，归入IR37-24、IR37-29～IR37-31、IR37-37。 |
-| specification §3.4 | 适用 | lease/permit收束与停止准入归入IR37-09～IR37-10、IR37-20、IR37-38。 |
-| specification §3.4b | 适用 | storage governor/arbiter的cleanup与stop边界归入IR37-06、IR37-10、IR37-24、IR37-38。 |
-| specification §3.5 | 适用（收束） | completion/reviewer既有accepted work归入IR37-09、IR37-20、IR37-36。 |
-| specification §3.6 | 适用（收束） | executor在途工作与安全停止归入IR37-09～IR37-11、IR37-20、IR37-36。 |
-| specification §3.7 | 适用（收束） | submission/usage/final的accepted终态归入IR37-09～IR37-10、IR37-20、IR37-36。 |
-| specification §3.8 | 适用 | host/current-anchor/surface principal 与逐方法 guard 归入 IR37-07、IR37-13、IR37-27、IR37-33、IR37-37。 |
-| specification §4.1 | 适用（核心） | 唯一 AuthorityCommitLog、stream transaction/replay 归入 IR37-03～IR37-05、IR37-21、IR37-30。 |
-| specification §4.2 | 适用 | ArtifactStore 与 evidence roots 归入 IR37-06、IR37-16～IR37-18、IR37-29～IR37-31。 |
-| specification §4.3 | 适用 | session/assignment/intent/final/outbox/exposure/trust/checkpoint 流归入 IR37-09～IR37-10、IR37-15～IR37-24、IR37-29～IR37-31。 |
-| specification §4.4 | 适用 | revoke+exposure+lifecycle 与 retirement 原子 envelope 归入 IR37-05、IR37-21、IR37-30。 |
-| specification §4.5 | 适用 | lifecycle ArtifactRef retention/GC 归入 IR37-06、IR37-24、IR37-31。 |
-| specification §5.1 | 适用 | shutdown/device/uninstall控制请求的认证、幂等与错误形态归入IR37-07、IR37-13～IR37-15、IR37-27、IR37-33。 |
-| specification §5.2 | 适用（收束） | fresh dispatch关闭与既有assignment收束归入IR37-08～IR37-10、IR37-14、IR37-22、IR37-36。 |
-| specification §5.3 | 适用（收束） | capability/version匹配、撤销与旧peer拒绝归入IR37-22、IR37-37、IR37-39。 |
-| specification §5.4 | 适用（核心） | transfer/delete/revoke/retirement/checkpoint提交的CAS与原子性归入IR37-17～IR37-21、IR37-28～IR37-31、IR37-36。 |
-| specification §5.5 | 适用（收束） | final/outbox/terminal重放归入IR37-09～IR37-10、IR37-20～IR37-23、IR37-36。 |
-| specification §5.6 | 适用（收束） | run stream的accepted work安全点归入IR37-09～IR37-10、IR37-20、IR37-36。 |
-| specification §5.7 | 适用 | cancel、abort、设备失控与止损归入IR37-19～IR37-26、IR37-37。 |
-| specification §6.1、§6.2、§6.2b | 适用（收束） | conversation/job/system accepted-work 停止与取消归入 IR37-09～IR37-10、IR37-20、IR37-36。 |
-| specification §6.3 | 适用（核心） | AuthorityTransfer freeze/import/commit/abort/terminal 归入 IR37-15、IR37-17、IR37-19、IR37-28。 |
-| specification §6.4 | 适用（核心） | device active/revoked、uncertain、terminal replay 归入 IR37-19～IR37-26。 |
-| specification §7 | 适用（核心） | 六类 authority 的 transfer/delete/preserve/backup 六个枚举行逐项归入 F37-04～F37-05、IR37-16～IR37-18、IR37-28～IR37-31。 |
-| specification §8 | 适用 | device 四入口、shutdown、uninstall 五入口及 target/issuer 两服务的唯一落点归入 F37-02、IR37-07、IR37-13～IR37-15、IR37-27、IR37-33～IR37-35。 |
-| specification §9 | 适用（边界） | anchor/local capability 不因 lifecycle 绕过归入 IR37-15～IR37-22、IR37-35、IR37-37。 |
-| specification §10、§10.1 | 适用 | governor/storage maintenance/permit/锁序归入 IR37-10、IR37-20、IR37-24、IR37-38。 |
-| specification §11 | 适用 | stop/removal/lost/uninstall 产品旅程归入 IR37-12、IR37-13、IR37-26～IR37-34。 |
-| specification §12 | 适用 | 不变量到机械验收映射归入 IR37-02～IR37-06、IR37-35～IR37-40。 |
-| specification §13 | 适用 | core/server/cli/resources/scripts 文档影响归入 IR37-35、IR37-39～IR37-40。 |
-| specification §14 | 不适用（新增功能） | S1开工清单已封版；仅在IR37-39检查兼容。 |
-| specification §15 第1～36、38行 | 不适用（新增功能） | 已封版前置或Unit38；只作为IR37-39兼容/越界边界。 |
-| specification §15 第 37 行及字段级 DeviceLifecycleRecord | 适用（核心） | 三路径 identity/phase/abort、八类 evidence、two-root 与入口 ownership 枚举行逐项归入 F37-01～F37-07、IR37-02～IR37-36。 |
-| S2 范围说明与裁决 | 适用（兼容） | 不新增依赖，不改变证书/PAKE用途，归入 IR37-37、IR37-39～IR37-40。 |
-| S2 强制门禁 | 适用（兼容） | 精确锁版、owner、PAKE 非生产隔离、package import/export 归入 IR37-37、IR37-39～IR37-40。 |
-| S2 接受依据 | 适用（兼容） | TLS/证书/PAKE与秘密暴露面不得扩张，归入 IR37-22、IR37-26、IR37-37。 |
-| verification-runbook.md | 不适用（功能范围） | 仅约束后续验证命令和运行方式；当次测试/构建结果只作各审查项证据，不建立独立功能项。 |
-| development workbench 静态规则 | 不适用（功能范围） | 只约束开发清单维护与架构空洞裁决；Unit37 功能边界由 D37-01～D37-09 承载。 |
-| D37-01 | 适用 | protocol/journal/identity/phase/abort/retention 归入 IR37-02～IR37-06。 |
-| D37-02 | 适用 | stop 三策略与 exact host 归入 IR37-07～IR37-12。 |
-| D37-03 | 适用 | effect-free preflight、issuer accepted、target gate、冻结 exact-set、漂移重显与 decision 归入 IR37-13～IR37-16、IR37-19～IR37-20。 |
-| D37-04 | 适用 | transfer/destroy/abort/settlement 归入 IR37-16～IR37-18。 |
-| D37-05 | 适用 | issuer selector/authority-change guard、signed ready、原子 revoke/exposure、窄历史终态重放、route/secret 归入 IR37-14、IR37-20～IR37-23。 |
-| D37-06 | 适用 | target terminal、cleanup、supervisor、key-last 与删除注册前后恢复归入 IR37-23～IR37-25、IR37-32。 |
-| D37-07 | 适用 | 同 operation 的 reachable→lost 选择、远端撤销与诚实未知归入 IR37-26。 |
-| D37-08 | 适用 | anchor preflight、migration 后旧设备移除、两次真实 checkpoint、retirement/final exact-set 归入 IR37-27～IR37-31。 |
-| D37-09 | 适用 | pre-runtime recovery、入口所有权、S7 exact-set 与各项直接证据归入 IR37-32～IR37-40。 |
-| Unit36 正式账本与归档清单 | 不适用（新增功能） | 仅证明上游 supervisor 封版；交界兼容归入 IR37-11、IR37-25、IR37-39。 |
+### 直接规范条款与枚举行落点
 
-### 当前交付物与审查落点
+| 有限规范集合 | 必须逐项判定的内容 | 审查项 |
+|---|---|---|
+| 第 38 单元自动维护合同 | specification 2617、2668～2670：stable-only、三种本机运行形态、异步且不阻塞启动/首个输入/ready、无 daemon、同 candidate 合并、全部验证在 lifecycle accept 前完成 | IR38-02～IR38-10 |
+| ProgramUpdateReceipt v1 | phase exact-set：idle/checking/downloading/staged/handed-off；notice exact-set：none/updated/failed-safe/restored/action-required；action exact-set：retry-update/restore-previous/contact-support；candidate、operationId、code/action 的条件字段规则 | IR38-11 |
+| 安全切版与恢复 | specification 2674：已验 stage、固定 drain、安全空闲点、旧 exact host、禁止 wall-clock 强切、自动兼容恢复优先、zz update 只是显式重试 | IR38-12～IR38-17、IR38-20 |
+| 两种删除语义 | specification 2676：zz app remove 与 zz device remove --permanent；仅删除 zz uninstall、zz update --rollback 两个旧别名 | IR38-21～IR38-23 |
+| 五目标 exact-set | win32-x64、darwin-x64、darwin-arm64、linux-x64、linux-arm64 | IR38-02、IR38-07、IR38-24、IR38-25 |
+| 十三项 durable schema exact-set | AssignmentAuthorityRecord、AuthorityCommitEnvelope、CheckpointAuthorityRecord、ConversationAuthorityRecord、CredentialExposureRecord、DeliveryAuthorityRecord、DeviceLifecycleRecord、FinalAuthorityRecord、GlobalStateRecord、HomeTrustRecord、IntentAuthorityRecord、ResourceLeaseRecord、SchedulerAuthorityRecord | IR38-05、IR38-15、IR38-18 |
+| S2 供应链 exact-set | @peculiar/webcrypto 1.7.1、@peculiar/x509 2.0.0、reflect-metadata 0.2.2 三项生产依赖；@cipherman/pake-js 0.1.1 仅开发依赖；强制门禁七条逐条判定 | IR38-06、IR38-24、IR38-28、IR38-31 |
+| release smoke exact-set | clean-install、first-run、same-version-replay、no-update-silent、automatic-update、visible-update-status、safe-point-install、automatic-restore、guided-restore、offline-doctor、app-remove-preserves-data、permanent-device-remove-confirms | IR38-25、IR38-30 |
+| 七组首个公开基线清退 exact-set | credentials.json 迁移/旧公开凭据字段；filesystem workscene registry/cutover；legacy memory/journal Markdown import/projection；scheduler compatibility JSON store；recovery package legacyCheckpoint decoder；废弃 RPC/request/CLI alias 与 source-compatible 注入参数；shadow writer/旧 delivery queue/registry/producer/capability flag | IR38-23 |
+| 开发事项 exact-set | D38-01～D38-10 每项的生产实现、消费链、边界场景和直接测试义务 | IR38-02～IR38-31 |
 
-| 交付分组 | 当前文件 | 审查落点 |
-| --- | --- | --- |
-| lifecycle protocol/codec | core/protocol/device-lifecycle.ts、device-lifecycle.test.ts 及 barrel | IR37-02～IR37-04、IR37-19、IR37-21、IR37-36～IR37-37 |
-| lifecycle journal/stream/retention | core/authority/device-lifecycle-journal.ts、对应测试、commit-log.ts 及 barrel | IR37-03～IR37-06、IR37-21、IR37-30～IR37-32、IR37-36 |
-| stop production chain/evidence | cli/serve/host-stop-lifecycle.ts、stop.ts、command.ts；server context/lifecycle/server RPC；三组直接测试 | IR37-07～IR37-12、IR37-32～IR37-36 |
-| removal issuer/target/mesh | device-removal.ts、device-removal-mesh.ts、mesh-runtime-assembly.ts、executor-role-runtime.ts 及直接测试 | IR37-13～IR37-23、IR37-26、IR37-35～IR37-38 |
-| local authority freeze | local-conversation-owner.ts 及 lifecycle 测试 | IR37-15～IR37-20、IR37-36～IR37-38 |
-| local cleanup/supervisor/resources | device-removal-cleanup.ts、managed-service.ts、storage-maintenance.ts 及测试 | IR37-23～IR37-25、IR37-31～IR37-32、IR37-38～IR37-39 |
-| removal CLI/RPC | runtime/device-removal-command.ts、facade、CLI index、server registry/methods 及测试 | IR37-13、IR37-26、IR37-33～IR37-35、IR37-40 |
-| anchor uninstall production/evidence | cli/serve/anchor-uninstall.ts、command.ts；runtime command/facade；CLI/server 入口及直接测试 | IR37-27～IR37-36、IR37-38～IR37-40 |
-| pre-runtime recovery | mesh-runtime-bootstrap.ts 及测试 | IR37-23～IR37-25、IR37-31～IR37-36、IR37-39 |
-| registry/S7 | canonical-registry golden、s7-entry-coverage.mjs 及测试 | IR37-33、IR37-35、IR37-39～IR37-40 |
-| specification/development checklist | specification.md、unit-development-workbench.md | 来源覆盖、IR37-01～IR37-40 |
-| Unit36 archive | unit-review-checklists/distributed-runtime/unit-36.gen-1.md | 仅保存上单元原动态区，不作为 Unit37 功能证据 |
+### 当前完整交付物与生产装配归项
 
-### 固定范围矩阵
+| 交付链 | 已纳入的生产端、消费端与装配入口 | 审查项 |
+|---|---|---|
+| 发布协议与耐久模型 | packages/core/src/protocol/release.ts、durable-schema.ts、device-lifecycle.ts 及对应导出和消费者 | IR38-02～IR38-05、IR38-10～IR38-16 |
+| 发布工件与供应链 | scripts/release-version.mjs、release-channel.mjs、release-tooling.mjs、build-release-artifact.mjs、release-check.mjs，根 package scripts、锁文件和生成资产 | IR38-02～IR38-07、IR38-24、IR38-25、IR38-31 |
+| CLI 更新与维护 | packages/cli/src/update 下的 durable-file、program-store、release-channel、release-verifier、update-controller、upgrade-lifecycle、runtime、doctor、app-remove 及 packages/cli/src/index.ts | IR38-07～IR38-22、IR38-30、IR38-31 |
+| 常驻服务与两根装配 | packages/cli/src/serve/command.ts、executor-role-runtime.ts、rpc-program-update-facade.ts，packages/server/src/context.ts 与 rpc/methods/server.ts | IR38-08、IR38-11～IR38-20、IR38-29、IR38-31 |
+| 凭据与配对交界 | packages/providers 的 credentials/path/export、CLI secret boundary/config editor、mesh pairing/recovery/package 依赖；只允许当前 SecretStore 与高熵邀请生产链 | IR38-06、IR38-21、IR38-23、IR38-28、IR38-31 |
+| 权威、scheduler、memory 与工具清退 | packages/core 的 memory/scheduler/workscene、packages/owner-kernel 的 scheduler authority、packages/tools-builtin 的 memory/schedule，以及 CLI 对应 facade/adapter | IR38-05、IR38-18、IR38-23、IR38-26～IR38-31 |
+| 旧路径退役与兼容资产 | 七组 exact-set 的删除文件和残留 reader，S7 有限入口描述、server goldens、公开导出、package graph 与文档引用 | IR38-18、IR38-22、IR38-23、IR38-31 |
+| 最终验收与用户文档 | final acceptance ledger、release guide、直接测试、五目标平台证据和 release report | IR38-24～IR38-31 |
 
-| 编号 | 有限闭包 | 固定内容 |
-| --- | --- | --- |
-| F37-01 | 三路径状态机 | stop：accepted→gate-closed→work-settled→flushed→ready-to-stop→terminal；removal：accepted→gate-frozen→authority-decided→authority-settled→revocation-ready→revoked→cleanup-complete→terminal；uninstall migration：accepted→gate-frozen→transfer-committed→cleanup-complete→terminal；uninstall backup：accepted→gate-frozen→checkpoint-verified→retirement-decided→gate-closed→work-settled→flushed→final-checkpoint-verified→cleanup-complete→terminal。stop 不可 abort；removal 在 authority-settled 前、uninstall 在 transfer-committed/retirement-decided 前可 authenticated abort。 |
-| F37-02 | 公开/远端入口 exact-set | current-anchor：device.list/remove/status/continue；本机：OS signal、CLI stop/uninstall 与 loopback server.shutdown、server.uninstall.preflight/begin/continue/cancel/status；有限认证 mesh：device.removal.target 的 accept/decide/status/abort 与 device.removal.issuer 的 accept-self/ready/terminal。 |
-| F37-03 | 生产根与形态 | stop：managed/on-demand/foreground；removal issuer：current anchor 恰一；removal target：anchor+executor 与 executor-only 两根；uninstall：current anchor 的 migration/backup 两路；surface/empty/disabled 不装配 lifecycle owner。 |
-| F37-04 | accepted-work 与本地 owner exact-set | current/frozen/importing conversation；active run/interaction；pending final/assignment；DeferredGlobalIntent；RunFinalOutbox/delivery outbox；remote/channel/scheduler/delivery obligation；lease、permit 与 managed instance。 |
-| F37-05 | authority/cleanup exact-set | 权威六类：全局状态与期望配置、会话状态、会话内容资产、环境事实与本地秘密、执行资产、非权威缓存；cleanup 仅限 frozen home 的 provider/channel/MCP/rendezvous/transfer candidate/device secret、workspace/environment binding、projection/staging/reservation/artifact/cache，排除用户 workspace、其他 home、独立 checkpoint target 与最小非秘密 terminal/tombstone。 |
-| F37-06 | 故障与竞态切点 | accept 前/后；F37-01 每次 phase sync 前/后；transfer/delete/revoke/retirement/checkpoint/supervisor unregister/key delete/stop 的效果前、效果后响应前；同/异 identity 并发；cancel 与首个不可逆事实竞争；坏尾、缺/坏 ref、网络/manager/磁盘/容量失败；连续两次重启与迟到旧 owner/endpoint 请求。 |
-| F37-07 | lifecycle evidence kind exact-set | accepted-work、authority-transfer、authority-deletion、trust-event、credential-exposure、checkpoint、supervisor、cleanup；含 ArtifactRef 的证据在 terminal transaction 继续声明 candidate reference。 |
-| F37-08 | 可复核直接证据分组 | codec/reducer/journal/retention；stop coordinator/CLI/RPC/supervisor；local owner/removal issuer-target/mesh/cleanup；uninstall migration/backup/CLI/RPC；pre-runtime non-resurrection；canonical registry 与 S7 结构 exact-set。每个功能项只使用对应现有测试和结构证据，不另设 build/test 结果项。 |
+### 固定审查矩阵
 
-### 审查项
+| 矩阵 | 必须穷尽的有限变体 |
+|---|---|
+| F38-01 身份 | stable version、release sequence、五目标 target、index、manifest、artifact、receipt、stage、pointer、lifecycle operation、host generation；有/无 home、应用移除后重装和手动恢复均不降低已验高水位 |
+| F38-02 触发与拓扑 | foreground、on-demand、managed 三种本机 host：真实启动、显式 update、managed 周期；pure surface 只消费 current-authority 投影且本机零 updater/home/daemon；在线、离线、禁用 |
+| F38-03 升级窗口 | check、download、resume、stage、handoff、gate、settle、flush、stop、switch、health、restore、cleanup 各效果前后及响应丢失 |
+| F38-04 兼容 | current、candidate、previous；版本、release sequence、协议、上述十三项 durable schema；bridge 初始旧 writer、各日志首条新写与同 envelope activation、兼容恢复后单调 writer、远端 peer 只读/写入 exact-set |
+| F38-05 安装与移除 | 五目标；干净安装、首次启动、同版本重放、Unicode/空格路径；无 home 时只走重复安装且零 host/lifecycle；有 home 时安全升级；应用移除、永久设备移除和误操作交界 |
+| F38-06 故障与安全 | 离线、超时、断流、Range 不符、容量不足、错误 target、签名/摘要/规范字节错误、manager 不可判定、健康失败、原始错误泄漏 |
+| F38-07 并发与资源 | 同 home 单飞、锁竞争、重复触发、重启、固定批次、下载和内存上界、无网络 permit、current/previous/active stage 保留 |
+| F38-08 发布证据 | 五目标真实工件、平台签名/公证、上述 12 项 smoke exact-set、源码与包摘要、生成资产、final ledger、release report 和用户指南 |
+| F38-09 最终验收 | ledger 的 50 个固定 id 按下表逐行闭合，不接受“至少一个分类前缀”或总测试结果 |
+| F38-10 边界 | 第 30～37 单元冻结合同交界、上述七组旧路径 exact-set、明确排除项及第 38 单元之后能力不得倒灌 |
 
-> U37-01修复改变的12个节点已全部独立重审并完成价值裁决：同一生产endpoint上的早期bind、closed recovery、逐phase前滚与同对象activate成立；非默认host竞争只可由内部函数参数/测试构造，当前CLI、managed definition与权威配置均无该用户入口。12项无P0/P1，统一标为`[x]`；其余28项继续复用。
+### 最终验收 50 行 exact-set
 
-| 编号 | 状态 | 审查对象 | 独立通过条件与可复核证据 |
-| --- | --- | --- | --- |
-| IR37-01 | [x] | 单元身份与有限边界 | 本轮独立重审：当前差异只补第37单元既有stop operation逐phase successor恢复和`server.shutdown`方法级错误投影；实现复用既有journal、artifact、owner ports、`RpcAppError`与生产根，未引入独立恢复计划、通用错误框架或Unit38能力。来源补充与实现边界一致，无P0/P1范围问题。 |
-| IR37-02 | [x] | strict lifecycle DTO/codec | `device-lifecycle` identity/record/decision/evidence 继续 exact-key、version、phase 与签名严格解码；新增 backup `gate-closed→work-settled→flushed` 顺序已进入 reducer，delivery `lifecycleBinding` 亦在 replay 前 strict decode owner/id/revision exact-set。未发现非规范输入可越过 codec。 |
-| IR37-03 | [x] | stable identity 与 subject 单飞 | stop identity现必含`localDeviceId`，reducer在`home+host`外同时占用`home+device`；removal/uninstall占同一本机device subject，三路径durable accept恰一。`DeviceLifecycleJournal.active()`对双subject去重，settle/seal/release只消费调用参数中的exact operationId，已删除进程级可变owner。 |
-| IR37-04 | [x] | phase/abort/terminal reducer | stop、removal、migration 与 recovery-backup 的合法相邻 phase、不可逆点、abort/terminal 幂等和冲突拒绝均由同一 reducer 固定；新 backup closure phase 顺序与规格一致，未发现跳 phase 或 terminal 回退。 |
-| IR37-05 | [x] | 唯一物理日志与 transaction | 本轮独立重审：stop identity、phase、artifact与terminal仍只来自同一本机`AuthorityCommitLog`；`startupLifecycle`、`alreadySettled`及delivery admission均由该耐久事实派生，root-local release只消费exact operation且进程重启会重新投影，不形成第二耐久事实源。未发现无日志决定或跨日志提交，结论无P0/P1。 |
-| IR37-06 | [x] | evidence retention/GC | stop accepted-work artifact由 `gate-closed` evidence 保留；backup retirement transaction 同 envelope 写 artifact evidence 并声明 candidate reference，后继 phase/terminal candidateReferences 继续保留。缺失、错 digest、非 canonical 或歧义 artifact 均在 settlement/checkpoint/cleanup 前拒绝，普通无引用 artifact 仍按现有 GC。 |
-| IR37-07 | [x] | stop 入口与本机授权 | 价值裁决后重审：公开`serve`入口只传`managed`，不接受host/port；anchor/executor生产根均使用`DEFAULT_SERVER_CONFIG.host`与同一`homeToPort(home)`，因此同home竞争实际落在同一endpoint，早期inactive bind的EADDRINUSE loser在owner效果前退出。内部参数构造异host不属于受支持产品入口，无P0/P1。 |
-| IR37-08 | [x] | stop gate | 价值裁决后重审：受支持生产endpoint只有一个OS winner；winner内`recoverAcceptedWork=false`已覆盖local readiness/lifecycle projection及mesh/worker恢复，旧host proof前零accepted-work owner效果。上一轮双host前提不可由产品入口到达，故closed gate合同通过。 |
-| IR37-09 | [x] | stop 三策略 accepted-work | 价值裁决后重审：同一生产endpoint单飞成立，三策略按同一frozen `id/revision`逐owner settle/read-back；`accepted/gate-closed/work-settled/flushed/ready-to-stop`仅补各自未完成步骤，响应丢失重放不重复已耐久效果。无P0/P1。 |
-| IR37-10 | [x] | flush 与资源安全点 | 价值裁决后重审：唯一生产winner下coordinator由durable phase保证`work-settled`只补flush、`flushed`只补physical，journal前外部效果由各port exact read-back吸收；异host双执行者不是受支持场景，未发现独立flush/资源阻断。 |
-| IR37-11 | [x] | exact host stop/future preservation | 价值裁决后重审：当前产品本机lifecycle endpoint的host固定为loopback，port按home确定，故`StopEndpointLock`的port与bound handle足以判别当前受支持endpoint；PID/startTime/startedAt区分generation，managed链另验definition/manager。为内部不可达host参数扩充耐久DTO没有当前价值，无P0/P1。 |
-| IR37-12 | [x] | stop 故障恢复 | 价值裁决后重审：真实非零固定endpoint竞争、inactive HTTP/WS、同对象activate、winner崩溃后OS释放及五phase恢复已有直接证据；异host同port虽可由OS建立，但CLI/managed产品入口不能生成该组合，不能据此判定当前恢复失败。 |
-| IR37-13 | [x] | removal effect-free preflight 与名称体验 | current issuer 先耐久 accepted/selector guard，reachable target 随后只读 local owner 与 external owner 投影并外置 preflight；此时尚未关闭本地域 gate、未 transfer/delete/revoke。用户决定前返回冻结名称/数量；离线路径明确投影 local data unknown，不伪造空集已清理。 |
-| IR37-14 | [x] | issuer accepted 与 lifecycle guard | issuer accepted identity 冻结 target member public key/device-key generation、issuer 与 trust ancestor；同 subject 单飞及 current-authority guard 在 target 效果前生效，成员换代、竞争 operation、非 current issuer 与错误名称均零后续副作用。 |
-| IR37-15 | [x] | target 两根 accepted/gate | target lifecycle与启动扫描都使用`bootstrapStore.authorityLog()`；两种生产装配均先恢复local active operation，再以closed参数启动mesh/local conversation/job/channel/delivery。decision前关闭local+external gate并重采完整ownerItems，artifact未形成时保持全部producer关闭，形成后只恢复同operation exact work。 |
-| IR37-16 | [x] | local authority/work exact-set 与决策复验 | effect-free preflight与关gate后的snapshot作digest全等复验，变化则释放gate并重显；decision artifact耐久完整十owner `id/revision`。delivery source映射保留`local:`/`relay:` namespace，conversation/final/scheduler各消费自身稳定revision，authority逐项exact核验而不代填，same-id successor零append。 |
-| IR37-17 | [x] | removal transfer | transfer只消费decision中的conversation及十owner exact-set：复用既有AuthorityTransfer提交/tombstone，随后local owner与external ports逐项settle/read-back；delivery先安装冻结source、恢复causal work、seal并drain至terminal，全部归零后才写`authority-settled/revocation-ready`。响应丢失重放原decision与原transfer身份。 |
-| IR37-18 | [x] | irreversible destroy | destroy决定与冻结snapshot artifact同一operation耐久后才执行；local owner按同一conversation exact-set收束run/intent/final并写删除/tombstone，external及delivery继续按同一ownerItems settlement。首个不可逆点后只能重放原mode/target，未全量read-back不得进入ready。 |
-| IR37-19 | [x] | cancel/irreversible race | signed abort与`authority-decided`由同一journal恰一胜出；durable aborted先授权同operation gate释放，absent幂等、异operation拒绝，再hydrate原`target-aborted` receipt；ready胜出保持原ready，连续重启不回退。 |
-| IR37-20 | [x] | target work/resource ready | local owner、remote/channel/scheduler/delivery与lease/permit均来自同一decision ownerItems；每个port校验operation及frozen `id/revision`，完成settle后独立read-back，delivery包含迟到causal item且drain至terminal，governor在写ready前完成安全协调。任一缺项、换代、未终结或响应不明均保持gate与原phase。 |
-| IR37-21 | [x] | revoke/exposure/lifecycle atomicity | issuer 在同一 `AuthorityCommitLog.transactProjection()` 内重验 accepted trust ancestor与 target generation，并原子追加 revoke trust event、全部 active exposure→compromised 及 lifecycle `revoked`；无关 trust 前进保留祖先身份，竞争换代 fail-closed。 |
-| IR37-22 | [x] | route/capability/secret closure | revoke transaction 可见后 current trust 立即使 resolver/inventory/capability/fresh dispatch拒绝目标并断开普通服务；issuer rendezvous ref按 exact target删除，删除失败在同 revoked operation 重放，后继 member generation 由 accepted guard隔离。 |
-| IR37-23 | [x] | narrow historical terminal replay | revoked peer只经独立terminal-only registry进入ready/cleanup-ready/target-aborted/terminal四方法；每个方法先做exact-key/version与accepted target身份反绑，普通service admission不放宽。aborted重放先完成exact gate release，再复用同一签名receipt。 |
-| IR37-24 | [x] | local cleanup exact-set | cleanup roots为代码内冻结的 current-home 子路径并逐项 `assertOwnedPath`；walker每个 governor step最多处理128个dirent，secret按稳定顺序每128项删除/read-back，排除用户workspace、其他home、checkpoint target、device key与最小 lifecycle log。 |
-| IR37-25 | [x] | supervisor/key-last/process exit | target先完成文件/非device-key secret清理与 exact supervisor unregister，再耐久 cleanup-ready；issuer terminal返回后才 compare-delete冻结 device-key，随后写本机terminal并走安全自退出。错slot拒绝删除，pre-runtime resumer在角色/key/listener前续做未终结本机清退。 |
-| IR37-26 | [x] | reachable/offline lost同一终态 | lost是issuer日志中的显式不可逆选择：只提交本端 revoke/exposure与 `localData=unknown` cleanup/terminal，不生成 target ready/cleanup 事实；迟到设备仍是 revoked 且只能进入 terminal-only 通道，公开结果持续说明本地数据不可达。 |
-| IR37-27 | [x] | uninstall preflight/local-only | 五个 `server.uninstall.*` 方法均经 loopback guard；preflight只读 active lifecycle、ready migration target 与真实 checkpoint status，缺少安全路径时零 accepted/零 gate，begin 才冻结 home/current device/epoch/trust 与选定 target generation。 |
-| IR37-28 | [x] | migration uninstall | migration在`accepted`后关闭公开及十owner producer gate，冻结canonical accepted-work artifact并安装exact delivery admission；逐owner以drain语义settle/read-back、刷稳日志与物理步骤后才调用既有planned transfer并全等验证新owner，随后进入`transfer-committed→cleanup`。重启按artifact/phase恢复原admission与sealed，零新source窗口。 |
-| IR37-29 | [x] | first recovery checkpoint | `force(pre-retirement)`后 coordinator 直接调用同一 checkpoint service 的 `verify(checkpointId,recoveryRoot)`；service从冻结 target read package、用用户 recovery root真解封，严格核验issuer/home/root/manifest/catalog/retained闭包并写耐久 verification，非 status 自报。 |
-| IR37-30 | [x] | retirement/final checkpoint | recovery-backup先真解封验证pre-checkpoint；确认时在同一transaction反绑十owner artifact与retirement decision。逐项immediate安全settlement/read-back后写`flushed`，从该lifecycle record真实LSN取水位，final checkpoint用同root真解封且要求`upToLsn>=flushedLsn`；startup按phase恢复sealed，未通过不得cleanup。 |
-| IR37-31 | [x] | uninstall cleanup/terminal | migration与backup均先完成各自accepted-work闭包再进入cleanup。cleanup只遍历冻结current-home roots，walker与SecretStore按128固定批次、governor前滚；随后exact supervisor unregister、非device-key秘密、cleanup-complete/ready、issuer terminal、exact device-key compare-delete、本机terminal与安全退出，错slot/错home零误删。 |
-| IR37-32 | [x] | pre-runtime recovery/non-resurrection | 价值裁决后重审：两根均先scan/strict hydrate再争用同一生产endpoint，只有winner可恢复原phase；terminal/exact release后才激活，崩溃后继重新读耐久事实。内部异host参数不是启动入口，当前non-resurrection无P0/P1。 |
-| IR37-33 | [x] | RPC/CLI/mesh ownership与隐私 | 封版独立复审：生产实现、方法级测试与真实dispatcher测试对同一`INTERNAL_ERROR/安全停机未完成/{action:retry-same-request}`全等，内部`delivery flush failed`不再被直接测试当作公共合同；失败零trigger。router认证、loopback/strict params、既有`RpcAppError`和其他RPC/mesh授权未变，零raw内部身份泄漏，无P0/P1。 |
-| IR37-34 | [x] | complete product journeys | 价值裁决后重审：用户可达停机、自动/显式重启均使用同一loopback home endpoint；恢复期间稳定503，terminal/release后原对象激活并发布ready，连续接替唯一前滚。异host双入口不是产品旅程，无P0/P1。 |
-| IR37-35 | [x] | production roots/profile exact-set | 价值裁决后重审：anchor/executor及managed/on-demand/foreground均接收同一公开options集合；实际入口不提供host/port，故两根固定为loopback+home派生端口，并共享早期bind/后期activate结构。内部类型接缝不扩大生产profile exact-set。 |
-| IR37-36 | [x] | fixed fault/recovery matrix | 封版独立复审：F37-64～F37-69仍由同一非零loopback home endpoint覆盖；shutdown普通异常的直接测试现已验证固定wire投影及零trigger，不再期待raw错误。两个既有环境基线均在当前单元断言前失败且有独立归因，必要证据与当前范围成比例。 |
-| IR37-37 | [x] | security/secrets/isolation | 封版独立复审：shutdown普通异常在方法边界被替换为固定错误，修正后的直接测试明确拒绝原message泄漏；stack、operation/device/path均不进入wire，既有`RpcAppError`仅保留已支持公开行动。stop successor未新增secret读取、跨home路径、远端授权或公开拓扑字段，无P0/P1安全或隔离问题。 |
-| IR37-38 | [x] | resource/cancel/lock order | 价值裁决后重审：受支持生产endpoint上同一handle贯穿bind/activate/close，anchor rollback与executor finally均关闭handle，失主由OS释放；三策略/cancel锁序不变。不存在用户可达的跨host双handle，资源与锁序无P0/P1。 |
-| IR37-39 | [x] | layering/compat/Unit38 boundary | 本轮独立重审：依赖方向仍是core lifecycle/delivery原语→CLI生产装配与server公开投影，未新增跨包反向依赖、通用恢复/错误框架、新runner、升级/替换/回滚或发布能力；第30～36单元既有owner、delivery、supervisor接口只被组合使用。当前阻断是Unit37内部启动仲裁缺口，不是分层或Unit38越界，故本项无P0/P1。 |
-| IR37-40 | [x] | registry/S7 与证据充分性 | 封版独立复审：30个Vitest入口取得355项Unit37相关通过证据，S7 20/20与golden沿未变输入复用；shutdown陈旧断言已修正并定向3/3，两个既有环境基线分别有历史归属和失败点证据，不以其冒充当前通过或阻断。真实双进程端点证据、两根顺序合同与当前范围仍充分。 |
+| 分类 | 固定 id | 独立审查项 |
+|---|---|---|
+| invariant（18） | invariant-01、invariant-02、invariant-03、invariant-04、invariant-05、invariant-06、invariant-07、invariant-08、invariant-09、invariant-10、invariant-11、invariant-12、invariant-13、invariant-14、invariant-15、invariant-16、invariant-17、invariant-18 | IR38-26 |
+| fault（10） | fault-executor-crash、fault-owner-crash、fault-cancel-race、fault-path-partition、fault-transfer-interruption、fault-storage、fault-revocation、fault-retry、fault-version-clock、fault-update | IR38-27 |
+| security（8） | security-pairing、security-certificate-ticket、security-permission-snapshot、security-revocation、security-blind-relay、security-confirmation、security-authority、security-resource | IR38-28 |
+| topology（2） | topology-single-machine、topology-paired-devices | IR38-29 |
+| journey（12） | journey-first-run、journey-pair-ready、journey-daily-local、journey-offline、journey-uncertain、journey-transfer-recovery、journey-stop-remove、journey-auto-update、journey-update-recovery、journey-app-remove、journey-offline-doctor、journey-release-matrix | IR38-30 |
 
----
+### 独立审查项
 
-## P0/P1 阻断问题列表
+| 状态 | 编号 | 审查对象与独立通过条件 | 权威依据 | 必须记录的直接证据 |
+|---|---|---|---|---|
+| [ ] | IR38-01 | 单元身份、范围和来源完整：S10 的交付物、五目标、稳定自动更新、发布与最终验收全部归项；明确排除未变成门禁，所有规范来源、章节和枚举行均有适用性结论。 | charter、specification §15、D38-01～D38-10 | 来源双向映射、交付物清单、边界反查和未归项为零 |
+| [ ] | IR38-02 | 发布身份唯一：根 package.json 的 stable 0.1.0 是 workspace、CLI、构建和运行投影唯一版本源；release sequence、五个 target、index/manifest/artifact identity 全等。反降级高水位只来自已验安装 manifest 与同 home upgrade 记录；无 home、应用移除后重装和手动兼容恢复均不得降低，错误 target、旧序列及同 identity 异 bytes fail-closed。 | charter、specification §1/§5.3/§15、D38-01 | producer/consumer 调用图，五目标、有/无 home、重装、恢复、精确重放和降级反例 |
+| [ ] | IR38-03 | StableReleaseIndex v1 与 ReleaseManifest v1 严格规范：各自 exact key-set、JCS UTF-8 规范字节、签名域、HTTPS URL、摘要/字节和 index→manifest→artifact 交叉绑定闭合；unknown、缺失、错类型、非规范编码、签名或摘要错误在任何持久效果前拒绝。 | specification §1、Unit38 补充、D38-01 | 两类最终字节、真实 decoder/verifier/binding 路径和零写反例 |
+| [ ] | IR38-04 | ProgramArtifact v1 合同完整：exact key-set、规范 UTF-8、文件 canonical 排序、路径、权限、单文件/总大小、base64url 与展开上界受限，禁止路径穿越、链接逃逸和额外根；下载字节、manifest 摘要、stage read-back 与执行字节全等。 | specification §4/§10.1/§15、release guide、D38-02 | 真实 artifact/archive/stage 路径、恶意工件和容量边界证据 |
+| [ ] | IR38-05 | 兼容与耐久 schema：上述十三项 exact-set 由实际 codec/record descriptor 机械闭合并被 manifest、运行投影和 reader/writer policy 共用。bridge 初始写旧格式；每个真实 AuthorityCommitLog 首条新格式记录与该 schema activation 同 envelope，之后兼容恢复也只写已激活版本；无新写不虚构迁移，format/protocol/schema activation/epoch 均单调。current/candidate/previous 不得靠 reader fallback 隐式降级或写入不兼容状态。 | specification §1.4/§4/§5.3/§9/§15、D38-01/D38-06 | 十三项逐行 producer/consumer/writer/activation 表，首写响应丢失、重放、bridge→writer→compatible recovery 与拒绝终态 |
+| [ ] | IR38-06 | 供应链与凭据边界：三项批准生产依赖精确锁定，PAKE 仅开发依赖；四项只由 mesh 声明，门禁覆盖实际 workspace、锁文件完整性、运行闭包、许可证、安装脚本、官方审计事实和固定向量。生产导出、构建、包和运行时无 PAKE/短码路径，配对只用高熵邀请；工件不含开发依赖、source map、测试资产、源码秘密、私钥、SecretStore 或 home 数据。 | s2-security-supply-chain-review、specification §2、D38-02 | package/lock/export/build/runtime 反向图、最终包内容和秘密零包含证据 |
+| [ ] | IR38-07 | 五目标安装与 launcher：五个 target 的用户级程序根、PATH 中稳定 zz/zhixing、不可变 versions 与原子 current 同一合同；首次/重复安装验证平台签名、内嵌 manifest 和最终 bytes，只写程序层与内置 stable URL。空格/Unicode 路径成立；无 home 时只复用重复安装路径，零 host、零配对/恢复概念、零 lifecycle 或 ZHIXING_HOME 写入。 | charter、release guide、specification §8/§15、D38-03 | 五目标工件入口、安装 read-back、无 home 崩溃窗口和路径场景 |
+| [ ] | IR38-08 | 自动维护触发正确：真实 foreground、on-demand、managed 三种本机 host 启动均异步检查，managed 按既定周期；current 启动、ready、首个输入和工作不等待网络。离线/禁用无破坏效果，无 updater daemon；pure surface 只消费 current-authority 更新投影，本机零 updater、home、module、listener。 | charter §11/§14～§15、requirements VII、release guide、D38-03 | 三种 host 与 pure surface 的 production 装配图、时间和零阻塞/零常驻证据 |
+| [ ] | IR38-09 | 获取与续传安全：检查、下载、Range 续传、超时、断流、重试和容量门禁只接受同一候选 identity；网络 permit、响应头、长度、摘要和最终字节均验证，失败可重放且不污染 current。 | specification §10.1/§15、release guide、D38-02/D38-03 | production fetch 到 stage 调用链及 F38-03/F38-06 反例 |
+| [ ] | IR38-10 | ProgramStore 与指针耐久：stage、current、previous、active stage 的 identity、原子写、目录同步、read-back 和崩溃窗口闭合；任何响应丢失通过耐久事实前滚，不产生第二事实源。 | specification §4/§15、D38-01/D38-05 | 临时真实目录、写入窗口、重启和 exact replay 证据 |
+| [ ] | IR38-11 | ProgramUpdateReceipt 是唯一程序层更新事实：phase、notice、action 及条件字段必须逐项符合上表 exact-set，receipt 不复制 lifecycle、health、pointer 或兼容事实。它与 current/previous、已验 stage 和 active upgrade 形成唯一无副作用投影；CLI、server、status、doctor、输入区和第一方 surface 消费同一结果。固定文案可行动、零 raw，失败在成功、candidate 换代或用户明确收起前保持可见。 | charter §11、requirements VII、specification Unit38 补充、D38-01/D38-07 | exact decoder、同一耐久输入的各入口投影、sticky failure、条件字段和 raw-error 反例 |
+| [ ] | IR38-12 | 升级接纳与安全点：只有完整已验 stage 且当前工作到达安全空闲点才 accept；随后关闭十类 producer gate，冻结同 operation accepted-work/source/delivery artifact，并固定使用 drain 逐 owner settle/read-back、flush 和物理收束。anchor/executor/foreground 不丢已接纳工作、不早停、不并行第二 operation；stop/removal/uninstall 只在耐久 conflict 边界保留各自既有策略，不扩成升级三策略。 | charter §10～§13、specification §3/§6/§15、第37单元冻结合同、D38-04 | 三形态、十 owner、迟到 source/delivery、冲突 operation、owner 非空和崩溃恢复 |
+| [ ] | IR38-13 | 生命周期冲突与恢复：升级、stop、target removal、migration、backup uninstall 对同一设备的耐久 conflict identity、phase、重放和 terminal 唯一；任一阶段重启只前滚原 operation，不能绕过已封闭准入。 | specification §6/§15、第37单元冻结合同、D38-04 | 冲突矩阵、逐 phase 响应丢失和连续重启证据 |
+| [ ] | IR38-14 | 旧 host 与切换顺序：只有 exact host/endpoint/definition/manager 事实授权停止旧实例；old-host-stopped 后才切 current pointer，切换效果丢响应可由 read-back 判定，绝不误停 successor。 | charter §10/§12、specification Unit38 补充、第36～37单元冻结合同、D38-04/D38-05 | production supervisor/endpoint/pointer 链和 PID successor 反例 |
+| [ ] | IR38-15 | candidate 启动健康门禁：anchor 与 executor、managed/on-demand/foreground 都以同一 candidate/version/schema/trust/role/endpoint identity 完成 preflight、listener、ready 和 health；不健康或身份漂移不得发布 ready。 | specification §2/§5.3/§8/§15、D38-05/D38-06 | 两根 composition root、监听前复验和错误 candidate 反例 |
+| [ ] | IR38-16 | 恢复语义有限而完整：健康失败自动恢复 previous；用户可在支持窗口执行 guided restore；恢复仍走同一安全生命周期和健康验证，current/previous 交换可重放，产品不暴露 rollback 术语或无限历史版本。 | charter §11～§12、release guide、specification Unit38 补充、D38-05 | 自动/显式恢复、previous 缺失、重复恢复和用户输出 |
+| [ ] | IR38-17 | 清理和资源上界：仅清理非 current、非 previous、非 active stage 的程序版本，固定批次且 read-back；失败可重入，不触碰 home、SecretStore、checkpoint 或 lifecycle evidence，磁盘和内存增长有界。 | specification §4.5/§10.1/§15、D38-05 | 大目录、错 slot、批次窗口和重启证据 |
+| [ ] | IR38-18 | 协议不兼容与 mesh 行为：远端 peer 版本/能力/schema 不兼容时仍提供规定的只读诊断，写入和 activation fail-closed；兼容 peer 正常工作，旧 peer 不触发本地降级或第二同步路径。 | specification §2.5/§5.3/§9/§15、D38-06 | current/candidate/previous 与旧 peer 组合的真实 admission 证据 |
+| [ ] | IR38-19 | 离线诊断和 surface：doctor、status 与 pure surface 只读组合 release manifest、current/previous pointer、stage/receipt、active upgrade、protocol/schema、真实 managed snapshot、checkpoint configuration、SecretStore inspect 和 lifecycle blocker；host absent、离线、无候选、下载、待安全点、恢复及失败均收敛为一个 code/message/action。不得 activation、SecretStore 写、网络探测或 lifecycle 效果，不泄漏秘密、URL、路径、内部 identity、环境变量或 raw error。 | charter §11、release guide、specification Unit38 补充、D38-07 | 每个输入源和终态的 projection、无服务/无网络/损坏/权限失败下零写与用户输出 |
+| [ ] | IR38-20 | 显式 update 与 server RPC：认证和 loopback、strict 输入、request identity、并发/重放、公开错误及生命周期 handoff 全部在首个效果前验证；CLI 与 RPC 只调用同一 controller/lifecycle，不产生旁路。 | specification §1.5/§8/§15、release guide、D38-03/D38-04 | CLI/RPC production 调用图，畸形、远端和重放反例 |
+| [ ] | IR38-21 | 应用移除：先复用现有安全 stop 收束 current/future launch，再只移除程序工件；用户 home、配置、信任、SecretStore、checkpoint 和可恢复数据保持，效果丢失可重放。 | charter §10～§12、requirements VII、release guide、D38-03 | 五目标 uninstall handoff、数据 read-back 和重启窗口 |
+| [ ] | IR38-22 | 永久设备移除与误操作边界：与应用移除保持独立入口、强确认和不可逆语义；只将 zz uninstall 与 zz update --rollback 作为旧别名拒绝，不能误伤当前 zz device remove --permanent。文案、help、交互和非交互参数清楚区分“移除应用并保留数据”与“永久移除设备及本机数据”。 | requirements VII、release guide、specification §8/§15、D38-03/D38-08 | CLI help/decoder/route exact-set、冻结设备名、永久确认及两个旧别名拒绝 |
+| [ ] | IR38-23 | 七组旧路径按上表 exact-set 完整退役：每组的 reader、writer、组合根、公开 export、迁移状态、别名/注入参数、golden 和文档引用均反向清点；只保留 durable schema inventory 明示且被 minimumRollbackVersion 实际消费、无隐藏开关的正式 reader。默认安装不扫描旧位置，生产图无双写、双读、旧 capability 或 shadow owner。 | specification §8/§13/§15、D38-08 | 七组逐项 reachability、残留引用、export/entry/golden 和负向结构证据 |
+| [ ] | IR38-24 | 五目标发布工件构建：每个 target 从同一 source/package closure 形成自包含 Node 22 程序树，消解 workspace:*，只含运行资产；消费平台签名/公证后才冻结最终归档 bytes、manifest 和逐文件摘要。版本、target、权限、原生件、launcher read-back 全等，开发占位 channel、开发依赖、install script、source map、测试资产和秘密不得进入正式包。 | release guide、specification Unit38 补充、D38-02/D38-09 | 五目标最终工件、平台证据、包内容 exact-set 和生成资产 |
+| [ ] | IR38-25 | release:check 是确定、受控输出且无外部发布副作用的发布门：先运行 lint/test/build，再验证同一 source/package 输入、五目标、上述 12 项 smoke、签名/公证、manifest/artifact、50 行 ledger 和文档版本；结束前复验输入未漂移，才原子写 release-report 与可选 candidate index。不依赖 Git 暂存/干净状态，不保管私钥、不调用外部发布；失败不得留下伪成功或半写正式输出。 | release guide、specification §15、D38-09 | 脚本真实读写、输入指纹、质量门、12×5 矩阵、原子输出和失败窗口 |
+| [ ] | IR38-26 | invariant-01～invariant-18 逐行闭合：每行分别核对 source、真实 producer、consumer、composition root、terminal 与现存直接测试，且升级前后/恢复后仍成立；只有 18 行各自有结论和证据时本项通过。 | charter §13、specification §12、final acceptance ledger、D38-10 | 18 个固定 id 逐行双向对账，错误路径、孤立测试和未映射均为零 |
+| [ ] | IR38-27 | 上表 10 个 fault id 逐行闭合：每行分别覆盖其规范终态及适用的效果前失败、效果后响应丢失、重启和恢复；fault-update 还必须证明旧版安全可用或兼容恢复并给唯一用户行动。只有 10 行各自有结论和生产证据时通过。 | charter §12/§12.1、final acceptance ledger、D38-10 | 10 个固定 id 的生产注入点、终态和直接场景证据 |
+| [ ] | IR38-28 | 上表 8 个 security id 逐行闭合，并在第 38 单元交界核对发布签名、规范字节、target/path、秘密和供应链；每个拒绝均在首个副作用前，公开结果无敏感原文。只有 8 行及本单元安全交界各自有结论时通过。 | charter §4/§12/§13、s2 review、final acceptance ledger、D38-10 | 8 个固定 id 与发布安全交界的攻击路径和 fail-closed 证据 |
+| [ ] | IR38-29 | topology-single-machine 与 topology-paired-devices 分别闭合：anchor/executor 和 managed/on-demand/foreground 复用同一更新、lifecycle、health、兼容与诊断原语；pure surface 只走 current authority 的有限投影，本机零 updater/lifecycle/host。未启用角色零模块/监听，无漏装、双装或角色旁路。 | charter §2～§3/§14、specification §8、final acceptance ledger、D38-10 | 两个固定 topology id、两根和三 host/pure-surface 的 production composition graph |
+| [ ] | IR38-30 | 上表 12 个 journey id 必须逐行给出入口、用户语言、终态和直接证据；另将 12 项 release smoke exact-set 逐项映射到相关旅程。开箱、配对、日常、离线、uncertain、迁居/恢复、停机/永久移除与四个更新旅程均保持零拓扑术语、正常无噪声、失败一个下一步；只有 12 行和 12 项 smoke 各自有结论时通过。 | charter §11/§15、requirements VII、release guide、final acceptance ledger、D38-10 | 12 个 journey id、12 项 smoke、CLI/server/surface 文案与终态逐项对账 |
+| [ ] | IR38-31 | 最终交付装配与证据充分：当前变更集中的 root/scripts、core、cli、mesh、owner-kernel、providers、server、tools-builtin、模块文档和 workbench 每组均反向归入 IR38-02～IR38-30；所有 production 文件有真实 producer、consumer、composition root 和公开出口，直接测试走生产路径。生成 version/channel、S7、golden、导出、ledger、guide、report 与代码一致，无孤立实现、测试专用生产旁路或范围外能力。 | charter §15、specification §13/§15、release guide、D38-01～D38-10 | 全部变更文件分组归项、入口/导出/派生资产差异及现存直接证据索引 |
 
-> 本表只保留尚未转入正式问题清单的待解决问题；表为空仅表示尚无已审发现。
+### P0/P1 阻断问题列表
 
-| 编号 | 问题描述 | 产生的影响 | 最优解决方案 | 工作量评估 | 问题评级 | 相关审查项 |
-| --- | --- | --- | --- | --- | --- | --- |
+- 当前为空；尚未执行独立审查，不代表已判定无问题。
 
-### 已删除问题的价值裁决记录（非待处理问题）
+### 非阻断级问题列表
 
-| 原编号 | 原结论 | 推翻或收窄事实 | 新决定与重开条件 |
-| --- | --- | --- | --- |
-| P37-21 | P0/中：把不同host同port可并行listen视为受支持stop successor，并要求扩充`StopEndpointLock`与两根owner谓词。 | OS反例本身成立，但举证前提不成立：公开`zhixing serve`只接受`managed/managed-home/managed-secret-backend`，调用`runServeCommand()`时仅传`managed`；权威配置没有本机lifecycle server host/port项，两根生产根因此始终使用固定`127.0.0.1`和同一`homeToPort(home)`。`ServeOptions.host/port`仅是未暴露的内部/测试接缝，generic server的可配置host也不装配Unit37 stop lifecycle。上一轮以F37-70验收文字和内部类型存在性代替了当前用户可达性。保持现状的用户损失为零；扩耐久DTO和故障矩阵只会增加无价值复杂度。 | 删除，无确定未来交付义务；同步把12项恢复为`[x]`并将F37-70理解收窄为“生产根使用同一已解析非零endpoint，受控测试覆盖不得改变产品范围”。仅当公开CLI、managed definition或权威配置新增本机lifecycle host/port，或生产调用图实际向两根传入不同host时重开。用户体验达标：当前本机loopback单飞、恢复与安全停机不受影响。架构达标：复用现有OS endpoint owner，不为不可达组合扩充协议或新锁。 |
+- 当前为空；尚未执行独立审查，不代表已判定无问题。
 
-## 非阻断级问题列表
+### 定稿结论
 
-> 本表只保留尚未转入正式问题清单的问题。
-
-| 编号 | 问题描述 | 产生的影响 | 最优解决方案 | 工作量评估 | 问题评级 |
-| --- | --- | --- | --- | --- | --- |
-
-> **独立审查结论**：通过。当前40项全部为`[x]`，零`[!]`/`[~]`/`[ ]`；封版测试合同变化影响的4项已在新冻结输入上独立复审，P0/P1与非阻断级问题列表均为空。P37-21经反向价值裁决删除并进入“已删除问题的价值裁决记录”，其重开条件当前未满足；本轮没有待转存的当前问题。
+- 规范来源、章节、规范性条款、枚举行、完整功能链与当前交付路径均已归入有限审查项或写明不适用依据。
+- 本清单只确定独立审查范围和判定条件；所有 IR38 项均保持 [ ]，未执行审查、构建或测试，也未修改生产实现。

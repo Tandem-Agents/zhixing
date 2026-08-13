@@ -4,14 +4,11 @@
  * facade 是方法域封装、不持连接:连接是进程级共享的 CoreHostRpcLink(调度 /
  * 会话 / 确认域共用一条已认证连接),建立 / 重连 / 释放归连接持有者。
  *
- * 读写分离：
- * - 写 / 执行（create / update / delete / run）经连接发 RPC（按需 ensure 宿主）。
- * - list 直接读 scheduler.json 从属投影，不拉宿主（磁盘是宿主单写者的只读投影）。
- * - onEvent 经 RPC notification 订阅，被动——不为订阅而拉宿主。
+ * 全部读写都经过当前宿主的 scheduler authority。客户端不读取本地兼容
+ * JSON，也不维持第二份任务事实；事件仍经既有 RPC notification 被动订阅。
  */
 
 import {
-  getSchedulerStorePath,
   type SchedulerFacade,
   type TaskSpec,
   type TaskPatch,
@@ -22,23 +19,18 @@ import {
   type ScheduleMutationContext,
 } from "@zhixing/core";
 import type { CoreHostRpcLink } from "./core-host-connection.js";
-import { readSchedulerTasksSync } from "./scheduler-projection.js";
 
 export interface RpcSchedulerFacadeOptions {
   /** 进程级共享的核心宿主连接。 */
   connection: CoreHostRpcLink;
-  /** scheduler.json 路径（读投影用）；默认 getSchedulerStorePath()。 */
-  storePath?: string;
 }
 
 export class RpcSchedulerFacade implements SchedulerFacade {
   private readonly link: CoreHostRpcLink;
-  private readonly storePath: string;
   private readonly observedRevisions = new Map<string, number>();
 
   constructor(opts: RpcSchedulerFacadeOptions) {
     this.link = opts.connection;
-    this.storePath = opts.storePath ?? getSchedulerStorePath();
   }
 
   async create(spec: TaskSpec, context?: ScheduleMutationContext): Promise<TaskView> {
@@ -51,10 +43,9 @@ export class RpcSchedulerFacade implements SchedulerFacade {
     return task;
   }
 
-  // 读投影：直接读 scheduler.json（宿主单写者的只读投影），不拉宿主。损坏即空，
-  // 与 turn-context 的 sync 投影同降级语义（不向消费者抛原始 JSON 解析错误）。
   async list(): Promise<TaskView[]> {
-    const tasks = readSchedulerTasksSync(this.storePath);
+    const client = await this.link.getClient();
+    const tasks = await client.request<TaskView[]>("schedule.list");
     for (const task of tasks) this.observe(task);
     return tasks;
   }

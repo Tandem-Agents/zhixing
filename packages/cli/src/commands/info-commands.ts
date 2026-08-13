@@ -48,7 +48,7 @@ export interface InfoCommandsDeps {
   readonly controller: ConversationController;
   /** 网络代理诊断（/status，display 字段已脱敏）。 */
   readonly getNetworkProxy: () => ProxyDescription;
-  /** 调度门面（/tasks 读 scheduler.json 投影，cli 无本地 scheduler）。 */
+  /** 调度门面（/tasks 从当前宿主 scheduler authority 读取）。 */
   readonly getScheduler: () => SchedulerFacade;
   /** 管理面门面(/journal /people 经宿主只读执行体)。 */
   readonly management: RpcManagementFacade;
@@ -660,7 +660,7 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     tag: "builtin",
   });
   dispatcher.registerHandler("tasks:repl", async () => {
-    // 读 scheduler.json 从属投影（cli 无本地 scheduler）；只列外部任务。
+    // 从当前宿主 scheduler authority 读取；只列外部任务。
     // 「执行中」是宿主内存瞬态，读投影拿不到，故不显示。
     const tasks = (await deps.getScheduler().list()).filter(
       (t) => !isInternal(t),

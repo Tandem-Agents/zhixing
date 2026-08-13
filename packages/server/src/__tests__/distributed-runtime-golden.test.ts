@@ -103,8 +103,13 @@ describe("distributed runtime migration behavior golden", () => {
     const descriptor = captureBuiltinRegistryDescriptor();
     expect(golden.roleConfigurations).toEqual({
       "anchor-executor": descriptor,
+      "anchor-executor-surface": descriptor,
+      "anchor-only": descriptor,
       "anchor-surface": descriptor,
+      "disabled-empty": [],
       "executor-only": [],
+      "executor-surface": [],
+      "surface-only": [],
     });
     const registered = new Set(descriptor.map(({ name }) => name));
     for (const retired of golden.retiredMethods) expect(registered.has(retired)).toBe(false);
@@ -607,6 +612,22 @@ async function captureShutdownStrategies() {
       config: { ...DEFAULT_SERVER_CONFIG, port: 18900 },
       version: "golden",
       token: "golden-token",
+      lifecycleShutdown: {
+        prepare: async (input) => {
+          calls.push({
+            action: "prepare-shutdown",
+            reason: input.reason,
+            requestId: input.requestId,
+            strategy: input.strategy,
+            timeoutMs: input.timeoutMs,
+          });
+          return {
+            requestId: input.requestId,
+            phase: "ready-to-stop",
+            strategy: input.strategy,
+          };
+        },
+      },
       runtimeControl: {
         flushDelivery: async () => {
           calls.push({ action: "flush-delivery" });
@@ -624,11 +645,20 @@ async function captureShutdownStrategies() {
         return 1;
       },
     } as never;
-    const context = { connection: { authenticated: true }, server } as HandlerContext;
-    const result = buildServerShutdownMethod().handler(
-      { reason: "golden-stop", strategy, timeoutMs: 1_000 },
+    const context = {
+      connection: { authenticated: true, loopback: true },
+      server,
+    } as HandlerContext;
+    const result = await buildServerShutdownMethod().handler(
+      {
+        requestId: `golden-stop-${strategy}`,
+        reason: "golden-stop",
+        strategy,
+        timeoutMs: 1_000,
+      },
       context,
     );
+    await vi.runAllTicks();
     await shutdownTriggered.promise;
     return { result, calls };
   };

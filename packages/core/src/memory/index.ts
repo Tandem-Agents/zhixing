@@ -1,14 +1,10 @@
 export { loadProfile, formatProfileForContext } from "./profile-loader.js";
 export { parseFrontmatter, stringifyFrontmatter } from "./frontmatter.js";
-export { MemoryStore } from "./memory-store.js";
-export type { MemoryCategory, MemoryEntry, SaveOptions } from "./memory-store.js";
 export { PeopleStore, getRelationAliases } from "./people-store.js";
 export type { PersonMeta, PersonEntry, PersonMatch } from "./people-store.js";
-export { JournalStore, planJournalLifecycle } from "./journal-store.js";
+export { planJournalLifecycle } from "./journal-store.js";
 export type {
-  JournalMeta, JournalEntry, JournalPhase,
-  LifecyclePlan, JournalStats, CondensePlan, CondenseMonth,
-  CondenserResult, CondenseLLM, JournalConfig, JournalLifecycleEntry,
+  JournalStats, JournalConfig, JournalLifecycleEntry,
   JournalLifecycleMonth, JournalAuthorityLifecyclePlan,
 } from "./journal-store.js";
 export type { ProfileData, ProfileMeta } from "./types.js";

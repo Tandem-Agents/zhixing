@@ -4,6 +4,7 @@ import type { RuntimeControlAdapter } from "../../../context.js";
 import {
   buildServerShutdownMethod,
   buildServerInfoMethod,
+  buildServerUpdateHealthMethod,
   buildDeliveryResolveMethod,
   buildDutyMigrationCancelMethod,
   buildDutyMigrationCommitMethod,
@@ -73,6 +74,37 @@ describe("Unit 37 lifecycle facade input", () => {
     await expect(entry.handler(params, ctx))
       .rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
     for (const operation of Object.values(uninstall)) expect(operation).not.toHaveBeenCalled();
+  });
+});
+
+describe("server.update.health", () => {
+  const snapshot = {
+    releaseManifestDigest: `sha256:${"a".repeat(64)}`,
+    protocolRange: { readMin: "1", readMax: "1", writeVersion: "1" },
+    durableSchemas: [{ schemaId: "AuthorityCommitEnvelope", readMin: "1", readMax: "1", writeVersion: "1" }],
+    homeId: "home-1",
+    endpoint: { host: "127.0.0.1", port: 18900 },
+    rolePlan: { host: "anchor-host", loadExecutor: true },
+  };
+
+  it("returns the exact local runtime projection and rejects non-loopback before projection", async () => {
+    const project = vi.fn(async () => snapshot);
+    const local = mkCtx({ programUpdateHealth: project });
+    await expect(buildServerUpdateHealthMethod().handler(undefined, local)).resolves.toEqual(snapshot);
+    expect(project).toHaveBeenCalledOnce();
+
+    const remote = mkCtx({ programUpdateHealth: project });
+    remote.connection.loopback = false;
+    await expect(buildServerUpdateHealthMethod().handler(undefined, remote))
+      .rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    expect(project).toHaveBeenCalledOnce();
+  });
+
+  it("rejects any parameters before reading runtime state", async () => {
+    const project = vi.fn(async () => snapshot);
+    await expect(buildServerUpdateHealthMethod().handler({ extra: true }, mkCtx({ programUpdateHealth: project })))
+      .rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    expect(project).not.toHaveBeenCalled();
   });
 });
 

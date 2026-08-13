@@ -366,6 +366,57 @@ export function buildDeliveryResolveMethod(): MethodEntry {
   };
 }
 
+export function buildServerUpdatePrepareMethod(): MethodEntry {
+  return {
+    name: "server.update.prepare",
+    requiresAuth: true,
+    async handler(params, ctx) {
+      if (!ctx.connection.loopback) {
+        throw RpcErrors.invalidParams("server.update.prepare 只能在当前设备本机执行");
+      }
+      const value = asRecord(params, "server.update.prepare");
+      assertExactRecord(
+        value,
+        ["candidateManifestDigest", "requestId", "timeoutMs"],
+        "server.update.prepare",
+      );
+      if (!isProtocolIdentifier(value.requestId)) {
+        throw RpcErrors.invalidParams("server.update.prepare requires a stable requestId");
+      }
+      if (typeof value.candidateManifestDigest !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(value.candidateManifestDigest)) {
+        throw RpcErrors.invalidParams("server.update.prepare candidate digest is invalid");
+      }
+      const timeoutMs = shutdownTimeoutMs(value.timeoutMs);
+      const lifecycle = ctx.server.lifecycleUpgrade;
+      const trigger = ctx.server.requestShutdown;
+      if (!lifecycle || !trigger) throw RpcErrors.internal("server update is not available");
+      const prepared = await lifecycle.prepare({
+        requestId: value.requestId,
+        candidateManifestDigest: value.candidateManifestDigest,
+        timeoutMs,
+      });
+      queueMicrotask(() => trigger("program-update"));
+      return prepared;
+    },
+  };
+}
+
+export function buildServerUpdateHealthMethod(): MethodEntry {
+  return {
+    name: "server.update.health",
+    requiresAuth: true,
+    async handler(params, ctx) {
+      if (!ctx.connection.loopback) {
+        throw RpcErrors.invalidParams("server.update.health 只能在当前设备本机执行");
+      }
+      parseEmptyParams(params, "server.update.health");
+      const project = ctx.server.programUpdateHealth;
+      if (!project) throw RpcErrors.internal("server update health is not available");
+      return project();
+    },
+  };
+}
+
 export function buildDutyMigrationTargetsMethod(): MethodEntry {
   return {
     name: "dutyMigration.targets",

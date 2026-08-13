@@ -1,6 +1,5 @@
 export { Scheduler } from "./scheduler.js";
 export type { SchedulerDeps } from "./scheduler.js";
-export { JsonTaskStore, getSchedulerStorePath } from "./task-store.js";
 export { TimerLoop } from "./timer-loop.js";
 export { nextScheduleTime, nextFutureScheduleTime } from "./schedule-time.js";
 export { RunRegistry } from "./run-registry.js";
@@ -43,3 +42,4 @@ export type {
   ScheduleMutationContext,
   ScheduleMutationStager,
 } from "./facade.js";
+export { InMemoryTaskStore } from "./in-memory-task-store.js";

@@ -143,6 +143,8 @@ async function handleStatusAction(): Promise<void> {
     await pruneRuntimeLogs();
     const { runStatusCommand } = await import("./serve/status.js");
     const report = await runStatusCommand();
+    const { printProgramUpdateProjection, readProgramUpdateProjection } = await import("./update/runtime.js");
+    printProgramUpdateProjection(await readProgramUpdateProjection());
     // exit code: 0 running, 1 running-unhealthy, 2 stopped, 3 stale
     const exitCode =
       report.status === "running"
@@ -169,13 +171,6 @@ function parseLogLineCount(value: string): number {
     const message = err instanceof Error ? err.message : String(err);
     throw new InvalidArgumentError(message);
   }
-}
-
-function parsePairingMethod(value: string): "qr" | "short" {
-  if (value !== "qr" && value !== "short") {
-    throw new InvalidArgumentError("配对方式必须是 qr 或 short");
-  }
-  return value;
 }
 
 function parseRevision(value: string): number {
@@ -238,6 +233,14 @@ program
       });
       handleStartupResult(startupResult);
 
+      const {
+        printProgramUpdateProjection,
+        readProgramUpdateProjection,
+        startAutomaticUpdateCheck,
+      } = await import("./update/runtime.js");
+      startAutomaticUpdateCheck();
+      printProgramUpdateProjection(await readProgramUpdateProjection());
+
       await startRepl();
     } catch (err) {
       await renderActionError(err);
@@ -257,25 +260,44 @@ program
   .action(handleStopAction);
 
 program
-  .command("uninstall")
-  .description("安全永久卸载当前值班设备")
-  .option("--device <device-name>", "把值班职责交给名称唯一的已就绪设备")
-  .option("--recovery-backup", "使用已验证的恢复备份作为卸载安全保障")
-  .option("--confirm", "确认永久清退当前设备")
-  .action(async (options: {
-    device?: string;
-    recoveryBackup?: boolean;
-    confirm?: boolean;
-  }) => {
+  .command("update")
+  .description("立即检查更新或恢复上一个可用版本")
+  .option("--restore-previous", "恢复上一个可用版本")
+  .action(async (options: { restorePrevious?: boolean }) => {
     try {
-      const { uninstallCurrentDevice } = await import(
-        "./runtime/anchor-uninstall-command.js"
-      );
-      await uninstallCurrentDevice({
-        ...(options.device ? { targetName: options.device } : {}),
-        ...(options.recoveryBackup ? { recoveryBackup: true } : {}),
-        ...(options.confirm ? { confirmed: true } : {}),
-      });
+      const { printProgramUpdateProjection, runUpdateCommand } = await import("./update/runtime.js");
+      printProgramUpdateProjection(await runUpdateCommand(options));
+      process.exit(0);
+    } catch (err) {
+      await renderActionError(err);
+      process.exit(1);
+    }
+  });
+
+program
+  .command("doctor")
+  .description("离线检查运行与更新状态并给出一个下一步")
+  .action(async () => {
+    try {
+      const { inspectProgramHealth, printProgramDoctorReport } = await import("./update/doctor.js");
+      printProgramDoctorReport(await inspectProgramHealth());
+      process.exit(0);
+    } catch (err) {
+      await renderActionError(err);
+      process.exit(1);
+    }
+  });
+
+const appCmd = program.command("app").description("管理知行应用");
+
+appCmd
+  .command("remove")
+  .description("移除知行应用（保留全部数据）")
+  .action(async () => {
+    try {
+      const { removeApplication } = await import("./update/app-remove.js");
+      await removeApplication();
+      console.log("正在移除知行应用；设备身份、配置和全部工作都会保留");
       process.exit(0);
     } catch (err) {
       await renderActionError(err);
@@ -286,9 +308,7 @@ program
 program
   .command("pair")
   .description("配对另一台知行设备")
-  .argument("[invitation]", "另一台设备显示的配对邀请")
-  .option("--method <method>", "出码方式：qr 或 short", parsePairingMethod, "qr")
-  .option("--code <code>", "加入短码配对时输入八位配对码")
+  .argument("[invitation]", "另一台设备显示的高熵配对邀请")
   .option("--listen <host:port>", "出码设备的临时监听地址")
   .option("--advertise <host:port>", "邀请中公布的直连地址")
   .option("--relay <host:port>", "盲中继会合地址")
@@ -299,8 +319,6 @@ program
     parseYesNo,
   )
   .action(async (invitation: string | undefined, options: {
-    method: "qr" | "short";
-    code?: string;
     listen?: string;
     advertise?: string;
     relay?: string;
@@ -311,8 +329,6 @@ program
       const { runPairCommand } = await import("./serve/mesh-pair-command.js");
       await runPairCommand({
         ...(invitation ? { invitation } : {}),
-        method: options.method,
-        ...(options.code ? { shortCode: options.code } : {}),
         ...(options.listen ? { listen: options.listen } : {}),
         ...(options.advertise ? { advertise: options.advertise } : {}),
         ...(options.relay ? { relay: options.relay } : {}),
@@ -361,18 +377,42 @@ deviceCmd
 
 deviceCmd
   .command("remove")
-  .description("安全移除已配对设备")
+  .description("永久移除设备及其本机数据")
   .argument("[device-name]", "设备名称；交互终端可省略后按序号选择")
+  .requiredOption("--permanent", "确认这是永久设备移除，不是应用移除")
+  .option("--current", "永久移除当前值班设备")
+  .option("--duty-device <name>", "当前值班设备移除前的接班设备名称")
+  .option("--recovery-backup", "当前值班设备移除前使用已验证的恢复备份")
   .option("--mode <mode>", "处理方式：transfer、destroy 或 lost", parseDeviceRemovalMode)
-  .option("--confirm", "确认永久删除本地权威，或确认按失控设备撤销")
+  .option("--confirm", "确认设备名、未转移工作和不可逆后果")
   .action(async (deviceName: string | undefined, options: {
+    permanent: boolean;
+    current?: boolean;
+    dutyDevice?: string;
+    recoveryBackup?: boolean;
     mode?: "transfer" | "destroy" | "lost" | "cancel";
     confirm?: boolean;
   }) => {
     try {
+      if (options.current) {
+        if (deviceName || options.mode) {
+          throw new TypeError("--current 不能与设备名称或 --mode 同时使用");
+        }
+        const { uninstallCurrentDevice } = await import("./runtime/anchor-uninstall-command.js");
+        await uninstallCurrentDevice({
+          ...(options.dutyDevice ? { targetName: options.dutyDevice } : {}),
+          ...(options.recoveryBackup ? { recoveryBackup: true } : {}),
+          ...(options.confirm ? { confirmed: true } : {}),
+        });
+        process.exit(0);
+      }
+      if (options.dutyDevice || options.recoveryBackup) {
+        throw new TypeError("--duty-device 和 --recovery-backup 只可与 --current 同时使用");
+      }
       if (options.mode === "cancel") throw new TypeError("新移除操作不能以 cancel 开始");
       const { removeDevice } = await import("./runtime/device-removal-command.js");
       await removeDevice({
+        permanent: options.permanent,
         ...(deviceName ? { targetName: deviceName } : {}),
         ...(options.mode ? { mode: options.mode } : {}),
         ...(options.confirm ? { confirmed: true } : {}),
@@ -826,7 +866,12 @@ const serveCmd = program
       const {
         runServeCommand,
       } = await import("./serve/topology-command.js");
+      const { startAutomaticUpdateCheck, startManagedUpdateChecks } = await import("./update/runtime.js");
+      const stopUpdateChecks = options.managed
+        ? startManagedUpdateChecks()
+        : (startAutomaticUpdateCheck(), () => undefined);
       await runServeCommand({ ...(options.managed ? { managed: true } : {}) });
+      stopUpdateChecks();
       process.exit(0);
     } catch (err) {
       await renderActionError(err);

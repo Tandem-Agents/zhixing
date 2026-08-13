@@ -1,16 +1,8 @@
 export type { WorkScene, IWorkSceneRegistry } from "./types.js";
 export {
-  legacyWorksceneCutover,
-  markLegacyWorksceneCutover,
-  withLegacyWorksceneWriteFence,
-} from "./registry.js";
-export {
   WorksceneConflictError,
   WorksceneNotFoundError,
   WorksceneRevisionError,
-  canonicalLegacyWorksceneImport,
-  worksceneImportSetDigest,
-  worksceneImportSetDigestNext,
   type WorksceneRegistryControlContext,
 } from "./authority-registry.js";
 export {

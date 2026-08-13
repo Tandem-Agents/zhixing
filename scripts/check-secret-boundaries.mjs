@@ -12,7 +12,7 @@ const productionFiles = (await walk(path.join(root, "packages"))).filter(
 const errors = [];
 const legacyMentionsAllowed = new Set([
   "packages/core/src/security/builtin-rules.ts",
-  "packages/providers/src/paths.ts",
+  "packages/cli/src/security/secret-boundary.ts",
 ]);
 const fullCredentialProjectionAllowed = new Set([
   "packages/providers/src/credentials-loader.ts",
@@ -67,18 +67,12 @@ if (isolationContract.includes("任何 AI 文件访问")) {
   errors.push("Secret isolation contract incorrectly describes the L2 guard as hard isolation");
 }
 for (const required of [
-  "migrateLegacyCredentials",
-  "loadCredentialsWithLegacyMigration",
-  "read-back verification failed",
-  "unlink(filePath)",
   "runExclusive",
   "cleanupUncommittedGeneration",
-  "cleanupLegacyCredentialTemps",
   'state: "aborted"',
-  "acknowledgePlaintextRisk: true",
 ]) {
   if (!credentialRepository.includes(required)) {
-    errors.push(`credential migration is missing required boundary: ${required}`);
+    errors.push(`SecretStore credential repository is missing required boundary: ${required}`);
   }
 }
 
@@ -118,7 +112,7 @@ const dynamicBoundaryFiles = new Map([
   ],
   [
     "packages/cli/src/security/secret-boundary.ts",
-    ["getCredentialsPath", "getPlatformSecretStoreProtectedPaths"],
+    ['"credentials.json"', "getPlatformSecretStoreProtectedPaths"],
   ],
   [
     "packages/cli/src/serve/command.ts",

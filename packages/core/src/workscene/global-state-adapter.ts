@@ -11,7 +11,6 @@ import type {
   LogicalRecord,
   GlobalStatePort,
   WorksceneAppliedResult,
-  WorksceneMigrationMutation,
   WorksceneWriteMutation,
 } from "../contracts/index.js";
 import { defineDurableRuntimeContract } from "../contracts/durable-contract.js";
@@ -224,15 +223,6 @@ export class AnchorWorksceneGlobalStateAdapter implements GlobalStatePort {
         "Assignment workscene mutations must be staged by the assignment owner",
       );
     }
-    if (isWorksceneMigration(mutation)) {
-      if (context.principal.kind !== "host") {
-        throw new TypeError("Only the host migration owner may import workscenes");
-      }
-      await this.#registry.applyMigration(mutation, {
-        requestId: context.requestId,
-      });
-      return { revision: 0 };
-    }
     if (!isWorksceneWrite(mutation)) {
       throw new TypeError(
         "This global state adapter only owns the workscene domain",
@@ -375,7 +365,7 @@ export const WORKSCENE_REGISTRY_DURABLE_CONTRACT = defineDurableRuntimeContract(
   resourceIdentity: "workscene:<sceneId>",
   recoveryClass: "authority-replay",
   cases: [
-    ...["established", "control-applied", "legacy-import-open", "legacy-import-activated", "legacy-import-abandoned", "deletion-projected"]
+    ...["established", "control-applied", "deletion-projected"]
       .map((key) => ({ kind: "variant" as const, key })),
     { kind: "rejection", key: "principal-method", reasonCode: "AUTHORITY_METHOD_FORBIDDEN" },
     { kind: "rejection", key: "request-conflict", reasonCode: "WORKSCENE_CONFLICT" },
@@ -394,16 +384,6 @@ function isWorksceneWrite(
     mutation.kind === "workscene-rename" ||
     mutation.kind === "workscene-set-workdir" ||
     mutation.kind === "workscene-delete"
-  );
-}
-
-function isWorksceneMigration(
-  mutation: GlobalControlMutation | GlobalStagedMutation,
-): mutation is WorksceneMigrationMutation {
-  return (
-    mutation.kind === "workscene-import-legacy" ||
-    mutation.kind === "workscene-activate-device-registry" ||
-    mutation.kind === "workscene-abandon-legacy-import"
   );
 }
 

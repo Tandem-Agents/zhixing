@@ -68,12 +68,6 @@ export interface AnchorSchedulerOptions {
   }) => Promise<{ readonly state: string }>;
   readonly systemHandlers?: ReadonlyMap<string, SystemHandler>;
   readonly systemTasks?: ReadonlyMap<string, AnchorSystemTaskSpec>;
-  readonly legacyTasks?: () => Promise<readonly ScheduledTask[]>;
-  readonly migrateLegacyDelivery?: (
-    delivery: ScheduledTask["delivery"],
-    taskId: string,
-  ) => Promise<Extract<TaskDefinition["definition"], { kind: "user" }>["spec"]["delivery"]>;
-  readonly onProjection?: (tasks: readonly ScheduledTask[]) => Promise<void>;
   readonly onError?: (error: Error) => void;
   readonly now?: () => Date;
   readonly pollMs?: number;
@@ -165,9 +159,7 @@ export class AnchorScheduler {
         registeredSystem ? { systemView: systemView(registeredSystem) } : {},
       );
     }
-    await this.#importLegacyTasks();
     await this.#ensureConfiguredSystemTasks();
-    await this.#publishProjection();
     this.#prepared = true;
   }
 
@@ -240,7 +232,6 @@ export class AnchorScheduler {
         }
       }
     }
-    await this.#publishProjection();
   }
 
   async #prepareMissedSummaries(): Promise<void> {
@@ -300,7 +291,6 @@ export class AnchorScheduler {
     await Promise.allSettled(this.#completionTrackers.values());
     for (const unsubscribe of this.#lifecycleUnsubscribers.values()) unsubscribe();
     this.#lifecycleUnsubscribers.clear();
-    await this.#publishProjection();
     this.#prepared = false;
   }
 
@@ -372,7 +362,6 @@ export class AnchorScheduler {
     if (seen.size !== expected.size || [...expected.keys()].some((id) => !seen.has(id))) {
       throw new Error("Scheduler lifecycle artifact does not bind current durable work");
     }
-    await this.#publishProjection();
   }
 
   /** Closes fresh triggers while preserving every durable schedule fact for pre-commit rollback. */
@@ -452,7 +441,6 @@ export class AnchorScheduler {
       schedule: spec.schedule,
       nextRunAt: this.#nextRunByTask.get(taskId),
     });
-    await this.#publishProjection();
     this.#arm();
     return this.#requiredView(taskId);
   }
@@ -526,7 +514,6 @@ export class AnchorScheduler {
       taskId,
       name: (next.definition as Extract<TaskDefinition["definition"], { kind: "user" }>).spec.name,
     });
-    await this.#publishProjection();
     this.#arm();
     return this.#requiredView(taskId);
   }
@@ -601,7 +588,6 @@ export class AnchorScheduler {
       taskId,
       name: view.name,
     });
-    await this.#publishProjection();
     this.#arm();
     if (cancellationFailures.length > 0) {
       throw new AggregateError(
@@ -832,7 +818,6 @@ export class AnchorScheduler {
     )) {
       await this.#refreshTask(taskId);
     }
-    await this.#publishProjection();
     this.#arm();
   }
 
@@ -976,7 +961,6 @@ export class AnchorScheduler {
     // fired timestamp and makes deterministic backoff restart-safe.
     this.#nextRunByTask.delete(taskId);
     await this.#refreshTask(taskId);
-    await this.#publishProjection();
   }
 
   async #activateUser(
@@ -1053,7 +1037,6 @@ export class AnchorScheduler {
       });
       await this.#disableAfterRepeatedFailure(taskId);
     }
-    await this.#publishProjection();
   }
 
   async #waitForResult(
@@ -1259,7 +1242,6 @@ export class AnchorScheduler {
       }
     }
     await this.#refreshTask(event.ref.taskId);
-    await this.#publishProjection();
   }
 
   async #schedulerPolicyFor(journal: JobJournal): ReturnType<JobJournal["schedulerPolicy"]> {
@@ -1283,42 +1265,6 @@ export class AnchorScheduler {
     return undefined;
   }
 
-  async #importLegacyTasks(): Promise<void> {
-    const tasks = await this.#options.legacyTasks?.();
-    if (!tasks) return;
-    for (const legacy of tasks) {
-      if (legacy.system || this.#definitions.has(legacy.id)) continue;
-      if (legacy.action.kind !== "agent-turn") {
-        throw new Error(`Legacy user task ${legacy.id} has a system action`);
-      }
-      const definition = await this.#userDefinition(legacy.id, 1, {
-        name: legacy.name,
-        ...(legacy.description ? { description: legacy.description } : {}),
-        enabled: legacy.enabled,
-        priority: legacy.priority,
-        schedule: legacy.schedule,
-        action: legacy.action,
-        ...(legacy.delivery ? { delivery: legacy.delivery } : {}),
-      }, {
-        ...(legacy.origin ? { origin: legacy.origin } : {}),
-        ...(legacy.createdInTurn ? { createdInTurn: legacy.createdInTurn } : {}),
-      });
-      await this.#journal(legacy.id).define(
-        definition,
-        this.#hostContext(`schedule-legacy-import-${legacy.id}`),
-        legacy.state.nextRunAt
-          ? {
-              kind: "legacy-import",
-              nextFire: legacy.state.nextRunAt,
-              scheduleDigest: protocolDigest("LegacySchedulerSchedule", 1, legacy.schedule),
-              legacyDigest: protocolDigest("LegacyScheduledTask", 1, legacy),
-            }
-          : undefined,
-      );
-      await this.#refreshTask(legacy.id);
-    }
-  }
-
   async #userDefinition(
     taskId: string,
     taskRevision: number,
@@ -1338,8 +1284,7 @@ export class AnchorScheduler {
     if (input.action.kind !== "agent-turn") {
       throw new TypeError("User task action must be agent-turn");
     }
-    const delivery = await this.#options.migrateLegacyDelivery?.(input.delivery, taskId) ??
-      legacyDeliveryToDefinition(input.delivery);
+    const delivery = taskDeliveryToDefinition(input.delivery);
     return {
       taskId,
       taskRevision,
@@ -1457,11 +1402,6 @@ export class AnchorScheduler {
     if (!this.#accepting) throw new Error("Scheduler is not accepting commands");
   }
 
-  async #publishProjection(): Promise<void> {
-    await this.#options.onProjection?.(
-      [...this.#views.values()].map((task) => structuredClone(task)),
-    );
-  }
 }
 
 function definitionSource(ingress: IngressContext) {
@@ -1493,7 +1433,7 @@ function projectUserTask(input: TaskRuntimeProjection): ScheduledTask {
     priority: definition.definition.spec.priority,
     schedule: structuredClone(definition.definition.spec.schedule),
     action: structuredClone(definition.definition.spec.action),
-    ...definitionDeliveryToLegacy(definition.definition.spec.delivery),
+    ...definitionDeliveryToTask(definition.definition.spec.delivery),
     ...(definition.definition.origin
       ? { origin: structuredClone(definition.definition.origin) }
       : {}),
@@ -1619,7 +1559,7 @@ export function scheduleTaskIdForRequest(requestId: string): string {
   return `task-${shortHash(requestId)}`;
 }
 
-function legacyDeliveryToDefinition(
+function taskDeliveryToDefinition(
   delivery: ScheduledTask["delivery"],
 ): Extract<TaskDefinition["definition"], { kind: "user" }>["spec"]["delivery"] {
   if (!delivery) return undefined;
@@ -1635,7 +1575,7 @@ function legacyDeliveryToDefinition(
   return { kind: "webhook", endpoint: delivery.endpoint };
 }
 
-function definitionDeliveryToLegacy(
+function definitionDeliveryToTask(
   delivery: Extract<TaskDefinition["definition"], { kind: "user" }>["spec"]["delivery"],
 ): Pick<ScheduledTask, "delivery"> | Record<string, never> {
   if (!delivery) return {};

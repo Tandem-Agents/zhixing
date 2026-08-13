@@ -14,7 +14,6 @@ import type {
   LogicalRecord,
   WorksceneAppliedResult,
   WorksceneDto,
-  WorksceneMigrationMutation,
   WorksceneWriteMutation,
 } from "../contracts/index.js";
 import { canonicalize, protocolDigest } from "../protocol/index.js";
@@ -26,8 +25,6 @@ const WORKSCENE_SCENE_PREFIX = "scene:";
 const WORKSCENE_TOMBSTONE_PREFIX = "tombstone:";
 const WORKSCENE_REQUEST_PREFIX = "request:";
 const WORKSCENE_PENDING_PREFIX = "pending-deletion:";
-const WORKSCENE_LEGACY_META_PREFIX = "legacy-meta:";
-const WORKSCENE_LEGACY_ENTRY_PREFIX = "legacy-entry:";
 
 type WorksceneRegistryRecord =
   | { t: "workscene-registry-established"; at: string }
@@ -40,36 +37,6 @@ type WorksceneRegistryRecord =
       at: string;
     }
   | {
-      t: "workscene-legacy-import-opened";
-      requestId: string;
-      mutationDigest: Digest;
-      mutation: Extract<
-        WorksceneMigrationMutation,
-        { kind: "workscene-import-legacy" }
-      >;
-      at: string;
-    }
-  | {
-      t: "workscene-legacy-import-activated";
-      requestId: string;
-      mutationDigest: Digest;
-      mutation: Extract<
-        WorksceneMigrationMutation,
-        { kind: "workscene-activate-device-registry" }
-      >;
-      at: string;
-    }
-  | {
-      t: "workscene-legacy-import-abandoned";
-      requestId: string;
-      mutationDigest: Digest;
-      mutation: Extract<
-        WorksceneMigrationMutation,
-        { kind: "workscene-abandon-legacy-import" }
-      >;
-      at: string;
-    }
-  | {
       t: "workscene-deletion-projected";
       sceneId: string;
       deletionRevision: number;
@@ -79,13 +46,6 @@ type WorksceneRegistryRecord =
 interface RequestReplay {
   readonly mutationDigest: Digest;
   readonly result?: WorksceneAppliedResult;
-}
-
-interface LegacyBatch {
-  readonly sourceSnapshotToken: string;
-  readonly imports: Map<string, WorksceneDto>;
-  status: "open" | "activated" | "abandoned";
-  importSetDigest?: Digest;
 }
 
 interface WorksceneRegistryProjection {
@@ -101,7 +61,6 @@ interface WorksceneRegistryProjection {
     }
   >;
   readonly requests: Map<string, RequestReplay>;
-  readonly legacyBatches: Map<string, LegacyBatch>;
 }
 
 export interface WorksceneRegistryControlContext {
@@ -413,75 +372,6 @@ export class AnchorWorksceneRegistry {
     return cloneResult(transaction.value);
   }
 
-  async applyMigration(
-    mutation: WorksceneMigrationMutation,
-    context: WorksceneRegistryControlContext,
-  ): Promise<void> {
-    requireIdentifier(context.requestId, "Workscene migration requestId");
-    const normalized = validateMigrationMutation(mutation);
-    const mutationDigest = protocolDigest(
-      "WorksceneMigrationMutation",
-      1,
-      normalized,
-    );
-    await this.#ensureOpen();
-    const transaction = await this.#log.transactProjection<
-      WorksceneRegistryProjection,
-      WorksceneRegistryRecord,
-      void
-    >(
-      this.#state(),
-      reduceRegistry,
-      (state) => {
-        const replay = state.requests.get(context.requestId);
-        if (replay) {
-          if (replay.mutationDigest !== mutationDigest) {
-            throw new WorksceneConflictError(
-              "Migration request identity was reused with another mutation",
-            );
-          }
-          return { kind: "return", value: undefined };
-        }
-        validateMigrationTransition(state, normalized);
-        return {
-          kind: "append",
-          entries: [
-            {
-              stream: REGISTRY_STREAM,
-              body: migrationRecord(
-                context.requestId,
-                mutationDigest,
-                normalized,
-                this.#clock(),
-              ),
-            },
-          ],
-          value: undefined,
-        };
-      },
-      { cursor: this.#cursor, stream: REGISTRY_STREAM },
-    );
-    this.#projection = transaction.state;
-    this.#cursor = transaction.cursor;
-  }
-
-  async openLegacyBatches(): Promise<
-    Array<{
-      migrationId: string;
-      sourceSnapshotToken: string;
-      imports: WorksceneDto[];
-    }>
-  > {
-    await this.#ensureOpen();
-    return [...this.#state().legacyBatches]
-      .filter(([, batch]) => batch.status === "open")
-      .map(([migrationId, batch]) => ({
-        migrationId,
-        sourceSnapshotToken: batch.sourceSnapshotToken,
-        imports: [...batch.imports.values()].map(cloneScene),
-      }));
-  }
-
   #state(): WorksceneRegistryProjection {
     if (!this.#projection) {
       throw new AuthorityStorageError(
@@ -713,87 +603,6 @@ async function reduceWorksceneDurableProjection(
         tombstone(workscenePendingKey(record.sceneId));
         break;
       }
-      case "workscene-legacy-import-opened": {
-        const migrationId = record.mutation.migrationId;
-        const legacy = readLegacyMeta(
-          await get(worksceneLegacyMetaKey(migrationId)),
-        ) ?? {
-          sourceSnapshotToken: record.mutation.sourceSnapshotToken,
-          status: "open" as const,
-        };
-        if (
-          legacy.status !== "open" ||
-          legacy.sourceSnapshotToken !== record.mutation.sourceSnapshotToken ||
-          await get(worksceneLegacyEntryKey(migrationId, record.mutation.scene.id))
-        ) {
-          throw corruptRegistry("Legacy workscene import is inconsistent");
-        }
-        put(worksceneLegacyMetaKey(migrationId), legacy as unknown as JsonValue);
-        put(
-          worksceneLegacyEntryKey(migrationId, record.mutation.scene.id),
-          importedScene(record.mutation.scene) as unknown as JsonValue,
-        );
-        put(worksceneRequestKey(record.requestId), {
-          mutationDigest: record.mutationDigest,
-        });
-        break;
-      }
-      case "workscene-legacy-import-activated": {
-        const migrationId = record.mutation.migrationId;
-        const legacy = readLegacyMeta(
-          await get(worksceneLegacyMetaKey(migrationId)),
-        );
-        if (
-          !legacy || legacy.status !== "open" ||
-          legacy.sourceSnapshotToken !== record.mutation.sourceSnapshotToken
-        ) {
-          throw corruptRegistry("Legacy workscene activation is inconsistent");
-        }
-        const imports = await readLegacyEntries(current, overlay, migrationId);
-        if (importSetDigest(imports) !== record.mutation.importSetDigest) {
-          throw corruptRegistry("Legacy activation does not bind its import set");
-        }
-        for (const [sceneId, scene] of imports) {
-          if (
-            await get(worksceneSceneKey(sceneId)) ||
-            await get(worksceneTombstoneKey(sceneId))
-          ) {
-            throw corruptRegistry("Legacy activation collides with current state");
-          }
-          put(worksceneSceneKey(sceneId), cloneScene(scene) as unknown as JsonValue);
-        }
-        put(worksceneLegacyMetaKey(migrationId), {
-          ...legacy,
-          status: "activated",
-          importSetDigest: record.mutation.importSetDigest,
-        } as unknown as JsonValue);
-        put(worksceneRequestKey(record.requestId), {
-          mutationDigest: record.mutationDigest,
-        });
-        meta = { ...meta, domainRevision: meta.domainRevision + 1 };
-        put(WORKSCENE_META_KEY, meta as unknown as JsonValue);
-        break;
-      }
-      case "workscene-legacy-import-abandoned": {
-        const migrationId = record.mutation.migrationId;
-        const legacy = readLegacyMeta(
-          await get(worksceneLegacyMetaKey(migrationId)),
-        );
-        if (
-          !legacy || legacy.status !== "open" ||
-          legacy.sourceSnapshotToken !== record.mutation.sourceSnapshotToken
-        ) {
-          throw corruptRegistry("Legacy workscene abandonment is inconsistent");
-        }
-        put(worksceneLegacyMetaKey(migrationId), {
-          ...legacy,
-          status: "abandoned",
-        } as unknown as JsonValue);
-        put(worksceneRequestKey(record.requestId), {
-          mutationDigest: record.mutationDigest,
-        });
-        break;
-      }
     }
   }
   return mutations;
@@ -820,36 +629,6 @@ async function readWorksceneScenes(
   return scenes;
 }
 
-async function readLegacyEntries(
-  current: DurableProjectionReadContext,
-  overlay: ReadonlyMap<string, JsonValue | undefined>,
-  migrationId: string,
-): Promise<Map<string, WorksceneDto>> {
-  const prefix = `${WORKSCENE_LEGACY_ENTRY_PREFIX}${migrationId}:`;
-  const imports = new Map<string, WorksceneDto>();
-  let continuation: string | undefined;
-  do {
-    const page = await current.scan(
-      { gte: prefix, lt: `${prefix}\uffff` },
-      256,
-      continuation,
-    );
-    for (const item of page.entries) {
-      const value = overlay.has(item.key) ? overlay.get(item.key) : item.value;
-      const scene = readWorksceneScene(value);
-      if (scene) imports.set(scene.id, scene);
-    }
-    continuation = page.continuation;
-  } while (continuation !== undefined);
-  for (const [key, value] of overlay) {
-    if (!key.startsWith(prefix)) continue;
-    const scene = readWorksceneScene(value);
-    if (scene) imports.set(scene.id, scene);
-    else imports.delete(key.slice(prefix.length));
-  }
-  return imports;
-}
-
 function worksceneSceneKey(sceneId: string): string {
   return `${WORKSCENE_SCENE_PREFIX}${sceneId}`;
 }
@@ -864,14 +643,6 @@ function worksceneRequestKey(requestId: string): string {
 
 function workscenePendingKey(sceneId: string): string {
   return `${WORKSCENE_PENDING_PREFIX}${sceneId}`;
-}
-
-function worksceneLegacyMetaKey(migrationId: string): string {
-  return `${WORKSCENE_LEGACY_META_PREFIX}${migrationId}`;
-}
-
-function worksceneLegacyEntryKey(migrationId: string, sceneId: string): string {
-  return `${WORKSCENE_LEGACY_ENTRY_PREFIX}${migrationId}:${sceneId}`;
 }
 
 function readWorksceneMeta(value: JsonValue | undefined): {
@@ -980,28 +751,6 @@ function readPendingDeletion(value: JsonValue | undefined): {
   return {
     deletionRevision: Number(value.deletionRevision),
     previousObjectRevision: Number(value.previousObjectRevision),
-  };
-}
-
-function readLegacyMeta(value: JsonValue | undefined): {
-  readonly sourceSnapshotToken: string;
-  readonly status: "open" | "activated" | "abandoned";
-  readonly importSetDigest?: Digest;
-} | undefined {
-  if (value === undefined) return undefined;
-  if (
-    typeof value !== "object" || value === null || Array.isArray(value) ||
-    typeof value.sourceSnapshotToken !== "string" ||
-    (value.status !== "open" && value.status !== "activated" && value.status !== "abandoned")
-  ) {
-    throw corruptRegistry("Workscene legacy metadata is invalid");
-  }
-  return {
-    sourceSnapshotToken: value.sourceSnapshotToken,
-    status: value.status,
-    ...(typeof value.importSetDigest === "string"
-      ? { importSetDigest: value.importSetDigest as Digest }
-      : {}),
   };
 }
 
@@ -1135,80 +884,6 @@ function reduceRegistry(
         result: cloneResult(record.result),
       });
       break;
-    case "workscene-legacy-import-opened": {
-      const mutation = record.mutation;
-      let batch = state.legacyBatches.get(mutation.migrationId);
-      if (!batch) {
-        batch = {
-          sourceSnapshotToken: mutation.sourceSnapshotToken,
-          imports: new Map(),
-          status: "open",
-        };
-        state.legacyBatches.set(mutation.migrationId, batch);
-      }
-      if (
-        batch.status !== "open" ||
-        batch.sourceSnapshotToken !== mutation.sourceSnapshotToken ||
-        batch.imports.has(mutation.scene.id)
-      ) {
-        throw corruptRegistry("Legacy import batch is inconsistent");
-      }
-      batch.imports.set(mutation.scene.id, importedScene(mutation.scene));
-      state.requests.set(record.requestId, {
-        mutationDigest: record.mutationDigest,
-      });
-      break;
-    }
-    case "workscene-legacy-import-activated": {
-      let batch = state.legacyBatches.get(record.mutation.migrationId);
-      if (
-        !batch &&
-        record.mutation.importSetDigest === worksceneImportSetDigest([])
-      ) {
-        batch = {
-          sourceSnapshotToken: record.mutation.sourceSnapshotToken,
-          imports: new Map(),
-          status: "open",
-        };
-        state.legacyBatches.set(record.mutation.migrationId, batch);
-      }
-      if (
-        !batch ||
-        batch.status !== "open" ||
-        batch.sourceSnapshotToken !== record.mutation.sourceSnapshotToken ||
-        importSetDigest(batch.imports) !== record.mutation.importSetDigest
-      ) {
-        throw corruptRegistry("Legacy activation does not bind its open import set");
-      }
-      for (const [sceneId, scene] of batch.imports) {
-        if (state.scenes.has(sceneId) || state.tombstones.has(sceneId)) {
-          throw corruptRegistry("Legacy activation collides with current state");
-        }
-        state.scenes.set(sceneId, cloneScene(scene));
-      }
-      state.domainRevision += 1;
-      batch.status = "activated";
-      batch.importSetDigest = record.mutation.importSetDigest;
-      state.requests.set(record.requestId, {
-        mutationDigest: record.mutationDigest,
-      });
-      break;
-    }
-    case "workscene-legacy-import-abandoned": {
-      const batch = state.legacyBatches.get(record.mutation.migrationId);
-      if (
-        !batch ||
-        batch.status !== "open" ||
-        batch.sourceSnapshotToken !== record.mutation.sourceSnapshotToken
-      ) {
-        throw corruptRegistry("Legacy abandonment does not bind an open batch");
-      }
-      batch.status = "abandoned";
-      state.requests.set(record.requestId, {
-        mutationDigest: record.mutationDigest,
-      });
-      break;
-    }
     case "workscene-deletion-projected": {
       const pending = state.pendingDeletions.get(record.sceneId);
       if (!pending || pending.deletionRevision !== record.deletionRevision) {
@@ -1307,97 +982,6 @@ function applyResult(
   state.domainRevision = result.revision;
 }
 
-function validateMigrationTransition(
-  state: WorksceneRegistryProjection,
-  mutation: WorksceneMigrationMutation,
-): void {
-  const batch = state.legacyBatches.get(mutation.migrationId);
-  switch (mutation.kind) {
-    case "workscene-import-legacy":
-      if (
-        batch &&
-        (batch.status !== "open" ||
-          batch.sourceSnapshotToken !== mutation.sourceSnapshotToken ||
-          batch.imports.has(mutation.scene.id))
-      ) {
-        throw new WorksceneConflictError(
-          "Legacy import does not extend the current open batch",
-        );
-      }
-      if (
-        state.scenes.has(mutation.scene.id) ||
-        state.tombstones.has(mutation.scene.id)
-      ) {
-        throw new WorksceneConflictError(
-          "Legacy scene identity is already reserved",
-        );
-      }
-      return;
-    case "workscene-activate-device-registry":
-      if (
-        !batch &&
-        mutation.importSetDigest === worksceneImportSetDigest([])
-      ) {
-        return;
-      }
-      if (
-        !batch ||
-        batch.status !== "open" ||
-        batch.sourceSnapshotToken !== mutation.sourceSnapshotToken ||
-        importSetDigest(batch.imports) !== mutation.importSetDigest
-      ) {
-        throw new WorksceneConflictError(
-          "Legacy activation does not bind the complete open import set",
-        );
-      }
-      return;
-    case "workscene-abandon-legacy-import":
-      if (
-        !batch ||
-        batch.status !== "open" ||
-        batch.sourceSnapshotToken !== mutation.sourceSnapshotToken
-      ) {
-        throw new WorksceneConflictError(
-          "Legacy abandonment does not bind the current open batch",
-        );
-      }
-  }
-}
-
-function migrationRecord(
-  requestId: string,
-  mutationDigest: Digest,
-  mutation: WorksceneMigrationMutation,
-  at: string,
-): WorksceneRegistryRecord {
-  switch (mutation.kind) {
-    case "workscene-import-legacy":
-      return {
-        t: "workscene-legacy-import-opened",
-        requestId,
-        mutationDigest,
-        mutation,
-        at,
-      };
-    case "workscene-activate-device-registry":
-      return {
-        t: "workscene-legacy-import-activated",
-        requestId,
-        mutationDigest,
-        mutation,
-        at,
-      };
-    case "workscene-abandon-legacy-import":
-      return {
-        t: "workscene-legacy-import-abandoned",
-        requestId,
-        mutationDigest,
-        mutation,
-        at,
-      };
-  }
-}
-
 function validateMutation(
   input: WorksceneWriteMutation,
 ): WorksceneWriteMutation {
@@ -1450,75 +1034,6 @@ function validateMutation(
   return mutation;
 }
 
-function validateMigrationMutation(
-  input: WorksceneMigrationMutation,
-): WorksceneMigrationMutation {
-  assertPlainRecord(input, "Workscene migration mutation");
-  const mutation = structuredClone(input);
-  requireIdentifier(mutation.migrationId, "Migration id");
-  requireIdentifier(mutation.sourceSnapshotToken, "Source snapshot token");
-  switch (mutation.kind) {
-    case "workscene-import-legacy":
-      assertRecordKeys(
-        mutation,
-        [
-          "kind",
-          "migrationId",
-          "scene",
-          "sourceSnapshotToken",
-        ],
-        "Workscene legacy import mutation",
-      );
-      assertPlainRecord(mutation.scene, "Legacy workscene");
-      assertRecordKeys(
-        mutation.scene,
-        mutation.scene.workspace
-          ? ["createdAt", "id", "name", "workspace"]
-          : ["createdAt", "id", "name"],
-        "Legacy workscene",
-      );
-      requireIdentifier(mutation.scene.id, "Legacy scene id");
-      mutation.scene.name = normalizeName(mutation.scene.name);
-      canonicalTime(mutation.scene.createdAt, "Legacy scene creation time");
-      if (mutation.scene.workspace) validateWorkspace(mutation.scene.workspace);
-      break;
-    case "workscene-activate-device-registry":
-      assertRecordKeys(
-        mutation,
-        [
-          "importSetDigest",
-          "kind",
-          "migrationId",
-          "sourceSnapshotToken",
-        ],
-        "Workscene legacy activation mutation",
-      );
-      requireDigest(mutation.importSetDigest, "Legacy import set digest");
-      break;
-    case "workscene-abandon-legacy-import":
-      assertRecordKeys(
-        mutation,
-        [
-          "kind",
-          "migrationId",
-          "reason",
-          "sourceSnapshotToken",
-        ],
-        "Workscene legacy abandonment mutation",
-      );
-      if (
-        typeof mutation.reason !== "string" ||
-        mutation.reason.trim().length === 0
-      ) {
-        throw new TypeError("Legacy migration abandonment requires a reason");
-      }
-      break;
-    default:
-      throw new TypeError("Unknown workscene migration mutation");
-  }
-  return mutation;
-}
-
 function validateRecord(record: WorksceneRegistryRecord): WorksceneRegistryRecord {
   if (!record || typeof record !== "object" || Array.isArray(record)) {
     throw corruptRegistry("Workscene registry record is malformed");
@@ -1556,29 +1071,6 @@ function validateRecord(record: WorksceneRegistryRecord): WorksceneRegistryRecor
       validateAppliedResult(record.result, mutation);
       break;
     }
-    case "workscene-legacy-import-opened":
-    case "workscene-legacy-import-activated":
-    case "workscene-legacy-import-abandoned": {
-      assertRecordKeys(
-        record,
-        ["at", "mutation", "mutationDigest", "requestId", "t"],
-        "Workscene migration record",
-      );
-      requireIdentifier(record.requestId, "Workscene migration requestId");
-      const mutation = validateMigrationMutation(record.mutation);
-      if (canonicalize(mutation) !== canonicalize(record.mutation)) {
-        throw corruptRegistry("Workscene migration mutation is not canonical");
-      }
-      const expected = protocolDigest(
-        "WorksceneMigrationMutation",
-        1,
-        mutation,
-      );
-      if (record.mutationDigest !== expected) {
-        throw corruptRegistry("Workscene migration digest is inconsistent");
-      }
-      break;
-    }
     case "workscene-deletion-projected":
       assertRecordKeys(
         record,
@@ -1593,70 +1085,6 @@ function validateRecord(record: WorksceneRegistryRecord): WorksceneRegistryRecor
   }
   canonicalTime(record.at, "Workscene registry record time");
   return record;
-}
-
-function importedScene(
-  scene: Extract<
-    WorksceneMigrationMutation,
-    { kind: "workscene-import-legacy" }
-  >["scene"],
-): WorksceneDto {
-  return {
-    id: scene.id,
-    revision: 1,
-    name: scene.name,
-    ...(scene.workspace ? { workspace: { ...scene.workspace } } : {}),
-    createdAt: scene.createdAt,
-    lastActiveAt: scene.createdAt,
-  };
-}
-
-export function worksceneImportSetDigest(
-  scenes: readonly WorksceneDto[],
-): Digest {
-  return [...scenes]
-    .map(cloneScene)
-    .sort((left, right) => left.id.localeCompare(right.id, "en-US"))
-    .reduce<Digest>(
-      (digest, scene) => worksceneImportSetDigestNext(digest, scene),
-      protocolDigest("WorksceneLegacyImportSet", 2, { count: 0 }),
-    );
-}
-
-export function worksceneImportSetDigestNext(
-  previous: Digest,
-  scene: WorksceneDto,
-): Digest {
-  requireDigest(previous, "Legacy import accumulator");
-  return protocolDigest("WorksceneLegacyImportSet", 2, {
-    previous,
-    scene: cloneScene(scene),
-  });
-}
-
-export function canonicalLegacyWorksceneImport(input: {
-  readonly id: string;
-  readonly name: string;
-  readonly createdAt: string;
-  readonly workspace?: { readonly deviceId: string; readonly bindingRef: string };
-}): WorksceneDto {
-  const name = input.name.trim().normalize("NFKC");
-  if (!name) {
-    throw new TypeError("Legacy workscene name is empty after normalization");
-  }
-  const imported: WorksceneDto = {
-    id: input.id,
-    revision: 1,
-    name,
-    createdAt: input.createdAt,
-    lastActiveAt: input.createdAt,
-  };
-  if (input.workspace) imported.workspace = { ...input.workspace };
-  return imported;
-}
-
-function importSetDigest(imports: Map<string, WorksceneDto>): Digest {
-  return worksceneImportSetDigest([...imports.values()]);
 }
 
 function requireScene(
@@ -1866,12 +1294,6 @@ function requireRevision(value: number): void {
   }
 }
 
-function requireDigest(value: unknown, label: string): asserts value is Digest {
-  if (typeof value !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(value)) {
-    throw new TypeError(`${label} is invalid`);
-  }
-}
-
 function canonicalTime(value: string, label: string): string {
   const time = Date.parse(value);
   if (!Number.isFinite(time) || new Date(time).toISOString() !== value) {
@@ -1899,7 +1321,6 @@ function emptyProjection(): WorksceneRegistryProjection {
     tombstones: new Set(),
     pendingDeletions: new Map(),
     requests: new Map(),
-    legacyBatches: new Map(),
   };
 }
 
@@ -1925,21 +1346,6 @@ function cloneProjection(
         {
           mutationDigest: replay.mutationDigest,
           ...(replay.result ? { result: cloneResult(replay.result) } : {}),
-        },
-      ]),
-    ),
-    legacyBatches: new Map(
-      [...source.legacyBatches].map(([migrationId, batch]) => [
-        migrationId,
-        {
-          sourceSnapshotToken: batch.sourceSnapshotToken,
-          imports: new Map(
-            [...batch.imports].map(([id, scene]) => [id, cloneScene(scene)]),
-          ),
-          status: batch.status,
-          ...(batch.importSetDigest
-            ? { importSetDigest: batch.importSetDigest }
-            : {}),
         },
       ]),
     ),

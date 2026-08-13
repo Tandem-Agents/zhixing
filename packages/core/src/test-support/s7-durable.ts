@@ -28,9 +28,6 @@ export function createCoreS7DurableScenarios(): ReadonlyMap<
     defineS7DurableScenarios(WORKSCENE_REGISTRY_DURABLE_CONTRACT, {
       "variant:established": () => executeWorksceneRegistryCase("variant", "established"),
       "variant:control-applied": () => executeWorksceneRegistryCase("variant", "control-applied"),
-      "variant:legacy-import-open": () => executeWorksceneRegistryCase("variant", "legacy-import-open"),
-      "variant:legacy-import-activated": () => executeWorksceneRegistryCase("variant", "legacy-import-activated"),
-      "variant:legacy-import-abandoned": () => executeWorksceneRegistryCase("variant", "legacy-import-abandoned"),
       "variant:deletion-projected": () => executeWorksceneRegistryCase("variant", "deletion-projected"),
       "rejection:principal-method": () => executeWorksceneRegistryCase("rejection", "principal-method"),
       "rejection:request-conflict": () => executeWorksceneRegistryCase("rejection", "request-conflict"),

@@ -305,6 +305,110 @@
     },
     {
       "emptyRequest": {},
+      "method": "device.continue",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "device.list",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "device.remove",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "device.status",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "dutyMigration.cancel",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "dutyMigration.commit",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "dutyMigration.prepare",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "dutyMigration.targets",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
       "method": "health",
       "outcome": {
         "kind": "result",
@@ -502,7 +606,98 @@
       "emptyRequest": {},
       "method": "server.shutdown",
       "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "server.uninstall.begin",
+      "outcome": {
         "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "server.uninstall.cancel",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "server.uninstall.continue",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "server.uninstall.preflight",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "server.uninstall.status",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "server.update.health",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "server.update.prepare",
+      "outcome": {
+        "code": -32602,
         "kind": "error",
         "shape": {
           "code": "number",
@@ -1049,15 +1244,11 @@
     "cancel": {
       "calls": [
         {
-          "action": "abort-conversations",
-          "reason": {
-            "kind": "external",
-            "origin": "server-shutdown"
-          },
+          "action": "prepare-shutdown",
+          "reason": "golden-stop",
+          "requestId": "golden-stop-cancel",
+          "strategy": "cancel",
           "timeoutMs": 1000
-        },
-        {
-          "action": "flush-delivery"
         },
         {
           "action": "shutdown",
@@ -1067,14 +1258,19 @@
       "result": {
         "accepted": true,
         "estimatedCompleteAt": "<estimatedCompleteAt:string>",
-        "phase": "stopping",
+        "phase": "ready-to-stop",
+        "requestId": "golden-stop-cancel",
         "strategy": "cancel"
       }
     },
     "drain": {
       "calls": [
         {
-          "action": "flush-delivery"
+          "action": "prepare-shutdown",
+          "reason": "golden-stop",
+          "requestId": "golden-stop-drain",
+          "strategy": "drain",
+          "timeoutMs": 1000
         },
         {
           "action": "shutdown",
@@ -1084,21 +1280,30 @@
       "result": {
         "accepted": true,
         "estimatedCompleteAt": "<estimatedCompleteAt:string>",
-        "phase": "stopping",
+        "phase": "ready-to-stop",
+        "requestId": "golden-stop-drain",
         "strategy": "drain"
       }
     },
     "immediate": {
       "calls": [
         {
+          "action": "prepare-shutdown",
+          "reason": "golden-stop",
+          "requestId": "golden-stop-immediate",
+          "strategy": "immediate",
+          "timeoutMs": 1000
+        },
+        {
           "action": "shutdown",
-          "reason": "golden-stop"
+          "reason": "golden-stop:immediate"
         }
       ],
       "result": {
         "accepted": true,
         "estimatedCompleteAt": "<estimatedCompleteAt:string>",
-        "phase": "stopping",
+        "phase": "ready-to-stop",
+        "requestId": "golden-stop-immediate",
         "strategy": "immediate"
       }
     }

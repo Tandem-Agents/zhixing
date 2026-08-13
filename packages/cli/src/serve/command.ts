@@ -20,7 +20,6 @@
  */
 
 import {
-  JsonTaskStore,
   computeStatusSummary,
   isInternal,
   createEventBus,
@@ -42,7 +41,11 @@ import {
   type DeliveryLifecycleSourcePermit,
 } from "@zhixing/core";
 import { DeviceLifecycleJournal } from "@zhixing/core/authority";
-import { protocolDigest, type StopHostGeneration } from "@zhixing/core/protocol";
+import {
+  DURABLE_SCHEMA_INVENTORY,
+  protocolDigest,
+  type StopHostGeneration,
+} from "@zhixing/core/protocol";
 import {
   createServerContext,
   bindServer,
@@ -64,6 +67,7 @@ import {
   resolveProcessStartTime,
   type RunningServer,
   type ProcessLockPaths,
+  type ServerContext,
 } from "@zhixing/server";
 import {
   AnchorSchedulerGlobalStateAdapter,
@@ -187,6 +191,11 @@ import {
 } from "./host-stop-lifecycle.js";
 import { deleteDeviceKey, deleteDeviceKeyExact } from "@zhixing/mesh/device-key-store";
 import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
+import { ProgramStore } from "../update/program-store.js";
+import { createReleaseVerifier } from "../update/release-verifier.js";
+import { EMBEDDED_RELEASE_TRUST } from "../update/release-channel.js";
+import { ProgramUpgradeCoordinator } from "../update/upgrade-lifecycle.js";
+import { verifyLocalUpgradeHealth } from "../update/runtime.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
@@ -680,6 +689,8 @@ async function runServerProcess(
   const localLifecycleOperations = (await lifecycleJournal.active()).filter((operation) =>
     (operation.identity.kind === "stop" &&
       operation.identity.localDeviceId === bootstrap.mesh.deviceKey.deviceId) ||
+    (operation.identity.kind === "upgrade" &&
+      operation.identity.localDeviceId === bootstrap.mesh.deviceKey.deviceId) ||
     (operation.identity.kind === "executor-removal" &&
       operation.identity.targetDeviceId === bootstrap.mesh.deviceKey.deviceId) ||
     (operation.identity.kind === "anchor-uninstall" &&
@@ -719,6 +730,8 @@ async function runServerProcess(
     const phase = startupLifecycleOperation.phase;
     const sealed = startupLifecycleOperation.identity.kind === "stop"
       ? ["work-settled", "flushed", "ready-to-stop"].includes(phase)
+      : startupLifecycleOperation.identity.kind === "upgrade"
+      ? ["work-settled", "flushed", "old-host-stopped", "pointer-switched", "health-verified"].includes(phase)
       : startupLifecycleOperation.identity.kind === "executor-removal"
         ? ["authority-settled", "revocation-ready", "revoked", "cleanup-complete"].includes(phase)
         : startupLifecycleOperation.identity.path.kind === "migration"
@@ -728,10 +741,12 @@ async function runServerProcess(
       kind: startupLifecycleOperation.identity.kind,
       artifactReady,
       // A successor must prove the old host stopped before replaying any frozen owner effect.
-      recoverAcceptedWork: startupLifecycleOperation.identity.kind === "stop"
+      recoverAcceptedWork: startupLifecycleOperation.identity.kind === "stop" ||
+        startupLifecycleOperation.identity.kind === "upgrade"
         ? false
         : artifactReady,
-      alreadySettled: startupLifecycleOperation.identity.kind === "stop"
+      alreadySettled: startupLifecycleOperation.identity.kind === "stop" ||
+        startupLifecycleOperation.identity.kind === "upgrade"
         ? hostStopAlreadySettled(phase)
         : false,
       delivery: {
@@ -1031,7 +1046,6 @@ async function runServerProcess(
       authority: ctx.authorityRuntime!,
       protocol: ctx.conversationProtocol!,
       eventBus: schedulerEventBus,
-      compatibilityStore: new JsonTaskStore(),
       jobStatus: ctx.jobStatus!,
       jobRelays: ctx.jobRelayObligations!,
       openManualJobSurface: async (input) => {
@@ -1099,34 +1113,6 @@ async function runServerProcess(
           },
         ],
       ]),
-      migrateLegacyDelivery: async (delivery, taskId) => {
-        if (!delivery) return undefined;
-        if (delivery.kind === "none") return { kind: "none" };
-        if (delivery.kind === "channel") {
-          return {
-            kind: "channel",
-            channel: delivery.channel,
-            to: delivery.to,
-            ...(delivery.threadId ? { threadId: delivery.threadId } : {}),
-          };
-        }
-        if ("endpoint" in delivery) {
-          return { kind: "webhook", endpoint: delivery.endpoint };
-        }
-        const legacy = delivery as unknown as {
-          readonly url: string;
-          readonly headers?: Readonly<Record<string, string>>;
-        };
-        const endpoint = {
-          kind: "webhook" as const,
-          bindingId: `scheduler/${taskId}/webhook`,
-        };
-        await startupResult.secretStore.put(
-          endpoint,
-          JSON.stringify({ url: legacy.url, headers: legacy.headers ?? {} }),
-        );
-        return { kind: "webhook", endpoint };
-      },
       onError: (error) =>
         console.error(chalk.red(`[scheduler] ${error.message}`)),
     });
@@ -1568,6 +1554,43 @@ async function runServerProcess(
       await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
     }),
   };
+  const isLifecycleHostStopped = async (candidateHost: StopHostGeneration): Promise<boolean> => {
+    const endpoint = candidateHost.endpointLock;
+    if (!endpoint) return false;
+    const currentReplacesEndpoint = ownsCurrentSuccessorEndpoint(
+      serverBinding,
+      endpoint,
+      stopEndpointLock,
+    );
+    if (
+      endpoint.pid === stopEndpointLock.pid &&
+      endpoint.port === stopEndpointLock.port &&
+      endpoint.startTime === stopEndpointLock.startTime &&
+      endpoint.startedAt === stopEndpointLock.startedAt
+    ) return false;
+    if (isProcessAlive(endpoint.pid) && !currentReplacesEndpoint) return false;
+    if (candidateHost.kind === "foreground") return candidateHost.processId === endpoint.pid;
+    try {
+      const state = await loadCurrentManagedServiceState("inspect", zhixingHome);
+      if (
+        !state.spec ||
+        state.spec.serviceId !== candidateHost.serviceId ||
+        managedServiceDefinitionDigest(state.spec) !== candidateHost.definitionDigest
+      ) return false;
+      const inspection = await createManagedServiceAdapter({
+        storageGovernor: deviceCapacity.storage,
+      }).inspect(state.spec, new AbortController().signal);
+      const currentSuccessor = stopHost.kind === "managed" &&
+        stopHost.serviceId === candidateHost.serviceId &&
+        stopHost.definitionDigest === candidateHost.definitionDigest &&
+        stopHost.endpointLock?.pid === process.pid &&
+        currentReplacesEndpoint &&
+        isProcessAlive(process.pid);
+      return inspection.matches && (!inspection.running || currentSuccessor);
+    } catch {
+      return false;
+    }
+  };
   const stopCoordinator = new HostStopCoordinator({
     journal: new DeviceLifecycleJournal(lifecycleAuthorityLog),
     homeId: lifecycleHomeId,
@@ -1635,47 +1658,60 @@ async function runServerProcess(
         await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
       },
     },
-    isHostStopped: async (host) => {
-      const endpoint = host.endpointLock;
-      if (!endpoint) return false;
-      const currentReplacesEndpoint = ownsCurrentSuccessorEndpoint(
-        serverBinding,
-        endpoint,
-        stopEndpointLock,
-      );
-      if (
-        endpoint.pid === stopEndpointLock.pid &&
-        endpoint.port === stopEndpointLock.port &&
-        endpoint.startTime === stopEndpointLock.startTime &&
-        endpoint.startedAt === stopEndpointLock.startedAt
-      ) return false;
-      if (
-        isProcessAlive(endpoint.pid) &&
-        !currentReplacesEndpoint
-      ) return false;
-      if (host.kind === "foreground") return host.processId === endpoint.pid;
-      try {
-        const state = await loadCurrentManagedServiceState("inspect", zhixingHome);
-        if (
-          !state.spec ||
-          state.spec.serviceId !== host.serviceId ||
-          managedServiceDefinitionDigest(state.spec) !== host.definitionDigest
-        ) return false;
-        const inspection = await createManagedServiceAdapter({
-          storageGovernor: deviceCapacity.storage,
-        }).inspect(state.spec, new AbortController().signal);
-        const currentSuccessor = stopHost.kind === "managed" &&
-          stopHost.serviceId === host.serviceId &&
-          stopHost.definitionDigest === host.definitionDigest &&
-          stopHost.endpointLock?.pid === process.pid &&
-          currentReplacesEndpoint &&
-          isProcessAlive(process.pid);
-        return inspection.matches && (!inspection.running || currentSuccessor);
-      } catch {
-        return false;
-      }
-    },
+    isHostStopped: isLifecycleHostStopped,
   });
+  const releaseVerifier = EMBEDDED_RELEASE_TRUST
+    ? createReleaseVerifier(EMBEDDED_RELEASE_TRUST)
+    : undefined;
+  const programStore = releaseVerifier ? new ProgramStore() : undefined;
+  const programUpgrade = releaseVerifier && programStore
+    ? new ProgramUpgradeCoordinator({
+        journal: new DeviceLifecycleJournal(lifecycleAuthorityLog),
+        store: programStore,
+        verifier: releaseVerifier,
+        artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
+        acceptedWork,
+        homeId: lifecycleHomeId,
+        localDeviceId: bootstrap.mesh.deviceKey.deviceId,
+        host: stopHost,
+        isHostStopped: isLifecycleHostStopped,
+        runtime: {
+          closeAdmission: async (operationId) => {
+            managedHostStopping = true;
+            ctx.inboundRouter?.refuseNewMessages();
+            ctx.executorJobOwner?.pauseAccepting();
+            schedulerRuntime?.scheduler.closeAdmissionForLifecycle();
+            ctx.deliveryStack?.closeAdmissionForLifecycle();
+            await Promise.all([
+              ctx.localConversationOwner?.closeHostStopAdmission(operationId),
+              ctx.channelConnections?.suspendConfigured(),
+            ]);
+          },
+          flushDurableState: async () => {
+            const [checkpoint, localOwnerDigest] = await Promise.all([
+              lifecycleAuthorityLog.checkpoint(),
+              ctx.localConversationOwner?.checkpointAcceptedWork(),
+            ]);
+            return [{
+              kind: "accepted-work",
+              digest: protocolDigest("ProgramUpgradeDurableFlush", 1, {
+                lifecycle: checkpoint.prefixDigest,
+                localOwner: localOwnerDigest ?? null,
+              }),
+            }];
+          },
+          settlePhysicalSteps: async () => {
+            await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
+          },
+        },
+      })
+    : undefined;
+  const programUpgradeResume = await programUpgrade?.resumeBeforeStartup();
+  if (programUpgradeResume?.kind === "stop-current" || programUpgradeResume?.kind === "restart-target") {
+    await serverBinding.close();
+    await startupRollback.rollback();
+    return;
+  }
   const stopResume = await stopCoordinator.resumeActive();
   if (startupLifecycleOperation?.identity.kind === "stop") {
     const operationId = startupLifecycleOperation.identity.operationId;
@@ -1958,7 +1994,8 @@ async function runServerProcess(
   if (localRetirementCompletedBeforeServerStart) {
     throw new Error("This device has completed local retirement and cannot start normally");
   }
-  const serverCtx = createServerContext({
+  let serverCtx: ServerContext;
+  serverCtx = createServerContext({
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
     version: SERVER_VERSION,
     token: tokenInfo.token,
@@ -2216,6 +2253,26 @@ async function runServerProcess(
       },
     },
     lifecycleShutdown: stopCoordinator,
+    ...(programUpgrade ? { lifecycleUpgrade: programUpgrade } : {}),
+    ...(programUpgrade && programStore && releaseVerifier
+      ? {
+          programUpdateHealth: async () => {
+            const installed = await programStore.loadCurrentManifest(releaseVerifier);
+            const endpoint = serverCtx.listenAddr;
+            if (!installed || !endpoint) {
+              throw new Error("Current program health identity is unavailable");
+            }
+            return {
+              releaseManifestDigest: installed.digest,
+              protocolRange: { ...installed.manifest.protocolRange },
+              durableSchemas: DURABLE_SCHEMA_INVENTORY.map((row) => ({ ...row })),
+              homeId: lifecycleHomeId,
+              endpoint: { ...endpoint },
+              rolePlan: { host: plan.host, loadExecutor: plan.loadExecutor },
+            };
+          },
+        }
+      : {}),
   });
   managedShutdown.current = () => {
     managedHostStopping = true;
@@ -2289,6 +2346,56 @@ async function runServerProcess(
       error: (msg) => console.error(chalk.red(`[server] ${msg}`)),
     },
   });
+
+  if (programUpgradeResume?.kind === "verify-target") {
+    const current = await programStore!.loadPointer();
+    if (!current || current.current.manifestDigest !== programUpgradeResume.targetManifestDigest) {
+      await programUpgrade!.restoreCompatiblePrevious(programUpgradeResume.operationId);
+      throw new Error("Updated program identity did not match the durable upgrade target");
+    }
+    const installed = await programStore!.loadCurrentManifest(releaseVerifier!);
+    const endpoint = serverCtx.listenAddr;
+    if (!installed || !endpoint) {
+      await programUpgrade!.restoreCompatiblePrevious(programUpgradeResume.operationId);
+      throw new Error("Updated program health identity is unavailable");
+    }
+    const healthDigest = await verifyLocalUpgradeHealth({
+      endpoint,
+      token: tokenInfo.token,
+      expected: {
+        releaseManifestDigest: installed.digest,
+        protocolRange: { ...installed.manifest.protocolRange },
+        durableSchemas: DURABLE_SCHEMA_INVENTORY.map((row) => ({ ...row })),
+        homeId: lifecycleHomeId,
+        endpoint: { ...endpoint },
+        rolePlan: { host: plan.host, loadExecutor: plan.loadExecutor },
+      },
+    }).catch(async (error: unknown) => {
+      await programUpgrade!.restoreCompatiblePrevious(programUpgradeResume.operationId);
+      throw error;
+    });
+    await programUpgrade!.completeHealthy(
+      programUpgradeResume.operationId,
+      programUpgradeResume.targetManifestDigest,
+      healthDigest,
+    );
+    await ctx.localConversationOwner?.releaseHostStopAdmission(programUpgradeResume.operationId);
+    await ctx.deliveryStack?.releaseLifecycleAdmission(programUpgradeResume.operationId);
+    await ctx.deliveryStack?.resumeAfterAuthorityTransfer();
+    if (!startupLifecycleFrozenRecoveryStarted) {
+      await recoverStartupLifecycleAcceptedWork(startupLifecycle?.delivery.sources ?? []);
+    }
+    await recoverAdvancementAcceptedWork();
+    schedulerRuntime?.scheduler.resumeAfterAuthorityTransfer();
+    ctx.executorJobOwner?.resumeAccepting();
+    ctx.meshRuntime?.resumeAcceptingAfterLifecycle();
+    ctx.inboundRouter?.resumeNewMessages();
+    await ctx.channelConnections?.resumeConfigured();
+    ctx.localConversationOwner?.resumeRecoveryAfterLifecycle();
+    managedHostStopping = false;
+    startupLifecycle = undefined;
+    delete ctx.startupLifecycle;
+  }
 
   // 组播设施已由 startServer 回填到 serverCtx —— 接通带外事件转发的 lazy ref。
   sessionBroadcastRef.current = serverCtx.sessionBroadcast ?? null;

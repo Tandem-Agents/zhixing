@@ -12,7 +12,7 @@
  *
  * 设计要点：
  * - 所有写操作对用户透明（工具调用在 CLI 中可见）
- * - Markdown 文件只是 anchor 派生兼容视图，不是生产写入入口
+ * - authority log 是唯一生产事实源，不存在并行文件写入入口
  * - memory 工具的 description 指导 AI 何时主动保存记忆
  */
 
@@ -23,22 +23,22 @@ import {
 } from "@zhixing/core";
 import type {
   MemoryLogicalEntry,
-  MemoryCategory,
+  MemoryCategoryDto,
 } from "@zhixing/core";
 
 export interface MemoryToolPort {
   save(input: {
     action: "save" | "update";
-    category: MemoryCategory;
+    category: MemoryCategoryDto;
     id: string;
     meta: Record<string, unknown>;
     content: string;
     operationId: string;
   }): Promise<void>;
   search(query: string): Promise<readonly MemoryLogicalEntry[]>;
-  list(category: MemoryCategory): Promise<readonly MemoryLogicalEntry[]>;
+  list(category: MemoryCategoryDto): Promise<readonly MemoryLogicalEntry[]>;
   delete(input: {
-    category: MemoryCategory;
+    category: MemoryCategoryDto;
     id: string;
     operationId: string;
   }): Promise<boolean>;
@@ -50,8 +50,7 @@ const MEMORY_SYSTEM_PROMPT_HINTS: readonly string[] = [
 ];
 
 /**
- * store 由装配期注入（单一 scoped 实例，与 flush strategy 共用）—— 工具不再
- * 自建 `new MemoryStore()`，杜绝双实例与工作场景下写穿个人记忆域。
+ * authority port 由装配期注入；工具不持有第二存储事实源。
  */
 export function createMemoryTool(store: MemoryToolPort): ToolDefinition {
 
@@ -261,7 +260,7 @@ async function handleDelete(
   return { content: `Memory not found: ${canonical.category}/${canonical.id}`, isError: true };
 }
 
-function canonicalToolCategory(value: unknown): Extract<MemoryCategory, "profile" | "person"> {
+function canonicalToolCategory(value: unknown): Extract<MemoryCategoryDto, "profile" | "person"> {
   if (value !== "profile" && value !== "person") {
     throw new TypeError("Memory category must be profile or person");
   }
@@ -271,7 +270,7 @@ function canonicalToolCategory(value: unknown): Extract<MemoryCategory, "profile
 function canonicalToolIdentity(
   category: unknown,
   id: string,
-): { category: Extract<MemoryCategory, "profile" | "person">; id: string } {
+): { category: Extract<MemoryCategoryDto, "profile" | "person">; id: string } {
   const canonicalCategory = canonicalToolCategory(category);
   const identity = canonicalMemoryIdentity(
     canonicalCategory === "profile"

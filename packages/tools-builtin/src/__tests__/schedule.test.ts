@@ -12,10 +12,9 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { join } from "node:path";
 import {
   createEventBus,
-  JsonTaskStore,
+  InMemoryTaskStore,
   Scheduler,
   LocalSchedulerFacade,
   type SchedulerEventMap,
@@ -33,7 +32,7 @@ async function withScheduler<T>(
   const dir = await createTempDir("sched");
   const eventBus = createEventBus<SchedulerEventMap>();
   const scheduler = new Scheduler({
-    store: new JsonTaskStore(join(dir, "tasks.json")),
+    store: new InMemoryTaskStore(),
     eventBus,
     runAgentTurn: async () => ({ status: "ok", durationMs: 0 }),
     systemHandlers: new Map(),

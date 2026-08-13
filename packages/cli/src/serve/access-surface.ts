@@ -138,7 +138,7 @@ export interface AssemblyContext {
   readonly onTrustApplied?: (record: import("@zhixing/core/contracts").HomeTrustRecord) => void | Promise<void>;
   /** Durable lifecycle projection loaded before any producer recovery or ingress. */
   startupLifecycle?: {
-    readonly kind: "stop" | "executor-removal" | "anchor-uninstall";
+    readonly kind: "stop" | "executor-removal" | "anchor-uninstall" | "upgrade";
     readonly artifactReady: boolean;
     readonly recoverAcceptedWork: boolean;
     readonly alreadySettled: boolean;

@@ -43,8 +43,6 @@ export type {
   MemoryCategoryDto,
   PersonMetaDto,
 } from "../memory/contracts.js";
-export type { MemoryEntry } from "../memory/memory-store.js";
-export type { JournalEntry } from "../memory/journal-store.js";
 export type { PersonEntry } from "../memory/people-store.js";
 export type { SkillModeDto, SkillUsageRecord } from "../skills/types.js";
 export type {

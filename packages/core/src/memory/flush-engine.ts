@@ -21,7 +21,6 @@ import {
   calculateMessageTurns,
   splitMessagesPairAware,
 } from "../context/message-turns.js";
-import { MemoryStore, type MemoryCategory } from "./memory-store.js";
 import {
   assertSubstantiveJournalContent,
   canonicalMemoryIdentity,
@@ -65,8 +64,7 @@ export interface FlushResult {
 
 export interface MemoryFlusherConfig {
   readonly callLLM: TextCallLLMFn;
-  readonly store?: MemoryStore;
-  readonly write?: (extraction: FlushExtraction, operationId: string) => Promise<void>;
+  readonly write: (extraction: FlushExtraction, operationId: string) => Promise<void>;
 }
 
 /**
@@ -78,16 +76,11 @@ export interface MemoryFlusherConfig {
  */
 export class MemoryFlusher {
   private readonly callLLM: TextCallLLMFn;
-  private readonly store: MemoryStore | undefined;
   private readonly write: MemoryFlusherConfig["write"];
 
   constructor(config: MemoryFlusherConfig) {
     this.callLLM = config.callLLM;
-    this.store = config.store;
     this.write = config.write;
-    if (!this.store && !this.write) {
-      throw new TypeError("MemoryFlusher requires a store or staged write port");
-    }
   }
 
   /** 从消息中提取记忆并保存。 */
@@ -104,18 +97,7 @@ export class MemoryFlusher {
 
     for (const [index, ext] of extractions.entries()) {
       try {
-        if (this.write) {
-          await this.write(ext, `${opts?.operationId ?? "memory-flush"}:${index}`);
-        } else if (ext.category === "journal") {
-          await this.appendJournal(ext);
-        } else {
-          await this.store!.save({
-            category: ext.category as MemoryCategory,
-            id: ext.id,
-            meta: ext.meta,
-            content: ext.content,
-          });
-        }
+        await this.write(ext, `${opts?.operationId ?? "memory-flush"}:${index}`);
         saved++;
       } catch (err) {
         errors.push(
@@ -127,27 +109,6 @@ export class MemoryFlusher {
     return { extracted: extractions.length, saved, errors };
   }
 
-  /** Journal 是追加模式：读取已有内容，在末尾追加新条目。 */
-  private async appendJournal(ext: FlushExtraction): Promise<void> {
-    const existing = await this.store!.load("journal", ext.id);
-
-    if (existing) {
-      const newContent = `${existing.content}\n\n---\n\n${ext.content}`;
-      await this.store!.save({
-        category: "journal",
-        id: ext.id,
-        meta: { ...existing.meta, ...ext.meta },
-        content: newContent,
-      });
-    } else {
-      await this.store!.save({
-        category: "journal",
-        id: ext.id,
-        meta: ext.meta,
-        content: ext.content,
-      });
-    }
-  }
 }
 
 // ─── 提取 Prompt ───

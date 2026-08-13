@@ -58,6 +58,35 @@ export interface LifecycleShutdownAdapter {
   }>;
 }
 
+export interface LifecycleUpgradeAdapter {
+  prepare(input: {
+    readonly requestId: string;
+    readonly candidateManifestDigest: string;
+    readonly timeoutMs: number;
+  }): Promise<{
+    readonly operationId: string;
+    readonly phase: "flushed";
+  }>;
+}
+
+export interface ProgramUpdateHealthSnapshot {
+  readonly releaseManifestDigest: string;
+  readonly protocolRange: {
+    readonly readMin: string;
+    readonly readMax: string;
+    readonly writeVersion: string;
+  };
+  readonly durableSchemas: readonly {
+    readonly schemaId: string;
+    readonly readMin: string;
+    readonly readMax: string;
+    readonly writeVersion: string;
+  }[];
+  readonly homeId: string;
+  readonly endpoint: { readonly host: string; readonly port: number };
+  readonly rolePlan: { readonly host: string; readonly loadExecutor: boolean };
+}
+
 /**
  * 第一方权威 RPC 的窄覆盖点。非当前锚点宿主只转发冻结的有限方法集；
  * 方法仍须存在于 canonical RPC registry，认证与 wire 分发仍由 server 拥有。
@@ -273,6 +302,7 @@ export interface ServerContext {
   /** Loopback-only permanent removal of the current duty device. */
   anchorUninstall?: {
     preflight(): Promise<{
+      readonly currentDeviceName: string;
       readonly migrationTargets: readonly { readonly displayName: string; readonly ready: boolean }[];
       readonly recoveryBackupReady: boolean;
     }>;
@@ -347,6 +377,10 @@ export interface ServerContext {
   runtimeControl?: RuntimeControlAdapter;
   /** 耐久停机收束点。所有外部停机入口必须先取得 ready-to-stop。 */
   lifecycleShutdown?: LifecycleShutdownAdapter;
+  /** 已验证程序 stage 的本机升级收束点。 */
+  lifecycleUpgrade?: LifecycleUpgradeAdapter;
+  /** 本机升级成功门消费的当前运行代精确投影。 */
+  programUpdateHealth?: () => Promise<ProgramUpdateHealthSnapshot>;
   /** executor-only 宿主的有限第一方会话路由；锚点宿主不注入。 */
   conversationRpc?: FirstPartyConversationRpcRouter;
   /**
@@ -405,6 +439,8 @@ export interface CreateContextOptions {
   confirmationHub?: ConfirmationHub;
   runtimeControl?: RuntimeControlAdapter;
   lifecycleShutdown?: LifecycleShutdownAdapter;
+  lifecycleUpgrade?: LifecycleUpgradeAdapter;
+  programUpdateHealth?: ServerContext["programUpdateHealth"];
   conversationRpc?: FirstPartyConversationRpcRouter;
 }
 
@@ -438,6 +474,8 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     confirmationHub: opts.confirmationHub,
     runtimeControl: opts.runtimeControl,
     lifecycleShutdown: opts.lifecycleShutdown,
+    lifecycleUpgrade: opts.lifecycleUpgrade,
+    programUpdateHealth: opts.programUpdateHealth,
     conversationRpc: opts.conversationRpc,
   };
 }

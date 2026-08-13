@@ -17,7 +17,6 @@ import {
   AnchorWorksceneGlobalStateAdapter,
   WorksceneConflictError,
   WorksceneRevisionError,
-  worksceneImportSetDigest,
 } from "../workscene/index.js";
 import { AnchorWorksceneRegistry } from "../workscene/authority-registry.js";
 import { IncrementalWorksceneActivityProjection } from "../workscene/activity-projection.js";
@@ -107,75 +106,6 @@ export async function executeWorksceneRegistryCase(
         recovered.kind === "workscene-get" && recovered.scene?.name === "Project",
         "production recovery owner did not replay the control record",
         { kind: "variant", caseKey: "control-applied" },
-      );
-    } else if (caseKey === "legacy-import-open") {
-      await fixture.adapter.mutate(
-        worksceneLegacyImport(),
-        globalControlContext("legacy-open"),
-      );
-      const open = await fixture.adapter.read(
-        { kind: "workscene-get", sceneId: "legacy-a" },
-        globalReadContext("legacy-open-read"),
-      );
-      assert(
-        open.kind === "workscene-get" && open.scene === null,
-        "open import became visible before activation",
-        {
-        kind: "variant",
-        caseKey: "legacy-import-open",
-        },
-      );
-    } else if (caseKey === "legacy-import-activated") {
-      const imported = worksceneLegacyImport();
-      await fixture.adapter.mutate(
-        imported,
-        globalControlContext("legacy-open"),
-      );
-      await fixture.adapter.mutate(
-        {
-          kind: "workscene-activate-device-registry",
-          migrationId: imported.migrationId,
-          sourceSnapshotToken: imported.sourceSnapshotToken,
-          importSetDigest: worksceneImportSetDigest([{
-            ...imported.scene,
-            revision: 1,
-            lastActiveAt: imported.scene.createdAt,
-          }]),
-        },
-        globalControlContext("legacy-activate"),
-      );
-      const recovered = await createRecoveredWorksceneAdapter(fixture.log).read(
-        { kind: "workscene-get", sceneId: "legacy-a" },
-        globalReadContext("legacy-activate-replay"),
-      );
-      assert(
-        recovered.kind === "workscene-get" && recovered.scene?.name === "Legacy",
-        "production recovery owner did not replay legacy activation",
-        { kind: "variant", caseKey: "legacy-import-activated" },
-      );
-    } else if (caseKey === "legacy-import-abandoned") {
-      const imported = worksceneLegacyImport();
-      await fixture.adapter.mutate(
-        imported,
-        globalControlContext("legacy-open"),
-      );
-      await fixture.adapter.mutate(
-        {
-          kind: "workscene-abandon-legacy-import",
-          migrationId: imported.migrationId,
-          sourceSnapshotToken: imported.sourceSnapshotToken,
-          reason: "operator-abandoned",
-        },
-        globalControlContext("legacy-abandon"),
-      );
-      const recovered = await createRecoveredWorksceneAdapter(fixture.log).read(
-        { kind: "workscene-get", sceneId: "legacy-a" },
-        globalReadContext("legacy-abandon-replay"),
-      );
-      assert(
-        recovered.kind === "workscene-get" && recovered.scene === null,
-        "abandoned import became visible after recovery",
-        { kind: "variant", caseKey: "legacy-import-abandoned" },
       );
     } else if (caseKey === "deletion-projected") {
       await fixture.adapter.mutate(
@@ -378,15 +308,6 @@ function createRecoveredWorksceneAdapter(log: AuthorityCommitLog) {
 
 function worksceneCreateMutation() {
   return { kind: "workscene-create" as const, name: "Project" };
-}
-
-function worksceneLegacyImport() {
-  return {
-    kind: "workscene-import-legacy" as const,
-    migrationId: "migration-a",
-    sourceSnapshotToken: "snapshot-a",
-    scene: { id: "legacy-a", name: "Legacy", createdAt: NOW },
-  };
 }
 
 export async function executeWorkspaceBindingRootCase(

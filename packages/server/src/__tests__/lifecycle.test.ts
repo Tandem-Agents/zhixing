@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { writeFile } from "node:fs/promises";
 import {
   Scheduler,
-  JsonTaskStore,
+  InMemoryTaskStore,
   createEventBus,
   type SchedulerEventMap,
   type AgentTurnResult,
@@ -38,7 +38,7 @@ describe("runServer lifecycle (S2.F)", () => {
 
     const eventBus = createEventBus<SchedulerEventMap>();
     scheduler = new Scheduler({
-      store: new JsonTaskStore(join(tempDir, "tasks.json")),
+      store: new InMemoryTaskStore(),
       eventBus,
       runAgentTurn: async (): Promise<AgentTurnResult> => ({
         status: "ok",

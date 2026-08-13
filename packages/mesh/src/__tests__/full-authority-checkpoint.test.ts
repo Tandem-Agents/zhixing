@@ -962,7 +962,7 @@ describe("full authority recovery checkpoints", () => {
     await busyOwner.stop();
   });
 
-  it("emits only the secret-only package while still accepting a legacy package", async () => {
+  it("emits only the secret-only package and rejects the retired checkpoint-bearing format", async () => {
     const fixture = await authorityFixture();
     const current = encodeRecoveryPackage(fixture.root);
     expect(current.startsWith("zxrp2:")).toBe(true);
@@ -977,19 +977,8 @@ describe("full authority recovery checkpoints", () => {
       rootIdentity: { ...(currentPayload.rootIdentity as Record<string, unknown>), rootKeyId: "wrong" },
     }), "utf8").toString("base64url")}`)).toThrow(/does not match/);
 
-    const legacyCheckpoint: CheckpointPackage = {
-      envelope: { checkpointId: "legacy" } as CheckpointPackage["envelope"],
-      chunks: [{ seq: 0, bytes: Buffer.from("legacy") }],
-    };
-    const legacy = `zxrp1:${Buffer.from(JSON.stringify({
-      checkpoint: {
-        chunks: [{ bytes: Buffer.from("legacy").toString("base64url"), seq: 0 }],
-        envelope: legacyCheckpoint.envelope,
-      },
-      recoverySecret: fixture.root.exportSecret(),
-      v: 1,
-    }), "utf8").toString("base64url")}`;
-    expect(decodeRecoveryPackage(legacy).legacyCheckpoint?.chunks[0]?.bytes.toString()).toBe("legacy");
+    expect(() => decodeRecoveryPackage(`zxrp1:${Buffer.from("{}", "utf8").toString("base64url")}`))
+      .toThrow("unsupported format");
   });
 
   it("persists only a finite verification failure code", async () => {

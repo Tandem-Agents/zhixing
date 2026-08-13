@@ -290,31 +290,6 @@ export type WorksceneWriteMutation =
     }
   | { kind: "workscene-delete"; sceneId: string; expectedRevision: number };
 
-export type WorksceneMigrationMutation =
-  | {
-      kind: "workscene-import-legacy";
-      migrationId: string;
-      sourceSnapshotToken: string;
-      scene: {
-        id: string;
-        name: string;
-        createdAt: IsoTime;
-        workspace?: { deviceId: string; bindingRef: string };
-      };
-    }
-  | {
-      kind: "workscene-activate-device-registry";
-      migrationId: string;
-      sourceSnapshotToken: string;
-      importSetDigest: Digest;
-    }
-  | {
-      kind: "workscene-abandon-legacy-import";
-      migrationId: string;
-      sourceSnapshotToken: string;
-      reason: string;
-    };
-
 export type TrustWriteMutation =
   | { kind: "trust-persist"; rule: TrustRule }
   | { kind: "trust-revoke"; ruleId: string };
@@ -351,7 +326,6 @@ export type GlobalControlMutation =
   | SkillWriteMutation
   | RubricWriteMutation
   | WorksceneWriteMutation
-  | WorksceneMigrationMutation
   | TrustWriteMutation
   | { kind: "config-asset-write"; record: ConfigAssetRecord };
 

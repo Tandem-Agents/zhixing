@@ -1,20 +1,19 @@
 /**
  * Providers 包路径解析中心。
  *
- * 全 providers 包消费的用户级配置路径与旧版明文迁移源路径的唯一
- * 拼接点。其他模块通过本文件取路径，不自拼。
+ * 全 providers 包消费的用户级配置路径唯一拼接点。
  *
  * 4 级优先级层叠（从高到低）：
  *
  *   1. caller 显式 homeDir 参数
  *   2. ZHIXING_CONFIG_PATH 环境变量（精确文件路径覆盖；其 dirname 同时充当
- *      凭证目录——保证 config 与 credentials 物理同目录，不分裂）
+ *      配置目录）
  *   3. ZHIXING_HOME 环境变量（来自 @zhixing/core 的 getZhixingHome）
  *   4. 默认 ~/.zhixing
  *
  * 让 ZHIXING_HOME 与 ZHIXING_CONFIG_PATH 在本层互通——以前两 env var 各被
  * core 与 providers 独立消费、互不知情，导致 ZHIXING_HOME=/foo 时 conversations
- * 走 /foo 但 credentials/config 仍打 ~/.zhixing。
+ * 走 /foo 但 config 仍打 ~/.zhixing。
  */
 
 import path from "node:path";
@@ -27,7 +26,6 @@ import { expandUserHome, getZhixingHome } from "@zhixing/core";
  * 各自重复定义。
  */
 export const GLOBAL_CONFIG_FILENAME = "config.jsonc";
-export const CREDENTIALS_FILENAME = "credentials.json";
 
 /**
  * 解析 zhixing 数据目录（不接 caller homeDir 参数；caller 显式覆盖应在上层处理）。
@@ -42,7 +40,7 @@ function resolveDir(env: Record<string, string | undefined>): string {
   return getZhixingHome();
 }
 
-/** 全局配置目录——zhixing 数据根（含公开配置与旧版凭据迁移源）。 */
+/** 全局配置目录——zhixing 数据根。 */
 export function getGlobalConfigDir(
   env: Record<string, string | undefined> = process.env,
 ): string {
@@ -66,8 +64,7 @@ export function getGlobalConfigPath(
 }
 
 /**
- * 推断 ~/.zhixing 目录——caller 需要"基于此目录加载多份 zhixing 文件"时用，
- * 保证 config 与 credentials 在同目录、不分裂。
+ * 推断 ~/.zhixing 目录——caller 需要基于同一数据根装配配置与运行状态时用。
  */
 export function resolveHomeDir(
   env: Record<string, string | undefined> = process.env,
@@ -75,7 +72,3 @@ export function resolveHomeDir(
   return resolveDir(env);
 }
 
-/** 旧版明文凭据迁移/显式回滚导出路径。 */
-export function getCredentialsPath(homeDir?: string): string {
-  return path.join(homeDir ?? resolveDir(process.env), CREDENTIALS_FILENAME);
-}

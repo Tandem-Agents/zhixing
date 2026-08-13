@@ -1,22 +1,11 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { join } from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
+import { describe, it, expect } from "vitest";
 import { RpcSchedulerFacade } from "../rpc-scheduler-facade.js";
-import { JsonTaskStore } from "@zhixing/core";
 import type { SchedulerFacadeEvent } from "@zhixing/core";
-import { makeFakeHostLink, makeUnreachableHostLink } from "./fake-host-link.js";
+import { makeFakeHostLink } from "./fake-host-link.js";
 
 describe("RpcSchedulerFacade", () => {
-  let storePath: string;
-
-  beforeEach(async () => {
-    storePath = join(await createTempDir("rpcfacade"), "scheduler.json");
-  });
-
-  it("list 读 scheduler.json 投影、不连宿主", async () => {
-    const store = new JsonTaskStore(storePath);
-    await store.load();
-    await store.addTask({
+  it("list 从当前宿主 authority 读取，不碰本地兼容文件", async () => {
+    const task = {
       id: "t1",
       name: "x",
       enabled: true,
@@ -26,15 +15,14 @@ describe("RpcSchedulerFacade", () => {
       state: { consecutiveErrors: 0, runCount: 0 },
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
-    });
-
-    const facade = new RpcSchedulerFacade({
-      connection: makeUnreachableHostLink(),
-      storePath,
-    });
+    };
+    const fake = makeFakeHostLink();
+    fake.setResponder((method) => method === "schedule.list" ? [task] : undefined);
+    const facade = new RpcSchedulerFacade({ connection: fake.link });
 
     const list = await facade.list();
     expect(list.map((t) => t.id)).toEqual(["t1"]);
+    expect(fake.requests).toContainEqual({ method: "schedule.list", params: undefined });
   });
 
   it("create / run 走 RPC", async () => {
@@ -44,7 +32,7 @@ describe("RpcSchedulerFacade", () => {
         ? { id: "new1" }
         : { status: "ok", durationMs: 3 },
     );
-    const facade = new RpcSchedulerFacade({ connection: fake.link, storePath });
+    const facade = new RpcSchedulerFacade({ connection: fake.link });
 
     const task = await facade.create(
       {
@@ -74,7 +62,6 @@ describe("RpcSchedulerFacade", () => {
   it("拒绝在 facade 内为写操作临时生成 operation id", async () => {
     const facade = new RpcSchedulerFacade({
       connection: makeFakeHostLink().link,
-      storePath,
     });
 
     await expect(facade.run("task-1")).rejects.toThrow(
@@ -84,7 +71,7 @@ describe("RpcSchedulerFacade", () => {
 
   it("onEvent 映射 RPC notification（completed 含 error）", async () => {
     const fake = makeFakeHostLink();
-    const facade = new RpcSchedulerFacade({ connection: fake.link, storePath });
+    const facade = new RpcSchedulerFacade({ connection: fake.link });
 
     const events: SchedulerFacadeEvent[] = [];
     facade.onEvent((e) => events.push(e));
@@ -119,7 +106,7 @@ describe("RpcSchedulerFacade", () => {
 
   it("onEvent 返回的退订函数解除全部订阅", () => {
     const fake = makeFakeHostLink();
-    const facade = new RpcSchedulerFacade({ connection: fake.link, storePath });
+    const facade = new RpcSchedulerFacade({ connection: fake.link });
 
     const events: SchedulerFacadeEvent[] = [];
     const off = facade.onEvent((e) => events.push(e));

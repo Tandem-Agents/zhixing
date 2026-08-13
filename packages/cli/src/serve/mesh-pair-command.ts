@@ -56,12 +56,10 @@ import {
 import {
   assemblePairingFinished,
   assertPairingOfferJoin,
-  CIPHERMAN_PAIRING_PAKE_SUITES,
   createPairingAcceptanceProof,
   createQrPairingJoin,
   InMemoryPairingOfferRepository,
   pairingTranscriptDigest,
-  PakeJoinerSession,
   verifyPairingAcceptance,
   type PairingOfferMaterial,
   type PairingOfferRepository,
@@ -104,8 +102,6 @@ const pairingDeadlines = new WeakMap<Socket, AbortSignal>();
 
 export interface PairCommandOptions {
   readonly invitation?: string;
-  readonly method?: "qr" | "short";
-  readonly shortCode?: string;
   readonly listen?: string;
   readonly advertise?: string;
   readonly relay?: string;
@@ -136,16 +132,6 @@ interface JoinMessage {
   readonly join: PairingJoin;
   readonly rootCertificatePem: string;
   readonly firstRound?: PakeRound;
-}
-
-interface PakeResponseMessage {
-  readonly t: "pake-response";
-  readonly round: PakeRound;
-}
-
-interface PakeFinishMessage {
-  readonly t: "pake-finish";
-  readonly round: PakeRound;
 }
 
 interface PairingChallengeMessage {
@@ -202,6 +188,12 @@ interface RecoveryOnboardingCompleteMessage {
 /** Runs the same executable as pairing issuer or joiner without loading the agent runtime. */
 export async function runPairCommand(options: PairCommandOptions = {}): Promise<void> {
   const zhixingHome = options.zhixingHome ?? getZhixingHome();
+  if (options.invitation) {
+    assertProductionPairingInvitation(decodeInvitation(options.invitation));
+  }
+  const continuations = new FileMeshPairingContinuationStore(zhixingHome);
+  const continuation = await continuations.load();
+  if (continuation) assertProductionPairingOffer(continuation.invitation.offer);
   const secretStore = options.secretStore ?? createPlatformSecretStore({ homeDir: zhixingHome });
   if (await secretStore.unlockState() !== "unlocked") {
     throw new Error("Device SecretStore must be unlocked before pairing");
@@ -221,10 +213,8 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
       secretStore,
     }),
   );
-  const continuations = new FileMeshPairingContinuationStore(zhixingHome);
   const writeLine: (line: string) => void =
     options.writeLine ?? createStdoutWriter().line;
-  const continuation = await continuations.load();
   if (options.invitation || continuation?.side === "joiner") {
     const currentConfig = loadConfig({ homeDir: zhixingHome });
     const executorAutoStart = await resolveExecutorAutoStartSelection({
@@ -319,7 +309,7 @@ export async function activateInitialRecoveryRoot(input: {
     pending.plan.rootEvent.body.backupPublicKey !== candidateRoot.backupPublicKey ||
     pending.plan.rootEvent.body.rootPublicKey !== candidateRoot.rootPublicKey
   )) throw new Error("Recovery package does not match the pending root activation");
-  if (recoveryRoot && !decoded.legacyCheckpoint && (
+  if (recoveryRoot && (
     recoveryRoot.backupPublicKey !== candidateRoot.backupPublicKey ||
     recoveryRoot.rootPublicKey !== candidateRoot.rootPublicKey
   )) throw new Error("Recovery package read-back does not match the generated recovery root");
@@ -335,14 +325,10 @@ export async function activateInitialRecoveryRoot(input: {
       at: createdAt,
     }),
   };
-  const legacyPurpose = decoded.legacyCheckpoint?.envelope.manifest.purpose;
-  if (legacyPurpose && legacyPurpose.kind !== "root-activation") {
-    throw new Error("Legacy recovery package does not contain a root activation plan");
-  }
-  const plan = pending?.plan ?? (legacyPurpose?.kind === "root-activation" ? legacyPurpose.plan : generatedPlan);
+  const plan = pending?.plan ?? generatedPlan;
   const trust = await input.store.loadTrustRecord();
   if (!trust) throw new Error("Recovery activation requires the local home trust record");
-  const checkpoint = pending?.checkpoint ?? decoded.legacyCheckpoint ?? (await captureFullAuthorityCheckpoint({
+  const checkpoint = pending?.checkpoint ?? (await captureFullAuthorityCheckpoint({
     checkpointId: createCheckpointId(),
     createdAt,
     purpose: { kind: "root-activation", plan },
@@ -535,17 +521,11 @@ async function issuePairing(input: PairCommandOptions & {
         ? currentEndpoint
         : await input.store.acceptEndpoint(candidate);
       const issued = new InMemoryPairingOfferRepository();
-      material = input.method === "short"
-        ? issued.issueShortCode({
-            homeId: projection.homeId,
-            issuer: identity,
-            protocolVersion: EXECUTION_PROTOCOL_VERSION,
-          })
-        : issued.issueQr({
-            homeId: projection.homeId,
-            issuer: identity,
-            protocolVersion: EXECUTION_PROTOCOL_VERSION,
-          });
+      material = issued.issueQr({
+        homeId: projection.homeId,
+        issuer: identity,
+        protocolVersion: EXECUTION_PROTOCOL_VERSION,
+      });
       offers = issued;
       const durableInvitation: DurablePairingInvitation = {
         v: 1,
@@ -579,10 +559,8 @@ async function issuePairing(input: PairCommandOptions & {
       await input.continuations.save(continuation);
       invitation = restoreInvitation(durableInvitation, material.secret);
     }
+    assertProductionPairingOffer(material.offer);
     input.writeLine(`Pairing invitation: ${encodeInvitation(invitation)}`);
-    if (material.offer.method.kind === "short-pake") {
-      input.writeLine(`Pairing code: ${material.secret}`);
-    }
 
     const acceptUntil = committedReplay
       ? new Date(Date.now() + PAIRING_TIMEOUT_MS).toISOString()
@@ -596,7 +574,6 @@ async function issuePairing(input: PairCommandOptions & {
     const coordinator = new PairingCommitCoordinator(
       input.store.pairingAuthority(),
       offers,
-      CIPHERMAN_PAIRING_PAKE_SUITES,
     );
     const firstFrame = await receivePairingFrame(transport);
     if (isRecord(firstFrame) && firstFrame.t === "resume") {
@@ -622,33 +599,18 @@ async function issuePairing(input: PairCommandOptions & {
       throw new Error("Committed pairing continuation requires an authenticated resume frame");
     }
     const joinMessage = asJoinMessage(firstFrame);
+    if (joinMessage.firstRound !== undefined) {
+      throw new TypeError("High-entropy pairing does not accept PAKE rounds");
+    }
     peerDeviceId = joinMessage.join.device.deviceId;
     assertPairingOfferJoin(material.offer, joinMessage.join, identity);
-    let attempt;
-    let sessionKey: Buffer | string;
-    let pakeRounds: readonly PakeRound[] = [];
-    if (material.offer.method.kind === "short-pake") {
-      if (!joinMessage.firstRound) throw new TypeError("Short-code pairing requires a joiner PAKE round");
-      const started = await coordinator.beginShortCodeAttempt({
-        current: projection,
-        offer: material.offer,
-        join: joinMessage.join,
-        joinerRound: joinMessage.firstRound,
-        issuerIdentity: identity,
-      });
-      attempt = started.attempt;
-      await sendPairingFrame(transport, { t: "pake-response", round: started.session.responseRound } satisfies PakeResponseMessage);
-      const finish = asPakeFinish(await receivePairingFrame(transport));
-      sessionKey = await started.session.finish(finish.round);
-      pakeRounds = [joinMessage.firstRound, started.session.responseRound, finish.round];
-    } else {
-      attempt = await coordinator.beginQrAttempt({
-        current: projection,
-        offer: material.offer,
-        issuerIdentity: identity,
-      });
-      sessionKey = material.secret;
-    }
+    const attempt = await coordinator.beginQrAttempt({
+      current: projection,
+      offer: material.offer,
+      issuerIdentity: identity,
+    });
+    const sessionKey = material.secret;
+    const pakeRounds: readonly PakeRound[] = [];
 
     if (!projection.recoveryRootPublicKey) {
       const targetDeviceId = joinMessage.join.device.deviceId;
@@ -759,12 +721,6 @@ async function issuePairing(input: PairCommandOptions & {
     const pairwise = derivePairwiseRendezvousSecret(sessionKey);
     await persistPairwiseRendezvousSecret(input.secretStore, peerDeviceId, pairwise);
     pairwisePersisted = true;
-    if (material.offer.method.kind === "short-pake") {
-      await persistPairingSecret(input.secretStore, material.offer.offerId, {
-        offerSecret: material.secret,
-        sessionKey: Buffer.from(sessionKey).toString("base64url"),
-      });
-    }
     continuation = {
       ...secretPending,
       phase: "commit-ready",
@@ -913,6 +869,7 @@ async function joinPairing(input: PairCommandOptions & {
         )
       : undefined;
   if (!invitation) throw new Error("Joining a home requires a pairing invitation");
+  assertProductionPairingInvitation(invitation);
   if (persisted && (
     persisted.invitation.offer.offerId !== invitation.offer.offerId ||
     persisted.invitation.issuer.deviceId !== invitation.issuer.deviceId ||
@@ -950,41 +907,16 @@ async function joinPairing(input: PairCommandOptions & {
   try {
     socket = await connectPairingInvitation(invitation);
     peerDeviceId = invitation.issuer.deviceId;
-    let join: PairingJoin;
-    let sessionKey: Buffer | string;
-    let pakeRounds: readonly PakeRound[] = [];
-    if (invitation.offer.method.kind === "short-pake") {
-      if (!input.shortCode) throw new Error("Short-code pairing requires --code");
-      const started = await PakeJoinerSession.start(
-        invitation.offer,
-        identity,
-        input.shortCode,
-        CIPHERMAN_PAIRING_PAKE_SUITES,
-      );
-      join = started.join;
-      assertPairingOfferJoin(invitation.offer, join, invitation.issuer);
-      await sendPairingFrame(socket, {
-        t: "join",
-        join,
-        rootCertificatePem: input.key.rootCertificatePem,
-        firstRound: started.session.firstRound,
-      } satisfies JoinMessage);
-      const response = asPakeResponse(await receivePairingFrame(socket));
-      const finalRound = started.session.finish(response.round);
-      sessionKey = started.session.sessionKey();
-      pakeRounds = [started.session.firstRound, response.round, finalRound];
-      await sendPairingFrame(socket, { t: "pake-finish", round: finalRound } satisfies PakeFinishMessage);
-    } else {
-      if (!invitation.qrSecret) throw new Error("QR pairing invitation has no secret");
-      join = createQrPairingJoin(invitation.offer, identity, invitation.qrSecret);
-      assertPairingOfferJoin(invitation.offer, join, invitation.issuer);
-      sessionKey = invitation.qrSecret;
-      await sendPairingFrame(socket, {
-        t: "join",
-        join,
-        rootCertificatePem: input.key.rootCertificatePem,
-      } satisfies JoinMessage);
-    }
+    if (!invitation.qrSecret) throw new Error("High-entropy pairing invitation has no secret");
+    const join: PairingJoin = createQrPairingJoin(invitation.offer, identity, invitation.qrSecret);
+    assertPairingOfferJoin(invitation.offer, join, invitation.issuer);
+    const sessionKey = invitation.qrSecret;
+    const pakeRounds: readonly PakeRound[] = [];
+    await sendPairingFrame(socket, {
+      t: "join",
+      join,
+      rootCertificatePem: input.key.rootCertificatePem,
+    } satisfies JoinMessage);
     const challenge = await receiveChallengeAfterRecoveryOnboarding({
       socket,
       first: await receivePairingFrame(socket),
@@ -1015,10 +947,7 @@ async function joinPairing(input: PairCommandOptions & {
     const pairwise = derivePairwiseRendezvousSecret(sessionKey);
     await persistPairwiseRendezvousSecret(input.secretStore, peerDeviceId, pairwise);
     await persistPairingSecret(input.secretStore, invitation.offer.offerId, {
-      offerSecret: typeof sessionKey === "string" ? sessionKey : input.shortCode!,
-      ...(typeof sessionKey === "string"
-        ? {}
-        : { sessionKey: Buffer.from(sessionKey).toString("base64url") }),
+      offerSecret: sessionKey,
     });
     const continuation: PairingJoinerContinuation = {
       ...secretPending,
@@ -1089,7 +1018,6 @@ async function resumeIssuerPairing(input: {
   const coordinator = new PairingCommitCoordinator(
     input.input.store.pairingAuthority(),
     input.offers,
-    CIPHERMAN_PAIRING_PAKE_SUITES,
   );
   await coordinator.commit({
     current: input.projection,
@@ -1790,20 +1718,6 @@ function asJoinMessage(value: unknown): JoinMessage {
   return value as unknown as JoinMessage;
 }
 
-function asPakeResponse(value: unknown): PakeResponseMessage {
-  if (!isRecord(value) || value.t !== "pake-response" || !isRecord(value.round)) {
-    throw new Error("Pairing PAKE response is invalid");
-  }
-  return value as unknown as PakeResponseMessage;
-}
-
-function asPakeFinish(value: unknown): PakeFinishMessage {
-  if (!isRecord(value) || value.t !== "pake-finish" || !isRecord(value.round)) {
-    throw new Error("Pairing PAKE finish is invalid");
-  }
-  return value as unknown as PakeFinishMessage;
-}
-
 function asChallenge(value: unknown): PairingChallengeMessage {
   if (!isRecord(value) || value.t !== "challenge" || !Array.isArray(value.trustEvents)) {
     throw new Error("Pairing challenge is invalid");
@@ -2002,13 +1916,23 @@ function sessionKeyFromSecret(
   offer: PairingOffer,
   secret: PersistedPairingSecret,
 ): Buffer | string {
-  if (offer.method.kind === "qr-secret") return secret.offerSecret;
-  if (!secret.sessionKey) throw new Error("Pairing PAKE session key is unavailable for resume");
-  const decoded = Buffer.from(secret.sessionKey, "base64url");
-  if (decoded.toString("base64url") !== secret.sessionKey || decoded.byteLength === 0) {
-    throw new Error("Pairing PAKE session key is invalid");
+  assertProductionPairingOffer(offer);
+  return secret.offerSecret;
+}
+
+function assertProductionPairingOffer(offer: PairingOffer): asserts offer is PairingOffer & {
+  readonly method: { readonly kind: "qr-secret" };
+} {
+  if (offer.method.kind !== "qr-secret") {
+    throw new Error("This release only accepts audited high-entropy pairing invitations");
   }
-  return decoded;
+}
+
+function assertProductionPairingInvitation(invitation: PairingInvitation): void {
+  assertProductionPairingOffer(invitation.offer);
+  if (!invitation.qrSecret) {
+    throw new Error("High-entropy pairing invitation has no secret");
+  }
 }
 
 function createPairingResumeMessage(

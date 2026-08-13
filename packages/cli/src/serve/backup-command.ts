@@ -471,10 +471,8 @@ async function prepareInitialRoot(
   context.writeLine(`恢复包：${recoveryPackage}`);
   const decoded = await readDecodedRecoveryPackage(readRecoveryPackage);
   if (
-    !decoded.legacyCheckpoint && (
-      decoded.root.rootPublicKey !== root.rootPublicKey ||
-      decoded.root.backupPublicKey !== root.backupPublicKey
-    )
+    decoded.root.rootPublicKey !== root.rootPublicKey ||
+    decoded.root.backupPublicKey !== root.backupPublicKey
   ) throw new Error("回读的恢复包与本次生成的恢复根不一致");
   const createdAt = new Date().toISOString();
   const generatedPlan = {
@@ -488,13 +486,9 @@ async function prepareInitialRoot(
       at: createdAt,
     }),
   };
-  const legacyPurpose = decoded.legacyCheckpoint?.envelope.manifest.purpose;
-  if (legacyPurpose && legacyPurpose.kind !== "root-activation") {
-    throw new Error("旧版恢复包不包含恢复根激活计划");
-  }
-  const plan = legacyPurpose?.kind === "root-activation" ? legacyPurpose.plan : generatedPlan;
+  const plan = generatedPlan;
   const issuer = checkpointIssuer(currentIssuerIdentity(context), context.issuerKey);
-  const checkpoint = decoded.legacyCheckpoint ?? (await captureFullAuthorityCheckpoint({
+  const checkpoint = (await captureFullAuthorityCheckpoint({
     checkpointId: createCheckpointId(),
     createdAt,
     purpose: { kind: "root-activation", plan },

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import WebSocket from "ws";
 import {
   Scheduler,
-  JsonTaskStore,
+  InMemoryTaskStore,
   createEventBus,
   type SchedulerEventMap,
   type AgentTurnResult,
@@ -160,7 +160,7 @@ describe("schedule.* RPC + event bridge (S2.E)", () => {
     tempDir = await createTempDir("schedrpc");
     const eventBus = createEventBus<SchedulerEventMap>();
     scheduler = new Scheduler({
-      store: new JsonTaskStore(join(tempDir, "tasks.json")),
+      store: new InMemoryTaskStore(),
       eventBus,
       runAgentTurn: mockRunAgentTurn(),
       systemHandlers: buildSystemHandlers(),
@@ -419,7 +419,7 @@ describe("schedule.* RPC + event bridge (S2.E)", () => {
       tempDir2 = await createTempDir("schedrun");
       const eventBus = createEventBus<SchedulerEventMap>();
       schedulerWithReg = new Scheduler({
-        store: new JsonTaskStore(join(tempDir2, "tasks.json")),
+        store: new InMemoryTaskStore(),
         eventBus,
         runAgentTurn: mockRunAgentTurn(),
         systemHandlers: buildSystemHandlers(),

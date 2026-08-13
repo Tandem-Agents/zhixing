@@ -100,6 +100,28 @@ export async function runStatusCommand(opts: StatusOptions = {}): Promise<Status
   return report;
 }
 
+/** Effect-free local projection for offline diagnostics; intentionally performs no HTTP probe. */
+export async function buildOfflineStatusReport(deps: StatusDeps = {}): Promise<StatusReport> {
+  const readLockFn = deps.readLockFn ?? readLock;
+  const isAlive = deps.isProcessAliveFn ?? isProcessAlive;
+  const readState = deps.readStateFn ?? defaultReadState;
+  const lock = await readLockFn().catch(() => null);
+  if (!lock) return { status: "stopped" };
+  if (!isAlive(lock.pid)) return { status: "stale" };
+  const state = await readState().catch(() => null);
+  return {
+    status: state?.phase === "unhealthy" || state?.phase === "stopping"
+      ? "running-unhealthy"
+      : "running",
+    pid: lock.pid,
+    port: lock.port,
+    host: lock.host,
+    startedAt: lock.startedAt,
+    phase: state?.phase,
+    lastHeartbeat: state?.lastHeartbeat,
+  };
+}
+
 export async function buildManagedHostPublicStatus(
   processReport: StatusReport,
   options: {

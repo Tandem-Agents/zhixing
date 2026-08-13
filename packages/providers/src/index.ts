@@ -96,19 +96,13 @@ export {
   CredentialPostCommitError,
   CredentialRetirementError,
   CredentialsSchemaError,
-  exportCredentialsToLegacyFile,
-  getCredentialsPath,
-  legacyCredentialsPresent,
+  loadCredentialSnapshot,
   loadCredentials,
-  loadCredentialsWithLegacyMigration,
-  migrateLegacyCredentials,
   writeCredentials,
 } from "./credentials-loader.js";
 export type {
   CredentialMutationOptions,
   CredentialStoreCoordinator,
-  LegacyCredentialExportOptions,
-  LegacyCredentialMigrationOptions,
 } from "./credentials-loader.js";
 
 // 配置语义校验（凭证字段 / 密字段拒绝）

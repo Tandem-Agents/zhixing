@@ -1,4 +1,5 @@
-import { getCredentialsPath, resolveHomeDir } from "@zhixing/providers";
+import path from "node:path";
+import { resolveHomeDir } from "@zhixing/providers";
 import { getPlatformSecretStoreProtectedPaths } from "@zhixing/secrets";
 
 /**
@@ -10,7 +11,7 @@ export function resolveSystemProtectedSecretPaths(
 ): readonly string[] {
   const homeDir = resolveHomeDir(env);
   return [
-    getCredentialsPath(homeDir),
+    path.join(homeDir, "credentials.json"),
     ...getPlatformSecretStoreProtectedPaths(homeDir),
   ];
 }

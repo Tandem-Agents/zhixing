@@ -12,7 +12,6 @@ import type {
   AdvancementSnapshot,
   DeliveryTargetDto,
   MemoryAppendPayload,
-  MemoryCategoryDto,
   IsoTime,
   PersonMetaDto,
   ScheduleTaskSpec,
@@ -32,7 +31,6 @@ import type { JobGlobalStagedMutation, SkillStatePatch } from "./state.js";
 import type { AdvancementSession, AdvancementStoreEvent } from "../advancement/types.js";
 import type { DeliveryTarget } from "../channels/types.js";
 import type { SegmentMeta, TaskListState } from "../conversation/types.js";
-import type { MemoryCategory } from "../memory/memory-store.js";
 import type { PersonMeta } from "../memory/people-store.js";
 import type { TaskSpec } from "../scheduler/facade.js";
 import type { TaskPriority, TaskSchedule } from "../scheduler/types.js";
@@ -129,9 +127,6 @@ export type SkillUsageRecordInvariant = Assert<
     SkillUsageRecord,
     { skillId: string; occurredAt: IsoTime; hitDelta: 1 }
   >
->;
-export type MemoryCategorySnapshotInvariant = Assert<
-  Equal<MemoryCategoryDto, MemoryCategory>
 >;
 export type PersonMetaSnapshotInvariant = Assert<
   Equivalent<PersonMetaDto, PersonMeta>

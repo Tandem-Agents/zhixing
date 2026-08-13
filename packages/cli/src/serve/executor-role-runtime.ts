@@ -9,7 +9,7 @@ import {
 } from "@zhixing/orchestrator/runtime";
 import { mainProfile, powerProfile } from "@zhixing/orchestrator/profile";
 import { parseConversationId } from "@zhixing/core";
-import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
+import type { ProviderCredentialProjection, ZhixingConfig } from "@zhixing/providers";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
 import { createStdoutWriter } from "../screen/index.js";
 import { resolveSystemProtectedSecretPaths } from "../security/secret-boundary.js";
@@ -87,6 +87,12 @@ import {
 } from "./host-stop-lifecycle.js";
 import type { StopHostGeneration } from "@zhixing/core/protocol";
 import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
+import { ProgramStore } from "../update/program-store.js";
+import { createReleaseVerifier } from "../update/release-verifier.js";
+import { EMBEDDED_RELEASE_TRUST } from "../update/release-channel.js";
+import { ProgramUpgradeCoordinator } from "../update/upgrade-lifecycle.js";
+
+class ProgramUpgradeRestart extends Error {}
 
 export async function runExecutorRole(
   options: ServeOptions,
@@ -120,11 +126,11 @@ export async function runExecutorRole(
   const lifecycleHomeId = (await lifecycleLog.originCheckpoint()).logId;
   const lifecycleJournal = new DeviceLifecycleJournal(lifecycleLog);
   const startupStopOperations = (await lifecycleJournal.active()).filter((operation) =>
-    operation.identity.kind === "stop" &&
+    (operation.identity.kind === "stop" || operation.identity.kind === "upgrade") &&
     operation.identity.homeId === lifecycleHomeId &&
     operation.identity.localDeviceId === bootstrap.mesh.deviceKey.deviceId);
   if (startupStopOperations.length > 1) {
-    throw new Error("More than one host-stop operation owns executor startup admission");
+    throw new Error("More than one local lifecycle operation owns executor startup admission");
   }
   const startupStopOperation = startupStopOperations[0];
   const startupStopSnapshot = startupStopOperation?.evidence.some((item) =>
@@ -519,7 +525,7 @@ export async function runExecutorRole(
       ? {
           lifecycle: {
             operationId: startupStopOperation.identity.operationId,
-            kind: "stop",
+            kind: startupStopOperation.identity.kind,
             recoverAcceptedWork: startupStopRecoverAcceptedWork,
             alreadySettled: startupStopAlreadySettled,
           },
@@ -602,6 +608,43 @@ export async function runExecutorRole(
       lease: stopPort("lease"),
       permit: stopPort("permit"),
     };
+    const isLifecycleHostStopped = async (candidateHost: StopHostGeneration): Promise<boolean> => {
+      const endpoint = candidateHost.endpointLock;
+      if (!endpoint) return false;
+      const currentReplacesEndpoint = ownsCurrentSuccessorEndpoint(
+        localServerBinding!,
+        endpoint,
+        endpointLock,
+      );
+      if (
+        endpoint.pid === endpointLock.pid &&
+        endpoint.port === endpointLock.port &&
+        endpoint.startTime === endpointLock.startTime &&
+        endpoint.startedAt === endpointLock.startedAt
+      ) return false;
+      if (isProcessAlive(endpoint.pid) && !currentReplacesEndpoint) return false;
+      if (candidateHost.kind === "foreground") return candidateHost.processId === endpoint.pid;
+      try {
+        const current = await loadCurrentManagedServiceState("inspect", zhixingHome);
+        if (
+          !current.spec ||
+          current.spec.serviceId !== candidateHost.serviceId ||
+          managedServiceDefinitionDigest(current.spec) !== candidateHost.definitionDigest
+        ) return false;
+        const inspection = await createManagedServiceAdapter({
+          storageGovernor: deviceCapacity.storage,
+        }).inspect(current.spec, new AbortController().signal);
+        const currentSuccessor = stopHost.kind === "managed" &&
+          stopHost.serviceId === candidateHost.serviceId &&
+          stopHost.definitionDigest === candidateHost.definitionDigest &&
+          stopHost.endpointLock?.pid === process.pid &&
+          currentReplacesEndpoint &&
+          isProcessAlive(process.pid);
+        return inspection.matches && (!inspection.running || currentSuccessor);
+      } catch {
+        return false;
+      }
+    };
     const stopCoordinator = new HostStopCoordinator({
       journal: new DeviceLifecycleJournal(lifecycleLog),
       homeId: lifecycleHomeId,
@@ -653,49 +696,49 @@ export async function runExecutorRole(
           async () => undefined,
         ),
       },
-      isHostStopped: async (host) => {
-        const endpoint = host.endpointLock;
-        if (!endpoint) return false;
-        const currentReplacesEndpoint = ownsCurrentSuccessorEndpoint(
-          localServerBinding!,
-          endpoint,
-          endpointLock,
-        );
-        if (
-          endpoint.pid === endpointLock.pid &&
-          endpoint.port === endpointLock.port &&
-          endpoint.startTime === endpointLock.startTime &&
-          endpoint.startedAt === endpointLock.startedAt
-        ) return false;
-        if (
-          isProcessAlive(endpoint.pid) &&
-          !currentReplacesEndpoint
-        ) return false;
-        if (host.kind === "foreground") return host.processId === endpoint.pid;
-        try {
-          const current = await loadCurrentManagedServiceState("inspect", zhixingHome);
-          if (
-            !current.spec ||
-            current.spec.serviceId !== host.serviceId ||
-            managedServiceDefinitionDigest(current.spec) !== host.definitionDigest
-          ) return false;
-          const inspection = await createManagedServiceAdapter({
-            storageGovernor: deviceCapacity.storage,
-          }).inspect(current.spec, new AbortController().signal);
-          const currentSuccessor = stopHost.kind === "managed" &&
-            stopHost.serviceId === host.serviceId &&
-            stopHost.definitionDigest === host.definitionDigest &&
-            stopHost.endpointLock?.pid === process.pid &&
-            currentReplacesEndpoint &&
-            isProcessAlive(process.pid);
-          return inspection.matches && (!inspection.running || currentSuccessor);
-        } catch {
-          return false;
-        }
-      },
+      isHostStopped: isLifecycleHostStopped,
     });
+    const programUpgrade = EMBEDDED_RELEASE_TRUST
+      ? new ProgramUpgradeCoordinator({
+          journal: new DeviceLifecycleJournal(lifecycleLog),
+          store: new ProgramStore(),
+          verifier: createReleaseVerifier(EMBEDDED_RELEASE_TRUST),
+          artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
+          acceptedWork,
+          homeId: lifecycleHomeId,
+          localDeviceId: bootstrap.mesh.deviceKey.deviceId,
+          host: stopHost,
+          isHostStopped: isLifecycleHostStopped,
+          runtime: {
+            closeAdmission: async (operationId) => {
+              jobOwnerAssembly!.pauseAccepting();
+              await localConversationOwner!.closeHostStopAdmission(operationId);
+            },
+            flushDurableState: async () => {
+              const [checkpoint, ownerDigest] = await Promise.all([
+                lifecycleLog.checkpoint(),
+                localConversationOwner!.checkpointAcceptedWork(),
+              ]);
+              return [{
+                kind: "accepted-work",
+                digest: protocolDigest("ExecutorProgramUpgradeDurableFlush", 1, {
+                  lifecycle: checkpoint.prefixDigest,
+                  localOwner: ownerDigest,
+                }),
+              }];
+            },
+            settlePhysicalSteps: () => authority!.executorResourceGovernor.coordinate(
+              async () => undefined,
+            ),
+          },
+        })
+      : undefined;
+    const programUpgradeResume = await programUpgrade?.resumeBeforeStartup();
+    if (programUpgradeResume?.kind === "stop-current" || programUpgradeResume?.kind === "restart-target") {
+      throw new ProgramUpgradeRestart();
+    }
     const stopResume = await stopCoordinator.resumeActive();
-    if (startupStopOperation) {
+    if (startupStopOperation?.identity.kind === "stop") {
       const operationId = startupStopOperation.identity.operationId;
       const terminal = stopResume.find((operation) =>
         operation.identity.operationId === operationId && operation.phase === "terminal");
@@ -739,6 +782,7 @@ export async function runExecutorRole(
       token: token.token,
       conversationRpc,
       lifecycleShutdown: stopCoordinator,
+      ...(programUpgrade ? { lifecycleUpgrade: programUpgrade } : {}),
       runtimeControl: {
         conversationStatus: (after) =>
           localConversationOwner!.port().statusHistory(after),
@@ -770,6 +814,28 @@ export async function runExecutorRole(
         error: (message) => writer.notify(`[local-session] ${message}`),
       },
     });
+    if (programUpgradeResume?.kind === "verify-target") {
+      const current = await new ProgramStore().loadPointer();
+      if (!current || current.current.manifestDigest !== programUpgradeResume.targetManifestDigest) {
+        await programUpgrade!.restoreCompatiblePrevious(programUpgradeResume.operationId);
+        throw new ProgramUpgradeRestart();
+      }
+      await programUpgrade!.completeHealthy(
+        programUpgradeResume.operationId,
+        programUpgradeResume.targetManifestDigest,
+      );
+      await localConversationOwner.releaseHostStopAdmission(programUpgradeResume.operationId);
+      await authority.authority.releaseLifecycleAdmission(programUpgradeResume.operationId);
+      if (!startupStopAcceptedWorkRecovered) {
+        await localConversationOwner.recoverAcceptedWorkForLifecycle();
+        await jobOwnerAssembly.recoverAcceptedWorkForLifecycle();
+        await mesh.recoverAcceptedWorkForLifecycle();
+        startupStopAcceptedWorkRecovered = true;
+      }
+      jobOwnerAssembly.resumeAccepting();
+      mesh.resumeAcceptingAfterLifecycle();
+      localConversationOwner.resumeRecoveryAfterLifecycle();
+    }
     if (isDaemonChild()) {
       localServerState = new ServerStateFile();
       await localServerState.markReady({
@@ -791,7 +857,7 @@ export async function runExecutorRole(
       timeoutMs: 30_000,
     }).then(() => undefined));
   } catch (error) {
-    roleFailure = error;
+    if (!(error instanceof ProgramUpgradeRestart)) roleFailure = error;
   }
   const cleanupFailures: unknown[] = [];
   try {
@@ -865,7 +931,7 @@ export async function runExecutorRole(
 export class ExecutorRuntimeSubstrate {
   constructor(private readonly options: {
     readonly config: ZhixingConfig;
-    readonly credentials: Pick<ZhixingCredentials, "providers">;
+    readonly credentials: ProviderCredentialProjection;
     readonly mcpHub: McpHub;
     readonly systemProtectedPaths: readonly string[];
     readonly interactions: DurableConversationInteractionObserver;

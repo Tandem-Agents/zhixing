@@ -9,7 +9,6 @@ import {
   AnchorWorksceneRegistry,
   WorksceneConflictError,
   WorksceneRevisionError,
-  worksceneImportSetDigest,
 } from "./authority-registry.js";
 
 const NOW = "2026-07-30T00:00:00.000Z";
@@ -107,63 +106,6 @@ describe("AnchorWorksceneRegistry", () => {
     ).toEqual({ items: [] });
   });
 
-  it("keeps legacy imports invisible until an exact atomic activation", async () => {
-    const fixture = await createRegistry();
-    const legacyScene = {
-      id: "legacy-a",
-      name: "Legacy",
-      workspace: { deviceId: "device-a", bindingRef: "workspace-a" },
-      createdAt: NOW,
-    };
-    const scene = {
-      ...legacyScene,
-      revision: 1,
-      lastActiveAt: NOW,
-    };
-    await fixture.registry.applyMigration(
-      {
-        kind: "workscene-import-legacy",
-        migrationId: "migration-a",
-        sourceSnapshotToken: "snapshot-a",
-        scene: legacyScene,
-      },
-      { requestId: "import-a" },
-    );
-    expect(await fixture.registry.get(scene.id)).toBeNull();
-    await expect(
-      fixture.registry.applyMigration(
-        {
-          kind: "workscene-activate-device-registry",
-          migrationId: "migration-a",
-          sourceSnapshotToken: "snapshot-a",
-          importSetDigest: worksceneImportSetDigest([]),
-        },
-        { requestId: "activate-wrong" },
-      ),
-    ).rejects.toBeInstanceOf(WorksceneConflictError);
-    await fixture.registry.applyMigration(
-      {
-        kind: "workscene-activate-device-registry",
-        migrationId: "migration-a",
-        sourceSnapshotToken: "snapshot-a",
-        importSetDigest: worksceneImportSetDigest([scene]),
-      },
-      { requestId: "activate-a" },
-    );
-    expect(await fixture.registry.get(scene.id)).toMatchObject({
-      id: scene.id,
-      name: scene.name,
-      revision: 1,
-    });
-
-    const restarted = new AnchorWorksceneRegistry({
-      log: fixture.log,
-      clock: () => NOW,
-    });
-    expect(await restarted.get(scene.id)).toEqual(
-      await fixture.registry.get(scene.id),
-    );
-  });
 });
 
 async function createRegistry() {

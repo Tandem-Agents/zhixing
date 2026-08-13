@@ -37,18 +37,15 @@ export async function removeDevice(input: {
   readonly targetName?: string;
   readonly mode?: Exclude<DeviceRemovalMode, "cancel">;
   readonly confirmed?: boolean;
+  readonly permanent?: boolean;
 }, io: DeviceRemovalSelectionIO = defaultSelectionIO()): Promise<void> {
+  if (input.permanent !== true) {
+    throw new TypeError("永久移除设备必须显式提供 --permanent");
+  }
   await withManagement(async (management) => {
     const device = await selectRemovalTarget(management, input.targetName, io);
     const operationId = createDeviceRemovalOperationId();
     const requestId = `request:${operationId}`;
-    if (input.mode === "lost") {
-      await requireConfirmation(
-        io,
-        input.confirmed,
-        `无法读取或擦除“${device.displayName}”上的本地对话和文件；只会撤销其访问并列出需要更换的外部账号凭据。继续吗？`,
-      );
-    }
     const preflight = await management.deviceRemove({
       requestId,
       operationId,
@@ -73,12 +70,17 @@ export async function removeDevice(input: {
     if (!mode) {
       throw new TypeError("非交互环境必须用 --mode transfer、--mode destroy 或 --mode lost 明确处理方式");
     }
-    if (mode === "destroy") {
-      const summary = preflight.conversations.length === 0
-        ? "设备上的本地权威数据将永久删除。继续吗？"
-        : `以下本机对话将永久删除：${preflight.conversations.join("、")}。继续吗？`;
-      await requireConfirmation(io, input.confirmed, summary);
-    }
+    const work = preflight.conversations.length === 0
+      ? "没有未转移的本机对话"
+      : `未转移的本机对话：${preflight.conversations.join("、")}`;
+    const consequence = mode === "destroy"
+      ? "这些本机数据将永久删除，无法恢复"
+      : "本机工作收束后将永久撤销该设备的访问";
+    await requireConfirmation(
+      io,
+      input.confirmed,
+      `永久移除设备“${device.displayName}”。${work}；${consequence}。继续吗？`,
+    );
     renderState(await management.deviceContinue({
       targetName: device.displayName,
       mode,

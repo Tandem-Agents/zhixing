@@ -1,6 +1,5 @@
 import type {
   IEventBus,
-  ScheduledTask,
   SchedulerEventMap,
   SystemHandler,
 } from "@zhixing/core";
@@ -22,7 +21,6 @@ import {
   protocolDigest,
   validateAuthorityCapability,
 } from "@zhixing/core/protocol";
-import type { JsonTaskStore } from "@zhixing/core";
 import {
   AnchorScheduler,
   InProcessJobDispatcher,
@@ -71,7 +69,6 @@ export interface AnchorSchedulerRuntimeOptions {
   readonly authority: AuthorityRuntimeStack;
   readonly protocol: ConversationProtocolRuntime;
   readonly eventBus: IEventBus<SchedulerEventMap>;
-  readonly compatibilityStore: JsonTaskStore;
   readonly jobStatus: JobStatusDirectory;
   readonly jobRelays: JobRelayObligationDirectory;
   readonly openManualJobSurface: (input: {
@@ -91,7 +88,6 @@ export interface AnchorSchedulerRuntimeOptions {
   readonly systemTasks: NonNullable<
     import("@zhixing/owner-kernel").AnchorSchedulerOptions["systemTasks"]
   >;
-  readonly migrateLegacyDelivery?: import("@zhixing/owner-kernel").AnchorSchedulerOptions["migrateLegacyDelivery"];
   readonly now?: () => Date;
   readonly onError?: (error: Error) => void;
 }
@@ -99,9 +95,8 @@ export interface AnchorSchedulerRuntimeOptions {
 /**
  * Product composition for the anchor-owned scheduler and job authority.
  *
- * The compatibility JSON store is read once for migration and thereafter is
- * only a projection. All execution goes through the existing assignment
- * ledger, executor job owner and durable submission protocol.
+ * All execution and projection state comes from the assignment journal,
+ * executor job owner and durable submission protocol.
  */
 export class AnchorSchedulerRuntime {
   readonly anchorEpoch: number;
@@ -127,16 +122,11 @@ export class AnchorSchedulerRuntime {
   readonly #dispatchers = new Map<string, InProcessJobDispatcher>();
   readonly #manualSurfaces: ManualJobSurfaceLifecycle;
   readonly #retirementTasks = new Map<string, Promise<void>>();
-  readonly #legacyTasks: readonly ScheduledTask[];
   readonly #clock: () => string;
 
-  private constructor(
-    options: AnchorSchedulerRuntimeOptions,
-    legacyTasks: readonly ScheduledTask[],
-  ) {
+  private constructor(options: AnchorSchedulerRuntimeOptions) {
     this.#options = options;
     this.anchorEpoch = options.authority.anchorEpoch;
-    this.#legacyTasks = legacyTasks;
     this.#clock = () => (options.now?.() ?? new Date()).toISOString();
     this.#manualSurfaces = new ManualJobSurfaceLifecycle({
       ...(options.onError ? { onError: options.onError } : {}),
@@ -166,13 +156,8 @@ export class AnchorSchedulerRuntime {
       recoverUserJobs: (journal, acceptedJobRunIds) =>
         this.#recoverJournal(journal, acceptedJobRunIds),
       cancelUserJob: (input) => this.#cancel(input),
-      legacyTasks: () => Promise.resolve(this.#legacyTasks),
-      ...(options.migrateLegacyDelivery
-        ? { migrateLegacyDelivery: options.migrateLegacyDelivery }
-        : {}),
       systemTasks: options.systemTasks,
       schedulerNotices: this.schedulerNotices,
-      onProjection: (tasks) => options.compatibilityStore.save([...tasks]),
       ...(options.now ? { now: options.now } : {}),
       ...(options.onError ? { onError: options.onError } : {}),
     });
@@ -249,8 +234,7 @@ export class AnchorSchedulerRuntime {
   static async create(
     options: AnchorSchedulerRuntimeOptions,
   ): Promise<AnchorSchedulerRuntime> {
-    const legacyTasks = await options.compatibilityStore.load();
-    const runtime = new AnchorSchedulerRuntime(options, legacyTasks);
+    const runtime = new AnchorSchedulerRuntime(options);
     await runtime.schedulerNotices.initializeLiveCursor();
     return runtime;
   }

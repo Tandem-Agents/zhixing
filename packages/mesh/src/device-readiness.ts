@@ -16,8 +16,7 @@ export type DeviceReadinessCheckKind =
   | "channel"
   | "role-configuration"
   | "secret-store"
-  | "protocol-version"
-  | "plaintext-credential";
+  | "protocol-version";
 
 export interface DeviceReadinessCheck {
   readonly kind: DeviceReadinessCheckKind;
@@ -48,7 +47,6 @@ export async function evaluateDeviceReadiness(input: {
   readonly requirements: readonly DeviceReadinessRequirement[];
   readonly checks: readonly DeviceReadinessCheck[];
   readonly secretStore: SecretStorePort;
-  readonly legacyPlaintextPresent: boolean;
   readonly protocolVersionCompatible: boolean;
 }): Promise<DeviceReadinessProjection> {
   if (!isCanonicalText(input.deviceId)) {
@@ -97,13 +95,6 @@ export async function evaluateDeviceReadiness(input: {
       configured: true,
       ready: input.protocolVersionCompatible,
       ...(!input.protocolVersionCompatible ? { reason: "协议版本不兼容" } : {}),
-    },
-    {
-      kind: "plaintext-credential",
-      id: "legacy-file",
-      configured: true,
-      ready: !input.legacyPlaintextPresent,
-      ...(input.legacyPlaintextPresent ? { reason: "旧明文凭据尚未清退" } : {}),
     },
   ]);
   const configured = checks.every((check) => check.configured);
@@ -178,7 +169,6 @@ function normalizeChecks(checks: readonly DeviceReadinessCheck[]): DeviceReadine
     "role-configuration",
     "secret-store",
     "protocol-version",
-    "plaintext-credential",
   ]);
   const seen = new Set<string>();
   return checks

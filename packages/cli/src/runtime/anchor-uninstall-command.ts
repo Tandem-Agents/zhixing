@@ -37,8 +37,8 @@ export async function uninstallCurrentDevice(input: {
       io,
       input.confirmed,
       path.path === "migration"
-        ? `确认把值班职责交给“${path.targetName}”，并永久清退这台设备吗？`
-        : "确认仅保留已验证的恢复备份，并永久清退这台值班设备吗？",
+        ? `永久移除设备“${preflight.currentDeviceName}”。本机尚未转移的已接受工作会先安全收束，再把值班职责交给“${path.targetName}”；本机数据和设备身份随后永久删除，无法恢复。继续吗？`
+        : `永久移除设备“${preflight.currentDeviceName}”。本机尚未转移的已接受工作会先安全收束，并只保留已验证的恢复备份；本机数据和设备身份随后永久删除，无法恢复。继续吗？`,
     );
 
     const operationId = createOpaqueId("uninstall");

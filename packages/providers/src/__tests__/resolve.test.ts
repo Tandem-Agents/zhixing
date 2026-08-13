@@ -196,9 +196,9 @@ describe("resolveProvider", () => {
       }).toThrow(ProviderConfigError);
     });
 
-    it("错误消息不再提及废弃的 fallback 语法（契约：单档 credentials.json）", () => {
+    it("错误消息不再提及废弃的 fallback 语法", () => {
       // 回归保护：未来谁把 env:VAR / helper:cmd 引导加回错误消息时触发——凭证唯一入口
-      // 必须是 credentials.json，错误消息不应推荐任何替代路径。
+      // 错误消息不应推荐任何明文凭据路径或替代语法。
       try {
         resolveProvider("deepseek", noCreds());
         expect.fail("应抛 ProviderConfigError");

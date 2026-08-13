@@ -19,6 +19,7 @@ const nonInteractive: AnchorUninstallIO = {
 describe("anchor uninstall command projection", () => {
   it("selects only a unique ready device name and never accepts an unavailable target", async () => {
     const preflight = {
+      currentDeviceName: "当前电脑",
       migrationTargets: [
         { displayName: "书房电脑", ready: true },
         { displayName: "离线电脑", ready: false },
@@ -39,7 +40,11 @@ describe("anchor uninstall command projection", () => {
   });
 
   it("requires an explicit safe path outside a terminal and projects only action language", async () => {
-    await expect(selectPath({ migrationTargets: [], recoveryBackupReady: false }, {}, nonInteractive))
+    await expect(selectPath({
+      currentDeviceName: "当前电脑",
+      migrationTargets: [],
+      recoveryBackupReady: false,
+    }, {}, nonInteractive))
       .rejects.toThrow("非交互环境必须提供");
     const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     try {

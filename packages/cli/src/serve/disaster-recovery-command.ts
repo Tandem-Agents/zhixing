@@ -14,7 +14,7 @@ import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import {
   loadConfig,
-  loadCredentialsWithLegacyMigration,
+  loadCredentialSnapshot,
   type CredentialStoreCoordinator,
 } from "@zhixing/providers";
 import {
@@ -506,10 +506,7 @@ function productionRecoveryReadiness(context: RecoveryContext) {
     if (!context.configuration?.enabledRoles.includes("anchor")) {
       throw new Error("恢复目标没有启用真实值班角色配置");
     }
-    const credentials = await loadCredentialsWithLegacyMigration({
-      store: context.secretStore,
-      homeDir: context.home,
-    });
+    const credentials = await loadCredentialSnapshot({ store: context.secretStore });
     const verifier = createTrustedDeviceProtocolVerifier(
       context.trust.members.map((member) => member.device),
     );

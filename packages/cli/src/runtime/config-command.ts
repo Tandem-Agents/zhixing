@@ -21,7 +21,7 @@ import type { ChannelStatus } from "@zhixing/core";
 import {
   getGlobalConfigPath,
   loadConfig,
-  loadCredentialsWithLegacyMigration,
+  loadCredentialSnapshot,
   resolveHomeDir,
   writeConfig,
   writeCredentials,
@@ -219,10 +219,7 @@ async function runEditorCommand(
 
     // 重新 load 最新——保证用户外部编辑后的一致性，不复用启动缓存
     const config = loadConfig();
-    const { credentials } = await loadCredentialsWithLegacyMigration({
-      store: secretStore,
-      homeDir,
-    });
+    const { credentials } = await loadCredentialSnapshot({ store: secretStore });
 
     const editorResult = await runConfigEditor({
       initialConfig: config,

@@ -55,6 +55,7 @@ export interface AnchorUninstallPublicState {
 }
 
 export interface AnchorUninstallPreflight {
+  readonly currentDeviceName: string;
   readonly migrationTargets: readonly {
     readonly displayName: string;
     readonly ready: boolean;
@@ -105,7 +106,7 @@ export class AnchorUninstallCoordinator {
   }
 
   async preflight(): Promise<AnchorUninstallPreflight> {
-    await this.#assertCurrentAuthority();
+    const trust = await this.#assertCurrentAuthority();
     const active = await this.#journal.active();
     if (active.some((operation) => operation.identity.kind === "executor-removal")) {
       throw new Error("Finish the current device removal before uninstalling this device");
@@ -115,6 +116,8 @@ export class AnchorUninstallCoordinator {
       ? await this.options.checkpointOwner.status()
       : { state: "not-configured" as const, fullBackupReady: false };
     return Object.freeze({
+      currentDeviceName: trust.members.find((member) =>
+        member.device.deviceId === this.options.currentDeviceId)?.device.displayName ?? "当前设备",
       migrationTargets: Object.freeze(migrationTargets.map(({ displayName, ready }) => ({
         displayName,
         ready,

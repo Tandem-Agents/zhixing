@@ -1,8 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { join } from "node:path";
-import { createTempDir } from "@zhixing/test-utils";
 import { Scheduler } from "../scheduler.js";
-import { JsonTaskStore } from "../task-store.js";
+import { InMemoryTaskStore } from "../in-memory-task-store.js";
 import { LocalSchedulerFacade } from "../facade.js";
 import { createEventBus } from "../../events/event-bus.js";
 import type { SchedulerEventMap } from "../events.js";
@@ -10,16 +8,10 @@ import type { SchedulerFacadeEvent } from "../facade.js";
 import type { AgentTurnResult } from "../types.js";
 
 describe("LocalSchedulerFacade", () => {
-  let storePath: string;
-
-  beforeEach(async () => {
-    storePath = join(await createTempDir("facade"), "tasks.json");
-  });
-
   function setup(runAgentTurn?: () => Promise<AgentTurnResult>) {
     const eventBus = createEventBus<SchedulerEventMap>();
     const scheduler = new Scheduler({
-      store: new JsonTaskStore(storePath),
+      store: new InMemoryTaskStore(),
       eventBus,
       runAgentTurn:
         runAgentTurn ?? (async () => ({ status: "ok", output: "done", durationMs: 1 })),

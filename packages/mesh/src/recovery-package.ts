@@ -1,10 +1,8 @@
 import { canonicalize } from "./canonical.js";
-import type { CheckpointPackage } from "./checkpoint.js";
 import { RecoveryRoot } from "./recovery-root.js";
 
 export interface DecodedRecoveryPackage {
   readonly root: RecoveryRoot;
-  readonly legacyCheckpoint?: CheckpointPackage;
 }
 
 export function encodeRecoveryPackage(root: RecoveryRoot): string {
@@ -21,7 +19,6 @@ export function decodeRecoveryPackage(value: string | Uint8Array): DecodedRecove
     ? value.trim()
     : Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString("utf8").trim();
   if (trimmed.startsWith("zxrp2:")) return decodeCurrent(trimmed.slice(6));
-  if (trimmed.startsWith("zxrp1:")) return decodeLegacy(trimmed.slice(6));
   throw new TypeError("Recovery package has an unsupported format");
 }
 
@@ -43,38 +40,6 @@ function decodeCurrent(encoded: string): DecodedRecoveryPackage {
     throw new TypeError("Recovery package secret does not match its root identity");
   }
   return { root };
-}
-
-function decodeLegacy(encoded: string): DecodedRecoveryPackage {
-  const value = decodeCanonicalPayload(encoded);
-  if (
-    !isRecord(value) ||
-    value.v !== 1 ||
-    typeof value.recoverySecret !== "string" ||
-    !isRecord(value.checkpoint)
-  ) {
-    throw new TypeError("Legacy recovery package shape is invalid");
-  }
-  assertExactKeys(value, ["checkpoint", "recoverySecret", "v"]);
-  assertExactKeys(value.checkpoint, ["chunks", "envelope"]);
-  if (!isRecord(value.checkpoint.envelope) || !Array.isArray(value.checkpoint.chunks)) {
-    throw new TypeError("Legacy recovery checkpoint is invalid");
-  }
-  const chunks = value.checkpoint.chunks.map((entry, expectedSeq) => {
-    if (!isRecord(entry) || entry.seq !== expectedSeq || typeof entry.bytes !== "string") {
-      throw new TypeError("Legacy recovery checkpoint chunk is invalid");
-    }
-    assertExactKeys(entry, ["bytes", "seq"]);
-    const bytes = decodeCanonicalBase64(entry.bytes, "Legacy recovery checkpoint chunk");
-    return { seq: expectedSeq, bytes };
-  });
-  return {
-    root: RecoveryRoot.importSecret(value.recoverySecret),
-    legacyCheckpoint: {
-      envelope: value.checkpoint.envelope as unknown as CheckpointPackage["envelope"],
-      chunks,
-    },
-  };
 }
 
 function decodeCanonicalPayload(encoded: string): unknown {

@@ -164,7 +164,7 @@ function buildProviderConfigMeta(
   );
   const myIssues = checkModel(
     previewState.config,
-    previewState.credentials,
+    { providers: previewState.credentials.providers },
   ).filter((i) => i.role === descriptor.role);
   const canProceed = myIssues.length === 0;
 
@@ -186,7 +186,7 @@ function buildProviderConfigMeta(
           descriptor.providerId,
           model ?? "",
         );
-        const issues = checkModel(next.config, next.credentials).filter(
+        const issues = checkModel(next.config, { providers: next.credentials.providers }).filter(
           (i) => i.role === descriptor.role,
         );
         if (issues.length > 0) {
@@ -247,7 +247,7 @@ function buildChannelConfigMeta(
     const previewState = enableMessaging(state, descriptor.channelId);
     const myIssues = checkMessaging(
       previewState.config,
-      previewState.credentials,
+      { channels: previewState.credentials.channels },
     ).filter((i) => i.channelId === descriptor.channelId);
     canEnable = myIssues.length === 0;
   }
@@ -268,7 +268,7 @@ function buildChannelConfigMeta(
         }
         // 点击态再算一次 preview——defensive
         const next = enableMessaging(s, descriptor.channelId);
-        const issues = checkMessaging(next.config, next.credentials).filter(
+        const issues = checkMessaging(next.config, { channels: next.credentials.channels }).filter(
           (i) => i.channelId === descriptor.channelId,
         );
         if (issues.length > 0) {

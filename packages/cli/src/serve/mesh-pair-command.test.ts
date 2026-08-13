@@ -165,27 +165,22 @@ describe("production mesh pairing command", () => {
       .toBeUndefined();
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
-  it.each(["qr", "short"] as const)(
-    "pairs two clean installations over direct %s rendezvous",
-    async (method) => {
-      const anchorHome = await createTempDir(`mesh-pair-anchor-${method}`);
-      const executorHome = await createTempDir(`mesh-pair-executor-${method}`);
+  it(
+    "pairs two clean installations over a direct high-entropy rendezvous",
+    async () => {
+      const anchorHome = await createTempDir("mesh-pair-anchor-qr");
+      const executorHome = await createTempDir("mesh-pair-executor-qr");
       const anchorSecrets = new MemorySecretStore();
       const executorSecrets = new MemorySecretStore();
       const invitation = deferred<string>();
-      let shortCode: string | undefined;
       const issuer = runPairCommand({
         zhixingHome: anchorHome,
         secretStore: anchorSecrets,
         confirmRecoveryPackage: echoRecoveryPackage,
-        method,
         advertise: "127.0.0.1:0",
         writeLine: (line) => {
           if (line.startsWith("Pairing invitation: ")) {
             invitation.resolve(line.slice("Pairing invitation: ".length));
-          }
-          if (line.startsWith("Pairing code: ")) {
-            shortCode = line.slice("Pairing code: ".length);
           }
         },
       });
@@ -194,7 +189,6 @@ describe("production mesh pairing command", () => {
         zhixingHome: executorHome,
         secretStore: executorSecrets,
         invitation: encoded,
-        ...(method === "short" ? { shortCode: requireValue(() => shortCode) } : {}),
         writeLine: () => undefined,
       });
       await issuer;

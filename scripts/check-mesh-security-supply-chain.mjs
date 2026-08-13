@@ -159,10 +159,11 @@ async function readJson(file) {
 }
 
 function meshImporterBlock(text) {
-  const start = text.indexOf("  packages/mesh:\n");
+  const normalized = text.replaceAll("\r\n", "\n");
+  const start = normalized.indexOf("  packages/mesh:\n");
   if (start < 0) return "";
-  const next = text.indexOf("\n  packages/", start + 1);
-  return text.slice(start, next < 0 ? undefined : next);
+  const next = normalized.indexOf("\n  packages/", start + 1);
+  return normalized.slice(start, next < 0 ? undefined : next);
 }
 
 function lockPackageBlock(text, key) {

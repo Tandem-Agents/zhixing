@@ -58,9 +58,8 @@ export const EMPTY_TASK_STATUS_SUMMARY: TaskStatusSummary = Object.freeze({
 /**
  * cli 装配层 TurnContextProvider 的依赖项。
  *
- * `getSchedulerStatus`：让 caller 用 closure 控制"如何取 scheduler 状态"——REPL
- * 模式读 scheduler.json 从属投影（readSchedulerSummarySync，cli 无本地 scheduler），
- * serve 模式直接由本进程 scheduler 算 summary。helper 不假设 scheduler 状态来源。
+ * `getSchedulerStatus`：让 caller 用 closure 从本进程 scheduler authority 读取状态；
+ * helper 不假设具体 scheduler 实现。
  *
  * `taskListService`：assembly 持有的 service 单例。helper 内部用 ALS 取
  * conversationId 后通过 service 同步读 cache。

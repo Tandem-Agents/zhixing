@@ -23,7 +23,7 @@ export const messagingSection: Section = {
   title: "消息通道",
   description: "用于接收外部消息触发 agent（如飞书）",
   entries: (state) => {
-    const allIssues = checkMessaging(state.config, state.credentials);
+    const allIssues = checkMessaging(state.config, { channels: state.credentials.channels });
     return SUPPORTED_CHANNELS.map((channel) =>
       buildEntry(state, channel.id, channel.label, allIssues),
     );

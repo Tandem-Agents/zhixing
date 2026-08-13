@@ -119,6 +119,7 @@ export interface DeviceRemovalState {
 }
 
 export interface AnchorUninstallPreflight {
+  currentDeviceName: string;
   migrationTargets: Array<{ displayName: string; ready: boolean }>;
   recoveryBackupReady: boolean;
 }
@@ -506,7 +507,9 @@ function decodeDeviceRemovalState(input: unknown): DeviceRemovalState {
 function decodeAnchorUninstallPreflight(input: unknown): AnchorUninstallPreflight {
   if (
     !isPlainRecord(input) ||
-    !hasExactKeys(input, ["migrationTargets", "recoveryBackupReady"]) ||
+    !hasExactKeys(input, ["currentDeviceName", "migrationTargets", "recoveryBackupReady"]) ||
+    typeof input.currentDeviceName !== "string" ||
+    input.currentDeviceName.trim().length === 0 ||
     typeof input.recoveryBackupReady !== "boolean" ||
     !Array.isArray(input.migrationTargets)
   ) {
@@ -523,7 +526,11 @@ function decodeAnchorUninstallPreflight(input: unknown): AnchorUninstallPrefligh
     }
     return { displayName: candidate.displayName, ready: candidate.ready };
   });
-  return { migrationTargets, recoveryBackupReady: input.recoveryBackupReady };
+  return {
+    currentDeviceName: input.currentDeviceName,
+    migrationTargets,
+    recoveryBackupReady: input.recoveryBackupReady,
+  };
 }
 
 function decodeAnchorUninstallState(input: unknown): AnchorUninstallState {

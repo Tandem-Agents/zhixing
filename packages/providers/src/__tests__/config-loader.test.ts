@@ -160,7 +160,7 @@ describe("loadConfig", () => {
     // 守护"模板不再硬编码 vendor、与推荐表零漂移"——双源回归会在此失败。
     expect(config.llm?.light?.provider).toBe(ROLE_RECOMMENDATIONS.light?.provider);
     expect(config.llm?.light?.model).toBe(ROLE_RECOMMENDATIONS.light?.model);
-    // 模板不含 providers 字段（已删除——provider 资源在 credentials.json）
+    // 模板不含 providers 字段（provider 凭据由 SecretStore 管理）。
     expect((config as Record<string, unknown>).providers).toBeUndefined();
     // messaging 空对象（启用列表，用户用时手添）
     expect(config.messaging).toEqual({});

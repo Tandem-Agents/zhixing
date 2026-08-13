@@ -26,7 +26,7 @@ export const modelSection: Section = {
   description: "主模型必填；辅助角色（轻量 / 强力）可选，未配则沿用主模型",
   entries: (state) => {
     // 一次 audit，按 role 分发——避免 buildEntry 内重复遍历
-    const allIssues = checkModel(state.config, state.credentials);
+    const allIssues = checkModel(state.config, { providers: state.credentials.providers });
     // 遍历 ROLE_SPECS（角色集单一事实源）生成入口——新增角色零改动。
     // 标签后带中文括号说明（spec.parenZh：必填/轻量/更强等），让首次用户
     // 一眼看懂每个角色干嘛。
@@ -53,7 +53,7 @@ function buildEntry(
   // checkModel 阻断清单（选填不阻断），其"是否就绪"只能由此真值谓词判定，
   // 不能用"myIssues 为空"代替（可选角色 myIssues 恒空 ≠ 就绪）。
   const providerHasKey = config?.provider
-    ? hasApiKey(state.credentials, config.provider)
+    ? hasApiKey({ providers: state.credentials.providers }, config.provider)
     : false;
   // main 的 provider —— 用于区分"与主模型同 provider（补 main 那把 key 即
   // 一并就绪）"与"独立 provider（缺则运行时回退 main）"两种引导文案。
@@ -135,4 +135,3 @@ function buildEntryState(
     statusText: `${config!.provider} · ${config!.model}`,
   };
 }
-

@@ -5,7 +5,7 @@
  * 用同一逻辑——避免分裂实现。
  *
  * 流程：
- *   1. 加载公开配置，并在同一协调区完成旧凭据清退与 SecretStore 加载
+ *   1. 加载公开配置，并从 SecretStore 读取同一代凭据快照
  *   2. validateConfigSemantics —— 含废弃字段 → semantic-error
  *   3. checkModel —— 缺失则触发编辑器(messaging 可选,不在宿主启动拦截)
  *   4. 编辑器完成 → reload 后返回 ready
@@ -25,7 +25,7 @@ import {
   CredentialsSchemaError,
   getGlobalConfigPath,
   loadConfig,
-  loadCredentialsWithLegacyMigration,
+  loadCredentialSnapshot,
   resolveHomeDir,
   validateConfigSemantics,
   writeConfig,
@@ -138,9 +138,8 @@ export async function runStartupCheck(
       credentialsHomeDir,
       secretStore,
     );
-    const preparedCredentials = await loadCredentialsWithLegacyMigration({
+    const preparedCredentials = await loadCredentialSnapshot({
       store: secretStore,
-      homeDir: credentialsHomeDir,
       ...(credentialReadGuard
         ? { authorizeCredentialRead: credentialReadGuard }
         : {}),
@@ -162,7 +161,7 @@ export async function runStartupCheck(
   const missingSections: SectionId[] = [];
   const missingLabels: string[] = [];
 
-  const modelIssues = checkModel(config, credentials);
+  const modelIssues = checkModel(config, { providers: credentials.providers });
   if (modelIssues.length > 0) {
     missingSections.push("model");
     missingLabels.push(...modelIssues.map((i) => i.label));
@@ -211,9 +210,8 @@ export async function runStartupCheck(
       credentialsHomeDir,
       secretStore,
     );
-    const updatedCredentialSnapshot = await loadCredentialsWithLegacyMigration({
+    const updatedCredentialSnapshot = await loadCredentialSnapshot({
       store: secretStore,
-      homeDir: credentialsHomeDir,
       ...(updatedCredentialReadGuard
         ? { authorizeCredentialRead: updatedCredentialReadGuard }
         : {}),

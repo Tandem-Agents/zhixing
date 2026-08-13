@@ -54,6 +54,11 @@ const retiredProductionTokens = [
   "workspace.binding.reset",
   "IDeliveryPipeline",
   "EnqueueParams",
+  "JsonTaskStore",
+  "scheduler.json",
+  "WorksceneMigrationMutation",
+  "legacyCheckpoint",
+  "--rollback",
 ];
 const forbiddenWriteOwners = new Set(["MemoryStore", "SkillStore", "AnchorWorksceneRegistry"]);
 const guardedRoots = [
@@ -99,6 +104,7 @@ const coverageGroups = [
   ["light-inference", ["rpc:llm.complete"]],
   ["shutdown", [
     "rpc:server.shutdown",
+    "rpc:server.update.prepare",
     "rpc:server.uninstall.preflight",
     "rpc:server.uninstall.begin",
     "rpc:server.uninstall.continue",
@@ -109,7 +115,8 @@ const coverageGroups = [
     "rpc:device.status",
     "rpc:device.continue",
     "cli:zhixing stop",
-    "cli:zhixing uninstall",
+    "cli:zhixing update",
+    "cli:zhixing app remove",
     "cli:zhixing device list",
     "cli:zhixing device remove",
     "cli:zhixing device status",
@@ -145,6 +152,7 @@ const baseMappingTuples = [
   ["rpc:auth", { exclusion: "connection", reason: exclusions.connection }],
   ["rpc:health", { exclusion: "connection", reason: exclusions.connection }],
   ["cli:zhixing", { exclusion: "composition", reason: exclusions.composition }],
+  ["cli:zhixing app", { exclusion: "composition", reason: exclusions.composition }],
   [
     "cli:zhixing workspace",
     { exclusion: "composition", reason: exclusions.composition },
@@ -158,6 +166,8 @@ const baseMappingTuples = [
     "cli:zhixing serve logs",
     { exclusion: "diagnostic", reason: exclusions.diagnostic },
   ],
+  ["cli:zhixing doctor", { exclusion: "diagnostic", reason: exclusions.diagnostic }],
+  ["rpc:server.update.health", { exclusion: "diagnostic", reason: exclusions.diagnostic }],
   ["slash:help:repl", { exclusion: "localRender", reason: exclusions.localRender }],
   ["slash:model:repl", { exclusion: "localRender", reason: exclusions.localRender }],
 ];
@@ -2049,7 +2059,7 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     plannedLifecycle < 0 || stopInbound < plannedLifecycle || drainInbound < stopInbound ||
     disconnectChannels < drainInbound || quiesceDelivery < disconnectChannels ||
     drainAccepted < quiesceDelivery ||
-    count(command, "await ctx.deliveryStack?.resumeAfterAuthorityTransfer()") !== 4 ||
+    count(command, "await ctx.deliveryStack?.resumeAfterAuthorityTransfer()") !== 5 ||
     count(command, "await protocol.recoverInstalledAuthority()") !== 1 ||
     count(command, "return obligations;") !== 4 ||
     count(conversationProtocol, "async recoverInstalledAuthority(): Promise<number>") !== 1 ||
@@ -3642,6 +3652,7 @@ const coreHostRpcLinkOwners = new Set([
 ]);
 const rpcClientOwners = new Set([
   "packages/cli/src/runtime/core-host-connection.ts",
+  "packages/cli/src/runtime/rpc-program-update-facade.ts",
   "packages/cli/src/runtime/surface-core-host-link.ts",
   "packages/cli/src/serve/stop.ts",
 ]);
