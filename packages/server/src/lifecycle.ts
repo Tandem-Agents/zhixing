@@ -96,6 +96,7 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
   // 1. 启动 server（端口锁内置在 listen() 里）
   const server = await startServer({
     context: opts.context,
+    ...(opts.boundServer ? { boundServer: opts.boundServer } : {}),
     config: opts.config,
     registry: opts.registry,
     wsPath: opts.wsPath,

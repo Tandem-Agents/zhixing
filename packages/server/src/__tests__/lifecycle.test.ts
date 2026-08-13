@@ -16,6 +16,7 @@ import {
 } from "@zhixing/core";
 import { createTempDir } from "@zhixing/test-utils";
 import { runServer, type RunningServer } from "../lifecycle.js";
+import { bindServer } from "../server.js";
 import { createServerContext } from "../context.js";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
 import { readLock, releaseLock } from "../process-lock.js";
@@ -90,6 +91,32 @@ describe("runServer lifecycle (S2.F)", () => {
 
     const lockAfter = await readLock({ pidPath, portPath });
     expect(lockAfter).toBeNull();
+  });
+
+  it("consumes an existing inactive binding without a second listen", async () => {
+    const ctx = createServerContext({
+      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
+      version: "0.1.0-test",
+      token: TEST_TOKEN,
+      scheduler,
+    });
+    const bound = await bindServer({ config: ctx.config });
+    const httpServer = bound.httpServer;
+    expect(await readLock({ pidPath, portPath })).toBeNull();
+    expect((await fetch(`http://127.0.0.1:${bound.port}/api/health`)).status).toBe(503);
+
+    runner = await runServer({
+      context: ctx,
+      boundServer: bound,
+      scheduler,
+      lockPaths: { pidPath, portPath },
+      skipSignalHandlers: true,
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    expect(runner.server.httpServer).toBe(httpServer);
+    expect((await fetch(`http://127.0.0.1:${bound.port}/api/health`)).status).toBe(200);
+    expect((await readLock({ pidPath, portPath }))?.port).toBe(bound.port);
   });
 
   it("writes process metadata to the PID discovery file", async () => {

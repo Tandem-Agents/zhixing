@@ -2083,7 +2083,10 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   const startupRecoveryGate = /this\.\#plannedTransferRuntime\.run\(async \(\) => \{\s+await this\.\#plannedAnchorTarget\?\.recoverBeforeAdmission\(\);\s+await this\.\#plannedAnchorOwner\?\.recoverBeforeAdmission\(\);\s+\}\)/;
   const recovery = assembly.lastIndexOf(recoveryCall);
   const targetRecovery = assembly.indexOf(targetRecoveryCall);
-  const admission = assembly.indexOf("await this.#control.start()", recovery);
+  const startupRecovery = assembly.indexOf(
+    "await this.#recoverStartupState(options.lifecycleAdmissionClosed === true)",
+  );
+  const admission = assembly.indexOf("await this.#startControl()", startupRecovery);
   const reconcile = assembly.indexOf("await reconcilePlannedAnchorTrustFromPeer(");
   const connectionRecovery = assembly.indexOf(
     recoveryCall,
@@ -2094,7 +2097,8 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   if (
     count(assembly, recoveryCall) !== 2 || count(assembly, targetRecoveryCall) !== 1 ||
     !connectionRecoveryGate.test(assembly) || !startupRecoveryGate.test(assembly) ||
-    targetRecovery < 0 || targetRecovery > recovery || recovery < 0 || admission < recovery || reconcile < 0 ||
+    targetRecovery < 0 || targetRecovery > recovery || recovery < 0 || startupRecovery < 0 ||
+    admission < startupRecovery || reconcile < 0 ||
     connectionRecovery < reconcile || freeze < 0 || commitCall < freeze ||
     count(assembly, "registerPlannedAnchorTrustReconciliationService(") !== 1 ||
     count(assembly, "reconcilePlannedAnchorTrustFromPeer(") !== 1 ||
@@ -2918,9 +2922,28 @@ export function inspectConversationAdoptionAssembly(records) {
     failures.push(`${mesh.relative}: mesh lifecycle start/stop boundary is missing`);
   } else {
     const startBody = mesh.text.slice(startBoundary, stopBoundary);
-    const restore = startBody.indexOf("await this.#restoreCommittedTransfers()");
-    const admission = startBody.indexOf("await this.#startControl()");
-    if (restore < 0 || admission < 0 || restore > admission) {
+    const recoveryCall = startBody.indexOf(
+      "await this.#recoverStartupState(options.lifecycleAdmissionClosed === true)",
+    );
+    const admission = startBody.indexOf("await this.#startControl()", recoveryCall);
+    const recoveryBoundary = mesh.text.indexOf("  async #recoverStartupState(");
+    const recoveryEnd = mesh.text.indexOf("  currentAnchorDeviceId():", recoveryBoundary);
+    const recoveryBody = recoveryBoundary >= 0 && recoveryEnd > recoveryBoundary
+      ? mesh.text.slice(recoveryBoundary, recoveryEnd)
+      : "";
+    const restore = recoveryBody.indexOf("await this.#restoreCommittedTransfers()");
+    const prematureAdmission = recoveryBody.indexOf("await this.#startControl()");
+    const lifecycleResume = mesh.text.slice(
+      mesh.text.indexOf("  async recoverAcceptedWorkForLifecycle():"),
+      mesh.text.indexOf("  resumeAcceptingAfterLifecycle():"),
+    );
+    const resumedRecovery = lifecycleResume.indexOf("await this.#recoverStartupState(true)");
+    const resumedAdmission = lifecycleResume.indexOf("await this.#startControl()", resumedRecovery);
+    if (
+      recoveryCall < 0 || admission < recoveryCall || restore < 0 ||
+      (prematureAdmission >= 0 && prematureAdmission < restore) ||
+      resumedRecovery < 0 || resumedAdmission < resumedRecovery
+    ) {
       failures.push(`${mesh.relative}: committed transfers must restore before mesh admission opens`);
     }
   }

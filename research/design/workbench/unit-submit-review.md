@@ -175,22 +175,22 @@
 #### 目标模式：审查并收敛问题列表
 
 ```
-目标：只收敛第 37 单元正式问题列表中同根重开的 U37-01 一个 P0/中和新增的 U37-11 一个 P2/小，使两项真正命中耐久stop phase在successor启动中的可执行恢复，以及`server.shutdown`已支持失败的稳定公开错误投影，并具备可由执行者一次实施的最优方案与完整验收条件。不修改实现，不运行构建或测试，不审查其他问题；U37-02～U37-10与第30～36单元既有结论直接复用，U37-01已验证的delivery admission/sealed、七类source exact revision、local/relay namespace与migration共同闭包不得恢复或扩面，U37-11不得扩到共享dispatcher或其他RPC；价值裁决否定的独立恢复计划、通用lifecycle/codec/错误框架、泛化S7、新runner及第38单元能力不得并入本单元。
+目标：只收敛第 37 单元正式问题列表中同根重开的 U37-01 一个 P0/中，使其真正命中stop successor恢复的进程单飞线性化晚于owner效果、closed admission与exact执行owner混淆的根因，并具备可由执行者一次实施的最优方案与完整验收条件。不修改实现，不运行构建或测试，不审查其他问题；U37-02～U37-11与第30～36单元既有结论直接复用，U37-01已验证的耐久phase执行恢复、delivery admission/sealed、七类source exact revision、local/relay namespace、migration共同闭包、三策略owner安全点及exact-host stop不得恢复或扩面；价值裁决否定的耐久successor claim、第二journal、独立恢复计划、通用server lifecycle/coordinator、泛化S7、新runner及第38单元能力不得并入本单元。
 
-首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 37 单元正式文件中的 U37-01、U37-11，只依据两项最新的事实、价值裁决、最优方案、验收条件和状态继续。
+首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第 37 单元正式文件中的 U37-01，只依据该问题最新的事实、价值裁决、最优方案、验收条件和状态继续。
 
 进度反馈：首次读取状态后报告一次整体进度；此后每完成一个实质阶段、进入等待或暂停以及用户询问时，用百分比报告距离本提示词完成条件的整体进度，并用一句话说明已完成、当前和剩余。不得以单轮、单项或测试命令的进度冒充整体进度，不得为汇报而中断工作或重复检查。
 
 持续执行：
 
-1. 按 `U37-01 → U37-11` 从权威架构、规格和当前生产调用图重建事实链，核准stop operation/artifact/strategy/phase、两根startup投影与`resumeActive()`结果、old host/successor、owner settled/close，以及shutdown lifecycle异常与公开wire error投影的唯一事实源、稳定identity、线性化点、消费者、异常终态、当前损失、受影响审查项、评级和工作量；判断当前描述命中共同根因还是局部表象。同根内容必须合并，独立根因不得互相遮蔽；历史修复与价值裁决未被新生产事实触发时不得恢复旧评级、旧方案或扩面。
-2. 穷尽直接变体：U37-01覆盖anchor/executor、managed/on-demand/foreground、三策略、`gate-closed/work-settled/flushed/ready-to-stop`、十owner空/非空、old/new PID、generic close、各sync/响应窗口与连续重启；U37-11覆盖blocker、owner settlement、flush及未知异常，prepare/trigger前后、真实dispatcher wire投影和合法request重放。每格必须指出稳定identity、唯一事实、效果排序、零副作用边界、消费终态和直接验收；无法解释即继续修正根因。
-3. 以锁定范围内的最优架构审查方案：U37-01只复用现有journal、accepted-work artifact、coordinator与ports，让两根先以closed producer装配并按原strategy/phase补未完成步骤，`work-settled+`恢复already-settled，旧host terminal后清除旧投影再开放successor；U37-11只在`buildServerShutdownMethod()`异常出口复用既有`RpcAppError`/行动映射。方案必须用最少文字说清改什么、怎么改、关键边界及完成判据；不得新增恢复计划、第二事实源、通用lifecycle/codec/错误框架、修改共享dispatcher或其他RPC、S7 registry、新runner、监控、诊断、benchmark或信息采集。发现缺口时直接修正对应原问题，使执行者无需实现猜测即可一次完成。
-4. 两项看似闭合后，对同一份未修改问题列表执行四路冷启动对抗复审：stop successor的phase执行恢复与两根启动顺序、三策略settled/close与exact-host边界、shutdown失败的wire错误投影、生产体验/范围价值及历史裁决边界。各路必须抛开前轮结论，从当前合同和源码主动构造第2步反例，并核查`U37-01↔U37-11`、两项与U37-02～U37-10、第30～36单元既有合同及第38单元边界的直接交界；发现真实反证则修正原记录并重新执行四路复审。
+1. 从权威架构、规格和当前生产调用图重建 U37-01 事实链，核准stop operation/artifact/strategy/phase、anchor/executor两根startup装配、local readiness/lifecycle projection、mesh/worker恢复、`resumeActive()`、`isHostStopped()`与`runServer()` OS端口owner的唯一事实源、稳定identity、线性化点、消费者、异常终态、当前损失、受影响审查项、评级和工作量；判断当前描述命中跨进程执行owner根因还是局部启动顺序表象。同根内容必须合并，历史修复与价值裁决未被新生产事实触发时不得恢复旧评级、旧方案或扩面。
+2. 穷尽直接变体：覆盖anchor/executor、managed/on-demand/foreground、三策略、`accepted/gate-closed/work-settled/flushed/ready-to-stop`、十owner空/非空、单/双successor、端口取得/竞争失败、owner取得后崩溃与接替、old/current PID、generic close、各sync/响应窗口和连续重启。每格必须指出operation/endpoint/进程owner稳定identity、唯一耐久事实、OS单飞线性化点、owner前零副作用边界、消费终态和直接验收；无法解释即继续修正根因。
+3. 以锁定范围内的最优架构审查方案：只复用既有真实server端口owner，把启动窄分为“scan+closed hydrate→inactive-ingress bind→旧host proof与原phase补步→terminal/exact release→激活既有router/ingress”；竞争失败者在任何owner/journal/manager效果前退出，current-successor判断反绑同一exact endpoint，owner崩溃后由OS释放且后继重读原耐久phase。方案必须用最少文字说清改什么、怎么改、关键边界及完成判据；不得新增耐久claim、第二journal/事实源、独立恢复计划、通用server lifecycle/coordinator、修改已验证delivery/source合同、S7 registry、新runner、监控、诊断、benchmark或信息采集。发现缺口时直接修正U37-01，使执行者无需实现猜测即可一次完成。
+4. 问题看似闭合后，对同一份未修改问题列表执行四路冷启动对抗复审：OS端口owner与首个owner效果排序、五phase/三策略/十owner的双successor隔离、owner崩溃接替与inactive-ingress边界、生产体验/范围价值及历史裁决边界。各路必须抛开前轮结论，从当前合同和源码主动构造第2步反例，并核查U37-01与U37-02～U37-11、第30～36单元既有合同及第38单元边界的直接交界；发现真实反证则修正原记录并重新执行四路复审。
 
 只有现有架构无法唯一推出方案，且选择会显著改变产品需求、用户体验、成本或单元边界时才暂停；其余架构选择按整体最优且不留债务自主收敛。
 
-完成条件：同一份未修改问题列表通过四路冷启动对抗复审；U37-01的全部phase、三策略/三形态、old/new host与连续重启变体，以及U37-11的全部已支持shutdown失败/wire投影变体均被根因完整解释，影响面无遗漏，评级与工作量有事实依据，最优方案和验收条件可直接执行，不会恢复已验证delivery/source边界或扩建通用框架，也不会因逐phase、逐入口或逐异常补丁继续返工。满足后明确回复“U37-01、U37-11 的根因与最优方案已闭合”并立即停止。
+完成条件：同一份未修改问题列表通过四路冷启动对抗复审；U37-01的全部双successor、五phase、三策略/三形态、十owner、端口竞争、old/current host、owner崩溃接替与连续重启变体均被根因完整解释，影响面无遗漏，评级与工作量有事实依据，最优方案和验收条件可直接执行，不会恢复耐久claim或已验证delivery/source边界，也不会因逐phase、逐入口或逐owner补丁继续返工。满足后明确回复“U37-01 的根因与最优方案已闭合”并立即停止。
 
 完成任务之后，根据最新的问题情况，把“目标模式：解决问题并完成多角色对抗收口”提示词内容改成本次的问题，格式、规则不变；
 ```
@@ -236,25 +236,23 @@
 ### 2.9 目标模式：解决问题并完成多角色对抗收口
 
 ```text
-目标：彻底解决第 37 单元正式问题列表中同根重开的 U37-01 一个 P0/中和新增的 U37-11 一个 P2/小，闭合耐久 stop phase 在 successor 启动中的可执行恢复，以及 `server.shutdown` 已支持失败的稳定公开错误投影的全部同根直接变体；不得扩展到其他问题或全单元流程。U37-02～U37-10 与第30～36单元既有结论直接复用，U37-01已验证的delivery admission/sealed、七类source exact revision、local/relay namespace与migration共同闭包不得恢复或扩面，U37-11不得扩到共享dispatcher或其他RPC；价值裁决否定的独立恢复计划、通用lifecycle/codec/错误框架、泛化S7、新runner及第38单元能力不得实施。
+目标：彻底解决第 37 单元正式问题列表中同根重开的 U37-01 一个 P0/中，闭合 stop successor 恢复的进程单飞线性化晚于 owner 效果、closed admission 与 exact 执行 owner 混淆的全部同根直接变体；不得扩展到其他问题或全单元流程。U37-02～U37-11 与第30～36单元既有结论直接复用，U37-01已验证的耐久phase执行恢复、delivery admission/sealed、七类source exact revision、local/relay namespace、migration共同闭包、三策略owner安全点及exact-host stop不得恢复或扩面；价值裁决否定的耐久successor claim、第二journal、独立恢复计划、通用server lifecycle/coordinator、泛化S7、新runner及第38单元能力不得实施。
 
-首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第37单元正式文件中的U37-01、U37-11，只依据两项问题最新的根因、价值裁决、F37-56～F37-63固定矩阵、最优方案执行合同、验收条件、反证账和状态继续。
+首个动作及每次续跑或历史压缩后的首个动作：读取《单元审查与修复工作台》及第37单元正式文件中的U37-01，只依据该问题最新的根因、价值裁决、F37-64～F37-71固定矩阵、C37-C25反证账、最优方案执行合同、验收条件和状态继续。
 
 进度反馈：首次读取状态后报告一次整体进度；此后每完成一个实质阶段、进入等待或暂停以及用户询问时，用百分比报告距离本提示词结束条件的整体进度，并用一句话说明已完成、当前和剩余。不得以单轮、单项或测试命令的进度冒充整体进度，不得为汇报而中断工作或重复检查。
 
 持续执行：
 
-1. 修复前从权威架构、规格与当前生产调用图重建F37-56～F37-63固定矩阵。U37-01覆盖anchor/executor、managed/on-demand/foreground、三策略、`accepted/gate-closed/work-settled/flushed/ready-to-stop`、十owner空/非空、old/current host、generic close、各sync/响应窗口与连续重启；U37-11覆盖既有`RpcAppError`、blocker/owner/flush/unknown普通异常、prepare各耐久窗口、真实dispatcher wire投影、合法重放与ready后void trigger。逐格绑定operation/strategy/phase/host/request identity、唯一耐久事实、线性化点、零副作用终态和直接证据，并持续核对其余U37、第30～36与第38单元边界。
-2. 按`U37-01 → U37-11`一次完成。先保持现有stop journal、accepted-work artifact、`HostStopCoordinator`与十owner ports，让anchor和executor两根都在任何producer恢复或listener前扫描active operation，以closed producer装配并投影完整`operationId+strategy+phase+artifactReady+alreadySettled`。异host在任何owner效果前必须用完整endpoint lock、definition与manager投影证明旧代已停止或被当前exact successor取代，证明不足则全部gate保持关闭并终止启动，零owner/terminal/manager效果。
+1. 修复前从权威架构、规格与当前生产调用图重建F37-64～F37-71固定矩阵。覆盖anchor/executor，managed/on-demand/foreground，三策略，`accepted/gate-closed/work-settled/flushed/ready-to-stop`，十owner空/非空，单/双successor，端口取得/竞争失败，owner取得后各phase效果/响应丢失、崩溃接替，old/current PID、generic close与连续重启。逐格绑定operation/artifact/phase、resolved non-zero home endpoint、bound server handle与host generation，唯一耐久事实、OS线性化点、owner前零副作用边界和直接证据，并持续核对其余U37、第30～36与第38单元边界。
+2. 只复用既有真实server端口owner完成窄两段启动。anchor在`setupAssemblyUnits()`前、executor在MCP/authority/workspace/data-plane/job/local owner启动前，先扫描active stop（存在时strict hydrate原operation/artifact/phase并形成closed投影），随后无论扫描有无active operation，所有production启动都必须让server包以最终同home非零`host+port`创建并listen同一种inactive server对象；否则terminal后、activate前到达且扫描为无active的进程仍会绕过早期单飞。HTTP稳定拒绝、WebSocket upgrade不进入router，PID/state/ready不得发布。`EADDRINUSE`失败者立即按原回滚退出，任何owner恢复、journal advance或manager效果计数必须为零。
 
-   随后只按原phase补未完成步骤：`accepted`只关gate并freeze一次，`gate-closed`只hydrate原artifact并按原strategy exact settle/read-back，`work-settled`恢复already-settled且只补flush，`flushed`只补物理安全点，`ready-to-stop`不重做前相；达到ready后只给旧host写terminal，绝不以旧operation停止successor。两根必须消费resume结果，并以同operation窄release复用现有delivery、job、mesh、inbound、channel、scheduler恢复原语，给local owner补exact release/settled清理；terminal后才清startup投影、恢复剩余耐久义务并开放successor，错operation与stale completion零释放。
+   只有持有该exact bound handle的winner可装配closed owners；`recoverAcceptedWork=false`必须真正覆盖local readiness/lifecycle projection及mesh/worker恢复，使closed assembly保持零owner效果。随后`resumeActive()`先完成旧host proof，成功后才触发首个恢复效果并按原phase补步；current-successor判断同时反绑handle、current endpoint lock、旧endpoint、definition及manager投影。`accepted`只补gate/freeze，`gate-closed`只按原artifact/strategy settle，`work-settled`只flush，`flushed`只physical，`ready-to-stop`只terminal；terminal与同operation exact release后，`runServer()`必须消费同一handle并在原对象上激活既有REST/RPC/bridge，再写发现/ready投影，禁止第二次listen、close/rebind。异常回滚关闭同一handle；进程崩溃由OS释放，后继重读原耐久phase再竞争。同步直接相关架构、规格与直接测试；端口0的一次性server测试不得充当lifecycle owner证据。禁止新增耐久claim、第二journal/锁、独立恢复计划、通用server lifecycle/coordinator，禁止修改已验证delivery/source/三策略/exact-stop合同或增加S7 registry、新runner、监控、诊断、benchmark、信息采集。
+3. 按验证手册运行受影响闭包的最小必要类型检查、server inactive-bind/同对象activate、anchor/executor真实双进程端口竞争、逐phase successor恢复与十owner零二次效果直接合同和场景测试，核对必要派生资产；源码有变时按项目常驻规则取得一次同输入构建证据。真实反例必须让两个child process穿过两条production composition root并争用同一非零home endpoint，直接注入五phase、三策略、十owner、旧host live/dead/PID复用、manager不可判定、bind后崩溃、各sync/响应丢失、inactive HTTP/WS与连续接替；不得以mock自报owner/settled/stopped或两个`port=0`实例代替，不得运行包全测、模块回归、配置×故障笛卡尔积或无关验证。失败先归因，实现问题直接修复并回到第2步。
+4. 验证通过后冻结当前交付物指纹，整轮只读逐格重建U37-01事实链；测试通过不得代替功能判断，F37-64～F37-71全部完成后才统一归并。随后对同一指纹执行四个相互隔离的冷启动对抗角色：OS端口owner与首个owner效果排序、五phase/三策略/十owner双successor隔离、owner崩溃接替与inactive-ingress边界、生产体验/范围价值及历史裁决边界。各角色须抛开既有结论，主动重造第1步全部适用反例，并核查U37-01与U37-02～U37-11、第30～36单元既有合同及第38单元边界的直接交界。
+5. 新发现首次出现即以C37-C26起的稳定编号写入正式问题证据与反证账；收口前对C37-C25、历轮反证、专项审查和四路记录做差异审计，每项只能以“同根合并”“当前源码证伪”或“修复后复核通过”关闭。发现真实反证时先修正U37-01的根因、方案、验收和矩阵，再回到第2步；任何交付物修改都会使冻结指纹与对抗结论失效。
 
-   最后只在`buildServerShutdownMethod()`包住`lifecycle.prepare()`：既有`RpcAppError`原样抛出，其他任意异常统一转为现有`RpcAppError(INTERNAL_ERROR)`，message固定为`安全停机未完成`，data固定为`{ action: "retry-same-request" }`，不得复制原message、stack、operation/device/path。失败零trigger；prepare返回ready后仍按原顺序排队一次既有void trigger，不捕获其异步清理错误。同步直接相关架构、规格与直接测试；禁止修改共享dispatcher、其他RPC或已验证delivery/source边界，禁止新增恢复计划、第二事实源、通用lifecycle/codec/错误框架、S7 registry、新runner、监控、诊断、benchmark或信息采集。每个实质阶段完成后立即更新正式状态与证据。
-3. 按验证手册运行受影响闭包的最小必要类型检查、anchor/executor两根逐phase successor恢复、三策略/三形态/十owner与exact-host release、shutdown方法级错误包装及真实registry/dispatcher wire投影直接合同与场景测试，核对必要派生资产；源码有变时按项目常驻规则取得一次同输入构建证据。真实反例必须穿过production startup装配、真实stop coordinator/ports/owner release、RPC registry/dispatcher/connection与shutdown lifecycle，直接注入五phase、old/current PID、generic close、owner非空、各sync/响应丢失、blocker/owner/flush/unknown异常与连续重启；不得以mock自报phase/settled/stopped/wire error或只验证返回值，不得运行包全测、模块回归、配置×故障笛卡尔积或与两项验收无关的验证。失败先归因，实现问题直接修复并回到第2步。
-4. 验证通过后冻结当前交付物指纹，整轮只读逐格重建U37-01、U37-11事实链；测试通过不得代替功能判断，F37-56～F37-63全部完成后才统一归并。随后对同一指纹执行四个相互隔离的冷启动对抗角色：stop successor的phase执行恢复与两根启动顺序、三策略settled/close与exact-host边界、shutdown失败的wire错误投影、生产体验/范围价值及历史裁决边界。各角色须抛开既有结论，主动重造第1步全部适用反例，并核查`U37-01↔U37-11`、两项与U37-02～U37-10、第30～36单元既有合同及第38单元边界的直接交界。
-5. 新发现首次出现即以C37-C23起的稳定编号写入正式问题证据与反证账；收口前对历轮反证、专项审查和四路记录做差异审计，每项只能以“同根合并”“当前源码证伪”或“修复后复核通过”关闭。发现真实反证时先修正对应问题的根因、方案、验收和矩阵，再回到第2步；任何交付物修改都会使冻结指纹与对抗结论失效。
-
-结束条件：同一冻结指纹上的U37-01、U37-11方案全部落地，受影响闭包的最小必要验证通过，专项功能审查与四路冷启动对抗均留下完整矩阵；全部既有及新增同根反证均有耐久处置，证明anchor/executor在五phase、三策略/三形态、old/current host、owner非空、generic close、响应丢失与连续重启下只前滚原operation，旧host terminal前successor零早开/零并发settle，`work-settled+`零二次效果，terminal后exact release并恰一恢复剩余义务；shutdown已支持prepare失败在真实wire上只产生固定code/message/data且零raw、零trigger，既有`RpcAppError`与ready后void trigger语义不变。U37-02～U37-10与第30～36单元结论不变，第38单元能力未提前实施，两项均已更新为“已验证”。满足后明确报告“U37-01、U37-11 两项问题已彻底解决”并立即停止；不得进入全单元终审或单元提交验证。
+结束条件：同一冻结指纹上的U37-01方案全部落地，受影响闭包的最小必要验证通过，专项功能审查与四路冷启动对抗均留下完整矩阵；C37-C25及新增同根反证全部有耐久处置，证明anchor/executor在五phase、三策略/三形态、十owner、双successor、old/current host、端口竞争、owner崩溃接替、generic close、效果/响应丢失与连续重启下，失败者owner/journal/manager效果恒零，任一时刻仅exact bound handle持有者前滚原operation，inactive ingress零分派，`work-settled+`零二次效果，terminal/exact release后同一server对象才激活；失主后后继只重读原phase且不需要耐久claim。U37-02～U37-11与第30～36单元结论不变，第38单元能力未提前实施，U37-01已更新为“已验证”。满足后明确报告“U37-01 问题已彻底解决”并立即停止；不得进入全单元终审或单元提交验证。
 
 完成任务之后，执行“修复后更新独立审查清单状态”：凡受本轮生产实现、公共合同或直接测试变更影响的 `[!]`、`[x]` 节点一律改为 `[~]` 并作废旧证据，未受影响的 `[x]` 保持不变；修复验证、问题“已验证”、专项功能审查或多角色对抗通过均不得直接产生 `[x]`。若本轮修改了生产文件却没有任何受影响节点变为 `[~]`，立即停止并报告状态映射错误。
 ```
@@ -273,7 +271,7 @@
 - **架构空洞判定**：总纲 §10～§15、规格 §1～§12 与 §15 第 37 行/字段级协议、D37-01～D37-09 已唯一确定产品行为、稳定身份、阶段顺序、取消边界、恢复终态、体验和后继隔离；无须以实现假设补齐且会改变产品结果的真实架构空洞。
 - **状态约定**：[ ] 未审；[x] 已完成且无 P0/P1；[!] 存在 P0/P1；[~] 输入变化须重审。
 
-> **清单状态**：0 项 [ ]、33 项 [x]、7 项 [!]、0 项 [~]；本轮只审查8个输入变化节点并直接复用32个事实未变的`[x]`。P37-18已按同根重开转入正式U37-01（P0/中），P37-19已转入正式U37-11（P2/小）；两类源问题表已清空，7个`[!]`须待正式问题修复后按影响范围改为`[~]`。
+> **清单状态**：0 项 `[ ]`、28 项 `[x]`、12 项 `[!]`、0 项 `[~]`；本轮已逐项完成17个失效节点的独立重审并复用23个输入未变节点。12个阻断节点由同一stop successor执行owner缺口导致；P37-20经反向价值裁决改写后已同根转入正式U37-01（P0/中、待修复），本工作台问题列表已清空。`server.shutdown`稳定错误投影及其安全、分层边界通过。
 
 ### 来源覆盖
 
@@ -400,22 +398,22 @@
 
 ### 审查项
 
-> 修复后状态更新：本批生产实现、公共合同与直接测试变化使17项成为`[~]`，旧证据及独立深审计数已作废；其余23项输入未变，继续保持`[x]`。当前零`[!]`，专项修复验证、问题“已验证”和多角色对抗均未直接产生`[x]`。
+> U37-01修复已改变stop successor执行owner、server ingress、两条production composition root、closed recovery、exact-host判断及直接证据输入。原12个`[!]`按“修复后更新独立审查清单状态”统一改为`[~]`并作废旧证据；其余28个输入未变的`[x]`继续复用。修复验证与正式问题“已验证”不构成独立审查通过。
 
 | 编号 | 状态 | 审查对象 | 独立通过条件与可复核证据 |
 | --- | --- | --- | --- |
-| IR37-01 | [~] | 单元身份与有限边界 | 本轮因权威需求、总纲与规格新增stop successor及shutdown错误稳定投影合同而失效；旧证据已作废、独立深审计数清零，待按当前冻结指纹重新审查。 |
+| IR37-01 | [x] | 单元身份与有限边界 | 本轮独立重审：当前差异只补第37单元既有stop operation逐phase successor恢复和`server.shutdown`方法级错误投影；实现复用既有journal、artifact、owner ports、`RpcAppError`与生产根，未引入独立恢复计划、通用错误框架或Unit38能力。来源补充与实现边界一致，无P0/P1范围问题。 |
 | IR37-02 | [x] | strict lifecycle DTO/codec | `device-lifecycle` identity/record/decision/evidence 继续 exact-key、version、phase 与签名严格解码；新增 backup `gate-closed→work-settled→flushed` 顺序已进入 reducer，delivery `lifecycleBinding` 亦在 replay 前 strict decode owner/id/revision exact-set。未发现非规范输入可越过 codec。 |
 | IR37-03 | [x] | stable identity 与 subject 单飞 | stop identity现必含`localDeviceId`，reducer在`home+host`外同时占用`home+device`；removal/uninstall占同一本机device subject，三路径durable accept恰一。`DeviceLifecycleJournal.active()`对双subject去重，settle/seal/release只消费调用参数中的exact operationId，已删除进程级可变owner。 |
 | IR37-04 | [x] | phase/abort/terminal reducer | stop、removal、migration 与 recovery-backup 的合法相邻 phase、不可逆点、abort/terminal 幂等和冲突拒绝均由同一 reducer 固定；新 backup closure phase 顺序与规格一致，未发现跳 phase 或 terminal 回退。 |
-| IR37-05 | [~] | 唯一物理日志与 transaction | 本轮因startup phase运行时投影、消费与exact release输入变化而失效；旧证据已作废、独立深审计数清零，待按当前冻结指纹重新审查。 |
+| IR37-05 | [x] | 唯一物理日志与 transaction | 本轮独立重审：stop identity、phase、artifact与terminal仍只来自同一本机`AuthorityCommitLog`；`startupLifecycle`、`alreadySettled`及delivery admission均由该耐久事实派生，root-local release只消费exact operation且进程重启会重新投影，不形成第二耐久事实源。未发现无日志决定或跨日志提交，结论无P0/P1。 |
 | IR37-06 | [x] | evidence retention/GC | stop accepted-work artifact由 `gate-closed` evidence 保留；backup retirement transaction 同 envelope 写 artifact evidence 并声明 candidate reference，后继 phase/terminal candidateReferences 继续保留。缺失、错 digest、非 canonical 或歧义 artifact 均在 settlement/checkpoint/cleanup 前拒绝，普通无引用 artifact 仍按现有 GC。 |
-| IR37-07 | [~] | stop 入口与本机授权 | 本轮因stop RPC/OS/executor入口消费resume结果及错误投影变化而失效；旧证据已作废、独立深审计数清零，待按当前冻结指纹重新审查。 |
-| IR37-08 | [~] | stop gate | 本轮因stop closed-startup与artifact恢复时点变化而失效；旧证据已作废、独立深审计数清零，待按当前冻结指纹重新审查。 |
-| IR37-09 | [~] | stop 三策略 accepted-work | 本轮因三策略phase恢复、already-settled与剩余义务恢复变化而失效；旧证据已作废、独立深审计数清零，待按当前冻结指纹重新审查。 |
-| IR37-10 | [~] | flush 与资源安全点 | 本轮因work-settled/flushed/ready的补步与release顺序变化而失效；旧证据已作废、独立深审计数清零，待按当前冻结指纹重新审查。 |
-| IR37-11 | [~] | exact host stop/future preservation | 本轮因旧host exact stopped/replaced读证明变化而失效；旧证据已作废、独立深审计数清零，待按当前冻结指纹重新审查。 |
-| IR37-12 | [~] | stop 故障恢复 | 本轮因五phase响应丢失、连续重启与successor恢复变化而失效；旧证据已作废、独立深审计数清零，待按当前冻结指纹重新审查。 |
+| IR37-07 | [~] | stop 入口与本机授权 | U37-01修改了入口授权输入：两根现于首个owner效果前取得同一最终非零home端点的inactive OS owner。原`[!]`证据对应旧调用顺序，已失效；待独立重审真实入口、竞争loser零效果与proof-before-effect。 |
+| IR37-08 | [~] | stop gate | U37-01把local readiness/lifecycle projection及mesh/worker恢复纳入`recoverAcceptedWork=false`的closed边界。原`[!]`证据已失效；待独立重审closed assembly是否在全部直接消费者上保持零owner效果。 |
+| IR37-09 | [~] | stop 三策略 accepted-work | U37-01改变freeze前的跨进程执行owner与closed恢复顺序，三策略仍复用原frozen `id/revision`合同。原`[!]`证据已失效；待独立重审双successor、五phase与三策略交界。 |
+| IR37-10 | [~] | flush 与资源安全点 | U37-01把composition-root效果置于exact bound owner之后并延迟closed恢复。原`[!]`证据已失效；待独立重审`work-settled+`是否零二次owner效果及flush/physical唯一执行。 |
+| IR37-11 | [~] | exact host stop/future preservation | U37-01新增共享exact successor谓词，反绑old/current PID、端口与实际bound handle，managed链继续复验definition/manager。原`[!]`证据已失效；待独立重审current-owner与future-preservation边界。 |
+| IR37-12 | [~] | stop 故障恢复 | U37-01新增真实非零端口竞争、inactive ingress、winner崩溃接替及同对象activate证据。原`[!]`证据已失效；待独立重审五phase、双successor和连续重启完整故障链。 |
 | IR37-13 | [x] | removal effect-free preflight 与名称体验 | current issuer 先耐久 accepted/selector guard，reachable target 随后只读 local owner 与 external owner 投影并外置 preflight；此时尚未关闭本地域 gate、未 transfer/delete/revoke。用户决定前返回冻结名称/数量；离线路径明确投影 local data unknown，不伪造空集已清理。 |
 | IR37-14 | [x] | issuer accepted 与 lifecycle guard | issuer accepted identity 冻结 target member public key/device-key generation、issuer 与 trust ancestor；同 subject 单飞及 current-authority guard 在 target 效果前生效，成员换代、竞争 operation、非 current issuer 与错误名称均零后续副作用。 |
 | IR37-15 | [x] | target 两根 accepted/gate | target lifecycle与启动扫描都使用`bootstrapStore.authorityLog()`；两种生产装配均先恢复local active operation，再以closed参数启动mesh/local conversation/job/channel/delivery。decision前关闭local+external gate并重采完整ownerItems，artifact未形成时保持全部producer关闭，形成后只恢复同operation exact work。 |
@@ -435,15 +433,15 @@
 | IR37-29 | [x] | first recovery checkpoint | `force(pre-retirement)`后 coordinator 直接调用同一 checkpoint service 的 `verify(checkpointId,recoveryRoot)`；service从冻结 target read package、用用户 recovery root真解封，严格核验issuer/home/root/manifest/catalog/retained闭包并写耐久 verification，非 status 自报。 |
 | IR37-30 | [x] | retirement/final checkpoint | recovery-backup先真解封验证pre-checkpoint；确认时在同一transaction反绑十owner artifact与retirement decision。逐项immediate安全settlement/read-back后写`flushed`，从该lifecycle record真实LSN取水位，final checkpoint用同root真解封且要求`upToLsn>=flushedLsn`；startup按phase恢复sealed，未通过不得cleanup。 |
 | IR37-31 | [x] | uninstall cleanup/terminal | migration与backup均先完成各自accepted-work闭包再进入cleanup。cleanup只遍历冻结current-home roots，walker与SecretStore按128固定批次、governor前滚；随后exact supervisor unregister、非device-key秘密、cleanup-complete/ready、issuer terminal、exact device-key compare-delete、本机terminal与安全退出，错slot/错home零误删。 |
-| IR37-32 | [~] | pre-runtime recovery/non-resurrection | 本轮因anchor/executor启动扫描、closed producer及terminal后恢复变化而失效；旧证据已作废、独立深审计数清零，待按当前冻结指纹重新审查。 |
-| IR37-33 | [~] | RPC/CLI/mesh ownership与隐私 | 本轮因server.shutdown方法级公开错误投影变化而失效；旧证据已作废、独立深审计数清零，待按当前冻结指纹重新审查。 |
-| IR37-34 | [~] | complete product journeys | 本轮因停机崩溃恢复完整产品旅程变化而失效；旧证据已作废、独立深审计数清零，待按当前冻结指纹重新审查。 |
-| IR37-35 | [~] | production roots/profile exact-set | 本轮因anchor/executor生产根与profile装配变化而失效；旧证据已作废、独立深审计数清零，待按当前冻结指纹重新审查。 |
-| IR37-36 | [~] | fixed fault/recovery matrix | 本轮因五phase、两根、wire错误固定故障矩阵变化而失效；旧证据已作废、独立深审计数清零，待按当前冻结指纹重新审查。 |
-| IR37-37 | [~] | security/secrets/isolation | 本轮因公开raw错误隔离与内部身份不泄漏边界变化而失效；旧证据已作废、独立深审计数清零，待按当前冻结指纹重新审查。 |
-| IR37-38 | [~] | resource/cancel/lock order | 本轮因root-local exact release、owner reopen及资源顺序变化而失效；旧证据已作废、独立深审计数清零，待按当前冻结指纹重新审查。 |
-| IR37-39 | [~] | layering/compat/Unit38 boundary | 本轮因复用既有lifecycle/RpcAppError且不越Unit38的分层输入变化而失效；旧证据已作废、独立深审计数清零，待按当前冻结指纹重新审查。 |
-| IR37-40 | [~] | registry/S7 与证据充分性 | 本轮因直接测试、S7描述符、构建与专项证据输入变化而失效；旧证据已作废、独立深审计数清零，待按当前冻结指纹重新审查。 |
+| IR37-32 | [~] | pre-runtime recovery/non-resurrection | U37-01把所有production启动的inactive bind前移到pre-server owner装配前，并将closed恢复延后至old-host proof。原`[!]`证据已失效；待独立重审两根启动顺序、terminal/exact release与non-resurrection。 |
+| IR37-33 | [x] | RPC/CLI/mesh ownership与隐私 | 本轮独立重审：router仍先执行认证，handler首效果前保留loopback与strict params门禁；`lifecycle.prepare()`的既有`RpcAppError`原样投影，其他throwable被固定为`INTERNAL_ERROR/安全停机未完成/{action:retry-same-request}`，真实dispatcher只收到固定data且失败零trigger。未改共享dispatcher、其他RPC或mesh授权，零raw内部身份泄漏，无P0/P1。 |
+| IR37-34 | [~] | complete product journeys | U37-01改变停机后自动/显式重启旅程的可见边界：恢复期间同一inactive server稳定拒绝，原对象只在terminal/release后激活。原`[!]`证据已失效；待独立重审用户旅程及连续接替。 |
+| IR37-35 | [~] | production roots/profile exact-set | U37-01同时修改anchor与executor-only生产根，并覆盖managed/on-demand/foreground共享端点与closed装配。原`[!]`证据已失效；待独立重审两根完整装配和profile exact-set。 |
+| IR37-36 | [~] | fixed fault/recovery matrix | U37-01扩充F37-64～F37-71与双进程非零端点、inactive HTTP/WS、崩溃接替、exact endpoint反例。原`[!]`证据已失效；待独立重审固定矩阵的完整性与证据比例性。 |
+| IR37-37 | [x] | security/secrets/isolation | 本轮独立重审：shutdown普通异常在方法边界被替换为固定错误，原message、stack、operation/device/path均不进入wire；既有`RpcAppError`仅保留已支持公开行动。stop successor改动没有新增secret读取、跨home路径、远端授权或公开拓扑字段，localDevice/endpoint只留内部生命周期事实。未发现P0/P1安全或隔离问题。 |
+| IR37-38 | [~] | resource/cancel/lock order | U37-01把唯一OS端口owner前移并由同一handle贯穿恢复、激活与close；三策略/cancel合同未改。原`[!]`证据已失效；待独立重审锁序、资源上界、异常回滚与失主后OS释放。 |
+| IR37-39 | [x] | layering/compat/Unit38 boundary | 本轮独立重审：依赖方向仍是core lifecycle/delivery原语→CLI生产装配与server公开投影，未新增跨包反向依赖、通用恢复/错误框架、新runner、升级/替换/回滚或发布能力；第30～36单元既有owner、delivery、supervisor接口只被组合使用。当前阻断是Unit37内部启动仲裁缺口，不是分层或Unit38越界，故本项无P0/P1。 |
+| IR37-40 | [~] | registry/S7 与证据充分性 | U37-01修改直接测试、既有S7有限结构检查与最终构建输入，新增production bind原语的真实child-process竞争及两根源码顺序合同。原`[!]`及其证据均失效；待独立审查判断当前证据能否充分证明composition-root单飞。 |
 
 ---
 
@@ -466,4 +464,4 @@
 | 编号 | 问题描述 | 产生的影响 | 最优解决方案 | 工作量评估 | 问题评级 |
 | --- | --- | --- | --- | --- | --- |
 
-> **独立审查结论**：当前未通过。40项状态为23项`[x]`、0项`[!]`、17项`[~]`、零`[ ]`；U37-01/U37-11已修复并在专项冻结指纹上验证，但17项受影响节点必须按当前交付物完成独立重审后才能重新判定通过或封版。
+> **独立审查结论**：待重审。当前40项为28项`[x]`、12项`[~]`、零`[!]`/`[ ]`；两类源问题列表均为空。12项旧阻断证据已因U37-01生产实现、公共合同和直接测试变化而作废，必须按当前交付物独立重审；修复验证和正式问题“已验证”不代表清单通过，当前不得封版。

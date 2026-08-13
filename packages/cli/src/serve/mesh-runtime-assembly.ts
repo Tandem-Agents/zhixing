@@ -383,6 +383,8 @@ export class MeshRuntimeAssembly {
   #started = false;
   #controlStarted = false;
   #closed = false;
+  #startupRecoveryComplete = false;
+  #startupRecovery: Promise<void> | undefined;
   #postInstallTransitionPending = false;
   #observedIssuerDeviceId: string;
 
@@ -1461,31 +1463,12 @@ export class MeshRuntimeAssembly {
     if (this.#closed) throw new Error("Mesh runtime assembly is closed");
     if (this.#started) return;
     try {
-      for (const operationId of await this.#deviceRemovalTarget.restoreLocalAdmissionGate()) {
-        if (
-          this.#localDeviceRemovalOperation &&
-          this.#localDeviceRemovalOperation !== operationId
-        ) {
-          throw new Error("Conflicting local device removal operations cannot share admission");
-        }
-        this.#localDeviceRemovalOperation = operationId;
-      }
-      await this.#plannedTransferRuntime.run(async () => {
-        await this.#plannedAnchorTarget?.recoverBeforeAdmission();
-        await this.#plannedAnchorOwner?.recoverBeforeAdmission();
-      });
-      await this.#deviceRemovalAuthority?.resumeActive();
-      await this.#restoreCommittedTransfers();
       if (options.recoverAcceptedWork !== false) {
-        if (options.lifecycleAdmissionClosed) {
-          await this.#worker?.recoverAcceptedWorkForLifecycle();
-        } else {
-          await this.#worker?.recover();
-        }
+        await this.#recoverStartupState(options.lifecycleAdmissionClosed === true);
       }
       if (options.lifecycleAdmissionClosed) this.#worker?.stopAccepting();
       this.#started = true;
-      if (!this.#plannedAnchorPostInstall) {
+      if (this.#startupRecoveryComplete && !this.#plannedAnchorPostInstall) {
         await this.#startControl();
       }
     } catch (error) {
@@ -1747,7 +1730,8 @@ export class MeshRuntimeAssembly {
   }
 
   async recoverAcceptedWorkForLifecycle(): Promise<void> {
-    await this.#worker?.recoverAcceptedWorkForLifecycle();
+    await this.#recoverStartupState(true);
+    if (!this.#plannedAnchorPostInstall) await this.#startControl();
   }
 
   resumeAcceptingAfterLifecycle(): void {
@@ -2023,6 +2007,40 @@ export class MeshRuntimeAssembly {
     if (this.#controlStarted || this.#closed) return;
     await this.#control.start();
     this.#controlStarted = true;
+  }
+
+  async #recoverStartupState(lifecycleAdmissionClosed: boolean): Promise<void> {
+    if (this.#startupRecoveryComplete) return;
+    if (this.#startupRecovery) return this.#startupRecovery;
+    const recovery = (async () => {
+      for (const operationId of await this.#deviceRemovalTarget.restoreLocalAdmissionGate()) {
+        if (
+          this.#localDeviceRemovalOperation &&
+          this.#localDeviceRemovalOperation !== operationId
+        ) {
+          throw new Error("Conflicting local device removal operations cannot share admission");
+        }
+        this.#localDeviceRemovalOperation = operationId;
+      }
+      await this.#plannedTransferRuntime.run(async () => {
+        await this.#plannedAnchorTarget?.recoverBeforeAdmission();
+        await this.#plannedAnchorOwner?.recoverBeforeAdmission();
+      });
+      await this.#deviceRemovalAuthority?.resumeActive();
+      await this.#restoreCommittedTransfers();
+      if (lifecycleAdmissionClosed) {
+        await this.#worker?.recoverAcceptedWorkForLifecycle();
+      } else {
+        await this.#worker?.recover();
+      }
+      this.#startupRecoveryComplete = true;
+    })();
+    this.#startupRecovery = recovery;
+    try {
+      await recovery;
+    } finally {
+      if (this.#startupRecovery === recovery) this.#startupRecovery = undefined;
+    }
   }
 
   currentAnchorDeviceId(): string {

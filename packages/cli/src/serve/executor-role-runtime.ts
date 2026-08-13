@@ -55,6 +55,7 @@ import {
 import { CurrentAnchorFirstPartyRpcRouter } from "./first-party-conversation-mesh.js";
 import {
   createServerContext,
+  bindServer,
   DEFAULT_SERVER_CONFIG,
   getDefaultLogPath,
   isProcessAlive,
@@ -62,6 +63,7 @@ import {
   runServer,
   ServerStateFile,
   type RunningServer,
+  type BoundZhixingServer,
 } from "@zhixing/server";
 import { loadOrCreateToken } from "./token.js";
 import { homeToPort } from "./host-port.js";
@@ -84,6 +86,7 @@ import {
   type HostStopAcceptedWorkPorts,
 } from "./host-stop-lifecycle.js";
 import type { StopHostGeneration } from "@zhixing/core/protocol";
+import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
 
 export async function runExecutorRole(
   options: ServeOptions,
@@ -140,7 +143,9 @@ export async function runExecutorRole(
     ? hostStopAlreadySettled(startupStopOperation.phase)
     : false;
   let startupStopAcceptedWorkRecovered = startupStopRecoverAcceptedWork;
-  await mcpHub.connectAll();
+  const processMode = resolveHostProcessMode(options.managed);
+  const localServerPort = options.port ?? homeToPort(zhixingHome);
+  const localServerHost = options.host ?? DEFAULT_SERVER_CONFIG.host;
 
   const initialAnchorDeviceId = bootstrap.mesh.trust.issuer.deviceId;
   let mesh: MeshRuntimeAssembly | undefined;
@@ -154,6 +159,7 @@ export async function runExecutorRole(
   let evidenceHandler: ExecutorEvidenceHandler | undefined;
   let localConversationOwner: LocalConversationOwnerAssembly | undefined;
   let localConversationServer: RunningServer | undefined;
+  let localServerBinding: BoundZhixingServer | undefined;
   let localServerState: ServerStateFile | undefined;
   let localServerHeartbeat: NodeJS.Timeout | undefined;
   let resolveLifecycleShutdown: (() => void) | undefined;
@@ -162,6 +168,42 @@ export async function runExecutorRole(
   });
   let roleFailure: unknown;
   try {
+    // Establish the same final endpoint owner before MCP, authority, workspace,
+    // data-plane, job or local conversation owners can produce effects.
+    localServerBinding = await bindServer({
+      config: {
+        ...DEFAULT_SERVER_CONFIG,
+        port: localServerPort,
+        host: localServerHost,
+      },
+    });
+    const managedState = processMode === "managed"
+      ? await loadCurrentManagedServiceState("activate", zhixingHome)
+      : undefined;
+    if (processMode === "managed" && !managedState?.spec) {
+      throw new Error("Managed executor stop identity requires the installed service definition");
+    }
+    const endpointLock = {
+      pid: process.pid,
+      port: localServerBinding.port,
+      startTime: processStartTime,
+      startedAt: processStartedAt,
+    } as const;
+    const stopHost: StopHostGeneration = processMode === "managed" && managedState?.spec
+      ? {
+          kind: "managed",
+          serviceId: managedState.spec.serviceId,
+          definitionDigest: managedServiceDefinitionDigest(managedState.spec),
+          instanceId: `${process.pid}:${processStartedAt}`,
+          endpointLock,
+        }
+      : {
+          kind: "foreground",
+          processId: process.pid,
+          startedAt: processStartedAt,
+          endpointLock,
+        };
+    await mcpHub.connectAll();
     const interactions = new DurableConversationInteractionObserver();
     const runtime = new ExecutorRuntimeSubstrate({
       config: startup.config,
@@ -483,34 +525,6 @@ export async function runExecutorRole(
           },
         }
       : {});
-    const processMode = resolveHostProcessMode(options.managed);
-    const localServerPort = options.port ?? homeToPort(zhixingHome);
-    const managedState = processMode === "managed"
-      ? await loadCurrentManagedServiceState("activate", zhixingHome)
-      : undefined;
-    if (processMode === "managed" && !managedState?.spec) {
-      throw new Error("Managed executor stop identity requires the installed service definition");
-    }
-    const endpointLock = {
-      pid: process.pid,
-      port: localServerPort,
-      startTime: processStartTime,
-      startedAt: processStartedAt,
-    } as const;
-    const stopHost: StopHostGeneration = processMode === "managed" && managedState?.spec
-      ? {
-          kind: "managed",
-          serviceId: managedState.spec.serviceId,
-          definitionDigest: managedServiceDefinitionDigest(managedState.spec),
-          instanceId: `${process.pid}:${processStartedAt}`,
-          endpointLock,
-        }
-      : {
-          kind: "foreground",
-          processId: process.pid,
-          startedAt: processStartedAt,
-          endpointLock,
-        };
     const localOwners = new Set<HostStopAcceptedWorkOwner>([
       "conversation",
       "intent",
@@ -642,13 +656,21 @@ export async function runExecutorRole(
       isHostStopped: async (host) => {
         const endpoint = host.endpointLock;
         if (!endpoint) return false;
+        const currentReplacesEndpoint = ownsCurrentSuccessorEndpoint(
+          localServerBinding!,
+          endpoint,
+          endpointLock,
+        );
         if (
           endpoint.pid === endpointLock.pid &&
           endpoint.port === endpointLock.port &&
           endpoint.startTime === endpointLock.startTime &&
           endpoint.startedAt === endpointLock.startedAt
         ) return false;
-        if (isProcessAlive(endpoint.pid)) return false;
+        if (
+          isProcessAlive(endpoint.pid) &&
+          !currentReplacesEndpoint
+        ) return false;
         if (host.kind === "foreground") return host.processId === endpoint.pid;
         try {
           const current = await loadCurrentManagedServiceState("inspect", zhixingHome);
@@ -664,6 +686,7 @@ export async function runExecutorRole(
             stopHost.serviceId === host.serviceId &&
             stopHost.definitionDigest === host.definitionDigest &&
             stopHost.endpointLock?.pid === process.pid &&
+            currentReplacesEndpoint &&
             isProcessAlive(process.pid);
           return inspection.matches && (!inspection.running || currentSuccessor);
         } catch {
@@ -729,6 +752,12 @@ export async function runExecutorRole(
     });
     localConversationServer = await runServer({
       context: serverContext,
+      boundServer: localServerBinding,
+      config: {
+        ...DEFAULT_SERVER_CONFIG,
+        port: localServerPort,
+        host: localServerHost,
+      },
       skipSignalHandlers: true,
       processInfo: {
         version: ZHIXING_CLI_VERSION,
@@ -769,6 +798,7 @@ export async function runExecutorRole(
     if (localServerHeartbeat) clearInterval(localServerHeartbeat);
     await localServerState?.markStopping("graceful");
     await localConversationServer?.shutdown("executor-role-stop");
+    await localServerBinding?.close();
     await localServerState?.markStopped();
     await localServerState?.cleanup();
   } catch (error) {

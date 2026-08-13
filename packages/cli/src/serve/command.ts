@@ -45,6 +45,7 @@ import { DeviceLifecycleJournal } from "@zhixing/core/authority";
 import { protocolDigest, type StopHostGeneration } from "@zhixing/core/protocol";
 import {
   createServerContext,
+  bindServer,
   runServer,
   buildSystemHandlers,
   buildBuiltinRegistry,
@@ -185,6 +186,7 @@ import {
   type HostStopAcceptedWorkSnapshot,
 } from "./host-stop-lifecycle.js";
 import { deleteDeviceKey, deleteDeviceKeyExact } from "@zhixing/mesh/device-key-store";
+import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
@@ -740,6 +742,16 @@ async function runServerProcess(
       },
     };
   }
+
+  // The final home endpoint is the only cross-process startup owner. Every
+  // production start, including the no-active-operation path, acquires it
+  // before any pre-server owner can recover or publish effects. Until the
+  // existing server object is activated it serves only the stable inactive
+  // response and never dispatches HTTP/WebSocket work.
+  const serverBinding = await bindServer({
+    config: { ...DEFAULT_SERVER_CONFIG, port, host },
+  });
+  startupRollback.register("serverBinding.close", () => serverBinding.close());
 
   // 4. CleanupRegistry —— 唯一清理出口。LIFO 语义 + 跨包注入。注册序列封装在
   //    shutdown-chain.ts，方便单测顺序正确性。post-server 接入面在自己 setup 内注册到此。
@@ -1327,7 +1339,7 @@ async function runServerProcess(
   let managedHostStopping = false;
   const stopEndpointLock = {
     pid: process.pid,
-    port,
+    port: serverBinding.port,
     startTime: processStartTime,
     startedAt: processStartedAt,
   } as const;
@@ -1626,13 +1638,21 @@ async function runServerProcess(
     isHostStopped: async (host) => {
       const endpoint = host.endpointLock;
       if (!endpoint) return false;
+      const currentReplacesEndpoint = ownsCurrentSuccessorEndpoint(
+        serverBinding,
+        endpoint,
+        stopEndpointLock,
+      );
       if (
         endpoint.pid === stopEndpointLock.pid &&
         endpoint.port === stopEndpointLock.port &&
         endpoint.startTime === stopEndpointLock.startTime &&
         endpoint.startedAt === stopEndpointLock.startedAt
       ) return false;
-      if (isProcessAlive(endpoint.pid)) return false;
+      if (
+        isProcessAlive(endpoint.pid) &&
+        !currentReplacesEndpoint
+      ) return false;
       if (host.kind === "foreground") return host.processId === endpoint.pid;
       try {
         const state = await loadCurrentManagedServiceState("inspect", zhixingHome);
@@ -1648,6 +1668,7 @@ async function runServerProcess(
           stopHost.serviceId === host.serviceId &&
           stopHost.definitionDigest === host.definitionDigest &&
           stopHost.endpointLock?.pid === process.pid &&
+          currentReplacesEndpoint &&
           isProcessAlive(process.pid);
         return inspection.matches && (!inspection.running || currentSuccessor);
       } catch {
@@ -2247,25 +2268,27 @@ async function runServerProcess(
     throw new Error("Managed host admission changed during startup");
   }
   runner = await runServer({
-      context: serverCtx,
-      registry: serverRegistry,
-      ...(scheduler ? { scheduler } : {}),
-      schedulerEventBus,
-      cleanupRegistry: registry,
-      lockPaths, // 与 registerTailCleanup 使用同一引用——acquire/release 路径一致
-      processInfo: {
-        version: SERVER_VERSION,
-        kind: processMode,
-        logPath: daemonLogPath,
-        startTime: processStartTime,
-        startedAt: processStartedAt,
-      },
-      logger: {
-        info: (msg) => console.log(chalk.dim(`[server] ${msg}`)),
-        warn: (msg) => console.warn(chalk.yellow(`[server] ${msg}`)),
-        error: (msg) => console.error(chalk.red(`[server] ${msg}`)),
-      },
-    });
+    context: serverCtx,
+    boundServer: serverBinding,
+    config: { ...DEFAULT_SERVER_CONFIG, port, host },
+    registry: serverRegistry,
+    ...(scheduler ? { scheduler } : {}),
+    schedulerEventBus,
+    cleanupRegistry: registry,
+    lockPaths, // 与 registerTailCleanup 使用同一引用——acquire/release 路径一致
+    processInfo: {
+      version: SERVER_VERSION,
+      kind: processMode,
+      logPath: daemonLogPath,
+      startTime: processStartTime,
+      startedAt: processStartedAt,
+    },
+    logger: {
+      info: (msg) => console.log(chalk.dim(`[server] ${msg}`)),
+      warn: (msg) => console.warn(chalk.yellow(`[server] ${msg}`)),
+      error: (msg) => console.error(chalk.red(`[server] ${msg}`)),
+    },
+  });
 
   // 组播设施已由 startServer 回填到 serverCtx —— 接通带外事件转发的 lazy ref。
   sessionBroadcastRef.current = serverCtx.sessionBroadcast ?? null;

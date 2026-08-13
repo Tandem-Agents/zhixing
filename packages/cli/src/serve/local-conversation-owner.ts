@@ -832,7 +832,6 @@ export class LocalConversationOwnerAssembly {
           }
           this.#protocol.beginShutdownDrain();
         }
-        await this.#intents.recover();
         for (const transfer of await listConversationTransferStates(
           this.#owner.executorLog,
           this.#owner.verifier,
@@ -844,8 +843,9 @@ export class LocalConversationOwnerAssembly {
             this.#transferringConversations.add(transfer.identity.conversationId);
           }
         }
-        await this.#protocol.recoverReadinessProjections();
         if (!options.lifecycle || options.lifecycle.recoverAcceptedWork) {
+          await this.#intents.recover();
+          await this.#protocol.recoverReadinessProjections();
           await this.#protocol.recover();
           await this.#recovery.recoverAllOpenSessions();
           if (!options.lifecycle) this.#protocol.startRecoveryLoop();
@@ -988,6 +988,7 @@ export class LocalConversationOwnerAssembly {
   }
 
   async recoverAcceptedWorkForLifecycle(): Promise<void> {
+    await this.#intents.recover();
     await this.#protocol.recover();
     await this.#recovery.recoverAllOpenSessions();
   }

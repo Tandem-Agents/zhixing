@@ -1,5 +1,7 @@
 import { localConversationId } from "@zhixing/core";
-import { describe, expect, it } from "vitest";
+import { DeferredGlobalIntentRepository } from "@zhixing/owner-kernel";
+import { describe, expect, it, vi } from "vitest";
+import { ConversationProtocolRuntime } from "../conversation-protocol-runtime.js";
 import type { LocalConversationOwnerPort } from "../local-conversation-owner.js";
 import {
   createLocalOwnerAssemblyFixture,
@@ -7,6 +9,40 @@ import {
 } from "./local-owner-assembly-fixture.js";
 
 const LIFECYCLE_TIMEOUT_MS = 60_000;
+
+describe("closed lifecycle startup", () => {
+  it("defers readiness and accepted-work recovery until the exact lifecycle resumes", async () => {
+    const readiness = vi.spyOn(
+      ConversationProtocolRuntime.prototype,
+      "recoverReadinessProjections",
+    );
+    const intents = vi.spyOn(DeferredGlobalIntentRepository.prototype, "recover");
+    const accepted = vi.spyOn(ConversationProtocolRuntime.prototype, "recover");
+    const fixture = await createLocalOwnerAssemblyFixture({ profile: "executor-only" });
+    try {
+      await fixture.assembly.start({
+        lifecycle: {
+          operationId: "stop-closed-startup",
+          kind: "stop",
+          recoverAcceptedWork: false,
+        },
+      });
+      expect(intents).not.toHaveBeenCalled();
+      expect(readiness).not.toHaveBeenCalled();
+      expect(accepted).not.toHaveBeenCalled();
+
+      await fixture.assembly.recoverAcceptedWorkForLifecycle();
+      expect(intents).toHaveBeenCalledTimes(1);
+      expect(readiness).toHaveBeenCalledTimes(1);
+      expect(accepted).toHaveBeenCalledTimes(1);
+    } finally {
+      await fixture.assembly.close();
+      intents.mockRestore();
+      readiness.mockRestore();
+      accepted.mockRestore();
+    }
+  }, LIFECYCLE_TIMEOUT_MS);
+});
 
 function hostContext(requestId: string) {
   return {

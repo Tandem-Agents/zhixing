@@ -8,7 +8,13 @@
  * - host 默认 127.0.0.1：仅本地访问，规避 SSRF 和未授权访问
  */
 
-import { createServer, type Server as HttpServer } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type Server as HttpServer,
+  type ServerResponse,
+} from "node:http";
+import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { IEventBus, SchedulerEventMap } from "@zhixing/core";
 import { isInternal } from "@zhixing/core";
@@ -60,6 +66,150 @@ export interface StartServerOptions {
   onError?: (err: unknown, context: { method?: string; messageId?: string | number | null }) => void;
   /** Scheduler EventBus（提供则自动桥接事件到 RPC 推送） */
   schedulerEventBus?: IEventBus<SchedulerEventMap>;
+  /** 已在最终端点取得 OS owner、但尚未开放业务入口的 server handle。 */
+  boundServer?: BoundZhixingServer;
+}
+
+export interface BindServerOptions {
+  /** 最终监听配置；生命周期 owner 只能使用与激活阶段完全相同的 host/port。 */
+  config?: Partial<ServerConfig>;
+}
+
+type RequestHandler = (req: IncomingMessage, res: ServerResponse) => void;
+type UpgradeHandler = (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
+
+/**
+ * 已由 OS `listen` 仲裁、尚未开放 REST/RPC 的 server handle。
+ *
+ * 它只表达当前进程对最终 home endpoint 的易失独占权：崩溃时由 OS 自动释放，
+ * 激活必须复用同一个 HTTP server，不能 close/rebind 或第二次 listen。
+ */
+export class BoundZhixingServer {
+  readonly #requested: ServerConfig;
+  #requestHandler: RequestHandler | undefined;
+  #upgradeHandler: UpgradeHandler | undefined;
+  #activeCleanup: (() => Promise<void>) | undefined;
+  #closed = false;
+  #closePromise: Promise<void> | undefined;
+
+  private constructor(
+    readonly httpServer: HttpServer,
+    requested: ServerConfig,
+    readonly port: number,
+    readonly host: string,
+  ) {
+    this.#requested = requested;
+  }
+
+  static async listen(options: BindServerOptions = {}): Promise<BoundZhixingServer> {
+    const requested = { ...DEFAULT_SERVER_CONFIG, ...options.config };
+    let bound: BoundZhixingServer | undefined;
+    const httpServer = createServer((req, res) => {
+      const handler = bound ? bound.#requestHandler : undefined;
+      if (handler) {
+        handler(req, res);
+        return;
+      }
+      res.writeHead(503, {
+        "Connection": "close",
+        "Content-Type": "text/plain; charset=utf-8",
+        "Retry-After": "1",
+      });
+      res.end("Server starting");
+    });
+    httpServer.on("upgrade", (req, socket, head) => {
+      const handler = bound ? bound.#upgradeHandler : undefined;
+      if (handler) {
+        handler(req, socket, head);
+        return;
+      }
+      socket.write(
+        "HTTP/1.1 503 Service Unavailable\r\n" +
+          "Connection: close\r\n" +
+          "Retry-After: 1\r\n\r\n",
+      );
+      socket.destroy();
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const onError = (err: Error) => {
+        httpServer.removeListener("listening", onListening);
+        reject(err);
+      };
+      const onListening = () => {
+        httpServer.removeListener("error", onError);
+        resolve();
+      };
+      httpServer.once("error", onError);
+      httpServer.once("listening", onListening);
+      httpServer.listen(requested.port, requested.host);
+    });
+
+    const addr = httpServer.address();
+    if (addr === null || typeof addr === "string") {
+      await closeHttpServer(httpServer);
+      throw new Error("Server address unavailable after listen");
+    }
+    bound = new BoundZhixingServer(
+      httpServer,
+      requested,
+      addr.port,
+      addr.address,
+    );
+    return bound;
+  }
+
+  get listening(): boolean {
+    return !this.#closed && this.httpServer.listening;
+  }
+
+  ownsEndpoint(port: number): boolean {
+    return this.listening && this.port === port;
+  }
+
+  /** @internal 仅由 startServer 在完整上下文就绪后调用。 */
+  activate(input: {
+    readonly config: ServerConfig;
+    readonly requestHandler: RequestHandler;
+    readonly upgradeHandler: UpgradeHandler;
+    readonly cleanup: () => Promise<void>;
+  }): void {
+    if (this.#closed || !this.httpServer.listening) {
+      throw new Error("Cannot activate a closed server binding");
+    }
+    if (this.#requestHandler || this.#upgradeHandler || this.#activeCleanup) {
+      throw new Error("Server binding is already active");
+    }
+    if (
+      input.config.host !== this.#requested.host ||
+      input.config.port !== this.#requested.port
+    ) {
+      throw new Error("Server activation does not match the bound endpoint request");
+    }
+    this.#activeCleanup = input.cleanup;
+    this.#requestHandler = input.requestHandler;
+    this.#upgradeHandler = input.upgradeHandler;
+  }
+
+  async close(): Promise<void> {
+    this.#closePromise ??= (async () => {
+      if (this.#closed) return;
+      this.#closed = true;
+      this.#requestHandler = undefined;
+      this.#upgradeHandler = undefined;
+      if (this.#activeCleanup) {
+        await this.#activeCleanup();
+      } else {
+        await closeHttpServer(this.httpServer);
+      }
+    })();
+    return this.#closePromise;
+  }
+}
+
+/** 在最终 host/port 建立 inactive ingress；不会创建 RPC/REST router 或发布 ready。 */
+export function bindServer(options: BindServerOptions = {}): Promise<BoundZhixingServer> {
+  return BoundZhixingServer.listen(options);
 }
 
 /**
@@ -71,8 +221,10 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
   const ctx = opts.context;
   const wsPath = opts.wsPath ?? "/ws";
   const registry = opts.registry ?? buildBuiltinRegistry();
+  const boundServer = opts.boundServer ?? await bindServer({ config });
+  const httpServer = boundServer.httpServer;
 
-  const httpServer = createServer((req, res) => {
+  const requestHandler: RequestHandler = (req, res) => {
     const routePath = new URL(req.url ?? "/", "http://localhost").pathname;
     const channelRoute = ctx.channelHttpRoutes?.get(routePath);
     if (channelRoute) {
@@ -91,7 +243,7 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
     // 未匹配 → 404
     res.writeHead(404, { "Content-Type": "text/plain" });
     res.end("Not Found");
-  });
+  };
 
   // ─── WebSocket 集成 ───
   // 用 noServer 模式：手动处理 upgrade，便于路径过滤
@@ -101,7 +253,7 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
   ctx.rpcSurfaces = rpcSurfaces;
   const dispatcher = new RpcDispatcher({ registry, server: ctx, onError: opts.onError });
 
-  httpServer.on("upgrade", (req, socket, head) => {
+  const upgradeHandler: UpgradeHandler = (req, socket, head) => {
     const url = req.url ?? "/";
     if (url !== wsPath) {
       socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
@@ -114,7 +266,7 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
     wss.handleUpgrade(req, socket, head, (ws) => {
       attachConnection(ws, loopback);
     });
-  });
+  };
 
   function attachConnection(ws: WebSocket, loopback: boolean): void {
     const connection = createRpcConnection(ws, { loopback });
@@ -136,29 +288,8 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
     });
   }
 
-  // 等待监听就绪
-  await new Promise<void>((resolve, reject) => {
-    const onError = (err: Error) => {
-      httpServer.removeListener("listening", onListening);
-      reject(err);
-    };
-    const onListening = () => {
-      httpServer.removeListener("error", onError);
-      resolve();
-    };
-    httpServer.once("error", onError);
-    httpServer.once("listening", onListening);
-    httpServer.listen(config.port, config.host);
-  });
-
-  // 提取实际监听信息（端口可能由 OS 分配）
-  const addr = httpServer.address();
-  if (addr === null || typeof addr === "string") {
-    throw new Error("Server address unavailable after listen");
-  }
-
   // 回填实际监听地址到 context，供 status 等端点读取
-  ctx.listenAddr = { port: addr.port, host: addr.address };
+  ctx.listenAddr = { port: boundServer.port, host: boundServer.host };
 
   // 回填会话域组播——delta / complete / session.event / session.changed 经
   // observer 名册推送给会话的全部在场接入面(多端同看一个流式 turn 由此成立)。
@@ -191,37 +322,54 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
     },
   });
 
-  let closed = false;
+  let activeClosed = false;
+  const cleanupActive = async () => {
+    if (activeClosed) return;
+    activeClosed = true;
+    // 0. 断开所有通道适配器
+    if (ctx.channels) {
+      await ctx.channels.dispose().catch(() => {});
+    }
+    // 1. 释放所有对话运行时（timer 清理 + 资源回收 + 各会话末窗 onWindowClose）
+    await ctx.conversations?.disposeAll();
+    // 2. 取消事件桥接订阅（否则 scheduler 后续事件还会调 conn.notify）
+    disposeBridge();
+    // 3. 关闭所有 WebSocket（触发 ws.on("close") → 从 connections 移除）
+    for (const conn of connections) {
+      conn.close(1001, "Server shutting down");
+    }
+    // 4. 关闭 ws server（不再接受新连接）
+    wss.close();
+    // 5. 关闭 HTTP server（停止监听 + 等待现有连接结束）
+    await closeHttpServer(httpServer);
+  };
+
+  try {
+    boundServer.activate({ config, requestHandler, upgradeHandler, cleanup: cleanupActive });
+  } catch (error) {
+    disposeBridge();
+    wss.close();
+    await boundServer.close().catch(() => {});
+    throw error;
+  }
 
   return {
-    port: addr.port,
-    host: addr.address,
+    port: boundServer.port,
+    host: boundServer.host,
     httpServer,
     context: ctx,
     registry,
     connections,
     async close() {
-      if (closed) return;
-      closed = true;
-      // 0. 断开所有通道适配器
-      if (ctx.channels) {
-        await ctx.channels.dispose().catch(() => {});
-      }
-      // 1. 释放所有对话运行时（timer 清理 + 资源回收 + 各会话末窗 onWindowClose）
-      await ctx.conversations?.disposeAll();
-      // 2. 取消事件桥接订阅（否则 scheduler 后续事件还会调 conn.notify）
-      disposeBridge();
-      // 3. 关闭所有 WebSocket（触发 ws.on("close") → 从 connections 移除）
-      for (const conn of connections) {
-        conn.close(1001, "Server shutting down");
-      }
-      // 4. 关闭 ws server（不再接受新连接）
-      wss.close();
-      // 5. 关闭 HTTP server（停止监听 + 等待现有连接结束）
-      await new Promise<void>((resolve, reject) => {
-        httpServer.close((err) => (err ? reject(err) : resolve()));
-        httpServer.closeAllConnections();
-      });
+      await boundServer.close();
     },
   };
+}
+
+async function closeHttpServer(httpServer: HttpServer): Promise<void> {
+  if (!httpServer.listening) return;
+  await new Promise<void>((resolve, reject) => {
+    httpServer.close((err) => (err ? reject(err) : resolve()));
+    httpServer.closeAllConnections();
+  });
 }
