@@ -8,7 +8,7 @@ function context(input: {
   trigger?: ReturnType<typeof vi.fn>;
 }): HandlerContext {
   return {
-    connection: { authenticated: true } as never,
+    connection: { authenticated: true, loopback: true } as never,
     server: {
       config: { port: 18900, host: "127.0.0.1" },
       version: "test",

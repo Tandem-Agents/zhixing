@@ -76,13 +76,30 @@ export function buildServerShutdownMethod(): MethodEntry {
     name: "server.shutdown",
     requiresAuth: true,
     async handler(params, ctx): Promise<ServerShutdownResult> {
-      const p = (params ?? {}) as ServerShutdownParams;
+      if (!ctx.connection.loopback) {
+        throw RpcErrors.invalidParams("server.shutdown 只能在当前设备本机执行");
+      }
+      const p = asRecord(params, "server.shutdown");
+      const hasReason = Object.prototype.hasOwnProperty.call(p, "reason");
+      const hasStrategy = Object.prototype.hasOwnProperty.call(p, "strategy");
+      const hasTimeout = Object.prototype.hasOwnProperty.call(p, "timeoutMs");
+      assertExactRecord(
+        p,
+        [
+          "requestId",
+          ...(hasReason ? ["reason"] : []),
+          ...(hasStrategy ? ["strategy"] : []),
+          ...(hasTimeout ? ["timeoutMs"] : []),
+        ],
+        "server.shutdown",
+      );
       if (!isProtocolIdentifier(p.requestId)) {
         throw RpcErrors.invalidParams("server.shutdown requires a stable requestId");
       }
-      const reason = (typeof p.reason === "string" && p.reason.trim()) || "rpc.server.shutdown";
-      const timeoutMs = typeof p.timeoutMs === "number" && p.timeoutMs > 0 ? p.timeoutMs : 30_000;
+      const reason = hasReason ? stableText(p.reason, "server.shutdown reason") : "rpc.server.shutdown";
+      const timeoutMs = hasTimeout ? shutdownTimeoutMs(p.timeoutMs) : 30_000;
       const strategy = normalizeShutdownStrategy(p.strategy);
+      const estimatedCompleteAt = shutdownEstimatedCompleteAt(timeoutMs);
 
       const trigger = ctx.server.requestShutdown;
       const lifecycle = ctx.server.lifecycleShutdown;
@@ -104,7 +121,7 @@ export function buildServerShutdownMethod(): MethodEntry {
         requestId: prepared.requestId,
         phase: prepared.phase,
         strategy,
-        estimatedCompleteAt: new Date(Date.now() + timeoutMs).toISOString(),
+        estimatedCompleteAt,
       };
     },
   };
@@ -931,6 +948,21 @@ function normalizeShutdownStrategy(value: unknown): ServerShutdownStrategy {
   throw RpcErrors.invalidParams(
     'server.shutdown strategy must be "immediate", "drain", or "cancel"',
   );
+}
+
+function shutdownTimeoutMs(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw RpcErrors.invalidParams("server.shutdown timeoutMs must be a finite positive number");
+  }
+  return value;
+}
+
+function shutdownEstimatedCompleteAt(timeoutMs: number): string {
+  const estimated = new Date(Date.now() + timeoutMs);
+  if (!Number.isFinite(estimated.getTime())) {
+    throw RpcErrors.invalidParams("server.shutdown timeoutMs cannot be represented as an ETA");
+  }
+  return estimated.toISOString();
 }
 
 function buildRuntimeControlSnapshot(

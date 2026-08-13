@@ -894,6 +894,12 @@ export class LocalConversationOwnerAssembly {
       this.#state = "closed";
       return;
     }
+    if (this.#hostStopSettledOperationId) {
+      await this.#protocol.stopRecoveryLoop().catch(() => {});
+      await this.#manager.disposeAll().catch(() => {});
+      this.#state = "closed";
+      return;
+    }
     const deadline = Date.now() + this.#closeDrainBudgetMs;
     let failure: unknown;
     let lastReadings = "";
@@ -1022,6 +1028,20 @@ export class LocalConversationOwnerAssembly {
     if (this.#hostStopSettlement) return this.#hostStopSettlement;
     const settlement = (async () => {
       const deadline = Date.now() + timeoutMs;
+      if (strategy === "immediate") {
+        await this.#protocol.stopRecoveryLoop();
+        while (true) {
+          const closure = await this.#protocol.pendingClosureWork();
+          if (!this.#manager.hasActiveWork() && closure.activeLocalLeases === 0) {
+            this.#hostStopSettledOperationId = operationId;
+            return;
+          }
+          if (Date.now() >= deadline) {
+            throw new Error("Host stop could not reach the local durable safe point before its deadline");
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
       if (strategy === "cancel") {
         await this.#manager.abortAllAndWait(
           { kind: "external", origin: "server-shutdown" },
@@ -1061,6 +1081,7 @@ export class LocalConversationOwnerAssembly {
   async assertHostStopAcceptedWorkSettled(
     operationId: string,
     owner: LocalConversationRemovalSnapshot["ownerItems"][number]["owner"],
+    strategy: "immediate" | "drain" | "cancel",
     frozen: readonly { readonly id: string; readonly revision: string }[],
   ): Promise<void> {
     const expected = this.hostStopAcceptedWorkItems(operationId, owner);
@@ -1076,7 +1097,10 @@ export class LocalConversationOwnerAssembly {
       }
       return;
     }
-    if (owner === "intent") return;
+    if (
+      strategy === "immediate" &&
+      (owner === "intent" || owner === "final" || owner === "assignment")
+    ) return;
     if (current.length !== 0) {
       throw new Error(`Host stop ${owner} accepted work is not settled`);
     }

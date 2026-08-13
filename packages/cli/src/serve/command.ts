@@ -1399,6 +1399,7 @@ async function runServerProcess(
       await ctx.localConversationOwner.assertHostStopAcceptedWorkSettled(
         operationId,
         owner as "conversation" | "intent" | "final" | "assignment" | "lease" | "permit",
+        strategy,
         frozen,
       );
       return;
@@ -1422,11 +1423,16 @@ async function runServerProcess(
           : owner === "intent"
             ? closure?.recoveryBacklog ?? 0
             : closure?.activeLocalLeases ?? 0;
-      if (remaining !== 0) throw new Error(`${owner} accepted work is not settled`);
+      const durableImmediateOwner = owner === "intent" || owner === "final" || owner === "assignment";
+      if (remaining !== 0 && !(strategy === "immediate" && durableImmediateOwner)) {
+        throw new Error(`${owner} accepted work is not settled`);
+      }
       return;
     }
     if (owner === "remote") {
-      if (current.length !== 0) throw new Error("Remote accepted work is not settled");
+      if (strategy !== "immediate" && current.length !== 0) {
+        throw new Error("Remote accepted work is not settled");
+      }
       return;
     }
     if (owner === "channel") {

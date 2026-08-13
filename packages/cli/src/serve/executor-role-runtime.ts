@@ -505,19 +505,21 @@ export async function runExecutorRole(
       },
       readBack: async (input: {
         readonly operationId: string;
+        readonly strategy: "immediate" | "drain" | "cancel";
         readonly frozen: readonly HostStopAcceptedWorkItem[];
       }) => {
         if (localOwners.has(owner)) {
           await localConversationOwner!.assertHostStopAcceptedWorkSettled(
             input.operationId,
             owner as "conversation" | "intent" | "final" | "assignment" | "lease" | "permit",
+            input.strategy,
             input.frozen,
           );
           return;
         }
         const current = await captureHostStopWork(owner, input.operationId);
         assertAcceptedWorkSubset(current, input.frozen, `executor host-stop ${owner} read-back`);
-        if (current.length > 0) {
+        if (input.strategy !== "immediate" && current.length > 0) {
           throw new Error(`Executor host-stop ${owner} accepted work is not settled`);
         }
       },

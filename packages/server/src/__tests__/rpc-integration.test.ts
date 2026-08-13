@@ -195,6 +195,18 @@ describe("WebSocket + RPC (S2.C)", () => {
     client.close();
   });
 
+  it("server.shutdown is rejected by the router before its local lifecycle is consulted", async () => {
+    const client = await connect(server.port);
+    const response = await client.request("server.shutdown", {
+      requestId: "unauthenticated-shutdown",
+    });
+    expect(isErrorResponse(response)).toBe(true);
+    if (isErrorResponse(response)) {
+      expect(response.error.code).toBe(RPC_ERROR_CODES.UNAUTHORIZED);
+    }
+    client.close();
+  });
+
   it("methods requiring auth succeed after auth", async () => {
     server.registry.register({
       name: "test.protected",

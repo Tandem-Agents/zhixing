@@ -162,9 +162,149 @@ describe("local conversation owner lifecycle", () => {
         await expect(fixture.assembly.assertHostStopAcceptedWorkSettled(
           "stop-local-owner",
           owner,
+          "immediate",
           frozen,
         )).resolves.toBeUndefined();
       }
+      await fixture.assembly.close();
+      await fixture.authority.stopStorageMaintenance();
+    },
+    LIFECYCLE_TIMEOUT_MS,
+  );
+
+  it(
+    "keeps only the frozen durable local subset for immediate stop",
+    async () => {
+      const fixture = await createLocalOwnerAssemblyFixture({ profile: "anchor-executor" });
+      await fixture.assembly.start();
+      const conversationId = await fixture.port.createConversation();
+      await fixture.port.deferSchedule({
+        conversationId,
+        requestId: "host-stop-durable-intent",
+        mutation: {
+          kind: "schedule-create",
+          spec: {
+            name: "Host stop durable intent",
+            enabled: true,
+            priority: "normal",
+            schedule: { kind: "cron", expr: "0 9 * * *", tz: "Asia/Shanghai" },
+            action: { kind: "agent-turn", prompt: "resume after restart" },
+          },
+        },
+      });
+      await fixture.assembly.closeHostStopAdmission("stop-durable-subset");
+      const frozenIntent = fixture.assembly.hostStopAcceptedWorkItems(
+        "stop-durable-subset",
+        "intent",
+      );
+      expect(frozenIntent).toHaveLength(1);
+
+      await fixture.assembly.settleHostStopAcceptedWork(
+        "stop-durable-subset",
+        "immediate",
+        10_000,
+      );
+      await expect(fixture.assembly.assertHostStopAcceptedWorkSettled(
+        "stop-durable-subset",
+        "intent",
+        "immediate",
+        frozenIntent,
+      )).resolves.toBeUndefined();
+      await expect(fixture.assembly.assertHostStopAcceptedWorkSettled(
+        "stop-durable-subset",
+        "intent",
+        "drain",
+        frozenIntent,
+      )).rejects.toThrow("intent accepted work is not settled");
+      const currentIntent = (await fixture.assembly.preflightForDeviceRemoval(
+        "stop-durable-subset",
+      )).ownerItems
+        .filter((item) => item.owner === "intent")
+        .map(({ id, revision }) => ({ id, revision }));
+      expect(currentIntent).toEqual(frozenIntent);
+
+      await fixture.assembly.close();
+      await fixture.authority.stopStorageMaintenance();
+    },
+    LIFECYCLE_TIMEOUT_MS,
+  );
+
+  it(
+    "waits for an active local turn to reach its durable safe point without cancelling it",
+    async () => {
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => { release = resolve; });
+      const fixture = await createLocalOwnerAssemblyFixture({
+        profile: "anchor-executor",
+        run: async function* (messages) {
+          await released;
+          const assistant = {
+            role: "assistant" as const,
+            content: [{ type: "text" as const, text: "safe point reached" }],
+          };
+          return {
+            agentResult: {
+              reason: "completed" as const,
+              message: assistant,
+              usage: { inputTokens: 1, outputTokens: 1 },
+            },
+            runRecord: {
+              timestamp: new Date().toISOString(),
+              messages: [messages.at(-1)!, assistant],
+              usage: { inputTokens: 1, outputTokens: 1 },
+              source: "interactive" as const,
+            },
+            newMessages: [assistant],
+            durationMs: 1,
+          };
+        },
+      });
+      await fixture.assembly.start();
+      const conversationId = await fixture.port.createConversation();
+      const turn = fixture.port.runTurn({
+        conversationId,
+        text: "finish current work",
+        turnId: "host-stop-active-turn",
+      });
+      await waitFor(() => fixture.runtime.executions() === 1, "active host-stop turn");
+      await fixture.assembly.closeHostStopAdmission("stop-active-turn");
+      const frozenByOwner = Object.fromEntries(
+        (["conversation", "intent", "final", "assignment", "lease", "permit"] as const)
+          .map((owner) => [
+            owner,
+            fixture.assembly.hostStopAcceptedWorkItems("stop-active-turn", owner),
+          ]),
+      );
+
+      let settled = false;
+      const settlement = fixture.assembly.settleHostStopAcceptedWork(
+        "stop-active-turn",
+        "immediate",
+        10_000,
+      ).then(() => { settled = true; });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(settled).toBe(false);
+      expect(fixture.runtime.aborts()).toBe(0);
+      release();
+      await expect(turn).resolves.toMatchObject({ kind: "settled" });
+      await expect(settlement).resolves.toBeUndefined();
+      expect(fixture.runtime.aborts()).toBe(0);
+      for (const owner of [
+        "conversation",
+        "intent",
+        "final",
+        "assignment",
+        "lease",
+        "permit",
+      ] as const) {
+        await expect(fixture.assembly.assertHostStopAcceptedWorkSettled(
+          "stop-active-turn",
+          owner,
+          "immediate",
+          frozenByOwner[owner]!,
+        )).resolves.toBeUndefined();
+      }
+
       await fixture.assembly.close();
       await fixture.authority.stopStorageMaintenance();
     },

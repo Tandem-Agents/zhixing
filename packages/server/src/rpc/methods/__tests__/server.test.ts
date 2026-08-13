@@ -25,7 +25,7 @@ import { RPC_ERROR_CODES } from "../../protocol.js";
 
 function mkCtx(overrides: Partial<HandlerContext["server"]> = {}): HandlerContext {
   return {
-    connection: { authenticated: true } as any,
+    connection: { authenticated: true, loopback: true } as any,
     server: {
       config: { port: 18900, host: "127.0.0.1" } as any,
       version: "0.1.0-test",
@@ -76,6 +76,45 @@ describe("Unit 37 lifecycle facade input", () => {
 });
 
 describe("server.shutdown", () => {
+  it("rejects authenticated non-loopback callers before decoding or lifecycle effects", async () => {
+    const trigger = vi.fn();
+    const prepare = vi.fn();
+    const ctx = mkCtx({ requestShutdown: trigger, lifecycleShutdown: { prepare } });
+    ctx.connection.loopback = false;
+
+    await expect(buildServerShutdownMethod().handler({ malformed: true }, ctx))
+      .rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    expect(prepare).not.toHaveBeenCalled();
+    expect(trigger).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [undefined],
+    [null],
+    [[]],
+    [{}],
+    [{ requestId: "shutdown-invalid", unknown: true }],
+    [{ requestId: "" }],
+    [{ requestId: "shutdown-invalid", reason: null }],
+    [{ requestId: "shutdown-invalid", reason: "" }],
+    [{ requestId: "shutdown-invalid", strategy: "later" }],
+    [{ requestId: "shutdown-invalid", timeoutMs: null }],
+    [{ requestId: "shutdown-invalid", timeoutMs: 0 }],
+    [{ requestId: "shutdown-invalid", timeoutMs: -1 }],
+    [{ requestId: "shutdown-invalid", timeoutMs: Number.NaN }],
+    [{ requestId: "shutdown-invalid", timeoutMs: Number.POSITIVE_INFINITY }],
+    [{ requestId: "shutdown-invalid", timeoutMs: Number.MAX_VALUE }],
+  ])("rejects malformed public input before lifecycle effects: %j", async (params) => {
+    const trigger = vi.fn();
+    const prepare = vi.fn();
+    const ctx = mkCtx({ requestShutdown: trigger, lifecycleShutdown: { prepare } });
+
+    await expect(buildServerShutdownMethod().handler(params, ctx))
+      .rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    expect(prepare).not.toHaveBeenCalled();
+    expect(trigger).not.toHaveBeenCalled();
+  });
+
   it("prepares the durable lifecycle before requesting process shutdown", async () => {
     const trigger = vi.fn();
     const prepare = vi.fn(async (input: ShutdownPrepareInput) => ({
