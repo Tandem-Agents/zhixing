@@ -51,13 +51,17 @@ describe("server.shutdown durable lifecycle", () => {
     expect(order).toEqual(["durable-ready", "shutdown"]);
   });
 
-  it("propagates preparation failure and never acknowledges or triggers shutdown", async () => {
+  it("projects preparation failure without leaking internals and never acknowledges or triggers shutdown", async () => {
     const prepare = vi.fn(async () => { throw new Error("delivery flush failed"); });
     const trigger = vi.fn();
     await expect(buildServerShutdownMethod().handler({
       requestId: "request-stop-2",
       strategy: "cancel",
-    }, context({ prepare, trigger }))).rejects.toThrow("delivery flush failed");
+    }, context({ prepare, trigger }))).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.INTERNAL_ERROR,
+      message: "安全停机未完成",
+      data: { action: "retry-same-request" },
+    });
     expect(trigger).not.toHaveBeenCalled();
   });
 });

@@ -11,11 +11,11 @@
 
 ## 当前状态
 
-- **当前状态**:U37-01专项修复、最小必要验证、同指纹矩阵复核与四路冷启动对抗均已完成，问题状态为“已验证”。本轮生产/公共合同/直接测试变更影响的12个独立审查节点已按规则改为`[~]`并作废旧证据，其余28个`[x]`保持不变；修复验证未直接产生任何`[x]`。U37-02～U37-11既有结论继续复用，尚未进入全单元终审或单元提交验证
-- **连续无新增问题轮数**:0 / 2
-- **交付物是否冻结**:否（U37-01专项交付物已冻结并完成同指纹对抗；独立审查仍有12项`[~]`待重审，故不构成全单元冻结或封版）
-- **交付物文件集**:41个Unit37完整生产、公共合同、直接测试、S7与分布式运行时架构/规格文件；本轮U37-01专项指纹覆盖16个生产、公共合同、直接测试、S7与架构/规格文件，过程账本与独立审查清单不计入专项指纹
-- **当前交付物指纹**:`sha256:b3cf4b54249035744432e2dbd2f1a9260687c102f9114fac9200de0cffd2dee4`（U37-01修复后16文件专项指纹；算法为按固定文件序列连接`path<TAB>file-sha256`后对UTF-8 LF文本再取SHA-256，过程账本与独立审查清单排除）
+- **当前状态**:第37单元已封版；同一92文件最终冻结指纹已完成两轮冻结终审（R37-01～R37-11全部2/2）、独立功能审查与单元提交验证，均零新增且无未解决问题
+- **连续无新增问题轮数**:2 / 2
+- **交付物是否冻结**:是（冻结于HEAD `6866ab0e8e27b860920ab573a2433a26b72ca3dd`及当前未提交的`server.shutdown`直接测试合同修正；过程账本与独立审查工作台不计入功能指纹，可继续登记审查事实）
+- **交付物文件集**:以Unit36封版提交`dd902ad0289c3429b8a2e4e9de8b218b85e22327`为基线，按当前工作树相对基线取集合并排除`research/design/workbench/*`，得到92个文件：CLI 46、core 16、mesh 4、owner-kernel 7、server 14、分布式运行时架构/规格3、S7脚本2；不存在删除项、未归类项或生产文件工作树漂移，唯一交付漂移是已纳入指纹并验证的shutdown直接测试合同修正
+- **当前交付物指纹**:`sha256:2351cb48edce409678cbfe55bfaa0836d5e564757113bc6643433717debfa797`（92条排序后的`path<TAB>file-sha256`以UTF-8 LF连接后取SHA-256；过程账本与独立审查工作台排除）
 - **架构来源**:`research/design/modules/distributed-runtime/always-online-and-local-execution-requirements.md`、`research/design/modules/distributed-runtime/distributed-runtime-charter.md`、`research/design/modules/distributed-runtime/specification.md`、`research/design/modules/distributed-runtime/s2-security-supply-chain-review.md`，以及已定稿开发清单 D37-01～D37-09
 
 ## 固定边界
@@ -32,6 +32,13 @@
 
 | 交付物变化(文件或同类组) | 派生关系与必须同步/核对项 | 低成本检查与证据 | 结论 |
 | ------------------------ | ------------------------- | ---------------- | ---- |
+| core 16文件与owner-kernel 7文件 | lifecycle/delivery导出、DTO/reducer/journal、producer companion及直接合同测试；无lockfile变化 | barrel、codec、journal、authority/pipeline、delivery participant与scheduler直接测试已纳入V37-23；当前workspace build证据V37-21覆盖导出可消费性 | 通过 |
+| CLI 46文件 | 两条production composition root、stop/removal/uninstall、owner/cleanup/recovery与17个直接测试文件；无生成schema或lockfile | 入口与测试精确集合纳入V37-23；当前workspace build证据V37-21有效，CLI既有8个credentials类型基线不属于Unit37且未冒充通过 | 通过 |
+| server 14文件 | lifecycle/registry/RPC、inactive bind与canonical registry golden；fixture只服务真实child-process端口竞争 | canonical registry golden与S7已由V37-22核对；6个直接测试文件纳入V37-23，server类型及workspace build证据有效 | 通过 |
+| mesh 4文件 | checkpoint verify、device-key exact delete及真实recovery-root证据；无新增派生格式 | checkpoint直接测试纳入V37-23；workspace build证据V37-21覆盖当前导出 | 通过 |
+| 分布式运行时架构/规格3文件 | requirements、charter、specification必须与字段级协议、phase和明确排除一致 | 独立审查来源覆盖逐章对账40/40通过；冻结终审按R37-01～R37-11双向复核 | 通过 |
+| S7脚本2文件 | production entry descriptor、mutation测试与server registry golden | V37-22在当前HEAD执行`pnpm s7:lint`，20/20及registry golden通过 | 通过 |
+| 全部92文件闭包 | lockfile、外部schema、其他golden/快照、生成清单 | baseline→HEAD精确集合未包含lockfile或其他派生产物；交付文件工作树/暂存区漂移均为0，`git diff --check`与`git diff --cached --check`通过 | 不适用:除上述registry golden与S7外无其他派生项 |
 
 ## 关键原语核查
 
@@ -39,6 +46,14 @@
 
 | 关键原语 | 唯一事实源 | 生效/线性化点 | 崩溃与竞争插点 | 生产者/消费者 | 时间、空间、重放与队列上界 | 结论 |
 | -------- | ---------- | ------------- | -------------- | ------------- | -------------------------- | ---- |
+| DeviceLifecycleJournal/reducer | 本机既有AuthorityCommitLog中的`device-lifecycle`记录 | accepted/各phase/abort/terminal所在commit envelope | 每次sync前后、同subject竞争、坏尾与连续重启 | stop、target removal、migration/backup uninstall及startup resumer | 每operation有限phase；同subject恰一active；terminal后不回退 | 通过 |
+| accepted-work artifact与evidence retention | canonical artifact bytes/digest及lifecycle evidence/candidate reference | gate全关后artifact引用与父decision同transaction耐久 | artifact写/引用/GC、错ref、响应丢失 | 十owner ports、delivery admission、stop/removal/uninstall恢复 | owner exact-set有限；引用随非终态与terminal证据保留 | 通过 |
+| DeliveryAuthority lifecycle admission/sealed | authority log中的delivery item、operation binding与耐久phase投影 | `coordinate()`串行边界的install/seal/enqueue | fresh/late producer、同id换代、效果/响应丢失与重启 | 七类source companion、pipeline及三条lifecycle路径 | source与pending集合受artifact/authority记录约束；transport重试沿既有上界 | 通过 |
+| HostStopCoordinator与bound server handle | stop operation/artifact/phase及同home真实OS socket owner | 同一非零生产endpoint的inactive bind先于任何owner效果 | 双successor、EADDRINUSE、bind后崩溃、五phase重放 | anchor/executor两根、十owner ports、runServer/manager | 任一时刻一个exact handle；inactive ingress零分派；失主由OS释放 | 通过 |
+| removal双根终态与terminal-only replay | target/issuer各自既有AuthorityCommitLog及签名receipt | target abort/ready恰一与issuer revoke/terminal commit | 在线转离线、receipt丢失、revoked peer与连续重启 | issuer/target runtime、认证mesh、trust/exposure消费者 | terminal-only方法fixed exact-set；历史重放只读/补既有effect | 通过 |
+| checkpoint真解封与retirement水位 | checkpoint service generation、package、recovery root输入与lifecycle真实record LSN | 同root`verify()`且`upToLsn>=flushedLsn` | force/replicate/read/unseal/verify各窗、篡改和重启 | backup uninstall、checkpoint target与cleanup gate | 双checkpoint有限；root不耐久；失败保持原operation gate | 通过 |
+| cleanup governor与key-last | frozen current-home roots、SecretStore exact slot及lifecycle phase | 固定128项批次read-back，issuer terminal后exact compare-delete key | 深树/链接、批次中断、错slot、supervisor响应丢失 | cleanup、managed supervisor、SecretStore与pre-runtime resumer | 单step<=128 dirent/secret；其他home/workspace/checkpoint零删除 | 通过 |
+| 公开facade授权与strict codec | router auth、connection loopback、exact decoder与既有RpcAppError | auth→method guard→decode→prepare/trigger | unknown/错类型/非有限值、普通异常、响应丢失 | CLI/server/mesh公开入口及wire消费者 | 固定方法/字段集合；错误零raw且不创建诊断/历史框架 | 通过 |
 
 ## 审查结论复用表
 
@@ -50,6 +65,17 @@
 
 | 编号 | 审查目标与核查面 | 登记输入（关键实现、全部生产点、消费路径、测试） | 最近通过的输入指纹（算法 + 值） | 重审条件 | 当前状态 | 有效独立深审 | 本轮结论与证据 |
 | ---- | ---------------- | ------------------------------------------------ | ------------------------------- | -------- | -------- | ------------ | -------------- |
+| R37-01 | 边界、协议、identity、phase与唯一日志 | core protocol/journal/commit-log/state，三条生产根，codec/journal/protocol测试，架构/规格 | `sha256:2351cb48…fa797` | DTO、reducer、journal、subject或来源边界变化 | 通过 | 2/2 | 终审一：来源→phase/identity/日志正向闭合；终审二：从乱序、冲突accept、abort/terminal重放与坏尾反推，strict reducer及同日志transaction均fail-closed；最终仅测试断言变化，协议输入未变，零新增 |
+| R37-02 | accepted-work artifact、delivery producer/admission与终态 | core delivery、owner-kernel companion、CLI十owner ports及其直接测试 | `sha256:2351cb48…fa797` | source/ref/revision、admission/sealed、owner settlement或artifact retention变化 | 通过 | 2/2 | 终审一：producer→artifact→settlement正向闭合；终审二：重造barrier竞争、late/fresh source、错revision、seal响应丢失和重启，串行authority与candidate reference唯一前滚；最终仅测试断言变化，零新增 |
+| R37-03 | stop三策略、两根startup、exact host与故障恢复 | host-stop/stop/command/executor runtime、server bound handle/lifecycle、local/job/mesh owner及直接测试 | `sha256:2351cb48…fa797` | strategy、phase恢复、endpoint/manager、composition root或owner安全点变化 | 通过 | 2/2 | 终审一：两根与五phase功能链闭合；终审二：双successor、EADDRINUSE、bind后崩溃、PID复用、manager不可判定及terminal→activate窗口均由exact handle/phase吸收；最终仅测试断言变化，零新增 |
+| R37-04 | removal preflight/decision/transfer/destroy与abort | removal issuer/target/mesh、local owner、authority transfer、ownerItems及直接测试 | `sha256:2351cb48…fa797` | decision artifact、owner reader、abort/ready或两根装配变化 | 通过 | 2/2 | 终审一：preflight→decision→ready正向闭合；终审二：同id换代、十owner非空、abort/ready竞争、gate/receipt丢失与双根重启均反绑原decision identity；最终仅测试断言变化，零新增 |
+| R37-05 | revoke/exposure/terminal-only/lost终态 | trust/exposure transaction、mesh terminal-only、route/capability/secret及公开状态测试 | `sha256:2351cb48…fa797` | trust identity、peer receipt、route/secret或lost产品合同变化 | 通过 | 2/2 | 终审一：revoke/exposure/terminal正向闭合；终审二：旧peer、迟到receipt、issuer/target响应丢失、lost后设备重现与连续重启不放宽普通admission；最终仅测试断言变化，零新增 |
+| R37-06 | cleanup、supervisor、SecretStore与non-resurrection | cleanup/storage maintenance/managed service/device key/bootstrap及直接测试 | `sha256:2351cb48…fa797` | removable roots、batch/governor、key slot、unregister或startup gate变化 | 通过 | 2/2 | 终审一：cleanup/key/启动顺序正向闭合；终审二：深树/链接、批次中断、unregister丢响应、错slot/跨home及key删后崩溃均有界前滚且零误删；最终仅测试断言变化，零新增 |
+| R37-07 | uninstall migration/backup、checkpoint与retirement | anchor uninstall、checkpoint service/owner、migration、cleanup及CLI/server直接测试 | `sha256:2351cb48…fa797` | transfer/checkpoint/root/LSN、phase顺序或cleanup授权变化 | 通过 | 2/2 | 终审一：两条卸载路径正向闭合；终审二：错root/target/generation、篡改、force/verify响应丢失、flushed水位不足与cleanup中断均停在原phase；最终仅测试断言变化，零新增 |
+| R37-08 | 公开入口、授权、strict输入、错误与产品旅程 | CLI index/facade、server registry/methods/context、removal mesh及直接wire测试 | `sha256:2351cb48…fa797` | method registry、auth/loopback、codec/error mapper或公开文案变化 | 通过 | 2/2 | 终审一：修正后的直接测试全等断言既定`INTERNAL_ERROR/安全停机未完成/retry-same-request`且失败零trigger；终审二：反向注入内部message后确认断言拒绝raw泄露，未认证、远端、strict输入和合法重放边界未变，零新增 |
+| R37-09 | 安全、资源、分层、兼容与Unit38隔离 | secrets/trust/path/permit/governor、包依赖、三份来源与第30～36合同 | `sha256:2351cb48…fa797` | secret/path/capability、共享合同、依赖方向或范围边界变化 | 通过 | 2/2 | 终审一：安全/分层/边界正向闭合；终审二：秘密、路径、许可、governor与依赖反向追踪无扩暴露、无无界step、无新框架或Unit38能力；测试修正仅加强既有隐私合同，零新增 |
+| R37-10 | 测试、registry/S7、派生资产与完整交付闭包 | 全部31个测试入口、fixture/harness、registry golden、S7脚本及92文件manifest | `sha256:2351cb48…fa797` | 测试/fixture/golden/S7/manifest或任一交付文件变化 | 通过 | 2/2 | 终审一：30个Vitest入口取得355项Unit37相关通过证据，S7入口复用20/20；终审二：反向核对两个既有环境基线与一条陈旧断言，均有归因/修正且不掩盖功能失败，92路径零未归类项 |
+| R37-11 | 跨项组合推演 | R37-01～R37-10当前输入指纹与结论，三路径/两根/十owner/checkpoint/cleanup交界 | `sha256:2351cb48…fa797` | 任一R37-01～R37-10边界、输入或结论变化 | 通过 | 2/2 | 终审一：共享identity/状态/锁序及公开错误合同无断点；终审二：交叉重造stop↔removal、removal↔cleanup、uninstall↔checkpoint、startup↔terminal与shutdown失败，既有operation exact事实和固定wire投影均成立，零新增 |
 
 ## 问题列表
 
@@ -429,6 +455,7 @@
 
 | 编号 | 原疑点与已验证事实 | 排除依据与适用边界 | 证据与输入基线 | 重开条件 | 最终裁决 |
 | ---- | ------------------ | ------------------ | -------------- | -------- | -------- |
+| EX37-01 | 原P37-21主张不同host同port可并行listen，使stop successor产生双owner；OS事实成立，但当前公开`zhixing serve`不接受host/port，managed definition/权威配置也无该项，两根均固定使用`127.0.0.1+homeToPort(home)` | 内部`ServeOptions.host/port`和generic server配置是测试/内部接缝，不构成Unit37受支持产品路径；扩StopEndpointLock或新锁无当前用户价值 | 独立审查40/40、价值裁决记录及冻结HEAD `6866ab0e`；当前生产调用图与CLI入口复核 | 公开CLI、managed definition或权威配置新增本机lifecycle host/port，或生产调用图实际向两根传入不同host | 已排除 |
 
 ## 迟发现教训
 
@@ -476,13 +503,17 @@
 | V37-20 | U37-01 inactive bind、同对象activate、两根closed recovery与逐phase直接证据 | server inactive/竞争/崩溃接替21/21；CLI composition-root顺序、exact successor、closed local/mesh与HostStop选定闭包15/15 | 本批server owner、anchor/executor startup、local/mesh closed recovery、exact endpoint predicate与直接测试 | 修复直接验证 / 中 / 已完成 | 36/36通过；真实child-process使用production bind原语竞争同一非零端点并覆盖失主后接替，root结构证据锁定两根bind早于首个owner效果；五phase既有定向证据继续复用 | `sha256:b3cf4b54249035744432e2dbd2f1a9260687c102f9114fac9200de0cffd2dee4` | 有效 |
 | V37-21 | 类型边界与最终可消费构建 | server `tsc --noEmit`；CLI同命令归因；`pnpm build`唯一替换输入执行 | server/CLI受影响源码、17个workspace包与当前16文件专项闭包 | 修复直接验证 / 中 / 约134.2s构建 | server类型通过；CLI仅复现8个既有credentials类型错误且零U37新增；C37-C26修正后的最终输入17/17 workspace build通过，未重复同输入构建 | 同上 | 有效 |
 | V37-22 | 派生资产、差异卫生与专项冻结 | `pnpm s7:lint`；runtime package export检查；Biome changed-file检查；`git diff --check HEAD`；16文件逐文件SHA-256后聚合 | 当前production入口、既有S7有限descriptor/registry golden及本批16文件，排除过程账本与独立清单 | 冻结前检查 / 低 / 已完成 | S7 20/20与registry golden通过；package export与Biome通过；diff check通过；固定序列聚合指纹稳定 | 同上 | 有效 |
+| V37-23 | 当前完整Unit37直接测试入口 | 按包内Vitest入口串行执行core 4、owner-kernel 2、mesh 1、server 6、CLI 17个测试文件；不运行包全测 | 92文件冻结闭包中的30个Vitest入口；第31个S7入口复用V37-22，当前工作树与上游dist | 单元提交验证 / 中 / 已完成 | Unit37相关355项通过：core 89、owner-kernel 22、mesh 15、server 96、CLI 133；server陈旧断言已修正并定向3/3，CLI卸载批次超时隔离1/1通过。mesh旧5秒用例及Unit30 conversation用例的宿主IOPS背压分别记V37-D02/V37-D03，不冒充当前单元失败或通过 | `sha256:2351cb48edce409678cbfe55bfaa0836d5e564757113bc6643433717debfa797` | 有效 |
+| V37-24 | 单元提交一致性与封版 | 当前输入执行`pnpm build`；复用V37-22 S7/golden；对唯一测试修正执行Biome；执行diff卫生、92路径闭包/指纹复算与零临时结果核查 | 完整92文件冻结闭包、HEAD `6866ab0e`加当前测试修正、过程账本/独立清单排除 | 单元提交验证 / 中 / 140.8s+低 | 17/17 workspace build通过；S7 20/20与golden沿未变输入复用；Biome和双diff check通过；状态仅含1个交付测试修正与2个过程文档，无临时结果；92文件指纹稳定 | 同上 | 有效 |
+| V37-D02 | mesh旧checkpoint owner单飞用例固定5秒超时 | 整文件与隔离新进程各运行一次；blame及Unit36基线到当前diff归因 | 该用例及`ensureDaily/force/stop`路径早于Unit37；本单元仅新增`verify()`透传与status targetId | 失败归因 / 低 / 已完成 | 两次均仅命中默认5000ms且无断言失败；同文件其余15项（含Unit37真解封/verify）通过。按验证纪律停止重复运行，不改旧预算，不计为Unit37失败 | 同上 | 诊断 |
+| V37-D03 | Unit30 conversation restart用例被宿主实时IOPS背压 | CLI批次、错误的并行隔离与最终无其他Vitest进程的串行新进程归因；blame及Unit37差异核对 | 用例与recovery断言来自Unit30且未被Unit37修改；失败发生在真实capacity probe拒绝artifact adoption scan | 失败归因 / 低 / 已完成 | 串行单例仍以`backpressured:ioOperations`在功能断言前终止，属于既有宿主资源基线；第37单元新增closed-startup/stop owner场景均通过，不修改生产资源合同或扩充测试预算 | 同上 | 诊断 |
 
 ## 终审记录
 
 | 轮次   | 审查侧重                                       | 矩阵是否完整 | 新增问题 | 交付物指纹 | 结论   |
 | ------ | ---------------------------------------------- | ------------ | -------- | ---------- | ------ |
-| 第一轮 | 需求、架构、功能闭环、状态、回归               | 否           | —       | —         | 待开始 |
-| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 否           | —       | —         | 待开始 |
+| 第一轮 | 需求、架构、功能闭环、状态、回归               | 是           | 无       | `sha256:2351cb48edce409678cbfe55bfaa0836d5e564757113bc6643433717debfa797` | 通过；在最终测试合同输入上重新正向对账，R37-01～R37-11均1/2 |
+| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 是           | 无       | `sha256:2351cb48edce409678cbfe55bfaa0836d5e564757113bc6643433717debfa797` | 通过；反向构造raw错误泄漏、陈旧断言掩盖、基线失败误归因及全部既有组合反例，R37-01～R37-11均2/2 |
 
 ## 独立审查覆盖表
 
@@ -490,5 +521,13 @@
 
 | 编号 | 风险区与风险面 | 登记输入与指纹 | 独立覆盖状态 | 结论与证据 | 重开条件 |
 | ---- | -------------- | -------------- | ------------ | ---------- | -------- |
+| IF37-01 | 耐久状态损坏、乱序与重放 | lifecycle codec/reducer/journal、artifact/evidence、三路径全部phase；`sha256:2351cb48…fa797` | 已覆盖 | 高风险深审：坏尾、错ref、跳phase、冲突replay、sync/响应丢失与连续重启均在既有日志/strict hydrate边界fail-closed或唯一前滚 | protocol、journal、artifact retention或phase变化 |
+| IF37-02 | producer admission、执行owner与并发竞争 | 七类delivery source、十owner、双subject、本机三路径、两根startup与OS bound handle；同指纹 | 已覆盖 | 高风险深审：fresh/late source、双successor、跨入口accept、PID/operation换代均由同transaction或exact OS owner排序；loser首效前退出 | admission/sealed、subject、composition root或endpoint owner变化 |
+| IF37-03 | 跨端trust、receipt与历史终态 | removal issuer/target、认证mesh、abort/ready/revoke/cleanup-ready/terminal-only/lost；同指纹 | 已覆盖 | 高风险深审：旧peer、错identity、在线转离线与receipt丢失不放宽普通admission，不伪造target本地事实 | trust/receipt签名域、mesh方法或lost合同变化 |
+| IF37-04 | 不可逆清退与恢复可用性 | migration/backup、双checkpoint、retirement LSN、cleanup/supervisor/key-last；同指纹 | 已覆盖 | 高风险深审：同root真解封且final覆盖flushed实际LSN后才cleanup；128固定批次、exact slot与key-last保证错root/错slot/中断零误删 | checkpoint、cleanup roots、batch、supervisor或SecretStore变化 |
+| IF37-05 | 公开授权、strict输入、隐私与错误体验 | CLI/server/mesh registry、auth/loopback/exact decoder、wire错误和产品文案；同指纹 | 已覆盖 | 最终测试修正后独立复审：生产普通异常固定投影与直接断言全等，内部message不能通过测试；所有公开方法仍在首效前完成auth/方法guard/严格解码，零raw内部拓扑/secret | registry、connection context、decoder/error mapper或文案合同变化 |
+| IF37-06 | 资源、取消、锁序与队列上界 | immediate/drain/cancel、governor、lease/permit、delivery attempt、walker与运行期Map/Set；同指纹 | 已覆盖 | 高风险深审：活动物理事实到安全零点，可重放耐久子集按strategy保留；cleanup单step<=128，runtime集合沿既有terminal/finally释放，无新增无界队列 | strategy、安全点、governor、缓存生命周期或资源预算变化 |
+| IF37-07 | 生产装配、分层兼容与范围越界 | 92文件manifest、两条composition root、barrel/registry/S7、Unit30～36接口和Unit38排除；同指纹 | 已覆盖 | 最终manifest独立复审：30个Vitest入口、1个S7入口、2个helper/fixture与1个golden全部归类；测试修正未改变依赖、导出、runner或Unit38边界 | manifest、依赖、公开导出、S7或单元边界变化 |
+| IF37-08 | 跨风险组合核查 | IF37-01～IF37-07当前状态与三路径/两根/十owner/checkpoint/cleanup交界；同指纹 | 已覆盖 | 最终组合复审：stop↔removal、removal↔cleanup、uninstall↔checkpoint、startup↔terminal与shutdown失败投影均闭合；基线运行失败不掩盖当前功能反证，零循环等待、越相或第二事实源 | 任一其他风险面输入、状态或结论变化 |
 
 <!-- registration-complete: unit-37.gen-1 -->
