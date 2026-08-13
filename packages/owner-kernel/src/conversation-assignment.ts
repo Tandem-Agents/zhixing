@@ -402,7 +402,10 @@ export interface ConversationRunJournalOptions {
   readonly resources?: AssignmentResourceCoordinator;
   readonly clock?: () => string;
   readonly legacyAbortTickets?: ConversationAbortTicketAuthorizer;
-  readonly currentAuthority?: { readonly deviceId: string };
+  readonly currentAuthority?: {
+    readonly deviceId: string;
+    readonly executorId?: string;
+  };
 }
 
 export interface ConversationAbortTicketAuthorizer {
@@ -998,7 +1001,10 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
   readonly #resources: AssignmentResourceCoordinator | undefined;
   readonly #clock: () => string;
   readonly #legacyAbortTickets: ConversationAbortTicketAuthorizer | undefined;
-  readonly #currentAuthority: { readonly deviceId: string } | undefined;
+  readonly #currentAuthority: {
+    readonly deviceId: string;
+    readonly executorId?: string;
+  } | undefined;
   readonly #operations = new SerialTaskQueue();
   readonly #statusListeners = new Set<
     (notice: ConversationStatusNotice) => void | Promise<void>
@@ -4625,6 +4631,16 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           runId: body.runId,
           assignmentId: bundle.assignmentId,
           commitRevision,
+          conversationLifecycleSource: {
+            owner: "conversation",
+            id: `${this.#conversationId}:${body.runId}`,
+            revision: String(commitRevision),
+          },
+          assignmentLifecycleSource: {
+            owner: "assignment",
+            id: `${assigned.record.executorId === this.#currentAuthority?.executorId ? "local" : "relay"}:${bundle.assignmentId}`,
+            revision: assigned.record.dispatchDigest,
+          },
           ingress: admitted.record.ingress,
           runRecord: committedRunRecord,
           ...(batch ? { mutationBatch: batch } : {}),
@@ -7088,6 +7104,16 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
               runId: body.runId,
               assignmentId: body.assignmentId,
               commitRevision: body.commitRevision,
+              conversationLifecycleSource: {
+                owner: "conversation",
+                id: `${this.#conversationId}:${body.runId}`,
+                revision: String(body.commitRevision),
+              },
+              assignmentLifecycleSource: {
+                owner: "assignment",
+                id: `${assigned.record.executorId === this.#currentAuthority?.executorId ? "local" : "relay"}:${body.assignmentId}`,
+                revision: assigned.record.dispatchDigest,
+              },
               ingress: admitted.record.ingress,
               runRecord: closure.runRecord,
               ...(closure.batch ? { mutationBatch: closure.batch } : {}),

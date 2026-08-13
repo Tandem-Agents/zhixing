@@ -52,6 +52,35 @@ describe("executor job owner production surface", () => {
     expect(ctx.executorJobOwner!.ready).toBe(false);
   });
 
+  it("keeps fresh job recovery closed until the durable lifecycle artifact exists", async () => {
+    const ctx = ownerContext(
+      ["executor"],
+      recoveryLedger(),
+      new StartupRollback(),
+    );
+    ctx.startupLifecycle = {
+      kind: "stop",
+      artifactReady: false,
+      delivery: {
+        operationId: "stop-startup",
+        sources: [],
+        deliveries: [],
+        sealed: false,
+      },
+    };
+    await unit.setup(ctx);
+    const start = vi.spyOn(ctx.executorJobOwnerAssembly!, "start");
+
+    await startUnit.setup(ctx);
+
+    expect(start).toHaveBeenCalledWith({
+      admissionClosed: true,
+      recoverAcceptedWork: false,
+    });
+    expect(ctx.executorJobOwner!.ready).toBe(false);
+    await ctx.startupCleanups.jobOwner!.run();
+  });
+
   it("creates the same owner contract for executor-only and stays inert without executor", async () => {
     const executorOnly = ownerContext(
       ["executor"],

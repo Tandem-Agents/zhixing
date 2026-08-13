@@ -93,11 +93,16 @@ export class ConversationAssignmentWorker {
   readonly #preflightClaims = new Set<string>();
   readonly #abort = new AbortController();
   #closed = false;
+  #accepting = true;
 
   constructor(private readonly options: ConversationAssignmentWorkerOptions) {}
 
   accept(envelope: DispatchEnvelope): void {
-    if (this.#closed || envelope.execution !== "conversation") return;
+    if (this.#closed || !this.#accepting || envelope.execution !== "conversation") return;
+    this.#schedule(envelope);
+  }
+
+  #schedule(envelope: Extract<DispatchEnvelope, { execution: "conversation" }>): void {
     if (this.#running.has(envelope.assignmentId)) return;
     const executionAbort = new AbortController();
     this.#executionAborts.set(envelope.assignmentId, executionAbort);
@@ -174,6 +179,16 @@ export class ConversationAssignmentWorker {
     return pending.length + cancellations.length;
   }
 
+  async recoverAcceptedWorkForLifecycle(): Promise<number> {
+    const [pending, cancellations] = await Promise.all([
+      this.options.ledger.recoverableConversationAssignments(),
+      this.options.ledger.recoverableConversationCancellations(),
+    ]);
+    for (const envelope of pending) this.#schedule(envelope);
+    for (const envelope of cancellations) this.#scheduleCancellation(envelope);
+    return pending.length + cancellations.length;
+  }
+
   async drain(): Promise<void> {
     await Promise.all([
       ...this.#running.values(),
@@ -182,11 +197,12 @@ export class ConversationAssignmentWorker {
   }
 
   stopAccepting(): void {
-    this.#closed = true;
+    this.#accepting = false;
   }
 
   async close(): Promise<void> {
     this.stopAccepting();
+    this.#closed = true;
     this.#abort.abort(new Error("Conversation assignment worker stopped"));
     for (const controller of this.#executionAborts.values()) {
       controller.abort(new Error("Conversation assignment worker stopped"));

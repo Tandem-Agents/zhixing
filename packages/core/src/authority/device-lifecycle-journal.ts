@@ -30,7 +30,7 @@ export class DeviceLifecycleJournal {
 
   async active(): Promise<readonly DeviceLifecycleOperation[]> {
     const projection = await this.#projection();
-    return [...projection.activeSubjects.values()]
+    return [...new Set(projection.activeSubjects.values())]
       .map((operationId) => projection.operations.get(operationId))
       .filter((operation): operation is DeviceLifecycleOperation => operation !== undefined);
   }

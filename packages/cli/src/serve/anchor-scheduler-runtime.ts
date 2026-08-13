@@ -17,6 +17,7 @@ import type {
 import {
   MAX_CONTROL_LEASE_TTL_MS,
   assertPrincipalAllowsAuthorityMethod,
+  dispatchEnvelopeDigest,
   ownerControlRequestDigest,
   protocolDigest,
   validateAuthorityCapability,
@@ -162,7 +163,8 @@ export class AnchorSchedulerRuntime {
       listTaskIds: () => this.#listTaskIds(),
       journalFor: (taskId) => this.#journal(taskId),
       activateUserJob: (input) => this.#activate(input),
-      recoverUserJobs: (journal) => this.#recoverJournal(journal),
+      recoverUserJobs: (journal, acceptedJobRunIds) =>
+        this.#recoverJournal(journal, acceptedJobRunIds),
       cancelUserJob: (input) => this.#cancel(input),
       legacyTasks: () => Promise.resolve(this.#legacyTasks),
       ...(options.migrateLegacyDelivery
@@ -282,6 +284,12 @@ export class AnchorSchedulerRuntime {
 
   activate(): void {
     this.scheduler.activate();
+  }
+
+  recoverAcceptedWorkForLifecycle(
+    frozen: readonly { readonly id: string; readonly revision: string }[],
+  ): Promise<void> {
+    return this.scheduler.recoverAcceptedWorkForLifecycle(frozen);
   }
 
   async stop(): Promise<void> {
@@ -440,9 +448,18 @@ export class AnchorSchedulerRuntime {
     return this.#dispatcher(input.journal, candidate.dispatch).cancel(input);
   }
 
-  async #recoverJournal(journal: JobJournal): Promise<void> {
+  async #recoverJournal(
+    journal: JobJournal,
+    acceptedJobRunIds?: ReadonlySet<string>,
+  ): Promise<void> {
     const candidates = await journal.assignmentsAwaitingRecovery();
     for (const candidate of candidates) {
+      if (
+        acceptedJobRunIds &&
+        !acceptedJobRunIds.has(candidate.dispatch.envelope.work.jobRunId)
+      ) {
+        continue;
+      }
       try {
         await this.#rememberPending(journal, candidate.dispatch);
         const dispatcher = this.#dispatcher(journal, candidate.dispatch);
@@ -496,6 +513,7 @@ export class AnchorSchedulerRuntime {
     if (!this.#relayDisposers.has(pending.assignmentId)) {
       const opening: JobRelayOpening = {
         assignmentId: pending.assignmentId,
+        sourceRevision: dispatchEnvelopeDigest(pending.envelope),
         ref: {
           execution: "job",
           taskId: pending.envelope.work.taskId,
@@ -713,6 +731,7 @@ export class AnchorSchedulerRuntime {
       systemHandlers: adaptSystemHandlers(this.#options.systemHandlers),
       schedulerFailureThreshold: 5,
       schedulerNotices: this.schedulerNotices,
+      localExecutorId: this.#options.authority.executorId,
       clock: this.#clock,
     });
     this.#journals.set(taskId, journal);

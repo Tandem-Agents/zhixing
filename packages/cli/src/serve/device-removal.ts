@@ -21,6 +21,7 @@ import {
   validateDeviceLifecycleAbort,
   validateExecutorRemovalReceipt,
   type DeviceLifecycleEvidenceRef,
+  type DeviceLifecycleOperation,
   type DeviceLifecycleAbort,
   type DeviceLifecycleProjection,
   type ExecutorRemovalDecision,
@@ -1203,34 +1204,40 @@ export class ExecutorRemovalTarget {
   async #decision(
     operation: Awaited<ReturnType<DeviceLifecycleJournal["state"]>>,
   ): Promise<ExecutorRemovalDecision | undefined> {
-    if (!operation) return undefined;
-    if (phaseOrder(operation.phase) < phaseOrder("authority-decided")) return undefined;
-    for (const evidence of operation.evidence) {
-      if (!evidence.artifact) continue;
-      const bytes = await this.options.log.artifactStore.get(evidence.artifact);
-      let parsed: unknown;
-      try {
-        const text = Buffer.from(bytes).toString("utf8");
-        parsed = JSON.parse(text);
-        if (canonicalize(parsed) !== text) throw new TypeError("artifact is not canonical");
-      } catch (error) {
-        throw new Error("Executor removal evidence artifact is corrupt", { cause: error });
-      }
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) ||
-        (parsed as { t?: unknown }).t !== "executor-removal-decision") continue;
-      const decision = decodeExecutorRemovalDecision(bytes);
-      if (
-        decision.operationId !== operation.identity.operationId ||
-        decision.homeId !== operation.identity.homeId ||
-        operation.identity.kind !== "executor-removal" ||
-        decision.targetDeviceId !== operation.identity.targetDeviceId
-      ) {
-        throw new Error("Executor removal decision does not bind its lifecycle operation");
-      }
-      return decision;
-    }
-    return undefined;
+    return operation ? loadExecutorRemovalLifecycleDecision(this.options.log, operation) : undefined;
   }
+}
+
+export async function loadExecutorRemovalLifecycleDecision(
+  log: FileAuthorityCommitLog,
+  operation: DeviceLifecycleOperation,
+): Promise<ExecutorRemovalDecision | undefined> {
+  if (phaseOrder(operation.phase) < phaseOrder("authority-decided")) return undefined;
+  for (const evidence of operation.evidence) {
+    if (!evidence.artifact) continue;
+    const bytes = await log.artifactStore.get(evidence.artifact);
+    let parsed: unknown;
+    try {
+      const text = Buffer.from(bytes).toString("utf8");
+      parsed = JSON.parse(text);
+      if (canonicalize(parsed) !== text) throw new TypeError("artifact is not canonical");
+    } catch (error) {
+      throw new Error("Executor removal evidence artifact is corrupt", { cause: error });
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) ||
+      (parsed as { t?: unknown }).t !== "executor-removal-decision") continue;
+    const decision = decodeExecutorRemovalDecision(bytes);
+    if (
+      operation.identity.kind !== "executor-removal" ||
+      decision.operationId !== operation.identity.operationId ||
+      decision.homeId !== operation.identity.homeId ||
+      decision.targetDeviceId !== operation.identity.targetDeviceId
+    ) {
+      throw new Error("Executor removal decision does not bind its lifecycle operation");
+    }
+    return decision;
+  }
+  return undefined;
 }
 
 export async function cleanupRemovedDeviceSecrets(input: {

@@ -235,11 +235,10 @@ export type DeliveryLifecycleSourceOwner = "conversation" | "assignment" | "sche
 export interface DeliveryLifecycleSourceRef {
   readonly owner: DeliveryLifecycleSourceOwner;
   readonly id: string;
-}
-
-export interface DeliveryLifecycleSourcePermit extends DeliveryLifecycleSourceRef {
   readonly revision: string;
 }
+
+export type DeliveryLifecycleSourcePermit = DeliveryLifecycleSourceRef;
 
 export interface DeliveryLifecycleAdmission {
   readonly operationId: string;
@@ -248,6 +247,10 @@ export interface DeliveryLifecycleAdmission {
     readonly id: string;
     readonly revision: string;
   }[];
+}
+
+export interface DeliveryLifecycleRestoration extends DeliveryLifecycleAdmission {
+  readonly sealed: boolean;
 }
 
 export interface DeliveryLifecycleBinding {

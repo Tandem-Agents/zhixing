@@ -18,6 +18,7 @@ import {
   createJobSealedBundle,
   createMutationBatch,
   jobDeliveryPlanDigest,
+  protocolDigest,
 } from "@zhixing/core/protocol";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
@@ -26,6 +27,25 @@ import { OwnerDeliveryParticipant } from "../delivery-participant.js";
 const NOW = "2026-07-17T02:00:00.000Z";
 const DIGEST = `sha256:${"0".repeat(64)}`;
 const ARTIFACT_REF = { digest: DIGEST, bytes: 0 } as const;
+const CONVERSATION_COMMIT_LIFECYCLE_SOURCE = {
+  owner: "conversation" as const,
+  id: "conversation-1:run-1",
+  revision: "1",
+};
+const CONVERSATION_ASSIGNMENT_LIFECYCLE_SOURCE = {
+  owner: "assignment" as const,
+  id: "local:assignment-conversation",
+  revision: protocolDigest("AssignmentDeliveryLifecycleSource", 1, {
+    assignmentId: "assignment-conversation",
+  }),
+};
+const JOB_ASSIGNMENT_LIFECYCLE_SOURCE = {
+  owner: "assignment" as const,
+  id: "local:assignment-job",
+  revision: protocolDigest("AssignmentDeliveryLifecycleSource", 1, {
+    assignmentId: "assignment-job",
+  }),
+};
 
 async function participant(maxAttempts?: number) {
   return (await participantFixture(maxAttempts)).owner;
@@ -175,13 +195,25 @@ function jobFacts() {
 describe("owner delivery participant", () => {
   it("binds all seven canonical producer paths to the frozen lifecycle source exact-set", async () => {
     const { authority, owner } = await participantFixture();
+    const facts = jobFacts();
+    const conversationRevision = protocolDigest("ConversationDeliveryLifecycleSource", 1, {
+      conversationId: "conversation-1",
+    });
+    const schedulerRevision = protocolDigest("SchedulerAcceptedWork", 1, {
+      taskId: facts.occurrence.taskId,
+      jobRunId: facts.occurrence.jobRunId,
+      scheduledFor: facts.occurrence.scheduledFor,
+      taskRevision: facts.occurrence.taskRevision,
+      deliveryPlan: facts.occurrence.deliveryPlan,
+    });
     await authority.installLifecycleAdmission({
       operationId: "stop-delivery-producers",
       sources: [
-        { owner: "conversation", id: "conversation-1", revision: "conversation-r1" },
-        { owner: "assignment", id: "assignment-conversation", revision: "assignment-r1" },
-        { owner: "assignment", id: "assignment-job", revision: "assignment-r2" },
-        { owner: "scheduler", id: "job-run-1", revision: "scheduler-r1" },
+        { owner: "conversation", id: "conversation-1", revision: conversationRevision },
+        CONVERSATION_COMMIT_LIFECYCLE_SOURCE,
+        CONVERSATION_ASSIGNMENT_LIFECYCLE_SOURCE,
+        JOB_ASSIGNMENT_LIFECYCLE_SOURCE,
+        { owner: "scheduler", id: "job-run-1", revision: schedulerRevision },
       ],
       deliveries: [],
     });
@@ -191,6 +223,8 @@ describe("owner delivery participant", () => {
       runId: "run-1",
       assignmentId: "assignment-conversation",
       commitRevision: 1,
+      conversationLifecycleSource: CONVERSATION_COMMIT_LIFECYCLE_SOURCE,
+      assignmentLifecycleSource: CONVERSATION_ASSIGNMENT_LIFECYCLE_SOURCE,
       ingress: channelIngress,
       runRecord,
       mutationBatch: stagedMutation("assignment-conversation", "turn-origin"),
@@ -210,10 +244,10 @@ describe("owner delivery participant", () => {
       replyTarget: channelIngress.replyTarget,
       response: "empty-cancel-batch",
     }]);
-    const facts = jobFacts();
     const job = owner.prepareJobCommit({
       at: NOW,
       ...facts,
+      assignmentLifecycleSource: JOB_ASSIGNMENT_LIFECYCLE_SOURCE,
       mutationBatch: stagedMutation("assignment-job", "explicit"),
     });
     const jobStatus = owner.prepareJobStatuses([{
@@ -228,7 +262,7 @@ describe("owner delivery participant", () => {
       noticeId: "notice-1",
       target: channelIngress.replyTarget,
       text: "notice",
-      lifecycleSources: [{ owner: "scheduler", id: "job-run-1" }],
+      lifecycleSources: [{ owner: "scheduler", id: "job-run-1", revision: schedulerRevision }],
     }]);
     const results = [conversation, conversationStatus, control, job, jobStatus, notice];
     for (const result of results) {
@@ -262,6 +296,8 @@ describe("owner delivery participant", () => {
       runId: "run-1",
       assignmentId: "assignment-conversation",
       commitRevision: 1,
+      conversationLifecycleSource: CONVERSATION_COMMIT_LIFECYCLE_SOURCE,
+      assignmentLifecycleSource: CONVERSATION_ASSIGNMENT_LIFECYCLE_SOURCE,
       ingress: channelIngress,
       runRecord,
       mutationBatch: stagedMutation("assignment-conversation", "turn-origin"),
@@ -292,6 +328,7 @@ describe("owner delivery participant", () => {
     const committed = owner.prepareJobCommit({
       at: NOW,
       ...facts,
+      assignmentLifecycleSource: JOB_ASSIGNMENT_LIFECYCLE_SOURCE,
       mutationBatch: stagedMutation("assignment-job", "explicit"),
     });
     if (!committed.accepted) throw new Error("job fixture was rejected");
@@ -321,6 +358,7 @@ describe("owner delivery participant", () => {
     const input = {
       at: NOW,
       ...facts,
+      assignmentLifecycleSource: JOB_ASSIGNMENT_LIFECYCLE_SOURCE,
       bundle: {
         ...facts.bundle,
         body: {
@@ -539,7 +577,12 @@ describe("owner delivery participant", () => {
         mutation: { kind: "workscene-create", name: "Research" },
       },
     ]);
-    const committed = owner.prepareJobCommit({ at: NOW, ...facts, mutationBatch });
+    const committed = owner.prepareJobCommit({
+      at: NOW,
+      ...facts,
+      assignmentLifecycleSource: JOB_ASSIGNMENT_LIFECYCLE_SOURCE,
+      mutationBatch,
+    });
     if (!committed.accepted) throw new Error("job fixture was rejected");
 
     expect(deliveryKinds(committed.records)).toEqual(["job-result-delivery"]);
@@ -553,6 +596,8 @@ describe("owner delivery participant", () => {
       runId: "run-1",
       assignmentId: "assignment-conversation",
       commitRevision: 1,
+      conversationLifecycleSource: CONVERSATION_COMMIT_LIFECYCLE_SOURCE,
+      assignmentLifecycleSource: CONVERSATION_ASSIGNMENT_LIFECYCLE_SOURCE,
       ingress: {
         kind: "first-party",
         surfacePrincipal: "surface:user-1",
@@ -582,6 +627,8 @@ describe("owner delivery participant", () => {
       runId: "run-1",
       assignmentId: "assignment-conversation",
       commitRevision: 1,
+      conversationLifecycleSource: CONVERSATION_COMMIT_LIFECYCLE_SOURCE,
+      assignmentLifecycleSource: CONVERSATION_ASSIGNMENT_LIFECYCLE_SOURCE,
       ingress: channelIngress,
       runRecord,
     } as const;

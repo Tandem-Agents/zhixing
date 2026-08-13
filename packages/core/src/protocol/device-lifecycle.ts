@@ -108,6 +108,7 @@ export interface StopLifecycleIdentity {
   readonly requestId: string;
   readonly operationId: string;
   readonly homeId: string;
+  readonly localDeviceId: string;
   readonly strategy: StopStrategy;
   readonly host: StopHostGeneration;
 }
@@ -294,6 +295,12 @@ export function deviceLifecycleSubject(identity: DeviceLifecycleIdentity): strin
 
 export function deviceLifecycleSubjectKey(identity: DeviceLifecycleIdentity): string {
   return `${identity.homeId}\u0000${deviceLifecycleSubject(identity)}`;
+}
+
+function deviceLifecycleSubjectKeys(identity: DeviceLifecycleIdentity): readonly string[] {
+  const primary = deviceLifecycleSubjectKey(identity);
+  if (identity.kind !== "stop") return [primary];
+  return [primary, `${identity.homeId}\u0000device:${identity.localDeviceId}`];
 }
 
 export function createSignedDeviceLifecycleAbort(
@@ -657,10 +664,11 @@ export function reduceDeviceLifecycleProjection(
     const identity = record.identity;
     const existing = current.operations.get(identity.operationId);
     if (!existing) {
-      const subjectKey = deviceLifecycleSubjectKey(identity);
-      const active = current.activeSubjects.get(subjectKey);
-      if (active && active !== identity.operationId) {
-        throw new TypeError("Another lifecycle operation already owns this home subject");
+      for (const subjectKey of deviceLifecycleSubjectKeys(identity)) {
+        const active = current.activeSubjects.get(subjectKey);
+        if (active && active !== identity.operationId) {
+          throw new TypeError("Another lifecycle operation already owns this home subject");
+        }
       }
     }
   }
@@ -671,9 +679,10 @@ export function reduceDeviceLifecycleProjection(
   const operations = new Map(current.operations);
   operations.set(operationId, next);
   const activeSubjects = new Map(current.activeSubjects);
-  const subjectKey = deviceLifecycleSubjectKey(next.identity);
-  if (next.phase === "terminal" || next.phase === "aborted") activeSubjects.delete(subjectKey);
-  else activeSubjects.set(subjectKey, operationId);
+  for (const subjectKey of deviceLifecycleSubjectKeys(next.identity)) {
+    if (next.phase === "terminal" || next.phase === "aborted") activeSubjects.delete(subjectKey);
+    else activeSubjects.set(subjectKey, operationId);
+  }
   return { operations, activeSubjects };
 }
 
@@ -682,7 +691,8 @@ function validateIdentity(input: unknown): DeviceLifecycleIdentity {
   if (value.v !== 1) throw new TypeError("Device lifecycle identity version must be 1");
   for (const field of ["requestId", "operationId", "homeId"] as const) identifier(value[field], `Lifecycle ${field}`);
   if (value.kind === "stop") {
-    exact(value, ["homeId", "host", "kind", "operationId", "requestId", "strategy", "v"], "Stop lifecycle identity");
+    exact(value, ["homeId", "host", "kind", "localDeviceId", "operationId", "requestId", "strategy", "v"], "Stop lifecycle identity");
+    identifier(value.localDeviceId, "Stop local device id");
     if (!new Set(["immediate", "drain", "cancel"]).has(value.strategy as string)) {
       throw new TypeError("Stop lifecycle strategy is invalid");
     }

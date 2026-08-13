@@ -100,6 +100,7 @@ function stopIdentity(): StopLifecycleIdentity {
   return {
     v: 1,
     kind: "stop",
+    localDeviceId: "device-local",
     requestId: "request-stop",
     operationId: "stop-1",
     homeId: "home-1",

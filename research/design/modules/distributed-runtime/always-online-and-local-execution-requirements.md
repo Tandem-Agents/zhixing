@@ -91,7 +91,7 @@
 
 Windows 后台服务的系统回读不得依赖本地化展示文本或宽松 XML 片段：只接受 numeric task state、当前用户有限身份集合与完整 typed trigger/action exact-set 的严格投影；`RegisteredTask.Enabled` 与 `Definition.Settings.Enabled` 必须一致，冲突时拒绝投影，一致值只表示动态 future-enabled，不参与 immutable definition identity。配置换代要求 explicit drain 先收束既有 accepted work；关闭非 managed 选择时，future launch 必须在等待旧 endpoint turnover 和连接新代之前关闭，而任一 reconcile 唤醒都不得凭 trigger 或 service id 终止当前实例，current stop 只接受既有 graceful completion 或 exact stale endpoint/lock 事实。跨平台 fake-runner 的文件副作用证据必须落在每例唯一的宿主临时目录，禁止把 guest 语义路径当成宿主物理路径。
 
-主动停机、设备移除和永久卸载都必须先把已接受工作变成可重放的确定结果，再结束精确的旧宿主或撤销身份。停机不能只看 PID，托管实例还须同时匹配完整运行端点、服务定义和系统管理器回读，后继实例不得被误停。设备移除应在任何转移或销毁前展示无副作用的真实本地工作摘要；确认后若集合漂移须重新展示，目标与签发端的取消、就绪、撤销、清理和终态在断线或重启后仍只能收敛到一个结果。永久卸载选择恢复备份时，首份与最终备份都必须用用户恢复包从冻结目标真解封，最终备份覆盖退役决定后才可清理；清理按固定小批次进行，设备身份密钥最后删除。公开入口对未知或错误字段稳定拒绝，不把内部身份、拓扑和恢复细节交给用户判断。
+主动停机、设备移除和永久卸载都必须先把已接受工作变成可重放的确定结果，再结束精确的旧宿主或撤销身份。同一 home 的本机三条路径共用耐久互斥身份；重启必须先从已有 operation、accepted-work artifact 和 phase 恢复 producer gate，再允许任何 scheduler、assignment、channel、advancement 或投递生产者恢复。停机不能只看 PID，托管实例还须同时匹配完整运行端点、服务定义和系统管理器回读，后继实例不得被误停。设备移除应在任何转移或销毁前展示无副作用的真实本地工作摘要；确认后若集合漂移须重新展示，目标与签发端的取消、就绪、撤销、清理和终态在断线或重启后仍只能收敛到一个结果。永久卸载选择恢复备份时，首份与最终备份都必须用用户恢复包从冻结目标真解封，最终备份覆盖退役决定后才可清理；清理按固定小批次进行，设备身份密钥最后删除。公开入口对未知或错误字段稳定拒绝，不把内部身份、拓扑和恢复细节交给用户判断。
 
 ## 八、值班设备迁移的当前产品要求
 

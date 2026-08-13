@@ -804,7 +804,13 @@ export class LocalConversationOwnerAssembly {
     });
   }
 
-  async start(): Promise<void> {
+  async start(options: {
+    readonly lifecycle?: {
+      readonly operationId: string;
+      readonly kind: "stop" | "executor-removal" | "anchor-uninstall";
+      readonly recoverAcceptedWork: boolean;
+    };
+  } = {}): Promise<void> {
     if (this.#state === "ready") return;
     if (this.#state === "closing" || this.#state === "closed") {
       throw new Error("Local conversation owner is closed");
@@ -814,6 +820,14 @@ export class LocalConversationOwnerAssembly {
     this.#started = true;
     const starting = (async () => {
       try {
+        if (options.lifecycle) {
+          if (options.lifecycle.kind === "executor-removal") {
+            this.#removalOperationId = options.lifecycle.operationId;
+          } else {
+            this.#hostStopOperationId = options.lifecycle.operationId;
+          }
+          this.#protocol.beginShutdownDrain();
+        }
         await this.#intents.recover();
         for (const transfer of await listConversationTransferStates(
           this.#owner.executorLog,
@@ -827,9 +841,11 @@ export class LocalConversationOwnerAssembly {
           }
         }
         await this.#protocol.recoverReadinessProjections();
-        await this.#protocol.recover();
-        await this.#recovery.recoverAllOpenSessions();
-        this.#protocol.startRecoveryLoop();
+        if (!options.lifecycle || options.lifecycle.recoverAcceptedWork) {
+          await this.#protocol.recover();
+          await this.#recovery.recoverAllOpenSessions();
+          if (!options.lifecycle) this.#protocol.startRecoveryLoop();
+        }
         if (this.#state !== "starting") {
           // close 已介入:停掉刚起的恢复循环,由 close 统一收束。
           await this.#protocol.stopRecoveryLoop();
@@ -959,6 +975,11 @@ export class LocalConversationOwnerAssembly {
       }
     }
     return candidates;
+  }
+
+  async recoverAcceptedWorkForLifecycle(): Promise<void> {
+    await this.#protocol.recover();
+    await this.#recovery.recoverAllOpenSessions();
   }
 
   deviceRemovalCandidates(operationId: string): readonly string[] {

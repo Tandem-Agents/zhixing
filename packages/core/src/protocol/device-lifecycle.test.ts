@@ -84,6 +84,28 @@ describe("device lifecycle protocol", () => {
     )).not.toThrow();
   });
 
+  it("lets stop atomically own its host and local device without blocking remote issuer work", () => {
+    const projection = reduceDeviceLifecycleProjection(
+      emptyDeviceLifecycleProjection(),
+      { v: 1, t: "accepted", identity: stopIdentity() },
+    );
+    expect(() => reduceDeviceLifecycleProjection(projection, {
+      v: 1,
+      t: "accepted",
+      identity: { ...removalIdentity(), targetDeviceId: "device-local" },
+    })).toThrow("already owns this home subject");
+    expect(() => reduceDeviceLifecycleProjection(projection, {
+      v: 1,
+      t: "accepted",
+      identity: { ...uninstallIdentity(), currentDeviceId: "device-local" },
+    })).toThrow("already owns this home subject");
+    expect(() => reduceDeviceLifecycleProjection(projection, {
+      v: 1,
+      t: "accepted",
+      identity: removalIdentity(),
+    })).not.toThrow();
+  });
+
   it("makes replay exact, forbids stop abort, and never moves a terminal backward", () => {
     const accepted = { v: 1, t: "accepted", identity: stopIdentity() } as const;
     let state = reduceDeviceLifecycle(undefined, accepted);
@@ -276,6 +298,7 @@ function stopIdentity(): StopLifecycleIdentity {
   return {
     v: 1,
     kind: "stop",
+    localDeviceId: "device-local",
     requestId: "request-stop-1",
     operationId: "stop-1",
     homeId: "home-1",

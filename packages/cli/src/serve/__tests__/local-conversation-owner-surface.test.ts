@@ -60,6 +60,36 @@ describe("local conversation owner production surface", () => {
     expect(ctx.localConversationOwner).toBeUndefined();
   });
 
+  it("starts with the durable lifecycle gate before conversation recovery", async () => {
+    const assembly = {
+      start: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined),
+    } as unknown as LocalConversationOwnerAssembly;
+    vi.spyOn(LocalConversationOwnerAssembly, "create").mockResolvedValue(assembly);
+    const ctx = context(["executor"], new StartupRollback());
+    ctx.startupLifecycle = {
+      kind: "removal",
+      artifactReady: true,
+      delivery: {
+        operationId: "removal-startup",
+        sources: [],
+        deliveries: [],
+        sealed: false,
+      },
+    };
+
+    await unit.setup(ctx);
+
+    expect(assembly.start).toHaveBeenCalledWith({
+      lifecycle: {
+        operationId: "removal-startup",
+        kind: "removal",
+        recoverAcceptedWork: true,
+      },
+    });
+    await ctx.startupCleanups.localConversationOwner!.run();
+  });
+
   it("accepts only a final frame that is already present in authoritative history", async () => {
     const frame = {
       v: 1,

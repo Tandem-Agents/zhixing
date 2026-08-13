@@ -73,6 +73,7 @@ function opening(
 ): JobRelayOpening {
   return {
     assignmentId: "asg-job-1",
+    sourceRevision: "dispatch-digest-1",
     ref: jobToken.ref,
     executorId: "exec-1",
     controlLeaseId: "lease-1",

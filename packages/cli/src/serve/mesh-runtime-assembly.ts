@@ -892,7 +892,7 @@ export class MeshRuntimeAssembly {
     });
 
     this.#deviceRemovalTarget = new ExecutorRemovalTarget({
-      log: options.authority.executorLog,
+      log: options.bootstrapStore.authorityLog(),
       homeId: options.trust.homeId,
       deviceKey: options.authority.identityKey,
       verifier: options.authority.verifier,
@@ -1454,7 +1454,10 @@ export class MeshRuntimeAssembly {
     this.#plannedAnchorLifecycle = lifecycle;
   }
 
-  async start(): Promise<void> {
+  async start(options: {
+    readonly lifecycleAdmissionClosed?: boolean;
+    readonly recoverAcceptedWork?: boolean;
+  } = {}): Promise<void> {
     if (this.#closed) throw new Error("Mesh runtime assembly is closed");
     if (this.#started) return;
     try {
@@ -1473,7 +1476,14 @@ export class MeshRuntimeAssembly {
       });
       await this.#deviceRemovalAuthority?.resumeActive();
       await this.#restoreCommittedTransfers();
-      await this.#worker?.recover();
+      if (options.recoverAcceptedWork !== false) {
+        if (options.lifecycleAdmissionClosed) {
+          await this.#worker?.recoverAcceptedWorkForLifecycle();
+        } else {
+          await this.#worker?.recover();
+        }
+      }
+      if (options.lifecycleAdmissionClosed) this.#worker?.stopAccepting();
       this.#started = true;
       if (!this.#plannedAnchorPostInstall) {
         await this.#startControl();
@@ -1734,6 +1744,10 @@ export class MeshRuntimeAssembly {
     return this.#peerHasRole(deviceId, "executor")
       ? executorIdForDevice(deviceId)
       : undefined;
+  }
+
+  async recoverAcceptedWorkForLifecycle(): Promise<void> {
+    await this.#worker?.recoverAcceptedWorkForLifecycle();
   }
 
   #installPlannedAnchorRole(trust: HomeTrustRecord): void {

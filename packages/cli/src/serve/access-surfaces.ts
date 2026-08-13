@@ -117,6 +117,11 @@ const authorityRuntimeSurface: AccessSurface = {
     });
     ctx.startupCleanups.authorityRuntime = authorityRuntime.startupCleanup;
     ctx.authorityRuntime = authorityRuntime;
+    if (ctx.startupLifecycle) {
+      await authorityRuntime.authority.restoreLifecycleAdmission(
+        ctx.startupLifecycle.delivery,
+      );
+    }
     if (ctx.enabledRoles.includes("anchor")) {
       ctx.jobRelayObligations ??= new JobRelayObligationDirectory();
     }
@@ -325,7 +330,12 @@ const meshSurface: AccessSurface = {
       "meshRuntime.stop",
       () => mesh.stop(),
     );
-    await mesh.start();
+    await mesh.start(ctx.startupLifecycle
+      ? {
+          lifecycleAdmissionClosed: true,
+          recoverAcceptedWork: ctx.startupLifecycle.artifactReady,
+        }
+      : {});
     ctx.meshRuntime = mesh;
     ctx.startupCleanups.meshRuntime = cleanup;
   },
@@ -733,7 +743,15 @@ const localConversationOwnerUnit: CoreAssemblyUnit = {
       () => assembly.close(),
     );
     ctx.startupCleanups.localConversationOwner = cleanup;
-    await assembly.start();
+    await assembly.start(ctx.startupLifecycle
+      ? {
+          lifecycle: {
+            operationId: ctx.startupLifecycle.delivery.operationId,
+            kind: ctx.startupLifecycle.kind,
+            recoverAcceptedWork: ctx.startupLifecycle.artifactReady,
+          },
+        }
+      : {});
     ctx.localConversationOwner = assembly;
   },
 };
@@ -853,7 +871,12 @@ const executorJobOwnerStartUnit: CoreAssemblyUnit = {
       "executorJobOwner.close",
       () => assembly.close(),
     );
-    await assembly.start();
+    await assembly.start(ctx.startupLifecycle
+      ? {
+          admissionClosed: true,
+          recoverAcceptedWork: ctx.startupLifecycle.artifactReady,
+        }
+      : {});
   },
 };
 
@@ -922,11 +945,12 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
             ctx.channelHttpRoutes.set(path, handler);
           },
           isCurrentOwner: isCurrentChannelOwner,
-          connectImmediately: isCurrentChannelOwner(),
+          connectImmediately: isCurrentChannelOwner() && !ctx.startupLifecycle,
         });
         losslessDataPlane.bindChannels(result.registry);
         ctx.channels = result.registry;
         ctx.inboundRouter = result.router;
+        if (ctx.startupLifecycle) result.router?.refuseNewMessages();
         ctx.channelConnections = {
           ready: result.connectionTask,
           connectConfigured: result.connectConfigured,
@@ -936,7 +960,9 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
         };
         // 渠道在场后恢复耐久开放义务(job relay 会话按权威日志重建;
         // conversation 义务由协议恢复循环幂等重开)。
-        await ctx.channelCoordinator?.recover();
+        if (!ctx.startupLifecycle || ctx.startupLifecycle.artifactReady) {
+          await ctx.channelCoordinator?.recover();
+        }
         ctx.startupCleanups.channels = ctx.startupRollback.register(
           "channels.dispose",
           () => result.registry.dispose(),
@@ -974,6 +1000,7 @@ const deliverySurface: AccessSurface = {
       },
     });
     ctx.deliveryStack = deliveryStack;
+    if (ctx.startupLifecycle) deliveryStack.closeAdmissionForLifecycle();
     ctx.startupCleanups.deliveryStack = deliveryStack.startupCleanup;
     deliveryStack.onStatus((notice) => {
       ctx.executionStatusHub?.publish(notice);
@@ -1018,7 +1045,7 @@ const conversationRecoverySurface: AccessSurface = {
   phase: "post-server",
   async setup(ctx) {
     const protocol = ctx.conversationProtocol;
-    if (!protocol) return;
+    if (!protocol || ctx.startupLifecycle) return;
     protocol.startRecoveryLoop();
   },
 };

@@ -56,7 +56,10 @@ export interface AnchorSchedulerOptions {
     };
     readonly occurrence: JobOccurrence;
   }) => Promise<void>;
-  readonly recoverUserJobs?: (journal: JobJournal) => Promise<void>;
+  readonly recoverUserJobs?: (
+    journal: JobJournal,
+    acceptedJobRunIds?: ReadonlySet<string>,
+  ) => Promise<void>;
   readonly cancelUserJob?: (input: {
     readonly journal: JobJournal;
     readonly jobRunId: string;
@@ -331,6 +334,45 @@ export class AnchorScheduler {
       }));
     }
     return Object.freeze(items);
+  }
+
+  /** Recovers only the exact scheduler generation frozen by a lifecycle artifact. */
+  async recoverAcceptedWorkForLifecycle(
+    frozen: readonly { readonly id: string; readonly revision: string }[],
+  ): Promise<void> {
+    await this.prepare();
+    const expected = new Map(frozen.map((item) => [item.id, item.revision]));
+    const seen = new Set<string>();
+    for (const [taskId, definition] of this.#definitions) {
+      const journal = this.#journal(taskId);
+      const accepted = new Set<string>();
+      for (const occurrence of await journal.occurrences()) {
+        if (TERMINAL_STATES.has(occurrence.state as never)) continue;
+        const revision = protocolDigest("SchedulerAcceptedWork", 1, {
+          taskId: occurrence.taskId,
+          jobRunId: occurrence.jobRunId,
+          scheduledFor: occurrence.scheduledFor,
+          taskRevision: occurrence.taskRevision,
+          deliveryPlan: occurrence.deliveryPlan,
+        });
+        if (expected.get(occurrence.jobRunId) !== revision) {
+          throw new Error("Scheduler recovery observed an unfrozen accepted-work generation");
+        }
+        seen.add(occurrence.jobRunId);
+        accepted.add(occurrence.jobRunId);
+        this.#trackCompletion(taskId, occurrence.jobRunId);
+      }
+      if (accepted.size === 0) continue;
+      if (definition.definition.kind === "system") {
+        await journal.resumeSystemJobs(this.#hostContext(`resume-system-${taskId}`));
+      } else {
+        await this.#options.recoverUserJobs?.(journal, accepted);
+      }
+    }
+    if (seen.size !== expected.size || [...expected.keys()].some((id) => !seen.has(id))) {
+      throw new Error("Scheduler lifecycle artifact does not bind current durable work");
+    }
+    await this.#publishProjection();
   }
 
   /** Closes fresh triggers while preserving every durable schedule fact for pre-commit rollback. */

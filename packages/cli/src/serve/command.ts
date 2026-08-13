@@ -173,10 +173,12 @@ import {
   managedServiceDefinitionDigest,
 } from "./managed-service.js";
 import { cleanupExecutorDeviceLocalState } from "./device-removal-cleanup.js";
+import { loadExecutorRemovalLifecycleDecision } from "./device-removal.js";
 import { AnchorUninstallCoordinator } from "./anchor-uninstall.js";
 import { buildManagedHostPublicStatus } from "./status.js";
 import {
   HostStopCoordinator,
+  loadHostStopAcceptedWork,
   type HostStopAcceptedWorkItem,
   type HostStopAcceptedWorkPorts,
   type HostStopAcceptedWorkSnapshot,
@@ -665,6 +667,72 @@ async function runServerProcess(
     credentialGeneration,
   });
 
+  // Device lifecycle admission is reconstructed from the durable operation before
+  // any access surface can recover a producer. The authority runtime consumes this
+  // projection first; downstream surfaces only decide whether frozen work may be
+  // resumed, never whether fresh work may enter.
+  const lifecycleAuthorityLog = bootstrap.mesh.bootstrapStore.authorityLog();
+  const lifecycleHomeId = (await lifecycleAuthorityLog.originCheckpoint()).logId;
+  const lifecycleJournal = new DeviceLifecycleJournal(lifecycleAuthorityLog);
+  const localLifecycleOperations = (await lifecycleJournal.active()).filter((operation) =>
+    (operation.identity.kind === "stop" &&
+      operation.identity.localDeviceId === bootstrap.mesh.deviceKey.deviceId) ||
+    (operation.identity.kind === "executor-removal" &&
+      operation.identity.targetDeviceId === bootstrap.mesh.deviceKey.deviceId) ||
+    (operation.identity.kind === "anchor-uninstall" &&
+      operation.identity.currentDeviceId === bootstrap.mesh.deviceKey.deviceId));
+  if (localLifecycleOperations.length > 1) {
+    throw new Error("More than one local device lifecycle operation owns startup admission");
+  }
+  const startupLifecycleOperation = localLifecycleOperations[0];
+  let startupLifecycle: AssemblyContext["startupLifecycle"];
+  if (startupLifecycleOperation) {
+    let sources: readonly DeliveryLifecycleSourcePermit[] = [];
+    let deliveries: readonly { readonly id: string; readonly revision: string }[] = [];
+    let artifactReady = false;
+    const acceptedWorkArtifact = startupLifecycleOperation.evidence.some((item) =>
+      item.kind === "accepted-work" && item.artifact);
+    if (acceptedWorkArtifact && startupLifecycleOperation.identity.kind !== "executor-removal") {
+      const snapshot = await loadHostStopAcceptedWork(
+        startupLifecycleOperation,
+        bootstrap.mesh.bootstrapStore.artifactStore(),
+      );
+      sources = deliveryLifecycleSources(snapshot);
+      deliveries = snapshot.owners.delivery;
+      artifactReady = true;
+    } else if (startupLifecycleOperation.identity.kind === "executor-removal") {
+      const decision = await loadExecutorRemovalLifecycleDecision(
+        lifecycleAuthorityLog,
+        startupLifecycleOperation,
+      );
+      if (decision?.ownerItems) {
+        sources = deliveryLifecycleSourcesFromOwnerItems(decision.ownerItems);
+        deliveries = decision.ownerItems
+          .filter((item) => item.owner === "delivery")
+          .map(({ id, revision }) => ({ id, revision }));
+        artifactReady = true;
+      }
+    }
+    const phase = startupLifecycleOperation.phase;
+    const sealed = startupLifecycleOperation.identity.kind === "stop"
+      ? ["work-settled", "flushed", "ready-to-stop"].includes(phase)
+      : startupLifecycleOperation.identity.kind === "executor-removal"
+        ? ["authority-settled", "revocation-ready", "revoked", "cleanup-complete"].includes(phase)
+        : startupLifecycleOperation.identity.path.kind === "migration"
+          ? ["transfer-committed", "cleanup-complete"].includes(phase)
+          : ["work-settled", "flushed", "final-checkpoint-verified", "cleanup-complete"].includes(phase);
+    startupLifecycle = {
+      kind: startupLifecycleOperation.identity.kind,
+      artifactReady,
+      delivery: {
+        operationId: startupLifecycleOperation.identity.operationId,
+        sources,
+        deliveries,
+        sealed,
+      },
+    };
+  }
+
   // 4. CleanupRegistry —— 唯一清理出口。LIFO 语义 + 跨包注入。注册序列封装在
   //    shutdown-chain.ts，方便单测顺序正确性。post-server 接入面在自己 setup 内注册到此。
   const registry = new CleanupRegistry({
@@ -746,6 +814,7 @@ async function runServerProcess(
     enabledRoles: bootstrap.mesh.roles,
     meshBootstrap: bootstrap.mesh,
     onTrustApplied,
+    ...(startupLifecycle ? { startupLifecycle } : {}),
   };
   assemblyContext = ctx;
 
@@ -906,6 +975,27 @@ async function runServerProcess(
   let schedulerRuntime: AnchorSchedulerRuntime | undefined;
   let adoptionReview: PostAdoptionReviewCoordinator | undefined;
   let schedulerCleanup: ReturnType<StartupRollback["register"]> | undefined;
+  let startupLifecycleFrozenRecoveryStarted = startupLifecycle?.artifactReady ?? true;
+  const recoverStartupLifecycleAcceptedWork = async (
+    sources: readonly DeliveryLifecycleSourcePermit[],
+  ): Promise<void> => {
+    if (!startupLifecycle || startupLifecycleFrozenRecoveryStarted) return;
+    startupLifecycleFrozenRecoveryStarted = true;
+    try {
+      await ctx.localConversationOwner?.recoverAcceptedWorkForLifecycle();
+      await ctx.executorJobOwner?.recoverAcceptedWorkForLifecycle();
+      await ctx.meshRuntime?.recoverAcceptedWorkForLifecycle();
+      await ctx.channelCoordinator?.recover();
+      await schedulerRuntime?.recoverAcceptedWorkForLifecycle(
+        sources
+          .filter((source) => source.owner === "scheduler")
+          .map(({ id, revision }) => ({ id, revision })),
+      );
+    } catch (error) {
+      startupLifecycleFrozenRecoveryStarted = false;
+      throw error;
+    }
+  };
   if (ctx.enabledRoles.includes("anchor")) {
     if (
       !ctx.authorityRuntime ||
@@ -1050,7 +1140,17 @@ async function runServerProcess(
       );
       ctx.authorityRuntime!.installSchedulerGlobalState(schedulerGlobalState);
       await runtime.start();
-      if (activate) {
+      if (startupLifecycle) {
+        runtime.scheduler.closeAdmissionForLifecycle();
+        if (startupLifecycle.artifactReady) {
+          await runtime.recoverAcceptedWorkForLifecycle(
+            startupLifecycle.delivery.sources
+              .filter((source) => source.owner === "scheduler")
+              .map(({ id, revision }) => ({ id, revision })),
+          );
+        }
+      }
+      if (activate && !startupLifecycle) {
         runtime.activate();
         await runtime.resumeManualJobSurfaces();
       }
@@ -1181,7 +1281,7 @@ async function runServerProcess(
   // Reconcile accepted-but-unreviewed runs and their durable evidence requests
   // before any control ingress starts listening. Recovery may schedule local
   // proxy work, but it never requires a connected surface.
-  if (advancementRecovery) {
+  if (advancementRecovery && !startupLifecycleOperation) {
     try {
       const recovered = await advancementRecovery.recoverAllOpenSessions();
       const scheduledCount = recovered.filter(
@@ -1212,8 +1312,6 @@ async function runServerProcess(
 
   const serverRegistry = buildBuiltinRegistry();
   let managedHostStopping = false;
-  const lifecycleAuthorityLog = bootstrap.mesh.bootstrapStore.authorityLog();
-  const lifecycleHomeId = (await lifecycleAuthorityLog.originCheckpoint()).logId;
   const stopEndpointLock = {
     pid: process.pid,
     port,
@@ -1263,7 +1361,7 @@ async function runServerProcess(
     if (owner === "remote") {
       const relay = (await ctx.jobRelayObligations?.listOpen() ?? []).map((opening) => ({
         id: `relay:${opening.assignmentId}`,
-        revision: protocolDigest("HostStopRemoteObligation", 1, opening.assignmentId),
+        revision: opening.sourceRevision,
       }));
       const local = (await ctx.executorJobOwner?.acceptedWorkItems() ?? []).map((item) => ({
         id: `local:${item.id}`,
@@ -1350,7 +1448,12 @@ async function runServerProcess(
   };
   const stopPort = (
     owner: keyof HostStopAcceptedWorkPorts,
-    settle: (strategy: "immediate" | "drain" | "cancel", timeoutMs: number) => Promise<void>,
+    settle: (input: {
+      readonly operationId: string;
+      readonly strategy: "immediate" | "drain" | "cancel";
+      readonly timeoutMs: number;
+      readonly frozen: readonly HostStopAcceptedWorkItem[];
+    }) => Promise<void>,
   ) => ({
     freeze: (operationId: string) => captureStopAcceptedWork(owner, operationId),
     settle: async (input: {
@@ -1376,7 +1479,7 @@ async function runServerProcess(
         );
         return;
       }
-      await settle(input.strategy, input.timeoutMs);
+      await settle(input);
     },
     readBack: (input: {
       readonly operationId: string;
@@ -1390,7 +1493,7 @@ async function runServerProcess(
     ),
   });
   const acceptedWork: HostStopAcceptedWorkPorts = {
-    conversation: stopPort("conversation", async (strategy, timeoutMs) => {
+    conversation: stopPort("conversation", async ({ strategy, timeoutMs }) => {
       if (strategy === "cancel") {
         await ctx.conversations?.abortAllAndWait(
           { kind: "external", origin: "server-shutdown" },
@@ -1419,9 +1522,7 @@ async function runServerProcess(
       await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
       await ctx.executorJobOwner?.drain();
     }),
-    delivery: stopPort("delivery", async (strategy, timeoutMs) => {
-      const operationId = activeDeliveryLifecycleOperationId;
-      if (!operationId) throw new Error("Delivery settlement is missing its lifecycle operation");
+    delivery: stopPort("delivery", async ({ operationId, strategy, timeoutMs }) => {
       await ctx.deliveryStack?.sealLifecycleAdmission(operationId);
       await ctx.deliveryStack?.settleAcceptedWorkForLifecycle(
         operationId,
@@ -1436,20 +1537,21 @@ async function runServerProcess(
       await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
     }),
   };
-  let activeDeliveryLifecycleOperationId: string | undefined;
   const stopCoordinator = new HostStopCoordinator({
     journal: new DeviceLifecycleJournal(lifecycleAuthorityLog),
     homeId: lifecycleHomeId,
+    localDeviceId: bootstrap.mesh.deviceKey.deviceId,
     host: stopHost,
     acceptedWork,
     artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
     onAcceptedWorkFrozen: async (snapshot) => {
-      activeDeliveryLifecycleOperationId = snapshot.operationId;
+      const sources = deliveryLifecycleSources(snapshot);
       await ctx.deliveryStack?.installLifecycleAdmission({
         operationId: snapshot.operationId,
-        sources: deliveryLifecycleSources(snapshot),
+        sources,
         deliveries: snapshot.owners.delivery,
       });
+      await recoverStartupLifecycleAcceptedWork(sources);
     },
     runtime: {
       closeAdmission: async (operationId) => {
@@ -1604,6 +1706,9 @@ async function runServerProcess(
           .filter((item) => item.owner === "delivery")
           .map(({ id, revision }) => ({ id, revision })),
       });
+      await recoverStartupLifecycleAcceptedWork(
+        deliveryLifecycleSourcesFromOwnerItems(ownerItems),
+      );
       for (const owner of ["remote", "channel", "scheduler", "delivery"] as const) {
         const frozen = ownerItems
           .filter((item) => item.owner === owner)
@@ -1717,13 +1822,8 @@ async function runServerProcess(
           await ctx.deliveryStack?.quiesceForAuthorityTransfer();
           await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
         },
-        releaseAdmission: async () => {
-          if (activeDeliveryLifecycleOperationId) {
-            await ctx.deliveryStack?.releaseLifecycleAdmission(
-              activeDeliveryLifecycleOperationId,
-            );
-            activeDeliveryLifecycleOperationId = undefined;
-          }
+        releaseAdmission: async (operationId) => {
+          await ctx.deliveryStack?.releaseLifecycleAdmission(operationId);
           await ctx.deliveryStack?.resumeAfterAuthorityTransfer();
           ctx.conversationProtocol?.startRecoveryLoop();
           schedulerRuntime?.scheduler.resumeAfterAuthorityTransfer();
@@ -1745,12 +1845,13 @@ async function runServerProcess(
             ]);
           },
           onFrozen: async (snapshot) => {
-            activeDeliveryLifecycleOperationId = snapshot.operationId;
+            const sources = deliveryLifecycleSources(snapshot);
             await ctx.deliveryStack?.installLifecycleAdmission({
               operationId: snapshot.operationId,
-              sources: deliveryLifecycleSources(snapshot),
+              sources,
               deliveries: snapshot.owners.delivery,
             });
+            await recoverStartupLifecycleAcceptedWork(sources);
           },
           flushDurableState: async () => {
             const [checkpoint, localOwnerDigest] = await Promise.all([
@@ -2115,11 +2216,13 @@ async function runServerProcess(
   // External handlers and transports become active only after the product
   // ingress is listening; preparation above is intentionally side-effect free.
   ctx.deliveryStack?.activate();
-  schedulerRuntime?.activate();
+  if (!startupLifecycle) schedulerRuntime?.activate();
 
   // runServer resolve 后填 runner，供 post-server 接入面读 server.connections。
   ctx.runner = runner;
-  await schedulerRuntime?.resumeManualJobSurfaces();
+  if (!startupLifecycle || startupLifecycleFrozenRecoveryStarted) {
+    await schedulerRuntime?.resumeManualJobSurfaces();
+  }
 
   // runServer 之后：核心资源清理（LIFO 最先执行 —— markStopping / scheduler / channels /
   // delivery / heartbeat）。接入面产物（channels / deliveryStack）从 ctx 取。
@@ -2375,15 +2478,31 @@ function deliveryLifecycleSourcesFromOwnerItems(
   const sources = new Map<string, DeliveryLifecycleSourcePermit>();
   for (const item of items) {
     const source = item.owner === "conversation"
-      ? { owner: "conversation" as const, id: item.id, revision: item.revision }
+      ? {
+          owner: "conversation" as const,
+          id: item.id,
+          revision: protocolDigest("ConversationDeliveryLifecycleSource", 1, {
+            conversationId: item.id,
+          }),
+        }
+      : item.owner === "final"
+        ? {
+            owner: "conversation" as const,
+            id: item.id,
+            revision: item.revision,
+          }
       : item.owner === "assignment"
-        ? { owner: "assignment" as const, id: item.id, revision: item.revision }
+        ? {
+            owner: "assignment" as const,
+            id: item.id,
+            revision: item.revision,
+          }
         : item.owner === "scheduler"
           ? { owner: "scheduler" as const, id: item.id, revision: item.revision }
           : item.owner === "remote" && (item.id.startsWith("relay:") || item.id.startsWith("local:"))
             ? {
                 owner: "assignment" as const,
-                id: item.id.slice(item.id.indexOf(":") + 1),
+                id: item.id,
                 revision: item.revision,
               }
             : undefined;

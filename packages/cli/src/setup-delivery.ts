@@ -414,6 +414,7 @@ export interface DeliveryStack {
     operationId: string,
   ): Promise<readonly { readonly id: string; readonly revision: string }[]>;
   installLifecycleAdmission(input: import("@zhixing/core").DeliveryLifecycleAdmission): Promise<void>;
+  restoreLifecycleAdmission(input: import("@zhixing/core").DeliveryLifecycleRestoration): Promise<void>;
   sealLifecycleAdmission(operationId: string): Promise<void>;
   releaseLifecycleAdmission(operationId: string): Promise<void>;
   settleAcceptedWorkForLifecycle(
@@ -2526,6 +2527,8 @@ export async function setupDelivery(
       acceptedWorkItems: () => authorityDelivery!.acceptedWorkItems(),
       installLifecycleAdmission: (input) =>
         options.authorityRuntime.authority.installLifecycleAdmission(input),
+      restoreLifecycleAdmission: (input) =>
+        options.authorityRuntime.authority.restoreLifecycleAdmission(input),
       sealLifecycleAdmission: (operationId) =>
         options.authorityRuntime.authority.sealLifecycleAdmission(operationId),
       releaseLifecycleAdmission: (operationId) =>

@@ -74,6 +74,7 @@ export type {
   DeliveryEnqueueInput,
   DeliveryEnqueueResult,
   DeliveryLifecycleAdmission,
+  DeliveryLifecycleRestoration,
   DeliveryLifecycleBinding,
   DeliveryLifecycleSourceOwner,
   DeliveryLifecycleSourcePermit,

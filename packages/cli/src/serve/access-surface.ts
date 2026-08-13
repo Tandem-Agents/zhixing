@@ -94,6 +94,7 @@ import type { AgentRuntimeCapacityBinding } from "@zhixing/orchestrator/runtime"
 import type { JournalMaintenance } from "./journal-maintenance.js";
 import type { ProviderCredentialProjection } from "@zhixing/providers";
 import type { LocalConversationOwnerAssembly } from "./local-conversation-owner.js";
+import type { DeliveryLifecycleRestoration } from "@zhixing/core";
 
 /** 接入面装配阶段 —— 适配真实交织（confirmationBridge 依赖 runServer 后的 connections）。 */
 export type SurfacePhase = "pre-server" | "post-server";
@@ -135,6 +136,12 @@ export interface AssemblyContext {
   readonly storageMaintenance: StorageMaintenanceGovernorPort;
   readonly localWorkspaceIdentity: LocalWorkspaceAssemblyIdentity;
   readonly onTrustApplied?: (record: import("@zhixing/core/contracts").HomeTrustRecord) => void | Promise<void>;
+  /** Durable lifecycle projection loaded before any producer recovery or ingress. */
+  readonly startupLifecycle?: {
+    readonly kind: "stop" | "executor-removal" | "anchor-uninstall";
+    readonly artifactReady: boolean;
+    readonly delivery: DeliveryLifecycleRestoration;
+  };
 
   // ── 恒定核心（接入面 setup 前已建，供其读） ──
   readonly confirmationHub: ConfirmationHub;

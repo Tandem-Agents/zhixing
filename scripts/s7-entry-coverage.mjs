@@ -959,7 +959,8 @@ export function inspectDeviceLifecycleAssembly(records) {
   if (
     count(protocol, 'export const DEVICE_LIFECYCLE_STREAM = "device-lifecycle"') !== 1 ||
     !journal.includes('stream: DEVICE_LIFECYCLE_STREAM') ||
-    !journal.includes('record.t === "advanced" || record.t === "terminal"')
+    !journal.includes('record.t === "advanced" || record.t === "terminal"') ||
+    !protocol.includes('`${identity.homeId}\\u0000device:${identity.localDeviceId}`')
   ) failures.push("device lifecycle single journal or retained terminal evidence drifted");
   if (
     !removal.includes("await this.options.closeAdmission(identity.operationId)") ||
@@ -973,6 +974,12 @@ export function inspectDeviceLifecycleAssembly(records) {
     !executor.includes("const stopCoordinator = new HostStopCoordinator({") ||
     !executor.includes("lifecycleShutdown: stopCoordinator,")
   ) failures.push("device removal admission, accepted-work or two-root recovery binding drifted");
+  if (
+    !assembly.includes("log: options.bootstrapStore.authorityLog(),") ||
+    assembly.includes("log: options.authority.executorLog,") ||
+    command.includes("activeDeliveryLifecycleOperationId") ||
+    !command.includes('delivery: stopPort("delivery", async ({ operationId, strategy, timeoutMs }) =>')
+  ) failures.push("local lifecycle authority root or exact delivery operation ownership drifted");
   for (const method of [
     "server.shutdown",
     "server.uninstall.preflight",
@@ -2905,7 +2912,7 @@ export function inspectConversationAdoptionAssembly(records) {
   ) {
     failures.push(`${mesh.relative}: anchor must own the single finite first-party conversation relay target`);
   }
-  const startBoundary = mesh.text.indexOf("  async start(): Promise<void> {");
+  const startBoundary = mesh.text.search(/  async start\([^)]*\): Promise<void> \{/u);
   const stopBoundary = mesh.text.indexOf("  async stop(): Promise<void> {");
   if (startBoundary < 0 || stopBoundary < 0 || startBoundary > stopBoundary) {
     failures.push(`${mesh.relative}: mesh lifecycle start/stop boundary is missing`);

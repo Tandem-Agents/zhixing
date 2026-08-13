@@ -25,6 +25,7 @@ describe("anchor uninstall coordinator", () => {
     const commitMigration = vi.fn(async () => undefined);
     const verifyMigration = vi.fn(async () => undefined);
     const retireMigratedDevice = vi.fn(async () => undefined);
+    const effects: string[] = [];
     const coordinator = new AnchorUninstallCoordinator({
       ...fixture.base,
       migrationTargets: async () => [{ deviceId: "target-1", displayName: "书房电脑", ready: true }],
@@ -33,6 +34,28 @@ describe("anchor uninstall coordinator", () => {
       retireMigratedDevice,
       closeAdmission,
       releaseAdmission: async () => undefined,
+      recoveryAcceptedWork: {
+        ports: acceptedWorkPorts(effects),
+        artifactStore: fixture.store.artifactStore(),
+        closeAdmission: async (operationId) => {
+          effects.push(`close:${operationId}`);
+        },
+        onFrozen: async (snapshot) => {
+          effects.push(`frozen:${snapshot.operationId}`);
+        },
+        flushDurableState: async () => {
+          effects.push("flush");
+          return [{
+            kind: "accepted-work" as const,
+            digest: protocolDigest("TestAnchorMigrationFlush", 1, {
+              operationId: "uninstall-migration",
+            }),
+          }];
+        },
+        settlePhysicalSteps: async () => {
+          effects.push("physical");
+        },
+      },
       cleanupRecovery: async () => [],
       onRetired: async () => undefined,
     });
@@ -51,6 +74,9 @@ describe("anchor uninstall coordinator", () => {
     });
     expect(verifyMigration).toHaveBeenCalledWith("target-1");
     expect(retireMigratedDevice).toHaveBeenCalledWith("uninstall-migration");
+    expect(effects.filter((item) => item.startsWith("settle:")).length)
+      .toBe(HOST_STOP_ACCEPTED_WORK_OWNERS.length);
+    expect(effects.indexOf("flush")).toBeLessThan(effects.indexOf("physical"));
     await expect(coordinator.state("uninstall-migration")).resolves.toEqual({ phase: "uninstalled" });
   });
 

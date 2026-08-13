@@ -86,7 +86,7 @@ export class AnchorUninstallCoordinator {
     readonly retireMigratedDevice: (operationId: string) => Promise<void>;
     readonly checkpointOwner?: AuthorityCheckpointOwnerPort;
     readonly closeAdmission: () => Promise<void>;
-    readonly releaseAdmission: () => void | Promise<void>;
+    readonly releaseAdmission: (operationId: string) => void | Promise<void>;
     readonly recoveryAcceptedWork?: {
       readonly ports: HostStopAcceptedWorkPorts;
       readonly artifactStore: ArtifactStore;
@@ -235,7 +235,7 @@ export class AnchorUninstallCoordinator {
       at: this.options.now?.() ?? new Date().toISOString(),
     }, this.options.issuerKey);
     await this.#journal.abort(operationId, abort);
-    await this.options.releaseAdmission();
+    await this.options.releaseAdmission(operationId);
     return { phase: "cancelled" };
   }
 
@@ -299,22 +299,45 @@ export class AnchorUninstallCoordinator {
     let operation = await this.#requireOperation(identity.operationId);
     if (operation.phase === "accepted") {
       await this.options.closeAdmission();
-      operation = await this.#journal.advance(identity.operationId, "gate-frozen", [{
-        kind: "accepted-work",
-        digest: protocolDigest("AnchorUninstallAdmission", 1, identity),
-      }]);
+      const closure = this.#requireRecoveryAcceptedWork();
+      await closure.closeAdmission(identity.operationId);
+      const frozen = await freezeHostStopAcceptedWork(
+        identity.operationId,
+        closure.ports,
+        closure.artifactStore,
+      );
+      operation = await this.#journal.advance(
+        identity.operationId,
+        "gate-frozen",
+        [frozen.evidence],
+      );
     }
     if (operation.phase === "gate-frozen") {
+      const closure = this.#requireRecoveryAcceptedWork();
+      const snapshot = await loadHostStopAcceptedWork(operation, closure.artifactStore);
+      await closure.onFrozen?.(snapshot);
+      await settleHostStopAcceptedWork({
+        operationId: identity.operationId,
+        strategy: "drain",
+        timeoutMs: 30_000,
+        snapshot,
+        ports: closure.ports,
+      });
+      const flushEvidence = await closure.flushDurableState();
+      await closure.settlePhysicalSteps();
       await this.options.commitMigration({
         requestId: identity.requestId,
         transferId: path.transferId,
         targetDeviceId: path.targetDeviceId,
       });
       await this.options.verifyMigration(path.targetDeviceId);
-      operation = await this.#journal.advance(identity.operationId, "transfer-committed", [{
-        kind: "authority-transfer",
-        digest: protocolDigest("AnchorUninstallMigration", 1, path),
-      }]);
+      operation = await this.#journal.advance(identity.operationId, "transfer-committed", [
+        ...flushEvidence,
+        {
+          kind: "authority-transfer",
+          digest: protocolDigest("AnchorUninstallMigration", 1, path),
+        },
+      ]);
     }
     if (operation.phase === "transfer-committed") {
       await this.options.retireMigratedDevice(identity.operationId);

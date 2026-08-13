@@ -16,7 +16,10 @@ import type {
   SessionEventProjection,
 } from "@zhixing/core/contracts";
 import { AuthorityStorageError } from "@zhixing/core/authority";
-import { protocolDigest, type StreamFrameProducer } from "@zhixing/core/protocol";
+import {
+  dispatchEnvelopeDigest,
+  type StreamFrameProducer,
+} from "@zhixing/core/protocol";
 import type {
   ConversationAssignmentLedger,
   ExecutorResourceGovernor,
@@ -311,7 +314,7 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
       for (const obligation of page.entries) {
         items.push(Object.freeze({
           id: obligation.envelope.assignmentId,
-          revision: protocolDigest("ExecutorJobAcceptedWork", 1, obligation),
+          revision: dispatchEnvelopeDigest(obligation.envelope),
         }));
       }
       if (items.length > 50_000) {

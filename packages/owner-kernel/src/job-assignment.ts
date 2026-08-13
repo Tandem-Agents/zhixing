@@ -685,6 +685,7 @@ export interface JobJournalOptions {
   readonly clock?: () => string;
   readonly schedulerFailureThreshold?: number;
   readonly schedulerNotices?: SchedulerUserNoticeJournal;
+  readonly localExecutorId?: string;
 }
 
 /** Pure assignment metadata checked before the authority is allowed to issue credentials. */
@@ -752,6 +753,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
   readonly #clock: () => string;
   readonly #schedulerFailureThreshold: number;
   readonly #schedulerNotices: SchedulerUserNoticeJournal | undefined;
+  readonly #localExecutorId: string | undefined;
   readonly #operations = new SerialTaskQueue();
   readonly #statusListeners = new Set<
     (notice: JobStatusNotice) => void | Promise<void>
@@ -790,6 +792,7 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#schedulerFailureThreshold = options.schedulerFailureThreshold ?? 5;
     this.#schedulerNotices = options.schedulerNotices;
+    this.#localExecutorId = options.localExecutorId;
     assertPositive(this.#schedulerFailureThreshold, "Scheduler failure threshold");
   }
 
@@ -4240,6 +4243,11 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
           occurrence,
           definition,
           bundle,
+          assignmentLifecycleSource: {
+            owner: "assignment",
+            id: `${assigned.record.executorId === this.#localExecutorId ? "local" : "relay"}:${assignmentId}`,
+            revision: assigned.record.dispatchDigest,
+          },
           ...(mutationBatch ? { mutationBatch } : {}),
           ...(compiledDelivery.result
             ? { resultContent: compiledDelivery.result.content }
@@ -6786,6 +6794,11 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
               occurrence,
               definition: requireDefinitionRevision(state, occurrence.taskRevision),
               bundle,
+              assignmentLifecycleSource: {
+                owner: "assignment",
+                id: `${assigned.record.executorId === this.#localExecutorId ? "local" : "relay"}:${body.assignmentId}`,
+                revision: assigned.record.dispatchDigest,
+              },
               ...(closure.batch ? { mutationBatch: closure.batch } : {}),
             },
             envelope,

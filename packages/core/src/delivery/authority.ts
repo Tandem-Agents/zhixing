@@ -557,7 +557,7 @@ export class DeliveryAuthority {
   #lifecycleAdmission:
     | {
       readonly operationId: string;
-      readonly sources: ReadonlyMap<string, DeliveryLifecycleSourcePermit>;
+      sources: ReadonlyMap<string, DeliveryLifecycleSourcePermit>;
       readonly deliveries: Map<string, string>;
       sealed: boolean;
       }
@@ -588,6 +588,19 @@ export class DeliveryAuthority {
   }
 
   async installLifecycleAdmission(input: DeliveryLifecycleAdmission): Promise<void> {
+    await this.#setLifecycleAdmission(input, false);
+  }
+
+  async restoreLifecycleAdmission(
+    input: import("./types.js").DeliveryLifecycleRestoration,
+  ): Promise<void> {
+    await this.#setLifecycleAdmission(input, input.sealed);
+  }
+
+  async #setLifecycleAdmission(
+    input: DeliveryLifecycleAdmission,
+    sealed: boolean,
+  ): Promise<void> {
     const admission = snapshot(input, "Delivery lifecycle admission");
     assertDeliveryIdentifier(admission.operationId, "Delivery lifecycle operation id");
     const sources = new Map<string, DeliveryLifecycleSourcePermit>();
@@ -615,11 +628,14 @@ export class DeliveryAuthority {
     await this.coordinate(async () => {
       const current = this.#lifecycleAdmission;
       if (current) {
-        if (
-          current.operationId !== admission.operationId ||
-          canonicalize([...current.sources.values()].sort(compareLifecycleSources)) !==
-            canonicalize([...sources.values()].sort(compareLifecycleSources))
-        ) {
+        if (current.operationId !== admission.operationId) {
+          throw new Error("Another lifecycle operation owns delivery producer admission");
+        }
+        const currentSources = canonicalize([...current.sources.values()].sort(compareLifecycleSources));
+        const restoredSources = canonicalize([...sources.values()].sort(compareLifecycleSources));
+        if (current.sources.size === 0 && sources.size > 0 && !current.sealed) {
+          current.sources = sources;
+        } else if (sources.size > 0 && currentSources !== restoredSources) {
           throw new Error("Another lifecycle operation owns delivery producer admission");
         }
         for (const [itemId, revision] of deliveries) {
@@ -630,6 +646,7 @@ export class DeliveryAuthority {
           current.deliveries.set(itemId, revision);
         }
         this.#capturePendingLifecycleDeliveries(current.deliveries);
+        current.sealed ||= sealed;
         return;
       }
       this.#capturePendingLifecycleDeliveries(deliveries);
@@ -637,7 +654,7 @@ export class DeliveryAuthority {
         operationId: admission.operationId,
         sources,
         deliveries,
-        sealed: false,
+        sealed,
       };
     });
   }
@@ -709,6 +726,17 @@ export class DeliveryAuthority {
     const admission = this.#lifecycleAdmission;
     if (!admission) return inputs.map(() => undefined);
     return inputs.map((input) => {
+      const sources = input.lifecycleSources;
+      if (!sources || sources.length === 0) {
+        throw new Error("Delivery source is not part of the frozen lifecycle operation");
+      }
+      for (const source of sources) {
+        validateLifecycleSourcePermit(source);
+        const permit = admission.sources.get(lifecycleSourceKey(source.owner, source.id));
+        if (!permit || permit.revision !== source.revision) {
+          throw new Error("Delivery source is not part of the frozen lifecycle operation");
+        }
+      }
       const key = deliveryIdempotencyKey(input.keyBody);
       const existingId = this.#enqueueProjection.itemByKey.get(key);
       if (existingId) {
@@ -721,18 +749,9 @@ export class DeliveryAuthority {
       if (admission.sealed) {
         throw new Error("Delivery producer admission is sealed for the lifecycle operation");
       }
-      const sources = input.lifecycleSources;
-      if (
-        !sources || sources.length === 0 ||
-        sources.some((source) =>
-          !admission.sources.has(lifecycleSourceKey(source.owner, source.id)))
-      ) {
-        throw new Error("Delivery source is not part of the frozen lifecycle operation");
-      }
       return Object.freeze({
         operationId: admission.operationId,
-        sources: Object.freeze(sources.map((source) =>
-          admission.sources.get(lifecycleSourceKey(source.owner, source.id))!)),
+        sources: Object.freeze(sources.map((source) => Object.freeze({ ...source }))),
       });
     });
   }

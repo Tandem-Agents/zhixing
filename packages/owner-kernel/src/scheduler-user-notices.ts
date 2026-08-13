@@ -481,10 +481,22 @@ function missedMemberKey(member: MissedSummaryMember): string {
 
 function schedulerNoticeLifecycleSources(
   draft: SchedulerNoticeDraft,
-): readonly { readonly owner: "assignment" | "scheduler"; readonly id: string }[] {
-  const sources = new Map<string, { readonly owner: "assignment" | "scheduler"; readonly id: string }>();
+): readonly {
+  readonly owner: "assignment" | "scheduler";
+  readonly id: string;
+  readonly revision: string;
+}[] {
+  const sources = new Map<string, {
+    readonly owner: "assignment" | "scheduler";
+    readonly id: string;
+    readonly revision: string;
+  }>();
   const add = (owner: "assignment" | "scheduler", id: string) => {
-    if (id.length > 0) sources.set(`${owner}\u0000${id}`, Object.freeze({ owner, id }));
+    if (id.length === 0) return;
+    const revision = owner === "assignment"
+      ? protocolDigest("AssignmentDeliveryLifecycleSource", 1, { assignmentId: id })
+      : protocolDigest("SchedulerNoticeLifecycleSource", 1, { jobRunId: id });
+    sources.set(`${owner}\u0000${id}`, Object.freeze({ owner, id, revision }));
   };
   for (const member of draft.missedMembers ?? []) {
     const separator = member.indexOf("\u0000");

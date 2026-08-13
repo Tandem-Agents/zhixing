@@ -666,7 +666,7 @@ describe("delivery unique index and replay", () => {
     };
     const firstInput: DeliveryEnqueueInput = {
       ...deliveryInput(),
-      lifecycleSources: [{ owner: "conversation", id: "conversation-1" }],
+      lifecycleSources: [permit],
     };
     const authority = new DeliveryAuthority({ log, anchorEpoch: 7 });
     await authority.installLifecycleAdmission({
@@ -690,7 +690,7 @@ describe("delivery unique index and replay", () => {
           runId: "run-1",
           statusRevision: 2,
         },
-        lifecycleSources: [{ owner: "conversation", id: "conversation-1" }],
+        lifecycleSources: [permit],
       },
       {
         keyBody: {
@@ -698,11 +698,11 @@ describe("delivery unique index and replay", () => {
           conversationId: "conversation-1",
           requestId: "request-1",
         },
-        lifecycleSources: [{ owner: "conversation", id: "conversation-1" }],
+        lifecycleSources: [permit],
       },
       {
         keyBody: { kind: "staged-delivery", assignmentId: "assignment-1", mutationSeq: 1 },
-        lifecycleSources: [{ owner: "assignment", id: "assignment-1" }],
+        lifecycleSources: [{ owner: "assignment", id: "assignment-1", revision: `sha256:${"c".repeat(64)}` }],
       },
       {
         keyBody: {
@@ -711,7 +711,7 @@ describe("delivery unique index and replay", () => {
           jobRunId: "job-run-1",
           planDigest: `sha256:${"b".repeat(64)}`,
         },
-        lifecycleSources: [{ owner: "scheduler", id: "job-run-1" }],
+        lifecycleSources: [{ owner: "scheduler", id: "job-run-1", revision: `sha256:${"d".repeat(64)}` }],
       },
       {
         keyBody: {
@@ -720,11 +720,11 @@ describe("delivery unique index and replay", () => {
           jobRunId: "job-run-1",
           statusRevision: 2,
         },
-        lifecycleSources: [{ owner: "scheduler", id: "job-run-1" }],
+        lifecycleSources: [{ owner: "scheduler", id: "job-run-1", revision: `sha256:${"d".repeat(64)}` }],
       },
       {
         keyBody: { kind: "scheduler-user-notice-delivery", noticeId: "notice-1" },
-        lifecycleSources: [{ owner: "scheduler", id: "job-run-1" }],
+        lifecycleSources: [{ owner: "scheduler", id: "job-run-1", revision: `sha256:${"d".repeat(64)}` }],
       },
     ];
     await authority.releaseLifecycleAdmission("stop-operation-1");
@@ -755,9 +755,14 @@ describe("delivery unique index and replay", () => {
         runId: "run-2",
         commitRevision: 1,
       },
-      lifecycleSources: [{ owner: "conversation", id: "conversation-2" }],
+      lifecycleSources: [{ owner: "conversation", id: "conversation-2", revision: permit.revision }],
     })).rejects.toThrow("not part of the frozen lifecycle operation");
     expect(await log.readAll()).toEqual(beforeFresh);
+
+    await expect(enqueue(log, artifacts, authority, {
+      ...firstInput,
+      lifecycleSources: [{ ...permit, revision: `sha256:${"e".repeat(64)}` }],
+    })).rejects.toThrow("not part of the frozen lifecycle operation");
 
     await authority.sealLifecycleAdmission("stop-operation-1");
     await expect(enqueue(log, artifacts, authority, firstInput)).resolves.toMatchObject({
@@ -795,6 +800,23 @@ describe("delivery unique index and replay", () => {
       deliveries: [],
     });
     expect(await restarted.lifecycleAcceptedWorkItems("stop-operation-2")).toHaveLength(7);
+
+    await restarted.releaseLifecycleAdmission("stop-operation-2");
+    await restarted.restoreLifecycleAdmission({
+      operationId: "stop-operation-3",
+      sources: [permit],
+      deliveries: [],
+      sealed: true,
+    });
+    await expect(enqueue(log, artifacts, restarted, {
+      ...firstInput,
+      keyBody: {
+        kind: "conversation-status-delivery",
+        conversationId: "conversation-1",
+        runId: "run-1",
+        statusRevision: 4,
+      },
+    })).rejects.toThrow("admission is sealed");
   });
   it("generates the frozen prefixed ULID identity vector and rejects malformed item ids", () => {
     const digest = `sha256:${"a".repeat(64)}`;

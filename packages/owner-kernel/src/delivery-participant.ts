@@ -5,6 +5,7 @@ import {
   projectDeliveryDisplayText,
   validateDeliveryStreamRecord,
   type DeliveryEnqueueInput,
+  type DeliveryLifecycleSourceRef,
 } from "@zhixing/core";
 import {
   type AuthorityError,
@@ -24,6 +25,7 @@ import {
 } from "@zhixing/core/contracts";
 import {
   canonicalize,
+  protocolDigest,
   validatePublishDecisionForBatch,
 } from "@zhixing/core/protocol";
 
@@ -46,6 +48,8 @@ export interface ConversationDeliveryCommitInput {
   readonly runId: string;
   readonly assignmentId: string;
   readonly commitRevision: number;
+  readonly conversationLifecycleSource: DeliveryLifecycleSourceRef;
+  readonly assignmentLifecycleSource: DeliveryLifecycleSourceRef;
   readonly ingress: IngressContext;
   readonly runRecord: TranscriptRunRecord;
   readonly mutationBatch?: MutationBatch;
@@ -59,6 +63,7 @@ export interface JobDeliveryCommitInput {
   readonly occurrence: JobOccurrence;
   readonly definition: TaskDefinition;
   readonly bundle: JobBundle;
+  readonly assignmentLifecycleSource: DeliveryLifecycleSourceRef;
   readonly mutationBatch?: MutationBatch;
   readonly resultContent?: DeliveryIntentDto["content"];
   readonly stagedContents?: ReadonlyMap<number, DeliveryIntentDto["content"]>;
@@ -104,6 +109,7 @@ export interface SchedulerNoticeDeliveryInput {
   readonly lifecycleSources?: readonly {
     readonly owner: "assignment" | "scheduler";
     readonly id: string;
+    readonly revision: string;
   }[];
 }
 
@@ -581,7 +587,7 @@ function conversationCommitInputs(
         createdAt: input.at,
         maxAttempts,
       },
-      lifecycleSources: [{ owner: "conversation", id: input.conversationId }],
+      lifecycleSources: [input.conversationLifecycleSource],
     });
   }
   for (const record of input.mutationBatch?.records ?? []) {
@@ -614,7 +620,7 @@ function conversationCommitInputs(
         createdAt: input.at,
         maxAttempts,
       },
-      lifecycleSources: [{ owner: "assignment", id: input.assignmentId }],
+      lifecycleSources: [input.assignmentLifecycleSource],
     });
   }
   return result;
@@ -665,7 +671,7 @@ function jobCommitInputs(
         createdAt: input.at,
         maxAttempts,
       },
-      lifecycleSources: [{ owner: "scheduler", id: input.occurrence.jobRunId }],
+      lifecycleSources: [schedulerLifecycleSource(input.occurrence)],
     });
   }
   for (const record of input.mutationBatch?.records ?? []) {
@@ -701,7 +707,7 @@ function jobCommitInputs(
         createdAt: input.at,
         maxAttempts,
       },
-      lifecycleSources: [{ owner: "assignment", id: input.bundle.assignmentId }],
+      lifecycleSources: [input.assignmentLifecycleSource],
     });
   }
   return result;
@@ -734,7 +740,7 @@ function conversationStatusInputs(
         createdAt: input.at,
         maxAttempts,
       },
-      lifecycleSources: [{ owner: "conversation", id: input.conversationId }],
+      lifecycleSources: [conversationLifecycleSource(input.conversationId)],
     },
   ];
 }
@@ -758,7 +764,7 @@ function conversationControlResponseInput(
       createdAt: input.at,
       maxAttempts,
     },
-    lifecycleSources: [{ owner: "conversation", id: input.conversationId }],
+    lifecycleSources: [conversationLifecycleSource(input.conversationId)],
   };
 }
 
@@ -804,9 +810,31 @@ function jobStatusInputs(
         createdAt: input.at,
         maxAttempts,
       },
-      lifecycleSources: [{ owner: "scheduler", id: input.occurrence.jobRunId }],
+      lifecycleSources: [schedulerLifecycleSource(input.occurrence)],
     },
   ];
+}
+
+function conversationLifecycleSource(conversationId: string) {
+  return Object.freeze({
+    owner: "conversation" as const,
+    id: conversationId,
+    revision: protocolDigest("ConversationDeliveryLifecycleSource", 1, { conversationId }),
+  });
+}
+
+function schedulerLifecycleSource(occurrence: JobOccurrence) {
+  return Object.freeze({
+    owner: "scheduler" as const,
+    id: occurrence.jobRunId,
+    revision: protocolDigest("SchedulerAcceptedWork", 1, {
+      taskId: occurrence.taskId,
+      jobRunId: occurrence.jobRunId,
+      scheduledFor: occurrence.scheduledFor,
+      taskRevision: occurrence.taskRevision,
+      deliveryPlan: occurrence.deliveryPlan,
+    }),
+  });
 }
 
 function assertDeliveryCompanions(

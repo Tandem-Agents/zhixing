@@ -42,6 +42,7 @@ import {
   assertPrincipalAllowsAuthorityMethod,
   MAX_CONTROL_LEASE_TTL_MS,
   canonicalize,
+  dispatchEnvelopeDigest,
   ownerControlRequestDigest,
   protocolDigest,
   StreamDigestChain,
@@ -2351,8 +2352,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       }
       for (const assignment of await journal.assignmentsAwaitingRecovery()) {
         assignments.push({
-          id: assignment.assignmentId,
-          revision: protocolDigest("PendingAssignmentClosure", 1, assignment),
+          id: `${assignment.dispatch.envelope.executorId === this.#authority.executorId ? "local" : "relay"}:${assignment.assignmentId}`,
+          revision: dispatchEnvelopeDigest(assignment.dispatch.envelope),
         });
       }
     }
@@ -2659,7 +2660,10 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         : {}),
       resources: this.#authority.resourceGovernor,
       clock: this.#clock,
-      currentAuthority: { deviceId: this.#authority.deviceId },
+      currentAuthority: {
+        deviceId: this.#authority.deviceId,
+        executorId: this.#authority.executorId,
+      },
     });
     if (this.#onStatus) {
       journal.onStatus(this.#onStatus);

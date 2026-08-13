@@ -45,6 +45,7 @@ export interface JobChannelObligationJournal
 
 export interface JobRelayOpening {
   readonly assignmentId: string;
+  readonly sourceRevision: string;
   readonly ref: JobRef;
   readonly executorId: string;
   readonly controlLeaseId: string;

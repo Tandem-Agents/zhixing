@@ -538,6 +538,7 @@ export async function runExecutorRole(
     const stopCoordinator = new HostStopCoordinator({
       journal: new DeviceLifecycleJournal(lifecycleLog),
       homeId: (await lifecycleLog.originCheckpoint()).logId,
+      localDeviceId: bootstrap.mesh.deviceKey.deviceId,
       host: stopHost,
       acceptedWork,
       artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),

@@ -591,7 +591,7 @@ test("local conversation owner remains isolated from anchor capabilities by cons
   assert.match(
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
-      (text) => text.replace("    await assembly.start();", "    await Promise.resolve();"),
+      (text) => text.replace("    await assembly.start(", "    await Promise.resolve("),
     )).join("\n"),
     /assembly must start exactly once, got 0/,
   );
@@ -1862,6 +1862,13 @@ test("device lifecycle stays on one journal, two production roots and local-only
       (text) => text.replace("const stopCoordinator = new HostStopCoordinator({", "const stopCoordinator = undefined; void ({"),
     )).join("\n"),
     /two-root recovery binding drifted/,
+  );
+  assert.match(
+    inspectDeviceLifecycleAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace("log: options.bootstrapStore.authorityLog(),", "log: options.authority.executorLog,"),
+    )).join("\n"),
+    /local lifecycle authority root/,
   );
   assert.match(
     inspectDeviceLifecycleAssembly(mutate(

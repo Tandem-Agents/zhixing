@@ -66,6 +66,7 @@ export interface HostStopRuntime {
 export interface HostStopCoordinatorOptions {
   readonly journal: DeviceLifecycleJournal;
   readonly homeId: string;
+  readonly localDeviceId: string;
   readonly host: StopHostGeneration;
   readonly runtime: HostStopRuntime;
   readonly acceptedWork?: HostStopAcceptedWorkPorts;
@@ -99,6 +100,7 @@ export class HostStopCoordinator {
       requestId: input.requestId,
       operationId,
       homeId: this.options.homeId,
+      localDeviceId: this.options.localDeviceId,
       strategy: input.strategy,
       host: this.options.host,
     });
@@ -115,6 +117,7 @@ export class HostStopCoordinator {
     for (const operation of operations) {
       if (operation.identity.kind !== "stop") continue;
       if (operation.identity.homeId !== this.options.homeId) continue;
+      if (operation.identity.localDeviceId !== this.options.localDeviceId) continue;
       if (canonicalHost(operation.identity.host) === canonicalHost(this.options.host)) {
         resumed.push(await this.#resume(operation, 30_000));
         continue;

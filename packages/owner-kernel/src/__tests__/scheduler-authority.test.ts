@@ -5,6 +5,7 @@ import type {
   JobRunState,
   TaskDefinition,
 } from "@zhixing/core/contracts";
+import { protocolDigest } from "@zhixing/core/protocol";
 import { describe, expect, it, vi } from "vitest";
 import type { ControlAdmissionJournal } from "../control-admission.js";
 import type { JobJournal, JobLifecycleEvent } from "../job-assignment.js";
@@ -192,6 +193,7 @@ function fixture(input: {
   systemTasks?: ConstructorParameters<typeof AnchorScheduler>[0]["systemTasks"];
   activateUserJob?: ConstructorParameters<typeof AnchorScheduler>[0]["activateUserJob"];
   schedulerNotices?: ConstructorParameters<typeof AnchorScheduler>[0]["schedulerNotices"];
+  recoverUserJobs?: ConstructorParameters<typeof AnchorScheduler>[0]["recoverUserJobs"];
   onError?: (error: Error) => void;
 } = {}) {
   const journals = input.journals ?? new Map<string, MemoryJobJournal>();
@@ -211,6 +213,7 @@ function fixture(input: {
       return journal as unknown as JobJournal;
     },
     activateUserJob: input.activateUserJob ?? (async () => {}),
+    ...(input.recoverUserJobs ? { recoverUserJobs: input.recoverUserJobs } : {}),
     systemTasks: input.systemTasks ?? new Map(),
     ...(input.schedulerNotices ? { schedulerNotices: input.schedulerNotices } : {}),
     ...(input.onError ? { onError: input.onError } : {}),
@@ -264,6 +267,61 @@ describe("AnchorScheduler authority", () => {
     await scheduler.pauseForAuthorityTransfer();
     await expect(run).resolves.toMatchObject({ status: "ok" });
     await expect(scheduler.acceptedWorkItems()).resolves.toEqual([]);
+    await scheduler.stop();
+  });
+
+  it("recovers only the exact scheduler generation frozen by lifecycle state", async () => {
+    const journal = new MemoryJobJournal();
+    journal.definition = {
+      taskId: "task-recovery",
+      taskRevision: 1,
+      state: "enabled",
+      definition: {
+        kind: "user",
+        spec: {
+          name: "recovery task",
+          enabled: true,
+          priority: "normal",
+          schedule: { kind: "interval", everyMs: 60_000 },
+          action: { kind: "agent-turn", prompt: "resume" },
+        },
+      },
+    };
+    const occurrence: JobOccurrence = {
+      taskId: "task-recovery",
+      jobRunId: "job-recovery",
+      scheduledFor: "2026-08-02T00:00:00.000Z",
+      taskRevision: 1,
+      deliveryPlan: { delivery: { kind: "none" }, planDigest: "none" },
+      state: "queued",
+    };
+    journal.runs.push(occurrence);
+    const recoverUserJobs = vi.fn(async () => undefined);
+    const { scheduler } = fixture({
+      journals: new Map([["task-recovery", journal]]),
+      recoverUserJobs,
+    });
+    const revision = protocolDigest("SchedulerAcceptedWork", 1, {
+      taskId: occurrence.taskId,
+      jobRunId: occurrence.jobRunId,
+      scheduledFor: occurrence.scheduledFor,
+      taskRevision: occurrence.taskRevision,
+      deliveryPlan: occurrence.deliveryPlan,
+    });
+
+    await scheduler.recoverAcceptedWorkForLifecycle([
+      { id: occurrence.jobRunId, revision },
+    ]);
+    expect(recoverUserJobs).toHaveBeenCalledWith(
+      expect.anything(),
+      new Set([occurrence.jobRunId]),
+    );
+
+    await expect(
+      scheduler.recoverAcceptedWorkForLifecycle([
+        { id: occurrence.jobRunId, revision: `${revision}-successor` },
+      ]),
+    ).rejects.toThrow("unfrozen accepted-work generation");
     await scheduler.stop();
   });
 

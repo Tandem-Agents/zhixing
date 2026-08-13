@@ -83,6 +83,7 @@ describe("HostStopCoordinator", () => {
       timeoutMs: 2_000,
     });
     const restarted = new HostStopCoordinator({
+      localDeviceId: "device-local",
       journal: fixture.journal,
       homeId: fixture.homeId,
       host: {
@@ -156,6 +157,7 @@ async function createFixture(options: { failFlushOnce?: boolean } = {}) {
     homeId,
     journal,
     coordinator: new HostStopCoordinator({
+      localDeviceId: "device-local",
       journal,
       homeId,
       host: {

@@ -39,7 +39,10 @@ export class ExecutorJobOwner implements JobInteractionAnswerPort {
     return this.#state === "ready";
   }
 
-  async start(): Promise<void> {
+  async start(options: {
+    readonly admissionClosed?: boolean;
+    readonly recoverAcceptedWork?: boolean;
+  } = {}): Promise<void> {
     if (this.#state === "ready") return;
     if (this.#state === "closed") {
       throw new JobInteractionRuntimeUnavailableError(
@@ -50,8 +53,11 @@ export class ExecutorJobOwner implements JobInteractionAnswerPort {
     this.#state = "recovering";
     this.#starting = (async () => {
       try {
-        await this.#worker.recover();
-        if (this.#state !== "closed") this.#state = "ready";
+        if (options.admissionClosed) this.#worker.stopAccepting();
+        if (options.recoverAcceptedWork !== false) await this.#worker.recover();
+        if (this.#state !== "closed") {
+          this.#state = options.admissionClosed ? "paused" : "ready";
+        }
       } catch (error) {
         if (this.#state !== "closed") this.#state = "created";
         throw error;
@@ -105,6 +111,11 @@ export class ExecutorJobOwner implements JobInteractionAnswerPort {
 
   drain(): Promise<void> {
     return this.#worker.drain();
+  }
+
+  async recoverAcceptedWorkForLifecycle(): Promise<void> {
+    if (this.#state !== "paused") return;
+    await this.#worker.recover();
   }
 
   pauseAccepting(): void {
@@ -169,8 +180,8 @@ export class ExecutorJobOwnerAssembly {
     return this.owner.ready;
   }
 
-  start(): Promise<void> {
-    return this.owner.start();
+  start(options?: Parameters<ExecutorJobOwner["start"]>[0]): Promise<void> {
+    return this.owner.start(options);
   }
 
   stopAccepting(): void {
@@ -191,6 +202,10 @@ export class ExecutorJobOwnerAssembly {
 
   acceptedWorkItems(): Promise<readonly JobAcceptedWorkItem[]> {
     return this.owner.acceptedWorkItems();
+  }
+
+  recoverAcceptedWorkForLifecycle(): Promise<void> {
+    return this.owner.recoverAcceptedWorkForLifecycle();
   }
 
   close(): Promise<void> {
