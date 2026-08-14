@@ -143,6 +143,7 @@ import { registerDisasterRecoveryTrustEvidenceService } from "./disaster-recover
 import {
   CurrentIssuerDeviceRemovalAuthority,
   ExecutorRemovalTarget,
+  type ExecutorRemovalPublicState,
 } from "./device-removal.js";
 import {
   DeviceRemovalIssuerMeshClient,
@@ -1251,18 +1252,16 @@ export class MeshRuntimeAssembly {
       member.device.deviceId,
     );
     if (!operation) return undefined;
-    if (this.connections.has(member.device.deviceId)) {
-      return new DeviceRemovalTargetMeshClient(
-        this.connections.client(member.device.deviceId),
-      ).status(operation.operationId);
-    }
-    const terminal = await this.#deviceRemovalAuthority?.terminal(operation.operationId);
-    return terminal ? {
-      phase: "removed" as const,
-      conversations: [] as readonly string[],
-      localData: "unknown" as const,
-      credentialActions: ["Change credentials for accounts used on this device"],
-    } : undefined;
+    return resolveDeviceRemovalStatus({
+      targetStatus: this.connections.has(member.device.deviceId)
+        ? () => new DeviceRemovalTargetMeshClient(
+            this.connections.client(member.device.deviceId),
+          ).status(operation.operationId)
+        : undefined,
+      issuerStatus: () => this.#deviceRemovalAuthority!.publicStateForTarget(
+        member.device.deviceId,
+      ),
+    });
   }
 
   async retireLocalDeviceAfterMigration(input: {
@@ -2263,6 +2262,21 @@ export class MeshRuntimeAssembly {
       throw new Error("Duty-device migration is unavailable while a paired device is being removed");
     }
   }
+}
+
+export async function resolveDeviceRemovalStatus(input: {
+  readonly targetStatus?: () => Promise<ExecutorRemovalPublicState | undefined>;
+  readonly issuerStatus: () => Promise<ExecutorRemovalPublicState | undefined>;
+}): Promise<ExecutorRemovalPublicState | undefined> {
+  if (input.targetStatus) {
+    try {
+      const target = await input.targetStatus();
+      if (target) return target;
+    } catch {
+      // Fall through to the durable issuer projection.
+    }
+  }
+  return input.issuerStatus();
 }
 
 export function executorIdForDevice(deviceId: string): string {

@@ -62,6 +62,10 @@ describe("current issuer device removal", () => {
     };
     const revoked = await authority.commitReady(receipt);
     expect(revoked.phase).toBe("revoked");
+    await expect(authority.publicStateForTarget(accepted.targetDeviceId)).resolves.toMatchObject({
+      phase: "cleaning-device",
+      localData: "known",
+    });
     await expect(authority.commitReady(receipt)).resolves.toEqual(revoked);
     const tail = (await fixture.store.authorityLog().readAll()).at(-1);
     expect(tail?.entries.map((entry) => entry.stream)).toEqual(expect.arrayContaining([
@@ -83,6 +87,10 @@ describe("current issuer device removal", () => {
     };
     const removed = await authority.commitCleanupReady(cleanupReady);
     expect(removed.phase).toBe("removed");
+    await expect(authority.publicStateForTarget(accepted.targetDeviceId)).resolves.toMatchObject({
+      phase: "removed",
+      localData: "unknown",
+    });
     await expect(authority.commitCleanupReady(cleanupReady)).resolves.toEqual(removed);
     await expect(authority.terminal("remove-1")).resolves.toEqual(removed);
     const restarted = fixture.authority();
@@ -105,6 +113,32 @@ describe("current issuer device removal", () => {
     expect(restarted.authorizesTarget(fixture.targetKey.deviceId)).toBe(true);
     expect((await fixture.store.authorityLog().readStream("device-lifecycle")).length).toBe(2);
   });
+
+  it("projects pending and abort-waiting states from the issuer journal after restart", async () => {
+    const fixture = await createFixture();
+    const authority = fixture.authority();
+    const accepted = await authority.accept({
+      requestId: "request-status-fallback",
+      operationId: "remove-status-fallback",
+      targetName: "工作电脑",
+    });
+
+    await expect(authority.publicStateForTarget(accepted.targetDeviceId)).resolves.toEqual({
+      phase: "needs-conversation-decision",
+      conversations: [],
+      localData: "known",
+      credentialActions: ["移除已登记，可继续或取消"],
+    });
+
+    await authority.abort(accepted.operationId);
+    const restarted = fixture.authority();
+    await expect(restarted.publicStateForTarget(accepted.targetDeviceId)).resolves.toEqual({
+      phase: "waiting-for-device",
+      conversations: [],
+      localData: "known",
+      credentialActions: ["取消已安全记录；目标设备上线后会自动恢复准入"],
+    });
+  }, 120_000);
 
   it("keeps a signed cancel pending until the target durably aborts and exactly replays both sides", async () => {
     const fixture = await createFixture();

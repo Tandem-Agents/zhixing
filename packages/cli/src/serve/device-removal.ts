@@ -230,6 +230,21 @@ export class CurrentIssuerDeviceRemovalAuthority {
   }
 
   async operationForTarget(targetDeviceId: string): Promise<ExecutorRemovalLifecycleIdentity | undefined> {
+    return (await this.#operationStateForTarget(targetDeviceId))?.identity as
+      | ExecutorRemovalLifecycleIdentity
+      | undefined;
+  }
+
+  async publicStateForTarget(
+    targetDeviceId: string,
+  ): Promise<ExecutorRemovalPublicState | undefined> {
+    const operation = await this.#operationStateForTarget(targetDeviceId);
+    return operation ? publicIssuerRemovalState(operation) : undefined;
+  }
+
+  async #operationStateForTarget(
+    targetDeviceId: string,
+  ): Promise<DeviceLifecycleOperation | undefined> {
     const operations = (await this.#journal.operations())
       .filter((operation) =>
         operation.identity.kind === "executor-removal" &&
@@ -240,9 +255,7 @@ export class CurrentIssuerDeviceRemovalAuthority {
     if (active.length > 1) {
       throw new Error("Paired device has conflicting active removal operations");
     }
-    return (active[0] ?? operations.at(-1))?.identity as
-      | ExecutorRemovalLifecycleIdentity
-      | undefined;
+    return active[0] ?? operations.at(-1);
   }
 
   async commitReady(input: ExecutorRemovalReceipt): Promise<ExecutorRemovalReceipt> {
@@ -1427,6 +1440,45 @@ function publicRemovalState(
     conversations,
     localData: "known",
     credentialActions: [],
+  };
+}
+
+function publicIssuerRemovalState(
+  operation: DeviceLifecycleOperation,
+): ExecutorRemovalPublicState {
+  if (operation.phase === "aborted") {
+    return { phase: "cancelled", conversations: [], localData: "known", credentialActions: [] };
+  }
+  if (operation.phase === "terminal") {
+    return {
+      phase: "removed",
+      conversations: [],
+      localData: "unknown",
+      credentialActions: ["Change credentials for accounts used on this device"],
+    };
+  }
+  if (operation.peerEffects.some((effect) => effect.kind === "issuer-abort")) {
+    return {
+      phase: "waiting-for-device",
+      conversations: [],
+      localData: "known",
+      credentialActions: ["取消已安全记录；目标设备上线后会自动恢复准入"],
+    };
+  }
+  if (operation.phase === "revoked" || operation.phase === "cleanup-complete") {
+    return { phase: "cleaning-device", conversations: [], localData: "known", credentialActions: [] };
+  }
+  if (operation.phase === "revocation-ready") {
+    return { phase: "revoking-access", conversations: [], localData: "known", credentialActions: [] };
+  }
+  if (operation.phase === "authority-decided" || operation.phase === "authority-settled") {
+    return { phase: "moving-conversations", conversations: [], localData: "known", credentialActions: [] };
+  }
+  return {
+    phase: "needs-conversation-decision",
+    conversations: [],
+    localData: "known",
+    credentialActions: ["移除已登记，可继续或取消"],
   };
 }
 

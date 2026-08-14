@@ -2,7 +2,7 @@ import { chmod, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
-import { removeApplication } from "./app-remove.js";
+import { handoffProgramRemoval, removeApplication } from "./app-remove.js";
 
 describe("application removal", () => {
   it("stops safely and only hands the program root to the installer", async () => {
@@ -47,6 +47,55 @@ describe("application removal", () => {
       "future-unregistered",
       "program-removal-handed-off",
     ]);
+  });
+
+  it("accepts the installer handoff only after the installer exits successfully", async () => {
+    await expect(handoffProgramRemoval(process.execPath, [
+      "-e",
+      "process.exit(0)",
+    ])).resolves.toBeUndefined();
+
+    await expect(handoffProgramRemoval(process.execPath, [
+      "-e",
+      "process.exit(23)",
+    ])).rejects.toThrow("应用未完全移除，请重试");
+
+    await expect(handoffProgramRemoval(process.execPath, [
+      "-e",
+      "process.kill(process.pid, 'SIGTERM')",
+    ])).rejects.toThrow("应用未完全移除，请重试");
+
+    const missing = path.join(await createTempDir("app-remove-missing-runtime"), "missing-runtime");
+    await expect(handoffProgramRemoval(missing, []))
+      .rejects.toThrow("应用未完全移除，请重试");
+  });
+
+  it("keeps a post-commit handoff failure idempotently retryable", async () => {
+    const root = await createTempDir("app-remove-handoff-retry");
+    const executable = path.join(root, "runtime", process.platform === "win32" ? "node.exe" : "node");
+    const installer = path.join(root, "installer", "program-installer.js");
+    await mkdir(path.dirname(executable), { recursive: true });
+    await writeFile(executable, "installer");
+    await mkdir(path.dirname(installer), { recursive: true });
+    await writeFile(installer, "installer");
+    const rollback = vi.fn(async () => undefined);
+    const handoff = vi.fn()
+      .mockRejectedValueOnce(new Error("应用未完全移除，请重试"))
+      .mockResolvedValueOnce(undefined);
+    const deps = {
+      programRoot: root,
+      prepareManagedRemoval: async () => ({
+        commit: async () => undefined,
+        rollback,
+      }),
+      stop: async () => ({ status: "nothing-to-stop" as const }),
+      handoff,
+    };
+
+    await expect(removeApplication(deps)).rejects.toThrow("应用未完全移除，请重试");
+    await expect(removeApplication(deps)).resolves.toBeUndefined();
+    expect(rollback).not.toHaveBeenCalled();
+    expect(handoff).toHaveBeenCalledTimes(2);
   });
 
   it("does not hand off when accepted work blocks the safe stop", async () => {

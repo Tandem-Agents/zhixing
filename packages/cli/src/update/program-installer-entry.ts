@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { EMBEDDED_RELEASE_TRUST } from "./release-channel.js";
@@ -6,6 +5,7 @@ import { createReleaseVerifier } from "./release-verifier.js";
 import { installProgramRelease } from "./installation-receipt.js";
 import { ProgramStore, currentReleaseTarget, defaultProgramRoot } from "./program-store.js";
 import { requestLocalUpgradeHandoff } from "./runtime.js";
+import { scheduleProgramRootRemoval } from "./program-root-removal.js";
 
 const command = process.argv[2];
 if (command === "install") {
@@ -25,30 +25,9 @@ if (command === "install") {
   if (!process.argv.includes("--preserve-user-data")) {
     throw new Error("应用移除必须显式保留全部用户数据");
   }
-  scheduleProgramRootRemoval(root);
+  await scheduleProgramRootRemoval(root);
 } else {
   throw new Error("program installer command is invalid");
-}
-
-function scheduleProgramRootRemoval(root: string): void {
-  const child = process.platform === "win32"
-    ? spawn("powershell.exe", [
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        "Start-Sleep -Seconds 1; Remove-Item -LiteralPath $env:ZHIXING_REMOVE_ROOT -Recurse -Force",
-      ], {
-        detached: true,
-        env: { ...process.env, ZHIXING_REMOVE_ROOT: root },
-        stdio: "ignore",
-        windowsHide: true,
-      })
-    : spawn("sh", ["-c", "sleep 1; rm -rf -- \"$ZHIXING_REMOVE_ROOT\""], {
-        detached: true,
-        env: { ...process.env, ZHIXING_REMOVE_ROOT: root },
-        stdio: "ignore",
-      });
-  child.unref();
 }
 
 function required(flag: string): string {

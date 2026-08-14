@@ -39,7 +39,7 @@ export async function removeApplication(deps: AppRemoveDeps = {}): Promise<void>
     }
     await managedService.commit();
     committed = true;
-    await (deps.handoff ?? defaultHandoff)(executable, [
+    await (deps.handoff ?? handoffProgramRemoval)(executable, [
       installer,
       "remove",
       "--program-root",
@@ -61,11 +61,31 @@ export async function removeApplication(deps: AppRemoveDeps = {}): Promise<void>
   }
 }
 
-async function defaultHandoff(executable: string, args: readonly string[]): Promise<void> {
+export async function handoffProgramRemoval(
+  executable: string,
+  args: readonly string[],
+): Promise<void> {
   const child = spawn(executable, [...args], {
     detached: true,
     stdio: "ignore",
     windowsHide: true,
   });
-  child.unref();
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const fail = (): void => {
+      if (settled) return;
+      settled = true;
+      reject(new Error("应用未完全移除，请重试"));
+    };
+    child.once("error", fail);
+    child.once("exit", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      if (code === 0 && signal === null) {
+        resolve();
+        return;
+      }
+      reject(new Error("应用未完全移除，请重试"));
+    });
+  });
 }

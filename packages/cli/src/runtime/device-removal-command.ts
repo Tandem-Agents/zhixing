@@ -46,7 +46,10 @@ export async function removeDevice(input: {
 }
 
 export async function removeDeviceWithManagement(
-  management: Pick<RpcManagementFacade, "deviceList" | "deviceRemove" | "deviceContinue">,
+  management: Pick<
+    RpcManagementFacade,
+    "deviceList" | "deviceRemove" | "deviceContinue" | "deviceStatus"
+  >,
   input: {
     readonly targetName?: string;
     readonly mode?: Exclude<DeviceRemovalMode, "cancel">;
@@ -97,10 +100,10 @@ export async function removeDeviceWithManagement(
         `永久移除设备“${device.displayName}”。${work}；${consequence}。继续吗？`,
       );
       irreversibleDecisionStarted = true;
-      renderState(await management.deviceContinue({
+      await continueDeviceRemovalWithManagement(management, {
         targetName: device.displayName,
         mode,
-      }));
+      }, true);
     } catch (error) {
       if (acceptStarted && !irreversibleDecisionStarted) {
         try {
@@ -139,8 +142,31 @@ export async function continueDeviceRemoval(input: {
     );
   }
   await withManagement(async (management) => {
-    renderState(await management.deviceContinue(input));
+    if (input.mode === "cancel") {
+      renderState(await management.deviceContinue(input));
+      return;
+    }
+    await continueDeviceRemovalWithManagement(management, {
+      targetName: input.targetName,
+      mode: input.mode,
+    }, false);
   });
+}
+
+export async function continueDeviceRemovalWithManagement(
+  management: Pick<RpcManagementFacade, "deviceContinue" | "deviceStatus">,
+  input: {
+    readonly targetName: string;
+    readonly mode: Exclude<DeviceRemovalMode, "cancel">;
+  },
+  knownAccepted: boolean,
+): Promise<void> {
+  try {
+    renderState(await management.deviceContinue(input));
+    return;
+  } catch {
+    await renderDecisionDispatchFailure(management, input.targetName, knownAccepted);
+  }
 }
 
 export async function showDeviceRemovalStatus(
@@ -205,6 +231,34 @@ function renderState(state: DeviceRemovalState): void {
     console.log(`本机对话：${state.conversations.join("、")}`);
   }
   for (const action of state.credentialActions) console.log(`下一步：${action}`);
+}
+
+async function renderDecisionDispatchFailure(
+  management: Pick<RpcManagementFacade, "deviceStatus">,
+  targetName: string,
+  knownAccepted: boolean,
+): Promise<void> {
+  let state: DeviceRemovalState | null;
+  try {
+    state = await management.deviceStatus({ targetName });
+  } catch {
+    throw new Error("设备移除状态暂时无法确认；请稍后运行 device status 查看进度");
+  }
+  if (!state) {
+    if (knownAccepted) {
+      console.log("移除已登记，可继续或取消");
+      return;
+    }
+    throw new Error("没有找到可继续的设备移除操作；请重新运行永久设备移除");
+  }
+  if (
+    state.phase === "waiting-for-device" ||
+    state.phase === "needs-conversation-decision"
+  ) {
+    console.log("移除已登记，可继续或取消");
+    return;
+  }
+  renderState(state);
 }
 
 async function requireConfirmation(

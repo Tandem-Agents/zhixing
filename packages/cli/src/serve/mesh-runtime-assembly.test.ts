@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { partitionPlannedAnchorPostInstall } from "./mesh-runtime-assembly.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+  partitionPlannedAnchorPostInstall,
+  resolveDeviceRemovalStatus,
+} from "./mesh-runtime-assembly.js";
 
 describe("planned anchor post-install consumer closure", () => {
   it("partitions every durable pending kind into exactly one fixed consumer", () => {
@@ -39,3 +42,31 @@ describe("planned anchor post-install consumer closure", () => {
     ]));
   });
 });
+
+describe("device removal status projection", () => {
+  it("prefers the target state and falls back to the issuer when target status fails", async () => {
+    const issuer = vi.fn(async () => removalState("needs-conversation-decision"));
+    const target = vi.fn(async () => removalState("moving-conversations"));
+    await expect(resolveDeviceRemovalStatus({
+      targetStatus: target,
+      issuerStatus: issuer,
+    })).resolves.toEqual(removalState("moving-conversations"));
+    expect(issuer).not.toHaveBeenCalled();
+
+    target.mockRejectedValueOnce(new Error("target went offline"));
+    await expect(resolveDeviceRemovalStatus({
+      targetStatus: target,
+      issuerStatus: issuer,
+    })).resolves.toEqual(removalState("needs-conversation-decision"));
+    expect(issuer).toHaveBeenCalledOnce();
+  });
+});
+
+function removalState(phase: "needs-conversation-decision" | "moving-conversations") {
+  return {
+    phase,
+    conversations: [],
+    localData: "known" as const,
+    credentialActions: [],
+  };
+}

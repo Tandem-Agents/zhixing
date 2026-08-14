@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RpcManagementFacade } from "./rpc-management-facade.js";
 import {
+  continueDeviceRemovalWithManagement,
   selectRemovalTarget,
   removeDeviceWithManagement,
   type DeviceRemovalSelectionIO,
@@ -51,7 +52,11 @@ describe("durable device removal cancellation", () => {
       deviceList: async () => [{ displayName: "旅行电脑", reachable: true }],
       deviceRemove: async () => ({ conversations: ["本机对话"], hasAcceptedWork: true }),
       deviceContinue,
-    } as unknown as Pick<RpcManagementFacade, "deviceList" | "deviceRemove" | "deviceContinue">;
+      deviceStatus: async () => null,
+    } as unknown as Pick<
+      RpcManagementFacade,
+      "deviceList" | "deviceRemove" | "deviceContinue" | "deviceStatus"
+    >;
     await removeDeviceWithManagement(management, {
       permanent: true,
       targetName: "旅行电脑",
@@ -76,7 +81,11 @@ describe("durable device removal cancellation", () => {
       deviceList: async () => [{ displayName: "旅行电脑", reachable: false }],
       deviceRemove: async () => ({ conversations: [], hasAcceptedWork: false }),
       deviceContinue,
-    } as unknown as Pick<RpcManagementFacade, "deviceList" | "deviceRemove" | "deviceContinue">;
+      deviceStatus: async () => null,
+    } as unknown as Pick<
+      RpcManagementFacade,
+      "deviceList" | "deviceRemove" | "deviceContinue" | "deviceStatus"
+    >;
     await removeDeviceWithManagement(management, {
       permanent: true,
       targetName: "旅行电脑",
@@ -102,7 +111,11 @@ describe("durable device removal cancellation", () => {
       deviceList: async () => [{ displayName: "旅行电脑", reachable: true }],
       deviceRemove,
       deviceContinue,
-    } as unknown as Pick<RpcManagementFacade, "deviceList" | "deviceRemove" | "deviceContinue">;
+      deviceStatus: async () => null,
+    } as unknown as Pick<
+      RpcManagementFacade,
+      "deviceList" | "deviceRemove" | "deviceContinue" | "deviceStatus"
+    >;
     await expect(removeDeviceWithManagement(management, {
       permanent: true,
       targetName: "旅行电脑",
@@ -118,9 +131,68 @@ describe("durable device removal cancellation", () => {
   });
 });
 
+describe("device removal decision failure projection", () => {
+  it("renders the durable decided state after a lost decision response", async () => {
+    const output = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const deviceStatus = vi.fn(async () => state("moving-conversations"));
+    const management = {
+      deviceContinue: vi.fn(async () => { throw new Error("raw response loss"); }),
+      deviceStatus,
+    } as unknown as Pick<RpcManagementFacade, "deviceContinue" | "deviceStatus">;
+
+    await continueDeviceRemovalWithManagement(management, {
+      targetName: "旅行电脑",
+      mode: "transfer",
+    }, true);
+
+    expect(deviceStatus).toHaveBeenCalledOnce();
+    expect(output).toHaveBeenCalledWith("正在收束目标设备上的本机对话");
+  });
+
+  it("gives one continue-or-cancel action while the durable operation is still pending", async () => {
+    const output = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const management = {
+      deviceContinue: vi.fn(async () => { throw new Error("decision rejected"); }),
+      deviceStatus: vi.fn(async () => state("needs-conversation-decision")),
+    } as unknown as Pick<RpcManagementFacade, "deviceContinue" | "deviceStatus">;
+
+    await continueDeviceRemovalWithManagement(management, {
+      targetName: "旅行电脑",
+      mode: "destroy",
+    }, true);
+
+    expect(output).toHaveBeenCalledTimes(1);
+    expect(output).toHaveBeenCalledWith("移除已登记，可继续或取消");
+    expect(management.deviceContinue).toHaveBeenCalledOnce();
+  });
+
+  it("replaces raw decision and status failures with one stable action", async () => {
+    const management = {
+      deviceContinue: vi.fn(async () => { throw new Error("raw decision failure"); }),
+      deviceStatus: vi.fn(async () => { throw new Error("raw status failure"); }),
+    } as unknown as Pick<RpcManagementFacade, "deviceContinue" | "deviceStatus">;
+
+    await expect(continueDeviceRemovalWithManagement(management, {
+      targetName: "旅行电脑",
+      mode: "lost",
+    }, false)).rejects.toThrow(
+      "设备移除状态暂时无法确认；请稍后运行 device status 查看进度",
+    );
+  });
+});
+
 function cancelled() {
   return {
     phase: "cancelled" as const,
+    conversations: [],
+    localData: "known" as const,
+    credentialActions: [],
+  };
+}
+
+function state(phase: "needs-conversation-decision" | "moving-conversations") {
+  return {
+    phase,
     conversations: [],
     localData: "known" as const,
     credentialActions: [],
