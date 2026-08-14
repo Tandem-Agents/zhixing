@@ -1,6 +1,8 @@
 import type { HomeTrustRecord } from "@zhixing/core/contracts";
-import { rm, readdir } from "node:fs/promises";
+import { rm, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
+import { persistDeviceKey } from "@zhixing/mesh/device-key-store";
 import {
   createPlatformSecretStore,
   readPlatformSecretStoreBackendBinding,
@@ -11,8 +13,10 @@ import {
   captureManagedHostAdmission,
   coordinateManagedHostTrustTransition,
   loadCurrentManagedServiceState,
+  proveLocalCurrentAuthority,
   verifyManagedHostAdmission,
 } from "./managed-service-runtime.js";
+import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 
 describe("managed host trust transition", () => {
   it("keeps a current anchor online after reconciling the durable plan", async () => {
@@ -133,6 +137,67 @@ describe("managed host trust transition", () => {
 });
 
 describe("managed service current-state intent", () => {
+  it("proves a default no-genesis single-machine home before any SecretStore access", async () => {
+    const homeDir = await createTempDir("managed-current-authority-single-machine");
+    await expect(proveLocalCurrentAuthority(homeDir)).resolves.toBe(true);
+    expect(await readdir(homeDir)).toEqual([]);
+  });
+
+  it("keeps paired authority unavailable when the existing-only credential facts are absent", async () => {
+    const homeDir = await createTempDir("managed-current-authority-paired-missing");
+    await writeFile(path.join(homeDir, "config.jsonc"), JSON.stringify({
+      mesh: {
+        enabledRoles: ["anchor"],
+        anchorListen: { bind: { host: "127.0.0.1", port: 43121 } },
+      },
+    }));
+    await expect(proveLocalCurrentAuthority(homeDir)).resolves.toBe(false);
+    expect((await readdir(homeDir)).filter((name) => name.startsWith("secret-vault"))).toEqual([]);
+  });
+
+  it.runIf(process.platform === "win32" || process.platform === "linux")(
+    "proves a paired current anchor from one config snapshot and existing trust",
+    async () => {
+      const homeDir = await createTempDir("managed-current-authority-paired-current");
+      await writeFile(path.join(homeDir, "config.jsonc"), JSON.stringify({
+        mesh: {
+          enabledRoles: ["anchor"],
+          anchorListen: { bind: { host: "127.0.0.1", port: 43121 } },
+        },
+      }));
+      await withManagedEnvironment(undefined, undefined, async () => {
+        const secrets = createPlatformSecretStore({ homeDir, context: "foreground" });
+        expect(await secrets.unlockState()).toBe("unlocked");
+        const key = await DeviceKey.generate();
+        await persistDeviceKey(secrets, key);
+        const identity = enrollDeviceIdentity(key, {
+          displayName: "Current anchor",
+          platform: "headless",
+          enrolledAt: "2026-08-14T00:00:00.000Z",
+        });
+        const trust = new FileMeshBootstrapStore(homeDir, key);
+        try {
+          await trust.initializeLocalHome({
+            key,
+            identity,
+            roles: ["anchor"],
+            homeId: "home:current-authority-test",
+            at: "2026-08-14T00:00:00.000Z",
+          });
+          await expect(proveLocalCurrentAuthority(homeDir)).resolves.toBe(true);
+          await writeFile(
+            path.join(homeDir, "distributed-runtime", "authority", "authority.log"),
+            "corrupt-trust-log",
+          );
+          await expect(proveLocalCurrentAuthority(homeDir)).resolves.toBe(false);
+        } finally {
+          trust.stopStorageMaintenance();
+        }
+      });
+    },
+    30_000,
+  );
+
   it("keeps inspect read-only when a fresh home has no backend binding", async () => {
     const homeDir = await createTempDir("managed-current-inspect-fresh");
     await withManagedEnvironment(undefined, undefined, async () => {

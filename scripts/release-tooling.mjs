@@ -11,19 +11,24 @@ export const RELEASE_TARGETS = Object.freeze([
 ]);
 
 export const RELEASE_SMOKE_SCENARIO_CONTRACTS = Object.freeze([
-  ["clean-install", "installer install", "signed candidate becomes the exact current program", "src/update/update-controller.test.ts", "installs, exactly replays and preserves a program-root-external anti-downgrade receipt"],
-  ["first-run", "launcher --version", "the exact candidate runtime starts the exact candidate application", "src/serve/__tests__/distributed-runtime-golden.test.ts", "matches registration and cleanup order"],
-  ["same-version-replay", "installer install", "the exact installed identity is unchanged", "src/update/update-controller.test.ts", "installs, exactly replays and preserves a program-root-external anti-downgrade receipt"],
-  ["no-update-silent", "zz update", "the verified current release remains usable without a newer release", "src/update/runtime.test.ts", "never waits for the network and coalesces failures inside the controller"],
-  ["automatic-update", "managed update schedule", "a newer signed release is downloaded and handed to the current host", "src/update/runtime.test.ts", "runs a bounded managed schedule without creating a daemon"],
-  ["visible-update-status", "server.update.status", "the current authority projects one stable user-visible state", "src/update/update-controller.test.ts", "reads public update status from the verified current program facts"],
-  ["safe-point-install", "server.update.prepare", "accepted work is settled before the pointer changes", "src/update/upgrade-lifecycle.test.ts", "settles exact accepted work before switching and verifies the target on a successor"],
-  ["automatic-restore", "upgrade successor health", "an unhealthy candidate restores the verified previous release", "src/update/upgrade-lifecycle.test.ts", "settles exact accepted work before switching and verifies the target on a successor"],
-  ["guided-restore", "zz update --restore-previous", "the user receives one stable recovery action", "src/update/doctor.test.ts", "uses the shared update projection and exposes one stable action without raw errors"],
-  ["offline-doctor", "zz doctor", "offline inspection is effect-free and produces one next action", "src/update/doctor.test.ts", "reports an incomplete installation without touching managed or checkpoint state"],
-  ["app-remove-preserves-data", "zz app remove", "only the program root is handed to the installer after safe stop", "src/update/app-remove.test.ts", "stops safely and only hands the program root to the installer"],
-  ["permanent-device-remove-confirms", "zz device remove --permanent", "non-interactive removal requires explicit irreversible confirmation", "src/runtime/device-removal-command.test.ts", "uses the unique display name and keeps internal device identities out of the command"],
-].map(([id, entry, terminal, testFile, testName]) => Object.freeze({ id, entry, terminal, testFile, testName })));
+  ["clean-install", "candidate-installer", ["install", "--program-root", "{programRoot}", "--manifest", "{candidateManifest}", "--artifact", "{candidateArtifact}"], "candidate-current"],
+  ["first-run", "stable-launcher", ["--version"], "candidate-version"],
+  ["same-version-replay", "stable-installer", ["install", "--program-root", "{programRoot}", "--manifest", "{candidateManifest}", "--artifact", "{candidateArtifact}"], "pointer-unchanged"],
+  ["no-update-silent", "stable-launcher", ["--version"], "no-maintenance-output"],
+  ["automatic-update", "candidate-installer", ["install", "--program-root", "{programRoot}", "--manifest", "{candidateManifest}", "--artifact", "{candidateArtifact}"], "candidate-current-with-previous"],
+  ["visible-update-status", "candidate-rpc", ["status"], "updated-visible"],
+  ["safe-point-install", "candidate-installer", ["install", "--program-root", "{programRoot}", "--manifest", "{candidateManifest}", "--artifact", "{candidateArtifact}"], "candidate-current-after-host-handoff"],
+  ["automatic-restore", "candidate-cli", ["update", "--restore-previous"], "baseline-current"],
+  ["guided-restore", "candidate-cli", ["doctor"], "single-recovery-action"],
+  ["offline-doctor", "candidate-cli", ["doctor"], "offline-action"],
+  ["app-remove-preserves-data", "candidate-cli", ["app", "remove"], "program-removed-user-data-preserved"],
+  ["permanent-device-remove-confirms", "candidate-cli", ["device", "remove", "Smoke target"], "permanent-confirmation-required"],
+].map(([id, entryKind, argvTemplate, terminalKind]) => Object.freeze({
+  id,
+  entryKind,
+  argvTemplate: Object.freeze(argvTemplate),
+  terminalKind,
+})));
 
 export const RELEASE_SMOKE_SCENARIOS = Object.freeze(
   RELEASE_SMOKE_SCENARIO_CONTRACTS.map((contract) => contract.id),
@@ -103,13 +108,15 @@ export function assertCanonicalTargetSmokeReport(input, expected) {
   if (!input || typeof input !== "object" || Array.isArray(input) || Object.getPrototypeOf(input) !== Object.prototype) {
     throw new Error("target smoke report must be a plain object");
   }
-  const fields = ["arch", "artifactDigest", "candidateExecutionDigest", "manifestDigest", "packageGraphDigest", "platform", "producerVersion", "scenarios", "sourceTreeDigest", "target", "v"];
+  const fields = ["arch", "artifactDigest", "baselineArtifactDigest", "baselineManifestDigest", "candidateExecutionDigest", "manifestDigest", "packageGraphDigest", "platform", "producerVersion", "scenarios", "sourceTreeDigest", "target", "v"];
   if (JSON.stringify(Object.keys(input).sort()) !== JSON.stringify(fields.sort())) {
     throw new Error("target smoke report has unknown or missing fields");
   }
-  if (input.v !== 2 || input.producerVersion !== 1 || input.target !== expected.target ||
+  if (input.v !== 3 || input.producerVersion !== 2 || input.target !== expected.target ||
       input.platform !== expected.platform || input.arch !== expected.arch ||
       input.manifestDigest !== expected.manifestDigest || input.artifactDigest !== expected.artifactDigest ||
+      input.baselineManifestDigest !== expected.baselineManifestDigest ||
+      input.baselineArtifactDigest !== expected.baselineArtifactDigest ||
       input.sourceTreeDigest !== expected.sourceTreeDigest || input.packageGraphDigest !== expected.packageGraphDigest ||
       typeof input.candidateExecutionDigest !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(input.candidateExecutionDigest) ||
       !Array.isArray(input.scenarios)) {
@@ -122,11 +129,19 @@ export function assertCanonicalTargetSmokeReport(input, expected) {
   for (const contract of RELEASE_SMOKE_SCENARIO_CONTRACTS) {
     const row = rows.get(contract.id);
     if (!row || typeof row !== "object" || Array.isArray(row) ||
-        JSON.stringify(Object.keys(row).sort()) !== JSON.stringify(["candidateExecutionDigest", "commandDigest", "id", "resultDigest", "tests"].sort()) ||
-        row.commandDigest !== digest(Buffer.from(canonicalize(contract), "utf8")) ||
-        row.candidateExecutionDigest !== input.candidateExecutionDigest ||
-        typeof row.resultDigest !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(row.resultDigest) ||
-        !Number.isSafeInteger(row.tests) || row.tests < 1) {
+        JSON.stringify(Object.keys(row).sort()) !== JSON.stringify(["argvDigest", "commandDigest", "entryDigest", "executionDigest", "id", "resultDigest", "terminalDigest"].sort()) ||
+        !isDigest(row.entryDigest) || !isDigest(row.argvDigest) || !isDigest(row.resultDigest) ||
+        !isDigest(row.terminalDigest) || !isDigest(row.executionDigest) ||
+        row.commandDigest !== digest(Buffer.from(canonicalize({
+          contract,
+          entryDigest: row.entryDigest,
+          argvDigest: row.argvDigest,
+        }), "utf8")) ||
+        row.executionDigest !== digest(Buffer.from(canonicalize({
+          commandDigest: row.commandDigest,
+          resultDigest: row.resultDigest,
+          terminalDigest: row.terminalDigest,
+        }), "utf8"))) {
       throw new Error(`target smoke report row ${contract.id} is invalid`);
     }
   }
@@ -248,6 +263,8 @@ export function canonicalize(value) {
 }
 
 export function digest(bytes) { return `sha256:${createHash("sha256").update(bytes).digest("hex")}`; }
+
+function isDigest(value) { return typeof value === "string" && /^sha256:[a-f0-9]{64}$/u.test(value); }
 
 async function collectBuildInputs(root, packageRoot, rows) {
   await walk(packageRoot, async (path, entry) => {

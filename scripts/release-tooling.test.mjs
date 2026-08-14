@@ -50,40 +50,47 @@ test("release evidence requires producer-bound target terminals and an exact Nod
     arch: "x64",
     manifestDigest: sha,
     artifactDigest: sha,
+    baselineManifestDigest: sha,
+    baselineArtifactDigest: sha,
     sourceTreeDigest: sha,
     packageGraphDigest: sha,
   };
   const report = {
-    v: 2,
-    producerVersion: 1,
+    v: 3,
+    producerVersion: 2,
     ...expected,
     candidateExecutionDigest: sha,
-    scenarios: RELEASE_SMOKE_SCENARIO_CONTRACTS.map((contract) => ({
-      id: contract.id,
-      commandDigest: digest(Buffer.from(canonicalize(contract), "utf8")),
-      resultDigest: sha,
-      tests: 1,
-      candidateExecutionDigest: sha,
-    })),
+    scenarios: RELEASE_SMOKE_SCENARIO_CONTRACTS.map((contract) => smokeRow(contract, sha)),
   };
   assert.equal(assertCanonicalTargetSmokeReport(report, expected), report);
   assert.throws(() => assertCanonicalTargetSmokeReport({
     ...report,
-    scenarios: report.scenarios.map((row, index) => index === 0 ? { ...row, tests: 0 } : row),
+    scenarios: report.scenarios.map((row, index) => index === 0 ? { ...row, entryDigest: `sha256:${"b".repeat(64)}` } : row),
   }, expected), /row clean-install/);
   assert.throws(() => assertCanonicalTargetSmokeReport({
     ...report,
-    candidateExecutionDigest: `sha256:${"b".repeat(64)}`,
-  }, expected), /row clean-install/);
+    scenarios: report.scenarios.slice(1),
+  }, expected), /scenario set/);
   assert.equal(assertReleaseNodeVersion("22.18.0"), "22.18.0");
   assert.throws(() => assertReleaseNodeVersion("24.0.0"), /Node 22/);
 });
 
-test("release smoke contracts name existing direct production tests", async () => {
+test("release smoke contracts are strict candidate-entry descriptors with a fixed producer", async () => {
   for (const contract of RELEASE_SMOKE_SCENARIO_CONTRACTS) {
-    const source = await readFile(join(import.meta.dirname, "..", "packages", "cli", contract.testFile), "utf8");
-    assert.ok(source.includes(contract.testName), `${contract.id} test contract drifted`);
+    assert.deepEqual(
+      Object.keys(contract).sort(),
+      ["argvTemplate", "entryKind", "id", "terminalKind"],
+      `${contract.id} contract shape drifted`,
+    );
+    assert.ok(["candidate-cli", "candidate-installer", "candidate-rpc", "stable-installer", "stable-launcher"].includes(contract.entryKind));
+    assert.ok(Array.isArray(contract.argvTemplate));
+    assert.equal(typeof contract.terminalKind, "string");
   }
+  const producer = await readFile(join(import.meta.dirname, "release-target-evidence.mjs"), "utf8");
+  assert.match(producer, /switch \(contract\.id\)/u);
+  assert.doesNotMatch(producer, /vitest|\.test\.[cm]?[jt]s/u);
+  assert.match(producer, /candidate offline doctor changed the isolated home/u);
+  for (const { id } of RELEASE_SMOKE_SCENARIO_CONTRACTS) assert.match(producer, new RegExp(`case "${id}"`, "u"));
 });
 
 test("release acceptance ledger requires the fixed fifty identifiers", () => {
@@ -134,4 +141,25 @@ test("all five release program trees require their exact runtime and launcher su
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function smokeRow(contract, value) {
+  const commandDigest = digest(Buffer.from(canonicalize({
+    contract,
+    entryDigest: value,
+    argvDigest: value,
+  }), "utf8"));
+  return {
+    id: contract.id,
+    entryDigest: value,
+    argvDigest: value,
+    commandDigest,
+    resultDigest: value,
+    terminalDigest: value,
+    executionDigest: digest(Buffer.from(canonicalize({
+      commandDigest,
+      resultDigest: value,
+      terminalDigest: value,
+    }), "utf8")),
+  };
 }

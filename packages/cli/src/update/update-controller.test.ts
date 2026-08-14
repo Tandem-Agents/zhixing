@@ -131,6 +131,51 @@ describe("stable program update", () => {
     expect((await store.loadPointer())?.current.manifestDigest).toBe(byteDigest(manifestBytes));
   });
 
+  it("keeps legal release identity separate from its digest-addressed program directory", async () => {
+    const root = await createTempDir("program-update-storage-identity");
+    const store = new ProgramStore(root, "linux-x64");
+    const candidate = release("linux-x64", "1.0.0+build.1", "1", "build-metadata");
+    const manifestBytes = bytes(candidate.manifest);
+    const manifestDigest = byteDigest(manifestBytes);
+    const directory = manifestDigest.slice("sha256:".length);
+
+    await store.stage(candidate.manifest, manifestBytes, candidate.artifactBytes);
+    const first = await store.activateStaged(candidate.manifest, manifestDigest);
+    const replay = await store.activateStaged(candidate.manifest, manifestDigest);
+
+    expect(first.current).toMatchObject({
+      releaseVersion: "1.0.0+build.1",
+      manifestDigest,
+      directory,
+    });
+    expect(first.current.directory).toMatch(/^[a-f0-9]{64}$/u);
+    expect(replay).toEqual(first);
+    await expect(store.verifyInstalled(first.current, verifier)).resolves.toMatchObject({
+      digest: manifestDigest,
+      manifest: { releaseVersion: "1.0.0+build.1" },
+    });
+  });
+
+  it("reads an existing safe pointer directory without migrating or rewriting it", async () => {
+    const root = await createTempDir("program-update-legacy-directory");
+    const pointer = {
+      v: 1 as const,
+      target: "linux-x64" as const,
+      generation: 7,
+      current: {
+        releaseVersion: "0.9.0",
+        releaseSequence: "9",
+        manifestDigest: `sha256:${"9".repeat(64)}`,
+        directory: "0.9.0_legacy-safe",
+      },
+    };
+    const pointerBytes = Buffer.from(`${canonicalize(pointer)}\n`, "utf8");
+    await writeFile(path.join(root, "current.json"), pointerBytes);
+
+    await expect(new ProgramStore(root, "linux-x64").loadPointer()).resolves.toEqual(pointer);
+    await expect(readFile(path.join(root, "current.json"))).resolves.toEqual(pointerBytes);
+  });
+
   it("stages a verified previous version without bypassing the lifecycle pointer switch", async () => {
     const root = await createTempDir("program-update");
     const target = "linux-x64" as const;

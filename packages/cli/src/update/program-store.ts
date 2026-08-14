@@ -125,7 +125,7 @@ export class ProgramStore {
     manifestDigest: string,
     verifier: ProtocolSignatureVerifier,
   ): Promise<{ readonly manifest: ReleaseManifest; readonly digest: string; readonly bytes: Buffer }> {
-    const file = path.join(this.root, "stage", digestPart(manifestDigest), "release-manifest.json");
+    const file = path.join(this.root, "stage", programVersionDirectory(manifestDigest), "release-manifest.json");
     const bytes = await readFile(file);
     const manifest = decodeAndValidateReleaseManifest(bytes, verifier);
     const digest = byteDigest(bytes);
@@ -223,7 +223,7 @@ export class ProgramStore {
       installationBytes,
     }));
     const manifestDigest = byteDigest(manifestBytes);
-    const finalDirectory = path.join(this.root, "stage", digestPart(manifestDigest));
+    const finalDirectory = path.join(this.root, "stage", programVersionDirectory(manifestDigest));
     if (await isDirectory(finalDirectory)) {
       await this.verifyExpanded(finalDirectory, manifest, manifestBytes, artifactBytes);
       return finalDirectory;
@@ -263,8 +263,8 @@ export class ProgramStore {
     manifestDigest: string,
     expectation?: ProgramActivationExpectation,
   ): Promise<ProgramPointer> {
-    const staged = path.join(this.root, "stage", digestPart(manifestDigest));
-    const directory = `${manifest.releaseVersion}-${digestPart(manifestDigest).slice(0, 16)}`;
+    const directory = programVersionDirectory(manifestDigest);
+    const staged = path.join(this.root, "stage", directory);
     const versionPath = path.join(this.root, "versions", directory);
     await mkdir(path.dirname(versionPath), { recursive: true, mode: 0o700 });
     if (!await isDirectory(versionPath)) {
@@ -345,7 +345,7 @@ export class ProgramStore {
     if (!pointer) return;
     const keepVersions = new Set([pointer.current.directory, pointer.previous?.directory].filter(Boolean));
     await removeChildrenInBatches(path.join(this.root, "versions"), keepVersions as Set<string>);
-    const keepStages = new Set(activeStageDigest ? [digestPart(activeStageDigest)] : []);
+    const keepStages = new Set(activeStageDigest ? [programVersionDirectory(activeStageDigest)] : []);
     await removeChildrenInBatches(path.join(this.root, "stage"), keepStages);
   }
 
@@ -454,7 +454,7 @@ function exact(value: Record<string, unknown>, fields: readonly string[], label:
   }
 }
 
-function digestPart(digest: string): string {
+function programVersionDirectory(digest: string): string {
   if (!/^sha256:[a-f0-9]{64}$/u.test(digest)) throw new TypeError("Program digest is invalid");
   return digest.slice("sha256:".length);
 }

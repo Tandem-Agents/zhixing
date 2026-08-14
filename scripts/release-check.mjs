@@ -7,6 +7,8 @@ import {
   assertStableReleaseBinding,
   byteDigest,
   canonicalize,
+  compareReleaseSemver,
+  decodeAndValidateReleaseManifest,
   decodeAndValidateStableReleaseIndex,
   decodeProgramArtifact,
   protocolBytes,
@@ -70,6 +72,23 @@ for (const target of STABLE_RELEASE_TARGETS) {
   const artifact = decodeProgramArtifact(artifactBytes);
   if (artifact.target !== target || artifact.releaseVersion !== index.releaseVersion) throw new Error(`${target} artifact identity is inconsistent`);
   assertProgramTreeContract(artifact.files, target);
+  const baselineManifestBytes = await readFile(resolve(targetRoot, "baseline-release-manifest.json"));
+  const baselineManifest = decodeAndValidateReleaseManifest(baselineManifestBytes, verifier);
+  if (
+    baselineManifest.target !== target ||
+    compareReleaseSemver(baselineManifest.releaseVersion, manifest.releaseVersion) >= 0 ||
+    BigInt(baselineManifest.releaseSequence) >= BigInt(manifest.releaseSequence)
+  ) throw new Error(`${target} smoke baseline is not a strictly older signed release`);
+  const baselineArtifactBytes = await readFile(resolve(targetRoot, "baseline-program-artifact.json"));
+  if (
+    baselineArtifactBytes.byteLength !== baselineManifest.artifact.bytes ||
+    byteDigest(baselineArtifactBytes) !== baselineManifest.artifact.digest
+  ) throw new Error(`${target} baseline artifact bytes do not match its signed manifest`);
+  const baselineArtifact = decodeProgramArtifact(baselineArtifactBytes);
+  if (baselineArtifact.target !== target || baselineArtifact.releaseVersion !== baselineManifest.releaseVersion) {
+    throw new Error(`${target} baseline artifact identity is inconsistent`);
+  }
+  assertProgramTreeContract(baselineArtifact.files, target);
   const platformBytes = await readFile(resolve(targetRoot, "platform-evidence.json"));
   const platformEvidence = exact(JSON.parse(platformBytes), ["artifactDigest", "passed", "target", "v"]);
   if (platformEvidence.v !== 1 || platformEvidence.passed !== true || platformEvidence.target !== target || platformEvidence.artifactDigest !== manifest.artifact.digest) {
@@ -83,6 +102,8 @@ for (const target of STABLE_RELEASE_TARGETS) {
     arch,
     manifestDigest: byteDigest(manifestBytes),
     artifactDigest: byteDigest(artifactBytes),
+    baselineManifestDigest: byteDigest(baselineManifestBytes),
+    baselineArtifactDigest: byteDigest(baselineArtifactBytes),
     sourceTreeDigest,
     packageGraphDigest,
   });
@@ -93,6 +114,8 @@ for (const target of STABLE_RELEASE_TARGETS) {
     target,
     manifestDigest: byteDigest(manifestBytes),
     artifactDigest: manifest.artifact.digest,
+    baselineManifestDigest: byteDigest(baselineManifestBytes),
+    baselineArtifactDigest: baselineManifest.artifact.digest,
     platformEvidenceDigest: byteDigest(platformBytes),
     smokeEvidenceDigest: byteDigest(smokeBytes),
   });

@@ -22,7 +22,7 @@ import {
   type ManagedServiceReconcileResult,
   type ManagedServiceReconcileTrigger,
 } from "./managed-service-reconciler.js";
-import { resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
+import { resolveEffectiveMeshRoles, resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
 
 export interface ManagedHostTrustTransitionDeps {
   readonly loadCurrent?: typeof loadCurrentManagedServiceState;
@@ -45,6 +45,35 @@ export async function loadCurrentManagedServiceState(
   homeDir = getZhixingHome(),
 ): Promise<ManagedServiceCurrentState> {
   const config = loadConfig({ homeDir });
+  return loadCurrentManagedServiceStateFromConfig(intent, homeDir, config);
+}
+
+export async function proveLocalCurrentAuthority(
+  homeDir = getZhixingHome(),
+): Promise<boolean> {
+  try {
+    const config = loadConfig({ homeDir, noAutoCreate: true });
+    if (config.mesh === undefined) return true;
+    const current = await loadCurrentManagedServiceStateFromConfig("inspect", homeDir, config);
+    if (!current.configuration || !current.trust) return false;
+    const effective = resolveEffectiveMeshRoles({
+      localDeviceId: current.localDeviceId,
+      configuration: current.configuration,
+      trust: current.trust,
+    });
+    return effective.mode === "trusted-home" &&
+      effective.roles.includes("anchor") &&
+      current.trust.issuer.deviceId === current.localDeviceId;
+  } catch {
+    return false;
+  }
+}
+
+async function loadCurrentManagedServiceStateFromConfig(
+  intent: ManagedServiceStateLoadIntent,
+  homeDir: string,
+  config: ReturnType<typeof loadConfig>,
+): Promise<ManagedServiceCurrentState> {
   const initialBinding = await readPlatformSecretStoreBackendBinding(homeDir);
   const expectedBackend = managedExpectedBackend();
   if (

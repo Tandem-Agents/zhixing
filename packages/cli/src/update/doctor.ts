@@ -17,7 +17,7 @@ import { EMBEDDED_RELEASE_TRUST } from "./release-channel.js";
 import { createReleaseVerifier } from "./release-verifier.js";
 import { ProgramStore } from "./program-store.js";
 import type { CurrentAuthorityProgramUpdateStatus } from "../runtime/rpc-program-update-facade.js";
-import { loadCurrentManagedServiceState } from "../serve/managed-service-runtime.js";
+import { proveLocalCurrentAuthority } from "../serve/managed-service-runtime.js";
 
 export interface ProgramDoctorReport {
   readonly code: string;
@@ -55,7 +55,7 @@ export async function inspectProgramHealth(deps: ProgramDoctorDeps = {}): Promis
       ? authorityStatus.projection
       : localUpdate;
     if (authorityStatus?.availability === "unavailable") {
-      const localIsCurrent = await (deps.localIsCurrentAuthority ?? localIsCurrentAuthority)();
+      const localIsCurrent = await (deps.localIsCurrentAuthority ?? proveLocalCurrentAuthority)();
       if (!localIsCurrent) {
         return {
           code: "current-authority-unavailable",
@@ -100,11 +100,6 @@ export async function inspectProgramHealth(deps: ProgramDoctorDeps = {}): Promis
       action: "contact-support",
     };
   }
-}
-
-async function localIsCurrentAuthority(): Promise<boolean> {
-  const current = await loadCurrentManagedServiceState("inspect");
-  return current.trust?.issuer.deviceId === current.localDeviceId;
 }
 
 async function inspectInstalledRelease(
