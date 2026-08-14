@@ -125,29 +125,82 @@ export function buildProgramUpdateTrustProjection(
   });
 }
 
+export interface AutomaticUpdateRoundHandle {
+  /** Idempotent, concurrently joinable: closes the owner, aborts and awaits the exact in-flight round. */
+  readonly stop: () => Promise<void>;
+}
+
+interface ActiveUpdateRound {
+  readonly abort: AbortController;
+  readonly promise: Promise<unknown>;
+}
+
+function createAutomaticUpdateRoundOwner(
+  controller: StableUpdateController | undefined,
+): { readonly start: () => void; readonly stop: () => Promise<void> } {
+  let closed = controller === undefined;
+  let active: ActiveUpdateRound | undefined;
+  let settle: Promise<void> | undefined;
+
+  const start = (): void => {
+    if (closed || active) return;
+    const abort = new AbortController();
+    const timeout = setTimeout(() => abort.abort(), AUTOMATIC_CHECK_TIMEOUT_MS);
+    timeout.unref?.();
+    const promise = controller!.checkFailSafe(abort.signal).finally(() => {
+      clearTimeout(timeout);
+      if (active?.abort === abort) active = undefined;
+    });
+    active = { abort, promise };
+  };
+
+  const stop = (): Promise<void> => {
+    closed = true;
+    if (settle) return settle;
+    settle = (async () => {
+      const round = active;
+      if (!round) return;
+      round.abort.abort();
+      await round.promise.catch(() => undefined);
+      if (active === round) active = undefined;
+    })();
+    return settle;
+  };
+
+  return { start, stop };
+}
+
 export function startAutomaticUpdateCheck(
   deps: UpdateRuntimeDeps = {},
-): void {
+): AutomaticUpdateRoundHandle {
   const controller = deps.controller ?? createInstalledUpdateController(deps.store);
-  if (!controller) return;
-  const abort = new AbortController();
-  const timeout = setTimeout(() => abort.abort(), AUTOMATIC_CHECK_TIMEOUT_MS);
-  timeout.unref?.();
-  void controller.checkFailSafe(abort.signal).finally(() => clearTimeout(timeout));
+  const owner = createAutomaticUpdateRoundOwner(controller);
+  owner.start();
+  return { stop: () => owner.stop() };
 }
 
 export function startManagedUpdateChecks(
   deps: UpdateRuntimeDeps = {},
-): () => void {
+): AutomaticUpdateRoundHandle {
   const controller = deps.controller ?? createInstalledUpdateController(deps.store);
-  if (!controller) return () => undefined;
-  startAutomaticUpdateCheck({ ...deps, controller });
+  const owner = createAutomaticUpdateRoundOwner(controller);
+  if (!controller) return { stop: () => owner.stop() };
+  owner.start();
   const timer = (deps.setIntervalFn ?? setInterval)(
-    () => startAutomaticUpdateCheck({ ...deps, controller }),
+    () => owner.start(),
     MANAGED_CHECK_INTERVAL_MS,
   );
   timer.unref?.();
-  return () => (deps.clearIntervalFn ?? clearInterval)(timer);
+  let cleared = false;
+  return {
+    stop: () => {
+      if (!cleared) {
+        cleared = true;
+        (deps.clearIntervalFn ?? clearInterval)(timer);
+      }
+      return owner.stop();
+    },
+  };
 }
 
 export async function runUpdateCommand(

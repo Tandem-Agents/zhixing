@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
+import { compareProgramArtifactPaths } from "../packages/core/dist/protocol/index.js";
 
 export const RELEASE_TARGETS = Object.freeze([
   "win32-x64",
@@ -9,6 +10,24 @@ export const RELEASE_TARGETS = Object.freeze([
   "linux-x64",
   "linux-arm64",
 ]);
+
+/**
+ * The complete finite release production chain. Every script that produces or
+ * gates release inputs, trees, artifacts, evidence or reports must be listed
+ * here; the source fingerprint binds these exact bytes so a producer edit
+ * invalidates every previously built tree and report.
+ */
+export const RELEASE_PRODUCER_PATHS = Object.freeze([
+  "scripts/release-version.mjs",
+  "scripts/release-channel.mjs",
+  "scripts/build-program-tree.mjs",
+  "scripts/build-release-artifact.mjs",
+  "scripts/release-target-evidence.mjs",
+  "scripts/release-check.mjs",
+  "scripts/release-tooling.mjs",
+]);
+
+export { compareProgramArtifactPaths };
 
 export const RELEASE_SMOKE_SCENARIO_CONTRACTS = Object.freeze([
   ["clean-install", "candidate-installer", ["install", "--program-root", "{programRoot}", "--manifest", "{candidateManifest}", "--artifact", "{candidateArtifact}"], "candidate-current"],
@@ -168,7 +187,7 @@ export async function collectProgramFiles(programRoot) {
       data: bytes.toString("base64url"),
     }));
   });
-  files.sort((left, right) => left.path.localeCompare(right.path));
+  files.sort((left, right) => compareProgramArtifactPaths(left.path, right.path));
   if (files.length === 0) throw new Error("release program directory is empty");
   return Object.freeze(files);
 }
@@ -206,17 +225,18 @@ export function assertProgramTreeContract(files, target) {
   return files;
 }
 
-export async function fingerprintSourceTree(repositoryRoot) {
+export async function collectSourceTreeRows(repositoryRoot) {
   const root = resolve(repositoryRoot);
   const rows = [];
-  for (const name of ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.json"]) {
+  for (const name of ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.base.json"]) {
+    const bytes = await readFile(resolve(root, name));
+    rows.push({ path: name, digest: digest(bytes), bytes: bytes.byteLength });
+  }
+  for (const name of RELEASE_PRODUCER_PATHS) {
     const bytes = await readFile(resolve(root, name));
     rows.push({ path: name, digest: digest(bytes), bytes: bytes.byteLength });
   }
   for (const name of [
-    "scripts/release-tooling.mjs",
-    "scripts/release-target-evidence.mjs",
-    "scripts/release-check.mjs",
     "research/design/modules/distributed-runtime/release-and-maintenance-guide.md",
     "research/design/modules/distributed-runtime/unit-38-final-acceptance-ledger.json",
   ]) {
@@ -227,8 +247,12 @@ export async function fingerprintSourceTree(repositoryRoot) {
     if (!packageEntry.isDirectory()) continue;
     await collectBuildInputs(root, resolve(root, "packages", packageEntry.name), rows);
   }
-  rows.sort((left, right) => left.path.localeCompare(right.path));
-  return digest(Buffer.from(canonicalize(rows), "utf8"));
+  rows.sort((left, right) => compareProgramArtifactPaths(left.path, right.path));
+  return rows;
+}
+
+export async function fingerprintSourceTree(repositoryRoot) {
+  return digest(Buffer.from(canonicalize(await collectSourceTreeRows(repositoryRoot)), "utf8"));
 }
 
 export async function fingerprintPackageGraph(repositoryRoot) {
@@ -245,7 +269,7 @@ export async function fingerprintPackageGraph(repositoryRoot) {
     const bytes = await readFile(resolve(root, name));
     rows.push({ path: name, digest: digest(bytes), bytes: bytes.byteLength });
   }
-  rows.sort((left, right) => left.path.localeCompare(right.path));
+  rows.sort((left, right) => compareProgramArtifactPaths(left.path, right.path));
   return digest(Buffer.from(canonicalize(rows), "utf8"));
 }
 
@@ -275,13 +299,17 @@ async function collectBuildInputs(root, packageRoot, rows) {
     if (/(?:^|\/)(__tests__|test|tests)(?:\/|$)|\.(?:test|spec)\.[cm]?[jt]sx?$/u.test(name)) return;
     const bytes = await readFile(path);
     rows.push({ path: name, digest: digest(bytes), bytes: bytes.byteLength });
-  });
+  }, (_path, entry) =>
+    entry.name !== "node_modules" && entry.name !== "dist" &&
+    entry.name !== "coverage" && entry.name !== ".turbo");
 }
 
-async function walk(root, visit) {
+async function walk(root, visit, shouldDescend = () => true) {
   for (const entry of await readdir(root, { withFileTypes: true })) {
     const path = resolve(root, entry.name);
     await visit(path, entry);
-    if (entry.isDirectory()) await walk(path, visit);
+    if (entry.isDirectory() && shouldDescend(path, entry)) {
+      await walk(path, visit, shouldDescend);
+    }
   }
 }

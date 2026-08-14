@@ -56,6 +56,30 @@ describe("Unit 37 lifecycle facade input", () => {
     expect(lifecycle.status).not.toHaveBeenCalled();
   });
 
+  it("accepts operationId only for exact cancel and forwards the complete identity", async () => {
+    const lifecycle = {
+      continue: vi.fn(async () => ({ phase: "cancelled" })),
+    };
+    const entry = buildDeviceContinueMethod();
+    const ctx = mkCtx({ deviceLifecycle: lifecycle as any });
+    await expect(entry.handler({
+      targetName: "设备",
+      operationId: "operation-1",
+      mode: "cancel",
+    }, ctx)).resolves.toEqual({ phase: "cancelled" });
+    expect(lifecycle.continue).toHaveBeenCalledWith({
+      targetName: "设备",
+      operationId: "operation-1",
+      mode: "cancel",
+    });
+    await expect(entry.handler({
+      targetName: "设备",
+      operationId: "operation-1",
+      mode: "destroy",
+    }, ctx)).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    expect(lifecycle.continue).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     [buildAnchorUninstallPreflightMethod, { extra: true }],
     [buildAnchorUninstallBeginMethod, {

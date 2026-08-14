@@ -2130,10 +2130,16 @@ async function runServerProcess(
               readonly operationId: string;
               readonly targetName: string;
             }) => ctx.meshRuntime!.beginDeviceRemoval(input),
-            continue: (input: {
-              readonly targetName: string;
-              readonly mode: "transfer" | "destroy" | "lost" | "cancel";
-            }) => ctx.meshRuntime!.continueDeviceRemoval(input),
+            continue: (input:
+              | {
+                  readonly targetName: string;
+                  readonly mode: "transfer" | "destroy" | "lost";
+                }
+              | {
+                  readonly targetName: string;
+                  readonly mode: "cancel";
+                  readonly operationId?: string;
+                }) => ctx.meshRuntime!.continueDeviceRemoval(input),
             status: (input: {
               readonly targetName: string;
             }) => ctx.meshRuntime!.deviceRemovalStatus(input),
@@ -2433,8 +2439,8 @@ async function runServerProcess(
 
   if (programStore) {
     const stopProgramUpdateChecks = processMode === "managed"
-      ? startManagedUpdateChecks({ store: programStore })
-      : (startAutomaticUpdateCheck({ store: programStore }), () => undefined);
+      ? startManagedUpdateChecks({ store: programStore }).stop
+      : startAutomaticUpdateCheck({ store: programStore }).stop;
     registerCleanup(
       registry,
       { owner: "anchor-host", role: "runtime", id: "programUpdateChecks.stop" },

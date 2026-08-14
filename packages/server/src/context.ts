@@ -351,10 +351,16 @@ export interface ServerContext {
       readonly conversations: readonly string[];
       readonly hasAcceptedWork: boolean;
     }>;
-    continue(input: {
-      readonly targetName: string;
-      readonly mode: "transfer" | "destroy" | "lost" | "cancel";
-    }): Promise<unknown>;
+    continue(input:
+      | {
+          readonly targetName: string;
+          readonly mode: "transfer" | "destroy" | "lost";
+        }
+      | {
+          readonly targetName: string;
+          readonly mode: "cancel";
+          readonly operationId?: string;
+        }): Promise<unknown>;
     status(input: {
       readonly targetName: string;
     }): Promise<unknown>;

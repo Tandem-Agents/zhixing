@@ -20,7 +20,10 @@ describe("application removal", () => {
       programRoot: root,
       prepareManagedRemoval: async () => {
         order.push("future-disabled");
-        return async () => { order.push("future-unregistered"); };
+        return {
+          commit: async () => { order.push("future-unregistered"); },
+          rollback: async () => { order.push("future-restored"); },
+        };
       },
       stop: async () => {
         order.push("current-stopped");
@@ -57,10 +60,33 @@ describe("application removal", () => {
     const handoff = vi.fn(async () => undefined);
     await expect(removeApplication({
       programRoot: root,
-      prepareManagedRemoval: async () => async () => undefined,
+      prepareManagedRemoval: async () => ({
+        commit: async () => undefined,
+        rollback: async () => undefined,
+      }),
       stop: async () => ({ status: "refused", pid: 1, reason: "busy", blockers: ["work"] }),
       handoff,
     })).rejects.toThrow("当前工作尚未安全结束");
     expect(handoff).not.toHaveBeenCalled();
+  });
+
+  it("restores only this removal's future-disable when safe stop is refused", async () => {
+    const root = await createTempDir("app-remove-rollback");
+    const executable = path.join(root, "runtime", process.platform === "win32" ? "node.exe" : "node");
+    const installer = path.join(root, "installer", "program-installer.js");
+    await mkdir(path.dirname(executable), { recursive: true });
+    await writeFile(executable, "installer");
+    await mkdir(path.dirname(installer), { recursive: true });
+    await writeFile(installer, "installer");
+    const rollback = vi.fn(async () => undefined);
+    const commit = vi.fn(async () => undefined);
+    await expect(removeApplication({
+      programRoot: root,
+      prepareManagedRemoval: async () => ({ commit, rollback }),
+      stop: async () => ({ status: "refused", pid: 1, reason: "busy", blockers: ["work"] }),
+      handoff: vi.fn(),
+    })).rejects.toThrow("当前工作尚未安全结束");
+    expect(rollback).toHaveBeenCalledOnce();
+    expect(commit).not.toHaveBeenCalled();
   });
 });

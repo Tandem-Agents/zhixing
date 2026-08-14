@@ -154,6 +154,34 @@ describe("stable release protocol", () => {
     }), "utf8"))).toThrow("binding");
   });
 
+  it("rejects artifact paths that are locale-collated instead of canonically ordered", () => {
+    const file = Buffer.from("content", "utf8");
+    const entry = (path: string) => ({
+      path,
+      mode: 0o644,
+      digest: byteDigest(file),
+      bytes: file.byteLength,
+      data: file.toString("base64url"),
+    });
+    // Ordinal order: "B" (0x42) < "a" (0x61); locale collation places "a" before "B".
+    const localeOrdered = {
+      v: 1,
+      target: "linux-x64",
+      releaseVersion: "1.2.3",
+      files: [entry("app/a.txt"), entry("app/B.txt")],
+    } as const;
+    expect(() => decodeProgramArtifact(Buffer.from(canonicalize(localeOrdered), "utf8")))
+      .toThrow("canonically sorted");
+    const ordinalOrdered = {
+      v: 1,
+      target: "linux-x64",
+      releaseVersion: "1.2.3",
+      files: [entry("app/B.txt"), entry("app/a.txt")],
+    } as const;
+    expect(decodeProgramArtifact(Buffer.from(canonicalize(ordinalOrdered), "utf8")))
+      .toEqual(ordinalOrdered);
+  });
+
   it("shares one finite archive, expansion and storage budget", () => {
     expect(assertProgramArtifactArchiveBytes(PROGRAM_ARTIFACT_LIMITS.maxArchiveBytes))
       .toBe(PROGRAM_ARTIFACT_LIMITS.maxArchiveBytes);

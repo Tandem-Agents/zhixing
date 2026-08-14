@@ -693,9 +693,9 @@ function parseDeviceRemovalIdentity(params: unknown): {
 function parseDeviceRemovalContinue(params: unknown): {
   readonly targetName: string;
   readonly mode: "transfer" | "destroy" | "lost" | "cancel";
+  readonly operationId?: string;
 } {
   const value = asRecord(params, "device.continue");
-  assertExactRecord(value, ["mode", "targetName"], "device.continue");
   const identity = { targetName: stableText(value.targetName, "device name") };
   if (
     value.mode !== "transfer" && value.mode !== "destroy" &&
@@ -703,6 +703,15 @@ function parseDeviceRemovalContinue(params: unknown): {
   ) {
     throw RpcErrors.invalidParams("设备移除方式必须是 transfer、destroy、lost 或 cancel");
   }
+  if (value.mode === "cancel" && value.operationId !== undefined) {
+    assertExactRecord(value, ["mode", "operationId", "targetName"], "device.continue exact cancel");
+    return {
+      ...identity,
+      mode: "cancel",
+      operationId: stableText(value.operationId, "device removal operationId"),
+    };
+  }
+  assertExactRecord(value, ["mode", "targetName"], "device.continue");
   return { ...identity, mode: value.mode };
 }
 

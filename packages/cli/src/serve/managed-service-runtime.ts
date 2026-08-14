@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import { userInfo } from "node:os";
 import path from "node:path";
 import { canonicalize } from "@zhixing/core/protocol";
@@ -123,19 +124,7 @@ async function loadCurrentManagedServiceStateFromConfig(
 }
 
 function createCurrentManagedServiceStateProjector(homeDir: string) {
-  const entryScript = process.argv[1]
-    ? path.resolve(process.argv[1])
-    : path.resolve(import.meta.dirname, "../index.js");
-  const account = userInfo();
-  const serviceIdentity = Object.freeze({
-    platform: process.platform,
-    zhixingHome: homeDir,
-    execPath: process.execPath,
-    entryScript,
-    osUser: account.username,
-    userHome: expandUserHome("~"),
-    ...(typeof account.uid === "number" ? { uid: account.uid } : {}),
-  });
+  const serviceIdentity = currentManagedServiceIdentity(homeDir);
   return (snapshot: {
     readonly config: ReturnType<typeof loadConfig>;
     readonly binding: PlatformSecretStoreBackend;
@@ -158,6 +147,22 @@ function createCurrentManagedServiceStateProjector(homeDir: string) {
       spec,
     };
   };
+}
+
+function currentManagedServiceIdentity(homeDir: string) {
+  const entryScript = process.argv[1]
+    ? path.resolve(process.argv[1])
+    : path.resolve(import.meta.dirname, "../index.js");
+  const account = userInfo();
+  return Object.freeze({
+    platform: process.platform,
+    zhixingHome: homeDir,
+    execPath: process.execPath,
+    entryScript,
+    osUser: account.username,
+    userHome: expandUserHome("~"),
+    ...(typeof account.uid === "number" ? { uid: account.uid } : {}),
+  });
 }
 
 export async function reconcileCurrentManagedService(
@@ -193,41 +198,144 @@ export async function prepareCurrentManagedServiceConfigTurnover(
 export async function prepareProgramRemovalManagedService(
   signal: AbortSignal = new AbortController().signal,
   homeDir = getZhixingHome(),
-): Promise<() => Promise<void>> {
-  if (await readPlatformSecretStoreBackendBinding(homeDir) === undefined) {
-    return async () => undefined;
-  }
-  const current = await loadCurrentManagedServiceState("inspect", homeDir);
-  if (!current.spec) return async () => undefined;
+): Promise<ProgramRemovalManagedServiceHandle> {
   const capacity = createDeviceCapacityRuntime(
     path.join(homeDir, "distributed-runtime", "capacity"),
   );
   const adapter = createManagedServiceAdapter({ storageGovernor: capacity.storage });
+  if (await readPlatformSecretStoreBackendBinding(homeDir) === undefined) {
+    const absentProbe = buildManagedServiceSpec({
+      ...currentManagedServiceIdentity(homeDir),
+      backend: defaultManagedServiceProbeBackend(),
+      headless: false,
+    });
+    const assertAbsent = async (): Promise<void> => {
+      const inspection = await adapter.inspect(absentProbe, signal);
+      if (
+        inspection.state !== "absent" || inspection.running || !inspection.matches ||
+        !await fileIsAbsent(absentProbe.definitionPath) ||
+        await readPlatformSecretStoreBackendBinding(homeDir) !== undefined
+      ) {
+        throw new Error("无法确认托管启动状态；应用保持不变，请恢复本机凭据后重试");
+      }
+    };
+    await assertAbsent();
+    let committed = false;
+    return Object.freeze({
+      async commit() {
+        if (committed) return;
+        await assertAbsent();
+        committed = true;
+      },
+      async rollback() {},
+    });
+  }
+  const current = await loadCurrentManagedServiceState("inspect", homeDir);
+  if (!current.spec) {
+    throw new Error("无法确认托管启动定义；应用保持不变，请重试");
+  }
   const spec = current.spec;
   const definitionDigest = managedServiceDefinitionDigest(spec);
-  const disabled = await adapter.disableFuture(spec, signal);
-  if (disabled.state === "enabled") {
-    throw new Error("托管服务的未来启动尚未停用");
+  const launchPlanIdentity = canonicalize(resolveHostLaunchPlan(current));
+  const before = await adapter.inspect(spec, signal);
+  if (before.state !== "absent" && !before.matches) {
+    throw new Error("托管服务定义无法确认；应用保持不变，请重试");
   }
-  return async () => {
+  let changedByThisOperation = false;
+  let disabled = before;
+  if (before.state === "enabled") {
+    try {
+      disabled = await adapter.disableFuture(spec, signal);
+    } catch (error) {
+      const readBack = await adapter.inspect(spec, signal).catch(() => undefined);
+      if (!readBack || readBack.state !== "disabled" || !readBack.matches) throw error;
+      disabled = readBack;
+    }
+    changedByThisOperation = true;
+  }
+  if (
+    disabled.state !== "absent" &&
+    (disabled.state !== "disabled" || !disabled.matches)
+  ) {
+    throw new Error("托管服务的未来启动尚未安全停用");
+  }
+
+  let committed = disabled.state === "absent";
+  const assertDefinition = async (): Promise<void> => {
     const latest = await loadCurrentManagedServiceState("inspect", homeDir);
-    if (
-      !latest.spec ||
-      latest.spec.serviceId !== spec.serviceId ||
-      managedServiceDefinitionDigest(latest.spec) !== definitionDigest
-    ) {
-      throw new Error("托管服务定义在应用移除前已换代");
-    }
-    const inspection = await adapter.inspect(spec, signal);
-    if (inspection.state === "absent") return;
-    if (!inspection.matches || inspection.running) {
-      throw new Error("托管服务尚未安全停止，未注销未来启动");
-    }
-    const removed = await adapter.unregisterFutureExact(spec, inspection, signal);
-    if (removed.state !== "absent" || removed.running) {
-      throw new Error("托管服务注销未通过回读验证");
+    if (!latest.spec || latest.spec.serviceId !== spec.serviceId ||
+      managedServiceDefinitionDigest(latest.spec) !== definitionDigest ||
+      canonicalize(resolveHostLaunchPlan(latest)) !== launchPlanIdentity) {
+      throw new Error("托管服务定义在应用移除期间已换代");
     }
   };
+
+  return {
+    async commit() {
+      if (committed) return;
+      await assertDefinition();
+      const inspection = await adapter.inspect(spec, signal);
+      if (inspection.state === "absent") {
+        committed = true;
+        return;
+      }
+      if (inspection.state !== "disabled" || !inspection.matches || inspection.running) {
+        throw new Error("托管服务尚未安全停止，未注销未来启动");
+      }
+      try {
+        const removed = await adapter.unregisterFutureExact(spec, inspection, signal);
+        if (removed.state !== "absent" || removed.running) {
+          throw new Error("托管服务注销未通过回读验证");
+        }
+        committed = true;
+      } catch (error) {
+        const readBack = await adapter.inspect(spec, signal).catch(() => undefined);
+        if (readBack?.state === "absent" && !readBack.running) {
+          committed = true;
+          return;
+        }
+        throw error;
+      }
+    },
+    async rollback() {
+      if (!changedByThisOperation || committed) return;
+      await assertDefinition();
+      const inspection = await adapter.inspect(spec, signal);
+      if (inspection.state === "enabled" && inspection.matches) return;
+      if (inspection.state !== "disabled" || !inspection.matches) {
+        throw new Error("托管启动状态无法安全恢复；应用已保留，请按提示修复");
+      }
+      const restored = await adapter.enableFutureExact(spec, disabled, signal);
+      if (restored.state !== "enabled" || !restored.matches) {
+        throw new Error("托管启动状态恢复未通过回读验证；应用已保留");
+      }
+    },
+  };
+}
+
+export interface ProgramRemovalManagedServiceHandle {
+  /** Irreversibly removes the exact disabled registration after current stop. */
+  readonly commit: () => Promise<void>;
+  /** Restores only an enabled→disabled transition made by this operation. */
+  readonly rollback: () => Promise<void>;
+}
+
+function defaultManagedServiceProbeBackend(): PlatformSecretStoreBackend {
+  return process.platform === "win32"
+    ? "windows-dpapi"
+    : process.platform === "darwin"
+      ? "macos-keychain"
+      : "machine-bound";
+}
+
+async function fileIsAbsent(filePath: string): Promise<boolean> {
+  try {
+    await stat(filePath);
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw error;
+  }
 }
 
 export async function coordinateManagedHostTrustTransition(

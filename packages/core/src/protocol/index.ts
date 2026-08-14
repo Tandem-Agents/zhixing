@@ -296,6 +296,7 @@ export {
   assertProgramArtifactArchiveBytes,
   assertReleaseAdvance,
   assertStableReleaseBinding,
+  compareProgramArtifactPaths,
   compareReleaseSemver,
   createSignedReleaseManifest,
   createSignedStableReleaseIndex,

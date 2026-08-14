@@ -40,6 +40,11 @@ export interface ManagedServiceAdapter {
   inspect(spec: ManagedServiceSpec, signal: AbortSignal): Promise<ManagedServiceInspection>;
   install(spec: ManagedServiceSpec, signal: AbortSignal): Promise<ManagedServiceInspection>;
   disableFuture(spec: ManagedServiceSpec, signal: AbortSignal): Promise<ManagedServiceInspection>;
+  enableFutureExact(
+    spec: ManagedServiceSpec,
+    expected: ManagedServiceInspection,
+    signal: AbortSignal,
+  ): Promise<ManagedServiceInspection>;
   disable(spec: ManagedServiceSpec, signal: AbortSignal): Promise<ManagedServiceInspection>;
   stopCurrentExact(
     spec: ManagedServiceSpec,
@@ -297,6 +302,35 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
     const after = await this.inspect(spec, signal);
     if (after.state === "enabled") {
       throw new ManagedServiceError("read-back-failed", "Managed service future disable could not be verified");
+    }
+    return after;
+  }
+
+  async enableFutureExact(
+    spec: ManagedServiceSpec,
+    expected: ManagedServiceInspection,
+    signal: AbortSignal,
+  ): Promise<ManagedServiceInspection> {
+    this.assertSpec(spec);
+    const before = await this.inspect(spec, signal);
+    if (
+      expected.state !== "disabled" ||
+      before.state !== "disabled" ||
+      before.matches !== expected.matches ||
+      !before.matches
+    ) {
+      throw new ManagedServiceError(
+        "definition-drift",
+        "Managed service registration changed before exact future enable",
+      );
+    }
+    await this.enableFutureManager(spec, signal);
+    const after = await this.inspect(spec, signal);
+    if (after.state !== "enabled" || !after.matches) {
+      throw new ManagedServiceError(
+        "read-back-failed",
+        "Managed service future enable could not be verified",
+      );
     }
     return after;
   }
@@ -605,6 +639,30 @@ class NodeManagedServiceAdapter implements ManagedServiceAdapter {
     }, signal);
   }
 
+  private async enableFutureManager(
+    spec: ManagedServiceSpec,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (this.platform === "win32") {
+      await this.requireCommand(
+        windowsTaskSchedulerCommand(["/Change", "/TN", spec.serviceId, "/ENABLE"]),
+        signal,
+      );
+      return;
+    }
+    if (this.platform === "darwin") {
+      await this.requireCommand({
+        command: "/bin/launchctl",
+        args: ["enable", `gui/${spec.uid ?? 0}/${spec.serviceId}`],
+      }, signal);
+      return;
+    }
+    await this.requireCommand({
+      command: "systemctl",
+      args: ["--user", "enable", spec.serviceId],
+    }, signal);
+  }
+
   private async requireCommand(
     request: { readonly command: string; readonly args: readonly string[] },
     signal: AbortSignal,
@@ -687,8 +745,8 @@ function classifyManagerFailure(
   if (platform === "win32") {
     const hresult = result.code >>> 0;
     if (hresult === 0x80070005) return "permission-required";
-    if (hresult === 0x80070002) return "not-found";
-    if (/not found|cannot find|0x80070002|2147942402/u.test(output)) return "not-found";
+    if (hresult === 0x80070002 || hresult === 0x80070003) return "not-found";
+    if (/not found|cannot find|0x8007000[23]|214794240[23]/u.test(output)) return "not-found";
   } else if (platform === "darwin") {
     if (result.code === 113 || /could not find service|service .* not found/u.test(output)) {
       return "not-found";

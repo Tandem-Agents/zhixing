@@ -14,6 +14,7 @@ import {
 import {
   DURABLE_SCHEMA_INVENTORY,
   assertProgramArtifactArchiveBytes,
+  validateProgramArtifact,
 } from "../packages/core/dist/protocol/index.js";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
@@ -30,7 +31,7 @@ assertProgramTreeContract(files, target);
 if (evidence.treeDigest !== programTreeDigest(files)) throw new Error("platform signing evidence does not bind the final program tree");
 const treeReceipt = exact(
   JSON.parse(await readFile(resolve(programRoot, "program-tree-receipt.json"), "utf8")),
-  ["appTreeDigest", "indexUrl", "keyId", "nodeVersion", "runtimeDigest", "target", "v"],
+  ["appTreeDigest", "indexUrl", "keyId", "nodeVersion", "packageGraphDigest", "runtimeDigest", "sourceTreeDigest", "target", "v"],
 );
 if (
   treeReceipt.v !== 1 || treeReceipt.target !== target ||
@@ -38,11 +39,16 @@ if (
   treeReceipt.keyId !== arg("--key-id") ||
   treeReceipt.appTreeDigest !== programTreeDigest(await collectProgramFiles(resolve(programRoot, "app")))
 ) throw new Error("program tree receipt does not bind the release build inputs");
-const artifact = { v: 1, target, releaseVersion: rootPackage.version, files };
-const artifactBytes = Buffer.from(canonicalize(artifact), "utf8");
-assertProgramArtifactArchiveBytes(artifactBytes.byteLength);
 const sourceTreeDigest = await fingerprintSourceTree(repositoryRoot);
 const packageGraphDigest = await fingerprintPackageGraph(repositoryRoot);
+if (
+  treeReceipt.sourceTreeDigest !== sourceTreeDigest ||
+  treeReceipt.packageGraphDigest !== packageGraphDigest
+) throw new Error("program tree was not built from the current build input closure");
+const artifact = { v: 1, target, releaseVersion: rootPackage.version, files };
+validateProgramArtifact(artifact);
+const artifactBytes = Buffer.from(canonicalize(artifact), "utf8");
+assertProgramArtifactArchiveBytes(artifactBytes.byteLength);
 const manifestPayload = {
   v: 1,
   releaseVersion: rootPackage.version,
@@ -62,6 +68,10 @@ await atomicDirectory(outputRoot, async (temporary) => {
   await writeFile(resolve(temporary, "program-artifact.json"), artifactBytes);
   await writeFile(resolve(temporary, "release-manifest-payload.json"), canonicalize(manifestPayload));
   await writeFile(resolve(temporary, "build-inputs.json"), canonicalize({ v: 1, sourceTreeDigest, packageGraphDigest }));
+  if (
+    await fingerprintSourceTree(repositoryRoot) !== sourceTreeDigest ||
+    await fingerprintPackageGraph(repositoryRoot) !== packageGraphDigest
+  ) throw new Error("release inputs drifted while the artifact was being built");
 });
 
 function arg(flag) {

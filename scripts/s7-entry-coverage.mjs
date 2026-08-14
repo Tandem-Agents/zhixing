@@ -1095,7 +1095,7 @@ export function inspectManagedHostAssembly(records) {
     !service.includes('\'<?xml version="1.0" encoding="UTF-16"?>\'') ||
     !service.includes("Buffer.from([0xff, 0xfe])") ||
     !service.includes('Buffer.from(spec.definition, "utf16le")') ||
-    count(service, "windowsTaskSchedulerCommand([") !== 6 ||
+    count(service, "windowsTaskSchedulerCommand([") !== 7 ||
     count(service, 'args: [...args, "/HRESULT"]') !== 1 ||
     count(service, "hresult === 0x80070002") !== 1 ||
     count(service, "hresult === 0x80070005") !== 1 ||

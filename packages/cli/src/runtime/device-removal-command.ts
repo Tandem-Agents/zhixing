@@ -42,50 +42,86 @@ export async function removeDevice(input: {
   if (input.permanent !== true) {
     throw new TypeError("永久移除设备必须显式提供 --permanent");
   }
-  await withManagement(async (management) => {
+  await withManagement((management) => removeDeviceWithManagement(management, input, io));
+}
+
+export async function removeDeviceWithManagement(
+  management: Pick<RpcManagementFacade, "deviceList" | "deviceRemove" | "deviceContinue">,
+  input: {
+    readonly targetName?: string;
+    readonly mode?: Exclude<DeviceRemovalMode, "cancel">;
+    readonly confirmed?: boolean;
+    readonly permanent?: boolean;
+  },
+  io: DeviceRemovalSelectionIO,
+): Promise<void> {
     const device = await selectRemovalTarget(management, input.targetName, io);
     const operationId = createDeviceRemovalOperationId();
     const requestId = `request:${operationId}`;
-    const preflight = await management.deviceRemove({
-      requestId,
-      operationId,
-      targetName: device.displayName,
-    });
-    console.log(`“${device.displayName}”的移除操作已安全登记。`);
-    if (input.mode === "lost") {
+    let acceptStarted = false;
+    let irreversibleDecisionStarted = false;
+    try {
+      acceptStarted = true;
+      const preflight = await management.deviceRemove({
+        requestId,
+        operationId,
+        targetName: device.displayName,
+      });
+      console.log(`“${device.displayName}”的移除操作已安全登记。`);
+      let mode: DeviceRemovalMode | undefined = input.mode;
+      if (!mode) {
+        mode = preflight.conversations.length === 0
+          ? "transfer"
+          : io.interactive
+            ? await io.chooseMode(preflight.conversations)
+            : undefined;
+      }
+      if (!mode) {
+        throw new TypeError("非交互环境必须用 --mode transfer、--mode destroy 或 --mode lost 明确处理方式");
+      }
+      if (mode === "cancel") {
+        renderState(await cancelAcceptedRemoval(management, device.displayName, operationId));
+        return;
+      }
+      const work = preflight.conversations.length === 0
+        ? "没有未转移的本机对话"
+        : `未转移的本机对话：${preflight.conversations.join("、")}`;
+      const consequence = mode === "destroy"
+        ? "这些本机数据将永久删除，无法恢复"
+        : mode === "lost"
+          ? "只会撤销访问，目标设备上的本机数据无法验证或擦除"
+          : "本机工作收束后将永久撤销该设备的访问";
+      await requireConfirmation(
+        io,
+        input.confirmed,
+        `永久移除设备“${device.displayName}”。${work}；${consequence}。继续吗？`,
+      );
+      irreversibleDecisionStarted = true;
       renderState(await management.deviceContinue({
         targetName: device.displayName,
-        mode: "lost",
+        mode,
       }));
-      return;
+    } catch (error) {
+      if (acceptStarted && !irreversibleDecisionStarted) {
+        try {
+          const cancelled = await cancelAcceptedRemoval(
+            management,
+            device.displayName,
+            operationId,
+          );
+          if (error instanceof DeviceRemovalCancelled) {
+            renderState(cancelled);
+            return;
+          }
+        } catch (cancelError) {
+          throw new AggregateError(
+            [error, cancelError],
+            "设备移除尚未继续，但取消状态暂时无法确认；请使用同一设备和操作重试",
+          );
+        }
+      }
+      throw error;
     }
-    let mode: "transfer" | "destroy" | "cancel" | undefined = input.mode;
-    if (!mode) {
-      mode = preflight.conversations.length === 0
-        ? "transfer"
-        : io.interactive
-        ? await io.chooseMode(preflight.conversations)
-        : undefined;
-    }
-    if (!mode) {
-      throw new TypeError("非交互环境必须用 --mode transfer、--mode destroy 或 --mode lost 明确处理方式");
-    }
-    const work = preflight.conversations.length === 0
-      ? "没有未转移的本机对话"
-      : `未转移的本机对话：${preflight.conversations.join("、")}`;
-    const consequence = mode === "destroy"
-      ? "这些本机数据将永久删除，无法恢复"
-      : "本机工作收束后将永久撤销该设备的访问";
-    await requireConfirmation(
-      io,
-      input.confirmed,
-      `永久移除设备“${device.displayName}”。${work}；${consequence}。继续吗？`,
-    );
-    renderState(await management.deviceContinue({
-      targetName: device.displayName,
-      mode,
-    }));
-  });
 }
 
 export async function continueDeviceRemoval(input: {
@@ -178,7 +214,34 @@ async function requireConfirmation(
 ): Promise<void> {
   if (confirmed === true) return;
   if (!io.interactive) throw new TypeError("非交互环境必须同时提供 --confirm");
-  if (!await io.confirm(message)) throw new Error("操作已取消");
+  if (!await io.confirm(message)) throw new DeviceRemovalCancelled();
+}
+
+class DeviceRemovalCancelled extends Error {
+  constructor() {
+    super("操作已取消");
+    this.name = "DeviceRemovalCancelled";
+  }
+}
+
+async function cancelAcceptedRemoval(
+  management: Pick<RpcManagementFacade, "deviceContinue">,
+  targetName: string,
+  operationId: string,
+): Promise<DeviceRemovalState> {
+  let firstError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await management.deviceContinue({
+        targetName,
+        operationId,
+        mode: "cancel",
+      });
+    } catch (error) {
+      firstError ??= error;
+    }
+  }
+  throw firstError;
 }
 
 function defaultSelectionIO(): DeviceRemovalSelectionIO {

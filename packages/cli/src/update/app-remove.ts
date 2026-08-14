@@ -3,12 +3,13 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { runStopCommand, type StopResult } from "../serve/stop.js";
 import { prepareProgramRemovalManagedService } from "../serve/managed-service-runtime.js";
+import type { ProgramRemovalManagedServiceHandle } from "../serve/managed-service-runtime.js";
 import { defaultProgramRoot } from "./program-store.js";
 
 export interface AppRemoveDeps {
   readonly programRoot?: string;
   readonly stop?: () => Promise<StopResult>;
-  readonly prepareManagedRemoval?: () => Promise<() => Promise<void>>;
+  readonly prepareManagedRemoval?: () => Promise<ProgramRemovalManagedServiceHandle>;
   readonly handoff?: (executable: string, args: readonly string[]) => Promise<void>;
 }
 
@@ -27,21 +28,37 @@ export async function removeApplication(deps: AppRemoveDeps = {}): Promise<void>
   if (!runtimeEntry?.isFile() || !installerEntry?.isFile()) {
     throw new Error("正式安装器的应用移除入口不可用");
   }
-  const unregisterFuture = await (
+  const managedService = await (
     deps.prepareManagedRemoval ?? (() => prepareProgramRemovalManagedService())
   )();
-  const result = await (deps.stop ?? (() => runStopCommand({ respectBlockers: true })))();
-  if (result.status === "error" || result.status === "refused") {
-    throw new Error("当前工作尚未安全结束，未移除应用");
+  let committed = false;
+  try {
+    const result = await (deps.stop ?? (() => runStopCommand({ respectBlockers: true })))();
+    if (result.status === "error" || result.status === "refused") {
+      throw new Error("当前工作尚未安全结束，未移除应用");
+    }
+    await managedService.commit();
+    committed = true;
+    await (deps.handoff ?? defaultHandoff)(executable, [
+      installer,
+      "remove",
+      "--program-root",
+      programRoot,
+      "--preserve-user-data",
+    ]);
+  } catch (error) {
+    if (!committed) {
+      try {
+        await managedService.rollback();
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          "应用未移除，但自动启动状态无法安全恢复；请修复托管服务后重试",
+        );
+      }
+    }
+    throw error;
   }
-  await unregisterFuture();
-  await (deps.handoff ?? defaultHandoff)(executable, [
-    installer,
-    "remove",
-    "--program-root",
-    programRoot,
-    "--preserve-user-data",
-  ]);
 }
 
 async function defaultHandoff(executable: string, args: readonly string[]): Promise<void> {

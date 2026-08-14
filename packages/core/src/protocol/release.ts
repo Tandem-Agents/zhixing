@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import type { Signature } from "../contracts/index.js";
-import { byteDigest, canonicalize } from "./canonical.js";
+import { byteDigest, canonicalize, compareCanonicalStrings } from "./canonical.js";
 import type { ProtocolSignatureVerifier, ProtocolSigner } from "./signature.js";
 import { assertProtocolIdentifier, validateProtocolVersion } from "./validation.js";
 
@@ -350,7 +350,10 @@ export function validateProgramArtifact(input: unknown): ProgramArtifact {
     }) as ProgramArtifactFile;
   });
   const paths = files.map((file) => file.path);
-  if (new Set(paths).size !== paths.length || paths.some((filePath, index) => index > 0 && paths[index - 1]! >= filePath)) {
+  if (
+    new Set(paths).size !== paths.length ||
+    paths.some((filePath, index) => index > 0 && compareProgramArtifactPaths(paths[index - 1]!, filePath) >= 0)
+  ) {
     throw new TypeError("Program artifact paths must be unique and canonically sorted");
   }
   return Object.freeze({
@@ -359,6 +362,11 @@ export function validateProgramArtifact(input: unknown): ProgramArtifact {
     releaseVersion: value.releaseVersion,
     files: Object.freeze(files),
   }) as ProgramArtifact;
+}
+
+/** The sole ordering contract for ProgramArtifact and release provenance paths. */
+export function compareProgramArtifactPaths(left: string, right: string): number {
+  return compareCanonicalStrings(left, right);
 }
 
 export function assertProgramArtifactArchiveBytes(bytes: number): number {

@@ -302,10 +302,16 @@ export class RpcManagementFacade {
     };
   }
 
-  async deviceContinue(input: {
-    targetName: string;
-    mode: "transfer" | "destroy" | "lost" | "cancel";
-  }): Promise<DeviceRemovalState> {
+  async deviceContinue(input:
+    | {
+        targetName: string;
+        mode: "transfer" | "destroy" | "lost";
+      }
+    | {
+        targetName: string;
+        mode: "cancel";
+        operationId?: string;
+      }): Promise<DeviceRemovalState> {
     const client = await this.link.getClient();
     return decodeDeviceRemovalState(await client.request<unknown>("device.continue", input));
   }

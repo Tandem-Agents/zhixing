@@ -1157,10 +1157,16 @@ export class MeshRuntimeAssembly {
     ).accept(receipt);
   }
 
-  async continueDeviceRemoval(input: {
-    readonly targetName: string;
-    readonly mode: "transfer" | "destroy" | "lost" | "cancel";
-  }) {
+  async continueDeviceRemoval(input:
+    | {
+        readonly targetName: string;
+        readonly mode: "transfer" | "destroy" | "lost";
+      }
+    | {
+        readonly targetName: string;
+        readonly mode: "cancel";
+        readonly operationId?: string;
+      }) {
     if (!this.#deviceRemovalAuthority) {
       throw new Error("Only the current duty device can continue device removal");
     }
@@ -1171,10 +1177,20 @@ export class MeshRuntimeAssembly {
         ? "Paired device name is unknown"
         : "Paired device name is not unique");
     }
-    const operation = await this.#deviceRemovalAuthority.operationForTarget(
-      named[0]!.device.deviceId,
-    );
-    if (!operation) throw new Error("Removal operation is unknown");
+    const operation = input.mode === "cancel" && input.operationId !== undefined
+      ? await this.#deviceRemovalAuthority.operation(input.operationId)
+      : await this.#deviceRemovalAuthority.operationForTarget(named[0]!.device.deviceId);
+    if (!operation) {
+      if (input.mode === "cancel" && input.operationId !== undefined) {
+        return {
+          phase: "cancelled" as const,
+          conversations: [] as readonly string[],
+          localData: "known" as const,
+          credentialActions: [] as readonly string[],
+        };
+      }
+      throw new Error("Removal operation is unknown");
+    }
     const matches = trust.members.filter((member) =>
       member.device.deviceId === operation.targetDeviceId &&
       member.device.displayName === input.targetName);
@@ -1192,7 +1208,7 @@ export class MeshRuntimeAssembly {
         phase: "waiting-for-device" as const,
         conversations: [] as readonly string[],
         localData: "known" as const,
-        credentialActions: [] as readonly string[],
+        credentialActions: ["取消已安全记录；目标设备上线后会自动恢复准入"] as readonly string[],
       };
     }
     if (input.mode === "lost") {

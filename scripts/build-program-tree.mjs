@@ -8,6 +8,8 @@ import {
   canonicalize,
   collectProgramFiles,
   digest,
+  fingerprintPackageGraph,
+  fingerprintSourceTree,
   programTreeDigest,
   stableProgramLoaderSource,
 } from "./release-tooling.mjs";
@@ -32,6 +34,8 @@ const channelSource = await readFile(
   "utf8",
 );
 const channel = parseEmbeddedChannel(channelSource);
+const frozenSourceTreeDigest = await fingerprintSourceTree(repositoryRoot);
+const frozenPackageGraphDigest = await fingerprintPackageGraph(repositoryRoot);
 
 await atomicDirectory(outputRoot, async (temporary) => {
   const deployed = `${temporary}.deploy`;
@@ -75,11 +79,17 @@ await atomicDirectory(outputRoot, async (temporary) => {
     nodeVersion,
     runtimeDigest: runtimeEvidence.digest,
     appTreeDigest: programTreeDigest(appFiles),
+    sourceTreeDigest: frozenSourceTreeDigest,
+    packageGraphDigest: frozenPackageGraphDigest,
     indexUrl: channel.indexUrl,
     keyId: channel.keyId,
   };
   await writeFile(resolve(temporary, "program-tree-receipt.json"), canonicalize(receipt), "utf8");
   assertProgramTreeContract(await collectProgramFiles(temporary), target);
+  if (
+    await fingerprintSourceTree(repositoryRoot) !== frozenSourceTreeDigest ||
+    await fingerprintPackageGraph(repositoryRoot) !== frozenPackageGraphDigest
+  ) throw new Error("release inputs drifted while the program tree was being built");
 });
 
 function runPnpm(args) {

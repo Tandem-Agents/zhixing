@@ -63,6 +63,12 @@ if (
 
 const sourceTreeDigest = await fingerprintSourceTree(repositoryRoot);
 const packageGraphDigest = await fingerprintPackageGraph(repositoryRoot);
+if (
+  candidate.manifest.sourceTreeDigest !== sourceTreeDigest ||
+  candidate.manifest.packageGraphDigest !== packageGraphDigest
+) {
+  throw new Error("candidate manifest does not bind the current build input closure");
+}
 const execution = await executeCandidateAndScenarios({ candidate, baseline });
 await assertInputsUnchanged({ candidate, baseline, sourceTreeDigest, packageGraphDigest });
 const report = assertCanonicalTargetSmokeReport({

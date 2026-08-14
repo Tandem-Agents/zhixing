@@ -177,7 +177,7 @@ export async function runExecutorRole(
   let localServerBinding: BoundZhixingServer | undefined;
   let localServerState: ServerStateFile | undefined;
   let localServerHeartbeat: NodeJS.Timeout | undefined;
-  let stopProgramUpdateChecks: () => void = () => undefined;
+  let stopProgramUpdateChecks: () => Promise<void> = async () => undefined;
   let stopProgramUpdateNotifications: () => void = () => undefined;
   let programUpgrade: ProgramUpgradeCoordinator | undefined;
   let resolveLifecycleShutdown: (() => void) | undefined;
@@ -922,8 +922,8 @@ export async function runExecutorRole(
       ...(programUpgradeHealthGate ? { beforePublish: programUpgradeHealthGate } : {}),
     });
     stopProgramUpdateChecks = processMode === "managed"
-      ? startManagedUpdateChecks({ store: programStore })
-      : (startAutomaticUpdateCheck({ store: programStore }), () => undefined);
+      ? startManagedUpdateChecks({ store: programStore }).stop
+      : startAutomaticUpdateCheck({ store: programStore }).stop;
     if (programUpgradeResume?.kind === "verify-current") {
       await localConversationOwner.releaseHostStopAdmission(programUpgradeResume.operationId);
       await authority.authority.releaseLifecycleAdmission(programUpgradeResume.operationId);
@@ -961,7 +961,7 @@ export async function runExecutorRole(
     if (!(error instanceof ProgramUpgradeRestart)) roleFailure = error;
   }
   const cleanupFailures: unknown[] = [];
-  stopProgramUpdateChecks();
+  await stopProgramUpdateChecks().catch((error: unknown) => cleanupFailures.push(error));
   stopProgramUpdateNotifications();
   try {
     if (localServerHeartbeat) clearInterval(localServerHeartbeat);

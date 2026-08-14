@@ -412,6 +412,55 @@ describe("managed service platform contract", () => {
   );
 
   it.each(["win32", "darwin", "linux"] as const)(
+    "re-enables only the same existing %s definition without starting it",
+    async (platform) => {
+      const directory = await createTempDir(`managed-service-${platform}-exact-enable`);
+      const spec = platformSpec(platform, directory);
+      await mkdir(path.dirname(spec.definitionPath), { recursive: true });
+      await writeFile(spec.definitionPath, managedServiceDefinitionBytes(spec));
+      let enabled = false;
+      const calls: string[] = [];
+      const runner: ManagedServiceCommandRunner = async (command, args) => {
+        calls.push(`${command} ${args.join(" ")}`);
+        if (platform === "win32" && command === "powershell.exe") {
+          return { code: 0, stdout: windowsInspectionJson(spec, { enabled, running: false }), stderr: "" };
+        }
+        if (platform === "darwin" && args.includes("print-disabled")) {
+          return { code: 0, stdout: enabled ? "" : `"${spec.serviceId}" => true`, stderr: "" };
+        }
+        if (platform === "darwin" && args.includes("print")) {
+          return { code: 0, stdout: "state = exited", stderr: "" };
+        }
+        if (platform === "linux" && args.includes("is-enabled")) {
+          return { code: enabled ? 0 : 1, stdout: enabled ? "enabled\n" : "disabled\n", stderr: "" };
+        }
+        if (platform === "linux" && args.includes("is-active")) {
+          return { code: 3, stdout: "inactive\n", stderr: "" };
+        }
+        if (args.includes("/ENABLE") || args.includes("enable")) enabled = true;
+        return { code: 0, stdout: "", stderr: "" };
+      };
+      const adapter = createManagedServiceAdapter({ platform, commandRunner: runner });
+      const expected = await adapter.inspect(spec, new AbortController().signal);
+      await expect(adapter.enableFutureExact(
+        spec,
+        expected,
+        new AbortController().signal,
+      )).resolves.toEqual({ state: "enabled", running: false, matches: true });
+      expect(calls.some((call) => /\/ENABLE| enable /u.test(call))).toBe(true);
+      expect(calls.some((call) => /\/Run|kickstart| start /u.test(call))).toBe(false);
+
+      const beforeMismatchCalls = calls.length;
+      await expect(adapter.enableFutureExact(
+        spec,
+        expected,
+        new AbortController().signal,
+      )).rejects.toMatchObject({ code: "definition-drift" });
+      expect(calls.length).toBe(beforeMismatchCalls + (platform === "win32" ? 1 : 2));
+    },
+  );
+
+  it.each(["win32", "darwin", "linux"] as const)(
     "stops only the exact current %s instance while preserving future registration",
     async (platform) => {
       const directory = await createTempDir(`managed-service-${platform}-exact-stop`);

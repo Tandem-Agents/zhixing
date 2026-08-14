@@ -13,6 +13,7 @@ import {
   captureManagedHostAdmission,
   coordinateManagedHostTrustTransition,
   loadCurrentManagedServiceState,
+  prepareProgramRemovalManagedService,
   proveLocalCurrentAuthority,
   verifyManagedHostAdmission,
 } from "./managed-service-runtime.js";
@@ -207,6 +208,23 @@ describe("managed service current-state intent", () => {
       expect((await readdir(homeDir)).filter((name) => name.startsWith("secret-vault"))).toEqual([]);
     });
   });
+
+  it.runIf(process.platform === "win32")(
+    "proves a fresh unbound home has no managed registration before application removal",
+    async () => {
+      const homeDir = await createTempDir("managed-removal-fresh-home");
+      await withManagedEnvironment(undefined, undefined, async () => {
+        const handle = await prepareProgramRemovalManagedService(
+          new AbortController().signal,
+          homeDir,
+        );
+        await expect(handle.commit()).resolves.toBeUndefined();
+        await expect(handle.rollback()).resolves.toBeUndefined();
+        expect(await readPlatformSecretStoreBackendBinding(homeDir)).toBeUndefined();
+      });
+    },
+    30_000,
+  );
 
   it.runIf(process.platform === "win32" || process.platform === "linux")(
     "backfills a legacy binding only during activation and projects it in the same load",
