@@ -50,6 +50,8 @@ import {
 import { CleanupRegistry, registerCleanup } from "./cleanup-registry.js";
 
 export interface RunServerOptions extends StartServerOptions {
+  /** Server 已激活但尚未发布 PID/ready 时执行的候选健康门。 */
+  beforePublish?: (server: ZhixingServerInstance) => Promise<void>;
   /** Scheduler 实例（已 start）。独立模式会在 registry 中注册 scheduler.stop */
   scheduler?: SchedulerBackend;
   /** 进程锁文件路径覆盖 */
@@ -103,6 +105,15 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
     onError: opts.onError,
     schedulerEventBus: opts.schedulerEventBus,
   });
+
+  if (opts.beforePublish) {
+    try {
+      await opts.beforePublish(server);
+    } catch (error) {
+      await server.close();
+      throw error;
+    }
+  }
 
   // 2. 写 PID / port 发现文件 —— owner 已由上面的 listen 确立（端口才是单例锁），
   //    acquireLock 覆盖任何崩溃残留、不因 PID 冲突自杀（见 process-lock.ts）。

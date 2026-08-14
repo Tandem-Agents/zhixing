@@ -16,6 +16,8 @@ import type { ProgramUpdateProjection } from "./update-controller.js";
 import { EMBEDDED_RELEASE_TRUST } from "./release-channel.js";
 import { createReleaseVerifier } from "./release-verifier.js";
 import { ProgramStore } from "./program-store.js";
+import type { CurrentAuthorityProgramUpdateStatus } from "../runtime/rpc-program-update-facade.js";
+import { loadCurrentManagedServiceState } from "../serve/managed-service-runtime.js";
 
 export interface ProgramDoctorReport {
   readonly code: string;
@@ -31,6 +33,8 @@ export interface ProgramDoctorDeps {
   readonly checkpointConfiguration?: () => Promise<"configured" | "not-configured">;
   readonly releaseTrust?: typeof EMBEDDED_RELEASE_TRUST;
   readonly currentAuthorityProjection?: () => Promise<ProgramUpdateProjection>;
+  readonly currentAuthorityStatus?: () => Promise<CurrentAuthorityProgramUpdateStatus>;
+  readonly localIsCurrentAuthority?: () => Promise<boolean>;
 }
 
 export async function inspectProgramHealth(deps: ProgramDoctorDeps = {}): Promise<ProgramDoctorReport> {
@@ -39,9 +43,28 @@ export async function inspectProgramHealth(deps: ProgramDoctorDeps = {}): Promis
     const pointer = await store.loadPointer();
     const receipt = await store.loadReceipt();
     const localUpdate = projectProgramUpdate(receipt);
-    const update = deps.currentAuthorityProjection
-      ? await deps.currentAuthorityProjection()
+    const authorityStatus = deps.currentAuthorityStatus
+      ? await deps.currentAuthorityStatus()
+      : deps.currentAuthorityProjection
+        ? await deps.currentAuthorityProjection().then(
+            (projection): CurrentAuthorityProgramUpdateStatus => ({ availability: "available", projection }),
+            (): CurrentAuthorityProgramUpdateStatus => ({ availability: "unavailable" }),
+          )
+        : undefined;
+    let update = authorityStatus?.availability === "available"
+      ? authorityStatus.projection
       : localUpdate;
+    if (authorityStatus?.availability === "unavailable") {
+      const localIsCurrent = await (deps.localIsCurrentAuthority ?? localIsCurrentAuthority)();
+      if (!localIsCurrent) {
+        return {
+          code: "current-authority-unavailable",
+          message: "当前权威设备暂不可达，无法确认更新状态",
+          action: "retry-update",
+        };
+      }
+      update = localUpdate;
+    }
     if (update.visible && update.action) {
       return {
         code: update.code ?? "update-needs-attention",
@@ -77,6 +100,11 @@ export async function inspectProgramHealth(deps: ProgramDoctorDeps = {}): Promis
       action: "contact-support",
     };
   }
+}
+
+async function localIsCurrentAuthority(): Promise<boolean> {
+  const current = await loadCurrentManagedServiceState("inspect");
+  return current.trust?.issuer.deviceId === current.localDeviceId;
 }
 
 async function inspectInstalledRelease(

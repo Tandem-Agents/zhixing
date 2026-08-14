@@ -201,6 +201,7 @@ import {
   readProgramUpdateProjection,
   startAutomaticUpdateCheck,
   startManagedUpdateChecks,
+  verifyLocalUpgradeHealth,
 } from "../update/runtime.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
@@ -1666,6 +1667,7 @@ async function runServerProcess(
     },
     isHostStopped: isLifecycleHostStopped,
   });
+  let publishProgramUpdateChanged: () => void = () => undefined;
   const releaseVerifier = EMBEDDED_RELEASE_TRUST
     ? createReleaseVerifier(EMBEDDED_RELEASE_TRUST)
     : undefined;
@@ -1699,6 +1701,7 @@ async function runServerProcess(
         localDeviceId: bootstrap.mesh.deviceKey.deviceId,
         host: stopHost,
         isHostStopped: isLifecycleHostStopped,
+        onStateChanged: () => publishProgramUpdateChanged(),
         runtime: {
           closeAdmission: async (operationId) => {
             managedHostStopping = true;
@@ -2306,6 +2309,17 @@ async function runServerProcess(
         }
       : {}),
   });
+  publishProgramUpdateChanged = () => serverCtx.programUpdateNotifications.publishChanged();
+  const stopProgramUpdateNotifications = programStore?.onUpdateChanged(
+    publishProgramUpdateChanged,
+  );
+  if (stopProgramUpdateNotifications) {
+    registerCleanup(
+      registry,
+      { owner: "anchor-host", role: "runtime", id: "programUpdateNotifications.stop" },
+      async () => stopProgramUpdateNotifications(),
+    );
+  }
   managedShutdown.current = () => {
     managedHostStopping = true;
     ctx.inboundRouter?.refuseNewMessages();
@@ -2347,12 +2361,13 @@ async function runServerProcess(
   registerTailCleanup(registry, { stateFile, heartbeatTimerRef, lockPaths });
 
   // runServer —— 内部会向 registry 注册 server.close（注入模式）
-  if (programUpgradeResume?.kind === "verify-target") {
+  let programUpgradeHealthGate: (() => Promise<void>) | undefined;
+  if (programUpgradeResume?.kind === "verify-current") {
     const current = await programStore!.loadPointer();
     const installed = await programStore!.loadCurrentManifest(releaseVerifier!);
     if (
-      !current || current.current.manifestDigest !== programUpgradeResume.targetManifestDigest ||
-      !installed || installed.digest !== programUpgradeResume.targetManifestDigest
+      !current || current.current.manifestDigest !== programUpgradeResume.currentManifestDigest ||
+      !installed || installed.digest !== programUpgradeResume.currentManifestDigest
     ) {
       await programUpgrade!.restoreCompatiblePrevious(programUpgradeResume.operationId);
       throw new Error("Updated program health identity is unavailable");
@@ -2365,14 +2380,23 @@ async function runServerProcess(
       rolePlan: { host: plan.host, loadExecutor: plan.loadExecutor },
       trust: buildProgramUpdateTrustProjection(bootstrap.mesh),
     });
-    await programUpgrade!.completeHealthy(
-      programUpgradeResume.operationId,
-      programUpgradeResume.targetManifestDigest,
-      protocolDigest("ProgramUpdateHealthSnapshot", 1, health),
-    ).catch(async (error: unknown) => {
-      await programUpgrade!.restoreCompatiblePrevious(programUpgradeResume.operationId);
-      throw error;
-    });
+    programUpgradeHealthGate = async () => {
+      try {
+        const healthDigest = await verifyLocalUpgradeHealth({
+          endpoint: { host: serverBinding.host, port: serverBinding.port },
+          token: tokenInfo.token,
+          expected: health,
+        });
+        await programUpgrade!.completeHealthy(
+          programUpgradeResume.operationId,
+          programUpgradeResume.currentManifestDigest,
+          healthDigest,
+        );
+      } catch (error) {
+        await programUpgrade!.restoreCompatiblePrevious(programUpgradeResume.operationId);
+        throw error;
+      }
+    };
   }
   if (!await verifyManagedHostAdmission(
     initialManagedHostAdmission,
@@ -2399,6 +2423,7 @@ async function runServerProcess(
       startTime: processStartTime,
       startedAt: processStartedAt,
     },
+    ...(programUpgradeHealthGate ? { beforePublish: programUpgradeHealthGate } : {}),
     logger: {
       info: (msg) => console.log(chalk.dim(`[server] ${msg}`)),
       warn: (msg) => console.warn(chalk.yellow(`[server] ${msg}`)),
@@ -2417,7 +2442,7 @@ async function runServerProcess(
     );
   }
 
-  if (programUpgradeResume?.kind === "verify-target") {
+  if (programUpgradeResume?.kind === "verify-current") {
     await ctx.localConversationOwner?.releaseHostStopAdmission(programUpgradeResume.operationId);
     await ctx.deliveryStack?.releaseLifecycleAdmission(programUpgradeResume.operationId);
     await ctx.deliveryStack?.resumeAfterAuthorityTransfer();
@@ -2656,6 +2681,7 @@ async function runServerProcess(
 
   // 等待停机 —— 所有清理由 lifecycle.ts 的 shutdown → registry.runAll 统一完成
   await runner.waitForShutdown();
+  await programUpgrade?.advanceAfterCurrentHostStopped(!serverBinding.listening);
   } catch (error) {
     if (runner) {
       await runner.shutdown("startup-error").catch(() => {});

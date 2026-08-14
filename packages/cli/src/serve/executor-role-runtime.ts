@@ -98,6 +98,7 @@ import {
   readProgramUpdateProjection,
   startAutomaticUpdateCheck,
   startManagedUpdateChecks,
+  verifyLocalUpgradeHealth,
 } from "../update/runtime.js";
 
 class ProgramUpgradeRestart extends Error {}
@@ -177,6 +178,8 @@ export async function runExecutorRole(
   let localServerState: ServerStateFile | undefined;
   let localServerHeartbeat: NodeJS.Timeout | undefined;
   let stopProgramUpdateChecks: () => void = () => undefined;
+  let stopProgramUpdateNotifications: () => void = () => undefined;
+  let programUpgrade: ProgramUpgradeCoordinator | undefined;
   let resolveLifecycleShutdown: (() => void) | undefined;
   const lifecycleShutdown = new Promise<void>((resolve) => {
     resolveLifecycleShutdown = resolve;
@@ -707,11 +710,12 @@ export async function runExecutorRole(
       },
       isHostStopped: isLifecycleHostStopped,
     });
+    let publishProgramUpdateChanged: () => void = () => undefined;
     const releaseVerifier = EMBEDDED_RELEASE_TRUST
       ? createReleaseVerifier(EMBEDDED_RELEASE_TRUST)
       : undefined;
     const programStore = releaseVerifier ? new ProgramStore() : undefined;
-    const programUpgrade = releaseVerifier && programStore
+    programUpgrade = releaseVerifier && programStore
       ? new ProgramUpgradeCoordinator({
           journal: new DeviceLifecycleJournal(lifecycleLog),
           store: programStore,
@@ -742,6 +746,7 @@ export async function runExecutorRole(
           localDeviceId: bootstrap.mesh.deviceKey.deviceId,
           host: stopHost,
           isHostStopped: isLifecycleHostStopped,
+          onStateChanged: () => publishProgramUpdateChanged(),
           runtime: {
             closeAdmission: async (operationId) => {
               jobOwnerAssembly!.pauseAccepting();
@@ -854,12 +859,17 @@ export async function runExecutorRole(
       },
       hostInfo: { logPath: isDaemonChild() ? getDefaultLogPath() : undefined },
     });
-    if (programUpgradeResume?.kind === "verify-target") {
+    publishProgramUpdateChanged = () => serverContext.programUpdateNotifications.publishChanged();
+    stopProgramUpdateNotifications = programStore?.onUpdateChanged(
+      publishProgramUpdateChanged,
+    ) ?? (() => undefined);
+    let programUpgradeHealthGate: (() => Promise<void>) | undefined;
+    if (programUpgradeResume?.kind === "verify-current") {
       const current = await programStore!.loadPointer();
       const installed = await programStore!.loadCurrentManifest(releaseVerifier!);
       if (
-        !current || current.current.manifestDigest !== programUpgradeResume.targetManifestDigest ||
-        !installed || installed.digest !== programUpgradeResume.targetManifestDigest
+        !current || current.current.manifestDigest !== programUpgradeResume.currentManifestDigest ||
+        !installed || installed.digest !== programUpgradeResume.currentManifestDigest
       ) {
         await programUpgrade!.restoreCompatiblePrevious(programUpgradeResume.operationId);
         throw new ProgramUpgradeRestart();
@@ -872,14 +882,23 @@ export async function runExecutorRole(
         rolePlan: { host: "executor-host", loadExecutor: true },
         trust: buildProgramUpdateTrustProjection(bootstrap.mesh),
       });
-      await programUpgrade!.completeHealthy(
-        programUpgradeResume.operationId,
-        programUpgradeResume.targetManifestDigest,
-        protocolDigest("ProgramUpdateHealthSnapshot", 1, health),
-      ).catch(async () => {
-        await programUpgrade!.restoreCompatiblePrevious(programUpgradeResume.operationId);
-        throw new ProgramUpgradeRestart();
-      });
+      programUpgradeHealthGate = async () => {
+        try {
+          const healthDigest = await verifyLocalUpgradeHealth({
+            endpoint: { host: localServerBinding!.host, port: localServerBinding!.port },
+            token: token.token,
+            expected: health,
+          });
+          await programUpgrade!.completeHealthy(
+            programUpgradeResume.operationId,
+            programUpgradeResume.currentManifestDigest,
+            healthDigest,
+          );
+        } catch {
+          await programUpgrade!.restoreCompatiblePrevious(programUpgradeResume.operationId);
+          throw new ProgramUpgradeRestart();
+        }
+      };
     }
     localConversationServer = await runServer({
       context: serverContext,
@@ -900,11 +919,12 @@ export async function runExecutorRole(
         warn: (message) => writer.notify(`[local-session] ${message}`),
         error: (message) => writer.notify(`[local-session] ${message}`),
       },
+      ...(programUpgradeHealthGate ? { beforePublish: programUpgradeHealthGate } : {}),
     });
     stopProgramUpdateChecks = processMode === "managed"
       ? startManagedUpdateChecks({ store: programStore })
       : (startAutomaticUpdateCheck({ store: programStore }), () => undefined);
-    if (programUpgradeResume?.kind === "verify-target") {
+    if (programUpgradeResume?.kind === "verify-current") {
       await localConversationOwner.releaseHostStopAdmission(programUpgradeResume.operationId);
       await authority.authority.releaseLifecycleAdmission(programUpgradeResume.operationId);
       if (!startupStopAcceptedWorkRecovered) {
@@ -942,6 +962,7 @@ export async function runExecutorRole(
   }
   const cleanupFailures: unknown[] = [];
   stopProgramUpdateChecks();
+  stopProgramUpdateNotifications();
   try {
     if (localServerHeartbeat) clearInterval(localServerHeartbeat);
     await localServerState?.markStopping("graceful");
@@ -992,6 +1013,15 @@ export async function runExecutorRole(
     await mcpHub.dispose();
   } catch (error) {
     cleanupFailures.push(error);
+  }
+  if (roleFailure === undefined && cleanupFailures.length === 0) {
+    try {
+      await programUpgrade?.advanceAfterCurrentHostStopped(
+        localServerBinding !== undefined && !localServerBinding.listening,
+      );
+    } catch (error) {
+      cleanupFailures.push(error);
+    }
   }
   if (roleFailure !== undefined) {
     if (cleanupFailures.length > 0) {

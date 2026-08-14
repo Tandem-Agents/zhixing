@@ -74,7 +74,7 @@ async function reclaimDeadLock(
     .then((value) => now() - value.mtimeMs)
     .catch(() => 0);
   const observedOwner = await readLockRecord(lockPath);
-  if (observedOwner ? isLockOwnerActive(observedOwner) : age <= staleMs) return;
+  if (observedOwner ? isLockOwnerActive(observedOwner, age, staleMs) : age <= staleMs) return;
 
   const reclaimPath = `${lockPath}.reclaim`;
   const reclaimRecord: LockRecord = {
@@ -87,7 +87,7 @@ async function reclaimDeadLock(
       .then((value) => now() - value.mtimeMs)
       .catch(() => 0);
     const reclaimOwner = await readLockRecord(reclaimPath);
-    if (reclaimOwner ? !isLockOwnerActive(reclaimOwner) : reclaimAge > staleMs) {
+    if (reclaimOwner ? !isLockOwnerActive(reclaimOwner, reclaimAge, staleMs) : reclaimAge > staleMs) {
       await rm(reclaimPath, { force: true });
     }
     return;
@@ -99,7 +99,7 @@ async function reclaimDeadLock(
       .then((value) => now() - value.mtimeMs)
       .catch(() => 0);
     const owner = await readLockRecord(lockPath);
-    if (owner ? !isLockOwnerActive(owner) : currentAge > staleMs) {
+    if (owner ? !isLockOwnerActive(owner, currentAge, staleMs) : currentAge > staleMs) {
       await rm(lockPath, { force: true });
     }
   } finally {
@@ -144,7 +144,7 @@ async function cleanupAbandonedClaims(
     const age = await pathAge(claimPath, now);
     if (age === null) continue;
     const owner = await readLockRecord(claimPath);
-    if (owner ? isLockOwnerActive(owner) : age <= staleMs) continue;
+    if (owner ? isLockOwnerActive(owner, age, staleMs) : age <= staleMs) continue;
     await rm(claimPath, { force: true });
   }
 }
@@ -214,8 +214,9 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-function isLockOwnerActive(owner: LockRecord): boolean {
-  return activeTokens.has(owner.token) || isProcessAlive(owner.pid);
+function isLockOwnerActive(owner: LockRecord, heartbeatAgeMs: number, staleMs: number): boolean {
+  return activeTokens.has(owner.token) ||
+    (heartbeatAgeMs <= staleMs && isProcessAlive(owner.pid));
 }
 
 function startLockHeartbeat(

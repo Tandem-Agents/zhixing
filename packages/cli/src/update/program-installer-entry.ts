@@ -5,6 +5,7 @@ import { EMBEDDED_RELEASE_TRUST } from "./release-channel.js";
 import { createReleaseVerifier } from "./release-verifier.js";
 import { installProgramRelease } from "./installation-receipt.js";
 import { ProgramStore, currentReleaseTarget, defaultProgramRoot } from "./program-store.js";
+import { requestLocalUpgradeHandoff } from "./runtime.js";
 
 const command = process.argv[2];
 if (command === "install") {
@@ -17,6 +18,7 @@ if (command === "install") {
     verifier: createReleaseVerifier(EMBEDDED_RELEASE_TRUST),
     manifestBytes: await readFile(manifestPath),
     artifactBytes: await readFile(artifactPath),
+    handoffExisting: requestLocalUpgradeHandoff,
   });
 } else if (command === "remove") {
   const root = path.resolve(required("--program-root"));

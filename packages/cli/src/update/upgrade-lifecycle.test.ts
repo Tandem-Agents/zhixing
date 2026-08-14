@@ -1,4 +1,5 @@
 import path from "node:path";
+import { readFile, rm } from "node:fs/promises";
 import { generateKeyPairSync, sign } from "node:crypto";
 import { DeviceLifecycleJournal, FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
 import {
@@ -13,7 +14,7 @@ import {
 } from "@zhixing/core/protocol";
 import type { Signature } from "@zhixing/core/contracts";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { HOST_STOP_ACCEPTED_WORK_OWNERS, type HostStopAcceptedWorkPorts } from "../serve/host-stop-lifecycle.js";
 import { ProgramStore } from "./program-store.js";
 import { createReleaseVerifier } from "./release-verifier.js";
@@ -97,16 +98,37 @@ describe("program upgrade lifecycle", () => {
       operationId: prepared.operationId,
     });
     expect((await store.loadPointer())?.current.releaseVersion).toBe("1.1.0");
+    const replayedPointer = await store.activateStaged(candidate.manifest, byteDigest(candidateBytes), {
+      sourceManifestDigest: byteDigest(currentBytes),
+      pointerGeneration: 1,
+    });
+    expect(replayedPointer.generation).toBe(2);
 
     const target = new ProgramUpgradeCoordinator({
       ...options,
       host: { kind: "foreground", processId: 43, startedAt: "2026-08-13T00:02:00.000Z" },
     });
     const action = await target.resumeBeforeStartup();
-    expect(action).toMatchObject({ kind: "verify-target", operationId: prepared.operationId });
+    expect(action).toMatchObject({ kind: "verify-current", operationId: prepared.operationId });
+    await expect(target.prepare({
+      requestId: "update-request",
+      candidateManifestDigest: byteDigest(candidateBytes),
+      timeoutMs: 5_000,
+    })).resolves.toEqual({ operationId: prepared.operationId, phase: "flushed" });
     await target.completeHealthy(prepared.operationId, byteDigest(candidateBytes));
     await expect(journal.active()).resolves.toEqual([]);
     await expect(store.loadReceipt()).resolves.toMatchObject({ notice: "updated" });
+
+    await rm(options.installationReceiptPath, { force: true });
+    await expect(target.prepare({
+      requestId: "terminal-response-replay",
+      candidateManifestDigest: byteDigest(candidateBytes),
+      timeoutMs: 5_000,
+    })).resolves.toEqual({ operationId: prepared.operationId, phase: "flushed" });
+    await expect(readFileReceipt(options.installationReceiptPath)).resolves.toMatchObject({
+      releaseVersion: "1.1.0",
+      releaseSequence: "2",
+    });
 
     const upgradedPointer = await store.loadPointer();
     expect(upgradedPointer?.previous?.releaseVersion).toBe("1.0.0");
@@ -116,20 +138,25 @@ describe("program upgrade lifecycle", () => {
       candidateManifestDigest: recovery.digest,
       timeoutMs: 5_000,
     });
-    const recoverySuccessor = new ProgramUpgradeCoordinator({
+    const advance = journal.advance.bind(journal);
+    let lostOldHostResponse = false;
+    vi.spyOn(journal, "advance").mockImplementation(async (...args) => {
+      const result = await advance(...args);
+      if (args[1] === "old-host-stopped" && !lostOldHostResponse) {
+        lostOldHostResponse = true;
+        throw new Error("old-host-stopped response lost");
+      }
+      return result;
+    });
+    await expect(target.advanceAfterCurrentHostStopped(false)).rejects.toThrow("endpoint is still active");
+    await expect(target.advanceAfterCurrentHostStopped(true)).resolves.toBe(true);
+    expect(lostOldHostResponse).toBe(true);
+    const recoveredTarget = new ProgramUpgradeCoordinator({
       ...options,
       host: { kind: "foreground", processId: 44, startedAt: "2026-08-13T00:03:00.000Z" },
     });
-    await expect(recoverySuccessor.resumeBeforeStartup()).resolves.toEqual({
-      kind: "restart-target",
-      operationId: recoveryPrepared.operationId,
-    });
-    const recoveredTarget = new ProgramUpgradeCoordinator({
-      ...options,
-      host: { kind: "foreground", processId: 45, startedAt: "2026-08-13T00:04:00.000Z" },
-    });
     await expect(recoveredTarget.resumeBeforeStartup()).resolves.toMatchObject({
-      kind: "verify-target",
+      kind: "verify-current",
       operationId: recoveryPrepared.operationId,
     });
     await recoveredTarget.completeHealthy(recoveryPrepared.operationId, recovery.digest);
@@ -139,6 +166,10 @@ describe("program upgrade lifecycle", () => {
     await expect(store.loadReceipt()).resolves.toMatchObject({ notice: "restored" });
   }, 120_000);
 });
+
+async function readFileReceipt(file: string): Promise<unknown> {
+  return JSON.parse(await readFile(file, "utf8"));
+}
 
 function release(target: StableReleaseTarget, version: string, sequence: string, text: string) {
   const file = Buffer.from(text);

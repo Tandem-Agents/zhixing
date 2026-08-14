@@ -22,6 +22,8 @@ describe("production startup server ownership", () => {
     const activation = source.slice(location(source, "runner = await runServer"));
     expect(activation).toContain("boundServer: serverBinding");
     expect(activation).toContain("config: { ...DEFAULT_SERVER_CONFIG, port, host }");
+    expect(location(source, "await runner.waitForShutdown()"))
+      .toBeLessThan(location(source, "programUpgrade?.advanceAfterCurrentHostStopped(!serverBinding.listening)"));
   });
 
   it("binds the executor endpoint before every effectful owner and reuses that handle", async () => {
@@ -34,6 +36,10 @@ describe("production startup server ownership", () => {
     expect(activation).toContain("boundServer: localServerBinding");
     expect(activation).toContain("port: localServerPort");
     expect(activation).toContain("host: localServerHost");
+    const finalMcpDispose = source.lastIndexOf("await mcpHub.dispose()");
+    expect(finalMcpDispose).toBeGreaterThanOrEqual(0);
+    expect(finalMcpDispose)
+      .toBeLessThan(location(source, "programUpgrade?.advanceAfterCurrentHostStopped("));
   });
 
   it("keeps mesh startup recovery behind the closed lifecycle release", async () => {

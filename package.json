@@ -26,6 +26,7 @@
     "release:program-tree": "node scripts/build-program-tree.mjs",
     "release:artifact": "node scripts/build-release-artifact.mjs",
     "release:tooling:test": "node --test scripts/release-tooling.test.mjs",
+    "release:target-evidence": "node scripts/release-target-evidence.mjs",
     "release:check": "node scripts/release-check.mjs",
     "contracts:typecheck": "pnpm --filter @zhixing/core typecheck:contracts",
     "contracts:lint": "pnpm --filter @zhixing/core lint:contract-schemas",

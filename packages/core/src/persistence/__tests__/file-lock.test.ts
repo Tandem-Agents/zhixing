@@ -45,6 +45,27 @@ describe("file lock atomic publication", () => {
     });
     await release();
   });
+
+  it("reclaims a stale heartbeat even when the recorded PID has been reused", async () => {
+    const directory = await createTempDir("file-lock-pid-reuse");
+    const lockPath = path.join(directory, "resource.lock");
+    const staleToken = "d".repeat(32);
+    await writeFile(lockPath, lockRecord(staleToken), "utf8");
+    const stale = new Date(Date.now() - 60_000);
+    await utimes(lockPath, stale, stale);
+
+    const release = await acquireFileLock(lockPath, {
+      staleMs: 100,
+      waitMs: 500,
+      retryMs: 5,
+    });
+
+    expect(JSON.parse(await readFile(lockPath, "utf8"))).toMatchObject({
+      pid: process.pid,
+    });
+    expect(JSON.parse(await readFile(lockPath, "utf8")).token).not.toBe(staleToken);
+    await release();
+  });
 });
 
 function lockRecord(token: string): string {

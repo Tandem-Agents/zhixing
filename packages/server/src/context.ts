@@ -34,6 +34,48 @@ import type { SessionAdoptionReviewResult } from "@zhixing/rpc";
 import type { ServerConfig } from "./types.js";
 import type { ManagedHostPublicStatus } from "./managed-host-status.js";
 import type { RpcSurfaceRegistry } from "./rpc/surface-identity.js";
+import type { RpcConnection } from "./rpc/connection.js";
+
+export class ProgramUpdateNotificationDomain {
+  readonly #connections = new Map<number, {
+    readonly connection: RpcConnection;
+    readonly removeCloseListener: () => void;
+  }>();
+
+  subscribe(connection: RpcConnection): () => void {
+    if (connection.closed) return () => undefined;
+    const current = this.#connections.get(connection.id);
+    if (current?.connection === connection) return () => undefined;
+    current?.removeCloseListener();
+    const removeCloseListener = connection.onClose(() => {
+      if (this.#connections.get(connection.id)?.connection === connection) {
+        this.#connections.delete(connection.id);
+      }
+    });
+    if (connection.closed) {
+      removeCloseListener();
+      return () => undefined;
+    }
+    this.#connections.set(connection.id, { connection, removeCloseListener });
+    return () => {
+      if (this.#connections.get(connection.id)?.connection !== connection) return;
+      removeCloseListener();
+      this.#connections.delete(connection.id);
+    };
+  }
+
+  publishChanged(): void {
+    for (const [id, entry] of this.#connections) {
+      if (entry.connection.closed ||
+          (entry.connection.tryNotify && !entry.connection.tryNotify("server.update.changed", {}))) {
+        entry.removeCloseListener();
+        if (this.#connections.get(id)?.connection === entry.connection) this.#connections.delete(id);
+        continue;
+      }
+      if (!entry.connection.tryNotify) entry.connection.notify("server.update.changed", {});
+    }
+  }
+}
 import type { PerspectivesController } from "./perspectives/index.js";
 import type { ConversationDirectory } from "./runtime/conversation-directory.js";
 import type { WorksceneDirectory } from "./runtime/workscene-directory.js";
@@ -405,6 +447,8 @@ export interface ServerContext {
   programUpdateConsumeNotice?: (
     noticeToken: string,
   ) => Promise<{ readonly consumed: boolean }>;
+  /** 已成功读取更新状态的 exact connection；通知仅提示重读，不携带事实。 */
+  programUpdateNotifications: ProgramUpdateNotificationDomain;
   /** executor-only 宿主的有限第一方会话路由；锚点宿主不注入。 */
   conversationRpc?: FirstPartyConversationRpcRouter;
   /**
@@ -504,6 +548,7 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     programUpdateHealth: opts.programUpdateHealth,
     programUpdateStatus: opts.programUpdateStatus,
     programUpdateConsumeNotice: opts.programUpdateConsumeNotice,
+    programUpdateNotifications: new ProgramUpdateNotificationDomain(),
     conversationRpc: opts.conversationRpc,
   };
 }

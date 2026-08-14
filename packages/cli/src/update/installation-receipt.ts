@@ -74,6 +74,13 @@ export async function installProgramRelease(input: {
   readonly manifestBytes: Uint8Array;
   readonly artifactBytes: Uint8Array;
   readonly receiptPath?: string;
+  readonly handoffExisting?: (
+    candidateManifestDigest: string,
+    signal?: AbortSignal,
+  ) => Promise<{ readonly operationId: string } | undefined>;
+  readonly signal?: AbortSignal;
+  readonly terminalTimeoutMs?: number;
+  readonly pollIntervalMs?: number;
 }): Promise<InstallationReceipt> {
   const manifest = decodeAndValidateReleaseManifest(input.manifestBytes, input.verifier);
   const manifestDigest = byteDigest(input.manifestBytes);
@@ -97,24 +104,60 @@ export async function installProgramRelease(input: {
     releaseSequence: manifest.releaseSequence,
     manifestDigest,
   });
-  assertInstallAdvance(currentReceipt, candidate);
-
   const pointer = await input.store.loadPointer();
-  let installedPointer;
-  if (pointer?.current.manifestDigest === manifestDigest) {
-    await input.store.verifyInstalled(pointer.current, input.verifier);
-    installedPointer = pointer;
-  } else {
+  const currentProgram = pointer
+    ? await input.store.verifyInstalled(pointer.current, input.verifier)
+    : undefined;
+  const pointerReceipt = currentProgram
+    ? receiptFromManifest(currentProgram.manifest, currentProgram.digest)
+    : undefined;
+  assertInstallAdvance(currentReceipt, candidate);
+  assertInstallAdvance(pointerReceipt, candidate);
+
+  if (!pointer) {
     await input.store.stage(manifest, input.manifestBytes, input.artifactBytes);
     const installed = await input.store.activateStaged(manifest, manifestDigest);
     if (installed.current.manifestDigest !== manifestDigest) {
       throw new Error("Installed program pointer does not match the signed release");
     }
     await input.store.verifyInstalled(installed.current, input.verifier);
-    installedPointer = installed;
+    await materializeStableInstallationSurface(input.store, installed.current, artifact.files);
+    return commitInstallationReceipt(manifest, manifestDigest, receiptPath);
   }
-  await materializeStableInstallationSurface(input.store, installedPointer.current, artifact.files);
-  return commitInstallationReceipt(manifest, manifestDigest, receiptPath);
+
+  if (sameReceipt(pointerReceipt!, candidate) && !pointer.previous && !currentReceipt) {
+    await materializeStableInstallationSurface(input.store, pointer.current, artifact.files);
+    return commitInstallationReceipt(manifest, manifestDigest, receiptPath);
+  }
+
+  if (sameReceipt(pointerReceipt!, candidate) && currentReceipt && sameReceipt(currentReceipt, candidate)) {
+    await materializeStableInstallationSurface(input.store, pointer.current, artifact.files);
+    return currentReceipt;
+  }
+
+  if (pointer.current.manifestDigest !== manifestDigest) {
+    await input.store.stage(manifest, input.manifestBytes, input.artifactBytes);
+  }
+  if (!input.handoffExisting) {
+    throw new Error("Existing installation updates require the current-host lifecycle");
+  }
+  const prepared = await input.handoffExisting(manifestDigest, input.signal);
+  if (!prepared) throw new Error("Current program host is unavailable for a safe update");
+  const terminal = await waitForTerminalInstallation({
+    store: input.store,
+    verifier: input.verifier,
+    candidate,
+    receiptPath,
+    signal: input.signal,
+    timeoutMs: input.terminalTimeoutMs ?? 120_000,
+    pollIntervalMs: input.pollIntervalMs ?? 100,
+  });
+  const installedPointer = await input.store.loadPointer();
+  if (!installedPointer || installedPointer.current.manifestDigest !== manifestDigest) {
+    throw new Error("Terminal program update did not install the requested release");
+  }
+  await input.store.verifyInstalled(installedPointer.current, input.verifier);
+  return terminal;
 }
 
 export function validateInstallationReceipt(input: unknown): InstallationReceipt {
@@ -156,6 +199,51 @@ function assertInstallAdvance(
     if (sequence !== 0n || version !== 0 || !sameReceipt(current, candidate)) {
       throw new Error("Installer rejected conflicting bytes for an existing release identity");
     }
+  }
+}
+
+function receiptFromManifest(manifest: ReleaseManifest, manifestDigest: string): InstallationReceipt {
+  return validateInstallationReceipt({
+    v: 1,
+    target: manifest.target,
+    keyId: manifest.keyId,
+    releaseVersion: manifest.releaseVersion,
+    releaseSequence: manifest.releaseSequence,
+    manifestDigest,
+  });
+}
+
+async function waitForTerminalInstallation(input: {
+  readonly store: ProgramStore;
+  readonly verifier: ProtocolSignatureVerifier;
+  readonly candidate: InstallationReceipt;
+  readonly receiptPath: string;
+  readonly signal?: AbortSignal;
+  readonly timeoutMs: number;
+  readonly pollIntervalMs: number;
+}): Promise<InstallationReceipt> {
+  if (!Number.isFinite(input.timeoutMs) || input.timeoutMs <= 0 ||
+      !Number.isFinite(input.pollIntervalMs) || input.pollIntervalMs <= 0) {
+    throw new TypeError("Installer terminal wait options are invalid");
+  }
+  const deadline = Date.now() + input.timeoutMs;
+  while (true) {
+    if (input.signal?.aborted) {
+      throw input.signal.reason instanceof Error ? input.signal.reason : new Error("Installer update was aborted");
+    }
+    const [receipt, pointer] = await Promise.all([
+      loadInstallationReceipt(input.receiptPath),
+      input.store.loadPointer(),
+    ]);
+    if (receipt && sameReceipt(receipt, input.candidate) &&
+        pointer?.current.manifestDigest === input.candidate.manifestDigest) {
+      await input.store.verifyInstalled(pointer.current, input.verifier);
+      return receipt;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error("Timed out waiting for the current-host update lifecycle");
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, input.pollIntervalMs));
   }
 }
 

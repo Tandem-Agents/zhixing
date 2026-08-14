@@ -14,7 +14,7 @@ import {
   type ReleaseManifest,
 } from "@zhixing/core/protocol";
 import { createSafeFetch, safeFetch } from "@zhixing/network";
-import { withProgramLock } from "./durable-file.js";
+import { ProgramUpdateBusyError, withProgramLock } from "./durable-file.js";
 import { ProgramStore, programUpdateNoticeToken } from "./program-store.js";
 
 const INDEX_BYTES_LIMIT = 1024 * 1024;
@@ -121,6 +121,7 @@ export class StableUpdateController {
       return await this.check(signal);
     } catch (error) {
       const current = await this.#store.loadReceipt().catch(() => undefined);
+      if (error instanceof ProgramUpdateBusyError) return current;
       if (!current) return undefined;
       // A lost handoff response must not demote an already accepted durable operation.
       if (current.phase === "handed-off") return current;

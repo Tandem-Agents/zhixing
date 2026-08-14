@@ -10,6 +10,7 @@ import {
   assertStableReleaseBinding,
   createSignedReleaseManifest,
   createSignedStableReleaseIndex,
+  compareReleaseSemver,
   decodeProgramArtifact,
   programArtifactStorageBudget,
   validateProgramUpdateReceipt,
@@ -95,6 +96,18 @@ describe("stable release protocol", () => {
     expect(assertReleaseAdvance(current, signedManifest("linux-x64", { releaseVersion: "1.1.0", releaseSequence: "2" }))).toBe("advance");
     expect(() => assertReleaseAdvance(current, signedManifest("linux-x64", { releaseVersion: "1.1.0", releaseSequence: "1" }))).toThrow("strictly advance");
     expect(() => assertReleaseAdvance(current, signedManifest("linux-x64", { releaseVersion: "1.0.0", releaseSequence: "2" }))).toThrow("strictly advance");
+  });
+
+  it("uses canonical SemVer 2.0 precedence without numeric precision loss or build ordering", () => {
+    expect(compareReleaseSemver("9007199254740993.0.0", "9007199254740992.999999999999999999999.999")).toBeGreaterThan(0);
+    expect(compareReleaseSemver("1.0.0-alpha.2", "1.0.0-alpha.10")).toBeLessThan(0);
+    expect(compareReleaseSemver("1.0.0-alpha", "1.0.0-alpha.1")).toBeLessThan(0);
+    expect(compareReleaseSemver("1.0.0-1", "1.0.0-alpha")).toBeLessThan(0);
+    expect(compareReleaseSemver("1.0.0-alpha", "1.0.0")).toBeLessThan(0);
+    expect(compareReleaseSemver("1.0.0+build.1", "1.0.0+build.999")).toBe(0);
+    expect(() => validateReleaseManifest(signedManifest("linux-x64", {
+      releaseVersion: "1.0.0-alpha.01",
+    }))).toThrow("canonical SemVer");
   });
 
   it("accepts only legal atomic update receipt combinations", () => {

@@ -425,7 +425,13 @@ export function buildServerUpdateStatusMethod(): MethodEntry {
       parseEmptyParams(params, "server.update.status");
       const project = ctx.server.programUpdateStatus;
       if (!project) throw RpcErrors.internal("server update status is not available");
-      return project();
+      const rollbackSubscription = ctx.server.programUpdateNotifications.subscribe(ctx.connection);
+      try {
+        return await project();
+      } catch (error) {
+        rollbackSubscription();
+        throw error;
+      }
     },
   };
 }

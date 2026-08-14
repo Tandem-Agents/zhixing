@@ -35,6 +35,7 @@ function mkCtx(overrides: Partial<HandlerContext["server"]> = {}): HandlerContex
       version: "0.1.0-test",
       startedAt: Date.now() - 1000,
       token: "t",
+      programUpdateNotifications: { subscribe: vi.fn(() => vi.fn()), publishChanged: vi.fn() } as any,
       ...overrides,
     } as any,
   };
@@ -121,6 +122,19 @@ describe("server.update current-authority projection", () => {
     await expect(buildServerUpdateStatusMethod().handler(undefined, local)).resolves.toEqual(projection);
     await expect(buildServerUpdateStatusMethod().handler(undefined, remote)).resolves.toEqual(projection);
     expect(project).toHaveBeenCalledTimes(2);
+    expect(local.server.programUpdateNotifications.subscribe).toHaveBeenCalledWith(local.connection);
+    expect(remote.server.programUpdateNotifications.subscribe).toHaveBeenCalledWith(remote.connection);
+    expect(local.server.programUpdateNotifications.subscribe.mock.invocationCallOrder[0])
+      .toBeLessThan(project.mock.invocationCallOrder[0]!);
+  });
+
+  it("rolls back a new status subscription when projection fails", async () => {
+    const ctx = mkCtx({ programUpdateStatus: async () => { throw new Error("unavailable"); } });
+    const rollback = vi.fn();
+    vi.mocked(ctx.server.programUpdateNotifications.subscribe).mockReturnValue(rollback);
+    await expect(buildServerUpdateStatusMethod().handler(undefined, ctx)).rejects.toThrow("unavailable");
+    expect(ctx.server.programUpdateNotifications.subscribe).toHaveBeenCalledWith(ctx.connection);
+    expect(rollback).toHaveBeenCalledOnce();
   });
 
   it("validates an exact notice token before compare-and-consume", async () => {

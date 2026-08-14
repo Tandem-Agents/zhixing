@@ -69,6 +69,7 @@ export class ProgramStore {
   readonly root: string;
   readonly target: StableReleaseTarget;
   readonly #availableBytes: (root: string) => Promise<bigint>;
+  readonly #updateChanged = new Set<() => void>();
 
   constructor(
     root = defaultProgramRoot(),
@@ -134,6 +135,18 @@ export class ProgramStore {
     return { manifest, digest, bytes };
   }
 
+  async loadAcceptedManifest(
+    manifestDigest: string,
+    verifier: ProtocolSignatureVerifier,
+  ): Promise<{ readonly manifest: ReleaseManifest; readonly digest: string; readonly bytes: Buffer }> {
+    const pointer = await this.loadPointer();
+    const installed = pointer
+      ? [pointer.current, pointer.previous].find((entry) => entry?.manifestDigest === manifestDigest)
+      : undefined;
+    if (installed) return this.verifyInstalled(installed, verifier);
+    return this.loadStagedManifest(manifestDigest, verifier);
+  }
+
   async loadReceipt(): Promise<ProgramUpdateReceipt | undefined> {
     const value = await readJsonIfPresent(path.join(this.root, "update-receipt.json"));
     return value === undefined ? undefined : validateProgramUpdateReceipt(value);
@@ -144,6 +157,12 @@ export class ProgramStore {
       path.join(this.root, "update-receipt.json"),
       validateProgramUpdateReceipt(receipt),
     );
+    for (const listener of this.#updateChanged) listener();
+  }
+
+  onUpdateChanged(listener: () => void): () => void {
+    this.#updateChanged.add(listener);
+    return () => this.#updateChanged.delete(listener);
   }
 
   async consumeNotice(expectedToken: string): Promise<boolean> {
@@ -245,11 +264,11 @@ export class ProgramStore {
     expectation?: ProgramActivationExpectation,
   ): Promise<ProgramPointer> {
     const staged = path.join(this.root, "stage", digestPart(manifestDigest));
-    if (!await isDirectory(staged)) throw new Error("Verified update stage is missing");
     const directory = `${manifest.releaseVersion}-${digestPart(manifestDigest).slice(0, 16)}`;
     const versionPath = path.join(this.root, "versions", directory);
     await mkdir(path.dirname(versionPath), { recursive: true, mode: 0o700 });
     if (!await isDirectory(versionPath)) {
+      if (!await isDirectory(staged)) throw new Error("Verified update stage is missing");
       await rename(staged, versionPath);
       await syncDirectory(path.dirname(versionPath));
     }

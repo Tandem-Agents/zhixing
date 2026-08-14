@@ -39,6 +39,51 @@ describe("offline program doctor", () => {
     });
   });
 
+  it("uses local update facts only when topology proves this device is current authority", async () => {
+    const store = {
+      loadPointer: async () => ({
+        v: 1,
+        target: "linux-x64",
+        generation: 1,
+        current: {
+          manifestDigest: `sha256:${"a".repeat(64)}`,
+          releaseVersion: "0.1.0",
+          releaseSequence: "1",
+          directory: "0.1.0-a",
+        },
+      }),
+      loadReceipt: async () => ({
+        v: 1,
+        currentManifestDigest: `sha256:${"a".repeat(64)}`,
+        target: "linux-x64",
+        phase: "idle",
+        notice: "failed-safe",
+        code: "network-unavailable",
+        action: "retry-update",
+      }),
+    } as never;
+    const currentAuthorityStatus = async () => ({ availability: "unavailable" as const });
+
+    await expect(inspectProgramHealth({
+      store,
+      currentAuthorityStatus,
+      localIsCurrentAuthority: async () => false,
+    })).resolves.toEqual({
+      code: "current-authority-unavailable",
+      message: "当前权威设备暂不可达，无法确认更新状态",
+      action: "retry-update",
+    });
+    await expect(inspectProgramHealth({
+      store,
+      currentAuthorityStatus,
+      localIsCurrentAuthority: async () => true,
+    })).resolves.toEqual({
+      code: "network-unavailable",
+      message: "自动更新失败，仍在使用原版本",
+      action: "retry-update",
+    });
+  });
+
   it("projects unreadable local state to a fixed safe problem code", async () => {
     const report = await inspectProgramHealth({
       store: { loadReceipt: async () => { throw new Error("C:\\secret\\token raw"); } } as never,

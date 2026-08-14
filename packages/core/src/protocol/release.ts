@@ -106,7 +106,6 @@ export interface ProgramArtifact {
 }
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
-const SEMVER_PATTERN = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 const UINT64_MAX = (1n << 64n) - 1n;
 
 export function createSignedReleaseManifest(
@@ -505,7 +504,8 @@ function sequence(value: unknown): asserts value is string {
 }
 
 function semver(value: unknown, label: string): asserts value is string {
-  if (typeof value !== "string" || !SEMVER_PATTERN.test(value)) throw new TypeError(`${label} must be canonical SemVer`);
+  if (typeof value !== "string") throw new TypeError(`${label} must be canonical SemVer`);
+  parseReleaseSemver(value, label);
 }
 
 function target(value: unknown): asserts value is StableReleaseTarget {
@@ -548,13 +548,48 @@ function enumValue<T extends string>(value: unknown, values: readonly T[], label
 }
 
 export function compareReleaseSemver(left: string, right: string): number {
-  semver(left, "Left release version");
-  semver(right, "Right release version");
-  const parse = (value: string) => value.split(/[+-]/u, 1)[0]!.split(".").map(Number);
-  const a = parse(left);
-  const b = parse(right);
+  const a = parseReleaseSemver(left, "Left release version");
+  const b = parseReleaseSemver(right, "Right release version");
   for (let index = 0; index < 3; index += 1) {
-    if (a[index] !== b[index]) return a[index]! - b[index]!;
+    const compared = compareNumericIdentifier(a.core[index]!, b.core[index]!);
+    if (compared !== 0) return compared;
   }
-  return left === right ? 0 : left.includes("-") ? -1 : right.includes("-") ? 1 : left < right ? -1 : 1;
+  if (!a.prerelease && !b.prerelease) return 0;
+  if (!a.prerelease) return 1;
+  if (!b.prerelease) return -1;
+  const length = Math.max(a.prerelease.length, b.prerelease.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftIdentifier = a.prerelease[index];
+    const rightIdentifier = b.prerelease[index];
+    if (leftIdentifier === undefined) return -1;
+    if (rightIdentifier === undefined) return 1;
+    if (leftIdentifier === rightIdentifier) continue;
+    const leftNumeric = /^[0-9]+$/u.test(leftIdentifier);
+    const rightNumeric = /^[0-9]+$/u.test(rightIdentifier);
+    if (leftNumeric && rightNumeric) return compareNumericIdentifier(leftIdentifier, rightIdentifier);
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    return leftIdentifier < rightIdentifier ? -1 : 1;
+  }
+  return 0;
+}
+
+function parseReleaseSemver(value: string, label: string): {
+  readonly core: readonly [string, string, string];
+  readonly prerelease?: readonly string[];
+} {
+  const match = /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/u.exec(value);
+  if (!match) throw new TypeError(`${label} must be canonical SemVer`);
+  const prerelease = match[4]?.split(".");
+  if (prerelease?.some((identifier) => /^[0-9]+$/u.test(identifier) && identifier.length > 1 && identifier.startsWith("0"))) {
+    throw new TypeError(`${label} must be canonical SemVer`);
+  }
+  return {
+    core: [match[1]!, match[2]!, match[3]!],
+    ...(prerelease ? { prerelease } : {}),
+  };
+}
+
+function compareNumericIdentifier(left: string, right: string): number {
+  if (left.length !== right.length) return left.length < right.length ? -1 : 1;
+  return left === right ? 0 : left < right ? -1 : 1;
 }

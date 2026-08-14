@@ -1,5 +1,6 @@
 import type { ProgramUpdateHealthSnapshot } from "@zhixing/server";
 import { createRpcClient } from "@zhixing/server";
+import { protocolDigest } from "@zhixing/core/protocol";
 import type { ProgramUpdateProjection } from "../update/update-controller.js";
 import {
   CoreHostConnection,
@@ -70,11 +71,22 @@ export class RpcProgramUpdateSurfaceFacade {
       .request<ProgramUpdateProjection>("server.update.status");
   }
 
+  async prepare(
+    request: ProgramUpdatePrepareRequest,
+  ): Promise<{ readonly operationId: string }> {
+    return (await this.connection.getClient())
+      .request<{ readonly operationId: string }>("server.update.prepare", request);
+  }
+
   async consumeNotice(noticeToken: string): Promise<{ readonly consumed: boolean }> {
     return (await this.connection.getClient())
       .request<{ readonly consumed: boolean }>("server.update.consumeNotice", {
         noticeToken,
       });
+  }
+
+  onChanged(handler: () => void): () => void {
+    return this.connection.onNotification("server.update.changed", () => handler());
   }
 }
 
@@ -90,6 +102,38 @@ export async function readCurrentAuthorityProgramUpdateStatus(): Promise<Program
   });
   try {
     return await new RpcProgramUpdateSurfaceFacade(connection).status();
+  } finally {
+    await connection.dispose();
+  }
+}
+
+export type CurrentAuthorityProgramUpdateStatus =
+  | { readonly availability: "available"; readonly projection: ProgramUpdateProjection }
+  | { readonly availability: "unavailable" };
+
+export async function tryReadCurrentAuthorityProgramUpdateStatus(): Promise<CurrentAuthorityProgramUpdateStatus> {
+  try {
+    return {
+      availability: "available",
+      projection: await readCurrentAuthorityProgramUpdateStatus(),
+    };
+  } catch {
+    return { availability: "unavailable" };
+  }
+}
+
+export async function requestCurrentHostProgramUpdatePrepare(
+  candidateManifestDigest: string,
+  signal?: AbortSignal,
+): Promise<{ readonly operationId: string }> {
+  if (signal?.aborted) throw signal.reason;
+  const connection = new CoreHostConnection(defaultCoreHostConnectionDeps());
+  try {
+    return await new RpcProgramUpdateSurfaceFacade(connection).prepare({
+      requestId: protocolDigest("ProgramUpdateHandoffRequest", 1, { candidateManifestDigest }),
+      candidateManifestDigest,
+      timeoutMs: 30_000,
+    });
   } finally {
     await connection.dispose();
   }

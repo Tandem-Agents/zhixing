@@ -13,8 +13,7 @@ import {
 } from "../packages/core/dist/protocol/index.js";
 import {
   RELEASE_ACCEPTANCE_IDS,
-  RELEASE_SMOKE_SCENARIOS,
-  assertExactBooleanMatrix,
+  assertCanonicalTargetSmokeReport,
   assertExactStringSet,
   assertProgramTreeContract,
   assertReleaseNodeVersion,
@@ -72,16 +71,24 @@ for (const target of STABLE_RELEASE_TARGETS) {
   if (artifact.target !== target || artifact.releaseVersion !== index.releaseVersion) throw new Error(`${target} artifact identity is inconsistent`);
   assertProgramTreeContract(artifact.files, target);
   const platformBytes = await readFile(resolve(targetRoot, "platform-evidence.json"));
-  const platform = exact(JSON.parse(platformBytes), ["artifactDigest", "passed", "target", "v"]);
-  if (platform.v !== 1 || platform.passed !== true || platform.target !== target || platform.artifactDigest !== manifest.artifact.digest) {
+  const platformEvidence = exact(JSON.parse(platformBytes), ["artifactDigest", "passed", "target", "v"]);
+  if (platformEvidence.v !== 1 || platformEvidence.passed !== true || platformEvidence.target !== target || platformEvidence.artifactDigest !== manifest.artifact.digest) {
     throw new Error(`${target} platform signing/notarization evidence is not bound to final bytes`);
   }
   const smokeBytes = await readFile(resolve(targetRoot, "smoke-report.json"));
-  const smoke = exact(JSON.parse(smokeBytes), ["candidateManifestDigest", "passed", "scenarios", "target", "v"]);
-  if (smoke.v !== 1 || smoke.passed !== true || smoke.target !== target || smoke.candidateManifestDigest !== byteDigest(manifestBytes)) {
-    throw new Error(`${target} smoke evidence is not bound to the candidate manifest`);
+  const [platform, arch] = target.split("-");
+  const smoke = assertCanonicalTargetSmokeReport(JSON.parse(smokeBytes), {
+    target,
+    platform,
+    arch,
+    manifestDigest: byteDigest(manifestBytes),
+    artifactDigest: byteDigest(artifactBytes),
+    sourceTreeDigest,
+    packageGraphDigest,
+  });
+  if (smokeBytes.toString("utf8") !== `${canonicalize(smoke)}\n`) {
+    throw new Error(`${target} smoke report is not canonical producer output`);
   }
-  assertExactBooleanMatrix(smoke.scenarios, RELEASE_SMOKE_SCENARIOS, "target smoke matrix");
   reports.push({
     target,
     manifestDigest: byteDigest(manifestBytes),

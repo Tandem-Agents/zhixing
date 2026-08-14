@@ -1226,6 +1226,7 @@
           "cleanup:anchor-host:runtime:losslessDataPlane.close",
           "cleanup:anchor-host:runtime:meshRuntime.stop",
           "cleanup:anchor-host:runtime:programUpdateChecks.stop",
+          "cleanup:anchor-host:runtime:programUpdateNotifications.stop",
           "cleanup:anchor-host:runtime:scheduler.stop",
           "cleanup:anchor-host:runtime:serverLogLifecycle.stop",
           "cleanup:anchor-host:server:server.close",
@@ -1426,6 +1427,7 @@
           "cleanup:anchor-host:runtime:losslessDataPlane.close",
           "cleanup:anchor-host:runtime:meshRuntime.stop",
           "cleanup:anchor-host:runtime:programUpdateChecks.stop",
+          "cleanup:anchor-host:runtime:programUpdateNotifications.stop",
           "cleanup:anchor-host:runtime:scheduler.stop",
           "cleanup:anchor-host:runtime:serverLogLifecycle.stop",
           "cleanup:anchor-host:server:server.close",
@@ -1623,6 +1625,7 @@
           "cleanup:anchor-host:runtime:losslessDataPlane.close",
           "cleanup:anchor-host:runtime:meshRuntime.stop",
           "cleanup:anchor-host:runtime:programUpdateChecks.stop",
+          "cleanup:anchor-host:runtime:programUpdateNotifications.stop",
           "cleanup:anchor-host:runtime:scheduler.stop",
           "cleanup:anchor-host:runtime:serverLogLifecycle.stop",
           "cleanup:anchor-host:server:server.close",
@@ -1796,6 +1799,7 @@
           "cleanup:anchor-host:runtime:losslessDataPlane.close",
           "cleanup:anchor-host:runtime:meshRuntime.stop",
           "cleanup:anchor-host:runtime:programUpdateChecks.stop",
+          "cleanup:anchor-host:runtime:programUpdateNotifications.stop",
           "cleanup:anchor-host:runtime:scheduler.stop",
           "cleanup:anchor-host:runtime:serverLogLifecycle.stop",
           "cleanup:anchor-host:server:server.close",
@@ -2518,6 +2522,17 @@
         "id": "programUpdateChecks.stop",
         "source": "packages/cli/src/serve/command.ts",
         "key": "cleanup:anchor-host:runtime:programUpdateChecks.stop",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "owner": "anchor-host",
+        "role": "runtime",
+        "id": "programUpdateNotifications.stop",
+        "source": "packages/cli/src/serve/command.ts",
+        "key": "cleanup:anchor-host:runtime:programUpdateNotifications.stop",
         "category": "cleanup",
         "target": {
           "rowId": "shutdown"

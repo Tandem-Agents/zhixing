@@ -13,15 +13,10 @@ import {
 import type { ProgramUpdateHealthSnapshot } from "@zhixing/server";
 import type { MeshRuntimeBootstrap } from "../serve/mesh-runtime-bootstrap.js";
 import {
-  getDefaultTokenPath,
-  isProcessAlive,
-  readLock,
-} from "@zhixing/server";
-import {
-  readCurrentAuthorityProgramUpdateStatus,
   RpcProgramUpdateFacade,
+  requestCurrentHostProgramUpdatePrepare,
+  tryReadCurrentAuthorityProgramUpdateStatus,
 } from "../runtime/rpc-program-update-facade.js";
-import { readFile } from "node:fs/promises";
 import {
   projectProgramUpdate,
   StableUpdateController,
@@ -54,21 +49,8 @@ export async function requestLocalUpgradeHandoff(
   candidateManifestDigest: string,
   signal?: AbortSignal,
 ): Promise<{ readonly operationId: string } | undefined> {
-  const lock = await readLock().catch(() => null);
-  if (!lock || !isProcessAlive(lock.pid)) return undefined;
   if (signal?.aborted) throw signal.reason;
-  const token = (await readFile(getDefaultTokenPath(), "utf8")).trim();
-  if (!token) throw new Error("本机宿主认证不可用");
-  const rpc = new RpcProgramUpdateFacade({
-    url: `ws://${lock.host ?? "127.0.0.1"}:${lock.port}/ws`,
-    token,
-    timeoutMs: 30_000,
-  });
-  return rpc.prepare({
-    requestId: protocolDigest("ProgramUpdateHandoffRequest", 1, { candidateManifestDigest }),
-    candidateManifestDigest,
-    timeoutMs: 30_000,
-  }, signal);
+  return requestCurrentHostProgramUpdatePrepare(candidateManifestDigest, signal);
 }
 
 export async function verifyLocalUpgradeHealth(input: {
@@ -280,11 +262,15 @@ export function buildProgramUpdateProjection(
 }
 
 export async function readCurrentAuthorityProgramUpdateProjection(): Promise<ProgramUpdateProjection> {
-  try {
-    return await readCurrentAuthorityProgramUpdateStatus();
-  } catch {
-    return { visible: false };
-  }
+  const result = await tryReadCurrentAuthorityProgramUpdateStatus();
+  if (result.availability === "available") return result.projection;
+  return {
+    visible: true,
+    state: "action-required",
+    message: "当前权威设备暂不可达，请稍后重试更新检查",
+    code: "current-authority-unavailable",
+    action: "retry-update",
+  };
 }
 
 export async function consumeProgramUpdateNotice(

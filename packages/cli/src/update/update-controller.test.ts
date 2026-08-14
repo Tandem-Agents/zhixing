@@ -6,7 +6,7 @@ import type { Signature } from "@zhixing/core/contracts";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import { ProgramStore } from "./program-store.js";
-import { installProgramRelease, loadInstallationReceipt } from "./installation-receipt.js";
+import { commitInstallationReceipt, installProgramRelease, loadInstallationReceipt } from "./installation-receipt.js";
 import { createReleaseVerifier } from "./release-verifier.js";
 import { readProgramUpdateProjection } from "./runtime.js";
 import { projectProgramUpdate, StableUpdateController } from "./update-controller.js";
@@ -41,6 +41,8 @@ describe("stable program update", () => {
       receiptPath,
     });
     await install();
+    await rm(receiptPath, { force: true });
+    await install();
     await install();
     expect((await loadInstallationReceipt(receiptPath))?.releaseSequence).toBe("1");
 
@@ -51,9 +53,21 @@ describe("stable program update", () => {
       manifestBytes: bytes(second.manifest),
       artifactBytes: second.artifactBytes,
       receiptPath,
+      handoffExisting: async (candidateManifestDigest) => {
+        const store = new ProgramStore(root, "linux-x64");
+        const accepted = await store.loadStagedManifest(candidateManifestDigest, verifier);
+        await store.activateStaged(accepted.manifest, accepted.digest, {
+          sourceManifestDigest: byteDigest(bytes(first.manifest)),
+          pointerGeneration: 1,
+        });
+        await commitInstallationReceipt(accepted.manifest, accepted.digest, receiptPath);
+        return { operationId: "upgrade:test" };
+      },
+      terminalTimeoutMs: 1_000,
+      pollIntervalMs: 1,
     });
-    await expect(readFile(path.join(root, "installer", "program-installer.js"), "utf8")).resolves.toBe("installer:second");
-    await expect(readFile(path.join(root, "runtime", "node"), "utf8")).resolves.toBe("node-runtime:second");
+    await expect(readFile(path.join(root, "installer", "program-installer.js"), "utf8")).resolves.toBe("installer:first");
+    await expect(readFile(path.join(root, "runtime", "node"), "utf8")).resolves.toBe("node-runtime:first");
     await rm(root, { recursive: true, force: true });
     await expect(install()).rejects.toThrow("downgrade");
     await expect(stat(root)).rejects.toMatchObject({ code: "ENOENT" });

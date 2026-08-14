@@ -7,6 +7,13 @@ import { canonicalize } from "@zhixing/core/protocol";
 const LOCK_STALE_MS = 5 * 60_000;
 const LOCK_WAIT_MS = 10_000;
 
+export class ProgramUpdateBusyError extends Error {
+  constructor() {
+    super("Program update is already running");
+    this.name = "ProgramUpdateBusyError";
+  }
+}
+
 export async function readJsonIfPresent(filePath: string): Promise<unknown | undefined> {
   try {
     return JSON.parse(await readFile(filePath, "utf8")) as unknown;
@@ -71,7 +78,7 @@ export async function withProgramLock<T>(root: string, task: () => Promise<T>): 
     });
   } catch (error) {
     if (error instanceof Error && error.message === "Program update lock is busy") {
-      throw new Error("Program update is already running");
+      throw new ProgramUpdateBusyError();
     }
     throw error;
   }

@@ -35,7 +35,13 @@ zz update --restore-previous
 
 发布者在五个目标系统上产生自包含 Node 22 程序树并取得平台签名或公证证据，再用 `pnpm release:artifact` 冻结最终 artifact 和待签 manifest。外部签名系统签署每个 canonical manifest，并从这五份已签 manifest 的摘要生成候选 stable index。
 
-每个目标必须使用候选最终字节完成固定 smoke：干净安装、首次运行、同版静默重放、正常无更新静默、自动发现和下载、用户可见进度、安全点安装、自动恢复、诊断引导恢复、离线诊断、移除应用保留数据和永久设备移除强确认。证据写入同一 release evidence 目录后运行：
+每个目标必须在对应真实 OS/arch 上使用候选最终字节完成固定 smoke：干净安装、首次运行、同版静默重放、正常无更新静默、自动发现和下载、用户可见进度、安全点安装、自动恢复、诊断引导恢复、离线诊断、移除应用保留数据和永久设备移除强确认。先在目标机运行固定 producer；它会验证签名候选、在隔离程序根和 home 中用候选自带 runtime 完成真实安装/启动/重放/移除，并从十二个正式场景终态生成 canonical report：
+
+```text
+pnpm release:target-evidence -- --evidence <release-evidence-directory> --target <current-target>
+```
+
+五个目标的报告都写入同一 release evidence 目录后运行：
 
 ```text
 pnpm release:check -- --evidence <release-evidence-directory> --publish-index <candidate-index-path>

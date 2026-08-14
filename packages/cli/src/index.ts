@@ -275,9 +275,9 @@ program
   .action(async () => {
     try {
       const { inspectProgramHealth, printProgramDoctorReport } = await import("./update/doctor.js");
-      const { readCurrentAuthorityProgramUpdateProjection } = await import("./update/runtime.js");
+      const { tryReadCurrentAuthorityProgramUpdateStatus } = await import("./runtime/rpc-program-update-facade.js");
       printProgramDoctorReport(await inspectProgramHealth({
-        currentAuthorityProjection: readCurrentAuthorityProgramUpdateProjection,
+        currentAuthorityStatus: tryReadCurrentAuthorityProgramUpdateStatus,
       }));
       process.exit(0);
     } catch (err) {
