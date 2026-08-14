@@ -1,5 +1,6 @@
 import type { ArtifactStore, DeviceLifecycleJournal } from "@zhixing/core/authority";
 import {
+  compareReleaseSemver,
   protocolDigest,
   validateProgramUpdateReceipt,
   type DeviceLifecycleEvidenceRef,
@@ -14,6 +15,7 @@ import {
   type HostStopAcceptedWorkPorts,
 } from "../serve/host-stop-lifecycle.js";
 import { ProgramStore } from "./program-store.js";
+import { commitInstallationReceipt } from "./installation-receipt.js";
 
 export interface ProgramUpgradeRuntime {
   closeAdmission(operationId: string): Promise<void>;
@@ -27,11 +29,15 @@ export interface ProgramUpgradeCoordinatorOptions {
   readonly verifier: ProtocolSignatureVerifier;
   readonly artifactStore: ArtifactStore;
   readonly acceptedWork: HostStopAcceptedWorkPorts;
+  readonly onAcceptedWorkFrozen?: (
+    snapshot: Awaited<ReturnType<typeof loadHostStopAcceptedWork>>,
+  ) => void | Promise<void>;
   readonly runtime: ProgramUpgradeRuntime;
   readonly homeId: string;
   readonly localDeviceId: string;
   readonly host: StopHostGeneration;
   readonly isHostStopped: (host: StopHostGeneration) => Promise<boolean>;
+  readonly installationReceiptPath?: string;
 }
 
 export type ProgramUpgradeResumeAction =
@@ -97,7 +103,10 @@ export class ProgramUpgradeCoordinator {
       operation.identity.kind === "upgrade" &&
       operation.identity.homeId === this.options.homeId &&
       operation.identity.localDeviceId === this.options.localDeviceId);
-    if (active.length === 0) return { kind: "none" };
+    if (active.length === 0) {
+      await this.#completeTerminalReceiptReplay();
+      return { kind: "none" };
+    }
     if (active.length !== 1) throw new Error("More than one local program upgrade is active");
     let operation = active[0]!;
     if (operation.identity.kind !== "upgrade") throw new Error("Program upgrade identity changed");
@@ -119,12 +128,11 @@ export class ProgramUpgradeCoordinator {
       }]);
     }
     if (operation.phase === "old-host-stopped") {
-      const pointer = await this.options.store.loadPointer();
-      if (!pointer || pointer.generation !== identity.pointerGeneration || pointer.current.manifestDigest !== identity.fromManifestDigest) {
-        throw new Error("Program pointer changed before upgrade activation");
-      }
       const staged = await this.options.store.loadStagedManifest(identity.targetManifestDigest, this.options.verifier);
-      await this.options.store.activateStaged(staged.manifest, staged.digest);
+      await this.options.store.activateStaged(staged.manifest, staged.digest, {
+        sourceManifestDigest: identity.fromManifestDigest,
+        pointerGeneration: identity.pointerGeneration,
+      });
       operation = await this.options.journal.advance(operation.identity.operationId, "pointer-switched", [{
         kind: "release",
         digest: identity.targetManifestDigest,
@@ -139,8 +147,13 @@ export class ProgramUpgradeCoordinator {
       };
     }
     if (operation.phase === "health-verified") {
-      await this.options.journal.terminal(operation.identity.operationId, "upgraded", operation.evidence.filter((item) => item.kind === "health"));
-      await this.#writeUpdatedReceipt(operation);
+      const outcome = terminalOutcome(operation);
+      await this.options.journal.terminal(
+        operation.identity.operationId,
+        outcome,
+        operation.evidence.filter((item) => item.kind === "health"),
+      );
+      await this.#writeTerminalReceipt(operation, outcome);
       return { kind: "none" };
     }
     return { kind: "none" };
@@ -166,8 +179,13 @@ export class ProgramUpgradeCoordinator {
         healthDigest,
       }),
     }]);
-    await this.options.journal.terminal(operationId, "upgraded", healthy.evidence.filter((item) => item.kind === "health"));
-    await this.#writeUpdatedReceipt(healthy);
+    const outcome = terminalOutcome(healthy);
+    await this.options.journal.terminal(
+      operationId,
+      outcome,
+      healthy.evidence.filter((item) => item.kind === "health"),
+    );
+    await this.#writeTerminalReceipt(healthy, outcome);
     await this.options.store.cleanup();
   }
 
@@ -176,7 +194,10 @@ export class ProgramUpgradeCoordinator {
     if (!operation || operation.identity.kind !== "upgrade" || operation.phase !== "pointer-switched") {
       throw new Error("Program upgrade is not eligible for compatibility recovery");
     }
-    const pointer = await this.options.store.restorePrevious();
+    const pointer = await this.options.store.restorePrevious({
+      failedManifestDigest: operation.identity.targetManifestDigest,
+      sourceManifestDigest: operation.identity.fromManifestDigest,
+    });
     if (pointer.current.manifestDigest !== operation.identity.fromManifestDigest) {
       throw new Error("Previous verified release does not match the upgrade source");
     }
@@ -211,6 +232,7 @@ export class ProgramUpgradeCoordinator {
     }
     if (operation.phase === "gate-closed") {
       const snapshot = await loadHostStopAcceptedWork(operation, this.options.artifactStore);
+      await this.options.onAcceptedWorkFrozen?.(snapshot);
       await settleHostStopAcceptedWork({
         operationId: operation.identity.operationId,
         strategy: "drain",
@@ -231,18 +253,80 @@ export class ProgramUpgradeCoordinator {
     return operation;
   }
 
-  async #writeUpdatedReceipt(operation: DeviceLifecycleOperation): Promise<void> {
+  async #writeTerminalReceipt(
+    operation: DeviceLifecycleOperation,
+    outcome: "upgraded" | "rolled-back",
+  ): Promise<void> {
     if (operation.identity.kind !== "upgrade") throw new Error("Program upgrade identity changed");
+    const current = await this.options.store.loadCurrentManifest(this.options.verifier);
+    if (!current || current.digest !== operation.identity.targetManifestDigest) {
+      throw new Error("Verified current program does not match the terminal upgrade");
+    }
+    if (outcome === "upgraded") {
+      await commitInstallationReceipt(
+        current.manifest,
+        current.digest,
+        this.options.installationReceiptPath,
+      );
+    }
     await this.options.store.writeReceipt(validateProgramUpdateReceipt({
       v: 1,
       currentManifestDigest: operation.identity.targetManifestDigest,
       target: this.options.store.target,
       phase: "idle",
-      notice: "updated",
+      notice: outcome === "upgraded" ? "updated" : "restored",
     }));
+  }
+
+  async #completeTerminalReceiptReplay(): Promise<void> {
+    const receipt = await this.options.store.loadReceipt();
+    if (receipt?.phase !== "handed-off" || !receipt.operationId) return;
+    const operation = await this.options.journal.state(receipt.operationId);
+    if (!operation || operation.identity.kind !== "upgrade" || operation.phase !== "terminal") return;
+    const pointer = await this.options.store.loadPointer();
+    if (!pointer) throw new Error("Program pointer is missing after terminal upgrade");
+    if (operation.terminalOutcome === "upgraded") {
+      if (pointer.current.manifestDigest !== operation.identity.targetManifestDigest) {
+        throw new Error("Terminal upgrade pointer does not match its target");
+      }
+      await this.#writeTerminalReceipt(operation, "upgraded");
+      await this.options.store.cleanup();
+      return;
+    }
+    if (operation.terminalOutcome === "rolled-back") {
+      const explicitRecovery = terminalOutcome(operation) === "rolled-back";
+      const expectedDigest = explicitRecovery
+        ? operation.identity.targetManifestDigest
+        : operation.identity.fromManifestDigest;
+      if (pointer.current.manifestDigest !== expectedDigest) {
+        throw new Error("Terminal recovery pointer does not match its verified release");
+      }
+      await this.options.store.writeReceipt(validateProgramUpdateReceipt({
+        v: 1,
+        currentManifestDigest: pointer.current.manifestDigest,
+        target: pointer.target,
+        phase: "idle",
+        notice: "restored",
+      }));
+      await this.options.store.cleanup();
+    }
   }
 }
 
 function sameHost(left: StopHostGeneration, right: StopHostGeneration): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function terminalOutcome(
+  operation: DeviceLifecycleOperation,
+): "upgraded" | "rolled-back" {
+  if (operation.identity.kind !== "upgrade") {
+    throw new Error("Program upgrade identity changed");
+  }
+  return compareReleaseSemver(
+    operation.identity.targetReleaseVersion,
+    operation.identity.fromReleaseVersion,
+  ) < 0
+    ? "rolled-back"
+    : "upgraded";
 }

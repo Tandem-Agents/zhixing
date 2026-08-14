@@ -1,7 +1,7 @@
-import { homedir, userInfo } from "node:os";
+import { userInfo } from "node:os";
 import path from "node:path";
 import { canonicalize } from "@zhixing/core/protocol";
-import { getZhixingHome } from "@zhixing/core";
+import { expandUserHome, getZhixingHome } from "@zhixing/core";
 import { loadConfig } from "@zhixing/providers";
 import {
   createPlatformSecretStore,
@@ -14,6 +14,7 @@ import { loadExistingDeviceKey } from "./mesh-device-key.js";
 import {
   buildManagedServiceSpec,
   createManagedServiceAdapter,
+  managedServiceDefinitionDigest,
 } from "./managed-service.js";
 import {
   reconcileManagedService,
@@ -103,7 +104,7 @@ function createCurrentManagedServiceStateProjector(homeDir: string) {
     execPath: process.execPath,
     entryScript,
     osUser: account.username,
-    userHome: homedir(),
+    userHome: expandUserHome("~"),
     ...(typeof account.uid === "number" ? { uid: account.uid } : {}),
   });
   return (snapshot: {
@@ -158,6 +159,46 @@ export async function prepareCurrentManagedServiceConfigTurnover(
   );
   await createManagedServiceAdapter({ storageGovernor: capacity.storage })
     .disableFuture(current.spec, signal);
+}
+
+export async function prepareProgramRemovalManagedService(
+  signal: AbortSignal = new AbortController().signal,
+  homeDir = getZhixingHome(),
+): Promise<() => Promise<void>> {
+  if (await readPlatformSecretStoreBackendBinding(homeDir) === undefined) {
+    return async () => undefined;
+  }
+  const current = await loadCurrentManagedServiceState("inspect", homeDir);
+  if (!current.spec) return async () => undefined;
+  const capacity = createDeviceCapacityRuntime(
+    path.join(homeDir, "distributed-runtime", "capacity"),
+  );
+  const adapter = createManagedServiceAdapter({ storageGovernor: capacity.storage });
+  const spec = current.spec;
+  const definitionDigest = managedServiceDefinitionDigest(spec);
+  const disabled = await adapter.disableFuture(spec, signal);
+  if (disabled.state === "enabled") {
+    throw new Error("托管服务的未来启动尚未停用");
+  }
+  return async () => {
+    const latest = await loadCurrentManagedServiceState("inspect", homeDir);
+    if (
+      !latest.spec ||
+      latest.spec.serviceId !== spec.serviceId ||
+      managedServiceDefinitionDigest(latest.spec) !== definitionDigest
+    ) {
+      throw new Error("托管服务定义在应用移除前已换代");
+    }
+    const inspection = await adapter.inspect(spec, signal);
+    if (inspection.state === "absent") return;
+    if (!inspection.matches || inspection.running) {
+      throw new Error("托管服务尚未安全停止，未注销未来启动");
+    }
+    const removed = await adapter.unregisterFutureExact(spec, inspection, signal);
+    if (removed.state !== "absent" || removed.running) {
+      throw new Error("托管服务注销未通过回读验证");
+    }
+  };
 }
 
 export async function coordinateManagedHostTrustTransition(

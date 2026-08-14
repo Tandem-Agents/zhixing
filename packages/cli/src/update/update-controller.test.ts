@@ -1,10 +1,14 @@
 import { generateKeyPairSync, sign } from "node:crypto";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { DURABLE_SCHEMA_INVENTORY, canonicalize, byteDigest, createSignedReleaseManifest, createSignedStableReleaseIndex, protocolBytes, type ProgramArtifact, type ProtocolSigner, type ReleaseManifest, type StableReleaseTarget } from "@zhixing/core/protocol";
 import type { Signature } from "@zhixing/core/contracts";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import { ProgramStore } from "./program-store.js";
+import { installProgramRelease, loadInstallationReceipt } from "./installation-receipt.js";
 import { createReleaseVerifier } from "./release-verifier.js";
+import { readProgramUpdateProjection } from "./runtime.js";
 import { projectProgramUpdate, StableUpdateController } from "./update-controller.js";
 
 const keyPair = generateKeyPairSync("ed25519");
@@ -24,7 +28,96 @@ const verifier = createReleaseVerifier({
 });
 
 describe("stable program update", () => {
-  it("stages one signed candidate, projects it visibly and restores the verified previous version", async () => {
+  it("installs, exactly replays and preserves a program-root-external anti-downgrade receipt", async () => {
+    const directory = await createTempDir("program-install");
+    const root = path.join(directory, "program with 空格");
+    const receiptPath = path.join(directory, "installer-state", "installation-receipt.json");
+    const first = release("linux-x64", "1.0.0", "1", "first");
+    const install = () => installProgramRelease({
+      store: new ProgramStore(root, "linux-x64"),
+      verifier,
+      manifestBytes: bytes(first.manifest),
+      artifactBytes: first.artifactBytes,
+      receiptPath,
+    });
+    await install();
+    await install();
+    expect((await loadInstallationReceipt(receiptPath))?.releaseSequence).toBe("1");
+
+    const second = release("linux-x64", "1.1.0", "2", "second");
+    await installProgramRelease({
+      store: new ProgramStore(root, "linux-x64"),
+      verifier,
+      manifestBytes: bytes(second.manifest),
+      artifactBytes: second.artifactBytes,
+      receiptPath,
+    });
+    await expect(readFile(path.join(root, "installer", "program-installer.js"), "utf8")).resolves.toBe("installer:second");
+    await expect(readFile(path.join(root, "runtime", "node"), "utf8")).resolves.toBe("node-runtime:second");
+    await rm(root, { recursive: true, force: true });
+    await expect(install()).rejects.toThrow("downgrade");
+    await expect(stat(root)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await loadInstallationReceipt(receiptPath))?.releaseSequence).toBe("2");
+  });
+
+  it("rejects different bytes under an installed release identity before program writes", async () => {
+    const directory = await createTempDir("program-install-conflict");
+    const root = path.join(directory, "program");
+    const receiptPath = path.join(directory, "receipt.json");
+    const accepted = release("linux-x64", "1.0.0", "1", "accepted");
+    await installProgramRelease({
+      store: new ProgramStore(root, "linux-x64"),
+      verifier,
+      manifestBytes: bytes(accepted.manifest),
+      artifactBytes: accepted.artifactBytes,
+      receiptPath,
+    });
+    await rm(root, { recursive: true, force: true });
+    const conflict = release("linux-x64", "1.0.0", "1", "conflict");
+    await expect(installProgramRelease({
+      store: new ProgramStore(root, "linux-x64"),
+      verifier,
+      manifestBytes: bytes(conflict.manifest),
+      artifactBytes: conflict.artifactBytes,
+      receiptPath,
+    })).rejects.toThrow("conflicting bytes");
+    await expect(stat(root)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects insufficient program-volume capacity before staging a candidate", async () => {
+    const root = await createTempDir("program-update-capacity");
+    let available = 2n * 1024n * 1024n * 1024n;
+    const store = new ProgramStore(root, "linux-x64", {
+      availableBytes: async () => available,
+    });
+    const current = release("linux-x64", "1.0.0", "1", "current");
+    const currentManifestBytes = bytes(current.manifest);
+    await store.stage(current.manifest, currentManifestBytes, current.artifactBytes);
+    await store.activateStaged(current.manifest, byteDigest(currentManifestBytes));
+    available = 0n;
+
+    await expect(store.ensureDownloadCapacity(1)).rejects.toThrow("enough capacity");
+    expect((await store.loadPointer())?.current.releaseVersion).toBe("1.0.0");
+  });
+
+  it("rejects undeclared files and directories in an installed program version", async () => {
+    const root = await createTempDir("program-update-exact-layout");
+    const store = new ProgramStore(root, "linux-x64");
+    const current = release("linux-x64", "1.0.0", "1", "current");
+    const manifestBytes = bytes(current.manifest);
+    await store.stage(current.manifest, manifestBytes, current.artifactBytes);
+    const pointer = await store.activateStaged(current.manifest, byteDigest(manifestBytes));
+    const program = store.programPath(pointer.current);
+
+    await mkdir(path.join(program, "undeclared-empty"));
+    await expect(store.verifyInstalled(pointer.current, verifier)).rejects.toThrow("layout read-back failed");
+    await rm(path.join(program, "undeclared-empty"), { recursive: true, force: true });
+    await writeFile(path.join(program, "app", "dist", "undeclared.js"), "payload");
+    await expect(store.verifyInstalled(pointer.current, verifier)).rejects.toThrow("layout read-back failed");
+    expect((await store.loadPointer())?.current.manifestDigest).toBe(byteDigest(manifestBytes));
+  });
+
+  it("stages a verified previous version without bypassing the lifecycle pointer switch", async () => {
     const root = await createTempDir("program-update");
     const target = "linux-x64" as const;
     const store = new ProgramStore(root, target);
@@ -68,8 +161,100 @@ describe("stable program update", () => {
     expect(pointer.current.releaseVersion).toBe("1.1.0");
     expect(pointer.previous?.releaseVersion).toBe("1.0.0");
     const restored = await controller.restorePrevious();
-    expect(projectProgramUpdate(restored)).toMatchObject({ state: "restored" });
-    expect((await store.loadPointer())?.current.releaseVersion).toBe("1.0.0");
+    expect(projectProgramUpdate(restored)).toMatchObject({ state: "awaiting-safe-point" });
+    expect(restored).toMatchObject({
+      phase: "staged",
+      candidateManifestDigest: byteDigest(currentManifestBytes),
+    });
+    expect((await store.loadPointer())?.current.releaseVersion).toBe("1.1.0");
+  });
+
+  it("keeps an action-required notice sticky until its exact candidate changes", async () => {
+    const root = await createTempDir("program-update-sticky-action");
+    const target = "linux-x64" as const;
+    const store = new ProgramStore(root, target);
+    const current = release(target, "1.0.0", "1", "current");
+    const currentBytes = bytes(current.manifest);
+    await store.stage(current.manifest, currentBytes, current.artifactBytes);
+    await store.activateStaged(current.manifest, byteDigest(currentBytes));
+    const candidateDigest = `sha256:${"a".repeat(64)}`;
+    await store.writeReceipt({
+      v: 1,
+      currentManifestDigest: byteDigest(currentBytes),
+      target,
+      candidateManifestDigest: candidateDigest,
+      phase: "idle",
+      notice: "action-required",
+      code: "schema-incompatible",
+      action: "contact-support",
+    });
+    const controller = new StableUpdateController({
+      store,
+      verifier,
+      indexUrl: "https://release.example/stable.json",
+      fetchDocument: async () => { throw new Error("offline"); },
+    });
+    await expect(controller.checkFailSafe()).resolves.toMatchObject({
+      notice: "action-required",
+      candidateManifestDigest: candidateDigest,
+      action: "contact-support",
+    });
+  });
+
+  it("consumes an updated notice only through its exact durable token", async () => {
+    const root = await createTempDir("program-update-notice");
+    const store = new ProgramStore(root, "linux-x64");
+    const updated = {
+      v: 1 as const,
+      currentManifestDigest: `sha256:${"b".repeat(64)}`,
+      target: "linux-x64" as const,
+      phase: "idle" as const,
+      notice: "updated" as const,
+    };
+    await store.writeReceipt(updated);
+    const projection = projectProgramUpdate(updated);
+    expect(projection.noticeToken).toMatch(/^sha256:[a-f0-9]{64}$/u);
+    await expect(store.consumeNotice(`sha256:${"c".repeat(64)}`)).resolves.toBe(false);
+    await expect(store.consumeNotice(projection.noticeToken!)).resolves.toBe(true);
+    await expect(store.consumeNotice(projection.noticeToken!)).resolves.toBe(false);
+    await expect(store.loadReceipt()).resolves.toMatchObject({ notice: "none" });
+  });
+
+  it("reads public update status from the verified current program facts", async () => {
+    const root = await createTempDir("program-update-public-facts");
+    const store = new ProgramStore(root, "linux-x64");
+    const current = release("linux-x64", "1.0.0", "1", "current");
+    const manifestBytes = bytes(current.manifest);
+    const digest = byteDigest(manifestBytes);
+    await store.stage(current.manifest, manifestBytes, current.artifactBytes);
+    await store.activateStaged(current.manifest, digest);
+    await store.writeReceipt({
+      v: 1,
+      currentManifestDigest: digest,
+      target: "linux-x64",
+      phase: "idle",
+      notice: "updated",
+    });
+    const deps = {
+      verifier,
+      lifecycle: { state: async () => undefined },
+      health: async () => ({ releaseManifestDigest: digest }) as never,
+    };
+    await expect(readProgramUpdateProjection(store, deps)).resolves.toMatchObject({
+      state: "updated",
+      message: "已更新",
+    });
+    await store.writeReceipt({
+      v: 1,
+      currentManifestDigest: `sha256:${"9".repeat(64)}`,
+      target: "linux-x64",
+      phase: "idle",
+      notice: "updated",
+    });
+    await expect(readProgramUpdateProjection(store, deps)).resolves.toMatchObject({
+      state: "action-required",
+      code: "update-state-inconsistent",
+    });
   });
 
   it("keeps the current version and emits one stable action when candidate bytes are invalid", async () => {
@@ -148,12 +333,25 @@ describe("stable program update", () => {
 });
 
 function release(target: StableReleaseTarget, version: string, sequence: string, content: string) {
-  const file = Buffer.from(content, "utf8");
+  const runtimeName = target === "win32-x64" ? "runtime/node.exe" : "runtime/node";
+  const launcherName = target === "win32-x64" ? "bin/zz.cmd" : "bin/zz";
+  const aliasName = target === "win32-x64" ? "bin/zhixing.cmd" : "bin/zhixing";
+  const programFiles = [
+    artifactFile(launcherName, `launcher:${content}`, 0o755),
+    artifactFile(aliasName, `launcher:${content}`, 0o755),
+    artifactFile(runtimeName, `node-runtime:${content}`, 0o755),
+    artifactFile("installer/launch.js", `launch:${content}`, 0o644),
+    artifactFile("installer/program-installer.js", `installer:${content}`, 0o644),
+    artifactFile("app/package.json", "{}", 0o644),
+    artifactFile("app/dist/index.js", content, 0o755),
+    artifactFile("app/dist/program-installer.js", content, 0o755),
+    artifactFile("program-tree-receipt.json", "{}", 0o644),
+  ].sort((left, right) => left.path.localeCompare(right.path, "en-US"));
   const artifact: ProgramArtifact = {
     v: 1,
     target,
     releaseVersion: version,
-    files: [{ path: "bin/zz", mode: 0o755, digest: byteDigest(file), bytes: file.byteLength, data: file.toString("base64url") }],
+    files: programFiles,
   };
   const artifactBytes = Buffer.from(canonicalize(artifact), "utf8");
   const manifest = createSignedReleaseManifest({
@@ -172,6 +370,11 @@ function release(target: StableReleaseTarget, version: string, sequence: string,
     keyId,
   }, signer);
   return { manifest, artifactBytes };
+}
+
+function artifactFile(filePath: string, content: string, mode: number) {
+  const file = Buffer.from(content, "utf8");
+  return { path: filePath, mode, digest: byteDigest(file), bytes: file.byteLength, data: file.toString("base64url") };
 }
 
 function bytes(value: unknown): Buffer {

@@ -12,8 +12,11 @@ import {
   protocolBytes,
 } from "../packages/core/dist/protocol/index.js";
 import {
+  RELEASE_ACCEPTANCE_IDS,
   RELEASE_SMOKE_SCENARIOS,
   assertExactBooleanMatrix,
+  assertExactStringSet,
+  assertProgramTreeContract,
   assertReleaseNodeVersion,
   fingerprintPackageGraph,
   fingerprintSourceTree,
@@ -43,9 +46,7 @@ const verifier = {
   },
 };
 
-if (!process.argv.includes("--skip-workspace-gates")) {
-  for (const args of [["lint"], ["test"], ["build"]]) runPnpm(args);
-}
+for (const args of [["lint"], ["test"], ["build"]]) runPnpm(args);
 
 const sourceTreeDigest = await fingerprintSourceTree(root);
 const packageGraphDigest = await fingerprintPackageGraph(root);
@@ -69,6 +70,7 @@ for (const target of STABLE_RELEASE_TARGETS) {
   }
   const artifact = decodeProgramArtifact(artifactBytes);
   if (artifact.target !== target || artifact.releaseVersion !== index.releaseVersion) throw new Error(`${target} artifact identity is inconsistent`);
+  assertProgramTreeContract(artifact.files, target);
   const platformBytes = await readFile(resolve(targetRoot, "platform-evidence.json"));
   const platform = exact(JSON.parse(platformBytes), ["artifactDigest", "passed", "target", "v"]);
   if (platform.v !== 1 || platform.passed !== true || platform.target !== target || platform.artifactDigest !== manifest.artifact.digest) {
@@ -103,9 +105,7 @@ const report = {
   indexDigest: byteDigest(indexBytes),
   acceptanceLedgerDigest: byteDigest(acceptanceLedger.bytes),
   maintenanceGuideDigest: byteDigest(maintenanceGuide),
-  commands: process.argv.includes("--skip-workspace-gates")
-    ? ["release:check --skip-workspace-gates"]
-    : ["pnpm lint", "pnpm test", "pnpm build", "release:check"],
+  commands: ["pnpm lint", "pnpm test", "pnpm build", "release:check"],
   targets: reports,
   result: "passed",
 };
@@ -152,11 +152,6 @@ async function validateAcceptanceLedger(path, releaseVersion) {
       await access(resolve(root, testPath));
     }
   }
-  for (let invariant = 1; invariant <= 18; invariant += 1) {
-    if (!ids.has(`invariant-${String(invariant).padStart(2, "0")}`)) throw new Error(`final acceptance ledger is missing invariant ${invariant}`);
-  }
-  for (const prefix of ["fault-", "security-", "topology-", "journey-"]) {
-    if (![...ids].some((id) => id.startsWith(prefix))) throw new Error(`final acceptance ledger is missing ${prefix} rows`);
-  }
+  assertExactStringSet([...ids], RELEASE_ACCEPTANCE_IDS, "final acceptance ledger ids");
   return { ledger, bytes };
 }

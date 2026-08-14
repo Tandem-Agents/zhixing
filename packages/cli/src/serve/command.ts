@@ -42,7 +42,6 @@ import {
 } from "@zhixing/core";
 import { DeviceLifecycleJournal } from "@zhixing/core/authority";
 import {
-  DURABLE_SCHEMA_INVENTORY,
   protocolDigest,
   type StopHostGeneration,
 } from "@zhixing/core/protocol";
@@ -195,7 +194,14 @@ import { ProgramStore } from "../update/program-store.js";
 import { createReleaseVerifier } from "../update/release-verifier.js";
 import { EMBEDDED_RELEASE_TRUST } from "../update/release-channel.js";
 import { ProgramUpgradeCoordinator } from "../update/upgrade-lifecycle.js";
-import { verifyLocalUpgradeHealth } from "../update/runtime.js";
+import {
+  buildProgramUpdateHealthSnapshot,
+  buildProgramUpdateTrustProjection,
+  consumeProgramUpdateNotice,
+  readProgramUpdateProjection,
+  startAutomaticUpdateCheck,
+  startManagedUpdateChecks,
+} from "../update/runtime.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
@@ -1671,6 +1677,24 @@ async function runServerProcess(
         verifier: releaseVerifier,
         artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
         acceptedWork,
+        onAcceptedWorkFrozen: async (snapshot) => {
+          const sources = hostStopDeliveryLifecycleSources(snapshot);
+          ctx.localConversationOwner?.restoreHostStopAcceptedWork(
+            snapshot.operationId,
+            Object.entries(snapshot.owners).flatMap(([owner, items]) =>
+              items.map((item) => ({
+                owner: owner as keyof HostStopAcceptedWorkSnapshot["owners"],
+                ...item,
+              })),
+            ),
+          );
+          await ctx.deliveryStack?.installLifecycleAdmission({
+            operationId: snapshot.operationId,
+            sources,
+            deliveries: snapshot.owners.delivery,
+          });
+          await recoverStartupLifecycleAcceptedWork(sources);
+        },
         homeId: lifecycleHomeId,
         localDeviceId: bootstrap.mesh.deviceKey.deviceId,
         host: stopHost,
@@ -1994,6 +2018,21 @@ async function runServerProcess(
   if (localRetirementCompletedBeforeServerStart) {
     throw new Error("This device has completed local retirement and cannot start normally");
   }
+  const programUpdateHealth = async () => {
+    if (!programStore || !releaseVerifier) {
+      throw new Error("Current program health identity is unavailable");
+    }
+    const installed = await programStore.loadCurrentManifest(releaseVerifier);
+    if (!installed) throw new Error("Current program health identity is unavailable");
+    return buildProgramUpdateHealthSnapshot({
+      manifest: installed.manifest,
+      manifestDigest: installed.digest,
+      homeId: lifecycleHomeId,
+      endpoint: { host: serverBinding.host, port: serverBinding.port },
+      rolePlan: { host: plan.host, loadExecutor: plan.loadExecutor },
+      trust: buildProgramUpdateTrustProjection(bootstrap.mesh),
+    });
+  };
   let serverCtx: ServerContext;
   serverCtx = createServerContext({
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
@@ -2256,21 +2295,14 @@ async function runServerProcess(
     ...(programUpgrade ? { lifecycleUpgrade: programUpgrade } : {}),
     ...(programUpgrade && programStore && releaseVerifier
       ? {
-          programUpdateHealth: async () => {
-            const installed = await programStore.loadCurrentManifest(releaseVerifier);
-            const endpoint = serverCtx.listenAddr;
-            if (!installed || !endpoint) {
-              throw new Error("Current program health identity is unavailable");
-            }
-            return {
-              releaseManifestDigest: installed.digest,
-              protocolRange: { ...installed.manifest.protocolRange },
-              durableSchemas: DURABLE_SCHEMA_INVENTORY.map((row) => ({ ...row })),
-              homeId: lifecycleHomeId,
-              endpoint: { ...endpoint },
-              rolePlan: { host: plan.host, loadExecutor: plan.loadExecutor },
-            };
-          },
+          programUpdateHealth,
+          programUpdateStatus: () => readProgramUpdateProjection(programStore, {
+            verifier: releaseVerifier,
+            lifecycle: lifecycleJournal,
+            health: programUpdateHealth,
+          }),
+          programUpdateConsumeNotice: (noticeToken: string) =>
+            consumeProgramUpdateNotice(noticeToken, programStore),
         }
       : {}),
   });
@@ -2315,6 +2347,33 @@ async function runServerProcess(
   registerTailCleanup(registry, { stateFile, heartbeatTimerRef, lockPaths });
 
   // runServer —— 内部会向 registry 注册 server.close（注入模式）
+  if (programUpgradeResume?.kind === "verify-target") {
+    const current = await programStore!.loadPointer();
+    const installed = await programStore!.loadCurrentManifest(releaseVerifier!);
+    if (
+      !current || current.current.manifestDigest !== programUpgradeResume.targetManifestDigest ||
+      !installed || installed.digest !== programUpgradeResume.targetManifestDigest
+    ) {
+      await programUpgrade!.restoreCompatiblePrevious(programUpgradeResume.operationId);
+      throw new Error("Updated program health identity is unavailable");
+    }
+    const health = buildProgramUpdateHealthSnapshot({
+      manifest: installed.manifest,
+      manifestDigest: installed.digest,
+      homeId: lifecycleHomeId,
+      endpoint: { host: serverBinding.host, port: serverBinding.port },
+      rolePlan: { host: plan.host, loadExecutor: plan.loadExecutor },
+      trust: buildProgramUpdateTrustProjection(bootstrap.mesh),
+    });
+    await programUpgrade!.completeHealthy(
+      programUpgradeResume.operationId,
+      programUpgradeResume.targetManifestDigest,
+      protocolDigest("ProgramUpdateHealthSnapshot", 1, health),
+    ).catch(async (error: unknown) => {
+      await programUpgrade!.restoreCompatiblePrevious(programUpgradeResume.operationId);
+      throw error;
+    });
+  }
   if (!await verifyManagedHostAdmission(
     initialManagedHostAdmission,
     processMode,
@@ -2347,38 +2406,18 @@ async function runServerProcess(
     },
   });
 
-  if (programUpgradeResume?.kind === "verify-target") {
-    const current = await programStore!.loadPointer();
-    if (!current || current.current.manifestDigest !== programUpgradeResume.targetManifestDigest) {
-      await programUpgrade!.restoreCompatiblePrevious(programUpgradeResume.operationId);
-      throw new Error("Updated program identity did not match the durable upgrade target");
-    }
-    const installed = await programStore!.loadCurrentManifest(releaseVerifier!);
-    const endpoint = serverCtx.listenAddr;
-    if (!installed || !endpoint) {
-      await programUpgrade!.restoreCompatiblePrevious(programUpgradeResume.operationId);
-      throw new Error("Updated program health identity is unavailable");
-    }
-    const healthDigest = await verifyLocalUpgradeHealth({
-      endpoint,
-      token: tokenInfo.token,
-      expected: {
-        releaseManifestDigest: installed.digest,
-        protocolRange: { ...installed.manifest.protocolRange },
-        durableSchemas: DURABLE_SCHEMA_INVENTORY.map((row) => ({ ...row })),
-        homeId: lifecycleHomeId,
-        endpoint: { ...endpoint },
-        rolePlan: { host: plan.host, loadExecutor: plan.loadExecutor },
-      },
-    }).catch(async (error: unknown) => {
-      await programUpgrade!.restoreCompatiblePrevious(programUpgradeResume.operationId);
-      throw error;
-    });
-    await programUpgrade!.completeHealthy(
-      programUpgradeResume.operationId,
-      programUpgradeResume.targetManifestDigest,
-      healthDigest,
+  if (programStore) {
+    const stopProgramUpdateChecks = processMode === "managed"
+      ? startManagedUpdateChecks({ store: programStore })
+      : (startAutomaticUpdateCheck({ store: programStore }), () => undefined);
+    registerCleanup(
+      registry,
+      { owner: "anchor-host", role: "runtime", id: "programUpdateChecks.stop" },
+      async () => stopProgramUpdateChecks(),
     );
+  }
+
+  if (programUpgradeResume?.kind === "verify-target") {
     await ctx.localConversationOwner?.releaseHostStopAdmission(programUpgradeResume.operationId);
     await ctx.deliveryStack?.releaseLifecycleAdmission(programUpgradeResume.operationId);
     await ctx.deliveryStack?.resumeAfterAuthorityTransfer();

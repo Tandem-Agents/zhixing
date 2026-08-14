@@ -5,6 +5,8 @@ import {
   buildServerShutdownMethod,
   buildServerInfoMethod,
   buildServerUpdateHealthMethod,
+  buildServerUpdateStatusMethod,
+  buildServerUpdateConsumeNoticeMethod,
   buildDeliveryResolveMethod,
   buildDutyMigrationCancelMethod,
   buildDutyMigrationCommitMethod,
@@ -85,6 +87,7 @@ describe("server.update.health", () => {
     homeId: "home-1",
     endpoint: { host: "127.0.0.1", port: 18900 },
     rolePlan: { host: "anchor-host", loadExecutor: true },
+    trust: { generation: 1, digest: `sha256:${"b".repeat(64)}` },
   };
 
   it("returns the exact local runtime projection and rejects non-loopback before projection", async () => {
@@ -105,6 +108,32 @@ describe("server.update.health", () => {
     await expect(buildServerUpdateHealthMethod().handler({ extra: true }, mkCtx({ programUpdateHealth: project })))
       .rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
     expect(project).not.toHaveBeenCalled();
+  });
+});
+
+describe("server.update current-authority projection", () => {
+  it("serves the same authenticated projection to loopback and relayed surfaces", async () => {
+    const projection = { visible: true, state: "action-required" as const, message: "需要处理" };
+    const project = vi.fn(async () => projection);
+    const local = mkCtx({ programUpdateStatus: project });
+    const remote = mkCtx({ programUpdateStatus: project });
+    remote.connection.loopback = false;
+    await expect(buildServerUpdateStatusMethod().handler(undefined, local)).resolves.toEqual(projection);
+    await expect(buildServerUpdateStatusMethod().handler(undefined, remote)).resolves.toEqual(projection);
+    expect(project).toHaveBeenCalledTimes(2);
+  });
+
+  it("validates an exact notice token before compare-and-consume", async () => {
+    const consume = vi.fn(async () => ({ consumed: true }));
+    const entry = buildServerUpdateConsumeNoticeMethod();
+    const token = `sha256:${"c".repeat(64)}`;
+    await expect(entry.handler({ noticeToken: token }, mkCtx({
+      programUpdateConsumeNotice: consume,
+    }))).resolves.toEqual({ consumed: true });
+    await expect(entry.handler({ noticeToken: token, extra: true }, mkCtx({
+      programUpdateConsumeNotice: consume,
+    }))).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    expect(consume).toHaveBeenCalledOnce();
   });
 });
 

@@ -14,6 +14,15 @@ export const STABLE_RELEASE_TARGETS = [
 
 export type StableReleaseTarget = (typeof STABLE_RELEASE_TARGETS)[number];
 
+export const PROGRAM_ARTIFACT_LIMITS = Object.freeze({
+  v: 1 as const,
+  maxArchiveBytes: 512 * 1024 * 1024,
+  maxExpandedBytes: 768 * 1024 * 1024,
+  maxFileBytes: 192 * 1024 * 1024,
+  maxInstallationSurfaceBytes: 224 * 1024 * 1024,
+  storageHeadroomBytes: 64 * 1024 * 1024,
+});
+
 export interface ReleaseArtifactRef {
   readonly digest: string;
   readonly bytes: number;
@@ -240,7 +249,11 @@ export function validateProgramUpdateReceipt(input: unknown): ProgramUpdateRecei
   const phase = enumValue(value.phase, ["idle", "checking", "downloading", "staged", "handed-off"] as const, "Program update phase");
   const notice = enumValue(value.notice, ["none", "updated", "failed-safe", "restored", "action-required"] as const, "Program update notice");
   const requiresCandidate = phase === "downloading" || phase === "staged" || phase === "handed-off";
-  if (requiresCandidate !== (value.candidateManifestDigest !== undefined)) {
+  const hasCandidate = value.candidateManifestDigest !== undefined;
+  if (
+    (requiresCandidate && !hasCandidate) ||
+    (!requiresCandidate && hasCandidate && notice !== "action-required")
+  ) {
     throw new TypeError("Program update candidate digest does not match phase");
   }
   if (value.candidateManifestDigest !== undefined) digest(value.candidateManifestDigest, "Candidate manifest digest");
@@ -263,6 +276,7 @@ export function validateProgramUpdateReceipt(input: unknown): ProgramUpdateRecei
 }
 
 export function decodeProgramArtifact(bytes: Uint8Array): ProgramArtifact {
+  assertProgramArtifactArchiveBytes(bytes.byteLength);
   const text = Buffer.from(bytes).toString("utf8");
   if (!Buffer.from(text, "utf8").equals(Buffer.from(bytes))) {
     throw new TypeError("Program artifact must be canonical UTF-8");
@@ -288,6 +302,7 @@ export function validateProgramArtifact(input: unknown): ProgramArtifact {
     throw new TypeError("Program artifact files must be a finite non-empty list");
   }
   let totalBytes = 0;
+  let installationBytes = 0;
   const files = value.files.map((inputFile, index) => {
     const file = object(inputFile, `Program artifact file ${index}`);
     exact(file, ["bytes", "data", "digest", "mode", "path"], `Program artifact file ${index}`);
@@ -296,7 +311,7 @@ export function validateProgramArtifact(input: unknown): ProgramArtifact {
       throw new TypeError(`Program artifact file ${index} mode is invalid`);
     }
     digest(file.digest, `Program artifact file ${index} digest`);
-    if (!Number.isSafeInteger(file.bytes) || (file.bytes as number) < 0 || (file.bytes as number) > 512 * 1024 * 1024) {
+    if (!Number.isSafeInteger(file.bytes) || (file.bytes as number) < 0 || (file.bytes as number) > PROGRAM_ARTIFACT_LIMITS.maxFileBytes) {
       throw new TypeError(`Program artifact file ${index} bytes are invalid`);
     }
     if (typeof file.data !== "string" || !/^[A-Za-z0-9_-]*$/u.test(file.data)) {
@@ -311,8 +326,21 @@ export function validateProgramArtifact(input: unknown): ProgramArtifact {
       throw new TypeError(`Program artifact file ${index} bytes do not match their binding`);
     }
     totalBytes += decodedFile.byteLength;
-    if (!Number.isSafeInteger(totalBytes) || totalBytes > 2 * 1024 * 1024 * 1024) {
+    if (!Number.isSafeInteger(totalBytes) || totalBytes > PROGRAM_ARTIFACT_LIMITS.maxExpandedBytes) {
       throw new TypeError("Program artifact expanded bytes exceed the limit");
+    }
+    if (
+      filePath.startsWith("bin/") ||
+      filePath.startsWith("installer/") ||
+      filePath.startsWith("runtime/")
+    ) {
+      installationBytes += decodedFile.byteLength;
+      if (
+        !Number.isSafeInteger(installationBytes) ||
+        installationBytes > PROGRAM_ARTIFACT_LIMITS.maxInstallationSurfaceBytes
+      ) {
+        throw new TypeError("Program artifact installation surface exceeds the limit");
+      }
     }
     return Object.freeze({
       path: filePath,
@@ -332,6 +360,34 @@ export function validateProgramArtifact(input: unknown): ProgramArtifact {
     releaseVersion: value.releaseVersion,
     files: Object.freeze(files),
   }) as ProgramArtifact;
+}
+
+export function assertProgramArtifactArchiveBytes(bytes: number): number {
+  if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes > PROGRAM_ARTIFACT_LIMITS.maxArchiveBytes) {
+    throw new TypeError("Program artifact archive bytes exceed the supported release limit");
+  }
+  return bytes;
+}
+
+export function programArtifactStorageBudget(input: {
+  readonly archiveBytes: number;
+  readonly expandedBytes?: number;
+  readonly installationBytes?: number;
+}): number {
+  const archiveBytes = assertProgramArtifactArchiveBytes(input.archiveBytes);
+  const expandedBytes = input.expandedBytes ?? PROGRAM_ARTIFACT_LIMITS.maxExpandedBytes;
+  if (!Number.isSafeInteger(expandedBytes) || expandedBytes < 0 || expandedBytes > PROGRAM_ARTIFACT_LIMITS.maxExpandedBytes) {
+    throw new TypeError("Program artifact expanded bytes exceed the supported release limit");
+  }
+  const installationBytes = input.installationBytes ?? PROGRAM_ARTIFACT_LIMITS.maxInstallationSurfaceBytes;
+  if (
+    !Number.isSafeInteger(installationBytes) || installationBytes < 0 ||
+    installationBytes > PROGRAM_ARTIFACT_LIMITS.maxInstallationSurfaceBytes
+  ) {
+    throw new TypeError("Program artifact installation surface exceeds the supported release limit");
+  }
+  const stageBytes = archiveBytes + expandedBytes + installationBytes + PROGRAM_ARTIFACT_LIMITS.storageHeadroomBytes;
+  return Math.max(archiveBytes + PROGRAM_ARTIFACT_LIMITS.storageHeadroomBytes, stageBytes);
 }
 
 const RELEASE_MANIFEST_FIELDS = [

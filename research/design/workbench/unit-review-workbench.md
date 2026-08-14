@@ -152,4 +152,4 @@
 
 > 本区只维护“当前单元指针”一行。单元状态（边界、审查结论复用表、问题清单、已排除问题、迟发现教训、证据、终审）住指针所指的单元文件；骨架模板见 `unit-review-ledgers/_template.md`；登记协议、幂等判定与恢复指引见静态区第 4 节。
 
-- **当前单元指针**：`unit-review-ledgers/unit-37.gen-1.md`（第 37 单元 · generation 1 · 登记于 2026-08-12）
+- **当前单元指针**：`unit-review-ledgers/unit-38.gen-1.md`（第 38 单元 · generation 1 · 登记于 2026-08-14）

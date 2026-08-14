@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
+import { acquireFileLock } from "@zhixing/core/persistence";
 import { canonicalize } from "@zhixing/core/protocol";
 
 const LOCK_STALE_MS = 5 * 60_000;
@@ -60,29 +61,24 @@ export async function syncDirectory(directory: string): Promise<void> {
 export async function withProgramLock<T>(root: string, task: () => Promise<T>): Promise<T> {
   await mkdir(root, { recursive: true, mode: 0o700 });
   const lockPath = path.join(root, ".program-update.lock");
-  const deadline = Date.now() + LOCK_WAIT_MS;
-  for (;;) {
-    try {
-      const handle = await open(lockPath, "wx", 0o600);
-      try {
-        await handle.writeFile(canonicalize({ pid: process.pid, acquiredAt: new Date().toISOString() }));
-        await handle.sync();
-        return await task();
-      } finally {
-        await handle.close();
-        await rm(lockPath, { force: true });
-        await syncDirectory(root);
-      }
-    } catch (error) {
-      if (!isNodeError(error, "EEXIST")) throw error;
-      const age = await stat(lockPath).then((entry) => Date.now() - entry.mtimeMs).catch(() => 0);
-      if (age > LOCK_STALE_MS) {
-        await rm(lockPath, { force: true });
-        continue;
-      }
-      if (Date.now() >= deadline) throw new Error("Program update is already running");
-      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  let release: (() => Promise<void>) | undefined;
+  try {
+    release = await acquireFileLock(lockPath, {
+      staleMs: LOCK_STALE_MS,
+      waitMs: LOCK_WAIT_MS,
+      retryMs: 50,
+      resourceName: "Program update",
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === "Program update lock is busy") {
+      throw new Error("Program update is already running");
     }
+    throw error;
+  }
+  try {
+    return await task();
+  } finally {
+    await release();
   }
 }
 

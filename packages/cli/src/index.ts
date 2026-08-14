@@ -143,8 +143,11 @@ async function handleStatusAction(): Promise<void> {
     await pruneRuntimeLogs();
     const { runStatusCommand } = await import("./serve/status.js");
     const report = await runStatusCommand();
-    const { printProgramUpdateProjection, readProgramUpdateProjection } = await import("./update/runtime.js");
-    printProgramUpdateProjection(await readProgramUpdateProjection());
+    const {
+      printProgramUpdateProjection,
+      readCurrentAuthorityProgramUpdateProjection,
+    } = await import("./update/runtime.js");
+    printProgramUpdateProjection(await readCurrentAuthorityProgramUpdateProjection());
     // exit code: 0 running, 1 running-unhealthy, 2 stopped, 3 stale
     const exitCode =
       report.status === "running"
@@ -233,14 +236,6 @@ program
       });
       handleStartupResult(startupResult);
 
-      const {
-        printProgramUpdateProjection,
-        readProgramUpdateProjection,
-        startAutomaticUpdateCheck,
-      } = await import("./update/runtime.js");
-      startAutomaticUpdateCheck();
-      printProgramUpdateProjection(await readProgramUpdateProjection());
-
       await startRepl();
     } catch (err) {
       await renderActionError(err);
@@ -280,7 +275,10 @@ program
   .action(async () => {
     try {
       const { inspectProgramHealth, printProgramDoctorReport } = await import("./update/doctor.js");
-      printProgramDoctorReport(await inspectProgramHealth());
+      const { readCurrentAuthorityProgramUpdateProjection } = await import("./update/runtime.js");
+      printProgramDoctorReport(await inspectProgramHealth({
+        currentAuthorityProjection: readCurrentAuthorityProgramUpdateProjection,
+      }));
       process.exit(0);
     } catch (err) {
       await renderActionError(err);
@@ -866,12 +864,7 @@ const serveCmd = program
       const {
         runServeCommand,
       } = await import("./serve/topology-command.js");
-      const { startAutomaticUpdateCheck, startManagedUpdateChecks } = await import("./update/runtime.js");
-      const stopUpdateChecks = options.managed
-        ? startManagedUpdateChecks()
-        : (startAutomaticUpdateCheck(), () => undefined);
       await runServeCommand({ ...(options.managed ? { managed: true } : {}) });
-      stopUpdateChecks();
       process.exit(0);
     } catch (err) {
       await renderActionError(err);

@@ -100,7 +100,13 @@ const coverageGroups = [
   ["runtime-lifecycle", agentLifecyclePhases.map((phase) => `lifecycle:agent:${phase}`)],
   ["orchestration-child", ["tool:orchestrator:Task"]],
   ["channel-inbound", ["channel:router:InboundRouter", "channel:adapter:feishu", "channel:event:feishu:im.message.receive_v1"]],
-  ["status-read", ["rpc:server.info", "cli:zhixing status", "slash:status:repl"]],
+  ["status-read", [
+    "rpc:server.info",
+    "rpc:server.update.status",
+    "rpc:server.update.consumeNotice",
+    "cli:zhixing status",
+    "slash:status:repl",
+  ]],
   ["light-inference", ["rpc:llm.complete"]],
   ["shutdown", [
     "rpc:server.shutdown",
@@ -1101,7 +1107,7 @@ export function inspectManagedHostAssembly(records) {
     !service.includes("projection.actions.items.length === 1")
   ) failures.push("managed host Windows bytes, strict projection or HRESULT classifier drifted");
   if (
-    count(serviceRuntime, "createManagedServiceAdapter({ storageGovernor: capacity.storage })") !== 2 ||
+    count(serviceRuntime, "createManagedServiceAdapter({ storageGovernor: capacity.storage })") !== 3 ||
     !service.includes('"managed-service-reconcile"') ||
     !service.includes("export function managedServiceDefinitionBytes(") ||
     !service.includes('"--managed-home"') ||
@@ -3647,6 +3653,7 @@ const coreHostRpcLinkOwners = new Set([
   "packages/cli/src/runtime/rpc-confirmation-broker.ts",
   "packages/cli/src/runtime/rpc-conversation-facade.ts",
   "packages/cli/src/runtime/rpc-management-facade.ts",
+  "packages/cli/src/runtime/rpc-program-update-facade.ts",
   "packages/cli/src/runtime/rpc-scheduler-facade.ts",
   "packages/cli/src/runtime/rpc-workscene-facade.ts",
 ]);
@@ -3658,6 +3665,7 @@ const rpcClientOwners = new Set([
 ]);
 const coreHostConnectionOwners = new Set([
   "packages/cli/src/repl.ts",
+  "packages/cli/src/runtime/rpc-program-update-facade.ts",
   "packages/cli/src/runtime/anchor-uninstall-command.ts",
   "packages/cli/src/runtime/device-removal-command.ts",
   "packages/cli/src/runtime/duty-migration-command.ts",

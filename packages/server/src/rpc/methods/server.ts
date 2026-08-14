@@ -417,6 +417,38 @@ export function buildServerUpdateHealthMethod(): MethodEntry {
   };
 }
 
+export function buildServerUpdateStatusMethod(): MethodEntry {
+  return {
+    name: "server.update.status",
+    requiresAuth: true,
+    async handler(params, ctx) {
+      parseEmptyParams(params, "server.update.status");
+      const project = ctx.server.programUpdateStatus;
+      if (!project) throw RpcErrors.internal("server update status is not available");
+      return project();
+    },
+  };
+}
+
+export function buildServerUpdateConsumeNoticeMethod(): MethodEntry {
+  return {
+    name: "server.update.consumeNotice",
+    requiresAuth: true,
+    async handler(params, ctx) {
+      const value = asRecord(params, "server.update.consumeNotice");
+      assertExactRecord(value, ["noticeToken"], "server.update.consumeNotice");
+      if (!isProtocolIdentifier(value.noticeToken)) {
+        throw RpcErrors.invalidParams("server.update.consumeNotice noticeToken is invalid");
+      }
+      const consume = ctx.server.programUpdateConsumeNotice;
+      if (!consume) {
+        throw RpcErrors.internal("server update notice consumption is not available");
+      }
+      return consume(value.noticeToken);
+    },
+  };
+}
+
 export function buildDutyMigrationTargetsMethod(): MethodEntry {
   return {
     name: "dutyMigration.targets",

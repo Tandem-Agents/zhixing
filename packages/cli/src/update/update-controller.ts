@@ -15,7 +15,7 @@ import {
 } from "@zhixing/core/protocol";
 import { createSafeFetch, safeFetch } from "@zhixing/network";
 import { withProgramLock } from "./durable-file.js";
-import { ProgramStore } from "./program-store.js";
+import { ProgramStore, programUpdateNoticeToken } from "./program-store.js";
 
 const INDEX_BYTES_LIMIT = 1024 * 1024;
 const DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
@@ -27,6 +27,7 @@ export interface ProgramUpdateProjection {
   readonly release?: string;
   readonly code?: string;
   readonly action?: ProgramUpdateAction;
+  readonly noticeToken?: string;
 }
 
 export interface StableUpdateControllerOptions {
@@ -63,7 +64,13 @@ export class StableUpdateController {
     const outcome = await withProgramLock(this.#store.root, async () => {
       const current = await this.#store.loadCurrentManifest(this.#verifier);
       if (!current) throw new ProgramUpdateError("not-installed", "contact-support");
-      await this.#store.writeReceipt(receipt(current.digest, this.#store.target, "checking", "none"));
+      const previousReceipt = await this.#store.loadReceipt().catch(() => undefined);
+      if (
+        previousReceipt?.notice !== "action-required" ||
+        previousReceipt.currentManifestDigest !== current.digest
+      ) {
+        await this.#store.writeReceipt(receipt(current.digest, this.#store.target, "checking", "none"));
+      }
       const indexBytes = await this.#fetchDocument(this.#indexUrl, INDEX_BYTES_LIMIT, signal);
       const index = decodeAndValidateStableReleaseIndex(indexBytes, this.#verifier);
       const target = index.targets.find((entry) => entry.target === this.#store.target);
@@ -78,6 +85,7 @@ export class StableUpdateController {
       }
       assertCompatibleUpgrade(current.manifest, manifest);
       const candidateDigest = byteDigest(manifestBytes);
+      await this.#store.ensureDownloadCapacity(manifest.artifact.bytes);
       await this.#store.writeReceipt(receipt(
         current.digest,
         this.#store.target,
@@ -105,11 +113,70 @@ export class StableUpdateController {
       await this.#store.writeReceipt(staged);
       return staged;
     });
+    return this.#handoff(outcome, signal);
+  }
+
+  async checkFailSafe(signal?: AbortSignal): Promise<ProgramUpdateReceipt | undefined> {
+    try {
+      return await this.check(signal);
+    } catch (error) {
+      const current = await this.#store.loadReceipt().catch(() => undefined);
+      if (!current) return undefined;
+      // A lost handoff response must not demote an already accepted durable operation.
+      if (current.phase === "handed-off") return current;
+      const classified = classifyUpdateError(error);
+      if (current.notice === "action-required" && classified.action === "retry-update") {
+        return current;
+      }
+      const failed = receipt(
+        current.currentManifestDigest,
+        current.target,
+        "idle",
+        classified.action === "retry-update" ? "failed-safe" : "action-required",
+        {
+          ...(classified.action !== "retry-update" && current.candidateManifestDigest
+            ? { candidateManifestDigest: current.candidateManifestDigest }
+            : {}),
+          code: classified.code,
+          action: classified.action,
+        },
+      );
+      await this.#store.writeReceipt(failed).catch(() => undefined);
+      return failed;
+    }
+  }
+
+  async restorePrevious(signal?: AbortSignal): Promise<ProgramUpdateReceipt> {
+    const staged = await withProgramLock(this.#store.root, async () => {
+      const pointer = await this.#store.loadPointer();
+      const current = await this.#store.loadCurrentManifest(this.#verifier);
+      const previous = await this.#store.loadPreviousManifest(this.#verifier);
+      if (!pointer?.previous || !current || !previous) {
+        throw new ProgramUpdateError("previous-unavailable", "contact-support");
+      }
+      assertCompatibleUpgrade(previous.manifest, current.manifest);
+      const candidate = await this.#store.stageInstalled(pointer.previous, this.#verifier);
+      if (candidate.digest !== previous.digest) {
+        throw new ProgramUpdateError("previous-identity-changed", "contact-support");
+      }
+      const outcome = receipt(current.digest, pointer.target, "staged", "none", {
+        candidateManifestDigest: candidate.digest,
+      });
+      await this.#store.writeReceipt(outcome);
+      return outcome;
+    });
+    return this.#handoff(staged, signal);
+  }
+
+  async #handoff(
+    outcome: ProgramUpdateReceipt,
+    signal?: AbortSignal,
+  ): Promise<ProgramUpdateReceipt> {
     if (outcome.phase !== "staged" || !outcome.candidateManifestDigest || !this.#handoffStaged) {
       return outcome;
     }
     const handoff = await this.#handoffStaged(outcome.candidateManifestDigest, signal);
-    if (!handoff) return outcome;
+    if (!handoff) throw new ProgramUpdateError("host-unavailable", "retry-update");
     const handedOff = receipt(
       outcome.currentManifestDigest,
       outcome.target,
@@ -122,44 +189,6 @@ export class StableUpdateController {
     );
     await this.#store.writeReceipt(handedOff);
     return handedOff;
-  }
-
-  async checkFailSafe(signal?: AbortSignal): Promise<ProgramUpdateReceipt | undefined> {
-    try {
-      return await this.check(signal);
-    } catch (error) {
-      const current = await this.#store.loadReceipt().catch(() => undefined);
-      if (!current) return undefined;
-      // A lost handoff response must not demote an already accepted durable operation.
-      if (current.phase === "handed-off") return current;
-      const classified = classifyUpdateError(error);
-      const failed = receipt(
-        current.currentManifestDigest,
-        current.target,
-        "idle",
-        classified.action === "retry-update" ? "failed-safe" : "action-required",
-        { code: classified.code, action: classified.action },
-      );
-      await this.#store.writeReceipt(failed).catch(() => undefined);
-      return failed;
-    }
-  }
-
-  async restorePrevious(): Promise<ProgramUpdateReceipt> {
-    return withProgramLock(this.#store.root, async () => {
-      const current = await this.#store.loadCurrentManifest(this.#verifier);
-      const previous = await this.#store.loadPreviousManifest(this.#verifier);
-      if (!current || !previous) throw new ProgramUpdateError("previous-unavailable", "contact-support");
-      assertCompatibleUpgrade(previous.manifest, current.manifest);
-      const pointer = await this.#store.restorePrevious();
-      if (pointer.current.manifestDigest !== previous.digest) {
-        throw new ProgramUpdateError("previous-identity-changed", "contact-support");
-      }
-      const restored = receipt(pointer.current.manifestDigest, pointer.target, "idle", "restored");
-      await this.#store.writeReceipt(restored);
-      await this.#store.cleanup();
-      return restored;
-    });
   }
 }
 
@@ -177,8 +206,22 @@ export function projectProgramUpdate(
   if (receipt.phase === "handed-off") {
     return { visible: true, state: "installing", message: "正在更新", ...(candidateRelease ? { release: candidateRelease } : {}) };
   }
-  if (receipt.notice === "updated") return { visible: true, state: "updated", message: "已更新" };
-  if (receipt.notice === "restored") return { visible: true, state: "restored", message: "更新未完成，已恢复上一版本" };
+  if (receipt.notice === "updated") {
+    return {
+      visible: true,
+      state: "updated",
+      message: "已更新",
+      noticeToken: programUpdateNoticeToken(receipt),
+    };
+  }
+  if (receipt.notice === "restored") {
+    return {
+      visible: true,
+      state: "restored",
+      message: "更新未完成，已恢复上一版本",
+      noticeToken: programUpdateNoticeToken(receipt),
+    };
+  }
   if (receipt.notice === "failed-safe") {
     return {
       visible: true,

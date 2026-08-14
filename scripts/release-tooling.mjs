@@ -25,11 +25,73 @@ export const RELEASE_SMOKE_SCENARIOS = Object.freeze([
   "permanent-device-remove-confirms",
 ]);
 
+export const RELEASE_ACCEPTANCE_IDS = Object.freeze([
+  ...Array.from({ length: 18 }, (_, index) => `invariant-${String(index + 1).padStart(2, "0")}`),
+  "fault-executor-crash",
+  "fault-owner-crash",
+  "fault-cancel-race",
+  "fault-path-partition",
+  "fault-transfer-interruption",
+  "fault-storage",
+  "fault-revocation",
+  "fault-retry",
+  "fault-version-clock",
+  "fault-update",
+  "security-pairing",
+  "security-certificate-ticket",
+  "security-permission-snapshot",
+  "security-revocation",
+  "security-blind-relay",
+  "security-confirmation",
+  "security-authority",
+  "security-resource",
+  "topology-single-machine",
+  "topology-paired-devices",
+  "journey-first-run",
+  "journey-pair-ready",
+  "journey-daily-local",
+  "journey-offline",
+  "journey-uncertain",
+  "journey-transfer-recovery",
+  "journey-stop-remove",
+  "journey-auto-update",
+  "journey-update-recovery",
+  "journey-app-remove",
+  "journey-offline-doctor",
+  "journey-release-matrix",
+]);
+
+export function assertExactStringSet(input, expected, label) {
+  if (!Array.isArray(input) || input.some((value) => typeof value !== "string")) {
+    throw new Error(`${label} must be a string array`);
+  }
+  const actual = [...input].sort();
+  const fields = [...expected].sort();
+  if (
+    new Set(actual).size !== actual.length ||
+    actual.length !== fields.length ||
+    actual.some((value, index) => value !== fields[index])
+  ) {
+    throw new Error(`${label} is not the canonical exact-set`);
+  }
+  return input;
+}
+
 export function assertReleaseNodeVersion(value) {
   if (typeof value !== "string" || !/^22\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:[-+][0-9A-Za-z.-]+)?$/u.test(value)) {
     throw new Error("stable release artifacts must embed an exact Node 22 version");
   }
   return value;
+}
+
+export function stableProgramLoaderSource(target, entry) {
+  if (!RELEASE_TARGETS.includes(target)) throw new Error("program loader target is outside the stable exact-set");
+  if (entry !== "app/dist/index.js" && entry !== "app/dist/program-installer.js") {
+    throw new Error("program loader entry is outside the stable exact-set");
+  }
+  const runtime = target === "win32-x64" ? "node.exe" : "node";
+  const entryParts = entry.split("/").map((part) => JSON.stringify(part)).join(",");
+  return `import { spawn } from "node:child_process";\nimport { readFile } from "node:fs/promises";\nimport { resolve } from "node:path";\nconst root=resolve(import.meta.dirname,"..");\nconst value=JSON.parse(await readFile(resolve(root,"current.json"),"utf8"));\nconst directory=value?.current?.directory;\nif(typeof directory!=="string"||!/^[0-9A-Za-z._-]+$/u.test(directory))throw new Error("Installed program pointer is invalid");\nconst versionRoot=resolve(root,"versions",directory,"program");\nconst child=spawn(resolve(versionRoot,"runtime",${JSON.stringify(runtime)}),[resolve(versionRoot,${entryParts}),...process.argv.slice(2)],{stdio:"inherit",windowsHide:true});\nconst result=await new Promise((resolveResult,reject)=>{child.once("error",reject);child.once("exit",(code,signal)=>resolveResult({code,signal}));});\nif(result.signal){try{process.kill(process.pid,result.signal);}catch{process.exitCode=1;}}else{process.exitCode=result.code??1;}\n`;
 }
 
 export function assertExactBooleanMatrix(input, expected, label) {
@@ -72,6 +134,35 @@ export async function collectProgramFiles(programRoot) {
 
 export function programTreeDigest(files) {
   return digest(Buffer.from(canonicalize(files.map(({ path, mode, digest, bytes }) => ({ path, mode, digest, bytes }))), "utf8"));
+}
+
+export function assertProgramTreeContract(files, target) {
+  if (!RELEASE_TARGETS.includes(target)) throw new Error("program tree target is outside the stable exact-set");
+  const names = new Set(files.map((file) => file.path));
+  const runtime = target === "win32-x64" ? "runtime/node.exe" : "runtime/node";
+  const launcher = target === "win32-x64" ? "bin/zz.cmd" : "bin/zz";
+  const alias = target === "win32-x64" ? "bin/zhixing.cmd" : "bin/zhixing";
+  for (const required of [
+    runtime,
+    launcher,
+    alias,
+    "installer/launch.js",
+    "installer/program-installer.js",
+    "app/package.json",
+    "app/dist/index.js",
+    "app/dist/program-installer.js",
+    "program-tree-receipt.json",
+  ]) {
+    if (!names.has(required)) throw new Error(`program tree is missing ${required}`);
+  }
+  const allowedRoots = new Set(["app", "bin", "installer", "runtime"]);
+  for (const file of files) {
+    const [root] = file.path.split("/");
+    if (file.path !== "program-tree-receipt.json" && !allowedRoots.has(root)) {
+      throw new Error(`program tree contains an unmanaged root: ${file.path}`);
+    }
+  }
+  return files;
 }
 
 export async function fingerprintSourceTree(repositoryRoot) {

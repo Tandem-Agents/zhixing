@@ -1,10 +1,13 @@
-import { chmod, mkdir, readFile, readdir, rename, rm, stat } from "node:fs/promises";
-import { homedir } from "node:os";
+import { chmod, mkdir, readFile, readdir, rename, rm, stat, statfs } from "node:fs/promises";
 import path from "node:path";
+import { expandUserHome } from "@zhixing/core";
 import {
   byteDigest,
+  canonicalize,
   decodeAndValidateReleaseManifest,
   decodeProgramArtifact,
+  programArtifactStorageBudget,
+  protocolDigest,
   validateProgramUpdateReceipt,
   type ProgramUpdateReceipt,
   type ProtocolSignatureVerifier,
@@ -28,6 +31,19 @@ export interface ProgramPointer {
   readonly previous?: ProgramPointerEntry;
 }
 
+export interface ProgramStoreDeps {
+  readonly availableBytes?: (root: string) => Promise<bigint>;
+}
+
+export interface ProgramActivationExpectation {
+  readonly sourceManifestDigest: string;
+  readonly pointerGeneration: number;
+}
+
+export function programUpdateNoticeToken(receipt: ProgramUpdateReceipt): string {
+  return protocolDigest("ProgramUpdateNotice", 1, receipt);
+}
+
 export function currentReleaseTarget(): StableReleaseTarget {
   const key = `${process.platform}-${process.arch}`;
   if (
@@ -43,17 +59,29 @@ export function defaultProgramRoot(): string {
     if (!local) throw new Error("Windows LOCALAPPDATA is unavailable");
     return path.join(local, "Zhixing");
   }
-  if (process.platform === "darwin") return path.join(homedir(), "Library", "Application Support", "Zhixing");
-  return path.join(process.env.XDG_DATA_HOME ?? path.join(homedir(), ".local", "share"), "zhixing");
+  if (process.platform === "darwin") {
+    return expandUserHome("~/Library/Application Support/Zhixing");
+  }
+  return path.join(process.env.XDG_DATA_HOME ?? expandUserHome("~/.local/share"), "zhixing");
 }
 
 export class ProgramStore {
   readonly root: string;
   readonly target: StableReleaseTarget;
+  readonly #availableBytes: (root: string) => Promise<bigint>;
 
-  constructor(root = defaultProgramRoot(), target = currentReleaseTarget()) {
+  constructor(
+    root = defaultProgramRoot(),
+    target = currentReleaseTarget(),
+    deps: ProgramStoreDeps = {},
+  ) {
     this.root = path.resolve(root);
     this.target = target;
+    this.#availableBytes = deps.availableBytes ?? availableBytes;
+  }
+
+  async ensureDownloadCapacity(archiveBytes: number): Promise<void> {
+    await this.#ensureCapacity(programArtifactStorageBudget({ archiveBytes }));
   }
 
   async loadPointer(): Promise<ProgramPointer | undefined> {
@@ -79,6 +107,17 @@ export class ProgramStore {
     const pointer = await this.loadPointer();
     if (!pointer?.previous) return undefined;
     return this.loadManifestEntry(pointer.previous, verifier);
+  }
+
+  async verifyInstalled(
+    entry: ProgramPointerEntry,
+    verifier: ProtocolSignatureVerifier,
+  ): Promise<{ readonly manifest: ReleaseManifest; readonly digest: string; readonly bytes: Buffer }> {
+    const installed = await this.loadManifestEntry(entry, verifier);
+    const directory = path.join(this.root, "versions", entry.directory);
+    const artifactBytes = await readFile(path.join(directory, "artifact.json"));
+    await this.verifyExpanded(directory, installed.manifest, installed.bytes, artifactBytes);
+    return installed;
   }
 
   async loadStagedManifest(
@@ -107,6 +146,40 @@ export class ProgramStore {
     );
   }
 
+  async consumeNotice(expectedToken: string): Promise<boolean> {
+    const current = await this.loadReceipt();
+    if (
+      !current ||
+      (current.notice !== "updated" && current.notice !== "restored") ||
+      programUpdateNoticeToken(current) !== expectedToken
+    ) return false;
+    const consumed = validateProgramUpdateReceipt({
+      v: 1,
+      currentManifestDigest: current.currentManifestDigest,
+      target: current.target,
+      phase: "idle",
+      notice: "none",
+    });
+    await this.writeReceipt(consumed);
+    const durable = await this.loadReceipt();
+    if (!durable || canonicalize(durable) !== canonicalize(consumed)) {
+      throw new Error("Program update notice consumption read-back failed");
+    }
+    return true;
+  }
+
+  async stageInstalled(
+    entry: ProgramPointerEntry,
+    verifier: ProtocolSignatureVerifier,
+  ): Promise<{ readonly manifest: ReleaseManifest; readonly digest: string }> {
+    const installed = await this.verifyInstalled(entry, verifier);
+    const artifactBytes = await readFile(
+      path.join(this.root, "versions", entry.directory, "artifact.json"),
+    );
+    await this.stage(installed.manifest, installed.bytes, artifactBytes);
+    return { manifest: installed.manifest, digest: installed.digest };
+  }
+
   async stage(
     manifest: ReleaseManifest,
     manifestBytes: Uint8Array,
@@ -120,6 +193,16 @@ export class ProgramStore {
     if (artifact.target !== manifest.target || artifact.releaseVersion !== manifest.releaseVersion) {
       throw new TypeError("Program artifact identity does not match release manifest");
     }
+    const expandedBytes = artifact.files.reduce((total, file) => total + file.bytes, 0);
+    const installationBytes = artifact.files.reduce((total, file) =>
+      file.path.startsWith("bin/") || file.path.startsWith("installer/") || file.path.startsWith("runtime/")
+        ? total + file.bytes
+        : total, 0);
+    await this.#ensureCapacity(programArtifactStorageBudget({
+      archiveBytes: artifactBytes.byteLength,
+      expandedBytes,
+      installationBytes,
+    }));
     const manifestDigest = byteDigest(manifestBytes);
     const finalDirectory = path.join(this.root, "stage", digestPart(manifestDigest));
     if (await isDirectory(finalDirectory)) {
@@ -156,7 +239,11 @@ export class ProgramStore {
     }
   }
 
-  async activateStaged(manifest: ReleaseManifest, manifestDigest: string): Promise<ProgramPointer> {
+  async activateStaged(
+    manifest: ReleaseManifest,
+    manifestDigest: string,
+    expectation?: ProgramActivationExpectation,
+  ): Promise<ProgramPointer> {
     const staged = path.join(this.root, "stage", digestPart(manifestDigest));
     if (!await isDirectory(staged)) throw new Error("Verified update stage is missing");
     const directory = `${manifest.releaseVersion}-${digestPart(manifestDigest).slice(0, 16)}`;
@@ -166,31 +253,69 @@ export class ProgramStore {
       await rename(staged, versionPath);
       await syncDirectory(path.dirname(versionPath));
     }
+    const durableManifest = await readFile(path.join(versionPath, "release-manifest.json"));
+    const durableArtifact = await readFile(path.join(versionPath, "artifact.json"));
+    await this.verifyExpanded(versionPath, manifest, durableManifest, durableArtifact);
+    if (!durableManifest.equals(Buffer.from(canonicalize(manifest), "utf8")) || byteDigest(durableManifest) !== manifestDigest) {
+      throw new Error("Installed program version identity changed");
+    }
     const current = await this.loadPointer();
+    const desired: ProgramPointerEntry = {
+      manifestDigest,
+      releaseVersion: manifest.releaseVersion,
+      releaseSequence: manifest.releaseSequence,
+      directory,
+    };
+    if (current?.current.manifestDigest === manifestDigest) {
+      if (!samePointerEntry(current.current, desired)) {
+        throw new Error("Installed program pointer conflicts with the verified target");
+      }
+      if (expectation && (
+        current.generation !== expectation.pointerGeneration + 1 ||
+        current.previous?.manifestDigest !== expectation.sourceManifestDigest
+      )) {
+        throw new Error("Installed program pointer does not match the accepted upgrade");
+      }
+      return current;
+    }
+    if (expectation && (
+      !current ||
+      current.generation !== expectation.pointerGeneration ||
+      current.current.manifestDigest !== expectation.sourceManifestDigest
+    )) {
+      throw new Error("Program pointer changed before upgrade activation");
+    }
     const next: ProgramPointer = {
       v: 1,
       target: this.target,
       generation: (current?.generation ?? 0) + 1,
-      current: {
-        manifestDigest,
-        releaseVersion: manifest.releaseVersion,
-        releaseSequence: manifest.releaseSequence,
-        directory,
-      },
+      current: desired,
       ...(current ? { previous: current.current } : {}),
     };
     await writeDurableJson(this.pointerPath(), next);
     return validatePointer(await readJsonIfPresent(this.pointerPath()), this.target);
   }
 
-  async restorePrevious(): Promise<ProgramPointer> {
+  async restorePrevious(input?: {
+    readonly failedManifestDigest: string;
+    readonly sourceManifestDigest: string;
+  }): Promise<ProgramPointer> {
     const current = await this.loadPointer();
+    if (input && current?.current.manifestDigest === input.sourceManifestDigest && !current.previous) {
+      return current;
+    }
     if (!current?.previous) throw new Error("没有可恢复的上一可用版本");
+    if (input && (
+      current.current.manifestDigest !== input.failedManifestDigest ||
+      current.previous.manifestDigest !== input.sourceManifestDigest
+    )) {
+      throw new Error("Program pointer does not match the accepted recovery");
+    }
     const next: ProgramPointer = {
-      ...current,
+      v: 1,
+      target: current.target,
       generation: current.generation + 1,
       current: current.previous,
-      previous: current.current,
     };
     await writeDurableJson(this.pointerPath(), next);
     return validatePointer(await readJsonIfPresent(this.pointerPath()), this.target);
@@ -211,6 +336,13 @@ export class ProgramStore {
 
   private pointerPath(): string {
     return path.join(this.root, "current.json");
+  }
+
+  async #ensureCapacity(requiredBytes: number): Promise<void> {
+    await mkdir(this.root, { recursive: true, mode: 0o700 });
+    if (await this.#availableBytes(this.root) < BigInt(requiredBytes)) {
+      throw new Error("Program store does not have enough capacity for this update");
+    }
   }
 
   private async loadManifestEntry(entry: ProgramPointerEntry, verifier: ProtocolSignatureVerifier) {
@@ -237,6 +369,17 @@ export class ProgramStore {
       throw new Error("Verified update stage read-back failed");
     }
     const artifact = decodeProgramArtifact(durableArtifact);
+    const actualLayout = await readProgramLayout(path.join(directory, "program"));
+    const expectedFiles = artifact.files.map((file) => file.path).sort();
+    const expectedDirectories = expectedProgramDirectories(expectedFiles);
+    if (
+      actualLayout.files.length !== expectedFiles.length ||
+      actualLayout.files.some((file, index) => file !== expectedFiles[index]) ||
+      actualLayout.directories.length !== expectedDirectories.length ||
+      actualLayout.directories.some((entry, index) => entry !== expectedDirectories[index])
+    ) {
+      throw new Error("Expanded program layout read-back failed");
+    }
     for (const file of artifact.files) {
       const bytes = await readFile(path.join(directory, "program", ...file.path.split("/")));
       if (bytes.byteLength !== file.bytes || byteDigest(bytes) !== file.digest) {
@@ -314,4 +457,56 @@ async function removeChildrenInBatches(root: string, keep: ReadonlySet<string>):
     await Promise.all(removable.slice(offset, offset + 128).map((entry) =>
       rm(path.join(root, entry.name), { recursive: true, force: true })));
   }
+}
+
+async function availableBytes(root: string): Promise<bigint> {
+  const value = await statfs(root, { bigint: true });
+  return value.bavail * value.bsize;
+}
+
+function samePointerEntry(left: ProgramPointerEntry, right: ProgramPointerEntry): boolean {
+  return left.manifestDigest === right.manifestDigest &&
+    left.releaseVersion === right.releaseVersion &&
+    left.releaseSequence === right.releaseSequence &&
+    left.directory === right.directory;
+}
+
+async function readProgramLayout(root: string): Promise<{
+  readonly files: readonly string[];
+  readonly directories: readonly string[];
+}> {
+  const files: string[] = [];
+  const directories: string[] = [];
+  const visit = async (directory: string, prefix: string): Promise<void> => {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name, "en-US"));
+    for (const entry of entries) {
+      const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isSymbolicLink() || (!entry.isDirectory() && !entry.isFile())) {
+        throw new Error("Expanded program layout contains an unsupported entry");
+      }
+      if (entry.isDirectory()) {
+        directories.push(relative);
+        await visit(path.join(directory, entry.name), relative);
+      } else {
+        files.push(relative);
+      }
+    }
+  };
+  await visit(root, "");
+  return Object.freeze({
+    files: Object.freeze(files.sort()),
+    directories: Object.freeze(directories.sort()),
+  });
+}
+
+function expectedProgramDirectories(files: readonly string[]): readonly string[] {
+  const directories = new Set<string>();
+  for (const file of files) {
+    const parts = file.split("/");
+    for (let index = 1; index < parts.length; index += 1) {
+      directories.add(parts.slice(0, index).join("/"));
+    }
+  }
+  return Object.freeze([...directories].sort());
 }

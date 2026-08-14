@@ -8,9 +8,13 @@ import {
   fingerprintPackageGraph,
   fingerprintSourceTree,
   programTreeDigest,
+  assertProgramTreeContract,
   assertReleaseNodeVersion,
 } from "./release-tooling.mjs";
-import { DURABLE_SCHEMA_INVENTORY } from "../packages/core/dist/protocol/index.js";
+import {
+  DURABLE_SCHEMA_INVENTORY,
+  assertProgramArtifactArchiveBytes,
+} from "../packages/core/dist/protocol/index.js";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const rootPackage = JSON.parse(await readFile(resolve(repositoryRoot, "package.json"), "utf8"));
@@ -22,9 +26,21 @@ const evidence = exact(JSON.parse(await readFile(resolve(arg("--platform-evidenc
 if (evidence.v !== 1 || evidence.passed !== true || evidence.target !== target) throw new Error("platform signing evidence does not match target");
 
 const files = await collectProgramFiles(programRoot);
+assertProgramTreeContract(files, target);
 if (evidence.treeDigest !== programTreeDigest(files)) throw new Error("platform signing evidence does not bind the final program tree");
+const treeReceipt = exact(
+  JSON.parse(await readFile(resolve(programRoot, "program-tree-receipt.json"), "utf8")),
+  ["appTreeDigest", "indexUrl", "keyId", "nodeVersion", "runtimeDigest", "target", "v"],
+);
+if (
+  treeReceipt.v !== 1 || treeReceipt.target !== target ||
+  treeReceipt.nodeVersion !== assertReleaseNodeVersion(arg("--node-version")) ||
+  treeReceipt.keyId !== arg("--key-id") ||
+  treeReceipt.appTreeDigest !== programTreeDigest(await collectProgramFiles(resolve(programRoot, "app")))
+) throw new Error("program tree receipt does not bind the release build inputs");
 const artifact = { v: 1, target, releaseVersion: rootPackage.version, files };
 const artifactBytes = Buffer.from(canonicalize(artifact), "utf8");
+assertProgramArtifactArchiveBytes(artifactBytes.byteLength);
 const sourceTreeDigest = await fingerprintSourceTree(repositoryRoot);
 const packageGraphDigest = await fingerprintPackageGraph(repositoryRoot);
 const manifestPayload = {
@@ -33,7 +49,7 @@ const manifestPayload = {
   releaseSequence: uint64(arg("--release-sequence")),
   channel: "stable",
   target,
-  nodeVersion: assertReleaseNodeVersion(arg("--node-version")),
+  nodeVersion: treeReceipt.nodeVersion,
   sourceTreeDigest,
   packageGraphDigest,
   artifact: { digest: digest(artifactBytes), bytes: artifactBytes.byteLength },

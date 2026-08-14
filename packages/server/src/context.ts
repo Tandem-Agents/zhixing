@@ -85,6 +85,24 @@ export interface ProgramUpdateHealthSnapshot {
   readonly homeId: string;
   readonly endpoint: { readonly host: string; readonly port: number };
   readonly rolePlan: { readonly host: string; readonly loadExecutor: boolean };
+  readonly trust: { readonly generation: number; readonly digest: string };
+}
+
+export interface ProgramUpdatePublicProjection {
+  readonly visible: boolean;
+  readonly state?:
+    | "downloading"
+    | "awaiting-safe-point"
+    | "installing"
+    | "updated"
+    | "failed-safe"
+    | "restored"
+    | "action-required";
+  readonly message?: string;
+  readonly release?: string;
+  readonly code?: string;
+  readonly action?: "retry-update" | "restore-previous" | "contact-support";
+  readonly noticeToken?: string;
 }
 
 /**
@@ -381,6 +399,12 @@ export interface ServerContext {
   lifecycleUpgrade?: LifecycleUpgradeAdapter;
   /** 本机升级成功门消费的当前运行代精确投影。 */
   programUpdateHealth?: () => Promise<ProgramUpdateHealthSnapshot>;
+  /** 当前权威宿主的用户可见更新状态；surface 只经认证 relay 消费。 */
+  programUpdateStatus?: () => Promise<ProgramUpdatePublicProjection>;
+  /** 按 exact token 一次性消费成功通知；旧 token 不得清除新代通知。 */
+  programUpdateConsumeNotice?: (
+    noticeToken: string,
+  ) => Promise<{ readonly consumed: boolean }>;
   /** executor-only 宿主的有限第一方会话路由；锚点宿主不注入。 */
   conversationRpc?: FirstPartyConversationRpcRouter;
   /**
@@ -441,6 +465,8 @@ export interface CreateContextOptions {
   lifecycleShutdown?: LifecycleShutdownAdapter;
   lifecycleUpgrade?: LifecycleUpgradeAdapter;
   programUpdateHealth?: ServerContext["programUpdateHealth"];
+  programUpdateStatus?: ServerContext["programUpdateStatus"];
+  programUpdateConsumeNotice?: ServerContext["programUpdateConsumeNotice"];
   conversationRpc?: FirstPartyConversationRpcRouter;
 }
 
@@ -476,6 +502,8 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     lifecycleShutdown: opts.lifecycleShutdown,
     lifecycleUpgrade: opts.lifecycleUpgrade,
     programUpdateHealth: opts.programUpdateHealth,
+    programUpdateStatus: opts.programUpdateStatus,
+    programUpdateConsumeNotice: opts.programUpdateConsumeNotice,
     conversationRpc: opts.conversationRpc,
   };
 }

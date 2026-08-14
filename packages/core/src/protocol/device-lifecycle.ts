@@ -275,6 +275,7 @@ export interface DeviceLifecycleOperation {
   readonly recordDigests: Readonly<Record<string, string>>;
   readonly peerEffects: readonly DeviceLifecyclePeerEffect[];
   readonly abort?: DeviceLifecycleAbort;
+  readonly terminalOutcome?: "stopped" | "removed" | "retired" | "upgraded" | "rolled-back";
 }
 
 export interface DeviceLifecycleProjection {
@@ -683,7 +684,7 @@ export function reduceDeviceLifecycle(
   if (record.t === "terminal") {
     assertTerminalOutcome(current.identity.kind, record.outcome);
     assertCanReachTerminal(current);
-    return advance(current, "terminal", record.evidence, key, digest);
+    return advance(current, "terminal", record.evidence, key, digest, undefined, record.outcome);
   }
   assertNextPhase(current, record.phase);
   return advance(current, record.phase, record.evidence, key, digest);
@@ -1055,6 +1056,7 @@ function advance(
   key: string,
   digestValue: string,
   abort?: DeviceLifecycleAbort,
+  terminalOutcome?: DeviceLifecycleOperation["terminalOutcome"],
 ): DeviceLifecycleOperation {
   return Object.freeze({
     ...current,
@@ -1062,6 +1064,7 @@ function advance(
     evidence: Object.freeze([...current.evidence, ...evidence]),
     recordDigests: Object.freeze({ ...current.recordDigests, [key]: digestValue }),
     ...(abort ? { abort } : {}),
+    ...(terminalOutcome ? { terminalOutcome } : {}),
   });
 }
 

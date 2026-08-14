@@ -1,5 +1,11 @@
 import type { ProgramUpdateHealthSnapshot } from "@zhixing/server";
 import { createRpcClient } from "@zhixing/server";
+import type { ProgramUpdateProjection } from "../update/update-controller.js";
+import {
+  CoreHostConnection,
+  type CoreHostRpcLink,
+  defaultCoreHostConnectionDeps,
+} from "./core-host-connection.js";
 
 export interface ProgramUpdatePrepareRequest {
   readonly requestId: string;
@@ -52,6 +58,40 @@ export class RpcProgramUpdateFacade {
     } finally {
       await client.close().catch(() => undefined);
     }
+  }
+}
+
+/** 当前权威设备的更新通知面；调用方不持有原始 RPC client。 */
+export class RpcProgramUpdateSurfaceFacade {
+  constructor(private readonly connection: CoreHostRpcLink) {}
+
+  async status(): Promise<ProgramUpdateProjection> {
+    return (await this.connection.getClient())
+      .request<ProgramUpdateProjection>("server.update.status");
+  }
+
+  async consumeNotice(noticeToken: string): Promise<{ readonly consumed: boolean }> {
+    return (await this.connection.getClient())
+      .request<{ readonly consumed: boolean }>("server.update.consumeNotice", {
+        noticeToken,
+      });
+  }
+}
+
+export async function readCurrentAuthorityProgramUpdateStatus(): Promise<ProgramUpdateProjection> {
+  const defaults = defaultCoreHostConnectionDeps();
+  const connection = new CoreHostConnection({
+    ...defaults,
+    spawn: async () => ({
+      ok: false,
+      mode: "none",
+      reason: "只读更新状态不会启动本机宿主",
+    }),
+  });
+  try {
+    return await new RpcProgramUpdateSurfaceFacade(connection).status();
+  } finally {
+    await connection.dispose();
   }
 }
 

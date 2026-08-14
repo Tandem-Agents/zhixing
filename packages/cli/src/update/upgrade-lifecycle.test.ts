@@ -75,6 +75,7 @@ describe("program upgrade lifecycle", () => {
         },
         settlePhysicalSteps: async () => { order.push("physical"); },
       },
+      installationReceiptPath: path.join(root, "installer-state", "receipt.json"),
     };
     const original = new ProgramUpgradeCoordinator(options);
     const prepared = await original.prepare({
@@ -106,6 +107,36 @@ describe("program upgrade lifecycle", () => {
     await target.completeHealthy(prepared.operationId, byteDigest(candidateBytes));
     await expect(journal.active()).resolves.toEqual([]);
     await expect(store.loadReceipt()).resolves.toMatchObject({ notice: "updated" });
+
+    const upgradedPointer = await store.loadPointer();
+    expect(upgradedPointer?.previous?.releaseVersion).toBe("1.0.0");
+    const recovery = await store.stageInstalled(upgradedPointer!.previous!, verifier);
+    const recoveryPrepared = await target.prepare({
+      requestId: "restore-request",
+      candidateManifestDigest: recovery.digest,
+      timeoutMs: 5_000,
+    });
+    const recoverySuccessor = new ProgramUpgradeCoordinator({
+      ...options,
+      host: { kind: "foreground", processId: 44, startedAt: "2026-08-13T00:03:00.000Z" },
+    });
+    await expect(recoverySuccessor.resumeBeforeStartup()).resolves.toEqual({
+      kind: "restart-target",
+      operationId: recoveryPrepared.operationId,
+    });
+    const recoveredTarget = new ProgramUpgradeCoordinator({
+      ...options,
+      host: { kind: "foreground", processId: 45, startedAt: "2026-08-13T00:04:00.000Z" },
+    });
+    await expect(recoveredTarget.resumeBeforeStartup()).resolves.toMatchObject({
+      kind: "verify-target",
+      operationId: recoveryPrepared.operationId,
+    });
+    await recoveredTarget.completeHealthy(recoveryPrepared.operationId, recovery.digest);
+    await expect(store.loadPointer()).resolves.toMatchObject({
+      current: { releaseVersion: "1.0.0" },
+    });
+    await expect(store.loadReceipt()).resolves.toMatchObject({ notice: "restored" });
   }, 120_000);
 });
 

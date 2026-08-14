@@ -12,6 +12,7 @@ import {
 import { FileBackupTargetConfiguration } from "../serve/backup-target-config.js";
 import { getZhixingHome } from "@zhixing/core";
 import { projectProgramUpdate } from "./update-controller.js";
+import type { ProgramUpdateProjection } from "./update-controller.js";
 import { EMBEDDED_RELEASE_TRUST } from "./release-channel.js";
 import { createReleaseVerifier } from "./release-verifier.js";
 import { ProgramStore } from "./program-store.js";
@@ -29,6 +30,7 @@ export interface ProgramDoctorDeps {
   readonly managedStatus?: (report: Awaited<ReturnType<typeof buildOfflineStatusReport>>) => Promise<ManagedHostPublicStatus>;
   readonly checkpointConfiguration?: () => Promise<"configured" | "not-configured">;
   readonly releaseTrust?: typeof EMBEDDED_RELEASE_TRUST;
+  readonly currentAuthorityProjection?: () => Promise<ProgramUpdateProjection>;
 }
 
 export async function inspectProgramHealth(deps: ProgramDoctorDeps = {}): Promise<ProgramDoctorReport> {
@@ -36,7 +38,10 @@ export async function inspectProgramHealth(deps: ProgramDoctorDeps = {}): Promis
   try {
     const pointer = await store.loadPointer();
     const receipt = await store.loadReceipt();
-    const update = projectProgramUpdate(receipt);
+    const localUpdate = projectProgramUpdate(receipt);
+    const update = deps.currentAuthorityProjection
+      ? await deps.currentAuthorityProjection()
+      : localUpdate;
     if (update.visible && update.action) {
       return {
         code: update.code ?? "update-needs-attention",

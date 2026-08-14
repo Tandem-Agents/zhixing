@@ -3,12 +3,15 @@ import { byteDigest, canonicalize, protocolDigest } from "./canonical.js";
 import { DURABLE_SCHEMA_INVENTORY } from "./durable-schema.js";
 import type { ProtocolSignatureVerifier, ProtocolSigner } from "./signature.js";
 import {
+  PROGRAM_ARTIFACT_LIMITS,
+  assertProgramArtifactArchiveBytes,
   STABLE_RELEASE_TARGETS,
   assertReleaseAdvance,
   assertStableReleaseBinding,
   createSignedReleaseManifest,
   createSignedStableReleaseIndex,
   decodeProgramArtifact,
+  programArtifactStorageBudget,
   validateProgramUpdateReceipt,
   validateReleaseManifest,
   validateStableReleaseIndex,
@@ -136,6 +139,24 @@ describe("stable release protocol", () => {
       ...artifact,
       files: [{ ...artifact.files[0], data: Buffer.from("tampered").toString("base64url") }],
     }), "utf8"))).toThrow("binding");
+  });
+
+  it("shares one finite archive, expansion and storage budget", () => {
+    expect(assertProgramArtifactArchiveBytes(PROGRAM_ARTIFACT_LIMITS.maxArchiveBytes))
+      .toBe(PROGRAM_ARTIFACT_LIMITS.maxArchiveBytes);
+    expect(() => assertProgramArtifactArchiveBytes(PROGRAM_ARTIFACT_LIMITS.maxArchiveBytes + 1))
+      .toThrow("supported release limit");
+    expect(programArtifactStorageBudget({ archiveBytes: 1024, expandedBytes: 2048, installationBytes: 512 }))
+      .toBe(1024 + 2048 + 512 + PROGRAM_ARTIFACT_LIMITS.storageHeadroomBytes);
+    expect(() => programArtifactStorageBudget({
+      archiveBytes: 1024,
+      expandedBytes: PROGRAM_ARTIFACT_LIMITS.maxExpandedBytes + 1,
+    })).toThrow("expanded bytes");
+    expect(() => programArtifactStorageBudget({
+      archiveBytes: 1024,
+      expandedBytes: 2048,
+      installationBytes: PROGRAM_ARTIFACT_LIMITS.maxInstallationSurfaceBytes + 1,
+    })).toThrow("installation surface");
   });
 });
 

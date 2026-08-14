@@ -1,14 +1,26 @@
 import { EMBEDDED_RELEASE_TRUST, STABLE_RELEASE_INDEX_URL } from "./release-channel.js";
 import { createReleaseVerifier } from "./release-verifier.js";
 import { ProgramStore } from "./program-store.js";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
+import {
+  DURABLE_SCHEMA_INVENTORY,
+  canonicalize,
+  protocolDigest,
+  type DeviceLifecycleOperation,
+  type ProgramUpdateReceipt,
+  type ProtocolSignatureVerifier,
+  type ReleaseManifest,
+} from "@zhixing/core/protocol";
 import type { ProgramUpdateHealthSnapshot } from "@zhixing/server";
+import type { MeshRuntimeBootstrap } from "../serve/mesh-runtime-bootstrap.js";
 import {
   getDefaultTokenPath,
   isProcessAlive,
   readLock,
 } from "@zhixing/server";
-import { RpcProgramUpdateFacade } from "../runtime/rpc-program-update-facade.js";
+import {
+  readCurrentAuthorityProgramUpdateStatus,
+  RpcProgramUpdateFacade,
+} from "../runtime/rpc-program-update-facade.js";
 import { readFile } from "node:fs/promises";
 import {
   projectProgramUpdate,
@@ -76,6 +88,61 @@ export async function verifyLocalUpgradeHealth(input: {
   return protocolDigest("ProgramUpdateHealthSnapshot", 1, actual);
 }
 
+export function buildProgramUpdateHealthSnapshot(input: {
+  readonly manifest: ReleaseManifest;
+  readonly manifestDigest: string;
+  readonly homeId: string;
+  readonly endpoint: { readonly host: string; readonly port: number };
+  readonly rolePlan: { readonly host: string; readonly loadExecutor: boolean };
+  readonly trust: { readonly generation: number; readonly digest: string };
+  readonly runtimeVersion?: string;
+}): ProgramUpdateHealthSnapshot {
+  if (!/^sha256:[a-f0-9]{64}$/u.test(input.manifestDigest)) {
+    throw new TypeError("Program health manifest digest is invalid");
+  }
+  if (
+    !input.homeId || !input.endpoint.host ||
+    !Number.isInteger(input.endpoint.port) || input.endpoint.port <= 0 || input.endpoint.port > 65_535 ||
+    !Number.isSafeInteger(input.trust.generation) || input.trust.generation < 0 ||
+    !/^sha256:[a-f0-9]{64}$/u.test(input.trust.digest)
+  ) throw new TypeError("Program health runtime identity is invalid");
+  if (canonicalize(input.manifest.durableSchemas) !== canonicalize(DURABLE_SCHEMA_INVENTORY)) {
+    throw new Error("Program health durable schema inventory drifted");
+  }
+  const runtimeVersion = (input.runtimeVersion ?? process.versions.node).replace(/^v/u, "");
+  if (runtimeVersion !== input.manifest.nodeVersion) {
+    throw new Error("Program health runtime version does not match the signed release");
+  }
+  return Object.freeze({
+    releaseManifestDigest: input.manifestDigest,
+    protocolRange: Object.freeze({ ...input.manifest.protocolRange }),
+    durableSchemas: Object.freeze(DURABLE_SCHEMA_INVENTORY.map((row) => Object.freeze({ ...row }))),
+    homeId: input.homeId,
+    endpoint: Object.freeze({ ...input.endpoint }),
+    rolePlan: Object.freeze({ ...input.rolePlan }),
+    trust: Object.freeze({ ...input.trust }),
+  });
+}
+
+export function buildProgramUpdateTrustProjection(
+  mesh: MeshRuntimeBootstrap,
+): { readonly generation: number; readonly digest: string } {
+  if (mesh.mode === "trusted-home") {
+    return Object.freeze({
+      generation: mesh.trust.trustEpoch,
+      digest: protocolDigest("ProgramUpdateTrustProjection", 1, mesh.trust),
+    });
+  }
+  return Object.freeze({
+    generation: 0,
+    digest: protocolDigest("ProgramUpdateSingleMachineTrust", 1, {
+      deviceId: mesh.deviceKey.deviceId,
+      trustedIdentities: mesh.trustedIdentities,
+      authorizedDeviceIds: mesh.authorizedDeviceIds,
+    }),
+  });
+}
+
 export function startAutomaticUpdateCheck(
   deps: UpdateRuntimeDeps = {},
 ): void {
@@ -110,12 +177,6 @@ export async function runUpdateCommand(
   if (!controller) {
     throw new Error("当前开发构建未嵌入稳定发布源；请使用正式安装包");
   }
-  if (options.restorePrevious) {
-    const lock = await readLock().catch(() => null);
-    if (lock && isProcessAlive(lock.pid)) {
-      throw new Error("知行仍在安全运行；请先完成当前工作并停止知行，再恢复上一个可用版本");
-    }
-  }
   const receipt = options.restorePrevious
     ? await controller.restorePrevious()
     : await controller.checkFailSafe();
@@ -124,9 +185,113 @@ export async function runUpdateCommand(
 }
 
 export async function readProgramUpdateProjection(
-  store = new ProgramStore(),
+  store: ProgramStore,
+  deps: {
+    readonly verifier: ProtocolSignatureVerifier;
+    readonly lifecycle: { state(operationId: string): Promise<DeviceLifecycleOperation | undefined> };
+    readonly health: () => Promise<ProgramUpdateHealthSnapshot>;
+  },
 ): Promise<ProgramUpdateProjection> {
-  return projectProgramUpdate(await store.loadReceipt().catch(() => undefined));
+  const receipt = await store.loadReceipt().catch(() => undefined);
+  if (!receipt) return { visible: false };
+  const pointer = await store.loadPointer().catch(() => undefined);
+  const current = pointer
+    ? await store.loadCurrentManifest(deps.verifier).catch(() => undefined)
+    : undefined;
+  const staged = receipt.candidateManifestDigest
+    ? await store.loadStagedManifest(receipt.candidateManifestDigest, deps.verifier).catch(() => undefined)
+    : undefined;
+  const lifecycle = receipt.operationId
+    ? await deps.lifecycle.state(receipt.operationId).catch(() => undefined)
+    : undefined;
+  const health = await deps.health().catch(() => undefined);
+  return buildProgramUpdateProjection({
+    receipt,
+    pointerCurrentManifestDigest: current?.digest,
+    stagedManifestDigest: staged?.digest,
+    lifecycle,
+    health,
+  }, staged?.manifest.releaseVersion ?? (
+    current && current.digest === receipt.candidateManifestDigest
+      ? current.manifest.releaseVersion
+      : undefined
+  ));
+}
+
+export function buildProgramUpdateProjection(
+  facts: {
+    readonly receipt?: ProgramUpdateReceipt;
+    readonly pointerCurrentManifestDigest?: string;
+    readonly stagedManifestDigest?: string;
+    readonly lifecycle?: DeviceLifecycleOperation;
+    readonly health?: ProgramUpdateHealthSnapshot;
+  },
+  candidateRelease?: string,
+): ProgramUpdateProjection {
+  const receipt = facts.receipt;
+  if (!receipt) return { visible: false };
+  const inconsistent = (): ProgramUpdateProjection => ({
+    visible: true,
+    state: "action-required",
+    message: "更新状态需要修复",
+    code: "update-state-inconsistent",
+    action: "contact-support",
+  });
+  const currentDigest = facts.pointerCurrentManifestDigest;
+  if (!currentDigest) return inconsistent();
+
+  if (receipt.phase === "downloading") {
+    return currentDigest === receipt.currentManifestDigest
+      ? projectProgramUpdate(receipt, candidateRelease)
+      : inconsistent();
+  }
+  if (receipt.phase === "staged") {
+    return currentDigest === receipt.currentManifestDigest &&
+      facts.stagedManifestDigest === receipt.candidateManifestDigest
+      ? projectProgramUpdate(receipt, candidateRelease)
+      : inconsistent();
+  }
+  if (receipt.phase === "handed-off") {
+    const operation = facts.lifecycle;
+    const identity = operation?.identity;
+    if (
+      !operation || identity?.kind !== "upgrade" ||
+      identity.operationId !== receipt.operationId ||
+      identity.fromManifestDigest !== receipt.currentManifestDigest ||
+      identity.targetManifestDigest !== receipt.candidateManifestDigest ||
+      (facts.stagedManifestDigest !== receipt.candidateManifestDigest &&
+        currentDigest !== receipt.candidateManifestDigest) ||
+      operation.phase === "terminal" || operation.phase === "aborted"
+    ) return inconsistent();
+    const switched = operation.phase === "pointer-switched" || operation.phase === "health-verified";
+    const expectedCurrent = switched ? identity.targetManifestDigest : identity.fromManifestDigest;
+    if (currentDigest !== expectedCurrent) return inconsistent();
+    if (switched && facts.health?.releaseManifestDigest !== identity.targetManifestDigest) {
+      return inconsistent();
+    }
+    return projectProgramUpdate(receipt, candidateRelease);
+  }
+
+  if (
+    currentDigest !== receipt.currentManifestDigest ||
+    facts.health?.releaseManifestDigest !== receipt.currentManifestDigest
+  ) return inconsistent();
+  return projectProgramUpdate(receipt, candidateRelease);
+}
+
+export async function readCurrentAuthorityProgramUpdateProjection(): Promise<ProgramUpdateProjection> {
+  try {
+    return await readCurrentAuthorityProgramUpdateStatus();
+  } catch {
+    return { visible: false };
+  }
+}
+
+export async function consumeProgramUpdateNotice(
+  noticeToken: string,
+  store = new ProgramStore(),
+): Promise<{ readonly consumed: boolean }> {
+  return { consumed: await store.consumeNotice(noticeToken) };
 }
 
 export function printProgramUpdateProjection(

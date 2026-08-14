@@ -291,7 +291,9 @@ export {
   type DurableSchemaId,
 } from "./durable-schema.js";
 export {
+  PROGRAM_ARTIFACT_LIMITS,
   STABLE_RELEASE_TARGETS,
+  assertProgramArtifactArchiveBytes,
   assertReleaseAdvance,
   assertStableReleaseBinding,
   compareReleaseSemver,
@@ -300,6 +302,7 @@ export {
   decodeProgramArtifact,
   decodeAndValidateReleaseManifest,
   decodeAndValidateStableReleaseIndex,
+  programArtifactStorageBudget,
   validateProgramUpdateReceipt,
   validateProgramArtifact,
   validateReleaseManifest,
