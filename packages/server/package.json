@@ -27,7 +27,7 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@types/node": "^22.14.1",
+    "@types/node": "^24.0.0",
     "@types/ws": "^8.5.13",
     "@zhixing/test-utils": "workspace:*",
     "tsup": "^8.4.0",

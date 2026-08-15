@@ -294,6 +294,7 @@ export {
   PROGRAM_ARTIFACT_LIMITS,
   STABLE_RELEASE_TARGETS,
   assertProgramArtifactArchiveBytes,
+  assertReleaseNodeVersion,
   assertReleaseAdvance,
   assertStableReleaseBinding,
   compareProgramArtifactPaths,

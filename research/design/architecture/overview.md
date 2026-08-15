@@ -181,7 +181,7 @@ graph TB
 | 类别 | 选择 | 理由 |
 |------|------|------|
 | 语言 | TypeScript (ESM, strict) | 类型安全 + Node.js 生态 |
-| 运行时 | Node.js 22+ | 最新 LTS，与 OpenClaw 对齐 |
+| 运行时 | 开发工具链使用受支持 LTS；官方制品内置私有 Node | 官方用户零 Node 前置；精确制品版本与源码/npm 最低版本分离，见 [Node.js 运行时边界](../modules/distributed-runtime/node-runtime-boundaries.md) |
 | 包管理 | pnpm (workspace monorepo) | 见 [ADR-001](./decisions/001-monorepo-structure.md) |
 | 测试 | Vitest | 快速，原生 ESM 支持 |
 | 构建 | tsup | 轻量，基于 esbuild |

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
-import { compareProgramArtifactPaths } from "../packages/core/dist/protocol/index.js";
+import { assertReleaseNodeVersion, compareProgramArtifactPaths } from "../packages/core/dist/protocol/index.js";
 
 export const RELEASE_TARGETS = Object.freeze([
   "win32-x64",
@@ -27,7 +27,7 @@ export const RELEASE_PRODUCER_PATHS = Object.freeze([
   "scripts/release-tooling.mjs",
 ]);
 
-export { compareProgramArtifactPaths };
+export { assertReleaseNodeVersion, compareProgramArtifactPaths };
 
 export const RELEASE_SMOKE_SCENARIO_CONTRACTS = Object.freeze([
   ["clean-install", "candidate-installer", ["install", "--program-root", "{programRoot}", "--manifest", "{candidateManifest}", "--artifact", "{candidateArtifact}"], "candidate-current"],
@@ -103,13 +103,6 @@ export function assertExactStringSet(input, expected, label) {
     throw new Error(`${label} is not the canonical exact-set`);
   }
   return input;
-}
-
-export function assertReleaseNodeVersion(value) {
-  if (typeof value !== "string" || !/^22\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:[-+][0-9A-Za-z.-]+)?$/u.test(value)) {
-    throw new Error("stable release artifacts must embed an exact Node 22 version");
-  }
-  return value;
 }
 
 export function stableProgramLoaderSource(target, entry) {

@@ -137,7 +137,7 @@ describe("automatic update runtime", () => {
 
   it("binds candidate health to the exact signed Node runtime", () => {
     const manifest = {
-      nodeVersion: "22.18.0",
+      nodeVersion: "24.18.0",
       protocolRange: { readMin: "1", readMax: "1", writeVersion: "1" },
       durableSchemas: DURABLE_SCHEMA_INVENTORY,
     } as ReleaseManifest;
@@ -149,9 +149,9 @@ describe("automatic update runtime", () => {
       rolePlan: { host: "anchor-host", loadExecutor: true },
       trust: { generation: 1, digest: `sha256:${"c".repeat(64)}` },
     } as const;
-    expect(buildProgramUpdateHealthSnapshot({ ...input, runtimeVersion: "22.18.0" }))
+    expect(buildProgramUpdateHealthSnapshot({ ...input, runtimeVersion: "24.18.0" }))
       .toMatchObject({ releaseManifestDigest: input.manifestDigest });
-    expect(() => buildProgramUpdateHealthSnapshot({ ...input, runtimeVersion: "22.19.0" }))
+    expect(() => buildProgramUpdateHealthSnapshot({ ...input, runtimeVersion: "24.19.0" }))
       .toThrow("runtime version does not match");
   });
 

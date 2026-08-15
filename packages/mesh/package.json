@@ -123,6 +123,7 @@
     "build/Release/checkpoint_child_bridge.*"
   ],
   "scripts": {
+    "install": "node scripts/build-checkpoint-child-bridge.mjs",
     "build": "node scripts/build-checkpoint-child-bridge.mjs && tsup",
     "pretest": "node scripts/build-checkpoint-child-bridge.mjs && node ../../scripts/check-mesh-live-tls-tests.mjs",
     "test": "vitest run",
@@ -136,7 +137,8 @@
   },
   "devDependencies": {
     "@cipherman/pake-js": "0.1.1",
-    "@types/node": "^22.15.2",
+    "@types/node": "^24.0.0",
+    "@zhixing/test-utils": "workspace:*",
     "tsup": "^8.4.0",
     "typescript": "^5.8.3",
     "vitest": "^3.1.1"

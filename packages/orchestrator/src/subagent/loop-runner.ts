@@ -272,7 +272,7 @@ export async function runSubAgentLoop(
   };
   opts.eventBus.on("llm:request_end", usageListener);
 
-  // AbortSignal.any 合并三路信号 —— Node ≥22 稳定,本仓库 engines.node:">=22.0.0";
+  // AbortSignal.any 合并三路信号 —— Node ≥24 稳定,本仓库 engines.node:">=24.0.0";
   // 子 loop 拿到的 abortSignal 是合并 signal,任一软上限触发都让它 aborted。
   const externalAbortSignal = AbortSignal.any([
     wallClockController.signal,

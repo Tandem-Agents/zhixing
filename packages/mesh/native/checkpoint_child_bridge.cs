@@ -82,7 +82,7 @@ internal static class CheckpointChildBridge {
     var full = Path.GetFullPath(input);
     var root = Path.GetPathRoot(full);
     if (String.IsNullOrEmpty(root)) throw new InvalidOperationException("Checkpoint path is not absolute");
-    var current = CreateFileW(root, FILE_LIST_DIRECTORY | FILE_ADD_SUBDIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+    var current = CreateFileW(root, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, IntPtr.Zero, OPEN_EXISTING,
       FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero);
     if (current == new IntPtr(-1)) throw Win32("Unable to open checkpoint filesystem root");

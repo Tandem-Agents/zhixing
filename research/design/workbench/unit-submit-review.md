@@ -277,7 +277,7 @@
 - **架构空洞判定**：总纲、规格 Unit38 补充、release guide 与 D38-01～D38-10 已唯一确定当前产品行为、事实源、阶段顺序、恢复边界、用户可见性和发布门禁；本轮发现的是实现与证据未满足既定合同，不是需要用户补充产品选择的架构空洞。
 - **状态约定**：[ ] 未审；[x] 已完成且无 P0/P1；[!] 存在 P0/P1；[~] 输入变化须重审。
 
-> **清单状态**：0 项 `[ ]`、27 项 `[x]`、0 项 `[!]`、4 项 `[~]`；U38-19～U38-20 修复改变应用移除、永久设备移除、相关旅程及最终交付闭包，IR38-21、IR38-22、IR38-30、IR38-31 的旧证据已作废，须由后续独立审查重新判定；其余 27 项 `[x]` 直接复用，源问题列表为空。
+> **清单状态**：0 项 `[ ]`、31 项 `[x]`、0 项 `[!]`、0 项 `[~]`；本轮 IR38-21、IR38-22、IR38-30、IR38-31 均已独立重审通过，其余 27 项 `[x]` 的登记输入未变并直接复用；两类问题列表为空。
 
 ### 来源覆盖
 
@@ -365,7 +365,7 @@
 
 ### 审查项
 
-> 本轮已审完全部 11 项 `[~]`，其余 20 项 `[x]` 的登记输入未变并直接复用。状态仅表示本轮独立判定，不以专项修复验证或测试结果代替功能判断。
+> 本轮 4 项 `[~]` 已全部独立完成并更新为 `[x]`，其余 27 项 `[x]` 的登记输入未变并直接复用。状态仅表示本轮独立判定，不以专项修复验证或测试结果代替功能判断。
 
 | 编号 | 状态 | 审查对象 | 独立通过条件与可复核证据 |
 | --- | --- | --- | --- |
@@ -389,8 +389,8 @@
 | IR38-18 | [x] | 协议不兼容与 mesh 行为：远端 peer 版本/能力/schema 不兼容时仍提供规定的只读诊断，写入和 activation fail-closed；兼容 peer 正常工作，旧 peer 不触发本地降级或第二同步路径。 | 当前独立证据：冻结 mesh protocol/capability admission继续 fail-closed；十三项 durable schema inventory由现有 codec/descriptor共用，current/candidate/previous互读门禁拒绝版本漂移；当前 v1无可达activation。EX38-01重开条件未满足，未发现 P0/P1。 |
 | IR38-19 | [x] | 离线诊断和 surface：doctor、status 与 pure surface 只读组合 release manifest、current/previous pointer、stage/receipt、active upgrade、protocol/schema、真实 managed snapshot、checkpoint configuration、SecretStore inspect 和 lifecycle blocker；host absent、离线、无候选、下载、待安全点、恢复及失败均收敛为一个 code/message/action。不得 activation、SecretStore 写、网络探测或 lifecycle 效果，不泄漏秘密、URL、路径、内部 identity、环境变量或 raw error。 | 当前独立证据：doctor 先消费 current-authority RPC，unavailable时才以同一 `noAutoCreate` config snapshot做本机纯证明；no-genesis 单机零 SecretStore，paired 仅 existing-only inspect且坏 binding/key/trust/non-current均 unavailable。该路径不建配置、不联网、不 activation、不写 lifecycle，继续复用唯一 update projection和固定公开行动，未泄漏 URL/path/identity/raw error，无 P0/P1。 |
 | IR38-20 | [x] | 显式 update 与 server RPC：认证和 loopback、strict 输入、request identity、并发/重放、公开错误及生命周期 handoff 全部在首个效果前验证；CLI 与 RPC 只调用同一 controller/lifecycle，不产生旁路。 | 当前独立证据：router认证、method loopback、plain-object/exact-key/type/range、request identity与公开错误均在 controller/lifecycle首效果前；CLI update/restore和installer existing update只经同一RPC handoff，active/terminal重放加入原operation。P38-10是内部storage identity，不形成公开旁路，本项无 P0/P1。 |
-| IR38-21 | [~] | 应用移除：先复用现有安全 stop 收束 current/future launch，再只移除程序工件；用户 home、配置、信任、SecretStore、checkpoint 和可恢复数据保持，效果丢失可重放。 | 旧证据已作废：本轮修改 app-remove、稳定 installer/helper、直接测试及删除合同；须独立重审 commit 后两层接纳、固定失败行动与 future-absent 重放。 |
-| IR38-22 | [~] | 永久设备移除与误操作边界：与应用移除保持独立入口、强确认和不可逆语义；只将 zz uninstall 与 zz update --rollback 作为旧别名拒绝，不能误伤当前 zz device remove --permanent。文案、help、交互和非交互参数清楚区分“移除应用并保留数据”与“永久移除设备及本机数据”。 | 旧证据已作废：本轮修改 device decision CLI、issuer journal 纯投影、mesh status 回退、直接测试及删除合同；须独立重审 online/offline/status 失败与 explicit cancel 交界。 |
+| IR38-21 | [x] | 应用移除：先复用现有安全 stop 收束 current/future launch，再只移除程序工件；用户 home、配置、信任、SecretStore、checkpoint 和可恢复数据保持，效果丢失可重放。 | 本轮独立证据：`removeApplication()` 仍先冻结并核准 managed future，安全 stop 后才 exact unregister；commit 后第一层 handoff 等待稳定 installer 的 `error/exit` 且只接受无 signal 的 exit 0，installer 又等待固定平台 helper 的真实 `spawn` 后才退出 0。任一层未接纳统一返回“应用未完全移除，请重试”，不泄漏 raw/path；helper 仅接管程序根，`--preserve-user-data` 仍为强制门禁。future 已 absent 时 managed handle 只 read-back absent，失败后重跑同一路径，不恢复自动启动或触碰 home、信任、SecretStore、checkpoint 与可恢复数据，无 P0/P1。 |
+| IR38-22 | [x] | 永久设备移除与误操作边界：与应用移除保持独立入口、强确认和不可逆语义；只将 zz uninstall 与 zz update --rollback 作为旧别名拒绝，不能误伤当前 zz device remove --permanent。文案、help、交互和非交互参数清楚区分“移除应用并保留数据”与“永久移除设备及本机数据”。 | 本轮独立证据：公开入口继续明确分为 `zz app remove`（保留全部数据）与 `zz device remove --permanent`（永久移除设备及本机数据），device remove 的 target/mode/永久确认门未弱化，destroy/lost 仍在不可逆 decision 前强确认，explicit cancel 继续只走本次 operation 的 exact durable abort且不再二次确认。decision dispatch 失败只读一次既有 status：在线优先 target，离线或 target 读取失败回退 issuer journal；未决给“继续或取消”，已决/terminal 回放既有进度，status 也不可用才提示稍后查询，全程零自动 abort、零 raw error 和零旧别名恢复，无 P0/P1。 |
 | IR38-23 | [x] | 七组旧路径按上表 exact-set 完整退役：每组的 reader、writer、组合根、公开 export、迁移状态、别名/注入参数、golden 和文档引用均反向清点；只保留 durable schema inventory 明示且被 minimumRollbackVersion 实际消费、无隐藏开关的正式 reader。默认安装不扫描旧位置，生产图无双写、双读、旧 capability 或 shadow owner。 | 权威依据：specification §8/§13/§15、D38-08。本轮证据：七组 production reader/writer/route 扫描未发现双写、旧 capability 或 shadow owner；`StopDeps.killFn/taskkillFn`未调用字段和CLI README迁移文字没有生产消费或当前用户损失，价值裁决后已转正式 EX38-02。 |
 | IR38-24 | [x] | 五目标发布工件构建：每个 target 从同一 source/package closure 形成自包含 Node 22 程序树，消解 workspace:*，只含运行资产；消费平台签名/公证后才冻结最终归档 bytes、manifest 和逐文件摘要。版本、target、权限、原生件、launcher read-back 全等，开发占位 channel、开发依赖、install script、source map、测试资产和秘密不得进入正式包。 | 本轮独立证据：程序树在构建前冻结 source/package closure，strict tree receipt 绑定 target、runtime、tree、source、package 与有限 producer exact-set，构建后再次复验；artifact builder 与 target evidence 均重算并全等消费同一 receipt，五目标树仍排除 workspace 协议、测试/开发资产、source map、install script 和秘密。 |
 | IR38-25 | [x] | release:check 是确定、受控输出且无外部发布副作用的发布门：先运行 lint/test/build，再验证同一 source/package 输入、五目标、上述 12 项 smoke、签名/公证、manifest/artifact、50 行 ledger 和文档版本；结束前复验输入未漂移，才原子写 release-report 与可选 candidate index。不依赖 Git 暂存/干净状态，不保管私钥、不调用外部发布；失败不得留下伪成功或半写正式输出。 | 本轮独立证据：`release:check`重算当前 source/package/producer closure，逐目标全等核对 tree receipt、signed manifest/artifact 与十二项 target-local evidence，再检查固定 50 id；最终输出前再次复验输入。任一旧 tree/report、producer 漂移或非 canonical artifact 均在 report/index 写入前失败，脚本未读取 Git 暂存状态、私钥或调用外部发布。 |
@@ -398,8 +398,8 @@
 | IR38-27 | [x] | 上表 10 个 fault id 逐行闭合：每行分别覆盖其规范终态及适用的效果前失败、效果后响应丢失、重启和恢复；fault-update 还必须证明旧版安全可用或兼容恢复并给唯一用户行动。只有 10 行各自有结论和生产证据时通过。 | 本轮独立证据：逐行反查十个 fault 的 production 终态，变更交界仅影响 fault-update；自动轮次 teardown 等待 exact promise 后才释放 ProgramStore/FileLock，FileLock 仅在 PID+birth 消失/换代后接替，旧 generation completion 与 stale release 均不能污染 current，失败继续保留旧版或给既有唯一恢复行动。 |
 | IR38-28 | [x] | 上表 8 个 security id 逐行闭合，并在第 38 单元交界核对发布签名、规范字节、target/path、秘密和供应链；每个拒绝均在首个副作用前，公开结果无敏感原文。只有 8 行及本单元安全交界各自有结论时通过。 | 当前独立证据：八项冻结security行逐项可定位；Unit38 release decode/JCS/signature/index→manifest→artifact/target/path/秘密与依赖边界均在首程序效果前fail-closed，公开结果不含URL、path、identity或raw error。P38-12影响产品scenario证据的执行对象，不推翻已签工件完整性或八项安全终态，本项无P0/P1。 |
 | IR38-29 | [x] | topology-single-machine 与 topology-paired-devices 分别闭合：anchor/executor 和 managed/on-demand/foreground 复用同一更新、lifecycle、health、兼容与诊断原语；pure surface 只走 current authority 的有限投影，本机零 updater/lifecycle/host。未启用角色零模块/监听，无漏装、双装或角色旁路。 | 本轮独立证据：anchor/executor 两根及 managed/on-demand/foreground 均装配同一 automatic update owner 与异步 teardown 合同，无独立 updater 或角色旁路；单机与 paired 只改变 current-authority 投影来源。pure surface 继续只消费有限投影，未装配 ProgramStore、lifecycle、host、timer 或更新监听。 |
-| IR38-30 | [~] | 上表 12 个 journey id 必须逐行给出入口、用户语言、终态和直接证据；另将 12 项 release smoke exact-set 逐项映射到相关旅程。开箱、配对、日常、离线、uncertain、迁居/恢复、停机/永久移除与四个更新旅程均保持零拓扑术语、正常无噪声、失败一个下一步；只有 12 行和 12 项 smoke 各自有结论时通过。 | 旧证据已作废：两类删除 journey 的公开失败反馈、重试/继续行动与直接场景证据已变化，须独立重审 journey-app-remove 与 permanent-device-remove 交界。 |
-| IR38-31 | [~] | 最终交付装配与证据充分：当前变更集中的 root/scripts、core、cli、mesh、owner-kernel、providers、server、tools-builtin、模块文档和 workbench 每组均反向归入 IR38-02～IR38-30；所有 production 文件有真实 producer、consumer、composition root 和公开出口，直接测试走生产路径。生成 version/channel、S7、golden、导出、ledger、guide、report 与代码一致，无孤立实现、测试专用生产旁路或范围外能力。 | 旧证据已作废：新增 program-root-removal 生产模块并修改两条装配/消费链、直接测试和三份文档；须重新核对交付闭包、构建产物与无旁路。 |
+| IR38-30 | [x] | 上表 12 个 journey id 必须逐行给出入口、用户语言、终态和直接证据；另将 12 项 release smoke exact-set 逐项映射到相关旅程。开箱、配对、日常、离线、uncertain、迁居/恢复、停机/永久移除与四个更新旅程均保持零拓扑术语、正常无噪声、失败一个下一步；只有 12 行和 12 项 smoke 各自有结论时通过。 | 本轮独立证据：未受影响的 10 个 journey 与 10 项 smoke 直接复用；`journey-app-remove`/`app-remove-preserves-data` 由 exact candidate CLI 进入当前 program runtime，成功等待两层删除责任接纳并在 target-local smoke 中继续等待程序根消失、同时 read-back home sentinel 不变，任一接纳失败只给固定重试行动。`journey-stop-remove`/`permanent-device-remove-confirms` 由 candidate CLI 在 `--permanent` 缺失时零 home 效果拒绝，强确认后的 transfer/destroy/lost、decision 响应丢失、在线转离线与 issuer fallback 分别由 command、journal、mesh 生产路径证据覆盖；未决只给继续或取消，已决/terminal 回放进度，status 不可用只给稍后查询，无拓扑术语、raw error 或自动 abort，无 P0/P1。 |
+| IR38-31 | [x] | 最终交付装配与证据充分：当前变更集中的 root/scripts、core、cli、mesh、owner-kernel、providers、server、tools-builtin、模块文档和 workbench 每组均反向归入 IR38-02～IR38-30；所有 production 文件有真实 producer、consumer、composition root 和公开出口，直接测试走生产路径。生成 version/channel、S7、golden、导出、ledger、guide、report 与代码一致，无孤立实现、测试专用生产旁路或范围外能力。 | 本轮独立证据：16 个提交文件逐一反向归项。`app-remove` 从公开 CLI 进入 stable runtime/installer，新增 `program-root-removal` 仅由 production installer import，并已进入 `program-installer` 构建入口及实际 `dist`；两层 child 事件由真实 Node/OS 进程测试覆盖，无测试专用 production 旁路。device decision 从公开 CLI 经 strict management facade、RPC composition root、mesh target/issuer journal 到纯 status projection，command、authority 与 fallback 均有直接生产路径证据。charter、specification、release guide、正式问题状态与 V38-08 构建账一致；未改 root/scripts/core/mesh/owner-kernel/providers/tools-builtin 的冻结内部合同，未新增 journal、lifecycle、发布能力或范围外框架，无 P0/P1。 |
 
 ---
 ## P0/P1 阻断问题列表
@@ -422,4 +422,4 @@
 | --- | --- | --- | --- | --- | --- |
 
 
-> **独立审查结论**：当前待受影响范围复审。27 项 `[x]` 继续复用，IR38-21、IR38-22、IR38-30、IR38-31 为 `[~]` 且旧证据已作废，零 `[ ]`/`[!]`；两类问题列表和已删除问题价值裁决表均为空。本轮未进入全单元终审或单元提交验证。
+> **独立审查结论**：独立审查通过。31 项均为 `[x]`，零 `[ ]`/`[~]`/`[!]`；本轮 4 个受影响节点已逐项独立重审，27 个未受影响节点直接复用，两类问题列表和已删除问题价值裁决表均为空。当前完整交付物未发现 P0/P1 或需登记的 P2/P3。

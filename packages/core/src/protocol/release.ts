@@ -402,6 +402,14 @@ const RELEASE_MANIFEST_FIELDS = [
   "packageGraphDigest", "protocolRange", "releaseSequence", "releaseVersion", "sourceTreeDigest", "target", "v",
 ] as const;
 const STABLE_RELEASE_INDEX_FIELDS = ["channel", "keyId", "releaseSequence", "releaseVersion", "targets", "v"] as const;
+const RELEASE_NODE_VERSION_PATTERN = /^24\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:[-+][0-9A-Za-z.-]+)?$/u;
+
+export function assertReleaseNodeVersion(value: unknown): string {
+  if (typeof value !== "string" || !RELEASE_NODE_VERSION_PATTERN.test(value)) {
+    throw new TypeError("Release Node version must identify an exact Node 24 version");
+  }
+  return value;
+}
 
 function validateUnsignedReleaseManifest(input: UnsignedReleaseManifest): UnsignedReleaseManifest {
   const value = object(input, "Unsigned release manifest");
@@ -410,9 +418,7 @@ function validateUnsignedReleaseManifest(input: UnsignedReleaseManifest): Unsign
   semver(value.releaseVersion, "Release version");
   sequence(value.releaseSequence);
   target(value.target);
-  if (typeof value.nodeVersion !== "string" || !/^22(?:\.[0-9]+){0,2}$/u.test(value.nodeVersion)) {
-    throw new TypeError("Release Node version must identify Node 22");
-  }
+  assertReleaseNodeVersion(value.nodeVersion);
   digest(value.sourceTreeDigest, "Source tree digest");
   digest(value.packageGraphDigest, "Package graph digest");
   const artifact = artifactRef(value.artifact, "Release artifact");

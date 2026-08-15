@@ -58,7 +58,7 @@
     "@zhixing/tools-builtin": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "^22.14.1",
+    "@types/node": "^24.0.0",
     "@zhixing/test-utils": "workspace:*",
     "tsup": "^8.4.0",
     "typescript": "^5.8.3",

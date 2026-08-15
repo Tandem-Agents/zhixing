@@ -6,6 +6,7 @@ import {
   PROGRAM_ARTIFACT_LIMITS,
   assertProgramArtifactArchiveBytes,
   STABLE_RELEASE_TARGETS,
+  assertReleaseNodeVersion,
   assertReleaseAdvance,
   assertStableReleaseBinding,
   createSignedReleaseManifest,
@@ -110,6 +111,13 @@ describe("stable release protocol", () => {
     }))).toThrow("canonical SemVer");
   });
 
+  it("accepts only exact Node 24 release runtime versions", () => {
+    expect(assertReleaseNodeVersion("24.19.0")).toBe("24.19.0");
+    expect(() => assertReleaseNodeVersion("24")).toThrow("exact Node 24");
+    expect(() => assertReleaseNodeVersion("24.19")).toThrow("exact Node 24");
+    expect(() => assertReleaseNodeVersion("22.19.0")).toThrow("exact Node 24");
+  });
+
   it("accepts only legal atomic update receipt combinations", () => {
     expect(validateProgramUpdateReceipt({
       v: 1, currentManifestDigest: DIGEST, target: "linux-x64", phase: "idle", notice: "none",
@@ -211,7 +219,7 @@ function signedManifest(
     releaseSequence: "1",
     channel: "stable",
     target,
-    nodeVersion: "22.18.0",
+    nodeVersion: "24.19.0",
     sourceTreeDigest: DIGEST,
     packageGraphDigest: OTHER_DIGEST,
     artifact: { digest: DIGEST, bytes: 42 },

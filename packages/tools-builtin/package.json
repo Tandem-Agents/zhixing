@@ -27,7 +27,7 @@
     "turndown": "^7.2.0"
   },
   "devDependencies": {
-    "@types/node": "^22.14.1",
+    "@types/node": "^24.0.0",
     "@types/turndown": "^5.0.5",
     "@zhixing/test-utils": "workspace:*",
     "tsup": "^8.4.0",

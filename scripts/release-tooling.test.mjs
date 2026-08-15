@@ -108,7 +108,7 @@ test("the release producer exact-set is complete and binds the source fingerprin
   assert.match(evidenceProducer, /candidate manifest does not bind the current build input closure/u);
 });
 
-test("release evidence requires producer-bound target terminals and an exact Node 22 runtime", () => {
+test("release evidence requires producer-bound target terminals and an exact Node 24 runtime", () => {
   assert.deepEqual(RELEASE_SMOKE_SCENARIOS, RELEASE_SMOKE_SCENARIO_CONTRACTS.map(({ id }) => id));
   const sha = `sha256:${"a".repeat(64)}`;
   const expected = {
@@ -138,8 +138,8 @@ test("release evidence requires producer-bound target terminals and an exact Nod
     ...report,
     scenarios: report.scenarios.slice(1),
   }, expected), /scenario set/);
-  assert.equal(assertReleaseNodeVersion("22.18.0"), "22.18.0");
-  assert.throws(() => assertReleaseNodeVersion("24.0.0"), /Node 22/);
+  assert.equal(assertReleaseNodeVersion("24.19.0"), "24.19.0");
+  assert.throws(() => assertReleaseNodeVersion("22.19.0"), /Node 24/);
 });
 
 test("release smoke contracts are strict candidate-entry descriptors with a fixed producer", async () => {

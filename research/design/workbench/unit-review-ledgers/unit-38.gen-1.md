@@ -11,11 +11,11 @@
 
 ## 当前状态
 
-- **当前状态**:U38-19～U38-20 已在同一专项冻结指纹上完成实现、最小必要验证、逐格功能复核与四路冷启动对抗，均为 P2/小、已验证；本轮生产、公共合同与直接测试变化影响 IR38-21、IR38-22、IR38-30、IR38-31，四项已按协议转为`[~]`且旧证据作废，其余 27 项`[x]`继续复用。U38-01～U38-18 与 EX38-01～EX38-03 既有结论不变，尚未进入全单元终审或单元提交验证
-- **连续无新增问题轮数**:0 / 2
-- **交付物是否冻结**:是（仅冻结 U38-19～U38-20 专项交付物；全单元交付物须待 4 项`[~]`独立复审后另行冻结）
-- **交付物文件集**:14 个专项冻结交付文件：CLI app-remove、稳定 installer/helper、device CLI、issuer authority与mesh status生产文件及五份直接测试；charter、specification与release guide三份直接权威文档
-- **当前交付物指纹**:U38-19～U38-20 专项 `sha256:9fe99009c1d6bc75f882d0a8b7a43a1850766687ee6711fa94683de0f2475325`（14 个生产、测试及直接架构/规格文件按相对路径 ordinal 排序，以 `path<TAB>file-sha256`、UTF-8 LF 且无末尾换行聚合后取 SHA-256；排除 workbench 状态文件）；全单元指纹待后续独立复审后重冻
+- **当前状态**:第38单元已封版；同一155路径最终冻结指纹已完成两轮冻结终审（R38-01～R38-10全部2/2）、独立功能审查（IF38-01～IF38-07全部已覆盖）与单元提交验证，均零新增且无未解决问题
+- **连续无新增问题轮数**:2 / 2
+- **交付物是否冻结**:是（全单元冻结；任何非 workbench 交付文件变化均使两轮终审失效）
+- **交付物文件集**:以第 37 单元封版提交`9c0274bd13b3af02863cc4aecf35b9bd1ef1ea5a`为基线，到当前提交`512996c7`的 155 个非 workbench 交付路径：144 个现存文件、11 个明确退役文件；按下方派生产物闭包的 12 个原子输入组和 10 条完整事实链覆盖
+- **当前交付物指纹**:`sha256:bcd9b0f41c6fe8a38236a232a4704ab09d35c8165a60299a12908da538bb0bfe`（155 个路径按 ordinal 排序；现存文件记录`path<TAB>file-sha256`，退役文件记录`path<TAB><deleted>`，UTF-8 LF、无末尾换行聚合后取 SHA-256；排除 workbench 状态文件与构建产物）
 - **架构来源**:`research/design/modules/distributed-runtime/distributed-runtime-charter.md`、`research/design/modules/distributed-runtime/always-online-and-local-execution-requirements.md`、`research/design/modules/distributed-runtime/specification.md`、`research/design/modules/distributed-runtime/s2-security-supply-chain-review.md`、`research/design/modules/distributed-runtime/release-and-maintenance-guide.md`、`research/design/modules/distributed-runtime/unit-38-final-acceptance-ledger.json`及已定稿开发清单D38-01～D38-10
 
 ## 固定边界
@@ -32,6 +32,18 @@
 
 | 交付物变化(文件或同类组) | 派生关系与必须同步/核对项 | 低成本检查与证据 | 结论 |
 | ------------------------ | ------------------------- | ---------------- | ---- |
+| G1 根级发布入口与 11 个 release/security/S7 脚本（12 路径） | 根版本、固定命令、source/package/producer closure、五目标 evidence、S7 与供应链检查必须一致 | `package.json`版本为`0.1.0`且 generated version 全等；release 命令、S7 入口与 V38-05/V38-07 同输入证据有效；组指纹`3d4b362f…197aa` | 通过 |
+| G2 core release/durable-schema 协议与测试（5 路径） | public codec/export、ProgramArtifact ordinal、SemVer、十三 schema inventory 与 release scripts 必须同源 | core protocol 直接证据 V38-02、U38-09/U38-13 专项证据仍绑定当前输入；组指纹`c60ebe6c…e8116` | 通过 |
+| G3 device lifecycle 协议与 journal（3 路径） | upgrade/stop/removal 冲突身份、phase、strict codec 与 CLI/server 消费者一致 | U38-03/U38-18/U38-20 的真实 journal/mesh 证据有效；组指纹`d64a3d66…14025` | 通过 |
+| G4 FileLock/process identity 与直接测试（3 路径） | strict record、三平台 birth provider、reclaim claim、compare-token release 同步 | U38-16 专项真实 child 11/11 与 V38-02 输入未失效；组指纹`3422dea6…0fb8` | 通过 |
+| G5 CLI update/program 子系统与生成资产（22 路径） | ProgramStore、receipt、controller、lifecycle、doctor、app remove、installer bundle、生成 version/channel 与 tsup entry 同步 | V38-03、V38-06、V38-08 及当前 generated version/channel 预检有效；组指纹`2ae0a264…1bc8` | 通过 |
+| G6 CLI runtime/RPC facade 与清退文件（13 路径） | update/device management 请求、strict 输入、公开状态与退役 scheduler projection 同步 | 独立清单 IR38-20/22/23 通过；删除路径纳入全单元指纹；组指纹`58884102…dce8` | 通过 |
+| G7 CLI host composition、managed adapter、mesh/status 与测试（29 路径） | anchor/executor/foreground 装配、health、automatic owner、stop/removal/app-remove handoff 与 S7 描述一致 | V38-03/V38-04/V38-08、S7 20/20 与独立清单 IR38-12～22/29～31 有效；组指纹`72342152…393e` | 通过 |
+| G8 CLI 公开入口、REPL/config/secret/setup/startup（9 路径） | 版本与 update surface、doctor/app/device 命令、SecretStore-only 与稳定产品文案一致 | 独立清单 IR38-06/11/19～23/30 通过；组指纹`0bb58b9a…0308` | 通过 |
+| G9 core memory/scheduler/workscene 退役与冻结合同（26 路径） | 七组旧路径 reader/writer/export/test 删除，保留的新 in-memory/authority 入口与 package consumer 一致 | IR38-23 反向 reachability、S7/golden 与删除 tombstone 均已核对；组指纹`e1a5f787…7b02` | 通过 |
+| G10 mesh/providers/owner-kernel/tools 交界（16 路径） | PAKE dev-only、SecretStore-only、recovery/legacy decoder 清退、scheduler/memory consumer 迁移一致 | supply-chain/secret/S7 既有证据有效，EX38-01/02 未重开；组指纹`52aae6d3…8376` | 通过 |
+| G11 server RPC、context/lifecycle、registry/structure/behavior goldens（12 路径） | update/device strict method、connection generation、loopback health 与三个 goldens 同步 | V38-04、V38-08、server strict RPC 专项 63/63 与 golden 证据有效；组指纹`b7e3044e…6ec1` | 通过 |
+| G12 charter/requirements/specification/release guide/50-row ledger（5 路径） | 产品行为、执行规格、用户指南、固定 18+10+8+2+12 验收行与实现一致 | JSON 解析为 50 个唯一 id（18/10/8/2/12）；独立清单来源覆盖通过；组指纹`cab9c08b…d5f4` | 通过 |
 
 ## 关键原语核查
 
@@ -39,6 +51,16 @@
 
 | 关键原语 | 唯一事实源 | 生效/线性化点 | 崩溃与竞争插点 | 生产者/消费者 | 时间、空间、重放与队列上界 | 结论 |
 | -------- | ---------- | ------------- | -------------- | ------------- | -------------------------- | ---- |
+| release identity / ProgramArtifact | signed index→manifest→artifact 与安装 receipt | 规范字节验签、target/digest全等后才进入 ProgramStore | 旧sequence、同identity异bytes、排序/closure漂移、响应丢失 | release scripts/core codec→installer/release:check | 五目标 exact-set；有限 archive/expanded/file 策略；重放只认 exact identity | 通过 |
+| ProgramStore pointer / lifecycle | exact stage/version/current/previous 与 DeviceLifecycleJournal | pointer 原子替换；phase 仅在 achieved read-back 后推进 | rename/pointer/health/terminal 任一效果或响应丢失、连续重启 | installer/update controller/launcher→两根 startup/current surface | current+previous+active stage 有界；每 phase 幂等前滚 | 通过 |
+| accepted-work / delivery upgrade closure | accepted-work artifact 与 DeliveryAuthority admission/sealed | gate关闭后冻结 exact owner/source/delivery；全 terminal 后 work-settled | late/fresh source、uncertain delivery、旧/新 generation | 十 owner/七 source→lifecycle settle/ready | 冻结集合有限；同 operation 重放，fresh 冲突零父提交 | 通过 |
+| bound host health / exact release | bound inactive server、endpoint/definition/manager projection | 同一 handle 激活并真实 loopback health 后 terminal/release/ready | old/current host、manager未知、health失败、generation接力 | anchor/executor/foreground→launcher/supervisor/current authority | 任一时刻 exact host；失败 previous 恢复，不排队第二 lifecycle | 通过 |
+| update receipt / current-authority projection | ProgramUpdateReceipt + pointer/stage/lifecycle/health 纯投影 | receipt durable提交；notification仅提示重读 | connection换代、authority unavailable、busy、success token响应丢失 | controller/lifecycle→RPC/REPL/status/doctor/surface | 每连接窄订阅；健康静默；一个行动；通知非事实源 | 通过 |
+| automatic round / FileLock | generation-local active handle；strict PID+birth+token lock record | tick active gate；跨进程 lock acquire/reclaim claim | stop/remove换代、pause/crash/PID reuse、stale release | automatic controller→ProgramStore；FileLock→全部 updater writer | 每代最多一轮、O(1) handle；身份未知 fail-closed；旧 token 零释放 | 通过 |
+| app removal / handoff | exact managed future/current read-back 与 stable installer/helper进程事件 | exact unregister 是 commit；helper spawn→installer exit 0→父接纳 | stop/reenable/unregister响应丢失、两层spawn/error/signal | app remove→managed adapter→stable installer/helper | commit前 exact补偿；commit后幂等重试；只删除 program root | 通过 |
+| permanent device removal | 唯一 target active operation 与 issuer/target journal phase | accept/decision/abort 各自 journal提交；status只纯投影 | accept/abort响应丢失、在线转离线、旧新operation、重启 | CLI/RPC→authority/mesh→status/continue/cancel | 单 active operation；错id零取消；离线前滚原operation | 通过 |
+| compatibility / legacy retirement | 十三 schema inventory、mesh negotiation 与七组 reachability exact-set | incompatible只读门；退役 reader/writer/export 从生产图消失 | peer版本漂移、隐藏旧入口、shadow writer/owner | core/mesh/providers/CLI/server→所有公开写入与 package exports | 当前 v1 零虚构 activation；退役集合有限且默认零扫描 | 通过 |
+| release evidence / acceptance ledger | source/package/producer closure、五目标 report、50-row ledger | 全部 gate 与逐行复验后原子写 report/candidate index | candidate-only损坏、缺格、脚本/bytes漂移、旧report重放 | target-local producer→release:check→维护者 | 五目标×固定12 smoke；50 id exact-set；不持钥不外发 | 通过 |
 
 ## 审查结论复用表
 
@@ -50,6 +72,16 @@
 
 | 编号 | 审查目标与核查面 | 登记输入（关键实现、全部生产点、消费路径、测试） | 最近通过的输入指纹（算法 + 值） | 重审条件 | 当前状态 | 有效独立深审 | 本轮结论与证据 |
 | ---- | ---------------- | ------------------------------------------------ | ------------------------------- | -------- | -------- | ------------ | -------------- |
+| R38-01 | release identity、ProgramArtifact、source/package provenance 与五目标资源边界；覆盖入口、生产、消费、安全、资源、证据 | G1+G2+G12：根命令与 release scripts、core release/durable-schema codec与测试、charter/spec/guide/50-row ledger；消费到 installer、ProgramStore、target evidence、release:check | `sha256:5290755a…e2a9`（组指纹有序聚合） | 任一 release codec/比较器、producer closure、manifest/artifact/receipt、目标或文档/ledger变化 | 通过 | 2/2 | 终审一：从五目标身份、ordinal canonical、closure冻结、容量与publish前复验正反推导；producer/decoder/gate同源，零问题。终审二：从跨locale排序、签名输入漂移、容量不足、旧tree/report重放和candidate损坏构造反例；生产解码、有限资源门与发布复验均fail-closed，零问题 |
+| R38-02 | ProgramStore、existing install、upgrade phase、launcher、真实health与恢复；覆盖状态、生命周期、崩溃、消费者、测试 | G3+G5+G7+G11：lifecycle journal/codec、CLI update全链、两根composition、server RPC/health/goldens及直接测试 | `sha256:e4d9f221…d4e8` | stage/pointer/receipt/phase、launcher/installer、health或两根装配及其测试变化 | 通过 | 2/2 | 终审一：逐 phase 对账 stage/version/pointer/previous、launcher generation与真实loopback health；只补未达效果，坏版零ready，零问题。终审二：从rename/pointer/health任一效果或响应丢失、连续重启与previous接力重造；exact achieved read-back和同一bound server health保证唯一前滚，零问题 |
+| R38-03 | accepted-work/delivery、exact-host、schema/mesh交界；覆盖权威、并发、恢复、模块边界 | G3+G7+G10+G11：device lifecycle、十owner/七source装配、mesh/providers交界、server composition与测试 | `sha256:94203f40…3319` | owner/source/delivery artifact、admission/sealed、host proof、mesh写入门或消费者变化 | 通过 | 2/2 | 终审一：从gate→freeze→admission/seal→settle→flush→exact host stop重建十owner/七source链；fresh冲突与旧host均fail-closed，零问题。终审二：以双successor、迟到delivery、旧host/PID换代、gate后崩溃与连续接替攻击；耐久artifact、sealed集合及exact endpoint owner在首效果前阻断竞争者，零问题 |
+| R38-04 | automatic round、FileLock、current-authority状态与离线doctor；覆盖并发、资源、异常、体验 | G4+G5+G7+G8+G11：FileLock/process identity、controller/runtime/doctor、host/public surface、server context/RPC及测试 | `sha256:86ffe5bc…83e4` | round handle、lock record/provider、receipt投影、subscription/doctor/public consumer变化 | 通过 | 2/2 | 终审一：检查每代single round、close→abort→await、PID+birth reclaim、subscribe-before-read与no-genesis/paired纯投影；旧代零效果，零问题。终审二：用轮次中断、进程暂停、PID复用、birth读取失败、离线和authority换代重造；exact handle清理、未知活性保持busy及纯本地投影均零越权/双写，零问题 |
+| R38-05 | 应用移除 stop/future compensation、exact unregister 与两层 remover handoff；覆盖五目标、失败与重放 | G5+G7+G8 中 app-remove/managed-service/program-installer/root-removal/public CLI及直接测试，消费到稳定installer/helper | `sha256:1ca0ff92…cac5` | managed adapter/read-back、stop/unregister、installer/helper、公开结果或测试变化 | 通过 | 2/2 | 终审一：沿future/current双事实、commit前exact补偿、unregister与helper spawn→installer exit 0接纳复核；失败保留program/data可重试，零问题。终审二：从definition漂移、stop失败、补偿失败、两层spawn/error/非零/signal及响应丢失攻击；commit前fail-closed、commit后固定可重试行动且数据保留，零问题 |
+| R38-06 | 永久设备移除 strong confirm、exact cancel、decision/status 稳定投影；覆盖在线/离线、两根、重启 | G3+G6+G7+G10+G11 中 device CLI/facade、authority/journal、mesh assembly、server strict RPC及直接测试 | `sha256:673aee75…dcf5` | operation identity、abort/decision reducer、status投影、CLI行动、mesh/RPC消费者变化 | 通过 | 2/2 | 终审一：按accept/confirm/decision/abort/status重建在线离线两根；取消全等operation，dispatch失败仅读既有phase且零自动abort，零问题。终审二：从同target旧新operation、decision/abort响应丢失、在线转离线、status再失败和连续重启构造；issuer/target既有phase只读投影并保持显式exact cancel，零问题 |
+| R38-07 | 七组旧路径退役、供应链、SecretStore 与 package/export/S7/golden 边界；覆盖安全、模块边界、回归 | G1+G8+G9+G10+G11：清退文件/tombstone、公开入口、上下游消费者、security scripts、server goldens | `sha256:782aa927…6c22` | 退役路径复活、依赖分类、SecretStore/mesh/schema入口、package export、S7/golden变化 | 通过 | 2/2 | 终审一：对七组reader/writer/export/tombstone、PAKE dev-only、SecretStore、S7与三golden反向归项；EX38-01/02边界未变，零问题。终审二：从遗留import/export、生产依赖误分类、公开RPC畸形输入、secret旁路及golden漂移反查；退役路径不可达、strict边界和派生资产一致，零问题 |
+| R38-08 | 五目标 candidate-only 证据、固定12 smoke、50-row最终验收与发布门；覆盖验收充分性 | G1+G2+G11+G12：release producer/check、core codec、server goldens、最终ledger/guide及其直接测试 | `sha256:27c6ba5e…92d0` | target evidence descriptor/entry/argv/terminal、report/gate、ledger/golden/guide变化 | 通过 | 2/2 | 终审一：逐项核对12条descriptor→exact candidate entry/argv/terminal/digest与50个唯一id；report前后重算输入且无passed旁路，零问题。终审二：以candidate-only字节破坏、缺格/重复、argv/终态分叉、source/script漂移及旧report重放攻击；逐行execution digest和publish前全输入复验均拒绝，零问题 |
+| R38-09 | 第一方产品旅程与文案：自动更新可见、失败唯一行动、离线、应用/设备移除边界；覆盖用户体验与公开错误 | G5+G6+G7+G8+G12：controller/doctor/removal、CLI/RPC/REPL/status、模块权威文档与 journey 直接测试 | `sha256:806bac80…fb04` | 公开入口、状态/action exact-set、产品文案、默认路径、旅程或权威产品要求变化 | 通过 | 2/2 | 终审一：按无更新静默、更新可见、失败单行动、离线doctor、app/data保留与permanent确认旅程对账权威文案；零内部术语/raw，零问题。终审二：从认证/非本机、离线、busy、prepare失败、移除不确定态与重放核对公开结果；所有失败只给当前可执行行动且零raw/path泄露，零问题 |
+| R38-10 | 跨项组合推演：release→install→update→health/recovery→status/doctor→app/device removal→release evidence，及第30～37/排除边界 | R38-01～R38-09 的当前输入指纹、结论、EX38-01～03、L38-01～03 与 U38-01～20 状态 | `sha256:b384f2ce…0a2`（九项编号+指纹有序聚合） | 任一R38-01～09新增、边界/指纹/结论变化，排除项重开或教训新增 | 通过 | 2/2 | 终审一：九项结论后组合upgrade与stop/removal、lock与status、app/device remove、candidate evidence交界；第30～37和排除边界无倒灌，零问题。终审二：独立组合并发update/stop、lock失主、authority离线、removal重放与candidate发布证据；共享identity和终态无矛盾，EX38-01～03及第30～37/范围外发布边界均未触发，零问题 |
 
 ## 问题列表
 
@@ -313,9 +345,9 @@
 
 | 编号 | 对应问题与先前通过轮次 | 遗漏机制 | 后续必做的检测动作与适用范围 | 应用记录（轮次:证据） |
 | ---- | ---------------------- | -------- | ---------------------------- | --------------------- |
-| L38-01 | U38-10；U38-09及IR38-02/10/16先前通过 | 只验证SemVer解析与排序，没有把公开identity允许字符逐一差分到ProgramStore目录、pointer codec和生成launcher的实际消费合同。 | 对所有进入文件名、pointer或生成loader的公开identity，枚举codec合法字符并与每个持久化/启动消费者做正反差分；至少包含`+build`并穿过真实write→read→launch。适用于第38单元版本与程序存储交界。 | 本轮转存：P38-10生产反例已执行该检测并登记U38-10。 |
-| L38-02 | U38-11；U38-04及IR38-11/19/29先前通过 | current-authority回退只验证了已有trust的配对拓扑，漏掉“无trust本身是默认单机合法事实”的no-genesis生产组合。 | 每个topology/trust授权谓词必须同时枚举默认单机、paired current/non-current、trust absent/corrupt及host absent，并穿过真实composition root验证效果边界。适用于第38单元离线诊断与本机回退。 | 本轮转存：P38-11默认临时home反例已执行该检测并登记U38-11。 |
-| L38-03 | U38-12；U38-08及IR38-25/30/31先前通过 | 证据审查核对了scenario id、摘要和candidate runtime，却未核对真正执行的program bytes/entry/argv/terminal，导致workspace源码测试冒充候选行为。 | 对所有发布候选运行证据执行“candidate-only mutation、workspace不变”检测，并逐行反绑实际可执行bytes、entry、argv和终态；任一候选损坏必须使门禁失败。适用于第38单元target-local证据与release:check。 | 本轮转存：P38-12调用链反例已执行该检测并登记U38-12。 |
+| L38-01 | U38-10；U38-09及IR38-02/10/16先前通过 | 只验证SemVer解析与排序，没有把公开identity允许字符逐一差分到ProgramStore目录、pointer codec和生成launcher的实际消费合同。 | 对所有进入文件名、pointer或生成loader的公开identity，枚举codec合法字符并与每个持久化/启动消费者做正反差分；至少包含`+build`并穿过真实write→read→launch。适用于第38单元版本与程序存储交界。 | 本轮转存：P38-10生产反例已执行该检测并登记U38-10。终审一：复查raw SemVer仅留在pointer exact identity，目录唯一取已验manifest digest 64-hex，launcher只消费pointer.directory；`+build`无路径分叉。终审二：从合法core/prerelease/build的write→pointer→generated launcher重做正反差分；旧安全pointer原样可读，raw identity与digest目录无混用。独立功能审查：以“公开身份进入不可信存储槽”为失效机制，跨ProgramStore、pointer、launcher、release receipt反查；仅digest目录承担文件系统身份，结论已覆盖。 |
+| L38-02 | U38-11；U38-04及IR38-11/19/29先前通过 | current-authority回退只验证了已有trust的配对拓扑，漏掉“无trust本身是默认单机合法事实”的no-genesis生产组合。 | 每个topology/trust授权谓词必须同时枚举默认单机、paired current/non-current、trust absent/corrupt及host absent，并穿过真实composition root验证效果边界。适用于第38单元离线诊断与本机回退。 | 本轮转存：P38-11默认临时home反例已执行该检测并登记U38-11。终审一：复查`loadConfig(noAutoCreate)`同一快照；无mesh在SecretStore前判本机current，paired才existing-only读binding/key/trust，non-current/corrupt稳定false。终审二：分别重造no-config/no-binding默认单机、paired current/non-current、坏trust/key与host absent；纯证明零创建、零网络、零SecretStore activation。独立功能审查：以“离线事实不足导致越权或无行动”为失效机制跨doctor/current-state/trust核查；默认单机与paired严格分流且零写，结论已覆盖。 |
+| L38-03 | U38-12；U38-08及IR38-25/30/31先前通过 | 证据审查核对了scenario id、摘要和candidate runtime，却未核对真正执行的program bytes/entry/argv/terminal，导致workspace源码测试冒充候选行为。 | 对所有发布候选运行证据执行“candidate-only mutation、workspace不变”检测，并逐行反绑实际可执行bytes、entry、argv和终态；任一候选损坏必须使门禁失败。适用于第38单元target-local证据与release:check。 | 本轮转存：P38-12调用链反例已执行该检测并登记U38-12。终审一：复查固定12项descriptor和switch只解析candidate/stable entry，逐行验证entryKind/argvTemplate/terminalKind并生成独立execution digest，输入漂移零report。终审二：重造candidate-only mutation、workspace不变、单格缺失/损坏与report重放；全部证据反绑exact executable bytes、entry、argv、terminal且发布门拒绝漂移。独立功能审查：以“证据替代真实候选行为”为失效机制跨五目标producer、十二journey与release gate核查；候选字节、入口、argv和终态逐行绑定，结论已覆盖。 |
 
 ## 验证计划与证据账本
 
@@ -332,13 +364,14 @@
 | V38-06 | U38-10/U38-11当前实现的ProgramStore storage identity、旧pointer与单机/配对离线authority纯投影 | 两份CLI直接测试；CLI类型检查；`pnpm cli:build` | 本轮5个CLI生产/测试文件及其CLI依赖输入 | 修复直接验证/必要构建；25项+类型检查+一次构建 | 25/25、类型检查、CLI构建均通过；空home零写，paired坏trust fail-closed | `b7327c1d48662df31fbb77383cc472ffa39565d1d6f1a2a9f81ea370a2ea20cb` | 有效 |
 | V38-07 | U38-12固定十二项candidate-only producer、signed baseline/candidate与release gate | 两脚本语法；`node --test scripts/release-tooling.test.mjs`；`pnpm s7:lint` | 本轮release脚本、合同测试、指南/规格及S7现有descriptor/golden | 修复直接验证/派生资产；6项+20项 | 5通过/1宿主symlink能力跳过；S7 20/20与golden通过；C38-C12修复后失效闭包复跑通过 | `b7327c1d48662df31fbb77383cc472ffa39565d1d6f1a2a9f81ea370a2ea20cb` | 有效 |
 | V38-08 | U38-19/U38-20 两层 remover 接纳与 device decision 失败稳定投影 | CLI 类型检查；5 个直接测试文件的失效闭包；Biome；`pnpm cli:build` | 14 个专项冻结生产、测试及直接架构/规格文件 | 修复直接验证/必要构建；初始 26 项后按失败归因补证 | 类型检查、Biome、CLI 构建通过；直接测试初始 24/26，通过归因修正后失效闭包 2/2，新增信号/幂等重试及既有 terminal 增量 6/6 | `9fe99009c1d6bc75f882d0a8b7a43a1850766687ee6711fa94683de0f2475325` | 有效 |
+| V38-09 | 全单元提交验证：当前全单元源码/导出最终可构建，派生资产、既有直接证据、交付闭包与冻结指纹一致 | 复用 V38-01～V38-08、S7/golden及独立清单 31 项；当前完整输入执行`pnpm build`一次（450秒硬截止）；随后`git diff --check`、50-row ledger exact-set、交付路径/删除 tombstone 与全单元指纹复算 | 冻结全单元 155 路径及 workspace 依赖图；不含 workbench 状态文件和构建产物 | 单元提交验证；124.7秒+低成本静态核对 | `release:version:check`及17/17 workspace项目构建成功；diff卫生通过；验收账本50个唯一id（18 invariant、10 fault、8 security、2 topology、12 journey）；144现存+11退役路径闭包、core/server/CLI/program-installer构建产物与冻结指纹全等；沙箱内pnpm在构建启动前因用户目录lstat EPERM被运行环境拦截，按手册获批真实运行方式一次有效构建通过；未运行包全测、模块回归或发布验证 | `bcd9b0f41c6fe8a38236a232a4704ab09d35c8165a60299a12908da538bb0bfe` | 有效 |
 
 ## 终审记录
 
 | 轮次   | 审查侧重                                       | 矩阵是否完整 | 新增问题 | 交付物指纹 | 结论   |
 | ------ | ---------------------------------------------- | ------------ | -------- | ---------- | ------ |
-| 第一轮 | 需求、架构、功能闭环、状态、回归               | 否           | —       | —         | 待开始 |
-| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 否           | —       | —         | 待开始 |
+| 第一轮 | 需求、架构、功能闭环、状态、回归               | 是           | 0       | `sha256:bcd9b0f41c6fe8a38236a232a4704ab09d35c8165a60299a12908da538bb0bfe` | 通过；R38-01～R38-10 均为 1/2 |
+| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 是           | 0       | `sha256:bcd9b0f41c6fe8a38236a232a4704ab09d35c8165a60299a12908da538bb0bfe` | 通过；R38-01～R38-10 均为 2/2 |
 
 ## 独立审查覆盖表
 
@@ -346,5 +379,12 @@
 
 | 编号 | 风险区与风险面 | 登记输入与指纹 | 独立覆盖状态 | 结论与证据 | 重开条件 |
 | ---- | -------------- | -------------- | ------------ | ---------- | -------- |
+| IF38-01 | **高风险·身份与证明漂移。** release raw identity、filesystem storage identity、ProgramArtifact canonical bytes、source/package/producer closure、五目标candidate证据可能彼此错绑或被旧产物重放 | G1+G2+G12及L38-01/L38-03；全单元冻结指纹`sha256:bcd9b0f4…0bfe` | 已覆盖 | 从不可信identity进入文件系统、跨locale排序、构树后漂移、candidate-only损坏和旧report重放反推；ordinal comparator、manifest digest目录、strict receipt、逐行execution digest及publish前重算形成单一闭包，零新增问题 | release比较器/codec、ProgramStore目录、closure exact-set、candidate descriptor/report/gate或权威发布合同变化 |
+| IF38-02 | **高风险·耐久状态误判。** stage/pointer/receipt/lifecycle phase、accepted-work artifact、delivery seal和真实health可能把“已发效果”误认完成，崩溃后早ready或重复效果 | G3+G5+G7+G11及U38-01～U38-03；全单元冻结指纹`sha256:bcd9b0f4…0bfe` | 已覆盖 | 沿rename、pointer、health、gate、freeze、settle、flush各效果/响应丢失与连续重启检查；exact achieved read-back、原operation artifact、sealed delivery集合和同bound server health只补未达步骤，零新增问题 | lifecycle phase/codec、ProgramStore effect、owner/source/delivery合同、health identity或两根恢复装配变化 |
+| IF38-03 | **高风险·并发所有权丢失。** 自动检查轮次、FileLock、inactive server/exact-host及cleanup可能在stop、暂停、PID复用或双successor下出现旧代效果、双owner或无界资源 | G4+G5+G7及U38-07/U38-15/U38-16；全单元冻结指纹`sha256:bcd9b0f4…0bfe` | 已覆盖 | 以连续tick、close/abort窗口、paused child、PID reuse、birth不可读、端口竞争与失主接替构造；每代exact round handle、PID+birth保守活性和OS bound handle均在首个副作用前线性化，资源上界明确，零新增问题 | round owner、FileLock record/resolver、server bind/activate、ProgramStore保留策略或相关直接测试变化 |
+| IF38-04 | **高风险·授权与公开边界混淆。** 默认单机/paired current、trust/SecretStore、loopback方法授权及strict RPC可能在离线或畸形输入下越权、写入或泄露内部错误 | G6+G8+G10+G11及L38-02；全单元冻结指纹`sha256:bcd9b0f4…0bfe` | 已覆盖 | 分别重造no-genesis、paired current/non-current、坏binding/key/trust、认证非loopback和unknown/错类型/非有限输入；纯本地证明existing-only、router/auth/loopback/strict decode先于效果，公开错误固定且零raw，零新增问题 | configuration/trust拓扑、SecretStore入口、connection context、RPC method/decoder/error projection或公开产品合同变化 |
+| IF38-05 | **高风险·不可逆移除边界。** 应用future/current/program三事实与设备issuer/target两根可能在失败补偿、handoff、取消和decision不确定态下伪成功、误恢复或自动取消用户决定 | G3+G5+G6+G7+G8+G10+G11及U38-17～U38-20；全单元冻结指纹`sha256:bcd9b0f4…0bfe` | 已覆盖 | 穿过definition drift、stop/rollback失败、两层child终态、accept/abort/decision响应丢失、在线转离线与连续重启；commit前仅补偿本操作，commit后固定重试，设备只按exact operation显式取消并只读既有phase投影，零新增问题 | managed adapter/definition、stop/unregister/handoff、device operation/abort/decision/status或公开行动变化 |
+| IF38-06 | **一般风险·退役与有限资源边界。** 旧reader/writer/export可能残留，工件/程序目录/清理可能绕过容量、保留或tombstone合同；排除项可能过期 | G1+G2+G9+G10+G12及EX38-01～EX38-03；全单元冻结指纹`sha256:bcd9b0f4…0bfe` | 已覆盖 | 反向搜索七组退役路径和消费者，核对512/768/192/224MiB上限、statfs预检、128删除批次与current/previous/active-stage保留；schema仍全v1、旧测试字段无生产消费、ProgramStore版本有界，排除项未重开，零新增问题 | 退役路径恢复、资源上限/保留集合、schema writer版本、EX38-01～03前提或生产资源失败证据变化 |
+| IF38-07 | **跨区组合·端到端用户旅程。** release→install/update→crash recovery→visible status/doctor→app/device removal→candidate evidence跨越多个事实源，局部正确仍可能形成矛盾终态或范围倒灌 | IF38-01～IF38-06结论、R38-01～R38-10 2/2、第30～37封版合同及范围外发布边界；全单元冻结指纹`sha256:bcd9b0f4…0bfe` | 已覆盖 | 在其他风险面完成后组合update/stop、lock失主、authority离线、removal重放和candidate发布门；stable identity、用户唯一行动与证据终态一致，未恢复EX38排除项、未提前实施自动failover/外部发布/通用框架，零新增问题 | 任一IF38-01～06输入、状态或结论变化；第30～37合同、EX38重开条件、产品范围或全单元指纹变化 |
 
 <!-- registration-complete: unit-38.gen-1 -->

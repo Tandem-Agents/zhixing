@@ -9,8 +9,9 @@
 
 import chalk from "chalk";
 import { Command, InvalidArgumentError, Option } from "commander";
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createStdoutWriter } from "./screen/cli-writer.js";
 import type { StartupCheckResult } from "./startup.js";
 import { MAX_LOG_LINES, normalizeLogLineCount } from "./serve/log-line-count.js";
@@ -890,10 +891,16 @@ serveCmd
     }
   });
 
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(resolve(process.argv[1])).href
-) {
+function isExecutedAsMain(moduleUrl: string, argvEntry: string | undefined): boolean {
+  if (!argvEntry) return false;
+  try {
+    return realpathSync.native(fileURLToPath(moduleUrl)) === realpathSync.native(resolve(argvEntry));
+  } catch {
+    return moduleUrl === pathToFileURL(resolve(argvEntry)).href;
+  }
+}
+
+if (isExecutedAsMain(import.meta.url, process.argv[1])) {
   // pnpm run 会将 `--` 原样传递给脚本，导致 Commander 将后续选项误认为位置参数。
   // 移除 argv 中首个独立的 `--`，使 `-p` 等选项正常解析。
   const argv = [...process.argv];

@@ -5,7 +5,7 @@
   "description": "知行 — 智能体引擎",
   "type": "module",
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=24.0.0"
   },
   "packageManager": "pnpm@10.8.0",
   "pnpm": {
