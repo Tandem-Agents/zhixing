@@ -50,14 +50,13 @@ function analyzeTestModule(file, source) {
   function visit(node) {
     if (ts.isImportDeclaration(node) && node.importClause) {
       const moduleName = literalModuleName(node.moduleSpecifier);
-      if (tlsModules.has(moduleName) && importHasRuntimeBinding(node.importClause)) {
+      const bindings = inspectImportBindings(node.importClause);
+      if (tlsModules.has(moduleName) && bindings.hasRuntimeBinding) {
         report(node, "imports native TLS values outside the shared test harness");
       }
-      if (ts.isNamedImports(node.importClause.namedBindings)) {
-        for (const element of node.importClause.namedBindings.elements) {
-          if (!element.isTypeOnly && meshTlsFactories.has(importedName(element))) {
-            report(element, `imports ${importedName(element)} outside the shared test harness`);
-          }
+      for (const element of bindings.runtimeNamedElements) {
+        if (meshTlsFactories.has(importedName(element))) {
+          report(element, `imports ${importedName(element)} outside the shared test harness`);
         }
       }
     }
@@ -134,14 +133,13 @@ function verifyHarnessImports(source) {
   for (const statement of tree.statements) {
     if (!ts.isImportDeclaration(statement) || !statement.importClause) continue;
     const moduleName = literalModuleName(statement.moduleSpecifier);
-    if (tlsModules.has(moduleName) && importHasRuntimeBinding(statement.importClause)) {
+    const bindings = inspectImportBindings(statement.importClause);
+    if (tlsModules.has(moduleName) && bindings.hasRuntimeBinding) {
       importsNativeTls = true;
     }
-    if (ts.isNamedImports(statement.importClause.namedBindings)) {
-      for (const element of statement.importClause.namedBindings.elements) {
-        if (!element.isTypeOnly && meshTlsFactories.has(importedName(element))) {
-          importedFactories.add(importedName(element));
-        }
+    for (const element of bindings.runtimeNamedElements) {
+      if (meshTlsFactories.has(importedName(element))) {
+        importedFactories.add(importedName(element));
       }
     }
   }
@@ -179,6 +177,19 @@ function verifyAnalyzer() {
       source: 'import type { TLSSocket } from "node:tls"; export type Socket = TLSSocket;',
       expected: false,
     },
+    {
+      source: 'import safeDefault from "../../safe.js"; export { safeDefault };',
+      expected: false,
+    },
+    {
+      source: 'import tlsDefault from "node:tls"; export { tlsDefault };',
+      expected: true,
+    },
+    {
+      source:
+        'import type { connectAuthenticatedMesh } from "../../handshake.js"; export type Open = typeof connectAuthenticatedMesh;',
+      expected: false,
+    },
   ];
 
   for (const [index, example] of cases.entries()) {
@@ -189,13 +200,21 @@ function verifyAnalyzer() {
   }
 }
 
-function importHasRuntimeBinding(clause) {
-  if (clause.isTypeOnly) return false;
-  if (clause.name || ts.isNamespaceImport(clause.namedBindings)) return true;
-  return (
-    ts.isNamedImports(clause.namedBindings) &&
-    clause.namedBindings.elements.some((element) => !element.isTypeOnly)
-  );
+function inspectImportBindings(clause) {
+  const namedBindings = clause.namedBindings;
+  const namespaceBinding = namedBindings && ts.isNamespaceImport(namedBindings);
+  const namedElements = namedBindings && ts.isNamedImports(namedBindings)
+    ? [...namedBindings.elements]
+    : [];
+  const runtimeNamedElements = clause.isTypeOnly
+    ? []
+    : namedElements.filter((element) => !element.isTypeOnly);
+  return {
+    hasRuntimeBinding:
+      !clause.isTypeOnly &&
+      Boolean(clause.name || namespaceBinding || runtimeNamedElements.length > 0),
+    runtimeNamedElements,
+  };
 }
 
 function exportHasRuntimeBinding(declaration) {

@@ -8,7 +8,7 @@
  */
 
 import chalk from "chalk";
-import { Command, InvalidArgumentError, Option } from "commander";
+import { Command, Help, InvalidArgumentError, Option } from "commander";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -88,6 +88,19 @@ function handleStartupResult(result: StartupCheckResult): void {
 }
 
 export const program = new Command();
+const COMMANDER_HELP = new Help();
+
+const ROOT_HELP_TITLES: Readonly<Record<string, string>> = Object.freeze({
+  "Usage:": "用法：",
+  "Arguments:": "参数：",
+  "Options:": "选项：",
+  "Global Options:": "全局选项：",
+  "Commands:": "命令：",
+});
+
+function localizeHelpSyntax(value: string): string {
+  return value.replaceAll("[options]", "[选项]").replaceAll("[command]", "[命令]");
+}
 
 export interface CliCommandDescriptor {
   readonly path: string;
@@ -120,8 +133,8 @@ function rejectUnknownCommandPath(argv: string[], command: Command): void {
   const unknownCommand = findUnknownCommandPath(argv, command);
   if (!unknownCommand) return;
 
-  console.error(chalk.red(`error: unknown command '${unknownCommand}'`));
-  console.error(chalk.dim("Run `zz --help` to see available commands."));
+  console.error(chalk.red(`错误：未知命令“${unknownCommand}”`));
+  console.error(chalk.dim("运行 `zz --help` 查看可用命令。"));
   process.exit(1);
 }
 
@@ -191,7 +204,14 @@ function parseRevision(value: string): number {
 program
   .name("zhixing")
   .description("知行 — 智能体引擎")
-  .version(ZHIXING_CLI_VERSION)
+  .helpOption("-h, --help", "显示帮助")
+  .helpCommand(false)
+  .version(ZHIXING_CLI_VERSION, "-V, --version", "显示版本")
+  .configureHelp({
+    styleTitle: (title) => ROOT_HELP_TITLES[title] ?? title,
+    commandUsage: (command) => localizeHelpSyntax(COMMANDER_HELP.commandUsage(command)),
+    subcommandTerm: (command) => localizeHelpSyntax(COMMANDER_HELP.subcommandTerm(command)),
+  })
   .addOption(
     new Option(
       "--log",
@@ -872,6 +892,11 @@ const serveCmd = program
       process.exit(1);
     }
   });
+
+program
+  .command("help")
+  .description("显示帮助")
+  .action(() => program.outputHelp());
 
 // zhixing serve logs —— 查看日志（默认尾部 50 行；--tail 持续跟踪）
 serveCmd

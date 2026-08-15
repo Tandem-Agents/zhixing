@@ -17,6 +17,7 @@ import {
   collectSourceTreeRows,
   compareProgramArtifactPaths,
   digest,
+  fingerprintPackageGraph,
   programTreeDigest,
   stableProgramLoaderSource,
 } from "./release-tooling.mjs";
@@ -106,6 +107,48 @@ test("the release producer exact-set is complete and binds the source fingerprin
   assert.match(treeBuilder, /release inputs drifted while the program tree was being built/u);
   const evidenceProducer = await readFile(resolve(import.meta.dirname, "release-target-evidence.mjs"), "utf8");
   assert.match(evidenceProducer, /candidate manifest does not bind the current build input closure/u);
+});
+
+test("package graph fingerprint ignores installed dependency and build directories", async () => {
+  const root = join(tmpdir(), `zhixing-release-package-graph-${process.pid}-${Date.now()}`);
+  const packageRoot = join(root, "packages", "demo");
+  const externalModules = join(root, "external-node-modules");
+  await mkdir(packageRoot, { recursive: true });
+  await mkdir(externalModules, { recursive: true });
+  await writeFile(join(root, "package.json"), '{"name":"workspace"}\n');
+  await writeFile(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+  await writeFile(join(root, "pnpm-workspace.yaml"), "packages:\n  - packages/*\n");
+  await writeFile(join(packageRoot, "package.json"), '{"name":"demo"}\n');
+  await writeFile(join(externalModules, "package.json"), '{"name":"dependency","version":"1.0.0"}\n');
+  await mkdir(join(packageRoot, "dist"), { recursive: true });
+  await writeFile(join(packageRoot, "dist", "package.json"), '{"name":"stale-build"}\n');
+  try {
+    await symlink(
+      externalModules,
+      join(packageRoot, "node_modules"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+  } catch (error) {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error.code === "EPERM" || error.code === "EACCES")
+    ) return;
+    throw error;
+  }
+
+  const before = await fingerprintPackageGraph(root);
+  await writeFile(join(externalModules, "package.json"), '{"name":"dependency","version":"2.0.0"}\n');
+  await writeFile(join(packageRoot, "dist", "package.json"), '{"name":"different-stale-build"}\n');
+  assert.equal(await fingerprintPackageGraph(root), before);
+
+  await symlink(
+    externalModules,
+    join(packageRoot, "vendor-link"),
+    process.platform === "win32" ? "junction" : "dir",
+  );
+  await assert.rejects(() => fingerprintPackageGraph(root), /symlinks/u);
 });
 
 test("release evidence requires producer-bound target terminals and an exact Node 24 runtime", () => {

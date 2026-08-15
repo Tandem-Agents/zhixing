@@ -8,6 +8,7 @@ import {
   storageMaintenanceRequest,
   type StorageMaintenanceGovernorPort,
 } from "@zhixing/core/resources";
+import { byteDigest } from "@zhixing/core/protocol";
 import type { PlatformSecretStoreBackend } from "@zhixing/secrets";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 15_000;
@@ -932,9 +933,7 @@ function definitionDigest(spec: ManagedServiceSpec): string {
 }
 
 export function managedServiceDefinitionDigest(spec: ManagedServiceSpec): string {
-  return `sha256:${createHash("sha256")
-    .update(managedServiceDefinitionBytes(spec))
-    .digest("hex")}`;
+  return byteDigest(managedServiceDefinitionBytes(spec));
 }
 
 export function managedServiceDefinitionBytes(spec: ManagedServiceSpec): Buffer {

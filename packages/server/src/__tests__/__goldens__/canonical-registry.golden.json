@@ -1261,6 +1261,7 @@
           "cli:zhixing duty continue",
           "cli:zhixing duty migrate",
           "cli:zhixing duty targets",
+          "cli:zhixing help",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1462,6 +1463,7 @@
           "cli:zhixing duty continue",
           "cli:zhixing duty migrate",
           "cli:zhixing duty targets",
+          "cli:zhixing help",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1655,6 +1657,7 @@
           "cli:zhixing duty continue",
           "cli:zhixing duty migrate",
           "cli:zhixing duty targets",
+          "cli:zhixing help",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1829,6 +1832,7 @@
           "cli:zhixing duty continue",
           "cli:zhixing duty migrate",
           "cli:zhixing duty targets",
+          "cli:zhixing help",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -1972,6 +1976,7 @@
           "cli:zhixing duty continue",
           "cli:zhixing duty migrate",
           "cli:zhixing duty targets",
+          "cli:zhixing help",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -2068,6 +2073,7 @@
           "cli:zhixing duty continue",
           "cli:zhixing duty migrate",
           "cli:zhixing duty targets",
+          "cli:zhixing help",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -2161,6 +2167,7 @@
           "cli:zhixing duty continue",
           "cli:zhixing duty migrate",
           "cli:zhixing duty targets",
+          "cli:zhixing help",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -2236,6 +2243,7 @@
           "cli:zhixing duty continue",
           "cli:zhixing duty migrate",
           "cli:zhixing duty targets",
+          "cli:zhixing help",
           "cli:zhixing pair",
           "cli:zhixing serve",
           "cli:zhixing serve logs",
@@ -2925,6 +2933,17 @@
         "category": "cli",
         "target": {
           "rowId": "device-trust"
+        }
+      },
+      {
+        "path": "zhixing help",
+        "hidden": false,
+        "hasAction": true,
+        "key": "cli:zhixing help",
+        "category": "cli",
+        "target": {
+          "exclusion": "localRender",
+          "reason": "纯本地展示，不产生权威事实"
         }
       },
       {

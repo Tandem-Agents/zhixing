@@ -4,12 +4,14 @@ import { userInfo } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { createTempDir } from "@zhixing/test-utils";
+import { byteDigest } from "@zhixing/core/protocol";
 import { describe, expect, it } from "vitest";
 import {
   applyManagedServiceLaunchContext,
   buildManagedServiceSpec,
   createManagedServiceAdapter,
   managedServiceDefinitionBytes,
+  managedServiceDefinitionDigest,
   type ManagedServiceCommandRunner,
 } from "./managed-service.js";
 
@@ -66,6 +68,42 @@ function platformSpec(
 }
 
 describe("managed service platform contract", () => {
+  it("derives fixed Windows and Unix digests from canonical definition bytes", () => {
+    const windows = buildManagedServiceSpec({
+      platform: "win32",
+      zhixingHome: "C:\\Users\\test\\.zhixing",
+      backend: "windows-dpapi",
+      execPath: "C:\\Program Files\\nodejs\\node.exe",
+      entryScript: "C:\\Program Files\\zhixing\\dist\\index.js",
+      osUser: "test",
+      userHome: "C:\\Users\\test",
+    });
+    const linux = buildManagedServiceSpec({
+      platform: "linux",
+      zhixingHome: "/home/test/.zhixing",
+      backend: "machine-bound",
+      execPath: "/usr/bin/node",
+      entryScript: "/opt/zhixing/dist/index.js",
+      osUser: "test",
+      userHome: "/home/test",
+      uid: 1000,
+      headless: true,
+    });
+
+    expect(managedServiceDefinitionDigest(windows)).toBe(
+      "sha256:c4f66f79e8de43dfcefc2d253b199d827ede4f56bae78c45402b1e979546f9f7",
+    );
+    expect(managedServiceDefinitionDigest(linux)).toBe(
+      "sha256:575c5d6ae9758e005af8ba900df916130b7719a652b015355dec91d93ffadf55",
+    );
+    expect(managedServiceDefinitionDigest(windows)).toBe(
+      byteDigest(managedServiceDefinitionBytes(windows)),
+    );
+    expect(managedServiceDefinitionDigest(linux)).toBe(
+      byteDigest(managedServiceDefinitionBytes(linux)),
+    );
+  });
+
   it("renders stable secret-free definitions for the three supported platforms", async () => {
     const windows = buildManagedServiceSpec({
       platform: "win32",

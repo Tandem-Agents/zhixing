@@ -6,6 +6,7 @@ function createProgram(): Command {
   const program = new Command();
   program.command("status");
   program.command("stop");
+  program.command("help");
   const serve = program.command("serve");
   serve.command("logs");
   return program;
@@ -36,6 +37,7 @@ describe("CLI command gate", () => {
       ["node", "zz", "--log"],
       ["node", "zz", "status"],
       ["node", "zz", "stop"],
+      ["node", "zz", "help"],
       ["node", "zz", "serve", "logs"],
     ]) {
       expect(findUnknownCommandPath(argv, program), argv.join(" ")).toBeNull();

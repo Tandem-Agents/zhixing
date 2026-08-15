@@ -252,12 +252,13 @@ export async function fingerprintPackageGraph(repositoryRoot) {
   const root = resolve(repositoryRoot);
   const rows = [];
   await walk(resolve(root, "packages"), async (path, entry) => {
+    if (PACKAGE_GRAPH_IGNORED_DIRECTORIES.has(entry.name)) return;
     if (entry.isSymbolicLink()) throw new Error(`package graph cannot contain symlinks: ${path}`);
     if (entry.isFile() && path.endsWith(`${sep}package.json`)) {
       const bytes = await readFile(path);
       rows.push({ path: relative(root, path).split(sep).join("/"), digest: digest(bytes), bytes: bytes.byteLength });
     }
-  });
+  }, (_path, entry) => !PACKAGE_GRAPH_IGNORED_DIRECTORIES.has(entry.name));
   for (const name of ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"]) {
     const bytes = await readFile(resolve(root, name));
     rows.push({ path: name, digest: digest(bytes), bytes: bytes.byteLength });
@@ -265,6 +266,13 @@ export async function fingerprintPackageGraph(repositoryRoot) {
   rows.sort((left, right) => compareProgramArtifactPaths(left.path, right.path));
   return digest(Buffer.from(canonicalize(rows), "utf8"));
 }
+
+const PACKAGE_GRAPH_IGNORED_DIRECTORIES = new Set([
+  "node_modules",
+  "dist",
+  "coverage",
+  ".turbo",
+]);
 
 export function canonicalize(value) {
   if (value === null || typeof value === "boolean" || typeof value === "string") return JSON.stringify(value);

@@ -35,6 +35,8 @@ zz update --restore-previous
 
 ## 发布运行手册
 
+正式候选开始前，发布者须准备无凭据的稳定索引 HTTPS 地址和 Ed25519 公钥信任输入，运行 `pnpm release:channel:embed -- --input <release-channel.json>` 后完成最终构建；开发构建保持 channel/trust 为 `undefined`，不得借用测试密钥或把私钥写入仓库。随后冻结 source/package/release-producer closure，任一绑定输入变化都必须从嵌入与构建重新开始。
+
 发布者在五个目标系统上产生自包含 Node 24 程序树并取得平台签名或公证证据，再用 `pnpm release:artifact` 冻结最终 artifact 和待签 manifest。所有程序路径、source 与 package 行使用同一 ordinal 顺序；构树前冻结的 source/package 摘要覆盖固定 release producer，并由 tree receipt、artifact、目标报告和发布门逐段复验。外部签名系统签署每个 canonical manifest，并从这五份已签 manifest 的摘要生成候选 stable index。
 
 每个目标必须在对应真实 OS/arch 上使用候选最终字节完成固定 smoke：干净安装、首次运行、同版静默重放、正常无更新静默、自动发现和下载、用户可见进度、安全点安装、自动恢复、诊断引导恢复、离线诊断、移除应用保留数据和永久设备移除强确认。目标目录须同时提供该目标已签候选的 `release-manifest.json`/`program-artifact.json` 和严格更旧的已签基线 `baseline-release-manifest.json`/`baseline-program-artifact.json`。固定 producer 会验证两组身份，在隔离程序根和 home 中只通过候选程序的 runtime、launcher、installer、CLI/RPC 正式入口执行十二项，逐行绑定实际 runtime/entry 字节、公开参数和耐久终态后生成 canonical report；仓库测试不能替代该证据：

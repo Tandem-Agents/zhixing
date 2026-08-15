@@ -173,6 +173,7 @@ const baseMappingTuples = [
     { exclusion: "diagnostic", reason: exclusions.diagnostic },
   ],
   ["cli:zhixing doctor", { exclusion: "diagnostic", reason: exclusions.diagnostic }],
+  ["cli:zhixing help", { exclusion: "localRender", reason: exclusions.localRender }],
   ["rpc:server.update.health", { exclusion: "diagnostic", reason: exclusions.diagnostic }],
   ["slash:help:repl", { exclusion: "localRender", reason: exclusions.localRender }],
   ["slash:model:repl", { exclusion: "localRender", reason: exclusions.localRender }],

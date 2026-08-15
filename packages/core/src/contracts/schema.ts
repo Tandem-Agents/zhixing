@@ -42,7 +42,11 @@ import type {
   SurfaceAssetGrant,
   UsageReport,
 } from "./authorization.js";
-import type { ConfigAssetRecord } from "./state.js";
+import type {
+  ConfigAssetRecord,
+  ExecutionAssetBundle,
+  ExecutionAssetSnapshot,
+} from "./state.js";
 import type {
   CapabilityDescriptor,
   ControlEnvelope,
@@ -123,6 +127,8 @@ export interface WireSchemaMap {
   AssignmentArtifactTransferGrant: AssignmentArtifactTransferGrant;
   OwnerControlGrant: OwnerControlGrant;
   ConfigAssetRecord: ConfigAssetRecord;
+  ExecutionAssetSnapshot: ExecutionAssetSnapshot;
+  ExecutionAssetBundle: ExecutionAssetBundle;
   ControlEnvelope: ControlEnvelope;
   CapabilityDescriptor: CapabilityDescriptor;
   ExecutorVersionInventory: ExecutorVersionInventory;

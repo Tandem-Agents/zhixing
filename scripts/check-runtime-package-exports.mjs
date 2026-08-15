@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 
 const [
   coreAuthority,
@@ -137,6 +137,7 @@ const meshCanonicalValues = {
 };
 
 const failures = [];
+await verifyCorePackageExports(failures);
 for (const [moduleName, module, names] of [
   ["core-authority", coreAuthority, ["FileArtifactStore", "FileAuthorityCommitLog"]],
   [
@@ -276,4 +277,43 @@ for (const name of runtimeHostLegacyNames) {
 
 if (failures.length > 0) {
   throw new Error(`Runtime package export checks failed: ${failures.join(", ")}`);
+}
+
+async function verifyCorePackageExports(failures) {
+  const packageRoot = new URL("../packages/core/", import.meta.url);
+  const manifest = JSON.parse(
+    await readFile(new URL("package.json", packageRoot), "utf8"),
+  );
+  if (!manifest.exports || typeof manifest.exports !== "object" || Array.isArray(manifest.exports)) {
+    failures.push("core-exports:invalid-manifest");
+    return;
+  }
+
+  for (const [subpath, conditions] of Object.entries(manifest.exports)) {
+    if (!conditions || typeof conditions !== "object" || Array.isArray(conditions)) {
+      failures.push(`core-exports:${subpath}:invalid-conditions`);
+      continue;
+    }
+    for (const condition of ["types", "import"]) {
+      const target = conditions[condition];
+      if (typeof target !== "string" || !target.startsWith("./dist/")) {
+        failures.push(`core-exports:${subpath}:${condition}:invalid-target`);
+        continue;
+      }
+      const targetUrl = new URL(target.slice(2), packageRoot);
+      try {
+        await access(targetUrl);
+      } catch {
+        failures.push(`core-exports:${subpath}:${condition}:missing-target`);
+        continue;
+      }
+      if (condition === "import") {
+        try {
+          await import(targetUrl.href);
+        } catch {
+          failures.push(`core-exports:${subpath}:${condition}:unloadable-target`);
+        }
+      }
+    }
+  }
 }
