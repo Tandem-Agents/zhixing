@@ -24,7 +24,7 @@
     "@zhixing/owner-kernel": "workspace:*",
     "@zhixing/owner-services": "workspace:*",
     "@zhixing/rpc": "workspace:*",
-    "ws": "^8.18.0"
+    "ws": "8.20.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
@@ -33,5 +33,17 @@
     "tsup": "^8.4.0",
     "typescript": "^5.8.3",
     "vitest": "^3.1.1"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/longxia/zhixing.git",
+    "directory": "packages/server"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

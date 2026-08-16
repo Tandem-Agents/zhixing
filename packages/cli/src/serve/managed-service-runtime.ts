@@ -45,7 +45,7 @@ export async function loadCurrentManagedServiceState(
   intent: ManagedServiceStateLoadIntent,
   homeDir = getZhixingHome(),
 ): Promise<ManagedServiceCurrentState> {
-  const config = loadConfig({ homeDir });
+  const config = loadConfig({ homeDir, noAutoCreate: intent === "inspect" });
   return loadCurrentManagedServiceStateFromConfig(intent, homeDir, config);
 }
 
@@ -195,10 +195,104 @@ export async function prepareCurrentManagedServiceConfigTurnover(
     .disableFuture(current.spec, signal);
 }
 
-export async function prepareProgramRemovalManagedService(
+export async function prepareManagedServiceMaintenance(
   signal: AbortSignal = new AbortController().signal,
   homeDir = getZhixingHome(),
-): Promise<ProgramRemovalManagedServiceHandle> {
+): Promise<ManagedServiceMaintenanceHandle> {
+  const capacity = createDeviceCapacityRuntime(
+    path.join(homeDir, "distributed-runtime", "capacity"),
+  );
+  const adapter = createManagedServiceAdapter({ storageGovernor: capacity.storage });
+  if (await readPlatformSecretStoreBackendBinding(homeDir) === undefined) {
+    const absentProbe = buildManagedServiceSpec({
+      ...currentManagedServiceIdentity(homeDir),
+      backend: defaultManagedServiceProbeBackend(),
+      headless: false,
+    });
+    const assertAbsent = async (): Promise<void> => {
+      const inspection = await adapter.inspect(absentProbe, signal);
+      if (inspection.state !== "absent" || inspection.running || !inspection.matches) {
+        throw new Error("无法确认托管启动状态；维护未开始，请恢复本机凭据后重试");
+      }
+    };
+    await assertAbsent();
+    return Object.freeze({ commit: assertAbsent, rollback: async () => {} });
+  }
+
+  const current = await loadCurrentManagedServiceState("inspect", homeDir);
+  if (!current.spec) throw new Error("无法确认托管启动定义；维护未开始，请重试");
+  const spec = current.spec;
+  const definitionDigest = managedServiceDefinitionDigest(spec);
+  const launchPlanIdentity = canonicalize(resolveHostLaunchPlan(current));
+  const before = await adapter.inspect(spec, signal);
+  if (before.state !== "absent" && !before.matches) {
+    throw new Error("托管服务定义无法确认；维护未开始，请重试");
+  }
+  let changedByThisOperation = false;
+  let disabled = before;
+  if (before.state === "enabled") {
+    try {
+      disabled = await adapter.disableFuture(spec, signal);
+    } catch (error) {
+      const readBack = await adapter.inspect(spec, signal).catch(() => undefined);
+      if (!readBack || readBack.state !== "disabled" || !readBack.matches) throw error;
+      disabled = readBack;
+    }
+    changedByThisOperation = true;
+  }
+  if (disabled.state !== "absent" && (disabled.state !== "disabled" || !disabled.matches)) {
+    throw new Error("托管服务的未来启动尚未安全停用");
+  }
+
+  let committed = false;
+  const assertDefinition = async (): Promise<void> => {
+    const latest = await loadCurrentManagedServiceState("inspect", homeDir);
+    if (!latest.spec || latest.spec.serviceId !== spec.serviceId ||
+      managedServiceDefinitionDigest(latest.spec) !== definitionDigest ||
+      canonicalize(resolveHostLaunchPlan(latest)) !== launchPlanIdentity) {
+      throw new Error("托管服务定义在维护期间已换代");
+    }
+  };
+
+  return {
+    async commit() {
+      if (committed) return;
+      await assertDefinition();
+      const inspection = await adapter.inspect(spec, signal);
+      if (inspection.state === "absent" && !inspection.running) {
+        committed = true;
+        return;
+      }
+      if (inspection.state !== "disabled" || !inspection.matches || inspection.running) {
+        throw new Error("托管服务尚未安全停止；维护未完成");
+      }
+      committed = true;
+    },
+    async rollback() {
+      if (!changedByThisOperation || committed) return;
+      await assertDefinition();
+      const inspection = await adapter.inspect(spec, signal);
+      if (inspection.state === "enabled" && inspection.matches) return;
+      if (inspection.state !== "disabled" || !inspection.matches) {
+        throw new Error("托管启动状态无法安全恢复；请运行 zz doctor");
+      }
+      const restored = await adapter.enableFutureExact(spec, disabled, signal);
+      if (restored.state !== "enabled" || !restored.matches) {
+        throw new Error("托管启动状态恢复未通过回读验证；请运行 zz doctor");
+      }
+    },
+  };
+}
+
+export interface ManagedServiceMaintenanceHandle {
+  readonly commit: () => Promise<void>;
+  readonly rollback: () => Promise<void>;
+}
+
+export async function prepareProgramUninstallManagedService(
+  signal: AbortSignal = new AbortController().signal,
+  homeDir = getZhixingHome(),
+): Promise<ProgramUninstallManagedServiceHandle> {
   const capacity = createDeviceCapacityRuntime(
     path.join(homeDir, "distributed-runtime", "capacity"),
   );
@@ -313,7 +407,7 @@ export async function prepareProgramRemovalManagedService(
   };
 }
 
-export interface ProgramRemovalManagedServiceHandle {
+export interface ProgramUninstallManagedServiceHandle {
   /** Irreversibly removes the exact disabled registration after current stop. */
   readonly commit: () => Promise<void>;
   /** Restores only an enabled→disabled transition made by this operation. */

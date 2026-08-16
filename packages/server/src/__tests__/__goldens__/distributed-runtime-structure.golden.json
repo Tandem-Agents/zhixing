@@ -12,7 +12,9 @@
         "@zhixing/test-utils"
       ],
       "@zhixing/mcp": [],
-      "@zhixing/mesh": [],
+      "@zhixing/mesh": [
+        "@zhixing/test-utils"
+      ],
       "@zhixing/network": [],
       "@zhixing/orchestrator": [
         "@zhixing/test-utils"
@@ -1172,7 +1174,7 @@
     },
     {
       "kind": "import",
-      "references": 7,
+      "references": 6,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/server"
     },
@@ -1208,7 +1210,7 @@
     },
     {
       "kind": "type-import",
-      "references": 3,
+      "references": 2,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/server"
     },
@@ -1256,7 +1258,7 @@
     },
     {
       "kind": "import",
-      "references": 143,
+      "references": 144,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },

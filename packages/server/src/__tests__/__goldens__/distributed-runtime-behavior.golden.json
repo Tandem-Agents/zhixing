@@ -682,32 +682,6 @@
     },
     {
       "emptyRequest": {},
-      "method": "server.update.health",
-      "outcome": {
-        "code": -32603,
-        "kind": "error",
-        "shape": {
-          "code": "number",
-          "message": "string"
-        }
-      },
-      "requiresAuth": true
-    },
-    {
-      "emptyRequest": {},
-      "method": "server.update.prepare",
-      "outcome": {
-        "code": -32602,
-        "kind": "error",
-        "shape": {
-          "code": "number",
-          "message": "string"
-        }
-      },
-      "requiresAuth": true
-    },
-    {
-      "emptyRequest": {},
       "method": "session.abort",
       "outcome": {
         "code": -32602,

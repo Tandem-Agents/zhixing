@@ -123,22 +123,6 @@
         "requiresAuth": true
       },
       {
-        "name": "server.update.consumeNotice",
-        "requiresAuth": true
-      },
-      {
-        "name": "server.update.health",
-        "requiresAuth": true
-      },
-      {
-        "name": "server.update.prepare",
-        "requiresAuth": true
-      },
-      {
-        "name": "server.update.status",
-        "requiresAuth": true
-      },
-      {
         "name": "session.abort",
         "requiresAuth": true
       },
@@ -394,22 +378,6 @@
       },
       {
         "name": "server.uninstall.status",
-        "requiresAuth": true
-      },
-      {
-        "name": "server.update.consumeNotice",
-        "requiresAuth": true
-      },
-      {
-        "name": "server.update.health",
-        "requiresAuth": true
-      },
-      {
-        "name": "server.update.prepare",
-        "requiresAuth": true
-      },
-      {
-        "name": "server.update.status",
         "requiresAuth": true
       },
       {
@@ -671,22 +639,6 @@
         "requiresAuth": true
       },
       {
-        "name": "server.update.consumeNotice",
-        "requiresAuth": true
-      },
-      {
-        "name": "server.update.health",
-        "requiresAuth": true
-      },
-      {
-        "name": "server.update.prepare",
-        "requiresAuth": true
-      },
-      {
-        "name": "server.update.status",
-        "requiresAuth": true
-      },
-      {
         "name": "session.abort",
         "requiresAuth": true
       },
@@ -942,22 +894,6 @@
       },
       {
         "name": "server.uninstall.status",
-        "requiresAuth": true
-      },
-      {
-        "name": "server.update.consumeNotice",
-        "requiresAuth": true
-      },
-      {
-        "name": "server.update.health",
-        "requiresAuth": true
-      },
-      {
-        "name": "server.update.prepare",
-        "requiresAuth": true
-      },
-      {
-        "name": "server.update.status",
         "requiresAuth": true
       },
       {
@@ -1225,8 +1161,6 @@
           "cleanup:anchor-host:runtime:jobStatus.dispose",
           "cleanup:anchor-host:runtime:losslessDataPlane.close",
           "cleanup:anchor-host:runtime:meshRuntime.stop",
-          "cleanup:anchor-host:runtime:programUpdateChecks.stop",
-          "cleanup:anchor-host:runtime:programUpdateNotifications.stop",
           "cleanup:anchor-host:runtime:scheduler.stop",
           "cleanup:anchor-host:runtime:serverLogLifecycle.stop",
           "cleanup:anchor-host:server:server.close",
@@ -1267,7 +1201,6 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
-          "cli:zhixing update",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -1314,10 +1247,6 @@
           "rpc:server.uninstall.continue",
           "rpc:server.uninstall.preflight",
           "rpc:server.uninstall.status",
-          "rpc:server.update.consumeNotice",
-          "rpc:server.update.health",
-          "rpc:server.update.prepare",
-          "rpc:server.update.status",
           "rpc:session.abort",
           "rpc:session.advancementCancel",
           "rpc:session.advancementConfirm",
@@ -1427,8 +1356,6 @@
           "cleanup:anchor-host:runtime:jobStatus.dispose",
           "cleanup:anchor-host:runtime:losslessDataPlane.close",
           "cleanup:anchor-host:runtime:meshRuntime.stop",
-          "cleanup:anchor-host:runtime:programUpdateChecks.stop",
-          "cleanup:anchor-host:runtime:programUpdateNotifications.stop",
           "cleanup:anchor-host:runtime:scheduler.stop",
           "cleanup:anchor-host:runtime:serverLogLifecycle.stop",
           "cleanup:anchor-host:server:server.close",
@@ -1469,7 +1396,6 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
-          "cli:zhixing update",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -1516,10 +1442,6 @@
           "rpc:server.uninstall.continue",
           "rpc:server.uninstall.preflight",
           "rpc:server.uninstall.status",
-          "rpc:server.update.consumeNotice",
-          "rpc:server.update.health",
-          "rpc:server.update.prepare",
-          "rpc:server.update.status",
           "rpc:session.abort",
           "rpc:session.advancementCancel",
           "rpc:session.advancementConfirm",
@@ -1626,8 +1548,6 @@
           "cleanup:anchor-host:runtime:jobStatus.dispose",
           "cleanup:anchor-host:runtime:losslessDataPlane.close",
           "cleanup:anchor-host:runtime:meshRuntime.stop",
-          "cleanup:anchor-host:runtime:programUpdateChecks.stop",
-          "cleanup:anchor-host:runtime:programUpdateNotifications.stop",
           "cleanup:anchor-host:runtime:scheduler.stop",
           "cleanup:anchor-host:runtime:serverLogLifecycle.stop",
           "cleanup:anchor-host:server:server.close",
@@ -1663,7 +1583,6 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
-          "cli:zhixing update",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -1703,10 +1622,6 @@
           "rpc:server.uninstall.continue",
           "rpc:server.uninstall.preflight",
           "rpc:server.uninstall.status",
-          "rpc:server.update.consumeNotice",
-          "rpc:server.update.health",
-          "rpc:server.update.prepare",
-          "rpc:server.update.status",
           "rpc:session.abort",
           "rpc:session.advancementCancel",
           "rpc:session.advancementConfirm",
@@ -1801,8 +1716,6 @@
           "cleanup:anchor-host:runtime:jobStatus.dispose",
           "cleanup:anchor-host:runtime:losslessDataPlane.close",
           "cleanup:anchor-host:runtime:meshRuntime.stop",
-          "cleanup:anchor-host:runtime:programUpdateChecks.stop",
-          "cleanup:anchor-host:runtime:programUpdateNotifications.stop",
           "cleanup:anchor-host:runtime:scheduler.stop",
           "cleanup:anchor-host:runtime:serverLogLifecycle.stop",
           "cleanup:anchor-host:server:server.close",
@@ -1838,7 +1751,6 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
-          "cli:zhixing update",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -1878,10 +1790,6 @@
           "rpc:server.uninstall.continue",
           "rpc:server.uninstall.preflight",
           "rpc:server.uninstall.status",
-          "rpc:server.update.consumeNotice",
-          "rpc:server.update.health",
-          "rpc:server.update.prepare",
-          "rpc:server.update.status",
           "rpc:session.abort",
           "rpc:session.advancementCancel",
           "rpc:session.advancementConfirm",
@@ -1982,7 +1890,6 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
-          "cli:zhixing update",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -2079,7 +1986,6 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
-          "cli:zhixing update",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -2173,7 +2079,6 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
-          "cli:zhixing update",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -2249,7 +2154,6 @@
           "cli:zhixing serve logs",
           "cli:zhixing status",
           "cli:zhixing stop",
-          "cli:zhixing update",
           "cli:zhixing workspace",
           "cli:zhixing workspace create",
           "cli:zhixing workspace create-scene",
@@ -2519,28 +2423,6 @@
         "id": "meshRuntime.stop",
         "source": "packages/cli/src/serve/command.ts",
         "key": "cleanup:anchor-host:runtime:meshRuntime.stop",
-        "category": "cleanup",
-        "target": {
-          "rowId": "shutdown"
-        }
-      },
-      {
-        "owner": "anchor-host",
-        "role": "runtime",
-        "id": "programUpdateChecks.stop",
-        "source": "packages/cli/src/serve/command.ts",
-        "key": "cleanup:anchor-host:runtime:programUpdateChecks.stop",
-        "category": "cleanup",
-        "target": {
-          "rowId": "shutdown"
-        }
-      },
-      {
-        "owner": "anchor-host",
-        "role": "runtime",
-        "id": "programUpdateNotifications.stop",
-        "source": "packages/cli/src/serve/command.ts",
-        "key": "cleanup:anchor-host:runtime:programUpdateNotifications.stop",
         "category": "cleanup",
         "target": {
           "rowId": "shutdown"
@@ -2999,16 +2881,6 @@
         }
       },
       {
-        "path": "zhixing update",
-        "hidden": false,
-        "hasAction": true,
-        "key": "cli:zhixing update",
-        "category": "cli",
-        "target": {
-          "rowId": "shutdown"
-        }
-      },
-      {
         "path": "zhixing workspace",
         "hidden": false,
         "hasAction": false,
@@ -3425,43 +3297,6 @@
         "category": "rpc",
         "target": {
           "rowId": "shutdown"
-        }
-      },
-      {
-        "name": "server.update.consumeNotice",
-        "requiresAuth": true,
-        "key": "rpc:server.update.consumeNotice",
-        "category": "rpc",
-        "target": {
-          "rowId": "status-read"
-        }
-      },
-      {
-        "name": "server.update.health",
-        "requiresAuth": true,
-        "key": "rpc:server.update.health",
-        "category": "rpc",
-        "target": {
-          "exclusion": "diagnostic",
-          "reason": "只读取或渲染设备本地诊断信息，无权威写"
-        }
-      },
-      {
-        "name": "server.update.prepare",
-        "requiresAuth": true,
-        "key": "rpc:server.update.prepare",
-        "category": "rpc",
-        "target": {
-          "rowId": "shutdown"
-        }
-      },
-      {
-        "name": "server.update.status",
-        "requiresAuth": true,
-        "key": "rpc:server.update.status",
-        "category": "rpc",
-        "target": {
-          "rowId": "status-read"
         }
       },
       {

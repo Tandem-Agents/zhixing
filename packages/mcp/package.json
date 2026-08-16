@@ -19,7 +19,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@zhixing/core": "workspace:*",
     "@zhixing/network": "workspace:*"
   },
@@ -28,5 +28,17 @@
     "tsup": "^8.4.0",
     "typescript": "^5.8.3",
     "vitest": "^3.1.1"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/longxia/zhixing.git",
+    "directory": "packages/mcp"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

@@ -163,24 +163,7 @@
 
 #### 目标模式：审查并收敛问题列表
 
-```text
-目标：只收敛本模块正式问题列表中状态为“待收敛”的 MDR-02～MDR-03、MDR-05～MDR-08（MDR-08 一个 P0/小，其余五个 P2/小），使六项分别真正命中公开构建子路径闭包、wire schema 注册、canonical definition digest 单源、mesh live-TLS 检查器合法 import、根 CLI 统一反馈，以及 package graph 的 workspace manifest 边界根因，并具备执行者无需补充设计决策即可一次实施的最优方案与完整验收条件。不得修改实现、运行构建或测试、重做模块独立审查、发现或登记无关问题；已删除问题及价值裁决否定的事实、评级、方案和范围，未满足重开条件不得恢复。
-
-首个动作及每次续跑或历史压缩后的首个动作：完整读取本工作台静态规则、三份权威交付文档、两类正式问题列表及“已删除问题的价值裁决记录”，再读取六项直接涉及的当前生产调用图、公共合同、发布链和现有验收设施；只依据文件中的最新事实、价值裁决、相关 MIR、方案、验收条件和状态继续。
-
-持续执行：
-
-1. 按 `MDR-08 → MDR-02 → MDR-03 → MDR-05 → MDR-06 → MDR-07` 重建事实链。逐项核准权威要求、真实生产者与组合根、唯一事实和稳定 identity、线性化点、全部消费者、公开终态、当前可达损失、相关 MIR、评级与工作量；区分生产行为错误、必要证据缺失、验收设施错误和局部结构债务。判断现有描述命中根因还是局部表象，同一根因及其上下游影响合并，独立根因不得互相遮蔽。
-2. 穷尽每项有限直接变体：MDR-08 覆盖 workspace manifest、`node_modules/dist/coverage/.turbo`、范围内其他符号链接、摘要重放与输入漂移；MDR-02 覆盖 exports、tsup entry、clean build 的 JS/DTS 目标、根入口与受支持消费者；MDR-03 覆盖两类 wire type 的生产 validator、`WireSchemaMap`、同版本解码与版本协商边界；MDR-05 覆盖 canonical definition bytes、`byteDigest` 与 serviceId 派生的职责边界；MDR-06 覆盖 default-only、namespace 和 named imports；MDR-07 覆盖根 help、无参数、显式 help 与未知命令。每个变体必须给出唯一事实、失败终态、影响边界和直接验收；无法解释时继续修正对应原问题。
-3. 按“保持现状或修正规则 → 复用现有机制 → 最小完整修复 → 新增能力或基础设施”的顺序收敛方案，选择更高成本方案前必须用当前事实排除前项。每项用最少文字写清执行者要改什么、在哪个既有责任边界内怎么改、哪些相邻合同不得改变、失败如何收束，以及哪些生产行为、消费者和直接证据全部成立才算完成；不得用逐文件补丁掩盖同根分叉，也不得新增第二事实源、schema 版本、通用 digest/runner/发布/诊断框架或范围外能力。
-4. 六项看似闭合后，对同一份未修改问题列表执行四路相互独立的冷启动对抗复审：package graph 的 workspace 闭包与路径安全；公开构建、wire 与 digest 的合同单源；安全检查器和根 CLI 的真实用户结果；六项与三份权威文档、相关 MIR、已删除问题及模块整体架构的直接交界。每路均须主动构造第 2 步反例，核查根因、影响、范围、评级、工作量、方案比例性和验收可执行性；发现真实反证则修正原记录并重新执行全部四路复审。
-
-只有三份权威文档和当前生产事实无法唯一推出方案，且选择会显著改变产品需求、用户体验、成本或模块边界时才暂停；其余方案按锁定范围内整体用户体验与模块架构同时最优自主收敛。直接交界只用于验证现有问题边界，不得把独立新根因并入或扩展本任务。
-
-完成条件：同一份未修改问题列表通过四路冷启动对抗复审；六项均完整写明事实与证据、根因、完整影响面、相关审查项、最优解决方案、直接验收、评级与工作量，且方案可由执行者一次实施，不恢复已否定主张、不扩建通用框架。完成项状态由“待收敛”更新为“待修复”，相关 MIR 状态和模块审查结论只做必要的一致性更新；固定骨架、表头及原格式保持不变。满足后明确回复“MDR-02～MDR-03、MDR-05～MDR-08 的根因与最优方案已闭合”并立即停止。
-
-完成任务之后，根据最新问题事实更新“目标模式：解决问题并完成多角色对抗收口”提示词，使其只执行本轮已闭合问题，格式与规则不变。
-```
+> 当前无状态为“待收敛”的正式问题；出现新一轮问题后由用户按正式问题列表更新。
 
 ### 2.5 识别开发阶段遗漏
 
@@ -202,46 +185,29 @@
 
 ### 2.8 目标模式：解决问题并完成多角色对抗收口
 
-```text
-目标：彻底解决本模块正式问题列表中的 MDR-02～MDR-03、MDR-05～MDR-08，使 MDR-08 一个 P0/小和其余五个 P2/小闭合公开构建子路径、wire schema 注册、canonical definition digest、mesh live-TLS 检查器、根 CLI 反馈及 package graph workspace 闭包的全部同根直接变体；不得扩展到其他问题、重做模块独立审查或进入模块发布之外的流程。已删除问题及价值裁决否定的事实、评级、方案和范围，未满足重开条件不得恢复；不得新增第二事实源、新 schema 版本、通用 digest/runner/发布/诊断框架或范围外能力。
-
-首个动作及每次续跑或历史压缩后的首个动作：完整读取本工作台静态规则、三份权威交付文档、MDR-02～MDR-03、MDR-05～MDR-08、已删除问题的价值裁决记录及六项直接涉及的生产调用图、公共合同、发布链和验收设施；只依据文件中的最新根因、方案、验收、相关 MIR 和状态继续。
-
-持续执行：
-
-1. 修复前按问题行的有限变体重新绑定当前事实：MDR-02 的 exports/tsup/clean JS+DTS，MDR-03 的两类 v1 wire schema/validator/协商边界，MDR-05 的 definition bytes/digest/serviceId，MDR-06 的 default-only/namespace/named imports，MDR-07 的根 help/无参数/显式 help/未知命令，MDR-08 的 workspace manifest、安装/构建目录、其他符号链接、摘要重放与输入漂移。逐项指出唯一事实、消费者、首个效果、失败终态和直接证据；事实与正式记录不符时先修正原行，不得另建问题。
-2. 按 `MDR-02 → MDR-03 → MDR-05 → MDR-06 → MDR-07 → MDR-08` 一次完成。先使 core 的公开 exports、tsup entry 与 clean JS/DTS 闭合；把 `ExecutionAssetSnapshot/ExecutionAssetBundle` 登记进现有 `WireSchemaMap` v1；仅让 managed definition 的 canonical bytes 复用 `byteDigest`，serviceId 派生不动；在现有 live-TLS AST 检查器内统一安全分类可选 import bindings；只用 Commander 既有配置和真实根 `help`子命令统一 help/error 中文且保持无参数 REPL，并把新增的 `cli:zhixing help` entry 作为 `localRender` 同步到现有 S7 coverage。同步直接测试与现有结构门禁，不新增公共能力。
-
-   上述源码与测试稳定后修复 MDR-08：让现有 package graph walker 只忽略 `node_modules/dist/coverage/.turbo`，继续绑定真实 workspace manifests，并对范围内其他符号链接 fail-closed；同步现有 release tooling 直接测试，不新增发布能力。按验证手册运行各项最小类型/直接测试并取得一次当前源码全量构建。
-3. 验证必须穿过真实责任边界：clean core build 与声明 subpath import/type resolution；contracts lint/typecheck 与 production `install-assets` decoder；managed definition 固定 bytes/digest 及全部 stop/supervisor consumers；检查器脚本自身对合法和违规 import 的结果；构建产物 CLI 的 stdout/stderr/exit 与真实 command tree/S7 mapping；production package graph producer 对真实 workspace manifests、固定安装/构建目录和其他符号链接的摘要闭包。不得以 mock 自报、历史 dist、仓库测试或末端返回值代替对应事实。失败先归因，实施缺陷直接修复并回到第 2 步。
-4. 全部验证通过后冻结源码和构建产物的同一交付指纹，整轮只读重建六项事实链；随后对同一指纹执行四个相互隔离的冷启动对抗角色：package graph workspace 闭包与路径安全，公开构建/wire/digest 合同单源，安全检查器与根 CLI 用户结果，三份权威文档/相关 MIR/已删除问题/模块整体架构边界。各角色主动重造问题行全部有限反例，测试通过不得替代功能判断。新反证首次出现即以稳定编号写入对应问题证据与反证记录；收口前对历轮反证、专项审查和四路记录做差异审计，每项只能以“同根合并”“当前源码证伪”或“修复后复核通过”关闭。发现真实反证时先修正对应问题的根因、方案和验收并回到第 2 步；任何交付物修改都会使冻结指纹和四路结论失效，必须重新完成第 3～4 步。只有真实修复、直接验证和四路复核均成立，才把对应问题沿 `修复中 → 待验证 → 已验证`推进。
-
-结束条件：同一冻结交付指纹上的六项方案全部落地并通过成比例验证，四路冷启动对抗无未处置反证；证明公开 subpath 的 clean JS/DTS 可消费、两类 wire v1 注册与生产拒绝边界闭合、definition digest 恰一实现、合法 import 不使安全检查器崩溃、根 CLI 全中文且无参数行为不变，以及 package graph 在默认 workspace 稳定绑定真实 manifests、排除固定安装/构建目录并拒绝其他符号链接。六项均为“已验证”，模块独立审查仍按工作台流程继续。满足后明确报告“MDR-02～MDR-03、MDR-05～MDR-08 六项问题已彻底解决”并立即停止；不得自行执行模块复审、归档、提交或外部发布。
-
-完成任务之后，执行“修复后更新模块独立审查清单状态”：凡受本轮生产实现、公共合同、验收设施或交付证据变更影响的 `[!]`、`[x]` 节点一律改为 `[~]` 并作废旧证据，未受影响的 `[x]` 保持不变；修复验证、问题“已验证”、专项功能审查或多角色对抗通过均不得直接产生 `[x]`。若本轮修改了生产文件却没有任何受影响节点变为 `[~]`，立即停止并报告状态映射错误。
-```
+> 当前无状态为“待修复”的正式问题；出现新一轮已收敛问题后由用户按正式问题列表更新。
 
 ## 审查清单
 
 ### 当前状态
 
 - **当前模块**：distributed-runtime（分布式运行时）
-- **模块身份**：把同一套知行运行时装配为单机、值班设备 + 工作电脑及 executor-only 三种受支持形态，并闭合会话、任务、投递、离线、迁移、恢复、停机、移除、安装与更新的模块级生产行为。
-- **权威来源**：`always-online-and-local-execution-requirements.md`（用户价值与体验）→ `distributed-runtime-charter.md`（最高架构依据）→ `specification.md`（字段、状态、异常与验收合同）；直接合同为规格 §13 所列九份模块文档、`s2-security-supply-chain-review.md`、`packages/mesh/security-dependencies.json`、`release-and-maintenance-guide.md`、`node-runtime-boundaries.md` 与 `unit-38-final-acceptance-ledger.json`。
-- **交付基线**：当前完整工作区，代码基线 `ae624bb3f0678a6b5ae3b38c9de81c0e153af955`；以 `packages/*`、`packages/channels/*`、CLI/Server 公共入口、两条生产组合根、发布脚本及其派生资产合同为交付物，不以历史单元清单或既有测试结论代替审查；尚未发起正式候选时不虚构或要求候选专属产物。
+- **模块身份**：把同一套知行运行时装配为单机、值班设备 + 工作电脑及 executor-only 三种受支持形态，并闭合会话、任务、投递、离线、迁移、恢复、停机、设备移除及 npm 安装与显式维护的模块级生产行为。
+- **权威来源**：`always-online-and-local-execution-requirements.md`（用户价值与体验）→ `distributed-runtime-charter.md`（最高架构依据）→ `specification.md`（字段、状态、异常与验收合同）；直接合同为规格 §13 所列九份模块文档、`s2-security-supply-chain-review.md`、`packages/mesh/security-dependencies.json`、`release-and-maintenance-guide.md`、`node-runtime-boundaries.md` 与 `software-distribution-trust-and-target-strategy.md`。
+- **交付基线**：当前完整工作区，代码基线 `ae624bb3f0678a6b5ae3b38c9de81c0e153af955`；以 `packages/*`、`packages/channels/*`、CLI/Server 公共入口、两条生产组合根、npm 打包/发布脚本及其派生资产合同为交付物，不以历史单元清单或既有测试结论代替审查；真实 npm 发布不是当前审查证据。
 - **生产装配关系**：`@zhixing/cli` 是产品入口与组合根；anchor 路径装配 server/RPC、owner、scheduler、delivery、mesh、checkpoint 与可选 channel，executor 路径装配同一 RuntimeHost、assignment/job/local-owner/data-plane；单机用进程内 adapter 组合两角色，跨机用认证 mesh adapter 组合，公共事实与 guard 由 core/contracts、AuthorityCommitLog、ArtifactStore、SecretStore、governor 和 lifecycle owner 提供。
-- **目标交付边界**：证明模块实现与发布门能够在正式候选产生时保证同一安装包在五个受支持 OS/arch 目标上完成开箱、配对、日常本机/跨机工作、离线继续、定时与推进、迁居与灾难恢复、安全停机、应用/设备移除、自动更新与失败恢复；同时满足唯一权威、无损投递、权限与隐私、耐久恢复、资源有界、兼容与公开反馈合同。实际五目标候选证据只在发起正式发布时产生，不作为非发布阶段的当前问题。
+- **目标交付边界**：证明 Windows x64 上通过用户 Node 与 npm 全局包即可完成开箱、配对、日常本机/跨机工作、离线继续、定时与推进、迁居与灾难恢复、安全停机、应用停用、npm 卸载及永久设备移除；显式维护失败可安全重试，用户数据与既有协议兼容保护不回退。macOS/Linux、自有自动更新、原生安装器、平台签名公证和真实 npm 发布均不作当前交付门禁。
 - **明确排除**：未被当前三份权威文档要求的通用 updater/lifecycle/runner/诊断或遥测框架、benchmark、任意规模流式工件、独立 updater daemon、远程证明、自动 failover、全局持续同步、范围外发布服务、未来检索召回及未启用 schema 的预迁移；竞品调研、历史实施步骤和可选未来章节只作边界/反证，不作新增能力门禁。
 - **架构与需求空洞判定**：未发现阻止清单定稿的冲突或空洞。三份主文档的优先级已明示为“总纲定方向和边界、规格冻结字段与行为、需求确定价值”；直接合同与当前生产入口可唯一推出本模块的产品、架构、性能和交付闭包。
 - **状态约定**：[ ] 未审；[x] 已完成且无 P0/P1；[!] 存在 P0/P1；[~] 输入变化须重审。
 
-> **清单状态**：0 项 `[ ]`、13 项 `[x]`、0 项 `[!]`、7 项 `[~]`；20 项已完成原独立判定。MIR-02、MIR-03、MIR-14～MIR-17、MIR-20 因本轮修复改变生产实现、公共合同、验收设施或交付证据，旧证据已作废并待独立复审；其余 13 项输入未变并继续复用。
+> **清单状态**：0 项 `[ ]`、10 项 `[x]`、0 项 `[!]`、10 项 `[~]`；20 项已完成原独立判定。MIR-01～MIR-03、MIR-12、MIR-14～MIR-18、MIR-20 因交付路径变更而旧证据失效并待独立复审；其余 10 项输入未变并继续复用。
 >
-> **本轮审查记录（2026-08-15）**：完整读取权威来源并核对当前生产装配；Node 24 全量构建及主要包类型检查通过，按风险运行双拓扑、安全、权威/执行、环境、投递、调度推进、transcript、更新移除、FileLock 与发布工具直接证据。确认 4 个 P0/P1 根因和 3 个 P2 根因；资源受限下的 5 秒 I/O 超时经隔离复核未形成实现问题。本轮未修改实现。
+> **历史审查记录（2026-08-15，已被 2026-08-16 交付裁决取代）**：完整读取当时权威来源并核对当时生产装配；Node 24 全量构建及主要包类型检查通过，按风险运行双拓扑、安全、权威/执行、环境、投递、调度推进、transcript、更新移除、FileLock 与发布工具直接证据。确认 4 个 P0/P1 根因和 3 个 P2 根因；资源受限下的 5 秒 I/O 超时经隔离复核未形成实现问题。本轮未修改实现。
 >
-> **问题价值裁决记录（2026-08-15）**：从三份权威文档与当前生产源码重新举证后，删除 1 个根因失实的 P0，将 2 个无当前用户失败的 P1 降为 P2，并收窄 1 个 P2 的事实。MDR-04 的“五目标正式候选证据缺失”主张已删除并转入已删除记录；审查中另发现的 package graph workspace 边界是独立生产根因，登记为 MDR-08。五目标签名、公证和候选报告只在正式发布候选产生时由既有门禁要求，当前不存在某次候选证据不是开发问题，也不阻断本机测试。
+> **历史问题价值裁决记录（2026-08-15，已被 2026-08-16 交付裁决取代）**：从当时权威文档与生产源码重新举证后，删除 1 个根因失实的 P0，将 2 个无当前用户失败的 P1 降为 P2，并收窄 1 个 P2 的事实。MDR-04 的“五目标正式候选证据缺失”主张已删除并转入已删除记录；审查中另发现的 package graph workspace 边界是独立生产根因，登记为 MDR-08。
 >
-> **问题修复记录（2026-08-15）**：MDR-02～MDR-03、MDR-05～MDR-08 已在同一当前源码构建上完成直接验证与四路冷启动复核并更新为“已验证”。MDR-08 的 package graph walker 已排除固定安装/构建目录、继续绑定真实 workspace manifests并对其他符号链接 fail-closed，冻结 closure 为 source `sha256:aa96c544…` / package `sha256:719eeb9b…`；正式候选仍须在发布时通过既有五目标门禁，但不属于当前问题。
+> **历史问题修复记录（2026-08-15，已被 2026-08-16 交付裁决取代）**：MDR-02～MDR-03、MDR-05～MDR-08 已在同一当时源码构建上完成直接验证与四路冷启动复核并更新为“已验证”。其中 MDR-08 所在旧发布链现已整体移除，不再构成当前入口或门禁。
 
 ### 来源覆盖
 
@@ -292,19 +258,19 @@
 | Permission Evolution | 第一部分需求、第二部分 §1～§10（不含文末“待定”） | 适用；信任上下文、三层决策、确定性禁区、用户确认/控制面和分布式冻结快照共同约束权限体验 | MIR-03、MIR-06、MIR-16～MIR-19 |
 | Permission Evolution | 文末“待定”：`escalate` 危险模式清单、助理研判缓存粒度 | 不适用；三份主文档未把两项开放选择激活为当前交付义务，不得以未来细化扩充门禁 | 明确排除；不新增审查项 |
 | 安全供应链评审 + `security-dependencies.json` | 裁决、强制门禁、精确依赖闭包、RFC 向量；未审计 PAKE production adapter 阻断 | 适用；批准依赖必须精确锁定，阻断适配器不得进入生产导出或构建 | MIR-03、MIR-15、MIR-19 |
-| 安装维护指南 | 安装与日常更新、离线诊断、移除应用与永久移除设备、发布运行手册 | 适用；全部章节分别约束安装/更新/恢复、无 host 诊断、两类移除语义与五目标发布动作 | MIR-01、MIR-14～MIR-16、MIR-20 |
-| Node 运行时边界 | 目标、三种 Node 身份、与 OS/用户 Node 共存、构建/类型/原生代码、官方安装更新合同、验收底线 | 适用；开发 Node、产品私有 Node 和用户 Node 必须隔离，五目标 runtime/原生构件与启动器 absolute path 一致 | MIR-02、MIR-15、MIR-17、MIR-20 |
+| 安装维护指南 | npm 安装、显式维护、离线诊断、应用停用、npm 卸载与永久移除设备 | 适用；约束唯一 npm 路径、无 host 诊断、维护失败行动和两类移除语义 | MIR-01、MIR-14～MIR-16、MIR-20 |
+| Node 运行时边界 | 用户 Node 前置、开发 Node、Windows x64 支持边界、原生 helper 与托管 definition | 适用；运行使用用户当前 Node，CLI 在首个产品效果前拒绝未支持环境，helper 与包版本/摘要全等 | MIR-02、MIR-15、MIR-17、MIR-20 |
 | Node 运行时边界 | 当前仓库现状、本轮执行结果与清洁性 | 适用为当前交付事实和验收输入，不把某台开发机状态升级为用户运行合同 | MIR-15、MIR-20 |
-| Unit 38 最终验收账本 | 十八不变量、故障、安全、拓扑和用户 journey 的固定 producer/consumer/composition root/terminal/test 行 | 适用为验收证据索引，不是新的权威事实；每行必须由对应模块项验证且不得以账本自报代替生产证据 | MIR-01～MIR-20 |
-| 当前完整交付物 | workspace manifests、`packages/*`/channels、CLI/Server 公共出口、anchor/executor 组合根、RPC registry、release scripts 与五目标派生资产 | 适用；反向检查每个公共入口、事实源、生产装配、派生资产和发布路径恰一归项 | MIR-01～MIR-20 |
+| Unit 38 最终验收账本 | 第 38 单元当时的不变量、故障、安全、拓扑和用户 journey 证据索引 | 不适用为当前规范；仅用于反查未被交付裁决删除的核心能力没有回退 | MIR-01～MIR-20 的历史交界 |
+| 当前完整交付物 | workspace manifests、`packages/*`/channels、CLI/Server 公共出口、anchor/executor 组合根、RPC registry、npm 打包/发布脚本与本地 tarball | 适用；反向检查每个公共入口、事实源、生产装配、派生资产和 npm 交付路径恰一归项 | MIR-01～MIR-20 |
 
 ### 审查项
 
 | 编号 | 状态 | 审查对象 | 独立通过条件与可复核证据 |
 | --- | --- | --- | --- |
-| MIR-01 | [x] | **一个产品的开箱与拓扑体验**：单机默认、值班设备 + 工作电脑两种一等用户形态 | 五目标安装后 `zz` 直接可用；扩展只需同包配对与选择值班设备，用户无需理解 anchor/executor/mesh；单机和跨机都提供同一完整 RuntimeHost 能力，本机优先且第三方限制只来自平台。以真实 CLI 旅程、角色计划、双拓扑组合根和用户可见输出证明默认/非默认路径均闭合；executor-only 只作内部装配变体，不成为第三种产品心智。<br>**独立证据（2026-08-15）**：角色计划、两条组合根及 24 项拓扑/启动证据通过；对抗裁决确认 Windows bridge 当前已按最终段区分权限且已有当前源码真实读写通过记录，原权限根因失实，受限执行环境中的 `0xc0000022` 未证明为受支持用户路径失败，见 MDR-01 删除记录。 |
-| MIR-02 | [~] | **角色、包依赖与生产装配不变量**：anchor/executor、三进程形态、可选 surface/channel | `@zhixing/cli` 两条组合根只按角色装配；禁用角色零加载零监听，单机仅以进程内 adapter 组合同一角色代码；server 与 executor 无互相 import，owner、runtime、mesh、rpc、delivery、governor、supervisor 各恰一生产 owner，启动恢复先于 ingress。以 manifests/exports、依赖图、composition-root 结构、真实端口监听和拓扑 conformance 证明，无旁路或第二装配。<br>**修复影响与当前证据（2026-08-15）**：core tsup entry 与公开 exports 验收设施已变化，clean build 和 subpath 直接验证通过；本项以 manifests/exports 作为装配证据，原独立证据已作废并待复审。 |
-| MIR-03 | [~] | **设备信任、权限、凭据与隐私闭包**：pair/reconnect/revoke/rotate/lost，进程内与 mesh | 高熵 single-use 配对、双向 TLS、HomeTrust、证书/票据/lease/capability 的 issuer/audience/scope/expiry/replay 全验；权限快照绑定 assignment 且 fail-closed；SecretStore 只暴露 SecretRef，秘密不进 wire/log/artifact/backup；撤销关闭连接并给外部凭据唯一换密行动；安全依赖精确锁定且 blocked PAKE 零生产导出。以真实握手、篡改/重放矩阵、SecretStore read-back、exposure/rotation 和供应链门禁证明。<br>**修复影响与当前证据（2026-08-15）**：live-TLS 检查器已在唯一 optional-import 边界安全窄化，当前 16 个 mesh 测试源检查和 default-only/namespace/named 自检通过；验收设施已变化，旧证据作废，本项转 `[~]`待独立复审。 |
+| MIR-01 | [~] | **一个产品的开箱与拓扑体验**：Windows x64 npm 安装后 `zz` 直接可用；单机默认，第二台同包配对后形成值班设备 + 工作电脑，不要求用户理解内部角色。用户 Node 是安装前置而非产品概念；首次运行才创建配置、身份和托管服务。以 packed CLI、首次运行、角色计划、双拓扑组合根和公开反馈证明。<br>**输入变化（2026-08-16）**：交付入口由私有 Node/原生安装改为 npm，全套旧证据作废，待独立复审。 |
+| MIR-02 | [~] | **角色、包依赖与生产装配不变量**：全部公开 npm 包的 manifests/exports 与 anchor/executor、三进程形态、可选 surface/channel 的真实组合根闭合；禁用角色零加载零监听，owner/runtime/mesh/rpc/delivery/governor/supervisor 各恰一生产 owner，启动恢复先于 ingress。以 packed manifests、依赖图、subpath import、组合根、真实端口和拓扑 conformance 证明。<br>**输入变化（2026-08-16）**：公开包合同、组合根和交付闭包均变化，旧证据作废，待独立复审。 |
+| MIR-03 | [~] | **设备信任、权限、凭据与软件供应链闭包**：pair/reconnect/revoke/rotate/lost 及进程内/mesh 信任合同不变；SecretStore 不进入包、wire、日志或备份。npm 交付还须证明知行包零安装脚本、第三方精确闭包无下载/配置/服务/home 副作用，tarball 零秘密与开发资产。<br>**输入变化（2026-08-16）**：供应链门由原生签名链改为 npm 包闭包，旧证据作废，待独立复审。 |
 | MIR-04 | [x] | **唯一权威、稳定身份与原子事实**：六类权威、conversation/global/local/device 域 | 每项状态只有一个 AuthorityCommitLog/owner，stable id+epoch/revision/digest 决定身份和 CAS 线性化；executor 无全局 Store 写，投影不得反向定义事实；MutationBatch、artifact 在场、幂等键和 applied/领域变化全有或全无，重复/迟到只回原结果，损坏或歧义 fail-stop。以权威覆盖表逐行、生产写入口、日志/资产 read-back、重启重放和结构门禁证明。<br>**独立证据（2026-08-15）**：六类 authority/port 写入口与 executor 禁写结构闭合；contract typecheck、幂等准入/响应丢失/重启 read-back 代表证据通过，未发现第二事实源。 |
 | MIR-05 | [x] | **conversation/job/system work 的端到端执行结果**：send/timer/manual、cancel/confirm/commit/failed/uncertain | 每个输入经 owner 准入、manifest/permission/resource 冻结、派发、executor received/start、fence commit、final publication 恰一闭合；conversation、user job、system job 按各自状态机且不混写；效果/响应丢失、重连、旧 epoch、cancel/sealed/confirmation 竞争不重复执行，无法证明时诚实 uncertain 并只给三选。以两拓扑真实生产链、日志水位、owner/executor 双 read-back、逐边与崩溃注入证据证明。<br>**独立证据（2026-08-15）**：owner admission、conversation/job recovery、fence/final 与 uncertain 路径均沿当前生产组合根核对；隔离的并发重放和 durable-point 测试通过，组合运行仅出现可归因的宿主 I/O 超时。 |
 | MIR-06 | [x] | **工作环境、工作场景与执行能力匹配**：main/scene、local/remote、online/offline | 用户选择被规范化为稳定 `{deviceId,bindingRef,revision}`，owner 冻结 exact Environment/ExecutionManifest，目标 executor 才做 probe 与真实工具执行；workspace CRUD/reset/migration 受本机 authority、generation、permission 和 capacity 保护；manifest/capability/asset/credential 任一不符零执行；无目录场景和本地域能力按矩阵自然降级而不暗取宿主路径。以所有入口映射、真实 filesystem/probe、匹配负例和两拓扑 read-back 证明。<br>**独立证据（2026-08-15）**：环境选择、ExecutionManifest、workspace authority/probe 的生产调用链与 exact identity 一致；本机 adapter 和损坏目录 fail-closed 隔离测试通过，未见宿主路径旁路。 |
@@ -313,20 +279,22 @@
 | MIR-09 | [x] | **定时与后台任务闭包**：user/system task、timer/manual、missed | TaskDefinition 与 JobOccurrence 分离，锚点是唯一 scheduler/job owner；定时、手动、错过追赶、暂停/恢复、取消和投递均经 job journal/fence/resource/delivery 主链；system task 仅锚点本地、对用户静默且不借 channel/mesh 持有义务；生命周期 gate 关闭后零新 occurrence，已接受项按原状态收束，换代后零旧代效果。以 scheduler 生产装配、三形态、用户/系统状态机、并发 tick、重启和 teardown read-back 证明。<br>**独立证据（2026-08-15）**：scheduler facade/run registry、occurrence/fence/delivery 生产链及生命周期 gate 核对完成；相关 scheduler/advancement/transcript 组 78 项通过，自动轮次 teardown 28 项闭合。 |
 | MIR-10 | [x] | **任务推进与 Agent lifecycle 提交边界**：rubric、review、evidence、segment/memory hooks | 推进采用/全局沉淀两半分离，local-draft 可离线生效；每个 run 的准入、契约、取证、裁判、代理消息和退出在 owner 流中有唯一 attempt/terminal，恢复不重做 provider 副作用；四 lifecycle 挂点只读装配，segment/memory 等写只进 assignment overlay 并在 owner committed 后发布，失败/cancel/uncertain 零泄漏。以 Advancement/RunRecord、ControlCompletion/Evidence ports、overlay 与权威 read-back、全部中间态恢复证明。<br>**独立证据（2026-08-15）**：Advancement contract/closure/store、review/evidence ports 与 lifecycle overlay 的 staged→committed 发布边界一致；中间态恢复和退出直接测试通过。 |
 | MIR-11 | [x] | **对话连续性、原文持久化与注意力窗口边界**：启动/resume/clear/GC/换代 | transcript 的 run 级 append-only 原文是保留窗内唯一事实，窗口/摘要是可丢派生视图；启动只倒读一次并给 agent 与用户一致的最近上下文，运行期不反向改写归档；clear 以耐久边界统一约束所有读端；7 MiB 分片、27 天非活跃片 GC、活跃片与当前快照保护、owner 索引和 post-commit memory 关系在并发/崩溃下不丢已提交内容。以生产 store、双读端、窗口状态、索引/分片 read-back、GC 与重启证明。<br>**独立证据（2026-08-15）**：retention/serializer/shard/snapshot 与 clear/read 生产关系核对完成，当前 transcript 直接测试通过；缺失的公开 subpath 仅影响包合同，另见 MDR-02。 |
-| MIR-12 | [x] | **用户感知性能、容量与资源有界性**：四 workload class、三 storage urgency、七 capacity class | current 启动、ready 与首个输入不等待自动维护网络，本机入口/执行无不必要远端绕行，流式结果和必要进度及时可见；所有外部调用先 reserve 后效果，usageId 幂等 consume，终态显式 settle/release/reclaim；WDRR 8:4:2:1 和七类正份额保证交互低延迟且后台不永久饥饿；workload/storage 共用唯一 DeviceCapacityArbiter，`atomic ≤ granted ≤ preferred`、预扣、固定批次/游标/保留窗使热状态与恢复近线性有界，等待时不持关键锁。以冷启动/网络停滞、本机/跨机交互、全 workload 满载、容量不足、崩溃残留、锁序和清理 read-back 证明，不以 benchmark 标签代替合同。<br>**独立证据（2026-08-15）**：resource governor、capacity arbiter、固定批次/游标及 active-round 单飞均有生产 owner；隔离资源/锁/容量测试通过，组合 5 秒超时与 runbook 的低资源 I/O 特征一致，未发现无界持有。 |
+| MIR-12 | [~] | **用户感知性能、容量与资源有界性**：启动、ready 与首个输入零更新网络/ProgramStore工作；本机入口无不必要远端绕行。既有四 workload、三 storage urgency、七 capacity class 的 reserve/consume/settle/release/reclaim 合同不变；npm 安装不执行产品代码。以冷启动、打包 CLI、网络停滞、资源满载、容量不足和清理 read-back 证明。<br>**输入变化（2026-08-16）**：自动轮次与程序存储删除改变启动/维护资源图，旧证据作废，待独立复审。 |
 | MIR-13 | [x] | **迁居、备份与灾难恢复**：目录/配对 target、recovery root、planned/disaster | checkpoint owner 唯一，首次与持续 checkpoint 绑定 current trust/root/target 并从实际目标真解封验证；planned transfer 与 disaster recovery 共享必要 closure 但身份/签名严格隔离；inventory/baseline/claim/import/ReadyProof/install/credential exposure 每阶段 exact、可重放且 abort/commit 恰一；恢复后唯一新权威、旧端拒写，root 丢失只走 rotate/invalidate/distinct-device reset，无单设备绕过。以真实 target、AuthorityCommitLog/ArtifactStore/SecretStore、断点与连续重启、双端 read-back 证明。<br>**独立证据（2026-08-15）**：checkpoint/transfer/disaster 的日志和 identity 主链存在；对抗裁决以当前 native source、提交差异和已登记的 rebuilt helper 真实 round-trip 证伪 MDR-01 的祖先写删权限主张，未保留 P0/P1。 |
-| MIR-14 | [~] | **宿主与托管服务生命周期、安全停机及两类移除**：三运行形态、signal/CLI/RPC、三停机策略、app/device/uninstall | managed/on-demand/foreground 只由同次配置、trust、角色与 binding 快照选择；canonical home 的单 worker 收束 exact OS definition、future-enabled/current-running/readiness，配置/信任换代先关准入并 drain，再按真实 manager/endpoint read-back reconcile，Windows bytes、principal/trigger/action/HRESULT 均按有限 canonical 合同验真。三形态共用 HostStopCoordinator、frozen accepted-work 与 exact host owner，按策略安全收束十 owner 后才 ready/terminal，successor 不误停；应用移除只删程序并 exact 补偿本操作改变的 future launch，永久设备移除经强确认、durable operation、owner closure 与 key-last cleanup。以三平台 managed adapter、三入口/三策略、十 owner、两层 handoff、双根 journal、各阶段故障和连续重启证明。<br>**修复影响与当前证据（2026-08-15）**：managed definition digest 已改为复用 canonical `byteDigest`，固定向量和 stop/successor/manager 直接验证通过；本项消费 exact definition identity，原独立证据已作废并待复审。 |
-| MIR-15 | [~] | **安装、自动更新、回滚与发布供应链**：五目标、first/replay/update/remove | release/index/manifest/artifact/ProgramStore/receipt 以 raw release identity、digest storage identity 和 sequence 高水位防降级/换字节；stage→activate→health→terminal 每阶段 achieved read-back，candidate 两根真实 loopback health 后才 current，失败保留/恢复 previous；自动检查正常安静、进度可见，每 generation 的单次/周期入口共用至多一个可 abort/await 的 active round，安全点才安装且 cleanup 后零旧代效果；私有 Node 用绝对路径、零 PATH/npm/用户 Node 改动。模块审查证明现有 producer、validator 和 `release:check`在正式候选发布时强制五目标 exact candidate、十二 journey、source/package/producer provenance 全等，缺格、错签、重放或漂移均零发布；尚未发起正式候选时不要求候选专属工件。以生产 installer/launcher/controller、发布工具直接合同、反例矩阵、响应丢失/连续重启和发布门输入闭包证明；实际五目标证据由真实发布流程产生。<br>**修复影响与当前证据（2026-08-15）**：当前 Node 24 全量构建成功；package graph 已排除 pnpm 依赖/构建目录并保持其他 symlink fail-closed，release tooling 直接验证通过，冻结 closure 为 source `sha256:aa96c544…` / package `sha256:719eeb9b95a2cccb8f69a561ded48c9e97dd67ba8f9669f4788c165c9db6e6f1`。正式候选的签名、公证和五目标报告仍由发布时既有门禁要求，当前没有候选不构成问题；发布生产者及其证据基础已变化，原独立证据已作废并待复审。 |
-| MIR-16 | [~] | **统一、克制且可行动的产品反馈**：CLI/REPL/RPC/channel，默认/异常/离线/维护 | 用户只见“值班设备/干活的电脑/当前工作/待确认/更新”等稳定心智模型；默认与健康状态安静，必要进度在当前输入/状态区可见；选择只在不可逆或真实分叉时出现；每个失败保护数据、隐藏 raw error/path/secret/internal id，并给唯一安全行动；`/status`、`zz status/doctor`、通知与原始接入面在同一事实下语言和行动一致，重放不制造第二提示。以产品旅程逐句、真实 renderer/wire、断线/错误/重试和多入口对照证明。<br>**修复影响与当前证据（2026-08-15）**：最终 CLI 构建的 `--help`、显式 `help`、未知命令与子命令 help 四格已验证为统一中文和唯一行动，无参数 root action保持；真实 command tree、S7 coverage 与 golden 同步通过。公开反馈输入已变化，旧证据作废，本项转 `[~]`待独立复审。 |
-| MIR-17 | [~] | **公共合同、兼容演进与边界完整性**：RPC/CLI/contracts/artifacts/version | 所有公开方法和命令恰一映射到权威操作或明确只读排除，strict decoder 在首效果前拒 unknown/缺失/错类型/非规范值；canonical bytes/digest/signature 在进程内与 mesh 一致，SemVer 2.0、协议版本、schema、feature negotiation 和只读降级不激活不兼容写；旧 pointer/receipt/log 的受支持重放可读，废弃入口不成为第二事实源。以 registry/entry coverage、contract schema/typecheck 资产、wire 污染、固定向量、版本矩阵和依赖/导出结构证明。<br>**修复影响与当前证据（2026-08-15）**：clean core build 已生成 transcript/conversation JS+DTS 且真实 subpath 可导入；两类 execution asset 已登记现有 wire v1 map并经 production decoder 验证污染/错版本零效果；managed definition digest 已恰一复用 `byteDigest`且 serviceId 不变。公共合同输入已变化，旧证据作废，本项转 `[~]`待独立复审。 |
-| MIR-18 | [x] | **系统性故障、并发与恢复责任**：总纲故障矩阵全部行及其交界 | 对 executor/owner 崩溃、网络分区、效果/响应丢失、路径切换、时钟/版本偏斜、磁盘满/坏尾、撤销、更新失败、双 successor/PID reuse、各阶段竞争和连续重启，逐项能指出稳定 identity、唯一耐久事实、线性化点、零副作用边界、恢复 owner 与公开终态；同根状态机在单机/跨机不分叉，任何 unknown 不伪成功、不自动重复不可逆效果。证据必须穿过真实组合根和事实源并证明故障实际命中。<br>**独立证据（2026-08-15）**：响应丢失、重放、换代、FileLock crash/PID reuse 与 stop/update 故障直接证据通过；对抗裁决证伪 MDR-01 的权限根因，受限环境错误不足以证明受支持生产故障，未保留 P0/P1。 |
+| MIR-14 | [~] | **宿主与托管服务生命周期、安全停机及两类移除**：三运行形态共用 HostStopCoordinator、frozen accepted-work 与 exact host owner；`stop --maintenance` 关闭并回读 exact future launch，失败只补偿本操作变化，成功待新 CLI reconcile。`app remove` 仅停用、注销并保护 home，再交 npm 卸载；永久设备移除仍走强确认和 key-last cleanup。以真实 manager/endpoint、Windows definition、各阶段故障与重放证明。<br>**输入变化（2026-08-16）**：维护和应用停用合同重写，旧证据作废，待独立复审。 |
+| MIR-15 | [~] | **npm 安装、显式维护与发布供应链**：Windows x64 的公开包版本、packed manifests、精确 registry 依赖、CLI shrinkwrap、第三方脚本审计、Windows helper descriptor 和本地 tarball smoke 形成交付闭包；旧 installer、私有 Node、ProgramStore、自动更新、回滚、签名及五目标门零当前入口。正式发布命令只有用户授权后才写 registry，依赖候选全等后才移动 CLI `latest`。<br>**输入变化（2026-08-16）**：本项合同整体换代，全部旧证据作废，待独立复审。 |
+| MIR-16 | [~] | **统一、克制且可行动的产品反馈**：CLI/REPL/RPC/channel 默认健康安静；维护只显示安全停机、npm 安装和新 CLI 恢复三个用户动作，失败隐藏 raw/path/internal id 并给唯一安全行动；doctor、status 与帮助不再出现候选、回滚、私有运行时或原生安装术语。以最终 dist、真实 renderer/wire 和重放对照证明。<br>**输入变化（2026-08-16）**：维护与卸载反馈重写，旧证据作废，待独立复审。 |
+| MIR-17 | [~] | **公共合同、兼容演进与边界完整性**：公开 CLI/RPC/package exports 恰一映射当前能力；update RPC、release protocol 和 upgrade lifecycle 零空壳。协议/schema negotiation 与只读降级继续 fail-closed；包版本与运行版本同源，已运行新版本后不承诺数据降级。以 registry/entry coverage、contracts、package exports、packed manifests 和版本矩阵证明。<br>**输入变化（2026-08-16）**：公共命令、RPC、协议 exports 和 package 表面变化，旧证据作废，待独立复审。 |
+| MIR-18 | [~] | **系统性故障、并发与恢复责任**：既有 executor/owner、网络、日志、撤销与 successor 故障合同不变；新增交界只含 maintenance 的 future-disable/stop/reconcile、npm 安装失败零知行副作用、Node 路径漂移诊断及 app prepare-uninstall 补偿。任何 unknown 不伪成功、不自动降级或删除数据。以真实组合根、manager read-back、响应丢失和连续重放证明。<br>**输入变化（2026-08-16）**：更新故障族删除、显式维护故障族新增，旧证据作废，待独立复审。 |
 | MIR-19 | [x] | **全局状态与用户资产的跨拓扑一致性**：memory、skill、rubric、schedule、workscene 与配置 | 锚点是全局写唯一权威，读由同一 current-authority 投影提供；run 内写先 staged、committed 后才发布，离线仅开放规格允许的 intent/只读 cache，收编后重校验；资产版本、SecretRef、workspace binding 与 consumer snapshot exact 绑定，删除/换代/恢复不留第二投影或旧代写入口；所有 CLI/RPC/tool/lifecycle producer 均进入同一领域端口。以六类权威覆盖、global query/mutation ports、各资产生产/消费/read-back、离线与迁居重放证明。<br>**独立证据（2026-08-15）**：global/local authority ports、current-authority 投影、workspace/rubric/schedule/memory producer 与 staged→committed 关系逐链核对；离线收编和换代未见第二写入口。 |
-| MIR-20 | [~] | **模块可交付证据闭包**：三份权威文档、十八不变量、全部矩阵与五目标发布门 | 每条适用规范、表格行、枚举行、公共入口、生产者/消费者/组合根/terminal 都可双向追到本清单唯一落点；当前模块实现由必要类型、结构、直接合同、双拓扑、真实故障和用户旅程证据覆盖，派生资产与源码全等；正式候选产生后，其五目标工件、journey、ledger 和 release report 必须与该候选全等。模块审查证明既有发布门在候选证据缺失、错误或漂移时拒绝，不以尚未发起发布导致的产物不存在判失败；测试通过不代替功能判断，自报、mock terminal、历史单元通过或 Git 状态均不能单独作为交付证明。全部 MIR 项完成、P0/P1 均已验证且受影响项重审通过，才允许判定模块实现具备交付条件；实际发布仍须通过候选级门禁。<br>**修复影响与当前证据（2026-08-15）**：当前源码全量构建、六项直接闭包及四路冷启动复核完成；公开 exports、wire schema、definition digest、安全检查器、根 CLI 和 package graph 的交付输入均已变化，正式候选证据仍只在实际发布时产生。原独立证据已作废，本项待按当前完整交付物重新闭合。 |
+| MIR-20 | [~] | **模块可交付证据闭包**：三份权威文档、公共入口、生产者/消费者/组合根/terminal 与当前 npm 路径双向对账；最终源码、一次全量构建、本轮全部 tarball、package check、Windows x64 smoke、S7/registry/golden 和保留能力矩阵同一指纹。真实 npm 发布不是本项证据。<br>**输入变化（2026-08-16）**：交付闭包与派生资产整体换代，旧证据作废，待独立复审。 |
 
 ---
 ## P0/P1 阻断问题列表
 
 > 本表是本模块 P0/P1 的唯一正式问题列表。每个根因只保留一行并持续更新事实、方案、验收与状态；价值裁决删除的问题移入“已删除问题的价值裁决记录”，只有状态为“已验证”的问题不再构成当前阻断。
+>
+> 2026-08-16 软件交付边界改为 npm 后，MDR-04 与 MDR-08 中涉及五目标、自有发布门和 package graph producer 的内容只保留为当时事实，已被[当前产品裁决](../modules/distributed-runtime/software-distribution-trust-and-target-strategy.md)取代，不参与当前构建、审查或发布。
 
 | 编号 | 问题描述 | 产生的影响 | 最优解决方案 | 工作量评估 | 问题评级 | 相关审查项 | 状态 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -351,4 +319,4 @@
 | MDR-06 | **事实与证据：**修复前 `check-mesh-live-tls-tests.mjs`在 `analyzeTestModule()`、`verifyHarnessImports()`及`importHasRuntimeBinding()`三处把可缺省的 `ImportClause.namedBindings`直接交给 `ts.isNamedImports/isNamespaceImport`；合法 default-only import 因此可使安全检查器抛异常。named 与 namespace 规则本身已有窄检查，生产 TLS、认证 transport 与 credential 路径不消费该脚本。**根因：**同一 AST 可选联合未在唯一边界先判存在，不是 TLS 生产行为错误。**当前损失/不做后果：**当前生产安全不受影响，但一次合法 import 形态即可让 lint/release 门制造假失败。**处理价值与范围：**恢复现有安全验收设施的确定性，不新增 runner。**按序排除：**删除或弱化检查器会丢失真实安全边界；TypeScript AST 已提供所需判别，只需在现有脚本统一窄化。**最小完整方案：**在脚本内用一个窄 helper 对 `namedBindings`先判存在，再分别返回 namespace/named/runtime 信息；三处复用该 helper，保持 TLS/factory 禁止规则不变。扩展既有 `verifyAnalyzer()`覆盖 default-only 普通模块不报错、default-only TLS 被识别、namespace 与 named runtime 被拒、named type-only 被允许。**直接验收：**当前 mesh 测试树检查通过；上述合法/违规 import 自测逐项命中预期且无异常；绕过 shared harness 的原有例子仍失败。**评级与工作量：**P2/小，约 0.5～1 小时。**最终结论：保留并收窄为三处同根调用。**修复与验证证据（2026-08-15）：**三处 AST 消费统一复用 `inspectImportBindings()`；当前 16 个 mesh 测试源和 default-only 普通/TLS、namespace、named runtime/type-only 自检均按原安全规则通过且不抛异常。四路复核确认生产 TLS 与共享 harness 禁止边界未改变。 | 不影响生产 TLS；影响安全 lint 和正式发布门的可靠性。 | 在现有 AST 检查器统一窄化 optional bindings，并用既有自检覆盖 default-only/namespace/named。 | 小；约 0.5～1 小时。 | P2 | MIR-03、MIR-20 | 已验证 |
 | MDR-07 | **事实与证据：**根 `Command`的业务描述为中文，但修复前 `zz --help`输出 Commander 的 `Usage/Options/Commands/display help/output version`英文固定语句；修复前没有把显式 `help`注册进真实 command tree，前置 `rejectUnknownCommandPath()`会把 `zz help`当作未知命令，且该错误与行动同样硬编码英文。无参数入口仍有真实 root action并进入 REPL，不应改成帮助页。Commander 的隐式 `helpCommand`不进入 `program.commands`，不能作为命令门或 S7 coverage 的唯一事实。**根因：**根 CLI 未在现有 Commander 配置与同一 command registry 边界完成统一语言投影，帮助与错误形成第二套反馈。**当前损失/不做后果：**首次探索和输错命令时出现混合语言，显式 help 还被误拒；主要功能仍可用，但持续增加理解成本并破坏核心入口完整感。**处理价值与范围：**只统一当前公开根入口的必要反馈，不建设文案框架或改子命令语义。**按序排除：**保持现状不满足总纲的一致、自然和唯一行动；给命令门增加特殊名单会制造第二命令表；现有 Commander 输出与真实 command registry 足够，但只能在其原生 usage/term 结果上中文化，不能重写路径拼装。**最小完整方案：**在根 `program`用现有 `helpOption/version/configureHelp`复用 Commander 原生 `commandUsage/subcommandTerm`结果后只替换固定模板，再把 Usage、Arguments、Options、Global Options、Commands及内建 help/version 描述映射为固定中文，并注册一个只调用 `program.outputHelp()`的真实无参数 `help`子命令；把未知命令改成固定中文错误和唯一“运行 `zz --help` 查看可用命令”行动；在现有 S7 `baseMappingTuples`中把新增的 `cli:zhixing help`登记为 `localRender`排除。保持 `rejectUnknownCommandPath()`在 parse/action 前、无参数 root action和全部业务子命令不变。**直接验收：**对最终 `dist`锁定四格：`zz --help`与`zz help`退出 0、根页无英文模板且命令仍完整；未知命令退出 1、只输出中文错误和唯一行动；无参数仍选择 REPL root action而不显示 help。重复运行输出稳定；command gate 证明显式 help 与已注册业务命令同源，S7 coverage/golden 无 unmapped entry且仅新增该 `localRender`映射。**评级与工作量：**P2/小，约 1 小时。**反证修正记录：**原方案拟用隐式 `helpCommand`承载显式帮助；Commander 当前实现证明它不进入真实 `commands`，会继续被命令门拒绝。现改为真实只读 help 子命令，范围、评级和用户终态不变。冷启动复核又证明手工重建 `commandUsage`会把子命令从 `zhixing status`收窄成 `status`；现进一步收敛为复用 Commander 原生 usage/term 后仅中文化，根与子命令路径均保持。**最终结论：保留并补齐显式 help 边界。**修复与验证证据（2026-08-15）：**根 Commander 真实 registry 已登记 `help`，帮助模板与未知命令统一中文；直接测试、类型检查、S7 coverage/golden 与最终 dist 四格通过，`zhixing status --help`保留完整根路径，无参数 root action仍存在。四路复核修正了手工 usage 拼装反证后未再发现用户结果或范围反证。 | 主要功能正确；局部影响首次使用、显式帮助和错误恢复的一致性。 | 仅在根 Commander 真实 registry/config 统一 help/error 中文和唯一行动，同步现有 S7 `localRender`映射并保持无参数 REPL。 | 小；约 1 小时。 | P2 | MIR-16 | 已验证 |
 
-> **模块独立审查结论**：本轮 20 项已全部完成原独立判定；修复后当前为 13 项 `[x]`、7 项 `[~]`、0 项 `[!]`。MDR-02～MDR-03、MDR-05～MDR-08 已验证并通过同一源码指纹上的四路冷启动复核，MDR-04 已删除；其影响的 MIR-02、MIR-03、MIR-14～MIR-17、MIR-20 已统一转为 `[~]`并作废旧证据。当前没有未解决的 P0/P1，模块独立审查尚未通过的唯一原因是 7 项受影响节点仍需独立复审。
+> **模块独立审查结论**：当前为 10 项 `[x]`、10 项 `[~]`、0 项 `[!]`。软件交付路径已裁决为“用户 Node + npm 全局包 + 显式维护”，受影响 MIR-01～MIR-03、MIR-12、MIR-14～MIR-18、MIR-20 的旧证据全部作废；本任务只实现并验证范围收缩，不得直接把这些节点改回 `[x]`，后续须独立复审。

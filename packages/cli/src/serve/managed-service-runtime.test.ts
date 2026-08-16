@@ -13,7 +13,7 @@ import {
   captureManagedHostAdmission,
   coordinateManagedHostTrustTransition,
   loadCurrentManagedServiceState,
-  prepareProgramRemovalManagedService,
+  prepareProgramUninstallManagedService,
   proveLocalCurrentAuthority,
   verifyManagedHostAdmission,
 } from "./managed-service-runtime.js";
@@ -214,7 +214,7 @@ describe("managed service current-state intent", () => {
     async () => {
       const homeDir = await createTempDir("managed-removal-fresh-home");
       await withManagedEnvironment(undefined, undefined, async () => {
-        const handle = await prepareProgramRemovalManagedService(
+        const handle = await prepareProgramUninstallManagedService(
           new AbortController().signal,
           homeDir,
         );

@@ -11,7 +11,6 @@ import {
   type AnchorUninstallLifecycleIdentity,
   type ExecutorRemovalLifecycleIdentity,
   type StopLifecycleIdentity,
-  type UpgradeLifecycleIdentity,
 } from "./device-lifecycle.js";
 import type { ProtocolSignatureVerifier, ProtocolSigner } from "./signature.js";
 
@@ -34,7 +33,7 @@ const issuer = identity("device-anchor");
 
 describe("device lifecycle protocol", () => {
   it("strictly round-trips every stable operation identity", () => {
-    for (const input of [stopIdentity(), removalIdentity(), uninstallIdentity(), upgradeIdentity()] as const) {
+    for (const input of [stopIdentity(), removalIdentity(), uninstallIdentity()] as const) {
       const record = validateDeviceLifecycleRecord({ v: 1, t: "accepted", identity: input });
       expect(decodeDeviceLifecycleRecord(encodeDeviceLifecycleRecord(record))).toEqual(record);
     }
@@ -294,46 +293,6 @@ describe("device lifecycle protocol", () => {
     })).toThrow("duplicate");
   });
 
-  it("serializes upgrade with other local-device lifecycle work and enforces every phase", () => {
-    let projection = reduceDeviceLifecycleProjection(
-      emptyDeviceLifecycleProjection(),
-      { v: 1, t: "accepted", identity: upgradeIdentity() },
-    );
-    expect(() => reduceDeviceLifecycleProjection(projection, {
-      v: 1,
-      t: "accepted",
-      identity: { ...stopIdentity(), operationId: "stop-during-upgrade" },
-    })).toThrow("already owns this home subject");
-    let state = projection.operations.get("upgrade-1")!;
-    for (const phase of [
-      "gate-closed",
-      "work-settled",
-      "flushed",
-      "old-host-stopped",
-      "pointer-switched",
-      "health-verified",
-    ] as const) {
-      state = reduceDeviceLifecycle(state, {
-        v: 1,
-        t: "advanced",
-        operationId: "upgrade-1",
-        phase,
-        evidence: phase === "health-verified" ? [{ kind: "health", digest: OTHER_DIGEST }] : [],
-      });
-    }
-    state = reduceDeviceLifecycle(state, {
-      v: 1,
-      t: "terminal",
-      operationId: "upgrade-1",
-      outcome: "upgraded",
-      evidence: [{ kind: "release", digest: DIGEST }],
-    });
-    expect(state.phase).toBe("terminal");
-    expect(() => reduceDeviceLifecycle(
-      reduceDeviceLifecycle(undefined, { v: 1, t: "accepted", identity: upgradeIdentity() }),
-      { v: 1, t: "advanced", operationId: "upgrade-1", phase: "pointer-switched", evidence: [] },
-    )).toThrow("cannot advance");
-  });
 });
 
 function stopIdentity(): StopLifecycleIdentity {
@@ -383,28 +342,6 @@ function uninstallIdentity(): AnchorUninstallLifecycleIdentity {
       kind: "recovery-backup",
       checkpointTargetId: "checkpoint-target-1",
       checkpointGeneration: "checkpoint-generation-7",
-    },
-  };
-}
-
-function upgradeIdentity(): UpgradeLifecycleIdentity {
-  return {
-    v: 1,
-    kind: "upgrade",
-    requestId: "request-upgrade-1",
-    operationId: "upgrade-1",
-    homeId: "home-1",
-    localDeviceId: "device-local",
-    fromReleaseVersion: "1.0.0",
-    fromManifestDigest: DIGEST,
-    targetReleaseVersion: "1.1.0",
-    targetManifestDigest: OTHER_DIGEST,
-    stageDigest: DIGEST,
-    pointerGeneration: 7,
-    host: {
-      kind: "foreground",
-      processId: 4242,
-      startedAt: "2026-08-13T00:00:00.000Z",
     },
   };
 }

@@ -1,4 +1,9 @@
-import type { DurableSchemaCompatibility } from "./release.js";
+export interface DurableSchemaCompatibility {
+  readonly schemaId: string;
+  readonly readMin: string;
+  readonly readMax: string;
+  readonly writeVersion: string;
+}
 
 /** Finite durable families written by the first stable distributed-runtime baseline. */
 export const DURABLE_SCHEMA_INVENTORY = Object.freeze([

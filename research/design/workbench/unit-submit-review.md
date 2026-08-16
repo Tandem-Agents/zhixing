@@ -265,10 +265,12 @@
 
 ## 审查清单
 
+> 第 38 单元的自动更新、私有 Node、原生安装与五目标发布合同已由[软件分发信任与产品边界](../modules/distributed-runtime/software-distribution-trust-and-target-strategy.md)取代；以下内容仅保存当时审查事实，不再作为当前待办、当前规范或交付门禁。
+
 ### 当前状态
 
-- **当前单元**：第 38 单元 · generation 1
-- **单元身份**：S10 升级兼容、稳定自动更新、五目标发布与模块最终验收；只交付当前 stable 通道、既有三种本机运行形态的安全更新与有限恢复、应用移除、离线诊断、旧路径退役和固定发布门禁。
+- **当前单元**：无。下列第 38 单元 generation 1 内容为历史记录。
+- **单元身份**：历史 S10 升级、自动更新与五目标发布合同；已被当前 npm 交付裁决取代。
 - **权威来源**：distributed-runtime-charter.md、always-online-and-local-execution-requirements.md、specification.md、s2-security-supply-chain-review.md、release-and-maintenance-guide.md、已定稿 D38-01～D38-10，以及第 30～37 单元已封版的 owner、transfer、checkpoint、trust、exposure、supervisor、stop 与 removal 合同。
 - **交付基线**：当前工作树中的 Unit38 完整生产实现、直接测试、发布脚本、生成资产、最终验收账与文档；历史问题、开发勾选、专项修复验证和多角色对抗不得替代本轮独立判断。
 - **生产装配关系**：五目标 release index/manifest/artifact 经 installer、ProgramStore 与 update controller 进入 anchor/executor/foreground 三种本机 host；升级复用既有 device lifecycle、accepted-work/delivery、supervisor 与 bound server health，CLI/server/doctor/surface 只消费 ProgramUpdateReceipt 的 current-authority 投影；release:check 汇总固定五目标、smoke 与 50 行最终验收证据。
@@ -277,7 +279,7 @@
 - **架构空洞判定**：总纲、规格 Unit38 补充、release guide 与 D38-01～D38-10 已唯一确定当前产品行为、事实源、阶段顺序、恢复边界、用户可见性和发布门禁；本轮发现的是实现与证据未满足既定合同，不是需要用户补充产品选择的架构空洞。
 - **状态约定**：[ ] 未审；[x] 已完成且无 P0/P1；[!] 存在 P0/P1；[~] 输入变化须重审。
 
-> **清单状态**：0 项 `[ ]`、31 项 `[x]`、0 项 `[!]`、0 项 `[~]`；本轮 IR38-21、IR38-22、IR38-30、IR38-31 均已独立重审通过，其余 27 项 `[x]` 的登记输入未变并直接复用；两类问题列表为空。
+> **历史清单状态**：0 项 `[ ]`、31 项 `[x]`、0 项 `[!]`、0 项 `[~]`；仅表示当时合同完成，不参与当前审查或交付判定。
 
 ### 来源覆盖
 

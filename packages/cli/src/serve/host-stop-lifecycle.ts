@@ -214,8 +214,7 @@ export class HostStopCoordinator {
 export function hostStopAlreadySettled(
   phase: DeviceLifecycleOperation["phase"],
 ): boolean {
-  return phase === "work-settled" || phase === "flushed" || phase === "ready-to-stop" ||
-    phase === "old-host-stopped" || phase === "pointer-switched" || phase === "health-verified";
+  return phase === "work-settled" || phase === "flushed" || phase === "ready-to-stop";
 }
 
 export function hostStopDeliveryLifecycleSources(

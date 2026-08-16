@@ -52,10 +52,6 @@ import {
 } from "./schedule.js";
 import {
   buildServerShutdownMethod,
-  buildServerUpdatePrepareMethod,
-  buildServerUpdateHealthMethod,
-  buildServerUpdateStatusMethod,
-  buildServerUpdateConsumeNoticeMethod,
   buildServerInfoMethod,
   buildDeliveryResolveMethod,
   buildDutyMigrationTargetsMethod,
@@ -146,10 +142,6 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     buildScheduleAbortRunMethod(),
     // server.*（控制面：shutdown / info）+ llm 轻推理通道(可信面)
     buildServerShutdownMethod(),
-    buildServerUpdatePrepareMethod(),
-    buildServerUpdateHealthMethod(),
-    buildServerUpdateStatusMethod(),
-    buildServerUpdateConsumeNoticeMethod(),
     buildServerInfoMethod(),
     buildDeliveryResolveMethod(),
     buildDutyMigrationTargetsMethod(),
@@ -199,8 +191,6 @@ export const DEVICE_LOCAL_RPC_METHODS = Object.freeze([
   "auth",
   "health",
   "server.shutdown",
-  "server.update.prepare",
-  "server.update.health",
   "server.uninstall.preflight",
   "server.uninstall.begin",
   "server.uninstall.continue",

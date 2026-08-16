@@ -78,7 +78,6 @@ import {
   type CoreHostLifecycleNotice,
 } from "./runtime/core-host-connection.js";
 import { RpcSchedulerFacade } from "./runtime/rpc-scheduler-facade.js";
-import { RpcProgramUpdateSurfaceFacade } from "./runtime/rpc-program-update-facade.js";
 import { RpcConversationFacade } from "./runtime/rpc-conversation-facade.js";
 import { RpcWorksceneFacade } from "./runtime/rpc-workscene-facade.js";
 import {
@@ -555,7 +554,6 @@ export async function startRepl(): Promise<void> {
   const conversationFacade = new RpcConversationFacade(coreHost);
   const worksceneFacade = new RpcWorksceneFacade(coreHost);
   const managementFacade = new RpcManagementFacade(coreHost);
-  const programUpdateFacade = new RpcProgramUpdateSurfaceFacade(coreHost);
 
   // 会话本身在宿主执行——宿主必须在场,启动即 ensure(不在则拉起)。
   // 拉起 / 连接 / 协议失败时进入只读事实面，不启动任何会话写路径。
@@ -568,30 +566,6 @@ export async function startRepl(): Promise<void> {
     renderScreen?.dispose();
     process.exit(1);
   }
-
-  let updateRefresh = Promise.resolve();
-  const refreshProgramUpdate = (): Promise<void> => {
-    updateRefresh = updateRefresh.then(async () => {
-      const updateProjection = await programUpdateFacade.status().catch(() => undefined);
-      if (!updateProjection) return;
-      const { printProgramUpdateProjection } = await import("./update/runtime.js");
-      printProgramUpdateProjection(updateProjection, {
-        log: (message) => cliWriter.line(message),
-      });
-      if (
-        updateProjection.noticeToken &&
-        (updateProjection.state === "updated" || updateProjection.state === "restored")
-      ) {
-        await programUpdateFacade.consumeNotice(updateProjection.noticeToken)
-          .catch(() => undefined);
-      }
-    }).catch(() => undefined);
-    return updateRefresh;
-  };
-  const stopProgramUpdateNotifications = programUpdateFacade.onChanged(() => {
-    void refreshProgramUpdate();
-  });
-  await refreshProgramUpdate();
 
   // 本地派生视图——配置显示 / 代理诊断 / workspace root 随宿主换代刷新。
   const localView = new ReplLocalView({ management: managementFacade });
@@ -1976,7 +1950,6 @@ export async function startRepl(): Promise<void> {
   renderer.stop();
   // UI 订阅先撤(tail / 确认面板 / 带外投影 / 会话订阅),再断连接——
   // 避免连接关闭期间残留事件触发已无效的渲染。
-  stopProgramUpdateNotifications();
   taskTail?.dispose();
   detachConfirmation?.();
   rpcConfirmationBroker.dispose();

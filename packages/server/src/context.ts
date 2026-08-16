@@ -34,48 +34,6 @@ import type { SessionAdoptionReviewResult } from "@zhixing/rpc";
 import type { ServerConfig } from "./types.js";
 import type { ManagedHostPublicStatus } from "./managed-host-status.js";
 import type { RpcSurfaceRegistry } from "./rpc/surface-identity.js";
-import type { RpcConnection } from "./rpc/connection.js";
-
-export class ProgramUpdateNotificationDomain {
-  readonly #connections = new Map<number, {
-    readonly connection: RpcConnection;
-    readonly removeCloseListener: () => void;
-  }>();
-
-  subscribe(connection: RpcConnection): () => void {
-    if (connection.closed) return () => undefined;
-    const current = this.#connections.get(connection.id);
-    if (current?.connection === connection) return () => undefined;
-    current?.removeCloseListener();
-    const removeCloseListener = connection.onClose(() => {
-      if (this.#connections.get(connection.id)?.connection === connection) {
-        this.#connections.delete(connection.id);
-      }
-    });
-    if (connection.closed) {
-      removeCloseListener();
-      return () => undefined;
-    }
-    this.#connections.set(connection.id, { connection, removeCloseListener });
-    return () => {
-      if (this.#connections.get(connection.id)?.connection !== connection) return;
-      removeCloseListener();
-      this.#connections.delete(connection.id);
-    };
-  }
-
-  publishChanged(): void {
-    for (const [id, entry] of this.#connections) {
-      if (entry.connection.closed ||
-          (entry.connection.tryNotify && !entry.connection.tryNotify("server.update.changed", {}))) {
-        entry.removeCloseListener();
-        if (this.#connections.get(id)?.connection === entry.connection) this.#connections.delete(id);
-        continue;
-      }
-      if (!entry.connection.tryNotify) entry.connection.notify("server.update.changed", {});
-    }
-  }
-}
 import type { PerspectivesController } from "./perspectives/index.js";
 import type { ConversationDirectory } from "./runtime/conversation-directory.js";
 import type { WorksceneDirectory } from "./runtime/workscene-directory.js";
@@ -100,52 +58,6 @@ export interface LifecycleShutdownAdapter {
   }>;
 }
 
-export interface LifecycleUpgradeAdapter {
-  prepare(input: {
-    readonly requestId: string;
-    readonly candidateManifestDigest: string;
-    readonly timeoutMs: number;
-  }): Promise<{
-    readonly operationId: string;
-    readonly phase: "flushed";
-  }>;
-}
-
-export interface ProgramUpdateHealthSnapshot {
-  readonly releaseManifestDigest: string;
-  readonly protocolRange: {
-    readonly readMin: string;
-    readonly readMax: string;
-    readonly writeVersion: string;
-  };
-  readonly durableSchemas: readonly {
-    readonly schemaId: string;
-    readonly readMin: string;
-    readonly readMax: string;
-    readonly writeVersion: string;
-  }[];
-  readonly homeId: string;
-  readonly endpoint: { readonly host: string; readonly port: number };
-  readonly rolePlan: { readonly host: string; readonly loadExecutor: boolean };
-  readonly trust: { readonly generation: number; readonly digest: string };
-}
-
-export interface ProgramUpdatePublicProjection {
-  readonly visible: boolean;
-  readonly state?:
-    | "downloading"
-    | "awaiting-safe-point"
-    | "installing"
-    | "updated"
-    | "failed-safe"
-    | "restored"
-    | "action-required";
-  readonly message?: string;
-  readonly release?: string;
-  readonly code?: string;
-  readonly action?: "retry-update" | "restore-previous" | "contact-support";
-  readonly noticeToken?: string;
-}
 
 /**
  * 第一方权威 RPC 的窄覆盖点。非当前锚点宿主只转发冻结的有限方法集；
@@ -443,18 +355,6 @@ export interface ServerContext {
   runtimeControl?: RuntimeControlAdapter;
   /** 耐久停机收束点。所有外部停机入口必须先取得 ready-to-stop。 */
   lifecycleShutdown?: LifecycleShutdownAdapter;
-  /** 已验证程序 stage 的本机升级收束点。 */
-  lifecycleUpgrade?: LifecycleUpgradeAdapter;
-  /** 本机升级成功门消费的当前运行代精确投影。 */
-  programUpdateHealth?: () => Promise<ProgramUpdateHealthSnapshot>;
-  /** 当前权威宿主的用户可见更新状态；surface 只经认证 relay 消费。 */
-  programUpdateStatus?: () => Promise<ProgramUpdatePublicProjection>;
-  /** 按 exact token 一次性消费成功通知；旧 token 不得清除新代通知。 */
-  programUpdateConsumeNotice?: (
-    noticeToken: string,
-  ) => Promise<{ readonly consumed: boolean }>;
-  /** 已成功读取更新状态的 exact connection；通知仅提示重读，不携带事实。 */
-  programUpdateNotifications: ProgramUpdateNotificationDomain;
   /** executor-only 宿主的有限第一方会话路由；锚点宿主不注入。 */
   conversationRpc?: FirstPartyConversationRpcRouter;
   /**
@@ -513,10 +413,6 @@ export interface CreateContextOptions {
   confirmationHub?: ConfirmationHub;
   runtimeControl?: RuntimeControlAdapter;
   lifecycleShutdown?: LifecycleShutdownAdapter;
-  lifecycleUpgrade?: LifecycleUpgradeAdapter;
-  programUpdateHealth?: ServerContext["programUpdateHealth"];
-  programUpdateStatus?: ServerContext["programUpdateStatus"];
-  programUpdateConsumeNotice?: ServerContext["programUpdateConsumeNotice"];
   conversationRpc?: FirstPartyConversationRpcRouter;
 }
 
@@ -550,11 +446,6 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     confirmationHub: opts.confirmationHub,
     runtimeControl: opts.runtimeControl,
     lifecycleShutdown: opts.lifecycleShutdown,
-    lifecycleUpgrade: opts.lifecycleUpgrade,
-    programUpdateHealth: opts.programUpdateHealth,
-    programUpdateStatus: opts.programUpdateStatus,
-    programUpdateConsumeNotice: opts.programUpdateConsumeNotice,
-    programUpdateNotifications: new ProgramUpdateNotificationDomain(),
     conversationRpc: opts.conversationRpc,
   };
 }

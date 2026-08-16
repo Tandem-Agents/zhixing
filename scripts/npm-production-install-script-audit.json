@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "packages": [
+    {
+      "name": "protobufjs",
+      "version": "7.6.5",
+      "scripts": [
+        "postinstall"
+      ],
+      "review": "只读相邻 package.json，最多向 stderr 输出依赖版本提示；不访问网络，不修改系统、服务、配置或 ZHIXING_HOME。"
+    }
+  ]
+}

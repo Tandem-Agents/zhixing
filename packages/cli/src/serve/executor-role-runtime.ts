@@ -87,21 +87,6 @@ import {
 } from "./host-stop-lifecycle.js";
 import type { StopHostGeneration } from "@zhixing/core/protocol";
 import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
-import { ProgramStore } from "../update/program-store.js";
-import { createReleaseVerifier } from "../update/release-verifier.js";
-import { EMBEDDED_RELEASE_TRUST } from "../update/release-channel.js";
-import { ProgramUpgradeCoordinator } from "../update/upgrade-lifecycle.js";
-import {
-  buildProgramUpdateHealthSnapshot,
-  buildProgramUpdateTrustProjection,
-  consumeProgramUpdateNotice,
-  readProgramUpdateProjection,
-  startAutomaticUpdateCheck,
-  startManagedUpdateChecks,
-  verifyLocalUpgradeHealth,
-} from "../update/runtime.js";
-
-class ProgramUpgradeRestart extends Error {}
 
 export async function runExecutorRole(
   options: ServeOptions,
@@ -135,7 +120,7 @@ export async function runExecutorRole(
   const lifecycleHomeId = (await lifecycleLog.originCheckpoint()).logId;
   const lifecycleJournal = new DeviceLifecycleJournal(lifecycleLog);
   const startupStopOperations = (await lifecycleJournal.active()).filter((operation) =>
-    (operation.identity.kind === "stop" || operation.identity.kind === "upgrade") &&
+    operation.identity.kind === "stop" &&
     operation.identity.homeId === lifecycleHomeId &&
     operation.identity.localDeviceId === bootstrap.mesh.deviceKey.deviceId);
   if (startupStopOperations.length > 1) {
@@ -177,9 +162,6 @@ export async function runExecutorRole(
   let localServerBinding: BoundZhixingServer | undefined;
   let localServerState: ServerStateFile | undefined;
   let localServerHeartbeat: NodeJS.Timeout | undefined;
-  let stopProgramUpdateChecks: () => Promise<void> = async () => undefined;
-  let stopProgramUpdateNotifications: () => void = () => undefined;
-  let programUpgrade: ProgramUpgradeCoordinator | undefined;
   let resolveLifecycleShutdown: (() => void) | undefined;
   const lifecycleShutdown = new Promise<void>((resolve) => {
     resolveLifecycleShutdown = resolve;
@@ -710,71 +692,6 @@ export async function runExecutorRole(
       },
       isHostStopped: isLifecycleHostStopped,
     });
-    let publishProgramUpdateChanged: () => void = () => undefined;
-    const releaseVerifier = EMBEDDED_RELEASE_TRUST
-      ? createReleaseVerifier(EMBEDDED_RELEASE_TRUST)
-      : undefined;
-    const programStore = releaseVerifier ? new ProgramStore() : undefined;
-    programUpgrade = releaseVerifier && programStore
-      ? new ProgramUpgradeCoordinator({
-          journal: new DeviceLifecycleJournal(lifecycleLog),
-          store: programStore,
-          verifier: releaseVerifier,
-          artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
-          acceptedWork,
-          onAcceptedWorkFrozen: async (snapshot) => {
-            const sources = hostStopDeliveryLifecycleSources(snapshot);
-            localConversationOwner!.restoreHostStopAcceptedWork(
-              snapshot.operationId,
-              Object.entries(snapshot.owners).flatMap(([owner, items]) =>
-                items.map((item) => ({ owner: owner as HostStopAcceptedWorkOwner, ...item })),
-              ),
-            );
-            await authority!.authority.installLifecycleAdmission({
-              operationId: snapshot.operationId,
-              sources,
-              deliveries: snapshot.owners.delivery,
-            });
-            if (!startupStopAcceptedWorkRecovered) {
-              await localConversationOwner!.recoverAcceptedWorkForLifecycle();
-              await jobOwnerAssembly!.recoverAcceptedWorkForLifecycle();
-              await mesh!.recoverAcceptedWorkForLifecycle();
-              startupStopAcceptedWorkRecovered = true;
-            }
-          },
-          homeId: lifecycleHomeId,
-          localDeviceId: bootstrap.mesh.deviceKey.deviceId,
-          host: stopHost,
-          isHostStopped: isLifecycleHostStopped,
-          onStateChanged: () => publishProgramUpdateChanged(),
-          runtime: {
-            closeAdmission: async (operationId) => {
-              jobOwnerAssembly!.pauseAccepting();
-              await localConversationOwner!.closeHostStopAdmission(operationId);
-            },
-            flushDurableState: async () => {
-              const [checkpoint, ownerDigest] = await Promise.all([
-                lifecycleLog.checkpoint(),
-                localConversationOwner!.checkpointAcceptedWork(),
-              ]);
-              return [{
-                kind: "accepted-work",
-                digest: protocolDigest("ExecutorProgramUpgradeDurableFlush", 1, {
-                  lifecycle: checkpoint.prefixDigest,
-                  localOwner: ownerDigest,
-                }),
-              }];
-            },
-            settlePhysicalSteps: () => authority!.executorResourceGovernor.coordinate(
-              async () => undefined,
-            ),
-          },
-        })
-      : undefined;
-    const programUpgradeResume = await programUpgrade?.resumeBeforeStartup();
-    if (programUpgradeResume?.kind === "stop-current" || programUpgradeResume?.kind === "restart-target") {
-      throw new ProgramUpgradeRestart();
-    }
     const stopResume = await stopCoordinator.resumeActive();
     if (startupStopOperation?.identity.kind === "stop") {
       const operationId = startupStopOperation.identity.operationId;
@@ -810,21 +727,6 @@ export async function runExecutorRole(
         remoteFor: (deviceId) => mesh!.firstPartyConversationFor(deviceId),
       }),
     });
-    const programUpdateHealth = async () => {
-      if (!programStore || !releaseVerifier) {
-        throw new Error("Current program health identity is unavailable");
-      }
-      const installed = await programStore.loadCurrentManifest(releaseVerifier);
-      if (!installed) throw new Error("Current program health identity is unavailable");
-      return buildProgramUpdateHealthSnapshot({
-        manifest: installed.manifest,
-        manifestDigest: installed.digest,
-        homeId: lifecycleHomeId,
-        endpoint: { host: localServerBinding!.host, port: localServerBinding!.port },
-        rolePlan: { host: "executor-host", loadExecutor: true },
-        trust: buildProgramUpdateTrustProjection(bootstrap.mesh),
-      });
-    };
     const serverContext = createServerContext({
       config: {
         ...DEFAULT_SERVER_CONFIG,
@@ -835,19 +737,6 @@ export async function runExecutorRole(
       token: token.token,
       conversationRpc,
       lifecycleShutdown: stopCoordinator,
-      ...(programUpgrade ? { lifecycleUpgrade: programUpgrade } : {}),
-      ...(programUpgrade && programStore && releaseVerifier
-        ? {
-            programUpdateHealth,
-            programUpdateStatus: () => readProgramUpdateProjection(programStore, {
-              verifier: releaseVerifier,
-              lifecycle: lifecycleJournal,
-              health: programUpdateHealth,
-            }),
-            programUpdateConsumeNotice: (noticeToken: string) =>
-              consumeProgramUpdateNotice(noticeToken, programStore),
-          }
-        : {}),
       runtimeControl: {
         conversationStatus: (after) =>
           localConversationOwner!.port().statusHistory(after),
@@ -859,47 +748,6 @@ export async function runExecutorRole(
       },
       hostInfo: { logPath: isDaemonChild() ? getDefaultLogPath() : undefined },
     });
-    publishProgramUpdateChanged = () => serverContext.programUpdateNotifications.publishChanged();
-    stopProgramUpdateNotifications = programStore?.onUpdateChanged(
-      publishProgramUpdateChanged,
-    ) ?? (() => undefined);
-    let programUpgradeHealthGate: (() => Promise<void>) | undefined;
-    if (programUpgradeResume?.kind === "verify-current") {
-      const current = await programStore!.loadPointer();
-      const installed = await programStore!.loadCurrentManifest(releaseVerifier!);
-      if (
-        !current || current.current.manifestDigest !== programUpgradeResume.currentManifestDigest ||
-        !installed || installed.digest !== programUpgradeResume.currentManifestDigest
-      ) {
-        await programUpgrade!.restoreCompatiblePrevious(programUpgradeResume.operationId);
-        throw new ProgramUpgradeRestart();
-      }
-      const health = buildProgramUpdateHealthSnapshot({
-        manifest: installed.manifest,
-        manifestDigest: installed.digest,
-        homeId: lifecycleHomeId,
-        endpoint: { host: localServerBinding.host, port: localServerBinding.port },
-        rolePlan: { host: "executor-host", loadExecutor: true },
-        trust: buildProgramUpdateTrustProjection(bootstrap.mesh),
-      });
-      programUpgradeHealthGate = async () => {
-        try {
-          const healthDigest = await verifyLocalUpgradeHealth({
-            endpoint: { host: localServerBinding!.host, port: localServerBinding!.port },
-            token: token.token,
-            expected: health,
-          });
-          await programUpgrade!.completeHealthy(
-            programUpgradeResume.operationId,
-            programUpgradeResume.currentManifestDigest,
-            healthDigest,
-          );
-        } catch {
-          await programUpgrade!.restoreCompatiblePrevious(programUpgradeResume.operationId);
-          throw new ProgramUpgradeRestart();
-        }
-      };
-    }
     localConversationServer = await runServer({
       context: serverContext,
       boundServer: localServerBinding,
@@ -919,24 +767,7 @@ export async function runExecutorRole(
         warn: (message) => writer.notify(`[local-session] ${message}`),
         error: (message) => writer.notify(`[local-session] ${message}`),
       },
-      ...(programUpgradeHealthGate ? { beforePublish: programUpgradeHealthGate } : {}),
     });
-    stopProgramUpdateChecks = processMode === "managed"
-      ? startManagedUpdateChecks({ store: programStore }).stop
-      : startAutomaticUpdateCheck({ store: programStore }).stop;
-    if (programUpgradeResume?.kind === "verify-current") {
-      await localConversationOwner.releaseHostStopAdmission(programUpgradeResume.operationId);
-      await authority.authority.releaseLifecycleAdmission(programUpgradeResume.operationId);
-      if (!startupStopAcceptedWorkRecovered) {
-        await localConversationOwner.recoverAcceptedWorkForLifecycle();
-        await jobOwnerAssembly.recoverAcceptedWorkForLifecycle();
-        await mesh.recoverAcceptedWorkForLifecycle();
-        startupStopAcceptedWorkRecovered = true;
-      }
-      jobOwnerAssembly.resumeAccepting();
-      mesh.resumeAcceptingAfterLifecycle();
-      localConversationOwner.resumeRecoveryAfterLifecycle();
-    }
     if (isDaemonChild()) {
       localServerState = new ServerStateFile();
       await localServerState.markReady({
@@ -958,11 +789,9 @@ export async function runExecutorRole(
       timeoutMs: 30_000,
     }).then(() => undefined));
   } catch (error) {
-    if (!(error instanceof ProgramUpgradeRestart)) roleFailure = error;
+    roleFailure = error;
   }
   const cleanupFailures: unknown[] = [];
-  await stopProgramUpdateChecks().catch((error: unknown) => cleanupFailures.push(error));
-  stopProgramUpdateNotifications();
   try {
     if (localServerHeartbeat) clearInterval(localServerHeartbeat);
     await localServerState?.markStopping("graceful");
@@ -1013,15 +842,6 @@ export async function runExecutorRole(
     await mcpHub.dispose();
   } catch (error) {
     cleanupFailures.push(error);
-  }
-  if (roleFailure === undefined && cleanupFailures.length === 0) {
-    try {
-      await programUpgrade?.advanceAfterCurrentHostStopped(
-        localServerBinding !== undefined && !localServerBinding.listening,
-      );
-    } catch (error) {
-      cleanupFailures.push(error);
-    }
   }
   if (roleFailure !== undefined) {
     if (cleanupFailures.length > 0) {

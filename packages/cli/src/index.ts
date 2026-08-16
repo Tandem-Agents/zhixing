@@ -17,6 +17,7 @@ import type { StartupCheckResult } from "./startup.js";
 import { MAX_LOG_LINES, normalizeLogLineCount } from "./serve/log-line-count.js";
 import { ZHIXING_CLI_VERSION } from "./version.js";
 import { findUnknownCommandPath } from "./command-gate.js";
+import { assertSupportedRuntime } from "./runtime-support.js";
 
 async function renderActionError(error: unknown): Promise<void> {
   if (
@@ -138,11 +139,15 @@ function rejectUnknownCommandPath(argv: string[], command: Command): void {
   process.exit(1);
 }
 
-async function handleStopAction(): Promise<void> {
+async function handleStopAction(options: { maintenance?: boolean } = {}): Promise<void> {
   try {
     await pruneRuntimeLogs();
-    const { runStopCommand } = await import("./serve/stop.js");
-    const result = await runStopCommand();
+    const result = options.maintenance
+      ? await (await import("./maintenance/stop.js")).runMaintenanceStop()
+      : await (await import("./serve/stop.js")).runStopCommand();
+    if (options.maintenance && result.status !== "error" && result.status !== "refused") {
+      console.log("维护已准备完成；下一步：安装当前版本或运行 npm install -g @zhixing/cli@latest，然后运行 zz");
+    }
     const exitCode =
       result.status === "error" || result.status === "refused" ? 1 : 0;
     process.exit(exitCode);
@@ -157,11 +162,6 @@ async function handleStatusAction(): Promise<void> {
     await pruneRuntimeLogs();
     const { runStatusCommand } = await import("./serve/status.js");
     const report = await runStatusCommand();
-    const {
-      printProgramUpdateProjection,
-      readCurrentAuthorityProgramUpdateProjection,
-    } = await import("./update/runtime.js");
-    printProgramUpdateProjection(await readCurrentAuthorityProgramUpdateProjection());
     // exit code: 0 running, 1 running-unhealthy, 2 stopped, 3 stale
     const exitCode =
       report.status === "running"
@@ -264,6 +264,10 @@ program
     }
   });
 
+program.hook("preAction", (_root, action) => {
+  if (action.name() !== "help") assertSupportedRuntime();
+});
+
 // ─── zhixing status / stop（用户运行控制入口） ───
 program
   .command("status")
@@ -273,33 +277,16 @@ program
 program
   .command("stop")
   .description("停止知行")
+  .option("--maintenance", "停止并关闭托管自启，为 npm 修复或升级做准备")
   .action(handleStopAction);
 
 program
-  .command("update")
-  .description("立即检查更新或恢复上一个可用版本")
-  .option("--restore-previous", "恢复上一个可用版本")
-  .action(async (options: { restorePrevious?: boolean }) => {
-    try {
-      const { printProgramUpdateProjection, runUpdateCommand } = await import("./update/runtime.js");
-      printProgramUpdateProjection(await runUpdateCommand(options));
-      process.exit(0);
-    } catch (err) {
-      await renderActionError(err);
-      process.exit(1);
-    }
-  });
-
-program
   .command("doctor")
-  .description("离线检查运行与更新状态并给出一个下一步")
+  .description("离线检查本机配置、托管服务和备份设置")
   .action(async () => {
     try {
-      const { inspectProgramHealth, printProgramDoctorReport } = await import("./update/doctor.js");
-      const { tryReadCurrentAuthorityProgramUpdateStatus } = await import("./runtime/rpc-program-update-facade.js");
-      printProgramDoctorReport(await inspectProgramHealth({
-        currentAuthorityStatus: tryReadCurrentAuthorityProgramUpdateStatus,
-      }));
+      const { inspectLocalHealth, printDoctorReport } = await import("./maintenance/doctor.js");
+      printDoctorReport(await inspectLocalHealth());
       process.exit(0);
     } catch (err) {
       await renderActionError(err);
@@ -311,12 +298,13 @@ const appCmd = program.command("app").description("管理知行应用");
 
 appCmd
   .command("remove")
-  .description("移除知行应用（保留全部数据）")
+  .description("停用知行并准备 npm 卸载（保留全部数据）")
   .action(async () => {
     try {
-      const { removeApplication } = await import("./update/app-remove.js");
-      await removeApplication();
-      console.log("正在移除知行应用；设备身份、配置和全部工作都会保留");
+      const { prepareApplicationUninstall } = await import("./maintenance/prepare-uninstall.js");
+      await prepareApplicationUninstall();
+      console.log("已停止且不再自动启动，程序尚未卸载");
+      console.log("下一步：运行 npm uninstall -g @zhixing/cli");
       process.exit(0);
     } catch (err) {
       await renderActionError(err);

@@ -26,7 +26,9 @@
       "import": "./dist/data-plane-ticket-registry.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
@@ -43,5 +45,17 @@
     "tsup": "^8.4.0",
     "typescript": "^5.8.3",
     "vitest": "^3.1.1"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/longxia/zhixing.git",
+    "directory": "packages/executor"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

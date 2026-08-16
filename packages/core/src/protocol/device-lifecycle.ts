@@ -6,7 +6,7 @@ import { assertProtocolIdentifier } from "./validation.js";
 
 export const DEVICE_LIFECYCLE_STREAM = "device-lifecycle";
 
-export type DeviceLifecycleKind = "stop" | "executor-removal" | "anchor-uninstall" | "upgrade";
+export type DeviceLifecycleKind = "stop" | "executor-removal" | "anchor-uninstall";
 export type StopStrategy = "immediate" | "drain" | "cancel";
 
 export type DeviceLifecyclePeerEffectKind =
@@ -32,9 +32,7 @@ export interface DeviceLifecycleEvidenceRef {
     | "trust-event"
     | "credential-exposure"
      | "checkpoint"
-     | "supervisor"
-    | "release"
-    | "health"
+    | "supervisor"
      | "cleanup";
   readonly digest: string;
   /** Optional durable payload root. Its digest must equal `digest`. */
@@ -152,27 +150,10 @@ export interface AnchorUninstallLifecycleIdentity {
   readonly path: AnchorUninstallPath;
 }
 
-export interface UpgradeLifecycleIdentity {
-  readonly v: 1;
-  readonly kind: "upgrade";
-  readonly requestId: string;
-  readonly operationId: string;
-  readonly homeId: string;
-  readonly localDeviceId: string;
-  readonly fromReleaseVersion: string;
-  readonly fromManifestDigest: string;
-  readonly targetReleaseVersion: string;
-  readonly targetManifestDigest: string;
-  readonly stageDigest: string;
-  readonly pointerGeneration: number;
-  readonly host: StopHostGeneration;
-}
-
 export type DeviceLifecycleIdentity =
   | StopLifecycleIdentity
   | ExecutorRemovalLifecycleIdentity
-  | AnchorUninstallLifecycleIdentity
-  | UpgradeLifecycleIdentity;
+  | AnchorUninstallLifecycleIdentity;
 
 export type DeviceLifecyclePhase =
   | "accepted"
@@ -180,9 +161,6 @@ export type DeviceLifecyclePhase =
   | "work-settled"
   | "flushed"
   | "ready-to-stop"
-  | "old-host-stopped"
-  | "pointer-switched"
-  | "health-verified"
   | "gate-frozen"
   | "authority-decided"
   | "authority-settled"
@@ -251,7 +229,7 @@ export type DeviceLifecycleRecord =
       readonly v: 1;
       readonly t: "terminal";
       readonly operationId: string;
-      readonly outcome: "stopped" | "removed" | "retired" | "upgraded" | "rolled-back";
+      readonly outcome: "stopped" | "removed" | "retired";
       readonly evidence: readonly DeviceLifecycleEvidenceRef[];
     }
   | {
@@ -275,7 +253,7 @@ export interface DeviceLifecycleOperation {
   readonly recordDigests: Readonly<Record<string, string>>;
   readonly peerEffects: readonly DeviceLifecyclePeerEffect[];
   readonly abort?: DeviceLifecycleAbort;
-  readonly terminalOutcome?: "stopped" | "removed" | "retired" | "upgraded" | "rolled-back";
+  readonly terminalOutcome?: "stopped" | "removed" | "retired";
 }
 
 export interface DeviceLifecycleProjection {
@@ -303,16 +281,6 @@ const REMOVAL_PHASES = [
   "cleanup-complete",
   "terminal",
 ] as const;
-const UPGRADE_PHASES = [
-  "accepted",
-  "gate-closed",
-  "work-settled",
-  "flushed",
-  "old-host-stopped",
-  "pointer-switched",
-  "health-verified",
-  "terminal",
-] as const;
 
 export function emptyDeviceLifecycleProjection(): DeviceLifecycleProjection {
   return { operations: new Map(), activeSubjects: new Map() };
@@ -323,9 +291,7 @@ export function deviceLifecycleSubject(identity: DeviceLifecycleIdentity): strin
     ? `host:${identity.host.kind === "managed" ? identity.host.serviceId : identity.host.processId}`
     : identity.kind === "executor-removal"
       ? `device:${identity.targetDeviceId}`
-      : identity.kind === "anchor-uninstall"
-        ? `device:${identity.currentDeviceId}`
-        : `device:${identity.localDeviceId}`;
+      : `device:${identity.currentDeviceId}`;
 }
 
 export function deviceLifecycleSubjectKey(identity: DeviceLifecycleIdentity): string {
@@ -558,14 +524,14 @@ export function validateDeviceLifecycleRecord(input: unknown): DeviceLifecycleRe
   if (value.t === "terminal") {
     exact(value, ["evidence", "operationId", "outcome", "t", "v"], "Terminal lifecycle record");
     identifier(value.operationId, "Terminal lifecycle operationId");
-    if (!new Set(["stopped", "removed", "retired", "upgraded", "rolled-back"]).has(value.outcome as string)) {
+    if (!new Set(["stopped", "removed", "retired"]).has(value.outcome as string)) {
       throw new TypeError("Terminal lifecycle outcome is invalid");
     }
     return {
       v: 1,
       t: "terminal",
       operationId: value.operationId,
-      outcome: value.outcome as "stopped" | "removed" | "retired" | "upgraded" | "rolled-back",
+      outcome: value.outcome as "stopped" | "removed" | "retired",
       evidence: validateEvidence(value.evidence),
     };
   }
@@ -667,7 +633,6 @@ export function reduceDeviceLifecycle(
   }
   if (record.t === "aborted") {
     if (current.identity.kind === "stop") throw new TypeError("Accepted stop cannot be aborted");
-    if (current.identity.kind === "upgrade") throw new TypeError("Accepted upgrade cannot be aborted");
     if (!abortVerifier) throw new TypeError("Authenticated lifecycle abort requires a verifier");
     const abort = validateDeviceLifecycleAbort(record.abort, abortVerifier);
     if (
@@ -773,31 +738,6 @@ function validateIdentity(input: unknown): DeviceLifecycleIdentity {
     positiveInteger(value.anchorEpoch, "Anchor uninstall anchorEpoch");
     digest(value.trustHeadDigest, "Anchor uninstall trust head digest");
     return { ...value, path: validateUninstallPath(value.path) } as unknown as AnchorUninstallLifecycleIdentity;
-  }
-  if (value.kind === "upgrade") {
-    exact(value, [
-      "fromManifestDigest",
-      "fromReleaseVersion",
-      "host",
-      "homeId",
-      "kind",
-      "localDeviceId",
-      "operationId",
-      "pointerGeneration",
-      "requestId",
-      "stageDigest",
-      "targetManifestDigest",
-      "targetReleaseVersion",
-      "v",
-    ], "Upgrade lifecycle identity");
-    identifier(value.localDeviceId, "Upgrade local device id");
-    semver(value.fromReleaseVersion, "Upgrade source release version");
-    semver(value.targetReleaseVersion, "Upgrade target release version");
-    digest(value.fromManifestDigest, "Upgrade source manifest digest");
-    digest(value.targetManifestDigest, "Upgrade target manifest digest");
-    digest(value.stageDigest, "Upgrade stage digest");
-    nonNegativeInteger(value.pointerGeneration, "Upgrade pointer generation");
-    return { ...value, host: validateHost(value.host) } as unknown as UpgradeLifecycleIdentity;
   }
   throw new TypeError("Device lifecycle identity kind is invalid");
 }
@@ -939,8 +879,6 @@ function validateEvidence(input: unknown): readonly DeviceLifecycleEvidenceRef[]
       "credential-exposure",
       "checkpoint",
       "supervisor",
-      "release",
-      "health",
       "cleanup",
     ]).has(value.kind as string)) throw new TypeError(`Lifecycle evidence ${index} kind is invalid`);
     digest(value.digest, `Lifecycle evidence ${index} digest`);
@@ -976,10 +914,6 @@ function assertNextPhase(current: DeviceLifecycleOperation, next: DeviceLifecycl
     assertSequential(REMOVAL_PHASES, current.phase, next, "executor removal");
     return;
   }
-  if (current.identity.kind === "upgrade") {
-    assertSequential(UPGRADE_PHASES, current.phase, next, "upgrade");
-    return;
-  }
   const path = current.identity.path.kind;
   const phases = path === "migration"
     ? ["accepted", "gate-frozen", "transfer-committed", "cleanup-complete", "terminal"] as const
@@ -1011,12 +945,6 @@ function assertSequential(
 }
 
 function assertTerminalOutcome(kind: DeviceLifecycleKind, outcome: string): void {
-  if (kind === "upgrade") {
-    if (outcome !== "upgraded" && outcome !== "rolled-back") {
-      throw new TypeError("Lifecycle terminal outcome does not match operation kind");
-    }
-    return;
-  }
   const expected = kind === "stop" ? "stopped" : kind === "executor-removal" ? "removed" : "retired";
   if (outcome !== expected) throw new TypeError("Lifecycle terminal outcome does not match operation kind");
 }
@@ -1024,8 +952,6 @@ function assertTerminalOutcome(kind: DeviceLifecycleKind, outcome: string): void
 function assertCanReachTerminal(current: DeviceLifecycleOperation): void {
   const expected = current.identity.kind === "stop"
     ? "ready-to-stop"
-    : current.identity.kind === "upgrade"
-      ? "health-verified"
     : current.identity.kind === "executor-removal"
       ? "cleanup-complete"
       : "cleanup-complete";
@@ -1071,11 +997,10 @@ function advance(
 function subjectDeviceId(identity: DeviceLifecycleIdentity): string {
   if (identity.kind === "executor-removal") return identity.targetDeviceId;
   if (identity.kind === "anchor-uninstall") return identity.currentDeviceId;
-  if (identity.kind === "upgrade") return identity.localDeviceId;
   return deviceLifecycleSubject(identity);
 }
 
-function abortAuthority(identity: Exclude<DeviceLifecycleIdentity, StopLifecycleIdentity | UpgradeLifecycleIdentity>): string {
+function abortAuthority(identity: Exclude<DeviceLifecycleIdentity, StopLifecycleIdentity>): string {
   return identity.kind === "executor-removal"
     ? identity.acceptedIssuerDeviceId
     : identity.currentDeviceId;
@@ -1087,9 +1012,6 @@ function isAdvancedPhase(value: unknown): value is Exclude<DeviceLifecyclePhase,
     "work-settled",
     "flushed",
     "ready-to-stop",
-    "old-host-stopped",
-    "pointer-switched",
-    "health-verified",
     "gate-frozen",
     "authority-decided",
     "authority-settled",
@@ -1101,12 +1023,6 @@ function isAdvancedPhase(value: unknown): value is Exclude<DeviceLifecyclePhase,
     "final-checkpoint-verified",
     "cleanup-complete",
   ]).has(value as string);
-}
-
-function semver(value: unknown, label: string): asserts value is string {
-  if (typeof value !== "string" || !/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.test(value)) {
-    throw new TypeError(`${label} must be canonical SemVer`);
-  }
 }
 
 function cloneObject(input: unknown, label: string): Record<string, unknown> {

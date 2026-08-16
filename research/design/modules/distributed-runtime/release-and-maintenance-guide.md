@@ -1,54 +1,45 @@
-# 知行 0.1.0 安装、更新与维护
+# 知行安装、维护与发布
 
-> Node.js 的开发环境、官方私有运行时和源码/npm 最低版本边界，统一见 [Node.js 运行时边界](./node-runtime-boundaries.md)。
+> 当前唯一正式交付路径：用户 Node + npm 全局包 + 显式维护。当前支持 Windows 10/11 x64 与 Node `>=24.0.0`。
 
-知行在 Windows x64、macOS x64/Apple 芯片和 Linux x64/ARM64 上提供同一个产品。安装完成后直接运行 `zz`；一台设备即可完整使用，再安装到其他设备并运行 `zz pair` 就能扩展。用户不需要选择“服务端版”或“节点版”。
-
-## 安装与日常更新
-
-正式安装包会验证平台签名、内嵌发布签名和最终程序字节，只写程序目录，不创建或改写知行数据目录。知行启动与首个输入不会等待网络；设备在实际运行期间异步检查稳定版，有更新时先在旧版继续工作的同时下载和验证，再等当前工作到达安全点后安装。
-
-正常且没有更新时不显示维护信息。有进度时只显示“正在下载更新”“将在当前工作完成后更新”或“正在更新”。需要立即检查或重试时运行：
+## 安装与首次运行
 
 ```text
-zz update
+npm install -g @zhixing/cli
+zz
 ```
 
-更新失败但旧版仍可安全使用时，知行会明确显示“自动更新失败，仍在使用原版本”，不会阻塞输入。健康验证失败时优先自动恢复上一可用版本；只有自动恢复无法完成时，诊断才会给出唯一人工动作：
+首次运行才在既有交互与权限边界内创建配置、设备身份和托管服务。npm 安装本身不下载额外程序、不注册服务、不写 `ZHIXING_HOME`，也不修改 Node、npm、PATH 或系统权限。全局目录不可写时，应使用 Node 官方的用户级安装方式修复环境；不得使用 `sudo npm`、放宽系统目录权限或修改知行以外的 npm 配置。
+
+## 同版修复与前向升级
 
 ```text
-zz update --restore-previous
+zz stop --maintenance
+npm install -g @zhixing/cli@<当前明确版本>
+zz
 ```
 
-## 离线诊断
+安装最新版本时把第二行改为 `npm install -g @zhixing/cli@latest`。maintenance 只关闭本次 exact 托管定义的未来启动并安全停止；失败会补偿本操作造成的状态变化。成功后保持停用，运行新 `zz` 才更新定义并恢复托管。知行不后台检查、下载、替换或回滚程序；已经运行新版本后不提供降级行动。
 
-运行 `zz doctor` 可在宿主未启动或网络不可用时检查当前安装、更新阶段、托管运行状态、凭据可解锁状态和本机恢复备份配置。结果只给一个稳定问题码和一个下一步，不输出密钥、令牌、URL、本机路径、设备内部身份或原始错误。
+## 诊断与停用
 
-## 移除应用与永久移除设备
+`zz doctor` 只读检查本机配置、秘密存储、托管服务、备份配置和已建立连接的兼容状态，每次只给一个安全行动，不联网、不写状态、不输出秘密或内部路径。
 
-两种操作的名称、入口和后果完全不同：
-
-- `zz app remove`：移除知行应用，保留全部数据。它停止当前程序、取消未来自动启动并移除启动器、版本和更新暂存，但保留设备身份、信任、配置、对话和工作。如果安全停机或注销未完成，程序会保留；知行只恢复本次操作改变的自动启动状态，无法证明恢复时会明确提示修复后重试。注销已提交后，只有稳定安装器和平台删除进程都已接纳任务才报告成功；启动失败会提示“应用未完全移除，请重试”，重试不会恢复自动启动或删除用户数据。
-- `zz device remove --permanent`：永久移除此设备及本机数据。知行会先显示设备名称、未转移工作和不可逆后果；交互操作必须再次确认，非交互操作也必须提供明确的永久确认。登记后的取消会绑定本次操作耐久保存；目标离线时会显示“取消已登记”，上线后自动恢复准入。继续操作的响应不确定时，知行会读取现有耐久进度；目标离线也会从本机登记给出“继续或取消”“查看进度”或最终结果，不会擅自取消用户已确认的决定。
-
-如果只是暂时不用，请使用 `zz stop`。不要用永久设备移除代替应用移除。
-
-## 发布运行手册
-
-正式候选开始前，发布者须准备无凭据的稳定索引 HTTPS 地址和 Ed25519 公钥信任输入，运行 `pnpm release:channel:embed -- --input <release-channel.json>` 后完成最终构建；开发构建保持 channel/trust 为 `undefined`，不得借用测试密钥或把私钥写入仓库。随后冻结 source/package/release-producer closure，任一绑定输入变化都必须从嵌入与构建重新开始。
-
-发布者在五个目标系统上产生自包含 Node 24 程序树并取得平台签名或公证证据，再用 `pnpm release:artifact` 冻结最终 artifact 和待签 manifest。所有程序路径、source 与 package 行使用同一 ordinal 顺序；构树前冻结的 source/package 摘要覆盖固定 release producer，并由 tree receipt、artifact、目标报告和发布门逐段复验。外部签名系统签署每个 canonical manifest，并从这五份已签 manifest 的摘要生成候选 stable index。
-
-每个目标必须在对应真实 OS/arch 上使用候选最终字节完成固定 smoke：干净安装、首次运行、同版静默重放、正常无更新静默、自动发现和下载、用户可见进度、安全点安装、自动恢复、诊断引导恢复、离线诊断、移除应用保留数据和永久设备移除强确认。目标目录须同时提供该目标已签候选的 `release-manifest.json`/`program-artifact.json` 和严格更旧的已签基线 `baseline-release-manifest.json`/`baseline-program-artifact.json`。固定 producer 会验证两组身份，在隔离程序根和 home 中只通过候选程序的 runtime、launcher、installer、CLI/RPC 正式入口执行十二项，逐行绑定实际 runtime/entry 字节、公开参数和耐久终态后生成 canonical report；仓库测试不能替代该证据：
+卸载应用而保留全部用户数据：
 
 ```text
-pnpm release:target-evidence -- --evidence <release-evidence-directory> --target <current-target>
+zz app remove
+npm uninstall -g @zhixing/cli
 ```
 
-五个目标的报告都写入同一 release evidence 目录后运行：
+第一步只安全停止并注销未来托管启动；成功固定表示“程序尚未卸载”。`ZHIXING_HOME`、设备身份、信任、配置、对话和工作均保留。永久移除设备及本机数据只能通过独立的 `zz device remove --permanent` 强确认流程。
+
+## 发布者合同
+
+本地先运行：
 
 ```text
-pnpm release:check -- --evidence <release-evidence-directory> --publish-index <candidate-index-path>
+pnpm package:check
 ```
 
-该命令先执行工作区质量门，再逐目标核对源树、包图、签名、公证、manifest、artifact 和 smoke 的摘要绑定；结束前再次核对输入未漂移。任何一格失败都会停止，只有全部通过才原子安装候选 stable index。仓库和报告不保管生产私钥，也不执行外部发布。
+它构建并 pack 全部公开包，在隔离临时根中以本轮 tarball 验证 manifest、精确依赖、CLI、runtime subpath 与 Windows helper，不写 npm registry。真实发布只能在用户另行授权后运行 `pnpm package:publish -- --confirm-publish`：命令先只读核验 npm 身份、二次验证、scope 与包权限，再按依赖拓扑使用候选 tag；只有全部版本、integrity、CLI shrinkwrap 和候选安装全等时才移动 `@zhixing/cli` 的 `latest`。仓库不保存 token，不建设 CI、自有更新源、签名 manifest、原生安装器或平台签名公证。

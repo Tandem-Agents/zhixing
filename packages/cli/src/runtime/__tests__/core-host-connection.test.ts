@@ -141,11 +141,34 @@ describe("CoreHostConnection", () => {
       createClient: () => asClient(client),
     });
 
-    await expect(conn.getClient()).rejects.toThrow(/RPC 协议不兼容/);
+    await expect(conn.getClient()).rejects.toThrow(
+      "当前设备上的知行版本较旧；请在当前设备运行 npm install -g @zhixing/cli@latest 后重试",
+    );
     expect(stopUnresponsiveHost).not.toHaveBeenCalled();
     expect(spawn).not.toHaveBeenCalled();
     expect(client.close).toHaveBeenCalledOnce();
     expect(conn.getStatus()).toEqual({ kind: "disconnected" });
+  });
+
+  it("宿主协议范围较旧时只引导更新宿主设备且不公开内部版本", async () => {
+    const client = makeFakeClient({
+      authenticate: async () => ({
+        protocol: 0,
+        protocolRange: { min: 0, max: 0 },
+        server: { version: "0.0.1" },
+        capabilities: [],
+      }),
+    });
+    const conn = new CoreHostConnection({
+      discover: async () => endpoint,
+      spawn: vi.fn(async () => ({ ok: true })),
+      createClient: () => asClient(client),
+    });
+
+    await expect(conn.getClient()).rejects.toThrow(
+      "宿主设备上的知行版本较旧；请在宿主设备运行 npm install -g @zhixing/cli@latest 后重试",
+    );
+    expect(client.close).toHaveBeenCalledOnce();
   });
 
   it("旧版本宿主且无其它活跃接入面 → 请求优雅退出、拉起新宿主并连接", async () => {

@@ -190,19 +190,6 @@ import {
 } from "./host-stop-lifecycle.js";
 import { deleteDeviceKey, deleteDeviceKeyExact } from "@zhixing/mesh/device-key-store";
 import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
-import { ProgramStore } from "../update/program-store.js";
-import { createReleaseVerifier } from "../update/release-verifier.js";
-import { EMBEDDED_RELEASE_TRUST } from "../update/release-channel.js";
-import { ProgramUpgradeCoordinator } from "../update/upgrade-lifecycle.js";
-import {
-  buildProgramUpdateHealthSnapshot,
-  buildProgramUpdateTrustProjection,
-  consumeProgramUpdateNotice,
-  readProgramUpdateProjection,
-  startAutomaticUpdateCheck,
-  startManagedUpdateChecks,
-  verifyLocalUpgradeHealth,
-} from "../update/runtime.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
@@ -696,8 +683,6 @@ async function runServerProcess(
   const localLifecycleOperations = (await lifecycleJournal.active()).filter((operation) =>
     (operation.identity.kind === "stop" &&
       operation.identity.localDeviceId === bootstrap.mesh.deviceKey.deviceId) ||
-    (operation.identity.kind === "upgrade" &&
-      operation.identity.localDeviceId === bootstrap.mesh.deviceKey.deviceId) ||
     (operation.identity.kind === "executor-removal" &&
       operation.identity.targetDeviceId === bootstrap.mesh.deviceKey.deviceId) ||
     (operation.identity.kind === "anchor-uninstall" &&
@@ -737,8 +722,6 @@ async function runServerProcess(
     const phase = startupLifecycleOperation.phase;
     const sealed = startupLifecycleOperation.identity.kind === "stop"
       ? ["work-settled", "flushed", "ready-to-stop"].includes(phase)
-      : startupLifecycleOperation.identity.kind === "upgrade"
-      ? ["work-settled", "flushed", "old-host-stopped", "pointer-switched", "health-verified"].includes(phase)
       : startupLifecycleOperation.identity.kind === "executor-removal"
         ? ["authority-settled", "revocation-ready", "revoked", "cleanup-complete"].includes(phase)
         : startupLifecycleOperation.identity.path.kind === "migration"
@@ -748,12 +731,10 @@ async function runServerProcess(
       kind: startupLifecycleOperation.identity.kind,
       artifactReady,
       // A successor must prove the old host stopped before replaying any frozen owner effect.
-      recoverAcceptedWork: startupLifecycleOperation.identity.kind === "stop" ||
-        startupLifecycleOperation.identity.kind === "upgrade"
+      recoverAcceptedWork: startupLifecycleOperation.identity.kind === "stop"
         ? false
         : artifactReady,
-      alreadySettled: startupLifecycleOperation.identity.kind === "stop" ||
-        startupLifecycleOperation.identity.kind === "upgrade"
+      alreadySettled: startupLifecycleOperation.identity.kind === "stop"
         ? hostStopAlreadySettled(phase)
         : false,
       delivery: {
@@ -1667,78 +1648,6 @@ async function runServerProcess(
     },
     isHostStopped: isLifecycleHostStopped,
   });
-  let publishProgramUpdateChanged: () => void = () => undefined;
-  const releaseVerifier = EMBEDDED_RELEASE_TRUST
-    ? createReleaseVerifier(EMBEDDED_RELEASE_TRUST)
-    : undefined;
-  const programStore = releaseVerifier ? new ProgramStore() : undefined;
-  const programUpgrade = releaseVerifier && programStore
-    ? new ProgramUpgradeCoordinator({
-        journal: new DeviceLifecycleJournal(lifecycleAuthorityLog),
-        store: programStore,
-        verifier: releaseVerifier,
-        artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
-        acceptedWork,
-        onAcceptedWorkFrozen: async (snapshot) => {
-          const sources = hostStopDeliveryLifecycleSources(snapshot);
-          ctx.localConversationOwner?.restoreHostStopAcceptedWork(
-            snapshot.operationId,
-            Object.entries(snapshot.owners).flatMap(([owner, items]) =>
-              items.map((item) => ({
-                owner: owner as keyof HostStopAcceptedWorkSnapshot["owners"],
-                ...item,
-              })),
-            ),
-          );
-          await ctx.deliveryStack?.installLifecycleAdmission({
-            operationId: snapshot.operationId,
-            sources,
-            deliveries: snapshot.owners.delivery,
-          });
-          await recoverStartupLifecycleAcceptedWork(sources);
-        },
-        homeId: lifecycleHomeId,
-        localDeviceId: bootstrap.mesh.deviceKey.deviceId,
-        host: stopHost,
-        isHostStopped: isLifecycleHostStopped,
-        onStateChanged: () => publishProgramUpdateChanged(),
-        runtime: {
-          closeAdmission: async (operationId) => {
-            managedHostStopping = true;
-            ctx.inboundRouter?.refuseNewMessages();
-            ctx.executorJobOwner?.pauseAccepting();
-            schedulerRuntime?.scheduler.closeAdmissionForLifecycle();
-            ctx.deliveryStack?.closeAdmissionForLifecycle();
-            await Promise.all([
-              ctx.localConversationOwner?.closeHostStopAdmission(operationId),
-              ctx.channelConnections?.suspendConfigured(),
-            ]);
-          },
-          flushDurableState: async () => {
-            const [checkpoint, localOwnerDigest] = await Promise.all([
-              lifecycleAuthorityLog.checkpoint(),
-              ctx.localConversationOwner?.checkpointAcceptedWork(),
-            ]);
-            return [{
-              kind: "accepted-work",
-              digest: protocolDigest("ProgramUpgradeDurableFlush", 1, {
-                lifecycle: checkpoint.prefixDigest,
-                localOwner: localOwnerDigest ?? null,
-              }),
-            }];
-          },
-          settlePhysicalSteps: async () => {
-            await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
-          },
-        },
-      })
-    : undefined;
-  const programUpgradeResume = await programUpgrade?.resumeBeforeStartup();
-  if (programUpgradeResume?.kind === "stop-current" || programUpgradeResume?.kind === "restart-target") {
-    await serverBinding.close();
-    await startupRollback.rollback();
-    return;
-  }
   const stopResume = await stopCoordinator.resumeActive();
   if (startupLifecycleOperation?.identity.kind === "stop") {
     const operationId = startupLifecycleOperation.identity.operationId;
@@ -2021,21 +1930,6 @@ async function runServerProcess(
   if (localRetirementCompletedBeforeServerStart) {
     throw new Error("This device has completed local retirement and cannot start normally");
   }
-  const programUpdateHealth = async () => {
-    if (!programStore || !releaseVerifier) {
-      throw new Error("Current program health identity is unavailable");
-    }
-    const installed = await programStore.loadCurrentManifest(releaseVerifier);
-    if (!installed) throw new Error("Current program health identity is unavailable");
-    return buildProgramUpdateHealthSnapshot({
-      manifest: installed.manifest,
-      manifestDigest: installed.digest,
-      homeId: lifecycleHomeId,
-      endpoint: { host: serverBinding.host, port: serverBinding.port },
-      rolePlan: { host: plan.host, loadExecutor: plan.loadExecutor },
-      trust: buildProgramUpdateTrustProjection(bootstrap.mesh),
-    });
-  };
   let serverCtx: ServerContext;
   serverCtx = createServerContext({
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
@@ -2301,31 +2195,7 @@ async function runServerProcess(
       },
     },
     lifecycleShutdown: stopCoordinator,
-    ...(programUpgrade ? { lifecycleUpgrade: programUpgrade } : {}),
-    ...(programUpgrade && programStore && releaseVerifier
-      ? {
-          programUpdateHealth,
-          programUpdateStatus: () => readProgramUpdateProjection(programStore, {
-            verifier: releaseVerifier,
-            lifecycle: lifecycleJournal,
-            health: programUpdateHealth,
-          }),
-          programUpdateConsumeNotice: (noticeToken: string) =>
-            consumeProgramUpdateNotice(noticeToken, programStore),
-        }
-      : {}),
   });
-  publishProgramUpdateChanged = () => serverCtx.programUpdateNotifications.publishChanged();
-  const stopProgramUpdateNotifications = programStore?.onUpdateChanged(
-    publishProgramUpdateChanged,
-  );
-  if (stopProgramUpdateNotifications) {
-    registerCleanup(
-      registry,
-      { owner: "anchor-host", role: "runtime", id: "programUpdateNotifications.stop" },
-      async () => stopProgramUpdateNotifications(),
-    );
-  }
   managedShutdown.current = () => {
     managedHostStopping = true;
     ctx.inboundRouter?.refuseNewMessages();
@@ -2367,43 +2237,6 @@ async function runServerProcess(
   registerTailCleanup(registry, { stateFile, heartbeatTimerRef, lockPaths });
 
   // runServer —— 内部会向 registry 注册 server.close（注入模式）
-  let programUpgradeHealthGate: (() => Promise<void>) | undefined;
-  if (programUpgradeResume?.kind === "verify-current") {
-    const current = await programStore!.loadPointer();
-    const installed = await programStore!.loadCurrentManifest(releaseVerifier!);
-    if (
-      !current || current.current.manifestDigest !== programUpgradeResume.currentManifestDigest ||
-      !installed || installed.digest !== programUpgradeResume.currentManifestDigest
-    ) {
-      await programUpgrade!.restoreCompatiblePrevious(programUpgradeResume.operationId);
-      throw new Error("Updated program health identity is unavailable");
-    }
-    const health = buildProgramUpdateHealthSnapshot({
-      manifest: installed.manifest,
-      manifestDigest: installed.digest,
-      homeId: lifecycleHomeId,
-      endpoint: { host: serverBinding.host, port: serverBinding.port },
-      rolePlan: { host: plan.host, loadExecutor: plan.loadExecutor },
-      trust: buildProgramUpdateTrustProjection(bootstrap.mesh),
-    });
-    programUpgradeHealthGate = async () => {
-      try {
-        const healthDigest = await verifyLocalUpgradeHealth({
-          endpoint: { host: serverBinding.host, port: serverBinding.port },
-          token: tokenInfo.token,
-          expected: health,
-        });
-        await programUpgrade!.completeHealthy(
-          programUpgradeResume.operationId,
-          programUpgradeResume.currentManifestDigest,
-          healthDigest,
-        );
-      } catch (error) {
-        await programUpgrade!.restoreCompatiblePrevious(programUpgradeResume.operationId);
-        throw error;
-      }
-    };
-  }
   if (!await verifyManagedHostAdmission(
     initialManagedHostAdmission,
     processMode,
@@ -2429,43 +2262,12 @@ async function runServerProcess(
       startTime: processStartTime,
       startedAt: processStartedAt,
     },
-    ...(programUpgradeHealthGate ? { beforePublish: programUpgradeHealthGate } : {}),
     logger: {
       info: (msg) => console.log(chalk.dim(`[server] ${msg}`)),
       warn: (msg) => console.warn(chalk.yellow(`[server] ${msg}`)),
       error: (msg) => console.error(chalk.red(`[server] ${msg}`)),
     },
   });
-
-  if (programStore) {
-    const stopProgramUpdateChecks = processMode === "managed"
-      ? startManagedUpdateChecks({ store: programStore }).stop
-      : startAutomaticUpdateCheck({ store: programStore }).stop;
-    registerCleanup(
-      registry,
-      { owner: "anchor-host", role: "runtime", id: "programUpdateChecks.stop" },
-      async () => stopProgramUpdateChecks(),
-    );
-  }
-
-  if (programUpgradeResume?.kind === "verify-current") {
-    await ctx.localConversationOwner?.releaseHostStopAdmission(programUpgradeResume.operationId);
-    await ctx.deliveryStack?.releaseLifecycleAdmission(programUpgradeResume.operationId);
-    await ctx.deliveryStack?.resumeAfterAuthorityTransfer();
-    if (!startupLifecycleFrozenRecoveryStarted) {
-      await recoverStartupLifecycleAcceptedWork(startupLifecycle?.delivery.sources ?? []);
-    }
-    await recoverAdvancementAcceptedWork();
-    schedulerRuntime?.scheduler.resumeAfterAuthorityTransfer();
-    ctx.executorJobOwner?.resumeAccepting();
-    ctx.meshRuntime?.resumeAcceptingAfterLifecycle();
-    ctx.inboundRouter?.resumeNewMessages();
-    await ctx.channelConnections?.resumeConfigured();
-    ctx.localConversationOwner?.resumeRecoveryAfterLifecycle();
-    managedHostStopping = false;
-    startupLifecycle = undefined;
-    delete ctx.startupLifecycle;
-  }
 
   // 组播设施已由 startServer 回填到 serverCtx —— 接通带外事件转发的 lazy ref。
   sessionBroadcastRef.current = serverCtx.sessionBroadcast ?? null;
@@ -2687,7 +2489,6 @@ async function runServerProcess(
 
   // 等待停机 —— 所有清理由 lifecycle.ts 的 shutdown → registry.runAll 统一完成
   await runner.waitForShutdown();
-  await programUpgrade?.advanceAfterCurrentHostStopped(!serverBinding.listening);
   } catch (error) {
     if (runner) {
       await runner.shutdown("startup-error").catch(() => {});

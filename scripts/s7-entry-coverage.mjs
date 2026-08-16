@@ -102,15 +102,12 @@ const coverageGroups = [
   ["channel-inbound", ["channel:router:InboundRouter", "channel:adapter:feishu", "channel:event:feishu:im.message.receive_v1"]],
   ["status-read", [
     "rpc:server.info",
-    "rpc:server.update.status",
-    "rpc:server.update.consumeNotice",
     "cli:zhixing status",
     "slash:status:repl",
   ]],
   ["light-inference", ["rpc:llm.complete"]],
   ["shutdown", [
     "rpc:server.shutdown",
-    "rpc:server.update.prepare",
     "rpc:server.uninstall.preflight",
     "rpc:server.uninstall.begin",
     "rpc:server.uninstall.continue",
@@ -121,7 +118,6 @@ const coverageGroups = [
     "rpc:device.status",
     "rpc:device.continue",
     "cli:zhixing stop",
-    "cli:zhixing update",
     "cli:zhixing app remove",
     "cli:zhixing device list",
     "cli:zhixing device remove",
@@ -174,7 +170,6 @@ const baseMappingTuples = [
   ],
   ["cli:zhixing doctor", { exclusion: "diagnostic", reason: exclusions.diagnostic }],
   ["cli:zhixing help", { exclusion: "localRender", reason: exclusions.localRender }],
-  ["rpc:server.update.health", { exclusion: "diagnostic", reason: exclusions.diagnostic }],
   ["slash:help:repl", { exclusion: "localRender", reason: exclusions.localRender }],
   ["slash:model:repl", { exclusion: "localRender", reason: exclusions.localRender }],
 ];
@@ -1108,7 +1103,9 @@ export function inspectManagedHostAssembly(records) {
     !service.includes("projection.actions.items.length === 1")
   ) failures.push("managed host Windows bytes, strict projection or HRESULT classifier drifted");
   if (
-    count(serviceRuntime, "createManagedServiceAdapter({ storageGovernor: capacity.storage })") !== 3 ||
+    count(serviceRuntime, "createManagedServiceAdapter({ storageGovernor: capacity.storage })") !== 4 ||
+    !serviceRuntime.includes("export async function prepareManagedServiceMaintenance(") ||
+    !serviceRuntime.includes("export async function prepareProgramUninstallManagedService(") ||
     !service.includes('"managed-service-reconcile"') ||
     !service.includes("export function managedServiceDefinitionBytes(") ||
     !service.includes('"--managed-home"') ||
@@ -2066,7 +2063,7 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     plannedLifecycle < 0 || stopInbound < plannedLifecycle || drainInbound < stopInbound ||
     disconnectChannels < drainInbound || quiesceDelivery < disconnectChannels ||
     drainAccepted < quiesceDelivery ||
-    count(command, "await ctx.deliveryStack?.resumeAfterAuthorityTransfer()") !== 5 ||
+    count(command, "await ctx.deliveryStack?.resumeAfterAuthorityTransfer()") !== 4 ||
     count(command, "await protocol.recoverInstalledAuthority()") !== 1 ||
     count(command, "return obligations;") !== 4 ||
     count(conversationProtocol, "async recoverInstalledAuthority(): Promise<number>") !== 1 ||
@@ -3654,19 +3651,16 @@ const coreHostRpcLinkOwners = new Set([
   "packages/cli/src/runtime/rpc-confirmation-broker.ts",
   "packages/cli/src/runtime/rpc-conversation-facade.ts",
   "packages/cli/src/runtime/rpc-management-facade.ts",
-  "packages/cli/src/runtime/rpc-program-update-facade.ts",
   "packages/cli/src/runtime/rpc-scheduler-facade.ts",
   "packages/cli/src/runtime/rpc-workscene-facade.ts",
 ]);
 const rpcClientOwners = new Set([
   "packages/cli/src/runtime/core-host-connection.ts",
-  "packages/cli/src/runtime/rpc-program-update-facade.ts",
   "packages/cli/src/runtime/surface-core-host-link.ts",
   "packages/cli/src/serve/stop.ts",
 ]);
 const coreHostConnectionOwners = new Set([
   "packages/cli/src/repl.ts",
-  "packages/cli/src/runtime/rpc-program-update-facade.ts",
   "packages/cli/src/runtime/anchor-uninstall-command.ts",
   "packages/cli/src/runtime/device-removal-command.ts",
   "packages/cli/src/runtime/duty-migration-command.ts",

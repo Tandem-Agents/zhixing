@@ -807,7 +807,7 @@ export class LocalConversationOwnerAssembly {
   async start(options: {
     readonly lifecycle?: {
       readonly operationId: string;
-      readonly kind: "stop" | "executor-removal" | "anchor-uninstall" | "upgrade";
+      readonly kind: "stop" | "executor-removal" | "anchor-uninstall";
       readonly recoverAcceptedWork: boolean;
       readonly alreadySettled?: boolean;
     };

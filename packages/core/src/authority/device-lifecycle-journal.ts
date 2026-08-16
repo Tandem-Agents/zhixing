@@ -75,7 +75,7 @@ export class DeviceLifecycleJournal {
 
   async terminal(
     operationId: string,
-    outcome: "stopped" | "removed" | "retired" | "upgraded" | "rolled-back",
+    outcome: "stopped" | "removed" | "retired",
     evidence: readonly DeviceLifecycleEvidenceRef[] = [],
   ): Promise<DeviceLifecycleOperation> {
     return this.#append(validateDeviceLifecycleRecord({

@@ -4,9 +4,6 @@ import type { RuntimeControlAdapter } from "../../../context.js";
 import {
   buildServerShutdownMethod,
   buildServerInfoMethod,
-  buildServerUpdateHealthMethod,
-  buildServerUpdateStatusMethod,
-  buildServerUpdateConsumeNoticeMethod,
   buildDeliveryResolveMethod,
   buildDutyMigrationCancelMethod,
   buildDutyMigrationCommitMethod,
@@ -35,7 +32,6 @@ function mkCtx(overrides: Partial<HandlerContext["server"]> = {}): HandlerContex
       version: "0.1.0-test",
       startedAt: Date.now() - 1000,
       token: "t",
-      programUpdateNotifications: { subscribe: vi.fn(() => vi.fn()), publishChanged: vi.fn() } as any,
       ...overrides,
     } as any,
   };
@@ -101,77 +97,6 @@ describe("Unit 37 lifecycle facade input", () => {
     await expect(entry.handler(params, ctx))
       .rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
     for (const operation of Object.values(uninstall)) expect(operation).not.toHaveBeenCalled();
-  });
-});
-
-describe("server.update.health", () => {
-  const snapshot = {
-    releaseManifestDigest: `sha256:${"a".repeat(64)}`,
-    protocolRange: { readMin: "1", readMax: "1", writeVersion: "1" },
-    durableSchemas: [{ schemaId: "AuthorityCommitEnvelope", readMin: "1", readMax: "1", writeVersion: "1" }],
-    homeId: "home-1",
-    endpoint: { host: "127.0.0.1", port: 18900 },
-    rolePlan: { host: "anchor-host", loadExecutor: true },
-    trust: { generation: 1, digest: `sha256:${"b".repeat(64)}` },
-  };
-
-  it("returns the exact local runtime projection and rejects non-loopback before projection", async () => {
-    const project = vi.fn(async () => snapshot);
-    const local = mkCtx({ programUpdateHealth: project });
-    await expect(buildServerUpdateHealthMethod().handler(undefined, local)).resolves.toEqual(snapshot);
-    expect(project).toHaveBeenCalledOnce();
-
-    const remote = mkCtx({ programUpdateHealth: project });
-    remote.connection.loopback = false;
-    await expect(buildServerUpdateHealthMethod().handler(undefined, remote))
-      .rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
-    expect(project).toHaveBeenCalledOnce();
-  });
-
-  it("rejects any parameters before reading runtime state", async () => {
-    const project = vi.fn(async () => snapshot);
-    await expect(buildServerUpdateHealthMethod().handler({ extra: true }, mkCtx({ programUpdateHealth: project })))
-      .rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
-    expect(project).not.toHaveBeenCalled();
-  });
-});
-
-describe("server.update current-authority projection", () => {
-  it("serves the same authenticated projection to loopback and relayed surfaces", async () => {
-    const projection = { visible: true, state: "action-required" as const, message: "需要处理" };
-    const project = vi.fn(async () => projection);
-    const local = mkCtx({ programUpdateStatus: project });
-    const remote = mkCtx({ programUpdateStatus: project });
-    remote.connection.loopback = false;
-    await expect(buildServerUpdateStatusMethod().handler(undefined, local)).resolves.toEqual(projection);
-    await expect(buildServerUpdateStatusMethod().handler(undefined, remote)).resolves.toEqual(projection);
-    expect(project).toHaveBeenCalledTimes(2);
-    expect(local.server.programUpdateNotifications.subscribe).toHaveBeenCalledWith(local.connection);
-    expect(remote.server.programUpdateNotifications.subscribe).toHaveBeenCalledWith(remote.connection);
-    expect(local.server.programUpdateNotifications.subscribe.mock.invocationCallOrder[0])
-      .toBeLessThan(project.mock.invocationCallOrder[0]!);
-  });
-
-  it("rolls back a new status subscription when projection fails", async () => {
-    const ctx = mkCtx({ programUpdateStatus: async () => { throw new Error("unavailable"); } });
-    const rollback = vi.fn();
-    vi.mocked(ctx.server.programUpdateNotifications.subscribe).mockReturnValue(rollback);
-    await expect(buildServerUpdateStatusMethod().handler(undefined, ctx)).rejects.toThrow("unavailable");
-    expect(ctx.server.programUpdateNotifications.subscribe).toHaveBeenCalledWith(ctx.connection);
-    expect(rollback).toHaveBeenCalledOnce();
-  });
-
-  it("validates an exact notice token before compare-and-consume", async () => {
-    const consume = vi.fn(async () => ({ consumed: true }));
-    const entry = buildServerUpdateConsumeNoticeMethod();
-    const token = `sha256:${"c".repeat(64)}`;
-    await expect(entry.handler({ noticeToken: token }, mkCtx({
-      programUpdateConsumeNotice: consume,
-    }))).resolves.toEqual({ consumed: true });
-    await expect(entry.handler({ noticeToken: token, extra: true }, mkCtx({
-      programUpdateConsumeNotice: consume,
-    }))).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
-    expect(consume).toHaveBeenCalledOnce();
   });
 });
 

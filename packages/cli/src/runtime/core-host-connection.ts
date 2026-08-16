@@ -555,8 +555,11 @@ export class CoreHostConnection implements CoreHostRpcLink {
       serverRange,
     );
     if (serverProtocolFitsClient && clientProtocolFitsServer) return;
+    const device = serverRange.max < SUPPORTED_PROTOCOL_RANGE.min
+      ? "宿主设备"
+      : "当前设备";
     throw new CoreHostUnavailableError(
-      `RPC 协议不兼容：cli 支持 ${SUPPORTED_PROTOCOL_RANGE.min}-${SUPPORTED_PROTOCOL_RANGE.max}，宿主协议 ${auth.protocol}（支持 ${serverRange.min}-${serverRange.max}）`,
+      `${device}上的知行版本较旧；请在${device}运行 npm install -g @zhixing/cli@latest 后重试`,
     );
   }
 

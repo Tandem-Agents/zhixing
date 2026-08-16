@@ -136,7 +136,7 @@
 ### 当前单元
 
 - 模块：`distributed-runtime`
-- 单元：第 38 单元（S10）——升级兼容、发布与最终验收
+- 单元：无。以下第 38 单元内容只保存历史开发事实，其合同已由[软件分发信任与产品边界](../modules/distributed-runtime/software-distribution-trust-and-target-strategy.md)取代，不是当前规范或待办。
 - 架构与规格来源：`research/design/modules/distributed-runtime/distributed-runtime-charter.md` 的“当前版本交付原则”、§4、§10～§15；`research/design/modules/distributed-runtime/always-online-and-local-execution-requirements.md` 的第七～八章；`research/design/modules/distributed-runtime/specification.md` 的 §1.2、§1.5、§2.1、§4、§5.3、§6.4、§11～§15 及第 33～37 单元已冻结上游合同；`research/design/modules/distributed-runtime/s2-security-supply-chain-review.md` 的裁决与强制门禁。
 - 单元边界：在第 30～37 单元已封版的 owner、transfer、checkpoint、trust、SecretStore、supervisor、stop/removal/uninstall 合同之上，交付同一 stable 产品的 `win32-x64`、`darwin-x64`、`darwin-arm64`、`linux-x64`、`linux-arm64` 安装制品及稳定启动入口；完成默认可见且不打断当前工作的稳定版自动检查、下载、安全空闲点安装、失败保留旧版与兼容恢复，并保留用户主动立即检查/重试入口；闭合崩溃续做、schema/protocol 兼容门与不兼容只读降级，提供可行动诊断，闭合供应链和发布检查，退役首个公开基线前的能力开关与迁移兼容层，并为 18 条不变量、故障/安全矩阵、双拓扑和产品旅程提供最终可执行验收入口。升级只替换程序层，必须保留当前 `ZHIXING_HOME`、设备身份、信任、权威数据、配置和用户工作；程序移除与永久设备退役在名称、入口、后果和确认上完全分离；其他 platform/arch 在清单校验、下载和安装前明确拒绝，不作隐式兼容。
 - 明确排除：自动 failover、quorum/witness、多 active 值班设备、全局或持续同步、恢复应用；不可见的强制切版、独立 updater daemon、多发布通道/灰度/企业策略、远程批量设备管理、应用商店能力；支持包/原始日志导出、通用 updater/lifecycle/diagnostics/telemetry/benchmark 框架及性能 benchmark 门禁；当前兼容窗口不需要的 schema 功能迁移；实际保管或提交生产签名私钥、商店账号及外部发布操作。第 38 单元只实现并验证这些外部操作所消费的签名、制品和发布自动化接口。

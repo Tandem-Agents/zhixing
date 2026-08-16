@@ -17,7 +17,9 @@
 
 - `zz`：进入交互 REPL。
 - `zz status`：查看知行运行状态。
-- `zz stop`：停止知行。
+- `zz stop`：停止知行；显式维护前使用 `zz stop --maintenance`。
+- `zz doctor`：只读检查本机运行、托管、配置和恢复状态。
+- `zz app remove`：安全停用并准备 npm 卸载，保留全部用户数据。
 
 **当前真实存在但隐藏 / 过渡中的入口**：
 
@@ -48,7 +50,31 @@
 
 ## 安装与配置
 
-`zhixing` 通过本仓库 monorepo 提供。开发期常用以下脚本：
+当前唯一正式安装路径要求 Windows 10/11 x64 与 Node `>=24.0.0`：
+
+```text
+npm install -g @zhixing/cli
+zz
+```
+
+同版修复或前向升级：
+
+```text
+zz stop --maintenance
+npm install -g @zhixing/cli@<当前明确版本或 latest>
+zz
+```
+
+不支持已运行新版本后的降级。卸载应用但保留 `ZHIXING_HOME`：
+
+```text
+zz app remove
+npm uninstall -g @zhixing/cli
+```
+
+全局目录不可写时只使用 Node 官方的用户级安装或修复方式；不要使用 `sudo npm`、放宽系统目录权限或修改知行以外的 npm 配置。知行不会后台替换程序，也不会修改用户 Node、npm 或 PATH。
+
+仓库开发使用以下脚本；这些不是用户安装入口：
 
 ```bash
 pnpm install                   # 安装依赖

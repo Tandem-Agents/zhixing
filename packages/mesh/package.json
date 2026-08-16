@@ -120,10 +120,10 @@
   },
   "files": [
     "dist",
-    "build/Release/checkpoint_child_bridge.*"
+    "build/Release/checkpoint_child_bridge.exe",
+    "build/Release/checkpoint_child_bridge.descriptor.json"
   ],
   "scripts": {
-    "install": "node scripts/build-checkpoint-child-bridge.mjs",
     "build": "node scripts/build-checkpoint-child-bridge.mjs && tsup",
     "pretest": "node scripts/build-checkpoint-child-bridge.mjs && node ../../scripts/check-mesh-live-tls-tests.mjs",
     "test": "vitest run",
@@ -142,5 +142,17 @@
     "tsup": "^8.4.0",
     "typescript": "^5.8.3",
     "vitest": "^3.1.1"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/longxia/zhixing.git",
+    "directory": "packages/mesh"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

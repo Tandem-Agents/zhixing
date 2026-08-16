@@ -20,12 +20,24 @@
   },
   "dependencies": {
     "@zhixing/core": "workspace:*",
-    "@larksuiteoapi/node-sdk": "^1.60.0"
+    "@larksuiteoapi/node-sdk": "1.60.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "tsup": "^8.4.0",
     "typescript": "^5.8.3",
     "vitest": "^3.1.1"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/longxia/zhixing.git",
+    "directory": "packages/channels/feishu"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

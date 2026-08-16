@@ -1,10 +1,7 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-  entry: {
-    index: "src/index.ts",
-    "program-installer": "src/update/program-installer-entry.ts",
-  },
+  entry: { index: "src/index.ts" },
   format: ["esm"],
   dts: false,
   sourcemap: true,

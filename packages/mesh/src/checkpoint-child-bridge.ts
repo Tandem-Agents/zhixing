@@ -1,4 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -140,9 +142,11 @@ function windowsBridge(): BridgeApi {
   let process: ChildProcessWithoutNullStreams | undefined;
   const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void }>();
 
-  const request = <T>(op: string, input: Record<string, unknown>): Promise<T> => {
+  let verifiedArtifact: Promise<string> | undefined;
+  const request = async <T>(op: string, input: Record<string, unknown>): Promise<T> => {
     if (!process) {
-      process = spawn(fileURLToPath(new URL("../build/Release/checkpoint_child_bridge.exe", import.meta.url)), [], {
+      const executable = await (verifiedArtifact ??= verifyWindowsBridgeArtifact());
+      process = spawn(executable, [], {
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
       });
@@ -208,6 +212,56 @@ function windowsBridge(): BridgeApi {
     sync: (value) => request<void>("sync", { handle: id(value) }),
     close: (value) => request<void>("close", { handle: id(value) }),
   };
+}
+
+interface CheckpointBridgeDescriptor {
+  readonly schemaVersion: 1;
+  readonly os: "win32";
+  readonly arch: "x64";
+  readonly packageVersion: string;
+  readonly file: "checkpoint_child_bridge.exe";
+  readonly bytes: number;
+  readonly sha256: string;
+}
+
+async function verifyWindowsBridgeArtifact(): Promise<string> {
+  const executable = fileURLToPath(
+    new URL("../build/Release/checkpoint_child_bridge.exe", import.meta.url),
+  );
+  const [binary, descriptorBytes, packageBytes] = await Promise.all([
+    readFile(executable),
+    readFile(
+      fileURLToPath(
+        new URL("../build/Release/checkpoint_child_bridge.descriptor.json", import.meta.url),
+      ),
+      "utf8",
+    ),
+    readFile(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
+  ]).catch(() => {
+    throw new Error("Windows checkpoint helper 不完整；请重新安装 @zhixing/cli");
+  });
+  let descriptor: CheckpointBridgeDescriptor;
+  let packageVersion: string;
+  try {
+    descriptor = JSON.parse(descriptorBytes) as CheckpointBridgeDescriptor;
+    packageVersion = (JSON.parse(packageBytes) as { readonly version?: unknown }).version as string;
+  } catch {
+    throw new Error("Windows checkpoint helper 描述无效；请重新安装 @zhixing/cli");
+  }
+  const digest = createHash("sha256").update(binary).digest("hex");
+  const descriptorKeys = Object.keys(descriptor).sort();
+  if (
+    descriptorKeys.join("\0") !== [
+      "arch", "bytes", "file", "os", "packageVersion", "schemaVersion", "sha256",
+    ].sort().join("\0") ||
+    descriptor.schemaVersion !== 1 || descriptor.os !== "win32" ||
+    descriptor.arch !== "x64" || descriptor.file !== "checkpoint_child_bridge.exe" ||
+    descriptor.packageVersion !== packageVersion || descriptor.bytes !== binary.byteLength ||
+    !/^[0-9a-f]{64}$/u.test(descriptor.sha256) || descriptor.sha256 !== digest
+  ) {
+    throw new Error("Windows checkpoint helper 与当前包不匹配；请重新安装 @zhixing/cli");
+  }
+  return executable;
 }
 
 function unrefStream(stream: NodeJS.ReadableStream | NodeJS.WritableStream): void {

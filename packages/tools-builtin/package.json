@@ -22,9 +22,9 @@
   "dependencies": {
     "@zhixing/core": "workspace:*",
     "@zhixing/network": "workspace:*",
-    "diff": "^9.0.0",
-    "glob": "^13.0.6",
-    "turndown": "^7.2.0"
+    "diff": "9.0.0",
+    "glob": "13.0.6",
+    "turndown": "7.2.4"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
@@ -33,5 +33,17 @@
     "tsup": "^8.4.0",
     "typescript": "^5.8.3",
     "vitest": "^3.1.1"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/longxia/zhixing.git",
+    "directory": "packages/tools-builtin"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

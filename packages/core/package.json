@@ -116,7 +116,19 @@
     "vitest": "^3.1.1"
   },
   "dependencies": {
-    "cron-parser": "^5.5.0",
-    "fuse.js": "^7.3.0"
+    "cron-parser": "5.5.0",
+    "fuse.js": "7.3.0"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/longxia/zhixing.git",
+    "directory": "packages/core"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

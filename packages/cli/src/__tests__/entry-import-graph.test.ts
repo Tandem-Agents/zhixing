@@ -18,6 +18,7 @@ const LIGHTWEIGHT_RUNTIME_IMPORTS = new Set([
   "./serve/log-line-count.js",
   "./version.js",
   "./command-gate.js",
+  "./runtime-support.js",
 ]);
 
 function collectRuntimeStaticImports(sourceText: string): string[] {

@@ -1,5 +1,7 @@
 # 单元登记:第 38 单元 · generation 1
 
+> **历史记录：**本文记录第 38 单元当时的自动更新、私有 Node、原生安装与五目标发布合同；这些合同已由[软件分发信任与产品边界](../../modules/distributed-runtime/software-distribution-trust-and-target-strategy.md)取代，不参与当前构建、测试、审查或发布。最终验收机器账见同目录 `unit-38-final-acceptance-ledger.json`。
+
 <!-- 身份头部:登记时填写,登记后不可变 -->
 
 - **unitId**:38

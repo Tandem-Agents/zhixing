@@ -19,12 +19,24 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "undici": "^7.0.0"
+    "undici": "7.25.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "tsup": "^8.4.0",
     "typescript": "^5.8.3",
     "vitest": "^3.1.1"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/longxia/zhixing.git",
+    "directory": "packages/network"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
