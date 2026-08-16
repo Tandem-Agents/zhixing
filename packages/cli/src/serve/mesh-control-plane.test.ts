@@ -1,11 +1,15 @@
 import { createServer } from "node:net";
+import { join } from "node:path";
 import type {
   DeviceIdentity,
   HomeTrustRecord,
   SecretRef,
   SecretStorePort,
 } from "@zhixing/core/contracts";
-import { MeshEndpointDirectory } from "@zhixing/mesh/bootstrap";
+import {
+  MeshConnectionRegistry,
+  MeshEndpointDirectory,
+} from "@zhixing/mesh/bootstrap";
 import {
   BlindRendezvousMatcher,
   readBlindRendezvousHello,
@@ -13,8 +17,11 @@ import {
 import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
 import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
 import { createTempDir } from "@zhixing/test-utils";
+import { ServerStateFile } from "@zhixing/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { inspectLocalHealth } from "../maintenance/doctor.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
+import { createMeshCompatibilityStateProjection } from "./mesh-compatibility-state.js";
 import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
 
 describe("production mesh control plane", () => {
@@ -36,6 +43,57 @@ describe("production mesh control plane", () => {
     const anchorRoot = await createTempDir("mesh-anchor-control");
     const executorRoot = await createTempDir("mesh-executor-control");
     const anchorSecrets = new MemorySecretStore();
+    const startedAt = "2026-08-16T00:00:00.000Z";
+    const anchorLock = {
+      pidFileVersion: 2 as const,
+      pid: 101,
+      host: "127.0.0.1",
+      port,
+      startTime: 1,
+      startedAt,
+    };
+    const executorLock = {
+      ...anchorLock,
+      pid: 102,
+      port: port + 1,
+      startTime: 2,
+    };
+    const anchorState = new ServerStateFile({
+      statePath: join(anchorRoot, "server.state.json"),
+      readyMarkerPath: join(anchorRoot, "server.ready"),
+      publishReadyMarker: false,
+    });
+    const executorState = new ServerStateFile({
+      statePath: join(executorRoot, "server.state.json"),
+      readyMarkerPath: join(executorRoot, "server.ready"),
+      publishReadyMarker: false,
+    });
+    const anchorProjection = createMeshCompatibilityStateProjection(anchorState, {
+      pid: anchorLock.pid,
+      host: anchorLock.host,
+      port: anchorLock.port,
+      startTime: anchorLock.startTime,
+      startedAt: anchorLock.startedAt,
+    });
+    const executorProjection = createMeshCompatibilityStateProjection(executorState, {
+      pid: executorLock.pid,
+      host: executorLock.host,
+      port: executorLock.port,
+      startTime: executorLock.startTime,
+      startedAt: executorLock.startedAt,
+    });
+    await anchorProjection.replaceCurrent([]);
+    await executorProjection.replaceCurrent([]);
+    await anchorState.markReady(anchorLock);
+    await executorState.markReady(executorLock);
+    await anchorState.markRunning();
+    await executorState.markRunning();
+    const anchorConnections = new MeshConnectionRegistry({
+      projection: anchorProjection,
+    });
+    const executorConnections = new MeshConnectionRegistry({
+      projection: executorProjection,
+    });
     await anchorSecrets.put(
       { kind: "rendezvous", bindingId: executor.identity.deviceId },
       "pairwise-secret",
@@ -52,6 +110,7 @@ describe("production mesh control plane", () => {
       secretStore: anchorSecrets,
       bootstrapStore: new FileMeshBootstrapStore(anchorRoot),
       services: new MeshServiceRegistry(),
+      connections: anchorConnections,
     });
     const executorControl = new ProductionMeshControlPlane({
       localIdentity: executor.key,
@@ -68,6 +127,7 @@ describe("production mesh control plane", () => {
       secretStore: new MemorySecretStore(),
       bootstrapStore: new FileMeshBootstrapStore(executorRoot),
       services: new MeshServiceRegistry(),
+      connections: executorConnections,
     });
     controls.push(anchorControl, executorControl);
 
@@ -79,6 +139,35 @@ describe("production mesh control plane", () => {
 
     expect(anchorControl.connections.has(executor.identity.deviceId)).toBe(true);
     expect(executorControl.connections.has(anchor.identity.deviceId)).toBe(true);
+    await anchorState.heartbeat();
+    await executorState.heartbeat();
+    expect(await anchorState.read()).toMatchObject({
+      extensions: { meshCompatibility: { connections: [{
+        connectionId: expect.any(String),
+        peerDeviceId: executor.identity.deviceId,
+        peerDisplayName: executor.identity.displayName,
+        localRange: { min: "1", max: "1" },
+        peerRange: { min: "1", max: "1" },
+        compatibility: { mode: "read-write", protocolVersion: "1" },
+      }] } },
+    });
+    expect(await executorState.read()).toMatchObject({
+      extensions: { meshCompatibility: { connections: [{
+        peerDeviceId: anchor.identity.deviceId,
+        compatibility: { mode: "read-write", protocolVersion: "1" },
+      }] } },
+    });
+    await expect(inspectLocalHealth({
+      configExists: async () => true,
+      inspectConfig: vi.fn(),
+      inspectBackup: vi.fn(async () => undefined),
+      inspectManaged: vi.fn(async () => ({ state: "ready" })),
+      statusDeps: {
+        readLockFn: async () => anchorLock,
+        isProcessAliveFn: () => true,
+        readStateFn: () => anchorState.read(),
+      },
+    })).resolves.toEqual({ code: "healthy", message: "知行本机状态正常" });
 
     await anchorControl.reconcileTrust({
       ...trust,
@@ -89,6 +178,10 @@ describe("production mesh control plane", () => {
           : member),
     });
     await waitFor(() => !anchorControl.connections.has(executor.identity.deviceId));
+    await anchorState.heartbeat();
+    expect(await anchorState.read()).toMatchObject({
+      extensions: { meshCompatibility: { connections: [] } },
+    });
     expect(await anchorSecrets.get({
       kind: "rendezvous",
       bindingId: executor.identity.deviceId,

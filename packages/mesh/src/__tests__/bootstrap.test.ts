@@ -1,8 +1,14 @@
 import { Duplex } from "node:stream";
-import type { HomeTrustRecord, SecretRef, SecretStorePort } from "@zhixing/core/contracts";
+import type {
+  DeviceIdentity,
+  HomeTrustRecord,
+  SecretRef,
+  SecretStorePort,
+} from "@zhixing/core/contracts";
 import { describe, expect, it } from "vitest";
 import {
   MeshEndpointDirectory,
+  MeshConnectionRegistry,
   commitMeshEndpointUpdate,
   createMeshEndpointDescriptor,
   currentAndPreviousRendezvousKeys,
@@ -15,6 +21,9 @@ import {
   validateMeshRoleBootConfig,
   validateRendezvousKey,
 } from "../bootstrap.js";
+import { MeshServiceRegistry } from "../service-registry.js";
+import { createSecureMeshConnection } from "../session.js";
+import type { MeshFrameTransport } from "../transport.js";
 import {
   BlindRendezvousMatcher,
   encodeBlindRendezvousHello,
@@ -294,6 +303,53 @@ describe("production mesh bootstrap contracts", () => {
     await expect(pending).rejects.toThrow("pre-auth deadline exceeded");
     expect(stream.destroyed).toBe(true);
   });
+
+  it("projects only the exact current diagnosable connection set", async () => {
+    const snapshots: string[][] = [];
+    const registry = new MeshConnectionRegistry({
+      projection: {
+        replaceCurrent: (entries) => {
+          snapshots.push(entries.map((entry) => entry.connectionId));
+        },
+      },
+    });
+    const services = new MeshServiceRegistry();
+    const first = testConnection("connection:first", "device:peer");
+    registry.attach(first.connection, services, { diagnosable: true });
+    expect(snapshots.at(-1)).toEqual(["connection:first"]);
+
+    const successor = testConnection("connection:successor", "device:peer");
+    registry.attach(successor.connection, services, { diagnosable: true });
+    await first.connection.closed;
+    expect(snapshots.at(-1)).toEqual(["connection:successor"]);
+
+    const terminal = testConnection("connection:terminal", "device:peer");
+    registry.attach(terminal.connection, services, { diagnosable: false });
+    await successor.connection.closed;
+    expect(snapshots.at(-1)).toEqual([]);
+
+    await registry.disconnect("device:peer");
+    expect(snapshots.at(-1)).toEqual([]);
+  });
+
+  it("keeps a projection failure outside the connection owner", () => {
+    const errors: string[] = [];
+    const registry = new MeshConnectionRegistry({
+      projection: {
+        replaceCurrent: () => {
+          throw new Error("state unavailable");
+        },
+      },
+      onProjectionError: (error) => errors.push(error.message),
+    });
+    const candidate = testConnection("connection:projection-failure", "device:peer");
+
+    expect(() => registry.attach(candidate.connection, new MeshServiceRegistry(), {
+      diagnosable: true,
+    })).not.toThrow();
+    expect(registry.has("device:peer")).toBe(true);
+    expect(errors).toEqual(["state unavailable"]);
+  });
 });
 
 class MemorySecretStore implements SecretStorePort {
@@ -330,6 +386,52 @@ class MemoryDuplex extends Duplex {
   _write(_chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
     callback();
   }
+}
+
+class TestMeshTransport implements MeshFrameTransport {
+  readonly closed: Promise<void>;
+  #resolveClosed!: () => void;
+  #rejectReceive: ((error: Error) => void) | undefined;
+
+  constructor() {
+    this.closed = new Promise<void>((resolve) => {
+      this.#resolveClosed = resolve;
+    });
+  }
+
+  async send(): Promise<void> {}
+
+  receive(signal?: AbortSignal): Promise<Uint8Array> {
+    return new Promise<Uint8Array>((_resolve, reject) => {
+      this.#rejectReceive = reject;
+      signal?.addEventListener("abort", () => reject(new Error("closed")), { once: true });
+    });
+  }
+
+  async close(): Promise<void> {
+    this.#rejectReceive?.(new Error("closed"));
+    this.#resolveClosed();
+  }
+}
+
+function testConnection(connectionId: string, deviceId: string) {
+  const peer: DeviceIdentity = {
+    deviceId,
+    publicKey: "ed25519:test",
+    displayName: "peer",
+    platform: "headless",
+    enrolledAt: AT,
+  };
+  return {
+    connection: createSecureMeshConnection({
+      transport: new TestMeshTransport(),
+      connectionId,
+      compatibility: { mode: "read-write", protocolVersion: "1" },
+      localProtocolRange: { min: "1", max: "1" },
+      peerProtocolRange: { min: "1", max: "1" },
+      peer,
+    }),
+  };
 }
 
 function trustRecord(roles: HomeTrustRecord["members"][number]["roles"]): HomeTrustRecord {

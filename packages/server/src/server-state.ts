@@ -51,6 +51,8 @@ export interface ServerStateSnapshot {
 export interface ServerStateFileOptions {
   statePath?: string;
   readyMarkerPath?: string;
+  /** Whether markReady publishes the daemon startup marker. Foreground owners disable it. */
+  publishReadyMarker?: boolean;
   /** 测试用：注入时钟 */
   clock?: () => Date;
 }
@@ -81,10 +83,12 @@ export class InvalidPhaseTransitionError extends Error {
 export class ServerStateFile {
   private readonly statePath: string;
   private readonly readyMarkerPath: string;
+  private readonly publishReadyMarker: boolean;
   private readonly clock: () => Date;
 
   private phase: ServerPhase = "starting";
   private snapshot: ServerStateSnapshot | null = null;
+  private pendingExtensions: Record<string, unknown> = {};
 
   /** 串行化 promise chain，保证写操作 FIFO，避免 tmp+rename race */
   private pending: Promise<void> = Promise.resolve();
@@ -92,6 +96,7 @@ export class ServerStateFile {
   constructor(opts: ServerStateFileOptions = {}) {
     this.statePath = opts.statePath ?? getDefaultStatePath();
     this.readyMarkerPath = opts.readyMarkerPath ?? getDefaultReadyMarkerPath();
+    this.publishReadyMarker = opts.publishReadyMarker ?? true;
     this.clock = opts.clock ?? (() => new Date());
   }
 
@@ -108,10 +113,50 @@ export class ServerStateFile {
         phase: "ready",
         lastHeartbeat: now,
         exitReason: null,
+        extensions: mergeExtensions(base.extensions, this.pendingExtensions),
       };
       await this.atomicWriteState();
-      await this.writeReadyMarker();
+      if (this.publishReadyMarker) await this.writeReadyMarker();
       this.phase = "ready";
+    });
+  }
+
+  /**
+   * Replaces one versioned, non-authoritative local projection on the same FIFO
+   * as lifecycle writes. Before markReady it updates only the in-memory pending
+   * snapshot; afterwards it atomically republishes the complete state file.
+   */
+  replaceExtension(
+    key: string,
+    value: Readonly<{ readonly version: number }>,
+  ): Promise<void> {
+    assertExtension(key, value);
+    return this.run(async () => {
+      this.pendingExtensions = { ...this.pendingExtensions, [key]: value };
+      if (!this.snapshot) return;
+      this.snapshot = {
+        ...this.snapshot,
+        extensions: mergeExtensions(this.snapshot.extensions, this.pendingExtensions),
+      };
+      await this.atomicWriteState();
+    });
+  }
+
+  /** Removes one local projection without disturbing sibling extensions. */
+  removeExtension(key: string): Promise<void> {
+    assertExtensionKey(key);
+    return this.run(async () => {
+      const pending = { ...this.pendingExtensions };
+      delete pending[key];
+      this.pendingExtensions = pending;
+      if (!this.snapshot) return;
+      const extensions = { ...(this.snapshot.extensions ?? {}) };
+      delete extensions[key];
+      this.snapshot = {
+        ...this.snapshot,
+        ...(Object.keys(extensions).length > 0 ? { extensions } : { extensions: undefined }),
+      };
+      await this.atomicWriteState();
     });
   }
 
@@ -178,7 +223,11 @@ export class ServerStateFile {
         phase: "unhealthy",
         exitReason: "error",
         lastHeartbeat: this.clock().toISOString(),
-        extensions: { ...(this.snapshot?.extensions ?? {}), unhealthyReason: reason },
+        extensions: {
+          ...this.pendingExtensions,
+          ...(this.snapshot?.extensions ?? {}),
+          unhealthyReason: reason,
+        },
       };
       await this.atomicWriteState();
       this.phase = "unhealthy";
@@ -271,6 +320,35 @@ export class ServerStateFile {
     this.pending = next.catch(() => {}); // chain 本身不吞错
     return next;
   }
+}
+
+function assertExtension(
+  key: string,
+  value: Readonly<{ readonly version: number }>,
+): void {
+  assertExtensionKey(key);
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !Number.isSafeInteger(value.version) ||
+    value.version < 1
+  ) {
+    throw new TypeError("Server state extension must have a positive integer version");
+  }
+}
+
+function assertExtensionKey(key: string): void {
+  if (!/^[a-z][A-Za-z0-9]{0,63}$/u.test(key)) {
+    throw new TypeError("Server state extension key is invalid");
+  }
+}
+
+function mergeExtensions(
+  base: Readonly<Record<string, unknown>> | undefined,
+  pending: Readonly<Record<string, unknown>>,
+): Record<string, unknown> | undefined {
+  const merged = { ...(base ?? {}), ...pending };
+  return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
 async function safeUnlink(path: string): Promise<void> {

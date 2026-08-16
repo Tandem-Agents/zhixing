@@ -423,6 +423,7 @@ export class ProductionMeshControlPlane {
     this.connections.attach(
       connection,
       terminalOnly ? this.options.terminalOnly!.services : this.options.services,
+      { diagnosable: active },
     );
     if (active && this.options.localEndpoint) {
       const payload = Buffer.from(canonicalize(this.options.localEndpoint), "utf8");

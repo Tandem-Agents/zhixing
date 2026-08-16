@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import {
@@ -122,6 +122,67 @@ describe("ServerStateFile", () => {
       const f = newFile();
       await f.cleanup();
       await f.cleanup();
+    });
+
+    it("keeps foreground state without publishing a daemon ready marker", async () => {
+      const f = new ServerStateFile({
+        statePath,
+        readyMarkerPath: readyPath,
+        publishReadyMarker: false,
+      });
+      await f.markReady({ pid: 1, startedAt: "t" });
+      expect((await readState()).phase).toBe("ready");
+      await expect(stat(readyPath)).rejects.toHaveProperty("code", "ENOENT");
+    });
+  });
+
+  describe("versioned extensions", () => {
+    it("merges a pre-ready projection and replaces or removes only its exact key", async () => {
+      const f = newFile();
+      await f.replaceExtension("meshCompatibility", { version: 1, peers: [] });
+      await f.markReady({
+        pid: 1,
+        startedAt: "t",
+        extensions: { sibling: { retained: true } },
+      });
+      expect((await readState()).extensions).toEqual({
+        sibling: { retained: true },
+        meshCompatibility: { version: 1, peers: [] },
+      });
+
+      await f.replaceExtension("meshCompatibility", { version: 1, peers: ["peer"] });
+      expect((await readState()).extensions).toEqual({
+        sibling: { retained: true },
+        meshCompatibility: { version: 1, peers: ["peer"] },
+      });
+      await f.removeExtension("meshCompatibility");
+      expect((await readState()).extensions).toEqual({ sibling: { retained: true } });
+    });
+
+    it("retains the latest in-memory projection after a write failure for heartbeat retry", async () => {
+      const f = newFile();
+      await f.markReady({ pid: 1, startedAt: "t" });
+      await f.markRunning();
+      await mkdir(statePath + ".tmp");
+      await expect(f.replaceExtension("meshCompatibility", {
+        version: 1,
+        peers: ["latest"],
+      })).rejects.toBeDefined();
+      await rm(statePath + ".tmp", { recursive: true });
+
+      await f.heartbeat();
+      expect((await readState()).extensions?.meshCompatibility).toEqual({
+        version: 1,
+        peers: ["latest"],
+      });
+    });
+
+    it("rejects invalid extension identities before changing state", async () => {
+      const f = newFile();
+      expect(() => f.replaceExtension("../mesh", { version: 1 })).toThrow(TypeError);
+      expect(() => f.replaceExtension("meshCompatibility", { version: 0 })).toThrow(TypeError);
+      await f.markReady({ pid: 1, startedAt: "t" });
+      expect((await readState()).extensions).toBeUndefined();
     });
   });
 

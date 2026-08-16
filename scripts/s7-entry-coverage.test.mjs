@@ -32,6 +32,26 @@ function fails(input, message) {
   assert.throws(() => validateCoverage(input), message);
 }
 
+function replaceExactlyOnce(text, pattern, replacement, label) {
+  const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+  const matches = [...text.matchAll(new RegExp(pattern.source, flags))];
+  if (matches.length !== 1) {
+    throw new Error(`${label}: expected exactly one mutation match, found ${matches.length}`);
+  }
+  return text.replace(pattern, replacement);
+}
+
+test("required source mutations reject zero and multiple matches", () => {
+  assert.throws(
+    () => replaceExactlyOnce("unchanged", /missing/u, "changed", "required-order"),
+    /required-order: expected exactly one mutation match, found 0/,
+  );
+  assert.throws(
+    () => replaceExactlyOnce("needle\nneedle", /needle/gu, "changed", "required-order"),
+    /required-order: expected exactly one mutation match, found 2/,
+  );
+});
+
 test("production descriptors form a complete exact-set coverage catalog", async () => {
   const catalog = await captureS7EntryCoverage();
   assert.ok(catalog.rowIds.length > 0);
@@ -1077,28 +1097,41 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     )).join("\n"),
     /verified replay, install decision or target-wide terminal order drifted/,
   );
-  assert.match(
-    inspectRecoveryBackupAssembly(mutate(
-      "packages/cli/src/serve/disaster-recovery-target.ts",
-      (text) => text.replace(
-        "const activeKey = await loadActiveAnchorIssuerKey(\n      this.options.secretStore,",
-        'await candidate.terminal(transferId, "committed");\n' +
-          "    const activeKey = await loadActiveAnchorIssuerKey(\n      this.options.secretStore,",
-      ),
-    )).join("\n"),
-    /verified replay, install decision or target-wide terminal order drifted/,
-  );
-  assert.match(
-    inspectRecoveryBackupAssembly(mutate(
-      "packages/cli/src/serve/disaster-recovery-target.ts",
-      (text) => text.replace(
-        "const activeKey = await loadActiveAnchorIssuerKey(\n    input.secretStore,",
-        'await candidate.terminal(installation.transferId, "committed");\n' +
-          "  const activeKey = await loadActiveAnchorIssuerKey(\n    input.secretStore,",
-      ),
-    )).join("\n"),
-    /verified replay, install decision or target-wide terminal order drifted/,
-  );
+  for (const newline of ["\n", "\r\n"]) {
+    const newlineRecords = records.map((record) => ({
+      ...record,
+      text: record.text.replace(/\r?\n/gu, newline),
+    }));
+    const mutateNewlineRecords = (transform) => newlineRecords.map((record) =>
+      record.relative === "packages/cli/src/serve/disaster-recovery-target.ts"
+        ? { ...record, text: transform(record.text) }
+        : record
+    );
+    assert.match(
+      inspectRecoveryBackupAssembly(mutateNewlineRecords((text) => replaceExactlyOnce(
+        text,
+        /^([ \t]*)const activeKey = await loadActiveAnchorIssuerKey\(\r?\n([ \t]*)this\.options\.secretStore,/mu,
+        (_match, indent, argumentIndent) =>
+          `${indent}await candidate.terminal(transferId, "committed");${newline}` +
+          `${indent}const activeKey = await loadActiveAnchorIssuerKey(${newline}` +
+          `${argumentIndent}this.options.secretStore,`,
+        "candidate-terminal-before-active-key",
+      ))).join("\n"),
+      /verified replay, install decision or target-wide terminal order drifted/,
+    );
+    assert.match(
+      inspectRecoveryBackupAssembly(mutateNewlineRecords((text) => replaceExactlyOnce(
+        text,
+        /^([ \t]*)const activeKey = await loadActiveAnchorIssuerKey\(\r?\n([ \t]*)input\.secretStore,/mu,
+        (_match, indent, argumentIndent) =>
+          `${indent}await candidate.terminal(installation.transferId, "committed");${newline}` +
+          `${indent}const activeKey = await loadActiveAnchorIssuerKey(${newline}` +
+          `${argumentIndent}input.secretStore,`,
+        "installation-terminal-before-active-key",
+      ))).join("\n"),
+      /verified replay, install decision or target-wide terminal order drifted/,
+    );
+  }
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
       "packages/cli/src/serve/disaster-recovery-candidate.ts",

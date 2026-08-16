@@ -95,6 +95,7 @@ import type { JournalMaintenance } from "./journal-maintenance.js";
 import type { ProviderCredentialProjection } from "@zhixing/providers";
 import type { LocalConversationOwnerAssembly } from "./local-conversation-owner.js";
 import type { DeliveryLifecycleRestoration } from "@zhixing/core";
+import type { MeshConnectionProjectionPort } from "@zhixing/mesh/bootstrap";
 
 /** 接入面装配阶段 —— 适配真实交织（confirmationBridge 依赖 runServer 后的 connections）。 */
 export type SurfacePhase = "pre-server" | "post-server";
@@ -136,6 +137,7 @@ export interface AssemblyContext {
   readonly storageMaintenance: StorageMaintenanceGovernorPort;
   readonly localWorkspaceIdentity: LocalWorkspaceAssemblyIdentity;
   readonly onTrustApplied?: (record: import("@zhixing/core/contracts").HomeTrustRecord) => void | Promise<void>;
+  readonly meshConnectionProjection?: MeshConnectionProjectionPort;
   /** Durable lifecycle projection loaded before any producer recovery or ingress. */
   startupLifecycle?: {
     readonly kind: "stop" | "executor-removal" | "anchor-uninstall";

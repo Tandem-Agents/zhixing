@@ -87,6 +87,7 @@ import {
 } from "./host-stop-lifecycle.js";
 import type { StopHostGeneration } from "@zhixing/core/protocol";
 import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
+import { createMeshCompatibilityStateProjection } from "./mesh-compatibility-state.js";
 
 export async function runExecutorRole(
   options: ServeOptions,
@@ -189,6 +190,14 @@ export async function runExecutorRole(
       startTime: processStartTime,
       startedAt: processStartedAt,
     } as const;
+    localServerState = new ServerStateFile({
+      publishReadyMarker: processMode !== "foreground",
+    });
+    const meshConnectionProjection = createMeshCompatibilityStateProjection(
+      localServerState,
+      { ...endpointLock, host: localServerBinding.host },
+    );
+    await meshConnectionProjection.replaceCurrent([]);
     const stopHost: StopHostGeneration = processMode === "managed" && managedState?.spec
       ? {
           kind: "managed",
@@ -416,6 +425,7 @@ export async function runExecutorRole(
         },
       },
       secretStore: bootstrap.secretStore,
+      connectionProjection: meshConnectionProjection,
       onError: (error) => writer.notify(`[mesh] ${error.message}`),
     });
     let removalAdmissionOperationId: string | undefined;
@@ -761,6 +771,8 @@ export async function runExecutorRole(
         version: ZHIXING_CLI_VERSION,
         kind: "zhixing-local-conversation-host",
         ...(isDaemonChild() ? { logPath: getDefaultLogPath() } : {}),
+        startTime: processStartTime,
+        startedAt: processStartedAt,
       },
       logger: {
         info: (message) => writer.notify(`[local-session] ${message}`),
@@ -768,20 +780,17 @@ export async function runExecutorRole(
         error: (message) => writer.notify(`[local-session] ${message}`),
       },
     });
-    if (isDaemonChild()) {
-      localServerState = new ServerStateFile();
-      await localServerState.markReady({
-        pid: process.pid,
-        startedAt: new Date().toISOString(),
-        port: localConversationServer.server.port,
-        host: localConversationServer.server.host,
-      });
-      await localServerState.markRunning();
-      localServerHeartbeat = setInterval(() => {
-        void localServerState?.heartbeat();
-      }, 60_000);
-      localServerHeartbeat.unref();
-    }
+    await localServerState.markReady({
+      pid: process.pid,
+      startedAt: processStartedAt,
+      port: localConversationServer.server.port,
+      host: localConversationServer.server.host,
+    });
+    await localServerState.markRunning();
+    localServerHeartbeat = setInterval(() => {
+      void localServerState?.heartbeat();
+    }, 60_000);
+    localServerHeartbeat.unref();
     await waitForRoleShutdown(lifecycleShutdown, () => stopCoordinator.prepare({
       requestId: `executor-signal:${process.pid}:${processStartedAt}`,
       reason: "executor-signal",
@@ -798,7 +807,6 @@ export async function runExecutorRole(
     await localConversationServer?.shutdown("executor-role-stop");
     await localServerBinding?.close();
     await localServerState?.markStopped();
-    await localServerState?.cleanup();
   } catch (error) {
     cleanupFailures.push(error);
   }
@@ -840,6 +848,11 @@ export async function runExecutorRole(
   }
   try {
     await mcpHub.dispose();
+  } catch (error) {
+    cleanupFailures.push(error);
+  }
+  try {
+    await localServerState?.cleanup();
   } catch (error) {
     cleanupFailures.push(error);
   }

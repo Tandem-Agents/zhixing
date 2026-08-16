@@ -178,6 +178,7 @@ import {
 import { cleanupExecutorDeviceLocalState } from "./device-removal-cleanup.js";
 import { loadExecutorRemovalLifecycleDecision } from "./device-removal.js";
 import { AnchorUninstallCoordinator } from "./anchor-uninstall.js";
+import { createMeshCompatibilityStateProjection } from "./mesh-compatibility-state.js";
 import { buildManagedHostPublicStatus } from "./status.js";
 import {
   HostStopCoordinator,
@@ -775,8 +776,18 @@ async function runServerProcess(
     );
   }
 
-  // 4a. Daemon child 才启用 ServerStateFile——前台模式不写 state 文件
-  const stateFile = isBackground ? new ServerStateFile() : undefined;
+  const stopEndpointLock = {
+    pid: process.pid,
+    port: serverBinding.port,
+    startTime: processStartTime,
+    startedAt: processStartedAt,
+  } as const;
+  const stateFile = new ServerStateFile({ publishReadyMarker: isBackground });
+  const meshConnectionProjection = createMeshCompatibilityStateProjection(stateFile, {
+    ...stopEndpointLock,
+    host: serverBinding.host,
+  });
+  await meshConnectionProjection.replaceCurrent([]);
   const heartbeatTimerRef: { current: NodeJS.Timeout | null } = { current: null };
 
   // lockPaths —— 单一事实源。同时传给 runServer（acquireLock）和 registerTailCleanup（releaseLock），
@@ -836,6 +847,7 @@ async function runServerProcess(
     advancement: advancementController,
     enabledRoles: bootstrap.mesh.roles,
     meshBootstrap: bootstrap.mesh,
+    meshConnectionProjection,
     onTrustApplied,
     ...(startupLifecycle ? { startupLifecycle } : {}),
   };
@@ -1311,12 +1323,6 @@ async function runServerProcess(
 
   const serverRegistry = buildBuiltinRegistry();
   let managedHostStopping = false;
-  const stopEndpointLock = {
-    pid: process.pid,
-    port: serverBinding.port,
-    startTime: processStartTime,
-    startedAt: processStartedAt,
-  } as const;
   const managedStopSpec = processMode === "managed"
     ? initialManagedServiceState.spec
     : undefined;
@@ -2408,22 +2414,21 @@ async function runServerProcess(
   //   此后若任何步骤抛错（markReady / banner 等），必须走 runner.shutdown 让 registry 完整跑完，
   //   否则后台 child 会孤儿化 + PID 锁/state 文件残留 —— 下次启动被假 "already running" 误挡。
   try {
-    // markReady + markRunning + heartbeat（仅后台 child）
+    // All listener owners publish the same local generation; only background
+    // startup uses the separate ready marker handshake.
     // 紧邻调用：running 才是稳态；ready 仅作为 .ready marker 的语义锚点
-    if (stateFile) {
-      await stateFile.markReady({
-        pid: process.pid,
-        startedAt: new Date().toISOString(),
-        port: runner.server.port,
-        host: runner.server.host,
-      });
-      await stateFile.markRunning();
-      const hbTimer = setInterval(() => {
-        void stateFile.heartbeat();
-      }, 60_000);
-      hbTimer.unref();
-      heartbeatTimerRef.current = hbTimer;
-    }
+    await stateFile.markReady({
+      pid: process.pid,
+      startedAt: processStartedAt,
+      port: runner.server.port,
+      host: runner.server.host,
+    });
+    await stateFile.markRunning();
+    const hbTimer = setInterval(() => {
+      void stateFile.heartbeat();
+    }, 60_000);
+    hbTimer.unref();
+    heartbeatTimerRef.current = hbTimer;
 
     if (processMode !== "managed") {
       console.log();

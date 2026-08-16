@@ -22,6 +22,8 @@ describe("production startup server ownership", () => {
     const activation = source.slice(location(source, "runner = await runServer"));
     expect(activation).toContain("boundServer: serverBinding");
     expect(activation).toContain("config: { ...DEFAULT_SERVER_CONFIG, port, host }");
+    expect(activation).toContain("startTime: processStartTime");
+    expect(activation).toContain("startedAt: processStartedAt");
     expect(location(source, "await runner.waitForShutdown()"))
       .toBeGreaterThan(location(source, "runner = await runServer"));
   });
@@ -36,6 +38,8 @@ describe("production startup server ownership", () => {
     expect(activation).toContain("boundServer: localServerBinding");
     expect(activation).toContain("port: localServerPort");
     expect(activation).toContain("host: localServerHost");
+    expect(activation).toContain("startTime: processStartTime");
+    expect(activation).toContain("startedAt: processStartedAt");
     expect(source.lastIndexOf("await mcpHub.dispose()"))
       .toBeGreaterThan(location(source, "localConversationServer = await runServer"));
   });

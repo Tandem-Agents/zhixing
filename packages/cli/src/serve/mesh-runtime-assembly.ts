@@ -21,6 +21,7 @@ import { canonicalize } from "@zhixing/core/protocol";
 import {
   MeshConnectionRegistry,
   MeshEndpointDirectory,
+  type MeshConnectionProjectionPort,
 } from "@zhixing/mesh/bootstrap";
 import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
 import type { DeviceKey } from "@zhixing/mesh/device-identity";
@@ -327,6 +328,7 @@ export interface MeshRuntimeAssemblyOptions {
     };
   };
   readonly secretStore: import("@zhixing/core/contracts").SecretStorePort;
+  readonly connectionProjection?: MeshConnectionProjectionPort;
   readonly onError?: (error: Error) => void;
   readonly onTrustApplied?: (record: HomeTrustRecord) => void | Promise<void>;
 }
@@ -335,7 +337,7 @@ export interface MeshRuntimeAssemblyOptions {
 export class MeshRuntimeAssembly {
   readonly services = new MeshServiceRegistry();
   readonly #terminalOnlyServices = new MeshServiceRegistry();
-  readonly connections = new MeshConnectionRegistry();
+  readonly connections: MeshConnectionRegistry;
   readonly #composition: AssignmentMeshComposition;
   readonly #control: ProductionMeshControlPlane;
   readonly #worker: ConversationAssignmentWorker | undefined;
@@ -390,6 +392,10 @@ export class MeshRuntimeAssembly {
   #observedIssuerDeviceId: string;
 
   constructor(private readonly options: MeshRuntimeAssemblyOptions) {
+    this.connections = new MeshConnectionRegistry({
+      ...(options.connectionProjection ? { projection: options.connectionProjection } : {}),
+      onProjectionError: (error) => options.onError?.(error),
+    });
     this.#observedIssuerDeviceId = options.trust.issuer.deviceId;
     this.#plannedAnchorIssuerKey = options.plannedAnchorIssuerKey;
     this.#plannedAnchorPostInstall = options.plannedAnchorPostInstall;

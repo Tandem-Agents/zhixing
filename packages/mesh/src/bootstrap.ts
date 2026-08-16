@@ -15,6 +15,10 @@ import type { MeshServiceClient } from "./request-channel.js";
 import { MeshRequestChannel } from "./request-channel.js";
 import type { SecureMeshConnection } from "./session.js";
 import { MeshServiceRegistry } from "./service-registry.js";
+import type {
+  MeshProtocolCompatibility,
+  MeshProtocolRange,
+} from "./protocol-version.js";
 
 export const MESH_ENDPOINT_SERVICE_ID = "mesh.endpoint";
 export const MAX_RENDEZVOUS_TTL_MS = 3_600_000;
@@ -405,17 +409,54 @@ export function validateBlindRendezvousHello(
   });
 }
 
-export class MeshConnectionRegistry {
-  readonly #channels = new Map<string, MeshRequestChannel>();
+export interface MeshConnectionProjectionEntry {
+  readonly connectionId: string;
+  readonly peerDeviceId: string;
+  readonly peerDisplayName: string;
+  readonly localRange: MeshProtocolRange;
+  readonly peerRange: MeshProtocolRange;
+  readonly compatibility: MeshProtocolCompatibility;
+}
 
-  attach(connection: SecureMeshConnection, services: MeshServiceRegistry): MeshRequestChannel {
+export interface MeshConnectionProjectionPort {
+  replaceCurrent(entries: readonly MeshConnectionProjectionEntry[]): void | Promise<void>;
+}
+
+export interface MeshConnectionRegistryOptions {
+  readonly projection?: MeshConnectionProjectionPort;
+  readonly onProjectionError?: (error: Error) => void;
+}
+
+interface MeshConnectionEntry {
+  readonly channel: MeshRequestChannel;
+  readonly connection: SecureMeshConnection;
+  readonly diagnosable: boolean;
+}
+
+export class MeshConnectionRegistry {
+  readonly #channels = new Map<string, MeshConnectionEntry>();
+
+  constructor(private readonly options: MeshConnectionRegistryOptions = {}) {}
+
+  attach(
+    connection: SecureMeshConnection,
+    services: MeshServiceRegistry,
+    options: { readonly diagnosable?: boolean } = {},
+  ): MeshRequestChannel {
     const channel = new MeshRequestChannel(connection, services);
     const deviceId = connection.peer.deviceId;
     const previous = this.#channels.get(deviceId);
-    this.#channels.set(deviceId, channel);
-    if (previous) void previous.close().catch(() => undefined);
+    this.#channels.set(deviceId, {
+      channel,
+      connection,
+      diagnosable: options.diagnosable === true,
+    });
+    this.#publishCurrent();
+    if (previous) void previous.channel.close().catch(() => undefined);
     void channel.closed.finally(() => {
-      if (this.#channels.get(deviceId) === channel) this.#channels.delete(deviceId);
+      if (this.#channels.get(deviceId)?.channel !== channel) return;
+      this.#channels.delete(deviceId);
+      this.#publishCurrent();
     }).catch(() => undefined);
     return channel;
   }
@@ -424,14 +465,14 @@ export class MeshConnectionRegistry {
     assertDeviceId(peerDeviceId, "Mesh service peer device id");
     return {
       request: (serviceId, payload, signal) => {
-        const channel = this.#channels.get(peerDeviceId);
-        if (!channel) {
+        const entry = this.#channels.get(peerDeviceId);
+        if (!entry) {
           throw new MeshProtocolError(
             "service-unavailable",
             "Authenticated mesh peer is offline",
           );
         }
-        return channel.request(serviceId, payload, signal);
+        return entry.channel.request(serviceId, payload, signal);
       },
     };
   }
@@ -441,17 +482,57 @@ export class MeshConnectionRegistry {
   }
 
   async disconnect(peerDeviceId: string, reason?: Error): Promise<void> {
-    const channel = this.#channels.get(peerDeviceId);
-    if (!channel) return;
+    const entry = this.#channels.get(peerDeviceId);
+    if (!entry) return;
     this.#channels.delete(peerDeviceId);
-    await channel.close(reason);
+    this.#publishCurrent();
+    await entry.channel.close(reason);
   }
 
   async close(reason?: Error): Promise<void> {
-    const channels = [...this.#channels.values()];
+    const channels = [...this.#channels.values()].map((entry) => entry.channel);
     this.#channels.clear();
+    this.#publishCurrent();
     await Promise.all(channels.map((channel) => channel.close(reason)));
   }
+
+  #publishCurrent(): void {
+    const projection = this.options.projection;
+    if (!projection) return;
+    const entries = [...this.#channels.values()]
+      .filter((entry) => entry.diagnosable)
+      .map(({ connection }) => Object.freeze({
+        connectionId: connection.connectionId,
+        peerDeviceId: connection.peer.deviceId,
+        peerDisplayName: connection.peer.displayName,
+        localRange: Object.freeze({ ...connection.localProtocolRange }),
+        peerRange: Object.freeze({ ...connection.peerProtocolRange }),
+        compatibility: Object.freeze({ ...connection.compatibility }),
+      }))
+      .sort(compareProjectionEntry);
+    try {
+      void Promise.resolve(projection.replaceCurrent(Object.freeze(entries)))
+        .catch((error) => this.options.onProjectionError?.(asError(error)));
+    } catch (error) {
+      this.options.onProjectionError?.(asError(error));
+    }
+  }
+}
+
+function compareProjectionEntry(
+  left: MeshConnectionProjectionEntry,
+  right: MeshConnectionProjectionEntry,
+): number {
+  const peer = ordinalCompare(left.peerDeviceId, right.peerDeviceId);
+  return peer !== 0 ? peer : ordinalCompare(left.connectionId, right.connectionId);
+}
+
+function ordinalCompare(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 export function registerMeshEndpointService(

@@ -5,12 +5,19 @@ import { loadConfig } from "@zhixing/providers";
 import { FileBackupTargetConfiguration } from "../serve/backup-target-config.js";
 import {
   buildManagedHostPublicStatus,
-  buildOfflineStatusReport,
+  readOfflineStatusSnapshot,
   type StatusDeps,
 } from "../serve/status.js";
+import { projectMeshCompatibilityHealth } from "../serve/mesh-compatibility-state.js";
 
 export interface DoctorReport {
-  readonly code: "healthy" | "setup-required" | "local-runtime-needs-attention" | "local-state-unreadable";
+  readonly code:
+    | "healthy"
+    | "setup-required"
+    | "local-runtime-needs-attention"
+    | "local-state-unreadable"
+    | "device-maintenance-required"
+    | "connection-state-unreadable";
   readonly message: string;
   readonly action?: string;
 }
@@ -39,9 +46,9 @@ export async function inspectLocalHealth(deps: DoctorDeps = {}): Promise<DoctorR
     await (deps.inspectBackup ?? (async () => {
       await new FileBackupTargetConfiguration(homeDir).load();
     }))();
+    const local = await readOfflineStatusSnapshot(deps.statusDeps);
     const managed = await (deps.inspectManaged ?? (async () => {
-      const process = await buildOfflineStatusReport(deps.statusDeps);
-      return buildManagedHostPublicStatus(process);
+      return buildManagedHostPublicStatus(local.report);
     }))();
     if (managed.state === "needs-attention") {
       return {
@@ -49,6 +56,30 @@ export async function inspectLocalHealth(deps: DoctorDeps = {}): Promise<DoctorR
         message: "本机运行状态需要处理",
         action: managed.action ?? "运行 zz 恢复托管",
       };
+    }
+    if (local.report.status === "running" && local.lock) {
+      const compatibility = projectMeshCompatibilityHealth(local.lock, local.state);
+      if (compatibility.kind === "unknown") {
+        return {
+          code: "connection-state-unreadable",
+          message: "设备连接状态无法安全确认",
+          action: "重启知行后再次运行 zz doctor",
+        };
+      }
+      if (compatibility.kind === "local-older") {
+        return {
+          code: "device-maintenance-required",
+          message: "这台设备需要更新后才能恢复完整协作",
+          action: "在这台设备运行 npm install -g @zhixing/cli@latest",
+        };
+      }
+      if (compatibility.kind === "peers-older") {
+        return {
+          code: "device-maintenance-required",
+          message: "部分设备需要更新后才能恢复完整协作",
+          action: `请在 ${compatibility.peerDisplayNames.join("、")} 分别运行 npm install -g @zhixing/cli@latest`,
+        };
+      }
     }
     return { code: "healthy", message: "知行本机状态正常" };
   } catch {

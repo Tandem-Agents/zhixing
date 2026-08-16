@@ -322,6 +322,9 @@ const meshSurface: AccessSurface = {
           }
         : {}),
       secretStore: ctx.secretStore,
+      ...(ctx.meshConnectionProjection
+        ? { connectionProjection: ctx.meshConnectionProjection }
+        : {}),
       ...(bootstrap.localEndpoint ? { localEndpoint: bootstrap.localEndpoint } : {}),
       onError: (error) => console.warn(chalk.yellow(`[mesh] ${error.message}`)),
       ...(ctx.onTrustApplied ? { onTrustApplied: ctx.onTrustApplied } : {}),
