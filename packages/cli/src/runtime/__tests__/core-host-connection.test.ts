@@ -142,15 +142,16 @@ describe("CoreHostConnection", () => {
     });
 
     await expect(conn.getClient()).rejects.toThrow(
-      "当前设备上的知行版本较旧；请在当前设备运行 npm install -g @zhixing/cli@latest 后重试",
+      "请在这台设备完成以下步骤：先运行 zz stop --maintenance；成功后运行 npm install -g @zhixing/cli@latest；再运行 zz，然后重试原操作",
     );
     expect(stopUnresponsiveHost).not.toHaveBeenCalled();
     expect(spawn).not.toHaveBeenCalled();
+    expect(client.request).not.toHaveBeenCalled();
     expect(client.close).toHaveBeenCalledOnce();
     expect(conn.getStatus()).toEqual({ kind: "disconnected" });
   });
 
-  it("宿主协议范围较旧时只引导更新宿主设备且不公开内部版本", async () => {
+  it("宿主协议范围较旧时仍只引导维护这台设备且不公开内部侧别", async () => {
     const client = makeFakeClient({
       authenticate: async () => ({
         protocol: 0,
@@ -159,15 +160,18 @@ describe("CoreHostConnection", () => {
         capabilities: [],
       }),
     });
+    const spawn = vi.fn(async () => ({ ok: true }));
     const conn = new CoreHostConnection({
       discover: async () => endpoint,
-      spawn: vi.fn(async () => ({ ok: true })),
+      spawn,
       createClient: () => asClient(client),
     });
 
     await expect(conn.getClient()).rejects.toThrow(
-      "宿主设备上的知行版本较旧；请在宿主设备运行 npm install -g @zhixing/cli@latest 后重试",
+      "请在这台设备完成以下步骤：先运行 zz stop --maintenance；成功后运行 npm install -g @zhixing/cli@latest；再运行 zz，然后重试原操作",
     );
+    expect(spawn).not.toHaveBeenCalled();
+    expect(client.request).not.toHaveBeenCalled();
     expect(client.close).toHaveBeenCalledOnce();
   });
 

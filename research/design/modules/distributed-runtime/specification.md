@@ -2673,7 +2673,7 @@ stop successor 的可执行恢复只消费既有 operation、accepted-work artif
 
 正式发布命令默认零外部写；只有用户另行明确授权后，才用当次 npm 认证只读确认身份、二次验证、scope 与全部包权限。依赖包按拓扑发布到固定候选 tag，重试只接受 registry 中同版本且 integrity 与本轮 tarball 全等的制品；随后生成 CLI shrinkwrap、重 pack 并从 registry exact closure 重跑 package check。CLI 候选也全等后才移动 `latest`，任一失败零 latest 变化。仓库不保存 token，不建设 CI、自有 feed、签名 manifest/index、平台 installer、私有 Node 或发布报告。
 
-同版修复或前向升级只允许用户显式运行 `zz stop --maintenance`，再安装当前明确版本或 `@latest` 并运行新 `zz`。maintenance 先对 exact managed definition 关闭 future launch并回读，再复用既有 stop coordinator 到安全终态；拒绝或失败只补偿本操作造成的 enabled→disabled，成功保持 disabled。新 CLI 启动复用既有 reconcile，以自身绝对入口和 `process.execPath` 更新 definition 并恢复托管；不得调用裸 `node`、npm 或 PATH 猜测。已运行新版本后不提供降级行动，协议/schema 不兼容继续沿现有 handshake fail-closed，并只提示在目标设备显式安装最新版本。
+同版修复或前向升级只允许用户显式运行 `zz stop --maintenance`，再安装当前明确版本或 `@latest` 并运行新 `zz`。maintenance 先对 exact managed definition 关闭 future launch并回读，再复用既有 stop coordinator 到安全终态；拒绝或失败只补偿本操作造成的 enabled→disabled，成功保持 disabled。新 CLI 启动复用既有 reconcile，以自身绝对入口和 `process.execPath` 更新 definition 并恢复托管；不得调用裸 `node`、npm 或 PATH 猜测。已运行新版本后不提供降级行动；协议/schema 不兼容继续沿现有 handshake fail-closed，并在目标设备提示同一完整维护顺序：先运行 `zz stop --maintenance`，成功后安装最新版本，再运行新 `zz` 并重试原操作。
 
 `zz doctor` 只检查本机配置、SecretStore 可用性、托管 definition/current 状态、备份配置和已建立连接的协议兼容，不读取更新事实、不联网、不写状态；每个失败只给一个安全行动。`zz app remove` 只执行 prepare-uninstall：冻结 exact definition，安全停止 current，注销 future launch并保护 `ZHIXING_HOME`；失败仅补偿本操作造成的状态变化。成功固定显示“已停止且不再自动启动，程序尚未卸载”，随后只给 `npm uninstall -g @zhixing/cli`。永久设备移除继续使用独立入口、强确认和既有 durable cancel/恢复合同。
 

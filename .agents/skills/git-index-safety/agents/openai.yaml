@@ -1,0 +1,4 @@
+interface:
+  display_name: "Git Index Safety"
+  short_description: "Prevent stale Git index locks during handoff"
+  default_prompt: "Use $git-index-safety to run Git reads or hand off modified files safely."

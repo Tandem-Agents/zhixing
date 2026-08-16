@@ -23,13 +23,13 @@ import {
   isProtocolVersionCompatible,
   PROTOCOL_VERSION,
   ServerNotRunningError,
-  SUPPORTED_PROTOCOL_RANGE,
   type AuthResult,
   type RpcClient,
   type ServerEndpoint,
 } from "@zhixing/server";
 import { spawnDaemon } from "../serve/daemon.js";
 import { runStopCommand } from "../serve/stop.js";
+import { formatVersionMaintenanceAction } from "../maintenance/version-maintenance-action.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
 import { randomUUID } from "node:crypto";
 
@@ -555,11 +555,8 @@ export class CoreHostConnection implements CoreHostRpcLink {
       serverRange,
     );
     if (serverProtocolFitsClient && clientProtocolFitsServer) return;
-    const device = serverRange.max < SUPPORTED_PROTOCOL_RANGE.min
-      ? "宿主设备"
-      : "当前设备";
     throw new CoreHostUnavailableError(
-      `${device}上的知行版本较旧；请在${device}运行 npm install -g @zhixing/cli@latest 后重试`,
+      formatVersionMaintenanceAction({ kind: "local-device" }),
     );
   }
 

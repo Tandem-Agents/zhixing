@@ -9,6 +9,7 @@ import {
   type StatusDeps,
 } from "../serve/status.js";
 import { projectMeshCompatibilityHealth } from "../serve/mesh-compatibility-state.js";
+import { formatVersionMaintenanceAction } from "./version-maintenance-action.js";
 
 export interface DoctorReport {
   readonly code:
@@ -70,14 +71,21 @@ export async function inspectLocalHealth(deps: DoctorDeps = {}): Promise<DoctorR
         return {
           code: "device-maintenance-required",
           message: "这台设备需要更新后才能恢复完整协作",
-          action: "在这台设备运行 npm install -g @zhixing/cli@latest",
+          action: formatVersionMaintenanceAction({ kind: "local-device" }),
         };
       }
       if (compatibility.kind === "peers-older") {
+        const [firstDisplayName, ...remainingDisplayNames] = compatibility.peerDisplayNames;
+        if (firstDisplayName === undefined) {
+          throw new TypeError("维护目标设备不能为空");
+        }
         return {
           code: "device-maintenance-required",
           message: "部分设备需要更新后才能恢复完整协作",
-          action: `请在 ${compatibility.peerDisplayNames.join("、")} 分别运行 npm install -g @zhixing/cli@latest`,
+          action: formatVersionMaintenanceAction({
+            kind: "peer-devices",
+            displayNames: [firstDisplayName, ...remainingDisplayNames],
+          }),
         };
       }
     }
