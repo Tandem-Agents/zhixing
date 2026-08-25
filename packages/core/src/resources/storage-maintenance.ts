@@ -311,9 +311,11 @@ export class StorageMaintenanceTaskRunner {
     return this.#join(task, waiterAbort, request.urgency);
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.#stopped = true;
-    for (const task of this.#tasks.values()) task.abort.abort();
+    const tasks = [...this.#tasks.values()];
+    for (const task of tasks) task.abort.abort();
+    await Promise.allSettled(tasks.map((task) => task.promise));
   }
 
   async #execute<T>(

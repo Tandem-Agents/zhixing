@@ -24,18 +24,20 @@ import {
   type TrustedControlSource,
 } from "../control-admission.js";
 import { applyDeliveryResolutionControl } from "../delivery-control.js";
+import {
+  DURABLE_IO_TEST_TIMEOUT_MS,
+  trackAuthorityLog,
+} from "./durable-io-test-support.js";
 
 const NOW = "2026-07-17T02:00:00.000Z";
 const FIXTURE_DIGEST = `sha256:${"0".repeat(64)}` as const;
 
-vi.setConfig({ testTimeout: 15_000 });
-
 async function createHarness() {
   const root = await createTempDir("delivery-control");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
-  const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+  const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
     clock: () => NOW,
-  });
+  }));
   const authority = new DeliveryAuthority({ log, anchorEpoch: 7 });
   const admission = new ControlAdmissionJournal(log, artifacts);
   const input: DeliveryEnqueueInput = {
@@ -132,7 +134,7 @@ function source(): TrustedControlSource {
   };
 }
 
-describe("delivery resolution control", () => {
+describe("delivery resolution control", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("atomically appends the user decision and its applied control result", async () => {
     const fixture = await createHarness();
     const trusted = source();
@@ -345,9 +347,9 @@ describe("delivery resolution control", () => {
   it("rejects an orphan delivery source through the control consumer's full reducer", async () => {
     const root = await createTempDir("delivery-control-orphan");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
-    const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+    const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
       clock: () => NOW,
-    });
+    }));
     const admission = new ControlAdmissionJournal(log, artifacts);
     const prepared = prepareDeliveryEnqueues(emptyDeliveryProjection(), [
       {

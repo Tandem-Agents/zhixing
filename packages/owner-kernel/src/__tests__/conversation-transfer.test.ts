@@ -24,6 +24,10 @@ import {
   readConversationTransferState,
   type ConversationTransferSourceOptions,
 } from "../conversation-transfer.js";
+import {
+  DURABLE_IO_TEST_TIMEOUT_MS,
+  trackAuthorityLog,
+} from "./durable-io-test-support.js";
 
 const TRANSFER_ID = "xfer-01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const CONVERSATION = "local-12345678-01K1ZZZZZZ0000000000000000";
@@ -57,7 +61,7 @@ const verifier: ProtocolSignatureVerifier = {
   },
 };
 
-describe("conversation transfer source and target", () => {
+describe("conversation transfer source and target", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("revalidates the source identity after settling before appending prepared", async () => {
     let deleted = false;
     const fixture = await sourceHarness({
@@ -185,11 +189,11 @@ describe("conversation transfer source and target", () => {
     const targetArtifacts = new FileArtifactStore(path.join(targetRoot, "artifacts"), {
       lockWaitMs: 2_000,
     });
-    const targetLog = new FileAuthorityCommitLog(
+    const targetLog = trackAuthorityLog(new FileAuthorityCommitLog(
       path.join(targetRoot, "authority"),
       targetArtifacts,
       { clock: () => NOW, lockWaitMs: 2_000 },
-    );
+    ));
     await source.log.append([
       { stream: `run:${CONVERSATION}`, body: { t: "identity", conversationId: CONVERSATION } },
       { stream: `intent:${CONVERSATION}`, body: { t: "intent", conversationId: CONVERSATION } },
@@ -294,11 +298,11 @@ describe("conversation transfer source and target", () => {
     const targetArtifacts = new FileArtifactStore(path.join(targetRoot, "artifacts"), {
       lockWaitMs: 2_000,
     });
-    const targetLog = new FileAuthorityCommitLog(
+    const targetLog = trackAuthorityLog(new FileAuthorityCommitLog(
       path.join(targetRoot, "authority"),
       targetArtifacts,
       { clock: () => NOW, lockWaitMs: 2_000 },
-    );
+    ));
     const staging = new FileConversationTransferStagingArea(
       path.join(targetRoot, "transfer-staging"),
     );
@@ -362,10 +366,10 @@ async function sourceHarness(options: {
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"), {
     lockWaitMs: 2_000,
   });
-  const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+  const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
     clock: () => NOW,
     lockWaitMs: 2_000,
-  });
+  }));
   const settled: string[] = [];
   const source = new ConversationTransferSource({
     deviceId: "device-source",

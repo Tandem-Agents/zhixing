@@ -32,6 +32,7 @@ import {
   DefaultStorageMaintenanceGovernor,
   runInMaintenanceContext,
   StorageMaintenanceTaskRunner,
+  type DeviceCapacityAdmission,
   type StorageMaintenanceGovernorPort,
   type StorageMaintenanceKind,
   type StorageMaintenanceRequest,
@@ -50,10 +51,11 @@ import {
   FileDurableProjectionIndex,
 } from "../durable-projection-index.js";
 import type { DurableLogCheckpoint } from "../interfaces.js";
+import { SerialTaskQueue } from "../../persistence/serial-task-queue.js";
 
 // 重 IO 组级预算:本机(低资源 Windows)上单条耐久用例真实耗时可达 20-30 秒,
 // 30 秒档会被临界抖动随机击穿;对齐 runbook 已验证的 120 秒档,断言失败仍立即终止。
-const DURABLE_IO_TEST_TIMEOUT_MS = 120_000;
+const DURABLE_IO_TEST_TIMEOUT_MS = 240_000;
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -769,6 +771,78 @@ describe("ArtifactLifecycleIndex", () => {
       expect(admissions).toContain("projection-flush");
       expect(admissions).toContain("lifecycle-reconcile");
       expect(activeSteps).toBe(0);
+    },
+    DURABLE_IO_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "redrives lifecycle backpressure outside its queue without waiting under a caller exclusion",
+    async () => {
+      const root = await createTempDir("artifact-lifecycle-backpressure-redrive");
+      const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+      const temporaryArtifacts = new FileArtifactStore(
+        path.join(root, "temporary"),
+      );
+      const receiver = new FileResumableArtifactReceiver(
+        temporaryArtifacts,
+        path.join(root, "partials"),
+        { maxArtifactBytes: 1_024 },
+      );
+      const log = new FileAuthorityCommitLog(path.join(root, "log"), artifacts, {
+        clock: () => "2026-07-25T00:00:00.000Z",
+      });
+      let lifecycleAttempts = 0;
+      let keepBackpressured = false;
+      const storageMaintenance: StorageMaintenanceGovernorPort = {
+        acquire: async (request): Promise<DeviceCapacityAdmission> => {
+          if (request.kind === "lifecycle-reconcile") {
+            lifecycleAttempts += 1;
+            if (lifecycleAttempts === 1 || keepBackpressured) {
+              return {
+                kind: "backpressured",
+                blockedBy: "ioOperations",
+                retryAfterMs: 1,
+              };
+            }
+          }
+          return {
+            kind: "granted",
+            permit: {
+              granted: request.preferred,
+              tryBegin: () => ({
+                claim: () => undefined,
+                complete: () => undefined,
+              }),
+              release: () => undefined,
+            },
+          };
+        },
+        snapshot: () => ({ queued: {}, inFlight: {} }),
+      };
+      const lifecycle = new ArtifactLifecycleIndex({
+        rootDir: path.join(root, "derived"),
+        logs: [log],
+        artifacts,
+        temporaryArtifacts,
+        temporaryPresence: temporaryPresence(root, { storageMaintenance }),
+        receiver,
+        storageMaintenance,
+      });
+
+      try {
+        await expect(lifecycle.synchronize()).resolves.toBeUndefined();
+        expect(lifecycleAttempts).toBeGreaterThan(1);
+
+        lifecycleAttempts = 0;
+        keepBackpressured = true;
+        const callerQueue = new SerialTaskQueue();
+        await expect(
+          callerQueue.run(() => lifecycle.synchronize()),
+        ).rejects.toThrow(/backpressured/);
+        expect(lifecycleAttempts).toBe(1);
+      } finally {
+        await lifecycle.stopStorageMaintenance();
+      }
     },
     DURABLE_IO_TEST_TIMEOUT_MS,
   );

@@ -513,11 +513,11 @@ export async function setupAuthorityRuntime(
   let workspaceProbe: WorkspaceProbeHandler | undefined;
   const stopStorageMaintenance = async () => {
     await workspaceProbe?.stopRetentionMaintenance();
-    surfaceAssets?.stopStorageMaintenance();
-    worksceneGlobalState?.stop();
+    await surfaceAssets?.stopStorageMaintenance();
+    await worksceneGlobalState?.stop();
     await workspaceBindings?.stop();
-    authorityLog?.stopStorageMaintenance();
-    executorLog?.stopStorageMaintenance();
+    await authorityLog?.stopStorageMaintenance();
+    await executorLog?.stopStorageMaintenance();
   };
   const startupRollback = options.startupRollback ?? new StartupRollback();
   const startupCleanup = startupRollback.register(
@@ -1759,7 +1759,7 @@ export async function setupAuthorityRuntime(
         throw new Error("Installed authority generation targets another authority log");
       }
 
-      worksceneGlobalState?.stop();
+      await worksceneGlobalState?.stop();
 
       const nextAuthority = new DeliveryAuthority({
         log: authorityLog,
@@ -2430,7 +2430,12 @@ export async function setupDelivery(
           error: (msg: string) => logger.error(`[delivery] ${msg}`),
         },
       });
-      await pipeline.prepare();
+      try {
+        await pipeline.prepare();
+      } catch (error) {
+        await pipeline.stop().catch(() => undefined);
+        throw error;
+      }
       if (activated) pipeline.activate();
       return pipeline;
     };

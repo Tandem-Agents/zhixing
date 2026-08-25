@@ -8,7 +8,7 @@
  * 启动装填产物(窗口归 ManagedSession,工厂只发纯执行体、不感知装填)。
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
@@ -104,14 +104,16 @@ async function setupCtx() {
     }),
   };
   const secretStore = new MemorySecretStore();
+  const authorityRuntime = await setupAuthorityRuntime({
+    zhixingHome: tmp,
+    secretStore,
+    executorReadiness: TEST_EXECUTOR_READINESS,
+  });
+  onTestFinished(() => authorityRuntime.stopStorageMaintenance());
   const ctx = {
     zhixingHome: tmp,
     secretStore,
-    authorityRuntime: await setupAuthorityRuntime({
-      zhixingHome: tmp,
-      secretStore,
-      executorReadiness: TEST_EXECUTOR_READINESS,
-    }),
+    authorityRuntime,
     durableInteractions: new DurableConversationInteractionObserver(),
     perspectives: { executePerspectiveWork: vi.fn() },
     sessionBroadcastRef: { current: null },
@@ -129,7 +131,7 @@ async function setupCtx() {
   return { transcript, created, ctx, convDir, conversationDirectory };
 }
 
-describe("conversation 接入面：历史装载服从持久层不变量", () => {
+describe("conversation 接入面：历史装载服从持久层不变量", { timeout: 30_000 }, () => {
   it("索引缺失但分片在 → 装填对含完整历史，不丢一轮（倒读自愈贯穿到入口）", async () => {
     const { transcript, created, ctx, convDir } = await setupCtx();
     await transcript.appendRunRecord("conv-x", {

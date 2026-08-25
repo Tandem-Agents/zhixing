@@ -25,6 +25,10 @@ import {
 } from "../deferred-global-intents.js";
 import { ConversationRunJournal } from "../conversation-assignment.js";
 import { OwnerDeliveryParticipant } from "../delivery.js";
+import {
+  DURABLE_IO_TEST_TIMEOUT_MS,
+  trackAuthorityLog,
+} from "./durable-io-test-support.js";
 
 const NOW = "2026-08-07T09:00:00.000Z";
 const CONVERSATION = "local-12345678-01K1ZZZZZZ0000000000000000";
@@ -96,10 +100,10 @@ async function harness(root?: string) {
   const artifacts = new FileArtifactStore(path.join(directory, "artifacts"), {
     lockWaitMs: 2_000,
   });
-  const log = new FileAuthorityCommitLog(path.join(directory, "authority"), artifacts, {
+  const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(directory, "authority"), artifacts, {
     clock: () => NOW,
     lockWaitMs: 2_000,
-  });
+  }));
   const repository = new DeferredGlobalIntentRepository({
     log,
     localDomainId: "local:device-a",
@@ -119,10 +123,10 @@ async function journalHarness() {
   const artifacts = new FileArtifactStore(path.join(directory, "artifacts"), {
     lockWaitMs: 2_000,
   });
-  const log = new FileAuthorityCommitLog(path.join(directory, "authority"), artifacts, {
+  const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(directory, "authority"), artifacts, {
     clock: () => NOW,
     lockWaitMs: 2_000,
-  });
+  }));
   const journal = new ConversationRunJournal({
     conversationId: WORKSCENE_CONVERSATION,
     ownerEpoch: 1,
@@ -155,7 +159,7 @@ async function journalHarness() {
   return { artifacts, journal, log, repository };
 }
 
-describe("DeferredGlobalIntentRepository", () => {
+describe("DeferredGlobalIntentRepository", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("records once, preserves the first envelope time and rebuilds ordered latest state", async () => {
     const first = await harness();
     const recorded = await first.repository.record(

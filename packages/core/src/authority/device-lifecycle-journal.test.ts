@@ -8,6 +8,7 @@ import { FileAuthorityCommitLog } from "./commit-log.js";
 import { DeviceLifecycleJournal } from "./device-lifecycle-journal.js";
 
 const DIGEST = `sha256:${"a".repeat(64)}`;
+const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
 
 function identity(): ProtocolSigner & ProtocolSignatureVerifier {
   return {
@@ -20,7 +21,7 @@ function identity(): ProtocolSigner & ProtocolSignatureVerifier {
   };
 }
 
-describe("DeviceLifecycleJournal", () => {
+describe("DeviceLifecycleJournal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("keeps acceptance durable across response loss and repeated process restart", async () => {
     const fixture = await createFixture();
     const accepted = await fixture.journal.accept(stopIdentity());

@@ -614,8 +614,8 @@ class FilePlannedAnchorCandidateJournal {
     })).value;
   }
 
-  stopStorageMaintenance(): void {
-    this.log.stopStorageMaintenance();
+  async stopStorageMaintenance(): Promise<void> {
+    await this.log.stopStorageMaintenance();
   }
 
   #projection(): Promise<PlannedAnchorCandidateProjection> {
@@ -762,6 +762,10 @@ export class FilePlannedAnchorTransferJournal {
       (states, entry) => reduceJournal(states, entry, this.verifier),
       { stream: ANCHOR_TRANSFER_STREAM },
     );
+  }
+
+  async stopStorageMaintenance(): Promise<void> {
+    await this.log.stopStorageMaintenance();
   }
 
   async append(
@@ -1707,8 +1711,13 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
     return context;
   }
 
-  close(): void {
-    this.#candidates.stopStorageMaintenance();
+  async close(): Promise<void> {
+    await Promise.all([
+      this.#candidates.stopStorageMaintenance(),
+      ...[...this.#contexts.values()].map((context) =>
+        context.journal.stopStorageMaintenance()),
+    ]);
+    this.#contexts.clear();
   }
 }
 

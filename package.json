@@ -15,7 +15,7 @@
   },
   "scripts": {
     "build": "pnpm release:version:check && pnpm -r run build",
-    "test": "pnpm -r run test",
+    "test": "pnpm -r --workspace-concurrency=1 run test",
     "test:watch": "pnpm -r run test:watch",
     "runtime:baseline": "node scripts/runtime-baseline.mjs",
     "runtime:baseline:update": "node scripts/runtime-baseline.mjs --update",

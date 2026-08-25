@@ -12,7 +12,8 @@ import {
 } from "./authority-registry.js";
 
 const NOW = "2026-07-30T00:00:00.000Z";
-describe("AnchorWorksceneRegistry", () => {
+const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
+describe("AnchorWorksceneRegistry", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("linearizes CRUD, exact replay, CAS and tombstones", async () => {
     const fixture = await createRegistry();
     const created = await fixture.registry.apply(

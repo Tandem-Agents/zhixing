@@ -23,6 +23,10 @@ import {
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import { OwnerDeliveryParticipant } from "../delivery-participant.js";
+import {
+  DURABLE_IO_TEST_TIMEOUT_MS,
+  trackAuthorityLog,
+} from "./durable-io-test-support.js";
 
 const NOW = "2026-07-17T02:00:00.000Z";
 const DIGEST = `sha256:${"0".repeat(64)}`;
@@ -54,9 +58,9 @@ async function participant(maxAttempts?: number) {
 async function participantFixture(maxAttempts?: number) {
   const root = await createTempDir("delivery-participant");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
-  const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+  const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
     clock: () => NOW,
-  });
+  }));
   const authority = new DeliveryAuthority({ log, anchorEpoch: 3 });
   return {
     authority,
@@ -192,7 +196,7 @@ function jobFacts() {
   return { definition, occurrence, bundle };
 }
 
-describe("owner delivery participant", () => {
+describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("binds all seven canonical producer paths to the frozen lifecycle source exact-set", async () => {
     const { authority, owner } = await participantFixture();
     const facts = jobFacts();

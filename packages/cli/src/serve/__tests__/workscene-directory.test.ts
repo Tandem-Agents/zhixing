@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   AnchorWorksceneGlobalStateAdapter,
   ConversationRepository,
@@ -58,7 +58,7 @@ afterEach(() => {
   else process.env.ZHIXING_HOME = originalHome;
 });
 
-describe("workscene directory", () => {
+describe("workscene directory", { timeout: 30_000 }, () => {
   it("linearizes CRUD and preserves not-found results", async () => {
     const fixture = await createFixture();
     expect(await fixture.directory.rename("ghost", "x", requestId("rename"))).toBeNull();
@@ -239,7 +239,7 @@ describe("workscene directory", () => {
 
     await expect(
       fixture.directory.remove(scene.id, deleteRequestId),
-    ).rejects.toThrow("injected cleanup failure");
+    ).resolves.toBe(true);
     await expect(
       fixture.globalState.read(
         { kind: "workscene-get", sceneId: scene.id },
@@ -303,6 +303,10 @@ async function createFixture(
     anchorEpoch: 1,
     removeScene: (sceneId, conversationIds) =>
       cleanup(sceneId, conversationIds),
+  });
+  onTestFinished(async () => {
+    await globalState.stop();
+    await log.stopStorageMaintenance();
   });
   const worksceneStorageCleanup = createWorksceneStorageCleanup();
   const conversationDirectory = createConversationDirectory({

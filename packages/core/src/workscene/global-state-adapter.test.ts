@@ -1,16 +1,22 @@
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import {
+  type AuthorityCommitLog,
+  type DurableProjectionIndex,
   FileArtifactStore,
   FileAuthorityCommitLog,
 } from "../authority/index.js";
 import type { GlobalControlCallContext } from "../contracts/index.js";
+import { IncrementalWorksceneActivityProjection } from "./activity-projection.js";
 import { AnchorWorksceneGlobalStateAdapter } from "./global-state-adapter.js";
 
 const NOW = "2026-07-30T00:00:00.000Z";
 const LATER = "2026-07-30T00:05:00.000Z";
-describe("AnchorWorksceneGlobalStateAdapter", () => {
+// 隔离文件约 25 秒、最慢单项约 3 秒；根级 Windows 并发 fsync 时文件达到
+// 约 53 秒并击穿 30 秒外层边界。只调整真实耐久组的测试预算。
+const DURABLE_IO_TEST_TIMEOUT_MS = 60_000;
+describe("AnchorWorksceneGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("is the guarded exact read/write surface and merges incremental activity", async () => {
     const fixture = await createFixture();
     const created = await fixture.adapter.mutate(
@@ -106,6 +112,7 @@ describe("AnchorWorksceneGlobalStateAdapter", () => {
       removeScene: async () => {},
       clock: () => NOW,
     });
+    onTestFinished(() => restarted.stop());
     await expectLastActiveAt(restarted, "scene-a", NOW);
   });
 
@@ -201,6 +208,43 @@ describe("AnchorWorksceneGlobalStateAdapter", () => {
   });
 });
 
+describe("IncrementalWorksceneActivityProjection lifecycle", () => {
+  it("waits for an in-flight read-behind refresh and rejects new work after stop", async () => {
+    let resolveStarted!: () => void;
+    let resolveGet!: (value: unknown) => void;
+    const started = new Promise<void>((resolve) => {
+      resolveStarted = resolve;
+    });
+    const pendingGet = new Promise<unknown>((resolve) => {
+      resolveGet = resolve;
+    });
+    const get = vi.fn(() => {
+      resolveStarted();
+      return pendingGet;
+    });
+    const projection = new IncrementalWorksceneActivityProjection({
+      log: {
+        durableProjection: () => ({ get } as unknown as DurableProjectionIndex),
+      } as unknown as AuthorityCommitLog,
+    });
+
+    expect(projection.peek("scene-a")).toBeUndefined();
+    await started;
+    let stopped = false;
+    const stopping = projection.stop().then(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+
+    resolveGet({ sceneId: "scene-a", lastActiveAt: NOW });
+    await stopping;
+    expect(stopped).toBe(true);
+    expect(projection.peek("scene-a")).toBe(NOW);
+    expect(get).toHaveBeenCalledTimes(1);
+  });
+});
+
 function context(
   requestId: string,
   expectedRevision?: number,
@@ -262,24 +306,31 @@ async function createFixture(
   } = {},
 ) {
   const root = await createTempDir("zhixing-workscene-global-state");
+  let log: FileAuthorityCommitLog | undefined;
+  let adapter: AnchorWorksceneGlobalStateAdapter | undefined;
+  onTestFinished(async () => {
+    await adapter?.stop();
+    await log?.stopStorageMaintenance();
+  });
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
-  const log = new FileAuthorityCommitLog(
+  log = new FileAuthorityCommitLog(
     path.join(root, "authority"),
     artifacts,
     { clock: () => NOW },
   );
+  adapter = new AnchorWorksceneGlobalStateAdapter({
+    log,
+    anchorEpoch: 1,
+    removeScene,
+    clock: () => NOW,
+    sceneIdFactory: options.sceneIdFactory ?? (() => "scene-a"),
+    ...(options.deletionPageSize
+      ? { deletionPageSize: options.deletionPageSize }
+      : {}),
+  });
   return {
     log,
-    adapter: new AnchorWorksceneGlobalStateAdapter({
-      log,
-      anchorEpoch: 1,
-      removeScene,
-      clock: () => NOW,
-      sceneIdFactory: options.sceneIdFactory ?? (() => "scene-a"),
-      ...(options.deletionPageSize
-        ? { deletionPageSize: options.deletionPageSize }
-        : {}),
-    }),
+    adapter,
   };
 }
 

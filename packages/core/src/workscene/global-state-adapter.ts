@@ -288,8 +288,11 @@ export class AnchorWorksceneGlobalStateAdapter implements GlobalStatePort {
     return this.#registry.replay(requestId);
   }
 
-  stop(): void {
-    this.#maintenanceRunner.stop();
+  async stop(): Promise<void> {
+    const recovery = this.#recovery;
+    await this.#activity.stop();
+    await this.#maintenanceRunner.stop();
+    await recovery?.catch(() => undefined);
   }
 
   async #projectDeletion(

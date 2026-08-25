@@ -202,7 +202,7 @@ export class DefaultDeviceCapacityArbiter
     if (abort.aborted) return Promise.resolve({ kind: "cancelled" });
     this.#refill();
     const pressure = this.#safePressure();
-    const gap = this.#capacityGap(request.atomic, pressure);
+    const gap = this.#capacityGap(request.atomic);
     if (gap) return Promise.resolve(gap);
 
     return new Promise<DeviceCapacityAdmission>((resolve) => {
@@ -347,7 +347,6 @@ export class DefaultDeviceCapacityArbiter
     pressure: DeviceCapacityPressure,
   ): boolean {
     if (
-      pressure.cpuBusyRatio > this.#policy.pressure.maxCpuBusyRatio ||
       pressure.availableMemoryBytes <
         this.#policy.pressure.minimumAvailableMemoryBytes
     ) {
@@ -370,13 +369,12 @@ export class DefaultDeviceCapacityArbiter
     return true;
   }
 
-  #capacityGap(
-    atomic: DeviceCapacityBudget,
-    pressure: DeviceCapacityPressure,
-  ):
+  #capacityGap(atomic: DeviceCapacityBudget):
     | Extract<DeviceCapacityAdmission, { kind: "capacity-gap" }>
     | undefined {
-    const capacity = this.#occupancyCapacity(pressure);
+    // capacity-gap 只表示当前策略永远装不下 atomic；实时 CPU、内存与临时空间
+    // 压力都是可恢复的 backpressure，不能把一次采样固化成“永远不可能”。
+    const capacity = this.#policy.occupancy;
     for (const dimension of OCCUPANCY_DIMENSIONS) {
       const required = atomic.occupancy[dimension];
       const available = capacity[dimension];
@@ -403,9 +401,6 @@ export class DefaultDeviceCapacityArbiter
       this.#policy.pressure.minimumAvailableMemoryBytes
     ) {
       return "memoryReservationBytes";
-    }
-    if (pressure.cpuBusyRatio > this.#policy.pressure.maxCpuBusyRatio) {
-      return "slots";
     }
     const capacity = this.#occupancyCapacity(pressure);
     for (const dimension of OCCUPANCY_DIMENSIONS) {
@@ -444,6 +439,10 @@ export class DefaultDeviceCapacityArbiter
             this.#policy.occupancy.temporarySafetyReserveBytes,
         ),
       ),
+      // CPU 是设备级压力诊断，不是可归因到某个任务的容量扣账。并发上界已经
+      // 由版本化 slots 策略、七类公平队列与有界步骤共同治理；用一次进程级
+      // CPU 采样把 slots 突然压低，会让已获 permit 占用超过新上界，继而把全部
+      // committed 维护错误地拒成 backpressured，正是规范禁止的采样冒充用量。
       slots: this.#policy.occupancy.slots,
     };
   }

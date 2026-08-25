@@ -14,10 +14,13 @@ import { SerialTaskQueue } from "../persistence/serial-task-queue.js";
 import { canonicalize, protocolDigest } from "../protocol/index.js";
 import {
   currentMaintenanceAbortSignal,
+  isHoldingMaintenanceExclusion,
+  maintenanceRetryDelayMs,
   runStorageMaintenanceStep,
   storageMaintenanceObligation,
   storageMaintenanceRequest,
   StorageMaintenanceTaskRunner,
+  waitForMaintenanceRetry,
   type StorageMaintenanceGovernorPort,
 } from "../resources/index.js";
 import {
@@ -56,6 +59,7 @@ const RETIREMENT_PAGE_SIZE = 64;
 const PENDING_JOB_PAGE_SIZE = 16;
 const MAX_RELEASE_PAGE_SIZE = 64;
 const MAX_SYNCHRONIZATION_TURNS = 4;
+const LIFECYCLE_ADMISSION_DEADLINE_MS = 5_000;
 const EMPTY_FACT_ROOTS = createEmptyFactRoots();
 
 const STATE_PREFIX = "state/";
@@ -323,9 +327,31 @@ export class ArtifactLifecycleIndex {
       ),
       currentMaintenanceAbortSignal(),
       async () => {
+        const admissionDeadline = Date.now() + LIFECYCLE_ADMISSION_DEADLINE_MS;
         let more = true;
         while (more) {
-          more = await this.#synchronizeBounded(sourceHeads);
+          try {
+            more = await this.#synchronizeBounded(sourceHeads);
+          } catch (error) {
+            const retryAfterMs = maintenanceRetryDelayMs(error);
+            // `#synchronizeBounded` 已退出自己的串行区，正常调用可在这里等待后
+            // 重驱同一 committed 义务。若调用方仍持有更外层互斥区，则继续上抛，
+            // 由那个最外层 owner 退出互斥区后重试，不能把等待藏回锁内。
+            if (
+              retryAfterMs === undefined ||
+              isHoldingMaintenanceExclusion() ||
+              Date.now() >= admissionDeadline
+            ) {
+              throw error;
+            }
+            await waitForMaintenanceRetry(
+              Math.min(
+                retryAfterMs,
+                Math.max(0, admissionDeadline - Date.now()),
+              ),
+            );
+            continue;
+          }
           if (more) await yieldToEventLoop();
         }
       },
@@ -333,10 +359,10 @@ export class ArtifactLifecycleIndex {
   }
 
   /** 进程停机时取消生命周期、内部投影及源日志拥有的维护义务。 */
-  stopStorageMaintenance(): void {
-    this.#maintenanceRunner.stop();
-    this.#index.stopStorageMaintenance();
-    for (const log of this.#logs) log.stopStorageMaintenance();
+  async stopStorageMaintenance(): Promise<void> {
+    await this.#maintenanceRunner.stop();
+    await this.#index.stopStorageMaintenance();
+    for (const log of this.#logs) await log.stopStorageMaintenance();
   }
 
   async #runSynchronized<T>(operation: () => Promise<T>): Promise<T> {

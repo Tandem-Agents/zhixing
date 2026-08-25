@@ -27,6 +27,10 @@ import {
   AnchorResourceGovernor,
   assignmentReservationId,
 } from "../resource-governor.js";
+import {
+  DURABLE_IO_TEST_TIMEOUT_MS,
+  trackAuthorityLog,
+} from "./durable-io-test-support.js";
 
 const NOW = "2026-07-20T00:00:00.000Z";
 
@@ -52,7 +56,7 @@ const hostContext: AuthorityCallContext = {
   deadlineAt: "2026-07-20T00:05:00.000Z",
 };
 
-describe("AnchorResourceGovernor", () => {
+describe("AnchorResourceGovernor", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("tombstones a terminal workload before any late reservation can queue", async () => {
     const fixture = await createHarness();
     await fixture.governor.coordinate(async () => {
@@ -845,9 +849,9 @@ async function createHarness(
 ) {
   const root = await createTempDir("anchor-resource-governor");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
-  const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+  const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
     clock,
-  });
+  }));
   const createGovernor = () => new AnchorResourceGovernor({
     log,
     signer,

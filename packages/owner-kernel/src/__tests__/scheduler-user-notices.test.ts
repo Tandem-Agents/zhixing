@@ -12,15 +12,19 @@ import { describe, expect, it, vi } from "vitest";
 import { OwnerDeliveryParticipant } from "../delivery-participant.js";
 import { SchedulerUserNoticeJournal } from "../scheduler-user-notices.js";
 import { protocolDigest } from "@zhixing/core/protocol";
+import {
+  DURABLE_IO_TEST_TIMEOUT_MS,
+  trackAuthorityLog,
+} from "./durable-io-test-support.js";
 
 const NOW = "2026-08-02T10:00:00.000Z";
 
 async function createHarness() {
   const root = await createTempDir("scheduler-user-notices");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
-  const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+  const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
     clock: () => NOW,
-  });
+  }));
   const delivery = new OwnerDeliveryParticipant({
     authority: new DeliveryAuthority({ log, anchorEpoch: 3 }),
   });
@@ -31,7 +35,7 @@ async function createHarness() {
   };
 }
 
-describe("SchedulerUserNoticeJournal", () => {
+describe("SchedulerUserNoticeJournal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("atomically prepares and deduplicates missed summaries across restart", async () => {
     const harness = await createHarness();
     const group = {

@@ -34,7 +34,7 @@ import {
   AdvancementEvidenceCoordinator,
 } from "@zhixing/owner-services";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 
 const NOW = "2026-08-04T00:00:00.000Z";
 const RUN_REF = { shardId: "000001", runIndex: 0 } as const;
@@ -129,7 +129,7 @@ class HoldDeferredTransitionStore extends AdvancementStore {
   }
 }
 
-describe("advancement review attempt production recovery", () => {
+describe("advancement review attempt production recovery", { timeout: 30_000 }, () => {
   it("never replays an invoking root and eventually commits one review with the real governor and metered reviewer", async () => {
     const root = await createTempDir("advancement-review-attempt");
     const store = new CrashAfterInvokingStore(path.join(root, "advancement"));
@@ -642,6 +642,7 @@ function createGovernor(root: string): AnchorResourceGovernor {
   const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
     clock: () => new Date().toISOString(),
   });
+  onTestFinished(() => log.stopStorageMaintenance());
   return new AnchorResourceGovernor({
     log,
     signer,

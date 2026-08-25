@@ -40,6 +40,7 @@ import type {
   ArtifactTemporaryCandidate,
 } from "./artifact-lifecycle-index.js";
 import {
+  isHoldingMaintenanceExclusion,
   maintenanceRetryDelayMs,
   runInMaintenanceContext,
   runStorageMaintenanceStep,
@@ -125,7 +126,7 @@ export interface SurfaceAssetGrantLedger {
   adoptedTemporary(limit: number): Promise<readonly ArtifactRef[]>;
   markTemporaryRemoved(ref: ArtifactRef): Promise<boolean>;
   /** 进程停机时停止本账本拥有的存储维护任务。 */
-  stopStorageMaintenance?(): void;
+  stopStorageMaintenance?(): void | Promise<void>;
 }
 
 export type SurfaceAssetGrantIssueRequest = SurfaceAssetGrantIssueBinding & {
@@ -324,7 +325,7 @@ export class SurfaceAssetCoordinator {
     const binding = validateSurfaceAssetGrantIssueBinding(rawBinding);
     const key = requestKey(binding.scope, surfacePrincipal, binding.requestId);
     return this.#serving(() =>
-      this.#queue.run(async () => {
+      this.#runQueueWithRecoverRetry(async (recoveryFailed) => {
         if (!this.#recovered) {
           // durable-first exact replay:不依赖热投影、当前资格、时钟与签名器。
           const durable = await this.options.ledger.findIssuedByRequestKey(key);
@@ -335,7 +336,12 @@ export class SurfaceAssetCoordinator {
               surfacePrincipal,
             );
           }
-          await this.#recoverLocked();
+          try {
+            await this.#recoverLocked();
+          } catch (error) {
+            recoveryFailed(error);
+            throw error;
+          }
         }
         const durable = await this.options.ledger.findIssuedByRequestKey(key);
         if (durable) {
@@ -396,7 +402,7 @@ export class SurfaceAssetCoordinator {
           throw new TypeError("Surface asset scope is not owned by this authority");
         }
         return candidate;
-        }),
+      }),
     );
   }
 
@@ -618,14 +624,14 @@ export class SurfaceAssetCoordinator {
   }
 
   /** 停止周期回收拥有的 GC 义务，不提前截断其下游账本所有者。 */
-  stopCollectionMaintenance(): void {
-    this.#maintenanceRunner.stop();
+  async stopCollectionMaintenance(): Promise<void> {
+    await this.#maintenanceRunner.stop();
   }
 
   /** 进程存储层停机时，按所有权层级停止 GC、账本、投影和日志义务。 */
-  stopStorageMaintenance(): void {
-    this.stopCollectionMaintenance();
-    this.options.ledger.stopStorageMaintenance?.();
+  async stopStorageMaintenance(): Promise<void> {
+    await this.stopCollectionMaintenance();
+    await this.options.ledger.stopStorageMaintenance?.();
   }
 
   async #collectLocked(now: {
@@ -857,10 +863,49 @@ export class SurfaceAssetCoordinator {
 
   /** 已由所有者声明语境的路径(周期回收)直接走这里,不得被覆盖成前台。 */
   async #runRecoveredIn<T>(task: () => Promise<T>): Promise<T> {
-    return this.#queue.run(async () => {
-      await this.#recoverLocked();
+    return this.#runQueueWithRecoverRetry(async (recoveryFailed) => {
+      try {
+        await this.#recoverLocked();
+      } catch (error) {
+        recoveryFailed(error);
+        throw error;
+      }
       return task();
     });
+  }
+
+  async #runQueueWithRecoverRetry<T>(
+    operation: (recoveryFailed: (error: unknown) => void) => Promise<T>,
+  ): Promise<T> {
+    const deadline = Date.now() + RECOVERY_ADMISSION_DEADLINE_MS;
+    for (;;) {
+      let recoveryFailure: unknown;
+      try {
+        return await this.#queue.run(() =>
+          operation((error) => {
+            recoveryFailure = error;
+          }),
+        );
+      } catch (error) {
+        // 只重驱尚未进入请求 task 的恢复背压；task 自身一旦开始便由它自己的
+        // 幂等/终态合同负责，不能在这里把任意部分效果静默重放。等待发生在
+        // SurfaceAssetCoordinator 串行区释放之后；更外层仍持互斥时继续上抛给
+        // 最外 owner，保持“等待容量时零锁持有”的固定锁序。
+        const retryAfterMs = error === recoveryFailure
+          ? maintenanceRetryDelayMs(error)
+          : undefined;
+        if (
+          retryAfterMs === undefined ||
+          isHoldingMaintenanceExclusion() ||
+          Date.now() >= deadline
+        ) {
+          throw error;
+        }
+        await waitForMaintenanceRetry(
+          Math.min(retryAfterMs, Math.max(0, deadline - Date.now())),
+        );
+      }
+    }
   }
 
   async #recoverLocked(

@@ -12,7 +12,7 @@ import type {
   PublishRecord,
 } from "../../contracts/index.js";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   DeliveryAuthority,
   assertDeliveryEnvelopeCompanions,
@@ -38,7 +38,11 @@ import {
 } from "./delivery-test-harness.js";
 import { MAX_INLINE_DELIVERY_CONTENT_BYTES } from "../content-schema.js";
 
-vi.setConfig({ testTimeout: 15_000 });
+// Both suites exercise a real durable authority log. The isolated file completes in
+// about 53 seconds, while the root Windows run measured about 175 seconds because
+// it shares fsync capacity with the other core durability files. Keep the protocol
+// deadlines and assertions unchanged; only bound each durability test outside them.
+const DURABLE_IO_TEST_TIMEOUT_MS = 60_000;
 
 const FIRST = "2026-07-17T02:00:00.000Z";
 
@@ -198,7 +202,10 @@ async function resolve(
   ).value as DeliveryResolutionDecision;
 }
 
-describe("delivery authority lifecycle", () => {
+describe(
+  "delivery authority lifecycle",
+  { timeout: DURABLE_IO_TEST_TIMEOUT_MS },
+  () => {
   it("row 1 atomically creates one queued item from its frozen intent", async () => {
     const fixture = await harness();
     const item = await fixture.authority.get(fixture.itemId);
@@ -650,9 +657,13 @@ describe("delivery authority lifecycle", () => {
     ).resolves.toEqual({ accepted: false });
     expect(await fixture.authority.get(fixture.itemId)).toEqual(before);
   });
-});
+  },
+);
 
-describe("delivery unique index and replay", () => {
+describe(
+  "delivery unique index and replay",
+  { timeout: DURABLE_IO_TEST_TIMEOUT_MS },
+  () => {
   it("admits only frozen causal sources and seals fresh canonical enqueue across restart", async () => {
     const root = await createTempDir("delivery-lifecycle-admission");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
@@ -817,7 +828,7 @@ describe("delivery unique index and replay", () => {
         statusRevision: 4,
       },
     })).rejects.toThrow("admission is sealed");
-  });
+  }, 30_000);
   it("generates the frozen prefixed ULID identity vector and rejects malformed item ids", () => {
     const digest = `sha256:${"a".repeat(64)}`;
     expect(deliveryItemId(digest, FIRST)).toBe("dlv-01KXPWTM80BYB4SH423EJT1CVN");
@@ -1594,4 +1605,5 @@ describe("delivery unique index and replay", () => {
     const restarted = new DeliveryAuthority({ log: fixture.log, anchorEpoch: 7 });
     expect((await restarted.get(fixture.itemId))?.state).toBe("attempting");
   });
-});
+  },
+);

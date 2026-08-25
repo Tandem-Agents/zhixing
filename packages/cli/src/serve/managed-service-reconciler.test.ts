@@ -60,15 +60,18 @@ describe("managed service reconciliation", () => {
       });
       expect(nonManaged.calls).toEqual(["inspect", "disable-future"]);
 
-      const invalidPlan = fakeAdapter({ state: "enabled", running: true, matches: true });
+      const dutyCandidate = fakeAdapter({ state: "enabled", running: true, matches: true });
       await expect(reconcileManagedService({
-        homeKey: `home-${trigger}-invalid-plan`,
+        homeKey: `home-${trigger}-duty-candidate`,
         trigger,
         loadCurrent: async () => current({ roles: ["anchor"], issuer: "device:remote", spec }),
-        adapter: invalidPlan,
+        adapter: dutyCandidate,
         signal,
-      })).rejects.toMatchObject({ code: "anchor-authority-conflict" });
-      expect(invalidPlan.calls).toEqual(["inspect", "disable-future"]);
+      })).resolves.toMatchObject({
+        plan: { mode: "managed", roles: ["anchor"] },
+        action: "unchanged",
+      });
+      expect(dutyCandidate.calls).toEqual(["inspect"]);
 
       const driftAfterInstall = fakeAdapter();
       let read = 0;

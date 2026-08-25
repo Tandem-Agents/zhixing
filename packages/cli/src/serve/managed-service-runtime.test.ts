@@ -192,7 +192,7 @@ describe("managed service current-state intent", () => {
           );
           await expect(proveLocalCurrentAuthority(homeDir)).resolves.toBe(false);
         } finally {
-          trust.stopStorageMaintenance();
+          await trust.stopStorageMaintenance();
         }
       });
     },

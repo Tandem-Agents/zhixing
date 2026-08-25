@@ -453,10 +453,10 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   }
 
   /** 进程停机时取消日志迁移及该日志所拥有的全部投影维护义务。 */
-  stopStorageMaintenance(): void {
-    this.#maintenanceRunner.stop();
+  async stopStorageMaintenance(): Promise<void> {
+    await this.#maintenanceRunner.stop();
     for (const projection of this.#durableProjections.values()) {
-      projection.state.stopStorageMaintenance();
+      await projection.state.stopStorageMaintenance();
     }
   }
 

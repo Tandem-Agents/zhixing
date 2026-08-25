@@ -1110,10 +1110,10 @@ export class AssignmentStreamSpool {
     await scan?.close().catch(() => undefined);
   }
 
-  stopStorageMaintenance(): void {
-    for (const handle of this.#handles.values()) {
-      handle.log.stopStorageMaintenance();
-    }
+  async stopStorageMaintenance(): Promise<void> {
+    await Promise.all(
+      [...this.#handles.values()].map((handle) => handle.log.stopStorageMaintenance()),
+    );
   }
 
   /**
@@ -1674,7 +1674,7 @@ export class AssignmentStreamSpool {
           this.#writeAssignmentIdentity(opened.assignmentId, directory),
         );
       } finally {
-        log.stopStorageMaintenance();
+        await log.stopStorageMaintenance();
       }
     }
     if (

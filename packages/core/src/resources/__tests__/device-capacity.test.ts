@@ -149,6 +149,69 @@ describe("DefaultDeviceCapacityArbiter", () => {
     if (first.kind === "granted") first.permit.release();
   });
 
+  it("reports saturated CPU without rewriting the versioned slot capacity", async () => {
+    let currentPressure: DeviceCapacityPressure = {
+      ...pressure(),
+      cpuBusyRatio: 1,
+    };
+    const arbiter = new DefaultDeviceCapacityArbiter({
+      policy: policy(4),
+      probe: () => currentPressure,
+    });
+
+    const first = await arbiter.acquire(
+      request("cpu-progress", budget(1)),
+      new AbortController().signal,
+    );
+    expect(first.kind).toBe("granted");
+
+    const second = await arbiter.acquire(
+      request("cpu-progress-adjacent", budget(1)),
+      new AbortController().signal,
+    );
+    expect(second.kind).toBe("granted");
+
+    const third = await arbiter.acquire(
+      request("cpu-progress-third", budget(1)),
+      new AbortController().signal,
+    );
+    expect(third.kind).toBe("granted");
+    const fourth = await arbiter.acquire(
+      request("cpu-progress-fourth", budget(1)),
+      new AbortController().signal,
+    );
+    expect(fourth.kind).toBe("granted");
+    expect(arbiter.snapshot()).toMatchObject({
+      occupancyCapacity: { slots: 4 },
+      occupancyInUse: { slots: 4 },
+      devicePressure: { cpuBusyRatio: 1 },
+    });
+    const slotBlocked = await arbiter.acquire(
+      request("slot-backpressure", budget(1)),
+      new AbortController().signal,
+    );
+    expect(slotBlocked).toMatchObject({
+      kind: "backpressured",
+      blockedBy: "slots",
+    });
+    for (const admission of [first, second, third, fourth]) {
+      if (admission.kind === "granted") admission.permit.release();
+    }
+
+    currentPressure = {
+      ...pressure(),
+      availableMemoryBytes: 0,
+    };
+    const memoryBlocked = await arbiter.acquire(
+      request("memory-backpressure", budget(1)),
+      new AbortController().signal,
+    );
+    expect(memoryBlocked).toMatchObject({
+      kind: "backpressured",
+      blockedBy: "memoryReservationBytes",
+    });
+  });
+
   it("pre-reserves each step, seals a violating permit, and reports the violation", async () => {
     const arbiter = new DefaultDeviceCapacityArbiter({
       policy: policy(),

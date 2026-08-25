@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { open } from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import { FileArtifactStore } from "../artifact-store.js";
 import { FileAuthorityCommitLog } from "../commit-log.js";
 import {
@@ -20,12 +20,16 @@ import {
  */
 async function newLog(root: string): Promise<FileAuthorityCommitLog> {
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
-  return new FileAuthorityCommitLog(path.join(root, "authority-log"), artifacts, {
+  const log = new FileAuthorityCommitLog(path.join(root, "authority-log"), artifacts, {
     clock: () => "2026-07-24T00:00:00.000Z",
   });
+  onTestFinished(() => log.stopStorageMaintenance());
+  return log;
 }
 
-describe("authority WAL format roundtrip", () => {
+const DURABLE_IO_TEST_TIMEOUT_MS = 10_000;
+
+describe("authority WAL format roundtrip", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("reads back an envelope at its own checkpoint on a freshly created log", async () => {
     const root = await createTempDir("wal-roundtrip-versioned");
     const log = await newLog(root);
@@ -54,6 +58,7 @@ describe("authority WAL format roundtrip", () => {
       artifacts,
       { clock: () => "2026-07-24T00:00:00.000Z" },
     );
+    onTestFinished(() => log.stopStorageMaintenance());
     await log.append([{ stream: "control", body: { t: "probe", value: 2 } }]);
     const checkpoint = await log.checkpoint();
 
@@ -76,6 +81,7 @@ describe("authority WAL format roundtrip", () => {
       artifacts,
       { clock: () => "2026-07-24T00:00:00.000Z" },
     );
+    onTestFinished(() => log.stopStorageMaintenance());
     await log.append([{ stream: "control", body: { t: "probe", value: 3 } }]);
 
     // 不主动迁移:旧二进制必须能继续读它自己创建的日志,因此开头不得出现文件头。

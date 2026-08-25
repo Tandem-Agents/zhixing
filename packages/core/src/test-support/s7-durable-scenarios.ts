@@ -287,6 +287,7 @@ async function createWorksceneRegistryFixture(options: {
     new FileArtifactStore(path.join(root, "artifacts")),
     { clock: () => NOW },
   );
+  registerS7Cleanup(() => log.stopStorageMaintenance());
   const adapter = new AnchorWorksceneGlobalStateAdapter({
     log,
     anchorEpoch: 1,
@@ -1354,7 +1355,7 @@ async function writeActivityProjectionStorage(
     index.publish(prepared, { authority: checkpoint });
   }
   await index.flush();
-  index.stopStorageMaintenance();
+  await index.stopStorageMaintenance();
 }
 
 function activityContributionKey(sceneId: string, conversationId: string): string {

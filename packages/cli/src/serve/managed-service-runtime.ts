@@ -109,7 +109,7 @@ async function loadCurrentManagedServiceStateFromConfig(
     try {
       trust = await store.loadTrustRecord();
     } finally {
-      store.stopStorageMaintenance();
+      await store.stopStorageMaintenance();
     }
   }
   if (await readPlatformSecretStoreBackendBinding(homeDir) !== binding) {

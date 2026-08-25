@@ -7,8 +7,9 @@ import { parseRubricDocument, rubricDocumentId, stringifyRubricDraft } from "./d
 import { AnchorRubricGlobalStateAdapter } from "./global-state-adapter.js";
 
 const NOW = "2026-08-03T00:00:00.000Z";
+const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
 
-describe("AnchorRubricGlobalStateAdapter", () => {
+describe("AnchorRubricGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("persists immutable rubric content behind a guarded global index", async () => {
     const fixture = await createFixture();
     const first = await rubricWrite(fixture.artifacts, "验收准则", "第一版");

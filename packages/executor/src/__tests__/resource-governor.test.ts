@@ -21,13 +21,14 @@ import {
   type ProtocolSigner,
 } from "@zhixing/core/protocol";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import {
   ExecutorResourceBackpressureError,
   ExecutorResourceGovernor,
 } from "../resource-governor.js";
 
 const NOW = "2026-07-20T00:00:00.000Z";
+const DURABLE_IO_TEST_TIMEOUT_MS = 10_000;
 
 const signer: ProtocolSigner = {
   sign(schemaId, version, payload): Signature {
@@ -51,7 +52,9 @@ const context: AuthorityCallContext = {
   deadlineAt: "2026-07-20T00:05:00.000Z",
 };
 
-describe("ExecutorResourceGovernor", () => {
+describe("ExecutorResourceGovernor", {
+  timeout: DURABLE_IO_TEST_TIMEOUT_MS,
+}, () => {
   it("dequeues a control root precisely when its admission deadline has already passed", async () => {
     let monotonicNow = 0;
     const fixture = await createHarness(
@@ -944,8 +947,10 @@ async function createHarness(
   monotonicClock: () => number = () => performance.now(),
 ) {
   const root = await createTempDir("executor-resource-governor");
+  let log: FileAuthorityCommitLog | undefined;
+  onTestFinished(() => log?.stopStorageMaintenance());
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
-  const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+  log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
     clock,
   });
   return {

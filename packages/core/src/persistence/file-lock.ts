@@ -22,6 +22,7 @@ type LockOwnerReading =
   | { readonly kind: "corrupt" };
 
 const activeTokens = new Set<string>();
+const defaultProcessIdentityResolver = createProcessIdentityResolver();
 
 export interface FileLockOptions {
   readonly staleMs: number;
@@ -51,7 +52,7 @@ export async function acquireFileLock(
   const now = options.now ?? Date.now;
   const retryMs = options.retryMs ?? 25;
   const startedAt = performance.now();
-  const resolver = options.processIdentityResolver ?? createProcessIdentityResolver();
+  const resolver = options.processIdentityResolver ?? defaultProcessIdentityResolver;
   const self = await resolver.read(process.pid);
   if (self.kind !== "present") {
     throw new Error(`${resourceName} lock owner identity is unavailable`);

@@ -1002,7 +1002,7 @@ async function runConversationScenario(
   await composition.close();
   await remote?.close();
   await localDataPlane?.close();
-  authority.stopStorageMaintenance();
+  await authority.stopStorageMaintenance();
   return {
     assignmentId: assigned!.assignmentId!,
     statuses,
@@ -1742,7 +1742,7 @@ async function runJobScenario(
   await composition.close();
   await jobOwnerAssembly.close();
   await dataPlane.close();
-  authority.stopStorageMaintenance();
+  await authority.stopStorageMaintenance();
   return { statuses, deliveries };
 }
 

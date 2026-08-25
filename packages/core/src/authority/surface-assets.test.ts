@@ -586,7 +586,7 @@ function later(left: string | undefined, right: string): string {
   return Date.parse(left) >= Date.parse(right) ? left : right;
 }
 
-describe("surface asset coordinator", () => {
+describe("surface asset coordinator", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("rebinds the stable store coordinator to one new authority generation", async () => {
     const current = await fixture({ authorizeScope: () => false });
     expect(await current.coordinator.ownsScope(scope)).toBe(false);
@@ -2030,7 +2030,7 @@ describe("surface asset coordinator", () => {
   });
 });
 
-describe("surface asset collection capacity", () => {
+describe("surface asset collection capacity", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   function singleSlotGovernor() {
     const classWeights = {
       "workload-interactive": 1,
@@ -2330,6 +2330,42 @@ describe("surface asset collection capacity", () => {
       runInMaintenanceContext("recovery", () => state.coordinator.recover()),
     ).resolves.toBeUndefined();
     // 第一次被背压打断,第二次才完成。
+    expect(synchronizes).toBe(2);
+  });
+
+  it("retries request-blocking recovery outside the coordinator serial section", async () => {
+    let synchronizes = 0;
+    const state = await fixture({
+      ledgerDecorator: (ledger) =>
+        new Proxy(ledger, {
+          get(target, property, _receiver) {
+            if (property === "synchronize") {
+              return async () => {
+                synchronizes += 1;
+                if (synchronizes === 1) {
+                  throw new StorageMaintenanceAdmissionError({
+                    kind: "backpressured",
+                    blockedBy: "slots",
+                    retryAfterMs: 1,
+                  });
+                }
+                return target.synchronize();
+              };
+            }
+            const value = Reflect.get(target, property, target) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        }),
+    });
+
+    await expect(state.coordinator.issue({
+      kind: "asset-upload",
+      scope,
+      surfacePrincipal: "surface-recovery-retry",
+      requestId: "request-recovery-retry",
+      assets: [ref(Buffer.from("request recovery retry"))],
+      payloadDigest,
+    })).resolves.toMatchObject({ requestId: "request-recovery-retry" });
     expect(synchronizes).toBe(2);
   });
 

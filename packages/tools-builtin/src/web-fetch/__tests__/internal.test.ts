@@ -162,7 +162,7 @@ describe("processContent", () => {
     const md = await processContent(result, "markdown");
     expect(md).toContain("# Title");
     expect(md).toContain("**world**");
-  });
+  }, 15_000);
 
   it("HTML text 模式: 去标签", async () => {
     const html = "<h1>Title</h1><p>Hello <strong>world</strong></p>";

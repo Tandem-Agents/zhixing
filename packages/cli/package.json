@@ -12,7 +12,7 @@
   ],
   "scripts": {
     "build": "tsup",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=4",
     "clean": "rm -rf dist"
   },
   "dependencies": {

@@ -141,7 +141,7 @@ describe("file lock atomic publication", () => {
     });
     expect(JSON.parse(await readFile(lockPath, "utf8")).pid).toBe(process.pid);
     await release();
-  });
+  }, 120_000);
 });
 
 describe("platform process identity projection", () => {

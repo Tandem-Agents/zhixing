@@ -51,7 +51,9 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 import { FileArtifactStore } from "../artifact-store.js";
 import { FileAuthorityCommitLog } from "../commit-log.js";
 
-describe("FileAuthorityCommitLog post-sync boundary", () => {
+const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
+
+describe("FileAuthorityCommitLog post-sync boundary", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("publishes the committed envelope without post-sync metadata I/O", async () => {
     const fixture = await createFixture();
     faults.postSyncStat = true;

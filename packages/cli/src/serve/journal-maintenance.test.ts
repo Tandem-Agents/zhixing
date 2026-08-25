@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import type {
   GlobalControlMutation,
   GlobalStatePort,
@@ -17,7 +17,7 @@ import { createTempDir } from "@zhixing/test-utils";
 
 const digest = (value: string) => `sha256:${value.repeat(64).slice(0, 64)}`;
 
-describe("createAnchorJournalMaintenance", () => {
+describe("createAnchorJournalMaintenance", { timeout: 30_000 }, () => {
   it("emits no notice and makes no paid call when no maintenance is planned", async () => {
     const state = {
       read: vi.fn(async () => ({ kind: "memory-list" as const, entries: [] })),
@@ -418,6 +418,7 @@ describe("createAnchorJournalMaintenance", () => {
     const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
       clock: () => "2026-08-05T00:00:00.000Z",
     });
+    onTestFinished(() => log.stopStorageMaintenance());
     const noticeAuthority = new SchedulerUserNoticeJournal({
       log,
       delivery: new OwnerDeliveryParticipant({

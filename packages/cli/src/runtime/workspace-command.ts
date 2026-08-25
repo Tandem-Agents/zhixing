@@ -288,7 +288,7 @@ export async function withLocalWorkspaceFacade<T, R = T>(
     await host?.close().catch(() => undefined);
     await runtime?.startupCleanup.run().catch(() => undefined);
     await mcpHub?.dispose().catch(() => undefined);
-    mesh?.bootstrapStore.stopStorageMaintenance();
+    await mesh?.bootstrapStore.stopStorageMaintenance();
     await owner?.release();
   }
 }

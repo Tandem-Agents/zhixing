@@ -6,7 +6,7 @@ import { decodeRecoveryPackage, encodeRecoveryPackage } from "@zhixing/mesh/reco
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import { createTempDir } from "@zhixing/test-utils";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { AnchorUninstallCoordinator } from "./anchor-uninstall.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { createTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";
@@ -18,7 +18,7 @@ import {
 } from "./host-stop-lifecycle.js";
 import { protocolDigest, validateDeviceLifecycleRecord } from "@zhixing/core/protocol";
 
-describe("anchor uninstall coordinator", () => {
+describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
   it("uses a ready migration target and only reports terminal after transfer verification and local retirement", async () => {
     const fixture = await createFixture();
     const closeAdmission = vi.fn(async () => undefined);
@@ -253,6 +253,7 @@ async function createFixture() {
     enrolledAt: "2026-08-12T00:00:00.000Z",
   });
   const store = new FileMeshBootstrapStore(home, issuerKey);
+  onTestFinished(() => store.stopStorageMaintenance());
   const initialized = await store.initializeLocalHome({
     key: issuerKey,
     identity: issuer,

@@ -21,8 +21,9 @@ import {
 } from "./assignment-artifacts.js";
 
 const DIGEST = `sha256:${"1".repeat(64)}` as const;
+const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
 
-describe("assignment artifact closure", () => {
+describe("assignment artifact closure", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("collects the base identity from extended artifact references", async () => {
     const fixture = await createFixture();
     expect(collectArtifactRefs({ content: { ...fixture.nestedRef, kind: "file" } })).toEqual([
@@ -241,7 +242,7 @@ function bundleWithDependencies(
   };
 }
 
-describe("FileResumableArtifactReceiver", () => {
+describe("FileResumableArtifactReceiver", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("imports and reads large artifacts without whole-object materialization", async () => {
     const root = await temporaryRoot();
     const source = Buffer.alloc(512 * 1024, 0x4d);

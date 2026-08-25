@@ -150,9 +150,9 @@ export class FileMeshBootstrapStore {
     this.issuerKey = key;
   }
 
-  stopStorageMaintenance(): void {
-    this.#checkpointLifecycle.stopStorageMaintenance();
-    this.#log.stopStorageMaintenance();
+  async stopStorageMaintenance(): Promise<void> {
+    await this.#checkpointLifecycle.stopStorageMaintenance();
+    await this.#log.stopStorageMaintenance();
   }
 
   authorityLog(): FileAuthorityCommitLog {

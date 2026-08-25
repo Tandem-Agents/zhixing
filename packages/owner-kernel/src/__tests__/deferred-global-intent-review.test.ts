@@ -30,6 +30,10 @@ import {
   type DeferredIntentConversationAuthority,
 } from "../deferred-global-intents.js";
 import { GlobalMutationCommitCoordinator } from "../global-mutation-commit-coordinator.js";
+import {
+  DURABLE_IO_TEST_TIMEOUT_MS,
+  trackAuthorityLog,
+} from "./durable-io-test-support.js";
 
 const NOW = "2026-08-07T11:00:00.000Z";
 const CONVERSATION = "local-12345678-01K1ZZZZZZ0000000000000000";
@@ -81,10 +85,10 @@ async function harness(currentOwner = true) {
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"), {
     lockWaitMs: 2_000,
   });
-  const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+  const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
     clock: () => NOW,
     lockWaitMs: 2_000,
-  });
+  }));
   const local = new DeferredGlobalIntentRepository({
     log,
     localDomainId: "local:device-a",
@@ -163,7 +167,7 @@ async function harness(currentOwner = true) {
   };
 }
 
-describe("DeferredGlobalIntentAnchorReviewService", () => {
+describe("DeferredGlobalIntentAnchorReviewService", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("requires a surface for schedules and atomically commits task, confirmed intent and control result", async () => {
     const fixture = await harness();
     const { intentId } = await fixture.local.record(

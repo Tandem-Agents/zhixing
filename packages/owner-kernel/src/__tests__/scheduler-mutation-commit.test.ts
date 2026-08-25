@@ -26,6 +26,10 @@ import {
   scheduleMutationTaskId,
 } from "../scheduler-mutation-commit.js";
 import { scheduleTaskIdForRequest } from "../scheduler-authority.js";
+import {
+  DURABLE_IO_TEST_TIMEOUT_MS,
+  trackAuthorityLog,
+} from "./durable-io-test-support.js";
 
 const SPEC = {
   name: "daily summary",
@@ -112,13 +116,13 @@ describe("scheduler mutation commit planning", () => {
   });
 });
 
-describe("scheduler mutation owners", () => {
+describe("scheduler mutation owners", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("plans competing schedule writes against the exact locked prefix", async () => {
     const root = await createTempDir("schedule-exact-prefix");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
-    const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+    const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
       clock: () => "2026-08-05T00:00:00.000Z",
-    });
+    }));
     const coordinator = new GlobalMutationCommitCoordinator({
       log,
       artifacts,
@@ -307,9 +311,9 @@ describe("scheduler mutation owners", () => {
   it("redrives only granted job side effects and removes the bounded pending fact", async () => {
     const root = await createTempDir("job-publish-redrive");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
-    const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+    const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
       clock: () => "2026-08-05T00:00:00.000Z",
-    });
+    }));
     const mutation: ScheduleWriteMutation = { kind: "schedule-create", spec: SPEC };
     const batch = createMutationBatch("assignment-1", [
       {
@@ -426,9 +430,9 @@ describe("scheduler mutation owners", () => {
   it("fairly redrives transient pending jobs without requiring another task", async () => {
     const root = await createTempDir("job-publish-lifecycle");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
-    const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+    const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
       clock: () => "2026-08-05T00:00:00.000Z",
-    });
+    }));
     await seedPendingPublish(log, artifacts, "task-a", "assignment-a", "request-a");
     await seedPendingPublish(log, artifacts, "task-b", "assignment-b", "request-b");
     const attempts = new Map<string, number>();
@@ -448,11 +452,14 @@ describe("scheduler mutation owners", () => {
     });
 
     await participant.start();
-    await vi.waitFor(() => {
-      expect(attempts.get("assignment-a")).toBe(3);
-      expect(attempts.get("assignment-b")).toBe(1);
-    });
-    await participant.stop();
+    try {
+      await vi.waitFor(() => {
+        expect(attempts.get("assignment-a")).toBe(3);
+        expect(attempts.get("assignment-b")).toBe(1);
+      }, { timeout: DURABLE_IO_TEST_TIMEOUT_MS });
+    } finally {
+      await participant.stop();
+    }
     const restarted = new SchedulerJobCommitParticipant({
       coordinator: { readProjectionIds: [], apply } as unknown as GlobalMutationCommitCoordinator,
       log,
@@ -468,9 +475,9 @@ describe("scheduler mutation owners", () => {
   it("does not lose a producer wake while the global drain is idle", async () => {
     const root = await createTempDir("job-publish-idle-wake");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
-    const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+    const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
       clock: () => "2026-08-05T00:00:00.000Z",
-    });
+    }));
     const apply = vi.fn(async () => {});
     const participant = new SchedulerJobCommitParticipant({
       coordinator: { readProjectionIds: [], apply } as unknown as GlobalMutationCommitCoordinator,
@@ -489,9 +496,9 @@ describe("scheduler mutation owners", () => {
   it("stops retry timers and fails startup visibly for corrupt pending authority", async () => {
     const root = await createTempDir("job-publish-stop");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
-    const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+    const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
       clock: () => "2026-08-05T00:00:00.000Z",
-    });
+    }));
     await seedPendingPublish(log, artifacts, "task-a", "assignment-a", "request-a");
     const apply = vi.fn(async () => {
       throw new Error("temporary materializer outage");
@@ -510,11 +517,11 @@ describe("scheduler mutation owners", () => {
 
     const corruptRoot = await createTempDir("job-publish-corrupt");
     const corruptArtifacts = new FileArtifactStore(path.join(corruptRoot, "artifacts"));
-    const corruptLog = new FileAuthorityCommitLog(
+    const corruptLog = trackAuthorityLog(new FileAuthorityCommitLog(
       path.join(corruptRoot, "authority"),
       corruptArtifacts,
       { clock: () => "2026-08-05T00:00:00.000Z" },
-    );
+    ));
     const corruptBatch = await seedPendingPublish(
       corruptLog,
       corruptArtifacts,
@@ -539,9 +546,9 @@ describe("scheduler mutation owners", () => {
   it("fail-stops a durable pending item whose committed materialization contract is invalid", async () => {
     const root = await createTempDir("job-publish-contract-failure");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
-    const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+    const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
       clock: () => "2026-08-05T00:00:00.000Z",
-    });
+    }));
     await seedPendingPublish(log, artifacts, "task-invalid", "assignment-invalid", "request-invalid");
     const onFatal = vi.fn();
     const participant = new SchedulerJobCommitParticipant({

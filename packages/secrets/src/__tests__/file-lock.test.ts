@@ -8,12 +8,24 @@ describe("SecretStore file lock", () => {
   it("reclaims an expired lock only when its process is gone", async () => {
     const directory = await createTempDir("secret-lock-dead");
     const lockPath = path.join(directory, "vault.lock");
-    await writeLock(lockPath, 2_147_483_647, "a".repeat(32));
+    const deadPid = 2_147_483_647;
+    await writeVersionedLock(
+      lockPath,
+      deadPid,
+      "a".repeat(32),
+      "test:dead-process",
+    );
+    await makeStale(lockPath);
 
     const release = await acquireFileLock(lockPath, {
       staleMs: 100,
       waitMs: 500,
       retryMs: 5,
+      processIdentityResolver: {
+        read: async (pid) => pid === deadPid
+          ? { kind: "absent" }
+          : { kind: "present", birth: "test:self" },
+      },
     });
     const owner = JSON.parse(await readFile(lockPath, "utf8")) as { pid: number };
     expect(owner.pid).toBe(process.pid);
@@ -95,6 +107,19 @@ async function writeLock(lockPath: string, pid: number, token: string): Promise<
   await writeFile(
     lockPath,
     `${JSON.stringify({ pid, token, createdAt: Date.now() - 60_000 })}\n`,
+    "utf8",
+  );
+}
+
+async function writeVersionedLock(
+  lockPath: string,
+  pid: number,
+  token: string,
+  birth: string,
+): Promise<void> {
+  await writeFile(
+    lockPath,
+    `${JSON.stringify({ v: 1, pid, token, createdAt: Date.now() - 60_000, birth })}\n`,
     "utf8",
   );
 }

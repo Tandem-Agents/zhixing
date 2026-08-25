@@ -82,7 +82,7 @@ import {
   type SystemJobResourceCoordinator,
 } from "@zhixing/owner-kernel/job-assignment";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
@@ -109,6 +109,19 @@ const FROZEN_MISSED_NEXT_FIRE = {
   readyBoundary: "2026-07-15T09:06:00.000Z",
   nextFire: "2026-07-15T09:07:00.000Z",
 } as const;
+
+function trackTestAuthorityLogs(): (
+  log: FileAuthorityCommitLog,
+) => FileAuthorityCommitLog {
+  const logs = new Set<FileAuthorityCommitLog>();
+  return (log) => {
+    if (!logs.has(log)) {
+      logs.add(log);
+      onTestFinished(() => log.stopStorageMaintenance());
+    }
+    return log;
+  };
+}
 
 async function allJobRecoveryObligations(
   ledger: ConversationAssignmentLedger,
@@ -428,15 +441,18 @@ async function createUserHarness(
     schedulerNotices?: boolean;
   } = {},
 ) {
+  const trackLog = trackTestAuthorityLogs();
   const root = await createTempDir("job-assignment");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"), {
     lockWaitMs: 2_000,
   });
   const clock = options.clock ?? (() => NOW);
-  const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
-    clock,
-    lockWaitMs: 2_000,
-  });
+  const log = trackLog(
+    new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+      clock,
+      lockWaitMs: 2_000,
+    }),
+  );
   const identity = new TestProtocolIdentity();
   const executorIdentity = new TestProtocolIdentity(EXECUTOR_ID);
   const ownerArtifacts = options.ownerArtifacts?.(artifacts) ?? artifacts;
@@ -536,6 +552,7 @@ async function createUserHarness(
     ledger,
     unsigned,
     dispatch,
+    trackLog,
   };
 }
 
@@ -556,10 +573,12 @@ function reopenUserJournal(
   return new JobJournal({
     taskId: TASK_ID,
     anchorEpoch: 3,
-    log: new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {
-      clock,
-      lockWaitMs: 2_000,
-    }),
+    log: harness.trackLog(
+      new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {
+        clock,
+        lockWaitMs: 2_000,
+      }),
+    ),
     artifacts,
     signer: harness.identity,
     verifier: harness.identity,
@@ -659,7 +678,9 @@ async function resolve(
   });
 }
 
-describe("user job durable protocol", () => {
+describe("user job durable protocol", {
+  timeout: DURABLE_IO_TEST_TIMEOUT_MS,
+}, () => {
   it("keeps capability diagnostics internal while publishing actionable notices", async () => {
     const harness = await createUserHarness({
       assign: false,
@@ -2211,10 +2232,12 @@ describe("user job durable protocol", () => {
       },
     ]);
     const replayedLedger = new ConversationAssignmentLedger({
-      log: new FileAuthorityCommitLog(producer.log.rootDir, producer.artifacts, {
-        clock: () => NOW,
-        lockWaitMs: 2_000,
-      }),
+      log: producer.trackLog(
+        new FileAuthorityCommitLog(producer.log.rootDir, producer.artifacts, {
+          clock: () => NOW,
+          lockWaitMs: 2_000,
+        }),
+      ),
       artifacts: producer.artifacts,
       executorId: EXECUTOR_ID,
       signer: producer.identity,
@@ -2428,10 +2451,12 @@ describe("user job durable protocol", () => {
     ).toEqual([]);
     expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("queued");
     const compatibilityReader = new ConversationAssignmentLedger({
-      log: new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {
-        clock: () => NOW,
-        lockWaitMs: 2_000,
-      }),
+      log: harness.trackLog(
+        new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {
+          clock: () => NOW,
+          lockWaitMs: 2_000,
+        }),
+      ),
       artifacts: harness.artifacts,
       executorId: EXECUTOR_ID,
       signer: harness.identity,
@@ -2507,10 +2532,12 @@ describe("user job durable protocol", () => {
     ).toEqual([]);
 
     const replayed = new ConversationAssignmentLedger({
-      log: new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {
-        clock: () => NOW,
-        lockWaitMs: 2_000,
-      }),
+      log: harness.trackLog(
+        new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {
+          clock: () => NOW,
+          lockWaitMs: 2_000,
+        }),
+      ),
       artifacts: harness.artifacts,
       executorId: EXECUTOR_ID,
       signer: harness.identity,
@@ -2814,10 +2841,12 @@ describe("user job durable protocol", () => {
     let durableAt: string | undefined;
     let durableReceivedAt: string | undefined;
     const restarted = new ControlAdmissionJournal(
-      new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {
-        clock: () => NOW,
-        lockWaitMs: 2_000,
-      }),
+      harness.trackLog(
+        new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {
+          clock: () => NOW,
+          lockWaitMs: 2_000,
+        }),
+      ),
       harness.artifacts,
     );
     const outcome = await restarted.applyAuthority({
@@ -3391,13 +3420,16 @@ describe("user job durable protocol", () => {
     expect(await harness.journal.pendingCancellations()).toHaveLength(1);
 
     dispatcher.startRecoveryLoop(1);
-    await vi.waitFor(
-      async () => {
-        expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("cancelled");
-      },
-      { timeout: 2_000 },
-    );
-    await dispatcher.stopRecoveryLoop();
+    try {
+      await vi.waitFor(
+        async () => {
+          expect(await harness.journal.currentState(JOB_RUN_ID)).toBe("cancelled");
+        },
+        { timeout: 10_000 },
+      );
+    } finally {
+      await dispatcher.stopRecoveryLoop();
+    }
 
     expect(cancelAttempts).toBe(3);
     expect(recoveryErrors).toHaveLength(1);
@@ -3446,13 +3478,17 @@ const USER_JOB_ROWS = [
   [38, "a halted conflict fence contains effects without resolving the fact"],
 ] as const;
 
-describe("user job state machine rows", () => {
+describe("user job state machine rows", {
+  timeout: DURABLE_IO_TEST_TIMEOUT_MS,
+}, () => {
   it.each(USER_JOB_ROWS)("[6.2 row %i] %s", async (row) => {
     await exerciseUserJobRow(row);
   }, 15_000);
 });
 
-describe("job cancellation evidence authority binding", () => {
+describe("job cancellation evidence authority binding", {
+  timeout: DURABLE_IO_TEST_TIMEOUT_MS,
+}, () => {
   it("rejects pre-received control evidence that does not bind the assigned envelope", async () => {
     const harness = await createUserHarness();
     const cancellation = await harness.journal.cancel({
@@ -3541,7 +3577,9 @@ const CANCELLATION_RACE_PERMUTATIONS = [
   ["sealed", "abort-ticket", "owner-fence"],
 ] as const;
 
-describe("user job three-party cancellation race", () => {
+describe("user job three-party cancellation race", {
+  timeout: DURABLE_IO_TEST_TIMEOUT_MS,
+}, () => {
   it.each(CANCELLATION_RACE_PERMUTATIONS)(
     "%s -> %s -> %s",
     async (...order) => {
@@ -3581,7 +3619,9 @@ describe("user job three-party cancellation race", () => {
   );
 });
 
-describe("system job local protocol", () => {
+describe("system job local protocol", {
+  timeout: DURABLE_IO_TEST_TIMEOUT_MS,
+}, () => {
   it("rejects surface construction of system run and cancellation controls", async () => {
     const harness = await createSystemHarness();
     const source = jobRunSource();
@@ -4025,13 +4065,17 @@ const SYSTEM_JOB_ROWS = [
   [6, "disabling an unleased occurrence cancels it"],
 ] as const;
 
-describe("system job state machine rows", () => {
+describe("system job state machine rows", {
+  timeout: DURABLE_IO_TEST_TIMEOUT_MS,
+}, () => {
   it.each(SYSTEM_JOB_ROWS)("[6.2b row %i] %s", async (row) => {
     await exerciseSystemJobRow(row);
   }, 15_000);
 });
 
-describe("user job clock occurrences while one is in flight", () => {
+describe("user job clock occurrences while one is in flight", {
+  timeout: DURABLE_IO_TEST_TIMEOUT_MS,
+}, () => {
   it.each([
     ["dispatched"],
     ["running"],
@@ -4095,7 +4139,9 @@ const FENCE_TAMPERS = [
   ["executorId", { executorId: "executor-2" }],
 ] as const;
 
-describe("job commit fence field pollution", () => {
+describe("job commit fence field pollution", {
+  timeout: DURABLE_IO_TEST_TIMEOUT_MS,
+}, () => {
   it.each(FENCE_TAMPERS)(
     "rejects a self-consistent bundle whose fence %s does not match the occurrence",
     async (_field, override) => {
@@ -4168,7 +4214,9 @@ describe("job commit fence field pollution", () => {
   });
 });
 
-describe("job submission guard preflight", () => {
+describe("job submission guard preflight", {
+  timeout: DURABLE_IO_TEST_TIMEOUT_MS,
+}, () => {
   it("rejects a user occurrence polluted by system activation in full and compact replay", async () => {
     const harness = await createUserHarness();
     const fence = {
@@ -4375,7 +4423,9 @@ async function finishedInteractionBatch(
   return batch;
 }
 
-describe("job interaction mirror contract", () => {
+describe("job interaction mirror contract", {
+  timeout: DURABLE_IO_TEST_TIMEOUT_MS,
+}, () => {
   it("rejects a fresh mirror batch while uncertain without a durable cancel fence", async () => {
     const harness = await createUserHarness();
     await start(harness);
@@ -4444,7 +4494,9 @@ describe("job interaction mirror contract", () => {
   });
 });
 
-describe("job cancel proof durable replay", () => {
+describe("job cancel proof durable replay", {
+  timeout: DURABLE_IO_TEST_TIMEOUT_MS,
+}, () => {
   it("replays an accepted cancel proof after the executor re-signs the same payload", async () => {
     const harness = await createUserHarness();
     await receive(harness);
@@ -4589,7 +4641,9 @@ describe("job cancel proof durable replay", () => {
   });
 });
 
-describe("job abort ticket authorization", () => {
+describe("job abort ticket authorization", {
+  timeout: DURABLE_IO_TEST_TIMEOUT_MS,
+}, () => {
   it("rejects an abort-ticket proof whose ticket fails owner re-authorization", async () => {
     const harness = await createUserHarness();
     await receive(harness);
@@ -4666,7 +4720,7 @@ describe("job abort ticket authorization", () => {
         submissionContext(harness.unsigned),
       ),
     ).rejects.toThrow("durable record limit");
-  });
+  }, 10_000);
 });
 
 async function exerciseUserJobRow(row: (typeof USER_JOB_ROWS)[number][0]) {
@@ -5019,14 +5073,17 @@ async function createSystemHarness(
     invalidResourceBinding?: "activation" | "terminal";
   } = {},
 ) {
+  const trackLog = trackTestAuthorityLogs();
   const root = await createTempDir("system-job");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"), {
     lockWaitMs: 2_000,
   });
-  const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
-    clock: () => NOW,
-    lockWaitMs: 2_000,
-  });
+  const log = trackLog(
+    new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+      clock: () => NOW,
+      lockWaitMs: 2_000,
+    }),
+  );
   const identity = new TestProtocolIdentity();
   const crashAfterStart = { value: options.crashAfterStart ?? false };
   let prepareCalls = 0;
@@ -5752,10 +5809,12 @@ function rogueLedger(
   harness: Awaited<ReturnType<typeof createUserHarness>>,
 ): ConversationAssignmentLedger {
   return new ConversationAssignmentLedger({
-    log: new FileAuthorityCommitLog(
-      path.join(harness.root, "rogue-ledger"),
-      harness.artifacts,
-      { clock: () => NOW, lockWaitMs: 2_000 },
+    log: harness.trackLog(
+      new FileAuthorityCommitLog(
+        path.join(harness.root, "rogue-ledger"),
+        harness.artifacts,
+        { clock: () => NOW, lockWaitMs: 2_000 },
+      ),
     ),
     artifacts: harness.artifacts,
     executorId: EXECUTOR_ID,
@@ -5773,10 +5832,12 @@ function reopenAssignmentLedger(
   harness: Awaited<ReturnType<typeof createUserHarness>>,
 ): ConversationAssignmentLedger {
   return new ConversationAssignmentLedger({
-    log: new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {
-      clock: () => NOW,
-      lockWaitMs: 2_000,
-    }),
+    log: harness.trackLog(
+      new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {
+        clock: () => NOW,
+        lockWaitMs: 2_000,
+      }),
+    ),
     artifacts: harness.artifacts,
     executorId: EXECUTOR_ID,
     signer: harness.identity,
@@ -5789,7 +5850,9 @@ function reopenAssignmentLedger(
   });
 }
 
-describe("task deletion stops uncertain occupancy", () => {
+describe("task deletion stops uncertain occupancy", {
+  timeout: DURABLE_IO_TEST_TIMEOUT_MS,
+}, () => {
   it("establishes a durable cancel fence when deleting a task whose occurrence is uncertain", async () => {
     const harness = await createUserHarness();
     await receive(harness);
@@ -5857,7 +5920,9 @@ describe("task deletion stops uncertain occupancy", () => {
   });
 });
 
-describe("contradictory proof kinds stop only their own recovery action", () => {
+describe("contradictory proof kinds stop only their own recovery action", {
+  timeout: DURABLE_IO_TEST_TIMEOUT_MS,
+}, () => {
   it("stops the owner-fence cancel redrive and keeps other recovery duties", async () => {
     const harness = await createUserHarness();
     await start(harness);
@@ -5975,7 +6040,9 @@ describe("contradictory proof kinds stop only their own recovery action", () => 
   });
 });
 
-describe("job resource lease domain closure", () => {
+describe("job resource lease domain closure", {
+  timeout: DURABLE_IO_TEST_TIMEOUT_MS,
+}, () => {
   it("rejects a validly signed local-domain lease on a job dispatch", () => {
     const identity = new TestProtocolIdentity();
     const envelope = jobWithLease(identity, (payload) => {
@@ -7184,7 +7251,9 @@ async function expectGuardReplayAccepted(probe: () => Promise<unknown>): Promise
   }
 }
 
-describe("scheduler mutation and automatic-disable fences", () => {
+describe("scheduler mutation and automatic-disable fences", {
+  timeout: DURABLE_IO_TEST_TIMEOUT_MS,
+}, () => {
   it("replays a durable task mutation before CAS and rejects key reuse", async () => {
     const harness = await createUserHarness({ trigger: false });
     const operationId = "schedule-update-replay";
@@ -7348,7 +7417,9 @@ describe("job record execution-point behavior matrix", () => {
   );
 });
 
-describe("user assigned state edges are closed by domain", () => {
+describe("user assigned state edges are closed by domain", {
+  timeout: DURABLE_IO_TEST_TIMEOUT_MS,
+}, () => {
   it("rejects a raw assigned edge outside the user state machine in full and guard replay", async () => {
     const harness = await createUserHarness();
     await start(harness);

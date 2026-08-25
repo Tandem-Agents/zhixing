@@ -1,5 +1,5 @@
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { MemoryMutationConflictError } from "@zhixing/core";
 import {
   FileArtifactStore,
@@ -59,6 +59,7 @@ async function fixture(options?: {
   const root = await createTempDir("post-adoption-memory");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
   const authorityLog = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts);
+  onTestFinished(() => authorityLog.stopStorageMaintenance());
   let revisionConflicted = false;
   const read = vi.fn(async () => ({
     kind: "memory-list" as const,

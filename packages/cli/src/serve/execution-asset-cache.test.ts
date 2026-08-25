@@ -34,7 +34,7 @@ const verifier: ProtocolSignatureVerifier = {
   },
 };
 
-describe("FileExecutionAssetCache", () => {
+describe("FileExecutionAssetCache", { timeout: 30_000 }, () => {
   it("publishes, transfers and reads a version-bound path-free cache", async () => {
     const sourceArtifacts = new FileArtifactStore(await createTempDir("execution-assets-source"));
     const skillRef = await sourceArtifacts.put(Buffer.from("# skill\nread-only", "utf8"));

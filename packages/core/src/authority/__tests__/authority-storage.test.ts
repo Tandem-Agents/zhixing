@@ -132,7 +132,7 @@ async function replaceRetainedProjectionValue(
   await index.flush();
 }
 
-describe("FileArtifactStore", () => {
+describe("FileArtifactStore", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("stores immutable content by digest and rejects corrupted content", async () => {
     const { artifacts } = await createStores();
     const bytes = Buffer.from("durable content", "utf8");
@@ -367,7 +367,7 @@ describe("FileArtifactStore", () => {
     await expect(reopened.deadConversations()).resolves.toEqual(
       deadConversations,
     );
-  });
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it(
     "rebuilds retained exact, leaf, and tombstone records misbound to another identity",
@@ -522,7 +522,7 @@ describe("FileArtifactStore", () => {
     await expect(
       external.log.retainedArtifactReferences([envelopeRef]),
     ).resolves.toEqual([envelopeRef]);
-  });
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("rejects a corrupt external control root before commit", async () => {
     const { artifacts, log } = await createStores();
@@ -642,7 +642,7 @@ describe("FileArtifactStore", () => {
   });
 });
 
-describe("FileAuthorityCommitLog", () => {
+describe("FileAuthorityCommitLog", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("keeps the compatibility bridge on legacy frames with a stable sidecar identity", async () => {
     const { artifacts, log } = await createStores();
     // 兼容桥服务的是旧版本创建的日志:新建日志现在默认写带版本头的格式,

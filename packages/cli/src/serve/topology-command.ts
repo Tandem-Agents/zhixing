@@ -88,7 +88,7 @@ export async function runServeCommand(
         secretStore,
         storageMaintenance: deviceCapacity.storage,
       });
-      mesh.bootstrapStore.stopStorageMaintenance();
+      await mesh.bootstrapStore.stopStorageMaintenance();
       mesh = await prepareMeshRuntimeBootstrap({
         zhixingHome,
         secretStore,
@@ -125,7 +125,7 @@ export async function runServeCommand(
       },
     );
   } finally {
-    mesh?.bootstrapStore.stopStorageMaintenance();
+    await mesh?.bootstrapStore.stopStorageMaintenance();
     await localWorkspaceOwner?.release();
   }
 }

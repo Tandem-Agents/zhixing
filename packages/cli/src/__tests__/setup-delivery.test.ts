@@ -692,18 +692,29 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
       deviceCapacity: capacity.arbiter,
       storageMaintenance: capacity.storage,
     });
-
-    expect(runtime.executorLog).toBeDefined();
-    expect(runtime.executorResourceGovernor).toBeDefined();
-    expect(runtime.environment).toBeDefined();
-    expect(runtime.workspaceBindingAdmin).toBeDefined();
-    expect(runtime.workspaceBindingMigration).toBeDefined();
-    expect(runtime.workspaceProbe).toBeDefined();
-    expect(runtime.globalState).toBeUndefined();
-    expect(() => runtime.authorityLog).toThrow("Anchor authority role is not enabled");
-    expect(() => runtime.authority).toThrow("Anchor authority role is not enabled");
-    expect(() => runtime.controlAdmission).toThrow("Anchor authority role is not enabled");
-    expect(() => runtime.resourceGovernor).toThrow("Anchor authority role is not enabled");
+    try {
+      expect(runtime.executorLog).toBeDefined();
+      expect(runtime.executorResourceGovernor).toBeDefined();
+      expect(runtime.environment).toBeDefined();
+      expect(runtime.workspaceBindingAdmin).toBeDefined();
+      expect(runtime.workspaceBindingMigration).toBeDefined();
+      expect(runtime.workspaceProbe).toBeDefined();
+      expect(runtime.globalState).toBeUndefined();
+      expect(() => runtime.authorityLog).toThrow(
+        "Anchor authority role is not enabled",
+      );
+      expect(() => runtime.authority).toThrow(
+        "Anchor authority role is not enabled",
+      );
+      expect(() => runtime.controlAdmission).toThrow(
+        "Anchor authority role is not enabled",
+      );
+      expect(() => runtime.resourceGovernor).toThrow(
+        "Anchor authority role is not enabled",
+      );
+    } finally {
+      await runtime.startupCleanup.run();
+    }
   });
 
   it("constructs an anchor-only authority stack without loading local environment ports", async () => {

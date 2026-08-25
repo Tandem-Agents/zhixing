@@ -27,9 +27,10 @@ import {
   type DurableProjectionReadContext,
 } from "../index.js";
 
-// 重 IO 组级预算:本机上单条耐久用例真实耗时可达 20-30 秒,30 秒档会被临界
-// 抖动随机击穿;对齐 runbook 已验证的 120 秒档,断言失败仍立即终止。
-const DURABLE_IO_TEST_TIMEOUT_MS = 120_000;
+// 重 IO 组级预算：隔离文件约 63 秒，但根级 Windows 并发 fsync 基线中单项
+// 已击穿 120 秒并使文件耗时达到约 252 秒。只把测试外层边界扩到两倍档；
+// 生产期限、数据规模和断言失败路径仍保持不变并立即终止。
+const DURABLE_IO_TEST_TIMEOUT_MS = 240_000;
 
 function checkpoint(lsn: number): DurableLogCheckpoint {
   return {
@@ -232,6 +233,47 @@ async function createLaggingCorruptedProjection(
 }
 
 describe("FileDurableProjectionIndex", () => {
+  it("retries transient initialize backpressure outside the manifest queue", async () => {
+    const root = await createTempDir("durable-projection-initialize-backpressure");
+    const governor = new DefaultStorageMaintenanceGovernor({
+      capacity: new DefaultDeviceCapacityArbiter({
+        policy: createDefaultDeviceCapacityPolicy(),
+        probe: () => ({
+          cpuBusyRatio: 0,
+          availableMemoryBytes: 8 * 1024 * 1024 * 1024,
+          processRssBytes: 64 * 1024 * 1024,
+          temporaryBytesAvailable: 8 * 1024 * 1024 * 1024,
+        }),
+      }),
+    });
+    let scrubAdmissions = 0;
+    const interrupted: StorageMaintenanceGovernorPort = {
+      acquire: (request, abort) => {
+        if (request.kind === "projection-scrub" && ++scrubAdmissions === 1) {
+          return Promise.resolve({
+            kind: "backpressured",
+            blockedBy: "slots",
+            retryAfterMs: 1,
+          });
+        }
+        return governor.acquire(request, abort);
+      },
+      snapshot: () => governor.snapshot(),
+    };
+    const index = new FileDurableProjectionIndex({
+      rootDir: root,
+      projectionId: "test.initialize-backpressure",
+      reducerVersion: 1,
+      storageMaintenance: interrupted,
+    });
+
+    await index.initialize({ source: checkpoint(0) });
+
+    expect(scrubAdmissions).toBeGreaterThanOrEqual(2);
+    expect(index.checkpoints()).toEqual({ source: checkpoint(0) });
+    await index.stopStorageMaintenance();
+  });
+
   it(
     "rejects checksum-valid records copied under another physical key",
     async () => {

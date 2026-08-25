@@ -22,7 +22,7 @@ import type {
   StorageMaintenanceRequest,
 } from "@zhixing/core/resources";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import {
   AssignmentStreamSpool,
   AssignmentStreamWriter,
@@ -58,6 +58,38 @@ const ownerRelay: StreamConsumerAuth = {
 };
 const SURFACE_EXPIRY = "2026-07-24T00:00:00.000Z";
 const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
+const DURABLE_DISCOVERY_TEST_TIMEOUT_MS = 60_000;
+
+function trackTestSpoolResources(): {
+  readonly spool: <T extends AssignmentStreamSpool>(spool: T) => T;
+  readonly log: <T extends FileAuthorityCommitLog>(log: T) => T;
+} {
+  const spools = new Set<AssignmentStreamSpool>();
+  const logs = new Set<FileAuthorityCommitLog>();
+  return {
+    spool<T extends AssignmentStreamSpool>(spool: T): T {
+      if (!spools.has(spool)) {
+        spools.add(spool);
+        onTestFinished(async () => {
+          const settled = await Promise.allSettled([
+            spool.closeAssignmentScan(),
+            spool.stopStorageMaintenance(),
+          ]);
+          const failure = settled.find((result) => result.status === "rejected");
+          if (failure?.status === "rejected") throw failure.reason;
+        });
+      }
+      return spool;
+    },
+    log<T extends FileAuthorityCommitLog>(log: T): T {
+      if (!logs.has(log)) {
+        logs.add(log);
+        onTestFinished(() => log.stopStorageMaintenance());
+      }
+      return log;
+    },
+  };
+}
 
 describe(
   "AssignmentStreamSpool",
@@ -261,10 +293,12 @@ describe(
       ref,
     });
 
-    const restarted = new AssignmentStreamSpool(
-      fixture.spoolRoot,
-      fixture.artifacts,
-      { clock: fixture.clock },
+    const restarted = fixture.resources.spool(
+      new AssignmentStreamSpool(
+        fixture.spoolRoot,
+        fixture.artifacts,
+        { clock: fixture.clock },
+      ),
     );
     const replayEpoch = await restarted.beginConnection(
       "assignment-fixed",
@@ -409,10 +443,12 @@ describe(
     expect(acknowledged.retainedBytes).toBe(0);
     expect(acknowledged.reclaimAfter).toBe("2026-07-24T00:00:00.000Z");
 
-    const restarted = new AssignmentStreamSpool(
-      fixture.spoolRoot,
-      fixture.artifacts,
-      { clock: fixture.clock },
+    const restarted = fixture.resources.spool(
+      new AssignmentStreamSpool(
+        fixture.spoolRoot,
+        fixture.artifacts,
+        { clock: fixture.clock },
+      ),
     );
     await expect(restarted.snapshot("assignment-fixed")).resolves.toMatchObject({
       prunedThrough: final.seq,
@@ -451,7 +487,7 @@ describe(
     // 两个目录页 + 每个 assignment 的 sidecar 读取；单轮仍由 limit 固定上界。
     expect(physicalSteps).toBe(42);
     await fixture.spool.closeAssignmentScan();
-  });
+  }, DURABLE_DISCOVERY_TEST_TIMEOUT_MS);
 
   it("backfills a bounded identity sidecar for a legacy spool directory", async () => {
     const fixture = await createFixture();
@@ -481,6 +517,7 @@ describe(
   });
 
   it("governs both internal log constructors without nesting the discovery step", async () => {
+    const resources = trackTestSpoolResources();
     const root = await createTempDir("assignment-stream-spool-governor");
     const spoolRoot = path.join(root, "spool");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
@@ -493,10 +530,12 @@ describe(
     await mkdir(indexDirectory, { recursive: true });
     await writeFile(path.join(indexDirectory, "authority.log"), Buffer.alloc(0));
     const governor = recordingStorageGovernor();
-    const spool = new AssignmentStreamSpool(spoolRoot, artifacts, {
-      clock: () => "2026-07-23T00:00:00.000Z",
-      storageMaintenance: governor.port,
-    });
+    const spool = resources.spool(
+      new AssignmentStreamSpool(spoolRoot, artifacts, {
+        clock: () => "2026-07-23T00:00:00.000Z",
+        storageMaintenance: governor.port,
+      }),
+    );
 
     await spool.open(assignmentId, ref);
     expect(
@@ -507,10 +546,12 @@ describe(
     await rm(path.join(indexDirectory, "authority.log.identity"));
     governor.requests.length = 0;
     let insideDiscoveryStep = false;
-    const restarted = new AssignmentStreamSpool(spoolRoot, artifacts, {
-      clock: () => "2026-07-23T00:00:00.000Z",
-      storageMaintenance: governor.port,
-    });
+    const restarted = resources.spool(
+      new AssignmentStreamSpool(spoolRoot, artifacts, {
+        clock: () => "2026-07-23T00:00:00.000Z",
+        storageMaintenance: governor.port,
+      }),
+    );
     await expect(
       restarted.assignmentIdPage(1, async (operation) => {
         expect(insideDiscoveryStep).toBe(false);
@@ -526,7 +567,7 @@ describe(
       governor.requests.some(({ kind }) => kind === "log-migration"),
     ).toBe(true);
     expect(insideDiscoveryStep).toBe(false);
-    restarted.stopStorageMaintenance();
+    await restarted.stopStorageMaintenance();
     await restarted.closeAssignmentScan();
   });
 
@@ -812,6 +853,7 @@ describe(
   });
 
   it("does not let an artifact reference hide an invalid producer value", async () => {
+    const resources = trackTestSpoolResources();
     const root = await createTempDir("assignment-stream-invalid-source");
     const bytes = Buffer.from(
       canonicalize({
@@ -822,14 +864,16 @@ describe(
       "utf8",
     );
     const sourceRef = { digest: byteDigest(bytes), bytes: bytes.byteLength };
-    const spool = new AssignmentStreamSpool(
-      path.join(root, "spool"),
-      {
-        put: async () => sourceRef,
-        get: async () => bytes,
-        has: async () => true,
-        withPresentReferences: async (_refs, operation) => operation(),
-      },
+    const spool = resources.spool(
+      new AssignmentStreamSpool(
+        path.join(root, "spool"),
+        {
+          put: async () => sourceRef,
+          get: async () => bytes,
+          has: async () => true,
+          withPresentReferences: async (_refs, operation) => operation(),
+        },
+      ),
     );
 
     await expect(
@@ -905,21 +949,24 @@ describe(
   });
 
   it("redrives a committed physical deletion failure without restarting", async () => {
+    const resources = trackTestSpoolResources();
     const root = await createTempDir("assignment-stream-delete-retry");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
     let failDeletion = true;
-    const spool = new AssignmentStreamSpool(
-      path.join(root, "spool"),
-      artifacts,
-      {
-        removeRetiredArtifact: async (store, artifact) => {
-          if (failDeletion) {
-            failDeletion = false;
-            throw new Error("temporary delete failure");
-          }
-          await rm(store.pathFor(artifact), { force: true });
+    const spool = resources.spool(
+      new AssignmentStreamSpool(
+        path.join(root, "spool"),
+        artifacts,
+        {
+          removeRetiredArtifact: async (store, artifact) => {
+            if (failDeletion) {
+              failDeletion = false;
+              throw new Error("temporary delete failure");
+            }
+            await rm(store.pathFor(artifact), { force: true });
+          },
         },
-      },
+      ),
     );
     const epoch = await qualifyAndConnect(
       spool,
@@ -1310,10 +1357,12 @@ describe(
       ).reclaimAfter,
     ).toBeUndefined();
 
-    const closed = new AssignmentStreamSpool(
-      path.join((await createTempDir("assignment-stream-spool-closed")), "spool"),
-      fixture.artifacts,
-      { clock: fixture.clock },
+    const closed = fixture.resources.spool(
+      new AssignmentStreamSpool(
+        path.join((await createTempDir("assignment-stream-spool-closed")), "spool"),
+        fixture.artifacts,
+        { clock: fixture.clock },
+      ),
     );
     const closedEpoch = await qualifyAndConnect(
       closed,
@@ -1443,20 +1492,24 @@ async function qualifyAndConnect(
 }
 
 async function createFixture(capacityBytes?: number) {
+  const resources = trackTestSpoolResources();
   const root = await createTempDir("assignment-stream-spool");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
   let now = "2026-07-23T00:00:00.000Z";
   const clock = () => now;
   const spoolRoot = path.join(root, "spool");
-  const spool = new AssignmentStreamSpool(spoolRoot, artifacts, {
-    clock,
-    ...(capacityBytes === undefined ? {} : { capacityBytes }),
-  });
+  const spool = resources.spool(
+    new AssignmentStreamSpool(spoolRoot, artifacts, {
+      clock,
+      ...(capacityBytes === undefined ? {} : { capacityBytes }),
+    }),
+  );
   return {
     artifacts,
     clock,
     spool,
     spoolRoot,
+    resources,
     get now() {
       return now;
     },
@@ -1469,10 +1522,12 @@ async function createFixture(capacityBytes?: number) {
 function restartedSpool(
   fixture: Awaited<ReturnType<typeof createFixture>>,
 ): AssignmentStreamSpool {
-  return new AssignmentStreamSpool(
-    fixture.spoolRoot,
-    fixture.artifacts,
-    { clock: fixture.clock },
+  return fixture.resources.spool(
+    new AssignmentStreamSpool(
+      fixture.spoolRoot,
+      fixture.artifacts,
+      { clock: fixture.clock },
+    ),
   );
 }
 
@@ -1488,10 +1543,12 @@ function rawSpoolLog(
     "assignments",
     key,
   );
-  return new FileAuthorityCommitLog(
-    path.join(directory, "index"),
-    new FileArtifactStore(path.join(directory, "frames")),
-    { clock: fixture.clock },
+  return fixture.resources.log(
+    new FileAuthorityCommitLog(
+      path.join(directory, "index"),
+      new FileArtifactStore(path.join(directory, "frames")),
+      { clock: fixture.clock },
+    ),
   );
 }
 

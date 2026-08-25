@@ -225,10 +225,10 @@ export class ExecutorDataPlaneRuntime {
     this.#closed = true;
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = undefined;
-    this.#maintenanceRunner.stop();
-    this.spool.stopStorageMaintenance();
+    await this.#maintenanceRunner.stop();
     await this.#maintenance?.catch(() => undefined);
     await this.spool.closeAssignmentScan();
+    await this.spool.stopStorageMaintenance();
   }
 
   /**

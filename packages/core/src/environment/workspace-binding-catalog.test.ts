@@ -1,6 +1,6 @@
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import {
   AuthorityStorageError,
   FileArtifactStore,
@@ -32,6 +32,7 @@ import { localEnvironmentControlSubject } from "./workspace-bindings.js";
 
 const NOW = "2026-07-30T00:00:00.000Z";
 const EXPIRY = "2026-07-30T01:00:00.000Z";
+const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
 const capabilityRevisions = new Map<string, number>();
 const identity: ProtocolSigner & ProtocolSignatureVerifier = {
   sign(schemaId, version, payload) {
@@ -46,7 +47,7 @@ const identity: ProtocolSigner & ProtocolSignatureVerifier = {
   },
 };
 
-describe("WorkspaceBindingCatalog", () => {
+describe("WorkspaceBindingCatalog", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("withdraws a corrupt catalog and resets through one durable generation reservation", async () => {
     const fixture = await createFixture(corruptLog());
     await fixture.catalog.initialize();
@@ -107,6 +108,7 @@ describe("WorkspaceBindingCatalog", () => {
       catalogGeneration: reserved.catalogGeneration,
     });
     expect(restarted.published.at(-1)).toEqual([]);
+    await restarted.catalog.stop();
   });
 
   it("coalesces the committed reset and rejects competing reservations", async () => {
@@ -193,6 +195,8 @@ async function createFixture(
 ) {
   const root =
     existingRoot ?? (await createTempDir("zhixing-workspace-catalog"));
+  let catalog: WorkspaceBindingCatalog | undefined;
+  onTestFinished(() => catalog?.stop());
   const published: CapabilityDescriptor["workspaces"][] = [];
   const createdGenerations: string[] = [];
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
@@ -215,7 +219,7 @@ async function createFixture(
       temporaryBytesAvailable: Number.MAX_SAFE_INTEGER,
     }),
   });
-  const catalog = new WorkspaceBindingCatalog({
+  catalog = new WorkspaceBindingCatalog({
     rootDir: path.join(root, "catalog"),
     initialLog,
     createGenerationLog: (generation) => {

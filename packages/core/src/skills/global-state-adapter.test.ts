@@ -12,8 +12,9 @@ import { AnchorSkillGlobalStateAdapter } from "./global-state-adapter.js";
 import { SkillStore } from "./store.js";
 
 const NOW = "2026-08-04T00:00:00.000Z";
+const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
 
-describe("AnchorSkillGlobalStateAdapter", () => {
+describe("AnchorSkillGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("commits an immutable content dependency before path-free catalog publication", async () => {
     const fixture = await createFixture();
     const document = "---\nname: My Skill\ndescription: Useful\n---\nDo it.";

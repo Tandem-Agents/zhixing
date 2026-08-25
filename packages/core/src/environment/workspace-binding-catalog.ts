@@ -405,12 +405,12 @@ export class WorkspaceBindingCatalog
 
   async stop(): Promise<void> {
     this.#recoveryAbort.abort();
-    this.#recoveryRunner.stop();
+    await this.#recoveryRunner.stop();
     await this.#recoveryOwner;
     for (const log of this.#generationLogs.values()) {
-      (
+      await (
         log as AuthorityCommitLog & {
-          stopStorageMaintenance?: () => void;
+          stopStorageMaintenance?: () => void | Promise<void>;
         }
       ).stopStorageMaintenance?.();
     }

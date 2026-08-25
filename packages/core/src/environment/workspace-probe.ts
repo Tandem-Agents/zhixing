@@ -369,7 +369,7 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
       new DOMException("Workspace probe retention stopped", "AbortError"),
     );
     await this.#retentionRunning;
-    this.#retentionRunner.stop();
+    await this.#retentionRunner.stop();
   }
 
   async #executeFresh(

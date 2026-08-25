@@ -536,8 +536,9 @@ describe("StorageMaintenanceTaskRunner obligations", () => {
         ),
     );
     await vi.waitFor(() => expect(capacityAbort).toBeDefined());
-    runner.stop();
-    await expect(pending).rejects.toThrow("cancelled");
+    const rejection = expect(pending).rejects.toThrow("cancelled");
+    await runner.stop();
+    await rejection;
     expect(capacityAbort?.aborted).toBe(true);
   });
 

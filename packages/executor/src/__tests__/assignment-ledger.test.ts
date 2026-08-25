@@ -94,7 +94,7 @@ import {
 } from "@zhixing/owner-kernel/control-admission";
 import { OwnerDeliveryParticipant } from "@zhixing/owner-kernel";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
@@ -405,11 +405,13 @@ async function createUnassignedHarness(
   } = {},
 ) {
   const root = await createTempDir("conversation-assignment");
+  let log: FileAuthorityCommitLog | undefined;
+  onTestFinished(() => log?.stopStorageMaintenance());
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"), {
     lockWaitMs: 2_000,
   });
   const clock = options.clock ?? (() => NOW);
-  const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+  log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
     clock,
     lockWaitMs: 2_000,
   });
@@ -548,7 +550,7 @@ async function createHarness(
   return { ...harness, dispatch };
 }
 
-describe("conversation assignment protocol", () => {
+describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("authorizes a surface abort through the owner-issued durable ticket chain", async () => {
     const harness = await createHarness();
     await harness.ledger.dispatch(
@@ -1090,7 +1092,7 @@ describe("conversation assignment protocol", () => {
         ),
       ),
     ).toBe(false);
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("does not write delivery content for an unroutable final or during committed replay", async () => {
     let counted: CountingArtifactStore | undefined;
@@ -1155,7 +1157,7 @@ describe("conversation assignment protocol", () => {
     counted.resetWrites();
     await expect(cold.currentState(RUN_ID)).resolves.toBe("committed");
     expect(counted.writes).toBe(0);
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("retries a conversation commit after transient staged-content storage failure", async () => {
     let faulting: FaultingArtifactStore | undefined;
@@ -1205,7 +1207,7 @@ describe("conversation assignment protocol", () => {
     await expect(
       harness.journal.submitBundle(bundle, submissionContext(harness.unsigned)),
     ).resolves.toEqual({ committed: true, commitRevision: 8 });
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("commits and cold-replays a conversation with invalid staged delivery content", async () => {
     const harness = await createHarness({
@@ -1253,7 +1255,7 @@ describe("conversation assignment protocol", () => {
     await expect(reopenJournal(harness).currentState(RUN_ID)).resolves.toBe(
       "committed",
     );
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("requires durable receipt before start and recovers a lost started report", async () => {
     const harness = await createHarness();
@@ -2163,7 +2165,7 @@ describe("conversation assignment protocol", () => {
         expect.objectContaining({ t: "acked", commitRevision: 42 }),
       ]),
     );
-  }, 20_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("returns the largest bounded ledger evidence prefix and resumes without gaps", async () => {
     const harness = await createHarness();
@@ -2735,7 +2737,7 @@ describe("conversation assignment protocol", () => {
       ),
     ).toBe(17);
     expect(await harness.ledger.pendingInteractionMirrors(ASSIGNMENT_ID)).toEqual([]);
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("rebuilds incremental interaction indexes and resumes a partial mirror watermark", async () => {
     const harness = await createHarness({ maxPendingInteractions: 2 });
@@ -2833,7 +2835,7 @@ describe("conversation assignment protocol", () => {
         (entry) => entry.seq,
       ),
     ).toEqual([...finished.slice(3).map((entry) => entry.seq), afterRestart.seq]);
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("rebuilds staged-mutation indexes without prefix revalidation", async () => {
     const harness = await createHarness();
@@ -2925,14 +2927,17 @@ describe("conversation assignment protocol", () => {
       recordSeq: 33,
       mutationDigest: expect.any(String),
     });
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("commits a sealed conversation exactly once and recovers publish and final response loss", async () => {
     const applied: Array<Parameters<ConversationMutationPublisher["apply"]>[0]> = [];
     let failSecondPublish = true;
     const publisher: ConversationMutationPublisher = {
-      decideGlobalBatchAtPrefix() {
-        throw new Error("global decision is not expected");
+      decideGlobalBatchAtPrefix(input) {
+        return input.records.map((record) => ({
+          seq: record.seq,
+          outcome: { t: "granted", targetRevision: 100 + record.seq },
+        }));
       },
       async apply(input) {
         if (input.seq === 2 && failSecondPublish) {
@@ -2973,27 +2978,21 @@ describe("conversation assignment protocol", () => {
       expect.objectContaining({ state: "running", statusRevision: 3, at: NOW }),
     ]);
     await harness.ledger.stageMutation(ASSIGNMENT_ID, {
-      domain: "session",
+      domain: "global",
       requestId: "mutation-1",
+      expected: { anchorEpoch: 9 },
       mutation: {
-        kind: "task-list-op",
-        op: {
-          op: "set",
-          state: { items: [{ id: "task-1", content: "ship", status: "in_progress" }] },
-        },
+        kind: "memory-append",
+        payload: { domain: "journal", scope: { kind: "personal" }, content: "Focus one" },
       },
     });
     await harness.ledger.stageMutation(ASSIGNMENT_ID, {
-      domain: "session",
+      domain: "global",
       requestId: "mutation-2",
+      expected: { anchorEpoch: 9 },
       mutation: {
-        kind: "task-list-op",
-        op: {
-          op: "set",
-          state: {
-            items: [{ id: "task-2", content: "ship", status: "completed" }],
-          },
-        },
+        kind: "memory-append",
+        payload: { domain: "journal", scope: { kind: "personal" }, content: "Focus two" },
       },
     });
     const runRecord: TranscriptRunRecord = {
@@ -3061,32 +3060,24 @@ describe("conversation assignment protocol", () => {
       {
         assignmentId: ASSIGNMENT_ID,
         seq: 1,
-        domain: "session",
+        domain: "global",
         requestId: "mutation-1",
         mutation: {
-          kind: "task-list-op",
-          op: {
-            op: "set",
-            state: { items: [{ id: "task-1", content: "ship", status: "in_progress" }] },
-          },
+          kind: "memory-append",
+          payload: { domain: "journal", scope: { kind: "personal" }, content: "Focus one" },
         },
-        targetRevision: 8,
+        targetRevision: 101,
       },
       {
         assignmentId: ASSIGNMENT_ID,
         seq: 2,
-        domain: "session",
+        domain: "global",
         requestId: "mutation-2",
         mutation: {
-          kind: "task-list-op",
-          op: {
-            op: "set",
-            state: {
-              items: [{ id: "task-2", content: "ship", status: "completed" }],
-            },
-          },
+          kind: "memory-append",
+          payload: { domain: "journal", scope: { kind: "personal" }, content: "Focus two" },
         },
-        targetRevision: 8,
+        targetRevision: 102,
       },
     ]);
     const committedBeforeReplay = (
@@ -3124,7 +3115,7 @@ describe("conversation assignment protocol", () => {
     await expect(harness.artifacts.has(contentRef)).resolves.toBe(true);
     expect(await harness.journal.expirePublishedFinals("2026-07-14T09:00:00.001Z")).toBe(1);
     expect(await harness.journal.expirePublishedFinals("2026-07-15T09:00:00.001Z")).toBe(0);
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("retries a conversation bundle after the owner commit response is lost and durably closes the ACK outbox", async () => {
     const harness = await createHarness();
@@ -3188,7 +3179,7 @@ describe("conversation assignment protocol", () => {
     query.mockClear();
     await expect(dispatcher.recoverAssignments()).resolves.toBe(0);
     expect(query).not.toHaveBeenCalled();
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("returns the committed disposition when the executor ACK write fails and recovers the ACK outbox", async () => {
     const harness = await createHarness();
@@ -3260,7 +3251,7 @@ describe("conversation assignment protocol", () => {
     ).resolves.toEqual([]);
     await expect(harness.ledger.recoverableConversationAssignments()).resolves.toEqual([]);
     await expect(harness.journal.assignmentsAwaitingRecovery()).resolves.toEqual([]);
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("recovers received conversations only before execution starts", async () => {
     const harness = await createHarness();
@@ -3326,7 +3317,7 @@ describe("conversation assignment protocol", () => {
     query.mockClear();
     await expect(dispatcher.recoverAssignments()).resolves.toBe(0);
     expect(query).not.toHaveBeenCalled();
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it.each(["wrong-bundle", "wrong-revision", "duplicate"] as const)(
     "rejects a %s conversation bundle acknowledgement in both replay projections",
@@ -3381,8 +3372,11 @@ describe("conversation assignment protocol", () => {
     let blockPublishing = true;
     const applied: string[] = [];
     const publisher: ConversationMutationPublisher = {
-      decideGlobalBatchAtPrefix() {
-        throw new Error("global decision is not expected");
+      decideGlobalBatchAtPrefix(input) {
+        return input.records.map((record) => ({
+          seq: record.seq,
+          outcome: { t: "granted", targetRevision: 100 + record.seq },
+        }));
       },
       async apply(input) {
         if (blockPublishing) throw new Error("hold publish recovery open");
@@ -3401,11 +3395,12 @@ describe("conversation assignment protocol", () => {
     });
     await firstAdapter.startAndReport(ASSIGNMENT_ID, submissionContext(first.unsigned));
     await first.ledger.stageMutation(ASSIGNMENT_ID, {
-      domain: "session",
+      domain: "global",
       requestId: "first-partitioned-mutation",
+      expected: { anchorEpoch: 9 },
       mutation: {
-        kind: "task-list-op",
-        op: { op: "set", state: { items: [] } },
+        kind: "memory-append",
+        payload: { domain: "journal", scope: { kind: "personal" }, content: "First" },
       },
     });
     const firstBundle = await sealDefaultBundle(first.ledger);
@@ -3490,11 +3485,12 @@ describe("conversation assignment protocol", () => {
       submissionContext(secondUnsigned),
     );
     await secondLedger.stageMutation(secondAssignmentId, {
-      domain: "session",
+      domain: "global",
       requestId: "second-partitioned-mutation",
+      expected: { anchorEpoch: 9 },
       mutation: {
-        kind: "task-list-op",
-        op: { op: "set", state: { items: [] } },
+        kind: "memory-append",
+        payload: { domain: "journal", scope: { kind: "personal" }, content: "Second" },
       },
     });
     const secondBundle = await secondLedger.sealConversationBundle(secondAssignmentId, {
@@ -3539,7 +3535,7 @@ describe("conversation assignment protocol", () => {
     expect(applied).toEqual([ASSIGNMENT_ID]);
     await expect(secondJournal.resumePendingPublishing()).resolves.toBe(1);
     expect(applied).toEqual([ASSIGNMENT_ID, secondAssignmentId]);
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("commits global publish conflicts while exposing durable summary and detail", async () => {
     const publisher: ConversationMutationPublisher = {
@@ -3617,7 +3613,7 @@ describe("conversation assignment protocol", () => {
           mutation: { kind: "workscene-create", name: "Focus" },
           error: {
             code: "revision-conflict",
-            message: "workscene changed",
+            message: "相关内容已被其他修改更新。查看最新内容后重试，放弃这项修改。",
             retryable: false,
           },
         },
@@ -3637,7 +3633,7 @@ describe("conversation assignment protocol", () => {
           t: "conflicted",
           error: {
             code: "revision-conflict",
-            message: "workscene changed",
+            message: "相关内容已被其他修改更新。查看最新内容后重试，放弃这项修改。",
             retryable: false,
           },
         },
@@ -3983,7 +3979,7 @@ describe("conversation assignment protocol", () => {
     await expect(finalHarness.journal.pendingFinalFrames()).rejects.toThrow(
       "transition is invalid",
     );
-  }, 20_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("rejects polluted, stale, and incomplete conversation bundles without a second commit", async () => {
     const publisher: ConversationMutationPublisher = {
@@ -4555,7 +4551,7 @@ describe("conversation assignment protocol", () => {
     await expect(bareSupersede.journal.currentState(RUN_ID)).rejects.toThrow(
       "Assignment supersede replay contract",
     );
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("rejects non-atomic initial facts, cross-conversation dispatches, and non-head assignments", async () => {
     const admittedOnly = await createUnassignedHarness();
@@ -4964,7 +4960,7 @@ describe("conversation assignment protocol", () => {
       } as never),
     ).rejects.toThrow("Ledger snapshot");
     expect(await owner.journal.currentState(RUN_ID)).toBe("dispatched");
-  }, 20_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("rejects every incomplete atomic closure for conflict and uncertain resolution", async () => {
     const ackedConflict = await createHarness();
@@ -5156,7 +5152,7 @@ describe("conversation assignment protocol", () => {
     await expect(wrongApplied.journal.currentState(RUN_ID)).rejects.toThrow(
       "missing its atomic authority facts",
     );
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("requires complete sidecars and capability revocations for conversation commit", async () => {
     const incomplete = await createHarness();
@@ -5352,7 +5348,7 @@ describe("conversation assignment protocol", () => {
           (entry.body as { readonly t?: string }).t === "capability-revoked",
       ),
     ).toBe(true);
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("rejects incomplete historical commit fences and conflict late-bundle closures", async () => {
     for (const variant of ["executor", "owner-epoch"] as const) {
@@ -5433,7 +5429,7 @@ describe("conversation assignment protocol", () => {
     await expect(conflicted.journal.currentState(RUN_ID)).rejects.toThrow(
       "Committed run replay contract",
     );
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("recovers a cancelled run from a dispatch rejection whose response was lost", async () => {
     const harness = await createHarness();
@@ -5928,7 +5924,7 @@ describe("conversation assignment protocol", () => {
         ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
       ),
     ).rejects.toThrow("halted does not close the durable cancellation prefix");
-  });
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("rejects halting with a pending interaction during replay", async () => {
     const harness = await createHarness();
@@ -6057,7 +6053,7 @@ describe("conversation assignment protocol", () => {
         ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
       ),
     ).rejects.toThrow("halted does not close the durable cancellation prefix");
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("keeps a late halted proof as evidence when cancellation was already uncertain", async () => {
     const harness = await createHarness();
@@ -6769,7 +6765,7 @@ describe("conversation assignment protocol", () => {
       superseded.journal.acceptSupersedeProof(oldTerminationProof),
     ).rejects.toThrow("historical assignment");
     expect(await superseded.journal.currentState(RUN_ID)).toBe("dispatched");
-  }, 20_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("idempotently accepts a conflict whose accepted side is owner-authoritative", async () => {
     const harness = await createHarness();
@@ -6878,7 +6874,7 @@ describe("conversation assignment protocol", () => {
       closedBy: "proven-not-started-redispatched",
       resultingState: "queued",
     });
-  });
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it.each([
     ["not-started", false, "queued"],
@@ -7460,7 +7456,7 @@ describe("conversation assignment protocol", () => {
         submissionContext(settlement.unsigned),
       ),
     ).resolves.toBeUndefined();
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("settles conflict interaction audit after revocation before producing containment proof", async () => {
     const authorization = createRevocationAwareSubmission();
@@ -7543,7 +7539,7 @@ describe("conversation assignment protocol", () => {
     expect(await harness.journal.pendingCancellations()).toEqual([]);
     expect(await harness.ledger.pendingInteractionMirrors(ASSIGNMENT_ID)).toEqual([]);
     expect(await reopenJournal(harness).pendingCancellations()).toEqual([]);
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("binds mirror replay to exact signed batches across lost acknowledgements", async () => {
     const authorization = createRevocationAwareSubmission();
@@ -7667,7 +7663,7 @@ describe("conversation assignment protocol", () => {
     });
     expect(await restarted.pendingInteractionMirrors(ASSIGNMENT_ID)).toEqual([]);
     expect(firstReceipt).toEqual(mirrorReceipt(firstBatch));
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("rejects fresh mirror facts outside their state fence and repeated request identities", async () => {
     const mirrorEntry = (ordinal: number, seq: number, requestId: string) => ({
@@ -7766,7 +7762,7 @@ describe("conversation assignment protocol", () => {
     await expect(reopenJournal(terminal).currentState(RUN_ID)).rejects.toThrow(
       "outside its authorized state",
     );
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("replays only the exact contained cancel proof after a successor attempt exists", async () => {
     const authorization = createRevocationAwareSubmission();
@@ -7831,7 +7827,7 @@ describe("conversation assignment protocol", () => {
     ).rejects.toThrow("different durable termination proof");
     expect(await harness.log.readAll()).toHaveLength(beforeReplay);
     expect(await harness.journal.currentState(RUN_ID)).toBe("dispatched");
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("authenticates and activates every submission before payload or artifact work", async () => {
     let counted: CountingArtifactStore | undefined;
@@ -8055,7 +8051,7 @@ describe("conversation assignment protocol", () => {
         submissionContext(cancelled.unsigned),
       ),
     ).resolves.toBeUndefined();
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("does no artifact reads for exact bundle replay or stable fence rejection", async () => {
     let counted: CountingArtifactStore | undefined;
@@ -8177,7 +8173,7 @@ describe("conversation assignment protocol", () => {
       error: { code: "fence-rejected" },
     });
     expect(counted.reads).toBe(0);
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("rejects a cold exact replay whose capability epoch does not bind the durable assigned snapshot", async () => {
     const harness = await createHarness();
@@ -8214,7 +8210,7 @@ describe("conversation assignment protocol", () => {
     await expect(
       cold.submitBundle(bundle, submissionContext(harness.unsigned)),
     ).resolves.toEqual({ committed: true, commitRevision: 8 });
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("rejects a self-consistent resolution fact whose ownerEpoch does not bind the durable assignment", async () => {
     const harness = await createHarness();
@@ -8265,7 +8261,7 @@ describe("conversation assignment protocol", () => {
     await expect(
       cold.submitBundle({} as SealedBundle, submissionContext(harness.unsigned)),
     ).rejects.toThrow("belongs to another authority");
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("rejects a second dispatch conflict for an acknowledged assignment in both full and guard replay", async () => {
     const harness = await createHarness();
@@ -8316,7 +8312,7 @@ describe("conversation assignment protocol", () => {
     await expect(
       cold.submitBundle({} as SealedBundle, submissionContext(harness.unsigned)),
     ).rejects.toThrow("Dispatch conflict replay contract");
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("rejects replayed supersede facts that contradict durable started or lack their request", async () => {
     const started = await createHarness();
@@ -8433,7 +8429,7 @@ describe("conversation assignment protocol", () => {
     await expect(unfenced.journal.currentState(RUN_ID)).rejects.toThrow(
       "Assignment supersede replay contract",
     );
-  }, 15_000);
+  }, DURABLE_IO_TEST_TIMEOUT_MS);
 
   it("writes each capability revocation once across uncertain containment and resolution", async () => {
     const harness = await createHarness();
@@ -9915,6 +9911,7 @@ type ConversationBehaviorScenarioId =
   | "commit"
   | "advancementSession"
   | "worksceneSession"
+  | "sessionControl"
   | "sessionLifecycle"
   | "channelLifecycle"
   | "mirror"
@@ -10057,6 +10054,31 @@ const CONVERSATION_BEHAVIOR_SCENARIOS: Record<
   ConversationBehaviorScenarioId,
   () => Promise<ConversationBehaviorHarness>
 > = {
+  async sessionControl() {
+    const harness = await createHarness();
+    const source = trustedControlSource();
+    const authority = await harness.journal.authorityState();
+    const outcome = await harness.journal.applyControl({
+      admission: harness.control,
+      envelope: createConversationControlEnvelope({
+        requestId: "matrix-session-control",
+        source,
+        at: NOW,
+        body: {
+          t: "session-write",
+          conversationId: CONVERSATION_ID,
+          mutation: { kind: "task-list-op", op: { op: "set", state: { items: [] } } },
+          ownerEpoch: 3,
+          domainRevision: authority.domainRevision,
+        },
+      }),
+      source,
+    });
+    if (outcome.kind !== "applied" || outcome.result.status !== "ok") {
+      throw new Error("matrix session control was rejected");
+    }
+    return conversationBehaviorHarness(harness);
+  },
   async advancementSession() {
     const harness = await createHarness();
     await harness.journal.applyAdvancementEvents({
@@ -10617,6 +10639,14 @@ const noConversationRecovery = (reason: string): ConversationRecoveryExpectation
   reason,
 });
 
+const EXTERNAL_CONVERSATION_RECORD_OWNERS = {
+  "post-adoption-memory-discovery": "cli/post-adoption-memory",
+  "post-adoption-memory-attempt": "cli/post-adoption-memory",
+  "post-adoption-memory-plan": "cli/post-adoption-memory",
+  "post-adoption-memory-effect": "cli/post-adoption-memory",
+  "post-adoption-memory-completed": "cli/post-adoption-memory",
+} as const satisfies Partial<Record<ConversationBehaviorRecordType, string>>;
+
 // conversation 域与 job 域同一引擎:每类记录绑定真实生产场景、恢复合同或
 // 事实化 N/A 与对抗向量；精确重放被协议幂等吸收的类型使用同身份异载荷/
 // ghost 向量。生产事实注记:
@@ -10641,6 +10671,13 @@ const CONVERSATION_RECORD_BEHAVIOR = {
   "session-lifecycle": {
     scenario: "sessionLifecycle",
     recovery: conversationRecovery("lifecycleProjection"),
+  },
+  "session-control": {
+    scenario: "sessionControl",
+    recovery: noConversationRecovery(
+      "session control is consumed by conversation-owner authority replay",
+    ),
+    corrupt: (body) => ({ ...body, domainRevision: 0 }),
   },
   "session-meta": {
     scenario: "worksceneSession",
@@ -10768,7 +10805,10 @@ const CONVERSATION_RECORD_BEHAVIOR = {
     recovery: conversationRecovery("lifecycleProjection"),
     corrupt: (body) => ({ ...body, requestId: "matrix-lifecycle-ghost" }),
   },
-} as const satisfies Record<ConversationBehaviorRecordType, ConversationRecordBehaviorSpec>;
+} as const satisfies Record<
+  Exclude<ConversationBehaviorRecordType, keyof typeof EXTERNAL_CONVERSATION_RECORD_OWNERS>,
+  ConversationRecordBehaviorSpec
+>;
 
 async function expectConversationRejected(probe: () => Promise<unknown>): Promise<void> {
   try {
@@ -10802,8 +10842,21 @@ describe("conversation record execution-point behavior matrix", () => {
   it("binds every conversation record type to a producing scenario", () => {
     expect(Object.keys(CONVERSATION_RECORD_BEHAVIOR).sort()).toEqual(
       [
-        ...Object.keys(CONVERSATION_RUN_RECORD_SHAPES),
-        ...CONVERSATION_RUN_INTERNAL_RECORD_TYPES,
+        ...Object.keys(CONVERSATION_RUN_RECORD_SHAPES).filter(
+          (recordType) => !(recordType in EXTERNAL_CONVERSATION_RECORD_OWNERS),
+        ),
+        ...CONVERSATION_RUN_INTERNAL_RECORD_TYPES.filter(
+          (recordType) => !(recordType in EXTERNAL_CONVERSATION_RECORD_OWNERS),
+        ),
+      ].sort(),
+    );
+    expect(Object.keys(EXTERNAL_CONVERSATION_RECORD_OWNERS).sort()).toEqual(
+      [
+        "post-adoption-memory-attempt",
+        "post-adoption-memory-completed",
+        "post-adoption-memory-discovery",
+        "post-adoption-memory-effect",
+        "post-adoption-memory-plan",
       ].sort(),
     );
     const referencedRecoveryProbes = new Set<ConversationRecoveryProbeId>();

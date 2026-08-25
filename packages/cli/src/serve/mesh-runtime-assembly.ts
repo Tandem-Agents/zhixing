@@ -837,7 +837,7 @@ export class MeshRuntimeAssembly {
             .map((member) => member.device.deviceId),
         );
         if (roles.has("anchor")) {
-          this.#installPlannedAnchorRole(record);
+          await this.#replacePlannedAnchorRole(record);
           if (this.#postInstallTransitionPending) {
             await this.#loadLiveDisasterPostInstall(record);
           }
@@ -969,7 +969,7 @@ export class MeshRuntimeAssembly {
     this.#disposers.push(() => this.#disposeDeviceRemovalIssuer?.());
 
     if (roles.has("anchor")) {
-      this.#installPlannedAnchorRole(options.trust);
+      this.#installInitialPlannedAnchorRole(options.trust);
       options.protocol!.bindRemoteExecution(this.#remoteDirectory());
     }
   }
@@ -1510,7 +1510,7 @@ export class MeshRuntimeAssembly {
     await this.#worker?.close();
     this.#disposePlannedAnchorTarget?.();
     this.#disposePlannedAnchorSource?.();
-    this.#plannedAnchorTarget?.close();
+    await this.#plannedAnchorTarget?.close();
     this.#disposePlannedAnchorTarget = undefined;
     this.#disposePlannedAnchorSource = undefined;
     this.#plannedAnchorOwner = undefined;
@@ -1759,24 +1759,48 @@ export class MeshRuntimeAssembly {
     this.#worker?.resumeAccepting();
   }
 
-  #installPlannedAnchorRole(trust: HomeTrustRecord): void {
+  #plannedAnchorRoleFor(trust: HomeTrustRecord): string {
     const roleEnabled = this.options.configuration.enabledRoles.includes("anchor");
     const local = trust.members.find((member) =>
       member.device.deviceId === this.options.authority.deviceId);
-    const role = roleEnabled && local?.state === "active" && local.roles.includes("anchor")
+    return roleEnabled && local?.state === "active" && local.roles.includes("anchor")
       ? trust.issuer.deviceId === this.options.authority.deviceId
         ? `owner:${trust.trustEpoch}:${trust.issuer.issuerKeyId}`
         : `target:${trust.trustEpoch}:${trust.issuer.deviceId}`
       : "disabled";
+  }
+
+  #installInitialPlannedAnchorRole(trust: HomeTrustRecord): void {
+    const role = this.#plannedAnchorRoleFor(trust);
     if (role === this.#plannedAnchorRole) return;
+    if (
+      this.#plannedAnchorRole !== "" ||
+      this.#plannedAnchorOwner ||
+      this.#plannedAnchorTarget
+    ) {
+      throw new Error("Initial duty-role installation cannot replace a live role");
+    }
     this.#plannedAnchorRole = role;
+    this.#activatePlannedAnchorRole(trust, role);
+  }
+
+  async #replacePlannedAnchorRole(trust: HomeTrustRecord): Promise<void> {
+    const role = this.#plannedAnchorRoleFor(trust);
+    if (role === this.#plannedAnchorRole) return;
     this.#disposePlannedAnchorTarget?.();
     this.#disposePlannedAnchorSource?.();
-    this.#plannedAnchorTarget?.close();
+    const target = this.#plannedAnchorTarget;
     this.#disposePlannedAnchorTarget = undefined;
     this.#disposePlannedAnchorSource = undefined;
     this.#plannedAnchorOwner = undefined;
     this.#plannedAnchorTarget = undefined;
+    this.#plannedAnchorRole = "";
+    await target?.close();
+    this.#plannedAnchorRole = role;
+    this.#activatePlannedAnchorRole(trust, role);
+  }
+
+  #activatePlannedAnchorRole(trust: HomeTrustRecord, role: string): void {
     if (role.startsWith("owner:")) {
       this.#plannedAnchorOwner = new PlannedAnchorTransferOwner({
         deviceId: this.options.authority.deviceId,

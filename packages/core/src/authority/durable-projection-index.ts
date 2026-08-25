@@ -20,6 +20,7 @@ import { canonicalize, protocolDigest } from "../protocol/index.js";
 import {
   claimDeviceCapacity,
   currentMaintenanceAbortSignal,
+  isHoldingMaintenanceExclusion,
   maintenanceRetryDelayMs,
   runDetachedMaintenanceContext,
   runInMaintenanceContext,
@@ -27,6 +28,7 @@ import {
   storageMaintenanceObligation,
   storageMaintenanceRequest,
   StorageMaintenanceTaskRunner,
+  waitForMaintenanceRetry,
   type StorageMaintenanceGovernorPort,
   type StorageMaintenanceKind,
   type StorageMaintenanceObligation,
@@ -44,6 +46,7 @@ const MAX_KEY_BYTES = 2_048;
 const MAX_VALUE_BYTES = 16 * 1024 * 1024;
 const DEFAULT_OVERLAY_ENTRIES = 512;
 const DEFAULT_OVERLAY_BYTES = 1024 * 1024;
+const PROJECTION_ADMISSION_DEADLINE_MS = 5_000;
 const MAX_DELTA_SEGMENTS = 4;
 const BASE_SEGMENT_ENTRIES = 512;
 const BASE_SEGMENT_BYTES = 1024 * 1024;
@@ -417,16 +420,36 @@ export class FileDurableProjectionIndex {
       frozenInput,
       "committed",
       async () => {
+        const admissionDeadline = Date.now() + PROJECTION_ADMISSION_DEADLINE_MS;
         let initialized = false;
         while (!initialized) {
-          initialized = await this.#manifestQueue.run(() =>
-            this.#runMaintenanceStep(
-              "projection-scrub",
-              { frozenInput, step: "initialize" },
-              "committed",
-              () => this.#initializeStep(emptyCheckpoints),
-            ),
-          );
+          try {
+            initialized = await this.#manifestQueue.run(() =>
+              this.#runMaintenanceStep(
+                "projection-scrub",
+                { frozenInput, step: "initialize" },
+                "committed",
+                () => this.#initializeStep(emptyCheckpoints),
+              ),
+            );
+          } catch (error) {
+            const retryAfterMs = maintenanceRetryDelayMs(error);
+            // manifestQueue 已释放后才可等待；若调用方仍持更外层互斥区，必须
+            // 把重驱交还给那个 owner，不能把等待重新藏进外层锁。
+            if (
+              retryAfterMs === undefined ||
+              isHoldingMaintenanceExclusion() ||
+              Date.now() >= admissionDeadline
+            ) {
+              throw error;
+            }
+            await waitForMaintenanceRetry(
+              Math.min(
+                retryAfterMs,
+                Math.max(0, admissionDeadline - Date.now()),
+              ),
+            );
+          }
         }
       },
     );
@@ -710,10 +733,10 @@ export class FileDurableProjectionIndex {
   }
 
   /** 进程停机时取消尚未跨过安全检查点的投影维护义务。 */
-  stopStorageMaintenance(): void {
+  async stopStorageMaintenance(): Promise<void> {
     this.#maintenanceStopped = true;
     this.#clearRetirementRetry();
-    this.#maintenanceRunner.stop();
+    await this.#maintenanceRunner.stop();
   }
 
   async #runFlush(obligation: StorageMaintenanceObligation): Promise<void> {

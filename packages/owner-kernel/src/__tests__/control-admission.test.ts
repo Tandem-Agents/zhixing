@@ -28,6 +28,10 @@ import {
 } from "../control-admission.js";
 import { ConversationRunJournal } from "../conversation-assignment.js";
 import { OwnerDeliveryParticipant } from "../delivery.js";
+import {
+  DURABLE_IO_TEST_TIMEOUT_MS,
+  trackAuthorityLog,
+} from "./durable-io-test-support.js";
 
 const NOW = "2026-07-13T08:00:00.000Z";
 
@@ -52,10 +56,10 @@ async function createHarness() {
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"), {
     lockWaitMs: 2_000,
   });
-  const log = new FileAuthorityCommitLog(path.join(root, "log"), artifacts, {
+  const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "log"), artifacts, {
     clock: () => NOW,
     lockWaitMs: 2_000,
-  });
+  }));
   return {
     artifacts,
     log,
@@ -179,7 +183,7 @@ function inputResult(runId: string, queuedPosition = 0): ControlResult {
   };
 }
 
-describe("ControlAdmissionJournal", () => {
+describe("ControlAdmissionJournal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("distinguishes absent, durable pending and settled admission states", async () => {
     const { log, journal } = await createHarness();
     const source = sessionSource();
@@ -282,10 +286,10 @@ describe("ControlAdmissionJournal", () => {
 
   it("linearizes concurrent request retries and commits one authority change", async () => {
     const { artifacts, log } = await createHarness();
-    const peerLog = new FileAuthorityCommitLog(log.rootDir, artifacts, {
+    const peerLog = trackAuthorityLog(new FileAuthorityCommitLog(log.rootDir, artifacts, {
       clock: () => NOW,
       lockWaitMs: 2_000,
-    });
+    }));
     const first = new ControlAdmissionJournal(log, artifacts);
     const second = new ControlAdmissionJournal(peerLog, artifacts);
     const envelope = sessionEnvelope("request-create-1");
@@ -342,10 +346,10 @@ describe("ControlAdmissionJournal", () => {
     });
     expect(applied.kind).toBe("applied");
 
-    const restartedLog = new FileAuthorityCommitLog(log.rootDir, artifacts, {
+    const restartedLog = trackAuthorityLog(new FileAuthorityCommitLog(log.rootDir, artifacts, {
       clock: () => NOW,
       lockWaitMs: 2_000,
-    });
+    }));
     const restarted = new ControlAdmissionJournal(restartedLog, artifacts);
     const replayPrepare = vi.fn(() => ({
       result: sessionResult("conversation-wrong"),
@@ -407,10 +411,10 @@ describe("ControlAdmissionJournal", () => {
     ]);
 
     const restarted = new ControlAdmissionJournal(
-      new FileAuthorityCommitLog(log.rootDir, artifacts, {
+      trackAuthorityLog(new FileAuthorityCommitLog(log.rootDir, artifacts, {
         clock: () => NOW,
         lockWaitMs: 2_000,
-      }),
+      })),
       artifacts,
     );
     await expect(restarted.listCreatedConversationIds()).resolves.toEqual([
@@ -644,10 +648,10 @@ describe("ControlAdmissionJournal", () => {
     ]);
 
     const restarted = new ControlAdmissionJournal(
-      new FileAuthorityCommitLog(log.rootDir, artifacts, {
+      trackAuthorityLog(new FileAuthorityCommitLog(log.rootDir, artifacts, {
         clock: () => NOW,
         lockWaitMs: 2_000,
-      }),
+      })),
       artifacts,
     );
     const outcome = await restarted.apply({
@@ -689,10 +693,10 @@ describe("ControlAdmissionJournal", () => {
 
     const retrySource = inputSource("pending-ingress", "connection-after-crash");
     const restarted = new ControlAdmissionJournal(
-      new FileAuthorityCommitLog(log.rootDir, artifacts, {
+      trackAuthorityLog(new FileAuthorityCommitLog(log.rootDir, artifacts, {
         clock: () => NOW,
         lockWaitMs: 2_000,
-      }),
+      })),
       artifacts,
     );
     const outcome = await restarted.apply({
@@ -746,10 +750,10 @@ describe("ControlAdmissionJournal", () => {
     });
 
     const restarted = new ControlAdmissionJournal(
-      new FileAuthorityCommitLog(log.rootDir, artifacts, {
+      trackAuthorityLog(new FileAuthorityCommitLog(log.rootDir, artifacts, {
         clock: () => NOW,
         lockWaitMs: 2_000,
-      }),
+      })),
       artifacts,
     );
     const outcome = await restarted.apply({
@@ -817,10 +821,10 @@ describe("ControlAdmissionJournal", () => {
       ],
     }));
     const restarted = new ControlAdmissionJournal(
-      new FileAuthorityCommitLog(log.rootDir, artifacts, {
+      trackAuthorityLog(new FileAuthorityCommitLog(log.rootDir, artifacts, {
         clock: () => NOW,
         lockWaitMs: 2_000,
-      }),
+      })),
       artifacts,
     );
     await expect(
@@ -1060,7 +1064,7 @@ describe("ControlAdmissionJournal", () => {
   });
 });
 
-describe("workscene session owner metadata", () => {
+describe("workscene session owner metadata", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("commits metadata and activity atomically and replays exact owner requests", async () => {
     const { artifacts, log } = await createHarness();
     const conversationId = "ws:scene-1:primary";

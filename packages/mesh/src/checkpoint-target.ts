@@ -455,7 +455,10 @@ export class FileRecoveryCheckpointTarget implements InventoryRecoveryCheckpoint
           "authority-checkpoint",
           this.targetId,
           { identity, bytes },
-          { obligation: "pre-commit" },
+          // 本步骤不持有 authority / projection / ArtifactStore 互斥；配对与恢复
+          // 的前台调用可以在这里有界等待公平容量，而不是以零等待把瞬时槽位
+          // 竞争升级成配对失败。AbortSignal 仍精确终结连接取消。
+          { obligation: "pre-commit", maxWaitMs: 5_000 },
         ),
         operation,
       ));

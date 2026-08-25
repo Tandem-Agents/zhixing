@@ -37,6 +37,10 @@ import {
 import { ConversationRunJournal } from "../conversation-assignment.js";
 import { OwnerDeliveryParticipant } from "../delivery.js";
 import { AnchorSessionStateAdapter } from "../session-state-adapter.js";
+import {
+  DURABLE_IO_TEST_TIMEOUT_MS,
+  trackAuthorityLog,
+} from "./durable-io-test-support.js";
 
 const NOW = "2026-08-02T00:00:00.000Z";
 const EXPIRY = "2026-08-02T01:00:00.000Z";
@@ -62,10 +66,10 @@ async function createHarness(conversationId = "conv-1") {
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"), {
     lockWaitMs: 2_000,
   });
-  const log = new FileAuthorityCommitLog(path.join(root, "log"), artifacts, {
+  const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "log"), artifacts, {
     clock: () => NOW,
     lockWaitMs: 2_000,
-  });
+  }));
   const makeJournal = () =>
     new ConversationRunJournal({
       conversationId,
@@ -318,7 +322,7 @@ function evidenceRequest(): EvidenceRequest {
   );
 }
 
-describe("AnchorSessionStateAdapter advancement", () => {
+describe("AnchorSessionStateAdapter advancement", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("承载完整推进生命周期并复合原子落盘", async () => {
     const { write, read, log } = await createHarness();
 

@@ -40,12 +40,12 @@ export async function createCurrentAnchorSurfaceRpcClient(): Promise<CurrentAnch
   const bootstrapStore = new FileMeshBootstrapStore(homeDir, deviceKey);
   const trust = await bootstrapStore.loadTrustRecord();
   if (!trust) {
-    bootstrapStore.stopStorageMaintenance();
+    await bootstrapStore.stopStorageMaintenance();
     throw new CoreHostUnavailableError("这台设备尚未完成配对");
   }
   const local = trust.members.find((member) => member.device.deviceId === deviceKey.deviceId);
   if (!local || local.state !== "active") {
-    bootstrapStore.stopStorageMaintenance();
+    await bootstrapStore.stopStorageMaintenance();
     throw new CoreHostUnavailableError("这台设备已不在当前家庭中");
   }
   try {
@@ -65,7 +65,7 @@ export async function createCurrentAnchorSurfaceRpcClient(): Promise<CurrentAnch
     client = new CurrentAnchorSurfaceRpcClient(deviceKey.deviceId, control, bootstrapStore);
     return client;
   } catch (error) {
-    bootstrapStore.stopStorageMaintenance();
+    await bootstrapStore.stopStorageMaintenance();
     throw error;
   }
 }
@@ -174,7 +174,7 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
     try {
       await this.control.stop();
     } finally {
-      this.bootstrapStore.stopStorageMaintenance();
+      await this.bootstrapStore.stopStorageMaintenance();
     }
     this.#methodHandlers.clear();
     this.#wildcardHandlers.clear();
