@@ -1,4 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { lstat, open, readFile, readdir, rm, unlink } from "node:fs/promises";
+import path from "node:path";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { mergeIdMap } from "./internal/io.js";
 import type { ZhixingCredentials } from "./types.js";
@@ -39,6 +41,15 @@ interface CredentialManifest extends CredentialGeneration {
   readonly v: 1;
   readonly credentialSchemaVersion?: number;
   readonly retired?: readonly CredentialGeneration[];
+}
+
+interface LegacySourceSnapshot {
+  readonly raw: string;
+  readonly dev: number;
+  readonly ino: number;
+  readonly size: number;
+  readonly mtimeMs: number;
+  readonly digest: string;
 }
 
 interface CredentialGenerationMarker extends CredentialGeneration {
@@ -110,6 +121,11 @@ export type CredentialMutationOptions = CredentialStoreOptions &
     | { readonly coordinator: CredentialStoreCoordinator }
   );
 
+export type CredentialSnapshotOptions = CredentialMutationOptions & {
+  /** Existing plaintext source to consume once at the startup boundary. */
+  readonly legacyHomeDir?: string;
+};
+
 export async function loadCredentials(
   options: CredentialMutationOptions,
 ): Promise<ZhixingCredentials> {
@@ -117,12 +133,151 @@ export async function loadCredentials(
 }
 
 export async function loadCredentialSnapshot(
-  options: CredentialMutationOptions,
+  options: CredentialSnapshotOptions,
 ): Promise<{ readonly credentials: ZhixingCredentials; readonly generation: string | null }> {
-  return mutationCoordinator(options).runExclusive(async () => ({
-    credentials: await loadCredentialsUnlocked(options),
-    generation: await readActiveGeneration(options.store),
-  }));
+  return mutationCoordinator(options).runExclusive(async () => {
+    if (options.legacyHomeDir !== undefined) {
+      await migrateLegacyCredentialFile(options.store, options.legacyHomeDir);
+    }
+    return {
+      credentials: await loadCredentialsUnlocked(options),
+      generation: await readActiveGeneration(options.store),
+    };
+  });
+}
+
+async function migrateLegacyCredentialFile(
+  store: SecretStorePort,
+  homeDir: string,
+): Promise<void> {
+  const filePath = path.join(homeDir, "credentials.json");
+  try {
+    await cleanupLegacyCredentialTemps(filePath);
+  } catch (error) {
+    throw new CredentialsSchemaError(
+      `旧凭据临时文件无法安全清退：${safeErrorMessage(error)}`,
+      filePath,
+    );
+  }
+  let source: LegacySourceSnapshot;
+  try {
+    source = await readLegacySource(filePath);
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return;
+    if (error instanceof CredentialsSchemaError) throw error;
+    throw new CredentialsSchemaError("读取旧凭据文件失败，未执行迁移。", filePath);
+  }
+
+  let credentials: ZhixingCredentials;
+  try {
+    credentials = JSON.parse(source.raw) as ZhixingCredentials;
+    validateCredentials(credentials, filePath);
+  } catch (error) {
+    if (error instanceof CredentialsSchemaError) throw error;
+    throw new CredentialsSchemaError("旧凭据文件格式无效，未执行迁移。", filePath);
+  }
+
+  const activeManifest = await store.get(MANIFEST_REF);
+  if (activeManifest !== null) {
+    const active = await loadCredentialsUnlocked({ store });
+    if (!sameValue(canonicalJson(active), canonicalJson(credentials))) {
+      throw new CredentialsSchemaError(
+        "SecretStore 已有不同凭据，拒绝用旧明文文件覆盖；请通过配置入口确认当前凭据。",
+        filePath,
+      );
+    }
+    try {
+      await retireLegacySource(filePath, source);
+      await syncDirectory(path.dirname(filePath));
+    } catch (error) {
+      throw new CredentialsSchemaError(
+        `安全存储与旧文件一致，但旧明文文件无法清退：${safeErrorMessage(error)}`,
+        filePath,
+      );
+    }
+    return;
+  }
+
+  try {
+    await replaceCredentialSet(
+      store,
+      credentialEntries(credentials),
+      credentials.version,
+      () => retireLegacySource(filePath, source),
+    );
+    await syncDirectory(path.dirname(filePath));
+  } catch (error) {
+    if (error instanceof CredentialCommitStateUnknownError) {
+      throw new CredentialsSchemaError(
+        `凭据激活状态未知，旧明文文件已保留；下次启动将重新读取并收敛：${safeErrorMessage(error)}`,
+        filePath,
+      );
+    }
+    if (error instanceof CredentialPostCommitError || error instanceof CredentialRetirementError) {
+      throw new CredentialsSchemaError(
+        `凭据已安全激活，但迁移收尾尚未完成：${safeErrorMessage(error)}`,
+        filePath,
+      );
+    }
+    throw new CredentialsSchemaError(
+      `旧凭据迁移失败，明文源文件保持不变：${safeErrorMessage(error)}`,
+      filePath,
+    );
+  }
+}
+
+async function readLegacySource(filePath: string): Promise<LegacySourceSnapshot> {
+  const pathStats = await lstat(filePath);
+  if (!pathStats.isFile() || pathStats.isSymbolicLink() || pathStats.nlink !== 1) {
+    throw new CredentialsSchemaError("旧凭据迁移源必须是单一普通文件。", filePath);
+  }
+  const handle = await open(filePath, "r");
+  try {
+    const openedStats = await handle.stat();
+    if (
+      !openedStats.isFile() ||
+      openedStats.dev !== pathStats.dev ||
+      openedStats.ino !== pathStats.ino ||
+      openedStats.nlink !== 1
+    ) {
+      throw new CredentialsSchemaError("旧凭据迁移源在读取前已发生替换。", filePath);
+    }
+    const raw = await handle.readFile("utf8");
+    return {
+      raw,
+      dev: openedStats.dev,
+      ino: openedStats.ino,
+      size: openedStats.size,
+      mtimeMs: openedStats.mtimeMs,
+      digest: createHash("sha256").update(raw, "utf8").digest("hex"),
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+async function retireLegacySource(
+  filePath: string,
+  expected: LegacySourceSnapshot,
+): Promise<void> {
+  const current = await lstat(filePath);
+  if (
+    !current.isFile() ||
+    current.isSymbolicLink() ||
+    current.nlink !== 1 ||
+    current.dev !== expected.dev ||
+    current.ino !== expected.ino ||
+    current.size !== expected.size ||
+    current.mtimeMs !== expected.mtimeMs
+  ) {
+    throw new Error("旧凭据迁移源在清退前已发生替换");
+  }
+  const currentRaw = await readFile(filePath, "utf8");
+  const currentDigest = createHash("sha256").update(currentRaw, "utf8").digest("hex");
+  if (!sameValue(currentDigest, expected.digest)) {
+    throw new Error("旧凭据迁移源在清退前已发生变更");
+  }
+  await unlink(filePath);
 }
 
 async function loadCredentialsUnlocked(
@@ -789,6 +944,68 @@ function sameValue(left: string, right: string): boolean {
   const leftDigest = createHash("sha256").update(left, "utf8").digest();
   const rightDigest = createHash("sha256").update(right, "utf8").digest();
   return timingSafeEqual(leftDigest, rightDigest);
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value === "boolean" || typeof value === "string") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new TypeError("Credential value is not finite");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (isPlainObject(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+      .join(",")}}`;
+  }
+  throw new TypeError("Credential value cannot be canonicalized");
+}
+
+async function cleanupLegacyCredentialTemps(filePath: string): Promise<void> {
+  const directory = path.dirname(filePath);
+  const entries = await readdir(directory).catch((error: unknown) => {
+    if (isNodeError(error, "ENOENT")) return [];
+    throw error;
+  });
+  let removed = false;
+  for (const entry of entries) {
+    if (!isLegacyCredentialTemp(filePath, entry)) continue;
+    await rm(path.join(directory, entry), { force: true });
+    removed = true;
+  }
+  if (removed) await syncDirectory(directory);
+}
+
+function isLegacyCredentialTemp(filePath: string, entry: string): boolean {
+  const fileName = path.basename(filePath);
+  if (!entry.startsWith(`${fileName}.`) || !entry.endsWith(".tmp")) return false;
+  return /^\d+\.[a-f0-9]{16}\.tmp$/u.test(entry.slice(fileName.length + 1));
+}
+
+function safeErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "未知错误";
+}
+
+function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error && error.code === code;
+}
+
+async function syncDirectory(directoryPath: string): Promise<void> {
+  const directory = await open(directoryPath, "r");
+  try {
+    await directory.sync().catch((error: unknown) => {
+      if (
+        process.platform === "win32" &&
+        (isNodeError(error, "EPERM") || isNodeError(error, "EINVAL"))
+      ) return;
+      throw error;
+    });
+  } finally {
+    await directory.close();
+  }
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

@@ -102,6 +102,7 @@ export {
 } from "./credentials-loader.js";
 export type {
   CredentialMutationOptions,
+  CredentialSnapshotOptions,
   CredentialStoreCoordinator,
 } from "./credentials-loader.js";
 

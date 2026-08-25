@@ -86,8 +86,11 @@ import {
   AnchorSkillGlobalStateAdapter,
   AnchorWorksceneGlobalStateAdapter,
   SkillStore,
+  getMemoryDir,
   getSkillsRoot,
+  getWorkSceneMemoryDir,
   parseConversationId,
+  type MemoryScopeRef,
 } from "@zhixing/core";
 import {
   FileArtifactStore,
@@ -999,6 +1002,10 @@ export async function setupAuthorityRuntime(
       ? new AnchorMemoryGlobalStateAdapter({
           log: authorityLog,
           anchorEpoch,
+          scopeRoot: (scope) =>
+            scope.kind === "personal"
+              ? getMemoryDir(options.zhixingHome)
+              : getWorkSceneMemoryDir(scope.sceneId, options.zhixingHome),
           clock,
         })
       : undefined;
@@ -1020,7 +1027,30 @@ export async function setupAuthorityRuntime(
         })
       : undefined;
     await worksceneGlobalState?.initializeStagedPublishing();
-    await memoryGlobalState?.initializeStagedPublishing();
+    if (memoryGlobalState) {
+      const memoryScopes: MemoryScopeRef[] = [{ kind: "personal" }];
+      if (worksceneGlobalState) {
+        const listed = await worksceneGlobalState.read(
+          { kind: "workscene-list" },
+          {
+            principal: { kind: "host", component: "memory-legacy-cutover" },
+            requestId: "memory-legacy-cutover:workscene-list",
+            deadlineAt: new Date(Date.parse(clock()) + 30_000).toISOString(),
+            authority: { domain: "global", anchorEpoch },
+          },
+        );
+        if (listed.kind !== "workscene-list") {
+          throw new Error("Workscene authority returned another read domain");
+        }
+        memoryScopes.push(
+          ...listed.scenes.map((scene) => ({
+            kind: "workscene" as const,
+            sceneId: scene.id,
+          })),
+        );
+      }
+      await memoryGlobalState.initializeStagedPublishing(memoryScopes);
+    }
     await skillGlobalState?.initializeStagedPublishing();
     const refreshLocalExecutorSnapshot = async (
       permissionSnapshotHighWater?: number,
@@ -1813,6 +1843,10 @@ export async function setupAuthorityRuntime(
       const nextMemory = new AnchorMemoryGlobalStateAdapter({
         log: authorityLog,
         anchorEpoch: generation.anchorEpoch,
+        scopeRoot: (scope) =>
+          scope.kind === "personal"
+            ? getMemoryDir(options.zhixingHome)
+            : getWorkSceneMemoryDir(scope.sceneId, options.zhixingHome),
         clock,
       });
       const nextSkill = new AnchorSkillGlobalStateAdapter({
@@ -1831,7 +1865,31 @@ export async function setupAuthorityRuntime(
 
       try {
         await nextWorkscene.initializeStagedPublishing();
-        await nextMemory.initializeStagedPublishing();
+        const memoryScopes: MemoryScopeRef[] = [{ kind: "personal" }];
+        const listed = await nextWorkscene.read(
+          { kind: "workscene-list" },
+          {
+            principal: { kind: "host", component: "installed-generation" },
+            requestId: `installed-generation:${generation.transferId}:workscenes`,
+            deadlineAt: new Date(Date.parse(clock()) + 30_000).toISOString(),
+            authority: {
+              domain: "global",
+              anchorEpoch: generation.anchorEpoch,
+            },
+          },
+        );
+        if (listed.kind !== "workscene-list") {
+          throw new Error(
+            "Installed authority returned another workscene read domain",
+          );
+        }
+        memoryScopes.push(
+          ...listed.scenes.map((scene) => ({
+            kind: "workscene" as const,
+            sceneId: scene.id,
+          })),
+        );
+        await nextMemory.initializeStagedPublishing(memoryScopes);
         await nextSkill.initializeStagedPublishing();
       } catch (error) {
         nextWorkscene.stop();

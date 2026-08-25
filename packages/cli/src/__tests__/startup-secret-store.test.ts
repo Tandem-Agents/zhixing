@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
+import { writeCredentials } from "@zhixing/providers";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import { runStartupCheck } from "../startup.js";
@@ -70,6 +71,46 @@ describe("startup SecretStore boundary", () => {
     expect(result.kind === "ready" ? result.credentialGeneration : null)
       .toMatch(/^[A-Za-z0-9_-]{16,64}$/u);
     await expect(readFile(legacyPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("keeps malformed legacy plaintext unchanged and refuses ready", async () => {
+    const homeDir = await createTempDir("startup-secret-malformed");
+    const legacyPath = path.join(homeDir, "credentials.json");
+    await writeFile(legacyPath, "{invalid", "utf8");
+
+    const result = await runStartupCheck({
+      homeDir,
+      mode: "host",
+      isTTY: false,
+      secretStore: new MemoryStore(),
+    });
+
+    expect(result).toMatchObject({ kind: "schema-error", filePath: legacyPath });
+    await expect(readFile(legacyPath, "utf8")).resolves.toBe("{invalid");
+  });
+
+  it("does not overwrite a different active SecretStore generation", async () => {
+    const homeDir = await createTempDir("startup-secret-conflict");
+    const legacyPath = path.join(homeDir, "credentials.json");
+    await writeFile(
+      legacyPath,
+      JSON.stringify({ providers: { deepseek: { apiKey: "legacy-secret" } } }),
+      "utf8",
+    );
+    const store = new MemoryStore();
+    await writeCredentials({
+      providers: { deepseek: { apiKey: "current-secret" } },
+    }, { store });
+
+    const result = await runStartupCheck({
+      homeDir,
+      mode: "host",
+      isTTY: false,
+      secretStore: store,
+    });
+
+    expect(result).toMatchObject({ kind: "schema-error", filePath: legacyPath });
+    await expect(readFile(legacyPath, "utf8")).resolves.toContain("legacy-secret");
   });
 
   it("fails closed before configuration when the platform vault is locked", async () => {

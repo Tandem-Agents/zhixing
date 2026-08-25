@@ -14,6 +14,9 @@ const legacyMentionsAllowed = new Set([
   "packages/core/src/security/builtin-rules.ts",
   "packages/cli/src/security/secret-boundary.ts",
 ]);
+const legacyPlaintextMigrationOwner =
+  "packages/providers/src/credentials-loader.ts";
+const legacyPlaintextConsumers = [];
 const fullCredentialProjectionAllowed = new Set([
   "packages/providers/src/credentials-loader.ts",
   "packages/providers/src/index.ts",
@@ -26,7 +29,11 @@ for (const file of productionFiles) {
   const relative = repoPath(file);
   const source = await readFile(file, "utf8");
   if (source.includes("credentials.json") && !legacyMentionsAllowed.has(relative)) {
-    errors.push(`${relative} references the retired plaintext credential file`);
+    if (relative === legacyPlaintextMigrationOwner) {
+      legacyPlaintextConsumers.push(relative);
+    } else {
+      errors.push(`${relative} references the retired plaintext credential file`);
+    }
   }
   if (source.includes("@zhixing/secrets") && !relative.startsWith("packages/cli/src/")) {
     errors.push(`${relative} bypasses the CLI composition root for SecretStore implementation`);
@@ -47,6 +54,22 @@ const credentialRepository = await readFile(
   path.join(root, "packages/providers/src/credentials-loader.ts"),
   "utf8",
 );
+if (
+  legacyPlaintextConsumers.length !== 1 ||
+  legacyPlaintextConsumers[0] !== legacyPlaintextMigrationOwner ||
+  (credentialRepository.match(/"credentials\.json"/gu)?.length ?? 0) !== 1 ||
+  !credentialRepository.includes(
+    "await migrateLegacyCredentialFile(options.store, options.legacyHomeDir)",
+  ) ||
+  !credentialRepository.includes("async function migrateLegacyCredentialFile(") ||
+  /export\s+(?:async\s+)?function\s+migrateLegacyCredentialFile/u.test(
+    credentialRepository,
+  )
+) {
+  errors.push(
+    "retired plaintext credentials must have exactly one private startup migration owner",
+  );
+}
 if (/readFileSync|writeFileSync/u.test(credentialRepository)) {
   errors.push("credential repository contains a synchronous plaintext file path");
 }
@@ -151,7 +174,7 @@ if (externalRuntimeDependencies.length > 0) {
 if (errors.length > 0) {
   throw new Error(`Secret boundary checks failed:\n- ${errors.join("\n- ")}`);
 }
-console.log("Secret boundaries verified: no plaintext runtime path, explicit composition, zero external crypto dependencies.");
+console.log("Secret boundaries verified: one private plaintext migration owner, explicit composition, zero external crypto dependencies.");
 
 async function walk(directory) {
   const entries = await readdir(directory, { withFileTypes: true });

@@ -1,6 +1,7 @@
 import path from "node:path";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import { FileArtifactStore, FileAuthorityCommitLog } from "../authority/index.js";
 import type {
   GlobalControlCallContext,
@@ -8,12 +9,120 @@ import type {
   GlobalStagedMutation,
 } from "../contracts/index.js";
 import { AnchorMemoryGlobalStateAdapter } from "./global-state-adapter.js";
+import { stringifyFrontmatter } from "./frontmatter.js";
 import { projectMemoryLogicalEntry } from "./logical-entry.js";
+import { PeopleStore } from "./people-store.js";
 import type { MemoryScopeRef } from "./contracts.js";
 
 const NOW = "2026-08-04T00:00:00.000Z";
+const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
 
-describe("AnchorMemoryGlobalStateAdapter", () => {
+describe("AnchorMemoryGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
+  it("takes over the three legacy Markdown domains exactly once", async () => {
+    const fixture = await createFixture();
+    const memoryRoot = path.join(fixture.root, "me");
+    await mkdir(path.join(memoryRoot, "journal"), { recursive: true });
+    await writeFile(
+      path.join(memoryRoot, "profile.md"),
+      stringifyFrontmatter({ name: "Alice" }, "personal profile"),
+      "utf8",
+    );
+    await new PeopleStore(memoryRoot).save(
+      "legacy-person",
+      { name: "Legacy", relation: "friend" },
+      "legacy person",
+    );
+    await writeFile(
+      path.join(memoryRoot, "journal", "2026-08-04.md"),
+      stringifyFrontmatter({ date: "2026-08-04" }, "legacy journal"),
+      "utf8",
+    );
+
+    await fixture.adapter.initializeStagedPublishing();
+    await fixture.adapter.initializeStagedPublishing();
+
+    await expect(
+      readEntries(fixture.adapter, { kind: "personal" }, "memory"),
+    ).resolves.toMatchObject([{ id: "profile", content: "personal profile" }]);
+    await expect(
+      readEntries(fixture.adapter, { kind: "personal" }, "people"),
+    ).resolves.toMatchObject([
+      { id: "legacy-person", content: "legacy person" },
+    ]);
+    await expect(
+      readEntries(fixture.adapter, { kind: "personal" }, "journal"),
+    ).resolves.toMatchObject([
+      { id: "2026-08-04", content: "legacy journal" },
+    ]);
+    const records = (await fixture.log.readAll()).flatMap(
+      (commit) => commit.entries,
+    );
+    expect(
+      records.filter(
+        (record) => record.body.t === "memory-legacy-cutover-started",
+      ),
+    ).toHaveLength(1);
+    expect(
+      records.filter((record) => record.body.t === "memory-legacy-cutover"),
+    ).toHaveLength(1);
+    expect(
+      records.filter((record) => record.body.t === "memory-mutation-applied"),
+    ).toHaveLength(3);
+  });
+
+  it("records an empty terminal cutover so late legacy files cannot revive", async () => {
+    const fixture = await createFixture();
+    await fixture.adapter.initializeStagedPublishing();
+    await new PeopleStore(path.join(fixture.root, "me")).save(
+      "late",
+      { name: "Late", relation: "unknown" },
+      "created after cutover",
+    );
+    const reopened = new AnchorMemoryGlobalStateAdapter({
+      log: fixture.log,
+      anchorEpoch: 1,
+      scopeRoot: () => path.join(fixture.root, "me"),
+      clock: () => NOW,
+    });
+
+    await reopened.initializeStagedPublishing();
+
+    await expect(
+      readEntries(reopened, { kind: "personal" }, "people"),
+    ).resolves.toEqual([]);
+  });
+
+  it("rejects a linked legacy subtree before recording a cutover", async () => {
+    const fixture = await createFixture();
+    const outside = path.join(fixture.root, "outside");
+    const peopleRoot = path.join(fixture.root, "me", "people");
+    await mkdir(outside, { recursive: true });
+    await mkdir(peopleRoot, { recursive: true });
+    await writeFile(
+      path.join(outside, "secret.md"),
+      stringifyFrontmatter({ name: "Secret", relation: "unknown" }, "outside"),
+      "utf8",
+    );
+    try {
+      await symlink(outside, path.join(peopleRoot, "linked"), "junction");
+    } catch (error) {
+      if ((error as { readonly code?: unknown }).code === "EPERM") return;
+      throw error;
+    }
+
+    await expect(fixture.adapter.initializeStagedPublishing()).rejects.toThrow(
+      "symbolic links",
+    );
+    const records = (await fixture.log.readAll()).flatMap(
+      (commit) => commit.entries,
+    );
+    expect(
+      records.some(
+        (record) => record.body.t === "memory-legacy-cutover-started",
+      ),
+    ).toBe(false);
+  });
+
   it("rejects blank journal writes at both staged and control authority boundaries", async () => {
     const fixture = await createFixture();
     await fixture.adapter.initializeStagedPublishing();
@@ -264,6 +373,7 @@ describe("AnchorMemoryGlobalStateAdapter", () => {
     const reopened = new AnchorMemoryGlobalStateAdapter({
       log: fixture.log,
       anchorEpoch: 1,
+      scopeRoot: () => path.join(fixture.root, "me"),
       clock: () => NOW,
     });
     await reopened.initializeStagedPublishing();
@@ -357,8 +467,10 @@ async function prepareStaged(
 
 async function createFixture() {
   const root = await createTempDir("zhixing-memory-global-state");
+  let log: FileAuthorityCommitLog | undefined;
+  onTestFinished(() => log?.stopStorageMaintenance());
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
-  const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+  log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
     clock: () => NOW,
   });
   return {
@@ -367,6 +479,7 @@ async function createFixture() {
     adapter: new AnchorMemoryGlobalStateAdapter({
       log,
       anchorEpoch: 1,
+      scopeRoot: () => path.join(root, "me"),
       clock: () => NOW,
     }),
   };

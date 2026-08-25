@@ -140,6 +140,7 @@ export async function runStartupCheck(
     );
     const preparedCredentials = await loadCredentialSnapshot({
       store: secretStore,
+      legacyHomeDir: credentialsHomeDir,
       ...(credentialReadGuard
         ? { authorizeCredentialRead: credentialReadGuard }
         : {}),
@@ -212,6 +213,7 @@ export async function runStartupCheck(
     );
     const updatedCredentialSnapshot = await loadCredentialSnapshot({
       store: secretStore,
+      legacyHomeDir: credentialsHomeDir,
       ...(updatedCredentialReadGuard
         ? { authorizeCredentialRead: updatedCredentialReadGuard }
         : {}),

@@ -16,8 +16,8 @@ import { fileURLToPath } from "node:url";
 import {
   AuthorityDeliveryPipeline,
   ChannelRegistry,
-  MemoryStore,
   OutboxRegistry,
+  PeopleStore,
   type PermissionRule,
 } from "@zhixing/core";
 import { SurfaceAssetCoordinator } from "@zhixing/core/authority";
@@ -132,13 +132,12 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
   });
 
   it("takes over legacy memory from the explicitly configured authority home", async () => {
-    const legacy = new MemoryStore(resolve(home, "me"));
-    await legacy.save({
-      category: "person",
-      id: "legacy-person",
-      meta: { name: "Legacy", relation: "friend" },
-      content: "remembered before authority cutover",
-    });
+    const legacy = new PeopleStore(resolve(home, "me"));
+    await legacy.save(
+      "legacy-person",
+      { name: "Legacy", relation: "friend" },
+      "remembered before authority cutover",
+    );
 
     const authority = await setupAuthorityRuntime({
       zhixingHome: home,
