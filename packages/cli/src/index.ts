@@ -315,15 +315,16 @@ appCmd
 program
   .command("pair")
   .description("配对另一台知行设备")
-  .argument("[invitation]", "另一台设备显示的高熵配对邀请")
-  .option("--listen <host:port>", "出码设备的临时监听地址")
-  .option("--advertise <host:port>", "邀请中公布的直连地址")
-  .option("--relay <host:port>", "盲中继会合地址")
-  .option("--relay-only", "仅通过盲中继会合")
-  .option(
-    "--executor-auto-start <choice>",
-    "加入设备开机后是否自动上线：yes 或 no",
-    parseYesNo,
+  .argument("[invitation]", "另一台设备显示的邀请内容")
+  .addOption(new Option("--listen <host:port>", "出码设备的临时监听地址").hideHelp())
+  .addOption(new Option("--advertise <host:port>", "邀请中公布的直连地址").hideHelp())
+  .addOption(new Option("--relay <host:port>", "盲中继会合地址").hideHelp())
+  .addOption(new Option("--relay-only", "仅通过盲中继会合").hideHelp())
+  .addOption(
+    new Option(
+      "--executor-auto-start <choice>",
+      "加入设备开机后是否自动上线：yes 或 no",
+    ).argParser(parseYesNo).hideHelp(),
   )
   .action(async (invitation: string | undefined, options: {
     listen?: string;
@@ -346,7 +347,8 @@ program
       });
       process.exit(0);
     } catch (err) {
-      await renderActionError(err);
+      const { pairingPublicError } = await import("./serve/mesh-pair-command.js");
+      await renderActionError(pairingPublicError(err));
       process.exit(1);
     }
   });

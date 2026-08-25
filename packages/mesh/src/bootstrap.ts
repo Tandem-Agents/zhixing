@@ -129,13 +129,14 @@ export function resolveHostLaunchPlan(input: {
       "Current mesh issuer is not authorized for the anchor role",
     );
   }
-  if (!isCurrentAnchor && roleSet.has("anchor")) {
-    throw new HostLaunchPlanError(
-      "anchor-authority-conflict",
-      "A non-current device cannot launch the anchor role",
-    );
-  }
   if (isCurrentAnchor && roleSet.has("anchor")) {
+    return Object.freeze({ mode: "managed" as const, roles });
+  }
+  // A trusted non-current device with the anchor role is an explicitly
+  // configured duty candidate. It must stay online so the current issuer can
+  // reach its fenced migration receiver; current trust still prevents it from
+  // becoming the owner until AnchorTransferCommit is installed.
+  if (roleSet.has("anchor")) {
     return Object.freeze({ mode: "managed" as const, roles });
   }
   if (roleSet.has("executor")) {

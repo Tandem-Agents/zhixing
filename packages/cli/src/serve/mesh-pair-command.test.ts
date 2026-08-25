@@ -14,7 +14,7 @@ import {
 } from "@zhixing/mesh/trust-chain";
 import { createTempDir } from "@zhixing/test-utils";
 import { connect, createServer, type Socket } from "node:net";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { FileBackupTargetConfiguration } from "./backup-target-config.js";
 import { FileMeshPairingContinuationStore } from "./mesh-pairing-continuation.js";
@@ -115,7 +115,7 @@ describe("production mesh pairing command", () => {
       advertise: "127.0.0.1:0",
       confirmRecoveryPackage: echoRecoveryPackage,
       writeLine: (line) => {
-        if (line.startsWith("Pairing invitation: ")) invitationPublished = true;
+        if (line.startsWith("邀请内容：")) invitationPublished = true;
       },
     });
 
@@ -132,7 +132,7 @@ describe("production mesh pairing command", () => {
       zhixingHome: home,
       secretStore: secrets,
       writeLine: (line) => {
-        if (line.startsWith("Pairing invitation: ")) throw new Error("invitation reissued");
+        if (line.startsWith("邀请内容：")) throw new Error("invitation reissued");
       },
     })).rejects.toThrow("invitation reissued");
   }, TEST_DURABLE_IO_TIMEOUT_MS);
@@ -147,8 +147,8 @@ describe("production mesh pairing command", () => {
       advertise: "127.0.0.1:0",
       confirmRecoveryPackage: async (recoveryPackage) => `${recoveryPackage}x`,
       writeLine: (line) => {
-        if (line.startsWith("Pairing invitation: ")) {
-          invitation.resolve(line.slice("Pairing invitation: ".length));
+        if (line.startsWith("邀请内容：")) {
+          invitation.resolve(line.slice("邀请内容：".length));
         }
       },
     });
@@ -173,14 +173,21 @@ describe("production mesh pairing command", () => {
       const anchorSecrets = new MemorySecretStore();
       const executorSecrets = new MemorySecretStore();
       const invitation = deferred<string>();
+      const journey: string[] = [];
+      const migrateDutyTo = vi.fn(async (deviceName: string) => {
+        journey.push(`migrate:${deviceName}`);
+      });
       const issuer = runPairCommand({
         zhixingHome: anchorHome,
         secretStore: anchorSecrets,
         confirmRecoveryPackage: echoRecoveryPackage,
         advertise: "127.0.0.1:0",
+        selectDutyDevice: async () => "paired",
+        migrateDutyTo,
         writeLine: (line) => {
-          if (line.startsWith("Pairing invitation: ")) {
-            invitation.resolve(line.slice("Pairing invitation: ".length));
+          journey.push(`issuer:${line}`);
+          if (line.startsWith("邀请内容：")) {
+            invitation.resolve(line.slice("邀请内容：".length));
           }
         },
       });
@@ -189,7 +196,14 @@ describe("production mesh pairing command", () => {
         zhixingHome: executorHome,
         secretStore: executorSecrets,
         invitation: encoded,
-        writeLine: () => undefined,
+        completeDeviceConfiguration: async () => {
+          journey.push("joiner:configure");
+          return "ready";
+        },
+        reconcileManagedService: async () => {
+          journey.push("joiner:reconcile");
+        },
+        writeLine: (line) => journey.push(`joiner:${line}`),
       });
       await issuer;
 
@@ -202,7 +216,7 @@ describe("production mesh pairing command", () => {
       expect(anchorTrust?.recoveryBackupPublicKey).toMatch(/^x25519:/u);
       expect(anchorTrust?.members.map((member) => member.roles)).toEqual([
         ["anchor", "executor"],
-        ["executor"],
+        ["anchor", "executor"],
       ]);
       const anchorId = anchorTrust!.issuer.deviceId;
       const executorId = anchorTrust!.members.find((member) => member.device.deviceId !== anchorId)!.device.deviceId;
@@ -222,7 +236,22 @@ describe("production mesh pairing command", () => {
       expect(await anchorSecrets.get({ kind: "rendezvous", bindingId: executorId }))
         .toBe(await executorSecrets.get({ kind: "rendezvous", bindingId: anchorId }));
       expect(loadConfig({ homeDir: anchorHome }).mesh?.enabledRoles).toEqual(["anchor", "executor"]);
-      expect(loadConfig({ homeDir: executorHome }).mesh?.enabledRoles).toEqual(["executor"]);
+      expect(loadConfig({ homeDir: executorHome }).mesh?.enabledRoles).toEqual([
+        "anchor",
+        "executor",
+      ]);
+      expect(loadConfig({ homeDir: executorHome }).mesh?.anchorListen).toBeDefined();
+      const recoveryIndex = journey.findIndex((line) => line.includes("这是你的恢复码"));
+      const configureIndex = journey.indexOf("joiner:configure");
+      const reconcileIndex = journey.indexOf("joiner:reconcile");
+      const dutyIndex = journey.findIndex((line) => line.includes("哪台设备长期开机"));
+      const migrationIndex = journey.findIndex((line) => line.startsWith("migrate:"));
+      expect(recoveryIndex).toBeGreaterThanOrEqual(0);
+      expect(configureIndex).toBeGreaterThan(recoveryIndex);
+      expect(reconcileIndex).toBeGreaterThan(configureIndex);
+      expect(dutyIndex).toBeGreaterThan(reconcileIndex);
+      expect(migrationIndex).toBeGreaterThan(dutyIndex);
+      expect(migrateDutyTo).toHaveBeenCalledOnce();
       await expect(new FileBackupTargetConfiguration(anchorHome).load()).resolves.toMatchObject({
         currentTargetId: `backup-device:${executorId}`,
         bindings: [{ kind: "paired-device", deviceId: executorId }],
@@ -255,8 +284,8 @@ describe("production mesh pairing command", () => {
         relay: `127.0.0.1:${address.port}`,
         relayOnly: true,
         writeLine: (line) => {
-          if (line.startsWith("Pairing invitation: ")) {
-            invitation.resolve(line.slice("Pairing invitation: ".length));
+          if (line.startsWith("邀请内容：")) {
+            invitation.resolve(line.slice("邀请内容：".length));
           }
         },
       });
@@ -298,8 +327,8 @@ describe("production mesh pairing command", () => {
         advertise: "127.0.0.1:0",
         relay: `127.0.0.1:${address.port}`,
         writeLine: (line) => {
-          if (line.startsWith("Pairing invitation: ")) {
-            invitation.resolve(line.slice("Pairing invitation: ".length));
+          if (line.startsWith("邀请内容：")) {
+            invitation.resolve(line.slice("邀请内容：".length));
           }
         },
       });
@@ -333,8 +362,8 @@ describe("production mesh pairing command", () => {
       listen: `127.0.0.1:${targetPort}`,
       advertise: `127.0.0.1:${proxyPort}`,
       writeLine: (line) => {
-        if (line.startsWith("Pairing invitation: ")) {
-          invitation.resolve(line.slice("Pairing invitation: ".length));
+        if (line.startsWith("邀请内容：")) {
+          invitation.resolve(line.slice("邀请内容：".length));
         }
       },
     });
@@ -356,8 +385,8 @@ describe("production mesh pairing command", () => {
         zhixingHome: anchorHome,
         secretStore: anchorSecrets,
         writeLine: (line) => {
-          if (line.startsWith("Pairing invitation: ")) {
-            resumedInvitation.resolve(line.slice("Pairing invitation: ".length));
+          if (line.startsWith("邀请内容：")) {
+            resumedInvitation.resolve(line.slice("邀请内容：".length));
           }
         },
       });

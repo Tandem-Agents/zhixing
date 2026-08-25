@@ -126,7 +126,7 @@ import {
   createSurfaceAssetAuthority,
   rebindSurfaceAssetAuthority,
 } from "./serve/surface-asset-authority.js";
-import { createTrustedDeviceProtocolVerifier } from "./serve/trusted-device-protocol-verifier.js";
+import { createLiveTrustedDeviceProtocolVerifier } from "./serve/trusted-device-protocol-verifier.js";
 import { SchedulerCapabilityGapError } from "./serve/scheduler-capability-gap.js";
 import { CredentialExposureAuthority } from "./serve/credential-exposure-authority.js";
 import {
@@ -604,8 +604,8 @@ export async function setupAuthorityRuntime(
       options.authorizedDeviceIds ?? [...trustedIdentities.keys()],
     );
     authorizedDeviceIds.add(identity.deviceId);
-    const verifier = createTrustedDeviceProtocolVerifier(
-      [...trustedIdentities.values()],
+    const verifier = createLiveTrustedDeviceProtocolVerifier((deviceId) =>
+      trustedIdentities.get(deviceId)
     );
     const clock = options.clock ?? (() => new Date().toISOString());
     surfaceAssets = authorityLog

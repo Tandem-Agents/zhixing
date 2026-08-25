@@ -49,7 +49,7 @@ import {
  * messaging 是可选能力,凭证不全由 channel 装配警告跳过(非致命),
  * 配置入口是 /config 而非宿主启动拦截。
  */
-export type StartupMode = "repl" | "host";
+export type StartupMode = "repl" | "host" | "pairing";
 
 /**
  * 启动检查结果——caller 据此决定后续动作。
@@ -290,7 +290,9 @@ function validateMeshConfiguration(config: ZhixingConfig): ConfigSemanticIssue[]
 }
 
 function pickEditorTitle(mode: StartupMode, _sections: SectionId[]): string {
-  return mode === "repl" ? "初始配置" : "核心宿主初始化";
+  if (mode === "repl") return "初始配置";
+  if (mode === "pairing") return "完成这台设备的配置";
+  return "核心宿主初始化";
 }
 
 /**
@@ -300,6 +302,9 @@ function pickEditorTitle(mode: StartupMode, _sections: SectionId[]): string {
 function pickWelcomeText(mode: StartupMode): string {
   if (mode === "repl") {
     return "欢迎使用知行。下面填好 API 凭证就能开始使用。";
+  }
+  if (mode === "pairing") {
+    return "知行需要在这台设备上登录模型服务。填好 API 凭证后，这台设备就准备好了。";
   }
   return "欢迎使用知行核心宿主。填好 API 凭证即可启动;消息通道可稍后在 /config 配置。";
 }

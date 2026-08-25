@@ -40,10 +40,28 @@ describe("managed host trust transition", () => {
     expect(requestShutdown).not.toHaveBeenCalled();
   });
 
-  it("closes admission and enters graceful shutdown before any supervisor stop when authority moved", async () => {
+  it("keeps an active anchor-role duty candidate online after authority moved", async () => {
     const order: string[] = [];
     await expect(coordinateManagedHostTrustTransition({
       loadCurrent: async () => current(["anchor"], "device:new-anchor"),
+      reconcile: async () => {
+        order.push("reconcile");
+        return {
+          plan: { mode: "none", roles: [] },
+          service: undefined,
+          action: "disabled",
+        };
+      },
+      refuseNewMessages: () => order.push("refuse"),
+      requestShutdown: () => order.push("shutdown"),
+    })).resolves.toBe("retained");
+    expect(order).toEqual(["reconcile"]);
+  });
+
+  it("closes admission and enters graceful shutdown after the anchor role is revoked", async () => {
+    const order: string[] = [];
+    await expect(coordinateManagedHostTrustTransition({
+      loadCurrent: async () => current(["surface"], "device:new-anchor"),
       reconcile: async () => {
         order.push("reconcile");
         return {

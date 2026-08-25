@@ -5,7 +5,7 @@ import type {
   SecretRef,
   SecretStorePort,
 } from "@zhixing/core/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   MeshEndpointDirectory,
   MeshConnectionRegistry,
@@ -79,22 +79,22 @@ describe("production mesh bootstrap contracts", () => {
     });
   });
 
-  it("fails closed on stale anchor, inactive or ambiguous identity and invalid selection", () => {
-    const staleAnchor = trustRecordFor({
+  it("keeps a fenced duty candidate online while failing closed on invalid trust or selection", () => {
+    const dutyCandidate = trustRecordFor({
       issuerDeviceId: "device:anchor",
       localRoles: ["anchor", "executor"],
     });
-    expect(() => resolveHostLaunchPlan({
+    expect(resolveHostLaunchPlan({
       localDeviceId: LOCAL,
-      trust: staleAnchor,
+      trust: dutyCandidate,
       configuration: {
         enabledRoles: ["anchor", "executor"],
         anchorListen: { bind: { host: "127.0.0.1", port: 7443 } },
       },
-    })).toThrow(/non-current device/);
+    })).toEqual({ mode: "managed", roles: ["anchor", "executor"] });
     expect(() => resolveHostLaunchPlan({
       localDeviceId: LOCAL,
-      trust: staleAnchor,
+      trust: dutyCandidate,
       configuration: {
         enabledRoles: ["executor"],
         executorAutoStart: "yes",
@@ -237,6 +237,19 @@ describe("production mesh bootstrap contracts", () => {
       async (accepted) => accepted,
     )).resolves.toEqual(descriptor);
     expect(directory.get(LOCAL)).toEqual(descriptor);
+
+    const persistExactReplay = vi.fn(async () => descriptor);
+    await expect(commitMeshEndpointUpdate(
+      directory,
+      descriptor,
+      persistExactReplay,
+    )).resolves.toEqual(descriptor);
+    expect(persistExactReplay).not.toHaveBeenCalled();
+    await expect(commitMeshEndpointUpdate(
+      directory,
+      { ...descriptor, transports: [{ kind: "direct", host: "127.0.0.2", port: 7443 }] },
+      async (accepted) => accepted,
+    )).rejects.toThrow("did not advance");
   });
 
   it("derives, persists and rotates opaque rendezvous keys without transporting the secret", async () => {

@@ -1,6 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { networkInterfaces, hostname, platform } from "node:os";
 import { connect, createServer, type Server, type Socket } from "node:net";
+import QRCode from "qrcode";
 import {
   getZhixingHome,
 } from "@zhixing/core";
@@ -10,6 +11,7 @@ import type {
   DeviceIdentity,
   DeviceRole,
   HomeTrustEvent,
+  MeshRoleBootConfig,
   MeshEndpointDescriptor,
   MeshEndpointTransport,
   PairingAcceptance,
@@ -100,6 +102,10 @@ const PAIRING_TIMEOUT_MS = 120_000;
 const MAX_PAIRING_FRAME_BYTES = 1024 * 1024;
 const pairingDeadlines = new WeakMap<Socket, AbortSignal>();
 
+class PairingPublicFacingError extends Error {
+  override readonly name = "PairingPublicFacingError";
+}
+
 export interface PairCommandOptions {
   readonly invitation?: string;
   readonly listen?: string;
@@ -116,6 +122,15 @@ export interface PairCommandOptions {
   readonly reconcileManagedService?: (
     trigger: "pairing-issuer-committed" | "pairing-joiner-committed",
   ) => Promise<void>;
+  /** Isolated composition seam for the target-device configuration step. */
+  readonly completeDeviceConfiguration?: () => Promise<"ready" | "cancelled">;
+  /** Isolated composition seam for the final duty-device choice. */
+  readonly selectDutyDevice?: (input: {
+    readonly currentDeviceName: string;
+    readonly pairedDeviceName: string;
+  }) => Promise<"current" | "paired">;
+  /** Isolated composition seam for the existing planned migration command. */
+  readonly migrateDutyTo?: (deviceName: string) => Promise<void>;
 }
 
 interface PairingInvitation {
@@ -215,27 +230,25 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
   );
   const writeLine: (line: string) => void =
     options.writeLine ?? createStdoutWriter().line;
-  if (options.invitation || continuation?.side === "joiner") {
-    const currentConfig = loadConfig({ homeDir: zhixingHome });
-    const executorAutoStart = await resolveExecutorAutoStartSelection({
-      explicit: options.executorAutoStart,
-      persisted: currentConfig.mesh?.executorAutoStart,
-      isolated: options.secretStore !== undefined,
-      interactive: process.stdin.isTTY === true && process.stdout.isTTY === true,
-      prompt: () => requestExecutorAutoStart(options),
-    });
-    await writeConfig({
-      ...currentConfig,
-      mesh: {
-        ...currentConfig.mesh,
-        enabledRoles: currentConfig.mesh?.enabledRoles ?? [],
-        executorAutoStart,
-      },
-    }, { homeDir: zhixingHome });
-    await joinPairing({
+  try {
+    if (options.invitation || continuation?.side === "joiner") {
+      await joinPairing({
+        ...options,
+        isolatedComposition: options.secretStore !== undefined,
+        ...(options.invitation ? { invitation: options.invitation } : {}),
+        zhixingHome,
+        secretStore: routedSecretStore,
+        key,
+        store,
+        continuations,
+        storageMaintenance: deviceCapacity.storage,
+        writeLine,
+      });
+      return;
+    }
+    await issuePairing({
       ...options,
-      executorAutoStart,
-      ...(options.invitation ? { invitation: options.invitation } : {}),
+      isolatedComposition: options.secretStore !== undefined,
       zhixingHome,
       secretStore: routedSecretStore,
       key,
@@ -244,20 +257,10 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
       storageMaintenance: deviceCapacity.storage,
       writeLine,
     });
-    await reconcileAfterPairing(options, "pairing-joiner-committed");
-    return;
+    await reconcileAfterPairing(options, "pairing-issuer-committed");
+  } finally {
+    await store.stopStorageMaintenance();
   }
-  await issuePairing({
-    ...options,
-    zhixingHome,
-    secretStore: routedSecretStore,
-    key,
-    store,
-    continuations,
-    storageMaintenance: deviceCapacity.storage,
-    writeLine,
-  });
-  await reconcileAfterPairing(options, "pairing-issuer-committed");
 }
 
 async function reconcileAfterPairing(
@@ -271,6 +274,52 @@ async function reconcileAfterPairing(
   // A caller-supplied SecretStore denotes an isolated embedding/test composition.
   // Production CLI pairing always uses the platform store and performs host reconcile.
   if (!options.secretStore) await reconcileCurrentManagedService(trigger);
+}
+
+/** Renders the one invitation as both a scannable terminal QR and copyable text. */
+export async function renderPairingInvitation(
+  invitation: string,
+  writeLine: (line: string) => void,
+  renderQr: (content: string) => Promise<string> = (content) =>
+    QRCode.toString(content, {
+      type: "terminal",
+      small: true,
+      errorCorrectionLevel: "L",
+    }),
+): Promise<void> {
+  const qr = await renderQr(invitation);
+  writeLine("用另一台设备扫描下面的二维码，或复制二维码下方的邀请内容。");
+  writeLine(qr.trimEnd());
+  writeLine(`邀请内容：${invitation}`);
+}
+
+/** Converts internal pairing failures into one safe, actionable public message. */
+export function pairingPublicError(error: unknown): Error {
+  if (error instanceof PairingPublicFacingError) return error;
+  const message = error instanceof Error ? error.message : String(error);
+  if (/recovery|恢复码|root activation/iu.test(message)) {
+    return new Error(
+      "恢复码设置尚未完成。请保留刚才的恢复码，并在当前设备重新运行 zz pair 继续。",
+    );
+  }
+  if (/invitation|offer|邀请|single-use|already belongs/iu.test(message)) {
+    return new Error(
+      "这份配对邀请已经失效或不能再次使用。请回到出码设备重新运行 zz pair，再扫描或复制新的邀请内容。",
+    );
+  }
+  if (/rendezvous|routable|address|listen|relay|connect|socket|network|会合/iu.test(message)) {
+    return new Error(
+      "两台设备暂时无法连接。请确认它们在同一网络后，回到出码设备重新运行 zz pair。",
+    );
+  }
+  if (/configuration|config|credential|model|executor-auto-start|干活电脑/iu.test(message)) {
+    return new Error(
+      "这台设备尚未准备好。请在交互终端重新运行 zz pair，按提示完成模型服务配置。",
+    );
+  }
+  return new Error(
+    "配对尚未完整结束，已经完成的安全步骤会被保留。请在当前设备重新运行 zz pair 继续。",
+  );
 }
 
 export async function activateInitialRecoveryRoot(input: {
@@ -297,12 +346,16 @@ export async function activateInitialRecoveryRoot(input: {
   );
   const recoveryRoot = pending ? undefined : RecoveryRoot.generate();
   const recoveryPackage = recoveryRoot ? encodeRecoveryPackage(recoveryRoot) : "";
-  if (recoveryPackage) input.writeLine(`Recovery package: ${recoveryPackage}`);
-  else input.writeLine("Resume recovery activation with the recovery package saved earlier.");
+  if (recoveryPackage) {
+    input.writeLine("这是你的恢复码，抄下来放在安全的地方：");
+    input.writeLine(recoveryPackage);
+  } else {
+    input.writeLine("请粘贴上次已经保存的恢复码，继续完成设备配对。");
+  }
   const decoded = input.confirmRecoveryPackage
     ? decodeRecoveryPackage(await input.confirmRecoveryPackage(recoveryPackage))
     : await readRecoveryPackageFromTty({
-        prompt: "Save the recovery package independently, then paste the complete package to verify it: ",
+        prompt: "请粘贴完整恢复码，确认你已经保存：",
       });
   const candidateRoot = decoded.root;
   const legacy = decoded.version === 1 ? decoded : undefined;
@@ -373,11 +426,12 @@ export async function activateInitialRecoveryRoot(input: {
     sourceIndependenceDomain: `device:${input.issuerKey.deviceId}`,
     now: () => new Date().toISOString(),
   });
-  input.writeLine("Recovery root activated after independent package verification.");
+  input.writeLine("恢复码已验证并安全启用。");
   return next;
 }
 
 async function issuePairing(input: PairCommandOptions & {
+  readonly isolatedComposition: boolean;
   readonly zhixingHome: string;
   readonly secretStore: SecretStorePort;
   readonly key: DeviceKey;
@@ -573,7 +627,7 @@ async function issuePairing(input: PairCommandOptions & {
       invitation = restoreInvitation(durableInvitation, material.secret);
     }
     assertProductionPairingOffer(material.offer);
-    input.writeLine(`Pairing invitation: ${encodeInvitation(invitation)}`);
+    await renderPairingInvitation(encodeInvitation(invitation), input.writeLine);
 
     const acceptUntil = committedReplay
       ? new Date(Date.now() + PAIRING_TIMEOUT_MS).toISOString()
@@ -781,7 +835,14 @@ async function issuePairing(input: PairCommandOptions & {
     await input.store.markBootstrapComplete(peerDeviceId, material.offer.offerId);
     await deletePairingSecret(input.secretStore, material.offer.offerId);
     await input.continuations.clear(material.offer.offerId);
-    input.writeLine(`Paired device: ${peerDeviceId}`);
+    input.writeLine(`已和“${joinMessage.join.device.displayName}”完成配对。`);
+    await completeDutyDeviceSelection({
+      options: input,
+      isolated: input.isolatedComposition,
+      currentDeviceName: identity.displayName,
+      pairedDeviceName: joinMessage.join.device.displayName,
+      writeLine: input.writeLine,
+    });
   } catch (error) {
     if (
       continuation &&
@@ -849,6 +910,7 @@ export function createPairingTrustEvent(input: {
 }
 
 async function joinPairing(input: PairCommandOptions & {
+  readonly isolatedComposition: boolean;
   readonly zhixingHome: string;
   readonly secretStore: SecretStorePort;
   readonly key: DeviceKey;
@@ -899,7 +961,7 @@ async function joinPairing(input: PairCommandOptions & {
   ) {
     await deletePairingSecret(input.secretStore, persisted.invitation.offer.offerId);
     await input.continuations.clear(persisted.invitation.offer.offerId);
-    input.writeLine(`Joined home: ${persisted.committed.trustRecord.homeId}`);
+    input.writeLine("这台设备已经准备好，可以开始使用知行了。");
     return;
   }
   if (persisted) {
@@ -992,6 +1054,7 @@ async function joinPairing(input: PairCommandOptions & {
 
 async function resumeIssuerPairing(input: {
   readonly input: PairCommandOptions & {
+    readonly isolatedComposition: boolean;
     readonly secretStore: SecretStorePort;
     readonly key: DeviceKey;
     readonly store: FileMeshBootstrapStore;
@@ -1068,12 +1131,20 @@ async function resumeIssuerPairing(input: {
   );
   await deletePairingSecret(input.input.secretStore, continuation.invitation.offer.offerId);
   await input.input.continuations.clear(continuation.invitation.offer.offerId);
-  input.input.writeLine(`Paired device: ${peerDeviceId}`);
+  input.input.writeLine(`已和“${continuation.join.device.displayName}”完成配对。`);
+  await completeDutyDeviceSelection({
+    options: input.input,
+    isolated: input.input.isolatedComposition,
+    currentDeviceName: continuation.invitation.issuer.displayName,
+    pairedDeviceName: continuation.join.device.displayName,
+    writeLine: input.input.writeLine,
+  });
   return { committed: true };
 }
 
 async function resumeJoinerPairing(input: {
   readonly input: PairCommandOptions & {
+    readonly isolatedComposition: boolean;
     readonly zhixingHome: string;
     readonly secretStore: SecretStorePort;
     readonly key: DeviceKey;
@@ -1137,6 +1208,7 @@ async function resumeJoinerPairing(input: {
 
 async function completeJoinerBootstrap(input: {
   readonly input: PairCommandOptions & {
+    readonly isolatedComposition: boolean;
     readonly zhixingHome: string;
     readonly secretStore: SecretStorePort;
     readonly key: DeviceKey;
@@ -1162,13 +1234,28 @@ async function completeJoinerBootstrap(input: {
     member.device.deviceId === input.input.key.deviceId && member.state === "active");
   if (!local) throw new Error("Pairing trust projection does not contain the local device");
   const config = loadConfig({ homeDir: input.input.zhixingHome });
+  const executorAutoStart = await resolveExecutorAutoStartSelection({
+    explicit: input.input.executorAutoStart,
+    persisted: config.mesh?.executorAutoStart,
+    isolated: input.input.isolatedComposition,
+    interactive: process.stdin.isTTY === true && process.stdout.isTTY === true,
+    prompt: () => requestExecutorAutoStart(input.input),
+  });
+  const reachability = await resolveJoinerAnchorReachability({
+    roles: local.roles,
+    invitation: input.invitation,
+    configuration: config.mesh,
+  });
   await writeConfig({
     ...config,
     mesh: {
       enabledRoles: local.roles,
-      executorAutoStart: input.input.executorAutoStart ?? false,
+      executorAutoStart,
+      ...reachability,
     },
   }, { homeDir: input.input.zhixingHome });
+  await completePairingDeviceConfiguration(input.input);
+  await reconcileAfterPairing(input.input, "pairing-joiner-committed");
   await input.input.store.markBootstrapComplete(
     input.invitation.issuer.deviceId,
     input.invitation.offer.offerId,
@@ -1176,7 +1263,7 @@ async function completeJoinerBootstrap(input: {
   await sendPairingFrame(input.socket, { t: "bootstrap-complete" });
   await deletePairingSecret(input.input.secretStore, input.invitation.offer.offerId);
   await input.input.continuations.clear(input.invitation.offer.offerId);
-  input.input.writeLine(`Joined home: ${input.committed.trustRecord.homeId}`);
+  input.input.writeLine("这台设备已经准备好，可以开始使用知行了。");
 }
 
 async function requestExecutorAutoStart(
@@ -1209,9 +1296,136 @@ export async function resolveExecutorAutoStartSelection(input: {
   if (input.persisted !== undefined) return input.persisted;
   if (input.isolated) return false;
   if (!input.interactive) {
-    throw new Error("Joining an executor non-interactively requires --executor-auto-start yes|no");
+    throw new Error("请在交互终端重新运行同一个配对命令，完成这台干活电脑的上线选择");
   }
   return input.prompt();
+}
+
+export async function resolveJoinerAnchorReachability(input: {
+  readonly roles: readonly DeviceRole[];
+  readonly invitation: Pick<PairingInvitation, "transports">;
+  readonly configuration?: MeshRoleBootConfig;
+}): Promise<Pick<MeshRoleBootConfig, "anchorListen" | "relayRegistration">> {
+  if (!input.roles.includes("anchor")) return {};
+  if (input.configuration?.anchorListen || input.configuration?.relayRegistration) {
+    return {
+      ...(input.configuration.anchorListen
+        ? { anchorListen: input.configuration.anchorListen }
+        : {}),
+      ...(input.configuration.relayRegistration
+        ? { relayRegistration: input.configuration.relayRegistration }
+        : {}),
+    };
+  }
+  const relay = input.invitation.transports.find((transport) =>
+    transport.kind === "blind-relay");
+  if (relay?.kind === "blind-relay") {
+    return { relayRegistration: relay.relay };
+  }
+  const reservation = await openPairingListener();
+  try {
+    return {
+      anchorListen: {
+        bind: reservation.endpoint,
+        advertised: [resolveAdvertisedEndpoint(reservation.endpoint)],
+      },
+    };
+  } finally {
+    await closeServer(reservation.server);
+  }
+}
+
+async function completePairingDeviceConfiguration(
+  input: PairCommandOptions & {
+    readonly isolatedComposition: boolean;
+    readonly zhixingHome: string;
+    readonly writeLine: (line: string) => void;
+  },
+): Promise<void> {
+  input.writeLine("知行需要在这台设备上登录模型服务。");
+  if (input.completeDeviceConfiguration) {
+    if (await input.completeDeviceConfiguration() === "cancelled") {
+      throw new PairingPublicFacingError(
+        "设备配置已取消，已经完成的安全步骤会被保留。请在当前设备重新运行 zz pair 继续。",
+      );
+    }
+  } else if (!input.isolatedComposition) {
+    const { runStartupCheck } = await import("../startup.js");
+    const result = await runStartupCheck({
+      homeDir: input.zhixingHome,
+      mode: "pairing",
+      isTTY: process.stdin.isTTY === true && process.stdout.isTTY === true,
+    });
+    if (result.kind === "cancelled") {
+      throw new PairingPublicFacingError(
+        "设备配置已取消，已经完成的安全步骤会被保留。请在当前设备重新运行 zz pair 继续。",
+      );
+    }
+    if (result.kind !== "ready") {
+      throw new PairingPublicFacingError(
+        "这台设备尚未准备好。请在交互终端重新运行 zz pair，按提示完成模型服务配置。",
+      );
+    }
+  }
+  input.writeLine("这台设备的模型服务已经准备好。");
+}
+
+async function completeDutyDeviceSelection(input: {
+  readonly options: PairCommandOptions;
+  readonly isolated: boolean;
+  readonly currentDeviceName: string;
+  readonly pairedDeviceName: string;
+  readonly writeLine: (line: string) => void;
+}): Promise<void> {
+  if (input.isolated && !input.options.selectDutyDevice) return;
+  input.writeLine("哪台设备长期开机？让它值班。");
+  const choice = input.options.selectDutyDevice
+    ? await input.options.selectDutyDevice({
+        currentDeviceName: input.currentDeviceName,
+        pairedDeviceName: input.pairedDeviceName,
+      })
+    : await requestDutyDeviceChoice(input.currentDeviceName, input.pairedDeviceName);
+  if (choice === "current") {
+    input.writeLine(`知行继续在“${input.currentDeviceName}”值班。`);
+    return;
+  }
+  try {
+    if (input.options.migrateDutyTo) {
+      await input.options.migrateDutyTo(input.pairedDeviceName);
+    } else {
+      const { prepareDutyMigration } = await import("../runtime/duty-migration-command.js");
+      await prepareDutyMigration(input.pairedDeviceName, true);
+    }
+  } catch (error) {
+    throw new PairingPublicFacingError(
+      `设备已经配对，但值班设备尚未切换。请保持两台设备在线，然后运行 zz duty migrate "${input.pairedDeviceName}"。`,
+      { cause: error },
+    );
+  }
+}
+
+async function requestDutyDeviceChoice(
+  currentDeviceName: string,
+  pairedDeviceName: string,
+): Promise<"current" | "paired"> {
+  if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
+    throw new PairingPublicFacingError(
+      "设备已经配对，但还没有确认值班设备。请在交互终端运行 zz duty migrate 继续。",
+    );
+  }
+  const { createInterface } = await import("node:readline/promises");
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    while (true) {
+      const answer = (await prompt.question(
+        `1. ${currentDeviceName}\n2. ${pairedDeviceName}\n序号：`,
+      )).trim();
+      if (answer === "1") return "current";
+      if (answer === "2") return "paired";
+    }
+  } finally {
+    prompt.close();
+  }
 }
 
 async function selectInitialPairingBackupTarget(input: {
@@ -1995,9 +2209,12 @@ function pairingResumeProof(
 }
 
 function normalizeGrantedRoles(value: readonly DeviceRole[] | undefined): readonly DeviceRole[] {
-  const roles = value ?? ["executor"];
-  if (roles.length === 0 || roles.some((role) => role !== "executor" && role !== "surface")) {
-    throw new Error("Pairing may grant executor or surface roles");
+  const roles = value ?? ["anchor", "executor"];
+  if (
+    roles.length === 0 ||
+    roles.some((role) => role !== "anchor" && role !== "executor" && role !== "surface")
+  ) {
+    throw new Error("Pairing contains an unsupported device capability");
   }
   return [...new Set(roles)].sort();
 }
@@ -2019,7 +2236,7 @@ function localNetworkAddress(): string {
       if (entry.family === "IPv4" && !entry.internal) return entry.address;
     }
   }
-  throw new Error("No routable local address was found; provide --advertise host:port");
+  throw new Error("No routable local address was found");
 }
 
 function devicePlatform(): DeviceIdentity["platform"] {
