@@ -978,7 +978,28 @@ type StorageMaintenanceKind =
   | "local-workspace-operation-outbox"
   | "workscene-cleanup"
   | "projection-flush" | "projection-rebuild" | "projection-scrub" | "projection-compaction"
-  | "lifecycle-reconcile" | "asset-gc";
+  | "lifecycle-reconcile" | "asset-gc"
+  | "workspace-probe-retirement"
+  | "ticket-retirement" | "stream-spool-reclaim"
+  | "conversation-transfer"
+  | "authority-checkpoint"
+  | "managed-service-reconcile"
+  | "device-lifecycle-cleanup";
+type StorageMaintenanceTaskOwner =
+  | "authority-commit-log"
+  | "workspace-binding-migrator"
+  | "workspace-binding-recovery-owner"
+  | "local-workspace-management-host"
+  | "anchor-workscene-owner"
+  | "durable-projection-index"
+  | "artifact-lifecycle-index"
+  | "anchor-asset-maintainer"
+  | "workspace-probe-owner"
+  | "executor-data-plane"
+  | "conversation-transfer-owner"
+  | "authority-checkpoint-owner"
+  | "managed-service-owner"
+  | "device-lifecycle-owner";
 type StorageMaintenanceUrgency = "foreground" | "recovery" | "background";
 type StorageMaintenanceObligation = "pre-commit" | "committed";
 type DeviceCapacityDimension =
@@ -1056,7 +1077,7 @@ interface StorageMaintenanceGovernorPort {
 
 `maxWaitMs` 只限制一次物理准入尝试：workload 取外层操作剩余期限与策略上限的较小值，storage 取任务所有者的有界调度片；它不代替 single-flight 等待者各自的调用期限。期限内暂时无容量返回 `backpressured`，本次设备状态或策略下不能靠等待容纳 atomic 返回 `capacity-gap`；传给 storage governor 的 `AbortSignal` 是共享任务信号，只在进程停机或全部 `pre-commit` 等待者离开时取消，单个等待者不得直接传入。`admissionId` 每次进程内申请唯一，仅用于容量占用和诊断；arbiter 不解释业务任务身份、不做语义去重。
 
-single-flight 归维护义务的唯一任务所有者：AuthorityCommitLog 拥有 log migration，workscene 兼容桥迁移器拥有 workspace migration，binding reset recovery owner 拥有 workspace catalog reset，锚点 workscene owner 拥有已提交删除的系统目录收敛，DurableProjectionIndex 拥有 projection 四类任务，ArtifactLifecycleIndex 拥有 lifecycle reconcile，锚点资产维护器拥有 asset GC。`workKey = D("StorageMaintenanceWork",1,{kind,resourceId,inputIdentity})`：日志使用逻辑日志身份与源格式，workspace 迁移使用设备、migrationId 与冻结 sourceSnapshotToken，workspace catalog reset 使用设备 binding 目录身份及 previous / target generation，workscene cleanup 使用 sceneId 与删除 revision，投影使用 projectionId 与 frozen manifest/checkpoint，生命周期使用 ArtifactStore 身份与源 checkpoint 集，GC 使用 ArtifactStore 身份与候选游标/release 前沿。键覆盖“复核义务 → 申请容量 → 执行 → 步骤计量 → permit 释放”的完整生命周期；新输入必须生成新键，禁止用资源名吞并不同代工作。
+single-flight 归维护义务的唯一任务所有者：AuthorityCommitLog 拥有 log migration，workscene 兼容桥迁移器拥有 workspace migration，binding reset recovery owner 拥有 workspace catalog reset，本机 workspace management host 拥有 local operation outbox，锚点 workscene owner 拥有已提交删除的系统目录收敛，DurableProjectionIndex 拥有 projection 四类任务，ArtifactLifecycleIndex 拥有 lifecycle reconcile，锚点资产维护器拥有 asset GC，workspace probe owner 拥有 probe retirement，executor data plane 共同拥有 ticket retirement 与 stream spool reclaim，conversation transfer owner 拥有 conversation transfer，authority checkpoint owner 拥有 checkpoint，managed service owner 拥有托管服务 reconciliation，device lifecycle owner 拥有设备生命周期 cleanup。`workKey = D("StorageMaintenanceWork",1,{kind,resourceId,inputIdentity})`：日志使用逻辑日志身份与源格式，workspace 迁移使用设备、migrationId 与冻结 sourceSnapshotToken，workspace catalog reset 使用设备 binding 目录身份及 previous / target generation，workscene cleanup 使用 sceneId 与删除 revision，投影使用 projectionId 与 frozen manifest/checkpoint，生命周期使用 ArtifactStore 身份与源 checkpoint 集，GC 使用 ArtifactStore 身份与候选游标/release 前沿；其余 kind 使用对应 owner 已冻结的设备/执行器/transfer/checkpoint/definition/lifecycle 身份与耐久 revision、候选或清理前沿，禁止跨 owner 或跨代合并。键覆盖“复核义务 → 申请容量 → 执行 → 步骤计量 → permit 释放”的完整生命周期；新输入必须生成新键，禁止用资源名吞并不同代工作。
 
 并发同键等待者加入同一个完成 promise，不另行申请 permit；每个等待者以自身调用期限等待，完成后再核对自己的提交前提。单个等待者超时或取消只解除自身等待，并向该调用返回对应结果；仅当全部等待者离开且义务仍为 `pre-commit` 时，任务所有者才触发共享任务信号并在安全检查点取消。进程停机可在安全检查点暂停任何任务；`committed` 来源无论失败或零等待者都不得清除，下次启动或触发仍从耐久事实重试。
 
