@@ -15,11 +15,19 @@
 
 **当前用户可见的外部 `zz` 命令**：
 
+<!-- public-top-level-commands:start -->
 - `zz`：进入交互 REPL。
+- `zz help`：显示当前公开命令。
 - `zz status`：查看知行运行状态。
 - `zz stop`：停止知行；显式维护前使用 `zz stop --maintenance`。
 - `zz doctor`：只读检查本机运行、托管、配置和恢复状态。
-- `zz app remove`：安全停用并准备 npm 卸载，保留全部用户数据。
+- `zz app`：管理应用生命周期；`zz app remove` 安全停用并准备 npm 卸载，保留全部用户数据。
+- `zz pair`：与第二台设备配对；出码与加入都沿同一引导完成。
+- `zz device`：查看或永久移除已配对设备。
+- `zz duty`：查看接班设备并迁移值班职责。
+- `zz backup`：设置、验证和使用恢复备份，管理恢复码。
+- `zz workspace`：管理当前设备已授权的本地工作区。
+<!-- public-top-level-commands:end -->
 
 **当前真实存在但隐藏 / 过渡中的入口**：
 
@@ -169,6 +177,22 @@ zz stop
 ```
 
 `zz status` 用于查看本机知行运行状态；`zz stop` 用于停止知行后台宿主。
+
+---
+
+## 多设备、恢复备份与本地工作区
+
+这些命令承接必须在交互对话之外仍可完成的设备级旅程；具体参数以对应的 `--help` 为准：
+
+| 旅程 | 入口 | 作用 |
+|---|---|---|
+| 第二台设备 | `zz pair [invitation]` | 一台设备显示二维码和同内容文本，另一台扫描或粘贴后继续恢复码回读、完成配置、确认可用并选择值班设备。正常流程不要求地址、端口、中继或内部角色知识。 |
+| 永久设备移除 | `zz device list/remove/continue/status` | 查看候选，永久移除设备，并在中断后继续或查看同一操作。应用停用另用 `zz app remove`，两者不会混淆。 |
+| 值班迁移 | `zz duty targets/migrate/continue/cancel` | 选择长期在线的接班设备，准备、继续或在切换前取消值班迁移。 |
+| 恢复备份 | `zz backup setup/verify/status` | 建立恢复备份、从实际目标回读验证并查看唯一下一步行动。 |
+| 灾难恢复 | `zz backup recover/recover-finish` | 值班设备永久丢失后，从完整备份接管，并在旧设备已隔离后完成恢复。 |
+| 恢复码 | `zz backup root rotate/invalidate/approve-reset/reset` | 轮换、紧急停用或在另一台已加入设备协助下重置恢复码。 |
+| 本地工作区 | `zz workspace status/list/create/create-scene/rename/repath/remove/reset` | 只在当前设备授权和维护本地目录；远端不接收原始路径。 |
 
 ---
 

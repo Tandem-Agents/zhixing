@@ -165,7 +165,7 @@ export async function continueDeviceRemovalWithManagement(
     renderState(await management.deviceContinue(input));
     return;
   } catch {
-    await renderDecisionDispatchFailure(management, input.targetName, knownAccepted);
+    await renderDecisionDispatchFailure(management, input.targetName, input.mode, knownAccepted);
   }
 }
 
@@ -236,29 +236,48 @@ function renderState(state: DeviceRemovalState): void {
 async function renderDecisionDispatchFailure(
   management: Pick<RpcManagementFacade, "deviceStatus">,
   targetName: string,
+  mode: Exclude<DeviceRemovalMode, "cancel">,
   knownAccepted: boolean,
 ): Promise<void> {
   let state: DeviceRemovalState | null;
   try {
     state = await management.deviceStatus({ targetName });
   } catch {
-    throw new Error("设备移除状态暂时无法确认；请稍后运行 device status 查看进度");
+    throw new Error(
+      `设备移除状态暂时无法确认。请稍后运行 \`zz device status <设备名称>\` 查看进度；` +
+        `<设备名称> 填写“${targetName}”。`,
+    );
   }
   if (!state) {
     if (knownAccepted) {
-      console.log("移除已登记，可继续或取消");
+      renderPendingDecisionAction(targetName, mode);
       return;
     }
-    throw new Error("没有找到可继续的设备移除操作；请重新运行永久设备移除");
+    throw new Error(
+      `没有找到可继续的设备移除操作。请重新运行 ` +
+        `\`zz device remove <设备名称> --permanent --mode ${mode}\`；` +
+        `<设备名称> 填写“${targetName}”。`,
+    );
   }
   if (
     state.phase === "waiting-for-device" ||
     state.phase === "needs-conversation-decision"
   ) {
-    console.log("移除已登记，可继续或取消");
+    renderPendingDecisionAction(targetName, mode);
     return;
   }
   renderState(state);
+}
+
+function renderPendingDecisionAction(
+  targetName: string,
+  mode: Exclude<DeviceRemovalMode, "cancel">,
+): void {
+  console.log(
+    `移除已登记，但处理方式尚未确认。请运行 ` +
+      `\`zz device continue <设备名称> --mode ${mode}\` 继续，` +
+      `或将 mode 改为 cancel 取消；<设备名称> 填写“${targetName}”。`,
+  );
 }
 
 async function requireConfirmation(

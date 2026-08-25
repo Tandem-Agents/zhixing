@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { readFile } from "node:fs/promises";
 import { captureCliCommandDescriptor, program } from "../index.js";
 
 describe("root CLI help", () => {
@@ -34,5 +35,36 @@ describe("root CLI help", () => {
   it("preserves the full root-to-subcommand usage path", () => {
     const status = program.commands.find((command) => command.name() === "status");
     expect(status?.helpInformation()).toContain("用法： zhixing status [选项]");
+  });
+
+  it("keeps normal pairing help free of topology and security internals", () => {
+    const pair = program.commands.find((command) => command.name() === "pair");
+    const help = pair?.helpInformation() ?? "";
+
+    expect(help).toContain("另一台设备显示的邀请内容");
+    expect(help).not.toMatch(/高熵|listen|advertise|relay|executor|host:port/iu);
+  });
+
+  it("keeps the documented top-level command set exact with the real registry", async () => {
+    const readme = await readFile(
+      new URL("../../README.md", import.meta.url),
+      "utf8",
+    );
+    const section = readme.match(
+      /<!-- public-top-level-commands:start -->([\s\S]*?)<!-- public-top-level-commands:end -->/u,
+    )?.[1];
+    expect(section).toBeDefined();
+    const documented = [...section!.matchAll(/^- `zz(?: ([a-z][a-z-]*))?`/gmu)]
+      .map((match) => match[1] ? `zhixing ${match[1]}` : "zhixing")
+      .sort((left, right) => left.localeCompare(right, "en-US"));
+    const registered = captureCliCommandDescriptor()
+      .filter(({ path, hidden }) =>
+        !hidden && (path === "zhixing" || /^zhixing [^ ]+$/u.test(path))
+      )
+      .map(({ path }) => path)
+      .sort((left, right) => left.localeCompare(right, "en-US"));
+
+    expect(documented).toEqual(registered);
+    expect(documented).not.toContain("zhixing serve");
   });
 });

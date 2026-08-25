@@ -149,7 +149,7 @@ describe("device removal decision failure projection", () => {
     expect(output).toHaveBeenCalledWith("正在收束目标设备上的本机对话");
   });
 
-  it("gives one continue-or-cancel action while the durable operation is still pending", async () => {
+  it("gives exact continue-or-cancel actions while the durable operation is still pending", async () => {
     const output = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const management = {
       deviceContinue: vi.fn(async () => { throw new Error("decision rejected"); }),
@@ -162,7 +162,10 @@ describe("device removal decision failure projection", () => {
     }, true);
 
     expect(output).toHaveBeenCalledTimes(1);
-    expect(output).toHaveBeenCalledWith("移除已登记，可继续或取消");
+    expect(output).toHaveBeenCalledWith(
+      "移除已登记，但处理方式尚未确认。请运行 `zz device continue <设备名称> --mode destroy` 继续，" +
+        "或将 mode 改为 cancel 取消；<设备名称> 填写“旅行电脑”。",
+    );
     expect(management.deviceContinue).toHaveBeenCalledOnce();
   });
 
@@ -176,7 +179,8 @@ describe("device removal decision failure projection", () => {
       targetName: "旅行电脑",
       mode: "lost",
     }, false)).rejects.toThrow(
-      "设备移除状态暂时无法确认；请稍后运行 device status 查看进度",
+      "设备移除状态暂时无法确认。请稍后运行 `zz device status <设备名称>` 查看进度；" +
+        "<设备名称> 填写“旅行电脑”。",
     );
   });
 });

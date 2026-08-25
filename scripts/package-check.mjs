@@ -173,9 +173,19 @@ async function verifyPublicEntrypoints(installRoot, packages) {
 async function verifyCli(installRoot, home, version) {
   const entry = path.join(installRoot, "node_modules", "@zhixing", "cli", "dist", "index.js");
   const env = { ...process.env, ZHIXING_HOME: home, NO_COLOR: "1" };
-  for (const args of [["--version"], ["--help"], ["help"]]) {
-    const result = await run(process.execPath, [entry, ...args], installRoot, env, true);
-    assert(result.stdout.includes(args[0] === "--version" ? version : "用法："), `CLI ${args.join(" ")} 输出不正确`);
+  const metadata = await import(pathToFileURL(entry).href);
+  const versionResult = await run(process.execPath, [entry, "--version"], installRoot, env, true);
+  assert(versionResult.stdout.includes(version), "CLI --version 输出不正确");
+  const help = await run(process.execPath, [entry, "--help"], installRoot, env, true);
+  const helpCommand = await run(process.execPath, [entry, "help"], installRoot, env, true);
+  const canonicalHelp = metadata.program.helpInformation().trim();
+  assert(help.stdout.trim() === canonicalHelp, "tarball CLI --help 与真实 Commander registry 不一致");
+  assert(helpCommand.stdout.trim() === canonicalHelp, "tarball CLI help 与真实 Commander registry 不一致");
+  const hiddenTopLevel = metadata.captureCliCommandDescriptor()
+    .filter(({ path: commandPath, hidden }) => hidden && /^zhixing [^ ]+$/u.test(commandPath))
+    .map(({ path: commandPath }) => commandPath.slice("zhixing ".length));
+  for (const command of hiddenTopLevel) {
+    assert(!new RegExp(`^  ${command}(?: |$)`, "mu").test(canonicalHelp), `隐藏命令 ${command} 泄漏到 tarball 默认帮助`);
   }
   const doctor = await run(process.execPath, [entry, "doctor"], installRoot, env, true);
   assert(doctor.stdout.includes("知行尚未完成首次设置") && doctor.stdout.includes("运行 zz 完成设置"), "空 home 的 doctor 未给出唯一设置行动");
