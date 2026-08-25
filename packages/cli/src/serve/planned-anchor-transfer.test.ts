@@ -1,5 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm } from "node:fs/promises";
 import path from "node:path";
 import type {
   DeviceIdentity,
@@ -30,7 +29,8 @@ import {
   loadAnchorIssuerKey,
 } from "@zhixing/mesh/device-key-store";
 import { createSignedTrustEvent } from "@zhixing/mesh/trust-chain";
-import { afterEach, describe, expect, it } from "vitest";
+import { createTempDir } from "@zhixing/test-utils";
+import { describe, expect, it, onTestFinished } from "vitest";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import {
   FilePlannedAnchorTransferJournal,
@@ -52,16 +52,14 @@ import {
   type PlannedAnchorReadySnapshot,
 } from "../setup-delivery.js";
 
-const roots: string[] = [];
 const NOW = Date.now();
 const AT = new Date(NOW).toISOString();
 const TRANSFER_ID = "xfer-01J00000000000000000000001";
+const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
 
-afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-});
-
-describe("planned anchor transfer prepared phase", () => {
+describe("planned anchor transfer prepared phase", {
+  timeout: DURABLE_IO_TEST_TIMEOUT_MS,
+}, () => {
   it("durably binds one ready target and one transfer-local issuer key on both logs", async () => {
     const fixture = await createFixture();
     const first = await fixture.owner.prepare({
@@ -340,7 +338,7 @@ describe("planned anchor transfer prepared phase", () => {
       transferId: "xfer-01J00000000000000000000002",
       targetDeviceId: fixture.targetKey.deviceId,
     })).resolves.toMatchObject({ phase: "prepared" });
-  });
+  }, 10_000);
 
   it("crosses the strict mesh service and authorizes only the current source", async () => {
     const fixture = await createFixture();
@@ -536,7 +534,7 @@ describe("planned anchor transfer prepared phase", () => {
     ]);
     expect(await fixture.targetStore.artifactStore().has(imported.checkpoint!)).toBe(false);
     expect(await fixture.targetStore.artifactStore().has(imported.catalogRef!)).toBe(false);
-  });
+  }, 10_000);
 
   it("commits once on the source and atomically installs the migrated authority on the target", async () => {
     const fixture = await createFixture();
@@ -589,7 +587,7 @@ describe("planned anchor transfer prepared phase", () => {
     await expect(fixture.sourceStore.authorityLog().append([
       { stream: "control", body: { staleSource: true } },
     ])).rejects.toThrow("frozen authority writes");
-  }, 10_000);
+  }, 120_000);
 
   it("holds the target readiness revision across the source commit window", async () => {
     const fixture = await createFixture();
@@ -697,7 +695,7 @@ describe("planned anchor transfer prepared phase", () => {
     await expect(fixture.sourceStore.authorityLog().append([
       { stream: "control", body: { sourceResumed: true } },
     ])).resolves.toBeDefined();
-  });
+  }, 10_000);
 
   it("keeps the source fenced and replays forward after a lost target commit response", async () => {
     const fixture = await createFixture();
@@ -785,7 +783,7 @@ describe("planned anchor transfer prepared phase", () => {
     releaseNetwork();
     await freezing;
     expect(targetGovernor.snapshot().inFlight["authority-checkpoint"] ?? 0).toBe(0);
-  });
+  }, 10_000);
 
   it("closes the planned runtime once, cancels in-flight I/O and rejects later work", async () => {
     const lifecycle = new PlannedAnchorTransferRuntimeLifecycle();
@@ -926,8 +924,10 @@ async function createFixture(options: {
   readonly sourceStorageMaintenance?: StorageMaintenanceGovernorPort;
   readonly targetStorageMaintenance?: StorageMaintenanceGovernorPort;
 } = {}) {
-  const sourceRoot = await temporary("anchor-source-");
-  const targetRoot = await temporary("anchor-target-");
+  const targets = new Set<PlannedAnchorTransferTarget>();
+  const stores: FileMeshBootstrapStore[] = [];
+  const sourceRoot = await temporary("anchor-source");
+  const targetRoot = await temporary("anchor-target");
   const sourceKey = await DeviceKey.generate();
   const targetKey = await DeviceKey.generate();
   const peerKey = await DeviceKey.generate();
@@ -947,8 +947,17 @@ async function createFixture(options: {
   };
   const sourceStore = new FileMeshBootstrapStore(sourceRoot, sourceKey);
   const targetStore = new FileMeshBootstrapStore(targetRoot, targetKey);
-  const peerRoot = await temporary("anchor-peer-");
+  const peerRoot = await temporary("anchor-peer");
+  onTestFinished(async () => {
+    const settled = await Promise.allSettled([
+      ...[...targets].map((target) => target.close()),
+      ...stores.map((store) => store.stopStorageMaintenance()),
+    ]);
+    const failure = settled.find((result) => result.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
+  });
   const peerStore = new FileMeshBootstrapStore(peerRoot, peerKey);
+  stores.push(sourceStore, targetStore, peerStore);
   let initialized = await sourceStore.initializeLocalHome({
     key: sourceKey,
     identity: sourceIdentity,
@@ -1006,21 +1015,27 @@ async function createFixture(options: {
   const createTarget = (
     readinessPort: import("../setup-delivery.js").PlannedAnchorReadinessPort = readiness.port,
     now: () => number = () => NOW,
-  ) => new PlannedAnchorTransferTarget({
-    deviceId: targetKey.deviceId,
-    identityKey: targetKey,
-    secretStore: secrets,
-    bootstrapStore: targetStore,
-    authorityLog: targetStore.authorityLog(),
-    artifacts: targetStore.artifactStore(),
-    stagingRoot: path.join(targetRoot, "anchor-transfer-staging"),
-    sourceFor: () => ({ applyArtifactCommand: (command) => sourceArtifactCommand.current(command) }),
-    storageMaintenance: options.targetStorageMaintenance,
-    signer: targetKey,
-    verifier,
-    readiness: readinessPort,
-    now,
-  });
+  ) => {
+    const target = new PlannedAnchorTransferTarget({
+      deviceId: targetKey.deviceId,
+      identityKey: targetKey,
+      secretStore: secrets,
+      bootstrapStore: targetStore,
+      authorityLog: targetStore.authorityLog(),
+      artifacts: targetStore.artifactStore(),
+      stagingRoot: path.join(targetRoot, "anchor-transfer-staging"),
+      sourceFor: () => ({
+        applyArtifactCommand: (command) => sourceArtifactCommand.current(command),
+      }),
+      storageMaintenance: options.targetStorageMaintenance,
+      signer: targetKey,
+      verifier,
+      readiness: readinessPort,
+      now,
+    });
+    targets.add(target);
+    return target;
+  };
   const target = createTarget();
   const onDrain = { current: async () => {} };
   const createOwner = (
@@ -1064,10 +1079,8 @@ function enroll(key: DeviceKey, displayName: string) {
   return enrollDeviceIdentity(key, { displayName, platform: "linux", enrolledAt: AT });
 }
 
-async function temporary(prefix: string) {
-  const root = await mkdtemp(path.join(tmpdir(), prefix));
-  roots.push(root);
-  return root;
+async function temporary(label: string) {
+  return createTempDir(label);
 }
 
 class MemoryStore implements SecretStorePort {

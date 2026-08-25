@@ -1,8 +1,7 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
+import { createTempDir } from "@zhixing/test-utils";
 import {
   loadDisasterRecoveryPostInstallReceipt,
   recordDisasterRecoveryPostInstallReceipt,
@@ -10,16 +9,9 @@ import {
   type DisasterInstalledAuthorityGeneration,
 } from "./disaster-recovery-installation.js";
 
-const roots: string[] = [];
-
-afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-});
-
 describe("disaster recovery post-install receipt", () => {
   it("durably binds one installed generation to its participants and six-kind read-back", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "zhixing-disaster-receipt-"));
-    roots.push(root);
+    const root = await createTempDir("disaster-recovery-receipt");
     const log = new FileAuthorityCommitLog(
       path.join(root, "authority"),
       new FileArtifactStore(path.join(root, "artifacts")),

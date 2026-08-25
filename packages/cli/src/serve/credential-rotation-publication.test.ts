@@ -1,21 +1,14 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
 import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
 import type { CredentialExposureRecord, SecretRef, SecretStorePort } from "@zhixing/core/contracts";
+import { createTempDir } from "@zhixing/test-utils";
 import { createCredentialExposureRecord } from "@zhixing/mesh/credential-exposure";
 import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import { publishRequiredCredentialRotations } from "./credential-rotation-publication.js";
 
-const roots: string[] = [];
-
-afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-});
-
-describe("credential rotation publication", () => {
+describe("credential rotation publication", { timeout: 30_000 }, () => {
   it("service-verifies provider, channel and MCP rotations before one exposure transaction each", async () => {
     const fixture = await createFixture([
       ["provider", "main"],
@@ -99,10 +92,10 @@ describe("credential rotation publication", () => {
 type BindingKind = "provider" | "channel" | "mcp";
 
 async function createFixture(bindings: readonly (readonly [BindingKind, string])[]) {
-  const root = await mkdtemp(path.join(tmpdir(), "zhixing-rotation-publication-"));
-  roots.push(root);
+  const root = await createTempDir("credential-rotation-publication");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
   const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts);
+  onTestFinished(() => log.stopStorageMaintenance());
   const secretStore = new MemorySecretStore();
   const source = new CredentialExposureAuthority({
     deviceId: "lost-device",

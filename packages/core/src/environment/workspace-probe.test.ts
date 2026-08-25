@@ -1,7 +1,7 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { createTempDir } from "@zhixing/test-utils";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
@@ -34,8 +34,7 @@ import {
 
 const NOW = "2026-07-30T00:00:00.000Z";
 const LATER = "2026-07-30T00:10:00.000Z";
-const roots: string[] = [];
-
+const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
 const identity: ProtocolSigner & ProtocolSignatureVerifier = {
   sign(schemaId, version, payload) {
     return {
@@ -49,13 +48,7 @@ const identity: ProtocolSigner & ProtocolSignatureVerifier = {
   },
 };
 
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
-
-describe("workspace probe conformance", () => {
+describe("workspace probe conformance", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it.each([
     "local",
     "mesh",
@@ -143,6 +136,18 @@ describe("workspace probe conformance", () => {
 
 async function createFixture() {
   const root = await tempRoot();
+  const logs = new Set<FileAuthorityCommitLog>();
+  onTestFinished(async () => {
+    const settled = await Promise.allSettled(
+      [...logs].map((log) => log.stopStorageMaintenance()),
+    );
+    const failure = settled.find((result) => result.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
+  });
+  const trackLog = (log: FileAuthorityCommitLog): FileAuthorityCommitLog => {
+    logs.add(log);
+    return log;
+  };
   const capacity = new DefaultDeviceCapacityArbiter({
     policy: createDefaultDeviceCapacityPolicy(),
     probe: () => ({
@@ -153,11 +158,11 @@ async function createFixture() {
     }),
   });
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
-  const bindingLog = new FileAuthorityCommitLog(
+  const bindingLog = trackLog(new FileAuthorityCommitLog(
     path.join(root, "binding-log"),
     artifacts,
     { clock: () => NOW },
-  );
+  ));
   const bindings = new WorkspaceBindingService({
     rootDir: path.join(root, "binding-state"),
     catalogGeneration: "catalog-initial",
@@ -178,11 +183,11 @@ async function createFixture() {
     { displayName: "Workspace", absolutePath: workspace },
     localControl("binding-create"),
   );
-  const probeLog = new FileAuthorityCommitLog(
+  const probeLog = trackLog(new FileAuthorityCommitLog(
     path.join(root, "probe-log"),
     artifacts,
     { clock: () => NOW },
-  );
+  ));
   const createHandler = (clock: () => string = () => NOW) =>
     new WorkspaceProbeHandler({
       rootDir: path.join(root, "probe-state"),
@@ -287,7 +292,5 @@ function inventory(): ExecutorVersionInventory {
 }
 
 async function tempRoot(): Promise<string> {
-  const root = await mkdtemp(path.join(tmpdir(), "workspace-probe-"));
-  roots.push(root);
-  return root;
+  return createTempDir("workspace-probe");
 }

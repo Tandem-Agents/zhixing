@@ -1,7 +1,7 @@
-import { link, mkdtemp, mkdir, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { link, mkdir, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
+import { createTempDir } from "@zhixing/test-utils";
 import {
   ArtifactLifecycleIndex,
   FileArtifactStore,
@@ -202,7 +202,7 @@ describe("full authority recovery checkpoints", () => {
       artifacts: fixture.artifacts,
       retention: fixture.lifecycle,
     });
-    const root = await mkdtemp(path.join(tmpdir(), "zhixing-checkpoint-private-import-"));
+    const root = await createTempDir("checkpoint-private-import");
     const store = new FileArtifactStore(path.join(root, "artifacts"));
     const receiver = new FileResumableArtifactReceiver(store, path.join(root, "partials"), {
       maxArtifactBytes: MAX_SURFACE_ASSET_BYTES,
@@ -233,7 +233,6 @@ describe("full authority recovery checkpoints", () => {
     } finally {
       verified.verificationNonce.fill(0);
       retained.fill(0);
-      await rm(root, { recursive: true, force: true });
     }
   }, 120_000);
 
@@ -573,7 +572,7 @@ describe("full authority recovery checkpoints", () => {
       artifacts: fixture.artifacts,
       retention: fixture.lifecycle,
     });
-    const root = await mkdtemp(path.join(tmpdir(), "zhixing-checkpoint-paired-"));
+    const root = await createTempDir("checkpoint-paired");
     const governor = recordingGovernor();
     const sourceGovernor = recordingGovernor();
     const durable = await FileRecoveryCheckpointTarget.openPaired({
@@ -698,7 +697,7 @@ describe("full authority recovery checkpoints", () => {
       artifacts: fixture.artifacts,
       retention: fixture.lifecycle,
     });
-    const root = await mkdtemp(path.join(tmpdir(), "zhixing-checkpoint-inventory-"));
+    const root = await createTempDir("checkpoint-inventory");
     const targetRoot = path.join(root, "target");
     const durable = await FileRecoveryCheckpointTarget.openPaired({
       targetRoot,
@@ -841,7 +840,7 @@ describe("full authority recovery checkpoints", () => {
   }, 120_000);
 
   it("rejects non-independent or linked directory roots before writing", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "zhixing-checkpoint-directory-"));
+    const root = await createTempDir("checkpoint-directory");
     const source = path.join(root, "authority");
     const target = path.join(root, "backup");
     await mkdir(source);
@@ -878,7 +877,7 @@ describe("full authority recovery checkpoints", () => {
       artifacts: fixture.artifacts,
       retention: fixture.lifecycle,
     });
-    const root = await mkdtemp(path.join(tmpdir(), "zhixing-checkpoint-identity-"));
+    const root = await createTempDir("checkpoint-identity");
     const replacedRoot = path.join(root, "replaced");
     await mkdir(replacedRoot);
     const replacedTarget = await FileRecoveryCheckpointTarget.openPaired({
@@ -960,7 +959,7 @@ describe("full authority recovery checkpoints", () => {
     blockingTarget.release();
     await activeDaily;
     await busyOwner.stop();
-  });
+  }, 120_000);
 
   it("emits only the secret-only package and rejects the retired checkpoint-bearing format", async () => {
     const fixture = await authorityFixture();
@@ -1028,7 +1027,7 @@ async function authorityFixture() {
   });
   const projection = applyTrustEvent(initial, rootEvent);
   const trust = buildHomeTrustRecord(projection, key);
-  const directory = await mkdtemp(path.join(tmpdir(), "zhixing-checkpoint-authority-"));
+  const directory = await createTempDir("checkpoint-authority");
   const artifacts = new FileArtifactStore(path.join(directory, "artifacts"));
   const log = new FileAuthorityCommitLog(path.join(directory, "authority"), artifacts, { clock: () => AT });
   const temporaryArtifacts = new FileArtifactStore(path.join(directory, "temporary"));
@@ -1045,6 +1044,7 @@ async function authorityFixture() {
     temporaryPresence: new FileArtifactTemporaryPresenceStore(path.join(directory, "presence")),
     receiver,
   });
+  onTestFinished(() => lifecycle.stopStorageMaintenance());
   return {
     key,
     identity,

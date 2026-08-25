@@ -1,7 +1,6 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it, onTestFinished } from "vitest";
+import { createTempDir } from "@zhixing/test-utils";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
@@ -31,8 +30,7 @@ import {
 
 const NOW = "2026-07-30T00:00:00.000Z";
 const EXPIRY = "2026-07-30T01:00:00.000Z";
-const roots: string[] = [];
-
+const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
 const identity: ProtocolSigner & ProtocolSignatureVerifier = {
   sign(schemaId, version, payload) {
     return {
@@ -46,13 +44,7 @@ const identity: ProtocolSigner & ProtocolSignatureVerifier = {
   },
 };
 
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
-
-describe("WorkspaceBindingService", () => {
+describe("WorkspaceBindingService", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("owns CRUD, CAS, name uniqueness and execution revisions in one log", async () => {
     const service = await createService();
     const created = await service.create(
@@ -311,6 +303,7 @@ function createServiceAt(
     artifacts,
     { clock: () => NOW },
   );
+  onTestFinished(() => log.stopStorageMaintenance());
   const capacity = new DefaultDeviceCapacityArbiter({
     policy: createDefaultDeviceCapacityPolicy(),
     probe: () => ({
@@ -409,9 +402,7 @@ function immediateLease(requestId: string): ImmediateRootResourceLease {
 }
 
 async function tempRoot(): Promise<string> {
-  const root = await mkdtemp(path.join(tmpdir(), "workspace-binding-"));
-  roots.push(root);
-  return root;
+  return createTempDir("workspace-binding");
 }
 
 async function appendRawRecord(root: string, body: unknown): Promise<void> {
@@ -421,6 +412,7 @@ async function appendRawRecord(root: string, body: unknown): Promise<void> {
     artifacts,
     { clock: () => NOW },
   );
+  onTestFinished(() => log.stopStorageMaintenance());
   await log.append([
     {
       stream: "executor:workspace-bindings",

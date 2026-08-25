@@ -1,25 +1,17 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authority";
 import { protocolDigest } from "@zhixing/core/protocol";
+import { createTempDir } from "@zhixing/test-utils";
 import {
   CredentialExposureAuthority,
   exposureGuardedSecretStore,
 } from "./credential-exposure-authority.js";
 
-const roots: string[] = [];
-
-afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-});
-
 describe("credential exposure authority", () => {
   it("blocks only the compromised binding and restores it with one verified rotation envelope", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "zhixing-exposure-"));
-    roots.push(root);
+    const root = await createTempDir("credential-exposure");
     const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
     const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts);
     const secretStore = new MemorySecretStore();

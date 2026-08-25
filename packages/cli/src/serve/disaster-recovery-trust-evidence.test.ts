@@ -1,9 +1,8 @@
-import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished } from "vitest";
 import type { DeviceIdentity, SecretRef, SecretStorePort } from "@zhixing/core/contracts";
+import { createTempDir } from "@zhixing/test-utils";
 import { MeshEndpointDirectory } from "@zhixing/mesh/bootstrap";
 import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
 import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
@@ -24,15 +23,13 @@ import {
   registerDisasterRecoveryTrustEvidenceService,
 } from "./disaster-recovery-trust-evidence.js";
 
-const roots: string[] = [];
 const controls: ProductionMeshControlPlane[] = [];
 
 afterEach(async () => {
   await Promise.all(controls.splice(0).map((control) => control.stop()));
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-describe("disaster recovery reachable-peer evidence", () => {
+describe("disaster recovery reachable-peer evidence", { timeout: 30_000 }, () => {
   it("selects the exact signed suffix from every frozen peer in the cut", async () => {
     const fixture = await trustFixture();
     const registry = new CapturingRegistry();
@@ -144,14 +141,20 @@ describe("disaster recovery reachable-peer evidence", () => {
 });
 
 async function trustFixture() {
-  const localRoot = await temporary("zhixing-recovery-evidence-local-");
-  const peerRoot = await temporary("zhixing-recovery-evidence-peer-");
+  const localRoot = await temporary("recovery-evidence-local");
+  const peerRoot = await temporary("recovery-evidence-peer");
   const localKey = await DeviceKey.generate();
   const peerKey = await DeviceKey.generate();
   const localIdentity = identity(localKey, "local");
   const peerIdentity = identity(peerKey, "peer");
   const localStore = new FileMeshBootstrapStore(localRoot, localKey);
   const peerStore = new FileMeshBootstrapStore(peerRoot, peerKey);
+  onTestFinished(async () => {
+    await Promise.all([
+      localStore.stopStorageMaintenance(),
+      peerStore.stopStorageMaintenance(),
+    ]);
+  });
   const initialized = await localStore.initializeLocalHome({
     key: localKey,
     identity: localIdentity,
@@ -210,10 +213,8 @@ function identity(key: DeviceKey, displayName: string): DeviceIdentity {
   });
 }
 
-async function temporary(prefix: string): Promise<string> {
-  const root = await mkdtemp(path.join(tmpdir(), prefix));
-  roots.push(root);
-  return root;
+async function temporary(label: string): Promise<string> {
+  return createTempDir(label);
 }
 
 class CapturingRegistry extends MeshServiceRegistry {

@@ -1,8 +1,8 @@
-import { lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { lstat, mkdir, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { PathGuard, type GuidanceWarningInput } from "@zhixing/core";
+import { createTempDir } from "@zhixing/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -16,15 +16,13 @@ describe("readGuidanceFile", () => {
   let warnings: GuidanceWarningInput[];
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(os.tmpdir(), "zhixing-guidance-root-"));
-    outside = await mkdtemp(path.join(os.tmpdir(), "zhixing-guidance-out-"));
+    root = await createTempDir("guidance-root");
+    outside = await createTempDir("guidance-outside");
     warnings = [];
   });
 
   afterEach(async () => {
     vi.restoreAllMocks();
-    await rm(root, { recursive: true, force: true });
-    await rm(outside, { recursive: true, force: true });
   });
 
   it("读取普通文件并保留完整内容", async () => {
