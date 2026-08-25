@@ -155,6 +155,7 @@ import {
   projectRecoveryBackupStatus,
 } from "./backup-runtime-owner.js";
 import {
+  governControlProvider,
   governControlTextCall,
   type GovernedTextCall,
 } from "./governed-control-llm.js";
@@ -926,6 +927,17 @@ async function runServerProcess(
       credentialGeneration,
       readCredentials: async () =>
         loadCredentials({ store: startupResult.secretStore }),
+      governProvider: (provider) =>
+        governControlProvider(
+          {
+            governor: ctx.authorityRuntime!.resourceGovernor,
+            origin: { admissionClass: "interactive", entry: "environment-control" },
+            workPrefix: "credential-rotation-provider",
+            defaultMaxOutputTokens: 1,
+            deadlineMs: 15_000,
+          },
+          provider,
+        ),
       mcpStatuses: () => ctx.mcpHub.serverStatuses(),
       channelStatuses: () => ctx.channels?.listStatuses() ?? [],
       ...(ctx.channelConnections

@@ -1,4 +1,4 @@
-import type { ChannelStatus, Message } from "@zhixing/core";
+import type { ChannelStatus, LLMProvider, Message } from "@zhixing/core";
 import type { SecretRef } from "@zhixing/core/contracts";
 import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
 import type { McpServerStatus } from "@zhixing/mcp";
@@ -40,6 +40,8 @@ export interface CredentialRotationPublicationOptions {
   readonly mcpStatuses: () => readonly McpServerStatus[];
   readonly channelStatuses: () => readonly ChannelStatus[];
   readonly waitForChannels?: () => Promise<void>;
+  /** Production provider probes must enter the shared authority control governor. */
+  readonly governProvider?: (provider: LLMProvider) => LLMProvider;
   readonly probeProvider?: (input: {
     readonly providerId: string;
     readonly model: string;
@@ -203,7 +205,12 @@ function readinessFor(
       let verified = false;
       return {
         verify: async () => {
-          const principal = await (options.probeProvider ?? probeProviderCredential)({
+          const principal = await (options.probeProvider ?? ((input) => {
+            if (!options.governProvider) {
+              throw new Error("Credential provider verification governor is not configured");
+            }
+            return probeProviderCredential(input, options.governProvider);
+          }))({
             providerId: binding.id,
             model,
             config: options.config,
@@ -270,12 +277,14 @@ async function probeProviderCredential(input: {
   readonly model: string;
   readonly config: ZhixingConfig;
   readonly credentials: ProviderCredentialProjection;
-}): Promise<string> {
+}, governProvider: (provider: LLMProvider) => LLMProvider): Promise<string> {
   const credentials = input.credentials.providers
     ? { providers: input.credentials.providers }
     : {};
   const resolved = resolveProvider(input.providerId, credentials);
-  const provider = createProvider(input.config, credentials, input.providerId);
+  const provider = governProvider(
+    createProvider(input.config, credentials, input.providerId),
+  );
   const abort = new AbortController();
   const timer = setTimeout(
     () => abort.abort(new Error("Credential provider verification timed out")),

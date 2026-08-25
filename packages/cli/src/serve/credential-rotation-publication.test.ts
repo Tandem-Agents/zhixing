@@ -87,6 +87,17 @@ describe("credential rotation publication", { timeout: 30_000 }, () => {
     expect((await fixture.authority.projection()).rotationRequired).toHaveLength(1);
     expect(await fixture.log.readStream("exposure")).toHaveLength(2);
   });
+
+  it("fails closed before an ungoverned production provider verification", async () => {
+    const fixture = await createFixture([["provider", "main"]]);
+
+    await expect(publishRequiredCredentialRotations(fixture.options)).rejects.toThrow(
+      "Credential provider verification governor is not configured",
+    );
+
+    expect((await fixture.authority.projection()).rotationRequired).toHaveLength(1);
+    expect(await fixture.log.readStream("exposure")).toHaveLength(2);
+  });
 });
 
 type BindingKind = "provider" | "channel" | "mcp";

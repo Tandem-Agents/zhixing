@@ -46,6 +46,21 @@ const GOVERNED_CALL_SITES: ReadonlyArray<{
     governance: "control 根治理——turn 后台维护（scheduler/schedule-trigger）",
   },
   {
+    file: "cli/src/serve/command.ts",
+    marker: 'workPrefix: "journal-maintenance"',
+    governance: "control 根治理——journal maintenance（scheduler/schedule-trigger）",
+  },
+  {
+    file: "cli/src/serve/command.ts",
+    marker: 'workPrefix: "post-adoption-memory"',
+    governance: "control 根治理——post-adoption memory（scheduler/schedule-trigger）",
+  },
+  {
+    file: "cli/src/serve/command.ts",
+    marker: 'workPrefix: "credential-rotation-provider"',
+    governance: "control 根治理——凭据服务核验（interactive/environment-control）",
+  },
+  {
     file: "cli/src/serve/advancement-controller.ts",
     marker: "completionPort.complete({",
     governance: "control 根治理——advancement 准入/草案/修订/收场经 ControlCompletionPort、裁判/窗口经 AdvancementReviewerPort，全部沿调用方租约以稳定 usageId 计量（advancement/advancement-control）",
@@ -117,8 +132,13 @@ describe("provider call governance registry", () => {
       },
       {
         file: "cli/src/serve/command.ts",
-        expected: 2,
-        nature: "llmComplete 治理接线（governControlTextCall 包 ephemeralRuntime.callText）",
+        expected: 4,
+        nature: "llmComplete、journal maintenance 与 post-adoption memory 治理接线",
+      },
+      {
+        file: "cli/src/serve/credential-rotation-publication.ts",
+        expected: 1,
+        nature: "provider 凭据服务核验——生产组合根注入 governControlProvider",
       },
       {
         file: "cli/src/serve/governed-control-llm.ts",
@@ -127,8 +147,18 @@ describe("provider call governance registry", () => {
       },
       {
         file: "cli/src/serve/turn-maintenance.ts",
-        expected: 4,
+        expected: 2,
         nature: "governCallText 透传签名与钩子（实际调用经 access-surfaces 治理注入）",
+      },
+      {
+        file: "cli/src/serve/journal-maintenance.ts",
+        expected: 3,
+        nature: "受治理 callText 绑定、保存与调用（实际治理在 command 组合根）",
+      },
+      {
+        file: "cli/src/serve/post-adoption-memory.ts",
+        expected: 2,
+        nature: "受治理 GovernedTextCall 端口与调用（实际治理在 command 组合根）",
       },
       {
         file: "server/src/perspectives/allocation.ts",
