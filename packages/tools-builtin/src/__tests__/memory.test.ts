@@ -1,93 +1,117 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import type { ToolDefinition, ToolExecutionContext } from "@zhixing/core";
-import { MemoryStore } from "@zhixing/core";
-import { createTempDir } from "@zhixing/test-utils";
+import type {
+  MemoryLogicalEntry,
+  ToolDefinition,
+  ToolExecutionContext,
+} from "@zhixing/core";
 import { createMemoryTool, type MemoryToolPort } from "../memory.js";
 
 /**
  * Memory 工具集成测试
  *
- * 直接测试 MemoryStore 的 CRUD 操作，模拟 memory 工具的行为。
- * 使用真实临时目录，验证端到端的文件读写。
+ * 通过当前 MemoryToolPort 合同观察 memory 工具的 CRUD 调用与结果。
+ * 工具不再拥有文件存储，生产耐久性由 assignment-bound authority port 负责。
  */
 
-describe("Memory Tool (integration via MemoryStore)", () => {
-  let tmpDir: string;
-  let store: MemoryStore;
+describe("Memory Tool (integration via MemoryToolPort)", () => {
+  let store: ObservableMemoryPort;
+  let tool: ToolDefinition;
   const ctx: ToolExecutionContext = { workingDirectory: "/tmp" };
 
-  beforeEach(async () => {
-    tmpDir = await createTempDir("memory-tool");
-    store = new MemoryStore(tmpDir);
+  beforeEach(() => {
+    store = new ObservableMemoryPort();
+    tool = createMemoryTool(store);
   });
 
   it("save → load roundtrip", async () => {
-    await store.save({
+    const saved = await tool.call({
+      action: "save",
       category: "person",
       id: "test-person",
       meta: { name: "Alice", relation: "朋友" },
       content: "在 Google 工作",
-    });
+    }, ctx);
 
-    const entry = await store.load("person", "test-person");
-    expect(entry).not.toBeNull();
-    expect(entry!.meta.name).toBe("Alice");
-    expect(entry!.content).toBe("在 Google 工作");
+    expect(saved.isError).not.toBe(true);
+    expect(store.entry("person", "test-person")).toMatchObject({
+      meta: { name: "Alice", relation: "朋友" },
+      content: "在 Google 工作",
+    });
+    expect(store.operationIds).toEqual(["memory:save"]);
   });
 
   it("save → list → delete → list roundtrip", async () => {
-    await store.save({
+    await tool.call({
+      action: "save",
       category: "person",
       id: "test-person",
       meta: { name: "Test Person", tags: ["test"] },
       content: "步骤 1",
-    });
+    }, ctx);
 
-    let entries = await store.list("person");
-    expect(entries).toHaveLength(1);
+    const listed = await tool.call({ action: "list", category: "person" }, ctx);
+    expect(listed.content).toContain("person memories (1)");
+    expect(listed.content).toContain("Test Person [test] (test-person)");
 
-    await store.delete("person", "test-person");
+    const deleted = await tool.call({
+      action: "delete",
+      category: "person",
+      id: "test-person",
+    }, ctx);
+    expect(deleted.isError).not.toBe(true);
 
-    entries = await store.list("person");
-    expect(entries).toHaveLength(0);
+    const empty = await tool.call({ action: "list", category: "person" }, ctx);
+    expect(empty.content).toBe("No person memories found");
+    expect(store.operationIds).toEqual(["memory:save", "memory:delete"]);
   });
 
   it("search 跨类别", async () => {
-    await store.save({
+    await tool.call({
+      action: "save",
       category: "person",
       id: "alice",
       meta: { name: "Alice" },
       content: "likes TypeScript",
-    });
-    await store.save({
-      category: "person",
-      id: "bob",
+    }, ctx);
+    store.seed({
+      domain: "memory",
+      scope: { kind: "personal" },
+      id: "profile",
       meta: { name: "Bob" },
       content: "TypeScript expert",
+      revision: 1,
+      digest: `sha256:${"b".repeat(64)}`,
     });
 
-    const results = await store.search("TypeScript");
-    expect(results).toHaveLength(2);
+    const results = await tool.call({ action: "search", query: "TypeScript" }, ctx);
+    expect(results.content).toContain("Found 2 memories");
+    expect(results.content).toContain("[person] Alice (alice)");
+    expect(results.content).toContain("[profile] Bob (profile)");
   });
 
   it("update 覆盖已有内容", async () => {
-    await store.save({
+    await tool.call({
+      action: "save",
       category: "person",
       id: "evolving-person",
       meta: { name: "My Person", version: 1 },
       content: "Version 1 content",
-    });
+    }, ctx);
 
-    await store.save({
+    await tool.call({
+      action: "update",
       category: "person",
       id: "evolving-person",
       meta: { name: "My Person (Updated)", version: 2 },
       content: "Version 2 content",
-    });
+    }, ctx);
 
-    const entry = await store.load("person", "evolving-person");
-    expect(entry!.meta.version).toBe(2);
-    expect(entry!.content).toBe("Version 2 content");
+    expect(store.entry("person", "evolving-person")).toMatchObject({
+      meta: { name: "My Person (Updated)", version: 2 },
+      content: "Version 2 content",
+      revision: 2,
+    });
+    expect(store.operationIds).toEqual(["memory:save", "memory:update"]);
   });
 });
 
@@ -144,4 +168,53 @@ function fakePort(overrides: Partial<MemoryToolPort>): MemoryToolPort {
     delete: async () => false,
     ...overrides,
   };
+}
+
+class ObservableMemoryPort implements MemoryToolPort {
+  readonly #entries = new Map<string, MemoryLogicalEntry>();
+  readonly operationIds: string[] = [];
+
+  async save(input: Parameters<MemoryToolPort["save"]>[0]): Promise<void> {
+    const key = this.#key(input.category, input.id);
+    const previous = this.#entries.get(key);
+    this.operationIds.push(input.operationId);
+    this.#entries.set(key, {
+      domain: input.category === "profile" ? "memory" : "people",
+      scope: { kind: "personal" },
+      id: input.id,
+      meta: input.meta,
+      content: input.content,
+      revision: (previous?.revision ?? 0) + 1,
+      digest: `sha256:${"a".repeat(64)}`,
+    });
+  }
+
+  async search(query: string): Promise<readonly MemoryLogicalEntry[]> {
+    const needle = query.toLowerCase();
+    return [...this.#entries.values()].filter((entry) =>
+      JSON.stringify(entry).toLowerCase().includes(needle));
+  }
+
+  async list(category: Parameters<MemoryToolPort["list"]>[0]): Promise<readonly MemoryLogicalEntry[]> {
+    const domain = category === "profile" ? "memory" : "people";
+    return [...this.#entries.values()].filter((entry) => entry.domain === domain);
+  }
+
+  async delete(input: Parameters<MemoryToolPort["delete"]>[0]): Promise<boolean> {
+    this.operationIds.push(input.operationId);
+    return this.#entries.delete(this.#key(input.category, input.id));
+  }
+
+  seed(entry: MemoryLogicalEntry): void {
+    const category = entry.domain === "memory" ? "profile" : "person";
+    this.#entries.set(this.#key(category, entry.id), entry);
+  }
+
+  entry(category: "profile" | "person", id: string): MemoryLogicalEntry | undefined {
+    return this.#entries.get(this.#key(category, id));
+  }
+
+  #key(category: "profile" | "person", id: string): string {
+    return `${category}:${id}`;
+  }
 }

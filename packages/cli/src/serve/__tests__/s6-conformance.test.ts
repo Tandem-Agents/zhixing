@@ -1015,6 +1015,7 @@ function createJobUnsignedEnvelope(input: {
   readonly signer: ProtocolSigner;
   readonly executorId: string;
   readonly permissionSnapshot: TrustRuleSnapshot;
+  readonly executorSnapshot: ExecutorCapabilitySnapshot;
 }): UnsignedJobEnvelope {
   const assignmentId = "job-assignment-s6";
   const delivery = {
@@ -1031,19 +1032,17 @@ function createJobUnsignedEnvelope(input: {
       taskRevision: 1,
     },
     requires: {
-      runtimeConfigRev: 1,
-      modelProfileRev: 1,
-      policyRev: 1,
-      skillsRev: 1,
-      rubricsRev: 1,
-      promptAssetsRev: 1,
+      ...input.executorSnapshot.inventory.configVersions,
+      ...input.executorSnapshot.inventory.assetVersions,
       permissionSnapshotVersion: input.permissionSnapshot.snapshotVersion,
     },
-    protocolVersion: "1",
-    tools: [],
-    mcpServers: [],
+    protocolVersion: input.executorSnapshot.descriptor.protocolVersion,
+    tools: [...input.executorSnapshot.descriptor.tools],
+    mcpServers: [...input.executorSnapshot.descriptor.mcpServers],
     environment: {},
-    credentialBindings: [],
+    credentialBindings: input.executorSnapshot.descriptor.credentialBindings.map(
+      (binding) => ({ ...binding }),
+    ),
   };
   const controlBody = {
     v: 1 as const,
@@ -1323,6 +1322,7 @@ async function runJobScenario(
     signer: authority.signer,
     executorId: authority.executorId,
     permissionSnapshot,
+    executorSnapshot: snapshot,
   });
   const plan: JobAssignmentPlan = {
     taskId: "task-s6",

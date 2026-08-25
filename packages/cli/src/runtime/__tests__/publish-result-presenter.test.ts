@@ -56,7 +56,7 @@ describe("PublishResultPresenter", () => {
         domain: "memory",
         scope: { kind: "personal" },
         category: "profile",
-        id: "profile-a",
+        id: "profile",
         expectedDigest: `sha256:${"1".repeat(64)}`,
       },
       decision: {

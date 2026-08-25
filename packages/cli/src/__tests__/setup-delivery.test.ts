@@ -460,6 +460,9 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
       configurationSnapshot: { executableVersion: "1", profile: "main" },
     });
     const firstPrepared = await prepareAuthority(first);
+    const firstInventory = structuredClone(
+      first.executorCapabilities.snapshotFor(first.executorId)!.inventory,
+    );
     const replayed = await setupAuthorityRuntime({
       zhixingHome: home,
       secretStore,
@@ -475,17 +478,17 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
     });
     const advancedPrepared = await prepareAuthority(advanced);
 
-    expect(first.executorCapabilities.snapshotFor(first.executorId)?.inventory.inventoryRevision)
-      .toBe(1);
     expect(replayed.executorCapabilities.snapshotFor(replayed.executorId)?.inventory.inventoryRevision)
-      .toBe(1);
+      .toBe(firstInventory.inventoryRevision);
     const advancedInventory = advanced.executorCapabilities
       .snapshotFor(advanced.executorId)?.inventory;
-    expect(advancedInventory?.inventoryRevision).toBe(2);
+    expect(advancedInventory?.inventoryRevision).toBe(
+      firstInventory.inventoryRevision + 1,
+    );
     expect(new Set([
       ...Object.values(advancedInventory!.configVersions),
       ...Object.values(advancedInventory!.assetVersions),
-    ])).toEqual(new Set([2]));
+    ])).toEqual(new Set([advancedInventory!.capabilityRevision]));
     expect(replayedPrepared.policy.permissionSnapshot.digest).toBe(
       firstPrepared.policy.permissionSnapshot.digest,
     );
@@ -518,6 +521,9 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
     const first = await prepareAuthority(authority, {
       permissionRules: [makeRule("permission-a")],
     });
+    const firstInventory = structuredClone(
+      authority.executorCapabilities.snapshotFor(authority.executorId)!.inventory,
+    );
     const second = await prepareAuthority(authority, {
       permissionRules: [makeRule("permission-b")],
     });
@@ -526,12 +532,16 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
     expect(first.policy.permissionSnapshot.snapshotVersion).toBe(1);
     expect(second.policy.permissionSnapshot.snapshotVersion).toBe(2);
     expect(current.descriptor.revision).toBe(1);
-    expect(current.inventory.inventoryRevision).toBe(2);
+    expect(current.inventory.inventoryRevision).toBe(
+      firstInventory.inventoryRevision + 1,
+    );
     expect(current.inventory.permissionSnapshotHighWater).toBe(2);
-    expect(new Set([
-      ...Object.values(current.inventory.configVersions),
-      ...Object.values(current.inventory.assetVersions),
-    ])).toEqual(new Set([1]));
+    expect(current.inventory.configVersions).toEqual(
+      firstInventory.configVersions,
+    );
+    expect(current.inventory.assetVersions).toEqual(
+      firstInventory.assetVersions,
+    );
     expect(authority.permissionSnapshotFor(first.policy.permissionSnapshot.digest))
       .toEqual(first.policy.permissionSnapshot);
 
@@ -901,6 +911,7 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
       const peer = await setupAuthorityRuntime({
         zhixingHome: peerHome,
         secretStore: new MemorySecretStore(),
+        executorId: "executor:peer",
         executorReadiness: TEST_EXECUTOR_READINESS,
       });
       const local = await setupAuthorityRuntime({
@@ -984,10 +995,10 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
       (firstSnapshot?.inventory.inventoryRevision ?? 0) + 1,
     );
     expect(rotatedSnapshot?.descriptor.credentialBindings[0]?.revision).toBe(
-      rotatedSnapshot?.inventory.inventoryRevision,
+      rotatedSnapshot?.descriptor.revision,
     );
     expect(rotatedPrepared.policy.manifestCapabilities
-      .credentialBindings[0]?.revision).toBe(rotatedSnapshot?.inventory.inventoryRevision);
+      .credentialBindings[0]?.revision).toBe(rotatedSnapshot?.descriptor.revision);
   });
 
   it("versions permission policy by portable canonical content", async () => {

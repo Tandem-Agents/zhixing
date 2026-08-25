@@ -31,6 +31,7 @@ export class IncrementalWorksceneActivityProjection {
   readonly #index: DurableProjectionIndex;
   readonly #latest = new Map<string, string>();
   readonly #refreshes = new Map<string, Promise<void>>();
+  #stopped = false;
 
   constructor(options: IncrementalWorksceneActivityProjectionOptions) {
     this.#index = options.log.durableProjection<SessionInternalRecord>({
@@ -63,7 +64,7 @@ export class IncrementalWorksceneActivityProjection {
    */
   peek(sceneId: string): string | undefined {
     const normalizedSceneId = requireId(sceneId);
-    if (!this.#refreshes.has(normalizedSceneId)) {
+    if (!this.#stopped && !this.#refreshes.has(normalizedSceneId)) {
       const refresh = this.get(normalizedSceneId)
         .then(() => undefined)
         .catch(() => undefined)
@@ -75,6 +76,14 @@ export class IncrementalWorksceneActivityProjection {
       this.#refreshes.set(normalizedSceneId, refresh);
     }
     return this.#latest.get(normalizedSceneId);
+  }
+
+  /** Stops new read-behind work and waits until every started refresh settles. */
+  async stop(): Promise<void> {
+    this.#stopped = true;
+    while (this.#refreshes.size > 0) {
+      await Promise.allSettled([...this.#refreshes.values()]);
+    }
   }
 
   async contributions(sceneId: string): Promise<

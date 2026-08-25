@@ -151,6 +151,19 @@ describe("post-adoption memory", () => {
     expect(loadCandidates).not.toHaveBeenCalled();
     expect(f.mutate.mock.calls[0]![1].requestId)
       .toMatch(/^post-adoption-effect:sha256:[a-f0-9]{64}:attempt:1$/u);
+    expect([
+      ...new Set(
+        (await f.authorityLog.readStream("run:local:device-a:conversation-1"))
+          .map((entry) => (entry.body as { readonly kind?: string }).kind)
+          .filter((kind): kind is string => kind?.startsWith("post-adoption-memory-") === true),
+      ),
+    ].sort()).toEqual([
+      "post-adoption-memory-attempt",
+      "post-adoption-memory-completed",
+      "post-adoption-memory-discovery",
+      "post-adoption-memory-effect",
+      "post-adoption-memory-plan",
+    ].sort());
   });
 
   it("re-drives an incomplete durable input without reloading transcript history", async () => {

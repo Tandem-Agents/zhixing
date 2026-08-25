@@ -12,6 +12,9 @@ const SRC_DIR = path.resolve(
 const ENTRY_FILE = path.join(SRC_DIR, "index.ts");
 
 const LIGHTWEIGHT_RUNTIME_IMPORTS = new Set([
+  "node:fs",
+  "node:path",
+  "node:url",
   "chalk",
   "commander",
   "./screen/cli-writer.js",

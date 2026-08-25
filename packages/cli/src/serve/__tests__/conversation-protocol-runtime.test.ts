@@ -977,7 +977,7 @@ describe("ConversationProtocolRuntime", () => {
         "Local executor rejected a freshly issued assignment",
       );
       expect(validateBindingSpy).toHaveBeenCalledOnce();
-      expect(readinessReads).toEqual([["memory"], []]);
+      expect(readinessReads).toEqual([["memory"], ["memory"], []]);
       expect(bindingResults).toMatchObject([
         { code: "capability-gap", retryable: true },
       ]);

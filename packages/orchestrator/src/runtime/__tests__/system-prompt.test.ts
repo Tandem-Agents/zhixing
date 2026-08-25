@@ -8,13 +8,14 @@ import {
   WORKING_MODE_TEXT,
 } from "../system-prompt.js";
 import { subAgentProfile } from "../../profile/default-profiles.js";
-import { MemoryStore, type ToolDefinition } from "@zhixing/core";
+import type { ToolDefinition } from "@zhixing/core";
 import {
   createBashTool,
   createEditTool,
   createGlobTool,
   createGrepTool,
   createMemoryTool,
+  type MemoryToolPort,
   createReadTool,
   createWebFetchTool,
   createWriteTool,
@@ -361,9 +362,15 @@ describe("buildSystemPrompt", () => {
   // 与上一条无 memory 锚点互补:Tool Usage 的 memory 提示行改动 / 段顺序变化
   // 都会被此快照拦截。两个快照共同覆盖主 agent 段集全态。
   it("主路径静态区(默认 profile + 含 memory 工具)完整段集 byte-equal 锚点", () => {
+    const memoryPort: MemoryToolPort = {
+      save: async () => undefined,
+      search: async () => [],
+      list: async () => [],
+      delete: async () => false,
+    };
     const prompt = buildSystemPrompt({
       ...ctx,
-      tools: [...defaultTools, createMemoryTool(new MemoryStore("/tmp/zhixing-test-memory"))],
+      tools: [...defaultTools, createMemoryTool(memoryPort)],
     });
     const staticPart = prompt.split(CACHE_BOUNDARY)[0];
     expect(staticPart).toMatchInlineSnapshot(`

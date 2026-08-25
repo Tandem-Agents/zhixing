@@ -1224,6 +1224,12 @@
       "kind": "dynamic-import",
       "references": 1,
       "sourceZone": "cli/serve",
+      "target": "cli/runtime"
+    },
+    {
+      "kind": "dynamic-import",
+      "references": 1,
+      "sourceZone": "cli/serve",
       "target": "package:@zhixing/channel-feishu"
     },
     {
@@ -1258,7 +1264,7 @@
     },
     {
       "kind": "import",
-      "references": 144,
+      "references": 145,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1354,7 +1360,7 @@
     },
     {
       "kind": "type-import",
-      "references": 57,
+      "references": 59,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/mesh"
     },
@@ -1402,7 +1408,7 @@
     },
     {
       "kind": "type-import",
-      "references": 10,
+      "references": 11,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/server"
     },

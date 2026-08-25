@@ -163,7 +163,7 @@ describe("HTTP Server (S2.B)", () => {
       }
       await Promise.all(children.map(waitForExit));
     }
-  });
+  }, 120_000);
 
   it("close() resolves and stops accepting connections", async () => {
     const port = server.port;

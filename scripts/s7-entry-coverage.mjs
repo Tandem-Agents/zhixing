@@ -1063,7 +1063,7 @@ export function inspectManagedHostAssembly(records) {
   ) failures.push("managed host plan or reconcile trigger descriptor exact-set drifted");
   if (
     count(pairing, 'reconcileAfterPairing(options, "pairing-issuer-committed")') !== 1 ||
-    count(pairing, 'reconcileAfterPairing(options, "pairing-joiner-committed")') !== 1 ||
+    count(pairing, 'reconcileAfterPairing(input.input, "pairing-joiner-committed")') !== 1 ||
     count(config, 'reconcileCurrentManagedService("local-role-config-committed")') !== 1 ||
     !config.includes("const reload = await captureConfigPostCommitEffect(() => input.reload({") ||
     !config.includes("const reconcile = input.launchSelectionChanged") ||
@@ -1144,7 +1144,8 @@ export function inspectManagedHostAssembly(records) {
     !bootstrap.includes("export function resolveHostLaunchPlan(") ||
     !bootstrap.includes("configuration.executorAutoStart === true") ||
     !bootstrap.includes('"anchor-authority-conflict"') ||
-    !bootstrap.includes("A non-current device cannot launch the anchor role") ||
+    !bootstrap.includes('if (roleSet.has("anchor")) {') ||
+    !bootstrap.includes('return Object.freeze({ mode: "managed" as const, roles });') ||
     !secrets.includes('context?: "foreground" | "managed"') ||
     !secrets.includes("async loadExisting(): Promise<Buffer>") ||
     !secrets.includes('const BACKEND_BINDING_FILE = `${SECRET_STORE_FILE_PREFIX}.backend.json`;')
@@ -1338,7 +1339,7 @@ export function inspectRecoveryBackupAssembly(records) {
     !pairedTarget.includes("root-establishment.pending.json") ||
     !pairedTarget.includes("assertRootEstablishment(") ||
     !pairedTarget.includes('t: "checkpoint.activate-root"') ||
-    !backup.includes("activationConnection.target.activateRoot(replay)") ||
+    !backup.includes("connection.target.activateRoot(replay)") ||
     !backup.includes("await connection.target.activateRoot({") ||
     !runtime.includes("rootLifecycle: true") ||
     !runtime.includes("commitRootActivation:") ||

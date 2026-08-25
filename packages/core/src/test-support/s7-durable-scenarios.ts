@@ -186,15 +186,20 @@ export async function executeWorksceneRegistryCase(
         worksceneCreateMutation(),
         globalControlContext("workscene-create"),
       );
+      const deleted = await pendingFixture.adapter.mutate(
+        {
+          kind: "workscene-delete",
+          sceneId: "scene-a",
+          expectedRevision: 1,
+        },
+        globalControlContext("workscene-delete"),
+      );
+      assert(
+        deleted.kind === "workscene-deleted",
+        "committed workscene deletion did not return its authoritative result",
+      );
       await expectFailure(
-        () => pendingFixture.adapter.mutate(
-          {
-            kind: "workscene-delete",
-            sceneId: "scene-a",
-            expectedRevision: 1,
-          },
-          globalControlContext("workscene-delete"),
-        ),
+        () => pendingFixture.adapter.recoverPendingDeletions(),
         "projection unavailable",
       );
       await expectInstance(
@@ -217,61 +222,77 @@ export async function executeWorksceneRegistryCase(
     globalReadContext("workscene-corruption-establish"),
   );
   if (caseKey === "unknown-record") {
-    await fixture.log.append([{ stream: "intent:workscene-registry", body: { t: "unknown-record" } }]);
+    const before = (await fixture.log.readAll()).length;
     await expectFailure(
-      () => createRecoveredWorksceneAdapter(fixture.log).read(
-        { kind: "workscene-list" },
-        globalReadContext("workscene-corruption-replay"),
-      ),
+      () => fixture.log.append([{
+        stream: "intent:workscene-registry",
+        body: { t: "unknown-record" },
+      }]),
       "tag",
       { kind: "corruption", caseKey: "unknown-record" },
     );
+    assert(
+      (await fixture.log.readAll()).length === before,
+      "unknown workscene record appended a durable record",
+    );
   } else if (caseKey === "non-contiguous-revision") {
     const mutation = worksceneCreateMutation();
-    await fixture.log.append([{
-      stream: "intent:workscene-registry",
-      body: {
-        t: "workscene-control-applied",
-        requestId: "bad-revision",
-        mutationDigest: protocolDigest("WorksceneWriteMutation", 1, mutation),
-        mutation,
-        result: {
-          kind: "workscene-applied",
-          operation: "create",
-          revision: 2,
-          scene: {
-            id: "scene-a",
-            revision: 1,
-            name: "Project",
-            createdAt: NOW,
-            lastActiveAt: NOW,
-          },
-        },
-        at: NOW,
-      },
-    }]);
+    const before = (await fixture.log.readAll()).length;
     await expectFailure(
-      () => createRecoveredWorksceneAdapter(fixture.log).read(
-        { kind: "workscene-list" },
-        globalReadContext("workscene-revision-replay"),
-      ),
+      () => fixture.log.append([{
+        stream: "intent:workscene-registry",
+        body: {
+          t: "workscene-control-applied",
+          requestId: "bad-revision",
+          mutationDigest: protocolDigest("WorksceneWriteMutation", 1, mutation),
+          mutation,
+          result: {
+            kind: "workscene-applied",
+            operation: "create",
+            revision: 2,
+            scene: {
+              id: "scene-a",
+              revision: 1,
+              name: "Project",
+              createdAt: NOW,
+              lastActiveAt: NOW,
+            },
+          },
+          at: NOW,
+        },
+      }]),
       "revision",
       { kind: "corruption", caseKey: "non-contiguous-revision" },
     );
+    assert(
+      (await fixture.log.readAll()).length === before,
+      "non-contiguous workscene revision appended a durable record",
+    );
   } else if (caseKey === "broken-deletion-confirmation") {
-    await fixture.log.append([{
-      stream: "intent:workscene-registry",
-      body: {
-        t: "workscene-deletion-projected",
-        sceneId: "scene-a",
-        deletionRevision: 1,
-        at: NOW,
-      },
-    }]);
-    await expectFailure(
-      () => createRecoveredWorksceneAdapter(fixture.log).recoverPendingDeletions(),
-      "pending deletion",
+    const before = (await fixture.log.readAll()).length;
+    let caught: unknown;
+    try {
+      await fixture.log.append([{
+        stream: "intent:workscene-registry",
+        body: {
+          t: "workscene-deletion-projected",
+          sceneId: "scene-a",
+          deletionRevision: 1,
+          at: NOW,
+        },
+      }]);
+    } catch (error) {
+      caught = error;
+    }
+    assert(
+      caught instanceof Error && caught.message.toLowerCase().includes("deletion"),
+      "corrupt deletion confirmation was not rejected at append",
       { kind: "corruption", caseKey: "broken-deletion-confirmation" },
+    );
+    observeError(caught);
+    assert(
+      (await fixture.log.readAll()).length === before,
+      "corrupt deletion confirmation appended a durable record",
     );
   } else {
     throw new Error(`Unimplemented workscene registry corruption: ${caseKey}`);

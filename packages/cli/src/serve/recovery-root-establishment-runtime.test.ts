@@ -1,7 +1,10 @@
+import path from "node:path";
 import type { HomeTrustRecord, SecretStorePort } from "@zhixing/core/contracts";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import { MESH_ENDPOINT_SERVICE_ID } from "@zhixing/mesh/bootstrap";
+import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
+import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import type { MeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import {
   RecoveryRootEstablishmentRuntime,
@@ -10,30 +13,36 @@ import {
 
 describe("recovery root establishment runtime", () => {
   it("keeps ordinary business services closed and exposes the strict receiver only on the target", async () => {
+    const root = await createTempDir("recovery-root-establishment-runtime");
+    const targetMesh = bootstrap("target", ["executor"], path.join(root, "target"));
     const target = new RecoveryRootEstablishmentRuntime({
-      zhixingHome: "Z:/root-establishment-target",
-      mesh: bootstrap("target", ["executor"]),
+      zhixingHome: path.join(root, "target"),
+      mesh: targetMesh,
       secretStore: secretStore(),
       storageMaintenance: maintenance(),
     });
     expect(target.services.list()).toEqual([...ROOT_ESTABLISHMENT_SERVICE_EXACT_SET]);
     await target.stop();
+    await targetMesh.bootstrapStore.stopStorageMaintenance();
     expect(target.services.list()).toEqual([]);
 
+    const issuerMesh = bootstrap("issuer", ["anchor"], path.join(root, "issuer"));
     const issuer = new RecoveryRootEstablishmentRuntime({
-      zhixingHome: "Z:/root-establishment-issuer",
-      mesh: bootstrap("issuer", ["anchor"]),
+      zhixingHome: path.join(root, "issuer"),
+      mesh: issuerMesh,
       secretStore: secretStore(),
       storageMaintenance: maintenance(),
     });
     expect(issuer.services.list()).toEqual([MESH_ENDPOINT_SERVICE_ID]);
     await issuer.stop();
+    await issuerMesh.bootstrapStore.stopStorageMaintenance();
   });
 });
 
 function bootstrap(
   localDeviceId: "issuer" | "target",
   roles: readonly ("anchor" | "executor")[],
+  root: string,
 ): Extract<MeshRuntimeBootstrap, { mode: "trusted-home" }> {
   const identity = (deviceId: string) => ({ deviceId, keyId: `key:${deviceId}` });
   const trust = {
@@ -53,7 +62,7 @@ function bootstrap(
     mode: "trusted-home",
     roles,
     deviceKey: { deviceId: localDeviceId } as never,
-    bootstrapStore: {} as never,
+    bootstrapStore: new FileMeshBootstrapStore(root),
     trust,
     configuration: { enabledRoles: roles } as never,
     endpoints: {} as never,

@@ -257,6 +257,7 @@ describe("RpcConversationFacade · 方法域", () => {
     expect(fake.requests[4]?.params).toEqual({
       conversationId: "conv-1",
       action: { kind: "add", content: "x" },
+      requestId: expect.stringMatching(/^task-list:turn_/u),
     });
   });
 
@@ -402,7 +403,7 @@ describe("RpcConversationFacade · 方法域", () => {
     });
 
     expect(fake.requests).toEqual([
-      { method: "session.new", params: undefined },
+      { method: "session.new", params: {} },
       {
         method: "session.clear",
         params: {
