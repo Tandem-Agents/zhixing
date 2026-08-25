@@ -857,14 +857,14 @@ export class PairedCheckpointReceiver implements PairedCheckpointTransport {
     }
     this.#assertBinding(command);
     if (command.t === "checkpoint.begin") {
+      const rootActivation = command.envelope.manifest.purpose.kind === "root-activation";
       if (
-        (!this.options.rootEstablishment && !this.options.rootLifecycle &&
+        (this.options.rootEstablishment && !rootActivation) ||
+        (!this.options.rootEstablishment &&
+          !(this.options.rootLifecycle && rootActivation) &&
           command.envelope.recipientKeyId !== this.options.recipientKeyId) ||
         command.envelope.manifest.scope.length === 0
       ) throw new TypeError("Paired recovery envelope is not authorized for this target");
-      if (this.options.rootLifecycle && command.envelope.manifest.purpose.kind !== "root-activation") {
-        throw new TypeError("Paired root lifecycle accepts only root activation checkpoints");
-      }
       if (this.options.rootEstablishment) {
         await this.options.staging.bindRootEstablishment({
           homeId: command.homeId,
@@ -873,7 +873,7 @@ export class PairedCheckpointReceiver implements PairedCheckpointTransport {
           checkpointId: command.envelope.checkpointId,
           recipientKeyId: command.envelope.recipientKeyId,
         }, signal);
-      } else if (this.options.rootLifecycle) {
+      } else if (this.options.rootLifecycle && rootActivation) {
         await this.options.staging.bindRootLifecycle({
           homeId: command.homeId,
           sourceDeviceId: command.sourceDeviceId,
@@ -901,7 +901,7 @@ export class PairedCheckpointReceiver implements PairedCheckpointTransport {
         })),
       };
     }
-    if (this.options.rootEstablishment || this.options.rootLifecycle) {
+    if (this.options.rootEstablishment) {
       const binding = {
         homeId: command.homeId,
         sourceDeviceId: command.sourceDeviceId,
@@ -909,10 +909,20 @@ export class PairedCheckpointReceiver implements PairedCheckpointTransport {
         checkpointId: command.checkpointId,
         recipientKeyId: await this.#rootActivationRecipient(command.checkpointId, signal),
       };
-      if (this.options.rootEstablishment) {
-        await this.options.staging.assertRootEstablishment(binding, signal);
-      } else {
-        await this.options.staging.assertRootLifecycle(binding, signal);
+      await this.options.staging.assertRootEstablishment(binding, signal);
+    } else if (this.options.rootLifecycle) {
+      const existing = await this.options.staging.rootLifecycleBinding(
+        command.checkpointId,
+        signal,
+      );
+      if (existing) {
+        await this.options.staging.assertRootLifecycle({
+          homeId: command.homeId,
+          sourceDeviceId: command.sourceDeviceId,
+          targetId: `backup-device:${command.targetDeviceId}`,
+          checkpointId: command.checkpointId,
+          recipientKeyId: existing.recipientKeyId,
+        }, signal);
       }
     }
     if (command.t === "checkpoint.progress") {
@@ -962,7 +972,8 @@ export class PairedCheckpointReceiver implements PairedCheckpointTransport {
     if (command.t === "checkpoint.activate-root") {
       const checkpoint = await this.options.staging.read(command.checkpointId, signal);
       const binding = this.options.rootLifecycle
-        ? await this.options.staging.rootLifecycleBinding(command.checkpointId, signal)
+        ? await this.options.staging.rootLifecycleBinding(command.checkpointId, signal) ??
+          await this.options.staging.rootEstablishmentBinding(signal)
         : await this.options.staging.rootEstablishmentBinding(signal);
       if (
         !binding ||

@@ -222,6 +222,103 @@ describe("production mesh runtime bootstrap", () => {
     expect(replay.localEndpoint?.revision).toBe(trusted.localEndpoint?.revision);
   });
 
+  it("replays a strict legacy trust-only package after target response loss without claiming a full backup", async () => {
+    const home = await createTempDir("mesh-runtime-legacy-root");
+    const secrets = new MemorySecretStore();
+    const local = await prepareMeshRuntimeBootstrap({ zhixingHome: home, secretStore: secrets });
+    const identity = enrollDeviceIdentity(local.deviceKey, {
+      displayName: "home anchor",
+      platform: "headless",
+      enrolledAt: "2026-08-12T00:00:00.000Z",
+    });
+    const initialized = await local.bootstrapStore.initializeLocalHome({
+      key: local.deviceKey,
+      identity,
+      roles: ["anchor", "executor"],
+      at: "2026-08-12T00:00:00.000Z",
+    });
+    const recoveryRoot = RecoveryRoot.generate();
+    const plan = {
+      v: 1 as const,
+      kind: "establish" as const,
+      rootEvent: createRecoveryRootEvent({
+        current: initialized.projection,
+        op: "establish",
+        candidate: recoveryRoot,
+        outerSigner: local.deviceKey,
+        at: "2026-08-12T00:01:00.000Z",
+      }),
+    };
+    const checkpoint = createRootActivationCheckpoint({
+      checkpointId: "01J00000000000000000000041",
+      createdAt: "2026-08-12T00:01:00.000Z",
+      plan,
+      recoveryRoot,
+      issuer: Object.assign({}, identity, { sign: local.deviceKey.sign.bind(local.deviceKey) }),
+      scope: ["trust"],
+      domainRevisions: { trust: initialized.projection.chainHead.seq },
+      upToLsn: initialized.projection.chainHead.seq,
+      plaintextChunks: [Buffer.from("legacy trust checkpoint")],
+    });
+    const legacyPackage = encodeLegacyRecoveryPackage(recoveryRoot, checkpoint);
+    const durableTarget = await FileRecoveryCheckpointTarget.openPaired({
+      targetRoot: `${home}/recovery-target`,
+      targetDeviceId: "legacy-target",
+    });
+    let loseWriteResponse = true;
+    const responseLossTarget = {
+      targetId: durableTarget.targetId,
+      independenceDomain: durableTarget.independenceDomain,
+      async writeDurable(value: Parameters<typeof durableTarget.writeDurable>[0]) {
+        await durableTarget.writeDurable(value);
+        if (loseWriteResponse) {
+          loseWriteResponse = false;
+          throw new Error("simulated target response loss");
+        }
+      },
+      read: durableTarget.read.bind(durableTarget),
+    };
+    const activation = {
+      store: local.bootstrapStore,
+      issuerKey: local.deviceKey,
+      issuerIdentity: identity,
+      current: initialized.projection,
+      targetId: durableTarget.targetId,
+      targetIndependenceDomain: durableTarget.independenceDomain,
+      createTarget: async () => responseLossTarget,
+      writeLine: () => undefined,
+      confirmRecoveryPackage: async () => legacyPackage,
+    };
+    try {
+      await expect(activateInitialRecoveryRoot(activation)).rejects.toThrow(
+        "simulated target response loss",
+      );
+      await expect(activateInitialRecoveryRoot(activation)).resolves.toMatchObject({
+        recoveryRootPublicKey: recoveryRoot.rootPublicKey,
+        recoveryBackupPublicKey: recoveryRoot.backupPublicKey,
+      });
+
+      const trust = await local.bootstrapStore.loadTrustProjection();
+      if (!trust) throw new Error("recovery trust projection is missing");
+      const records = await local.bootstrapStore.loadCheckpointRecords();
+      const readiness = projectRecoveryReadiness({
+        trust,
+        verifiedRecords: records.filter(
+          (record): record is Extract<CheckpointStreamRecord, { t: "checkpoint-verified" }> =>
+            record.t === "checkpoint-verified",
+        ),
+        createdRecords: records.filter(
+          (record): record is Extract<CheckpointStreamRecord, { t: "checkpoint-created" }> =>
+            record.t === "checkpoint-created",
+        ),
+        checkpointEnvelopes: [checkpoint.envelope],
+      });
+      expect(readiness).toMatchObject({ ready: true, fullBackupReady: false });
+    } finally {
+      await durableTarget.close();
+    }
+  });
+
   it("rejects a configured role outside the signed trust projection", async () => {
     const root = await createTempDir("mesh-runtime-role-guard");
     const secrets = new MemorySecretStore();
@@ -260,6 +357,23 @@ describe("production mesh runtime bootstrap", () => {
   });
 
 });
+
+function encodeLegacyRecoveryPackage(
+  recoveryRoot: RecoveryRoot,
+  checkpoint: ReturnType<typeof createRootActivationCheckpoint>,
+): string {
+  return `zxrp1:${Buffer.from(canonicalize({
+    v: 1,
+    recoverySecret: recoveryRoot.exportSecret(),
+    checkpoint: {
+      envelope: checkpoint.envelope,
+      chunks: checkpoint.chunks?.map((chunk) => ({
+        seq: chunk.seq,
+        bytes: Buffer.from(chunk.bytes).toString("base64url"),
+      })) ?? [],
+    },
+  }), "utf8").toString("base64url")}`;
+}
 
 class MemorySecretStore implements SecretStorePort {
   readonly values = new Map<string, string>();

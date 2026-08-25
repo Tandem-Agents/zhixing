@@ -621,22 +621,26 @@ async function pairedHomeWithoutRecoveryRoot(version: "v1" | "v2") {
     rootCertificatePem: sourceBootstrap.deviceKey.rootCertificatePem,
   });
   const port = await freePort();
-  await targetLocal.bootstrapStore.acceptEndpoint({
-    v: 1,
-    deviceId: sourceIdentity.deviceId,
-    transports: [{ kind: "direct", host: "127.0.0.1", port }],
-    revision: 1,
-    at,
-  });
+  const anchorConfiguration = {
+    enabledRoles: ["anchor"] as const,
+    anchorListen: { bind: { host: "127.0.0.1", port } },
+  };
   const rendezvous = `pairwise-${version}`;
   await sourceSecrets.put({ kind: "rendezvous", bindingId: targetIdentity.deviceId }, rendezvous);
   await targetSecrets.put({ kind: "rendezvous", bindingId: sourceIdentity.deviceId }, rendezvous);
   await writeFile(path.join(sourceHome, "config.jsonc"), JSON.stringify({
-    mesh: {
-      enabledRoles: ["anchor"],
-      anchorListen: { bind: { host: "127.0.0.1", port } },
-    },
+    mesh: anchorConfiguration,
   }), "utf8");
+  const sourceEndpoint = await prepareMeshRuntimeBootstrap({
+    zhixingHome: sourceHome,
+    secretStore: sourceSecrets,
+    storageMaintenance: sourceStorage,
+    configuration: anchorConfiguration,
+  });
+  if (sourceEndpoint.mode !== "trusted-home" || !sourceEndpoint.localEndpoint) {
+    throw new Error("expected the source anchor endpoint");
+  }
+  await targetLocal.bootstrapStore.acceptEndpoint(sourceEndpoint.localEndpoint);
   const targetBootstrap = await prepareMeshRuntimeBootstrap({
     zhixingHome: targetHome,
     secretStore: targetSecrets,

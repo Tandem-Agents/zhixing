@@ -22,7 +22,10 @@ import {
 import type { AuthorityCheckpointOwnerPort } from "@zhixing/mesh/checkpoint-owner";
 import type { CheckpointPackage } from "@zhixing/mesh/checkpoint";
 import type { RecoveryRoot } from "@zhixing/mesh/recovery-root";
-import { decodeRecoveryPackage } from "@zhixing/mesh/recovery-package";
+import {
+  decodeRecoveryPackage,
+  requireCurrentRecoveryPackage,
+} from "@zhixing/mesh/recovery-package";
 import type { DeviceKey } from "@zhixing/mesh/device-identity";
 import { projectCredentialExposures } from "@zhixing/mesh/credential-exposure";
 import { replayTrustChain } from "@zhixing/mesh/trust-chain";
@@ -170,7 +173,9 @@ export class AnchorUninstallCoordinator {
     readonly operationId: string;
     readonly recoveryPackage: string;
   }): Promise<AnchorUninstallPublicState> {
-    const decoded = decodeRecoveryPackage(input.recoveryPackage);
+    const decoded = requireCurrentRecoveryPackage(
+      decodeRecoveryPackage(input.recoveryPackage),
+    );
     await this.preflight();
     const owner = this.options.checkpointOwner;
     if (!owner) throw new Error("No recovery backup target is configured");
@@ -218,7 +223,9 @@ export class AnchorUninstallCoordinator {
       operation.identity.path.kind !== "recovery-backup") {
       throw new Error("Recovery-backup uninstall operation is unknown");
     }
-    const decoded = decodeRecoveryPackage(recoveryPackage);
+    const decoded = requireCurrentRecoveryPackage(
+      decodeRecoveryPackage(recoveryPackage),
+    );
     await this.#assertRecoveryRoot(operation.identity, decoded.root);
     return this.#driveRecovery(operation.identity, true, decoded.root);
   }

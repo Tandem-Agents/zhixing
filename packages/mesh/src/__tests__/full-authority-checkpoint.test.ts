@@ -25,6 +25,7 @@ import { AuthorityCheckpointService } from "../checkpoint-service.js";
 import { AuthorityCheckpointOwner } from "../checkpoint-owner.js";
 import { FileRecoveryCheckpointTarget, type RetirableRecoveryCheckpointTarget } from "../checkpoint-target.js";
 import {
+  createRootActivationCheckpoint,
   openFullAuthorityCheckpoint,
   readCheckpointChunk,
   verifyStoredFullAuthorityCheckpoint,
@@ -39,7 +40,11 @@ import {
   decodePairedCheckpointResult,
   type PairedCheckpointTransport,
 } from "../paired-checkpoint-target.js";
-import { decodeRecoveryPackage, encodeRecoveryPackage } from "../recovery-package.js";
+import {
+  decodeRecoveryPackage,
+  encodeRecoveryPackage,
+  requireCurrentRecoveryPackage,
+} from "../recovery-package.js";
 import { RecoveryRoot, keyIdForPublicKey } from "../recovery-root.js";
 import {
   applyTrustEvent,
@@ -617,6 +622,17 @@ describe("full authority recovery checkpoints", () => {
     const local = await materializePackage(captured.checkpoint);
     expect(materializedBytes(remote)).toEqual(materializedBytes(local));
 
+    const initialRootCheckpoint = createRootActivationCheckpoint({
+      checkpointId: "01J00000000000000000000006",
+      createdAt: AT,
+      plan: { v: 1, kind: "establish", rootEvent: fixture.rootEvent },
+      recoveryRoot: fixture.root,
+      issuer: fixture.issuer,
+      scope: ["trust"],
+      domainRevisions: { trust: fixture.initial.chainHead.seq },
+      upToLsn: fixture.initial.chainHead.seq,
+      plaintextChunks: [Buffer.from("root establishment")],
+    });
     const rootEstablishmentStaging = path.join(root, "root-establishment-incoming");
     const rootEstablishmentReceiver = () => new PairedCheckpointReceiver({
       homeId: fixture.trust.homeId,
@@ -634,11 +650,11 @@ describe("full authority recovery checkpoints", () => {
         homeId: fixture.trust.homeId,
         sourceDeviceId: fixture.identity.deviceId,
         targetDeviceId: "device-target",
-        recipientKeyId: captured.checkpoint.envelope.recipientKeyId,
+        recipientKeyId: initialRootCheckpoint.envelope.recipientKeyId,
         transport: receiver,
         storageMaintenance: sourceGovernor.port,
       });
-    await rootEstablishmentTarget(rootEstablishmentReceiver()).writeDurable(captured.checkpoint);
+    await rootEstablishmentTarget(rootEstablishmentReceiver()).writeDurable(initialRootCheckpoint);
     const restartedReceiver = rootEstablishmentReceiver();
     await expect(restartedReceiver.request({
       v: 1,
@@ -646,10 +662,10 @@ describe("full authority recovery checkpoints", () => {
       homeId: fixture.trust.homeId,
       sourceDeviceId: fixture.identity.deviceId,
       targetDeviceId: "device-target",
-      envelope: captured.checkpoint.envelope,
+      envelope: initialRootCheckpoint.envelope,
     })).resolves.toEqual({
       t: "checkpoint.begun",
-      checkpointId: captured.checkpoint.envelope.checkpointId,
+      checkpointId: initialRootCheckpoint.envelope.checkpointId,
     });
     await expect(restartedReceiver.request({
       v: 1,
@@ -658,8 +674,8 @@ describe("full authority recovery checkpoints", () => {
       sourceDeviceId: fixture.identity.deviceId,
       targetDeviceId: "device-target",
       envelope: {
-        ...captured.checkpoint.envelope,
-        checkpointId: "01J00000000000000000000006",
+        ...initialRootCheckpoint.envelope,
+        checkpointId: "01J00000000000000000000007",
       },
     })).rejects.toThrow(/already bound/);
 
@@ -961,11 +977,14 @@ describe("full authority recovery checkpoints", () => {
     await busyOwner.stop();
   }, 120_000);
 
-  it("emits only the secret-only package and rejects the retired checkpoint-bearing format", async () => {
+  it("strictly discriminates current and legacy trust-only recovery packages", async () => {
     const fixture = await authorityFixture();
     const current = encodeRecoveryPackage(fixture.root);
     expect(current.startsWith("zxrp2:")).toBe(true);
-    expect(decodeRecoveryPackage(current).root.publicIdentity()).toEqual(fixture.root.publicIdentity());
+    expect(decodeRecoveryPackage(current)).toMatchObject({
+      version: 2,
+      root: expect.any(RecoveryRoot),
+    });
     const currentPayload = JSON.parse(Buffer.from(current.slice(6), "base64url").toString("utf8")) as Record<string, unknown>;
     expect(() => decodeRecoveryPackage(`zxrp2:${Buffer.from(canonicalize({
       ...currentPayload,
@@ -976,8 +995,100 @@ describe("full authority recovery checkpoints", () => {
       rootIdentity: { ...(currentPayload.rootIdentity as Record<string, unknown>), rootKeyId: "wrong" },
     }), "utf8").toString("base64url")}`)).toThrow(/does not match/);
 
-    expect(() => decodeRecoveryPackage(`zxrp1:${Buffer.from("{}", "utf8").toString("base64url")}`))
-      .toThrow("unsupported format");
+    const checkpoint = createRootActivationCheckpoint({
+      checkpointId: "01J00000000000000000000009",
+      createdAt: AT,
+      plan: { v: 1, kind: "establish", rootEvent: fixture.rootEvent },
+      recoveryRoot: fixture.root,
+      issuer: fixture.issuer,
+      scope: ["trust"],
+      domainRevisions: { trust: fixture.initial.chainHead.seq },
+      upToLsn: fixture.initial.chainHead.seq,
+      plaintextChunks: [Buffer.from("legacy trust checkpoint")],
+    });
+    const legacy = legacyRecoveryPackage(fixture.root, checkpoint);
+    const decodedLegacy = decodeRecoveryPackage(legacy);
+    expect(decodedLegacy).toMatchObject({
+      version: 1,
+      root: expect.any(RecoveryRoot),
+      checkpoint: { envelope: { checkpointId: checkpoint.envelope.checkpointId } },
+    });
+    expect(() => requireCurrentRecoveryPackage(decodedLegacy)).toThrow(
+      "valid only for initial root activation",
+    );
+
+    const legacyPayload = JSON.parse(
+      Buffer.from(legacy.slice(6), "base64url").toString("utf8"),
+    ) as Record<string, unknown>;
+    expect(() => decodeRecoveryPackage(`zxrp1:${Buffer.from(canonicalize({
+      ...legacyPayload,
+      extra: true,
+    }), "utf8").toString("base64url")}`)).toThrow(/unknown fields/);
+    expect(() => decodeRecoveryPackage(`zxrp1:${Buffer.from(canonicalize({
+      ...legacyPayload,
+      recoverySecret: RecoveryRoot.generate().exportSecret(),
+    }), "utf8").toString("base64url")}`)).toThrow(/does not match/);
+    const legacyCheckpoint = legacyPayload.checkpoint as {
+      chunks: Array<{ seq: number; bytes: string }>;
+      envelope: Record<string, unknown>;
+    };
+    expect(() => decodeRecoveryPackage(`${legacy}=`)).toThrow(/canonical/);
+    expect(() => decodeRecoveryPackage(`zxrp1:${Buffer.from(canonicalize({
+      ...legacyPayload,
+      checkpoint: {
+        ...legacyCheckpoint,
+        envelope: {
+          ...legacyCheckpoint.envelope,
+          recipientKeyId: "wrong-recipient",
+        },
+      },
+    }), "utf8").toString("base64url")}`)).toThrow(/does not match/);
+    const manifest = legacyCheckpoint.envelope.manifest as Record<string, unknown>;
+    expect(() => decodeRecoveryPackage(`zxrp1:${Buffer.from(canonicalize({
+      ...legacyPayload,
+      checkpoint: {
+        ...legacyCheckpoint,
+        envelope: {
+          ...legacyCheckpoint.envelope,
+          manifest: { ...manifest, scope: ["trust", "global-authority"] },
+        },
+      },
+    }), "utf8").toString("base64url")}`)).toThrow(/trust-only/);
+    const purpose = manifest.purpose as Record<string, unknown>;
+    const plan = purpose.plan as Record<string, unknown>;
+    const legacyRootEvent = plan.rootEvent as Record<string, unknown>;
+    expect(() => decodeRecoveryPackage(`zxrp1:${Buffer.from(canonicalize({
+      ...legacyPayload,
+      checkpoint: {
+        ...legacyCheckpoint,
+        envelope: {
+          ...legacyCheckpoint.envelope,
+          manifest: {
+            ...manifest,
+            purpose: {
+              ...purpose,
+              plan: {
+                ...plan,
+                rootEvent: {
+                  ...legacyRootEvent,
+                  body: {
+                    ...(legacyRootEvent.body as Record<string, unknown>),
+                    rootPublicKey: "wrong-root",
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    }), "utf8").toString("base64url")}`)).toThrow(/does not match/);
+    expect(() => decodeRecoveryPackage(`zxrp1:${Buffer.from(canonicalize({
+      ...legacyPayload,
+      checkpoint: {
+        ...legacyCheckpoint,
+        chunks: [{ ...legacyCheckpoint.chunks[0], bytes: "dGFtcGVy" }],
+      },
+    }), "utf8").toString("base64url")}`)).toThrow(/does not match its envelope/);
   });
 
   it("persists only a finite verification failure code", async () => {
@@ -1050,12 +1161,28 @@ async function authorityFixture() {
     identity,
     issuer: Object.assign({}, identity, { sign: key.sign.bind(key) }),
     projection,
+    initial,
+    rootEvent,
     trust,
     root,
     artifacts,
     log,
     lifecycle,
   };
+}
+
+function legacyRecoveryPackage(root: RecoveryRoot, checkpoint: CheckpointPackage): string {
+  return `zxrp1:${Buffer.from(canonicalize({
+    v: 1,
+    recoverySecret: root.exportSecret(),
+    checkpoint: {
+      envelope: checkpoint.envelope,
+      chunks: checkpoint.chunks?.map((chunk) => ({
+        seq: chunk.seq,
+        bytes: Buffer.from(chunk.bytes).toString("base64url"),
+      })) ?? [],
+    },
+  }), "utf8").toString("base64url")}`;
 }
 
 function checkpointService(

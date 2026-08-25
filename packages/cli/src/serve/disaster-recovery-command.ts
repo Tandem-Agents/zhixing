@@ -136,11 +136,12 @@ export async function runDisasterRecoveryCommand(
     }
     const selected = selectDisasterRecoveryCandidate(candidates, selection.backupNumber);
     context.writeLine("请输入恢复包以验证备份；输入内容不会显示。");
-    const decoded = options.readRecoveryPackage
-      ? (await import("@zhixing/mesh/recovery-package")).decodeRecoveryPackage(
-          await options.readRecoveryPackage(),
-        )
-      : await readRecoveryPackageFromTty();
+    const recoveryPackages = await import("@zhixing/mesh/recovery-package");
+    const decoded = recoveryPackages.requireCurrentRecoveryPackage(
+      options.readRecoveryPackage
+        ? recoveryPackages.decodeRecoveryPackage(await options.readRecoveryPackage())
+        : await readRecoveryPackageFromTty(),
+    );
     if (
       selected.entry.recipientKeyId !== decoded.root.publicIdentity().backupKeyId ||
       selected.entry.envelope.recipientKeyId !== decoded.root.publicIdentity().backupKeyId

@@ -305,15 +305,22 @@ export async function activateInitialRecoveryRoot(input: {
         prompt: "Save the recovery package independently, then paste the complete package to verify it: ",
       });
   const candidateRoot = decoded.root;
+  const legacy = decoded.version === 1 ? decoded : undefined;
   if (pending && (
     pending.plan.rootEvent.body.backupPublicKey !== candidateRoot.backupPublicKey ||
     pending.plan.rootEvent.body.rootPublicKey !== candidateRoot.rootPublicKey
   )) throw new Error("Recovery package does not match the pending root activation");
-  if (recoveryRoot && (
+  if (pending && legacy && canonicalize(legacy.checkpoint.envelope) !== canonicalize(
+    pending.checkpoint.envelope,
+  )) {
+    throw new Error("Legacy recovery package does not match the pending root activation");
+  }
+  if (recoveryRoot && decoded.version === 2 && (
     recoveryRoot.backupPublicKey !== candidateRoot.backupPublicKey ||
     recoveryRoot.rootPublicKey !== candidateRoot.rootPublicKey
   )) throw new Error("Recovery package read-back does not match the generated recovery root");
-  const createdAt = pending?.checkpoint.envelope.createdAt ?? new Date().toISOString();
+  const createdAt = pending?.checkpoint.envelope.createdAt ??
+    legacy?.checkpoint.envelope.createdAt ?? new Date().toISOString();
   const generatedPlan = {
     v: 1 as const,
     kind: "establish" as const,
@@ -325,10 +332,16 @@ export async function activateInitialRecoveryRoot(input: {
       at: createdAt,
     }),
   };
-  const plan = pending?.plan ?? generatedPlan;
+  const legacyPurpose = legacy?.checkpoint.envelope.manifest.purpose;
+  if (legacyPurpose && legacyPurpose.kind !== "root-activation") {
+    throw new Error("Legacy recovery package does not contain a root activation plan");
+  }
+  const plan = pending?.plan ??
+    (legacyPurpose?.kind === "root-activation" ? legacyPurpose.plan : generatedPlan);
   const trust = await input.store.loadTrustRecord();
   if (!trust) throw new Error("Recovery activation requires the local home trust record");
-  const checkpoint = pending?.checkpoint ?? (await captureFullAuthorityCheckpoint({
+  const checkpoint = pending?.checkpoint ?? legacy?.checkpoint ??
+    (await captureFullAuthorityCheckpoint({
     checkpointId: createCheckpointId(),
     createdAt,
     purpose: { kind: "root-activation", plan },
@@ -340,7 +353,7 @@ export async function activateInitialRecoveryRoot(input: {
     log: input.store.authorityLog(),
     artifacts: input.store.artifactStore(),
     retention: input.store.checkpointRetention(),
-  })).checkpoint;
+    })).checkpoint;
   const target = await input.createTarget({
     checkpointId: checkpoint.envelope.checkpointId,
     recipientKeyId: checkpoint.envelope.recipientKeyId,

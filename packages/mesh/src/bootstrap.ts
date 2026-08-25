@@ -574,6 +574,8 @@ export async function commitMeshEndpointUpdate(
   ) => MeshEndpointDescriptor | Promise<MeshEndpointDescriptor>,
 ): Promise<MeshEndpointDescriptor> {
   const descriptor = validateMeshEndpointDescriptor(value);
+  const current = directory.get(descriptor.deviceId);
+  if (current && canonicalize(current) === canonicalize(descriptor)) return current;
   const accepted = persist
     ? validateMeshEndpointDescriptor(await persist(descriptor))
     : descriptor;

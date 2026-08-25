@@ -23,7 +23,11 @@ import {
   type RetirableRecoveryCheckpointTarget,
 } from "@zhixing/mesh/checkpoint-target";
 import { captureFullAuthorityCheckpoint } from "@zhixing/mesh/full-checkpoint";
-import { decodeRecoveryPackage, encodeRecoveryPackage } from "@zhixing/mesh/recovery-package";
+import {
+  decodeRecoveryPackage,
+  encodeRecoveryPackage,
+  requireCurrentRecoveryPackage,
+} from "@zhixing/mesh/recovery-package";
 import { enrollDeviceIdentity, type DeviceKey } from "@zhixing/mesh/device-identity";
 import {
   activateAnchorIssuerKey,
@@ -110,21 +114,9 @@ export async function runBackupSetupCommand(
       ? await prepareInitialRoot(context, options.readRecoveryPackage)
       : undefined;
     await context.targets.select(binding);
-    if (!prepared) {
-      const replay = await currentPairedRootActivation(context, binding.targetId);
-      if (replay) {
-        const activationConnection = await connectPairedTarget(
-          context,
-          binding.deviceId,
-          keyIdForPublicKey(context.trust.recoveryBackupPublicKey!),
-        );
-        try {
-          await activationConnection.target.activateRoot(replay);
-        } finally {
-          await activationConnection.close();
-        }
-      }
-    }
+    const replay = prepared
+      ? undefined
+      : await currentPairedRootActivation(context, binding.targetId);
     const connection = await connectPairedTarget(
       context,
       binding.deviceId,
@@ -133,6 +125,7 @@ export async function runBackupSetupCommand(
         : keyIdForPublicKey(context.trust.recoveryBackupPublicKey!),
     );
     try {
+      if (replay) await connection.target.activateRoot(replay);
       await completeBackupSetup(
         context,
         connection.target,
@@ -179,7 +172,9 @@ export async function runRecoveryRootRotateCommand(
 ): Promise<void> {
   if (!input.userConfirmed) throw new Error("请先确认已准备保存新的恢复码");
   const context = await openContext(options, false);
-  const currentPackage = await readDecodedRecoveryPackage(options.readRecoveryPackage);
+  const currentPackage = requireCurrentRecoveryPackage(
+    await readDecodedRecoveryPackage(options.readRecoveryPackage),
+  );
   const candidate = await prepareReplacementRoot(context, options);
   const target = await openCurrentTarget(context, candidate.root, options);
   try {
@@ -216,7 +211,9 @@ export async function runRecoveryRootInvalidateCommand(
 ): Promise<void> {
   if (!input.userConfirmed) throw new Error("请先确认立即停用当前恢复码");
   const context = await openContext(options, false);
-  const decoded = await readDecodedRecoveryPackage(options.readRecoveryPackage);
+  const decoded = requireCurrentRecoveryPackage(
+    await readDecodedRecoveryPackage(options.readRecoveryPackage),
+  );
   await (await lifecycle(context)).invalidate(decoded.root);
   context.writeLine("当前恢复码已停用；创建新恢复码前，恢复备份不可用于接管值班。");
 }
@@ -340,7 +337,9 @@ export async function runBackupVerifyCommand(options: BackupCommandOptions = {})
   const connection = await openTargetBinding(context, binding);
   try {
     const service = createService(context, context.trust, connection.target);
-    const decoded = await readDecodedRecoveryPackage(options.readRecoveryPackage);
+    const decoded = requireCurrentRecoveryPackage(
+      await readDecodedRecoveryPackage(options.readRecoveryPackage),
+    );
     await service.verify({ checkpointId: candidate.checkpointId, recoveryRoot: decoded.root });
     context.writeLine("恢复备份已从实际目标完整解封并验证，可用于恢复。");
   } finally {
@@ -460,6 +459,7 @@ interface PreparedInitialRoot {
   readonly root: RecoveryRoot;
   readonly plan: Parameters<RecoveryActivationCoordinator["activatePrepared"]>[0]["plan"];
   readonly checkpoint: Parameters<RecoveryActivationCoordinator["activatePrepared"]>[0]["checkpoint"];
+  readonly legacyTrustOnly: boolean;
 }
 
 async function prepareInitialRoot(
@@ -470,6 +470,17 @@ async function prepareInitialRoot(
   const recoveryPackage = encodeRecoveryPackage(root);
   context.writeLine(`恢复包：${recoveryPackage}`);
   const decoded = await readDecodedRecoveryPackage(readRecoveryPackage);
+  if (decoded.version === 1) {
+    if (decoded.checkpoint.envelope.manifest.purpose.kind !== "root-activation") {
+      throw new Error("旧恢复包不包含根激活计划");
+    }
+    return {
+      root: decoded.root,
+      plan: decoded.checkpoint.envelope.manifest.purpose.plan,
+      checkpoint: decoded.checkpoint,
+      legacyTrustOnly: true,
+    };
+  }
   if (
     decoded.root.rootPublicKey !== root.rootPublicKey ||
     decoded.root.backupPublicKey !== root.backupPublicKey
@@ -503,7 +514,7 @@ async function prepareInitialRoot(
   if (checkpoint.envelope.recipientKeyId !== keyIdForPublicKey(decoded.root.backupPublicKey)) {
     throw new Error("恢复包与恢复 checkpoint 的 recipient 身份不一致");
   }
-  return { root: decoded.root, plan, checkpoint };
+  return { root: decoded.root, plan, checkpoint, legacyTrustOnly: false };
 }
 
 async function establishInitialRoot(
@@ -511,7 +522,7 @@ async function establishInitialRoot(
   target: RetirableRecoveryCheckpointTarget,
   readRecoveryPackage?: () => Promise<string>,
   prepared?: PreparedInitialRoot,
-): Promise<void> {
+): Promise<PreparedInitialRoot> {
   const initial = prepared ?? await prepareInitialRoot(context, readRecoveryPackage);
   await new RecoveryActivationCoordinator(context.store.bootstrapAuthority()).activatePrepared({
     current: context.projection,
@@ -523,6 +534,7 @@ async function establishInitialRoot(
     sourceIndependenceDomain: `filesystem:${await sourceDevice(context.store)}`,
     now: () => new Date().toISOString(),
   });
+  return initial;
 }
 
 async function completeBackupSetup(
@@ -532,8 +544,10 @@ async function completeBackupSetup(
   prepared?: PreparedInitialRoot,
 ): Promise<void> {
   if (!context.trust.recoveryRootPublicKey || !context.trust.recoveryBackupPublicKey) {
-    await establishInitialRoot(context, target, readRecoveryPackage, prepared);
-    context.writeLine("恢复备份已创建、回读并验证，可用于恢复。");
+    const initial = await establishInitialRoot(context, target, readRecoveryPackage, prepared);
+    context.writeLine(initial.legacyTrustOnly
+      ? "旧恢复包中的恢复根已安全激活；请再次运行 zz backup setup 创建完整恢复备份。"
+      : "恢复备份已创建、回读并验证，可用于恢复。");
     return;
   }
   const checkpoint = await createService(context, context.trust, target).createAndReplicate({
@@ -728,7 +742,9 @@ async function prepareReplacementRoot(
 ): Promise<{ readonly root: RecoveryRoot }> {
   const generated = RecoveryRoot.generate();
   context.writeLine(`新的恢复码：${encodeRecoveryPackage(generated)}`);
-  const readBack = await readDecodedRecoveryPackage(options.readRecoveryPackage);
+  const readBack = requireCurrentRecoveryPackage(
+    await readDecodedRecoveryPackage(options.readRecoveryPackage),
+  );
   if (
     readBack.root.rootPublicKey !== generated.rootPublicKey ||
     readBack.root.backupPublicKey !== generated.backupPublicKey
