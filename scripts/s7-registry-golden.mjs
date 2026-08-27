@@ -24,7 +24,13 @@ export async function captureCanonicalRegistryGolden() {
       "disabled-empty": registryFor([]),
       "surface-only": registryFor(["surface"]),
     },
-    retiredMethods: ["workspace.binding.admin", "workspace.binding.reset"],
+    retiredMethods: [
+      "memory.journalStats",
+      "memory.peopleList",
+      "memory.profileGet",
+      "workspace.binding.admin",
+      "workspace.binding.reset",
+    ],
     entryCoverage: await captureS7EntryCoverage(),
   };
 }

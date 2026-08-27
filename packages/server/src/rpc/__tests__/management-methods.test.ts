@@ -1,5 +1,5 @@
 /**
- * trust.* / skill.* / memory.* 管理面方法契约 —— 薄壳直达目录、坏参数
+ * trust.* / skill.* 管理面方法契约 —— 薄壳直达目录、坏参数
  * fail-fast、skill 写后向全连接广播 skill.changed(携结构版本)。
  */
 
@@ -13,23 +13,16 @@ import {
   buildSkillSetStateMethod,
   buildSkillArchiveMethod,
 } from "../methods/skill.js";
-import {
-  buildMemoryJournalStatsMethod,
-  buildMemoryProfileGetMethod,
-  buildMemoryPeopleListMethod,
-} from "../methods/memory.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 import type { ServerContext } from "../../context.js";
 import type {
   SkillDirectory,
   TrustDirectory,
-  MemoryDirectory,
 } from "../../runtime/management-directories.js";
 
 function makeCtx(slots: {
   trust?: TrustDirectory;
   skills?: SkillDirectory;
-  memory?: MemoryDirectory;
   broadcastAll?: (method: string, params: unknown) => void;
 }) {
   return {
@@ -141,27 +134,6 @@ describe("skill.*", () => {
       call(buildSkillArchiveMethod(), { skillId: "ghost" }, ctx),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.NOT_FOUND });
     expect(broadcastAll).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("memory.*", () => {
-  it("profileGet / journalStats / peopleList 只读透传", async () => {
-    const ctx = makeCtx({
-      memory: {
-        profileGet: async () => ({ id: "profile" }) as never,
-        journalStats: async () => ({ totalFiles: 3 }) as never,
-        peopleList: async () => [{ id: "p1" }] as never,
-      },
-    });
-    expect(await call(buildMemoryProfileGetMethod(), {}, ctx)).toEqual({
-      profile: { id: "profile" },
-    });
-    expect(await call(buildMemoryJournalStatsMethod(), {}, ctx)).toEqual({
-      stats: { totalFiles: 3 },
-    });
-    expect(await call(buildMemoryPeopleListMethod(), {}, ctx)).toEqual({
-      people: [{ id: "p1" }],
-    });
   });
 });
 

@@ -15,26 +15,23 @@
  *   `needsPermission` 在当前实现里只是自描述文档字段（grep 全仓库无运行时消费）。
  *   真正驱动 confirm 弹窗的是 `OperationClassifier`：声明 `boundaries` 让分类器
  *   把 enter/exit/change_approve 归到 `agent-context` / `filesystem.write` 这类
- *   external 类，自然升级到 confirm；list / memory_query 声明 `filesystem.read`
+ *   external 类，自然升级到 confirm；list 声明 `filesystem.read`
  *   归为 observe，自动放行。声明而非依赖 BoundaryImpactClassifier 的 fail-closed
  *   critical 兜底 —— 那条路径是"忘了声明的最后保底"，不应该作为 intended 行为。
  *
  *   - LLM 调 enter / exit / change_approve → 系统弹 confirm 让用户拍板
- *   - LLM 调 list / memory_query → 自动放行
+ *   - LLM 调 list → 自动放行
  *   - 用户命令 `/work` / `/exit` 走产品命令分发，根本不经 SecurityPipeline，
  *     天然不需要确认（用户意图即授权）
  */
 
 import {
-  compareMemoryLogicalEntries,
   getEnabledWorksceneToolActions,
   getWorksceneToolBoundaries,
   getWorksceneToolPostTurnControlKind,
-  memoryLogicalEntryKey,
   normalizeSceneName,
   worksceneToolRequiresExplicitConfirmation,
   type JsonSchema,
-  type MemoryLogicalEntry,
   type ToolDefinition,
   type WorksceneManagementToolName,
 } from "@zhixing/core";
@@ -55,9 +52,6 @@ export interface WorksceneCurrentToolContext {
   readonly sceneId: string;
   readonly sceneName: string;
 }
-
-/** 单条记忆片段上限 —— 控制注入主上下文的体量（只读检索非 raw dump）。 */
-const MEMORY_SNIPPET_CAP = 500;
 
 function activeAssignment() {
   const run = runContextStorage.getStore();
@@ -155,45 +149,6 @@ async function stageWorkscene(
   });
 }
 
-async function readSceneMemory(
-  sceneId: string,
-  queryText: string,
-): Promise<readonly MemoryLogicalEntry[]> {
-  const query = activeAssignment().query;
-  const scope = { kind: "workscene", sceneId } as const;
-  if (queryText) {
-    const hits: MemoryLogicalEntry[] = [];
-    for (const domain of ["memory", "people"] as const) {
-      const result = await query.read({
-        kind: "memory-search",
-        scope,
-        domain,
-        query: queryText,
-        limit: 20,
-      });
-      if (result.kind !== "memory-search") {
-        throw new Error("工作场景记忆检索返回了错误的结果类型");
-      }
-      hits.push(...result.hits.map((hit) => hit.entry));
-    }
-    return [
-      ...new Map(hits.map((entry) => [memoryLogicalEntryKey(entry), entry])).values(),
-    ].sort(compareMemoryLogicalEntries).slice(0, 20);
-  }
-  const entries: MemoryLogicalEntry[] = [];
-  for (const memoryQuery of [
-    { kind: "memory-list", scope, domain: "memory", category: "profile" },
-    { kind: "memory-list", scope, domain: "people" },
-  ] as const) {
-    const result = await query.read(memoryQuery);
-    if (result.kind !== "memory-list") {
-      throw new Error("工作场景记忆目录返回了错误的结果类型");
-    }
-    entries.push(...result.entries);
-  }
-  return entries;
-}
-
 function ok(content: string): Promise<{ content: string }> {
   return Promise.resolve({ content });
 }
@@ -287,7 +242,7 @@ export function createWorkmodeEnterTool(
     properties: {
       sceneId: {
         type: "string",
-        description: "要进入的工作场景 id（用 workscene_list 或 workscene_memory_query 确认 id）",
+        description: "要进入的工作场景 id（用 workscene_list 确认 id）",
       },
     },
     required: ["sceneId"],
@@ -295,7 +250,7 @@ export function createWorkmodeEnterTool(
   return {
     name: "workmode_enter",
     description:
-      "进入一个工作场景：后续对话切到该场景的独立运行态（场景目录 + 场景记忆域 + power 模型）。" +
+      "进入一个工作场景：后续对话切到该场景的独立运行态（场景目录 + power 模型）。" +
       "切换在用户确认后、于本 turn 结束的 turn 边界发生——调用本工具后请正常把本轮回复收尾，不要假设已经切换。",
     inputSchema,
     isReadOnly: false,
@@ -696,100 +651,6 @@ export function createWorksceneClearWorkdirCurrentTool(
         context?.toolCallId,
       );
       return ok("已记录解除当前工作场景的工作区绑定；本轮成功完成后生效。");
-    },
-  };
-}
-
-/**
- * workscene_memory_query（main-only，只读）—— 检索任一/全部工作场景记忆域。
- *
- * 按 query 子串搜索（无 query 则列目录索引），返回 id + 标题 + 截断片段；
- * 各场景只经 assignment-bound GlobalQuery 读取权威逻辑记忆。
- */
-export function createWorksceneMemoryQueryTool(
-  _workscenes: Pick<WorksceneToolDirectory, "list" | "get">,
-): ToolDefinition {
-  const inputSchema: JsonSchema = {
-    type: "object",
-    properties: {
-      sceneId: {
-        type: "string",
-        description: "限定某个工作场景 id；省略则检索全部工作场景",
-      },
-      query: {
-        type: "string",
-        description: "关键词子串；省略则返回各场景记忆条目索引",
-      },
-    },
-  };
-  return {
-    name: "workscene_memory_query",
-    description:
-      "只读检索工作场景的记忆域（人物/画像）。用于进入场景前先探查已有积累，" +
-      "据此决定直接进入、还是先向用户澄清。",
-    inputSchema,
-    isReadOnly: true,
-    isParallelSafe: true,
-    needsPermission: false,
-    // 只读检索各场景记忆域目录 → filesystem.read → observe → 自动放行。
-    boundaries: [{ boundaryType: "filesystem", access: "read", dynamic: false }],
-    async call(input) {
-      const sceneId =
-        typeof input.sceneId === "string" ? input.sceneId.trim() : "";
-      const query =
-        typeof input.query === "string" ? input.query.trim() : "";
-
-      const scenes = sceneId
-        ? await (async () => {
-            const s = await readWorkscene(sceneId);
-            return s ? [s] : [];
-          })()
-        : await readWorkscenes();
-
-      if (scenes.length === 0) {
-        return ok(
-          sceneId
-            ? `工作场景 "${sceneId}" 不存在`
-            : "当前没有任何工作场景",
-        );
-      }
-
-      const blocks: string[] = [];
-      for (const scene of scenes) {
-        const header = `# 工作场景「${scene.name}」(id: ${scene.id})`;
-        const entries = await readSceneMemory(scene.id, query);
-        if (query) {
-          const hits = entries;
-          if (hits.length === 0) {
-            blocks.push(`${header}\n（无匹配「${query}」的记忆）`);
-            continue;
-          }
-          const lines = hits.map((e) => {
-            const title = String(e.meta.title ?? e.meta.name ?? e.id);
-            const snippet = e.content.slice(0, MEMORY_SNIPPET_CAP);
-            return `- [${e.id}] ${title}\n  ${snippet}`;
-          });
-          blocks.push(`${header}\n${lines.join("\n")}`);
-        } else {
-          const idx: string[] = [];
-          for (const category of ["person", "profile"] as const) {
-            const categoryEntries = entries.filter(
-              (entry) =>
-                (category === "profile" && entry.domain === "memory") ||
-                (category === "person" && entry.domain === "people"),
-            );
-            if (categoryEntries.length > 0) {
-              idx.push(
-                `${category}: ${categoryEntries.map((entry) => entry.id).join(", ")}`,
-              );
-            }
-          }
-          blocks.push(
-            `${header}\n${idx.length > 0 ? idx.join("\n") : "（记忆域为空）"}`,
-          );
-        }
-      }
-      return ok(blocks.join("\n\n"));
     },
   };
 }

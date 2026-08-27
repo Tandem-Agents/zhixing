@@ -1,10 +1,9 @@
 /**
  * info 域命令注册 —— 只读展示类命令的模块化原子注册（范式同 registerTaskCommands）。
  *
- * 覆盖 /help /status /me /model /usage /context /journal /people /tasks。
- * 运行时信息(上下文预算 / journal / people)的权威在核心宿主——经会话与
- * 管理面 RPC 取;模型 / provider 显示取本地配置(宿主按同一配置装配)。
- * /me、/journal、/people 只读宿主 memory authority 投影。
+ * 覆盖 /help /status /stop /model /usage /context /tasks。
+ * 运行时信息的权威在核心宿主——经会话与管理面 RPC 取；模型 / provider
+ * 显示取本地配置（宿主按同一配置装配）。
  */
 
 import chalk from "chalk";
@@ -17,7 +16,6 @@ import {
   type CommandHandlerContext,
   type CommandDef,
   type CommandCategory,
-  type MemoryLogicalEntry,
 } from "@zhixing/core";
 import type { ZhixingConfig } from "@zhixing/providers";
 import type { ProxyDescription } from "@zhixing/network";
@@ -50,7 +48,7 @@ export interface InfoCommandsDeps {
   readonly getNetworkProxy: () => ProxyDescription;
   /** 调度门面（/tasks 从当前宿主 scheduler authority 读取）。 */
   readonly getScheduler: () => SchedulerFacade;
-  /** 管理面门面(/journal /people 经宿主只读执行体)。 */
+  /** 管理面门面（宿主状态等只读执行体）。 */
   readonly management: RpcManagementFacade;
   /** 通用选择服务。/stop 使用它承载交互式决策。 */
   readonly selection?: SelectionService;
@@ -436,45 +434,6 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
   });
 
   registry.register({
-    id: "me:repl",
-    name: "me",
-    description: "查看身份画像",
-    category: "info",
-    execution: "local",
-    tag: "builtin",
-  });
-  dispatcher.registerHandler("me:repl", async () => {
-    const profile = await deps.management.profileGet();
-    if (!profile) {
-      writer.line(
-        `\n${chalk.dim("  未找到身份画像。")}` +
-          `\n${chalk.dim("  在对话中告诉知行你的身份信息或偏好，并请它记住。\n")}`,
-      );
-      return {};
-    }
-    writer.line(`\n${chalk.bold("  身份画像")}`);
-    writer.line(
-      `  ${chalk.dim("Name:")} ${chalk.cyan(textMeta(profile, "name") ?? profile.id)}`,
-    );
-    const language = textMeta(profile, "language");
-    if (language) {
-      writer.line(`  ${chalk.dim("Language:")} ${language}`);
-    }
-    const timezone = textMeta(profile, "timezone");
-    if (timezone) {
-      writer.line(`  ${chalk.dim("Timezone:")} ${timezone}`);
-    }
-    if (profile.content) {
-      writer.line("");
-      for (const line of profile.content.split("\n")) {
-        writer.line(`  ${line}`);
-      }
-    }
-    writer.line("");
-    return {};
-  });
-
-  registry.register({
     id: "model:repl",
     name: "model",
     description: "显示当前模型信息",
@@ -542,116 +501,6 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
   });
 
   registry.register({
-    id: "journal:repl",
-    name: "journal",
-    description: "查看日志状态",
-    category: "tools",
-    execution: "local",
-    tag: "builtin",
-  });
-  dispatcher.registerHandler("journal:repl", async () => {
-    const view = (await deps.management.journalStats()) as {
-      stats: {
-        totalFiles: number;
-        hotCount: number;
-        warmCount: number;
-        condensedCount: number;
-      };
-      condense: { months: number; files: number } | null;
-      expiredCount: number;
-      maintenance: {
-        state: "prepared" | "open" | "updated" | "closed";
-        ref: {
-          kind: "journal-maintenance";
-          attempt: number;
-          completed: number;
-          monthCount: number;
-        };
-        reason: string;
-        actions: readonly string[];
-      } | null;
-    };
-    const { stats } = view;
-
-    if (stats.totalFiles === 0 && !view.maintenance) {
-      writer.line(
-        `\n${chalk.dim("  日志为空。对话中的信息将自动记录到日志中。\n")}`,
-      );
-      return {};
-    }
-
-    writer.line(
-      `\n${chalk.bold("  日志状态")} ${chalk.dim(`(${stats.totalFiles} 文件)`)}`,
-    );
-    writer.line(`  ${chalk.green("●")} 热 (≤30天): ${stats.hotCount}`);
-    writer.line(`  ${chalk.yellow("●")} 温 (>30天): ${stats.warmCount}`);
-    writer.line(`  ${chalk.blue("●")} 凝练: ${stats.condensedCount}`);
-
-    if (view.maintenance?.ref.kind === "journal-maintenance") {
-      const marker = view.maintenance.state === "closed"
-        ? chalk.green("✓")
-        : view.maintenance.state === "updated"
-          ? chalk.yellow("●")
-          : chalk.cyan("●");
-      writer.line(`  ${marker} 凝练进度: ${view.maintenance.reason}`);
-      for (const action of view.maintenance.actions) {
-        writer.line(chalk.dim(`    ${action}`));
-      }
-    }
-
-    if (view.expiredCount > 0) {
-      writer.line(`  ${chalk.red("●")} 过期待删除: ${view.expiredCount}`);
-    }
-    if (view.condense) {
-      writer.line(
-        chalk.dim(
-          `\n  💡 ${view.condense.files} 条日志（${view.condense.months} 个月）待凝练，首轮对话后自动执行`,
-        ),
-      );
-    }
-    writer.line("");
-    return {};
-  });
-
-  registry.register({
-    id: "people:repl",
-    name: "people",
-    description: "查看关系网络",
-    category: "tools",
-    execution: "local",
-    tag: "builtin",
-  });
-  dispatcher.registerHandler("people:repl", async () => {
-    const people = await deps.management.peopleList();
-
-    if (people.length === 0) {
-      writer.line(
-        `\n${chalk.dim("  关系网络为空。")}` +
-          `\n${chalk.dim('  对话中说"记住小丽是我女朋友"可以添加关系人。\n')}`,
-      );
-      return {};
-    }
-
-    writer.line(
-      `\n${chalk.bold("  关系网络")} ${chalk.dim(`(${people.length} 人)`)}`,
-    );
-    for (const person of people) {
-      const relation = chalk.dim(
-        ` (${textMeta(person, "relation") ?? "未设置关系"})`,
-      );
-      const birthdayText = textMeta(person, "birthday");
-      const birthday = birthdayText
-        ? chalk.dim(` 🎂 ${birthdayText}`)
-        : "";
-      writer.line(
-        `  ${chalk.cyan("•")} ${textMeta(person, "name") ?? person.id}${relation}${birthday}`,
-      );
-    }
-    writer.line("");
-    return {};
-  });
-
-  registry.register({
     id: "tasks:repl",
     name: "tasks",
     description: "查看定时任务",
@@ -701,9 +550,4 @@ function formatRecoveryBackupState(
   if (state === "recoverable") return "可恢复";
   if (state === "pending-verification") return "待验证（运行 zz backup verify）";
   return "未配置（运行 zz backup setup）";
-}
-
-function textMeta(entry: MemoryLogicalEntry, key: string): string | undefined {
-  const value = entry.meta[key];
-  return typeof value === "string" && value.trim() ? value : undefined;
 }

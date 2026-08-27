@@ -76,6 +76,32 @@ describe("executor role conversation runtime production assembly", () => {
 });
 
 describe("executor role job runtime production assembly", () => {
+  it("capability catalog 与用户 job 工具选择都不再接受旧 memory 工具", () => {
+    const substrate = new ExecutorRuntimeSubstrate({
+      config: {} as ZhixingConfig,
+      credentials: {},
+      mcpHub: {
+        catalog: () => [],
+        callTool: vi.fn(),
+      } as unknown as McpHub,
+      systemProtectedPaths: ["protected"],
+      interactions: {} as never,
+      artifactStore: () => ({} as ArtifactStore),
+      deviceCapacity: {
+        interactive: {} as AgentRuntimeCapacityBinding,
+        scheduler: {} as AgentRuntimeCapacityBinding,
+        orchestration: {} as AgentRuntimeCapacityBinding,
+      },
+    });
+
+    expect(substrate.capabilityCatalog().tools).not.toContain("memory");
+    expect(() => substrate.createJobRuntime(
+      { kind: "agent-turn", prompt: "scheduled", tools: ["memory"] },
+      {} as IConfirmationBroker,
+    )).toThrow("Job requested unavailable tools: memory");
+    expect(runtimeMocks.createAgentRuntime).not.toHaveBeenCalled();
+  });
+
   it("constructs jobs through the scheduler runtime substrate", async () => {
     const runtime = {} as AgentRuntime;
     runtimeMocks.createAgentRuntime.mockResolvedValueOnce(runtime);

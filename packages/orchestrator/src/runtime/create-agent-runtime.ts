@@ -66,6 +66,7 @@ import {
   toToolSpec,
   DEFAULT_WATCHDOG_POLICY,
   type MemoryLogicalEntry,
+  type MemoryCategoryDto,
   type MemoryScopeRef,
   compareMemoryLogicalEntries,
   canonicalMemoryIdentity,
@@ -127,7 +128,6 @@ import {
   BUILTIN_TOOL_FACTORIES,
   BUILTIN_TOOL_NAMES,
   WEB_FETCH_DEFAULT_RULES,
-  type MemoryToolPort,
 } from "@zhixing/tools-builtin";
 import { mainProfile, SUB_AGENT_ENABLED_TOOLS } from "../profile/default-profiles.js";
 import type { AgentRoleProfile } from "../profile/agent-role-profile.js";
@@ -692,6 +692,25 @@ export interface CreateAgentRuntimeOptions {
   runtimeKind?: RuntimeKind;
 }
 
+/** M4 删除 orchestrator 记忆装配时一并移除；M3 后不再进入工具工厂或公开合同。 */
+interface RuntimeMemoryPort {
+  save(input: {
+    action: "save" | "update";
+    category: MemoryCategoryDto;
+    id: string;
+    meta: Record<string, unknown>;
+    content: string;
+    operationId: string;
+  }): Promise<void>;
+  search(query: string): Promise<readonly MemoryLogicalEntry[]>;
+  list(category: MemoryCategoryDto): Promise<readonly MemoryLogicalEntry[]>;
+  delete(input: {
+    category: MemoryCategoryDto;
+    id: string;
+    operationId: string;
+  }): Promise<boolean>;
+}
+
 /**
  * 装配期解析某 role 的**生效**思考控制 —— 三条 ChatRequest 构造路径
  * （主对话 / 压缩 flush / 段切换摘要）统一经此注入，杜绝散落分支。
@@ -798,7 +817,7 @@ export async function createAgentRuntime(
   // 的注册输入（Task 工具 needsPermission: false 且无 boundaries，不参与
   // 这些链路）。
   const memoryScope: MemoryScopeRef = options.memoryScope ?? { kind: "personal" };
-  const memoryPort: MemoryToolPort = {
+  const memoryPort: RuntimeMemoryPort = {
     async save(input) {
       const identity = canonicalMemoryIdentity(
         input.category === "profile"

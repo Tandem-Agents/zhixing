@@ -137,7 +137,7 @@ config 是“启用什么 / 用哪个”的引用；SecretStore 是目标设备�
 zz
 ```
 
-进入交互式多轮对话。所有内置工具（read/write/edit/glob/grep/bash/memory/schedule）开箱可用。
+进入交互式多轮对话。所有内置工具（read/write/edit/glob/grep/bash/schedule）开箱可用。
 
 **斜杠命令**：
 
@@ -151,14 +151,11 @@ zz
 | `/enter` | 进入工作场景 |
 | `/exit` | 退出工作场景 / 退出知行 |
 | `/status` | 显示当前会话状态 |
-| `/me` | 查看身份画像 |
 | `/model` | 显示当前模型信息 |
 | `/usage` | Token 用量详情 |
 | `/context` | 上下文容量可视化 |
 | `/skills` | 查看技能库 |
 | `/work` | 工作场景管理（增删改查/归档） |
-| `/journal` | 查看日志状态 |
-| `/people` | 查看关系网络 |
 | `/compact` | 手动触发上下文压缩 |
 | `/tasks` | 查看定时任务 |
 | `/config` | 修改基础配置（服务商 / 模型 / API Key / 消息通道等） |

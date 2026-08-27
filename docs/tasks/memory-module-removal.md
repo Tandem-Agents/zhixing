@@ -1,8 +1,8 @@
 # 当前记忆模块彻底剔除
 
 > 状态：执行中<br>
-> 当前检查点：M3：删除 Agent 公开能力与产品表面<br>
-> 完成度：2/8
+> 当前检查点：M4：删除自动记忆与维护链<br>
+> 完成度：3/8
 > 职责：从知行当前产品与工程基线中完整移除现有记忆模块，同时保持历史对话持久化和全部非记忆能力不变。
 
 ## 一、任务目标
@@ -74,7 +74,7 @@
 
 - [x] **M1　冻结真实闭包与兼容基线。** 从 CLI、server、orchestrator、runtime-host 和 distributed-runtime 生产组合根正向追踪，再按符号、协议、路径和文档引用反查，形成“删除 / 中性迁移 / 保护 / 历史保留”四类闭包；独立建立历史对话保护闭包，并核实记忆专属事实是否已进入本版本承诺兼容的会话日志、检查点、generation 或未完成操作。把稳定入口、消费方、裁决、发布/数据支持依据和代表性直接证据登记在本文 M1 执行记录中；未分类事实不得进入批量删除。完成证据是双向调用图与兼容基线同时闭合，不是文件清单或搜索命中数。
 - [x] **M2　先解除错误耦合。** 迁移通用 frontmatter 原语并保持 Skills/Rubrics 合同；把技能 main/work 分区、scene 信任上下文和 lifecycle `sceneId` 改为只由既有 workscene/runtime 身份提供，不再借 `memoryScope` 决定。以对应单元测试和真实 RuntimeHost 装配证明行为等价；本项不删除记忆能力，也不新建通用框架。
-- [ ] **M3　删除 Agent 公开能力与产品表面。** 删除 `memory` 工具及导出/工厂/AgentRoleProfile 工具声明、系统提示、CLI/TUI 呈现、`/me`、`/journal`、`/people`、server memory RPC、管理 facade/directory、`workscene_memory_query`、帮助/README，以及尚无实现但保留旧能力语义的 `@memory:` typeahead 占位；默认与用户配置均不得再解析出旧工具。同步公开工具和命令 exact-set；保留 AgentRoleProfile 机制、文件/工具补全、其他工作场景工具及通用 `app-state` 权限边界，并以生产注册入口和直接测试证明无影子入口。
+- [x] **M3　删除 Agent 公开能力与产品表面。** 删除 `memory` 工具及导出/工厂/AgentRoleProfile 工具声明、系统提示、CLI/TUI 呈现、`/me`、`/journal`、`/people`、server memory RPC、管理 facade/directory、`workscene_memory_query`、帮助/README，以及尚无实现但保留旧能力语义的 `@memory:` typeahead 占位；默认与用户配置均不得再解析出旧工具。同步公开工具和命令 exact-set；保留 AgentRoleProfile 机制、文件/工具补全、其他工作场景工具及通用 `app-state` 权限边界，并以生产注册入口和直接测试证明无影子入口。
 - [ ] **M4　删除自动记忆与维护链。** 移除 orchestrator 记忆端口、Memory Flush、segment hook、post-adoption memory 输入/记录/回放、mesh 绑定、对应 provider 调用治理与 S7 注册，以及 journal maintenance 的 scheduler/system-handler/生命周期装配。保留 segment/摘要/窗口、transcript 提交、收养/转移、post-adoption review、scheduler 本体、transcript retention 和失败恢复主链；用真实组合根与失败/重启测试证明只断开派生支路。
 - [ ] **M5　删除分布式状态与 owner 协议面。** 移除 memory/people/journal 的 global query/result/mutation/commit domain、codec、invariant、唯一 owner、维护合同和 product-language；删除 `memory-domain:*` 资源类型、conversation/job assignment 签发、stager 验权、场景删除的 memory cleanup 以及 generation install/rebind/router/participant exact-set 中的 memory owner。保留其他全局域、assignment、AuthorityCapability、workscene 删除及对话清理语义；通用协议测试若以 memory 作样本，改绑仍存活域而不削弱断言。
 - [ ] **M6　删除存储、接管与 core 记忆域。** 在所有消费者退场后，删除 Anchor memory adapter、legacy Markdown import/projection、cutover/维护状态、Profile/People/Journal store、逻辑身份、`getMemoryDir`/`getWorkSceneMemoryDir`、`core/src/memory`、根导出、`./memory` 子路径和构建入口。保留 workscene 根与会话目录。以首次启动、升级、恢复、转移和维护入口证明旧目录零创建、零扫描、零读写、零迁移；既有用户数据保持原样且完全惰性。
@@ -134,8 +134,8 @@
 | ---- | ---- | ------------------ | -------- | ---------- |
 | M1 | 已完成 | `HEAD 2af063e8`；差异标识 `memory-removal-M1-compat-decided-20260827`。双向调用图、历史对话保护闭包和三层兼容事实均已闭合；用户确认知行尚未正式发布、没有真实用户，发布前 memory-bearing 开发数据不属于兼容承诺。 | 无。首个正式版本以记忆剔除后的格式为兼容起点；不得保留旧 decoder/participant、扫描或迁移发布前开发数据。 | M2：先迁出通用 frontmatter，再拆除非记忆 scene 语义对 `memoryScope` 的借用。 |
 | M2 | 已完成 | `HEAD 2af063e8`；差异标识 `memory-removal-M2-neutral-frontmatter-workscene-identity-20260827`。frontmatter 唯一实现已迁至 core 中性文件 owner，包根只显式转导既有 `parseFrontmatter` / `stringifyFrontmatter` 函数；`worksceneIdentity` 独立驱动 work 技能、scene 信任/权限与 lifecycle，RuntimeHost 和 CLI executor 均从既有场景/对话身份显式传入。core/orchestrator/runtime-host 的 typecheck+build、CLI build 和 139 个直接测试通过。 | 无 M2 遗留。CLI 规范 typecheck 仍报告 HEAD 已存在且本包未触碰的 `mesh-runtime-assembly.ts:1803` 未使用参数；关闭该既有告警后同一 typecheck 通过，不影响本包类型与产物结论。 | M3：从默认 profile/工具工厂到 CLI/server/工作模式表面完整删除旧记忆公开能力。 |
-| M3 | 待执行 | — | — | 等待 M2 |
-| M4 | 待执行 | — | — | 等待 M3 |
+| M3 | 已完成 | `HEAD 4ab15b91`；差异标识 `memory-removal-M3-public-surface-20260827`。builtin 工具、默认 profile/提示、CLI/TUI 三命令与呈现、server 三项 RPC、runtime-host 场景查询和 typeahead 占位已沿生产注册根及直接消费链删除；331 项 Vitest、21 项 canonical S7 Node exact-set 测试、受影响包静态验证与构建共同证明无影子入口且存活集合未漂移。协调反证暴露的角色正向旧工具断言与 typeahead 旧专门语义均已纠正。 | 无 M3 遗留。自动 flush/segment/post-adoption/journal maintenance、全局 memory 协议/owner/store 仍按 M4～M6 边界原样存活，不属于本项残留。CLI 规范 typecheck 仍只有 HEAD 既有的 `mesh-runtime-assembly.ts:1803` 未使用参数，关闭该 hygiene 检查后完整通过。 | M4：从 orchestrator/owner/CLI 组合根删除自动记忆、post-adoption memory 与 journal maintenance 派生支路。 |
+| M4 | 待执行 | — | — | 当前检查点 |
 | M5 | 待执行 | — | — | 等待 M4 |
 | M6 | 待执行 | — | — | 等待 M5 |
 | M7 | 待执行 | — | — | 等待 M6 |
@@ -225,6 +225,29 @@ M1 冻结点是 `HEAD 2af063e8` + 本文 `memory-removal-M1-compat-decided-20260
 - 公共出口纠正：协调复核发现实现类型 `ParsedFrontmatter` 没有既有根导出或外部消费依据，已从 `core/src/index.ts` 移除；包根只保留两个既有函数的中性转导。纠正后仅运行 `git diff --check`、`pnpm --filter @zhixing/core exec tsc -p tsconfig.json --noEmit` 和 `pnpm --filter @zhixing/core build`，三项通过；build 仍仅输出既有 Rollup circular-chunk 警告。未重复运行已经双方确认通过的 139 项直接测试。
 
 M2 无未闭合责任，标记 `[x]`；下一检查点是 M3。当前已暂存的工作台动态任务行始终未修改索引或文件内容，不计入本包成果。
+
+### M3 执行记录（2026-08-27）
+
+#### 公开能力生产闭包
+
+- 基线为 `HEAD 4ab15b91fc8e378ee6adf0c71a521d6d80e4f05d` + 差异标识 `memory-removal-M3-public-surface-20260827`；进场时工作区和索引均为空。本包从真实注册根正向追踪并按符号、注册表、golden、帮助和直接测试反查，不以 `memory` 关键词直接裁决。
+- **Agent 工具与提示：** 默认 `AgentRoleProfile.enabledTools` 原经 `BUILTIN_TOOL_FACTORIES.memory` 实例化 `createMemoryTool`，再由 `createAgentRuntime` 向模型发布。本包删除工具实现、公共导出、工厂/capability、直接测试和默认声明，删除 system/runtime prompt 的显式记忆说明；默认 builtin exact-set 现为十项存活工具。自定义 profile 或 executor job 再声明 `memory` 时分别在 runtime 工厂校验和真实 executor capability admission 处稳定拒绝，无法实例化或激活旧工具。`AgentRoleProfile` 机制、其他工具及通用 `app-state` 权限链未变。
+- **CLI/TUI 与 server：** `registerInfoCommands → dispatcher → RpcManagementFacade → memory.* RPC → ServerContext.memoryDirectory` 的三条 `/me`、`/journal`、`/people` 链已同时删除命令定义、facade、serve 组合、directory、handler/schema/registry 和直接测试；CLI README、工具卡、render strategy、typeahead 标题及离线提示不再宣告旧能力。CLI 本地 info exact-set 固定为 `help/status/stop/model/usage/context/tasks`；server 将三项 method 纳入 retired exact-set，所有真实 registry 组合均不再注册它们。
+- **工作模式与 typeahead：** RuntimeHost 的 extra-tools 组合根不再导入或装配 `workscene_memory_query`，实现、描述、进入提示和直接测试均删除；main 存活集合固定为 `schedule/task_list/workmode_enter/workscene_change_approve/workscene_list`，workscene 的退出/变更/生命周期和 M2 场景身份保持不变。FileProvider 只为现有 `@tool:` provider 让出前缀，普通冒号 token 与既有文件补全合同不变；通用类型注释和直接测试不再保留旧记忆 provider 的名称或专门语义。
+- **边界保护：** M3 未删除或改造 Memory Flush、segment hook、post-adoption memory、journal maintenance、scheduler、global memory query/mutation/owner、legacy adapter、Profile/People/Journal store 或 `core/src/memory`；这些生产命中分别归 M4～M6。未修改 transcript、conversation、run commit、attention window、segment/摘要、恢复、历史浏览和渠道投影。distributed behavior golden 的差异只删除三项 memory RPC 行，其他 server/RPC 行为保持 byte-for-byte 稳定。
+
+#### 直接证据、命令与结果
+
+- core：在 `packages/core` 运行 FileProvider 直接测试，1 文件 30 测试通过；`pnpm --filter @zhixing/core exec tsc -p tsconfig.json --noEmit` 与 `pnpm --filter @zhixing/core build` 通过。
+- tools-builtin：工厂 exact-set 直接测试 1 文件 2 测试通过；canonical typecheck 与 build 通过。测试同时锁定十项存活名称、工厂键和 capability，不允许 `memory` 影子注册。
+- orchestrator：默认 profiles、system prompt、真实 runtime 工厂 3 文件 148 测试通过；canonical typecheck 与 build 通过。直接负例证明默认集合不含旧工具，自定义 profile 声明 `memory` 会在装配前失败。
+- runtime-host/server：`@zhixing/runtime-host` canonical typecheck 与 build 通过；CLI 中的 host/workmode 直接测试覆盖存活工具 exact-set。`@zhixing/server` canonical typecheck 与 build 通过；management methods 与当前 distributed behavior golden 共 2 文件 8 测试通过，另以 `ZHIXING_UPDATE_GOLDENS=1` 运行同一 3 项 golden 用例生成当前基线后再无更新变量复验。
+- CLI/TUI：info commands、host/workmode、工作场景创建提示、工具卡/呈现、executor job capability、离线 conversation、journal maintenance 和 typeahead panel 共 10 文件 143 测试通过；`pnpm cli:build` 通过。规范 typecheck 只复现未改动的 HEAD 既有 `src/serve/mesh-runtime-assembly.ts(1803,30) TS6133`，追加 `--noUnusedParameters false` 后同一完整 typecheck 通过，因此没有被该 hygiene 告警遮蔽的 M3 类型错误。
+- 结构与注册证据：首轮只执行 entry script 与 registry golden，遗漏了 `scripts/s7-entry-coverage.test.mjs` 中仍要求 `anchor-executor` / `executor-only` 包含旧 builtin 的反向断言；协调者用 canonical `pnpm s7:lint` 取得失败反证后，M3 立即退回未完成。纠正后 exact-set 测试对全部八种 role configuration 统一断言 `tool:builtin:memory` 不可出现，同时保留 anchor RPC、cleanup 差异及四组 surface 同构断言；完整 `pnpm s7:lint` 一次通过 production coverage、21/21 Node 测试和 registry golden。retired production token 仍覆盖旧工具实现/端口、管理 directory、三项 RPC 和 `workscene_memory_query`。
+- 纠正失效闭包：core FileProvider 直接测试仍为 1 文件 30/30，canonical typecheck 与 build 通过；build 只输出既有 Rollup circular-chunk 警告。连同输入未变且不重复执行的其余 301 项 Vitest，当前直接测试数字为 331 项 Vitest + 21 项 canonical S7 Node 测试，共 352 项。
+- 静态反查按旧工具符号、三项 RPC、三条 slash、工作场景查询和旧 typeahead token 对生产源码、S7 catalog、CLI/server/runtime-host/typeahead exact-set 复核；生产源码与 typeahead 注释/专门测试均无残留，剩余精确命中只用于全角色负断言、retired 门禁、M4～M6 尚需处理的内部链、core memory 路径或历史材料。未运行根级全测、根级 build、package check 或 M4 验证；未访问用户 `ZHIXING_HOME`，未执行任何 Git 暂存、取消暂存、提交、历史改写或推送。
+
+协调反证、S7 全角色 exact-set 和 typeahead 残余语义已经在同一 M3 工作包内闭合；M3 恢复标记 `[x]`，下一检查点是 M4。
 
 ## 十、用户提示词
 

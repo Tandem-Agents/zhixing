@@ -87,7 +87,7 @@ export interface RuntimeHostOptions {
   lifecycle?: readonly AgentRuntimeLifecycle[];
   /**
    * 工作场景领域服务(可选)——提供时会话实例装配 workmode 工具组(main 装
-   * enter / change_approve / list / memory_query,场景实例装 exit),LLM 由此产生
+   * enter / change_approve / list,场景实例装 exit),LLM 由此产生
    * 进出场景意图或主模式管理动作。ephemeral
    * 实例不装(定时任务无模式语义)。
    */

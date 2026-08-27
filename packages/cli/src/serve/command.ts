@@ -130,7 +130,6 @@ import { createWorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 import {
   createTrustDirectory,
   createSkillDirectory,
-  createMemoryDirectory,
 } from "./management-directories.js";
 import { createAnchorJournalMaintenance } from "./journal-maintenance.js";
 import {
@@ -351,7 +350,7 @@ async function runServerProcess(
   const providerCredentials = credentials.providers
     ? { providers: credentials.providers }
     : {};
-  // 管理面三域——trust(盘上持久规则)/ memory(只读查看);skill 经锚点
+  // 管理面两域——trust(盘上持久规则);skill 经锚点
   // GlobalStatePort 的 path-free query/control 合同装配。
   const trustDirectory = createTrustDirectory({
     config,
@@ -364,14 +363,6 @@ async function runServerProcess(
           console.error(chalk.red(`[journal] ${error.message}`)),
       })
     : undefined;
-  const memoryDirectory = journalMaintenance
-    ? createMemoryDirectory({
-        globalState: () => authorityRuntimeRef.current?.globalState,
-        anchorEpoch: () => authorityRuntimeRef.current?.anchorEpoch,
-        journal: journalMaintenance,
-      })
-    : undefined;
-
   // 3. Scheduler facade lazy ref —— 打破组合根装配顺序依赖。
   let schedulerRef: SchedulerBackend | null = null;
   let schedulerProductRef: SchedulerBackend | undefined;
@@ -1975,7 +1966,6 @@ async function runServerProcess(
       globalState: () => authorityRuntime.globalState!,
       anchorEpoch: () => authorityRuntime.anchorEpoch,
     }),
-    ...(memoryDirectory ? { memory: memoryDirectory } : {}),
     hostInfo: {
       // 宿主单点解析的工作区——接入面 @ 补全 root 取此
       workspace: ephemeralRuntime.resolvedWorkspace.path ?? undefined,

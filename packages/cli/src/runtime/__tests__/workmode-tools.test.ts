@@ -4,7 +4,6 @@ import {
   getEnabledWorksceneToolActions,
   getWorksceneToolBoundaries,
   type AgentEventMap,
-  type MemoryLogicalEntry,
 } from "@zhixing/core";
 import type {
   AssignmentGlobalQueryPort,
@@ -21,7 +20,6 @@ import {
   createWorksceneChangeApproveTool,
   createWorksceneClearWorkdirCurrentTool,
   createWorksceneListTool,
-  createWorksceneMemoryQueryTool,
   createWorksceneRenameCurrentTool,
   createWorksceneSetWorkdirCurrentTool,
   type WorksceneToolDirectory,
@@ -45,23 +43,6 @@ function scene(
   };
 }
 
-function memoryEntry(
-  sceneId: string,
-  id: string,
-  content: string,
-): MemoryLogicalEntry {
-  return {
-    domain: "people",
-    scope: { kind: "workscene", sceneId },
-    id,
-    meta: { name: id },
-    content,
-    revision: 1,
-    digest: `digest-${id}`,
-    updatedAt: NOW,
-  };
-}
-
 function makeDirectory(
   overrides: Partial<WorksceneToolDirectory> = {},
 ): WorksceneToolDirectory {
@@ -74,7 +55,6 @@ function makeDirectory(
 
 interface RunFixture {
   readonly scenes?: readonly WorksceneDto[];
-  readonly memories?: readonly MemoryLogicalEntry[];
   readonly postTurnControl?: boolean;
   readonly overlays?: AssignmentMutationOverlayRecord[];
 }
@@ -133,32 +113,6 @@ async function callInRun<T>(
           };
         case "workscene-list":
           return { kind: "workscene-list", scenes: [...(fixture.scenes ?? [])] };
-        case "memory-search":
-          return {
-            kind: "memory-search",
-            hits: (fixture.memories ?? [])
-              .filter(
-                (entry) =>
-                  entry.scope.kind === "workscene" &&
-                  input.scope.kind === "workscene" &&
-                  entry.scope.sceneId === input.scope.sceneId &&
-                  entry.domain === input.domain &&
-                  entry.content.includes(input.query),
-              )
-              .map((entry) => ({ entry })),
-          };
-        case "memory-list":
-          return {
-            kind: "memory-list",
-            entries: (fixture.memories ?? []).filter(
-              (entry) =>
-                entry.scope.kind === "workscene" &&
-                input.scope.kind === "workscene" &&
-                entry.scope.sceneId === input.scope.sceneId &&
-                entry.domain === input.domain &&
-                (input.category === undefined || entry.category === input.category),
-            ),
-          };
         default:
           throw new Error(`Unexpected query: ${input.kind}`);
       }
@@ -386,52 +340,6 @@ describe("workscene path-free reads", () => {
     expect(result.result.content).toContain("工作区：未绑定");
     expect(result.result.content).not.toContain("binding-secret");
     expect(result.result.content).not.toMatch(/[A-Z]:\\|\/tmp\//);
-  });
-
-  it("memory query 只经 GlobalQuery，保留隔离并截断片段", async () => {
-    const longContent = `alpha ${"x".repeat(1_000)}`;
-    const result = await callInRun(
-      () =>
-        createWorksceneMemoryQueryTool(makeDirectory()).call(
-          { sceneId: "scene-a", query: "alpha" },
-          CTX,
-        ),
-      {
-        scenes: [scene("scene-a", "场景A"), scene("scene-b", "场景B")],
-        memories: [
-          memoryEntry("scene-a", "person-a", longContent),
-          memoryEntry("scene-b", "person-b", "alpha other scene"),
-        ],
-      },
-    );
-    expect(result.result.content).toContain("person-a");
-    expect(result.result.content).not.toContain("person-b");
-    expect(result.result.content).not.toContain(longContent);
-    expect(result.reads).toEqual([
-      "workscene-get",
-      "memory-search",
-      "memory-search",
-    ]);
-  });
-
-  it("无关键词时以 domain 读取人物目录并稳定呈现", async () => {
-    const result = await callInRun(
-      () =>
-        createWorksceneMemoryQueryTool(makeDirectory()).call(
-          { sceneId: "scene-a" },
-          CTX,
-        ),
-      {
-        scenes: [scene("scene-a", "场景A")],
-        memories: [memoryEntry("scene-a", "person-a", "alpha")],
-      },
-    );
-    expect(result.result.content).toContain("person: person-a");
-    expect(result.reads).toEqual([
-      "workscene-get",
-      "memory-list",
-      "memory-list",
-    ]);
   });
 
   it("声明面仍由共享工具表派生", () => {

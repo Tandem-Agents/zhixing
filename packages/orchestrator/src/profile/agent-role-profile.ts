@@ -34,7 +34,7 @@ export interface AgentRoleProfile {
    * 由此实现 sub-agent 工具集与 main agent 解耦。
    *
    * 常见值：
-   *   - 内置：read / write / edit / glob / grep / bash / memory / web_fetch
+   *   - 内置：read / write / edit / glob / grep / bash / web_fetch
    *   - 派生：Task（主 agent 启用子任务派发；create-agent-runtime 后置装配）
    *
    * **不含外部依赖型工具**——如 schedule 需要 scheduler ref 在 cli 层实例化，

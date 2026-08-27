@@ -59,18 +59,6 @@
         "requiresAuth": true
       },
       {
-        "name": "memory.journalStats",
-        "requiresAuth": true
-      },
-      {
-        "name": "memory.peopleList",
-        "requiresAuth": true
-      },
-      {
-        "name": "memory.profileGet",
-        "requiresAuth": true
-      },
-      {
         "name": "schedule.abortRun",
         "requiresAuth": true
       },
@@ -314,18 +302,6 @@
       },
       {
         "name": "llm.complete",
-        "requiresAuth": true
-      },
-      {
-        "name": "memory.journalStats",
-        "requiresAuth": true
-      },
-      {
-        "name": "memory.peopleList",
-        "requiresAuth": true
-      },
-      {
-        "name": "memory.profileGet",
         "requiresAuth": true
       },
       {
@@ -575,18 +551,6 @@
         "requiresAuth": true
       },
       {
-        "name": "memory.journalStats",
-        "requiresAuth": true
-      },
-      {
-        "name": "memory.peopleList",
-        "requiresAuth": true
-      },
-      {
-        "name": "memory.profileGet",
-        "requiresAuth": true
-      },
-      {
         "name": "schedule.abortRun",
         "requiresAuth": true
       },
@@ -833,18 +797,6 @@
         "requiresAuth": true
       },
       {
-        "name": "memory.journalStats",
-        "requiresAuth": true
-      },
-      {
-        "name": "memory.peopleList",
-        "requiresAuth": true
-      },
-      {
-        "name": "memory.profileGet",
-        "requiresAuth": true
-      },
-      {
         "name": "schedule.abortRun",
         "requiresAuth": true
       },
@@ -1039,6 +991,9 @@
     "surface-only": []
   },
   "retiredMethods": [
+    "memory.journalStats",
+    "memory.peopleList",
+    "memory.profileGet",
     "workspace.binding.admin",
     "workspace.binding.reset"
   ],
@@ -1231,9 +1186,6 @@
           "rpc:dutyMigration.targets",
           "rpc:health",
           "rpc:llm.complete",
-          "rpc:memory.journalStats",
-          "rpc:memory.peopleList",
-          "rpc:memory.profileGet",
           "rpc:schedule.abortRun",
           "rpc:schedule.create",
           "rpc:schedule.delete",
@@ -1288,13 +1240,10 @@
           "slash:context:repl",
           "slash:exit:repl",
           "slash:help:repl",
-          "slash:journal:repl",
           "slash:mcp:repl",
-          "slash:me:repl",
           "slash:model:repl",
           "slash:name:repl",
           "slash:new:repl",
-          "slash:people:repl",
           "slash:resume:repl",
           "slash:security:repl",
           "slash:skill:<catalog-id>",
@@ -1308,7 +1257,6 @@
           "slash:usage:repl",
           "slash:work:repl",
           "tool:builtin:admit_skill",
-          "tool:builtin:memory",
           "tool:builtin:save_skill",
           "tool:extra:schedule:manage",
           "tool:extra:schedule:run",
@@ -1426,9 +1374,6 @@
           "rpc:dutyMigration.targets",
           "rpc:health",
           "rpc:llm.complete",
-          "rpc:memory.journalStats",
-          "rpc:memory.peopleList",
-          "rpc:memory.profileGet",
           "rpc:schedule.abortRun",
           "rpc:schedule.create",
           "rpc:schedule.delete",
@@ -1483,13 +1428,10 @@
           "slash:context:repl",
           "slash:exit:repl",
           "slash:help:repl",
-          "slash:journal:repl",
           "slash:mcp:repl",
-          "slash:me:repl",
           "slash:model:repl",
           "slash:name:repl",
           "slash:new:repl",
-          "slash:people:repl",
           "slash:resume:repl",
           "slash:security:repl",
           "slash:skill:<catalog-id>",
@@ -1503,7 +1445,6 @@
           "slash:usage:repl",
           "slash:work:repl",
           "tool:builtin:admit_skill",
-          "tool:builtin:memory",
           "tool:builtin:save_skill",
           "tool:extra:schedule:manage",
           "tool:extra:schedule:run",
@@ -1606,9 +1547,6 @@
           "rpc:dutyMigration.targets",
           "rpc:health",
           "rpc:llm.complete",
-          "rpc:memory.journalStats",
-          "rpc:memory.peopleList",
-          "rpc:memory.profileGet",
           "rpc:schedule.abortRun",
           "rpc:schedule.create",
           "rpc:schedule.delete",
@@ -1663,13 +1601,10 @@
           "slash:context:repl",
           "slash:exit:repl",
           "slash:help:repl",
-          "slash:journal:repl",
           "slash:mcp:repl",
-          "slash:me:repl",
           "slash:model:repl",
           "slash:name:repl",
           "slash:new:repl",
-          "slash:people:repl",
           "slash:resume:repl",
           "slash:security:repl",
           "slash:skill:<catalog-id>",
@@ -1774,9 +1709,6 @@
           "rpc:dutyMigration.targets",
           "rpc:health",
           "rpc:llm.complete",
-          "rpc:memory.journalStats",
-          "rpc:memory.peopleList",
-          "rpc:memory.profileGet",
           "rpc:schedule.abortRun",
           "rpc:schedule.create",
           "rpc:schedule.delete",
@@ -1831,13 +1763,10 @@
           "slash:context:repl",
           "slash:exit:repl",
           "slash:help:repl",
-          "slash:journal:repl",
           "slash:mcp:repl",
-          "slash:me:repl",
           "slash:model:repl",
           "slash:name:repl",
           "slash:new:repl",
-          "slash:people:repl",
           "slash:resume:repl",
           "slash:security:repl",
           "slash:skill:<catalog-id>",
@@ -1913,13 +1842,10 @@
           "slash:context:repl",
           "slash:exit:repl",
           "slash:help:repl",
-          "slash:journal:repl",
           "slash:mcp:repl",
-          "slash:me:repl",
           "slash:model:repl",
           "slash:name:repl",
           "slash:new:repl",
-          "slash:people:repl",
           "slash:resume:repl",
           "slash:security:repl",
           "slash:skill:<catalog-id>",
@@ -1933,7 +1859,6 @@
           "slash:usage:repl",
           "slash:work:repl",
           "tool:builtin:admit_skill",
-          "tool:builtin:memory",
           "tool:builtin:save_skill",
           "tool:extra:schedule:manage",
           "tool:extra:schedule:run",
@@ -2009,13 +1934,10 @@
           "slash:context:repl",
           "slash:exit:repl",
           "slash:help:repl",
-          "slash:journal:repl",
           "slash:mcp:repl",
-          "slash:me:repl",
           "slash:model:repl",
           "slash:name:repl",
           "slash:new:repl",
-          "slash:people:repl",
           "slash:resume:repl",
           "slash:security:repl",
           "slash:skill:<catalog-id>",
@@ -2029,7 +1951,6 @@
           "slash:usage:repl",
           "slash:work:repl",
           "tool:builtin:admit_skill",
-          "tool:builtin:memory",
           "tool:builtin:save_skill",
           "tool:extra:schedule:manage",
           "tool:extra:schedule:run",
@@ -2095,13 +2016,10 @@
           "slash:context:repl",
           "slash:exit:repl",
           "slash:help:repl",
-          "slash:journal:repl",
           "slash:mcp:repl",
-          "slash:me:repl",
           "slash:model:repl",
           "slash:name:repl",
           "slash:new:repl",
-          "slash:people:repl",
           "slash:resume:repl",
           "slash:security:repl",
           "slash:skill:<catalog-id>",
@@ -2170,13 +2088,10 @@
           "slash:context:repl",
           "slash:exit:repl",
           "slash:help:repl",
-          "slash:journal:repl",
           "slash:mcp:repl",
-          "slash:me:repl",
           "slash:model:repl",
           "slash:name:repl",
           "slash:new:repl",
-          "slash:people:repl",
           "slash:resume:repl",
           "slash:security:repl",
           "slash:skill:<catalog-id>",
@@ -3156,33 +3071,6 @@
         }
       },
       {
-        "name": "memory.journalStats",
-        "requiresAuth": true,
-        "key": "rpc:memory.journalStats",
-        "category": "rpc",
-        "target": {
-          "rowId": "memory-read"
-        }
-      },
-      {
-        "name": "memory.peopleList",
-        "requiresAuth": true,
-        "key": "rpc:memory.peopleList",
-        "category": "rpc",
-        "target": {
-          "rowId": "memory-read"
-        }
-      },
-      {
-        "name": "memory.profileGet",
-        "requiresAuth": true,
-        "key": "rpc:memory.profileGet",
-        "category": "rpc",
-        "target": {
-          "rowId": "memory-read"
-        }
-      },
-      {
         "name": "schedule.abortRun",
         "requiresAuth": true,
         "key": "rpc:schedule.abortRun",
@@ -3691,18 +3579,6 @@
         }
       },
       {
-        "id": "journal:repl",
-        "name": "journal",
-        "execution": "local",
-        "source": "packages/cli/src/commands/info-commands.ts",
-        "registrar": "registerInfoCommands",
-        "key": "slash:journal:repl",
-        "category": "slash",
-        "target": {
-          "rowId": "memory-read"
-        }
-      },
-      {
         "id": "mcp:repl",
         "name": "mcp",
         "execution": "local",
@@ -3712,18 +3588,6 @@
         "category": "slash",
         "target": {
           "rowId": "runtime-config"
-        }
-      },
-      {
-        "id": "me:repl",
-        "name": "me",
-        "execution": "local",
-        "source": "packages/cli/src/commands/info-commands.ts",
-        "registrar": "registerInfoCommands",
-        "key": "slash:me:repl",
-        "category": "slash",
-        "target": {
-          "rowId": "memory-read"
         }
       },
       {
@@ -3761,18 +3625,6 @@
         "category": "slash",
         "target": {
           "rowId": "conversation-manage"
-        }
-      },
-      {
-        "id": "people:repl",
-        "name": "people",
-        "execution": "local",
-        "source": "packages/cli/src/commands/info-commands.ts",
-        "registrar": "registerInfoCommands",
-        "key": "slash:people:repl",
-        "category": "slash",
-        "target": {
-          "rowId": "memory-read"
         }
       },
       {
@@ -3925,14 +3777,6 @@
         "category": "tool",
         "target": {
           "rowId": "skill-manage"
-        }
-      },
-      {
-        "name": "memory",
-        "key": "tool:builtin:memory",
-        "category": "tool",
-        "target": {
-          "rowId": "memory-write"
         }
       },
       {

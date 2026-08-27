@@ -536,8 +536,6 @@ function titleOfProvider(id: string): string {
       return "Arguments";
     case "file":
       return "Files";
-    case "memory":
-      return "Memory";
     case "tool":
       return "Tools";
     default:

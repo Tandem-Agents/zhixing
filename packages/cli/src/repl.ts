@@ -658,7 +658,7 @@ export async function startRepl(): Promise<void> {
     confirmLocalContinuation: async () => {
       cliWriter.line(
         chalk.yellow(
-          `${layout.contentPrefix}值班设备暂时无法连接。排程、全局记忆和旧设备对话暂不可用。`,
+          `${layout.contentPrefix}值班设备暂时无法连接。排程和旧设备对话暂不可用。`,
         ),
       );
       if (!process.stdin.isTTY) return false;
@@ -1127,7 +1127,7 @@ export async function startRepl(): Promise<void> {
     isInteractive: () => Boolean(process.stdin.isTTY && process.stdout.isTTY),
   });
 
-  // info 域命令（help/status/me/model/usage/context/journal/people/tasks）。
+  // info 域命令（help/status/stop/model/usage/context/tasks）。
   // 运行时信息(model / usage / context)的权威在宿主——经管理面 RPC 取。
   registerInfoCommands({
     registry: tRegistry,

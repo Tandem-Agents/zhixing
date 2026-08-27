@@ -38,7 +38,6 @@ import type { PerspectivesController } from "./perspectives/index.js";
 import type { ConversationDirectory } from "./runtime/conversation-directory.js";
 import type { WorksceneDirectory } from "./runtime/workscene-directory.js";
 import type {
-  MemoryDirectory,
   SkillDirectory,
   TrustDirectory,
 } from "./runtime/management-directories.js";
@@ -225,8 +224,6 @@ export interface ServerContext {
   trust?: TrustDirectory;
   /** 技能库管理面。不传则 skill.* 不可用。 */
   skills?: SkillDirectory;
-  /** 记忆域查看面。不传则 memory.* 不可用。 */
-  memory?: MemoryDirectory;
   /** 宿主装配信息(server.info 的运维字段:工作区 / 日志路径)。 */
   hostInfo?: { workspace?: string; logPath?: string };
   /** 公开的本机运行状态；只允许稳定产品语言和有限动作。 */
@@ -398,7 +395,6 @@ export interface CreateContextOptions {
   workscenes?: WorksceneDirectory;
   trust?: TrustDirectory;
   skills?: SkillDirectory;
-  memory?: MemoryDirectory;
   hostInfo?: { workspace?: string; logPath?: string };
   managedHostPublicStatus?: ServerContext["managedHostPublicStatus"];
   recoveryBackupStatus?: ServerContext["recoveryBackupStatus"];
@@ -431,7 +427,6 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     workscenes: opts.workscenes,
     trust: opts.trust,
     skills: opts.skills,
-    memory: opts.memory,
     hostInfo: opts.hostInfo,
     managedHostPublicStatus: opts.managedHostPublicStatus,
     recoveryBackupStatus: opts.recoveryBackupStatus,

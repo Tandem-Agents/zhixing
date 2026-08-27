@@ -34,11 +34,6 @@
  *                        统一归 default,避免静态 strategy 错误归类把"AI 在查"
  *                        与"AI 在改"混在一起):
  *                          - bash:    `ls` 读 vs `npm install` 写
- *                          - memory:  `search / list` 读 vs `save / update / delete` 写
- *                                     (实测 LLM 高频 list / search,把 memory 整体
- *                                     归 side-effect 会让真正 save 的视觉信号被
- *                                     5 倍 list/search 的 ✎ 行稀释,违反"副作用必须
- *                                     可见"产品原则)
  *                          - web_fetch: stateless 网络请求归探索,非副作用
  * - `sub-agent-status`:  主路径不渲染,status-bar 接管层次化状态条(Task 工具)。
  *

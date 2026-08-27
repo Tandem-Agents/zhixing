@@ -33,7 +33,6 @@ const TOOL_DISPLAY_NAME: Readonly<Record<string, string>> = Object.freeze({
   bash: "Bash",
   grep: "Grep",
   glob: "Glob",
-  memory: "Memory",
   web_fetch: "WebFetch",
   schedule: "Schedule",
   Task: "Task",
@@ -73,7 +72,7 @@ interface ToolVerbLabel {
  * 工具名 → 动作短语 映射表。
  *
  * **仅覆盖 default 策略工具**（探索类——会进入 batch summary 的工具）：
- *   - read / glob / grep / bash / web_fetch / task_list / memory
+ *   - read / glob / grep / bash / web_fetch / task_list
  *
  * 副作用工具（write/edit/schedule）走 ✎ 独立行不入 batch；sub-agent-status
  * （Task）由 status-bar 接管——这两类不出现在 batch.events，不需要 verb 映射。
@@ -109,10 +108,6 @@ const TOOL_VERB_LABELS: Readonly<Record<string, ToolVerbLabel>> = Object.freeze(
   task_list: {
     full: (n: number) => `更新了 ${n} 次任务`,
     compact: (n: number) => `任务 ${n}`,
-  },
-  memory: {
-    full: (n: number) => `使用记忆 ${n} 次`,
-    compact: (n: number) => `记忆 ${n}`,
   },
 } as const);
 
@@ -382,12 +377,6 @@ function extractTarget(
       return truncate(stringField(input, "pattern") ?? "", TARGET_TRUNCATE);
     case "glob":
       return truncate(stringField(input, "pattern") ?? "", TARGET_TRUNCATE);
-    case "memory":
-      return (
-        stringField(input, "operation") ??
-        stringField(input, "action") ??
-        ""
-      );
     case "web_fetch":
       return truncate(stringField(input, "url") ?? "", TARGET_TRUNCATE);
     case "schedule":

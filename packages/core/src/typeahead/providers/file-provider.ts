@@ -52,7 +52,7 @@ const FILE_TOKEN_CHAR_CLASS = "\\p{L}\\p{N}_\\-:./~";
 const DEFAULT_MAX_RESULTS = 100;
 
 /** 已知的非 file @ 前缀 —— matchTrigger 遇到这些前缀时让出 */
-const NON_FILE_PREFIXES = ["memory:", "tool:"] as const;
+const NON_FILE_PREFIXES = ["tool:"] as const;
 
 // ─── Provider Data ───
 
@@ -118,7 +118,7 @@ export class FileProvider implements SuggestionProvider {
       };
     }
 
-    // 已知非 file 前缀 —— 让出给未来的 MemoryProvider / ToolProvider
+    // 已知非 file 前缀 —— 让出给未来的 ToolProvider
     for (const prefix of NON_FILE_PREFIXES) {
       if (query.startsWith(prefix)) return null;
     }
@@ -128,7 +128,7 @@ export class FileProvider implements SuggestionProvider {
 
     // 裸 @path 启发式 —— 非空 query 全部尝试匹配
     // Phase 2 当前只有 FileProvider 处理 @，所以宽松匹配。
-    // Phase 3 MemoryProvider/ToolProvider 上线后，可以收紧到"必须含 / . ~"的启发式。
+    // Phase 3 ToolProvider 上线后，可以收紧到"必须含 / . ~"的启发式。
     return {
       providerId: this.id,
       tokenStart: token.tokenStart,

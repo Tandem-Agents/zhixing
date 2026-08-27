@@ -586,7 +586,7 @@ export interface SuggestionItem {
 /**
  * Suggestion Provider 接口 —— 插件式 typeahead 触发处理。
  *
- * 一个 provider 对应一类触发（`/command` / `@file` / `@memory` / ...）。
+ * 一个 provider 对应一类触发（`/command` / `@file` / `@tool` / ...）。
  * Broker 按 priority 升序依次调 `matchTrigger(ctx)`，首个返回非 null 的命中。
  *
  * Provider 是**无状态**的 —— 所有 per-session 状态在 broker 里。每次 query

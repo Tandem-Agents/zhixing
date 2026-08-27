@@ -237,7 +237,6 @@ describe("createBuiltinExtraToolsAssembly", () => {
         "workmode_enter",
         "workscene_change_approve",
         "workscene_list",
-        "workscene_memory_query",
       ].sort(),
     );
     expect(names).not.toContain("workmode_exit");
@@ -267,7 +266,6 @@ describe("createBuiltinExtraToolsAssembly", () => {
       "workmode_enter",
       "workscene_change_approve",
       "workscene_list",
-      "workscene_memory_query",
     ]) {
       expect(names).not.toContain(mainOnly);
     }

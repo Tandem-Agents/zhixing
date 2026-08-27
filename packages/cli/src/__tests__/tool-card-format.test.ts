@@ -78,15 +78,6 @@ describe("formatToolHeader", () => {
     );
   });
 
-  it("memory 工具——operation 作 target，向后兼容 action 字段", () => {
-    expect(formatToolHeader("memory", { operation: "read" })).toBe(
-      "Memory(read)",
-    );
-    expect(formatToolHeader("memory", { action: "write" })).toBe(
-      "Memory(write)",
-    );
-  });
-
   it("target 为空时省略括号", () => {
     expect(formatToolHeader("schedule", {})).toBe("Schedule");
     expect(formatToolHeader("read", {})).toBe("Read");
@@ -264,7 +255,7 @@ describe("formatBatchSummary", () => {
     ).toBe("执行了 2 条命令 · 150ms");
   });
 
-  it("单一类型 web_fetch / task_list / memory——各自量词", () => {
+  it("单一类型 web_fetch / task_list——各自量词", () => {
     expect(
       formatBatchSummary([
         mkEvent("web_fetch", { url: "http://a" }, "x", 200),
@@ -273,12 +264,6 @@ describe("formatBatchSummary", () => {
     expect(
       formatBatchSummary([mkEvent("task_list", { items: [] }, "ok", 10)]),
     ).toBe("更新了 1 次任务 · 10ms");
-    expect(
-      formatBatchSummary([
-        mkEvent("memory", { action: "search" }, "x", 30),
-        mkEvent("memory", { action: "save" }, "y", 50),
-      ]),
-    ).toBe("使用记忆 2 次 · 80ms");
   });
 
   it("多类型——紧凑动词「阅读 N · 查找 N」按首次出现顺序拼接", () => {

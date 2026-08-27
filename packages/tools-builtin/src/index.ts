@@ -4,8 +4,6 @@ export { createEditTool } from "./edit.js";
 export { createGlobTool } from "./glob.js";
 export { createGrepTool } from "./grep.js";
 export { createBashTool } from "./bash.js";
-export { createMemoryTool } from "./memory.js";
-export type { MemoryToolPort } from "./memory.js";
 export { createScheduleTool } from "./schedule.js";
 export {
   TaskListService,

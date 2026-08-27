@@ -61,7 +61,7 @@ export const LOCAL_CONVERSATION_RPC_METHODS = Object.freeze([
 const LOCAL_METHODS = new Set<string>(LOCAL_CONVERSATION_RPC_METHODS);
 
 const LOCAL_ONLY_CAPABILITIES = Object.freeze([
-  "排程与全局记忆暂不可用",
+  "排程暂不可用",
   "旧设备上的对话暂不可修改",
   "任务推进确认将在重新连接后处理",
 ]);

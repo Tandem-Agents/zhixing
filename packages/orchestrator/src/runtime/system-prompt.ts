@@ -22,7 +22,7 @@
  * - 缓存分界借鉴 Claude Code / OpenClaw,静态区不含任何会话特有信息
  * - 工具使用段从注册工具的 systemPromptHints 动态生成,添加/移除工具时自动适应
  * - 条件段返回 null 时被 buildSystemPrompt 跳过,不留空白(无空段噪声)
- *   —— 让 ctx.tools 不含 memory / Task 时输出 byte-equal 历史,守住既有锚点
+ *   —— 让 ctx.tools 不含自描述 hints / Task 时输出 byte-equal 历史,守住既有锚点
  * - 元协议段在工具段之前:LLM 解析 messages 的基础协议(<system-meta> 标签等)
  *   是看懂工具调用的前置知识,语义上先于工具使用引导
  * - 环境信息放在分界后(每个项目不同),保护静态区缓存前缀
@@ -107,7 +107,6 @@ export const MAIN_AGENT_SEGMENTS: readonly SystemPromptSegment[] = [
  *   - 持久工作约定 / 动态上下文 —— 由主 agent 在 Task prompt
  *     中显式提炼相关部分传给子,避免子 system prompt 膨胀且利于跨 spawn 的
  *     prompt cache 命中(同角色子 agent 的静态前缀 byte-identical)
- *   - 用户记忆段 —— 同上,且 Memory 工具不暴露给子 agent
  *
  * 调用方装配子 agent 时参考:
  *   buildSystemPrompt({ profile: subAgentProfile({ subAgentId }),
@@ -395,24 +394,23 @@ function buildSubAgentDelegation(tools: ToolDefinition[]): string | null {
  * 子 agent / serve / 无 workmode 装配点无此工具，段缺省、历史输出 byte-equal。
  *
  * 段文本显式引用工具名字面值（workmode_enter / workscene_list /
- * workscene_memory_query / workscene_change_approve）—— 与 sub-agent-delegation
+ * workscene_change_approve）—— 与 sub-agent-delegation
  * 同款"prompt-text 显式契约"：宁可工具改名时同步本文本，也不动态拼接让段
  * 不可静态审查。
  */
 export const WORKING_MODE_TEXT = `## Working Mode (work scenes)
 
-A work scene is an isolated context for a bounded line of work, with an optional device workspace, private memory, and model. Entering one switches the conversation into that scene; leaving returns here.
+A work scene is an isolated context for a bounded line of work, with an optional device workspace and model. Entering one switches the conversation into that scene; leaving returns here.
 
 Tools:
 - \`workmode_enter\`: enter a work scene; the switch takes effect after the current turn.
 - \`workscene_list\`: list scenes and their ids, names, optional device workspace names, and recent activity.
-- \`workscene_memory_query\`: inspect existing scene memory before deciding.
 - \`workscene_change_approve\`: create, rename, remove, bind/change a device workspace, or clear the workspace binding with confirmation.
 
 How to decide:
 - Need scene ids or current workspace bindings: call \`workscene_list\`.
 - Clear scene fit: call \`workmode_enter\` with that scene id; if none fits but one is warranted, propose it via \`workscene_change_approve\`.
-- Ambiguous fit: probe with \`workscene_memory_query\` before asking or switching.
+- Ambiguous fit: ask the user before switching.
 - Workspace management: use \`workscene_change_approve\` action \`set_workdir\` with a device and workspace name already authorized on that device, and action \`clear_workdir\` only for an explicit unbind request. Never request or transmit a remote filesystem path.
 - Casual or one-off questions: stay in the main conversation.
 

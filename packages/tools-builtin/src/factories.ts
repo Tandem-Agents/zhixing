@@ -22,8 +22,6 @@ import { createBashTool } from "./bash.js";
 import { createEditTool } from "./edit.js";
 import { createGlobTool } from "./glob.js";
 import { createGrepTool } from "./grep.js";
-import { createMemoryTool } from "./memory.js";
-import type { MemoryToolPort } from "./memory.js";
 import {
   createAdmitSkillTool,
   createLoadSkillTool,
@@ -43,7 +41,6 @@ import { createWriteTool } from "./write.js";
 export interface BuiltinToolContext {
   /** HTTP 代理地址，web_fetch 透传给底层 fetch 客户端 */
   readonly proxy?: string;
-  readonly memoryPort?: MemoryToolPort;
   readonly skillLoader?: SkillTextLoader;
   readonly skillSaver?: SkillSaver;
   readonly skillAdmission?: SkillAdmissionPort;
@@ -76,14 +73,6 @@ export const BUILTIN_TOOL_FACTORIES: Readonly<
   glob: () => createGlobTool(),
   grep: () => createGrepTool(),
   bash: () => createBashTool(),
-  memory: (ctx) => {
-    if (!ctx.memoryPort) {
-      throw new Error(
-        "memory 工具需装配期注入 assignment memory port",
-      );
-    }
-    return createMemoryTool(ctx.memoryPort);
-  },
   load_skill: (ctx) => {
     const loader = ctx.skillLoader;
     if (!loader) {
@@ -139,7 +128,6 @@ export const BUILTIN_TOOL_CAPABILITIES = {
   glob: { authorityWrite: false },
   grep: { authorityWrite: false },
   bash: { authorityWrite: false },
-  memory: { authorityWrite: true },
   load_skill: { authorityWrite: false },
   save_skill: { authorityWrite: true },
   admit_skill: { authorityWrite: true },

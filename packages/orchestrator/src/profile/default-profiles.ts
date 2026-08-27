@@ -34,7 +34,7 @@ export const MAIN_IDENTITY_INSTRUCTIONS = [
  * 主 agent 启用的工具集 —— builtin 与 Task 的权威源。
  *
  * 包含：
- *   - 11 个内置工具（由 BUILTIN_TOOL_FACTORIES 提供实例）
+ *   - 10 个内置工具（由 BUILTIN_TOOL_FACTORIES 提供实例）
  *   - Task（启用子 agent 派发；create-agent-runtime 后置装配）
  *
  * **不含外部依赖型工具**（如 schedule 需要 scheduler ref，由 cli 通过
@@ -48,7 +48,6 @@ const MAIN_ENABLED_TOOLS = [
   "glob",
   "grep",
   "bash",
-  "memory",
   "web_fetch",
   "load_skill",
   "save_skill",
@@ -123,7 +122,7 @@ const NON_FILE_TOOLS = MAIN_ENABLED_TOOLS.filter(
  *
  * 工具集按本地 runtime 是否已解析出授权 workspace 二分（by-construction）：
  *   - 有 workspace：主工具全集（文件工具在授权工作根内操作）
- *   - 无 workspace：剔除本地文件类，仅留非文件工具（memory/web_fetch/load_skill/Task）
+ *   - 无 workspace：剔除本地文件类，仅留非文件工具（web_fetch/load_skill/Task）
  *
  * capabilities 同 mainProfile（用户面对、可派 Task）。
  */
@@ -135,7 +134,7 @@ export function powerProfile(scene: WorksceneProfileInput): AgentRoleProfile {
     instructions:
       `${MAIN_IDENTITY_INSTRUCTIONS}\n\n` +
       `You are now focused on the work scene "${scene.name}". ` +
-      `Work and memory in this scene are isolated from personal scope and other scenes. ` +
+      `Work in this scene is isolated from personal scope and other scenes. ` +
       `Inside this scene, you may use confirmed tools to rename this scene, change its device workspace, or clear its workspace binding; rename applies to registry metadata without restarting this window, while workspace changes take effect after this turn by re-entering the scene with the updated configuration. ` +
       `When the work in this scene is done — or the user signals they want to step back to the broader conversation — ` +
       `judge for yourself that the scene is complete and call the workmode_exit tool to return to the main conversation. ` +

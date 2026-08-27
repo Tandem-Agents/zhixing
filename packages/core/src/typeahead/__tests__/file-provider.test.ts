@@ -137,9 +137,11 @@ describe("FileProvider.matchTrigger", () => {
     expect(m).toBeNull();
   });
 
-  it("@memory: 前缀不触发（让出给 MemoryProvider）", () => {
-    const m = provider.matchTrigger(makeCtx("@memory:greeting"));
-    expect(m).toBeNull();
+  it("普通冒号 token 仍按裸文件引用匹配", () => {
+    const m = provider.matchTrigger(makeCtx("@namespace:entry"));
+    expect(m).not.toBeNull();
+    expect(m!.providerId).toBe("file");
+    expect(m!.query).toBe("namespace:entry");
   });
 
   it("@tool: 前缀不触发（让出给 ToolProvider）", () => {

@@ -1,19 +1,16 @@
 /**
- * 管理面目录抽象 —— trust / skill / memory 三个管理域的窄接口。
+ * 管理面目录抽象 —— trust / skill 两个管理域的窄接口。
  *
  * server 声明接口、装配方注入持久层实现(与 ConversationDirectory /
  * WorksceneDirectory 同模式)。三域共性:全局数据(非会话域)、单写者在宿主、
- * 接入面经 RPC 读写(/trust /skills /journal /people 的执行体)。
+ * 接入面经 RPC 读写（当前承载 trust 与 skills 管理方法）。
  */
 
 import type {
-  JournalStats,
-  MemoryLogicalEntry,
   PermissionRule,
   SkillCatalogEntry,
   SkillMode,
 } from "@zhixing/core";
-import type { SchedulerUserNotice } from "@zhixing/core/contracts";
 
 /**
  * 信任规则管理 —— 按对话语境列 / 撤用户可管规则(/trust 的上下文相关视角:
@@ -45,21 +42,4 @@ export interface SkillDirectory {
   archive(id: string): Promise<boolean>;
   /** 结构版本——变更通知携带,接入面据此刷新补全候选 */
   structuralVersion(): number;
-}
-
-/** /journal 展示的扫描投影——统计 + 待办摘要(凝练计划 / 过期数) */
-export interface JournalScanView {
-  stats: JournalStats;
-  /** 待凝练摘要;无计划为 null */
-  condense: { months: number; files: number } | null;
-  expiredCount: number;
-  /** 最近一次付费凝练的耐久进度；从 scheduler notice 权威读取。 */
-  maintenance: SchedulerUserNotice | null;
-}
-
-/** 记忆域查看 —— /journal 统计与 /people 关系列表的只读执行体 */
-export interface MemoryDirectory {
-  profileGet(): Promise<MemoryLogicalEntry | null>;
-  journalStats(): Promise<JournalScanView>;
-  peopleList(): Promise<MemoryLogicalEntry[]>;
 }

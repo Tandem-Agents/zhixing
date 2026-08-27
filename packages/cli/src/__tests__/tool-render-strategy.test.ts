@@ -20,12 +20,10 @@ describe("tool-render-strategy · 单一事实源契约", () => {
     }
   });
 
-  it("二义性工具(bash / memory / web_fetch) 不入副作用白名单——归 default", () => {
+  it("二义性工具 bash 与 stateless web_fetch 不入副作用白名单——归 default", () => {
     // bash:    `ls` 读 vs `npm install` 写
-    // memory:  `search / list` 读 vs `save / update / delete` 写
-    //          (LLM 高频 list/search 调用,整体归 side-effect 会稀释真正 save 的信号)
     // web_fetch: stateless 网络请求,归探索
-    for (const name of ["bash", "memory", "web_fetch"]) {
+    for (const name of ["bash", "web_fetch"]) {
       expect(getToolRenderStrategy(name)).toBe<ToolRenderStrategy>("default");
     }
   });

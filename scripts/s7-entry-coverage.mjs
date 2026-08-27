@@ -59,6 +59,13 @@ const retiredProductionTokens = [
   "WorksceneMigrationMutation",
   "legacyCheckpoint",
   "--rollback",
+  "createMemoryTool",
+  "MemoryToolPort",
+  "MemoryDirectory",
+  "memory.profileGet",
+  "memory.journalStats",
+  "memory.peopleList",
+  "workscene_memory_query",
 ];
 const forbiddenWriteOwners = new Set(["MemoryStore", "SkillStore", "AnchorWorksceneRegistry"]);
 const guardedRoots = [
@@ -92,8 +99,6 @@ const coverageGroups = [
   ["workscene-switch", ["rpc:workscene.enter", "rpc:workscene.exit", "slash:work:repl", "slash:exit:repl", "tool:extra:workscene:enter", "tool:extra:workscene:exit"]],
   ["schedule-manage", ["rpc:schedule.create", "rpc:schedule.update", "rpc:schedule.delete", "tool:extra:schedule:manage"]],
   ["schedule-run", ["rpc:schedule.run", "rpc:schedule.abortRun", "tool:extra:schedule:run"]],
-  ["memory-write", ["tool:builtin:memory"]],
-  ["memory-read", ["rpc:memory.journalStats", "rpc:memory.peopleList", "rpc:memory.profileGet", "slash:me:repl", "slash:journal:repl", "slash:people:repl"]],
   ["skill-manage", ["rpc:skill.archive", "rpc:skill.setState", "slash:skills:repl", "tool:builtin:save_skill", "tool:builtin:admit_skill"]],
   ["segment-transition", segmentLifecyclePhases.map((phase) => `lifecycle:segment:${phase}`)],
   ["workspace-binding", ["cli:zhixing workspace status", "cli:zhixing workspace list", "cli:zhixing workspace create", "cli:zhixing workspace create-scene", "cli:zhixing workspace rename", "cli:zhixing workspace repath", "cli:zhixing workspace remove", "cli:zhixing workspace reset"]],
@@ -626,7 +631,7 @@ async function collectProductionConstants() {
           : { kind: "workscene", sceneId: "coverage", sceneName: "coverage" },
       }).map((tool) => tool.name),
     );
-  const nonAuthorityNames = new Set(["workscene_list", "workscene_memory_query"]);
+  const nonAuthorityNames = new Set(["workscene_list"]);
   for (const kind of ["main", "workscene"]) {
     const actual = [...assembledNames(kind)]
       .filter((name) => !nonAuthorityNames.has(name))

@@ -79,20 +79,22 @@ test("production descriptors form a complete exact-set coverage catalog", async 
   assert.deepEqual(anchorSurface, anchorOnly);
   assert.deepEqual(executorSurface, executorOnly);
   assert.deepEqual(surfaceOnly, disabledEmpty);
+  for (const [roleName, configuration] of Object.entries(catalog.roleConfigurations)) {
+    assert.ok(
+      !configuration.entryKeys.includes("tool:builtin:memory"),
+      `${roleName} must not register the retired builtin memory tool`,
+    );
+  }
   assert.ok(anchorExecutor.includes("rpc:session.send"));
-  assert.ok(anchorExecutor.includes("tool:builtin:memory"));
   assert.ok(anchorExecutor.includes(
     "cleanup:anchor-local-executor:runtime:executorDataPlane.close",
   ));
   assert.ok(anchorOnly.includes("rpc:session.send"));
-  assert.ok(!anchorOnly.includes("tool:builtin:memory"));
   assert.ok(!anchorOnly.includes(
     "cleanup:anchor-local-executor:runtime:executorDataPlane.close",
   ));
   assert.ok(anchorSurface.includes("rpc:session.send"));
-  assert.ok(!anchorSurface.includes("tool:builtin:memory"));
   assert.ok(!executorOnly.includes("rpc:session.send"));
-  assert.ok(executorOnly.includes("tool:builtin:memory"));
   assert.ok(!executorOnly.some((key) => key.startsWith("cleanup:")));
   assert.ok(!disabledEmpty.some((key) => key.startsWith("cleanup:")));
 });

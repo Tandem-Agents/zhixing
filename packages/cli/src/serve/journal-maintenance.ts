@@ -147,7 +147,7 @@ export function createAnchorJournalMaintenance(deps: {
           reason: `${month.month} 的日志已确认凝练（${completed}/${state.plan.months.length}）。`,
           actions: completed < state.plan.months.length
             ? ["系统将继续处理剩余月份"]
-            : ["可用 /journal 查看结果"],
+            : [],
         });
       }
       if (completed === state.plan.months.length) {
@@ -156,7 +156,7 @@ export function createAnchorJournalMaintenance(deps: {
           attempt: ref.attempt,
           completed: state.plan.months.length,
           reason: "日志凝练已完成。",
-          actions: ["可用 /journal 查看最新状态"],
+          actions: [],
         });
         continue;
       }
@@ -206,7 +206,7 @@ export function createAnchorJournalMaintenance(deps: {
           attempt: 0,
           completed: 0,
           reason: `准备凝练 ${plan.months.length} 个月的日志。`,
-          actions: ["凝练会使用轻量模型并产生模型用量", "可用 /journal 查看进度"],
+          actions: ["凝练会使用轻量模型并产生模型用量"],
         });
       } else {
         const ref = journalRef(existing.notice);
@@ -242,7 +242,7 @@ export function createAnchorJournalMaintenance(deps: {
             attempt,
             completed: index,
             reason: "日志凝练暂未完成。",
-            actions: ["无需重复操作，系统会自动重试", "可用 /journal 查看状态"],
+            actions: ["无需重复操作，系统会自动重试"],
           });
           throw error;
         }
@@ -271,7 +271,7 @@ export function createAnchorJournalMaintenance(deps: {
             reason: `${month.month} 的日志已凝练（${completed}/${plan.months.length}）。`,
             actions: completed < plan.months.length
               ? ["系统将继续处理剩余月份"]
-              : ["可用 /journal 查看结果"],
+              : [],
           });
         } catch (error) {
           await record(binding.notices, plan, {
@@ -292,7 +292,7 @@ export function createAnchorJournalMaintenance(deps: {
           attempt,
           completed: plan.months.length,
           reason: `日志凝练已完成，共处理 ${plan.months.length} 个月。`,
-          actions: ["可用 /journal 查看最新状态"],
+          actions: [],
         });
       }
     }

@@ -37,7 +37,6 @@ import {
   createWorksceneChangeApproveTool,
   createWorksceneClearWorkdirCurrentTool,
   createWorksceneListTool,
-  createWorksceneMemoryQueryTool,
   createWorksceneRenameCurrentTool,
   createWorksceneSetWorkdirCurrentTool,
   type WorksceneToolDirectory,
@@ -195,7 +194,7 @@ export function createBuiltinExtraToolsAssembly(
       // workscene 工具组按 spec.kind 二分注入 —— by-construction 隔离：
       // power runtime 物理不持有 main-only 工具，main 物理不持有 workmode_exit。
       // exit 零依赖恒装(意图经 ALS 发当前 run 的 bus,所有组合形态共用同一工具);
-      // main 组(enter / 变更审批 / 管理列表 / 记忆检索)依赖工作场景领域服务,
+      // main 组(enter / 变更审批 / 管理列表)依赖工作场景领域服务,
       // 仅服务在场装配。
       const kind = ctx.spec?.kind ?? "main";
       if (kind === "workscene") {
@@ -218,7 +217,6 @@ export function createBuiltinExtraToolsAssembly(
           createWorkmodeEnterTool(workscenes),
           createWorksceneChangeApproveTool(workscenes),
           createWorksceneListTool(workscenes),
-          createWorksceneMemoryQueryTool(workscenes),
         );
       }
 

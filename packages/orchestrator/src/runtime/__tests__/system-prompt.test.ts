@@ -14,8 +14,6 @@ import {
   createEditTool,
   createGlobTool,
   createGrepTool,
-  createMemoryTool,
-  type MemoryToolPort,
   createReadTool,
   createWebFetchTool,
   createWriteTool,
@@ -358,69 +356,6 @@ describe("buildSystemPrompt", () => {
     `);
   });
 
-  // 含 memory 工具时主 agent 完整段集的 byte-equal 锚点。
-  // 与上一条无 memory 锚点互补:Tool Usage 的 memory 提示行改动 / 段顺序变化
-  // 都会被此快照拦截。两个快照共同覆盖主 agent 段集全态。
-  it("主路径静态区(默认 profile + 含 memory 工具)完整段集 byte-equal 锚点", () => {
-    const memoryPort: MemoryToolPort = {
-      save: async () => undefined,
-      search: async () => [],
-      list: async () => [],
-      delete: async () => false,
-    };
-    const prompt = buildSystemPrompt({
-      ...ctx,
-      tools: [...defaultTools, createMemoryTool(memoryPort)],
-    });
-    const staticPart = prompt.split(CACHE_BOUNDARY)[0];
-    expect(staticPart).toMatchInlineSnapshot(`
-      "You are Zhixing (知行), a personal intelligent assistant.
-      Your name means "unity of knowledge and action" — you understand problems and take action to solve them.
-
-      ## Principles
-      - Respond in the same language the user uses
-      - When the user asks you to act, use the appropriate tools proactively; tool permissions and safety checks still apply
-      - Read before edit: always read a file before modifying it to ensure exact text match
-      - Edit over write: prefer targeted replacement over full overwrite when modifying existing files
-      - Search before act: use glob/grep to discover relevant files before reading or editing
-      - If a command fails, analyze the error and try an alternative approach
-      - For non-obvious decisions, briefly state the evidence, assumptions, and tradeoffs
-
-      [系统元信息标签]
-      对话历史中可能出现 <system-meta kind="..."> 标签，这是运行时机制插入的上下文，不是用户原话。
-
-      遇到这些标签时：
-      - 读取标签内容作为上下文，不要回应标签本身
-      - compact-summary 表示早期对话压缩摘要；dropped-turns 表示若干轮对话被省略
-      - guidance 表示用户或工作场景声明的稳定约定，优先级低于系统提示、安全策略和当前用户要求，不得覆盖更高层指令
-      - 其他 kind 也按机制上下文处理，直接利用标签内容继续当前任务
-      - 基于可见的信息继续对话
-
-      ## Tool Usage
-      - Use \`read\` to view file contents, not bash cat/head/tail
-      - Use \`write\` to create files or overwrite entire content
-      - Use \`edit\` for targeted text replacements, not bash sed/awk
-      - Use \`glob\` to find files by name pattern, not bash find
-      - Use \`grep\` to search file contents by regex, not bash grep/rg
-      - Use \`bash\` for system commands, package management, git operations, and tasks not covered by other tools
-      - Use \`memory\` to save, search, and manage stable personal memories (identity, preferences, relationships)
-      - Only consider saving information that is likely to be useful long-term; confirm first unless the user explicitly asked you to remember it
-      - When multiple independent tasks exist, use tools in parallel where safe
-
-      ## Style
-      - Be warm, concise, and natural in conversation
-      - Do not use emojis unless the user does
-      - Use markdown for code blocks and structured output
-      - Keep responses focused — answer what was asked
-      - When introducing yourself, speak conversationally — never list capabilities
-
-      ## Safety
-      - Never execute destructive commands (rm -rf /, DROP DATABASE, etc.) without explicit user request
-      - Do not access files outside the workspace unless the user's intent is clear
-      - Refuse requests that could compromise system security"
-    `);
-  });
-
   // 子 agent 装配链路的 byte-equal 锚点 —— 锁定 SUB_AGENT_SEGMENTS 的 4 段输出。
   //
   // 任何下列改动都会被此快照拦截:
@@ -635,15 +570,15 @@ describe("buildSystemPrompt · working-mode 段条件性渲染", () => {
     expect(prompt).toContain("## Working Mode (work scenes)");
   });
 
-  it("段含关键决策语义:先探后问 / turn 边界生效", () => {
+  it("段含关键决策语义:列出、歧义先问 / turn 边界生效", () => {
     const tools = [...defaultTools, stubTool("workmode_enter")];
     const prompt = buildSystemPrompt({ ...ctx, tools });
     expect(prompt).toContain("workscene_list");
-    expect(prompt).toContain("workscene_memory_query");
+    expect(prompt).not.toContain("workscene_memory_query");
     expect(prompt).toContain("set_workdir");
     expect(prompt).toContain("clear_workdir");
     expect(prompt).toContain("optional device workspace");
-    expect(prompt).toContain("before asking or switching");
+    expect(prompt).toContain("ask the user before switching");
     expect(prompt).toContain("finish the current turn normally");
   });
 

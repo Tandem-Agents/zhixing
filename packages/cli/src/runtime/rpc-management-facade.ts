@@ -1,5 +1,5 @@
 /**
- * RpcManagementFacade —— cli 管理面命令(/trust /skills /journal /people /host)
+ * RpcManagementFacade —— cli 管理面命令(/trust /skills /host)
  * 的 RPC 方法收口。
  *
  * 与会话 / 调度 facade 同纪律:方法域封装、不持连接;方法名字符串只在此一处,
@@ -9,7 +9,6 @@
 
 import type {
   ChannelStatus,
-  MemoryLogicalEntry,
   PermissionRule,
   SkillMode,
 } from "@zhixing/core";
@@ -199,32 +198,6 @@ export class RpcManagementFacade {
       const payload = p as { structuralVersion?: number };
       handler(payload.structuralVersion ?? 0);
     });
-  }
-
-  // ─── memory ───
-
-  async profileGet(): Promise<MemoryLogicalEntry | null> {
-    const client = await this.link.getClient();
-    const result = await client.request<{ profile: MemoryLogicalEntry | null }>(
-      "memory.profileGet",
-    );
-    return result.profile;
-  }
-
-  async journalStats(): Promise<unknown> {
-    const client = await this.link.getClient();
-    const result = await client.request<{ stats: unknown }>(
-      "memory.journalStats",
-    );
-    return result.stats;
-  }
-
-  async peopleList(): Promise<MemoryLogicalEntry[]> {
-    const client = await this.link.getClient();
-    const result = await client.request<{ people: MemoryLogicalEntry[] }>(
-      "memory.peopleList",
-    );
-    return result.people;
   }
 
   // ─── server ───

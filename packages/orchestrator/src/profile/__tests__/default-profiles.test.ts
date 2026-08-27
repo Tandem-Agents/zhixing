@@ -95,7 +95,6 @@ describe("powerProfile(scene)", () => {
       "glob",
       "grep",
       "bash",
-      "memory",
       "web_fetch",
       "load_skill",
       "save_skill",
@@ -109,7 +108,6 @@ describe("powerProfile(scene)", () => {
     // load_skill / save_skill 读写 app-state(~/.zhixing/skills)、非 workdir
     // 本地文件,故保留。
     expect(p.enabledTools).toEqual([
-      "memory",
       "web_fetch",
       "load_skill",
       "save_skill",
@@ -127,6 +125,7 @@ describe("powerProfile(scene)", () => {
     expect(p.instructions).toContain("rename this scene");
     expect(p.instructions).toContain("change its device workspace");
     expect(p.instructions).toContain("clear its workspace binding");
+    expect(p.instructions).not.toContain("memory");
     // 退出自判：显式指向 workmode_exit 工具，而非仅"叙述完成"
     expect(p.instructions).toContain("workmode_exit");
     expect(p.capabilities).toEqual({

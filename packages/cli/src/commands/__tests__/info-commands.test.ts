@@ -102,14 +102,6 @@ function setup(options: { selection?: SelectionService; requestExit?: () => void
       keepAliveWork: [],
     })),
     serverShutdown: vi.fn(async () => {}),
-    profileGet: vi.fn(async () => null),
-    journalStats: vi.fn(async () => ({
-      stats: { totalFiles: 2, hotCount: 1, warmCount: 1, condensedCount: 0 },
-      condense: null,
-      expiredCount: 0,
-      maintenance: null,
-    })),
-    peopleList: vi.fn(async () => []),
   } as unknown as RpcManagementFacade;
 
   registerInfoCommands({
@@ -138,20 +130,20 @@ function setup(options: { selection?: SelectionService; requestExit?: () => void
 }
 
 describe("registerInfoCommands", () => {
-  it("10 条命令注册为 local，可经 findByName 找到", () => {
+  it("7 条存活命令构成 local exact-set", () => {
     const { registry } = setup();
-    for (const name of [
+    const names = [
       "help",
       "status",
       "stop",
-      "me",
       "model",
       "usage",
       "context",
-      "journal",
-      "people",
       "tasks",
-    ]) {
+    ];
+    expect(registry.list(RUNTIME).map((command) => command.name).sort())
+      .toEqual([...names].sort());
+    for (const name of names) {
       expect(registry.findByName(name)?.execution).toBe("local");
     }
   });
@@ -255,16 +247,6 @@ describe("registerInfoCommands", () => {
     expect(text).toContain("claude-x");
   });
 
-  it("/me 只读宿主 authority，空画像引导用户通过对话设置", async () => {
-    const h = setup();
-    await h.dispatcher.dispatch("/me", RUNTIME);
-    expect(h.management.profileGet).toHaveBeenCalledOnce();
-    const text = stripAnsi(h.writer.text());
-    expect(text).toContain("未找到身份画像");
-    expect(text).toContain("在对话中");
-    expect(text).not.toContain("profile.md");
-  });
-
   it("/model 在执行时读取最新配置快照", async () => {
     const h = setup();
     h.setConfig({
@@ -277,22 +259,6 @@ describe("registerInfoCommands", () => {
     expect(text).toContain("gpt-next");
     expect(text).toContain("openai");
     expect(text).not.toContain("claude-x");
-  });
-
-  it("/journal 经管理面 RPC 渲染扫描投影", async () => {
-    const h = setup();
-    await h.dispatcher.dispatch("/journal", RUNTIME);
-    expect(h.management.journalStats).toHaveBeenCalledOnce();
-    const text = stripAnsi(h.writer.text());
-    expect(text).toContain("日志状态");
-    expect(text).toContain("(2 文件)");
-  });
-
-  it("/people 经管理面 RPC;空网络友好提示", async () => {
-    const h = setup();
-    await h.dispatcher.dispatch("/people", RUNTIME);
-    expect(h.management.peopleList).toHaveBeenCalledOnce();
-    expect(stripAnsi(h.writer.text())).toContain("关系网络为空");
   });
 
   it("/context 经宿主上下文预算渲染;失败可观测", async () => {

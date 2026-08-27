@@ -317,6 +317,14 @@ describe("createAgentRuntime · run() lineage 契约", () => {
 });
 
 describe("createAgentRuntime · execution authority facts", () => {
+  it("旧 memory 工具名不再能由自定义 profile 激活", async () => {
+    await expect(
+      createAgentRuntime({
+        profile: { ...mainProfile(), enabledTools: ["memory"] },
+      }),
+    ).rejects.toThrow(/工具 "memory" 不在 BUILTIN_TOOL_FACTORIES/u);
+  });
+
   it("projects the immutable tools, MCP servers, and resolved provider identities of this runtime", async () => {
     const probe: ToolDefinition = {
       name: "runtime_profile_probe",
