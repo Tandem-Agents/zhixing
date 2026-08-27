@@ -1,5 +1,5 @@
 export { loadProfile, formatProfileForContext } from "./profile-loader.js";
-export { parseFrontmatter, stringifyFrontmatter } from "./frontmatter.js";
+export { parseFrontmatter, stringifyFrontmatter } from "../frontmatter.js";
 export { PeopleStore, getRelationAliases } from "./people-store.js";
 export type { PersonMeta, PersonEntry, PersonMatch } from "./people-store.js";
 export { planJournalLifecycle } from "./journal-store.js";

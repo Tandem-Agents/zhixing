@@ -113,15 +113,23 @@ describe("SkillStore 写路径", () => {
       const store = new SkillStore(root);
       const rec = await store.create({
         name: "Deploy Flow",
-        description: "部署",
+        description: '部署: "蓝绿"',
         body: "步骤正文",
         mode: "work",
       });
       expect(rec.id).toBe("deploy-flow");
       expect(rec.source).toBe("own");
       expect(rec.mode).toBe("work");
-      expect((await store.listAll()).map((r) => r.id)).toContain("deploy-flow");
+      expect(await store.listAll()).toEqual([
+        expect.objectContaining({
+          id: "deploy-flow",
+          description: '部署: "蓝绿"',
+        }),
+      ]);
       expect((await store.loadText("deploy-flow")).body).toBe("步骤正文");
+      expect(await store.readDocument("deploy-flow")).toContain(
+        'description: "部署: \\"蓝绿\\""',
+      );
       const st = (await readIndexFile()).find((s) => s.id === "deploy-flow")!;
       expect(st.mode).toBe("work");
     });

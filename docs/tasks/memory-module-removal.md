@@ -1,8 +1,8 @@
 # 当前记忆模块彻底剔除
 
-> 状态：待执行  
-> 当前检查点：尚未派发第一个工作包  
-> 完成度：0/8  
+> 状态：执行中<br>
+> 当前检查点：M3：删除 Agent 公开能力与产品表面<br>
+> 完成度：2/8
 > 职责：从知行当前产品与工程基线中完整移除现有记忆模块，同时保持历史对话持久化和全部非记忆能力不变。
 
 ## 一、任务目标
@@ -56,15 +56,15 @@
 
 | 当前交界 | 裁决 |
 | -------- | ---- |
-| `skills/store.ts`、`rubrics/document.ts` 复用 `memory/frontmatter.ts` | 先把通用 frontmatter 原语迁至中性 owner 并保持合同，再删除 memory 目录；Skills、Rubrics 不属于记忆模块。 |
-| `createAgentRuntime` 的 `memoryScope` 同时决定记忆域、技能分区、场景信任上下文和 lifecycle `sceneId` | 先让后三项只消费既有 workscene/runtime 身份，再删除记忆 scope；技能隔离、权限/信任语义和场景生命周期不得随记忆消失。 |
+| Skills、Rubrics 与暂存活的 memory 实现共同消费 core 根 `frontmatter.ts` | M2 已把通用原语迁至中性 owner 并保持合同；后续删除 memory 目录时保留该 owner，Skills、Rubrics 不属于记忆模块。 |
+| `createAgentRuntime` 以显式 `worksceneIdentity` 决定技能分区、场景信任上下文和 lifecycle `sceneId`；`memoryScope` 只剩记忆职责 | M2 已解除错误耦合；后续删除记忆 scope 不得改变技能隔离、权限/信任语义和场景生命周期。 |
 | owner 从已提交 transcript 重建 segment-memory 输入，post-adoption memory 又依赖收养/转移主链 | 只删除长期记忆派生输入、记录和回放；transcript、segment、收养/转移、post-adoption review 及恢复顺序保持不变。 |
 | workscene 同时具有场景身份、对话目录和 `/me` 记忆目录，且公开 `workscene_memory_query` | 删除记忆目录 helper、清理端口和查询工具；保留场景注册、工作区、会话目录及其他工作模式工具。 |
 | memory 工具使用通用 `app-state` 安全边界，部分通用协议/发布测试以 memory mutation 作样本 | 删除记忆注册和样本，不删除通用安全边界；通用测试改绑仍存活的真实域并保持原断言强度。 |
 
 `Journal` 还用于 Authority/Run 等通用耐久日志，`memory` 也可表示进程内存或缓存；这些名称只有反绑第 2.1 节产品语义后才可删除。
 
-`post-adoption-memory-*` 当前是会话 run 权威流中的严格内部记录，memory owner 也进入检查点、generation 与在途生命周期的精确集合。M1 必须先证明它们未进入本版本承诺兼容的既有日志、检查点或未完成操作；若已经进入且删除其 decoder/参与者会破坏受保护事实，则“历史与非记忆能力不变”和“零兼容残留”无法由任务自行同时满足，必须记录反证、标记阻塞并交用户裁决，禁止擅自保留 reader、放宽未知记录校验或改写用户数据。
+`post-adoption-memory-*` 当前是会话 run 权威流中的严格内部记录，memory owner 也进入检查点、generation 与在途生命周期的精确集合。M1 已证明这些事实若进入兼容集合，删除其 decoder/参与者会与受保护恢复事实冲突；用户最终确认知行尚未正式发布、没有真实用户，首次正式发布前生成的 memory-bearing 开发数据不纳入兼容范围。首个正式版本因此以记忆剔除后的格式为兼容起点，不保留旧 memory reader/participant，也不建设发布前数据迁移；历史对话持久化仍按第 2.2 节完整保护。
 
 本节只记录建任务时已确认的入口，不是允许遗漏的封闭文件清单。实施前必须从生产组合根正向追踪，再从仓库引用反向核对，建立最终可达闭包。
 
@@ -72,8 +72,8 @@
 
 每项 `[x]` 表示该项的生产实现、消费链、直接测试、必要文档和本轮证据已在当前基线上同时闭合；只改代码或只让测试变绿都不得勾选。
 
-- [ ] **M1　冻结真实闭包与兼容基线。** 从 CLI、server、orchestrator、runtime-host 和 distributed-runtime 生产组合根正向追踪，再按符号、协议、路径和文档引用反查，形成“删除 / 中性迁移 / 保护 / 历史保留”四类闭包；独立建立历史对话保护闭包，并核实记忆专属事实是否已进入本版本承诺兼容的会话日志、检查点、generation 或未完成操作。把稳定入口、消费方、裁决、发布/数据支持依据和代表性直接证据登记在本文 M1 执行记录中；未分类事实不得进入批量删除。完成证据是双向调用图与兼容基线同时闭合，不是文件清单或搜索命中数。
-- [ ] **M2　先解除错误耦合。** 迁移通用 frontmatter 原语并保持 Skills/Rubrics 合同；把技能 main/work 分区、scene 信任上下文和 lifecycle `sceneId` 改为只由既有 workscene/runtime 身份提供，不再借 `memoryScope` 决定。以对应单元测试和真实 RuntimeHost 装配证明行为等价；本项不删除记忆能力，也不新建通用框架。
+- [x] **M1　冻结真实闭包与兼容基线。** 从 CLI、server、orchestrator、runtime-host 和 distributed-runtime 生产组合根正向追踪，再按符号、协议、路径和文档引用反查，形成“删除 / 中性迁移 / 保护 / 历史保留”四类闭包；独立建立历史对话保护闭包，并核实记忆专属事实是否已进入本版本承诺兼容的会话日志、检查点、generation 或未完成操作。把稳定入口、消费方、裁决、发布/数据支持依据和代表性直接证据登记在本文 M1 执行记录中；未分类事实不得进入批量删除。完成证据是双向调用图与兼容基线同时闭合，不是文件清单或搜索命中数。
+- [x] **M2　先解除错误耦合。** 迁移通用 frontmatter 原语并保持 Skills/Rubrics 合同；把技能 main/work 分区、scene 信任上下文和 lifecycle `sceneId` 改为只由既有 workscene/runtime 身份提供，不再借 `memoryScope` 决定。以对应单元测试和真实 RuntimeHost 装配证明行为等价；本项不删除记忆能力，也不新建通用框架。
 - [ ] **M3　删除 Agent 公开能力与产品表面。** 删除 `memory` 工具及导出/工厂/AgentRoleProfile 工具声明、系统提示、CLI/TUI 呈现、`/me`、`/journal`、`/people`、server memory RPC、管理 facade/directory、`workscene_memory_query`、帮助/README，以及尚无实现但保留旧能力语义的 `@memory:` typeahead 占位；默认与用户配置均不得再解析出旧工具。同步公开工具和命令 exact-set；保留 AgentRoleProfile 机制、文件/工具补全、其他工作场景工具及通用 `app-state` 权限边界，并以生产注册入口和直接测试证明无影子入口。
 - [ ] **M4　删除自动记忆与维护链。** 移除 orchestrator 记忆端口、Memory Flush、segment hook、post-adoption memory 输入/记录/回放、mesh 绑定、对应 provider 调用治理与 S7 注册，以及 journal maintenance 的 scheduler/system-handler/生命周期装配。保留 segment/摘要/窗口、transcript 提交、收养/转移、post-adoption review、scheduler 本体、transcript retention 和失败恢复主链；用真实组合根与失败/重启测试证明只断开派生支路。
 - [ ] **M5　删除分布式状态与 owner 协议面。** 移除 memory/people/journal 的 global query/result/mutation/commit domain、codec、invariant、唯一 owner、维护合同和 product-language；删除 `memory-domain:*` 资源类型、conversation/job assignment 签发、stager 验权、场景删除的 memory cleanup 以及 generation install/rebind/router/participant exact-set 中的 memory owner。保留其他全局域、assignment、AuthorityCapability、workscene 删除及对话清理语义；通用协议测试若以 memory 作样本，改绑仍存活域而不削弱断言。
@@ -132,8 +132,8 @@
 
 | M 项 | 状态 | 当前基线与直接证据 | 遗留问题 | 下一检查点 |
 | ---- | ---- | ------------------ | -------- | ---------- |
-| M1 | 待执行 | — | — | 建立四类闭包与历史对话保护闭包 |
-| M2 | 待执行 | — | — | 等待 M1 |
+| M1 | 已完成 | `HEAD 2af063e8`；差异标识 `memory-removal-M1-compat-decided-20260827`。双向调用图、历史对话保护闭包和三层兼容事实均已闭合；用户确认知行尚未正式发布、没有真实用户，发布前 memory-bearing 开发数据不属于兼容承诺。 | 无。首个正式版本以记忆剔除后的格式为兼容起点；不得保留旧 decoder/participant、扫描或迁移发布前开发数据。 | M2：先迁出通用 frontmatter，再拆除非记忆 scene 语义对 `memoryScope` 的借用。 |
+| M2 | 已完成 | `HEAD 2af063e8`；差异标识 `memory-removal-M2-neutral-frontmatter-workscene-identity-20260827`。frontmatter 唯一实现已迁至 core 中性文件 owner，包根只显式转导既有 `parseFrontmatter` / `stringifyFrontmatter` 函数；`worksceneIdentity` 独立驱动 work 技能、scene 信任/权限与 lifecycle，RuntimeHost 和 CLI executor 均从既有场景/对话身份显式传入。core/orchestrator/runtime-host 的 typecheck+build、CLI build 和 139 个直接测试通过。 | 无 M2 遗留。CLI 规范 typecheck 仍报告 HEAD 已存在且本包未触碰的 `mesh-runtime-assembly.ts:1803` 未使用参数；关闭该既有告警后同一 typecheck 通过，不影响本包类型与产物结论。 | M3：从默认 profile/工具工厂到 CLI/server/工作模式表面完整删除旧记忆公开能力。 |
 | M3 | 待执行 | — | — | 等待 M2 |
 | M4 | 待执行 | — | — | 等待 M3 |
 | M5 | 待执行 | — | — | 等待 M4 |
@@ -142,6 +142,89 @@
 | M8 | 待执行 | — | — | 等待 M7 |
 
 M1 的分类闭包和 M8 的五面对抗记录均追加在本节，不创建第二份任务或回归文档。
+
+### M1 执行记录（2026-08-27）
+
+#### 基线、方法与结论
+
+- 基线为 `HEAD 2af063e81000a163c111c3a2ef8f320111d39f65`（`develop` 相对 `origin/develop` ahead 1）+ 本文未暂存差异 `memory-removal-M1-compat-decided-20260827`。进场前唯一其他工作区变化是已暂存的 `research/design/workbench/unit-development-workbench.md` 当前关注任务一行；本包未修改且不计入成果。
+- 从 CLI/serve 的 authority、conversation 和 mesh 生产组合根正向追到 core，再从符号、协议 discriminant、资源类型、路径、package export、构建入口、注册表/golden、测试和现行文档反向核对。仓库没有独立的 `packages/distributed-runtime`，其生产责任实际分布在 CLI setup/serve、core protocol/adapter、owner-kernel、runtime-host 和 server，已按这些真实组合根闭合。当前可达记忆相关事实均已归入下表四类；合法的 `Journal`、进程内 memory 和历史材料另行隔离，没有以关键词命中代替归属。
+- 四类闭包与历史对话保护闭包已经成立；用户最终确认知行尚未正式发布、没有真实用户，发布前 memory-bearing 开发数据不纳入兼容范围。兼容基线因此无条件闭合，M1 标记 `[x]` 并进入 M2。
+
+#### 双向生产调用图与四类闭包
+
+| 责任链 | 稳定入口 → producer → 直接 consumer → 最终行为 | 裁决与后续落点 |
+| ------ | ----------------------------------------------- | ---------------- |
+| Profile、People、memory Journal 存储与旧数据接管 | `setup-delivery` 在 anchor 启动创建 `AnchorMemoryGlobalStateAdapter`，对 personal/全部 workscene 执行 staged publishing 与 legacy takeover；adapter 消费 memory query/mutation，维护 canonical store、旧 Markdown projection/cutover，向工具、RPC、自动链和维护链提供长期状态 | **删除**：M5 先退 query/mutation/owner，M6 再退 adapter、store、路径、import/cutover 和旧投影；不得触碰用户已有文件。 |
+| 显式 Agent/管理表面 | 默认 main profile 注册 builtin `memory`；orchestrator 的 assignment-bound port 把 save/update/delete stage 为全局变更，search/list 读取全局状态；server 注册三项 memory RPC，CLI 暴露 `/me`、`/journal`、`/people`；runtime-host 暴露 `workscene_memory_query` | **删除**：M3 同时关闭工具工厂、默认配置、提示、RPC/CLI/工作模式查询、exact-set/golden 和无实现的 `@memory:` typeahead 语义，防止影子入口。 |
+| 自动提炼、收养后回放与维护 | segment summarize 后的 memory hook 调用 `MemoryFlusher` 并 stage Profile/People/Journal；conversation transfer 安装后及启动 catch-up 调用 post-adoption memory；journal maintenance 定时查询并 stage condense/delete | **删除**：M4 只断开长期记忆派生、回放和维护支路；保留 segment/摘要、transfer/adoption、post-adoption review、scheduler 与恢复主链。 |
+| 全局协议、唯一 owner 与 generation | core 的 closed global query/result/staged-mutation union、`memory-domain:*` 能力资源和严格 codec 进入 assignment/stager；memory adapter 作为 `memory-global-state` participant 进入 router、generation rebind、projection/participant exact-set、checkpoint 与灾备 receipt | **删除**：M5；按最终兼容裁决直接删除 decoder/participant，不为发布前开发数据保留 reader 或迁移。 |
+| core 公开/制品面 | `@zhixing/core` 根导出、`./memory` 子路径和 tsup 独立入口导出整个 memory 域；S7、distributed-runtime contracts、package exports、registry/server golden、测试与现行规格反向锁定上述入口 | **删除**：M6/M7 在消费方退场后同步删除 export/build/门禁/现行授权，tarball 必须不可达。 |
+| 通用 frontmatter | M1 冻结时 Skills store 与 Rubrics document 直接复用 `core/memory/frontmatter.ts`；M2 已将唯一实现迁至 `core/frontmatter.ts`，memory/Skills/Rubrics 共同消费 | **中性迁移已完成**：后续删除 memory 目录时保留中性 owner 与 Skills/Rubrics 合同。 |
+| `memoryScope` 承载的非记忆身份 | M1 冻结时 `createAgentRuntime` 同时用它决定 skill main/work 分区、scene trust context 和 lifecycle `sceneId`；M2 已改由 RuntimeHost/executor 显式传入 `worksceneIdentity` | **中性迁移已完成**：`memoryScope` 只剩记忆职责；技能隔离、信任/权限和生命周期不随其删除。 |
+| 对话、authority 与通用安全基础设施 | transcript/run journal、Authority/Run/DeviceLifecycle/Evidence Journal、assignment/commit/app-state 安全边界、scheduler、workscene 身份/工作区/对话目录均被旧链复用或以 memory 作测试样本 | **保护**：机制和语义保留；仅移除 memory consumer/fixture，通用测试改绑存活域且保持原识别力。 |
+| 非产品同名与历史事实 | `InMemory*` store、缓存/Map、RSS memory、模型上下文，以及 `research/source-analysis`、`research/insights`、旧任务/ledger/migration/draft 中的 memory/Journal | **保护 / 历史保留**：运行期非产品 memory 不删；历史原始事实不清洗。M7 只让现行规格、索引、README 和架构“当前结论”停止授权旧能力。 |
+
+代表性直接证据：`packages/cli/src/setup-delivery.ts` 的 adapter 初始化、router/participant/rebind；`packages/core/src/memory/global-state-adapter.ts` 的 owner、cutover 与投影；`packages/tools-builtin/src/memory.ts`、`packages/orchestrator/src/runtime/create-agent-runtime.ts`、`packages/runtime-host/src/builtin-extra-tools.ts`、`packages/server/src/rpc/methods/memory.ts` 的生产消费；`packages/core/package.json` 与 `packages/core/tsup.config.ts` 的公开/构建入口；`scripts/s7-entry-coverage.mjs` 与 `scripts/lint-distributed-runtime-contracts.mjs` 的反向结构约束。
+
+#### 历史对话持久化保护闭包
+
+| 受保护事实 | 真实 owner / 投影 / 产品出口 | 与旧记忆链交界及唯一允许动作 | 后续保护证据 |
+| ---------- | -------------------------- | ---------------------------- | ------------ |
+| transcript 原文、committed run 与 clear | `ShardedTranscriptStore` 持久化 raw/committed run、clear、分片/索引；serve `access-surfaces` 提供 append/read/count/clear/delete | memory 只消费已提交内容；删除 memory 派生和 cleanup，不改写原文、clear 顺序、分片或 retention | M4～M6 的历史、clear、删除与重启直接回归必须继续读取同一事实。 |
+| run/owner 提交、元数据和崩溃重驱 | `ConversationRunJournal` 以 `run:<conversationId>` 为权威流，提交 artifact closure、session metadata/lifecycle 与恢复投影 | `segmentMemoryFlushes()` 和 post-adoption memory 内部记录是派生支路；只能移除其 producer/consumer，不能放宽 journal/MutationBatch 严格校验 | committed/pending run、artifact closure、recovery projection 和 restart redrive 回归。 |
+| conversation/session 生命周期与历史浏览 | `ConversationManager` + CLI conversation access surface 负责 create/load/switch/resume/list/history/rename/clear/delete | memory 管理/RPC 退出，不改变 conversation ID、元数据、历史分页、删除和恢复 | server `session.*`、CLI facade/controller 与 history/bootstrap 直接回归。 |
+| attention window、bootstrap、segment 与摘要 | transcript/snapshot 构建 startup bootstrap；AttentionWindow/SegmentManager 压缩视图并记录 windowCompact/summary，原始 transcript 不被改写 | 只删除 `afterSummarize` memory hook、segment-memory candidate 和 provider 提炼；保留 compact/summary/预算/启动装填 | 无 memory hook 的 segment 切换、摘要、上下文预算、snapshot/bootstrap 回归。 |
+| 收养/转移与恢复顺序 | transfer install 先建立 conversation authority；启动扫描 committed/tombstoned transfer 并恢复；post-adoption review 独立运行 | 删除 post-adoption **memory** flush/records/replay；保留 transfer/adoption、catch-up、review 和失败恢复顺序 | transfer/adoption/restart/review 组合测试，证明只少一个并行派生消费者。 |
+| RPC、CLI、server 与渠道投影 | server `session.*`、RPC session wire/广播、CLI conversation facade/controller、channel conversation binding/Feishu adapter 统一消费 ConversationManager | 只移除 memory 命令/RPC/工具；不得改变会话事件、订阅、流式 turn、渠道绑定或历史产品行为 | 对真实 server/CLI/channel 组合根做发送、历史、clear/delete、恢复和事件投影回归。 |
+
+代表性直接证据：`packages/core/src/transcript/shard/store.ts`、`packages/core/src/context/bootstrap/build-startup-bootstrap.ts`、`packages/core/src/context/segment/segment-manager.ts`、`packages/owner-kernel/src/conversation-assignment.ts`、`packages/cli/src/serve/access-surfaces.ts`、`packages/cli/src/serve/mesh-runtime-assembly.ts`、`packages/server/src/rpc/methods/session.ts`。这些主链均能在不依赖长期记忆输出的情况下成立；下述格式冲突仅记录兼容集合包含旧 memory 专属耐久事实时的反事实技术边界，最终产品裁决已将其排除。
+
+#### 兼容三层基线、技术必然性与最终裁决
+
+| 事实层 | 已证明 | 未证明 / 不得推导 | 直接证据 |
+| ------ | ------ | ----------------- | -------- |
+| 代码生产可达 | 当前生产组合会在 transfer commit 与启动 catch-up 后把 `post-adoption-memory-*` 写入 `run:<conversationId>`；builtin memory 与自动 flush 会把 `memory-append/delete` 写入 `MutationBatch v1`；memory adapter 是当前全局 mutation owner 和 generation participant。 | 生产入口存在不等于任何真实用户已经运行并形成数据。 | `post-adoption-memory.ts`、`mesh-runtime-assembly.ts`、`create-agent-runtime.ts`、`commit.ts`、`setup-delivery.ts`。 |
+| 交付分支 / 制品候选 | 引入 post-adoption memory 的 `dd50eec8949f` 是 `origin/main` 的 `9e1d4d69` 祖先；根及 16 个公开包版本均为 `0.1.0`；closeout 在隔离 npm consumer/home 中完成 canonical tarball 验收并记录候选 SHA-256。 | 进入 main、版本号、README 安装说明、本地 pack 或 tarball smoke 都不是 npm 发布或真实使用 provenance。 | Git ancestry、`package.json`/版本投影、`distributed-runtime-closeout-task.md` 的最终 tarball/隔离验收记录。 |
+| 必须兼容的既有用户数据 | 仓库内没有可靠证据证明上述 memory-bearing 候选已真实发布或被真实用户运行；用户进一步确认知行尚未正式发布且没有真实用户，并裁决发布前由源码、构建产物或候选 tarball 生成的数据不纳入兼容范围。 | main 祖先关系、版本号、README 和候选 tarball 仍只证明前两层，不能冒充真实发布；开发者本地是否曾生成数据不再改变产品兼容边界，也不授权访问或处理其目录。 | 用户 2026-08-27 最终裁决；`distributed-runtime-closeout-task.md` §四、§五和最终冻结记录；`release-and-maintenance-guide.md` 发布者合同；`publish-npm.mjs` 与 `npm-delivery-structure.test.mjs`；本地 Git/tag/archive/workflow 检查。 |
+
+如果兼容集合包含 memory-bearing 数据，源码证明不存在同时满足“零 memory decoder/participant、零数据扫描改写、不放宽严格校验、历史对话及恢复不变”的方案：
+
+1. **run 流没有可绕过的投影路径。** `ConversationRunJournal` 重建 run 与 submission-guard 投影时，对同一 `run:<conversationId>` 中每个带 `kind` 的记录调用 `assertConversationRunInternalRecord`；删除五种 post-adoption memory decoder 后会按 unknown internal record fail-closed，早于历史投影完成。保留这些 exact kind 的惰性分支仍是 memory 专属兼容 reader；改成忽略任意未知 kind 则放宽通用严格校验。
+2. **MutationBatch 不能整体跳过或局部猜读。** `validateConversationBundleClosure`、artifact retention/依赖提取、committed/pending recovery 与 transfer 都调用 `validateMutationBatch`，后者逐条进入 closed global staged-mutation codec。批次可同时含 memory 与非记忆 mutation；跳过整个 artifact 会丢失非记忆提交和 closure，按未知 kind 过滤会改变 digest/严格合同，保留 memory discriminant 则是协议残余。已 granted 但待物化的 memory mutation 在移除 owner 后还会于 `GlobalMutationCommitCoordinator.apply` 以“no unique anchor owner”失败。
+3. **generation/checkpoint 本身不是独立发布或阻塞证据。** 已完成的 disaster post-install receipt 只耐久保存 participant digest，读取时不按当前 participant exact-set 重新解释；未完成 install 会用当前代码的 participant 集合重新 rebind，因此不能仅凭旧列表推导失败。真正的条件性冲突是：checkpoint/transfer 恢复随后调用 conversation consumer；若恢复的共享 authority log 含上述 run 记录、MutationBatch 或待物化 memory mutation，仍必然回到第 1、2 条，移除 memory owner 后无法完成原义务。把 memory stream 或专属目录留作完全不可达的用户数据本身不需要 reader，但不能修复混入受保护 run/artifact 的事实。
+4. **没有第三条无残留路线。** 改写/迁移既有日志或 mutation artifact 违反数据边界；保留旧 codec/owner 是兼容壳；跳过整段历史、切换到另一份 transcript 或忽略未知记录会破坏 owner 权威、混合 mutation、崩溃重驱或严格损坏检测。版本化旧 codec 即使不再生产，也仍是本任务明确禁止的 reader。
+
+上述条件式技术冲突已由产品边界裁决解除：**发布前 memory-bearing 开发数据不进入兼容集合。** 首个正式版本直接以剔除完成后的严格格式为兼容起点；后续删除不得保留旧 memory decoder/participant、放宽未知记录校验、扫描或迁移开发者本地数据。这个裁决只取消旧记忆数据兼容义务，不改变 transcript、conversation、segment、摘要、恢复及其投影的正式产品基线。
+
+M1 冻结点是 `HEAD 2af063e8` + 本文 `memory-removal-M1-compat-decided-20260827`：四类双向闭包、历史对话保护闭包和兼容基线均无条件成立，M1 可闭合并进入 M2；M1 取证期间未执行任何 Git 暂存区、历史、远程或 registry 写操作，也未访问用户 home、秘密或外部系统。
+
+#### 实际取证命令
+
+- 基线/差异：`git status --short --branch`、`git rev-parse HEAD`、`git diff --cached -- research/design/workbench/unit-development-workbench.md`、`git diff -- docs/tasks/memory-module-removal.md`。
+- 双向闭包：`rg --files`；按 memory/Profile/People/Journal、协议 kind、资源类型、路径 helper、export/build、注册表/golden/test/doc 引用执行的 `rg -n`；对生产组合根和严格 codec 使用 `Get-Content` 分段核读。
+- 发布/兼容：`git log --all --follow`、`git show`、`git merge-base --is-ancestor dd50eec8949f 9e1d4d69`、`git tag --list`、`git branch --contains`、`git ls-files` 的 archive/shrinkwrap 检查、`.github`/发布报告检查；核读 closeout 最终记录、release guide、`publish-npm.mjs`、零写结构测试及 production write/recovery 条件。全程离线，未访问 npm registry、用户 home、秘密或外部系统。
+- 按 M1 边界未运行 lint、test、build 或 package check；未执行暂存、取消暂存、提交、历史改写或推送。
+
+### M2 执行记录（2026-08-27）
+
+#### 中性归属与生产装配闭包
+
+- 基线为同一 `HEAD 2af063e81000a163c111c3a2ef8f320111d39f65` + 差异标识 `memory-removal-M2-neutral-frontmatter-workscene-identity-20260827`。`packages/core/src/frontmatter.ts` 现在是 Markdown frontmatter 的唯一中性文件 owner；原 `memory/frontmatter.ts` 已删除，直接测试迁至 `core/src/__tests__`。Skills、Rubrics 以及 M3～M6 前仍存活的 memory 实现全部直接消费该 owner，`./memory` 仅暂时转导同一绑定。`parseFrontmatter` / `stringifyFrontmatter` 迁移前已通过 memory 转导属于 core 根公共面；M2 保持两个函数的公共可达性，只为避免在“解除错误耦合”阶段顺手改变非记忆合同，不以当前未被证明存在的包外消费方为依据。最终公共面是否保留它们，由真实非记忆职责和 M7 package surface 统一裁决；实现文件的 `ParsedFrontmatter` 类型不加入包根公共合同。
+- `CreateAgentRuntimeOptions.worksceneIdentity` 是最窄的非记忆装配输入。skill main/work 分区、`SecurityPipeline` 的 scene trust/permission context 和全部 lifecycle `sceneId` 只读取该身份；`memoryScope` 的生产引用只剩记忆 query/mutation/flush 的 scope。显式 workscene 身份在没有 `memoryScope` 时仍产生完整 work 语义，反向给出 workscene `memoryScope` 而不提供 runtime 身份时仍保持 main/global 语义。
+- RuntimeHost 从 `WorksceneDto.id` 建立单一 `sceneId`，再向 `createAgentRuntime` 显式传入同值的 `worksceneIdentity` 与临时 memory scope；CLI executor 从已编码在 conversation ID 中的 `ConversationScope` 取得同一场景身份。普通 workspace、main 与无 workspace 路径均不从 profile、路径或 memory 类型回退推断 scene。M2 未修改 transcript、conversation、segment、摘要、恢复或投影代码，也未删除任何记忆能力。
+
+#### 直接证据、命令与结果
+
+- core 直接测试：在 `packages/core` 运行 `node node_modules/vitest/vitest.mjs run src/__tests__/frontmatter.test.ts src/skills/__tests__/store.test.ts src/skills/__tests__/store-write.test.ts src/rubrics/__tests__/document.test.ts src/rubrics/__tests__/store.test.ts`，5 文件 60 测试通过；特殊字符 roundtrip 同时覆盖 Skills/Rubrics 产品入口。
+- orchestrator 直接测试：在 `packages/orchestrator` 运行 `node node_modules/vitest/vitest.mjs run src/runtime/__tests__/create-agent-runtime.test.ts`，1 文件 70 测试通过；新增正反例同时锁定技能分区、scene trust/context 和 lifecycle 身份与 `memoryScope` 正交。
+- 生产组合根直接测试：在 `packages/cli` 运行 `node node_modules/vitest/vitest.mjs run src/runtime/__tests__/runtime-host.test.ts src/serve/__tests__/executor-role-job-runtime.test.ts`，2 文件 9 测试通过；RuntimeHost 与实际 executor 组合根均显式透传场景身份，main/workspace 路径无回退。
+- 串行类型/构建：`pnpm --filter @zhixing/core exec tsc -p tsconfig.json --noEmit`、`pnpm --filter @zhixing/core build`、`pnpm --filter @zhixing/orchestrator exec tsc -p tsconfig.json --noEmit`、`pnpm --filter @zhixing/orchestrator build`、`pnpm --filter @zhixing/runtime-host exec tsc -p tsconfig.json --noEmit`、`pnpm --filter @zhixing/runtime-host build` 和 `pnpm --filter @zhixing/cli build` 全部通过。core build 仅输出既有 Rollup circular-chunk 警告。
+- CLI 规范 typecheck `pnpm --filter @zhixing/cli exec tsc -p tsconfig.json --noEmit` 唯一失败为未改动的 `src/serve/mesh-runtime-assembly.ts(1803,30) TS6133`；`git diff` 与 `git show HEAD:` 证明该未使用参数来自当前 HEAD。追加 `--noUnusedParameters false` 后同一完整 CLI typecheck 通过，且 CLI 生产构建通过，因此没有被该既有 hygiene 告警遮蔽的 M2 类型错误。
+- 静态反查：`rg` 已确认生产源码不存在 `memory/frontmatter` 引用；`create-agent-runtime.ts` 中 `options.memoryScope` 只初始化记忆 scope，所有非记忆 scene 消费均命中 `worksceneIdentity`。未运行根级 lint/test/build、package check 或 M3 验证；未执行任何 Git 暂存、取消暂存、提交、历史改写或推送。
+- 公共出口纠正：协调复核发现实现类型 `ParsedFrontmatter` 没有既有根导出或外部消费依据，已从 `core/src/index.ts` 移除；包根只保留两个既有函数的中性转导。纠正后仅运行 `git diff --check`、`pnpm --filter @zhixing/core exec tsc -p tsconfig.json --noEmit` 和 `pnpm --filter @zhixing/core build`，三项通过；build 仍仅输出既有 Rollup circular-chunk 警告。未重复运行已经双方确认通过的 139 项直接测试。
+
+M2 无未闭合责任，标记 `[x]`；下一检查点是 M3。当前已暂存的工作台动态任务行始终未修改索引或文件内容，不计入本包成果。
 
 ## 十、用户提示词
 

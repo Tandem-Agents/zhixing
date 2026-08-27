@@ -87,6 +87,8 @@ describe("资产层透传", () => {
     expect(params.decorateRunBus).toBe(decorateRunBus);
     expect(params.artifactStore).toBe(artifactStore);
     expect(params.workspace).toBeUndefined();
+    expect(params.worksceneIdentity).toBeUndefined();
+    expect(params.memoryScope).toBeUndefined();
     expect(params.extraTools).toBe(tools);
     expect(params.runtimeKind).toBe("conversation");
     expect(params.systemProtectedPaths).toBe(options.systemProtectedPaths);
@@ -123,6 +125,7 @@ describe("资产层透传", () => {
     expect(params.workspace).toBe("/proj");
     expect(params.runtimeKind).toBe("conversation");
     expect(params.primaryRole).toBe("power");
+    expect(params.worksceneIdentity).toEqual({ sceneId: "s1" });
     expect(params.memoryScope).toEqual({ kind: "workscene", sceneId: "s1" });
     expect(params.profile).toBeDefined();
     expect((assembled[0] as { spec?: unknown }).spec).toEqual({
@@ -139,6 +142,8 @@ describe("资产层透传", () => {
     params = createAgentRuntimeMock.mock.calls[1]![0];
     expect(params.workspace).toBeNull();
     expect(params.runtimeKind).toBe("conversation");
+    expect(params.worksceneIdentity).toEqual({ sceneId: "s2" });
+    expect(params.memoryScope).toEqual({ kind: "workscene", sceneId: "s2" });
     expect(params.profile.enabledTools).not.toContain("read");
     expect(params.profile.enabledTools).not.toContain("admit_skill");
   });

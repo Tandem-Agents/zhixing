@@ -27,7 +27,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import { parseFrontmatter } from "./frontmatter.js";
+import { parseFrontmatter } from "../frontmatter.js";
 import type { ProfileData, ProfileMeta } from "./types.js";
 import { getMemoryDir } from "./types.js";
 

@@ -2264,12 +2264,39 @@ describe("createAgentRuntime · 生命周期钩子", () => {
 // ─── 信任上下文装配:场景实例用场景信任(会话锚),非场景维持路径锚 ───
 
 describe("trustContext 装配分叉", () => {
-  it("workscene memoryScope → scene 信任与 scene 权限上下文(allow-context 沉淀进场景语境)", async () => {
+  it("显式 workscene 身份独立决定 work 技能、scene 信任/权限与 lifecycle sceneId", async () => {
     providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const query = makeSkillCatalogQuery([
+      ownSkillEntry({
+        id: "main-only",
+        name: "Main Only",
+        description: "ZX_MAIN_SKILL_MARKER",
+        mode: "main",
+      }),
+      ownSkillEntry({
+        id: "work-only",
+        name: "Work Only",
+        description: "ZX_WORK_SKILL_MARKER",
+        mode: "work",
+      }),
+    ]);
+    const opens: Array<{ mode: string; sceneId?: string }> = [];
     const runtime = await createAgentRuntime({
       workspace: null,
-      memoryScope: { kind: "workscene", sceneId: "s1" },
+      worksceneIdentity: { sceneId: "s1" },
+      lifecycle: [
+        {
+          id: "identity-probe",
+          onWindowOpen: (ctx) => {
+            opens.push({
+              mode: ctx.mode,
+              ...(ctx.sceneId === undefined ? {} : { sceneId: ctx.sceneId }),
+            });
+          },
+        },
+      ],
     });
+    expect(opens).toEqual([{ mode: "work", sceneId: "s1" }]);
     expect(runtime.securityPipeline.getTrust()).toEqual({
       kind: "scene",
       sceneId: "s1",
@@ -2278,6 +2305,67 @@ describe("trustContext 装配分叉", () => {
       kind: "scene",
       sceneId: "s1",
     });
+
+    await runtime.run({
+      messages: [userMessage("hi")],
+      turnIndex: 0,
+      globalQuery: query.port,
+    });
+    expect(providerRef.current.calls[0]!.systemPrompt).toContain(
+      "ZX_WORK_SKILL_MARKER",
+    );
+    expect(providerRef.current.calls[0]!.systemPrompt).not.toContain(
+      "ZX_MAIN_SKILL_MARKER",
+    );
+  });
+
+  it("workscene memoryScope 单独存在时不再改变 main 技能、信任/权限或 lifecycle 身份", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const query = makeSkillCatalogQuery([
+      ownSkillEntry({
+        id: "main-only",
+        name: "Main Only",
+        description: "ZX_MAIN_SKILL_MARKER",
+        mode: "main",
+      }),
+      ownSkillEntry({
+        id: "work-only",
+        name: "Work Only",
+        description: "ZX_WORK_SKILL_MARKER",
+        mode: "work",
+      }),
+    ]);
+    const opens: Array<{ mode: string; sceneId?: string }> = [];
+    const runtime = await createAgentRuntime({
+      workspace: null,
+      memoryScope: { kind: "workscene", sceneId: "memory-only" },
+      lifecycle: [
+        {
+          id: "identity-probe",
+          onWindowOpen: (ctx) => {
+            opens.push({
+              mode: ctx.mode,
+              ...(ctx.sceneId === undefined ? {} : { sceneId: ctx.sceneId }),
+            });
+          },
+        },
+      ],
+    });
+    expect(opens).toEqual([{ mode: "main" }]);
+    expect(runtime.securityPipeline.getTrust()).toEqual({ kind: "global" });
+    expect(runtime.securityPipeline.getContextId()).toEqual({ kind: "main" });
+
+    await runtime.run({
+      messages: [userMessage("hi")],
+      turnIndex: 0,
+      globalQuery: query.port,
+    });
+    expect(providerRef.current.calls[0]!.systemPrompt).toContain(
+      "ZX_MAIN_SKILL_MARKER",
+    );
+    expect(providerRef.current.calls[0]!.systemPrompt).not.toContain(
+      "ZX_WORK_SKILL_MARKER",
+    );
   });
 
   it("非场景实例:无工作区 → global 信任与 main 上下文", async () => {

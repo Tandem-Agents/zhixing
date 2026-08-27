@@ -8,6 +8,10 @@ export * from "./loop/index.js";
 export * from "./resilience/index.js";
 export * from "./context/index.js";
 export * from "./transcript/index.js";
+export {
+  parseFrontmatter,
+  stringifyFrontmatter,
+} from "./frontmatter.js";
 export * from "./memory/index.js";
 export * from "./security/index.js";
 export * from "./confirmation/index.js";

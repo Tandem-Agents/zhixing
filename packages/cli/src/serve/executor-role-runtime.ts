@@ -925,6 +925,7 @@ export class ExecutorRuntimeSubstrate {
       ...(workscene
         ? {
             primaryRole: "power",
+            worksceneIdentity: { sceneId: workscene.sceneId },
             memoryScope: {
               kind: "workscene" as const,
               sceneId: workscene.sceneId,

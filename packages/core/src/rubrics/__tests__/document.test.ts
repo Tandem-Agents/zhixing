@@ -135,4 +135,23 @@ description: 有标题但 id 无效
     );
     expect(document.content.failureHandling[0]?.scenario).toBe("覆盖不完整");
   });
+
+  it("frontmatter 特殊字符经 Rubric 序列化与回读保持原值", () => {
+    const raw = stringifyRubricDraft({
+      id: "critical-path-review",
+      title: '审查: "关键路径"',
+      description: '适用于包含 # 标记的 "关键" 审查',
+      content: {
+        passCriteria: ["关键路径已核对。"],
+        failureHandling: [
+          { scenario: "仍有遗漏", reply: "继续核对。" },
+        ],
+      },
+    });
+
+    const document = parseRubricDocument(raw);
+    expect(document.id).toBe("critical-path-review");
+    expect(document.title).toBe('审查: "关键路径"');
+    expect(document.description).toBe('适用于包含 # 标记的 "关键" 审查');
+  });
 });

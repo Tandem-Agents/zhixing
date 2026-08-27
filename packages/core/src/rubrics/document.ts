@@ -1,4 +1,4 @@
-import { parseFrontmatter, stringifyFrontmatter } from "../memory/frontmatter.js";
+import { parseFrontmatter, stringifyFrontmatter } from "../frontmatter.js";
 import { normalizeRubricId, rubricTextToId, rubricTitleToId } from "./id.js";
 import {
   RubricProtocolError,

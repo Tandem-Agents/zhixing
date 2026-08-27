@@ -1,13 +1,8 @@
 /**
- * YAML Frontmatter 解析器
+ * Markdown YAML Frontmatter 解析与序列化原语。
  *
- * 轻量实现，无需引入 gray-matter 等外部依赖。
- * 支持标准的 --- 分隔的 YAML frontmatter 格式。
- *
- * 局限性（有意为之）：
- * - 只支持扁平的 key: value 和简单数组 [a, b, c]
- * - 不支持嵌套对象（记忆文件的 frontmatter 不需要）
- * - 复杂场景由 memory 工具在写入时保证格式正确
+ * 轻量实现，无需引入 gray-matter 等外部依赖。当前合同有意只支持项目文档
+ * 已使用的扁平 key: value 与简单数组 [a, b, c]；不支持嵌套对象。
  */
 
 export interface ParsedFrontmatter<T = Record<string, unknown>> {
@@ -52,9 +47,7 @@ export function parseFrontmatter<T = Record<string, unknown>>(
   return { data, content, raw };
 }
 
-/**
- * 将对象序列化为 YAML frontmatter + Markdown 格式。
- */
+/** 将对象序列化为 YAML frontmatter + Markdown 格式。 */
 export function stringifyFrontmatter(
   data: Record<string, unknown>,
   content: string,
@@ -74,8 +67,6 @@ export function stringifyFrontmatter(
     ? `${frontmatter}\n\n${content}`
     : content;
 }
-
-// ─── 内部实现 ───
 
 function parseSimpleYaml(yaml: string): Record<string, unknown> {
   const result: Record<string, unknown> = {};
@@ -102,10 +93,8 @@ function parseYamlValue(raw: string): unknown {
   if (raw === "true") return true;
   if (raw === "false") return false;
 
-  // 数字
   if (/^-?\d+(\.\d+)?$/.test(raw)) return Number(raw);
 
-  // 数组：[a, b, c]
   if (raw.startsWith("[") && raw.endsWith("]")) {
     const inner = raw.slice(1, -1).trim();
     if (inner === "") return [];
@@ -115,7 +104,6 @@ function parseYamlValue(raw: string): unknown {
     });
   }
 
-  // 带引号的字符串
   return unquote(raw);
 }
 
@@ -137,7 +125,6 @@ function serializeYamlLine(key: string, value: unknown): string {
   }
 
   if (typeof value === "string") {
-    // 含特殊字符时加引号
     if (value.includes(":") || value.includes("#") || value.includes('"')) {
       return `${key}: "${value.replace(/"/g, '\\"')}"`;
     }

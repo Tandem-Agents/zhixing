@@ -2,7 +2,7 @@ import type { ArtifactStore, IConfirmationBroker } from "@zhixing/core";
 import type { McpHub } from "@zhixing/mcp";
 import type { AgentRuntime, AgentRuntimeCapacityBinding } from "@zhixing/orchestrator/runtime";
 import type { ZhixingConfig } from "@zhixing/providers";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const runtimeMocks = vi.hoisted(() => ({
   createAgentRuntime: vi.fn(),
@@ -23,6 +23,57 @@ const {
   ExecutorJobOwnerLifecycle,
   ExecutorRuntimeSubstrate,
 } = await import("../executor-role-runtime.js");
+
+beforeEach(() => {
+  runtimeMocks.createAgentRuntime.mockReset();
+});
+
+describe("executor role conversation runtime production assembly", () => {
+  it("forwards explicit workscene identity and keeps ordinary workspace runtimes in main mode", async () => {
+    const runtime = {} as AgentRuntime;
+    runtimeMocks.createAgentRuntime.mockResolvedValue(runtime);
+    const substrate = new ExecutorRuntimeSubstrate({
+      config: {} as ZhixingConfig,
+      credentials: {},
+      mcpHub: {
+        catalog: () => [],
+        callTool: vi.fn(),
+      } as unknown as McpHub,
+      systemProtectedPaths: ["protected"],
+      interactions: {} as never,
+      artifactStore: () => ({} as ArtifactStore),
+      deviceCapacity: {
+        interactive: {} as AgentRuntimeCapacityBinding,
+        scheduler: {} as AgentRuntimeCapacityBinding,
+        orchestration: {} as AgentRuntimeCapacityBinding,
+      },
+    });
+
+    await substrate.createConversationRuntime(
+      "/scene-workspace",
+      "ws:scene-a:primary",
+    );
+    expect(runtimeMocks.createAgentRuntime).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        workspace: "/scene-workspace",
+        primaryRole: "power",
+        worksceneIdentity: { sceneId: "scene-a" },
+        memoryScope: { kind: "workscene", sceneId: "scene-a" },
+      }),
+    );
+
+    await substrate.createConversationRuntime(
+      "/ordinary-workspace",
+      "ordinary-conversation",
+    );
+    const mainParams = runtimeMocks.createAgentRuntime.mock.calls[1]![0];
+    expect(mainParams.workspace).toBe("/ordinary-workspace");
+    expect(mainParams.worksceneIdentity).toBeUndefined();
+    expect(mainParams.memoryScope).toBeUndefined();
+    expect(mainParams.primaryRole).toBeUndefined();
+  });
+});
 
 describe("executor role job runtime production assembly", () => {
   it("constructs jobs through the scheduler runtime substrate", async () => {

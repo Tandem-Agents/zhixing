@@ -15,7 +15,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { writeAtomic } from "../transcript/serializer.js";
 import { PathGuard } from "../security/path-guard.js";
-import { parseFrontmatter, stringifyFrontmatter } from "../memory/frontmatter.js";
+import { parseFrontmatter, stringifyFrontmatter } from "../frontmatter.js";
 import { skillNameToId } from "./id.js";
 import { getBuiltinSkill } from "./builtin.js";
 import {

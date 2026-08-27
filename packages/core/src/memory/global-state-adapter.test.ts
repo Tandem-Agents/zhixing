@@ -9,7 +9,7 @@ import type {
   GlobalStagedMutation,
 } from "../contracts/index.js";
 import { AnchorMemoryGlobalStateAdapter } from "./global-state-adapter.js";
-import { stringifyFrontmatter } from "./frontmatter.js";
+import { stringifyFrontmatter } from "../frontmatter.js";
 import { projectMemoryLogicalEntry } from "./logical-entry.js";
 import { PeopleStore } from "./people-store.js";
 import type { MemoryScopeRef } from "./contracts.js";

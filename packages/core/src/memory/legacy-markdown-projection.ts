@@ -15,7 +15,7 @@ import {
   syncDirectory,
 } from "../persistence/durable-directory.js";
 import { assertMemoryStorageIdentity } from "./canonical-identity.js";
-import { parseFrontmatter, stringifyFrontmatter } from "./frontmatter.js";
+import { parseFrontmatter, stringifyFrontmatter } from "../frontmatter.js";
 
 export type LegacyMemoryCategory = "profile" | "person" | "journal";
 

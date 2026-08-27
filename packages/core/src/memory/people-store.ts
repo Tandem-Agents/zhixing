@@ -13,7 +13,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import { parseFrontmatter, stringifyFrontmatter } from "./frontmatter.js";
+import { parseFrontmatter, stringifyFrontmatter } from "../frontmatter.js";
 import { getMemoryDir } from "./types.js";
 
 // ─── 类型 ───

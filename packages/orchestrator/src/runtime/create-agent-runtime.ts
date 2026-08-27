@@ -630,6 +630,14 @@ export interface CreateAgentRuntimeOptions {
    * per-run 上下文通过 runContextStorage 传递。
    */
   profile?: AgentRoleProfile;
+  /**
+   * 当前运行体的工作场景身份。只负责非记忆的 work 技能分区、scene 信任/
+   * 权限上下文和 lifecycle `sceneId`；main 运行体不传。
+   *
+   * 该身份由 workscene/conversation 组合根显式提供，不得从 profile、workspace
+   * 或 memoryScope 反推。
+   */
+  worksceneIdentity?: { readonly sceneId: string };
   /** Static scope constraining assignment-bound GlobalQuery and staged overlay. */
   memoryScope?:
     | { kind: "personal" }
@@ -774,6 +782,7 @@ export async function createAgentRuntime(
 
   // 角色 profile —— 决定工具集与身份段。enabledTools 是装配的唯一权威源。
   const profile = options.profile ?? mainProfile();
+  const sceneId = options.worksceneIdentity?.sceneId;
 
   // baseTools = profile.enabledTools 中的 builtin + options.extraTools，
   // **不含 Task** —— Task 装配依赖 securityPipeline / confirmationBroker
@@ -873,10 +882,9 @@ export async function createAgentRuntime(
     },
   };
 
-  // 技能分区跟随场景。执行侧只持 immutable artifact 与 assignment 读写接缝；
-  // 目录、状态、usage 和物化的唯一写 owner 在 anchor。
-  const skillMode: SkillMode =
-    options.memoryScope?.kind === "workscene" ? "work" : "main";
+  // 技能分区跟随运行体的显式工作场景身份。执行侧只持 immutable artifact
+  // 与 assignment 读写接缝；目录、状态、usage 和物化的唯一写 owner 在 anchor。
+  const skillMode: SkillMode = sceneId === undefined ? "main" : "work";
   const skillPorts = options.artifactStore
     ? createAssignmentSkillPorts(options.artifactStore)
     : unavailableAssignmentSkillPorts();
@@ -968,13 +976,14 @@ export async function createAgentRuntime(
   const boundaryRegistry: MutableToolBoundaryRegistry =
     BoundaryRegistry.fromTools(baseTools);
   const securityPipeline = new SecurityPipeline({
-    // 工作场景实例用场景信任(会话锚:整会话生效、跟场景身份而非 workdir 偶然
+    // 工作场景实例用显式运行体场景身份建立场景信任(会话锚:整会话生效、
+    // 跟场景身份而非 workdir 偶然
     // 共享)——allow-context 沉淀进 scene 上下文,与 /trust 的场景语境视角同源。
     // workdir 仍经 workspace 解析承载文件操作根,与信任锚正交。
     // 非场景实例维持路径锚:有工作区即 workspace 信任,否则 global。
     trustContext:
-      options.memoryScope?.kind === "workscene"
-        ? { kind: "scene", sceneId: options.memoryScope.sceneId }
+      sceneId !== undefined
+        ? { kind: "scene", sceneId }
         : workspace.path !== null
           ? { kind: "workspace", dir: workspace.path }
           : { kind: "global" },
@@ -1139,10 +1148,7 @@ export async function createAgentRuntime(
     runtimeId,
     runtimeKind,
     mode: skillMode,
-    sceneId:
-      options.memoryScope?.kind === "workscene"
-        ? options.memoryScope.sceneId
-        : undefined,
+    sceneId,
     providerId: roles[primaryRole].provider.id,
     model: roles[primaryRole].model,
     async reportLifecycleWarning(event) {

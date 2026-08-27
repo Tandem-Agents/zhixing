@@ -123,9 +123,9 @@ export class RuntimeHost {
     return this.assemble({
       withWorkmodeTools: true,
       workscene: {
+        sceneId: scene.id,
         workspace: absolutePath,
         primaryRole: "power",
-        memoryScope: { kind: "workscene", sceneId: scene.id },
         profile: powerProfile({
           id: scene.id,
           name: scene.name,
@@ -207,9 +207,9 @@ export class RuntimeHost {
       /** 会话路径装 workmode 工具组(LLM 进出场景意图的产生面) */
       withWorkmodeTools?: boolean;
       workscene?: {
+        sceneId: string;
         workspace: string | null;
         primaryRole: "power";
-        memoryScope: { kind: "workscene"; sceneId: string };
         profile: ReturnType<typeof powerProfile>;
         spec: { kind: "workscene"; sceneId: string; sceneName: string };
       };
@@ -288,7 +288,12 @@ export class RuntimeHost {
       systemProtectedPaths: this.opts.systemProtectedPaths,
       workspace: workscene ? workscene.workspace : opts?.workspace,
       primaryRole: workscene?.primaryRole,
-      memoryScope: workscene?.memoryScope,
+      worksceneIdentity: workscene
+        ? { sceneId: workscene.sceneId }
+        : undefined,
+      memoryScope: workscene
+        ? { kind: "workscene", sceneId: workscene.sceneId }
+        : undefined,
       profile,
       extraTools,
       executionMcpServers: mcpServers,
