@@ -17,7 +17,6 @@ export {
   getWorkScenesRoot,
   getWorkSceneIndexPath,
   getWorkSceneDir,
-  getWorkSceneMemoryDir,
   getWorkSceneConversationsRoot,
 } from "./paths.js";
 export {

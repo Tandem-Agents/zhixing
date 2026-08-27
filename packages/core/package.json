@@ -44,10 +44,6 @@
       "types": "./dist/resources/index.d.ts",
       "import": "./dist/resources/index.js"
     },
-    "./memory": {
-      "types": "./dist/memory/index.d.ts",
-      "import": "./dist/memory/index.js"
-    },
     "./security": {
       "types": "./dist/security/index.d.ts",
       "import": "./dist/security/index.js"

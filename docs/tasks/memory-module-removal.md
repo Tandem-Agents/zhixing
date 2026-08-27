@@ -1,8 +1,8 @@
 # 当前记忆模块彻底剔除
 
 > 状态：执行中<br>
-> 当前检查点：M6：删除存储、接管与 core 记忆域<br>
-> 完成度：5/8
+> 当前检查点：M7：收敛测试、结构门禁、制品与现行文档<br>
+> 完成度：6/8
 > 职责：从知行当前产品与工程基线中完整移除现有记忆模块，同时保持历史对话持久化和全部非记忆能力不变。
 
 ## 一、任务目标
@@ -77,7 +77,7 @@
 - [x] **M3　删除 Agent 公开能力与产品表面。** 删除 `memory` 工具及导出/工厂/AgentRoleProfile 工具声明、系统提示、CLI/TUI 呈现、`/me`、`/journal`、`/people`、server memory RPC、管理 facade/directory、`workscene_memory_query`、帮助/README，以及尚无实现但保留旧能力语义的 `@memory:` typeahead 占位；默认与用户配置均不得再解析出旧工具。同步公开工具和命令 exact-set；保留 AgentRoleProfile 机制、文件/工具补全、其他工作场景工具及通用 `app-state` 权限边界，并以生产注册入口和直接测试证明无影子入口。
 - [x] **M4　删除自动记忆与维护链。** 移除 orchestrator 记忆端口、Memory Flush、segment hook、post-adoption memory 输入/记录/回放、mesh 绑定、对应 provider 调用治理与 S7 注册，以及 journal maintenance 的 scheduler/system-handler/生命周期装配。保留 segment/摘要/窗口、transcript 提交、收养/转移、post-adoption review、scheduler 本体、transcript retention 和失败恢复主链；用真实组合根与失败/重启测试证明只断开派生支路。
 - [x] **M5　删除分布式状态与 owner 协议面。** 移除 memory/people/journal 的 global query/result/mutation/commit domain、codec、invariant、唯一 owner、维护合同和 product-language；删除 `memory-domain:*` 资源类型、conversation/job assignment 签发、stager 验权、场景删除的 memory cleanup 以及 generation install/rebind/router/participant exact-set 中的 memory owner。保留其他全局域、assignment、AuthorityCapability、workscene 删除及对话清理语义；通用协议测试若以 memory 作样本，改绑仍存活域而不削弱断言。
-- [ ] **M6　删除存储、接管与 core 记忆域。** 在所有消费者退场后，删除 Anchor memory adapter、legacy Markdown import/projection、cutover/维护状态、Profile/People/Journal store、逻辑身份、`getMemoryDir`/`getWorkSceneMemoryDir`、`core/src/memory`、根导出、`./memory` 子路径和构建入口。保留 workscene 根与会话目录。以首次启动、升级、恢复、转移和维护入口证明旧目录零创建、零扫描、零读写、零迁移；既有用户数据保持原样且完全惰性。
+- [x] **M6　删除存储、接管与 core 记忆域。** 在所有消费者退场后，删除 Anchor memory adapter、legacy Markdown import/projection、cutover/维护状态、Profile/People/Journal store、逻辑身份、`getMemoryDir`/`getWorkSceneMemoryDir`、`core/src/memory`、根导出、`./memory` 子路径和构建入口。保留 workscene 根与会话目录。以首次启动、升级、恢复、转移和维护入口证明旧目录零创建、零扫描、零读写、零迁移；既有用户数据保持原样且完全惰性。
 - [ ] **M7　收敛测试、结构门禁、制品与现行文档。** 删除只证明旧能力的测试、fixture、snapshot、golden 和示例；通用 owner、assignment、发布、安全测试中以 memory 作样本者改绑存活域并保持识别力。同步 contracts lint、S7 entry/registry、package exports、runtime baseline、server golden 和 tarball；删除现行记忆规格及其索引，把公开文档、distributed-runtime 三份核心文档和架构演进的当前结论改为无旧记忆模块基线。明确历史材料仍是历史；不得清洗归档、改写架构演进“原始构想”或让历史内容重新成为当前授权。
 - [ ] **M8　同基线验收与冷启动对抗。** 先完成失效闭包的直接验证，再冻结源码、测试、构建配置、现行产品/架构文档、构建产物和验收输入，执行最终门禁。随后抛开既有清单，从五个独立方向主动寻找反证：真实生产可达性；历史对话/上下文连续性；非记忆功能交界；旧数据与首次启动/升级/恢复/转移/维护副作用；公开协议、制品和现行文档。每一面登记攻击目标、实际动作、证据与结论；发现真实问题即恢复受影响 M 项和退出门为 `[ ]`，修复后整轮重做，直至同一未修改产品基线无未处置 P0/P1。
 
@@ -137,8 +137,8 @@
 | M3 | 已完成 | `HEAD 4ab15b91`；差异标识 `memory-removal-M3-public-surface-20260827`。builtin 工具、默认 profile/提示、CLI/TUI 三命令与呈现、server 三项 RPC、runtime-host 场景查询和 typeahead 占位已沿生产注册根及直接消费链删除；331 项 Vitest、21 项 canonical S7 Node exact-set 测试、受影响包静态验证与构建共同证明无影子入口且存活集合未漂移。协调反证暴露的角色正向旧工具断言与 typeahead 旧专门语义均已纠正。 | 无 M3 遗留。自动 flush/segment/post-adoption/journal maintenance、全局 memory 协议/owner/store 仍按 M4～M6 边界原样存活，不属于本项残留。CLI 规范 typecheck 仍只有 HEAD 既有的 `mesh-runtime-assembly.ts:1803` 未使用参数，关闭该 hygiene 检查后完整通过。 | M4：从 orchestrator/owner/CLI 组合根删除自动记忆、post-adoption memory 与 journal maintenance 派生支路。 |
 | M4 | 已完成 | `HEAD 8bf34c44`；差异标识 `memory-removal-M4-auto-pipelines-20260827`。Segment→Memory Flush、post-adoption memory 和 journal maintenance 三条生产/耐久/恢复/治理链均已删除；826 项直接 Vitest、21 项 S7 mutation 测试、canonical `pnpm s7:lint`、受影响包构建与 CLI typecheck 通过，保护链仍成立。 | 无 M4 遗留。M5/M6 所属的 global memory 协议、owner/adapter authorization、generation/assignment、Profile/People/Journal store 与 legacy 接管仍原样存活，但已无 M4 producer/consumer。 | M5：删除分布式状态与 owner 协议面。 |
 | M5 | 已完成 | `HEAD fce81f98`；差异标识 `memory-removal-M5-distributed-protocol-owner-20260828`。core 全局 query/result/staged mutation、严格 codec/invariant、共享 People DTO/store 转导与 `memory-domain:*` 资源均已退场；conversation/job 签发、stager、publish product-language、setup/router/generation participant 和恢复重绑不再承载 memory owner。273 项直接 Vitest、受影响包 typecheck/build、contract schema lint、canonical S7 21/21 与 registry golden 通过。 | 无 M5 遗留。M6 所属 adapter/store/legacy projection/cutover/path/core memory 子路径仍在源码中，但 adapter 已脱离 `GlobalStatePort` 与共享 discriminant，生产组合根、assignment、router、generation、participant 均不可达。 | M6：删除 adapter、legacy 接管、Profile/People/Journal store、路径、core memory 域及 package 子路径。 |
-| M6 | 待执行 | — | — | 当前检查点 |
-| M7 | 待执行 | — | — | 等待 M6 |
+| M6 | 已完成 | `HEAD 5e2fce52`；差异标识 `memory-removal-M6-storage-core-domain-20260828`。`core/src/memory` 的 adapter/store/legacy/cutover/Profile/People/Journal 域、根转导、`./memory` 子路径、tsup 入口及两项旧路径 helper 已退场；131 项直接 Vitest、core/CLI typecheck+build、runtime package exports 与隔离 sentinel fs 拦截证明旧目录零访问，frontmatter、workscene registry/conversations 和会话清理不回退。 | 无 M6 遗留。现行/历史文档、跨包 fixture/golden、tarball 与最终结构总收敛按 M7 边界处理；S7 对旧 adapter 的负向禁止断言继续保留。 | M7：收敛跨包测试/门禁/制品和现行文档。 |
+| M7 | 待执行 | — | — | 当前检查点 |
 | M8 | 待执行 | — | — | 等待 M7 |
 
 M1 的分类闭包和 M8 的五面对抗记录均追加在本节，不创建第二份任务或回归文档。
@@ -301,6 +301,23 @@ M2 无未闭合责任，标记 `[x]`；下一检查点是 M3。当前已暂存�
 - 未运行根级全测、根级 build、package check 或 M8 门禁；未访问、扫描、迁移或删除用户 `ZHIXING_HOME`，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 分布式 memory/people/journal 语义已从共享协议、能力签发、assignment/stager、product-language、生产 owner/router、generation/recovery participant 和 workscene 删除责任链中同时退场；非记忆全局域、AuthorityCapability、assignment、generation 原子性、工作场景/会话清理与历史 owner 恢复证据成立。M5 标记 `[x]`，下一检查点是 M6。
+
+### M6 执行记录（2026-08-28）
+
+#### 存储域、路径与公开出口闭包
+
+- 基线为 `HEAD 5e2fce52ea50a529171b74259a1143bf82b2590b` + 差异标识 `memory-removal-M6-storage-core-domain-20260828`；进场时工作区与索引均为空。先从 core 根/package export/tsup/path helper 反查，再按 adapter 公开类、legacy projection、canonical identity、Profile/People/Journal store 和路径符号反向核对：M5 后这些实现只在 `packages/core/src/memory/` 内部自循环，生产 setup、router、generation/rebind、assignment、transfer 和 maintenance 组合根均无消费者。
+- 删除了整个 `packages/core/src/memory/` 及其专属测试，包括 Anchor adapter、legacy Markdown reader/projection、takeover/cutover/维护状态、Profile/People/Journal 物理与逻辑 store、canonical identity 和 reader/writer；未搬迁、改名或保留兼容壳。core 根不再转导该域，`packages/core/package.json` 不再公开 `./memory`，tsup 不再构建独立入口；package-export 检查新增退役子路径负向断言。
+- `getMemoryDir`、`getWorkSceneMemoryDir` 及 workscene 布局中 `<scene>/me` 定义/导出已删除。`getWorkScenesRoot`、index/meta、`getWorkSceneDir`、`getWorkSceneConversationsRoot` 和 conversation repository 的 user/workscene 布局保持原值。中性 `frontmatter.ts` 及根级 `parseFrontmatter` / `stringifyFrontmatter` 保留，Skills/Rubrics 继续直接消费同一 owner。
+
+#### 零副作用与保护证据
+
+- 新增的 CLI 直接测试使用 `createTempDir` 生成显式隔离 home，事先写入 `<home>/me/sentinel.txt` 和 `<home>/workscenes/scene-a/me/sentinel.txt`，再对 `node:fs/promises` 的创建、枚举、打开、读写、改名和删除等路径操作安装 forbidden-root 拦截；`setupAuthorityRuntime` 首次启动与 shutdown cleanup、随后的 workscene conversation cleanup 全程零拦截命中。撤除拦截后两个 sentinel 内容与路径原样，而目标 conversation 目录正常删除；这不是仅以“最终内容相同”推测零扫描。测试没有读取用户真实 home。
+- core 直接回归：frontmatter/Skills/Rubrics/workscene path 6 文件 61/61，conversation repository 创建、持久化、scope 隔离、恢复与删除 48/48，workscene registry/global adapter 的 CRUD、tombstone、删除重驱与幂等 7/7。CLI 直接回归：sentinel 1/1，conversation directory 与 workscene storage cleanup 14/14。合计 131/131，同时证明只删除旧记忆存储责任，会话和 workscene 主链未漂移。
+- 串行运行 `pnpm --filter @zhixing/core exec tsc -p tsconfig.json --noEmit`、`pnpm --filter @zhixing/core build`、`pnpm --filter @zhixing/cli exec tsc -p tsconfig.json --noEmit`、`pnpm --filter @zhixing/cli build` 与 `pnpm runtime:package-exports`，全部通过；core build 只输出既有 Rollup circular-chunk 警告。新 core `dist` 不再含 memory 入口，根模块实际 import 也不包含退役符号。
+- 窄化 Biome 检查、`git diff --check`、精确 retired symbol/路径双向检索与构建制品实际 import 检查通过。最终生产命中已无 reader/writer、adapter、store、legacy/cutover、路径 helper 或可重活同义实现；剩余精确命中只是 S7 对旧 adapter 的负向禁止、本包的退役出口/零访问证据，以及 M7 所属现行与历史文档。S7 生产输入未改变，因此本包未重复运行 canonical S7；未运行根级全测、根级 build、package check 或 M8 门禁，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+M6 的生产实现、公开出口、路径、零副作用与非记忆保护闭包已同时成立；M6 标记 `[x]`，完成度为 6/8，下一检查点是 M7。
 
 ## 十、用户提示词
 

@@ -289,6 +289,10 @@ async function verifyCorePackageExports(failures) {
     return;
   }
 
+  if ("./memory" in manifest.exports) {
+    failures.push("core-exports:retired-memory-subpath");
+  }
+
   for (const [subpath, conditions] of Object.entries(manifest.exports)) {
     if (!conditions || typeof conditions !== "object" || Array.isArray(conditions)) {
       failures.push(`core-exports:${subpath}:invalid-conditions`);

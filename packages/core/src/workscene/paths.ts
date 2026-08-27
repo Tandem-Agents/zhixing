@@ -8,7 +8,6 @@
  * 布局：
  *   <home>/workscenes/index.json              注册表主表（已注册 id 集合）
  *   <home>/workscenes/<id>/meta.json          该工作场景权威记录
- *   <home>/workscenes/<id>/me/                工作场景记忆域（结构同 ~/.zhixing/me/）
  *   <home>/workscenes/<id>/conversations/     工作场景会话域
  */
 
@@ -28,14 +27,6 @@ export function getWorkSceneIndexPath(zhixingHome = getZhixingHome()): string {
 /** 单个工作场景目录 `<home>/workscenes/<id>`。 */
 export function getWorkSceneDir(id: string, zhixingHome = getZhixingHome()): string {
   return path.join(getWorkScenesRoot(zhixingHome), toSafePathSegment(id));
-}
-
-/** 工作场景记忆域根 `<home>/workscenes/<id>/me` —— power runtime 个人记忆域。 */
-export function getWorkSceneMemoryDir(
-  id: string,
-  zhixingHome = getZhixingHome(),
-): string {
-  return path.join(getWorkSceneDir(id, zhixingHome), "me");
 }
 
 /** 工作场景会话域根 `<home>/workscenes/<id>/conversations`。 */
