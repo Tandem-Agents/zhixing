@@ -163,10 +163,10 @@ Hermes 插件可注册工具、Hook、Slash command、CLI command、Skills 和�
 - 无法绕过的灾难性命令 hardline blocklist；
 - 文件写入敏感路径保护和可选 safe root；
 - MCP 凭据过滤、上下文注入扫描和输入清理；
-- Docker、Singularity、Modal 等隔离执行环境；
+- 可替换终端后端，以及包裹整个进程的官方 Docker/OpenShell 隔离；
 - Profile、Session 和 Cron 状态边界。
 
-真实边界是：默认本机终端能力仍可触达用户机器，`smart` 审批依赖辅助模型判断已知危险模式，原生插件属于受信任代码，Profile 隔离也不等于 OS 隔离。Hermes 提供了较完整的防线，但其安全目标是帮助单一操作者控制高权限 Agent，而不是在同一进程内承载彼此敌对的租户或插件。
+真实边界是：默认本机后端不隔离，终端后端隔离只覆盖 Shell 与建立在 Shell 合同上的文件工具，代码执行、MCP 子进程、插件、Hook 和 Skill 仍在宿主；只有用官方 Docker 或 NVIDIA OpenShell 包裹整个 Hermes 进程，所有代码路径才共享 OS 级边界。`smart` 审批、扫描器、allowlist 和脱敏都是防误操作的应用层启发式，不被官方安全策略视为抵抗恶意 LLM 的 containment。Hermes 的安全目标是帮助单一操作者控制高权限 Agent，而不是在同一进程内承载彼此敌对的租户或插件。
 
 ## 12. 产品价值与架构成本
 
@@ -221,3 +221,4 @@ Hermes 插件可注册工具、Hook、Slash command、CLI command、Skills 和�
 - [Profile 状态隔离](https://github.com/NousResearch/hermes-agent/blob/a1682376ca37abe3fcfd30a1febed25ca3678d9d/website/docs/user-guide/profiles.md)
 - [插件能力与信任边界](https://github.com/NousResearch/hermes-agent/blob/a1682376ca37abe3fcfd30a1febed25ca3678d9d/website/docs/user-guide/features/plugins.md)
 - [安全模型](https://github.com/NousResearch/hermes-agent/blob/a1682376ca37abe3fcfd30a1febed25ca3678d9d/website/docs/user-guide/security.md)
+- [官方安全边界：终端后端与整进程包裹](https://github.com/NousResearch/hermes-agent/blob/main/SECURITY.md)

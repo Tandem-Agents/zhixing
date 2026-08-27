@@ -176,9 +176,9 @@ Pi 明确不默认提供 MCP、子 Agent、权限弹窗、计划模式、内置 
 
 需要更强边界时，官方建议把隔离放到 Agent 外部：
 
-- Gondolin 扩展把工具和 `!` 命令送入本地 Linux micro-VM，模型认证仍留在宿主。
-- Plain Docker 把整个 Pi 进程放入容器。
-- OpenShell 提供策略化沙箱。
+- 官方 SRT 示例只把 Bash 包进 Anthropic Sandbox Runtime，其他内置文件工具仍在宿主执行。
+- Gondolin 扩展把全部七个内置文件/Shell 工具和 `!` 命令送入本地 QEMU Linux microVM，模型认证仍留在宿主。
+- Plain Docker 或 OpenShell 包住整个 Pi 进程，才会让所有代码路径共享同一外部安全边界。
 
 这一选择架构上自洽：核心没有假装提供半套沙箱。但从普通用户产品看，它仍是 Pi 最重要的风险——默认易用性高，误操作和恶意扩展的影响半径也等于用户进程权限。
 
@@ -243,7 +243,8 @@ Pi 明确不默认提供 MCP、子 Agent、权限弹窗、计划模式、内置 
 - [JSONL Session 格式](https://github.com/earendil-works/pi/blob/2509b5c037d366979f2febfce4174b88aeaadc6a/packages/coding-agent/docs/session-format.md)
 - [SDK 与 AgentSessionRuntime](https://github.com/earendil-works/pi/blob/2509b5c037d366979f2febfce4174b88aeaadc6a/packages/coding-agent/docs/sdk.md)
 - [容器化与外部安全边界](https://github.com/earendil-works/pi/blob/2509b5c037d366979f2febfce4174b88aeaadc6a/packages/coding-agent/docs/containerization.md)
+- [SRT Bash 沙箱示例](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/examples/extensions/sandbox/index.ts)
+- [Gondolin 全内置工具 microVM 示例](https://github.com/earendil-works/pi/tree/main/packages/coding-agent/examples/extensions/gondolin)
 - [实验 Protocol 合同](https://github.com/earendil-works/pi/blob/2509b5c037d366979f2febfce4174b88aeaadc6a/packages/protocol/README.md)
 - [实验 Client 与 Session Lease](https://github.com/earendil-works/pi/blob/2509b5c037d366979f2febfce4174b88aeaadc6a/packages/client/README.md)
 - [SQLite Session Backend](https://github.com/earendil-works/pi/blob/2509b5c037d366979f2febfce4174b88aeaadc6a/packages/session-backends/sqlite-node/README.md)
-

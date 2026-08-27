@@ -162,6 +162,10 @@ Harness 把 append-only `SessionEvent` 日志作为模型上下文、回放和�
 
 这不仅是代码整洁。文件系统与 subprocess Provider 共享同一个“执行世界”时，把两者换到远程沙箱，Bash、PTY 和 LSP 可以一起迁移，无需为每个工具复制远程版逻辑。子智能体也可在同一接口后选择进程内新 Agent、会话 fork、ACP、Codex、Claude Code 或另一个 Harness 进程。
 
+### 7.1 当前本地沙箱的真实合同
+
+TUI 与 Web 默认装配 `workspace-write + ask`。Bash、PowerShell、PTY 命令树和进程内文件变更共用一份 fail-closed 文件效果策略：Linux 先使用 bubblewrap，不可用时使用 Landlock；macOS 使用 Seatbelt；Windows 使用 restricted token + ACL，并因 ambient ACL 与 hard-link 缺口明确报告为 `partial`。该合同只约束文件效果，网络访问和宿主进程可见性不在其范围内；同进程普通插件与 `node:vm` 动态插件也不是安全边界。
+
 ## 8. 自修改：最有辨识度的产品能力
 
 Creator 相关插件把当前 Cordis 运行时本身暴露为五个模型工具：
@@ -289,3 +293,5 @@ Host/Client Context 声明合并冲突迫使仓库维护两个 TypeScript 聚合
 - [Agent Loop 与扩展点](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/core/agent-loop/README.md)
 - [运行时自修改工具与信任边界](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/packages/extensions/tool-cordis/README.md)
 - [Web UI 用户旅程](https://github.com/deepseek-ai/deepseek-harness/blob/99f6f02fecdb7dff40c3fbc9470f5907c29f74ca/docs/user/guide/index.md)
+- [本地进程沙箱合同与平台后端](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/sandbox.md)
+- [默认 `workspace-write + ask` 装配](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/bundle/base/cordis.patch.yml)

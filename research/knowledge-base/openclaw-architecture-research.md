@@ -165,12 +165,12 @@ OpenClaw 的正式安全模型是“一个可信操作者对应一个 Gateway �
 - 未知私聊发送者默认配对或按 allowlist 限制；入站消息始终按不可信输入处理。
 - Gateway 默认 loopback，并支持 token、设备身份、挑战签名、TLS/指纹和受控远程连接。
 - Tool policy、exec approvals、节点命令 allow/deny、敏感命令二次 opt-in 和安全审计共同限制效果面。
-- Sandbox 可按 Agent、Session 或共享范围选择 Docker、Podman、SSH、OpenShell；容器默认无网络、只读根和移除 Linux capabilities。
+- Sandbox 启用后的默认合同是 Docker 后端、每个 Agent 一个沙箱且不挂载工作区；容器默认无网络、只读根文件系统、移除 Linux capabilities，并启用 `no-new-privileges`。
 - 状态、配置、认证和插件来源有权限、provenance 与 doctor/audit 检查。
 
 但默认边界必须说清楚：
 
-- Sandbox 默认关闭，主 Session 的工具通常运行在 Gateway 主机上。
+- Sandbox 默认关闭，主 Session 的工具直接运行在 Gateway 主机上；Podman、SSH 与 OpenShell 是操作者显式选择的替代后端，不是默认行为。
 - Workspace 只是默认工作目录，不是硬隔离；不开 Sandbox 时绝对路径仍可访问主机其他位置。
 - Gateway 本身从不进入 Agent Sandbox；elevated、插件和 MCP 能力还要经过各自策略。
 - 原生插件是受信任的进程内代码。

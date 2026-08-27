@@ -139,8 +139,8 @@ OpenCode 因此具有很强扩展性，但它不是“Everything is a Plugin”�
 
 真实边界是：
 
-- OpenCode 面向用户本人控制的本地编码 Agent，不是敌对租户沙箱。
-- Tool Permission 限制 Agent 的公开效果面，但受信任插件与宿主进程仍共享 OS 权限。
+- OpenCode 没有 OS 或容器沙箱；它面向用户本人控制的本地编码 Agent，不承诺隔离敌对代码。
+- Tool Permission 以 `allow`、`ask`、`deny` 和外部目录检查限制公开工具，但 Shell 仍拥有宿主用户的文件、进程和网络权限，命令参数中的外部路径只接受尽力而为的告警；受信任插件也与宿主进程共享 OS 权限。
 - Server 默认本地；远程暴露必须配置密码和外围网络保护。
 - Session 分享默认由用户主动触发；分享会把会话内容上传并生成可访问链接，可通过配置完全禁用。
 - “本地优先”不等于“完全离线”：模型 Provider、MCP 或用户配置的 Web 工具仍可能访问网络。
@@ -226,4 +226,3 @@ OpenCode 的 UI 并不是几套各自实现的 Agent：
 - [V2 Client](https://opencode.ai/v2/docs/build/client)
 - [V2 Plugin API（beta）](https://opencode.ai/v2/docs/build/plugins)
 - [V2 Permission](https://opencode.ai/v2/docs/permissions)
-
