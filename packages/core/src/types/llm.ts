@@ -425,7 +425,7 @@ export interface LLMRole {
  * 三角色（角色集单一事实源 = `@zhixing/providers` 的 ROLE_SPECS 注册表，
  * 本接口键与注册表 id 一一对应；新增角色 = 注册表加一行 + 本接口加一字段）：
  *   - main ：必填，主对话循环 / 用户可见输出
- *   - light：选填，后台杂活（记忆提取 / WebFetch 蒸馏 / 工具结果摘要 /
+ *   - light：选填，后台杂活（WebFetch 蒸馏 / 工具结果摘要 /
  *            子 agent 返回压缩 / 入站分类等 I/O 边界净化）
  *            注：质量敏感的单发任务（callText role="main"）走 main
  *   - power：选填，重活槽（编程等高难任务），模型档位由用户决定；当前仅
@@ -474,8 +474,8 @@ export interface ResolvedRoleThinking {
 // ─── 单发文本调用契约 ───
 
 /**
- * 单发文本 LLM 调用函数 —— 系统侧一次性文本任务的统一签名（记忆提取、
- * `callText` 单发调用等注入点共用）。与 resilience 的流式 `CallLLMFn`
+ * 单发文本 LLM 调用函数 —— 系统侧一次性 `callText` 任务的统一签名。
+ * 与 resilience 的流式 `CallLLMFn`
  * （ChatRequest 进、StreamEvent 流出）区分：本契约是 messages 进、纯文本出。
  *
  * 为什么统一：此前各注入点各自定义 `(msgs) => Promise<string>` 形态，

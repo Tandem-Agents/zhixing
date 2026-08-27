@@ -11,7 +11,7 @@
  *   - SegmentSummarizeLLMFn：压缩 LLM 调用签名（携带完整 system + tools + 可摘要 messages）
  *   - SegmentPersistence：段切换写入路径抽象（与 ConversationRepository / TranscriptStore 解耦）
  *   - TaskListReader：task_list 状态读取抽象（避免 core 反向 import tools-builtin）
- *   - SegmentTransitionHook：扩展点接口（记忆提取经 afterSummarize 挂载）
+ *   - SegmentTransitionHook：段切换扩展点接口
  */
 
 import type { SegmentMeta } from "../../conversation/types.js";
@@ -195,9 +195,8 @@ export interface SegmentTransitionContext {
   readonly segmentId: string;
   readonly tokensBefore: number;
   /**
-   * 被摘段消息（只读）—— 即将被摘要替代、离开注意力窗口的原文。
-   * afterSummarize 的记忆提取等 hook 以此为输入：段切换正是从原文蒸馏
-   * 长期信息的自然时刻。
+   * 被摘段消息（只读）—— 即将被摘要替代、离开注意力窗口的原文，供
+   * afterSummarize 扩展点观察已完成的切段结果。
    */
   readonly messages: readonly Message[];
   /** run 中断信号透传 —— hook 内的 LLM 调用必须可中断 */

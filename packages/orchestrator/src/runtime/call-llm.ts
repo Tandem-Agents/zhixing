@@ -5,14 +5,13 @@
  * 按档位分流到不同角色：
  *
  *   main 档（callText "main"）           ←─ createMainCallLLM  ─→ roles.main.chat
- *   light 档（记忆提取 / callText 默认）  ←─ createLightCallLLM ─→ roles.light.chat
+ *   light 档（callText 默认）             ←─ createLightCallLLM ─→ roles.light.chat
  *
  * **职责分工**：
  *
  *   - 质量敏感的单发任务（MCP 接入标识推断、skill 起草等撰写 / 研判类）
  *     产物质量直接面向用户，用 main 档位
- *   - 记忆提取从被摘段消息中抽取 profile / person / journal 写盘，
- *     是 I/O 边界的结构化数据净化，用 light 档位
+ *   - 低成本的默认单发文本任务用 light 档位
  *
  * **隔离价值**：两个助手都通过独立 ChatRequest 调用，prompt 不出现在主对话的
  * conversation history——这切断了"工具结果中的 prompt injection 注入主对话"
@@ -37,8 +36,7 @@ import type {
  * 让两个对外 helper 复用同一实现，避免代码重复。
  *
  * 返回纯拼接结果（空响应即空字符串），不做任何语义兜底——caller 各自处理：
- * 记忆提取经 parseExtractions try/catch 自然降级为空数组；callText 消费方
- * 对空文本自带容错。
+ * callText 消费方自行处理空文本。
  */
 function callLLMTextWithUsage(
   role: LLMRole,
@@ -94,7 +92,7 @@ export function createMainCallLLMWithUsage(
 /**
  * 创建 light 档单发调用 —— 走 `roles.light`。
  *
- * 记忆提取（MemoryFlusher）与 `callText` 默认档经此通道执行。`lightThinking`
+ * `callText` 默认档经此通道执行。`lightThinking`
  * 由装配期按 light 角色的 thinking 配置解析后传入；用户未显式配 `llm.light`
  * 时，light 自动用 main 实例兜底（resolveAuxRole 机制），无需本助手做
  * fallback 决策。

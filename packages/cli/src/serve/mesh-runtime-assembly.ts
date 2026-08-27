@@ -101,7 +101,6 @@ import {
   ConversationTransferRejectedError,
   registerConversationTransferMeshService,
 } from "./conversation-transfer-mesh.js";
-import type { PostAdoptionMemoryPort } from "./post-adoption-memory.js";
 import {
   FirstPartyConversationMeshClient,
   FirstPartyConversationMeshTarget,
@@ -381,7 +380,6 @@ export class MeshRuntimeAssembly {
   #plannedAnchorPostInstall: AnchorPostInstallDescriptor | undefined;
   #plannedAnchorPostInstallConsumers: PlannedAnchorPostInstallConsumers | undefined;
   #plannedCommittedTargetDeviceId: string | undefined;
-  #postAdoptionMemory: PostAdoptionMemoryPort | undefined;
   #postAdoptionReview: PostAdoptionReviewPort | undefined;
   #started = false;
   #controlStarted = false;
@@ -1001,18 +999,6 @@ export class MeshRuntimeAssembly {
       capability,
       anchorEpoch,
     );
-  }
-
-  /** Binds the anchor-only consumer and catches up every durable commit. */
-  async bindPostAdoptionMemory(port: PostAdoptionMemoryPort): Promise<void> {
-    if (!this.#transferTarget || !this.options.protocol) {
-      throw new Error("Post-adoption memory requires the anchor transfer target");
-    }
-    if (this.#postAdoptionMemory && this.#postAdoptionMemory !== port) {
-      throw new Error("Post-adoption memory is already bound");
-    }
-    this.#postAdoptionMemory = port;
-    await this.#restoreCommittedTransfers();
   }
 
   /** Binds the anchor review seam and catches up every durable commit. */
@@ -1781,7 +1767,7 @@ export class MeshRuntimeAssembly {
       throw new Error("Initial duty-role installation cannot replace a live role");
     }
     this.#plannedAnchorRole = role;
-    this.#activatePlannedAnchorRole(trust, role);
+    this.#activatePlannedAnchorRole(role);
   }
 
   async #replacePlannedAnchorRole(trust: HomeTrustRecord): Promise<void> {
@@ -1797,10 +1783,10 @@ export class MeshRuntimeAssembly {
     this.#plannedAnchorRole = "";
     await target?.close();
     this.#plannedAnchorRole = role;
-    this.#activatePlannedAnchorRole(trust, role);
+    this.#activatePlannedAnchorRole(role);
   }
 
-  #activatePlannedAnchorRole(trust: HomeTrustRecord, role: string): void {
+  #activatePlannedAnchorRole(role: string): void {
     if (role.startsWith("owner:")) {
       this.#plannedAnchorOwner = new PlannedAnchorTransferOwner({
         deviceId: this.options.authority.deviceId,
@@ -2159,19 +2145,7 @@ export class MeshRuntimeAssembly {
     const protocol = this.options.protocol;
     if (!protocol) throw new Error("Conversation transfer target has no owner protocol");
     await protocol.installCommittedConversationTransfer(base);
-    await Promise.all([
-      this.#postAdoptionMemory
-        ? this.#postAdoptionMemory.flush({
-            manifest: base.manifest,
-            loadCandidates: () => protocol.conversationMemoryFlushes(
-              base.manifest.conversationId,
-            ),
-          })
-        : Promise.resolve(),
-      this.#postAdoptionReview
-        ? this.#postAdoptionReview.reviewAfterAdoption(base.manifest.conversationId)
-        : Promise.resolve(),
-    ]);
+    await this.#postAdoptionReview?.reviewAfterAdoption(base.manifest.conversationId);
   }
 
   async #adoptLocalConversations(

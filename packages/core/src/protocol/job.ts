@@ -13,7 +13,6 @@ import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 const SYSTEM_HANDLERS = new Set([
   "__transcript-gc",
-  "__journal-gc",
   "__advancement-gc",
 ]);
 

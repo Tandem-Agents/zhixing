@@ -10639,14 +10639,6 @@ const noConversationRecovery = (reason: string): ConversationRecoveryExpectation
   reason,
 });
 
-const EXTERNAL_CONVERSATION_RECORD_OWNERS = {
-  "post-adoption-memory-discovery": "cli/post-adoption-memory",
-  "post-adoption-memory-attempt": "cli/post-adoption-memory",
-  "post-adoption-memory-plan": "cli/post-adoption-memory",
-  "post-adoption-memory-effect": "cli/post-adoption-memory",
-  "post-adoption-memory-completed": "cli/post-adoption-memory",
-} as const satisfies Partial<Record<ConversationBehaviorRecordType, string>>;
-
 // conversation 域与 job 域同一引擎:每类记录绑定真实生产场景、恢复合同或
 // 事实化 N/A 与对抗向量；精确重放被协议幂等吸收的类型使用同身份异载荷/
 // ghost 向量。生产事实注记:
@@ -10806,7 +10798,7 @@ const CONVERSATION_RECORD_BEHAVIOR = {
     corrupt: (body) => ({ ...body, requestId: "matrix-lifecycle-ghost" }),
   },
 } as const satisfies Record<
-  Exclude<ConversationBehaviorRecordType, keyof typeof EXTERNAL_CONVERSATION_RECORD_OWNERS>,
+  ConversationBehaviorRecordType,
   ConversationRecordBehaviorSpec
 >;
 
@@ -10842,21 +10834,8 @@ describe("conversation record execution-point behavior matrix", () => {
   it("binds every conversation record type to a producing scenario", () => {
     expect(Object.keys(CONVERSATION_RECORD_BEHAVIOR).sort()).toEqual(
       [
-        ...Object.keys(CONVERSATION_RUN_RECORD_SHAPES).filter(
-          (recordType) => !(recordType in EXTERNAL_CONVERSATION_RECORD_OWNERS),
-        ),
-        ...CONVERSATION_RUN_INTERNAL_RECORD_TYPES.filter(
-          (recordType) => !(recordType in EXTERNAL_CONVERSATION_RECORD_OWNERS),
-        ),
-      ].sort(),
-    );
-    expect(Object.keys(EXTERNAL_CONVERSATION_RECORD_OWNERS).sort()).toEqual(
-      [
-        "post-adoption-memory-attempt",
-        "post-adoption-memory-completed",
-        "post-adoption-memory-discovery",
-        "post-adoption-memory-effect",
-        "post-adoption-memory-plan",
+        ...Object.keys(CONVERSATION_RUN_RECORD_SHAPES),
+        ...CONVERSATION_RUN_INTERNAL_RECORD_TYPES,
       ].sort(),
     );
     const referencedRecoveryProbes = new Set<ConversationRecoveryProbeId>();

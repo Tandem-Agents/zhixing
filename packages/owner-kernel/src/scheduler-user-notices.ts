@@ -5,7 +5,7 @@ import type {
   SchedulerUserNotice,
 } from "@zhixing/core/contracts";
 import type { AuthorityCommitLog } from "@zhixing/core/authority";
-import { SCHEDULER_USER_NOTICE_STREAM, isCalendarDay } from "@zhixing/core";
+import { SCHEDULER_USER_NOTICE_STREAM } from "@zhixing/core";
 import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
 import type {
   JobDeliveryParticipant,
@@ -23,7 +23,6 @@ export interface SchedulerNoticeFact {
   readonly reason: string;
   readonly actions: readonly string[];
   readonly missedMembers?: readonly string[];
-  readonly journalPlan?: JournalMaintenanceNoticePlan;
 }
 
 export interface SchedulerNoticeDraft {
@@ -37,24 +36,6 @@ export interface SchedulerNoticeDraft {
   readonly target?: DeliveryTargetDto;
   readonly channelText?: string;
   readonly missedMembers?: readonly string[];
-  readonly journalPlan?: JournalMaintenanceNoticePlan;
-}
-
-export interface JournalMaintenanceNoticePlan {
-  readonly planDigest: string;
-  readonly months: readonly {
-    readonly month: string;
-    readonly targetExpectedDigest?: string;
-    readonly sources: readonly {
-      readonly id: string;
-      readonly expectedDigest: string;
-    }[];
-  }[];
-}
-
-export interface JournalMaintenanceNoticeState {
-  readonly notice: SchedulerUserNotice;
-  readonly plan: JournalMaintenanceNoticePlan;
 }
 
 export interface MissedSummaryMember {
@@ -73,7 +54,6 @@ export interface MissedSummaryGroup {
 interface NoticeProjection {
   readonly noticeIds: Set<string>;
   readonly missedMembers: Set<string>;
-  readonly journalMaintenance: Map<string, SchedulerNoticeFact>;
 }
 
 /**
@@ -106,7 +86,6 @@ export class SchedulerUserNoticeJournal {
       reason: draft.reason,
       actions: [...draft.actions],
       ...(draft.missedMembers ? { missedMembers: [...draft.missedMembers] } : {}),
-      ...(draft.journalPlan ? { journalPlan: structuredClone(draft.journalPlan) } : {}),
     };
     const records: LogicalRecord<unknown>[] = [
       { stream: SCHEDULER_NOTICE_STREAM, body: fact },
@@ -181,49 +160,6 @@ export class SchedulerUserNoticeJournal {
     await this.publishNew();
   }
 
-  async recordJournalMaintenance(draft: SchedulerNoticeDraft): Promise<void> {
-    if (draft.kind !== "journal-maintenance") {
-      throw new TypeError("Journal maintenance notice kind is invalid");
-    }
-    await this.#log.transactProjection<NoticeProjection, unknown, void>(
-      emptyProjection(),
-      noticeReducer,
-      (projection) => {
-        const next = validateNoticeFact(this.prepareRecords(draft)[0]!.body);
-        const current = projection.journalMaintenance.get(draft.noticeId);
-        if (current && canonicalize(current) === canonicalize(next)) {
-          return { kind: "return", value: undefined };
-        }
-        assertJournalMaintenanceTransition(current, next);
-        return {
-          kind: "append",
-          entries: [{ stream: SCHEDULER_NOTICE_STREAM, body: next }],
-          value: undefined,
-        };
-      },
-      { stream: SCHEDULER_NOTICE_STREAM },
-    );
-    await this.publishNew();
-  }
-
-  async journalMaintenanceStates(): Promise<readonly JournalMaintenanceNoticeState[]> {
-    const states = new Map<string, JournalMaintenanceNoticeState>();
-    for (const envelope of await this.#log.readAll<unknown>()) {
-      for (const entry of envelope.entries) {
-        if (entry.stream !== SCHEDULER_NOTICE_STREAM) continue;
-        const fact = validateNoticeFact(entry.body);
-        if (fact.kind !== "journal-maintenance" || !fact.journalPlan) continue;
-        states.set(fact.noticeId, {
-          notice: projectNotice(fact, envelope),
-          plan: structuredClone(fact.journalPlan),
-        });
-      }
-    }
-    return [...states.values()].sort(
-      (a, b) => a.notice.revision - b.notice.revision,
-    );
-  }
-
   async history(afterRevision: number): Promise<readonly SchedulerUserNotice[]> {
     if (!Number.isSafeInteger(afterRevision) || afterRevision < 0) {
       throw new TypeError("Scheduler notice cursor must be a non-negative safe integer");
@@ -263,7 +199,6 @@ function emptyProjection(): NoticeProjection {
   return {
     noticeIds: new Set(),
     missedMembers: new Set(),
-    journalMaintenance: new Map(),
   };
 }
 
@@ -275,9 +210,6 @@ function noticeReducer(
   const fact = validateNoticeFact(raw.body);
   state.noticeIds.add(fact.noticeId);
   for (const member of fact.missedMembers ?? []) state.missedMembers.add(member);
-  if (fact.kind === "journal-maintenance") {
-    state.journalMaintenance.set(fact.noticeId, fact);
-  }
   return state;
 }
 
@@ -289,7 +221,6 @@ function validateNoticeFact(value: unknown): SchedulerNoticeFact {
   const allowedKeys = new Set([
     "actions",
     "kind",
-    "journalPlan",
     "missedMembers",
     "noticeId",
     "reason",
@@ -303,24 +234,14 @@ function validateNoticeFact(value: unknown): SchedulerNoticeFact {
     typeof fact.noticeId !== "string" || fact.noticeId.length === 0 ||
     (fact.kind !== "missed-summary" &&
       fact.kind !== "capability-gap" &&
-      fact.kind !== "publish-result" &&
-      fact.kind !== "journal-maintenance") ||
+      fact.kind !== "publish-result") ||
     !["prepared", "open", "updated", "closed"].includes(fact.state ?? "") ||
     typeof fact.reason !== "string" || fact.reason.length === 0 ||
     !Array.isArray(fact.actions) || !fact.actions.every((item) => typeof item === "string") ||
     !validNoticeRef(fact.ref, fact.kind) ||
     (fact.missedMembers !== undefined &&
       (!Array.isArray(fact.missedMembers) ||
-        !fact.missedMembers.every((item) => typeof item === "string" && item.length > 0))) ||
-    (fact.kind === "journal-maintenance"
-      ? !validJournalPlan(fact.journalPlan) ||
-        fact.journalPlan.planDigest !==
-          (fact.ref as Extract<SchedulerUserNotice["ref"], { kind: "journal-maintenance" }>).planDigest ||
-        fact.journalPlan.months.length !==
-          (fact.ref as Extract<SchedulerUserNotice["ref"], { kind: "journal-maintenance" }>).monthCount ||
-        fact.journalPlan.months.reduce((sum, month) => sum + month.sources.length, 0) !==
-          (fact.ref as Extract<SchedulerUserNotice["ref"], { kind: "journal-maintenance" }>).fileCount
-      : fact.journalPlan !== undefined)
+        !fact.missedMembers.every((item) => typeof item === "string" && item.length > 0)))
   ) {
     throw new TypeError("Scheduler notice fact is invalid");
   }
@@ -358,105 +279,7 @@ function validNoticeRef(
       Number.isSafeInteger(ref.seq) && (ref.seq as number) > 0 &&
       (ref.decision === "conflicted" || ref.decision === "applied");
   }
-  if (kind === "journal-maintenance") {
-    return Object.keys(ref).sort().join(",") ===
-        "attempt,completed,fileCount,kind,monthCount,planDigest" &&
-      ref.kind === "journal-maintenance" &&
-      typeof ref.planDigest === "string" && /^sha256:[a-f0-9]{64}$/u.test(ref.planDigest) &&
-      Number.isSafeInteger(ref.monthCount) && (ref.monthCount as number) > 0 &&
-      Number.isSafeInteger(ref.fileCount) && (ref.fileCount as number) > 0 &&
-      Number.isSafeInteger(ref.attempt) && (ref.attempt as number) >= 0 &&
-      Number.isSafeInteger(ref.completed) && (ref.completed as number) >= 0 &&
-      (ref.completed as number) <= (ref.monthCount as number);
-  }
   return false;
-}
-
-function validJournalPlan(value: unknown): value is JournalMaintenanceNoticePlan {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const plan = value as Partial<JournalMaintenanceNoticePlan>;
-  if (
-    Object.keys(value).sort().join(",") !== "months,planDigest" ||
-    typeof plan.planDigest !== "string" ||
-    !/^sha256:[a-f0-9]{64}$/u.test(plan.planDigest) ||
-    !Array.isArray(plan.months) || plan.months.length === 0 ||
-    protocolDigest("JournalMaintenancePlan", 1, { months: plan.months }) !==
-      plan.planDigest
-  ) return false;
-  let previousMonth = "";
-  return plan.months.every((month) => {
-    if (!month || typeof month !== "object" || Array.isArray(month)) return false;
-    const expectedKeys = [
-      "month",
-      "sources",
-      ...(month.targetExpectedDigest === undefined ? [] : ["targetExpectedDigest"]),
-    ].sort().join(",");
-    if (
-      Object.keys(month).sort().join(",") !== expectedKeys ||
-      !/^\d{4}-(0[1-9]|1[0-2])$/u.test(month.month) ||
-      month.month <= previousMonth ||
-      (month.targetExpectedDigest !== undefined &&
-        !/^sha256:[a-f0-9]{64}$/u.test(month.targetExpectedDigest)) ||
-      !Array.isArray(month.sources) || month.sources.length === 0
-    ) return false;
-    previousMonth = month.month;
-    let previousSource = "";
-    return month.sources.every((source: { id: string; expectedDigest: string }) => {
-      if (
-        !source || typeof source !== "object" || Array.isArray(source) ||
-        Object.keys(source).sort().join(",") !== "expectedDigest,id" ||
-        !isCalendarDay(source.id) ||
-        !source.id.startsWith(`${month.month}-`) ||
-        source.id <= previousSource ||
-        !/^sha256:[a-f0-9]{64}$/u.test(source.expectedDigest)
-      ) return false;
-      previousSource = source.id;
-      return true;
-    });
-  });
-}
-
-function assertJournalMaintenanceTransition(
-  current: SchedulerNoticeFact | undefined,
-  next: SchedulerNoticeFact,
-): void {
-  const ref = next.ref as Extract<
-    SchedulerUserNotice["ref"],
-    { kind: "journal-maintenance" }
-  >;
-  if (!current) {
-    if (next.state !== "prepared" || ref.attempt !== 0 || ref.completed !== 0) {
-      throw new TypeError("Journal maintenance notice must start prepared");
-    }
-    return;
-  }
-  const previous = current.ref as typeof ref;
-  if (
-    current.kind !== "journal-maintenance" ||
-    current.state === "closed" ||
-    current.journalPlan?.planDigest !== next.journalPlan?.planDigest ||
-    previous.monthCount !== ref.monthCount ||
-    previous.fileCount !== ref.fileCount ||
-    ref.attempt < previous.attempt ||
-    ref.completed < previous.completed ||
-    ref.completed > previous.completed + 1 ||
-    next.state === "prepared"
-  ) {
-    throw new TypeError("Journal maintenance notice transition is not monotonic");
-  }
-  if (next.state === "open") {
-    if (ref.attempt !== previous.attempt + 1 || ref.completed !== previous.completed) {
-      throw new TypeError("Journal maintenance attempt transition is invalid");
-    }
-  } else if (next.state === "updated") {
-    if (ref.attempt !== previous.attempt) {
-      throw new TypeError("Journal maintenance progress transition is invalid");
-    }
-  } else if (next.state === "closed") {
-    if (ref.attempt !== previous.attempt) {
-      throw new TypeError("Journal maintenance completion is invalid");
-    }
-  }
 }
 
 function projectNotice(

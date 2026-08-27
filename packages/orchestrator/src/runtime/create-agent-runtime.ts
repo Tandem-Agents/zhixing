@@ -59,22 +59,10 @@ import {
   wrapStreamWithWatchdog,
   wrapWithCalibration,
   ToolArgumentExtractor,
-  MemoryFlusher,
   calculateBudget,
-  createMemoryFlushHook,
   computeContextTokens,
   toToolSpec,
   DEFAULT_WATCHDOG_POLICY,
-  type MemoryLogicalEntry,
-  type MemoryCategoryDto,
-  type MemoryScopeRef,
-  compareMemoryLogicalEntries,
-  canonicalMemoryIdentity,
-  memoryLogicalEntryKey,
-  memoryLogicalEntryMatches,
-  memoryLogicalIdentityKey,
-  projectMemoryLogicalEntry,
-  sameMemoryScope,
   PermissionStore,
   resolveAgentIdentity,
   resolveModelInfo,
@@ -420,7 +408,6 @@ export interface RunOrchestrationV1Params {
     readonly nextCallIndex: () => number;
   };
 }
-
 export interface RuntimeSecuritySnapshot {
   readonly contextId: PermissionContextId;
   readonly workspacePath: string | null;
@@ -634,14 +621,10 @@ export interface CreateAgentRuntimeOptions {
    * 当前运行体的工作场景身份。只负责非记忆的 work 技能分区、scene 信任/
    * 权限上下文和 lifecycle `sceneId`；main 运行体不传。
    *
-   * 该身份由 workscene/conversation 组合根显式提供，不得从 profile、workspace
-   * 或 memoryScope 反推。
+   * 该身份由 workscene/conversation 组合根显式提供，不得从 profile 或 workspace
+   * 反推。
    */
   worksceneIdentity?: { readonly sceneId: string };
-  /** Static scope constraining assignment-bound GlobalQuery and staged overlay. */
-  memoryScope?:
-    | { kind: "personal" }
-    | { kind: "workscene"; sceneId: string };
   /** Immutable skill content assets; catalog and writes remain assignment-owned. */
   artifactStore?: ArtifactStore;
   /**
@@ -649,7 +632,7 @@ export interface CreateAgentRuntimeOptions {
    * Task provider+model / budget resolveModelInfo / 返回 providerId+model /
    * resilientCallLLM / runAgentLoop）取 roles[primaryRole]，及主对话 loop +
    * Task 子 agent loop 的思考解析跟随；单发调用域按性质分流（callText main
-   * →roles.main / MemoryFlush+callText→roles.light / 段切换→roles.light）
+   * →roles.main / callText→roles.light / 段切换→roles.light）
    * 不随 primaryRole 漂移，
    * roleThinking 三角色映射为真实 per-role 不跟随。
    * 工作模式装配 power runtime 时传 "power"。
@@ -691,26 +674,6 @@ export interface CreateAgentRuntimeOptions {
   /** 运行体种类。缺省为持久会话运行体；一次性执行体由宿主显式传 ephemeral。 */
   runtimeKind?: RuntimeKind;
 }
-
-/** M4 删除 orchestrator 记忆装配时一并移除；M3 后不再进入工具工厂或公开合同。 */
-interface RuntimeMemoryPort {
-  save(input: {
-    action: "save" | "update";
-    category: MemoryCategoryDto;
-    id: string;
-    meta: Record<string, unknown>;
-    content: string;
-    operationId: string;
-  }): Promise<void>;
-  search(query: string): Promise<readonly MemoryLogicalEntry[]>;
-  list(category: MemoryCategoryDto): Promise<readonly MemoryLogicalEntry[]>;
-  delete(input: {
-    category: MemoryCategoryDto;
-    id: string;
-    operationId: string;
-  }): Promise<boolean>;
-}
-
 /**
  * 装配期解析某 role 的**生效**思考控制 —— 三条 ChatRequest 构造路径
  * （主对话 / 压缩 flush / 段切换摘要）统一经此注入，杜绝散落分支。
@@ -767,7 +730,7 @@ export async function createAgentRuntime(
   // 主对话槽位 —— 决定主对话语义六处取哪个 role（capability / Task
   // provider+model / budget resolveModelInfo / 返回 providerId+model /
   // resilientCallLLM / runAgentLoop）+ loop 思考解析跟随。压缩域按 task 分流
-  // （callText main→main / 记忆提取+callText→light / 段切换→light）不跟随、
+  // （callText main→main / callText 默认档+段切换→light）不跟随、
   // roleThinking 三角色聚合
   // 不跟随（见下）。缺省 main，工作模式装配传 power。
   const primaryRole = options.primaryRole ?? "main";
@@ -816,91 +779,6 @@ export async function createAgentRuntime(
   // baseTools 是 SecurityPipeline / BoundaryRegistry / ToolArgumentExtractor
   // 的注册输入（Task 工具 needsPermission: false 且无 boundaries，不参与
   // 这些链路）。
-  const memoryScope: MemoryScopeRef = options.memoryScope ?? { kind: "personal" };
-  const memoryPort: RuntimeMemoryPort = {
-    async save(input) {
-      const identity = canonicalMemoryIdentity(
-        input.category === "profile"
-          ? { domain: "memory", category: "profile", id: input.id }
-          : { domain: "people", id: input.id },
-      );
-      const entries = await readMemoryEntries(memoryScope, input.category);
-      const current = entries.find((entry) => entry.id === input.id);
-      if (input.action === "save" && current) {
-        throw new Error(`Memory "${input.id}" already exists; use update`);
-      }
-      if (input.action === "update" && !current) {
-        throw new Error(`Memory "${input.id}" does not exist; use save`);
-      }
-      await requireAssignmentMutations().stage({
-        domain: "global",
-        operationId: input.operationId,
-        mutation: {
-          kind: "memory-append",
-          payload: input.category === "profile"
-            ? {
-                domain: "memory",
-                category: "profile",
-                id: "profile",
-                scope: memoryScope,
-                meta: toJsonObject(input.meta),
-                content: input.content,
-                ...(current ? { expectedDigest: current.digest } : {}),
-              }
-            : {
-                domain: "people",
-                id: identity.id,
-                scope: memoryScope,
-                meta: {
-                  name: String(input.meta.name ?? input.id),
-                  relation: String(input.meta.relation ?? "unknown"),
-                  ...(typeof input.meta.birthday === "string"
-                    ? { birthday: input.meta.birthday }
-                    : {}),
-                  ...(Array.isArray(input.meta.tags)
-                    ? { tags: input.meta.tags.map(String) }
-                    : {}),
-                },
-                content: input.content,
-                ...(current ? { expectedDigest: current.digest } : {}),
-              },
-        },
-      });
-    },
-    async search(query) {
-      const limit = 20;
-      const candidates = [
-        ...(await readMemorySearch(memoryScope, "memory", query, limit)),
-        ...(await readMemorySearch(memoryScope, "people", query, limit)),
-      ];
-      return [...new Map(candidates.map((entry) => [memoryLogicalEntryKey(entry), entry])).values()]
-        .sort(compareMemoryLogicalEntries)
-        .slice(0, limit);
-    },
-    list: (category) => readMemoryEntries(memoryScope, category),
-    async delete(input) {
-      const identity = canonicalMemoryIdentity(
-        input.category === "profile"
-          ? { domain: "memory", category: "profile", id: input.id }
-          : { domain: "people", id: input.id },
-      );
-      const entries = await readMemoryEntries(memoryScope, input.category);
-      const current = entries.find((entry) => entry.id === input.id);
-      if (!current) return false;
-      await requireAssignmentMutations().stage({
-        domain: "global",
-        operationId: input.operationId,
-        mutation: {
-          kind: "memory-delete",
-          scope: memoryScope,
-          ...identity,
-          expectedDigest: current.digest,
-        },
-      });
-      return true;
-    },
-  };
-
   // 技能分区跟随运行体的显式工作场景身份。执行侧只持 immutable artifact
   // 与 assignment 读写接缝；目录、状态、usage 和物化的唯一写 owner 在 anchor。
   const skillMode: SkillMode = sceneId === undefined ? "main" : "work";
@@ -915,7 +793,7 @@ export async function createAgentRuntime(
   //     不跟随 primaryRole（工具调 ctx.llm.light 就该拿 light 的思考配置）
   //   - primaryThinking：主对话 loop + Task 子 agent loop（二者均跑
   //     roles[primaryRole] 单 model）→ 取 roleThinking[primaryRole]
-  //   - lightThinking ：MemoryFlush + callText + 段切换摘要（恒走 roles.light，
+  //   - lightThinking ：callText + 段切换摘要（恒走 roles.light，
   //     不跟 primaryRole；质量敏感单发（callText main）走 roles.main 用 mainThinking。
   // 构造位置先于 builtinCtx：单发通道（mainCallLLM）要直接注入工具上下文
   // （admit_skill 的独立裁判通道），零 lazy 间接层。
@@ -926,7 +804,7 @@ export async function createAgentRuntime(
   };
 
   // 单发文本 LLM 调用按档位分流到不同角色——质量敏感单发（callText "main"）
-  // 走 main，记忆提取与 callText 默认档走 light（I/O 边界结构化数据净化）。
+  // 走 main，callText 默认档走 light（I/O 边界结构化数据净化）。
   // 详见 call-llm.ts 的设计注释。
   const mainCallLLM = createMainCallLLM(roles, roleThinking.main);
   const lightCallLLM = createLightCallLLM(roles, roleThinking.light);
@@ -941,7 +819,6 @@ export async function createAgentRuntime(
 
   const builtinCtx = {
     proxy: config.network?.proxy,
-    memoryPort,
     skillLoader: skillPorts.loader,
     skillSaver: skillPorts.saver,
     skillAdmission: skillPorts.admission,
@@ -1333,78 +1210,6 @@ export async function createAgentRuntime(
   // /clear 一并清空。
   const resettables: Resettable[] = [];
 
-  // 记忆提取 —— 挂在段切换 afterSummarize：内容被摘要
-  // 替代、离开注意力窗口之时正是从原文蒸馏长期记忆的自然时刻。提取核心
-  // （MemoryFlusher）装配期单例，hook 跨 run 共享（无状态）。
-  const memoryFlushHook = createMemoryFlushHook({
-    flusher: new MemoryFlusher({
-      callLLM: lightCallLLM,
-      write: async (extraction, operationId) => {
-        const mutations = requireAssignmentMutations();
-        const category = extraction.category;
-        canonicalMemoryIdentity(
-          category === "profile"
-            ? { domain: "memory", category: "profile", id: extraction.id }
-            : category === "person"
-              ? { domain: "people", id: extraction.id }
-              : { domain: "journal", id: extraction.id },
-        );
-        const current = category === "journal"
-          ? undefined
-          : (await readMemoryEntries(memoryScope, category))
-              .find((entry) => entry.id === extraction.id);
-        const common = {
-          scope: memoryScope,
-          content: extraction.content,
-        };
-        await mutations.stage({
-          domain: "global",
-          operationId,
-          mutation: extraction.category === "journal"
-            ? {
-                kind: "memory-append",
-                payload: {
-                  domain: "journal",
-                  ...common,
-                  date: extraction.id,
-                },
-              }
-            : extraction.category === "person"
-              ? {
-                  kind: "memory-append",
-                  payload: {
-                    domain: "people",
-                    ...common,
-                    id: extraction.id,
-                    meta: {
-                      name: String(extraction.meta.name ?? extraction.id),
-                      relation: String(extraction.meta.relation ?? "unknown"),
-                      ...(typeof extraction.meta.birthday === "string"
-                        ? { birthday: extraction.meta.birthday }
-                        : {}),
-                      ...(Array.isArray(extraction.meta.tags)
-                        ? { tags: extraction.meta.tags.map(String) }
-                        : {}),
-                    },
-                    ...(current ? { expectedDigest: current.digest } : {}),
-                  },
-                }
-              : {
-                  kind: "memory-append",
-                  payload: {
-                    domain: "memory",
-                    ...common,
-                    category: "profile",
-                    id: "profile",
-                    meta: toJsonObject(extraction.meta),
-                    ...(current ? { expectedDigest: current.digest } : {}),
-                  },
-                },
-        });
-      },
-    }),
-  });
-
   // 段切换摘要的流装配工厂 —— run 内评估与手动 forceCompact 共用同一条
   // 保护链（withRetry 重试降级 → watchdog idle 看门狗 → calibration 估算校准），
   // 杜绝两处装配漂移。bus 按调用方传入（run 用 per-run bus，forceCompact 用
@@ -1557,8 +1362,8 @@ export async function createAgentRuntime(
       opts?: TextCallOptions,
     ): Promise<string> {
       // 单发 LLM 文本调用入口（无对话历史，独立 ChatRequest 隔离）。按 role 复用已装配
-      // 的角色通道 TextCallLLMFn：默认 light（工作场景纪要 / 日志凝练等轻量任务，与
-      // 记忆提取同 light 角色）；role="main" 走主档（质量敏感的单发任务，如 MCP
+      // 的角色通道 TextCallLLMFn：默认 light（工作场景纪要等轻量任务）；
+      // role="main" 走主档（质量敏感的单发任务，如 MCP
       // 接入标识推断，带 mainThinking）。
       const caller = role === "main" ? mainCallLLM : lightCallLLM;
       return runMeteredTextCall(opts, () => caller([userMessage(prompt)], opts));
@@ -1654,8 +1459,7 @@ export async function createAgentRuntime(
       // 应用——本方法只产指令、不触窗口、不落盘。
       //
       // 本地 bus：段事件与 REPL 主事件流隔离（/compact 的用户反馈由调用方
-      // 按 ForceCompactResult 渲染）。记忆提取 hook 照常挂载——手动切段
-      // 与自动切段的蒸馏时刻语义一致。
+      // 按 ForceCompactResult 渲染）。手动与自动切段共用同一摘要装配。
       const localBus = createEventBus<AgentEventMap>({ lineage: "main" });
       const segmentManager = createSegmentManager({
         estimator,
@@ -1788,9 +1592,6 @@ export async function createAgentRuntime(
             persistence: options.segmentDeps.persistence,
             taskListReader: options.segmentDeps.taskListReader,
             eventBus,
-            // 记忆提取挂段切换时刻（afterSummarize）—— 失败由段管理器降级
-            // warning，绝不阻断切段
-            hooks: [memoryFlushHook],
           })
         : undefined;
 
@@ -2389,202 +2190,4 @@ function unavailableAssignmentSkillPorts(): ReturnType<
       sweepStaleStaging: async () => 0,
     },
   };
-}
-
-function requireAssignmentMutations(): AssignmentMutationPort {
-  const mutations = runContextStorage.getStore()?.assignmentMutations;
-  if (!mutations) {
-    throw new Error("Memory writes require an active durable assignment");
-  }
-  return mutations;
-}
-
-function requireGlobalQuery(): AssignmentGlobalQueryPort {
-  const query = runContextStorage.getStore()?.globalQuery;
-  if (!query) {
-    throw new Error("Memory reads require the assignment global query port");
-  }
-  return query;
-}
-
-async function readMemoryEntries(
-  scope: MemoryScopeRef,
-  category: "profile" | "person" | "journal",
-): Promise<readonly MemoryLogicalEntry[]> {
-  const domain = memoryDomainForCategory(category);
-  const result = await requireGlobalQuery().read(
-    domain === "memory"
-      ? { kind: "memory-list", scope, domain, category: "profile" }
-      : { kind: "memory-list", scope, domain },
-  );
-  if (result.kind !== "memory-list") {
-    throw new Error("Memory list returned another result type");
-  }
-  return (await readMemoryOverlay(result.entries, scope, domain)).filter(
-    (entry) => memoryCategoryForDomain(entry.domain, entry.category) === category,
-  );
-}
-
-async function readMemoryOverlay(
-  base: readonly MemoryLogicalEntry[],
-  scope: MemoryScopeRef,
-  domain: "memory" | "journal" | "people",
-): Promise<MemoryLogicalEntry[]> {
-  const port = runContextStorage.getStore()?.assignmentMutations;
-  if (!port) return [...base].sort(compareMemoryLogicalEntries);
-  const records = (await port.readOverlay()).filter((record) =>
-    isMemoryOverlayRecordFor(record, scope, domain)
-  );
-  return mergeMemoryOverlay(base, records)
-    .sort(compareOverlayEntries)
-    .map((item) => item.entry);
-}
-
-async function readMemorySearch(
-  scope: MemoryScopeRef,
-  domain: "memory" | "journal" | "people",
-  query: string,
-  limit: number,
-): Promise<readonly MemoryLogicalEntry[]> {
-  const port = requireGlobalQuery();
-  const mutationPort = runContextStorage.getStore()?.assignmentMutations;
-  const records = mutationPort
-    ? (await mutationPort.readOverlay()).filter((record) =>
-        isMemoryOverlayRecordFor(record, scope, domain)
-      )
-    : [];
-  const result = await port.read({
-    kind: "memory-search",
-    scope,
-    domain,
-    query,
-    limit: limit + records.length,
-  });
-  if (result.kind !== "memory-search") {
-    throw new Error("Memory query returned another result type");
-  }
-  return resolveMemorySearchOverlay(
-    result.hits.map((hit) => hit.entry),
-    records,
-    { scope, domain, query, limit },
-  );
-}
-
-type MemoryOverlayRecord = Awaited<
-  ReturnType<AssignmentMutationPort["readOverlay"]>
->[number];
-
-interface OverlayMemoryEntry {
-  readonly entry: MemoryLogicalEntry;
-  readonly recordSeq?: number;
-}
-
-function mergeMemoryOverlay(
-  base: readonly MemoryLogicalEntry[],
-  records: readonly MemoryOverlayRecord[],
-): OverlayMemoryEntry[] {
-  const result = new Map<string, OverlayMemoryEntry>(
-    base.map((entry) => [memoryLogicalEntryKey(entry), { entry }] as const),
-  );
-  for (const record of records) {
-    const mutation = record.mutation;
-    if (mutation.kind === "memory-delete") {
-      result.delete(memoryLogicalIdentityKey(
-        mutation.scope,
-        mutation.domain,
-        mutation.category,
-        mutation.id,
-      ));
-      continue;
-    }
-    if (mutation.kind !== "memory-append") continue;
-    const payload = mutation.payload;
-    const id = payload.domain === "journal" ? payload.date : payload.id;
-    if (!id) throw new TypeError("Staged journal memory requires an explicit date");
-    const key = memoryLogicalIdentityKey(
-      payload.scope,
-      payload.domain,
-      payload.domain === "memory" ? payload.category : undefined,
-      id,
-    );
-    const previous = result.get(key)?.entry;
-    result.set(key, {
-      entry: projectMemoryLogicalEntry(payload, previous, {
-        revision: (previous?.revision ?? 0) + 1,
-      }),
-      recordSeq: record.recordSeq,
-    });
-  }
-  return [...result.values()];
-}
-
-export function resolveMemorySearchOverlay(
-  base: readonly MemoryLogicalEntry[],
-  records: readonly MemoryOverlayRecord[],
-  input: {
-    readonly scope: MemoryScopeRef;
-    readonly domain: "memory" | "journal" | "people";
-    readonly query: string;
-    readonly limit: number;
-  },
-): MemoryLogicalEntry[] {
-  return mergeMemoryOverlay(base, records)
-    .filter(({ entry }) => memoryLogicalEntryMatches(entry, input))
-    .sort(compareOverlayEntries)
-    .slice(0, input.limit)
-    .map((item) => item.entry);
-}
-
-function isMemoryOverlayRecordFor(
-  record: MemoryOverlayRecord,
-  scope: MemoryScopeRef,
-  domain: "memory" | "journal" | "people",
-): boolean {
-  if (record.domain !== "global") return false;
-  const mutation = record.mutation;
-  if (mutation.kind === "memory-delete") {
-    return mutation.domain === domain && sameMemoryScope(mutation.scope, scope);
-  }
-  return mutation.kind === "memory-append" &&
-    mutation.payload.domain === domain &&
-    sameMemoryScope(mutation.payload.scope, scope);
-}
-
-function compareOverlayEntries(left: OverlayMemoryEntry, right: OverlayMemoryEntry): number {
-  if (left.recordSeq !== undefined || right.recordSeq !== undefined) {
-    if (left.recordSeq === undefined) return 1;
-    if (right.recordSeq === undefined) return -1;
-    return right.recordSeq - left.recordSeq;
-  }
-  return compareMemoryLogicalEntries(left.entry, right.entry);
-}
-
-function memoryDomainForCategory(
-  category: "profile" | "person" | "journal",
-): "memory" | "people" | "journal" {
-  return category === "person"
-    ? "people"
-    : category === "journal"
-      ? "journal"
-      : "memory";
-}
-
-function memoryCategoryForDomain(
-  domain: "memory" | "journal" | "people",
-  category?: "profile" | "person" | "journal",
-): "profile" | "person" | "journal" {
-  return domain === "people"
-    ? "person"
-    : domain === "journal"
-      ? "journal"
-      : category ?? "profile";
-}
-
-function toJsonObject(
-  input: Record<string, unknown>,
-): Record<string, import("@zhixing/core").JsonValue> {
-  return JSON.parse(JSON.stringify(input)) as Record<
-    string,
-    import("@zhixing/core").JsonValue
-  >;
 }

@@ -2888,7 +2888,6 @@ export function inspectConversationAdoptionAssembly(records) {
     ["packages/cli/src/serve/conversation-transfer-mesh.ts", undefined],
     ["packages/cli/src/serve/first-party-conversation-mesh.ts", undefined],
     ["packages/cli/src/serve/local-conversation-rpc.ts", undefined],
-    ["packages/cli/src/serve/post-adoption-memory.ts", undefined],
     ["packages/cli/src/serve/post-adoption-review.ts", undefined],
     ["packages/cli/src/serve/command.ts", undefined],
     ["packages/cli/src/runtime/rpc-confirmation-broker.ts", undefined],
@@ -2899,6 +2898,7 @@ export function inspectConversationAdoptionAssembly(records) {
     ["packages/server/src/rpc/methods/index.ts", undefined],
     ["packages/server/src/rpc/methods/session.ts", undefined],
     ["packages/server/src/rpc/methods/confirmation.ts", undefined],
+    ["packages/owner-kernel/src/conversation-run-contracts.ts", undefined],
     ["packages/owner-kernel/src/conversation-transfer.ts", undefined],
   ]);
   for (const record of records) {
@@ -2966,15 +2966,6 @@ export function inspectConversationAdoptionAssembly(records) {
     ) {
       failures.push(`${mesh.relative}: committed transfers must restore before mesh admission opens`);
     }
-  }
-  if (!/async\s+bindPostAdoptionMemory\s*\([\s\S]*?this\.#postAdoptionMemory\s*=\s*port;\s*await\s+this\.#restoreCommittedTransfers\s*\(\s*\)/u.test(mesh.text)) {
-    failures.push(`${mesh.relative}: post-adoption memory must bind before replaying durable commits`);
-  }
-  if (!/await\s+protocol\.installCommittedConversationTransfer\s*\(base\);[\s\S]*?this\.#postAdoptionMemory[\s\S]*?\.flush\s*\(/u.test(mesh.text)) {
-    failures.push(`${mesh.relative}: committed authority must install before post-adoption memory consumption`);
-  }
-  if (!/loadCandidates:\s*\(\)\s*=>\s*protocol\.conversationMemoryFlushes\s*\(/u.test(mesh.text)) {
-    failures.push(`${mesh.relative}: completed post-adoption memory watermarks must be checked before loading candidate history`);
   }
   if (!/async\s+bindPostAdoptionReview\s*\([\s\S]*?this\.#postAdoptionReview\s*=\s*port;\s*await\s+this\.#restoreCommittedTransfers\s*\(\s*\)/u.test(mesh.text)) {
     failures.push(`${mesh.relative}: post-adoption review must bind before replaying durable commits`);
@@ -3052,20 +3043,14 @@ export function inspectConversationAdoptionAssembly(records) {
   }
 
   const command = required.get("packages/cli/src/serve/command.ts");
-  requireCount(command, /bindPostAdoptionMemory\s*\(/gu, 1, "anchor post-adoption memory binding");
   requireCount(command, /new\s+PostAdoptionReviewCoordinator\s*\(/gu, 1, "anchor post-adoption review construction");
   requireCount(command, /bindPostAdoptionReview\s*\(/gu, 1, "anchor post-adoption review binding");
-  if (!/ctx\.meshRuntime\s*&&\s*ctx\.authorityRuntime\?\.globalState/u.test(command.text)) {
-    failures.push(`${command.relative}: post-adoption memory must be limited to an anchor with GlobalState`);
-  }
-  const memoryBinding = command.text.indexOf("await ctx.meshRuntime.bindPostAdoptionMemory(");
   const reviewBinding = command.text.indexOf("await ctx.meshRuntime.bindPostAdoptionReview(");
   const publicServer = command.text.indexOf("runner = await runServer(");
   if (
-    memoryBinding < 0 || reviewBinding < 0 || publicServer < 0 ||
-    memoryBinding > publicServer || reviewBinding > publicServer
+    reviewBinding < 0 || publicServer < 0 || reviewBinding > publicServer
   ) {
-    failures.push(`${command.relative}: adoption recovery consumers must bind before public server admission`);
+    failures.push(`${command.relative}: adoption review recovery must bind before public server admission`);
   }
   if (!/conversationAdoptionReview\s*:[\s\S]*?adoptionReview!\.reviewForSurface\s*\(input\)/u.test(command.text)) {
     failures.push(`${command.relative}: public resume must reuse the authenticated anchor review coordinator`);
@@ -3117,22 +3102,15 @@ export function inspectConversationAdoptionAssembly(records) {
     failures.push(`${transferOwner.relative}: transfer-private staging, shared promotion and committed cleanup must remain distinct`);
   }
 
-  const memory = required.get("packages/cli/src/serve/post-adoption-memory.ts");
-  for (const kind of ["discovery", "attempt", "plan", "effect", "completed"]) {
-    if (!memory.text.includes(`post-adoption-memory-${kind}`)) {
-      failures.push(`${memory.relative}: durable post-adoption memory ${kind} record is missing`);
+  const retiredMemoryOwners = [
+    mesh,
+    command,
+    required.get("packages/owner-kernel/src/conversation-run-contracts.ts"),
+  ];
+  for (const record of retiredMemoryOwners) {
+    if (/PostAdoptionMemory|post-adoption-memory|bindPostAdoptionMemory|conversationMemoryFlushes/u.test(record.text)) {
+      failures.push(`${record.relative}: retired post-adoption memory production or durable record semantics must stay absent`);
     }
-  }
-  const projectionRead = memory.text.indexOf("const beforeLoad = await readProjection");
-  const candidateLoad = memory.text.indexOf("input.candidates ?? await input.loadCandidates?.()", projectionRead);
-  if (
-    projectionRead < 0 ||
-    candidateLoad < 0 ||
-    projectionRead > candidateLoad ||
-    !/if\s*\(!durableDiscovery\)\s*\{[\s\S]*?input\.candidates\s*\?\?\s*await input\.loadCandidates\?\.\(\)[\s\S]*?appendDiscoveryWithAttempts/u.test(memory.text) ||
-    !/for\s*\(const operationId of durableDiscovery\.operationIds\)[\s\S]*?operation\?\.completed[\s\S]*?operation\?\.attempt\?\.input/u.test(memory.text)
-  ) {
-    failures.push(`${memory.relative}: durable discovery inputs must be frozen atomically and only incomplete operations may be re-driven without reloading history`);
   }
 
   const session = required.get("packages/server/src/rpc/methods/session.ts");

@@ -702,7 +702,6 @@ test("conversation adoption stays bound to the two production roots and ordered 
     "packages/cli/src/serve/conversation-transfer-mesh.ts",
     "packages/cli/src/serve/first-party-conversation-mesh.ts",
     "packages/cli/src/serve/local-conversation-rpc.ts",
-    "packages/cli/src/serve/post-adoption-memory.ts",
     "packages/cli/src/serve/post-adoption-review.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/runtime/rpc-confirmation-broker.ts",
@@ -713,6 +712,7 @@ test("conversation adoption stays bound to the two production roots and ordered 
     "packages/server/src/rpc/methods/index.ts",
     "packages/server/src/rpc/methods/session.ts",
     "packages/server/src/rpc/methods/confirmation.ts",
+    "packages/owner-kernel/src/conversation-run-contracts.ts",
     "packages/owner-kernel/src/conversation-transfer.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
@@ -811,13 +811,6 @@ test("conversation adoption stays bound to the two production roots and ordered 
   );
   assert.match(
     inspectConversationAdoptionAssembly(mutate(
-      "packages/cli/src/serve/post-adoption-memory.ts",
-      (text) => text.replace("if (!durableDiscovery) {", "if (true) {"),
-    )).join("\n"),
-    /durable discovery inputs must be frozen atomically and only incomplete operations may be re-driven without reloading history/,
-  );
-  assert.match(
-    inspectConversationAdoptionAssembly(mutate(
       "packages/cli/src/serve/conversation-evidence-authority.ts",
       (text) => text.replace("current.ownerEpoch !== request.ownerEpoch", "false"),
     )).join("\n"),
@@ -825,10 +818,10 @@ test("conversation adoption stays bound to the two production roots and ordered 
   );
   assert.match(
     inspectConversationAdoptionAssembly(mutate(
-      "packages/cli/src/serve/command.ts",
-      (text) => text.replace("await ctx.meshRuntime.bindPostAdoptionMemory(", "await Promise.resolve("),
+      "packages/owner-kernel/src/conversation-run-contracts.ts",
+      (text) => `${text}\ntype PostAdoptionMemory = unknown;\n`,
     )).join("\n"),
-    /anchor post-adoption memory binding/,
+    /retired post-adoption memory production or durable record semantics must stay absent/,
   );
   assert.match(
     inspectConversationAdoptionAssembly(mutate(

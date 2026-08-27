@@ -35,7 +35,7 @@ export interface RoleSpec {
  * 角色集定义。顺序即 config-editor 入口展示顺序。
  *
  * 文案语义：
- *   - light：系统侧后台辅助任务（记忆提取 / WebFetch 蒸馏 / 工具结果摘要 /
+ *   - light：系统侧后台辅助任务（WebFetch 蒸馏 / 工具结果摘要 /
  *     子 agent 返回压缩 / 入站分类等 I/O 边界净化），用户不直接调用，由
  *     系统侧 I/O 边界净化与工具 ctx 注入消费；通常挑轻量便宜模型
  *     （注：质量敏感单发任务 callText main 走 main 不走 light）

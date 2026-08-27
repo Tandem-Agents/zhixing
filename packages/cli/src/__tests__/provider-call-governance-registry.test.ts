@@ -47,16 +47,6 @@ const GOVERNED_CALL_SITES: ReadonlyArray<{
   },
   {
     file: "cli/src/serve/command.ts",
-    marker: 'workPrefix: "journal-maintenance"',
-    governance: "control 根治理——journal maintenance（scheduler/schedule-trigger）",
-  },
-  {
-    file: "cli/src/serve/command.ts",
-    marker: 'workPrefix: "post-adoption-memory"',
-    governance: "control 根治理——post-adoption memory（scheduler/schedule-trigger）",
-  },
-  {
-    file: "cli/src/serve/command.ts",
     marker: 'workPrefix: "credential-rotation-provider"',
     governance: "control 根治理——凭据服务核验（interactive/environment-control）",
   },
@@ -132,8 +122,8 @@ describe("provider call governance registry", () => {
       },
       {
         file: "cli/src/serve/command.ts",
-        expected: 4,
-        nature: "llmComplete、journal maintenance 与 post-adoption memory 治理接线",
+        expected: 2,
+        nature: "llmComplete 的 governControlTextCall 接线与 callText 委托",
       },
       {
         file: "cli/src/serve/credential-rotation-publication.ts",
@@ -149,16 +139,6 @@ describe("provider call governance registry", () => {
         file: "cli/src/serve/turn-maintenance.ts",
         expected: 2,
         nature: "governCallText 透传签名与钩子（实际调用经 access-surfaces 治理注入）",
-      },
-      {
-        file: "cli/src/serve/journal-maintenance.ts",
-        expected: 3,
-        nature: "受治理 callText 绑定、保存与调用（实际治理在 command 组合根）",
-      },
-      {
-        file: "cli/src/serve/post-adoption-memory.ts",
-        expected: 2,
-        nature: "受治理 GovernedTextCall 端口与调用（实际治理在 command 组合根）",
       },
       {
         file: "server/src/perspectives/allocation.ts",

@@ -88,7 +88,6 @@ describe("资产层透传", () => {
     expect(params.artifactStore).toBe(artifactStore);
     expect(params.workspace).toBeUndefined();
     expect(params.worksceneIdentity).toBeUndefined();
-    expect(params.memoryScope).toBeUndefined();
     expect(params.extraTools).toBe(tools);
     expect(params.runtimeKind).toBe("conversation");
     expect(params.systemProtectedPaths).toBe(options.systemProtectedPaths);
@@ -126,7 +125,6 @@ describe("资产层透传", () => {
     expect(params.runtimeKind).toBe("conversation");
     expect(params.primaryRole).toBe("power");
     expect(params.worksceneIdentity).toEqual({ sceneId: "s1" });
-    expect(params.memoryScope).toEqual({ kind: "workscene", sceneId: "s1" });
     expect(params.profile).toBeDefined();
     expect((assembled[0] as { spec?: unknown }).spec).toEqual({
       kind: "workscene",
@@ -143,7 +141,6 @@ describe("资产层透传", () => {
     expect(params.workspace).toBeNull();
     expect(params.runtimeKind).toBe("conversation");
     expect(params.worksceneIdentity).toEqual({ sceneId: "s2" });
-    expect(params.memoryScope).toEqual({ kind: "workscene", sceneId: "s2" });
     expect(params.profile.enabledTools).not.toContain("read");
     expect(params.profile.enabledTools).not.toContain("admit_skill");
   });

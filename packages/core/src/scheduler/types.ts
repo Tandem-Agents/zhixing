@@ -52,7 +52,7 @@ export type TaskScheduleDto =
 /**
  * S1 支持的动作类型：
  * - agent-turn: 启动一次 Agent 对话（prompt → LLM → tools → result）
- * - system: 调用内置系统处理器（如 __journal-gc）
+ * - system: 调用内置系统处理器（如 __transcript-gc）
  */
 export type TaskAction =
   | {

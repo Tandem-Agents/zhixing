@@ -46,7 +46,7 @@ describe("job replay contracts", () => {
     scheduledFor: "2026-07-15T09:00:00.000Z",
     taskRevision: 1,
     anchorEpoch: 3,
-    handler: "__journal-gc",
+    handler: "__transcript-gc",
     paramsDigest: `sha256:${"1".repeat(64)}`,
     reservationId: "system-reservation-1",
     attempt: 1,
@@ -375,7 +375,7 @@ describe("job replay contracts", () => {
     taskRevision: 1,
     definition: {
       kind: "system",
-      handler: "__journal-gc",
+      handler: "__transcript-gc",
       params: { retainDays: 30 },
     },
     state: "enabled",

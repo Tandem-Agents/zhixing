@@ -43,12 +43,10 @@ import {
   type Message,
   type ToolDefinition,
   type SkillCatalogEntry,
-  type MemoryLogicalEntry,
 } from "@zhixing/core";
 import type { RoleDegradation } from "@zhixing/providers";
 import type {
   AssignmentGlobalQueryPort,
-  AssignmentMutationOverlayRecord,
   GlobalQuery,
   GlobalReadResult,
   ModelCallResourceMeter,
@@ -183,7 +181,6 @@ vi.mock("@zhixing/providers", async (importOriginal) => {
 // 必须在 vi.mock 之后 import,确保 createAgentRuntime 拿到的是 mock 后的 providers
 const {
   createAgentRuntime: createAgentRuntimeImpl,
-  resolveMemorySearchOverlay,
 } = await import("../create-agent-runtime.js");
 const createAgentRuntime = (
   options: Omit<Parameters<typeof createAgentRuntimeImpl>[0], "providerConfiguration">,
@@ -202,85 +199,6 @@ beforeEach(() => {
   degradationsRef.current = [];
   decorateCalls.length = 0;
   decorateDisposes.length = 0;
-});
-
-describe("assignment memory search overlay", () => {
-  it("reapplies domain/query/ranking/limit and fills deleted or unmatched base slots", () => {
-    const entry = (
-      id: string,
-      content: string,
-      updatedAt: string,
-    ): MemoryLogicalEntry => ({
-      domain: "people",
-      scope: { kind: "personal" },
-      id,
-      meta: {},
-      content,
-      revision: 1,
-      digest: `sha256:${id.padEnd(64, id[0] ?? "a").slice(0, 64)}`,
-      updatedAt,
-    });
-    const base = [
-      entry("a", "needle old", "2026-08-05T03:00:00.000Z"),
-      entry("b", "needle removed", "2026-08-05T02:00:00.000Z"),
-      entry("c", "needle fallback", "2026-08-05T01:00:00.000Z"),
-    ];
-    const records: AssignmentMutationOverlayRecord[] = [
-      {
-        recordSeq: 1,
-        domain: "global",
-        requestId: "update-a",
-        mutationDigest: `sha256:${"1".repeat(64)}`,
-        mutation: {
-          kind: "memory-append",
-          payload: {
-            domain: "people",
-            scope: { kind: "personal" },
-            id: "a",
-            meta: {},
-            content: "no longer relevant",
-            expectedDigest: base[0]!.digest,
-          },
-        },
-      },
-      {
-        recordSeq: 2,
-        domain: "global",
-        requestId: "delete-b",
-        mutationDigest: `sha256:${"2".repeat(64)}`,
-        mutation: {
-          kind: "memory-delete",
-          scope: { kind: "personal" },
-          domain: "people",
-          id: "b",
-          expectedDigest: base[1]!.digest,
-        },
-      },
-      {
-        recordSeq: 3,
-        domain: "global",
-        requestId: "insert-d",
-        mutationDigest: `sha256:${"3".repeat(64)}`,
-        mutation: {
-          kind: "memory-append",
-          payload: {
-            domain: "people",
-            scope: { kind: "personal" },
-            id: "d",
-            meta: {},
-            content: "needle newest",
-          },
-        },
-      },
-    ];
-
-    expect(resolveMemorySearchOverlay(base, records, {
-      scope: { kind: "personal" },
-      domain: "people",
-      query: "needle",
-      limit: 2,
-    }).map((item) => item.id)).toEqual(["d", "c"]);
-  });
 });
 
 /** 装饰器 spy:记录 ctx.bus + 返回可断言的 dispose */
@@ -524,7 +442,7 @@ describe("createAgentRuntime · forceCompact 强制段切换", () => {
 
   function sixMessages() {
     const messages = [];
-    // 10 turns：被摘段（去掉保留 buffer 2 turns）≥ 记忆提取的 minMessages 门槛
+    // 10 turns：保证被摘段与保留 buffer 都有足够消息覆盖真实切段路径。
     for (let i = 0; i < 10; i++) {
       messages.push(userMessage(`q${i}`), {
         role: "assistant" as const,
@@ -534,12 +452,8 @@ describe("createAgentRuntime · forceCompact 强制段切换", () => {
     return messages;
   }
 
-  it("强制切段成功：阈值置零绕过 defer，产出 windowCompact（含结构化摘要）+ 新段消息；run 外不触发 memory staged 写", async () => {
-    // 响应序列：① 段摘要（light）② 记忆提取（light，返回空数组 → 零写盘）
-    providerRef.current = new MockLLMProvider([
-      { text: SUMMARY_XML },
-      { text: "[]" },
-    ]);
+  it("强制切段成功：阈值置零绕过 defer，仅用摘要调用产出 windowCompact（含结构化摘要）+ 新段消息", async () => {
+    providerRef.current = new MockLLMProvider([{ text: SUMMARY_XML }]);
 
     const runtime = await createAgentRuntime({});
     const messages = sixMessages();
@@ -558,7 +472,7 @@ describe("createAgentRuntime · forceCompact 强制段切换", () => {
     expect("budget" in result).toBe(false);
     // 正常摘要切段无降级信息
     expect(result.emergencyFloor).toBeUndefined();
-    // 手动 compact 属于 run 外 control，仅执行段摘要，不触发 assignment-only memory flush。
+    // 无自动派生 hook：手动 compact 只执行一次段摘要。
     expect(providerRef.current!.calls.length).toBe(1);
   });
 
@@ -2324,55 +2238,6 @@ describe("trustContext 装配分叉", () => {
     );
     expect(providerRef.current.calls[0]!.systemPrompt).not.toContain(
       "ZX_MAIN_SKILL_MARKER",
-    );
-  });
-
-  it("workscene memoryScope 单独存在时不再改变 main 技能、信任/权限或 lifecycle 身份", async () => {
-    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
-    const query = makeSkillCatalogQuery([
-      ownSkillEntry({
-        id: "main-only",
-        name: "Main Only",
-        description: "ZX_MAIN_SKILL_MARKER",
-        mode: "main",
-      }),
-      ownSkillEntry({
-        id: "work-only",
-        name: "Work Only",
-        description: "ZX_WORK_SKILL_MARKER",
-        mode: "work",
-      }),
-    ]);
-    const opens: Array<{ mode: string; sceneId?: string }> = [];
-    const runtime = await createAgentRuntime({
-      workspace: null,
-      memoryScope: { kind: "workscene", sceneId: "memory-only" },
-      lifecycle: [
-        {
-          id: "identity-probe",
-          onWindowOpen: (ctx) => {
-            opens.push({
-              mode: ctx.mode,
-              ...(ctx.sceneId === undefined ? {} : { sceneId: ctx.sceneId }),
-            });
-          },
-        },
-      ],
-    });
-    expect(opens).toEqual([{ mode: "main" }]);
-    expect(runtime.securityPipeline.getTrust()).toEqual({ kind: "global" });
-    expect(runtime.securityPipeline.getContextId()).toEqual({ kind: "main" });
-
-    await runtime.run({
-      messages: [userMessage("hi")],
-      turnIndex: 0,
-      globalQuery: query.port,
-    });
-    expect(providerRef.current.calls[0]!.systemPrompt).toContain(
-      "ZX_MAIN_SKILL_MARKER",
-    );
-    expect(providerRef.current.calls[0]!.systemPrompt).not.toContain(
-      "ZX_WORK_SKILL_MARKER",
     );
   });
 

@@ -1,11 +1,10 @@
 /**
- * 宿主侧 turn 后维护 —— 自动命名与 journal 凝练的触发纪律。
+ * 宿主侧 turn 后维护 —— 自动命名触发纪律。
  *
  * 锁住:
- *   - 单向阀:场景对话(ws:)与 ephemeral 不触发任何个人维护
+ *   - 单向阀:场景对话(ws:)与 ephemeral 不触发自动命名
  *   - 自动命名:仅首轮、仅 name 仍为 id 的对话、改名成功通知 onRenamed
- *   - journal:turn 仅唤醒组合根持有的宿主级 lifecycle owner
- *   - 运行体无 callText 时只跳过命名，不影响 journal owner
+ *   - 运行体无 callText 时跳过命名
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -39,16 +38,6 @@ function makeRepo(conv: Conversation | null) {
   return { repo, renames };
 }
 
-function makeJournal(_opts?: { condensePlan?: unknown }) {
-  const condenseSpy = vi.fn(async () => ({}));
-  return {
-    journal: {
-      wake: condenseSpy,
-    } as never,
-    condenseSpy,
-  };
-}
-
 function makeInfo(overrides?: Partial<TurnCommittedInfo>): TurnCommittedInfo {
   const userMsg: Message = {
     role: "user",
@@ -79,7 +68,6 @@ describe("createTurnMaintenance", () => {
     const onRenamed = vi.fn();
     const maintain = createTurnMaintenance({
       convRepo: repo,
-      journal: makeJournal().journal,
       onRenamed,
     });
 
@@ -94,7 +82,6 @@ describe("createTurnMaintenance", () => {
     const { repo, renames } = makeRepo(makeConv("conv-1", "我的名字"));
     const maintain = createTurnMaintenance({
       convRepo: repo,
-      journal: makeJournal().journal,
     });
 
     maintain(makeInfo());
@@ -104,76 +91,20 @@ describe("createTurnMaintenance", () => {
     expect(renames).toEqual([]);
   });
 
-  it("单向阀:场景对话与 ephemeral 不触发任何维护", async () => {
+  it("单向阀:场景对话与 ephemeral 不触发自动命名", async () => {
     const { repo, renames } = makeRepo(makeConv("conv-1"));
-    const { journal, condenseSpy } = makeJournal({ condensePlan: { months: ["2026-01"] } });
-    const maintain = createTurnMaintenance({ convRepo: repo, journal });
+    const maintain = createTurnMaintenance({ convRepo: repo });
 
     maintain(makeInfo({ conversationId: "ws:scene-1:conv-9" }));
     maintain(makeInfo({ ephemeral: true }));
     await flush();
 
     expect(renames).toEqual([]);
-    expect(condenseSpy).not.toHaveBeenCalled();
   });
 
-  it("journal:每个 user turn 只唤醒组合根持有的同一个 lifecycle owner", async () => {
-    const { repo } = makeRepo(makeConv("conv-1", "已命名"));
-    const { journal, condenseSpy } = makeJournal({ condensePlan: { months: ["2026-01"] } });
-    const maintain = createTurnMaintenance({ convRepo: repo, journal });
-
-    maintain(makeInfo({ turnCount: 2 }));
-    maintain(makeInfo({ conversationId: "conv-2", turnCount: 1 }));
-    await flush();
-
-    expect(condenseSpy).toHaveBeenCalledTimes(2);
-  });
-
-  it("journal:turn 层只发送无参数 wake，不持有第二套运行状态", async () => {
-    const { repo } = makeRepo(makeConv("conv-1", "已命名"));
-    const condenseSpy = vi.fn(async () => ({}));
-    const maintain = createTurnMaintenance({
-      convRepo: repo,
-      journal: {
-        wake: condenseSpy,
-      } as never,
-    });
-
-    maintain(makeInfo({ conversationId: "conv-1", turnCount: 2 }));
-    await flush();
-    maintain(makeInfo({ conversationId: "conv-2", turnCount: 2 }));
-    await flush();
-
-    expect(condenseSpy).toHaveBeenCalledTimes(2);
-    expect(condenseSpy).toHaveBeenNthCalledWith(1);
-    expect(condenseSpy).toHaveBeenNthCalledWith(2);
-  });
-
-  it("journal:owner 拒绝一次唤醒不阻止后续 user turn 再次唤醒", async () => {
-    const { repo } = makeRepo(makeConv("conv-1", "已命名"));
-    const condenseSpy = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("llm failed"))
-      .mockResolvedValueOnce({});
-    const maintain = createTurnMaintenance({
-      convRepo: repo,
-      journal: {
-        wake: condenseSpy,
-      } as never,
-    });
-
-    maintain(makeInfo({ conversationId: "conv-1", turnCount: 2 }));
-    await flush();
-    maintain(makeInfo({ conversationId: "conv-2", turnCount: 2 }));
-    await flush();
-
-    expect(condenseSpy).toHaveBeenCalledTimes(2);
-  });
-
-  it("运行体无 callText 只跳过命名，仍唤醒已绑定的 journal owner", async () => {
+  it("运行体无 callText 时跳过命名", async () => {
     const { repo, renames } = makeRepo(makeConv("conv-1"));
-    const { journal, condenseSpy } = makeJournal({ condensePlan: {} });
-    const maintain = createTurnMaintenance({ convRepo: repo, journal });
+    const maintain = createTurnMaintenance({ convRepo: repo });
 
     maintain(
       makeInfo({
@@ -183,6 +114,5 @@ describe("createTurnMaintenance", () => {
     await flush();
 
     expect(renames).toEqual([]);
-    expect(condenseSpy).toHaveBeenCalledOnce();
   });
 });

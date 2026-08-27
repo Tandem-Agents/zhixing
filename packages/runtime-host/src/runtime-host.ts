@@ -291,9 +291,6 @@ export class RuntimeHost {
       worksceneIdentity: workscene
         ? { sceneId: workscene.sceneId }
         : undefined,
-      memoryScope: workscene
-        ? { kind: "workscene", sceneId: workscene.sceneId }
-        : undefined,
       profile,
       extraTools,
       executionMcpServers: mcpServers,

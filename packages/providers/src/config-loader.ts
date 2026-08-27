@@ -267,7 +267,7 @@ function buildConfigTemplate(workspaceRoot: string): string {
       "model": "${mainModel}"
     }
 
-    // light：系统侧后台辅助任务（记忆提取 / WebFetch 蒸馏 / 工具结果摘要 /
+    // light：系统侧后台辅助任务（WebFetch 蒸馏 / 工具结果摘要 /
     // 子 agent 返回压缩 / 通讯通道入站分类等 I/O 边界净化），你不会直接调用。
     // 注：质量敏感的单发任务（callText role="main"）走 main 不走 light。
     // 默认即推荐的轻量模型（与 main 同 provider，单 key 即可，价格更低）；

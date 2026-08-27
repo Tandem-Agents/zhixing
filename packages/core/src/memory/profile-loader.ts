@@ -34,10 +34,8 @@ import { getMemoryDir } from "./types.js";
 /**
  * 加载身份画像。
  *
- * root 缺省 = getMemoryDir()（Layer-A 根治后的正确个人记忆域默认，服务
- * 非装配调用方如 cli /me）；装配期按 memoryScope 显式注入 scoped root 实现
- * 工作场景隔离 —— profile-loader 是 me/ 域唯一函数式访问者，加此参数让它与
- * 四个 store class 的 baseDir 注入同源。
+ * root 缺省 = getMemoryDir()；显式 root 供仍持有独立存储根的调用方注入，
+ * 与 store class 的 baseDir 入口保持一致。
  *
  * @returns ProfileData 或 null（文件不存在/为空时）
  */

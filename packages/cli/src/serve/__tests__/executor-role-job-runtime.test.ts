@@ -59,7 +59,6 @@ describe("executor role conversation runtime production assembly", () => {
         workspace: "/scene-workspace",
         primaryRole: "power",
         worksceneIdentity: { sceneId: "scene-a" },
-        memoryScope: { kind: "workscene", sceneId: "scene-a" },
       }),
     );
 
@@ -70,7 +69,6 @@ describe("executor role conversation runtime production assembly", () => {
     const mainParams = runtimeMocks.createAgentRuntime.mock.calls[1]![0];
     expect(mainParams.workspace).toBe("/ordinary-workspace");
     expect(mainParams.worksceneIdentity).toBeUndefined();
-    expect(mainParams.memoryScope).toBeUndefined();
     expect(mainParams.primaryRole).toBeUndefined();
   });
 });

@@ -414,7 +414,7 @@ function systemDefinition(revision = 1, state: TaskDefinition["state"] = "enable
     state,
     definition: {
       kind: "system",
-      handler: "__journal-gc",
+      handler: "__transcript-gc",
       params: { retainDays: 30 },
     },
   };
@@ -4225,7 +4225,7 @@ describe("job submission guard preflight", {
       scheduledFor: NOW,
       taskRevision: 1,
       anchorEpoch: 3,
-      handler: "__journal-gc" as const,
+      handler: "__transcript-gc" as const,
       paramsDigest: systemJobParamsDigest({ retainDays: 30 }),
       reservationId: "system-reservation-1",
       attempt: 1,
@@ -5193,7 +5193,7 @@ async function createSystemHarness(
   }) as unknown as SystemJobHandler;
   const systemHandlers = new Map([
     [
-      "__journal-gc" as const,
+      "__transcript-gc" as const,
       handler,
     ],
   ]);

@@ -1,8 +1,7 @@
 /**
  * Message Turns — "turn 在消息数组中的视图" 抽象层
  *
- * 这个模块是切分消费者（段切换 SegmentManager / 记忆提取 MemoryFlusher）
- * 共享的 turn 视图单一事实源。
+ * 这个模块是段切换等消息切分消费者共享的 turn 视图单一事实源。
  *
  * 概念：
  *   一个 turn = assistant 消息 + 其后续的 tool_result user 消息。

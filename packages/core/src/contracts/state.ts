@@ -216,7 +216,6 @@ export interface ScheduleTaskSpecDto {
 
 export type SystemHandlerId =
   | "__transcript-gc"
-  | "__journal-gc"
   | "__advancement-gc";
 
 export interface DeliveryRequestDto {

@@ -94,7 +94,6 @@ describe("buildSystemHandlers", () => {
     expect([...map.keys()].sort()).toEqual([
       "__advancement-gc",
       "__health-check",
-      "__journal-gc",
       "__transcript-gc",
     ]);
   });

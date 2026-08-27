@@ -11,7 +11,7 @@
  *
  * 依赖注入：
  * - runAgentTurn：由 CLI/Server 注入，Scheduler 不依赖具体 Agent 实现
- * - systemHandlers：内置任务处理器（如 __journal-gc）
+ * - systemHandlers：内置任务处理器（如 __transcript-gc）
  * - eventBus：事件通知（REPL 订阅渲染）
  */
 

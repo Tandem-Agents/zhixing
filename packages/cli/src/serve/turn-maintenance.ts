@@ -2,14 +2,10 @@
  * 宿主侧 turn 后维护 —— ConversationManager.onTurnCommitted 的装配实现。
  *
  * 所有入口(RPC / 渠道)的 turn 持久化成功后经唯一汇聚点触发:
- * - 自动命名:首轮(turnCount === 1)后用轻量 LLM 给 name 仍为 id 的对话起名,
- *   改名成功经 onRenamed 通知接入面(session.changed renamed 组播挂点);
- * - journal 生命周期:宿主级全局 single-flight——过期凝练清理 + 温日志凝练
- *   (LLM 经运行体 callText 的 light 档)。
- *
- * 单向阀:个人记忆维护只在 user 域(main)对话触发——场景对话(ws: 前缀)
- * 的记忆域是 workscene,绝不跑个人 journal,也不参与 main 列表命名。
- * 全部 fire-and-forget 且静默兜错:维护是辅助能力,绝不影响用户主路径。
+ * 首轮(turnCount === 1)后用轻量 LLM 给 name 仍为 id 的用户对话起名，
+ * 改名成功经 onRenamed 通知接入面(session.changed renamed 组播挂点)。
+ * 场景对话(ws: 前缀)与 ephemeral 对话不参与 main 列表命名；维护调用
+ * fire-and-forget 且静默兜错，不影响用户主路径。
  */
 
 import {
@@ -21,7 +17,6 @@ import {
   type Conversation,
 } from "@zhixing/core";
 import type { TurnCommittedInfo } from "@zhixing/owner-kernel";
-import type { JournalMaintenance } from "./journal-maintenance.js";
 
 /** 自动命名所需的 meta 仓窄面 */
 export interface NamerConversationRepo {
@@ -30,7 +25,6 @@ export interface NamerConversationRepo {
 }
 export interface TurnMaintenanceDeps {
   convRepo: NamerConversationRepo;
-  journal?: JournalMaintenance;
   /** 自动命名成功后的通知挂点(组播 session.changed renamed) */
   onRenamed?: (conversationId: string, name: string) => void;
   /**
@@ -61,8 +55,6 @@ export function createTurnMaintenance(
     if (info.turnCount === 1 && callText) {
       void autoNameFirstTurn(deps, info, callText).catch(() => {});
     }
-
-    if (deps.journal) void deps.journal.wake().catch(() => {});
   };
 }
 

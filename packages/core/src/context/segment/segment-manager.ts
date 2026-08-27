@@ -195,7 +195,7 @@ export class SegmentManager {
     const segmentId = this.cfg.generateSegmentId();
     const startedAt = this.cfg.clock();
     // 切分提前到 ctx 构造（纯函数，与摘要 LLM 调用无序依赖）——被摘段原文
-    // 作为 hook 输入随 ctx 交付（记忆提取等消费）
+    // 作为通用 hook 输入随 ctx 交付
     const { toSummarize, toPreserve } = splitMessagesPairAware(
       input.messages,
       this.cfg.bufferTurns,

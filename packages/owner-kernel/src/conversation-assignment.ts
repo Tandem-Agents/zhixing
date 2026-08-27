@@ -133,9 +133,7 @@ import {
 } from "@zhixing/core/protocol";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 import {
-  calculateMessageTurns,
   compileDeliveryContent,
-  createAttentionWindow,
   DeliveryContentValidationError,
   parseConversationId,
   type CompiledDeliveryContent,
@@ -235,14 +233,9 @@ import {
 export type {
   ConversationRunInternalRecord,
   ConversationRunJournalRecord,
-  PostAdoptionMemoryExtraction,
-  PostAdoptionMemoryInput,
-  PostAdoptionMemoryRecord,
 } from "./conversation-run-contracts.js";
 export {
   assertConversationRunInternalRecord,
-  postAdoptionMemoryInputDigest,
-  postAdoptionMemoryOperationId,
 } from "./conversation-run-contracts.js";
 type ConversationUncertainResolutionFact = Extract<
   UncertainResolutionFact,
@@ -973,13 +966,6 @@ export interface ConversationChannelFrameAdoption {
   >;
 }
 
-/**
- * A committed segment boundary whose evicted source messages can be replayed
- * into the anchor memory pipeline after conversation adoption.
- */
-export type ConversationSegmentMemoryFlush =
-  import("./conversation-run-contracts.js").PostAdoptionMemoryInput;
-
 /** Owner-side durable run facts and deterministic dispatch outbox for one conversation. */
 export class ConversationRunJournal implements AssignmentSubmissionPreflightPort {
   readonly #conversationId: string;
@@ -1087,60 +1073,6 @@ export class ConversationRunJournal implements AssignmentSubmissionPreflightPort
           : {}),
       };
     });
-  }
-
-  /**
-   * Rebuilds segment-memory inputs from committed run facts only. The result is
-   * a derived view: imported caches and source-side memory are never consulted.
-   */
-  async segmentMemoryFlushes(): Promise<readonly ConversationSegmentMemoryFlush[]> {
-    const transcript = await this.#select((state) =>
-      snapshot(state.transcript, "Conversation segment memory transcript"),
-    );
-    const window = createAttentionWindow({ conversationId: this.#conversationId });
-    const flushes: ConversationSegmentMemoryFlush[] = [];
-
-    for (const record of transcript) {
-      const committed = await this.committedRun(record.runId);
-      if (!committed) {
-        throw new Error(`Committed run ${record.runId} is unavailable`);
-      }
-      const compact = committed.windowCompact;
-      if (compact?.segmentId && compact.structuredSummary) {
-        const beforeCompact = [
-          ...window.getMessages().map((message) => structuredClone(message)),
-          ...committed.runRecord.messages.map((message) => structuredClone(message)),
-        ];
-        const turns = calculateMessageTurns(beforeCompact);
-        let end = 0;
-        while (
-          end < beforeCompact.length &&
-          (turns[end] ?? Number.POSITIVE_INFINITY) <= compact.pairsCompacted
-        ) {
-          end++;
-        }
-        const messages = beforeCompact.slice(0, end);
-        if (messages.length === 0) {
-          throw new Error(
-            `Committed segment ${compact.segmentId} has no reconstructable source messages`,
-          );
-        }
-        flushes.push({
-          conversationId: this.#conversationId,
-          segmentId: compact.segmentId,
-          tokensBefore: compact.tokensBefore,
-          messages,
-          summary: structuredClone(compact.structuredSummary),
-        });
-      }
-      window.acceptRun({
-        runMessages: committed.runRecord.messages,
-        runIndex: record.runIndex,
-        ...(compact ? { windowCompact: compact } : {}),
-      });
-    }
-
-    return snapshot(flushes, "Conversation segment memory flushes");
   }
 
   async taskList(): Promise<TaskListState> {

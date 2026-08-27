@@ -7,11 +7,10 @@
  * 命名约定：双下划线前缀 `__` 表示系统内置（用户不可创建/删除）。
  *
  * 分层纪律：handler 一律是**薄触发壳**——到点调用对应模块自带的维护能力、
- * 把返回转成 `{status, summary}`，自身不含任何维护算法（journal 生命周期由
- * 注入的 anchor authority service 管理，transcript 清理由持久层 sweep 管理）。
+ * 把返回转成 `{status, summary}`，自身不含任何维护算法（transcript 清理由
+ * 持久层 sweep 管理）。
  *
  * - __health-check：周期性健康自检（不依赖外部资源）
- * - __journal-gc：触发 anchor journal authority lifecycle service
  * - __transcript-gc：调用持久层时间窗保留清理（分片 + 摘要快照）
  */
 
@@ -52,42 +51,12 @@ export function buildHealthCheckHandler(deps?: {
   };
 }
 
-// ─── __journal-gc ───
-
-export interface JournalGcDeps {
-  /** 注入由 CLI/Server 提供的 journal 凝练函数。不提供则 handler 报告未配置 */
-  runJournalLifecycle?: () => Promise<{ condensed: number; expired: number }>;
-}
-
-export function buildJournalGcHandler(deps: JournalGcDeps = {}): SystemHandler {
-  return async () => {
-    if (!deps.runJournalLifecycle) {
-      return {
-        status: "ok",
-        summary: "journal-gc: not configured (no-op)",
-      };
-    }
-    try {
-      const r = await deps.runJournalLifecycle();
-      return {
-        status: "ok",
-        summary: `journal-gc: condensed=${r.condensed} expired=${r.expired}`,
-      };
-    } catch (err) {
-      return {
-        status: "error",
-        summary: err instanceof Error ? err.message : String(err),
-      };
-    }
-  };
-}
-
 // ─── __transcript-gc ───
 
 export interface TranscriptGcDeps {
   /**
    * 注入持久层保留清理能力（runRetentionSweep 的闭包，roots 由装配方解析）。
-   * 不提供则 handler 报告未配置——与 journal-gc 同款可缺省模式。
+   * 不提供则 handler 报告未配置。
    */
   runSweep?: () => Promise<{
     conversationsScanned: number;
@@ -171,7 +140,6 @@ export function buildAdvancementGcHandler(
 // ─── 注册器 ───
 
 export interface SystemHandlersOptions {
-  journal?: JournalGcDeps;
   transcript?: TranscriptGcDeps;
   advancement?: AdvancementGcDeps;
   healthCheck?: { onCheck?: () => Promise<{ ok: boolean; details?: string }> };
@@ -183,7 +151,6 @@ export interface SystemHandlersOptions {
 export function buildSystemHandlers(opts: SystemHandlersOptions = {}): Map<string, SystemHandler> {
   const map = new Map<string, SystemHandler>();
   map.set("__health-check", buildHealthCheckHandler(opts.healthCheck));
-  map.set("__journal-gc", buildJournalGcHandler(opts.journal));
   map.set("__transcript-gc", buildTranscriptGcHandler(opts.transcript));
   map.set("__advancement-gc", buildAdvancementGcHandler(opts.advancement));
   return map;

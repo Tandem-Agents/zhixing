@@ -99,7 +99,6 @@ import { renderResumedAdvancementNotice } from "./advancement-presentation.js";
 import { createAdvancementControlPresenter } from "./runtime/advancement-control-presenter.js";
 import { createLifecycleDiagnosticsPresenter } from "./runtime/lifecycle-diagnostics-presenter.js";
 import { createPublishResultPresenter } from "./runtime/publish-result-presenter.js";
-import { createJournalMaintenancePresenter } from "./runtime/journal-maintenance-presenter.js";
 import { createObservedTurnPresenter } from "./runtime/observed-turn-presenter.js";
 import {
   ConversationController,
@@ -642,12 +641,6 @@ export async function startRepl(): Promise<void> {
     flushOutput: () => renderer.stop(),
     filter: (envelope) => watching(envelope.conversationId),
   });
-  const journalMaintenancePresenter = createJournalMaintenancePresenter({
-    link: coreHost,
-    writer: cliWriter,
-    flushOutput: () => renderer.stop(),
-  });
-
   // ── 当前对话指针:auto-resume 最近可恢复的一条(session.list 新→旧),无则新建 ──
   const {
     active: initialActive,
@@ -1957,7 +1950,6 @@ export async function startRepl(): Promise<void> {
   advancementControlPresenter.dispose();
   lifecycleDiagnosticsPresenter.dispose();
   publishResultPresenter.dispose();
-  journalMaintenancePresenter.dispose();
   controller.dispose();
 
   if (inputController) {

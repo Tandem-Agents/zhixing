@@ -3,7 +3,7 @@
  *
  * 两个 helper 按档位分流到不同角色：
  *   - createMainCallLLM  → roles.main.chat  (质量敏感单发，产物直接面向用户)
- *   - createLightCallLLM → roles.light.chat (记忆提取等 I/O 边界结构化净化)
+ *   - createLightCallLLM → roles.light.chat (低成本默认单发文本调用)
  *
  * 本文件用 spy LLMRoles 反向验证两条路径互不干扰、每条路径的 ChatRequest 透传正确。
  */
@@ -210,7 +210,7 @@ describe("createLightCallLLM · 路由契约", () => {
     expect(result).toBe("第一段第二段");
   });
 
-  it("空响应直接返回空字符串（MemoryFlush 经 parseExtractions 自带 try/catch 容错）", async () => {
+  it("callText 空响应直接返回空字符串", async () => {
     const { roles } = makeSpyRoles({ lightChunks: [] });
     const callLLM = createLightCallLLM(roles);
 

@@ -11,7 +11,6 @@ import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { OwnerDeliveryParticipant } from "../delivery-participant.js";
 import { SchedulerUserNoticeJournal } from "../scheduler-user-notices.js";
-import { protocolDigest } from "@zhixing/core/protocol";
 import {
   DURABLE_IO_TEST_TIMEOUT_MS,
   trackAuthorityLog,
@@ -138,68 +137,6 @@ describe("SchedulerUserNoticeJournal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
         }),
       }),
     ]);
-  });
-
-  it("persists one monotonic journal-maintenance notice across attempts and restart", async () => {
-    const harness = await createHarness();
-    await harness.notices.initializeLiveCursor();
-    const months = [{
-      month: "2026-06",
-      sources: [
-        { id: "2026-06-01", expectedDigest: `sha256:${"1".repeat(64)}` },
-        { id: "2026-06-02", expectedDigest: `sha256:${"2".repeat(64)}` },
-      ],
-    }];
-    const plan = {
-      planDigest: protocolDigest("JournalMaintenancePlan", 1, { months }),
-      months,
-    } as const;
-    const base = {
-      noticeId: `journal-maintenance:${plan.planDigest}`,
-      kind: "journal-maintenance" as const,
-      journalPlan: plan,
-      at: NOW,
-    };
-    const write = (
-      state: "prepared" | "open" | "updated" | "closed",
-      attempt: number,
-      completed: number,
-    ) => harness.notices.recordJournalMaintenance({
-      ...base,
-      state,
-      ref: {
-        kind: "journal-maintenance",
-        planDigest: plan.planDigest,
-        monthCount: 1,
-        fileCount: 2,
-        attempt,
-        completed,
-      },
-      reason: state === "closed" ? "日志凝练已完成。" : "日志凝练处理中。",
-      actions: ["可用 /journal 查看状态"],
-    });
-
-    await write("prepared", 0, 0);
-    await write("open", 1, 0);
-    await write("updated", 1, 0);
-    await write("open", 2, 0);
-    await write("updated", 2, 1);
-    await write("closed", 2, 1);
-
-    const reopened = new SchedulerUserNoticeJournal({
-      log: harness.log,
-      delivery: harness.delivery,
-    });
-    const [latest] = await reopened.journalMaintenanceStates();
-    expect(latest).toMatchObject({
-      notice: {
-        kind: "journal-maintenance",
-        state: "closed",
-        ref: { attempt: 2, completed: 1 },
-      },
-      plan,
-    });
-    await expect(write("open", 3, 1)).rejects.toThrow(/monotonic/);
   });
 
   it("fails closed on an unknown notice field", async () => {

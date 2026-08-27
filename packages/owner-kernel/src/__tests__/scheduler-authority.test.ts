@@ -332,32 +332,32 @@ describe("AnchorScheduler authority", () => {
     });
     const journal = new MemoryJobJournal();
     journal.definition = {
-      taskId: "__journal-gc",
+      taskId: "__transcript-gc",
       taskRevision: 1,
       state: "enabled",
-      definition: { kind: "system", handler: "__journal-gc" },
+      definition: { kind: "system", handler: "__transcript-gc" },
     };
     journal.resumeSystemJobs.mockImplementation(async () => recoveryGate);
     const systemTasks = new Map([
       [
-        "__journal-gc",
+        "__transcript-gc",
         {
-          id: "__journal-gc",
-          name: "journal-gc",
-          handler: "__journal-gc",
+          id: "__transcript-gc",
+          name: "transcript-gc",
+          handler: "__transcript-gc",
           schedule: { kind: "interval" as const, everyMs: 60_000 },
         },
       ],
     ]);
     const { scheduler } = fixture({
-      journals: new Map([["__journal-gc", journal]]),
+      journals: new Map([["__transcript-gc", journal]]),
       systemTasks,
     });
 
     await scheduler.prepare();
     expect(journal.resumeSystemJobs).not.toHaveBeenCalled();
     await expect(
-      scheduler.runTask("__journal-gc", "before-ready"),
+      scheduler.runTask("__transcript-gc", "before-ready"),
     ).rejects.toThrow("Scheduler is not accepting commands");
 
     scheduler.activate();
@@ -466,19 +466,19 @@ describe("AnchorScheduler authority", () => {
   it("seeds host-only tasks before opening and restores their host registration", async () => {
     const systemTasks = new Map([
       [
-        "__journal-gc",
+        "__transcript-gc",
         {
-          id: "__journal-gc",
-          name: "journal-gc",
-          handler: "__journal-gc",
+          id: "__transcript-gc",
+          name: "transcript-gc",
+          handler: "__transcript-gc",
           schedule: { kind: "cron" as const, expr: "0 3 * * *" },
         },
       ],
     ]);
     const first = fixture({ systemTasks });
     await first.scheduler.start();
-    expect(first.scheduler.getTask("__journal-gc")).toMatchObject({
-      id: "__journal-gc",
+    expect(first.scheduler.getTask("__transcript-gc")).toMatchObject({
+      id: "__transcript-gc",
       system: true,
       schedule: { kind: "cron", expr: "0 3 * * *" },
     });
@@ -487,24 +487,24 @@ describe("AnchorScheduler authority", () => {
 
     const restarted = fixture({ journals: first.journals, systemTasks });
     await restarted.scheduler.start();
-    expect(restarted.scheduler.getTask("__journal-gc")).toMatchObject({
+    expect(restarted.scheduler.getTask("__transcript-gc")).toMatchObject({
       system: true,
-      name: "journal-gc",
+      name: "transcript-gc",
     });
-    expect(first.journals.get("__journal-gc")!.resumeSystemJobs).toHaveBeenCalled();
+    expect(first.journals.get("__transcript-gc")!.resumeSystemJobs).toHaveBeenCalled();
     await restarted.scheduler.stop();
   });
 
   it("coalesces an offline system interval into one ready-boundary catch-up", async () => {
     const journal = new MemoryJobJournal();
     journal.definition = {
-      taskId: "__journal-gc",
+      taskId: "__transcript-gc",
       taskRevision: 1,
       state: "enabled",
-      definition: { kind: "system", handler: "__journal-gc" },
+      definition: { kind: "system", handler: "__transcript-gc" },
     };
     journal.runs.push({
-      taskId: "__journal-gc",
+      taskId: "__transcript-gc",
       jobRunId: "previous",
       scheduledFor: "2026-08-01T00:00:00.000Z",
       taskRevision: 1,
@@ -513,17 +513,17 @@ describe("AnchorScheduler authority", () => {
     });
     const systemTasks = new Map([
       [
-        "__journal-gc",
+        "__transcript-gc",
         {
-          id: "__journal-gc",
-          name: "journal-gc",
-          handler: "__journal-gc",
+          id: "__transcript-gc",
+          name: "transcript-gc",
+          handler: "__transcript-gc",
           schedule: { kind: "interval" as const, everyMs: 60_000 },
         },
       ],
     ]);
     const { scheduler } = fixture({
-      journals: new Map([["__journal-gc", journal]]),
+      journals: new Map([["__transcript-gc", journal]]),
       systemTasks,
     });
 

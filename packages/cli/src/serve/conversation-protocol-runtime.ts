@@ -87,7 +87,6 @@ import {
   type DeferredIntentConversationTransaction,
   type InProcessDispatchContextFactory,
   type ConversationTransferAuthorityRecord,
-  type ConversationSegmentMemoryFlush,
   ConversationSessionStateAdapter,
 } from "@zhixing/owner-kernel";
 import {
@@ -510,13 +509,6 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         this.#markRecovery(conversationId);
       },
     });
-  }
-
-  /** Derived post-adoption memory inputs from the installed authority prefix. */
-  async conversationMemoryFlushes(
-    conversationId: string,
-  ): Promise<readonly ConversationSegmentMemoryFlush[]> {
-    return this.#journal(conversationId).segmentMemoryFlushes();
   }
 
   assignmentIngress(assignmentId: string): IngressContext {
