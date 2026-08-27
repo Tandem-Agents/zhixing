@@ -7,7 +7,6 @@ import type {
   Digest,
   IsoTime,
   JsonValue,
-  MemoryAppendPayload,
   OutboundContentDto,
   SegmentRecord,
   Signature,
@@ -20,10 +19,6 @@ import type {
   TrustRule,
   TrustRuleSnapshot,
 } from "./foundation.js";
-import type {
-  MemoryLogicalEntry,
-  MemoryScopeRef,
-} from "../memory/contracts.js";
 import type { WireSchemaV1 } from "../types/distributed.js";
 import type {
   ChannelMessageRef,
@@ -130,18 +125,6 @@ export interface ConfigAssetRecord extends WireSchemaV1<"ConfigAssetRecord"> {
 }
 
 export type GlobalQuery =
-  | {
-      kind: "memory-search";
-      scope: MemoryScopeRef;
-      domain: "memory" | "journal" | "people";
-      query: string;
-      limit: number;
-    }
-  | ({ kind: "memory-list"; scope: MemoryScopeRef } & (
-      | { domain: "memory"; category: "profile" }
-      | { domain: "journal" | "people"; category?: never }
-    ))
-  | { kind: "memory-stats"; scope: MemoryScopeRef; domain: "journal" | "people" }
   | { kind: "trust-rules"; scope?: string }
   | { kind: "schedule-list"; includeDisabled?: boolean }
   | { kind: "workscene-list" }
@@ -164,17 +147,6 @@ export interface AssetIndexEntry {
 }
 
 export type GlobalReadResult =
-  | {
-      kind: "memory-search";
-      hits: Array<{ entry: MemoryLogicalEntry; score?: number }>;
-    }
-  | { kind: "memory-list"; entries: MemoryLogicalEntry[] }
-  | {
-      kind: "memory-stats";
-      domain: "journal" | "people";
-      count: number;
-      lastWriteAt?: IsoTime;
-    }
   | { kind: "trust-rules"; snapshot: TrustRuleSnapshot }
   | { kind: "schedule-list"; tasks: TaskDefinition[] }
   | { kind: "workscene-list"; scenes: WorksceneDto[] }
@@ -293,34 +265,7 @@ export type TrustWriteMutation =
   | { kind: "trust-persist"; rule: TrustRule }
   | { kind: "trust-revoke"; ruleId: string };
 
-/**
- * Anchor-owned journal lifecycle mutation. It is deliberately absent from the
- * staged mutation union: lifecycle maintenance must never join an assignment
- * publish batch.
- */
-export type MemoryJournalCondenseMutation = {
-  kind: "memory-journal-condense";
-  scope: { kind: "personal" };
-  month: string;
-  targetExpectedDigest?: Digest;
-  sources: Array<{ id: string; expectedDigest: Digest }>;
-  summary: string;
-};
-
-export type MemoryDeleteMutation = {
-  kind: "memory-delete";
-  scope: MemoryScopeRef;
-  expectedDigest: Digest;
-} & (
-  | { domain: "memory"; category: "profile"; id: "profile" }
-  | { domain: "people"; category?: never; id: string }
-  | { domain: "journal"; category?: never; id: string }
-);
-
 export type GlobalControlMutation =
-  | { kind: "memory-append"; payload: MemoryAppendPayload }
-  | MemoryDeleteMutation
-  | MemoryJournalCondenseMutation
   | ScheduleWriteMutation
   | SkillWriteMutation
   | RubricWriteMutation
@@ -329,8 +274,6 @@ export type GlobalControlMutation =
   | { kind: "config-asset-write"; record: ConfigAssetRecord };
 
 export type GlobalStagedBase =
-  | { kind: "memory-append"; payload: MemoryAppendPayload }
-  | Extract<GlobalControlMutation, { kind: "memory-delete" }>
   | ScheduleWriteMutation
   | { kind: "skill-usage"; record: SkillUsageRecord }
   | Extract<

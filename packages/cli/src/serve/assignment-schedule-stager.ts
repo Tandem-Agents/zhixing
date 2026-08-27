@@ -68,7 +68,6 @@ export function createAssignmentMutationPort(input: {
           capability,
           assignmentId,
           execution,
-          request.mutation,
         );
       }
       const requestId = `mutation:${protocolDigest("AssignmentMutationRequest", 1, {
@@ -118,7 +117,6 @@ function assertGlobalMutationCapability(
   capability: AuthorityCapability,
   assignmentId: string,
   execution: "conversation" | "job",
-  mutation: Extract<AssignmentMutationRequest, { domain: "global" }>["mutation"],
 ): void {
   if (
     capability.assignmentId !== assignmentId ||
@@ -126,15 +124,6 @@ function assertGlobalMutationCapability(
     !capability.methods.includes("global.mutate")
   ) {
     throw new Error("Assignment global mutation capability is misbound");
-  }
-  if (mutation.kind === "memory-append" || mutation.kind === "memory-delete") {
-    const scope = mutation.kind === "memory-append" ? mutation.payload.scope : mutation.scope;
-    const resource: `memory-domain:${string}` = scope.kind === "personal"
-      ? "memory-domain:personal"
-      : `memory-domain:workscene:${scope.sceneId}`;
-    if (!capability.resources.includes(resource)) {
-      throw new Error("Assignment capability does not cover this memory scope");
-    }
   }
 }
 

@@ -38,12 +38,6 @@ export type {
   TrustRule,
   TrustRuleSnapshot,
 } from "../security/types.js";
-export type {
-  MemoryAppendPayload,
-  MemoryCategoryDto,
-  PersonMetaDto,
-} from "../memory/contracts.js";
-export type { PersonEntry } from "../memory/people-store.js";
 export type { SkillModeDto, SkillUsageRecord } from "../skills/types.js";
 export type {
   ScheduleTaskSpec,

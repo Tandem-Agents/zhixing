@@ -4,8 +4,6 @@ import type {
   GlobalReadResult,
   TaskDefinition,
 } from "../contracts/state.js";
-import type { MemoryLogicalEntry } from "../memory/contracts.js";
-import { memoryLogicalEntryDigest } from "../memory/logical-entry.js";
 import type { SkillCatalogEntry } from "../skills/types.js";
 import { describe, expect, it } from "vitest";
 import { protocolDigest } from "./canonical.js";
@@ -16,23 +14,6 @@ import {
 
 const NOW = "2026-08-05T00:00:00.000Z";
 const DIGEST_A = `sha256:${"a".repeat(64)}`;
-
-function memoryEntry(): MemoryLogicalEntry {
-  const identity = {
-    domain: "memory" as const,
-    scope: { kind: "personal" as const },
-    category: "profile" as const,
-    id: "profile",
-    meta: { source: "user" },
-    content: "hello world",
-  };
-  return {
-    ...identity,
-    revision: 1,
-    digest: memoryLogicalEntryDigest(identity),
-    updatedAt: NOW,
-  };
-}
 
 function task(): TaskDefinition {
   return {
@@ -111,20 +92,7 @@ const trustSnapshot = (() => {
 
 describe("GlobalQuery strict request/result contract", () => {
   it("accepts every closed query/result variant and binds the result to its query", () => {
-    const entry = memoryEntry();
     const cases: Array<[GlobalQuery, GlobalReadResult]> = [
-      [
-        { kind: "memory-search", scope: { kind: "personal" }, domain: "memory", query: "hello", limit: 1 },
-        { kind: "memory-search", hits: [{ entry }] },
-      ],
-      [
-        { kind: "memory-list", scope: { kind: "personal" }, domain: "memory", category: "profile" },
-        { kind: "memory-list", entries: [entry] },
-      ],
-      [
-        { kind: "memory-stats", scope: { kind: "personal" }, domain: "people" },
-        { kind: "memory-stats", domain: "people", count: 0 },
-      ],
       [{ kind: "trust-rules" }, { kind: "trust-rules", snapshot: trustSnapshot }],
       [{ kind: "schedule-list" }, { kind: "schedule-list", tasks: [task()] }],
       [{ kind: "workscene-list" }, { kind: "workscene-list", scenes: [scene] }],
@@ -154,32 +122,8 @@ describe("GlobalQuery strict request/result contract", () => {
   });
 
   it("rejects nested shape, digest, identity and query-binding violations", () => {
-    const entry = memoryEntry();
     expect(() => validateGlobalQuery({ kind: "workscene-get", sceneId: "scene-1", extra: true }))
       .toThrow(/fields/u);
-    expect(() => validateGlobalQueryResult(
-      { kind: "memory-search", scope: { kind: "personal" }, domain: "people", query: "hello", limit: 1 },
-      { kind: "memory-search", hits: [{ entry }] },
-    )).toThrow(/bound/u);
-    expect(() => validateGlobalQueryResult(
-      { kind: "memory-list", scope: { kind: "personal" }, domain: "memory", category: "profile" },
-      { kind: "memory-list", entries: [{ ...entry, digest: DIGEST_A }] },
-    )).toThrow(/digest/u);
-    expect(() => validateGlobalQuery({
-      kind: "memory-list",
-      scope: { kind: "personal" },
-      domain: "memory",
-    })).toThrow(/category/u);
-    expect(() => validateGlobalQuery({
-      kind: "memory-list",
-      scope: { kind: "personal" },
-      domain: "people",
-      category: "person",
-    })).toThrow(/category/u);
-    expect(() => validateGlobalQueryResult(
-      { kind: "memory-search", scope: { kind: "personal" }, domain: "people", query: "hello", limit: 1 },
-      { kind: "memory-search", hits: [{ entry: { ...entry, domain: "people", category: undefined } }] },
-    )).toThrow();
     expect(() => validateGlobalQueryResult(
       { kind: "workscene-get", sceneId: "scene-2" },
       { kind: "workscene-get", scene: { ...scene, workspace: { deviceId: "d", bindingRef: "b", path: "C:\\secret" } } },
@@ -214,6 +158,12 @@ describe("GlobalQuery strict request/result contract", () => {
       { kind: "workscene-list" },
       accessorResult,
     )).toThrow(/accessor/u);
+  });
+
+  it("rejects every retired memory query discriminant", () => {
+    for (const kind of ["memory-search", "memory-list", "memory-stats"] as const) {
+      expect(() => validateGlobalQuery({ kind })).toThrow(/kind/u);
+    }
   });
 
   it("rejects internal, deleted and unrequested disabled schedule definitions", () => {

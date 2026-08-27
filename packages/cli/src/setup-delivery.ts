@@ -82,15 +82,11 @@ import {
 } from "@zhixing/core/environment";
 import {
   AnchorRubricGlobalStateAdapter,
-  AnchorMemoryGlobalStateAdapter,
   AnchorSkillGlobalStateAdapter,
   AnchorWorksceneGlobalStateAdapter,
   SkillStore,
-  getMemoryDir,
   getSkillsRoot,
-  getWorkSceneMemoryDir,
   parseConversationId,
-  type MemoryScopeRef,
 } from "@zhixing/core";
 import {
   FileArtifactStore,
@@ -146,7 +142,6 @@ export const INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS = Object.freeze([
   "resource-governor",
   "surface-assets",
   "workscene-global-state",
-  "memory-global-state",
   "skill-global-state",
   "rubric-global-state",
 ] as const);
@@ -508,7 +503,6 @@ export async function setupAuthorityRuntime(
   let executorLog: FileAuthorityCommitLog | undefined;
   let surfaceAssets: ReturnType<typeof createSurfaceAssetAuthority> | undefined;
   let worksceneGlobalState: AnchorWorksceneGlobalStateAdapter | undefined;
-  let memoryGlobalState: AnchorMemoryGlobalStateAdapter | undefined;
   let skillGlobalState: AnchorSkillGlobalStateAdapter | undefined;
   let rubricGlobalState: AnchorRubricGlobalStateAdapter | undefined;
   let schedulerGlobalState: GlobalStatePort | undefined;
@@ -998,17 +992,6 @@ export async function setupAuthorityRuntime(
           clock,
         })
       : undefined;
-    memoryGlobalState = authorityLog
-      ? new AnchorMemoryGlobalStateAdapter({
-          log: authorityLog,
-          anchorEpoch,
-          scopeRoot: (scope) =>
-            scope.kind === "personal"
-              ? getMemoryDir(options.zhixingHome)
-              : getWorkSceneMemoryDir(scope.sceneId, options.zhixingHome),
-          clock,
-        })
-      : undefined;
     skillGlobalState = authorityLog
       ? new AnchorSkillGlobalStateAdapter({
           log: authorityLog,
@@ -1027,30 +1010,6 @@ export async function setupAuthorityRuntime(
         })
       : undefined;
     await worksceneGlobalState?.initializeStagedPublishing();
-    if (memoryGlobalState) {
-      const memoryScopes: MemoryScopeRef[] = [{ kind: "personal" }];
-      if (worksceneGlobalState) {
-        const listed = await worksceneGlobalState.read(
-          { kind: "workscene-list" },
-          {
-            principal: { kind: "host", component: "memory-legacy-cutover" },
-            requestId: "memory-legacy-cutover:workscene-list",
-            deadlineAt: new Date(Date.parse(clock()) + 30_000).toISOString(),
-            authority: { domain: "global", anchorEpoch },
-          },
-        );
-        if (listed.kind !== "workscene-list") {
-          throw new Error("Workscene authority returned another read domain");
-        }
-        memoryScopes.push(
-          ...listed.scenes.map((scene) => ({
-            kind: "workscene" as const,
-            sceneId: scene.id,
-          })),
-        );
-      }
-      await memoryGlobalState.initializeStagedPublishing(memoryScopes);
-    }
     await skillGlobalState?.initializeStagedPublishing();
     const refreshLocalExecutorSnapshot = async (
       permissionSnapshotHighWater?: number,
@@ -1752,10 +1711,9 @@ export async function setupAuthorityRuntime(
       );
       return result.ok ? undefined : result.error;
     };
-    const routedGlobalState = worksceneGlobalState && memoryGlobalState && skillGlobalState && rubricGlobalState
+    const routedGlobalState = worksceneGlobalState && skillGlobalState && rubricGlobalState
       ? createGlobalStateRouter(
           () => worksceneGlobalState!,
-          () => memoryGlobalState!,
           () => skillGlobalState!,
           () => schedulerGlobalState,
           () => rubricGlobalState!,
@@ -1840,15 +1798,6 @@ export async function setupAuthorityRuntime(
         storageMaintenance: options.storageMaintenance,
         clock,
       });
-      const nextMemory = new AnchorMemoryGlobalStateAdapter({
-        log: authorityLog,
-        anchorEpoch: generation.anchorEpoch,
-        scopeRoot: (scope) =>
-          scope.kind === "personal"
-            ? getMemoryDir(options.zhixingHome)
-            : getWorkSceneMemoryDir(scope.sceneId, options.zhixingHome),
-        clock,
-      });
       const nextSkill = new AnchorSkillGlobalStateAdapter({
         log: authorityLog,
         artifacts,
@@ -1865,31 +1814,6 @@ export async function setupAuthorityRuntime(
 
       try {
         await nextWorkscene.initializeStagedPublishing();
-        const memoryScopes: MemoryScopeRef[] = [{ kind: "personal" }];
-        const listed = await nextWorkscene.read(
-          { kind: "workscene-list" },
-          {
-            principal: { kind: "host", component: "installed-generation" },
-            requestId: `installed-generation:${generation.transferId}:workscenes`,
-            deadlineAt: new Date(Date.parse(clock()) + 30_000).toISOString(),
-            authority: {
-              domain: "global",
-              anchorEpoch: generation.anchorEpoch,
-            },
-          },
-        );
-        if (listed.kind !== "workscene-list") {
-          throw new Error(
-            "Installed authority returned another workscene read domain",
-          );
-        }
-        memoryScopes.push(
-          ...listed.scenes.map((scene) => ({
-            kind: "workscene" as const,
-            sceneId: scene.id,
-          })),
-        );
-        await nextMemory.initializeStagedPublishing(memoryScopes);
         await nextSkill.initializeStagedPublishing();
       } catch (error) {
         nextWorkscene.stop();
@@ -1898,7 +1822,6 @@ export async function setupAuthorityRuntime(
 
       const nextGlobalState = createGlobalStateRouter(
         () => nextWorkscene,
-        () => nextMemory,
         () => nextSkill,
         () => undefined,
         () => nextRubric,
@@ -1926,7 +1849,6 @@ export async function setupAuthorityRuntime(
       surfaceAssets = nextSurfaceAssets;
       resourceGovernor = nextResourceGovernor;
       worksceneGlobalState = nextWorkscene;
-      memoryGlobalState = nextMemory;
       skillGlobalState = nextSkill;
       rubricGlobalState = nextRubric;
       schedulerGlobalState = undefined;
@@ -2025,8 +1947,8 @@ export async function setupAuthorityRuntime(
         return rubricGlobalState;
       },
       get globalMutationParticipants() {
-        return worksceneGlobalState && memoryGlobalState && skillGlobalState
-          ? [worksceneGlobalState, memoryGlobalState, skillGlobalState]
+        return worksceneGlobalState && skillGlobalState
+          ? [worksceneGlobalState, skillGlobalState]
           : [];
       },
       installSchedulerGlobalState: (state) => {
@@ -2172,7 +2094,6 @@ interface NormalizedExecutorReadiness {
 
 function createGlobalStateRouter(
   workscene: () => GlobalStatePort,
-  memory: () => GlobalStatePort,
   skills: () => GlobalStatePort,
   scheduler: () => GlobalStatePort | undefined,
   rubrics: () => GlobalStatePort,
@@ -2181,7 +2102,6 @@ function createGlobalStateRouter(
     mutation: Parameters<GlobalStatePort["mutate"]>[0],
   ): GlobalStatePort => {
     if (mutation.kind.startsWith("rubric-")) return rubrics();
-    if (mutation.kind.startsWith("memory-")) return memory();
     if (mutation.kind.startsWith("skill-")) return skills();
     if (!mutation.kind.startsWith("schedule-")) return workscene();
     const owner = scheduler();
@@ -2192,9 +2112,6 @@ function createGlobalStateRouter(
   };
   return {
     read: (query, context) => {
-      if (query.kind.startsWith("memory-")) {
-        return memory().read(query, context);
-      }
       if (query.kind === "asset-index" && query.asset === "rubrics") {
         return rubrics().read(query, context);
       }

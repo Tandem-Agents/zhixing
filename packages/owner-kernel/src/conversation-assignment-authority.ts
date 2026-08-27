@@ -8,7 +8,6 @@ import type {
   PermissionSnapshotLease,
   TrustRuleSnapshot,
 } from "@zhixing/core/contracts";
-import { parseConversationId } from "@zhixing/core";
 import {
   MAX_CONTROL_LEASE_TTL_MS,
   MAX_PERMISSION_LEASE_TTL_MS,
@@ -39,8 +38,6 @@ export interface ConversationAssignmentIssueInput {
   readonly controlContext?: UnsignedConversationEnvelope["work"]["controlContext"];
   readonly environment: EnvironmentRequirement;
   readonly policy: ConversationAssignmentCredentialPolicy;
-  /** Exact memory scopes the anchor resolved for this immutable assignment. */
-  readonly memoryResources?: readonly `memory-domain:${string}`[];
 }
 
 /** Stable issuance port replaced by the governed authority without changing wire contracts. */
@@ -227,10 +224,6 @@ export class ConversationAssignmentAuthority
       methods: [...PRINCIPAL_METHODS.assignment],
       resources: [
         `conversation:${input.conversationId}`,
-        ...new Set([
-          memoryResourceForConversation(input.conversationId),
-          ...(input.memoryResources ?? []),
-        ]),
       ] as AuthorityCapability<"conversation">["resources"],
       assignmentId: input.assignmentId,
       issuedAt,
@@ -286,15 +279,6 @@ export class ConversationAssignmentAuthority
       },
     };
   }
-}
-
-function memoryResourceForConversation(
-  conversationId: string,
-): AuthorityCapability<"conversation">["resources"][number] {
-  const scope = parseConversationId(conversationId).scope;
-  return scope.kind === "workscene"
-    ? `memory-domain:workscene:${scope.sceneId}`
-    : "memory-domain:personal";
 }
 
 function canonicalTime(value: string, label: string): string {

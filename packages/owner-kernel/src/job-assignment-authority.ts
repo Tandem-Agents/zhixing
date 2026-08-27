@@ -168,7 +168,6 @@ export class JobAssignmentAuthority {
       methods: [...PRINCIPAL_METHODS.assignment],
       resources: [
         `task:${occurrence.taskId}`,
-        "memory-domain:personal",
       ] as AuthorityCapability<"job">["resources"],
       assignmentId: input.assignmentId,
       issuedAt,

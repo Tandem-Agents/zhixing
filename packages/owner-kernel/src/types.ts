@@ -148,7 +148,7 @@ export interface SessionRuntime {
   // ─── 会话命令执行体所需的运行体能力(可选——adapter 透传底层运行体) ───
   //
   // 以下成员服务 run 外的会话命令(清空 / 手动压缩 / 切换对话)与 turn 后维护
-  // (自动命名 / journal 凝练)。测试 stub / 不支持的实现可缺省,方法层对
+  // (例如自动命名)。测试 stub / 不支持的实现可缺省,方法层对
   // 缺失能力 fail-fast 报"运行体不支持"。
 
   /**
@@ -167,8 +167,8 @@ export interface SessionRuntime {
    */
   onAttentionWindowChange?(reason: "clear" | "resume" | "compact"): Promise<void>;
   /**
-   * 简易单发 LLM 文本调用(无对话历史)——turn 后维护(自动命名 / journal
-   * 凝练)的推理通道。light 档为辅助任务默认。
+   * 简易单发 LLM 文本调用(无对话历史)——turn 后维护（例如自动命名）的
+   * 推理通道。light 档为辅助任务默认。
    */
   callText?(
     prompt: string,

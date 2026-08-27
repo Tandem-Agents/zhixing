@@ -17,7 +17,6 @@ import {
   AuthorityDeliveryPipeline,
   ChannelRegistry,
   OutboxRegistry,
-  PeopleStore,
   type PermissionRule,
 } from "@zhixing/core";
 import { SurfaceAssetCoordinator } from "@zhixing/core/authority";
@@ -129,42 +128,6 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
     expect(stack.authorityDelivery).toBeDefined();
     expect(stack.outboxRegistry).toBeDefined();
     expect(typeof stack.stop).toBe("function");
-  });
-
-  it("takes over legacy memory from the explicitly configured authority home", async () => {
-    const legacy = new PeopleStore(resolve(home, "me"));
-    await legacy.save(
-      "legacy-person",
-      { name: "Legacy", relation: "friend" },
-      "remembered before authority cutover",
-    );
-
-    const authority = await setupAuthorityRuntime({
-      zhixingHome: home,
-      secretStore: new MemorySecretStore(),
-      executorReadiness: TEST_EXECUTOR_READINESS,
-    });
-    try {
-      const result = await authority.globalState!.read(
-        {
-          kind: "memory-list",
-          scope: { kind: "personal" },
-          domain: "people",
-        },
-        {
-          principal: { kind: "host", component: "setup-memory-cutover-test" },
-          requestId: "setup-memory-cutover-read",
-          deadlineAt: "2099-01-01T00:00:00.000Z",
-          authority: { domain: "global", anchorEpoch: authority.anchorEpoch },
-        },
-      );
-      expect(result).toMatchObject({
-        kind: "memory-list",
-        entries: [{ id: "legacy-person", content: "remembered before authority cutover" }],
-      });
-    } finally {
-      await authority.startupCleanup.run();
-    }
   });
 
   it("freezes an explicit workspace revision and preflights it before local execution", async () => {
@@ -792,6 +755,16 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
 
       const second = generation(2);
       const receipt = await runtime.rebindInstalledAuthority(second);
+      expect(INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS).toEqual([
+        "runtime-epoch",
+        "delivery-authority",
+        "control-admission",
+        "resource-governor",
+        "surface-assets",
+        "workscene-global-state",
+        "skill-global-state",
+        "rubric-global-state",
+      ]);
       expect(receipt).toEqual({
         generation: second,
         participants: INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS,
@@ -806,6 +779,7 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
       expect(runtime.globalMutationParticipants).toHaveLength(
         initial.globalMutationParticipants.length,
       );
+      expect(runtime.globalMutationParticipants).toHaveLength(2);
       for (const [index, participant] of runtime.globalMutationParticipants.entries()) {
         expect(participant).not.toBe(initial.globalMutationParticipants[index]);
       }

@@ -23,8 +23,6 @@ const ERROR_CODES = [
 ] as const satisfies readonly AuthorityError["code"][];
 
 const MUTATION_KINDS = [
-  "memory-append",
-  "memory-delete",
   "schedule-create",
   "schedule-update",
   "schedule-set-state",

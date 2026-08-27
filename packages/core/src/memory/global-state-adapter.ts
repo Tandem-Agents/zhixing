@@ -1,15 +1,9 @@
 import type {
   AuthorityError,
+  Digest,
   GlobalControlCallContext,
-  GlobalControlMutation,
-  GlobalControlMutationResult,
-  GlobalQuery,
   GlobalReadCallContext,
-  GlobalReadResult,
   GlobalStagedCallContext,
-  GlobalStagedMutation,
-  GlobalStagedMutationResult,
-  GlobalStatePort,
   JsonValue,
   LogicalRecord,
 } from "../contracts/index.js";
@@ -22,11 +16,13 @@ import type {
 } from "../authority/index.js";
 import {
   assertPrincipalAllowsAuthorityMethod,
-  AuthorityMethodForbiddenError,
   protocolDigest,
-  validateGlobalQuery,
 } from "../protocol/index.js";
-import type { MemoryLogicalEntry, MemoryScopeRef } from "./contracts.js";
+import type {
+  MemoryAppendPayload,
+  MemoryLogicalEntry,
+  MemoryScopeRef,
+} from "./contracts.js";
 import {
   compareMemoryLogicalEntries,
   memoryLogicalEntryDigest,
@@ -57,15 +53,54 @@ const MEMORY_LEGACY_CUTOVER_STARTED_KEY = "legacy-cutover-started";
 const MEMORY_LEGACY_CUTOVER_KEY = "legacy-cutover";
 const MEMORY_LEGACY_MAPPER_VERSION = 1;
 
-type StagedMemoryMutation = Extract<
-  GlobalStagedMutation,
-  { kind: "memory-append" | "memory-delete" }
->;
+type MemoryDeleteMutation = {
+  kind: "memory-delete";
+  scope: MemoryScopeRef;
+  expectedDigest: Digest;
+} & (
+  | { domain: "memory"; category: "profile"; id: "profile" }
+  | { domain: "people"; category?: never; id: string }
+  | { domain: "journal"; category?: never; id: string }
+);
 
-type MemoryControlMutation = Extract<
-  GlobalControlMutation,
-  { kind: "memory-append" | "memory-delete" | "memory-journal-condense" }
->;
+type MemoryJournalCondenseMutation = {
+  kind: "memory-journal-condense";
+  scope: { kind: "personal" };
+  month: string;
+  targetExpectedDigest?: Digest;
+  sources: Array<{ id: string; expectedDigest: Digest }>;
+  summary: string;
+};
+
+type StagedMemoryMutation =
+  | { kind: "memory-append"; payload: MemoryAppendPayload }
+  | MemoryDeleteMutation;
+
+type MemoryControlMutation = StagedMemoryMutation | MemoryJournalCondenseMutation;
+
+type MemoryQuery =
+  | {
+      kind: "memory-search";
+      scope: MemoryScopeRef;
+      domain: "memory" | "journal" | "people";
+      query: string;
+      limit: number;
+    }
+  | ({ kind: "memory-list"; scope: MemoryScopeRef } & (
+      | { domain: "memory"; category: "profile" }
+      | { domain: "journal" | "people"; category?: never }
+    ))
+  | { kind: "memory-stats"; scope: MemoryScopeRef; domain: "journal" | "people" };
+
+type MemoryReadResult =
+  | { kind: "memory-search"; hits: Array<{ entry: MemoryLogicalEntry; score?: number }> }
+  | { kind: "memory-list"; entries: MemoryLogicalEntry[] }
+  | {
+      kind: "memory-stats";
+      domain: "journal" | "people";
+      count: number;
+      lastWriteAt?: string;
+    };
 
 type MemoryMutationAppliedRecord = {
   readonly t: "memory-mutation-applied";
@@ -137,7 +172,7 @@ export interface AnchorMemoryGlobalStateAdapterOptions {
 }
 
 /** Anchor-owned logical memory authority. */
-export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
+export class AnchorMemoryGlobalStateAdapter {
   readonly #log: AuthorityCommitLog;
   readonly #anchorEpoch: number;
   readonly #scopeRoot: (scope: MemoryScopeRef) => string;
@@ -169,7 +204,7 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     await this.refreshStagedMutations([]);
   }
 
-  ownsStagedMutation(mutation: GlobalStagedMutation): boolean {
+  ownsStagedMutation(mutation: unknown): mutation is StagedMemoryMutation {
     return isStagedMemoryMutation(mutation);
   }
 
@@ -177,7 +212,7 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     readonly records: ReadonlyArray<{
       readonly seq: number;
       readonly requestId: string;
-      readonly mutation: GlobalStagedMutation;
+      readonly mutation: StagedMemoryMutation;
     }>;
     readonly authorityProjection: DurableProjectionReadContext;
     readonly at: string;
@@ -237,7 +272,7 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
 
   async applyStagedMutation(input: {
     readonly requestId: string;
-    readonly mutation: GlobalStagedMutation;
+    readonly mutation: StagedMemoryMutation;
     readonly targetRevision: number;
   }): Promise<void> {
     if (!isStagedMemoryMutation(input.mutation)) {
@@ -248,7 +283,7 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
 
   async refreshStagedMutations(records: ReadonlyArray<{
     readonly requestId: string;
-    readonly mutation: GlobalStagedMutation;
+    readonly mutation: StagedMemoryMutation;
   }>): Promise<void> {
     await this.#log.transactDurableProjection(
       MEMORY_AUTHORITY_PROJECTION_ID,
@@ -261,12 +296,9 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     }
   }
 
-  async read(query: GlobalQuery, context: GlobalReadCallContext): Promise<GlobalReadResult> {
-    const normalizedQuery = validateGlobalQuery(query);
-    if (!isMemoryQuery(normalizedQuery)) {
-      throw new TypeError("This global state adapter only owns the memory domain");
-    }
-    this.#admit(context, "global.read", normalizedQuery.scope);
+  async read(query: MemoryQuery, context: GlobalReadCallContext): Promise<MemoryReadResult> {
+    const normalizedQuery = structuredClone(query);
+    this.#admit(context, "global.read");
     await this.#ensureOpen();
     const entries = await readMemoryEntries(this.#durable);
     const candidates = [...entries.values()].filter((entry) =>
@@ -308,50 +340,20 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
     };
   }
 
-  mutate<M extends GlobalControlMutation>(
+  mutate<M extends MemoryControlMutation>(
     mutation: M,
     context: GlobalControlCallContext,
-  ): Promise<GlobalControlMutationResult<M>>;
-  mutate<M extends GlobalStagedMutation>(
+  ): Promise<{ revision: number }>;
+  mutate<M extends StagedMemoryMutation>(
     mutation: M,
     context: GlobalStagedCallContext,
-  ): Promise<GlobalStagedMutationResult<M>>;
+  ): Promise<{ revision: number }>;
   async mutate(
-    mutation: GlobalControlMutation | GlobalStagedMutation,
+    mutation: MemoryControlMutation,
     context: GlobalControlCallContext | GlobalStagedCallContext,
-  ): Promise<
-    | GlobalControlMutationResult<GlobalControlMutation>
-    | GlobalStagedMutationResult<GlobalStagedMutation>
-  > {
-    if (!isMemoryControlMutation(mutation)) {
-      throw new TypeError("This global state adapter only owns the memory domain");
-    }
-    if (context.principal.kind === "assignment") {
-      throw new AuthorityMethodForbiddenError(
-        "Assignment memory mutations must be staged by the assignment owner",
-      );
-    }
+  ): Promise<{ revision: number }> {
     const memoryMutation = mutation;
-    if (
-      memoryMutation.kind === "memory-journal-condense" &&
-      (context.principal.kind !== "host" ||
-        context.principal.component !== "memory-journal-maintenance")
-    ) {
-      throw new AuthorityMethodForbiddenError(
-        "Journal condensation is owned by anchor memory maintenance",
-      );
-    }
-    if (
-      memoryMutation.kind === "memory-delete" &&
-      memoryMutation.domain === "journal" &&
-      (context.principal.kind !== "host" ||
-        context.principal.component !== "memory-journal-maintenance")
-    ) {
-      throw new AuthorityMethodForbiddenError(
-        "Journal deletion is owned by anchor memory maintenance",
-      );
-    }
-    this.#admit(context, "global.mutate", memoryScopeOf(memoryMutation));
+    this.#admit(context, "global.mutate");
     await this.#ensureOpen();
     const normalized = normalizeControlMutation(memoryMutation);
     const transaction = await this.#log.transactProjection<
@@ -613,29 +615,15 @@ export class AnchorMemoryGlobalStateAdapter implements GlobalStatePort {
   #admit(
     context: GlobalReadCallContext | GlobalControlCallContext | GlobalStagedCallContext,
     method: "global.read" | "global.mutate",
-    scope: MemoryScopeRef,
   ): void {
     assertPrincipalAllowsAuthorityMethod(context.principal.kind, method);
     if (context.authority.domain !== "global" || context.authority.anchorEpoch !== this.#anchorEpoch) {
       throw new TypeError("Global memory authority fence is stale or invalid");
     }
-    if (context.principal.kind === "assignment") {
-      if (!context.principal.capability.resources.includes(memoryResource(scope))) {
-        throw new AuthorityMethodForbiddenError(
-          "Assignment capability does not cover this memory scope",
-        );
-      }
-    }
     if (!context.requestId || Date.parse(context.deadlineAt) < Date.parse(this.#clock())) {
       throw new TypeError("Global memory request identity or deadline is invalid");
     }
   }
-}
-
-function memoryResource(scope: MemoryScopeRef): `memory-domain:${string}` {
-  return scope.kind === "personal"
-    ? "memory-domain:personal"
-    : `memory-domain:workscene:${scope.sceneId}`;
 }
 
 function scopeKey(scope: MemoryScopeRef): string {
@@ -1527,7 +1515,7 @@ function readLegacyBoundary<
 }
 
 function requireStagedMemoryMutation(
-  mutation: GlobalStagedMutation,
+  mutation: unknown,
 ): StagedMemoryMutation {
   if (!isStagedMemoryMutation(mutation)) {
     throw new TypeError("Memory planner received another mutation domain");
@@ -1686,24 +1674,12 @@ function cloneScope(scope: MemoryScopeRef): MemoryScopeRef {
 }
 
 function isStagedMemoryMutation(
-  mutation: GlobalStagedMutation,
+  mutation: unknown,
 ): mutation is StagedMemoryMutation {
-  return mutation.kind === "memory-append" || mutation.kind === "memory-delete";
-}
-
-function isMemoryControlMutation(
-  mutation: GlobalControlMutation | GlobalStagedMutation,
-): mutation is MemoryControlMutation {
-  return mutation.kind === "memory-append" ||
-    mutation.kind === "memory-delete" ||
-    mutation.kind === "memory-journal-condense";
-}
-
-function isMemoryQuery(query: GlobalQuery): query is Extract<
-  GlobalQuery,
-  { kind: "memory-search" | "memory-list" | "memory-stats" }
-> {
-  return query.kind === "memory-search" || query.kind === "memory-list" || query.kind === "memory-stats";
+  return typeof mutation === "object" && mutation !== null &&
+    ("kind" in mutation) &&
+    ((mutation as { kind?: unknown }).kind === "memory-append" ||
+      (mutation as { kind?: unknown }).kind === "memory-delete");
 }
 
 function conflict(code: AuthorityError["code"], message: string) {

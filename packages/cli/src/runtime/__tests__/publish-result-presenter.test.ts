@@ -52,12 +52,9 @@ describe("PublishResultPresenter", () => {
       assignmentId: "assignment-1",
       seq: 2,
       mutation: {
-        kind: "memory-delete",
-        domain: "memory",
-        scope: { kind: "personal" },
-        category: "profile",
-        id: "profile",
-        expectedDigest: `sha256:${"1".repeat(64)}`,
+        kind: "schedule-delete",
+        taskId: "task-1",
+        taskRevision: 3,
       },
       decision: {
         t: "conflicted",
@@ -73,7 +70,7 @@ describe("PublishResultPresenter", () => {
     emit(structuredClone(notice));
 
     expect(lines).toEqual([
-      "这次未能完成“删除记忆”：相关内容已被其他修改更新。查看最新内容后重试，放弃这项修改。",
+      "这次未能完成“删除定时任务”：相关内容已被其他修改更新。查看最新内容后重试，放弃这项修改。",
     ]);
   });
 

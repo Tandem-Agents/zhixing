@@ -226,7 +226,7 @@ export interface ConversationManagerCallbacks {
   confirmationHub?: ConfirmationHub;
   /**
    * turn 持久化成功后的维护钩子——所有入口(RPC / 渠道)的 turn 都经
-   * recordTurn,此处是宿主侧 turn 后维护(自动命名 / journal 凝练等)的
+   * recordTurn,此处是宿主侧 turn 后维护（例如自动命名）的
    * 唯一汇聚点。同步签名 fire-and-forget:实现自行 void 异步工作并兜错,
    * 钩子失败绝不影响已完成的持久化与窗口推进。
    */

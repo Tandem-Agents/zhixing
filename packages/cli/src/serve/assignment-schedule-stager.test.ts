@@ -39,7 +39,7 @@ describe("assignment mutation composition", () => {
     expect(readStagedMutationOverlay).toHaveBeenCalledWith("assignment-1");
   });
 
-  it("rejects session writes for jobs and exact-scope memory violations before ledger append", async () => {
+  it("rejects session writes for jobs and misbound global capabilities before ledger append", async () => {
     const stageMutation = vi.fn();
     const ledger = {
       stageMutation,
@@ -67,9 +67,9 @@ describe("assignment mutation composition", () => {
     ).rejects.toThrow("cannot stage session");
 
     const capability = authorityCapability({
-      assignmentId: "conversation-assignment",
+      assignmentId: "another-assignment",
       execution: "conversation",
-      resources: ["memory-domain:personal"],
+      resources: ["conversation:main"],
     });
     const conversation = createAssignmentMutationPort({
       ledger,
@@ -81,16 +81,14 @@ describe("assignment mutation composition", () => {
     await expect(
       conversation.stage({
         domain: "global",
-        operationId: "memory-write",
+        operationId: "schedule-write",
         mutation: {
-          kind: "memory-delete",
-          scope: { kind: "workscene", sceneId: "scene-a" },
-          domain: "people",
-          id: "person-a",
-          expectedDigest: "a".repeat(64),
+          kind: "schedule-delete",
+          taskId: "task-1",
+          taskRevision: 1,
         },
       }),
-    ).rejects.toThrow("does not cover");
+    ).rejects.toThrow("misbound");
     expect(stageMutation).not.toHaveBeenCalled();
   });
 
@@ -98,7 +96,7 @@ describe("assignment mutation composition", () => {
     const capability = authorityCapability({
       assignmentId: "assignment-1",
       execution: "conversation",
-      resources: ["memory-domain:personal"],
+      resources: ["conversation:main"],
     });
     expect(
       assignmentGlobalCapability({
@@ -133,13 +131,11 @@ describe("assignment mutation composition", () => {
     await expect(
       port.stage({
         domain: "global",
-        operationId: "forbidden-memory-write",
+        operationId: "forbidden-schedule-write",
         mutation: {
-          kind: "memory-delete",
-          scope: { kind: "personal" },
-          domain: "people",
-          id: "person-a",
-          expectedDigest: "a".repeat(64),
+          kind: "schedule-delete",
+          taskId: "task-1",
+          taskRevision: 1,
         },
       }),
     ).rejects.toThrow("unavailable");

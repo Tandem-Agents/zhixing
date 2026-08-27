@@ -305,7 +305,7 @@ export interface AgentRuntime {
   forceCompact: (messages: Message[], turnCount: number) => Promise<ForceCompactResult>;
   /**
    * 简易单发 LLM 文本调用（无对话历史，独立 ChatRequest 隔离）。
-   * 默认 `light` 档——Journal condense 等轻量辅助任务；传 `"main"` 走主档，
+   * 默认 `light` 档用于轻量辅助任务；传 `"main"` 走主档，
    * 用于质量敏感的单发任务（如 MCP 接入的标识 → 连接方式推断）。
    */
   callText: (

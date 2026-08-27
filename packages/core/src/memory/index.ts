@@ -22,11 +22,6 @@ export {
 export type { MemoryCanonicalIdentity } from "./canonical-identity.js";
 export { getMemoryDir } from "./types.js";
 export {
-  AnchorMemoryGlobalStateAdapter,
-  MemoryMutationConflictError,
-} from "./global-state-adapter.js";
-export type { AnchorMemoryGlobalStateAdapterOptions } from "./global-state-adapter.js";
-export {
   compareMemoryLogicalEntries,
   memoryLogicalEntryDigest,
   memoryLogicalEntryKey,

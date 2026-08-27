@@ -174,6 +174,12 @@ describe("authority protocol guards", () => {
     expect(() => validateAuthorityCapability(invalid, identity)).toThrow(
       "forbidden method",
     );
+    const retiredMemoryResource = resignCapability((payload) => {
+      Object.assign(payload, { resources: ["memory-domain:personal"] });
+    });
+    expect(() => validateAuthorityCapability(retiredMemoryResource, identity)).toThrow(
+      "resource selector is invalid",
+    );
   });
 
   it("requires durable activation and rejects active expiry or revocation", () => {

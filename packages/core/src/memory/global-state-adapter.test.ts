@@ -6,7 +6,6 @@ import { FileArtifactStore, FileAuthorityCommitLog } from "../authority/index.js
 import type {
   GlobalControlCallContext,
   GlobalReadCallContext,
-  GlobalStagedMutation,
 } from "../contracts/index.js";
 import { AnchorMemoryGlobalStateAdapter } from "./global-state-adapter.js";
 import { stringifyFrontmatter } from "../frontmatter.js";
@@ -150,7 +149,7 @@ describe("AnchorMemoryGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS
 
   it("plans staged personal memory, verifies the committed request, and returns path-free DTOs", async () => {
     const fixture = await createFixture();
-    const mutation: GlobalStagedMutation = {
+    const mutation = {
       kind: "memory-append",
       payload: {
         domain: "memory",
@@ -160,7 +159,7 @@ describe("AnchorMemoryGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS
         meta: { name: "Alice" },
         content: "Prefers concise answers.",
       },
-    };
+    } as const;
     const plan = await prepareStaged(fixture, {
       records: [{ seq: 1, requestId: "memory-save", mutation }],
     });
@@ -190,7 +189,7 @@ describe("AnchorMemoryGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS
     expect(JSON.stringify(result)).not.toContain(fixture.root);
   });
 
-  it("serializes same-batch update/delete by digest and rejects stale scope capability", async () => {
+  it("serializes same-batch update/delete by digest", async () => {
     const fixture = await createFixture();
     await fixture.adapter.mutate(
       {
@@ -215,7 +214,7 @@ describe("AnchorMemoryGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS
     );
     if (listed.kind !== "memory-list") throw new Error("unexpected result");
     const current = listed.entries[0]!;
-    const update: GlobalStagedMutation = {
+    const update = {
       kind: "memory-append",
       payload: {
         domain: "people",
@@ -225,14 +224,14 @@ describe("AnchorMemoryGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS
         content: "second",
         expectedDigest: current.digest,
       },
-    };
-    const remove: GlobalStagedMutation = {
+    } as const;
+    const remove = {
       kind: "memory-delete",
       scope: { kind: "workscene", sceneId: "scene-a" },
       domain: "people",
       id: "person-a",
       expectedDigest: "0".repeat(64),
-    };
+    } as const;
     const plan = await prepareStaged(fixture, {
       records: [
         { seq: 1, requestId: "update", mutation: update },
@@ -245,31 +244,6 @@ describe("AnchorMemoryGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS
       error: { code: "revision-conflict" },
     });
 
-    await expect(
-      fixture.adapter.read(
-        {
-          kind: "memory-list",
-          scope: { kind: "workscene", sceneId: "scene-a" },
-          domain: "people",
-        },
-        {
-          ...readContext("wrong-capability"),
-          principal: {
-            kind: "assignment",
-            capability: {
-              authorityId: "authority",
-              subject: "assignment",
-              methods: ["global.read"],
-              resources: ["memory-domain:personal"],
-              issuedAt: NOW,
-              expiresAt: "2026-08-04T02:00:00.000Z",
-              nonce: "nonce",
-              signature: { keyId: "key", algorithm: "ed25519", value: "sig" },
-            },
-          },
-        },
-      ),
-    ).rejects.toThrow("does not cover");
   });
 
   it("accepts consecutive same-batch people updates using the shared projected digest", async () => {
@@ -360,7 +334,7 @@ describe("AnchorMemoryGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS
         })).sort((left, right) => left.id.localeCompare(right.id, "en-US")),
         summary: "monthly summary",
       },
-      maintenanceContext("condense:2026-01"),
+      controlContext("condense:2026-01"),
     );
     await expect(
       readEntries(fixture.adapter, { kind: "personal" }, "journal"),
@@ -416,16 +390,10 @@ describe("AnchorMemoryGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS
     };
 
     await expect(
-      fixture.adapter.mutate(mutation, maintenanceContext("stale-condense")),
+      fixture.adapter.mutate(mutation, controlContext("stale-condense")),
     ).rejects.toMatchObject({
       authorityError: { code: "revision-conflict" },
     });
-    await expect(
-      fixture.adapter.mutate(
-        { ...mutation, sources: [{ id: source.id, expectedDigest: source.digest }] },
-        controlContext("wrong-owner"),
-      ),
-    ).rejects.toThrow("owned by anchor memory maintenance");
     await expect(
       fixture.adapter.mutate(
         {
@@ -433,7 +401,7 @@ describe("AnchorMemoryGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS
           month: "2026-02",
           sources: [{ id: "2026-02-31", expectedDigest: source.digest }],
         },
-        maintenanceContext("invalid-calendar-day"),
+        controlContext("invalid-calendar-day"),
       ),
     ).rejects.toThrow("sources are invalid");
     await expect(
@@ -511,12 +479,5 @@ function readContext(requestId: string): GlobalReadCallContext {
 
 function controlContext(requestId: string): GlobalControlCallContext {
   return readContext(requestId) as GlobalControlCallContext;
-}
-
-function maintenanceContext(requestId: string): GlobalControlCallContext {
-  return {
-    ...controlContext(requestId),
-    principal: { kind: "host", component: "memory-journal-maintenance" },
-  };
 }
 

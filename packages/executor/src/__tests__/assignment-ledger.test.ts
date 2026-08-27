@@ -2982,8 +2982,9 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
       requestId: "mutation-1",
       expected: { anchorEpoch: 9 },
       mutation: {
-        kind: "memory-append",
-        payload: { domain: "journal", scope: { kind: "personal" }, content: "Focus one" },
+        kind: "schedule-delete",
+        taskId: "focus-one",
+        taskRevision: 1,
       },
     });
     await harness.ledger.stageMutation(ASSIGNMENT_ID, {
@@ -2991,8 +2992,9 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
       requestId: "mutation-2",
       expected: { anchorEpoch: 9 },
       mutation: {
-        kind: "memory-append",
-        payload: { domain: "journal", scope: { kind: "personal" }, content: "Focus two" },
+        kind: "schedule-delete",
+        taskId: "focus-two",
+        taskRevision: 1,
       },
     });
     const runRecord: TranscriptRunRecord = {
@@ -3063,8 +3065,9 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
         domain: "global",
         requestId: "mutation-1",
         mutation: {
-          kind: "memory-append",
-          payload: { domain: "journal", scope: { kind: "personal" }, content: "Focus one" },
+          kind: "schedule-delete",
+          taskId: "focus-one",
+          taskRevision: 1,
         },
         targetRevision: 101,
       },
@@ -3074,8 +3077,9 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
         domain: "global",
         requestId: "mutation-2",
         mutation: {
-          kind: "memory-append",
-          payload: { domain: "journal", scope: { kind: "personal" }, content: "Focus two" },
+          kind: "schedule-delete",
+          taskId: "focus-two",
+          taskRevision: 1,
         },
         targetRevision: 102,
       },
@@ -3399,8 +3403,9 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
       requestId: "first-partitioned-mutation",
       expected: { anchorEpoch: 9 },
       mutation: {
-        kind: "memory-append",
-        payload: { domain: "journal", scope: { kind: "personal" }, content: "First" },
+        kind: "schedule-delete",
+        taskId: "first-partition",
+        taskRevision: 1,
       },
     });
     const firstBundle = await sealDefaultBundle(first.ledger);
@@ -3489,8 +3494,9 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
       requestId: "second-partitioned-mutation",
       expected: { anchorEpoch: 9 },
       mutation: {
-        kind: "memory-append",
-        payload: { domain: "journal", scope: { kind: "personal" }, content: "Second" },
+        kind: "schedule-delete",
+        taskId: "second-partition",
+        taskRevision: 1,
       },
     });
     const secondBundle = await secondLedger.sealConversationBundle(secondAssignmentId, {
@@ -3816,18 +3822,15 @@ describe("conversation assignment protocol", { timeout: DURABLE_IO_TEST_TIMEOUT_
       owner: harness.journal,
     });
     await adapter.startAndReport(ASSIGNMENT_ID, submissionContext(harness.unsigned));
-    for (const [index, content] of ["one", "two"].entries()) {
+    for (const index of [0, 1]) {
       await harness.ledger.stageMutation(ASSIGNMENT_ID, {
         domain: "global",
         requestId: `mutation-${index + 1}`,
         expected: { anchorEpoch: 9 },
         mutation: {
-          kind: "memory-append",
-          payload: {
-            domain: "journal",
-            scope: { kind: "personal" },
-            content,
-          },
+          kind: "schedule-delete",
+          taskId: `batch-${index + 1}`,
+          taskRevision: 1,
         },
       });
     }

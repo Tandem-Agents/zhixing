@@ -754,7 +754,7 @@ export function assertActivePermissionSnapshotLease(input: {
 
 function validateResourceSelector(value: unknown): asserts value is ResourceSelector {
   assertIdentifier(value, "Authority capability resource");
-  if (!/^(conversation|task|asset|memory-domain):[^*]+$/u.test(value)) {
+  if (!/^(conversation|task|asset):[^*]+$/u.test(value)) {
     throw new TypeError("Authority capability resource selector is invalid");
   }
 }

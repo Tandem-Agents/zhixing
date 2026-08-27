@@ -2002,7 +2002,6 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     "resource-governor",
     "surface-assets",
     "workscene-global-state",
-    "memory-global-state",
     "skill-global-state",
     "rubric-global-state",
   ];
@@ -2025,6 +2024,9 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     ) !== 1 ||
     count(setup, "const rebindInstalledAuthority = async (") !== 1 ||
     count(setup, "installedAuthorityGeneration = Object.freeze(structuredClone(generation));") !== 1 ||
+    setup.includes("AnchorMemoryGlobalStateAdapter") ||
+    setup.includes('"memory-global-state"') ||
+    setup.includes("memory-domain:") ||
     count(
       setup,
       "rebindSurfaceAssetAuthority(surfaceAssets!, nextSurfaceAssetOptions)",

@@ -26,8 +26,6 @@ const ERROR_COPY = {
 } satisfies Record<AuthorityError["code"], ProductErrorCopy>;
 
 const MUTATION_LABEL = {
-  "memory-append": "保存记忆",
-  "memory-delete": "删除记忆",
   "schedule-create": "创建定时任务",
   "schedule-update": "更新定时任务",
   "schedule-set-state": "更新定时任务状态",

@@ -256,8 +256,7 @@ export interface PrincipalMethodMatrix {
 export type ResourceSelector = `${
   | "conversation"
   | "task"
-  | "asset"
-  | "memory-domain"}:${string}`;
+  | "asset"}:${string}`;
 
 export type AuthorityCapability<E extends ExecutionKind = ExecutionKind> =
   WireSchemaV1<"AuthorityCapability"> &

@@ -5,17 +5,6 @@ import type {
   GlobalReadResult,
   TaskDefinition,
 } from "../contracts/state.js";
-import {
-  compareMemoryLogicalEntries,
-  memoryLogicalEntryDigest,
-  memoryLogicalEntryKey,
-  memoryLogicalEntryMatches,
-} from "../memory/logical-entry.js";
-import type {
-  MemoryCategoryDto,
-  MemoryLogicalEntry,
-  MemoryScopeRef,
-} from "../memory/contracts.js";
 import type { SkillCatalogEntry } from "../skills/types.js";
 import type { JsonValue } from "../types/distributed.js";
 import { protocolDigest } from "./canonical.js";
@@ -23,7 +12,6 @@ import { validateWorksceneDto } from "./contract-validation.js";
 import { validateTaskDefinition } from "./job.js";
 import { validateTrustRuleSnapshot } from "./permission-snapshot.js";
 import { assertProtocolIdentifier } from "./validation.js";
-import { canonicalMemoryIdentity } from "../memory/canonical-identity.js";
 
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 const CONFIG_DOMAINS = new Set([
@@ -39,41 +27,6 @@ export function validateGlobalQuery(input: unknown): GlobalQuery {
   const value = plainObject(validateJson(input, "Global query"), "Global query");
   const kind = identifier(value.kind, "Global query kind");
   switch (kind) {
-    case "memory-search":
-      exactKeys(value, ["domain", "kind", "limit", "query", "scope"]);
-      return {
-        kind,
-        scope: memoryScope(value.scope),
-        domain: memoryDomain(value.domain),
-        query: string(value.query, "Memory query text"),
-        limit: positiveInteger(value.limit, "Memory query limit"),
-      };
-    case "memory-list":
-      exactKeys(value, ["domain", "kind", "scope"], ["category"]);
-      {
-        const domain = memoryDomain(value.domain);
-        const category = value.category === undefined
-          ? undefined
-          : memoryCategory(value.category);
-        if (
-          (domain === "memory" && category !== "profile") ||
-          (domain !== "memory" && category !== undefined)
-        ) {
-          throw new TypeError("Memory list category does not match its domain");
-        }
-        const scope = memoryScope(value.scope);
-        return domain === "memory"
-          ? { kind, scope, domain, category: "profile" }
-          : { kind, scope, domain };
-      }
-    case "memory-stats": {
-      exactKeys(value, ["domain", "kind", "scope"]);
-      const domain = value.domain;
-      if (domain !== "journal" && domain !== "people") {
-        throw new TypeError("Memory stats domain is invalid");
-      }
-      return { kind, scope: memoryScope(value.scope), domain };
-    }
     case "trust-rules":
       exactKeys(value, ["kind"], ["scope"]);
       return {
@@ -170,60 +123,6 @@ export function validateGlobalQueryResult(
     throw new TypeError("Global query response kind mismatch");
   }
   switch (query.kind) {
-    case "memory-search": {
-      exactKeys(value, ["hits", "kind"]);
-      const hits = denseArray(value.hits, "Memory search hits").map((input, index) => {
-        const hit = plainObject(input, `Memory search hit ${index}`);
-        exactKeys(hit, ["entry"], ["score"]);
-        const entry = memoryEntry(hit.entry, `Memory search hit ${index}`);
-        if (!memoryLogicalEntryMatches(entry, query)) {
-          throw new TypeError("Memory search hit is not bound to its query");
-        }
-        if (hit.score !== undefined) finiteNumber(hit.score, "Memory search score");
-        return {
-          entry,
-          ...(hit.score === undefined ? {} : { score: hit.score as number }),
-        };
-      });
-      if (hits.length > query.limit) {
-        throw new TypeError("Memory search result exceeds its query limit");
-      }
-      assertUnique(hits.map((hit) => memoryLogicalEntryKey(hit.entry)), "Memory search hits");
-      assertSorted(
-        hits.map((hit) => hit.entry),
-        compareMemoryLogicalEntries,
-        "Memory search hits",
-      );
-      return { kind: query.kind, hits };
-    }
-    case "memory-list": {
-      exactKeys(value, ["entries", "kind"]);
-      const entries = denseArray(value.entries, "Memory list entries").map((input, index) => {
-        const entry = memoryEntry(input, `Memory list entry ${index}`);
-        if (!memoryLogicalEntryMatches(entry, query)) {
-          throw new TypeError("Memory list entry is not bound to its query");
-        }
-        return entry;
-      });
-      assertUnique(entries.map(memoryLogicalEntryKey), "Memory list entries");
-      assertSorted(entries, compareMemoryLogicalEntries, "Memory list entries");
-      return { kind: query.kind, entries };
-    }
-    case "memory-stats": {
-      exactKeys(value, ["count", "domain", "kind"], ["lastWriteAt"]);
-      if (value.domain !== query.domain) {
-        throw new TypeError("Memory stats domain is not bound to its query");
-      }
-      const count = nonNegativeInteger(value.count, "Memory stats count");
-      return {
-        kind: query.kind,
-        domain: query.domain,
-        count,
-        ...(value.lastWriteAt === undefined
-          ? {}
-          : { lastWriteAt: canonicalTime(value.lastWriteAt, "Memory last write time") }),
-      };
-    }
     case "trust-rules": {
       exactKeys(value, ["kind", "snapshot"]);
       const snapshot = validateTrustRuleSnapshot(value.snapshot);
@@ -338,47 +237,6 @@ export function validateGlobalQueryResult(
   }
 }
 
-function memoryEntry(input: unknown, label: string): MemoryLogicalEntry {
-  const value = plainObject(input, label);
-  exactKeys(
-    value,
-    ["content", "digest", "domain", "id", "meta", "revision", "scope"],
-    ["category", "updatedAt"],
-  );
-  const domain = memoryDomain(value.domain);
-  const scope = memoryScope(value.scope);
-  const category = value.category === undefined
-    ? undefined
-    : memoryCategory(value.category);
-  const id = identifier(value.id, `${label} id`);
-  const canonicalIdentity = canonicalMemoryIdentity(
-    { domain, category, id },
-    { allowJournalMonth: true },
-  );
-  const meta = plainObject(value.meta, `${label} metadata`);
-  validateJson(meta, `${label} metadata`);
-  const content = string(value.content, `${label} content`);
-  const revision = positiveInteger(value.revision, `${label} revision`);
-  const digest = assertDigest(value.digest, `${label} digest`);
-  const identity = {
-    ...canonicalIdentity,
-    scope,
-    meta: meta as Record<string, JsonValue>,
-    content,
-  };
-  if (digest !== memoryLogicalEntryDigest(identity)) {
-    throw new TypeError(`${label} digest is invalid`);
-  }
-  return {
-    ...identity,
-    revision,
-    digest,
-    ...(value.updatedAt === undefined
-      ? {}
-      : { updatedAt: canonicalTime(value.updatedAt, `${label} updatedAt`) }),
-  };
-}
-
 function skillEntry(input: unknown): SkillCatalogEntry {
   const value = plainObject(input, "Skill catalog entry");
   exactKeys(value, [
@@ -469,33 +327,6 @@ function assetIndexEntry(input: unknown): AssetIndexEntry {
     revision: positiveInteger(value.revision, "Asset index revision"),
     digest: assertDigest(value.digest, "Asset index digest"),
   };
-}
-
-function memoryScope(input: unknown): MemoryScopeRef {
-  const value = plainObject(input, "Memory scope");
-  if (value.kind === "personal") {
-    exactKeys(value, ["kind"]);
-    return { kind: "personal" };
-  }
-  if (value.kind === "workscene") {
-    exactKeys(value, ["kind", "sceneId"]);
-    return { kind: "workscene", sceneId: identifier(value.sceneId, "Memory scene id") };
-  }
-  throw new TypeError("Memory scope kind is invalid");
-}
-
-function memoryDomain(input: unknown): MemoryLogicalEntry["domain"] {
-  if (input !== "memory" && input !== "journal" && input !== "people") {
-    throw new TypeError("Memory domain is invalid");
-  }
-  return input;
-}
-
-function memoryCategory(input: unknown): MemoryCategoryDto {
-  if (input !== "profile" && input !== "person" && input !== "journal") {
-    throw new TypeError("Memory category is invalid");
-  }
-  return input;
 }
 
 function artifactRef(input: unknown, label: string): { digest: string; bytes: number } {
@@ -604,13 +435,6 @@ function nonNegativeInteger(input: unknown, label: string): number {
     throw new TypeError(`${label} must be a non-negative safe integer`);
   }
   return input as number;
-}
-
-function finiteNumber(input: unknown, label: string): number {
-  if (typeof input !== "number" || !Number.isFinite(input)) {
-    throw new TypeError(`${label} must be finite`);
-  }
-  return input;
 }
 
 function canonicalTime(input: unknown, label: string): string {

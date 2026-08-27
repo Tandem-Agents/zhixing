@@ -38,10 +38,6 @@ const frozenSymbols = new Map([
   ["src/scheduler/types.ts", ["TaskPriorityDto", "TaskScheduleDto"]],
   ["src/scheduler/facade.ts", ["ScheduleTaskSpec"]],
   ["src/channels/types.ts", ["DeliveryTargetDto", "OutboundContentDto"]],
-  [
-    "src/memory/contracts.ts",
-    ["MemoryCategoryDto", "PersonMetaDto", "MemoryAppendPayload"],
-  ],
   ["src/transcript/shard/types.ts", ["TranscriptRunRecord"]],
   ["src/context/window/types.ts", ["WindowCompactInstruction"]],
   [

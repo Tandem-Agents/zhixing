@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   createSignedTrustRuleSnapshot,
+  jobDeliveryPlanDigest,
   protocolDigest,
   type ExecutorCapabilitySnapshot,
   type ProtocolSigner,
@@ -12,6 +13,7 @@ import {
   type ConversationAssignmentIssueInput,
   type ConversationAssignmentCredentialPolicy,
 } from "../conversation-assignment-authority.js";
+import { JobAssignmentAuthority } from "../job-assignment-authority.js";
 
 const signer: ProtocolSigner = {
   sign(schemaId, version, payload): Signature {
@@ -156,6 +158,9 @@ describe("ConversationAssignmentAuthority", () => {
       expect(envelope.permissionLease.expiry).toBe("2026-07-18T00:01:00.000Z");
       expect(envelope.resourceLease.expiry).toBe("2026-07-18T00:01:00.000Z");
       expect(envelope.capabilities[0]?.expiry).toBe("2026-07-18T00:01:00.000Z");
+      expect(envelope.capabilities[0]?.resources).toEqual([
+        "conversation:conversation-1",
+      ]);
     },
   );
 
@@ -220,6 +225,54 @@ describe("ConversationAssignmentAuthority", () => {
       "Conversation assignment credential policy is invalid",
     );
   });
+
+  it("issues a job capability for only the owning task resource", () => {
+    const credentialPolicy = policy(3);
+    const delivery = { kind: "none" as const };
+    const envelope = new JobAssignmentAuthority({
+      signer,
+      verifier,
+      snapshotFor: snapshotFor(3),
+      clock: () => "2026-07-18T00:00:00.000Z",
+    }).issue({
+      assignmentId: "job-assignment-1",
+      executorId: "executor:local",
+      anchorEpoch: 7,
+      attempt: 1,
+      occurrence: {
+        taskId: "task-1",
+        jobRunId: "job-run-1",
+        scheduledFor: "2026-07-18T00:00:00.000Z",
+        taskRevision: 1,
+        deliveryPlan: {
+          delivery,
+          planDigest: jobDeliveryPlanDigest(delivery),
+        },
+        state: "queued",
+      },
+      definition: {
+        taskId: "task-1",
+        taskRevision: 1,
+        state: "enabled",
+        definition: {
+          kind: "user",
+          spec: {
+            name: "Daily review",
+            enabled: true,
+            priority: "normal",
+            schedule: { kind: "interval", everyMs: 60_000 },
+            action: { kind: "agent-turn", prompt: "review" },
+          },
+        },
+      },
+      instruction: { kind: "agent-turn", prompt: "review" },
+      environment: {},
+      resourceLease: jobAssignmentResourceLease(credentialPolicy),
+      policy: credentialPolicy,
+    });
+
+    expect(envelope.capabilities[0]?.resources).toEqual(["task:task-1"]);
+  });
 });
 
 function assignmentResourceLease(input: {
@@ -247,6 +300,40 @@ function assignmentResourceLease(input: {
       maxBudget: { ...input.budget },
     },
     activation: { kind: "assignment" as const, assignmentId: input.assignmentId },
+    issuedAt: "2026-07-18T00:00:00.000Z",
+    expiry: "2026-07-18T00:01:00.000Z",
+  };
+  const withDigest = {
+    ...payload,
+    digest: protocolDigest("ResourceLease", 1, payload),
+  };
+  return {
+    ...withDigest,
+    signature: signer.sign("ResourceLease", 1, withDigest),
+  };
+}
+
+function jobAssignmentResourceLease(
+  credentialPolicy: ConversationAssignmentCredentialPolicy,
+): AssignmentResourceLease<"job"> {
+  const payload = {
+    v: 1 as const,
+    reservationId: "reservation:job-assignment-1",
+    admissionClass: "scheduler" as const,
+    workload: { kind: "job" as const, id: "job-run-1", attempt: 1 },
+    scopeBinding: { kind: "job" as const, taskId: "task-1", anchorEpoch: 7 },
+    audience: { executorId: "executor:local" },
+    budget: { ...credentialPolicy.budget },
+    domain: { kind: "anchor" as const, anchorEpoch: 7 },
+    delegation: {
+      executorId: "executor:local",
+      maxDepth: 1,
+      maxBudget: { ...credentialPolicy.budget },
+    },
+    activation: {
+      kind: "assignment" as const,
+      assignmentId: "job-assignment-1",
+    },
     issuedAt: "2026-07-18T00:00:00.000Z",
     expiry: "2026-07-18T00:01:00.000Z",
   };

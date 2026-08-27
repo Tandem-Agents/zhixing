@@ -13,11 +13,6 @@ import { byteDigest, canonicalize, protocolDigest } from "./canonical.js";
 import { validateJobCommitFence } from "./job.js";
 import { assertProtocolIdentifier as assertIdentifier } from "./validation.js";
 import { validateMessages } from "./values.js";
-import {
-  assertSubstantiveJournalContent,
-  canonicalMemoryIdentity,
-  isCalendarDay,
-} from "../memory/canonical-identity.js";
 
 type StagedMutationRecord = Extract<AssignmentRecord, { t: "staged-mutation" }>;
 type ConversationSealedBundle = SealedBundle & { body: ConversationCommitBundle };
@@ -549,28 +544,6 @@ export function validateGlobalStagedMutation(
   mutation: StagedMutationRecord["mutation"],
 ): void {
   switch (mutation.kind) {
-    case "memory-append":
-      assertExactKeys(mutation, ["kind", "payload"], "Memory staged mutation");
-      validateMemoryAppend(mutation.payload);
-      return;
-    case "memory-delete":
-      assertExactKeys(
-        mutation,
-        ["category", "domain", "expectedDigest", "id", "kind", "scope"],
-        "Memory delete mutation",
-        true,
-      );
-      validateMemoryScope(mutation.scope);
-      canonicalMemoryIdentity(
-        {
-          domain: mutation.domain,
-          category: mutation.category,
-          id: mutation.id,
-        },
-        { allowJournalMonth: false },
-      );
-      assertDigest(mutation.expectedDigest, "Memory delete expected digest");
-      return;
     case "schedule-create":
       assertExactKeys(mutation, ["kind", "spec"], "Schedule create mutation");
       validateScheduleSpec(mutation.spec);
@@ -683,97 +656,6 @@ export function validateGlobalStagedMutation(
     default:
       throw new TypeError("Global staged mutation kind is outside its closed union");
   }
-}
-
-function validateMemoryAppend(payload: unknown): void {
-  assertPlainObject(payload, "Memory append payload");
-  switch (payload.domain) {
-    case "memory":
-      assertExactKeys(
-        payload,
-        ["category", "content", "domain", "expectedDigest", "id", "meta", "scope"],
-        "Memory append payload",
-        true,
-      );
-      validateMemoryScope(payload.scope);
-      if (payload.category !== "profile" || payload.id !== "profile") {
-        throw new TypeError("Profile memory identity is invalid");
-      }
-      canonicalMemoryIdentity({
-        domain: "memory",
-        category: "profile",
-        id: "profile",
-      });
-      assertPlainObject(payload.meta, "Memory entry metadata");
-      assertString(payload.content, "Memory entry content");
-      if (payload.expectedDigest !== undefined) {
-        assertDigest(payload.expectedDigest, "Memory expected digest");
-      }
-      return;
-    case "journal":
-      assertExactKeys(
-        payload,
-        ["content", "date", "domain", "scope"],
-        "Journal append payload",
-        true,
-      );
-      validateMemoryScope(payload.scope);
-      assertString(payload.content, "Journal content");
-      assertSubstantiveJournalContent(payload.content);
-      if (
-        payload.date !== undefined &&
-        (typeof payload.date !== "string" || !isCalendarDay(payload.date))
-      ) {
-        throw new TypeError("Journal date must be a real calendar day");
-      }
-      return;
-    case "people":
-      assertExactKeys(
-        payload,
-        ["content", "domain", "expectedDigest", "id", "meta", "scope"],
-        "People append payload",
-        true,
-      );
-      validateMemoryScope(payload.scope);
-      assertString(payload.id, "Person entry id");
-      canonicalMemoryIdentity({ domain: "people", id: payload.id });
-      assertString(payload.content, "Person entry content");
-      assertPlainObject(payload.meta, "Person metadata");
-      assertExactKeys(
-        payload.meta,
-        ["birthday", "name", "relation", "tags"],
-        "Person metadata",
-        true,
-      );
-      assertString(payload.meta.name, "Person name");
-      assertString(payload.meta.relation, "Person relation");
-      if (payload.meta.birthday !== undefined) {
-        assertString(payload.meta.birthday, "Person birthday");
-      }
-      if (payload.meta.tags !== undefined) {
-        assertStringArray(payload.meta.tags, "Person tags");
-      }
-      if (payload.expectedDigest !== undefined) {
-        assertDigest(payload.expectedDigest, "Person expected digest");
-      }
-      return;
-    default:
-      throw new TypeError("Memory append domain is invalid");
-  }
-}
-
-function validateMemoryScope(scope: unknown): void {
-  assertPlainObject(scope, "Memory scope");
-  if (scope.kind === "personal") {
-    assertExactKeys(scope, ["kind"], "Personal memory scope");
-    return;
-  }
-  if (scope.kind === "workscene") {
-    assertExactKeys(scope, ["kind", "sceneId"], "Workscene memory scope");
-    assertIdentifier(scope.sceneId, "Workscene memory scene id");
-    return;
-  }
-  throw new TypeError("Memory scope is invalid");
 }
 
 function validateScheduleSpec(spec: unknown): void {
