@@ -1023,6 +1023,7 @@ export function inspectManagedHostAssembly(records) {
   const config = byPath.get("packages/cli/src/runtime/config-command.ts");
   const command = byPath.get("packages/cli/src/serve/command.ts");
   const topology = byPath.get("packages/cli/src/serve/topology-command.ts");
+  const applicationHost = byPath.get("packages/cli/src/serve/application-host.ts");
   const connection = byPath.get("packages/cli/src/runtime/core-host-connection.ts");
   const repl = byPath.get("packages/cli/src/repl.ts");
   const surfaceLink = byPath.get("packages/cli/src/runtime/surface-core-host-link.ts");
@@ -1036,7 +1037,7 @@ export function inspectManagedHostAssembly(records) {
   const serverShutdown = byPath.get("packages/server/src/rpc/methods/server.ts");
   if (
     !reconciler || !service || !serviceRuntime || !bootstrap || !pairing || !config ||
-    !command || !topology || !connection || !repl || !surfaceLink || !secrets || !status ||
+    !command || !topology || !applicationHost || !connection || !repl || !surfaceLink || !secrets || !status ||
     !publicStatus || !statusRoute || !scheduler || !manifest || !serverContext || !serverShutdown
   ) return ["managed host production assembly sources are missing"];
   const count = (text, token) => text.split(token).length - 1;
@@ -1117,7 +1118,14 @@ export function inspectManagedHostAssembly(records) {
     !service.includes('"--managed-secret-backend"') ||
     !service.includes("applyManagedServiceLaunchContext(") ||
     !topology.includes("await waitForManagedHostTurn()") ||
-    !topology.includes("await runConfiguredServeTopology(") ||
+    count(topology, "createPersistentApplicationHost({") !== 1 ||
+    count(topology, "await host.run()") !== 1 ||
+    topology.includes("runConfiguredServeTopology(") ||
+    topology.includes("prepareMeshRuntimeBootstrap(") ||
+    topology.includes("runRecoveryRootEstablishmentTopology(") ||
+    topology.includes("acquireExecutorLocalWorkspaceOwner(") ||
+    !applicationHost.includes("export class PersistentApplicationHost<Options>") ||
+    !applicationHost.includes("await this.#dependencies.runRoleTopology(") ||
     !command.includes('processMode !== "managed"')
   ) failures.push("managed host service adapter, preflight or unique composition root drifted");
   if (
@@ -1198,6 +1206,7 @@ export function inspectRecoveryBackupAssembly(records) {
   const bootstrapStore = byPath.get("packages/cli/src/serve/mesh-bootstrap-store.ts");
   const bootstrap = byPath.get("packages/cli/src/serve/mesh-runtime-bootstrap.ts");
   const topology = byPath.get("packages/cli/src/serve/topology-command.ts");
+  const applicationHost = byPath.get("packages/cli/src/serve/application-host.ts");
   const rootEstablishment = byPath.get(
     "packages/cli/src/serve/recovery-root-establishment-runtime.ts",
   );
@@ -1223,7 +1232,7 @@ export function inspectRecoveryBackupAssembly(records) {
   const checkpointOwner = byPath.get("packages/mesh/src/checkpoint-owner.ts");
   const pairedTarget = byPath.get("packages/mesh/src/paired-checkpoint-target.ts");
   if (
-    !command || !owner || !backup || !bootstrapStore || !bootstrap || !topology || !rootEstablishment ||
+    !command || !owner || !backup || !bootstrapStore || !bootstrap || !topology || !applicationHost || !rootEstablishment ||
     !rootActivation || !controlPlane ||
     !runtime || !pairing || !disasterCommand || !disasterCandidate || !disasterEvidence ||
     !disasterInstallation || !disasterTarget || !artifactRetention || !authorityCommitLog ||
@@ -1301,19 +1310,28 @@ export function inspectRecoveryBackupAssembly(records) {
   ) {
     failures.push("paired root establishment must freeze package identity before target connection");
   }
-  const limitedBranch = topology.indexOf("await runRecoveryRootEstablishmentTopology({");
-  const workspaceAdmission = topology.indexOf("await acquireExecutorLocalWorkspaceOwner(");
-  const normalTopology = topology.indexOf("await runConfiguredServeTopology(");
+  const limitedBranch = applicationHost.indexOf("await this.#dependencies.runRecoveryRoot({");
+  const oldBootstrapStop = applicationHost.indexOf("await this.#releaseCurrentMesh();");
+  const residentBootstrap = applicationHost.indexOf(
+    "mesh = await this.#prepareMesh(deviceCapacity);",
+    oldBootstrapStop,
+  );
+  const workspaceAdmission = applicationHost.indexOf(
+    "await this.#dependencies.acquireLocalWorkspaceOwner(",
+  );
+  const normalTopology = applicationHost.indexOf("await this.#dependencies.runRoleTopology(");
   if (
     !bootstrap.includes("!!trust.recoveryRootPublicKey !== !!trust.recoveryBackupPublicKey") ||
     limitedBranch < 0 ||
+    oldBootstrapStop < limitedBranch ||
+    residentBootstrap < oldBootstrapStop ||
     workspaceAdmission < limitedBranch ||
     normalTopology < workspaceAdmission
   ) {
     failures.push("trusted-home root establishment must remain a finite pre-business topology");
   }
   if (
-    count(topology, "mesh = await prepareMeshRuntimeBootstrap({") !== 2 ||
+    count(applicationHost, "await this.#prepareMesh(deviceCapacity)") !== 2 ||
     !rootEstablishment.includes("watchTrust: false") ||
     !backup.includes("watchTrust: false") ||
     !controlPlane.includes("this.options.watchTrust !== false")

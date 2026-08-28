@@ -7,18 +7,10 @@ import {
   runStartupCheck,
   type StartupCheckResult,
 } from "../startup.js";
-import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import {
   DEFAULT_LOCAL_ROLE_CONFIGURATION,
-  runConfiguredServeTopology,
   type ServeRoleConfiguration,
 } from "./role-topology.js";
-import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
-import { runRecoveryRootEstablishmentTopology } from "./recovery-root-establishment-runtime.js";
-import {
-  acquireExecutorLocalWorkspaceOwner,
-  defineLocalWorkspaceAssemblyIdentity,
-} from "../runtime/local-workspace-bootstrap.js";
 import { resolveHostProcessMode } from "./self-exec.js";
 import { reconcileCurrentManagedService } from "./managed-service-runtime.js";
 import {
@@ -27,6 +19,7 @@ import {
 } from "@zhixing/server";
 import { resolveHostLaunchPlan } from "@zhixing/mesh/bootstrap";
 import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
+import { createPersistentApplicationHost } from "./application-host.js";
 
 export {
   DEFAULT_LOCAL_ROLE_CONFIGURATION,
@@ -66,68 +59,17 @@ export async function runServeCommand(
     process.exit(startup.kind === "cancelled" ? 0 : 2);
     return;
   }
-  const deviceCapacity = createDeviceCapacityRuntime(`${zhixingHome}/distributed-runtime/capacity`);
-  let mesh: Awaited<ReturnType<typeof prepareMeshRuntimeBootstrap>> | undefined;
-  let localWorkspaceOwner: Awaited<ReturnType<typeof acquireExecutorLocalWorkspaceOwner>> | undefined;
-  try {
-    mesh = await prepareMeshRuntimeBootstrap({
-      zhixingHome,
-      secretStore,
-      storageMaintenance: deviceCapacity.storage,
-      ...(startup.config.mesh ? { configuration: startup.config.mesh } : {}),
-    });
-    if (
-      mesh.mode === "trusted-home" &&
-      !mesh.trust.recoveryRootPublicKey &&
-      !mesh.trust.recoveryBackupPublicKey
-    ) {
+  const host = createPersistentApplicationHost({
+    zhixingHome,
+    processMode,
+    options,
+    startup,
+    secretStore,
+    onRecoveryRootRequired: () => {
       output.line(chalk.dim("恢复根尚未建立；仅启动已配对设备的恢复副本通道。"));
-      await runRecoveryRootEstablishmentTopology({
-        zhixingHome,
-        mesh,
-        secretStore,
-        storageMaintenance: deviceCapacity.storage,
-      });
-      await mesh.bootstrapStore.stopStorageMaintenance();
-      mesh = await prepareMeshRuntimeBootstrap({
-        zhixingHome,
-        secretStore,
-        storageMaintenance: deviceCapacity.storage,
-        ...(startup.config.mesh ? { configuration: startup.config.mesh } : {}),
-      });
-      if (
-        mesh.mode !== "trusted-home" ||
-        !mesh.trust.recoveryRootPublicKey ||
-        !mesh.trust.recoveryBackupPublicKey
-      ) throw new Error("恢复根激活后未形成可运行的耐久信任状态");
-    }
-    localWorkspaceOwner = await acquireExecutorLocalWorkspaceOwner(
-      zhixingHome,
-      mesh.roles,
-    );
-    await runConfiguredServeTopology(
-      { roles: mesh.roles },
-      {
-        anchorHost: () => import("./anchor-role.js"),
-        executorHost: () => import("./executor-role.js"),
-        executor: () => import("@zhixing/executor"),
-      },
-      options,
-      {
-        mesh,
-        deviceCapacity,
-        secretStore,
-        startup,
-        localWorkspaceIdentity: defineLocalWorkspaceAssemblyIdentity(
-          mesh.roles,
-          localWorkspaceOwner,
-        ),
-      },
-    );
-  } finally {
-    await mesh?.bootstrapStore.stopStorageMaintenance();
-    await localWorkspaceOwner?.release();
-  }
+    },
+  });
+  await host.run();
 }
 
 export async function waitForManagedHostTurn(input: {

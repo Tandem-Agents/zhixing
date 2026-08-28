@@ -40,10 +40,14 @@ if (process.argv.includes("--write")) {
   await writeFile(target, expected, "utf8");
 } else if (process.argv.includes("--check")) {
   const current = await readFile(target, "utf8").catch(() => "");
-  if (current !== expected) {
+  if (normalizeLineEndings(current) !== expected) {
     console.error("Canonical server registry golden is stale; run pnpm s7:registry-golden:write");
     process.exitCode = 1;
   }
 } else {
   throw new Error("Expected --write or --check");
+}
+
+function normalizeLineEndings(text) {
+  return text.replace(/\r\n?/gu, "\n");
 }

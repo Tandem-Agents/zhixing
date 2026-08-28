@@ -878,6 +878,7 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     "packages/cli/src/serve/recovery-root-establishment-runtime.ts",
     "packages/cli/src/serve/recovery-root-activation.ts",
     "packages/cli/src/serve/topology-command.ts",
+    "packages/cli/src/serve/application-host.ts",
     "packages/mesh/src/checkpoint-service.ts",
     "packages/mesh/src/checkpoint-owner.ts",
     "packages/mesh/src/paired-checkpoint-target.ts",
@@ -913,8 +914,8 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
-      "packages/cli/src/serve/topology-command.ts",
-      (text) => text.replace("await runRecoveryRootEstablishmentTopology({", "await runConfiguredServeTopology({"),
+      "packages/cli/src/serve/application-host.ts",
+      (text) => text.replace("await this.#dependencies.runRecoveryRoot({", "await this.#dependencies.runRoleTopology({"),
     )).join("\n"),
     /finite pre-business topology/,
   );
@@ -1671,6 +1672,7 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     "packages/cli/src/runtime/config-command.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/topology-command.ts",
+    "packages/cli/src/serve/application-host.ts",
     "packages/cli/src/runtime/core-host-connection.ts",
     "packages/cli/src/repl.ts",
     "packages/cli/src/runtime/surface-core-host-link.ts",
@@ -1804,8 +1806,8 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
   );
   assert.match(
     inspectManagedHostAssembly(mutate(
-      "packages/cli/src/serve/topology-command.ts",
-      (text) => text.replace("await runConfiguredServeTopology(", "await runSecondServeTopology("),
+      "packages/cli/src/serve/application-host.ts",
+      (text) => text.replace("await this.#dependencies.runRoleTopology(", "await this.#dependencies.runSecondRoleTopology("),
     )).join("\n"),
     /unique composition root drifted/,
   );

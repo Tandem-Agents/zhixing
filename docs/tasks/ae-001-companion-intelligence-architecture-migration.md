@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `b09d9f5eb159372175913ac235167574d5436c62`；已提交 A0-09 最小迁移决策图及协调者依赖纠正 |
+| 已接受基线 | `f5e5f617b9e34df3f3e2bd53e11e9bdd1dd4e375`；A0 已关闭，A1-01 在该基线上形成 `A1-01-persistent-application-host-v1` 工作区差异，等待协调者独立复核 |
 | 当前 A 项 | A1：收束 ApplicationHost 生命周期边界 |
-| 活跃工作包 | 无；A0-10 已形成首批验证映射并关闭 A0，等待协调者独立复核 |
-| 下一责任链 | A1 首条责任链：把持久 Host 外层生命周期收敛为唯一 owner；协调者直接依据 `A0-09` 决策与 `A0-10` 验证映射拆成 2～4 小时工作包，不再增加 A0 前置调查 |
-| 打开的单向桥 | 无；出现后登记桥 ID、唯一事实源/写入口、引入包、退场包和最迟退场 A 项 |
-| 已失效证据 | 无当前未恢复证据；A0-06b3b H02/P10 初次把 `pending/acknowledge` 与新写请求混为 Host-ready 双 gate，H07/H08/P14 又把完整 service ID 简写成裸 hash并把 drift 一概写成拒绝，现已由 A0-06b3b 纠正按 `#handle/#drainLoop` 与 `inspect/install/unregister/maintenance/uninstall` 分段恢复。manager absent 只会让 install 进入 canonical definition 物化分支：文件缺失时创建、字节相同时复用、字节不同时仍 fail closed，不存在覆盖漂移文件的 writer。其余 H01、H03～H06、H09～H10 与既有证据未失效；更早失效项按对应纠正记录继续有效 |
+| 活跃工作包 | A1-01 及 canonical S7 registry-golden 纠正已完成，等待协调者独立复核；A1 阶段仍未完成 |
+| 下一责任链 | 协调者复核 A1-01 后，继续在 A1 内按 `A0-10-initial-verification-map-v1` 拆分持久 Host 的 create/start/open、拒新/排空、并发 stop/close 与内部组件贡献；不得进入 A2 |
+| 打开的单向桥 | `A1-HOST-DELEGATE-01`：唯一 `PersistentApplicationHost` 已拥有外层 bootstrap/lease/terminal 生命周期，但仍以类型化 loader 单向委托既有 Anchor/Executor role root；唯一事实与产品装配仍在既有 root，退场上限为 A1，其后续包不得形成第二 Host 或双 owner |
+| 已失效证据 | 无当前未恢复证据；A1-01 初次把 canonical S7 在临时 LF golden 上通过写成当前 clean Windows 基线通过，协调者以 CRLF checkout 反证后，已由 registry checker 的行尾归一化纠正并在 CRLF 基线上完整重取。A0-06b3b H02/P10、H07/H08/P14 等更早失效项仍按对应纠正记录继续有效 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1262,6 +1262,17 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 失效与恢复：A0-01～A0-09 无证据失效。若 A1/A2 选择、对应生产入口/owner，或本证据列出的测试、S7/contracts/golden输入变化，恢复 `A0-10-initial-verification-map-v1`、A0第五行与A0；详细迁移行为变化只恢复实际受影响的A1/A2工作包，不重开全A0。
 - 遗留问题：无 A0 决策缺口。executor-only stop/trust/idle、Skill materialization/legacy边界及待新增架构门禁均已绑定相应 A1/A2 实施包，不构成 A0 前置；A7 全量同基线门禁与六面对抗未运行且不得提前运行。
 - 下一检查点：协调者复核后把 A1 首条责任链“持久 Host 外层生命周期唯一 owner”按单一生命周期结果和独立验证闭包拆成 2～4 小时工作包；责任链只迁移 home/config/secret/role/topology冻结、recovery-root串行前置、role-root委托、stop/terminal等待与outer lease/cleanup，内部组件与产品语义先原样委托，不开始A2。
+
+### A1-01：建立持久 ApplicationHost 的第一个真实生产闭环
+
+- 基线与差异：`HEAD f5e5f617b9e34df3f3e2bd53e11e9bdd1dd4e375 + A1-01-persistent-application-host-v1`；进场索引与工作区为空。本包新增 `packages/cli/src/serve/application-host.ts` 及其直接测试，修改 `topology-command.ts` 与直接测试，并因生产扫描输入迁移而同步 S7 coverage 实现/变异测试；协调纠正又最窄修改 `scripts/s7-registry-golden.mjs` 的跨平台精确比较。本文是唯一文档变化，未执行任何 Git 写操作。
+- 责任迁移：三种 process mode（foreground/on-demand/managed）继续只在 `topology-command.ts` 完成模式选择、managed preflight、startup/SecretStore 就绪和 Host 创建，随后全部进入同一个 `PersistentApplicationHost`。该 Host 冻结 home/process mode 与本次 startup/options/secret 引用，唯一创建 device capacity、prepare Mesh、取得本机 workspace lease、形成冻结 role configuration/bootstrap、单次委托既有 role root，并统一负责最外层释放；`topology-command.ts` 已删除 Mesh、recovery-root、workspace lease、role loader 和 `finally` 平行 owner。
+- 串行与失败终态：trusted-home 缺恢复根时，Host 先运行有限 recovery-root topology，完整停止第一份 Mesh bootstrap maintenance，才 prepare 第二份常驻 bootstrap；只有第二份同时具备 recovery root/backup key 才允许取得 workspace lease 并委托 role root。正常返回、recovery-root 失败、第二次 prepare 失败、role root 失败都汇入同一 terminal path；已取得的当前 Mesh maintenance 与 lease 各自至多释放一次，cleanup 的一项失败不阻断另一项尝试，主失败与 cleanup 失败同时存在时以 `AggregateError` 保留全部事实。
+- 行为保护：`runConfiguredServeTopology`、Anchor/Executor role root、Server/owner/Mesh/Runtime 产品装配及内部 start/open/stop 顺序均未改变，只成为 Host 的不透明既有组件。参数化直接测试覆盖 foreground/on-demand/managed × anchor+executor/anchor-only/executor-only 九种组合均使用同一 Host class，另覆盖恢复根无双图、role root 单次委托、成功/恢复失败/第二 bootstrap 失败/role 失败/重复 run 的精确一次释放；旧 topology owner 的负向源码断言和 S7 mutation 会识别平行 owner 回流。
+- 实际验证：首次从根运行 `pnpm exec vitest ...` 因根包不提供 vitest binary 而在收集前失败，按验证手册改用 package-filter 入口；五个指定文件最终为 44/44（Host 15、topology-command 6、其余三文件 23），且协调者已在当前未修改 CLI 输入上独立复核，纠正轮没有重复运行。`pnpm --filter @zhixing/cli exec tsc --noEmit` 首次发现 production factory 的无约束 generic 与 `ServeOptions` 不相容，收窄 factory 输入后复跑通过；变更文件最窄 Biome check 通过；`pnpm cli:build` 通过。S7 扫描输入确已改变，因此把 managed/recovery 结构门禁迁到真实 Host。
+- S7 协调纠正：初次记录把 canonical S7 在 `s7:registry-golden:write` 临时写出的 LF 文件上通过误记为 clean Windows 工作区事实；协调者在 CRLF checkout 上复现 registry stale，故该结论一度失效。纠正轮先运行 `pnpm s7:registry-golden` 复现，再经 canonical `pnpm s7:registry-golden:write` 生成并人工对账：golden 的 clean-filter object 与 HEAD 都是 `071f21b073918fee3766618cb98bd909049493a2`，`git diff` 为空，说明 ApplicationHost/S7 inspector 迁移没有改变 canonical registry JSON；唯一差异是 `i/lf + w/crlf`，旧 checker 以 raw string 比较造成假失败。`scripts/s7-registry-golden.mjs` 现只把 CRLF/CR 归一为 LF 后继续执行完整 exact compare，不放宽 JSON、角色、方法或 entry coverage。恢复真实 CRLF checkout 后重新运行一次 canonical `pnpm s7:lint`，coverage/mutation 21/21 与 registry golden 全部通过；golden 文件无内容差异，CLI 源码未再变化，故 44 项直接测试与 CLI build 证据继续有效。
+- 当前边界：本包没有统一 HostStop、replace、idle、拒新/排空或 role root 内部 lifecycle，没有迁移 Server/Owner/Mesh/Runtime 产品装配，也没有建立 component descriptor 框架。`A1-HOST-DELEGATE-01` 是唯一打开的单向委托；A1 与全部最终退出门保持 `[ ]`。
+- 下一检查点：协调者独立复核后，只在 A1 内选择下一条能独立闭合的持久 Host 生命周期责任（优先 create/start/open 或 stop/drain/close 中能保持既有产品次序的一条），即时补齐真实 component/rollback/cleanup 证据；不得因本包已有 Host class 而提前进入 A2。
 
 ## 十、用户提示词
 
