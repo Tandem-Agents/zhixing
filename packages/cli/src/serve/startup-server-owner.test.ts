@@ -14,7 +14,7 @@ describe("production startup server ownership", () => {
       .toBe(false);
   });
 
-  it("binds the anchor endpoint before pre-server owners and reuses that handle", async () => {
+  it("keeps the anchor endpoint inactive until every open prerequisite has one cleanup owner", async () => {
     const source = await readSource("command.ts");
     const bind = location(source, "const serverBinding = await bindServer");
     expect(bind).toBeLessThan(location(source, "await setupAssemblyUnits(assemblyUnits, ctx, \"pre-server\")"));
@@ -24,6 +24,22 @@ describe("production startup server ownership", () => {
     expect(activation).toContain("config: { ...DEFAULT_SERVER_CONFIG, port, host }");
     expect(activation).toContain("startTime: processStartTime");
     expect(activation).toContain("startedAt: processStartedAt");
+    const gate = location(activation, "beforeActivate: async (openingRunner) =>");
+    const delivery = location(activation, "ctx.deliveryStack?.activate()");
+    const scheduler = location(activation, "schedulerRuntime?.activate()");
+    const cleanupOwner = location(activation, "registerCoreCleanup(registry, {");
+    const contribution = location(
+      activation,
+      'await setupAssemblyUnits(assemblyUnits, ctx, "post-server")',
+    );
+    const cleanupCommit = location(activation, "startupRollback.commit()");
+    const publish = location(activation, "publishReady: async (openingRunner) =>");
+    const ready = location(activation, "await stateFile.markReady({");
+    for (const prerequisite of [delivery, scheduler, cleanupOwner, contribution, cleanupCommit]) {
+      expect(prerequisite).toBeGreaterThan(gate);
+      expect(prerequisite).toBeLessThan(publish);
+    }
+    expect(ready).toBeGreaterThan(publish);
     expect(location(source, "await runner.waitForShutdown()"))
       .toBeGreaterThan(location(source, "runner = await runServer"));
   });

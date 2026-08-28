@@ -68,6 +68,11 @@ export interface StartServerOptions {
   schedulerEventBus?: IEventBus<SchedulerEventMap>;
   /** 已在最终端点取得 OS owner、但尚未开放业务入口的 server handle。 */
   boundServer?: BoundZhixingServer;
+  /**
+   * 已建立内部 handler/connection 设施、但同一 bound handle 仍只返回 503 时执行。
+   * resolve 后才会一次性开放 REST/RPC/WS；reject 时关闭该 inactive handle。
+   */
+  activationGate?: (server: ZhixingServerInstance) => Promise<void>;
 }
 
 export interface BindServerOptions {
@@ -344,16 +349,7 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
     await closeHttpServer(httpServer);
   };
 
-  try {
-    boundServer.activate({ config, requestHandler, upgradeHandler, cleanup: cleanupActive });
-  } catch (error) {
-    disposeBridge();
-    wss.close();
-    await boundServer.close().catch(() => {});
-    throw error;
-  }
-
-  return {
+  const server: ZhixingServerInstance = {
     port: boundServer.port,
     host: boundServer.host,
     httpServer,
@@ -364,6 +360,18 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
       await boundServer.close();
     },
   };
+
+  try {
+    await opts.activationGate?.(server);
+    boundServer.activate({ config, requestHandler, upgradeHandler, cleanup: cleanupActive });
+  } catch (error) {
+    disposeBridge();
+    wss.close();
+    await boundServer.close().catch(() => {});
+    throw error;
+  }
+
+  return server;
 }
 
 async function closeHttpServer(httpServer: HttpServer): Promise<void> {

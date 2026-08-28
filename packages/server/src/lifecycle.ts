@@ -49,9 +49,16 @@ import {
 } from "./process-lock.js";
 import { CleanupRegistry, registerCleanup } from "./cleanup-registry.js";
 
-export interface RunServerOptions extends StartServerOptions {
+export interface RunServerOptions extends Omit<StartServerOptions, "activationGate"> {
+  /**
+   * Server 内部设施已准备、正常关闭入口已绑定，但 REST/RPC/WS 仍为 inactive 503 时执行。
+   * 仅 Anchor 组合根使用；resolve 后同一个 bound handle 才会激活。
+   */
+  beforeActivate?: (runner: RunningServer) => Promise<void>;
   /** Server 已激活但尚未发布 PID/ready 时执行的候选健康门。 */
   beforePublish?: (server: ZhixingServerInstance) => Promise<void>;
+  /** PID/port 已发布后写入 Host state/ready；失败仍走同一 shutdown registry。 */
+  publishReady?: (runner: RunningServer) => Promise<void>;
   /** Scheduler 实例（已 start）。独立模式会在 registry 中注册 scheduler.stop */
   scheduler?: SchedulerBackend;
   /** 进程锁文件路径覆盖 */
@@ -95,46 +102,8 @@ export interface RunningServer {
 export async function runServer(opts: RunServerOptions): Promise<RunningServer> {
   const logger = opts.logger ?? defaultLogger();
 
-  // 1. 启动 server（端口锁内置在 listen() 里）
-  const server = await startServer({
-    context: opts.context,
-    ...(opts.boundServer ? { boundServer: opts.boundServer } : {}),
-    config: opts.config,
-    registry: opts.registry,
-    wsPath: opts.wsPath,
-    onError: opts.onError,
-    schedulerEventBus: opts.schedulerEventBus,
-  });
-
-  if (opts.beforePublish) {
-    try {
-      await opts.beforePublish(server);
-    } catch (error) {
-      await server.close();
-      throw error;
-    }
-  }
-
-  // 2. 写 PID / port 发现文件 —— owner 已由上面的 listen 确立（端口才是单例锁），
-  //    acquireLock 覆盖任何崩溃残留、不因 PID 冲突自杀（见 process-lock.ts）。
-  if (!opts.skipProcessLock) {
-    try {
-      await acquireLock(server.port, {
-        ...opts.lockPaths,
-        ...opts.processInfo,
-        host: opts.processInfo?.host ?? server.host,
-      });
-    } catch (err) {
-      // 仅 PID 文件写入 IO 失败（磁盘满 / 权限）才会到这里——此时 server 已 listen 但
-      // cleanup 尚未注册，手动关掉防端口泄漏再传播（fail-fast：发现文件写不了，宿主无法被接入）。
-      await server.close();
-      throw err;
-    }
-  }
-
-  logger.info(`Server listening on http://${server.host}:${server.port}`);
-
-  // 3. Cleanup registry：外部注入 or 内部默认
+  // 1. Cleanup registry：在公开入口激活之前成立，令 staging/open/publication
+  //    任一失败都由同一 owner 逆序补偿。
   const injected = !!opts.cleanupRegistry;
   const registry =
     opts.cleanupRegistry ??
@@ -145,36 +114,8 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
       },
     });
 
-  // 4. 注册 server-internal cleanup
-  //    LIFO 语义：后注册者先执行 = 注册顺序是期望执行顺序的倒序。
-  if (!injected) {
-    // 独立模式：保持 M3 之前的 shutdown 顺序（scheduler.stop → server.close → releaseLock）
-    // 注册顺序（倒序）：releaseLock → server.close → scheduler.stop
-    if (!opts.skipProcessLock) {
-      registerCleanup(registry, { owner: "standalone-server", role: "server", id: "releaseLock" }, async () => {
-        await releaseLock(opts.lockPaths);
-      });
-    }
-  }
-  // 两种模式执行同一动作，但 owner 必须反映实际 registry 所属宿主。
-  if (injected) {
-    registerCleanup(registry, { owner: "anchor-host", role: "server", id: "server.close" }, async () => {
-      await server.close();
-    });
-  } else {
-    registerCleanup(registry, { owner: "standalone-server", role: "server", id: "server.close" }, async () => {
-      await server.close();
-    });
-  }
-  if (!injected) {
-    if (opts.scheduler) {
-      registerCleanup(registry, { owner: "standalone-server", role: "server", id: "scheduler.stop" }, async () => {
-        await opts.scheduler!.stop();
-      });
-    }
-  }
-
-  // 5. shutdown 编排
+  // 2. shutdown 编排。prepared server 进入 activation gate 时即绑定；公开入口
+  //    尚未开放也能由同一 registry 安全终止。
   let shuttingDown = false;
   let shutdownPromise: Promise<void> | null = null;
   const shutdownDoneWaiters: Array<() => void> = [];
@@ -191,11 +132,102 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
     return shutdownPromise;
   };
 
-  // 5a. 绑定 ctx.requestShutdown —— 供 server.shutdown RPC handler 使用
-  //     startServer 已 resolve，同一微任务内绑定，不存在 race（RPC handler 在下一 tick 才能执行）
-  opts.context.requestShutdown = (reason: string) => {
-    void shutdown(reason);
+  let runner: RunningServer | undefined;
+  let processLockAcquired = false;
+  const assertStartupActive = async (): Promise<void> => {
+    if (!shuttingDown) return;
+    await shutdownPromise;
+    throw new Error("Server stopped before startup publication completed");
   };
+
+  try {
+    // 3. startServer 先准备 handler/connection/context，但 activationGate resolve 前
+    //    同一最终 endpoint 仍只返回 inactive 503。
+    const server = await startServer({
+      context: opts.context,
+      ...(opts.boundServer ? { boundServer: opts.boundServer } : {}),
+      config: opts.config,
+      registry: opts.registry,
+      wsPath: opts.wsPath,
+      onError: opts.onError,
+      schedulerEventBus: opts.schedulerEventBus,
+      activationGate: async (preparedServer) => {
+        if (!injected && !opts.skipProcessLock) {
+          registerCleanup(
+            registry,
+            { owner: "standalone-server", role: "server", id: "releaseLock" },
+            async () => {
+              if (processLockAcquired) await releaseLock(opts.lockPaths);
+            },
+          );
+        }
+        if (injected) {
+          registerCleanup(
+            registry,
+            { owner: "anchor-host", role: "server", id: "server.close" },
+            async () => preparedServer.close(),
+          );
+        } else {
+          registerCleanup(
+            registry,
+            { owner: "standalone-server", role: "server", id: "server.close" },
+            async () => preparedServer.close(),
+          );
+        }
+        if (!injected && opts.scheduler) {
+          registerCleanup(
+            registry,
+            { owner: "standalone-server", role: "server", id: "scheduler.stop" },
+            async () => opts.scheduler!.stop(),
+          );
+        }
+
+        runner = {
+          server: preparedServer,
+          shutdown,
+          waitForShutdown(): Promise<void> {
+            if (shuttingDown && shutdownPromise) return shutdownPromise;
+            return new Promise<void>((resolve) => {
+              shutdownDoneWaiters.push(resolve);
+            });
+          },
+        };
+        opts.context.requestShutdown = (reason: string) => {
+          void shutdown(reason);
+        };
+        await opts.beforeActivate?.(runner);
+      },
+    });
+
+    if (!runner) {
+      throw new Error("Server activation completed without lifecycle ownership");
+    }
+
+    // 4. 可选候选健康门在激活后、任何发现/ready 发布前运行。
+    await opts.beforePublish?.(server);
+    await assertStartupActive();
+
+    // 5. 写 PID / port 发现文件。若失败，同一 registry 会关闭已激活入口并补偿。
+    if (!opts.skipProcessLock) {
+      await acquireLock(server.port, {
+        ...opts.lockPaths,
+        ...opts.processInfo,
+        host: opts.processInfo?.host ?? server.host,
+      });
+      processLockAcquired = true;
+    }
+
+    await assertStartupActive();
+    await opts.publishReady?.(runner);
+    await assertStartupActive();
+    logger.info(`Server listening on http://${server.host}:${server.port}`);
+  } catch (error) {
+    await shutdown("startup-error").catch(() => {});
+    throw error;
+  }
+
+  // 6. start/open/publication 全部成立后才安装进程信号入口。
+  const activeRunner = runner;
 
   const prepareSignalShutdown = async (reason: string): Promise<void> => {
     const lifecycle = opts.context.lifecycleShutdown;
@@ -210,7 +242,7 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
     await shutdown(reason);
   };
 
-  // 6. 信号处理器
+  // 7. 信号处理器
   if (!opts.skipSignalHandlers) {
     let sigintCount = 0;
     const onSigterm = () => {
@@ -245,16 +277,7 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
     }
   }
 
-  return {
-    server,
-    shutdown,
-    waitForShutdown(): Promise<void> {
-      if (shuttingDown && shutdownPromise) return shutdownPromise;
-      return new Promise<void>((resolve) => {
-        shutdownDoneWaiters.push(resolve);
-      });
-    },
-  };
+  return activeRunner;
 }
 
 // ─── 工具 ───

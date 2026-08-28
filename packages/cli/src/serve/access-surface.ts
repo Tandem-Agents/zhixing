@@ -8,12 +8,12 @@
  * 不改（杜绝"每加一面改主干"的声明面领先生效面复发）。
  *
  * 真实装配拓扑有交织（核心 Scheduler 构造期吃 delivery 接入面、confirmationBridge 依赖
- * runServer 之后的 connections），故接入面带 phase：
+ * Server 内部设施准备后的 connections），故接入面带 phase：
  * - pre-server：runServer 之前装（MCP / 会话执行面 / channel 门面 / delivery / 文本确认渲染器）。
- * - post-server：runServer 之后装（confirmationBridge，依赖 server.connections）。
+ * - post-server：同一 bound handle 激活前装（confirmationBridge，依赖 prepared connections）。
  * 核心 Scheduler 排在 pre-server 接入面之后构造（读 ctx.deliveryStack）。
  *
- * pre-server 资源取得后立即进入启动回滚事务；runServer 成功后再把同一幂等清理 handle
+ * pre-server 资源取得后立即进入启动回滚事务；公开入口激活前把同一幂等清理 handle
  * 按既有 LIFO 时序登记到正常停机链。启动补偿与正常停机各自决定顺序，但不会双重释放。
  */
 
@@ -96,7 +96,7 @@ import type { LocalConversationOwnerAssembly } from "./local-conversation-owner.
 import type { DeliveryLifecycleRestoration } from "@zhixing/core";
 import type { MeshConnectionProjectionPort } from "@zhixing/mesh/bootstrap";
 
-/** 接入面装配阶段 —— 适配真实交织（confirmationBridge 依赖 runServer 后的 connections）。 */
+/** 接入面装配阶段 —— 适配真实交织（confirmationBridge 依赖 prepared connections）。 */
 export type SurfacePhase = "pre-server" | "post-server";
 
 export interface AssemblyStartupCleanups {

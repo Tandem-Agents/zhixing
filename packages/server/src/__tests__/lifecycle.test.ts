@@ -102,6 +102,7 @@ describe("runServer lifecycle (S2.F)", () => {
     });
     const bound = await bindServer({ config: ctx.config });
     const httpServer = bound.httpServer;
+    const order: string[] = [];
     expect(await readLock({ pidPath, portPath })).toBeNull();
     expect((await fetch(`http://127.0.0.1:${bound.port}/api/health`)).status).toBe(503);
 
@@ -112,11 +113,165 @@ describe("runServer lifecycle (S2.F)", () => {
       lockPaths: { pidPath, portPath },
       skipSignalHandlers: true,
       logger: { info() {}, warn() {}, error() {} },
+      beforeActivate: async (openingRunner) => {
+        order.push("prerequisites");
+        expect(openingRunner.server.httpServer).toBe(httpServer);
+        expect((await fetch(`http://127.0.0.1:${bound.port}/api/health`)).status).toBe(503);
+        expect(await readLock({ pidPath, portPath })).toBeNull();
+      },
+      beforePublish: async () => {
+        order.push("activated");
+        expect((await fetch(`http://127.0.0.1:${bound.port}/api/health`)).status).toBe(200);
+        expect(await readLock({ pidPath, portPath })).toBeNull();
+      },
+      publishReady: async () => {
+        order.push("published");
+        expect((await readLock({ pidPath, portPath }))?.port).toBe(bound.port);
+      },
     });
 
+    expect(order).toEqual(["prerequisites", "activated", "published"]);
     expect(runner.server.httpServer).toBe(httpServer);
     expect((await fetch(`http://127.0.0.1:${bound.port}/api/health`)).status).toBe(200);
     expect((await readLock({ pidPath, portPath }))?.port).toBe(bound.port);
+  });
+
+  it("compensates an activation prerequisite failure exactly once without publishing discovery", async () => {
+    const ctx = createServerContext({
+      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
+      version: "0.1.0-test",
+      token: TEST_TOKEN,
+      scheduler,
+    });
+    const bound = await bindServer({ config: ctx.config });
+    const registry = new CleanupRegistry({ logger: { error: () => {} } });
+    let contributionCleanup = 0;
+
+    await expect(runServer({
+      context: ctx,
+      boundServer: bound,
+      scheduler,
+      lockPaths: { pidPath, portPath },
+      skipSignalHandlers: true,
+      cleanupRegistry: registry,
+      beforeActivate: async () => {
+        registry.register("post-server.dispose", () => {
+          contributionCleanup += 1;
+        });
+        throw new Error("post-server contribution failed");
+      },
+      logger: { info() {}, warn() {}, error() {} },
+    })).rejects.toThrow("post-server contribution failed");
+
+    expect(contributionCleanup).toBe(1);
+    expect(registry.finished).toBe(true);
+    expect(bound.httpServer.listening).toBe(false);
+    expect(await readLock({ pidPath, portPath })).toBeNull();
+  });
+
+  it("uses the same compensation chain when activation itself fails", async () => {
+    const ctx = createServerContext({
+      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
+      version: "0.1.0-test",
+      token: TEST_TOKEN,
+      scheduler,
+    });
+    const bound = await bindServer({ config: ctx.config });
+    const registry = new CleanupRegistry({ logger: { error: () => {} } });
+    let cleanupCount = 0;
+    registry.register("acquired-resource", () => {
+      cleanupCount += 1;
+    });
+
+    await expect(runServer({
+      context: ctx,
+      boundServer: bound,
+      scheduler,
+      lockPaths: { pidPath, portPath },
+      skipSignalHandlers: true,
+      cleanupRegistry: registry,
+      beforeActivate: async (openingRunner) => {
+        await openingRunner.server.close();
+      },
+      logger: { info() {}, warn() {}, error() {} },
+    })).rejects.toThrow("Cannot activate a closed server binding");
+
+    expect(cleanupCount).toBe(1);
+    expect(registry.finished).toBe(true);
+    expect(await readLock({ pidPath, portPath })).toBeNull();
+  });
+
+  it("removes the process lock and closes the endpoint when ready publication fails", async () => {
+    const ctx = createServerContext({
+      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
+      version: "0.1.0-test",
+      token: TEST_TOKEN,
+      scheduler,
+    });
+    const bound = await bindServer({ config: ctx.config });
+    const registry = new CleanupRegistry({ logger: { error: () => {} } });
+    let cleanupCount = 0;
+    registry.register("releaseLock", async () => {
+      await releaseLock({ pidPath, portPath });
+    });
+    registry.register("acquired-resource", () => {
+      cleanupCount += 1;
+    });
+
+    await expect(runServer({
+      context: ctx,
+      boundServer: bound,
+      scheduler,
+      lockPaths: { pidPath, portPath },
+      skipSignalHandlers: true,
+      cleanupRegistry: registry,
+      publishReady: async () => {
+        expect((await readLock({ pidPath, portPath }))?.port).toBe(bound.port);
+        throw new Error("ready publication failed");
+      },
+      logger: { info() {}, warn() {}, error() {} },
+    })).rejects.toThrow("ready publication failed");
+
+    expect(cleanupCount).toBe(1);
+    expect(registry.finished).toBe(true);
+    expect(bound.httpServer.listening).toBe(false);
+    expect(await readLock({ pidPath, portPath })).toBeNull();
+  });
+
+  it("does not publish discovery when shutdown wins during the activated health gate", async () => {
+    const ctx = createServerContext({
+      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
+      version: "0.1.0-test",
+      token: TEST_TOKEN,
+      scheduler,
+    });
+    const bound = await bindServer({ config: ctx.config });
+    const registry = new CleanupRegistry({ logger: { error: () => {} } });
+    let readyPublished = false;
+    registry.register("releaseLock", async () => {
+      await releaseLock({ pidPath, portPath });
+    });
+
+    await expect(runServer({
+      context: ctx,
+      boundServer: bound,
+      scheduler,
+      lockPaths: { pidPath, portPath },
+      skipSignalHandlers: true,
+      cleanupRegistry: registry,
+      beforePublish: async () => {
+        ctx.requestShutdown!("startup-race");
+      },
+      publishReady: async () => {
+        readyPublished = true;
+      },
+      logger: { info() {}, warn() {}, error() {} },
+    })).rejects.toThrow("Server stopped before startup publication completed");
+
+    expect(readyPublished).toBe(false);
+    expect(registry.finished).toBe(true);
+    expect(bound.httpServer.listening).toBe(false);
+    expect(await readLock({ pidPath, portPath })).toBeNull();
   });
 
   it("writes process metadata to the PID discovery file", async () => {

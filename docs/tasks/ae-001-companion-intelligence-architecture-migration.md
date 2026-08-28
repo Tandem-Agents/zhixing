@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `3d07c58b99f27c01f97d2c13d49c44703bd55ef6`；A1-01、A1-02 已由协调者独立复核并提交 |
+| 已接受基线 | `5cf0a8eee0f57684444de60a224aa1e7b0f1349f`；A1-01～A1-03 已由协调者独立复核并提交 |
 | 当前 A 项 | A1：收束 ApplicationHost 生命周期边界 |
-| 活跃工作包 | A1-03：闭合 Anchor 内部停止触发的唯一耐久终止入口；实现与最窄验证已完成，等待协调者独立复核 |
-| 下一责任链 | 协调者先复核 `A1-03-anchor-internal-stop-v1` 的三来源汇流、同 identity 重驱、旧裸旁路归零与真实 Server terminal；接受后只在 A1 内选择下一条未闭合 Host 生命周期责任，不进入 A2 |
+| 活跃工作包 | A1-04：闭合 Anchor 的 entry-last 开放边界；实现与最窄验证已完成，等待协调者独立复核 |
+| 下一责任链 | 协调者先复核 `A1-04-anchor-entry-last-v1` 的同端口 inactive gate、Anchor 必要前置与 cleanup 接管、激活后 PID/state/ready 发布及三类失败补偿；接受后只在 A1 内选择下一条未闭合 Host 生命周期责任，不进入 A2 |
 | 打开的单向桥 | `A1-HOST-DELEGATE-01`：唯一 `PersistentApplicationHost` 已拥有外层 bootstrap/lease/terminal 生命周期，但仍以类型化 loader 单向委托既有 Anchor/Executor role root；唯一事实与产品装配仍在既有 root，退场上限为 A1，其后续包不得形成第二 Host 或双 owner |
-| 已失效证据 | 无当前未恢复证据；A1-01 初次把 canonical S7 在临时 LF golden 上通过写成当前 clean Windows 基线通过，协调者以 CRLF checkout 反证后，已由 registry checker 的行尾归一化纠正并在 CRLF 基线上完整重取。A0-06b3b H02/P10、H07/H08/P14 等更早失效项仍按对应纠正记录继续有效 |
+| 已失效证据 | 无当前未恢复证据；A1-04 的 canonical S7 首轮暴露新 cleanup descriptor 使用条件 owner、第二轮与第三轮分别暴露两条无识别力 mutation，均已修正根因并在最终同一源码基线完整重取 21/21 + registry golden。A1-01 的 CRLF golden 纠正与更早纠正记录继续有效 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1297,6 +1297,17 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 保护、失效与遗留：A0、A1-01、A1-02 证据未失效，`A1-HOST-DELEGATE-01` 仍是唯一打开的单向桥。本包未迁移 Anchor 内部组件 descriptor、start/open 次序、完整 cleanup registry、Executor trust/idle 或其他 A1 责任；因此 A1、完成度与最终退出门保持不变。若 Anchor 三个 internal source、HostStop prepare、Server shutdown binding/terminal、device removal cleanup/key 顺序、idle policy 或 ApplicationHost outer release 任一变化，则恢复 `A1-03-anchor-internal-stop-v1` 并只重验本闭包。
 - 交接类型：完成，等待协调者独立复核；无本包内遗留。
 - 下一检查点：协调者沿三条生产 source、端口首次请求冻结与失败重驱、`runner.waitForShutdown` 和 ApplicationHost outer release 独立复核；接受后继续 A1 的下一条单一 Host 生命周期责任，不进入 A2。
+
+### A1-04：闭合 Anchor 的 entry-last 开放边界
+
+- 基线与差异：`HEAD 5cf0a8eee0f57684444de60a224aa1e7b0f1349f + A1-04-anchor-entry-last-v1`；进场工作区与索引为空，A1-01～A1-03 已由协调者独立复核并提交。本包修改 `@zhixing/server` 的 prepared/activation 生命周期、Anchor 唯一生产组合根及其现有接入面/清理时序注释，新增 Server/Host 直接证据并强化 S7 managed-host 结构门禁；本文是唯一产品文档变化，未执行 Git 写操作。
+- 原窗口与责任迁移：旧链在 `runServer/startServer` 内先执行 `BoundZhixingServer.activate`，随后才由 Anchor 激活 Delivery/Scheduler、绑定 session broadcast、装配 confirmation/recovery contribution、注册完整 normal cleanup 并 `startupRollback.commit`，公开 REST/RPC/WS 因而存在“已经 200/可 RPC、但 Host 尚未被完整关闭责任接管”的窗口。现在 `startServer` 先在同一 `BoundZhixingServer` 上建立 handler、RPC/WS connection 集合与 bridge，再等待类型化 `activationGate`；`runServer` 在 gate 内先建立唯一 CleanupRegistry owner、注册 `server.close`、绑定幂等 shutdown 与 prepared `RunningServer`，然后调用 Anchor 的 `beforeActivate`。Anchor 在该回调内完成原有 Delivery/Scheduler activation、session projection、manual surface resume、core/owner teardown 注册、post-server contribution 与 rollback→normal-owner 移交，全部成立后 gate 才释放并由同一 handle 一次性激活。没有第二 listen、ServerContext、registry、lazy runner 或运行期定位。
+- 发布、失败与保护边界：公开入口激活后，既有 `beforePublish` 健康门仍先于 discovery；随后才写 PID/port，并由 `publishReady` 写 `ServerStateFile ready/running`、background `.ready` 与 heartbeat/banner。gate 前失败关闭 inactive endpoint且不写 PID/ready；activate、健康门、PID 或 ready/state 发布失败都调用同一 registry 的 `startup-error` 终止路径，CleanupRegistry 幂等保证已取得资源只产生一次实际补偿，注入模式继续由 Anchor tail cleanup 精确释放本进程 discovery。信号 handler 只在 open+publication 全部成功后安装。standalone `startServer/runServer` 与 Executor-only 未传 gate 时仍按原调用默认开放，RPC/HTTP/WS wire、HostStop、领域 owner、A1-02/A1-03 terminal 和外层 `PersistentApplicationHost` 均未改动。
+- 直接证据：Server 最终直接闭包为 2 文件 27/27：`server.test.ts` 12/12 来自同基线首次组合运行，真实 loopback 在可控 deferred gate 中证明同一端口 HTTP 与 WS 持续 503，gate 后同一 `httpServer` 健康 200 且 RPC `health` 可调用，gate reject 关闭端口；`lifecycle.test.ts` 在补入启动期 shutdown 竞态后最终为 15/15，证明 `beforeActivate → activate/health → PID publish` 顺序，contribution、activate、ready publication 三类失败的端口/PID 零残留与精确一次补偿，以及 shutdown 抢先时不再继续发布 discovery/ready。CLI `startup-server-owner`、access-surface、shutdown-chain、startup-rollback 直接闭包为 4 文件 24/24，反绑实际 Anchor 组合根的 Delivery/Scheduler、normal cleanup、post-server contribution、rollback commit 与 state ready 顺序；中间对已失效 lifecycle 子集的重跑不重复计入上述最终数字。
+- 结构、静态与构建证据：S7 managed-host inspector 现读取真实 `command.ts`、`server/lifecycle.ts` 与 `server.ts`，要求唯一 bind/run/gate/publication、`server.close` 先接管、全部必要 Anchor 前置位于 gate 内、gate 先于 `BoundZhixingServer.activate`、ready 位于 publication hook，并以反向 mutation 识别恢复早激活、把 Delivery 移到 gate 后、第二 bind 和提前 ready。canonical S7 的失败轮分别暴露动态 cleanup owner 不符合 descriptor literal、两条 mutation 没有真正改变受检生产结构；均按根因修正，启动期 shutdown 防假 ready 输入补齐后，在最终当前源码上重取 `pnpm s7:lint` 为 coverage/mutation 21/21 且 registry golden 通过，未更新 golden。`pnpm exec biome check` 对 9 个变更 TypeScript 文件通过；最终 Server canonical typecheck/build、CLI canonical typecheck 与 `pnpm cli:build` 均通过。没有运行包全测、根级 lint/test/build、package check 或制品验收。
+- 保护、失效与遗留：A0 与 A1-01～A1-03 的责任结论未失效，A0-02 所记录的旧早开放窗口由本证据明确取代；`A1-HOST-DELEGATE-01` 仍是唯一打开的单向桥。若 `BoundZhixingServer` prepared/activate/close、`startServer` connection/bridge 设施、`runServer` cleanup/shutdown/discovery/publication、Anchor Delivery/Scheduler/post-server contribution/cleanup/ready 顺序或对应结构门禁任一变化，恢复 `A1-04-anchor-entry-last-v1` 并只重验上述 6 个直接文件、S7 与 Server→CLI build 闭包。本包没有处理 Executor trust/idle、managed successor、完整 component descriptor、所有 cleanup leak harness 或委托桥退场，因此 A1、完成度和最终退出门保持不变。
+- 交接类型：完成，等待协调者独立复核；无本包内遗留。
+- 下一检查点：协调者从同一 bound endpoint 的 503/activate/PID/ready 时序、Anchor 必要前置、三类失败补偿和 S7 反向 mutation 独立复核；接受后继续 A1 的下一条单一 Host 生命周期责任，不进入 A2。
 
 ## 十、用户提示词
 

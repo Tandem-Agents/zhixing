@@ -1039,10 +1039,13 @@ export function inspectManagedHostAssembly(records) {
   const manifest = byPath.get("packages/core/src/protocol/manifest.ts");
   const serverContext = byPath.get("packages/server/src/context.ts");
   const serverShutdown = byPath.get("packages/server/src/rpc/methods/server.ts");
+  const serverLifecycle = byPath.get("packages/server/src/lifecycle.ts");
+  const server = byPath.get("packages/server/src/server.ts");
   if (
     !reconciler || !service || !serviceRuntime || !bootstrap || !pairing || !config ||
     !command || !anchorInternalStop || !topology || !applicationHost || !connection || !repl || !surfaceLink || !secrets || !status ||
-    !publicStatus || !statusRoute || !scheduler || !manifest || !serverContext || !serverShutdown
+    !publicStatus || !statusRoute || !scheduler || !manifest || !serverContext || !serverShutdown ||
+    !serverLifecycle || !server
   ) return ["managed host production assembly sources are missing"];
   const count = (text, token) => text.split(token).length - 1;
   const descriptor = frozenLiteralDescriptor(
@@ -1187,6 +1190,54 @@ export function inspectManagedHostAssembly(records) {
     !anchorInternalStop.includes("await dependencies.requestShutdown(frozen.reason);") ||
     !anchorInternalStop.includes("shutdownTriggered = true;")
   ) failures.push("managed host internal stop durable owner drifted");
+  const anchorRunServer = command.indexOf("runner = await runServer({");
+  const anchorOpenGate = command.indexOf("beforeActivate: async (openingRunner) =>", anchorRunServer);
+  const deliveryActivation = command.indexOf("ctx.deliveryStack?.activate()", anchorOpenGate);
+  const schedulerActivation = command.indexOf("schedulerRuntime?.activate()", anchorOpenGate);
+  const normalCleanupOwner = command.indexOf("registerCoreCleanup(registry, {", anchorOpenGate);
+  const postServerContribution = command.indexOf(
+    'await setupAssemblyUnits(assemblyUnits, ctx, "post-server")',
+    anchorOpenGate,
+  );
+  const cleanupTransfer = command.indexOf("startupRollback.commit()", anchorOpenGate);
+  const readyPublication = command.indexOf("publishReady: async (openingRunner) =>", anchorOpenGate);
+  const readyMarker = command.indexOf("await stateFile.markReady({", readyPublication);
+  const lifecycleActivationGate = serverLifecycle.indexOf(
+    "activationGate: async (preparedServer) =>",
+  );
+  const lifecycleCloseOwner = serverLifecycle.indexOf(
+    'id: "server.close"',
+    lifecycleActivationGate,
+  );
+  const lifecycleOpenPrerequisite = serverLifecycle.indexOf(
+    "await opts.beforeActivate?.(runner)",
+    lifecycleCloseOwner,
+  );
+  const serverGate = server.indexOf("await opts.activationGate?.(server)");
+  const serverActivate = server.indexOf("boundServer.activate({", serverGate);
+  if (
+    count(command, "await bindServer({") !== 1 ||
+    count(command, "runner = await runServer({") !== 1 ||
+    count(command, "beforeActivate: async (openingRunner) =>") !== 1 ||
+    count(command, "publishReady: async (openingRunner) =>") !== 1 ||
+    anchorRunServer < 0 ||
+    anchorOpenGate < anchorRunServer ||
+    [
+      deliveryActivation,
+      schedulerActivation,
+      normalCleanupOwner,
+      postServerContribution,
+      cleanupTransfer,
+    ].some((position) => position < anchorOpenGate || position >= readyPublication) ||
+    readyMarker < readyPublication ||
+    count(serverLifecycle, "activationGate: async (preparedServer) =>") !== 1 ||
+    lifecycleCloseOwner < lifecycleActivationGate ||
+    lifecycleOpenPrerequisite < lifecycleCloseOwner ||
+    count(server, "await opts.activationGate?.(server)") !== 1 ||
+    count(server, "boundServer.activate({") !== 1 ||
+    serverGate < 0 ||
+    serverActivate < serverGate
+  ) failures.push("managed host entry-last activation or publication order drifted");
   if (
     !bootstrap.includes("export function resolveHostLaunchPlan(") ||
     !bootstrap.includes("configuration.executorAutoStart === true") ||

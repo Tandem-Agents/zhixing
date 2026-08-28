@@ -7,7 +7,7 @@
  *
  * 这里把注册序列拆成两个函数：
  *   - `registerTailCleanup`  在 runServer **之前**调（LIFO 最后执行）
- *   - `registerCoreCleanup`  在 runServer **之后**调（LIFO 最先执行）
+ *   - `registerCoreCleanup`  在 runServer 的 **activation gate 内**调（LIFO 最先执行）
  *
  * 这样：
  *   1. 可单元测试——注入 mock registry，断言 register 的 name 序列
@@ -103,7 +103,7 @@ export function registerTailCleanup(
 }
 
 /**
- * 在 `runServer` **之后**调用，注册 LIFO 核心资源清理（最先执行的那些）。
+ * 在 `runServer` 的 **activation gate 内**调用，注册 LIFO 核心资源清理（最先执行的那些）。
  *
  * 注册顺序（LIFO 执行由下到上）：
  *   1. heartbeat.clear          （LIFO 执行 ⑥ —— 停 heartbeat timer）
@@ -113,7 +113,7 @@ export function registerTailCleanup(
  *   5. scheduler.stop           （② —— 停调度器）
  *   6. stateFile.markStopping   （① —— 最先执行：对外宣告停机）
  *
- * 为什么这些在 runServer **之后**注册：
+ * 为什么这些在 activation gate 内、`server.close` 之后注册：
  * - scheduler/channels/delivery 由 command.ts 顶层创建，runServer 之前已经启动，但
  *   要作为核心资源被 LIFO 最先清理——所以必须在 runServer 之后（即 server.close 注册之后）注册
  * - runServer 内部已注册 `server.close`（LIFO 执行 ⑥），本函数注册的项都排在 server.close 之前执行

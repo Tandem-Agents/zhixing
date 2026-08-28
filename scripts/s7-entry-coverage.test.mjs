@@ -1685,6 +1685,8 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     "packages/core/src/protocol/manifest.ts",
     "packages/server/src/context.ts",
     "packages/server/src/rpc/methods/server.ts",
+    "packages/server/src/lifecycle.ts",
+    "packages/server/src/server.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -1764,6 +1766,52 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
       ),
     )).join("\n"),
     /internal stop durable owner drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace("beforeActivate: async (openingRunner) =>", "afterActivate: async (openingRunner) =>"),
+    )).join("\n"),
+    /entry-last activation or publication order drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text
+        .replace("ctx.deliveryStack?.activate()", "void openingRunner.server.port")
+        .replace(
+          "publishReady: async (openingRunner) => {",
+          "publishReady: async (openingRunner) => {\n      ctx.deliveryStack?.activate();",
+        ),
+    )).join("\n"),
+    /entry-last activation or publication order drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/server/src/server.ts",
+      (text) => text.replace(
+        "await opts.activationGate?.(server);\n    boundServer.activate({",
+        "boundServer.activate({\n      config, requestHandler, upgradeHandler, cleanup: cleanupActive,\n    });\n    await opts.activationGate?.(server);\n    boundServer.activate({",
+      ),
+    )).join("\n"),
+    /entry-last activation or publication order drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => `${text}\nconst shadowBinding = await bindServer({});`,
+    )).join("\n"),
+    /entry-last activation or publication order drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "publishReady: async (openingRunner) =>",
+        "publishBeforeActivate: async (openingRunner) =>",
+      ),
+    )).join("\n"),
+    /entry-last activation or publication order drifted/,
   );
   assert.match(
     inspectManagedHostAssembly(mutate(

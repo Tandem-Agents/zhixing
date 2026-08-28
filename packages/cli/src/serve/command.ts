@@ -2202,204 +2202,192 @@ async function runServerProcess(
       warn: (msg) => console.warn(chalk.yellow(`[server] ${msg}`)),
       error: (msg) => console.error(chalk.red(`[server] ${msg}`)),
     },
-  });
-  anchorInternalStop.current = createAnchorInternalStopPort({
-    requestId: `anchor-internal-stop:${protocolDigest("AnchorInternalStopRequest", 1, {
-      homeId: lifecycleHomeId,
-      host: stopHost,
-    })}`,
-    timeoutMs: 30_000,
-    prepare: (request) => stopCoordinator.prepare(request),
-    requestShutdown: (reason) => {
-      const shutdown = serverCtx.requestShutdown;
-      if (!shutdown) throw new Error("Anchor Server shutdown is not bound");
-      shutdown(reason);
-    },
-  });
+    beforeActivate: async (openingRunner) => {
+      anchorInternalStop.current = createAnchorInternalStopPort({
+        requestId: `anchor-internal-stop:${protocolDigest("AnchorInternalStopRequest", 1, {
+          homeId: lifecycleHomeId,
+          host: stopHost,
+        })}`,
+        timeoutMs: 30_000,
+        prepare: (request) => stopCoordinator.prepare(request),
+        requestShutdown: (reason) => {
+          const shutdown = serverCtx.requestShutdown;
+          if (!shutdown) throw new Error("Anchor Server shutdown is not bound");
+          shutdown(reason);
+        },
+      });
 
-  // 组播设施已由 startServer 回填到 serverCtx —— 接通带外事件转发的 lazy ref。
-  sessionBroadcastRef.current = serverCtx.sessionBroadcast ?? null;
-  sessionActivityBroadcastRef.current =
-    serverCtx.sessionActivityBroadcast ?? null;
+      // Server 内部设施已准备、公开入口仍为 inactive 503；此时接通带外事件转发引用。
+      sessionBroadcastRef.current = serverCtx.sessionBroadcast ?? null;
+      sessionActivityBroadcastRef.current =
+        serverCtx.sessionActivityBroadcast ?? null;
 
-  // External handlers and transports become active only after the product
-  // ingress is listening; preparation above is intentionally side-effect free.
-  ctx.deliveryStack?.activate();
-  if (!startupLifecycle) schedulerRuntime?.activate();
+      // Delivery/Scheduler 的既有 activation 是公开入口开放的必要前置。
+      ctx.deliveryStack?.activate();
+      if (!startupLifecycle) schedulerRuntime?.activate();
 
-  // runServer resolve 后填 runner，供 post-server 接入面读 server.connections。
-  ctx.runner = runner;
-  if (!startupLifecycle || startupLifecycleFrozenRecoveryStarted) {
-    await schedulerRuntime?.resumeManualJobSurfaces();
-  }
-
-  // runServer 之后：核心资源清理（LIFO 最先执行 —— markStopping / scheduler / channels /
-  // delivery / heartbeat）。接入面产物（channels / deliveryStack）从 ctx 取。
-  registerCoreCleanup(registry, {
-    stateFile,
-    heartbeatTimerRef,
-    authorityRuntime: ctx.authorityRuntime,
-    channels: ctx.channels,
-    deliveryStack: ctx.deliveryStack,
-    mcpHub: builtinExtraTools.mcpHub,
-    startupCleanups: {
-      authorityRuntime: startupCleanups.authorityRuntime,
-      localWorkspaceHost: startupCleanups.localWorkspaceHost,
-      localConversationOwner: startupCleanups.localConversationOwner,
-      channels: startupCleanups.channels,
-      deliveryStack: startupCleanups.deliveryStack,
-      mcp: startupCleanups.mcp,
-    },
-  });
-
-  // post-server 接入面：confirmationBridge（依赖 runner.server.connections，在自己 setup 内
-  // 注册 dispose 到 ctx.cleanup —— LIFO 落在 registerCoreCleanup 之后、即更先执行）。
-  await setupAssemblyUnits(assemblyUnits, ctx, "post-server");
-
-  // pre-server 接入面 teardown —— 时序硬约束（必须在 server.close 之前 = runServer 之后注册）
-  // 决定它们不能在自己 setup 内自注册，故由主干用 ctx 产物注册到 shutdown-chain。LIFO 顺序：
-  //   后注册 = 更先执行。以下三项都在 registerCoreCleanup 之后注册，先于核心资源清理执行。
-
-  if (ctx.meshRuntime) {
-    registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "meshRuntime.stop" }, async () => {
-      await startupCleanups.meshRuntime!.run();
-    });
-  }
-
-  if (ctx.executorDataPlane) {
-    registerCleanup(registry, { owner: "anchor-local-executor", role: "runtime", id: "executorDataPlane.close" }, async () => {
-      await startupCleanups.executorDataPlane!.run();
-    });
-  }
-
-  if (ctx.jobStatus) {
-    registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "jobStatus.dispose" }, async () => {
-      await startupCleanups.jobStatus!.run();
-    });
-  }
-
-  if (ctx.assetMaintenance) {
-    registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "assetMaintenance.stop" }, async () => {
-      await startupCleanups.assetMaintenance!.run();
-    });
-  }
-
-  if (ctx.executorJobOwner) {
-    registerCleanup(registry, { owner: "anchor-local-executor", role: "runtime", id: "executorJobOwner.close" }, async () => {
-      await startupCleanups.jobOwner!.run();
-    });
-  }
-
-  // 无损会话先于其依赖的 mesh / executor / channel 关停；下方执行 drain
-  // 更晚注册，仍会先停止新工作并收束在途执行。
-  if (ctx.losslessDataPlane) {
-    registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "losslessDataPlane.close" }, async () => {
-      await startupCleanups.losslessDataPlane!.run();
-    });
-  }
-
-  // 远程中断模块关停链 —— LIFO 最先执行（在 channels.dispose / scheduler.stop / server.close 之前）：
-  //   1. inboundRouter.refuseNew  拒新入站，避免下游 drain 期间又来新消息
-  //   2. conversationProtocol.stopRecovery  等恢复协调器静默，禁止 drain 后再生任务
-  //   3. execution.abortAllAndWait  并行 fire abort + 等所有 in-flight 走完 cleanup
-  //                                 （partial yields + RunResult + 取消反馈）
-  // 必须 await drain —— 没有它 server.close / channels.dispose 抢断 partial 流和取消反馈，
-  // 违反"关停期反馈不丢"。30s 总超时兜底由 abortAllAndWait 自身实现，超时不抛直接进下一步。
-  registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "execution.abortAllAndWait" }, async () => {
-    await Promise.all([
-      ...(ctx.conversations
-        ? [
-            ctx.conversations.abortAllAndWait(
-              { kind: "external", origin: "scheduler-shutdown" },
-              30_000,
-            ),
-          ]
-        : []),
-    ]);
-  });
-
-  if (ctx.conversationProtocol) {
-    const protocol = ctx.conversationProtocol;
-    registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "conversationProtocol.stopRecovery" }, async () => {
-      await protocol.stopRecoveryLoop();
-    });
-  }
-
-  // Scheduler owns trigger admission and job recovery loops. Stop it before
-  // executor/job/channel owners are released so no new occurrence can enter
-  // while every accepted assignment is already durable and restartable.
-  if (schedulerCleanup) {
-    registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "scheduler.stop" }, async () => {
-      await schedulerCleanup!.run();
-    });
-  }
-
-  if (ctx.inboundRouter) {
-    const router = ctx.inboundRouter;
-    registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "inboundRouter.refuseNew" }, () => {
-      router.refuseNewMessages();
-    });
-  }
-
-  if (ctx.evidenceHandler) {
-    const evidenceHandler = ctx.evidenceHandler;
-    registerCleanup(registry, { owner: "anchor-local-executor", role: "runtime", id: "evidenceHandler.stopAccepting" }, () => {
-      evidenceHandler.stopAccepting();
-    });
-  }
-
-  // 正常停机链已经完整接管所有已取得资源；启动补偿事务不再持有独立责任。
-  startupRollback.commit();
-
-  // Post-runServer 启动步骤（startup guard 包裹）
-  //   不变量：runServer 已 resolve → server listening + PID 锁持有 + registry 全注册完毕。
-  //   此后若任何步骤抛错（markReady / banner 等），必须走 runner.shutdown 让 registry 完整跑完，
-  //   否则后台 child 会孤儿化 + PID 锁/state 文件残留 —— 下次启动被假 "already running" 误挡。
-  try {
-    // All listener owners publish the same local generation; only background
-    // startup uses the separate ready marker handshake.
-    // 紧邻调用：running 才是稳态；ready 仅作为 .ready marker 的语义锚点
-    await stateFile.markReady({
-      pid: process.pid,
-      startedAt: processStartedAt,
-      port: runner.server.port,
-      host: runner.server.host,
-    });
-    await stateFile.markRunning();
-    const hbTimer = setInterval(() => {
-      void stateFile.heartbeat();
-    }, 60_000);
-    hbTimer.unref();
-    heartbeatTimerRef.current = hbTimer;
-
-    if (processMode !== "managed") {
-      console.log();
-      console.log(chalk.green("  知行服务已启动"));
-      console.log(chalk.dim(`  HTTP:      http://${runner.server.host}:${runner.server.port}`));
-      console.log(chalk.dim(`  WebSocket: ws://${runner.server.host}:${runner.server.port}/ws`));
-      console.log(chalk.dim(`  Token:     ${tokenInfo.path}`));
-      if (ctx.channels) {
-        const statuses = ctx.channels.listStatuses();
-        const connected = statuses.filter((s) => s.state === "connected");
-        console.log(chalk.dim(`  Channels:  ${connected.length}/${statuses.length} connected`));
-        for (const s of statuses) {
-          const icon = s.state === "connected" ? chalk.green("●") : chalk.red("●");
-          console.log(
-            chalk.dim(`    ${icon} ${s.channelId}: ${s.state}${s.error ? ` (${s.error})` : ""}`),
-          );
-        }
+      // prepared runner 只提供内部 connection/cleanup 设施；activation gate 尚未释放。
+      ctx.runner = openingRunner;
+      if (!startupLifecycle || startupLifecycleFrozenRecoveryStarted) {
+        await schedulerRuntime?.resumeManualJobSurfaces();
       }
-      console.log(chalk.dim(`  Ctrl+C 停止`));
-      console.log();
-    }
-  } catch (err) {
-    // Post-runServer startup 失败 → runner.shutdown 让 registry 跑完（release lock / close server / stop scheduler 等）
-    // runner.shutdown 幂等 + 内部吞错，保证资源最大化回收
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(chalk.red(`Startup failed after server listening: ${msg}`));
-    await runner.shutdown("startup-error").catch(() => {});
-    throw err;
-  }
+
+      // 激活前让正常关闭链接管核心资源（LIFO 最先执行）。
+      registerCoreCleanup(registry, {
+        stateFile,
+        heartbeatTimerRef,
+        authorityRuntime: ctx.authorityRuntime,
+        channels: ctx.channels,
+        deliveryStack: ctx.deliveryStack,
+        mcpHub: builtinExtraTools.mcpHub,
+        startupCleanups: {
+          authorityRuntime: startupCleanups.authorityRuntime,
+          localWorkspaceHost: startupCleanups.localWorkspaceHost,
+          localConversationOwner: startupCleanups.localConversationOwner,
+          channels: startupCleanups.channels,
+          deliveryStack: startupCleanups.deliveryStack,
+          mcp: startupCleanups.mcp,
+        },
+      });
+
+      // post-server contribution 依赖 prepared server.connections，但不要求入口已激活。
+      // 它在自己 setup 内注册 dispose，故失败与正常关闭都由同一 registry 收口。
+      await setupAssemblyUnits(assemblyUnits, ctx, "post-server");
+
+      // pre-server 接入面 teardown —— 时序硬约束（必须在 server.close 之前执行）
+      // 决定它们不能在自己 setup 内自注册，故由主干用 ctx 产物注册到 shutdown-chain。LIFO 顺序：
+      //   后注册 = 更先执行。以下三项都在 registerCoreCleanup 之后注册，先于核心资源清理执行。
+
+      if (ctx.meshRuntime) {
+        registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "meshRuntime.stop" }, async () => {
+          await startupCleanups.meshRuntime!.run();
+        });
+      }
+
+      if (ctx.executorDataPlane) {
+        registerCleanup(registry, { owner: "anchor-local-executor", role: "runtime", id: "executorDataPlane.close" }, async () => {
+          await startupCleanups.executorDataPlane!.run();
+        });
+      }
+
+      if (ctx.jobStatus) {
+        registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "jobStatus.dispose" }, async () => {
+          await startupCleanups.jobStatus!.run();
+        });
+      }
+
+      if (ctx.assetMaintenance) {
+        registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "assetMaintenance.stop" }, async () => {
+          await startupCleanups.assetMaintenance!.run();
+        });
+      }
+
+      if (ctx.executorJobOwner) {
+        registerCleanup(registry, { owner: "anchor-local-executor", role: "runtime", id: "executorJobOwner.close" }, async () => {
+          await startupCleanups.jobOwner!.run();
+        });
+      }
+
+      // 无损会话先于其依赖的 mesh / executor / channel 关停；下方执行 drain
+      // 更晚注册，仍会先停止新工作并收束在途执行。
+      if (ctx.losslessDataPlane) {
+        registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "losslessDataPlane.close" }, async () => {
+          await startupCleanups.losslessDataPlane!.run();
+        });
+      }
+
+      // 远程中断模块关停链 —— LIFO 最先执行（在 channels.dispose / scheduler.stop / server.close 之前）：
+      //   1. inboundRouter.refuseNew  拒新入站，避免下游 drain 期间又来新消息
+      //   2. conversationProtocol.stopRecovery  等恢复协调器静默，禁止 drain 后再生任务
+      //   3. execution.abortAllAndWait  并行 fire abort + 等所有 in-flight 走完 cleanup
+      //                                 （partial yields + RunResult + 取消反馈）
+      // 必须 await drain —— 没有它 server.close / channels.dispose 抢断 partial 流和取消反馈，
+      // 违反"关停期反馈不丢"。30s 总超时兜底由 abortAllAndWait 自身实现，超时不抛直接进下一步。
+      registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "execution.abortAllAndWait" }, async () => {
+        await Promise.all([
+          ...(ctx.conversations
+            ? [
+                ctx.conversations.abortAllAndWait(
+                  { kind: "external", origin: "scheduler-shutdown" },
+                  30_000,
+                ),
+              ]
+            : []),
+        ]);
+      });
+
+      if (ctx.conversationProtocol) {
+        const protocol = ctx.conversationProtocol;
+        registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "conversationProtocol.stopRecovery" }, async () => {
+          await protocol.stopRecoveryLoop();
+        });
+      }
+
+      // Scheduler owns trigger admission and job recovery loops. Stop it before
+      // executor/job/channel owners are released so no new occurrence can enter
+      // while every accepted assignment is already durable and restartable.
+      if (schedulerCleanup) {
+        registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "scheduler.stop" }, async () => {
+          await schedulerCleanup!.run();
+        });
+      }
+
+      if (ctx.inboundRouter) {
+        const router = ctx.inboundRouter;
+        registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "inboundRouter.refuseNew" }, () => {
+          router.refuseNewMessages();
+        });
+      }
+
+      if (ctx.evidenceHandler) {
+        const evidenceHandler = ctx.evidenceHandler;
+        registerCleanup(registry, { owner: "anchor-local-executor", role: "runtime", id: "evidenceHandler.stopAccepting" }, () => {
+          evidenceHandler.stopAccepting();
+        });
+      }
+
+      // 正常停机链已经完整接管所有已取得资源；启动补偿事务不再持有独立责任。
+      startupRollback.commit();
+    },
+    publishReady: async (openingRunner) => {
+      // All listener owners publish the same local generation; only background
+      // startup uses the separate ready marker handshake.
+      // 只有同一 bound handle 已激活且 PID/port 已发布后，才发布 state/ready。
+      await stateFile.markReady({
+        pid: process.pid,
+        startedAt: processStartedAt,
+        port: openingRunner.server.port,
+        host: openingRunner.server.host,
+      });
+      await stateFile.markRunning();
+      const hbTimer = setInterval(() => {
+        void stateFile.heartbeat();
+      }, 60_000);
+      hbTimer.unref();
+      heartbeatTimerRef.current = hbTimer;
+
+      if (processMode !== "managed") {
+        console.log();
+        console.log(chalk.green("  知行服务已启动"));
+        console.log(chalk.dim(`  HTTP:      http://${openingRunner.server.host}:${openingRunner.server.port}`));
+        console.log(chalk.dim(`  WebSocket: ws://${openingRunner.server.host}:${openingRunner.server.port}/ws`));
+        console.log(chalk.dim(`  Token:     ${tokenInfo.path}`));
+        if (ctx.channels) {
+          const statuses = ctx.channels.listStatuses();
+          const connected = statuses.filter((s) => s.state === "connected");
+          console.log(chalk.dim(`  Channels:  ${connected.length}/${statuses.length} connected`));
+          for (const s of statuses) {
+            const icon = s.state === "connected" ? chalk.green("●") : chalk.red("●");
+            console.log(
+              chalk.dim(`    ${icon} ${s.channelId}: ${s.state}${s.error ? ` (${s.error})` : ""}`),
+            );
+          }
+        }
+        console.log(chalk.dim(`  Ctrl+C 停止`));
+        console.log();
+      }
+    },
+  });
 
   // idle reaper —— 仅后台宿主装配:前台进程的生命周期归终端(用户
   // Ctrl+C),reaper 管的是没有终端的后台宿主——这是进程形态差异,不是档位。

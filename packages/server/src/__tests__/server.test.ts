@@ -3,6 +3,7 @@ import { connect } from "node:net";
 import { fork, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { bindServer, startServer, type ZhixingServerInstance } from "../server.js";
+import { createRpcClient } from "../client/rpc-client.js";
 import { createServerContext } from "../context.js";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
 
@@ -125,6 +126,78 @@ describe("HTTP Server (S2.B)", () => {
     const active = await fetchJson(`http://127.0.0.1:${server.port}/api/health`);
     expect(active.status).toBe(200);
     expect(active.body).toMatchObject({ status: "ok" });
+  });
+
+  it("keeps one bound endpoint inactive until the deferred activation gate resolves", async () => {
+    await server.close();
+    const ctx = createServerContext({
+      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
+      version: TEST_VERSION,
+      token: TEST_TOKEN,
+    });
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    let preparedResolve!: (candidate: ZhixingServerInstance) => void;
+    const prepared = new Promise<ZhixingServerInstance>((resolve) => {
+      preparedResolve = resolve;
+    });
+    const started = startServer({
+      context: ctx,
+      activationGate: async (candidate) => {
+        preparedResolve(candidate);
+        await gate;
+      },
+    });
+    const candidate = await prepared;
+    server = candidate;
+
+    expect((await fetch(`http://127.0.0.1:${candidate.port}/api/health`)).status).toBe(503);
+    expect(await rawWebSocketUpgrade(candidate.port)).toContain(
+      "HTTP/1.1 503 Service Unavailable",
+    );
+
+    releaseGate();
+    server = await started;
+    expect(server.httpServer).toBe(candidate.httpServer);
+    expect((await fetch(`http://127.0.0.1:${server.port}/api/health`)).status).toBe(200);
+    const client = createRpcClient({ url: `ws://127.0.0.1:${server.port}/ws` });
+    await client.connect();
+    await expect(client.request("health")).resolves.toMatchObject({ status: "ok" });
+    await client.close();
+  });
+
+  it("closes the inactive endpoint when the activation gate fails", async () => {
+    await server.close();
+    const ctx = createServerContext({
+      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
+      version: TEST_VERSION,
+      token: TEST_TOKEN,
+    });
+    let preparedResolve!: (candidate: ZhixingServerInstance) => void;
+    const prepared = new Promise<ZhixingServerInstance>((resolve) => {
+      preparedResolve = resolve;
+    });
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    const started = startServer({
+      context: ctx,
+      activationGate: async (candidate) => {
+        preparedResolve(candidate);
+        await gate;
+        throw new Error("post-server contribution failed");
+      },
+    });
+    const candidate = await prepared;
+    server = candidate;
+
+    releaseGate();
+    await expect(started).rejects.toThrow("post-server contribution failed");
+    expect(candidate.httpServer.listening).toBe(false);
+    await expect(fetch(`http://127.0.0.1:${candidate.port}/api/health`)).rejects.toThrow();
   });
 
   it("lets exactly one real process own the same fixed endpoint", async () => {
