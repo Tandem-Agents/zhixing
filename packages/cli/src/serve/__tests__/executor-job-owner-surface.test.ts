@@ -3,6 +3,7 @@ import { createAssemblyUnits } from "../access-surfaces.js";
 import type { AssemblyContext } from "../access-surface.js";
 import { PROFILES } from "../profile.js";
 import { StartupRollback } from "../startup-rollback.js";
+import { AssemblyLifecycleContributions } from "../assembly-lifecycle.js";
 
 const unit = createAssemblyUnits({}).find(
   (candidate) => candidate.name === "executor-job-owner",
@@ -41,14 +42,14 @@ describe("executor job owner production surface", () => {
 
     expect(ctx.executorJobOwner).toBeDefined();
     expect(ctx.jobRelayObligations).toBeDefined();
-    expect(ctx.startupCleanups.jobOwner).toBeUndefined();
+    expect(ctx.lifecycleContributions.has("executorJobOwner.close")).toBe(false);
     await startUnit.setup(ctx);
-    expect(ctx.startupCleanups.jobOwner).toBeDefined();
+    expect(ctx.lifecycleContributions.has("executorJobOwner.close")).toBe(true);
     expect(ctx.executorJobOwner!.ready).toBe(true);
     expect(ledger.recoverableJobObligations).toHaveBeenCalledTimes(1);
     await expect(unit.setup(ctx)).rejects.toThrow(/already assembled/u);
 
-    await ctx.startupCleanups.jobOwner!.run();
+    await rollback.rollback();
     expect(ctx.executorJobOwner!.ready).toBe(false);
   });
 
@@ -80,7 +81,7 @@ describe("executor job owner production surface", () => {
       recoverAcceptedWork: false,
     });
     expect(ctx.executorJobOwner!.ready).toBe(false);
-    await ctx.startupCleanups.jobOwner!.run();
+    await ctx.startupRollback.rollback();
   });
 
   it("creates the same owner contract for executor-only and stays inert without executor", async () => {
@@ -93,7 +94,7 @@ describe("executor job owner production surface", () => {
     expect(executorOnly.executorJobOwner).toBeDefined();
     expect(executorOnly.jobRelayObligations).toBeUndefined();
     await startUnit.setup(executorOnly);
-    await executorOnly.startupCleanups.jobOwner!.run();
+    await executorOnly.startupRollback.rollback();
 
     const anchorOnly = ownerContext(
       ["anchor"],
@@ -197,6 +198,6 @@ function ownerContext(
       create: vi.fn(),
     },
     startupRollback,
-    startupCleanups: {},
+    lifecycleContributions: new AssemblyLifecycleContributions(startupRollback),
   } as unknown as AssemblyContext;
 }

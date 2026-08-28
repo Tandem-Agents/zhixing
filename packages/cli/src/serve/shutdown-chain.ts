@@ -23,13 +23,8 @@ import type {
   ProcessLockPaths,
   ExitReason,
 } from "@zhixing/server";
-import type { ChannelRegistry, SchedulerBackend } from "@zhixing/core";
-import type { McpHub } from "@zhixing/mcp";
-import type {
-  AuthorityRuntimeStack,
-  DeliveryStack,
-} from "../setup-delivery.js";
-import type { StartupCleanupHandle } from "./startup-rollback.js";
+import type { SchedulerBackend } from "@zhixing/core";
+import type { AssemblyLifecycleContributions } from "./assembly-lifecycle.js";
 
 /**
  * 资源引用包。使用 `{ current: ... }` 结构给 heartbeat timer 这种"注册时未存在，
@@ -39,26 +34,17 @@ import type { StartupCleanupHandle } from "./startup-rollback.js";
  * `lockPaths` 和这里的 `lockPaths` **必须是同一引用**），否则 acquire 与 release 路径
  * 不一致会导致 PID 锁孤儿化。默认 undefined 时两边都走默认路径，一致。
  */
-export interface ShutdownChainResources {
+export interface TailCleanupResources {
   stateFile?: ServerStateFile;
-  heartbeatTimerRef: { current: NodeJS.Timeout | null };
-  authorityRuntime?: AuthorityRuntimeStack;
-  scheduler?: SchedulerBackend;
-  channels?: ChannelRegistry;
-  deliveryStack?: DeliveryStack;
-  /** MCP 连接层 hub —— 关闭所有 MCP server 连接 / stdio 子进程。 */
-  mcpHub?: McpHub;
-  startupCleanups?: {
-    readonly authorityRuntime?: StartupCleanupHandle;
-    readonly localWorkspaceHost?: StartupCleanupHandle;
-    readonly localConversationOwner?: StartupCleanupHandle;
-    readonly scheduler?: StartupCleanupHandle;
-    readonly channels?: StartupCleanupHandle;
-    readonly deliveryStack?: StartupCleanupHandle;
-    readonly mcp?: StartupCleanupHandle;
-  };
   /** PID 锁路径。必须与 runServer 的 lockPaths 同一引用（见接口注释） */
   lockPaths?: ProcessLockPaths;
+}
+
+export interface CoreCleanupResources {
+  stateFile?: ServerStateFile;
+  heartbeatTimerRef: { current: NodeJS.Timeout | null };
+  scheduler?: SchedulerBackend;
+  readonly lifecycleContributions: AssemblyLifecycleContributions;
 }
 
 /**
@@ -75,7 +61,7 @@ export interface ShutdownChainResources {
  */
 export function registerTailCleanup(
   registry: CleanupRegistry,
-  resources: ShutdownChainResources,
+  resources: TailCleanupResources,
 ): void {
   // releaseLock 只释放**本进程持有**的锁。
   //
@@ -114,68 +100,23 @@ export function registerTailCleanup(
  *   6. stateFile.markStopping   （① —— 最先执行：对外宣告停机）
  *
  * 为什么这些在 activation gate 内、`server.close` 之后注册：
- * - scheduler/channels/delivery 由 command.ts 顶层创建，runServer 之前已经启动，但
+ * - pre-server lifecycle contributions 与 scheduler 在 runServer 之前已经启动，但
  *   要作为核心资源被 LIFO 最先清理——所以必须在 runServer 之后（即 server.close 注册之后）注册
  * - runServer 内部已注册 `server.close`（LIFO 执行 ⑥），本函数注册的项都排在 server.close 之前执行
  */
 export function registerCoreCleanup(
   registry: CleanupRegistry,
-  resources: ShutdownChainResources,
+  resources: CoreCleanupResources,
 ): void {
-  if (resources.authorityRuntime) {
-    registerCleanup(
-      registry,
-      { owner: "anchor-host", role: "common", id: "authorityRuntime.stopStorageMaintenance" },
-      async () => {
-        const cleanup = resources.startupCleanups?.authorityRuntime;
-        if (cleanup) await cleanup.run();
-        else await resources.authorityRuntime!.stopStorageMaintenance();
-      },
-    );
-  }
-  if (resources.startupCleanups?.localWorkspaceHost) {
-    registerCleanup(registry, { owner: "anchor-local-executor", role: "common", id: "localWorkspaceHost.close" }, async () => {
-      await resources.startupCleanups!.localWorkspaceHost!.run();
-    });
-  }
-  if (resources.startupCleanups?.localConversationOwner) {
-    registerCleanup(registry, { owner: "anchor-local-executor", role: "runtime", id: "localConversationOwner.close" }, async () => {
-      await resources.startupCleanups!.localConversationOwner!.run();
-    });
-  }
+  resources.lifecycleContributions.transferTo(registry, "foundation");
   registerCleanup(registry, { owner: "anchor-host", role: "common", id: "heartbeat.clear" }, () => {
     const t = resources.heartbeatTimerRef.current;
     if (t) clearInterval(t);
   });
-  if (resources.channels) {
-    registerCleanup(registry, { owner: "anchor-host", role: "common", id: "channels.dispose" }, async () => {
-      const cleanup = resources.startupCleanups?.channels;
-      if (cleanup) await cleanup.run();
-      else await resources.channels!.dispose();
-    });
-  }
-  if (resources.deliveryStack) {
-    registerCleanup(registry, { owner: "anchor-host", role: "common", id: "deliveryStack.stop" }, async () => {
-      const cleanup = resources.startupCleanups?.deliveryStack;
-      if (cleanup) await cleanup.run();
-      else await resources.deliveryStack!.stop();
-    });
-  }
-  if (resources.mcpHub) {
-    // LIFO 执行落在 scheduler.stop 之后、channels.dispose 之前：先停调度（不再有
-    // 新 turn）→ 关 MCP 连接 / 子进程。in-flight turn 已由 graceful shutdown 等待
-    // 完成，此刻关 hub 不会切断进行中的 MCP 调用。
-    registerCleanup(registry, { owner: "anchor-host", role: "common", id: "mcpHub.dispose" }, async () => {
-      const cleanup = resources.startupCleanups?.mcp;
-      if (cleanup) await cleanup.run();
-      else await resources.mcpHub!.dispose();
-    });
-  }
+  resources.lifecycleContributions.transferTo(registry, "surface");
   if (resources.scheduler) {
     registerCleanup(registry, { owner: "anchor-host", role: "common", id: "scheduler.stop" }, async () => {
-      const cleanup = resources.startupCleanups?.scheduler;
-      if (cleanup) await cleanup.run();
-      else await resources.scheduler!.stop();
+      await resources.scheduler!.stop();
     });
   }
   if (resources.stateFile) {

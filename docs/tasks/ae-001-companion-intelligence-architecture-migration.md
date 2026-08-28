@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `9524083c355d57daf0ad47d3e9a9e11304001fd5`；A1-01～A1-05 已由协调者独立复核并提交 |
+| 已接受基线 | `d297317e1e1f622d12a52941c70241ab9e68bf24`；A1-01～A1-06 已由协调者独立复核并提交 |
 | 当前 A 项 | A1：收束 ApplicationHost 生命周期边界 |
-| 活跃工作包 | A1-06：闭合 Executor-only 的 entry-last 开放与失败补偿边界；实现与最窄验证完成，等待协调者独立复核 |
-| 下一责任链 | 协调者先复核 `A1-06-executor-entry-last-v1` 的同一 inactive endpoint、gate 内 stop owner/trust binding/最终 admission、publishReady 及 gate/activation/publication 失败补偿；接受后只在 A1 内选择下一条未闭合 Host 生命周期责任，不进入 A2 |
+| 活跃工作包 | A1-07：把 Anchor pre-server 单元收束为类型化生命周期贡献；foreign-handle provenance 与 core 必须 transfer 两项 fail-closed 纠正完成，等待协调者独立复核 |
+| 下一责任链 | 协调者先复核 `A1-07-anchor-pre-server-lifecycle-contributions-v1` 的 12 项静态 identity/owner exact-set、同一 `StartupRollback` 实例拥有的同一幂等 handle、core 必须 transfer、三段顺序与既有 LIFO/条件拓扑；接受后只在 A1 内选择 post-server contribution、Executor 手工 cleanup 或委托桥退场等尚未闭合的单一生命周期责任，不进入 A2 |
 | 打开的单向桥 | `A1-HOST-DELEGATE-01`：唯一 `PersistentApplicationHost` 已拥有外层 bootstrap/lease/terminal 生命周期，但仍以类型化 loader 单向委托既有 Anchor/Executor role root；唯一事实与产品装配仍在既有 root，退场上限为 A1，其后续包不得形成第二 Host 或双 owner |
-| 已失效证据 | 无当前未恢复证据；A1-05 的 durable-final 与 deferred-intent 纠正已由协调者接受并包含在当前基线。A1-06 的 CLI/Server 直接闭包 5 文件 49/49、canonical S7 21/21 + registry golden、CLI typecheck/build 与最窄静态检查均通过；A1-04 已接受且输入未变的真实 inactive-503 loopback 证据继续有效，未重复运行 |
+| 已失效证据 | 无当前未恢复证据；A1-01～A1-06 已包含在当前接受基线。协调反证曾作废 A1-07 初次“同名 handle 足以证明同一 rollback”及“core transfer 不可绕过”结论，现已由实例私有 provenance、core/tail 分离的必填类型合同、编译期负例与 S7 反向 mutation 恢复。纠正后直接闭包合并同工作区有效结果为 10 文件 53/53，canonical S7 21/21 与 registry golden、CLI typecheck/build、最窄 Biome 和 diff 检查均通过；golden 仍只把 12 个既有 cleanup descriptor 的 source 归属统一迁到类型化贡献表，owner/role/id 与 role exact-set 未漂移 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1331,6 +1331,24 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 保护、失效与遗留：本包没有迁移领域、Product API、Kernel、Executor 手工 cleanup、其他命令期 Surface 或 A1-HOST-DELEGATE-01，也没有扩大 idle/HostStop accepted-work 集合；A0 与 A1-01～A1-05 责任结论未失效，A1、完成度与最终退出门保持不变。若 Server `beforeActivate/publishReady`、Executor bound endpoint/runServer、internal stop/trust admission、PID/state/ready/heartbeat、terminal/cleanup、managed admission identity 或对应 S7 inspector 任一变化，恢复 `A1-06-executor-entry-last-v1`，只重验上述 CLI 4 文件、Server lifecycle、S7 与 CLI typecheck/build；只有 `server.ts` gate/activate 实现变化时才重取真实 loopback。
 - 交接类型：完成，等待协调者独立复核；无本包内遗留。
 - 下一检查点：协调者从真实 Executor root 反查同一 bound handle 的 inactive gate、stop owner/trust/final admission 次序、变化 identity 的 durable terminal、ready publication 与失败 cleanup；接受后继续 A1 的下一条单一 Host 生命周期责任，不进入 A2。
+
+### A1-07：把 Anchor pre-server 单元收束为类型化生命周期贡献
+
+- 基线与差异：`HEAD d297317e1e1f622d12a52941c70241ab9e68bf24 + A1-07-anchor-pre-server-lifecycle-contributions-v1`；进场工作区与索引为空，A1-01～A1-06 已由协调者独立复核并提交。本包新增 `assembly-lifecycle.ts` 与直接测试，修改 Anchor pre-server 单元、activation gate、shutdown-chain 和受影响直接测试，并同步 S7 production coverage/mutation 与 canonical registry golden；没有修改 post-server 单元、Executor root、领域行为、公开协议或其他产品文档，未执行 Git 写操作。
+- 责任迁移与桥关闭：原 `AssemblyStartupCleanups` 是 12 个可选字段组成的可变袋；各 `AssemblyUnit` 把 handle 写入袋中，`command.ts` 再按产品字段判断并逐项注册，`shutdown-chain.ts` 还可在 handle 缺失时直接调用运行对象，形成启动补偿、正常关闭与 fallback 三份责任表达。现在 `AssemblyLifecycleContributions` 只接受静态 `AssemblyLifecycleIdentity`，descriptor 同时冻结 owner/role/id 与既有 normal-registration stage；资源取得时单元立即通过 `acquire` 或 `contribute` 把同一 `StartupRollback` 幂等 handle 登记为贡献。除名称 exact-match 外，`StartupRollback` 以实例私有 `WeakSet` 判断 handle object provenance，贡献层因此拒绝另一个 rollback 创建的完全同名 handle；不暴露 cleanup 内容、没有全局 registry。重复 identity、stage 移交后的迟到贡献和 foreign handle 均 fail closed，条件单元不创建资源时不制造空贡献。`AssemblyStartupCleanups`、`startupCleanups`、命令层逐字段搬运及 shutdown-chain 的运行对象 fallback 已从生产源码完全删除，故该旧桥已关闭。
+- 移交与顺序：activation gate 内 `registerCoreCleanup` 的 `CoreCleanupResources.lifecycleContributions` 是必填 readonly 类型输入，并直接先后移交 `foundation` 与 `surface`，不存在 optional 参数或 optional-chain 静默跳过；不消费贡献的 `registerTailCleanup` 改用只含 state/lock 的窄参数。post-server contribution 完成后，命令根只调用一次 `runtime` 移交。三段静态顺序精确保留原 authority/workspace/local-conversation → heartbeat → channel/delivery/MCP → post-server → mesh/executor-data-plane/job-status/assets/job-owner/lossless-data-plane 注册关系，因此 CleanupRegistry 的既有 LIFO、owner exact-set、条件 topology 与单项失败隔离不变。全部贡献移交后 `assertTransferred` 才允许 `startupRollback.commit`；gate 任一步失败时 registry 与 rollback 即使都观察到同一 handle，也只实际清理一次。
+- 直接证据：初次串行定向命令覆盖 10 文件并取得 51/51；补入 handle identity 与“资源取得后 setup 失败仍逆序尝试全部补偿”断言后，初次闭包为 10 文件 52/52。协调反证纠正后只重跑失效的 `assembly-lifecycle.test.ts` 6/6、`startup-rollback.test.ts` 4/4、`shutdown-chain.test.ts` 14/14，共 3 文件 24/24；合并同一工作区未失效的其余 7 文件 29/29，当前直接闭包为 10 文件 53/53。新增反例证明另一个 rollback 产生的同名 handle 被拒绝、每个 rollback 只识别自己的 object；`@ts-expect-error` 负例把 core 缺少贡献固定为编译错误。其余证据继续识别 identity/exact-set、重复登记、setup rollback、三段/LIFO normal close、条件不适用、gate 接管后 commit 及真实单元取得资源前后的顺序。
+- 结构、构建与保护：S7 collector 现在从 `ASSEMBLY_LIFECYCLE_DESCRIPTORS` 的 literal exact-set 机械取得 12 个生产 descriptor，同时拒绝 direct registry bypass、缺失/未知 owner、恢复字段袋、丢失任一真实贡献、删除 rollback provenance 校验、把 core 输入退回 optional、恢复 optional-chain 或删除 transfer 完整性断言；纠正后一次 canonical `pnpm s7:lint` 为 21/21 且 registry golden 通过。canonical write 的人工差异仍仅为 12 项 source 从 `command.ts`/`shutdown-chain.ts` 迁到 `assembly-lifecycle.ts`，owner/role/id/role mapping 均未变。最窄 Biome、CLI canonical typecheck 与 `pnpm cli:build` 通过。A1-04 entry-last、post-server 自注册、Scheduler 非 AssemblyUnit lifecycle、HostStop/trust/idle、Server wire、领域对象与 Executor-only 手工 cleanup 均未改变。
+- 失效、遗留与状态：若 `createAssemblyUnits` pre-server exact-set、任一单元的资源取得/handle、descriptor identity/owner/role/stage、三段 transfer、StartupRollback commit、CleanupRegistry LIFO 或 S7 collector/golden 任一变化，恢复本证据并只重验上述直接闭包、S7 与 CLI typecheck/build。`A1-HOST-DELEGATE-01` 仍打开，post-server 生命周期贡献与 Executor 手工 cleanup 尚未迁移，完整零残留 Host 退出条件也未由本包独立闭合，因此 A1、完成度与最终退出门保持不变。
+- 交接类型：完成，等待协调者独立复核；无本包内遗留。
+- 下一检查点：协调者从 12 个生产资源取得点反查同一 handle 的 rollback/normal-close 双路径、条件拓扑和实际 LIFO，再核对字段袋/fallback/逐项搬运确已归零；接受后继续 A1 的下一条单一生命周期责任，不进入 A2。
+
+#### A1-07 协调复核纠正：rollback provenance 与 core transfer fail-closed
+
+- 协调反证：初次实现只比较 `handle.name`，另一个 `StartupRollback` 可构造完全同名 handle；`ShutdownChainResources.lifecycleContributions?` 与两处 optional-chain 又允许生产 core 关闭注册缺参后静默跳过 foundation/surface transfer。两点均使“同一 rollback 的同一 handle 已强制转交”结论失效，但不影响 12 项 descriptor、单元迁移、三段顺序和既有产品行为。
+- 最窄修复：`StartupRollback.owns()` 只查询该实例私有、注册时写入的 handle `WeakSet`；`contribute()` 同时校验静态 identity 和实例 provenance。shutdown-chain 拆成 `TailCleanupResources` 与 `CoreCleanupResources`，后者必填 lifecycle contribution 并无条件执行两段 transfer，前者不再携带无关 heartbeat/lifecycle 字段。没有公开 cleanup、全局登记、第二 owner 或新的产品分支。
+- 本轮实际证据：`pnpm --filter @zhixing/cli exec vitest run src/serve/__tests__/assembly-lifecycle.test.ts src/serve/__tests__/startup-rollback.test.ts src/serve/__tests__/shutdown-chain.test.ts --maxWorkers=1` 为 3 文件 24/24；`pnpm --filter @zhixing/cli exec tsc -p tsconfig.json --noEmit` 通过并消费 core 缺参的编译期负例；canonical `pnpm s7:lint` 为 21/21 且 registry golden 通过，反向 mutation 可检出 provenance 删除、core 字段 optional 化与 optional-chain；`pnpm cli:build`、受影响路径的最窄 Biome check 与 `git diff --check` 通过。原 7 个未变直接测试 29/29 继续有效，故最终 A1-07 直接闭包为 10 文件 53/53，不重复相加。
+- 状态与失效：`A1-07-anchor-pre-server-lifecycle-contributions-v1` 已在同一工作区恢复，等待协调者独立复核；A1 仍未勾选。以后若 `StartupRollback.register/owns`、handle object identity、`contribute` provenance、core/tail 参数类型、两段直接 transfer 或对应 S7 mutation 任一变化，精确恢复本纠正证据；无需重验未变化的其他 7 个直接测试。
 
 ## 十、用户提示词
 

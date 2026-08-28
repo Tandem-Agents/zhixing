@@ -7,6 +7,7 @@ import {
 } from "../local-conversation-owner.js";
 import { PROFILES } from "../profile.js";
 import { StartupRollback } from "../startup-rollback.js";
+import { AssemblyLifecycleContributions } from "../assembly-lifecycle.js";
 
 const unit = createAssemblyUnits({}).find(
   (candidate) => candidate.name === "local-conversation-owner",
@@ -90,7 +91,7 @@ describe("local conversation owner production surface", () => {
         alreadySettled: false,
       },
     });
-    await ctx.startupCleanups.localConversationOwner!.run();
+    await ctx.startupRollback.rollback();
   });
 
   it("accepts only a final frame that is already present in authoritative history", async () => {
@@ -153,6 +154,6 @@ function context(
     evidenceHandler: {},
     config: {},
     startupRollback,
-    startupCleanups: {},
+    lifecycleContributions: new AssemblyLifecycleContributions(startupRollback),
   } as unknown as AssemblyContext;
 }

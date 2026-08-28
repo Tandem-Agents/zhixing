@@ -3,6 +3,7 @@ import { createAssemblyUnits } from "../access-surfaces.js";
 import type { AssemblyContext } from "../access-surface.js";
 import { PROFILES } from "../profile.js";
 import { StartupRollback } from "../startup-rollback.js";
+import { AssemblyLifecycleContributions } from "../assembly-lifecycle.js";
 
 const assetMaintenanceSurface = createAssemblyUnits({}).find(
   (surface) => surface.name === "asset-maintenance",
@@ -26,6 +27,7 @@ describe("asset maintenance surface", () => {
 
   it("drives collection on the single-machine topology", async () => {
     let collections = 0;
+    const startupRollback = new StartupRollback();
     const ctx = {
       enabledRoles: ["anchor"],
       authorityRuntime: {
@@ -38,8 +40,8 @@ describe("asset maintenance surface", () => {
       },
       // 单机拓扑：没有 mesh bootstrap，也不会创建 mesh 控制面。
       meshBootstrap: { mode: "single-machine" },
-      startupRollback: new StartupRollback(),
-      startupCleanups: {},
+      startupRollback,
+      lifecycleContributions: new AssemblyLifecycleContributions(startupRollback),
     } as unknown as AssemblyContext;
 
     await assetMaintenanceSurface.setup(ctx);

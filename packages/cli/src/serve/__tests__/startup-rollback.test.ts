@@ -32,6 +32,17 @@ describe("StartupRollback", () => {
     expect(calls).toBe(1);
   });
 
+  it("recognizes only handles registered by the same rollback instance", () => {
+    const owner = new StartupRollback();
+    const foreign = new StartupRollback();
+    const ownedHandle = owner.register("same-name", () => undefined);
+    const foreignHandle = foreign.register("same-name", () => undefined);
+
+    expect(owner.owns(ownedHandle)).toBe(true);
+    expect(owner.owns(foreignHandle)).toBe(false);
+    expect(foreign.owns(foreignHandle)).toBe(true);
+  });
+
   it("drops rollback ownership only after commit", async () => {
     let calls = 0;
     const rollback = new StartupRollback();

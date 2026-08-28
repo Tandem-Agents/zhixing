@@ -144,6 +144,7 @@ import { DurableConversationInteractionObserver } from "./conversation-protocol-
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 import { createExecutorReadinessSource } from "./executor-readiness.js";
 import { StartupRollback } from "./startup-rollback.js";
+import { AssemblyLifecycleContributions } from "./assembly-lifecycle.js";
 import {
   createConfiguredCheckpointOwner,
   projectRecoveryBackupStatus,
@@ -782,7 +783,9 @@ async function runServerProcess(
   // 有序装配 —— 稳定核心单元恒启用，profile 仅选择可选接入面；setupAssemblyUnits
   // 按依赖拓扑序遍历、各自 setup（产物写回 ctx）。主干不出现任何 `if (profile === ...)`。
   // ============================================================================
-  const startupCleanups: AssemblyContext["startupCleanups"] = {};
+  const lifecycleContributions = new AssemblyLifecycleContributions(
+    startupRollback,
+  );
   const channelHttpRoutes: AssemblyContext["channelHttpRoutes"] = new Map();
   const anchorInternalStop = {
     current: undefined as AnchorInternalStopPort | undefined,
@@ -839,7 +842,7 @@ async function runServerProcess(
     advancementRecoveryRef,
     cleanup: registry,
     startupRollback,
-    startupCleanups,
+    lifecycleContributions,
     channelHttpRoutes,
     advancement: advancementController,
     enabledRoles: bootstrap.mesh.roles,
@@ -2169,7 +2172,7 @@ async function runServerProcess(
   });
 
   // runServer 之前：尾部清理（LIFO 最后执行 —— releaseLock / state 文件）
-  registerTailCleanup(registry, { stateFile, heartbeatTimerRef, lockPaths });
+  registerTailCleanup(registry, { stateFile, lockPaths });
 
   // runServer —— 内部会向 registry 注册 server.close（注入模式）
   if (!await verifyManagedHostAdmission(
@@ -2236,65 +2239,17 @@ async function runServerProcess(
       registerCoreCleanup(registry, {
         stateFile,
         heartbeatTimerRef,
-        authorityRuntime: ctx.authorityRuntime,
-        channels: ctx.channels,
-        deliveryStack: ctx.deliveryStack,
-        mcpHub: builtinExtraTools.mcpHub,
-        startupCleanups: {
-          authorityRuntime: startupCleanups.authorityRuntime,
-          localWorkspaceHost: startupCleanups.localWorkspaceHost,
-          localConversationOwner: startupCleanups.localConversationOwner,
-          channels: startupCleanups.channels,
-          deliveryStack: startupCleanups.deliveryStack,
-          mcp: startupCleanups.mcp,
-        },
+        lifecycleContributions,
       });
 
       // post-server contribution 依赖 prepared server.connections，但不要求入口已激活。
       // 它在自己 setup 内注册 dispose，故失败与正常关闭都由同一 registry 收口。
       await setupAssemblyUnits(assemblyUnits, ctx, "post-server");
 
-      // pre-server 接入面 teardown —— 时序硬约束（必须在 server.close 之前执行）
-      // 决定它们不能在自己 setup 内自注册，故由主干用 ctx 产物注册到 shutdown-chain。LIFO 顺序：
-      //   后注册 = 更先执行。以下三项都在 registerCoreCleanup 之后注册，先于核心资源清理执行。
-
-      if (ctx.meshRuntime) {
-        registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "meshRuntime.stop" }, async () => {
-          await startupCleanups.meshRuntime!.run();
-        });
-      }
-
-      if (ctx.executorDataPlane) {
-        registerCleanup(registry, { owner: "anchor-local-executor", role: "runtime", id: "executorDataPlane.close" }, async () => {
-          await startupCleanups.executorDataPlane!.run();
-        });
-      }
-
-      if (ctx.jobStatus) {
-        registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "jobStatus.dispose" }, async () => {
-          await startupCleanups.jobStatus!.run();
-        });
-      }
-
-      if (ctx.assetMaintenance) {
-        registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "assetMaintenance.stop" }, async () => {
-          await startupCleanups.assetMaintenance!.run();
-        });
-      }
-
-      if (ctx.executorJobOwner) {
-        registerCleanup(registry, { owner: "anchor-local-executor", role: "runtime", id: "executorJobOwner.close" }, async () => {
-          await startupCleanups.jobOwner!.run();
-        });
-      }
-
-      // 无损会话先于其依赖的 mesh / executor / channel 关停；下方执行 drain
-      // 更晚注册，仍会先停止新工作并收束在途执行。
-      if (ctx.losslessDataPlane) {
-        registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "losslessDataPlane.close" }, async () => {
-          await startupCleanups.losslessDataPlane!.run();
-        });
-      }
+      // pre-server units transfer their typed contributions in the established
+      // registration order. The same handles remain idempotently owned by the
+      // startup rollback until the full normal chain is complete.
+      lifecycleContributions.transferTo(registry, "runtime");
 
       // 远程中断模块关停链 —— LIFO 最先执行（在 channels.dispose / scheduler.stop / server.close 之前）：
       //   1. inboundRouter.refuseNew  拒新入站，避免下游 drain 期间又来新消息
@@ -2347,6 +2302,7 @@ async function runServerProcess(
       }
 
       // 正常停机链已经完整接管所有已取得资源；启动补偿事务不再持有独立责任。
+      lifecycleContributions.assertTransferred();
       startupRollback.commit();
     },
     publishReady: async (openingRunner) => {

@@ -2136,7 +2136,7 @@
         "owner": "anchor-host",
         "role": "common",
         "id": "authorityRuntime.stopStorageMaintenance",
-        "source": "packages/cli/src/serve/shutdown-chain.ts",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-host:common:authorityRuntime.stopStorageMaintenance",
         "category": "cleanup",
         "target": {
@@ -2147,7 +2147,7 @@
         "owner": "anchor-host",
         "role": "common",
         "id": "channels.dispose",
-        "source": "packages/cli/src/serve/shutdown-chain.ts",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-host:common:channels.dispose",
         "category": "cleanup",
         "target": {
@@ -2158,7 +2158,7 @@
         "owner": "anchor-host",
         "role": "common",
         "id": "deliveryStack.stop",
-        "source": "packages/cli/src/serve/shutdown-chain.ts",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-host:common:deliveryStack.stop",
         "category": "cleanup",
         "target": {
@@ -2180,7 +2180,7 @@
         "owner": "anchor-host",
         "role": "common",
         "id": "mcpHub.dispose",
-        "source": "packages/cli/src/serve/shutdown-chain.ts",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-host:common:mcpHub.dispose",
         "category": "cleanup",
         "target": {
@@ -2246,7 +2246,7 @@
         "owner": "anchor-host",
         "role": "runtime",
         "id": "assetMaintenance.stop",
-        "source": "packages/cli/src/serve/command.ts",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-host:runtime:assetMaintenance.stop",
         "category": "cleanup",
         "target": {
@@ -2312,7 +2312,7 @@
         "owner": "anchor-host",
         "role": "runtime",
         "id": "jobStatus.dispose",
-        "source": "packages/cli/src/serve/command.ts",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-host:runtime:jobStatus.dispose",
         "category": "cleanup",
         "target": {
@@ -2323,7 +2323,7 @@
         "owner": "anchor-host",
         "role": "runtime",
         "id": "losslessDataPlane.close",
-        "source": "packages/cli/src/serve/command.ts",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-host:runtime:losslessDataPlane.close",
         "category": "cleanup",
         "target": {
@@ -2334,7 +2334,7 @@
         "owner": "anchor-host",
         "role": "runtime",
         "id": "meshRuntime.stop",
-        "source": "packages/cli/src/serve/command.ts",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-host:runtime:meshRuntime.stop",
         "category": "cleanup",
         "target": {
@@ -2389,7 +2389,7 @@
         "owner": "anchor-local-executor",
         "role": "common",
         "id": "localWorkspaceHost.close",
-        "source": "packages/cli/src/serve/shutdown-chain.ts",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-local-executor:common:localWorkspaceHost.close",
         "category": "cleanup",
         "target": {
@@ -2411,7 +2411,7 @@
         "owner": "anchor-local-executor",
         "role": "runtime",
         "id": "executorDataPlane.close",
-        "source": "packages/cli/src/serve/command.ts",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-local-executor:runtime:executorDataPlane.close",
         "category": "cleanup",
         "target": {
@@ -2422,7 +2422,7 @@
         "owner": "anchor-local-executor",
         "role": "runtime",
         "id": "executorJobOwner.close",
-        "source": "packages/cli/src/serve/command.ts",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-local-executor:runtime:executorJobOwner.close",
         "category": "cleanup",
         "target": {
@@ -2433,7 +2433,7 @@
         "owner": "anchor-local-executor",
         "role": "runtime",
         "id": "localConversationOwner.close",
-        "source": "packages/cli/src/serve/shutdown-chain.ts",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-local-executor:runtime:localConversationOwner.close",
         "category": "cleanup",
         "target": {

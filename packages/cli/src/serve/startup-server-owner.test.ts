@@ -32,6 +32,14 @@ describe("production startup server ownership", () => {
       activation,
       'await setupAssemblyUnits(assemblyUnits, ctx, "post-server")',
     );
+    const runtimeTransfer = location(
+      activation,
+      'lifecycleContributions.transferTo(registry, "runtime")',
+    );
+    const transferComplete = location(
+      activation,
+      "lifecycleContributions.assertTransferred()",
+    );
     const cleanupCommit = location(activation, "startupRollback.commit()");
     const publish = location(activation, "publishReady: async (openingRunner) =>");
     const ready = location(activation, "await stateFile.markReady({");
@@ -39,6 +47,11 @@ describe("production startup server ownership", () => {
       expect(prerequisite).toBeGreaterThan(gate);
       expect(prerequisite).toBeLessThan(publish);
     }
+    expect(runtimeTransfer).toBeGreaterThan(contribution);
+    expect(transferComplete).toBeGreaterThan(runtimeTransfer);
+    expect(cleanupCommit).toBeGreaterThan(transferComplete);
+    expect(source).not.toContain("startupCleanups");
+    expect(source).not.toContain("AssemblyStartupCleanups");
     expect(ready).toBeGreaterThan(publish);
     expect(location(source, "await runner.waitForShutdown()"))
       .toBeGreaterThan(location(source, "runner = await runServer"));

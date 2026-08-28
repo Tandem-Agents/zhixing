@@ -85,10 +85,8 @@ import type {
   FirstPartyFinalitySession,
   FirstPartyFinalitySessionOptions,
 } from "./first-party-finality-session.js";
-import type {
-  StartupCleanupHandle,
-  StartupRollback,
-} from "./startup-rollback.js";
+import type { StartupRollback } from "./startup-rollback.js";
+import type { AssemblyLifecycleContributions } from "./assembly-lifecycle.js";
 import type { LocalWorkspaceAssemblyIdentity } from "../runtime/local-workspace-bootstrap.js";
 import type { AgentRuntimeCapacityBinding } from "@zhixing/orchestrator/runtime";
 import type { ProviderCredentialProjection } from "@zhixing/providers";
@@ -98,21 +96,6 @@ import type { MeshConnectionProjectionPort } from "@zhixing/mesh/bootstrap";
 
 /** 接入面装配阶段 —— 适配真实交织（confirmationBridge 依赖 prepared connections）。 */
 export type SurfacePhase = "pre-server" | "post-server";
-
-export interface AssemblyStartupCleanups {
-  mcp?: StartupCleanupHandle;
-  authorityRuntime?: StartupCleanupHandle;
-  executorDataPlane?: StartupCleanupHandle;
-  jobStatus?: StartupCleanupHandle;
-  assetMaintenance?: StartupCleanupHandle;
-  meshRuntime?: StartupCleanupHandle;
-  jobOwner?: StartupCleanupHandle;
-  losslessDataPlane?: StartupCleanupHandle;
-  channels?: StartupCleanupHandle;
-  deliveryStack?: StartupCleanupHandle;
-  localWorkspaceHost?: StartupCleanupHandle;
-  localConversationOwner?: StartupCleanupHandle;
-}
 
 /**
  * 装配期共享上下文 —— 接入面 setup 从这里读依赖、把产物写回，后续接入面 / 核心再读。
@@ -192,7 +175,7 @@ export interface AssemblyContext {
    */
   readonly cleanup: CleanupRegistry;
   readonly startupRollback: StartupRollback;
-  readonly startupCleanups: AssemblyStartupCleanups;
+  readonly lifecycleContributions: AssemblyLifecycleContributions;
   readonly channelHttpRoutes: Map<
     string,
     import("@zhixing/core").HttpHandler

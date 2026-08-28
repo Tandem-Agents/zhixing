@@ -442,6 +442,8 @@ async function collectSlashCommands() {
 
 export function collectCleanupRegistrationsFromSource(relative, text) {
   const source = sourceFile(relative, text);
+  const assemblyLifecycleSource =
+    relative === "packages/cli/src/serve/assembly-lifecycle.ts";
   const helperNames = new Set();
   const cleanupTypeNames = new Set();
   for (const statement of source.statements) {
@@ -507,7 +509,9 @@ export function collectCleanupRegistrationsFromSource(relative, text) {
       }
     }
   }
-  const result = [];
+  const result = assemblyLifecycleSource
+    ? collectAssemblyLifecycleDescriptors(relative, source)
+    : [];
   const failures = [];
   const cleanupOwners = new Set([
     "anchor-host",
@@ -521,7 +525,13 @@ export function collectCleanupRegistrationsFromSource(relative, text) {
         helperNames.has(node.expression.text)
       ) {
         const descriptor = node.arguments[1];
-        if (!descriptor || !ts.isObjectLiteralExpression(descriptor)) {
+        const typedAssemblyTransfer = assemblyLifecycleSource &&
+          descriptor && ts.isIdentifier(descriptor) &&
+          descriptor.text === "descriptor";
+        if (typedAssemblyTransfer) {
+          // The finite literal descriptor table above is the contract source;
+          // this call transfers one of those typed entries without rebuilding it.
+        } else if (!descriptor || !ts.isObjectLiteralExpression(descriptor)) {
           failures.push(`${relative}: cleanup descriptor must be an object literal`);
         } else {
           const owner = literalProperty(descriptor, "owner");
@@ -551,6 +561,63 @@ export function collectCleanupRegistrationsFromSource(relative, text) {
   visit(source);
   if (failures.length > 0) throw new Error(failures.join("\n"));
   return result;
+}
+
+function collectAssemblyLifecycleDescriptors(relative, source) {
+  let initializer;
+  for (const statement of source.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (
+        ts.isIdentifier(declaration.name) &&
+        declaration.name.text === "ASSEMBLY_LIFECYCLE_DESCRIPTORS"
+      ) initializer = declaration.initializer;
+    }
+  }
+  const table = unwrapStaticExpression(initializer);
+  if (!table || !ts.isArrayLiteralExpression(table)) {
+    throw new Error(`${relative}: assembly lifecycle descriptor table must be a literal array`);
+  }
+  const result = [];
+  for (const element of table.elements) {
+    const descriptor = unwrapStaticExpression(element);
+    if (!descriptor || !ts.isObjectLiteralExpression(descriptor)) {
+      throw new Error(`${relative}: assembly lifecycle descriptor must be an object literal`);
+    }
+    const owner = literalProperty(descriptor, "owner");
+    const role = literalProperty(descriptor, "role");
+    const id = literalProperty(descriptor, "id");
+    const stage = literalProperty(descriptor, "stage");
+    if (!owner || !role || !id) {
+      throw new Error(`${relative}: cleanup descriptor owner/role/id must be literal`);
+    }
+    if (!stage) {
+      throw new Error(`${relative}: assembly lifecycle stage must be literal`);
+    }
+    if (![
+      "anchor-host",
+      "anchor-local-executor",
+      "standalone-server",
+    ].includes(owner)) {
+      throw new Error(`${relative}: unknown cleanup owner ${owner}`);
+    }
+    if (!["foundation", "surface", "runtime"].includes(stage)) {
+      throw new Error(`${relative}: unknown assembly lifecycle stage ${stage}`);
+    }
+    result.push({ owner, role, id, source: relative });
+  }
+  return result;
+}
+
+function unwrapStaticExpression(expression) {
+  let current = expression;
+  while (
+    current &&
+    (ts.isAsExpression(current) ||
+      ts.isSatisfiesExpression(current) ||
+      ts.isParenthesizedExpression(current))
+  ) current = current.expression;
+  return current;
 }
 
 async function collectCleanupRegistrations() {
@@ -1025,6 +1092,10 @@ export function inspectManagedHostAssembly(records) {
   const pairing = byPath.get("packages/cli/src/serve/mesh-pair-command.ts");
   const config = byPath.get("packages/cli/src/runtime/config-command.ts");
   const command = byPath.get("packages/cli/src/serve/command.ts");
+  const accessSurface = byPath.get("packages/cli/src/serve/access-surface.ts");
+  const accessSurfaces = byPath.get("packages/cli/src/serve/access-surfaces.ts");
+  const assemblyLifecycle = byPath.get("packages/cli/src/serve/assembly-lifecycle.ts");
+  const shutdownChain = byPath.get("packages/cli/src/serve/shutdown-chain.ts");
   const anchorInternalStop = byPath.get("packages/cli/src/serve/anchor-internal-stop.ts");
   const executorRoot = byPath.get("packages/cli/src/serve/executor-role-runtime.ts");
   const executorInternalStop = byPath.get("packages/cli/src/serve/executor-internal-stop.ts");
@@ -1045,11 +1116,60 @@ export function inspectManagedHostAssembly(records) {
   const server = byPath.get("packages/server/src/server.ts");
   if (
     !reconciler || !service || !serviceRuntime || !bootstrap || !pairing || !config ||
-    !command || !anchorInternalStop || !executorRoot || !executorInternalStop || !topology || !applicationHost || !connection || !repl || !surfaceLink || !secrets || !status ||
+    !command || !accessSurface || !accessSurfaces || !assemblyLifecycle || !shutdownChain ||
+    !anchorInternalStop || !executorRoot || !executorInternalStop || !topology || !applicationHost || !connection || !repl || !surfaceLink || !secrets || !status ||
     !publicStatus || !statusRoute || !scheduler || !manifest || !serverContext || !serverShutdown ||
     !serverLifecycle || !server
   ) return ["managed host production assembly sources are missing"];
   const count = (text, token) => text.split(token).length - 1;
+  const assemblyLifecycleIds = [
+    "authorityRuntime.stopStorageMaintenance",
+    "localWorkspaceHost.close",
+    "localConversationOwner.close",
+    "channels.dispose",
+    "deliveryStack.stop",
+    "mcpHub.dispose",
+    "meshRuntime.stop",
+    "executorDataPlane.close",
+    "jobStatus.dispose",
+    "assetMaintenance.stop",
+    "executorJobOwner.close",
+    "losslessDataPlane.close",
+  ];
+  const lifecycleDescriptors = collectCleanupRegistrationsFromSource(
+    "packages/cli/src/serve/assembly-lifecycle.ts",
+    assemblyLifecycle,
+  );
+  const contributionCount = (identity) =>
+    count(accessSurfaces, `lifecycleContributions.acquire("${identity}"`) +
+    count(accessSurfaces, `lifecycleContributions.contribute(\n      "${identity}"`);
+  const runtimeTransfer = command.indexOf(
+    'lifecycleContributions.transferTo(registry, "runtime")',
+  );
+  const transferAssertion = command.indexOf(
+    "lifecycleContributions.assertTransferred()",
+    runtimeTransfer,
+  );
+  const rollbackCommit = command.indexOf("startupRollback.commit()", transferAssertion);
+  if (
+    lifecycleDescriptors.length !== assemblyLifecycleIds.length ||
+    lifecycleDescriptors.map(({ id }) => id).join("\n") !== assemblyLifecycleIds.join("\n") ||
+    assemblyLifecycleIds.some((identity) => contributionCount(identity) !== 1) ||
+    [accessSurface, accessSurfaces, command, shutdownChain]
+      .some((source) => source.includes("startupCleanups") || source.includes("AssemblyStartupCleanups")) ||
+    count(shutdownChain, 'resources: TailCleanupResources') !== 1 ||
+    count(shutdownChain, 'resources: CoreCleanupResources') !== 1 ||
+    count(shutdownChain, 'readonly lifecycleContributions: AssemblyLifecycleContributions;') !== 1 ||
+    shutdownChain.includes('lifecycleContributions?:') ||
+    shutdownChain.includes('lifecycleContributions?.') ||
+    count(shutdownChain, 'lifecycleContributions.transferTo(registry, "foundation")') !== 1 ||
+    count(shutdownChain, 'lifecycleContributions.transferTo(registry, "surface")') !== 1 ||
+    count(command, 'lifecycleContributions.transferTo(registry, "runtime")') !== 1 ||
+    runtimeTransfer < 0 || transferAssertion < runtimeTransfer || rollbackCommit < transferAssertion ||
+    count(assemblyLifecycle, "registerCleanup(registry, descriptor, () => contribution.handle.run())") !== 1 ||
+    count(assemblyLifecycle, "if (!this.#rollback.owns(handle))") !== 1 ||
+    count(assemblyLifecycle, "Assembly lifecycle contribution already exists") !== 1
+  ) failures.push("Anchor pre-server lifecycle contribution ownership drifted");
   const descriptor = frozenLiteralDescriptor(
     "packages/cli/src/serve/managed-service-reconciler.ts",
     reconciler,

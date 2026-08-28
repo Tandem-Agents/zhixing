@@ -4,15 +4,30 @@ import { describe, it, vi } from "vitest";
 import {
   registerCoreCleanup,
   registerTailCleanup,
-  type ShutdownChainResources,
+  type CoreCleanupResources,
+  type TailCleanupResources,
 } from "../shutdown-chain.js";
+import { AssemblyLifecycleContributions } from "../assembly-lifecycle.js";
+import { StartupRollback } from "../startup-rollback.js";
 
 describe("runtime lifecycle migration golden", () => {
   it("matches registration and cleanup order", async () => {
     const executed: string[] = [];
     const registry = new CleanupRegistry({ logger: { error() {} } });
     const register = vi.spyOn(registry, "register");
-    const resources: ShutdownChainResources = {
+    const lifecycleContributions = new AssemblyLifecycleContributions(
+      new StartupRollback(),
+    );
+    lifecycleContributions.acquire("mcpHub.dispose", async () => {
+      executed.push("mcpHub.dispose");
+    });
+    lifecycleContributions.acquire("channels.dispose", async () => {
+      executed.push("channels.dispose");
+    });
+    lifecycleContributions.acquire("deliveryStack.stop", async () => {
+      executed.push("deliveryStack.stop");
+    });
+    const resources: CoreCleanupResources & TailCleanupResources = {
       heartbeatTimerRef: { current: null },
       stateFile: {
         cleanup: async () => {
@@ -30,21 +45,7 @@ describe("runtime lifecycle migration golden", () => {
           executed.push("scheduler.stop");
         },
       } as never,
-      mcpHub: {
-        dispose: async () => {
-          executed.push("mcpHub.dispose");
-        },
-      } as never,
-      channels: {
-        dispose: async () => {
-          executed.push("channels.dispose");
-        },
-      } as never,
-      deliveryStack: {
-        stop: async () => {
-          executed.push("deliveryStack.stop");
-        },
-      } as never,
+      lifecycleContributions,
     };
 
     registerTailCleanup(registry, resources);

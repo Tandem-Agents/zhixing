@@ -229,6 +229,7 @@ test("cleanup and channel coverage are bound to actual production calls", async 
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/shutdown-chain.ts",
     "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/assembly-lifecycle.ts",
   ];
   const descriptors = [];
   for (const source of cleanupSources) {
@@ -238,38 +239,41 @@ test("cleanup and channel coverage are bound to actual production calls", async 
     ));
   }
   assert.ok(descriptors.length >= 20);
-  const command = await readFile("packages/cli/src/serve/command.ts", "utf8");
+  const assemblyLifecycle = await readFile(
+    "packages/cli/src/serve/assembly-lifecycle.ts",
+    "utf8",
+  );
   assert.throws(
     () => collectCleanupRegistrationsFromSource(
-      "packages/cli/src/serve/command.ts",
-      command.replace(
-        'registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "meshRuntime.stop" }, async () => {',
-        'registry.register("meshRuntime.stop", async () => {',
+      "packages/cli/src/serve/assembly-lifecycle.ts",
+      assemblyLifecycle.replace(
+        "registerCleanup(registry, descriptor, () => contribution.handle.run())",
+        "registry.register(descriptor.id, () => contribution.handle.run())",
       ),
     ),
     /bypasses registerCleanup descriptor/,
   );
   assert.throws(
     () => collectCleanupRegistrationsFromSource(
-      "packages/cli/src/serve/command.ts",
-      command.replace(
-        'registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "meshRuntime.stop" }, async () => {',
-        'const shutdowns = registry; shutdowns.register("meshRuntime.stop", async () => {',
+      "packages/cli/src/serve/assembly-lifecycle.ts",
+      assemblyLifecycle.replace(
+        "registerCleanup(registry, descriptor, () => contribution.handle.run())",
+        "const shutdowns = registry; shutdowns.register(descriptor.id, () => contribution.handle.run())",
       ),
     ),
     /bypasses registerCleanup descriptor/,
   );
   assert.throws(
     () => collectCleanupRegistrationsFromSource(
-      "packages/cli/src/serve/command.ts",
-      command.replace('owner: "anchor-host", role: "runtime", id: "meshRuntime.stop"', 'role: "runtime", id: "meshRuntime.stop"'),
+      "packages/cli/src/serve/assembly-lifecycle.ts",
+      assemblyLifecycle.replace('owner: "anchor-host",\n    role: "runtime",\n    id: "meshRuntime.stop"', 'role: "runtime",\n    id: "meshRuntime.stop"'),
     ),
     /owner\/role\/id must be literal/,
   );
   assert.throws(
     () => collectCleanupRegistrationsFromSource(
-      "packages/cli/src/serve/command.ts",
-      command.replace('owner: "anchor-host", role: "runtime", id: "meshRuntime.stop"', 'owner: "unknown-host", role: "runtime", id: "meshRuntime.stop"'),
+      "packages/cli/src/serve/assembly-lifecycle.ts",
+      assemblyLifecycle.replace('owner: "anchor-host",\n    role: "runtime",\n    id: "meshRuntime.stop"', 'owner: "unknown-host",\n    role: "runtime",\n    id: "meshRuntime.stop"'),
     ),
     /unknown cleanup owner unknown-host/,
   );
@@ -1671,6 +1675,10 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     "packages/cli/src/serve/mesh-pair-command.ts",
     "packages/cli/src/runtime/config-command.ts",
     "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/access-surface.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/assembly-lifecycle.ts",
+    "packages/cli/src/serve/shutdown-chain.ts",
     "packages/cli/src/serve/anchor-internal-stop.ts",
     "packages/cli/src/serve/executor-role-runtime.ts",
     "packages/cli/src/serve/executor-internal-stop.ts",
@@ -1704,6 +1712,66 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
       (text) => text.replace('"host-missing",', '"health-read",'),
     )).join("\n"),
     /descriptor exact-set drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        'ctx.lifecycleContributions.acquire("meshRuntime.stop"',
+        'ctx.startupRollback.register("meshRuntime.stop"',
+      ),
+    )).join("\n"),
+    /pre-server lifecycle contribution ownership drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/assembly-lifecycle.ts",
+      (text) => text.replace(
+        "contribution.handle.run()",
+        "Promise.resolve()",
+      ),
+    )).join("\n"),
+    /pre-server lifecycle contribution ownership drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/assembly-lifecycle.ts",
+      (text) => text.replace(
+        "if (!this.#rollback.owns(handle))",
+        "if (false)",
+      ),
+    )).join("\n"),
+    /pre-server lifecycle contribution ownership drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/shutdown-chain.ts",
+      (text) => text.replace(
+        "readonly lifecycleContributions: AssemblyLifecycleContributions;",
+        "readonly lifecycleContributions?: AssemblyLifecycleContributions;",
+      ),
+    )).join("\n"),
+    /pre-server lifecycle contribution ownership drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/shutdown-chain.ts",
+      (text) => text.replace(
+        'resources.lifecycleContributions.transferTo(registry, "foundation")',
+        'resources.lifecycleContributions?.transferTo(registry, "foundation")',
+      ),
+    )).join("\n"),
+    /pre-server lifecycle contribution ownership drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "lifecycleContributions.assertTransferred();",
+        "void lifecycleContributions;",
+      ),
+    )).join("\n"),
+    /pre-server lifecycle contribution ownership drifted/,
   );
   assert.match(
     inspectManagedHostAssembly(mutate(

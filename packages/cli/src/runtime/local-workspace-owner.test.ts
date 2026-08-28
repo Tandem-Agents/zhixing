@@ -91,7 +91,7 @@ describe("local workspace management ownership", () => {
     ]);
     expect(sources.some(({ source }) => source.includes("workspace-settings-capacity"))).toBe(false);
     const accessSurface = sources.find(({ file }) => file.endsWith("access-surfaces.ts"))!.source;
-    expect(accessSurface.indexOf('startupRollback.register(\n        "localWorkspaceHost.close"'))
+    expect(accessSurface.indexOf('lifecycleContributions.acquire("localWorkspaceHost.close"'))
       .toBeLessThan(accessSurface.indexOf("await host.start()"));
     for (const fileName of ["executor-role-runtime.ts", "workspace-command.ts"]) {
       const source = sources.find(({ file }) => file.endsWith(fileName))!.source;

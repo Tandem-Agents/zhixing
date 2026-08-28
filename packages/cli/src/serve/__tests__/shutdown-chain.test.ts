@@ -15,14 +15,22 @@ import {
   registerTailCleanup,
   registerCoreCleanup,
   mapReasonToExit,
-  type ShutdownChainResources,
+  type CoreCleanupResources,
+  type TailCleanupResources,
 } from "../shutdown-chain.js";
+import {
+  AssemblyLifecycleContributions,
+  type AssemblyLifecycleIdentity,
+} from "../assembly-lifecycle.js";
+import { StartupRollback } from "../startup-rollback.js";
 
 function quietLogger() {
   return { info: vi.fn(), debug: vi.fn(), error: vi.fn() };
 }
 
-function mkFullResources(heartbeatTimerRef = { current: null as NodeJS.Timeout | null }): ShutdownChainResources {
+type FullCleanupResources = CoreCleanupResources & TailCleanupResources;
+
+function mkFullResources(heartbeatTimerRef = { current: null as NodeJS.Timeout | null }): FullCleanupResources {
   return {
     heartbeatTimerRef,
     stateFile: {
@@ -31,13 +39,29 @@ function mkFullResources(heartbeatTimerRef = { current: null as NodeJS.Timeout |
       markStopping: vi.fn(async () => {}),
     } as any,
     scheduler: { stop: vi.fn(async () => {}) } as any,
-    channels: { dispose: vi.fn(async () => {}) } as any,
-    mcpHub: { dispose: vi.fn(async () => {}) } as any,
-    deliveryStack: { stop: vi.fn(async () => {}) } as any,
-    authorityRuntime: {
-      stopStorageMaintenance: vi.fn(),
-    } as any,
+    lifecycleContributions: lifecycleFor(),
   };
+}
+
+// @ts-expect-error Production core cleanup cannot omit typed lifecycle transfer.
+const missingCoreLifecycle: CoreCleanupResources = {
+  heartbeatTimerRef: { current: null },
+};
+void missingCoreLifecycle;
+
+function lifecycleFor(
+  cleanups: Partial<Record<AssemblyLifecycleIdentity, () => void | Promise<void>>> = {},
+): AssemblyLifecycleContributions {
+  const lifecycle = new AssemblyLifecycleContributions(new StartupRollback());
+  for (const identity of [
+    "authorityRuntime.stopStorageMaintenance",
+    "channels.dispose",
+    "deliveryStack.stop",
+    "mcpHub.dispose",
+  ] as const) {
+    lifecycle.acquire(identity, cleanups[identity] ?? (() => undefined));
+  }
+  return lifecycle;
 }
 
 describe("registerTailCleanup", () => {
@@ -56,7 +80,7 @@ describe("registerTailCleanup", () => {
     const registry = new CleanupRegistry({ logger: quietLogger() });
     const spy = vi.spyOn(registry, "register");
 
-    registerTailCleanup(registry, { heartbeatTimerRef: { current: null } });
+    registerTailCleanup(registry, {});
 
     const names = spy.mock.calls.map((c) => c[0]);
     expect(names).toEqual(["releaseLock"]);
@@ -85,7 +109,10 @@ describe("registerCoreCleanup", () => {
     const registry = new CleanupRegistry({ logger: quietLogger() });
     const spy = vi.spyOn(registry, "register");
 
-    registerCoreCleanup(registry, { heartbeatTimerRef: { current: null } });
+    registerCoreCleanup(registry, {
+      heartbeatTimerRef: { current: null },
+      lifecycleContributions: new AssemblyLifecycleContributions(new StartupRollback()),
+    });
 
     expect(spy.mock.calls.map((c) => c[0])).toEqual(["heartbeat.clear"]);
   });
@@ -94,7 +121,10 @@ describe("registerCoreCleanup", () => {
     const registry = new CleanupRegistry({ logger: quietLogger() });
     const ref: { current: NodeJS.Timeout | null } = { current: null };
 
-    registerCoreCleanup(registry, { heartbeatTimerRef: ref });
+    registerCoreCleanup(registry, {
+      heartbeatTimerRef: ref,
+      lifecycleContributions: new AssemblyLifecycleContributions(new StartupRollback()),
+    });
 
     // timer 后来才创建
     const timer = setInterval(() => {}, 100_000);
@@ -115,7 +145,7 @@ describe("LIFO execution order (spec §3.6.1 regression guard)", () => {
     const registry = new CleanupRegistry({ logger: quietLogger() });
     const order: string[] = [];
 
-    const res: ShutdownChainResources = {
+    const res: FullCleanupResources = {
       heartbeatTimerRef: { current: null },
       stateFile: {
         cleanup: vi.fn(async () => {
@@ -133,26 +163,20 @@ describe("LIFO execution order (spec §3.6.1 regression guard)", () => {
           order.push("scheduler.stop");
         }),
       } as any,
-      channels: {
-        dispose: vi.fn(async () => {
+      lifecycleContributions: lifecycleFor({
+        "channels.dispose": vi.fn(async () => {
           order.push("channels.dispose");
         }),
-      } as any,
-      deliveryStack: {
-        stop: vi.fn(async () => {
+        "deliveryStack.stop": vi.fn(async () => {
           order.push("deliveryStack.stop");
         }),
-      } as any,
-      mcpHub: {
-        dispose: vi.fn(async () => {
+        "mcpHub.dispose": vi.fn(async () => {
           order.push("mcpHub.dispose");
         }),
-      } as any,
-      authorityRuntime: {
-        stopStorageMaintenance: vi.fn(() => {
+        "authorityRuntime.stopStorageMaintenance": vi.fn(() => {
           order.push("authorityRuntime.stopStorageMaintenance");
         }),
-      } as any,
+      }),
     };
 
     // 模拟 command.ts 的真实注册时序：tail → [runServer 注册 server.close] → core
@@ -229,7 +253,6 @@ describe("releaseLock closure (Issue θ regression guard)", () => {
     // Child B 的 catch 分支调 runAll → releaseLock 闭包执行
     const registry = new CleanupRegistry({ logger: quietLogger() });
     registerTailCleanup(registry, {
-      heartbeatTimerRef: { current: null },
       lockPaths: { pidPath, portPath },
     });
     await registry.runAll("startup-failure");
@@ -255,7 +278,6 @@ describe("releaseLock closure (Issue θ regression guard)", () => {
 
     const registry = new CleanupRegistry({ logger: quietLogger() });
     registerTailCleanup(registry, {
-      heartbeatTimerRef: { current: null },
       lockPaths: { pidPath, portPath },
     });
     await registry.runAll("test");
@@ -269,7 +291,6 @@ describe("releaseLock closure (Issue θ regression guard)", () => {
     // 什么都不写——acquireLock 早期失败场景
     const registry = new CleanupRegistry({ logger: quietLogger() });
     registerTailCleanup(registry, {
-      heartbeatTimerRef: { current: null },
       lockPaths: { pidPath, portPath },
     });
     // 不抛、不 log error

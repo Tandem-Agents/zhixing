@@ -15,6 +15,7 @@ interface StartupCleanupEntry {
  */
 export class StartupRollback {
   readonly #entries: StartupCleanupEntry[] = [];
+  readonly #handles = new WeakSet<StartupCleanupHandle>();
   #committed = false;
 
   register(
@@ -25,8 +26,13 @@ export class StartupRollback {
       throw new Error("Startup rollback transaction is already committed");
     }
     const handle = createCleanupHandle(name, cleanup);
+    this.#handles.add(handle);
     this.#entries.push({ handle });
     return handle;
+  }
+
+  owns(handle: StartupCleanupHandle): boolean {
+    return this.#handles.has(handle);
   }
 
   commit(): void {

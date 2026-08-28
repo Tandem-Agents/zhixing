@@ -75,9 +75,8 @@ const mcpSurface: AccessSurface = {
   name: "mcp",
   phase: "pre-server",
   async setup(ctx) {
-    ctx.startupCleanups.mcp ??= ctx.startupRollback.register(
-      "mcpHub.dispose",
-      () => ctx.mcpHub.dispose(),
+    ctx.lifecycleContributions.acquire("mcpHub.dispose", () =>
+      ctx.mcpHub.dispose()
     );
     await ctx.mcpHub.connectAll();
   },
@@ -115,7 +114,10 @@ const authorityRuntimeSurface: AccessSurface = {
       // 返回前失败"的无人清理窗口。
       startupRollback: ctx.startupRollback,
     });
-    ctx.startupCleanups.authorityRuntime = authorityRuntime.startupCleanup;
+    ctx.lifecycleContributions.contribute(
+      "authorityRuntime.stopStorageMaintenance",
+      authorityRuntime.startupCleanup,
+    );
     ctx.authorityRuntime = authorityRuntime;
     if (ctx.startupLifecycle) {
       await authorityRuntime.authority.restoreLifecycleAdmission(
@@ -144,9 +146,8 @@ const authorityRuntimeSurface: AccessSurface = {
         },
       });
       if (!host) throw new Error("Local workspace management host is unavailable");
-      ctx.startupCleanups.localWorkspaceHost = ctx.startupRollback.register(
-        "localWorkspaceHost.close",
-        () => host.close(),
+      ctx.lifecycleContributions.acquire("localWorkspaceHost.close", () =>
+        host.close()
       );
       await host.start();
       if (!authorityRuntime.environment) {
@@ -206,9 +207,8 @@ const authorityRuntimeSurface: AccessSurface = {
     ctx.executionStatusHub = statusHub;
     ctx.firstPartyFinality = (input) =>
       new FirstPartyFinalitySession({ sources: statusHub, ...input });
-    ctx.startupCleanups.jobStatus = ctx.startupRollback.register(
-      "jobStatus.dispose",
-      () => jobStatus.dispose(),
+    ctx.lifecycleContributions.acquire("jobStatus.dispose", () =>
+      jobStatus.dispose()
     );
     ctx.jobStatus = jobStatus;
   },
@@ -233,9 +233,8 @@ const executorDataPlaneSurface: AccessSurface = {
       onError: (error) =>
         console.warn(chalk.yellow(`[data-plane] ${error.message}`)),
     });
-    ctx.startupCleanups.executorDataPlane = ctx.startupRollback.register(
-      "executorDataPlane.close",
-      () => dataPlane.close(),
+    ctx.lifecycleContributions.acquire("executorDataPlane.close", () =>
+      dataPlane.close()
     );
     ctx.executorDataPlane = dataPlane;
   },
@@ -263,9 +262,8 @@ const assetMaintenanceSurface: AccessSurface = {
       onError: (error) =>
         console.warn(chalk.yellow(`[assets] ${error.message}`)),
     });
-    ctx.startupCleanups.assetMaintenance = ctx.startupRollback.register(
-      "assetMaintenance.stop",
-      () => maintenance.stop(),
+    ctx.lifecycleContributions.acquire("assetMaintenance.stop", () =>
+      maintenance.stop()
     );
     await maintenance.start();
     ctx.assetMaintenance = maintenance;
@@ -329,10 +327,7 @@ const meshSurface: AccessSurface = {
       onError: (error) => console.warn(chalk.yellow(`[mesh] ${error.message}`)),
       ...(ctx.onTrustApplied ? { onTrustApplied: ctx.onTrustApplied } : {}),
     });
-    const cleanup = ctx.startupRollback.register(
-      "meshRuntime.stop",
-      () => mesh.stop(),
-    );
+    ctx.lifecycleContributions.acquire("meshRuntime.stop", () => mesh.stop());
     await mesh.start(ctx.startupLifecycle
       ? {
           lifecycleAdmissionClosed: true,
@@ -340,7 +335,6 @@ const meshSurface: AccessSurface = {
         }
       : {});
     ctx.meshRuntime = mesh;
-    ctx.startupCleanups.meshRuntime = cleanup;
   },
 };
 
@@ -380,9 +374,8 @@ const losslessDataPlaneSurface: AccessSurface = {
       onCoordinatorError: (error) =>
         console.warn(chalk.yellow(`[channel-coordinator] ${error.message}`)),
     });
-    ctx.startupCleanups.losslessDataPlane = ctx.startupRollback.register(
-      "losslessDataPlane.close",
-      () => composition.close(),
+    ctx.lifecycleContributions.acquire("losslessDataPlane.close", () =>
+      composition.close()
     );
     ctx.losslessDataPlane = composition.runtime;
     ctx.channelCoordinator = composition.coordinator;
@@ -740,11 +733,9 @@ const localConversationOwnerUnit: CoreAssemblyUnit = {
             ctx.meshBootstrap.trust.issuer.deviceId
           : ctx.authorityRuntime!.deviceId,
     });
-    const cleanup = ctx.startupRollback.register(
-      "localConversationOwner.close",
-      () => assembly.close(),
+    ctx.lifecycleContributions.acquire("localConversationOwner.close", () =>
+      assembly.close()
     );
-    ctx.startupCleanups.localConversationOwner = cleanup;
     await assembly.start(ctx.startupLifecycle
       ? {
           lifecycle: {
@@ -870,9 +861,8 @@ const executorJobOwnerStartUnit: CoreAssemblyUnit = {
   async setup(ctx) {
     const assembly = ctx.executorJobOwnerAssembly;
     if (!assembly) return;
-    ctx.startupCleanups.jobOwner ??= ctx.startupRollback.register(
-      "executorJobOwner.close",
-      () => assembly.close(),
+    ctx.lifecycleContributions.acquire("executorJobOwner.close", () =>
+      assembly.close()
     );
     await assembly.start(ctx.startupLifecycle
       ? {
@@ -950,6 +940,9 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
           isCurrentOwner: isCurrentChannelOwner,
           connectImmediately: isCurrentChannelOwner() && !ctx.startupLifecycle,
         });
+        ctx.lifecycleContributions.acquire("channels.dispose", () =>
+          result.registry.dispose()
+        );
         losslessDataPlane.bindChannels(result.registry);
         ctx.channels = result.registry;
         ctx.inboundRouter = result.router;
@@ -966,10 +959,6 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
         if (!ctx.startupLifecycle || ctx.startupLifecycle.recoverAcceptedWork) {
           await ctx.channelCoordinator?.recover();
         }
-        ctx.startupCleanups.channels = ctx.startupRollback.register(
-          "channels.dispose",
-          () => result.registry.dispose(),
-        );
       } catch (err) {
         console.warn(
           chalk.yellow(
@@ -1002,9 +991,12 @@ const deliverySurface: AccessSurface = {
         error: (msg) => console.error(chalk.red(msg)),
       },
     });
+    ctx.lifecycleContributions.contribute(
+      "deliveryStack.stop",
+      deliveryStack.startupCleanup,
+    );
     ctx.deliveryStack = deliveryStack;
     if (ctx.startupLifecycle) deliveryStack.closeAdmissionForLifecycle();
-    ctx.startupCleanups.deliveryStack = deliveryStack.startupCleanup;
     deliveryStack.onStatus((notice) => {
       ctx.executionStatusHub?.publish(notice);
     });
