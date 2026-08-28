@@ -39,9 +39,11 @@
 
 ## 二、本文边界与架构命题
 
-本文只解决架构问题：如何在不降低现有能力、不阻断首个版本发布的前提下，把知行整理成一个责任清楚、可长期演进的个人智能体基座。
+本文只解决架构问题：如何在不降低当前正式产品基线能力、不阻断首个版本发布的前提下，把知行整理成一个责任清楚、可长期演进的个人智能体基座。
 
 本文不设计或承诺任何新增能力。个人连续性增强、主动触达、受控学习、新设备体验和生态化都可以在未来单独立项，但不能作为本次架构演进的阶段、退出门或完成收益。它们在本文中最多只用于检验目标架构是否留出了正确边界。
+
+当前旧 Memory 模块及其工具、协议、分布式 owner、存储与接管链已从正式基线退场，不是现有能力模块，也不是本次架构迁移的前置假设。未来是否接入 OWNWARD、另行重建记忆能力或长期保持无记忆，必须由独立产品决策决定；本文不预建记忆抽象。
 
 知行当前并不缺少成为首个完整版本的核心能力。当前需要解决的是：这些能力已经形成，却横向散落在组合根、协议处理、运行时、Owner 和基础设施之间；如果继续直接叠加新功能，未来每增加一项能力都可能再次穿透所有层。
 
@@ -50,7 +52,7 @@
 > **薄核纵切，单宿主同协议；事实归域，能力外接，拓扑下沉。**
 
 - **薄核**：Agent Loop、上下文窗口、模型调用和工具闭环保持封闭、有限，不吸收产品领域。
-- **纵切**：对话、推进、调度、记忆、工作场景和投递等现有能力，各自形成从产品合同到权威事实的完整垂直模块。
+- **纵切**：对话、推进、调度、工作场景和投递等现有能力，各自形成从产品合同到权威事实的完整垂直模块。
 - **单宿主**：只有一个应用组合根负责装配、启动、回滚、换代和关闭；CLI 不再兼任产品后端。
 - **同协议**：CLI、消息通道和未来产品面消费同一套与传输无关的产品合同，不复制运行行为。
 - **事实归域**：每项事实只有一个领域责任者和一个写入权威，其他位置只持投影或端口。
@@ -73,7 +75,8 @@
 | 受控效果链 | 工具、MCP、权限、确认、资源治理、工作区和执行分配已有正式边界 | 模型提出行动，系统裁决和落实效果的原则已经成立 |
 | 多拓扑执行 | Anchor、Executor、Mesh 与本机直连拓扑共享经过验证的合同 | 部署形态可替换，产品层无需感知网络细节 |
 | 多产品入口 | CLI、Server/RPC 和消息通道已经共享大量会话与运行事实 | 已具备建立统一产品协议的现实基础 |
-| 专门领域 | Conversation、Advancement、Schedule、Memory、Workscene、Delivery 等均有真实实现 | 不合并成巨型模型；应按垂直责任重新归位 |
+| 专门领域 | Conversation、Advancement、Schedule、Workscene、Delivery 等均有真实实现 | 不合并成巨型模型；应按垂直责任重新归位 |
+| 已退场能力 | 旧 Memory 模块已从生产、协议、存储和公开面删除 | 不把它作为待迁移模块；未来方案另行决策 |
 
 distributed-runtime 是知行走向伴身智能所需的一项基础能力，但知行不为 distributed-runtime 而存在；distributed-runtime 为知行而存在。
 
@@ -103,7 +106,7 @@ distributed-runtime 是知行走向伴身智能所需的一项基础能力，但
                            │
 ┌──────────────────────────▼───────────────────────────────┐
 │ 垂直能力模块                                                │
-│ Conversation · Advancement · Schedule · Memory            │
+│ Conversation · Advancement · Schedule                     │
 │ Workscene · Delivery                                      │
 └─────────────────┬──────────────────────┬─────────────────┘
                   │ Kernel Port          │ Authority/Effect Ports
@@ -125,7 +128,7 @@ distributed-runtime 是知行走向伴身智能所需的一项基础能力，但
 | 轴 | 回答的问题 | 不得渗透的内容 |
 |---|---|---|
 | 产品领域轴 | 知行当前提供什么行为、事实由谁负责 | 不知道模型 SDK、RPC、设备拓扑和文件路径 |
-| 智能执行轴 | 一次推理与行动如何运行、终止和释放 | 不知道记忆、调度、工作场景等产品领域 |
+| 智能执行轴 | 一次推理与行动如何运行、终止和释放 | 不知道调度、工作场景等产品领域 |
 | 部署接入轴 | 行为从哪里进入、在哪里执行、如何传输 | 不重新定义产品规则，不成为第二事实源 |
 
 未来能力优雅加入的关键，不是提前为它写通用框架，而是让它只扩展其中一条轴，并通过既有稳定端口与另外两条轴协作。
@@ -144,7 +147,7 @@ distributed-runtime 是知行走向伴身智能所需的一项基础能力，但
 生命周期：怎样启动、换代、停机和清理
 ```
 
-Conversation、Advancement、Schedule、Memory、Workscene 和 Delivery 保持不同领域，不因“统一架构”被压进一个万能 Task、Session 或 Personal State。跨领域协作只能调用对方公开应用端口或消费已提交事件，不得直接读写对方存储。
+Conversation、Advancement、Schedule、Workscene 和 Delivery 保持不同领域，不因“统一架构”被压进一个万能 Task、Session 或 Personal State。跨领域协作只能调用对方公开应用端口或消费已提交事件，不得直接读写对方存储。
 
 这里的“模块”首先是编译期责任边界，不等于动态插件。只有当一个边界已经稳定、有独立替换价值并确实需要独立发布时，才进一步拆成包。
 
@@ -157,7 +160,7 @@ Conversation、Advancement、Schedule、Memory、Workscene 和 Delivery 保持�
 - 产生结构化运行事件、受控效果请求和明确终态。
 - 保证一次运行内部资源可释放、事件可观察、失败可归因。
 
-智能内核不拥有 Conversation、Memory、Schedule、Workscene、Delivery 或设备身份，也不向 CLI、Server 暴露 `SecurityPipeline`、权限存储等内部实现。管理产品需要的安全、用量和状态信息，必须通过窄查询端口取得。
+智能内核不拥有 Conversation、Schedule、Workscene、Delivery 或设备身份，也不向 CLI、Server 暴露 `SecurityPipeline`、权限存储等内部实现。管理产品需要的安全、用量和状态信息，必须通过窄查询端口取得。
 
 产品消息与模型消息之间建立显式投影边界：产品模块拥有丰富业务对象，智能内核只消费有限的模型输入。这样既吸收 Pi 的薄内核价值，也避免让 Prompt 或某家 Provider 的消息格式反向定义知行产品。
 
@@ -173,7 +176,7 @@ Conversation、Advancement、Schedule、Memory、Workscene 和 Delivery 保持�
 4. 选择单机或分布式部署适配，不改变上层应用合同。
 5. 统一执行启动回滚、代际换代、排空、关闭和残留清理。
 
-Host 不实现会话、记忆、调度、推进或设备管理用例，不持有业务状态，也不通过任意字符串服务定位器让组件在运行期寻找依赖。生命周期允许借鉴 DeepSeek Harness 的依赖、作用域和可逆 Effect 思想，但初始实现应是静态、类型化、可追踪的装配图，而不是“Everything is a Plugin”。
+Host 不实现会话、调度、推进或设备管理用例，不持有业务状态，也不通过任意字符串服务定位器让组件在运行期寻找依赖。生命周期允许借鉴 DeepSeek Harness 的依赖、作用域和可逆 Effect 思想，但初始实现应是静态、类型化、可追踪的装配图，而不是“Everything is a Plugin”。
 
 组合顺序本身必须成为可测试合同：依赖先启动、消费者后开放；新流量先停止、在途责任后排空；资源按所有权逆序释放。任何组件创建的 listener、timer、child process、临时目录和连接，都由同一个生命周期作用域负责清理。
 
@@ -254,7 +257,7 @@ Infrastructure Adapter ────────► Its Port Contract
 | 产品命令、查询与事件合同 | Product Protocol | 传输绑定与表面只编码、调用、订阅和呈现 |
 | 领域规则与状态机 | 对应能力模块 | Host 只装配，Kernel 只被调用 |
 | Conversation / Run 事实 | Conversation 模块及其 Authority | 其他模块持引用或读取公开投影 |
-| Schedule、Memory、Workscene、Advancement、Delivery 事实 | 各自能力模块及其 Authority | 不得经 CLI/Server 旁路写入 |
+| Schedule、Workscene、Advancement、Delivery 事实 | 各自能力模块及其 Authority | 不得经 CLI/Server 旁路写入 |
 | 模型—工具运行状态 | Intelligence Kernel | 应用只观察有限事件与终态 |
 | 权限、资源和效果准入 | Authority & Effect Substrate | 模型和表面只能提交请求或决定 |
 | 设备与传输事实 | Executor / Mesh 适配器及相应 Authority | 上层只消费与拓扑无关的执行端口 |
@@ -365,7 +368,7 @@ Infrastructure Adapter ────────► Its Port Contract
 
 ### 检查点 4：按垂直切片归位现有能力
 
-- 先选择边界较小的现有能力验证模块模板，再逐项迁移 Conversation、Advancement、Schedule、Memory、Workscene 和 Delivery。
+- 先选择边界较小的现有能力验证模块模板，再逐项迁移 Conversation、Advancement、Schedule、Workscene 和 Delivery。
 - 每次只迁移一个能力的应用服务、权威规则、协议投影和生命周期。
 - 迁移完成立即删除旧写入口；不得等待全部模块结束后统一清理。
 
@@ -419,11 +422,11 @@ Infrastructure Adapter ────────► Its Port Contract
 ## 十三、明确不做
 
 - 不新增 Self、Commitment、Presence、Attention、Learning 或其他未来产品对象作为本次迁移前提。
-- 不增强记忆、学习、主动触达、多设备体验或生态能力。
+- 不决定或实现任何记忆方案，也不增强学习、主动触达、多设备体验或生态能力。
 - 不推倒重写 AgentRuntime、Owner 或 distributed-runtime。
 - 不把 distributed-runtime、多 Agent、插件、沙箱或任何单项技术提升为架构中心。
 - 不把所有现有能力合并成万能 Task、Session、Capability 或 Personal State。
-- 不建立第二套 Conversation、Run、Schedule、Memory 或全局状态事实源。
+- 不建立第二套 Conversation、Run、Schedule 或全局状态事实源。
 - 不把所有实现动态插件化，也不预建市场、通用插件平台或自修改框架。
 - 不为了“未来可能需要”增加没有两个现有消费者的新抽象。
 - 不要求首个版本等待架构演进完成后才能发布。

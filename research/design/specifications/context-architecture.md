@@ -13,7 +13,6 @@
 >
 > - [conversation-model.md](./conversation-model.md) — Conversation / SessionRuntime / Turn 三层模型
 > - [persistent-service.md](./persistent-service.md) — AgentOrchestrator / BackgroundAgent 运行时
-> - [memory-system.md](./memory-system.md) — Journal + 三支柱（Profile / Skills / People）
 > - [archive/prompt-system.md](./archive/prompt-system.md) — 早期 Prompt 构建与缓存方案（历史资料）
 
 ---

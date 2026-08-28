@@ -32,7 +32,7 @@ v2 不新造地基,接 v1 留好的插座(父规格 §九 / skill-authoring §�
 - **凭证脱敏** `scrubSecrets`(`core/src/security/secret-scrubber.ts`)—— 在 `SkillSavePipeline` 内焊死(skill-authoring §三),管家产物经同一管线天然过滤(§六)。
 - **systemPrompt 可重建** —— v1 `systemPrompt` 保持闭包 `const`、`buildSystemPrompt` 是可重调纯函数;v2 把它 holder 化,技能集变更在**注意力窗口生命周期边界**经父规格 §3.3 的重建检查反映(§八)。
 - **回合事件** —— `agent:run_end`(`agent-events.ts`,payload 含 `reason`)标记一次完整 agent run(用户的一次交互 / 任务)结束,是"做完一摊事"的复盘时机。注意 eventBus 是 **per-run**(每次 run 新建),不存在可持续订阅的全局 bus;故经 `decorateRunBus` 钩子(`DecorateRunBusFn`,`create-agent-runtime.ts`)在**每次 run 的 bus** 上挂监听(同 cli 既有的 renderer / retry / context 装饰),**只在 `reason==="completed"` 触发**(aborted / error / max_turns 不复盘)。**不取 `turn_complete`** —— 那是单个 LLM 工具轮、过于频繁且语义不对(§三)。
-- **调度** —— `scheduler`(`core/src/scheduler/`)的周期任务(`interval`/`cron` + `system` 动作,同 `__journal-gc`)是治理 curator 的载体(§四)。
+- **调度** —— `scheduler`(`core/src/scheduler/`)的周期任务(`interval`/`cron` + `system` 动作，同现存 `__transcript-gc`)是治理 curator 的载体(§四)。
 
 ## 二、来源标记与写隔离(放手的前提)
 
@@ -64,7 +64,7 @@ v2 不新造地基,接 v1 留好的插座(父规格 §九 / skill-authoring §�
 
 ## 四、治理与淘汰(周期 curator)
 
-**调度(基于 scheduler 真实行为定死,不留"如每日"占位)**:注册为 `scheduler` 的 **system + `interval` 任务**(`__skill-curator`,同 `__journal-gc`;system 任务不可被用户误删 —— `scheduler.ts:210`)。**用 `interval`、不用 `cron`**:CLI 是开关不定的交互进程,固定钟点(cron)在没开终端的时刻根本不跑;`interval` 的下次时间从**上次跑完**算(`computeNextRunAt` 用 `finishTime` —— `scheduler.ts:494`),语义是「距上次治理跑完满 `everyMs` 才到下次」,不绑作息、不绑钟点。
+**调度(基于 scheduler 真实行为定死,不留"如每日"占位)**:注册为 `scheduler` 的 **system + `interval` 任务**(`__skill-curator`,同现存 `__transcript-gc`;system 任务不可被用户误删 —— `scheduler.ts:210`)。**用 `interval`、不用 `cron`**:CLI 是开关不定的交互进程,固定钟点(cron)在没开终端的时刻根本不跑;`interval` 的下次时间从**上次跑完**算(`computeNextRunAt` 用 `finishTime` —— `scheduler.ts:494`),语义是「距上次治理跑完满 `everyMs` 才到下次」,不绑作息、不绑钟点。
 - **触发检查时机**:开着终端时进程内 `TimerLoop` tick;关终端期间到点的,**下次启动由 `start()` 的 missed 检查补跑一次**(`scheduler.ts:97-114`)—— 用户哪天没开机不丢、下次补。
 - **防重复**:scheduler **内建** —— `activeTasks` Set 挡执行中重入、跑完才从新 `finishTime` 重算 `nextRunAt`(`scheduler.ts:322-350`),v2 不自管。
 - `everyMs` 的值(如 24h)是唯一可调参数(且 ≥60s,`scheduler.ts:148`)。curator 内部用 `main` 档判定(治理高副作用)。
@@ -102,7 +102,7 @@ v2 不新造地基,接 v1 留好的插座(父规格 §九 / skill-authoring §�
 | 包 | 内容 | 关键对接 |
 |---|---|---|
 | `core/src/skills/` | 技能管家逻辑(复盘 / 治理 / 淘汰判定)、`StewardWriter` 受限写门、确定性沉淀信号检测、治理候选轮转、自产反馈聚合 | 复用 `SkillSavePipeline`(skill-authoring.md §三,经 `StewardWriter` 包装)、`store.ts`(`archive`/`update` fork-on-edit、`usage`、不计 hit 的只读入口)、`SkillState` 加 `stewardCreated` + `lastCuratedAt`、`content-scan.ts`/`secret-scrubber.ts`(模式匹配范式) |
-| `orchestrator` | **暴露**触发 / LLM / 调度能力(管家判定逻辑不在此,见 core) | `agent:run_end` 事件 + `DecorateRunBusFn` 钩子(`create-agent-runtime.ts`,per-run bus)、`AgentRuntime.callText(_, "main")`、`scheduler` 的 `systemHandlers` Map 注入 + `system` 周期任务(`task-executor.ts`,同 `__journal-gc`)、`buildSystemPrompt` holder 化(父规格 §九/§3.3) |
+| `orchestrator` | **暴露**触发 / LLM / 调度能力(管家判定逻辑不在此,见 core) | `agent:run_end` 事件 + `DecorateRunBusFn` 钩子(`create-agent-runtime.ts`,per-run bus)、`AgentRuntime.callText(_, "main")`、`scheduler` 的 `systemHandlers` Map 注入 + `system` 周期任务(`task-executor.ts`,同现存 `__transcript-gc`)、`buildSystemPrompt` holder 化(父规格 §九/§3.3) |
 | `cli` | **装配接入**:经 decorateRunBus 挂 `run_end`(`reason==="completed"`)复盘监听、喂 `state.conv.messages`、绑 `callText("main")`、注册 curator 周期任务;`/skills` 的来源可视区分 + proactive 开关(反馈由 core 治理 / 复盘时从 index/usage/archived 即时算,cli 不额外采集,§五) | `decorateRunBus` 组合(同 renderer / retry / context 装饰)、`state.conv.messages`、`scheduler` 注册、`/skills` 管理器(父规格 §5.2)、`tRegistry.refresh()` |
 
 ## 八、systemPrompt 边界重建(父规格 §九插座)

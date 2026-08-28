@@ -4,7 +4,7 @@
 >
 > **范围**:本 spec 仅覆盖 REPL(cli)路径。server 模式的工作模式单独 spec —— 对齐 [runtime-session-hot-reload.md](runtime-session-hot-reload.md) 的边界处理(RuntimeSession 是 cli 专属抽象;server 触发与反馈不同)。
 
-> **当前权威接入补充**：下文早期以 runtime 持有可写 Store/Registry、管理工具直接落盘或以 `set_workdir` post-turn 意图落盘的描述，在耐久 assignment 中已由分布式运行时合同取代。运行体只持 GlobalQuery、Artifact reader 和 assignment stager；personal/workscene 记忆按静态会话身份反绑，main 的跨场景记忆查询仍是 path-free 的按需只读检索。workscene create/rename/setWorkdir/delete 与 memory 写只进入当前 MutationBatch，工具只说明本轮成功后生效；enter/exit 继续是合法的 turn-boundary 控制。锚点 adapter 在 owner 提交后唯一物化，提交前不得切换 runtime、暴露主机路径或声称已应用。
+> **当前权威接入补充**：下文早期以 runtime 持有可写 Registry、管理工具直接落盘或以 `set_workdir` post-turn 意图落盘的描述，在耐久 assignment 中已由分布式运行时合同取代。运行体只持 GlobalQuery、Artifact reader 和 assignment stager；workscene create/rename/setWorkdir/delete 只进入当前 MutationBatch，工具只说明本轮成功后生效；enter/exit 继续是合法的 turn-boundary 控制。锚点 adapter 在 owner 提交后唯一物化，提交前不得切换 runtime、暴露主机路径或声称已应用。旧记忆域不再是 WorkScene 的组成部分。
 
 ## 总览
 
@@ -12,15 +12,13 @@
 
 vision 焊死的不变量(详见 vision 第 1-5 块):
 
-- **单向阀 by construction**:main 可读各 workscene 记忆;workscene 物理上无法写 main 记忆;workscene 间互不串。靠装配期注入受限 store 实例保证,不靠工具内检查。
 - **机制与策略分离**:工作场景的粒度、组织、生命周期由用户决定,系统只提供 接入 / 移除 / 列表 / 切换 机制原语。
 - **两入口同源**:agent 工具与用户系统指令共享同一组底层原语。
 - **关系层动作必须用户拍板**:接入 / 移除 / 进入,LLM 可提议但不可单方面执行。
-- **main 对工作场景记忆是按需只读检索**:不预加载、不推送、不常驻 main 上下文。
 
 **核心架构决策一:agent 访问唯一路径 = `session.runtime`。**
 
-REPL 现状有一处既存 bug:`ReplState.agent` 是创建时刻对 `session.runtime` 的一次性值捕获,而 `.run()` 走 `session.runtime` getter——两条路径。reload 后 getter 换新但 `state.agent` 仍旧引用(`/status` 显示旧模型即此 bug)。workmode 会把它放大为灾难(进入后 16+ 处 `state.agent.xxx` 全指向 main,而 `.run()` 已在 power)。**根治:删除 `ReplState.agent`,REPL 全部 agent 访问(model/providerId/securityPipeline/checkBudget/forceCompact/calibrationFactor/resetConversationState/callText 等)统一走 `session.runtime` getter**,swap / workmode 自动响应。`ConversationRuntimeState`(下文)**不**聚合 agent —— agent 是 runtime 资源归 RuntimeSession,不是 conversation 运行态。配套:个人记忆维护(journal condense 等)仅 main 模式触发(workmode 下 active=power、其记忆域是 workscene,绝不能跑个人 journal —— 单向阀的必然延伸)。
+REPL 现状有一处既存 bug:`ReplState.agent` 是创建时刻对 `session.runtime` 的一次性值捕获,而 `.run()` 走 `session.runtime` getter——两条路径。reload 后 getter 换新但 `state.agent` 仍旧引用(`/status` 显示旧模型即此 bug)。workmode 会把它放大为灾难(进入后 16+ 处 `state.agent.xxx` 全指向 main,而 `.run()` 已在 power)。**根治:删除 `ReplState.agent`,REPL 全部 agent 访问(model/providerId/securityPipeline/checkBudget/forceCompact/calibrationFactor/resetConversationState/callText 等)统一走 `session.runtime` getter**,swap / workmode 自动响应。`ConversationRuntimeState`(下文)**不**聚合 agent —— agent 是 runtime 资源归 RuntimeSession,不是 conversation 运行态。
 
 **核心架构决策二:切换 = turn 边界的单一原子事务。**
 
@@ -39,11 +37,11 @@ interface WorkScene {
   workdir?: string;    // optional —— 仅"工作内容涉及本地文件"的场景指定(开发/写作);浏览器/对话/规划类无此属性。创建时绑定,要换换重建
   createdAt: string;
   lastActiveAt: string;
-  archived?: boolean;  // 仅 list 默认过滤,不影响 main 能否 query 其记忆
+  archived?: boolean;  // 仅 list 默认过滤
 }
 ```
 
-每个 WorkScene 拥有独立记忆域目录、会话目录、元信息(见持久化布局)。vision "每次进入工作模式是新会话":进入时在该 workscene 的 conversations/ 下新建 conversation,退出后沉积、不带入下次进入。
+每个 WorkScene 拥有独立会话目录和元信息(见持久化布局)。vision "每次进入工作模式是新会话":进入时在该 workscene 的 conversations/ 下新建 conversation,退出后沉积、不带入下次进入。
 
 ### WorkSceneRegistry(`@zhixing/core/workscene`)
 
@@ -61,7 +59,7 @@ interface IWorkSceneRegistry {
 }
 ```
 
-持久化 `~/.zhixing/workscenes/index.json`(主表)+ 各 workscene meta.json(权威)。并发安全沿用 `ConversationRepository` 的 atomic write + per-id lock(`repository.ts` 的 `metaLocks` 成熟实现,同构复用)。`remove(id)` 彻底删除该场景的系统目录(meta + 记忆域 me/ + 会话域 conversations/),不可恢复;用户的 `workdir` 不动 —— 那是用户代码资产归用户自管。要"软隐藏"该场景请用 `setArchived(id, true)`(list 默认不出现、数据全留、可 unarchive 恢复),两条语义分工独立。**归属**:RuntimeSession 持有 Registry 单例,生命周期同 session。
+持久化 `~/.zhixing/workscenes/index.json`(主表)+ 各 workscene meta.json(权威)。并发安全沿用 `ConversationRepository` 的 atomic write + per-id lock(`repository.ts` 的 `metaLocks` 成熟实现,同构复用)。`remove(id)` 彻底删除该场景的系统目录(meta + 会话域 conversations/),不可恢复;用户的 `workdir` 不动 —— 那是用户代码资产归用户自管。要"软隐藏"该场景请用 `setArchived(id, true)`(list 默认不出现、数据全留、可 unarchive 恢复),两条语义分工独立。**归属**:RuntimeSession 持有 Registry 单例,生命周期同 session。
 
 **active 守卫归 session 层**:registry 是低层 CRUD 原语,不该知道运行态——`remove` 直接调 registry 不带任何 guard。"不能删除当前活跃场景"这条业务规则由 `RuntimeSession.removeWorkScene(id)` 实现(`IWorkModeController` 同名方法),CLI `/work remove` 与 LLM 工具 `workscene_change_approve action=remove` 都过此 chokepoint,guard 不可绕过(机制与策略分离 + 两入口同源)。规则:active sceneId 命中目标 id → 抛 friendly error 引导先 `/exit`。
 
@@ -93,47 +91,27 @@ class RuntimeSession {
 
 这两方法只管 runtime overlay + broker;与 ConversationRuntimeState 切换是同一原子事务的两组必须同步状态(非两个独立对称面),统一由 `applyModeSwitch` 在 turn 边界协调。模式切换是**换 runtime 实例**(各自带独立 budget/estimator/Resettable),**不调** `resetConversationState`(那是 `/clear` 重置同一 runtime 的语义,与切换正交)。
 
-**dispose**:`RuntimeSession.dispose()` 若在 workmode,先丢弃 workScene overlay(GC)再走现有 main 资源 dispose 链(scheduler→delivery→channels 顺序不变)。**reload × workmode**:in workmode 时 reload 的 `agentChanged` 分支连带重建 power(workdir/memoryScope 从 WorkScene 重读、roles 从新 config 重解析、primaryRole 仍 power)。
+**dispose**:`RuntimeSession.dispose()` 若在 workmode,先丢弃 workScene overlay(GC)再走现有 main 资源 dispose 链(scheduler→delivery→channels 顺序不变)。**reload × workmode**:in workmode 时 reload 的 `agentChanged` 分支连带重建 power(workdir 与显式 workscene 身份从 WorkScene 重读、roles 从新 config 重解析、primaryRole 仍 power)。
 
 **lifecycle 互斥语义**:reload / applyModeSwitch 共享**单一 lifecycle guard**,语义与现有 `reloading` guard 一致 —— **忙时后到者拒绝并提示**(非排队 mutex,非裸 boolean 模拟;沿用 `session.ts` 现有 `if(busy) return failed` 模式,只是从单一 reload 扩为覆盖 reload+enter+exit 三者的同一 guard)。三者都是 turn 边界操作、都先 await in-flight turn,纪律一致。
-
-### MemoryScope(`@zhixing/core/memory`)
-
-**作用对象是整个个人记忆域根(`me/` 目录),不是单个 store 类**。grep 实证 `me/` 域访问者两类:**(a) 四个 store class**(`MemoryStore`/`JournalStore`/`PeopleStore`/`SkillsStore`,均 `baseDir ?? getMemoryDir()` —— 有注入点);**(b) `profile-loader.ts` 函数**(`path.join(getMemoryDir(),"profile.md")` —— 无注入点、直调)。整域 scope 隔离须穷尽两类,任一漏掉破隔离。
-
-修正现状两处既存债:
-1. **双 `MemoryStore` 实例归一**:`create-agent-runtime.ts`(装配期给 `createMemoryFlushStrategy` 的 `new MemoryStore()`)与 `tools-builtin/src/memory.ts`(memory 工具内的 `new MemoryStore()`)是两个独立实例。装配期构造**单一** MemoryStore(按 memoryScope 定 root),同时注入 builtinCtx(工具)与 flush strategy —— 否则 power 模式下 flush 仍写 `~/.zhixing/me/`,by-construction 隔离失效。
-2. **`getMemoryDir()` 根治**:`memory/types.ts` 的 `getMemoryDir()` 现用 `HOME/USERPROFILE` 拼接、**不尊重 ZHIXING_HOME**(既存 bug)。改为走 `getZhixingHome()`,不隐式绕过。
-
-**两层分工(不可混淆)**:`getMemoryDir()` 根治只解决"默认 personal 路径尊重 ZHIXING_HOME";**scope 隔离**靠装配期 root 注入覆盖全部 `me/` 域访问者 —— 四个 store class 经 `baseDir` 注入,`profile-loader` 须从函数直调改造为接收 root 参数(与四 store 一致),由装配期按 memoryScope 统一注入。两者分别解决"默认路径正确"与"scope 物理隔离",缺一不可。
-
-`MemoryStore` 现有 `baseDir?` 升必填 `root`;memory 工具经 `BuiltinToolContext` 扩展接收 store(`factories.ts` 注释已显式预留 `memoryStore` 扩展点,工厂签名不变)。装配期 root:
-- main runtime:`root = <zhixingHome>/me/`(经 getZhixingHome,根治后)
-- power runtime:`root = getWorkSceneMemoryDir(sceneId)`(`<zhixingHome>/workscenes/<id>/me/`)
-
-**单向阀 by construction**:power runtime 拿到的(整域)store 物理指向 workscene 目录,无路径参数可 escape,装配后不暴露 setter;power 装配不注入 main-only workscene 工具,物理无途径触达 `~/.zhixing/me/` 或其他 workscene。
 
 ## 持久化布局
 
 ```
 ~/.zhixing/                            (= getZhixingHome(),尊重 ZHIXING_HOME)
-├── me/                                (个人记忆域;只 main runtime 读写)
-│   ├── profile.md  people/  skills/  journal/
 ├── conversations/<id>/                (user scope)
 └── workscenes/                        (workscene scope)
     ├── index.json                     (WorkSceneRegistry 主表)
     └── <sceneId>/
         ├── meta.json
-        ├── me/                        (工作场景记忆域;结构同 ~/.zhixing/me/,内容隔离)
-        │   ├── profile.md  people/  skills/  journal/
         └── conversations/<conversationId>/
             ├── meta.json
             └── transcript.jsonl
 ```
 
-`~/.zhixing/workscenes/<id>/` **严格单一职责**:仅 meta.json + me/ + conversations/,**不接纳任何工作产物 / 临时文件**(产物落 `workdir`;无 `workdir` 时落系统 /tmp;绝不落此系统数据目录)。
+`~/.zhixing/workscenes/<id>/` **严格单一职责**:仅 meta.json + conversations/,**不接纳任何工作产物 / 临时文件**(产物落 `workdir`;无 `workdir` 时落系统 /tmp;绝不落此系统数据目录)。
 
-`paths.ts` 加 `getWorkScenesRoot()` / `getWorkSceneDir(id)` / `getWorkSceneMemoryDir(id)` / `getWorkSceneConversationsRoot(id)`,均从 `getZhixingHome()` 派生,id 经 `toSafePathSegment`。
+`paths.ts` 提供 `getWorkScenesRoot()` / `getWorkSceneDir(id)` / `getWorkSceneConversationsRoot(id)`,均从 `getZhixingHome()` 派生,id 经 `toSafePathSegment`。
 
 `ConversationScope` 二态(user + workscene),`conversationsDir` 单一 dispatcher(复用现有 `ConversationRepository`):
 
@@ -145,7 +123,7 @@ type ConversationScope =
 
 ## 运行时编排
 
-### createAgentRuntime 选项扩展(仅两个新选项)
+### createAgentRuntime 选项扩展
 
 ```typescript
 interface CreateAgentRuntimeOptions {
@@ -156,13 +134,11 @@ interface CreateAgentRuntimeOptions {
    * ① 主对话语义六处统一取 roles[primaryRole](capability 解析 / Task
    *   provider+model / budget resolveModelInfo / 返回 providerId+model /
    *   resilientCallLLM / runAgentLoop);
-   * ② 压缩语义按 task 性质分流到不同 role(见 secondary-llm-capability
+   * ② 单发与压缩语义按 task 性质分流到不同 role(见 secondary-llm-capability
    *   ADR-SLLM-009),不跟随 primaryRole:
    *   - 主对话压缩(LLMSummarize)走 roles.main —— 摘要质量直接关系下一轮
-   *     LLM 认知输入,由 createSummarizeCallLLM 承载
-   *   - 记忆提取(MemoryFlush)+ callText 走 roles.light —— I/O 边界净化,
-   *     由 createMemoryFlushCallLLM 承载
-   *   - 段切换摘要(createSegmentSummarizeFn callLLM model)走 roles.light
+   *     LLM 认知输入,由 createMainCallLLM 承载
+   *   - callText 默认档与段切换摘要(createSegmentSummarizeFn)走 roles.light
    *     (现状误用 roles.main,本次归正到 light)
    *   注意 ① 主对话语义"跟随 primaryRole" 与 ② 压缩域"按 task 性质固定"
    *   是两条独立分区 —— workscene/power 模式下主对话走 power,但压缩域两
@@ -172,28 +148,26 @@ interface CreateAgentRuntimeOptions {
    *   resolveRoleThinking(roles[primaryRole], config.llm?.[primaryRole]?.thinking),
    *   不得硬编码 roles.main / config.llm.main(否则 primaryRole=power 时
    *   power 模型套用 main 思考配置、且按 main 模型 thinkingControl 误校验);
-   *   压缩域 thinking 按 ② 的 role 分流:LLMSummarize 收 mainThinking
-   *   (roleThinking.main)、MemoryFlush 收 lightThinking(roleThinking.light);
+   *   单发与压缩域 thinking 按 ② 的 role 分流:LLMSummarize 收 mainThinking
+   *   (roleThinking.main)、callText 默认档与段切换收 lightThinking(roleThinking.light);
    *   段切换 thinking 随 ② 的 model 归正同事务一并改 lightThinking。
    *   roleThinking 三角色聚合对象(下传 ToolExecutionContext 供工具按所用
    *   角色扇出)本身不变 —— 它是全角色映射、非 primaryRole 单值。
    */
   primaryRole?: "main" | "power";
 
-  /** 个人记忆域根作用域 —— 装配期决定整域 root,后续不可变。缺省 personal。 */
-  memoryScope?:
-    | { kind: "personal" }                      // root = <zhixingHome>/me/
-    | { kind: "workscene"; sceneId: string };   // root = <zhixingHome>/workscenes/<id>/me/
+  /** 非记忆的工作场景身份；只由 workscene/runtime 组合根显式提供。 */
+  worksceneIdentity?: { readonly sceneId: string };
 }
 ```
 
-**不新增 `workSceneContext` 选项**:workscene 工作目录走现有 `workspace` 选项(power 传 `scene.workdir`),由现有 Environment 段(`CACHE_BOUNDARY` 之后,`system-prompt.ts` 实证已渲染工作目录)呈现,不重复进 prompt;workscene 语义定位走现有 `profile` 选项 —— `powerProfile(scene)`(下文)。`primaryRole` 单一槽位选择 → 主对话六处统一同源、压缩域按 task 性质分流(LLMSummarize=main、MemoryFlush+callText=light、段切换=light,详见 [secondary-llm-capability ADR-SLLM-009](secondary-llm-capability.md))不随 primaryRole 漂移、思考解析随同分区(主对话/子 agent loop 跟 primaryRole,LLMSummarize 跟 main,MemoryFlush+callText+段切换跟 light);roles 由 `createProviderRoles` 从 `config.llm.*` 正常解析(`resolve.ts` 实证 light 未配时 fallback `roles.main`=config.llm.main 中档、非 power → MemoryFlush/段切换/callText 的 light 通道成本正确;LLMSummarize 本就走 main,不依赖此 fallback)。systemPrompt 仍 byte-equal 冻结。
+workscene 工作目录走现有 `workspace` 选项(power 传 `scene.workdir`),由现有 Environment 段(`CACHE_BOUNDARY` 之后,`system-prompt.ts` 实证已渲染工作目录)呈现,不重复进 prompt;workscene 语义定位走现有 `profile` 选项 —— `powerProfile(scene)`(下文)。`worksceneIdentity` 独立提供 scene trust/permission/lifecycle 身份，调用方不得从 profile 名称或 workspace 路径反推。`primaryRole` 单一槽位选择 → 主对话六处统一同源、单发与压缩域按 task 性质分流(LLMSummarize=main、callText 默认档与段切换=light)不随 primaryRole 漂移。systemPrompt 仍 byte-equal 冻结。
 
 ### powerProfile(scene)
 
 复用 `subAgentProfile(opts)` 把动态文本编进 instructions 的现成手法(`default-profiles.ts` 实证 AgentRoleProfile 支持自定义 instructions + 任意 enabledTools)。明确基线:
 
-- `enabledTools` **按 `scene.workdir` 有无二分(by-construction)**:**有 workdir** = `MAIN_ENABLED_TOOLS` 全集(read/write/edit/glob/grep/bash/memory/web_fetch/Task,文件工具在 workdir 操作);**无 workdir** = 剔除本地文件类工具(bash/read/write/edit/glob/grep),只留非文件工具(memory/web_fetch/Task 等)—— 无 workdir = 此场景不涉及本地文件,装配期即无文件工具,根本不存在"文件工具无根"问题(`default-profiles.ts` 实证 enabledTools 可任意子集,subAgentProfile 已是剔除先例)。workscene extraTools(`workmode_exit`)由 createAgent 按 spec.kind 追加
+- `enabledTools` **按 `scene.workdir` 有无二分(by-construction)**:**有 workdir** = `MAIN_ENABLED_TOOLS` 全集(read/write/edit/glob/grep/bash/web_fetch/load_skill/save_skill/admit_skill/Task,文件工具在 workdir 操作);**无 workdir** = 剔除本地文件类工具(bash/read/write/edit/glob/grep),只留非文件工具(web_fetch/load_skill/save_skill/admit_skill/Task)—— 无 workdir = 此场景不涉及本地文件,装配期即无文件工具,根本不存在"文件工具无根"问题。workscene extraTools(`workmode_exit` 等)由 assembly 按 spec.kind 追加
 - `instructions` = 工作专注身份段(场景名 + "你在专注 `<scene.name>` 工作场景"定位 + 退出自判指引);同一 workscene 输出固定 → 静态前缀 byte-equal,多次进入缓存可复用
 - `capabilities` = `{ canSpawnSubAgents: true, userFacing: true }`(同 mainProfile)
 
@@ -212,7 +186,7 @@ private createAgent(
 |---|---|---|
 | primaryRole | `"main"`(缺省) | `"power"` |
 | workspace | 无运行时覆盖,由全局配置 / cwd 兜底解析 | 有 `scene.workdir` → 用之;无 → 显式无根(source:"none"),跳过 resolveWorkspace(见下不变量) |
-| memoryScope | `{ kind: "personal" }` | `{ kind: "workscene", sceneId }` |
+| worksceneIdentity | 不传 | `{ sceneId }` |
 | profile | `mainProfile()` | `powerProfile(scene)` |
 
 **无 workdir power 文件作用域隔离(by-construction 不变量,须焊死)**:create-agent-runtime 现状在 runAgentLoop 装配处 `workingDirectory: workspace.path ?? process.cwd()` —— workspace 空时兜底进程 cwd(很可能 = 用户启动 cli 处 / main 工作区)。无 workdir 的 power 若走此兜底则文件工具串到 main 工作区,破单向阀。须**两处一起切断**(只改装配层无效:传 `{path:undefined,source:"none"}` 后该兜底 `undefined ?? cwd` 仍生效):① 装配层对无 workdir power 标 `source:"none"`、跳 `resolveWorkspace`;② 该 `workingDirectory` 兜底改条件式 —— `source:"none"` 时 `workingDirectory: undefined`,不 `?? process.cwd()`。**主防线是无 workdir power 不装文件工具(见 powerProfile 二分),根本无文件操作面**;此兜底切断是纵深防御 —— 即使 Task 子 agent 等其他路径触发 workspace 解析,也**物理上不可能落进程 cwd / main 工作区 / workscene 系统数据目录**。装配期切断,不靠运行时检查。
@@ -226,7 +200,7 @@ workscene 工具**走 `builtinExtraTools.assembleTools` 统一装配路径**,不
 - **main(spec.kind=main)**:
   - `workscene_change_approve`(boundaries `filesystem.write` → external → confirm)— 用户拍板后调 `registry` add/remove/rename/archive
   - `workmode_enter`(boundaries `agent-context.switch` → external → confirm)— 用户拍板后 emit `workmode:switch_requested {kind:"enter",sceneId}`,**不执行切换**
-  - `workscene_memory_query`(boundaries `filesystem.read` → observe → 自动放行)— 只读检索任一 workscene 记忆域(各 workscene readonly store 集合),返回片段/摘要非 raw
+  - `workscene_list`(observe → 自动放行)— 只读列出工作场景管理元数据
 - **power(spec.kind=workscene)**:
   - `workmode_exit`(boundaries `agent-context.switch` → external → confirm)— LLM 自判完结,emit `workmode:switch_requested {kind:"exit"}`,**不执行切换**;退出和进入对称都要用户拍板(power overlay 一旦弃不可复原,exit fail-forward 到 main,值得让用户对"离开"显式确认);用户主动 `/exit` cli 命令走命令分发不经此工具,天然无需确认
 
@@ -255,7 +229,7 @@ REPL 把 per-conversation 运行态聚合为 `ConversationRuntimeState`(各字�
 | `messages`(canonical) | `commitTurn` 返回整体替换 |
 | `conversationId` | 当前对话身份 |
 | `turnCounter` | commitTurn 后 ++;进入 workscene 归零 |
-| 会话级 flag | `lastToolEndCount`/`hasProposedSkill`/`journalCondenseDone`;进入 workscene 全归零 |
+| 会话级 flag | `lastToolEndCount`/`hasProposedSkill`;进入 workscene 全归零 |
 | `convRepo` | 绑 `ConversationScope`;workscene 独立第二实例 |
 | `transcriptStore` | `TranscriptStore(convDir)`;workscene 独立第二实例(workscene convDir) |
 | scope 路由核 | **单一路由核**:REPL 维护 `active → ConversationRepository` 决策(main 常驻、workscene 由切换事务注册/注销)。**两个 facade 适配器包同一路由核**:`TaskListStore` 形(供 task_list,`(convId)` 接口委派)+ `IConversationRepository` 形(供 `createSegmentPersistence`/segmentDeps,绑 repo 实例接口)—— 接口形态不同、路由决策同源,非两套机制。**路由核限 REPL 内部实现**(简单 `active→convRepo` 映射 + enter 注册/exit 注销,不独立成模块、不做跨 scope convId 冲突检测等扩展,防过度抽象)。TaskListService 不动(per-convId cache 三层契约保持) |
@@ -263,11 +237,11 @@ REPL 把 per-conversation 运行态聚合为 `ConversationRuntimeState`(各字�
 `applyModeSwitch(intent)` —— REPL 主回路 turn 边界唯一切换执行点,**原子事务**:有副作用步骤按序执行,任一步失败则**逆序撤销已执行的副作用**,不改 active、不留半切状态、错误抛 REPL 提示。
 
 - **enter** 副作用步骤序(失败逆序撤销已执行项):① 路由核 register `worksceneConvId→workscene convRepo`(撤销:unregister)→ ② workscene scope 新建 conversation(撤销:删除该 conversation 记录)→ ③ `taskListService.prime(worksceneConvId)`(撤销:`taskListService.clear(worksceneConvId)`)→ ④ `session.enterWorkMode(sceneId)`(装 power runtime + broker swap;其自身原子由 RuntimeSession 保证——装配中途抛错不 set workScene;此步成功后若 ⑤ 失败,applyModeSwitch 调 `session.exitWorkMode()` 回退 broker + 弃 overlay)→ ⑤ 构造并切 active 为 workscene `ConversationRuntimeState`(turnCounter/flag 归零)。**起始 messages 按触发源**:LLM `workmode_enter` 工具触发 → 当前 turn 的原始用户输入(引发 LLM 决定进入的那句,REPL 主回路本就持有 `state.messages` 末尾 userMsg)作 power 起始 `messages[0]`(vision:不读 main 历史,但触发那句须带入,否则 power 不知干啥);`/enter` 命令触发 → `messages=[]`(命令非对话输入,用户随后在 workscene 输入)。**渲染**:REPL 在事务点直接 cliWriter 输出分隔线 + dim 提示(不经 EventBus 订阅);切为 active。
-- **exit** 副作用步骤序:① 当前 power runtime `runtime.callText(prompt)` 生成一句纪要(`callText` 现有,`compaction-llm.ts` 实证复用 `createMemoryFlushCallLLM` 走 light 通道;power 的 light=用户中档,成本正确)——**best-effort,失败不阻断 exit**(退出是用户明确意图,不可因纪要 LLM 失败卡在 workscene;失败则跳过纪要 + 记降级提示,main 后续仍可 query workscene 记忆兜底)→ ② `session.exitWorkMode()`(broker swap 回 main + 弃 power overlay)→ ③ 切 active 回 main `ConversationRuntimeState` + 丢弃 workscene 运行态(`taskListService.clear` + 路由核注销 workscene 绑定)→ ④ 仅 ① 成功时,纪要 append main 运行态 `messages` 末尾,**以现有 `<system-meta kind="workscene-digest">` 元标签包裹**(复用 `system-prompt.ts` meta-protocol 段已教 LLM 的"机制插入内容、非用户/自己原话"识别机制 → 解决"main 误以为自己说过"的归因混乱;尾部追加不毁 main systemPrompt 前缀缓存);渲染直接触发。纪要不写个人记忆(值得长存的由 main 后续自判调 memory 工具)。
+- **exit** 副作用步骤序:① 当前 power runtime `runtime.callText(prompt)` 生成一句纪要（默认走 light 档）——**best-effort,失败不阻断 exit**(退出是用户明确意图,不可因纪要 LLM 失败卡在 workscene;失败则跳过纪要 + 记降级提示)→ ② `session.exitWorkMode()`(broker swap 回 main + 弃 power overlay)→ ③ 切 active 回 main `ConversationRuntimeState` + 丢弃 workscene 运行态(`taskListService.clear` + 路由核注销 workscene 绑定)→ ④ 仅 ① 成功时,纪要 append main 运行态 `messages` 末尾,**以现有 `<system-meta kind="workscene-digest">` 元标签包裹**(复用 `system-prompt.ts` meta-protocol 段已教 LLM 的"机制插入内容、非用户/自己原话"识别机制 → 解决"main 误以为自己说过"的归因混乱;尾部追加不毁 main systemPrompt 前缀缓存);渲染直接触发。
 
 **enter / exit 失败原子性不对称(须焊死)**:enter 失败 = **fail-back 到 main**(逆序撤销已执行副作用,安全态是 main);exit 失败 = **fail-forward 到 main**(power overlay 一旦弃不可复原,② 起任一步失败都必须继续推进到 main 干净态,绝不退回 workscene);① callText 失败是 best-effort 跳过、不计入失败。
 
-`/resume`/`/new` 在工作模式下**禁用**(确定,非开放:单一 workscene 专注会话切换别的对话语义混乱);`/compact`/`/clear` 作用当前 active 运行态。**journal-gate**:turn 边界 journal condense 触发处仅 `activeMode.kind==="main"` 才跑(workmode 下 active=power、记忆域是 workscene,个人 journal 只 main 碰)。
+`/resume`/`/new` 在工作模式下**禁用**(确定,非开放:单一 workscene 专注会话切换别的对话语义混乱);`/compact`/`/clear` 作用当前 active 运行态。
 
 ### cli 系统命令(同源)
 
@@ -287,35 +261,31 @@ agent 工具与命令最终汇聚到同一 `applyModeSwitch` / `registry` 原语
 每个 PR 独立可验证,顺序基于依赖。
 
 **PR 1 — WorkScene + Registry 基础设施**(`packages/core/src/workscene/`)
-类型 + `FsWorkSceneRegistry`(atomic write + per-id lock,同构复用 conversation/repository.ts metaLocks);paths.ts 加 4 getter;`ConversationScope` 加 workscene 变体 + `conversationsDir` 分支。单测 CRUD + 并发 + workscene-scope 路径解析。
+类型 + `FsWorkSceneRegistry`(atomic write + per-id lock,同构复用 conversation/repository.ts metaLocks);paths.ts 加 3 个 getter;`ConversationScope` 加 workscene 变体 + `conversationsDir` 分支。单测 CRUD + 并发 + workscene-scope 路径解析。
 **验收**:跨包测试零回归;dev script 端到端 CRUD + 跨 process 持久化。
 
-**PR 2 — MemoryScope(整域 + 既存债根治)**
-`MemoryStore` 构造 `root` 必填;`getMemoryDir()` 根治走 `getZhixingHome()`(尊重 ZHIXING_HOME)或废弃;`BuiltinToolContext` 加 `memoryStore`;`createAgentRuntime` 加 `memoryScope`,装配期构造**单一** MemoryStore 同时注入 builtinCtx(工具)与 flush strategy(消除 create-agent-runtime 装配期实例与 tools-builtin/memory.ts 工具内实例的双实例);审计 `me/` 域全部访问者:4 store class 经 baseDir 注入、`profile-loader` 改造加 root 参数,统一从同一 root 派生(getMemoryDir 根治负责默认路径、root 注入负责 scope 隔离,两层分工)。缺省 personal 对外不变。
-**验收**:跨包测试零回归;ZHIXING_HOME 设置后记忆写入正确目录;flush 与工具读写同一 store;me/ 域全访问者(4 store class + profile-loader)scope 注入穷尽、workscene 模式下无任何访问者写入 personal 目录。
-
 **PR 3 — createAgentRuntime primaryRole 槽位**
-加 `primaryRole?`(缺省 main);① 主对话六处统一 `roles[primaryRole]`;② 压缩域按 task 性质分流(见 [secondary-llm-capability ADR-SLLM-009](secondary-llm-capability.md)):主对话压缩(LLMSummarize)走 `roles.main`、记忆提取(MemoryFlush)+ callText 走 `roles.light`、段切换摘要(`createSegmentSummarizeFn` callLLM model 现状 `roles.main`)归正 `roles.light`;③ 思考解析维度(thinking-control 已落地,与 ①② 同分区,**必须同 PR 一并改否则 primaryRole=power 静默错位**):主对话 loop 与 Task 子 agent loop 的 thinking 由现状硬编码 `resolveRoleThinking(roles.main, config.llm?.main?.thinking)` 改为 `resolveRoleThinking(roles[primaryRole], config.llm?.[primaryRole]?.thinking)`,runAgentLoop / 子 agent loop 收该值;段切换 thinking 随 ② 的 model 归正在同一改动里一并切到 lightThinking;压缩域两 helper 各自收对应 role 的 thinking(LLMSummarize 收 mainThinking、MemoryFlush 收 lightThinking);roleThinking 三角色聚合对象(下传 ToolExecutionContext)不变。
-**验收**:缺省 main 主对话六处 + 思考解析字节级零变化;段切换改 light 后 model 与 thinking 一致(未配 light fallback main 行为等价、配了 light 既存不一致被修正);单测 primaryRole=power 验证六处指向 power、loop thinking 解析自 config.llm.power(非 main)、段切换指向 light(未配=config.llm.main 中档非 power);压缩域两 helper 按 task 分流固定不变(LLMSummarize=main / MemoryFlush=light),不随 primaryRole 漂移。
+加 `primaryRole?`(缺省 main);① 主对话六处统一 `roles[primaryRole]`;② 单发与压缩域按 task 性质分流:主对话压缩(LLMSummarize)走 `roles.main`、callText 默认档与段切换摘要走 `roles.light`;③ 思考解析与实际 role 同分区:主对话 loop 与 Task 子 agent loop 的 thinking 跟随 primaryRole，LLMSummarize 收 mainThinking，callText 默认档与段切换收 lightThinking；roleThinking 三角色聚合对象不变。
+**验收**:缺省 main 主对话六处 + 思考解析字节级零变化;段切换 model 与 thinking 一致;单测 primaryRole=power 验证六处指向 power、loop thinking 解析自 config.llm.power，单发与压缩域不随 primaryRole 漂移。
 
 **PR 4 — WorkSceneRegistry 接入 + cli 命令**
 RuntimeSession 持有 Registry;cli `/work add/list/remove/rename/archive` 直接调 Registry。
 **验收**:cli 命令端到端 CRUD,持久化跨重启。
 
 **PR 5 — REPL agent 访问统一(P1 根治,前置)**
-删除 `ReplState.agent`;16+ 处 `state.agent.xxx` 全改 `session.runtime.xxx`;journal-gate(仅 main 模式触发 condense)。**先于 workmode 扩展**——这是修复既存 reload bug 的独立单元,无 workmode 也应做。
-**验收**:`/config` 改模型后 `/status`/`/model` 显示新模型(既存 bug 修复);所有 slash 命令(/usage /compact /trust /security /new 等)行为零回归;journal 维护仅 main 触发。
+删除 `ReplState.agent`;16+ 处 `state.agent.xxx` 全改 `session.runtime.xxx`。**先于 workmode 扩展**——这是修复既存 reload bug 的独立单元,无 workmode 也应做。
+**验收**:`/config` 改模型后 `/status`/`/model` 显示新模型(既存 bug 修复);所有 slash 命令(/usage /compact /trust /security /new 等)行为零回归。
 
 **PR 6 — 切换意图回传管道**
 `AgentEventMap` 加 `workmode:switch_requested`;`subscribeWorkModeAccumulator`(复用 compact-accumulator 结构形态,语义 last-wins 单一意图非累加);`RunResult` 加 `pendingModeSwitch?`;run() 装配 accumulator 带出。纯管道无切换执行。
 **验收**:桩工具 emit 一次,RunResult 正确带出;同 turn 多次(不同 sceneId)取最后(last-wins);无事件 undefined;现有路径零回归。
 
 **PR 7 — RuntimeSession 工作模式扩展 + applyModeSwitch 单一事务**
-`swapConfirmationBroker` 抽方法(reload 改调此方法,消除内联);`createAgent` 参数化(spec.kind/powerProfile/memoryScope/primaryRole=power/workspace=workdir);`workScene` overlay + `get runtime()` 路由 + `activeMode`;`enterWorkMode`/`exitWorkMode`(broker swap / permissionStore 复用 / GC);scope 路由 facade(task_list + segmentDeps 共用);`ConversationRuntimeState` 聚合 + 双份持有;`applyModeSwitch` turn 边界原子事务(消费 pendingModeSwitch + 命令直接调;enter 起始 messages 按触发源;失败整体回滚;渲染事务点直接);lifecycle guard 覆盖 reload/enter/exit;dispose 处理 workScene 分支;临时 `/enter`(exit 暂不带纪要)。
-**验收**:`/enter` 进入 —— power runtime 装配打印 effective 主对话=power 解析值、light=中档、memory 域 root=workscene;ConversationRuntimeState 全字段切换正确;turn 内 emit 后当前 turn 用旧 runtime 跑完、turn 边界才切;`/resume`/`/new` 在 main 模式零回归;lifecycle guard 阻止 reload 与切换并发;装配中途抛错整体回滚无半切;dispose 在 workmode 先弃 overlay。
+`swapConfirmationBroker` 抽方法(reload 改调此方法,消除内联);`createAgent` 参数化(spec.kind/powerProfile/worksceneIdentity/primaryRole=power/workspace=workdir);`workScene` overlay + `get runtime()` 路由 + `activeMode`;`enterWorkMode`/`exitWorkMode`(broker swap / permissionStore 复用 / GC);scope 路由 facade(task_list + segmentDeps 共用);`ConversationRuntimeState` 聚合 + 双份持有;`applyModeSwitch` turn 边界原子事务(消费 pendingModeSwitch + 命令直接调;enter 起始 messages 按触发源;失败整体回滚;渲染事务点直接);lifecycle guard 覆盖 reload/enter/exit;dispose 处理 workScene 分支;临时 `/enter`(exit 暂不带纪要)。
+**验收**:`/enter` 进入 —— power runtime 装配打印 effective 主对话=power 解析值、light=中档、sceneId 来自显式 worksceneIdentity;ConversationRuntimeState 全字段切换正确;turn 内 emit 后当前 turn 用旧 runtime 跑完、turn 边界才切;`/resume`/`/new` 在 main 模式零回归;lifecycle guard 阻止 reload 与切换并发;装配中途抛错整体回滚无半切;dispose 在 workmode 先弃 overlay。
 
 **PR 8 — reload × workmode**
-`reload()` `agentChanged` 分支:in workmode 连带重建 power(workdir/memoryScope 从 WorkScene 重读、roles 重解析、primaryRole 仍 power);事务回滚覆盖 power。
+`reload()` `agentChanged` 分支:in workmode 连带重建 power(workdir 与 worksceneIdentity 从 WorkScene 重读、roles 重解析、primaryRole 仍 power);事务回滚覆盖 power。
 **验收**:workmode 中 `/config` 改 model,main 与 power 下条消息均用新配置,两份运行态不丢。
 
 **PR 9 — 退出纪要**
@@ -323,15 +293,14 @@ RuntimeSession 持有 Registry;cli `/work add/list/remove/rename/archive` 直接
 **验收**:手动 enter/做事/exit 后 main 下一 turn 见纪要且 LLM 识别为机制插入(不当自己原话);mainRuntime.systemPrompt byte-equal 不变。
 
 **PR 10 — agent 工具接入(走 assembly)**
-`ExtraToolsRuntimeContext` 加 `spec`;`assembleTools` 按 spec.kind 追加 workscene 工具组;工具捕获 `IWorkModeController` 接口(RuntimeSession 实现)。引入新 `BoundaryType "agent-context"` (`BOUNDARY_WRITE_IMPACT["agent-context"] = "external"`),让 enter / exit 显式声明切换 agent 自身运行态的边界;4 个工具 boundaries 声明: enter / exit `agent-context.switch` (external → confirm), `workscene_change_approve` `filesystem.write` (external → confirm), `workscene_memory_query` `filesystem.read` (observe → 自动放行)。enter/exit 的 call 体仅 emit 不执行切换。
-**验收**:LLM 在 main 调 workmode_enter / power 调 workmode_exit / main 调 workscene_change_approve 均触发 confirmation, 拍板后 emit / 落盘;`workscene_memory_query` 自动放行不弹窗;两入口共享状态;工具脱离 RuntimeSession 实例可单测(IWorkModeController mock)。
+`ExtraToolsRuntimeContext` 加 `spec`;`assembleTools` 按 spec.kind 追加 workscene 工具组;工具捕获 `IWorkModeController` 接口(RuntimeSession 实现)。引入新 `BoundaryType "agent-context"` (`BOUNDARY_WRITE_IMPACT["agent-context"] = "external"`),让 enter / exit 显式声明切换 agent 自身运行态的边界;enter / exit 使用 `agent-context.switch` (external → confirm)，`workscene_change_approve` 使用管理写边界，`workscene_list` 为只读 observe。enter/exit 的 call 体仅 emit 不执行切换。
+**验收**:LLM 在 main 调 workmode_enter / power 调 workmode_exit / main 调 workscene_change_approve 均触发 confirmation, 拍板后 emit / 落盘;`workscene_list` 自动放行不弹窗;两入口共享状态;工具脱离 RuntimeSession 实例可单测(IWorkModeController mock)。
 
 **PR 11 — LLM 自动切换 + system prompt 指引**
-main systemPrompt 加 Working Mode 段(stable prefix,条件渲染参考现有 sub-agent-delegation 条件段模式);明确信号直接调 `workmode_enter`,模糊场景先 `workscene_memory_query` 探再决定问/切(vision 第 4 块"先探后问")。`powerProfile` 身份段含场景定位 + 退出自判。
-**验收**:端到端 —— 用户 main 说"帮我看 zhixing 的 cli 模块" → LLM 调 workmode_enter → confirm → 本轮 main 跑完 → turn 边界进 power(workscene 目录+power 模型+workscene 记忆域,触发那句作起始 messages) → 续 → "差不多了" → workmode_exit → turn 边界回 main 见纪要。
+main systemPrompt 加 Working Mode 段(stable prefix,条件渲染参考现有 sub-agent-delegation 条件段模式);明确信号直接调 `workmode_enter`,需要 sceneId 或绑定信息时先调 `workscene_list`。`powerProfile` 身份段含场景定位 + 退出自判。
+**验收**:端到端 —— 用户 main 说"帮我看 zhixing 的 cli 模块" → LLM 调 workmode_enter → confirm → 本轮 main 跑完 → turn 边界进 power(workscene 目录+power 模型+显式 scene 身份,触发那句作起始 messages) → 续 → "差不多了" → workmode_exit → turn 边界回 main 见纪要。
 
 ## 开放问题(PR 内实施细节,不影响架构)
 
-1. **workscene_memory_query 检索策略**:v1 category+slug 列表 + 单条 raw 读;v2 全文搜+LLM 蒸馏。snippet 上限初步 500 字符/条。
-2. **power runtime SecurityPipeline**:permissionStore 跨实例复用已定;SecurityPipeline 随 createAgentRuntime 新建(power 有自己 workspace 边界)。`swapConfirmationBroker` 在 power 新 broker 上行为正确性需 PR 7 验证(power runtime 的 `confirmationBroker` 是全新实例,`renderer.attach` 幂等性靠 detach 旧→attach 新,不经"已 attach throw"守卫)。
-3. **WorkScene.workdir 不存在 / 失效**:enterWorkMode 装配前校验 workdir 可访问,不可访问则 applyModeSwitch 整体失败回滚 + REPL 提示,active 留 main。
+1. **power runtime SecurityPipeline**:permissionStore 跨实例复用已定;SecurityPipeline 随 createAgentRuntime 新建(power 有自己 workspace 边界)。`swapConfirmationBroker` 在 power 新 broker 上行为正确性需 PR 7 验证(power runtime 的 `confirmationBroker` 是全新实例,`renderer.attach` 幂等性靠 detach 旧→attach 新,不经"已 attach throw"守卫)。
+2. **WorkScene.workdir 不存在 / 失效**:enterWorkMode 装配前校验 workdir 可访问,不可访问则 applyModeSwitch 整体失败回滚 + REPL 提示,active 留 main。

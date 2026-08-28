@@ -157,7 +157,7 @@ export interface TaskListReader {
  * 段切换扩展点 —— 在段切换的三个关键时刻接入业务逻辑。
  *
  * 第一版仅预留接口，不内置任何 hook 实现。候选未来用途：
- *   - beforeSummarize：自动 memory.save 引导 / 任务边界推断
+ *   - beforeSummarize：任务边界推断 / 摘要前置校验
  *   - afterSummarize：摘要质量评估 / 用户通知
  *   - beforeNewSegmentStart：段统计上报 / 内嵌业务标记
  *

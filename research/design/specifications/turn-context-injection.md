@@ -1,8 +1,8 @@
 # Per-Turn 上下文注入架构
 
-> **当前定位**：本文是 `<turn-context>` per-turn 动态上下文机制的规格。它不定义 `ZHIXING.md` / profile 的持久上下文注入；早期首条 `<context>` 示例仅作历史背景，当前 `ZHIXING.md` 机制见 [ZHIXING.md 分层 guidance 架构](../drafts/zhixing-md-layered-context-architecture.md)。
+> **当前定位**：本文是 `<turn-context>` per-turn 动态上下文机制的规格。它不定义 `ZHIXING.md` 的持久上下文注入；早期首条 `<context>` 示例仅作历史背景，当前 `ZHIXING.md` 机制见 [ZHIXING.md 分层 guidance 架构](../drafts/zhixing-md-layered-context-architecture.md)。
 
-> 规格目标：让 AI 在每一轮对话中拥有实时状态感知——当前时间、定时任务状态、未来可扩展到记忆预取和通道上下文。
+> 规格目标：让 AI 在每一轮对话中拥有实时状态感知——当前时间、定时任务状态，以及未来独立设计的通道上下文。
 > 调研依据：[dynamic-context-injection.md](../../source-analysis/dynamic-context-injection.md)（openclaw / hermes / claude-code 三方对比）
 
 ---
@@ -14,7 +14,7 @@
 | 注入物 | 注入时机 | 注入位置 | 问题 |
 |--------|---------|---------|------|
 | 身份 + 工具 + 原则 | `createAgentRuntime()` 一次 | system prompt | 正确（静态内容） |
-| 持久工作约定 / profile（历史背景） | 早期首条 user message | `<context>` 标签 | 已迁出本文范围；`ZHIXING.md` 当前由 guidance / messagePrefix 承载，profile 属记忆线 |
+| 持久工作约定（历史背景） | 早期首条 user message | `<context>` 标签 | 已迁出本文范围；`ZHIXING.md` 当前由 guidance / messagePrefix 承载 |
 | 当前时间 | `buildEnvironment()` 一次 | system prompt 动态段 | **错误：REPL 全程冻结，serve 每会话冻结** |
 | 定时任务状态 | 无 | 无 | **缺失：AI 完全不知道哪些任务在跑** |
 
@@ -46,7 +46,7 @@
 │ 注入位置：最新 user message（当前轮输入）               │
 │ 注入时机：每次 run() 调用                              │
 │ 格式标签：<turn-context>                              │
-│ 内容：当前时间 / 定时任务状态 / (future: 记忆预取...)   │
+│ 内容：当前时间 / 定时任务状态                           │
 │ 更新频率：每轮都变                                    │
 │                                                     │
 │ → 本规格的设计目标                                    │
@@ -58,7 +58,6 @@
 | 内容 | 当前归属 |
 |------|----------|
 | `ZHIXING.md` 持久工作约定 | guidance / messagePrefix 机制 |
-| profile / memory | 记忆线 |
 | 已删除的首条 `<context>` 注入路径 | 仅保留在本文附录作历史追溯 |
 
 **对比参考项目：**
@@ -562,7 +561,6 @@ LayerAssembler 的 Layer 3 已有 `currentTime` 和 `activeTaskHint` 参数，�
 
 | Provider | 触发条件 | 内容 |
 |----------|---------|------|
-| MemoryProvider | 记忆预取命中时 | 相关记忆摘要 |
 | ChannelProvider | serve 模式接收消息时 | 来源通道、发送者身份 |
 | SessionProvider | 多会话切换时 | 当前会话名称、轮数 |
 

@@ -1046,8 +1046,8 @@ export async function startRepl(): Promise<void> {
         cliWriter.line(chalk.dim("\n  当前不在工作场景中\n"));
         return;
       }
-      // 退出 = 宿主 touch + 指针切回 main。场景实例的收尾(末窗记忆 flush)随
-      // 宿主实例生命周期(grace 到期 dispose)自行发生,不在接入面。
+      // 退出 = 宿主 touch + 指针切回 main。场景实例的收尾随宿主实例生命周期
+      // （grace 到期 dispose）自行发生，不在接入面。
       const exitResult = await controller.exitScene(mainReturnTarget);
       mainReturnTarget = controller.current;
       const exitMessage =

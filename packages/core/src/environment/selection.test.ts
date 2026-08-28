@@ -22,14 +22,14 @@ describe("environment selection", () => {
         "grep",
         "bash",
         "admit_skill",
-        "memory",
+        "load_skill",
         "web_fetch",
       ],
       mcpServers: ["server-a"],
       providerIds: ["provider-a"],
     };
     expect(executionProfileForEnvironment(profile, {})).toEqual({
-      tools: ["memory", "web_fetch"],
+      tools: ["load_skill", "web_fetch"],
       mcpServers: ["server-a"],
       providerIds: ["provider-a"],
     });

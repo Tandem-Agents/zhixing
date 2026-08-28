@@ -1,5 +1,9 @@
 # 知行智能体运行时架构设计方案
 
+> ⚠️ **HISTORICAL（2026-08-28 起）**
+>
+> 本文保留早期常驻服务、调度、投递与后台运行时设计的演进事实，不再作为当前实施授权。现行生产合同以 distributed-runtime 执行规格及对应模块现行文档为准；正文中的旧 Memory / Journal maintenance、旧 Scheduler、DeliveryPipeline/queue 与共享 `memoryStore` 等内容均不得据此恢复。
+
 > 设计日期：2026-04-09 | 最后更新：2026-04-21（v2.1 — Outbox 顺序层）
 > 依赖调研：[openclaw/persistent-service.md](../../source-analysis/openclaw/persistent-service.md)、[claude-code/persistent-service.md](../../source-analysis/claude-code/persistent-service.md)、[hermes-agent/persistent-service.md](../../source-analysis/hermes-agent/persistent-service.md)
 > 产品定位：个人助手（需要 7×24 可达 + 主动关怀 + 跨通道投递 + 智能协调）

@@ -1,8 +1,8 @@
 # 辅助 LLM 角色能力 · 执行规格
 
-> 在会话级（ToolExecutionContext / SessionRuntime）暴露独立的"辅助 LLM 角色"，让 I/O 边界净化（记忆提取 / WebFetch distill / 工具结果摘要 / 子 agent 返回压缩 / 通道入站分类等）不消耗主上下文与主模型成本。本能力**不绑定具体工具**——是会话级共享基础设施。注:主对话压缩（LLMSummarize）走 main 不在辅助角色范围（见 ADR-SLLM-009）。
+> 在会话级（ToolExecutionContext / SessionRuntime）暴露独立的"辅助 LLM 角色"，让 I/O 边界净化（WebFetch distill / 工具结果摘要 / 子 agent 返回压缩 / 通道入站分类等）不消耗主上下文与主模型成本。本能力**不绑定具体工具**——是会话级共享基础设施。注:主对话压缩（LLMSummarize）走 main 不在辅助角色范围（见 ADR-SLLM-009）。
 
-**消费者**：记忆提取（`createMemoryFlushCallLLM` → `roles.light`）+ WebFetch distill（`ctx.llm.light`）+ 未来 WebSearch / MCP 大结果摘要 / 子 agent 返回压缩 / 通道入站分类 / 记忆语义压缩。**主对话压缩（LLMSummarize）走 main**（`createSummarizeCallLLM` → `roles.main`），不属于辅助角色范围 —— 摘要质量直接决定下一轮 LLM 的认知输入,与"I/O 边界净化"语义不同。
+**当前消费者**：WebFetch distill（`ctx.llm.light`）+ runtime 默认 `callText` / 段切换摘要（`createLightCallLLM` → `roles.light`）。**主对话压缩（LLMSummarize）与质量敏感的 `callText(prompt, "main")` 走 main**（`createMainCallLLM` → `roles.main`）；未来 WebSearch / MCP 大结果摘要 / 子 agent 返回压缩 / 通道入站分类可按真实需求接入 light。
 
 ---
 
@@ -13,14 +13,14 @@
 会话级共暴露三个 LLM 角色，**角色集的单一事实源是 `packages/providers/src/role-spec.ts` 的 `ROLE_SPECS` 注册表**（见 §一.4）：
 
 - **`main`（必填）**：主对话循环、complex reasoning、用户面对的最终输出。
-- **`light`（选填）**：后台杂活槽——记忆提取 / WebFetch 蒸馏 / 工具结果摘要 / 子 agent 返回压缩 / 通道入站分类等"输入大、输出小、不需要长链推理"的 I/O 边界净化任务。通常挑轻量便宜模型。主对话压缩（LLMSummarize）不在 light 范围（走 main，见 ADR-SLLM-009）。
+- **`light`（选填）**：后台杂活槽——WebFetch 蒸馏、默认单发文本调用、段切换摘要、工具结果摘要 / 子 agent 返回压缩 / 通道入站分类等"输入大、输出小、不需要长链推理"的任务。通常挑轻量便宜模型。主对话压缩（LLMSummarize）不在 light 范围（走 main，见 ADR-SLLM-009）。
 - **`power`（选填）**：重活槽——编程等高难任务。模型档位由用户决定，名字表达"接重活"而非"模型一定强"（用户即便给 `power` 配弱模型也合法）。**当前仅基础设施就位，没有任何消费者接入**，为未来重活类工作预留——不预绑任何调用点。
 
 `light` 与 `power` 都是**辅助角色**（非必填、有 main 兜底），共用同一套解析 / 实例复用 / 兜底机制（§二）。三者承担"接什么活"的角色用途分工，不锁定模型档位。
 
 ### 〇.2 为什么需要辅助角色
 
-辅助角色的核心价值是**调用上下文隔离**——把 I/O 边界处的处理任务（记忆提取 / 工具结果摘要 / 网页正文蒸馏 / 子 agent 返回压缩 / 通道入站分类等）放到一次**独立的 LLM conversation** 里执行，不污染主对话历史。三层价值，按重要度递减：
+辅助角色的核心价值是**调用上下文隔离**——把 I/O 边界处的处理任务（工具结果摘要 / 网页正文蒸馏 / 子 agent 返回压缩 / 通道入站分类等）放到一次**独立的 LLM conversation** 里执行，不污染主对话历史。三层价值，按重要度递减：
 
 **第一层：上下文隔离 / 信任边界（核心，不可放弃）**
 
@@ -79,7 +79,7 @@ export interface ZhixingConfig {
   /**
    * LLM 角色配置（角色集单一事实源 = role-spec.ts 的 ROLE_SPECS）：
    * - main 必填——主对话循环、用户面对的最终输出
-   * - light 可缺省——系统侧 I/O 边界净化（记忆提取、WebFetch distill、工具结果摘要等），用户不直接调用
+   * - light 可缺省——系统侧轻量任务（WebFetch distill、默认单发文本调用、段切换摘要等），用户不直接调用
    * - power 可缺省——重活槽（首个消费者：work-mode 工作场景主对话；其余预留按需接入）
    * 辅助角色缺省时直接用 main 实例 + main.model 兜底（隔离价值仍保留）。
    *
@@ -290,33 +290,33 @@ export function createProviderRoles(options?: ProviderRolesOptions): ProviderRol
 |------|------|------|
 | entry | `const { roles, config } = createProviderRoles()` | entry |
 | budget 解析 | `resolveModelInfo({ providerId: roles.main.provider.id, model: roles.main.model, ... })` | main |
-| 主对话压缩（LLMSummarize） | `createSummarizeCallLLM(roles, mainThinking)` → 内部走 `roles.main.chat({...})` | **main** |
-| 记忆提取（MemoryFlush） | `createMemoryFlushCallLLM(roles, lightThinking)` → 内部走 `roles.light.chat({...})` | **light** |
+| main 档单发调用与主对话压缩（LLMSummarize） | `createMainCallLLM(roles, mainThinking)` → 内部走 `roles.main.chat({...})` | **main** |
+| 默认单发调用与段切换摘要 | `createLightCallLLM(roles, lightThinking)` → 内部走 `roles.light.chat({...})` | **light** |
 | AgentRuntime 返回 | 同时含 `providerId: roles.main.provider.id` 与 `model: roles.main.model`——都反映 config.llm.main | main |
 | agent loop | `runAgentLoop({ provider: roles.main.provider, model: roles.main.model, ... })` | main |
 | ctx 工厂 | 创建 ToolExecutionContext 时注入 `llm: roles` | both |
 
-压缩域两条独立 helper（`orchestrator/src/runtime/compaction-llm.ts`），各自专属一个 strategy、各走自己的角色——"走哪个 role"这一承诺在单测中可反向 assert（另一个 role 的 chat 不应被调用），防止未来 refactor 错绑而无人发现：
+单发文本调用由 `orchestrator/src/runtime/call-llm.ts` 提供 main/light 两条独立 helper——"走哪个 role"这一承诺在单测中可反向 assert（另一个 role 的 chat 不应被调用），防止未来 refactor 错绑而无人发现：
 
 ```typescript
-// 主对话压缩（LLMSummarize）—— 摘要质量直接决定下一轮 LLM 认知输入，走 main
-export function createSummarizeCallLLM(
+// 质量敏感的单发调用与主对话压缩走 main
+export function createMainCallLLM(
   roles: LLMRoles,
   mainThinking?: ThinkingConfig,
-): CompactLLMFn {
+): TextCallLLMFn {
   return callLLMText(roles.main, mainThinking);
 }
 
-// 记忆提取（MemoryFlush）—— I/O 边界结构化净化（提取 profile/person/skill/journal 写盘），走 light
-export function createMemoryFlushCallLLM(
+// 默认单发调用与段切换摘要走 light
+export function createLightCallLLM(
   roles: LLMRoles,
   lightThinking?: ThinkingConfig,
-): CompactLLMFn {
+): TextCallLLMFn {
   return callLLMText(roles.light, lightThinking);
 }
 
 // 共享内部 helper：消费流式响应、拼接 text_delta、返回纯字符串（空响应即空串，caller 各自处理）
-function callLLMText(role: LLMRole, thinking?: ThinkingConfig): CompactLLMFn {
+function callLLMText(role: LLMRole, thinking?: ThinkingConfig): TextCallLLMFn {
   return async (messages, opts) => {
     const chunks: string[] = [];
     for await (const event of role.chat({
@@ -329,7 +329,7 @@ function callLLMText(role: LLMRole, thinking?: ThinkingConfig): CompactLLMFn {
 }
 ```
 
-**两个 helper 分流的隔离价值**：即便 light 与 main 是同一 provider+model（用户没显式配 `llm.light` 走 main 兜底），各自走独立 `ChatRequest` 调用本身已切断"工具结果中的 prompt injection 注入主对话"的攻击向量、剥离噪音 —— 隔离来自调用边界独立而非模型差异。把主对话压缩从 light 升到 main 是任务专门化层面的产品决策（摘要质量直接关系到下一轮认知），与 MemoryFlush 的"I/O 边界净化"语义本质不同。
+**两个 helper 分流的隔离价值**：即便 light 与 main 是同一 provider+model（用户没显式配 `llm.light` 走 main 兜底），每次调用仍是独立 `ChatRequest`，不会把一次性 prompt 写入主对话历史。角色分流只表达任务质量/成本取舍：质量敏感的单发任务与 LLMSummarize 走 main，默认单发任务与段切换摘要走 light。
 
 间接受益（无需直接修改）：`serve/command.ts` 通过 `createAgentRuntime` 工厂调用自动传导；`serve/session-adapter.ts` 通过工厂注入消费。
 
@@ -375,8 +375,9 @@ async call(input, ctx) {
 
 | Consumer | Role | 状态 | 触发条件 / 备注 |
 |----------|------|------|----------------|
-| 主对话压缩（LLMSummarize 策略） | **main** | 已落地 | `createSummarizeCallLLM(roles, mainThinking)` → `roles.main.chat`；priority 200 / usage ≥ 0.9 触发；摘要质量直接关系到下一轮 LLM 的认知输入，走 main 档位（不属于"辅助角色"语义） |
-| 记忆提取（MemoryFlush 策略） | light | 已落地 | `createMemoryFlushCallLLM(roles, lightThinking)` → `roles.light.chat`；priority 3 / usage ≥ 0.75 触发；I/O 边界结构化净化（提取 profile / person / skill / journal 写盘） |
+| 主对话压缩（LLMSummarize 策略） | **main** | 已落地 | `createMainCallLLM(roles, mainThinking)` → `roles.main.chat`；摘要质量直接关系到下一轮 LLM 的认知输入，走 main 档位（不属于"辅助角色"语义） |
+| `callText(prompt, "main")` | **main** | 已落地 | 质量敏感的撰写 / 研判类单发任务 |
+| 默认 `callText` / 段切换摘要 | light | 已落地 | `createLightCallLLM(roles, lightThinking)` → `roles.light.chat`；低成本单发任务与 segment 摘要 |
 | WebFetch distill | light | 已落地 | 用户传 `input.prompt` 时触发；`!ctx.llm` 时退到 raw markdown |
 | WebSearch 后处理 | light | 未来 | search snippet 合并 + 提炼 |
 | MCP 大结果摘要 | light | 未来 | tool result > N tokens 时自动 distill |
@@ -423,8 +424,8 @@ async call(input, ctx) {
 
 | 组件 | 关系 |
 |------|------|
-| `createSummarizeCallLLM(roles, mainThinking?)`（`orchestrator/runtime/compaction-llm.ts`） | 固定走 `roles.main.chat`；专属 LLMSummarize 主对话压缩；无状态 |
-| `createMemoryFlushCallLLM(roles, lightThinking?)`（`orchestrator/runtime/compaction-llm.ts`） | 固定走 `roles.light.chat`；专属 MemoryFlush 记忆提取；无状态 |
+| `createMainCallLLM(roles, mainThinking?)`（`orchestrator/runtime/call-llm.ts`） | 固定走 `roles.main.chat`；供质量敏感的单发调用与 LLMSummarize 使用；无状态 |
+| `createLightCallLLM(roles, lightThinking?)`（`orchestrator/runtime/call-llm.ts`） | 固定走 `roles.light.chat`；供默认单发调用与段切换摘要使用；无状态 |
 | WebFetch（`tools-builtin/web-fetch.ts`） | 走 `ctx.llm.light`；`!ctx.llm || !prompt` graceful degrade 到 raw markdown |
 | `cli/config-editor`（sections/checks/state/types） | `ModelRole = RoleId`；遍历 ROLE_SPECS / AUX_ROLE_SPECS 派生入口与校验 |
 | `cli/runtime/diff.ts` | 整段 `!stableEqual(oldConfig.llm, newConfig.llm)`——与 ROLE_SPECS 解耦零漂移 |
@@ -480,7 +481,7 @@ async call(input, ctx) {
 ### ADR-SLLM-007：不抽 LLMService
 
 consumer 直接调 `light.chat()` / `main.chat()`（工具消费走 `ctx.llm.<role>`，runtime 闭包消费走 `roles.<role>`），不抽象 `LLMService.summarize() / classify() / extract()`：
-- 当前 3 个 consumer（LLMSummarize / MemoryFlush / WebFetch distill）task 形态完全不同（消息列表→主对话摘要 vs 消息列表→JSON 提取写盘 vs raw markdown+prompt→task-relevant 摘要）
+- 当前 consumer（LLMSummarize、runtime 单发/段切换摘要、WebFetch distill）task 形态不同（消息列表→主对话摘要、一次性文本任务、raw markdown+prompt→task-relevant 摘要）
 - 未来 WebSearch / MCP digest / 子 agent return 各自有特殊 prompt + temperature + max_tokens
 - 抽象层会让"统一接口"成为最小公约数 → 任何 consumer 想自定义参数都要绕开抽象 → 抽象层无价值
 - 阈值：3+ consumer 共享同一 task 形态时再抽
@@ -494,13 +495,13 @@ consumer 直接调 `light.chat()` / `main.chat()`（工具消费走 `ctx.llm.<ro
 
 两个维度分治：注册表吃掉机械重复，typed 接口守住消费者契约——既无散落分支漂移，又不牺牲调用点类型安全。
 
-### ADR-SLLM-009：主对话压缩（LLMSummarize）走 main 而非 light
+### ADR-SLLM-009：单发调用按 main / light 档位分流
 
-压缩域两个 strategy 按 task 性质分流到不同 role —— LLMSummarize 走 main、MemoryFlush 走 light，由 `compaction-llm.ts` 的两个独立 helper（`createSummarizeCallLLM` / `createMemoryFlushCallLLM`）分别承载：
+`call-llm.ts` 以 `createMainCallLLM` / `createLightCallLLM` 承载两个档位：
 
-- **task shape 不同 → role 选择不同**：MemoryFlush 是"消息列表 → 结构化 JSON 写盘"的 I/O 边界净化（属于 §〇.2 第二层任务专门化典型形态，走 light 合理）；LLMSummarize 是"消息列表 → 替代早期消息的摘要文本"，**摘要质量直接决定下一轮 LLM 的认知输入**，task shape 不属于"输入大、输出小、不需要长链推理"档 —— 应走 main 档位
-- **隔离价值仍保留**：即便 light 与 main 是同一 provider+model（用户没显式配 `llm.light` 走 main 兜底），两个 helper 各走独立 `ChatRequest` 调用本身已切断"工具结果中的 prompt injection 注入主对话"的攻击向量、剥离噪音。隔离来自调用边界独立而非模型差异，所以 LLMSummarize 升 main 不放弃任何隔离价值
-- **拆 helper 而非共享**：历史耦合是 `createCompactionFlush` 单一 helper 同时服务两个 strategy（共享 `roles.light.chat`），命名也误导"compaction"语义。借这次升级直接拆开 —— 两个 helper 语义独立、role 归属一目了然，单测可反向 assert "走哪个 role 不被错绑"（防 refactor 漂移）
+- **task shape 决定 role**：LLMSummarize 和面向用户的撰写 / 研判类单发任务质量敏感，走 main；默认单发任务和段切换摘要走 light。
+- **隔离价值仍保留**：即便 light 与 main 是同一 provider+model，每次单发调用仍使用独立 `ChatRequest`，不会进入主对话历史。
+- **helper 按档位拆分**：两条 helper 语义独立，单测可反向 assert "走哪个 role 不被错绑"，并共同复用流式文本拼接实现。
 - **/compact 与自动触发同源**：用户主动 `/compact` 走 `forceCompact` → `engine.onTurnComplete` → 同一份 strategies → 同一 helper → 同一 prompt（`MAIN_SESSION_PROMPT`），自动与手动行为完全一致
 - **work-mode 同时覆盖**：main runtime 与 workscene/power runtime 都通过 `createAgentRuntime` 装配，同一函数装配两份 `LLMSummarizeStrategy` 都走 `roles.main` —— 单一改造覆盖两个场景
 
@@ -514,7 +515,7 @@ consumer 直接调 `light.chat()` / `main.chat()`（工具消费走 `ctx.llm.<ro
 - `bindRole` 实绑契约：chat 调用时 provider 收到 `request.model === 绑定 model`；多 role 共享 provider 时 closure 不串
 - 实例复用断言：同 provider 共享 instance / 异 provider 各自 instance / 缺省时同一 instance（仅内部不变断言，非外部契约）
 - effective state 断言：`roles.main.{provider.id, model}` 等于 `config.llm.main` 的 provider/model
-- consumer 路由：`compaction-llm.test.ts` mock 双 spy LLMRoles 反向验证两条路径互不干扰 —— `createSummarizeCallLLM` → `main.chat` 被调用、`light.chat` 永不被调用；`createMemoryFlushCallLLM` → `light.chat` 被调用、`main.chat` 永不被调用；两者 abortSignal / thinking 各自透传；空响应返回空字符串（caller 各自容错 —— LLMSummarize 经章节校验失败 → 重试 → strategy 退化，MemoryFlush 经 parseExtractions try/catch 自然降级为空数组）。WebFetch mock `ctx.llm.light.chat()` stream 出预期事件；`!ctx.llm` 时按"显式分支表态"契约 fail（不 silent / 不 throw）
+- consumer 路由：`call-llm.test.ts` mock 双 spy LLMRoles 反向验证两条路径互不干扰 —— `createMainCallLLM` → `main.chat` 被调用、`light.chat` 永不被调用；`createLightCallLLM` → `light.chat` 被调用、`main.chat` 永不被调用；abortSignal / thinking 各自透传；空响应返回空字符串。WebFetch mock `ctx.llm.light.chat()` stream 出预期事件；`!ctx.llm` 时按"显式分支表态"契约 fail（不 silent / 不 throw）
 - 缺省兜底不打印任何启动提示；可选角色显式配错**不 fail-fast**——回退 main + `create-agent-runtime` 一次 `[zhixing]` 可见非致命告警（session 正常启动）
 - 注册表驱动层：config-editor sections 遍历 `ROLE_SPECS` 产出三角色入口；`checks/model.ts` 仅产 required(main) 阻断项（可选角色不入清单）；`RoleId` ≡ `LLMRoles` 键集编译期断言生效
 
@@ -550,7 +551,7 @@ consumer 直接调 `light.chat()` / `main.chat()`（工具消费走 `ctx.llm.<ro
 | 价值定位 | 成本+性能 | task 专门化 | n/a | **隔离 > 专门化 > cost** |
 | WebFetch distill | ✅ Haiku | ✅（带并行分块） | ❌（raw 返回） | ✅ light |
 | 主对话压缩（LLM 摘要） | Haiku | auxiliary | 主模型 | **main**（质量直接关系下一轮认知） |
-| 记忆提取 / 工具结果摘要 | Haiku | auxiliary | 主模型 | light |
+| 工具结果摘要 | Haiku | auxiliary | 主模型 | light |
 | 抽象层 | API client 内部分支 | LLMService（call_llm by task） | 配置驱动 | LLMRole.chat()（无抽象层；角色集注册表 + 显式 typed 契约分治） |
 
 zhixing 选择固定角色集模式：比 hermes 简单（不引入 per-task complexity），比 claudecode vendor 中立（不写死任何 provider，保留用户主权），比 openclaw 准确（明确"调用上下文隔离"语义而非"成本维度"）；角色集由 `role-spec.ts` 注册表单一事实源驱动，新增角色机械层零改动。

@@ -678,7 +678,7 @@ rl.on("close", async () => {
 - **文件 watch 自动 reload**——当前仅 `/config completed` 触发；未来扩展通过同一 `reload()` 入口
 - **server 模式 hot reload**——本规格仅 REPL；server 触发与反馈不同，单独 spec
 - **多 reload 并发**——`/config` 模态接管 stdin，不可能并发；未来扩展触发源时再考虑 mutex
-- **`AgentRuntime.dispose()` 接口**——内部全 in-memory（securityPipeline / boundaryRegistry / turnContextInjector / memoryStore / estimator），replace ref 后 GC 自然回收，不增加冗余接口
+- **`AgentRuntime.dispose()` 接口**——内部全 in-memory（securityPipeline / boundaryRegistry / turnContextInjector / estimator），replace ref 后 GC 自然回收，不增加冗余接口
 - **`Scheduler.setDelivery` / `Scheduler.swapTaskRunner` 等内部状态切换接口**——blue-green swap 不需要，避免破坏 immutable 契约
 - **`tools-builtin/web-fetch` proxy 改 getter**——blue-green swap 不需要 hot field reload，跨包 API 零侵入
 

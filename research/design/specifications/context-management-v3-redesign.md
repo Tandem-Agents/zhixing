@@ -281,7 +281,7 @@ interface SegmentTransitionHook {
 ### 6.2 v3 第一版的实现规则
 
 - **仅接口预留**，不实现任何 hook 内容
-- 未来扩展候选（不在 v3 范围）：自动 `memory.save` 引导 / 任务边界推断 / 用户通知 / 段统计上报 / 摘要质量评估
+- 未来扩展候选（不在 v3 范围）：任务边界推断 / 用户通知 / 段统计上报 / 摘要质量评估
 
 ---
 
@@ -300,7 +300,7 @@ Profile 是 `AgentRoleProfile` 概念的延伸——同一对话场景下 LLM �
 
 | Profile | enabledTools | 场景 |
 |---|---|---|
-| `main` | 全 8 工具 + memory + task_list | 主对话（默认） |
+| `main` | 当前 main profile 的完整静态工具集 + task_list | 主对话（默认） |
 | `sub-agent` | read + glob + grep | Task 工具派出的子任务（探索） |
 
 具体工具集合在 spec 阶段最终定稿（含 sub-agent 是否再加更多工具如 web_fetch）。**v3 第一版不引入新 profile**（不做 chat / research / coding 等场景化拆分，YAGNI）。
@@ -381,7 +381,6 @@ SegmentManager 是**独立模块**，不引入 ContextCompiler 抽象层（v3 �
 |---|---|
 | `onTurnComplete` 主路径 | 保留（v3 段切换是更高层事件，独立于数据层）|
 | `MessageDrop` / `LLMSummarize` 策略 | **保留为异常路径兜底**——v3 段切换失败且 budget critical 时由 `LLMSummarize` 直接摘 raw（不再依赖 tier-compressor 预压缩）；`MessageDrop` 移除当前的 `isPinned` 消费（v3 不用 Pin）|
-| `MemoryFlush`（`packages/core/src/memory/flush-engine.ts`） | **保留为独立机制**——提炼 user message 中的关键事实到 memory store，是 memory 系统的功能，**与上下文管理解耦**，不参与段切换兜底链 |
 | `manageWindow`（含 Pin + eviction + applyTierCompression） | **🔴 整体砍除** —— (a) `applyTierCompression` 修改老 tool_result 字节违反 invariant 1；(b) Pin 砍除后 eviction 单独存在价值不大；(c) ContextEngine 直接做 budget check + 调用 MessageDrop / LLMSummarize，无需 manageWindow 这层抽象 |
 
 ---
@@ -414,7 +413,7 @@ SegmentManager 是**独立模块**，不引入 ContextCompiler 抽象层（v3 �
 | `tier-compressor.ts`（`applyTierCompression` + `determineTier` + 全部 generator）| 砍除 | 修改老 tool_result 字节，违反 invariant 1 |
 | `TierThresholds` 类型 + `ContextEngine` 配置 `tierThresholds` 入参 | 砍除 | 跟随 tier-compressor |
 | `manageWindow`（整体砍除）| 砍除 | Pin 不再需要 + 砍掉 tier-compressor 后此层抽象只剩 eviction，价值不足；ContextEngine 直接 budget check + 调用策略 |
-| `MessageDrop` 中的 `isPinned` 消费（`message-drop.ts:74,100`）| 砍除 | v3 不用 Pin（注：另两个策略 `MemoryFlush` / `LLMSummarize` 当前未接 isPinned，无需清理）|
+| `MessageDrop` 中的 `isPinned` 消费（`message-drop.ts:74,100`）| 砍除 | v3 不用 Pin（`LLMSummarize` 当前未接 isPinned，无需清理）|
 | `ContextCompiler` 主框架（含 types / runner / 测试）| 砍除 | YAGNI——v3 无视图层 Stage 需求 |
 | `ToolResultAnchorStage` + 全部 anchor generator（read/bash/grep/glob/edit/write/web_fetch）| 砍除 | 锚化改写历史 tool_result，违反 invariant 1 |
 | `recall_history` 工具 + 注入点（`create-agent-runtime.ts:444-455`）| 砍除 | v3 决议不做 |

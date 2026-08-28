@@ -24,7 +24,7 @@
 
 ## 一、设计目标：基于三家，做得更好
 
-**定位原则（先于一切）**：MCP 补的是知行内置工具**够不到的外部盲区**——外部服务 / SaaS 集成（GitHub、Notion、数据库、第三方 API 等），**不重复**知行已有的本地/通用能力（文件读写、bash、memory、web_fetch 这些内置工具已覆盖，且分类更精细）。凡知行内置已有等价能力的，用内置工具、不用 MCP（例如官方 reference 的 filesystem/git/fetch/memory server 在知行里没有价值，因为 read/write/bash/web_fetch/memory 已覆盖且更精细）。这与"MCP 工具统一声明 `external-service` 边界"自洽——MCP 在知行里就是"外部服务"那一类。预设库据此只收外部服务类 server。
+**定位原则（先于一切）**：MCP 补的是知行内置工具**够不到的外部盲区**——外部服务 / SaaS 集成（GitHub、Notion、数据库、第三方 API 等），**不重复**知行已有的本地/通用能力（文件读写、bash、web_fetch 这些内置工具已覆盖，且分类更精细）。凡知行内置已有等价能力的，用内置工具、不用 MCP（例如官方 reference 的 filesystem/git/fetch server 在知行里没有价值，因为 read/write/bash/web_fetch 已覆盖且更精细）。这与"MCP 工具统一声明 `external-service` 边界"自洽——MCP 在知行里就是"外部服务"那一类。预设库据此只收外部服务类 server。
 
 知行能在集成层做得比三家更好的，全部来自"知行宿主架构与三家不同"这一事实，不是凭空创新：
 

@@ -69,7 +69,7 @@ export type BoundaryType =
   | "external-service"
   | "financial"
   | "agent-context"
-  /** 知行应用本地状态（~/.zhixing 下 memory / schedule / skill 数据）：写=internal、读=observe */
+  /** 知行应用本地状态（~/.zhixing 下 schedule / skill 等数据）：写=internal、读=observe */
   | "app-state";
 
 /**

@@ -883,7 +883,7 @@ describe("ConversationProtocolRuntime", () => {
     const secretStore = new MemorySecretStore();
     let readiness = {
       ...TEST_EXECUTOR_READINESS,
-      tools: ["memory"],
+      tools: ["web_fetch"],
       mcpServers: ["server-a"],
     };
     const readinessReads: string[][] = [];
@@ -916,7 +916,7 @@ describe("ConversationProtocolRuntime", () => {
         confirmations: [],
       }),
       executionProfile: () => ({
-        tools: ["memory"],
+        tools: ["web_fetch"],
         mcpServers: ["server-a"],
         providerIds: [],
       }),
@@ -977,12 +977,12 @@ describe("ConversationProtocolRuntime", () => {
         "Local executor rejected a freshly issued assignment",
       );
       expect(validateBindingSpy).toHaveBeenCalledOnce();
-      expect(readinessReads).toEqual([["memory"], ["memory"], []]);
+      expect(readinessReads).toEqual([["web_fetch"], ["web_fetch"], []]);
       expect(bindingResults).toMatchObject([
         { code: "capability-gap", retryable: true },
       ]);
       expect(prepared?.policy.manifestCapabilities).toMatchObject({
-        tools: ["memory"],
+        tools: ["web_fetch"],
         mcpServers: ["server-a"],
       });
       expect(prepared?.policy.permissionSnapshot.rules).toEqual([

@@ -1,7 +1,7 @@
 /**
  * 工作场景类型
  *
- * 工作场景 = 用户进入具体工作语境时的一组运行配置归属（独立记忆域 + 会话域 +
+ * 工作场景 = 用户进入具体工作语境时的一组运行配置归属（显式场景身份 + 会话归属 +
  * 元信息）。粒度、组织、生命周期由用户决定，系统只提供 CRUD 机制原语。
  */
 
@@ -37,7 +37,7 @@ export interface IWorkSceneRegistry {
   add(opts: { name: string; workdir?: string }): Promise<WorkScene>;
   /**
    * 彻底移除工作场景：从 index 摘 id + 物理删除该场景系统目录
-   * (`meta.json` + 记忆域 `me/` + 会话域 `conversations/`)。**不可恢复**。
+   * (`meta.json` + 会话目录 `conversations/`)。**不可恢复**。
    *
    * 用户的代码工作目录 (`workdir`) **不动** —— 那是用户的代码资产，归用户自管，
    * 系统从不写也不删。

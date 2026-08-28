@@ -112,7 +112,7 @@ export class RuntimeHost {
 
   /**
    * 发放一个工作场景会话的 runtime 实例——power 装配：本机解析后的授权路径为工作区
-   * （无 workspace 显式 null，by-construction 杜绝串到 cwd）、记忆域绑场景、
+   * （无 workspace 显式 null，by-construction 杜绝串到 cwd）、显式场景身份、
    * power 角色与 profile。场景对话经全域键(ws: 前缀)路由到此。
    */
   async createWorksceneRuntime(input: {

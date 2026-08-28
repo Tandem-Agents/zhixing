@@ -110,7 +110,7 @@ describe("资产层透传", () => {
     expect(onRuntimeCreated).toHaveBeenNthCalledWith(3, eph);
   });
 
-  it("workscene 装配:只消费本机解析路径、无 workspace 显式 null，并绑定 power 角色与记忆域", async () => {
+  it("workscene 装配:只消费本机解析路径、无 workspace 显式 null，并绑定 power 角色与显式场景身份", async () => {
     const { options, assembled } = makeHostOptions();
     const host = new RuntimeHost(options);
 

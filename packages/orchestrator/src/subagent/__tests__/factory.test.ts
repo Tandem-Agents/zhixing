@@ -487,9 +487,9 @@ describe("runChildAgent · sub-agent profile.enabledTools 过滤", () => {
       { toolCalls: [{ id: "t1", name: "read", input: {} }] },
       { text: "done" },
     ]);
-    // sub-agent profile.enabledTools 含 read 不含 memory
+    // sub-agent profile.enabledTools 含 read 不含 write
     const enabledTool = makeReadOnlyTool("read");
-    const disabledTool = makeReadOnlyTool("memory");
+    const disabledTool = makeReadOnlyTool("write");
 
     const result = await runChildAgent(
       makeBaseOpts(provider, { parentTools: [enabledTool, disabledTool] }),
@@ -499,7 +499,7 @@ describe("runChildAgent · sub-agent profile.enabledTools 过滤", () => {
     // 子收到的请求 tools 列表只包含 enabled tool —— provider.calls 记录每次 chat 的 tools
     const lastCall = provider.calls.at(-1);
     expect(lastCall?.tools?.map((t) => t.name)).toEqual(["read"]);
-    expect(lastCall?.tools?.map((t) => t.name)).not.toContain("memory");
+    expect(lastCall?.tools?.map((t) => t.name)).not.toContain("write");
   });
 });
 

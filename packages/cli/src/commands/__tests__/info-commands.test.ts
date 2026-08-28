@@ -1,8 +1,8 @@
 /**
  * registerInfoCommands 测试 —— 真实 registry + dispatcher 驱动。
  *
- * 运行时信息(上下文预算 / journal / people)的权威在宿主——经注入的
- * controller / management 取;模型显示来自本地配置(宿主按同一配置装配)。
+ * 运行时信息（上下文预算 / 会话 / 调度）的权威在宿主——经注入的
+ * controller / management 获取；模型显示来自本地配置（宿主按同一配置装配）。
  */
 
 import { describe, it, expect, vi } from "vitest";

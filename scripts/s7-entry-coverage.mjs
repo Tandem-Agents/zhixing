@@ -67,7 +67,7 @@ const retiredProductionTokens = [
   "memory.peopleList",
   "workscene_memory_query",
 ];
-const forbiddenWriteOwners = new Set(["MemoryStore", "SkillStore", "AnchorWorksceneRegistry"]);
+const forbiddenWriteOwners = new Set(["SkillStore", "AnchorWorksceneRegistry"]);
 const guardedRoots = [
   "packages/server/",
   "packages/executor/",
@@ -2332,7 +2332,6 @@ export function inspectLocalConversationOwnerIsolation(records) {
     "GlobalMutationCommitParticipant",
     "ConversationDeliveryParticipant",
     "SurfaceAssetCoordinator",
-    "MemoryStore",
     "SkillStore",
     "AnchorWorksceneRegistry",
   ]);

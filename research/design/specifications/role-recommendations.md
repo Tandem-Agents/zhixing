@@ -298,7 +298,7 @@ serve 的 `--model`/`--provider` 与 REPL 同性质(命令行绕过 `config.json
 
 理由:用户明确不要 + "不留无效代码"原则。**这不是 scope 蔓延**:CLI override 的 model 来源 `defaultModel` 被本 spec 按 R5 删除后,该功能已无法自洽存在(`--provider` 单独将永久无 model 来源),删字段与删功能是同一根因的完整闭合;留半残 `--provider`(单独即报错)反而是新债。
 
-**连带影响(事实修正 · 须标注防实施漏)**:[work-mode.md](work-mode.md) 中"workscene 与 cli override 正交 / 工作场景 runtime 不透传 `opts.cliProvider/cliModel`"的表述,**其 live 代码 `runtime/session.ts:247-248`(`isWorkscene ? undefined : this.opts.cliModel`,注释原文"工作场景 runtime 不透传 cli override")已实现并在上线**(work-mode 已实质落地,见近期 commits `054d774`/`d3a22c1`/`f4c3192`/`c5c1561`/`fbe9049`——**非"未实现 spec",前一版按此误判延后是基于错误事实前提**)。该代码在本 spec **PR1 内直接删除**(不延后):删除不破坏 work-mode core——workscene 分支本就传 `undefined`,`primaryRole=power`/`memoryScope`/`profile` 与 cli override 无关,删后该 createAgentRuntime 入参直接移除即可。work-mode.md 文档侧"正交"表述同步失效,由 **PR3 一并校正**(不再有 cli override,"正交"无对象)。
+**连带影响(事实修正 · 须标注防实施漏)**:[work-mode.md](work-mode.md) 中"workscene 与 cli override 正交 / 工作场景 runtime 不透传 `opts.cliProvider/cliModel`"的表述,**其 live 代码 `runtime/session.ts:247-248`(`isWorkscene ? undefined : this.opts.cliModel`,注释原文"工作场景 runtime 不透传 cli override")已实现并在上线**(work-mode 已实质落地,见近期 commits `054d774`/`d3a22c1`/`f4c3192`/`c5c1561`/`fbe9049`——**非"未实现 spec",前一版按此误判延后是基于错误事实前提**)。该代码在本 spec **PR1 内直接删除**(不延后):删除不破坏 work-mode core——workscene 分支本就传 `undefined`,`primaryRole=power`/`profile` 与 cli override 无关,删后该 createAgentRuntime 入参直接移除即可。work-mode.md 文档侧"正交"表述同步失效,由 **PR3 一并校正**(不再有 cli override,"正交"无对象)。
 
 ### ADR-RR-007:UI 标签弃用 provider-内置推荐表述(R5)
 

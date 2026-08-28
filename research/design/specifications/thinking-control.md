@@ -49,7 +49,7 @@ preset per-model 声明 `thinkingControl`,枚举四类(覆盖现有四家;新形
 
 `LLMRoleConfig` 扩展可选思考配置:`{ provider, model, thinking? }`。`thinking` 形态随该 model 的 `thinkingControl` 类型而定(toggle: bool;toggle+effort: { enabled, effort };toggle+budget: { enabled, budget })。
 
-**per-role 而非 per-model**:思考强度跟使用语境走 —— light 做记忆提取 / WebFetch 蒸馏 / 工具结果摘要等 I/O 边界净化应可关思考省钱省延迟,power 接重活应可拉满,main 用户自选(注:主对话压缩 LLMSummarize 走 main 不走 light,见 [secondary-llm-capability ADR-SLLM-009](secondary-llm-capability.md))。与 work-mode 的 primaryRole 正交互补(primaryRole 选角色,本字段定该角色思考深度)。`config.llm.{main,light,power}.thinking` 各自独立。
+**per-role 而非 per-model**:思考强度跟使用语境走 —— light 做 WebFetch 蒸馏、默认单发文本调用和段切换摘要等轻量任务时应可关思考省钱省延迟,power 接重活应可拉满,main 用户自选(注:主对话压缩 LLMSummarize 走 main 不走 light,见 [secondary-llm-capability ADR-SLLM-009](secondary-llm-capability.md))。与 work-mode 的 primaryRole 正交互补(primaryRole 选角色,本字段定该角色思考深度)。`config.llm.{main,light,power}.thinking` 各自独立。
 
 ### config-editor 集成(section 入口不变,配置在 panel 步骤)
 
@@ -62,9 +62,9 @@ preset per-model 声明 `thinkingControl`,枚举四类(覆盖现有四家;新形
 - `ChatRequest` 加 `thinking?: ThinkingConfig`(`core/types/llm.ts`)。
 - **统一规则:thinking 跟随该 LLM 调用点实际使用的 role**(不硬编码、不与 work-mode 段切换归正耦合)。装配期(`create-agent-runtime.ts` 内有 config)经各调用点**函数参数**注入对应 role 的 thinking —— 不在 adapter / 无状态函数内读 config。grep 实证 **三条独立 ChatRequest 构造路径**(非两条),须全覆盖:
   - **① 主对话**:`runAgentLoop`(L951)内部(`core/loop/llm-call.ts`)构造 ChatRequest —— runAgentLoop 增 thinking 入参,装配期传当前 active role 的 `config.llm.<role>.thinking`,内部构造时填。
-  - **② compaction / callText / flush strategies**:压缩域拆为两条独立 helper（`compaction-llm.ts`),按 task 性质分流到不同 role(见 [secondary-llm-capability.md](secondary-llm-capability.md) ADR-SLLM-009):
-    - **主对话压缩(LLMSummarize)**:`createSummarizeCallLLM(roles, mainThinking?: ThinkingConfig)` 走 `roles.main.chat`,装配期传 `config.llm.main?.thinking`(`roleThinking.main`)
-    - **记忆提取(MemoryFlush)+ callText**:`createMemoryFlushCallLLM(roles, lightThinking?: ThinkingConfig)` 走 `roles.light.chat`,装配期传 `config.llm.light?.thinking`(`roleThinking.light`);RuntimeSession 的 `callText` 复用此 helper,保持原 light 通道行为
+  - **② 单发文本调用与主对话压缩**:`call-llm.ts` 按档位提供两条独立 helper(见 [secondary-llm-capability.md](secondary-llm-capability.md) ADR-SLLM-009):
+    - **main 档与主对话压缩(LLMSummarize)**:`createMainCallLLM(roles, mainThinking?: ThinkingConfig)` 走 `roles.main.chat`,装配期传 `config.llm.main?.thinking`(`roleThinking.main`)
+    - **light 默认档**:`createLightCallLLM(roles, lightThinking?: ThinkingConfig)` 走 `roles.light.chat`,装配期传 `config.llm.light?.thinking`(`roleThinking.light`);RuntimeSession 的默认 `callText` 复用此 helper
     - 两个 helper 共享内部 `callLLMText(role, thinking)`,各自 caller 一目了然 role 归属,单测可反向 assert 另一个 role 的 chat 未被调用
   - **③ 段切换摘要**:`segmentStreamFactory` / `createSegmentSummarizeFn`(L751,直接构造 ChatRequest 调 resilientCallLLM,实证无 thinking,独立于 ①②)—— 装配期按其实际 role(现状 roles.main、work-mode 段切换归正后 roles.light;本 spec 只跟随实际 role、不预设、不依赖 work-mode 时序)的 `config.llm.<role>.thinking` 注入该构造处。
 - `bindRole` 现有 `chat:(request:Omit<ChatRequest,"model">)=>provider.chat({...request,model})` 链天然透传 thinking 字段,不改 bindRole。
@@ -82,7 +82,7 @@ adapter 按 `ChatRequest.thinking` + 该 model `thinkingControl` 元数据,组�
 
 **PR 1 — 思考控制元数据 + model catalog 建设**:preset per-model 加 `thinkingControl`(类型 + 官方参数 + 档位/范围 + 默认)。**实质工作量须承认**:仅 deepseek / siliconflow 现有 `knownModels`;qwen / kimi / glm / openai / anthropic / minimax **六家无 knownModels,需从头建 model catalog** 再填 thinkingControl(非"给已有字段加属性")。逐模型精确枚举此 PR 内按模型 WebFetch 官方补全。`supportsThinking` boolean 保留兼容。验收:元数据单测;现有路径零回归。
 
-**PR 2 — schema + 传输管道**:`LLMRoleConfig` 加 `thinking?`;`ChatRequest` 加 `thinking?: ThinkingConfig`(`core/types/llm.ts`);**多条** ChatRequest 构造路径各从对应 role 的 `config.llm.<role>.thinking` 装配期注入(bindRole 链天然透传):① runAgentLoop 主对话(增 thinking 入参,active role);② 压缩域两 helper:`createSummarizeCallLLM(roles, mainThinking)` 接 `config.llm.main?.thinking` + `createMemoryFlushCallLLM(roles, lightThinking)` 接 `config.llm.light?.thinking`(两者均按各自 role 的 thinking,见 secondary-llm-capability ADR-SLLM-009);③ segmentStreamFactory 段切换摘要(按其实际 role);config 校验按选中 model 的 `thinkingControl` 校验形态合法性(类型不匹配拦截/warn)。验收:schema + ChatRequest 透传单测;非法组合被拦;未配时 ChatRequest.thinking 为 undefined。
+**PR 2 — schema + 传输管道**:`LLMRoleConfig` 加 `thinking?`;`ChatRequest` 加 `thinking?: ThinkingConfig`(`core/types/llm.ts`);**多条** ChatRequest 构造路径各从对应 role 的 `config.llm.<role>.thinking` 装配期注入(bindRole 链天然透传):① runAgentLoop 主对话(增 thinking 入参,active role);② 单发文本两 helper:`createMainCallLLM(roles, mainThinking)` 接 `config.llm.main?.thinking` + `createLightCallLLM(roles, lightThinking)` 接 `config.llm.light?.thinking`(两者均按各自 role 的 thinking,见 secondary-llm-capability ADR-SLLM-009);③ segmentStreamFactory 段切换摘要(按其实际 role);config 校验按选中 model 的 `thinkingControl` 校验形态合法性(类型不匹配拦截/warn)。验收:schema + ChatRequest 透传单测;非法组合被拦;未配时 ChatRequest.thinking 为 undefined。
 
 **PR 3 — adapter 发送侧(含 claude signature replay 强制子任务)**:openai-compatible / anthropic adapter 按 `ChatRequest.thinking` + model `thinkingControl` 组装官方原生参数;未配不发。**claude 分支强制伴生子任务**:接入 anthropic thinking 发送侧时,必须同 PR 实现 thinking block `signature` 的 multi-turn replay 原样回传(对标 `openai-compatible.ts:313-319` deepseek `reasoning_content` replay);`anthropic-messages.ts:160` 现状静默丢弃 `signature_delta`,须改为捕获 + 出站原样回传 —— 否则 Anthropic 多轮请求 400。此为协议正确性必要条件,非可选增强。验收:各 provider 桩测发送参数符官方;未配请求无思考参数;anthropic thinking 多轮 replay 带 signature 不被 400;现有接收侧零回归。
 

@@ -219,7 +219,7 @@ const BOUNDARY_READ_ACCESS: ReadonlySet<string> = new Set([
  * - process 的写（exec）本身是 internal，命令本身的影响由 ShellClassifier 判断
  * - filesystem 的写在无工作区上下文时回退到 external（有上下文时会走 FileSystemClassifier）
  * - secrets / system / financial 始终是 critical
- * - agent-context 切换 agent 自身运行态（workspace / 记忆域 / runtime 实例 / 模式
+ * - agent-context 切换 agent 自身运行态（workspace / 场景身份 / runtime 实例 / 模式
  *   / persona 等），影响后续所有 turn 的工具默认作用范围与可达资源 → external。
  *   用户需对"切换"本身拍板（"我确认要进入这个 workscene 吗"），而不是事后等子操作再问。
  */
@@ -234,7 +234,7 @@ const BOUNDARY_WRITE_IMPACT: Readonly<Record<BoundaryType, OperationClass>> = {
   system: "critical",
   financial: "critical",
   "agent-context": "external",
-  // 知行应用本地状态（~/.zhixing 下 memory / schedule / skill 数据）：写本地数据、
+  // 知行应用本地状态（~/.zhixing 下 schedule / skill 等数据）：写本地数据、
   // 无外部副作用 → internal（自动放行）；读 access 经 BOUNDARY_READ_ACCESS 归 observe。
   "app-state": "internal",
 };
@@ -344,7 +344,7 @@ export function createDefaultClassifier(
   composite.registerContext("bash", shellClassifier);
   composite.registerContext("shell", shellClassifier);
 
-  // memory / schedule 等"写本地应用状态"的工具不再在此硬编码 —— 它们通过声明
+  // schedule / save_skill 等“写本地应用状态”的工具不在此硬编码——它们通过声明
   // app-state 边界（见 BOUNDARY_WRITE_IMPACT）落到下方的边界分类器、判为 internal。
 
   // 其他工具走边界分类器

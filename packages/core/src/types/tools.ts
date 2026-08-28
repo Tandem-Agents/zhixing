@@ -380,7 +380,7 @@ export interface ToolResult {
 export type ToolInterruptBehavior =
   /**
    * 立即中止 —— tool.call 内部应在 ctx.abortSignal.aborted 时尽快 reject AbortError 或
-   * return partial result。纯 JS 工具(read / edit / grep / web_fetch / memory 等)适用。
+   * return partial result。纯 JS 工具（read / edit / grep / web_fetch / load_skill 等）适用。
    */
   | "cancel"
   /**
@@ -462,7 +462,7 @@ export interface ToolDefinition {
    * classifier（FileSystemClassifier / ShellClassifier）接管——它们的影响取决于运行时
    * 上下文（路径在不在 workspace、命令内容），非静态边界；`CompositeClassifier` 优先
    * contextClassifiers，对这几个工具声明 boundaries 是死代码、**不应**声明。
-   * 反之，memory / schedule 等"固定写本地应用状态"的工具应声明 `app-state` 边界
+   * 反之，schedule / save_skill 等“固定写本地应用状态”的工具应声明 `app-state` 边界
    * （判 internal），而非硬编码进 classifier。
    *
    * **何时必须声明**：未来无 context classifier 的新工具（如 web_fetch / web_search /

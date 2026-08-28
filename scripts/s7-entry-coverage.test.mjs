@@ -1907,10 +1907,10 @@ test("device lifecycle stays on one journal, two production roots and local-only
   );
 });
 
-test("retired entry, writable Store and reverse package dependency mutations fail", () => {
+test("retired entry, live writable Store and reverse package dependency mutations fail", () => {
   assert.match(
-    inspectProductionSource("packages/orchestrator/src/mutation.ts", 'import { MemoryStore } from "@zhixing/core";')[0],
-    /forbidden writable owner import MemoryStore/,
+    inspectProductionSource("packages/orchestrator/src/mutation.ts", 'import { SkillStore } from "@zhixing/core";')[0],
+    /forbidden writable owner import SkillStore/,
   );
   assert.match(
     inspectProductionSource("packages/server/src/bad.ts", 'import "@zhixing/executor";')[0],
@@ -1932,8 +1932,8 @@ test("retired entry, writable Store and reverse package dependency mutations fai
 test("finite dependency syntax and manifests cannot bypass owner or role isolation", () => {
   const guarded = "packages/orchestrator/src/mutation.ts";
   for (const source of [
-    'import { MemoryStore as Alias } from "@zhixing/core";',
-    'export { MemoryStore as Alias } from "@zhixing/core";',
+    'import { SkillStore as Alias } from "@zhixing/core";',
+    'export { SkillStore as Alias } from "@zhixing/core";',
     'import * as core from "@zhixing/core";',
     'export * from "@zhixing/core";',
     'const core = await import("@zhixing/core");',
@@ -1945,9 +1945,9 @@ test("finite dependency syntax and manifests cannot bypass owner or role isolati
   assert.match(
     inspectProductionSource(
       "packages/server/src/bad-owner.ts",
-      'import { MemoryStore } from "@zhixing/core";',
+      'import { SkillStore } from "@zhixing/core";',
     ).join("\n"),
-    /forbidden writable owner import MemoryStore/,
+    /forbidden writable owner import SkillStore/,
   );
   assert.match(
     inspectProductionSource(guarded, "const core = await import(target);").join("\n"),
@@ -1985,15 +1985,15 @@ test("workspace re-export aliases resolve back to the writable owner", async () 
   const records = [
     {
       relative: "packages/core/src/store.ts",
-      text: "export class MemoryStore {}",
+      text: "export class SkillStore {}",
     },
     {
       relative: "packages/core/src/index.ts",
-      text: 'export { MemoryStore } from "./store.js";',
+      text: 'export { SkillStore } from "./store.js";',
     },
     {
       relative: "packages/bridge/src/index.ts",
-      text: 'import { MemoryStore as LocalStore } from "@zhixing/core"; export { LocalStore as WritableMemory };',
+      text: 'import { SkillStore as LocalStore } from "@zhixing/core"; export { LocalStore as WritableSkill };',
     },
   ];
   const resolver = await buildWorkspaceOwnerExposure(records, new Map([
@@ -2003,10 +2003,10 @@ test("workspace re-export aliases resolve back to the writable owner", async () 
   assert.match(
     inspectProductionSource(
       "packages/orchestrator/src/bad.ts",
-      'import { WritableMemory as Alias } from "@test/bridge";',
+      'import { WritableSkill as Alias } from "@test/bridge";',
       { resolveOwnerExposure: resolver },
     ).join("\n"),
-    /MemoryStore as Alias/,
+    /SkillStore as Alias/,
   );
 });
 

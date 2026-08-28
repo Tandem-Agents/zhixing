@@ -283,7 +283,7 @@ async function runChildAgentInner(
     const enabledSet = new Set(profile.enabledTools);
     childTools = opts.parentTools.filter((t) => enabledSet.has(t.name));
 
-    // 子 system prompt:注意不传 project context / 用户记忆 / 父反思 —— 子任务专注,
+    // 子 system prompt：不传 project context / 主对话额外上下文 / 父反思——子任务专注，
     // 跨 spawn 的静态前缀 byte-identical 利于 prompt cache
     //
     // ⚠ Prompt cache 死线:此处是 sub-agent systemPrompt 的**唯一构造点**,

@@ -5,11 +5,10 @@
 > **相关但独立的机制**（不属于本文范围）：
 >
 > - **段切换摘要**（`createSegmentSummarizeFn`，facts / state / active 三段结构）—— work-mode / context-management v3 的"缓存安全分叉"专用机制，独立 prompt + 独立代码路径，详见 [context-management-v3-redesign.md](./context-management-v3-redesign.md) §5
-> - **记忆提取**（`MemoryFlushStrategy`，JSON 提取写盘）—— 见 [memory-system.md](./memory-system.md)
 >
 > **历史路径已废弃**：本文最初锚定的 "L3" 三级 Tier 压缩模型已整体砍除。LLMSummarize 现在是独立 strategy（priority 200 / usage ≥ 0.9 触发），不再是"L3 兜底层"。
 >
-> **角色归属**：LLMSummarize 走 `roles.main`（摘要质量直接关系到下一轮 LLM 的认知输入），由 [`createSummarizeCallLLM`](../../packages/orchestrator/src/runtime/compaction-llm.ts) 承载，详见 [secondary-llm-capability.md](./secondary-llm-capability.md) ADR-SLLM-009。
+> **角色归属**：LLMSummarize 走 `roles.main`（摘要质量直接关系到下一轮 LLM 的认知输入），由 [`createMainCallLLM`](../../packages/orchestrator/src/runtime/call-llm.ts) 承载，详见 [secondary-llm-capability.md](./secondary-llm-capability.md) ADR-SLLM-009。
 
 ## 一、竞品摘要模板对比
 
@@ -285,7 +284,7 @@ Claude Code 压缩后重新注入最近读过的 5 个文件（~50K token）。
 
 ### 5.3 Auto-compact vs /compact 的同源
 
-**当前实现两者完全同源**:都走 `forceCompact` / `engine.onTurnComplete` → 同一份 `strategies` → 同一个 `createSummarizeCallLLM` → 同一份 `MAIN_SESSION_PROMPT`。
+**当前实现两者完全同源**:都走 `forceCompact` / `engine.onTurnComplete` → 同一份 `strategies` → 同一个 `createMainCallLLM` → 同一份 `MAIN_SESSION_PROMPT`。
 
 - 自动触发(LLMSummarize canApply usage ≥ 0.9 + 文件 turn ≥ minTurns)
 - 手动触发(`/compact` 命令)
@@ -410,7 +409,7 @@ packages/core/src/context/
   system-meta.ts           ← buildCompactSummaryPair (<system-meta kind="compact-summary"> + ack pair)
 
 packages/orchestrator/src/runtime/
-  compaction-llm.ts        ← createSummarizeCallLLM(roles.main) + createMemoryFlushCallLLM(roles.light)
+  call-llm.ts              ← createMainCallLLM(roles.main) + createLightCallLLM(roles.light)
 ```
 
 ## 十、设计原则

@@ -1014,8 +1014,6 @@
       "environment-select",
       "global-list-read",
       "light-inference",
-      "memory-read",
-      "memory-write",
       "orchestration-child",
       "permission-persist",
       "recovery-backup",

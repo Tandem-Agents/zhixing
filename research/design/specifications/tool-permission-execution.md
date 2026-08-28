@@ -1,6 +1,6 @@
 # Tool 权限与基础设施补齐 · 执行规格
 
-> 知行已设计但未完整 wire 起来的工具安全/权限基础设施补齐。当前 8 个 builtin 工具（read / write / edit / glob / grep / bash / schedule / memory）通过 `FileSystemClassifier` / `ShellClassifier` / `Internal` context classifier 获得正确分类——系统当下并未"破"。本规格的目的是**为未来工具（web_fetch / web_search / MCP 接入工具 / 第三方工具等无 context classifier 的新工具）补齐基础设施**：让"声明 boundary → 自动分类 → 权限规则匹配 → 用户决策沉淀"全链路真正可用，避免每个新工具都要在自己内部重新发明权限分级。
+> 知行的工具安全/权限基础设施已经补齐。当前生产 factory 的精确集合为 `read / write / edit / glob / grep / bash / load_skill / save_skill / admit_skill / web_fetch`，通过 context classifier 与 boundary/effect 分类共同进入同一权限管线；旧 `schedule` / 旧记忆工具不属于该 factory 集合。下文保留该基础设施落地时的分步推导，工具集合以当前生产 registry 为准。
 
 **状态**：已落地（M1+M2+M3+M4+§五.7 已实施）
 **前置依赖**：S3.6 ✅ + Step 17/20 ✅ + Phase 5 ✅
@@ -14,7 +14,7 @@
 
 ### 〇.0.1 之前没感觉工具模块有问题，agent 也能正常用工具，这个模块的意义是什么？做了什么？
 
-agent 当前确实"能用"工具——`bash / read / write / edit / glob / grep / schedule / memory` 这 8 个 builtin 工具都正常工作：不报错、不卡死、不会乱授权。这是因为它们**恰好都被现有 context classifier**（`FileSystemClassifier` / `ShellClassifier` / `Internal`）专项接管了，每个 classifier 写死了自己负责的工具的分类逻辑。
+本规格立项时，agent 的既有工具已经能正常工作：不报错、不卡死、不会乱授权；其中一部分由已有 context classifier（`FileSystemClassifier` / `ShellClassifier`）专项接管。当前新增工具还可通过 boundary/effect 声明进入通用分类管线，精确集合见文首的生产基线。
 
 问题在于：**这是个特例覆盖，不是通用机制**。当下一个工具加入时（比如 WebFetch / WebSearch / MCP HTTP 工具 / 第三方插件工具）：
 - 它没有专属 context classifier
@@ -24,11 +24,11 @@ agent 当前确实"能用"工具——`bash / read / write / edit / glob / grep 
 
 类似的"接口已设计、运行时未连"的断层共有 5 处（详见 §一）。本模块**不动现有工具的行为**——只补这些断层，让"任意未来新工具：声明 boundary → 自动分类 → 权限规则匹配 → 用户决策沉淀"全链路真正可用。
 
-**一句话**：Agent 现在能用 8 个工具是因为**特例侥幸**，不是因为系统通用——本模块把侥幸变成系统。
+**一句话**：本模块把“依赖专项 classifier 的特例覆盖”补成了可由工具声明驱动的通用系统。
 
 ### 〇.0.2 这个模块的修改是否会影响 CLI / server 的使用？原来的工具是不是都得测试一下？
 
-**对现有 8 个 builtin 工具**：行为不变。
+**对立项时既有的 builtin 工具**：行为不变。
 - 它们仍走 context classifier 路径（M1 政策：**不为它们补 boundaries 字段**，避免死代码）
 - M3 给 `needsPermission=true` 的工具（write / edit / bash）补 `permissionArgumentKey` 是**显式化既有行为**——bash 的 `command` 提取在 permission-store 内置 extractArgument 中已经硬编码，新声明只是把隐式约定显式化。功能等价。
 - M4 加的 builtin scope 与现有 user 规则**两阶段独立匹配**：用户池任一命中 → 完全决定结果，builtin 不参与；用户池空才退回 builtin。已有 user 规则的解析行为完全不变。
@@ -391,8 +391,8 @@ export class ToolArgumentExtractor {
 | bash | true | `"command"` | 已显式声明（M3）—— 解决了 fallback 中 bash 特例的双源 truth 问题，特例已删 |
 | edit | true | `"path"` | 已显式声明（M3） |
 | write | true | `"path"` | 已显式声明（M3） |
-| read / glob / grep / schedule / memory | **false** | — | 不声明（needsPermission=false，不进入权限匹配链路）|
-| 未来 web_fetch | true | `"url"` | 21B 接入时声明 |
+| read / glob / grep / load_skill / save_skill / admit_skill | **false** | — | 不通过 `needsPermission` 进入参数匹配；skill 写入另由 effect/boundary 分类承担 |
+| web_fetch | true | `"url"` | 已声明 network/egress boundary |
 | 未来 web_search | true | `"query"` | |
 | 未来 http_request | true | `"url"` | |
 

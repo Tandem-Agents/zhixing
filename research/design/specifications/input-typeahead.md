@@ -15,7 +15,6 @@
 
 - 没有 `/` 触发的 slash command 提示
 - 没有 `@file` 文件引用
-- 没有 `@memory:` 记忆条目引用
 - 没有 `@tool:` 工具引用
 - 没有历史命令 ghost text
 - 没有命令发现机制 —— 用户必须记住命令名
@@ -28,7 +27,7 @@
 2. **打字多**：`/elevated ask` 十个字符没补全，熟练用户痛苦。
 3. **没有参数提示**：`/model` 后面接什么？需要先敲 `/help model` 查，然后回来继续打。
 4. **没有文件引用**：想让 agent 读 `src/security/secure-executor.ts` 只能复制粘贴路径 —— agent 也看不出来你是在引用而不是在描述。
-5. **没有记忆/工具引用**：知行有记忆系统和 tool registry，但用户无法在输入里精确定位 `@memory:confirmation-state`、`@tool:bash`。
+5. **没有工具引用**：知行有 tool registry，但用户无法在输入里精确定位 `@tool:bash`。
 6. **没有历史补全**：上一次打过 `/elevated ask session`，下次还得全部重打。
 7. **模态耦合灾难预留**：未来要加 clarify、sudo、modal dialogs，如果现在在 `readline.question` 上硬叠 raw-mode 会冲突 —— 必须在架构级别把 input layer 抽出来。
 8. **驭灵无感知**：驭灵未来要跨 Web / 微信 / 钉钉渲染，如果补全逻辑写死在 CLI 里，整个 input layer 就白做。
@@ -36,7 +35,7 @@
 ### 不是痛点但容易误判
 
 - **补全逻辑能不能直接用第三方库**：能，但三家竞品都栽在这条路上 —— OpenClaw 交给 `@mariozechner/pi-tui` 变黑盒；Hermes 和 `prompt_toolkit` 深耦合；Claude Code 用 Ink + fuse.js 却给自己留了 1384 行单文件 dispatcher。知行已经决定自研 raw-mode TTY，这一选择已经挡住了第三方 UI 框架的诱惑，剩下的问题是**架构分层**而不是"要不要自研"。
-- **是不是越多 provider 越好**：不是。多触发前缀是能力，不是目标。第一阶段只做 `/`，后续按用户请求加 `@file` / `@memory` / `@tool`，每加一个必须有明确的用户场景对应。
+- **是不是越多 provider 越好**：不是。多触发前缀是能力，不是目标。第一阶段只做 `/`，后续按用户请求加 `@file` / `@tool`，每加一个必须有明确的用户场景对应。
 - **是不是该现在就做 Web renderer**：不。confirmation-ux.md 已经证明"Broker + Renderer 接口 + TTY 先行"的渐进模式能 work，Web renderer 是占位，证明架构 —— 不交付。
 
 ---
@@ -51,7 +50,7 @@
 | 过滤算法 | pi-tui 内部（prefix?） | prefix + substring | **纯 prefix** | Fuse.js 加权 fuzzy + 自定义 resort | **Fuse.js + resort + 知行加权** |
 | MRU / 频度排序 | ❌ | ❌ | ❌ | ✅ `skillUsageScore` | ✅ Phase 1 |
 | 分类分组 | ❌ | 按 category | 按源顺序 | 最近用 → builtin → user → project → policy | **Phase 1 即到位** |
-| 多触发前缀 | `/` + cwd(?) | 只 `/` | `/` + `@` + path | `/` / `@file/mcp/agent` / `#channel` / bash history / directory / custom-title | **`/` / `@file` / `@memory` / `@tool` / `@mcp` / `@agent` 统一** |
+| 多触发前缀 | `/` + cwd(?) | 只 `/` | `/` + `@` + path | `/` / `@file/mcp/agent` / `#channel` / bash history / directory / custom-title | **`/` / `@file` / `@tool` / `@mcp` / `@agent` 统一** |
 | Ghost text | ❌ | ❌ | ✅ 两级（命令 + sub） | ✅（prefix，非 fuzzy） | ✅ Phase 2 |
 | 异步候选 | ❌ | ❌ | ❌ | ✅（stale-ref guard） | ✅（`AbortController`） |
 | 参数提示（hint） | ❌ | 有 `argOptions` 两段式 | `args_hint` 字符串 | `argumentHint` + progressive `argNames` | **argSchema 结构化 + progressive** |
@@ -71,8 +70,8 @@
 1. **让输入不再打字**。`/` 触发就能看到所有能做的事；方向键选、Enter 执行。
 2. **让输入表达意图**。`@file src/foo.ts` 让 agent 精确知道"我指的是这个文件"而不是字符串匹配。
 3. **让核心与渲染分离**。和 [confirmation-ux.md](./confirmation-ux.md) 同构 —— Core 只知道"有一个 typeahead 请求等待用户决定"，不知道终端在哪。
-4. **让 provider 可插拔**。`/command`、`@file`、`@memory`、`@tool` 都是 `SuggestionProvider` 的实现，显式 priority，新触发 = 新 provider，不改核心。
-5. **让异步优先**。文件、记忆、MCP 资源都是 async 源，从一开始就用 `AbortController` 取消过期请求，不留同步阻塞 debt。
+4. **让 provider 可插拔**。`/command`、`@file`、`@tool` 都是 `SuggestionProvider` 的实现，显式 priority，新触发 = 新 provider，不改核心。
+5. **让异步优先**。文件、MCP 资源都是 async 源，从一开始就用 `AbortController` 取消过期请求，不留同步阻塞 debt。
 6. **让参数结构化**。命令参数不是"一个字符串 hint"而是 `ArgSchema[]`，能驱动 progressive 提示、枚举补全、类型校验。
 7. **让测试覆盖**。核心逻辑纯函数 / 纯数据，broker + provider 用 Vitest + `PassThrough` 全覆盖，TTY 渲染器有护栏断言（§6.4 教训）。
 8. **让降级优雅**。补全层失败不能影响输入 —— provider 异常时静默降级到"无补全"而不是卡死 REPL。
@@ -231,7 +230,7 @@ interface CommandDef {
 type CommandCategory =
   | "session"     // /new, /reset, /history
   | "config"      // /model, /elevated, /verbose
-  | "info"        // /status, /help, /profile
+  | "info"        // /status, /help
   | "tools"       // /skill, /mcp
   | "session-mgmt" // /save, /branch, /resume
   | "debug"       // /debug, /logs
@@ -366,7 +365,7 @@ interface AcceptPayload {
 ```typescript
 interface SuggestionProvider {
   // ── 标识 ──
-  readonly id: string;                   // "command" | "file" | "memory" | ...
+  readonly id: string;                   // "command" | "file" | "tool" | ...
   readonly priority: number;             // 数字越小越高优先级（显式排序）
 
   // ── 触发检测 ──
@@ -731,7 +730,7 @@ Fuse 返回后**必须 re-sort**，按以下优先级：
     ↓
   config  (/model /elevated /verbose /fast)
     ↓
-  info    (/status /help /profile)
+  info    (/status /help)
     ↓
   tools   (/skill /mcp)
     ↓
@@ -1220,7 +1219,6 @@ REPL 进入 prompt 模式
 | ArgumentProvider | `argument` | 90 | 当前处于某命令的参数位置 | sync + async | 2 |
 | FileProvider | `file` | 200 | `@file:path` 或裸 `@path` | async (fs) | 2 |
 | FolderProvider | `folder` | 210 | `@folder:path` | async (fs) | 2 |
-| MemoryProvider | `memory` | 300 | `@memory:key` | sync | 3 |
 | ToolProvider | `tool` | 310 | `@tool:name` | sync | 3 |
 | McpResourceProvider | `mcp` | 320 | `@mcp:server/resource` | async (rpc) | 3 |
 | HistoryProvider | `history` | 500 | ghost text 回退 | sync | 2 |
@@ -1388,7 +1386,7 @@ switch (result.kind) {
 ```
 
 **典型归属**（与 cli 实际注册的内建命令对齐）：
-- `local`：全部内建命令——info 查询 `/help` `/status` `/me` `/model` `/usage` `/context` `/journal` `/people` `/tasks`、会话管理 `/new` `/clear` `/resume` `/name` `/compact`、模式 `/work` `/exit`、配置与安全 `/config` `/mcp` `/trust` `/security`、任务 `/tasklist` `/task`、技能管理 `/skills`。**不产生 agent turn、不消耗 token**。
+- `local`：全部内建命令——info 查询 `/help` `/status` `/model` `/usage` `/context` `/tasks`、会话管理 `/new` `/clear` `/resume` `/name` `/compact`、模式 `/work` `/exit`、配置与安全 `/config` `/mcp` `/trust` `/security`、任务 `/tasklist` `/task`、技能管理 `/skills`。**不产生 agent turn、不消耗 token**。
 - `agent`：动态技能命令（`/<技能名>`，由 `SkillCommandSource` 投影、`execution: "agent"`）——dispatcher 不调 handler，把整条 draft 当 user message 交给 agent loop。内建命令无一属此档。
 - `hybrid`：**生产中暂无命令使用**。保留这一档给"真的需要 agent 知道本地副作用才能正确推理"的场景（如 `/cd` 切工作区，后续对话里 agent 必须知道新 cwd），不开放给 info 类或项目管理类命令。
 
@@ -1743,25 +1741,21 @@ class ArgumentProvider implements SuggestionProvider {
 
 ---
 
-#### Step 10 — `MemoryProvider` / `ToolProvider`（知行差异化）
+#### Step 10 — `ToolProvider`（知行差异化）
 
-**目标**：两个知行独有的 provider，把"记忆引用" "工具引用" 做成 first-class 输入概念。
+**目标**：把“工具引用”做成 first-class 输入概念。
 
 **交付物**：
-- `packages/core/src/typeahead/providers/memory-provider.ts`
-  - trigger: `@memory:key`
-  - 数据源：`~/.claude/projects/.../memory/*.md`（或知行的 memory registry）
-  - `SuggestionItem.metadata` 携带 `{ memoryPath, loadSnippet }`
 - `packages/core/src/typeahead/providers/tool-provider.ts`
   - trigger: `@tool:name`
   - 数据源：`packages/tools-builtin` 的 tool registry
   - `SuggestionItem.metadata` 携带 `{ toolName, schema }`
-- Agent loop 扩展：解析 user message 里的 `@memory:` / `@tool:` 标记，把对应内容注入 context 或系统提示
-- 单元测试 ≥ 15 条
+- Agent loop 扩展：解析 user message 里的 `@tool:` 标记，把对应工具信息注入 context 或系统提示
+- 单元测试 ≥ 8 条
 
-**验收**：打 `@memory:confirm` 看到 `confirmation-state` 等记忆条目；选中后 draft 变成 `@memory:confirmation-state`；提交后 agent 看到记忆内容。
+**验收**：打 `@tool:ba` 看到 `bash`；选中后 draft 变成 `@tool:bash`；提交后 agent 看到对应工具信息。
 
-**代码量估计**：~450 行
+**代码量估计**：~250 行
 
 ---
 
@@ -1812,10 +1806,10 @@ class ArgumentProvider implements SuggestionProvider {
 |---|---|---|---|
 | **Phase 1: `/` 端到端可用** | 1-5 | ~2500 行 | 内核抽取 + Broker + CommandProvider + TTY 渲染器 + REPL 接入。`/command` fuzzy + MRU + 分类 + 执行分派 |
 | **Phase 2: 多触发 + Ghost + Args** | 6-8 | ~900 行 | `@file` 异步；ghost text inline；argumentHint + 参数枚举补全 |
-| **Phase 3: 差异化 + 扩展** | 10-11 | ~950 行 | `@memory` `@tool`；plugin API + filesystem 命令（Step 9 mid-input 降级为 P2，见 §12.2 #9） |
+| **Phase 3: 差异化 + 扩展** | 10-11 | ~750 行 | `@tool`；plugin API + filesystem 命令（Step 9 mid-input 降级为 P2，见 §12.2 #9） |
 | **Phase 4（远期）: 架构验证** | 12 | ~150 行 | Mock Web renderer 证明 core 渲染无关 |
 
-**总代码量预估**：**~4650 行**（含测试）。对比：Claude Code 约 3500 行（命令补全 + PromptInput + FooterSuggestions），Hermes 约 400 行，OpenClaw 约 600 行。
+**总代码量预估**：**~4450 行**（含测试）。对比：Claude Code 约 3500 行（命令补全 + PromptInput + FooterSuggestions），Hermes 约 400 行，OpenClaw 约 600 行。
 
 > **Phase 1 的代码量显著大于 confirmation-ux 的 Phase 1（~1350 行）**，原因：(a) 内核抽取是一次性投资，为未来所有 TUI 组件服务；(b) CommandProvider 的 Fuse + resort + MRU 比 confirmation 的选项列表复杂；(c) REPL 接入涉及 InputBuffer 这一新抽象。
 
@@ -1833,7 +1827,7 @@ class ArgumentProvider implements SuggestionProvider {
 | 过滤算法 | ? | prefix + substring | 纯 prefix | Fuse 加权 + resort | ✅ **Fuse 加权 + resort + 知行调参** |
 | MRU 排序 | ❌ | ❌ | ❌ | ✅ | ✅ **core 持久化（非 UI state）** |
 | 分类分组 | ❌ | category | 源顺序 | 多源分层 | ✅ Phase 1 |
-| 多触发前缀 | 1 | 1 | 2 (`/` + `@`) | 7+ | ✅ **`/ @file @memory @tool @mcp @agent`** |
+| 多触发前缀 | 1 | 1 | 2 (`/` + `@`) | 7+ | ✅ **`/ @file @tool @mcp @agent`** |
 | Async providers | ❌ | ❌ | ❌ | ✅（ref check） | ✅ **AbortController + 双重检查** |
 | Ghost text | ❌ | ❌ | ✅ | ✅ | ✅ Phase 2（prefix-only） |
 | 参数 schema | `argOptions` 字符串数组 | 同 | `args_hint` 字符串 | `argNames` + `argumentHint` | ✅ **结构化 `ArgSchema[]`** |
@@ -1917,7 +1911,7 @@ class ArgumentProvider implements SuggestionProvider {
 |---|---|
 | **Typeahead** | 输入时的实时补全建议系统的总称（和 "autocomplete" 同义） |
 | **Broker** | 核心调度器，管理 session、dispatch provider、abort 过期 query |
-| **Provider** | 一类补全候选的生成器（`/` / `@file` / `@memory` 各一个） |
+| **Provider** | 一类补全候选的生成器（`/` / `@file` / `@tool` 各一个） |
 | **Renderer** | 把 session state 变成用户能看到的 UI 并收集选择 |
 | **Session** | 一次"REPL 等待用户输入"的生命周期，贯穿多次 trigger 变化 |
 | **Trigger** | 触发 provider 激活的字符 + 上下文（如 `/` 开头，或 cursor 前是 `@`） |

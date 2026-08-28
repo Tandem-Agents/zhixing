@@ -848,7 +848,7 @@ export async function createAgentRuntime(
   // 整体重建后重新 fromTools，不走 in-place 增删（故无 unregister）。
   //
   // boundary registry 内容：read/write/edit/glob/grep/bash 走 context classifier、
-  // 不声明 boundaries；memory/schedule（app-state）、web_fetch（network）、MCP 工具
+  // 不声明 boundaries；schedule/save_skill（app-state）、web_fetch（network）、MCP 工具
   // （external-service）等声明边界的工具进 registry。tool-aware extractor 让
   // PermissionStore.match 按工具声明的 permissionArgumentKey 提参，避免多 string
   // 字段工具的字段顺序歧义。
@@ -1473,8 +1473,8 @@ export async function createAgentRuntime(
         persistence: { async appendSegment() {} },
         taskListReader: { hasInProgress: () => false },
         eventBus: localBus,
-        // Manual compact is a run-out control operation: it must not create
-        // assignment-scoped memory writes without a commit boundary.
+        // Manual compact has no conversation identity and therefore installs no
+        // post-summarize side-effect hooks.
         hooks: [],
       });
 

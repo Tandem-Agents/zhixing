@@ -169,7 +169,6 @@ export interface AssemblyContext {
     current: ConversationProtocolRuntime | undefined;
   };
   readonly worksceneDirectory: WorksceneDirectory;
-  /** 仅锚点装配的 journal 权威维护服务，turn 与系统任务共用。 */
   /**
    * 会话组播 lazy ref(runServer 后回填)——turn 后维护的改名通知等运行期
    * 推送经此读最新值;装配期为 null,运行期必已就位。

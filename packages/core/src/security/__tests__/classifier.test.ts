@@ -401,15 +401,15 @@ describe("createDefaultClassifier", () => {
     );
   });
 
-  it("声明 app-state 边界的工具 → internal（memory / schedule 由硬编码改为声明式的路径）", () => {
+  it("声明 app-state 边界的工具 → internal（由边界声明而非工具名称决定）", () => {
     const classifier = createDefaultClassifier({
       registry: {
         getBoundaries: (name) =>
-          name === "memory"
+          name === "save_skill"
             ? [{ boundaryType: "app-state", access: "write", dynamic: false }]
             : undefined,
       },
     });
-    expect(classifier.classify(makeRequest({ tool: "memory" }))).toBe("internal");
+    expect(classifier.classify(makeRequest({ tool: "save_skill" }))).toBe("internal");
   });
 });

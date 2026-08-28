@@ -371,7 +371,7 @@ onWindowOpen 的 ctx 暴露**公共方法** `updateSystemPromptSegment(segment, 
 - **run 内换代有三条出口**（runTurnBegin 段切换 / pre-flight 压缩 / runTurnEnd 段切换-压缩），统一经 `windowChange` 信号 + `windowLifecycle.onChange` 触发、只重拼本 run 局部 prompt——一条不漏（Inv-1）。
 - **main 运行体跨 main↔work 持续存活**——进 work 不触发 main 末窗（main 未销毁，只是不被路由）。
 - **reload 是实例换代**——旧实例末窗 onWindowClose 接在 **agent 域 swap 处**（`:651/656`），新实例首窗 onWindowOpen 接进 `createAgentRuntime`。**不可搭 `disposeOldInBackground` 便车**（§四④）。
-- work 运行体的钩子各自尊重其 memoryScope 隔离（[work-mode.md](./work-mode.md)）——订阅者上下文装配期注入、不从全局拿。
+- work 运行体的钩子各自尊重其显式 workscene/runtime 身份（[work-mode.md](./work-mode.md)）——订阅者上下文装配期注入、不从全局拿。
 
 ---
 
@@ -530,30 +530,24 @@ cli 交互模式（REPL / -p，主用户面）启动时 `setDiagnosticLogger(() 
 
 生命周期钩子仍按既定四阶段触发，但钩子的触发时点不是运行中权威写入的提交点。只读 prompt/context 贡献、本地资源释放和告警保持原时点；会改变会话或全局权威状态的消费者必须遵守以下边界：
 
-- MemoryFlush 只提取候选并以稳定 operationId 写入当前 assignment 的 memory staged overlay；segment 元数据同样只写 `segment-append`。二者在 commit 前对其他运行体和持久化投影不可见。
+- segment 元数据只写 `segment-append`，在 commit 前对其他运行体和持久化投影不可见。
 - failed、cancelled 丢弃整批写；uncertain 不得执行物化，等待 owner 裁决。committed 后仅由 owner 日志中的 publish 义务幂等物化，响应丢失或重启只重驱未 settled 项。
 - run 外 retention、clear、compact 等维护继续经 control/maintenance owner，不得伪造 assignment 或借 lifecycle 钩子绕开权威端口。
 - 钩子隔离、deadline、abort、warning 与非关键失败策略保持不变；不得为写类钩子另建第二日志或通用 outbox。
 
 ---
 
-## 附录：已删除的 `injectContext` 首条 `<context>` 注入器承载的三项业务（待未来通过 onBeforeRun 订阅者补回）
+## 附录：已删除的 `injectContext` 首条 `<context>` 注入器承载的项目指令（待未来通过 onBeforeRun 订阅者补回）
 
-为守住「run 前唯一入口」，本次直接删除已废弃的 `injectContext` 首条 `<context>` 注入器；它承接的三项业务注入随之一并移除、暂时缺失，留待未来作为 onBeforeRun 订阅者重做补回。此处留存现状全貌，供追溯。
+为守住「run 前唯一入口」，本次直接删除已废弃的 `injectContext` 首条 `<context>` 注入器；其中仍属当前产品边界的项目指令注入随之一并移除、暂时缺失，留待未来作为 onBeforeRun 订阅者重做补回。旧 profile / people 注入随旧 Memory 模块退场，不再是待补能力。
 
-`injectContext` 经 `buildContextBlock` 把一个 `<context>` 块注入「对话首条 user message」，承接三项：
+`injectContext` 经 `buildContextBlock` 把一个 `<context>` 块注入「对话首条 user message」，其中仍属当前边界的是：
 
-1. **用户画像 profile** —— `loadProfile(memoryRoot)` 从 `~/.zhixing/me/profile.md` 读，`formatProfileForContext` 格式化为 `# User Profile` + name / language / timezone + 自由正文。
-2. **项目指令 instructions** —— 已删除的 `loadInstructions(cwd)` 按三层加载（用户级 `~/.zhixing/ZHIXING.md` → 项目级 `./ZHIXING.md` 或 `./.zhixing/ZHIXING.md`，项目级覆盖用户级），套 `# Project Instructions (ZHIXING.md)` 历史标题注入。
-3. **匹配人物 dynamicContext** —— `enrichContext` 用最新一条 user 消息经 `PeopleStore.matchByMessage` 匹配相关人物，`formatForContext` 格式化注入。
+1. **项目指令 instructions** —— 已删除的 `loadInstructions(cwd)` 按三层加载（用户级 `~/.zhixing/ZHIXING.md` → 项目级 `./ZHIXING.md` 或 `./.zhixing/ZHIXING.md`，项目级覆盖用户级），套 `# Project Instructions (ZHIXING.md)` 历史标题注入。
 
-**现状已知限制**（供未来追溯）：
+**现状已知限制**（供未来追溯）：项目指令曾与其他已退场内容打包进同一个 `<context>` 块、注入「对话首条」并以 `<context>` 标签去重，因此整段对话实际只注一次；`ProjectContext.date` 字段被 `loadProjectContext` 加载，却未被 `buildContextBlock` 使用 / 注入。
 
-- 三项打包进同一个 `<context>` 块、走同一次 `injectContext`，注入「对话首条」并以 `<context>` 标签去重 → 整段对话实际只注一次。
-- 由此人物匹配被锁死：虽每 run 都 `matchByMessage`，但去重让首条之后 run 匹配到的新人物注不进去 —— **人物匹配实际只在对话首条生效一次**。
-- `ProjectContext.date` 字段被 `loadProjectContext` 加载，却未被 `buildContextBlock` 使用 / 注入 —— 挂空字段。
-
-**未来重构方向**（备忘、非本次范围）：三项拆为独立的 onBeforeRun 订阅者、各按粒度挑场景谓词（profile / instructions 偏「每窗口首 run」、人物匹配偏「每 run」），借「去重消失」解开人物只注一次的限制。
+**未来重构方向**（备忘、非本次范围）：项目指令作为独立的 onBeforeRun 订阅者，按「每窗口首 run」粒度注入；不恢复旧 profile / people 读取链。
 
 
 

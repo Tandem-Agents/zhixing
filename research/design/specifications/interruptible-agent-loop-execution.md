@@ -267,7 +267,7 @@ partial assistant message **只承载 text + thinking 两类 block**,不携带 t
                    │ ctx.abortSignal(与现有完全相同)
                    ▼
 ┌─────────────── 工具层 ──────────────────────────────────┐
-│  Bash (grace) / WebFetch (cancel) / Memory (cancel) ... │
+│  Bash (grace) / WebFetch (cancel) / …                   │
 │  通过 ctx.abortSignal 收到中断;grace 类用 gracefulKill  │
 └─────────────────────────────────────────────────────────┘
 ```

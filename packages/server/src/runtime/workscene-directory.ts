@@ -53,7 +53,7 @@ export interface WorksceneDirectory {
     requestId: string,
   ): Promise<WorksceneWriteResult | null>;
   /**
-   * 彻底移除场景(登记 + 场景系统目录:meta / 记忆域 / 会话域)。
+   * 彻底移除场景（登记 + 场景系统目录：meta / conversations）。
    * 用户代码工作目录(workdir)不动。不存在返回 false。
    */
   remove(id: string, requestId: string): Promise<boolean>;

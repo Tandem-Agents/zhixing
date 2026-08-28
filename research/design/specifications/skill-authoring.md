@@ -53,7 +53,7 @@
 
 1. **凭证脱敏**:`scrubSecrets`（`core/src/security/secret-scrubber.ts`,已落地）对 name / description / body 全量过滤,返回命中计数——草稿源自对话、对话里可能粘过 secret,技能会反复进上下文且可分享,绝不固化。
 2. **来源落位**:恒写 `own/<id>/SKILL.md`（本地区,目录即来源,父规格 §二）;builtin / linked 不可写。
-3. **格式与分区**:标准 SKILL.md + YAML frontmatter（`stringifyFrontmatter`,`core/memory/frontmatter.ts`）、`mode` 写 `index.json`、原子写（`writeAtomic`）——全部经 Store 既有写 API,不绕过唯一磁盘访问点。
+3. **格式与分区**:标准 SKILL.md + YAML frontmatter（`stringifyFrontmatter`,`core/frontmatter.ts`）、`mode` 写 `index.json`、原子写（`writeAtomic`）——全部经 Store 既有写 API,不绕过唯一磁盘访问点。
 4. **索引一致性**:落盘后触发索引产生管线标记重建;生效时机沿既有纪律——`/<name>` 唤醒立即可用（`listAll` 实时扫描）,系统提示词索引在下一个注意力窗口换代时进入稳定前缀（窗口内 systemPrompt byte-equal 不破,父规格 §3.2/3.3）。
 
 **返回**:`{ id, outcome: "created" | "updated", scrubbedCount, hint }`——`hint` 携 `/<id>` 唤起事实,方法据此向用户诚实交代;`scrubbedCount > 0` 驱动脱敏可见。

@@ -427,7 +427,7 @@ const conversationSurface: AccessSurface = {
 
     const turnMaintenance = createTurnMaintenance({
       convRepo: ctx.convRepo,
-      // turn 后台维护(自动命名/journal 凝练)是宿主维护类工作——scheduler 准入,
+      // turn 后台维护（自动命名）是宿主维护类工作——scheduler 准入，
       // 每次外调经 control 治理边界预占计量
       governCallText: (call) =>
         governControlTextCall(
