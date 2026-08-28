@@ -989,7 +989,10 @@ export function inspectDeviceLifecycleAssembly(records) {
     !command.includes("await ctx.meshRuntime?.bindDeviceRemovalLifecycle({") ||
     !executor.includes("await mesh.bindDeviceRemovalLifecycle({") ||
     !executor.includes("const stopCoordinator = new HostStopCoordinator({") ||
-    !executor.includes("lifecycleShutdown: stopCoordinator,")
+    !executor.includes("lifecycleShutdown: stopCoordinator,") ||
+    !executor.includes("await waitForExecutorRoleTerminal({") ||
+    !executor.includes("server: localConversationServer,") ||
+    !executor.includes("deviceRemoved: lifecycleShutdown,")
   ) failures.push("device removal admission, accepted-work or two-root recovery binding drifted");
   if (
     !assembly.includes("log: options.bootstrapStore.authorityLog(),") ||

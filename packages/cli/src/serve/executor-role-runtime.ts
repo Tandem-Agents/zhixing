@@ -88,6 +88,7 @@ import {
 import type { StopHostGeneration } from "@zhixing/core/protocol";
 import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
 import { createMeshCompatibilityStateProjection } from "./mesh-compatibility-state.js";
+import { waitForExecutorRoleTerminal } from "./executor-role-terminal.js";
 
 export async function runExecutorRole(
   options: ServeOptions,
@@ -791,12 +792,16 @@ export async function runExecutorRole(
       void localServerState?.heartbeat();
     }, 60_000);
     localServerHeartbeat.unref();
-    await waitForRoleShutdown(lifecycleShutdown, () => stopCoordinator.prepare({
-      requestId: `executor-signal:${process.pid}:${processStartedAt}`,
-      reason: "executor-signal",
-      strategy: "immediate",
-      timeoutMs: 30_000,
-    }).then(() => undefined));
+    await waitForExecutorRoleTerminal({
+      server: localConversationServer,
+      deviceRemoved: lifecycleShutdown,
+      prepareSignalStop: () => stopCoordinator.prepare({
+        requestId: `executor-signal:${process.pid}:${processStartedAt}`,
+        reason: "executor-signal",
+        strategy: "immediate",
+        timeoutMs: 30_000,
+      }).then(() => undefined),
+    });
   } catch (error) {
     roleFailure = error;
   }
@@ -1012,33 +1017,6 @@ export { ExecutorJobOwnerLifecycle } from "./executor-job-owner.js";
 function mapMcpTools(hub: McpHub): ToolDefinition[] {
   return hub.catalog().flatMap(({ server, tools }) =>
     mapServerTools(server, tools, hub.callTool));
-}
-
-function waitForRoleShutdown(
-  lifecycleShutdown: Promise<void>,
-  prepareSignalStop: () => Promise<void>,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let signalStop: Promise<void> | undefined;
-    const cleanup = () => {
-      process.off("SIGINT", stopFromSignal);
-      process.off("SIGTERM", stopFromSignal);
-    };
-    const finish = () => {
-      cleanup();
-      resolve();
-    };
-    const fail = (error: unknown) => {
-      cleanup();
-      reject(error);
-    };
-    const stopFromSignal = () => {
-      signalStop ??= prepareSignalStop().then(finish, fail);
-    };
-    process.once("SIGINT", stopFromSignal);
-    process.once("SIGTERM", stopFromSignal);
-    void lifecycleShutdown.then(finish, fail);
-  });
 }
 
 function assertAcceptedWorkSubset(

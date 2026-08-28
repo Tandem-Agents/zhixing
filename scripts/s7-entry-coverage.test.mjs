@@ -1895,6 +1895,13 @@ test("device lifecycle stays on one journal, two production roots and local-only
   );
   assert.match(
     inspectDeviceLifecycleAssembly(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace("await waitForExecutorRoleTerminal({", "await Promise.resolve({"),
+    )).join("\n"),
+    /two-root recovery binding drifted/,
+  );
+  assert.match(
+    inspectDeviceLifecycleAssembly(mutate(
       "packages/cli/src/serve/mesh-runtime-assembly.ts",
       (text) => text.replace("log: options.bootstrapStore.authorityLog(),", "log: options.authority.executorLog,"),
     )).join("\n"),

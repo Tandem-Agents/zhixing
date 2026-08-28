@@ -202,10 +202,10 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `f5e5f617b9e34df3f3e2bd53e11e9bdd1dd4e375`；A0 已关闭，A1-01 在该基线上形成 `A1-01-persistent-application-host-v1` 工作区差异，等待协调者独立复核 |
+| 已接受基线 | `cba7dd31b4d32caf311b91da1812193a9cc4f2b5`；A1-01 已由协调者独立复核并提交 |
 | 当前 A 项 | A1：收束 ApplicationHost 生命周期边界 |
-| 活跃工作包 | A1-01 及 canonical S7 registry-golden 纠正已完成，等待协调者独立复核；A1 阶段仍未完成 |
-| 下一责任链 | 协调者复核 A1-01 后，继续在 A1 内按 `A0-10-initial-verification-map-v1` 拆分持久 Host 的 create/start/open、拒新/排空、并发 stop/close 与内部组件贡献；不得进入 A2 |
+| 活跃工作包 | A1-02 已形成 `A1-02-executor-role-terminal-v1` 工作区差异并完成直接验证，等待协调者独立复核；A1 阶段仍未完成 |
+| 下一责任链 | 协调者先独立复核 `server.shutdown → HostStop.prepare → RunningServer terminal → executor role terminal → ApplicationHost outer release` 的唯一终止链；接受后仍只在 A1 内选择下一条持久 Host 生命周期责任，不得扩入 A2 |
 | 打开的单向桥 | `A1-HOST-DELEGATE-01`：唯一 `PersistentApplicationHost` 已拥有外层 bootstrap/lease/terminal 生命周期，但仍以类型化 loader 单向委托既有 Anchor/Executor role root；唯一事实与产品装配仍在既有 root，退场上限为 A1，其后续包不得形成第二 Host 或双 owner |
 | 已失效证据 | 无当前未恢复证据；A1-01 初次把 canonical S7 在临时 LF golden 上通过写成当前 clean Windows 基线通过，协调者以 CRLF checkout 反证后，已由 registry checker 的行尾归一化纠正并在 CRLF 基线上完整重取。A0-06b3b H02/P10、H07/H08/P14 等更早失效项仍按对应纠正记录继续有效 |
 | 阻塞/用户决策 | 无 |
@@ -1273,6 +1273,19 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - S7 协调纠正：初次记录把 canonical S7 在 `s7:registry-golden:write` 临时写出的 LF 文件上通过误记为 clean Windows 工作区事实；协调者在 CRLF checkout 上复现 registry stale，故该结论一度失效。纠正轮先运行 `pnpm s7:registry-golden` 复现，再经 canonical `pnpm s7:registry-golden:write` 生成并人工对账：golden 的 clean-filter object 与 HEAD 都是 `071f21b073918fee3766618cb98bd909049493a2`，`git diff` 为空，说明 ApplicationHost/S7 inspector 迁移没有改变 canonical registry JSON；唯一差异是 `i/lf + w/crlf`，旧 checker 以 raw string 比较造成假失败。`scripts/s7-registry-golden.mjs` 现只把 CRLF/CR 归一为 LF 后继续执行完整 exact compare，不放宽 JSON、角色、方法或 entry coverage。恢复真实 CRLF checkout 后重新运行一次 canonical `pnpm s7:lint`，coverage/mutation 21/21 与 registry golden 全部通过；golden 文件无内容差异，CLI 源码未再变化，故 44 项直接测试与 CLI build 证据继续有效。
 - 当前边界：本包没有统一 HostStop、replace、idle、拒新/排空或 role root 内部 lifecycle，没有迁移 Server/Owner/Mesh/Runtime 产品装配，也没有建立 component descriptor 框架。`A1-HOST-DELEGATE-01` 是唯一打开的单向委托；A1 与全部最终退出门保持 `[ ]`。
 - 下一检查点：协调者独立复核后，只在 A1 内选择下一条能独立闭合的持久 Host 生命周期责任（优先 create/start/open 或 stop/drain/close 中能保持既有产品次序的一条），即时补齐真实 component/rollback/cleanup 证据；不得因本包已有 Host class 而提前进入 A2。
+
+### A1-02：闭合 Executor-only RPC 停机到 ApplicationHost 的唯一终止链
+
+- 基线与差异：`HEAD cba7dd31b4d32caf311b91da1812193a9cc4f2b5 + A1-02-executor-role-terminal-v1`。A1-01 已由协调者独立复核并提交；本包新增 `packages/cli/src/serve/executor-role-terminal.ts` 及其直接测试，修改 `executor-role-runtime.ts` 的生产等待边界，并因该生产扫描输入变化同步 S7 coverage 与反向 mutation。除本文外没有修改产品文档、AE-001 或其他责任链，没有执行 Git 写操作。
+- 当前责任与断链：RPC `server.shutdown` 已先完整执行既有 `HostStopCoordinator.prepare`（拒新、冻结、settle、read-back、flush 与 response-loss 语义不变），再经 `ServerContext.requestShutdown` 触发 `RunningServer.shutdown`；但旧 `waitForRoleShutdown` 只观察 SIGINT/SIGTERM 与永久设备移除，未观察 `RunningServer.waitForShutdown()`，所以 Server 已真实 terminal 后 executor role 仍不返回，内部 cleanup 与 `PersistentApplicationHost` 外层 Mesh maintenance/workspace lease 释放均无法到达。
+- 本轮迁移：新增唯一 executor role terminal，把 RPC 驱动的 `RunningServer.waitForShutdown()`、信号和永久设备移除汇入同一幂等边界。RPC 路径只观察 Server terminal，不新增 prepare 或 shutdown；信号路径仍先且只调用一次既有 `HostStopCoordinator.prepare`，随后调用并等待 `RunningServer.shutdown/waitForShutdown`；设备移除沿既有耐久 terminal promise 到达同一 Server terminal。信号/移除竞态以单一 `roleStop` promise 合并，Server 自身 shutdown 仍幂等；只有真实 Server cleanup 完成才唤醒 role，随后 `runExecutorRole` 执行既有内部 cleanup 并返回，A1-01 的唯一 `PersistentApplicationHost` 再释放外层资源。旧平行 `waitForRoleShutdown` 已删除，SIGINT/SIGTERM listener 在成功或失败终态都精确移除，原始 prepare/shutdown 失败继续向现有 role failure 路径传播。
+- 直接证据：`pnpm --filter @zhixing/cli exec vitest run src/serve/executor-role-terminal.test.ts --maxWorkers=1` 首次 4/5，通过项已证明 RPC terminal、signal、竞态和失败边界；唯一失败是 device-removal 用例少等待一个由无 prepare 分支产生的 microtask，生产 `shutdown` 尚未来得及被 spy 观察，修正测试同步点后复跑 5/5。随后串行运行 `pnpm --filter @zhixing/cli exec vitest run src/serve/executor-role-terminal.test.ts src/serve/host-stop-lifecycle.test.ts --maxWorkers=1` 为 20/20，覆盖 RPC 不提前返回、信号 prepare 一次、设备移除、三来源竞态、失败监听器清理及既有 HostStop durable/replay 合同；`pnpm --filter @zhixing/server exec vitest run src/__tests__/lifecycle.test.ts src/rpc/methods/__tests__/server-shutdown-lifecycle.test.ts --maxWorkers=1` 为 14/14，证明 RPC 仍先 prepare 且 `RunningServer.waitForShutdown` 只在 CleanupRegistry 完成后成立。A1-01 已通过的 44 项测试未重复运行。
+- 静态与构建证据：`pnpm exec biome check packages/cli/src/serve/executor-role-terminal.ts packages/cli/src/serve/executor-role-terminal.test.ts packages/cli/src/serve/executor-role-runtime.ts scripts/s7-entry-coverage.mjs scripts/s7-entry-coverage.test.mjs` 对适用的 3 个 TypeScript 文件检查通过、未写入修复；`pnpm --filter @zhixing/cli exec tsc --noEmit` 通过；`pnpm cli:build` 通过。S7 生产扫描输入确已变化，新增 mutation 会把真实 `waitForExecutorRoleTerminal` 装配替换成非生产等待并要求门禁失败；本轮只运行一次 canonical `pnpm s7:lint`，coverage/mutation 21/21 与 registry golden 全部通过。没有运行包全测、根级 lint/test/build 或制品验收。
+- 保护与边界：Server 公共合同、RPC handler、HostStop 状态机、Anchor Host、managed trust replace、on-demand idle、role root 内部资源顺序和 ApplicationHost 外层 owner 均未改动；没有新增 coordinator、journal、轮询或超时兜底。`A1-HOST-DELEGATE-01` 仍是唯一打开的单向桥；本包只闭合 executor-only 的一条 terminal 接缝，不足以勾选 A1 或任何最终退出门。
+- 交接类型：完成，等待协调者独立复核。
+- 失效与恢复：A0 与 A1-01 证据无失效；若 executor role 的 Server 创建/等待、`ServerContext.requestShutdown`、HostStop prepare、device-removal terminal、role cleanup 或 ApplicationHost role 委托任一改变，则恢复 `A1-02-executor-role-terminal-v1` 并只重验上述直接闭包；其他 A1 分支变化不使本证据整体失效。
+- 遗留问题：无本包内遗留。A1 尚未统一其他 open/refuse/drain/replace/close 生命周期，也未迁移 role root 内部组件贡献；这些保持在后续 A1 工作包，不能由本包结果推导为已完成。
+- 下一检查点：协调者先沿真实 RPC handler、RunningServer terminal、executor cleanup 与 ApplicationHost outer release 独立复核本链；接受后继续 A1 的下一条单一持久 Host 生命周期责任，不进入 A2。
 
 ## 十、用户提示词
 
