@@ -829,36 +829,40 @@ export async function runExecutorRole(
         warn: (message) => writer.notify(`[local-session] ${message}`),
         error: (message) => writer.notify(`[local-session] ${message}`),
       },
+      beforeActivate: async (openingRunner) => {
+        executorInternalStop.current = createExecutorInternalStopPort({
+          requestId: `executor-internal:${process.pid}:${processStartedAt}`,
+          timeoutMs: 30_000,
+          prepare: (request) => stopCoordinator.prepare(request),
+          shutdown: (reason) => openingRunner.shutdown(reason),
+          waitForShutdown: () => openingRunner.waitForShutdown(),
+        });
+        coordinateRuntimeTrustTransition = async () => {
+          const result = await coordinateManagedHostTrustTransition({
+            processMode,
+            expectedAdmission: initialManagedHostAdmission,
+            refuseNewMessages: () => jobOwnerAssembly?.pauseAccepting(),
+            requestShutdown: () => requestExecutorInternalStop({
+              reason: "managed-role-changed",
+              strategy: "immediate",
+            }),
+          });
+          if (result === "stopped") {
+            throw new Error("Executor Host admission changed and reached its durable terminal");
+          }
+        };
+        await onTrustApplied();
+      },
+      publishReady: async (openingRunner) => {
+        await localServerState!.markReady({
+          pid: process.pid,
+          startedAt: processStartedAt,
+          port: openingRunner.server.port,
+          host: openingRunner.server.host,
+        });
+        await localServerState!.markRunning();
+      },
     });
-    executorInternalStop.current = createExecutorInternalStopPort({
-      requestId: `executor-internal:${process.pid}:${processStartedAt}`,
-      timeoutMs: 30_000,
-      prepare: (request) => stopCoordinator.prepare(request),
-      shutdown: (reason) => localConversationServer!.shutdown(reason),
-      waitForShutdown: () => localConversationServer!.waitForShutdown(),
-    });
-    coordinateRuntimeTrustTransition = async () => {
-      const result = await coordinateManagedHostTrustTransition({
-        processMode,
-        expectedAdmission: initialManagedHostAdmission,
-        refuseNewMessages: () => jobOwnerAssembly?.pauseAccepting(),
-        requestShutdown: () => requestExecutorInternalStop({
-          reason: "managed-role-changed",
-          strategy: "immediate",
-        }),
-      });
-      if (result === "stopped") {
-        throw new Error("Executor Host admission changed and reached its durable terminal");
-      }
-    };
-    await onTrustApplied();
-    await localServerState.markReady({
-      pid: process.pid,
-      startedAt: processStartedAt,
-      port: localConversationServer.server.port,
-      host: localConversationServer.server.host,
-    });
-    await localServerState.markRunning();
     localServerHeartbeat = setInterval(() => {
       void localServerState?.heartbeat();
     }, 60_000);

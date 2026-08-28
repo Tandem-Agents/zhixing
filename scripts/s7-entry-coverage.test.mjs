@@ -1845,6 +1845,33 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
   );
   assert.match(
     inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace(
+        "beforeActivate: async (openingRunner) =>",
+        "afterActivate: async (openingRunner) =>",
+      ),
+    )).join("\n"),
+    /Executor entry-last activation or publication order drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace("await onTrustApplied();", "void onTrustApplied();"),
+    )).join("\n"),
+    /Executor entry-last activation or publication order drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace(
+        "shutdown: (reason) => openingRunner.shutdown(reason)",
+        "shutdown: (reason) => localConversationServer!.shutdown(reason)",
+      ),
+    )).join("\n"),
+    /Executor entry-last activation or publication order drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => `${text}\ncreateAnchorInternalStopPort({});`,
     )).join("\n"),

@@ -52,7 +52,7 @@ import { CleanupRegistry, registerCleanup } from "./cleanup-registry.js";
 export interface RunServerOptions extends Omit<StartServerOptions, "activationGate"> {
   /**
    * Server 内部设施已准备、正常关闭入口已绑定，但 REST/RPC/WS 仍为 inactive 503 时执行。
-   * 仅 Anchor 组合根使用；resolve 后同一个 bound handle 才会激活。
+   * 持久 Host 组合根使用；resolve 后同一个 bound handle 才会激活。
    */
   beforeActivate?: (runner: RunningServer) => Promise<void>;
   /** Server 已激活但尚未发布 PID/ready 时执行的候选健康门。 */

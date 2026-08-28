@@ -1235,6 +1235,27 @@ export function inspectManagedHostAssembly(records) {
   const cleanupTransfer = command.indexOf("startupRollback.commit()", anchorOpenGate);
   const readyPublication = command.indexOf("publishReady: async (openingRunner) =>", anchorOpenGate);
   const readyMarker = command.indexOf("await stateFile.markReady({", readyPublication);
+  const executorRunServer = executorRoot.indexOf("localConversationServer = await runServer({");
+  const executorOpenGate = executorRoot.indexOf(
+    "beforeActivate: async (openingRunner) =>",
+    executorRunServer,
+  );
+  const executorTrustBinding = executorRoot.indexOf(
+    "coordinateRuntimeTrustTransition = async () =>",
+    executorOpenGate,
+  );
+  const executorFinalAdmission = executorRoot.indexOf(
+    "await onTrustApplied();",
+    executorTrustBinding,
+  );
+  const executorReadyPublication = executorRoot.indexOf(
+    "publishReady: async (openingRunner) =>",
+    executorFinalAdmission,
+  );
+  const executorReadyMarker = executorRoot.indexOf(
+    "await localServerState!.markReady({",
+    executorReadyPublication,
+  );
   const lifecycleActivationGate = serverLifecycle.indexOf(
     "activationGate: async (preparedServer) =>",
   );
@@ -1271,6 +1292,18 @@ export function inspectManagedHostAssembly(records) {
     serverGate < 0 ||
     serverActivate < serverGate
   ) failures.push("managed host entry-last activation or publication order drifted");
+  if (
+    count(executorRoot, "localConversationServer = await runServer({") !== 1 ||
+    count(executorRoot, "beforeActivate: async (openingRunner) =>") !== 1 ||
+    count(executorRoot, "publishReady: async (openingRunner) =>") !== 1 ||
+    executorRunServer < 0 ||
+    executorOpenGate < executorRunServer ||
+    [executorInternalStopOwner, executorTrustBinding, executorFinalAdmission]
+      .some((position) => position < executorOpenGate || position >= executorReadyPublication) ||
+    executorReadyMarker < executorReadyPublication ||
+    !executorRoot.includes("shutdown: (reason) => openingRunner.shutdown(reason)") ||
+    !executorRoot.includes("waitForShutdown: () => openingRunner.waitForShutdown()")
+  ) failures.push("Executor entry-last activation or publication order drifted");
   if (
     !bootstrap.includes("export function resolveHostLaunchPlan(") ||
     !bootstrap.includes("configuration.executorAutoStart === true") ||

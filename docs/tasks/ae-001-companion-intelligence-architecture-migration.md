@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `c5838a0b3271dff440c104f0d4c11788a2774133`；A1-01～A1-04 已由协调者独立复核并提交 |
+| 已接受基线 | `9524083c355d57daf0ad47d3e9a9e11304001fd5`；A1-01～A1-05 已由协调者独立复核并提交 |
 | 当前 A 项 | A1：收束 ApplicationHost 生命周期边界 |
-| 活跃工作包 | A1-05：闭合 Executor-only 的 trust-generation 换代与 on-demand idle 终止链；deferred intent 漏项已纠正，实现与最窄验证完成，等待协调者独立复核 |
-| 下一责任链 | 协调者先复核 `A1-05-executor-trust-idle-stop-v1` 的完整 admission identity、pre-open fail-closed 边界、唯一 durable stop identity、真实 idle presence/accepted-work（含 current/frozen/importing 本机 authority 的 pending deferred intent）判定、Server terminal 与 timer 清理；接受后只在 A1 内选择下一条未闭合 Host 生命周期责任，不进入 A2 |
+| 活跃工作包 | A1-06：闭合 Executor-only 的 entry-last 开放与失败补偿边界；实现与最窄验证完成，等待协调者独立复核 |
+| 下一责任链 | 协调者先复核 `A1-06-executor-entry-last-v1` 的同一 inactive endpoint、gate 内 stop owner/trust binding/最终 admission、publishReady 及 gate/activation/publication 失败补偿；接受后只在 A1 内选择下一条未闭合 Host 生命周期责任，不进入 A2 |
 | 打开的单向桥 | `A1-HOST-DELEGATE-01`：唯一 `PersistentApplicationHost` 已拥有外层 bootstrap/lease/terminal 生命周期，但仍以类型化 loader 单向委托既有 Anchor/Executor role root；唯一事实与产品装配仍在既有 root，退场上限为 A1，其后续包不得形成第二 Host 或双 owner |
-| 已失效证据 | 无当前未恢复的必需证据；A1-05 首轮把 local-owner durable final 错判为空闲，协调复核又发现 idle probe 漏掉 pending deferred intent，两项均已按真实 accepted-work 义务纠正。本轮受影响 2 文件首次为 22/23，唯一失败是既有重驱用例遭 `backpressured:ioOperations`，包内直接入口独立新进程 1/1 通过，合并 23/23；连同输入未变的其余 4 文件 40/40，当前 A1-05 直接闭包为 6 文件 63/63。CLI canonical typecheck/build 已重取通过；因 `local-conversation-owner.ts` 属于 S7 production records，本轮重新运行 canonical S7，coverage/mutation 21/21 且 registry golden 通过。首轮最窄 Biome 的输入因本次两文件纠正已变化，不再冒充当前证据，本轮要求未把它列为完成门。A1-01 的 CRLF golden 纠正与 A1-04 更早纠正记录继续有效 |
+| 已失效证据 | 无当前未恢复证据；A1-05 的 durable-final 与 deferred-intent 纠正已由协调者接受并包含在当前基线。A1-06 的 CLI/Server 直接闭包 5 文件 49/49、canonical S7 21/21 + registry golden、CLI typecheck/build 与最窄静态检查均通过；A1-04 已接受且输入未变的真实 inactive-503 loopback 证据继续有效，未重复运行 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1320,6 +1320,17 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 保护、失效与遗留：Anchor 两种拓扑、A1-02 RPC/signal/device-removal terminal、HostStop journal/response-loss/replay、Executor start/open/cleanup 次序、Server wire、领域/权限/资源策略和三种 process mode 的既有选择均未改动；idle probe 没有调用 `preflightForDeviceRemoval`，也没有新增 trust source、reconciler、journal、Host owner、轮询兜底或产品事实。A0 与 A1-01～A1-04 的责任结论未失效，`A1-HOST-DELEGATE-01` 仍是唯一打开的单向桥；因此 A1、完成度和最终退出门保持不变。若 Executor managed admission capture/verify/coordinate、Mesh trust callback、远端 job/local closure/deferred-intent 任一 accepted-work reader、deferred intent 状态合同、HostStop prepare、RunningServer terminal、idle timer cleanup、role cleanup 或 ApplicationHost outer release任一变化，恢复 `A1-05-executor-trust-idle-stop-v1` 并只重验本闭包。
 - 交接类型：完成，等待协调者独立复核；无本包内遗留。
 - 下一检查点：协调者沿相同/变化 admission、pre-open 与 ready 前复核、trust/idle 共用 identity、全部 presence/accepted-work（尤其 pending deferred intent 与其终态）事实、真实 Server terminal、内部与 outer cleanup 独立复核；接受后继续 A1 的下一条单一 Host 生命周期责任，不进入 A2。
+
+### A1-06：闭合 Executor-only 的 entry-last 开放与失败补偿边界
+
+- 基线与差异：`HEAD 9524083c355d57daf0ad47d3e9a9e11304001fd5 + A1-06-executor-entry-last-v1`；进场工作区与索引为空，A1-01～A1-05 已由协调者独立复核并提交。本包只修改 Executor 唯一生产 root、既有 Server lifecycle 注释、直接结构测试与 S7 managed-host 门禁；没有新增 listener、Server、registry、组合根或产品合同，未执行 Git 写操作。
+- 原窗口与责任迁移：Executor 原先先等待 `runServer` 完成 endpoint activate 与 PID 发布，随后才创建 `ExecutorInternalStopPort`、绑定运行期 trust transition、再次执行 `onTrustApplied` admission 复核，最后在 `runServer` 之外发布 state/ready；因此 stop owner 或最终 admission 失败时存在短暂公开入口。现在同一 `BoundZhixingServer` 仍在任何 effectful owner 之前由 OS 仲裁，但 `runServer.beforeActivate(openingRunner)` 在 endpoint 仅返回 inactive 503 时依次绑定 A1-05 的唯一 durable stop owner、安装 trust-generation transition，并等待最后一次 managed admission 复核；三项全部成立后同一 handle 才激活 REST/RPC/WS。旧 post-open stop/admission 路径已删除，stop 只捕获 gate 提供的同一 prepared `RunningServer`，没有可变 late runner 或第二 shutdown owner。
+- 发布与失败补偿：Executor 的既有 `ServerStateFile.markReady → markRunning` 已移入同一次 `runServer.publishReady`，因此仍在 endpoint activate 与 PID/port lock 之后、heartbeat/timer 与 terminal wait 之前发布。gate 内 identity 变化继续先拒新，经既有 HostStop durable prepare、同一 prepared Server shutdown 与真实 terminal 收口，`runServer` 不会返回或发布 ready；gate、activate、PID 或 state/ready 任一步失败都由 Server 唯一 registry 关闭 inactive/active endpoint并释放自身 lock，再由 Executor 既有逐段 cleanup 收束 state、owner、timer、Mesh、Authority、MCP 与外层 ApplicationHost 资源。`resumeActive`、RPC/signal/device-removal、trust/idle durable identity、accepted-work、Executor 内部清理和 `PersistentApplicationHost` 外层释放顺序均未改变。
+- 直接证据：CLI 定向闭包 4 文件 34/34：`startup-server-owner.test.ts` 4/4 直接读取唯一生产 root，要求 stop owner、trust binding、最终 `await onTrustApplied()` 全部位于 `beforeActivate` 与 `publishReady` 之间，ready/running 位于 publication callback 且 stop 捕获 `openingRunner`；`executor-internal-stop.test.ts` 9/9、`executor-role-terminal.test.ts` 5/5、`managed-service-runtime.test.ts` 16/16 继续证明同 identity retained、变化 identity durable terminal、prepare/terminal 与重复竞态。Server `lifecycle.test.ts` 15/15 证明 beforeActivate 与 publishReady 失败都走同一 shutdown owner、端口/PID 零残留；A1-04 已接受且 `server.ts` 输入未变的真实 loopback 12/12 继续证明同一端口 gate 前 HTTP/WS 503、gate 后健康 200/RPC 可用，未重复执行。因此本包当前直接闭包为实际重取 5 文件 49/49，外加未失效的 A1-04 loopback 保护证据，不重复相加。
+- 结构、静态与构建证据：S7 现同时要求 Anchor 与 Executor 唯一 production root 使用同一 `runServer` activation gate。Executor 约束精确检查唯一 run/gate/publication、internal stop/trust/final admission 全部位于 gate 内、ready 位于 publication，并检查 stop 绑定同一 `openingRunner`；三条反向 mutation 分别恢复无 gate、把最终 admission 改为不等待、把 shutdown 退回 post-open `localConversationServer`，均必须失败。当前基线一次 canonical `pnpm s7:lint` 为 coverage/mutation 21/21 且 registry golden 通过，未更新 golden；变更 TypeScript 的最窄 Biome check、`pnpm --filter @zhixing/cli exec tsc -p tsconfig.json --noEmit` 与 `pnpm cli:build` 均通过。
+- 保护、失效与遗留：本包没有迁移领域、Product API、Kernel、Executor 手工 cleanup、其他命令期 Surface 或 A1-HOST-DELEGATE-01，也没有扩大 idle/HostStop accepted-work 集合；A0 与 A1-01～A1-05 责任结论未失效，A1、完成度与最终退出门保持不变。若 Server `beforeActivate/publishReady`、Executor bound endpoint/runServer、internal stop/trust admission、PID/state/ready/heartbeat、terminal/cleanup、managed admission identity 或对应 S7 inspector 任一变化，恢复 `A1-06-executor-entry-last-v1`，只重验上述 CLI 4 文件、Server lifecycle、S7 与 CLI typecheck/build；只有 `server.ts` gate/activate 实现变化时才重取真实 loopback。
+- 交接类型：完成，等待协调者独立复核；无本包内遗留。
+- 下一检查点：协调者从真实 Executor root 反查同一 bound handle 的 inactive gate、stop owner/trust/final admission 次序、变化 identity 的 durable terminal、ready publication 与失败 cleanup；接受后继续 A1 的下一条单一 Host 生命周期责任，不进入 A2。
 
 ## 十、用户提示词
 

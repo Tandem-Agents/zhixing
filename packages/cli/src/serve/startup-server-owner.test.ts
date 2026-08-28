@@ -44,7 +44,7 @@ describe("production startup server ownership", () => {
       .toBeGreaterThan(location(source, "runner = await runServer"));
   });
 
-  it("binds the executor endpoint before every effectful owner and reuses that handle", async () => {
+  it("keeps the executor endpoint inactive through stop ownership and final admission", async () => {
     const source = await readSource("executor-role-runtime.ts");
     const bind = location(source, "localServerBinding = await bindServer");
     expect(bind).toBeLessThan(location(source, "await mcpHub.connectAll()"));
@@ -56,6 +56,27 @@ describe("production startup server ownership", () => {
     expect(activation).toContain("host: localServerHost");
     expect(activation).toContain("startTime: processStartTime");
     expect(activation).toContain("startedAt: processStartedAt");
+    const gate = location(activation, "beforeActivate: async (openingRunner) =>");
+    const stopOwner = location(
+      activation,
+      "executorInternalStop.current = createExecutorInternalStopPort({",
+    );
+    const trustBinding = location(activation, "coordinateRuntimeTrustTransition = async () =>");
+    const admission = location(activation, "await onTrustApplied();");
+    const publish = location(activation, "publishReady: async (openingRunner) =>");
+    const ready = location(activation, "await localServerState!.markReady({");
+    const running = location(activation, "await localServerState!.markRunning();");
+    for (const prerequisite of [stopOwner, trustBinding, admission]) {
+      expect(prerequisite).toBeGreaterThan(gate);
+      expect(prerequisite).toBeLessThan(publish);
+    }
+    expect(activation).toContain("shutdown: (reason) => openingRunner.shutdown(reason)");
+    expect(activation).toContain("waitForShutdown: () => openingRunner.waitForShutdown()");
+    expect(ready).toBeGreaterThan(publish);
+    expect(running).toBeGreaterThan(ready);
+    expect(source.indexOf("executorInternalStop.current = createExecutorInternalStopPort({"))
+      .toBe(source.lastIndexOf("executorInternalStop.current = createExecutorInternalStopPort({"));
+    expect(source.indexOf("await onTrustApplied();")).toBe(source.lastIndexOf("await onTrustApplied();"));
     expect(source.lastIndexOf("await mcpHub.dispose()"))
       .toBeGreaterThan(location(source, "localConversationServer = await runServer"));
   });
