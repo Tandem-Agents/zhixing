@@ -304,6 +304,7 @@ describe("local conversation owner lifecycle", () => {
         },
       });
       await fixture.assembly.start();
+      await expect(fixture.assembly.hasIdleBlockingWork()).resolves.toBe(false);
       const conversationId = await fixture.port.createConversation();
       const turn = fixture.port.runTurn({
         conversationId,
@@ -311,6 +312,7 @@ describe("local conversation owner lifecycle", () => {
         turnId: "host-stop-active-turn",
       });
       await waitFor(() => fixture.runtime.executions() === 1, "active host-stop turn");
+      await expect(fixture.assembly.hasIdleBlockingWork()).resolves.toBe(true);
       await fixture.assembly.closeHostStopAdmission("stop-active-turn");
       const frozenByOwner = Object.fromEntries(
         (["conversation", "intent", "final", "assignment", "lease", "permit"] as const)
@@ -333,6 +335,9 @@ describe("local conversation owner lifecycle", () => {
       await expect(turn).resolves.toMatchObject({ kind: "settled" });
       await expect(settlement).resolves.toBeUndefined();
       expect(fixture.runtime.aborts()).toBe(0);
+      // Immediate stop may leave a durable final for the next recovery owner;
+      // an on-demand Host must not classify that unresolved obligation as idle.
+      await expect(fixture.assembly.hasIdleBlockingWork()).resolves.toBe(true);
       for (const owner of [
         "conversation",
         "intent",
@@ -351,6 +356,44 @@ describe("local conversation owner lifecycle", () => {
 
       await fixture.assembly.close();
       await fixture.authority.stopStorageMaintenance();
+    },
+    LIFECYCLE_TIMEOUT_MS,
+  );
+
+  it(
+    "keeps a pending deferred intent active until its normal terminal decision",
+    async () => {
+      const fixture = await createLocalOwnerAssemblyFixture({ profile: "executor-only" });
+      try {
+        await fixture.assembly.start();
+        const conversationId = await fixture.port.createConversation();
+        await expect(fixture.assembly.hasIdleBlockingWork()).resolves.toBe(false);
+
+        const deferred = await fixture.port.deferSchedule({
+          conversationId,
+          requestId: "executor-idle-deferred-intent",
+          mutation: {
+            kind: "schedule-create",
+            spec: {
+              name: "Executor idle deferred intent",
+              enabled: true,
+              priority: "normal",
+              schedule: { kind: "cron", expr: "0 9 * * *", tz: "Asia/Shanghai" },
+              action: { kind: "agent-turn", prompt: "resume after idle" },
+            },
+          },
+        });
+        await expect(fixture.assembly.hasIdleBlockingWork()).resolves.toBe(true);
+
+        await fixture.port.discardDeferredIntent(deferred.intentId);
+        await expect(fixture.port.listDeferredIntents(conversationId)).resolves.toEqual([
+          expect.objectContaining({ intentId: deferred.intentId, status: "discarded" }),
+        ]);
+        await expect(fixture.assembly.hasIdleBlockingWork()).resolves.toBe(false);
+      } finally {
+        await fixture.assembly.close();
+        await fixture.authority.stopStorageMaintenance();
+      }
     },
     LIFECYCLE_TIMEOUT_MS,
   );

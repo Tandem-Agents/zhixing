@@ -871,6 +871,36 @@ export class LocalConversationOwnerAssembly {
     return starting;
   }
 
+  /** Read-only activity probe used by the Executor-only on-demand Host. */
+  async hasIdleBlockingWork(): Promise<boolean> {
+    this.#requireReady();
+    if (
+      this.#activeCommands > 0 ||
+      this.#transferringConversations.size > 0 ||
+      this.#manager.hasActiveWork()
+    ) return true;
+    const closure = await this.#protocol.pendingClosureWork();
+    if (
+      closure.pendingFinals > 0 ||
+      closure.pendingAssignments > 0 ||
+      closure.recoveryBacklog > 0 ||
+      closure.activeLocalLeases > 0
+    ) return true;
+    const conversations = (await this.#port.listConversationAuthorities())
+      .filter(({ authority }) =>
+        authority.state === "current" ||
+        authority.state === "frozen" ||
+        authority.state === "importing");
+    for (const { conversationId } of conversations) {
+      const intents = await this.#intents.list(
+        conversationId,
+        hostContext("executor-idle-intent-probe"),
+      );
+      if (intents.some((intent) => intent.status === "pending")) return true;
+    }
+    return false;
+  }
+
   /**
    * 关闭只有一个结果:原子进入 closing → 可判定 drain → 驱动 protocol /
    * advancement 到稳定检查点 → 停恢复循环 → 核对零 active/queued、零恢复

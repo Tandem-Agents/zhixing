@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `5cf0a8eee0f57684444de60a224aa1e7b0f1349f`；A1-01～A1-03 已由协调者独立复核并提交 |
+| 已接受基线 | `c5838a0b3271dff440c104f0d4c11788a2774133`；A1-01～A1-04 已由协调者独立复核并提交 |
 | 当前 A 项 | A1：收束 ApplicationHost 生命周期边界 |
-| 活跃工作包 | A1-04：闭合 Anchor 的 entry-last 开放边界；实现与最窄验证已完成，等待协调者独立复核 |
-| 下一责任链 | 协调者先复核 `A1-04-anchor-entry-last-v1` 的同端口 inactive gate、Anchor 必要前置与 cleanup 接管、激活后 PID/state/ready 发布及三类失败补偿；接受后只在 A1 内选择下一条未闭合 Host 生命周期责任，不进入 A2 |
+| 活跃工作包 | A1-05：闭合 Executor-only 的 trust-generation 换代与 on-demand idle 终止链；deferred intent 漏项已纠正，实现与最窄验证完成，等待协调者独立复核 |
+| 下一责任链 | 协调者先复核 `A1-05-executor-trust-idle-stop-v1` 的完整 admission identity、pre-open fail-closed 边界、唯一 durable stop identity、真实 idle presence/accepted-work（含 current/frozen/importing 本机 authority 的 pending deferred intent）判定、Server terminal 与 timer 清理；接受后只在 A1 内选择下一条未闭合 Host 生命周期责任，不进入 A2 |
 | 打开的单向桥 | `A1-HOST-DELEGATE-01`：唯一 `PersistentApplicationHost` 已拥有外层 bootstrap/lease/terminal 生命周期，但仍以类型化 loader 单向委托既有 Anchor/Executor role root；唯一事实与产品装配仍在既有 root，退场上限为 A1，其后续包不得形成第二 Host 或双 owner |
-| 已失效证据 | 无当前未恢复证据；A1-04 的 canonical S7 首轮暴露新 cleanup descriptor 使用条件 owner、第二轮与第三轮分别暴露两条无识别力 mutation，均已修正根因并在最终同一源码基线完整重取 21/21 + registry golden。A1-01 的 CRLF golden 纠正与更早纠正记录继续有效 |
+| 已失效证据 | 无当前未恢复的必需证据；A1-05 首轮把 local-owner durable final 错判为空闲，协调复核又发现 idle probe 漏掉 pending deferred intent，两项均已按真实 accepted-work 义务纠正。本轮受影响 2 文件首次为 22/23，唯一失败是既有重驱用例遭 `backpressured:ioOperations`，包内直接入口独立新进程 1/1 通过，合并 23/23；连同输入未变的其余 4 文件 40/40，当前 A1-05 直接闭包为 6 文件 63/63。CLI canonical typecheck/build 已重取通过；因 `local-conversation-owner.ts` 属于 S7 production records，本轮重新运行 canonical S7，coverage/mutation 21/21 且 registry golden 通过。首轮最窄 Biome 的输入因本次两文件纠正已变化，不再冒充当前证据，本轮要求未把它列为完成门。A1-01 的 CRLF golden 纠正与 A1-04 更早纠正记录继续有效 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1308,6 +1308,18 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 保护、失效与遗留：A0 与 A1-01～A1-03 的责任结论未失效，A0-02 所记录的旧早开放窗口由本证据明确取代；`A1-HOST-DELEGATE-01` 仍是唯一打开的单向桥。若 `BoundZhixingServer` prepared/activate/close、`startServer` connection/bridge 设施、`runServer` cleanup/shutdown/discovery/publication、Anchor Delivery/Scheduler/post-server contribution/cleanup/ready 顺序或对应结构门禁任一变化，恢复 `A1-04-anchor-entry-last-v1` 并只重验上述 6 个直接文件、S7 与 Server→CLI build 闭包。本包没有处理 Executor trust/idle、managed successor、完整 component descriptor、所有 cleanup leak harness 或委托桥退场，因此 A1、完成度和最终退出门保持不变。
 - 交接类型：完成，等待协调者独立复核；无本包内遗留。
 - 下一检查点：协调者从同一 bound endpoint 的 503/activate/PID/ready 时序、Anchor 必要前置、三类失败补偿和 S7 反向 mutation 独立复核；接受后继续 A1 的下一条单一 Host 生命周期责任，不进入 A2。
+
+### A1-05：闭合 Executor-only 的 trust-generation 换代与 on-demand idle 终止链
+
+- 基线与差异：`HEAD c5838a0b3271dff440c104f0d4c11788a2774133 + A1-05-executor-trust-idle-stop-v1`；进场工作区与索引为空，A1-01～A1-04 已由协调者独立复核并提交。本包新增 `executor-internal-stop.ts` 及直接测试，在唯一 Executor role root 接入 trust/idle，给既有 local conversation owner 增加只读 activity probe，并同步最窄测试与 S7 managed-host 结构门禁；本文是唯一产品文档变化，未执行 Git 写操作。
+- 原缺口与责任迁移：Executor-only 的 `MeshRuntimeAssembly` 原未绑定 `onTrustApplied`，所以 trust/role generation 变化不会让当前 generation 退场；该拓扑也没有 on-demand idle reaper。现在 role root 从同一 `loadCurrentManagedServiceState` 快照取得完整 managed admission identity，pre-open 阶段只以 `verifyManagedHostAdmission` fail closed，不在 Server/stop owner 尚未成立时伪造运行期换代；同一 `RunningServer` 建立后绑定唯一 `ExecutorInternalStopPort`，随后在发布 ready 前再次复核，并把后续 Mesh trust callback 交给既有 `coordinateManagedHostTrustTransition`。identity 完全相同只执行既有 reconcile、保持 Host；mode、trust、role 或 service generation 的 canonical identity 真实变化才拒新并请求停止。
+- 唯一耐久终止：trust 变化和 idle 共用 `executor-internal:<pid>:<startedAt>` 这一 Host-generation 稳定 request id。端口冻结首次 reason/strategy，并发和重复来源共享同一 in-flight；每次尝试严格执行既有 `HostStopCoordinator.prepare` 后触发同一 `RunningServer.shutdown`，且只有 `waitForShutdown` 证明真实 terminal 才成功。prepare 或 shutdown trigger 失败不假终止、不换 identity/reason/strategy，下一来源按同一请求重驱；成功后不再重复 prepare/shutdown。A1-02 的 RPC、SIGINT/SIGTERM、永久设备移除仍由原 `waitForExecutorRoleTerminal` 汇入同一 Server terminal，role 只在 terminal 后执行既有内部 cleanup，再由唯一 `PersistentApplicationHost` 释放外层 Mesh maintenance/workspace lease。
+- Executor idle 事实：reaper 仅在 `processMode === "on-demand"` 装配，不借用 Anchor 的 Channel/Scheduler 字段。每 tick 先观察真实本机 Server connection 与当前 Anchor Mesh connection；二者均不在场时，再读取远端 job durable accepted-work，以及 local conversation 的 active command/transfer/turn、pending final/assignment、recovery backlog、active lease，并遍历所有 `current/frozen/importing` 本机 conversation authority 的 deferred-intent 投影。只要存在 `status === "pending"` 的 intent 就继续保活；`confirmed/discarded` 已终态记录和普通无待办 durable conversation 本身不保活。全部事实为空才以 `drain` 请求同一内部 stop。该 probe 只走 authority/list reader，不调用会冻结、等待或改变准入的 removal/HostStop preflight；检查不重入，异步失败被显式消费并由下个 tick 以同一 identity 重试，timer 在 role cleanup 首步清除，已在途检查也在组件释放前收束。
+- 直接证据：首轮串行 6 文件曾得到 61/62，纠正 durable final 断言后为 62/62；协调复核随后以 HostStop accepted-work 闭包反证 deferred intent 漏项。本轮新增用例直接证明“普通空会话不保活 → 仅有 pending deferred intent 时阻止 idle → 经正常 discard 成为终态且其余 activity 为空后允许 idle”。受影响 `executor-internal-stop.test.ts` 与 `local-conversation-owner-lifecycle.test.ts` 首次组合为 22/23，新用例和 Executor idle 9 项均通过；唯一失败的既有重驱用例是存储维护 `backpressured:ioOperations`，按验证手册用包内 Node/Vitest 入口在独立新进程重取 1/1，通过与首次其余结果合并为 2 文件 23/23。连同输入未变的 executor terminal 5、HostStop 15、managed transition 16、Anchor idle policy 4，当前有效直接闭包为 6 文件 63/63，新增 intent 项已包含在 local-owner lifecycle 14 项中，不重复相加。
+- 结构、静态与构建证据：S7 managed-host inspector 现要求 Executor root 恰有一个 managed trust callback、一个内部 stop owner、两个来源、完整 admission capture、on-demand-only activity 判定、cleanup 收束和 terminal 后返回；反向 mutation 分别移除 durable prepare、断开 trust binding、忽略 current Anchor Mesh presence，均必须失败。deferred-intent 纠正没有改变上述门禁合同，但修改的 `local-conversation-owner.ts` 属于 S7 production records，故按输入失效规则重新运行一次 canonical `pnpm s7:lint`，coverage/mutation 21/21 且 registry golden 通过。当前源码上重新运行 `pnpm --filter @zhixing/cli exec tsc -p tsconfig.json --noEmit` 与 `pnpm cli:build` 均通过；首轮最窄 Biome 证据因两文件输入变化不再作为当前证据，本轮完成门未要求重取。没有运行 CLI 包全测、根级 lint/test/build、package check 或制品验收。
+- 保护、失效与遗留：Anchor 两种拓扑、A1-02 RPC/signal/device-removal terminal、HostStop journal/response-loss/replay、Executor start/open/cleanup 次序、Server wire、领域/权限/资源策略和三种 process mode 的既有选择均未改动；idle probe 没有调用 `preflightForDeviceRemoval`，也没有新增 trust source、reconciler、journal、Host owner、轮询兜底或产品事实。A0 与 A1-01～A1-04 的责任结论未失效，`A1-HOST-DELEGATE-01` 仍是唯一打开的单向桥；因此 A1、完成度和最终退出门保持不变。若 Executor managed admission capture/verify/coordinate、Mesh trust callback、远端 job/local closure/deferred-intent 任一 accepted-work reader、deferred intent 状态合同、HostStop prepare、RunningServer terminal、idle timer cleanup、role cleanup 或 ApplicationHost outer release任一变化，恢复 `A1-05-executor-trust-idle-stop-v1` 并只重验本闭包。
+- 交接类型：完成，等待协调者独立复核；无本包内遗留。
+- 下一检查点：协调者沿相同/变化 admission、pre-open 与 ready 前复核、trust/idle 共用 identity、全部 presence/accepted-work（尤其 pending deferred intent 与其终态）事实、真实 Server terminal、内部与 outer cleanup 独立复核；接受后继续 A1 的下一条单一 Host 生命周期责任，不进入 A2。
 
 ## 十、用户提示词
 

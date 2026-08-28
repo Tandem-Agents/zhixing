@@ -1026,6 +1026,8 @@ export function inspectManagedHostAssembly(records) {
   const config = byPath.get("packages/cli/src/runtime/config-command.ts");
   const command = byPath.get("packages/cli/src/serve/command.ts");
   const anchorInternalStop = byPath.get("packages/cli/src/serve/anchor-internal-stop.ts");
+  const executorRoot = byPath.get("packages/cli/src/serve/executor-role-runtime.ts");
+  const executorInternalStop = byPath.get("packages/cli/src/serve/executor-internal-stop.ts");
   const topology = byPath.get("packages/cli/src/serve/topology-command.ts");
   const applicationHost = byPath.get("packages/cli/src/serve/application-host.ts");
   const connection = byPath.get("packages/cli/src/runtime/core-host-connection.ts");
@@ -1043,7 +1045,7 @@ export function inspectManagedHostAssembly(records) {
   const server = byPath.get("packages/server/src/server.ts");
   if (
     !reconciler || !service || !serviceRuntime || !bootstrap || !pairing || !config ||
-    !command || !anchorInternalStop || !topology || !applicationHost || !connection || !repl || !surfaceLink || !secrets || !status ||
+    !command || !anchorInternalStop || !executorRoot || !executorInternalStop || !topology || !applicationHost || !connection || !repl || !surfaceLink || !secrets || !status ||
     !publicStatus || !statusRoute || !scheduler || !manifest || !serverContext || !serverShutdown ||
     !serverLifecycle || !server
   ) return ["managed host production assembly sources are missing"];
@@ -1087,6 +1089,9 @@ export function inspectManagedHostAssembly(records) {
       serviceRuntime.indexOf('await reconcile("current-trust-applied")') ||
     !serviceRuntime.includes('return "stopped";') ||
     count(command, "coordinateManagedHostTrustTransition({") !== 1 ||
+    count(executorRoot, "coordinateManagedHostTrustTransition({") !== 1 ||
+    count(executorRoot, "captureManagedHostAdmission(") !== 1 ||
+    count(executorRoot, "onTrustApplied,") !== 1 ||
     count(topology, 'reconcileCurrentManagedService("managed-preflight")') < 1 ||
     count(connection, 'reconcileCurrentManagedService("host-missing")') !== 1
   ) failures.push("managed host production trigger exact-set drifted");
@@ -1190,6 +1195,34 @@ export function inspectManagedHostAssembly(records) {
     !anchorInternalStop.includes("await dependencies.requestShutdown(frozen.reason);") ||
     !anchorInternalStop.includes("shutdownTriggered = true;")
   ) failures.push("managed host internal stop durable owner drifted");
+  const executorInternalStopOwner = executorRoot.indexOf(
+    "executorInternalStop.current = createExecutorInternalStopPort({",
+  );
+  const executorRoleTerminal = executorRoot.indexOf(
+    "await waitForExecutorRoleTerminal({",
+    executorInternalStopOwner,
+  );
+  if (
+    count(executorRoot, "createExecutorInternalStopPort({") !== 1 ||
+    count(executorRoot, "requestExecutorInternalStop({") !== 2 ||
+    !executorRoot.includes('reason: "managed-role-changed"') ||
+    !executorRoot.includes('requestExecutorInternalStop({ reason: "idle", strategy: "drain" })') ||
+    !executorRoot.includes('processMode === "on-demand"') ||
+    !executorRoot.includes("localConversationServer!.server.connections.size") ||
+    !executorRoot.includes("mesh!.connections.has(anchorDeviceId)") ||
+    !executorRoot.includes("localConversationOwner!.hasIdleBlockingWork()") ||
+    !executorRoot.includes("jobOwnerAssembly!.acceptedWorkItems()") ||
+    !executorRoot.includes("await executorIdleCheck?.catch(() => undefined)") ||
+    executorInternalStopOwner < 0 ||
+    executorRoleTerminal < executorInternalStopOwner ||
+    !executorInternalStop.includes("const frozen = claimed ?? Object.freeze({ ...request });") ||
+    !executorInternalStop.includes("claimed = frozen;") ||
+    !executorInternalStop.includes("if (inFlight) return inFlight;") ||
+    !executorInternalStop.includes("await dependencies.prepare({") ||
+    !executorInternalStop.includes("await dependencies.shutdown(frozen.reason);") ||
+    !executorInternalStop.includes("await dependencies.waitForShutdown();") ||
+    !executorInternalStop.includes("terminal = true;")
+  ) failures.push("Executor trust/idle durable stop owner drifted");
   const anchorRunServer = command.indexOf("runner = await runServer({");
   const anchorOpenGate = command.indexOf("beforeActivate: async (openingRunner) =>", anchorRunServer);
   const deliveryActivation = command.indexOf("ctx.deliveryStack?.activate()", anchorOpenGate);

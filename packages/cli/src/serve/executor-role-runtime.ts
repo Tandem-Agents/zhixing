@@ -71,7 +71,12 @@ import { isDaemonChild, resolveHostProcessMode } from "./self-exec.js";
 import { deleteDeviceKeyExact } from "@zhixing/mesh/device-key-store";
 import { protocolDigest } from "@zhixing/core/protocol";
 import { cleanupExecutorDeviceLocalState } from "./device-removal-cleanup.js";
-import { loadCurrentManagedServiceState } from "./managed-service-runtime.js";
+import {
+  captureManagedHostAdmission,
+  coordinateManagedHostTrustTransition,
+  loadCurrentManagedServiceState,
+  verifyManagedHostAdmission,
+} from "./managed-service-runtime.js";
 import {
   createManagedServiceAdapter,
   managedServiceDefinitionDigest,
@@ -89,6 +94,12 @@ import type { StopHostGeneration } from "@zhixing/core/protocol";
 import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
 import { createMeshCompatibilityStateProjection } from "./mesh-compatibility-state.js";
 import { waitForExecutorRoleTerminal } from "./executor-role-terminal.js";
+import {
+  createExecutorInternalStopPort,
+  type ExecutorInternalStopPort,
+  type ExecutorInternalStopRequest,
+  shouldExecutorIdleExit,
+} from "./executor-internal-stop.js";
 
 export async function runExecutorRole(
   options: ServeOptions,
@@ -164,6 +175,8 @@ export async function runExecutorRole(
   let localServerBinding: BoundZhixingServer | undefined;
   let localServerState: ServerStateFile | undefined;
   let localServerHeartbeat: NodeJS.Timeout | undefined;
+  let executorIdleTimer: NodeJS.Timeout | undefined;
+  let executorIdleCheck: Promise<void> | undefined;
   let resolveLifecycleShutdown: (() => void) | undefined;
   const lifecycleShutdown = new Promise<void>((resolve) => {
     resolveLifecycleShutdown = resolve;
@@ -179,8 +192,17 @@ export async function runExecutorRole(
         host: localServerHost,
       },
     });
+    const initialManagedServiceState = await loadCurrentManagedServiceState(
+      "activate",
+      zhixingHome,
+    );
+    const initialManagedHostAdmission = await captureManagedHostAdmission(
+      processMode,
+      zhixingHome,
+      async () => initialManagedServiceState,
+    );
     const managedState = processMode === "managed"
-      ? await loadCurrentManagedServiceState("activate", zhixingHome)
+      ? initialManagedServiceState
       : undefined;
     if (processMode === "managed" && !managedState?.spec) {
       throw new Error("Managed executor stop identity requires the installed service definition");
@@ -402,6 +424,32 @@ export async function runExecutorRole(
       onError: (_assignmentId, error) =>
         writer.notify(`[job-worker] ${error.message}`),
     });
+    const executorInternalStop = {
+      current: undefined as ExecutorInternalStopPort | undefined,
+    };
+    const requestExecutorInternalStop = (
+      request: ExecutorInternalStopRequest,
+    ): Promise<void> => {
+      const stop = executorInternalStop.current;
+      if (!stop) {
+        return Promise.reject(new Error("Executor internal stop is not ready"));
+      }
+      return stop.requestStop(request);
+    };
+    let coordinateRuntimeTrustTransition: (() => Promise<void>) | undefined;
+    const onTrustApplied = async () => {
+      if (coordinateRuntimeTrustTransition) {
+        await coordinateRuntimeTrustTransition();
+        return;
+      }
+      if (!await verifyManagedHostAdmission(
+        initialManagedHostAdmission,
+        processMode,
+        zhixingHome,
+      )) {
+        throw new Error("Executor Host admission changed before its stop port was ready");
+      }
+    };
     mesh = new MeshRuntimeAssembly({
       zhixingHome,
       trust: bootstrap.mesh.trust,
@@ -427,6 +475,7 @@ export async function runExecutorRole(
       },
       secretStore: bootstrap.secretStore,
       connectionProjection: meshConnectionProjection,
+      onTrustApplied,
       onError: (error) => writer.notify(`[mesh] ${error.message}`),
     });
     let removalAdmissionOperationId: string | undefined;
@@ -781,6 +830,28 @@ export async function runExecutorRole(
         error: (message) => writer.notify(`[local-session] ${message}`),
       },
     });
+    executorInternalStop.current = createExecutorInternalStopPort({
+      requestId: `executor-internal:${process.pid}:${processStartedAt}`,
+      timeoutMs: 30_000,
+      prepare: (request) => stopCoordinator.prepare(request),
+      shutdown: (reason) => localConversationServer!.shutdown(reason),
+      waitForShutdown: () => localConversationServer!.waitForShutdown(),
+    });
+    coordinateRuntimeTrustTransition = async () => {
+      const result = await coordinateManagedHostTrustTransition({
+        processMode,
+        expectedAdmission: initialManagedHostAdmission,
+        refuseNewMessages: () => jobOwnerAssembly?.pauseAccepting(),
+        requestShutdown: () => requestExecutorInternalStop({
+          reason: "managed-role-changed",
+          strategy: "immediate",
+        }),
+      });
+      if (result === "stopped") {
+        throw new Error("Executor Host admission changed and reached its durable terminal");
+      }
+    };
+    await onTrustApplied();
     await localServerState.markReady({
       pid: process.pid,
       startedAt: processStartedAt,
@@ -792,6 +863,42 @@ export async function runExecutorRole(
       void localServerState?.heartbeat();
     }, 60_000);
     localServerHeartbeat.unref();
+    if (processMode === "on-demand") {
+      executorIdleTimer = setInterval(() => {
+        if (executorIdleCheck) return;
+        const check = (async () => {
+          const anchorDeviceId = currentAnchorDeviceId();
+          const localConnectionCount = localConversationServer!.server.connections.size;
+          const currentAnchorConnected = anchorDeviceId !== undefined &&
+            mesh!.connections.has(anchorDeviceId);
+          const [hasLocalAcceptedWork, remoteAcceptedWork] =
+            localConnectionCount > 0 || currentAnchorConnected
+              ? [false, []] as const
+              : await Promise.all([
+                  localConversationOwner!.hasIdleBlockingWork(),
+                  jobOwnerAssembly!.acceptedWorkItems(),
+                ]);
+          if (!shouldExecutorIdleExit({
+            localConnectionCount,
+            currentAnchorConnected,
+            hasLocalAcceptedWork,
+            hasRemoteAcceptedWork: remoteAcceptedWork.length > 0,
+          })) return;
+          await requestExecutorInternalStop({ reason: "idle", strategy: "drain" });
+        })();
+        executorIdleCheck = check;
+        void check.catch((error) => {
+          writer.notify(
+            `[idle] durable Executor Host stop failed; the same operation will retry: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }).finally(() => {
+          if (executorIdleCheck === check) executorIdleCheck = undefined;
+        });
+      }, 60_000);
+      executorIdleTimer.unref();
+    }
     await waitForExecutorRoleTerminal({
       server: localConversationServer,
       deviceRemoved: lifecycleShutdown,
@@ -807,6 +914,8 @@ export async function runExecutorRole(
   }
   const cleanupFailures: unknown[] = [];
   try {
+    if (executorIdleTimer) clearInterval(executorIdleTimer);
+    await executorIdleCheck?.catch(() => undefined);
     if (localServerHeartbeat) clearInterval(localServerHeartbeat);
     await localServerState?.markStopping("graceful");
     await localConversationServer?.shutdown("executor-role-stop");

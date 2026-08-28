@@ -110,6 +110,34 @@ describe("managed host trust transition", () => {
     expect(order).toEqual(["refuse", "shutdown"]);
   });
 
+  it("retains the executor-only Host when the full admission identity is unchanged", async () => {
+    const currentState = current(["executor"], "device:anchor");
+    const expectedAdmission = await captureManagedHostAdmission(
+      "on-demand",
+      "home",
+      async () => currentState,
+    );
+    const refuseNewMessages = vi.fn();
+    const requestShutdown = vi.fn();
+    const reconcile = vi.fn(async () => ({
+      plan: { mode: "on-demand" as const, roles: ["executor"] as const },
+      service: undefined,
+      action: "unchanged" as const,
+    }));
+
+    await expect(coordinateManagedHostTrustTransition({
+      processMode: "on-demand",
+      expectedAdmission,
+      loadCurrent: async () => currentState,
+      reconcile,
+      refuseNewMessages,
+      requestShutdown,
+    })).resolves.toBe("retained");
+    expect(reconcile).toHaveBeenCalledWith("current-trust-applied");
+    expect(refuseNewMessages).not.toHaveBeenCalled();
+    expect(requestShutdown).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["on-demand", ["anchor"] as const, "device:local", "stopped"],
     ["foreground", ["anchor"] as const, "device:local", "retained"],

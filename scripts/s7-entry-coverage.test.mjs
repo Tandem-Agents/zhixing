@@ -1672,6 +1672,8 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     "packages/cli/src/runtime/config-command.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/anchor-internal-stop.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/cli/src/serve/executor-internal-stop.ts",
     "packages/cli/src/serve/topology-command.ts",
     "packages/cli/src/serve/application-host.ts",
     "packages/cli/src/runtime/core-host-connection.ts",
@@ -1819,6 +1821,27 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
       (text) => text.replace("await dependencies.prepare({", "void ({"),
     )).join("\n"),
     /internal stop durable owner drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/executor-internal-stop.ts",
+      (text) => text.replace("await dependencies.prepare({", "void ({"),
+    )).join("\n"),
+    /Executor trust\/idle durable stop owner drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace("onTrustApplied,", ""),
+    )).join("\n"),
+    /production trigger exact-set drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace("mesh!.connections.has(anchorDeviceId)", "false"),
+    )).join("\n"),
+    /Executor trust\/idle durable stop owner drifted/,
   );
   assert.match(
     inspectManagedHostAssembly(mutate(
