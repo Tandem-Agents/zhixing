@@ -1671,6 +1671,7 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     "packages/cli/src/serve/mesh-pair-command.ts",
     "packages/cli/src/runtime/config-command.ts",
     "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/anchor-internal-stop.ts",
     "packages/cli/src/serve/topology-command.ts",
     "packages/cli/src/serve/application-host.ts",
     "packages/cli/src/runtime/core-host-connection.ts",
@@ -1753,6 +1754,30 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
       ),
     )).join("\n"),
     /accepted-work drain or generation-safe turnover order drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "return stop.requestStop(request);",
+        "serverCtx.requestShutdown?.(request.reason); return Promise.resolve();",
+      ),
+    )).join("\n"),
+    /internal stop durable owner drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/anchor-internal-stop.ts",
+      (text) => text.replace("await dependencies.prepare({", "void ({"),
+    )).join("\n"),
+    /internal stop durable owner drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => `${text}\ncreateAnchorInternalStopPort({});`,
+    )).join("\n"),
+    /internal stop durable owner drifted/,
   );
   assert.match(
     inspectManagedHostAssembly(mutate(

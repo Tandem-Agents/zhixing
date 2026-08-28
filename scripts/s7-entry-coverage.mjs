@@ -1025,6 +1025,7 @@ export function inspectManagedHostAssembly(records) {
   const pairing = byPath.get("packages/cli/src/serve/mesh-pair-command.ts");
   const config = byPath.get("packages/cli/src/runtime/config-command.ts");
   const command = byPath.get("packages/cli/src/serve/command.ts");
+  const anchorInternalStop = byPath.get("packages/cli/src/serve/anchor-internal-stop.ts");
   const topology = byPath.get("packages/cli/src/serve/topology-command.ts");
   const applicationHost = byPath.get("packages/cli/src/serve/application-host.ts");
   const connection = byPath.get("packages/cli/src/runtime/core-host-connection.ts");
@@ -1040,7 +1041,7 @@ export function inspectManagedHostAssembly(records) {
   const serverShutdown = byPath.get("packages/server/src/rpc/methods/server.ts");
   if (
     !reconciler || !service || !serviceRuntime || !bootstrap || !pairing || !config ||
-    !command || !topology || !applicationHost || !connection || !repl || !surfaceLink || !secrets || !status ||
+    !command || !anchorInternalStop || !topology || !applicationHost || !connection || !repl || !surfaceLink || !secrets || !status ||
     !publicStatus || !statusRoute || !scheduler || !manifest || !serverContext || !serverShutdown
   ) return ["managed host production assembly sources are missing"];
   const count = (text, token) => text.split(token).length - 1;
@@ -1156,6 +1157,36 @@ export function inspectManagedHostAssembly(records) {
     !command.includes("drainAcceptedWork: async () => {") ||
     closeOldClient < 0 || disableFuture < closeOldClient || oldTurnover < disableFuture || successor < oldTurnover
   ) failures.push("managed host accepted-work drain or generation-safe turnover order drifted");
+  const anchorInternalStopOwner = command.indexOf(
+    "anchorInternalStop.current = createAnchorInternalStopPort({",
+  );
+  const anchorRoleTerminal = command.indexOf(
+    "await runner.waitForShutdown()",
+    anchorInternalStopOwner,
+  );
+  if (
+    count(command, "createAnchorInternalStopPort({") !== 1 ||
+    count(command, "requestAnchorInternalStop({") !== 3 ||
+    count(command, "serverCtx.requestShutdown") !== 1 ||
+    !command.includes("return stop.requestStop(request);") ||
+    !command.includes('reason: "managed-role-changed"') ||
+    !command.includes('reason: "device-removed"') ||
+    !command.includes('requestAnchorInternalStop({ reason: "idle", strategy: "drain" })') ||
+    !command.includes('chalk.red("[idle] durable Host stop failed; the same operation will retry")') ||
+    !command.includes("prepare: (request) => stopCoordinator.prepare(request)") ||
+    !command.includes("const shutdown = serverCtx.requestShutdown;") ||
+    command.includes('serverCtx.requestShutdown?.("managed-role-changed")') ||
+    command.includes('serverCtx.requestShutdown?.("device-removed")') ||
+    command.includes('serverCtx.requestShutdown?.("idle")') ||
+    anchorInternalStopOwner < 0 ||
+    anchorRoleTerminal < anchorInternalStopOwner ||
+    !anchorInternalStop.includes("const frozen = claimed ?? Object.freeze({ ...request });") ||
+    !anchorInternalStop.includes("claimed = frozen;") ||
+    !anchorInternalStop.includes("if (inFlight) return inFlight;") ||
+    !anchorInternalStop.includes("await dependencies.prepare({") ||
+    !anchorInternalStop.includes("await dependencies.requestShutdown(frozen.reason);") ||
+    !anchorInternalStop.includes("shutdownTriggered = true;")
+  ) failures.push("managed host internal stop durable owner drifted");
   if (
     !bootstrap.includes("export function resolveHostLaunchPlan(") ||
     !bootstrap.includes("configuration.executorAutoStart === true") ||

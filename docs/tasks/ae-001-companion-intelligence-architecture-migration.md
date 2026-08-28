@@ -202,10 +202,10 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `cba7dd31b4d32caf311b91da1812193a9cc4f2b5`；A1-01 已由协调者独立复核并提交 |
+| 已接受基线 | `3d07c58b99f27c01f97d2c13d49c44703bd55ef6`；A1-01、A1-02 已由协调者独立复核并提交 |
 | 当前 A 项 | A1：收束 ApplicationHost 生命周期边界 |
-| 活跃工作包 | A1-02 已形成 `A1-02-executor-role-terminal-v1` 工作区差异并完成直接验证，等待协调者独立复核；A1 阶段仍未完成 |
-| 下一责任链 | 协调者先独立复核 `server.shutdown → HostStop.prepare → RunningServer terminal → executor role terminal → ApplicationHost outer release` 的唯一终止链；接受后仍只在 A1 内选择下一条持久 Host 生命周期责任，不得扩入 A2 |
+| 活跃工作包 | A1-03：闭合 Anchor 内部停止触发的唯一耐久终止入口；实现与最窄验证已完成，等待协调者独立复核 |
+| 下一责任链 | 协调者先复核 `A1-03-anchor-internal-stop-v1` 的三来源汇流、同 identity 重驱、旧裸旁路归零与真实 Server terminal；接受后只在 A1 内选择下一条未闭合 Host 生命周期责任，不进入 A2 |
 | 打开的单向桥 | `A1-HOST-DELEGATE-01`：唯一 `PersistentApplicationHost` 已拥有外层 bootstrap/lease/terminal 生命周期，但仍以类型化 loader 单向委托既有 Anchor/Executor role root；唯一事实与产品装配仍在既有 root，退场上限为 A1，其后续包不得形成第二 Host 或双 owner |
 | 已失效证据 | 无当前未恢复证据；A1-01 初次把 canonical S7 在临时 LF golden 上通过写成当前 clean Windows 基线通过，协调者以 CRLF checkout 反证后，已由 registry checker 的行尾归一化纠正并在 CRLF 基线上完整重取。A0-06b3b H02/P10、H07/H08/P14 等更早失效项仍按对应纠正记录继续有效 |
 | 阻塞/用户决策 | 无 |
@@ -1286,6 +1286,17 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 失效与恢复：A0 与 A1-01 证据无失效；若 executor role 的 Server 创建/等待、`ServerContext.requestShutdown`、HostStop prepare、device-removal terminal、role cleanup 或 ApplicationHost role 委托任一改变，则恢复 `A1-02-executor-role-terminal-v1` 并只重验上述直接闭包；其他 A1 分支变化不使本证据整体失效。
 - 遗留问题：无本包内遗留。A1 尚未统一其他 open/refuse/drain/replace/close 生命周期，也未迁移 role root 内部组件贡献；这些保持在后续 A1 工作包，不能由本包结果推导为已完成。
 - 下一检查点：协调者先沿真实 RPC handler、RunningServer terminal、executor cleanup 与 ApplicationHost outer release 独立复核本链；接受后继续 A1 的下一条单一持久 Host 生命周期责任，不进入 A2。
+
+### A1-03：闭合 Anchor 内部停止触发的唯一耐久终止入口
+
+- 基线与差异：`HEAD 3d07c58b99f27c01f97d2c13d49c44703bd55ef6 + A1-03-anchor-internal-stop-v1`；进场工作区与索引为空，A1-01、A1-02 已由协调者独立复核并提交。本包新增 `anchor-internal-stop.ts` 及直接测试，修改 Anchor 生产组合根 `command.ts`，并同步 S7 production inspector 与反向 mutation；本文是唯一产品文档变化，未执行任何 Git 写操作。
+- 原断链与责任迁移：managed trust/role generation 变化原来只执行 `refuseNewMessages + serverCtx.requestShutdown`，idle reaper 直接执行裸 shutdown，永久本机设备移除则拥有一份独立 `HostStop.prepare + raw requestShutdown`。三者现统一调用唯一 `AnchorInternalStopPort`；该端口以冻结的 home/Host identity 生成一个 Host 生命周期稳定 request id，首次来源冻结 reason/strategy，并发或重复来源共享同一 in-flight promise。每次尝试都先调用既有 `HostStopCoordinator.prepare`，只有 durable `ready-to-stop` 成立后才触发真实 `ServerContext.requestShutdown`，成功后终生只触发一次；prepare 或 shutdown trigger 失败会清除本次 in-flight，但保留同一 identity 与首次请求，下一次触发只允许原样重驱，不新增 coordinator、journal、gate 或 cleanup owner。
+- 产品与终止边界：managed trust 变化仍由 `coordinateManagedHostTrustTransition` 先立即拒新，prepare 失败继续向 reconciler 可观察地传播；on-demand idle 仍只在既有 `shouldIdleExit` 为真时请求 drain，失败被显式消费并由下一 idle tick 以同一 identity 有界重试，不产生 unhandled rejection；device removal 仍先完成 admission/accepted-work、耐久 terminal 与既有 cleanup，local-device 路径继续先删除 device key 再请求 stop，Server 尚未建立时继续使用既有 pre-start terminal flag。内部回调不等待整个 Server cleanup；Anchor role 仍只在既有 `await runner.waitForShutdown()` 证明真实 terminal 后返回，随后 A1-01 的唯一 `PersistentApplicationHost` 才释放外层 Mesh maintenance 与 workspace lease。RPC `server.shutdown`、Server signal、Executor-only A1-02 链和 HostStop 状态机均未修改。
+- 直接与结构证据：CLI 直接闭包为 4 文件 40/40，其中 `anchor-internal-stop.test.ts` 6/6、`managed-service-runtime.test.ts` 15/15、idle policy 4/4、HostStop 15/15；40/40 已包含新增端口的 6 项，不重复相加。新增端口用例覆盖 managed/idle/device 三种策略、三来源并发与重复合并、prepare 失败不 shutdown、同 identity/body 重驱、shutdown trigger 失败重驱及成功后精确一次触发。S7 新门禁要求生产组合根恰有一个端口、三个来源、唯一 `serverCtx.requestShutdown` binding、prepare 先于 shutdown、idle 显式消费失败且 role 仍等待 `runner.waitForShutdown()`；三条反向 mutation 分别恢复裸旁路、删除 prepare await、增加第二 owner，均必须失败。canonical `pnpm s7:lint` 为 21/21，registry golden 通过。
+- 静态与构建证据：首次 CLI typecheck 精确发现新端口对象方法参数缺少显式类型、闭包读取未保持可选值收窄；改为显式 `AnchorInternalStopRequest → Promise<void>` 且在建闭包前冻结非空 request 后，重跑新增端口测试 6/6，`pnpm --filter @zhixing/cli exec tsc -p tsconfig.json --noEmit` 通过。变更 TypeScript 的最窄 Biome check 通过，`pnpm cli:build` 通过；没有运行 CLI 包全测、根级 lint/test/build、package check 或制品验收。
+- 保护、失效与遗留：A0、A1-01、A1-02 证据未失效，`A1-HOST-DELEGATE-01` 仍是唯一打开的单向桥。本包未迁移 Anchor 内部组件 descriptor、start/open 次序、完整 cleanup registry、Executor trust/idle 或其他 A1 责任；因此 A1、完成度与最终退出门保持不变。若 Anchor 三个 internal source、HostStop prepare、Server shutdown binding/terminal、device removal cleanup/key 顺序、idle policy 或 ApplicationHost outer release 任一变化，则恢复 `A1-03-anchor-internal-stop-v1` 并只重验本闭包。
+- 交接类型：完成，等待协调者独立复核；无本包内遗留。
+- 下一检查点：协调者沿三条生产 source、端口首次请求冻结与失败重驱、`runner.waitForShutdown` 和 ApplicationHost outer release 独立复核；接受后继续 A1 的下一条单一 Host 生命周期责任，不进入 A2。
 
 ## 十、用户提示词
 

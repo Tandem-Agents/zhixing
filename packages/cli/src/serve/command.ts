@@ -186,6 +186,11 @@ import {
 } from "./host-stop-lifecycle.js";
 import { deleteDeviceKey, deleteDeviceKeyExact } from "@zhixing/mesh/device-key-store";
 import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
+import {
+  createAnchorInternalStopPort,
+  type AnchorInternalStopPort,
+  type AnchorInternalStopRequest,
+} from "./anchor-internal-stop.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
@@ -779,13 +784,27 @@ async function runServerProcess(
   // ============================================================================
   const startupCleanups: AssemblyContext["startupCleanups"] = {};
   const channelHttpRoutes: AssemblyContext["channelHttpRoutes"] = new Map();
-  const managedShutdown = { current: undefined as undefined | (() => void) };
+  const anchorInternalStop = {
+    current: undefined as AnchorInternalStopPort | undefined,
+  };
+  const requestAnchorInternalStop = (
+    request: AnchorInternalStopRequest,
+  ): Promise<void> => {
+    const stop = anchorInternalStop.current;
+    if (!stop) {
+      return Promise.reject(new Error("Anchor internal stop is not ready"));
+    }
+    return stop.requestStop(request);
+  };
   let assemblyContext: AssemblyContext | undefined;
   const onTrustApplied = () => coordinateManagedHostTrustTransition({
     processMode,
     expectedAdmission: initialManagedHostAdmission,
     refuseNewMessages: () => assemblyContext?.inboundRouter?.refuseNewMessages(),
-    requestShutdown: () => managedShutdown.current?.(),
+    requestShutdown: () => requestAnchorInternalStop({
+      reason: "managed-role-changed",
+      strategy: "immediate",
+    }),
   }).then(() => undefined);
 
   const ctx: AssemblyContext = {
@@ -1610,7 +1629,6 @@ async function runServerProcess(
     delete ctx.startupLifecycle;
     managedHostStopping = false;
   }
-  const removedShutdown = { current: undefined as undefined | (() => Promise<void>) };
   let localRetirementCompletedBeforeServerStart = false;
   const cleanupLocalDevice = async () => {
     const current = await loadCurrentManagedServiceState("activate", zhixingHome);
@@ -1635,23 +1653,22 @@ async function runServerProcess(
       },
     });
   };
+  const requestRemovedDeviceStop = async () => {
+    const stop = anchorInternalStop.current;
+    if (stop) {
+      await requestAnchorInternalStop({
+        reason: "device-removed",
+        strategy: "immediate",
+      });
+      return;
+    }
+    localRetirementCompletedBeforeServerStart = true;
+  };
   const finishLocalRetirement = async () => {
     await deleteDeviceKey(bootstrap.secretStore, bootstrap.mesh.deviceKey.deviceId);
-    const shutdown = removedShutdown.current;
-    if (shutdown) {
-      await shutdown();
-      return;
-    }
-    localRetirementCompletedBeforeServerStart = true;
+    await requestRemovedDeviceStop();
   };
-  const finishRemovedDevice = async () => {
-    const shutdown = removedShutdown.current;
-    if (shutdown) {
-      await shutdown();
-      return;
-    }
-    localRetirementCompletedBeforeServerStart = true;
-  };
+  const finishRemovedDevice = requestRemovedDeviceStop;
   let removalAdmissionOperationId: string | undefined;
   await ctx.meshRuntime?.bindDeviceRemovalLifecycle({
     closeAdmission: async (operationId) => {
@@ -2130,22 +2147,6 @@ async function runServerProcess(
     },
     lifecycleShutdown: stopCoordinator,
   });
-  managedShutdown.current = () => {
-    managedHostStopping = true;
-    ctx.inboundRouter?.refuseNewMessages();
-    serverCtx.requestShutdown?.("managed-role-changed");
-  };
-  removedShutdown.current = async () => {
-    managedHostStopping = true;
-    await stopCoordinator.prepare({
-      requestId: `device-removed:${bootstrap.mesh.deviceKey.deviceId}`,
-      reason: "device-removed",
-      strategy: "immediate",
-      timeoutMs: 30_000,
-    });
-    serverCtx.requestShutdown?.("device-removed");
-  };
-
   if (ctx.meshRuntime) {
     ctx.meshRuntime.bindFirstPartyConversationSurface({
       dispatch: ({ method, params, connection }) =>
@@ -2200,6 +2201,19 @@ async function runServerProcess(
       info: (msg) => console.log(chalk.dim(`[server] ${msg}`)),
       warn: (msg) => console.warn(chalk.yellow(`[server] ${msg}`)),
       error: (msg) => console.error(chalk.red(`[server] ${msg}`)),
+    },
+  });
+  anchorInternalStop.current = createAnchorInternalStopPort({
+    requestId: `anchor-internal-stop:${protocolDigest("AnchorInternalStopRequest", 1, {
+      homeId: lifecycleHomeId,
+      host: stopHost,
+    })}`,
+    timeoutMs: 30_000,
+    prepare: (request) => stopCoordinator.prepare(request),
+    requestShutdown: (reason) => {
+      const shutdown = serverCtx.requestShutdown;
+      if (!shutdown) throw new Error("Anchor Server shutdown is not bound");
+      shutdown(reason);
     },
   });
 
@@ -2409,7 +2423,13 @@ async function runServerProcess(
           scheduler?.listTasks().some((t) => !isInternal(t) && t.enabled) ?? false,
       });
       if (exit) {
-        serverCtx.requestShutdown?.("idle");
+        void requestAnchorInternalStop({ reason: "idle", strategy: "drain" })
+          .catch((error) => {
+            console.error(
+              chalk.red("[idle] durable Host stop failed; the same operation will retry"),
+              error instanceof Error ? error.message : String(error),
+            );
+          });
       }
     }, IDLE_CHECK_MS);
     idleTimer.unref();
