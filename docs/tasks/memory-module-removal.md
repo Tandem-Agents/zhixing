@@ -1,8 +1,8 @@
 # 当前记忆模块彻底剔除
 
-> 状态：执行中<br>
-> 当前检查点：M8：最终同基线全量门禁与五面对抗复核<br>
-> 完成度：7/8
+> 状态：待用户确认<br>
+> 当前检查点：M8：同基线验收与五面对抗已通过，等待用户验收<br>
+> 完成度：8/8
 > 职责：从知行当前产品与工程基线中完整移除现有记忆模块，同时保持历史对话持久化和全部非记忆能力不变。
 
 ## 一、任务目标
@@ -79,7 +79,7 @@
 - [x] **M5　删除分布式状态与 owner 协议面。** 移除 memory/people/journal 的 global query/result/mutation/commit domain、codec、invariant、唯一 owner、维护合同和 product-language；删除 `memory-domain:*` 资源类型、conversation/job assignment 签发、stager 验权、场景删除的 memory cleanup 以及 generation install/rebind/router/participant exact-set 中的 memory owner。保留其他全局域、assignment、AuthorityCapability、workscene 删除及对话清理语义；通用协议测试若以 memory 作样本，改绑仍存活域而不削弱断言。
 - [x] **M6　删除存储、接管与 core 记忆域。** 在所有消费者退场后，删除 Anchor memory adapter、legacy Markdown import/projection、cutover/维护状态、Profile/People/Journal store、逻辑身份、`getMemoryDir`/`getWorkSceneMemoryDir`、`core/src/memory`、根导出、`./memory` 子路径和构建入口。保留 workscene 根与会话目录。以首次启动、升级、恢复、转移和维护入口证明旧目录零创建、零扫描、零读写、零迁移；既有用户数据保持原样且完全惰性。
 - [x] **M7　收敛测试、结构门禁、制品与现行文档。** 删除只证明旧能力的测试、fixture、snapshot、golden 和示例；通用 owner、assignment、发布、安全测试中以 memory 作样本者改绑存活域并保持识别力。同步 contracts lint、S7 entry/registry、package exports、runtime baseline、server golden 和 tarball；删除现行记忆规格及其索引，把公开文档、distributed-runtime 三份核心文档和架构演进的当前结论改为无旧记忆模块基线。明确历史材料仍是历史；不得清洗归档、改写架构演进“原始构想”或让历史内容重新成为当前授权。
-- [ ] **M8　同基线验收与冷启动对抗。** 先完成失效闭包的直接验证，再冻结源码、测试、构建配置、现行产品/架构文档、构建产物和验收输入，执行最终门禁。随后抛开既有清单，从五个独立方向主动寻找反证：真实生产可达性；历史对话/上下文连续性；非记忆功能交界；旧数据与首次启动/升级/恢复/转移/维护副作用；公开协议、制品和现行文档。每一面登记攻击目标、实际动作、证据与结论；发现真实问题即恢复受影响 M 项和退出门为 `[ ]`，修复后整轮重做，直至同一未修改产品基线无未处置 P0/P1。
+- [x] **M8　同基线验收与冷启动对抗。** 先完成失效闭包的直接验证，再冻结源码、测试、构建配置、现行产品/架构文档、构建产物和验收输入，执行最终门禁。随后抛开既有清单，从五个独立方向主动寻找反证：真实生产可达性；历史对话/上下文连续性；非记忆功能交界；旧数据与首次启动/升级/恢复/转移/维护副作用；公开协议、制品和现行文档。每一面登记攻击目标、实际动作、证据与结论；发现真实问题即恢复受影响 M 项和退出门为 `[ ]`，修复后整轮重做，直至同一未修改产品基线无未处置 P0/P1。
 
 ## 五、工作包与状态维护规则
 
@@ -116,15 +116,15 @@
 
 只有以下条件在同一未修改产品基线上全部成立，技术工作才算完成：
 
-- [ ] M1～M8 全部为 `[x]`，执行记录与当前工作区事实一致。
-- [ ] 生产调用图中不存在现有 Profile、People、memory Journal、`memory`、`workscene_memory_query`、Memory Flush、post-adoption memory 或其等价改名能力。
-- [ ] core/tools/orchestrator/owner-kernel/runtime-host/server/CLI/distributed-runtime 中不存在旧公开导出、AgentRoleProfile 记忆工具声明、提示/typeahead、命令/RPC、global query/mutation、`memory-domain:*` 能力资源、owner/维护、迁移、reader/writer 或组合入口。
-- [ ] 默认安装、首次启动、升级、恢复、会话转移和维护均不创建、扫描、读取、写入或迁移旧记忆位置；既有用户数据未被删除或改写。
-- [ ] 历史对话持久化及其所有产品投影通过直接回归，存储事实、对外合同、恢复能力和连续性无可观察变化。
-- [ ] Skills、Rubrics、权限/信任、任务、工作场景、scheduler、Authority/Run Journal、其他工具及全部受影响非记忆功能通过交界回归，行为变化仅为旧记忆能力消失。
-- [ ] package exports、runtime baseline、S7/registry/server golden、帮助和 tarball 不再暴露旧能力；现行记忆规格已退场，其他现行文档不再授权旧合同或把旧模块列为待迁移对象，历史事实仍清楚隔离。
-- [ ] contracts typecheck/lint、runtime baseline/exports、根级 lint/test/build 和 canonical package check 全部通过，证据来自当前同一基线且无未处置 P0/P1。
-- [ ] M8 五面对抗有实际动作和可核查记录；没有以历史绿灯、mock、自报、文件清单或单纯关键词搜索代替生产事实。
+- [x] M1～M8 全部为 `[x]`，执行记录与当前工作区事实一致。
+- [x] 生产调用图中不存在现有 Profile、People、memory Journal、`memory`、`workscene_memory_query`、Memory Flush、post-adoption memory 或其等价改名能力。
+- [x] core/tools/orchestrator/owner-kernel/runtime-host/server/CLI/distributed-runtime 中不存在旧公开导出、AgentRoleProfile 记忆工具声明、提示/typeahead、命令/RPC、global query/mutation、`memory-domain:*` 能力资源、owner/维护、迁移、reader/writer 或组合入口。
+- [x] 默认安装、首次启动、升级、恢复、会话转移和维护均不创建、扫描、读取、写入或迁移旧记忆位置；既有用户数据未被删除或改写。
+- [x] 历史对话持久化及其所有产品投影通过直接回归，存储事实、对外合同、恢复能力和连续性无可观察变化。
+- [x] Skills、Rubrics、权限/信任、任务、工作场景、scheduler、Authority/Run Journal、其他工具及全部受影响非记忆功能通过交界回归，行为变化仅为旧记忆能力消失。
+- [x] package exports、runtime baseline、S7/registry/server golden、帮助和 tarball 不再暴露旧能力；现行记忆规格已退场，其他现行文档不再授权旧合同或把旧模块列为待迁移对象，历史事实仍清楚隔离。
+- [x] contracts typecheck/lint、runtime baseline/exports、根级 lint/test/build 和 canonical package check 全部通过，证据来自当前同一基线且无未处置 P0/P1。
+- [x] M8 五面对抗有实际动作和可核查记录；没有以历史绿灯、mock、自报、文件清单或单纯关键词搜索代替生产事实。
 
 满足后将本文状态更新为“待用户确认”，保留全部勾选与证据并停止。用户确认前不得删除本文、开始未来记忆方案或进入架构迁移实施。
 
@@ -139,7 +139,7 @@
 | M5 | 已完成 | `HEAD fce81f98`；差异标识 `memory-removal-M5-distributed-protocol-owner-20260828`。core 全局 query/result/staged mutation、严格 codec/invariant、共享 People DTO/store 转导与 `memory-domain:*` 资源均已退场；conversation/job 签发、stager、publish product-language、setup/router/generation participant 和恢复重绑不再承载 memory owner。273 项直接 Vitest、受影响包 typecheck/build、contract schema lint、canonical S7 21/21 与 registry golden 通过。 | 无 M5 遗留。M6 所属 adapter/store/legacy projection/cutover/path/core memory 子路径仍在源码中，但 adapter 已脱离 `GlobalStatePort` 与共享 discriminant，生产组合根、assignment、router、generation、participant 均不可达。 | M6：删除 adapter、legacy 接管、Profile/People/Journal store、路径、core memory 域及 package 子路径。 |
 | M6 | 已完成 | `HEAD 5e2fce52`；差异标识 `memory-removal-M6-storage-core-domain-20260828`。`core/src/memory` 的 adapter/store/legacy/cutover/Profile/People/Journal 域、根转导、`./memory` 子路径、tsup 入口及两项旧路径 helper 已退场；131 项直接 Vitest、core/CLI typecheck+build、runtime package exports 与隔离 sentinel fs 拦截证明旧目录零访问，frontmatter、workscene registry/conversations 和会话清理不回退。 | 无 M6 遗留。现行/历史文档、跨包 fixture/golden、tarball 与最终结构总收敛按 M7 边界处理；S7 对旧 adapter 的负向禁止断言继续保留。 | M7：收敛跨包测试/门禁/制品和现行文档。 |
 | M7 | 已完成 | `HEAD 8594806e`；差异标识 `memory-removal-M7-tests-gates-artifacts-docs-20260828-r2`。四处通用测试 fixture 与 S7 writable-owner 样本改绑存活域；现行规格、公开/架构授权和 distributed-runtime 旧合同退场。协调反证暴露的 16 处 workscene/安全边界/运行时当前旧语义已纠正；累计 94 项直接 Vitest、contracts 两项门禁、两轮 canonical S7 21/21 + registry golden、runtime baseline 与 177-entry core tarball 检查通过。 | 无 M7 遗留。DEPRECATED/HISTORICAL 正文、退役负向门禁、第三方事实及非产品同名按分类保留；M8 根级 lint/test/build、canonical package check 与五面对抗尚未运行。 | M8：冻结当前工作区，执行最终同基线门禁与五面对抗复核。 |
-| M8 | 待执行 | — | — | 当前检查点 |
+| M8 | 已完成 | `HEAD 231bd8ef`；差异标识 `memory-removal-M8-final-adversarial-20260828-r3`。八项 canonical 门禁在同一最终产品基线上通过；根级测试 602 文件、8647 项通过，五面对抗另取得 298 项代表性直接测试、真实 import/RPC/CLI 失败动作、隔离 sentinel 零访问和 Windows x64 tarball 干净安装证据。 | 无未处置 P0/P1。两项真实反证均已最窄修复并使旧轮证据作废：`protobufjs` 安装脚本审计版本漂移、历史规格仍列在当前索引。 | 等待用户验收；不得开始未来记忆方案或 AE-001 实施。 |
 
 M1 的分类闭包和 M8 的五面对抗记录均追加在本节，不创建第二份任务或回归文档。
 
@@ -350,7 +350,53 @@ M6 的生产实现、公开出口、路径、零副作用与非记忆保护闭�
 - 全仓语义反查覆盖 `packages/` 源码/测试、构建与注册脚本、公开 README、现行规格、distributed-runtime 三份核心文档和 AE-001，并同时搜索“记忆域/个人记忆/`me/`/journal/people”及中英文旧工具、RPC、owner/store/maintenance 表述。剩余命中均属于：S7/server/core 的退役负向门禁；进程内/RSS/模型窗口等非产品同名；OpenClaw/Hermes 等第三方事实；或顶部已明确 DEPRECATED/HISTORICAL 的 context v1.2/v2 与 persistent-service 正文。`context-architecture.md` 只移除已删除规格的失效链接，v2 正文未改；没有以历史命中冒充当前授权或批量清洗。
 - 只重验失效闭包：CLI RuntimeHost 直接测试 3/3，通过；Biome 对 11 个续做源文件/测试静态检查通过；完整 `pnpm s7:lint` 再次通过 production coverage、21/21 mutation tests 与 registry golden；最终 `git diff --check` 和语义残余检索通过。本轮只改变注释与测试标题，runtime baseline、core tarball、contracts 门禁及此前 91 项直接测试所验证的可执行、类型与公开出口事实未改变，按协调要求不重复；M8 根级门禁仍未运行。
 
+#### M8 冷启动反证触发的索引纠正
+
+- M8 第五面首次冷启动抽查发现：`persistent-service.md` 文件头虽已明确标为 `HISTORICAL`，规格 README 却仍把它列在当前“规格索引”并标“待审阅”，会让其中旧 Memory / Journal maintenance 正文继续呈现为当前候选规格。该反证使 M7、M8 与当轮冻结证据立即失效；状态曾按规则退回 M7、6/8。
+- 最窄纠正只把该入口从当前规格表移到“历史资料”，并显式反绑 distributed-runtime 现行合同；正文与其他历史材料未改。静态分段检查确认当前规格索引不再包含该入口，历史区恰一保留并标注 `HISTORICAL`；distributed-runtime 三份核心文档、AE-001 当前设计与规格索引的退役产品符号精确复核零命中，`git diff --check` 通过。M7 因而重新闭合；该现行索引变化使此前 M8 全部冻结证据作废，必须在新基线上从八项门禁与五面对抗完整重做。
+
 M7 的测试样本、结构门禁、registry/golden、构建制品和现行文档已与无旧记忆模块的当前代码事实闭合；M7 标记 `[x]`，完成度为 7/8，下一检查点是 M8。
+
+### M8 执行记录（2026-08-28）
+
+#### 冻结基线、反证与重验规则
+
+- 进场基线为 `HEAD 231bd8efc4f0c7f14025ea3900e1363e646abf6e`，工作区与索引为空。最终冻结基线为该 HEAD + `memory-removal-M8-final-adversarial-20260828-r3`：产品/验收输入差异只有 `scripts/npm-production-install-script-audit.json` 的真实安装版本同步和 `research/design/specifications/README.md` 的历史入口纠正；本文其余差异只记录状态与证据。最终门禁开始后没有再修改源码、测试、构建配置、产品文档或验收输入。
+- 第一轮 canonical package check 从 Windows x64 tarball 的干净 npm 安装取得真实反证：依赖解析得到 `protobufjs@7.6.6`，审计清单仍固定 `7.6.5`。追踪公开 Feishu 包到 `@larksuiteoapi/node-sdk@1.60.0` 的 `protobufjs ^7.2.6` 后，分别隔离打包 7.6.5/7.6.6；两版 `postinstall` 内容与 SHA-256 均相同（`5AF8463B97EE8E309B4A2111F9479BACDF0C180DE0CA0155527679B1FC6D9E6C`），脚本只读包清单、没有网络/系统/home 写入。审计清单最窄更新到实际 7.6.6，旧轮冻结证据全部作废。
+- 第二轮门禁通过后，第五面对抗又发现 `persistent-service.md` 虽已在文件头标为 `HISTORICAL`，仍被规格 README 列为当前“待审阅”规格。M7/M8 随即退回未完成；入口被移入“历史资料”并反绑现行 distributed-runtime 合同，旧 Memory/maintenance 正文未改写。第二轮证据再次全部作废，以下门禁与五面结论均来自修复后的第三轮同一冻结基线。
+
+#### 八项最终门禁
+
+| 顺序 | 实际命令 | 同基线结果 |
+| ---- | -------- | ---------- |
+| 1 | `pnpm contracts:typecheck` | 通过。 |
+| 2 | `pnpm contracts:lint` | 通过。 |
+| 3 | `pnpm runtime:baseline` | canonical baseline 完整执行至最后一项 server structure，受影响闭包 build、package exports、server behavior 3/3、CLI lifecycle 1/1 和 server structure 1/1 均无失败。 |
+| 4 | `pnpm runtime:package-exports` | 通过；存活子路径可导入，`./memory` 保持不可导出。 |
+| 5 | `pnpm lint` | 通过；含供应链脚本审计 4 个直接依赖/25 个已审查依赖、mesh TLS 16 个测试文件、secret boundary、canonical S7 21/21 + registry golden，以及 Biome 1540 个文件。 |
+| 6 | `pnpm test` | 通过；14 个包、602 个测试文件、8647 项通过，只有 1 文件/3 项显式 provider integration 跳过。维护 hook 抛错与 test LLM dump 均为测试预期 stderr，没有功能失败或资源型补跑。 |
+| 7 | `pnpm build` | 17 个 workspace 包全部通过；只有 core 既有 Rollup circular-chunk 警告。 |
+| 8 | `pnpm package:check` | 通过；3/3 structure precheck、16 个公开包 Windows x64 tarball 干净安装/消费、安装脚本审计与实际 `protobufjs@7.6.6` 一致。实际制品 hash 为 `d56119a7c6a2386b7f911e211496161cd148b3264652bfdce4e569a3dfe9d988`，隔离安装新增 232 个包，卸载路径移除 51 个包。 |
+
+八项命令严格串行且在最终冻结基线上各执行一次；没有通过重复全测收集日志或取得绿灯，也没有用单项脚本替代 canonical 门禁。
+
+#### 五面对抗
+
+| 面 | 试图推翻的结论与生产事实链 | 实际动作与观察 | 裁决 |
+| -- | -------------------------- | -------------- | ---- |
+| 真实生产可达性 | 从 `BUILTIN_TOOL_FACTORIES` / 默认 profile → `createAgentRuntime`、server `HandlerRegistry`、RuntimeHost extra tools、core 严格 global-state codec、setup-delivery owners 与 package exports 反查，尝试让旧工具、RPC、resource 或子路径经自定义配置和公开入口复活。 | built factories/names 的 exact-set 均只有 `read/write/edit/glob/grep/bash/load_skill/save_skill/admit_skill/web_fetch`；真实根 import `@zhixing/core/memory` 返回 `ERR_PACKAGE_PATH_NOT_EXPORTED`；61-method server registry 对 `memory.profileGet`、`memory.peopleList`、`memory.journalStats` 均返回 `-32601`；built CLI help 无旧命令，执行 `memory` 以 unknown command 退出 1。tools factory、custom profile、retired authority resource 与 server golden 共 7/7 项直接测试通过；源码精确命中只剩 retired 负向门禁。 | 没有工具工厂、profile、RPC、global owner/resource、runtime-host、CLI 或 package export 旁路；失败均发生在真实公开/生产边界，未发现等价改名能力。 |
+| 历史对话与上下文连续性 | 沿 transcript shard/repository → run commit/recovery → conversation/session → attention segment/summary → transfer/review → CLI/server projection，攻击最易因派生支路删除而断裂的损坏恢复、重复转移、clear/delete 原子性和响应丢失。 | core segment/repository/transcript/snapshot 103/103、owner transfer/run 65/65、CLI conversation/transfer/review 8/8、server clear/delete 原子性 3/3、CLI final-history/link 响应丢失 1/1，合计 180/180。覆盖原文自愈、segment/窗口、转移幂等与损坏拒绝、run 重驱、review、clear/delete 失败原子性和投影丢失恢复。 | 删除的只有长期记忆派生支路；存储事实、会话权威、恢复、上下文连续性和产品投影无可观察回退。 |
+| 非记忆交界 | 攻击 M2～M6 的共用边界：frontmatter、Skills/Rubrics、scene identity/trust/permission/lifecycle、app-state、scheduler、device/Authority/Run/Job Journal 和 workscene CRUD/cleanup，寻找“可编译但语义漂移”。 | core 9 个交界文件 89/89、orchestrator scene identity/trust 5/5、owner scheduler notices/global state 7/7、CLI RuntimeHost/workscene cleanup 9/9，合计 110/110。测试直接命中 producer/consumer，而非只检查类型存在。 | 中性 owner、场景身份、权限、调度、耐久日志和工作场景行为仍成立，没有把非记忆职责随旧模块删除。 |
+| 旧数据与副作用 | 在首次 authority 启停和真实 conversation cleanup 中，试图观察程序创建、枚举、打开、读取、写入、改名或删除旧 personal/workscene `me` 数据。 | `retired-memory-storage.test.ts` 在显式临时 home 预置两处 sentinel，并对 `node:fs/promises` 全部相关操作安装旧根拦截；1/1 通过，零 forbidden-root 命中、两处 sentinel 路径和内容原样，存活 conversation 目录按合同删除。临时 fixture 自动清理；未读取用户真实 home。 | 正式入口对旧位置零创建、零扫描、零读写、零迁移，且不会借会话/场景清理删除预置旧数据。 |
+| 公开协议、制品与现行文档 | 从 canonical registry/help、server RPC、S7/golden、实际 tarball 安装、package exports 和现行规格入口反查，尝试 import/call/command 协商旧能力，并检查历史正文是否仍被索引为当前授权。 | canonical package check 完成实际 Windows x64 干净安装；旧 import/RPC/CLI 真实失败动作如上，server golden 3/3。distributed-runtime 三份核心文档、AE-001 当前设计和规格 README 的退役产品合同精确检查零命中；AE-001 明确旧模块退场且 OWNWARD/重建/长期无记忆仍未决。context v1.2/v2 标 `DEPRECATED`，persistent-service 现位于“历史资料”并标 `HISTORICAL`。 | 公开协议、help、registry、制品和现行授权均不可见旧能力；历史正文保留但不会恢复当前授权，未来方案未被预建或替用户决定。 |
+
+五面对抗另取得 298 项代表性直接测试（7 + 180 + 110 + 1；server golden 已计入首面），与根级 8647 项测试和实际制品动作互为独立证据。关键词检索只用于在生产入口追踪后的反向核对，没有把“零命中”单独当作完成证明。
+
+#### 清理、遗留与最终结论
+
+- package-check、core pack 和 retired-memory-storage 使用的隔离临时目录均为零残留；进程核对未发现 package-check、pnpm/vitest/tsx/tsup/npm install helper 或子进程。最终 `git diff --check` 通过，索引为空；没有执行暂存、取消暂存、提交、历史改写、推送或发布。
+- 全过程未访问、扫描、迁移或删除用户真实 `ZHIXING_HOME`。两项成立反证都已在任务硬边界内最窄修复，并在新冻结基线上从八项门禁和五面对抗完整重做；最终没有未处置 P0/P1，也没有待用户裁决的产品冲突。
+- M1～M8、九项退出门、八项 canonical 门禁与五面对抗在最终同一基线上成立。任务完成度为 8/8，状态进入“待用户确认”；用户确认前停止，不开始未来记忆方案或 AE-001 架构迁移。
 
 ## 十、用户提示词
 

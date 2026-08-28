@@ -10,7 +10,6 @@
 |---|---------|------|------|
 | 001 | Anthropic Messages 适配器 | [anthropic-adapter.md](anthropic-adapter.md) | 待审阅 |
 | 002 | Provider 层演进路线 | [provider-layer-evolution.md](provider-layer-evolution.md) | 待审阅 |
-| 004 | 智能体运行时（常驻服务 + 智能协调） | [persistent-service.md](persistent-service.md) | 待审阅 |
 | 005 | 安全系统 | [security-system.md](security-system.md) | 待审阅 |
 | 006 | 安全确认交互 | [confirmation-ux.md](confirmation-ux.md) | 待审阅 |
 | 007 | 输入补全 | [input-typeahead.md](input-typeahead.md) | 待审阅 |
@@ -35,6 +34,7 @@
 
 | 主题 | 文档 | 说明 |
 |---|---|---|
+| 早期常驻服务 / 调度 / 投递 / Memory maintenance 方案 | [persistent-service.md](persistent-service.md) | `HISTORICAL`；现行生产合同以 distributed-runtime 执行规格及对应模块现行文档为准 |
 | 早期 prompt / `ZHIXING.md` 方案 | [archive/prompt-system.md](archive/prompt-system.md) | 当前 system prompt 以 `packages/orchestrator/src/runtime/system-prompt.ts`、[agent-runtime-lifecycle.md](agent-runtime-lifecycle.md) 与 [context-management-v3-redesign.md](context-management-v3-redesign.md) 为准；当前 `ZHIXING.md` guidance 机制见 [ZHIXING.md 分层 guidance 架构](../drafts/zhixing-md-layered-context-architecture.md) |
 
 ## 编写规范
