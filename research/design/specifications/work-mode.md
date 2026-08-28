@@ -4,7 +4,7 @@
 >
 > **范围**:本 spec 仅覆盖 REPL(cli)路径。server 模式的工作模式单独 spec —— 对齐 [runtime-session-hot-reload.md](runtime-session-hot-reload.md) 的边界处理(RuntimeSession 是 cli 专属抽象;server 触发与反馈不同)。
 
-> **当前权威接入补充**：下文早期以 runtime 持有可写 Registry、管理工具直接落盘或以 `set_workdir` post-turn 意图落盘的描述，在耐久 assignment 中已由分布式运行时合同取代。运行体只持 GlobalQuery、Artifact reader 和 assignment stager；workscene create/rename/setWorkdir/delete 只进入当前 MutationBatch，工具只说明本轮成功后生效；enter/exit 继续是合法的 turn-boundary 控制。锚点 adapter 在 owner 提交后唯一物化，提交前不得切换 runtime、暴露主机路径或声称已应用。旧记忆域不再是 WorkScene 的组成部分。
+> **当前权威接入补充**：下文早期以 runtime 持有可写 Registry、管理工具直接落盘或以 `set_workdir` post-turn 意图落盘的描述，在耐久 assignment 中已由分布式运行时合同取代。运行体只持 GlobalQuery、Artifact reader 和 assignment stager；workscene create/rename/setWorkdir/delete 只进入当前 MutationBatch，工具只说明本轮成功后生效；enter/exit 继续是合法的 turn-boundary 控制。锚点 adapter 在 owner 提交后唯一物化，提交前不得切换 runtime、暴露主机路径或声称已应用。当前正式基线不包含个人记忆域、工作场景记忆域或两域单向阀；WorkScene 只承担身份、会话与可选工作目录边界。未来记忆方案尚未决定，不由本文预设。
 
 ## 总览
 
@@ -189,7 +189,7 @@ private createAgent(
 | worksceneIdentity | 不传 | `{ sceneId }` |
 | profile | `mainProfile()` | `powerProfile(scene)` |
 
-**无 workdir power 文件作用域隔离(by-construction 不变量,须焊死)**:create-agent-runtime 现状在 runAgentLoop 装配处 `workingDirectory: workspace.path ?? process.cwd()` —— workspace 空时兜底进程 cwd(很可能 = 用户启动 cli 处 / main 工作区)。无 workdir 的 power 若走此兜底则文件工具串到 main 工作区,破单向阀。须**两处一起切断**(只改装配层无效:传 `{path:undefined,source:"none"}` 后该兜底 `undefined ?? cwd` 仍生效):① 装配层对无 workdir power 标 `source:"none"`、跳 `resolveWorkspace`;② 该 `workingDirectory` 兜底改条件式 —— `source:"none"` 时 `workingDirectory: undefined`,不 `?? process.cwd()`。**主防线是无 workdir power 不装文件工具(见 powerProfile 二分),根本无文件操作面**;此兜底切断是纵深防御 —— 即使 Task 子 agent 等其他路径触发 workspace 解析,也**物理上不可能落进程 cwd / main 工作区 / workscene 系统数据目录**。装配期切断,不靠运行时检查。
+**无 workdir power 文件作用域隔离(by-construction 不变量,须焊死)**:create-agent-runtime 现状在 runAgentLoop 装配处 `workingDirectory: workspace.path ?? process.cwd()` —— workspace 空时兜底进程 cwd(很可能 = 用户启动 cli 处 / main 工作区)。无 workdir 的 power 若走此兜底则文件工具串到 main 工作区,破坏文件作用域隔离。须**两处一起切断**(只改装配层无效:传 `{path:undefined,source:"none"}` 后该兜底 `undefined ?? cwd` 仍生效):① 装配层对无 workdir power 标 `source:"none"`、跳 `resolveWorkspace`;② 该 `workingDirectory` 兜底改条件式 —— `source:"none"` 时 `workingDirectory: undefined`,不 `?? process.cwd()`。**主防线是无 workdir power 不装文件工具(见 powerProfile 二分),根本无文件操作面**;此兜底切断是纵深防御 —— 即使 Task 子 agent 等其他路径触发 workspace 解析,也**物理上不可能落进程 cwd / main 工作区 / workscene 系统数据目录**。装配期切断,不靠运行时检查。
 
 ### workscene agent 工具(走 assembly 统一路径 + IWorkModeController 接口)
 
