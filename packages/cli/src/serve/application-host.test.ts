@@ -41,10 +41,25 @@ describe("persistent ApplicationHost outer lifecycle", () => {
 
         await host.run();
 
-        expect(harness.runRoleTopology).toHaveBeenCalledOnce();
-        expect(harness.configuration).toEqual({ roles: topology.roles });
-        expect(Object.isFrozen(harness.configuration)).toBe(true);
-        expect(Object.isFrozen(harness.configuration?.roles)).toBe(true);
+        expect(harness.roleInvocations()).toBe(1);
+        if (topology.roles.includes("anchor")) {
+          expect(harness.rolePlan).toMatchObject({
+            host: "anchor-host",
+            loadExecutor: topology.roles.includes("executor"),
+          });
+        } else {
+          expect(harness.rolePlan).toBeUndefined();
+        }
+        expect(harness.roleBootstrap?.mesh.roles).toEqual(topology.roles);
+        expect(harness.importAnchorRole).toHaveBeenCalledTimes(
+          topology.roles.includes("anchor") ? 1 : 0,
+        );
+        expect(harness.importExecutorRole).toHaveBeenCalledTimes(
+          topology.roles.includes("anchor") ? 0 : 1,
+        );
+        expect(harness.importExecutorModule).toHaveBeenCalledTimes(
+          topology.roles.includes("executor") ? 1 : 0,
+        );
         expect(harness.meshStops[0]).toHaveBeenCalledOnce();
         expect(harness.releaseLease).toHaveBeenCalledTimes(
           topology.roles.includes("executor") ? 1 : 0,
@@ -53,7 +68,13 @@ describe("persistent ApplicationHost outer lifecycle", () => {
           "capacity",
           "mesh:1",
           ...(topology.roles.includes("executor") ? ["lease"] : []),
-          "role",
+          ...(topology.roles.includes("anchor")
+            ? ["load:anchor"]
+            : ["load:executor-role"]),
+          ...(topology.roles.includes("executor")
+            ? ["load:executor-module"]
+            : []),
+          topology.roles.includes("anchor") ? "role:anchor" : "role:executor",
           "stop:1",
           ...(topology.roles.includes("executor") ? ["release-lease"] : []),
         ]);
@@ -77,7 +98,7 @@ describe("persistent ApplicationHost outer lifecycle", () => {
     expect(recoveryNotice).toHaveBeenCalledOnce();
     expect(harness.runRecoveryRoot).toHaveBeenCalledOnce();
     expect(harness.prepareMesh).toHaveBeenCalledTimes(2);
-    expect(harness.runRoleTopology).toHaveBeenCalledOnce();
+    expect(harness.roleInvocations()).toBe(1);
     expect(harness.meshStops).toHaveLength(2);
     expect(harness.meshStops[0]).toHaveBeenCalledOnce();
     expect(harness.meshStops[1]).toHaveBeenCalledOnce();
@@ -89,7 +110,9 @@ describe("persistent ApplicationHost outer lifecycle", () => {
       "stop:1",
       "mesh:2",
       "lease",
-      "role",
+      "load:anchor",
+      "load:executor-module",
+      "role:anchor",
       "stop:2",
       "release-lease",
     ]);
@@ -109,7 +132,7 @@ describe("persistent ApplicationHost outer lifecycle", () => {
     ).run()).rejects.toBe(failure);
 
     expect(harness.prepareMesh).toHaveBeenCalledOnce();
-    expect(harness.runRoleTopology).not.toHaveBeenCalled();
+    expect(harness.roleInvocations()).toBe(0);
     expect(harness.meshStops[0]).toHaveBeenCalledOnce();
     expect(harness.releaseLease).not.toHaveBeenCalled();
   });
@@ -128,7 +151,7 @@ describe("persistent ApplicationHost outer lifecycle", () => {
     ).run()).rejects.toBe(failure);
 
     expect(harness.prepareMesh).toHaveBeenCalledTimes(2);
-    expect(harness.runRoleTopology).not.toHaveBeenCalled();
+    expect(harness.roleInvocations()).toBe(0);
     expect(harness.meshStops[0]).toHaveBeenCalledOnce();
     expect(harness.meshStops[1]).not.toHaveBeenCalled();
     expect(harness.releaseLease).not.toHaveBeenCalled();
@@ -146,7 +169,7 @@ describe("persistent ApplicationHost outer lifecycle", () => {
       harness.dependencies,
     ).run()).rejects.toBe(failure);
 
-    expect(harness.runRoleTopology).toHaveBeenCalledOnce();
+    expect(harness.roleInvocations()).toBe(1);
     expect(harness.meshStops[0]).toHaveBeenCalledOnce();
     expect(harness.releaseLease).toHaveBeenCalledOnce();
   });
@@ -182,7 +205,70 @@ describe("persistent ApplicationHost outer lifecycle", () => {
     await host.run();
     await expect(host.run()).rejects.toThrow("can only run once");
 
-    expect(harness.runRoleTopology).toHaveBeenCalledOnce();
+    expect(harness.roleInvocations()).toBe(1);
+    expect(harness.meshStops[0]).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { roles: ["anchor"] as const, failure: "anchor" as const },
+    { roles: ["anchor", "executor"] as const, failure: "executor-module" as const },
+    { roles: ["executor"] as const, failure: "executor-role" as const },
+  ])(
+    "starts no role and releases outer resources when $failure loading fails",
+    async ({ roles, failure }) => {
+      const loadFailure = new Error(`${failure} failed`);
+      const harness = createHarness({
+        roles,
+        moduleFailure: failure,
+        moduleFailureError: loadFailure,
+      });
+
+      await expect(new PersistentApplicationHost(
+        createInput("foreground"),
+        harness.dependencies,
+      ).run()).rejects.toBe(loadFailure);
+
+      expect(harness.roleInvocations()).toBe(0);
+      expect(harness.meshStops[0]).toHaveBeenCalledOnce();
+      expect(harness.releaseLease).toHaveBeenCalledTimes(
+        roles.includes("executor") ? 1 : 0,
+      );
+    },
+  );
+
+  it.each([
+    { roles: [] as const },
+    { roles: ["surface"] as const },
+  ])("loads no role component for disabled roles $roles", async ({ roles }) => {
+    const harness = createHarness({ roles });
+
+    await new PersistentApplicationHost(
+      createInput("foreground"),
+      harness.dependencies,
+    ).run();
+
+    expect(harness.importAnchorRole).not.toHaveBeenCalled();
+    expect(harness.importExecutorRole).not.toHaveBeenCalled();
+    expect(harness.importExecutorModule).not.toHaveBeenCalled();
+    expect(harness.roleInvocations()).toBe(0);
+    expect(harness.meshStops[0]).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { roles: ["anchor", "anchor"] as const },
+    { roles: ["unknown"] as never },
+  ])("rejects invalid roles $roles before loading a role component", async ({ roles }) => {
+    const harness = createHarness({ roles });
+
+    await expect(new PersistentApplicationHost(
+      createInput("foreground"),
+      harness.dependencies,
+    ).run()).rejects.toThrow("当前拓扑无法启动角色组合");
+
+    expect(harness.importAnchorRole).not.toHaveBeenCalled();
+    expect(harness.importExecutorRole).not.toHaveBeenCalled();
+    expect(harness.importExecutorModule).not.toHaveBeenCalled();
+    expect(harness.roleInvocations()).toBe(0);
     expect(harness.meshStops[0]).toHaveBeenCalledOnce();
   });
 });
@@ -213,6 +299,8 @@ function createHarness(input: {
   readonly secondBootstrapFailure?: Error;
   readonly roleFailure?: Error;
   readonly meshStopFailure?: Error;
+  readonly moduleFailure?: "anchor" | "executor-role" | "executor-module";
+  readonly moduleFailureError?: Error;
 }) {
   const events: string[] = [];
   const meshStops: ReturnType<typeof vi.fn>[] = [];
@@ -226,7 +314,8 @@ function createHarness(input: {
     ? [createMesh(false), createMesh(true)]
     : [createMesh(true)];
   let meshIndex = 0;
-  let configuration: { readonly roles: readonly DeviceRole[] } | undefined;
+  let rolePlan: unknown;
+  let roleBootstrap: { readonly mesh: MeshRuntimeBootstrap } | undefined;
 
   const prepareMesh = vi.fn(async () => {
     const index = meshIndex++;
@@ -240,10 +329,31 @@ function createHarness(input: {
     events.push("recovery");
     if (input.recoveryFailure) throw input.recoveryFailure;
   });
-  const runRoleTopology = vi.fn(async (nextConfiguration) => {
-    configuration = nextConfiguration;
-    events.push("role");
+  const runAnchorRole = vi.fn(async (_options, bootstrap, _executor, plan) => {
+    roleBootstrap = bootstrap;
+    rolePlan = plan;
+    events.push("role:anchor");
     if (input.roleFailure) throw input.roleFailure;
+  });
+  const runExecutorRole = vi.fn(async (_options, bootstrap) => {
+    roleBootstrap = bootstrap;
+    events.push("role:executor");
+    if (input.roleFailure) throw input.roleFailure;
+  });
+  const importAnchorRole = vi.fn(async () => {
+    events.push("load:anchor");
+    if (input.moduleFailure === "anchor") throw input.moduleFailureError;
+    return { runServeCommand: runAnchorRole };
+  });
+  const importExecutorRole = vi.fn(async () => {
+    events.push("load:executor-role");
+    if (input.moduleFailure === "executor-role") throw input.moduleFailureError;
+    return { runExecutorRole };
+  });
+  const importExecutorModule = vi.fn(async () => {
+    events.push("load:executor-module");
+    if (input.moduleFailure === "executor-module") throw input.moduleFailureError;
+    return {} as never;
   });
 
   const dependencies: PersistentApplicationHostDependencies<Record<string, never>> = {
@@ -266,8 +376,9 @@ function createHarness(input: {
     defineLocalWorkspaceIdentity: ((roles, lease) => roles.includes("executor")
       ? { kind: "executor", lease }
       : { kind: "non-executor" }) as never,
-    roleLoaders: {} as never,
-    runRoleTopology: runRoleTopology as never,
+    importAnchorRole,
+    importExecutorRole,
+    importExecutorModule,
   };
 
   return {
@@ -277,9 +388,15 @@ function createHarness(input: {
     prepareMesh,
     releaseLease,
     runRecoveryRoot,
-    runRoleTopology,
-    get configuration() {
-      return configuration;
+    importAnchorRole,
+    importExecutorRole,
+    importExecutorModule,
+    roleInvocations: () => runAnchorRole.mock.calls.length + runExecutorRole.mock.calls.length,
+    get rolePlan() {
+      return rolePlan;
+    },
+    get roleBootstrap() {
+      return roleBootstrap;
     },
   };
 

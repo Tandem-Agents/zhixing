@@ -95,14 +95,8 @@ describe("distributed runtime structural gates", () => {
     const serveCommandRefs = await readModuleReferences(
       "packages/cli/src/serve/command.ts",
     );
-    const topologyCommandRefs = await readModuleReferences(
-      "packages/cli/src/serve/topology-command.ts",
-    );
-    const anchorRoleRefs = await readModuleReferences(
-      "packages/cli/src/serve/anchor-role.ts",
-    );
-    const executorRoleRefs = await readModuleReferences(
-      "packages/cli/src/serve/executor-role.ts",
+    const applicationHostRefs = await readModuleReferences(
+      "packages/cli/src/serve/application-host.ts",
     );
     const executorRuntimeRefs = await readModuleReferences(
       "packages/cli/src/serve/executor-role-runtime.ts",
@@ -111,27 +105,19 @@ describe("distributed runtime structural gates", () => {
       kind: "import",
       specifier: "@zhixing/executor",
     });
-    expect(topologyCommandRefs).toContainEqual({
+    expect(applicationHostRefs).toContainEqual({
       kind: "dynamic-import",
       specifier: "@zhixing/executor",
     });
-    expect(topologyCommandRefs).toContainEqual({
-      kind: "dynamic-import",
-      specifier: "./anchor-role.js",
-    });
-    expect(anchorRoleRefs).toContainEqual({
+    expect(applicationHostRefs).toContainEqual({
       kind: "dynamic-import",
       specifier: "./command.js",
     });
-    expect(anchorRoleRefs).not.toContainEqual({
-      kind: "import",
-      specifier: "./command.js",
-    });
-    expect(executorRoleRefs).toContainEqual({
+    expect(applicationHostRefs).toContainEqual({
       kind: "dynamic-import",
       specifier: "./executor-role-runtime.js",
     });
-    expect(executorRoleRefs).not.toContainEqual({
+    expect(applicationHostRefs).not.toContainEqual({
       kind: "import",
       specifier: "./executor-role-runtime.js",
     });

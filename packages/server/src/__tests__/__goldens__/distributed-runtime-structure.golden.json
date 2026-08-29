@@ -1336,13 +1336,13 @@
     },
     {
       "kind": "type-import",
-      "references": 3,
+      "references": 2,
       "sourceZone": "cli/serve",
       "target": "cli/runtime"
     },
     {
       "kind": "type-import",
-      "references": 135,
+      "references": 137,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1354,13 +1354,13 @@
     },
     {
       "kind": "type-import",
-      "references": 3,
+      "references": 2,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/mcp"
     },
     {
       "kind": "type-import",
-      "references": 59,
+      "references": 60,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/mesh"
     },
@@ -1384,7 +1384,7 @@
     },
     {
       "kind": "type-import",
-      "references": 7,
+      "references": 8,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/providers"
     },
@@ -1408,7 +1408,7 @@
     },
     {
       "kind": "type-import",
-      "references": 11,
+      "references": 12,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/server"
     },

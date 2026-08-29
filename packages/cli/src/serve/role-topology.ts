@@ -26,7 +26,6 @@ const VALID_DEVICE_ROLES: ReadonlySet<string> = new Set([
 export interface ServeRoleConfiguration {
   readonly roles: readonly DeviceRole[];
 }
-
 export const DEFAULT_LOCAL_ROLE_CONFIGURATION = {
   roles: ["anchor", "executor"],
 } as const satisfies ServeRoleConfiguration;
@@ -60,21 +59,6 @@ export interface ServeBootstrapContext {
   readonly secretStore: SecretStorePort & CredentialStoreCoordinator;
   readonly startup: Extract<StartupCheckResult, { readonly kind: "ready" }>;
   readonly localWorkspaceIdentity: LocalWorkspaceAssemblyIdentity;
-}
-
-export interface ServiceHostModule<Options> {
-  run(
-    options: Options,
-    bootstrap: ServeBootstrapContext,
-    executor: ExecutorRoleModule | undefined,
-    plan: ServeTopologyPlan,
-  ): Promise<void>;
-}
-
-export interface ServeRoleLoaders<Options> {
-  readonly anchorHost: () => Promise<ServiceHostModule<Options>>;
-  readonly executorHost: () => Promise<ServiceHostModule<Options>>;
-  readonly executor: () => Promise<ExecutorRoleModule>;
 }
 
 export type ServeHostKind = "disabled" | "anchor-host" | "executor-host";
@@ -119,23 +103,4 @@ export function planServeTopology(
       ? ["anchor-host", "anchor-local-executor"]
       : ["anchor-host"],
   };
-}
-
-/** 先完成角色规划与按需模块加载，再允许产品宿主产生运行时副作用。 */
-export async function runConfiguredServeTopology<Options>(
-  configuration: ServeRoleConfiguration,
-  loaders: ServeRoleLoaders<Options>,
-  options: Options,
-  bootstrap: ServeBootstrapContext,
-): Promise<void> {
-  const plan = planServeTopology(configuration);
-  if (plan.host === "disabled") return;
-
-  const [host, executor] = await Promise.all([
-    plan.host === "anchor-host" ? loaders.anchorHost() : loaders.executorHost(),
-    plan.loadExecutor
-      ? loaders.executor()
-      : Promise.resolve(undefined),
-  ]);
-  await host.run(options, bootstrap, executor, plan);
 }

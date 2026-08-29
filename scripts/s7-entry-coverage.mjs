@@ -1141,6 +1141,7 @@ export function inspectManagedHostAssembly(records) {
   const executorInternalStop = byPath.get("packages/cli/src/serve/executor-internal-stop.ts");
   const topology = byPath.get("packages/cli/src/serve/topology-command.ts");
   const applicationHost = byPath.get("packages/cli/src/serve/application-host.ts");
+  const roleTopology = byPath.get("packages/cli/src/serve/role-topology.ts");
   const connection = byPath.get("packages/cli/src/runtime/core-host-connection.ts");
   const repl = byPath.get("packages/cli/src/repl.ts");
   const surfaceLink = byPath.get("packages/cli/src/runtime/surface-core-host-link.ts");
@@ -1159,7 +1160,7 @@ export function inspectManagedHostAssembly(records) {
     !reconciler || !service || !serviceRuntime || !bootstrap || !pairing || !config ||
     !command || !accessSurface || !accessSurfaces || !assemblyLifecycle ||
     !executorRoleLifecycle || !executorServerLifecycle || !anchorHostShell ||
-    !anchorInternalStop || !executorRoot || !executorInternalStop || !topology || !applicationHost || !connection || !repl || !surfaceLink || !secrets || !status ||
+    !anchorInternalStop || !executorRoot || !executorInternalStop || !topology || !applicationHost || !roleTopology || !connection || !repl || !surfaceLink || !secrets || !status ||
     !publicStatus || !statusRoute || !scheduler || !manifest || !serverContext || !serverShutdown ||
     !serverLifecycle || !server || !serverIndex
   ) return ["managed host production assembly sources are missing"];
@@ -1520,7 +1521,25 @@ export function inspectManagedHostAssembly(records) {
     topology.includes("runRecoveryRootEstablishmentTopology(") ||
     topology.includes("acquireExecutorLocalWorkspaceOwner(") ||
     !applicationHost.includes("export class PersistentApplicationHost<Options>") ||
-    !applicationHost.includes("await this.#dependencies.runRoleTopology(") ||
+    count(applicationHost, "await this.#runRoleComponents(") !== 1 ||
+    count(applicationHost, 'importAnchorRole: () => import("./command.js")') !== 1 ||
+    count(applicationHost, 'importExecutorRole: () => import("./executor-role-runtime.js")') !== 1 ||
+    count(applicationHost, 'importExecutorModule: () => import("@zhixing/executor")') !== 1 ||
+    count(applicationHost, ".runServeCommand(") !== 1 ||
+    count(applicationHost, ".runExecutorRole(") !== 1 ||
+    count(applicationHost, "const [anchorRole, executor] = await Promise.all([") !== 1 ||
+    count(applicationHost, "const [executorRole, executor] = await Promise.all([") !== 1 ||
+    count(applicationHost, 'if (plan.host === "anchor-host")') !== 1 ||
+    applicationHost.includes("runRoleTopology") ||
+    applicationHost.includes("roleLoaders") ||
+    applicationHost.includes("runConfiguredServeTopology") ||
+    applicationHost.includes("./anchor-role.js") ||
+    applicationHost.includes("./executor-role.js") ||
+    roleTopology.includes("runConfiguredServeTopology") ||
+    roleTopology.includes("ServiceHostModule") ||
+    roleTopology.includes("ServeRoleLoaders") ||
+    byPath.has("packages/cli/src/serve/anchor-role.ts") ||
+    byPath.has("packages/cli/src/serve/executor-role.ts") ||
     !command.includes('processMode !== "managed"')
   ) failures.push("managed host service adapter, preflight or unique composition root drifted");
   if (
@@ -1977,7 +1996,7 @@ export function inspectRecoveryBackupAssembly(records) {
   const workspaceAdmission = applicationHost.indexOf(
     "await this.#dependencies.acquireLocalWorkspaceOwner(",
   );
-  const normalTopology = applicationHost.indexOf("await this.#dependencies.runRoleTopology(");
+  const normalTopology = applicationHost.indexOf("await this.#runRoleComponents(");
   if (
     !bootstrap.includes("!!trust.recoveryRootPublicKey !== !!trust.recoveryBackupPublicKey") ||
     limitedBranch < 0 ||

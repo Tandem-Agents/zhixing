@@ -1,8 +1,8 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A1：收束 ApplicationHost 生命周期边界<br>
-> 完成度：1/8<br>
+> 当前检查点：等待协调者复核 A1；不得进入 A2<br>
+> 完成度：2/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
 
@@ -96,7 +96,7 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 每项 `[x]` 表示该检查点的生产责任、全部直接消费端、旧路径删除、保护性回归、必要文档和当前基线证据已经同时闭合。只移动文件、增加接口、通过编译或完成局部测试不得勾选。
 
 - [x] **A0　冻结最小迁移决策基线。** 完整读取 AE-001 和验证手册；复用已接受的生产角色、生命周期、公开合同、持久记录与制品 exact-set，补齐一张紧凑的“当前责任 → 目标责任 → A 项/迁移顺序 → 保护证据”决策图，以及首批迁移所需的 Kernel/RuntimeHost/拓扑、依赖和验证映射。A0 只回答“从哪里开始、责任如何转移、用什么证明没有回退”，不预先穷举后续每条领域行为。所有正式能力仍必须在真正改变其责任的工作包中完成即时双向取证、直接回归和旧路径删除；未改变当前迁移裁决的未知不得阻塞 A0。退出证据是足以直接派发 A1/A2 且没有未归属生产角色或迁移责任的决策基线，不是搜索结果、文件清单或全产品百科。
-- [ ] **A1　收束 ApplicationHost 生命周期边界。** 从现有 `access-surface`、启动回滚、清理注册和关闭链形成每个生产进程唯一的 Host 对象与类型化组件贡献；明确 create/start/open、换代、拒新、排空、close 和失败补偿，组件只管理自身内部资源。配置来源和秘密材料继续由专责 Provider 拥有，Host 只冻结并下发组件所需的最小只读投影，领域、Kernel 和 Surface 不读取来源。Host 可以暂时委托旧领域实现，但不得新增产品逻辑、领域状态、运行期服务定位或第二组合根。以完整启动失败、部分启动回滚、并发关闭、在途排空和零资源残留直接证明生命周期。
+- [x] **A1　收束 ApplicationHost 生命周期边界。** 从现有 `access-surface`、启动回滚、清理注册和关闭链形成每个生产进程唯一的 Host 对象与类型化组件贡献；明确 create/start/open、换代、拒新、排空、close 和失败补偿，组件只管理自身内部资源。配置来源和秘密材料继续由专责 Provider 拥有，Host 只冻结并下发组件所需的最小只读投影，领域、Kernel 和 Surface 不读取来源。Host 可以暂时委托旧领域实现，但不得新增产品逻辑、领域状态、运行期服务定位或第二组合根。以完整启动失败、部分启动回滚、并发关闭、在途排空和零资源残留直接证明生命周期。
 - [ ] **A2　用一条真实垂直切片证明领域模型。** 依据 A0 的依赖事实选择边界最小而行为完整的现有领域，先记录选择理由和明确不做；让该领域同时拥有自己的 Command/Query/Event 合同、应用用例、规则与状态机、领域权威适配、面向 Kernel 的 Run Envelope 投影、面向表面的投影和生命周期贡献。至少让一个真实现有表面经进程内或 RPC binding 调用同一应用端口，迁移后立即删除旧写入口。本项不得预建全局领域框架或为了模板美观拆包。
 - [ ] **A3　建立组合式 Product API 与纯绑定。** 只从 A2 已证明的领域合同建立 Product API Catalog、dispatcher 和进程内/RPC binding 模式；Catalog 只组合，不拥有业务类型、规则、状态或写入权。Command/Query/Fact Event/Progress Event 的语义与身份清楚，瞬时进展不能成为恢复事实；Progress Event 必须带运行身份与顺序，消费者发现缺口后重新 Query 权威投影。让 A2 领域的全部现有 Server/RPC、CLI、Channel 入口只承担各自实际存在的认证、连接、编解码、调用、订阅、错误映射和呈现；本机路径复用同一应用语义，但不被迫经过网络或无价值序列化。其他领域只能在 A5 完成自身垂直迁移时接入该模式，不得由 A3 先建立空合同或平行入口。
 - [ ] **A4　封闭 Intelligence Kernel。** 基于全部现有运行形态冻结最小 Run Envelope / Event / Terminal 合同和 Conformance Suite；收窄 `AgentRuntime` 公共面，隐藏安全管线、权限存储、工作区解析和宿主管理内部对象。产品对象到模型输入、运行事件到产品结果均经显式投影；模型输出只能形成提议、证据和运行终态，必须经领域决定与权威提交后才成为产品事实。A4 只负责 Kernel 合同及其边界：把 Workscene、Schedule 等产品特有装配移出 RuntimeHost，交给当前唯一产品责任者生成信封；尚未完成 A5 的领域可以通过登记退场点的最短单向端口提供投影，但不得在 A4 复制其状态机、权威或 Product API。RuntimeHost 只消费通用运行合同，对话、任务、本机、远端、取消、失败和资源释放行为必须等价。
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `410ace9b`；A1-01～A1-10 已由协调者独立复核并提交 |
-| 当前 A 项 | A1：收束 ApplicationHost 生命周期边界 |
-| 活跃工作包 | A1-11：Host shell 七项资源及 activation-failure/discovery 并发纠正已收束；最窄验证完成，等待协调者独立复核 |
-| 下一责任链 | 协调者先复核 A1-11 的真实 activation owner、同 generation discovery 释放、同 endpoint 接管、诚实终态与 golden 差异；接受后独立核对 `A1-HOST-DELEGATE-01` 的唯一退场条件，不进入 A2 |
-| 打开的单向桥 | `A1-HOST-DELEGATE-01`：唯一 `PersistentApplicationHost` 已拥有外层 bootstrap/lease/terminal 生命周期，但仍以类型化 loader 单向委托既有 Anchor/Executor role root；唯一事实与产品装配仍在既有 root，退场上限为 A1，其后续包不得形成第二 Host 或双 owner |
-| 已失效证据 | 无当前未恢复证据；A1-10 中依赖旧 shutdown-chain 的顺序证据已由 A1-11 的 Host shell 直接反例、lifecycle golden 与 S7 重取恢复。A1-07 的 12 项 pre-server 与 A1-10 的 6 项 runtime contribution identity/condition 未漂移；A1-09 与其他未改输入证据继续有效 |
+| 已接受基线 | `686822e0`；A1-01～A1-11 已由协调者独立复核并提交 |
+| 当前 A 项 | A1 已在当前工作区闭合，等待协调者独立复核；不得进入 A2 |
+| 活跃工作包 | A1-12：`A1-HOST-DELEGATE-01` 已退场；三拓扑由唯一 `PersistentApplicationHost` 直接规划、按需装入并调用真实 role component，最窄验证完成，等待协调者复核 |
+| 下一责任链 | 协调者冷启动复核 A1-12 的单一持久组合根、拓扑隔离、模块装入失败补偿、旧桥零残留与 A1-01～A1-12 阶段退出门；接受后再派发 A2 Skill Catalog 首个垂直切片 |
+| 打开的单向桥 | 无；`A1-HOST-DELEGATE-01` 已由 A1-12 删除，未以 loader bag、通用 component registry 或改名 wrapper 保留 |
+| 已失效证据 | 无当前未恢复证据；A1-12 已重取 ApplicationHost/role-topology/topology-command、结构图、S7 与 CLI build。A1-01 依赖旧委托 runner 的直接测试已由本包唯一 Host 证据取代；A1-02～A1-11 未改内部生命周期输入继续有效 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1394,14 +1394,23 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 诚实终态与旧路退场：终止操作先停 idle/heartbeat、等待在途 idle check 并尝试 `markStopping`；随后在旧 endpoint 仍占有 OS 端口时校验并删除本 process generation 的 PID/port，令合法 successor 无法落入“校验后、删除前”窗口，再关闭当前 binding/running server。只有 endpoint close 真实成功才尝试 `markStopped` 与 state/ready cleanup；若 endpoint close 失败，则不伪造 stopped，并用冻结 generation 恢复仍存活 endpoint 的 discovery。发现发布部分失败也只删除与本 generation 全等的记录，不删除 foreign generation。`markStopping`、state、discovery、checkpoint 或 log 的单项失败都不截断其他安全动作，失败以 `AggregateError` 保留。`command.ts` 中本 exact-set 的 direct registration、可选引用袋、idle direct timer/fallback 及 `registerCoreCleanup/registerTailCleanup` 全部删除，`shutdown-chain.ts` 与其专属测试退役。canonical catalog 将原 9 个散落 Anchor shell cleanup descriptor 收束为唯一 `cleanup:anchor-host:server:hostShell.stop`；无 lifecycle owner 的通用注入模式不再冒充 Anchor production owner。
 - 直接与保护证据：CLI 新 Host shell、production order 与 lifecycle golden 为 3 文件 15/15；A1-07/A1-10 未改贡献的 assembly、runtime、surface、rollback 保护为 4 文件 18/18，合计 CLI 7 文件 33/33。Server 的 bound activation、lifecycle、state、cleanup registry 与 log lifecycle 为 5 文件 76/76；最后改动的 lifecycle 单文件另行重取 15/15，不重复计入 76。反例覆盖七项 exact-set、duplicate/foreign/missing/late，同 handle rollback/normal/repeat，异组 endpoint，gate 失败、真实 loopback 503→200→端口释放，idle in-flight settle，endpoint 失败禁止 stopped/cleanup 并恢复 discovery、单项失败继续与同 generation release。
 - 结构、构建与失效：S7 现机械取得七项 shell 资源与唯一 cleanup descriptor，要求 production root 的取得/接管/发布、同 endpoint provenance、idle settle、endpoint-terminal 条件和 discovery generation 全部成立；反向 mutation 能检出无条件 stopped、不等 idle check、丢 lifecycle owner、丢 discovery publication 和恢复 direct ready。canonical write 差异只收束上述 shell descriptor/source，A1-07/A1-10 的 18 项 owner/role/id 未漂移；最终 `pnpm s7:lint` 为 21/21 且 registry golden 通过。Server 上游 build、CLI canonical typecheck、`pnpm cli:build`、适用 TypeScript 路径的最窄 Biome 与 `git diff --check` 通过；MJS 结构脚本被 Biome 配置排除，由 canonical S7 直接执行取证。未运行包全测、根级全量、package check 或制品验收。若七项 exact-set/取得点、endpoint provenance/transfer、activation-failure ownership、A1-10 transfer 顺序、state/discovery 终态条件、timer settle、cleanup descriptor/golden 或 standalone Server 默认任一变化，恢复 `A1-11-anchor-host-shell-lifecycle-v1` 并只重验上述失效闭包。
-- 交接类型：完成，等待协调者独立复核；无本包内遗留。A1 与最终退出门继续保持 `[ ]`；唯一下一检查点是独立裁决并退场 `A1-HOST-DELEGATE-01`，不进入 A2。
+- 交接类型：已由协调者独立复核并纳入提交 `686822e0`；无本包内遗留。A1 与最终退出门继续保持 `[ ]`；唯一下一检查点是退场 `A1-HOST-DELEGATE-01`，不进入 A2。
 
 #### A1-11 协调反证纠正：真实 activation owner 与 successor-safe discovery
 
 - 反证与根因：初版 `StartServerOptions.activationFailureCleanupOwner?: "server" | "caller"` 只靠可伪造字符串声明外部 owner，direct caller 可在没有 cleanup handle 时跳过 inactive binding 关闭；初版 discovery 又在 endpoint close 后执行 `readLock → releaseLock`，合法 successor 可在两步间绑定同一端口并覆盖 discovery，随后被旧 Host 删除。两处都恢复了 `A1-11-anchor-host-shell-lifecycle-v1` 的 endpoint/discovery 子证据，未扩大到七项 exact-set、A1-07/A1-10 contribution 或 `A1-HOST-DELEGATE-01`。
 - 纠正结果：公开 `startServer` 已无跳过清理字段，包根也不导出内部 owner-aware 入口；默认路径自行关闭，Host 路径实际调用同一 `StartupRollback` handle 的 `cleanupActivationFailure()`，后续 registry/rollback 重入不产生第二 close。discovery 的 generation check/release 已移到 endpoint close 之前；真实端口竞争反例在该窗口只能得到 `EADDRINUSE`，旧 endpoint terminal 后 successor 才能绑定并发布且记录保持。endpoint close 失败会恢复旧 generation discovery；partial acquire 失败只条件清理本 generation，foreign record 不受影响。
 - 本轮有效证据：`server.test.ts + lifecycle.test.ts` 为 2 文件 28/28，`anchor-host-shell-lifecycle.test.ts` 为 12/12，合计 3 文件 40/40；其中公开伪造 owner 与真实 successor 竞争两个新增对抗均先隔离通过，未重复计数。`pnpm --filter @zhixing/server build`、`pnpm --filter @zhixing/cli exec tsc -p tsconfig.json --noEmit`、`pnpm cli:build` 与 12 个受影响 TypeScript 路径的最窄 Biome 均通过。S7 新增公开字段/包根出口、实际 owner cleanup、release-before-close、restore 与对应反向 mutation；首次 canonical 重取暴露测试输入漏读 `packages/server/src/index.ts`，补入真实扫描集合后最终 `pnpm s7:lint` 为 21/21 且 registry golden 通过。
-- 状态与失效：A1-11 纠正完成并等待协调者独立复核；A1 与最终退出门仍为 `[ ]`。以后若 `StartServerOptions`/包根导出、owner-aware lifecycle 调用、同 handle cleanup、discovery generation 校验与 release/restore 顺序、endpoint close 终态或相应 S7 mutation 任一变化，只恢复本纠正与 A1-11 endpoint/discovery 失效闭包；其余未变 A1 证据继续复用。
+- 状态与失效：A1-11 纠正已由协调者独立复核并纳入提交 `686822e0`；A1 与最终退出门仍为 `[ ]`。以后若 `StartServerOptions`/包根导出、owner-aware lifecycle 调用、同 handle cleanup、discovery generation 校验与 release/restore 顺序、endpoint close 终态或相应 S7 mutation 任一变化，只恢复本纠正与 A1-11 endpoint/discovery 失效闭包；其余未变 A1 证据继续复用。
+
+### A1-12：退场持久 Host 委托桥并关闭 A1
+
+- 基线与 exact-set：`HEAD 686822e0edf255f5178f12da2373193ec185f2a1 + A1-12-persistent-host-composition-v1`；进场索引为空，工作区只有协调者预先登记的本文台账差异。旧桥 exact-set 为 `PersistentApplicationHostDependencies.roleLoaders/runRoleTopology`、`ServeRoleLoaders`、`ServiceHostModule`、`runConfiguredServeTopology`、`anchor-role.ts` 与 `executor-role.ts`；这些对象只承担第二层模块选择/转发，没有领域事实、产品用例或独立资源。`command.ts:runServeCommand`、`executor-role-runtime.ts:runExecutorRole`、`@zhixing/executor` 动态模块、`planServeTopology` 及真实 Anchor/Executor 内部装配均是保留的生产组件，不按名称误删。瞬态 `workspace-command.ts` 的本机 fallback 直接消费 Executor runtime，是 A0-03 已冻结的命令期有限装配，不是持久 Host 委托桥或第二常驻组合根。
+- 唯一组合与装入链：`topology-command.ts` 仍只做 process mode/preflight 并唯一创建、运行一次 `PersistentApplicationHost`。Host 在 recovery-root 串行 bootstrap 完整停止并重新 prepare 后冻结 roles/configuration，自行调用 `planServeTopology`；disabled 不装入 role，anchor-only 只动态装入 `command.ts`，anchor+executor 同时装入 `command.ts + @zhixing/executor`，executor-only 同时装入 `executor-role-runtime.ts + @zhixing/executor`。每条有效拓扑均先以同一次 `Promise.all` 取得全部所需模块，随后才调用唯一真实 role component；任一装入失败时 role 零启动，Host 仍经同一 terminal path 各自精确一次释放已取得的 Mesh maintenance 与 workspace lease。旧 loader bag、通用 host module、平行 runner 与两个 wrapper 文件全部删除，没有服务定位、字符串注册、空 component 框架或第二 Host。
+- 行为与 A1 阶段裁决：三种 process mode 仍经过同一 Host class，三种有效角色拓扑、recovery-root 替换、capacity/Mesh/workspace lease、entry-last、HostStop/accepted-work、role 内部类型化生命周期、真实 Server terminal 与 outer release 顺序均未改变。Host 只规划有限拓扑、冻结依赖、装入并等待组件；没有导入领域 handler、持有领域状态或编排产品用例。冷启动从唯一 CLI main/`serve` action、`createPersistentApplicationHost → host.run`、动态 role imports 与生产 `PersistentApplicationHost` 构造反查，常驻图只有这一条组合链；旧桥名称在生产/类型/测试/构建输入中为零，残余命中仅为 S7 retired 负向门禁与本历史记录。A1-01～A1-11 已接受的 create/start/entry-last、拒新/排空、terminal、类型化 cleanup、失败聚合与零残留证据共同闭合 A1；A1 因此在当前工作区标为 `[x]`，最终退出门继续留待 A7 同基线验收。
+- 直接与结构证据：Host/拓扑定向闭包为 3 文件 39/39：`application-host.test.ts` 22/22、`role-topology.test.ts` 11/11 来自修正测试参数后的最终重取，`topology-command.test.ts` 6/6 来自同一源码首次组合命令的未失效通过项；覆盖 3 process mode × 3 topology、disabled/invalid fail closed、三类所需模块装入失败时 role 零启动与 outer 精确释放、恢复根无双图、role 正常/失败终态和重复 run。Server 结构测试 1/1 直接把动态 import 生产边反绑唯一 Host；显式 golden 候选只有 `cli/serve` type-import 计数差异，另以 `git show HEAD` 对 133 个进场生产文件机械重取后确认这些计数已是接受基线事实，并非本包新增依赖或 owner 漂移，更新后 test 可继续识别当前 package graph 与 Host 动态边。
+- 门禁、构建与失效：canonical `pnpm s7:lint` 为 coverage/mutation 21/21 且 registry golden 通过；门禁同时要求唯一 Host 调用、有限三模块动态入口、两条真实 role 调用、拓扑分支、Promise-all-before-run，并以反向 mutation 检出第二 role 调用、跨拓扑分支、wrapper 文件恢复、旧 runner/loader 回流。`pnpm --filter @zhixing/cli exec tsc -p tsconfig.json --noEmit`、`pnpm cli:build` 与 5 个适用 TypeScript 文件的最窄 Biome 均通过；build 产物保留真实 `command` 与 `executor-role-runtime` chunk，不再生成两个 wrapper entry。`git diff --check` 通过，索引为空，工作区只含 A1-12 实现/测试/门禁/golden 与协调者预先登记后续写的本文；没有运行 CLI 包全测、根级 lint/test/build、package check 或制品验收。若 topology-command 的 Host 构造/调用、ApplicationHost 的 plan/import/invocation/outer release、role-topology plan、wrapper 负向 exact-set、动态构建边或相应 S7 mutation 任一变化，恢复 `A1-12-persistent-host-composition-v1` 与 A1，只重验本闭包。
+- 交接类型：完成，等待协调者独立复核 A1；无本包内遗留，不得由本对话进入 A2。
 
 ## 十、用户提示词
 

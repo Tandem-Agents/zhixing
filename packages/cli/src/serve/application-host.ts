@@ -16,10 +16,11 @@ import {
 } from "./mesh-runtime-bootstrap.js";
 import { runRecoveryRootEstablishmentTopology } from "./recovery-root-establishment-runtime.js";
 import {
-  runConfiguredServeTopology,
+  planServeTopology,
+  type ExecutorRoleModule,
   type ServeBootstrapContext,
   type ServeRoleConfiguration,
-  type ServeRoleLoaders,
+  type ServeTopologyPlan,
 } from "./role-topology.js";
 import type { HostProcessMode } from "./self-exec.js";
 
@@ -28,6 +29,23 @@ type TrustedHomeBootstrap = Extract<MeshRuntimeBootstrap, { readonly mode: "trus
 type LocalWorkspaceOwner = Awaited<
   ReturnType<typeof acquireExecutorLocalWorkspaceOwner>
 >;
+
+interface AnchorRoleModule<Options> {
+  readonly runServeCommand: (
+    options: Options,
+    bootstrap: ServeBootstrapContext,
+    executor: ExecutorRoleModule | undefined,
+    plan: ServeTopologyPlan,
+  ) => Promise<void>;
+}
+
+interface ExecutorRoleRuntimeModule<Options> {
+  readonly runExecutorRole: (
+    options: Options,
+    bootstrap: ServeBootstrapContext,
+    executor?: ExecutorRoleModule,
+  ) => Promise<void>;
+}
 
 export interface PersistentApplicationHostInput<Options> {
   readonly zhixingHome: string;
@@ -44,13 +62,9 @@ export interface PersistentApplicationHostDependencies<Options> {
   readonly runRecoveryRoot: typeof runRecoveryRootEstablishmentTopology;
   readonly acquireLocalWorkspaceOwner: typeof acquireExecutorLocalWorkspaceOwner;
   readonly defineLocalWorkspaceIdentity: typeof defineLocalWorkspaceAssemblyIdentity;
-  readonly roleLoaders: ServeRoleLoaders<Options>;
-  readonly runRoleTopology: (
-    configuration: ServeRoleConfiguration,
-    loaders: ServeRoleLoaders<Options>,
-    options: Options,
-    bootstrap: ServeBootstrapContext,
-  ) => Promise<void>;
+  readonly importAnchorRole: () => Promise<AnchorRoleModule<Options>>;
+  readonly importExecutorRole: () => Promise<ExecutorRoleRuntimeModule<Options>>;
+  readonly importExecutorModule: () => Promise<ExecutorRoleModule>;
 }
 
 interface OwnedResource {
@@ -142,6 +156,7 @@ export class PersistentApplicationHost<Options> {
 
     const roles = Object.freeze([...mesh.roles]) as readonly DeviceRole[];
     const configuration = Object.freeze({ roles }) satisfies ServeRoleConfiguration;
+    const plan = planServeTopology(configuration);
     const lease = await this.#dependencies.acquireLocalWorkspaceOwner(
       this.#input.zhixingHome,
       roles,
@@ -159,12 +174,36 @@ export class PersistentApplicationHost<Options> {
       localWorkspaceIdentity,
     }) satisfies ServeBootstrapContext;
 
-    await this.#dependencies.runRoleTopology(
-      configuration,
-      this.#dependencies.roleLoaders,
-      this.#input.options,
-      bootstrap,
-    );
+    await this.#runRoleComponents(plan, bootstrap);
+  }
+
+  async #runRoleComponents(
+    plan: ServeTopologyPlan,
+    bootstrap: ServeBootstrapContext,
+  ): Promise<void> {
+    if (plan.host === "disabled") return;
+
+    if (plan.host === "anchor-host") {
+      const [anchorRole, executor] = await Promise.all([
+        this.#dependencies.importAnchorRole(),
+        plan.loadExecutor
+          ? this.#dependencies.importExecutorModule()
+          : Promise.resolve(undefined),
+      ]);
+      await anchorRole.runServeCommand(
+        this.#input.options,
+        bootstrap,
+        executor,
+        plan,
+      );
+      return;
+    }
+
+    const [executorRole, executor] = await Promise.all([
+      this.#dependencies.importExecutorRole(),
+      this.#dependencies.importExecutorModule(),
+    ]);
+    await executorRole.runExecutorRole(this.#input.options, bootstrap, executor);
   }
 
   async #prepareMesh(deviceCapacity: DeviceCapacityRuntime): Promise<MeshRuntimeBootstrap> {
@@ -219,12 +258,9 @@ export function createPersistentApplicationHost(
     runRecoveryRoot: runRecoveryRootEstablishmentTopology,
     acquireLocalWorkspaceOwner: acquireExecutorLocalWorkspaceOwner,
     defineLocalWorkspaceIdentity: defineLocalWorkspaceAssemblyIdentity,
-    roleLoaders: {
-      anchorHost: () => import("./anchor-role.js"),
-      executorHost: () => import("./executor-role.js"),
-      executor: () => import("@zhixing/executor"),
-    },
-    runRoleTopology: runConfiguredServeTopology,
+    importAnchorRole: () => import("./command.js"),
+    importExecutorRole: () => import("./executor-role-runtime.js"),
+    importExecutorModule: () => import("@zhixing/executor"),
   });
 }
 
