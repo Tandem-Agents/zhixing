@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A4-05 已完成，等待协调者独立复核；AgentRuntime 工作区解析对象已退出返回面<br>
+> 当前检查点：A4-06 已派发；移除 AgentRuntime 的运行后 TurnContext 注册入口<br>
 > 完成度：4/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `6d11fc90`；A0～A3、A4-01～A4-04 已由协调者独立复核并提交，A1、A2、A3 阶段退出门成立 |
+| 已接受基线 | `fbb0edc9`；A0～A3、A4-01～A4-05 已由协调者独立复核并提交，A1、A2、A3 阶段退出门成立 |
 | 当前 A 项 | A4：封闭 Intelligence Kernel 合同及其生产边界 |
-| 活跃工作包 | A4-05 已完成，等待协调者独立复核：`AgentRuntime` source/declaration/return 已移除 `resolvedWorkspace` / `workspaceDirStatus`；Anchor 两个宿主消费者共用一次权威解析形成的默认工作区投影 |
-| 下一责任链 | 协调者独立复核 A4-05 后，再从其余宿主管理公共成员、RuntimeHost 产品特有装配或 Kernel Conformance 中选择最高价值的单一 A4 责任链；不提前进入 A5 |
+| 活跃工作包 | A4-06 已完成实现与最窄验证，等待协调者独立复核：TurnContext providers 已成为 runtime 发布前的有限只读装配输入，运行后 setter 与 RuntimeHost post-create hook 已归零 |
+| 下一责任链 | A4-06 通过协调者独立复核后，再从其余宿主管理公共成员、RuntimeHost 产品特有装配或 Kernel Conformance 中选择最高价值的单一 A4 责任链；不提前进入 A5 |
 | 打开的单向桥 | 无；Skill 管理、保存、admission、load/usage、Kernel 与 Executor 投影均只经 `@zhixing/core/skills/catalog` 及既有 Authority/CAS/assignment Correctness 端口成立，旧 writable Store 不再承担正式应用行为 |
-| 已失效证据 | 无当前未恢复证据。新增 `A4-05-agent-runtime-workspace-encapsulation-v1` 等待协调者独立复核；A4-01～A4-04 的 Envelope/Event/Terminal 与安全封装证据不因本包失效 |
+| 已失效证据 | A4-06 的 AgentRuntime 公共面、RuntimeHost 创建时序、CLI provider 装配及声明/结构证据已在当前工作区重取，等待协调者复核；A4-01～A4-05 的 Run、安全与工作区封装证据未失效 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1607,6 +1607,25 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 结构、声明与纠正：新增独立 S7 inspector/mutation 冻结 AgentRuntime 唯一 owner、返回面零 workspace 字段/别名、外部 runtime 属性读取归零、宿主投影唯一权威 resolver 与两消费点共用。第一次 canonical 运行识别出 inspector 把 workbench 自有 `workspaceDirStatus` 和 Mesh environment 的 `resolveWorkspace` 误当 Kernel 泄漏；门禁随后收窄为“runtime receiver 属性读取”和“禁止裸 provider resolver 旁路”，没有放宽生产不变量。最终 canonical `pnpm s7:lint` 为 27/27 且 registry golden 通过；fresh orchestrator declaration 上的 `pnpm runtime:package-exports` 通过，并拒绝旧字段、类型与常见改名 metadata/info 回流。
 - 失效、遗留与状态：若 `AgentRuntime` interface/return/declaration、内部 `resolveWorkspace/ensureWorkspaceDir`、Host 默认投影、post-adoption review、`ServerContext.hostInfo.workspace`、RuntimeHost 的 explicit null/Workscene/assignment 分叉、S7 inspector/mutation 或 package-export 声明门变化，恢复本证据并只重验对应闭包。工作区产品规则、配置格式、Workscene/Schedule 领域、权限/信任、安全、文件工具、其他 AgentRuntime 管理成员和 Kernel Conformance 均未迁移；A4 与完成度继续为 `[ ]` / `4/8`。交接类型为完成、等待协调者独立复核；无本包内遗留，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：从 AgentRuntime 唯一声明、工厂返回、fresh declaration、Anchor 两个生产消费者和显式 Workscene/null 输入反查，确认工作区解析对象已退出 Kernel 公共面，宿主只在冻结配置上调用一次既有权威 resolver，且未复制目录算法或形成第二运行期解析链。独立重跑 Kernel 内部默认/null 工作区 2/2、宿主投影与 RuntimeHost 隔离 6/6、orchestrator/runtime-host/CLI 依赖顺序构建、canonical S7 27/27、registry golden、fresh runtime package exports 和 `git diff --check`，全部通过；接受 `A4-05-agent-runtime-workspace-encapsulation-v1`。A4 继续为 `[ ]`，下一责任链不进入 A5。
+
+### A4-06：把 TurnContext providers 收口为不可变装配输入
+
+- 派发基线：`HEAD fbb0edc9 + task-doc:A4-06-dispatch`；A4-05 已由协调者独立复核并纳入提交，派发前索引与工作区为空。
+- 唯一架构结果：删除 `AgentRuntime.registerTurnContextProvider` 这一运行后宿主管理入口；全部 TurnContext providers 在 Kernel 实例对外可见前作为有限、不可变装配输入一次性注册。RuntimeHost 不再以 `onRuntimeCreated(runtime)` 回调取得完整 Kernel 对象做二次装配。
+- 生产闭包：把现有 SchedulerProvider 与 TaskListProvider helper 从“拿 runtime 后调用两次 register”改为“根据既有依赖创建固定有序 provider 集合”；RuntimeHost 资产层持有 provider factory/投影，并在每次 conversation、Workscene 与 ephemeral 实例创建时交给 `createAgentRuntime`。Kernel 继续先注册内建 TimeProvider，再按既有顺序注册 scheduler、task-list，不能漏过任何原生产发放路径。ExecutorRuntimeSubstrate 当前没有这组 Anchor providers，不得因本包错误注入或改变其行为。
+- 保护边界：每 turn 的 time/scheduler/task-list 内容、顺序、conversation ALS 绑定、scheduler lazy fallback、ephemeral 无 conversation 时自然省略、窗口与多 run 行为保持等价；provider 构造或注册失败必须在 runtime 发布前 fail fast，不能返回半装配实例。不得留下 post-create hook、setter、动态注册、服务定位器、可变 provider 数组、兼容别名或第二注册路径。
+- 门禁与证据：从 AgentRuntime 接口/返回/declaration 删除注册方法，从 RuntimeHost options/生产调用删除 `onRuntimeCreated`，新增结构反例拒绝两者回流、provider 多/少/乱序、任一发放路径漏传或注册发生在 factory 返回后。直接测试覆盖 conversation、Workscene、ephemeral 三条 RuntimeHost 发放路径以及 scheduler/task-list 的真实注入与 ephemeral 降级；按依赖顺序只验证 orchestrator、runtime-host、CLI 的失效闭包、canonical S7 和 package exports。
+- 明确不做：不改变 TurnContext 内容或新增 provider，不处理 conversation reset、attention-window、dispose、lifecycle diagnostics 等其他管理成员，不迁移 Schedule/Workscene 产品装配，不建立 Kernel Conformance，不进入 A5。
+- 完成与止损：只有运行后注册入口与回调从 source/declaration/return/生产调用全部归零、三条 RuntimeHost 发放路径都在发布前获得同一有序 providers、行为和失败边界等价、门禁能识别回流且工作区可构建时才算完成。预计超过四小时、需要改变 provider 产品语义、出现非 Anchor 的独立动态注册需求或影响扩至 Schedule/Workscene 领域时，停在原合同仍成立或新合同完整接管的可构建检查点并反馈；不执行 Git 写操作。
+
+执行记录（证据 ID：`A4-06-turn-context-provider-assembly-v1`）：
+
+- 基线与责任迁移：进场 HEAD 为 `fbb0edc913f59ea73f33612ea57ee0cbf8775c16`，索引为空且工作区只有协调者预登记的本文台账。`CreateAgentRuntimeOptions` 新增唯一 `readonly turnContextProviders?: readonly TurnContextProvider[]` 装配输入；工厂在任何 runtime 资源装配前浅拷贝捕获、冻结序列并校验 provider shape/id，保留 Kernel 内建 `TimeProvider` 第一位，再按输入顺序一次性注册。`AgentRuntime` interface/返回对象已删除 `registerTurnContextProvider`，调用方后续修改原数组、重复 `time`/id 或非法 provider 均不能产生半装配 runtime。
+- 宿主与生产组合：`RuntimeHostOptions` 的唯一资产入口改为 readonly provider factory；每次 conversation、Workscene、ephemeral（以及原本共用同一 `assemble` 的 durable job）发放都先取得完整投影，再调用唯一 `createAgentRuntime`，factory 抛错时 Kernel 工厂尚未开始。Anchor CLI helper 改为每次创建 fresh frozen exact-set `[SchedulerProvider, TaskListProvider]`，保持 scheduler lazy ref 和 task-list ALS closure；旧 `onRuntimeCreated(runtime)`、helper 内 runtime setter、第二注册路径和可变共享数组已归零。ExecutorRuntimeSubstrate 没有获得这组 Anchor providers。
+- 行为与直接证据：orchestrator 定向文件 75/75 通过，其中新增证据真实运行 Agent Loop，证明 Time → scheduler → task-list 的请求字节顺序、调用方数组后续变异不影响已交付实例、旧 setter 不在返回面，并证明非法/重复输入在 workspace/Kernel 装配前 fail fast。CLI 两个定向文件合计 16/16，证明 provider exact-set/顺序、fresh frozen sequence、scheduler 动态读取、task-list conversation ALS 隔离/cache miss、ephemeral 无 conversation 自然省略，以及 RuntimeHost 三条指定发放路径在 factory 返回前取得独立 fixed sequence；factory 失败时 `createAgentRuntime` 调用次数为零。
+- 结构、声明与构建：新增独立 S7 inspector 与六类反向 mutation，拒绝 AgentRuntime setter/post-create hook 回流、Create options 非 readonly、RuntimeHost 任一发放旁路、CLI provider 多/少/乱序、Anchor 漏装以及 Executor 误注入；canonical `pnpm s7:lint` 为 28/28 且 registry golden 通过。orchestrator、runtime-host、CLI 三包 typecheck 通过；按依赖顺序完成 orchestrator/runtime-host build 与 canonical `pnpm cli:build`。fresh declaration 的首次 package-export 检查准确暴露 checker 没有读取 `runtime-host.d.ts` 的盲点，补入该正式 subpath 后 `pnpm runtime:package-exports` 通过，并同时约束 AgentRuntime 零 setter、Create options readonly 输入和 RuntimeHost 零 post-create hook；最窄 Biome 与 `git diff --check` 通过。
+- 失效、遗留与状态：若 `AgentRuntime`/`CreateAgentRuntimeOptions` source 或 declaration、provider capture/校验/Time-first 顺序、RuntimeHost 四条共用 assemble 路径、Anchor helper exact-set/顺序、command factory、Executor substrate、S7 mutation 或 package-export declaration reader任一变化，恢复本证据并只重验上述闭包。TurnContext 内容、conversation reset/attention-window/dispose/lifecycle diagnostics、Schedule/Workscene 产品装配、其他 AgentRuntime 管理成员与 Kernel Conformance 均未迁移；A4 与完成度继续为 `[ ]` / `4/8`。交接类型为完成、等待协调者独立复核；无本包内遗留，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：反查 `AgentRuntime`/Create options、provider capture 时序、RuntimeHost 四条共用 `assemble` 发放路径、Anchor provider exact-set 与 Executor 隔离，确认运行后 setter/post-create hook 已归零，Time → Scheduler → TaskList 在实例发布前冻结且失败 fail fast。独立重跑 immutable assembly 2/2、RuntimeHost/CLI providers 16/16、orchestrator/runtime-host/CLI 依赖顺序构建、canonical S7 28/28、registry golden、fresh runtime package exports 和 `git diff --check`，全部通过；接受 `A4-06-turn-context-provider-assembly-v1`。A4 继续为 `[ ]`，下一责任链不进入 A5。
 
 ## 十、用户提示词
 

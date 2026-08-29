@@ -2052,6 +2052,123 @@ export function inspectAgentRuntimeWorkspaceEncapsulation(records) {
   return failures;
 }
 
+/** A4 TurnContext providers are immutable assembly input, never runtime management. */
+export function inspectTurnContextProviderAssembly(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const source = byPath.get(relative);
+    if (source === undefined) failures.push(`${relative}: turn-context assembly source is missing`);
+    return source ?? "";
+  };
+  const runtime = required("packages/orchestrator/src/runtime/create-agent-runtime.ts");
+  const host = required("packages/runtime-host/src/runtime-host.ts");
+  const providers = required("packages/cli/src/runtime/turn-context-providers.ts");
+  const command = required("packages/cli/src/serve/command.ts");
+  const executor = required("packages/cli/src/serve/executor-role-runtime.ts");
+
+  const runtimeFile = ts.createSourceFile(
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+    runtime,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const agentRuntime = runtimeFile.statements.find(
+    (statement) =>
+      ts.isInterfaceDeclaration(statement) && statement.name.text === "AgentRuntime",
+  );
+  const createOptions = runtimeFile.statements.find(
+    (statement) =>
+      ts.isInterfaceDeclaration(statement) &&
+      statement.name.text === "CreateAgentRuntimeOptions",
+  );
+  const agentRuntimeText = agentRuntime?.getText(runtimeFile) ?? "";
+  const createOptionsText = createOptions?.getText(runtimeFile) ?? "";
+  if (
+    !agentRuntime ||
+    /registerTurnContextProvider|turnContextProviders/iu.test(agentRuntimeText) ||
+    !/readonly turnContextProviders\?: readonly TurnContextProvider\[\];/u.test(createOptionsText)
+  ) {
+    failures.push("AgentRuntime turn-context boundary is not assembly-only");
+  }
+
+  const captureIndex = runtime.indexOf(
+    "const assembledTurnContextProviders = captureTurnContextProviders(\n    options.turnContextProviders,\n  );",
+  );
+  const roleAssemblyIndex = runtime.indexOf("const { roles: baseRoles, config, resolvedRoles }");
+  const injectorIndex = runtime.indexOf("const turnContextInjector = new TurnContextInjector();");
+  const timeIndex = runtime.indexOf("new TimeProvider(", injectorIndex);
+  const contributionIndex = runtime.indexOf(
+    "for (const provider of assembledTurnContextProviders)",
+    injectorIndex,
+  );
+  const returnIndex = runtime.indexOf("return {\n    providerId:", contributionIndex);
+  if (
+    captureIndex < 0 ||
+    roleAssemblyIndex < 0 ||
+    captureIndex > roleAssemblyIndex ||
+    injectorIndex < 0 ||
+    timeIndex < injectorIndex ||
+    contributionIndex < timeIndex ||
+    returnIndex < contributionIndex ||
+    !runtime.includes('const ids = new Set(["time"]);') ||
+    !runtime.includes("return Object.freeze(captured);") ||
+    runtime.includes("registerTurnContextProvider")
+  ) {
+    failures.push("createAgentRuntime does not capture and register the fixed provider input before publication");
+  }
+
+  if (
+    host.includes("onRuntimeCreated") ||
+    host.includes("registerTurnContextProvider") ||
+    !host.includes("readonly turnContextProviders?: () => TurnContextProvidersOption;") ||
+    !host.includes("const turnContextProviders = this.opts.turnContextProviders?.();") ||
+    !host.includes("...(turnContextProviders ? { turnContextProviders } : {}),") ||
+    host.indexOf("const turnContextProviders = this.opts.turnContextProviders?.();") >
+      host.indexOf("return createAgentRuntime({") ||
+    (host.match(/return this\.assemble\s*\(/gu) ?? []).length !== 4
+  ) {
+    failures.push("RuntimeHost does not pass one pre-publication provider projection to every issuance path");
+  }
+
+  const schedulerCount = (providers.match(/new SchedulerProvider\s*\(/gu) ?? []).length;
+  const taskListCount = (providers.match(/new TaskListProvider\s*\(/gu) ?? []).length;
+  if (
+    !providers.includes("export function createCliTurnContextProviders(") ||
+    !providers.includes("return Object.freeze([") ||
+    schedulerCount !== 1 ||
+    taskListCount !== 1 ||
+    providers.indexOf("new SchedulerProvider(") > providers.indexOf("new TaskListProvider(") ||
+    /\bAgentRuntime\b|registerTurnContextProvider/iu.test(providers)
+  ) {
+    failures.push("CLI turn-context provider exact-set is not the frozen scheduler/task-list sequence");
+  }
+
+  if (
+    command.includes("onRuntimeCreated") ||
+    command.includes("registerTurnContextProvider") ||
+    command.includes("registerCliTurnContextProviders") ||
+    !command.includes("turnContextProviders: () =>") ||
+    !command.includes("createCliTurnContextProviders({")
+  ) {
+    failures.push("Anchor does not supply the one CLI provider assembly factory");
+  }
+  if (executor.includes("turnContextProviders")) {
+    failures.push("ExecutorRuntimeSubstrate received Anchor turn-context providers");
+  }
+
+  for (const record of records) {
+    if (
+      record.text.includes("registerTurnContextProvider") ||
+      record.text.includes("onRuntimeCreated")
+    ) {
+      failures.push(`${record.relative}: runtime-after-publication turn-context mutation returned`);
+    }
+  }
+  return failures;
+}
+
 export async function validateS7Structure() {
   const files = await productionTypeScriptFiles(path.join(root, "packages"));
   const records = await Promise.all(files.map(async (absolute) => ({
@@ -2084,6 +2201,7 @@ export async function validateS7Structure() {
   failures.push(...inspectKernelTerminalOwnership(records));
   failures.push(...inspectAgentRuntimeSecurityEncapsulation(records));
   failures.push(...inspectAgentRuntimeWorkspaceEncapsulation(records));
+  failures.push(...inspectTurnContextProviderAssembly(records));
   failures.push(...inspectSkillCatalogApplicationOwnership([
     ...records,
     {

@@ -13,8 +13,8 @@
  * 对话级差异经执行期上下文取,不做装配期定制。schedule 工具只提交用户可控
  * TaskSpec；origin、responder 与创建 turn 由 owner 从已认证 ingress 反绑。
  *
- * onRuntimeCreated 是发放后的统一装配后置钩子(turn-context provider 注册等):
- * 会话与 ephemeral 两条发放路径都经此,杜绝"某入口漏注册"类不对齐。
+ * turnContextProviders 是资产层的固定 provider 工厂:每次发放先取得只读投影，
+ * 再作为 createAgentRuntime 装配输入同步注册，运行体对外可见后不再二次装配。
  */
 
 import {
@@ -44,6 +44,9 @@ type SegmentDepsOption = CreateAgentRuntimeOptions["segmentDeps"];
 type ProviderConfigurationOption = CreateAgentRuntimeOptions["providerConfiguration"];
 type ConfirmationLifecycleObserverOption =
   CreateAgentRuntimeOptions["confirmationLifecycleObserver"];
+type TurnContextProvidersOption = NonNullable<
+  CreateAgentRuntimeOptions["turnContextProviders"]
+>;
 
 export interface JobAgentRuntimeOptions {
   readonly instruction: JobExecutionInstruction;
@@ -74,11 +77,8 @@ export interface RuntimeHostOptions {
   /** per-run 渲染装饰钩子(无 TTY 宿主传日志 / 转发实现) */
   decorateRunBus: DecorateRunBusFn;
   onSecurityBlocked: OnSecurityBlockedFn;
-  /**
-   * 实例创建后的统一装配后置钩子——turn-context provider 注册等。两条发放
-   * 路径(会话 / ephemeral)都经此调用。
-   */
-  onRuntimeCreated?: (runtime: AgentRuntime) => void;
+  /** 每个实例发布前取得一份固定、有序的宿主 turn-context provider 投影。 */
+  readonly turnContextProviders?: () => TurnContextProvidersOption;
   /**
    * 生命周期订阅者集合(资产层共享)——随每个发放实例下发,实例内恒定。
    * 订阅者按执行期上下文(conversationId 等)自行决定是否介入,装配期不
@@ -279,7 +279,10 @@ export class RuntimeHost {
       opts?.runtimeKind === "ephemeral"
         ? this.opts.deviceCapacity?.scheduler
         : this.opts.deviceCapacity?.interactive;
-    const runtime = await createAgentRuntime({
+    // 先取得完整装配输入；factory 抛错时 createAgentRuntime 尚未开始，绝不发布
+    // 缺少部分 provider 的运行体。createAgentRuntime 再同步捕获只读序列。
+    const turnContextProviders = this.opts.turnContextProviders?.();
+    return createAgentRuntime({
       ...(capacityBinding ? { deviceCapacity: capacityBinding } : {}),
       ...(this.opts.deviceCapacity
         ? { orchestrationCapacity: this.opts.deviceCapacity.orchestration }
@@ -293,6 +296,7 @@ export class RuntimeHost {
         : undefined,
       profile,
       extraTools,
+      ...(turnContextProviders ? { turnContextProviders } : {}),
       executionMcpServers: mcpServers,
       decorateRunBus: this.opts.decorateRunBus,
       onSecurityBlocked: this.opts.onSecurityBlocked,
@@ -305,7 +309,5 @@ export class RuntimeHost {
         : {}),
       ...(this.opts.lifecycle ? { lifecycle: this.opts.lifecycle } : {}),
     });
-    this.opts.onRuntimeCreated?.(runtime);
-    return runtime;
   }
 }

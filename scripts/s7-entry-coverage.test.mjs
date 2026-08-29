@@ -20,6 +20,7 @@ import {
   inspectKernelTerminalOwnership,
   inspectAgentRuntimeSecurityEncapsulation,
   inspectAgentRuntimeWorkspaceEncapsulation,
+  inspectTurnContextProviderAssembly,
   inspectLocalConversationOwnerIsolation,
   inspectManagedHostAssembly,
   inspectPlannedAnchorTransferAssembly,
@@ -2703,6 +2704,75 @@ test("AgentRuntime keeps workspace resolution internal while Anchor shares one h
       ),
     )).join("\n"),
     /do not share the one default workspace projection/,
+  );
+});
+
+test("TurnContext providers are fixed assembly input before every RuntimeHost issuance", async () => {
+  const paths = [
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+    "packages/runtime-host/src/runtime-host.ts",
+    "packages/cli/src/runtime/turn-context-providers.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectTurnContextProviderAssembly(records), []);
+  assert.match(
+    inspectTurnContextProviderAssembly(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => text.replace(
+        "  drainLifecycleDiagnostics(): readonly AgentEventMap[\"lifecycle:warning\"][];",
+        "  drainLifecycleDiagnostics(): readonly AgentEventMap[\"lifecycle:warning\"][];\n  registerTurnContextProvider(provider: TurnContextProvider): void;",
+      ),
+    )).join("\n"),
+    /assembly-only|runtime-after-publication/,
+  );
+  assert.match(
+    inspectTurnContextProviderAssembly(mutate(
+      "packages/runtime-host/src/runtime-host.ts",
+      (text) => text.replace(
+        "const turnContextProviders = this.opts.turnContextProviders?.();",
+        "const turnContextProviders = undefined;",
+      ),
+    )).join("\n"),
+    /every issuance path/,
+  );
+  assert.match(
+    inspectTurnContextProviderAssembly(mutate(
+      "packages/runtime-host/src/runtime-host.ts",
+      (text) => text.replace("return this.assemble({ runtimeKind: \"ephemeral\" });", "return createAgentRuntime({} as never);"),
+    )).join("\n"),
+    /every issuance path/,
+  );
+  assert.match(
+    inspectTurnContextProviderAssembly(mutate(
+      "packages/cli/src/runtime/turn-context-providers.ts",
+      (text) => text
+        .replace("new SchedulerProvider(deps.getSchedulerStatus)", "new TaskListProvider(() => [])")
+        .replace("new TaskListProvider(() => {", "new SchedulerProvider(() => EMPTY_TASK_STATUS_SUMMARY),\n    new TaskListProvider(() => {"),
+    )).join("\n"),
+    /frozen scheduler\/task-list sequence/,
+  );
+  assert.match(
+    inspectTurnContextProviderAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace("turnContextProviders: () =>", "providersAfterCreate: () =>"),
+    )).join("\n"),
+    /one CLI provider assembly factory/,
+  );
+  assert.match(
+    inspectTurnContextProviderAssembly(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => `${text}\nconst turnContextProviders = [\"scheduler\"];`,
+    )).join("\n"),
+    /ExecutorRuntimeSubstrate/,
   );
 });
 

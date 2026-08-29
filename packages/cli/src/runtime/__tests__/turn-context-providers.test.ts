@@ -2,8 +2,8 @@
  * cli builtin TurnContextProvider 装配 helper 测试
  *
  * 契约覆盖：
- *   - registerCliTurnContextProviders 在 runtime 上注册了 SchedulerProvider + TaskListProvider
- *   - 注册顺序稳定（先 scheduler 后 task_list，与 turn-context 输出顺序对齐）
+ *   - createCliTurnContextProviders 构造 frozen SchedulerProvider + TaskListProvider 集合
+ *   - 装配顺序稳定（先 scheduler 后 task_list，与 turn-context 输出顺序对齐）
  *   - SchedulerProvider closure 通过 deps.getSchedulerStatus 取数
  *   - TaskListProvider closure 通过 ALS 取 conversationId + service.getAllTasks 取 items
  *   - ephemeral 路径（ALS 无 conversationId）下 task_list getItems 返空数组（自然降级）
@@ -15,33 +15,14 @@ import {
   SchedulerProvider,
   TaskListProvider,
   type TaskStatusSummary,
-  type TurnContextProvider,
 } from "@zhixing/core";
-import {
-  runContextStorage,
-  type AgentRuntime,
-} from "@zhixing/orchestrator/runtime";
+import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import { TaskListService } from "@zhixing/tools-builtin";
 import { InMemoryTaskListStore } from "../task-list-stores.js";
 import {
   EMPTY_TASK_STATUS_SUMMARY,
-  registerCliTurnContextProviders,
+  createCliTurnContextProviders,
 } from "../turn-context-providers.js";
-
-// ─── Mock runtime 收集注册的 providers ───
-
-function createMockRuntime(): {
-  runtime: AgentRuntime;
-  registered: TurnContextProvider[];
-} {
-  const registered: TurnContextProvider[] = [];
-  const runtime = {
-    registerTurnContextProvider: (p: TurnContextProvider) => {
-      registered.push(p);
-    },
-  } as unknown as AgentRuntime;
-  return { runtime, registered };
-}
 
 // ─── EMPTY_TASK_STATUS_SUMMARY 常量 ───
 
@@ -72,9 +53,9 @@ describe("EMPTY_TASK_STATUS_SUMMARY", () => {
   });
 });
 
-// ─── registerCliTurnContextProviders 装配契约 ───
+// ─── createCliTurnContextProviders 装配契约 ───
 
-describe("registerCliTurnContextProviders — 装配契约", () => {
+describe("createCliTurnContextProviders — 装配契约", () => {
   function makeDeps(overrides?: {
     getSchedulerStatus?: () => TaskStatusSummary;
     taskListService?: TaskListService;
@@ -88,21 +69,20 @@ describe("registerCliTurnContextProviders — 装配契约", () => {
     };
   }
 
-  it("注册了 SchedulerProvider + TaskListProvider 两个 provider", () => {
-    const { runtime, registered } = createMockRuntime();
-    registerCliTurnContextProviders(runtime, makeDeps());
+  it("创建 frozen SchedulerProvider + TaskListProvider exact-set", () => {
+    const providers = createCliTurnContextProviders(makeDeps());
 
-    expect(registered).toHaveLength(2);
-    expect(registered[0]).toBeInstanceOf(SchedulerProvider);
-    expect(registered[1]).toBeInstanceOf(TaskListProvider);
+    expect(Object.isFrozen(providers)).toBe(true);
+    expect(providers).toHaveLength(2);
+    expect(providers[0]).toBeInstanceOf(SchedulerProvider);
+    expect(providers[1]).toBeInstanceOf(TaskListProvider);
   });
 
-  it("注册顺序稳定（先 scheduler 后 task_list）", () => {
-    const { runtime, registered } = createMockRuntime();
-    registerCliTurnContextProviders(runtime, makeDeps());
+  it("装配顺序稳定（先 scheduler 后 task_list）", () => {
+    const providers = createCliTurnContextProviders(makeDeps());
 
-    expect(registered[0]?.id).toBe("scheduler");
-    expect(registered[1]?.id).toBe("task-list");
+    expect(providers[0]?.id).toBe("scheduler");
+    expect(providers[1]?.id).toBe("task-list");
   });
 
   it("SchedulerProvider closure 调 deps.getSchedulerStatus 取数", () => {
@@ -111,10 +91,9 @@ describe("registerCliTurnContextProviders — 装配契约", () => {
       recentlyCompleted: [],
       recentlyFailed: [],
     }));
-    const { runtime, registered } = createMockRuntime();
-    registerCliTurnContextProviders(runtime, makeDeps({ getSchedulerStatus }));
+    const providers = createCliTurnContextProviders(makeDeps({ getSchedulerStatus }));
 
-    const schedProvider = registered[0]!;
+    const schedProvider = providers[0]!;
     // SchedulerProvider 通过 shouldInject 触发 getStatus 调用
     expect(schedProvider.shouldInject()).toBe(true);
     expect(getSchedulerStatus).toHaveBeenCalled();
@@ -129,12 +108,10 @@ describe("registerCliTurnContextProviders — 装配契约", () => {
       { id: "t1", content: "持久会话任务", status: "in_progress" },
     ]);
 
-    const { runtime, registered } = createMockRuntime();
-    registerCliTurnContextProviders(
-      runtime,
+    const providers = createCliTurnContextProviders(
       makeDeps({ taskListService: service }),
     );
-    const taskListProvider = registered[1]!;
+    const taskListProvider = providers[1]!;
 
     // ALS 中含 conversationId → provider 看到 items
     await runContextStorage.run(
@@ -158,12 +135,10 @@ describe("registerCliTurnContextProviders — 装配契约", () => {
       { id: "t", content: "should not show", status: "pending" },
     ]);
 
-    const { runtime, registered } = createMockRuntime();
-    registerCliTurnContextProviders(
-      runtime,
+    const providers = createCliTurnContextProviders(
       makeDeps({ taskListService: service }),
     );
-    const taskListProvider = registered[1]!;
+    const taskListProvider = providers[1]!;
 
     // 不包 runContextStorage.run —— ALS 为空
     expect(taskListProvider.shouldInject()).toBe(false);
@@ -181,12 +156,10 @@ describe("registerCliTurnContextProviders — 装配契约", () => {
     const service = new TaskListService(new InMemoryTaskListStore());
     // 不 prime / 不 set —— cache 空
 
-    const { runtime, registered } = createMockRuntime();
-    registerCliTurnContextProviders(
-      runtime,
+    const providers = createCliTurnContextProviders(
       makeDeps({ taskListService: service }),
     );
-    const taskListProvider = registered[1]!;
+    const taskListProvider = providers[1]!;
 
     await runContextStorage.run(
       {
@@ -209,12 +182,10 @@ describe("registerCliTurnContextProviders — 装配契约", () => {
       { id: "b", content: "B 的任务", status: "pending" },
     ]);
 
-    const { runtime, registered } = createMockRuntime();
-    registerCliTurnContextProviders(
-      runtime,
+    const providers = createCliTurnContextProviders(
       makeDeps({ taskListService: service }),
     );
-    const taskListProvider = registered[1]!;
+    const taskListProvider = providers[1]!;
 
     await runContextStorage.run(
       { bus: {} as never, lineage: "main", conversationId: "conv-A" },
@@ -233,13 +204,15 @@ describe("registerCliTurnContextProviders — 装配契约", () => {
     );
   });
 
-  it("多次调 helper 在同一 runtime 上累积注册（不去重 —— 调用方责任）", () => {
-    const { runtime, registered } = createMockRuntime();
-    registerCliTurnContextProviders(runtime, makeDeps());
-    registerCliTurnContextProviders(runtime, makeDeps());
+  it("每次发放创建独立 frozen sequence，不共享可变数组或 provider 实例", () => {
+    const first = createCliTurnContextProviders(makeDeps());
+    const second = createCliTurnContextProviders(makeDeps());
 
-    // 两次调用累积注册 4 个 provider —— helper 本身不去重，约定 caller 每个
-    // runtime 实例只调用一次（与 REPL bootstrap / reload swap / serve 各场景对齐）
-    expect(registered).toHaveLength(4);
+    expect(first).not.toBe(second);
+    expect(first[0]).not.toBe(second[0]);
+    expect(first[1]).not.toBe(second[1]);
+    expect(() => {
+      (first as unknown as unknown[]).push({});
+    }).toThrow();
   });
 });

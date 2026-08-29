@@ -1,5 +1,5 @@
 /**
- * cli 装配层的 builtin TurnContextProvider 注册 helper —— REPL + serve 共享。
+ * cli 装配层的 builtin TurnContextProvider 集合工厂 —— REPL + serve 共享。
  *
  * 背景：
  *   `TurnContextProvider` 是 LLM 视角的"per-turn 上下文注入器"集合。Time / Scheduler
@@ -8,9 +8,9 @@
  *     - SchedulerProvider 和 TaskListProvider 依赖 cli 注入的 Scheduler / TaskListService
  *
  *   后两者需要在每一个 user-facing runtime 装配点全部注册：核心宿主的
- *   RuntimeHost 在会话 / 场景 / ephemeral 实例发放后统一调用本 helper。本
- *   helper 把"该注册什么"和"注册逻辑细节"集中一处，caller 只提供"如何取
- *   scheduler 状态 + 哪个 service"两个 deps。
+ *   RuntimeHost 在会话 / 场景 / ephemeral 实例发放前调用本工厂，并把结果
+ *   作为 createAgentRuntime 的不可变装配输入。本工厂把"该注册什么"和顺序
+ *   集中一处，caller 只提供"如何取 scheduler 状态 + 哪个 service"两个 deps。
  *
  * 为什么单独成文件 / 不塞进 BuiltinExtraToolsAssembly：
  *   - assembly 的语义是"task_list-aware 工具/服务集合"——把 SchedulerProvider 塞进
@@ -28,11 +28,9 @@ import {
   SchedulerProvider,
   TaskListProvider,
   type TaskStatusSummary,
+  type TurnContextProvider,
 } from "@zhixing/core";
-import {
-  runContextStorage,
-  type AgentRuntime,
-} from "@zhixing/orchestrator/runtime";
+import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import type { TaskListService } from "@zhixing/tools-builtin";
 
 /**
@@ -70,7 +68,7 @@ export interface BuiltinTurnContextDeps {
 }
 
 /**
- * 注册 cli 装配层的 builtin TurnContextProvider 集合到指定 runtime。
+ * 创建 cli 装配层的 builtin TurnContextProvider 固定集合。
  *
  * 当前注册：
  *   - SchedulerProvider —— 让 LLM 看到当前活跃定时任务 / 最近完成 / 最近失败
@@ -83,21 +81,18 @@ export interface BuiltinTurnContextDeps {
  *   - 闭包：TaskListProvider 内 getItems 通过 ALS 取 conversationId，缺失时返空
  *     数组 → provider.shouldInject false → 整段跳过（不污染 turn-context）。
  *     ephemeral 路径（定时任务等）天然走这条降级
- *   - 不返回 provider 数组让 caller 自己 register——直接 register 到 runtime 让
- *     helper 是终态（不能被 caller 漏掉某个 provider 的注册）
+ *   - 返回 fresh frozen sequence；RuntimeHost 只把整组作为一个装配输入传给
+ *     createAgentRuntime，不能在运行后选择性注册或改序。
  */
-export function registerCliTurnContextProviders(
-  runtime: AgentRuntime,
+export function createCliTurnContextProviders(
   deps: BuiltinTurnContextDeps,
-): void {
-  runtime.registerTurnContextProvider(
+): readonly TurnContextProvider[] {
+  return Object.freeze([
     new SchedulerProvider(deps.getSchedulerStatus),
-  );
-  runtime.registerTurnContextProvider(
     new TaskListProvider(() => {
       const conversationId = runContextStorage.getStore()?.conversationId;
       if (!conversationId) return [];
       return deps.taskListService.getAllTasks(conversationId);
     }),
-  );
+  ]);
 }

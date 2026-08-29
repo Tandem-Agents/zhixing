@@ -317,6 +317,10 @@ const runtimeHostDeclarations = await Promise.all([
     new URL("../packages/runtime-host/dist/session-adapter.d.ts", import.meta.url),
     "utf8",
   ),
+  readFile(
+    new URL("../packages/runtime-host/dist/runtime-host.d.ts", import.meta.url),
+    "utf8",
+  ),
 ]);
 const [orchestratorRootDeclarations, orchestratorRuntimeDeclarations] =
   await Promise.all([
@@ -356,6 +360,9 @@ if (
 const agentRuntimeDeclaration = orchestratorRuntimeDeclarations.match(
   /interface AgentRuntime \{(?<body>[\s\S]*?)\n\}/u,
 )?.groups?.body;
+const createAgentRuntimeOptionsDeclaration = orchestratorRuntimeDeclarations.match(
+  /interface CreateAgentRuntimeOptions \{(?<body>[\s\S]*?)\n\}/u,
+)?.groups?.body;
 if (
   !agentRuntimeDeclaration ||
   /\b(?:securityPipeline|permissionStore|SecurityPipeline|IPermissionStore)\b/u.test(
@@ -374,6 +381,22 @@ if (
   )
 ) {
   failures.push("orchestrator-agent-runtime:workspace-implementation-leak");
+}
+if (
+  !agentRuntimeDeclaration ||
+  /registerTurnContextProvider|turnContextProviders/u.test(agentRuntimeDeclaration) ||
+  !createAgentRuntimeOptionsDeclaration ||
+  !/readonly turnContextProviders\?: readonly TurnContextProvider\[\]/u.test(
+    createAgentRuntimeOptionsDeclaration,
+  ) ||
+  runtimeHostDeclarations.some((text) =>
+    /registerTurnContextProvider|onRuntimeCreated/u.test(text)
+  ) ||
+  !runtimeHostDeclarations.some((text) =>
+    /readonly turnContextProviders\?: \(\) => TurnContextProvidersOption/u.test(text)
+  )
+) {
+  failures.push("orchestrator-agent-runtime:turn-context-assembly-boundary");
 }
 for (const name of runtimeHostLegacyNames) {
   if (

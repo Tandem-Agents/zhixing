@@ -121,7 +121,7 @@ import {
   RoutedConversationRepoTaskListStore,
   type ConversationRepoTaskListRoute,
 } from "../runtime/task-list-stores.js";
-import { registerCliTurnContextProviders } from "../runtime/turn-context-providers.js";
+import { createCliTurnContextProviders } from "../runtime/turn-context-providers.js";
 import { applyTaskListAction } from "../runtime/task-list-actions.js";
 import { createServeAdvancementController } from "./advancement-controller.js";
 import { createAdvancementAcceptanceLifecycle } from "./advancement-acceptance-lifecycle.js";
@@ -528,8 +528,9 @@ async function runServerProcess(
   // 3d. RuntimeHost —— 宿主侧 runtime 装配点:共享资产(skillStore / segmentDeps /
   //   mcpHub / 渲染装饰)单一持有,会话与 ephemeral 两条发放路径同一装配体。
   //   投递 origin 执行期从 RunContext 派生,实例装配不再按对话定制。
-  //   turn-context provider 注册收拢进 onRuntimeCreated——scheduler 是 lazy ref
-  //   （顶层 let schedulerRef），LLM 调用时刻 ref 已就绪；未就绪时 fallback 空状态。
+  //   turn-context provider 集合在 runtime 发布前作为固定装配输入建立——scheduler
+  //   是 lazy ref（顶层 let schedulerRef），LLM 调用时刻 ref 已就绪；未就绪时
+  //   fallback 空状态。
   const resolveWorksceneRoot = async (sceneId: string): Promise<string | null> => {
     const scene = await worksceneDirectory.get(sceneId);
     if (!scene?.workspace) return null;
@@ -581,8 +582,8 @@ async function runServerProcess(
     // workmode 工具组的领域服务——LLM 管理入口与 RPC / CLI 管理入口共用
     // 同一校验、静默与运行态守卫。
     worksceneDirectory: () => worksceneDirectory,
-    onRuntimeCreated: (runtime) => {
-      registerCliTurnContextProviders(runtime, {
+    turnContextProviders: () =>
+      createCliTurnContextProviders({
         getSchedulerStatus: () =>
           schedulerRef
             ? computeStatusSummary(
@@ -591,8 +592,7 @@ async function runServerProcess(
               )
             : { active: [], recentlyCompleted: [], recentlyFailed: [] },
         taskListService: builtinExtraTools.taskListService,
-      });
-    },
+      }),
   });
 
   // RuntimeFactory —— 会话执行面（接入面）建 per-session runtime 的工厂。schedule 档无

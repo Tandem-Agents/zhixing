@@ -252,6 +252,30 @@ function assembleMessagePrefix(
   return out;
 }
 
+function captureTurnContextProviders(
+  providers: readonly TurnContextProvider[] | undefined,
+): readonly TurnContextProvider[] {
+  const ids = new Set(["time"]);
+  const captured: TurnContextProvider[] = [];
+  for (const provider of providers ?? []) {
+    if (
+      !provider ||
+      typeof provider.id !== "string" ||
+      provider.id.length === 0 ||
+      typeof provider.shouldInject !== "function" ||
+      typeof provider.render !== "function"
+    ) {
+      throw new TypeError("Invalid turn-context provider assembly input");
+    }
+    if (ids.has(provider.id)) {
+      throw new TypeError(`Duplicate turn-context provider: ${provider.id}`);
+    }
+    ids.add(provider.id);
+    captured.push(provider);
+  }
+  return Object.freeze(captured);
+}
+
 // ─── 类型 ───
 
 /**
@@ -342,8 +366,6 @@ export interface AgentRuntime {
    * 读取并清空 run 外 lifecycle 诊断。run 内诊断直接进入 per-run eventBus。
    */
   drainLifecycleDiagnostics(): readonly AgentEventMap["lifecycle:warning"][];
-  /** 注册 per-turn 上下文 provider（如 SchedulerProvider），支持后注册 */
-  registerTurnContextProvider(provider: TurnContextProvider): void;
   /**
    * 注册"对话级"可重置组件 —— `/clear` 时一并清空。
    *
@@ -494,6 +516,13 @@ export interface CreateAgentRuntimeOptions {
   workspace?: string | null;
   /** 额外工具（如 schedule），在内置工具之后注入 */
   extraTools?: ToolDefinition[];
+  /**
+   * 宿主在运行体发布前提供的有限 per-turn 上下文贡献。
+   *
+   * 工厂同步捕获该只读序列，并在内建 TimeProvider 之后按序一次性注册；返回的
+   * AgentRuntime 不提供运行后增删入口，避免不同发放路径出现半装配实例。
+   */
+  readonly turnContextProviders?: readonly TurnContextProvider[];
   /** MCP server identities used to assemble `extraTools`; captured in the same sync turn. */
   executionMcpServers?: readonly string[];
   /**
@@ -623,6 +652,10 @@ function resolveRoleThinking(
 export async function createAgentRuntime(
   options: CreateAgentRuntimeOptions,
 ): Promise<AgentRuntime> {
+  // 在任何运行体资源装配前捕获并校验宿主贡献；失败时不发布半装配实例。
+  const assembledTurnContextProviders = captureTurnContextProviders(
+    options.turnContextProviders,
+  );
   const { roles: baseRoles, config, resolvedRoles } = createProviderRoles({
     config: options.providerConfiguration.config,
     credentials: options.providerConfiguration.credentials,
@@ -1090,11 +1123,14 @@ export async function createAgentRuntime(
     }
   };
 
-  // Per-turn 上下文注入器：时间 + 后续注册的 provider（如 scheduler）
+  // Per-turn 上下文注入器：内建时间在前，宿主贡献按装配输入顺序一次性注册。
   const turnContextInjector = new TurnContextInjector();
   turnContextInjector.register(
     new TimeProvider(Intl.DateTimeFormat().resolvedOptions().timeZone),
   );
+  for (const provider of assembledTurnContextProviders) {
+    turnContextInjector.register(provider);
+  }
 
   // 解析模型预算信息 —— resolver 保证 info 永不为 undefined。
   // 数据源四层（高 → 低）：
@@ -1206,10 +1242,6 @@ export async function createAgentRuntime(
     providerId: roles[primaryRole].provider.id,
     model: roles[primaryRole].model,
     confirmationBroker,
-
-    registerTurnContextProvider(provider: TurnContextProvider): void {
-      turnContextInjector.register(provider);
-    },
 
     registerConversationStateReset(target: Resettable): void {
       resettables.push(target);

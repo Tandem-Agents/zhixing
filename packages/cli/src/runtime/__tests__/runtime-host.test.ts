@@ -6,7 +6,7 @@
  *     createAgentRuntime;extra tools 经 assembly 装配;main/ephemeral 工作区由
  *     createAgentRuntime 按配置解析,host 不持用户启动覆盖
  *   - schedule 工具只持 scheduler facade；权威来源由 owner 从 ingress 反绑
- *   - onRuntimeCreated:两条发放路径都被调用(杜绝"某入口漏注册")
+ *   - turnContextProviders:会话 / 场景 / ephemeral 都在工厂调用前取得固定输入
  *
  * mock 策略:createAgentRuntime stub 捕获装配参数;assembly 用真实形态的最小
  * stub(assembleTools 透传 ctx 供断言)。
@@ -33,7 +33,15 @@ type AssembledCtx = {
 
 function makeHostOptions() {
   const assembled: AssembledCtx[] = [];
-  const onRuntimeCreated = vi.fn();
+  const issuedProviderSets: Array<readonly unknown[]> = [];
+  const turnContextProviders = vi.fn(() => {
+    const providers = Object.freeze([
+      { id: "scheduler", shouldInject: () => false, render: () => ({ title: "", body: "" }) },
+      { id: "task-list", shouldInject: () => false, render: () => ({ title: "", body: "" }) },
+    ]);
+    issuedProviderSets.push(providers);
+    return providers;
+  });
   const segmentDeps = { marker: "segment-deps" };
   const decorateRunBus = () => () => {};
   const artifactStore = { marker: "artifact-store" };
@@ -53,12 +61,13 @@ function makeHostOptions() {
     scheduler: () => ({ marker: "facade" }),
     decorateRunBus,
     onSecurityBlocked: vi.fn(),
-    onRuntimeCreated,
+    turnContextProviders,
   } as never;
   return {
     options,
     assembled,
-    onRuntimeCreated,
+    issuedProviderSets,
+    turnContextProviders,
     segmentDeps,
     decorateRunBus,
     artifactStore,
@@ -93,21 +102,42 @@ describe("资产层透传", () => {
     expect(params.systemProtectedPaths).toBe(options.systemProtectedPaths);
   });
 
-  it("onRuntimeCreated 在会话 / 场景 / ephemeral 三条发放路径都被调用", async () => {
-    const { options, onRuntimeCreated } = makeHostOptions();
+  it("会话 / 场景 / ephemeral 三条发放路径都在发布前传入独立的 fixed providers", async () => {
+    const { options, issuedProviderSets, turnContextProviders } = makeHostOptions();
     const host = new RuntimeHost(options);
 
-    const conv = await host.createConversationRuntime();
-    const ws = await host.createWorksceneRuntime({
+    await host.createConversationRuntime();
+    await host.createWorksceneRuntime({
       scene: workscene("s1", "场景"),
       absolutePath: null,
     });
-    const eph = await host.createEphemeralRuntime();
+    await host.createEphemeralRuntime();
 
-    expect(onRuntimeCreated).toHaveBeenCalledTimes(3);
-    expect(onRuntimeCreated).toHaveBeenNthCalledWith(1, conv);
-    expect(onRuntimeCreated).toHaveBeenNthCalledWith(2, ws);
-    expect(onRuntimeCreated).toHaveBeenNthCalledWith(3, eph);
+    expect(turnContextProviders).toHaveBeenCalledTimes(3);
+    expect(issuedProviderSets).toHaveLength(3);
+    expect(new Set(issuedProviderSets).size).toBe(3);
+    for (const [index, providers] of issuedProviderSets.entries()) {
+      expect(Object.isFrozen(providers)).toBe(true);
+      expect(providers.map((provider) => (provider as { id: string }).id)).toEqual([
+        "scheduler",
+        "task-list",
+      ]);
+      expect(createAgentRuntimeMock.mock.calls[index]![0].turnContextProviders).toBe(
+        providers,
+      );
+    }
+  });
+
+  it("provider factory 失败时 fail fast，不调用 createAgentRuntime 发布半装配实例", async () => {
+    const { options } = makeHostOptions();
+    const failure = new Error("provider assembly failed");
+    options.turnContextProviders = () => {
+      throw failure;
+    };
+    const host = new RuntimeHost(options);
+
+    await expect(host.createConversationRuntime()).rejects.toBe(failure);
+    expect(createAgentRuntimeMock).not.toHaveBeenCalled();
   });
 
   it("workscene 装配:只消费本机解析路径、无 workspace 显式 null，并绑定 power 角色与显式场景身份", async () => {

@@ -43,6 +43,7 @@ import {
   type Message,
   type ToolDefinition,
   type SkillCatalogEntry,
+  type TurnContextProvider,
 } from "@zhixing/core";
 import type { RoleDegradation } from "@zhixing/providers";
 import type {
@@ -287,6 +288,60 @@ describe("createAgentRuntime · execution authority facts", () => {
 
     (profile.tools as string[]).push("tampered");
     expect(runtime.executionProfile().tools).not.toContain("tampered");
+  });
+});
+
+describe("createAgentRuntime · immutable turn-context assembly", () => {
+  const provider = (id: string, body: string): TurnContextProvider => ({
+    id,
+    shouldInject: () => true,
+    render: () => ({ title: id, body }),
+  });
+
+  it("captures the ordered provider input before publication and keeps TimeProvider first", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const mutableProviders = [
+      provider("scheduler", "scheduler-body"),
+      provider("task-list", "task-list-body"),
+    ];
+    const runtime = await createAgentRuntime({
+      turnContextProviders: mutableProviders,
+    });
+
+    mutableProviders.reverse();
+    mutableProviders.pop();
+    await runKernel(runtime, {
+      modelInput: { messages: [userMessage("hello")] },
+      identity: { turnIndex: 0 },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
+
+    const requestText = JSON.stringify(providerRef.current.calls[0]!.messages);
+    const timeIndex = requestText.indexOf("当前时间");
+    const schedulerIndex = requestText.indexOf("scheduler-body");
+    const taskListIndex = requestText.indexOf("task-list-body");
+    expect(timeIndex).toBeGreaterThanOrEqual(0);
+    expect(schedulerIndex).toBeGreaterThan(timeIndex);
+    expect(taskListIndex).toBeGreaterThan(schedulerIndex);
+    expect("registerTurnContextProvider" in runtime).toBe(false);
+  });
+
+  it("rejects invalid or duplicate provider registrations before runtime assembly", async () => {
+    await expect(
+      createAgentRuntime({
+        turnContextProviders: [provider("time", "spoofed-time")],
+      }),
+    ).rejects.toThrow("Duplicate turn-context provider: time");
+    expect(resolveWorkspaceMock).not.toHaveBeenCalled();
+
+    await expect(
+      createAgentRuntime({
+        turnContextProviders: [undefined as unknown as TurnContextProvider],
+      }),
+    ).rejects.toThrow("Invalid turn-context provider assembly input");
+    expect(resolveWorkspaceMock).not.toHaveBeenCalled();
   });
 });
 
