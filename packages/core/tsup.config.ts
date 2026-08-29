@@ -25,6 +25,7 @@ export default defineConfig({
     "src/persistence/index.ts",
     "src/authority/index.ts",
     "src/delivery/index.ts",
+    "src/delivery/resolution-application.ts",
     "src/environment/index.ts",
     "src/test-support/s7-durable.ts",
     "src/test-support/s7-durable-harness.ts",

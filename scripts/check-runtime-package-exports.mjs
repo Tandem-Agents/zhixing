@@ -3,6 +3,7 @@ import { access, readFile } from "node:fs/promises";
 const [
   coreRoot,
   coreSkillCatalog,
+  coreDeliveryApplication,
   coreProductApi,
   coreAuthority,
   corePersistence,
@@ -34,6 +35,7 @@ const [
 ] = await Promise.all([
   import("../packages/core/dist/index.js"),
   import("../packages/core/dist/skills/catalog-application.js"),
+  import("../packages/core/dist/delivery/resolution-application.js"),
   import("../packages/core/dist/product-api/catalog.js"),
   import("../packages/core/dist/authority/index.js"),
   import("../packages/core/dist/persistence/index.js"),
@@ -601,6 +603,22 @@ async function verifyCorePackageExports(failures) {
   ) {
     failures.push("core-exports:product-api:invalid-runtime-boundary");
   }
+  const deliveryApplicationConditions = manifest.exports["./delivery/application"];
+  if (
+    !deliveryApplicationConditions ||
+    deliveryApplicationConditions.types !==
+      "./dist/delivery/resolution-application.d.ts" ||
+    deliveryApplicationConditions.import !==
+      "./dist/delivery/resolution-application.js" ||
+    typeof coreDeliveryApplication.DeliveryUncertainResolutionApplicationService !==
+      "function" ||
+    typeof coreDeliveryApplication.createDeliveryResolutionProductApiContribution !==
+      "function" ||
+    "DeliveryUncertainResolutionApplicationService" in coreRoot ||
+    "createDeliveryResolutionProductApiContribution" in coreRoot
+  ) {
+    failures.push("core-exports:delivery-application:invalid-runtime-boundary");
+  }
   for (const [subpath, conditions] of Object.entries(manifest.exports)) {
     if (
       subpath !== "./product-api" &&
@@ -610,6 +628,17 @@ async function verifyCorePackageExports(failures) {
         conditions.import === productApiConditions?.import)
     ) {
       failures.push(`core-exports:${subpath}:duplicate-product-api-entry`);
+    }
+  }
+  for (const [subpath, conditions] of Object.entries(manifest.exports)) {
+    if (
+      subpath !== "./delivery/application" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === deliveryApplicationConditions?.types ||
+        conditions.import === deliveryApplicationConditions?.import)
+    ) {
+      failures.push(`core-exports:${subpath}:duplicate-delivery-application-entry`);
     }
   }
   for (const [subpath, conditions] of Object.entries(manifest.exports)) {

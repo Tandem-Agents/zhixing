@@ -13,6 +13,10 @@ import {
   type DeliveryEnqueueInput,
 } from "@zhixing/core/delivery";
 import {
+  DeliveryUncertainResolutionApplicationService,
+  type DeliveryUncertainResolutionCommand,
+} from "@zhixing/core/delivery/application";
+import {
   createConversationSealedBundle,
   sealedBundleArtifact,
 } from "@zhixing/core/protocol";
@@ -23,7 +27,7 @@ import {
   createDeliveryControlEnvelope,
   type TrustedControlSource,
 } from "../control-admission.js";
-import { applyDeliveryResolutionControl } from "../delivery-control.js";
+import { createDeliveryResolutionCorrectnessPort } from "../delivery-control.js";
 import {
   DURABLE_IO_TEST_TIMEOUT_MS,
   trackAuthorityLog,
@@ -134,6 +138,33 @@ function source(): TrustedControlSource {
   };
 }
 
+function commandFromEnvelope(
+  envelope: ReturnType<typeof createDeliveryControlEnvelope>,
+): DeliveryUncertainResolutionCommand {
+  return {
+    requestId: envelope.requestId,
+    itemId: envelope.body.itemId,
+    attempt: envelope.body.attempt,
+    anchorEpoch: envelope.body.anchorEpoch,
+    openFactDigest: envelope.body.openFactDigest,
+    decision: envelope.body.decision,
+    principal: envelope.principal,
+  };
+}
+
+function application(input: {
+  readonly admission: ControlAdmissionJournal;
+  readonly authority: DeliveryAuthority;
+  readonly onResolved?: Parameters<typeof createDeliveryResolutionCorrectnessPort>[0]["onResolved"];
+}) {
+  return new DeliveryUncertainResolutionApplicationService(
+    createDeliveryResolutionCorrectnessPort({
+      ...input,
+      clock: () => NOW,
+    }),
+  );
+}
+
 describe("delivery resolution control", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("atomically appends the user decision and its applied control result", async () => {
     const fixture = await createHarness();
@@ -152,18 +183,12 @@ describe("delivery resolution control", { timeout: DURABLE_IO_TEST_TIMEOUT_MS },
       },
     });
 
-    const first = await applyDeliveryResolutionControl({
+    const app = application({
       admission: fixture.admission,
       authority: fixture.authority,
-      envelope,
-      source: trusted,
     });
-    const replay = await applyDeliveryResolutionControl({
-      admission: fixture.admission,
-      authority: fixture.authority,
-      envelope,
-      source: trusted,
-    });
+    const first = await app.execute(commandFromEnvelope(envelope));
+    const replay = await app.execute(commandFromEnvelope(envelope));
 
     expect(first).toMatchObject({
       kind: "applied",
@@ -252,12 +277,10 @@ describe("delivery resolution control", { timeout: DURABLE_IO_TEST_TIMEOUT_MS },
     ]);
 
     await expect(
-      applyDeliveryResolutionControl({
+      application({
         admission: new ControlAdmissionJournal(fixture.log, fixture.artifacts),
         authority: new DeliveryAuthority({ log: fixture.log, anchorEpoch: 7 }),
-        envelope,
-        source: trusted,
-      }),
+      }).execute(commandFromEnvelope(envelope)),
     ).rejects.toThrow("does not bind its durable control request");
   });
 
@@ -278,16 +301,43 @@ describe("delivery resolution control", { timeout: DURABLE_IO_TEST_TIMEOUT_MS },
       },
     });
 
-    const result = await applyDeliveryResolutionControl({
+    const result = await application({
       admission: fixture.admission,
       authority: fixture.authority,
-      envelope,
-      source: trusted,
-    });
+    }).execute(commandFromEnvelope(envelope));
 
     expect(result.result).toMatchObject({
       status: "rejected",
       error: { code: "epoch-stale" },
+    });
+    expect(await fixture.authority.get(fixture.item.id)).toMatchObject({ state: "uncertain" });
+  });
+
+  it("rejects an open-fact mismatch without appending a resolution fact", async () => {
+    const fixture = await createHarness();
+    const trusted = source();
+    const envelope = createDeliveryControlEnvelope({
+      requestId: "delivery-resolution-open-fact-mismatch",
+      source: trusted,
+      at: NOW,
+      body: {
+        t: "delivery-resolve",
+        itemId: fixture.item.id,
+        attempt: fixture.item.currentAttempt,
+        anchorEpoch: 7,
+        openFactDigest: `sha256:${"f".repeat(64)}`,
+        decision: "abandon",
+      },
+    });
+
+    const result = await application({
+      admission: fixture.admission,
+      authority: fixture.authority,
+    }).execute(commandFromEnvelope(envelope));
+
+    expect(result.result).toMatchObject({
+      status: "rejected",
+      error: { code: "fence-rejected" },
     });
     expect(await fixture.authority.get(fixture.item.id)).toMatchObject({ state: "uncertain" });
   });
@@ -322,13 +372,11 @@ describe("delivery resolution control", { timeout: DURABLE_IO_TEST_TIMEOUT_MS },
           };
 
       await expect(
-        applyDeliveryResolutionControl({
+        application({
           admission: fixture.admission,
           authority: fixture.authority,
-          envelope,
-          source: trusted,
           onResolved: observer,
-        }),
+        }).execute(commandFromEnvelope(envelope)),
       ).resolves.toMatchObject({
         kind: "applied",
         result: { status: "ok", body: { applied: true } },
@@ -393,12 +441,10 @@ describe("delivery resolution control", { timeout: DURABLE_IO_TEST_TIMEOUT_MS },
       statusHistory: async () => [],
     } as unknown as DeliveryAuthority;
 
-    await expect(applyDeliveryResolutionControl({
+    await expect(application({
       admission,
       authority,
-      envelope,
-      source: trusted,
-    })).rejects.toThrow(
+    }).execute(commandFromEnvelope(envelope))).rejects.toThrow(
       "Delivery enqueue must have exactly one matching authority source fact",
     );
   });

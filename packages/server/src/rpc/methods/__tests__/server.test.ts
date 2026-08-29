@@ -1,5 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import type { ExecutionStatusNotice } from "@zhixing/core/contracts";
+import {
+  createDeliveryResolutionProductApiContribution,
+  DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET,
+  type DeliveryUncertainResolutionApplication,
+} from "@zhixing/core/delivery/application";
+import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import type { RuntimeControlAdapter } from "../../../context.js";
 import {
   buildServerShutdownMethod,
@@ -845,11 +851,24 @@ function cursorWithRevision<T extends object>(
 }
 
 describe("delivery.resolve", () => {
+  function deliveryProductApi(
+    execute: DeliveryUncertainResolutionApplication["execute"],
+  ): ProductApiDispatcher {
+    return new ProductApiDispatcher(DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET, [
+      createDeliveryResolutionProductApiContribution({ execute }),
+    ]);
+  }
+
   it("forwards a validated decision with the authenticated surface identity", async () => {
-    const resolveDelivery = vi.fn(async () => ({ status: "ok" }));
+    const execute = vi.fn<DeliveryUncertainResolutionApplication["execute"]>(async (command) => ({
+      kind: "applied",
+      canonicalRequestId: command.requestId,
+      result: { v: 1, status: "ok", body: { t: "delivery-resolve", applied: true } },
+      authorityRevision: 8,
+    }));
     const ctx = {
       ...mkCtx({
-        runtimeControl: { resolveDelivery },
+        productApi: deliveryProductApi(execute),
         conversations: {
           durableControlPrincipal: (input: {
             surfacePrincipal: string;
@@ -873,9 +892,12 @@ describe("delivery.resolve", () => {
     } as const;
 
     await expect(buildDeliveryResolveMethod().handler(params, ctx)).resolves.toEqual({
-      status: "ok",
+      kind: "applied",
+      canonicalRequestId: "resolution-1",
+      result: { v: 1, status: "ok", body: { t: "delivery-resolve", applied: true } },
+      authorityRevision: 8,
     });
-    expect(resolveDelivery).toHaveBeenCalledWith({
+    expect(execute).toHaveBeenCalledWith({
       ...params,
       principal: {
         surfacePrincipal: "rpc:desktop",
@@ -893,7 +915,7 @@ describe("delivery.resolve", () => {
   });
 
   it("rejects invalid request, item, and derived surface identifiers", async () => {
-    const resolveDelivery = vi.fn();
+    const execute = vi.fn<DeliveryUncertainResolutionApplication["execute"]>();
     const entry = buildDeliveryResolveMethod();
     const valid = {
       requestId: "resolution-1",
@@ -905,7 +927,7 @@ describe("delivery.resolve", () => {
     };
     const ctx = {
       ...mkCtx({
-        runtimeControl: { resolveDelivery },
+        productApi: deliveryProductApi(execute),
         conversations: {
           durableControlPrincipal: (input: {
             surfacePrincipal: string;
@@ -938,7 +960,91 @@ describe("delivery.resolve", () => {
         },
       } as never),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
-    expect(resolveDelivery).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("fails closed with the existing wire error when the Host has no Delivery contribution", async () => {
+    const ctx = mkCtx({
+      conversations: {
+        durableControlPrincipal: () => ({
+          surfacePrincipal: "rpc:desktop",
+          deviceId: "anchor-device",
+          connectionId: "7",
+        }),
+      } as never,
+    });
+    ctx.connection = {
+      id: 7,
+      authenticated: true,
+      clientInfo: { id: "desktop" },
+    } as never;
+    await expect(buildDeliveryResolveMethod().handler({
+      requestId: "resolution-1",
+      itemId: "dlv-01KXPWTM80BYB4SH423EJT1CVN",
+      attempt: 1,
+      anchorEpoch: 2,
+      openFactDigest: `sha256:${"a".repeat(64)}`,
+      decision: "abandon",
+    }, ctx)).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.INTERNAL_ERROR,
+      message: "delivery resolution is not available",
+    });
+  });
+
+  it("preserves the public result through the real RPC dispatcher", async () => {
+    const execute = vi.fn<DeliveryUncertainResolutionApplication["execute"]>(async (command) => ({
+      kind: "replayed",
+      canonicalRequestId: command.requestId,
+      result: { v: 1, status: "ok", body: { t: "delivery-resolve", applied: true } },
+      authorityRevision: 11,
+      commitLsn: 13,
+    }));
+    const registry = new HandlerRegistry();
+    registry.register(buildDeliveryResolveMethod());
+    const server = mkCtx({
+      productApi: deliveryProductApi(execute),
+      conversations: {
+        durableControlPrincipal: (input: {
+          surfacePrincipal: string;
+          connectionId: string;
+        }) => ({ ...input, deviceId: "anchor-device" }),
+      } as never,
+    }).server;
+    const dispatcher = new RpcDispatcher({ registry, server });
+    const sendSuccess = vi.fn();
+    const sendError = vi.fn();
+    await dispatcher.handleMessage({
+      id: 7,
+      authenticated: true,
+      loopback: true,
+      closed: false,
+      clientInfo: { id: "desktop" },
+      sendSuccess,
+      sendError,
+      notify: vi.fn(),
+      close: vi.fn(),
+      onClose: () => () => undefined,
+    }, JSON.stringify({
+      jsonrpc: "2.0",
+      id: "delivery-wire",
+      method: "delivery.resolve",
+      params: {
+        requestId: "resolution-wire",
+        itemId: "dlv-01KXPWTM80BYB4SH423EJT1CVN",
+        attempt: 1,
+        anchorEpoch: 2,
+        openFactDigest: `sha256:${"a".repeat(64)}`,
+        decision: "retry-risk-ack",
+      },
+    }));
+    expect(sendError).not.toHaveBeenCalled();
+    expect(sendSuccess).toHaveBeenCalledWith("delivery-wire", {
+      kind: "replayed",
+      canonicalRequestId: "resolution-wire",
+      result: { v: 1, status: "ok", body: { t: "delivery-resolve", applied: true } },
+      authorityRevision: 11,
+      commitLsn: 13,
+    });
   });
 });
 

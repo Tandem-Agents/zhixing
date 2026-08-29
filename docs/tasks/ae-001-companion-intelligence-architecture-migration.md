@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A4 已通过阶段退出门；A4-10 等待纳入提交<br>
+> 当前检查点：A5-01 已通过独立验收，等待纳入提交；Delivery 领域仍未完成<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,10 +202,10 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `f9d86268 + A4-10 accepted worktree`；A0～A4 已由协调者独立复核，A1～A4 阶段退出门成立；A4-10 等待纳入提交 |
+| 已接受基线 | `ca8608b6 + A5-01 accepted worktree`；A0～A4 已提交，A5-01 已由协调者独立复核并等待纳入提交 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | 无；A4-10 已通过协调者独立验收，等待提交 |
-| 下一责任链 | 从 A5 未完成领域中选择当前价值最高、依赖已满足且可在 2～4 小时闭合的单一事实所有权 |
+| 活跃工作包 | 无；A5-01 已通过协调者独立验收，等待提交 |
+| 下一责任链 | 沿同一 Delivery 责任链迁移义务产生、终态与 Channel effect；继续拆成 2～4 小时、单一可证伪结果的工作包 |
 | 打开的单向桥 | 无；Skill 管理、保存、admission、load/usage、Kernel 与 Executor 投影均只经 `@zhixing/core/skills/catalog` 及既有 Authority/CAS/assignment Correctness 端口成立，旧 writable Store 不再承担正式应用行为 |
 | 已失效证据 | 无当前未恢复证据；A4-10 已恢复 A4-07/A4-08 的包级产品无知结论，A4 全部合同与退出证据当前有效 |
 | 阻塞/用户决策 | 无 |
@@ -1705,6 +1705,22 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 结构与反向证据：S7 现在从 CLI 私有 owner 机械重取 extra-tool descriptor，同时要求四个私有实现存在、runtime-host 四个旧源码路径/根转导/tsup entry/产品实现 import 不存在；manifest mutation 拒绝旧 subpath 与 `mcp/tools-builtin` 依赖，consumer mutation 拒绝旧 runtime-host subpath 回流。fresh package-export gate 还直接检查 manifest、root/build、source 与清理后的 dist，任一旧 JS/DTS 文件、第二 export 或依赖恢复都会失败。
 - 直接验证与状态：迁移文件、Workscene projection、RuntimeHost 与四形态 Kernel Conformance 共 6 文件 56/56；canonical `pnpm s7:lint` 为 30/30 且 registry golden 无漂移；`runtime-host` fresh build、CLI typecheck、`pnpm cli:build`、fresh `pnpm runtime:package-exports`、最窄 Biome 和 `git diff --check` 均通过。若四个实现/消费者、runtime-host source/manifest/exports/build/declarations、S7 mutation 或 package-export 输入变化，只恢复 A4-10 对应闭包；A4 与完成度继续为 `[ ]` / `4/8`，下一步只允许协调者独立复核与 A4 退出门冷启动反查，未进入 A5/A6/A7，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收与 A4 退出门：从 CLI/Anchor 生产组合根、四个迁移实现、全部直接消费者、RuntimeHost manifest/source/root/subpath/build/fresh declaration 和 Kernel 四形态反向核对，确认产品装配只有一个 Anchor 私有落点，RuntimeHost 只剩通用 assembly、冻结投影与 Kernel/Conversation adapter；没有兼容转导、第二实现、产品状态机或产品依赖残余。独立重跑六个直接文件 56/56、canonical S7 30/30、registry golden、fresh package exports 与 `git diff --check`，并用静态反向搜索确认旧生产 subpath 和管理入口归零。结合 A4-01～A4-09 当前未失效的 Envelope、Event、Terminal、封装、不可变装配、产品投影和 Conformance 证据，冷启动复核未发现未处置反证；接受 `A4-10-runtime-host-product-assembly-exit-v1`，关闭 A4，完成度更新为 `5/8`。
+
+### A5-01：归位 Delivery uncertain-resolution 应用决定与 Product API binding
+
+- 派发基线：`HEAD ca8608b6 + task-doc:A5-01-dispatch`；A4 已由协调者独立复核并提交，派发前索引与工作区为空。
+- 唯一架构结果：`delivery.resolve` 只调用 Delivery 领域拥有的 uncertain-resolution 应用命令并经 Product API dispatch；Server/RPC 只保留认证、参数解析、稳定 principal 取得、调用和错误/结果映射，`ServerContext.runtimeControl.resolveDelivery` 与 CLI 同名闭包旧旁路彻底退场。
+- 生产闭包：从当前 `RPC handler → ServerContext.runtimeControl → CLI closure → DeliveryStack.resolve → applyDeliveryResolutionControl → DeliveryAuthority` 正反追踪，在现有 Delivery 窄边界形成不可变 command descriptor、应用入口和 Product API contribution，并与已存在的 Skill contribution 组合成一个 sealed dispatcher。保持 control admission、authority coordinate/commit、epoch/open-fact 校验、三种 decision、幂等 replay、durable principal、post-commit status notice 和 wire 结果完全等价；Product API 不复制 Delivery reducer、authority 或通知事实。
+- 旧路与门禁：删除 runtime-control 类型字段、Anchor closure、handler 直调及其测试自证；禁止兼容字段、别名、第二 dispatcher、第二 application 或 Product API 与旧回调双写。结构证据必须识别 `delivery.resolve` 绕过 Product API、旧字段回流、缺贡献/重复贡献、descriptor 漂移和 Server 取得 Delivery 实现对象。
+- 明确不做：不迁移 enqueue/participant、outbox/receipt、sender/transport、accepted-work lifecycle、Channel、Schedule、Advancement 或整个 Delivery 领域；不改变 RPC 方法名、参数、认证、错误、通知与公开行为，不拆新包或预建通用领域框架。
+- 直接证据：最窄覆盖真实应用的 applied/replayed/rejected、stale epoch/open-fact mismatch、observer failure 不回滚 durable fact；真实 RPC dispatcher 的合法调用、参数/身份拒绝、缺少贡献 fail closed、wire 等价；Anchor 唯一 Catalog composition、operation exact-set 和旧 runtimeControl 归零。只运行受影响的 core/owner-kernel/server/CLI 直接测试、必要依赖顺序构建、canonical S7、fresh package exports 与最窄格式检查，不重复 A4、根级回归或制品验收。
+- 完成与止损：只有 uncertain-resolution command 的合同、应用决定、权威提交、Product API 和 RPC binding 形成一条唯一生产链，旧旁路归零且直接证据成立，才算完成。预计超过四小时、需要改变 Delivery/Conversation 产品语义、出现两个可独立失败的未知或无法保持单一写入口时，停在可构建、可运行、无双链的检查点反馈；不得顺带迁移其余 Delivery 责任。
+- 实施结果：新增唯一窄入口 `@zhixing/core/delivery/application`，由 Delivery 拥有 readonly `DeliveryUncertainResolutionCommand`、三种 decision、耐久 outcome、单一 `DeliveryUncertainResolutionApplicationService`、`delivery.command.resolve-uncertain` descriptor 与无 Product API Fact 的 contribution；该入口有独立 package export/build entry，未进入 core 根或既有 `delivery` barrel。Product API 的 `supports(descriptor)` 只暴露封存 Catalog 的有限能力存在性，使未装配 Delivery 的 Host 保持原 `delivery resolution is not available` fail-closed wire，不暴露应用或实现对象。
+- 领域决定、Correctness 与权威链：`DeliveryUncertainResolutionApplicationService` 在冻结 command 后唯一调用 `decideDeliveryResolution`，把三种 decision、epoch/open-fact fence 与 principal 归于 Delivery 应用决定；`@zhixing/owner-kernel/delivery` 的 `createDeliveryResolutionCorrectnessPort` 只提供当前 projection/transaction time/anchor epoch 的有限决定上下文、从 command 构造控制 envelope，并复用原 `ControlAdmissionJournal.applyAuthority → DeliveryAuthority.coordinate → delivery/control 同提交`，不再调用或复制领域决定。applied 后仍异步发送原 `DeliveryStatusNotice`，observer 同步/异步失败不回滚 durable fact。`setupDelivery` 只把该端口注入领域应用并暴露应用合同，不再暴露 `resolve` 写入口；request identity、principal、applied/replayed/rejected、commit LSN 与响应丢失语义未改。
+- Product API 与 RPC binding：Anchor 仍只构造一个 `ProductApiDispatcher`，Skill contribution 恒定在场，Delivery stack 在场时把 Delivery exact-set/contribution 一次性并入同一 sealed Catalog；未装配时 Catalog 不宣称该能力。`delivery.resolve` handler 只做既有严格参数解析、认证 surface principal 与 durable principal 取得、descriptor 支持检查、command dispatch 和 result 返回；`ServerContext.runtimeControl.resolveDelivery`、`command.ts` 同名 closure、`DeliveryStack.resolve`、`applyDeliveryResolutionControl` 及对应旧测试主链全部归零，公开 RPC 名、参数、认证、错误和结果形状不变。
+- 结构与反向证据：S7 与 fresh package-export gate 冻结 Delivery application 唯一窄 subpath、descriptor/contribution exact-set、一个 Host dispatcher、Skill + 条件 Delivery 组合、owner-kernel Correctness 端口和 handler dispatch；反向 mutation 可识别旧 runtimeControl 字段/handler 旁路、Delivery contribution 丢失或改接 Skill、application 根/barrel 泄漏、重复 export 与旧 apply/resolve owner 回流。Product API constructor 原有 duplicate/missing/unknown/kind/descriptor/fact fail-closed 继续覆盖缺失或重复 contribution。
+- 直接验证与状态：当前基线的领域/Product API、耐久 Delivery control、真实 RPC dispatcher/wire 与 Anchor/Delivery 组合共 6 文件 81/81；其中 applied/replayed、stale epoch、open-fact mismatch、durable request binding、orphan source、observer failure、缺 contribution、参数/身份拒绝和公开 result 均有直接反例。core、owner-kernel、server 与 CLI 依赖顺序构建通过，CLI 包内 typecheck、canonical `pnpm s7:lint`、fresh `pnpm runtime:package-exports`、最窄 Biome 与 `git diff --check` 通过。A5 与 Delivery 行继续为 `[ ]`；下一步只允许协调者独立复核本包，接受后沿同一 Delivery 责任链迁移义务产生、终态与 Channel effect，未进入其他领域或 A6/A7，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：从唯一 RPC 方法、ServerContext、Anchor Catalog 组合、DeliveryStack 应用发放、Correctness 端口、ControlAdmission 与 DeliveryAuthority 同提交反向核对，确认领域决定、应用入口、耐久机制和 Surface binding 各自只有一个 owner；旧 `runtimeControl.resolveDelivery`、`DeliveryStack.resolve` 与 `applyDeliveryResolutionControl` 生产入口归零，未形成第二 dispatcher、第二决定或通知双写。独立重跑六个直接文件 81/81、canonical S7 30/30、registry golden、fresh package exports 与 `git diff --check`，静态反查确认旧符号仅剩负向门禁。接受 `A5-01-delivery-uncertain-resolution-product-api-v1`；Delivery 其余义务、终态、效果与生命周期尚未迁移，因此 Delivery 行和 A5 继续为 `[ ]`。
 
 ## 十、用户提示词
 

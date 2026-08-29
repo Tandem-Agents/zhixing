@@ -3033,6 +3033,8 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
 test("Skill Catalog management, load, save, admission and Kernel projection have one domain application boundary", async () => {
   const paths = [
     "packages/core/src/skills/catalog-application.ts",
+    "packages/core/src/delivery/resolution-application.ts",
+    "packages/core/src/delivery/index.ts",
     "packages/core/src/product-api/catalog.ts",
     "packages/core/src/skills/global-state-adapter.ts",
     "packages/core/src/index.ts",
@@ -3044,6 +3046,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/rpc/package.json",
     "packages/rpc/tsup.config.ts",
     "packages/server/src/rpc/methods/skill.ts",
+    "packages/server/src/rpc/methods/server.ts",
     "packages/server/src/context.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/runtime/rpc-management-facade.ts",
@@ -3052,6 +3055,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/cli/src/skills/manager-command.ts",
     "packages/cli/src/commands/skill-command-source.ts",
     "packages/cli/src/setup-delivery.ts",
+    "packages/owner-kernel/src/delivery-control.ts",
     "packages/cli/src/serve/management-directories.ts",
     "packages/orchestrator/src/runtime/assignment-skill-port.ts",
     "packages/core/src/protocol/assignment-mutation.ts",
@@ -3260,6 +3264,43 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       ),
     )).join("\n"),
     /exactly one Product API dispatcher construction|install one Product API dispatcher/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/server.ts",
+      (text) => text.replace(
+        "productApi.command(DELIVERY_RESOLVE_UNCERTAIN_COMMAND",
+        "ctx.server.runtimeControl.resolveDelivery(",
+      ),
+    )).join("\n"),
+    /delivery\.resolve bypasses the Product API dispatcher/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/context.ts",
+      (text) => text.replace(
+        "beginDrain?: () => Promise<void>;",
+        "resolveDelivery?: (input: unknown) => Promise<unknown>;\n  beginDrain?: () => Promise<void>;",
+      ),
+    )).join("\n"),
+    /expose only the Product API dispatcher binding/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "createDeliveryResolutionProductApiContribution(",
+        "createSkillCatalogProductApiContribution(",
+      ),
+    )).join("\n"),
+    /Skill and Delivery contributions/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/delivery/index.ts",
+      (text) => `${text}\nexport * from "./resolution-application.js";`,
+    )).join("\n"),
+    /one narrow non-root core subpath/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(

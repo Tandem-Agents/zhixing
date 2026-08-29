@@ -45,7 +45,14 @@ import {
   SKILL_CATALOG_PRODUCT_API_EXACT_SET,
   SkillCatalogApplicationService,
 } from "@zhixing/core/skills/catalog";
-import { ProductApiDispatcher } from "@zhixing/core/product-api";
+import {
+  createDeliveryResolutionProductApiContribution,
+  DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET,
+} from "@zhixing/core/delivery/application";
+import {
+  defineProductApiExactSet,
+  ProductApiDispatcher,
+} from "@zhixing/core/product-api";
 import { DeviceLifecycleJournal } from "@zhixing/core/authority";
 import {
   protocolDigest,
@@ -1870,6 +1877,34 @@ async function runServerProcess(
   if (localRetirementCompletedBeforeServerStart) {
     throw new Error("This device has completed local retirement and cannot start normally");
   }
+  const deliveryProductApi = ctx.deliveryStack
+    ? createDeliveryResolutionProductApiContribution(
+        ctx.deliveryStack.resolutionApplication,
+      )
+    : undefined;
+  const productApi = new ProductApiDispatcher(
+    defineProductApiExactSet({
+      operations: [
+        ...SKILL_CATALOG_PRODUCT_API_EXACT_SET.operations,
+        ...(deliveryProductApi
+          ? DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET.operations
+          : []),
+      ],
+      factEvents: [
+        ...SKILL_CATALOG_PRODUCT_API_EXACT_SET.factEvents,
+        ...(deliveryProductApi
+          ? DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET.factEvents
+          : []),
+      ],
+    }),
+    [
+      createSkillCatalogProductApiContribution(new SkillCatalogApplicationService({
+        globalState: () => authorityRuntime.globalState!,
+        anchorEpoch: () => authorityRuntime.anchorEpoch,
+      })),
+      ...(deliveryProductApi ? [deliveryProductApi] : []),
+    ],
+  );
   let serverCtx: ServerContext;
   serverCtx = createServerContext({
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
@@ -1893,12 +1928,7 @@ async function runServerProcess(
     conversationDirectory,
     workscenes: worksceneDirectory,
     trust: trustDirectory,
-    productApi: new ProductApiDispatcher(SKILL_CATALOG_PRODUCT_API_EXACT_SET, [
-      createSkillCatalogProductApiContribution(new SkillCatalogApplicationService({
-        globalState: () => authorityRuntime.globalState!,
-        anchorEpoch: () => authorityRuntime.anchorEpoch,
-      })),
-    ]),
+    productApi,
     hostInfo: {
       // 宿主单点解析的工作区——接入面 @ 补全 root 取此
       workspace: hostDefaultWorkspace.hostInfoWorkspace,
@@ -2105,21 +2135,6 @@ async function runServerProcess(
       schedulerNotices: (afterRevision) =>
         ctx.jobStatus?.schedulerHistory(afterRevision) ??
         Promise.resolve({ notices: [], nextRevision: afterRevision }),
-      resolveDelivery: async (input) => {
-        if (!ctx.deliveryStack) throw new Error("Delivery stack is unavailable");
-        return ctx.deliveryStack.resolve({
-          requestId: input.requestId,
-          source: { principal: input.principal },
-          body: {
-            t: "delivery-resolve",
-            itemId: input.itemId,
-            attempt: input.attempt,
-            anchorEpoch: input.anchorEpoch,
-            openFactDigest: input.openFactDigest,
-            decision: input.decision,
-          },
-        });
-      },
       beginDrain: async () => {
         managedHostStopping = true;
         ctx.inboundRouter?.refuseNewMessages();

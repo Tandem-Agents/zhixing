@@ -14,18 +14,26 @@ describe("production startup server ownership", () => {
       .toBe(false);
   });
 
-  it("composes one sealed Skill Product API dispatcher at the Anchor Host boundary", async () => {
+  it("composes one sealed Skill and Delivery Product API dispatcher at the Anchor Host boundary", async () => {
     const source = await readSource("command.ts");
     expect(source.match(/new ProductApiDispatcher\(/gu)).toHaveLength(1);
     expect(source.match(/createSkillCatalogProductApiContribution\(/gu)).toHaveLength(1);
+    expect(source.match(/createDeliveryResolutionProductApiContribution\(/gu)).toHaveLength(1);
     expect(source.match(/new SkillCatalogApplicationService\(\{/gu)).toHaveLength(1);
     const context = source.slice(location(source, "serverCtx = createServerContext({"));
-    const dispatcher = location(context, "productApi: new ProductApiDispatcher(");
-    const contribution = location(context, "createSkillCatalogProductApiContribution(");
-    const application = location(context, "new SkillCatalogApplicationService({");
+    const dispatcher = location(source, "const productApi = new ProductApiDispatcher(");
+    const contribution = location(source, "createSkillCatalogProductApiContribution(");
+    const application = location(source, "new SkillCatalogApplicationService({");
+    const deliveryContribution = location(
+      source,
+      "createDeliveryResolutionProductApiContribution(",
+    );
     expect(contribution).toBeGreaterThan(dispatcher);
     expect(application).toBeGreaterThan(contribution);
+    expect(deliveryContribution).toBeLessThan(dispatcher);
+    expect(context).toContain("productApi,");
     expect(context).not.toContain("skillCatalog:");
+    expect(context).not.toContain("resolveDelivery:");
   });
 
   it("keeps the anchor endpoint inactive until every open prerequisite has one cleanup owner", async () => {

@@ -154,6 +154,10 @@ export type DeliveryResolutionDecision =
       };
     };
 
+interface DeliveryResolutionDecisionContext {
+  readonly at: string;
+}
+
 export function emptyDeliveryProjection(): DeliveryProjection {
   return { items: new Map(), itemByKey: new Map(), statusNotices: new Map() };
 }
@@ -494,7 +498,7 @@ export function reduceDeliveryAuthorityRecord(
 export function decideDeliveryResolution(
   state: DeliveryProjection,
   input: DeliveryResolutionInput,
-  context: ProjectionTransactionContext,
+  context: DeliveryResolutionDecisionContext,
   currentAnchorEpoch: number,
 ): DeliveryResolutionDecision {
   assertDeliveryItemId(input.itemId);

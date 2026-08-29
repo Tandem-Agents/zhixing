@@ -88,6 +88,10 @@
       "types": "./dist/delivery/index.d.ts",
       "import": "./dist/delivery/index.js"
     },
+    "./delivery/application": {
+      "types": "./dist/delivery/resolution-application.d.ts",
+      "import": "./dist/delivery/resolution-application.js"
+    },
     "./environment": {
       "types": "./dist/environment/index.d.ts",
       "import": "./dist/environment/index.js"

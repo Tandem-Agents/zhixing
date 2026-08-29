@@ -123,7 +123,7 @@ describe("setupDelivery authority production path", () => {
     expect(stack.controlAdmission).toBeDefined();
     expect(stack.outboxRegistry).toBeDefined();
     expect(typeof stack.statusHistory).toBe("function");
-    expect(typeof stack.resolve).toBe("function");
+    expect(typeof stack.resolutionApplication.execute).toBe("function");
     expect(typeof stack.stop).toBe("function");
   });
 
@@ -201,23 +201,18 @@ describe("setupDelivery authority production path", () => {
     });
     stack.onStatus(listener);
 
-    await stack.resolve({
+    await stack.resolutionApplication.execute({
       requestId: "request:delivery-resolution",
-      source: {
-        principal: {
-          surfacePrincipal: "surface:user-1",
-          deviceId: "device-1",
-          connectionId: "connection-1",
-        },
+      principal: {
+        surfacePrincipal: "surface:user-1",
+        deviceId: "device-1",
+        connectionId: "connection-1",
       },
-      body: {
-        t: "delivery-resolve",
-        itemId: prepared.value,
-        attempt: uncertain!.currentAttempt,
-        anchorEpoch: 1,
-        openFactDigest: uncertain!.openFact!.openFactDigest,
-        decision: "abandon",
-      },
+      itemId: prepared.value,
+      attempt: uncertain!.currentAttempt,
+      anchorEpoch: 1,
+      openFactDigest: uncertain!.openFact!.openFactDigest,
+      decision: "abandon",
     });
 
     expect(listener).toHaveBeenCalledWith(

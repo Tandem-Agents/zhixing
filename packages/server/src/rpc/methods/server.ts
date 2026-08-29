@@ -12,6 +12,7 @@
 
 import { isInternal } from "@zhixing/core";
 import { isDeliveryItemId } from "@zhixing/core/delivery";
+import { DELIVERY_RESOLVE_UNCERTAIN_COMMAND } from "@zhixing/core/delivery/application";
 import { isProtocolIdentifier } from "@zhixing/core/protocol";
 import type { ExecutionStatusNotice } from "@zhixing/core/contracts";
 import { SESSION_NOTIFICATIONS } from "@zhixing/rpc";
@@ -341,8 +342,10 @@ export function buildDeliveryResolveMethod(): MethodEntry {
     requiresAuth: true,
     async handler(rawParams, ctx) {
       const params = parseDeliveryResolveParams(rawParams);
-      const resolve = ctx.server.runtimeControl?.resolveDelivery;
-      if (!resolve) throw RpcErrors.internal("delivery resolution is not available");
+      const productApi = ctx.server.productApi;
+      if (!productApi?.supports(DELIVERY_RESOLVE_UNCERTAIN_COMMAND)) {
+        throw RpcErrors.internal("delivery resolution is not available");
+      }
       const surfacePrincipal = requireRpcSurfacePrincipal(ctx.connection);
       const connectionId = String(ctx.connection.id);
       if (
@@ -358,10 +361,11 @@ export function buildDeliveryResolveMethod(): MethodEntry {
       if (!principal) {
         throw RpcErrors.internal("durable control identity is not available");
       }
-      return resolve({
+      const dispatch = await productApi.command(DELIVERY_RESOLVE_UNCERTAIN_COMMAND, {
         ...params,
         principal,
       });
+      return dispatch.result;
     },
   };
 }

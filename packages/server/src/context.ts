@@ -174,19 +174,6 @@ export interface RuntimeControlAdapter {
     readonly frame: FinalFrame;
     readonly publishResults: readonly PublishResultNotice[];
   }[]>;
-  resolveDelivery?: (input: {
-    readonly requestId: string;
-    readonly itemId: string;
-    readonly attempt: number;
-    readonly anchorEpoch: number;
-    readonly openFactDigest: string;
-    readonly decision: "user-verified-sent" | "abandon" | "retry-risk-ack";
-    readonly principal: {
-      readonly surfacePrincipal: string;
-      readonly deviceId: string;
-      readonly connectionId: string;
-    };
-  }) => Promise<unknown>;
   beginDrain?: () => Promise<void>;
   drainAcceptedWork?: () => Promise<void>;
   flushDelivery?: () => Promise<void>;

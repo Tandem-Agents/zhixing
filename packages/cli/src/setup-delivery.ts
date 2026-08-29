@@ -87,6 +87,10 @@ import {
   parseConversationId,
 } from "@zhixing/core";
 import {
+  DeliveryUncertainResolutionApplicationService,
+  type DeliveryUncertainResolutionApplication,
+} from "@zhixing/core/delivery/application";
+import {
   FileArtifactStore,
   FileAuthorityCommitLog,
   type SurfaceAssetCoordinator,
@@ -95,8 +99,6 @@ import type {
   ControlAdmissionJournal,
   AnchorResourceGovernor,
   OwnerDeliveryParticipant,
-  applyDeliveryResolutionControl,
-  CreateDeliveryControlEnvelopeInput,
   ConversationAssignmentCredentialPolicy,
   JobAssignmentCredentialPolicy,
   GlobalMutationCommitParticipant,
@@ -431,9 +433,7 @@ export interface DeliveryStack {
   onStatus: (
     listener: (notice: DeliveryStatusNotice) => void | Promise<void>,
   ) => () => void;
-  resolve: (
-    input: CreateDeliveryControlEnvelopeInput,
-  ) => ReturnType<typeof applyDeliveryResolutionControl>;
+  resolutionApplication: DeliveryUncertainResolutionApplication;
   startupCleanup: StartupCleanupHandle;
   stop: () => Promise<void>;
 }
@@ -2314,8 +2314,8 @@ export async function setupDelivery(
   options: SetupDeliveryOptions,
 ): Promise<DeliveryStack> {
   const { channels, logger } = options;
-  const { applyDeliveryResolutionControl, createDeliveryControlEnvelope } =
-    await import("@zhixing/owner-kernel");
+  const { createDeliveryResolutionCorrectnessPort } =
+    await import("@zhixing/owner-kernel/delivery");
 
   // 1. OutboxRegistry — 顺序层，per-target FIFO
   //    doSend 直通 channel adapter；adapter 未就绪则返回可重试失败
@@ -2379,6 +2379,13 @@ export async function setupDelivery(
       );
     };
     eventBus.on("delivery:notice", ({ notice }) => publishNotice(notice));
+    const resolutionApplication = new DeliveryUncertainResolutionApplicationService(
+      createDeliveryResolutionCorrectnessPort({
+        admission: options.authorityRuntime.controlAdmission,
+        authority: options.authorityRuntime.authority,
+        onResolved: (notice) => eventBus.emit("delivery:notice", { notice }),
+      }),
+    );
 
     // 权威 Pipeline 只消费已提交事实；conversation 生产入口在 owner commit。
     const buildAuthorityDelivery = async () => {
@@ -2463,16 +2470,7 @@ export async function setupDelivery(
         statusListeners.add(listener);
         return () => statusListeners.delete(listener);
       },
-      resolve: (input) => {
-        const envelope = createDeliveryControlEnvelope(input);
-        return applyDeliveryResolutionControl({
-          admission: options.authorityRuntime.controlAdmission,
-          authority: options.authorityRuntime.authority,
-          envelope,
-          source: input.source,
-          onResolved: (notice) => eventBus.emit("delivery:notice", { notice }),
-        });
-      },
+      resolutionApplication,
       startupCleanup,
       stop: () => startupCleanup.run(),
     };

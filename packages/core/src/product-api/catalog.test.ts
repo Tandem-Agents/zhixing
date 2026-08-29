@@ -59,6 +59,10 @@ describe("ProductApiDispatcher", () => {
     expect(Object.isFrozen(dispatcher)).toBe(true);
     expect(Object.isFrozen(exactSet.operations)).toBe(true);
     expect(Reflect.set(dispatcher, "register", vi.fn())).toBe(false);
+    expect(dispatcher.supports(read)).toBe(true);
+    expect(dispatcher.supports(write)).toBe(true);
+    const unknown = defineProductApiQuery<"unknown", undefined, undefined>("unknown");
+    expect(dispatcher.supports(unknown)).toBe(false);
   });
 
   it("fails closed for duplicate, missing, unknown and kind-mismatched contributions", () => {

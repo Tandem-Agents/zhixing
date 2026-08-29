@@ -2787,6 +2787,11 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   };
 
   const application = required("packages/core/src/skills/catalog-application.ts");
+  const deliveryApplication = required(
+    "packages/core/src/delivery/resolution-application.ts",
+  );
+  const deliveryIndex = required("packages/core/src/delivery/index.ts");
+  const deliveryControl = required("packages/owner-kernel/src/delivery-control.ts");
   const productApi = required("packages/core/src/product-api/catalog.ts");
   const coreIndex = required("packages/core/src/index.ts");
   const skillIndex = required("packages/core/src/skills/index.ts");
@@ -2800,6 +2805,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const rpcManifestText = required("packages/rpc/package.json");
   const rpcBuild = required("packages/rpc/tsup.config.ts");
   const handler = required("packages/server/src/rpc/methods/skill.ts");
+  const deliveryHandler = required("packages/server/src/rpc/methods/server.ts");
   const context = required("packages/server/src/context.ts");
   const composition = required("packages/cli/src/serve/command.ts");
   const skillClientBinding = required(
@@ -2930,6 +2936,27 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     skillIndex.includes("ProductApiDispatcher")
   ) {
     failures.push("Product API catalog must have one narrow non-root core subpath");
+  }
+  const deliveryApplicationExport = coreManifest?.exports?.["./delivery/application"];
+  const duplicateDeliveryApplicationExports = Object.entries(coreManifest?.exports ?? {})
+    .filter(([subpath, conditions]) =>
+      subpath !== "./delivery/application" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === deliveryApplicationExport?.types ||
+        conditions.import === deliveryApplicationExport?.import)
+    );
+  if (
+    deliveryApplicationExport?.types !==
+      "./dist/delivery/resolution-application.d.ts" ||
+    deliveryApplicationExport?.import !==
+      "./dist/delivery/resolution-application.js" ||
+    duplicateDeliveryApplicationExports.length > 0 ||
+    coreBuild.split('"src/delivery/resolution-application.ts"').length - 1 !== 1 ||
+    coreIndex.includes("resolution-application") ||
+    deliveryIndex.includes("resolution-application")
+  ) {
+    failures.push("Delivery application must have one narrow non-root core subpath");
   }
   for (const retiredPath of [
     "packages/core/src/skills/store.ts",
@@ -3158,7 +3185,8 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     /import\s+(?:type\s+)?\{[^}]*ProductApiDispatcher[^}]*\}\s+from\s+["']@zhixing\/core["']/u.test(context) ||
     context.includes("skillCatalog") ||
     context.includes("SkillCatalogApplication") ||
-    context.includes("SkillDirectory")
+    context.includes("SkillDirectory") ||
+    context.includes("resolveDelivery")
   ) {
     failures.push("ServerContext must expose only the Product API dispatcher binding");
   }
@@ -3180,9 +3208,12 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   if (
     composition.split("new ProductApiDispatcher(").length - 1 !== 1 ||
     composition.split("createSkillCatalogProductApiContribution(").length - 1 !== 1 ||
+    composition.split("createDeliveryResolutionProductApiContribution(").length - 1 !== 1 ||
     composition.split("new SkillCatalogApplicationService({").length - 1 !== 1
   ) {
-    failures.push("Anchor composition root must install one Product API dispatcher and Skill contribution");
+    failures.push(
+      "Anchor composition root must install one Product API dispatcher with Skill and Delivery contributions",
+    );
   }
   const productApiConstructions = records.reduce(
     (count, record) => count + (record.text.split("new ProductApiDispatcher(").length - 1),
@@ -3200,10 +3231,50 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !productApi.includes("Product API operation descriptor mismatch") ||
     !productApi.includes("Product API command fact set mismatch") ||
     !productApi.includes("Product API operation descriptor is not sealed") ||
+    !productApi.includes("supports(descriptor: ProductApiOperationDescriptor)") ||
     !productApi.includes("Object.freeze(this)") ||
     /SkillCatalog|skillId|pinned|disabled|skill\.list|skill\.changed/u.test(productApi)
   ) {
     failures.push("Product API dispatcher is not finite, fail-closed, sealed or domain-neutral");
+  }
+  if (
+    !deliveryApplication.includes('"delivery.command.resolve-uncertain"') ||
+    !deliveryApplication.includes("DeliveryUncertainResolutionApplicationService") ||
+    !deliveryApplication.includes("decideDeliveryResolution(") ||
+    !deliveryApplication.includes("createDeliveryResolutionProductApiContribution") ||
+    !deliveryApplication.includes("DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET") ||
+    !deliveryApplication.includes("facts: []") ||
+    deliveryApplication.includes("DeliveryAuthority") ||
+    deliveryApplication.includes("ControlAdmissionJournal") ||
+    deliveryApplication.includes("DeliveryStatusNotice")
+  ) {
+    failures.push(
+      "Delivery domain does not uniquely own its finite uncertain-resolution application command",
+    );
+  }
+  if (
+    !deliveryControl.includes("createDeliveryResolutionCorrectnessPort") ||
+    !deliveryControl.includes("input.admission.applyAuthority") ||
+    !deliveryControl.includes("input.authority.coordinate") ||
+    deliveryControl.includes("applyDeliveryResolutionControl") ||
+    deliveryControl.includes("decideDeliveryResolution") ||
+    !setupDelivery.includes("resolutionApplication") ||
+    !setupDelivery.includes('await import("@zhixing/owner-kernel/delivery")') ||
+    setupDelivery.includes("applyDeliveryResolutionControl") ||
+    setupDelivery.includes("createDeliveryControlEnvelope")
+  ) {
+    failures.push(
+      "Delivery uncertain-resolution Correctness adapter or application ownership drifted",
+    );
+  }
+  if (
+    !deliveryHandler.includes('from "@zhixing/core/delivery/application"') ||
+    !deliveryHandler.includes("productApi.command(DELIVERY_RESOLVE_UNCERTAIN_COMMAND") ||
+    !deliveryHandler.includes("productApi?.supports(DELIVERY_RESOLVE_UNCERTAIN_COMMAND)") ||
+    deliveryHandler.includes("runtimeControl?.resolveDelivery") ||
+    deliveryHandler.includes("deliveryStack.resolve")
+  ) {
+    failures.push("delivery.resolve bypasses the Product API dispatcher");
   }
   if (
     !application.includes('"skill-catalog.query.list"') ||

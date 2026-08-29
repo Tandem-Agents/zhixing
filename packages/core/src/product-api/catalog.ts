@@ -239,6 +239,10 @@ export class ProductApiDispatcher {
     return invocation.result as OperationResult<Descriptor>;
   }
 
+  supports(descriptor: ProductApiOperationDescriptor): boolean {
+    return this.#operations.get(descriptor.identity)?.descriptor === descriptor;
+  }
+
   async command<Descriptor extends ProductApiOperationDescriptor<string, "command">>(
     descriptor: Descriptor,
     input: OperationInput<Descriptor>,
