@@ -1096,6 +1096,7 @@ export function inspectManagedHostAssembly(records) {
   const accessSurfaces = byPath.get("packages/cli/src/serve/access-surfaces.ts");
   const assemblyLifecycle = byPath.get("packages/cli/src/serve/assembly-lifecycle.ts");
   const executorRoleLifecycle = byPath.get("packages/cli/src/serve/executor-role-lifecycle.ts");
+  const executorServerLifecycle = byPath.get("packages/cli/src/serve/executor-server-lifecycle.ts");
   const shutdownChain = byPath.get("packages/cli/src/serve/shutdown-chain.ts");
   const anchorInternalStop = byPath.get("packages/cli/src/serve/anchor-internal-stop.ts");
   const executorRoot = byPath.get("packages/cli/src/serve/executor-role-runtime.ts");
@@ -1118,7 +1119,7 @@ export function inspectManagedHostAssembly(records) {
   if (
     !reconciler || !service || !serviceRuntime || !bootstrap || !pairing || !config ||
     !command || !accessSurface || !accessSurfaces || !assemblyLifecycle ||
-    !executorRoleLifecycle || !shutdownChain ||
+    !executorRoleLifecycle || !executorServerLifecycle || !shutdownChain ||
     !anchorInternalStop || !executorRoot || !executorInternalStop || !topology || !applicationHost || !connection || !repl || !surfaceLink || !secrets || !status ||
     !publicStatus || !statusRoute || !scheduler || !manifest || !serverContext || !serverShutdown ||
     !serverLifecycle || !server
@@ -1232,6 +1233,76 @@ export function inspectManagedHostAssembly(records) {
       "await mcpHub.dispose()",
     ].some((token) => executorCleanupTail.includes(token))
   ) failures.push("Executor non-Server lifecycle contribution ownership drifted");
+  const executorServerLifecycleIds = [
+    "inactiveBinding.close",
+    "runningServer.shutdown",
+    "serverState.lifecycle",
+    "heartbeatTimer.clear",
+    "idleTimer.clearAndSettle",
+  ];
+  const executorServerLifecyclePositions = executorServerLifecycleIds.map((identity) =>
+    executorServerLifecycle.indexOf(`{ owner: "executor-server", id: "${identity}" }`)
+  );
+  const executorBinding = executorRoot.indexOf("const localServerBinding = await bindServer({");
+  const executorBindingOwner = executorRoot.indexOf(
+    "executorServerLifecycle.acquireBinding(localServerBinding)",
+    executorBinding,
+  );
+  const executorFirstAwaitAfterBinding = executorRoot.indexOf("await ", executorBindingOwner);
+  const executorState = executorRoot.indexOf("const localServerState = new ServerStateFile({");
+  const executorStateOwner = executorRoot.indexOf(
+    "executorServerLifecycle.acquireStateFile(localServerState)",
+    executorState,
+  );
+  const executorServerStop = executorRoot.indexOf("await executorServerLifecycle.stop()");
+  const executorRoleStop = executorRoot.indexOf("await executorRoleLifecycle.close()", executorServerStop);
+  const executorStateCleanup = executorRoot.indexOf(
+    "await executorServerLifecycle.cleanupState()",
+    executorRoleStop,
+  );
+  const executorServerCleanupTail = executorRoot.slice(
+    executorRoot.indexOf("const cleanupFailures: unknown[] = []"),
+  );
+  if (
+    count(executorServerLifecycle, 'owner: "executor-server"') !==
+      executorServerLifecycleIds.length ||
+    executorServerLifecyclePositions.some((position) => position < 0) ||
+    executorServerLifecyclePositions.some((position, index) =>
+      index > 0 && position <= executorServerLifecyclePositions[index - 1]) ||
+    count(executorRoot, "new ExecutorServerLifecycle()") !== 1 ||
+    executorBinding < 0 ||
+    executorBindingOwner <= executorBinding ||
+    executorBindingOwner >= executorFirstAwaitAfterBinding ||
+    executorState < 0 ||
+    executorStateOwner <= executorState ||
+    count(executorRoot, "executorServerLifecycle.transferToRunningServer(openingRunner)") !== 1 ||
+    count(executorRoot, "executorServerLifecycle.assertRunningServer(localConversationServer)") !== 1 ||
+    count(executorRoot, "executorServerLifecycle.startHeartbeat()") !== 1 ||
+    count(executorRoot, "executorServerLifecycle.startIdleTimer(") !== 1 ||
+    executorServerStop < 0 || executorRoleStop <= executorServerStop ||
+    executorStateCleanup <= executorRoleStop ||
+    !executorServerLifecycle.includes("server.server.httpServer !== current.binding.httpServer") ||
+    !executorServerLifecycle.includes("await this.#idleCheck?.catch(() => undefined)") ||
+    !executorServerLifecycle.includes(
+      'let endpointTerminal = endpoint.kind === "none" || endpoint.kind === "terminal"',
+    ) ||
+    !executorServerLifecycle.includes(
+      "endpointTerminal = await attempt(() => endpoint.binding.close(), failures)",
+    ) ||
+    !executorServerLifecycle.includes(
+      "endpointTerminal = await attempt(() => endpoint.server.shutdown(reason), failures)",
+    ) ||
+    !executorServerLifecycle.includes(
+      "if (endpointTerminal) {\n      await attempt(() => this.#stateFile?.markStopped(), failures);\n    }",
+    ) ||
+    [
+      "await localServerState?.markStopping",
+      "await localConversationServer?.shutdown",
+      "await localServerBinding?.close",
+      "await localServerState?.markStopped",
+      "await localServerState?.cleanup",
+    ].some((token) => executorServerCleanupTail.includes(token))
+  ) failures.push("Executor Server lifecycle ownership or failure isolation drifted");
   const descriptor = frozenLiteralDescriptor(
     "packages/cli/src/serve/managed-service-reconciler.ts",
     reconciler,
@@ -1390,11 +1461,11 @@ export function inspectManagedHostAssembly(records) {
     !executorRoot.includes('reason: "managed-role-changed"') ||
     !executorRoot.includes('requestExecutorInternalStop({ reason: "idle", strategy: "drain" })') ||
     !executorRoot.includes('processMode === "on-demand"') ||
-    !executorRoot.includes("localConversationServer!.server.connections.size") ||
+    !executorRoot.includes("localConversationServer.server.connections.size") ||
     !executorRoot.includes("mesh!.connections.has(anchorDeviceId)") ||
     !executorRoot.includes("localConversationOwner!.hasIdleBlockingWork()") ||
     !executorRoot.includes("jobOwnerAssembly!.acceptedWorkItems()") ||
-    !executorRoot.includes("await executorIdleCheck?.catch(() => undefined)") ||
+    !executorServerLifecycle.includes("await this.#idleCheck?.catch(() => undefined)") ||
     executorInternalStopOwner < 0 ||
     executorRoleTerminal < executorInternalStopOwner ||
     !executorInternalStop.includes("const frozen = claimed ?? Object.freeze({ ...request });") ||
@@ -1417,13 +1488,17 @@ export function inspectManagedHostAssembly(records) {
   const cleanupTransfer = command.indexOf("startupRollback.commit()", anchorOpenGate);
   const readyPublication = command.indexOf("publishReady: async (openingRunner) =>", anchorOpenGate);
   const readyMarker = command.indexOf("await stateFile.markReady({", readyPublication);
-  const executorRunServer = executorRoot.indexOf("localConversationServer = await runServer({");
+  const executorRunServer = executorRoot.indexOf("const localConversationServer = await runServer({");
   const executorOpenGate = executorRoot.indexOf(
     "beforeActivate: async (openingRunner) =>",
     executorRunServer,
   );
   const executorTrustBinding = executorRoot.indexOf(
     "coordinateRuntimeTrustTransition = async () =>",
+    executorOpenGate,
+  );
+  const executorEndpointTransfer = executorRoot.indexOf(
+    "executorServerLifecycle.transferToRunningServer(openingRunner)",
     executorOpenGate,
   );
   const executorFinalAdmission = executorRoot.indexOf(
@@ -1435,7 +1510,7 @@ export function inspectManagedHostAssembly(records) {
     executorFinalAdmission,
   );
   const executorReadyMarker = executorRoot.indexOf(
-    "await localServerState!.markReady({",
+    "await executorServerLifecycle.markReady({",
     executorReadyPublication,
   );
   const lifecycleActivationGate = serverLifecycle.indexOf(
@@ -1475,13 +1550,14 @@ export function inspectManagedHostAssembly(records) {
     serverActivate < serverGate
   ) failures.push("managed host entry-last activation or publication order drifted");
   if (
-    count(executorRoot, "localConversationServer = await runServer({") !== 1 ||
+    count(executorRoot, "const localConversationServer = await runServer({") !== 1 ||
     count(executorRoot, "beforeActivate: async (openingRunner) =>") !== 1 ||
     count(executorRoot, "publishReady: async (openingRunner) =>") !== 1 ||
     executorRunServer < 0 ||
     executorOpenGate < executorRunServer ||
-    [executorInternalStopOwner, executorTrustBinding, executorFinalAdmission]
+    [executorEndpointTransfer, executorInternalStopOwner, executorTrustBinding, executorFinalAdmission]
       .some((position) => position < executorOpenGate || position >= executorReadyPublication) ||
+    executorEndpointTransfer >= executorInternalStopOwner ||
     executorReadyMarker < executorReadyPublication ||
     !executorRoot.includes("shutdown: (reason) => openingRunner.shutdown(reason)") ||
     !executorRoot.includes("waitForShutdown: () => openingRunner.waitForShutdown()")

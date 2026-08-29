@@ -1679,6 +1679,7 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/assembly-lifecycle.ts",
     "packages/cli/src/serve/executor-role-lifecycle.ts",
+    "packages/cli/src/serve/executor-server-lifecycle.ts",
     "packages/cli/src/serve/shutdown-chain.ts",
     "packages/cli/src/serve/anchor-internal-stop.ts",
     "packages/cli/src/serve/executor-role-runtime.ts",
@@ -1743,6 +1744,46 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
       ),
     )).join("\n"),
     /Executor non-Server lifecycle contribution ownership drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace(
+        "executorServerLifecycle.acquireBinding(localServerBinding)",
+        "void localServerBinding",
+      ),
+    )).join("\n"),
+    /Executor Server lifecycle ownership or failure isolation drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/executor-server-lifecycle.ts",
+      (text) => text.replace(
+        "    if (endpointTerminal) {\n      await attempt(() => this.#stateFile?.markStopped(), failures);\n    }",
+        "    await attempt(() => this.#stateFile?.markStopped(), failures);",
+      ),
+    )).join("\n"),
+    /Executor Server lifecycle ownership or failure isolation drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace(
+        "executorServerLifecycle.transferToRunningServer(openingRunner)",
+        "void openingRunner",
+      ),
+    )).join("\n"),
+    /Executor Server lifecycle ownership or failure isolation drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace(
+        "  throwExecutorRoleFailures(roleFailure, cleanupFailures);",
+        "  await localServerBinding?.close();\n  throwExecutorRoleFailures(roleFailure, cleanupFailures);",
+      ),
+    )).join("\n"),
+    /Executor Server lifecycle ownership or failure isolation drifted/,
   );
   assert.match(
     inspectManagedHostAssembly(mutate(

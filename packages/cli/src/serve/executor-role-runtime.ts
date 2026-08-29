@@ -61,8 +61,6 @@ import {
   resolveProcessStartTime,
   runServer,
   ServerStateFile,
-  type RunningServer,
-  type BoundZhixingServer,
 } from "@zhixing/server";
 import { loadOrCreateToken } from "./token.js";
 import { homeToPort } from "./host-port.js";
@@ -103,6 +101,7 @@ import {
   ExecutorRoleLifecycle,
   throwExecutorRoleFailures,
 } from "./executor-role-lifecycle.js";
+import { ExecutorServerLifecycle } from "./executor-server-lifecycle.js";
 
 export async function runExecutorRole(
   options: ServeOptions,
@@ -159,6 +158,7 @@ export async function runExecutorRole(
   const localServerPort = options.port ?? homeToPort(zhixingHome);
   const localServerHost = options.host ?? DEFAULT_SERVER_CONFIG.host;
   const executorRoleLifecycle = new ExecutorRoleLifecycle();
+  const executorServerLifecycle = new ExecutorServerLifecycle();
   const mcpHub = createMcpHub(
     parseServerSpecs(startup.config.mcp, startup.credentials.mcp),
     { networkProxy: startup.config.network?.proxy },
@@ -169,12 +169,6 @@ export async function runExecutorRole(
   let mesh: MeshRuntimeAssembly | undefined;
   const currentAnchorDeviceId = () =>
     mesh?.currentAnchorDeviceId() ?? initialAnchorDeviceId;
-  let localConversationServer: RunningServer | undefined;
-  let localServerBinding: BoundZhixingServer | undefined;
-  let localServerState: ServerStateFile | undefined;
-  let localServerHeartbeat: NodeJS.Timeout | undefined;
-  let executorIdleTimer: NodeJS.Timeout | undefined;
-  let executorIdleCheck: Promise<void> | undefined;
   let resolveLifecycleShutdown: (() => void) | undefined;
   const lifecycleShutdown = new Promise<void>((resolve) => {
     resolveLifecycleShutdown = resolve;
@@ -183,13 +177,14 @@ export async function runExecutorRole(
   try {
     // Establish the same final endpoint owner before MCP, authority, workspace,
     // data-plane, job or local conversation owners can produce effects.
-    localServerBinding = await bindServer({
+    const localServerBinding = await bindServer({
       config: {
         ...DEFAULT_SERVER_CONFIG,
         port: localServerPort,
         host: localServerHost,
       },
     });
+    executorServerLifecycle.acquireBinding(localServerBinding);
     const initialManagedServiceState = await loadCurrentManagedServiceState(
       "activate",
       zhixingHome,
@@ -211,9 +206,10 @@ export async function runExecutorRole(
       startTime: processStartTime,
       startedAt: processStartedAt,
     } as const;
-    localServerState = new ServerStateFile({
+    const localServerState = new ServerStateFile({
       publishReadyMarker: processMode !== "foreground",
     });
+    executorServerLifecycle.acquireStateFile(localServerState);
     const meshConnectionProjection = createMeshCompatibilityStateProjection(
       localServerState,
       { ...endpointLock, host: localServerBinding.host },
@@ -830,7 +826,7 @@ export async function runExecutorRole(
       },
       hostInfo: { logPath: isDaemonChild() ? getDefaultLogPath() : undefined },
     });
-    localConversationServer = await runServer({
+    const localConversationServer = await runServer({
       context: serverContext,
       boundServer: localServerBinding,
       config: {
@@ -852,6 +848,7 @@ export async function runExecutorRole(
         error: (message) => writer.notify(`[local-session] ${message}`),
       },
       beforeActivate: async (openingRunner) => {
+        executorServerLifecycle.transferToRunningServer(openingRunner);
         executorInternalStop.current = createExecutorInternalStopPort({
           requestId: `executor-internal:${process.pid}:${processStartedAt}`,
           timeoutMs: 30_000,
@@ -876,25 +873,22 @@ export async function runExecutorRole(
         await onTrustApplied();
       },
       publishReady: async (openingRunner) => {
-        await localServerState!.markReady({
+        await executorServerLifecycle.markReady({
           pid: process.pid,
           startedAt: processStartedAt,
           port: openingRunner.server.port,
           host: openingRunner.server.host,
         });
-        await localServerState!.markRunning();
+        await executorServerLifecycle.markRunning();
       },
     });
-    localServerHeartbeat = setInterval(() => {
-      void localServerState?.heartbeat();
-    }, 60_000);
-    localServerHeartbeat.unref();
+    executorServerLifecycle.assertRunningServer(localConversationServer);
+    executorServerLifecycle.startHeartbeat();
     if (processMode === "on-demand") {
-      executorIdleTimer = setInterval(() => {
-        if (executorIdleCheck) return;
-        const check = (async () => {
+      executorServerLifecycle.startIdleTimer(
+        async () => {
           const anchorDeviceId = currentAnchorDeviceId();
-          const localConnectionCount = localConversationServer!.server.connections.size;
+          const localConnectionCount = localConversationServer.server.connections.size;
           const currentAnchorConnected = anchorDeviceId !== undefined &&
             mesh!.connections.has(anchorDeviceId);
           const [hasLocalAcceptedWork, remoteAcceptedWork] =
@@ -911,19 +905,15 @@ export async function runExecutorRole(
             hasRemoteAcceptedWork: remoteAcceptedWork.length > 0,
           })) return;
           await requestExecutorInternalStop({ reason: "idle", strategy: "drain" });
-        })();
-        executorIdleCheck = check;
-        void check.catch((error) => {
+        },
+        (error) => {
           writer.notify(
             `[idle] durable Executor Host stop failed; the same operation will retry: ${
               error instanceof Error ? error.message : String(error)
             }`,
           );
-        }).finally(() => {
-          if (executorIdleCheck === check) executorIdleCheck = undefined;
-        });
-      }, 60_000);
-      executorIdleTimer.unref();
+        },
+      );
     }
     await waitForExecutorRoleTerminal({
       server: localConversationServer,
@@ -940,15 +930,10 @@ export async function runExecutorRole(
   }
   const cleanupFailures: unknown[] = [];
   try {
-    if (executorIdleTimer) clearInterval(executorIdleTimer);
-    await executorIdleCheck?.catch(() => undefined);
-    if (localServerHeartbeat) clearInterval(localServerHeartbeat);
-    await localServerState?.markStopping("graceful");
-    await localConversationServer?.shutdown("executor-role-stop");
-    await localServerBinding?.close();
-    await localServerState?.markStopped();
+    await executorServerLifecycle.stop();
   } catch (error) {
-    cleanupFailures.push(error);
+    if (error instanceof AggregateError) cleanupFailures.push(...error.errors);
+    else cleanupFailures.push(error);
   }
   try {
     await executorRoleLifecycle.close();
@@ -957,7 +942,7 @@ export async function runExecutorRole(
     else cleanupFailures.push(error);
   }
   try {
-    await localServerState?.cleanup();
+    await executorServerLifecycle.cleanupState();
   } catch (error) {
     cleanupFailures.push(error);
   }

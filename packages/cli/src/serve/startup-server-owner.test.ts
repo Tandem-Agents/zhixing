@@ -59,17 +59,26 @@ describe("production startup server ownership", () => {
 
   it("keeps the executor endpoint inactive through stop ownership and final admission", async () => {
     const source = await readSource("executor-role-runtime.ts");
-    const bind = location(source, "localServerBinding = await bindServer");
+    const bind = location(source, "const localServerBinding = await bindServer");
+    const bindingOwner = location(
+      source,
+      "executorServerLifecycle.acquireBinding(localServerBinding)",
+    );
+    expect(bindingOwner).toBeGreaterThan(bind);
     expect(bind).toBeLessThan(location(source, "await mcpHub.connectAll()"));
     expect(bind).toBeLessThan(location(source, "const interactions = new DurableConversationInteractionObserver()"));
     expect(bind).toBeLessThan(location(source, "const stopResume = await stopCoordinator.resumeActive()"));
-    const activation = source.slice(location(source, "localConversationServer = await runServer"));
+    const activation = source.slice(location(source, "const localConversationServer = await runServer"));
     expect(activation).toContain("boundServer: localServerBinding");
     expect(activation).toContain("port: localServerPort");
     expect(activation).toContain("host: localServerHost");
     expect(activation).toContain("startTime: processStartTime");
     expect(activation).toContain("startedAt: processStartedAt");
     const gate = location(activation, "beforeActivate: async (openingRunner) =>");
+    const endpointTransfer = location(
+      activation,
+      "executorServerLifecycle.transferToRunningServer(openingRunner)",
+    );
     const stopOwner = location(
       activation,
       "executorInternalStop.current = createExecutorInternalStopPort({",
@@ -77,16 +86,21 @@ describe("production startup server ownership", () => {
     const trustBinding = location(activation, "coordinateRuntimeTrustTransition = async () =>");
     const admission = location(activation, "await onTrustApplied();");
     const publish = location(activation, "publishReady: async (openingRunner) =>");
-    const ready = location(activation, "await localServerState!.markReady({");
-    const running = location(activation, "await localServerState!.markRunning();");
-    for (const prerequisite of [stopOwner, trustBinding, admission]) {
+    const ready = location(activation, "await executorServerLifecycle.markReady({");
+    const running = location(activation, "await executorServerLifecycle.markRunning();");
+    for (const prerequisite of [endpointTransfer, stopOwner, trustBinding, admission]) {
       expect(prerequisite).toBeGreaterThan(gate);
       expect(prerequisite).toBeLessThan(publish);
     }
+    expect(endpointTransfer).toBeLessThan(stopOwner);
     expect(activation).toContain("shutdown: (reason) => openingRunner.shutdown(reason)");
     expect(activation).toContain("waitForShutdown: () => openingRunner.waitForShutdown()");
     expect(ready).toBeGreaterThan(publish);
     expect(running).toBeGreaterThan(ready);
+    expect(location(activation, "executorServerLifecycle.assertRunningServer(localConversationServer)"))
+      .toBeGreaterThan(running);
+    expect(location(activation, "executorServerLifecycle.startHeartbeat()"))
+      .toBeGreaterThan(running);
     expect(source.indexOf("executorInternalStop.current = createExecutorInternalStopPort({"))
       .toBe(source.lastIndexOf("executorInternalStop.current = createExecutorInternalStopPort({"));
     expect(source.indexOf("await onTrustApplied();")).toBe(source.lastIndexOf("await onTrustApplied();"));
@@ -123,9 +137,19 @@ describe("production startup server ownership", () => {
       "await dataPlane?.close()",
       "await authority?.stopStorageMaintenance()",
       "await mcpHub.dispose()",
+      "await localServerState?.markStopping",
+      "await localConversationServer?.shutdown",
+      "await localServerBinding?.close",
+      "await localServerState?.markStopped",
+      "await localServerState?.cleanup",
     ]) {
       expect(cleanupTail).not.toContain(directCleanup);
     }
+    const serverStop = location(cleanupTail, "await executorServerLifecycle.stop()");
+    const roleStop = location(cleanupTail, "await executorRoleLifecycle.close()");
+    const stateCleanup = location(cleanupTail, "await executorServerLifecycle.cleanupState()");
+    expect(serverStop).toBeLessThan(roleStop);
+    expect(roleStop).toBeLessThan(stateCleanup);
   });
 
   it("keeps mesh startup recovery behind the closed lifecycle release", async () => {

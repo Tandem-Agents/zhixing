@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `6b7731cc49c97e8bac0745906d701a10b475bb16`；A1-01～A1-07 已由协调者独立复核并提交 |
+| 已接受基线 | `136ea9fd812af256873fca136b173e9420f5fd84`；A1-01～A1-08 已由协调者独立复核并提交 |
 | 当前 A 项 | A1：收束 ApplicationHost 生命周期边界 |
-| 活跃工作包 | A1-08：7 项 Executor-only 非 Server 资源已由类型化角色生命周期 owner 接管，Mesh/job 共同 lifecycle 已在 Mesh 构造后的首个安全点、任何后续 `await` 前登记；直接测试、S7、CLI typecheck/build 与静态检查完成，等待协调者独立复核 |
-| 下一责任链 | 协调者复核 Executor 非 Server 资源从取得、部分启动失败、正常终态到清理失败隔离的同一幂等 handle 与逆序关闭；接受后再判断 Server/state/timer 边界、Anchor post-server contribution 或 `A1-HOST-DELEGATE-01` 退场中的最高价值单链，不进入 A2 |
+| 活跃工作包 | A1-09：Executor Server endpoint/state/heartbeat/idle 已收束到有限类型化 owner；协调反证后又将 `stopped` 外化严格绑定到真实 endpoint terminal，直接测试、S7、CLI typecheck/build 均完成，等待协调者独立复核 |
+| 下一责任链 | A1-09 只闭合 Executor Server/state/timer 从 inactive binding、入口接管、运行期计时器到关闭/失败补偿的单一责任链；接受后在 Anchor post-server contribution 与 `A1-HOST-DELEGATE-01` 退场中选择最高价值单链，不进入 A2 |
 | 打开的单向桥 | `A1-HOST-DELEGATE-01`：唯一 `PersistentApplicationHost` 已拥有外层 bootstrap/lease/terminal 生命周期，但仍以类型化 loader 单向委托既有 Anchor/Executor role root；唯一事实与产品装配仍在既有 root，退场上限为 A1，其后续包不得形成第二 Host 或双 owner |
-| 已失效证据 | 无当前未恢复证据；A1-07 已由协调者独立重取并接受。A1-08 当前直接闭包 4 文件 22/22、canonical S7 21/21 与 registry golden、CLI typecheck/build、最窄 Biome 和 diff 检查均通过；其余未改输入继续有效，不得重复全量验证 |
+| 已失效证据 | 无当前未恢复证据；A1-08 已由协调者独立重取并接受。A1-09 协调反证纠正后，失效的 lifecycle 直接测试实际重取 9/9，与输入未变的 production-order 4/4、executor terminal 5/5 合并为当前直接闭包 3 文件 18/18；canonical S7 21/21 与 registry golden、CLI typecheck/build 均通过。A1-08 未改的 7 项 non-Server owner 与 A1-06 Server loopback 证据继续有效，不得重复全量验证 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1359,6 +1359,22 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接与结构证据：`pnpm --filter @zhixing/cli exec vitest run src/serve/__tests__/executor-role-lifecycle.test.ts src/serve/startup-server-owner.test.ts src/serve/__tests__/executor-job-owner-surface.test.ts src/serve/executor-role-terminal.test.ts --maxWorkers=1` 为 4 文件 22/22（新 lifecycle 7、生产顺序 4、job/Mesh surface 6、terminal 5）。新增 production source 断言与 S7 结构约束均要求 job/Mesh lifecycle 的构造、贡献早于 Mesh 后第一个 `await`；反向 mutation 在登记前插入 await 必须失败。S7 初次 canonical 运行 20/21，唯一失败是既有 data-plane mutation 仍匹配迁移前单行调用、实际上没有改变输入；将其改为稳定 identity token mutation 后重新运行 `pnpm s7:lint` 为 21/21 且 registry golden 通过，未更新 golden、未放宽生产断言。
 - 静态、构建与状态：`pnpm --filter @zhixing/cli exec tsc -p tsconfig.json --noEmit`、`pnpm cli:build`、6 个本包代码/门禁路径的最窄 Biome check 与 `git diff --check` 通过；没有运行 CLI 包全测、根级 lint/test/build、package check 或制品验收。若七项 descriptor/顺序、任一取得点、Authority rollback provenance、Mesh/job 首 await 边界、role failure/cleanup aggregation、旧 direct-cleanup 负向集合或对应 S7 mutation 任一变化，恢复 `A1-08-executor-role-lifecycle-v1` 并只重验本闭包。`A1-HOST-DELEGATE-01` 仍打开，Anchor post-server contribution、Server/state/timer 边界和委托桥退场未由本包处理，因此 A1、完成度与最终退出门保持不变。
 - 交接类型：完成，等待协调者独立复核；无本包内遗留。下一检查点由协调者在 A1 内从 Anchor post-server contribution、Server/state/timer 生命周期或 `A1-HOST-DELEGATE-01` 退场中选择最高价值的单一责任链，不进入 A2。
+
+### A1-09：收束 Executor Server endpoint、运行状态与 timer 的类型化生命周期所有权
+
+- 基线与差异：`HEAD 136ea9fd812af256873fca136b173e9420f5fd84 + A1-09-executor-server-lifecycle-v1`；进场索引为空，A1-01～A1-08 已由协调者独立复核并提交，工作区只有协调者预先登记的本文台账差异。本包新增 `executor-server-lifecycle.ts` 及直接测试，修改 Executor 唯一生产 root、生产顺序测试和 S7 inspector/mutation；未修改 `@zhixing/server` 的公开合同或 CleanupRegistry、A1-08 non-Server exact-set、Anchor root、领域或其他产品文档，未执行 Git 写操作。
+- exact-set 与阶段 owner：唯一 `ExecutorServerLifecycle` 静态冻结五个 subfamily：`inactiveBinding.close`、`runningServer.shutdown`、`serverState.lifecycle`、`heartbeatTimer.clear`、`idleTimer.clearAndSettle`。`bindServer` 返回后立即登记 inactive binding，故 managed-admission/state/projection 及后续任一 setup 失败都有补偿；`ServerStateFile` 构造后、首次 projection await 前登记。heartbeat 与 on-demand idle timer 只能在 Server 已接管后建立，方法内部在 `setInterval` 返回的同一同步段立即持有 timer；idle owner 同时持有唯一 in-flight check 并在关闭时等待其 settle。条件性 idle 不创建空贡献，没有 optional cleanup bag、动态发现或第二 registry。
+- endpoint 单向接管：外层 binding owner 只保留到 `runServer.beforeActivate`。该回调发生在 Server lifecycle 已把 `server.close` 注册进自身 CleanupRegistry 之后；`transferToRunningServer` 又要求 `RunningServer.server` 与原 binding 的 `httpServer` object、host、port 全等，才把阶段从 binding 切到 running Server。若错误发生在 gate 前，外层 owner 关闭 inactive endpoint；gate 到达后，所有 open/publication/terminal 失败都只由同一 RunningServer 驱动 Server registry，外层不再直接关闭 binding。`runServer` 返回后还以 object identity 断言是同一 transferred runner，生产尾部的 `localServerBinding?.close` 已删除；没有以 close 幂等掩盖双 owner，也没有复制 PID/connection 清理。
+- 状态、timer 与失败终态：A1-06 的 inactive gate、internal stop/trust/final admission 顺序和 `publishReady` 内 `markReady → markRunning` 保持不变，只改由 lifecycle 的窄方法调用同一 `ServerStateFile`。终止先清 idle timer并等待当前 check，再清 heartbeat；`markStopping("graceful")` 失败不会阻断 endpoint 终止，且错误仍进入聚合集合。只有 inactive binding `close()` 或 `RunningServer.shutdown("executor-role-stop")` 成功证明 endpoint terminal 后才尝试 `markStopped`；endpoint 终止失败本身继续聚合，但会阻止虚假 stopped 外化。无论 stop 是否失败，后续 `cleanupState` 都独立尝试清除 state/ready。A1-08 的 `ExecutorRoleLifecycle.close` 仍位于 Server stop 尝试之后、state/ready cleanup 之前；重复 stop/cleanup 复用同一 Promise，最终仍由 `throwExecutorRoleFailures` 保留 role 原始失败并聚合清理失败。
+- 直接与真实资源证据：协调反证纠正后，失效的 `executor-server-lifecycle.test.ts` 单独重取为 9/9：除五项 exact-set、真实 loopback inactive 503、endpoint provenance/单向接管、timer/in-flight idle settle、重复关闭及 fail-closed cleanup 外，新增 binding close 与 RunningServer shutdown 失败时 `markStopped` 零调用的直接反例，并证明 `markStopping` 失败时 endpoint 终止、条件满足后的 `markStopped` 与独立 state cleanup 继续执行，前后状态错误全部可观察。输入未变的 `startup-server-owner.test.ts` 4/4 与 `executor-role-terminal.test.ts` 5/5 继续有效，因此当前定向闭包为 3 文件 18/18；A1-06 已接受且输入未变的 Server lifecycle 15/15/真实 loopback gate 证据也继续有效，均未重复执行或重复计数。
+- 结构、静态与构建证据：S7 新增五项 descriptor exact-set、binding/state 首安全点、同 endpoint provenance、transfer/entry-last、timer settle、endpoint-terminal 条件、三段关闭顺序和旧 direct cleanup 负向约束；除遗漏 binding owner、绕过 transfer 或恢复尾部 direct binding close 外，新增反向 mutation 会把条件化 `markStopped` 恢复成无条件调用并必须失败，门禁不再用固定调用次数冒充终态证明。canonical S7 初次在测试前因 inspector 把 `bindServer` 语句内部的 `await` 误作“登记后的首个 await”而自误判，修正为从登记点向后取首 await；本轮纠正后再次运行 `pnpm s7:lint` 为 21/21 且 registry golden 通过，没有放宽 owner 合同或更新 golden。`pnpm --filter @zhixing/cli exec tsc -p tsconfig.json --noEmit` 与 `pnpm cli:build` 通过；未运行 CLI 包全测、根级 lint/test/build、package check 或制品验收。
+- 失效、遗留与状态：若 `bindServer/runServer.beforeActivate` 接管点、Server `server.close` registry 顺序、endpoint provenance、publishReady state 次序、heartbeat/idle timer 或 in-flight check、RunningServer shutdown、state terminal/cleanup、A1-08 相邻关闭顺序或 S7 mutation 任一变化，恢复 `A1-09-executor-server-lifecycle-v1` 并只重验本闭包。Anchor post-server contribution 与 `A1-HOST-DELEGATE-01` 尚未处理，因此 A1、完成度和最终退出门保持不变。
+- 交接类型：完成，等待协调者独立复核；无本包内遗留。下一检查点由协调者在 Anchor post-server contribution 与 `A1-HOST-DELEGATE-01` 退场中选择最高价值的单一 A1 责任链，不进入 A2。
+
+#### A1-09 协调反证纠正：真实 Server terminal 才能发布 stopped
+
+- 协调复核发现初版 `#stopOnce` 把 `markStopped` 与 endpoint 终止并列为无条件失败隔离步骤；binding close 或 RunningServer shutdown 抛错时仍可能留下虚假 stopped，且后续 state cleanup 若也失败会使该错误投影长期残留。本轮没有改变公开 Server/ServerStateFile 合同或重做生命周期 owner，只让 endpoint 终止尝试返回真实成功值，并以该值作为唯一 `markStopped` gate；state cleanup 仍独立执行，多失败仍完整聚合。
+- 纠正只使 lifecycle 单测与相应 S7 输入失效：最终直接重取 9/9，canonical S7 21/21 且 registry golden 通过，CLI typecheck/build 通过；production-order 4/4、executor terminal 5/5、A1-08 non-Server owner 与 A1-06 loopback 输入均未变并继续复用。若 endpoint close/shutdown 返回值、`markStopped` 条件、state cleanup 隔离或相应 mutation 任一变化，只恢复本纠正证据与 A1-09 对应失效闭包。
 
 ## 十、用户提示词
 
