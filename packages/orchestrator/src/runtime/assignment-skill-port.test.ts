@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   ADMISSION_TOKEN_TTL_MS,
   createEventBus,
@@ -60,7 +60,10 @@ describe("assignment skill ports", () => {
             "tool-save",
           );
           expect(saved.outcome).toBe("created");
-          const loaded = await ports.loader.loadText(saved.id, "tool-load");
+          const loaded = await ports.loadApplication.load({
+            id: saved.id,
+            operationId: "tool-load",
+          });
           expect(loaded).toMatchObject({
             id: skillNameToId("My Skill"),
             body: "Do the useful thing.",
@@ -322,10 +325,16 @@ describe("assignment skill ports", () => {
   it("fails closed outside a durable assignment instead of writing a local store", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "assignment-skills-"));
     try {
-      const ports = createAssignmentSkillPorts(
-        new FileArtifactStore(path.join(root, "artifacts")),
-        admissionOptions(),
-      );
+      const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+      const artifactRead = vi.spyOn(artifacts, "get");
+      const ports = createAssignmentSkillPorts(artifacts, admissionOptions());
+      for (const id of [skillNameToId("提炼技能"), "user-or-unknown"]) {
+        await expect(ports.loadApplication.load({
+          id,
+          operationId: "tool-load",
+        })).rejects.toThrow("Skill access requires an active durable assignment");
+      }
+      expect(artifactRead).not.toHaveBeenCalled();
       await expect(
         ports.saveApplication.save(
           {

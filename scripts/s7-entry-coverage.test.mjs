@@ -2341,7 +2341,7 @@ test("retired entry, live writable Store and reverse package dependency mutation
   );
 });
 
-test("Skill Catalog management, save and admission have one domain application boundary", async () => {
+test("Skill Catalog management, load, save and admission have one domain application boundary", async () => {
   const paths = [
     "packages/core/src/skills/catalog-application.ts",
     "packages/core/src/index.ts",
@@ -2382,6 +2382,60 @@ test("Skill Catalog management, save and admission have one domain application b
       (text) => `${text}\nconst bypass = { kind: "skill-archive" };`,
     )).join("\n"),
     /binding writes Skill GlobalState directly/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/skills/catalog-application.ts",
+      (text) => text.replace(
+        "await this.correctness.stageUsage(`${request.operationId}:usage`,",
+        "await this.correctness.stageUsage(request.operationId,",
+      ),
+    )).join("\n"),
+    /load and usage invariants lack one domain application owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/orchestrator/src/runtime/assignment-skill-port.ts",
+      (text) => `${text}\nexport interface SkillTextLoader { loadText(): void; }`,
+    )).join("\n"),
+    /retired parallel Skill load application owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/orchestrator/src/runtime/assignment-skill-port.ts",
+      (text) => text.replace(
+        "new SkillCatalogLoadApplicationService(",
+        "createLegacySkillLoader(",
+      ),
+    )).join("\n"),
+    /omits the domain adapter/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/orchestrator/src/runtime/assignment-skill-port.ts",
+      (text) => text.replace(
+        "const run = requireRunSkillContext();",
+        'const run = optionalRunSkillContext();\n      if (!run) return { kind: "builtin-only" };',
+      ),
+    )).join("\n"),
+    /retains Skill load business orchestration or omits the domain adapter/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/tools-builtin/src/skill.ts",
+      (text) => text.replace("await application.load({", "await loader.loadText({"),
+    )).join("\n"),
+    /load_skill binding must consume only the Skill-owned application contract/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => text.replace(
+        "skillCatalogLoad: skillPorts.loadApplication",
+        "skillLoader: skillPorts.loader",
+      ),
+    )).join("\n"),
+    /unique Skill load application binding|retired parallel Skill load application owner/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(

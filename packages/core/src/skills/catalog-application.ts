@@ -16,6 +16,7 @@ import {
 import type { ContentThreat } from "./content-scan.js";
 import { SkillMutationConflictError } from "./global-state-adapter.js";
 import { skillNameToId } from "./id.js";
+import { getBuiltinSkill } from "./builtin.js";
 import type { SkillCatalogEntry, SkillMode } from "./types.js";
 
 /** Skill-owned management query. Runtime and tool catalog reads use GlobalStatePort directly. */
@@ -271,6 +272,132 @@ export class SkillCatalogSaveApplicationService
         : { replayRecord: replayRecords[0] }),
     };
   }
+}
+
+/** Skill-owned request for loading executable instructions within one tool operation. */
+export interface SkillCatalogLoadRequest {
+  readonly id: string;
+  readonly operationId?: string;
+}
+
+/** Stable projection consumed by load_skill; storage and assignment details stay private. */
+export interface SkillCatalogLoadOutcome {
+  readonly id: string;
+  readonly name: string;
+  readonly body: string;
+}
+
+/** The only application entry for load_skill and its durable usage hit. */
+export interface SkillCatalogLoadApplication {
+  load(request: SkillCatalogLoadRequest): Promise<SkillCatalogLoadOutcome>;
+}
+
+export interface SkillCatalogUsageMutation {
+  readonly kind: "skill-usage";
+  readonly record: {
+    readonly skillId: string;
+    readonly occurredAt: string;
+    readonly hitDelta: 1;
+  };
+}
+
+/** Explicit execution scope; missing assignment context remains an adapter error. */
+export type SkillCatalogLoadScope =
+  | {
+      readonly kind: "assignment";
+      readonly entry: SkillCatalogEntry | null;
+      readonly overlay: readonly SkillCatalogSaveOverlayRecord[];
+      readonly issuedAt: string;
+    }
+  | {
+      /** Production runtime without ArtifactStore: immutable builtins only. */
+      readonly kind: "builtin-only";
+    };
+
+/**
+ * Path-free Correctness adapter for Skill loading. The Skill application owns
+ * user-over-builtin selection, overlay folding, document parsing and usage identity.
+ */
+export interface SkillCatalogLoadCorrectnessPort {
+  readScope(skillId: string): Promise<SkillCatalogLoadScope>;
+  readContent(content: ArtifactRef): Promise<string>;
+  stageUsage(operationId: string, mutation: SkillCatalogUsageMutation): Promise<void>;
+}
+
+/** Skill-owned load and usage application over assignment-scoped adapters. */
+export class SkillCatalogLoadApplicationService
+  implements SkillCatalogLoadApplication
+{
+  constructor(private readonly correctness: SkillCatalogLoadCorrectnessPort) {}
+
+  async load(request: SkillCatalogLoadRequest): Promise<SkillCatalogLoadOutcome> {
+    const id = typeof request?.id === "string" ? request.id.trim() : "";
+    if (!id) throw new Error("Skill id must be non-empty");
+
+    const builtin = getBuiltinSkill(id);
+    const scope = await this.correctness.readScope(id);
+    if (scope.kind === "builtin-only") {
+      if (!builtin) {
+        throw new Error("User skills require an active artifact-backed assignment");
+      }
+      return { id: builtin.id, name: builtin.name, body: builtin.body };
+    }
+
+    const entry = foldSkillCatalogEntry(
+      id,
+      scope.entry,
+      scope.overlay,
+      scope.issuedAt,
+    );
+    if (!entry) {
+      if (!builtin) throw new Error(`Skill not found: ${id}`);
+      return { id: builtin.id, name: builtin.name, body: builtin.body };
+    }
+
+    const document = await this.correctness.readContent(entry.contentRef);
+    const parsed = parseFrontmatter(document);
+    if (!request.operationId) {
+      throw new Error("Skill mutation requires a durable tool operation id");
+    }
+    await this.correctness.stageUsage(`${request.operationId}:usage`, {
+      kind: "skill-usage",
+      record: {
+        skillId: entry.id,
+        occurredAt: scope.issuedAt,
+        hitDelta: 1,
+      },
+    });
+    return { id: entry.id, name: entry.name, body: parsed.content };
+  }
+}
+
+function foldSkillCatalogEntry(
+  skillId: string,
+  initial: SkillCatalogEntry | null,
+  overlay: readonly SkillCatalogSaveOverlayRecord[],
+  issuedAt: string,
+): SkillCatalogEntry | null {
+  let entry = initial;
+  for (const record of overlay) {
+    const mutation = record.mutation;
+    const mutationId = skillNameToId(mutation.record.name);
+    if (mutationId !== skillId) continue;
+    entry = {
+      id: mutationId,
+      name: mutation.record.name,
+      description: mutation.record.description,
+      source: mutation.kind === "skill-admit" ? "linked" : "own",
+      mode: mutation.mode,
+      pinned: entry?.pinned ?? false,
+      disabled: false,
+      createdAt: entry?.createdAt ?? issuedAt,
+      usage: entry?.usage ?? null,
+      contentRef: mutation.record.content,
+      revision: entry ? entry.revision + 1 : 1,
+      digest: record.mutationDigest,
+    };
+  }
+  return entry;
 }
 
 /** Skill-owned request for the admit_skill two-stage lifecycle. */

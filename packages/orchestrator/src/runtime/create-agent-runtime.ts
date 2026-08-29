@@ -78,7 +78,6 @@ import {
   TimeProvider,
   renderSkillIndex,
   builtinIndexEntries,
-  getBuiltinSkill,
   type SkillMode,
   type Resettable,
   type RuntimeExecutionProfile,
@@ -89,6 +88,7 @@ import {
   type AgentLoopDeps,
 } from "@zhixing/core";
 import type { ArtifactStore } from "@zhixing/core/authority";
+import { SkillCatalogLoadApplicationService } from "@zhixing/core/skills/catalog";
 import type {
   AssignmentGlobalQueryPort,
   AssignmentMutationPort,
@@ -821,7 +821,7 @@ export async function createAgentRuntime(
 
   const builtinCtx = {
     proxy: config.network?.proxy,
-    skillLoader: skillPorts.loader,
+    skillCatalogLoad: skillPorts.loadApplication,
     skillCatalogSave: skillPorts.saveApplication,
     skillCatalogAdmission: skillPorts.admissionApplication,
     skillMode,
@@ -2175,13 +2175,17 @@ function unavailableAssignmentSkillPorts(): ReturnType<
     throw new Error("User skills require an active artifact-backed assignment");
   };
   return {
-    loader: {
-      async loadText(id) {
-        const builtin = getBuiltinSkill(id);
-        if (!builtin) return unavailable();
-        return { id: builtin.id, name: builtin.name, body: builtin.body };
+    loadApplication: new SkillCatalogLoadApplicationService({
+      async readScope() {
+        return { kind: "builtin-only" };
       },
-    },
+      async readContent() {
+        return unavailable();
+      },
+      async stageUsage() {
+        return unavailable();
+      },
+    }),
     saveApplication: { save: unavailable },
     admissionApplication: { admit: unavailable },
   };

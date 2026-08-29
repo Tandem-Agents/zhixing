@@ -6,12 +6,16 @@ import type {
 import {
   SkillCatalogApplicationError,
   SkillCatalogApplicationService,
+  SkillCatalogLoadApplicationService,
   SkillCatalogSaveApplicationService,
+  type SkillCatalogLoadCorrectnessPort,
+  type SkillCatalogUsageMutation,
   type SkillCatalogSaveCorrectnessPort,
   type SkillCatalogSaveMutation,
   type SkillCatalogSaveOverlayRecord,
 } from "./catalog-application.js";
 import { SkillMutationConflictError } from "./global-state-adapter.js";
+import { skillNameToId } from "./id.js";
 import type { SkillCatalogEntry } from "./types.js";
 
 const entry: SkillCatalogEntry = {
@@ -281,6 +285,115 @@ describe("SkillCatalogSaveApplicationService", () => {
   });
 });
 
+describe("SkillCatalogLoadApplicationService", () => {
+  it("loads builtin instructions without an assignment and never writes usage", async () => {
+    const load = loadHarness({ scope: "builtin-only" });
+
+    await expect(load.service.load({ id: skillNameToId("提炼技能") }))
+      .resolves.toMatchObject({ name: "提炼技能" });
+    expect(load.readContents).toEqual([]);
+    expect(load.staged).toEqual([]);
+
+    await expect(load.service.load({ id: "user-or-unknown" })).rejects.toThrow(
+      "User skills require an active artifact-backed assignment",
+    );
+    expect(load.readContents).toEqual([]);
+    expect(load.staged).toEqual([]);
+  });
+
+  it("lets an artifact-backed user entry shadow the builtin and records usage after parsing", async () => {
+    const user = {
+      ...entry,
+      id: skillNameToId("提炼技能"),
+      name: "用户提炼技能",
+      disabled: true,
+    };
+    const load = loadHarness({ entry: user });
+
+    await expect(load.service.load({
+      id: user.id,
+      operationId: "tool-load",
+    })).resolves.toEqual({
+      id: user.id,
+      name: user.name,
+      body: "User body",
+    });
+    expect(load.events).toEqual(["assignment", "content", "stage"]);
+    expect(load.staged).toEqual([{
+      operationId: "tool-load:usage",
+      mutation: {
+        kind: "skill-usage",
+        record: {
+          skillId: user.id,
+          occurredAt: "2026-08-29T00:00:00.000Z",
+          hitDelta: 1,
+        },
+      },
+    }]);
+  });
+
+  it("folds same-assignment create/admit/update overlay before reading content", async () => {
+    const id = skillNameToId("Overlay Skill");
+    const record = {
+      name: "Overlay Skill",
+      description: "overlay",
+      content: { digest: "d".repeat(64), bytes: 42 },
+    };
+    for (const mutation of [
+      { kind: "skill-create" as const, mode: "work" as const, record },
+      { kind: "skill-admit" as const, mode: "work" as const, record },
+      {
+        kind: "skill-update" as const,
+        skillId: id,
+        expectedRevision: 1,
+        mode: "work" as const,
+        record,
+      },
+    ]) {
+      const load = loadHarness({
+        overlay: [{
+          recordSeq: 1,
+          requestIdentity: mutation.kind,
+          mutationDigest: "c".repeat(64),
+          mutation,
+        }],
+      });
+
+      await expect(load.service.load({ id, operationId: `load-${mutation.kind}` }))
+        .resolves.toMatchObject({ id, name: "Overlay Skill", body: "User body" });
+      expect(load.readContents).toEqual(["d".repeat(64)]);
+      expect(load.staged[0]).toMatchObject({
+        operationId: `load-${mutation.kind}:usage`,
+        mutation: { record: { skillId: id } },
+      });
+    }
+  });
+
+  it("keeps unknown and artifact/operation/stage failures observable without false success", async () => {
+    const unknown = loadHarness();
+    await expect(unknown.service.load({ id: "unknown", operationId: "missing" }))
+      .rejects.toThrow("Skill not found: unknown");
+    expect(unknown.staged).toEqual([]);
+
+    const artifactError = new Error("artifact unavailable");
+    const failedArtifact = loadHarness({ entry, readError: artifactError });
+    await expect(failedArtifact.service.load({ id: entry.id, operationId: "artifact" }))
+      .rejects.toBe(artifactError);
+    expect(failedArtifact.staged).toEqual([]);
+
+    const missingOperation = loadHarness({ entry });
+    await expect(missingOperation.service.load({ id: entry.id })).rejects.toThrow(
+      "Skill mutation requires a durable tool operation id",
+    );
+    expect(missingOperation.staged).toEqual([]);
+
+    const stageError = new Error("usage conflict");
+    const failedStage = loadHarness({ entry, stageError });
+    await expect(failedStage.service.load({ id: entry.id, operationId: "stage" }))
+      .rejects.toBe(stageError);
+  });
+});
+
 function cleanDraft() {
   return {
     name: "Deploy",
@@ -349,5 +462,49 @@ function saveHarness(input: {
     setCatalogEntry(value: SkillCatalogEntry | null) {
       catalogEntry = value;
     },
+  };
+}
+
+function loadHarness(input: {
+  readonly scope?: "builtin-only";
+  readonly entry?: SkillCatalogEntry | null;
+  readonly overlay?: SkillCatalogSaveOverlayRecord[];
+  readonly readError?: Error;
+  readonly stageError?: Error;
+} = {}) {
+  const events: string[] = [];
+  const readContents: string[] = [];
+  const staged: Array<{
+    operationId: string;
+    mutation: SkillCatalogUsageMutation;
+  }> = [];
+  const correctness: SkillCatalogLoadCorrectnessPort = {
+    async readScope() {
+      events.push("assignment");
+      if (input.scope === "builtin-only") return { kind: "builtin-only" };
+      return {
+        kind: "assignment",
+        entry: input.entry ?? null,
+        overlay: input.overlay ?? [],
+        issuedAt: "2026-08-29T00:00:00.000Z",
+      };
+    },
+    async readContent(content) {
+      events.push("content");
+      readContents.push(content.digest);
+      if (input.readError) throw input.readError;
+      return "---\nname: User\ndescription: user\n---\nUser body";
+    },
+    async stageUsage(operationId, mutation) {
+      events.push("stage");
+      if (input.stageError) throw input.stageError;
+      staged.push({ operationId, mutation });
+    },
+  };
+  return {
+    service: new SkillCatalogLoadApplicationService(correctness),
+    events,
+    readContents,
+    staged,
   };
 }

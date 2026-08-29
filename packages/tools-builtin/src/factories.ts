@@ -13,11 +13,11 @@
 
 import type {
   SkillMode,
-  SkillTextLoader,
   ToolDefinition,
 } from "@zhixing/core";
 import type {
   SkillCatalogAdmissionApplication,
+  SkillCatalogLoadApplication,
   SkillCatalogSaveApplication,
 } from "@zhixing/core/skills/catalog";
 import { createBashTool } from "./bash.js";
@@ -42,7 +42,7 @@ import { createWriteTool } from "./write.js";
 export interface BuiltinToolContext {
   /** HTTP 代理地址，web_fetch 透传给底层 fetch 客户端 */
   readonly proxy?: string;
-  readonly skillLoader?: SkillTextLoader;
+  readonly skillCatalogLoad?: SkillCatalogLoadApplication;
   readonly skillCatalogSave?: SkillCatalogSaveApplication;
   readonly skillCatalogAdmission?: SkillCatalogAdmissionApplication;
   /**
@@ -69,13 +69,13 @@ export const BUILTIN_TOOL_FACTORIES: Readonly<
   grep: () => createGrepTool(),
   bash: () => createBashTool(),
   load_skill: (ctx) => {
-    const loader = ctx.skillLoader;
-    if (!loader) {
+    const application = ctx.skillCatalogLoad;
+    if (!application) {
       throw new Error(
-        "load_skill 工具需装配期注入 assignment skill loader",
+        "load_skill 工具需装配期注入 Skill Catalog load application",
       );
     }
-    return createLoadSkillTool(loader);
+    return createLoadSkillTool(application);
   },
   save_skill: (ctx) => {
     const application = ctx.skillCatalogSave;

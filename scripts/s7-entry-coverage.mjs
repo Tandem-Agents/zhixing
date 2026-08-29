@@ -1139,6 +1139,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     skillIndex.includes("catalog-application") ||
     skillIndex.includes("SkillCatalogApplication") ||
     skillIndex.includes("SkillCatalogAdmissionApplication") ||
+    skillIndex.includes("SkillCatalogLoadApplication") ||
     skillIndex.includes("SkillCatalogSaveApplication") ||
     skillIndex.includes("runSkillSavePipeline")
   ) {
@@ -1149,6 +1150,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   }
 
   for (const record of records) {
+    if (/\bSkillTextLoader\b|\bskillLoader\b/u.test(record.text)) {
+      failures.push(`${record.relative}: retired parallel Skill load application owner`);
+    }
     if (
       record.relative === "packages/core/src/skills/save-pipeline.ts" ||
       /\b(?:runSkillSavePipeline|SkillSaver)\b/u.test(record.text)
@@ -1187,6 +1191,36 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !saveApplication.includes("skillNameToId(normalized.name)")
   ) {
     failures.push("Skill Catalog save invariants lack one domain application owner");
+  }
+  const loadStart = application.indexOf("export interface SkillCatalogLoadRequest");
+  const loadEnd = application.indexOf(
+    "/** Skill-owned request for the admit_skill two-stage lifecycle.",
+  );
+  const loadApplication = loadStart >= 0 && loadEnd > loadStart
+    ? application.slice(loadStart, loadEnd)
+    : "";
+  if (
+    !loadApplication.includes("class SkillCatalogLoadApplicationService") ||
+    !loadApplication.includes("interface SkillCatalogLoadCorrectnessPort") ||
+    !loadApplication.includes("const builtin = getBuiltinSkill(id)") ||
+    !loadApplication.includes("foldSkillCatalogEntry(") ||
+    !loadApplication.includes("const parsed = parseFrontmatter(document)") ||
+    !loadApplication.includes('scope.kind === "builtin-only"') ||
+    !loadApplication.includes(
+      "User skills require an active artifact-backed assignment",
+    ) ||
+    !loadApplication.includes("`${request.operationId}:usage`") ||
+    !loadApplication.includes('kind: "skill-usage"')
+  ) {
+    failures.push("Skill Catalog load and usage invariants lack one domain application owner");
+  }
+  const loadContent = loadApplication.indexOf(
+    "await this.correctness.readContent(entry.contentRef)",
+  );
+  const loadParse = loadApplication.indexOf("parseFrontmatter(document)");
+  const loadStage = loadApplication.indexOf("await this.correctness.stageUsage(");
+  if (!(loadContent >= 0 && loadParse > loadContent && loadStage > loadParse)) {
+    failures.push("Skill Catalog usage must stage only after artifact read and document parsing");
   }
   if (
     !application.includes("class SkillCatalogAdmissionApplicationService") ||
@@ -1264,10 +1298,23 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     for (const match of text.matchAll(
       /import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+["'](@zhixing\/core)["']/gu,
     )) {
-      if (/\bSkillCatalog(?:Save|Admission)Application(?:Service)?\b/u.test(match[1])) {
+      if (/\bSkillCatalog(?:Save|Admission|Load)Application(?:Service)?\b/u.test(match[1])) {
         failures.push(`${relative}: Skill application contract leaked back through core root import`);
       }
     }
+  }
+  if (
+    assignmentSkillPort.includes("getBuiltinSkill") ||
+    assignmentSkillPort.includes("parseFrontmatter") ||
+    assignmentSkillPort.includes("skillNameToId") ||
+    !assignmentSkillPort.includes("new SkillCatalogLoadApplicationService(") ||
+    !assignmentSkillPort.includes("createSkillCatalogLoadCorrectnessPort(artifacts)") ||
+    !assignmentSkillPort.includes("async readScope(skillId)") ||
+    !assignmentSkillPort.includes("const run = requireRunSkillContext()") ||
+    assignmentSkillPort.includes("return { kind: \"builtin-only\" }") ||
+    !assignmentSkillPort.includes("async stageUsage(operationId, mutation)")
+  ) {
+    failures.push("Orchestrator retains Skill load business orchestration or omits the domain adapter");
   }
   if (
     assignmentSkillPort.includes("scrubSecrets") ||
@@ -1305,6 +1352,14 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     );
   }
   if (
+    !builtinSkill.includes("application: SkillCatalogLoadApplication") ||
+    !builtinSkill.includes("await application.load({") ||
+    builtinSkill.includes("loadText(") ||
+    builtinFactories.includes("SkillTextLoader")
+  ) {
+    failures.push("load_skill binding must consume only the Skill-owned application contract");
+  }
+  if (
     !builtinSkill.includes("application: SkillCatalogSaveApplication") ||
     !builtinSkill.includes("await application.save(") ||
     builtinSkill.includes("SkillSaver") ||
@@ -1322,6 +1377,14 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     builtinSkill.includes("acquireToStaging")
   ) {
     failures.push("admit_skill binding retains a parallel admission state machine");
+  }
+  if (
+    !builtinFactories.includes("skillCatalogLoad?: SkillCatalogLoadApplication") ||
+    !agentRuntime.includes("skillCatalogLoad: skillPorts.loadApplication") ||
+    !agentRuntime.includes('return { kind: "builtin-only" }') ||
+    agentRuntime.includes("skillLoader: skillPorts.loader")
+  ) {
+    failures.push("Agent runtime does not install the unique Skill load application binding");
   }
   if (
     !builtinFactories.includes("skillCatalogSave?: SkillCatalogSaveApplication") ||

@@ -6,32 +6,27 @@ import {
   acquireToStaging,
   builtinIndexEntries,
   computeStagingDigest,
-  getBuiltinSkill,
-  parseFrontmatter,
   renderSkillIndex,
-  skillNameToId,
-  type SkillCatalogEntry,
   type SkillMode,
-  type SkillTextLoader,
   type AdmissionLlm,
 } from "@zhixing/core";
 import {
   SkillCatalogAdmissionApplicationService,
+  SkillCatalogLoadApplicationService,
   SkillCatalogSaveApplicationService,
   type SkillCatalogAdmissionApplication,
   type SkillCatalogAdmissionCandidate,
   type SkillCatalogAdmissionCorrectnessPort,
   type SkillCatalogAdmissionMutation,
+  type SkillCatalogLoadApplication,
+  type SkillCatalogLoadCorrectnessPort,
   type SkillCatalogSaveApplication,
   type SkillCatalogSaveCorrectnessPort,
   type SkillCatalogSaveMutation,
   type SkillCatalogSaveOverlayRecord,
 } from "@zhixing/core/skills/catalog";
 import type { ArtifactStore } from "@zhixing/core/authority";
-import type {
-  AssignmentGlobalQueryPort,
-  GlobalStagedMutation,
-} from "@zhixing/core/contracts";
+import type { AssignmentGlobalQueryPort } from "@zhixing/core/contracts";
 import { assignmentMutationRequestId } from "@zhixing/core/protocol";
 import { runContextStorage } from "./run-context.js";
 
@@ -40,7 +35,7 @@ const decoder = new TextDecoder();
 const encoder = new TextEncoder();
 
 export interface AssignmentSkillPorts {
-  readonly loader: SkillTextLoader;
+  readonly loadApplication: SkillCatalogLoadApplication;
   readonly saveApplication: SkillCatalogSaveApplication;
   readonly admissionApplication: SkillCatalogAdmissionApplication;
 }
@@ -61,35 +56,61 @@ export function createAssignmentSkillPorts(
     createSkillCatalogSaveCorrectnessPort(artifacts),
   );
   return {
-    loader: {
-      async loadText(id, operationId) {
-        const builtin = getBuiltinSkill(id);
-        const entry = await readSkillEntry(id);
-        if (!entry) {
-          if (!builtin) throw new Error(`Skill not found: ${id}`);
-          return { id: builtin.id, name: builtin.name, body: builtin.body };
-        }
-        const document = decoder.decode(await artifacts.get(entry.contentRef));
-        const parsed = parseFrontmatter(document);
-        await stageSkillMutation(
-          operationId,
-          "usage",
-          {
-            kind: "skill-usage",
-            record: {
-              skillId: entry.id,
-              occurredAt: requireAssignmentTime(),
-              hitDelta: 1,
-            },
-          },
-        );
-        return { id: entry.id, name: entry.name, body: parsed.content };
-      },
-    },
+    loadApplication: new SkillCatalogLoadApplicationService(
+      createSkillCatalogLoadCorrectnessPort(artifacts),
+    ),
     saveApplication,
     admissionApplication: new SkillCatalogAdmissionApplicationService(
       admissionCorrectness,
     ),
+  };
+}
+
+function createSkillCatalogLoadCorrectnessPort(
+  artifacts: ArtifactStore,
+): SkillCatalogLoadCorrectnessPort {
+  return {
+    async readScope(skillId) {
+      const run = requireRunSkillContext();
+      const result = await run.globalQuery.read({ kind: "skill-get", skillId });
+      if (result.kind !== "skill-get") {
+        throw new Error("Skill query returned another result type");
+      }
+      const overlay: SkillCatalogSaveOverlayRecord[] = [];
+      for (const record of await run.assignmentMutations.readOverlay()) {
+        if (record.domain !== "global") continue;
+        const mutation = record.mutation;
+        if (
+          mutation.kind !== "skill-create" &&
+          mutation.kind !== "skill-admit" &&
+          mutation.kind !== "skill-update"
+        ) {
+          continue;
+        }
+        overlay.push({
+          recordSeq: record.recordSeq,
+          requestIdentity: record.requestId,
+          mutation,
+          mutationDigest: record.mutationDigest,
+        });
+      }
+      return {
+        kind: "assignment",
+        entry: result.entry,
+        overlay,
+        issuedAt: requireAssignmentTime(),
+      };
+    },
+    async readContent(content) {
+      return decoder.decode(await artifacts.get(content));
+    },
+    async stageUsage(operationId, mutation) {
+      await requireRunSkillContext().assignmentMutations.stage({
+        domain: "global",
+        operationId,
+        mutation,
+      });
+    },
   };
 }
 
@@ -173,42 +194,6 @@ export async function renderAssignmentSkillIndex(
   };
 }
 
-async function readSkillEntry(id: string): Promise<SkillCatalogEntry | null> {
-  const run = requireRunSkillContext();
-  const result = await run.globalQuery.read({ kind: "skill-get", skillId: id });
-  if (result.kind !== "skill-get") {
-    throw new Error("Skill query returned another result type");
-  }
-  let entry = result.entry;
-  for (const record of await run.assignmentMutations.readOverlay()) {
-    if (record.domain !== "global") continue;
-    const mutation = record.mutation;
-    if (
-      mutation.kind === "skill-create" ||
-      mutation.kind === "skill-admit" ||
-      mutation.kind === "skill-update"
-    ) {
-      const mutationId = skillNameToId(mutation.record.name);
-      if (mutationId !== id) continue;
-      entry = {
-        id: mutationId,
-        name: mutation.record.name,
-        description: mutation.record.description,
-        source: mutation.kind === "skill-admit" ? "linked" : "own",
-        mode: mutation.mode,
-        pinned: entry?.pinned ?? false,
-        disabled: false,
-        createdAt: entry?.createdAt ?? requireAssignmentTime(),
-        usage: entry?.usage ?? null,
-        contentRef: mutation.record.content,
-        revision: entry ? entry.revision + 1 : 1,
-        digest: record.mutationDigest,
-      };
-    }
-  }
-  return entry;
-}
-
 function requireRunSkillContext() {
   const run = runContextStorage.getStore();
   if (!run?.globalQuery || !run.assignmentMutations) {
@@ -224,22 +209,6 @@ function requireAssignmentTime(): string {
   const at = runContextStorage.getStore()?.assignmentIssuedAt;
   if (!at) throw new Error("Skill mutation requires a durable assignment time");
   return at;
-}
-
-async function stageSkillMutation(
-  operationId: string | undefined,
-  suffix: string,
-  mutation: Extract<
-    GlobalStagedMutation,
-    { kind: "skill-create" | "skill-update" | "skill-admit" | "skill-usage" }
-  >,
-): Promise<void> {
-  if (!operationId) throw new Error("Skill mutation requires a durable tool operation id");
-  await requireRunSkillContext().assignmentMutations.stage({
-    domain: "global",
-    operationId: `${operationId}:${suffix}`,
-    mutation,
-  });
 }
 
 class AssignmentSkillAdmissionCorrectnessPort

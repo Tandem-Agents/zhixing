@@ -7,25 +7,27 @@
  * 与自动命中同经本工具,故技能全集(含未进 top-N 索引的)都可达。取回技能完整正文
  * (做法 / 约定 / 坑)。固定工具:技能再增删,工具集恒只此一个加载工具。
  *
- * 依赖按接口隔离:只依赖 `SkillTextLoader`(按 id 取全文),不耦合整个 SkillStore,
- * 便于注入与测试。读全文 + 写命中度量属知行应用本地状态,声明 app-state 边界 →
+ * 依赖按领域端口隔离:只调用 Skill Catalog 的 load application,不耦合 Store、
+ * ArtifactStore 或 assignment ledger。读全文 + 写命中度量属知行应用本地状态,声明 app-state 边界 →
  * 判 internal 自动放行,不每次弹确认;不设 maxResultChars,全文须完整入上下文。
  */
 
 import type {
   ContentThreat,
   SkillMode,
-  SkillTextLoader,
   ToolDefinition,
   ToolResult,
 } from "@zhixing/core";
 import type {
   SkillCatalogAdmissionApplication,
   SkillCatalogAdmissionOutcome,
+  SkillCatalogLoadApplication,
   SkillCatalogSaveApplication,
 } from "@zhixing/core/skills/catalog";
 
-export function createLoadSkillTool(loader: SkillTextLoader): ToolDefinition {
+export function createLoadSkillTool(
+  application: SkillCatalogLoadApplication,
+): ToolDefinition {
   return {
     name: "load_skill",
     description:
@@ -59,7 +61,10 @@ export function createLoadSkillTool(loader: SkillTextLoader): ToolDefinition {
         return { content: "load_skill 需要非空的 id 参数。", isError: true };
       }
       try {
-        const { name, body } = await loader.loadText(id, context?.toolCallId);
+        const { name, body } = await application.load({
+          id,
+          operationId: context?.toolCallId,
+        });
         return { content: `# ${name}\n\n${body}`, isError: false };
       } catch (e) {
         return {

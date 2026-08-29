@@ -6,6 +6,7 @@ import type { Server as TlsServer } from "node:tls";
 import {
   DeliveryAuthority,
   createEventBus,
+  skillNameToId,
   type AgentEventMap,
 } from "@zhixing/core";
 import {
@@ -1056,6 +1057,109 @@ describe("assignment mesh adapters", () => {
         expectedRevision: 1,
       },
     });
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("loads overlay Skills and replays one durable usage through the real factory and ledger", async () => {
+    const fixture = await createFixture();
+    const protocol = await createRealProtocolFixture(fixture);
+    installRealProtocolServices(fixture, protocol);
+    const executor = realExecutorAdapter(fixture, protocol);
+    await executor.dispatch(
+      protocol.dispatch.envelope,
+      protocol.dispatch.activation,
+      realOwnerContext({
+        dispatch: protocol.dispatch,
+        method: "executor.dispatch",
+        requestId: "skill-load-dispatch",
+        body: {
+          dispatchDigest: dispatchEnvelopeDigest(protocol.dispatch.envelope),
+          activationDigest: activationDigest(protocol.dispatch.activation),
+        },
+        ownerDeviceId: fixture.ownerDeviceId,
+        identity: fixture.identity,
+      }),
+    );
+    await protocol.ledger.start("assignment-1");
+    const assignmentMutations = createAssignmentMutationPort({
+      ledger: protocol.ledger,
+      assignmentId: "assignment-1",
+      execution: "conversation",
+      anchorEpoch: 1,
+    });
+    const ports = createAssignmentSkillPorts(fixture.executorArtifacts, {
+      admissionLlm: async () => JSON.stringify({ decision: "safe", reason: "safe" }),
+    });
+    const tool = BUILTIN_TOOL_FACTORIES.load_skill!({
+      skillCatalogLoad: ports.loadApplication,
+    });
+    const run = <T>(action: () => Promise<T>) => runContextStorage.run(
+      {
+        bus: createEventBus<AgentEventMap>({ lineage: "main" }),
+        lineage: "main",
+        globalQuery: {
+          async read(query) {
+            if (query.kind === "skill-get") {
+              return { kind: "skill-get", catalogRevision: 0, entry: null };
+            }
+            if (query.kind === "skill-catalog") {
+              return { kind: "skill-catalog", catalogRevision: 0, entries: [] };
+            }
+            throw new Error(`Unexpected query: ${query.kind}`);
+          },
+        },
+        assignmentMutations,
+        assignmentIssuedAt: NOW,
+      },
+      action,
+    );
+    const firstId = skillNameToId("Durable Load One");
+    const secondId = skillNameToId("Durable Load Two");
+    await run(() => ports.saveApplication.save({
+      name: "Durable Load One",
+      description: "First overlay Skill",
+      body: "First durable body.",
+      mode: "main",
+    }, "tool-save-one"));
+    await run(() => ports.saveApplication.save({
+      name: "Durable Load Two",
+      description: "Second overlay Skill",
+      body: "Second durable body.",
+      mode: "main",
+    }, "tool-save-two"));
+
+    const invoke = (id: string, toolCallId: string) => run(() => tool.call(
+      { id },
+      { workingDirectory: fixture.root, toolCallId },
+    ));
+    const first = await invoke(firstId, "tool-load-replay");
+    expect(first).toMatchObject({ isError: false });
+    expect(first.content).toContain("First durable body.");
+    expect(await protocol.ledger.readStagedMutationOverlay("assignment-1"))
+      .toHaveLength(3);
+
+    await expect(invoke(firstId, "tool-load-replay")).resolves.toEqual(first);
+    expect(await protocol.ledger.readStagedMutationOverlay("assignment-1"))
+      .toHaveLength(3);
+
+    const conflict = await invoke(secondId, "tool-load-replay");
+    expect(conflict).toMatchObject({ isError: true });
+    expect(conflict.content).toContain("conflicting payload");
+    expect(await protocol.ledger.readStagedMutationOverlay("assignment-1"))
+      .toHaveLength(3);
+
+    const next = await invoke(secondId, "tool-load-next");
+    expect(next).toMatchObject({ isError: false });
+    expect(next.content).toContain("Second durable body.");
+    expect(await protocol.ledger.readStagedMutationOverlay("assignment-1"))
+      .toHaveLength(4);
+
+    const builtin = await run(() => tool.call(
+      { id: skillNameToId("提炼技能") },
+      { workingDirectory: fixture.root },
+    ));
+    expect(builtin).toMatchObject({ isError: false });
+    expect(await protocol.ledger.readStagedMutationOverlay("assignment-1"))
+      .toHaveLength(4);
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("replays admit_skill through the real factory, domain adapter and assignment ledger", async () => {
