@@ -32,14 +32,18 @@ import type {
   DeliveryEnqueueResult,
   AuthorityDeliveryItem,
   DeliveryOpenFact,
-  DeliveryLifecycleAdmission,
   DeliveryLifecycleBinding,
   DeliveryLifecycleSourcePermit,
 } from "./types.js";
+import type {
+  DeliveryLifecycleAdmissionMutation,
+  DeliveryLifecycleAdmissionState,
+} from "./application.js";
 import {
   assertDeliveryDiagnosticText,
   assertDeliveryIdentifier,
   assertDeliveryItemId,
+  assertDeliveryLifecycleSourceRef,
   DELIVERY_ITEM_ID_PREFIX,
 } from "./validation.js";
 import {
@@ -526,14 +530,7 @@ export class DeliveryAuthority {
   readonly #operations: SerialTaskQueue;
   #enqueueProjection = emptyDeliveryProjection();
   #cursor: ProjectionCursor | undefined;
-  #lifecycleAdmission:
-    | {
-      readonly operationId: string;
-      sources: ReadonlyMap<string, DeliveryLifecycleSourcePermit>;
-      readonly deliveries: Map<string, string>;
-      sealed: boolean;
-      }
-    | undefined;
+  #lifecycleAdmission: DeliveryLifecycleAdmissionState | undefined;
 
   constructor(options: { readonly log: AuthorityCommitLog; readonly anchorEpoch: number }) {
     if (!Number.isSafeInteger(options.anchorEpoch) || options.anchorEpoch <= 0) {
@@ -558,131 +555,44 @@ export class DeliveryAuthority {
       projection: DeliveryProjection,
       inputs: readonly DeliveryEnqueueInput[],
       commitAt: string,
-      lifecycleBindings: readonly (DeliveryLifecycleBinding | undefined)[],
+      lifecycleAdmission: DeliveryLifecycleAdmissionState | undefined,
     ) => DeliveryEnqueueResult,
   ): DeliveryEnqueueResult {
-    const bindings = this.#lifecycleBindings(inputs);
-    return decide(this.#enqueueProjection, inputs, commitAt, bindings);
+    return decide(
+      this.#enqueueProjection,
+      inputs,
+      commitAt,
+      this.#lifecycleAdmission
+        ? snapshot(this.#lifecycleAdmission, "Delivery lifecycle admission projection")
+        : undefined,
+    );
   }
 
-  async installLifecycleAdmission(input: DeliveryLifecycleAdmission): Promise<void> {
-    await this.#setLifecycleAdmission(input, false);
-  }
-
-  async restoreLifecycleAdmission(
-    input: import("./types.js").DeliveryLifecycleRestoration,
-  ): Promise<void> {
-    await this.#setLifecycleAdmission(input, input.sealed);
-  }
-
-  async #setLifecycleAdmission(
-    input: DeliveryLifecycleAdmission,
-    sealed: boolean,
-  ): Promise<void> {
-    const admission = snapshot(input, "Delivery lifecycle admission");
-    assertDeliveryIdentifier(admission.operationId, "Delivery lifecycle operation id");
-    const sources = new Map<string, DeliveryLifecycleSourcePermit>();
-    for (const source of admission.sources) {
-      validateLifecycleSourcePermit(source);
-      const key = lifecycleSourceKey(source.owner, source.id);
-      const previous = sources.get(key);
-      if (previous && previous.revision !== source.revision) {
-        throw new TypeError("Delivery lifecycle source identity has conflicting revisions");
-      }
-      sources.set(key, Object.freeze({ ...source }));
+  /**
+   * Correctness boundary for lifecycle admission. Delivery owns all state
+   * transitions; Authority only serializes a projection snapshot and installs
+   * the returned state atomically with respect to delivery commits.
+   */
+  async transactDeliveryAdmission<Value>(
+    decide: (context: {
+      readonly projection: DeliveryProjection;
+      readonly admission: DeliveryLifecycleAdmissionState | undefined;
+    }) => DeliveryLifecycleAdmissionMutation<Value>,
+  ): Promise<Value> {
+    if (typeof decide !== "function") {
+      throw new TypeError("Delivery lifecycle admission decision must be a function");
     }
-    const deliveries = new Map<string, string>();
-    for (const delivery of admission.deliveries) {
-      assertDeliveryItemId(delivery.id, "Delivery lifecycle item id");
-      if (typeof delivery.revision !== "string" || delivery.revision.length === 0) {
-        throw new TypeError("Delivery lifecycle item revision is invalid");
-      }
-      const previous = deliveries.get(delivery.id);
-      if (previous && previous !== delivery.revision) {
-        throw new TypeError("Delivery lifecycle item has conflicting revisions");
-      }
-      deliveries.set(delivery.id, delivery.revision);
-    }
-    await this.coordinate(async () => {
-      const current = this.#lifecycleAdmission;
-      if (current) {
-        if (current.operationId !== admission.operationId) {
-          throw new Error("Another lifecycle operation owns delivery producer admission");
-        }
-        const currentSources = canonicalize([...current.sources.values()].sort(compareLifecycleSources));
-        const restoredSources = canonicalize([...sources.values()].sort(compareLifecycleSources));
-        if (current.sources.size === 0 && sources.size > 0 && !current.sealed) {
-          current.sources = sources;
-        } else if (sources.size > 0 && currentSources !== restoredSources) {
-          throw new Error("Another lifecycle operation owns delivery producer admission");
-        }
-        for (const [itemId, revision] of deliveries) {
-          const previous = current.deliveries.get(itemId);
-          if (previous !== undefined && previous !== revision) {
-            throw new Error("Lifecycle delivery snapshot conflicts with its durable replay");
-          }
-          current.deliveries.set(itemId, revision);
-        }
-        this.#capturePendingLifecycleDeliveries(current.deliveries);
-        current.sealed ||= sealed;
-        return;
-      }
-      this.#capturePendingLifecycleDeliveries(deliveries);
-      this.#lifecycleAdmission = {
-        operationId: admission.operationId,
-        sources,
-        deliveries,
-        sealed,
-      };
-    });
-  }
-
-  async sealLifecycleAdmission(operationId: string): Promise<void> {
-    assertDeliveryIdentifier(operationId, "Delivery lifecycle operation id");
-    await this.coordinate(async () => {
-      const admission = this.#requireLifecycleAdmission(operationId);
-      admission.sealed = true;
-    });
-  }
-
-  async releaseLifecycleAdmission(operationId: string): Promise<void> {
-    assertDeliveryIdentifier(operationId, "Delivery lifecycle operation id");
-    await this.coordinate(async () => {
-      if (!this.#lifecycleAdmission) return;
-      this.#requireLifecycleAdmission(operationId);
-      this.#lifecycleAdmission = undefined;
-    });
-  }
-
-  async lifecycleAcceptedWorkItems(
-    operationId: string,
-  ): Promise<readonly { readonly id: string; readonly revision: string }[]> {
-    assertDeliveryIdentifier(operationId, "Delivery lifecycle operation id");
-    return this.#operations.run(async () => {
-      await this.#synchronizeUnlocked();
-      const admission = this.#requireLifecycleAdmission(operationId);
-      const items = [...this.#enqueueProjection.items.values()].filter((item) => {
-        if (!isPendingDelivery(item.state)) return false;
-        const initialRevision = admission.deliveries.get(item.id);
-        if (initialRevision !== undefined) {
-          if (initialRevision !== item.intentDigest) {
-            throw new Error("Lifecycle delivery item revision changed after it was frozen");
-          }
-          return true;
-        }
-        return item.lifecycleBinding?.operationId === operationId;
-      }).filter((item) => {
-        const binding = item.lifecycleBinding;
-        if (!binding || binding.operationId !== operationId) return true;
-        for (const source of binding.sources) {
-          const permit = admission.sources.get(lifecycleSourceKey(source.owner, source.id));
-          if (!permit || permit.revision !== source.revision) {
-            throw new Error("Lifecycle delivery binding is outside the frozen source exact-set");
-          }
-        }
-        return true;
-      }).map((item) => Object.freeze({ id: item.id, revision: item.intentDigest }));
-      return Object.freeze(items.sort((left, right) => left.id.localeCompare(right.id, "en-US")));
+    return await this.coordinate(async () => {
+      const decision = decide({
+        projection: cloneDeliveryProjection(this.#enqueueProjection),
+        admission: this.#lifecycleAdmission
+          ? snapshot(this.#lifecycleAdmission, "Delivery lifecycle admission projection")
+          : undefined,
+      });
+      this.#lifecycleAdmission = decision.admission
+        ? snapshot(decision.admission, "Delivery lifecycle admission state")
+        : undefined;
+      return decision.value;
     });
   }
 
@@ -696,61 +606,6 @@ export class DeliveryAuthority {
         await this.#synchronizeUnlocked();
       }
     });
-  }
-
-  #lifecycleBindings(
-    inputs: readonly DeliveryEnqueueInput[],
-  ): readonly (DeliveryLifecycleBinding | undefined)[] {
-    const admission = this.#lifecycleAdmission;
-    if (!admission) return inputs.map(() => undefined);
-    return inputs.map((input) => {
-      const sources = input.lifecycleSources;
-      if (!sources || sources.length === 0) {
-        throw new Error("Delivery source is not part of the frozen lifecycle operation");
-      }
-      for (const source of sources) {
-        validateLifecycleSourcePermit(source);
-        const permit = admission.sources.get(lifecycleSourceKey(source.owner, source.id));
-        if (!permit || permit.revision !== source.revision) {
-          throw new Error("Delivery source is not part of the frozen lifecycle operation");
-        }
-      }
-      const key = deliveryIdempotencyKey(input.keyBody);
-      const existingId = this.#enqueueProjection.itemByKey.get(key);
-      if (existingId) {
-        const existing = this.#enqueueProjection.items.get(existingId);
-        if (!existing) throw corruptDeliveryStream("Delivery unique index is inconsistent");
-        if (existing.intentDigest === deliveryIntentDigest(input.intent)) {
-          return existing.lifecycleBinding;
-        }
-      }
-      if (admission.sealed) {
-        throw new Error("Delivery producer admission is sealed for the lifecycle operation");
-      }
-      return Object.freeze({
-        operationId: admission.operationId,
-        sources: Object.freeze(sources.map((source) => Object.freeze({ ...source }))),
-      });
-    });
-  }
-
-  #requireLifecycleAdmission(operationId: string) {
-    const admission = this.#lifecycleAdmission;
-    if (!admission || admission.operationId !== operationId) {
-      throw new Error("Lifecycle operation does not own delivery producer admission");
-    }
-    return admission;
-  }
-
-  #capturePendingLifecycleDeliveries(deliveries: Map<string, string>): void {
-    for (const item of this.#enqueueProjection.items.values()) {
-      if (!isPendingDelivery(item.state)) continue;
-      const previous = deliveries.get(item.id);
-      if (previous !== undefined && previous !== item.intentDigest) {
-        throw new Error("Lifecycle delivery revision changed while admission was closing");
-      }
-      deliveries.set(item.id, item.intentDigest);
-    }
   }
 
   async list(): Promise<readonly AuthorityDeliveryItem[]> {
@@ -906,20 +761,6 @@ export class DeliveryAuthority {
   }
 }
 
-function validateLifecycleSourcePermit(source: DeliveryLifecycleSourcePermit): void {
-  if (
-    source.owner !== "conversation" &&
-    source.owner !== "assignment" &&
-    source.owner !== "scheduler"
-  ) {
-    throw new TypeError("Delivery lifecycle source owner is invalid");
-  }
-  assertDeliveryIdentifier(source.id, "Delivery lifecycle source id");
-  if (typeof source.revision !== "string" || source.revision.length === 0 || source.revision.length > 512) {
-    throw new TypeError("Delivery lifecycle source revision is invalid");
-  }
-}
-
 function validateLifecycleBinding(value: unknown): asserts value is DeliveryLifecycleBinding {
   if (!isPlainObject(value)) throw new TypeError("Delivery lifecycle binding must be an object");
   assertExactKeys(value, ["operationId", "sources"]);
@@ -931,7 +772,7 @@ function validateLifecycleBinding(value: unknown): asserts value is DeliveryLife
   for (const raw of value.sources) {
     if (!isPlainObject(raw)) throw new TypeError("Delivery lifecycle source must be an object");
     assertExactKeys(raw, ["id", "owner", "revision"]);
-    validateLifecycleSourcePermit(raw as unknown as DeliveryLifecycleSourcePermit);
+    assertDeliveryLifecycleSourceRef(raw as unknown as DeliveryLifecycleSourcePermit);
     const key = lifecycleSourceKey(
       raw.owner as DeliveryLifecycleSourcePermit["owner"],
       raw.id as string,
@@ -946,23 +787,6 @@ function lifecycleSourceKey(
   id: string,
 ): string {
   return `${owner}\u0000${id}`;
-}
-
-function compareLifecycleSources(
-  left: DeliveryLifecycleSourcePermit,
-  right: DeliveryLifecycleSourcePermit,
-): number {
-  return lifecycleSourceKey(left.owner, left.id).localeCompare(
-    lifecycleSourceKey(right.owner, right.id),
-    "en-US",
-  );
-}
-
-function isPendingDelivery(state: DeliveryItemState): boolean {
-  return state === "queued" ||
-    state === "retry-wait" ||
-    state === "attempting" ||
-    state === "uncertain";
 }
 
 export function assertDeliveryEnvelopeCompanions(

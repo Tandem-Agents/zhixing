@@ -82,7 +82,6 @@ import {
 import {
   HostStopCoordinator,
   hostStopAlreadySettled,
-  hostStopDeliveryLifecycleSources,
   loadHostStopAcceptedWork,
   type HostStopAcceptedWorkItem,
   type HostStopAcceptedWorkOwner,
@@ -146,9 +145,6 @@ export async function runExecutorRole(
         bootstrap.mesh.bootstrapStore.artifactStore(),
       )
     : undefined;
-  const startupStopSources = startupStopSnapshot
-    ? hostStopDeliveryLifecycleSources(startupStopSnapshot)
-    : [];
   // Startup stays closed until resumeActive() proves the old host terminal.
   const startupStopRecoverAcceptedWork = false;
   const startupStopAlreadySettled = startupStopOperation
@@ -273,12 +269,9 @@ export async function runExecutorRole(
     });
     executorRoleLifecycle.adoptAuthority(authority.startupCleanup);
     if (startupStopOperation) {
-      await authority.authority.restoreLifecycleAdmission({
-        operationId: startupStopOperation.identity.operationId,
-        sources: startupStopSources,
-        deliveries: startupStopSnapshot?.owners.delivery ?? [],
-        sealed: startupStopAlreadySettled,
-      });
+      if ((startupStopSnapshot?.owners.delivery.length ?? 0) !== 0) {
+        throw new Error("Executor-only lifecycle cannot restore Anchor Delivery accepted work");
+      }
     }
     if (!authority.workspaceBindingAdmin || !authority.workspaceBindingRecovery) {
       throw new Error("Local workspace management ports are unavailable");
@@ -726,17 +719,14 @@ export async function runExecutorRole(
       acceptedWork,
       artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
       onAcceptedWorkFrozen: async (snapshot) => {
-        const sources = hostStopDeliveryLifecycleSources(snapshot);
         localConversationOwner!.restoreHostStopAcceptedWork(
           snapshot.operationId,
           Object.entries(snapshot.owners).flatMap(([owner, items]) =>
             items.map((item) => ({ owner: owner as HostStopAcceptedWorkOwner, ...item }))),
         );
-        await authority!.authority.installLifecycleAdmission({
-          operationId: snapshot.operationId,
-          sources,
-          deliveries: snapshot.owners.delivery,
-        });
+        if (snapshot.owners.delivery.length !== 0) {
+          throw new Error("Executor-only lifecycle cannot install Anchor Delivery accepted work");
+        }
         if (!startupStopAcceptedWorkRecovered) {
           await localConversationOwner!.recoverAcceptedWorkForLifecycle();
           await jobOwnerAssembly!.recoverAcceptedWorkForLifecycle();
@@ -780,7 +770,6 @@ export async function runExecutorRole(
         throw new Error("Durable executor host-stop recovery did not prove the old host terminal");
       }
       await localConversationOwner.releaseHostStopAdmission(operationId);
-      await authority.authority.releaseLifecycleAdmission(operationId);
       if (!startupStopAcceptedWorkRecovered) {
         await localConversationOwner.recoverAcceptedWorkForLifecycle();
         await jobOwnerAssembly.recoverAcceptedWorkForLifecycle();

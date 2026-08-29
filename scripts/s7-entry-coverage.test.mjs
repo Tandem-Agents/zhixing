@@ -3058,6 +3058,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/cli/src/skills/manager-command.ts",
     "packages/cli/src/commands/skill-command-source.ts",
     "packages/cli/src/setup-delivery.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
     "packages/owner-kernel/src/delivery-control.ts",
     "packages/owner-kernel/src/delivery-obligation-correctness.ts",
     "packages/owner-kernel/src/delivery-participant.ts",
@@ -3375,6 +3377,37 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       ),
     )).join("\n"),
     /attempt lifecycle does not have one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/delivery/authority.ts",
+      (text) => `${text}\nasync function installLifecycleAdmission() {}`,
+    )).join("\n"),
+    /accepted-work lifecycle does not have one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/delivery/authority-pipeline.ts",
+      (text) => `${text}\nfunction settleAcceptedWorkForLifecycle() { return "immediate"; }`,
+    )).join("\n"),
+    /accepted-work lifecycle does not have one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "ctx.deliveryStack?.lifecycle.install({",
+        "ctx.deliveryStack?.authority.installLifecycleAdmission({",
+      ),
+    )).join("\n"),
+    /accepted-work lifecycle does not have one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => `${text}\nvoid authority.authority.installLifecycleAdmission({});`,
+    )).join("\n"),
+    /accepted-work lifecycle does not have one domain application/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(

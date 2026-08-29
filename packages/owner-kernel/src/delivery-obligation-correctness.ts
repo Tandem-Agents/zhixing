@@ -5,6 +5,8 @@ import {
   DeliveryObligationApplicationService,
   DeliveryProjectionInvariantError,
   type DeliveryLifecycleApplication,
+  type DeliveryLifecycleAdmissionDecisionContext,
+  type DeliveryLifecycleAdmissionMutation,
   type DeliveryLifecycleCorrectnessPort,
   type DeliveryLifecycleDecisionContext,
   type DeliveryLifecycleMutation,
@@ -24,10 +26,10 @@ export function createDeliveryObligationCorrectnessPort(
       authority.prepareEnqueues(
         inputs,
         commitAt,
-        (projection, _inputs, _commitAt, bindings) =>
+        (projection, _inputs, _commitAt, lifecycleAdmission) =>
           decide({
             projection,
-            lifecycleBindings: bindings,
+            lifecycleAdmission,
           }),
       ),
   };
@@ -60,6 +62,7 @@ export function createOwnerDeliveryLifecycleBinding(options: {
   readonly baseRetryDelayMs?: number;
 }): OwnerDeliveryLifecycleBinding {
   const correctness: DeliveryLifecycleCorrectnessPort = Object.freeze({
+    snapshot: () => options.authority.snapshot(),
     transact: <Value>(
       decide: (
         context: DeliveryLifecycleDecisionContext,
@@ -81,12 +84,15 @@ export function createOwnerDeliveryLifecycleBinding(options: {
           throw error;
         }
       }),
+    transactAdmission: <Value>(
+      decide: (
+        context: DeliveryLifecycleAdmissionDecisionContext,
+      ) => DeliveryLifecycleAdmissionMutation<Value>,
+    ) => options.authority.transactDeliveryAdmission<Value>(decide),
   });
   const projection: DeliveryLifecycleProjectionPort = Object.freeze({
     list: () => options.authority.list(),
     snapshot: () => options.authority.snapshot(),
-    lifecycleAcceptedWorkItems: (operationId: string) =>
-      options.authority.lifecycleAcceptedWorkItems(operationId),
   });
   const application = new DeliveryLifecycleApplicationService(
     correctness,

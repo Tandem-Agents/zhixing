@@ -2824,6 +2824,10 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     "packages/core/src/skills/global-state-adapter.ts",
   );
   const setupDelivery = required("packages/cli/src/setup-delivery.ts");
+  const accessSurfaces = required("packages/cli/src/serve/access-surfaces.ts");
+  const executorRoleRuntime = required(
+    "packages/cli/src/serve/executor-role-runtime.ts",
+  );
   const coreManifestText = required("packages/core/package.json");
   const coreBuild = required("packages/core/tsup.config.ts");
   const rpcIndex = required("packages/rpc/src/index.ts");
@@ -3320,13 +3324,60 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !deliveryPipeline.includes("this.#application.recordOutcome(") ||
     deliveryPipeline.includes("baseRetryDelayMs") ||
     !setupDelivery.includes("createOwnerDeliveryLifecycleBinding") ||
-    !setupDelivery.includes("application: deliveryLifecycle.application") ||
-    !setupDelivery.includes("projection: deliveryLifecycle.projection") ||
+    !setupDelivery.includes("application: deliveryLifecycle().application") ||
+    !setupDelivery.includes("projection: deliveryLifecycle().projection") ||
     deliveryIndex.includes("DeliveryLifecycleApplication") ||
     coreIndex.includes("DeliveryLifecycleApplication")
   ) {
     failures.push(
       "Delivery attempt lifecycle does not have one domain application and one narrow Correctness transaction",
+    );
+  }
+  const deliveryAdmissionTransactionConsumers = records
+    .filter((record) => record.text.includes(".transactDeliveryAdmission"))
+    .map((record) => record.relative);
+  if (
+    !deliveryApplication.includes("interface DeliveryLifecycleAdmissionState") ||
+    !deliveryApplication.includes("decideDeliveryLifecycleBindings(") ||
+    !deliveryApplication.includes("decideLifecycleAdmissionInstall(") ||
+    !deliveryApplication.includes("lifecycleAcceptedDeliveryItems(") ||
+    !deliveryApplication.includes("async settleAcceptedWork(input:") ||
+    !deliveryApplication.includes('input.strategy === "immediate"') ||
+    !deliveryApplication.includes('item.state === "uncertain"') ||
+    !deliveryApplication.includes("Delivery accepted work did not reach a durable terminal state") ||
+    !deliveryAuthority.includes("transactDeliveryAdmission<Value>") ||
+    deliveryAuthority.includes("installLifecycleAdmission(") ||
+    deliveryAuthority.includes("restoreLifecycleAdmission(") ||
+    deliveryAuthority.includes("sealLifecycleAdmission(") ||
+    deliveryAuthority.includes("releaseLifecycleAdmission(") ||
+    deliveryAuthority.includes("lifecycleAcceptedWorkItems(") ||
+    deliveryAuthority.includes("#lifecycleBindings(") ||
+    !deliveryObligationCorrectness.includes("authority.transactDeliveryAdmission<Value>") ||
+    deliveryAdmissionTransactionConsumers.length !== 1 ||
+    deliveryAdmissionTransactionConsumers[0] !==
+      "packages/owner-kernel/src/delivery-obligation-correctness.ts" ||
+    deliveryPipeline.includes("settleAcceptedWorkForLifecycle(") ||
+    deliveryPipeline.includes("lifecycleAcceptedWorkItems(") ||
+    deliveryPipeline.includes('input.strategy === "immediate"') ||
+    deliveryPipeline.includes("requires the existing user decision") ||
+    !deliveryPipeline.includes("implements DeliveryLifecycleEffectPort") ||
+    !deliveryPipeline.includes("async flushQuiescedOnce(): Promise<void>") ||
+    !setupDelivery.includes("readonly lifecycle: DeliveryAcceptedWorkLifecyclePort") ||
+    !setupDelivery.includes("deliveryLifecycle().application.settleAcceptedWork({") ||
+    !setupDelivery.includes("effects: authorityDelivery!") ||
+    !accessSurfaces.includes("await deliveryStack.lifecycle.restore(") ||
+    accessSurfaces.includes("authority.restoreLifecycleAdmission") ||
+    !composition.includes("ctx.deliveryStack?.lifecycle.install({") ||
+    !composition.includes("ctx.deliveryStack?.lifecycle.settle({") ||
+    /deliveryStack\?*\.authority\.(?:install|restore|seal|release)LifecycleAdmission/u.test(
+      composition,
+    ) ||
+    /\.authority\.(?:install|restore|seal|release)LifecycleAdmission/u.test(
+      executorRoleRuntime,
+    )
+  ) {
+    failures.push(
+      "Delivery accepted-work lifecycle does not have one domain application, one admission transaction and effect-only pipeline",
     );
   }
   if (
@@ -3364,7 +3415,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     deliveryParticipant.includes("maxAttempts") ||
     !deliveryParticipant.includes('from "@zhixing/core/delivery/application"') ||
     !deliveryParticipant.includes("this.#application.prepare(inputs, commitAt)") ||
-    !deliveryAuthority.includes("return decide(this.#enqueueProjection") ||
+    !deliveryAuthority.includes('"Delivery lifecycle admission projection"') ||
     ownerKernelIndex.includes("delivery-obligation-correctness") ||
     !ownerKernelDelivery.includes("delivery-obligation-correctness") ||
     !setupDelivery.includes("createOwnerDeliveryParticipant,") ||
@@ -5409,7 +5460,8 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     plannedLifecycle < 0 || stopInbound < plannedLifecycle || drainInbound < stopInbound ||
     disconnectChannels < drainInbound || quiesceDelivery < disconnectChannels ||
     drainAccepted < quiesceDelivery ||
-    count(command, "await ctx.deliveryStack?.resumeAfterAuthorityTransfer()") !== 4 ||
+    count(command, "await ctx.deliveryStack?.resumeAfterAuthorityTransfer()") !== 1 ||
+    count(command, "await ctx.deliveryStack?.lifecycle.resume()") !== 3 ||
     count(command, "await protocol.recoverInstalledAuthority()") !== 1 ||
     count(command, "return obligations;") !== 4 ||
     count(conversationProtocol, "async recoverInstalledAuthority(): Promise<number>") !== 1 ||

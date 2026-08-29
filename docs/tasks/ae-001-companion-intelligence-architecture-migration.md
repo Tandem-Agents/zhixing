@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-03 已通过协调者独立复核，等待提交；Delivery accepted-work/lifecycle 与 Channel effect 尚未归位<br>
+> 当前检查点：A5-04 已通过协调者独立复核，等待提交；按用户要求提交后暂停，不派发 Channel effect<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,13 +202,13 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `c8220440 + A5-03 accepted worktree`；A0～A4 与 A5-01～A5-03 已通过协调者独立复核，其中 A5-03 等待提交 |
+| 已接受基线 | `d181e926 + A5-04 accepted worktree`；A0～A4 与 A5-01～A5-04 已通过协调者独立复核，其中 A5-04 等待提交 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | 无；A5-03 已验收，等待协调者提交完整责任链 |
-| 下一责任链 | 继续收束 Delivery accepted-work/lifecycle；Channel effect 留在后续独立责任链，不得提前跨入其他领域 |
+| 活跃工作包 | 无；A5-04 已通过协调者独立验收，等待提交 |
+| 下一责任链 | 用户要求暂停调度；恢复后单独收束 Channel effect 并裁决 Delivery 行，不得提前跨入其他领域 |
 | 打开的单向桥 | 无；Skill 管理、保存、admission、load/usage、Kernel 与 Executor 投影均只经 `@zhixing/core/skills/catalog` 及既有 Authority/CAS/assignment Correctness 端口成立，旧 writable Store 不再承担正式应用行为 |
 | 已失效证据 | 无当前未恢复证据；A4-10 已恢复 A4-07/A4-08 的包级产品无知结论，A4 全部合同与退出证据当前有效 |
-| 阻塞/用户决策 | 无 |
+| 阻塞/用户决策 | 无技术阻塞；按用户要求在 A5-04 提交后暂停，等待新任务 |
 
 ### A0 基线索引
 
@@ -1759,6 +1759,22 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 唯一 application 源码与制品：统一承载 uncertain resolution、obligation、lifecycle 的唯一实现和测试已从 resolution-only 名称收敛为 `packages/core/src/delivery/application.ts` / `application.test.ts`；公开 subpath 仍为 `@zhixing/core/delivery/application`，其 package export、tsup entry 与 fresh declaration/runtime target 唯一指向 `dist/delivery/application.{d.ts,js}`。旧 `resolution-application` source/test/build/dist target 与兼容转导均归零；fresh build 会清除旧制品，package-export gate 显式拒绝旧 dist 文件，S7 反向 mutation 可识别旧 source、旧 build/manifest target、根/barrel 第二入口、Domain→Authority 依赖和 Correctness 错误映射丢失。
 - 纠正验证与状态：本次失效闭包为 core application/authority/pipeline 3 文件 82/82、owner-kernel 真实 Correctness/control 1 文件 8/8，合计 4 文件 90/90；core 与 owner-kernel fresh build 通过，fresh `pnpm runtime:package-exports` 通过，canonical `pnpm s7:lint` 为 30/30 且 registry golden 通过，最窄 Biome 与 `git diff --check` 通过。A5-03 纠正实施完成，等待协调者独立复核；A5 与 Delivery 行继续为 `[ ]`，producer、Channel、accepted-work 与后续 Delivery 责任均未进入，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：从统一 application、Authority 事务机制、owner-kernel Correctness 翻译、pipeline/queue 与 CLI 组合根正反核对，确认领域投影不变量只以有限领域信号跨端口，原 `commit-log-corrupt` code/message/cause 在唯一生产适配器恢复；旧 `resolution-application` source/test/build/dist 与兼容入口均归零，公开 subpath 唯一指向职责一致的 `delivery/application`。独立完成 core fresh build与 82/82、owner-kernel fresh build与 8/8、CLI 真实组合 3/3及 typecheck、canonical S7 30/30、registry golden、fresh package exports、旧 dist 缺失检查和 `git diff --check`，全部通过；接受 `A5-03-delivery-lifecycle-application-v1`。Delivery accepted-work/lifecycle 与 Channel effect 尚未迁移，因此 Delivery 行和 A5 继续为 `[ ]`。
+
+### A5-04：归位 Delivery accepted-work/lifecycle 应用责任
+
+- 派发基线：`HEAD d181e926`；A5-03 已由协调者独立验收并提交，派发前索引与工作区为空。
+- 唯一架构结果：Delivery 应用边界拥有生命周期 admission 的 install/restore/seal/release、冻结 source/delivery exact-set、后续 delivery binding、accepted-work 枚举及 immediate/drain/cancel 结算语义；Authority 只提供串行投影/状态机制，pipeline 只执行 quiesce、flush、等待和 transport 效果，Host 只调用一个有限 Delivery lifecycle 应用端口，不再组合领域规则。
+- 生产闭包：正反追踪 `DeliveryStack`、host-stop/device-removal/startup recovery、`DeliveryAuthority.prepareEnqueues/#lifecycleAdmission/*LifecycleAdmission/lifecycleAcceptedWorkItems`、`AuthorityDeliveryPipeline.acceptedWorkItems/settleAcceptedWorkForLifecycle` 与全部 producer participant。迁移 conflicting operation/revision、source permit exact-set、初始与运行期 delivery 捕获、sealed/release、重启恢复、uncertain 阻断、deadline/timeout、quiesce/resume 和结算 read-back 的现有决定；保持外部 accepted-work artifact、公开协议、持久 delivery record 与 stop/removal 行为完全等价。
+- 责任与旧路：优先复用现有 `@zhixing/core/delivery/application`，由 owner-kernel 的窄 Correctness adapter 提供 Authority 串行、当前投影和必要状态机制；不得在 CLI、pipeline、Authority、participant 或 Host-stop helper 中留下相同 admission/binding/membership/settlement 分支。可以保留不含产品判断的 pipeline effect port，但 Host 不得继续分别直调 Authority 和 pipeline 拼出同一生命周期用例。禁止第二 application、双 admission state、兼容回调、服务定位或仅改名。
+- 明确不做：不改变 Delivery attempt/retry/terminal、uncertain Product API、producer obligation、Channel transport/sender/content/event effect、其他 accepted-work owner、通用 Host-stop/device-removal 协议、公开 RPC/Event、持久格式或用户体验；不进入 A6，也不顺带迁移其他领域。
+- 直接证据：覆盖 install/restore 冲突与幂等、source/delivery revision exact-set、sealed 后绑定拒绝、release 后新 operation、冷启动 accepted-work 恢复、运行期新 delivery 捕获、immediate/drain/cancel、uncertain 阻断、timeout、response loss、quiesce/resume 与 stop/removal read-back；反向证明 CLI/Host 不再直调 Authority lifecycle 业务入口，Authority/pipeline 不再拥有领域分支且不存在第二状态。只运行 Delivery application/authority/pipeline、participant 与真实 CLI host-stop/device-removal 受影响闭包，必要依赖构建、canonical S7、fresh package exports、最窄格式与 `git diff --check`；不得重复根级或未失效 Delivery 全测。
+- 完成与止损：只有 admission、binding、membership 与 settlement 由唯一 Delivery 应用责任闭合，Authority/pipeline/Host 各自只剩机制、效果和调用职责，全部旧直调归零且行为证据通过，才算完成。预计超过四小时、需要改变外部 accepted-work artifact/持久语义、出现两个可独立失败的未知、影响面扩到 Channel 或其他 owner，或无法保持单一 admission 真相时，停在可构建、可运行、可恢复且无双写的安全检查点反馈；不得继续扩面。
+- 执行基线与唯一应用：`HEAD d181e92699e12e76fd9cf6eba6f2256e2b5deccc + task-doc:A5-04-dispatch + A5-04-delivery-accepted-work-lifecycle-application-v1`。A5-03 的同一个 `DeliveryLifecycleApplicationService` 现唯一拥有 admission install/restore/seal/release、source/delivery exact-set、运行期 binding、accepted-work membership 与 immediate/drain/cancel settlement；同 operation canonical replay（包括对象字段构造顺序不同）幂等，异 operation、source/revision 或 delivery/revision 冲突 fail closed。外部 HostStop accepted-work artifact 仍是启动恢复输入，恢复时经同一应用重建 admission；没有新增持久 record、第二 application 或进程缓存事实源。
+- Correctness、Authority 与效果边界：`createOwnerDeliveryLifecycleBinding` 是唯一生产 Correctness 适配，向应用提供当前 Delivery 投影、串行 lifecycle transaction 与串行 admission state transaction。`DeliveryAuthority` 已删除 install/restore/seal/release、binding、accepted-work 枚举等业务入口和分支，只保留 `prepareEnqueues` 所需的当前 admission 投影及通用串行安装机制；producer obligation 在同一应用内按冻结 source exact-set 形成原 lifecycle binding。`AuthorityDeliveryPipeline` 已删除 accepted-work 筛选和 settlement policy，只实现 close、等待在途 flush、quiesced 单次 flush、resume 与既有 transport/content/event 效果；uncertain 人工裁决阻断、deadline、三种 strategy 与 membership read-back 均由领域应用决定。
+- Host、恢复与拓扑闭包：`DeliveryStack.lifecycle` 是 Host 可见的唯一有限端口，startup restore、HostStop、永久设备移除、失败补偿和恢复后 resume 均只调用该端口；planned Authority transfer 仍只复用既有效果级 quiesce/resume，不被误写为 accepted-work 用例。Anchor generation rebind 会同时换代同一 Authority 对应的 lifecycle binding；Executor-only 不构造 Anchor Delivery authority，已删除会触发缺失 Anchor getter 的直调，并对外部 artifact 中意外出现 Delivery accepted-work fail closed。全部 producer participant 仍经 A5-02 obligation 应用绑定同一 admission，持久 Delivery record、公开协议、HostStop/device-removal artifact、attempt/retry/terminal、uncertain Product API 与 Channel effect 均未改变。
+- 直接证据与门禁：最终当前源码上 core application/authority/pipeline 3 文件 84/84，owner-kernel participant/control 2 文件 18/18，CLI setup/真实 authority recovery/HostStop/device-removal/Executor terminal 5 文件 57/57，合计 10 文件 159/159；覆盖七类既有 producer 的冻结 exact-set、运行期捕获、重启恢复、sealed/release、canonical replay、响应丢失重驱、三种 settlement、uncertain、deadline、quiesce/resume 与 executor 隔离。core、owner-kernel 与 CLI 依赖顺序 build、CLI `tsc --noEmit`、canonical `pnpm s7:lint` 30/30 与 registry golden、fresh `pnpm runtime:package-exports`、最窄 Biome 与 `git diff --check` 均通过；S7 反向 mutation 可识别 Authority/pipeline 决定回流、Host/Executor 直调 Authority、唯一 binding/端口丢失及 planned-transfer 与 lifecycle resume 混淆。
+- 交接与失效：A5-04 实施完成，等待协调者独立复核；A5 与 Delivery 行继续为 `[ ]`，下一责任链仍只能单独收束 Channel effect 并裁决 Delivery 行。Delivery application 的 admission/binding/membership/settlement、Authority admission transaction、owner-kernel binding、pipeline effect port、DeliveryStack lifecycle port、startup/HostStop/device-removal/Executor 隔离、全部 producer lifecycle source、外部 accepted-work artifact、S7/exports 或相关持久/恢复合同任一变化时，本证据精确失效并只重验上述 10 文件与构建/门禁闭包。本包未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：从 Delivery application、Authority admission transaction、owner-kernel binding、pipeline effect port、动态 Authority 换代、DeliveryStack lifecycle 端口及 Anchor/Executor 两类生产根正反核对，确认 admission、binding、membership 和 settlement 只有一个领域决定 owner，Authority/pipeline/Host 已无旧业务直调或第二状态机；Executor-only 对意外 Anchor Delivery accepted-work 明确 fail closed。独立完成 core/owner-kernel/CLI 依赖顺序构建与 CLI typecheck，并重跑 core 84/84、owner-kernel 18/18、CLI 57/57；canonical S7 30/30、registry golden、fresh package exports 与 `git diff --check` 全部通过。接受 `A5-04-delivery-accepted-work-lifecycle-application-v1`；Channel effect 尚未迁移，因此 Delivery 行和 A5 继续为 `[ ]`。按用户要求，本包提交后暂停调度。
 
 ## 十、用户提示词
 

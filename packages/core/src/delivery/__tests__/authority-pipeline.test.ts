@@ -51,7 +51,7 @@ async function createPipeline(
     ...(options.logger ? { logger: options.logger } : {}),
   });
   await pipeline.start();
-  return { ...fixture, pipeline, eventBus };
+  return { ...fixture, pipeline, lifecycle: lifecycle.application, eventBus };
 }
 
 function transport(
@@ -79,17 +79,22 @@ describe("AuthorityDeliveryPipeline", () => {
       const fixture = await createPipeline(transport(send));
       const created = await fixture.enqueue();
       if (!created.accepted) throw new Error("fixture enqueue failed");
-      fixture.pipeline.closeAdmissionForLifecycle();
+      fixture.lifecycle.closeAdmission(fixture.pipeline);
 
-      await fixture.authority.installLifecycleAdmission({
+      await fixture.lifecycle.installAdmission({
         operationId: "lifecycle-1",
         sources: [],
-        deliveries: fixture.pipeline.acceptedWorkItems(),
+        deliveries: fixture.lifecycle.captureAcceptedWork(),
       });
-      await fixture.pipeline.settleAcceptedWorkForLifecycle("lifecycle-1", strategy, 1_000);
+      await fixture.lifecycle.settleAcceptedWork({
+        operationId: "lifecycle-1",
+        strategy,
+        timeoutMs: 1_000,
+        effects: fixture.pipeline,
+      });
 
       expect(send).toHaveBeenCalledOnce();
-      expect(fixture.pipeline.acceptedWorkItems()).toEqual([]);
+      expect(fixture.lifecycle.captureAcceptedWork()).toEqual([]);
       await fixture.pipeline.stop();
     },
   );
@@ -99,25 +104,75 @@ describe("AuthorityDeliveryPipeline", () => {
     const fixture = await createPipeline(transport(send));
     const created = await fixture.enqueue();
     if (!created.accepted) throw new Error("fixture enqueue failed");
-    fixture.pipeline.closeAdmissionForLifecycle();
+    fixture.lifecycle.closeAdmission(fixture.pipeline);
 
-    await fixture.authority.installLifecycleAdmission({
+    await fixture.lifecycle.installAdmission({
       operationId: "lifecycle-immediate",
       sources: [],
-      deliveries: fixture.pipeline.acceptedWorkItems(),
+      deliveries: fixture.lifecycle.captureAcceptedWork(),
     });
-    await fixture.pipeline.settleAcceptedWorkForLifecycle(
-      "lifecycle-immediate",
-      "immediate",
-      1_000,
-    );
+    await fixture.lifecycle.settleAcceptedWork({
+      operationId: "lifecycle-immediate",
+      strategy: "immediate",
+      timeoutMs: 1_000,
+      effects: fixture.pipeline,
+    });
 
     expect(send).not.toHaveBeenCalled();
-    expect(fixture.pipeline.acceptedWorkItems()).toEqual([
+    expect(fixture.lifecycle.captureAcceptedWork()).toEqual([
       expect.objectContaining({ id: created.items[0]!.itemId }),
     ]);
     await fixture.pipeline.stop();
   });
+
+  it("blocks lifecycle settlement when a manual outcome becomes uncertain", async () => {
+    const fixture = await createPipeline(transport(async () => {
+      throw new Error("response lost after write");
+    }));
+    const created = await fixture.enqueue();
+    if (!created.accepted) throw new Error("fixture enqueue failed");
+    fixture.lifecycle.closeAdmission(fixture.pipeline);
+    await fixture.lifecycle.installAdmission({
+      operationId: "lifecycle-uncertain",
+      sources: [],
+      deliveries: fixture.lifecycle.captureAcceptedWork(),
+    });
+
+    await expect(fixture.lifecycle.settleAcceptedWork({
+      operationId: "lifecycle-uncertain",
+      strategy: "drain",
+      timeoutMs: 1_000,
+      effects: fixture.pipeline,
+    })).rejects.toThrow("requires the existing user decision");
+    expect(await fixture.authority.get(created.items[0]!.itemId)).toMatchObject({
+      state: "uncertain",
+    });
+    await fixture.pipeline.stop();
+  });
+
+  it("fails lifecycle settlement at its deadline without fabricating a terminal", async () => {
+    const fixture = await createPipeline({ resolve: () => undefined });
+    const created = await fixture.enqueue();
+    if (!created.accepted) throw new Error("fixture enqueue failed");
+    fixture.lifecycle.closeAdmission(fixture.pipeline);
+    await fixture.lifecycle.installAdmission({
+      operationId: "lifecycle-deadline",
+      sources: [],
+      deliveries: fixture.lifecycle.captureAcceptedWork(),
+    });
+
+    await expect(fixture.lifecycle.settleAcceptedWork({
+      operationId: "lifecycle-deadline",
+      strategy: "cancel",
+      timeoutMs: 0,
+      effects: fixture.pipeline,
+    })).rejects.toThrow("before the deadline");
+    expect(await fixture.authority.get(created.items[0]!.itemId)).toMatchObject({
+      state: "queued",
+    });
+    await fixture.pipeline.stop();
+  });
+
   it("prepares durable work without invoking transport before activation", async () => {
     const fixture = await createDeliveryTestHarness();
     const created = await fixture.enqueue();
@@ -191,7 +246,7 @@ describe("AuthorityDeliveryPipeline", () => {
 
     const flush = fixture.pipeline.flush();
     await sending;
-    expect(fixture.pipeline.acceptedWorkItems()).toEqual([
+    expect(fixture.lifecycle.captureAcceptedWork()).toEqual([
       expect.objectContaining({ id: first.items[0]!.itemId }),
     ]);
     const quiesced = fixture.pipeline.quiesceForAuthorityTransfer();
@@ -206,7 +261,7 @@ describe("AuthorityDeliveryPipeline", () => {
       commitRevision: 1,
     }));
     if (!second.accepted) throw new Error("fixture second enqueue failed");
-    expect(fixture.pipeline.acceptedWorkItems()).toEqual([
+    expect(fixture.lifecycle.captureAcceptedWork()).toEqual([
       expect.objectContaining({ id: second.items[0]!.itemId }),
     ]);
     await expect(fixture.pipeline.flush()).rejects.toThrow(/state="quiesced"/);

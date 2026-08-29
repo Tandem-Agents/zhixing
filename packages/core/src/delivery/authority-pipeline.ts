@@ -13,6 +13,7 @@ import { AuthorityDeliveryQueue } from "./authority-queue.js";
 import type {
   DeliveryAttemptClaim,
   DeliveryLifecycleApplication,
+  DeliveryLifecycleEffectPort,
   DeliveryLifecycleProjectionPort,
 } from "./application.js";
 import type {
@@ -65,7 +66,7 @@ const MAX_TIMER_INTERVAL_MS = 2_147_483_647;
 type PipelineState = "unstarted" | "prepared" | "running" | "quiesced" | "stopped";
 
 /** Drains authority facts; it cannot create, delete, or rewrite delivery items. */
-export class AuthorityDeliveryPipeline {
+export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
   readonly #application: DeliveryLifecycleApplication;
   readonly #projection: DeliveryLifecycleProjectionPort;
   readonly #artifacts: ArtifactStore;
@@ -129,27 +130,15 @@ export class AuthorityDeliveryPipeline {
     this.#startFlushTimer();
   }
 
-  /** Closes fresh delivery attempts without waiting for the current drain. */
-  closeAdmissionForLifecycle(): void {
+  /** Effect only: stop new transport attempts without deciding lifecycle policy. */
+  closeAdmission(): void {
     if (this.#state === "quiesced") return;
     if (this.#state !== "running") {
-      throw new Error(`Pipeline.closeAdmissionForLifecycle: illegal transition from state="${this.#state}"`);
+      throw new Error(`Pipeline.closeAdmission: illegal transition from state="${this.#state}"`);
     }
     this.#state = "quiesced";
     if (this.#flushTimer) clearInterval(this.#flushTimer);
     this.#flushTimer = undefined;
-  }
-
-  acceptedWorkItems(): readonly { readonly id: string; readonly revision: string }[] {
-    return Object.freeze(this.#projection.snapshot()
-      .filter((item) =>
-        item.state === "queued" ||
-        item.state === "retry-wait" ||
-        item.state === "attempting" ||
-        item.state === "uncertain",
-      )
-      .map((item) => Object.freeze({ id: item.id, revision: item.intentDigest }))
-      .sort((left, right) => left.id.localeCompare(right.id, "en-US")));
   }
 
   async quiesceForAuthorityTransfer(): Promise<void> {
@@ -160,43 +149,29 @@ export class AuthorityDeliveryPipeline {
     if (this.#state !== "running") {
       throw new Error(`Pipeline.quiesceForAuthorityTransfer: illegal transition from state="${this.#state}"`);
     }
-    this.closeAdmissionForLifecycle();
-    await this.#activeFlush?.catch(() => undefined);
+    this.closeAdmission();
+    await this.waitForQuiescedEffects();
   }
 
-  async settleAcceptedWorkForLifecycle(
-    operationId: string,
-    strategy: "immediate" | "drain" | "cancel",
-    timeoutMs: number,
-  ): Promise<void> {
-    assertNonNegativeMs(timeoutMs, "Delivery lifecycle settlement timeout");
-    if (this.#state === "running") this.closeAdmissionForLifecycle();
+  async waitForQuiescedEffects(): Promise<void> {
+    if (this.#state === "running") this.closeAdmission();
     if (this.#state !== "quiesced") {
       throw new Error(
-        `Pipeline.settleAcceptedWorkForLifecycle: illegal transition from state="${this.#state}"`,
+        `Pipeline.waitForQuiescedEffects: illegal transition from state="${this.#state}"`,
       );
     }
     await this.#activeFlush?.catch(() => undefined);
-    if (strategy === "immediate") return;
+  }
 
-    const deadline = Date.now() + timeoutMs;
+  async flushQuiescedOnce(): Promise<void> {
+    if (this.#state !== "quiesced") {
+      throw new Error(
+        `Pipeline.flushQuiescedOnce: illegal transition from state="${this.#state}"`,
+      );
+    }
     this.#state = "running";
     try {
-      while (true) {
-        await this.flush();
-        const pending = await this.#projection.lifecycleAcceptedWorkItems(operationId);
-        if (pending.length === 0) return;
-        const uncertain = this.#projection.snapshot().find((item) => item.state === "uncertain");
-        if (uncertain) {
-          throw new Error(
-            `Delivery ${uncertain.id} has an uncertain outcome that requires the existing user decision`,
-          );
-        }
-        if (Date.now() >= deadline) {
-          throw new Error("Delivery accepted work did not reach a durable terminal state before the deadline");
-        }
-        await new Promise((resolve) => setTimeout(resolve, Math.min(25, deadline - Date.now())));
-      }
+      await this.flush();
     } finally {
       this.#state = "quiesced";
       if (this.#flushTimer) clearInterval(this.#flushTimer);
@@ -205,9 +180,13 @@ export class AuthorityDeliveryPipeline {
   }
 
   async resumeAfterAuthorityTransfer(): Promise<void> {
+    await this.resume();
+  }
+
+  async resume(): Promise<void> {
     if (this.#state === "running") return;
     if (this.#state !== "quiesced") {
-      throw new Error(`Pipeline.resumeAfterAuthorityTransfer: illegal transition from state="${this.#state}"`);
+      throw new Error(`Pipeline.resume: illegal transition from state="${this.#state}"`);
     }
     this.#state = "running";
     this.#startFlushTimer();

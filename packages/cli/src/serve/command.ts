@@ -1330,7 +1330,7 @@ async function runServerProcess(
       return await schedulerRuntime?.scheduler.acceptedWorkItems() ?? [];
     }
     if (owner === "delivery") {
-      return ctx.deliveryStack?.acceptedWorkItems() ?? [];
+      return ctx.deliveryStack?.lifecycle.capture() ?? [];
     }
     return [];
   };
@@ -1353,7 +1353,7 @@ async function runServerProcess(
       return;
     }
     const current = owner === "delivery"
-      ? await ctx.deliveryStack?.lifecycleAcceptedWorkItems(operationId) ?? []
+      ? await ctx.deliveryStack?.lifecycle.read(operationId) ?? []
       : await captureStopAcceptedWork(owner, operationId);
     assertAcceptedWorkSubset(current, frozen, `host-stop ${owner}`);
     if (owner === "conversation") {
@@ -1417,7 +1417,7 @@ async function runServerProcess(
       readonly frozen: readonly HostStopAcceptedWorkItem[];
     }) => {
       const current = owner === "delivery"
-        ? await ctx.deliveryStack?.lifecycleAcceptedWorkItems(input.operationId) ?? []
+        ? await ctx.deliveryStack?.lifecycle.read(input.operationId) ?? []
         : await captureStopAcceptedWork(owner, input.operationId);
       if (owner !== "delivery") {
         assertAcceptedWorkSubset(current, input.frozen, `host-stop ${owner} settlement`);
@@ -1477,12 +1477,8 @@ async function runServerProcess(
       await ctx.executorJobOwner?.drain();
     }),
     delivery: stopPort("delivery", async ({ operationId, strategy, timeoutMs }) => {
-      await ctx.deliveryStack?.sealLifecycleAdmission(operationId);
-      await ctx.deliveryStack?.settleAcceptedWorkForLifecycle(
-        operationId,
-        strategy,
-        timeoutMs,
-      );
+      await ctx.deliveryStack?.lifecycle.seal(operationId);
+      await ctx.deliveryStack?.lifecycle.settle({ operationId, strategy, timeoutMs });
     }),
     lease: stopPort("lease", async () => {
       await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
@@ -1545,7 +1541,7 @@ async function runServerProcess(
             ...item,
           }))),
       );
-      await ctx.deliveryStack?.installLifecycleAdmission({
+      await ctx.deliveryStack?.lifecycle.install({
         operationId: snapshot.operationId,
         sources,
         deliveries: snapshot.owners.delivery,
@@ -1558,7 +1554,7 @@ async function runServerProcess(
         ctx.inboundRouter?.refuseNewMessages();
         ctx.executorJobOwner?.pauseAccepting();
         schedulerRuntime?.scheduler.closeAdmissionForLifecycle();
-        ctx.deliveryStack?.closeAdmissionForLifecycle();
+        ctx.deliveryStack?.lifecycle.close();
         await Promise.all([
           ctx.localConversationOwner?.closeHostStopAdmission(operationId),
           ctx.channelConnections?.suspendConfigured(),
@@ -1606,8 +1602,8 @@ async function runServerProcess(
       throw new Error("Durable host-stop recovery did not prove the old host terminal");
     }
     await ctx.localConversationOwner?.releaseHostStopAdmission(operationId);
-    await ctx.deliveryStack?.releaseLifecycleAdmission(operationId);
-    await ctx.deliveryStack?.resumeAfterAuthorityTransfer();
+    await ctx.deliveryStack?.lifecycle.release(operationId);
+    await ctx.deliveryStack?.lifecycle.resume();
     if (!startupLifecycleFrozenRecoveryStarted) {
       await recoverStartupLifecycleAcceptedWork(
         startupLifecycle?.delivery.sources ?? [],
@@ -1678,7 +1674,7 @@ async function runServerProcess(
       ctx.executorJobOwner?.pauseAccepting();
       await ctx.channelConnections?.suspendConfigured();
       schedulerRuntime?.scheduler.closeAdmissionForLifecycle();
-      ctx.deliveryStack?.closeAdmissionForLifecycle();
+      ctx.deliveryStack?.lifecycle.close();
     },
     captureAcceptedWork: async (operationId) => {
       const items = [] as Array<{
@@ -1698,7 +1694,7 @@ async function runServerProcess(
       if (removalAdmissionOperationId !== operationId) {
         throw new Error("Device-removal settlement does not own external admission");
       }
-      await ctx.deliveryStack?.installLifecycleAdmission({
+      await ctx.deliveryStack?.lifecycle.install({
         operationId,
         sources: deliveryLifecycleSourcesFromOwnerItems(ownerItems),
         deliveries: ownerItems
@@ -1713,7 +1709,7 @@ async function runServerProcess(
           .filter((item) => item.owner === owner)
           .map(({ id, revision }) => ({ id, revision }));
         const current = owner === "delivery"
-          ? await ctx.deliveryStack?.lifecycleAcceptedWorkItems(operationId) ?? []
+          ? await ctx.deliveryStack?.lifecycle.read(operationId) ?? []
           : await captureStopAcceptedWork(owner, operationId);
         if (owner !== "delivery") {
           assertAcceptedWorkSubset(current, frozen, `device-removal ${owner} settlement`);
@@ -1726,15 +1722,15 @@ async function runServerProcess(
         } else if (owner === "scheduler") {
           await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
         } else {
-          await ctx.deliveryStack?.sealLifecycleAdmission(operationId);
-          await ctx.deliveryStack?.settleAcceptedWorkForLifecycle(
+          await ctx.deliveryStack?.lifecycle.seal(operationId);
+          await ctx.deliveryStack?.lifecycle.settle({
             operationId,
-            "drain",
-            30_000,
-          );
+            strategy: "drain",
+            timeoutMs: 30_000,
+          });
         }
         const after = owner === "delivery"
-          ? await ctx.deliveryStack?.lifecycleAcceptedWorkItems(operationId) ?? []
+          ? await ctx.deliveryStack?.lifecycle.read(operationId) ?? []
           : await captureStopAcceptedWork(owner, operationId);
         if (owner !== "delivery") {
           assertAcceptedWorkSubset(after, frozen, `device-removal ${owner} read-back`);
@@ -1750,8 +1746,8 @@ async function runServerProcess(
       if (removalAdmissionOperationId !== operationId) {
         throw new Error("Device-removal release does not own external admission");
       }
-      await ctx.deliveryStack?.releaseLifecycleAdmission(operationId);
-      await ctx.deliveryStack?.resumeAfterAuthorityTransfer();
+      await ctx.deliveryStack?.lifecycle.release(operationId);
+      await ctx.deliveryStack?.lifecycle.resume();
       schedulerRuntime?.scheduler.resumeAfterAuthorityTransfer();
       ctx.executorJobOwner?.resumeAccepting();
       ctx.inboundRouter?.resumeNewMessages();
@@ -1822,8 +1818,8 @@ async function runServerProcess(
           await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
         },
         releaseAdmission: async (operationId) => {
-          await ctx.deliveryStack?.releaseLifecycleAdmission(operationId);
-          await ctx.deliveryStack?.resumeAfterAuthorityTransfer();
+          await ctx.deliveryStack?.lifecycle.release(operationId);
+          await ctx.deliveryStack?.lifecycle.resume();
           ctx.conversationProtocol?.startRecoveryLoop();
           schedulerRuntime?.scheduler.resumeAfterAuthorityTransfer();
           ctx.inboundRouter?.resumeNewMessages();
@@ -1837,7 +1833,7 @@ async function runServerProcess(
             ctx.inboundRouter?.refuseNewMessages();
             ctx.executorJobOwner?.pauseAccepting();
             schedulerRuntime?.scheduler.closeAdmissionForLifecycle();
-            ctx.deliveryStack?.closeAdmissionForLifecycle();
+            ctx.deliveryStack?.lifecycle.close();
             await Promise.all([
               ctx.localConversationOwner?.closeHostStopAdmission(operationId),
               ctx.channelConnections?.suspendConfigured(),
@@ -1845,7 +1841,7 @@ async function runServerProcess(
           },
           onFrozen: async (snapshot) => {
             const sources = hostStopDeliveryLifecycleSources(snapshot);
-            await ctx.deliveryStack?.installLifecycleAdmission({
+            await ctx.deliveryStack?.lifecycle.install({
               operationId: snapshot.operationId,
               sources,
               deliveries: snapshot.owners.delivery,

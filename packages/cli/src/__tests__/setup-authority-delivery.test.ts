@@ -16,7 +16,6 @@ import {
   sealedBundleArtifact,
 } from "@zhixing/core/protocol";
 import { createTempDir } from "@zhixing/test-utils";
-import { createOwnerDeliveryLifecycleBinding } from "@zhixing/owner-kernel/delivery";
 import {
   setupAuthorityRuntime,
   setupDelivery,
@@ -192,9 +191,8 @@ describe("setupDelivery authority production path", () => {
         { candidateReferences: [sourceRef] },
       ),
     );
-    const lifecycle = createOwnerDeliveryLifecycleBinding({
-      authority: stack.authority,
-    }).application;
+    const lifecycle = authorityRuntime.deliveryLifecycle?.application;
+    if (!lifecycle) throw new Error("expected Delivery lifecycle application");
     const claim = await lifecycle.claim({
       itemId: prepared.value,
       outcomePolicy: { kind: "manual-resolution" },
@@ -298,6 +296,26 @@ describe("setupDelivery authority production path", () => {
       { candidateReferences: [sourceRef] },
     ));
     expect((await authority.get(transaction.value))?.state).toBe("queued");
+
+    stack.activate();
+    const frozen = stack.lifecycle.capture();
+    expect(frozen).toEqual([expect.objectContaining({ id: transaction.value })]);
+    await stack.lifecycle.install({
+      operationId: "host-stop-production-binding",
+      sources: [],
+      deliveries: frozen,
+    });
+    stack.lifecycle.close();
+    await stack.lifecycle.seal("host-stop-production-binding");
+    await stack.lifecycle.settle({
+      operationId: "host-stop-production-binding",
+      strategy: "immediate",
+      timeoutMs: 1_000,
+    });
+    await expect(stack.lifecycle.read("host-stop-production-binding"))
+      .resolves.toEqual(frozen);
+    await stack.lifecycle.release("host-stop-production-binding");
+    await stack.lifecycle.resume();
 
     await stack.stop();
     authorityRuntime = await setupAuthorityRuntime({

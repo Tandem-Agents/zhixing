@@ -72,6 +72,7 @@ export function createDeliveryLifecycleTestBinding(
   options: { readonly baseRetryDelayMs?: number } = {},
 ) {
   const correctness: DeliveryLifecycleCorrectnessPort = {
+    snapshot: () => authority.snapshot(),
     transact: <Value>(decide: Parameters<
       DeliveryLifecycleCorrectnessPort["transact"]
     >[0]) => authority.transactDeliveryLifecycle<Value>((context) => {
@@ -86,12 +87,13 @@ export function createDeliveryLifecycleTestBinding(
         throw error;
       }
     }),
+    transactAdmission: <Value>(decide: Parameters<
+      DeliveryLifecycleCorrectnessPort["transactAdmission"]
+    >[0]) => authority.transactDeliveryAdmission<Value>(decide),
   };
   const projection: DeliveryLifecycleProjectionPort = {
     list: () => authority.list(),
     snapshot: () => authority.snapshot(),
-    lifecycleAcceptedWorkItems: (operationId) =>
-      authority.lifecycleAcceptedWorkItems(operationId),
   };
   return {
     application: new DeliveryLifecycleApplicationService(correctness, options),

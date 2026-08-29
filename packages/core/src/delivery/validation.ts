@@ -4,6 +4,7 @@ import {
   isPrefixedUlid,
   MAX_PROTOCOL_IDENTIFIER_LENGTH,
 } from "../protocol/validation.js";
+import type { DeliveryLifecycleSourceRef } from "./types.js";
 
 export const MAX_DELIVERY_IDENTIFIER_LENGTH = MAX_PROTOCOL_IDENTIFIER_LENGTH;
 export const MAX_DELIVERY_DIAGNOSTIC_TEXT_LENGTH = 480;
@@ -22,6 +23,26 @@ export function assertDeliveryItemId(
   label = "Delivery item id",
 ): asserts value is string {
   assertPrefixedUlid(value, DELIVERY_ITEM_ID_PREFIX, label);
+}
+
+export function assertDeliveryLifecycleSourceRef(
+  source: DeliveryLifecycleSourceRef,
+): void {
+  if (
+    source.owner !== "conversation" &&
+    source.owner !== "assignment" &&
+    source.owner !== "scheduler"
+  ) {
+    throw new TypeError("Delivery lifecycle source owner is invalid");
+  }
+  assertDeliveryIdentifier(source.id, "Delivery lifecycle source id");
+  if (
+    typeof source.revision !== "string" ||
+    source.revision.length === 0 ||
+    source.revision.length > 512
+  ) {
+    throw new TypeError("Delivery lifecycle source revision is invalid");
+  }
 }
 
 export function assertDeliveryDiagnosticText(

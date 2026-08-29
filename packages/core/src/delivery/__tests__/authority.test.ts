@@ -37,6 +37,7 @@ import {
   deliverySourceRecords,
 } from "./delivery-test-harness.js";
 import type { DeliveryClaimResult } from "../application.js";
+import { DeliveryObligationApplicationService } from "../application.js";
 import { MAX_INLINE_DELIVERY_CONTENT_BYTES } from "../content-schema.js";
 
 // Both suites exercise a real durable authority log. The isolated file completes in
@@ -110,16 +111,26 @@ async function enqueue(
   input: DeliveryEnqueueInput,
 ): Promise<DeliveryEnqueueResult> {
   const source = await createDeliverySourceFixture(artifacts, input.keyBody);
+  const { maxAttempts, ...intent } = input.intent;
+  const obligation = new DeliveryObligationApplicationService({
+    coordinate: (operation) => authority.coordinate(operation),
+    prepare: (inputs, commitAt, decide) => authority.prepareEnqueues(
+      inputs,
+      commitAt,
+      (projection, _inputs, _commitAt, lifecycleAdmission) =>
+        decide({ projection, lifecycleAdmission }),
+    ),
+  }, { maxAttempts });
   return authority.coordinate(async () => (
     await log.transactProjection<Record<string, never>, unknown, DeliveryEnqueueResult>(
       {},
       (state) => state,
       (_state) => {
-        const decision = authority.prepareEnqueues(
-          [input],
-          input.intent.createdAt,
-          prepareDeliveryEnqueues,
-        );
+        const decision = obligation.prepare([{
+          keyBody: input.keyBody,
+          intent,
+          ...(input.lifecycleSources ? { lifecycleSources: input.lifecycleSources } : {}),
+        }], input.intent.createdAt);
         if (!decision.accepted || decision.records.length === 0) {
           return { kind: "return", value: decision };
         }
@@ -127,7 +138,7 @@ async function enqueue(
           kind: "append",
           entries: [
             ...source.records(decision.items[0]!.statusRevision),
-            ...decision.records.map(deliveryRecord),
+            ...decision.records,
           ],
           value: decision,
         };
@@ -684,14 +695,20 @@ describe(
       lifecycleSources: [permit],
     };
     const authority = new DeliveryAuthority({ log, anchorEpoch: 7 });
-    await authority.installLifecycleAdmission({
+    const lifecycle = createDeliveryLifecycleTestBinding(authority).application;
+    await lifecycle.installAdmission({
       operationId: "stop-operation-1",
       sources: [permit],
       deliveries: [],
     });
+    await expect(lifecycle.installAdmission({
+      operationId: "stop-operation-1",
+      sources: [{ revision: permit.revision, id: permit.id, owner: permit.owner }],
+      deliveries: [],
+    })).resolves.toBeUndefined();
     const first = await enqueue(log, artifacts, authority, firstInput);
     expect(first.accepted).toBe(true);
-    expect(await authority.lifecycleAcceptedWorkItems("stop-operation-1"))
+    expect(await lifecycle.acceptedWorkItems("stop-operation-1"))
       .toEqual([expect.objectContaining({ id: first.items[0]!.itemId })]);
 
     const causalCases: readonly {
@@ -742,8 +759,8 @@ describe(
         lifecycleSources: [{ owner: "scheduler", id: "job-run-1", revision: `sha256:${"d".repeat(64)}` }],
       },
     ];
-    await authority.releaseLifecycleAdmission("stop-operation-1");
-    await authority.installLifecycleAdmission({
+    await lifecycle.releaseAdmission("stop-operation-1");
+    await lifecycle.installAdmission({
       operationId: "stop-operation-1",
       sources: [
         permit,
@@ -759,7 +776,7 @@ describe(
         lifecycleSources: causal.lifecycleSources,
       })).resolves.toMatchObject({ accepted: true });
     }
-    expect(await authority.lifecycleAcceptedWorkItems("stop-operation-1")).toHaveLength(7);
+    expect(await lifecycle.acceptedWorkItems("stop-operation-1")).toHaveLength(7);
 
     const beforeFresh = await log.readAll();
     await expect(enqueue(log, artifacts, authority, {
@@ -779,7 +796,7 @@ describe(
       lifecycleSources: [{ ...permit, revision: `sha256:${"e".repeat(64)}` }],
     })).rejects.toThrow("not part of the frozen lifecycle operation");
 
-    await authority.sealLifecycleAdmission("stop-operation-1");
+    await lifecycle.sealAdmission("stop-operation-1");
     await expect(enqueue(log, artifacts, authority, firstInput)).resolves.toMatchObject({
       accepted: true,
     });
@@ -794,7 +811,8 @@ describe(
       })).rejects.toThrow("admission is sealed");
 
     const restarted = new DeliveryAuthority({ log, anchorEpoch: 7 });
-    await restarted.installLifecycleAdmission({
+    const restartedLifecycle = createDeliveryLifecycleTestBinding(restarted).application;
+    await restartedLifecycle.installAdmission({
       operationId: "stop-operation-1",
       sources: [
         permit,
@@ -803,21 +821,21 @@ describe(
       ],
       deliveries: [],
     });
-    expect(await restarted.lifecycleAcceptedWorkItems("stop-operation-1")).toHaveLength(7);
-    await restarted.sealLifecycleAdmission("stop-operation-1");
+    expect(await restartedLifecycle.acceptedWorkItems("stop-operation-1")).toHaveLength(7);
+    await restartedLifecycle.sealAdmission("stop-operation-1");
     await expect(enqueue(log, artifacts, restarted, firstInput)).resolves.toMatchObject({
       accepted: true,
     });
-    await restarted.releaseLifecycleAdmission("stop-operation-1");
-    await restarted.installLifecycleAdmission({
+    await restartedLifecycle.releaseAdmission("stop-operation-1");
+    await restartedLifecycle.installAdmission({
       operationId: "stop-operation-2",
       sources: [],
       deliveries: [],
     });
-    expect(await restarted.lifecycleAcceptedWorkItems("stop-operation-2")).toHaveLength(7);
+    expect(await restartedLifecycle.acceptedWorkItems("stop-operation-2")).toHaveLength(7);
 
-    await restarted.releaseLifecycleAdmission("stop-operation-2");
-    await restarted.restoreLifecycleAdmission({
+    await restartedLifecycle.releaseAdmission("stop-operation-2");
+    await restartedLifecycle.restoreAdmission({
       operationId: "stop-operation-3",
       sources: [permit],
       deliveries: [],

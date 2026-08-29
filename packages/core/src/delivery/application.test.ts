@@ -106,7 +106,7 @@ describe("Delivery obligation application", () => {
         decide: DeliveryObligationDecide,
       ) => decide({
         projection: emptyDeliveryProjection(),
-        lifecycleBindings: inputs.map(() => undefined),
+        lifecycleAdmission: undefined,
       }),
     );
     const application = new DeliveryObligationApplicationService(
@@ -152,7 +152,7 @@ describe("Delivery obligation application", () => {
     ) => {
       const decision = decide({
         projection: emptyDeliveryProjection(),
-        lifecycleBindings: inputs.map(() => undefined),
+        lifecycleAdmission: undefined,
       });
       if (decision.accepted) {
         projection = projectDeliveryLifecycleRecords(
@@ -176,10 +176,15 @@ describe("Delivery obligation application", () => {
     item.automaticAttemptsUsed = 1;
 
     const application = new DeliveryLifecycleApplicationService({
+      snapshot: () => [],
       transact: (decide) => Promise.resolve(decide({
         projection,
         transactionAt: NOW,
         currentAnchorEpoch: 7,
+      }).value),
+      transactAdmission: (decide) => Promise.resolve(decide({
+        projection,
+        admission: undefined,
       }).value),
     });
 

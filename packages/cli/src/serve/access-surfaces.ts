@@ -118,11 +118,6 @@ const authorityRuntimeSurface: AccessSurface = {
       authorityRuntime.startupCleanup,
     );
     ctx.authorityRuntime = authorityRuntime;
-    if (ctx.startupLifecycle) {
-      await authorityRuntime.authority.restoreLifecycleAdmission(
-        ctx.startupLifecycle.delivery,
-      );
-    }
     if (ctx.enabledRoles.includes("anchor")) {
       ctx.jobRelayObligations ??= new JobRelayObligationDirectory();
     }
@@ -1014,7 +1009,10 @@ const deliverySurface: AccessSurface = {
       deliveryStack.startupCleanup,
     );
     ctx.deliveryStack = deliveryStack;
-    if (ctx.startupLifecycle) deliveryStack.closeAdmissionForLifecycle();
+    if (ctx.startupLifecycle) {
+      await deliveryStack.lifecycle.restore(ctx.startupLifecycle.delivery);
+      deliveryStack.lifecycle.close();
+    }
     deliveryStack.onStatus((notice) => {
       ctx.executionStatusHub?.publish(notice);
     });

@@ -22,7 +22,10 @@ import {
 } from "@zhixing/core/protocol";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
-import { createOwnerDeliveryParticipant } from "../delivery-obligation-correctness.js";
+import {
+  createOwnerDeliveryLifecycleBinding,
+  createOwnerDeliveryParticipant,
+} from "../delivery-obligation-correctness.js";
 import {
   DURABLE_IO_TEST_TIMEOUT_MS,
   trackAuthorityLog,
@@ -199,6 +202,7 @@ function jobFacts() {
 describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("binds all seven canonical producer paths to the frozen lifecycle source exact-set", async () => {
     const { authority, owner } = await participantFixture();
+    const lifecycle = createOwnerDeliveryLifecycleBinding({ authority }).application;
     const facts = jobFacts();
     const conversationRevision = protocolDigest("ConversationDeliveryLifecycleSource", 1, {
       conversationId: "conversation-1",
@@ -210,7 +214,7 @@ describe("owner delivery participant", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, 
       taskRevision: facts.occurrence.taskRevision,
       deliveryPlan: facts.occurrence.deliveryPlan,
     });
-    await authority.installLifecycleAdmission({
+    await lifecycle.installAdmission({
       operationId: "stop-delivery-producers",
       sources: [
         { owner: "conversation", id: "conversation-1", revision: conversationRevision },

@@ -217,7 +217,6 @@ describe("delivery resolution control", { timeout: DURABLE_IO_TEST_TIMEOUT_MS },
       }).value as Value,
       list: async () => [],
       snapshot: () => [],
-      lifecycleAcceptedWorkItems: async () => [],
     } as unknown as DeliveryAuthority;
 
     const application = createOwnerDeliveryLifecycleBinding({ authority }).application;

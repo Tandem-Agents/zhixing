@@ -106,6 +106,7 @@ import type {
 import {
   createOwnerDeliveryLifecycleBinding,
   createOwnerDeliveryParticipant,
+  type OwnerDeliveryLifecycleBinding,
 } from "@zhixing/owner-kernel/delivery";
 import type { ExecutorResourceGovernor } from "@zhixing/executor";
 import {
@@ -251,6 +252,7 @@ export interface AuthorityRuntimeStack {
   readonly signer: ProtocolSigner;
   readonly verifier: ProtocolSignatureVerifier;
   readonly authority: DeliveryAuthority;
+  readonly deliveryLifecycle?: OwnerDeliveryLifecycleBinding;
   readonly authorityLog: FileAuthorityCommitLog;
   readonly localExecutorEnabled: boolean;
   readonly executorLog: FileAuthorityCommitLog;
@@ -407,20 +409,7 @@ export interface DeliveryStack {
   /** Enables transport side effects after the RPC server is listening. */
   activate(): void;
   stats(): AuthorityDeliveryStats;
-  closeAdmissionForLifecycle(): void;
-  acceptedWorkItems(): readonly { readonly id: string; readonly revision: string }[];
-  lifecycleAcceptedWorkItems(
-    operationId: string,
-  ): Promise<readonly { readonly id: string; readonly revision: string }[]>;
-  installLifecycleAdmission(input: import("@zhixing/core").DeliveryLifecycleAdmission): Promise<void>;
-  restoreLifecycleAdmission(input: import("@zhixing/core").DeliveryLifecycleRestoration): Promise<void>;
-  sealLifecycleAdmission(operationId: string): Promise<void>;
-  releaseLifecycleAdmission(operationId: string): Promise<void>;
-  settleAcceptedWorkForLifecycle(
-    operationId: string,
-    strategy: "immediate" | "drain" | "cancel",
-    timeoutMs: number,
-  ): Promise<void>;
+  readonly lifecycle: DeliveryAcceptedWorkLifecyclePort;
   flush(): Promise<void>;
   quiesceForAuthorityTransfer(): Promise<void>;
   resumeAfterAuthorityTransfer(): Promise<void>;
@@ -440,6 +429,24 @@ export interface DeliveryStack {
   resolutionApplication: DeliveryUncertainResolutionApplication;
   startupCleanup: StartupCleanupHandle;
   stop: () => Promise<void>;
+}
+
+export interface DeliveryAcceptedWorkLifecyclePort {
+  capture(): readonly { readonly id: string; readonly revision: string }[];
+  install(input: import("@zhixing/core").DeliveryLifecycleAdmission): Promise<void>;
+  restore(input: import("@zhixing/core").DeliveryLifecycleRestoration): Promise<void>;
+  seal(operationId: string): Promise<void>;
+  release(operationId: string): Promise<void>;
+  read(
+    operationId: string,
+  ): Promise<readonly { readonly id: string; readonly revision: string }[]>;
+  close(): void;
+  settle(input: {
+    readonly operationId: string;
+    readonly strategy: "immediate" | "drain" | "cancel";
+    readonly timeoutMs: number;
+  }): Promise<void>;
+  resume(): Promise<void>;
 }
 
 export interface SetupDeliveryOptions {
@@ -571,6 +578,9 @@ export async function setupAuthorityRuntime(
       : undefined;
     let participant = authority
       ? createOwnerDeliveryParticipant({ authority })
+      : undefined;
+    let deliveryLifecycle = authority
+      ? createOwnerDeliveryLifecycleBinding({ authority })
       : undefined;
     let controlAdmission = authorityLog
       ? new ownerRuntime!.ControlAdmissionJournal(authorityLog, artifacts)
@@ -1841,6 +1851,7 @@ export async function setupAuthorityRuntime(
 
       authority = nextAuthority;
       participant = nextParticipant;
+      deliveryLifecycle = createOwnerDeliveryLifecycleBinding({ authority: nextAuthority });
       controlAdmission = nextControlAdmission;
       surfaceAssets = nextSurfaceAssets;
       resourceGovernor = nextResourceGovernor;
@@ -1883,6 +1894,9 @@ export async function setupAuthorityRuntime(
       get authority() {
         if (!authority) throw new Error("Anchor authority role is not enabled");
         return authority;
+      },
+      get deliveryLifecycle() {
+        return deliveryLifecycle;
       },
       get authorityLog() {
         if (!authorityLog)
@@ -2390,15 +2404,19 @@ export async function setupDelivery(
         onResolved: (notice) => eventBus.emit("delivery:notice", { notice }),
       }),
     );
-    const deliveryLifecycle = createOwnerDeliveryLifecycleBinding({
-      authority: options.authorityRuntime.authority,
-    });
+    const deliveryLifecycle = () => {
+      const binding = options.authorityRuntime.deliveryLifecycle;
+      if (!binding) {
+        throw new Error("Delivery lifecycle application is unavailable without the Anchor role");
+      }
+      return binding;
+    };
 
     // 权威 Pipeline 只消费已提交事实；conversation 生产入口在 owner commit。
     const buildAuthorityDelivery = async () => {
       const pipeline = new AuthorityDeliveryPipeline({
-        application: deliveryLifecycle.application,
-        projection: deliveryLifecycle.projection,
+        application: deliveryLifecycle().application,
+        projection: deliveryLifecycle().projection,
         artifacts,
         transport: transports,
         eventBus,
@@ -2432,21 +2450,20 @@ export async function setupDelivery(
         activated = true;
       },
       stats: () => authorityDelivery!.stats(),
-      closeAdmissionForLifecycle: () =>
-        authorityDelivery!.closeAdmissionForLifecycle(),
-      acceptedWorkItems: () => authorityDelivery!.acceptedWorkItems(),
-      installLifecycleAdmission: (input) =>
-        options.authorityRuntime.authority.installLifecycleAdmission(input),
-      restoreLifecycleAdmission: (input) =>
-        options.authorityRuntime.authority.restoreLifecycleAdmission(input),
-      sealLifecycleAdmission: (operationId) =>
-        options.authorityRuntime.authority.sealLifecycleAdmission(operationId),
-      releaseLifecycleAdmission: (operationId) =>
-        options.authorityRuntime.authority.releaseLifecycleAdmission(operationId),
-      settleAcceptedWorkForLifecycle: (operationId, strategy, timeoutMs) =>
-        authorityDelivery!.settleAcceptedWorkForLifecycle(operationId, strategy, timeoutMs),
-      lifecycleAcceptedWorkItems: (operationId) =>
-        options.authorityRuntime.authority.lifecycleAcceptedWorkItems(operationId),
+      lifecycle: Object.freeze({
+        capture: () => deliveryLifecycle().application.captureAcceptedWork(),
+        install: (input) => deliveryLifecycle().application.installAdmission(input),
+        restore: (input) => deliveryLifecycle().application.restoreAdmission(input),
+        seal: (operationId) => deliveryLifecycle().application.sealAdmission(operationId),
+        release: (operationId) => deliveryLifecycle().application.releaseAdmission(operationId),
+        read: (operationId) => deliveryLifecycle().application.acceptedWorkItems(operationId),
+        close: () => deliveryLifecycle().application.closeAdmission(authorityDelivery!),
+        settle: (input) => deliveryLifecycle().application.settleAcceptedWork({
+          ...input,
+          effects: authorityDelivery!,
+        }),
+        resume: () => deliveryLifecycle().application.resume(authorityDelivery!),
+      } satisfies DeliveryAcceptedWorkLifecyclePort),
       flush: async () => {
         await authorityDelivery!.flush();
       },
