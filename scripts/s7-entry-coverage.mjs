@@ -1103,6 +1103,12 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const builtinSkill = required("packages/tools-builtin/src/skill.ts");
   const builtinFactories = required("packages/tools-builtin/src/factories.ts");
   const builtinIndex = required("packages/tools-builtin/src/index.ts");
+  const admissionStart = application.indexOf(
+    "export interface SkillCatalogAdmissionRequest",
+  );
+  const saveApplication = admissionStart >= 0
+    ? application.slice(0, admissionStart)
+    : application;
 
   let coreManifest;
   try {
@@ -1132,6 +1138,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     coreIndex.includes("catalog-application") ||
     skillIndex.includes("catalog-application") ||
     skillIndex.includes("SkillCatalogApplication") ||
+    skillIndex.includes("SkillCatalogAdmissionApplication") ||
     skillIndex.includes("SkillCatalogSaveApplication") ||
     skillIndex.includes("runSkillSavePipeline")
   ) {
@@ -1147,6 +1154,11 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       /\b(?:runSkillSavePipeline|SkillSaver)\b/u.test(record.text)
     ) {
       failures.push(`${record.relative}: retired parallel Skill save application owner`);
+    }
+    if (
+      /\b(?:SkillAdmissionPort|SkillAdmissionAssess|SkillAdmissionWorkspace)\b/u.test(record.text)
+    ) {
+      failures.push(`${record.relative}: retired parallel Skill admission application owner`);
     }
     if (
       (record.relative.startsWith("packages/server/src/") ||
@@ -1168,30 +1180,46 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     failures.push("Skill Catalog domain application service is missing");
   }
   if (
-    !application.includes("class SkillCatalogSaveApplicationService") ||
-    !application.includes("interface SkillCatalogSaveCorrectnessPort") ||
-    !application.includes("scrubSecrets(draft.name)") ||
-    !application.includes("stringifyFrontmatter(") ||
-    !application.includes("skillNameToId(normalized.name)")
+    !saveApplication.includes("class SkillCatalogSaveApplicationService") ||
+    !saveApplication.includes("interface SkillCatalogSaveCorrectnessPort") ||
+    !saveApplication.includes("scrubSecrets(draft.name)") ||
+    !saveApplication.includes("stringifyFrontmatter(") ||
+    !saveApplication.includes("skillNameToId(normalized.name)")
   ) {
     failures.push("Skill Catalog save invariants lack one domain application owner");
   }
   if (
-    !application.includes("requestIdentityFor(stagedOperationId)") ||
-    !application.includes("record.requestIdentity === currentRequestIdentity") ||
-    !application.includes("record.recordSeq >= replayRecordSeq") ||
-    !application.includes("sameSkillSaveDraft(replayMutation, candidate)") ||
-    !application.includes("const mutation = exactReplay")
+    !application.includes("class SkillCatalogAdmissionApplicationService") ||
+    !application.includes("interface SkillCatalogAdmissionCorrectnessPort") ||
+    !application.includes("readonly #pending = new Map") ||
+    !application.includes("await assessSkill(") ||
+    !application.includes("ADMISSION_TOKEN_TTL_MS") ||
+    !application.includes("candidate.digest !== pending.digest") ||
+    !application.includes("`${operationId}:admit`")
+  ) {
+    failures.push("Skill Catalog admission lifecycle lacks one domain application owner");
+  }
+  const admitArtifact = application.lastIndexOf("await this.correctness.putContent(");
+  const admitStage = application.lastIndexOf("await this.correctness.stage(");
+  if (!(admitArtifact >= 0 && admitStage > admitArtifact)) {
+    failures.push("Skill Catalog admit must stage only after its content artifact exists");
+  }
+  if (
+    !saveApplication.includes("requestIdentityFor(stagedOperationId)") ||
+    !saveApplication.includes("record.requestIdentity === currentRequestIdentity") ||
+    !saveApplication.includes("record.recordSeq >= replayRecordSeq") ||
+    !saveApplication.includes("sameSkillSaveDraft(replayMutation, candidate)") ||
+    !saveApplication.includes("const mutation = exactReplay")
   ) {
     failures.push(
       "Skill Catalog save replay does not exclude its own durable operation at the exact overlay boundary",
     );
   }
-  const saveArtifact = application.indexOf("await this.correctness.putContent(");
-  const saveStage = application.indexOf("await this.correctness.stage(");
+  const saveArtifact = saveApplication.indexOf("await this.correctness.putContent(");
+  const saveStage = saveApplication.indexOf("await this.correctness.stage(");
   if (
     !(saveArtifact >= 0 && saveStage > saveArtifact) ||
-    !application.includes("`${operationId}:save`")
+    !saveApplication.includes("`${operationId}:save`")
   ) {
     failures.push("Skill Catalog save must stage one stable operation only after content artifact creation");
   }
@@ -1236,8 +1264,8 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     for (const match of text.matchAll(
       /import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+["'](@zhixing\/core)["']/gu,
     )) {
-      if (/\bSkillCatalogSaveApplication(?:Service)?\b/u.test(match[1])) {
-        failures.push(`${relative}: Skill save contract leaked back through core root import`);
+      if (/\bSkillCatalog(?:Save|Admission)Application(?:Service)?\b/u.test(match[1])) {
+        failures.push(`${relative}: Skill application contract leaked back through core root import`);
       }
     }
   }
@@ -1249,6 +1277,15 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !assignmentSkillPort.includes("createSkillCatalogSaveCorrectnessPort(artifacts)")
   ) {
     failures.push("Orchestrator retains Skill save business orchestration or omits the domain service");
+  }
+  if (
+    !assignmentSkillPort.includes("new SkillCatalogAdmissionApplicationService(") ||
+    !assignmentSkillPort.includes("implements SkillCatalogAdmissionCorrectnessPort") ||
+    !assignmentSkillPort.includes("acquireLocalCandidate(") ||
+    !assignmentSkillPort.includes("assertRegularCandidateTree(") ||
+    assignmentSkillPort.includes("class SkillAdmissionWorkspace")
+  ) {
+    failures.push("Orchestrator does not provide the path-free Skill admission adapter");
   }
   if (
     !assignmentMutationIdentity.includes(
@@ -1276,11 +1313,34 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     failures.push("save_skill binding must consume only the Skill-owned application contract");
   }
   if (
+    !builtinSkill.includes("application: SkillCatalogAdmissionApplication") ||
+    !builtinSkill.includes("await application.admit(") ||
+    builtinSkill.includes("new Map<string, PendingAdmission>") ||
+    builtinSkill.includes("function firstCall(") ||
+    builtinSkill.includes("function confirmAdmission(") ||
+    builtinSkill.includes("computeStagingDigest") ||
+    builtinSkill.includes("acquireToStaging")
+  ) {
+    failures.push("admit_skill binding retains a parallel admission state machine");
+  }
+  if (
     !builtinFactories.includes("skillCatalogSave?: SkillCatalogSaveApplication") ||
     !agentRuntime.includes("skillCatalogSave: skillPorts.saveApplication") ||
     agentRuntime.includes("skillSaver: skillPorts.saver")
   ) {
     failures.push("Agent runtime does not install the unique Skill save application binding");
+  }
+  if (
+    !builtinFactories.includes(
+      "skillCatalogAdmission?: SkillCatalogAdmissionApplication",
+    ) ||
+    !agentRuntime.includes(
+      "skillCatalogAdmission: skillPorts.admissionApplication",
+    ) ||
+    builtinFactories.includes("admissionLlm?: AdmissionLlm") ||
+    builtinFactories.includes("skillAdmission?: SkillAdmissionPort")
+  ) {
+    failures.push("Agent runtime does not install the unique Skill admission application binding");
   }
   if (cliDirectories.includes("GlobalStatePort") || cliDirectories.includes("skill-set-state")) {
     failures.push("CLI management directories retain a direct Skill correctness adapter");

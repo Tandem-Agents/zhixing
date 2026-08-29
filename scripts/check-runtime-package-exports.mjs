@@ -145,6 +145,7 @@ await verifyCorePackageExports(failures);
 for (const name of [
   "SkillCatalogApplicationError",
   "SkillCatalogApplicationService",
+  "SkillCatalogAdmissionApplicationService",
   "SkillCatalogSaveApplicationService",
 ]) {
   if (typeof coreSkillCatalog[name] !== "function") {
@@ -356,6 +357,7 @@ async function verifyCorePackageExports(failures) {
             subpath !== "./skills/catalog" &&
             ("SkillCatalogApplicationError" in exported ||
               "SkillCatalogApplicationService" in exported ||
+              "SkillCatalogAdmissionApplicationService" in exported ||
               "SkillCatalogSaveApplicationService" in exported)
           ) {
             failures.push(`core-exports:${subpath}:skill-catalog-runtime-leak`);

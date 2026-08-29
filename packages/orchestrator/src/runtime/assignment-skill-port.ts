@@ -1,8 +1,11 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import {
+  acquireToStaging,
   builtinIndexEntries,
+  computeStagingDigest,
   getBuiltinSkill,
   parseFrontmatter,
   renderSkillIndex,
@@ -10,9 +13,15 @@ import {
   type SkillCatalogEntry,
   type SkillMode,
   type SkillTextLoader,
+  type AdmissionLlm,
 } from "@zhixing/core";
 import {
+  SkillCatalogAdmissionApplicationService,
   SkillCatalogSaveApplicationService,
+  type SkillCatalogAdmissionApplication,
+  type SkillCatalogAdmissionCandidate,
+  type SkillCatalogAdmissionCorrectnessPort,
+  type SkillCatalogAdmissionMutation,
   type SkillCatalogSaveApplication,
   type SkillCatalogSaveCorrectnessPort,
   type SkillCatalogSaveMutation,
@@ -24,9 +33,6 @@ import type {
   GlobalStagedMutation,
 } from "@zhixing/core/contracts";
 import { assignmentMutationRequestId } from "@zhixing/core/protocol";
-import type {
-  SkillAdmissionPort,
-} from "@zhixing/tools-builtin";
 import { runContextStorage } from "./run-context.js";
 
 const SKILL_INDEX_TOP_N = 20;
@@ -36,13 +42,21 @@ const encoder = new TextEncoder();
 export interface AssignmentSkillPorts {
   readonly loader: SkillTextLoader;
   readonly saveApplication: SkillCatalogSaveApplication;
-  readonly admission: SkillAdmissionPort;
+  readonly admissionApplication: SkillCatalogAdmissionApplication;
 }
 
 export function createAssignmentSkillPorts(
   artifacts: ArtifactStore,
+  options: {
+    readonly admissionLlm: AdmissionLlm;
+    readonly clock?: () => number;
+    readonly randomToken?: () => string;
+  },
 ): AssignmentSkillPorts {
-  const staging = new SkillAdmissionWorkspace(artifacts);
+  const admissionCorrectness = new AssignmentSkillAdmissionCorrectnessPort(
+    artifacts,
+    options,
+  );
   const saveApplication = new SkillCatalogSaveApplicationService(
     createSkillCatalogSaveCorrectnessPort(artifacts),
   );
@@ -73,7 +87,9 @@ export function createAssignmentSkillPorts(
       },
     },
     saveApplication,
-    admission: staging,
+    admissionApplication: new SkillCatalogAdmissionApplicationService(
+      admissionCorrectness,
+    ),
   };
 }
 
@@ -226,64 +242,126 @@ async function stageSkillMutation(
   });
 }
 
-class SkillAdmissionWorkspace implements SkillAdmissionPort {
+class AssignmentSkillAdmissionCorrectnessPort
+  implements SkillCatalogAdmissionCorrectnessPort
+{
   readonly #root = path.join(os.tmpdir(), "zhixing-skill-admission");
+  readonly #candidates = new Map<string, string>();
 
-  constructor(private readonly artifacts: ArtifactStore) {}
+  readonly admissionLlm: AdmissionLlm;
 
-  async prepareStaging(): Promise<string> {
-    await fs.mkdir(this.#root, { recursive: true });
-    return fs.mkdtemp(path.join(this.#root, "candidate-"));
+  constructor(
+    private readonly artifacts: ArtifactStore,
+    private readonly options: {
+      readonly admissionLlm: AdmissionLlm;
+      readonly clock?: () => number;
+      readonly randomToken?: () => string;
+    },
+  ) {
+    this.admissionLlm = options.admissionLlm;
   }
 
-  async discardStaging(dir: string): Promise<void> {
-    this.#assertOwned(dir);
+  async acquireLocalCandidate(
+    sourcePath: string,
+  ): Promise<SkillCatalogAdmissionCandidate> {
+    await fs.mkdir(this.#root, { recursive: true });
+    const dir = await fs.mkdtemp(path.join(this.#root, "candidate-"));
+    const candidateId = randomUUID();
+    this.#candidates.set(candidateId, dir);
+    try {
+      await acquireToStaging({ kind: "local-path", path: sourcePath }, dir);
+      return await this.readCandidate(candidateId);
+    } catch (error) {
+      await this.discardCandidate(candidateId).catch(() => {});
+      throw error;
+    }
+  }
+
+  async readCandidate(candidateId: string): Promise<SkillCatalogAdmissionCandidate> {
+    const dir = this.#requireCandidate(candidateId);
+    await assertRegularCandidateTree(dir);
+    const document = await fs.readFile(path.join(dir, "SKILL.md"), "utf8");
+    return {
+      candidateId,
+      document,
+      digest: await computeStagingDigest(dir),
+    };
+  }
+
+  async discardCandidate(candidateId: string): Promise<void> {
+    const dir = this.#requireCandidate(candidateId);
+    this.#candidates.delete(candidateId);
     await fs.rm(dir, { recursive: true, force: true });
   }
 
-  async admit(
-    stagingDir: string,
-    opts?: { mode?: SkillMode; operationId?: string },
-  ): Promise<{ id: string; name: string }> {
-    this.#assertOwned(stagingDir);
-    requireRunSkillContext();
-    const document = await fs.readFile(path.join(stagingDir, "SKILL.md"), "utf8");
-    const parsed = parseFrontmatter(document);
-    const name = typeof parsed.data.name === "string" ? parsed.data.name.trim() : "";
-    const description = typeof parsed.data.description === "string"
-      ? parsed.data.description.trim()
-      : "";
-    const id = skillNameToId(name);
-    if (!id || !description) {
-      throw new Error("Skill frontmatter requires name and description");
-    }
-    const content = await this.artifacts.put(encoder.encode(document));
-    await stageSkillMutation(opts?.operationId, "admit", {
-      kind: "skill-admit",
-      record: { name, description, content },
-      mode: opts?.mode ?? "main",
-    });
-    return { id, name };
-  }
-
-  async sweepStaleStaging(maxAgeMs: number): Promise<number> {
+  async sweepStaleCandidates(maxAgeMs: number): Promise<number> {
     await fs.mkdir(this.#root, { recursive: true });
     let removed = 0;
     for (const name of await fs.readdir(this.#root)) {
       const dir = path.join(this.#root, name);
       if (!name.startsWith("candidate-")) continue;
       const stat = await fs.stat(dir).catch(() => null);
-      if (!stat?.isDirectory() || Date.now() - stat.mtimeMs <= maxAgeMs) continue;
+      if (!stat?.isDirectory() || this.now() - stat.mtimeMs <= maxAgeMs) continue;
       await fs.rm(dir, { recursive: true, force: true });
+      for (const [candidateId, candidateDir] of this.#candidates) {
+        if (candidateDir === dir) this.#candidates.delete(candidateId);
+      }
       removed += 1;
     }
     return removed;
   }
 
-  #assertOwned(input: string): void {
-    const relative = path.relative(this.#root, path.resolve(input));
+  putContent(document: string) {
+    return this.artifacts.put(encoder.encode(document));
+  }
+
+  async stage(
+    operationId: string,
+    mutation: SkillCatalogAdmissionMutation,
+  ): Promise<void> {
+    if (!operationId) {
+      throw new Error("Skill mutation requires a durable tool operation id");
+    }
+    await requireRunSkillContext().assignmentMutations.stage({
+      domain: "global",
+      operationId,
+      mutation,
+    });
+  }
+
+  now(): number {
+    return this.options.clock?.() ?? Date.now();
+  }
+
+  newToken(): string {
+    return this.options.randomToken?.() ?? randomUUID();
+  }
+
+  #requireCandidate(candidateId: string): string {
+    const dir = this.#candidates.get(candidateId);
+    if (!dir) throw new Error("Skill admission candidate is unknown");
+    const relative = path.relative(this.#root, path.resolve(dir));
     if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
       throw new Error("Skill staging directory is outside the admission workspace");
     }
+    return dir;
   }
+}
+
+async function assertRegularCandidateTree(root: string): Promise<void> {
+  const visit = async (dir: string): Promise<void> => {
+    for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+      const child = path.join(dir, entry.name);
+      const stat = await fs.lstat(child);
+      if (stat.isSymbolicLink()) {
+        throw new Error("Skill admission candidate must not contain symbolic links");
+      }
+      if (stat.isDirectory()) {
+        await visit(child);
+      } else if (!stat.isFile()) {
+        throw new Error("Skill admission candidate must contain only regular files");
+      }
+    }
+  };
+  await visit(root);
 }

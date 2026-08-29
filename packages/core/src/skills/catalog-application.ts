@@ -6,8 +6,14 @@ import type {
   GlobalStatePort,
   SkillStatePatch,
 } from "../contracts/index.js";
-import { stringifyFrontmatter } from "../frontmatter.js";
+import { parseFrontmatter, stringifyFrontmatter } from "../frontmatter.js";
 import { scrubSecrets } from "../security/secret-scrubber.js";
+import {
+  ADMISSION_TOKEN_TTL_MS,
+  assessSkill,
+  type AdmissionLlm,
+} from "./admission.js";
+import type { ContentThreat } from "./content-scan.js";
 import { SkillMutationConflictError } from "./global-state-adapter.js";
 import { skillNameToId } from "./id.js";
 import type { SkillCatalogEntry, SkillMode } from "./types.js";
@@ -264,6 +270,230 @@ export class SkillCatalogSaveApplicationService
         ? {}
         : { replayRecord: replayRecords[0] }),
     };
+  }
+}
+
+/** Skill-owned request for the admit_skill two-stage lifecycle. */
+export interface SkillCatalogAdmissionRequest {
+  readonly source?: {
+    readonly kind: "local-path";
+    readonly path: string;
+  };
+  readonly admissionToken?: string;
+  readonly mode: SkillMode;
+  readonly operationId?: string;
+}
+
+export type SkillCatalogAdmissionOutcome =
+  | { readonly kind: "missing-input" }
+  | { readonly kind: "missing-name" }
+  | {
+      readonly kind: "escalated";
+      readonly reason: string;
+      readonly threats: readonly ContentThreat[];
+    }
+  | {
+      readonly kind: "needs-confirm";
+      readonly admissionToken: string;
+      readonly reason: string;
+      readonly threats: readonly ContentThreat[];
+    }
+  | { readonly kind: "confirmation-expired" }
+  | { readonly kind: "candidate-changed" }
+  | {
+      readonly kind: "admitted";
+      readonly id: string;
+      readonly name: string;
+    };
+
+export interface SkillCatalogAdmissionApplication {
+  admit(request: SkillCatalogAdmissionRequest): Promise<SkillCatalogAdmissionOutcome>;
+}
+
+/** Opaque, path-free snapshot owned by the Infrastructure adapter. */
+export interface SkillCatalogAdmissionCandidate {
+  readonly candidateId: string;
+  readonly document: string;
+  readonly digest: string;
+}
+
+export interface SkillCatalogAdmissionMutation {
+  readonly kind: "skill-admit";
+  readonly record: SkillCatalogSaveRecord;
+  readonly mode: SkillMode;
+}
+
+/**
+ * Path-free adapter for candidate storage, independent review, CAS and the
+ * assignment mutation ledger. The Skill application owns every admission rule.
+ */
+export interface SkillCatalogAdmissionCorrectnessPort {
+  acquireLocalCandidate(sourcePath: string): Promise<SkillCatalogAdmissionCandidate>;
+  readCandidate(candidateId: string): Promise<SkillCatalogAdmissionCandidate>;
+  discardCandidate(candidateId: string): Promise<void>;
+  sweepStaleCandidates(maxAgeMs: number): Promise<number>;
+  putContent(document: string): Promise<ArtifactRef>;
+  stage(operationId: string, mutation: SkillCatalogAdmissionMutation): Promise<void>;
+  admissionLlm: AdmissionLlm;
+  now(): number;
+  newToken(): string;
+}
+
+interface PendingSkillAdmission {
+  readonly candidateId: string;
+  readonly digest: string;
+  readonly threats: readonly ContentThreat[];
+  readonly reason: string;
+  readonly mode: SkillMode;
+  readonly expiresAt: number;
+}
+
+/** Skill-owned two-stage admission state machine over path-free adapters. */
+export class SkillCatalogAdmissionApplicationService
+  implements SkillCatalogAdmissionApplication
+{
+  readonly #pending = new Map<string, PendingSkillAdmission>();
+
+  constructor(private readonly correctness: SkillCatalogAdmissionCorrectnessPort) {}
+
+  async admit(
+    request: SkillCatalogAdmissionRequest,
+  ): Promise<SkillCatalogAdmissionOutcome> {
+    await this.correctness.sweepStaleCandidates(ADMISSION_TOKEN_TTL_MS).catch(() => {});
+    const now = this.correctness.now();
+    for (const [token, pending] of this.#pending) {
+      if (pending.expiresAt <= now) await this.#dropPending(token);
+    }
+
+    const token = request.admissionToken?.trim() ?? "";
+    if (token) return this.#confirm(token, request.operationId);
+
+    const sourcePath = request.source?.kind === "local-path"
+      ? request.source.path.trim()
+      : "";
+    if (!sourcePath) return { kind: "missing-input" };
+    if (request.mode !== "main" && request.mode !== "work") {
+      throw new Error("Skill admission mode is invalid");
+    }
+    return this.#reviewLocal(sourcePath, request.mode, request.operationId);
+  }
+
+  async #reviewLocal(
+    sourcePath: string,
+    mode: SkillMode,
+    operationId: string | undefined,
+  ): Promise<SkillCatalogAdmissionOutcome> {
+    let candidate: SkillCatalogAdmissionCandidate | undefined;
+    try {
+      candidate = await this.correctness.acquireLocalCandidate(sourcePath);
+      const { data } = parseFrontmatter(candidate.document);
+      const name = typeof data.name === "string" ? data.name.trim() : "";
+      if (!name) {
+        await this.correctness.discardCandidate(candidate.candidateId);
+        return { kind: "missing-name" };
+      }
+
+      const assessment = await assessSkill(
+        { llm: this.correctness.admissionLlm },
+        { name, content: candidate.document },
+      );
+      if (assessment.verdict.decision === "escalate") {
+        await this.correctness.discardCandidate(candidate.candidateId);
+        return {
+          kind: "escalated",
+          reason: assessment.verdict.reason,
+          threats: assessment.threats,
+        };
+      }
+      if (assessment.verdict.decision === "safe") {
+        const admitted = await this.#stageCandidate(candidate, mode, operationId);
+        await this.correctness.discardCandidate(candidate.candidateId);
+        return admitted;
+      }
+
+      const token = this.correctness.newToken();
+      if (!token || this.#pending.has(token)) {
+        throw new Error("Skill admission token generator returned a duplicate token");
+      }
+      this.#pending.set(token, {
+        candidateId: candidate.candidateId,
+        digest: candidate.digest,
+        threats: assessment.threats,
+        reason: assessment.verdict.reason,
+        mode,
+        expiresAt: this.correctness.now() + ADMISSION_TOKEN_TTL_MS,
+      });
+      candidate = undefined;
+      return {
+        kind: "needs-confirm",
+        admissionToken: token,
+        reason: assessment.verdict.reason,
+        threats: assessment.threats,
+      };
+    } catch (error) {
+      if (candidate) {
+        await this.correctness.discardCandidate(candidate.candidateId).catch(() => {});
+      }
+      throw error;
+    }
+  }
+
+  async #confirm(
+    token: string,
+    operationId: string | undefined,
+  ): Promise<SkillCatalogAdmissionOutcome> {
+    const pending = this.#pending.get(token);
+    if (!pending || pending.expiresAt <= this.correctness.now()) {
+      await this.#dropPending(token);
+      return { kind: "confirmation-expired" };
+    }
+    try {
+      const candidate = await this.correctness.readCandidate(pending.candidateId);
+      if (candidate.digest !== pending.digest) {
+        await this.#dropPending(token);
+        return { kind: "candidate-changed" };
+      }
+      const admitted = await this.#stageCandidate(candidate, pending.mode, operationId);
+      await this.#dropPending(token);
+      return admitted;
+    } catch (error) {
+      await this.#dropPending(token);
+      throw error;
+    }
+  }
+
+  async #stageCandidate(
+    candidate: SkillCatalogAdmissionCandidate,
+    mode: SkillMode,
+    operationId: string | undefined,
+  ): Promise<Extract<SkillCatalogAdmissionOutcome, { kind: "admitted" }>> {
+    const parsed = parseFrontmatter(candidate.document);
+    const name = typeof parsed.data.name === "string" ? parsed.data.name.trim() : "";
+    const description = typeof parsed.data.description === "string"
+      ? parsed.data.description.trim()
+      : "";
+    const id = skillNameToId(name);
+    if (!id || !description) {
+      throw new Error("Skill frontmatter requires name and description");
+    }
+    const content = await this.correctness.putContent(candidate.document);
+    if (!operationId) {
+      throw new Error("Skill mutation requires a durable tool operation id");
+    }
+    await this.correctness.stage(`${operationId}:admit`, {
+      kind: "skill-admit",
+      record: { name, description, content },
+      mode,
+    });
+    return { kind: "admitted", id, name };
+  }
+
+  async #dropPending(token: string): Promise<void> {
+    const pending = this.#pending.get(token);
+    this.#pending.delete(token);
+    if (pending) {
+      await this.correctness.discardCandidate(pending.candidateId).catch(() => {});
+    }
   }
 }
 

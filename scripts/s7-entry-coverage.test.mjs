@@ -2341,7 +2341,7 @@ test("retired entry, live writable Store and reverse package dependency mutation
   );
 });
 
-test("Skill Catalog management has one domain application and fact-after-commit boundary", async () => {
+test("Skill Catalog management, save and admission have one domain application boundary", async () => {
   const paths = [
     "packages/core/src/skills/catalog-application.ts",
     "packages/core/src/index.ts",
@@ -2478,7 +2478,7 @@ test("Skill Catalog management has one domain application and fact-after-commit 
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/core/src/skills/catalog-application.ts",
       (text) => text.replace(
-        "await this.correctness.stage(",
+        /await this\.correctness\.stage\(\s*stagedOperationId!,/u,
         "await bypassSkillSaveStage(",
       ),
     )).join("\n"),
@@ -2513,6 +2513,43 @@ test("Skill Catalog management has one domain application and fact-after-commit 
       ),
     )).join("\n"),
     /identity is not shared with the durable assignment mutation ledger/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/skills/catalog-application.ts",
+      (text) => text.replace(
+        "candidate.digest !== pending.digest",
+        "false",
+      ),
+    )).join("\n"),
+    /admission lifecycle lacks one domain application owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/tools-builtin/src/skill.ts",
+      (text) => `${text}\nexport interface SkillAdmissionPort { admit(): Promise<void>; }`,
+    )).join("\n"),
+    /retired parallel Skill admission application owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/orchestrator/src/runtime/assignment-skill-port.ts",
+      (text) => text.replace(
+        "new SkillCatalogAdmissionApplicationService(",
+        "createLegacyAdmissionApplication(",
+      ),
+    )).join("\n"),
+    /does not provide the path-free Skill admission adapter/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => text.replace(
+        "skillCatalogAdmission: skillPorts.admissionApplication",
+        "skillAdmission: skillPorts.admission",
+      ),
+    )).join("\n"),
+    /does not install the unique Skill admission application binding/,
   );
 });
 

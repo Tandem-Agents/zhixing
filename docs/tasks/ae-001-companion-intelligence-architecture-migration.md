@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A2-02 纠正完成，等待协调者复核；不得进入后续 A2 责任链<br>
+> 当前检查点：A2-03 已完成，等待协调者独立复核；不得进入 A2-04<br>
 > 完成度：2/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `c0386d5f`；A0、A1-01～A1-12、A2-01 已由协调者独立复核并提交，A1 阶段退出门成立 |
+| 已接受基线 | `6b400201`；A0、A1-01～A1-12、A2-01～A2-02 已由协调者独立复核并提交，A1 阶段退出门成立 |
 | 当前 A 项 | A2：以 Skill Catalog 真实垂直切片证明领域模型 |
-| 活跃工作包 | A2-02 纠正已闭合：保存领域用例以真实 assignment mutation request identity 定位本 operation 的耐久 record，exact replay 只折叠其前序 overlay 并以原 create/update payload 重驱；overlay 可见/不可见均不追加第二记录，异载荷仍由 ledger fail closed，等待协调者复核 |
-| 下一责任链 | 协调者独立复核 A2-02 的 overlay 可见/不可见响应丢失重放、异载荷冲突、同 assignment 不同 operation 更新、唯一领域入口与旧保存旁路归零；接受后再从 admit、usage/load 或 Kernel/Executor 不可变能力投影中选择一条独立 Skill 责任链 |
-| 打开的单向桥 | 无；Skill 管理与保存应用合同仅经 `@zhixing/core/skills/catalog` 公开，管理面使用既有 `GlobalStatePort`，保存面使用 path-free assignment Correctness port；tools-builtin 仅绑定调用，orchestrator 仅适配 ArtifactStore/global query/assignment mutation，未建立第二业务入口 |
-| 已失效证据 | 无当前未恢复证据；独立复核作废的 A2-02 response-loss replay/overlay-upsert 结论已由真实 `createAssignmentMutationPort + ConversationAssignmentLedger` 对抗、共享 request identity、领域 replay 边界及受影响结构/构建闭包重取恢复；A2-01 与其余未改 Skill 证据持续有效 |
+| 活跃工作包 | A2-03 已完成，等待协调者独立复核：`admit_skill` 的候选获取、独立安全评估、safe/needs-confirm/escalate 裁决、artifact-bound 确认、暂存清理和最终 assignment staged admit 已收归 Skill Catalog 领域应用生命周期；工具只保留 schema/权限边界/结果呈现，orchestrator 只提供文件、CAS、LLM 与 assignment Correctness 适配 |
+| 下一责任链 | 协调者独立复核 A2-03 的三态裁决、token/TTL/TOCTOU、全部正常异常清理、耐久 admit 重放、唯一领域入口与旧工具业务 owner 归零；接受后再从 usage/load 或 Kernel/Executor 不可变能力投影中选择一条独立 Skill 责任链 |
+| 打开的单向桥 | 无；Skill 管理、保存与 admission 应用合同仅经 `@zhixing/core/skills/catalog` 公开。admission 领域服务持有两阶段状态机并消费 opaque candidate/CAS/assignment Correctness port；tools-builtin 仅绑定调用，orchestrator 仅适配文件暂存、独立 LLM、ArtifactStore 与 assignment mutation，未建立第二业务入口 |
+| 已失效证据 | 无当前未恢复证据；A2-03 已重取 `admit_skill`、领域 admission 状态机、orchestrator 临时候选 adapter、真实 assignment ledger 重放、结构门禁与构建闭包。A2-01～A2-02 与未改的 load/usage、legacy/materialization、Kernel/Executor 投影证据继续有效 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1431,7 +1431,17 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 独立反证与纠正：协调复核证明初版仅覆盖“stage 已成功但读取 overlay 尚不可见”的重放；当真实 ledger 已返回本 operation record 时，旧折叠会把 create 改推为 update，并以同 requestId 提交异载荷冲突。本轮没有放宽 ledger 幂等或吞掉冲突，而是提取唯一的 `assignmentMutationRequestId` 协议算法供 mutation port 与 Skill Correctness adapter 共同使用；overlay adapter保留 durable `requestId/recordSeq`，领域以同 identity 的 recordSeq 为截点，且 exact draft 直接重驱原 mutation。name/description/body/mode 任一导致 payload 变化时仍进入同 requestId 异载荷冲突；不同 toolCallId 则读取前序记录并追加后继 update。
 - 直接、结构与构建证据：core `catalog-application.test.ts` 1 文件 11/11，新增 overlay 可见且全局 catalog 已变化时仍返回原 create/payload 的反例，并保留不可见 overlay 稳定 payload；orchestrator `assignment-skill-port.test.ts` 1 文件 4/4，adapter mock 改用真实 request-id 算法；CLI `assignment-schedule-stager.test.ts` 1 文件 4/4，保持 mutation port 身份/拒绝边界；CLI `assignment-mesh-adapter.test.ts` 定向 1/1 以真实 Mesh dispatch、`createAssignmentMutationPort`、`ConversationAssignmentLedger` 与 `FileArtifactStore` 证明首次 stage 后 overlay 不可见重试、可见重试均成功且 ledger 仍仅 1 条，四类异载荷全部冲突，另一个 toolCallId 追加第 2 条 `expectedRevision:1` update。纠正直接闭包为 4 文件 20/20；未改 tools-builtin 2 文件 12/12 证据继续有效，合并后的 A2-02 直接闭包为 6 文件 32/32，不重复相加。
 - 门禁、构建与失效：S7 Skill owner inspector 在原五类迁移突变外新增 durable request identity、recordSeq 截点、原 payload 重驱三类反向约束；最终 canonical `pnpm s7:lint` 为 22/22 且 registry golden 通过。`pnpm runtime:package-exports` 重新加载 core protocol 并确认唯一共享 `assignmentMutationRequestId` 已进入既有 `@zhixing/core/protocol`、Skill 保存应用仍只在 catalog subpath 且 core 根无回流。core、orchestrator、CLI 最窄 TypeScript typecheck 均通过；按依赖完成 core build、orchestrator build 与最终 `pnpm cli:build`，tools-builtin 生产输入未变而复用本包初次有效 build；受影响路径最窄 Biome 与 `git diff --check` 通过。初次新增真实 ledger 测试因直接读取尚未物化的 dispatch artifact 失败，改走已有真实 Mesh executor adapter 传输完整 closure 后同一反例通过，该失败是测试装配错误而非产品缺陷。未运行包全测、根级 lint/test/build、package check 或制品验收。
-- 状态、遗留与下一检查点：本包内无遗留；A2 与 Skill Catalog 登记行继续保持 `[ ]`，因为 admit/load/usage、legacy/materialization 与 Kernel/Executor 投影仍未完成整个 Skill 垂直域。若 `catalog-application.ts` 保存合同/原 mutation 重放、assignment request-id 算法、overlay `requestId/recordSeq` 投影、唯一 subpath/export/build entry、ArtifactStore→stage 顺序、tool binding/产品文案、operation suffix、旧路径负向集合或相关 S7/package-export 输入任一变化，恢复本证据并只重验上述闭包。交接类型为完成，等待协调者独立复核；不得提前进入 A3。
+- 状态、遗留与下一检查点：本包内无遗留；A2 与 Skill Catalog 登记行继续保持 `[ ]`，因为 admit/load/usage、legacy/materialization 与 Kernel/Executor 投影仍未完成整个 Skill 垂直域。若 `catalog-application.ts` 保存合同/原 mutation 重放、assignment request-id 算法、overlay `requestId/recordSeq` 投影、唯一 subpath/export/build entry、ArtifactStore→stage 顺序、tool binding/产品文案、operation suffix、旧路径负向集合或相关 S7/package-export 输入任一变化，恢复本证据并只重验上述闭包。交接类型为已由协调者独立复核并纳入提交 `6b400201`；下一检查点为 A2-03 的 `admit_skill` 两阶段安全接入生命周期，不得提前进入 A3。
+
+### A2-03：收归 `admit_skill` 两阶段安全接入生命周期
+
+- 基线与边界：`HEAD 6b4002012edfd45ac21d052a83892c9c9a2ecca8 + A2-03-skill-catalog-admission-domain-v1`；进场索引为空，工作区只有协调者预登记的本文台账差异。本包即时沿 `admit_skill → BuiltinToolContext → assignment Skill ports → OS-temp candidate/independent main LLM/ArtifactStore/assignment mutation ledger` 与全部清理分支取证并迁移；未改 `load_skill`、usage、legacy/materialization、Kernel/Executor 投影、Agent Loop、公开工具名/schema/权限边界或其他领域。
+- 领域生命周期与唯一入口：既有唯一 `@zhixing/core/skills/catalog` subpath 现在公开窄 `SkillCatalogAdmissionApplication`、typed outcome、opaque candidate/Correctness port 与唯一 `SkillCatalogAdmissionApplicationService`。领域服务拥有首调/确认状态机、pending token、10 分钟 TTL、safe/needs-confirm/escalate 三态、独立 `assessSkill` fail-safe 裁决、frontmatter name/description/id、main/work mode、artifact digest 绑定、TOCTOU 比对、canonical 原文 artifact、稳定 `${toolCallId}:admit` staged mutation及清理决策。needs-confirm 只在有效等待期保留候选；safe/escalate、缺 name、首调异常、确认成功/失败、过期、篡改都会释放候选，进程遗留只由下一首调的 TTL sweep 清除。领域只持有 opaque candidate id/document/digest，不读取或写入任意 OS 路径，也没有新增耐久 token 产品事实。
+- Binding、适配与旧路退场：tools-builtin 的 `createAdmitSkillTool` 只规范化 path/token/mode、调用领域应用并把 typed outcome 映射回迁移前完全相同的中文文案和 `isError`；工具 schema、`permissionArgumentKey=path`、filesystem/read + app-state/write 双边界和串行分类未漂移。orchestrator 的 `AssignmentSkillAdmissionCorrectnessPort` 只适配本地目录或单一 `SKILL.md` 获取、OS-temp candidate、独立 main 档 LLM、clock/random、ArtifactStore 与真实 assignment mutation；候选复制后以 `lstat` 递归拒绝 symlink/非常规文件，路径不越出受控根。生产 `createAgentRuntime` 注入唯一 admission application；旧 `SkillAdmissionPort/SkillAdmissionAssess/SkillAdmissionWorkspace`、工具 pending Map/firstCall/confirmAdmission、orchestrator 业务 admit 与同责兼容壳均已退出，不存在第二状态机、第二写入口或根 barrel/错误 subpath 回流。
+- 耐久重放与资源终态：safe 或确认成功均先把原始 canonical `SKILL.md` 放入共享 CAS，再以 `${toolCallId}:admit` stage `skill-admit`；ArtifactStore/stage 失败、缺 operation id 和 ledger 异载荷冲突均不虚报成功，候选被释放，已写 CAS 仍保持不可变去重语义。同 toolCallId、同来源内容在 stage 已耐久但响应丢失后重新获取候选，会形成相同 content ref 与 mutation，由真实 `ConversationAssignmentLedger` exact replay 接受且不产生第二记录；同 toolCallId 改变 name/description/body/mode 继续由同 request identity 的异载荷冲突 fail closed，不同 toolCallId 则形成后继 admit。无/错/已消费 token 均返回既有“重新审查”终态；确认使用首调登记 mode，不能由重调参数改写。
+- 直接证据：core `catalog-admission.test.ts + catalog-application.test.ts` 2 文件 17/17，覆盖三态、LLM 抛错/坏 JSON fail-safe、token/TTL/单次消费、mode、digest 篡改、缺输入/name/operation、artifact/stage failure、清理和重放/冲突；tools-builtin `admit-skill.test.ts + factories.test.ts` 2 文件 7/7，证明真实 factory 依赖与纯 binding 产品呈现；orchestrator `assignment-skill-port.test.ts` 1 文件 7/7，直接覆盖目录与单文件获取、真实 OS-temp artifact-bound confirmation、symlink 拒绝、过期 orphan sweep、全部适配及零临时候选残留。CLI `assignment-mesh-adapter.test.ts` 首次整文件 18 个既有用例通过而新增用例因测试分别加载 source/dist `AsyncLocalStorage` 产生装配失败；改为与生产 adapter 共享同一 source context 后，只重跑失效的新用例 1/1，通过真实 factory→领域应用→orchestrator adapter→`createAssignmentMutationPort`→`ConversationAssignmentLedger` 证明 exact replay、异载荷冲突和不同 operation 后继记录；该失败不属于产品缺陷，既有 18 项输入与结果未失效。
+- 结构、exports 与构建证据：S7 Skill owner inspector 现在同时冻结 management/save/admission 三条有限应用边界，拒绝 retired admission port/workspace、工具内状态机、orchestrator 业务规则、根导入、错误装配、漏 digest 比对或第二 owner；为 admission 增加四条反向 mutation，并把 save 的 artifact-before-stage 检查限定到 save 段，避免 admission 的第二个合法 stage 使旧 mutation 失去识别力。canonical `pnpm s7:lint` 为 22/22 且 registry golden 通过；`pnpm runtime:package-exports` 确认 admission 合同仅由 catalog subpath 加载且 core 根无泄漏。core/tools-builtin/orchestrator 最窄 typecheck 已通过，最终 CLI typecheck通过；按受影响依赖完成 core、tools-builtin、orchestrator build 与 `pnpm cli:build`，core build 仅保留既有 circular-chunk warning并成功生成 DTS。最窄 Biome 接受 10 个适用文件；最终 `git diff --check` 待交接前复取。未运行包全测、根级 lint/test/build、package check 或制品验收。
+- 状态、失效与下一检查点：本包内无当前遗留；A2 与 Skill Catalog 登记行继续保持 `[ ]`，因为 load/usage、legacy/materialization 与 Kernel/Executor 投影尚未完成整个 Skill 垂直域。若 admission contract/service、`assessSkill` 三态、token/TTL/digest、候选适配/path 安全、artifact→stage 顺序、operation suffix、AssignmentMutationPort/ledger 幂等、工具文案/权限、生产注入、旧 owner 负向集合、catalog subpath/export 或相关 S7 输入任一变化，恢复 `A2-03-skill-catalog-admission-domain-v1` 并只重验上述闭包。交接类型为完成、等待协调者独立复核；接受后由协调者从 usage/load 或 Kernel/Executor 不可变能力投影中选择下一条独立 Skill 责任链，不得由本对话进入 A2-04/A3。
 
 ## 十、用户提示词
 

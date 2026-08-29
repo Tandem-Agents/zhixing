@@ -1,9 +1,12 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { once } from "node:events";
+import fs from "node:fs/promises";
 import path from "node:path";
 import type { Server as TlsServer } from "node:tls";
 import {
   DeliveryAuthority,
+  createEventBus,
+  type AgentEventMap,
 } from "@zhixing/core";
 import {
   SkillCatalogSaveApplicationService,
@@ -61,6 +64,7 @@ import {
   type UnsignedConversationEnvelope,
 } from "@zhixing/core/protocol";
 import { ConversationAssignmentLedger } from "@zhixing/executor";
+import { BUILTIN_TOOL_FACTORIES } from "@zhixing/tools-builtin";
 import {
   DeviceKey,
   HandshakeReplayWindow,
@@ -97,6 +101,8 @@ import {
   registerRunExecutorMeshService,
 } from "./assignment-mesh-adapter.js";
 import { createAssignmentMutationPort } from "./assignment-schedule-stager.js";
+import { createAssignmentSkillPorts } from "../../../orchestrator/src/runtime/assignment-skill-port.js";
+import { runContextStorage } from "../../../orchestrator/src/runtime/run-context.js";
 
 const NOW = "2026-07-21T00:00:00.000Z";
 const EXPIRY = "2026-07-21T01:00:00.000Z";
@@ -1050,6 +1056,96 @@ describe("assignment mesh adapters", () => {
         expectedRevision: 1,
       },
     });
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("replays admit_skill through the real factory, domain adapter and assignment ledger", async () => {
+    const fixture = await createFixture();
+    const protocol = await createRealProtocolFixture(fixture);
+    installRealProtocolServices(fixture, protocol);
+    const executor = realExecutorAdapter(fixture, protocol);
+    await executor.dispatch(
+      protocol.dispatch.envelope,
+      protocol.dispatch.activation,
+      realOwnerContext({
+        dispatch: protocol.dispatch,
+        method: "executor.dispatch",
+        requestId: "skill-admit-dispatch",
+        body: {
+          dispatchDigest: dispatchEnvelopeDigest(protocol.dispatch.envelope),
+          activationDigest: activationDigest(protocol.dispatch.activation),
+        },
+        ownerDeviceId: fixture.ownerDeviceId,
+        identity: fixture.identity,
+      }),
+    );
+    await protocol.ledger.start("assignment-1");
+    const source = path.join(fixture.root, "admission-source");
+    await fs.mkdir(source);
+    const writeSource = (description: string, body: string) => fs.writeFile(
+      path.join(source, "SKILL.md"),
+      `---\nname: Durable Admission\ndescription: ${description}\n---\n${body}`,
+    );
+    await writeSource("Admit once", "Stable body");
+    const assignmentMutations = createAssignmentMutationPort({
+      ledger: protocol.ledger,
+      assignmentId: "assignment-1",
+      execution: "conversation",
+      anchorEpoch: 1,
+    });
+    const ports = createAssignmentSkillPorts(fixture.executorArtifacts, {
+      admissionLlm: async () => JSON.stringify({ decision: "safe", reason: "safe" }),
+    });
+    const tool = BUILTIN_TOOL_FACTORIES.admit_skill!({
+      skillCatalogAdmission: ports.admissionApplication,
+      skillMode: "main",
+    });
+    const runTool = (toolCallId: string) => runContextStorage.run(
+      {
+        bus: createEventBus<AgentEventMap>({ lineage: "main" }),
+        lineage: "main",
+        globalQuery: {
+          async read(query) {
+            if (query.kind === "skill-get") {
+              return { kind: "skill-get", catalogRevision: 0, entry: null };
+            }
+            if (query.kind === "skill-catalog") {
+              return { kind: "skill-catalog", catalogRevision: 0, entries: [] };
+            }
+            throw new Error(`Unexpected query: ${query.kind}`);
+          },
+        },
+        assignmentMutations,
+        assignmentIssuedAt: NOW,
+      },
+      () => tool.call(
+        { path: source },
+        { workingDirectory: fixture.root, toolCallId },
+      ),
+    );
+
+    const first = await runTool("tool-admit-replay");
+    expect(first).toMatchObject({ isError: false });
+    expect(await protocol.ledger.readStagedMutationOverlay("assignment-1"))
+      .toHaveLength(1);
+    await expect(runTool("tool-admit-replay")).resolves.toEqual(first);
+    expect(await protocol.ledger.readStagedMutationOverlay("assignment-1"))
+      .toHaveLength(1);
+
+    await writeSource("Changed", "Changed body");
+    const conflicting = await runTool("tool-admit-replay");
+    expect(conflicting).toMatchObject({ isError: true });
+    expect(conflicting.content).toContain("conflicting payload");
+    expect(await protocol.ledger.readStagedMutationOverlay("assignment-1"))
+      .toHaveLength(1);
+
+    const later = await runTool("tool-admit-next");
+    expect(later).toMatchObject({ isError: false });
+    const overlay = await protocol.ledger.readStagedMutationOverlay("assignment-1");
+    expect(overlay).toHaveLength(2);
+    expect(overlay.map((record) => record.mutation.kind)).toEqual([
+      "skill-admit",
+      "skill-admit",
+    ]);
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("forwards interaction-settlement completion through the submission service", async () => {

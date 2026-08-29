@@ -782,9 +782,6 @@ export async function createAgentRuntime(
   // 技能分区跟随运行体的显式工作场景身份。执行侧只持 immutable artifact
   // 与 assignment 读写接缝；目录、状态、usage 和物化的唯一写 owner 在 anchor。
   const skillMode: SkillMode = sceneId === undefined ? "main" : "work";
-  const skillPorts = options.artifactStore
-    ? createAssignmentSkillPorts(options.artifactStore)
-    : unavailableAssignmentSkillPorts();
 
   // 思考控制装配期一次性解析（runtime 生命周期内 config + 解析后的 role 均不变，
   // 无需 per-run 重算）。三类用途严格分区：
@@ -816,15 +813,18 @@ export async function createAgentRuntime(
     roles,
     roleThinking.light,
   );
+  const skillPorts = options.artifactStore
+    ? createAssignmentSkillPorts(options.artifactStore, {
+        admissionLlm: (prompt: string) => mainCallLLM([userMessage(prompt)]),
+      })
+    : unavailableAssignmentSkillPorts();
 
   const builtinCtx = {
     proxy: config.network?.proxy,
     skillLoader: skillPorts.loader,
     skillCatalogSave: skillPorts.saveApplication,
-    skillAdmission: skillPorts.admission,
+    skillCatalogAdmission: skillPorts.admissionApplication,
     skillMode,
-    // 接入审查独立裁判：绑 main 档单发（质量敏感安全裁决）、不带对话上下文
-    admissionLlm: (prompt: string) => mainCallLLM([userMessage(prompt)]),
   };
   const baseTools: ToolDefinition[] = [];
   for (const name of profile.enabledTools) {
@@ -2183,11 +2183,6 @@ function unavailableAssignmentSkillPorts(): ReturnType<
       },
     },
     saveApplication: { save: unavailable },
-    admission: {
-      prepareStaging: unavailable,
-      discardStaging: unavailable,
-      admit: unavailable,
-      sweepStaleStaging: async () => 0,
-    },
+    admissionApplication: { admit: unavailable },
   };
 }
