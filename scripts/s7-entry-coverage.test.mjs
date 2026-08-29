@@ -625,8 +625,8 @@ test("local conversation owner remains isolated from anchor capabilities by cons
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/executor-role-runtime.ts",
       (text) => text.replace(
-        "    await localConversationOwner?.close();",
-        "    await Promise.resolve();",
+        "() => localConversationOwner.close(),",
+        "() => Promise.resolve(),",
       ),
     )).join("\n"),
     /assembly must close exactly once, got 0/,
@@ -1678,6 +1678,7 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     "packages/cli/src/serve/access-surface.ts",
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/assembly-lifecycle.ts",
+    "packages/cli/src/serve/executor-role-lifecycle.ts",
     "packages/cli/src/serve/shutdown-chain.ts",
     "packages/cli/src/serve/anchor-internal-stop.ts",
     "packages/cli/src/serve/executor-role-runtime.ts",
@@ -1732,6 +1733,46 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
       ),
     )).join("\n"),
     /pre-server lifecycle contribution ownership drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace(
+        '"executorDataPlane.close",',
+        '"executorDataPlane.unowned",',
+      ),
+    )).join("\n"),
+    /Executor non-Server lifecycle contribution ownership drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace(
+        "    const jobOwnerLifecycle = new ExecutorJobOwnerLifecycle(",
+        "    await Promise.resolve();\n    const jobOwnerLifecycle = new ExecutorJobOwnerLifecycle(",
+      ),
+    )).join("\n"),
+    /Executor non-Server lifecycle contribution ownership drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace(
+        "  throwExecutorRoleFailures(roleFailure, cleanupFailures);",
+        "  await dataPlane?.close();\n  throwExecutorRoleFailures(roleFailure, cleanupFailures);",
+      ),
+    )).join("\n"),
+    /Executor non-Server lifecycle contribution ownership drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/executor-role-lifecycle.ts",
+      (text) => text.replace(
+        "this.#authorityRollback.owns(handle)",
+        "handle.name.length > 0",
+      ),
+    )).join("\n"),
+    /Executor non-Server lifecycle contribution ownership drifted/,
   );
   assert.match(
     inspectManagedHostAssembly(mutate(

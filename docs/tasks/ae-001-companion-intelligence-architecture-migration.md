@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `d297317e1e1f622d12a52941c70241ab9e68bf24`；A1-01～A1-06 已由协调者独立复核并提交 |
+| 已接受基线 | `6b7731cc49c97e8bac0745906d701a10b475bb16`；A1-01～A1-07 已由协调者独立复核并提交 |
 | 当前 A 项 | A1：收束 ApplicationHost 生命周期边界 |
-| 活跃工作包 | A1-07：把 Anchor pre-server 单元收束为类型化生命周期贡献；foreign-handle provenance 与 core 必须 transfer 两项 fail-closed 纠正完成，等待协调者独立复核 |
-| 下一责任链 | 协调者先复核 `A1-07-anchor-pre-server-lifecycle-contributions-v1` 的 12 项静态 identity/owner exact-set、同一 `StartupRollback` 实例拥有的同一幂等 handle、core 必须 transfer、三段顺序与既有 LIFO/条件拓扑；接受后只在 A1 内选择 post-server contribution、Executor 手工 cleanup 或委托桥退场等尚未闭合的单一生命周期责任，不进入 A2 |
+| 活跃工作包 | A1-08：7 项 Executor-only 非 Server 资源已由类型化角色生命周期 owner 接管，Mesh/job 共同 lifecycle 已在 Mesh 构造后的首个安全点、任何后续 `await` 前登记；直接测试、S7、CLI typecheck/build 与静态检查完成，等待协调者独立复核 |
+| 下一责任链 | 协调者复核 Executor 非 Server 资源从取得、部分启动失败、正常终态到清理失败隔离的同一幂等 handle 与逆序关闭；接受后再判断 Server/state/timer 边界、Anchor post-server contribution 或 `A1-HOST-DELEGATE-01` 退场中的最高价值单链，不进入 A2 |
 | 打开的单向桥 | `A1-HOST-DELEGATE-01`：唯一 `PersistentApplicationHost` 已拥有外层 bootstrap/lease/terminal 生命周期，但仍以类型化 loader 单向委托既有 Anchor/Executor role root；唯一事实与产品装配仍在既有 root，退场上限为 A1，其后续包不得形成第二 Host 或双 owner |
-| 已失效证据 | 无当前未恢复证据；A1-01～A1-06 已包含在当前接受基线。协调反证曾作废 A1-07 初次“同名 handle 足以证明同一 rollback”及“core transfer 不可绕过”结论，现已由实例私有 provenance、core/tail 分离的必填类型合同、编译期负例与 S7 反向 mutation 恢复。纠正后直接闭包合并同工作区有效结果为 10 文件 53/53，canonical S7 21/21 与 registry golden、CLI typecheck/build、最窄 Biome 和 diff 检查均通过；golden 仍只把 12 个既有 cleanup descriptor 的 source 归属统一迁到类型化贡献表，owner/role/id 与 role exact-set 未漂移 |
+| 已失效证据 | 无当前未恢复证据；A1-07 已由协调者独立重取并接受。A1-08 当前直接闭包 4 文件 22/22、canonical S7 21/21 与 registry golden、CLI typecheck/build、最窄 Biome 和 diff 检查均通过；其余未改输入继续有效，不得重复全量验证 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1349,6 +1349,16 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 最窄修复：`StartupRollback.owns()` 只查询该实例私有、注册时写入的 handle `WeakSet`；`contribute()` 同时校验静态 identity 和实例 provenance。shutdown-chain 拆成 `TailCleanupResources` 与 `CoreCleanupResources`，后者必填 lifecycle contribution 并无条件执行两段 transfer，前者不再携带无关 heartbeat/lifecycle 字段。没有公开 cleanup、全局登记、第二 owner 或新的产品分支。
 - 本轮实际证据：`pnpm --filter @zhixing/cli exec vitest run src/serve/__tests__/assembly-lifecycle.test.ts src/serve/__tests__/startup-rollback.test.ts src/serve/__tests__/shutdown-chain.test.ts --maxWorkers=1` 为 3 文件 24/24；`pnpm --filter @zhixing/cli exec tsc -p tsconfig.json --noEmit` 通过并消费 core 缺参的编译期负例；canonical `pnpm s7:lint` 为 21/21 且 registry golden 通过，反向 mutation 可检出 provenance 删除、core 字段 optional 化与 optional-chain；`pnpm cli:build`、受影响路径的最窄 Biome check 与 `git diff --check` 通过。原 7 个未变直接测试 29/29 继续有效，故最终 A1-07 直接闭包为 10 文件 53/53，不重复相加。
 - 状态与失效：`A1-07-anchor-pre-server-lifecycle-contributions-v1` 已在同一工作区恢复，等待协调者独立复核；A1 仍未勾选。以后若 `StartupRollback.register/owns`、handle object identity、`contribute` provenance、core/tail 参数类型、两段直接 transfer 或对应 S7 mutation 任一变化，精确恢复本纠正证据；无需重验未变化的其他 7 个直接测试。
+
+### A1-08：收束 Executor-only 非 Server 资源的类型化生命周期所有权
+
+- 基线与差异：`HEAD 6b7731cc49c97e8bac0745906d701a10b475bb16 + A1-08-executor-role-lifecycle-v1`；进场索引为空，A1-01～A1-07 已由协调者独立复核并提交，工作区只有协调者预先登记的本文台账差异。本包新增 `executor-role-lifecycle.ts` 及直接测试，修改 Executor 唯一生产 root、生产顺序结构测试和 S7 inspector/mutation；未修改 Server endpoint/state/heartbeat/idle timer、Anchor root、领域、公开协议或其他产品文档，未执行 Git 写操作。
+- 责任迁移与 exact-set：旧 `runExecutorRole` 在尾部以可选引用和七段逐对象 `try/catch` 直接清理非 Server 资源；现在唯一 `ExecutorRoleLifecycle` 静态冻结并依次关闭 `localConversationOwner.close`、`evidenceHandler.stopAccepting`、`localWorkspaceHost.close`、`executorJobOwnerLifecycle.close`、`executorDataPlane.close`、`authorityRuntime.stopStorageMaintenance`、`mcpHub.dispose`。该顺序是原生产依赖顺序，不从取得顺序推导：本机 accepted work 与 evidence admission 先关闭，job owner 与 Mesh 仍由既有 `ExecutorJobOwnerLifecycle` 共同拥有并按原 owner→transport 顺序释放，data plane、Authority maintenance 与 MCP 保留到其当前消费者收束。生产 root 的旧七段 direct cleanup 与 job/Mesh fallback 已归零；Server 组仍先于本 owner 收口，`ServerStateFile.cleanup` 仍在其后，原有边界不变。
+- 首个安全点与失败补偿：MCP 在构造后、`connectAll` 前登记；Authority 在 `setupAuthorityRuntime` 内通过本 lifecycle 私有 `StartupRollback` 于首个副作用前登记，返回的同一 provenance handle 被 adopt/commit，setup 中途失败仍由同一 rollback 补偿；workspace host 在构造后、`start` 前登记；evidence handler 与 data plane 在构造后、首个消费或 start 前登记；local conversation owner 的 effect-free assembly create 完成后、`start` 与公开消费前登记。协调续做确认 Mesh 构造后曾存在 `bindDeviceRemovalLifecycle` 首个 `await` 失败而 job/Mesh 尚无贡献的窗口，现已把同一个 `ExecutorJobOwnerLifecycle(jobOwnerAssembly, mesh)` 的创建与幂等 handle 登记移动到 Mesh 构造后的第一安全点，并在任何后续 `await`、bind 或 start 前 seal；未恢复 direct fallback，也未拆分第二 owner。其余六项反查未发现同类无人负责窗口。
+- fail-closed 与错误语义：descriptor exact-set、重复/迟到/遗漏贡献、Authority foreign handle provenance 均 fail closed；`seal` 只在七项齐全后成立。正常终态与部分启动失败调用同一幂等 handle，重复 close 只执行一次；单项 cleanup 失败不截断其余项。role 原始失败优先保留，若同时存在 cleanup failures 则以 `AggregateError` 同时保留；仅 cleanup 失败时聚合返回。已删除未参与任何合同判断的 `#ownedHandles` 死状态，没有引入全局 registry、optional cleanup bag、动态服务发现或通用 lifecycle 框架。
+- 直接与结构证据：`pnpm --filter @zhixing/cli exec vitest run src/serve/__tests__/executor-role-lifecycle.test.ts src/serve/startup-server-owner.test.ts src/serve/__tests__/executor-job-owner-surface.test.ts src/serve/executor-role-terminal.test.ts --maxWorkers=1` 为 4 文件 22/22（新 lifecycle 7、生产顺序 4、job/Mesh surface 6、terminal 5）。新增 production source 断言与 S7 结构约束均要求 job/Mesh lifecycle 的构造、贡献早于 Mesh 后第一个 `await`；反向 mutation 在登记前插入 await 必须失败。S7 初次 canonical 运行 20/21，唯一失败是既有 data-plane mutation 仍匹配迁移前单行调用、实际上没有改变输入；将其改为稳定 identity token mutation 后重新运行 `pnpm s7:lint` 为 21/21 且 registry golden 通过，未更新 golden、未放宽生产断言。
+- 静态、构建与状态：`pnpm --filter @zhixing/cli exec tsc -p tsconfig.json --noEmit`、`pnpm cli:build`、6 个本包代码/门禁路径的最窄 Biome check 与 `git diff --check` 通过；没有运行 CLI 包全测、根级 lint/test/build、package check 或制品验收。若七项 descriptor/顺序、任一取得点、Authority rollback provenance、Mesh/job 首 await 边界、role failure/cleanup aggregation、旧 direct-cleanup 负向集合或对应 S7 mutation 任一变化，恢复 `A1-08-executor-role-lifecycle-v1` 并只重验本闭包。`A1-HOST-DELEGATE-01` 仍打开，Anchor post-server contribution、Server/state/timer 边界和委托桥退场未由本包处理，因此 A1、完成度与最终退出门保持不变。
+- 交接类型：完成，等待协调者独立复核；无本包内遗留。下一检查点由协调者在 A1 内从 Anchor post-server contribution、Server/state/timer 生命周期或 `A1-HOST-DELEGATE-01` 退场中选择最高价值的单一责任链，不进入 A2。
 
 ## 十、用户提示词
 

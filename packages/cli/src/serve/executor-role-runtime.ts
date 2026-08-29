@@ -40,7 +40,6 @@ import {
   ExecutorJobOwnerAssembly,
   ExecutorJobOwnerLifecycle,
 } from "./executor-job-owner.js";
-import type { LocalWorkspaceManagementHost } from "../runtime/local-workspace-management-host.js";
 import { createExecutorLocalWorkspaceHost } from "../runtime/local-workspace-bootstrap.js";
 import {
   EvidenceJournal,
@@ -100,6 +99,10 @@ import {
   type ExecutorInternalStopRequest,
   shouldExecutorIdleExit,
 } from "./executor-internal-stop.js";
+import {
+  ExecutorRoleLifecycle,
+  throwExecutorRoleFailures,
+} from "./executor-role-lifecycle.js";
 
 export async function runExecutorRole(
   options: ServeOptions,
@@ -122,10 +125,6 @@ export async function runExecutorRole(
   const providerCredentials = startup.credentials.providers
     ? { providers: startup.credentials.providers }
     : {};
-  const mcpHub = createMcpHub(
-    parseServerSpecs(startup.config.mcp, startup.credentials.mcp),
-    { networkProxy: startup.config.network?.proxy },
-  );
   const writer = createStdoutWriter();
   const processStartedAt = new Date().toISOString();
   const processStartTime = await resolveProcessStartTime(process.pid);
@@ -159,18 +158,17 @@ export async function runExecutorRole(
   const processMode = resolveHostProcessMode(options.managed);
   const localServerPort = options.port ?? homeToPort(zhixingHome);
   const localServerHost = options.host ?? DEFAULT_SERVER_CONFIG.host;
+  const executorRoleLifecycle = new ExecutorRoleLifecycle();
+  const mcpHub = createMcpHub(
+    parseServerSpecs(startup.config.mcp, startup.credentials.mcp),
+    { networkProxy: startup.config.network?.proxy },
+  );
+  executorRoleLifecycle.acquire("mcpHub.dispose", () => mcpHub.dispose());
 
   const initialAnchorDeviceId = bootstrap.mesh.trust.issuer.deviceId;
   let mesh: MeshRuntimeAssembly | undefined;
   const currentAnchorDeviceId = () =>
     mesh?.currentAnchorDeviceId() ?? initialAnchorDeviceId;
-  let jobOwnerAssembly: ExecutorJobOwnerAssembly | undefined;
-  let jobOwnerLifecycle: ExecutorJobOwnerLifecycle | undefined;
-  let authority: AuthorityRuntimeStack | undefined;
-  let dataPlane: ExecutorDataPlaneRuntime | undefined;
-  let localWorkspaceHost: LocalWorkspaceManagementHost | undefined;
-  let evidenceHandler: ExecutorEvidenceHandler | undefined;
-  let localConversationOwner: LocalConversationOwnerAssembly | undefined;
   let localConversationServer: RunningServer | undefined;
   let localServerBinding: BoundZhixingServer | undefined;
   let localServerState: ServerStateFile | undefined;
@@ -234,9 +232,10 @@ export async function runExecutorRole(
           processId: process.pid,
           startedAt: processStartedAt,
           endpointLock,
-        };
+    };
     await mcpHub.connectAll();
     const interactions = new DurableConversationInteractionObserver();
+    let authority: AuthorityRuntimeStack | undefined;
     const runtime = new ExecutorRuntimeSubstrate({
       config: startup.config,
       credentials: providerCredentials,
@@ -273,7 +272,9 @@ export async function runExecutorRole(
       enableLocalExecutor: true,
       storageMaintenance: deviceCapacity.storage,
       deviceCapacity: deviceCapacity.arbiter,
+      startupRollback: executorRoleLifecycle.authorityStartupRollback(),
     });
+    executorRoleLifecycle.adoptAuthority(authority.startupCleanup);
     if (startupStopOperation) {
       await authority.authority.restoreLifecycleAdmission({
         operationId: startupStopOperation.identity.operationId,
@@ -285,7 +286,7 @@ export async function runExecutorRole(
     if (!authority.workspaceBindingAdmin || !authority.workspaceBindingRecovery) {
       throw new Error("Local workspace management ports are unavailable");
     }
-    localWorkspaceHost = createExecutorLocalWorkspaceHost({
+    const localWorkspaceHost = createExecutorLocalWorkspaceHost({
       identity: bootstrap.localWorkspaceIdentity,
       host: {
         zhixingHome,
@@ -300,11 +301,15 @@ export async function runExecutorRole(
       },
     });
     if (!localWorkspaceHost) throw new Error("Local workspace management host is unavailable");
+    executorRoleLifecycle.acquire(
+      "localWorkspaceHost.close",
+      () => localWorkspaceHost.close(),
+    );
     await localWorkspaceHost.start();
     if (!authority.environment) {
       throw new Error("Executor evidence requires the local environment authority");
     }
-    evidenceHandler = new ExecutorEvidenceHandler({
+    const evidenceHandler = new ExecutorEvidenceHandler({
       executorId: authority.executorId,
       environment: authority.environment,
       journal: new EvidenceJournal({
@@ -324,13 +329,21 @@ export async function runExecutorRole(
       }),
       capacity: deviceCapacity.workload("workload-advancement"),
     });
-    dataPlane = new ExecutorDataPlaneRuntime({
+    executorRoleLifecycle.acquire(
+      "evidenceHandler.stopAccepting",
+      () => evidenceHandler.stopAccepting(),
+    );
+    const dataPlane = new ExecutorDataPlaneRuntime({
       zhixingHome,
       authority,
       module: executor,
       storageMaintenance: deviceCapacity.storage,
       onError: (error) => writer.notify(`[data-plane] ${error.message}`),
     });
+    executorRoleLifecycle.acquire(
+      "executorDataPlane.close",
+      () => dataPlane.close(),
+    );
     const localOwnerRuntime = localConversationOwnerRuntime({
       artifacts: authority.artifacts,
       deviceId: authority.deviceId,
@@ -387,7 +400,7 @@ export async function runExecutorRole(
     });
     const runtimeFactory =
       executor.createInProcessAssignmentRuntimeFactory(role);
-    localConversationOwner = await LocalConversationOwnerAssembly.create({
+    const localConversationOwner = await LocalConversationOwnerAssembly.create({
       owner: localOwnerRuntime,
       ledger,
       ConversationAssignmentLedger: executor.ConversationAssignmentLedger,
@@ -400,7 +413,11 @@ export async function runExecutorRole(
       currentAnchorDeviceId,
       dataPlane,
     });
-    jobOwnerAssembly = new ExecutorJobOwnerAssembly({
+    executorRoleLifecycle.acquire(
+      "localConversationOwner.close",
+      () => localConversationOwner.close(),
+    );
+    const jobOwnerAssembly = new ExecutorJobOwnerAssembly({
       ledger,
       runtime: createAgentJobRuntimePort({
         create: (instruction, confirmationBroker) =>
@@ -478,6 +495,15 @@ export async function runExecutorRole(
       onTrustApplied,
       onError: (error) => writer.notify(`[mesh] ${error.message}`),
     });
+    const jobOwnerLifecycle = new ExecutorJobOwnerLifecycle(
+      jobOwnerAssembly,
+      mesh,
+    );
+    executorRoleLifecycle.acquire(
+      "executorJobOwnerLifecycle.close",
+      () => jobOwnerLifecycle.close(),
+    );
+    executorRoleLifecycle.seal();
     let removalAdmissionOperationId: string | undefined;
     await mesh.bindDeviceRemovalLifecycle({
       closeAdmission: async (operationId) => {
@@ -565,10 +591,6 @@ export async function runExecutorRole(
         resolveLifecycleShutdown?.();
       },
     });
-    jobOwnerLifecycle = new ExecutorJobOwnerLifecycle(
-      jobOwnerAssembly,
-      mesh,
-    );
     await jobOwnerLifecycle.start(startupStopOperation
       ? {
           admissionClosed: true,
@@ -929,66 +951,17 @@ export async function runExecutorRole(
     cleanupFailures.push(error);
   }
   try {
-    await localConversationOwner?.close();
+    await executorRoleLifecycle.close();
   } catch (error) {
-    cleanupFailures.push(error);
-  }
-  try {
-    evidenceHandler?.stopAccepting();
-  } catch (error) {
-    cleanupFailures.push(error);
-  }
-  try {
-    await localWorkspaceHost?.close();
-  } catch (error) {
-    cleanupFailures.push(error);
-  }
-  try {
-    if (jobOwnerLifecycle && !jobOwnerLifecycle.closed) {
-      await jobOwnerLifecycle.close();
-    } else if (!jobOwnerLifecycle) {
-      jobOwnerAssembly?.stopAccepting();
-      await jobOwnerAssembly?.close();
-      await mesh?.stop();
-    }
-  } catch (error) {
-    cleanupFailures.push(error);
-  }
-  try {
-    await dataPlane?.close();
-  } catch (error) {
-    cleanupFailures.push(error);
-  }
-  try {
-    await authority?.stopStorageMaintenance();
-  } catch (error) {
-    cleanupFailures.push(error);
-  }
-  try {
-    await mcpHub.dispose();
-  } catch (error) {
-    cleanupFailures.push(error);
+    if (error instanceof AggregateError) cleanupFailures.push(...error.errors);
+    else cleanupFailures.push(error);
   }
   try {
     await localServerState?.cleanup();
   } catch (error) {
     cleanupFailures.push(error);
   }
-  if (roleFailure !== undefined) {
-    if (cleanupFailures.length > 0) {
-      throw new AggregateError(
-        [roleFailure, ...cleanupFailures],
-        "Executor role and cleanup both failed",
-      );
-    }
-    throw roleFailure;
-  }
-  if (cleanupFailures.length > 0) {
-    throw new AggregateError(
-      cleanupFailures,
-      "Executor role cleanup failed",
-    );
-  }
+  throwExecutorRoleFailures(roleFailure, cleanupFailures);
 }
 
 export class ExecutorRuntimeSubstrate {

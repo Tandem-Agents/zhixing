@@ -90,8 +90,42 @@ describe("production startup server ownership", () => {
     expect(source.indexOf("executorInternalStop.current = createExecutorInternalStopPort({"))
       .toBe(source.lastIndexOf("executorInternalStop.current = createExecutorInternalStopPort({"));
     expect(source.indexOf("await onTrustApplied();")).toBe(source.lastIndexOf("await onTrustApplied();"));
-    expect(source.lastIndexOf("await mcpHub.dispose()"))
-      .toBeGreaterThan(location(source, "localConversationServer = await runServer"));
+    expect(source.match(/executorRoleLifecycle\.acquire\(/gu)).toHaveLength(6);
+    expect(source.match(/executorRoleLifecycle\.authorityStartupRollback\(\)/gu))
+      .toHaveLength(1);
+    expect(source.match(/executorRoleLifecycle\.adoptAuthority\(/gu)).toHaveLength(1);
+    expect(source.match(/executorRoleLifecycle\.seal\(\)/gu)).toHaveLength(1);
+    expect(source.match(/await executorRoleLifecycle\.close\(\)/gu)).toHaveLength(1);
+    expect(location(source, 'executorRoleLifecycle.acquire("mcpHub.dispose"'))
+      .toBeLessThan(location(source, "await mcpHub.connectAll()"));
+    const meshConstruction = location(source, "mesh = new MeshRuntimeAssembly({");
+    const jobLifecycleConstruction = location(
+      source,
+      "const jobOwnerLifecycle = new ExecutorJobOwnerLifecycle(",
+    );
+    const jobLifecycleContribution = location(
+      source,
+      'executorRoleLifecycle.acquire(\n      "executorJobOwnerLifecycle.close",',
+    );
+    const firstAwaitAfterMesh = source.indexOf("await ", meshConstruction);
+    expect(jobLifecycleConstruction).toBeGreaterThan(meshConstruction);
+    expect(jobLifecycleContribution).toBeGreaterThan(jobLifecycleConstruction);
+    expect(jobLifecycleContribution).toBeLessThan(firstAwaitAfterMesh);
+    expect(firstAwaitAfterMesh).toBe(location(source, "await mesh.bindDeviceRemovalLifecycle({"));
+    const cleanupTail = source.slice(location(source, "const cleanupFailures: unknown[] = []"));
+    for (const directCleanup of [
+      "await localConversationOwner?.close()",
+      "evidenceHandler?.stopAccepting()",
+      "await localWorkspaceHost?.close()",
+      "await jobOwnerLifecycle.close()",
+      "await jobOwnerAssembly?.close()",
+      "await mesh?.stop()",
+      "await dataPlane?.close()",
+      "await authority?.stopStorageMaintenance()",
+      "await mcpHub.dispose()",
+    ]) {
+      expect(cleanupTail).not.toContain(directCleanup);
+    }
   });
 
   it("keeps mesh startup recovery behind the closed lifecycle release", async () => {

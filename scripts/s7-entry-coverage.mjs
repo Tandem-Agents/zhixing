@@ -1095,6 +1095,7 @@ export function inspectManagedHostAssembly(records) {
   const accessSurface = byPath.get("packages/cli/src/serve/access-surface.ts");
   const accessSurfaces = byPath.get("packages/cli/src/serve/access-surfaces.ts");
   const assemblyLifecycle = byPath.get("packages/cli/src/serve/assembly-lifecycle.ts");
+  const executorRoleLifecycle = byPath.get("packages/cli/src/serve/executor-role-lifecycle.ts");
   const shutdownChain = byPath.get("packages/cli/src/serve/shutdown-chain.ts");
   const anchorInternalStop = byPath.get("packages/cli/src/serve/anchor-internal-stop.ts");
   const executorRoot = byPath.get("packages/cli/src/serve/executor-role-runtime.ts");
@@ -1116,7 +1117,8 @@ export function inspectManagedHostAssembly(records) {
   const server = byPath.get("packages/server/src/server.ts");
   if (
     !reconciler || !service || !serviceRuntime || !bootstrap || !pairing || !config ||
-    !command || !accessSurface || !accessSurfaces || !assemblyLifecycle || !shutdownChain ||
+    !command || !accessSurface || !accessSurfaces || !assemblyLifecycle ||
+    !executorRoleLifecycle || !shutdownChain ||
     !anchorInternalStop || !executorRoot || !executorInternalStop || !topology || !applicationHost || !connection || !repl || !surfaceLink || !secrets || !status ||
     !publicStatus || !statusRoute || !scheduler || !manifest || !serverContext || !serverShutdown ||
     !serverLifecycle || !server
@@ -1170,6 +1172,66 @@ export function inspectManagedHostAssembly(records) {
     count(assemblyLifecycle, "if (!this.#rollback.owns(handle))") !== 1 ||
     count(assemblyLifecycle, "Assembly lifecycle contribution already exists") !== 1
   ) failures.push("Anchor pre-server lifecycle contribution ownership drifted");
+  const executorRoleLifecycleIds = [
+    "localConversationOwner.close",
+    "evidenceHandler.stopAccepting",
+    "localWorkspaceHost.close",
+    "executorJobOwnerLifecycle.close",
+    "executorDataPlane.close",
+    "authorityRuntime.stopStorageMaintenance",
+    "mcpHub.dispose",
+  ];
+  const executorLifecyclePositions = executorRoleLifecycleIds.map((identity) =>
+    executorRoleLifecycle.indexOf(`{ owner: "executor-role", id: "${identity}" }`)
+  );
+  const executorCleanupTail = executorRoot.slice(
+    executorRoot.indexOf("const cleanupFailures: unknown[] = []"),
+  );
+  const executorMeshConstruction = executorRoot.indexOf("mesh = new MeshRuntimeAssembly({");
+  const executorJobLifecycleConstruction = executorRoot.indexOf(
+    "const jobOwnerLifecycle = new ExecutorJobOwnerLifecycle(",
+    executorMeshConstruction,
+  );
+  const executorJobLifecycleContribution = executorRoot.indexOf(
+    '"executorJobOwnerLifecycle.close"',
+    executorJobLifecycleConstruction,
+  );
+  const firstAwaitAfterExecutorMesh = executorRoot.indexOf("await ", executorMeshConstruction);
+  if (
+    count(executorRoleLifecycle, 'owner: "executor-role"') !==
+      executorRoleLifecycleIds.length ||
+    executorLifecyclePositions.some((position) => position < 0) ||
+    executorLifecyclePositions.some((position, index) =>
+      index > 0 && position <= executorLifecyclePositions[index - 1]) ||
+    count(executorRoot, "new ExecutorRoleLifecycle()") !== 1 ||
+    count(executorRoot, "executorRoleLifecycle.acquire(") !== 6 ||
+    executorRoleLifecycleIds
+      .filter((identity) => identity !== "authorityRuntime.stopStorageMaintenance")
+      .some((identity) => count(executorRoot, `"${identity}"`) !== 1) ||
+    count(executorRoot, "executorRoleLifecycle.authorityStartupRollback()") !== 1 ||
+    count(executorRoot, "executorRoleLifecycle.adoptAuthority(authority.startupCleanup)") !== 1 ||
+    count(executorRoot, "executorRoleLifecycle.seal()") !== 1 ||
+    count(executorRoot, "await executorRoleLifecycle.close()") !== 1 ||
+    executorMeshConstruction < 0 ||
+    executorJobLifecycleConstruction <= executorMeshConstruction ||
+    executorJobLifecycleContribution <= executorJobLifecycleConstruction ||
+    firstAwaitAfterExecutorMesh <= executorJobLifecycleContribution ||
+    !executorRoot.slice(firstAwaitAfterExecutorMesh).startsWith("await mesh.bindDeviceRemovalLifecycle({") ||
+    !executorRoleLifecycle.includes("this.#authorityRollback.owns(handle)") ||
+    !executorRoleLifecycle.includes("Executor role lifecycle contributions are incomplete") ||
+    !executorRoleLifecycle.includes("for (const { id } of EXECUTOR_ROLE_LIFECYCLE_DESCRIPTORS)") ||
+    [
+      "await localConversationOwner?.close()",
+      "evidenceHandler?.stopAccepting()",
+      "await localWorkspaceHost?.close()",
+      "await jobOwnerLifecycle.close()",
+      "await jobOwnerAssembly?.close()",
+      "await mesh?.stop()",
+      "await dataPlane?.close()",
+      "await authority?.stopStorageMaintenance()",
+      "await mcpHub.dispose()",
+    ].some((token) => executorCleanupTail.includes(token))
+  ) failures.push("Executor non-Server lifecycle contribution ownership drifted");
   const descriptor = frozenLiteralDescriptor(
     "packages/cli/src/serve/managed-service-reconciler.ts",
     reconciler,
