@@ -114,7 +114,7 @@ export function hasPostTurnControlCapability(): boolean {
 
 /**
  * 向当前 run 的 EventBus 发 turn 边界控制意图 —— turn 内只发意图不执行控制,
- * accumulator last-wins 收集后随 RunResult.pendingPostTurnControl 带出,由调用方
+ * accumulator last-wins 收集后随 Kernel artifacts 带出,由调用方
  * 在 turn 边界唯一消费(当前 CLI 经定向通知消费;其它接入面必须先声明 capability)。
  *
  * 经 ALS 取 per-run bus(与 task_list 工具取 conversationId 同款机制);

@@ -7,6 +7,7 @@ import type {
   AgentRuntime,
   KernelRunEnvelope,
   KernelRunEvent,
+  KernelTerminal,
 } from "@zhixing/orchestrator/runtime";
 import { describe, expect, it, vi } from "vitest";
 import { createAgentJobRuntimePort } from "../agent-job-runtime.js";
@@ -40,18 +41,26 @@ const KERNEL_EVENT_EXACT_SET: readonly KernelRunEvent[] = [
   },
 ];
 
-function completedRunResult() {
-  return {
-    agentResult: {
-      reason: "completed" as const,
-      message: {
-        role: "assistant" as const,
-        content: [{ type: "text" as const, text: "done" }],
-      },
-      usage: { inputTokens: 1, outputTokens: 2 },
+function completedRunResult(
+  terminal: KernelTerminal = {
+    reason: "completed",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "done" }],
     },
-    newMessages: [],
-    durationMs: 1,
+    usage: { inputTokens: 1, outputTokens: 2 },
+  },
+) {
+  return {
+    terminal,
+    artifacts: {
+      runRecord: {
+        timestamp: "2026-08-29T00:00:00.000Z",
+        messages: [],
+      },
+      newMessages: [],
+      durationMs: 1,
+    },
   };
 }
 
@@ -146,6 +155,53 @@ describe("agent job runtime structured lifecycle", () => {
     await handle.dispose();
 
     expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    {
+      terminal: {
+        reason: "max_turns",
+        maxTurns: 4,
+        usage: { inputTokens: 1, outputTokens: 2 },
+      } as const,
+      summary: "Job execution reached 4 turns",
+    },
+    {
+      terminal: {
+        reason: "aborted",
+        usage: { inputTokens: 1, outputTokens: 2 },
+      } as const,
+      summary: "Job execution was aborted",
+    },
+    {
+      terminal: {
+        reason: "error",
+        error: {
+          name: "AgentError",
+          message: "provider failed",
+          type: "provider_error",
+          recoverable: true,
+        },
+        usage: { inputTokens: 1, outputTokens: 2 },
+      } as const,
+      summary: "provider failed",
+    },
+  ])("projects $terminal.reason into the durable job failure result", async ({ terminal, summary }) => {
+    const runtime = Object.assign({} as AgentRuntime, {
+      run: vi.fn(async () => completedRunResult(terminal)),
+      dispose: vi.fn(async () => undefined),
+    });
+    const handle = await createHandle(runtime);
+    const result = await handle.run(instruction, runOptions()).next();
+
+    expect(result).toMatchObject({
+      done: true,
+      value: {
+        status: "failed",
+        summary,
+        usage: { inputTokens: 1, outputTokens: 2 },
+      },
+    });
   });
 
   it("explicitly projects the complete Kernel event set into the durable job stream", async () => {

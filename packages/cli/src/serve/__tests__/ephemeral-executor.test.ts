@@ -4,11 +4,11 @@
 
 import { describe, it, expect, vi } from "vitest";
 import type { AbortReason, AgentResult, AgentYield, Message } from "@zhixing/core";
-import type { RunResult } from "@zhixing/core";
 import type {
   AgentRuntime,
   KernelRunEnvelope,
   KernelRunEvent,
+  KernelRunCompletion,
 } from "@zhixing/orchestrator/runtime";
 import { runEphemeralTurn } from "../ephemeral-executor.js";
 
@@ -39,6 +39,7 @@ const KERNEL_EVENT_EXACT_SET: readonly KernelRunEvent[] = [
 interface MockBehavior {
   yields?: AgentYield[];
   malformedEvent?: unknown;
+  malformedTerminal?: unknown;
   reason?: AgentResult["reason"];
   throwError?: string;
   errorMessage?: string;
@@ -50,7 +51,7 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
   return Object.assign(stub, {
     providerId: "mock",
     model: "mock-model",
-    async run(envelope: KernelRunEnvelope): Promise<RunResult> {
+    async run(envelope: KernelRunEnvelope): Promise<KernelRunCompletion> {
       if (behavior.throwError) throw new Error(behavior.throwError);
       if (behavior.malformedEvent !== undefined) {
         const onEvent = envelope.observation.onEvent;
@@ -62,12 +63,12 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
       for (const y of yields) envelope.observation.onEvent?.(y);
 
       const reason = behavior.reason ?? "completed";
-      const completedResult: AgentResult = {
+      const completedResult: KernelRunCompletion["terminal"] = {
         reason: "completed",
         message: { role: "assistant", content: [{ type: "text", text: "done" }] },
         usage: { inputTokens: 1, outputTokens: 1 },
       };
-      const result: AgentResult =
+      const terminal: KernelRunCompletion["terminal"] =
         reason === "completed"
           ? completedResult
           : reason === "max_turns"
@@ -80,9 +81,12 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
                 }
               : {
                   reason: "error",
-                  error: Object.assign(new Error(behavior.errorMessage ?? "boom"), {
+                  error: {
                     name: "AgentError",
-                  }) as AgentResult extends { reason: "error"; error: infer E } ? E : never,
+                    message: behavior.errorMessage ?? "boom",
+                    type: "unknown",
+                    recoverable: false,
+                  },
                   usage: { inputTokens: 0, outputTokens: 0 },
                 };
 
@@ -92,10 +96,23 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
           : [];
 
       return {
-        agentResult: result,
-        newMessages,
-        durationMs: 10,
-      };
+        ...(behavior.malformedTerminal === undefined
+          ? { terminal }
+          : { terminal: behavior.malformedTerminal }),
+        artifacts: {
+          runRecord: {
+            timestamp: "2026-08-29T00:00:00.000Z",
+            messages: [
+              envelope.modelInput.messages[0] ?? {
+                role: "user",
+                content: [],
+              },
+            ],
+          },
+          newMessages,
+          durationMs: 10,
+        },
+      } as KernelRunCompletion;
     },
   });
 }
@@ -171,14 +188,17 @@ describe("runEphemeralTurn", () => {
   });
 
   it("仅传本轮 messages（验证 stateless 语义）", async () => {
-    const runSpy = vi.fn(async (_envelope: KernelRunEnvelope): Promise<RunResult> => ({
-      agentResult: {
+    const runSpy = vi.fn(async (_envelope: KernelRunEnvelope): Promise<KernelRunCompletion> => ({
+      terminal: {
         reason: "completed",
         message: { role: "assistant", content: [{ type: "text", text: "ok" }] },
         usage: { inputTokens: 1, outputTokens: 1 },
       },
-      newMessages: [],
-      durationMs: 1,
+      artifacts: {
+        runRecord: { timestamp: "2026-08-29T00:00:00.000Z", messages: [] },
+        newMessages: [],
+        durationMs: 1,
+      },
     }));
     const runtime = Object.assign({} as AgentRuntime, {
       providerId: "mock",
@@ -244,17 +264,31 @@ describe("runEphemeralTurn", () => {
     expect(result.error).toContain("Incomplete AgentYield variant");
   });
 
+  it("fails closed when a runtime supplies an incomplete Kernel terminal", async () => {
+    const result = await runEphemeralTurn({
+      runtime: createMockAgentRuntime({
+        malformedTerminal: { reason: "error", error: { message: "boom" } },
+      }),
+      prompt: "p",
+    });
+    expect(result.status).toBe("error");
+    expect(result.error).toContain("Incomplete Kernel terminal");
+  });
+
   // ─── PR-2 / remote-confirmation-execution.md §3.3：turnContext 透传 ───
 
   it("可选 turnContext 透传给 runtime.run（scheduler → ephemeral 路径）", async () => {
-    const runSpy = vi.fn(async (_envelope: KernelRunEnvelope): Promise<RunResult> => ({
-      agentResult: {
+    const runSpy = vi.fn(async (_envelope: KernelRunEnvelope): Promise<KernelRunCompletion> => ({
+      terminal: {
         reason: "completed",
         message: { role: "assistant", content: [{ type: "text", text: "ok" }] },
         usage: { inputTokens: 1, outputTokens: 1 },
       },
-      newMessages: [],
-      durationMs: 1,
+      artifacts: {
+        runRecord: { timestamp: "2026-08-29T00:00:00.000Z", messages: [] },
+        newMessages: [],
+        durationMs: 1,
+      },
     }));
     const runtime = Object.assign({} as AgentRuntime, {
       providerId: "mock",
@@ -285,14 +319,17 @@ describe("runEphemeralTurn", () => {
   });
 
   it("无 turnContext 时 runtime.run 的 turnContext 为 undefined", async () => {
-    const runSpy = vi.fn(async (_envelope: KernelRunEnvelope): Promise<RunResult> => ({
-      agentResult: {
+    const runSpy = vi.fn(async (_envelope: KernelRunEnvelope): Promise<KernelRunCompletion> => ({
+      terminal: {
         reason: "completed",
         message: { role: "assistant", content: [{ type: "text", text: "ok" }] },
         usage: { inputTokens: 1, outputTokens: 1 },
       },
-      newMessages: [],
-      durationMs: 1,
+      artifacts: {
+        runRecord: { timestamp: "2026-08-29T00:00:00.000Z", messages: [] },
+        newMessages: [],
+        durationMs: 1,
+      },
     }));
     const runtime = Object.assign({} as AgentRuntime, {
       providerId: "mock",
@@ -311,12 +348,15 @@ describe("runEphemeralTurn", () => {
       run: vi.fn(async (envelope: KernelRunEnvelope) => {
         captured = envelope;
         return {
-          agentResult: {
+          terminal: {
             reason: "aborted" as const,
             usage: { inputTokens: 0, outputTokens: 0 },
           },
-          newMessages: [],
-          durationMs: 1,
+          artifacts: {
+            runRecord: { timestamp: "2026-08-29T00:00:00.000Z", messages: [] },
+            newMessages: [],
+            durationMs: 1,
+          },
         };
       }),
     });

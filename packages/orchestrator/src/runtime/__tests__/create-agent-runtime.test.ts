@@ -309,7 +309,7 @@ describe("createAgentRuntime · decorateRunBus 调用契约", () => {
   });
 
   it("agent loop throw 路径:dispose 仍被调用一次", async () => {
-    // provider 在第 1 次 chat 即 throw —— agent loop 内部 catch + 转 RunResult,
+    // provider 在第 1 次 chat 即 throw —— agent loop 内部 catch + 转 Kernel terminal,
     // run() 不 throw,但 finally 必须 fire
     providerRef.current = new MockLLMProvider([
       { error: new Error("upstream connection refused") },
@@ -329,7 +329,7 @@ describe("createAgentRuntime · decorateRunBus 调用契约", () => {
       observation: {},
     });
 
-    expect(result.agentResult.reason).toBe("error");
+    expect(result.terminal.reason).toBe("error");
     expect(dispose).toHaveBeenCalledTimes(1);
   });
 
@@ -354,7 +354,7 @@ describe("createAgentRuntime · decorateRunBus 调用契约", () => {
       observation: {},
     });
 
-    expect(result.agentResult.reason).toBe("aborted");
+    expect(result.terminal.reason).toBe("aborted");
     expect(dispose).toHaveBeenCalledTimes(1);
   });
 
@@ -374,7 +374,7 @@ describe("createAgentRuntime · decorateRunBus 调用契约", () => {
       observation: {},
     });
 
-    expect(result.agentResult.reason).toBe("completed");
+    expect(result.terminal.reason).toBe("completed");
     expect(decorateCalls).toHaveLength(0);
   });
 });
@@ -409,7 +409,7 @@ describe("createAgentRuntime · safeDispose 故障隔离契约", () => {
       correctness: {},
       observation: {},
     });
-    expect(result.agentResult.reason).toBe("completed");
+    expect(result.terminal.reason).toBe("completed");
 
     // 日志带 [orchestrator.run.decorate] 命名空间标签
     expect(consoleErrorSpy).toHaveBeenCalledWith(
@@ -545,11 +545,11 @@ describe("createAgentRuntime · per-run 隔离契约", () => {
     });
 
     // 两次 run 各自只产生本轮 assistant message,不互相累积
-    expect(r1.newMessages).toHaveLength(1);
-    expect(r2.newMessages).toHaveLength(1);
+    expect(r1.artifacts.newMessages).toHaveLength(1);
+    expect(r2.artifacts.newMessages).toHaveLength(1);
     // 各自 runRecord 携带本轮用户原文
-    expect((r1.runRecord.messages[0]!.content[0] as { text: string }).text).toBe("ask 1");
-    expect((r2.runRecord.messages[0]!.content[0] as { text: string }).text).toBe("ask 2");
+    expect((r1.artifacts.runRecord.messages[0]!.content[0] as { text: string }).text).toBe("ask 1");
+    expect((r2.artifacts.runRecord.messages[0]!.content[0] as { text: string }).text).toBe("ask 2");
   });
 });
 
@@ -706,7 +706,7 @@ describe("createAgentRuntime · ALS RunContext 透传契约", () => {
       correctness: {},
       observation: {},
     });
-    expect(result.agentResult.reason).toBe("completed");
+    expect(result.terminal.reason).toBe("completed");
   });
 
   // 并发隔离契约 —— ALS 模型的核心承诺:每次 runtime.run() 走独立 store,
@@ -796,8 +796,8 @@ describe("createAgentRuntime · ALS RunContext 透传契约", () => {
       }),
     ]);
 
-    expect(r1.agentResult.reason).toBe("completed");
-    expect(r2.agentResult.reason).toBe("completed");
+    expect(r1.terminal.reason).toBe("completed");
+    expect(r2.terminal.reason).toBe("completed");
     expect(captures).toHaveLength(2);
 
     // 关键断言:两次 capture 的 bus 各自属于对应 run 的 bus —— 不串扰
@@ -889,12 +889,12 @@ describe("createAgentRuntime · Task 装配契约（profile.enabledTools 驱动�
       observation: {},
     });
 
-    expect(result.agentResult.reason).toBe("completed");
+    expect(result.terminal.reason).toBe("completed");
     // 序列消费断言:主 LLM 第 1 次(派 Task)+ 子 LLM 第 1 次(产 final)+ 主 LLM 第 2 次(综合)= 3 次
     expect(providerRef.current!.callCount).toBe(3);
     // 主回收的最后 assistant 文本来自第 3 次 chat 的综合输出
-    expect(result.newMessages.length).toBeGreaterThan(0);
-    const lastAssistant = result.newMessages.findLast((m) => m.role === "assistant");
+    expect(result.artifacts.newMessages.length).toBeGreaterThan(0);
+    const lastAssistant = result.artifacts.newMessages.findLast((m) => m.role === "assistant");
     expect(lastAssistant).toBeDefined();
     const lastText = lastAssistant!.content
       .filter((b) => b.type === "text")
@@ -940,7 +940,7 @@ describe("createAgentRuntime · Task 装配契约（profile.enabledTools 驱动�
       observation: {},
     });
 
-    expect(result.agentResult.reason).toBe("completed");
+    expect(result.terminal.reason).toBe("completed");
     expect(authorizeToolExecution.mock.calls.some(
       ([input]) => input.toolName === "read",
     )).toBe(true);
@@ -982,7 +982,7 @@ describe("createAgentRuntime · Task 装配契约（profile.enabledTools 驱动�
 
     // 主 run 应正常完成 —— 子的"递归 Task"被工具集过滤拒绝,
     // 子最终产出文本被主 LLM 综合,主返 completed
-    expect(result.agentResult.reason).toBe("completed");
+    expect(result.terminal.reason).toBe("completed");
   });
 });
 
@@ -1047,22 +1047,22 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
       observation: {},
     });
 
-    expect(result.agentResult.reason).toBe("completed");
+    expect(result.terminal.reason).toBe("completed");
 
     // runRecord.messages[0] 是用户原始消息(非子的"Begin"伪 user message)
     const userText = (
-      result.runRecord.messages[0]!.content[0] as { text: string }
+      result.artifacts.runRecord.messages[0]!.content[0] as { text: string }
     ).text;
     expect(userText).toBe("user question");
 
     // 主 turn.assistantMessage 是主综合 —— 不含子 final 文本(子文本是 tool_result.content,不是独立 assistant)
-    const assistantText = getAssistantText(result.runRecord);
+    const assistantText = getAssistantText(result.artifacts.runRecord);
     expect(assistantText).toContain("[main-only marker]");
     expect(assistantText).not.toContain("[child-only marker]");
 
     // 主 turn.toolCalls 含 Task 一条记录,result 字段(扁平化字符串)含子 final
-    expect(toolCallsOf(result.runRecord)).toHaveLength(1);
-    const taskCall = toolCallsOf(result.runRecord)[0]!;
+    expect(toolCallsOf(result.artifacts.runRecord)).toHaveLength(1);
+    const taskCall = toolCallsOf(result.artifacts.runRecord)[0]!;
     expect(taskCall.name).toBe("Task");
     expect(taskCall.input).toMatchObject({ description: "research", prompt: "do X" });
     expect(taskCall.result).toContain("[child-only marker]");
@@ -1070,7 +1070,7 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
 
     // 主 newMessages 中独立 assistant message 全集不含子 final 文本
     // (子内部 message 流不冒泡到主 yield 层 —— "上下文不被子串扰"的核心承诺)
-    const standaloneAssistantTexts = result.newMessages
+    const standaloneAssistantTexts = result.artifacts.newMessages
       .filter((m) => m.role === "assistant")
       .flatMap((m) => m.content)
       .filter((b): b is { type: "text"; text: string } => b.type === "text")
@@ -1114,12 +1114,12 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
       observation: {},
     });
 
-    expect(result.agentResult.reason).toBe("completed");
+    expect(result.terminal.reason).toBe("completed");
     // 5 次 chat: 1 主分发 + 3 子终结 + 1 主综合
     expect(providerRef.current!.callCount).toBe(5);
 
     // 主 turn 含 3 条 toolCalls,各自 success
-    const calls = toolCallsOf(result.runRecord);
+    const calls = toolCallsOf(result.artifacts.runRecord);
     expect(calls).toHaveLength(3);
     for (const tc of calls) {
       expect(tc.name).toBe("Task");
@@ -1133,7 +1133,7 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
     expect(allResults).toContain("child-final-γ");
 
     // 主综合输出
-    expect(getAssistantText(result.runRecord)).toContain("synthesized A+B+C");
+    expect(getAssistantText(result.artifacts.runRecord)).toContain("synthesized A+B+C");
   });
 
   it("子 LLM error → tool_result is_error=true,主 agent 继续完成 turn(子 fail 不波及父)", async () => {
@@ -1163,10 +1163,10 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
     });
 
     // 主 turn 完成 —— 不被子 fail 反向 abort
-    expect(result.agentResult.reason).toBe("completed");
+    expect(result.terminal.reason).toBe("completed");
 
     // toolCalls 含 Task 记录,isError=true
-    const errCalls = toolCallsOf(result.runRecord);
+    const errCalls = toolCallsOf(result.artifacts.runRecord);
     expect(errCalls).toHaveLength(1);
     const taskCall = errCalls[0]!;
     expect(taskCall.name).toBe("Task");
@@ -1175,7 +1175,7 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
     expect(taskCall.result).toMatch(/^\[Task "fetch" failed \(provider_error\):/);
 
     // 主 LLM 看到 is_error 后继续输出(spec 强制要求 LLM 在 final response 中暴露 Task 失败)
-    expect(getAssistantText(result.runRecord)).toContain("acknowledged");
+    expect(getAssistantText(result.artifacts.runRecord)).toContain("acknowledged");
   });
 
   it("父 listener 收到所有子事件,meta.lineage 各异且严格以 'main/sub-' 开头", async () => {
@@ -1221,7 +1221,7 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
       observation: {},
     });
 
-    expect(result.agentResult.reason).toBe("completed");
+    expect(result.terminal.reason).toBe("completed");
     // 3 个子各有唯一 lineage,且全部冒泡可见
     expect(observedSubLineages.size).toBe(3);
     for (const lineage of observedSubLineages) {
@@ -1560,7 +1560,7 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     expect(providerRef.current.calls[0]!.systemPrompt).toContain(SKILL_MARKER);
   });
 
-  it("run() 触发 onBeforeRun(观测原始输入 messages) → onAfterRun(RunResult),顺序与字段正确", async () => {
+  it("run() 触发 onBeforeRun(观测原始输入 messages) → onAfterRun(Kernel completion),顺序与字段正确", async () => {
     providerRef.current = new MockLLMProvider([{ text: "done" }]);
     const order: string[] = [];
     let beforeMsgCount: number | undefined;
@@ -1577,7 +1577,7 @@ describe("createAgentRuntime · 生命周期钩子", () => {
           },
           onAfterRun: (ctx) => {
             order.push("after");
-            afterReason = ctx.result.agentResult.reason;
+            afterReason = ctx.result.terminal.reason;
             afterTurnIndex = ctx.turnIndex;
           },
         },
@@ -1661,7 +1661,7 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       observation: {},
     });
 
-    expect(result.agentResult.reason).toBe("completed");
+    expect(result.terminal.reason).toBe("completed");
     expect(failed).toContainEqual({ hookId: "flaky", phase: "onBeforeRun" });
   });
 
@@ -1835,8 +1835,8 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       role: "assistant",
       content: [{ type: "text", text: "prefix-ack" }],
     });
-    expect(result.runRecord.messages).toHaveLength(2);
-    expect(result.runRecord.messages[0]).toEqual(userMessage("real user"));
+    expect(result.artifacts.runRecord.messages).toHaveLength(2);
+    expect(result.artifacts.runRecord.messages[0]).toEqual(userMessage("real user"));
   });
 
   it("guidance message pair 真实进入 provider 请求，且不进入 runRecord", async () => {
@@ -1890,8 +1890,8 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     expect((sent[2]!.content[0] as { type: "text"; text: string }).text).toContain(
       "真实问题",
     );
-    expect(result.runRecord.messages[0]).toEqual(userMessage("真实问题"));
-    expect(JSON.stringify(result.runRecord.messages)).not.toContain("guidance");
+    expect(result.artifacts.runRecord.messages[0]).toEqual(userMessage("真实问题"));
+    expect(JSON.stringify(result.artifacts.runRecord.messages)).not.toContain("guidance");
   });
 
   it("首窗非法 messagePrefix contribution 让 runtime 装配 fail-fast", async () => {

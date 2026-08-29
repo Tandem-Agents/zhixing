@@ -19,8 +19,10 @@ import {
 import type { AgentTurnResult } from "@zhixing/core";
 import {
   assertKernelRunEvent,
+  assertKernelTerminal,
   type AgentRuntime,
   type KernelRunEvent,
+  type KernelTerminal,
 } from "@zhixing/orchestrator/runtime";
 import { serializeAbortReason } from "./abort-serializer.js";
 
@@ -40,7 +42,7 @@ export interface EphemeralTurnOptions {
    * 可选 abortSignal。由当前执行 owner 提供；scheduler user job 已走耐久
    * cancellation dispatcher，不再由进程内 RunRegistry 持有取消事实。
    * 后,agent-loop / LLM call / 工具执行通过 signal 链路自然完成 cleanup,
-   * AgentResult.aborted.abortReason 携带类型化中断源,经 `serializeAbortReason`
+   * aborted Kernel terminal 携带类型化中断源,经 `serializeAbortReason`
    * 序列化到 `AgentTurnResult.detail`。
    *
    * 不传时所有 LLM 调用无外部限制(REPL / 单元测试 / 手工触发场景)。
@@ -97,11 +99,54 @@ function projectKernelEventToEphemeralYield(
   }
 }
 
+function unhandledEphemeralKernelTerminal(terminal: never): never {
+  throw new TypeError(`Unhandled ephemeral Kernel terminal: ${String(terminal)}`);
+}
+
+/** Kernel terminal → ephemeral product result projection. */
+function projectKernelTerminalToEphemeralResult(
+  terminal: KernelTerminal,
+  output: string | undefined,
+  durationMs: number,
+): AgentTurnResult {
+  assertKernelTerminal(terminal);
+  switch (terminal.reason) {
+    case "completed":
+      return { status: "ok", output, durationMs };
+    case "max_turns":
+      return {
+        status: "error",
+        output,
+        error: "Max turns reached",
+        durationMs,
+      };
+    case "aborted": {
+      const serialized = serializeAbortReason(terminal.abortReason);
+      return {
+        status: "error",
+        output,
+        error: serialized.message,
+        detail: serialized.detail ?? undefined,
+        durationMs,
+      };
+    }
+    case "error":
+      return {
+        status: "error",
+        output,
+        error: terminal.error.message,
+        durationMs,
+      };
+    default:
+      return unhandledEphemeralKernelTerminal(terminal);
+  }
+}
+
 /**
  * 执行一次 ephemeral agent-turn。
  * - 仅传入本次 prompt 的消息列表（不累积历史）
  * - 聚合 text_delta 为 output 字符串
- * - 映射 AgentResult.reason → AgentTurnResult.status
+ * - 映射 KernelTerminal.reason → AgentTurnResult.status
  */
 export async function runEphemeralTurn(
   opts: EphemeralTurnOptions,
@@ -130,34 +175,11 @@ export async function runEphemeralTurn(
     });
 
     const output = textChunks.join("") || undefined;
-    const r = runResult.agentResult;
-    if (r.reason === "completed") {
-      return { status: "ok", output, durationMs: Date.now() - startTime };
-    }
-    if (r.reason === "max_turns") {
-      return {
-        status: "error",
-        output,
-        error: "Max turns reached",
-        durationMs: Date.now() - startTime,
-      };
-    }
-    if (r.reason === "aborted") {
-      const serialized = serializeAbortReason(r.abortReason);
-      return {
-        status: "error",
-        output,
-        error: serialized.message,
-        detail: serialized.detail ?? undefined,
-        durationMs: Date.now() - startTime,
-      };
-    }
-    return {
-      status: "error",
+    return projectKernelTerminalToEphemeralResult(
+      runResult.terminal,
       output,
-      error: r.error.message,
-      durationMs: Date.now() - startTime,
-    };
+      Date.now() - startTime,
+    );
   } catch (err) {
     return {
       status: "error",

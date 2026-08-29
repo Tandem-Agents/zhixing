@@ -2,7 +2,7 @@
  * AgentRuntime → SessionRuntime 适配器
  *
  * @zhixing/owner-kernel 定义抽象接口 SessionRuntime（AsyncGenerator 风格），
- * AgentRuntime 是 callback 风格（KernelRunEvent + Promise<RunResult>）。
+ * AgentRuntime 是 callback 风格（KernelRunEvent + Promise<KernelRunCompletion>）。
  * 此适配器在两者之间架桥——纯协议适配:会话状态(注意力窗口 / turnCount /
  * 接受协议)归 ConversationManager,adapter 不持有任何会话状态。
  *
@@ -11,14 +11,16 @@
  * - 每个 turn 创建独立的 InterruptController(`createInterruptController({ parent })`),
  *   把 controller.signal 透传给 agentRuntime.run 让 LLM call / 工具执行链路真正受控
  * - abort 通过 `abortWithReason(currentController, reason)` 立即触发,主模块 cleanup
- *   路径在 ≤200ms 内自然完成 partial yield + RunResult.aborted with abortReason,
+ *   路径在 ≤200ms 内自然完成 partial yield + aborted Kernel terminal,
  *   adapter 让事件流自然走完 Kernel Event/.then 不与之竞速
  */
 
 import {
+  AgentError,
   abortWithReason,
   createInterruptController,
   type AbortReason,
+  type AgentResult,
   type AgentYield,
   type Message,
   type RunResult,
@@ -30,8 +32,11 @@ import type {
 } from "@zhixing/owner-kernel";
 import {
   assertKernelRunEvent,
+  assertKernelTerminal,
   type AgentRuntime,
   type KernelRunEvent,
+  type KernelRunCompletion,
+  type KernelTerminal,
 } from "@zhixing/orchestrator/runtime";
 
 // ─── 适配器 ───
@@ -89,6 +94,82 @@ function projectKernelEventToConversationYield(
       return unhandledConversationKernelEvent(event);
   }
 }
+
+function unhandledConversationKernelTerminal(terminal: never): never {
+  throw new TypeError(
+    `Unhandled conversation Kernel terminal: ${String(terminal)}`,
+  );
+}
+
+/** Kernel terminal → Conversation product terminal projection. */
+function projectKernelTerminalToConversationAgentResult(
+  terminal: KernelTerminal,
+): AgentResult {
+  assertKernelTerminal(terminal);
+  switch (terminal.reason) {
+    case "completed":
+      return {
+        reason: "completed",
+        message: terminal.message,
+        usage: terminal.usage,
+      };
+    case "max_turns":
+      return {
+        reason: "max_turns",
+        maxTurns: terminal.maxTurns,
+        usage: terminal.usage,
+      };
+    case "aborted":
+      return {
+        reason: "aborted",
+        usage: terminal.usage,
+        ...(terminal.abortReason
+          ? { abortReason: terminal.abortReason }
+          : {}),
+        ...(terminal.exitDelayMs === undefined
+          ? {}
+          : { exitDelayMs: terminal.exitDelayMs }),
+      };
+    case "error":
+      return {
+        reason: "error",
+        error: new AgentError(
+          terminal.error.message,
+          terminal.error.type,
+          terminal.error.recoverable,
+        ),
+        usage: terminal.usage,
+      };
+    default:
+      return unhandledConversationKernelTerminal(terminal);
+  }
+}
+
+/** Kernel completion → existing Conversation persistence/result contract. */
+function projectKernelCompletionToConversationRunResult(
+  completion: KernelRunCompletion,
+): RunResult {
+  const artifacts = completion.artifacts;
+  return {
+    agentResult: projectKernelTerminalToConversationAgentResult(
+      completion.terminal,
+    ),
+    runRecord: artifacts.runRecord,
+    // Conversation's legacy RunResult exposes a mutable array. Transfer the
+    // Kernel-owned messages by reference and copy only this small container;
+    // message/tool/image payloads remain the single artifact object graph.
+    newMessages: [...artifacts.newMessages],
+    durationMs: artifacts.durationMs,
+    ...(artifacts.windowCompact
+      ? { windowCompact: artifacts.windowCompact }
+      : {}),
+    ...(artifacts.pendingPostTurnControl
+      ? {
+          pendingPostTurnControl: artifacts.pendingPostTurnControl,
+        }
+      : {}),
+  };
+}
 export function createOwnerRuntimeAdapter(
   sessionId: string,
   agentRuntime: AgentRuntime,
@@ -131,7 +212,7 @@ export function createOwnerRuntimeAdapter(
       //
       // controller.signal 作为 abortSignal 透传 —— abort 触发后,主模块 cleanup 路径
       // 在 ≤200ms 内自然完成:yield partial assistant_message + turn_complete +
-      // 最终 .then(runResult) 携带 RunResult.agentResult.reason="aborted" 与 abortReason。
+      // 最终 completion 携带 aborted terminal 与 abortReason。
       //
       // adapter 不在 controller.signal 上挂 abort listener 主动 push error 终结
       // consumer loop —— 那样会与主模块 cleanup 路径竞速,抢在 cleanup 完成前抛出,
@@ -173,8 +254,11 @@ export function createOwnerRuntimeAdapter(
           },
         })
         .then(
-          (runResult) => {
-            queue.push({ kind: "done", result: runResult });
+          (completion) => {
+            queue.push({
+              kind: "done",
+              result: projectKernelCompletionToConversationRunResult(completion),
+            });
             wakeOne();
           },
           // throw 分支兜底:provider 网络错 / 编程错等。abort 不走此分支 ——

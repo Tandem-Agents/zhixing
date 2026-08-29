@@ -22,7 +22,6 @@ import {
   type OrchestrationContextSnapshotV1,
   type OrchestrationExecutableV1,
   type OrchestrationRunResultV1,
-  type RunResult,
   type ChatRequest,
   type StreamEvent,
   type ToolResultBlock,
@@ -164,6 +163,11 @@ import {
   type KernelRunEnvelope,
 } from "./kernel-run-envelope.js";
 import { projectAgentYieldToKernelRunEvent } from "./kernel-run-event.js";
+import {
+  createKernelRunCompletion,
+  projectAgentResultToKernelTerminal,
+  type KernelRunCompletion,
+} from "./kernel-terminal.js";
 
 /**
  * 注入系统提示词的技能索引上限(按当前模式 top-N)。
@@ -285,7 +289,7 @@ export type DecorateRunBusFn = (ctx: RunBusContext) => () => void;
 export interface AgentRuntime {
   providerId: string;
   model: string;
-  run: (envelope: KernelRunEnvelope) => Promise<RunResult>;
+  run: (envelope: KernelRunEnvelope) => Promise<KernelRunCompletion>;
   /**
    * 估算当前窗口下一次主对话 provider 请求的上下文预算状态。
    *
@@ -438,10 +442,6 @@ export interface ForceCompactResult {
    */
   emergencyFloor?: { droppedTurns: number; error: string };
 }
-
-// RunResult 从 @zhixing/core 统一（单一事实源）。
-// cli 的 AgentRuntime.run 和 server 的 SessionRuntime.run 共享此契约。
-export type { RunResult };
 
 /**
  * resetConversationState 失败聚合异常 —— 单个 Resettable 抛错不阻断其它 reset，
@@ -1431,7 +1431,7 @@ export async function createAgentRuntime(
       };
     },
 
-    async run(input: KernelRunEnvelope): Promise<RunResult> {
+    async run(input: KernelRunEnvelope): Promise<KernelRunCompletion> {
       const envelope = captureKernelRunEnvelope(input);
       // 主 agent 的 root EventBus 显式标记 lineage="main",建立父子事件契约的根:
       //   - 主 run 事件 meta.lineage === "main" (订阅方可按 lineage 过滤/路由)
@@ -1545,7 +1545,7 @@ export async function createAgentRuntime(
       const segmentAccumulator = subscribeSegmentMarkerAccumulator(eventBus);
 
       // post-turn 控制意图收集 —— last-wins 单一意图（非累加）。纯管道:
-      // 仅收集,run 结束带出 RunResult.pendingPostTurnControl,不执行任何控制动作。
+      // 仅收集,run 结束带出 Kernel artifacts,不执行任何控制动作。
       const postTurnControlAccumulator =
         subscribePostTurnControlAccumulator(eventBus);
 
@@ -1794,11 +1794,11 @@ export async function createAgentRuntime(
             orchestrationCapacity: options.orchestrationCapacity,
             ...(modelCallMetering ? { modelCallMetering } : {}),
           },
-          async (): Promise<RunResult> => {
+          async (): Promise<KernelRunCompletion> => {
             return await runMainLoop();
           },
         );
-        // onAfterRun —— run 产出 RunResult 后（ALS 外、disposeAll 前;若 run() 自身
+        // onAfterRun —— run 产出 Kernel completion 后（ALS 外、disposeAll 前;若 run() 自身
         // 抛错则不触发,onBeforeRun→onAfterRun 非强配对）。抛错不污染已就绪结果。
         for (const sub of lifecycle) {
           const afterRunCtx: LifecycleAfterRunContext = {
@@ -1827,7 +1827,7 @@ export async function createAgentRuntime(
         disposeAll();
       }
 
-      async function runMainLoop(): Promise<RunResult> {
+      async function runMainLoop(): Promise<KernelRunCompletion> {
         // onBeforeRun 订阅者贡献的 <context> 已注入当前 run 用户消息（injectedMessages，
         // 在 run 入口拼好）。本 loop 从它起步。
         //
@@ -1943,20 +1943,22 @@ export async function createAgentRuntime(
           if (done) {
             // 窗口重构指令唯一生产者 = 段切换（自动评估 / 应急地板同一出口）
             const windowCompact = segmentAccumulator.getWindowCompact();
-            return {
-              agentResult: value,
-              runRecord: buildRunRecord({
-                source: envelope.identity.source,
-                advancement: envelope.identity.advancement,
-                userMessage: originalUserMessage,
+            return createKernelRunCompletion(
+              projectAgentResultToKernelTerminal(value),
+              {
+                runRecord: buildRunRecord({
+                  source: envelope.identity.source,
+                  advancement: envelope.identity.advancement,
+                  userMessage: originalUserMessage,
+                  newMessages,
+                  agentResult: value,
+                }),
                 newMessages,
-                agentResult: value,
-              }),
-              newMessages,
-              durationMs: Date.now() - startTime,
-              windowCompact,
-              pendingPostTurnControl: postTurnControlAccumulator.getOutcome(),
-            };
+                durationMs: Date.now() - startTime,
+                windowCompact,
+                pendingPostTurnControl: postTurnControlAccumulator.getOutcome(),
+              },
+            );
           }
 
           // 通知调用方（渲染用）

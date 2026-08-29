@@ -58,7 +58,6 @@ export {
   type RunBusContext,
   type RunContext,
   type RunOrchestrationV1Params,
-  type RunResult,
   type RuntimeKind,
   type SystemPromptSegment,
   type TextCallOptions,

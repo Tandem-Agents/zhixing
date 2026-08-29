@@ -3,7 +3,7 @@
  *
  * 结构形态与 segment-marker-accumulator 同款（订阅 → getter → run 结束带出 →
  * 显式 dispose），语义为 last-wins 单一意图。纯管道：仅收集意图，不执行
- * 任何控制动作。消费方在 turn 边界以单一事务处理 RunResult.pendingPostTurnControl。
+ * 任何控制动作。消费方在 turn 边界以单一事务处理 Kernel artifacts 中的提议。
  */
 
 import type {

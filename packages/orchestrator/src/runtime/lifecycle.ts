@@ -20,7 +20,8 @@
  * 无注意力窗口换代，by-construction 不携带本钩子。
  */
 
-import type { LifecycleWarningInput, Message, RunResult } from "@zhixing/core";
+import type { LifecycleWarningInput, Message } from "@zhixing/core";
+import type { KernelRunCompletion } from "./kernel-terminal.js";
 import type { SystemPromptSegment } from "./system-prompt.js";
 
 /**
@@ -143,7 +144,7 @@ export interface LifecycleBeforeRunContext extends LifecycleContextBase {
 export interface LifecycleAfterRunContext extends LifecycleContextBase {
   readonly conversationId?: string;
   readonly turnIndex: number;
-  readonly result: Readonly<RunResult>;
+  readonly result: KernelRunCompletion;
 }
 
 export interface LifecycleWindowCloseContext extends LifecycleContextBase {
@@ -170,7 +171,7 @@ export interface AgentRuntimeLifecycle {
    *  用户消息贡献注入内容。不重建 system prompt（run 边界在窗口内）。 */
   onBeforeRun?(ctx: LifecycleBeforeRunContext): Promise<void> | void;
 
-  /** ③ 每次 run 后：run() 产出 RunResult 后调。观测 + 状态更新（本轮已结束）。 */
+  /** ③ 每次 run 后：run() 产出 Kernel completion 后调。观测 + 状态更新（本轮已结束）。 */
   onAfterRun?(ctx: LifecycleAfterRunContext): Promise<void> | void;
 
   /** ④ 注意力窗口结束：旧窗终结（段切换 / compact / clear / resume 前）或实例

@@ -7,8 +7,10 @@ import {
 import type { JobExecutionInstruction } from "@zhixing/core/contracts";
 import {
   assertKernelRunEvent,
+  assertKernelTerminal,
   type AgentRuntime,
   type KernelRunEvent,
+  type KernelTerminal,
 } from "@zhixing/orchestrator/runtime";
 import type {
   JobRunOutcome,
@@ -69,6 +71,49 @@ function projectKernelEventToDurableJobYield(
       };
     default:
       return unhandledDurableJobKernelEvent(event);
+  }
+}
+
+function unhandledDurableJobKernelTerminal(terminal: never): never {
+  throw new TypeError(`Unhandled durable-job Kernel terminal: ${String(terminal)}`);
+}
+
+/** Kernel terminal → durable job product result projection. */
+function projectKernelTerminalToDurableJobOutcome(
+  terminal: KernelTerminal,
+): JobRunOutcome {
+  assertKernelTerminal(terminal);
+  switch (terminal.reason) {
+    case "completed":
+      return {
+        status: "completed",
+        summary: extractText(terminal.message),
+        contentAssets: [],
+        usage: terminal.usage,
+      };
+    case "max_turns":
+      return {
+        status: "failed",
+        summary: `Job execution reached ${terminal.maxTurns} turns`,
+        contentAssets: [],
+        usage: terminal.usage,
+      };
+    case "aborted":
+      return {
+        status: "failed",
+        summary: "Job execution was aborted",
+        contentAssets: [],
+        usage: terminal.usage,
+      };
+    case "error":
+      return {
+        status: "failed",
+        summary: terminal.error.message,
+        contentAssets: [],
+        usage: terminal.usage,
+      };
+    default:
+      return unhandledDurableJobKernelTerminal(terminal);
   }
 }
 
@@ -160,28 +205,10 @@ export function createAgentJobRuntimePort(
             }
             const outcome = await settled;
             if (!outcome.ok) throw outcome.error;
-            const agentResult = outcome.result.agentResult;
-            const usage = agentResult.usage;
             completed = true;
-            if (agentResult.reason === "completed") {
-              return {
-                status: "completed",
-                summary: extractText(agentResult.message),
-                contentAssets: [],
-                usage,
-              };
-            }
-            return {
-              status: "failed",
-              summary:
-                agentResult.reason === "error"
-                  ? agentResult.error.message
-                  : agentResult.reason === "aborted"
-                    ? "Job execution was aborted"
-                    : `Job execution reached ${agentResult.maxTurns} turns`,
-              contentAssets: [],
-              usage,
-            };
+            return projectKernelTerminalToDurableJobOutcome(
+              outcome.result.terminal,
+            );
           } catch (error) {
             primaryFailure = true;
             throw error;

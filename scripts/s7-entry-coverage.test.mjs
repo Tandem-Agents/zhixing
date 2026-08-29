@@ -17,6 +17,7 @@ import {
   inspectDeviceLifecycleAssembly,
   inspectKernelRunEnvelopeOwnership,
   inspectKernelRunEventOwnership,
+  inspectKernelTerminalOwnership,
   inspectLocalConversationOwnerIsolation,
   inspectManagedHostAssembly,
   inspectPlannedAnchorTransferAssembly,
@@ -2485,6 +2486,95 @@ test("Kernel run events have one finite owner and explicit two-sided projections
       (text) => `${text}\nexport { type KernelRunEvent } from "./runtime/index.js";`,
     )).join("\n"),
     /leaked through the orchestrator package root/,
+  );
+});
+
+test("Kernel terminals have one finite owner, zero-copy artifact transfer and three product projections", async () => {
+  const paths = [
+    "packages/orchestrator/src/runtime/kernel-terminal.ts",
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+    "packages/orchestrator/src/runtime/index.ts",
+    "packages/orchestrator/src/index.ts",
+    "packages/runtime-host/src/session-adapter.ts",
+    "packages/cli/src/serve/ephemeral-executor.ts",
+    "packages/cli/src/serve/agent-job-runtime.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectKernelTerminalOwnership(records), []);
+  assert.match(
+    inspectKernelTerminalOwnership(mutate(
+      "packages/orchestrator/src/runtime/kernel-terminal.ts",
+      (text) => text.replace(
+        "      readonly exitDelayMs?: number;\n",
+        "",
+      ),
+    )).join("\n"),
+    /variant or field exact-set drifted/,
+  );
+  assert.match(
+    inspectKernelTerminalOwnership(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => text.replace(
+        "projectAgentResultToKernelTerminal(value)",
+        "value",
+      ),
+    )).join("\n"),
+    /Loop to Kernel Terminal boundary is bypassed/,
+  );
+  assert.match(
+    inspectKernelTerminalOwnership(mutate(
+      "packages/orchestrator/src/runtime/kernel-terminal.ts",
+      (text) => text.replace(
+        "artifacts: Object.freeze({ ...artifacts }),",
+        "artifacts: cloneAndFreeze(artifacts),",
+      ),
+    )).join("\n"),
+    /without deep cloning/,
+  );
+  assert.match(
+    inspectKernelTerminalOwnership(mutate(
+      "packages/runtime-host/src/session-adapter.ts",
+      (text) => text.replace('    case "max_turns":', '    case "turn_limit":'),
+    )).join("\n"),
+    /product projection is not explicit and exhaustive/,
+  );
+  assert.match(
+    inspectKernelTerminalOwnership(mutate(
+      "packages/runtime-host/src/session-adapter.ts",
+      (text) => text.replace(
+        "newMessages: [...artifacts.newMessages]",
+        "newMessages: artifacts.newMessages.map((message) => structuredClone(message))",
+      ),
+    )).join("\n"),
+    /repeats the Kernel artifact object graph/,
+  );
+  assert.match(
+    inspectKernelTerminalOwnership(mutate(
+      "packages/cli/src/serve/ephemeral-executor.ts",
+      (text) => text.replace("  assertKernelTerminal(terminal);", ""),
+    )).join("\n"),
+    /product projection is not explicit and exhaustive/,
+  );
+  assert.match(
+    inspectKernelTerminalOwnership(mutate(
+      "packages/cli/src/serve/agent-job-runtime.ts",
+      (text) => `${text}\ntype KernelTerminal = { reason: string };`,
+    )).join("\n"),
+    /second owner/,
+  );
+  assert.match(
+    inspectKernelTerminalOwnership(mutate(
+      "packages/orchestrator/src/index.ts",
+      (text) => `${text}\nexport { type KernelTerminal } from "./runtime/index.js";`,
+    )).join("\n"),
+    /leaked through the package root/,
   );
 });
 

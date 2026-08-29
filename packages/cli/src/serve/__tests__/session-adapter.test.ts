@@ -13,6 +13,7 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  AgentError,
   ConfirmationBroker,
   getAbortReason,
   type AbortReason,
@@ -30,6 +31,7 @@ import type {
   AgentRuntime,
   KernelRunEnvelope,
   KernelRunEvent,
+  KernelRunCompletion,
 } from "@zhixing/orchestrator/runtime";
 
 const KERNEL_EVENT_EXACT_SET: readonly KernelRunEvent[] = [
@@ -103,7 +105,7 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
       confirmations: [],
     }),
     calibrationFactor: 1,
-    async run(envelope: KernelRunEnvelope): Promise<RunResult> {
+    async run(envelope: KernelRunEnvelope): Promise<KernelRunCompletion> {
       behavior.capture?.(envelope);
       if (behavior.throwError) {
         throw new Error(behavior.throwError);
@@ -154,36 +156,38 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
 function buildAbortedResult(
   envelope: KernelRunEnvelope,
   abortReason: AbortReason | undefined,
-): RunResult {
+): KernelRunCompletion {
   return {
-    agentResult: {
+    terminal: {
       reason: "aborted",
       abortReason,
       usage: { inputTokens: 0, outputTokens: 0 },
     },
-    runRecord: {
-      timestamp: new Date().toISOString(),
-      messages: [
-        envelope.modelInput.messages[envelope.modelInput.messages.length - 1] ??
-          ({ role: "user", content: [] } as Message),
-        { role: "assistant", content: [] } as Message,
-      ],
-      usage: { inputTokens: 0, outputTokens: 0 },
+    artifacts: {
+      runRecord: {
+        timestamp: new Date().toISOString(),
+        messages: [
+          envelope.modelInput.messages[envelope.modelInput.messages.length - 1] ??
+            ({ role: "user", content: [] } as Message),
+          { role: "assistant", content: [] } as Message,
+        ],
+        usage: { inputTokens: 0, outputTokens: 0 },
+      },
+      newMessages: [],
+      durationMs: 1,
     },
-    newMessages: [],
-    durationMs: 1,
   };
 }
 
 function buildResultByReason(
   envelope: KernelRunEnvelope,
   reason: AgentResult["reason"],
-): RunResult {
+): KernelRunCompletion {
   const assistantMsg: Message = {
     role: "assistant",
     content: [{ type: "text", text: "done" }],
   };
-  const result: AgentResult =
+  const terminal: KernelRunCompletion["terminal"] =
     reason === "completed"
       ? {
           reason: "completed",
@@ -196,7 +200,12 @@ function buildResultByReason(
           ? { reason: "aborted", usage: { inputTokens: 0, outputTokens: 0 } }
           : {
               reason: "error",
-              error: Object.assign(new Error("agent error"), { name: "AgentError" }) as unknown as AgentResult & { reason: "error" } extends infer T ? T extends { error: infer E } ? E : never : never,
+              error: {
+                name: "AgentError",
+                message: "agent error",
+                type: "unknown",
+                recoverable: false,
+              },
               usage: { inputTokens: 0, outputTokens: 0 },
             };
 
@@ -204,20 +213,22 @@ function buildResultByReason(
     reason === "completed" ? [assistantMsg] : [];
 
   return {
-    agentResult: result,
-    runRecord: {
-      timestamp: new Date().toISOString(),
-      messages: [
-        envelope.modelInput.messages[envelope.modelInput.messages.length - 1] ??
-          ({ role: "user", content: [] } as Message),
-        reason === "completed"
-          ? assistantMsg
-          : ({ role: "assistant", content: [] } as Message),
-      ],
-      usage: { inputTokens: 1, outputTokens: 1 },
+    terminal,
+    artifacts: {
+      runRecord: {
+        timestamp: new Date().toISOString(),
+        messages: [
+          envelope.modelInput.messages[envelope.modelInput.messages.length - 1] ??
+            ({ role: "user", content: [] } as Message),
+          reason === "completed"
+            ? assistantMsg
+            : ({ role: "assistant", content: [] } as Message),
+        ],
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+      newMessages,
+      durationMs: 10,
     },
-    newMessages,
-    durationMs: 10,
   };
 }
 
@@ -288,6 +299,99 @@ describe("createOwnerRuntimeAdapter", () => {
     await expect(runtime.run([um("hello")]).next()).rejects.toThrow(
       "Incomplete AgentYield variant",
     );
+  });
+
+  it.each(["completed", "max_turns", "aborted", "error"] as const)(
+    "explicitly projects the %s Kernel terminal into the Conversation RunResult",
+    async (reason) => {
+      const runtime = createOwnerRuntimeAdapter(
+        `terminal-${reason}`,
+        createMockAgentRuntime({ reason }),
+      );
+      const run = runtime.run([um("hello")]);
+      let result: RunResult | undefined;
+      while (true) {
+        const next = await run.next();
+        if (next.done) {
+          result = next.value;
+          break;
+        }
+      }
+
+      expect(result!.agentResult.reason).toBe(reason);
+      expect(result!.runRecord.messages[0]).toEqual(um("hello"));
+      if (result!.agentResult.reason === "error") {
+        expect(result!.agentResult.error).toBeInstanceOf(AgentError);
+        expect(result!.agentResult.error).toMatchObject({
+          name: "AgentError",
+          message: "agent error",
+          type: "unknown",
+          recoverable: false,
+        });
+      }
+    },
+  );
+
+  it("projects evidence, window change, control proposal and diagnostics without recomputing them", async () => {
+    const assistant = {
+      role: "assistant" as const,
+      content: [{ type: "text" as const, text: "done" }],
+    };
+    const terminalMessage = structuredClone(assistant);
+    const terminalUsage = { inputTokens: 2, outputTokens: 3 };
+    const runRecord = {
+      timestamp: "2026-08-29T00:00:00.000Z",
+      messages: [um("hello"), assistant],
+    };
+    const newMessages = [assistant];
+    const windowCompact = {
+      summary: "summary",
+      pairsCompacted: 1,
+      tokensBefore: 10,
+      tokensAfter: 4,
+    };
+    const pendingPostTurnControl = { intent: { kind: "exit" as const } };
+    const agent = Object.assign({} as AgentRuntime, {
+      run: async (): Promise<KernelRunCompletion> => ({
+        terminal: {
+          reason: "completed",
+          message: terminalMessage,
+          usage: terminalUsage,
+        },
+        artifacts: {
+          runRecord,
+          newMessages,
+          durationMs: 17,
+          windowCompact,
+          pendingPostTurnControl,
+        },
+      }),
+    });
+    const run = createOwnerRuntimeAdapter("artifacts", agent).run([um("hello")]);
+    const next = await run.next();
+
+    expect(next).toMatchObject({
+      done: true,
+      value: {
+        runRecord: { timestamp: "2026-08-29T00:00:00.000Z" },
+        newMessages: [assistant],
+        durationMs: 17,
+        windowCompact: { summary: "summary", pairsCompacted: 1 },
+        pendingPostTurnControl: { intent: { kind: "exit" } },
+      },
+    });
+    if (!next.done) throw new Error("expected completed run");
+    expect(next.value.agentResult.reason).toBe("completed");
+    if (next.value.agentResult.reason !== "completed") {
+      throw new Error("expected completed result");
+    }
+    expect(next.value.agentResult.message).toBe(terminalMessage);
+    expect(next.value.agentResult.usage).toBe(terminalUsage);
+    expect(next.value.runRecord).toBe(runRecord);
+    expect(next.value.newMessages).not.toBe(newMessages);
+    expect(next.value.newMessages[0]).toBe(assistant);
+    expect(next.value.windowCompact).toBe(windowCompact);
+    expect(next.value.pendingPostTurnControl).toBe(pendingPostTurnControl);
   });
 
   it("纯执行体透传契约:messages 原样、conversationId=sessionId、turnIndex/source 透传", async () => {

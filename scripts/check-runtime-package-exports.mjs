@@ -160,6 +160,14 @@ if (
   failures.push("orchestrator-kernel-run-event:invalid-runtime-boundary");
 }
 if (
+  typeof orchestratorRuntime.assertKernelTerminal !== "function" ||
+  typeof orchestratorRuntime.projectAgentResultToKernelTerminal !== "function" ||
+  "assertKernelTerminal" in orchestratorRoot ||
+  "projectAgentResultToKernelTerminal" in orchestratorRoot
+) {
+  failures.push("orchestrator-kernel-terminal:invalid-runtime-boundary");
+}
+if (
   typeof rpcSkillCatalogClient.SkillCatalogRpcClient !== "function" ||
   "SkillCatalogRpcClient" in rpcRoot
 ) {
@@ -331,6 +339,19 @@ if (
   !orchestratorRuntimeDeclarations.includes("assertKernelRunEvent")
 ) {
   failures.push("orchestrator-kernel-run-event:invalid-declaration-boundary");
+}
+if (
+  orchestratorRootDeclarations.includes("KernelTerminal") ||
+  orchestratorRootDeclarations.includes("KernelRunCompletion") ||
+  orchestratorRootDeclarations.includes("assertKernelTerminal") ||
+  orchestratorRootDeclarations.includes("projectAgentResultToKernelTerminal") ||
+  /\bRunResult\b/u.test(orchestratorRuntimeDeclarations) ||
+  !orchestratorRuntimeDeclarations.includes("KernelTerminal") ||
+  !orchestratorRuntimeDeclarations.includes("KernelRunCompletion") ||
+  !orchestratorRuntimeDeclarations.includes("assertKernelTerminal") ||
+  !orchestratorRuntimeDeclarations.includes("projectAgentResultToKernelTerminal")
+) {
+  failures.push("orchestrator-kernel-terminal:invalid-declaration-boundary");
 }
 for (const name of runtimeHostLegacyNames) {
   if (

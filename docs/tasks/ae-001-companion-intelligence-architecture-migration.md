@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A4-02 已由协调者独立复核；下一检查点为 Kernel Terminal 合同<br>
+> 当前检查点：A4-03 已通过协调者独立复核，等待提交；A4 仍未完成<br>
 > 完成度：4/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `0ba58736`；A0～A3 与 A4-01 已由协调者独立复核并提交，A1、A2、A3 阶段退出门成立 |
+| 已接受基线 | `4a99495d`；A0～A3、A4-01 与 A4-02 已由协调者独立复核并提交，A1、A2、A3 阶段退出门成立 |
 | 当前 A 项 | A4：封闭 Intelligence Kernel 合同及其生产边界 |
-| 活跃工作包 | 无；A4-02 已由协调者独立复核，唯一八变体 Event owner、Loop → Kernel → 三类产品消费面的两侧显式投影、旧 `onYield` 直通退场及导出边界均成立 |
-| 下一责任链 | 单独建立 Kernel Terminal 合同，拆开 Kernel 运行终态与当前 `RunResult` 中 Conversation/持久化消费输入；不在本包迁移 Workscene/Schedule 装配、其他公共成员或进入 A5 |
+| 活跃工作包 | A4-03 已通过协调者独立复核，等待纳入本地提交；四类终态、五项非终态产物、三类生产结果投影、零深拷贝所有权交付与旧 `RunResult/AgentResult` Kernel 直通已在 `A4-03-kernel-run-terminal-v1` 中闭合，A4 保持未完成 |
+| 下一责任链 | A4-03 提交后，移除 `AgentRuntime` 对 `SecurityPipeline` 与权限存储实现对象的公共暴露，以现有有限安全查询、确认和效果端口保持行为等价；不同时处理工作区信息、其他公共成员、RuntimeHost 产品装配或 Kernel Conformance |
 | 打开的单向桥 | 无；Skill 管理、保存、admission、load/usage、Kernel 与 Executor 投影均只经 `@zhixing/core/skills/catalog` 及既有 Authority/CAS/assignment Correctness 端口成立，旧 writable Store 不再承担正式应用行为 |
-| 已失效证据 | 无当前未恢复证据。A4-02 将 A4-01 observation 子合同从 core `AgentYield` callback 收口为 `KernelRunEvent` callback；同一 Envelope、三个 production binding 与不可变 capture 已由本包直接测试和 S7 重新证明，`A4-01-kernel-run-envelope-v1` 其余五分区、调用方与产品语义未变；A3/A2 证据输入未变 |
+| 已失效证据 | 无当前未恢复证据。A4-03 将 A4-01 completion 子合同从 core `RunResult/AgentResult` 收口为 `KernelRunCompletion { terminal, artifacts }`；同一 Envelope、A4-02 Event、三个 production binding、Conversation 下游 `RunResult` 与公开产品语义均由本包直接测试和 S7 重新证明，A4-01/A4-02 其余证据及 A3/A2 输入未变 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1542,6 +1542,31 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 类型、构建与导出：正确使用各 workspace 的 TypeScript 后，orchestrator、runtime-host、CLI 三包 typecheck 均通过；此前一次根级 `pnpm exec tsc` 解析到仓库旧 TypeScript 4.3.4 而无法读取 node24 tsconfig，属于非 canonical 调用归因，未用重复全测掩盖。随后依赖顺序完成 orchestrator build、runtime-host build 与 `pnpm cli:build`；`pnpm runtime:package-exports` 证明 runtime subpath 有 runtime guard/declaration、orchestrator 根无 Kernel Event 泄漏；最窄 Biome、三个门禁脚本 `node --check` 与 `git diff --check` 均通过。
 - 失效、遗留与状态：若八变体/字段、Loop producer、Envelope observation、任一三类 projection、协议带外边界、runtime/root exports、S7 inspector/mutation 或对应测试发生变化，恢复本证据并只重验该闭包。Kernel Terminal、`RunResult` 收窄、Workscene/Schedule 装配及其他 AgentRuntime 公共成员均未迁移，因此 A4 与完成度继续为 `[ ]` / `4/8`；下一检查点只能在协调者接受本证据后单独处理 Kernel Terminal。交接类型为完成、等待协调者独立复核；索引为空，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：在同一未修改工作区反查 `KernelRunEvent` 声明、Loop producer、Envelope observation、三类生产消费面、root/runtime export 与旧 `observation.onYield` 残余；确认八变体 owner 唯一、两侧均为逐变体 fresh-value 投影、带外协议投影未混入、宽根未泄漏且旧直通为零。独立重跑 orchestrator/CLI 6 个直接文件 118/118、orchestrator/runtime-host/CLI 正式构建、runtime package exports、canonical S7 24/24 与 registry golden，全部通过；接受 `A4-02-kernel-run-event-v1`。A4 继续为 `[ ]`，下一责任链只处理 Kernel Terminal。
+
+### A4-03：建立唯一 Kernel Terminal 与完成结果边界
+
+- 派发基线：`HEAD 4a99495d48a08f193bdb8c4fc978aeedfa180779 + task-doc:A4-03-dispatch`。派发文本中的完整 hash `4a99495d13f47381941030416d35f0fcce0c6172` 不是当前仓库有效对象，短前缀 `4a99495d` 唯一解析到本记录的实际 HEAD；A4-02 已由协调者独立复核并纳入提交，进场索引为空且工作区只有协调者的本文台账差异。
+- 唯一架构结果：由 `@zhixing/orchestrator/runtime` 拥有有限、只读、可穷尽的 Kernel Terminal 合同，并让 `AgentRuntime.run` 的完成结果明确区分 Kernel 运行终态与当前 Conversation/持久化消费所需的候选、证据、窗口变化、控制提议和诊断；Kernel 公共签名不再直接返回 core `RunResult/AgentResult` 混合合同。
+- 生产闭包：覆盖 `completed / max_turns / aborted / error` 四种当前终态及其全部现有字段；Loop/internal completion 必须显式投影为 Kernel Terminal，runtime-host conversation、ephemeral、durable job 三类直接生产消费者再显式投影到各自既有产品合同或结果。`runRecord`、`windowCompact`、`newMessages`、`durationMs` 与 `pendingPostTurnControl` 必须保持现有含义和消费次序，但不能被 Terminal 冒充产品事实，也不能因拆分丢失、重复计算或变成第二权威。
+- 行为保护：保持 completed message、usage、max-turns、abort reason/exit delay、结构化 AgentError、run record、compact、控制提议、诊断、Conversation commit 条件、ephemeral 输出/错误和 durable job summary/status 的现有行为；异常抛出与正常 `error` terminal 继续严格区分。Owner/RPC/Server/Channel 的公开结果和 wire 不得漂移。
+- 旧路径与门禁：删除 `AgentRuntime.run`、Envelope 相邻类型和三个直接消费者对 core `RunResult/AgentResult` 的 Kernel 级直通、别名、强制断言、镜像 union 与第二 terminal owner；Kernel 合同仅从 runtime 窄入口公开，宽根不得新增泄漏。结构门禁必须识别漏终态/字段、直通回流、第二 owner、产品事实误并入 Terminal 和三消费面缺少投影。
+- 保护与直接证据：逐终态证明 internal → Kernel → conversation/ephemeral/durable job 字段与语义等价，特别覆盖 error class/wire 保真、abort/max-turns、Conversation 仅 completed 提交、持久化失败不改运行终态、窗口/控制提议与诊断不丢失；只运行受影响的 orchestrator、runtime-host、CLI/owner/RPC 最窄测试、必要 typecheck/build、S7 与 package exports，不重复 Event/Envelope 或根级全量验证。
+- 明确不做：不迁移 Conversation 领域或其 Authority/commit 状态机，不改变 core 下游公开 `RunResult` 合同，除非删除 Kernel 直通所需的最窄中性调整；不迁移 Workscene/Schedule 装配，不收窄其他 AgentRuntime 查询/管理成员，不建立通用 Outcome 框架，不进入 A5，不新增产品能力。
+- 完成与止损：只有唯一四终态 owner、Kernel 完成结果的责任分区、三类产品结果投影、旧混合合同直通退场和直接证据同时成立，工作区可构建且没有双终态/双结果真相，才算本包完成。若约四小时仍未闭合、出现 Conversation 状态机或公开 RPC/wire 扩面、两个以上独立未知、连续两条实质路径失败或无法保持单一终态真相，停在可构建可运行的安全检查点并报告唯一未闭合链；完成后停止等待协调者复核，不执行 Git 写操作。
+
+执行记录（证据 ID：`A4-03-kernel-run-terminal-v1`）：
+
+- 责任迁移：新增 runtime 窄入口唯一拥有的 `KernelTerminal`，四分支 exact-set 为 `completed(message,usage) / max_turns(maxTurns,usage) / aborted(usage,abortReason?,exitDelayMs?) / error(error{name,message,type,recoverable},usage)`；Agent Loop 的 core `AgentResult` 只能经严格、逐分支、fresh-value 投影进入该合同，未知、缺字段或扩字段输入 fail closed。`AgentRuntime.run` 现在只返回浅冻结的 `KernelRunCompletion { terminal, artifacts }`，其中 artifacts exact-set 为 `runRecord / windowCompact? / newMessages / durationMs / pendingPostTurnControl?`，明确只是候选、证据、窗口变化、控制提议和诊断；`runRecord` 内既有运行记录不被提升为第二终态或产品权威。
+- 三类产品投影与行为保护：runtime-host conversation adapter、CLI ephemeral executor、durable agent-job runtime 各自逐分支穷尽投影，不共享 core `AgentResult` alias、不用强制断言或原对象直通。Conversation 重新构造既有 core `RunResult`，`error` 分支恢复真实 `AgentError` class 及 `name/message/type/recoverable`，completed-only commit、持久化失败不改已提交运行终态和公开 wire 保持不变；ephemeral 的输出/取消/错误与 durable job 的 status/summary/usage 保持迁移前行为。正常 `error` terminal 与 `AgentRuntime.run` 自身 reject 仍是两条不同终态链。
+- 旧路、导出与结构门禁：`AgentRuntime.run`、lifecycle after-run context 和三个直接消费者不再把 core `RunResult/AgentResult` 当作 Kernel 公共合同；新合同只由 `@zhixing/orchestrator/runtime` 窄入口导出，orchestrator 宽根无新增泄漏。S7 owner inspector 与反向 mutation 冻结四终态/五 artifacts、唯一声明与 Loop producer、三消费面逐分支投影、runtime-only export、禁止 `as`/直通、禁止把产品产物并入 Terminal，并机械拒绝恢复 completion 整图深拷贝或消费侧逐消息复制；恢复第二 owner、漏分支、旧混合合同或无依据复制会失败。
+- 直接证据：Kernel terminal 单测 1 文件 3/3，覆盖四分支字段、终态必要快照深冻结、调用方后续修改不能破坏 completed message/usage、artifacts 零深拷贝与未知/不完整拒绝；`create-agent-runtime` 初次 71 项中 68 项通过，唯一 3 项失败是迁移后测试仍从错误分区读取 `forceCompact`，修正测试读取后只重跑该失效闭包 3/3，因此当前 71 项均有本轮有效证据且没有重复全文件。conversation/ephemeral/durable 三消费面为 3 文件 53/53，另有 conversation window 1 文件 3/3；Conversation 正常 durable commit 与 transcript projection failure 两项定向产品证据 2/2，证明完成结果投影未改变 commit/commit-failure 终态。canonical `pnpm s7:lint` 为 25/25 且 registry golden 通过。
+- 类型、构建与静态边界：orchestrator、runtime-host、CLI 三包最窄 typecheck 均通过；依赖顺序的 orchestrator build、runtime-host build 与 `pnpm cli:build` 均通过；`pnpm runtime:package-exports` 通过并证明 runtime 窄入口存在、宽根无 Terminal/Completion 泄漏；本包路径的最窄 Biome 已通过。没有运行根级 lint/test/build、package check、制品验收或与本包无关的回归。
+- 失效、遗留与状态：若四终态/字段、五 artifacts、Loop completion producer、`AgentRuntime.run` 返回合同、lifecycle after-run、任一三类产品投影、Conversation core `RunResult` 重构、runtime/root exports、S7 inspector/mutation 或上述直接测试变化，恢复本证据并只重验对应闭包。Envelope、Event、Conversation/Authority 状态机、Workscene/Schedule 装配和其他 AgentRuntime 查询/管理成员未迁移；A4 与完成度继续为 `[ ]` / `4/8`。交接类型为完成、等待协调者独立复核；无本包内遗留，下一责任链仍由协调者从 AgentRuntime 公共查询/管理面、RuntimeHost 产品特有装配或 Kernel Conformance 中选择，不进入 A5；未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+- 协调复核纠正（完成结果对象所有权）：独立复核作废初次实现“`createKernelRunCompletion` 对 terminal 与完整 artifacts 执行 `structuredClone + deepFreeze`、Conversation 再逐项深拷贝”的性能结论。生产所有权反查确认 `runRecord`、`newMessages`、`windowCompact` 与 `pendingPostTurnControl` 均由本次 Kernel run 新建并在 generator terminal 后停止写入；最终实现只在 core internal `AgentResult → KernelTerminal` 责任边界对 completed message/usage、abort reason 做一次 fresh clone + freeze，并把 error 复制为无 core class 的只读字段。completion 保留同一 terminal identity，只复制并冻结五引用外壳，绝不遍历或复制 artifacts 对象图。
+- 纠正后的产品交付：Conversation 继续创建新的 core `AgentResult` 外壳并仅为旧 `RunResult.newMessages: Message[]` 的可变容器做一次引用级浅拷贝；`runRecord`、消息/工具结果/思考/图片正文、window compact 与控制提议均按单向所有权直接交付，`error` 分支只新建产品侧所需的真实 `AgentError`。ephemeral 不消费 artifacts，durable job 直接消费只读 usage；两者不再为未使用 artifacts 付出复制成本，也不存在同一 Conversation 结果的重复深拷贝。
+- 纠正直接证据：更新后的 Kernel 单测 3/3 直接 spy 证明 completion 边界没有调用 `structuredClone`、terminal 与四类大 artifacts 保持正确 identity，同时源 `AgentResult` 的 message/usage 后续修改不能破坏已交付终态。`create-agent-runtime` 只重验对象图隔离和 lifecycle completion 2/2；runtime-host 上游重建后，Conversation 四终态与 artifacts 交付定向证据 6/6，durable job 13/13。第一次 Conversation 定向运行使用了未重建的 runtime-host dist，唯一 1 项 identity 断言失败，按验证手册归因为旧产物后先完成 orchestrator/runtime-host 构建再重取并通过，不作为产品失败。新增 S7 mutation 分别恢复 completion 深拷贝与 Conversation 逐消息 clone，均被门禁拒绝；canonical S7 25/25 与 golden、三包 typecheck、依赖顺序三包 build、runtime package exports 均通过。A4-03 其余架构与行为证据未失效，仍等待协调者独立复核。
+- 协调者独立验收：反查完成结果的生产所有权、生命周期观察顺序和三个直接消费面，确认 Kernel 只对跨责任边界的有限终态做必要快照，五项 artifacts 由 run 创建后单向转交，Conversation 只浅拷贝旧合同要求的 `newMessages` 容器，不存在未消费大对象复制或第二结果真相。纠正后的同一工作区独立重跑 Kernel terminal 3/3、runtime 对象图与 lifecycle 2/2、Conversation 四终态及 artifacts 6/6，依次重建 orchestrator 与 runtime-host；canonical S7 25/25、registry golden、fresh dist 上的 runtime package exports 和 `git diff --check` 均通过。协调者接受 `A4-03-kernel-run-terminal-v1`；A4 继续为 `[ ]`，下一责任链只处理安全实现对象退出 AgentRuntime 公共面。
 
 ## 十、用户提示词
 

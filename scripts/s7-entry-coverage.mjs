@@ -1137,8 +1137,8 @@ export function inspectKernelRunEnvelopeOwnership(records) {
     failures.push("Kernel run input has a second owner or the retired RunParams contract remains");
   }
   if (
-    !runtimeSource.includes("run: (envelope: KernelRunEnvelope) => Promise<RunResult>") ||
-    !runtimeSource.includes("async run(input: KernelRunEnvelope): Promise<RunResult>") ||
+    !runtimeSource.includes("run: (envelope: KernelRunEnvelope) => Promise<KernelRunCompletion>") ||
+    !runtimeSource.includes("async run(input: KernelRunEnvelope): Promise<KernelRunCompletion>") ||
     !runtimeSource.includes("const envelope = captureKernelRunEnvelope(input);") ||
     runtimeSource.includes("runV2") ||
     !runtimeIndex.includes('export type { KernelRunEnvelope } from "./kernel-run-envelope.js";')
@@ -1405,6 +1405,277 @@ export function inspectKernelRunEventOwnership(records) {
   return failures;
 }
 
+/** A4 Kernel runs have one finite Terminal owner and three explicit product projections. */
+export function inspectKernelTerminalOwnership(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const text = byPath.get(relative);
+    if (text === undefined) failures.push(`${relative}: Kernel Terminal source is missing`);
+    return text ?? "";
+  };
+  const terminalPath = "packages/orchestrator/src/runtime/kernel-terminal.ts";
+  const terminalSource = required(terminalPath);
+  const runtimeSource = required(
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+  );
+  const runtimeIndex = required("packages/orchestrator/src/runtime/index.ts");
+  const orchestratorRootIndex = required("packages/orchestrator/src/index.ts");
+  const consumerSpecs = [
+    {
+      relative: "packages/runtime-host/src/session-adapter.ts",
+      projector: "projectKernelTerminalToConversationAgentResult",
+      completionProjector: "projectKernelCompletionToConversationRunResult",
+    },
+    {
+      relative: "packages/cli/src/serve/ephemeral-executor.ts",
+      projector: "projectKernelTerminalToEphemeralResult",
+    },
+    {
+      relative: "packages/cli/src/serve/agent-job-runtime.ts",
+      projector: "projectKernelTerminalToDurableJobOutcome",
+    },
+  ];
+  const expectedVariants = {
+    completed: ["reason", "message", "usage"],
+    max_turns: ["reason", "maxTurns", "usage"],
+    aborted: ["reason", "usage", "abortReason", "exitDelayMs"],
+    error: ["reason", "error", "usage"],
+  };
+  const terminalFile = ts.createSourceFile(
+    terminalPath,
+    terminalSource,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const aliases = terminalFile.statements.filter(
+    (statement) =>
+      ts.isTypeAliasDeclaration(statement) &&
+      statement.name.text === "KernelTerminal",
+  );
+  const alias = aliases[0];
+  if (aliases.length !== 1 || !alias || !ts.isUnionTypeNode(alias.type)) {
+    failures.push("Kernel Terminal lacks one finite union owner");
+  } else {
+    const observed = new Map();
+    for (const member of alias.type.types) {
+      if (!ts.isTypeLiteralNode(member)) {
+        failures.push("Kernel Terminal includes a non-literal variant");
+        continue;
+      }
+      const properties = member.members.filter(ts.isPropertySignature);
+      const reasonProperty = properties.find(
+        (property) => property.name.getText(terminalFile) === "reason",
+      );
+      const reasonType = reasonProperty?.type;
+      const identity =
+        reasonType &&
+        ts.isLiteralTypeNode(reasonType) &&
+        ts.isStringLiteral(reasonType.literal)
+          ? reasonType.literal.text
+          : undefined;
+      if (!identity || observed.has(identity)) {
+        failures.push("Kernel Terminal variant identity is missing or duplicated");
+        continue;
+      }
+      observed.set(
+        identity,
+        properties.map((property) => property.name.getText(terminalFile)),
+      );
+      if (
+        member.members.some(
+          (property) =>
+            !ts.isPropertySignature(property) ||
+            !property.modifiers?.some(
+              (modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword,
+            ),
+        )
+      ) {
+        failures.push(`Kernel Terminal variant is not readonly: ${identity}`);
+      }
+    }
+    if (
+      JSON.stringify([...observed]) !==
+      JSON.stringify(Object.entries(expectedVariants))
+    ) {
+      failures.push("Kernel Terminal variant or field exact-set drifted");
+    }
+  }
+
+  const interfaceFields = (name) => {
+    const declaration = terminalFile.statements.find(
+      (statement) =>
+        ts.isInterfaceDeclaration(statement) && statement.name.text === name,
+    );
+    if (!declaration) return undefined;
+    return declaration.members.filter(ts.isPropertySignature);
+  };
+  const artifacts = interfaceFields("KernelRunArtifacts");
+  const completion = interfaceFields("KernelRunCompletion");
+  if (
+    !artifacts ||
+    JSON.stringify(artifacts.map((field) => field.name.getText(terminalFile))) !==
+      JSON.stringify([
+        "runRecord",
+        "windowCompact",
+        "newMessages",
+        "durationMs",
+        "pendingPostTurnControl",
+      ]) ||
+    artifacts.some(
+      (field) =>
+        !field.modifiers?.some(
+          (modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword,
+        ),
+    ) ||
+    !completion ||
+    JSON.stringify(completion.map((field) => field.name.getText(terminalFile))) !==
+      JSON.stringify(["terminal", "artifacts"]) ||
+    completion.some(
+      (field) =>
+        field.questionToken ||
+        !field.modifiers?.some(
+          (modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword,
+        ),
+    )
+  ) {
+    failures.push("Kernel completion does not separate one terminal from the artifact exact-set");
+  }
+
+  const declarationOwners = records
+    .filter((record) => {
+      const file = ts.createSourceFile(
+        record.relative,
+        record.text,
+        ts.ScriptTarget.Latest,
+        true,
+        ts.ScriptKind.TS,
+      );
+      return file.statements.some(
+        (statement) =>
+          (ts.isInterfaceDeclaration(statement) ||
+            ts.isTypeAliasDeclaration(statement)) &&
+          statement.name.text === "KernelTerminal",
+      );
+    })
+    .map((record) => record.relative);
+  if (
+    declarationOwners.length !== 1 ||
+    declarationOwners[0] !== terminalPath ||
+    terminalSource.includes("type KernelTerminal = AgentResult")
+  ) {
+    failures.push("Kernel Terminal has a second owner or AgentResult alias");
+  }
+  if (
+    !terminalSource.includes("projectAgentResultToKernelTerminal(") ||
+    !runtimeSource.includes("projectAgentResultToKernelTerminal(value)") ||
+    !runtimeSource.includes("createKernelRunCompletion(") ||
+    runtimeSource.includes("Promise<RunResult>") ||
+    /return\s*\{\s*agentResult:/u.test(runtimeSource) ||
+    !runtimeIndex.includes("assertKernelTerminal,") ||
+    !runtimeIndex.includes("type KernelRunCompletion,") ||
+    !runtimeIndex.includes("type KernelTerminal,") ||
+    !runtimeIndex.includes('from "./kernel-terminal.js";')
+  ) {
+    failures.push("Agent Loop to Kernel Terminal boundary is bypassed or leaked");
+  }
+  const completionFactory = terminalFile.statements.find(
+    (statement) =>
+      ts.isFunctionDeclaration(statement) &&
+      statement.name?.text === "createKernelRunCompletion",
+  );
+  const completionFactorySource = completionFactory?.getText(terminalFile) ?? "";
+  if (
+    !completionFactory ||
+    !completionFactorySource.includes("terminal,") ||
+    !completionFactorySource.includes("artifacts: Object.freeze({ ...artifacts }),") ||
+    /(?:structuredClone|cloneAndFreeze|deepFreeze)\s*\(\s*(?:terminal|artifacts)\b/u.test(
+      completionFactorySource,
+    )
+  ) {
+    failures.push(
+      "Kernel completion must shallow-seal one transferred artifact graph without deep cloning",
+    );
+  }
+  if (
+    orchestratorRootIndex.includes("KernelTerminal") ||
+    orchestratorRootIndex.includes("KernelRunCompletion") ||
+    orchestratorRootIndex.includes("assertKernelTerminal") ||
+    orchestratorRootIndex.includes("RunResult") ||
+    orchestratorRootIndex.includes('export * from "./runtime/index.js"')
+  ) {
+    failures.push("Kernel Terminal or retired Kernel RunResult leaked through the package root");
+  }
+
+  for (const spec of consumerSpecs) {
+    const source = required(spec.relative);
+    const file = ts.createSourceFile(
+      spec.relative,
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const projector = file.statements.find(
+      (statement) =>
+        ts.isFunctionDeclaration(statement) &&
+        statement.name?.text === spec.projector,
+    );
+    const projectorSource = projector?.getText(file) ?? "";
+    const cases = [];
+    if (projector) {
+      const visit = (node) => {
+        if (ts.isCaseClause(node) && ts.isStringLiteral(node.expression)) {
+          cases.push(node.expression.text);
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(projector);
+    }
+    if (
+      !projector ||
+      JSON.stringify(cases) !== JSON.stringify(Object.keys(expectedVariants)) ||
+      !projectorSource.includes("assertKernelTerminal(terminal);") ||
+      /return\s+terminal\s*;/u.test(projectorSource) ||
+      /structuredClone\s*\(/u.test(projectorSource) ||
+      /\bas\s+(?:AgentResult|RunResult|KernelTerminal|KernelRunCompletion)\b/u.test(
+        projectorSource,
+      ) ||
+      source.includes("outcome.result.agentResult") ||
+      source.includes("runResult.agentResult")
+    ) {
+      failures.push(`${spec.relative}: Kernel Terminal product projection is not explicit and exhaustive`);
+    }
+    if (
+      spec.completionProjector &&
+      !source.includes(`function ${spec.completionProjector}(`)
+    ) {
+      failures.push(`${spec.relative}: Kernel completion artifacts lack a product projection`);
+    }
+    if (spec.completionProjector) {
+      const completionProjector = file.statements.find(
+        (statement) =>
+          ts.isFunctionDeclaration(statement) &&
+          statement.name?.text === spec.completionProjector,
+      );
+      const completionProjectorSource = completionProjector?.getText(file) ?? "";
+      if (
+        !completionProjector ||
+        /structuredClone\s*\(/u.test(completionProjectorSource) ||
+        !completionProjectorSource.includes(
+          "newMessages: [...artifacts.newMessages]",
+        )
+      ) {
+        failures.push(
+          `${spec.relative}: product projection repeats the Kernel artifact object graph`,
+        );
+      }
+    }
+  }
+  return failures;
+}
+
 export async function validateS7Structure() {
   const files = await productionTypeScriptFiles(path.join(root, "packages"));
   const records = await Promise.all(files.map(async (absolute) => ({
@@ -1434,6 +1705,7 @@ export async function validateS7Structure() {
   failures.push(...inspectDeviceLifecycleAssembly(records));
   failures.push(...inspectKernelRunEnvelopeOwnership(records));
   failures.push(...inspectKernelRunEventOwnership(records));
+  failures.push(...inspectKernelTerminalOwnership(records));
   failures.push(...inspectSkillCatalogApplicationOwnership([
     ...records,
     {
