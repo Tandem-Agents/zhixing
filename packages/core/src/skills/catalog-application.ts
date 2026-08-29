@@ -16,8 +16,9 @@ import {
 import type { ContentThreat } from "./content-scan.js";
 import { SkillMutationConflictError } from "./global-state-adapter.js";
 import { skillNameToId } from "./id.js";
-import { getBuiltinSkill } from "./builtin.js";
+import { builtinIndexEntries, getBuiltinSkill } from "./builtin.js";
 import type { SkillCatalogEntry, SkillMode } from "./types.js";
+import { renderSkillIndex } from "./render.js";
 
 /** Skill-owned management query. Runtime and tool catalog reads use GlobalStatePort directly. */
 export type SkillCatalogQuery = { readonly kind: "list" };
@@ -56,6 +57,62 @@ export interface SkillCatalogCommandResult {
 export interface SkillCatalogApplication {
   query(query: SkillCatalogQuery): Promise<SkillCatalogView>;
   execute(command: SkillCatalogCommand): Promise<SkillCatalogCommandResult>;
+}
+
+const SKILL_CATALOG_KERNEL_TOP_N = 20;
+
+/** Raw, path-free catalog snapshot supplied by Correctness to the Skill domain. */
+export interface SkillCatalogKernelProjectionSource {
+  readCatalog(): Promise<{
+    readonly catalogRevision: number;
+    readonly entries: readonly SkillCatalogEntry[];
+  }>;
+}
+
+/** Immutable Skill capability projection consumed by the Intelligence Kernel. */
+export interface SkillCatalogKernelProjection {
+  readonly catalogRevision: number;
+  readonly content: string | null;
+}
+
+/** The Kernel asks only for its runtime mode and never interprets catalog entries. */
+export interface SkillCatalogKernelProjectionApplication {
+  project(mode: SkillMode): Promise<SkillCatalogKernelProjection>;
+}
+
+/**
+ * Skill-owned projection policy for Kernel prompt capabilities.
+ *
+ * With no source, the same policy produces the builtin-only startup projection.
+ * With a source, it owns mode filtering, disabled shadowing, the user top-N pool,
+ * builtin append rules and the final byte representation.
+ */
+export class SkillCatalogKernelProjectionApplicationService
+  implements SkillCatalogKernelProjectionApplication
+{
+  constructor(
+    private readonly source?: SkillCatalogKernelProjectionSource,
+  ) {}
+
+  async project(mode: SkillMode): Promise<SkillCatalogKernelProjection> {
+    if (mode !== "main" && mode !== "work") {
+      throw new TypeError("Skill capability projection mode is invalid");
+    }
+    const snapshot = this.source
+      ? await this.source.readCatalog()
+      : { catalogRevision: -1, entries: [] as const };
+    const userIds = new Set(snapshot.entries.map((entry) => entry.id));
+    const visibleUsers = snapshot.entries
+      .filter((entry) => entry.mode === mode && !entry.disabled)
+      .slice(0, SKILL_CATALOG_KERNEL_TOP_N);
+    return Object.freeze({
+      catalogRevision: snapshot.catalogRevision,
+      content: renderSkillIndex([
+        ...visibleUsers,
+        ...builtinIndexEntries(mode, userIds),
+      ]),
+    });
+  }
 }
 
 /** Skill-owned input for the save_skill create/update use case. */

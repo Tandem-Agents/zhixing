@@ -1139,6 +1139,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     skillIndex.includes("catalog-application") ||
     skillIndex.includes("SkillCatalogApplication") ||
     skillIndex.includes("SkillCatalogAdmissionApplication") ||
+    skillIndex.includes("SkillCatalogKernelProjectionApplication") ||
     skillIndex.includes("SkillCatalogLoadApplication") ||
     skillIndex.includes("SkillCatalogSaveApplication") ||
     skillIndex.includes("runSkillSavePipeline")
@@ -1182,6 +1183,31 @@ export function inspectSkillCatalogApplicationOwnership(records) {
 
   if (!application.includes("class SkillCatalogApplicationService")) {
     failures.push("Skill Catalog domain application service is missing");
+  }
+  const projectionStart = application.indexOf(
+    "export interface SkillCatalogKernelProjectionSource",
+  );
+  const projectionEnd = application.indexOf(
+    "/** Skill-owned input for the save_skill create/update use case.",
+  );
+  const projectionApplication = projectionStart >= 0 && projectionEnd > projectionStart
+    ? application.slice(projectionStart, projectionEnd)
+    : "";
+  if (
+    !projectionApplication.includes(
+      "class SkillCatalogKernelProjectionApplicationService",
+    ) ||
+    !projectionApplication.includes("interface SkillCatalogKernelProjectionSource") ||
+    !projectionApplication.includes("entry.mode === mode && !entry.disabled") ||
+    !projectionApplication.includes(".slice(0, SKILL_CATALOG_KERNEL_TOP_N)") ||
+    !projectionApplication.includes("builtinIndexEntries(mode, userIds)") ||
+    !projectionApplication.includes("content: renderSkillIndex([") ||
+    !projectionApplication.includes("return Object.freeze({") ||
+    !projectionApplication.includes("catalogRevision: snapshot.catalogRevision")
+  ) {
+    failures.push(
+      "Skill Catalog Kernel projection rules lack one immutable domain application owner",
+    );
   }
   if (
     !saveApplication.includes("class SkillCatalogSaveApplicationService") ||
@@ -1289,19 +1315,61 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   }
   for (const [relative, text] of [
     ["packages/orchestrator/src/runtime/assignment-skill-port.ts", assignmentSkillPort],
+    ["packages/orchestrator/src/runtime/create-agent-runtime.ts", agentRuntime],
     ["packages/tools-builtin/src/skill.ts", builtinSkill],
     ["packages/tools-builtin/src/factories.ts", builtinFactories],
   ]) {
     if (!text.includes('from "@zhixing/core/skills/catalog"')) {
-      failures.push(`${relative}: Skill save contract bypasses its domain subpath`);
+      failures.push(`${relative}: Skill application contract bypasses its domain subpath`);
     }
     for (const match of text.matchAll(
       /import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+["'](@zhixing\/core)["']/gu,
     )) {
-      if (/\bSkillCatalog(?:Save|Admission|Load)Application(?:Service)?\b/u.test(match[1])) {
+      if (/\bSkillCatalog(?:Save|Admission|Load|KernelProjection)Application(?:Service)?\b/u.test(match[1])) {
         failures.push(`${relative}: Skill application contract leaked back through core root import`);
       }
     }
+  }
+  if (
+    !assignmentSkillPort.includes(
+      "createAssignmentSkillProjectionApplication",
+    ) ||
+    !assignmentSkillPort.includes(
+      "new SkillCatalogKernelProjectionApplicationService({",
+    ) ||
+    !assignmentSkillPort.includes('kind: "skill-catalog"') ||
+    !assignmentSkillPort.includes("includeDisabled: true") ||
+    !assignmentSkillPort.includes('result.kind !== "skill-catalog"') ||
+    assignmentSkillPort.includes("renderAssignmentSkillIndex") ||
+    assignmentSkillPort.includes("renderSkillIndex") ||
+    assignmentSkillPort.includes("builtinIndexEntries") ||
+    assignmentSkillPort.includes("SKILL_INDEX_TOP_N") ||
+    assignmentSkillPort.includes("entry.mode === mode") ||
+    assignmentSkillPort.includes("entry.disabled")
+  ) {
+    failures.push(
+      "Orchestrator projection adapter interprets Skill fields or omits the raw catalog query",
+    );
+  }
+  if (
+    !agentRuntime.includes(
+      "new SkillCatalogKernelProjectionApplicationService()",
+    ) ||
+    !agentRuntime.includes(
+      "createAssignmentSkillProjectionApplication(",
+    ) ||
+    !agentRuntime.includes("entryInstanceEpoch === instanceEpoch") ||
+    !agentRuntime.includes("skillIndex.catalogRevision > skillCatalogRevision") ||
+    agentRuntime.includes("renderAssignmentSkillIndex") ||
+    agentRuntime.includes("renderSkillIndex") ||
+    agentRuntime.includes("builtinIndexEntries") ||
+    agentRuntime.includes("SKILL_INDEX_TOP_N") ||
+    agentRuntime.includes("entry.mode === skillMode") ||
+    agentRuntime.includes("entry.disabled")
+  ) {
+    failures.push(
+      "Agent runtime interprets Skill catalog fields or can regress the immutable projection",
+    );
   }
   if (
     assignmentSkillPort.includes("getBuiltinSkill") ||

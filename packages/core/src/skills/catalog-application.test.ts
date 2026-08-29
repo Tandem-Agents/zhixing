@@ -6,6 +6,7 @@ import type {
 import {
   SkillCatalogApplicationError,
   SkillCatalogApplicationService,
+  SkillCatalogKernelProjectionApplicationService,
   SkillCatalogLoadApplicationService,
   SkillCatalogSaveApplicationService,
   type SkillCatalogLoadCorrectnessPort,
@@ -14,6 +15,7 @@ import {
   type SkillCatalogSaveMutation,
   type SkillCatalogSaveOverlayRecord,
 } from "./catalog-application.js";
+import { builtinIndexEntries } from "./builtin.js";
 import { SkillMutationConflictError } from "./global-state-adapter.js";
 import { skillNameToId } from "./id.js";
 import type { SkillCatalogEntry } from "./types.js";
@@ -508,3 +510,99 @@ function loadHarness(input: {
     staged,
   };
 }
+
+describe("SkillCatalogKernelProjectionApplicationService", () => {
+  const header =
+    "## Available Skills\n" +
+    "To use a skill, call the `load_skill` tool with the id shown below. Descriptions are brief — load one for full instructions.";
+  const source = (
+    entries: readonly SkillCatalogEntry[],
+    catalogRevision = 7,
+  ) => ({
+    readCatalog: vi.fn(async () => ({ catalogRevision, entries })),
+  });
+  const projectionEntry = (
+    id: string,
+    overrides: Partial<SkillCatalogEntry> = {},
+  ): SkillCatalogEntry => ({
+    ...entry,
+    id,
+    name: id,
+    description: `description-${id}`,
+    disabled: false,
+    ...overrides,
+  });
+  const shadowAllBuiltins = (mode: "main" | "work") =>
+    builtinIndexEntries(mode, new Set()).map((builtin) =>
+      projectionEntry(builtin.id, {
+        description: `disabled-${builtin.id}`,
+        mode,
+        disabled: true,
+      })
+    );
+
+  it("produces one frozen builtin-only projection without exposing catalog entries", async () => {
+    const result = await new SkillCatalogKernelProjectionApplicationService()
+      .project("main");
+
+    expect(result.catalogRevision).toBe(-1);
+    expect(result.content).toContain("## Available Skills");
+    expect(result.content).toContain(skillNameToId("提炼技能"));
+    expect(Object.keys(result)).toEqual(["catalogRevision", "content"]);
+    expect(Object.isFrozen(result)).toBe(true);
+  });
+
+  it("owns mode filtering, disabled shadowing and exact rendered bytes", async () => {
+    const input = source([
+      projectionEntry("alpha", {
+        description: "Alpha instructions",
+        pinned: true,
+      }),
+      projectionEntry("work-only", {
+        description: "Work instructions",
+        mode: "work",
+      }),
+      ...shadowAllBuiltins("main"),
+    ], 11);
+    const result = await new SkillCatalogKernelProjectionApplicationService(input)
+      .project("main");
+
+    expect(input.readCatalog).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({
+      catalogRevision: 11,
+      content: `${header}\n- ★ **alpha**: Alpha instructions`,
+    });
+    expect(result.content).not.toContain("work-only");
+    expect(result.content).not.toContain(skillNameToId("提炼技能"));
+  });
+
+  it("keeps authority order, reserves top twenty for users, then appends builtins", async () => {
+    const users = Array.from({ length: 22 }, (_, index) =>
+      projectionEntry(`user-${String(index).padStart(2, "0")}`)
+    );
+    const result = await new SkillCatalogKernelProjectionApplicationService(
+      source(users, 12),
+    ).project("main");
+
+    expect(result.content).toContain("**user-00**");
+    expect(result.content).toContain("**user-19**");
+    expect(result.content).not.toContain("**user-20**");
+    expect(result.content!.indexOf("**user-00**")).toBeLessThan(
+      result.content!.indexOf("**user-19**"),
+    );
+    expect(result.content!.indexOf("**user-19**")).toBeLessThan(
+      result.content!.indexOf(`**${skillNameToId("提炼技能")}**`),
+    );
+  });
+
+  it("keeps an empty user catalog byte-equal to the builtin-only projection", async () => {
+    const builtinOnly = await new SkillCatalogKernelProjectionApplicationService()
+      .project("work");
+    const catalog = await new SkillCatalogKernelProjectionApplicationService(
+      source([], 13),
+    ).project("work");
+
+    expect(catalog.catalogRevision).toBe(13);
+    expect(catalog.content).toBe(builtinOnly.content);
+  });
+});

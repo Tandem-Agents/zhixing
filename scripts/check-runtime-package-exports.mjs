@@ -146,6 +146,7 @@ for (const name of [
   "SkillCatalogApplicationError",
   "SkillCatalogApplicationService",
   "SkillCatalogAdmissionApplicationService",
+  "SkillCatalogKernelProjectionApplicationService",
   "SkillCatalogLoadApplicationService",
   "SkillCatalogSaveApplicationService",
 ]) {
@@ -359,6 +360,7 @@ async function verifyCorePackageExports(failures) {
             ("SkillCatalogApplicationError" in exported ||
               "SkillCatalogApplicationService" in exported ||
               "SkillCatalogAdmissionApplicationService" in exported ||
+              "SkillCatalogKernelProjectionApplicationService" in exported ||
               "SkillCatalogLoadApplicationService" in exported ||
               "SkillCatalogSaveApplicationService" in exported)
           ) {
@@ -370,7 +372,7 @@ async function verifyCorePackageExports(failures) {
       } else if (subpath !== "./skills/catalog") {
         const declaration = await readFile(targetUrl, "utf8");
         if (
-          /SkillCatalog(?:Save|Admission|Load)?Application/u.test(declaration) ||
+          /SkillCatalog(?:Save|Admission|Load|KernelProjection)?Application/u.test(declaration) ||
           declaration.includes("catalog-application")
         ) {
           failures.push(`core-exports:${subpath}:skill-catalog-type-leak`);

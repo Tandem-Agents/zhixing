@@ -76,8 +76,6 @@ import {
   runAgentLoop,
   TurnContextInjector,
   TimeProvider,
-  renderSkillIndex,
-  builtinIndexEntries,
   type SkillMode,
   type Resettable,
   type RuntimeExecutionProfile,
@@ -88,7 +86,10 @@ import {
   type AgentLoopDeps,
 } from "@zhixing/core";
 import type { ArtifactStore } from "@zhixing/core/authority";
-import { SkillCatalogLoadApplicationService } from "@zhixing/core/skills/catalog";
+import {
+  SkillCatalogKernelProjectionApplicationService,
+  SkillCatalogLoadApplicationService,
+} from "@zhixing/core/skills/catalog";
 import type {
   AssignmentGlobalQueryPort,
   AssignmentMutationPort,
@@ -166,7 +167,7 @@ import {
 } from "../orchestration/index.js";
 import {
   createAssignmentSkillPorts,
-  renderAssignmentSkillIndex,
+  createAssignmentSkillProjectionApplication,
 } from "./assignment-skill-port.js";
 
 /**
@@ -1003,12 +1004,14 @@ export async function createAgentRuntime(
     buildSystemPrompt({ ...fixedPromptInputs, segmentOverrides: overrides });
 
   // 实例级 holder（所有 run 共享）—— authoritativePrompt 由首窗 onWindowOpen 建立。
+  const initialSkillProjection = await new SkillCatalogKernelProjectionApplicationService()
+    .project(skillMode);
   let instanceSegmentOverrides: Partial<
     Record<SystemPromptSegment, string | null>
   > = {
-    "skill-index": renderSkillIndex(builtinIndexEntries(skillMode, new Set())),
+    "skill-index": initialSkillProjection.content,
   };
-  let skillCatalogRevision = -1;
+  let skillCatalogRevision = initialSkillProjection.catalogRevision;
   let instanceMessagePrefixContributions: PrefixContributionHolder = new Map();
   let authoritativePrompt = "";
   let authoritativeMessagePrefix: readonly Message[] = [];
@@ -1640,15 +1643,18 @@ export async function createAgentRuntime(
       // run 末轮切段 / run 外换代已更新实例权威则取到新值）。run 内换代只改本 run
       // 局部,并发 run 互不观测对方的换代（窗口内 byte-equal 在并发下成立的根本）。
       const entryWindowIndex = windowCounter - 1;
+      const entryInstanceEpoch = instanceEpoch;
       const isWindowFirstRun = entryWindowIndex !== lastRunEntryWindowIndex;
       lastRunEntryWindowIndex = entryWindowIndex;
 
       if (isWindowFirstRun && params.globalQuery) {
-        const skillIndex = await renderAssignmentSkillIndex(
-          skillMode,
+        const skillIndex = await createAssignmentSkillProjectionApplication(
           params.globalQuery,
-        );
-        if (skillIndex.catalogRevision > skillCatalogRevision) {
+        ).project(skillMode);
+        if (
+          entryInstanceEpoch === instanceEpoch &&
+          skillIndex.catalogRevision > skillCatalogRevision
+        ) {
           skillCatalogRevision = skillIndex.catalogRevision;
           instanceSegmentOverrides = {
             ...instanceSegmentOverrides,
@@ -1685,10 +1691,9 @@ export async function createAgentRuntime(
             new Map(localMessagePrefixContributions);
 
           if (params.globalQuery) {
-            const skillIndex = await renderAssignmentSkillIndex(
-              skillMode,
+            const skillIndex = await createAssignmentSkillProjectionApplication(
               params.globalQuery,
-            );
+            ).project(skillMode);
             localSegmentOverrides["skill-index"] = skillIndex.content;
             if (
               myEpoch > instanceEpoch &&

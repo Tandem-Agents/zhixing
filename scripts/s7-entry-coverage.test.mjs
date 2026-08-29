@@ -2341,7 +2341,7 @@ test("retired entry, live writable Store and reverse package dependency mutation
   );
 });
 
-test("Skill Catalog management, load, save and admission have one domain application boundary", async () => {
+test("Skill Catalog management, load, save, admission and Kernel projection have one domain application boundary", async () => {
   const paths = [
     "packages/core/src/skills/catalog-application.ts",
     "packages/core/src/index.ts",
@@ -2368,6 +2368,40 @@ test("Skill Catalog management, load, save and admission have one domain applica
 
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/skills/catalog-application.ts",
+      (text) => text.replace(
+        "entry.mode === mode && !entry.disabled",
+        "entry.mode === mode",
+      ),
+    )).join("\n"),
+    /projection rules lack one immutable domain application owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/orchestrator/src/runtime/assignment-skill-port.ts",
+      (text) => `${text}\nexport function renderAssignmentSkillIndex() { return []; }`,
+    )).join("\n"),
+    /projection adapter interprets Skill fields or omits the raw catalog query/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => text.replace(
+        "entryInstanceEpoch === instanceEpoch",
+        "true",
+      ),
+    )).join("\n"),
+    /can regress the immutable projection/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => `${text}\nconst leakedProjection = renderSkillIndex(builtinIndexEntries("main", new Set()));`,
+    )).join("\n"),
+    /interprets Skill catalog fields|can regress the immutable projection/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(

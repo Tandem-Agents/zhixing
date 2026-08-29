@@ -4,15 +4,13 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   acquireToStaging,
-  builtinIndexEntries,
   computeStagingDigest,
-  renderSkillIndex,
-  type SkillMode,
   type AdmissionLlm,
 } from "@zhixing/core";
 import {
   SkillCatalogAdmissionApplicationService,
   SkillCatalogLoadApplicationService,
+  SkillCatalogKernelProjectionApplicationService,
   SkillCatalogSaveApplicationService,
   type SkillCatalogAdmissionApplication,
   type SkillCatalogAdmissionCandidate,
@@ -20,6 +18,7 @@ import {
   type SkillCatalogAdmissionMutation,
   type SkillCatalogLoadApplication,
   type SkillCatalogLoadCorrectnessPort,
+  type SkillCatalogKernelProjectionApplication,
   type SkillCatalogSaveApplication,
   type SkillCatalogSaveCorrectnessPort,
   type SkillCatalogSaveMutation,
@@ -30,7 +29,6 @@ import type { AssignmentGlobalQueryPort } from "@zhixing/core/contracts";
 import { assignmentMutationRequestId } from "@zhixing/core/protocol";
 import { runContextStorage } from "./run-context.js";
 
-const SKILL_INDEX_TOP_N = 20;
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
 
@@ -169,29 +167,25 @@ function createSkillCatalogSaveCorrectnessPort(
   };
 }
 
-export async function renderAssignmentSkillIndex(
-  mode: SkillMode,
+export function createAssignmentSkillProjectionApplication(
   query: AssignmentGlobalQueryPort,
-): Promise<{ readonly catalogRevision: number; readonly content: string | null }> {
+): SkillCatalogKernelProjectionApplication {
   if (!query) throw new Error("Skill index requires the assignment global query port");
-  const result = await query.read({
-    kind: "skill-catalog",
-    includeDisabled: true,
+  return new SkillCatalogKernelProjectionApplicationService({
+    async readCatalog() {
+      const result = await query.read({
+        kind: "skill-catalog",
+        includeDisabled: true,
+      });
+      if (result.kind !== "skill-catalog") {
+        throw new Error("Skill catalog query returned another result type");
+      }
+      return {
+        catalogRevision: result.catalogRevision,
+        entries: result.entries,
+      };
+    },
   });
-  if (result.kind !== "skill-catalog") {
-    throw new Error("Skill catalog query returned another result type");
-  }
-  const userIds = new Set(result.entries.map((entry) => entry.id));
-  const user = result.entries
-    .filter((entry) => entry.mode === mode && !entry.disabled)
-    .slice(0, SKILL_INDEX_TOP_N);
-  return {
-    catalogRevision: result.catalogRevision,
-    content: renderSkillIndex([
-      ...user,
-      ...builtinIndexEntries(mode, userIds),
-    ]),
-  };
 }
 
 function requireRunSkillContext() {

@@ -2108,14 +2108,12 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     ).rejects.toThrow("protocol persistence failed");
   });
 
-  it("内置 skill 订阅者:索引段含 builtin 条目(双池拼装),own 同名时遮蔽", async () => {
+  it("Skill 领域投影:无 global query 保留 builtin,own 同名时遮蔽", async () => {
     providerRef.current = new MockLLMProvider([{ text: "ok" }, { text: "ok" }]);
-    const empty = makeSkillCatalogQuery([]);
     const runtime = await createAgentRuntime();
     await runtime.run({
       messages: [userMessage("hi")],
       turnIndex: 0,
-      globalQuery: empty.port,
     });
     expect(providerRef.current.calls[0]!.systemPrompt).toContain("提炼技能");
 
@@ -2167,6 +2165,98 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     expect(query.read).toHaveBeenCalledTimes(2);
     expect(providerRef.current.calls[2]!.systemPrompt).toBe(
       providerRef.current.calls[0]!.systemPrompt,
+    );
+  });
+
+  it("Skill 领域投影:旧 catalog revision 不能覆盖实例权威", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }, { text: "ok" }]);
+    const current = makeSkillCatalogQuery([
+      ownSkillEntry({ description: "ZX_SKILL_REVISION_7" }),
+    ], 7);
+    const stale = makeSkillCatalogQuery([
+      ownSkillEntry({ description: "ZX_SKILL_REVISION_6" }),
+    ], 6);
+    const runtime = await createAgentRuntime();
+
+    await runtime.run({
+      messages: [userMessage("current")],
+      turnIndex: 0,
+      globalQuery: current.port,
+    });
+    await runtime.onAttentionWindowChange("clear");
+    await runtime.run({
+      messages: [userMessage("stale")],
+      turnIndex: 0,
+      globalQuery: stale.port,
+    });
+
+    expect(providerRef.current.calls[1]!.systemPrompt).toContain(
+      "ZX_SKILL_REVISION_7",
+    );
+    expect(providerRef.current.calls[1]!.systemPrompt).not.toContain(
+      "ZX_SKILL_REVISION_6",
+    );
+  });
+
+  it("Skill 领域投影:前一窗口延迟读取不能覆盖后继窗口", async () => {
+    providerRef.current = new MockLLMProvider([
+      { text: "ok" },
+      { text: "ok" },
+      { text: "ok" },
+    ]);
+    const current = makeSkillCatalogQuery([
+      ownSkillEntry({ description: "ZX_SKILL_CURRENT_WINDOW" }),
+    ], 7);
+    let queryEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      queryEntered = resolve;
+    });
+    let releaseQuery!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseQuery = resolve;
+    });
+    const delayedRead = vi.fn(async (query: GlobalQuery): Promise<GlobalReadResult> => {
+      if (query.kind !== "skill-catalog") {
+        throw new Error(`Unexpected delayed Skill query: ${query.kind}`);
+      }
+      queryEntered();
+      await gate;
+      return {
+        kind: "skill-catalog",
+        catalogRevision: 8,
+        entries: [ownSkillEntry({ description: "ZX_SKILL_STALE_WINDOW" })],
+      };
+    });
+    const runtime = await createAgentRuntime();
+    await runtime.run({
+      messages: [userMessage("current")],
+      turnIndex: 0,
+      globalQuery: current.port,
+    });
+    await runtime.onAttentionWindowChange("clear");
+
+    const staleRun = runtime.run({
+      messages: [userMessage("delayed")],
+      turnIndex: 0,
+      globalQuery: { read: delayedRead },
+    });
+    await entered;
+    await runtime.onAttentionWindowChange("resume");
+    releaseQuery();
+    await staleRun;
+    await runtime.run({ messages: [userMessage("after")], turnIndex: 0 });
+
+    expect(providerRef.current.calls[1]!.systemPrompt).toContain(
+      "ZX_SKILL_CURRENT_WINDOW",
+    );
+    expect(providerRef.current.calls[1]!.systemPrompt).not.toContain(
+      "ZX_SKILL_STALE_WINDOW",
+    );
+    expect(providerRef.current.calls[2]!.systemPrompt).toContain(
+      "ZX_SKILL_CURRENT_WINDOW",
+    );
+    expect(providerRef.current.calls[2]!.systemPrompt).not.toContain(
+      "ZX_SKILL_STALE_WINDOW",
     );
   });
 

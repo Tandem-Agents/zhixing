@@ -25,7 +25,7 @@ import type {
 } from "@zhixing/core/contracts";
 import {
   createAssignmentSkillPorts,
-  renderAssignmentSkillIndex,
+  createAssignmentSkillProjectionApplication,
 } from "./assignment-skill-port.js";
 import { runContextStorage } from "./run-context.js";
 
@@ -98,18 +98,33 @@ describe("assignment skill ports", () => {
     }
   });
 
-  it("renders path-free user catalog with own-name shadowing and disabled exclusion", async () => {
+  it("adapts only the raw path-free catalog snapshot for the Skill-owned projection", async () => {
     const own = entry({ description: "Owned description" });
     const disabled = entry({ id: "disabled", name: "Disabled", disabled: true });
-    const result = await renderAssignmentSkillIndex(
-      "main",
-      skillQuery([own, disabled], 9),
-    );
+    const read = vi.fn(skillQuery([own, disabled], 9).read);
+    const result = await createAssignmentSkillProjectionApplication({ read })
+      .project("main");
     expect(result.catalogRevision).toBe(9);
     expect(result.content).toContain("Owned description");
     expect(result.content).not.toContain("加载本方法来起草");
     expect(result.content).not.toContain("Disabled");
     expect(JSON.stringify([own, disabled])).not.toMatch(/[A-Z]:\\|\/tmp\//);
+    expect(read).toHaveBeenCalledWith({
+      kind: "skill-catalog",
+      includeDisabled: true,
+    });
+  });
+
+  it("fails closed when the raw catalog query returns another result kind", async () => {
+    const read = vi.fn(async (): Promise<GlobalReadResult> => ({
+      kind: "skill-get",
+      catalogRevision: 9,
+      entry: null,
+    }));
+
+    await expect(
+      createAssignmentSkillProjectionApplication({ read }).project("main"),
+    ).rejects.toThrow("Skill catalog query returned another result type");
   });
 
   it("binds the real save_skill factory to the domain application and staged update adapter", async () => {
