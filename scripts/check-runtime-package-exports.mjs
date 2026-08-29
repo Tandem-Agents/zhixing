@@ -435,15 +435,26 @@ const conversationProjectionDeclaration = runtimeHostDeclarations.find((text) =>
 );
 if (
   !runtimeHostDeclaration ||
+  /BuiltinExtraToolsAssembly|SchedulerFacade|ExecutionSchedulerFacade|JobExecutionInstruction|TaskListService|McpHub/u.test(
+    runtimeHostDeclaration,
+  ) ||
   /\b(?:WorksceneDto|WorksceneToolDirectory|powerProfile|createWorksceneRuntime|worksceneDirectory|capabilityCatalog)\b/iu.test(
     runtimeHostDeclaration,
   ) ||
   !/createConversationRuntime\(projection: ConversationRuntimeProjection\)/u.test(
     runtimeHostDeclaration,
   ) ||
+  !/createEphemeralRuntime\(runtimeTools: RuntimeToolProjection\)/u.test(
+    runtimeHostDeclaration,
+  ) ||
+  !runtimeHostDeclaration.includes("readonly runtimeTools: RuntimeToolProjection") ||
   !conversationProjectionDeclaration ||
   !conversationProjectionDeclaration.includes("createConversationRuntimeProjection") ||
-  !conversationProjectionDeclaration.includes("readonly productTools") ||
+  !conversationProjectionDeclaration.includes("interface RuntimeToolProjection") ||
+  !conversationProjectionDeclaration.includes("createRuntimeToolProjection") ||
+  !conversationProjectionDeclaration.includes("assertRuntimeToolProjection") ||
+  !conversationProjectionDeclaration.includes("readonly runtimeTools: RuntimeToolProjection") ||
+  conversationProjectionDeclaration.includes("readonly productTools") ||
   /\bsceneId\b/u.test(runtimeHostDeclaration) ||
   /\bsceneId\b/u.test(conversationProjectionDeclaration) ||
   runtimeHostRootDeclaration.includes("ConversationRuntimeProjection") ||

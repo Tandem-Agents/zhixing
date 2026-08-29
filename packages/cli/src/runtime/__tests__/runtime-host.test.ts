@@ -17,11 +17,11 @@ const { RuntimeHost } = await import("@zhixing/runtime-host/runtime-host");
 const { createConversationRuntimeProjection } = await import(
   "@zhixing/runtime-host/conversation-runtime-projection"
 );
-
-type AssembledCtx = { scheduler: () => unknown };
+const { createRuntimeToolProjection } = await import(
+  "@zhixing/runtime-host/conversation-runtime-projection"
+);
 
 function makeHostOptions() {
-  const assembled: AssembledCtx[] = [];
   const issuedProviderSets: Array<readonly unknown[]> = [];
   const turnContextProviders = vi.fn(() => {
     const providers = Object.freeze([
@@ -34,34 +34,61 @@ function makeHostOptions() {
   const segmentDeps = { marker: "segment-deps" };
   const decorateRunBus = () => () => {};
   const artifactStore = { marker: "artifact-store" };
-  const baseTools = [{ name: "schedule" }];
+  const providerConfiguration = {
+    config: {
+      llm: {
+        main: { provider: "test", model: "base-model" },
+      },
+    },
+    credentials: {},
+  };
+  const deviceCapacity = {
+    interactive: { kind: "interactive" },
+    scheduler: { kind: "scheduler" },
+    orchestration: { kind: "orchestration" },
+  };
   const options = {
+    providerConfiguration,
     systemProtectedPaths: ["/host/credentials.json", "/host/secret-vault"],
     artifactStore: () => artifactStore,
     segmentDeps,
-    extraTools: {
-      taskListService: {},
-      mcpHub: { catalog: vi.fn(() => []) },
-      assembleTools: vi.fn((ctx: AssembledCtx) => {
-        assembled.push(ctx);
-        return [...baseTools];
-      }),
-    },
-    scheduler: () => ({ marker: "facade" }),
+    deviceCapacity,
     decorateRunBus,
     onSecurityBlocked: vi.fn(),
     turnContextProviders,
   } as never;
   return {
     options,
-    assembled,
     issuedProviderSets,
     turnContextProviders,
     segmentDeps,
     decorateRunBus,
     artifactStore,
-    baseTools,
+    providerConfiguration,
+    deviceCapacity,
   };
+}
+
+function runtimeTools(
+  names: readonly string[] = ["schedule", "product-tool"],
+  mcpServers: readonly string[] = ["alpha"],
+) {
+  return createRuntimeToolProjection({
+    extraTools: names.map((name) => ({ name }) as never),
+    executionMcpServers: mcpServers,
+  });
+}
+
+function runtimeProfile() {
+  const profile = mainProfile();
+  return Object.freeze({
+    ...profile,
+    constraints: Object.freeze([...profile.constraints]),
+    enabledTools: Object.freeze([...profile.enabledTools]),
+    ...(profile.capabilities
+      ? { capabilities: Object.freeze({ ...profile.capabilities }) }
+      : {}),
+  });
 }
 
 function projection(overrides: {
@@ -81,7 +108,7 @@ function projection(overrides: {
           ),
         }
       : {}),
-    productTools: [{ name: "product-tool" } as never],
+    runtimeTools: runtimeTools(),
   });
 }
 
@@ -92,7 +119,7 @@ beforeEach(() => {
 
 describe("generic conversation projection", () => {
   it("passes one frozen product projection without interpreting it", async () => {
-    const { options, segmentDeps, decorateRunBus, artifactStore, baseTools } =
+    const { options, segmentDeps, decorateRunBus, artifactStore } =
       makeHostOptions();
     const host = new RuntimeHost(options);
     const input = projection({ workspace: "/project", sceneId: "scope-1" });
@@ -108,10 +135,10 @@ describe("generic conversation projection", () => {
     expect(params.runtimeIdentity).toBe(input.runtimeIdentity);
     expect(params.runtimeIdentity).toMatchObject({ sceneId: "scope-1" });
     expect(params.profile).toBe(input.profile);
-    expect(params.extraTools.map((tool: { name: string }) => tool.name)).toEqual([
-      ...baseTools.map((tool) => tool.name),
-      "product-tool",
-    ]);
+    expect(params.extraTools).toEqual(input.runtimeTools.extraTools);
+    expect(params.executionMcpServers).toBe(
+      input.runtimeTools.executionMcpServers,
+    );
     expect(params.runtimeKind).toBe("conversation");
   });
 
@@ -131,8 +158,8 @@ describe("generic conversation projection", () => {
     const host = new RuntimeHost(options);
     const mutable = {
       primaryRole: "main",
-      profile: mainProfile(),
-      productTools: [],
+      profile: runtimeProfile(),
+      runtimeTools: { extraTools: [], executionMcpServers: [] },
     } as never;
 
     await expect(host.createConversationRuntime(mutable)).rejects.toThrow(
@@ -157,15 +184,33 @@ describe("generic conversation projection", () => {
 });
 
 describe("shared assembly inputs", () => {
+  it("rejects an extended or duplicate product tool projection before publication", async () => {
+    const { options } = makeHostOptions();
+    const host = new RuntimeHost(options);
+    const extended = Object.freeze({
+      ...runtimeTools(["schedule"]),
+      productMetadata: "forbidden",
+    }) as never;
+
+    await expect(host.createEphemeralRuntime(extended)).rejects.toThrow(
+      "Runtime tool projection must be finite and immutable",
+    );
+    expect(() => runtimeTools(["schedule", "schedule"])).toThrow(
+      "Runtime tool projection contains an invalid or duplicate tool",
+    );
+    expect(createAgentRuntimeMock).not.toHaveBeenCalled();
+  });
+
   it("conversation / ephemeral / durable job obtain providers before publication", async () => {
     const { options, issuedProviderSets, turnContextProviders } = makeHostOptions();
     const host = new RuntimeHost(options);
 
     await host.createConversationRuntime(projection());
-    await host.createEphemeralRuntime();
+    await host.createEphemeralRuntime(runtimeTools(["schedule"]));
     await host.createJobRuntime({
-      instruction: {} as never,
       confirmationBroker: {} as never,
+      profile: runtimeProfile(),
+      runtimeTools: runtimeTools(["task_list"]),
     });
 
     expect(turnContextProviders).toHaveBeenCalledTimes(3);
@@ -193,5 +238,24 @@ describe("shared assembly inputs", () => {
 
     await expect(host.createConversationRuntime(projection())).rejects.toBe(failure);
     expect(createAgentRuntimeMock).not.toHaveBeenCalled();
+  });
+
+  it("forwards the product-selected job profile while preserving model and capacity binding", async () => {
+    const { options, deviceCapacity } = makeHostOptions();
+    const host = new RuntimeHost(options);
+    const profile = runtimeProfile();
+
+    await host.createJobRuntime({
+      confirmationBroker: {} as never,
+      profile,
+      runtimeTools: runtimeTools(["schedule"]),
+      modelOverride: "job-model",
+    });
+
+    const params = createAgentRuntimeMock.mock.calls[0]![0];
+    expect(params.profile).toBe(profile);
+    expect(params.providerConfiguration.config.llm.main.model).toBe("job-model");
+    expect(params.deviceCapacity).toBe(deviceCapacity.scheduler);
+    expect(params.orchestrationCapacity).toBe(deviceCapacity.orchestration);
   });
 });

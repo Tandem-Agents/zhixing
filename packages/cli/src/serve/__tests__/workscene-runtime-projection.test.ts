@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { WorksceneDto } from "@zhixing/core/contracts";
 import {
   createWorksceneConversationRuntimeFactory,
-  createWorksceneRuntimeProjectionAssembly,
+  createAnchorRuntimeProjectionAssembly,
 } from "../workscene-runtime-projection.js";
 
 function scene(
@@ -34,7 +34,7 @@ function fixture() {
       { name: "mcp__alpha__tool" },
     ],
   } as never;
-  return createWorksceneRuntimeProjectionAssembly({
+  return createAnchorRuntimeProjectionAssembly({
     workscenes,
     extraTools,
     scheduler: () => ({}) as never,
@@ -56,12 +56,18 @@ describe("Workscene product runtime projection", () => {
 
     expect(Object.isFrozen(main)).toBe(true);
     expect(Object.isFrozen(withWorkspace.profile)).toBe(true);
-    expect(main.productTools.map((tool) => tool.name).sort()).toEqual([
+    expect(main.runtimeTools.extraTools.map((tool) => tool.name).sort()).toEqual([
+      "mcp__alpha__tool",
+      "schedule",
+      "task_list",
       "workmode_enter",
       "workscene_change_approve",
       "workscene_list",
     ]);
-    expect(withWorkspace.productTools.map((tool) => tool.name).sort()).toEqual([
+    expect(withWorkspace.runtimeTools.extraTools.map((tool) => tool.name).sort()).toEqual([
+      "mcp__alpha__tool",
+      "schedule",
+      "task_list",
       "workmode_exit",
       "workscene_clear_workdir_current",
       "workscene_rename_current",
@@ -77,6 +83,36 @@ describe("Workscene product runtime projection", () => {
     expect(withoutWorkspace.workspace).toBeNull();
     expect(withoutWorkspace.profile.enabledTools).not.toContain("read");
     expect(withoutWorkspace.profile.enabledTools).not.toContain("admit_skill");
+  });
+
+  it("forms ephemeral and durable-job projections from the same exact tool facts", () => {
+    const assembly = fixture();
+    const ephemeral = assembly.ephemeral();
+    const allJob = assembly.job({} as never);
+    const restrictedJob = assembly.job({
+      tools: ["read", "schedule", "mcp__alpha__tool"],
+      model: "job-model",
+    } as never);
+
+    expect(ephemeral.extraTools.map((tool) => tool.name)).toEqual([
+      "schedule",
+      "task_list",
+      "mcp__alpha__tool",
+    ]);
+    expect(ephemeral.executionMcpServers).toEqual(["alpha", "beta"]);
+    expect(allJob.runtimeTools.extraTools.map((tool) => tool.name)).toEqual(
+      ephemeral.extraTools.map((tool) => tool.name),
+    );
+    expect(restrictedJob.profile.enabledTools).toEqual(["read"]);
+    expect(restrictedJob.runtimeTools.extraTools.map((tool) => tool.name)).toEqual([
+      "schedule",
+      "mcp__alpha__tool",
+    ]);
+    expect(restrictedJob.runtimeTools.executionMcpServers).toEqual(["alpha", "beta"]);
+    expect(restrictedJob.modelOverride).toBe("job-model");
+    expect(() => assembly.job({ tools: ["unknown-tool"] } as never)).toThrow(
+      "Job requested unavailable tools: unknown-tool",
+    );
   });
 
   it("derives capability catalog from the same projections and base assembler", () => {
@@ -204,6 +240,8 @@ describe("Anchor conversation runtime routing", () => {
         throw failure;
       }),
       scene: vi.fn(),
+      ephemeral: vi.fn(),
+      job: vi.fn(),
       capabilityCatalog: vi.fn(),
     } as never;
     const create = createWorksceneConversationRuntimeFactory({

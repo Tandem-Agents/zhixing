@@ -7,7 +7,7 @@ import { SKILL_COMMAND_SOURCE_DESCRIPTOR } from "../packages/cli/src/commands/sk
 import { captureCliCommandDescriptor } from "../packages/cli/src/index.ts";
 import { captureChannelAdapterFactoryDescriptor } from "../packages/cli/src/serve/channels.ts";
 import { planServeTopology } from "../packages/cli/src/serve/role-topology.ts";
-import { createWorksceneRuntimeProjectionAssembly } from "../packages/cli/src/serve/workscene-runtime-projection.ts";
+import { createAnchorRuntimeProjectionAssembly } from "../packages/cli/src/serve/workscene-runtime-projection.ts";
 import { SEGMENT_TRANSITION_HOOK_PHASES } from "../packages/core/src/context/segment/types.ts";
 import { AGENT_RUNTIME_LIFECYCLE_PHASES } from "../packages/orchestrator/src/runtime/lifecycle.ts";
 import { TASK_TOOL_CAPABILITY_DESCRIPTOR } from "../packages/orchestrator/src/tools/task.ts";
@@ -725,7 +725,7 @@ async function collectProductionConstants() {
     inert,
     { catalog: () => [], callTool: inert },
   );
-  const productAssembly = createWorksceneRuntimeProjectionAssembly({
+  const productAssembly = createAnchorRuntimeProjectionAssembly({
     workscenes: inert,
     extraTools: assembly,
     scheduler: () => inert,
@@ -743,10 +743,7 @@ async function collectProductionConstants() {
           },
           absolutePath: "/coverage",
         });
-    return new Set([
-      ...assembly.assembleTools({ scheduler: () => inert }),
-      ...projection.productTools,
-    ].map((tool) => tool.name));
+    return new Set(projection.runtimeTools.extraTools.map((tool) => tool.name));
   };
   const nonAuthorityNames = new Set(["workscene_list"]);
   for (const kind of ["main", "workscene"]) {
@@ -2187,7 +2184,7 @@ export function inspectTurnContextProviderAssembly(records) {
   return failures;
 }
 
-/** A4 Workscene product decisions are projected before the generic RuntimeHost boundary. */
+/** A4 Anchor product tools and MCP inputs are projected before the generic RuntimeHost boundary. */
 export function inspectWorksceneRuntimeProjectionBoundary(records) {
   const failures = [];
   const byPath = new Map(records.map((record) => [record.relative, record.text]));
@@ -2208,6 +2205,9 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
   );
   const baseTools = required("packages/runtime-host/src/builtin-extra-tools.ts");
+  const schedulerAdapter = required(
+    "packages/cli/src/serve/execution-scheduler-facade.ts",
+  );
   const product = required("packages/cli/src/serve/workscene-runtime-projection.ts");
   const command = required("packages/cli/src/serve/command.ts");
   const executor = required("packages/cli/src/serve/executor-role-runtime.ts");
@@ -2221,13 +2221,20 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     !host.includes("projection: ConversationRuntimeProjection") ||
     !host.includes("assertConversationRuntimeProjection(projection);") ||
     !host.includes("conversation: projection") ||
-    !host.includes("extraTools = [...extraTools, ...conversation.productTools];") ||
+    !host.includes("assertRuntimeToolProjection(runtimeTools);") ||
+    !host.includes("extraTools: [...runtimeTools.extraTools]") ||
+    !host.includes("executionMcpServers: runtimeTools.executionMcpServers") ||
     !host.includes("runtimeIdentity: conversation?.runtimeIdentity")
   ) {
     failures.push("RuntimeHost still owns or can bypass Workscene product projection");
   }
 
   if (
+    !projection.includes("export interface RuntimeToolProjection") ||
+    !projection.includes("export function createRuntimeToolProjection(") ||
+    !projection.includes("export function assertRuntimeToolProjection(") ||
+    !projection.includes("Runtime tool projection must be finite and immutable") ||
+    !projection.includes("assertRuntimeToolProjection(input.runtimeTools);") ||
     !projection.includes("export interface ConversationRuntimeProjection") ||
     !projection.includes("export function createConversationRuntimeProjection(") ||
     !projection.includes("export function assertConversationRuntimeProjection(") ||
@@ -2271,6 +2278,23 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     failures.push("BuiltinExtraToolsAssembly still selects Workscene product tools");
   }
 
+  if (
+    /BuiltinExtraToolsAssembly|SchedulerFacade|ExecutionSchedulerFacade|JobExecutionInstruction|taskListService|mcpHub|assembleTools|createBuiltinExtraToolsAssembly/u.test(
+      host,
+    ) ||
+    byPath.has("packages/runtime-host/src/execution-scheduler-facade.ts")
+  ) {
+    failures.push("RuntimeHost still owns Anchor Schedule, Task or MCP assembly");
+  }
+
+  if (
+    !schedulerAdapter.includes("export class ExecutionSchedulerFacade") ||
+    !schedulerAdapter.includes("stageScheduleMutation") ||
+    schedulerAdapter.includes("@zhixing/runtime-host")
+  ) {
+    failures.push("Anchor staged scheduler adapter is not owned by product composition");
+  }
+
   const expectedProductTools = [
     "createWorkmodeEnterTool",
     "createWorkmodeExitTool",
@@ -2281,13 +2305,21 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     "createWorksceneSetWorkdirCurrentTool",
   ];
   if (
-    !product.includes("export function createWorksceneRuntimeProjectionAssembly(") ||
+    !product.includes("export function createAnchorRuntimeProjectionAssembly(") ||
     !product.includes("export function createWorksceneConversationRuntimeFactory(") ||
+    !product.includes("new ExecutionSchedulerFacade(input.scheduler)") ||
+    !product.includes("const runtimeTools = (") ||
+    !product.includes("createRuntimeToolProjection({") ||
     !product.includes("createConversationRuntimeProjection({") ||
     !product.includes("createKernelRuntimeIdentityContribution(options.scene.id)") ||
     !product.includes("profile: mainProfile(") ||
     !product.includes("profile: powerProfile(") ||
-    !product.includes("addProjection(main());") ||
+    !product.includes("const ephemeral = (): RuntimeToolProjection => runtimeTools();") ||
+    !product.includes("const job = (instruction: JobExecutionInstruction) =>") ||
+    !product.includes("Job requested unavailable tools:") ||
+    !product.includes("const mainProjection = main();") ||
+    !product.includes("mcpServers: mainProjection.runtimeTools.executionMcpServers") ||
+    !product.includes("addProjection(mainProjection);") ||
     (product.match(/addProjection\(scene\(/gu) ?? []).length !== 2 ||
     expectedProductTools.some(
       (factory) => (product.match(new RegExp(`\\b${factory}\\s*\\(`, "gu")) ?? []).length !== 1,
@@ -2297,19 +2329,21 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
   }
 
   if (
-    (command.match(/createWorksceneRuntimeProjectionAssembly\s*\(/gu) ?? []).length !== 1 ||
+    (command.match(/createAnchorRuntimeProjectionAssembly\s*\(/gu) ?? []).length !== 1 ||
     (command.match(/createWorksceneConversationRuntimeFactory\s*\(/gu) ?? []).length !== 1 ||
     (command.match(/runtimeHost\.createConversationRuntime\s*\(/gu) ?? []).length !== 1 ||
     !command.includes("createAgentRuntime: createConversationAgentRuntime") ||
-    !command.includes("runtime: worksceneRuntimeProjections") ||
-    !command.includes("capabilities: worksceneRuntimeProjections.capabilityCatalog()") ||
+    !command.includes("runtime: anchorRuntimeProjections") ||
+    !command.includes("const projection = anchorRuntimeProjections.job(instruction);") ||
+    !command.includes("anchorRuntimeProjections.ephemeral()") ||
+    !command.includes("capabilities: anchorRuntimeProjections.capabilityCatalog()") ||
     /runtimeHost\.(?:createWorksceneRuntime|capabilityCatalog)\s*\(/u.test(command)
   ) {
     failures.push("Anchor production graph does not use the one Workscene projection owner");
   }
 
   if (
-    executor.includes("createWorksceneRuntimeProjectionAssembly") ||
+    executor.includes("createAnchorRuntimeProjectionAssembly") ||
     executor.includes("createWorksceneConversationRuntimeFactory")
   ) {
     failures.push("ExecutorRuntimeSubstrate received the Anchor Workscene product owner");

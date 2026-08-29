@@ -2749,7 +2749,10 @@ test("TurnContext providers are fixed assembly input before every RuntimeHost is
   assert.match(
     inspectTurnContextProviderAssembly(mutate(
       "packages/runtime-host/src/runtime-host.ts",
-      (text) => text.replace("return this.assemble({ runtimeKind: \"ephemeral\" });", "return createAgentRuntime({} as never);"),
+      (text) => text.replace(
+        "return this.assemble({ runtimeKind: \"ephemeral\", runtimeTools });",
+        "return createAgentRuntime({} as never);",
+      ),
     )).join("\n"),
     /every issuance path/,
   );
@@ -2778,7 +2781,7 @@ test("TurnContext providers are fixed assembly input before every RuntimeHost is
   );
 });
 
-test("Workscene product projection is outside the one generic RuntimeHost issuance", async () => {
+test("Anchor tool and MCP projection is outside the one generic RuntimeHost issuance", async () => {
   const paths = [
     "packages/runtime-host/src/runtime-host.ts",
     "packages/runtime-host/src/index.ts",
@@ -2786,6 +2789,7 @@ test("Workscene product projection is outside the one generic RuntimeHost issuan
     "packages/orchestrator/src/runtime/kernel-runtime-identity.ts",
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
     "packages/runtime-host/src/builtin-extra-tools.ts",
+    "packages/cli/src/serve/execution-scheduler-facade.ts",
     "packages/cli/src/serve/workscene-runtime-projection.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/executor-role-runtime.ts",
@@ -2846,6 +2850,20 @@ test("Workscene product projection is outside the one generic RuntimeHost issuan
   );
   assert.match(
     inspectWorksceneRuntimeProjectionBoundary(mutate(
+      "packages/runtime-host/src/runtime-host.ts",
+      (text) => `${text}\nconst mcpHub = { catalog() { return []; } };`,
+    )).join("\n"),
+    /still owns Anchor Schedule, Task or MCP assembly/,
+  );
+  assert.match(
+    inspectWorksceneRuntimeProjectionBoundary(mutate(
+      "packages/runtime-host/src/conversation-runtime-projection.ts",
+      (text) => text.replace("assertRuntimeToolProjection(input.runtimeTools);", ""),
+    )).join("\n"),
+    /finite, immutable and fail closed/,
+  );
+  assert.match(
+    inspectWorksceneRuntimeProjectionBoundary(mutate(
       "packages/cli/src/serve/workscene-runtime-projection.ts",
       (text) => text.replace("    createWorksceneListTool(workscenes),", ""),
     )).join("\n"),
@@ -2855,7 +2873,7 @@ test("Workscene product projection is outside the one generic RuntimeHost issuan
     inspectWorksceneRuntimeProjectionBoundary(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "capabilities: worksceneRuntimeProjections.capabilityCatalog()",
+        "capabilities: anchorRuntimeProjections.capabilityCatalog()",
         "capabilities: runtimeHost.capabilityCatalog()",
       ),
     )).join("\n"),
@@ -2867,6 +2885,20 @@ test("Workscene product projection is outside the one generic RuntimeHost issuan
       (text) => `${text}\nvoid runtimeHost.createWorksceneRuntime({} as never);`,
     )).join("\n"),
     /production graph|retired Workscene RuntimeHost entry/,
+  );
+  assert.match(
+    inspectWorksceneRuntimeProjectionBoundary(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace("anchorRuntimeProjections.ephemeral()", "{} as never"),
+    )).join("\n"),
+    /production graph/,
+  );
+  assert.match(
+    inspectWorksceneRuntimeProjectionBoundary(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => `${text}\nvoid createAnchorRuntimeProjectionAssembly;`,
+    )).join("\n"),
+    /ExecutorRuntimeSubstrate/,
   );
 });
 

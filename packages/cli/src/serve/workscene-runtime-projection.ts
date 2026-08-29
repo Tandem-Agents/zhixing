@@ -3,7 +3,10 @@ import {
   type SchedulerFacade,
   type ToolDefinition,
 } from "@zhixing/core";
-import type { WorksceneDto } from "@zhixing/core/contracts";
+import type {
+  JobExecutionInstruction,
+  WorksceneDto,
+} from "@zhixing/core/contracts";
 import { mainProfile, powerProfile } from "@zhixing/orchestrator/profile";
 import {
   createKernelRuntimeIdentityContribution,
@@ -12,7 +15,9 @@ import {
 import type { BuiltinExtraToolsAssembly } from "@zhixing/runtime-host/builtin-extra-tools";
 import {
   createConversationRuntimeProjection,
+  createRuntimeToolProjection,
   type ConversationRuntimeProjection,
+  type RuntimeToolProjection,
 } from "@zhixing/runtime-host/conversation-runtime-projection";
 import {
   createWorkmodeEnterTool,
@@ -24,13 +29,20 @@ import {
   createWorksceneSetWorkdirCurrentTool,
   type WorksceneToolDirectory,
 } from "@zhixing/runtime-host/workmode-tools";
+import { ExecutionSchedulerFacade } from "./execution-scheduler-facade.js";
 
-export interface WorksceneRuntimeProjectionAssembly {
+export interface AnchorRuntimeProjectionAssembly {
   main(workspace?: string | null): ConversationRuntimeProjection;
   scene(input: {
     readonly scene: WorksceneDto;
     readonly absolutePath: string | null;
   }): ConversationRuntimeProjection;
+  ephemeral(): RuntimeToolProjection;
+  job(instruction: JobExecutionInstruction): {
+    readonly profile: ConversationRuntimeProjection["profile"];
+    readonly runtimeTools: RuntimeToolProjection;
+    readonly modelOverride?: string;
+  };
   capabilityCatalog(): {
     readonly tools: readonly string[];
     readonly mcpServers: readonly string[];
@@ -58,18 +70,31 @@ function sceneProductTools(
   ];
 }
 
-/** Workscene product composition; RuntimeHost only sees the frozen output. */
-export function createWorksceneRuntimeProjectionAssembly(input: {
+/** Anchor product composition; RuntimeHost only sees the frozen output. */
+export function createAnchorRuntimeProjectionAssembly(input: {
   readonly workscenes: WorksceneToolDirectory;
   readonly extraTools: BuiltinExtraToolsAssembly;
   readonly scheduler: () => SchedulerFacade;
-}): WorksceneRuntimeProjectionAssembly {
+}): AnchorRuntimeProjectionAssembly {
+  const executionScheduler = new ExecutionSchedulerFacade(input.scheduler);
+  const runtimeTools = (
+    productTools: readonly ToolDefinition[] = [],
+  ): RuntimeToolProjection =>
+    createRuntimeToolProjection({
+      extraTools: [
+        ...input.extraTools.assembleTools({ scheduler: () => executionScheduler }),
+        ...productTools,
+      ],
+      executionMcpServers: input.extraTools.mcpHub.catalog()
+        .map(({ server }) => server.serverId)
+        .sort(),
+    });
   const main = (workspace?: string | null): ConversationRuntimeProjection =>
     createConversationRuntimeProjection({
       ...(workspace === undefined ? {} : { workspace }),
       primaryRole: "main",
       profile: mainProfile({ hasWorkspace: workspace !== null }),
-      productTools: mainProductTools(input.workscenes),
+      runtimeTools: runtimeTools(mainProductTools(input.workscenes)),
     });
   const scene = (options: {
     readonly scene: WorksceneDto;
@@ -84,19 +109,68 @@ export function createWorksceneRuntimeProjectionAssembly(input: {
         hasWorkspace: options.absolutePath !== null,
       }),
       runtimeIdentity: createKernelRuntimeIdentityContribution(options.scene.id),
-      productTools: sceneProductTools(input.workscenes, options.scene),
+      runtimeTools: runtimeTools(
+        sceneProductTools(input.workscenes, options.scene),
+      ),
     });
+  const ephemeral = (): RuntimeToolProjection => runtimeTools();
+  const job = (instruction: JobExecutionInstruction) => {
+    const baseProfile = mainProfile();
+    const availableTools = runtimeTools();
+    const requestedTools = instruction.tools
+      ? new Set(instruction.tools)
+      : undefined;
+    if (requestedTools) {
+      const available = new Set([
+        ...baseProfile.enabledTools,
+        ...availableTools.extraTools.map((tool) => tool.name),
+      ]);
+      const unknown = [...requestedTools].filter((tool) => !available.has(tool));
+      if (unknown.length > 0) {
+        throw new TypeError(
+          `Job requested unavailable tools: ${unknown.sort().join(", ")}`,
+        );
+      }
+    }
+    const profile = Object.freeze({
+      ...baseProfile,
+      constraints: Object.freeze([...baseProfile.constraints]),
+      enabledTools: Object.freeze(
+        requestedTools
+          ? baseProfile.enabledTools.filter((tool) => requestedTools.has(tool))
+          : [...baseProfile.enabledTools],
+      ),
+      ...(baseProfile.capabilities
+        ? { capabilities: Object.freeze({ ...baseProfile.capabilities }) }
+        : {}),
+    });
+    return Object.freeze({
+      profile,
+      ...(instruction.model ? { modelOverride: instruction.model } : {}),
+      runtimeTools: requestedTools
+        ? createRuntimeToolProjection({
+            extraTools: availableTools.extraTools.filter((tool) =>
+              requestedTools.has(tool.name),
+            ),
+            executionMcpServers: availableTools.executionMcpServers,
+          })
+        : availableTools,
+    });
+  };
 
   return Object.freeze({
     main,
     scene,
+    ephemeral,
+    job,
     capabilityCatalog() {
       const tools = new Set<string>();
       const addProjection = (projection: ConversationRuntimeProjection) => {
         for (const tool of projection.profile.enabledTools) tools.add(tool);
-        for (const tool of projection.productTools) tools.add(tool.name);
+        for (const tool of projection.runtimeTools.extraTools) tools.add(tool.name);
       };
-      addProjection(main());
+      const mainProjection = main();
+      addProjection(mainProjection);
       const catalogScene: WorksceneDto = {
         id: "capability-catalog",
         revision: 1,
@@ -106,16 +180,9 @@ export function createWorksceneRuntimeProjectionAssembly(input: {
       };
       addProjection(scene({ scene: catalogScene, absolutePath: null }));
       addProjection(scene({ scene: catalogScene, absolutePath: "/capability-catalog" }));
-      for (const tool of input.extraTools.assembleTools({ scheduler: input.scheduler })) {
-        tools.add(tool.name);
-      }
       return Object.freeze({
         tools: Object.freeze([...tools].sort()),
-        mcpServers: Object.freeze(
-          input.extraTools.mcpHub.catalog()
-            .map(({ server }) => server.serverId)
-            .sort(),
-        ),
+        mcpServers: mainProjection.runtimeTools.executionMcpServers,
       });
     },
   });
@@ -124,7 +191,7 @@ export function createWorksceneRuntimeProjectionAssembly(input: {
 /** The sole Anchor conversation routing path for main and Workscene runtimes. */
 export function createWorksceneConversationRuntimeFactory(input: {
   readonly issue: (projection: ConversationRuntimeProjection) => Promise<AgentRuntime>;
-  readonly projections: WorksceneRuntimeProjectionAssembly;
+  readonly projections: AnchorRuntimeProjectionAssembly;
   readonly getScene: (sceneId: string) => Promise<WorksceneDto | null>;
   readonly resolveWorkspaceRoot: (sceneId: string) => Promise<string | null>;
   readonly prepareWorkspaceRoot: (

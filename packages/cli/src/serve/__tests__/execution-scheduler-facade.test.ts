@@ -7,7 +7,7 @@ import {
 } from "@zhixing/core";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import { describe, expect, it, vi } from "vitest";
-import { ExecutionSchedulerFacade } from "./execution-scheduler-facade.js";
+import { ExecutionSchedulerFacade } from "../execution-scheduler-facade.js";
 
 const SPEC: TaskSpec = {
   name: "task",

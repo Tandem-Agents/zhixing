@@ -145,7 +145,7 @@ import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 import { createExecutorReadinessSource } from "./executor-readiness.js";
 import {
   createWorksceneConversationRuntimeFactory,
-  createWorksceneRuntimeProjectionAssembly,
+  createAnchorRuntimeProjectionAssembly,
 } from "./workscene-runtime-projection.js";
 import { StartupRollback } from "./startup-rollback.js";
 import { AssemblyLifecycleContributions } from "./assembly-lifecycle.js";
@@ -459,7 +459,7 @@ async function runServerProcess(
     new RoutedConversationRepoTaskListStore(repoForConversationId),
     mcpHub,
   );
-  const worksceneRuntimeProjections = createWorksceneRuntimeProjectionAssembly({
+  const anchorRuntimeProjections = createAnchorRuntimeProjectionAssembly({
     workscenes: worksceneDirectory,
     extraTools: builtinExtraTools,
     scheduler: getSchedulerFacade,
@@ -534,8 +534,8 @@ async function runServerProcess(
     },
   });
 
-  // 3d. RuntimeHost —— 宿主侧 runtime 装配点:共享资产(skillStore / segmentDeps /
-  //   mcpHub / 渲染装饰)单一持有,会话与 ephemeral 两条发放路径同一装配体。
+  // 3d. RuntimeHost —— 通用 runtime 装配点:共享 Kernel 资产与渲染装饰；
+  //   Schedule / Task / MCP / Workscene 已由上面的 Anchor 产品投影统一裁决。
   //   投递 origin 执行期从 RunContext 派生,实例装配不再按对话定制。
   //   turn-context provider 集合在 runtime 发布前作为固定装配输入建立——scheduler
   //   是 lazy ref（顶层 let schedulerRef），LLM 调用时刻 ref 已就绪；未就绪时
@@ -571,8 +571,6 @@ async function runServerProcess(
       scheduler: deviceCapacity.workload("workload-scheduler"),
       orchestration: deviceCapacity.workload("workload-orchestration"),
     },
-    extraTools: builtinExtraTools,
-    scheduler: getSchedulerFacade,
     // 推进闭环 active 期间把契约验收条件注入执行侧发送视图——订阅者按
     // conversationId 运行期查推进会话状态，装配期不绑定任何对话。
     lifecycle: [
@@ -603,7 +601,7 @@ async function runServerProcess(
 
   const createConversationAgentRuntime = createWorksceneConversationRuntimeFactory({
     issue: (projection) => runtimeHost.createConversationRuntime(projection),
-    projections: worksceneRuntimeProjections,
+    projections: anchorRuntimeProjections,
     getScene: (sceneId) => worksceneDirectory.get(sceneId),
     resolveWorkspaceRoot: resolveWorksceneRoot,
     prepareWorkspaceRoot: async (sceneId, absolutePath) => {
@@ -637,12 +635,17 @@ async function runServerProcess(
     : runtimeFactory;
   const jobRuntime = executor
     ? createAgentJobRuntimePort({
-        create: (instruction, confirmationBroker) =>
-          runtimeHost.createJobRuntime({ instruction, confirmationBroker }),
+        create: (instruction, confirmationBroker) => {
+          const projection = anchorRuntimeProjections.job(instruction);
+          return runtimeHost.createJobRuntime({
+            confirmationBroker,
+            ...projection,
+          });
+        },
       })
     : undefined;
   const executorReadiness = createExecutorReadinessSource({
-    runtime: worksceneRuntimeProjections,
+    runtime: anchorRuntimeProjections,
     credentials,
     credentialGeneration,
   });
@@ -866,8 +869,8 @@ async function runServerProcess(
 
   // ============================================================================
   // 恒定核心后置 —— 须在 pre-server 接入面之后构造。
-  // ephemeralRuntime 经 builtinExtraTools.assembleTools 同步物化 mcpHub.catalog()（MCP 工具目录），
-  // 而 catalog 由 mcp 接入面 connectAll 填充；故这个 eager runtime 必须排在 mcp 接入面之后，
+  // Anchor 产品投影同步物化 mcpHub.catalog()（MCP 工具目录），而 catalog 由 MCP 接入面
+  // connectAll 填充；故这个 eager runtime 必须排在 mcp 接入面之后，
   // 否则其 system prompt 缺 MCP 工具（runtimeFactory 是 lazy，session 调用时 connectAll 已完成，
   // 不受此序约束、可前置）。
   // ============================================================================
@@ -889,7 +892,9 @@ async function runServerProcess(
   // 定时任务路径 runtime.run 不传 conversationId——schedule origin 派生为 null
   // （任务 AI 自创建子任务非用户发起），TaskListProvider 闭包内 ALS 取不到
   // → getItems 返 [] → 整段跳过，不污染 turn-context。
-  const ephemeralRuntime = await runtimeHost.createEphemeralRuntime();
+  const ephemeralRuntime = await runtimeHost.createEphemeralRuntime(
+    anchorRuntimeProjections.ephemeral(),
+  );
 
   if (ctx.authorityRuntime) {
     await publishRequiredCredentialRotations({
@@ -1035,7 +1040,7 @@ async function runServerProcess(
       },
       ...(ctx.executorJobOwner ? { localJobOwner: ctx.executorJobOwner } : {}),
       mesh: () => ctx.meshRuntime,
-      capabilities: worksceneRuntimeProjections.capabilityCatalog(),
+      capabilities: anchorRuntimeProjections.capabilityCatalog(),
       systemHandlers,
       systemTasks: new Map([
         [

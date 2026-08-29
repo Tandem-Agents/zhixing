@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A4-07 已完成，等待协调者独立复核；Workscene 产品运行投影已移出 RuntimeHost<br>
+> 当前检查点：A4-08 已由协调者独立复核；等待纳入提交<br>
 > 完成度：4/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `72a1e668`；A0～A3、A4-01～A4-06 已由协调者独立复核并提交，A1、A2、A3 阶段退出门成立 |
+| 已接受基线 | `b624916d`；A0～A3、A4-01～A4-07 已由协调者独立复核并提交，A1、A2、A3 阶段退出门成立 |
 | 当前 A 项 | A4：封闭 Intelligence Kernel 合同及其生产边界 |
-| 活跃工作包 | A4-07 已完成，等待协调者独立复核：唯一 Workscene 产品组合责任者在发放前生成完整冻结投影，RuntimeHost 只消费通用 conversation runtime 装配合同 |
-| 下一责任链 | A4-07 通过协调者独立复核后，再单独处理 Schedule/Task 产品装配或 Kernel Conformance；不提前进入 A5 |
+| 活跃工作包 | A4-08 已由协调者独立复核，等待纳入提交：Anchor 唯一产品组合边界统一生成 Schedule、Task、MCP 与 Workscene 的有限冻结工具投影，RuntimeHost 只验证和消费通用运行装配合同 |
+| 下一责任链 | A4-08 通过协调者独立复核后，单独闭合 Kernel Conformance 与其余 AgentRuntime 公共面；不提前进入 A5 |
 | 打开的单向桥 | 无；Skill 管理、保存、admission、load/usage、Kernel 与 Executor 投影均只经 `@zhixing/core/skills/catalog` 及既有 Authority/CAS/assignment Correctness 端口成立，旧 writable Store 不再承担正式应用行为 |
-| 已失效证据 | 无当前未恢复证据；A4-07 已用通用 conversation 发放、Workscene 产品投影、Kernel-owned identity contribution、窄 subpath/root 零转导与 capability catalog 直接证据恢复受影响交界，A4-01 的 RuntimeHost 装配子边界、A4-05 的显式 workspace/null 与 A4-06 的发布前 provider 装配均在新单一路径下重验，A4-01～A4-06 其余 Kernel 合同与封装证据未失效 |
+| 已失效证据 | 无当前未恢复证据；A4-08 已重验 A4-07 的 Workscene/capability 投影与 A4-01 的 RuntimeHost 装配子边界，A4-01～A4-06 其余 Kernel 合同与封装证据未失效 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1652,6 +1652,26 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接与对抗证据：RuntimeHost projection 定向文件最终 6/6，新增伪造但同 shape 的冻结身份必须在 runtime 发布前拒绝，并证明合法贡献以同一对象零解释透传；Kernel identity 定向 2/2（同文件 76 项中 74 项未运行）证明合法身份继续驱动 work 技能、scene trust/permission/lifecycle，缺 provenance 输入在 workspace/provider/runtime 装配前 fail closed。CLI 首次两轮分别因 orchestrator、runtime-host 旧 dist 尚未按依赖构建而出现 2 项、1 项失败；依次完成上游构建后只重跑该文件即 6/6，未重复 Workscene 路由、七项工具或 capability catalog 既有闭包。
 - 门禁、exports 与状态：S7 Workscene inspector 新增 runtime-host 根回流、Host/projection `sceneId`、Kernel exact/provenance/冻结、产品绕过 constructor 的反向 mutation；定向 1/1 通过，canonical coverage/mutation 链全部通过并进入 golden，随后 golden check 通过且无漂移。fresh `pnpm runtime:package-exports` 首次准确暴露门禁把根声明为既有 RuntimeHost 参数保留的非导出 type-only side-effect import误判成 public export；收窄为动态根成员与根 exported symbol 后通过，并继续要求窄 subpath 两函数、Kernel runtime-only constructor/assertion、Create options nominal contribution 及 RuntimeHost declaration 零 `sceneId`。orchestrator/runtime-host typecheck 与 build、CLI typecheck/`pnpm cli:build`、最窄 Biome 和 `git diff --check` 通过；本纠正未改变原 27 项 Workscene 路由/工具/capability 证据的输入。A4 仍为 `[ ]`，不进入 Schedule、A5 或其他责任链，当前等待协调者独立复核。
 - 协调者独立验收：从 Workscene 组合根、唯一 conversation factory、通用 RuntimeHost 发放、Kernel identity constructor/assertion、fresh declarations 与根/窄 subpath 双向反查，确认 Workscene 的 profile/workspace/identity/七项工具及 capability 投影只在产品组合边界形成，Host 不查询产品 owner、不解释 `sceneId` 且不存在旧入口或根转导。独立重跑 Workscene/RuntimeHost/base tools/Executor job 4 文件 27/27、Kernel 身份正常与伪造拒绝 2/2、canonical S7 29/29、registry golden、orchestrator/runtime-host/CLI 依赖顺序构建、fresh package exports 和 `git diff --check`，全部通过；接受 `A4-07-workscene-runtime-projection-v1`。A4 继续为 `[ ]`，下一责任链不进入 A5。
+
+### A4-08：把 Schedule、Task 与 MCP 产品工具装配移出 RuntimeHost
+
+- 派发基线：`HEAD b624916d + task-doc:A4-08-dispatch`；A4-07 已由协调者独立复核并纳入提交，派发前索引与工作区为空。
+- 唯一架构结果：Anchor 当前唯一产品组合边界在 runtime 发放前生成有限、冻结且通用的工具与 MCP 投影；`RuntimeHost` 不再导入、持有或调用 `BuiltinExtraToolsAssembly`、`SchedulerFacade`、`ExecutionSchedulerFacade`、Task 服务或 MCP hub，只验证并消费已经裁决的通用运行输入。Workscene 工具与 Schedule、Task、MCP 基础工具必须由同一产品装配事实组合，不得形成第二工具目录、callback 服务定位或可变工具袋。
+- 生产闭包：把 `ExecutionSchedulerFacade` 的实例化、`BuiltinExtraToolsAssembly.assembleTools()` 与 MCP server catalog 读取迁到现有 Anchor 产品组合责任者；main、Workscene、ephemeral 与 durable job 均从该单一装配事实取得与迁移前全等的工具/MCP 输入。job 的 requested-tools unknown 拒绝、exact allowlist、模型覆盖与容量选择仍保持既有语义；capability catalog 必须由同一产品装配事实机械得到。Executor assignment runtime 继续使用既有独立 assignment-scoped MCP 投影，不得注入 Anchor 的 Schedule、Task 或 Workscene 工具。
+- 保护边界与旧路退场：保持 schedule mutation 的 staged/replay/operation identity、TaskList conversation/ALS/cache、MCP catalog/call、惰性 scheduler readiness、main/workscene/ephemeral/job 工具 exact-set、确认、资源和异常终态不变。RuntimeHost 源码、声明和构造参数中的上述产品实现类型、getter 与装配调用全部归零；不得以泛化 service locator、provider callback bag、兼容字段或根导出保留旧路径。发布前投影构造失败必须 fail closed，不能发放半装配 runtime。
+- 直接证据：用最窄直接测试覆盖四类发放的工具/MCP exact-set、schedule staged mutation、TaskList conversation 隔离、MCP catalog/call、job allowlist/unknown 拒绝与 capability catalog，并反查 RuntimeHost 和 fresh declaration 的产品类型/实现零认知、Executor 隔离及单一产品装配入口。只运行受影响包的直接测试、依赖顺序构建、canonical S7、package exports 与最窄格式检查；不得重复 A4-01～A4-07 全文件、根级回归或制品验收。
+- 明确不做：不迁移 Schedule/Task 的事实 owner、Reducer、Authority、Product API 或存储，不重构 MCP 基础设施、job 协议或 Executor 拓扑，不进入 Kernel Conformance、A5 或 A6，不新增能力。
+- 完成与止损：四类运行形态保持可构建、可运行和工具/MCP 行为全等，产品装配只有一个事实源，RuntimeHost 只剩通用运行装配且旧路径为零，受影响证据恢复后完成。若约四小时仍不能闭合，或发现需要迁移领域事实、改变 job/Executor 协议、形成第二 owner 或扩大到独立验证闭包，停在无双轨、可发布的安全检查点并反馈，不继续扩面。
+
+执行记录（证据 ID：`A4-08-anchor-runtime-tool-projection-v1`）：
+
+- 基线与责任迁移：进场 HEAD 为 `b624916dc4fa3ed2181dec38dcd085b65097b2e6`，索引为空且工作区只有协调者预登记的本文台账。新增有限、冻结、fail-closed 的 `RuntimeToolProjection { extraTools, executionMcpServers }`，仅由 runtime-host 正式窄 subpath 公开；`AnchorRuntimeProjectionAssembly` 在 runtime 发放前实例化唯一 `ExecutionSchedulerFacade`，调用现有 `BuiltinExtraToolsAssembly` 并读取 MCP catalog，再把 Schedule、Task、MCP 与 Workscene 专用工具组合成 main、Workscene、ephemeral、durable job 四类投影。`RuntimeHost` 只校验并透传该投影，source、constructor options 与 fresh declaration 中的 `BuiltinExtraToolsAssembly`、`SchedulerFacade`、`ExecutionSchedulerFacade`、Task service、MCP hub/getter/catalog/assembler 依赖均归零。
+- 四类行为与唯一事实：main 与 Workscene conversation 继续由同一场景路由形成 profile/workspace/Kernel identity，基础 Schedule/Task/MCP 与七项 Workscene 工具在一个投影工厂内组合；ephemeral 在 MCP connect 后才取得同一基础投影；durable job 在产品边界先以 main profile 加同一工具目录执行 unknown 拒绝与 exact allowlist，再把冻结后的 profile/tools/MCP 交给 Host。模型覆盖和 scheduler/orchestration capacity 仍由既有通用 job runtime 装配处理。capability catalog 从同一个 main/scene 投影的 enabled tools、extra tools 与 MCP server projection 机械取得，没有第二目录或重复选择规则；Executor substrate 继续只读 assignment-scoped MCP catalog，不导入 Anchor projection，也未获得 Schedule、Task 或 Workscene 工具。
+- 正确性与旧路退场：staged schedule adapter 从 runtime-host 物理归位到 Anchor CLI 产品组合边界，`runContextStorage.stageScheduleMutation` 的 operation identity、read-own-writes、direct fallback 与 replay 语义未改；TaskList service 的 conversation ALS/cache、MCP catalog/call、scheduler lazy getter、确认/资源/错误边界继续由原实现承担。旧 `RuntimeHost` 内 `assembleTools`、MCP catalog、job 工具选择与 `executionScheduler` 字段全部删除，旧 runtime-host scheduler adapter source/test 同步退场；投影拒绝可变、重复或非法 tool/server 项，产品构造或 allowlist 失败发生在 `createAgentRuntime` 前，不存在兼容字段、callback bag、根导出、第二 assembler 或半装配 runtime。
+- 直接证据：CLI 最窄闭包 5 文件 32/32，其中 Anchor 四形态与 capability/unknown allowlist 8/8、通用 RuntimeHost 与 job model/capacity/非法投影拒绝 8/8、Schedule staged/direct 2/2、TaskList/MCP/lazy scheduler 7/7、Executor assignment MCP/unknown 隔离 7/7。测试直接覆盖 main/Workscene/ephemeral/job 工具与 MCP exact-set、显式 workspace/null、投影失败零发布、重复/扩展投影 fail-closed、schedule staged mutation、TaskList ALS、MCP mapping/call、job allowlist/unknown、模型覆盖、容量绑定与 Executor 零 Anchor 注入；上游 source 最后一次变化后首次下游运行准确表现为旧 runtime-host `dist` 的三项旧行为，按验证手册先重建上游后只重跑失效的 RuntimeHost 文件 8/8，其余四文件 24/24 继续有效。未重复 A4-01～A4-07 的 Envelope/Event/Terminal、安全、工作区或完整 Workscene 路由闭包。
+- 结构、声明与构建：S7 扩展现有产品投影 inspector，绑定唯一 Anchor factory、四类 production issuance、同一 capability source、RuntimeHost 产品实现零认知、staged scheduler 产品归属、旧 source 退场与 Executor 隔离；反向 mutation 可识别 Host 重新取得 MCP/assembler、投影漏校验、ephemeral 绕过、capability 旁路和 Executor 注入。首次 canonical 运行准确暴露 inspector 仍要求旧 capability 调用文本，修正为当前单一投影事实后，最终 `pnpm s7:lint` 为 29/29 且 registry golden 通过。runtime-host final build、CLI typecheck 与 `pnpm cli:build` 通过；fresh declaration 上 `pnpm runtime:package-exports` 通过，证明通用 projection 只从窄 subpath 可达且 Host declaration 不泄漏产品实现；最窄 Biome 与 `git diff --check` 通过。
+- 失效、遗留与状态：若 `RuntimeToolProjection` factory/assertion/窄 export、Anchor projection factory、Schedule/Task/MCP assembler、job allowlist、四类 command issuance、capability catalog、RuntimeHost source/declaration、Executor assignment MCP、S7 mutation 或 package-export declaration reader任一变化，恢复本证据并只重验对应闭包。Schedule/Task 事实 owner、Reducer、Authority、Product API、存储，MCP 基础设施、job/Executor 协议、Kernel Conformance、A5/A6 均未迁移；A4 与完成度继续为 `[ ]` / `4/8`。交接类型为完成、等待协调者独立复核；无本包内遗留，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：从 Anchor 组合根、main/Workscene/ephemeral/durable-job 四类发放、RuntimeHost generic issuance、fresh declaration、capability catalog 与 Executor assignment runtime 双向反查，确认 Schedule、Task、MCP 与 Workscene 工具只由唯一产品投影装配，Host 不再导入或解释产品实现，job allowlist/model/capacity 与 Executor 隔离无漂移。独立重跑五个直接文件 32/32、canonical S7 29/29、runtime-host build、CLI typecheck/正式构建、fresh package exports 和 `git diff --check`，全部通过；接受 `A4-08-anchor-runtime-tool-projection-v1`。A4 继续为 `[ ]`，下一责任链只闭合 Kernel Conformance 与其余 AgentRuntime 公共面，不进入 A5。
 
 ## 十、用户提示词
 

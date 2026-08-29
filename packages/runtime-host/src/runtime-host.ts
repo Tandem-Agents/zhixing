@@ -2,16 +2,12 @@
  * RuntimeHost —— 宿主侧 runtime 装配点:共享装配资产单一持有,按消费者发放实例。
  *
  * 两层结构:
- * - 资产层(构造注入):技能库 / 段切换依赖 / extra tools assembly
- *   (含 MCP hub)/ 调度门面 getter / 渲染装饰与安全回调钩子——全部实例共享,
+ * - 资产层(构造注入):技能库 / 段切换依赖 / 渲染装饰与安全回调钩子——全部实例共享,
  *   是配置换代的单位。
  * - 实例层(按需发放):每个对话一个 runtime 实例——AgentRuntime 闭包持有窗口级
  *   状态,设计假定是服务单一对话的窗口序列,跨对话共享即互相践踏;定时任务路径
  *   发放 ephemeral 实例,同享资产层。实例所有权归调用方(会话适配层 / 任务执行
  *   器负责 dispose),host 只管装配。
- *
- * 对话级差异经执行期上下文取,不做装配期定制。schedule 工具只提交用户可控
- * TaskSpec；origin、responder 与创建 turn 由 owner 从已认证 ingress 反绑。
  *
  * turnContextProviders 是资产层的固定 provider 工厂:每次发放先取得只读投影，
  * 再作为 createAgentRuntime 装配输入同步注册，运行体对外可见后不再二次装配。
@@ -25,16 +21,13 @@ import {
   type CreateAgentRuntimeOptions,
   type RuntimeKind,
 } from "@zhixing/orchestrator/runtime";
-import { mainProfile } from "@zhixing/orchestrator/profile";
-import type { SchedulerFacade } from "@zhixing/core";
 import type { IConfirmationBroker } from "@zhixing/core";
-import type { JobExecutionInstruction } from "@zhixing/core/contracts";
 import type { ArtifactStore } from "@zhixing/core/authority";
-import type { BuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
-import { ExecutionSchedulerFacade } from "./execution-scheduler-facade.js";
 import {
   assertConversationRuntimeProjection,
+  assertRuntimeToolProjection,
   type ConversationRuntimeProjection,
+  type RuntimeToolProjection,
 } from "./conversation-runtime-projection.js";
 
 /** 从 createAgentRuntime 公共契约推导类型——避免依赖 orchestrator 内部路径 */
@@ -51,8 +44,10 @@ type TurnContextProvidersOption = NonNullable<
 >;
 
 export interface JobAgentRuntimeOptions {
-  readonly instruction: JobExecutionInstruction;
   readonly confirmationBroker: IConfirmationBroker;
+  readonly profile: NonNullable<CreateAgentRuntimeOptions["profile"]>;
+  readonly runtimeTools: RuntimeToolProjection;
+  readonly modelOverride?: string;
 }
 
 export interface RuntimeHostOptions {
@@ -72,10 +67,6 @@ export interface RuntimeHostOptions {
     readonly scheduler: AgentRuntimeCapacityBinding;
     readonly orchestration: AgentRuntimeCapacityBinding;
   };
-  /** 通用 extra tools 装配单例(含 task_list service 与 MCP hub) */
-  extraTools: BuiltinExtraToolsAssembly;
-  /** 调度门面 getter——惰性求值解装配顺序依赖 */
-  scheduler: () => SchedulerFacade;
   /** per-run 渲染装饰钩子(无 TTY 宿主传日志 / 转发实现) */
   decorateRunBus: DecorateRunBusFn;
   onSecurityBlocked: OnSecurityBlockedFn;
@@ -90,11 +81,7 @@ export interface RuntimeHostOptions {
 }
 
 export class RuntimeHost {
-  private readonly executionScheduler: ExecutionSchedulerFacade;
-
-  constructor(private readonly opts: RuntimeHostOptions) {
-    this.executionScheduler = new ExecutionSchedulerFacade(opts.scheduler);
-  }
+  constructor(private readonly opts: RuntimeHostOptions) {}
 
   /** 发放一个已由产品组合边界完整裁决的 conversation runtime 实例。 */
   async createConversationRuntime(
@@ -112,8 +99,11 @@ export class RuntimeHost {
    * 子任务非用户发起、无渠道投递目标,origin 恒 null;无模式语义,不装
    * workmode 工具组。
    */
-  async createEphemeralRuntime(): Promise<AgentRuntime> {
-    return this.assemble({ runtimeKind: "ephemeral" });
+  async createEphemeralRuntime(
+    runtimeTools: RuntimeToolProjection,
+  ): Promise<AgentRuntime> {
+    assertRuntimeToolProjection(runtimeTools);
+    return this.assemble({ runtimeKind: "ephemeral", runtimeTools });
   }
 
   /**
@@ -121,9 +111,12 @@ export class RuntimeHost {
    * assignment；不继承会话身份、工作场景或渠道接入面状态。
    */
   async createJobRuntime(options: JobAgentRuntimeOptions): Promise<AgentRuntime> {
+    assertRuntimeToolProjection(options.runtimeTools);
+    assertRuntimeProfileProjection(options.profile);
     return this.assemble({
       runtimeKind: "ephemeral",
       job: options,
+      runtimeTools: options.runtimeTools,
     });
   }
 
@@ -132,46 +125,21 @@ export class RuntimeHost {
       conversation?: ConversationRuntimeProjection;
       runtimeKind?: RuntimeKind;
       job?: JobAgentRuntimeOptions;
+      runtimeTools?: RuntimeToolProjection;
     },
   ): Promise<AgentRuntime> {
     const conversation = opts?.conversation;
     const job = opts?.job;
-    const mcpServers = this.opts.extraTools.mcpHub.catalog()
-      .map(({ server }) => server.serverId)
-      .sort();
-    let extraTools = this.opts.extraTools.assembleTools({
-      scheduler: () => this.executionScheduler,
-    });
-    if (conversation) {
-      extraTools = [...extraTools, ...conversation.productTools];
+    const runtimeTools = conversation?.runtimeTools ?? opts?.runtimeTools;
+    if (!runtimeTools) {
+      throw new TypeError(
+        "Runtime tool projection is required before runtime issuance",
+      );
     }
-    const baseProfile = mainProfile();
-    const requestedTools = job?.instruction.tools
-      ? new Set(job.instruction.tools)
-      : undefined;
-    if (requestedTools) {
-      const available = new Set([
-        ...baseProfile.enabledTools,
-        ...extraTools.map((tool) => tool.name),
-      ]);
-      const unknown = [...requestedTools].filter((tool) => !available.has(tool));
-      if (unknown.length > 0) {
-        throw new TypeError(
-          `Job requested unavailable tools: ${unknown.sort().join(", ")}`,
-        );
-      }
-      extraTools = extraTools.filter((tool) => requestedTools.has(tool.name));
-    }
-    const profile = job
-      ? {
-          ...baseProfile,
-          enabledTools: requestedTools
-            ? baseProfile.enabledTools.filter((tool) => requestedTools.has(tool))
-            : baseProfile.enabledTools,
-        }
-      : conversation?.profile;
+    assertRuntimeToolProjection(runtimeTools);
+    const profile = job?.profile ?? conversation?.profile;
     const providerConfiguration =
-      job?.instruction.model && this.opts.providerConfiguration.config.llm
+      job?.modelOverride && this.opts.providerConfiguration.config.llm
         ? {
             ...this.opts.providerConfiguration,
             config: {
@@ -180,7 +148,7 @@ export class RuntimeHost {
                 ...this.opts.providerConfiguration.config.llm,
                 main: {
                   ...this.opts.providerConfiguration.config.llm.main,
-                  model: job.instruction.model,
+                  model: job.modelOverride,
                 },
               },
             },
@@ -206,9 +174,9 @@ export class RuntimeHost {
       primaryRole: conversation?.primaryRole,
       runtimeIdentity: conversation?.runtimeIdentity,
       profile,
-      extraTools,
+      extraTools: [...runtimeTools.extraTools],
       ...(turnContextProviders ? { turnContextProviders } : {}),
-      executionMcpServers: mcpServers,
+      executionMcpServers: runtimeTools.executionMcpServers,
       decorateRunBus: this.opts.decorateRunBus,
       onSecurityBlocked: this.opts.onSecurityBlocked,
       segmentDeps: this.opts.segmentDeps,
@@ -220,5 +188,22 @@ export class RuntimeHost {
         : {}),
       ...(this.opts.lifecycle ? { lifecycle: this.opts.lifecycle } : {}),
     });
+  }
+}
+
+function assertRuntimeProfileProjection(
+  profile: NonNullable<CreateAgentRuntimeOptions["profile"]>,
+): void {
+  if (
+    !profile ||
+    !Array.isArray(profile.constraints) ||
+    !Array.isArray(profile.enabledTools) ||
+    !Object.isFrozen(profile) ||
+    !Object.isFrozen(profile.constraints) ||
+    !Object.isFrozen(profile.enabledTools) ||
+    (profile.capabilities !== undefined &&
+      !Object.isFrozen(profile.capabilities))
+  ) {
+    throw new TypeError("Runtime profile projection must be immutable");
   }
 }

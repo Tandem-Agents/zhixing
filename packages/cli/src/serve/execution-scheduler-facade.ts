@@ -17,7 +17,7 @@ interface StagedViewState {
   readonly tasks: Map<string, TaskView>;
 }
 
-/** Routes schedule definition writes through the current assignment overlay. */
+/** Anchor product adapter that routes schedule writes through assignment staging. */
 export class ExecutionSchedulerFacade implements SchedulerFacade {
   readonly #states = new WeakMap<ScheduleMutationStager, StagedViewState>();
 
