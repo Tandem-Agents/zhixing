@@ -5,7 +5,7 @@ export interface WorksceneWriteResult {
   readonly workspaceWarning?: string;
 }
 
-/** 运行宿主工具所需的最小工作场景端口；持久化与 owner 装配留在组合根。 */
+/** Anchor 产品工具所需的最小工作场景端口；持久化与 owner 装配留在组合根。 */
 export interface WorksceneToolDirectory {
   list(): Promise<WorksceneDto[]>;
   get(id: string): Promise<WorksceneDto | null>;

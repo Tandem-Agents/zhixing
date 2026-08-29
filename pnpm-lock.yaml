@@ -374,18 +374,12 @@ importers:
       '@zhixing/core':
         specifier: workspace:*
         version: link:../core
-      '@zhixing/mcp':
-        specifier: workspace:*
-        version: link:../mcp
       '@zhixing/orchestrator':
         specifier: workspace:*
         version: link:../orchestrator
       '@zhixing/owner-kernel':
         specifier: workspace:*
         version: link:../owner-kernel
-      '@zhixing/tools-builtin':
-        specifier: workspace:*
-        version: link:../tools-builtin
     devDependencies:
       '@types/node':
         specifier: ^24.0.0

@@ -12,7 +12,7 @@ import {
   createKernelRuntimeIdentityContribution,
   type AgentRuntime,
 } from "@zhixing/orchestrator/runtime";
-import type { BuiltinExtraToolsAssembly } from "@zhixing/runtime-host/builtin-extra-tools";
+import type { BuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
 import {
   createConversationRuntimeProjection,
   createRuntimeToolProjection,
@@ -28,7 +28,7 @@ import {
   createWorksceneRenameCurrentTool,
   createWorksceneSetWorkdirCurrentTool,
   type WorksceneToolDirectory,
-} from "@zhixing/runtime-host/workmode-tools";
+} from "./workmode-tools.js";
 import { ExecutionSchedulerFacade } from "./execution-scheduler-facade.js";
 
 export interface AnchorRuntimeProjectionAssembly {

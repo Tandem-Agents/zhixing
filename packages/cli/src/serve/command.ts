@@ -99,11 +99,9 @@ import {
 import fsp from "node:fs/promises";
 import chalk from "chalk";
 import { isProcessAlive } from "@zhixing/server";
-import {
-  RuntimeHost,
-  createBuiltinExtraToolsAssembly,
-  createTransientSegmentDeps,
-} from "@zhixing/runtime-host";
+import { RuntimeHost } from "@zhixing/runtime-host";
+import { createBuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
+import { createTransientSegmentDeps } from "./segment-deps.js";
 import type {
   ExecutorRoleModule,
   ServeBootstrapContext,

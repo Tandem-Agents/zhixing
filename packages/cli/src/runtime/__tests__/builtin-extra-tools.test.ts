@@ -16,7 +16,7 @@ import type {
 } from "@zhixing/core";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import { createMcpHub, type McpHub } from "@zhixing/mcp";
-import { createBuiltinExtraToolsAssembly } from "@zhixing/runtime-host/builtin-extra-tools";
+import { createBuiltinExtraToolsAssembly } from "../../serve/builtin-extra-tools.js";
 import { InMemoryTaskListStore } from "../task-list-stores.js";
 
 // ─── 测试 fixture ───

@@ -1,8 +1,8 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A4-09 已执行；等待协调者独立复核<br>
-> 完成度：4/8<br>
+> 当前检查点：A4 已通过阶段退出门；A4-10 等待纳入提交<br>
+> 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
 
@@ -99,7 +99,7 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 - [x] **A1　收束 ApplicationHost 生命周期边界。** 从现有 `access-surface`、启动回滚、清理注册和关闭链形成每个生产进程唯一的 Host 对象与类型化组件贡献；明确 create/start/open、换代、拒新、排空、close 和失败补偿，组件只管理自身内部资源。配置来源和秘密材料继续由专责 Provider 拥有，Host 只冻结并下发组件所需的最小只读投影，领域、Kernel 和 Surface 不读取来源。Host 可以暂时委托旧领域实现，但不得新增产品逻辑、领域状态、运行期服务定位或第二组合根。以完整启动失败、部分启动回滚、并发关闭、在途排空和零资源残留直接证明生命周期。
 - [x] **A2　用一条真实垂直切片证明领域模型。** 依据 A0 的依赖事实选择边界最小而行为完整的现有领域，先记录选择理由和明确不做；让该领域同时拥有自己的 Command/Query/Event 合同、应用用例、规则与状态机、领域权威适配、面向 Kernel 的 Run Envelope 投影、面向表面的投影和生命周期贡献。至少让一个真实现有表面经进程内或 RPC binding 调用同一应用端口，迁移后立即删除旧写入口。本项不得预建全局领域框架或为了模板美观拆包。
 - [x] **A3　建立组合式 Product API 与纯绑定。** 只从 A2 已证明的领域合同建立 Product API Catalog、dispatcher 和进程内/RPC binding 模式；Catalog 只组合，不拥有业务类型、规则、状态或写入权。Command/Query/Fact Event/Progress Event 的语义与身份清楚，瞬时进展不能成为恢复事实；Progress Event 必须带运行身份与顺序，消费者发现缺口后重新 Query 权威投影。让 A2 领域的全部现有 Server/RPC、CLI、Channel 入口只承担各自实际存在的认证、连接、编解码、调用、订阅、错误映射和呈现；本机路径复用同一应用语义，但不被迫经过网络或无价值序列化。其他领域只能在 A5 完成自身垂直迁移时接入该模式，不得由 A3 先建立空合同或平行入口。
-- [ ] **A4　封闭 Intelligence Kernel。** 基于全部现有运行形态冻结最小 Run Envelope / Event / Terminal 合同和 Conformance Suite；收窄 `AgentRuntime` 公共面，隐藏安全管线、权限存储、工作区解析和宿主管理内部对象。产品对象到模型输入、运行事件到产品结果均经显式投影；模型输出只能形成提议、证据和运行终态，必须经领域决定与权威提交后才成为产品事实。A4 只负责 Kernel 合同及其边界：把 Workscene、Schedule 等产品特有装配移出 RuntimeHost，交给当前唯一产品责任者生成信封；尚未完成 A5 的领域可以通过登记退场点的最短单向端口提供投影，但不得在 A4 复制其状态机、权威或 Product API。RuntimeHost 只消费通用运行合同，对话、任务、本机、远端、取消、失败和资源释放行为必须等价。
+- [x] **A4　封闭 Intelligence Kernel。** 基于全部现有运行形态冻结最小 Run Envelope / Event / Terminal 合同和 Conformance Suite；收窄 `AgentRuntime` 公共面，隐藏安全管线、权限存储、工作区解析和宿主管理内部对象。产品对象到模型输入、运行事件到产品结果均经显式投影；模型输出只能形成提议、证据和运行终态，必须经领域决定与权威提交后才成为产品事实。A4 只负责 Kernel 合同及其边界：把 Workscene、Schedule 等产品特有装配移出 RuntimeHost，交给当前唯一产品责任者生成信封；尚未完成 A5 的领域可以通过登记退场点的最短单向端口提供投影，但不得在 A4 复制其状态机、权威或 Product API。RuntimeHost 只消费通用运行合同，对话、任务、本机、远端、取消、失败和资源释放行为必须等价。
 - [ ] **A5　逐领域归位全部现有产品责任。** 按 A0 得到的无环依赖顺序迁移其余领域；每次只迁移一个事实所有权，并把合同、应用用例、状态机/Reducer、权威适配、既有 Kernel 投影的最终归属、Product API binding、Surface、生命周期、直接测试和旧入口删除作为同一责任链闭合。A2/A3/A4 已建立的合同、binding 与投影必须迁入最终唯一 owner 或直接复用，不得在 A5 重建第二套。领域只实现 Correctness 端口的业务适配，不得把通用提交、效果、安全、确认、资源、持久化或恢复机制复制进领域；Correctness 实现中的业务 Reducer、状态机和用户语义则必须随本项退出共享机制。A2 选中的领域保留在下表，但只有 A3 完成其 Product API 与全部现有 binding 后才能勾选；登记表所有行均为 `[x]` 后 A5 才能完成。A0 若发现未列出的正式产品事实，只有在生产事实与 AE-001 能唯一确定其窄边界时才可补行；没有独立事实的运行/交互方式应归入既有领域、Kernel 或 Surface，不得为了穷举虚构新领域。只有真正的产品语义歧义才暂停交由用户裁决。
 
   | 领域或管理责任 | 状态 | 必须成立的目标边界 |
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `ff834cbe`；A0～A3、A4-01～A4-08 已由协调者独立复核并提交，A1、A2、A3 阶段退出门成立 |
-| 当前 A 项 | A4：封闭 Intelligence Kernel 合同及其生产边界 |
-| 活跃工作包 | A4-09 已执行，等待协调者独立复核：四种生产运行形态共用同一 Kernel Conformance，AgentRuntime 公共 API exact-set 与 runtime-only 窄导出已冻结 |
-| 下一责任链 | A4-09 通过协调者独立复核后，按 A4 退出门冷启动反查 Kernel/RuntimeHost 生产依赖与残余；若无真实缺口则关闭 A4，否则只派发被反证的最窄闭包 |
+| 已接受基线 | `f9d86268 + A4-10 accepted worktree`；A0～A4 已由协调者独立复核，A1～A4 阶段退出门成立；A4-10 等待纳入提交 |
+| 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
+| 活跃工作包 | 无；A4-10 已通过协调者独立验收，等待提交 |
+| 下一责任链 | 从 A5 未完成领域中选择当前价值最高、依赖已满足且可在 2～4 小时闭合的单一事实所有权 |
 | 打开的单向桥 | 无；Skill 管理、保存、admission、load/usage、Kernel 与 Executor 投影均只经 `@zhixing/core/skills/catalog` 及既有 Authority/CAS/assignment Correctness 端口成立，旧 writable Store 不再承担正式应用行为 |
-| 已失效证据 | 无当前未恢复证据；A4-09 已在同一有限合同下恢复 A4-01～A4-03 的 Envelope/Event/Terminal owner、A4-04～A4-06 的公共面封装及 A4-07～A4-08 的四类生产投影交界，等待协调者独立复核 |
+| 已失效证据 | 无当前未恢复证据；A4-10 已恢复 A4-07/A4-08 的包级产品无知结论，A4 全部合同与退出证据当前有效 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1689,6 +1689,22 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据：Kernel Conformance 为 1 文件 16/16；CLI conformance/assembly/session adapter/window 为 4 文件 50/50；Executor 上层 runtime-factory conformance 为 1 文件 5/5；orchestrator primary-role 最窄闭包 3/3，Server clear 最窄闭包 1/1。canonical `pnpm s7:lint` 为 30/30 且更新后的 registry golden 通过，反向 mutation 可识别公共成员增删、根导出、任一四形态漏绑、远端改成本地 adapter、取消/清理证据缺失、无效 reset 链回流和 ephemeral owner 遗失；`pnpm runtime:package-exports` 在 fresh declaration 上通过。
 - 构建、失效与状态：依赖顺序完成 core、tools-builtin、owner-kernel、orchestrator、runtime-host、executor、server 与 CLI 构建，CLI `tsc --noEmit`、最窄 Biome 和 `git diff --check` 通过；core 只出现既有 Rollup 循环 re-export 警告且 DTS 成功。若 AgentRuntime 16 项声明/返回值、runtime/root export、任一四形态 adapter、Envelope/Event/Terminal owner、SessionRuntime 上层投影、ephemeral lifecycle contribution、Conformance/S7 mutation 或 fresh declaration gate变化，恢复本证据并只重验对应闭包。A4 继续为 `[ ]`、完成度仍为 `4/8`；下一检查点只由协调者按 A4 退出门冷启动反查决定，未进入 A5/A6/A7，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：从四类真实生产 adapter、AgentRuntime 唯一声明与全部消费者、`/clear` 和 TaskList 产品清理链、Anchor ephemeral 生命周期、窄导出及反向 mutation 双向复核，确认四种运行形态共用同一 Envelope/Event/Terminal 合同，16 项公共面均有当前消费者，退役 reset 链从未承载生产状态且删除不改变清空语义。独立重跑 CLI 四文件 55/55、orchestrator primary-role 3/3、Executor 5/5、Server clear 1/1、canonical S7 30/30、fresh package exports 与 `git diff --check`，全部通过；接受 `A4-09-kernel-conformance-agent-runtime-budget-v1`。A4 仍须按退出门冷启动反查 `@zhixing/runtime-host` 的产品领域依赖与公开残余，未据本包提前勾选。
+
+### A4-10：清除 runtime-host 的产品领域实现与公开残余
+
+- 派发基线：`HEAD f9d86268 + task-doc:A4-10-dispatch`；A4-09 已由协调者独立复核并提交，派发前索引与工作区为空。
+- 唯一架构结果：`@zhixing/runtime-host` 只承载通用 Runtime Assembly、冻结运行投影和 Kernel/Conversation adapter，不再实现、导出或依赖 Workscene、Schedule、TaskList、MCP catalog 或 segment 产品装配；这些既有实现原样归回当前 Anchor 产品组合边界，A5 再按领域最终归位。
+- 生产闭包：迁出 `builtin-extra-tools`、`segment-deps`、`workmode-tools` 与 `workscene-port` 的实现、构建入口、package exports、根转导和依赖；同步改绑 `command`、Workscene directory/runtime projection 及全部直接测试。生产消费端只改导入和唯一装配落点，不改变工具 exact-set、Profile、Schedule/TaskList/MCP/Workscene 行为、segment persistence/overlay、Conversation clear、Executor assignment 或四类 runtime 发放。
+- 边界与旧路：不得复制文件后保留 runtime-host 兼容 subpath、root alias、deprecated wrapper、type-only 回流或双实现；runtime-host manifest 不再因这些产品实现依赖 `@zhixing/mcp`、`@zhixing/tools-builtin`，且其生产源码不得出现 Workscene/Schedule/TaskList/MCP 产品装配。CLI 中的暂居实现必须是当前唯一生产实现，不预建 A5 领域包或 Product API。
+- 证据：补充可反向变异的 S7/package-export 门禁，证明四个旧 subpath、根转导、构建入口和错误依赖均归零，并能拒绝任一产品实现回流。运行迁移文件的直接测试、RuntimeHost/四形态 Conformance、受影响 CLI 组合根测试、runtime-host 与 CLI 的依赖顺序构建、fresh package exports、canonical S7、最窄格式与 `git diff --check`；不重复根级或未失效的 A4 回归。
+- 明确不做：不改变领域事实、Reducer、Authority、Product API、公开协议、用户行为或物理拓扑，不重构产品实现内部逻辑，不进入 A5/A6/A7，不顺手移动其他 CLI 暂居实现。
+- 完成与止损：只有 runtime-host 源码、root/subpath、build、manifest 和 fresh declaration 均只剩通用运行责任，全部生产消费者改绑唯一 Anchor 落点且行为证据通过，才算完成。若移动暴露真实跨领域语义变化、需要重设计产品合同、超过四小时仍不能保持单一实现或出现两个可独立失败的未知，停在可构建且无双实现的安全检查点反馈；不得扩成 A5 领域迁移。
+- 基线与迁移结果：进场为 `HEAD f9d86268a3fe21133136ec38b015b3c37a3d2c0d + task-doc:A4-10-dispatch`，索引为空且只有协调台账差异。`builtin-extra-tools / segment-deps / workmode-tools / workscene-port` 四个既有实现原样移至 `packages/cli/src/serve/` 私有 Anchor 组合落点；`command`、Workscene directory/runtime projection 与三个迁移文件直接测试全部改用相对私有入口。没有新增 A5 领域包、公共 CLI subpath、兼容转导、第二实现或产品状态机。
+- package 与依赖闭包：`@zhixing/runtime-host` 根转导、四个 package exports、四个 tsup entry、源码文件以及 `@zhixing/mcp / @zhixing/tools-builtin` 两条仅为产品装配存在的生产依赖已删除，lock importer 同步收敛；fresh build 只生成 `index / runtime-host / session-adapter / conversation-runtime-projection` 四个通用入口。包描述同步回到通用 AgentRuntime assembly 与 Kernel/Conversation adapter；现有 frozen `RuntimeToolProjection`、`segmentDeps` Kernel 输入和 assignment-scoped Executor 投影未被误删或改义。
+- 生产行为与所有权：唯一 Anchor `createBuiltinExtraToolsAssembly` 仍组合 Schedule、TaskList 与 MCP catalog，唯一 `createAnchorRuntimeProjectionAssembly` 仍在发放前合并 main/Workscene/ephemeral/job 工具投影，segment persistence/overlay 与 TaskList reader 仍由同一 `runContextStorage` Correctness 输入驱动。工具/Profile exact-set、Workscene 七项工具、schedule replay identity、Conversation clear cache、job allowlist/model/capacity、Executor assignment 隔离和四类 runtime 发放均只发生导入归属变化，没有公开协议或产品结果变化。
+- 结构与反向证据：S7 现在从 CLI 私有 owner 机械重取 extra-tool descriptor，同时要求四个私有实现存在、runtime-host 四个旧源码路径/根转导/tsup entry/产品实现 import 不存在；manifest mutation 拒绝旧 subpath 与 `mcp/tools-builtin` 依赖，consumer mutation 拒绝旧 runtime-host subpath 回流。fresh package-export gate 还直接检查 manifest、root/build、source 与清理后的 dist，任一旧 JS/DTS 文件、第二 export 或依赖恢复都会失败。
+- 直接验证与状态：迁移文件、Workscene projection、RuntimeHost 与四形态 Kernel Conformance 共 6 文件 56/56；canonical `pnpm s7:lint` 为 30/30 且 registry golden 无漂移；`runtime-host` fresh build、CLI typecheck、`pnpm cli:build`、fresh `pnpm runtime:package-exports`、最窄 Biome 和 `git diff --check` 均通过。若四个实现/消费者、runtime-host source/manifest/exports/build/declarations、S7 mutation 或 package-export 输入变化，只恢复 A4-10 对应闭包；A4 与完成度继续为 `[ ]` / `4/8`，下一步只允许协调者独立复核与 A4 退出门冷启动反查，未进入 A5/A6/A7，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收与 A4 退出门：从 CLI/Anchor 生产组合根、四个迁移实现、全部直接消费者、RuntimeHost manifest/source/root/subpath/build/fresh declaration 和 Kernel 四形态反向核对，确认产品装配只有一个 Anchor 私有落点，RuntimeHost 只剩通用 assembly、冻结投影与 Kernel/Conversation adapter；没有兼容转导、第二实现、产品状态机或产品依赖残余。独立重跑六个直接文件 56/56、canonical S7 30/30、registry golden、fresh package exports 与 `git diff --check`，并用静态反向搜索确认旧生产 subpath 和管理入口归零。结合 A4-01～A4-09 当前未失效的 Envelope、Event、Terminal、封装、不可变装配、产品投影和 Conformance 证据，冷启动复核未发现未处置反证；接受 `A4-10-runtime-host-product-assembly-exit-v1`，关闭 A4，完成度更新为 `5/8`。
 
 ## 十、用户提示词
 

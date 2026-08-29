@@ -2878,7 +2878,11 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
     "packages/runtime-host/src/conversation-runtime-projection.ts",
     "packages/orchestrator/src/runtime/kernel-runtime-identity.ts",
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
-    "packages/runtime-host/src/builtin-extra-tools.ts",
+    "packages/cli/src/serve/builtin-extra-tools.ts",
+    "packages/cli/src/serve/segment-deps.ts",
+    "packages/cli/src/serve/workmode-tools.ts",
+    "packages/cli/src/serve/workscene-port.ts",
+    "packages/runtime-host/tsup.config.ts",
     "packages/cli/src/serve/execution-scheduler-facade.ts",
     "packages/cli/src/serve/workscene-runtime-projection.ts",
     "packages/cli/src/serve/command.ts",
@@ -2930,7 +2934,7 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
   );
   assert.match(
     inspectWorksceneRuntimeProjectionBoundary(mutate(
-      "packages/runtime-host/src/builtin-extra-tools.ts",
+      "packages/cli/src/serve/builtin-extra-tools.ts",
       (text) => text.replace(
         "scheduler: () => SchedulerFacade;",
         "scheduler: () => SchedulerFacade;\n  spec?: { kind: \"workscene\" };",
@@ -2944,6 +2948,40 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
       (text) => `${text}\nconst mcpHub = { catalog() { return []; } };`,
     )).join("\n"),
     /still owns Anchor Schedule, Task or MCP assembly/,
+  );
+  assert.match(
+    inspectWorksceneRuntimeProjectionBoundary(mutate(
+      "packages/runtime-host/src/index.ts",
+      (text) => `${text}\nexport * from "./builtin-extra-tools.js";`,
+    )).join("\n"),
+    /retained a product implementation, export, build entry or consumer path/,
+  );
+  assert.match(
+    inspectWorksceneRuntimeProjectionBoundary(mutate(
+      "packages/runtime-host/tsup.config.ts",
+      (text) => text.replace(
+        '    "src/runtime-host.ts",',
+        '    "src/runtime-host.ts",\n    "src/segment-deps.ts",',
+      ),
+    )).join("\n"),
+    /retained a product implementation, export, build entry or consumer path/,
+  );
+  assert.match(
+    inspectWorksceneRuntimeProjectionBoundary([
+      ...records,
+      {
+        relative: "packages/runtime-host/src/workscene-port.ts",
+        text: "export interface WorksceneToolDirectory {}",
+      },
+    ]).join("\n"),
+    /retained a product implementation, export, build entry or consumer path/,
+  );
+  assert.match(
+    inspectWorksceneRuntimeProjectionBoundary(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => `${text}\nimport "@zhixing/runtime-host/workmode-tools";`,
+    )).join("\n"),
+    /retained a product implementation, export, build entry or consumer path/,
   );
   assert.match(
     inspectWorksceneRuntimeProjectionBoundary(mutate(
@@ -3547,6 +3585,18 @@ test("finite dependency syntax and manifests cannot bypass owner or role isolati
       devDependencies: { "@zhixing/executor": "workspace:*" },
     }),
     [],
+  );
+  assert.match(
+    inspectProductionManifest("packages/runtime-host/package.json", {
+      dependencies: { "@zhixing/mcp": "workspace:*" },
+    }).join("\n"),
+    /runtime-host declares product dependency/,
+  );
+  assert.match(
+    inspectProductionManifest("packages/runtime-host/package.json", {
+      exports: { "./workmode-tools": {} },
+    }).join("\n"),
+    /runtime-host exposes retired product subpath/,
   );
 });
 

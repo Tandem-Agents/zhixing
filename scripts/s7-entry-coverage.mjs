@@ -14,7 +14,7 @@ import { TASK_TOOL_CAPABILITY_DESCRIPTOR } from "../packages/orchestrator/src/to
 import {
   BUILTIN_EXTRA_TOOL_CAPABILITIES,
   createBuiltinExtraToolsAssembly,
-} from "../packages/runtime-host/src/builtin-extra-tools.ts";
+} from "../packages/cli/src/serve/builtin-extra-tools.ts";
 import { InboundRouter } from "../packages/server/src/channels/inbound-router.ts";
 import { captureBuiltinRegistryDescriptor } from "../packages/server/src/rpc/methods/index.ts";
 import {
@@ -2499,7 +2499,11 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
   const kernelAssembly = required(
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
   );
-  const baseTools = required("packages/runtime-host/src/builtin-extra-tools.ts");
+  const baseTools = required("packages/cli/src/serve/builtin-extra-tools.ts");
+  required("packages/cli/src/serve/segment-deps.ts");
+  required("packages/cli/src/serve/workmode-tools.ts");
+  required("packages/cli/src/serve/workscene-port.ts");
+  const runtimeHostBuild = required("packages/runtime-host/tsup.config.ts");
   const schedulerAdapter = required(
     "packages/cli/src/serve/execution-scheduler-facade.ts",
   );
@@ -2580,6 +2584,36 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     byPath.has("packages/runtime-host/src/execution-scheduler-facade.ts")
   ) {
     failures.push("RuntimeHost still owns Anchor Schedule, Task or MCP assembly");
+  }
+
+  const retiredRuntimeHostProductPaths = [
+    "packages/runtime-host/src/builtin-extra-tools.ts",
+    "packages/runtime-host/src/segment-deps.ts",
+    "packages/runtime-host/src/workmode-tools.ts",
+    "packages/runtime-host/src/workscene-port.ts",
+  ];
+  if (
+    retiredRuntimeHostProductPaths.some((relative) => byPath.has(relative)) ||
+    /builtin-extra-tools|segment-deps|workmode-tools|workscene-port/u.test(
+      hostRoot,
+    ) ||
+    /builtin-extra-tools|segment-deps|workmode-tools|workscene-port/u.test(
+      runtimeHostBuild,
+    ) ||
+    records.some(
+      (record) =>
+        record.relative.startsWith("packages/runtime-host/src/") &&
+        /(?:BuiltinExtraToolsAssembly|WorksceneToolDirectory|TaskListService|McpHub|createPersistentSegmentDeps|createTransientSegmentDeps|createWorkmodeEnterTool|@zhixing\/(?:mcp|tools-builtin))/u.test(
+          record.text,
+        ),
+    ) ||
+    records.some((record) =>
+      /@zhixing\/runtime-host\/(?:builtin-extra-tools|segment-deps|workmode-tools|workscene-port)/u.test(
+        record.text,
+      ),
+    )
+  ) {
+    failures.push("RuntimeHost retained a product implementation, export, build entry or consumer path");
   }
 
   if (
@@ -2701,7 +2735,16 @@ export async function validateS7Structure() {
   failures.push(...inspectAgentRuntimeSecurityEncapsulation(records));
   failures.push(...inspectAgentRuntimeWorkspaceEncapsulation(records));
   failures.push(...inspectTurnContextProviderAssembly(records));
-  failures.push(...inspectWorksceneRuntimeProjectionBoundary(records));
+  failures.push(...inspectWorksceneRuntimeProjectionBoundary([
+    ...records,
+    {
+      relative: "packages/runtime-host/tsup.config.ts",
+      text: await readFile(
+        path.join(root, "packages/runtime-host/tsup.config.ts"),
+        "utf8",
+      ),
+    },
+  ]));
   failures.push(...inspectSkillCatalogApplicationOwnership([
     ...records,
     {
@@ -7123,6 +7166,23 @@ export function inspectProductionManifest(relative, manifest) {
   }
   if (relative === "packages/executor/package.json" && edges.includes("@zhixing/server")) {
     failures.push(`${relative}: executor declares production dependency on server`);
+  }
+  if (relative === "packages/runtime-host/package.json") {
+    for (const dependency of ["@zhixing/mcp", "@zhixing/tools-builtin"]) {
+      if (edges.includes(dependency)) {
+        failures.push(`${relative}: runtime-host declares product dependency ${dependency}`);
+      }
+    }
+    for (const subpath of [
+      "./builtin-extra-tools",
+      "./segment-deps",
+      "./workmode-tools",
+      "./workscene-port",
+    ]) {
+      if (subpath in (manifest.exports ?? {})) {
+        failures.push(`${relative}: runtime-host exposes retired product subpath ${subpath}`);
+      }
+    }
   }
   return failures;
 }

@@ -28,7 +28,7 @@ import {
   createPersistentSegmentDeps,
   createTransientSegmentDeps,
   createTaskListReaderFromService,
-} from "@zhixing/runtime-host/segment-deps";
+} from "../../serve/segment-deps.js";
 
 function makeTaskListService(): TaskListService {
   return new TaskListService(new InMemoryTaskListStore());

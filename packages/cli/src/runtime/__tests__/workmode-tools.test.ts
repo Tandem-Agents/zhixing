@@ -23,7 +23,7 @@ import {
   createWorksceneRenameCurrentTool,
   createWorksceneSetWorkdirCurrentTool,
   type WorksceneToolDirectory,
-} from "@zhixing/runtime-host/workmode-tools";
+} from "../../serve/workmode-tools.js";
 
 const NOW = "2026-08-04T00:00:00.000Z";
 const CTX = { toolCallId: "tool-call-1" } as never;

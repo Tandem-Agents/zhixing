@@ -1,5 +1,5 @@
 /**
- * 工作模式 agent 工具 —— 经 builtinExtraTools.assembleTools 按 spec.kind 注入。
+ * 工作模式 agent 工具 —— 由 Anchor 产品投影按运行形态注入。
  *
  * 设计要点：
  *   - 工具只捕获工作场景领域服务窄接口（不反依赖宿主具体类），故可脱离

@@ -16,7 +16,7 @@ import type {
   WorksceneDirectory,
   WorksceneWriteResult,
 } from "@zhixing/server";
-import type { WorksceneToolDirectory } from "@zhixing/runtime-host";
+import type { WorksceneToolDirectory } from "./workscene-port.js";
 import type { ConversationManager } from "@zhixing/owner-kernel";
 import type { ConversationDirectory } from "@zhixing/server";
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";

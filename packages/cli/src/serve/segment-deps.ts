@@ -1,5 +1,5 @@
 /**
- * SegmentManager 外部依赖工厂 —— 核心宿主 runtime 发放路径共享。
+ * SegmentManager 外部依赖工厂 —— Anchor 产品组合边界的 runtime 发放路径共享。
  *
  * 段切换的"内部依赖"（provider / model capability / estimator / eventBus）由
  * orchestrator 在 createAgentRuntime 内部解析；"外部依赖"由产品组合层注入：

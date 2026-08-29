@@ -1,5 +1,5 @@
 /**
- * builtin extra tools 装配 —— 核心宿主共享的"外部依赖型工具"装配点。
+ * builtin extra tools 装配 —— Anchor 产品组合边界共享的外部依赖型工具装配点。
  *
  * 背景：
  *   "外部依赖型工具"指需要宿主注入运行时依赖（Scheduler / ConversationRepository

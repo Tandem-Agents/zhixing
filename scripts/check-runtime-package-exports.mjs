@@ -18,7 +18,6 @@ const [
   ownerServices,
   ownerServicesAdvancement,
   runtimeHost,
-  runtimeHostSegmentDeps,
   runtimeHostSessionAdapter,
   runtimeHostConversationProjection,
   executor,
@@ -50,7 +49,6 @@ const [
   import("../packages/owner-services/dist/index.js"),
   import("../packages/owner-services/dist/advancement/index.js"),
   import("../packages/runtime-host/dist/index.js"),
-  import("../packages/runtime-host/dist/segment-deps.js"),
   import("../packages/runtime-host/dist/session-adapter.js"),
   import("../packages/runtime-host/dist/conversation-runtime-projection.js"),
   import("../packages/executor/dist/index.js"),
@@ -112,9 +110,6 @@ retiredServerCompatibilityValues.push(
 
 const runtimeHostCanonicalValues = {
   createOwnerRuntimeAdapter: runtimeHostSessionAdapter,
-  createPersistentSegmentDeps: runtimeHostSegmentDeps,
-  createTaskListReaderFromService: runtimeHostSegmentDeps,
-  createTransientSegmentDeps: runtimeHostSegmentDeps,
 };
 
 const runtimeHostLegacyNames = [
@@ -155,6 +150,7 @@ const meshCanonicalValues = {
 const failures = [];
 await verifyCorePackageExports(failures);
 await verifyRpcSkillCatalogClientExport(failures);
+await verifyRuntimeHostProductBoundary(failures);
 if (
   typeof orchestratorRuntime.createAgentRuntime !== "function" ||
   "createAgentRuntime" in orchestratorRoot
@@ -334,10 +330,6 @@ for (const name of Object.keys(meshPairing)) {
 const runtimeHostDeclarations = await Promise.all([
   readFile(
     new URL("../packages/runtime-host/dist/index.d.ts", import.meta.url),
-    "utf8",
-  ),
-  readFile(
-    new URL("../packages/runtime-host/dist/segment-deps.d.ts", import.meta.url),
     "utf8",
   ),
   readFile(
@@ -527,6 +519,49 @@ for (const name of runtimeHostLegacyNames) {
 
 if (failures.length > 0) {
   throw new Error(`Runtime package export checks failed: ${failures.join(", ")}`);
+}
+
+async function verifyRuntimeHostProductBoundary(failures) {
+  const packageRoot = new URL("../packages/runtime-host/", import.meta.url);
+  const manifest = JSON.parse(
+    await readFile(new URL("package.json", packageRoot), "utf8"),
+  );
+  const retired = [
+    "builtin-extra-tools",
+    "segment-deps",
+    "workmode-tools",
+    "workscene-port",
+  ];
+  for (const name of retired) {
+    if (`./${name}` in (manifest.exports ?? {})) {
+      failures.push(`runtime-host:${name}:retired-product-subpath`);
+    }
+    for (const relative of [
+      `src/${name}.ts`,
+      `dist/${name}.js`,
+      `dist/${name}.d.ts`,
+    ]) {
+      try {
+        await access(new URL(relative, packageRoot));
+        failures.push(`runtime-host:${relative}:retired-product-file`);
+      } catch {}
+    }
+  }
+  for (const dependency of ["@zhixing/mcp", "@zhixing/tools-builtin"]) {
+    if (dependency in (manifest.dependencies ?? {})) {
+      failures.push(`runtime-host:${dependency}:retired-product-dependency`);
+    }
+  }
+  const [rootSource, buildConfig] = await Promise.all([
+    readFile(new URL("src/index.ts", packageRoot), "utf8"),
+    readFile(new URL("tsup.config.ts", packageRoot), "utf8"),
+  ]);
+  if (retired.some((name) => rootSource.includes(name))) {
+    failures.push("runtime-host:retired-product-root-export");
+  }
+  if (retired.some((name) => buildConfig.includes(name))) {
+    failures.push("runtime-host:retired-product-build-entry");
+  }
 }
 
 async function verifyCorePackageExports(failures) {
