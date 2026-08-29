@@ -25,6 +25,7 @@ import {
   DeliveryAuthority,
   SCHEDULER_USER_NOTICE_STREAM,
   deliveryRecord,
+  prepareDeliveryEnqueues,
   type DeliveryEnqueueInput,
   type DeliveryEnqueueResult,
 } from "../index.js";
@@ -94,7 +95,11 @@ export async function enqueueDelivery(
       {},
       (state) => state,
       () => {
-        const decision = authority.prepareEnqueues([input], input.intent.createdAt);
+        const decision = authority.prepareEnqueues(
+          [input],
+          input.intent.createdAt,
+          prepareDeliveryEnqueues,
+        );
         if (!decision.accepted || decision.records.length === 0) {
           return { kind: "return", value: decision };
         }

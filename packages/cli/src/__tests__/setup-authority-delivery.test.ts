@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { ChannelRegistry, deliveryRecord } from "@zhixing/core";
+import {
+  ChannelRegistry,
+  deliveryRecord,
+  prepareDeliveryEnqueues,
+} from "@zhixing/core";
 import type {
   SecretRef,
   SecretStorePort,
@@ -164,7 +168,7 @@ describe("setupDelivery authority production path", () => {
                 maxAttempts: 3,
               },
             },
-          ], context.at);
+          ], context.at, prepareDeliveryEnqueues);
           if (!enqueues.accepted) throw new Error(enqueues.error.message);
           return {
             kind: "append" as const,
@@ -267,7 +271,7 @@ describe("setupDelivery authority production path", () => {
               maxAttempts: 3,
             },
           },
-        ], context.at);
+        ], context.at, prepareDeliveryEnqueues);
         if (!prepared.accepted) throw new Error(prepared.error.message);
         return {
           kind: "append" as const,

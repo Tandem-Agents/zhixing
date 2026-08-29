@@ -35,7 +35,7 @@ import {
   createConversationControlEnvelope,
 } from "../control-admission.js";
 import { ConversationRunJournal } from "../conversation-assignment.js";
-import { OwnerDeliveryParticipant } from "../delivery.js";
+import { createOwnerDeliveryParticipant } from "../delivery.js";
 import { AnchorSessionStateAdapter } from "../session-state-adapter.js";
 import {
   DURABLE_IO_TEST_TIMEOUT_MS,
@@ -86,7 +86,7 @@ async function createHarness(conversationId = "conv-1") {
         decideAtPrefix: () => ({ committed: true, commitRevision: 1 }),
       },
       projection: { async project() {} },
-      delivery: new OwnerDeliveryParticipant({
+      delivery: createOwnerDeliveryParticipant({
         authority: new DeliveryAuthority({ log, anchorEpoch: 1 }),
       }),
       clock: () => NOW,

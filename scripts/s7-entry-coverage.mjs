@@ -2791,7 +2791,23 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     "packages/core/src/delivery/resolution-application.ts",
   );
   const deliveryIndex = required("packages/core/src/delivery/index.ts");
+  const deliveryAuthority = required("packages/core/src/delivery/authority.ts");
   const deliveryControl = required("packages/owner-kernel/src/delivery-control.ts");
+  const deliveryObligationCorrectness = required(
+    "packages/owner-kernel/src/delivery-obligation-correctness.ts",
+  );
+  const deliveryParticipant = required(
+    "packages/owner-kernel/src/delivery-participant.ts",
+  );
+  const ownerKernelIndex = required("packages/owner-kernel/src/index.ts");
+  const ownerKernelDelivery = required("packages/owner-kernel/src/delivery.ts");
+  const conversationAssignment = required(
+    "packages/owner-kernel/src/conversation-assignment.ts",
+  );
+  const jobAssignment = required("packages/owner-kernel/src/job-assignment.ts");
+  const schedulerUserNotices = required(
+    "packages/owner-kernel/src/scheduler-user-notices.ts",
+  );
   const productApi = required("packages/core/src/product-api/catalog.ts");
   const coreIndex = required("packages/core/src/index.ts");
   const skillIndex = required("packages/core/src/skills/index.ts");
@@ -3266,6 +3282,60 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     failures.push(
       "Delivery uncertain-resolution Correctness adapter or application ownership drifted",
     );
+  }
+  const deliveryPrepareConsumers = records
+    .filter((record) => record.text.includes(".prepareEnqueues("))
+    .map((record) => record.relative);
+  if (
+    !deliveryApplication.includes("interface DeliveryObligation") ||
+    !deliveryApplication.includes("class DeliveryObligationApplicationService") ||
+    !deliveryApplication.includes('Omit<DeliveryIntentDto, "maxAttempts">') ||
+    !deliveryApplication.includes("maxAttempts: this.#maxAttempts") ||
+    !deliveryApplication.includes("prepareDeliveryEnqueues(") ||
+    !deliveryObligationCorrectness.includes("createDeliveryObligationCorrectnessPort") ||
+    !deliveryObligationCorrectness.includes("createOwnerDeliveryParticipant") ||
+    deliveryPrepareConsumers.length !== 1 ||
+    deliveryPrepareConsumers[0] !==
+      "packages/owner-kernel/src/delivery-obligation-correctness.ts" ||
+    deliveryParticipant.includes("DeliveryAuthority") ||
+    deliveryParticipant.includes("prepareEnqueues") ||
+    deliveryParticipant.includes("prepareDeliveryEnqueues") ||
+    deliveryParticipant.includes("maxAttempts") ||
+    !deliveryParticipant.includes('from "@zhixing/core/delivery/application"') ||
+    !deliveryParticipant.includes("this.#application.prepare(inputs, commitAt)") ||
+    !deliveryAuthority.includes("return decide(this.#enqueueProjection") ||
+    ownerKernelIndex.includes("delivery-obligation-correctness") ||
+    !ownerKernelDelivery.includes("delivery-obligation-correctness") ||
+    !setupDelivery.includes(
+      'createOwnerDeliveryParticipant } from "@zhixing/owner-kernel/delivery"',
+    ) ||
+    setupDelivery.includes("ownerRuntime!.createOwnerDeliveryParticipant") ||
+    setupDelivery.includes("ownerRuntime.createOwnerDeliveryParticipant")
+  ) {
+    failures.push(
+      "Delivery obligations do not have one domain decision and one narrow Correctness adapter",
+    );
+  }
+  for (const [relative, text, method] of [
+    [
+      "packages/owner-kernel/src/conversation-assignment.ts",
+      conversationAssignment,
+      "prepareConversationCommit(",
+    ],
+    [
+      "packages/owner-kernel/src/job-assignment.ts",
+      jobAssignment,
+      "prepareJobCommit(",
+    ],
+    [
+      "packages/owner-kernel/src/scheduler-user-notices.ts",
+      schedulerUserNotices,
+      "prepareSchedulerNotices",
+    ],
+  ]) {
+    if (!text.includes(method)) {
+      failures.push(`${relative}: Delivery producer bypasses the obligation participant`);
+    }
   }
   if (
     !deliveryHandler.includes('from "@zhixing/core/delivery/application"') ||

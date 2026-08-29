@@ -1,12 +1,13 @@
 import {
-  DeliveryAuthority,
   assertDeliveryEnvelopeCompanions,
-  deliveryRecord,
   projectDeliveryDisplayText,
   validateDeliveryStreamRecord,
-  type DeliveryEnqueueInput,
   type DeliveryLifecycleSourceRef,
 } from "@zhixing/core";
+import type {
+  DeliveryObligation,
+  DeliveryObligationApplication,
+} from "@zhixing/core/delivery/application";
 import {
   type AuthorityError,
   type CommitEnvelope,
@@ -194,28 +195,22 @@ function conversationStatusText(input: ConversationStatusDeliveryInput): string 
 }
 
 /**
- * Maps owner facts to delivery intents while delegating uniqueness and
- * lifecycle authority to the one anchor-owned DeliveryAuthority instance.
+ * Producer adapter: maps source facts to generic Delivery obligations and
+ * consumes the single Delivery application result.
  */
 export class OwnerDeliveryParticipant
   implements ConversationDeliveryParticipant, JobDeliveryParticipant
 {
-  readonly #authority: DeliveryAuthority;
-  readonly #maxAttempts: number;
+  readonly #application: DeliveryObligationApplication;
 
   constructor(options: {
-    readonly authority: DeliveryAuthority;
-    readonly maxAttempts?: number;
+    readonly application: DeliveryObligationApplication;
   }) {
-    this.#authority = options.authority;
-    this.#maxAttempts = options.maxAttempts ?? 3;
-    if (!Number.isSafeInteger(this.#maxAttempts) || this.#maxAttempts <= 0) {
-      throw new TypeError("Delivery max attempts must be a positive safe integer");
-    }
+    this.#application = options.application;
   }
 
   coordinate<Result>(operation: () => Promise<Result>): Promise<Result> {
-    return this.#authority.coordinate(operation);
+    return this.#application.coordinate(operation);
   }
 
   prepareConversationCommit(
@@ -233,7 +228,7 @@ export class OwnerDeliveryParticipant
       }
     }
     return this.#prepare(
-      conversationCommitInputs(input, this.#maxAttempts),
+      conversationCommitInputs(input),
       input.at,
       conflicts,
     );
@@ -241,7 +236,7 @@ export class OwnerDeliveryParticipant
 
   prepareJobCommit(input: JobDeliveryCommitInput): DeliveryParticipantResult {
     return this.#prepare(
-      jobCommitInputs(input, this.#maxAttempts),
+      jobCommitInputs(input),
       input.at,
       input.stagedContentErrors,
     );
@@ -252,7 +247,7 @@ export class OwnerDeliveryParticipant
   ): DeliveryParticipantResult {
     if (inputs.length === 0) return emptyParticipantResult();
     return this.#prepare(
-      inputs.flatMap((input) => conversationStatusInputs(input, this.#maxAttempts)),
+      inputs.flatMap(conversationStatusInputs),
       requireSingleCommitTime(inputs),
     );
   }
@@ -262,7 +257,7 @@ export class OwnerDeliveryParticipant
   ): DeliveryParticipantResult {
     if (inputs.length === 0) return emptyParticipantResult();
     return this.#prepare(
-      inputs.map((input) => conversationControlResponseInput(input, this.#maxAttempts)),
+      inputs.map(conversationControlResponseInput),
       requireSingleCommitTime(inputs),
     );
   }
@@ -272,7 +267,7 @@ export class OwnerDeliveryParticipant
   ): DeliveryParticipantResult {
     if (inputs.length === 0) return emptyParticipantResult();
     return this.#prepare(
-      inputs.flatMap((input) => jobStatusInputs(input, this.#maxAttempts)),
+      inputs.flatMap(jobStatusInputs),
       requireSingleCommitTime(inputs),
     );
   }
@@ -293,7 +288,6 @@ export class OwnerDeliveryParticipant
           priority: "normal" as const,
           source: { kind: "system" as const, reason: "scheduler-user-notice" },
           createdAt: input.at,
-          maxAttempts: this.#maxAttempts,
         },
         ...(input.lifecycleSources ? { lifecycleSources: input.lifecycleSources } : {}),
       })),
@@ -303,11 +297,7 @@ export class OwnerDeliveryParticipant
 
   assertConversationCommit(input: ConversationDeliveryCommitInput, envelope: CommitEnvelope<unknown>): void {
     const conflictedSeqs = deliveryConflictSeqs(envelope, input.assignmentId);
-    const inputs = conversationCommitInputs(
-      input,
-      this.#maxAttempts,
-      conflictedSeqs,
-    );
+    const inputs = conversationCommitInputs(input, conflictedSeqs);
     assertDeliveryCompanions(
       envelope,
       inputs,
@@ -338,11 +328,7 @@ export class OwnerDeliveryParticipant
         .filter(([, outcome]) => outcome.t === "conflicted")
         .map(([seq]) => seq),
     );
-    const inputs = jobCommitInputs(
-      input,
-      this.#maxAttempts,
-      conflictedSeqs,
-    );
+    const inputs = jobCommitInputs(input, conflictedSeqs);
     assertDeliveryCompanions(
       envelope,
       inputs,
@@ -372,7 +358,7 @@ export class OwnerDeliveryParticipant
   ): void {
     assertDeliveryCompanions(
       envelope,
-      inputs.flatMap((input) => conversationStatusInputs(input, this.#maxAttempts)),
+      inputs.flatMap(conversationStatusInputs),
       new Set(["conversation-status-delivery"]),
     );
   }
@@ -383,17 +369,17 @@ export class OwnerDeliveryParticipant
   ): void {
     assertDeliveryCompanions(
       envelope,
-      inputs.flatMap((input) => jobStatusInputs(input, this.#maxAttempts)),
+      inputs.flatMap(jobStatusInputs),
       new Set(["job-status-delivery"]),
     );
   }
 
   #prepare(
-    inputs: readonly DeliveryEnqueueInput[],
+    inputs: readonly DeliveryObligation[],
     commitAt: string,
     stagedConflicts: ReadonlyMap<number, AuthorityError> = new Map(),
   ): DeliveryParticipantResult {
-    const decision = this.#authority.prepareEnqueues(inputs, commitAt);
+    const decision = this.#application.prepare(inputs, commitAt);
     if (!decision.accepted) return decision;
     const stagedRevisions = new Map<number, number>();
     for (let index = 0; index < inputs.length; index += 1) {
@@ -404,7 +390,7 @@ export class OwnerDeliveryParticipant
     }
     return {
       accepted: true,
-      records: decision.records.map(deliveryRecord),
+      records: decision.records,
       stagedRevisions,
       stagedConflicts,
     };
@@ -562,10 +548,9 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 function conversationCommitInputs(
   input: ConversationDeliveryCommitInput,
-  maxAttempts = 3,
   durableConflicts: ReadonlySet<number> = new Set(),
-): DeliveryEnqueueInput[] {
-  const result: DeliveryEnqueueInput[] = [];
+): DeliveryObligation[] {
+  const result: DeliveryObligation[] = [];
   if (input.ingress.kind === "channel") {
     const text = finalAssistantText(input.runRecord);
     if (text.trim().length > 0) result.push({
@@ -585,7 +570,6 @@ function conversationCommitInputs(
           turnSlotId: input.ingress.ingressId,
         },
         createdAt: input.at,
-        maxAttempts,
       },
       lifecycleSources: [input.conversationLifecycleSource],
     });
@@ -618,7 +602,6 @@ function conversationCommitInputs(
         priority: "normal",
         source: { kind: "agent", conversationId: input.conversationId },
         createdAt: input.at,
-        maxAttempts,
       },
       lifecycleSources: [input.assignmentLifecycleSource],
     });
@@ -628,10 +611,9 @@ function conversationCommitInputs(
 
 function jobCommitInputs(
   input: JobDeliveryCommitInput,
-  maxAttempts: number,
   durableConflicts: ReadonlySet<number> = new Set(),
-): DeliveryEnqueueInput[] {
-  const result: DeliveryEnqueueInput[] = [];
+): DeliveryObligation[] {
+  const result: DeliveryObligation[] = [];
   const definition = requireUserDefinition(input.definition, input.occurrence);
   const taskName = projectDeliveryDisplayText(definition.definition.spec.name);
   const delivery = input.occurrence.deliveryPlan.delivery;
@@ -669,7 +651,6 @@ function jobCommitInputs(
             : {}),
         },
         createdAt: input.at,
-        maxAttempts,
       },
       lifecycleSources: [schedulerLifecycleSource(input.occurrence)],
     });
@@ -705,7 +686,6 @@ function jobCommitInputs(
             : {}),
         },
         createdAt: input.at,
-        maxAttempts,
       },
       lifecycleSources: [input.assignmentLifecycleSource],
     });
@@ -715,8 +695,7 @@ function jobCommitInputs(
 
 function conversationStatusInputs(
   input: ConversationStatusDeliveryInput,
-  maxAttempts: number,
-): DeliveryEnqueueInput[] {
+): DeliveryObligation[] {
   if (input.ingress.kind !== "channel") return [];
   const text = conversationStatusText(input);
   if (!text) return [];
@@ -738,7 +717,6 @@ function conversationStatusInputs(
           turnSlotId: input.ingress.ingressId,
         },
         createdAt: input.at,
-        maxAttempts,
       },
       lifecycleSources: [conversationLifecycleSource(input.conversationId)],
     },
@@ -747,8 +725,7 @@ function conversationStatusInputs(
 
 function conversationControlResponseInput(
   input: ConversationControlResponseInput,
-  maxAttempts: number,
-): DeliveryEnqueueInput {
+): DeliveryObligation {
   const text = CONVERSATION_CONTROL_RESPONSE_TEXT[input.response];
   return {
     keyBody: {
@@ -762,7 +739,6 @@ function conversationControlResponseInput(
       priority: "normal",
       source: { kind: "agent", conversationId: input.conversationId },
       createdAt: input.at,
-      maxAttempts,
     },
     lifecycleSources: [conversationLifecycleSource(input.conversationId)],
   };
@@ -778,8 +754,7 @@ function noDurableRoute(): AuthorityError {
 
 function jobStatusInputs(
   input: JobStatusDeliveryInput,
-  maxAttempts: number,
-): DeliveryEnqueueInput[] {
+): DeliveryObligation[] {
   if (input.definition.definition.kind !== "user") return [];
   const definition = requireUserDefinition(input.definition, input.occurrence);
   const taskName = projectDeliveryDisplayText(definition.definition.spec.name);
@@ -808,7 +783,6 @@ function jobStatusInputs(
             : {}),
         },
         createdAt: input.at,
-        maxAttempts,
       },
       lifecycleSources: [schedulerLifecycleSource(input.occurrence)],
     },
@@ -839,15 +813,15 @@ function schedulerLifecycleSource(occurrence: JobOccurrence) {
 
 function assertDeliveryCompanions(
   envelope: CommitEnvelope<unknown>,
-  inputs: readonly DeliveryEnqueueInput[],
-  kinds: ReadonlySet<DeliveryEnqueueInput["keyBody"]["kind"]>,
+  inputs: readonly DeliveryObligation[],
+  kinds: ReadonlySet<DeliveryObligation["keyBody"]["kind"]>,
 ): void {
   assertDeliveryEnvelopeCompanions(envelope);
   const expectedKeys = inputs.map((input) => input.keyBody);
   const actual = envelope.entries.filter((record) => {
     if (record.stream !== "delivery") return false;
     const body = record.body as { readonly t?: string; readonly keyBody?: { readonly kind?: string } };
-    return body.t === "enqueued" && kinds.has(body.keyBody?.kind as DeliveryEnqueueInput["keyBody"]["kind"]);
+    return body.t === "enqueued" && kinds.has(body.keyBody?.kind as DeliveryObligation["keyBody"]["kind"]);
   });
   const actualKeys = actual.map((entry) => {
     const record = validateDeliveryStreamRecord(entry.body);

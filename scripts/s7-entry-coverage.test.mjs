@@ -3034,6 +3034,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   const paths = [
     "packages/core/src/skills/catalog-application.ts",
     "packages/core/src/delivery/resolution-application.ts",
+    "packages/core/src/delivery/authority.ts",
     "packages/core/src/delivery/index.ts",
     "packages/core/src/product-api/catalog.ts",
     "packages/core/src/skills/global-state-adapter.ts",
@@ -3056,6 +3057,13 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/cli/src/commands/skill-command-source.ts",
     "packages/cli/src/setup-delivery.ts",
     "packages/owner-kernel/src/delivery-control.ts",
+    "packages/owner-kernel/src/delivery-obligation-correctness.ts",
+    "packages/owner-kernel/src/delivery-participant.ts",
+    "packages/owner-kernel/src/delivery.ts",
+    "packages/owner-kernel/src/index.ts",
+    "packages/owner-kernel/src/conversation-assignment.ts",
+    "packages/owner-kernel/src/job-assignment.ts",
+    "packages/owner-kernel/src/scheduler-user-notices.ts",
     "packages/cli/src/serve/management-directories.ts",
     "packages/orchestrator/src/runtime/assignment-skill-port.ts",
     "packages/core/src/protocol/assignment-mutation.ts",
@@ -3301,6 +3309,30 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       (text) => `${text}\nexport * from "./resolution-application.js";`,
     )).join("\n"),
     /one narrow non-root core subpath/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/owner-kernel/src/delivery-participant.ts",
+      (text) => `${text}\nvoid deliveryAuthority.prepareEnqueues([]);`,
+    )).join("\n"),
+    /one domain decision and one narrow Correctness adapter/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/owner-kernel/src/index.ts",
+      (text) => `${text}\nexport * from "./delivery-obligation-correctness.js";`,
+    )).join("\n"),
+    /one domain decision and one narrow Correctness adapter/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/owner-kernel/src/scheduler-user-notices.ts",
+      (text) => text.replace(
+        "prepareSchedulerNotices?.(",
+        "prepareEnqueues(",
+      ),
+    )).join("\n"),
+    /Delivery producer bypasses the obligation participant/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(

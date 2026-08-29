@@ -17,7 +17,7 @@ import type { AdvancementControlEvent } from "@zhixing/core/advancement";
 import {
   ConversationRunJournal,
 } from "../conversation-assignment.js";
-import { OwnerDeliveryParticipant } from "../delivery-participant.js";
+import { createOwnerDeliveryParticipant } from "../delivery-obligation-correctness.js";
 import {
   assert,
   createS7TempDir,
@@ -181,7 +181,7 @@ async function createSessionActivityFixture() {
     submission: { authenticate() {}, authorize() {} },
     authority: { decideAtPrefix: () => ({ committed: true, commitRevision: 1 }) },
     projection: { async project() {} },
-    delivery: new OwnerDeliveryParticipant({
+    delivery: createOwnerDeliveryParticipant({
       authority: new DeliveryAuthority({ log, anchorEpoch: 1 }),
     }),
     clock: () => NOW,

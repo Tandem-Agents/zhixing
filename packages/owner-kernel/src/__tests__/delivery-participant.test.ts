@@ -22,7 +22,7 @@ import {
 } from "@zhixing/core/protocol";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
-import { OwnerDeliveryParticipant } from "../delivery-participant.js";
+import { createOwnerDeliveryParticipant } from "../delivery-obligation-correctness.js";
 import {
   DURABLE_IO_TEST_TIMEOUT_MS,
   trackAuthorityLog,
@@ -64,7 +64,7 @@ async function participantFixture(maxAttempts?: number) {
   const authority = new DeliveryAuthority({ log, anchorEpoch: 3 });
   return {
     authority,
-    owner: new OwnerDeliveryParticipant({
+    owner: createOwnerDeliveryParticipant({
       authority,
       ...(maxAttempts ? { maxAttempts } : {}),
     }),

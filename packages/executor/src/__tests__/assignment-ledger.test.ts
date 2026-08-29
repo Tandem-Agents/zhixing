@@ -92,7 +92,8 @@ import {
   createConversationControlEnvelope,
   createInitialControlEnvelope,
 } from "@zhixing/owner-kernel/control-admission";
-import { OwnerDeliveryParticipant } from "@zhixing/owner-kernel";
+import type { OwnerDeliveryParticipant } from "@zhixing/owner-kernel";
+import { createOwnerDeliveryParticipant } from "@zhixing/owner-kernel/delivery";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import {
@@ -168,7 +169,7 @@ function allowOnceDecisionDigest(requestId: string): string {
 }
 
 function deliveryParticipant(log: FileAuthorityCommitLog): OwnerDeliveryParticipant {
-  return new OwnerDeliveryParticipant({
+  return createOwnerDeliveryParticipant({
     authority: new DeliveryAuthority({ log, anchorEpoch: 3 }),
   });
 }

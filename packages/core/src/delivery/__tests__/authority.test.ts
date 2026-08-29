@@ -110,7 +110,11 @@ async function enqueue(
       {},
       (state) => state,
       (_state) => {
-        const decision = authority.prepareEnqueues([input], input.intent.createdAt);
+        const decision = authority.prepareEnqueues(
+          [input],
+          input.intent.createdAt,
+          prepareDeliveryEnqueues,
+        );
         if (!decision.accepted || decision.records.length === 0) {
           return { kind: "return", value: decision };
         }
@@ -1058,7 +1062,7 @@ describe(
         mutationSeq: 2,
       },
     };
-    const prepared = authority.prepareEnqueues([input], FIRST);
+    const prepared = authority.prepareEnqueues([input], FIRST, prepareDeliveryEnqueues);
     if (!prepared.accepted) throw new Error("fixture prepare failed");
     const source = await createDeliverySourceFixture(artifacts, input.keyBody);
     const mismatchedSource = source.records(1).map((record) => {

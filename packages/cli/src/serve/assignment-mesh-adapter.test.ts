@@ -83,6 +83,7 @@ import {
   OwnerDeliveryParticipant,
   type AssignmentSubmissionAuthorizer,
 } from "@zhixing/owner-kernel";
+import { createOwnerDeliveryParticipant } from "@zhixing/owner-kernel/delivery";
 import {
   JobJournal,
   type JobAssignmentPlan,
@@ -2053,7 +2054,7 @@ async function createRealProtocolFixture(
       decideAtPrefix: () => ({ committed: true, commitRevision: 1 }),
     },
     projection: { async project() {} },
-    delivery: new OwnerDeliveryParticipant({
+    delivery: createOwnerDeliveryParticipant({
       authority: new DeliveryAuthority({ log: ownerLog, anchorEpoch: 1 }),
     }),
     clock: () => ownerClock,
@@ -2200,7 +2201,7 @@ async function createRealJobProtocolFixture(
     snapshotFor,
     submission: submissionAuthorizer,
     ingress: { authorize() {} },
-    delivery: new OwnerDeliveryParticipant({ authority: deliveryAuthority }),
+    delivery: createOwnerDeliveryParticipant({ authority: deliveryAuthority }),
     clock: () => NOW,
   });
   const definition: TaskDefinition = {

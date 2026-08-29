@@ -103,6 +103,7 @@ import type {
   JobAssignmentCredentialPolicy,
   GlobalMutationCommitParticipant,
 } from "@zhixing/owner-kernel";
+import { createOwnerDeliveryParticipant } from "@zhixing/owner-kernel/delivery";
 import type { ExecutorResourceGovernor } from "@zhixing/executor";
 import {
   DeviceKey,
@@ -566,7 +567,7 @@ export async function setupAuthorityRuntime(
       ? new DeliveryAuthority({ log: authorityLog, anchorEpoch })
       : undefined;
     let participant = authority
-      ? new ownerRuntime!.OwnerDeliveryParticipant({ authority })
+      ? createOwnerDeliveryParticipant({ authority })
       : undefined;
     let controlAdmission = authorityLog
       ? new ownerRuntime!.ControlAdmissionJournal(authorityLog, artifacts)
@@ -1748,7 +1749,7 @@ export async function setupAuthorityRuntime(
         log: authorityLog,
         anchorEpoch: generation.anchorEpoch,
       });
-      const nextParticipant = new ownerRuntime.OwnerDeliveryParticipant({
+      const nextParticipant = createOwnerDeliveryParticipant({
         authority: nextAuthority,
       });
       const nextControlAdmission = new ownerRuntime.ControlAdmissionJournal(

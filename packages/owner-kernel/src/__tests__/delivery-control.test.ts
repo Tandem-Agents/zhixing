@@ -96,7 +96,7 @@ async function createHarness() {
       {},
       (state) => state,
       () => {
-        const decision = authority.prepareEnqueues([input], NOW);
+        const decision = authority.prepareEnqueues([input], NOW, prepareDeliveryEnqueues);
         if (!decision.accepted) return { kind: "return", value: decision };
         return {
           kind: "append",

@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-01 已通过独立验收，等待纳入提交；Delivery 领域仍未完成<br>
+> 当前检查点：A5-02 已通过独立验收，等待纳入提交；Delivery 领域仍未完成<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,10 +202,10 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `ca8608b6 + A5-01 accepted worktree`；A0～A4 已提交，A5-01 已由协调者独立复核并等待纳入提交 |
+| 已接受基线 | `b9e6a30d + A5-02 accepted worktree`；A0～A4 与 A5-01 已提交，A5-02 已通过协调者独立复核并等待纳入提交 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | 无；A5-01 已通过协调者独立验收，等待提交 |
-| 下一责任链 | 沿同一 Delivery 责任链迁移义务产生、终态与 Channel effect；继续拆成 2～4 小时、单一可证伪结果的工作包 |
+| 活跃工作包 | 无；A5-02 已通过协调者独立验收，等待提交 |
+| 下一责任链 | A5-02 验收后，沿同一 Delivery 责任链迁移终态推进，再单独收束 Channel effect；不得提前跨入其他领域 |
 | 打开的单向桥 | 无；Skill 管理、保存、admission、load/usage、Kernel 与 Executor 投影均只经 `@zhixing/core/skills/catalog` 及既有 Authority/CAS/assignment Correctness 端口成立，旧 writable Store 不再承担正式应用行为 |
 | 已失效证据 | 无当前未恢复证据；A4-10 已恢复 A4-07/A4-08 的包级产品无知结论，A4 全部合同与退出证据当前有效 |
 | 阻塞/用户决策 | 无 |
@@ -1721,6 +1721,23 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 结构与反向证据：S7 与 fresh package-export gate 冻结 Delivery application 唯一窄 subpath、descriptor/contribution exact-set、一个 Host dispatcher、Skill + 条件 Delivery 组合、owner-kernel Correctness 端口和 handler dispatch；反向 mutation 可识别旧 runtimeControl 字段/handler 旁路、Delivery contribution 丢失或改接 Skill、application 根/barrel 泄漏、重复 export 与旧 apply/resolve owner 回流。Product API constructor 原有 duplicate/missing/unknown/kind/descriptor/fact fail-closed 继续覆盖缺失或重复 contribution。
 - 直接验证与状态：当前基线的领域/Product API、耐久 Delivery control、真实 RPC dispatcher/wire 与 Anchor/Delivery 组合共 6 文件 81/81；其中 applied/replayed、stale epoch、open-fact mismatch、durable request binding、orphan source、observer failure、缺 contribution、参数/身份拒绝和公开 result 均有直接反例。core、owner-kernel、server 与 CLI 依赖顺序构建通过，CLI 包内 typecheck、canonical `pnpm s7:lint`、fresh `pnpm runtime:package-exports`、最窄 Biome 与 `git diff --check` 通过。A5 与 Delivery 行继续为 `[ ]`；下一步只允许协调者独立复核本包，接受后沿同一 Delivery 责任链迁移义务产生、终态与 Channel effect，未进入其他领域或 A6/A7，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：从唯一 RPC 方法、ServerContext、Anchor Catalog 组合、DeliveryStack 应用发放、Correctness 端口、ControlAdmission 与 DeliveryAuthority 同提交反向核对，确认领域决定、应用入口、耐久机制和 Surface binding 各自只有一个 owner；旧 `runtimeControl.resolveDelivery`、`DeliveryStack.resolve` 与 `applyDeliveryResolutionControl` 生产入口归零，未形成第二 dispatcher、第二决定或通知双写。独立重跑六个直接文件 81/81、canonical S7 30/30、registry golden、fresh package exports 与 `git diff --check`，静态反查确认旧符号仅剩负向门禁。接受 `A5-01-delivery-uncertain-resolution-product-api-v1`；Delivery 其余义务、终态、效果与生命周期尚未迁移，因此 Delivery 行和 A5 继续为 `[ ]`。
+
+### A5-02：归位 Delivery 交付义务产生与唯一入队决定边界
+
+- 派发基线：`HEAD b9e6a30d + task-doc:A5-02-dispatch`；A5-01 已由协调者独立复核并提交，派发前索引与工作区为空。
+- 唯一架构结果：Delivery 领域拥有“结果需要被交付”的通用义务合同、入队规则与唯一决定入口；Conversation、Job、Scheduler 等 producer 只把各自已提交或同提交事实映射为 Delivery 义务并消费领域结果，不再直接调用或拥有 `DeliveryAuthority.prepareEnqueues` 及其唯一性、生命周期和状态修订规则。
+- 生产闭包：正反追踪 `OwnerDeliveryParticipant` 的 Conversation final/staged/status/control-response、Job result/staged/status 与 Scheduler notice 全部生产入口，在现有 Delivery 窄边界形成可同步参加来源 Authority 同一事务的应用入口；保持来源事实 companion、staged revision/conflict、route/content 校验、生命周期 admission、幂等 key、commit time、max-attempts、enqueue record 与恢复投影完全等价。Correctness/Authority 只提供投影、fence、同提交写入和恢复机制，producer adapter 只拥有来源领域到通用义务的映射，二者均不得复制 Delivery 入队决定。
+- 旧路与门禁：生产代码中 `DeliveryAuthority.prepareEnqueues` 只能由新的 Delivery 应用/Correctness 边界消费；`OwnerDeliveryParticipant` 不得持有或取得 DeliveryAuthority 实现对象，不得保留兼容回调、第二 prepare、双写或旁路。结构证据必须能识别 producer 直调 Authority、领域决定回流 owner-kernel、重复应用入口、根/barrel 泄漏及任一真实 producer 未改绑。
+- 明确不做：不迁移 pipeline/outbox/receipt 的 attempt、retry、uncertain/terminal reducer，不改 Channel sender/transport，不迁移 accepted-work lifecycle、Schedule/Advancement 领域或 A6 边缘；不把 producer 的来源事实语义强塞进 Delivery，不改变公开协议、通知、内容、路由、优先级、错误或持久格式。
+- 直接证据：覆盖全部现有 producer 的 accepted/rejected/duplicate/conflict、来源 companion、staged revision、无耐久 route、生命周期 admission 与恢复后唯一性；反向证明 producer adapter 无 Authority 实现依赖且旧直调归零。只运行 Delivery application/authority、owner-kernel participant 与受影响 Conversation/Job/Scheduler 直接测试、必要依赖顺序构建、canonical S7、fresh package exports、最窄格式及 `git diff --check`，不重复 A5-01、根级回归或制品验收。
+- 完成与止损：只有全部现有 producer 经同一 Delivery 领域入队决定形成原子且行为等价的唯一生产链，旧直调归零、无双权威且直接证据成立，才算完成。预计超过四小时、需要改变来源领域或 Delivery 产品语义、出现两个可独立失败的未知、无法保持同事务 companion，或影响面扩到终态/Channel 时，停在可构建、可运行、单一真相成立的检查点反馈；不得顺带完成整个 Delivery。
+- 执行基线与边界：`HEAD b9e6a30d4d0e2a34c4ef40f08c97b4dafd1ee9a6 + task-doc:A5-02-dispatch + A5-02-delivery-obligation-application-v1`；只改变义务产生与入队决定 owner，没有进入 attempt/retry/uncertain/terminal、outbox/receipt、Channel sender、accepted-work 或其他领域。
+- 领域与 Correctness 归位：`@zhixing/core/delivery/application` 新增有限 `DeliveryObligation` 与唯一 `DeliveryObligationApplicationService`；领域在一次决定中拥有 route/content、幂等 key、生命周期 binding、当前投影冲突及默认 `maxAttempts`，并产生与既有格式相同的 enqueue records/items。`DeliveryObligationCorrectnessPort` 只提供串行 coordinate、当前 projection/fence 和同提交 append 所需的 Authority 机制；`DeliveryAuthority.prepareEnqueues` 不再内置领域规则，而只把投影与生命周期 binding 交给领域决定。
+- Producer 与旧路清理：`OwnerDeliveryParticipant` 只持有领域应用，保留 Conversation final/staged/status/control-response、Job result/staged/status 与 Scheduler notice 八个来源映射、staged revision/conflict 和来源 companion 校验；它不再取得 `DeliveryAuthority`、不再拥有 retry policy，也不再直接调用 `prepareEnqueues`。两个 Anchor generation 均从 `@zhixing/owner-kernel/delivery` 窄入口创建同一 participant；生产 `.prepareEnqueues` 唯一直接 consumer 是该窄 Correctness adapter，owner-kernel 根不转导新工厂，没有兼容回调、第二 prepare 或双写。
+- 行为与恢复保护：来源事实与 Delivery companion 仍由同一 Authority transaction 原子提交；无耐久 route 继续形成 staged conflict 而不拒绝来源提交，duplicate/conflict、生命周期 admission、commit time、staged revision、持久 record body、cold replay、recovery projection 与历史 `maxAttempts` 校验均保持。Scheduler missed-summary restart 去重、Conversation/Job commit 与 assignment ledger 响应丢失重放继续命中同一 Delivery unique index；公开协议、通知、文案、route、priority 与错误未改变。
+- 直接证据：领域 application/Authority 2 文件 46/46，owner participant/Scheduler notice 2 文件 14/14，Conversation/Job 真实 assignment ledger 2 文件 442/442，Anchor Delivery 组合与恢复 1 文件 3/3，合计 7 文件 505/505。依赖顺序的 core、owner-kernel、executor 与 CLI 构建通过，CLI `tsc --noEmit`、canonical `pnpm s7:lint` 30/30 与 registry golden、fresh `pnpm runtime:package-exports`、最窄 Biome 和 `git diff --check` 通过；S7 反向 mutation 可识别 participant 直调 Authority、root barrel 回流和 producer 漏改绑。
+- 交接与失效：A5-02 完成，等待协调者独立复核；A5 与 Delivery 行继续为 `[ ]`。Delivery application/Authority enqueue 签名、participant 八类来源映射、Conversation/Job/Scheduler producer、Anchor participant 组合、owner-kernel delivery subpath、S7/exports 或相关持久/恢复合同变化时，本记录失效并只重验上述闭包。下一检查点由协调者沿 Delivery 的 attempt/retry/uncertain/terminal 与 Channel effect 剩余责任选择最窄工作包，不得把本包扩大为整个 Delivery 迁移。
+- 协调者独立验收：从 Delivery application、Authority projection/fence、owner-kernel Correctness adapter、八条 producer 映射、两个 Anchor generation 与真实 Conversation/Job/Scheduler 消费端正反核对，确认领域拥有 retry/route/content/unique-index 入队决定，Correctness 只提供串行、投影、生命周期 binding 与同提交机制，participant 不再持有 Authority 或第二决定。独立完成 core/owner-kernel fresh build、Delivery application/participant/Scheduler/真实 CLI 组合 21/21、CLI typecheck、canonical S7 30/30、registry golden、fresh package exports 与 `git diff --check`；结合本包同基线 505/505 生产闭包证据，未发现旧直调、双写、持久格式或恢复语义漂移。接受 `A5-02-delivery-obligation-application-v1`；Delivery 的 attempt/retry/terminal 与 Channel effect 尚未迁移，因此 Delivery 行和 A5 继续为 `[ ]`。
 
 ## 十、用户提示词
 

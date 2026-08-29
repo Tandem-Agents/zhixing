@@ -586,9 +586,15 @@ export class DeliveryAuthority {
   prepareEnqueues(
     inputs: readonly DeliveryEnqueueInput[],
     commitAt: string,
+    decide: (
+      projection: DeliveryProjection,
+      inputs: readonly DeliveryEnqueueInput[],
+      commitAt: string,
+      lifecycleBindings: readonly (DeliveryLifecycleBinding | undefined)[],
+    ) => DeliveryEnqueueResult,
   ): DeliveryEnqueueResult {
     const bindings = this.#lifecycleBindings(inputs);
-    return prepareDeliveryEnqueues(this.#enqueueProjection, inputs, commitAt, bindings);
+    return decide(this.#enqueueProjection, inputs, commitAt, bindings);
   }
 
   async installLifecycleAdmission(input: DeliveryLifecycleAdmission): Promise<void> {

@@ -4,9 +4,14 @@ import {
   createDeliveryResolutionProductApiContribution,
   DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET,
   DELIVERY_RESOLVE_UNCERTAIN_COMMAND,
+  DeliveryObligationApplicationService,
   DeliveryUncertainResolutionApplicationService,
+  type DeliveryObligation,
+  type DeliveryObligationDecide,
   type DeliveryUncertainResolutionCommand,
 } from "./resolution-application.js";
+import { emptyDeliveryProjection } from "./authority.js";
+import type { DeliveryEnqueueInput } from "./types.js";
 
 const COMMAND: DeliveryUncertainResolutionCommand = {
   requestId: "resolution-1",
@@ -64,5 +69,72 @@ describe("Delivery uncertain-resolution application", () => {
     )).toThrow(
       "Missing Product API operation contribution: delivery.command.resolve-uncertain",
     );
+  });
+});
+
+describe("Delivery obligation application", () => {
+  const NOW = "2026-08-29T00:00:00.000Z";
+  const OBLIGATION: DeliveryObligation = {
+    keyBody: {
+      kind: "conversation-final-delivery",
+      conversationId: "conversation-1",
+      runId: "run-1",
+      commitRevision: 1,
+    },
+    intent: {
+      endpoint: {
+        kind: "channel",
+        target: { channelId: "feishu", to: "chat-1" },
+      },
+      content: { text: "done" },
+      priority: "normal",
+      source: { kind: "agent", conversationId: "conversation-1" },
+      createdAt: NOW,
+    },
+  };
+
+  it("owns retry policy and the sole enqueue decision while Correctness supplies projection", () => {
+    const prepare = vi.fn(
+      (
+        inputs: readonly DeliveryEnqueueInput[],
+        _commitAt: string,
+        decide: DeliveryObligationDecide,
+      ) => decide({
+        projection: emptyDeliveryProjection(),
+        lifecycleBindings: inputs.map(() => undefined),
+      }),
+    );
+    const application = new DeliveryObligationApplicationService(
+      {
+        coordinate: (operation) => operation(),
+        prepare,
+      },
+      { maxAttempts: 5 },
+    );
+
+    const result = application.prepare([OBLIGATION], NOW);
+
+    expect(result.accepted).toBe(true);
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(prepare.mock.calls[0]![0]).toEqual([
+      expect.objectContaining({
+        intent: expect.objectContaining({ maxAttempts: 5 }),
+      }),
+    ]);
+    expect(prepare.mock.calls[0]![1]).toBe(NOW);
+    expect("maxAttempts" in OBLIGATION.intent).toBe(false);
+    if (!result.accepted) throw new Error("expected accepted fixture");
+    expect(result.records).toHaveLength(1);
+    expect(result.items).toHaveLength(1);
+  });
+
+  it("rejects an invalid Delivery-owned retry policy before publication", () => {
+    expect(() => new DeliveryObligationApplicationService(
+      {
+        coordinate: (operation) => operation(),
+        prepare: vi.fn(),
+      },
+      { maxAttempts: 0 },
+    )).toThrow("Delivery max attempts must be a positive safe integer");
   });
 });

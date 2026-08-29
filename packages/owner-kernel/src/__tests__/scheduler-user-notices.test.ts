@@ -9,7 +9,7 @@ import {
 } from "@zhixing/core/authority";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
-import { OwnerDeliveryParticipant } from "../delivery-participant.js";
+import { createOwnerDeliveryParticipant } from "../delivery-obligation-correctness.js";
 import { SchedulerUserNoticeJournal } from "../scheduler-user-notices.js";
 import {
   DURABLE_IO_TEST_TIMEOUT_MS,
@@ -24,7 +24,7 @@ async function createHarness() {
   const log = trackAuthorityLog(new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
     clock: () => NOW,
   }));
-  const delivery = new OwnerDeliveryParticipant({
+  const delivery = createOwnerDeliveryParticipant({
     authority: new DeliveryAuthority({ log, anchorEpoch: 3 }),
   });
   return {

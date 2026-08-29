@@ -13,6 +13,7 @@ const [
   rpcRoot,
   rpcSkillCatalogClient,
   ownerKernel,
+  ownerKernelDelivery,
   ownerKernelControlAdmission,
   ownerKernelConversationAssignment,
   server,
@@ -45,6 +46,7 @@ const [
   import("../packages/rpc/dist/index.js"),
   import("../packages/rpc/dist/skill-catalog-client.js"),
   import("../packages/owner-kernel/dist/index.js"),
+  import("../packages/owner-kernel/dist/delivery.js"),
   import("../packages/owner-kernel/dist/control-admission.js"),
   import("../packages/owner-kernel/dist/conversation-assignment.js"),
   import("../packages/server/dist/index.js"),
@@ -612,12 +614,21 @@ async function verifyCorePackageExports(failures) {
       "./dist/delivery/resolution-application.js" ||
     typeof coreDeliveryApplication.DeliveryUncertainResolutionApplicationService !==
       "function" ||
+    typeof coreDeliveryApplication.DeliveryObligationApplicationService !==
+      "function" ||
     typeof coreDeliveryApplication.createDeliveryResolutionProductApiContribution !==
       "function" ||
     "DeliveryUncertainResolutionApplicationService" in coreRoot ||
+    "DeliveryObligationApplicationService" in coreRoot ||
     "createDeliveryResolutionProductApiContribution" in coreRoot
   ) {
     failures.push("core-exports:delivery-application:invalid-runtime-boundary");
+  }
+  if (
+    typeof ownerKernelDelivery.createOwnerDeliveryParticipant !== "function" ||
+    "createOwnerDeliveryParticipant" in ownerKernel
+  ) {
+    failures.push("owner-kernel-exports:delivery-obligation:invalid-runtime-boundary");
   }
   for (const [subpath, conditions] of Object.entries(manifest.exports)) {
     if (

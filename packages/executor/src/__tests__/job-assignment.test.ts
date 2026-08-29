@@ -70,6 +70,7 @@ import {
   OwnerDeliveryParticipant,
   SchedulerUserNoticeJournal,
 } from "@zhixing/owner-kernel";
+import { createOwnerDeliveryParticipant } from "@zhixing/owner-kernel/delivery";
 import {
   InProcessJobDispatcher,
   JOB_JOURNAL_RECORD_SHAPES,
@@ -217,7 +218,7 @@ function assignmentPlan(
 }
 
 function deliveryParticipant(log: FileAuthorityCommitLog): OwnerDeliveryParticipant {
-  return new OwnerDeliveryParticipant({
+  return createOwnerDeliveryParticipant({
     authority: new DeliveryAuthority({ log, anchorEpoch: 3 }),
   });
 }

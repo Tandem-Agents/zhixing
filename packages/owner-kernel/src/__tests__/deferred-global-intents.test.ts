@@ -24,7 +24,7 @@ import {
   type DeferredIntentConversationAuthority,
 } from "../deferred-global-intents.js";
 import { ConversationRunJournal } from "../conversation-assignment.js";
-import { OwnerDeliveryParticipant } from "../delivery.js";
+import { createOwnerDeliveryParticipant } from "../delivery.js";
 import {
   DURABLE_IO_TEST_TIMEOUT_MS,
   trackAuthorityLog,
@@ -137,7 +137,7 @@ async function journalHarness() {
     submission: { authenticate() {}, authorize() {} },
     authority: { decideAtPrefix: () => ({ committed: true, commitRevision: 1 }) },
     projection: { async project() {} },
-    delivery: new OwnerDeliveryParticipant({
+    delivery: createOwnerDeliveryParticipant({
       authority: new DeliveryAuthority({ log, anchorEpoch: 1 }),
     }),
     clock: () => NOW,

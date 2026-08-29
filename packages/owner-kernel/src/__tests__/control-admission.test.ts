@@ -27,7 +27,7 @@ import {
   type TrustedControlSource,
 } from "../control-admission.js";
 import { ConversationRunJournal } from "../conversation-assignment.js";
-import { OwnerDeliveryParticipant } from "../delivery.js";
+import { createOwnerDeliveryParticipant } from "../delivery.js";
 import {
   DURABLE_IO_TEST_TIMEOUT_MS,
   trackAuthorityLog,
@@ -910,7 +910,7 @@ describe("ControlAdmissionJournal", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () 
         decideAtPrefix: () => ({ committed: true, commitRevision: 1 }),
       },
       projection: { async project() {} },
-      delivery: new OwnerDeliveryParticipant({
+      delivery: createOwnerDeliveryParticipant({
         authority: new DeliveryAuthority({ log, anchorEpoch: 1 }),
       }),
       clock: () => NOW,
@@ -1083,7 +1083,7 @@ describe("workscene session owner metadata", { timeout: DURABLE_IO_TEST_TIMEOUT_
         decideAtPrefix: () => ({ committed: true, commitRevision: 1 }),
       },
       projection: { async project() {} },
-      delivery: new OwnerDeliveryParticipant({
+      delivery: createOwnerDeliveryParticipant({
         authority: new DeliveryAuthority({ log, anchorEpoch: 1 }),
       }),
       clock: () => NOW,
