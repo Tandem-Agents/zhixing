@@ -11,7 +11,9 @@ import {
 export type AssemblyLifecycleTransferStage =
   | "foundation"
   | "surface"
-  | "runtime";
+  | "post-server"
+  | "runtime"
+  | "activation";
 
 interface AssemblyLifecycleDescriptor extends CleanupRegistrationDescriptor {
   readonly stage: AssemblyLifecycleTransferStage;
@@ -99,8 +101,58 @@ export const ASSEMBLY_LIFECYCLE_DESCRIPTORS = [
   },
 ] as const satisfies readonly AssemblyLifecycleDescriptor[];
 
+/**
+ * Runtime responsibilities that become normal-close owners only while the
+ * prepared Anchor endpoint is still behind its activation gate. Registration
+ * order is the existing CleanupRegistry order; normal close observes its LIFO
+ * inverse. Conditional resources simply omit their contribution.
+ */
+export const ANCHOR_RUNTIME_LIFECYCLE_DESCRIPTORS = [
+  {
+    owner: "anchor-host",
+    role: "surface",
+    id: "confirmationBridge.dispose",
+    stage: "post-server",
+  },
+  {
+    owner: "anchor-host",
+    role: "runtime",
+    id: "execution.abortAllAndWait",
+    stage: "activation",
+  },
+  {
+    owner: "anchor-host",
+    role: "runtime",
+    id: "conversationProtocol.stopRecovery",
+    stage: "activation",
+  },
+  {
+    owner: "anchor-host",
+    role: "runtime",
+    id: "scheduler.stop",
+    stage: "activation",
+  },
+  {
+    owner: "anchor-host",
+    role: "runtime",
+    id: "inboundRouter.refuseNew",
+    stage: "activation",
+  },
+  {
+    owner: "anchor-local-executor",
+    role: "runtime",
+    id: "evidenceHandler.stopAccepting",
+    stage: "activation",
+  },
+] as const satisfies readonly AssemblyLifecycleDescriptor[];
+
+const ALL_ASSEMBLY_LIFECYCLE_DESCRIPTORS = [
+  ...ASSEMBLY_LIFECYCLE_DESCRIPTORS,
+  ...ANCHOR_RUNTIME_LIFECYCLE_DESCRIPTORS,
+] as const;
+
 export type AssemblyLifecycleIdentity =
-  (typeof ASSEMBLY_LIFECYCLE_DESCRIPTORS)[number]["id"];
+  (typeof ALL_ASSEMBLY_LIFECYCLE_DESCRIPTORS)[number]["id"];
 
 interface StoredContribution {
   readonly handle: StartupCleanupHandle;
@@ -161,7 +213,7 @@ export class AssemblyLifecycleContributions {
     if (this.#transferredStages.has(stage)) {
       throw new Error(`Assembly lifecycle stage already transferred: ${stage}`);
     }
-    for (const descriptor of ASSEMBLY_LIFECYCLE_DESCRIPTORS) {
+    for (const descriptor of ALL_ASSEMBLY_LIFECYCLE_DESCRIPTORS) {
       if (descriptor.stage !== stage) continue;
       const contribution = this.#entries.get(descriptor.id);
       if (!contribution) continue;
@@ -169,6 +221,37 @@ export class AssemblyLifecycleContributions {
       contribution.transferred = true;
     }
     this.#transferredStages.add(stage);
+  }
+
+  transferExactTo(
+    registry: CleanupRegistry,
+    stage: "post-server" | "activation",
+    expected: readonly AssemblyLifecycleIdentity[],
+  ): void {
+    const expectedSet = new Set(expected);
+    if (expectedSet.size !== expected.length) {
+      throw new Error(`Assembly lifecycle expected duplicate ${stage} identity`);
+    }
+    for (const identity of expectedSet) {
+      if (descriptorFor(identity).stage !== stage) {
+        throw new Error(
+          `Assembly lifecycle identity ${identity} does not belong to stage ${stage}`,
+        );
+      }
+    }
+    const actual = ALL_ASSEMBLY_LIFECYCLE_DESCRIPTORS
+      .filter((descriptor) => descriptor.stage === stage)
+      .map((descriptor) => descriptor.id)
+      .filter((identity) => this.#entries.has(identity));
+    if (
+      actual.length !== expectedSet.size ||
+      actual.some((identity) => !expectedSet.has(identity))
+    ) {
+      throw new Error(
+        `Assembly lifecycle ${stage} exact-set mismatch: expected ${[...expectedSet].join(", ") || "none"}; got ${actual.join(", ") || "none"}`,
+      );
+    }
+    this.transferTo(registry, stage);
   }
 
   assertTransferred(): void {
@@ -197,8 +280,8 @@ export class AssemblyLifecycleContributions {
 
 function descriptorFor(
   identity: AssemblyLifecycleIdentity,
-): (typeof ASSEMBLY_LIFECYCLE_DESCRIPTORS)[number] {
-  const descriptor = ASSEMBLY_LIFECYCLE_DESCRIPTORS.find(
+): (typeof ALL_ASSEMBLY_LIFECYCLE_DESCRIPTORS)[number] {
+  const descriptor = ALL_ASSEMBLY_LIFECYCLE_DESCRIPTORS.find(
     (candidate) => candidate.id === identity,
   );
   if (!descriptor) {

@@ -16,6 +16,7 @@ describe("production startup server ownership", () => {
 
   it("keeps the anchor endpoint inactive until every open prerequisite has one cleanup owner", async () => {
     const source = await readSource("command.ts");
+    const surfaces = await readSource("access-surfaces.ts");
     const bind = location(source, "const serverBinding = await bindServer");
     expect(bind).toBeLessThan(location(source, "await setupAssemblyUnits(assemblyUnits, ctx, \"pre-server\")"));
     expect(bind).toBeLessThan(location(source, "const stopResume = await stopCoordinator.resumeActive()"));
@@ -32,9 +33,17 @@ describe("production startup server ownership", () => {
       activation,
       'await setupAssemblyUnits(assemblyUnits, ctx, "post-server")',
     );
+    const postServerTransfer = location(
+      activation,
+      'lifecycleContributions.transferExactTo(\n        registry,\n        "post-server",',
+    );
     const runtimeTransfer = location(
       activation,
       'lifecycleContributions.transferTo(registry, "runtime")',
+    );
+    const activationTransfer = location(
+      activation,
+      'lifecycleContributions.transferExactTo(registry, "activation", [',
     );
     const transferComplete = location(
       activation,
@@ -47,11 +56,43 @@ describe("production startup server ownership", () => {
       expect(prerequisite).toBeGreaterThan(gate);
       expect(prerequisite).toBeLessThan(publish);
     }
-    expect(runtimeTransfer).toBeGreaterThan(contribution);
-    expect(transferComplete).toBeGreaterThan(runtimeTransfer);
+    expect(postServerTransfer).toBeGreaterThan(contribution);
+    expect(runtimeTransfer).toBeGreaterThan(postServerTransfer);
+    expect(activationTransfer).toBeGreaterThan(runtimeTransfer);
+    expect(transferComplete).toBeGreaterThan(activationTransfer);
     expect(cleanupCommit).toBeGreaterThan(transferComplete);
     expect(source).not.toContain("startupCleanups");
     expect(source).not.toContain("AssemblyStartupCleanups");
+    expect(source).not.toContain("cleanup: registry");
+    for (const identity of [
+      "execution.abortAllAndWait",
+      "conversationProtocol.stopRecovery",
+      "scheduler.stop",
+      "inboundRouter.refuseNew",
+      "evidenceHandler.stopAccepting",
+    ]) {
+      expect(source).not.toContain(`id: "${identity}"`);
+    }
+    expect(surfaces).not.toContain("registerCleanup(");
+    expect(location(surfaces, '"evidenceHandler.stopAccepting",'))
+      .toBeGreaterThan(location(surfaces, "const evidenceHandler = new ExecutorEvidenceHandler({"));
+    expect(location(surfaces, '"execution.abortAllAndWait",'))
+      .toBeGreaterThan(location(surfaces, "manager = new ConversationManager("));
+    expect(location(surfaces, '"inboundRouter.refuseNew",'))
+      .toBeGreaterThan(location(surfaces, "const router = result.router;"));
+    expect(location(surfaces, '"confirmationBridge.dispose",'))
+      .toBeGreaterThan(location(surfaces, "const confirmationBridge = createConfirmationBridge({"));
+    expect(location(surfaces, '"conversationProtocol.stopRecovery",'))
+      .toBeLessThan(location(surfaces, "protocol.startRecoveryLoop();"));
+    const schedulerHandle = location(source, "schedulerCleanup = startupRollback.register(");
+    const schedulerContribution = location(
+      source,
+      'lifecycleContributions.contribute("scheduler.stop", schedulerCleanup)',
+    );
+    expect(schedulerContribution).toBeGreaterThan(schedulerHandle);
+    expect(schedulerContribution).toBeLessThan(
+      location(source, "await installSchedulerGeneration(schedulerRuntime, false)"),
+    );
     expect(ready).toBeGreaterThan(publish);
     expect(location(source, "await runner.waitForShutdown()"))
       .toBeGreaterThan(location(source, "runner = await runServer"));

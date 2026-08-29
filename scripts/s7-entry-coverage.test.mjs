@@ -1727,6 +1727,46 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
   );
   assert.match(
     inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        'ctx.lifecycleContributions.acquire(\n      "confirmationBridge.dispose",',
+        'registerCleanup(ctx.cleanup,\n      "confirmationBridge.dispose",',
+      ),
+    )).join("\n"),
+    /Anchor activation-gate runtime lifecycle contribution ownership drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        'ctx.lifecycleContributions.acquire(\n      "conversationProtocol.stopRecovery",\n      () => protocol.stopRecoveryLoop(),\n    );\n    protocol.startRecoveryLoop();',
+        'protocol.startRecoveryLoop();\n    ctx.lifecycleContributions.acquire(\n      "conversationProtocol.stopRecovery",\n      () => protocol.stopRecoveryLoop(),\n    );',
+      ),
+    )).join("\n"),
+    /Anchor activation-gate runtime lifecycle contribution ownership drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        'lifecycleContributions.transferExactTo(registry, "activation", [',
+        'lifecycleContributions.transferExactTo(registry, "runtime", [',
+      ),
+    )).join("\n"),
+    /Anchor activation-gate runtime lifecycle contribution ownership drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "      lifecycleContributions.assertTransferred();",
+        '      registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "inboundRouter.refuseNew" }, () => undefined);\n      lifecycleContributions.assertTransferred();',
+      ),
+    )).join("\n"),
+    /Anchor activation-gate runtime lifecycle contribution ownership drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
       "packages/cli/src/serve/assembly-lifecycle.ts",
       (text) => text.replace(
         "contribution.handle.run()",

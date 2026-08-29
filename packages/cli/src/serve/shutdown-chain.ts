@@ -23,7 +23,6 @@ import type {
   ProcessLockPaths,
   ExitReason,
 } from "@zhixing/server";
-import type { SchedulerBackend } from "@zhixing/core";
 import type { AssemblyLifecycleContributions } from "./assembly-lifecycle.js";
 
 /**
@@ -43,7 +42,6 @@ export interface TailCleanupResources {
 export interface CoreCleanupResources {
   stateFile?: ServerStateFile;
   heartbeatTimerRef: { current: NodeJS.Timeout | null };
-  scheduler?: SchedulerBackend;
   readonly lifecycleContributions: AssemblyLifecycleContributions;
 }
 
@@ -96,8 +94,7 @@ export function registerTailCleanup(
  *   2. channels.dispose         （⑤ —— 权威投递收口后断通道）
  *   3. deliveryStack.stop       （④ —— 先排空权威投递栈）
  *   4. mcpHub.dispose           （③ —— 关 MCP 连接 / stdio 子进程）
- *   5. scheduler.stop           （② —— 停调度器）
- *   6. stateFile.markStopping   （① —— 最先执行：对外宣告停机）
+ *   5. stateFile.markStopping   （① —— 最先执行：对外宣告停机）
  *
  * 为什么这些在 activation gate 内、`server.close` 之后注册：
  * - pre-server lifecycle contributions 与 scheduler 在 runServer 之前已经启动，但
@@ -114,11 +111,6 @@ export function registerCoreCleanup(
     if (t) clearInterval(t);
   });
   resources.lifecycleContributions.transferTo(registry, "surface");
-  if (resources.scheduler) {
-    registerCleanup(registry, { owner: "anchor-host", role: "common", id: "scheduler.stop" }, async () => {
-      await resources.scheduler!.stop();
-    });
-  }
   if (resources.stateFile) {
     registerCleanup(registry, { owner: "anchor-host", role: "common", id: "stateFile.markStopping" }, async (reason) => {
       await resources.stateFile!.markStopping(mapReasonToExit(reason));

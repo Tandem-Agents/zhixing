@@ -65,7 +65,6 @@ import {
   EvidenceJournal,
   ExecutorEvidenceHandler,
 } from "@zhixing/orchestrator/advancement";
-import { registerCleanup } from "@zhixing/server";
 import { LocalConversationOwnerAssembly } from "./local-conversation-owner.js";
 import { localConversationOwnerRuntime } from "./conversation-owner-runtime.js";
 import { createConversationEvidenceAuthorityVerifier } from "./conversation-evidence-authority.js";
@@ -153,7 +152,7 @@ const authorityRuntimeSurface: AccessSurface = {
       if (!authorityRuntime.environment) {
         throw new Error("Executor evidence requires the local environment authority");
       }
-      ctx.evidenceHandler = new ExecutorEvidenceHandler({
+      const evidenceHandler = new ExecutorEvidenceHandler({
         executorId: authorityRuntime.executorId,
         environment: authorityRuntime.environment,
         journal: new EvidenceJournal({
@@ -177,6 +176,11 @@ const authorityRuntimeSurface: AccessSurface = {
         }),
         capacity: ctx.advancementCapacity,
       });
+      ctx.lifecycleContributions.acquire(
+        "evidenceHandler.stopAccepting",
+        () => evidenceHandler.stopAccepting(),
+      );
+      ctx.evidenceHandler = evidenceHandler;
     }
     const jobStatus = new JobStatusDirectory();
     jobStatus.onStatus((notice) => {
@@ -658,6 +662,13 @@ const conversationSurface: AccessSurface = {
       },
       durableTurnExecutor: protocol,
     });
+    ctx.lifecycleContributions.acquire(
+      "execution.abortAllAndWait",
+      () => manager.abortAllAndWait(
+        { kind: "external", origin: "scheduler-shutdown" },
+        30_000,
+      ).then(() => undefined),
+    );
     if (ctx.executorDataPlane) {
       ctx.executorDataPlane.bindLedger(protocol.executorLedger());
       await ctx.executorDataPlane.start();
@@ -945,8 +956,15 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
         );
         losslessDataPlane.bindChannels(result.registry);
         ctx.channels = result.registry;
-        ctx.inboundRouter = result.router;
-        if (ctx.startupLifecycle) result.router?.refuseNewMessages();
+        const router = result.router;
+        ctx.inboundRouter = router;
+        if (router) {
+          ctx.lifecycleContributions.acquire(
+            "inboundRouter.refuseNew",
+            () => router.refuseNewMessages(),
+          );
+        }
+        if (ctx.startupLifecycle) router?.refuseNewMessages();
         ctx.channelConnections = {
           ready: result.connectionTask,
           connectConfigured: result.connectConfigured,
@@ -1011,25 +1029,23 @@ const deliverySurface: AccessSurface = {
 
 /**
  * 远程确认桥 —— hub 事件 → RPC notification；依赖 runServer 之后的 server.connections
- * 与会话执行面。post-server 阶段，teardown 在此 setup 内自注册（时序正确）。
+ * 与会话执行面。post-server 阶段取得同一 rollback provenance handle，随后由
+ * activation gate 统一移交正常关闭链。
  */
 const confirmationBridgeSurface: AccessSurface = {
   name: "confirmation-bridge",
   phase: "post-server",
   async setup(ctx) {
-    const { conversations, confirmationHub, runner, cleanup } = ctx;
+    const { conversations, confirmationHub, runner } = ctx;
     if (!conversations || !runner) return;
     const confirmationBridge = createConfirmationBridge({
       connections: runner.server.connections,
       hub: confirmationHub,
       conversations,
     });
-    registerCleanup(
-      cleanup,
-      { owner: "anchor-host", role: "surface", id: "confirmationBridge.dispose" },
-      () => {
-        confirmationBridge.dispose();
-      },
+    ctx.lifecycleContributions.acquire(
+      "confirmationBridge.dispose",
+      () => confirmationBridge.dispose(),
     );
   },
 };
@@ -1041,6 +1057,10 @@ const conversationRecoverySurface: AccessSurface = {
   async setup(ctx) {
     const protocol = ctx.conversationProtocol;
     if (!protocol || ctx.startupLifecycle) return;
+    ctx.lifecycleContributions.acquire(
+      "conversationProtocol.stopRecovery",
+      () => protocol.stopRecoveryLoop(),
+    );
     protocol.startRecoveryLoop();
   },
 };

@@ -564,47 +564,55 @@ export function collectCleanupRegistrationsFromSource(relative, text) {
 }
 
 function collectAssemblyLifecycleDescriptors(relative, source) {
-  let initializer;
+  const initializers = new Map();
   for (const statement of source.statements) {
     if (!ts.isVariableStatement(statement)) continue;
     for (const declaration of statement.declarationList.declarations) {
       if (
         ts.isIdentifier(declaration.name) &&
-        declaration.name.text === "ASSEMBLY_LIFECYCLE_DESCRIPTORS"
-      ) initializer = declaration.initializer;
+        [
+          "ASSEMBLY_LIFECYCLE_DESCRIPTORS",
+          "ANCHOR_RUNTIME_LIFECYCLE_DESCRIPTORS",
+        ].includes(declaration.name.text)
+      ) initializers.set(declaration.name.text, declaration.initializer);
     }
-  }
-  const table = unwrapStaticExpression(initializer);
-  if (!table || !ts.isArrayLiteralExpression(table)) {
-    throw new Error(`${relative}: assembly lifecycle descriptor table must be a literal array`);
   }
   const result = [];
-  for (const element of table.elements) {
-    const descriptor = unwrapStaticExpression(element);
-    if (!descriptor || !ts.isObjectLiteralExpression(descriptor)) {
-      throw new Error(`${relative}: assembly lifecycle descriptor must be an object literal`);
+  for (const tableName of [
+    "ASSEMBLY_LIFECYCLE_DESCRIPTORS",
+    "ANCHOR_RUNTIME_LIFECYCLE_DESCRIPTORS",
+  ]) {
+    const table = unwrapStaticExpression(initializers.get(tableName));
+    if (!table || !ts.isArrayLiteralExpression(table)) {
+      throw new Error(`${relative}: ${tableName} must be a literal array`);
     }
-    const owner = literalProperty(descriptor, "owner");
-    const role = literalProperty(descriptor, "role");
-    const id = literalProperty(descriptor, "id");
-    const stage = literalProperty(descriptor, "stage");
-    if (!owner || !role || !id) {
-      throw new Error(`${relative}: cleanup descriptor owner/role/id must be literal`);
+    for (const element of table.elements) {
+      const descriptor = unwrapStaticExpression(element);
+      if (!descriptor || !ts.isObjectLiteralExpression(descriptor)) {
+        throw new Error(`${relative}: assembly lifecycle descriptor must be an object literal`);
+      }
+      const owner = literalProperty(descriptor, "owner");
+      const role = literalProperty(descriptor, "role");
+      const id = literalProperty(descriptor, "id");
+      const stage = literalProperty(descriptor, "stage");
+      if (!owner || !role || !id) {
+        throw new Error(`${relative}: cleanup descriptor owner/role/id must be literal`);
+      }
+      if (!stage) {
+        throw new Error(`${relative}: assembly lifecycle stage must be literal`);
+      }
+      if (![
+        "anchor-host",
+        "anchor-local-executor",
+        "standalone-server",
+      ].includes(owner)) {
+        throw new Error(`${relative}: unknown cleanup owner ${owner}`);
+      }
+      if (!["foundation", "surface", "post-server", "runtime", "activation"].includes(stage)) {
+        throw new Error(`${relative}: unknown assembly lifecycle stage ${stage}`);
+      }
+      result.push({ owner, role, id, source: relative });
     }
-    if (!stage) {
-      throw new Error(`${relative}: assembly lifecycle stage must be literal`);
-    }
-    if (![
-      "anchor-host",
-      "anchor-local-executor",
-      "standalone-server",
-    ].includes(owner)) {
-      throw new Error(`${relative}: unknown cleanup owner ${owner}`);
-    }
-    if (!["foundation", "surface", "runtime"].includes(stage)) {
-      throw new Error(`${relative}: unknown assembly lifecycle stage ${stage}`);
-    }
-    result.push({ owner, role, id, source: relative });
   }
   return result;
 }
@@ -1139,24 +1147,96 @@ export function inspectManagedHostAssembly(records) {
     "executorJobOwner.close",
     "losslessDataPlane.close",
   ];
+  const anchorRuntimeLifecycleIds = [
+    "confirmationBridge.dispose",
+    "execution.abortAllAndWait",
+    "conversationProtocol.stopRecovery",
+    "scheduler.stop",
+    "inboundRouter.refuseNew",
+    "evidenceHandler.stopAccepting",
+  ];
+  const allAnchorLifecycleIds = [
+    ...assemblyLifecycleIds,
+    ...anchorRuntimeLifecycleIds,
+  ];
   const lifecycleDescriptors = collectCleanupRegistrationsFromSource(
     "packages/cli/src/serve/assembly-lifecycle.ts",
     assemblyLifecycle,
   );
-  const contributionCount = (identity) =>
-    count(accessSurfaces, `lifecycleContributions.acquire("${identity}"`) +
-    count(accessSurfaces, `lifecycleContributions.contribute(\n      "${identity}"`);
+  const contributionCount = (identity) => {
+    const escaped = identity.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    const pattern = new RegExp(
+      `lifecycleContributions\\.(?:acquire|contribute)\\(\\s*"${escaped}"`,
+      "gu",
+    );
+    return [...`${accessSurfaces}\n${command}`.matchAll(pattern)].length;
+  };
+  const postServerSetup = command.indexOf(
+    'await setupAssemblyUnits(assemblyUnits, ctx, "post-server")',
+  );
+  const postServerTransfer = command.indexOf(
+    'lifecycleContributions.transferExactTo(\n        registry,\n        "post-server",',
+    postServerSetup,
+  );
   const runtimeTransfer = command.indexOf(
     'lifecycleContributions.transferTo(registry, "runtime")',
   );
-  const transferAssertion = command.indexOf(
-    "lifecycleContributions.assertTransferred()",
+  const activationTransfer = command.indexOf(
+    'lifecycleContributions.transferExactTo(registry, "activation", [',
     runtimeTransfer,
   );
+  const transferAssertion = command.indexOf(
+    "lifecycleContributions.assertTransferred()",
+    activationTransfer,
+  );
   const rollbackCommit = command.indexOf("startupRollback.commit()", transferAssertion);
+  const schedulerHandle = command.indexOf("schedulerCleanup = startupRollback.register(");
+  const schedulerContribution = command.indexOf(
+    'lifecycleContributions.contribute("scheduler.stop", schedulerCleanup)',
+    schedulerHandle,
+  );
+  const schedulerFirstAwait = command.indexOf("await ", schedulerContribution);
+  const evidenceConstruction = accessSurfaces.indexOf(
+    "const evidenceHandler = new ExecutorEvidenceHandler({",
+  );
+  const evidenceContribution = accessSurfaces.indexOf(
+    '"evidenceHandler.stopAccepting",',
+    evidenceConstruction,
+  );
+  const evidenceFirstAwait = accessSurfaces.indexOf("await ", evidenceConstruction);
+  const managerConstruction = accessSurfaces.indexOf("manager = new ConversationManager(");
+  const executionContribution = accessSurfaces.indexOf(
+    '"execution.abortAllAndWait",',
+    managerConstruction,
+  );
+  const managerFirstEffect = accessSurfaces.indexOf(
+    "await ctx.executorDataPlane.start()",
+    managerConstruction,
+  );
+  const inboundConstruction = accessSurfaces.indexOf("const router = result.router;");
+  const inboundContribution = accessSurfaces.indexOf(
+    '"inboundRouter.refuseNew",',
+    inboundConstruction,
+  );
+  const inboundFirstAwait = accessSurfaces.indexOf("await ", inboundConstruction);
+  const confirmationConstruction = accessSurfaces.indexOf(
+    "const confirmationBridge = createConfirmationBridge({",
+  );
+  const confirmationContribution = accessSurfaces.indexOf(
+    '"confirmationBridge.dispose",',
+    confirmationConstruction,
+  );
+  const recoveryContribution = accessSurfaces.indexOf(
+    '"conversationProtocol.stopRecovery",',
+    confirmationContribution,
+  );
+  const recoveryStart = accessSurfaces.indexOf(
+    "protocol.startRecoveryLoop();",
+    recoveryContribution,
+  );
   if (
-    lifecycleDescriptors.length !== assemblyLifecycleIds.length ||
-    lifecycleDescriptors.map(({ id }) => id).join("\n") !== assemblyLifecycleIds.join("\n") ||
+    lifecycleDescriptors.length !== allAnchorLifecycleIds.length ||
+    lifecycleDescriptors.map(({ id }) => id).join("\n") !== allAnchorLifecycleIds.join("\n") ||
     assemblyLifecycleIds.some((identity) => contributionCount(identity) !== 1) ||
     [accessSurface, accessSurfaces, command, shutdownChain]
       .some((source) => source.includes("startupCleanups") || source.includes("AssemblyStartupCleanups")) ||
@@ -1173,6 +1253,32 @@ export function inspectManagedHostAssembly(records) {
     count(assemblyLifecycle, "if (!this.#rollback.owns(handle))") !== 1 ||
     count(assemblyLifecycle, "Assembly lifecycle contribution already exists") !== 1
   ) failures.push("Anchor pre-server lifecycle contribution ownership drifted");
+  if (
+    anchorRuntimeLifecycleIds.some((identity) => contributionCount(identity) !== 1) ||
+    accessSurface.includes("readonly cleanup: CleanupRegistry") ||
+    accessSurfaces.includes("registerCleanup(") ||
+    shutdownChain.includes("scheduler?: SchedulerBackend") ||
+    shutdownChain.includes('role: "common", id: "scheduler.stop"') ||
+    postServerSetup < 0 || postServerTransfer <= postServerSetup ||
+    runtimeTransfer <= postServerTransfer || activationTransfer <= runtimeTransfer ||
+    transferAssertion <= activationTransfer || rollbackCommit <= transferAssertion ||
+    schedulerHandle < 0 || schedulerContribution <= schedulerHandle ||
+    schedulerContribution >= schedulerFirstAwait ||
+    evidenceConstruction < 0 || evidenceContribution <= evidenceConstruction ||
+    evidenceContribution >= evidenceFirstAwait ||
+    managerConstruction < 0 || executionContribution <= managerConstruction ||
+    managerFirstEffect < 0 || executionContribution >= managerFirstEffect ||
+    inboundConstruction < 0 || inboundContribution <= inboundConstruction ||
+    inboundContribution >= inboundFirstAwait ||
+    confirmationConstruction < 0 || confirmationContribution <= confirmationConstruction ||
+    recoveryContribution <= confirmationContribution || recoveryStart <= recoveryContribution ||
+    count(assemblyLifecycle, "transferExactTo(") !== 1 ||
+    !assemblyLifecycle.includes("Assembly lifecycle ${stage} exact-set mismatch") ||
+    anchorRuntimeLifecycleIds.some((identity) =>
+      command.includes(`id: "${identity}"`) ||
+      accessSurfaces.includes(`id: "${identity}"`)
+    )
+  ) failures.push("Anchor activation-gate runtime lifecycle contribution ownership drifted");
   const executorRoleLifecycleIds = [
     "localConversationOwner.close",
     "evidenceHandler.stopAccepting",

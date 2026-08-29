@@ -38,7 +38,6 @@ function mkFullResources(heartbeatTimerRef = { current: null as NodeJS.Timeout |
       markStopped: vi.fn(async () => {}),
       markStopping: vi.fn(async () => {}),
     } as any,
-    scheduler: { stop: vi.fn(async () => {}) } as any,
     lifecycleContributions: lifecycleFor(),
   };
 }
@@ -88,7 +87,7 @@ describe("registerTailCleanup", () => {
 });
 
 describe("registerCoreCleanup", () => {
-  it("with full resources: registers 7 items in correct order", () => {
+  it("with full resources: registers 6 non-runtime items in correct order", () => {
     const registry = new CleanupRegistry({ logger: quietLogger() });
     const spy = vi.spyOn(registry, "register");
 
@@ -100,7 +99,6 @@ describe("registerCoreCleanup", () => {
       "channels.dispose",
       "deliveryStack.stop",
       "mcpHub.dispose",
-      "scheduler.stop",
       "stateFile.markStopping",
     ]);
   });
@@ -158,11 +156,6 @@ describe("LIFO execution order (spec §3.6.1 regression guard)", () => {
           order.push("stateFile.markStopping");
         }),
       } as any,
-      scheduler: {
-        stop: vi.fn(async () => {
-          order.push("scheduler.stop");
-        }),
-      } as any,
       lifecycleContributions: lifecycleFor({
         "channels.dispose": vi.fn(async () => {
           order.push("channels.dispose");
@@ -191,16 +184,15 @@ describe("LIFO execution order (spec §3.6.1 regression guard)", () => {
     // spec §3.6.1 要求的 LIFO 执行顺序
     expect(order).toEqual([
       "stateFile.markStopping", // ①
-      "scheduler.stop", // ②
-      "mcpHub.dispose", // ③ —— 先停调度再关 MCP 连接 / 子进程
-      "deliveryStack.stop", // ④ —— 先排空权威投递，再释放 transport
-      "channels.dispose", // ⑤
-      // heartbeat.clear 无副作用（timer=null），被跳过（⑥）
-      "authorityRuntime.stopStorageMaintenance", // ⑦
-      "server.close", // ⑧
-      "stateFile.markStopped", // ⑨
-      "stateFile.cleanup", // ⑩
-      // releaseLock 最后（⑪），但我们没 mock
+      "mcpHub.dispose", // ②
+      "deliveryStack.stop", // ③ —— 先排空权威投递，再释放 transport
+      "channels.dispose", // ④
+      // heartbeat.clear 无副作用（timer=null），被跳过（⑤）
+      "authorityRuntime.stopStorageMaintenance", // ⑥
+      "server.close", // ⑦
+      "stateFile.markStopped", // ⑧
+      "stateFile.cleanup", // ⑨
+      // releaseLock 最后（⑩），但我们没 mock
     ]);
   });
 
@@ -217,7 +209,7 @@ describe("LIFO execution order (spec §3.6.1 regression guard)", () => {
 
     // Before runAll, capture original functions and replace with order-tracking ones
     // 最干净的方式：用真实资源 mock（上一个测试已做），这里只断言 LIFO 计数
-    expect(registry.size).toBe(3 /* tail */ + 7 /* core */ + 1 /* server.close */);
+    expect(registry.size).toBe(3 /* tail */ + 6 /* core */ + 1 /* server.close */);
 
     await registry.runAll("test");
     expect(registry.finished).toBe(true);

@@ -40,11 +40,6 @@ describe("runtime lifecycle migration golden", () => {
           executed.push("stateFile.markStopping");
         },
       } as never,
-      scheduler: {
-        stop: async () => {
-          executed.push("scheduler.stop");
-        },
-      } as never,
       lifecycleContributions,
     };
 

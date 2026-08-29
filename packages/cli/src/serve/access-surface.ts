@@ -40,7 +40,6 @@ import type {
   InboundRouter,
   PerspectivesController,
   RunningServer,
-  CleanupRegistry,
   WorksceneDirectory,
 } from "@zhixing/server";
 import type {
@@ -169,11 +168,6 @@ export interface AssemblyContext {
   readonly advancementRecoveryRef: {
     current: AdvancementRecoveryMaintenance | null;
   };
-  /**
-   * 唯一清理出口（LIFO）。pre-server 接入面的 teardown 走 runServer 后的 shutdown-chain
-   * 注册（时序约束见文件头）；仅 post-server 接入面在自己 setup 内注册到这里。
-   */
-  readonly cleanup: CleanupRegistry;
   readonly startupRollback: StartupRollback;
   readonly lifecycleContributions: AssemblyLifecycleContributions;
   readonly channelHttpRoutes: Map<

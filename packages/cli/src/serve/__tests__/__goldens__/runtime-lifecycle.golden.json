@@ -1,7 +1,6 @@
 {
   "executed": [
     "stateFile.markStopping",
-    "scheduler.stop",
     "mcpHub.dispose",
     "deliveryStack.stop",
     "channels.dispose",
@@ -18,7 +17,6 @@
     "channels.dispose",
     "deliveryStack.stop",
     "mcpHub.dispose",
-    "scheduler.stop",
     "stateFile.markStopping"
   ]
 }

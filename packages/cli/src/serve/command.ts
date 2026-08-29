@@ -840,7 +840,6 @@ async function runServerProcess(
     sessionBroadcastRef,
     sessionActivityBroadcastRef,
     advancementRecoveryRef,
-    cleanup: registry,
     startupRollback,
     lifecycleContributions,
     channelHttpRoutes,
@@ -1090,6 +1089,7 @@ async function runServerProcess(
         await schedulerRuntime?.stop();
       },
     );
+    lifecycleContributions.contribute("scheduler.stop", schedulerCleanup);
     const installSchedulerGeneration = async (
       runtime: AnchorSchedulerRuntime,
       activate: boolean,
@@ -2243,63 +2243,35 @@ async function runServerProcess(
       });
 
       // post-server contribution 依赖 prepared server.connections，但不要求入口已激活。
-      // 它在自己 setup 内注册 dispose，故失败与正常关闭都由同一 registry 收口。
+      // 每个资源先进入同一 startup rollback，再由 gate 作有限、类型化移交。
       await setupAssemblyUnits(assemblyUnits, ctx, "post-server");
+
+      lifecycleContributions.transferExactTo(
+        registry,
+        "post-server",
+        ctx.conversations ? ["confirmationBridge.dispose"] : [],
+      );
 
       // pre-server units transfer their typed contributions in the established
       // registration order. The same handles remain idempotently owned by the
       // startup rollback until the full normal chain is complete.
       lifecycleContributions.transferTo(registry, "runtime");
 
-      // 远程中断模块关停链 —— LIFO 最先执行（在 channels.dispose / scheduler.stop / server.close 之前）：
-      //   1. inboundRouter.refuseNew  拒新入站，避免下游 drain 期间又来新消息
-      //   2. conversationProtocol.stopRecovery  等恢复协调器静默，禁止 drain 后再生任务
-      //   3. execution.abortAllAndWait  并行 fire abort + 等所有 in-flight 走完 cleanup
-      //                                 （partial yields + RunResult + 取消反馈）
-      // 必须 await drain —— 没有它 server.close / channels.dispose 抢断 partial 流和取消反馈，
-      // 违反"关停期反馈不丢"。30s 总超时兜底由 abortAllAndWait 自身实现，超时不抛直接进下一步。
-      registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "execution.abortAllAndWait" }, async () => {
-        await Promise.all([
-          ...(ctx.conversations
-            ? [
-                ctx.conversations.abortAllAndWait(
-                  { kind: "external", origin: "scheduler-shutdown" },
-                  30_000,
-                ),
-              ]
-            : []),
-        ]);
-      });
-
-      if (ctx.conversationProtocol) {
-        const protocol = ctx.conversationProtocol;
-        registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "conversationProtocol.stopRecovery" }, async () => {
-          await protocol.stopRecoveryLoop();
-        });
-      }
-
-      // Scheduler owns trigger admission and job recovery loops. Stop it before
-      // executor/job/channel owners are released so no new occurrence can enter
-      // while every accepted assignment is already durable and restartable.
-      if (schedulerCleanup) {
-        registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "scheduler.stop" }, async () => {
-          await schedulerCleanup!.run();
-        });
-      }
-
-      if (ctx.inboundRouter) {
-        const router = ctx.inboundRouter;
-        registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "inboundRouter.refuseNew" }, () => {
-          router.refuseNewMessages();
-        });
-      }
-
-      if (ctx.evidenceHandler) {
-        const evidenceHandler = ctx.evidenceHandler;
-        registerCleanup(registry, { owner: "anchor-local-executor", role: "runtime", id: "evidenceHandler.stopAccepting" }, () => {
-          evidenceHandler.stopAccepting();
-        });
-      }
+      lifecycleContributions.transferExactTo(registry, "activation", [
+        ...(ctx.conversations ? ["execution.abortAllAndWait" as const] : []),
+        ...(
+          ctx.conversationProtocol && !startupLifecycle
+            ? ["conversationProtocol.stopRecovery" as const]
+            : []
+        ),
+        ...(schedulerCleanup ? ["scheduler.stop" as const] : []),
+        ...(ctx.inboundRouter ? ["inboundRouter.refuseNew" as const] : []),
+        ...(
+          ctx.evidenceHandler
+            ? ["evidenceHandler.stopAccepting" as const]
+            : []
+        ),
+      ]);
 
       // 正常停机链已经完整接管所有已取得资源；启动补偿事务不再持有独立责任。
       lifecycleContributions.assertTransferred();
