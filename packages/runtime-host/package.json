@@ -17,6 +17,10 @@
       "types": "./dist/runtime-host.d.ts",
       "import": "./dist/runtime-host.js"
     },
+    "./conversation-runtime-projection": {
+      "types": "./dist/conversation-runtime-projection.d.ts",
+      "import": "./dist/conversation-runtime-projection.js"
+    },
     "./builtin-extra-tools": {
       "types": "./dist/builtin-extra-tools.d.ts",
       "import": "./dist/builtin-extra-tools.js"

@@ -21,6 +21,7 @@ import {
   inspectAgentRuntimeSecurityEncapsulation,
   inspectAgentRuntimeWorkspaceEncapsulation,
   inspectTurnContextProviderAssembly,
+  inspectWorksceneRuntimeProjectionBoundary,
   inspectLocalConversationOwnerIsolation,
   inspectManagedHostAssembly,
   inspectPlannedAnchorTransferAssembly,
@@ -2356,6 +2357,7 @@ test("Kernel run input has one finite Envelope owner and three production bindin
     "packages/runtime-host/src/runtime-host.ts",
     "packages/cli/src/serve/ephemeral-executor.ts",
     "packages/cli/src/serve/agent-job-runtime.ts",
+    "packages/cli/src/serve/workscene-runtime-projection.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -2773,6 +2775,98 @@ test("TurnContext providers are fixed assembly input before every RuntimeHost is
       (text) => `${text}\nconst turnContextProviders = [\"scheduler\"];`,
     )).join("\n"),
     /ExecutorRuntimeSubstrate/,
+  );
+});
+
+test("Workscene product projection is outside the one generic RuntimeHost issuance", async () => {
+  const paths = [
+    "packages/runtime-host/src/runtime-host.ts",
+    "packages/runtime-host/src/index.ts",
+    "packages/runtime-host/src/conversation-runtime-projection.ts",
+    "packages/orchestrator/src/runtime/kernel-runtime-identity.ts",
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+    "packages/runtime-host/src/builtin-extra-tools.ts",
+    "packages/cli/src/serve/workscene-runtime-projection.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectWorksceneRuntimeProjectionBoundary(records), []);
+  assert.match(
+    inspectWorksceneRuntimeProjectionBoundary(mutate(
+      "packages/runtime-host/src/runtime-host.ts",
+      (text) => `${text}\nconst worksceneDirectory = {};`,
+    )).join("\n"),
+    /RuntimeHost still owns/,
+  );
+  assert.match(
+    inspectWorksceneRuntimeProjectionBoundary(mutate(
+      "packages/runtime-host/src/runtime-host.ts",
+      (text) => text.replace("assertConversationRuntimeProjection(projection);", ""),
+    )).join("\n"),
+    /can bypass Workscene product projection/,
+  );
+  assert.match(
+    inspectWorksceneRuntimeProjectionBoundary(mutate(
+      "packages/runtime-host/src/index.ts",
+      (text) => `${text}\nexport * from "./conversation-runtime-projection.js";`,
+    )).join("\n"),
+    /leaked through the RuntimeHost package root/,
+  );
+  assert.match(
+    inspectWorksceneRuntimeProjectionBoundary(mutate(
+      "packages/runtime-host/src/conversation-runtime-projection.ts",
+      (text) => `${text}\nconst sceneId = "host-owned";`,
+    )).join("\n"),
+    /generic conversation projection/,
+  );
+  assert.match(
+    inspectWorksceneRuntimeProjectionBoundary(mutate(
+      "packages/orchestrator/src/runtime/kernel-runtime-identity.ts",
+      (text) => text.replace("keys.length !== 1 ||", "false ||"),
+    )).join("\n"),
+    /Kernel runtime identity contribution/,
+  );
+  assert.match(
+    inspectWorksceneRuntimeProjectionBoundary(mutate(
+      "packages/runtime-host/src/builtin-extra-tools.ts",
+      (text) => text.replace(
+        "scheduler: () => SchedulerFacade;",
+        "scheduler: () => SchedulerFacade;\n  spec?: { kind: \"workscene\" };",
+      ),
+    )).join("\n"),
+    /still selects Workscene product tools/,
+  );
+  assert.match(
+    inspectWorksceneRuntimeProjectionBoundary(mutate(
+      "packages/cli/src/serve/workscene-runtime-projection.ts",
+      (text) => text.replace("    createWorksceneListTool(workscenes),", ""),
+    )).join("\n"),
+    /capability exact-set drifted/,
+  );
+  assert.match(
+    inspectWorksceneRuntimeProjectionBoundary(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "capabilities: worksceneRuntimeProjections.capabilityCatalog()",
+        "capabilities: runtimeHost.capabilityCatalog()",
+      ),
+    )).join("\n"),
+    /production graph/,
+  );
+  assert.match(
+    inspectWorksceneRuntimeProjectionBoundary(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => `${text}\nvoid runtimeHost.createWorksceneRuntime({} as never);`,
+    )).join("\n"),
+    /production graph|retired Workscene RuntimeHost entry/,
   );
 });
 

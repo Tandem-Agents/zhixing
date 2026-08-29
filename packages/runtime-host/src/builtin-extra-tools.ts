@@ -31,16 +31,6 @@ import {
   TaskListService,
   type TaskListStore,
 } from "@zhixing/tools-builtin";
-import {
-  createWorkmodeEnterTool,
-  createWorkmodeExitTool,
-  createWorksceneChangeApproveTool,
-  createWorksceneClearWorkdirCurrentTool,
-  createWorksceneListTool,
-  createWorksceneRenameCurrentTool,
-  createWorksceneSetWorkdirCurrentTool,
-  type WorksceneToolDirectory,
-} from "./workmode-tools.js";
 
 export const BUILTIN_EXTRA_TOOL_CAPABILITIES = [
   {
@@ -110,20 +100,6 @@ export const BUILTIN_EXTRA_TOOL_CAPABILITIES = [
  */
 export interface ExtraToolsRuntimeContext {
   scheduler: () => SchedulerFacade;
-  /**
-   * 本次 runtime 的模式 —— 决定追加哪组 workscene 工具（by-construction 隔离：
-   * power 物理不持有 main-only 工具）。缺省视为 main（无 workmode
-   * 概念的装配点不必显式传）。
-   */
-  spec?:
-    | { kind: "main" }
-    | { kind: "workscene"; sceneId: string; sceneName: string };
-  /**
-   * 工作场景领域服务 getter —— assembly 早于 per-runtime 实例发放，故用 getter
-   * 延迟取（与 `scheduler` getter 同构解鸡生蛋）。仅 main 组 workmode 工具需要；
-   * workscene 的 exit 工具零依赖。
-   */
-  worksceneDirectory?: () => WorksceneToolDirectory;
 }
 
 export interface BuiltinExtraToolsAssembly {
@@ -189,35 +165,6 @@ export function createBuiltinExtraToolsAssembly(
       // 不注入；catalog 在 connectAll 后已就绪，此处同步物化。
       for (const { server, tools: descriptors } of mcpHub.catalog()) {
         tools.push(...mapServerTools(server, descriptors, mcpHub.callTool));
-      }
-
-      // workscene 工具组按 spec.kind 二分注入 —— by-construction 隔离：
-      // power runtime 物理不持有 main-only 工具，main 物理不持有 workmode_exit。
-      // exit 零依赖恒装(意图经 ALS 发当前 run 的 bus,所有组合形态共用同一工具);
-      // main 组(enter / 变更审批 / 管理列表)依赖工作场景领域服务,
-      // 仅服务在场装配。
-      const kind = ctx.spec?.kind ?? "main";
-      if (kind === "workscene") {
-        tools.push(createWorkmodeExitTool());
-        if (ctx.worksceneDirectory && ctx.spec?.kind === "workscene") {
-          const workscenes = ctx.worksceneDirectory();
-          const scene = {
-            sceneId: ctx.spec.sceneId,
-            sceneName: ctx.spec.sceneName,
-          };
-          tools.push(
-            createWorksceneRenameCurrentTool(workscenes, scene),
-            createWorksceneSetWorkdirCurrentTool(scene, workscenes),
-            createWorksceneClearWorkdirCurrentTool(scene),
-          );
-        }
-      } else if (ctx.worksceneDirectory) {
-        const workscenes = ctx.worksceneDirectory();
-        tools.push(
-          createWorkmodeEnterTool(workscenes),
-          createWorksceneChangeApproveTool(workscenes),
-          createWorksceneListTool(workscenes),
-        );
       }
 
       return tools;

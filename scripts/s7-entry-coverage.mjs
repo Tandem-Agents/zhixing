@@ -7,6 +7,7 @@ import { SKILL_COMMAND_SOURCE_DESCRIPTOR } from "../packages/cli/src/commands/sk
 import { captureCliCommandDescriptor } from "../packages/cli/src/index.ts";
 import { captureChannelAdapterFactoryDescriptor } from "../packages/cli/src/serve/channels.ts";
 import { planServeTopology } from "../packages/cli/src/serve/role-topology.ts";
+import { createWorksceneRuntimeProjectionAssembly } from "../packages/cli/src/serve/workscene-runtime-projection.ts";
 import { SEGMENT_TRANSITION_HOOK_PHASES } from "../packages/core/src/context/segment/types.ts";
 import { AGENT_RUNTIME_LIFECYCLE_PHASES } from "../packages/orchestrator/src/runtime/lifecycle.ts";
 import { TASK_TOOL_CAPABILITY_DESCRIPTOR } from "../packages/orchestrator/src/tools/task.ts";
@@ -724,16 +725,29 @@ async function collectProductionConstants() {
     inert,
     { catalog: () => [], callTool: inert },
   );
-  const assembledNames = (kind) =>
-    new Set(
-      assembly.assembleTools({
-        scheduler: () => inert,
-        worksceneDirectory: () => inert,
-        spec: kind === "main"
-          ? { kind: "main" }
-          : { kind: "workscene", sceneId: "coverage", sceneName: "coverage" },
-      }).map((tool) => tool.name),
-    );
+  const productAssembly = createWorksceneRuntimeProjectionAssembly({
+    workscenes: inert,
+    extraTools: assembly,
+    scheduler: () => inert,
+  });
+  const assembledNames = (kind) => {
+    const projection = kind === "main"
+      ? productAssembly.main()
+      : productAssembly.scene({
+          scene: {
+            id: "coverage",
+            revision: 1,
+            name: "coverage",
+            createdAt: "1970-01-01T00:00:00.000Z",
+            lastActiveAt: "1970-01-01T00:00:00.000Z",
+          },
+          absolutePath: "/coverage",
+        });
+    return new Set([
+      ...assembly.assembleTools({ scheduler: () => inert }),
+      ...projection.productTools,
+    ].map((tool) => tool.name));
+  };
   const nonAuthorityNames = new Set(["workscene_list"]);
   for (const kind of ["main", "workscene"]) {
     const actual = [...assembledNames(kind)]
@@ -1034,6 +1048,9 @@ export function inspectKernelRunEnvelopeOwnership(records) {
   const ephemeral = required("packages/cli/src/serve/ephemeral-executor.ts");
   const durableJob = required("packages/cli/src/serve/agent-job-runtime.ts");
   const runtimeHost = required("packages/runtime-host/src/runtime-host.ts");
+  const worksceneProjection = required(
+    "packages/cli/src/serve/workscene-runtime-projection.ts",
+  );
 
   const sourceFile = ts.createSourceFile(
     envelopePath,
@@ -1196,8 +1213,9 @@ export function inspectKernelRunEnvelopeOwnership(records) {
 
   if (
     runtimeHost.split("createAgentRuntime({").length - 1 !== 1 ||
-    runtimeHost.split("return this.assemble(").length - 1 < 4 ||
-    !runtimeHost.includes('primaryRole: "power"')
+    runtimeHost.split("return this.assemble(").length - 1 < 3 ||
+    !worksceneProjection.includes('primaryRole: "power"') ||
+    !worksceneProjection.includes("input.issue(input.projections.scene(")
   ) {
     failures.push("Conversation, workscene/power or ephemeral runtime gained a second Kernel assembly path");
   }
@@ -2127,7 +2145,7 @@ export function inspectTurnContextProviderAssembly(records) {
     !host.includes("...(turnContextProviders ? { turnContextProviders } : {}),") ||
     host.indexOf("const turnContextProviders = this.opts.turnContextProviders?.();") >
       host.indexOf("return createAgentRuntime({") ||
-    (host.match(/return this\.assemble\s*\(/gu) ?? []).length !== 4
+    (host.match(/return this\.assemble\s*\(/gu) ?? []).length !== 3
   ) {
     failures.push("RuntimeHost does not pass one pre-publication provider projection to every issuance path");
   }
@@ -2169,6 +2187,145 @@ export function inspectTurnContextProviderAssembly(records) {
   return failures;
 }
 
+/** A4 Workscene product decisions are projected before the generic RuntimeHost boundary. */
+export function inspectWorksceneRuntimeProjectionBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const source = byPath.get(relative);
+    if (source === undefined) failures.push(`${relative}: Workscene runtime projection source is missing`);
+    return source ?? "";
+  };
+  const host = required("packages/runtime-host/src/runtime-host.ts");
+  const hostRoot = required("packages/runtime-host/src/index.ts");
+  const projection = required(
+    "packages/runtime-host/src/conversation-runtime-projection.ts",
+  );
+  const kernelIdentity = required(
+    "packages/orchestrator/src/runtime/kernel-runtime-identity.ts",
+  );
+  const kernelAssembly = required(
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+  );
+  const baseTools = required("packages/runtime-host/src/builtin-extra-tools.ts");
+  const product = required("packages/cli/src/serve/workscene-runtime-projection.ts");
+  const command = required("packages/cli/src/serve/command.ts");
+  const executor = required("packages/cli/src/serve/executor-role-runtime.ts");
+
+  if (
+    /\b(?:WorksceneDto|WorksceneToolDirectory|powerProfile|createWorksceneRuntime|worksceneDirectory|capabilityCatalog)\b/iu.test(
+      host,
+    ) ||
+    /\bworkscene\b/iu.test(host) ||
+    /\bsceneId\b/u.test(host) ||
+    !host.includes("projection: ConversationRuntimeProjection") ||
+    !host.includes("assertConversationRuntimeProjection(projection);") ||
+    !host.includes("conversation: projection") ||
+    !host.includes("extraTools = [...extraTools, ...conversation.productTools];") ||
+    !host.includes("runtimeIdentity: conversation?.runtimeIdentity")
+  ) {
+    failures.push("RuntimeHost still owns or can bypass Workscene product projection");
+  }
+
+  if (
+    !projection.includes("export interface ConversationRuntimeProjection") ||
+    !projection.includes("export function createConversationRuntimeProjection(") ||
+    !projection.includes("export function assertConversationRuntimeProjection(") ||
+    !projection.includes("return Object.freeze({") ||
+    !projection.includes("assertKernelRuntimeIdentityContribution(") ||
+    !projection.includes("Conversation runtime projection must be immutable") ||
+    /\bsceneId\b|Record<string, unknown>|metadata/iu.test(projection)
+  ) {
+    failures.push("generic conversation projection is not finite, immutable and fail closed");
+  }
+
+  if (
+    hostRoot.includes("conversation-runtime-projection") ||
+    /\bConversationRuntimeProjection\b/u.test(hostRoot)
+  ) {
+    failures.push("conversation projection leaked through the RuntimeHost package root");
+  }
+
+  if (
+    !kernelIdentity.includes("export interface KernelRuntimeIdentityContribution") ||
+    !kernelIdentity.includes("export function createKernelRuntimeIdentityContribution(") ||
+    !kernelIdentity.includes("export function assertKernelRuntimeIdentityContribution(") ||
+    !kernelIdentity.includes("kernelRuntimeIdentityProvenance") ||
+    !kernelIdentity.includes("keys.length !== 1") ||
+    !kernelIdentity.includes("Object.isFrozen(identity)") ||
+    /Record<string, unknown>|metadata/iu.test(kernelIdentity) ||
+    !kernelAssembly.includes(
+      "assertKernelRuntimeIdentityContribution(options.runtimeIdentity);",
+    ) ||
+    !kernelAssembly.includes("const sceneId = options.runtimeIdentity?.sceneId;")
+  ) {
+    failures.push("Kernel runtime identity contribution is not finite and fail closed");
+  }
+
+  if (
+    /\bspec\??:|worksceneDirectory|createWorkmode|WorksceneToolDirectory/iu.test(baseTools) ||
+    !/export interface ExtraToolsRuntimeContext\s*\{\s*scheduler: \(\) => SchedulerFacade;\s*\}/u.test(
+      baseTools,
+    )
+  ) {
+    failures.push("BuiltinExtraToolsAssembly still selects Workscene product tools");
+  }
+
+  const expectedProductTools = [
+    "createWorkmodeEnterTool",
+    "createWorkmodeExitTool",
+    "createWorksceneChangeApproveTool",
+    "createWorksceneClearWorkdirCurrentTool",
+    "createWorksceneListTool",
+    "createWorksceneRenameCurrentTool",
+    "createWorksceneSetWorkdirCurrentTool",
+  ];
+  if (
+    !product.includes("export function createWorksceneRuntimeProjectionAssembly(") ||
+    !product.includes("export function createWorksceneConversationRuntimeFactory(") ||
+    !product.includes("createConversationRuntimeProjection({") ||
+    !product.includes("createKernelRuntimeIdentityContribution(options.scene.id)") ||
+    !product.includes("profile: mainProfile(") ||
+    !product.includes("profile: powerProfile(") ||
+    !product.includes("addProjection(main());") ||
+    (product.match(/addProjection\(scene\(/gu) ?? []).length !== 2 ||
+    expectedProductTools.some(
+      (factory) => (product.match(new RegExp(`\\b${factory}\\s*\\(`, "gu")) ?? []).length !== 1,
+    )
+  ) {
+    failures.push("Workscene product owner projection or capability exact-set drifted");
+  }
+
+  if (
+    (command.match(/createWorksceneRuntimeProjectionAssembly\s*\(/gu) ?? []).length !== 1 ||
+    (command.match(/createWorksceneConversationRuntimeFactory\s*\(/gu) ?? []).length !== 1 ||
+    (command.match(/runtimeHost\.createConversationRuntime\s*\(/gu) ?? []).length !== 1 ||
+    !command.includes("createAgentRuntime: createConversationAgentRuntime") ||
+    !command.includes("runtime: worksceneRuntimeProjections") ||
+    !command.includes("capabilities: worksceneRuntimeProjections.capabilityCatalog()") ||
+    /runtimeHost\.(?:createWorksceneRuntime|capabilityCatalog)\s*\(/u.test(command)
+  ) {
+    failures.push("Anchor production graph does not use the one Workscene projection owner");
+  }
+
+  if (
+    executor.includes("createWorksceneRuntimeProjectionAssembly") ||
+    executor.includes("createWorksceneConversationRuntimeFactory")
+  ) {
+    failures.push("ExecutorRuntimeSubstrate received the Anchor Workscene product owner");
+  }
+
+  for (const record of records) {
+    if (
+      record.relative !== "packages/cli/src/serve/workscene-runtime-projection.ts" &&
+      record.text.includes("createWorksceneRuntime(")
+    ) {
+      failures.push(`${record.relative}: retired Workscene RuntimeHost entry returned`);
+    }
+  }
+  return failures;
+}
+
 export async function validateS7Structure() {
   const files = await productionTypeScriptFiles(path.join(root, "packages"));
   const records = await Promise.all(files.map(async (absolute) => ({
@@ -2202,6 +2359,7 @@ export async function validateS7Structure() {
   failures.push(...inspectAgentRuntimeSecurityEncapsulation(records));
   failures.push(...inspectAgentRuntimeWorkspaceEncapsulation(records));
   failures.push(...inspectTurnContextProviderAssembly(records));
+  failures.push(...inspectWorksceneRuntimeProjectionBoundary(records));
   failures.push(...inspectSkillCatalogApplicationOwnership([
     ...records,
     {

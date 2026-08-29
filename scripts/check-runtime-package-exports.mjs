@@ -20,6 +20,7 @@ const [
   runtimeHost,
   runtimeHostSegmentDeps,
   runtimeHostSessionAdapter,
+  runtimeHostConversationProjection,
   executor,
   executorRuntimeRole,
   executorAssignmentLedger,
@@ -51,6 +52,7 @@ const [
   import("../packages/runtime-host/dist/index.js"),
   import("../packages/runtime-host/dist/segment-deps.js"),
   import("../packages/runtime-host/dist/session-adapter.js"),
+  import("../packages/runtime-host/dist/conversation-runtime-projection.js"),
   import("../packages/executor/dist/index.js"),
   import("../packages/executor/dist/runtime-role.js"),
   import("../packages/executor/dist/assignment-ledger.js"),
@@ -166,6 +168,25 @@ if (
   "projectAgentResultToKernelTerminal" in orchestratorRoot
 ) {
   failures.push("orchestrator-kernel-terminal:invalid-runtime-boundary");
+}
+if (
+  typeof orchestratorRuntime.createKernelRuntimeIdentityContribution !== "function" ||
+  typeof orchestratorRuntime.assertKernelRuntimeIdentityContribution !== "function" ||
+  "createKernelRuntimeIdentityContribution" in orchestratorRoot ||
+  "assertKernelRuntimeIdentityContribution" in orchestratorRoot
+) {
+  failures.push("orchestrator-kernel-runtime-identity:invalid-runtime-boundary");
+}
+for (const name of [
+  "assertConversationRuntimeProjection",
+  "createConversationRuntimeProjection",
+]) {
+  if (
+    typeof runtimeHostConversationProjection[name] !== "function" ||
+    name in runtimeHost
+  ) {
+    failures.push(`runtime-host-conversation-projection:${name}:invalid-subpath`);
+  }
 }
 if (
   typeof rpcSkillCatalogClient.SkillCatalogRpcClient !== "function" ||
@@ -321,6 +342,13 @@ const runtimeHostDeclarations = await Promise.all([
     new URL("../packages/runtime-host/dist/runtime-host.d.ts", import.meta.url),
     "utf8",
   ),
+  readFile(
+    new URL(
+      "../packages/runtime-host/dist/conversation-runtime-projection.d.ts",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
 ]);
 const [orchestratorRootDeclarations, orchestratorRuntimeDeclarations] =
   await Promise.all([
@@ -336,6 +364,7 @@ const [orchestratorRootDeclarations, orchestratorRuntimeDeclarations] =
       "utf8",
     ),
   ]);
+const runtimeHostRootDeclaration = runtimeHostDeclarations[0] ?? "";
 if (
   orchestratorRootDeclarations.includes("KernelRunEvent") ||
   orchestratorRootDeclarations.includes("assertKernelRunEvent") ||
@@ -397,6 +426,37 @@ if (
   )
 ) {
   failures.push("orchestrator-agent-runtime:turn-context-assembly-boundary");
+}
+const runtimeHostDeclaration = runtimeHostDeclarations.find((text) =>
+  text.includes("declare class RuntimeHost"),
+);
+const conversationProjectionDeclaration = runtimeHostDeclarations.find((text) =>
+  text.includes("interface ConversationRuntimeProjection"),
+);
+if (
+  !runtimeHostDeclaration ||
+  /\b(?:WorksceneDto|WorksceneToolDirectory|powerProfile|createWorksceneRuntime|worksceneDirectory|capabilityCatalog)\b/iu.test(
+    runtimeHostDeclaration,
+  ) ||
+  !/createConversationRuntime\(projection: ConversationRuntimeProjection\)/u.test(
+    runtimeHostDeclaration,
+  ) ||
+  !conversationProjectionDeclaration ||
+  !conversationProjectionDeclaration.includes("createConversationRuntimeProjection") ||
+  !conversationProjectionDeclaration.includes("readonly productTools") ||
+  /\bsceneId\b/u.test(runtimeHostDeclaration) ||
+  /\bsceneId\b/u.test(conversationProjectionDeclaration) ||
+  runtimeHostRootDeclaration.includes("ConversationRuntimeProjection") ||
+  /\bworksceneIdentity\b/u.test(orchestratorRuntimeDeclarations) ||
+  !/runtimeIdentity\?: KernelRuntimeIdentityContribution;/u.test(
+    createAgentRuntimeOptionsDeclaration ?? "",
+  ) ||
+  orchestratorRootDeclarations.includes("createKernelRuntimeIdentityContribution") ||
+  orchestratorRootDeclarations.includes("assertKernelRuntimeIdentityContribution") ||
+  !orchestratorRuntimeDeclarations.includes("createKernelRuntimeIdentityContribution") ||
+  !orchestratorRuntimeDeclarations.includes("assertKernelRuntimeIdentityContribution")
+) {
+  failures.push("runtime-host:workscene-product-projection-boundary");
 }
 for (const name of runtimeHostLegacyNames) {
   if (

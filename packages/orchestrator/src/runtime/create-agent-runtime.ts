@@ -166,6 +166,10 @@ import {
   projectAgentResultToKernelTerminal,
   type KernelRunCompletion,
 } from "./kernel-terminal.js";
+import {
+  assertKernelRuntimeIdentityContribution,
+  type KernelRuntimeIdentityContribution,
+} from "./kernel-runtime-identity.js";
 
 /**
  * 注入系统提示词的技能索引上限(按当前模式 top-N)。
@@ -567,7 +571,7 @@ export interface CreateAgentRuntimeOptions {
    * 该身份由 workscene/conversation 组合根显式提供，不得从 profile 或 workspace
    * 反推。
    */
-  worksceneIdentity?: { readonly sceneId: string };
+  runtimeIdentity?: KernelRuntimeIdentityContribution;
   /** Immutable skill content assets; catalog and writes remain assignment-owned. */
   artifactStore?: ArtifactStore;
   /**
@@ -652,6 +656,9 @@ function resolveRoleThinking(
 export async function createAgentRuntime(
   options: CreateAgentRuntimeOptions,
 ): Promise<AgentRuntime> {
+  if (options.runtimeIdentity !== undefined) {
+    assertKernelRuntimeIdentityContribution(options.runtimeIdentity);
+  }
   // 在任何运行体资源装配前捕获并校验宿主贡献；失败时不发布半装配实例。
   const assembledTurnContextProviders = captureTurnContextProviders(
     options.turnContextProviders,
@@ -711,7 +718,7 @@ export async function createAgentRuntime(
 
   // 角色 profile —— 决定工具集与身份段。enabledTools 是装配的唯一权威源。
   const profile = options.profile ?? mainProfile();
-  const sceneId = options.worksceneIdentity?.sceneId;
+  const sceneId = options.runtimeIdentity?.sceneId;
 
   // baseTools = profile.enabledTools 中的 builtin + options.extraTools，
   // **不含 Task** —— Task 装配依赖 securityPipeline / confirmationBroker

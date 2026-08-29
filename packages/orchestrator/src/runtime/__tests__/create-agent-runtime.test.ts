@@ -188,6 +188,9 @@ vi.mock("@zhixing/providers", async (importOriginal) => {
 const {
   createAgentRuntime: createAgentRuntimeImpl,
 } = await import("../create-agent-runtime.js");
+const { createKernelRuntimeIdentityContribution } = await import(
+  "../kernel-runtime-identity.js"
+);
 const createAgentRuntime = (
   options: Omit<Parameters<typeof createAgentRuntimeImpl>[0], "providerConfiguration">,
 ) =>
@@ -2866,7 +2869,7 @@ describe("trustContext 装配分叉", () => {
     const opens: Array<{ mode: string; sceneId?: string }> = [];
     const runtime = await createAgentRuntime({
       workspace: null,
-      worksceneIdentity: { sceneId: "s1" },
+      runtimeIdentity: createKernelRuntimeIdentityContribution("s1"),
       lifecycle: [
         {
           id: "identity-probe",
@@ -2904,6 +2907,17 @@ describe("trustContext 装配分叉", () => {
     expect(providerRef.current.calls[0]!.systemPrompt).not.toContain(
       "ZX_MAIN_SKILL_MARKER",
     );
+  });
+
+  it("缺少 Kernel provenance 的身份在任何 runtime 装配前 fail closed", async () => {
+    await expect(
+      createAgentRuntime({
+        workspace: null,
+        runtimeIdentity: Object.freeze({ sceneId: "s1" }) as never,
+      }),
+    ).rejects.toThrow("Kernel runtime identity contribution is invalid");
+    expect(resolveWorkspaceMock).not.toHaveBeenCalled();
+    expect(ensureWorkspaceDirMock).not.toHaveBeenCalled();
   });
 
   it("非场景实例:无工作区 → global 信任与 main 上下文", async () => {

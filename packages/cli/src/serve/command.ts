@@ -143,6 +143,10 @@ import { createAssemblyUnits } from "./access-surfaces.js";
 import { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 import { createExecutorReadinessSource } from "./executor-readiness.js";
+import {
+  createWorksceneConversationRuntimeFactory,
+  createWorksceneRuntimeProjectionAssembly,
+} from "./workscene-runtime-projection.js";
 import { StartupRollback } from "./startup-rollback.js";
 import { AssemblyLifecycleContributions } from "./assembly-lifecycle.js";
 import {
@@ -455,6 +459,11 @@ async function runServerProcess(
     new RoutedConversationRepoTaskListStore(repoForConversationId),
     mcpHub,
   );
+  const worksceneRuntimeProjections = createWorksceneRuntimeProjectionAssembly({
+    workscenes: worksceneDirectory,
+    extraTools: builtinExtraTools,
+    scheduler: getSchedulerFacade,
+  });
   // task_list 状态变更 → 会话级变更组播(meta 变更):接入面屏底任务区的
   // 实时数据源。装配期 broadcast 未回填时静默丢弃(无会话 turn 流动)。
   builtinExtraTools.taskListService.subscribe(({ conversationId, state }) => {
@@ -579,9 +588,6 @@ async function runServerProcess(
     // 模式下退化为只输出 Task 起止帧(子工具中间事件静默,避免日志爆炸)。
     decorateRunBus: serveDecorateRunBus,
     onSecurityBlocked: createBlockedRenderer(serveWriter),
-    // workmode 工具组的领域服务——LLM 管理入口与 RPC / CLI 管理入口共用
-    // 同一校验、静默与运行态守卫。
-    worksceneDirectory: () => worksceneDirectory,
     turnContextProviders: () =>
       createCliTurnContextProviders({
         getSchedulerStatus: () =>
@@ -595,56 +601,29 @@ async function runServerProcess(
       }),
   });
 
+  const createConversationAgentRuntime = createWorksceneConversationRuntimeFactory({
+    issue: (projection) => runtimeHost.createConversationRuntime(projection),
+    projections: worksceneRuntimeProjections,
+    getScene: (sceneId) => worksceneDirectory.get(sceneId),
+    resolveWorkspaceRoot: resolveWorksceneRoot,
+    prepareWorkspaceRoot: async (sceneId, absolutePath) => {
+      const runtime = authorityRuntimeRef.current!;
+      const probe = await runtime.environment!.probePath(absolutePath);
+      if (probe === "missing") {
+        await fsp.mkdir(absolutePath, { recursive: true });
+      } else if (probe !== "directory") {
+        throw new Error(`工作场景 "${sceneId}" 的工作区不可用于执行: ${probe}`);
+      }
+    },
+  });
+
   // RuntimeFactory —— 会话执行面（接入面）建 per-session runtime 的工厂。schedule 档无
   //   会话执行面，工厂作无副作用留位（不连接、不建目录）。
   //   注：工厂内实例发放是 lazy（session 调用时才建），那时 mcp 接入面 connectAll
   //   早已完成（pre-server 阶段），故工厂装配可前置、不受 connectAll 时序约束（与 eager 的
   //   ephemeralRuntime 不同——后者须排在接入面之后，见下）。
   const executorRole = executor?.createExecutorRole({
-    createAgentRuntime: async (sessionId, environment) => {
-      // 对话归属编码在全域键里:ws: 前缀 → 该场景的 power 装配;其余 main。
-      const { scope } = parseConversationId(sessionId);
-      if (scope.kind === "workscene") {
-        const scene = await worksceneDirectory.get(scope.sceneId);
-        if (!scene) {
-          throw new Error(`工作场景 "${scope.sceneId}" 不存在,无法装配会话`);
-        }
-        if (environment) {
-          return runtimeHost.createWorksceneRuntime({
-            scene,
-            absolutePath: environment.workspaceRoot,
-          });
-        }
-        if (!scene.workspace) {
-          return runtimeHost.createWorksceneRuntime({
-            scene,
-            absolutePath: null,
-          });
-        }
-        const absolutePath = await resolveWorksceneRoot(scope.sceneId);
-        if (!absolutePath) {
-          throw new Error(
-            `工作场景 "${scope.sceneId}" 的工作区无法在当前 executor 解析`,
-          );
-        }
-        const runtime = authorityRuntimeRef.current!;
-        const probe = await runtime.environment!.probePath(absolutePath);
-        if (probe === "missing") {
-          await fsp.mkdir(absolutePath, { recursive: true });
-        } else if (probe !== "directory") {
-          throw new Error(
-            `工作场景 "${scope.sceneId}" 的工作区不可用于执行: ${probe}`,
-          );
-        }
-        return runtimeHost.createWorksceneRuntime({
-          scene,
-          absolutePath,
-        });
-      }
-      return runtimeHost.createConversationRuntime(
-        environment?.workspaceRoot,
-      );
-    },
+    createAgentRuntime: createConversationAgentRuntime,
   });
   const runtimeFactory = executorRole && executor
     ? executor.createInProcessRuntimeFactory(executorRole)
@@ -663,7 +642,7 @@ async function runServerProcess(
       })
     : undefined;
   const executorReadiness = createExecutorReadinessSource({
-    runtime: runtimeHost,
+    runtime: worksceneRuntimeProjections,
     credentials,
     credentialGeneration,
   });
@@ -1056,7 +1035,7 @@ async function runServerProcess(
       },
       ...(ctx.executorJobOwner ? { localJobOwner: ctx.executorJobOwner } : {}),
       mesh: () => ctx.meshRuntime,
-      capabilities: runtimeHost.capabilityCatalog(),
+      capabilities: worksceneRuntimeProjections.capabilityCatalog(),
       systemHandlers,
       systemTasks: new Map([
         [

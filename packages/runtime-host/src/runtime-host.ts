@@ -25,15 +25,17 @@ import {
   type CreateAgentRuntimeOptions,
   type RuntimeKind,
 } from "@zhixing/orchestrator/runtime";
-import { mainProfile, powerProfile } from "@zhixing/orchestrator/profile";
+import { mainProfile } from "@zhixing/orchestrator/profile";
 import type { SchedulerFacade } from "@zhixing/core";
-import type { WorksceneDto } from "@zhixing/core/contracts";
 import type { IConfirmationBroker } from "@zhixing/core";
 import type { JobExecutionInstruction } from "@zhixing/core/contracts";
 import type { ArtifactStore } from "@zhixing/core/authority";
 import type { BuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
-import type { WorksceneToolDirectory } from "./workscene-port.js";
 import { ExecutionSchedulerFacade } from "./execution-scheduler-facade.js";
+import {
+  assertConversationRuntimeProjection,
+  type ConversationRuntimeProjection,
+} from "./conversation-runtime-projection.js";
 
 /** 从 createAgentRuntime 公共契约推导类型——避免依赖 orchestrator 内部路径 */
 type DecorateRunBusFn = NonNullable<CreateAgentRuntimeOptions["decorateRunBus"]>;
@@ -70,7 +72,7 @@ export interface RuntimeHostOptions {
     readonly scheduler: AgentRuntimeCapacityBinding;
     readonly orchestration: AgentRuntimeCapacityBinding;
   };
-  /** extra tools 装配单例(含 task_list service 与 MCP hub) */
+  /** 通用 extra tools 装配单例(含 task_list service 与 MCP hub) */
   extraTools: BuiltinExtraToolsAssembly;
   /** 调度门面 getter——惰性求值解装配顺序依赖 */
   scheduler: () => SchedulerFacade;
@@ -85,13 +87,6 @@ export interface RuntimeHostOptions {
    * 按对话定制;无会话身份的 ephemeral run 由订阅者自然跳过。
    */
   lifecycle?: readonly AgentRuntimeLifecycle[];
-  /**
-   * 工作场景领域服务(可选)——提供时会话实例装配 workmode 工具组(main 装
-   * enter / change_approve / list,场景实例装 exit),LLM 由此产生
-   * 进出场景意图或主模式管理动作。ephemeral
-   * 实例不装(定时任务无模式语义)。
-   */
-  worksceneDirectory?: () => WorksceneToolDirectory;
 }
 
 export class RuntimeHost {
@@ -101,38 +96,13 @@ export class RuntimeHost {
     this.executionScheduler = new ExecutionSchedulerFacade(opts.scheduler);
   }
 
-  /** 发放一个 main 会话 runtime 实例。 */
-  async createConversationRuntime(workspace?: string | null): Promise<AgentRuntime> {
+  /** 发放一个已由产品组合边界完整裁决的 conversation runtime 实例。 */
+  async createConversationRuntime(
+    projection: ConversationRuntimeProjection,
+  ): Promise<AgentRuntime> {
+    assertConversationRuntimeProjection(projection);
     return this.assemble({
-      withWorkmodeTools: true,
-      runtimeKind: "conversation",
-      ...(workspace === undefined ? {} : { workspace }),
-    });
-  }
-
-  /**
-   * 发放一个工作场景会话的 runtime 实例——power 装配：本机解析后的授权路径为工作区
-   * （无 workspace 显式 null，by-construction 杜绝串到 cwd）、显式场景身份、
-   * power 角色与 profile。场景对话经全域键(ws: 前缀)路由到此。
-   */
-  async createWorksceneRuntime(input: {
-    readonly scene: WorksceneDto;
-    readonly absolutePath: string | null;
-  }): Promise<AgentRuntime> {
-    const { scene, absolutePath } = input;
-    return this.assemble({
-      withWorkmodeTools: true,
-      workscene: {
-        sceneId: scene.id,
-        workspace: absolutePath,
-        primaryRole: "power",
-        profile: powerProfile({
-          id: scene.id,
-          name: scene.name,
-          hasWorkspace: absolutePath !== null,
-        }),
-        spec: { kind: "workscene", sceneId: scene.id, sceneName: scene.name },
-      },
+      conversation: projection,
       runtimeKind: "conversation",
     });
   }
@@ -157,80 +127,24 @@ export class RuntimeHost {
     });
   }
 
-  /** Non-secret catalog derived from the same profile and extra-tool assemblers as runtime creation. */
-  capabilityCatalog(): {
-    readonly tools: readonly string[];
-    readonly mcpServers: readonly string[];
-  } {
-    const tools = new Set<string>();
-    const addProfile = (profile: ReturnType<typeof mainProfile>) => {
-      for (const tool of profile.enabledTools) tools.add(tool);
-    };
-    addProfile(mainProfile());
-    const catalogScene = {
-      id: "capability-catalog",
-      name: "capability-catalog",
-      createdAt: "1970-01-01T00:00:00.000Z",
-      lastActiveAt: "1970-01-01T00:00:00.000Z",
-    };
-    addProfile(powerProfile(catalogScene));
-    addProfile(powerProfile({ ...catalogScene, hasWorkspace: true }));
-    const addExtra = (input: Parameters<BuiltinExtraToolsAssembly["assembleTools"]>[0]) => {
-      for (const tool of this.opts.extraTools.assembleTools(input)) tools.add(tool.name);
-    };
-    addExtra({
-      scheduler: this.opts.scheduler,
-      worksceneDirectory: this.opts.worksceneDirectory,
-    });
-    addExtra({ scheduler: this.opts.scheduler });
-    if (this.opts.worksceneDirectory) {
-      addExtra({
-        scheduler: this.opts.scheduler,
-        spec: {
-          kind: "workscene",
-          sceneId: "capability-catalog",
-          sceneName: "capability-catalog",
-        },
-        worksceneDirectory: this.opts.worksceneDirectory,
-      });
-    }
-    return {
-      tools: [...tools].sort(),
-      mcpServers: this.opts.extraTools.mcpHub.catalog()
-        .map(({ server }) => server.serverId)
-        .sort(),
-    };
-  }
-
   private async assemble(
     opts?: {
-      /** 会话路径装 workmode 工具组(LLM 进出场景意图的产生面) */
-      withWorkmodeTools?: boolean;
-      workscene?: {
-        sceneId: string;
-        workspace: string | null;
-        primaryRole: "power";
-        profile: ReturnType<typeof powerProfile>;
-        spec: { kind: "workscene"; sceneId: string; sceneName: string };
-      };
-      /** Explicit executor-local root; null means this runtime has no file workspace. */
-      workspace?: string | null;
+      conversation?: ConversationRuntimeProjection;
       runtimeKind?: RuntimeKind;
       job?: JobAgentRuntimeOptions;
     },
   ): Promise<AgentRuntime> {
-    const workscene = opts?.workscene;
+    const conversation = opts?.conversation;
     const job = opts?.job;
     const mcpServers = this.opts.extraTools.mcpHub.catalog()
       .map(({ server }) => server.serverId)
       .sort();
     let extraTools = this.opts.extraTools.assembleTools({
       scheduler: () => this.executionScheduler,
-      spec: workscene?.spec,
-      worksceneDirectory: opts?.withWorkmodeTools
-        ? this.opts.worksceneDirectory
-        : undefined,
     });
+    if (conversation) {
+      extraTools = [...extraTools, ...conversation.productTools];
+    }
     const baseProfile = mainProfile();
     const requestedTools = job?.instruction.tools
       ? new Set(job.instruction.tools)
@@ -255,8 +169,7 @@ export class RuntimeHost {
             ? baseProfile.enabledTools.filter((tool) => requestedTools.has(tool))
             : baseProfile.enabledTools,
         }
-      : workscene?.profile ??
-        (opts?.workspace === null ? mainProfile({ hasWorkspace: false }) : undefined);
+      : conversation?.profile;
     const providerConfiguration =
       job?.instruction.model && this.opts.providerConfiguration.config.llm
         ? {
@@ -289,11 +202,9 @@ export class RuntimeHost {
         : {}),
       providerConfiguration,
       systemProtectedPaths: this.opts.systemProtectedPaths,
-      workspace: workscene ? workscene.workspace : opts?.workspace,
-      primaryRole: workscene?.primaryRole,
-      worksceneIdentity: workscene
-        ? { sceneId: workscene.sceneId }
-        : undefined,
+      workspace: conversation?.workspace,
+      primaryRole: conversation?.primaryRole,
+      runtimeIdentity: conversation?.runtimeIdentity,
       profile,
       extraTools,
       ...(turnContextProviders ? { turnContextProviders } : {}),

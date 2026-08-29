@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A4-06 已派发；移除 AgentRuntime 的运行后 TurnContext 注册入口<br>
+> 当前检查点：A4-07 已完成，等待协调者独立复核；Workscene 产品运行投影已移出 RuntimeHost<br>
 > 完成度：4/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `fbb0edc9`；A0～A3、A4-01～A4-05 已由协调者独立复核并提交，A1、A2、A3 阶段退出门成立 |
+| 已接受基线 | `72a1e668`；A0～A3、A4-01～A4-06 已由协调者独立复核并提交，A1、A2、A3 阶段退出门成立 |
 | 当前 A 项 | A4：封闭 Intelligence Kernel 合同及其生产边界 |
-| 活跃工作包 | A4-06 已完成实现与最窄验证，等待协调者独立复核：TurnContext providers 已成为 runtime 发布前的有限只读装配输入，运行后 setter 与 RuntimeHost post-create hook 已归零 |
-| 下一责任链 | A4-06 通过协调者独立复核后，再从其余宿主管理公共成员、RuntimeHost 产品特有装配或 Kernel Conformance 中选择最高价值的单一 A4 责任链；不提前进入 A5 |
+| 活跃工作包 | A4-07 已完成，等待协调者独立复核：唯一 Workscene 产品组合责任者在发放前生成完整冻结投影，RuntimeHost 只消费通用 conversation runtime 装配合同 |
+| 下一责任链 | A4-07 通过协调者独立复核后，再单独处理 Schedule/Task 产品装配或 Kernel Conformance；不提前进入 A5 |
 | 打开的单向桥 | 无；Skill 管理、保存、admission、load/usage、Kernel 与 Executor 投影均只经 `@zhixing/core/skills/catalog` 及既有 Authority/CAS/assignment Correctness 端口成立，旧 writable Store 不再承担正式应用行为 |
-| 已失效证据 | A4-06 的 AgentRuntime 公共面、RuntimeHost 创建时序、CLI provider 装配及声明/结构证据已在当前工作区重取，等待协调者复核；A4-01～A4-05 的 Run、安全与工作区封装证据未失效 |
+| 已失效证据 | 无当前未恢复证据；A4-07 已用通用 conversation 发放、Workscene 产品投影、Kernel-owned identity contribution、窄 subpath/root 零转导与 capability catalog 直接证据恢复受影响交界，A4-01 的 RuntimeHost 装配子边界、A4-05 的显式 workspace/null 与 A4-06 的发布前 provider 装配均在新单一路径下重验，A4-01～A4-06 其余 Kernel 合同与封装证据未失效 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1626,6 +1626,32 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 结构、声明与构建：新增独立 S7 inspector 与六类反向 mutation，拒绝 AgentRuntime setter/post-create hook 回流、Create options 非 readonly、RuntimeHost 任一发放旁路、CLI provider 多/少/乱序、Anchor 漏装以及 Executor 误注入；canonical `pnpm s7:lint` 为 28/28 且 registry golden 通过。orchestrator、runtime-host、CLI 三包 typecheck 通过；按依赖顺序完成 orchestrator/runtime-host build 与 canonical `pnpm cli:build`。fresh declaration 的首次 package-export 检查准确暴露 checker 没有读取 `runtime-host.d.ts` 的盲点，补入该正式 subpath 后 `pnpm runtime:package-exports` 通过，并同时约束 AgentRuntime 零 setter、Create options readonly 输入和 RuntimeHost 零 post-create hook；最窄 Biome 与 `git diff --check` 通过。
 - 失效、遗留与状态：若 `AgentRuntime`/`CreateAgentRuntimeOptions` source 或 declaration、provider capture/校验/Time-first 顺序、RuntimeHost 四条共用 assemble 路径、Anchor helper exact-set/顺序、command factory、Executor substrate、S7 mutation 或 package-export declaration reader任一变化，恢复本证据并只重验上述闭包。TurnContext 内容、conversation reset/attention-window/dispose/lifecycle diagnostics、Schedule/Workscene 产品装配、其他 AgentRuntime 管理成员与 Kernel Conformance 均未迁移；A4 与完成度继续为 `[ ]` / `4/8`。交接类型为完成、等待协调者独立复核；无本包内遗留，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：反查 `AgentRuntime`/Create options、provider capture 时序、RuntimeHost 四条共用 `assemble` 发放路径、Anchor provider exact-set 与 Executor 隔离，确认运行后 setter/post-create hook 已归零，Time → Scheduler → TaskList 在实例发布前冻结且失败 fail fast。独立重跑 immutable assembly 2/2、RuntimeHost/CLI providers 16/16、orchestrator/runtime-host/CLI 依赖顺序构建、canonical S7 28/28、registry golden、fresh runtime package exports 和 `git diff --check`，全部通过；接受 `A4-06-turn-context-provider-assembly-v1`。A4 继续为 `[ ]`，下一责任链不进入 A5。
+
+### A4-07：把 Workscene 产品运行投影移出 RuntimeHost
+
+- 派发基线：`HEAD 72a1e668 + task-doc:A4-07-dispatch`；A4-06 已由协调者独立复核并纳入提交，派发前索引与工作区为空。
+- 唯一架构结果：`RuntimeHost` 不再直接认识 `WorksceneDto`、`powerProfile`、`WorksceneToolDirectory`、Workscene spec 或 `createWorksceneRuntime` 产品入口；现有 Workscene 产品组合责任者在 runtime 发放前一次性生成 profile、workspace、scene identity 与专用工具等完整不可变投影，`RuntimeHost` 只通过一个通用 conversation runtime 装配合同消费。
+- 生产闭包：沿 `command.ts` 的 main/Workscene conversation factory、scene lookup 与 workspace 解析三条分支，把当前 `createWorksceneRuntime` 内的全部产品决定移到现有 Workscene 组合边界；main、scene 有 workspace、scene 无 workspace、scene 在首次读取后消失/更新的现有分支都必须保持。`BuiltinExtraToolsAssembly`、capability catalog 与 RuntimeHost 私有 `assemble` 中凡只为 Workscene 选择 profile/identity/spec/工具的判断均退出 Host 主体；允许相关实现暂留当前包内等待 A5 物理归位，但生产调用必须由产品责任者显式形成有限投影，不能以回调服务定位器、任意 metadata bag 或改名后的 Workscene DTO 继续注入 Host。
+- 保护边界：保持 power role/profile、scene name/id prompt、显式 workspace/null、scene trust/permission/lifecycle identity、enter/exit/change/list/rename/set/clear 工具 exact-set、main 与 Workscene conversation 路由、capability catalog、MCP/Task/Schedule 基础工具及 Executor substrate 行为等价。投影构造或校验失败必须发生在 runtime 发布前；不得创建第二 profile/tool assembler、复制 Workscene 状态机或让 Kernel/Host 查询 Workscene owner。
+- 旧路与门禁：删除 RuntimeHost 对 Workscene 合同/port/profile 的 import、字段、方法、分支和声明泄漏；增加能识别 `createWorksceneRuntime`/等价入口回流、Host 导入 Workscene 产品类型、Host 内按 scene 选择 profile/spec/tools、产品投影绕过唯一 conversation 发放合同以及 capability catalog 与真实投影漂移的结构反例。门禁必须绑定生产调用图和 fresh declaration，不能只搜文件名。
+- 直接证据：最窄测试至少覆盖 main、带 workspace Workscene、无 workspace Workscene、scene 重读/消失、Workscene 工具 exact-set、capability catalog 和投影失败不发布 runtime；反查 Kernel 收到的 profile/workspace/identity/tools 与迁移前一致。按依赖顺序只验证实际受影响的 runtime-host、CLI 与必要上游，运行 canonical S7、package exports 与最窄格式检查；不得重复 A4-01～A4-06 全文件、根级回归或制品验收。
+- 明确不做：不迁移 Workscene 事实 owner、Reducer、Authority、Product API、存储或物理包，不改变任何 Workscene 产品语义；不处理 Schedule/Task 的产品装配、job/ephemeral 模型覆盖、AgentRuntime 其他成员或 Kernel Conformance，不进入 A5。
+- 完成与止损：只有 Workscene 产品知识从 RuntimeHost source/declaration/生产分支归零、唯一产品责任者形成完整冻结投影、所有原发放与 capability 路径行为等价、旧入口删除且门禁可识别回流时才算完成。预计超过四小时、需要改变 Workscene 产品合同/公开协议/事实权威、出现两个以上独立未知、影响扩到 Schedule/Task owner 或无法在通用 conversation 发放单一真相成立处安全交接时，立即停在可构建检查点记录唯一未闭合链并反馈；不执行 Git 写操作。
+
+执行记录（证据 ID：`A4-07-workscene-runtime-projection-v1`）：
+
+- 基线与责任迁移：进场 HEAD 为 `72a1e668a4e9490fc2ff4a1537b686f3b9130907`，索引为空且工作区只有协调者预登记的本文台账。新增有限、冻结的 `ConversationRuntimeProjection`，只携带已裁决的 workspace、primary role、profile、runtime identity 与 product tools；`RuntimeHost.createConversationRuntime` 只校验并消费该通用投影。`RuntimeHost` source/declaration 已删除 `WorksceneDto`、`powerProfile`、`WorksceneToolDirectory`、Workscene spec/directory、`createWorksceneRuntime` 与 capability catalog 产品入口，`BuiltinExtraToolsAssembly` 也不再按 Workscene 选择工具。
+- 唯一产品组合与生产行为：Anchor 组合根只创建一个 `WorksceneRuntimeProjectionAssembly` 与一个 conversation runtime factory；前者唯一形成 main/power profile、scene identity、显式 workspace/null 和七项 Workscene 专用工具，后者沿 main、environment 已裁决 workspace、scene 无 workspace、scene workspace 二次解析/准备四条既有路径后才调用同一个 RuntimeHost 发放入口。首次读取后 scene 消失或 workspace 无法重解时不发布 runtime；scene 更新 workspace 时采用当前重读根而不复制解析规则。readiness 与 scheduler capability catalog 也从同一投影 owner 加上原 MCP/Task/Schedule 基础 assembly 机械取得，Executor substrate 未注入 Anchor Workscene 投影。
+- 所有权与旧路退场：Kernel 工厂输入将 `KernelRuntimeIdentityContribution` 作为已裁决的有限身份消费，旧 `worksceneIdentity` 镜像字段和 RuntimeHost 内的 profile/spec/tool 分支归零；产品工具只能在投影构造边界产生，Host 不查询 Workscene owner、路径或产品 DTO。投影只捕获/冻结 profile 数组、工具和外层对象；身份由 Kernel 窄装配入口以 exact `sceneId`、私有 provenance 和冻结对象创建/校验，RuntimeHost 只调用 Kernel 断言并透传，不解释 identity schema。非法、伪造或可变输入在 `createAgentRuntime` 前 fail closed；没有 callback 服务定位、任意 metadata bag、第二 renderer 或第二 conversation 发放入口。
+- 直接证据：CLI 定向闭包最终为 4 文件 26/26，其中 Workscene 产品投影 7/7 覆盖 main、带/不带 workspace scene、scene 初读消失/重读更新、工具 exact-set、capability catalog、prompt/identity 与构造失败零发放；RuntimeHost/base tools/Executor job 其余 19/19 覆盖通用投影、显式 null/undefined、provider 与 Executor 行为。orchestrator 的 runtime identity 定向用例 1/1 通过（同文件其余 74 项未运行）。canonical S7 首次准确暴露旧 inspector 仍要求 RuntimeHost 自持 power 分支的陈旧假设；修正为绑定唯一产品投影生产图后，定向反向 mutation 2/2、最终 `pnpm s7:lint` 29/29 且 registry golden 通过，无 golden 漂移。
+- 构建、exports 与状态：orchestrator、runtime-host、CLI typecheck 通过；按依赖顺序完成 orchestrator/runtime-host build 与 `pnpm cli:build`；`pnpm runtime:package-exports` 证明通用 projection 只由正式窄 subpath 导出、runtime-host 根运行时/声明无该合同转导、fresh RuntimeHost declaration 零 `sceneId`/Workscene identity schema、旧 identity 退场，最窄 Biome 与 `git diff --check` 通过。若通用 projection 字段/冻结校验、Kernel identity constructor/assertion/provenance、RuntimeHost conversation 发放或根/subpath export、Workscene product assembly/factory、scene 二次读取与 workspace 准备、七项工具、capability catalog、Executor 隔离、S7 mutation 或 package-export declaration 任一变化，恢复本证据并只重验上述闭包。Workscene 事实 owner/Reducer/Authority/Product API/存储与物理包、Schedule/Task 产品装配、其他 AgentRuntime 成员和 Kernel Conformance 未迁移；A4 与完成度继续为 `[ ]` / `4/8`。交接类型为完成、等待协调者独立复核；无本包内遗留，不进入 A5，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+纠正记录（`A4-07-workscene-runtime-projection-v1`，root export / identity ownership）：
+
+- 独立反证与恢复：协调者确认初次实现仍由 `packages/runtime-host/src/index.ts` 根转导 projection，并在 RuntimeHost validator 内直接读取 `runtimeIdentity.sceneId`；这两项初次“根旁路归零/Host 零身份解释”结论失效。本纠正删除根转导，保留 `./conversation-runtime-projection` 为唯一正式导出；新增 Kernel-owned `KernelRuntimeIdentityContribution`，只允许 runtime 窄入口 constructor 生成 exact、冻结且带私有 provenance 的单字段贡献。Workscene 产品组合与 Executor assignment 适配在边界创建贡献，RuntimeHost projection/validator 只调用 Kernel assertion、保留同一对象并透传，source/declaration 对 `sceneId` 和 Workscene identity schema 零认知。
+- 直接与对抗证据：RuntimeHost projection 定向文件最终 6/6，新增伪造但同 shape 的冻结身份必须在 runtime 发布前拒绝，并证明合法贡献以同一对象零解释透传；Kernel identity 定向 2/2（同文件 76 项中 74 项未运行）证明合法身份继续驱动 work 技能、scene trust/permission/lifecycle，缺 provenance 输入在 workspace/provider/runtime 装配前 fail closed。CLI 首次两轮分别因 orchestrator、runtime-host 旧 dist 尚未按依赖构建而出现 2 项、1 项失败；依次完成上游构建后只重跑该文件即 6/6，未重复 Workscene 路由、七项工具或 capability catalog 既有闭包。
+- 门禁、exports 与状态：S7 Workscene inspector 新增 runtime-host 根回流、Host/projection `sceneId`、Kernel exact/provenance/冻结、产品绕过 constructor 的反向 mutation；定向 1/1 通过，canonical coverage/mutation 链全部通过并进入 golden，随后 golden check 通过且无漂移。fresh `pnpm runtime:package-exports` 首次准确暴露门禁把根声明为既有 RuntimeHost 参数保留的非导出 type-only side-effect import误判成 public export；收窄为动态根成员与根 exported symbol 后通过，并继续要求窄 subpath 两函数、Kernel runtime-only constructor/assertion、Create options nominal contribution 及 RuntimeHost declaration 零 `sceneId`。orchestrator/runtime-host typecheck 与 build、CLI typecheck/`pnpm cli:build`、最窄 Biome 和 `git diff --check` 通过；本纠正未改变原 27 项 Workscene 路由/工具/capability 证据的输入。A4 仍为 `[ ]`，不进入 Schedule、A5 或其他责任链，当前等待协调者独立复核。
+- 协调者独立验收：从 Workscene 组合根、唯一 conversation factory、通用 RuntimeHost 发放、Kernel identity constructor/assertion、fresh declarations 与根/窄 subpath 双向反查，确认 Workscene 的 profile/workspace/identity/七项工具及 capability 投影只在产品组合边界形成，Host 不查询产品 owner、不解释 `sceneId` 且不存在旧入口或根转导。独立重跑 Workscene/RuntimeHost/base tools/Executor job 4 文件 27/27、Kernel 身份正常与伪造拒绝 2/2、canonical S7 29/29、registry golden、orchestrator/runtime-host/CLI 依赖顺序构建、fresh package exports 和 `git diff --check`，全部通过；接受 `A4-07-workscene-runtime-projection-v1`。A4 继续为 `[ ]`，下一责任链不进入 A5。
 
 ## 十、用户提示词
 

@@ -58,9 +58,12 @@ describe("executor role conversation runtime production assembly", () => {
       expect.objectContaining({
         workspace: "/scene-workspace",
         primaryRole: "power",
-        worksceneIdentity: { sceneId: "scene-a" },
       }),
     );
+    const worksceneIdentity = runtimeMocks.createAgentRuntime.mock.calls[0]![0]
+      .runtimeIdentity;
+    expect(worksceneIdentity).toMatchObject({ sceneId: "scene-a" });
+    expect(Object.isFrozen(worksceneIdentity)).toBe(true);
 
     await substrate.createConversationRuntime(
       "/ordinary-workspace",
@@ -68,7 +71,7 @@ describe("executor role conversation runtime production assembly", () => {
     );
     const mainParams = runtimeMocks.createAgentRuntime.mock.calls[1]![0];
     expect(mainParams.workspace).toBe("/ordinary-workspace");
-    expect(mainParams.worksceneIdentity).toBeUndefined();
+    expect(mainParams.runtimeIdentity).toBeUndefined();
     expect(mainParams.primaryRole).toBeUndefined();
   });
 });

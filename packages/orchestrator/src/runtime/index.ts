@@ -54,6 +54,11 @@ export {
   type RunOrchestrationV1Params,
   type TextCallOptions,
 } from "./create-agent-runtime.js";
+export {
+  assertKernelRuntimeIdentityContribution,
+  createKernelRuntimeIdentityContribution,
+  type KernelRuntimeIdentityContribution,
+} from "./kernel-runtime-identity.js";
 export type { KernelRunEnvelope } from "./kernel-run-envelope.js";
 export {
   assertKernelRunEvent,

@@ -5,6 +5,7 @@ export default defineConfig({
     "src/index.ts",
     "src/session-adapter.ts",
     "src/runtime-host.ts",
+    "src/conversation-runtime-projection.ts",
     "src/builtin-extra-tools.ts",
     "src/segment-deps.ts",
     "src/workmode-tools.ts",

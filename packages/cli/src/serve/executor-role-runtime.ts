@@ -4,6 +4,7 @@ import path from "node:path";
 import { createMcpHub, mapServerTools, type McpHub } from "@zhixing/mcp";
 import {
   createAgentRuntime,
+  createKernelRuntimeIdentityContribution,
   type AgentRuntime,
   type AgentRuntimeCapacityBinding,
 } from "@zhixing/orchestrator/runtime";
@@ -1001,7 +1002,9 @@ export class ExecutorRuntimeSubstrate {
       ...(workscene
         ? {
             primaryRole: "power",
-            worksceneIdentity: { sceneId: workscene.sceneId },
+            runtimeIdentity: createKernelRuntimeIdentityContribution(
+              workscene.sceneId,
+            ),
           }
         : {}),
     });
