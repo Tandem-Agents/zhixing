@@ -1080,6 +1080,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   };
 
   const application = required("packages/core/src/skills/catalog-application.ts");
+  const productApi = required("packages/core/src/product-api/catalog.ts");
   const coreIndex = required("packages/core/src/index.ts");
   const skillIndex = required("packages/core/src/skills/index.ts");
   const skillAuthority = required(
@@ -1158,6 +1159,25 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   }
   if (coreBuild.split('"src/skills/catalog-application.ts"').length - 1 !== 1) {
     failures.push("Skill Catalog canonical subpath lacks one dedicated build entry");
+  }
+  const productApiExport = coreManifest?.exports?.["./product-api"];
+  const duplicateProductApiExports = Object.entries(coreManifest?.exports ?? {})
+    .filter(([subpath, conditions]) =>
+      subpath !== "./product-api" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === productApiExport?.types ||
+        conditions.import === productApiExport?.import)
+    );
+  if (
+    productApiExport?.types !== "./dist/product-api/catalog.d.ts" ||
+    productApiExport?.import !== "./dist/product-api/catalog.js" ||
+    duplicateProductApiExports.length > 0 ||
+    coreBuild.split('"src/product-api/catalog.ts"').length - 1 !== 1 ||
+    coreIndex.includes("product-api") ||
+    skillIndex.includes("ProductApiDispatcher")
+  ) {
+    failures.push("Product API catalog must have one narrow non-root core subpath");
   }
   for (const retiredPath of [
     "packages/core/src/skills/store.ts",
@@ -1380,11 +1400,17 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   ) {
     failures.push("Skill Catalog fact must use the exact revision returned after authority commit");
   }
-  if (!context.includes("skillCatalog?: SkillCatalogApplication") || context.includes("SkillDirectory")) {
-    failures.push("ServerContext must consume the Skill-owned application contract only");
+  if (
+    !context.includes("productApi?: ProductApiDispatcher") ||
+    !context.includes('from "@zhixing/core/product-api"') ||
+    /import\s+(?:type\s+)?\{[^}]*ProductApiDispatcher[^}]*\}\s+from\s+["']@zhixing\/core["']/u.test(context) ||
+    context.includes("skillCatalog") ||
+    context.includes("SkillCatalogApplication") ||
+    context.includes("SkillDirectory")
+  ) {
+    failures.push("ServerContext must expose only the Product API dispatcher binding");
   }
   for (const [relative, text] of [
-    ["packages/server/src/context.ts", context],
     ["packages/server/src/rpc/methods/skill.ts", handler],
     ["packages/cli/src/serve/command.ts", composition],
   ]) {
@@ -1399,8 +1425,43 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       }
     }
   }
-  if (!composition.includes("new SkillCatalogApplicationService({")) {
-    failures.push("Anchor composition root does not install the Skill Catalog application service");
+  if (
+    composition.split("new ProductApiDispatcher(").length - 1 !== 1 ||
+    composition.split("createSkillCatalogProductApiContribution(").length - 1 !== 1 ||
+    composition.split("new SkillCatalogApplicationService({").length - 1 !== 1
+  ) {
+    failures.push("Anchor composition root must install one Product API dispatcher and Skill contribution");
+  }
+  const productApiConstructions = records.reduce(
+    (count, record) => count + (record.text.split("new ProductApiDispatcher(").length - 1),
+    0,
+  );
+  if (productApiConstructions !== 1) {
+    failures.push("Persistent production Host must have exactly one Product API dispatcher construction");
+  }
+  if (
+    !productApi.includes("export class ProductApiDispatcher") ||
+    !productApi.includes("Duplicate Product API operation contribution") ||
+    !productApi.includes("Missing Product API operation contribution") ||
+    !productApi.includes("Unknown Product API operation") ||
+    !productApi.includes("Product API operation kind mismatch") ||
+    !productApi.includes("Product API operation descriptor mismatch") ||
+    !productApi.includes("Product API command fact set mismatch") ||
+    !productApi.includes("Product API operation descriptor is not sealed") ||
+    !productApi.includes("Object.freeze(this)") ||
+    /SkillCatalog|skillId|pinned|disabled|skill\.list|skill\.changed/u.test(productApi)
+  ) {
+    failures.push("Product API dispatcher is not finite, fail-closed, sealed or domain-neutral");
+  }
+  if (
+    !application.includes('"skill-catalog.query.list"') ||
+    !application.includes('"skill-catalog.command.set-state"') ||
+    !application.includes('"skill-catalog.command.archive"') ||
+    !application.includes('"skill-catalog-changed"') ||
+    !application.includes("createSkillCatalogProductApiContribution") ||
+    !application.includes("SKILL_CATALOG_PRODUCT_API_EXACT_SET")
+  ) {
+    failures.push("Skill domain does not own the finite Product API operation and fact contribution");
   }
   for (const [relative, text] of [
     ["packages/orchestrator/src/runtime/assignment-skill-port.ts", assignmentSkillPort],
@@ -1576,9 +1637,17 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   ) {
     failures.push("Skill RPC binding changed the pre-migration conflict wire contract");
   }
+  if (
+    !handler.includes("requireProductApi(ctx.server).query(SKILL_CATALOG_LIST_QUERY") ||
+    handler.split("requireProductApi(ctx.server).command(").length - 1 !== 2 ||
+    /\bSkillCatalogApplication\b/u.test(handler) ||
+    handler.includes(".execute({")
+  ) {
+    failures.push("Skill RPC binding bypasses the Product API dispatcher");
+  }
   const executeCalls = [...handler.matchAll(/const result = await callSkillApplication/gu)]
     .map((match) => match.index);
-  const factTransports = [...handler.matchAll(/broadcastChanged\(ctx\.server, result\.fact\)/gu)]
+  const factTransports = [...handler.matchAll(/for \(const fact of result\.facts\) broadcastChanged/gu)]
     .map((match) => match.index);
   if (
     executeCalls.length !== 2 ||

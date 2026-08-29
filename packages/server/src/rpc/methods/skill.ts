@@ -8,11 +8,14 @@
  */
 
 import {
+  SKILL_CATALOG_ARCHIVE_COMMAND,
+  SKILL_CATALOG_LIST_QUERY,
+  SKILL_CATALOG_SET_STATE_COMMAND,
   SkillCatalogApplicationError,
-  type SkillCatalogApplication,
   type SkillCatalogChangedFact,
   type SkillCatalogStatePatch,
 } from "@zhixing/core/skills/catalog";
+import type { ProductApiDispatcher } from "@zhixing/core/product-api";
 import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
@@ -20,14 +23,14 @@ import type { ServerContext } from "../../context.js";
 
 const SKILL_MODES: ReadonlySet<string> = new Set(["main", "work"]);
 
-function requireSkillCatalog(server: ServerContext): SkillCatalogApplication {
-  if (!server.skillCatalog) {
+function requireProductApi(server: ServerContext): ProductApiDispatcher {
+  if (!server.productApi) {
     throw new RpcAppError(
       RPC_ERROR_CODES.INTERNAL_ERROR,
       "Skill Catalog application not configured on server",
     );
   }
-  return server.skillCatalog;
+  return server.productApi;
 }
 
 function broadcastChanged(
@@ -60,7 +63,7 @@ export function buildSkillListMethod(): MethodEntry {
     requiresAuth: true,
     async handler(_params, ctx) {
       const view = await callSkillApplication(() =>
-        requireSkillCatalog(ctx.server).query({ kind: "list" })
+        requireProductApi(ctx.server).query(SKILL_CATALOG_LIST_QUERY, { kind: "list" })
       );
       return {
         skills: view.entries,
@@ -111,13 +114,13 @@ export function buildSkillSetStateMethod(): MethodEntry {
         );
       }
       const result = await callSkillApplication(() =>
-        requireSkillCatalog(ctx.server).execute({
+        requireProductApi(ctx.server).command(SKILL_CATALOG_SET_STATE_COMMAND, {
           kind: "set-state",
           skillId: params.skillId!,
           patch,
         })
       );
-      broadcastChanged(ctx.server, result.fact);
+      for (const fact of result.facts) broadcastChanged(ctx.server, fact);
       return { ok: true };
     },
   };
@@ -133,12 +136,12 @@ export function buildSkillArchiveMethod(): MethodEntry {
         throw RpcErrors.invalidParams("skill.archive requires 'skillId'");
       }
       const result = await callSkillApplication(() =>
-        requireSkillCatalog(ctx.server).execute({
+        requireProductApi(ctx.server).command(SKILL_CATALOG_ARCHIVE_COMMAND, {
           kind: "archive",
           skillId: params.skillId!,
         })
       );
-      broadcastChanged(ctx.server, result.fact);
+      for (const fact of result.facts) broadcastChanged(ctx.server, fact);
       return { ok: true };
     },
   };

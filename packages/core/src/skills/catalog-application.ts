@@ -19,6 +19,15 @@ import { skillNameToId } from "./id.js";
 import { builtinIndexEntries, getBuiltinSkill } from "./builtin.js";
 import type { SkillCatalogEntry, SkillMode } from "./types.js";
 import { renderSkillIndex } from "./render.js";
+import {
+  bindProductApiOperation,
+  defineProductApiCommand,
+  defineProductApiContribution,
+  defineProductApiExactSet,
+  defineProductApiFactEvent,
+  defineProductApiQuery,
+  type ProductApiContribution,
+} from "../product-api/catalog.js";
 
 /** Skill-owned management query. Runtime and tool catalog reads use GlobalStatePort directly. */
 export type SkillCatalogQuery = { readonly kind: "list" };
@@ -57,6 +66,63 @@ export interface SkillCatalogCommandResult {
 export interface SkillCatalogApplication {
   query(query: SkillCatalogQuery): Promise<SkillCatalogView>;
   execute(command: SkillCatalogCommand): Promise<SkillCatalogCommandResult>;
+}
+
+export const SKILL_CATALOG_CHANGED_FACT_EVENT = defineProductApiFactEvent<
+  "skill-catalog-changed",
+  SkillCatalogChangedFact
+>("skill-catalog-changed");
+
+export const SKILL_CATALOG_LIST_QUERY = defineProductApiQuery<
+  "skill-catalog.query.list",
+  SkillCatalogQuery,
+  SkillCatalogView
+>("skill-catalog.query.list");
+
+export const SKILL_CATALOG_SET_STATE_COMMAND = defineProductApiCommand<
+  "skill-catalog.command.set-state",
+  Extract<SkillCatalogCommand, { readonly kind: "set-state" }>,
+  SkillCatalogCommandResult,
+  SkillCatalogChangedFact
+>("skill-catalog.command.set-state", [SKILL_CATALOG_CHANGED_FACT_EVENT]);
+
+export const SKILL_CATALOG_ARCHIVE_COMMAND = defineProductApiCommand<
+  "skill-catalog.command.archive",
+  Extract<SkillCatalogCommand, { readonly kind: "archive" }>,
+  SkillCatalogCommandResult,
+  SkillCatalogChangedFact
+>("skill-catalog.command.archive", [SKILL_CATALOG_CHANGED_FACT_EVENT]);
+
+export const SKILL_CATALOG_PRODUCT_API_EXACT_SET = defineProductApiExactSet({
+  operations: [
+    SKILL_CATALOG_LIST_QUERY,
+    SKILL_CATALOG_SET_STATE_COMMAND,
+    SKILL_CATALOG_ARCHIVE_COMMAND,
+  ],
+  factEvents: [SKILL_CATALOG_CHANGED_FACT_EVENT],
+});
+
+/** Skill-owned Product API contribution; it delegates to the one catalog application. */
+export function createSkillCatalogProductApiContribution(
+  application: SkillCatalogApplication,
+): ProductApiContribution {
+  return defineProductApiContribution({
+    operations: [
+      bindProductApiOperation(SKILL_CATALOG_LIST_QUERY, async (query) => ({
+        result: await application.query(query),
+        facts: [],
+      })),
+      bindProductApiOperation(SKILL_CATALOG_SET_STATE_COMMAND, async (command) => {
+        const result = await application.execute(command);
+        return { result, facts: [result.fact] };
+      }),
+      bindProductApiOperation(SKILL_CATALOG_ARCHIVE_COMMAND, async (command) => {
+        const result = await application.execute(command);
+        return { result, facts: [result.fact] };
+      }),
+    ],
+    factEvents: [SKILL_CATALOG_CHANGED_FACT_EVENT],
+  });
 }
 
 const SKILL_CATALOG_KERNEL_TOP_N = 20;

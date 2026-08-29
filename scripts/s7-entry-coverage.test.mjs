@@ -2344,6 +2344,7 @@ test("retired entry, live writable Store and reverse package dependency mutation
 test("Skill Catalog management, load, save, admission and Kernel projection have one domain application boundary", async () => {
   const paths = [
     "packages/core/src/skills/catalog-application.ts",
+    "packages/core/src/product-api/catalog.ts",
     "packages/core/src/skills/global-state-adapter.ts",
     "packages/core/src/index.ts",
     "packages/core/src/skills/index.ts",
@@ -2526,11 +2527,58 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/server/src/rpc/methods/skill.ts",
       (text) => text.replace(
-        "broadcastChanged(ctx.server, result.fact);",
-        "broadcastChanged(ctx.server, result.fact);\n      broadcastChanged(ctx.server, result.fact);",
+        "for (const fact of result.facts) broadcastChanged(ctx.server, fact);",
+        "for (const fact of result.facts) { broadcastChanged(ctx.server, fact); broadcastChanged(ctx.server, fact); }",
       ),
     )).join("\n"),
     /fact transport must follow each successful application command/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/skill.ts",
+      (text) => text.replace(
+        "requireProductApi(ctx.server).query(SKILL_CATALOG_LIST_QUERY",
+        "ctx.server.skillCatalog.query(",
+      ),
+    )).join("\n"),
+    /bypasses the Product API dispatcher/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/context.ts",
+      (text) => text.replace(
+        "productApi?: ProductApiDispatcher",
+        "skillCatalog?: SkillCatalogApplication",
+      ),
+    )).join("\n"),
+    /expose only the Product API dispatcher binding/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "new ProductApiDispatcher(",
+        "new ProductApiDispatcher(\n      // duplicate construction mutation\n      new ProductApiDispatcher(",
+      ),
+    )).join("\n"),
+    /exactly one Product API dispatcher construction|install one Product API dispatcher/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/product-api/catalog.ts",
+      (text) => `${text}\nconst leakedSkillRule = { skillId: "x", disabled: true };`,
+    )).join("\n"),
+    /domain-neutral/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/package.json",
+      (text) => text.replace(
+        '    "./advancement": {',
+        '    "./product-api-compat": {\n      "types": "./dist/product-api/catalog.d.ts",\n      "import": "./dist/product-api/catalog.js"\n    },\n    "./advancement": {',
+      ),
+    )).join("\n"),
+    /one narrow non-root core subpath/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
@@ -2543,11 +2591,11 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/server/src/context.ts",
       (text) => text.replace(
-        '@zhixing/core/skills/catalog',
+        '@zhixing/core/product-api',
         '@zhixing/core',
       ),
     )).join("\n"),
-    /bypasses its domain subpath|leaked back through core root import/,
+    /expose only the Product API dispatcher binding/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(

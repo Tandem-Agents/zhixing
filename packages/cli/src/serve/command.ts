@@ -40,7 +40,12 @@ import {
   getWorkSceneConversationsRoot,
   type DeliveryLifecycleSourcePermit,
 } from "@zhixing/core";
-import { SkillCatalogApplicationService } from "@zhixing/core/skills/catalog";
+import {
+  createSkillCatalogProductApiContribution,
+  SKILL_CATALOG_PRODUCT_API_EXACT_SET,
+  SkillCatalogApplicationService,
+} from "@zhixing/core/skills/catalog";
+import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import { DeviceLifecycleJournal } from "@zhixing/core/authority";
 import {
   protocolDigest,
@@ -1901,10 +1906,12 @@ async function runServerProcess(
     conversationDirectory,
     workscenes: worksceneDirectory,
     trust: trustDirectory,
-    skillCatalog: new SkillCatalogApplicationService({
-      globalState: () => authorityRuntime.globalState!,
-      anchorEpoch: () => authorityRuntime.anchorEpoch,
-    }),
+    productApi: new ProductApiDispatcher(SKILL_CATALOG_PRODUCT_API_EXACT_SET, [
+      createSkillCatalogProductApiContribution(new SkillCatalogApplicationService({
+        globalState: () => authorityRuntime.globalState!,
+        anchorEpoch: () => authorityRuntime.anchorEpoch,
+      })),
+    ]),
     hostInfo: {
       // 宿主单点解析的工作区——接入面 @ 补全 root 取此
       workspace: ephemeralRuntime.resolvedWorkspace.path ?? undefined,

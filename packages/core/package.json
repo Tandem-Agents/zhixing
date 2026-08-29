@@ -40,6 +40,10 @@
       "types": "./dist/skills/catalog-application.d.ts",
       "import": "./dist/skills/catalog-application.js"
     },
+    "./product-api": {
+      "types": "./dist/product-api/catalog.d.ts",
+      "import": "./dist/product-api/catalog.js"
+    },
     "./advancement": {
       "types": "./dist/advancement/index.d.ts",
       "import": "./dist/advancement/index.js"

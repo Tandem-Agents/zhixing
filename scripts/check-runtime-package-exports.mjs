@@ -3,6 +3,7 @@ import { access, readFile } from "node:fs/promises";
 const [
   coreRoot,
   coreSkillCatalog,
+  coreProductApi,
   coreAuthority,
   corePersistence,
   coreProtocol,
@@ -29,6 +30,7 @@ const [
 ] = await Promise.all([
   import("../packages/core/dist/index.js"),
   import("../packages/core/dist/skills/catalog-application.js"),
+  import("../packages/core/dist/product-api/catalog.js"),
   import("../packages/core/dist/authority/index.js"),
   import("../packages/core/dist/persistence/index.js"),
   import("../packages/core/dist/protocol/index.js"),
@@ -321,6 +323,32 @@ async function verifyCorePackageExports(failures) {
     skillCatalogConditions.import !== "./dist/skills/catalog-application.js"
   ) {
     failures.push("core-exports:skill-catalog:invalid-canonical-subpath");
+  }
+  const productApiConditions = manifest.exports["./product-api"];
+  if (
+    !productApiConditions ||
+    productApiConditions.types !== "./dist/product-api/catalog.d.ts" ||
+    productApiConditions.import !== "./dist/product-api/catalog.js"
+  ) {
+    failures.push("core-exports:product-api:invalid-canonical-subpath");
+  }
+  if (
+    typeof coreProductApi.ProductApiDispatcher !== "function" ||
+    "ProductApiDispatcher" in coreRoot ||
+    "ProductApiDispatcher" in coreSkillCatalog
+  ) {
+    failures.push("core-exports:product-api:invalid-runtime-boundary");
+  }
+  for (const [subpath, conditions] of Object.entries(manifest.exports)) {
+    if (
+      subpath !== "./product-api" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === productApiConditions?.types ||
+        conditions.import === productApiConditions?.import)
+    ) {
+      failures.push(`core-exports:${subpath}:duplicate-product-api-entry`);
+    }
   }
   for (const [subpath, conditions] of Object.entries(manifest.exports)) {
     if (

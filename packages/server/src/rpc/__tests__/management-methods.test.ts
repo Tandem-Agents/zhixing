@@ -5,9 +5,13 @@
 
 import { describe, expect, it, vi } from "vitest";
 import {
+  createSkillCatalogProductApiContribution,
+  SKILL_CATALOG_LIST_QUERY,
+  SKILL_CATALOG_PRODUCT_API_EXACT_SET,
   SkillCatalogApplicationError,
   type SkillCatalogApplication,
 } from "@zhixing/core/skills/catalog";
+import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import {
   buildTrustListMethod,
   buildTrustRevokeMethod,
@@ -25,7 +29,7 @@ import type { TrustDirectory } from "../../runtime/management-directories.js";
 
 function makeCtx(slots: {
   trust?: TrustDirectory;
-  skillCatalog?: SkillCatalogApplication;
+  productApi?: ProductApiDispatcher;
   broadcastAll?: (method: string, params: unknown) => void;
 }) {
   return {
@@ -41,7 +45,7 @@ async function call(entry: { handler: (p: unknown, c: never) => unknown }, param
 async function dispatchSkillRequest(input: {
   readonly method: string;
   readonly params?: unknown;
-  readonly skillCatalog: SkillCatalogApplication;
+  readonly productApi: ProductApiDispatcher;
 }) {
   const registry = new HandlerRegistry();
   registry.registerAll([
@@ -53,7 +57,7 @@ async function dispatchSkillRequest(input: {
   const sendError = vi.fn();
   const dispatcher = new RpcDispatcher({
     registry,
-    server: { skillCatalog: input.skillCatalog } as ServerContext,
+    server: { productApi: input.productApi } as ServerContext,
   });
   await dispatcher.handleMessage({
     id: 1,
@@ -97,6 +101,12 @@ describe("trust.*", () => {
 });
 
 describe("skill.*", () => {
+  function makeProductApi(application: SkillCatalogApplication): ProductApiDispatcher {
+    return new ProductApiDispatcher(SKILL_CATALOG_PRODUCT_API_EXACT_SET, [
+      createSkillCatalogProductApiContribution(application),
+    ]);
+  }
+
   function makeSkills(): SkillCatalogApplication & { calls: unknown[] } {
     const calls: unknown[] = [];
     let version = 7;
@@ -132,10 +142,18 @@ describe("skill.*", () => {
     };
   }
 
+  it("fails closed when the Host did not contribute the Skill Product API", async () => {
+    await expect(call(buildSkillListMethod(), {}, makeCtx({}))).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.INTERNAL_ERROR,
+      message: "Skill Catalog application not configured on server",
+    });
+  });
+
   it("list 返回管理视图与结构版本", async () => {
     const skills = makeSkills();
-    const ctx = makeCtx({ skillCatalog: skills });
-    const direct = await skills.query({ kind: "list" });
+    const productApi = makeProductApi(skills);
+    const ctx = makeCtx({ productApi });
+    const direct = await productApi.query(SKILL_CATALOG_LIST_QUERY, { kind: "list" });
     expect(await call(buildSkillListMethod(), {}, ctx)).toEqual({
       skills: [{ id: "s1" }],
       structuralVersion: 7,
@@ -146,7 +164,7 @@ describe("skill.*", () => {
   it("setState:patch 校验(空 patch / 坏类型 / 坏 mode 拒)、成功后广播 skill.changed 携新版本", async () => {
     const skills = makeSkills();
     const broadcastAll = vi.fn();
-    const ctx = makeCtx({ skillCatalog: skills, broadcastAll });
+    const ctx = makeCtx({ productApi: makeProductApi(skills), broadcastAll });
     const method = buildSkillSetStateMethod();
     const command = {
       kind: "set-state" as const,
@@ -196,7 +214,7 @@ describe("skill.*", () => {
   it("archive:成功广播、不存在 NOT_FOUND 不广播", async () => {
     const skills = makeSkills();
     const broadcastAll = vi.fn();
-    const ctx = makeCtx({ skillCatalog: skills, broadcastAll });
+    const ctx = makeCtx({ productApi: makeProductApi(skills), broadcastAll });
     await expect(makeSkills().execute({
       kind: "archive",
       skillId: "s1",
@@ -218,7 +236,7 @@ describe("skill.*", () => {
 
     const list = await dispatchSkillRequest({
       method: "skill.list",
-      skillCatalog: skills,
+      productApi: makeProductApi(skills),
     });
     expect(list.sendSuccess).toHaveBeenCalledWith("skill-wire", {
       skills: [{ id: "s1" }],
@@ -228,21 +246,21 @@ describe("skill.*", () => {
     const setState = await dispatchSkillRequest({
       method: "skill.setState",
       params: { skillId: "s1", pinned: true },
-      skillCatalog: skills,
+      productApi: makeProductApi(skills),
     });
     expect(setState.sendSuccess).toHaveBeenCalledWith("skill-wire", { ok: true });
 
     const archive = await dispatchSkillRequest({
       method: "skill.archive",
       params: { skillId: "s1" },
-      skillCatalog: skills,
+      productApi: makeProductApi(skills),
     });
     expect(archive.sendSuccess).toHaveBeenCalledWith("skill-wire", { ok: true });
 
     const invalid = await dispatchSkillRequest({
       method: "skill.setState",
       params: { skillId: "s1" },
-      skillCatalog: skills,
+      productApi: makeProductApi(skills),
     });
     expect(invalid.sendError).toHaveBeenCalledWith("skill-wire", {
       code: RPC_ERROR_CODES.INVALID_PARAMS,
@@ -253,7 +271,7 @@ describe("skill.*", () => {
     const notFound = await dispatchSkillRequest({
       method: "skill.archive",
       params: { skillId: "ghost" },
-      skillCatalog: skills,
+      productApi: makeProductApi(skills),
     });
     expect(notFound.sendError).toHaveBeenCalledWith("skill-wire", {
       code: RPC_ERROR_CODES.NOT_FOUND,
@@ -264,7 +282,7 @@ describe("skill.*", () => {
     const conflict = await dispatchSkillRequest({
       method: "skill.setState",
       params: { skillId: "conflict", disabled: true },
-      skillCatalog: skills,
+      productApi: makeProductApi(skills),
     });
     expect(conflict.sendError).toHaveBeenCalledWith("skill-wire", {
       code: RPC_ERROR_CODES.INTERNAL_ERROR,
@@ -275,7 +293,7 @@ describe("skill.*", () => {
     const commitFailure = await dispatchSkillRequest({
       method: "skill.archive",
       params: { skillId: "failed" },
-      skillCatalog: skills,
+      productApi: makeProductApi(skills),
     });
     expect(commitFailure.sendError).toHaveBeenCalledWith("skill-wire", {
       code: RPC_ERROR_CODES.INTERNAL_ERROR,

@@ -13,7 +13,7 @@ import type {
   AuthorityDeliveryStats,
   DeliveryStatusNotice,
 } from "@zhixing/core";
-import type { SkillCatalogApplication } from "@zhixing/core/skills/catalog";
+import type { ProductApiDispatcher } from "@zhixing/core/product-api";
 import type {
   ConversationStatusNotice,
   ExecutionStatusNotice,
@@ -220,8 +220,8 @@ export interface ServerContext {
   workscenes?: WorksceneDirectory;
   /** 信任规则管理面。不传则 trust.* 不可用。 */
   trust?: TrustDirectory;
-  /** Skill 领域的管理应用端口。不传则 skill.* 不可用。 */
-  skillCatalog?: SkillCatalogApplication;
+  /** Host 组合的传输无关 Product API。不传则相应产品 API 不可用。 */
+  productApi?: ProductApiDispatcher;
   /** 宿主装配信息(server.info 的运维字段:工作区 / 日志路径)。 */
   hostInfo?: { workspace?: string; logPath?: string };
   /** 公开的本机运行状态；只允许稳定产品语言和有限动作。 */
@@ -392,7 +392,7 @@ export interface CreateContextOptions {
   conversationDirectory?: ConversationDirectory;
   workscenes?: WorksceneDirectory;
   trust?: TrustDirectory;
-  skillCatalog?: SkillCatalogApplication;
+  productApi?: ProductApiDispatcher;
   hostInfo?: { workspace?: string; logPath?: string };
   managedHostPublicStatus?: ServerContext["managedHostPublicStatus"];
   recoveryBackupStatus?: ServerContext["recoveryBackupStatus"];
@@ -424,7 +424,7 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     conversationDirectory: opts.conversationDirectory,
     workscenes: opts.workscenes,
     trust: opts.trust,
-    skillCatalog: opts.skillCatalog,
+    productApi: opts.productApi,
     hostInfo: opts.hostInfo,
     managedHostPublicStatus: opts.managedHostPublicStatus,
     recoveryBackupStatus: opts.recoveryBackupStatus,

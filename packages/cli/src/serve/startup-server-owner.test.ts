@@ -14,6 +14,20 @@ describe("production startup server ownership", () => {
       .toBe(false);
   });
 
+  it("composes one sealed Skill Product API dispatcher at the Anchor Host boundary", async () => {
+    const source = await readSource("command.ts");
+    expect(source.match(/new ProductApiDispatcher\(/gu)).toHaveLength(1);
+    expect(source.match(/createSkillCatalogProductApiContribution\(/gu)).toHaveLength(1);
+    expect(source.match(/new SkillCatalogApplicationService\(\{/gu)).toHaveLength(1);
+    const context = source.slice(location(source, "serverCtx = createServerContext({"));
+    const dispatcher = location(context, "productApi: new ProductApiDispatcher(");
+    const contribution = location(context, "createSkillCatalogProductApiContribution(");
+    const application = location(context, "new SkillCatalogApplicationService({");
+    expect(contribution).toBeGreaterThan(dispatcher);
+    expect(application).toBeGreaterThan(contribution);
+    expect(context).not.toContain("skillCatalog:");
+  });
+
   it("keeps the anchor endpoint inactive until every open prerequisite has one cleanup owner", async () => {
     const source = await readSource("command.ts");
     const surfaces = await readSource("access-surfaces.ts");

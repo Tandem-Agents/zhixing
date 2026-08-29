@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A2-07 与 A2 阶段退出门已在当前工作区闭合，等待协调者独立复核；不得提前开始 A3<br>
+> 当前检查点：A3-01 已在当前工作区闭合，等待协调者独立复核；不得提前开始下一责任链<br>
 > 完成度：3/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `6d946546`；A0、A1-01～A1-12、A2-01～A2-06 已由协调者独立复核并提交，A1 阶段退出门成立；当前工作区叠加待复核的 A2-07 单一闭包 |
-| 当前 A 项 | A2：Skill Catalog 垂直切片已闭合，等待协调者独立复核 A2 阶段退出门 |
-| 活跃工作包 | A2-07 已完成，等待独立复核：Anchor 不再扫描或物化旧 Skill 目录，legacy import、materialization pending/ack stream、生产 `SkillStore` 与路径/根导出均已退场；正式管理、保存、接入、加载、usage、Kernel/Executor 投影与动态 slash 只消费领域/Authority/CAS/assignment Correctness 合同 |
-| 下一责任链 | 协调者独立复核 A2-07 的正式能力等价、staged mutation commit/replay、动态 slash、builtin shadow、旧目录零触碰、零 materialization record/pending、零 `SkillStore` 生产/导出及反向门禁；接受后进入 A3，不再追加 Skill 清理包 |
+| 已接受基线 | `1387fe3e`；A0、A1-01～A1-12、A2-01～A2-07 已由协调者独立复核并提交，A1、A2 阶段退出门成立 |
+| 当前 A 项 | A3：从已证明的 Skill Catalog 合同建立组合式 Product API 与纯绑定 |
+| 活跃工作包 | A3-01 已完成，等待协调者独立复核：Skill 领域贡献有限管理 Query/Command/Fact exact-set，唯一 Host 组合一个封存 dispatcher，三个 RPC 只经 dispatcher 调用同一领域应用，`ServerContext.skillCatalog` 直连已退场 |
+| 下一责任链 | 独立复核 A3-01 的 exact-set、领域 descriptor 所有权、dispatcher fail-closed/封存、Host 单例、ServerContext 退场、RPC wire/error/fact 等价和进程内直调；接受后再处理 CLI client / Surface 与 Fact Event 订阅纯绑定，不提前扩入其他领域 |
 | 打开的单向桥 | 无；Skill 管理、保存、admission、load/usage、Kernel 与 Executor 投影均只经 `@zhixing/core/skills/catalog` 及既有 Authority/CAS/assignment Correctness 端口成立，旧 writable Store 不再承担正式应用行为 |
-| 已失效证据 | 无当前未恢复证据。A2-07 曾使 A0-06a P05、A0-06b1 S01～S04、A0-10 Skill 验证映射及 staged apply/recovery 证据失效；现已按 Authority/CAS 唯一事实、旧目录零触碰和无外部副作用的 staged replay 重新取得，A2-01～A2-06 其余合同继续有效 |
+| 已失效证据 | 无当前未恢复证据。A3-01 曾使 Skill RPC handler、ServerContext Skill 依赖、Host 注入、core package export 与相关 S7/canonical registry 证据失效；现已按唯一 dispatcher、窄 subpath、纯 binding 和原 wire/fact 行为重取，A2 证据未失效 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1477,6 +1477,18 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 结构、导出与残余：canonical `pnpm s7:lint` 一次运行即22/22并通过registry golden；门禁及反向mutation机械拒绝重新出现Store/path文件、Anchor注入、legacy/materialization stream、漏 committed-mutation核对或core根导出。`pnpm runtime:package-exports` 一次通过，确认runtime与declaration根面都不暴露`SkillStore/getSkillsRoot`，catalog subpath继续唯一。静态反扫确认core/CLI production source、core dist与构建入口没有`SkillStore/getSkillsRoot/skill-materialization/skill-materialized/skill-legacy/#importLegacyCatalog/SKILL_PENDING`或Skill home路径调用；没有访问真实home、秘密或外部系统，没有运行根级全量、package check或制品验收。
 - A0恢复、状态与失效：A2-07曾精确作废`A0-06a-persistence-roots-v1`的P05、`A0-06b1-persistence-schema-v1`的S01～S04及`A0-10-initial-verification-map-v1`的旧Store/materialization证据；当前表已恢复为“P05仅有admission OS temp、旧home目录不属production exact-set、S01～S04退役且零兼容义务”，A0五类索引仍为`[x]`。若以后重新出现Skill home路径/Store/scanner/import/materializer/pending/ack、Anchor filesystem注入、根导出，或staged apply/refresh、正式动态slash/admission入口变化，立即恢复上述A0子证据、A2及其直接闭包。
 - 交接与下一检查点：A2-01～A2-07现在共同证明Skill Catalog拥有管理、保存、接入、读取/usage、Authority事实、表面投影与Kernel/Executor不可变投影，旧写入口、第二事实、兼容reader和物化链均为零，故A2标为`[x]`、完成度为`3/8`。A5的Skill Catalog登记行仍为`[ ]`，因为本文明确要求A3完成其全部Product API binding后才可勾选；当前停在“等待协调者独立复核A2”，不得提前开始A3。
+
+### A3-01：建立 Skill 管理 Product API Catalog / dispatcher 与 RPC 纯绑定
+
+- 派发基线：`HEAD 1387fe3e9109b7966f309b9aa2e9334c5c88438a + task-doc:A3-01-dispatch`。A2-07 已由协调者独立复跑 core 46/46、CLI 49/49、S7 22/22、package exports 与 core/CLI typecheck，并以生产源码反扫确认旧 Store、home 路径、legacy import 和 materialization 链归零；提交 `1387fe3e` 后索引与工作区为空，A2 阶段退出门正式成立。
+- 唯一架构结果：只从 Skill Catalog 已证明的管理 Query、Command 与 Fact Event 合同建立静态、传输无关且 fail-closed 的 Product API Catalog / dispatcher；Host 组合一个实例并把现有三个 Skill RPC 改为认证后的 wire 纯绑定。Catalog 不定义 Skill DTO、规则、状态、写入权或 RPC 名，ServerContext 不再持有 `SkillCatalogApplication`，本机直调不经过网络。
+- 工作包边界：覆盖现有 `list / set-state / archive / skill-catalog-changed` exact-set、Product API 最小组合机制、Skill 领域贡献、Host 装配、ServerContext 与三个 RPC handler、直接测试和结构门禁。不得接入其他领域，不迁移 CLI client / Surface 订阅，不设计不存在的 Skill Progress Event，不新增 npm 包、动态插件注册、服务定位器、万能协议或第二业务入口。
+- 完成与安全交接：领域继续唯一拥有业务合同与应用实现；Catalog 只组合不可变 descriptor 与调用，拒绝重复、unknown、kind mismatch、漏贡献和封存后变更；RPC 方法名、参数、结果、认证、错误和 `skill.changed { structuralVersion }` 行为完全等价；进程内与 RPC 绑定调用同一 dispatcher 且没有网络内绕。若约四小时不能闭合，停在可构建、现有三个 RPC 仍只有一个正式调用主链且无双注册/双入口的检查点，不得扩入下一责任链。
+- 领域贡献与组合结果：新增唯一窄入口 `@zhixing/core/product-api`，只公开传输无关 descriptor/contribution/exact-set 与封存 `ProductApiDispatcher`，不经 core 根或 Skill 根 barrel 转导，也不含 Skill DTO、规则、状态、写权或 RPC 名。Skill 领域在既有 `@zhixing/core/skills/catalog` 内唯一贡献 `skill-catalog.query.list`、`skill-catalog.command.set-state`、`skill-catalog.command.archive` 和 Fact `skill-catalog-changed`；没有虚构 Progress Event。dispatcher 构造时一次取得完整 expected set 与全部 contribution，拒绝重复、遗漏、unknown、kind/descriptor/fact-set 不匹配，构造后无注册面且实例/descriptor/集合冻结；进程内测试直接调用同一实例，不开端口、不序列化。
+- Host 与纯 binding：Anchor 唯一生产组合根在 `createServerContext` 边界恰一次构造 `ProductApiDispatcher(Skill exact-set, Skill contribution)`，贡献仍只委托既有唯一 `SkillCatalogApplicationService`。`ServerContext`/`CreateContextOptions` 只保留可选 `productApi`，不再导入或暴露 `SkillCatalogApplication`；缺贡献时三个现有 RPC 继续以迁移前 `INTERNAL_ERROR` 文案 fail closed。`skill.list/setState/archive` handler 只保留认证 registry、wire 参数校验、dispatcher 调用、既有 not-found/invalid-params 映射及 Fact 传输；concurrent conflict/普通提交失败仍走迁移前 INTERNAL_ERROR，所有失败零广播，成功命令各广播一次原 `skill.changed { structuralVersion }`。Executor-only 未获得虚假 Skill 贡献，CLI client/REPL/订阅留给下一 A3 责任链，A2 的 save/admit/load/usage、Authority/CAS 与 Kernel/Executor 投影未改。
+- 直接与对抗证据：core `catalog-application.test.ts + product-api/catalog.test.ts` 为 2 文件 23/23，覆盖领域应用原合同、进程内 Query/Command/Fact、同一应用恰一次调用、duplicate/missing/unknown/kind/descriptor/fact mismatch 与封存变更；Server `management-methods.test.ts + context.test.ts` 为 2 文件 10/10，覆盖缺贡献、三个真实 RPC、参数、成功、not-found、conflict/commit failure wire、commit 后单次广播和 ServerContext；CLI `startup-server-owner.test.ts` 为 1 文件 5/5，直接反绑 Anchor 生产 root 的单 dispatcher/单 contribution/单 application 装配。合计 5 文件 38/38，不重复相加。
+- 结构、导出与构建证据：canonical `pnpm s7:lint` 为 22/22 且 registry golden 通过；结构门禁及反向 mutation 拒绝 `ServerContext.skillCatalog`/handler 直连回流、第二 dispatcher/注册点、领域规则进入 Catalog、根 barrel/第二 export、Fact 传输错序与原 conflict wire 漂移。`pnpm runtime:package-exports` 通过，确认 `./product-api` 是唯一正式入口且 runtime/declaration 不泄入 core 根或 Skill subpath。core/server/CLI typecheck、core/server build 与 `pnpm cli:build` 均通过；8 个适用 TypeScript 文件最窄 Biome 和 3 个脚本 `node --check` 通过。未运行根级 lint/test/build、package check 或制品验收。
+- 状态、失效与交接：A3-01 在当前工作区形成可构建、可运行、单一 dispatcher 真相；没有双注册、双应用、兼容壳或未处置本包问题。若 Product API descriptor/catalog、Skill contribution/exact-set、Anchor composition、ServerContext、三个 Skill RPC/Fact、core export/build entry、S7 或 package-export gate任一变化，只恢复 A3-01 及上述直接闭包；A2 未变证据继续复用。A3 与 A5 Skill Catalog 行保持 `[ ]`，当前停在等待协调者独立复核 A3-01，不得由本对话进入下一责任链。
 
 ## 十、用户提示词
 
