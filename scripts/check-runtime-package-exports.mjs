@@ -1,6 +1,8 @@
 import { access, readFile } from "node:fs/promises";
 
 const [
+  coreRoot,
+  coreSkillCatalog,
   coreAuthority,
   corePersistence,
   coreProtocol,
@@ -25,6 +27,8 @@ const [
   meshCredentialExposure,
   secrets,
 ] = await Promise.all([
+  import("../packages/core/dist/index.js"),
+  import("../packages/core/dist/skills/catalog-application.js"),
   import("../packages/core/dist/authority/index.js"),
   import("../packages/core/dist/persistence/index.js"),
   import("../packages/core/dist/protocol/index.js"),
@@ -138,6 +142,15 @@ const meshCanonicalValues = {
 
 const failures = [];
 await verifyCorePackageExports(failures);
+for (const name of [
+  "SkillCatalogApplicationError",
+  "SkillCatalogApplicationService",
+]) {
+  if (typeof coreSkillCatalog[name] !== "function") {
+    failures.push(`core-skill-catalog:${name}:missing`);
+  }
+  if (name in coreRoot) failures.push(`core-root-skill-catalog-leak:${name}`);
+}
 for (const [moduleName, module, names] of [
   ["core-authority", coreAuthority, ["FileArtifactStore", "FileAuthorityCommitLog"]],
   [
@@ -293,6 +306,26 @@ async function verifyCorePackageExports(failures) {
     failures.push("core-exports:retired-memory-subpath");
   }
 
+  const skillCatalogConditions = manifest.exports["./skills/catalog"];
+  if (
+    !skillCatalogConditions ||
+    skillCatalogConditions.types !== "./dist/skills/catalog-application.d.ts" ||
+    skillCatalogConditions.import !== "./dist/skills/catalog-application.js"
+  ) {
+    failures.push("core-exports:skill-catalog:invalid-canonical-subpath");
+  }
+  for (const [subpath, conditions] of Object.entries(manifest.exports)) {
+    if (
+      subpath !== "./skills/catalog" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === skillCatalogConditions?.types ||
+        conditions.import === skillCatalogConditions?.import)
+    ) {
+      failures.push(`core-exports:${subpath}:duplicate-skill-catalog-entry`);
+    }
+  }
+
   for (const [subpath, conditions] of Object.entries(manifest.exports)) {
     if (!conditions || typeof conditions !== "object" || Array.isArray(conditions)) {
       failures.push(`core-exports:${subpath}:invalid-conditions`);
@@ -313,9 +346,24 @@ async function verifyCorePackageExports(failures) {
       }
       if (condition === "import") {
         try {
-          await import(targetUrl.href);
+          const exported = await import(targetUrl.href);
+          if (
+            subpath !== "./skills/catalog" &&
+            ("SkillCatalogApplicationError" in exported ||
+              "SkillCatalogApplicationService" in exported)
+          ) {
+            failures.push(`core-exports:${subpath}:skill-catalog-runtime-leak`);
+          }
         } catch {
           failures.push(`core-exports:${subpath}:${condition}:unloadable-target`);
+        }
+      } else if (subpath !== "./skills/catalog") {
+        const declaration = await readFile(targetUrl, "utf8");
+        if (
+          declaration.includes("SkillCatalogApplication") ||
+          declaration.includes("catalog-application")
+        ) {
+          failures.push(`core-exports:${subpath}:skill-catalog-type-leak`);
         }
       }
     }

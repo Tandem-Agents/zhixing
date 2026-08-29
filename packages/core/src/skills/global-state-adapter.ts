@@ -276,7 +276,7 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
     const transaction = await this.#log.transactProjection<
       SkillProjection,
       SkillAuthorityRecord,
-      { revision: number }
+      { revision: number; catalogRevision: number }
     >(
       this.#projection,
       reduceRecord,
@@ -298,7 +298,10 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
         return {
           kind: "append",
           entries: [{ stream: SKILL_STREAM, body: planned.record }],
-          value: { revision: planned.outcome.targetRevision },
+          value: {
+            revision: planned.outcome.targetRevision,
+            catalogRevision: planned.record.catalogRevision,
+          },
         };
       },
       {
@@ -494,7 +497,7 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
   }
 }
 
-class SkillMutationConflictError extends Error {
+export class SkillMutationConflictError extends Error {
   constructor(readonly authorityError: AuthorityError) {
     super(authorityError.message);
     this.name = "SkillMutationConflictError";

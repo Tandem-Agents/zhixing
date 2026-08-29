@@ -317,6 +317,11 @@ export type WorksceneAppliedResult =
 export type GlobalControlMutationResult<M extends GlobalControlMutation> =
   M extends WorksceneWriteMutation
     ? WorksceneAppliedResult
+    : M extends Extract<
+        SkillWriteMutation,
+        { kind: "skill-set-state" | "skill-archive" }
+      >
+      ? { revision: number; catalogRevision: number }
     : { revision: number };
 
 export interface WorksceneStagedReceipt {

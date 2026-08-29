@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：等待协调者复核 A1；不得进入 A2<br>
+> 当前检查点：A2-01 完成，等待协调者复核；不得进入后续 A2 责任链<br>
 > 完成度：2/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `686822e0`；A1-01～A1-11 已由协调者独立复核并提交 |
-| 当前 A 项 | A1 已在当前工作区闭合，等待协调者独立复核；不得进入 A2 |
-| 活跃工作包 | A1-12：`A1-HOST-DELEGATE-01` 已退场；三拓扑由唯一 `PersistentApplicationHost` 直接规划、按需装入并调用真实 role component，最窄验证完成，等待协调者复核 |
-| 下一责任链 | 协调者冷启动复核 A1-12 的单一持久组合根、拓扑隔离、模块装入失败补偿、旧桥零残留与 A1-01～A1-12 阶段退出门；接受后再派发 A2 Skill Catalog 首个垂直切片 |
-| 打开的单向桥 | 无；`A1-HOST-DELEGATE-01` 已由 A1-12 删除，未以 loader bag、通用 component registry 或改名 wrapper 保留 |
-| 已失效证据 | 无当前未恢复证据；A1-12 已重取 ApplicationHost/role-topology/topology-command、结构图、S7 与 CLI build。A1-01 依赖旧委托 runner 的直接测试已由本包唯一 Host 证据取代；A1-02～A1-11 未改内部生命周期输入继续有效 |
+| 已接受基线 | `c52cd212`；A0、A1-01～A1-12 已由协调者独立复核并提交，A1 阶段退出门成立 |
+| 当前 A 项 | A2：以 Skill Catalog 真实垂直切片证明领域模型 |
+| 活跃工作包 | A2-01：Skill Catalog 管理面的 list/set-state/archive 已收归领域 Query/Command/Fact Event 与唯一应用服务；领域合同只有 `@zhixing/core/skills/catalog` 窄入口，旧 Server/CLI 业务入口归零，RPC conflict wire 已恢复迁移前语义；最窄验证完成，等待协调者复核 |
+| 下一责任链 | 协调者独立复核 `A2-01-skill-catalog-management-domain-v1` 的单一领域 subpath、fact-after-commit、dispatcher 级 RPC 等价错误与旧写入口/根 barrel 回流负向门禁；接受后再沿同一 Skill 事实链迁移 save/admit/usage、权威适配与不可变 Kernel/Executor 投影 |
+| 打开的单向桥 | 无；Skill 应用服务只把既有 `GlobalStatePort` 作为 Correctness 适配，新合同仅经 `@zhixing/core/skills/catalog` 公开，旧 `SkillDirectory`、`createSkillDirectory`、Server 业务合同和 CLI 直接写入口均已删除 |
+| 已失效证据 | 无当前未恢复证据；独立复核发现的 core 根 barrel 泄漏与 conflict→BUSY wire 漂移均已纠正，并已重取领域 subpath/exports、dispatcher RPC、S7/golden 与 core→server→CLI 构建闭包；未改的 save/admit/load/usage、legacy/materialization、CLI facade/REPL 行为与 Kernel/Executor 投影证据继续有效 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1411,6 +1411,16 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接与结构证据：Host/拓扑定向闭包为 3 文件 39/39：`application-host.test.ts` 22/22、`role-topology.test.ts` 11/11 来自修正测试参数后的最终重取，`topology-command.test.ts` 6/6 来自同一源码首次组合命令的未失效通过项；覆盖 3 process mode × 3 topology、disabled/invalid fail closed、三类所需模块装入失败时 role 零启动与 outer 精确释放、恢复根无双图、role 正常/失败终态和重复 run。Server 结构测试 1/1 直接把动态 import 生产边反绑唯一 Host；显式 golden 候选只有 `cli/serve` type-import 计数差异，另以 `git show HEAD` 对 133 个进场生产文件机械重取后确认这些计数已是接受基线事实，并非本包新增依赖或 owner 漂移，更新后 test 可继续识别当前 package graph 与 Host 动态边。
 - 门禁、构建与失效：canonical `pnpm s7:lint` 为 coverage/mutation 21/21 且 registry golden 通过；门禁同时要求唯一 Host 调用、有限三模块动态入口、两条真实 role 调用、拓扑分支、Promise-all-before-run，并以反向 mutation 检出第二 role 调用、跨拓扑分支、wrapper 文件恢复、旧 runner/loader 回流。`pnpm --filter @zhixing/cli exec tsc -p tsconfig.json --noEmit`、`pnpm cli:build` 与 5 个适用 TypeScript 文件的最窄 Biome 均通过；build 产物保留真实 `command` 与 `executor-role-runtime` chunk，不再生成两个 wrapper entry。`git diff --check` 通过，索引为空，工作区只含 A1-12 实现/测试/门禁/golden 与协调者预先登记后续写的本文；没有运行 CLI 包全测、根级 lint/test/build、package check 或制品验收。若 topology-command 的 Host 构造/调用、ApplicationHost 的 plan/import/invocation/outer release、role-topology plan、wrapper 负向 exact-set、动态构建边或相应 S7 mutation 任一变化，恢复 `A1-12-persistent-host-composition-v1` 与 A1，只重验本闭包。
 - 交接类型：完成，等待协调者独立复核 A1；无本包内遗留，不得由本对话进入 A2。
+
+### A2-01：收归 Skill Catalog 管理 Query/Command/Fact Event
+
+- 基线与边界：`HEAD c52cd212a96d9e4b3ee6b84803bde3355d139a12 + A2-01-skill-catalog-management-domain-v1`；进场索引为空，工作区只有协调者预先登记的本文台账差异。本包即时沿 `skill.list/skill.setState/skill.archive → ServerContext → createSkillDirectory → GlobalStatePort → skill.changed` 及 REPL/RPC facade 消费链取证，只迁移 list/set-state/archive 管理行为；未改 `save_skill/admit_skill/load_skill`、usage、legacy import、CAS/本机 materialization、Kernel/Executor 投影、Agent Loop、MCP 或其他领域。
+- 领域合同与唯一应用用例：在 `packages/core/src/skills/catalog-application.ts` 建立有限 `SkillCatalogQuery`、`SkillCatalogCommand`、`SkillCatalogView`、`SkillCatalogChangedFact` 与 `SkillCatalogApplication`，合同只表达 Skill id/state、catalog projection/revision 与已提交事实，不暴露 Store、路径、WAL、RPC 或 Server 类型。这组新增合同与实现只经 `@zhixing/core/skills/catalog` 公开：`packages/core/package.json` 与 `tsup.config.ts` 各有唯一 export/build entry，`skills/index.ts` 和 core 根 barrel 均不再转导它。`SkillCatalogApplicationService` 是 list/set-state/archive 的唯一应用入口：管理 list 恒经 `includeDisabled:true` 返回 main/work、pinned/disabled、usage 与 catalog revision；命令先取得当前 entry/revision，拒绝空 patch/初始 not-found，再以 expected revision 提交既有 `GlobalStatePort` Correctness 适配，Skill adapter 在同一次权威 transaction 结果中返回精确 catalog revision，应用只能在该 commit 成功返回后形成一个对应 fact。mutation 期间的 authority not-found/revision/idempotency failure 均保留为领域 `conflict`；其他提交失败原样传播且不产生 fact，也不靠提交后的竞态 read 猜测版本。
+- 纯 binding 与旧路退场：`ServerContext`、Skill RPC 与 Anchor 组合根只从 `@zhixing/core/skills/catalog` 消费新增合同；三个认证 RPC 只做 wire 参数校验、应用调用、初始 not-found→`NOT_FOUND`、命令校验→`INVALID_PARAMS` 的既有显式映射，以及把 committed fact 投影为既有 `skill.changed { structuralVersion }` 通知。领域内部 concurrent conflict 不再被新增映射为 `BUSY`，而与迁移前 `SkillMutationConflictError` 一样由真实 dispatcher 投影为 `INTERNAL_ERROR / "Internal error" / data.message=<原始冲突消息>`；普通 commit failure 同样保持既有 INTERNAL_ERROR wire。`skill.list` 的 `{ skills, structuralVersion }`、三个 method 名与 registry、REPL `/skills`/动态 slash 刷新和 management facade 行为不变。Anchor 组合根直接构造唯一 `SkillCatalogApplicationService`；`@zhixing/server` 的 `SkillDirectory`、CLI `createSkillDirectory`、结构版本可变缓存、直接 skill GlobalState mutation 与同责兼容壳均已删除，没有双写或双事件。
+- 直接证据：core `catalog-application.test.ts + global-state-adapter.test.ts` 2 文件 6/6，覆盖 include-disabled query、expected revision、精确 committed catalog revision、set-state、not-found/空 patch、authority conflict/commit failure 的零 fact及既有 CAS/materialization；Server `management-methods.test.ts` 1 文件 6/6（其中 Skill 4/4），新增真实 `HandlerRegistry → RpcDispatcher → toJsonRpcError → connection` 反例，逐项证明 list/setState/archive 成功，以及 NOT_FOUND、INVALID_PARAMS、concurrent conflict 与普通 commit failure 的迁移前 wire；成功恰一次广播，所有失败零广播。CLI facade/REPL 管理闭包 4 文件 22/22 输入未变且沿用已取得直接证据，纠正后另以 CLI typecheck/build 验证新 subpath 组合入口。当前完整直接闭包为 7 文件 34/34，精确计数不重复相加；公开 registry 由 canonical golden 继续证明无漂移。
+- 结构、exports、构建与失效：S7 Skill 管理 owner inspector 现以八条反向 mutation 机械拒绝 Server/CLI 恢复 `SkillDirectory/createSkillDirectory`、直接构造 mutation、commit 前/重复传输 fact、core 根 barrel 回流、Server/CLI 绕过领域 subpath、第二 package export 与 conflict→BUSY wire 漂移；同时要求唯一 tsup entry。canonical `pnpm s7:lint` 为 22/22 且 registry golden 通过。`pnpm runtime:package-exports` 直接加载新 subpath、确认 runtime/type surface 不泄入 core 根或第二正式 export；首次执行只因 Server 旧 dist 仍请求已退场 root export 失败，按验证手册重建 Server 后同一门禁通过，不属于产品失败。core/server/CLI canonical typecheck 通过；按依赖先后完成 core build、server build 与 `pnpm cli:build`；本次未修改 contracts schema，既有 `pnpm contracts:typecheck/contracts:lint` 证据未失效；纠正闭包 7 个适用文件的最窄 Biome 通过，最终 `git diff --check` 待交接前复取。未运行包全测、根级 lint/test/build、package check 或制品验收。若领域源码/subpath/export/build entry、GlobalState adapter conflict/commit 返回、ServerContext/binding、Anchor service 注入、公开 skill RPC/notification、CLI facade/REPL consumer、package-export gate 或 S7 owner/ordering/wire gate 任一变化，恢复本证据并只重验上述闭包；其余 Skill 链与 A1 证据不失效。
+- 独立复核纠正：协调者指出新合同经 core 根 barrel 暴露与 conflict→BUSY 均违反本包边界；本轮没有把它们包装成后续债务，而是在原 A2-01 内建立唯一领域 subpath、删除根转导、恢复迁移前 wire，并新增 package-export 与 dispatcher 级可证伪证据。纠正不扩大到其他既有 Skill 根导出或 A7 全包 barrel 退场。
+- 交接类型：完成，等待协调者独立复核；A2 与 Skill Catalog 登记行继续保持 `[ ]`。本包内无遗留；下一检查点只能由协调者沿同一 Skill 垂直事实链选择 save/admit/usage、领域权威适配或 Kernel/Executor 不可变投影中的一个独立责任，不得提前进入 A3 或建设全局 Product API Catalog。
 
 ## 十、用户提示词
 

@@ -40,6 +40,7 @@ import {
   getWorkSceneConversationsRoot,
   type DeliveryLifecycleSourcePermit,
 } from "@zhixing/core";
+import { SkillCatalogApplicationService } from "@zhixing/core/skills/catalog";
 import { DeviceLifecycleJournal } from "@zhixing/core/authority";
 import {
   protocolDigest,
@@ -125,10 +126,7 @@ import { createConversationAliveCheck } from "./advancement-gc.js";
 import { createConversationDirectory } from "./conversation-directory.js";
 import { createWorksceneDirectory } from "./workscene-directory.js";
 import { createWorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
-import {
-  createTrustDirectory,
-  createSkillDirectory,
-} from "./management-directories.js";
+import { createTrustDirectory } from "./management-directories.js";
 import { PostAdoptionReviewCoordinator } from "./post-adoption-review.js";
 import { loadOrCreateToken } from "./token.js";
 import { resolveHostProcessMode } from "./self-exec.js";
@@ -1903,7 +1901,7 @@ async function runServerProcess(
     conversationDirectory,
     workscenes: worksceneDirectory,
     trust: trustDirectory,
-    skills: createSkillDirectory({
+    skillCatalog: new SkillCatalogApplicationService({
       globalState: () => authorityRuntime.globalState!,
       anchorEpoch: () => authorityRuntime.anchorEpoch,
     }),

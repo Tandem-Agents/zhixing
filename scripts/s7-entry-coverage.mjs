@@ -1042,6 +1042,13 @@ export async function validateS7Structure() {
   failures.push(...inspectPlannedAnchorTransferAssembly(records));
   failures.push(...inspectManagedHostAssembly(records));
   failures.push(...inspectDeviceLifecycleAssembly(records));
+  failures.push(...inspectSkillCatalogApplicationOwnership([
+    ...records,
+    {
+      relative: "packages/core/package.json",
+      text: await readFile(path.join(root, "packages/core/package.json"), "utf8"),
+    },
+  ]));
   for (const packageName of [
     "server",
     "executor",
@@ -1060,6 +1067,139 @@ export async function validateS7Structure() {
     failures.push("current authority delivery entry was removed");
   }
   if (failures.length > 0) throw new Error(`S7 structure gate failed:\n- ${failures.join("\n- ")}`);
+}
+
+/** A2 Skill Catalog management must have one domain application owner. */
+export function inspectSkillCatalogApplicationOwnership(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const text = byPath.get(relative);
+    if (text === undefined) failures.push(`${relative}: Skill Catalog production source is missing`);
+    return text ?? "";
+  };
+
+  const application = required("packages/core/src/skills/catalog-application.ts");
+  const coreIndex = required("packages/core/src/index.ts");
+  const skillIndex = required("packages/core/src/skills/index.ts");
+  const coreManifestText = required("packages/core/package.json");
+  const coreBuild = required("packages/core/tsup.config.ts");
+  const handler = required("packages/server/src/rpc/methods/skill.ts");
+  const context = required("packages/server/src/context.ts");
+  const composition = required("packages/cli/src/serve/command.ts");
+  const cliDirectories = required("packages/cli/src/serve/management-directories.ts");
+
+  let coreManifest;
+  try {
+    coreManifest = JSON.parse(coreManifestText);
+  } catch {
+    failures.push("Core manifest is invalid while checking the Skill Catalog subpath");
+  }
+  const skillCatalogExport = coreManifest?.exports?.["./skills/catalog"];
+  if (
+    skillCatalogExport?.types !== "./dist/skills/catalog-application.d.ts" ||
+    skillCatalogExport?.import !== "./dist/skills/catalog-application.js"
+  ) {
+    failures.push("Skill Catalog must have one canonical core domain subpath");
+  }
+  const duplicateSkillCatalogExports = Object.entries(coreManifest?.exports ?? {})
+    .filter(([subpath, conditions]) =>
+      subpath !== "./skills/catalog" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === skillCatalogExport?.types ||
+        conditions.import === skillCatalogExport?.import)
+    );
+  if (duplicateSkillCatalogExports.length > 0) {
+    failures.push("Skill Catalog contract has a second package export entry");
+  }
+  if (
+    coreIndex.includes("catalog-application") ||
+    skillIndex.includes("catalog-application") ||
+    skillIndex.includes("SkillCatalogApplication")
+  ) {
+    failures.push("Skill Catalog application contract leaked into the core root barrel");
+  }
+  if (coreBuild.split('"src/skills/catalog-application.ts"').length - 1 !== 1) {
+    failures.push("Skill Catalog canonical subpath lacks one dedicated build entry");
+  }
+
+  for (const record of records) {
+    if (
+      (record.relative.startsWith("packages/server/src/") ||
+        record.relative.startsWith("packages/cli/src/")) &&
+      /\b(?:SkillDirectory|createSkillDirectory)\b/u.test(record.text)
+    ) {
+      failures.push(`${record.relative}: retired parallel Skill management application owner`);
+    }
+    if (
+      (record.relative.startsWith("packages/server/src/") ||
+        record.relative.startsWith("packages/cli/src/")) &&
+      /kind:\s*["']skill-(?:set-state|archive)["']/u.test(record.text)
+    ) {
+      failures.push(`${record.relative}: binding writes Skill GlobalState directly`);
+    }
+  }
+
+  if (!application.includes("class SkillCatalogApplicationService")) {
+    failures.push("Skill Catalog domain application service is missing");
+  }
+  const commit = application.indexOf("await this.#state().mutate(");
+  const fact = application.lastIndexOf('kind: "skill-catalog-changed"');
+  if (
+    !(commit >= 0 && fact > commit) ||
+    !application.includes("catalogRevision: committed.catalogRevision")
+  ) {
+    failures.push("Skill Catalog fact must use the exact revision returned after authority commit");
+  }
+  if (!context.includes("skillCatalog?: SkillCatalogApplication") || context.includes("SkillDirectory")) {
+    failures.push("ServerContext must consume the Skill-owned application contract only");
+  }
+  for (const [relative, text] of [
+    ["packages/server/src/context.ts", context],
+    ["packages/server/src/rpc/methods/skill.ts", handler],
+    ["packages/cli/src/serve/command.ts", composition],
+  ]) {
+    if (!text.includes('from "@zhixing/core/skills/catalog"')) {
+      failures.push(`${relative}: Skill Catalog contract bypasses its domain subpath`);
+    }
+    for (const match of text.matchAll(
+      /import\s+(?:type\s+)?\{([\s\S]*?)\}\s+from\s+["'](@zhixing\/core)["']/gu,
+    )) {
+      if (/\bSkillCatalogApplication(?:Error|Service)?\b/u.test(match[1])) {
+        failures.push(`${relative}: Skill Catalog contract leaked back through core root import`);
+      }
+    }
+  }
+  if (!composition.includes("new SkillCatalogApplicationService({")) {
+    failures.push("Anchor composition root does not install the Skill Catalog application service");
+  }
+  if (cliDirectories.includes("GlobalStatePort") || cliDirectories.includes("skill-set-state")) {
+    failures.push("CLI management directories retain a direct Skill correctness adapter");
+  }
+  if (handler.includes("GlobalStatePort") || handler.includes(".mutate(")) {
+    failures.push("Skill RPC binding owns a direct Skill mutation path");
+  }
+  if (
+    handler.includes("RpcErrors.busy(error.message)") ||
+    !handler.includes('if (error.code === "not-found")') ||
+    !handler.includes('if (error.code === "invalid-command")') ||
+    !handler.includes("throw error;")
+  ) {
+    failures.push("Skill RPC binding changed the pre-migration conflict wire contract");
+  }
+  const executeCalls = [...handler.matchAll(/const result = await callSkillApplication/gu)]
+    .map((match) => match.index);
+  const factTransports = [...handler.matchAll(/broadcastChanged\(ctx\.server, result\.fact\)/gu)]
+    .map((match) => match.index);
+  if (
+    executeCalls.length !== 2 ||
+    factTransports.length !== 2 ||
+    executeCalls.some((position, index) => factTransports[index] <= position)
+  ) {
+    failures.push("Skill RPC fact transport must follow each successful application command");
+  }
+  return failures;
 }
 
 export function inspectDeviceLifecycleAssembly(records) {

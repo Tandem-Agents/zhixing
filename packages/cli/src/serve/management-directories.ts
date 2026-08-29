@@ -1,11 +1,11 @@
 /**
- * 管理面目录的持久层实现 —— trust / skill 两域,注入给 @zhixing/server。
+ * Server-owned 管理目录的持久层实现 —— 仅剩 trust 域。
  *
  * trust:每次操作新建 PermissionStore 实例(惰性载盘)——目录无状态,确认链路
  * 沉淀的新规则随读即见;撤销落盘后对新建 runtime 实例生效(活跃实例的内存
  * 副本随实例换代刷新,最终一致)。
  *
- * skill:只经 GlobalStatePort 的 path-free query/control 合同读写。
+ * Skill Catalog 管理已由 @zhixing/core 的 Skill 应用服务拥有。
  */
 
 import {
@@ -14,18 +14,13 @@ import {
   type PermissionContextId,
   type PermissionRule,
 } from "@zhixing/core";
-import { randomUUID } from "node:crypto";
-import type { GlobalStatePort } from "@zhixing/core/contracts";
 import {
   resolveWorkspace,
   resolveWorkspaceSessionType,
   type WorkspaceSessionType,
   type ZhixingConfig,
 } from "@zhixing/providers";
-import type {
-  SkillDirectory,
-  TrustDirectory,
-} from "@zhixing/server";
+import type { TrustDirectory } from "@zhixing/server";
 
 export function createTrustDirectory(deps: {
   config: ZhixingConfig;
@@ -69,87 +64,6 @@ export function createTrustDirectory(deps: {
       // 载入与 list 同语境——列得到的才撤得到
       store.list(contextFor(conversationId));
       return store.revoke(ruleId);
-    },
-  };
-}
-
-export function createSkillDirectory(deps: {
-  globalState: GlobalStatePort | (() => GlobalStatePort);
-  anchorEpoch: number | (() => number);
-}): SkillDirectory {
-  let structuralVersion = 0;
-  const globalState = () =>
-    typeof deps.globalState === "function" ? deps.globalState() : deps.globalState;
-  const anchorEpoch = () =>
-    typeof deps.anchorEpoch === "function" ? deps.anchorEpoch() : deps.anchorEpoch;
-  const context = (requestId: string) => ({
-    principal: { kind: "host" as const, component: "skill-management" },
-    requestId,
-    deadlineAt: new Date(Date.now() + 30_000).toISOString(),
-    authority: { domain: "global" as const, anchorEpoch: anchorEpoch() },
-  });
-  const readCatalog = async () => {
-    const result = await globalState().read(
-      { kind: "skill-catalog", includeDisabled: true },
-      context(`skill-list:${randomUUID()}`),
-    );
-    if (result.kind !== "skill-catalog") {
-      throw new Error("Skill catalog returned another result type");
-    }
-    structuralVersion = result.catalogRevision;
-    return result.entries;
-  };
-  const readEntry = async (id: string) => {
-    const result = await globalState().read(
-      { kind: "skill-get", skillId: id },
-      context(`skill-get:${randomUUID()}`),
-    );
-    if (result.kind !== "skill-get") {
-      throw new Error("Skill lookup returned another result type");
-    }
-    structuralVersion = result.catalogRevision;
-    return result.entry;
-  };
-  return {
-    list() {
-      return readCatalog();
-    },
-    async setState(id, patch): Promise<boolean> {
-      const current = await readEntry(id);
-      if (!current) return false;
-      const statePatch = patch.mode !== undefined
-        ? { mode: patch.mode, ...(patch.pinned !== undefined ? { pinned: patch.pinned } : {}), ...(patch.disabled !== undefined ? { disabled: patch.disabled } : {}) }
-        : patch.pinned !== undefined
-          ? { pinned: patch.pinned, ...(patch.disabled !== undefined ? { disabled: patch.disabled } : {}) }
-          : { disabled: patch.disabled! };
-      await globalState().mutate(
-        {
-          kind: "skill-set-state",
-          skillId: id,
-          patch: statePatch,
-          expectedRevision: current.revision,
-        },
-        context(`skill-state:${randomUUID()}`),
-      );
-      await readCatalog();
-      return true;
-    },
-    async archive(id): Promise<boolean> {
-      const current = await readEntry(id);
-      if (!current) return false;
-      await globalState().mutate(
-        {
-          kind: "skill-archive",
-          skillId: id,
-          expectedRevision: current.revision,
-        },
-        context(`skill-archive:${randomUUID()}`),
-      );
-      await readCatalog();
-      return true;
-    },
-    structuralVersion() {
-      return structuralVersion;
     },
   };
 }

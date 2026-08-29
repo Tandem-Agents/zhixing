@@ -13,6 +13,7 @@ import type {
   AuthorityDeliveryStats,
   DeliveryStatusNotice,
 } from "@zhixing/core";
+import type { SkillCatalogApplication } from "@zhixing/core/skills/catalog";
 import type {
   ConversationStatusNotice,
   ExecutionStatusNotice,
@@ -37,10 +38,7 @@ import type { RpcSurfaceRegistry } from "./rpc/surface-identity.js";
 import type { PerspectivesController } from "./perspectives/index.js";
 import type { ConversationDirectory } from "./runtime/conversation-directory.js";
 import type { WorksceneDirectory } from "./runtime/workscene-directory.js";
-import type {
-  SkillDirectory,
-  TrustDirectory,
-} from "./runtime/management-directories.js";
+import type { TrustDirectory } from "./runtime/management-directories.js";
 
 export type ServerShutdownStrategy = "immediate" | "drain" | "cancel";
 
@@ -222,8 +220,8 @@ export interface ServerContext {
   workscenes?: WorksceneDirectory;
   /** 信任规则管理面。不传则 trust.* 不可用。 */
   trust?: TrustDirectory;
-  /** 技能库管理面。不传则 skill.* 不可用。 */
-  skills?: SkillDirectory;
+  /** Skill 领域的管理应用端口。不传则 skill.* 不可用。 */
+  skillCatalog?: SkillCatalogApplication;
   /** 宿主装配信息(server.info 的运维字段:工作区 / 日志路径)。 */
   hostInfo?: { workspace?: string; logPath?: string };
   /** 公开的本机运行状态；只允许稳定产品语言和有限动作。 */
@@ -394,7 +392,7 @@ export interface CreateContextOptions {
   conversationDirectory?: ConversationDirectory;
   workscenes?: WorksceneDirectory;
   trust?: TrustDirectory;
-  skills?: SkillDirectory;
+  skillCatalog?: SkillCatalogApplication;
   hostInfo?: { workspace?: string; logPath?: string };
   managedHostPublicStatus?: ServerContext["managedHostPublicStatus"];
   recoveryBackupStatus?: ServerContext["recoveryBackupStatus"];
@@ -426,7 +424,7 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     conversationDirectory: opts.conversationDirectory,
     workscenes: opts.workscenes,
     trust: opts.trust,
-    skills: opts.skills,
+    skillCatalog: opts.skillCatalog,
     hostInfo: opts.hostInfo,
     managedHostPublicStatus: opts.managedHostPublicStatus,
     recoveryBackupStatus: opts.recoveryBackupStatus,

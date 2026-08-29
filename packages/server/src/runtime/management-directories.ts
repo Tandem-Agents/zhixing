@@ -1,16 +1,12 @@
 /**
- * 管理面目录抽象 —— trust / skill 两个管理域的窄接口。
+ * 管理面目录抽象 —— Server 仍需适配的 trust 管理窄接口。
  *
- * server 声明接口、装配方注入持久层实现(与 ConversationDirectory /
- * WorksceneDirectory 同模式)。三域共性:全局数据(非会话域)、单写者在宿主、
- * 接入面经 RPC 读写（当前承载 trust 与 skills 管理方法）。
+ * 装配方注入持久层实现(与 ConversationDirectory / WorksceneDirectory 同模式)。
+ * Skill Catalog 的 Query/Command/Fact 合同由 Skill 领域拥有，不再由 Server
+ * 声明平行目录接口。
  */
 
-import type {
-  PermissionRule,
-  SkillCatalogEntry,
-  SkillMode,
-} from "@zhixing/core";
+import type { PermissionRule } from "@zhixing/core";
 
 /**
  * 信任规则管理 —— 按对话语境列 / 撤用户可管规则(/trust 的上下文相关视角:
@@ -27,19 +23,4 @@ export interface TrustDirectory {
   list(conversationId?: string): Promise<PermissionRule[]>;
   /** 撤销语境内可见的一条规则;不存在返回 false */
   revoke(ruleId: string, conversationId?: string): Promise<boolean>;
-}
-
-/** 技能库管理 —— /skills 管理器与 slash 补全候选源的执行体 */
-export interface SkillDirectory {
-  /** 管理视图(含 disabled 全集;builtin 零暴露) */
-  list(): Promise<SkillCatalogEntry[]>;
-  /** 改技能状态;技能不存在返回 false */
-  setState(
-    id: string,
-    patch: { mode?: SkillMode; pinned?: boolean; disabled?: boolean },
-  ): Promise<boolean>;
-  /** 归档(可逆删除:目录移至 archived/);不存在返回 false */
-  archive(id: string): Promise<boolean>;
-  /** 结构版本——变更通知携带,接入面据此刷新补全候选 */
-  structuralVersion(): number;
 }

@@ -19,6 +19,7 @@ import {
   inspectManagedHostAssembly,
   inspectPlannedAnchorTransferAssembly,
   inspectRecoveryBackupAssembly,
+  inspectSkillCatalogApplicationOwnership,
   parseLandingRowIds,
   validateCoverage,
   validateInboundRouterAssembly,
@@ -2337,6 +2338,100 @@ test("retired entry, live writable Store and reverse package dependency mutation
   assert.match(
     inspectProductionSource("packages/cli/src/bad.ts", 'const name = "LegacyDeliveryDrainer";')[0],
     /retired token LegacyDeliveryDrainer/,
+  );
+});
+
+test("Skill Catalog management has one domain application and fact-after-commit boundary", async () => {
+  const paths = [
+    "packages/core/src/skills/catalog-application.ts",
+    "packages/core/src/index.ts",
+    "packages/core/src/skills/index.ts",
+    "packages/core/package.json",
+    "packages/core/tsup.config.ts",
+    "packages/server/src/rpc/methods/skill.ts",
+    "packages/server/src/context.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/management-directories.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  assert.deepEqual(inspectSkillCatalogApplicationOwnership(records), []);
+
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/management-directories.ts",
+      (text) => `${text}\nexport const createSkillDirectory = () => undefined;`,
+    )).join("\n"),
+    /retired parallel Skill management application owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/skill.ts",
+      (text) => `${text}\nconst bypass = { kind: "skill-archive" };`,
+    )).join("\n"),
+    /binding writes Skill GlobalState directly/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/skills/catalog-application.ts",
+      (text) => text.replace(
+        "const committed = await this.#state().mutate(",
+        "const committed = bypassSkillCommit(",
+      ),
+    )).join("\n"),
+    /fact must use the exact revision returned after authority commit/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/skill.ts",
+      (text) => text.replace(
+        "broadcastChanged(ctx.server, result.fact);",
+        "broadcastChanged(ctx.server, result.fact);\n      broadcastChanged(ctx.server, result.fact);",
+      ),
+    )).join("\n"),
+    /fact transport must follow each successful application command/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/skills/index.ts",
+      (text) => `${text}\nexport * from "./catalog-application.js";`,
+    )).join("\n"),
+    /leaked into the core root barrel/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/context.ts",
+      (text) => text.replace(
+        '@zhixing/core/skills/catalog',
+        '@zhixing/core',
+      ),
+    )).join("\n"),
+    /bypasses its domain subpath|leaked back through core root import/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/package.json",
+      (text) => text.replace(
+        '    "./advancement": {',
+        '    "./skills/catalog-compat": {\n      "types": "./dist/skills/catalog-application.d.ts",\n      "import": "./dist/skills/catalog-application.js"\n    },\n    "./advancement": {',
+      ),
+    )).join("\n"),
+    /second package export entry/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/skill.ts",
+      (text) => text.replace(
+        "throw error;",
+        "throw RpcErrors.busy(error.message);",
+      ),
+    )).join("\n"),
+    /changed the pre-migration conflict wire contract/,
   );
 });
 

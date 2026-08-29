@@ -36,6 +36,10 @@
       "types": "./dist/rubrics/index.d.ts",
       "import": "./dist/rubrics/index.js"
     },
+    "./skills/catalog": {
+      "types": "./dist/skills/catalog-application.d.ts",
+      "import": "./dist/skills/catalog-application.js"
+    },
     "./advancement": {
       "types": "./dist/advancement/index.d.ts",
       "import": "./dist/advancement/index.js"
