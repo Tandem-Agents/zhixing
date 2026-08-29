@@ -364,6 +364,17 @@ if (
 ) {
   failures.push("orchestrator-agent-runtime:security-implementation-leak");
 }
+if (
+  !agentRuntimeDeclaration ||
+  /\b(?:resolvedWorkspace|workspaceDirStatus|ResolvedWorkspace|WorkspaceDirStatus)\b/u.test(
+    agentRuntimeDeclaration,
+  ) ||
+  /\bworkspace(?:Resolution|DirectoryStatus|Metadata|Info)\b/iu.test(
+    agentRuntimeDeclaration,
+  )
+) {
+  failures.push("orchestrator-agent-runtime:workspace-implementation-leak");
+}
 for (const name of runtimeHostLegacyNames) {
   if (
     name in runtimeHost ||

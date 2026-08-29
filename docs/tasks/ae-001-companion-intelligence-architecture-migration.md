@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A4-04 已完成，等待协调者独立复核；AgentRuntime 返回面已移除安全实现对象<br>
+> 当前检查点：A4-05 已完成，等待协调者独立复核；AgentRuntime 工作区解析对象已退出返回面<br>
 > 完成度：4/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `a4e9ff87`；A0～A3、A4-01～A4-03 已由协调者独立复核并提交，A1、A2、A3 阶段退出门成立 |
+| 已接受基线 | `6d11fc90`；A0～A3、A4-01～A4-04 已由协调者独立复核并提交，A1、A2、A3 阶段退出门成立 |
 | 当前 A 项 | A4：封闭 Intelligence Kernel 合同及其生产边界 |
-| 活跃工作包 | A4-04 已完成，等待协调者独立复核：`AgentRuntime` 返回对象与正式声明已移除 `SecurityPipeline` / `IPermissionStore` 实现实例；内部安全执行链继续唯一持有实现，Host 与产品调用方只消费有限查询、确认和效果端口 |
-| 下一责任链 | 协调者独立复核 A4-04 后，再从工作区解析/宿主管理公共成员、RuntimeHost 产品特有装配或 Kernel Conformance 中选择最高价值的单一 A4 责任链；不提前进入 A5 |
+| 活跃工作包 | A4-05 已完成，等待协调者独立复核：`AgentRuntime` source/declaration/return 已移除 `resolvedWorkspace` / `workspaceDirStatus`；Anchor 两个宿主消费者共用一次权威解析形成的默认工作区投影 |
+| 下一责任链 | 协调者独立复核 A4-05 后，再从其余宿主管理公共成员、RuntimeHost 产品特有装配或 Kernel Conformance 中选择最高价值的单一 A4 责任链；不提前进入 A5 |
 | 打开的单向桥 | 无；Skill 管理、保存、admission、load/usage、Kernel 与 Executor 投影均只经 `@zhixing/core/skills/catalog` 及既有 Authority/CAS/assignment Correctness 端口成立，旧 writable Store 不再承担正式应用行为 |
-| 已失效证据 | 无当前未恢复证据。新增 `A4-04-agent-runtime-security-encapsulation-v1` 等待协调者独立复核；A4-04 只改变 AgentRuntime 返回对象的安全实现可见性，Envelope/Event/Terminal、内部安全执行与现有有限安全查询/效果合同未失效 |
+| 已失效证据 | 无当前未恢复证据。新增 `A4-05-agent-runtime-workspace-encapsulation-v1` 等待协调者独立复核；A4-01～A4-04 的 Envelope/Event/Terminal 与安全封装证据不因本包失效 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1588,6 +1588,25 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 类型、构建与静态边界：orchestrator、runtime-host、CLI 三包 typecheck 均通过；按依赖顺序完成 orchestrator build、runtime-host build 与 `pnpm cli:build`；fresh dist 上 `pnpm runtime:package-exports` 与本包两个 TypeScript 文件的最窄 Biome 均通过。没有运行 Envelope/Event/Terminal 全文件、根级测试/构建、package check、制品验收或无关安全矩阵。
 - 失效、遗留与状态：若 `AgentRuntime` 接口/工厂返回对象、runtime/root declaration、RuntimeHost adapter、`securitySnapshot`、`executionPermissionRules`、confirmation broker、正常工具/Task/独立编排安全注入、S7 inspector/mutation 或 package-export 声明门变化，恢复本证据并只重验对应闭包。权限/信任产品语义、core 安全实现、`CreateAgentRuntimeOptions`、工作区解析、RuntimeHost 产品装配和 Kernel Conformance 均未迁移；A4 与完成度继续为 `[ ]` / `4/8`。交接类型为完成、等待协调者独立复核；无本包内遗留，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：反查 `AgentRuntime` 唯一声明、工厂返回对象、fresh declaration 与全部外部生产属性访问，确认安全实现实例已退出公共面而内部同一 pipeline/store 仍唯一驱动主工具、Task、独立编排及有限安全投影。独立重跑 trust/context 与真实受控拒绝 5/5、Task/secure executor/agent-node executor 75/75、orchestrator build、canonical S7 26/26、registry golden、fresh runtime package exports 和 `git diff --check`，全部通过；接受 `A4-04-agent-runtime-security-encapsulation-v1`。A4 继续为 `[ ]`，下一责任链不进入 A5。
+
+### A4-05：移除 AgentRuntime 返回面的工作区解析对象
+
+- 派发基线：`HEAD 6d11fc90 + task-doc:A4-05-dispatch`；A4-04 已由协调者独立复核并纳入提交，派发前索引与工作区为空。
+- 唯一架构结果：`AgentRuntime` 的正式接口与返回对象不再公开 `resolvedWorkspace`、`workspaceDirStatus` 或等价工作区解析/目录管理对象；Kernel 仍在内部按既有规则获得执行工作区并驱动 prompt、工具、安全与运行合同，宿主需要的默认工作目录由宿主装配边界直接持有，不能通过已创建的 Kernel 实例反向查询。
+- 生产闭包：反查两个字段的唯一生产消费者 `command.ts` 中 post-adoption working directory 与 `hostInfo.workspace`，改由同一冻结配置和既有权威解析器形成一个宿主侧默认工作区投影并共同消费；不得复制工作区优先级、路径归一化或目录创建算法。显式 Workscene/Executor assignment 工作区继续由现有 environment/领域输入决定，不能误用宿主默认路径。`workspaceDirStatus` 当前没有生产消费者，退出返回面后不得保留空壳、别名或无意义转发；内部 `ensureWorkspaceDir` 的既有创建/重建副作用必须保持。
+- 保护边界：默认配置工作区、cwd fallback、显式 runtime workspace、显式 null、Workscene 路径与无工作区五类语义不变；post-adoption review 与 server host-info 继续得到与本机主运行体相同的默认路径，文件工具、MCP、信任锚、prompt workspace source 和工作目录创建行为不变。不得把 `ResolvedWorkspace`、`WorkspaceDirStatus`、provider config 或目录管理能力重新包装成 AgentRuntime getter/callback/metadata bag，也不得新增第二 resolver、运行期服务定位或根导出。
+- 门禁与证据：更新 AgentRuntime 公共面结构门禁和 fresh declaration/package-export 检查，使字段、类型、等价别名或外部生产读取回流均被拒绝；直接测试必须证明两个宿主消费者共用同一宿主投影，并覆盖默认路径、显式 null/Workscene 隔离及目录创建不回退。按依赖顺序只构建和验证 orchestrator、runtime-host、CLI 的失效闭包，运行 canonical S7 与 package exports；不重复安全矩阵、Envelope/Event/Terminal 测试或根级全量门禁。
+- 明确不做：不改变工作区产品规则、配置格式、权限/信任、安全或文件工具语义；不处理 AgentRuntime 其他管理成员，不迁移 Workscene/Schedule 产品装配，不建立 Kernel Conformance，不进入 A5。
+- 完成与止损：只有两个解析对象从 AgentRuntime source/declaration/return/external consumers 全部归零、宿主两处路径消费统一且行为等价、Kernel 内部工作区执行语义与目录副作用成立、门禁能识别回流并且工作区可构建时才算完成。预计超过四小时、需要改动公开配置/协议/产品语义、出现多个独立 workspace owner 或影响扩至 Workscene/Schedule 领域时，停在原合同仍成立或新合同完整接管的可构建检查点并反馈；不执行 Git 写操作。
+
+执行记录（证据 ID：`A4-05-agent-runtime-workspace-encapsulation-v1`）：
+
+- 基线与责任迁移：进场 HEAD 为 `6d11fc908cb896cafccf20201eab4132baee30c8`，索引为空且工作区只有协调者预登记的本文台账。`AgentRuntime` 唯一 interface、工厂返回对象和 fresh runtime declaration 已删除 `resolvedWorkspace` / `workspaceDirStatus`，相邻 `ResolvedWorkspace` / `WorkspaceDirStatus` 返回类型依赖及无消费者的目录状态变量一并退出；没有 getter、metadata、callback、别名或兼容壳。Kernel 内部仍按 `runtime override > global config > cwd/none` 调用既有 `resolveWorkspace`，显式 null 仍直接形成 `none`，随后无条件执行既有 `ensureWorkspaceDir`，prompt、文件/MCP 工具、安全信任锚和运行输入继续消费同一个内部 workspace。
+- 宿主默认投影：Anchor 组合根在冻结的 `startup.config` 上只创建一次 `HostDefaultWorkspaceProjection`；该投影只调用 providers 的权威 `resolveWorkspace(config, { sessionType })`，不复制优先级、绝对路径验证、归一化或目录创建，并把同一解析结果分别投影为 post-adoption review working directory 与 `hostInfo.workspace`。两处旧 `ephemeralRuntime.resolvedWorkspace` 反向读取已删除；CI/无配置时仍保持 review 回退当前 cwd、host info 不发布 workspace。Workscene 的本机 binding 解析、显式 null 与 Executor assignment workspace 仍只经原 `RuntimeHost` 输入进入 Kernel，不消费宿主默认投影。
+- 直接证据：orchestrator 工作区封装定向测试 1 文件 2/2，证明默认解析与目录建立仍在内部发生、显式 null 跳过 resolver 但继续完成安全的目录步骤，并且两个旧返回字段均不存在；CLI 宿主投影与 RuntimeHost 隔离测试 2 文件 6/6，证明配置路径同时供两个宿主消费者使用、非交互无 workspace 终态等价、main 显式 null 与 Workscene 路径互不回落。orchestrator、runtime-host、CLI 三包 typecheck 均通过；按依赖顺序完成三包 build（CLI 使用 canonical `pnpm cli:build`）。
+- 结构、声明与纠正：新增独立 S7 inspector/mutation 冻结 AgentRuntime 唯一 owner、返回面零 workspace 字段/别名、外部 runtime 属性读取归零、宿主投影唯一权威 resolver 与两消费点共用。第一次 canonical 运行识别出 inspector 把 workbench 自有 `workspaceDirStatus` 和 Mesh environment 的 `resolveWorkspace` 误当 Kernel 泄漏；门禁随后收窄为“runtime receiver 属性读取”和“禁止裸 provider resolver 旁路”，没有放宽生产不变量。最终 canonical `pnpm s7:lint` 为 27/27 且 registry golden 通过；fresh orchestrator declaration 上的 `pnpm runtime:package-exports` 通过，并拒绝旧字段、类型与常见改名 metadata/info 回流。
+- 失效、遗留与状态：若 `AgentRuntime` interface/return/declaration、内部 `resolveWorkspace/ensureWorkspaceDir`、Host 默认投影、post-adoption review、`ServerContext.hostInfo.workspace`、RuntimeHost 的 explicit null/Workscene/assignment 分叉、S7 inspector/mutation 或 package-export 声明门变化，恢复本证据并只重验对应闭包。工作区产品规则、配置格式、Workscene/Schedule 领域、权限/信任、安全、文件工具、其他 AgentRuntime 管理成员和 Kernel Conformance 均未迁移；A4 与完成度继续为 `[ ]` / `4/8`。交接类型为完成、等待协调者独立复核；无本包内遗留，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：从 AgentRuntime 唯一声明、工厂返回、fresh declaration、Anchor 两个生产消费者和显式 Workscene/null 输入反查，确认工作区解析对象已退出 Kernel 公共面，宿主只在冻结配置上调用一次既有权威 resolver，且未复制目录算法或形成第二运行期解析链。独立重跑 Kernel 内部默认/null 工作区 2/2、宿主投影与 RuntimeHost 隔离 6/6、orchestrator/runtime-host/CLI 依赖顺序构建、canonical S7 27/27、registry golden、fresh runtime package exports 和 `git diff --check`，全部通过；接受 `A4-05-agent-runtime-workspace-encapsulation-v1`。A4 继续为 `[ ]`，下一责任链不进入 A5。
 
 ## 十、用户提示词
 

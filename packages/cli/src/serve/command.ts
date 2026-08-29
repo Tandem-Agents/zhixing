@@ -176,6 +176,7 @@ import { loadExecutorRemovalLifecycleDecision } from "./device-removal.js";
 import { AnchorUninstallCoordinator } from "./anchor-uninstall.js";
 import { createMeshCompatibilityStateProjection } from "./mesh-compatibility-state.js";
 import { buildManagedHostPublicStatus } from "./status.js";
+import { createHostDefaultWorkspaceProjection } from "./host-default-workspace.js";
 import {
   HostStopCoordinator,
   hostStopAlreadySettled,
@@ -276,6 +277,7 @@ async function runServerProcess(
   const credentials: ZhixingCredentials = startupResult.credentials;
   const credentialGeneration = startupResult.credentialGeneration;
   const systemProtectedPaths = resolveSystemProtectedSecretPaths();
+  const hostDefaultWorkspace = createHostDefaultWorkspaceProjection(config);
 
   // ============================================================================
   // 恒定核心前置 —— 接入面 setup 从这里读依赖。
@@ -1127,7 +1129,7 @@ async function runServerProcess(
       adoptionReview = new PostAdoptionReviewCoordinator({
         review: runtime.deferredIntents,
         hub: confirmationHub,
-        workingDirectory: ephemeralRuntime.resolvedWorkspace.path ?? process.cwd(),
+        workingDirectory: hostDefaultWorkspace.postAdoptionReviewWorkingDirectory,
       });
     };
     await installSchedulerGeneration(schedulerRuntime, false);
@@ -1914,7 +1916,7 @@ async function runServerProcess(
     ]),
     hostInfo: {
       // 宿主单点解析的工作区——接入面 @ 补全 root 取此
-      workspace: ephemeralRuntime.resolvedWorkspace.path ?? undefined,
+      workspace: hostDefaultWorkspace.hostInfoWorkspace,
       logPath: daemonLogPath,
     },
     managedHostPublicStatus: () => buildManagedHostPublicStatus(

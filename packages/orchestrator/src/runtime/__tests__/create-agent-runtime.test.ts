@@ -61,6 +61,8 @@ const {
   degradationsRef,
   decorateCalls,
   decorateDisposes,
+  resolveWorkspaceMock,
+  ensureWorkspaceDirMock,
 } = vi.hoisted(() => ({
     providerRef: { current: null as MockLLMProvider | null },
     // opt-in 差异化 power 角色：默认 null = power 与 main 折叠（fallback 语义，
@@ -74,6 +76,11 @@ const {
     degradationsRef: { current: [] as RoleDegradation[] },
     decorateCalls: [] as Array<IEventBus<AgentEventMap>>,
     decorateDisposes: [] as Array<() => void>,
+    resolveWorkspaceMock: vi.fn(() => ({
+      path: process.cwd(),
+      source: "cwd-fallback" as const,
+    })),
+    ensureWorkspaceDirMock: vi.fn(() => "exists" as const),
 }));
 
 function makeSkillCatalogQuery(
@@ -170,12 +177,9 @@ vi.mock("@zhixing/providers", async (importOriginal) => {
       };
     },
     // workspace 走 cwd-fallback,跳过配置层
-    resolveWorkspace: () => ({
-      path: process.cwd(),
-      source: "cwd-fallback" as const,
-    }),
+    resolveWorkspace: resolveWorkspaceMock,
     // 不真的 mkdir
-    ensureWorkspaceDir: () => "exists" as const,
+    ensureWorkspaceDir: ensureWorkspaceDirMock,
   };
 });
 
@@ -207,6 +211,8 @@ beforeEach(() => {
   degradationsRef.current = [];
   decorateCalls.length = 0;
   decorateDisposes.length = 0;
+  resolveWorkspaceMock.mockClear();
+  ensureWorkspaceDirMock.mockClear();
 });
 
 /** 装饰器 spy:记录 ctx.bus + 返回可断言的 dispose */
@@ -281,6 +287,31 @@ describe("createAgentRuntime · execution authority facts", () => {
 
     (profile.tools as string[]).push("tampered");
     expect(runtime.executionProfile().tools).not.toContain("tampered");
+  });
+});
+
+describe("createAgentRuntime · workspace encapsulation", () => {
+  it("keeps default workspace resolution and directory establishment internal", async () => {
+    const runtime = await createAgentRuntime({});
+
+    expect(resolveWorkspaceMock).toHaveBeenCalledTimes(1);
+    expect(ensureWorkspaceDirMock).toHaveBeenCalledWith({
+      path: process.cwd(),
+      source: "cwd-fallback",
+    });
+    expect("resolvedWorkspace" in runtime).toBe(false);
+    expect("workspaceDirStatus" in runtime).toBe(false);
+  });
+
+  it("keeps an explicit null workspace isolated while still completing the internal directory step", async () => {
+    const runtime = await createAgentRuntime({ workspace: null });
+
+    expect(resolveWorkspaceMock).not.toHaveBeenCalled();
+    expect(ensureWorkspaceDirMock).toHaveBeenCalledWith({
+      path: null,
+      source: "none",
+    });
+    expect(runtime.securitySnapshot().workspacePath).toBeNull();
   });
 });
 

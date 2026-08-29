@@ -19,6 +19,7 @@ import {
   inspectKernelRunEventOwnership,
   inspectKernelTerminalOwnership,
   inspectAgentRuntimeSecurityEncapsulation,
+  inspectAgentRuntimeWorkspaceEncapsulation,
   inspectLocalConversationOwnerIsolation,
   inspectManagedHostAssembly,
   inspectPlannedAnchorTransferAssembly,
@@ -2639,6 +2640,69 @@ test("AgentRuntime keeps one internal security chain behind finite public ports"
       (text) => text.replace("      securityPipeline,", ""),
     )).join("\n"),
     /internal security chain is no longer single and shared/,
+  );
+});
+
+test("AgentRuntime keeps workspace resolution internal while Anchor shares one host projection", async () => {
+  const paths = [
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+    "packages/runtime-host/src/session-adapter.ts",
+    "packages/runtime-host/src/runtime-host.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/host-default-workspace.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectAgentRuntimeWorkspaceEncapsulation(records), []);
+  assert.match(
+    inspectAgentRuntimeWorkspaceEncapsulation(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => text.replace(
+        "  readonly confirmationBroker: IConfirmationBroker;",
+        "  readonly resolvedWorkspace: ResolvedWorkspace;\n  readonly confirmationBroker: IConfirmationBroker;",
+      ),
+    )).join("\n"),
+    /exposes workspace resolution/,
+  );
+  assert.match(
+    inspectAgentRuntimeWorkspaceEncapsulation(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => text.replace(
+        "    confirmationBroker,",
+        "    workspaceMetadata: workspace,\n    confirmationBroker,",
+      ),
+    )).join("\n"),
+    /returns workspace resolution/,
+  );
+  assert.match(
+    inspectAgentRuntimeWorkspaceEncapsulation(mutate(
+      "packages/runtime-host/src/session-adapter.ts",
+      (text) => `${text}\nexport const leakedWorkspace = (runtime: AgentRuntime) => runtime.resolvedWorkspace;`,
+    )).join("\n"),
+    /external production code reads AgentRuntime workspace internals/,
+  );
+  assert.match(
+    inspectAgentRuntimeWorkspaceEncapsulation(mutate(
+      "packages/cli/src/serve/host-default-workspace.ts",
+      (text) => text.replace("resolveWorkspace(config, { sessionType })", "{ path: config.workspace?.root ?? null }"),
+    )).join("\n"),
+    /authority resolver/,
+  );
+  assert.match(
+    inspectAgentRuntimeWorkspaceEncapsulation(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "hostDefaultWorkspace.hostInfoWorkspace",
+        "ephemeralRuntime.resolvedWorkspace.path ?? undefined",
+      ),
+    )).join("\n"),
+    /do not share the one default workspace projection/,
   );
 });
 

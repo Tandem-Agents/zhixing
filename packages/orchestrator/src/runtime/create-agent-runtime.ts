@@ -98,8 +98,6 @@ import {
   resolveWorkspaceSessionType,
   ROLE_SPECS,
   type ProviderCredentialProjection,
-  type ResolvedWorkspace,
-  type WorkspaceDirStatus,
   type ZhixingConfig,
 } from "@zhixing/providers";
 import {
@@ -344,10 +342,6 @@ export interface AgentRuntime {
    * 读取并清空 run 外 lifecycle 诊断。run 内诊断直接进入 per-run eventBus。
    */
   drainLifecycleDiagnostics(): readonly AgentEventMap["lifecycle:warning"][];
-  /** 解析后的工作区信息（路径 + 来源），供启动展示和 RuntimeContext 使用 */
-  readonly resolvedWorkspace: ResolvedWorkspace;
-  /** 工作区目录状态（exists/created/skipped），供启动展示区分场景 */
-  readonly workspaceDirStatus: WorkspaceDirStatus;
   /** 注册 per-turn 上下文 provider（如 SchedulerProvider），支持后注册 */
   registerTurnContextProvider(provider: TurnContextProvider): void;
   /**
@@ -671,16 +665,16 @@ export async function createAgentRuntime(
   const sessionType = resolveWorkspaceSessionType();
   // workspace === null：显式无工作区（无 workdir 工作场景），跳过解析、
   // 直接 source:"none"；否则按优先级链 resolveWorkspace。
-  const workspace: ResolvedWorkspace =
+  const workspace =
     options.workspace === null
-      ? { path: null, source: "none" }
+      ? { path: null, source: "none" as const }
       : resolveWorkspace(config, {
           runtimeWorkspace: options.workspace,
           sessionType,
         });
 
   // 确保工作区目录存在（首次启动自动创建，目录被删除则重建）
-  const workspaceDirStatus = ensureWorkspaceDir(workspace);
+  ensureWorkspaceDir(workspace);
 
   // 角色 profile —— 决定工具集与身份段。enabledTools 是装配的唯一权威源。
   const profile = options.profile ?? mainProfile();
@@ -1212,8 +1206,6 @@ export async function createAgentRuntime(
     providerId: roles[primaryRole].provider.id,
     model: roles[primaryRole].model,
     confirmationBroker,
-    resolvedWorkspace: workspace,
-    workspaceDirStatus,
 
     registerTurnContextProvider(provider: TurnContextProvider): void {
       turnContextInjector.register(provider);

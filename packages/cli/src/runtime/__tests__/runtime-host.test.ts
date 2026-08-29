@@ -144,6 +144,20 @@ describe("资产层透传", () => {
     expect(params.profile.enabledTools).not.toContain("read");
     expect(params.profile.enabledTools).not.toContain("admit_skill");
   });
+
+  it("main 显式 null 与 Workscene workspace 保持各自输入，不回落宿主默认投影", async () => {
+    const { options } = makeHostOptions();
+    const host = new RuntimeHost(options);
+
+    await host.createConversationRuntime(null);
+    await host.createWorksceneRuntime({
+      scene: workscene("s1", "场景"),
+      absolutePath: "/scene-root",
+    });
+
+    expect(createAgentRuntimeMock.mock.calls[0]![0].workspace).toBeNull();
+    expect(createAgentRuntimeMock.mock.calls[1]![0].workspace).toBe("/scene-root");
+  });
 });
 
 function workscene(

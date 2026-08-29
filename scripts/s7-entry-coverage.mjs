@@ -1895,6 +1895,163 @@ export function inspectAgentRuntimeSecurityEncapsulation(records) {
   return failures;
 }
 
+export function inspectAgentRuntimeWorkspaceEncapsulation(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const runtimePath = "packages/orchestrator/src/runtime/create-agent-runtime.ts";
+  const hostProjectionPath = "packages/cli/src/serve/host-default-workspace.ts";
+  const commandPath = "packages/cli/src/serve/command.ts";
+  const runtimeSource = byPath.get(runtimePath);
+  const hostProjectionSource = byPath.get(hostProjectionPath);
+  const commandSource = byPath.get(commandPath);
+  if (runtimeSource === undefined) {
+    return [`${runtimePath}: AgentRuntime workspace boundary source is missing`];
+  }
+
+  const runtimeFile = ts.createSourceFile(
+    runtimePath,
+    runtimeSource,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const runtimeDeclarations = records.flatMap((record) => {
+    const file = ts.createSourceFile(
+      record.relative,
+      record.text,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    return file.statements
+      .filter(
+        (statement) =>
+          ts.isInterfaceDeclaration(statement) &&
+          statement.name.text === "AgentRuntime",
+      )
+      .map(() => record.relative);
+  });
+  const declaration = runtimeFile.statements.find(
+    (statement) =>
+      ts.isInterfaceDeclaration(statement) && statement.name.text === "AgentRuntime",
+  );
+  if (
+    runtimeDeclarations.length !== 1 ||
+    runtimeDeclarations[0] !== runtimePath ||
+    !declaration ||
+    !ts.isInterfaceDeclaration(declaration)
+  ) {
+    failures.push("AgentRuntime lacks one public contract owner for workspace encapsulation");
+  } else {
+    for (const member of declaration.members) {
+      const name = member.name ? propertyNameText(member.name) : undefined;
+      const text = member.getText(runtimeFile);
+      if (
+        /workspace/iu.test(name ?? "") ||
+        /\b(?:ResolvedWorkspace|WorkspaceDirStatus)\b/u.test(text)
+      ) {
+        failures.push("AgentRuntime exposes workspace resolution or directory management");
+      }
+    }
+  }
+
+  const factory = runtimeFile.statements.find(
+    (statement) =>
+      ts.isFunctionDeclaration(statement) &&
+      statement.name?.text === "createAgentRuntime",
+  );
+  if (!factory?.body) {
+    failures.push("createAgentRuntime workspace return boundary is missing");
+  } else {
+    const candidates = [];
+    const visit = (node) => {
+      if (ts.isObjectLiteralExpression(node)) {
+        const names = new Set(
+          node.properties
+            .map((property) => property.name && propertyNameText(property.name))
+            .filter(Boolean),
+        );
+        if (
+          names.has("providerId") &&
+          names.has("model") &&
+          names.has("confirmationBroker") &&
+          names.has("run")
+        ) {
+          candidates.push(node);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(factory.body);
+    const returnedRuntime = candidates[0];
+    if (candidates.length !== 1 || !returnedRuntime) {
+      failures.push("createAgentRuntime return object is missing or duplicated");
+    } else if (
+      returnedRuntime.properties.some((property) =>
+        /workspace/iu.test(
+          property.name ? propertyNameText(property.name) ?? "" : "",
+        )
+      )
+    ) {
+      failures.push("createAgentRuntime returns workspace resolution or directory management");
+    }
+  }
+
+  for (const record of records) {
+    if (record.relative === runtimePath) continue;
+    const file = ts.createSourceFile(
+      record.relative,
+      record.text,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    let leaked = false;
+    const isRetiredWorkspaceProperty = (name) =>
+      /^(?:resolvedWorkspace|workspaceDirStatus)$/u.test(name) ||
+      /workspace(?:Resolution|DirectoryStatus|Metadata|Info)$/iu.test(name);
+    const visit = (node) => {
+      if (
+        (ts.isPropertyAccessExpression(node) &&
+          /runtime/iu.test(node.expression.getText(file)) &&
+          isRetiredWorkspaceProperty(node.name.text)) ||
+        (ts.isElementAccessExpression(node) &&
+          /runtime/iu.test(node.expression.getText(file)) &&
+          ts.isStringLiteral(node.argumentExpression) &&
+          isRetiredWorkspaceProperty(node.argumentExpression.text))
+      ) {
+        leaked = true;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+    if (leaked) {
+      failures.push(`${record.relative}: external production code reads AgentRuntime workspace internals`);
+    }
+  }
+
+  if (
+    hostProjectionSource === undefined ||
+    (hostProjectionSource.match(/\bresolveWorkspace\s*\(/gu) ?? []).length !== 1 ||
+    !hostProjectionSource.includes("resolveWorkspace(config, { sessionType })") ||
+    hostProjectionSource.includes("ensureWorkspaceDir")
+  ) {
+    failures.push("Host default workspace projection no longer delegates once to the authority resolver");
+  }
+  if (
+    commandSource === undefined ||
+    (commandSource.match(/\bcreateHostDefaultWorkspaceProjection\s*\(config\)/gu) ?? []).length !== 1 ||
+    (commandSource.match(/hostDefaultWorkspace\.postAdoptionReviewWorkingDirectory/gu) ?? []).length !== 1 ||
+    (commandSource.match(/hostDefaultWorkspace\.hostInfoWorkspace/gu) ?? []).length !== 1 ||
+    /ephemeralRuntime\.(?:resolvedWorkspace|workspaceDirStatus)/u.test(commandSource) ||
+    /(?:^|[^.])\bresolveWorkspace\s*\(/u.test(commandSource)
+  ) {
+    failures.push("Anchor host consumers do not share the one default workspace projection");
+  }
+
+  return failures;
+}
+
 export async function validateS7Structure() {
   const files = await productionTypeScriptFiles(path.join(root, "packages"));
   const records = await Promise.all(files.map(async (absolute) => ({
@@ -1926,6 +2083,7 @@ export async function validateS7Structure() {
   failures.push(...inspectKernelRunEventOwnership(records));
   failures.push(...inspectKernelTerminalOwnership(records));
   failures.push(...inspectAgentRuntimeSecurityEncapsulation(records));
+  failures.push(...inspectAgentRuntimeWorkspaceEncapsulation(records));
   failures.push(...inspectSkillCatalogApplicationOwnership([
     ...records,
     {
