@@ -9,7 +9,11 @@ import {
   type SkillCatalogEntry,
 } from "@zhixing/core";
 import { FileArtifactStore } from "@zhixing/core/authority";
-import { protocolDigest } from "@zhixing/core/protocol";
+import {
+  assignmentMutationRequestId,
+  protocolDigest,
+} from "@zhixing/core/protocol";
+import { BUILTIN_TOOL_FACTORIES } from "@zhixing/tools-builtin";
 import type {
   AssignmentGlobalQueryPort,
   AssignmentMutationOverlayRecord,
@@ -45,7 +49,7 @@ describe("assignment skill ports", () => {
           assignmentIssuedAt: ISSUED_AT,
         },
         async () => {
-          const saved = await ports.saver(
+          const saved = await ports.saveApplication.save(
             {
               name: "My Skill",
               description: "Useful instructions",
@@ -66,12 +70,20 @@ describe("assignment skill ports", () => {
       expect(overlay).toHaveLength(2);
       expect(overlay[0]).toMatchObject({
         domain: "global",
-        requestId: "tool-save:save",
+        requestId: assignmentMutationRequestId({
+          assignmentId: "assignment-1",
+          domain: "global",
+          operationId: "tool-save:save",
+        }),
         mutation: { kind: "skill-create" },
       });
       expect(overlay[1]).toMatchObject({
         domain: "global",
-        requestId: "tool-load:usage",
+        requestId: assignmentMutationRequestId({
+          assignmentId: "assignment-1",
+          domain: "global",
+          operationId: "tool-load:usage",
+        }),
         mutation: {
           kind: "skill-usage",
           record: { occurredAt: ISSUED_AT, hitDelta: 1 },
@@ -96,6 +108,57 @@ describe("assignment skill ports", () => {
     expect(JSON.stringify([own, disabled])).not.toMatch(/[A-Z]:\\|\/tmp\//);
   });
 
+  it("binds the real save_skill factory to the domain application and staged update adapter", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "assignment-skills-"));
+    try {
+      const overlay: AssignmentMutationOverlayRecord[] = [];
+      const ports = createAssignmentSkillPorts(
+        new FileArtifactStore(path.join(root, "artifacts")),
+      );
+      const tool = BUILTIN_TOOL_FACTORIES.save_skill!({
+        skillCatalogSave: ports.saveApplication,
+        skillMode: "work",
+      });
+      const linkedDisabled = entry({ source: "linked", disabled: true, revision: 4 });
+      const result = await runContextStorage.run(
+        {
+          bus: createEventBus<AgentEventMap>({ lineage: "main" }),
+          lineage: "main",
+          globalQuery: skillQuery([linkedDisabled]),
+          assignmentMutations: mutationPort(overlay),
+          assignmentIssuedAt: ISSUED_AT,
+        },
+        () => tool.call(
+          {
+            name: linkedDisabled.name,
+            description: "updated",
+            body: "updated body",
+          },
+          { workingDirectory: root, toolCallId: "tool-production-save" },
+        ),
+      );
+
+      expect(result).toMatchObject({ isError: false });
+      expect(result.content).toContain("本轮成功完成后入库");
+      expect(overlay).toHaveLength(1);
+      expect(overlay[0]).toMatchObject({
+        requestId: assignmentMutationRequestId({
+          assignmentId: "assignment-1",
+          domain: "global",
+          operationId: "tool-production-save:save",
+        }),
+        mutation: {
+          kind: "skill-update",
+          skillId: linkedDisabled.id,
+          expectedRevision: 4,
+          mode: "work",
+        },
+      });
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("fails closed outside a durable assignment instead of writing a local store", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "assignment-skills-"));
     try {
@@ -103,7 +166,7 @@ describe("assignment skill ports", () => {
         new FileArtifactStore(path.join(root, "artifacts")),
       );
       await expect(
-        ports.saver(
+        ports.saveApplication.save(
           {
             name: "No Assignment",
             description: "Must fail",
@@ -127,17 +190,22 @@ function mutationPort(
     execution: "conversation",
     async stage(input: AssignmentMutationRequest) {
       const recordSeq = overlay.length + 1;
+      const requestId = assignmentMutationRequestId({
+        assignmentId: "assignment-1",
+        domain: input.domain,
+        operationId: input.operationId,
+      });
       const mutationDigest = protocolDigest("AssignmentSkillTestMutation", 1, input);
       overlay.push({
         recordSeq,
         domain: input.domain,
         mutation: input.mutation,
-        requestId: input.operationId,
+        requestId,
         mutationDigest,
       });
       return {
         kind: "assignment-mutation-staged",
-        requestId: input.operationId,
+        requestId,
         recordSeq,
         mutationDigest,
       };

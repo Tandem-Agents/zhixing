@@ -145,11 +145,15 @@ await verifyCorePackageExports(failures);
 for (const name of [
   "SkillCatalogApplicationError",
   "SkillCatalogApplicationService",
+  "SkillCatalogSaveApplicationService",
 ]) {
   if (typeof coreSkillCatalog[name] !== "function") {
     failures.push(`core-skill-catalog:${name}:missing`);
   }
   if (name in coreRoot) failures.push(`core-root-skill-catalog-leak:${name}`);
+}
+if ("assignmentMutationRequestId" in coreRoot) {
+  failures.push("core-root-assignment-mutation-identity-leak");
 }
 for (const [moduleName, module, names] of [
   ["core-authority", coreAuthority, ["FileArtifactStore", "FileAuthorityCommitLog"]],
@@ -167,6 +171,7 @@ for (const [moduleName, module, names] of [
       "applyValidatedAssignmentEntry",
       "assignmentActivationDigest",
       "assignmentLedgerSeed",
+      "assignmentMutationRequestId",
       "buildConversationActivationPayload",
       "buildConversationActivationPayloadFromBinding",
       "byteDigest",
@@ -350,7 +355,8 @@ async function verifyCorePackageExports(failures) {
           if (
             subpath !== "./skills/catalog" &&
             ("SkillCatalogApplicationError" in exported ||
-              "SkillCatalogApplicationService" in exported)
+              "SkillCatalogApplicationService" in exported ||
+              "SkillCatalogSaveApplicationService" in exported)
           ) {
             failures.push(`core-exports:${subpath}:skill-catalog-runtime-leak`);
           }
@@ -360,7 +366,7 @@ async function verifyCorePackageExports(failures) {
       } else if (subpath !== "./skills/catalog") {
         const declaration = await readFile(targetUrl, "utf8");
         if (
-          declaration.includes("SkillCatalogApplication") ||
+          /SkillCatalog(?:Save)?Application/u.test(declaration) ||
           declaration.includes("catalog-application")
         ) {
           failures.push(`core-exports:${subpath}:skill-catalog-type-leak`);

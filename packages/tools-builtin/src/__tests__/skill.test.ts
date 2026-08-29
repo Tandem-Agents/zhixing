@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { createLoadSkillTool, createSaveSkillTool } from "../skill.js";
 import type { SkillTextLoader } from "@zhixing/core";
+import type { SkillCatalogSaveApplication } from "@zhixing/core/skills/catalog";
 
 const CTX = { workingDirectory: "." };
 
@@ -60,13 +61,17 @@ describe("load_skill 工具", () => {
   });
 });
 
-describe("save_skill 工具(SkillSavePipeline 的确认护栏包装)", () => {
-  const okSaver: import("../skill.js").SkillSaver = async (draft) => ({
-    id: "deploy-flow",
-    name: draft.name,
-    outcome: "created",
-    scrubbedCount: 0,
-  });
+describe("save_skill 工具(Skill Catalog 应用端口的确认护栏包装)", () => {
+  const okApplication: SkillCatalogSaveApplication = {
+    async save(draft) {
+      return {
+        id: "deploy-flow",
+        name: draft.name,
+        outcome: "created",
+        scrubbedCount: 0,
+      };
+    },
+  };
 
   const INPUT = {
     name: "部署流程",
@@ -75,7 +80,7 @@ describe("save_skill 工具(SkillSavePipeline 的确认护栏包装)", () => {
   };
 
   it("成功暂存:content 含名称 / id / 提交后生效,不虚报已可唤起", async () => {
-    const tool = createSaveSkillTool(okSaver, "main");
+    const tool = createSaveSkillTool(okApplication, "main");
     const r = await tool.call(INPUT, CTX as never);
     expect(r.isError).toBe(false);
     expect(r.content).toContain("部署流程");
@@ -87,13 +92,17 @@ describe("save_skill 工具(SkillSavePipeline 的确认护栏包装)", () => {
   });
 
   it("更新路径措辞 + 脱敏计数 > 0 时附诚实告知行", async () => {
-    const saver: import("../skill.js").SkillSaver = async (draft) => ({
-      id: "x",
-      name: draft.name,
-      outcome: "updated",
-      scrubbedCount: 2,
-    });
-    const tool = createSaveSkillTool(saver, "main");
+    const application: SkillCatalogSaveApplication = {
+      async save(draft) {
+        return {
+          id: "x",
+          name: draft.name,
+          outcome: "updated",
+          scrubbedCount: 2,
+        };
+      },
+    };
+    const tool = createSaveSkillTool(application, "main");
     const r = await tool.call(INPUT, CTX as never);
     expect(r.content).toContain("更新");
     expect(r.content).toContain("2 处密钥");
@@ -101,11 +110,13 @@ describe("save_skill 工具(SkillSavePipeline 的确认护栏包装)", () => {
 
   it("mode 缺省取装配档(work 场景默认 work);显式 mode 优先", async () => {
     const seen: string[] = [];
-    const saver: import("../skill.js").SkillSaver = async (draft) => {
-      seen.push(draft.mode);
-      return { id: "x", name: draft.name, outcome: "created", scrubbedCount: 0 };
+    const application: SkillCatalogSaveApplication = {
+      async save(draft) {
+        seen.push(draft.mode);
+        return { id: "x", name: draft.name, outcome: "created", scrubbedCount: 0 };
+      },
     };
-    const tool = createSaveSkillTool(saver, "work");
+    const tool = createSaveSkillTool(application, "work");
     await tool.call(INPUT, CTX as never);
     await tool.call({ ...INPUT, mode: "main" }, CTX as never);
     expect(seen).toEqual(["work", "main"]);
@@ -113,28 +124,32 @@ describe("save_skill 工具(SkillSavePipeline 的确认护栏包装)", () => {
 
   it("缺任一必填字段:isError、不触发管线", async () => {
     let called = false;
-    const saver: import("../skill.js").SkillSaver = async (draft) => {
-      called = true;
-      return { id: "x", name: draft.name, outcome: "created", scrubbedCount: 0 };
+    const application: SkillCatalogSaveApplication = {
+      async save(draft) {
+        called = true;
+        return { id: "x", name: draft.name, outcome: "created", scrubbedCount: 0 };
+      },
     };
-    const tool = createSaveSkillTool(saver, "main");
+    const tool = createSaveSkillTool(application, "main");
     const r = await tool.call({ name: "只有名字" }, CTX as never);
     expect(r.isError).toBe(true);
     expect(called).toBe(false);
   });
 
   it("管线抛错 → isError 透传消息,不抛出", async () => {
-    const saver: import("../skill.js").SkillSaver = async () => {
-      throw new Error("磁盘满");
+    const application: SkillCatalogSaveApplication = {
+      async save() {
+        throw new Error("磁盘满");
+      },
     };
-    const tool = createSaveSkillTool(saver, "main");
+    const tool = createSaveSkillTool(application, "main");
     const r = await tool.call(INPUT, CTX as never);
     expect(r.isError).toBe(true);
     expect(r.content).toContain("磁盘满");
   });
 
   it("系统护栏形态:无 boundaries 声明(走确认管线)、非只读、串行", () => {
-    const tool = createSaveSkillTool(okSaver, "main");
+    const tool = createSaveSkillTool(okApplication, "main");
     expect(tool.boundaries).toBeUndefined();
     expect(tool.isReadOnly).toBe(false);
     expect(tool.isParallelSafe).toBe(false);

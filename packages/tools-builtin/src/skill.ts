@@ -24,13 +24,12 @@ import {
 import type {
   AdmissionAssessment,
   ContentThreat,
-  SkillDraft,
   SkillMode,
-  SkillSaveOutcome,
   SkillTextLoader,
   ToolDefinition,
   ToolResult,
 } from "@zhixing/core";
+import type { SkillCatalogSaveApplication } from "@zhixing/core/skills/catalog";
 
 export function createLoadSkillTool(loader: SkillTextLoader): ToolDefinition {
   return {
@@ -81,27 +80,17 @@ export function createLoadSkillTool(loader: SkillTextLoader): ToolDefinition {
 }
 
 /**
- * save_skill 对保存管线的最小依赖契约(接口隔离)—— 工具只需"把草稿交给
- * 管线",不耦合 SkillStore 与管线内部;装配期把 runSkillSavePipeline 绑定
- * store 后注入,测试可注入轻量 mock。
- */
-export type SkillSaver = (
-  draft: SkillDraft,
-  operationId?: string,
-) => Promise<SkillSaveOutcome>;
-
-/**
  * save_skill 工具 —— 创建 / 打磨技能的唯一落盘口(upsert:同名即更新)。
  *
- * 定位 = SkillSavePipeline + 用户确认护栏的工具包装:四不变量(脱敏 / own
- * 落位 / 格式 / 索引版本)焊在管线里;本包装层承载用户路径的系统护栏——
+ * 定位 = Skill Catalog 保存应用 + 用户确认护栏的工具包装:保存不变量由领域应用
+ * 持有;本包装层只承载输入、产品文案与用户路径的系统护栏——
  * **刻意不声明 boundaries**:持久化用户方法资产不该静默放行,无边界声明经
  * 影响分类 fail-to-confirm 走确认管线(与 load_skill 的 app-state 自动放行
  * 形成有意不对称:读放行、写确认)。产品层护栏(保存前必须拿到用户明确
  * 同意)由内置方法「提炼技能」承载,双层互补。
  */
 export function createSaveSkillTool(
-  saver: SkillSaver,
+  application: SkillCatalogSaveApplication,
   defaultMode: SkillMode,
 ): ToolDefinition {
   return {
@@ -158,7 +147,7 @@ export function createSaveSkillTool(
         ? input.mode
         : defaultMode;
       try {
-        const result = await saver(
+        const result = await application.save(
           { name, description, body, mode },
           context?.toolCallId,
         );

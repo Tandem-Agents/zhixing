@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A2-01 完成，等待协调者复核；不得进入后续 A2 责任链<br>
+> 当前检查点：A2-02 纠正完成，等待协调者复核；不得进入后续 A2 责任链<br>
 > 完成度：2/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `c52cd212`；A0、A1-01～A1-12 已由协调者独立复核并提交，A1 阶段退出门成立 |
+| 已接受基线 | `c0386d5f`；A0、A1-01～A1-12、A2-01 已由协调者独立复核并提交，A1 阶段退出门成立 |
 | 当前 A 项 | A2：以 Skill Catalog 真实垂直切片证明领域模型 |
-| 活跃工作包 | A2-01：Skill Catalog 管理面的 list/set-state/archive 已收归领域 Query/Command/Fact Event 与唯一应用服务；领域合同只有 `@zhixing/core/skills/catalog` 窄入口，旧 Server/CLI 业务入口归零，RPC conflict wire 已恢复迁移前语义；最窄验证完成，等待协调者复核 |
-| 下一责任链 | 协调者独立复核 `A2-01-skill-catalog-management-domain-v1` 的单一领域 subpath、fact-after-commit、dispatcher 级 RPC 等价错误与旧写入口/根 barrel 回流负向门禁；接受后再沿同一 Skill 事实链迁移 save/admit/usage、权威适配与不可变 Kernel/Executor 投影 |
-| 打开的单向桥 | 无；Skill 应用服务只把既有 `GlobalStatePort` 作为 Correctness 适配，新合同仅经 `@zhixing/core/skills/catalog` 公开，旧 `SkillDirectory`、`createSkillDirectory`、Server 业务合同和 CLI 直接写入口均已删除 |
-| 已失效证据 | 无当前未恢复证据；独立复核发现的 core 根 barrel 泄漏与 conflict→BUSY wire 漂移均已纠正，并已重取领域 subpath/exports、dispatcher RPC、S7/golden 与 core→server→CLI 构建闭包；未改的 save/admit/load/usage、legacy/materialization、CLI facade/REPL 行为与 Kernel/Executor 投影证据继续有效 |
+| 活跃工作包 | A2-02 纠正已闭合：保存领域用例以真实 assignment mutation request identity 定位本 operation 的耐久 record，exact replay 只折叠其前序 overlay 并以原 create/update payload 重驱；overlay 可见/不可见均不追加第二记录，异载荷仍由 ledger fail closed，等待协调者复核 |
+| 下一责任链 | 协调者独立复核 A2-02 的 overlay 可见/不可见响应丢失重放、异载荷冲突、同 assignment 不同 operation 更新、唯一领域入口与旧保存旁路归零；接受后再从 admit、usage/load 或 Kernel/Executor 不可变能力投影中选择一条独立 Skill 责任链 |
+| 打开的单向桥 | 无；Skill 管理与保存应用合同仅经 `@zhixing/core/skills/catalog` 公开，管理面使用既有 `GlobalStatePort`，保存面使用 path-free assignment Correctness port；tools-builtin 仅绑定调用，orchestrator 仅适配 ArtifactStore/global query/assignment mutation，未建立第二业务入口 |
+| 已失效证据 | 无当前未恢复证据；独立复核作废的 A2-02 response-loss replay/overlay-upsert 结论已由真实 `createAssignmentMutationPort + ConversationAssignmentLedger` 对抗、共享 request identity、领域 replay 边界及受影响结构/构建闭包重取恢复；A2-01 与其余未改 Skill 证据持续有效 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1420,7 +1420,18 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据：core `catalog-application.test.ts + global-state-adapter.test.ts` 2 文件 6/6，覆盖 include-disabled query、expected revision、精确 committed catalog revision、set-state、not-found/空 patch、authority conflict/commit failure 的零 fact及既有 CAS/materialization；Server `management-methods.test.ts` 1 文件 6/6（其中 Skill 4/4），新增真实 `HandlerRegistry → RpcDispatcher → toJsonRpcError → connection` 反例，逐项证明 list/setState/archive 成功，以及 NOT_FOUND、INVALID_PARAMS、concurrent conflict 与普通 commit failure 的迁移前 wire；成功恰一次广播，所有失败零广播。CLI facade/REPL 管理闭包 4 文件 22/22 输入未变且沿用已取得直接证据，纠正后另以 CLI typecheck/build 验证新 subpath 组合入口。当前完整直接闭包为 7 文件 34/34，精确计数不重复相加；公开 registry 由 canonical golden 继续证明无漂移。
 - 结构、exports、构建与失效：S7 Skill 管理 owner inspector 现以八条反向 mutation 机械拒绝 Server/CLI 恢复 `SkillDirectory/createSkillDirectory`、直接构造 mutation、commit 前/重复传输 fact、core 根 barrel 回流、Server/CLI 绕过领域 subpath、第二 package export 与 conflict→BUSY wire 漂移；同时要求唯一 tsup entry。canonical `pnpm s7:lint` 为 22/22 且 registry golden 通过。`pnpm runtime:package-exports` 直接加载新 subpath、确认 runtime/type surface 不泄入 core 根或第二正式 export；首次执行只因 Server 旧 dist 仍请求已退场 root export 失败，按验证手册重建 Server 后同一门禁通过，不属于产品失败。core/server/CLI canonical typecheck 通过；按依赖先后完成 core build、server build 与 `pnpm cli:build`；本次未修改 contracts schema，既有 `pnpm contracts:typecheck/contracts:lint` 证据未失效；纠正闭包 7 个适用文件的最窄 Biome 通过，最终 `git diff --check` 待交接前复取。未运行包全测、根级 lint/test/build、package check 或制品验收。若领域源码/subpath/export/build entry、GlobalState adapter conflict/commit 返回、ServerContext/binding、Anchor service 注入、公开 skill RPC/notification、CLI facade/REPL consumer、package-export gate 或 S7 owner/ordering/wire gate 任一变化，恢复本证据并只重验上述闭包；其余 Skill 链与 A1 证据不失效。
 - 独立复核纠正：协调者指出新合同经 core 根 barrel 暴露与 conflict→BUSY 均违反本包边界；本轮没有把它们包装成后续债务，而是在原 A2-01 内建立唯一领域 subpath、删除根转导、恢复迁移前 wire，并新增 package-export 与 dispatcher 级可证伪证据。纠正不扩大到其他既有 Skill 根导出或 A7 全包 barrel 退场。
-- 交接类型：完成，等待协调者独立复核；A2 与 Skill Catalog 登记行继续保持 `[ ]`。本包内无遗留；下一检查点只能由协调者沿同一 Skill 垂直事实链选择 save/admit/usage、领域权威适配或 Kernel/Executor 不可变投影中的一个独立责任，不得提前进入 A3 或建设全局 Product API Catalog。
+- 交接类型：已由协调者独立复核并纳入提交 `c0386d5f`；A2 与 Skill Catalog 登记行继续保持 `[ ]`。本包内无遗留；下一检查点为 A2-02 的 `save_skill` 创建/更新应用行为，不得提前进入 A3 或建设全局 Product API Catalog。
+
+### A2-02：收归 `save_skill` 创建/更新应用行为
+
+- 基线与边界：`HEAD c0386d5f85cbe999fb1addf4143dfa3e6ac212a6 + A2-02-skill-catalog-save-domain-v1`；进场索引为空，工作区只有协调者预登记的本文台账差异。本包即时沿 `save_skill → createAgentRuntime → createAssignmentSkillPorts → ArtifactStore/global query/assignment staged mutation` 与同 assignment overlay 取证并迁移；未改 `admit_skill/load_skill`、usage、legacy/materialization、GlobalState commit、Agent Loop、Kernel/Executor 投影、公开工具 schema/确认分类/返回文案或其他领域。
+- 责任迁移与唯一入口：既有 `@zhixing/core/skills/catalog` 现在同时公开窄 `SkillCatalogSaveApplication` 与唯一 `SkillCatalogSaveApplicationService`。领域服务独立执行全字段 secret scrub/计数、trim 后非空与 `skillNameToId`、create/update 判定、standard frontmatter document、artifact-before-stage、expected revision、稳定 `${toolCallId}:save` 及结果投影；它从 path-free `SkillCatalogSaveCorrectnessPort` 读取当前 catalog 和按序 assignment overlay，并将 create/admit/update overlay 折叠为 read-own-writes 视图。disabled/linked 现有条目仍走 update、更新后重新启用并转 own；仅 builtin 同名而 catalog 无条目时仍 create/fork-to-own；同 assignment 连续保存按 overlay revision 继续 update。保存用例现在通过与 `createAssignmentMutationPort` 完全相同的 `{assignmentId, domain, operationId}` request identity 精确定位本 operation record：重放只折叠该 record 之前的其他 operation，draft/CAS/mode 相同则以耐久记录中的原 create/update payload 重驱并返回原 outcome；后续不同 operation 仍看到全部前序 overlay，继续形成 revision 单调的 update。该身份由 protocol digest 和耐久 ledger record 重启后重建，不使用进程内缓存、最后一条猜测或内容身份。
+- Binding、Correctness 与旧路退场：tools-builtin 的 `createSaveSkillTool` 只持有领域应用接口、输入/default mode、确认边界与原产品文案；`BuiltinToolContext` 只注入 `skillCatalogSave`。orchestrator 的 adapter 只把 ALS 中的 global query、assignment overlay/stage、assignment issue time 与 `ArtifactStore` 映射到领域所需端口；生产 `createAgentRuntime` 注入唯一 `saveApplication`，不再持有 scrub、id/upsert、frontmatter、expected revision 或 staged suffix 规则。旧 core `save-pipeline.ts` 及专属正向测试、skills/root 转导、tools `SkillSaver` 合同与 orchestrator inline saver 均已删除；不存在双写、兼容壳或第二 package export/build entry。
+- 失败与行为保护：原始缺字段仍由工具 binding 返回既有 `save_skill 需要非空...`；领域直调对脱敏/trim 后空描述、正文或空 id fail closed。ArtifactStore 失败时不 stage，stage/冲突失败保持原错误可观察；缺 durable tool operation id 仍在 artifact 形成后、stage 前以既有错误拒绝，不虚报入库。工具名/schema、无 boundary→确认、串行分类、main/work default、成功/更新/脱敏告知与“本轮成功完成后入库”文案均未漂移。
+- 独立反证与纠正：协调复核证明初版仅覆盖“stage 已成功但读取 overlay 尚不可见”的重放；当真实 ledger 已返回本 operation record 时，旧折叠会把 create 改推为 update，并以同 requestId 提交异载荷冲突。本轮没有放宽 ledger 幂等或吞掉冲突，而是提取唯一的 `assignmentMutationRequestId` 协议算法供 mutation port 与 Skill Correctness adapter 共同使用；overlay adapter保留 durable `requestId/recordSeq`，领域以同 identity 的 recordSeq 为截点，且 exact draft 直接重驱原 mutation。name/description/body/mode 任一导致 payload 变化时仍进入同 requestId 异载荷冲突；不同 toolCallId 则读取前序记录并追加后继 update。
+- 直接、结构与构建证据：core `catalog-application.test.ts` 1 文件 11/11，新增 overlay 可见且全局 catalog 已变化时仍返回原 create/payload 的反例，并保留不可见 overlay 稳定 payload；orchestrator `assignment-skill-port.test.ts` 1 文件 4/4，adapter mock 改用真实 request-id 算法；CLI `assignment-schedule-stager.test.ts` 1 文件 4/4，保持 mutation port 身份/拒绝边界；CLI `assignment-mesh-adapter.test.ts` 定向 1/1 以真实 Mesh dispatch、`createAssignmentMutationPort`、`ConversationAssignmentLedger` 与 `FileArtifactStore` 证明首次 stage 后 overlay 不可见重试、可见重试均成功且 ledger 仍仅 1 条，四类异载荷全部冲突，另一个 toolCallId 追加第 2 条 `expectedRevision:1` update。纠正直接闭包为 4 文件 20/20；未改 tools-builtin 2 文件 12/12 证据继续有效，合并后的 A2-02 直接闭包为 6 文件 32/32，不重复相加。
+- 门禁、构建与失效：S7 Skill owner inspector 在原五类迁移突变外新增 durable request identity、recordSeq 截点、原 payload 重驱三类反向约束；最终 canonical `pnpm s7:lint` 为 22/22 且 registry golden 通过。`pnpm runtime:package-exports` 重新加载 core protocol 并确认唯一共享 `assignmentMutationRequestId` 已进入既有 `@zhixing/core/protocol`、Skill 保存应用仍只在 catalog subpath 且 core 根无回流。core、orchestrator、CLI 最窄 TypeScript typecheck 均通过；按依赖完成 core build、orchestrator build 与最终 `pnpm cli:build`，tools-builtin 生产输入未变而复用本包初次有效 build；受影响路径最窄 Biome 与 `git diff --check` 通过。初次新增真实 ledger 测试因直接读取尚未物化的 dispatch artifact 失败，改走已有真实 Mesh executor adapter 传输完整 closure 后同一反例通过，该失败是测试装配错误而非产品缺陷。未运行包全测、根级 lint/test/build、package check 或制品验收。
+- 状态、遗留与下一检查点：本包内无遗留；A2 与 Skill Catalog 登记行继续保持 `[ ]`，因为 admit/load/usage、legacy/materialization 与 Kernel/Executor 投影仍未完成整个 Skill 垂直域。若 `catalog-application.ts` 保存合同/原 mutation 重放、assignment request-id 算法、overlay `requestId/recordSeq` 投影、唯一 subpath/export/build entry、ArtifactStore→stage 顺序、tool binding/产品文案、operation suffix、旧路径负向集合或相关 S7/package-export 输入任一变化，恢复本证据并只重验上述闭包。交接类型为完成，等待协调者独立复核；不得提前进入 A3。
 
 ## 十、用户提示词
 

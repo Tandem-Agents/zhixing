@@ -6,6 +6,10 @@ import {
   DeliveryAuthority,
 } from "@zhixing/core";
 import {
+  SkillCatalogSaveApplicationService,
+  type SkillCatalogSaveOverlayRecord,
+} from "@zhixing/core/skills/catalog";
+import {
   FileArtifactStore,
   FileAuthorityCommitLog,
   FileResumableArtifactReceiver,
@@ -31,6 +35,7 @@ import type {
 } from "@zhixing/core/contracts";
 import {
   buildConversationActivationPayload,
+  assignmentMutationRequestId,
   assignmentActivationDigest,
   canonicalize,
   createSignedAssignmentArtifactTransferGrant,
@@ -91,6 +96,7 @@ import {
   createRunSubmissionMeshServiceHandler,
   registerRunExecutorMeshService,
 } from "./assignment-mesh-adapter.js";
+import { createAssignmentMutationPort } from "./assignment-schedule-stager.js";
 
 const NOW = "2026-07-21T00:00:00.000Z";
 const EXPIRY = "2026-07-21T01:00:00.000Z";
@@ -913,6 +919,137 @@ describe("assignment mesh adapters", () => {
     );
     expect(await protocol.ownerLog.readAll()).toEqual(ownerAfterCommit);
     expect(replayArtifacts.getDigests).toEqual([sealedBundleArtifact(bundle).ref.digest]);
+  }, TEST_DURABLE_IO_TIMEOUT_MS);
+
+  it("replays save_skill through the real assignment ledger after its overlay becomes visible", async () => {
+    const fixture = await createFixture();
+    const protocol = await createRealProtocolFixture(fixture);
+    installRealProtocolServices(fixture, protocol);
+    const executor = realExecutorAdapter(fixture, protocol);
+    const dispatchContext = realOwnerContext({
+      dispatch: protocol.dispatch,
+      method: "executor.dispatch",
+      requestId: "skill-save-dispatch",
+      body: {
+        dispatchDigest: dispatchEnvelopeDigest(protocol.dispatch.envelope),
+        activationDigest: activationDigest(protocol.dispatch.activation),
+      },
+      ownerDeviceId: fixture.ownerDeviceId,
+      identity: fixture.identity,
+    });
+    await executor.dispatch(
+      protocol.dispatch.envelope,
+      protocol.dispatch.activation,
+      dispatchContext,
+    );
+    await protocol.ledger.start("assignment-1");
+
+    const encoder = new TextEncoder();
+    const runSave = async (
+      draft: {
+        readonly name: string;
+        readonly description: string;
+        readonly body: string;
+        readonly mode: "main" | "work";
+      },
+      toolCallId: string,
+      options: { readonly hideOverlay?: boolean } = {},
+    ) => {
+      const assignmentMutations = createAssignmentMutationPort({
+        ledger: protocol.ledger,
+        assignmentId: "assignment-1",
+        execution: "conversation",
+        anchorEpoch: 1,
+      });
+      const service = new SkillCatalogSaveApplicationService({
+        async readCatalogEntry() {
+          return null;
+        },
+        async readOverlay() {
+          if (options.hideOverlay) return [];
+          const records: SkillCatalogSaveOverlayRecord[] = [];
+          for (const record of await assignmentMutations.readOverlay()) {
+            if (
+              record.domain !== "global" ||
+              (record.mutation.kind !== "skill-create" &&
+                record.mutation.kind !== "skill-admit" &&
+                record.mutation.kind !== "skill-update")
+            ) {
+              continue;
+            }
+            records.push({
+              recordSeq: record.recordSeq,
+              requestIdentity: record.requestId,
+              mutation: record.mutation,
+              mutationDigest: record.mutationDigest,
+            });
+          }
+          return records;
+        },
+        requestIdentityFor(operationId) {
+          return assignmentMutationRequestId({
+            assignmentId: assignmentMutations.assignmentId,
+            domain: "global",
+            operationId,
+          });
+        },
+        putContent: (document) =>
+          fixture.executorArtifacts.put(encoder.encode(document)),
+        async stage(operationId, mutation) {
+          await assignmentMutations.stage({
+            domain: "global",
+            operationId,
+            mutation,
+          });
+        },
+        assignmentIssuedAt: () => NOW,
+      });
+      return service.save(draft, toolCallId);
+    };
+    const draft = {
+      name: "Durable Replay",
+      description: "Replay a staged Skill save",
+      body: "Keep the same mutation payload.",
+      mode: "main" as const,
+    };
+
+    const first = await runSave(draft, "tool-visible-replay");
+    expect(await protocol.ledger.readStagedMutationOverlay("assignment-1"))
+      .toHaveLength(1);
+    await expect(runSave(
+      draft,
+      "tool-visible-replay",
+      { hideOverlay: true },
+    )).resolves.toEqual(first);
+    await expect(runSave(draft, "tool-visible-replay")).resolves.toEqual(first);
+    expect(await protocol.ledger.readStagedMutationOverlay("assignment-1"))
+      .toHaveLength(1);
+
+    for (const changed of [
+      { ...draft, name: "Changed Name" },
+      { ...draft, description: "Changed description" },
+      { ...draft, body: "Changed body" },
+      { ...draft, mode: "work" as const },
+    ]) {
+      await expect(runSave(changed, "tool-visible-replay")).rejects.toThrow(
+        "Staged mutation requestId has a conflicting payload",
+      );
+    }
+    expect(await protocol.ledger.readStagedMutationOverlay("assignment-1"))
+      .toHaveLength(1);
+
+    await expect(runSave(
+      { ...draft, body: "A later operation sees the first save." },
+      "tool-next-save",
+    )).resolves.toMatchObject({ outcome: "updated" });
+    const overlay = await protocol.ledger.readStagedMutationOverlay("assignment-1");
+    expect(overlay).toHaveLength(2);
+    expect(overlay[1]).toMatchObject({
+      mutation: {
+        kind: "skill-update",
+        expectedRevision: 1,
+      },
+    });
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 
   it("forwards interaction-settlement completion through the submission service", async () => {

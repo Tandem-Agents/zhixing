@@ -7,6 +7,7 @@ import type {
   GlobalStatePort,
 } from "@zhixing/core/contracts";
 import {
+  assignmentMutationRequestId,
   protocolDigest,
   validateGlobalQuery,
   validateGlobalQueryResult,
@@ -70,11 +71,11 @@ export function createAssignmentMutationPort(input: {
           execution,
         );
       }
-      const requestId = `mutation:${protocolDigest("AssignmentMutationRequest", 1, {
+      const requestId = assignmentMutationRequestId({
         assignmentId,
         domain: request.domain,
         operationId: request.operationId,
-      })}`;
+      });
       return ledger.stageMutation(
         assignmentId,
         request.domain === "session"

@@ -17,6 +17,7 @@ import type {
   SkillTextLoader,
   ToolDefinition,
 } from "@zhixing/core";
+import type { SkillCatalogSaveApplication } from "@zhixing/core/skills/catalog";
 import { assessSkill } from "@zhixing/core";
 import { createBashTool } from "./bash.js";
 import { createEditTool } from "./edit.js";
@@ -27,7 +28,7 @@ import {
   createLoadSkillTool,
   createSaveSkillTool,
 } from "./skill.js";
-import type { SkillAdmissionPort, SkillSaver } from "./skill.js";
+import type { SkillAdmissionPort } from "./skill.js";
 import { createReadTool } from "./read.js";
 import { createWebFetchTool } from "./web-fetch.js";
 import { createWriteTool } from "./write.js";
@@ -42,7 +43,7 @@ export interface BuiltinToolContext {
   /** HTTP 代理地址，web_fetch 透传给底层 fetch 客户端 */
   readonly proxy?: string;
   readonly skillLoader?: SkillTextLoader;
-  readonly skillSaver?: SkillSaver;
+  readonly skillCatalogSave?: SkillCatalogSaveApplication;
   readonly skillAdmission?: SkillAdmissionPort;
   /**
    * 当前运行档的技能模式 —— save_skill / admit_skill 对未显式指定 mode 的
@@ -83,14 +84,14 @@ export const BUILTIN_TOOL_FACTORIES: Readonly<
     return createLoadSkillTool(loader);
   },
   save_skill: (ctx) => {
-    const saver = ctx.skillSaver;
-    if (!saver) {
+    const application = ctx.skillCatalogSave;
+    if (!application) {
       throw new Error(
-        "save_skill 工具需装配期注入 assignment skill saver",
+        "save_skill 工具需装配期注入 Skill Catalog save application",
       );
     }
     return createSaveSkillTool(
-      saver,
+      application,
       ctx.skillMode ?? "main",
     );
   },

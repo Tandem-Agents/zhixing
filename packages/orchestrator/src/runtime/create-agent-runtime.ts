@@ -820,7 +820,7 @@ export async function createAgentRuntime(
   const builtinCtx = {
     proxy: config.network?.proxy,
     skillLoader: skillPorts.loader,
-    skillSaver: skillPorts.saver,
+    skillCatalogSave: skillPorts.saveApplication,
     skillAdmission: skillPorts.admission,
     skillMode,
     // 接入审查独立裁判：绑 main 档单发（质量敏感安全裁决）、不带对话上下文
@@ -2182,7 +2182,7 @@ function unavailableAssignmentSkillPorts(): ReturnType<
         return { id: builtin.id, name: builtin.name, body: builtin.body };
       },
     },
-    saver: unavailable,
+    saveApplication: { save: unavailable },
     admission: {
       prepareStaging: unavailable,
       discardStaging: unavailable,

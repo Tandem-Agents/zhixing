@@ -12,7 +12,7 @@ export {
   type TaskListStateListener,
 } from "./task-list.js";
 export { createWebFetchTool } from "./web-fetch.js";
-export type { SkillAdmissionPort, SkillSaver } from "./skill.js";
+export type { SkillAdmissionPort } from "./skill.js";
 export { WEB_FETCH_DEFAULT_RULES } from "./web-fetch-rules.js";
 export {
   BUILTIN_TOOL_CAPABILITIES,

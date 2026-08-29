@@ -1088,6 +1088,21 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const context = required("packages/server/src/context.ts");
   const composition = required("packages/cli/src/serve/command.ts");
   const cliDirectories = required("packages/cli/src/serve/management-directories.ts");
+  const assignmentSkillPort = required(
+    "packages/orchestrator/src/runtime/assignment-skill-port.ts",
+  );
+  const assignmentMutationIdentity = required(
+    "packages/core/src/protocol/assignment-mutation.ts",
+  );
+  const assignmentMutationPort = required(
+    "packages/cli/src/serve/assignment-schedule-stager.ts",
+  );
+  const agentRuntime = required(
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+  );
+  const builtinSkill = required("packages/tools-builtin/src/skill.ts");
+  const builtinFactories = required("packages/tools-builtin/src/factories.ts");
+  const builtinIndex = required("packages/tools-builtin/src/index.ts");
 
   let coreManifest;
   try {
@@ -1116,7 +1131,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   if (
     coreIndex.includes("catalog-application") ||
     skillIndex.includes("catalog-application") ||
-    skillIndex.includes("SkillCatalogApplication")
+    skillIndex.includes("SkillCatalogApplication") ||
+    skillIndex.includes("SkillCatalogSaveApplication") ||
+    skillIndex.includes("runSkillSavePipeline")
   ) {
     failures.push("Skill Catalog application contract leaked into the core root barrel");
   }
@@ -1125,6 +1142,12 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   }
 
   for (const record of records) {
+    if (
+      record.relative === "packages/core/src/skills/save-pipeline.ts" ||
+      /\b(?:runSkillSavePipeline|SkillSaver)\b/u.test(record.text)
+    ) {
+      failures.push(`${record.relative}: retired parallel Skill save application owner`);
+    }
     if (
       (record.relative.startsWith("packages/server/src/") ||
         record.relative.startsWith("packages/cli/src/")) &&
@@ -1143,6 +1166,34 @@ export function inspectSkillCatalogApplicationOwnership(records) {
 
   if (!application.includes("class SkillCatalogApplicationService")) {
     failures.push("Skill Catalog domain application service is missing");
+  }
+  if (
+    !application.includes("class SkillCatalogSaveApplicationService") ||
+    !application.includes("interface SkillCatalogSaveCorrectnessPort") ||
+    !application.includes("scrubSecrets(draft.name)") ||
+    !application.includes("stringifyFrontmatter(") ||
+    !application.includes("skillNameToId(normalized.name)")
+  ) {
+    failures.push("Skill Catalog save invariants lack one domain application owner");
+  }
+  if (
+    !application.includes("requestIdentityFor(stagedOperationId)") ||
+    !application.includes("record.requestIdentity === currentRequestIdentity") ||
+    !application.includes("record.recordSeq >= replayRecordSeq") ||
+    !application.includes("sameSkillSaveDraft(replayMutation, candidate)") ||
+    !application.includes("const mutation = exactReplay")
+  ) {
+    failures.push(
+      "Skill Catalog save replay does not exclude its own durable operation at the exact overlay boundary",
+    );
+  }
+  const saveArtifact = application.indexOf("await this.correctness.putContent(");
+  const saveStage = application.indexOf("await this.correctness.stage(");
+  if (
+    !(saveArtifact >= 0 && saveStage > saveArtifact) ||
+    !application.includes("`${operationId}:save`")
+  ) {
+    failures.push("Skill Catalog save must stage one stable operation only after content artifact creation");
   }
   const commit = application.indexOf("await this.#state().mutate(");
   const fact = application.lastIndexOf('kind: "skill-catalog-changed"');
@@ -1164,7 +1215,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       failures.push(`${relative}: Skill Catalog contract bypasses its domain subpath`);
     }
     for (const match of text.matchAll(
-      /import\s+(?:type\s+)?\{([\s\S]*?)\}\s+from\s+["'](@zhixing\/core)["']/gu,
+      /import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+["'](@zhixing\/core)["']/gu,
     )) {
       if (/\bSkillCatalogApplication(?:Error|Service)?\b/u.test(match[1])) {
         failures.push(`${relative}: Skill Catalog contract leaked back through core root import`);
@@ -1173,6 +1224,63 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   }
   if (!composition.includes("new SkillCatalogApplicationService({")) {
     failures.push("Anchor composition root does not install the Skill Catalog application service");
+  }
+  for (const [relative, text] of [
+    ["packages/orchestrator/src/runtime/assignment-skill-port.ts", assignmentSkillPort],
+    ["packages/tools-builtin/src/skill.ts", builtinSkill],
+    ["packages/tools-builtin/src/factories.ts", builtinFactories],
+  ]) {
+    if (!text.includes('from "@zhixing/core/skills/catalog"')) {
+      failures.push(`${relative}: Skill save contract bypasses its domain subpath`);
+    }
+    for (const match of text.matchAll(
+      /import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+["'](@zhixing\/core)["']/gu,
+    )) {
+      if (/\bSkillCatalogSaveApplication(?:Service)?\b/u.test(match[1])) {
+        failures.push(`${relative}: Skill save contract leaked back through core root import`);
+      }
+    }
+  }
+  if (
+    assignmentSkillPort.includes("scrubSecrets") ||
+    assignmentSkillPort.includes("stringifyFrontmatter") ||
+    assignmentSkillPort.includes("SkillDraft") ||
+    !assignmentSkillPort.includes("new SkillCatalogSaveApplicationService(") ||
+    !assignmentSkillPort.includes("createSkillCatalogSaveCorrectnessPort(artifacts)")
+  ) {
+    failures.push("Orchestrator retains Skill save business orchestration or omits the domain service");
+  }
+  if (
+    !assignmentMutationIdentity.includes(
+      'protocolDigest("AssignmentMutationRequest", 1, input)',
+    ) ||
+    !assignmentMutationPort.includes(
+      "const requestId = assignmentMutationRequestId({",
+    ) ||
+    !assignmentSkillPort.includes(
+      "return assignmentMutationRequestId({",
+    ) ||
+    !assignmentSkillPort.includes("requestIdentity: record.requestId") ||
+    !assignmentSkillPort.includes("recordSeq: record.recordSeq")
+  ) {
+    failures.push(
+      "Skill save replay identity is not shared with the durable assignment mutation ledger",
+    );
+  }
+  if (
+    !builtinSkill.includes("application: SkillCatalogSaveApplication") ||
+    !builtinSkill.includes("await application.save(") ||
+    builtinSkill.includes("SkillSaver") ||
+    builtinIndex.includes("SkillSaver")
+  ) {
+    failures.push("save_skill binding must consume only the Skill-owned application contract");
+  }
+  if (
+    !builtinFactories.includes("skillCatalogSave?: SkillCatalogSaveApplication") ||
+    !agentRuntime.includes("skillCatalogSave: skillPorts.saveApplication") ||
+    agentRuntime.includes("skillSaver: skillPorts.saver")
+  ) {
+    failures.push("Agent runtime does not install the unique Skill save application binding");
   }
   if (cliDirectories.includes("GlobalStatePort") || cliDirectories.includes("skill-set-state")) {
     failures.push("CLI management directories retain a direct Skill correctness adapter");

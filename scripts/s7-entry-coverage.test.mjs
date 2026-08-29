@@ -2352,6 +2352,13 @@ test("Skill Catalog management has one domain application and fact-after-commit 
     "packages/server/src/context.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/management-directories.ts",
+    "packages/orchestrator/src/runtime/assignment-skill-port.ts",
+    "packages/core/src/protocol/assignment-mutation.ts",
+    "packages/cli/src/serve/assignment-schedule-stager.ts",
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+    "packages/tools-builtin/src/skill.ts",
+    "packages/tools-builtin/src/factories.ts",
+    "packages/tools-builtin/src/index.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -2432,6 +2439,80 @@ test("Skill Catalog management has one domain application and fact-after-commit 
       ),
     )).join("\n"),
     /changed the pre-migration conflict wire contract/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/skills/index.ts",
+      (text) => `${text}\nexport { runSkillSavePipeline } from "./save-pipeline.js";`,
+    )).join("\n"),
+    /retired parallel Skill save application owner|leaked into the core root barrel/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/tools-builtin/src/skill.ts",
+      (text) => text.replace(
+        '@zhixing/core/skills/catalog',
+        '@zhixing/core',
+      ),
+    )).join("\n"),
+    /bypasses its domain subpath|leaked back through core root import/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/orchestrator/src/runtime/assignment-skill-port.ts",
+      (text) => `${text}\nconst bypass = scrubSecrets("draft");`,
+    )).join("\n"),
+    /retains Skill save business orchestration/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => text.replace(
+        "skillCatalogSave: skillPorts.saveApplication",
+        "skillSaver: skillPorts.saver",
+      ),
+    )).join("\n"),
+    /does not install the unique Skill save application binding/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/skills/catalog-application.ts",
+      (text) => text.replace(
+        "await this.correctness.stage(",
+        "await bypassSkillSaveStage(",
+      ),
+    )).join("\n"),
+    /stage one stable operation only after content artifact creation/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/skills/catalog-application.ts",
+      (text) => text.replace(
+        "record.recordSeq >= replayRecordSeq",
+        "false",
+      ),
+    )).join("\n"),
+    /does not exclude its own durable operation/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/skills/catalog-application.ts",
+      (text) => text.replace(
+        "sameSkillSaveDraft(replayMutation, candidate)",
+        "false",
+      ),
+    )).join("\n"),
+    /does not exclude its own durable operation/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/assignment-schedule-stager.ts",
+      (text) => text.replace(
+        "const requestId = assignmentMutationRequestId({",
+        "const requestId = legacyAssignmentMutationRequestId({",
+      ),
+    )).join("\n"),
+    /identity is not shared with the durable assignment mutation ledger/,
   );
 });
 

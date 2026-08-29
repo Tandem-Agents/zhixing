@@ -7,6 +7,7 @@ export {
   protocolDigest,
 } from "./canonical.js";
 export type { ByteDigestAccumulator } from "./canonical.js";
+export { assignmentMutationRequestId } from "./assignment-mutation.js";
 export {
   createSignedEnvironmentControlGrant,
   createSignedWorkspaceProbeResult,

@@ -6,23 +6,26 @@ import {
   getBuiltinSkill,
   parseFrontmatter,
   renderSkillIndex,
-  scrubSecrets,
   skillNameToId,
-  stringifyFrontmatter,
   type SkillCatalogEntry,
-  type SkillDraft,
   type SkillMode,
-  type SkillSaveOutcome,
   type SkillTextLoader,
 } from "@zhixing/core";
+import {
+  SkillCatalogSaveApplicationService,
+  type SkillCatalogSaveApplication,
+  type SkillCatalogSaveCorrectnessPort,
+  type SkillCatalogSaveMutation,
+  type SkillCatalogSaveOverlayRecord,
+} from "@zhixing/core/skills/catalog";
 import type { ArtifactStore } from "@zhixing/core/authority";
 import type {
   AssignmentGlobalQueryPort,
   GlobalStagedMutation,
 } from "@zhixing/core/contracts";
+import { assignmentMutationRequestId } from "@zhixing/core/protocol";
 import type {
   SkillAdmissionPort,
-  SkillSaver,
 } from "@zhixing/tools-builtin";
 import { runContextStorage } from "./run-context.js";
 
@@ -32,7 +35,7 @@ const encoder = new TextEncoder();
 
 export interface AssignmentSkillPorts {
   readonly loader: SkillTextLoader;
-  readonly saver: SkillSaver;
+  readonly saveApplication: SkillCatalogSaveApplication;
   readonly admission: SkillAdmissionPort;
 }
 
@@ -40,6 +43,9 @@ export function createAssignmentSkillPorts(
   artifacts: ArtifactStore,
 ): AssignmentSkillPorts {
   const staging = new SkillAdmissionWorkspace(artifacts);
+  const saveApplication = new SkillCatalogSaveApplicationService(
+    createSkillCatalogSaveCorrectnessPort(artifacts),
+  );
   return {
     loader: {
       async loadText(id, operationId) {
@@ -66,65 +72,63 @@ export function createAssignmentSkillPorts(
         return { id: entry.id, name: entry.name, body: parsed.content };
       },
     },
-    saver: async (draft, operationId) => {
-      const name = scrubSecrets(draft.name);
-      const description = scrubSecrets(draft.description);
-      const body = scrubSecrets(draft.body);
-      const normalized: SkillDraft = {
-        name: name.scrubbed.trim(),
-        description: description.scrubbed.trim(),
-        body: body.scrubbed.trim(),
-        mode: draft.mode,
-      };
-      const id = skillNameToId(normalized.name);
-      if (!id || !normalized.description || !normalized.body) {
-        throw new Error("Skill name, description and body must remain non-empty");
-      }
-      const current = await readSkillEntry(id);
-      const content = await artifacts.put(
-        encoder.encode(
-          stringifyFrontmatter(
-            { name: normalized.name, description: normalized.description },
-            normalized.body,
-          ),
-        ),
-      );
-      await stageSkillMutation(
-        operationId,
-        "save",
-        current
-          ? {
-              kind: "skill-update",
-              skillId: current.id,
-              record: {
-                name: normalized.name,
-                description: normalized.description,
-                content,
-              },
-              mode: normalized.mode,
-              expectedRevision: current.revision,
-            }
-          : {
-              kind: "skill-create",
-              record: {
-                name: normalized.name,
-                description: normalized.description,
-                content,
-              },
-              mode: normalized.mode,
-            },
-      );
-      return {
-        id,
-        name: normalized.name,
-        outcome: current ? "updated" : "created",
-        scrubbedCount:
-          name.redactions.length +
-          description.redactions.length +
-          body.redactions.length,
-      } satisfies SkillSaveOutcome;
-    },
+    saveApplication,
     admission: staging,
+  };
+}
+
+function createSkillCatalogSaveCorrectnessPort(
+  artifacts: ArtifactStore,
+): SkillCatalogSaveCorrectnessPort {
+  return {
+    async readCatalogEntry(skillId) {
+      const result = await requireRunSkillContext().globalQuery.read({
+        kind: "skill-get",
+        skillId,
+      });
+      if (result.kind !== "skill-get") {
+        throw new Error("Skill query returned another result type");
+      }
+      return result.entry;
+    },
+    async readOverlay() {
+      const records: SkillCatalogSaveOverlayRecord[] = [];
+      for (const record of await requireRunSkillContext().assignmentMutations.readOverlay()) {
+        if (record.domain !== "global") continue;
+        const mutation = record.mutation;
+        if (
+          mutation.kind !== "skill-create" &&
+          mutation.kind !== "skill-admit" &&
+          mutation.kind !== "skill-update"
+        ) {
+          continue;
+        }
+        records.push({
+          recordSeq: record.recordSeq,
+          requestIdentity: record.requestId,
+          mutation,
+          mutationDigest: record.mutationDigest,
+        });
+      }
+      return records;
+    },
+    requestIdentityFor(operationId) {
+      const mutations = requireRunSkillContext().assignmentMutations;
+      return assignmentMutationRequestId({
+        assignmentId: mutations.assignmentId,
+        domain: "global",
+        operationId,
+      });
+    },
+    putContent: (document) => artifacts.put(encoder.encode(document)),
+    async stage(operationId, mutation: SkillCatalogSaveMutation) {
+      await requireRunSkillContext().assignmentMutations.stage({
+        domain: "global",
+        operationId,
+        mutation,
+      });
+    },
+    assignmentIssuedAt: requireAssignmentTime,
   };
 }
 

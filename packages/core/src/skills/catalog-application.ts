@@ -1,10 +1,15 @@
 import { randomUUID } from "node:crypto";
 import type {
+  ArtifactRef,
+  Digest,
   GlobalControlCallContext,
   GlobalStatePort,
   SkillStatePatch,
 } from "../contracts/index.js";
+import { stringifyFrontmatter } from "../frontmatter.js";
+import { scrubSecrets } from "../security/secret-scrubber.js";
 import { SkillMutationConflictError } from "./global-state-adapter.js";
+import { skillNameToId } from "./id.js";
 import type { SkillCatalogEntry, SkillMode } from "./types.js";
 
 /** Skill-owned management query. Runtime and tool catalog reads use GlobalStatePort directly. */
@@ -44,6 +49,239 @@ export interface SkillCatalogCommandResult {
 export interface SkillCatalogApplication {
   query(query: SkillCatalogQuery): Promise<SkillCatalogView>;
   execute(command: SkillCatalogCommand): Promise<SkillCatalogCommandResult>;
+}
+
+/** Skill-owned input for the save_skill create/update use case. */
+export interface SkillCatalogSaveDraft {
+  readonly name: string;
+  readonly description: string;
+  readonly body: string;
+  readonly mode: SkillMode;
+}
+
+export interface SkillCatalogSaveOutcome {
+  readonly id: string;
+  readonly name: string;
+  readonly outcome: "created" | "updated";
+  readonly scrubbedCount: number;
+}
+
+/** The only application entry for save_skill. Bindings retain product copy only. */
+export interface SkillCatalogSaveApplication {
+  save(
+    draft: SkillCatalogSaveDraft,
+    operationId?: string,
+  ): Promise<SkillCatalogSaveOutcome>;
+}
+
+export interface SkillCatalogSaveRecord {
+  readonly name: string;
+  readonly description: string;
+  readonly content: ArtifactRef;
+}
+
+export type SkillCatalogSaveOverlayMutation =
+  | {
+      readonly kind: "skill-create";
+      readonly record: SkillCatalogSaveRecord;
+      readonly mode: SkillMode;
+    }
+  | {
+      readonly kind: "skill-admit";
+      readonly record: SkillCatalogSaveRecord;
+      readonly mode: SkillMode;
+    }
+  | {
+      readonly kind: "skill-update";
+      readonly skillId: string;
+      readonly record: SkillCatalogSaveRecord;
+      readonly mode: SkillMode;
+      readonly expectedRevision: number;
+    };
+
+export interface SkillCatalogSaveOverlayRecord {
+  readonly recordSeq: number;
+  readonly requestIdentity: string;
+  readonly mutation: SkillCatalogSaveOverlayMutation;
+  readonly mutationDigest: Digest;
+}
+
+export type SkillCatalogSaveMutation = Exclude<
+  SkillCatalogSaveOverlayMutation,
+  { readonly kind: "skill-admit" }
+>;
+
+/**
+ * Path-free Correctness adapter required by the Skill-owned save use case.
+ * Runtime composition supplies artifact, global-read and assignment-stage mechanics;
+ * it does not decide upsert, overlay, format or operation identity semantics.
+ */
+export interface SkillCatalogSaveCorrectnessPort {
+  readCatalogEntry(skillId: string): Promise<SkillCatalogEntry | null>;
+  readOverlay(): Promise<readonly SkillCatalogSaveOverlayRecord[]>;
+  requestIdentityFor(operationId: string): string;
+  putContent(document: string): Promise<ArtifactRef>;
+  stage(operationId: string, mutation: SkillCatalogSaveMutation): Promise<void>;
+  assignmentIssuedAt(): string;
+}
+
+/** Skill-owned save use case over the assignment-scoped Correctness adapter. */
+export class SkillCatalogSaveApplicationService
+  implements SkillCatalogSaveApplication
+{
+  constructor(private readonly correctness: SkillCatalogSaveCorrectnessPort) {}
+
+  async save(
+    draft: SkillCatalogSaveDraft,
+    operationId?: string,
+  ): Promise<SkillCatalogSaveOutcome> {
+    if (
+      typeof draft?.name !== "string" ||
+      typeof draft.description !== "string" ||
+      typeof draft.body !== "string" ||
+      (draft.mode !== "main" && draft.mode !== "work")
+    ) {
+      throw new Error("Skill save draft is invalid");
+    }
+    const name = scrubSecrets(draft.name);
+    const description = scrubSecrets(draft.description);
+    const body = scrubSecrets(draft.body);
+    const normalized = {
+      name: name.scrubbed.trim(),
+      description: description.scrubbed.trim(),
+      body: body.scrubbed.trim(),
+      mode: draft.mode,
+    } satisfies SkillCatalogSaveDraft;
+    const id = skillNameToId(normalized.name);
+    if (!id || !normalized.description || !normalized.body) {
+      throw new Error("Skill name, description and body must remain non-empty");
+    }
+
+    const stagedOperationId = operationId
+      ? `${operationId}:save`
+      : undefined;
+    const currentState = await this.#readCurrent(
+      id,
+      stagedOperationId === undefined
+        ? undefined
+        : this.correctness.requestIdentityFor(stagedOperationId),
+    );
+    const content = await this.correctness.putContent(
+      stringifyFrontmatter(
+        { name: normalized.name, description: normalized.description },
+        normalized.body,
+      ),
+    );
+    if (!operationId) {
+      throw new Error("Skill mutation requires a durable tool operation id");
+    }
+    const candidate: SkillCatalogSaveMutation = currentState.entry
+      ? {
+          kind: "skill-update",
+          skillId: currentState.entry.id,
+          record: {
+            name: normalized.name,
+            description: normalized.description,
+            content,
+          },
+          mode: normalized.mode,
+          expectedRevision: currentState.entry.revision,
+        }
+      : {
+          kind: "skill-create",
+          record: {
+            name: normalized.name,
+            description: normalized.description,
+            content,
+          },
+          mode: normalized.mode,
+        };
+    const replayMutation = currentState.replayRecord?.mutation;
+    const exactReplay = replayMutation !== undefined &&
+      isSkillCatalogSaveMutation(replayMutation) &&
+      sameSkillSaveDraft(replayMutation, candidate);
+    const mutation = exactReplay
+      ? replayMutation
+      : candidate;
+    await this.correctness.stage(
+      stagedOperationId!,
+      mutation,
+    );
+    return {
+      id,
+      name: normalized.name,
+      outcome: mutation.kind === "skill-update" ? "updated" : "created",
+      scrubbedCount:
+        name.redactions.length +
+        description.redactions.length +
+        body.redactions.length,
+    };
+  }
+
+  async #readCurrent(
+    skillId: string,
+    currentRequestIdentity?: string,
+  ): Promise<{
+    readonly entry: SkillCatalogEntry | null;
+    readonly replayRecord?: SkillCatalogSaveOverlayRecord;
+  }> {
+    let entry = await this.correctness.readCatalogEntry(skillId);
+    const overlay = await this.correctness.readOverlay();
+    const replayRecords = currentRequestIdentity === undefined
+      ? []
+      : overlay.filter(
+          (record) => record.requestIdentity === currentRequestIdentity,
+        );
+    if (replayRecords.length > 1) {
+      throw new Error("Skill save overlay contains a duplicate operation identity");
+    }
+    const replayRecordSeq = replayRecords[0]?.recordSeq;
+    for (const record of overlay) {
+      if (replayRecordSeq !== undefined && record.recordSeq >= replayRecordSeq) {
+        continue;
+      }
+      const mutation = record.mutation;
+      const mutationId = skillNameToId(mutation.record.name);
+      if (mutationId !== skillId) continue;
+      entry = {
+        id: mutationId,
+        name: mutation.record.name,
+        description: mutation.record.description,
+        source: mutation.kind === "skill-admit" ? "linked" : "own",
+        mode: mutation.mode,
+        pinned: entry?.pinned ?? false,
+        disabled: false,
+        createdAt: entry?.createdAt ?? this.correctness.assignmentIssuedAt(),
+        usage: entry?.usage ?? null,
+        contentRef: mutation.record.content,
+        revision: entry ? entry.revision + 1 : 1,
+        digest: record.mutationDigest,
+      };
+    }
+    return {
+      entry,
+      ...(replayRecords[0] === undefined
+        ? {}
+        : { replayRecord: replayRecords[0] }),
+    };
+  }
+}
+
+function isSkillCatalogSaveMutation(
+  mutation: SkillCatalogSaveOverlayMutation,
+): mutation is SkillCatalogSaveMutation {
+  return mutation.kind === "skill-create" || mutation.kind === "skill-update";
+}
+
+function sameSkillSaveDraft(
+  replay: SkillCatalogSaveMutation,
+  candidate: SkillCatalogSaveMutation,
+): boolean {
+  return replay.record.name === candidate.record.name &&
+    replay.record.description === candidate.record.description &&
+    replay.record.content.digest === candidate.record.content.digest &&
+    replay.record.content.bytes === candidate.record.content.bytes &&
+    replay.mode === candidate.mode;
 }
 
 export type SkillCatalogApplicationErrorCode =
