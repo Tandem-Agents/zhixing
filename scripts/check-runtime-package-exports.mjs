@@ -356,6 +356,12 @@ async function verifyCorePackageExports(failures) {
         try {
           const exported = await import(targetUrl.href);
           if (
+            subpath === "." &&
+            ("SkillStore" in exported || "getSkillsRoot" in exported)
+          ) {
+            failures.push("core-exports:root:retired-skill-storage-runtime-leak");
+          }
+          if (
             subpath !== "./skills/catalog" &&
             ("SkillCatalogApplicationError" in exported ||
               "SkillCatalogApplicationService" in exported ||
@@ -371,6 +377,12 @@ async function verifyCorePackageExports(failures) {
         }
       } else if (subpath !== "./skills/catalog") {
         const declaration = await readFile(targetUrl, "utf8");
+        if (
+          subpath === "." &&
+          /\b(?:SkillStore|getSkillsRoot)\b/u.test(declaration)
+        ) {
+          failures.push("core-exports:root:retired-skill-storage-type-leak");
+        }
         if (
           /SkillCatalog(?:Save|Admission|Load|KernelProjection)?Application/u.test(declaration) ||
           declaration.includes("catalog-application")

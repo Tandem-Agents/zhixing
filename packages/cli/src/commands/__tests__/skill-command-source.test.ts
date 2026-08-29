@@ -1,33 +1,38 @@
-import os from "node:os";
-import path from "node:path";
 import fs from "node:fs/promises";
-import { describe, it, expect } from "vitest";
-import { SkillCommandSource } from "../skill-command-source.js";
+import path from "node:path";
+import { createTempDir } from "@zhixing/test-utils";
+import { describe, expect, it } from "vitest";
 import {
+  AnchorSkillGlobalStateAdapter,
   CommandDispatcher,
-  SkillStore,
   DefaultCommandRegistry,
   type CommandDef,
   type RuntimeContext,
-  type SkillRecord,
 } from "@zhixing/core";
+import {
+  SkillCatalogApplicationService,
+} from "@zhixing/core/skills/catalog";
+import {
+  FileArtifactStore,
+  FileAuthorityCommitLog,
+} from "@zhixing/core/authority";
+import {
+  SkillCommandSource,
+  type SkillCommandEntry,
+} from "../skill-command-source.js";
 
-function rec(id: string, name: string, description = "desc"): SkillRecord {
-  return {
-    id,
-    name,
-    description,
-    source: "own",
-    dir: `/skills/own/${id}`,
-    mode: "main",
-    pinned: false,
-    disabled: false,
-    createdAt: "2026-01-01T00:00:00.000Z",
-  };
+const NOW = "2026-08-29T00:00:00.000Z";
+
+function rec(
+  id: string,
+  name: string,
+  description = "desc",
+): SkillCommandEntry {
+  return { id, name, description };
 }
 
 function sourceWith(
-  skills: SkillRecord[],
+  skills: SkillCommandEntry[],
   existing: Record<string, CommandDef> = {},
 ): SkillCommandSource {
   return new SkillCommandSource({
@@ -57,48 +62,52 @@ describe("SkillCommandSource", () => {
     expect(sourceWith([]).id).toBe("skill");
   });
 
-  it("空库 → 空命令列表", async () => {
+  it("空 catalog → 空命令列表", async () => {
     expect(await sourceWith([]).list()).toEqual([]);
   });
 
-  it("技能映射为 execution:agent 的 plugin 命令(name=id、id 命名空间化)", async () => {
-    const cmds = await sourceWith([rec("deploy", "deploy", "部署到生产")]).list();
-    expect(cmds).toHaveLength(1);
-    const c = cmds[0]!;
-    expect(c.name).toBe("deploy");
-    expect(c.id).toBe("skill:deploy");
-    expect(c.execution).toBe("agent");
-    expect(c.category).toBe("plugin");
-    expect(c.tag).toBe("plugin");
-    expect(c.description).toBe("部署到生产");
+  it("技能映射为 execution:agent 的 plugin 命令", async () => {
+    const commands = await sourceWith([
+      rec("deploy", "deploy", "部署到生产"),
+    ]).list();
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toMatchObject({
+      name: "deploy",
+      id: "skill:deploy",
+      execution: "agent",
+      category: "plugin",
+      tag: "plugin",
+      description: "部署到生产",
+    });
   });
 
-  it("原始 name 与 id 不同 → aliases 保留原名;相同 → 无 aliases", async () => {
-    const cmds = await sourceWith([
+  it("原始 name 与 id 不同则保留 alias", async () => {
+    const commands = await sourceWith([
       rec("deploy-service", "Deploy Service"),
       rec("review", "review"),
     ]).list();
-    expect(cmds[0]!.aliases).toEqual(["Deploy Service"]);
-    expect(cmds[1]!.aliases).toBeUndefined();
+    expect(commands[0]!.aliases).toEqual(["Deploy Service"]);
+    expect(commands[1]!.aliases).toBeUndefined();
   });
 
-  it("技能 id 撞非技能命令(builtin)→ 跳过、不注册为 slash 命令(核心命令优先)", async () => {
-    const cmds = await sourceWith([rec("help", "help"), rec("deploy", "deploy")], {
-      help: builtinCmd("help"),
-    }).list();
-    expect(cmds.map((c) => c.name)).toEqual(["deploy"]);
+  it("技能 id 撞非技能命令时核心命令优先", async () => {
+    const commands = await sourceWith(
+      [rec("help", "help"), rec("deploy", "deploy")],
+      { help: builtinCmd("help") },
+    ).list();
+    expect(commands.map((command) => command.name)).toEqual(["deploy"]);
   });
 
-  it("findExisting 命中的是本源上一轮的 skill: 命令 → 不自抑制(仍注册)", async () => {
-    const cmds = await sourceWith([rec("deploy", "deploy")], {
+  it("上一轮本源命令不产生自抑制", async () => {
+    const commands = await sourceWith([rec("deploy", "deploy")], {
       deploy: ownSkillCmd("deploy"),
     }).list();
-    expect(cmds.map((c) => c.id)).toEqual(["skill:deploy"]);
+    expect(commands.map((command) => command.id)).toEqual(["skill:deploy"]);
   });
 });
 
-describe("SkillCommandSource · 集成(真实 SkillStore + registry + dispatcher)", () => {
-  const RUNTIME: RuntimeContext = {
+describe("SkillCommandSource · Authority Catalog 集成", () => {
+  const runtime: RuntimeContext = {
     sessionBusy: false,
     workspaceId: null,
     cwd: ".",
@@ -107,22 +116,48 @@ describe("SkillCommandSource · 集成(真实 SkillStore + registry + dispatcher
     now: 0,
   };
 
-  it("真实磁盘技能 → 注册为 /<id> 命令、撞 builtin 跳过、dispatch 产 agent-message", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "skillcmd-"));
+  it("正式应用查询注册动态命令并保持 builtin-first dispatch", async () => {
+    const root = await createTempDir("skill-command-authority");
     try {
-      const store = new SkillStore(root);
-      await store.create({
-        name: "Deploy Service",
-        description: "部署到生产",
-        body: "# 步骤",
-        mode: "main",
+      const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+      const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
+        clock: () => NOW,
       });
-      // 故意取一个会撞内置 /help 的技能名
-      await store.create({
-        name: "help",
-        description: "撞内置命令",
-        body: "x",
-        mode: "main",
+      const state = new AnchorSkillGlobalStateAdapter({
+        log,
+        anchorEpoch: 1,
+        clock: () => NOW,
+      });
+      for (const skill of [
+        { name: "Deploy Service", description: "部署到生产", body: "# 步骤" },
+        { name: "help", description: "撞内置命令", body: "x" },
+      ]) {
+        const content = await artifacts.put(Buffer.from(
+          `---\nname: ${skill.name}\ndescription: ${skill.description}\n---\n${skill.body}`,
+        ));
+        await state.mutate(
+          {
+            kind: "skill-create",
+            mode: "main",
+            record: {
+              name: skill.name,
+              description: skill.description,
+              content,
+            },
+          },
+          {
+            principal: { kind: "host", component: "skill-command-test" },
+            requestId: `create:${skill.name}`,
+            deadlineAt: "2026-08-29T01:00:00.000Z",
+            authority: { domain: "global", anchorEpoch: 1 },
+          },
+        );
+      }
+      const application = new SkillCatalogApplicationService({
+        globalState: state,
+        anchorEpoch: 1,
+        requestId: () => "list",
+        now: () => new Date(NOW),
       });
 
       const registry = new DefaultCommandRegistry();
@@ -133,26 +168,20 @@ describe("SkillCommandSource · 集成(真实 SkillStore + registry + dispatcher
         category: "info",
         execution: "local",
       });
-      registry.registerDynamicSource(
-        new SkillCommandSource({
-          listAll: () => store.listAll(),
-          findExisting: (name) => registry.findByName(name),
-        }),
-      );
+      registry.registerDynamicSource(new SkillCommandSource({
+        listAll: async () => (await application.query({ kind: "list" })).entries,
+        findExisting: (name) => registry.findByName(name),
+      }));
       await registry.refresh();
 
-      // deploy-service:注册成功、id 命名空间化、execution=agent
-      const deploy = registry.findByName("deploy-service");
-      expect(deploy?.id).toBe("skill:deploy-service");
-      expect(deploy?.execution).toBe("agent");
-
-      // help:撞内置 → findByName 仍解析到内置(技能未注册为 slash 命令)
+      expect(registry.findByName("deploy-service")).toMatchObject({
+        id: "skill:deploy-service",
+        execution: "agent",
+      });
       expect(registry.findByName("help")?.id).toBe("help:repl");
-
-      // dispatch /<id> → 不调 handler、原文作 user message 发给 agent loop
-      const dispatcher = new CommandDispatcher({ registry });
-      const res = await dispatcher.dispatch("/deploy-service", RUNTIME);
-      expect(res).toEqual({
+      await expect(
+        new CommandDispatcher({ registry }).dispatch("/deploy-service", runtime),
+      ).resolves.toEqual({
         kind: "agent-message",
         text: "/deploy-service",
       });

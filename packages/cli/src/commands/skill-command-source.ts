@@ -21,7 +21,6 @@
 import type {
   CommandDef,
   DynamicCommandSource,
-  SkillRecord,
 } from "@zhixing/core";
 
 /** 动态技能命令的生产 descriptor；注册源与覆盖门禁共同消费。 */
@@ -33,10 +32,16 @@ export const SKILL_COMMAND_SOURCE_DESCRIPTOR = {
   collisionPolicy: "builtin-first",
 } as const;
 
-/** SkillCommandSource 的最小依赖(接口隔离,便于单测注入 stub)。 */
+export interface SkillCommandEntry {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+}
+
+/** SkillCommandSource 的最小只读投影依赖。 */
 export interface SkillCommandSourceDeps {
-  /** 列出全部非禁用技能(`SkillStore.listAll` 满足此签名)。 */
-  listAll(): Promise<readonly SkillRecord[]>;
+  /** 列出 Skill Catalog 当前全部非禁用用户条目。 */
+  listAll(): Promise<readonly SkillCommandEntry[]>;
   /**
    * 按名查现有命令(= `registry.findByName`),用于撞名探测:返回非技能命令即跳过。
    * 见类注释「撞名」段对自抑制的处理。

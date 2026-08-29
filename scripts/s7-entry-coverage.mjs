@@ -1082,6 +1082,10 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const application = required("packages/core/src/skills/catalog-application.ts");
   const coreIndex = required("packages/core/src/index.ts");
   const skillIndex = required("packages/core/src/skills/index.ts");
+  const skillAuthority = required(
+    "packages/core/src/skills/global-state-adapter.ts",
+  );
+  const setupDelivery = required("packages/cli/src/setup-delivery.ts");
   const coreManifestText = required("packages/core/package.json");
   const coreBuild = required("packages/core/tsup.config.ts");
   const handler = required("packages/server/src/rpc/methods/skill.ts");
@@ -1154,6 +1158,46 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   }
   if (coreBuild.split('"src/skills/catalog-application.ts"').length - 1 !== 1) {
     failures.push("Skill Catalog canonical subpath lacks one dedicated build entry");
+  }
+  for (const retiredPath of [
+    "packages/core/src/skills/store.ts",
+    "packages/core/src/skills/paths.ts",
+  ]) {
+    if (byPath.has(retiredPath)) {
+      failures.push(`${retiredPath}: retired filesystem Skill owner remains reachable`);
+    }
+  }
+  if (
+    /\b(?:SkillStore|getSkillsRoot)\b|skill-(?:legacy|materialized)|intent:skill-materialization|SKILL_PENDING_PREFIX|#importLegacyCatalog|materialize(?:Authority|Usage|Archive)/u.test(
+      skillAuthority,
+    ) ||
+    /from\s+["']node:fs|\b(?:readFile|writeFile|readdir|mkdir|rename|rm)\s*\(/u.test(
+      skillAuthority,
+    )
+  ) {
+    failures.push(
+      "Skill Authority adapter retains legacy directory import or filesystem materialization",
+    );
+  }
+  if (
+    !skillAuthority.includes("reducerVersion: 2") ||
+    skillAuthority.split("#assertCommittedMutation(").length - 1 < 3 ||
+    !skillAuthority.includes("await this.#refreshDurableProjection()") ||
+    skillAuthority.includes("skillPendingKey(")
+  ) {
+    failures.push(
+      "Skill staged participant does not validate committed Authority replay without a second effect stream",
+    );
+  }
+  if (/\b(?:SkillStore|getSkillsRoot)\b/u.test(setupDelivery)) {
+    failures.push("Anchor composition still constructs the retired filesystem Skill owner");
+  }
+  if (
+    /(?:\.\/store\.js|\.\/paths\.js|\bSkillStore\b|\bgetSkillsRoot\b)/u.test(
+      skillIndex,
+    )
+  ) {
+    failures.push("core Skill root barrel exposes retired filesystem storage");
   }
 
   for (const record of records) {

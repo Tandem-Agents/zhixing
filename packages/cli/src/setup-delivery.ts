@@ -84,8 +84,6 @@ import {
   AnchorRubricGlobalStateAdapter,
   AnchorSkillGlobalStateAdapter,
   AnchorWorksceneGlobalStateAdapter,
-  SkillStore,
-  getSkillsRoot,
   parseConversationId,
 } from "@zhixing/core";
 import {
@@ -995,8 +993,6 @@ export async function setupAuthorityRuntime(
     skillGlobalState = authorityLog
       ? new AnchorSkillGlobalStateAdapter({
           log: authorityLog,
-          artifacts,
-          store: new SkillStore(getSkillsRoot()),
           anchorEpoch,
           clock,
         })
@@ -1010,7 +1006,6 @@ export async function setupAuthorityRuntime(
         })
       : undefined;
     await worksceneGlobalState?.initializeStagedPublishing();
-    await skillGlobalState?.initializeStagedPublishing();
     const refreshLocalExecutorSnapshot = async (
       permissionSnapshotHighWater?: number,
     ): Promise<{
@@ -1800,8 +1795,6 @@ export async function setupAuthorityRuntime(
       });
       const nextSkill = new AnchorSkillGlobalStateAdapter({
         log: authorityLog,
-        artifacts,
-        store: new SkillStore(getSkillsRoot()),
         anchorEpoch: generation.anchorEpoch,
         clock,
       });
@@ -1814,7 +1807,6 @@ export async function setupAuthorityRuntime(
 
       try {
         await nextWorkscene.initializeStagedPublishing();
-        await nextSkill.initializeStagedPublishing();
       } catch (error) {
         nextWorkscene.stop();
         throw error;

@@ -1,7 +1,7 @@
 /**
  * 技能索引段渲染 —— Index 层的纯投影。
  *
- * 输入是 Store 已过滤 / 排序 / 取够 top-N 的记录(见 SkillStore.queryTopN),
+ * 输入是 Skill Catalog 领域已过滤、排序并限制数量的不可变投影条目，
  * 这里只把它序列化为进系统提示词稳定区的一段文本。纯函数、无副作用、
  * byte-equal 可断言(稳定前缀缓存友好的前提)。
  *
@@ -19,7 +19,7 @@ const DEFAULT_MAX_DESCRIPTION_CHARS = 200;
 
 /**
  * 渲染所需的最小条目形态 —— 接口隔离:渲染只用三个字段,入参不绑完整
- * SkillRecord(超集天然兼容),builtin 拼池条目无需伪造目录技能的全字段。
+ * SkillCatalogEntry(超集天然兼容)，builtin 拼池条目无需伪造领域全字段。
  */
 export interface SkillIndexEntry {
   id: string;

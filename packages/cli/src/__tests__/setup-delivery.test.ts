@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { readFile, rm } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -128,6 +128,40 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
     expect(stack.authorityDelivery).toBeDefined();
     expect(stack.outboxRegistry).toBeDefined();
     expect(typeof stack.stop).toBe("function");
+  });
+
+  it("leaves a legacy Skill directory inert and outside the Authority Catalog", async () => {
+    const legacyRoot = resolve(home, "skills");
+    const legacyDocument = resolve(legacyRoot, "own", "legacy", "SKILL.md");
+    await mkdir(dirname(legacyDocument), { recursive: true });
+    await writeFile(legacyDocument, "legacy sentinel", "utf8");
+    const before = await readdir(legacyRoot, { recursive: true });
+
+    const authority = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: new MemorySecretStore(),
+      executorReadiness: TEST_EXECUTOR_READINESS,
+    });
+    try {
+      const result = await authority.globalState!.read(
+        { kind: "skill-catalog", includeDisabled: true },
+        {
+          principal: { kind: "host", component: "setup-delivery-test" },
+          requestId: "legacy-skill-directory-is-inert",
+          deadlineAt: "2099-01-01T00:00:00.000Z",
+          authority: { domain: "global", anchorEpoch: authority.anchorEpoch },
+        },
+      );
+      expect(result).toMatchObject({
+        kind: "skill-catalog",
+        catalogRevision: 0,
+        entries: [],
+      });
+      expect(await readdir(legacyRoot, { recursive: true })).toEqual(before);
+      expect(await readFile(legacyDocument, "utf8")).toBe("legacy sentinel");
+    } finally {
+      await authority.startupCleanup.run();
+    }
   });
 
   it("freezes an explicit workspace revision and preflights it before local execution", async () => {

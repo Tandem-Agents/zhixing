@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
@@ -9,14 +10,18 @@ import type {
 } from "../contracts/index.js";
 import { skillNameToId } from "./id.js";
 import { AnchorSkillGlobalStateAdapter } from "./global-state-adapter.js";
-import { SkillStore } from "./store.js";
 
 const NOW = "2026-08-04T00:00:00.000Z";
 const DURABLE_IO_TEST_TIMEOUT_MS = 30_000;
 
 describe("AnchorSkillGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
-  it("commits an immutable content dependency before path-free catalog publication", async () => {
+  it("commits immutable content without touching an inert legacy Skill directory", async () => {
     const fixture = await createFixture();
+    const legacyRoot = path.join(fixture.root, "skills");
+    const legacyDocument = path.join(legacyRoot, "own", "legacy", "SKILL.md");
+    await fs.mkdir(path.dirname(legacyDocument), { recursive: true });
+    await fs.writeFile(legacyDocument, "legacy sentinel", "utf8");
+    const legacyTree = await fs.readdir(legacyRoot, { recursive: true });
     const document = "---\nname: My Skill\ndescription: Useful\n---\nDo it.";
     const content = await fixture.artifacts.put(Buffer.from(document));
     const mutation: GlobalStagedMutation = {
@@ -28,7 +33,6 @@ describe("AnchorSkillGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS 
       records: [{ seq: 1, requestId: "skill-create", mutation }],
     });
     expect(plan.outcomes.get(1)).toEqual({ t: "granted", targetRevision: 1 });
-    await expect(fixture.store.loadText(skillNameToId("My Skill"))).rejects.toThrow();
 
     await fixture.log.append(plan.records);
     await fixture.adapter.applyStagedMutation({
@@ -36,6 +40,14 @@ describe("AnchorSkillGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS 
       mutation,
       targetRevision: 1,
     });
+    await fixture.adapter.applyStagedMutation({
+      requestId: "skill-create",
+      mutation,
+      targetRevision: 1,
+    });
+    await fixture.adapter.refreshStagedMutations([
+      { requestId: "skill-create", mutation },
+    ]);
     const result = await fixture.adapter.read(
       { kind: "skill-catalog", includeDisabled: true },
       readContext("catalog"),
@@ -49,7 +61,24 @@ describe("AnchorSkillGlobalStateAdapter", { timeout: DURABLE_IO_TEST_TIMEOUT_MS 
       contentRef: content,
     });
     expect(JSON.stringify(result)).not.toContain(fixture.root);
-    expect((await fixture.store.loadText(skillNameToId("My Skill"))).body).toContain("Do it.");
+    expect(Buffer.from(await fixture.artifacts.get(content)).toString("utf8")).toBe(
+      document,
+    );
+    expect(await fs.readdir(legacyRoot, { recursive: true })).toEqual(legacyTree);
+    expect(await fs.readFile(legacyDocument, "utf8")).toBe("legacy sentinel");
+    const snapshot = await fixture.log.readSnapshot();
+    expect(snapshot.commits.flatMap((commit) =>
+      commit.entries.map((entry) => entry.stream)
+    )).toEqual(["intent:skill-authority"]);
+
+    await expect(fixture.adapter.applyStagedMutation({
+      requestId: "skill-create",
+      mutation: {
+        ...mutation,
+        record: { ...mutation.record, description: "changed" },
+      },
+      targetRevision: 1,
+    })).rejects.toThrow("Committed skill mutation is unavailable or changed");
   });
 
   it("serializes usage deltas, enforces CAS, and keeps disabled entries only in management views", async () => {
@@ -142,16 +171,12 @@ async function createFixture() {
   const log = new FileAuthorityCommitLog(path.join(root, "authority"), artifacts, {
     clock: () => NOW,
   });
-  const store = new SkillStore(path.join(root, "skills"));
   const adapter = new AnchorSkillGlobalStateAdapter({
     log,
-    artifacts,
-    store,
     anchorEpoch: 1,
     clock: () => NOW,
   });
-  await adapter.initializeStagedPublishing();
-  return { root, artifacts, log, store, adapter };
+  return { root, artifacts, log, adapter };
 }
 
 function readContext(requestId: string): GlobalReadCallContext {

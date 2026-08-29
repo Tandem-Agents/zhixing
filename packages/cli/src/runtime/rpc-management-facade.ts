@@ -19,7 +19,7 @@ import {
 import type { SessionSecurityResult } from "@zhixing/rpc";
 import type { CoreHostRpcLink } from "./core-host-connection.js";
 
-/** skill.list 条目——补全候选与管理器消费的最小面(宿主返回 SkillStore 全集) */
+/** skill.list 条目——补全候选与管理器消费的 Skill Catalog 投影。 */
 export interface SkillListEntry {
   id: string;
   name?: string;

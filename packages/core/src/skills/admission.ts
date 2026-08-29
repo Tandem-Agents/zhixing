@@ -14,8 +14,9 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import { SKILL_FILE } from "./paths.js";
 import { scanSkillContent, type ContentThreat } from "./content-scan.js";
+
+const SKILL_DOCUMENT_FILE = "SKILL.md";
 
 /** AI 研判对 LLM 的最小依赖 —— 一个 prompt 进、文本出(同 steward 形态,绑 `callText("main")`)。 */
 export type AdmissionLlm = (prompt: string) => Promise<string>;
@@ -98,7 +99,7 @@ async function acquireLocalPath(srcPath: string, stagingDir: string): Promise<vo
     await fs.cp(srcPath, stagingDir, { recursive: true });
   } else if (stat.isFile()) {
     await fs.mkdir(stagingDir, { recursive: true });
-    await fs.cp(srcPath, path.join(stagingDir, SKILL_FILE));
+    await fs.cp(srcPath, path.join(stagingDir, SKILL_DOCUMENT_FILE));
   } else {
     throw new Error(`接入源不是文件或目录:${srcPath}`);
   }

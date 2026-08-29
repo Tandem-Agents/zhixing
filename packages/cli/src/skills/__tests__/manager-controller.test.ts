@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { ManagedSkillRecord } from "@zhixing/core";
+import type { SkillCatalogEntry } from "@zhixing/core";
 import {
   SkillManagerController,
   type SkillManagerStore,
@@ -7,18 +7,24 @@ import {
 
 const rec = (
   id: string,
-  over: Partial<ManagedSkillRecord> = {},
-): ManagedSkillRecord => ({
+  over: Partial<SkillCatalogEntry> = {},
+): SkillCatalogEntry => ({
   id,
   name: id.toUpperCase(),
   description: "d",
   source: "own",
-  dir: `/skills/own/${id}`,
   mode: "main",
   pinned: false,
   disabled: false,
   createdAt: "2026-01-01T00:00:00.000Z",
   usage: null,
+  contentRef: {
+    digest: id.padEnd(64, "0"),
+    size: 1,
+    mediaType: "text/markdown",
+  },
+  revision: 1,
+  digest: id.padEnd(64, "f"),
   ...over,
 });
 
@@ -28,7 +34,7 @@ interface Call {
   patch?: unknown;
 }
 
-function fakeStore(initial: ManagedSkillRecord[]): {
+function fakeStore(initial: SkillCatalogEntry[]): {
   store: SkillManagerStore;
   calls: Call[];
 } {

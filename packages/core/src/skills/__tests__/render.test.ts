@@ -1,18 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { renderSkillIndex } from "../render.js";
-import type { SkillRecord } from "../types.js";
+import type { SkillIndexEntry } from "../render.js";
 
-function rec(partial: Partial<SkillRecord>): SkillRecord {
+function rec(partial: Partial<SkillIndexEntry>): SkillIndexEntry {
   return {
     id: "x",
-    name: "X",
     description: "d",
-    source: "own",
-    dir: "/x",
-    mode: "main",
     pinned: false,
-    disabled: false,
-    createdAt: "2024-01-01T00:00:00.000Z",
     ...partial,
   };
 }

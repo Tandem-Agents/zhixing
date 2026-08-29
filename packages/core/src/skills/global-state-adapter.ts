@@ -13,10 +13,8 @@ import type {
   GlobalStatePort,
   JsonValue,
   LogicalRecord,
-  SkillWriteMutation,
 } from "../contracts/index.js";
 import type {
-  ArtifactStore,
   AuthorityCommitLog,
   DurableProjectionMutation,
   DurableProjectionReadContext,
@@ -30,16 +28,13 @@ import {
   protocolDigest,
 } from "../protocol/index.js";
 import { skillNameToId } from "./id.js";
-import { SkillStore } from "./store.js";
 import type { SkillCatalogEntry } from "./types.js";
 
 const SKILL_STREAM = "intent:skill-authority";
 export const SKILL_AUTHORITY_PROJECTION_ID = "global-skill-authority-v1";
 const SKILL_ENTRY_PREFIX = "entry:";
 const SKILL_REQUEST_PREFIX = "request:";
-const SKILL_PENDING_PREFIX = "pending:";
 const SKILL_META_KEY = "meta:catalog-revision";
-const SKILL_MATERIALIZATION_STREAM = "intent:skill-materialization";
 
 type SkillMutation =
   | Extract<
@@ -60,12 +55,6 @@ type SkillAuthorityRecord = {
   readonly at: string;
 };
 
-type SkillMaterializationRecord = {
-  readonly t: "skill-materialized";
-  readonly requestId: string;
-  readonly targetRevision: number;
-};
-
 interface SkillProjection {
   readonly catalogRevision: number;
   readonly entries: Map<string, SkillCatalogEntry>;
@@ -77,17 +66,13 @@ interface SkillProjection {
 
 export interface AnchorSkillGlobalStateAdapterOptions {
   readonly log: AuthorityCommitLog;
-  readonly artifacts: ArtifactStore;
-  readonly store: SkillStore;
   readonly anchorEpoch: number;
   readonly clock?: () => string;
 }
 
-/** Anchor-owned skill catalog and the sole user-skill filesystem materializer. */
+/** Anchor-owned Skill Catalog; immutable documents live only in ArtifactStore. */
 export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
   readonly #log: AuthorityCommitLog;
-  readonly #artifacts: ArtifactStore;
-  readonly #store: SkillStore;
   readonly #anchorEpoch: number;
   readonly #clock: () => string;
   readonly #durable: RebuildableDurableProjectionIndex;
@@ -97,23 +82,16 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
 
   constructor(options: AnchorSkillGlobalStateAdapterOptions) {
     this.#log = options.log;
-    this.#artifacts = options.artifacts;
-    this.#store = options.store;
     this.#anchorEpoch = positiveInteger(options.anchorEpoch, "Skill anchor epoch");
     this.#clock = options.clock ?? (() => new Date().toISOString());
     this.#durable = this.#log.durableProjection({
       projectionId: SKILL_AUTHORITY_PROJECTION_ID,
-      reducerVersion: 1,
+      reducerVersion: 2,
       reduce: reduceSkillDurableProjection,
     });
   }
 
   readonly stagedProjectionId = SKILL_AUTHORITY_PROJECTION_ID;
-
-  async initializeStagedPublishing(): Promise<void> {
-    await this.#ensureOpen();
-    await this.#importLegacyCatalog();
-  }
 
   ownsStagedMutation(mutation: GlobalStagedMutation): boolean {
     return isStagedSkillMutation(mutation);
@@ -173,37 +151,26 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
     readonly targetRevision: number;
   }): Promise<void> {
     if (!isStagedSkillMutation(input.mutation)) {
-      throw new TypeError("Skill materializer received another mutation domain");
+      throw new TypeError("Skill staged participant received another mutation domain");
     }
-    await this.#materializePending(input.requestId, input.targetRevision);
+    await this.#assertCommittedMutation(
+      input.requestId,
+      input.mutation,
+      input.targetRevision,
+    );
   }
 
   async refreshStagedMutations(records: ReadonlyArray<{
     readonly requestId: string;
     readonly mutation: GlobalStagedMutation;
   }>): Promise<void> {
-    if (records.length === 0) {
-      await this.#log.transactDurableProjection(
-        SKILL_AUTHORITY_PROJECTION_ID,
-        () => ({ kind: "return", value: undefined }),
-      );
-      let continuation: string | undefined;
-      do {
-        const page = await this.#durable.scan(
-          { gte: SKILL_PENDING_PREFIX, lt: `${SKILL_PENDING_PREFIX}\uffff` },
-          128,
-          continuation,
-        );
-        for (const entry of page.entries) {
-          await this.#materializePending(entry.key.slice(SKILL_PENDING_PREFIX.length));
-        }
-        continuation = page.continuation;
-      } while (continuation !== undefined);
-      return;
-    }
+    await this.#refreshDurableProjection();
     for (const record of records) {
       if (isStagedSkillMutation(record.mutation)) {
-        await this.#materializePending(record.requestId);
+        await this.#assertCommittedMutation(
+          record.requestId,
+          record.mutation,
+        );
       }
     }
   }
@@ -316,91 +283,33 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
     );
     this.#projection = transaction.state;
     this.#cursor = transaction.cursor;
-    await this.#materializePending(context.requestId, transaction.value.revision).catch(
-      () => undefined,
-    );
     return transaction.value;
   }
 
-  async #materializePending(
+  async #assertCommittedMutation(
     requestId: string,
+    mutation: Extract<SkillMutation, GlobalStagedMutation>,
     expectedRevision?: number,
   ): Promise<void> {
-    const pending = await this.#durable.get(skillPendingKey(requestId));
-    if (pending === undefined) {
-      const replay = readSkillRequest(
-        await this.#durable.get(skillRequestKey(requestId)),
-      );
-      if (
-        !replay ||
-        (expectedRevision !== undefined && replay.targetRevision !== expectedRevision)
-      ) {
-        throw new CommittedMutationMaterializationError(
-          "Committed skill mutation is unavailable or changed",
-        );
-      }
-      return;
-    }
-    const record = readPendingSkillRecord(pending);
+    await this.#refreshDurableProjection();
+    const replay = readSkillRequest(
+      await this.#durable.get(skillRequestKey(requestId)),
+    );
     if (
-      expectedRevision !== undefined &&
-      record.targetRevision !== expectedRevision
+      !replay ||
+      replay.mutationDigest !== mutationDigest(mutation) ||
+      (expectedRevision !== undefined && replay.targetRevision !== expectedRevision)
     ) {
       throw new CommittedMutationMaterializationError(
         "Committed skill mutation is unavailable or changed",
       );
     }
-    const mutation = record.mutation;
-    const skillId = mutationSkillId(mutation);
-    if (mutation.kind === "skill-archive") {
-      await this.#store.materializeArchive(skillId);
-    } else {
-      const entry = readSkillEntry(
-        await this.#durable.get(skillEntryKey(skillId)),
-      );
-      if (!entry) {
-        throw new CommittedMutationMaterializationError(
-          "Committed skill entry is absent from its projection",
-        );
-      }
-      if (mutation.kind === "skill-usage" || mutation.kind === "skill-set-state") {
-        await this.#store.materializeUsage(entry.id, entry.usage);
-        if (mutation.kind === "skill-set-state") {
-          const document = Buffer.from(await this.#artifacts.get(entry.contentRef)).toString("utf8");
-          await this.#store.materializeAuthority(entry, document);
-        }
-      } else {
-        if (mutation.kind === "skill-update" && mutation.skillId !== entry.id) {
-          await this.#store.materializeArchive(mutation.skillId);
-        }
-        const document = Buffer.from(await this.#artifacts.get(entry.contentRef)).toString("utf8");
-        await this.#store.materializeAuthority(entry, document);
-      }
-    }
-    await this.#log.transactDurableProjection<SkillMaterializationRecord, void>(
+  }
+
+  async #refreshDurableProjection(): Promise<void> {
+    await this.#log.transactDurableProjection(
       SKILL_AUTHORITY_PROJECTION_ID,
-      async (projection) => {
-        const current = await projection.get(skillPendingKey(requestId));
-        if (current === undefined) return { kind: "return", value: undefined };
-        const currentRecord = readPendingSkillRecord(current);
-        if (currentRecord.targetRevision !== record.targetRevision) {
-          throw new CommittedMutationMaterializationError(
-            "Skill materialization target changed",
-          );
-        }
-        return {
-          kind: "append",
-          entries: [{
-            stream: SKILL_MATERIALIZATION_STREAM,
-            body: {
-              t: "skill-materialized",
-              requestId,
-              targetRevision: record.targetRevision,
-            },
-          }],
-          value: undefined,
-        };
-      },
+      () => ({ kind: "return", value: undefined }),
     );
   }
 
@@ -421,63 +330,6 @@ export class AnchorSkillGlobalStateAdapter implements GlobalStatePort {
     }
     this.#projection = state;
     this.#cursor = snapshot.cursor;
-  }
-
-  async #importLegacyCatalog(): Promise<void> {
-    for (const legacy of await this.#store.listForManagement()) {
-      if (this.#projection.entries.has(legacy.id)) continue;
-      const contentRef = await this.#artifacts.put(
-        Buffer.from(await this.#store.readDocument(legacy.id), "utf8"),
-      );
-      const at = this.#clock();
-      const entry = withDigest({
-        id: legacy.id,
-        name: legacy.name,
-        description: legacy.description,
-        source: legacy.source,
-        mode: legacy.mode,
-        pinned: legacy.pinned,
-        disabled: legacy.disabled,
-        createdAt: legacy.createdAt,
-        usage: legacy.usage ? { ...legacy.usage } : null,
-        contentRef,
-        revision: 1,
-      });
-      const mutation: SkillMutation = legacy.source === "linked"
-        ? { kind: "skill-admit", mode: legacy.mode, record: skillRecord(entry) }
-        : { kind: "skill-create", mode: legacy.mode, record: skillRecord(entry) };
-      const requestId = `skill-legacy:${legacy.id}:${contentRef.digest}`;
-      const record: SkillAuthorityRecord = {
-        t: "skill-mutation-applied",
-        requestId,
-        mutationDigest: mutationDigest(mutation),
-        mutation,
-        targetRevision: 1,
-        catalogRevision: this.#projection.catalogRevision + 1,
-        entry,
-        at,
-      };
-      const transaction = await this.#log.transactProjection<
-        SkillProjection,
-        SkillAuthorityRecord,
-        void
-      >(
-        this.#projection,
-        reduceRecord,
-        () => ({
-          kind: "append",
-          entries: [{ stream: SKILL_STREAM, body: record }],
-          value: undefined,
-        }),
-        {
-          cursor: this.#cursor,
-          stream: SKILL_STREAM,
-          candidateReferences: [contentRef],
-        },
-      );
-      this.#projection = transaction.state;
-      this.#cursor = transaction.cursor;
-    }
   }
 
   #admit(
@@ -653,7 +505,7 @@ async function reduceSkillDurableProjection(
 
   for (const logical of envelope.entries) {
     if (logical.stream === SKILL_STREAM) {
-      const record = readPendingSkillRecord(logical.body);
+      const record = readSkillAuthorityRecord(logical.body);
       const requestKey = skillRequestKey(record.requestId);
       if (await get(requestKey)) {
         throw new TypeError("Skill authority request was duplicated");
@@ -671,19 +523,7 @@ async function reduceSkillDurableProjection(
         targetRevision: record.targetRevision,
       });
       put(SKILL_META_KEY, record.catalogRevision);
-      put(skillPendingKey(record.requestId), structuredClone(record) as unknown as JsonValue);
-      continue;
     }
-    if (logical.stream !== SKILL_MATERIALIZATION_STREAM) continue;
-    const record = readSkillMaterializationRecord(logical.body);
-    const pending = await get(skillPendingKey(record.requestId));
-    if (
-      !pending ||
-      readPendingSkillRecord(pending).targetRevision !== record.targetRevision
-    ) {
-      throw new TypeError("Skill materialization acknowledgement is stale");
-    }
-    tombstone(skillPendingKey(record.requestId));
   }
   return mutations;
 }
@@ -753,10 +593,6 @@ function skillRequestKey(requestId: string): string {
   return `${SKILL_REQUEST_PREFIX}${requestId}`;
 }
 
-function skillPendingKey(requestId: string): string {
-  return `${SKILL_PENDING_PREFIX}${requestId}`;
-}
-
 function readCatalogRevision(value: JsonValue | undefined): number {
   if (value === undefined) return 0;
   if (!Number.isSafeInteger(value) || Number(value) < 0) {
@@ -791,7 +627,7 @@ function readSkillEntry(value: JsonValue | undefined): SkillCatalogEntry | undef
   return cloneEntry(value as unknown as SkillCatalogEntry) ?? undefined;
 }
 
-function readPendingSkillRecord(value: unknown): SkillAuthorityRecord {
+function readSkillAuthorityRecord(value: unknown): SkillAuthorityRecord {
   if (
     typeof value !== "object" || value === null || Array.isArray(value) ||
     (value as { t?: unknown }).t !== "skill-mutation-applied"
@@ -808,23 +644,6 @@ function readPendingSkillRecord(value: unknown): SkillAuthorityRecord {
     throw new TypeError("Skill authority record is invalid");
   }
   return structuredClone(record);
-}
-
-function readSkillMaterializationRecord(value: unknown): SkillMaterializationRecord {
-  if (
-    typeof value !== "object" || value === null || Array.isArray(value) ||
-    (value as { t?: unknown }).t !== "skill-materialized"
-  ) {
-    throw new TypeError("Skill materialization record is invalid");
-  }
-  const record = value as SkillMaterializationRecord;
-  if (
-    typeof record.requestId !== "string" || !record.requestId ||
-    !Number.isSafeInteger(record.targetRevision) || record.targetRevision <= 0
-  ) {
-    throw new TypeError("Skill materialization record is invalid");
-  }
-  return { ...record };
 }
 
 function requireStagedSkillMutation(mutation: GlobalStagedMutation): Extract<SkillMutation, GlobalStagedMutation> {
@@ -855,24 +674,6 @@ function isSkillMutation(
   mutation: GlobalControlMutation | GlobalStagedMutation,
 ): mutation is SkillMutation {
   return mutation.kind.startsWith("skill-");
-}
-
-function mutationSkillId(mutation: SkillMutation): string {
-  if (mutation.kind === "skill-create" || mutation.kind === "skill-admit") {
-    return requireSkillId(mutation.record.name);
-  }
-  if (mutation.kind === "skill-update") return requireSkillId(mutation.record.name);
-  return mutation.kind === "skill-usage" ? mutation.record.skillId : mutation.skillId;
-}
-
-function skillRecord(
-  entry: SkillCatalogEntry,
-): Extract<SkillWriteMutation, { kind: "skill-create" }> ["record"] {
-  return {
-    name: entry.name,
-    description: entry.description,
-    content: cloneRef(entry.contentRef),
-  };
 }
 
 function requireSkillId(name: string): string {

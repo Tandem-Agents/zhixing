@@ -1,9 +1,9 @@
 /**
  * 技能管理器控制器 —— UI 无关的"大脑":持有技能列表 + 选中位置,把导航与状态
- * 操作(置顶 / 禁用 / 改 mode / 归档)落到 Store,供 alt-screen 外壳渲染与按键驱动。
+ * 操作(置顶 / 禁用 / 改 mode / 归档)交给管理应用端口,供 alt-screen 外壳渲染与按键驱动。
  *
  * 与渲染、按键解码彻底分离:外壳把按键映射到这里的方法、把 `view()` 画出来;
- * 控制器只管状态机与 Store 调用,故可不依赖 TUI 独立单测(注入轻量 store stub)。
+ * 控制器只管状态机与应用调用,故可不依赖 TUI 独立单测。
  *
  * 选中跟随被操作项:状态变更会让列表重排(置顶上移等),故每次变更后按 id 找回
  * 该项的新位置,而非死守索引 —— 否则置顶后选中会跳到"恰好排到该位置"的别的技能。
@@ -14,7 +14,7 @@
 
 import type { SkillCatalogEntry, SkillMode } from "@zhixing/core";
 
-/** 控制器对 Store 的最小依赖(接口隔离,便于注入 stub 单测)。 */
+/** 控制器对 Skill Catalog 管理 binding 的最小依赖。 */
 export interface SkillManagerStore {
   listForManagement(): Promise<readonly SkillCatalogEntry[]>;
   setState(
@@ -44,7 +44,7 @@ export class SkillManagerController {
     private readonly onMutate?: () => void | Promise<void>,
   ) {}
 
-  /** 从 Store 读全集(含 disabled)+ usage,初始化 / 刷新列表。 */
+  /** 从管理视图读全集(含 disabled)+ usage,初始化 / 刷新列表。 */
   async load(): Promise<void> {
     this.items = [...(await this.store.listForManagement())];
     this.clampSelection();

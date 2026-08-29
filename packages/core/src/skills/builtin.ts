@@ -3,18 +3,16 @@
  *
  * 能力内化机制的承载:系统能力 = 内置技能(程序性知识),与用户技能同走
  * 渐进披露管线(索引常驻 → 命中唤醒 → load_skill 加载全文 → 工具落地)。
- * 登记一次,两个消费者各取投影:Store(loadText 分支 / 索引拼池)读方法,
- * runtime 装配读关联工具(随能力增量补字段)。
+ * 登记一次，Skill Catalog 应用取正文与索引投影，runtime 装配读取关联工具。
  *
  * 实现形态 = 代码内注册集(TS 字符串模块):全仓 prompt 均为代码内常量、
  * 构建不打包非 JS 资源,代码内注册集零 fs 读取、零路径问题、天然随版本
  * 分发——升级即更新、用户目录零污染。
  *
  * 与用户资产的硬边界(零状态记录):
- *   - 不落用户磁盘、不进 `index.json`(无 pinned / disabled —— 用户管不了
+ *   - 不落用户磁盘、无独立状态记录(无 pinned / disabled —— 用户管不了
  *     机制内部件,定制走 fork-to-own:own 同名即遮蔽 builtin,原件随版本演进)
- *   - 不进 `listAll`(slash 补全零暴露 —— 进入即把系统能力变相恢复成用户
- *     命令入口)、不进 `listForManagement`(管理列表零暴露)
+ *   - 不进用户 catalog(因此 slash 补全与管理列表零暴露)
  *   - 唤醒只有两路:模型自主(索引命中)+ 用户自然语言(模型理解后 load_skill)
  *   - 适用模式由条目自带声明(不走用户 mode 状态过滤),缺省全模式
  *   - 索引占独立小额度,不挤占用户技能 top-N
@@ -62,7 +60,7 @@ const REGISTRY: ReadonlyMap<string, BuiltinSkillEntry> = new Map(
   }),
 );
 
-/** 按 id 取内置能力;不存在返回 null(Store loadText 据此走目录/builtin 分支)。 */
+/** 按 id 取内置能力；不存在返回 null。 */
 export function getBuiltinSkill(id: string): BuiltinSkillEntry | null {
   return REGISTRY.get(id) ?? null;
 }

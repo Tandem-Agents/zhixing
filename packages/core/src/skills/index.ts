@@ -1,12 +1,11 @@
 /**
  * 技能(Skill)模块 —— 桶导出。
  *
- * 当前导出 Store 基础(id 变换、路径、数据模型)。随增量推进,Store 实现、
- * Index 投影、Loader 工具、Admission 规则在此逐步补全。
+ * 根桶只保留通用 Skill 数据、builtin 内容与接入原语。领域应用合同只从
+ * `@zhixing/core/skills/catalog` 发布，Authority/CAS 不经本桶暴露写入口。
  */
 
 export { skillNameToId } from "./id.js";
-export { SkillStore } from "./store.js";
 export { AnchorSkillGlobalStateAdapter } from "./global-state-adapter.js";
 export type { AnchorSkillGlobalStateAdapterOptions } from "./global-state-adapter.js";
 export { renderSkillIndex } from "./render.js";
@@ -33,4 +32,3 @@ export type {
   SkillImportSource,
 } from "./admission.js";
 export * from "./types.js";
-export * from "./paths.js";

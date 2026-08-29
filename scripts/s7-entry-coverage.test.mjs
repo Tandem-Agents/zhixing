@@ -2344,6 +2344,7 @@ test("retired entry, live writable Store and reverse package dependency mutation
 test("Skill Catalog management, load, save, admission and Kernel projection have one domain application boundary", async () => {
   const paths = [
     "packages/core/src/skills/catalog-application.ts",
+    "packages/core/src/skills/global-state-adapter.ts",
     "packages/core/src/index.ts",
     "packages/core/src/skills/index.ts",
     "packages/core/package.json",
@@ -2351,6 +2352,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/server/src/rpc/methods/skill.ts",
     "packages/server/src/context.ts",
     "packages/cli/src/serve/command.ts",
+    "packages/cli/src/setup-delivery.ts",
     "packages/cli/src/serve/management-directories.ts",
     "packages/orchestrator/src/runtime/assignment-skill-port.ts",
     "packages/core/src/protocol/assignment-mutation.ts",
@@ -2677,6 +2679,47 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       ),
     )).join("\n"),
     /does not install the unique Skill admission application binding/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/skills/global-state-adapter.ts",
+      (text) => `${text}\nconst revived = "intent:skill-materialization";`,
+    )).join("\n"),
+    /legacy directory import or filesystem materialization/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/skills/global-state-adapter.ts",
+      (text) => text.replace(
+        "await this.#assertCommittedMutation(",
+        "await Promise.resolve(",
+      ),
+    )).join("\n"),
+    /does not validate committed Authority replay/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/setup-delivery.ts",
+      (text) => `${text}\nconst revived = new SkillStore(getSkillsRoot());`,
+    )).join("\n"),
+    /constructs the retired filesystem Skill owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/skills/index.ts",
+      (text) => `${text}\nexport { SkillStore } from "./store.js";`,
+    )).join("\n"),
+    /root barrel exposes retired filesystem storage/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership([
+      ...records,
+      {
+        relative: "packages/core/src/skills/store.ts",
+        text: "export class SkillStore {}",
+      },
+    ]).join("\n"),
+    /retired filesystem Skill owner remains reachable/,
   );
 });
 
