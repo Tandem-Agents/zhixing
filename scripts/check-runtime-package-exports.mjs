@@ -7,6 +7,8 @@ const [
   coreAuthority,
   corePersistence,
   coreProtocol,
+  orchestratorRoot,
+  orchestratorRuntime,
   rpcRoot,
   rpcSkillCatalogClient,
   ownerKernel,
@@ -36,6 +38,8 @@ const [
   import("../packages/core/dist/authority/index.js"),
   import("../packages/core/dist/persistence/index.js"),
   import("../packages/core/dist/protocol/index.js"),
+  import("../packages/orchestrator/dist/index.js"),
+  import("../packages/orchestrator/dist/runtime/index.js"),
   import("../packages/rpc/dist/index.js"),
   import("../packages/rpc/dist/skill-catalog-client.js"),
   import("../packages/owner-kernel/dist/index.js"),
@@ -149,6 +153,12 @@ const meshCanonicalValues = {
 const failures = [];
 await verifyCorePackageExports(failures);
 await verifyRpcSkillCatalogClientExport(failures);
+if (
+  typeof orchestratorRuntime.assertKernelRunEvent !== "function" ||
+  "assertKernelRunEvent" in orchestratorRoot
+) {
+  failures.push("orchestrator-kernel-run-event:invalid-runtime-boundary");
+}
 if (
   typeof rpcSkillCatalogClient.SkillCatalogRpcClient !== "function" ||
   "SkillCatalogRpcClient" in rpcRoot
@@ -300,6 +310,28 @@ const runtimeHostDeclarations = await Promise.all([
     "utf8",
   ),
 ]);
+const [orchestratorRootDeclarations, orchestratorRuntimeDeclarations] =
+  await Promise.all([
+    readFile(
+      new URL("../packages/orchestrator/dist/index.d.ts", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL(
+        "../packages/orchestrator/dist/runtime/index.d.ts",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ]);
+if (
+  orchestratorRootDeclarations.includes("KernelRunEvent") ||
+  orchestratorRootDeclarations.includes("assertKernelRunEvent") ||
+  !orchestratorRuntimeDeclarations.includes("KernelRunEvent") ||
+  !orchestratorRuntimeDeclarations.includes("assertKernelRunEvent")
+) {
+  failures.push("orchestrator-kernel-run-event:invalid-declaration-boundary");
+}
 for (const name of runtimeHostLegacyNames) {
   if (
     name in runtimeHost ||

@@ -163,6 +163,7 @@ import {
   captureKernelRunEnvelope,
   type KernelRunEnvelope,
 } from "./kernel-run-envelope.js";
+import { projectAgentYieldToKernelRunEvent } from "./kernel-run-event.js";
 
 /**
  * 注入系统提示词的技能索引上限(按当前模式 top-N)。
@@ -1959,7 +1960,9 @@ export async function createAgentRuntime(
           }
 
           // 通知调用方（渲染用）
-          await envelope.observation.onYield?.(value);
+          await envelope.observation.onEvent?.(
+            projectAgentYieldToKernelRunEvent(value),
+          );
 
           // 追踪消息以维护对话历史
           trackMessages(value, newMessages, pendingToolResults);

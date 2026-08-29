@@ -16,6 +16,7 @@ import {
   inspectConversationAdoptionAssembly,
   inspectDeviceLifecycleAssembly,
   inspectKernelRunEnvelopeOwnership,
+  inspectKernelRunEventOwnership,
   inspectLocalConversationOwnerIsolation,
   inspectManagedHostAssembly,
   inspectPlannedAnchorTransferAssembly,
@@ -2407,6 +2408,83 @@ test("Kernel run input has one finite Envelope owner and three production bindin
       (text) => `${text}\nvoid createAgentRuntime({} as never);`,
     )).join("\n"),
     /second Kernel assembly path/,
+  );
+});
+
+test("Kernel run events have one finite owner and explicit two-sided projections", async () => {
+  const paths = [
+    "packages/orchestrator/src/runtime/kernel-run-event.ts",
+    "packages/orchestrator/src/runtime/kernel-run-envelope.ts",
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+    "packages/orchestrator/src/runtime/index.ts",
+    "packages/orchestrator/src/index.ts",
+    "packages/runtime-host/src/session-adapter.ts",
+    "packages/cli/src/serve/ephemeral-executor.ts",
+    "packages/cli/src/serve/agent-job-runtime.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectKernelRunEventOwnership(records), []);
+  assert.match(
+    inspectKernelRunEventOwnership(mutate(
+      "packages/orchestrator/src/runtime/kernel-run-event.ts",
+      (text) => text.replace(
+        '  | { readonly type: "thinking_block_start" }\n',
+        "",
+      ),
+    )).join("\n"),
+    /variant or field exact-set drifted/,
+  );
+  assert.match(
+    inspectKernelRunEventOwnership(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => text.replace(
+        "projectAgentYieldToKernelRunEvent(value)",
+        "value",
+      ),
+    )).join("\n"),
+    /Loop to Kernel Event boundary is bypassed/,
+  );
+  assert.match(
+    inspectKernelRunEventOwnership(mutate(
+      "packages/runtime-host/src/session-adapter.ts",
+      (text) => text.replace('    case "tool_end":', '    case "tool_finished":'),
+    )).join("\n"),
+    /product projection is not explicit and exhaustive/,
+  );
+  assert.match(
+    inspectKernelRunEventOwnership(mutate(
+      "packages/cli/src/serve/ephemeral-executor.ts",
+      (text) => text.replace("  assertKernelRunEvent(event);", ""),
+    )).join("\n"),
+    /product projection is not explicit and exhaustive/,
+  );
+  assert.match(
+    inspectKernelRunEventOwnership(mutate(
+      "packages/cli/src/serve/agent-job-runtime.ts",
+      (text) => `${text}\ntype KernelRunEvent = { type: string };`,
+    )).join("\n"),
+    /second owner/,
+  );
+  assert.match(
+    inspectKernelRunEventOwnership(mutate(
+      "packages/orchestrator/src/runtime/kernel-run-event.ts",
+      (text) => `${text}\ntype SessionEventProjection = unknown;`,
+    )).join("\n"),
+    /out-of-band protocol projection share an owner/,
+  );
+  assert.match(
+    inspectKernelRunEventOwnership(mutate(
+      "packages/orchestrator/src/index.ts",
+      (text) => `${text}\nexport { type KernelRunEvent } from "./runtime/index.js";`,
+    )).join("\n"),
+    /leaked through the orchestrator package root/,
   );
 });
 

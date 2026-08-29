@@ -29,7 +29,32 @@ import type { RunResult } from "@zhixing/core";
 import type {
   AgentRuntime,
   KernelRunEnvelope,
+  KernelRunEvent,
 } from "@zhixing/orchestrator/runtime";
+
+const KERNEL_EVENT_EXACT_SET: readonly KernelRunEvent[] = [
+  { type: "text_delta", text: "hello" },
+  { type: "thinking_block_start" },
+  { type: "thinking_delta", thinking: "reason" },
+  { type: "thinking_block_end" },
+  {
+    type: "assistant_message",
+    message: { role: "assistant", content: [{ type: "text", text: "done" }] },
+  },
+  { type: "tool_start", id: "t1", name: "read", input: { path: "a" } },
+  {
+    type: "tool_end",
+    id: "t1",
+    name: "read",
+    result: { content: "ok" },
+    duration: 1,
+  },
+  {
+    type: "turn_complete",
+    turnCount: 1,
+    usage: { inputTokens: 1, outputTokens: 1 },
+  },
+];
 
 /** 本轮用户消息构造——run 输入由调用方组装(此处模拟 runTurnWithCommit 的构造) */
 function um(text: string): Message {
@@ -38,6 +63,7 @@ function um(text: string): Message {
 
 interface MockBehavior {
   yields?: AgentYield[];
+  malformedEvent?: unknown;
   throwError?: string;
   reason?: AgentResult["reason"];
   /** 模拟 LLM 流的延迟,让测试有空间在中途触发 abort */
@@ -82,6 +108,11 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
       if (behavior.throwError) {
         throw new Error(behavior.throwError);
       }
+      if (behavior.malformedEvent !== undefined) {
+        const onEvent = envelope.observation.onEvent;
+        if (!onEvent) throw new Error("Kernel event observer is missing");
+        Reflect.apply(onEvent, undefined, [behavior.malformedEvent]);
+      }
 
       // pre-flight:已 aborted 的 signal 直接走 aborted 路径,模拟 agent-loop 行为
       if (envelope.control.abortSignal?.aborted) {
@@ -99,7 +130,7 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
             getAbortReason(envelope.control.abortSignal) ?? undefined;
           return buildAbortedResult(envelope, abortReason);
         }
-        envelope.observation.onYield?.(y);
+        envelope.observation.onEvent?.(y);
         if (behavior.yieldDelayMs && behavior.yieldDelayMs > 0) {
           await sleepWithAbort(
             behavior.yieldDelayMs,
@@ -230,6 +261,35 @@ describe("createOwnerRuntimeAdapter", () => {
     expect((yields[0] as { text: string }).text).toBe("hi");
   });
 
+  it("explicitly projects the complete Kernel event set into Conversation yields", async () => {
+    const runtime = createOwnerRuntimeAdapter(
+      "event-exact-set",
+      createMockAgentRuntime({ yields: [...KERNEL_EVENT_EXACT_SET] }),
+    );
+    const received: AgentYield[] = [];
+    const run = runtime.run([um("hello")]);
+    while (true) {
+      const next = await run.next();
+      if (next.done) break;
+      received.push(next.value);
+    }
+
+    expect(received).toEqual(KERNEL_EVENT_EXACT_SET);
+    for (const [index, event] of received.entries()) {
+      expect(event).not.toBe(KERNEL_EVENT_EXACT_SET[index]);
+    }
+  });
+
+  it("fails closed when a runtime supplies an incomplete Kernel event", async () => {
+    const runtime = createOwnerRuntimeAdapter(
+      "invalid-event",
+      createMockAgentRuntime({ malformedEvent: { type: "text_delta" } }),
+    );
+    await expect(runtime.run([um("hello")]).next()).rejects.toThrow(
+      "Incomplete AgentYield variant",
+    );
+  });
+
   it("纯执行体透传契约:messages 原样、conversationId=sessionId、turnIndex/source 透传", async () => {
     let captured: KernelRunEnvelope | undefined;
     const runtime = createOwnerRuntimeAdapter(
@@ -308,7 +368,7 @@ describe("createOwnerRuntimeAdapter", () => {
       resourceReservation,
     });
     expect(captured!.observation.onProtocolEvent).toBe(onProtocolEvent);
-    expect(captured!.observation.onYield).toBeTypeOf("function");
+    expect(captured!.observation.onEvent).toBeTypeOf("function");
   });
 
   it("propagates errors from agentRuntime.run via throw", async () => {

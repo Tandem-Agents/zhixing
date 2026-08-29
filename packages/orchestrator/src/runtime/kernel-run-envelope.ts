@@ -1,5 +1,4 @@
 import type {
-  AgentYield,
   DurableToolExecutionAuthorizer,
   Message,
   RunRecordAdvancementMetadata,
@@ -18,6 +17,7 @@ import type {
   ResourceLease,
   ResourceReservationPort,
 } from "@zhixing/core/contracts";
+import type { KernelRunEvent } from "./kernel-run-event.js";
 
 /**
  * The one immutable input contract for a main Intelligence Kernel run.
@@ -57,7 +57,7 @@ export interface KernelRunEnvelope {
     };
   };
   readonly observation: {
-    readonly onYield?: (event: AgentYield) => void | Promise<void>;
+    readonly onEvent?: (event: KernelRunEvent) => void | Promise<void>;
     readonly onProtocolEvent?: (
       event: SessionEventProjection,
       meta: { readonly lineage?: string },
@@ -135,7 +135,7 @@ export function captureKernelRunEnvelope(
       resourceReservation,
     }),
     observation: Object.freeze({
-      onYield: input.observation.onYield,
+      onEvent: input.observation.onEvent,
       onProtocolEvent: input.observation.onProtocolEvent,
     }),
   });

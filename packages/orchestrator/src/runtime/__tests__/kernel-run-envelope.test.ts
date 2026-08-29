@@ -21,14 +21,14 @@ describe("KernelRunEnvelope", () => {
       source: "channel" as const,
       turnContext,
     };
-    const onYield = vi.fn();
+    const onEvent = vi.fn();
     const abort = new AbortController();
     const input: KernelRunEnvelope = {
       modelInput: { messages },
       identity,
       control: { abortSignal: abort.signal },
       correctness: {},
-      observation: { onYield },
+      observation: { onEvent },
     };
 
     const captured = captureKernelRunEnvelope(input);
@@ -53,7 +53,7 @@ describe("KernelRunEnvelope", () => {
         ?.postTurnControl,
     ).toBe(true);
     expect(captured.control.abortSignal).toBe(abort.signal);
-    expect(captured.observation.onYield).toBe(onYield);
+    expect(captured.observation.onEvent).toBe(onEvent);
     for (const partition of Object.values(captured)) {
       expect(Object.isFrozen(partition)).toBe(true);
     }

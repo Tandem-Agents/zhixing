@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A4-01 已由协调者独立复核；下一检查点为 Kernel Event 输出合同及生产投影<br>
+> 当前检查点：A4-02 已由协调者独立复核；下一检查点为 Kernel Terminal 合同<br>
 > 完成度：4/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `ceda8f65`；A0～A3 已由协调者独立复核并提交，A1、A2、A3 阶段退出门成立 |
+| 已接受基线 | `0ba58736`；A0～A3 与 A4-01 已由协调者独立复核并提交，A1、A2、A3 阶段退出门成立 |
 | 当前 A 项 | A4：封闭 Intelligence Kernel 合同及其生产边界 |
-| 活跃工作包 | 无；A4-01 已由协调者独立复核，唯一 Envelope owner、三类生产 binding、不可变 capture 与旧 `RunParams` 退场均成立 |
-| 下一责任链 | 单独建立 Kernel Event 输出合同及真实生产投影，封闭 Loop 内部事件与 Kernel 消费者之间的边界；Terminal 留给后续独立工作包，不提前收窄其他公共成员或迁移 RuntimeHost 产品装配 |
+| 活跃工作包 | 无；A4-02 已由协调者独立复核，唯一八变体 Event owner、Loop → Kernel → 三类产品消费面的两侧显式投影、旧 `onYield` 直通退场及导出边界均成立 |
+| 下一责任链 | 单独建立 Kernel Terminal 合同，拆开 Kernel 运行终态与当前 `RunResult` 中 Conversation/持久化消费输入；不在本包迁移 Workscene/Schedule 装配、其他公共成员或进入 A5 |
 | 打开的单向桥 | 无；Skill 管理、保存、admission、load/usage、Kernel 与 Executor 投影均只经 `@zhixing/core/skills/catalog` 及既有 Authority/CAS/assignment Correctness 端口成立，旧 writable Store 不再承担正式应用行为 |
-| 已失效证据 | 无。`A4-01-kernel-run-envelope-v1` 已由协调者重取；A3-02 Skill client/RPC binding/CLI Surface 与 A3-01/A2 既有证据输入未变 |
+| 已失效证据 | 无当前未恢复证据。A4-02 将 A4-01 observation 子合同从 core `AgentYield` callback 收口为 `KernelRunEvent` callback；同一 Envelope、三个 production binding 与不可变 capture 已由本包直接测试和 S7 重新证明，`A4-01-kernel-run-envelope-v1` 其余五分区、调用方与产品语义未变；A3/A2 证据输入未变 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1522,6 +1522,26 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 失效与状态：若 `KernelRunEnvelope` owner/export、任一分区/字段、capture、`AgentRuntime.run` 签名、三个直接 binding、RuntimeHost assembly、相关 observation/Correctness 投影、S7 inspector/mutation 或 runtime package export 任一变化，恢复本证据并只重验上述闭包。Kernel Event/Terminal、其他查询/管理成员、Workscene/Schedule 产品装配与 RuntimeExecutionProfile 后续收口均未迁移，因此 A4 仍为 `[ ]`、完成度仍为 `4/8`、最终退出门保持 `[ ]`；下一检查点仍由协调者接受本证据后派发 Kernel Event/Terminal 的单一责任链，不进入 A5。
 - 交接类型：完成，等待协调者独立复核；索引为空，未执行 Git 暂存、提交、历史改写或推送。
 - 协调者独立验收：在同一未修改工作区重跑 orchestrator Envelope/runtime 2 文件 72/72、CLI conversation/ephemeral/durable-job/RuntimeHost 4 文件 41/41，orchestrator、runtime-host、CLI typecheck 与 canonical S7 23/23 + registry golden 均通过。生产反扫确认 `KernelRunEnvelope` 只有一个声明和窄导出，`AgentRuntime.run` 只有一个入口，三个直接调用方均构造五分区合同，`RuntimeHost` 只有一个 factory 装配点，旧 `RunParams`、`runV2` 和镜像类型归零。协调者接受 `A4-01-kernel-run-envelope-v1`；durable job 的 meter/reservation 变更经 HEAD 对照确认是调用方原已提供而 adapter 丢弃的 Correctness 端口补全，不是新增产品语义。A4 继续为 `[ ]`，下一责任链只处理 Kernel Event，不与 Terminal 合包。
+
+### A4-02：建立唯一 Kernel Run Event 合同及两侧显式投影
+
+- 派发基线：`HEAD 0ba58736dd7b463b04d1359bd2b7b13dee37e117 + task-doc:A4-02-dispatch`。A4-01 已由协调者独立复核并纳入提交；进场索引与工作区为空。
+- 唯一架构结果：由 `@zhixing/orchestrator/runtime` 拥有有限、只读且可穷尽的 Kernel Run Event 合同。Agent Loop 内部事件必须在 Kernel 边界显式投影；Conversation、ephemeral 与 durable job 三类生产消费者必须再从 Kernel Event 显式投影到各自既有产品运行/传输合同，不能继续把 core 内部 `AgentYield` 当作 Kernel 公共合同直通。
+- 生产闭包：覆盖当前全部真实运行事件变体、顺序、背压和失败传播；`RuntimeHost` 会话适配、ephemeral executor 与 agent job runtime 均消费同一 Kernel Event。现有 SessionRuntime、Owner/RPC/Server/Channel 观察到的事件 exact-set、payload、顺序和错误语义保持不变。既有 `SessionEventProjection/onProtocolEvent` 是独立带外协议投影，本包只在防止其与 Kernel Run Event 形成混合 owner 所需的最窄范围内处理，不扩展为 RPC 迁移。
+- 旧路径与门禁：删除 Envelope/AgentRuntime 及三类直接消费者对 core `AgentYield` 的 Kernel 级直通、镜像别名、强制断言和第二事件入口；用穷尽投影和反向结构门禁拒绝漏变体、未知变体、直通回流、第二 owner 与根导出泄漏。不得用同构 type alias 或 `as` 掩盖边界。
+- 保护与直接证据：直接证明全部现有事件逐项投影、未知/不完整输入 fail closed、异步回调背压与异常传播、事件顺序，以及 conversation/ephemeral/durable job 的正式行为不变；只运行受影响的 orchestrator、runtime-host、CLI/Owner/RPC 最窄测试、必要 typecheck/build、S7 与 package exports，不重复 A0～A3 或根级回归。
+- 明确不做：不定义或迁移 Kernel Terminal，不收窄 `RunResult` 的产品/持久化字段，不迁移 Workscene、Schedule、Conversation 领域，不重做 Product API/RPC binding，不新增事件、产品能力或通用事件框架。
+- 完成与止损：只有唯一 Kernel Event owner、Loop → Kernel → 三类产品消费面的两侧投影、全部旧直通退场和直接证据同时成立，工作区可构建且没有双事件真相，才算本包完成；完成后停止等待协调者复核，不进入下一包，不执行 Git 写操作。若约四小时仍未闭合、出现跨领域/RPC 公共协议扩面、两个以上独立未知或无法保持单一事件真相，停在可构建的安全检查点并报告唯一未闭合链。
+
+执行记录（证据 ID：`A4-02-kernel-run-event-v1`）：
+
+- 基线与事实：进场为 `HEAD 0ba58736dd7b463b04d1359bd2b7b13dee37e117 + task-doc:A4-02-dispatch`，索引为空。生产 `AgentYield` exact-set 机械确认为 `text_delta / thinking_block_start / thinking_delta / thinking_block_end / assistant_message / tool_start / tool_end / turn_complete` 八种；唯一 producer 是 `createAgentRuntime` 的 Agent Loop，三个直接 Kernel 消费面是 runtime-host conversation session adapter、CLI ephemeral executor 和 durable agent-job runtime。`SessionEventProjection/onProtocolEvent` 继续是独立带外协议投影，没有并入本合同。
+- 责任迁移：新增只从 `@zhixing/orchestrator/runtime` 窄入口公开的 readonly `KernelRunEvent`；orchestrator 根 barrel 不导出该合同或 guard。Loop 边界逐变体校验、重建并冻结新事件，Envelope observation 改为 `onEvent`；三个产品 binding 各自再次校验并以穷尽 switch 重建既有 `AgentYield` 产品流，不共享对象、不用 alias/`as`/原对象直通。未知、缺字段、额外顶层字段和不合法嵌套载荷 fail closed；全部旧 production `observation.onYield` 直通归零。
+- 行为保护：Loop 仍 `await` observation callback，因而事件顺序、异步背压与 callback 异常传播不变；conversation queue、ephemeral 文本聚合与回调、durable job yield stream 继续消费字节等价的既有事件。Owner/RPC/Server/Channel 的 downstream 合同、wire、`onProtocolEvent`、RunResult/Terminal、Workscene/Schedule 和任何产品事实均未改变。
+- 直接证据：orchestrator `kernel-run-event / kernel-run-envelope / create-agent-runtime` 为 3 文件 74/74，通过八变体新对象/冻结、未知/不完整/扩字段拒绝、顺序/背压/异常传播及 Envelope capture；CLI/runtime-host 三个正式消费面为 3 文件 44/44，通过八变体逐项等价、fresh projection、畸形输入拒绝及既有 conversation/ephemeral/durable 行为。S7 新 owner inspector 与反向 mutation 冻结唯一声明、八变体字段 exact-set、Loop 投影、三消费面穷尽投影、带外协议隔离、窄 subpath 与根泄漏负向边界；canonical `pnpm s7:lint` 为 24/24 且 registry golden 通过。门禁编写中一次局部变量落点错误由最窄 mutation 测试直接发现并修正，不是产品失败。
+- 类型、构建与导出：正确使用各 workspace 的 TypeScript 后，orchestrator、runtime-host、CLI 三包 typecheck 均通过；此前一次根级 `pnpm exec tsc` 解析到仓库旧 TypeScript 4.3.4 而无法读取 node24 tsconfig，属于非 canonical 调用归因，未用重复全测掩盖。随后依赖顺序完成 orchestrator build、runtime-host build 与 `pnpm cli:build`；`pnpm runtime:package-exports` 证明 runtime subpath 有 runtime guard/declaration、orchestrator 根无 Kernel Event 泄漏；最窄 Biome、三个门禁脚本 `node --check` 与 `git diff --check` 均通过。
+- 失效、遗留与状态：若八变体/字段、Loop producer、Envelope observation、任一三类 projection、协议带外边界、runtime/root exports、S7 inspector/mutation 或对应测试发生变化，恢复本证据并只重验该闭包。Kernel Terminal、`RunResult` 收窄、Workscene/Schedule 装配及其他 AgentRuntime 公共成员均未迁移，因此 A4 与完成度继续为 `[ ]` / `4/8`；下一检查点只能在协调者接受本证据后单独处理 Kernel Terminal。交接类型为完成、等待协调者独立复核；索引为空，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：在同一未修改工作区反查 `KernelRunEvent` 声明、Loop producer、Envelope observation、三类生产消费面、root/runtime export 与旧 `observation.onYield` 残余；确认八变体 owner 唯一、两侧均为逐变体 fresh-value 投影、带外协议投影未混入、宽根未泄漏且旧直通为零。独立重跑 orchestrator/CLI 6 个直接文件 118/118、orchestrator/runtime-host/CLI 正式构建、runtime package exports、canonical S7 24/24 与 registry golden，全部通过；接受 `A4-02-kernel-run-event-v1`。A4 继续为 `[ ]`，下一责任链只处理 Kernel Terminal。
 
 ## 十、用户提示词
 

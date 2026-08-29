@@ -5,7 +5,11 @@ import {
   type IConfirmationBroker,
 } from "@zhixing/core";
 import type { JobExecutionInstruction } from "@zhixing/core/contracts";
-import type { AgentRuntime } from "@zhixing/orchestrator/runtime";
+import {
+  assertKernelRunEvent,
+  type AgentRuntime,
+  type KernelRunEvent,
+} from "@zhixing/orchestrator/runtime";
 import type {
   JobRunOutcome,
   JobRuntimePort,
@@ -17,6 +21,55 @@ export interface AgentJobRuntimeFactory {
     instruction: JobExecutionInstruction,
     confirmationBroker: IConfirmationBroker,
   ): Promise<AgentRuntime>;
+}
+
+function unhandledDurableJobKernelEvent(event: never): never {
+  throw new TypeError(`Unhandled durable-job Kernel event: ${String(event)}`);
+}
+
+/** Kernel → durable job stream projection. */
+function projectKernelEventToDurableJobYield(
+  event: KernelRunEvent,
+): AgentYield {
+  assertKernelRunEvent(event);
+  switch (event.type) {
+    case "text_delta":
+      return { type: "text_delta", text: event.text };
+    case "thinking_block_start":
+      return { type: "thinking_block_start" };
+    case "thinking_delta":
+      return { type: "thinking_delta", thinking: event.thinking };
+    case "thinking_block_end":
+      return { type: "thinking_block_end" };
+    case "assistant_message":
+      return {
+        type: "assistant_message",
+        message: structuredClone(event.message),
+      };
+    case "tool_start":
+      return {
+        type: "tool_start",
+        id: event.id,
+        name: event.name,
+        input: structuredClone(event.input),
+      };
+    case "tool_end":
+      return {
+        type: "tool_end",
+        id: event.id,
+        name: event.name,
+        result: structuredClone(event.result),
+        duration: event.duration,
+      };
+    case "turn_complete":
+      return {
+        type: "turn_complete",
+        turnCount: event.turnCount,
+        usage: structuredClone(event.usage),
+      };
+    default:
+      return unhandledDurableJobKernelEvent(event);
+  }
 }
 
 /** Bridges the canonical AgentRuntime into the executor-owned job runtime contract. */
@@ -78,7 +131,8 @@ export function createAgentJobRuntimePort(
                   resourceReservation: options.resourceReservation,
                 },
                 observation: {
-                  onYield: (event) => yields.push(event),
+                  onEvent: (event) =>
+                    yields.push(projectKernelEventToDurableJobYield(event)),
                   onProtocolEvent: (event) => options.onProtocolEvent(event),
                 },
               }),

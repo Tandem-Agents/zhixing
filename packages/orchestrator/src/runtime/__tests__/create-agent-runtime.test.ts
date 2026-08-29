@@ -2404,7 +2404,7 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       ],
     });
 
-    // onYield 抛错 → 传播出 runMainLoop → run() reject(ALS 内抛,onAfterRun 不触发)
+    // onEvent 抛错 → 传播出 runMainLoop → run() reject(ALS 内抛,onAfterRun 不触发)
     await expect(
       runKernel(runtime, {
         modelInput: {
@@ -2416,8 +2416,8 @@ describe("createAgentRuntime · 生命周期钩子", () => {
         control: {},
         correctness: {},
         observation: {
-          onYield: () => {
-          throw new Error("yield boom");
+          onEvent: () => {
+            throw new Error("yield boom");
           },
         },
       }),
@@ -2450,7 +2450,7 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       control: {},
       correctness: {},
       observation: {
-        onYield: async () => {
+        onEvent: async () => {
         entered();
         await callbackGate;
         },

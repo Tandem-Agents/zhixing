@@ -17,7 +17,11 @@ import {
   type TurnContext,
 } from "@zhixing/core";
 import type { AgentTurnResult } from "@zhixing/core";
-import type { AgentRuntime } from "@zhixing/orchestrator/runtime";
+import {
+  assertKernelRunEvent,
+  type AgentRuntime,
+  type KernelRunEvent,
+} from "@zhixing/orchestrator/runtime";
 import { serializeAbortReason } from "./abort-serializer.js";
 
 export interface EphemeralTurnOptions {
@@ -44,6 +48,55 @@ export interface EphemeralTurnOptions {
   abortSignal?: AbortSignal;
 }
 
+function unhandledEphemeralKernelEvent(event: never): never {
+  throw new TypeError(`Unhandled ephemeral Kernel event: ${String(event)}`);
+}
+
+/** Kernel → ephemeral product result projection. */
+function projectKernelEventToEphemeralYield(
+  event: KernelRunEvent,
+): AgentYield {
+  assertKernelRunEvent(event);
+  switch (event.type) {
+    case "text_delta":
+      return { type: "text_delta", text: event.text };
+    case "thinking_block_start":
+      return { type: "thinking_block_start" };
+    case "thinking_delta":
+      return { type: "thinking_delta", thinking: event.thinking };
+    case "thinking_block_end":
+      return { type: "thinking_block_end" };
+    case "assistant_message":
+      return {
+        type: "assistant_message",
+        message: structuredClone(event.message),
+      };
+    case "tool_start":
+      return {
+        type: "tool_start",
+        id: event.id,
+        name: event.name,
+        input: structuredClone(event.input),
+      };
+    case "tool_end":
+      return {
+        type: "tool_end",
+        id: event.id,
+        name: event.name,
+        result: structuredClone(event.result),
+        duration: event.duration,
+      };
+    case "turn_complete":
+      return {
+        type: "turn_complete",
+        turnCount: event.turnCount,
+        usage: structuredClone(event.usage),
+      };
+    default:
+      return unhandledEphemeralKernelEvent(event);
+  }
+}
+
 /**
  * 执行一次 ephemeral agent-turn。
  * - 仅传入本次 prompt 的消息列表（不累积历史）
@@ -66,9 +119,12 @@ export async function runEphemeralTurn(
       control: { abortSignal: opts.abortSignal },
       correctness: {},
       observation: {
-        onYield: (event) => {
-          if (event.type === "text_delta") textChunks.push(event.text);
-          opts.onYield?.(event);
+        onEvent: (event) => {
+          const productEvent = projectKernelEventToEphemeralYield(event);
+          if (productEvent.type === "text_delta") {
+            textChunks.push(productEvent.text);
+          }
+          opts.onYield?.(productEvent);
         },
       },
     });

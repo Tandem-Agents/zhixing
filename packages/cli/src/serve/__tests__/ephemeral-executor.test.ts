@@ -8,11 +8,37 @@ import type { RunResult } from "@zhixing/core";
 import type {
   AgentRuntime,
   KernelRunEnvelope,
+  KernelRunEvent,
 } from "@zhixing/orchestrator/runtime";
 import { runEphemeralTurn } from "../ephemeral-executor.js";
 
+const KERNEL_EVENT_EXACT_SET: readonly KernelRunEvent[] = [
+  { type: "text_delta", text: "hello" },
+  { type: "thinking_block_start" },
+  { type: "thinking_delta", thinking: "reason" },
+  { type: "thinking_block_end" },
+  {
+    type: "assistant_message",
+    message: { role: "assistant", content: [{ type: "text", text: "done" }] },
+  },
+  { type: "tool_start", id: "t1", name: "read", input: { path: "a" } },
+  {
+    type: "tool_end",
+    id: "t1",
+    name: "read",
+    result: { content: "ok" },
+    duration: 1,
+  },
+  {
+    type: "turn_complete",
+    turnCount: 1,
+    usage: { inputTokens: 1, outputTokens: 1 },
+  },
+];
+
 interface MockBehavior {
   yields?: AgentYield[];
+  malformedEvent?: unknown;
   reason?: AgentResult["reason"];
   throwError?: string;
   errorMessage?: string;
@@ -26,9 +52,14 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
     model: "mock-model",
     async run(envelope: KernelRunEnvelope): Promise<RunResult> {
       if (behavior.throwError) throw new Error(behavior.throwError);
+      if (behavior.malformedEvent !== undefined) {
+        const onEvent = envelope.observation.onEvent;
+        if (!onEvent) throw new Error("Kernel event observer is missing");
+        Reflect.apply(onEvent, undefined, [behavior.malformedEvent]);
+      }
 
       const yields = behavior.yields ?? [];
-      for (const y of yields) envelope.observation.onYield?.(y);
+      for (const y of yields) envelope.observation.onEvent?.(y);
 
       const reason = behavior.reason ?? "completed";
       const completedResult: AgentResult = {
@@ -165,7 +196,7 @@ describe("runEphemeralTurn", () => {
     expect(secondCallMsgs).toHaveLength(1);
     expect(runSpy.mock.calls[0]![0].identity).toMatchObject({ turnIndex: 0 });
     expect(runSpy.mock.calls[0]![0].correctness).toEqual({});
-    expect(runSpy.mock.calls[0]![0].observation.onYield).toBeTypeOf(
+    expect(runSpy.mock.calls[0]![0].observation.onEvent).toBeTypeOf(
       "function",
     );
   });
@@ -182,6 +213,35 @@ describe("runEphemeralTurn", () => {
     });
     expect(seen).toHaveLength(1);
     expect(seen[0]).toEqual({ type: "text_delta", text: "x" });
+  });
+
+  it("explicitly projects the complete Kernel event set into ephemeral output", async () => {
+    const seen: AgentYield[] = [];
+    const runtime = createMockAgentRuntime({
+      yields: [...KERNEL_EVENT_EXACT_SET],
+    });
+    const result = await runEphemeralTurn({
+      runtime,
+      prompt: "p",
+      onYield: (event) => seen.push(event),
+    });
+
+    expect(result.output).toBe("hello");
+    expect(seen).toEqual(KERNEL_EVENT_EXACT_SET);
+    for (const [index, event] of seen.entries()) {
+      expect(event).not.toBe(KERNEL_EVENT_EXACT_SET[index]);
+    }
+  });
+
+  it("fails closed when a runtime supplies an incomplete Kernel event", async () => {
+    const result = await runEphemeralTurn({
+      runtime: createMockAgentRuntime({
+        malformedEvent: { type: "text_delta" },
+      }),
+      prompt: "p",
+    });
+    expect(result.status).toBe("error");
+    expect(result.error).toContain("Incomplete AgentYield variant");
   });
 
   // ─── PR-2 / remote-confirmation-execution.md §3.3：turnContext 透传 ───

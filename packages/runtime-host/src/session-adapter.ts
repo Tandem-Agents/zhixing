@@ -2,17 +2,17 @@
  * AgentRuntime → SessionRuntime 适配器
  *
  * @zhixing/owner-kernel 定义抽象接口 SessionRuntime（AsyncGenerator 风格），
- * AgentRuntime 是 callback 风格（onYield + Promise<RunResult>）。
+ * AgentRuntime 是 callback 风格（KernelRunEvent + Promise<RunResult>）。
  * 此适配器在两者之间架桥——纯协议适配:会话状态(注意力窗口 / turnCount /
  * 接受协议)归 ConversationManager,adapter 不持有任何会话状态。
  *
  * 关键设计：
- * - queue + waiter 模式把 onYield 回调转为 AsyncGenerator yield
+ * - 显式投影 KernelRunEvent，再由 queue + waiter 转为 AsyncGenerator AgentYield
  * - 每个 turn 创建独立的 InterruptController(`createInterruptController({ parent })`),
  *   把 controller.signal 透传给 agentRuntime.run 让 LLM call / 工具执行链路真正受控
  * - abort 通过 `abortWithReason(currentController, reason)` 立即触发,主模块 cleanup
  *   路径在 ≤200ms 内自然完成 partial yield + RunResult.aborted with abortReason,
- *   adapter 让事件流自然走完 onYield/.then 不与之竞速
+ *   adapter 让事件流自然走完 Kernel Event/.then 不与之竞速
  */
 
 import {
@@ -28,15 +28,66 @@ import type {
   RuntimeDisposeReason,
   SessionRuntime,
 } from "@zhixing/owner-kernel";
-import type { AgentRuntime } from "@zhixing/orchestrator/runtime";
+import {
+  assertKernelRunEvent,
+  type AgentRuntime,
+  type KernelRunEvent,
+} from "@zhixing/orchestrator/runtime";
 
 // ─── 适配器 ───
 
-interface QueueItem {
-  kind: "yield" | "done" | "error";
-  value?: AgentYield;
-  result?: RunResult;
-  error?: unknown;
+type QueueItem =
+  | { readonly kind: "yield"; readonly value: AgentYield }
+  | { readonly kind: "done"; readonly result: RunResult }
+  | { readonly kind: "error"; readonly error: unknown };
+
+function unhandledConversationKernelEvent(event: never): never {
+  throw new TypeError(`Unhandled conversation Kernel event: ${String(event)}`);
+}
+
+/** Kernel → Conversation runtime projection. */
+function projectKernelEventToConversationYield(
+  event: KernelRunEvent,
+): AgentYield {
+  assertKernelRunEvent(event);
+  switch (event.type) {
+    case "text_delta":
+      return { type: "text_delta", text: event.text };
+    case "thinking_block_start":
+      return { type: "thinking_block_start" };
+    case "thinking_delta":
+      return { type: "thinking_delta", thinking: event.thinking };
+    case "thinking_block_end":
+      return { type: "thinking_block_end" };
+    case "assistant_message":
+      return {
+        type: "assistant_message",
+        message: structuredClone(event.message),
+      };
+    case "tool_start":
+      return {
+        type: "tool_start",
+        id: event.id,
+        name: event.name,
+        input: structuredClone(event.input),
+      };
+    case "tool_end":
+      return {
+        type: "tool_end",
+        id: event.id,
+        name: event.name,
+        result: structuredClone(event.result),
+        duration: event.duration,
+      };
+    case "turn_complete":
+      return {
+        type: "turn_complete",
+        turnCount: event.turnCount,
+        usage: structuredClone(event.usage),
+      };
+    default:
+      return unhandledConversationKernelEvent(event);
+  }
 }
 export function createOwnerRuntimeAdapter(
   sessionId: string,
@@ -111,8 +162,11 @@ export function createOwnerRuntimeAdapter(
             resourceReservation: options?.resourceReservation,
           },
           observation: {
-            onYield: (event) => {
-              queue.push({ kind: "yield", value: event });
+            onEvent: (event) => {
+              queue.push({
+                kind: "yield",
+                value: projectKernelEventToConversationYield(event),
+              });
               wakeOne();
             },
             onProtocolEvent: options?.onProtocolEvent,
@@ -140,9 +194,9 @@ export function createOwnerRuntimeAdapter(
           }
           const item = queue.shift()!;
           if (item.kind === "yield") {
-            yield item.value!;
+            yield item.value;
           } else if (item.kind === "done") {
-            return item.result!;
+            return item.result;
           } else {
             throw item.error;
           }

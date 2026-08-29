@@ -6,6 +6,7 @@ import type {
 import type {
   AgentRuntime,
   KernelRunEnvelope,
+  KernelRunEvent,
 } from "@zhixing/orchestrator/runtime";
 import { describe, expect, it, vi } from "vitest";
 import { createAgentJobRuntimePort } from "../agent-job-runtime.js";
@@ -14,6 +15,30 @@ const instruction = {
   kind: "agent-turn",
   prompt: "perform scheduled work",
 } as const;
+
+const KERNEL_EVENT_EXACT_SET: readonly KernelRunEvent[] = [
+  { type: "text_delta", text: "hello" },
+  { type: "thinking_block_start" },
+  { type: "thinking_delta", thinking: "reason" },
+  { type: "thinking_block_end" },
+  {
+    type: "assistant_message",
+    message: { role: "assistant", content: [{ type: "text", text: "done" }] },
+  },
+  { type: "tool_start", id: "t1", name: "read", input: { path: "a" } },
+  {
+    type: "tool_end",
+    id: "t1",
+    name: "read",
+    result: { content: "ok" },
+    duration: 1,
+  },
+  {
+    type: "turn_complete",
+    turnCount: 1,
+    usage: { inputTokens: 1, outputTokens: 1 },
+  },
+];
 
 function completedRunResult() {
   return {
@@ -92,14 +117,14 @@ describe("agent job runtime structured lifecycle", () => {
       resourceReservation: options.resourceReservation,
     });
     expect(captured!.observation.onProtocolEvent).toBeTypeOf("function");
-    expect(captured!.observation.onYield).toBeTypeOf("function");
+    expect(captured!.observation.onEvent).toBeTypeOf("function");
   });
 
   it("streams yields and joins one runtime task before returning", async () => {
     const dispose = vi.fn(async () => undefined);
     const runtime = Object.assign({} as AgentRuntime, {
       run: vi.fn(async (envelope: KernelRunEnvelope) => {
-        envelope.observation.onYield?.({ type: "text_delta", text: "hello" });
+        envelope.observation.onEvent?.({ type: "text_delta", text: "hello" });
         return completedRunResult();
       }),
       dispose,
@@ -121,6 +146,47 @@ describe("agent job runtime structured lifecycle", () => {
     await handle.dispose();
 
     expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("explicitly projects the complete Kernel event set into the durable job stream", async () => {
+    const runtime = Object.assign({} as AgentRuntime, {
+      run: vi.fn(async (envelope: KernelRunEnvelope) => {
+        for (const event of KERNEL_EVENT_EXACT_SET) {
+          await envelope.observation.onEvent?.(event);
+        }
+        return completedRunResult();
+      }),
+      dispose: vi.fn(async () => undefined),
+    });
+    const handle = await createHandle(runtime);
+    const generator = handle.run(instruction, runOptions());
+    const received: AgentYield[] = [];
+    while (true) {
+      const next = await generator.next();
+      if (next.done) break;
+      received.push(next.value);
+    }
+
+    expect(received).toEqual(KERNEL_EVENT_EXACT_SET);
+    for (const [index, event] of received.entries()) {
+      expect(event).not.toBe(KERNEL_EVENT_EXACT_SET[index]);
+    }
+  });
+
+  it("fails closed when a runtime supplies an incomplete Kernel event", async () => {
+    const runtime = Object.assign({} as AgentRuntime, {
+      run: vi.fn(async (envelope: KernelRunEnvelope) => {
+        const onEvent = envelope.observation.onEvent;
+        if (!onEvent) throw new Error("Kernel event observer is missing");
+        Reflect.apply(onEvent, undefined, [{ type: "text_delta" }]);
+        return completedRunResult();
+      }),
+      dispose: vi.fn(async () => undefined),
+    });
+    const handle = await createHandle(runtime);
+    await expect(
+      handle.run(instruction, runOptions()).next(),
+    ).rejects.toThrow("Incomplete AgentYield variant");
   });
 
   it("propagates a runtime rejection once and consumes its promise", async () => {
@@ -165,7 +231,7 @@ describe("agent job runtime structured lifecycle", () => {
       run: vi.fn(
         (envelope: KernelRunEnvelope) =>
           new Promise<ReturnType<typeof completedRunResult>>((_, reject) => {
-            envelope.observation.onYield?.({ type: "text_delta", text: "first" });
+            envelope.observation.onEvent?.({ type: "text_delta", text: "first" });
             envelope.control.abortSignal!.addEventListener(
               "abort",
               () => reject(envelope.control.abortSignal!.reason),
@@ -193,7 +259,7 @@ describe("agent job runtime structured lifecycle", () => {
       run: vi.fn(
         (envelope: KernelRunEnvelope) =>
           new Promise<ReturnType<typeof completedRunResult>>((_, reject) => {
-            envelope.observation.onYield?.({ type: "text_delta", text: "first" });
+            envelope.observation.onEvent?.({ type: "text_delta", text: "first" });
             envelope.control.abortSignal!.addEventListener(
               "abort",
               () => reject(envelope.control.abortSignal!.reason),

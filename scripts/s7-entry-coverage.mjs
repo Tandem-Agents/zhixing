@@ -1067,7 +1067,7 @@ export function inspectKernelRunEnvelopeOwnership(records) {
       "assignmentIssuedAt",
       "resourceReservation",
     ],
-    observation: ["onYield", "onProtocolEvent"],
+    observation: ["onEvent", "onProtocolEvent"],
   };
   if (envelopeDeclarations.length !== 1 || !envelopeDeclaration) {
     failures.push("Kernel Run Envelope lacks one interface owner");
@@ -1204,6 +1204,207 @@ export function inspectKernelRunEnvelopeOwnership(records) {
   return failures;
 }
 
+/** A4 Kernel runs have one finite Event owner and explicit projections on both sides. */
+export function inspectKernelRunEventOwnership(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const text = byPath.get(relative);
+    if (text === undefined) failures.push(`${relative}: Kernel Run Event source is missing`);
+    return text ?? "";
+  };
+  const eventPath = "packages/orchestrator/src/runtime/kernel-run-event.ts";
+  const eventSource = required(eventPath);
+  const envelopeSource = required(
+    "packages/orchestrator/src/runtime/kernel-run-envelope.ts",
+  );
+  const runtimeSource = required(
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+  );
+  const runtimeIndex = required("packages/orchestrator/src/runtime/index.ts");
+  const orchestratorRootIndex = required("packages/orchestrator/src/index.ts");
+  const consumerSpecs = [
+    {
+      relative: "packages/runtime-host/src/session-adapter.ts",
+      projector: "projectKernelEventToConversationYield",
+    },
+    {
+      relative: "packages/cli/src/serve/ephemeral-executor.ts",
+      projector: "projectKernelEventToEphemeralYield",
+    },
+    {
+      relative: "packages/cli/src/serve/agent-job-runtime.ts",
+      projector: "projectKernelEventToDurableJobYield",
+    },
+  ];
+  const expectedVariants = {
+    text_delta: ["type", "text"],
+    thinking_block_start: ["type"],
+    thinking_delta: ["type", "thinking"],
+    thinking_block_end: ["type"],
+    assistant_message: ["type", "message"],
+    tool_start: ["type", "id", "name", "input"],
+    tool_end: ["type", "id", "name", "result", "duration"],
+    turn_complete: ["type", "turnCount", "usage"],
+  };
+
+  const sourceFile = ts.createSourceFile(
+    eventPath,
+    eventSource,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const aliases = sourceFile.statements.filter(
+    (statement) =>
+      ts.isTypeAliasDeclaration(statement) &&
+      statement.name.text === "KernelRunEvent",
+  );
+  const alias = aliases[0];
+  if (aliases.length !== 1 || !alias || !ts.isUnionTypeNode(alias.type)) {
+    failures.push("Kernel Run Event lacks one finite union owner");
+  } else {
+    const observed = new Map();
+    for (const member of alias.type.types) {
+      if (!ts.isTypeLiteralNode(member)) {
+        failures.push("Kernel Run Event includes a non-literal variant");
+        continue;
+      }
+      const properties = member.members.filter(ts.isPropertySignature);
+      const typeProperty = properties.find(
+        (property) => property.name.getText(sourceFile) === "type",
+      );
+      const typeNode = typeProperty?.type;
+      const identity =
+        typeNode &&
+        ts.isLiteralTypeNode(typeNode) &&
+        ts.isStringLiteral(typeNode.literal)
+          ? typeNode.literal.text
+          : undefined;
+      if (!identity || observed.has(identity)) {
+        failures.push("Kernel Run Event variant identity is missing or duplicated");
+        continue;
+      }
+      observed.set(
+        identity,
+        properties.map((property) => property.name.getText(sourceFile)),
+      );
+      if (
+        member.members.some(
+          (property) =>
+            !ts.isPropertySignature(property) ||
+            property.questionToken ||
+            !property.modifiers?.some(
+              (modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword,
+            ),
+        )
+      ) {
+        failures.push(`Kernel Run Event variant is not required and readonly: ${identity}`);
+      }
+    }
+    if (
+      JSON.stringify([...observed]) !==
+      JSON.stringify(Object.entries(expectedVariants))
+    ) {
+      failures.push("Kernel Run Event variant or field exact-set drifted");
+    }
+  }
+
+  const declarationOwners = records
+    .filter((record) => {
+      const file = ts.createSourceFile(
+        record.relative,
+        record.text,
+        ts.ScriptTarget.Latest,
+        true,
+        ts.ScriptKind.TS,
+      );
+      return file.statements.some(
+        (statement) =>
+          (ts.isInterfaceDeclaration(statement) ||
+            ts.isTypeAliasDeclaration(statement)) &&
+          statement.name.text === "KernelRunEvent",
+      );
+    })
+    .map((record) => record.relative);
+  if (
+    declarationOwners.length !== 1 ||
+    declarationOwners[0] !== eventPath ||
+    eventSource.includes("type KernelRunEvent = AgentYield")
+  ) {
+    failures.push("Kernel Run Event has a second owner or AgentYield alias");
+  }
+  if (
+    !runtimeIndex.includes("assertKernelRunEvent,") ||
+    !runtimeIndex.includes("type KernelRunEvent,") ||
+    !runtimeIndex.includes('from "./kernel-run-event.js";') ||
+    envelopeSource.includes("AgentYield") ||
+    envelopeSource.includes("onYield") ||
+    !envelopeSource.includes("readonly onEvent?: (event: KernelRunEvent)") ||
+    !runtimeSource.includes("projectAgentYieldToKernelRunEvent(value)") ||
+    !runtimeSource.includes("envelope.observation.onEvent?.(") ||
+    runtimeSource.includes("envelope.observation.onYield")
+  ) {
+    failures.push("Agent Loop to Kernel Event boundary is bypassed or leaked");
+  }
+  if (
+    orchestratorRootIndex.includes("KernelRunEvent") ||
+    orchestratorRootIndex.includes("assertKernelRunEvent") ||
+    orchestratorRootIndex.includes('export * from "./runtime/index.js"')
+  ) {
+    failures.push("Kernel Run Event leaked through the orchestrator package root");
+  }
+  if (
+    eventSource.includes("SessionEventProjection") ||
+    !envelopeSource.includes("readonly onProtocolEvent?: (")
+  ) {
+    failures.push("Kernel Run Event and the out-of-band protocol projection share an owner");
+  }
+
+  for (const spec of consumerSpecs) {
+    const source = required(spec.relative);
+    const file = ts.createSourceFile(
+      spec.relative,
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const projector = file.statements.find(
+      (statement) =>
+        ts.isFunctionDeclaration(statement) &&
+        statement.name?.text === spec.projector,
+    );
+    const projectorSource = projector?.getText(file) ?? "";
+    const cases = [];
+    if (projector) {
+      const visit = (node) => {
+        if (
+          ts.isCaseClause(node) &&
+          ts.isStringLiteral(node.expression)
+        ) {
+          cases.push(node.expression.text);
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(projector);
+    }
+    if (
+      !projector ||
+      JSON.stringify(cases) !== JSON.stringify(Object.keys(expectedVariants)) ||
+      !projectorSource.includes("assertKernelRunEvent(event);") ||
+      /return\s+event\s*;/u.test(projectorSource) ||
+      /\bas\s+(?:AgentYield|KernelRunEvent)\b/u.test(projectorSource) ||
+      !source.includes("onEvent: (event) =>") ||
+      !source.includes(`${spec.projector}(event)`) ||
+      source.includes("observation.onYield")
+    ) {
+      failures.push(`${spec.relative}: Kernel Event product projection is not explicit and exhaustive`);
+    }
+  }
+  return failures;
+}
+
 export async function validateS7Structure() {
   const files = await productionTypeScriptFiles(path.join(root, "packages"));
   const records = await Promise.all(files.map(async (absolute) => ({
@@ -1232,6 +1433,7 @@ export async function validateS7Structure() {
   failures.push(...inspectManagedHostAssembly(records));
   failures.push(...inspectDeviceLifecycleAssembly(records));
   failures.push(...inspectKernelRunEnvelopeOwnership(records));
+  failures.push(...inspectKernelRunEventOwnership(records));
   failures.push(...inspectSkillCatalogApplicationOwnership([
     ...records,
     {
