@@ -4,6 +4,7 @@ export default defineConfig({
   entry: [
     "src/index.ts",
     "src/connection.ts",
+    "src/skill-catalog-client.ts",
     "src/session-wire.ts",
     "src/session-turn-stream.ts",
     "src/session-broadcast.ts",

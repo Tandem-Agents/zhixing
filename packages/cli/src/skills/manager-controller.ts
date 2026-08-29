@@ -1,6 +1,6 @@
 /**
  * 技能管理器控制器 —— UI 无关的"大脑":持有技能列表 + 选中位置,把导航与状态
- * 操作(置顶 / 禁用 / 改 mode / 归档)交给管理应用端口,供 alt-screen 外壳渲染与按键驱动。
+ * 操作(置顶 / 禁用 / 改 mode / 归档)交给领域 client,供 alt-screen 外壳渲染与按键驱动。
  *
  * 与渲染、按键解码彻底分离:外壳把按键映射到这里的方法、把 `view()` 画出来;
  * 控制器只管状态机与应用调用,故可不依赖 TUI 独立单测。
@@ -8,21 +8,15 @@
  * 选中跟随被操作项:状态变更会让列表重排(置顶上移等),故每次变更后按 id 找回
  * 该项的新位置,而非死守索引 —— 否则置顶后选中会跳到"恰好排到该位置"的别的技能。
  *
- * 变更后经 `onMutate` 回调通知外层(接 `registry.refresh()` 让 `/<name>` 补全即时
+ * 变更后经 `onMutate` Surface 回调通知外层(接 `registry.refresh()` 让 `/<name>` 补全即时
  * 反映禁用 / 归档带来的成员变化),再重读列表重画。
  */
 
-import type { SkillCatalogEntry, SkillMode } from "@zhixing/core";
-
-/** 控制器对 Skill Catalog 管理 binding 的最小依赖。 */
-export interface SkillManagerStore {
-  listForManagement(): Promise<readonly SkillCatalogEntry[]>;
-  setState(
-    id: string,
-    patch: { mode?: SkillMode; pinned?: boolean; disabled?: boolean },
-  ): Promise<void>;
-  archive(id: string): Promise<void>;
-}
+import type {
+  SkillCatalogClient,
+  SkillCatalogEntry,
+  SkillMode,
+} from "@zhixing/core/skills/catalog";
 
 /** 渲染所需的视图快照 —— 外壳据此画列表 + 高亮。 */
 export interface SkillManagerView {
@@ -36,7 +30,7 @@ export class SkillManagerController {
   private selected = 0;
 
   constructor(
-    private readonly store: SkillManagerStore,
+    private readonly client: SkillCatalogClient,
     /**
      * 技能集变更后的回调 —— 接 `registry.refresh()` 让 `/<name>` 补全即时反映
      * 禁用 / 归档带来的成员变化(§5.1)。可选:无 `/<name>` 注册的场景(测试)不传。
@@ -46,7 +40,7 @@ export class SkillManagerController {
 
   /** 从管理视图读全集(含 disabled)+ usage,初始化 / 刷新列表。 */
   async load(): Promise<void> {
-    this.items = [...(await this.store.listForManagement())];
+    this.items = [...(await this.client.query({ kind: "list" })).entries];
     this.clampSelection();
   }
 
@@ -72,14 +66,22 @@ export class SkillManagerController {
   async togglePin(): Promise<void> {
     const cur = this.current();
     if (!cur) return;
-    await this.store.setState(cur.id, { pinned: !cur.pinned });
+    await this.client.command({
+      kind: "set-state",
+      skillId: cur.id,
+      patch: { pinned: !cur.pinned },
+    });
     await this.afterMutate(cur.id);
   }
 
   async toggleDisabled(): Promise<void> {
     const cur = this.current();
     if (!cur) return;
-    await this.store.setState(cur.id, { disabled: !cur.disabled });
+    await this.client.command({
+      kind: "set-state",
+      skillId: cur.id,
+      patch: { disabled: !cur.disabled },
+    });
     await this.afterMutate(cur.id);
   }
 
@@ -87,14 +89,18 @@ export class SkillManagerController {
     const cur = this.current();
     if (!cur) return;
     const next: SkillMode = cur.mode === "main" ? "work" : "main";
-    await this.store.setState(cur.id, { mode: next });
+    await this.client.command({
+      kind: "set-state",
+      skillId: cur.id,
+      patch: { mode: next },
+    });
     await this.afterMutate(cur.id);
   }
 
   async archiveSelected(): Promise<void> {
     const cur = this.current();
     if (!cur) return;
-    await this.store.archive(cur.id);
+    await this.client.command({ kind: "archive", skillId: cur.id });
     await this.afterMutate(cur.id);
   }
 

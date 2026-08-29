@@ -1,7 +1,7 @@
 /**
  * SkillCommandSource —— 把技能库投影成 `/<name>` 动态 slash 命令。
  *
- * 每个非禁用技能映射为一条 `execution:"agent"` 的 CommandDef:用户在 typeahead
+ * 当前管理投影中的每个技能映射为一条 `execution:"agent"` 的 CommandDef:用户在 typeahead
  * 里选中 `/<id>` → dispatcher 不调 handler、把 `/<id>` 原文作 user message 发给
  * agent loop → agent 经 `load_skill(id)` 取全文。手动唤醒与模型自动命中由此同走
  * 「agent loop 调 load_skill」一条路、无旁路,故本源只产元数据、不持任何 handler。
@@ -22,6 +22,7 @@ import type {
   CommandDef,
   DynamicCommandSource,
 } from "@zhixing/core";
+import type { SkillCatalogClient } from "@zhixing/core/skills/catalog";
 
 /** 动态技能命令的生产 descriptor；注册源与覆盖门禁共同消费。 */
 export const SKILL_COMMAND_SOURCE_DESCRIPTOR = {
@@ -32,16 +33,10 @@ export const SKILL_COMMAND_SOURCE_DESCRIPTOR = {
   collisionPolicy: "builtin-first",
 } as const;
 
-export interface SkillCommandEntry {
-  readonly id: string;
-  readonly name: string;
-  readonly description: string;
-}
-
 /** SkillCommandSource 的最小只读投影依赖。 */
 export interface SkillCommandSourceDeps {
-  /** 列出 Skill Catalog 当前全部非禁用用户条目。 */
-  listAll(): Promise<readonly SkillCommandEntry[]>;
+  /** 管理器与动态命令共用的 Skill 领域 client。 */
+  client: SkillCatalogClient;
   /**
    * 按名查现有命令(= `registry.findByName`),用于撞名探测:返回非技能命令即跳过。
    * 见类注释「撞名」段对自抑制的处理。
@@ -55,7 +50,8 @@ export class SkillCommandSource implements DynamicCommandSource {
   constructor(private readonly deps: SkillCommandSourceDeps) {}
 
   async list(): Promise<readonly CommandDef[]> {
-    const skills = await this.deps.listAll();
+    const view = await this.deps.client.query({ kind: "list" });
+    const skills = view.entries;
     const commands: CommandDef[] = [];
     for (const s of skills) {
       const clash = this.deps.findExisting(s.id);

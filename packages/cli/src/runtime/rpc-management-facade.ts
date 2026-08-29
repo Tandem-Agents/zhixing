@@ -1,5 +1,5 @@
 /**
- * RpcManagementFacade —— cli 管理面命令(/trust /skills /host)
+ * RpcManagementFacade —— cli 管理面命令(/trust /host)
  * 的 RPC 方法收口。
  *
  * 与会话 / 调度 facade 同纪律:方法域封装、不持连接;方法名字符串只在此一处,
@@ -10,7 +10,6 @@
 import type {
   ChannelStatus,
   PermissionRule,
-  SkillMode,
 } from "@zhixing/core";
 import {
   RPC_ERROR_CODES,
@@ -18,22 +17,6 @@ import {
 } from "@zhixing/server";
 import type { SessionSecurityResult } from "@zhixing/rpc";
 import type { CoreHostRpcLink } from "./core-host-connection.js";
-
-/** skill.list 条目——补全候选与管理器消费的 Skill Catalog 投影。 */
-export interface SkillListEntry {
-  id: string;
-  name?: string;
-  description?: string;
-  pinned?: boolean;
-  disabled?: boolean;
-  mode?: SkillMode;
-  [key: string]: unknown;
-}
-
-export interface SkillListResult {
-  skills: SkillListEntry[];
-  structuralVersion: number;
-}
 
 export type ServerShutdownStrategy = "immediate" | "drain" | "cancel";
 
@@ -169,34 +152,6 @@ export class RpcManagementFacade {
     const client = await this.link.getClient();
     return client.request<SessionSecurityResult>("session.security", {
       conversationId,
-    });
-  }
-
-  // ─── skill ───
-
-  async skillList(): Promise<SkillListResult> {
-    const client = await this.link.getClient();
-    return client.request<SkillListResult>("skill.list");
-  }
-
-  async skillSetState(
-    skillId: string,
-    patch: { pinned?: boolean; disabled?: boolean; mode?: SkillMode },
-  ): Promise<void> {
-    const client = await this.link.getClient();
-    await client.request("skill.setState", { skillId, ...patch });
-  }
-
-  async skillArchive(skillId: string): Promise<void> {
-    const client = await this.link.getClient();
-    await client.request("skill.archive", { skillId });
-  }
-
-  /** 技能集结构变更推送(skill.changed,写后宿主广播)——补全候选刷新驱动。 */
-  onSkillChanged(handler: (structuralVersion: number) => void): () => void {
-    return this.link.onNotification("skill.changed", (p) => {
-      const payload = p as { structuralVersion?: number };
-      handler(payload.structuralVersion ?? 0);
     });
   }
 

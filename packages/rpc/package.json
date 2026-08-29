@@ -13,6 +13,10 @@
       "types": "./dist/connection.d.ts",
       "import": "./dist/connection.js"
     },
+    "./skill-catalog-client": {
+      "types": "./dist/skill-catalog-client.d.ts",
+      "import": "./dist/skill-catalog-client.js"
+    },
     "./session-wire": {
       "types": "./dist/session-wire.d.ts",
       "import": "./dist/session-wire.js"

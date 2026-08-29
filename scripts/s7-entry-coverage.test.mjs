@@ -2350,9 +2350,18 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/core/src/skills/index.ts",
     "packages/core/package.json",
     "packages/core/tsup.config.ts",
+    "packages/rpc/src/index.ts",
+    "packages/rpc/src/skill-catalog-client.ts",
+    "packages/rpc/package.json",
+    "packages/rpc/tsup.config.ts",
     "packages/server/src/rpc/methods/skill.ts",
     "packages/server/src/context.ts",
     "packages/cli/src/serve/command.ts",
+    "packages/cli/src/runtime/rpc-management-facade.ts",
+    "packages/cli/src/repl.ts",
+    "packages/cli/src/skills/manager-controller.ts",
+    "packages/cli/src/skills/manager-command.ts",
+    "packages/cli/src/commands/skill-command-source.ts",
     "packages/cli/src/setup-delivery.ts",
     "packages/cli/src/serve/management-directories.ts",
     "packages/orchestrator/src/runtime/assignment-skill-port.ts",
@@ -2768,6 +2777,73 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       },
     ]).join("\n"),
     /retired filesystem Skill owner remains reachable/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/rpc/src/skill-catalog-client.ts",
+      (text) => text.replace("requireExactKeys(value, [\"structuralVersion\"]);", "void value;"),
+    )).join("\n"),
+    /RPC client binding is not uniquely RPC-owned, domain-bound or strict fail-closed/,
+  );
+  for (const dependency of ["@zhixing/server", "@zhixing/cli"]) {
+    assert.match(
+      inspectSkillCatalogApplicationOwnership(mutate(
+        "packages/rpc/src/skill-catalog-client.ts",
+        (text) => `${text}\nimport type { Forbidden } from "${dependency}";`,
+      )).join("\n"),
+      /RPC client binding is not uniquely RPC-owned, domain-bound or strict fail-closed/,
+    );
+  }
+  assert.match(
+    inspectSkillCatalogApplicationOwnership([
+      ...records,
+      {
+        relative: "packages/cli/src/runtime/skill-catalog-rpc-client.ts",
+        text: 'const revived = "skill.list";',
+      },
+    ]).join("\n"),
+    /leaked back into the CLI Surface package|wire escaped/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/rpc/src/index.ts",
+      (text) => `${text}\nexport * from "./skill-catalog-client.js";`,
+    )).join("\n"),
+    /one narrow non-root RPC subpath/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/rpc/package.json",
+      (text) => text.replace(
+        '"./session-wire":',
+        '"./skill-client-alias": { "types": "./dist/skill-catalog-client.d.ts", "import": "./dist/skill-catalog-client.js" },\n    "./session-wire":',
+      ),
+    )).join("\n"),
+    /one narrow non-root RPC subpath/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/repl.ts",
+      (text) => text.replace("client: skillClient", "listAll: async () => []"),
+    )).join("\n"),
+    /does not share one Skill client/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/runtime/rpc-management-facade.ts",
+      (text) => `${text}\nconst revived = \"skill.list\";`,
+    )).join("\n"),
+    /parallel Skill client mainline|wire escaped/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership([
+      ...records,
+      {
+        relative: "packages/channels/feishu/src/skill-surface.ts",
+        text: 'const method = "skill.list";',
+      },
+    ]).join("\n"),
+    /unauthorized empty Skill Product API Surface/,
   );
 });
 

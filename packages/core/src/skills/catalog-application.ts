@@ -29,6 +29,8 @@ import {
   type ProductApiContribution,
 } from "../product-api/catalog.js";
 
+export type { SkillCatalogEntry, SkillMode } from "./types.js";
+
 /** Skill-owned management query. Runtime and tool catalog reads use GlobalStatePort directly. */
 export type SkillCatalogQuery = { readonly kind: "list" };
 
@@ -66,6 +68,19 @@ export interface SkillCatalogCommandResult {
 export interface SkillCatalogApplication {
   query(query: SkillCatalogQuery): Promise<SkillCatalogView>;
   execute(command: SkillCatalogCommand): Promise<SkillCatalogCommandResult>;
+}
+
+/**
+ * Transport-independent Skill management client consumed by product Surfaces.
+ *
+ * A binding owns connection and wire details. Surfaces can only query the
+ * authoritative projection, submit a domain command, and observe committed
+ * facts; they cannot infer catalog state from notifications.
+ */
+export interface SkillCatalogClient {
+  query(query: SkillCatalogQuery): Promise<SkillCatalogView>;
+  command(command: SkillCatalogCommand): Promise<void>;
+  onFact(handler: (fact: SkillCatalogChangedFact) => void): () => void;
 }
 
 export const SKILL_CATALOG_CHANGED_FACT_EVENT = defineProductApiFactEvent<

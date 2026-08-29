@@ -1048,6 +1048,10 @@ export async function validateS7Structure() {
       relative: "packages/core/package.json",
       text: await readFile(path.join(root, "packages/core/package.json"), "utf8"),
     },
+    {
+      relative: "packages/rpc/package.json",
+      text: await readFile(path.join(root, "packages/rpc/package.json"), "utf8"),
+    },
   ]));
   for (const packageName of [
     "server",
@@ -1089,9 +1093,28 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const setupDelivery = required("packages/cli/src/setup-delivery.ts");
   const coreManifestText = required("packages/core/package.json");
   const coreBuild = required("packages/core/tsup.config.ts");
+  const rpcIndex = required("packages/rpc/src/index.ts");
+  const rpcManifestText = required("packages/rpc/package.json");
+  const rpcBuild = required("packages/rpc/tsup.config.ts");
   const handler = required("packages/server/src/rpc/methods/skill.ts");
   const context = required("packages/server/src/context.ts");
   const composition = required("packages/cli/src/serve/command.ts");
+  const skillClientBinding = required(
+    "packages/rpc/src/skill-catalog-client.ts",
+  );
+  const managementFacade = required(
+    "packages/cli/src/runtime/rpc-management-facade.ts",
+  );
+  const repl = required("packages/cli/src/repl.ts");
+  const skillManager = required(
+    "packages/cli/src/skills/manager-controller.ts",
+  );
+  const skillManagerCommand = required(
+    "packages/cli/src/skills/manager-command.ts",
+  );
+  const skillCommandSource = required(
+    "packages/cli/src/commands/skill-command-source.ts",
+  );
   const cliDirectories = required("packages/cli/src/serve/management-directories.ts");
   const assignmentSkillPort = required(
     "packages/orchestrator/src/runtime/assignment-skill-port.ts",
@@ -1148,6 +1171,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   if (
     coreIndex.includes("catalog-application") ||
     skillIndex.includes("catalog-application") ||
+    skillIndex.includes("SkillCatalogClient") ||
     skillIndex.includes("SkillCatalogApplication") ||
     skillIndex.includes("SkillCatalogAdmissionApplication") ||
     skillIndex.includes("SkillCatalogKernelProjectionApplication") ||
@@ -1159,6 +1183,31 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   }
   if (coreBuild.split('"src/skills/catalog-application.ts"').length - 1 !== 1) {
     failures.push("Skill Catalog canonical subpath lacks one dedicated build entry");
+  }
+  let rpcManifest;
+  try {
+    rpcManifest = JSON.parse(rpcManifestText);
+  } catch {
+    failures.push("RPC manifest is invalid while checking the Skill client binding subpath");
+  }
+  const skillClientExport = rpcManifest?.exports?.["./skill-catalog-client"];
+  const duplicateSkillClientExports = Object.entries(rpcManifest?.exports ?? {})
+    .filter(([subpath, conditions]) =>
+      subpath !== "./skill-catalog-client" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === skillClientExport?.types ||
+        conditions.import === skillClientExport?.import)
+    );
+  if (
+    skillClientExport?.types !== "./dist/skill-catalog-client.d.ts" ||
+    skillClientExport?.import !== "./dist/skill-catalog-client.js" ||
+    duplicateSkillClientExports.length > 0 ||
+    rpcBuild.split('"src/skill-catalog-client.ts"').length - 1 !== 1 ||
+    rpcIndex.includes("skill-catalog-client") ||
+    rpcIndex.includes("SkillCatalogRpcClient")
+  ) {
+    failures.push("Skill RPC client binding must have one narrow non-root RPC subpath");
   }
   const productApiExport = coreManifest?.exports?.["./product-api"];
   const duplicateProductApiExports = Object.entries(coreManifest?.exports ?? {})
@@ -1462,6 +1511,99 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !application.includes("SKILL_CATALOG_PRODUCT_API_EXACT_SET")
   ) {
     failures.push("Skill domain does not own the finite Product API operation and fact contribution");
+  }
+  if (
+    !application.includes("export interface SkillCatalogClient") ||
+    !application.includes("query(query: SkillCatalogQuery): Promise<SkillCatalogView>") ||
+    !application.includes("command(command: SkillCatalogCommand): Promise<void>") ||
+    !application.includes("onFact(handler: (fact: SkillCatalogChangedFact) => void): () => void")
+  ) {
+    failures.push("Skill domain does not own the stable Query/Command/Fact client contract");
+  }
+  if (
+    !skillClientBinding.includes('from "@zhixing/core/skills/catalog"') ||
+    !skillClientBinding.includes("implements SkillCatalogClient") ||
+    skillClientBinding.includes('from "@zhixing/core"') ||
+    /from\s+["']@zhixing\/(?:cli|server)(?:\/|["'])/u.test(skillClientBinding) ||
+    skillClientBinding.includes("as never") ||
+    skillClientBinding.includes("[key: string]") ||
+    skillClientBinding.includes("?? 0") ||
+    !skillClientBinding.includes("decodeSkillCatalogView(") ||
+    !skillClientBinding.includes("decodeSkillCatalogChangedFact(") ||
+    !skillClientBinding.includes("decodeCommandAcknowledgement(") ||
+    !skillClientBinding.includes('requireExactKeys(value, ["skills", "structuralVersion"]);') ||
+    !skillClientBinding.includes('requireExactKeys(value, ["structuralVersion"]);') ||
+    !skillClientBinding.includes('requireExactKeys(value, ["ok"]);')
+  ) {
+    failures.push("Skill RPC client binding is not uniquely RPC-owned, domain-bound or strict fail-closed");
+  }
+  for (const wire of [
+    '"skill.list"',
+    '"skill.setState"',
+    '"skill.archive"',
+    '"skill.changed"',
+  ]) {
+    if (skillClientBinding.split(wire).length - 1 !== 1) {
+      failures.push(`Skill RPC client binding wire exact-set drifted: ${wire}`);
+    }
+  }
+  const cliSkillWireOwners = records
+    .filter((record) =>
+      record.relative.startsWith("packages/cli/src/") &&
+      /["']skill\.(?:list|setState|archive|changed)["']/u.test(record.text)
+    )
+    .map((record) => record.relative);
+  if (cliSkillWireOwners.length > 0) {
+    failures.push(`Skill wire escaped the unique RPC client binding: ${cliSkillWireOwners.join(", ")}`);
+  }
+  if (byPath.has("packages/cli/src/runtime/skill-catalog-rpc-client.ts")) {
+    failures.push("Skill RPC client binding leaked back into the CLI Surface package");
+  }
+  if (
+    managementFacade.includes("skillList(") ||
+    managementFacade.includes("skillSetState(") ||
+    managementFacade.includes("skillArchive(") ||
+    managementFacade.includes("onSkillChanged(") ||
+    /["']skill\.(?:list|setState|archive|changed)["']/u.test(managementFacade)
+  ) {
+    failures.push("RpcManagementFacade retains a parallel Skill client mainline");
+  }
+  if (
+    repl.split("new SkillCatalogRpcClient(coreHost)").length - 1 !== 1 ||
+    !repl.includes('from "@zhixing/rpc/skill-catalog-client"') ||
+    repl.includes("./runtime/skill-catalog-rpc-client") ||
+    !repl.includes("skillClient,") ||
+    !repl.includes("client: skillClient") ||
+    !repl.includes("skillClient.onFact(") ||
+    !repl.includes("detachSkillCatalogFacts();") ||
+    repl.includes("skillStore:") ||
+    repl.includes("as never") && repl.includes("managementFacade.skill")
+  ) {
+    failures.push("REPL does not share one Skill client across manager, dynamic slash and Fact refresh");
+  }
+  for (const [relative, text] of [
+    ["packages/cli/src/skills/manager-controller.ts", skillManager],
+    ["packages/cli/src/skills/manager-command.ts", skillManagerCommand],
+    ["packages/cli/src/commands/skill-command-source.ts", skillCommandSource],
+  ]) {
+    if (
+      !text.includes('from "@zhixing/core/skills/catalog"') ||
+      !text.includes("SkillCatalogClient") ||
+      text.includes("SkillManagerStore") ||
+      text.includes("listForManagement") ||
+      text.includes("listAll()")
+    ) {
+      failures.push(`${relative}: Skill Surface bypasses the shared domain client contract`);
+    }
+  }
+  const channelSkillSurfaces = records
+    .filter((record) =>
+      record.relative.startsWith("packages/channels/") &&
+      /SkillCatalogClient|skill\.changed|skill\.list|\/skills/u.test(record.text)
+    )
+    .map((record) => record.relative);
+  if (channelSkillSurfaces.length > 0) {
+    failures.push("Channel gained an unauthorized empty Skill Product API Surface");
   }
   for (const [relative, text] of [
     ["packages/orchestrator/src/runtime/assignment-skill-port.ts", assignmentSkillPort],

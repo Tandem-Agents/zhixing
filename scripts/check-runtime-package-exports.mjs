@@ -7,6 +7,8 @@ const [
   coreAuthority,
   corePersistence,
   coreProtocol,
+  rpcRoot,
+  rpcSkillCatalogClient,
   ownerKernel,
   ownerKernelControlAdmission,
   ownerKernelConversationAssignment,
@@ -34,6 +36,8 @@ const [
   import("../packages/core/dist/authority/index.js"),
   import("../packages/core/dist/persistence/index.js"),
   import("../packages/core/dist/protocol/index.js"),
+  import("../packages/rpc/dist/index.js"),
+  import("../packages/rpc/dist/skill-catalog-client.js"),
   import("../packages/owner-kernel/dist/index.js"),
   import("../packages/owner-kernel/dist/control-admission.js"),
   import("../packages/owner-kernel/dist/conversation-assignment.js"),
@@ -144,6 +148,13 @@ const meshCanonicalValues = {
 
 const failures = [];
 await verifyCorePackageExports(failures);
+await verifyRpcSkillCatalogClientExport(failures);
+if (
+  typeof rpcSkillCatalogClient.SkillCatalogRpcClient !== "function" ||
+  "SkillCatalogRpcClient" in rpcRoot
+) {
+  failures.push("rpc-skill-catalog-client:invalid-runtime-boundary");
+}
 for (const name of [
   "SkillCatalogApplicationError",
   "SkillCatalogApplicationService",
@@ -419,5 +430,55 @@ async function verifyCorePackageExports(failures) {
         }
       }
     }
+  }
+}
+
+async function verifyRpcSkillCatalogClientExport(failures) {
+  const packageRoot = new URL("../packages/rpc/", import.meta.url);
+  const manifest = JSON.parse(
+    await readFile(new URL("package.json", packageRoot), "utf8"),
+  );
+  if (!manifest.exports || typeof manifest.exports !== "object" || Array.isArray(manifest.exports)) {
+    failures.push("rpc-exports:invalid-manifest");
+    return;
+  }
+  const canonical = manifest.exports["./skill-catalog-client"];
+  if (
+    canonical?.types !== "./dist/skill-catalog-client.d.ts" ||
+    canonical?.import !== "./dist/skill-catalog-client.js"
+  ) {
+    failures.push("rpc-exports:skill-catalog-client:invalid-canonical-subpath");
+  }
+  for (const [subpath, conditions] of Object.entries(manifest.exports)) {
+    if (
+      subpath !== "./skill-catalog-client" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === canonical?.types || conditions.import === canonical?.import)
+    ) {
+      failures.push(`rpc-exports:${subpath}:duplicate-skill-catalog-client-entry`);
+    }
+  }
+  for (const condition of ["types", "import"]) {
+    const target = canonical?.[condition];
+    if (typeof target !== "string" || !target.startsWith("./dist/")) {
+      failures.push(`rpc-exports:skill-catalog-client:${condition}:invalid-target`);
+      continue;
+    }
+    try {
+      await access(new URL(target.slice(2), packageRoot));
+    } catch {
+      failures.push(`rpc-exports:skill-catalog-client:${condition}:missing-target`);
+    }
+  }
+  const rootDeclaration = await readFile(
+    new URL("dist/index.d.ts", packageRoot),
+    "utf8",
+  );
+  if (
+    rootDeclaration.includes("SkillCatalogRpcClient") ||
+    rootDeclaration.includes("skill-catalog-client")
+  ) {
+    failures.push("rpc-exports:root:skill-catalog-client-type-leak");
   }
 }

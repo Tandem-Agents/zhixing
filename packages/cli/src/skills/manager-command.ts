@@ -13,10 +13,10 @@
 
 import type * as readline from "node:readline/promises";
 import type { CommandDispatcher, ICommandRegistry } from "@zhixing/core";
+import type { SkillCatalogClient } from "@zhixing/core/skills/catalog";
 import type { CliWriter, ScreenController } from "../screen/index.js";
 import { chromeOnlyVisibility, requireChrome } from "../commands/command-visibility.js";
 import { runSkillManager } from "./manager-screen.js";
-import type { SkillManagerStore } from "./manager-controller.js";
 
 export interface SkillsCommandOptions {
   readonly registry: ICommandRegistry;
@@ -28,8 +28,8 @@ export interface SkillsCommandOptions {
   readonly screen: ScreenController | null;
   /** 写屏 sink —— 无 chrome 时 requireChrome 经此打印兜底提示。 */
   readonly writer: CliWriter;
-  /** 会话级单一技能库 store(管理器浏览 / 状态操作的落点)。 */
-  readonly skillStore: SkillManagerStore;
+  /** 会话级单一 Skill 领域 client；与动态 slash 共用。 */
+  readonly skillClient: SkillCatalogClient;
   /** 技能集变更后刷新动态命令,让 `/<name>` 补全即时反映禁用 / 归档(§5.1)。 */
   readonly refreshCommands: () => void | Promise<void>;
 }
@@ -51,7 +51,7 @@ export function registerSkillsCommand(opts: SkillsCommandOptions): void {
     opts.rl.pause();
     try {
       await runSkillManager({
-        store: opts.skillStore,
+        client: opts.skillClient,
         onMutate: opts.refreshCommands,
         stdin: process.stdin,
         stdout: process.stdout,

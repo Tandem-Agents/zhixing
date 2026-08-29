@@ -19,10 +19,8 @@ import {
   type KeyHint,
 } from "../tui/index.js";
 import { SkillManagerController } from "./manager-controller.js";
-import type {
-  SkillManagerStore,
-  SkillManagerView,
-} from "./manager-controller.js";
+import type { SkillCatalogClient } from "@zhixing/core/skills/catalog";
+import type { SkillManagerView } from "./manager-controller.js";
 
 // Footer 两端对齐分区:左 = 基础 / 导航操作(不改数据)、右 = 功能 / 变更操作
 // (对选中技能落 Store)。语义分组让"通用怎么动"与"对这个技能做什么"一眼分立。
@@ -96,7 +94,7 @@ export function renderSkillManager(
 
 /**
  * 按键派发:映射到控制器方法,返回是否退出循环。纯逻辑(注入控制器可测)。
- *   ↑↓ 导航;p 置顶 / d 禁用 / m 改 mode / a 归档(→ 控制器,内部落 Store + 重读);
+ *   ↑↓ 导航;p 置顶 / d 禁用 / m 改 mode / a 归档(→ 控制器,经领域 client 写入 + 重读);
  *   Esc / Ctrl+C 退出。其余按键忽略。
  */
 export async function handleSkillManagerKey(
@@ -135,7 +133,7 @@ export async function handleSkillManagerKey(
 }
 
 export interface SkillManagerRunDeps {
-  store: SkillManagerStore;
+  client: SkillCatalogClient;
   /** 技能集变更后回调(接 registry.refresh,让 /<name> 补全即时反映,§5.1)。 */
   onMutate?: () => void | Promise<void>;
   stdin: NodeJS.ReadStream;
@@ -153,7 +151,7 @@ export interface SkillManagerRunDeps {
 export async function runSkillManager(deps: SkillManagerRunDeps): Promise<void> {
   if (!deps.isTTY) return;
 
-  const controller = new SkillManagerController(deps.store, deps.onMutate);
+  const controller = new SkillManagerController(deps.client, deps.onMutate);
   await controller.load();
 
   const renderer = new Renderer(deps.stdout);

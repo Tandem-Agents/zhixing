@@ -11,6 +11,8 @@ import {
 } from "@zhixing/core";
 import {
   SkillCatalogApplicationService,
+  type SkillCatalogClient,
+  type SkillCatalogEntry,
 } from "@zhixing/core/skills/catalog";
 import {
   FileArtifactStore,
@@ -18,7 +20,6 @@ import {
 } from "@zhixing/core/authority";
 import {
   SkillCommandSource,
-  type SkillCommandEntry,
 } from "../skill-command-source.js";
 
 const NOW = "2026-08-29T00:00:00.000Z";
@@ -27,18 +28,39 @@ function rec(
   id: string,
   name: string,
   description = "desc",
-): SkillCommandEntry {
-  return { id, name, description };
+): SkillCatalogEntry {
+  return {
+    id,
+    name,
+    description,
+    source: "own",
+    mode: "main",
+    pinned: false,
+    disabled: false,
+    createdAt: NOW,
+    usage: null,
+    contentRef: { digest: `sha256:${"0".repeat(64)}`, bytes: 1 },
+    revision: 1,
+    digest: `sha256:${"f".repeat(64)}`,
+  };
 }
 
 function sourceWith(
-  skills: SkillCommandEntry[],
+  skills: SkillCatalogEntry[],
   existing: Record<string, CommandDef> = {},
 ): SkillCommandSource {
   return new SkillCommandSource({
-    listAll: async () => skills,
+    client: clientWith(skills),
     findExisting: (name) => existing[name] ?? null,
   });
+}
+
+function clientWith(entries: readonly SkillCatalogEntry[]): SkillCatalogClient {
+  return {
+    query: async () => ({ entries, catalogRevision: 1 }),
+    command: async () => {},
+    onFact: () => () => {},
+  };
 }
 
 const builtinCmd = (name: string): CommandDef => ({
@@ -169,7 +191,13 @@ describe("SkillCommandSource · Authority Catalog 集成", () => {
         execution: "local",
       });
       registry.registerDynamicSource(new SkillCommandSource({
-        listAll: async () => (await application.query({ kind: "list" })).entries,
+        client: {
+          query: (query) => application.query(query),
+          command: async (command) => {
+            await application.execute(command);
+          },
+          onFact: () => () => {},
+        },
         findExisting: (name) => registry.findByName(name),
       }));
       await registry.refresh();

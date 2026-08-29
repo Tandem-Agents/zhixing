@@ -1,8 +1,8 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A3-01 已在当前工作区闭合，等待协调者独立复核；不得提前开始下一责任链<br>
-> 完成度：3/8<br>
+> 当前检查点：A3-02 已由协调者独立复核，A3 阶段退出门成立；下一检查点为 A4 首条 Kernel 合同责任链<br>
+> 完成度：4/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
 
@@ -98,7 +98,7 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 - [x] **A0　冻结最小迁移决策基线。** 完整读取 AE-001 和验证手册；复用已接受的生产角色、生命周期、公开合同、持久记录与制品 exact-set，补齐一张紧凑的“当前责任 → 目标责任 → A 项/迁移顺序 → 保护证据”决策图，以及首批迁移所需的 Kernel/RuntimeHost/拓扑、依赖和验证映射。A0 只回答“从哪里开始、责任如何转移、用什么证明没有回退”，不预先穷举后续每条领域行为。所有正式能力仍必须在真正改变其责任的工作包中完成即时双向取证、直接回归和旧路径删除；未改变当前迁移裁决的未知不得阻塞 A0。退出证据是足以直接派发 A1/A2 且没有未归属生产角色或迁移责任的决策基线，不是搜索结果、文件清单或全产品百科。
 - [x] **A1　收束 ApplicationHost 生命周期边界。** 从现有 `access-surface`、启动回滚、清理注册和关闭链形成每个生产进程唯一的 Host 对象与类型化组件贡献；明确 create/start/open、换代、拒新、排空、close 和失败补偿，组件只管理自身内部资源。配置来源和秘密材料继续由专责 Provider 拥有，Host 只冻结并下发组件所需的最小只读投影，领域、Kernel 和 Surface 不读取来源。Host 可以暂时委托旧领域实现，但不得新增产品逻辑、领域状态、运行期服务定位或第二组合根。以完整启动失败、部分启动回滚、并发关闭、在途排空和零资源残留直接证明生命周期。
 - [x] **A2　用一条真实垂直切片证明领域模型。** 依据 A0 的依赖事实选择边界最小而行为完整的现有领域，先记录选择理由和明确不做；让该领域同时拥有自己的 Command/Query/Event 合同、应用用例、规则与状态机、领域权威适配、面向 Kernel 的 Run Envelope 投影、面向表面的投影和生命周期贡献。至少让一个真实现有表面经进程内或 RPC binding 调用同一应用端口，迁移后立即删除旧写入口。本项不得预建全局领域框架或为了模板美观拆包。
-- [ ] **A3　建立组合式 Product API 与纯绑定。** 只从 A2 已证明的领域合同建立 Product API Catalog、dispatcher 和进程内/RPC binding 模式；Catalog 只组合，不拥有业务类型、规则、状态或写入权。Command/Query/Fact Event/Progress Event 的语义与身份清楚，瞬时进展不能成为恢复事实；Progress Event 必须带运行身份与顺序，消费者发现缺口后重新 Query 权威投影。让 A2 领域的全部现有 Server/RPC、CLI、Channel 入口只承担各自实际存在的认证、连接、编解码、调用、订阅、错误映射和呈现；本机路径复用同一应用语义，但不被迫经过网络或无价值序列化。其他领域只能在 A5 完成自身垂直迁移时接入该模式，不得由 A3 先建立空合同或平行入口。
+- [x] **A3　建立组合式 Product API 与纯绑定。** 只从 A2 已证明的领域合同建立 Product API Catalog、dispatcher 和进程内/RPC binding 模式；Catalog 只组合，不拥有业务类型、规则、状态或写入权。Command/Query/Fact Event/Progress Event 的语义与身份清楚，瞬时进展不能成为恢复事实；Progress Event 必须带运行身份与顺序，消费者发现缺口后重新 Query 权威投影。让 A2 领域的全部现有 Server/RPC、CLI、Channel 入口只承担各自实际存在的认证、连接、编解码、调用、订阅、错误映射和呈现；本机路径复用同一应用语义，但不被迫经过网络或无价值序列化。其他领域只能在 A5 完成自身垂直迁移时接入该模式，不得由 A3 先建立空合同或平行入口。
 - [ ] **A4　封闭 Intelligence Kernel。** 基于全部现有运行形态冻结最小 Run Envelope / Event / Terminal 合同和 Conformance Suite；收窄 `AgentRuntime` 公共面，隐藏安全管线、权限存储、工作区解析和宿主管理内部对象。产品对象到模型输入、运行事件到产品结果均经显式投影；模型输出只能形成提议、证据和运行终态，必须经领域决定与权威提交后才成为产品事实。A4 只负责 Kernel 合同及其边界：把 Workscene、Schedule 等产品特有装配移出 RuntimeHost，交给当前唯一产品责任者生成信封；尚未完成 A5 的领域可以通过登记退场点的最短单向端口提供投影，但不得在 A4 复制其状态机、权威或 Product API。RuntimeHost 只消费通用运行合同，对话、任务、本机、远端、取消、失败和资源释放行为必须等价。
 - [ ] **A5　逐领域归位全部现有产品责任。** 按 A0 得到的无环依赖顺序迁移其余领域；每次只迁移一个事实所有权，并把合同、应用用例、状态机/Reducer、权威适配、既有 Kernel 投影的最终归属、Product API binding、Surface、生命周期、直接测试和旧入口删除作为同一责任链闭合。A2/A3/A4 已建立的合同、binding 与投影必须迁入最终唯一 owner 或直接复用，不得在 A5 重建第二套。领域只实现 Correctness 端口的业务适配，不得把通用提交、效果、安全、确认、资源、持久化或恢复机制复制进领域；Correctness 实现中的业务 Reducer、状态机和用户语义则必须随本项退出共享机制。A2 选中的领域保留在下表，但只有 A3 完成其 Product API 与全部现有 binding 后才能勾选；登记表所有行均为 `[x]` 后 A5 才能完成。A0 若发现未列出的正式产品事实，只有在生产事实与 AE-001 能唯一确定其窄边界时才可补行；没有独立事实的运行/交互方式应归入既有领域、Kernel 或 Surface，不得为了穷举虚构新领域。只有真正的产品语义歧义才暂停交由用户裁决。
 
@@ -111,7 +111,7 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
   | Advancement | [ ] | 执行、评价、证据与成果准入边界保持现有语义且归属唯一 |
   | Delivery | [ ] | “结果需要交付及其终态”归域；Channel 只实现发送效果 |
   | Trust Administration | [ ] | 用户可管理的信任规则归域；Security Substrate 只负责执行决定 |
-  | Skill Catalog | [ ] | 技能资产与生命周期归域；Kernel 只消费不可变能力投影 |
+  | Skill Catalog | [x] | 技能资产与生命周期归域；Kernel 只消费不可变能力投影 |
   | Device Administration | [ ] | 用户可见设备关系、移除和值班迁移归域；Executor/Mesh 只实现物理效果 |
   | Backup & Recovery Administration | [ ] | 备份目标、恢复根、checkpoint 选择与灾难恢复产品用例归域；Correctness/Storage/Mesh 只提供签名、冻结、传输、安装与恢复机制 |
 
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `1387fe3e`；A0、A1-01～A1-12、A2-01～A2-07 已由协调者独立复核并提交，A1、A2 阶段退出门成立 |
-| 当前 A 项 | A3：从已证明的 Skill Catalog 合同建立组合式 Product API 与纯绑定 |
-| 活跃工作包 | A3-01 已完成，等待协调者独立复核：Skill 领域贡献有限管理 Query/Command/Fact exact-set，唯一 Host 组合一个封存 dispatcher，三个 RPC 只经 dispatcher 调用同一领域应用，`ServerContext.skillCatalog` 直连已退场 |
-| 下一责任链 | 独立复核 A3-01 的 exact-set、领域 descriptor 所有权、dispatcher fail-closed/封存、Host 单例、ServerContext 退场、RPC wire/error/fact 等价和进程内直调；接受后再处理 CLI client / Surface 与 Fact Event 订阅纯绑定，不提前扩入其他领域 |
+| 已接受基线 | `b2f7398f`；A0、A1-01～A1-12、A2-01～A2-07、A3-01 已由协调者独立复核并提交，A1、A2 阶段退出门成立 |
+| 当前 A 项 | A4：封闭 Intelligence Kernel 合同及其生产边界 |
+| 活跃工作包 | 无；A3-02 已由协调者独立复核，A3 与 A5 Skill Catalog 行均已闭合 |
+| 下一责任链 | 从全部现有运行形态和当前 `AgentRuntime` 公共面中选择 A4 第一条可独立证伪的 Kernel 合同责任链；不得整阶段派发或提前迁移未归域产品状态机 |
 | 打开的单向桥 | 无；Skill 管理、保存、admission、load/usage、Kernel 与 Executor 投影均只经 `@zhixing/core/skills/catalog` 及既有 Authority/CAS/assignment Correctness 端口成立，旧 writable Store 不再承担正式应用行为 |
-| 已失效证据 | 无当前未恢复证据。A3-01 曾使 Skill RPC handler、ServerContext Skill 依赖、Host 注入、core package export 与相关 S7/canonical registry 证据失效；现已按唯一 dispatcher、窄 subpath、纯 binding 和原 wire/fact 行为重取，A2 证据未失效 |
+| 已失效证据 | 无。A3-02 的 Skill client、RPC binding、CLI Surface 与 Fact 订阅闭包已重取；A3-01 dispatcher/RPC server 与 A2 证据继续有效 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1489,6 +1489,21 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接与对抗证据：core `catalog-application.test.ts + product-api/catalog.test.ts` 为 2 文件 23/23，覆盖领域应用原合同、进程内 Query/Command/Fact、同一应用恰一次调用、duplicate/missing/unknown/kind/descriptor/fact mismatch 与封存变更；Server `management-methods.test.ts + context.test.ts` 为 2 文件 10/10，覆盖缺贡献、三个真实 RPC、参数、成功、not-found、conflict/commit failure wire、commit 后单次广播和 ServerContext；CLI `startup-server-owner.test.ts` 为 1 文件 5/5，直接反绑 Anchor 生产 root 的单 dispatcher/单 contribution/单 application 装配。合计 5 文件 38/38，不重复相加。
 - 结构、导出与构建证据：canonical `pnpm s7:lint` 为 22/22 且 registry golden 通过；结构门禁及反向 mutation 拒绝 `ServerContext.skillCatalog`/handler 直连回流、第二 dispatcher/注册点、领域规则进入 Catalog、根 barrel/第二 export、Fact 传输错序与原 conflict wire 漂移。`pnpm runtime:package-exports` 通过，确认 `./product-api` 是唯一正式入口且 runtime/declaration 不泄入 core 根或 Skill subpath。core/server/CLI typecheck、core/server build 与 `pnpm cli:build` 均通过；8 个适用 TypeScript 文件最窄 Biome 和 3 个脚本 `node --check` 通过。未运行根级 lint/test/build、package check 或制品验收。
 - 状态、失效与交接：A3-01 在当前工作区形成可构建、可运行、单一 dispatcher 真相；没有双注册、双应用、兼容壳或未处置本包问题。若 Product API descriptor/catalog、Skill contribution/exact-set、Anchor composition、ServerContext、三个 Skill RPC/Fact、core export/build entry、S7 或 package-export gate任一变化，只恢复 A3-01 及上述直接闭包；A2 未变证据继续复用。A3 与 A5 Skill Catalog 行保持 `[ ]`，当前停在等待协调者独立复核 A3-01，不得由本对话进入下一责任链。
+
+### A3-02：建立 Skill Product API client / Fact Event 订阅与 CLI Surface 纯绑定
+
+- 派发基线：`HEAD b2f7398f47a2e130dae241bf08a869ee1f66f5c4 + task-doc:A3-02-dispatch`。A3-01 已由协调者独立复跑 core 23/23、server 10/10、CLI 5/5、S7 22/22、core/server/CLI typecheck、core build与 package exports，并以生产反扫确认只有 Anchor Host 一处 dispatcher 构造；提交 `b2f7398f` 后索引与工作区为空。
+- 唯一架构结果：由 Skill 领域拥有管理 Query/Command/Fact 的稳定 client 合同，由唯一有限 RPC client binding 负责 `skill.list/setState/archive` 与 `skill.changed` 的 wire 编解码；`/skills` 管理器、动态 slash 和 REPL 只消费该 client 合同并负责呈现/刷新，不再知道 RPC 方法、通知名、wire DTO 或临时拼装业务端口。
+- 工作包边界：只覆盖当前真实 Skill CLI 消费链 `RpcManagementFacade → repl.ts → SkillManagerController / SkillCommandSource / registry.refresh`、必要的领域 client 合同、有限 RPC binding、直接测试和结构门禁。保持三条 RPC 与一条通知的公开名称、参数、结果、错误、订阅/取消订阅、管理器交互、排序/选中、builtin-first 冲突和动态 slash 刷新行为完全等价。Channel 当前没有 Skill 表面，不得为它建立空入口；不得接入其他领域、设计通用远程协议、迁移 Server dispatcher、增加 Progress Event、重写 TUI 或进入 A4。
+- 完成与安全交接：Skill wire 字符串和 wire 解码只存在于一个显式 RPC binding；领域 client 合同不导入 Server/RPC/CLI 类型，不持连接、Surface 状态或业务实现；Surface 不复制 Skill 状态机，只持 UI 选择和命令缓存，Fact 到达后以 Query 重取权威投影。未知/畸形 list 或 changed payload 必须 fail closed，不能用 `as never`、默认 revision 0 或宽松 index signature 掩盖协议漂移；断线重连沿既有 notification forwarding 行为，不新增第二订阅 owner。若约四小时不能闭合，停在可构建、旧 facade 路径仍完整或新 binding 已成为唯一正式入口的检查点，不得留下两套 client 主链或继续下一领域。
+- 验证责任：以当前 manager controller/screen、skill command source、REPL/RPC facade 与 connection notification 直接测试为起点，补足同一 client 对管理器与动态 slash 的复用、三个请求的严格 wire 映射、Fact 订阅/退订/畸形拒绝、写后 Query 刷新、builtin 冲突和无 Channel 空入口；同步 S7/package export/build entry 中真正受影响的窄门禁。先运行最窄测试和受影响包 typecheck/build，只重验失效闭包，不重复 A3-01 server dispatcher、A2 领域全链、根级回归或制品验收。
+- 状态规则：A3-02 全部闭合前 A3 与 A5 Skill Catalog 行保持 `[ ]`。完成后在本文记录生产端、全部消费端、旧路径删除、直接证据与精确失效条件，并停下等待协调者复核；不得自行开始其他领域或 Git 操作。
+- 生产责任收口：`SkillCatalogClient` 由 `@zhixing/core/skills/catalog` 领域入口唯一定义，只暴露 Query/Command/Fact 及不可变管理投影，不依赖 Server/RPC/CLI。`SkillCatalogRpcClient` 与全部严格 codec 由唯一正式 `@zhixing/rpc/skill-catalog-client` subpath 拥有；它只依赖 Skill 领域合同和本文件定义的最小 request/notification transport port，不依赖 Server、CLI 或 WebSocket。binding 严格解码 list 响应、command acknowledgement 和 changed Fact，拒绝未知字段、缺字段、非 canonical 时间/digest、非安全 revision 与畸形数组；三个 request 和一个 notification 的公开 wire 保持不变，RPC 错误原样传播。
+- Surface 与旧路退场：`CoreHostRpcLink` 只继续拥有 CLI 连接生命周期，以结构兼容的最薄 transport 实现直接交给 RPC binding；`repl.ts` 仅从 RPC 窄 subpath 构造一个 client 实例，并同时交给 `SkillManagerController` 与 `SkillCommandSource`。管理器写成功后重新 Query，Fact 到达后只驱动 registry refresh，动态 slash 在 refresh 时重取权威投影，不从 Fact 重建事实。builtin-first 冲突、管理投影全集、选中/重排和订阅/退订语义保持。CLI 旧 binding 文件及测试、`RpcManagementFacade.skill*`/`onSkillChanged`、`SkillManagerStore`、`listAll` 回调粘合、`as never` 与宽松 wire DTO 已从生产链删除；`packages/channels/` 反扫无 Skill Surface，未新增空 binding。
+- 直接证据：初次 Surface 闭包的领域应用/动态 slash、管理器 query/command/写后重查与严格 binding 共 4 文件 34/34 通过，末次微调的 binding/dynamic-source 2 文件 16/16 复取通过。本次物理归位后，相同严格 codec/三 request/Fact 订阅退订与畸形拒绝的 RPC 责任边界测试 1 文件 9/9 通过；原 manager/dynamic-source 25 项 Surface 证据输入未变。RPC 与 CLI typecheck、RPC build 与 `pnpm cli:build`、`pnpm runtime:package-exports` 均通过。canonical `pnpm s7:lint` 最终 22/22 且 registry golden 通过；反向 mutation 新增识别 CLI binding 回流、RPC 根 barrel 泄漏/第二 export、Server/CLI 反向依赖和 wire exact-set 漂移。S7 归位后首次取证发现 RPC manifest 尚未纳入该检查器的 production record 输入，补齐机械输入后最终全绿，未放宽断言。13 个适用 TS/JSON 文件 Biome、3 个结构/导出脚本 `node --check` 与 `git diff --check` 通过。未运行根级 lint/test/build、package check 或制品验收。
+- 协调反证与纠正：首次 A3-02 把完整 Product API RPC binding 放在 `@zhixing/cli`，虽然行为和 codec 成立，但违反 AE-001 的 `@zhixing/rpc = Product API RPC 绑定`、`@zhixing/cli = Surface/进程入口` 依赖方向，因而原物理 owner 结论作废。当前 binding 源码、直接测试、build entry 和 package export 已整体唯一归入 `@zhixing/rpc`；RPC 根导出不泄漏，CLI 无转导文件、镜像 DTO、wire 字符串或第二 binding，既有领域/Surface/公开 wire 行为没有重做或改变。
+- 协调者独立验收：在纠正后的同一工作区重跑 RPC binding 9/9、CLI manager/dynamic Surface 25/25，依次完成 core、RPC、CLI 构建与 CLI typecheck；canonical `pnpm s7:lint` 为 22/22 且 registry golden 通过，`pnpm runtime:package-exports` 通过。生产反扫确认 Skill wire 只存在于 RPC binding 与服务端 provider，CLI 没有 wire、镜像 DTO、第二 binding 或根级转导；一个 client 实例同时供两个 Surface 使用，Fact 只触发 Query 重取。协调者接受 A3-02 终态。
+- 失效与交接：若 Skill 领域 client Query/Command/Fact 合同、catalog subpath、RPC 窄 binding subpath/transport port/严格 codec、RPC root/export/build entry、CoreHost notification forwarding、REPL 单实例装配、manager/dynamic source、Skill wire exact-set、Channel 排除、S7 或 package-export gate 任一变化，只恢复 A3-02 及上述直接闭包；A3-01/A2 证据继续复用。当前无遗留旧 Skill client 主链或未处置本包问题，A3 与 A5 Skill Catalog 行均为 `[x]`，完成度为 `4/8`；下一检查点为 A4 首条 Kernel 合同责任链。
 
 ## 十、用户提示词
 

@@ -1,11 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { stringWidth, stripAnsi } from "../../tui/index.js";
 import type { KeyEvent } from "../../tui/index.js";
-import type { SkillCatalogEntry } from "@zhixing/core";
+import type {
+  SkillCatalogClient,
+  SkillCatalogEntry,
+} from "@zhixing/core/skills/catalog";
 import { renderSkillManager, handleSkillManagerKey } from "../manager-screen.js";
 import {
   SkillManagerController,
-  type SkillManagerStore,
   type SkillManagerView,
 } from "../manager-controller.js";
 
@@ -23,12 +25,11 @@ const rec = (
   createdAt: "2026-01-01T00:00:00.000Z",
   usage: null,
   contentRef: {
-    digest: id.padEnd(64, "0"),
-    size: 1,
-    mediaType: "text/markdown",
+    digest: `sha256:${id.padEnd(64, "0")}`,
+    bytes: 1,
   },
   revision: 1,
-  digest: id.padEnd(64, "f"),
+  digest: `sha256:${id.padEnd(64, "f")}`,
   ...over,
 });
 
@@ -88,7 +89,7 @@ describe("renderSkillManager", () => {
 });
 
 interface FakeStore {
-  store: SkillManagerStore;
+  client: SkillCatalogClient;
   calls: string[];
 }
 
@@ -96,18 +97,22 @@ function fakeStore(initial: SkillCatalogEntry[]): FakeStore {
   let items = initial.map((m) => ({ ...m }));
   const calls: string[] = [];
   return {
-    store: {
-      async listForManagement() {
-        return items.map((m) => ({ ...m }));
+    client: {
+      async query() {
+        return { entries: items.map((item) => ({ ...item })), catalogRevision: 1 };
       },
-      async setState(id, patch) {
-        calls.push(`setState:${id}:${JSON.stringify(patch)}`);
-        items = items.map((m) => (m.id === id ? { ...m, ...patch } : m));
+      async command(command) {
+        if (command.kind === "set-state") {
+          calls.push(`setState:${command.skillId}:${JSON.stringify(command.patch)}`);
+          items = items.map((item) =>
+            item.id === command.skillId ? { ...item, ...command.patch } : item
+          );
+        } else {
+          calls.push(`archive:${command.skillId}`);
+          items = items.filter((item) => item.id !== command.skillId);
+        }
       },
-      async archive(id) {
-        calls.push(`archive:${id}`);
-        items = items.filter((m) => m.id !== id);
-      },
+      onFact: () => () => {},
     },
     calls,
   };
@@ -117,14 +122,14 @@ const char = (ch: string): KeyEvent => ({ type: "char", ch });
 
 describe("handleSkillManagerKey", () => {
   it("Esc / Ctrl+C → exit", async () => {
-    const c = new SkillManagerController(fakeStore([rec("a")]).store);
+    const c = new SkillManagerController(fakeStore([rec("a")]).client);
     await c.load();
     expect(await handleSkillManagerKey(c, { type: "escape" })).toBe("exit");
     expect(await handleSkillManagerKey(c, { type: "ctrl-c" })).toBe("exit");
   });
 
   it("↑↓ → 导航,不退出", async () => {
-    const c = new SkillManagerController(fakeStore([rec("a"), rec("b")]).store);
+    const c = new SkillManagerController(fakeStore([rec("a"), rec("b")]).client);
     await c.load();
     expect(await handleSkillManagerKey(c, { type: "arrow-down" })).toBe(
       "continue",
@@ -135,8 +140,8 @@ describe("handleSkillManagerKey", () => {
   });
 
   it("p/d/m/a → 对应操作按序落 Store", async () => {
-    const { store, calls } = fakeStore([rec("a")]);
-    const c = new SkillManagerController(store);
+    const { client, calls } = fakeStore([rec("a")]);
+    const c = new SkillManagerController(client);
     await c.load();
     await handleSkillManagerKey(c, char("p"));
     await handleSkillManagerKey(c, char("d"));
@@ -151,15 +156,15 @@ describe("handleSkillManagerKey", () => {
   });
 
   it("大写键位同样生效(toLowerCase)", async () => {
-    const { store, calls } = fakeStore([rec("a")]);
-    const c = new SkillManagerController(store);
+    const { client, calls } = fakeStore([rec("a")]);
+    const c = new SkillManagerController(client);
     await c.load();
     await handleSkillManagerKey(c, char("P"));
     expect(calls).toContain(`setState:a:${JSON.stringify({ pinned: true })}`);
   });
 
   it("无关按键忽略、不退出", async () => {
-    const c = new SkillManagerController(fakeStore([rec("a")]).store);
+    const c = new SkillManagerController(fakeStore([rec("a")]).client);
     await c.load();
     expect(await handleSkillManagerKey(c, char("z"))).toBe("continue");
     expect(await handleSkillManagerKey(c, { type: "enter" })).toBe("continue");

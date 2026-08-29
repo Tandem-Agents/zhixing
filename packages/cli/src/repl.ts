@@ -88,6 +88,7 @@ import {
   RpcManagementFacade,
   type ServerInfoResult,
 } from "./runtime/rpc-management-facade.js";
+import { SkillCatalogRpcClient } from "@zhixing/rpc/skill-catalog-client";
 import { RpcEventBus } from "./runtime/rpc-event-bus.js";
 import { RpcConfirmationBroker } from "./runtime/rpc-confirmation-broker.js";
 import type {
@@ -553,6 +554,7 @@ export async function startRepl(): Promise<void> {
   const conversationFacade = new RpcConversationFacade(coreHost);
   const worksceneFacade = new RpcWorksceneFacade(coreHost);
   const managementFacade = new RpcManagementFacade(coreHost);
+  const skillClient = new SkillCatalogRpcClient(coreHost);
 
   // 会话本身在宿主执行——宿主必须在场,启动即 ensure(不在则拉起)。
   // 拉起 / 连接 / 协议失败时进入只读事实面，不启动任何会话写路径。
@@ -1293,8 +1295,8 @@ export async function startRepl(): Promise<void> {
     writer: cliWriter,
   });
 
-  // /skills 技能管理器（alt-screen）—— 技能库读写经管理面 RPC 在宿主执行,
-  // 管理器消费的 store 窄面由 facade 适配(管理器自身零改)。
+  // /skills 技能管理器（alt-screen）—— 只消费 Skill 领域 client；RPC wire
+  // 由唯一 SkillCatalogRpcClient binding 持有。
   registerSkillsCommand({
     registry: tRegistry,
     dispatcher: typeaheadDispatcher,
@@ -1302,25 +1304,20 @@ export async function startRepl(): Promise<void> {
     renderer,
     screen: renderScreen,
     writer: cliWriter,
-    skillStore: {
-      listForManagement: async () =>
-        (await managementFacade.skillList()).skills as never,
-      setState: (id, patch) => managementFacade.skillSetState(id, patch),
-      archive: (id) => managementFacade.skillArchive(id),
-    },
+    skillClient,
     refreshCommands: () => tRegistry.refresh(),
   });
 
-  // 技能 /<name> 动态唤醒 —— 把技能库投影成 execution:"agent" 命令,候选经
-  // skill.list RPC 取;宿主写后广播 skill.changed,补全候选随之刷新(代替
-  // 旧的 run 收尾版本轮询比对)。
+  // 技能 /<name> 动态唤醒 —— 把领域管理投影映射成
+  // execution:"agent" 命令；已提交 Fact 只触发权威 Query 重取
+  // 和补全刷新(代替旧的 run 收尾版本轮询比对)。
   tRegistry.registerDynamicSource(
     new SkillCommandSource({
-      listAll: async () => (await managementFacade.skillList()).skills as never,
+      client: skillClient,
       findExisting: (name) => tRegistry.findByName(name),
     }),
   );
-  managementFacade.onSkillChanged(() => {
+  const detachSkillCatalogFacts = skillClient.onFact(() => {
     void tRegistry.refresh();
   });
   await tRegistry.refresh();
@@ -1950,6 +1947,7 @@ export async function startRepl(): Promise<void> {
   advancementControlPresenter.dispose();
   lifecycleDiagnosticsPresenter.dispose();
   publishResultPresenter.dispose();
+  detachSkillCatalogFacts();
   controller.dispose();
 
   if (inputController) {
