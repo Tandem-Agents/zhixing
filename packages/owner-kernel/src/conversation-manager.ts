@@ -1751,8 +1751,6 @@ export class ConversationManager implements ConversationCommitProjection {
       if (!(await persistClear())) return "not-found";
       session.window.reset("clear");
       session.turnCount = 0;
-      // 运行体能力可选:缺失时窗口已清,内存语义即"清空",降级可接受
-      await session.runtime.resetConversationState?.().catch(() => {});
       await session.runtime.onAttentionWindowChange?.("clear").catch(() => {});
       return "cleared";
     } finally {

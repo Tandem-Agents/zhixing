@@ -1101,6 +1101,7 @@
           "cleanup:anchor-host:common:mcpHub.dispose",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
+          "cleanup:anchor-host:runtime:ephemeralRuntime.dispose",
           "cleanup:anchor-host:runtime:execution.abortAllAndWait",
           "cleanup:anchor-host:runtime:inboundRouter.refuseNew",
           "cleanup:anchor-host:runtime:jobStatus.dispose",
@@ -1280,6 +1281,7 @@
           "cleanup:anchor-host:common:mcpHub.dispose",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
+          "cleanup:anchor-host:runtime:ephemeralRuntime.dispose",
           "cleanup:anchor-host:runtime:execution.abortAllAndWait",
           "cleanup:anchor-host:runtime:inboundRouter.refuseNew",
           "cleanup:anchor-host:runtime:jobStatus.dispose",
@@ -1456,6 +1458,7 @@
           "cleanup:anchor-host:common:mcpHub.dispose",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
+          "cleanup:anchor-host:runtime:ephemeralRuntime.dispose",
           "cleanup:anchor-host:runtime:execution.abortAllAndWait",
           "cleanup:anchor-host:runtime:inboundRouter.refuseNew",
           "cleanup:anchor-host:runtime:jobStatus.dispose",
@@ -1609,6 +1612,7 @@
           "cleanup:anchor-host:common:mcpHub.dispose",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
+          "cleanup:anchor-host:runtime:ephemeralRuntime.dispose",
           "cleanup:anchor-host:runtime:execution.abortAllAndWait",
           "cleanup:anchor-host:runtime:inboundRouter.refuseNew",
           "cleanup:anchor-host:runtime:jobStatus.dispose",
@@ -2157,6 +2161,17 @@
         "id": "conversationProtocol.stopRecovery",
         "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "owner": "anchor-host",
+        "role": "runtime",
+        "id": "ephemeralRuntime.dispose",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
+        "key": "cleanup:anchor-host:runtime:ephemeralRuntime.dispose",
         "category": "cleanup",
         "target": {
           "rowId": "shutdown"

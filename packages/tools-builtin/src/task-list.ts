@@ -86,8 +86,8 @@ export type TaskListStateListener = (event: TaskListStateEvent) => void;
  *   - 简单 Map，无 LRU（cli 场景下 active conversation 数量极少）
  *   - prime() 显式加载到 cache；getCached() 同步读 cache miss 返回 null
  *   - clear(convId) 主动驱逐单个 cache 项（/clear 路径用）
- *   - 不实现 Resettable —— Resettable 是 runtime-bound 视图层协议，service 是
- *     conversation-scoped 服务，语义层级不同
+ *   - conversation-scoped cache 由产品服务自己的 clear/close 路径维护，不向
+ *     已发布的 Kernel 实例注入宿主管理对象
  */
 export class TaskListService {
   private readonly cache = new Map<string, TaskListState>();

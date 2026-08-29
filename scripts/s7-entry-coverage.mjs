@@ -1691,6 +1691,301 @@ export function inspectKernelTerminalOwnership(records) {
   return failures;
 }
 
+/** A4 Kernel Conformance covers every production binding and freezes AgentRuntime's finite API. */
+export function inspectKernelConformanceAndAgentRuntimeBudget(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const text = byPath.get(relative);
+    if (text === undefined) failures.push(`${relative}: Kernel Conformance source is missing`);
+    return text ?? "";
+  };
+  const runtimePath = "packages/orchestrator/src/runtime/create-agent-runtime.ts";
+  const runtimeSource = required(runtimePath);
+  const runtimeIndex = required("packages/orchestrator/src/runtime/index.ts");
+  const rootIndex = required("packages/orchestrator/src/index.ts");
+  const sessionAdapter = required("packages/runtime-host/src/session-adapter.ts");
+  const ephemeral = required("packages/cli/src/serve/ephemeral-executor.ts");
+  const durableJob = required("packages/cli/src/serve/agent-job-runtime.ts");
+  const executorRole = required("packages/executor/src/runtime-role.ts");
+  const executorComposition = required(
+    "packages/cli/src/serve/executor-role-runtime.ts",
+  );
+  const conformance = required(
+    "packages/cli/src/serve/__tests__/kernel-runtime-conformance.test.ts",
+  );
+  const lifecycle = required("packages/cli/src/serve/assembly-lifecycle.ts");
+  const command = required("packages/cli/src/serve/command.ts");
+
+  const expectedMembers = [
+    "run",
+    "estimateConversationRequestBudget",
+    "estimateMessagesTokens",
+    "forceCompact",
+    "callText",
+    "callTextWithUsage",
+    "runOrchestrationV1",
+    "subAgentUsages",
+    "securitySnapshot",
+    "executionPermissionRules",
+    "executionProfile",
+    "calibrationFactor",
+    "confirmationBroker",
+    "drainLifecycleDiagnostics",
+    "dispose",
+    "onAttentionWindowChange",
+  ];
+  const runtimeFile = ts.createSourceFile(
+    runtimePath,
+    runtimeSource,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const rootFile = ts.createSourceFile(
+    "packages/orchestrator/src/index.ts",
+    rootIndex,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const rootExports = new Set(
+    rootFile.statements.flatMap((statement) =>
+      ts.isExportDeclaration(statement) &&
+      statement.exportClause &&
+      ts.isNamedExports(statement.exportClause)
+        ? statement.exportClause.elements.map((element) => element.name.text)
+        : [],
+    ),
+  );
+  const declarations = records.flatMap((record) => {
+    const file = ts.createSourceFile(
+      record.relative,
+      record.text,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    return file.statements
+      .filter(
+        (statement) =>
+          ts.isInterfaceDeclaration(statement) &&
+          statement.name.text === "AgentRuntime",
+      )
+      .map((statement) => ({ relative: record.relative, statement, file }));
+  });
+  const declaration = declarations[0];
+  const memberNames = declaration
+    ? declaration.statement.members.map((member) =>
+        member.name ? propertyNameText(member.name) : undefined,
+      )
+    : [];
+  if (
+    declarations.length !== 1 ||
+    declaration?.relative !== runtimePath ||
+    memberNames.some((name) => !name) ||
+    JSON.stringify([...memberNames].sort()) !==
+      JSON.stringify([...expectedMembers].sort())
+  ) {
+    failures.push("AgentRuntime public member exact-set drifted or gained a second owner");
+  }
+  if (
+    declaration &&
+    declaration.statement.members.some((member) =>
+      /\b(?:Provider|SecurityPipeline|IPermissionStore|ResolvedWorkspace|WorkspaceDirStatus|Tool)\b/u.test(
+        member.getText(declaration.file),
+      ),
+    )
+  ) {
+    failures.push("AgentRuntime public query/effect ports expose an implementation object");
+  }
+
+  const createFactory = runtimeFile.statements.find(
+    (statement) =>
+      ts.isFunctionDeclaration(statement) &&
+      statement.name?.text === "createAgentRuntime",
+  );
+  const returnedCandidates = [];
+  if (createFactory?.body) {
+    const visit = (node) => {
+      if (ts.isReturnStatement(node) && node.expression && ts.isObjectLiteralExpression(node.expression)) {
+        const names = node.expression.properties
+          .map((property) => property.name && propertyNameText(property.name))
+          .filter(Boolean);
+        if (names.includes("confirmationBroker") && names.includes("run")) {
+          returnedCandidates.push(names);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(createFactory.body);
+  }
+  if (
+    returnedCandidates.length !== 1 ||
+    JSON.stringify([...returnedCandidates[0]].sort()) !==
+      JSON.stringify([...expectedMembers].sort())
+  ) {
+    failures.push("createAgentRuntime return object does not match the public member exact-set");
+  }
+  if (
+    /\b(?:registerConversationStateReset|resetConversationState|ResetConversationStateError)\b/u.test(
+      runtimeSource,
+    )
+  ) {
+    failures.push("AgentRuntime retained a post-publication host management entry");
+  }
+  if (
+    records.some((record) =>
+      /\b(?:Resettable|registerConversationStateReset|resetConversationState|ResetConversationStateError)\b/u.test(
+        record.text,
+      ),
+    )
+  ) {
+    failures.push("retired runtime state-reset injection chain remains reachable");
+  }
+  if (
+    !runtimeIndex.includes("type AgentRuntime,") ||
+    !runtimeIndex.includes("createAgentRuntime,") ||
+    !runtimeIndex.includes("export type { KernelRunEnvelope }") ||
+    !runtimeIndex.includes("type KernelRunEvent") ||
+    !runtimeIndex.includes("type KernelRunCompletion") ||
+    !runtimeIndex.includes("type KernelTerminal") ||
+    [
+      "AgentRuntime",
+      "createAgentRuntime",
+      "KernelRunEnvelope",
+      "KernelRunEvent",
+      "KernelRunCompletion",
+      "KernelTerminal",
+    ].some((name) => rootExports.has(name))
+  ) {
+    failures.push("Kernel runtime contract is not confined to the runtime subpath");
+  }
+
+  const bindingChecks = [
+    [
+      "packages/runtime-host/src/session-adapter.ts",
+      sessionAdapter,
+      "agentRuntime\n        .run({",
+    ],
+    [
+      "packages/cli/src/serve/ephemeral-executor.ts",
+      ephemeral,
+      "opts.runtime.run({",
+    ],
+    [
+      "packages/cli/src/serve/agent-job-runtime.ts",
+      durableJob,
+      "runtime!.run({",
+    ],
+    [
+      "packages/executor/src/runtime-role.ts",
+      executorRole,
+      "createAssignmentRuntimeAdapter(sessionId, runtime)",
+    ],
+    [
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      executorComposition,
+      "executor.createInProcessAssignmentRuntimeFactory(role)",
+    ],
+  ];
+  for (const [relative, source, token] of bindingChecks) {
+    if ((source.split(token).length - 1) !== 1) {
+      failures.push(`${relative}: Kernel production binding is missing or duplicated`);
+    }
+  }
+
+  const conformanceFile = ts.createSourceFile(
+    "packages/cli/src/serve/__tests__/kernel-runtime-conformance.test.ts",
+    conformance,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const casesDeclaration = conformanceFile.statements.find(
+    (statement) =>
+      ts.isVariableStatement(statement) &&
+      statement.declarationList.declarations.some(
+        (candidate) => ts.isIdentifier(candidate.name) && candidate.name.text === "CASES",
+      ),
+  );
+  const caseVariable = casesDeclaration?.declarationList.declarations.find(
+    (candidate) => ts.isIdentifier(candidate.name) && candidate.name.text === "CASES",
+  );
+  const unwrapExpression = (expression) => {
+    let current = expression;
+    while (
+      current &&
+      (ts.isAsExpression(current) ||
+        ts.isSatisfiesExpression(current) ||
+        ts.isParenthesizedExpression(current))
+    ) {
+      current = current.expression;
+    }
+    return current;
+  };
+  const caseArray = unwrapExpression(caseVariable?.initializer);
+  const caseNames = [];
+  if (caseArray && ts.isArrayLiteralExpression(caseArray)) {
+    for (const element of caseArray.elements) {
+      if (!ts.isObjectLiteralExpression(element)) continue;
+      const name = element.properties.find(
+        (property) => property.name && propertyNameText(property.name) === "name",
+      );
+      if (
+        name &&
+        ts.isPropertyAssignment(name) &&
+        ts.isStringLiteralLike(name.initializer)
+      ) {
+        caseNames.push(name.initializer.text);
+      }
+    }
+  }
+  const expectedCases = [
+    "conversation",
+    "scheduled ephemeral",
+    "local durable job",
+    "remote Executor assignment",
+  ];
+  if (
+    JSON.stringify(caseNames) !== JSON.stringify(expectedCases) ||
+    !conformance.includes("describe.each(CASES)") ||
+    (conformance.match(/\bit\(/gu) ?? []).length !== 4 ||
+    !conformance.includes("createOwnerRuntimeAdapter(identity, probe.runtime)") ||
+    !conformance.includes("runEphemeralTurn({") ||
+    !conformance.includes("createAgentJobRuntimePort({") ||
+    !conformance.includes("createExecutorRole({") ||
+    !conformance.includes("createInProcessAssignmentRuntimeFactory(role)") ||
+    !conformance.includes("KernelRunEnvelope") ||
+    !conformance.includes("KernelRunEvent") ||
+    !conformance.includes("KernelRunCompletion") ||
+    !conformance.includes("KernelTerminal") ||
+    !conformance.includes(
+      'expect(observation).toEqual({ status: "completed", events: EVENTS });',
+    ) ||
+    !conformance.includes("expect(binding.cancel(ABORT_REASON)).toBe(true);") ||
+    !conformance.includes(
+      "expect(binding.cancel(REPLACEMENT_ABORT_REASON)).toBe(false);",
+    ) ||
+    !conformance.includes("expect(probe.terminals).toEqual([]);") ||
+    !conformance.includes("expect(probe.dispose).toHaveBeenCalledTimes(1);") ||
+    !conformance.includes(
+      "expect(first.confirmationBroker).not.toBe(second.confirmationBroker);",
+    )
+  ) {
+    failures.push("shared Kernel Conformance does not cover the four real production bindings");
+  }
+  if (
+    (lifecycle.match(/id: "ephemeralRuntime\.dispose"/gu) ?? []).length !== 1 ||
+    (command.match(/lifecycleContributions\.acquire\("ephemeralRuntime\.dispose"/gu) ?? [])
+      .length !== 1 ||
+    !command.includes('ephemeralRuntime.dispose("session-dispose")')
+  ) {
+    failures.push("scheduled ephemeral runtime lacks one typed production lifecycle owner");
+  }
+  return failures;
+}
+
 /** A4 AgentRuntime exposes finite security projections/effects, never implementation objects. */
 export function inspectAgentRuntimeSecurityEncapsulation(records) {
   const failures = [];
@@ -1770,11 +2065,11 @@ export function inspectAgentRuntimeSecurityEncapsulation(records) {
             .filter(Boolean),
         );
         if (
-          names.has("providerId") &&
-          names.has("model") &&
           names.has("confirmationBroker") &&
           names.has("securitySnapshot") &&
           names.has("executionPermissionRules") &&
+          names.has("executionProfile") &&
+          names.has("dispose") &&
           names.has("run")
         ) {
           candidates.push(node);
@@ -1987,9 +2282,9 @@ export function inspectAgentRuntimeWorkspaceEncapsulation(records) {
             .filter(Boolean),
         );
         if (
-          names.has("providerId") &&
-          names.has("model") &&
           names.has("confirmationBroker") &&
+          names.has("executionProfile") &&
+          names.has("dispose") &&
           names.has("run")
         ) {
           candidates.push(node);
@@ -2118,7 +2413,7 @@ export function inspectTurnContextProviderAssembly(records) {
     "for (const provider of assembledTurnContextProviders)",
     injectorIndex,
   );
-  const returnIndex = runtime.indexOf("return {\n    providerId:", contributionIndex);
+  const returnIndex = runtime.indexOf("return {\n    confirmationBroker,", contributionIndex);
   if (
     captureIndex < 0 ||
     roleAssemblyIndex < 0 ||
@@ -2390,6 +2685,19 @@ export async function validateS7Structure() {
   failures.push(...inspectKernelRunEnvelopeOwnership(records));
   failures.push(...inspectKernelRunEventOwnership(records));
   failures.push(...inspectKernelTerminalOwnership(records));
+  failures.push(...inspectKernelConformanceAndAgentRuntimeBudget([
+    ...records,
+    {
+      relative: "packages/cli/src/serve/__tests__/kernel-runtime-conformance.test.ts",
+      text: await readFile(
+        path.join(
+          root,
+          "packages/cli/src/serve/__tests__/kernel-runtime-conformance.test.ts",
+        ),
+        "utf8",
+      ),
+    },
+  ]));
   failures.push(...inspectAgentRuntimeSecurityEncapsulation(records));
   failures.push(...inspectAgentRuntimeWorkspaceEncapsulation(records));
   failures.push(...inspectTurnContextProviderAssembly(records));
@@ -3269,6 +3577,7 @@ export function inspectManagedHostAssembly(records) {
     "assetMaintenance.stop",
     "executorJobOwner.close",
     "losslessDataPlane.close",
+    "ephemeralRuntime.dispose",
   ];
   const anchorRuntimeLifecycleIds = [
     "confirmationBridge.dispose",

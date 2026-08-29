@@ -14,6 +14,7 @@ type AgentRuntime = Awaited<
   ReturnType<ExecutorRoleOptions["createAgentRuntime"]>
 >;
 type AgentRunParams = Parameters<AgentRuntime["run"]>[0];
+type AgentRunCompletion = Awaited<ReturnType<AgentRuntime["run"]>>;
 type RunInput = Parameters<SessionRuntime["run"]>[0];
 type RunOptions = Parameters<SessionRuntime["run"]>[1];
 type RunIterator = ReturnType<SessionRuntime["run"]>;
@@ -88,6 +89,43 @@ function buildResult(
   } as RunResult;
 }
 
+function buildKernelCompletion(
+  input: RunInput,
+  reason: "completed" | "aborted",
+  abortReason?: AbortReason,
+): AgentRunCompletion {
+  const assistant = {
+    role: "assistant" as const,
+    content:
+      reason === "completed"
+        ? [{ type: "text" as const, text: "complete" }]
+        : [],
+  };
+  return {
+    terminal:
+      reason === "completed"
+        ? {
+            reason: "completed",
+            message: assistant,
+            usage: { inputTokens: 1, outputTokens: 1 },
+          }
+        : {
+            reason: "aborted",
+            abortReason,
+            usage: { inputTokens: 0, outputTokens: 0 },
+          },
+    artifacts: {
+      runRecord: {
+        timestamp: "2026-07-12T00:00:00.000Z",
+        messages: [...input, assistant],
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+      newMessages: reason === "completed" ? [assistant] : [],
+      durationMs: 1,
+    },
+  };
+}
+
 function createHarness(): RuntimeFactoryConformanceHarness<
   RunInput,
   RunOptions,
@@ -107,12 +145,13 @@ function createHarness(): RuntimeFactoryConformanceHarness<
     return {
       confirmationBroker: broker,
       drainLifecycleDiagnostics: () => [],
-      async run(params: AgentRunParams): Promise<RunResult> {
-        if (params.conversationId === "conversation-failed") throw RUN_ERROR;
-        if (params.conversationId === "conversation-interrupted") {
-          params.onYield?.(INTERRUPTED_YIELD);
-          return await new Promise<RunResult>((resolve, reject) => {
-            const signal = params.abortSignal;
+      async run(params: AgentRunParams): Promise<AgentRunCompletion> {
+        const conversationId = params.identity.conversationId;
+        if (conversationId === "conversation-failed") throw RUN_ERROR;
+        if (conversationId === "conversation-interrupted") {
+          await params.observation.onEvent?.(INTERRUPTED_YIELD);
+          return await new Promise<AgentRunCompletion>((resolve, reject) => {
+            const signal = params.control.abortSignal;
             if (!signal) {
               reject(new Error("conformance run requires an abort signal"));
               return;
@@ -121,7 +160,7 @@ function createHarness(): RuntimeFactoryConformanceHarness<
               "abort",
               () => {
                 resolve(
-                  buildResult(
+                  buildKernelCompletion(
                     INTERRUPTED_INPUT,
                     "aborted",
                     signal.reason as AbortReason,
@@ -134,8 +173,10 @@ function createHarness(): RuntimeFactoryConformanceHarness<
         }
 
         completedInvocations.push(params);
-        for (const event of COMPLETED_YIELDS) params.onYield?.(event);
-        return buildResult(COMPLETED_INPUT, "completed");
+        for (const event of COMPLETED_YIELDS) {
+          await params.observation.onEvent?.(event);
+        }
+        return buildKernelCompletion(COMPLETED_INPUT, "completed");
       },
       dispose,
     } as AgentRuntime;
@@ -168,10 +209,12 @@ function createHarness(): RuntimeFactoryConformanceHarness<
     expectCompletedInvocation() {
       expect(completedInvocations).toHaveLength(1);
       expect(completedInvocations[0]).toMatchObject({
-        conversationId: "conversation-completed",
-        messages: COMPLETED_INPUT,
-        turnIndex: 7,
-        source: "interactive",
+        modelInput: { messages: COMPLETED_INPUT },
+        identity: {
+          conversationId: "conversation-completed",
+          turnIndex: 7,
+          source: "interactive",
+        },
       });
     },
     expectDisposed(sessionId) {

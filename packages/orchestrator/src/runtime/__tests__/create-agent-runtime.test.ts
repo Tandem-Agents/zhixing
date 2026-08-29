@@ -1320,101 +1320,6 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
 
 });
 
-// ─── 契约: resetConversationState ───
-
-describe("createAgentRuntime · resetConversationState", () => {
-  it("无 Resettable 注册 → 调用即 resolve（空操作）", async () => {
-    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
-    const runtime = await createAgentRuntime({});
-    await expect(runtime.resetConversationState()).resolves.toBeUndefined();
-  });
-
-  it("LIFO 串行：后注册先 reset", async () => {
-    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
-    const runtime = await createAgentRuntime({});
-    const order: string[] = [];
-    runtime.registerConversationStateReset({
-      id: "first",
-      reset: () => {
-        order.push("first");
-      },
-    });
-    runtime.registerConversationStateReset({
-      id: "second",
-      reset: () => {
-        order.push("second");
-      },
-    });
-    runtime.registerConversationStateReset({
-      id: "third",
-      reset: () => {
-        order.push("third");
-      },
-    });
-
-    await runtime.resetConversationState();
-    expect(order).toEqual(["third", "second", "first"]);
-  });
-
-  it("await async reset 完成才往下走", async () => {
-    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
-    const runtime = await createAgentRuntime({});
-    let resolved = false;
-    runtime.registerConversationStateReset({
-      id: "slow",
-      reset: async () => {
-        await new Promise((r) => setTimeout(r, 5));
-        resolved = true;
-      },
-    });
-    await runtime.resetConversationState();
-    expect(resolved).toBe(true);
-  });
-
-  it("单个抛错不阻断其它 reset；全跑完后聚合抛 ResetConversationStateError", async () => {
-    const { ResetConversationStateError } = await import(
-      "../create-agent-runtime.js"
-    );
-    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
-    const runtime = await createAgentRuntime({});
-    const ran: string[] = [];
-    runtime.registerConversationStateReset({
-      id: "ok-1",
-      reset: () => {
-        ran.push("ok-1");
-      },
-    });
-    runtime.registerConversationStateReset({
-      id: "boom",
-      reset: () => {
-        throw new Error("inner failure");
-      },
-    });
-    runtime.registerConversationStateReset({
-      id: "ok-2",
-      reset: () => {
-        ran.push("ok-2");
-      },
-    });
-
-    let caught: unknown;
-    try {
-      await runtime.resetConversationState();
-    } catch (err) {
-      caught = err;
-    }
-
-    // 全部 reset 都被尝试（顺序 ok-2 → boom → ok-1）
-    expect(ran).toContain("ok-1");
-    expect(ran).toContain("ok-2");
-    expect(caught).toBeInstanceOf(ResetConversationStateError);
-    if (caught instanceof ResetConversationStateError) {
-      expect(caught.failures).toHaveLength(1);
-      expect(caught.failures[0]!.id).toBe("boom");
-    }
-  });
-});
-
 // ─── 契约: RunContext.conversationId 透传到 ALS ───
 
 describe("createAgentRuntime · run() conversationId 透传", () => {
@@ -1509,23 +1414,27 @@ describe("createAgentRuntime · run() conversationId 透传", () => {
 // ─── 契约: primaryRole 槽位路由 ───
 
 describe("createAgentRuntime · primaryRole 槽位", () => {
-  it("primaryRole='power' 未配（fallback main）→ 路径正常装配，model 取 fallback", async () => {
+  it("primaryRole='power' 未配（fallback main）→ 路径正常装配并调用 fallback", async () => {
     providerRef.current = new MockLLMProvider([{ text: "ok" }]);
     // powerRoleRef 未设 → power 折叠为 main（fallback 语义）
     const runtime = await createAgentRuntime({ primaryRole: "power" });
-    expect(runtime.model).toBe("mock-model");
+    await runKernel(runtime, {
+      modelInput: { messages: [userMessage("hi")] },
+      identity: { turnIndex: 0 },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
+    expect(providerRef.current.calls.length).toBeGreaterThan(0);
   });
 
-  it("primaryRole='power' + 差异化 power → 六处可观测点（返回 model + loop LLM）指向 power，非 main", async () => {
+  it("primaryRole='power' + 差异化 power → loop LLM 指向 power，非 main", async () => {
     const mainProvider = new MockLLMProvider([{ text: "from-main" }]);
     const powerProvider = new MockLLMProvider([{ text: "from-power" }]);
     providerRef.current = mainProvider;
     powerRoleRef.current = { model: "power-model", provider: powerProvider };
 
     const runtime = await createAgentRuntime({ primaryRole: "power" });
-
-    // 返回 providerId+model（六处之一，直接可观测）指向 power
-    expect(runtime.model).toBe("power-model");
 
     await runKernel(runtime, {
       modelInput: {
@@ -1551,8 +1460,6 @@ describe("createAgentRuntime · primaryRole 槽位", () => {
     powerRoleRef.current = { model: "power-model", provider: powerProvider };
 
     const runtime = await createAgentRuntime({}); // 缺省 primaryRole = main
-
-    expect(runtime.model).toBe("mock-model");
 
     await runKernel(runtime, {
       modelInput: {

@@ -156,6 +156,12 @@ const failures = [];
 await verifyCorePackageExports(failures);
 await verifyRpcSkillCatalogClientExport(failures);
 if (
+  typeof orchestratorRuntime.createAgentRuntime !== "function" ||
+  "createAgentRuntime" in orchestratorRoot
+) {
+  failures.push("orchestrator-agent-runtime:invalid-runtime-boundary");
+}
+if (
   typeof orchestratorRuntime.assertKernelRunEvent !== "function" ||
   "assertKernelRunEvent" in orchestratorRoot
 ) {
@@ -392,6 +398,47 @@ const agentRuntimeDeclaration = orchestratorRuntimeDeclarations.match(
 const createAgentRuntimeOptionsDeclaration = orchestratorRuntimeDeclarations.match(
   /interface CreateAgentRuntimeOptions \{(?<body>[\s\S]*?)\n\}/u,
 )?.groups?.body;
+if (
+  !agentRuntimeDeclaration ||
+  /\b(?:AgentRuntime|createAgentRuntime|KernelRunEnvelope|KernelRunEvent|KernelRunCompletion|KernelTerminal)\b/u.test(
+    orchestratorRootDeclarations,
+  )
+) {
+  failures.push("orchestrator-agent-runtime:invalid-declaration-boundary");
+}
+const expectedAgentRuntimeMembers = [
+  "run",
+  "estimateConversationRequestBudget",
+  "estimateMessagesTokens",
+  "forceCompact",
+  "callText",
+  "callTextWithUsage",
+  "runOrchestrationV1",
+  "subAgentUsages",
+  "securitySnapshot",
+  "executionPermissionRules",
+  "executionProfile",
+  "calibrationFactor",
+  "confirmationBroker",
+  "drainLifecycleDiagnostics",
+  "dispose",
+  "onAttentionWindowChange",
+];
+const actualAgentRuntimeMembers = agentRuntimeDeclaration
+  ? agentRuntimeDeclaration
+      .split("\n")
+      .map((line) =>
+        line.match(/^ {4}(?:readonly\s+)?(?<name>[A-Za-z_$][\w$]*)\??\s*(?::|\()/u)
+          ?.groups?.name,
+      )
+      .filter(Boolean)
+  : [];
+if (
+  JSON.stringify(actualAgentRuntimeMembers) !==
+  JSON.stringify(expectedAgentRuntimeMembers)
+) {
+  failures.push("orchestrator-agent-runtime:public-member-exact-set-drift");
+}
 if (
   !agentRuntimeDeclaration ||
   /\b(?:securityPipeline|permissionStore|SecurityPipeline|IPermissionStore)\b/u.test(

@@ -146,8 +146,5 @@ export type {
   WireContractV1,
 } from "./distributed.js";
 
-// ─── 可重置组件 ───
-export type { Resettable } from "./resettable.js";
-
 // ─── 已装配运行体事实 ───
 export type { RuntimeExecutionProfile } from "./runtime-execution-profile.js";

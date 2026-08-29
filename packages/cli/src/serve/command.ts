@@ -895,6 +895,9 @@ async function runServerProcess(
   const ephemeralRuntime = await runtimeHost.createEphemeralRuntime(
     anchorRuntimeProjections.ephemeral(),
   );
+  lifecycleContributions.acquire("ephemeralRuntime.dispose", () =>
+    ephemeralRuntime.dispose("session-dispose"),
+  );
 
   if (ctx.authorityRuntime) {
     await publishRequiredCredentialRotations({

@@ -315,10 +315,6 @@ export function createOwnerRuntimeAdapter(
       };
     },
 
-    resetConversationState() {
-      return agentRuntime.resetConversationState();
-    },
-
     onAttentionWindowChange(reason) {
       return agentRuntime.onAttentionWindowChange(reason);
     },

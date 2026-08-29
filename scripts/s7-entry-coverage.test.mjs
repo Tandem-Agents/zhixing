@@ -18,6 +18,7 @@ import {
   inspectKernelRunEnvelopeOwnership,
   inspectKernelRunEventOwnership,
   inspectKernelTerminalOwnership,
+  inspectKernelConformanceAndAgentRuntimeBudget,
   inspectAgentRuntimeSecurityEncapsulation,
   inspectAgentRuntimeWorkspaceEncapsulation,
   inspectTurnContextProviderAssembly,
@@ -2580,6 +2581,95 @@ test("Kernel terminals have one finite owner, zero-copy artifact transfer and th
       (text) => `${text}\nexport { type KernelTerminal } from "./runtime/index.js";`,
     )).join("\n"),
     /leaked through the package root/,
+  );
+});
+
+test("Kernel Conformance covers four production bindings and freezes AgentRuntime API", async () => {
+  const paths = [
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+    "packages/orchestrator/src/runtime/index.ts",
+    "packages/orchestrator/src/index.ts",
+    "packages/runtime-host/src/session-adapter.ts",
+    "packages/cli/src/serve/ephemeral-executor.ts",
+    "packages/cli/src/serve/agent-job-runtime.ts",
+    "packages/executor/src/runtime-role.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/cli/src/serve/__tests__/kernel-runtime-conformance.test.ts",
+    "packages/cli/src/serve/assembly-lifecycle.ts",
+    "packages/cli/src/serve/command.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectKernelConformanceAndAgentRuntimeBudget(records), []);
+  assert.match(
+    inspectKernelConformanceAndAgentRuntimeBudget(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => text.replace(
+        "export interface AgentRuntime {",
+        "export interface AgentRuntime {\n  readonly metadata: unknown;",
+      ),
+    )).join("\n"),
+    /public member exact-set drifted/,
+  );
+  assert.match(
+    inspectKernelConformanceAndAgentRuntimeBudget(mutate(
+      "packages/orchestrator/src/index.ts",
+      (text) => `${text}\nexport { createAgentRuntime } from "./runtime/index.js";`,
+    )).join("\n"),
+    /not confined to the runtime subpath/,
+  );
+  assert.match(
+    inspectKernelConformanceAndAgentRuntimeBudget(mutate(
+      "packages/cli/src/serve/__tests__/kernel-runtime-conformance.test.ts",
+      (text) => text.replace('    name: "remote Executor assignment",', '    name: "local alias",'),
+    )).join("\n"),
+    /does not cover the four real production bindings/,
+  );
+  assert.match(
+    inspectKernelConformanceAndAgentRuntimeBudget(mutate(
+      "packages/cli/src/serve/__tests__/kernel-runtime-conformance.test.ts",
+      (text) => text.replace(
+        "createInProcessAssignmentRuntimeFactory(role)",
+        "createInProcessRuntimeFactory(role)",
+      ),
+    )).join("\n"),
+    /does not cover the four real production bindings/,
+  );
+  assert.match(
+    inspectKernelConformanceAndAgentRuntimeBudget(mutate(
+      "packages/cli/src/serve/__tests__/kernel-runtime-conformance.test.ts",
+      (text) => text.replace(
+        "expect(binding.cancel(ABORT_REASON)).toBe(true);",
+        "expect(binding.cancel(ABORT_REASON)).toBe(false);",
+      ),
+    )).join("\n"),
+    /does not cover the four real production bindings/,
+  );
+  assert.match(
+    inspectKernelConformanceAndAgentRuntimeBudget(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace(
+        "executor.createInProcessAssignmentRuntimeFactory(role)",
+        "executor.createInProcessRuntimeFactory(role)",
+      ),
+    )).join("\n"),
+    /Kernel production binding is missing or duplicated/,
+  );
+  assert.match(
+    inspectKernelConformanceAndAgentRuntimeBudget(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        'lifecycleContributions.acquire("ephemeralRuntime.dispose",',
+        'void ("ephemeralRuntime.dispose" &&',
+      ),
+    )).join("\n"),
+    /lacks one typed production lifecycle owner/,
   );
 });
 

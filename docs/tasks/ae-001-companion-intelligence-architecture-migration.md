@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A4-08 已由协调者独立复核；等待纳入提交<br>
+> 当前检查点：A4-09 已执行；等待协调者独立复核<br>
 > 完成度：4/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `b624916d`；A0～A3、A4-01～A4-07 已由协调者独立复核并提交，A1、A2、A3 阶段退出门成立 |
+| 已接受基线 | `ff834cbe`；A0～A3、A4-01～A4-08 已由协调者独立复核并提交，A1、A2、A3 阶段退出门成立 |
 | 当前 A 项 | A4：封闭 Intelligence Kernel 合同及其生产边界 |
-| 活跃工作包 | A4-08 已由协调者独立复核，等待纳入提交：Anchor 唯一产品组合边界统一生成 Schedule、Task、MCP 与 Workscene 的有限冻结工具投影，RuntimeHost 只验证和消费通用运行装配合同 |
-| 下一责任链 | A4-08 通过协调者独立复核后，单独闭合 Kernel Conformance 与其余 AgentRuntime 公共面；不提前进入 A5 |
+| 活跃工作包 | A4-09 已执行，等待协调者独立复核：四种生产运行形态共用同一 Kernel Conformance，AgentRuntime 公共 API exact-set 与 runtime-only 窄导出已冻结 |
+| 下一责任链 | A4-09 通过协调者独立复核后，按 A4 退出门冷启动反查 Kernel/RuntimeHost 生产依赖与残余；若无真实缺口则关闭 A4，否则只派发被反证的最窄闭包 |
 | 打开的单向桥 | 无；Skill 管理、保存、admission、load/usage、Kernel 与 Executor 投影均只经 `@zhixing/core/skills/catalog` 及既有 Authority/CAS/assignment Correctness 端口成立，旧 writable Store 不再承担正式应用行为 |
-| 已失效证据 | 无当前未恢复证据；A4-08 已重验 A4-07 的 Workscene/capability 投影与 A4-01 的 RuntimeHost 装配子边界，A4-01～A4-06 其余 Kernel 合同与封装证据未失效 |
+| 已失效证据 | 无当前未恢复证据；A4-09 已在同一有限合同下恢复 A4-01～A4-03 的 Envelope/Event/Terminal owner、A4-04～A4-06 的公共面封装及 A4-07～A4-08 的四类生产投影交界，等待协调者独立复核 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1672,6 +1672,23 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 结构、声明与构建：S7 扩展现有产品投影 inspector，绑定唯一 Anchor factory、四类 production issuance、同一 capability source、RuntimeHost 产品实现零认知、staged scheduler 产品归属、旧 source 退场与 Executor 隔离；反向 mutation 可识别 Host 重新取得 MCP/assembler、投影漏校验、ephemeral 绕过、capability 旁路和 Executor 注入。首次 canonical 运行准确暴露 inspector 仍要求旧 capability 调用文本，修正为当前单一投影事实后，最终 `pnpm s7:lint` 为 29/29 且 registry golden 通过。runtime-host final build、CLI typecheck 与 `pnpm cli:build` 通过；fresh declaration 上 `pnpm runtime:package-exports` 通过，证明通用 projection 只从窄 subpath 可达且 Host declaration 不泄漏产品实现；最窄 Biome 与 `git diff --check` 通过。
 - 失效、遗留与状态：若 `RuntimeToolProjection` factory/assertion/窄 export、Anchor projection factory、Schedule/Task/MCP assembler、job allowlist、四类 command issuance、capability catalog、RuntimeHost source/declaration、Executor assignment MCP、S7 mutation 或 package-export declaration reader任一变化，恢复本证据并只重验对应闭包。Schedule/Task 事实 owner、Reducer、Authority、Product API、存储，MCP 基础设施、job/Executor 协议、Kernel Conformance、A5/A6 均未迁移；A4 与完成度继续为 `[ ]` / `4/8`。交接类型为完成、等待协调者独立复核；无本包内遗留，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：从 Anchor 组合根、main/Workscene/ephemeral/durable-job 四类发放、RuntimeHost generic issuance、fresh declaration、capability catalog 与 Executor assignment runtime 双向反查，确认 Schedule、Task、MCP 与 Workscene 工具只由唯一产品投影装配，Host 不再导入或解释产品实现，job allowlist/model/capacity 与 Executor 隔离无漂移。独立重跑五个直接文件 32/32、canonical S7 29/29、runtime-host build、CLI typecheck/正式构建、fresh package exports 和 `git diff --check`，全部通过；接受 `A4-08-anchor-runtime-tool-projection-v1`。A4 继续为 `[ ]`，下一责任链只闭合 Kernel Conformance 与其余 AgentRuntime 公共面，不进入 A5。
+
+### A4-09：闭合 Kernel Conformance 与 AgentRuntime 公共 API 预算
+
+- 派发基线：`HEAD ff834cbe + task-doc:A4-09-dispatch`；A4-08 已由协调者独立复核并纳入提交，派发前索引与工作区为空。
+- 唯一架构结果：建立一套直接消费 `KernelRunEnvelope / KernelRunEvent / KernelRunCompletion` 的可执行 Kernel Conformance，并由同一套合同证明 conversation、scheduled ephemeral、本机 durable job 与远端 Executor assignment 四种现有生产运行形态行为一致；同时把 `AgentRuntime` 正式公共面冻结为当前确有消费者的有限执行、查询和生命周期端口，使更换 Kernel 实现不需要产品领域、Surface、Host 或拓扑了解其内部对象。
+- 公共面闭包：从 `AgentRuntime` 唯一声明和全部生产消费者反查每个成员的当前必要性、只读性与责任归属；保留现有能力所需的有限 run/auxiliary execution、用量/安全/运行查询、确认与生命周期端口，不为接口整齐改写产品行为。删除没有生产消费者、只允许实例发布后向 Kernel 注入宿主管理对象的入口及其无效状态链；不得把成员换成 metadata bag、服务定位器、宽 callback、第二 runtime 类型或根 barrel。查询只能返回有限不可变值，不能泄漏 Provider、Security、Permission、Workspace、Tool 或 lifecycle 实现实例。
+- Conformance 闭包：复用已经冻结的 Envelope/Event/Terminal owner，不另建平行运行协议。共享测试合同必须对四种生产发放/适配路径逐一证明输入捕获、事件顺序与隔离、成功/失败/取消终态、同一完成结果语义、确认身份、实例隔离和 dispose/资源释放；远端形态必须经过现有 assignment/Executor 适配而非把本地工厂改名，产品投影/协议 wrapper 与 Kernel 合同各自有识别力。现有 `runtime-factory-conformance` 若属于上层 session/executor adapter，只能明确复用或保持分层，不得冒充 Kernel Conformance、复制一套近似合同或建设通用测试框架。
+- 旧路、门禁与证据：S7 与 fresh declaration/package-export 门禁机械冻结 Kernel 公共成员 exact-set、runtime-only 窄导出、四类生产 binding、唯一 Envelope/Event/Terminal owner，并拒绝安全/权限/工作区实现回流、未声明成员、第二入口、产品或拓扑类型导入。最窄直接测试必须能分别推翻四种形态漏绑、事件/终态漂移、取消或清理缺失；只运行受影响的 orchestrator、runtime-host、CLI、Executor/test-utils 直接闭包、依赖顺序构建、canonical S7、package exports 与格式检查，不重复根级回归或 A4-01～A4-08 已未失效的场景测试。
+- 明确不做：不迁移 Conversation/Schedule/Workscene/Task 领域事实或 Product API，不重构模型循环、安全/权限/确认、上下文压缩、编排、Executor 协议或远端拓扑，不新增运行形态、产品能力、benchmark 或通用诊断框架，不进入 A5/A6/A7。
+- 完成与止损：四种生产形态在同一有限 Kernel 合同下通过有识别力的共享 Conformance，AgentRuntime 公共成员均有真实消费者和有限值边界，旧后装管理入口及平行合同归零，受影响证据恢复后完成。若预计或实际超过四小时、需要改变产品语义/公开协议、跨入两个独立公共责任，或无法让远端适配在不重构拓扑的前提下进入共享合同，停在可构建、原合同仍完整或新合同已唯一接管的安全检查点反馈，不继续扩面。
+- 基线与即时裁决：进场为 `HEAD ff834cbe7b02f20a816e504c8adb38d60d306431 + task-doc:A4-09-dispatch`，索引为空。生产反查把 `AgentRuntime` 收敛为 16 项 exact-set：唯一执行 `run`；辅助执行 `forceCompact / callText / callTextWithUsage / runOrchestrationV1`；有限查询 `estimateConversationRequestBudget / estimateMessagesTokens / subAgentUsages / securitySnapshot / executionPermissionRules / executionProfile / calibrationFactor / drainLifecycleDiagnostics`；确认与生命周期 `confirmationBroker / dispose / onAttentionWindowChange`。这些成员分别由 conversation Owner/视角控制、Schedule/Advancement、Assignment setup-delivery、权限与 `/security` 投影、确认 Hub、attention-window 和 runtime 终止链直接消费；返回值均为既有有限值或窄端口，不暴露 Provider、SecurityPipeline、PermissionStore、workspace、Tool 或 lifecycle 实现实例。
+- 公共 API 与旧链退场：`providerId / model` 没有生产消费者，只剩旧测试自证，已从接口、工厂返回和相应测试观察面删除，primary-role 行为改由真实 provider 调用证明。`registerConversationStateReset / resetConversationState` 只有测试注册、生产 registry 永远为空；现已连同 `Resettable`、聚合错误、Owner `SessionRuntime` 可选 no-op、clear 调用和 core 根转导一起退场，没有实例发布后的宿主管理注入或无效状态链。`AgentRuntime / createAgentRuntime / KernelRunEnvelope` 也从 `@zhixing/orchestrator` 宽根退出，只保留 `@zhixing/orchestrator/runtime` 窄正式入口；fresh declaration 与 runtime package-export gate 固定 16 项 exact-set，并继续拒绝 Event/Terminal/identity 的根泄漏。
+- 共享 Conformance 与分层：新增一套直接引用现有 `KernelRunEnvelope / KernelRunEvent / KernelRunCompletion / KernelTerminal` 的参数化 Kernel Conformance，同一组四项行为分别驱动 conversation 的 `createOwnerRuntimeAdapter`、scheduled ephemeral 的 `runEphemeralTurn`、本机 durable job 的 `createAgentJobRuntimePort`，以及真实 `createExecutorRole → createInProcessAssignmentRuntimeFactory → createAssignmentRuntimeAdapter` 远端 assignment 路径；逐形态证明实例/确认 broker 隔离、Envelope identity/Correctness 捕获、Event 顺序、completed/reject/cancel-first-wins Terminal 和恰一次 dispose。既有 `@zhixing/test-utils/runtime-factory-conformance` 明确保留为上层 `SessionRuntime/RuntimeFactory` 投影合同；首次定向运行准确暴露其 fixture 仍伪造 A4 前的参数袋与 core `RunResult`，已改为由真实 Envelope 产生 Kernel Completion 后再验证 SessionRuntime 投影，未复制或冒充 Kernel Conformance。
+- 生命周期与行为保护：四类 adapter 的产品投影、公开协议、错误/取消、确认 identity、Assignment/Executor 拓扑均未改变。生产反查发现 Anchor 的 shared scheduled ephemeral runtime 原先没有 dispose owner；现由既有 `AssemblyLifecycleContributions` 在取得后的第一个安全点登记唯一 `ephemeralRuntime.dispose`，同一幂等 handle 同时覆盖后续启动失败和正常 runtime-stage LIFO 关闭。canonical registry golden 只新增该真实 `anchor-host/runtime` cleanup descriptor 在四种拓扑投影及 shutdown 映射，没有其他 registry 漂移。
+- 直接证据：Kernel Conformance 为 1 文件 16/16；CLI conformance/assembly/session adapter/window 为 4 文件 50/50；Executor 上层 runtime-factory conformance 为 1 文件 5/5；orchestrator primary-role 最窄闭包 3/3，Server clear 最窄闭包 1/1。canonical `pnpm s7:lint` 为 30/30 且更新后的 registry golden 通过，反向 mutation 可识别公共成员增删、根导出、任一四形态漏绑、远端改成本地 adapter、取消/清理证据缺失、无效 reset 链回流和 ephemeral owner 遗失；`pnpm runtime:package-exports` 在 fresh declaration 上通过。
+- 构建、失效与状态：依赖顺序完成 core、tools-builtin、owner-kernel、orchestrator、runtime-host、executor、server 与 CLI 构建，CLI `tsc --noEmit`、最窄 Biome 和 `git diff --check` 通过；core 只出现既有 Rollup 循环 re-export 警告且 DTS 成功。若 AgentRuntime 16 项声明/返回值、runtime/root export、任一四形态 adapter、Envelope/Event/Terminal owner、SessionRuntime 上层投影、ephemeral lifecycle contribution、Conformance/S7 mutation 或 fresh declaration gate变化，恢复本证据并只重验对应闭包。A4 继续为 `[ ]`、完成度仍为 `4/8`；下一检查点只由协调者按 A4 退出门冷启动反查决定，未进入 A5/A6/A7，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：从四类真实生产 adapter、AgentRuntime 唯一声明与全部消费者、`/clear` 和 TaskList 产品清理链、Anchor ephemeral 生命周期、窄导出及反向 mutation 双向复核，确认四种运行形态共用同一 Envelope/Event/Terminal 合同，16 项公共面均有当前消费者，退役 reset 链从未承载生产状态且删除不改变清空语义。独立重跑 CLI 四文件 55/55、orchestrator primary-role 3/3、Executor 5/5、Server clear 1/1、canonical S7 30/30、fresh package exports 与 `git diff --check`，全部通过；接受 `A4-09-kernel-conformance-agent-runtime-budget-v1`。A4 仍须按退出门冷启动反查 `@zhixing/runtime-host` 的产品领域依赖与公开残余，未据本包提前勾选。
 
 ## 十、用户提示词
 

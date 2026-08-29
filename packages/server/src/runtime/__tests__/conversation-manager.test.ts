@@ -2371,12 +2371,10 @@ describe("ConversationManager", () => {
       usage: { inputTokens: 0, outputTokens: 0 },
     });
 
-    it("clear:窗口+turnCount 归零、运行体钩子被调、持久层 persistClear 在临界区调;busy 拒绝;不活跃 persist 即 cleared-inactive", async () => {
-      const resetSpy = vi.fn(async () => {});
+    it("clear:窗口+turnCount 归零、换窗钩子被调、持久层 persistClear 在临界区调;busy 拒绝;不活跃 persist 即 cleared-inactive", async () => {
       const windowChangeSpy = vi.fn(async () => {});
       const mgr = makePersistentManager({
         runtimeExtras: {
-          resetConversationState: resetSpy,
           onAttentionWindowChange: windowChangeSpy,
         },
       });
@@ -2392,7 +2390,6 @@ describe("ConversationManager", () => {
       expect(session.window.getMessages()).toHaveLength(0);
       expect(session.turnCount).toBe(0);
       expect(session.busy).toBe(false); // 释放后串行点归还
-      expect(resetSpy).toHaveBeenCalledOnce();
       expect(windowChangeSpy).toHaveBeenCalledWith("clear");
 
       // busy 拒绝且 persist 绝不被调(盘不被动)

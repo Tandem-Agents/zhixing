@@ -168,8 +168,6 @@ export interface SessionRuntime {
     messages: Message[],
     turnCount: number,
   ): Promise<RuntimeCompactOutcome>;
-  /** 触发全部已注册组件重置对话级状态(/clear 执行体的内存侧)。 */
-  resetConversationState?(): Promise<void>;
   /**
    * run 外注意力窗口换代(清空 / 切换 / 手动压缩后)——旧窗 onWindowClose →
    * 新窗 onWindowOpen,更新实例权威 prompt。

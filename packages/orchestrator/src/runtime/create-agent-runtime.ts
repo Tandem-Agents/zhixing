@@ -73,7 +73,6 @@ import {
   TurnContextInjector,
   TimeProvider,
   type SkillMode,
-  type Resettable,
   type RuntimeExecutionProfile,
   type WindowLifecycle,
   type WindowChangeReason,
@@ -313,8 +312,6 @@ export interface RunBusContext {
 export type DecorateRunBusFn = (ctx: RunBusContext) => () => void;
 
 export interface AgentRuntime {
-  providerId: string;
-  model: string;
   run: (envelope: KernelRunEnvelope) => Promise<KernelRunCompletion>;
   /**
    * 估算当前窗口下一次主对话 provider 请求的上下文预算状态。
@@ -370,28 +367,6 @@ export interface AgentRuntime {
    * 读取并清空 run 外 lifecycle 诊断。run 内诊断直接进入 per-run eventBus。
    */
   drainLifecycleDiagnostics(): readonly AgentEventMap["lifecycle:warning"][];
-  /**
-   * 注册"对话级"可重置组件 —— `/clear` 时一并清空。
-   *
-   * 任何在会话期间持有对话级状态的组件实现 Resettable 后在 runtime 装配时注册
-   * 一次，无需 cli 在 /clear handler 里硬编码各 state 的 reset 调用。
-   *
-   * 多次注册按注册顺序累积；reset 按 LIFO 串行执行（让后注册组件先 reset，给"被
-   * 后注册组件依赖"的前注册组件留下还能被读取的窗口）。
-   */
-  registerConversationStateReset(target: Resettable): void;
-  /**
-   * 触发所有已注册组件 reset 自身对话级状态。
-   *
-   * 调用时机：cli `/clear` 在持久层 appendClear 之后调一次；
-   * server 在 conversation 切换 / 重置场景按需调。
-   *
-   * 失败语义：单个 Resettable 抛错 → 收集到聚合错误数组继续后续 reset，
-   * 全部跑完后再统一抛 ResetConversationStateError（含失败的 ids）。
-   * 调用方决定是否阻塞 /clear 完成 —— 多数情况吞错继续即可（state 已部分清，
-   * 内存语义已是"清空"，下次 LLM call 仍会按新视图编排）。
-   */
-  resetConversationState(): Promise<void>;
   /**
    * 销毁运行体实例 —— 触发末窗 onWindowClose（reason 透传销毁类型）。幂等
    *（重复调第二次起 no-op，reason 取首次）。运行体内部本无需释放的资源（全
@@ -457,21 +432,6 @@ export interface ForceCompactResult {
    * 有损截断伪装成正常摘要。
    */
   emergencyFloor?: { droppedTurns: number; error: string };
-}
-
-/**
- * resetConversationState 失败聚合异常 —— 单个 Resettable 抛错不阻断其它 reset，
- * 全跑完再抛此聚合异常让调用方决定吞错 / 升级 / UI 提示。
- */
-export class ResetConversationStateError extends Error {
-  readonly failures: ReadonlyArray<{ id: string; error: unknown }>;
-
-  constructor(failures: ReadonlyArray<{ id: string; error: unknown }>) {
-    const ids = failures.map((f) => f.id).join(", ");
-    super(`resetConversationState 失败：${ids}`);
-    this.name = "ResetConversationStateError";
-    this.failures = failures;
-  }
 }
 
 /**
@@ -1165,10 +1125,6 @@ export async function createAgentRuntime(
   });
   const estimator = createTokenEstimator();
 
-  // 对话级 Resettable 注册表 —— 视图层 stage 实现 Resettable 后在装配期注册，
-  // /clear 一并清空。
-  const resettables: Resettable[] = [];
-
   // 段切换摘要的流装配工厂 —— run 内评估与手动 forceCompact 共用同一条
   // 保护链（withRetry 重试降级 → watchdog idle 看门狗 → calibration 估算校准），
   // 杜绝两处装配漂移。bus 按调用方传入（run 用 per-run bus，forceCompact 用
@@ -1246,30 +1202,7 @@ export async function createAgentRuntime(
   };
 
   return {
-    providerId: roles[primaryRole].provider.id,
-    model: roles[primaryRole].model,
     confirmationBroker,
-
-    registerConversationStateReset(target: Resettable): void {
-      resettables.push(target);
-    },
-
-    async resetConversationState(): Promise<void> {
-      // LIFO 串行：后注册先 reset。失败聚合：单个抛错不阻断后续 reset，
-      // 全跑完再统一抛 ResetConversationStateError 让调用方决定吞 / 升级。
-      const failures: { id: string; error: unknown }[] = [];
-      for (let i = resettables.length - 1; i >= 0; i--) {
-        const target = resettables[i]!;
-        try {
-          await target.reset();
-        } catch (err) {
-          failures.push({ id: target.id, error: err });
-        }
-      }
-      if (failures.length > 0) {
-        throw new ResetConversationStateError(failures);
-      }
-    },
 
     dispose,
     onAttentionWindowChange,

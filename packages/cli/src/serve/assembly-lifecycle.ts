@@ -99,6 +99,12 @@ export const ASSEMBLY_LIFECYCLE_DESCRIPTORS = [
     id: "losslessDataPlane.close",
     stage: "runtime",
   },
+  {
+    owner: "anchor-host",
+    role: "runtime",
+    id: "ephemeralRuntime.dispose",
+    stage: "runtime",
+  },
 ] as const satisfies readonly AssemblyLifecycleDescriptor[];
 
 /**
