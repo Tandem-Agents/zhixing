@@ -88,7 +88,11 @@ function normalize(
 ): { readonly v: 1 } & UnsignedExecutionAssetSnapshot {
   return {
     ...clone(input),
-    skills: [...input.skills].sort((left, right) => left.id.localeCompare(right.id, "en-US")),
+    // Skill catalog order is an Authority fact: the Skill-owned Kernel projection
+    // applies its top-N window before appending builtins.  The signed snapshot must
+    // therefore preserve that order instead of canonicalizing it by id.  Rubric and
+    // prompt indexes do not carry this ordering contract and remain canonicalized.
+    skills: [...input.skills],
     rubrics: [...input.rubrics].sort((left, right) => left.id.localeCompare(right.id, "en-US")),
     promptAssets: [...input.promptAssets].sort((left, right) => left.id.localeCompare(right.id, "en-US")),
   };

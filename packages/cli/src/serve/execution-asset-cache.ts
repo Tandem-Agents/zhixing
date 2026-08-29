@@ -59,7 +59,7 @@ export class FileExecutionAssetCache implements ExecutionAssetCatalogPort {
     }
   }
 
-  /** A corrupt cache is indistinguishable from a miss to local runtime consumers. */
+  /** Missing cache means builtin-only; a present but corrupt cache fails closed. */
   async read(query: Parameters<AssignmentGlobalQueryPort["read"]>[0]): Promise<GlobalReadResult> {
     const validated = validateGlobalQuery(query);
     if (
@@ -69,10 +69,10 @@ export class FileExecutionAssetCache implements ExecutionAssetCatalogPort {
     ) {
       throw new Error("Execution asset cache does not expose global authority data");
     }
-    const snapshot = await this.#safeCurrent();
+    const snapshot = await this.current();
     if (validated.kind === "skill-catalog") {
       const entries = snapshot
-        ? await filterReadableSkills(snapshot.skills, this.artifacts)
+        ? await assertReadableSkills(snapshot.skills, this.artifacts)
         : [];
       return validateGlobalQueryResult(validated, {
         kind: "skill-catalog",
@@ -85,18 +85,16 @@ export class FileExecutionAssetCache implements ExecutionAssetCatalogPort {
     }
     if (validated.kind === "skill-get") {
       const entry = snapshot?.skills.find((candidate) => candidate.id === validated.skillId);
-      const readable = entry && await isReadable(entry.contentRef, this.artifacts)
-        ? entry
-        : null;
+      if (entry) await assertReadableSkill(entry, this.artifacts);
       return validateGlobalQueryResult(validated, {
         kind: "skill-get",
         catalogRevision: snapshot?.skillCatalogRevision ?? 0,
-        entry: readable,
+        entry: entry ?? null,
       });
     }
     const entries = snapshot
       ? validated.asset === "skills"
-        ? (await filterReadableSkills(snapshot.skills, this.artifacts)).map((entry) => ({
+        ? (await assertReadableSkills(snapshot.skills, this.artifacts)).map((entry) => ({
             id: entry.id,
             kind: "skills" as const,
             revision: entry.revision,
@@ -146,7 +144,7 @@ export class FileExecutionAssetCache implements ExecutionAssetCatalogPort {
     ) {
       throw new TypeError("Execution asset authority returned another result type");
     }
-    const skills = await filterReadableSkills(skillsResult.entries, this.artifacts);
+    const skills = await assertReadableSkills(skillsResult.entries, this.artifacts);
     const rubrics = await filterReadableIndex(rubricsResult.entries, this.artifacts);
     const promptAssets = await filterReadableIndex(promptResult.entries, this.artifacts);
     const contentIdentity = protocolDigest("ExecutionAssetSnapshotContent", 1, {
@@ -162,6 +160,11 @@ export class FileExecutionAssetCache implements ExecutionAssetCatalogPort {
     });
     try {
       const current = await this.current();
+      assertSkillCatalogTransition(
+        current,
+        skillsResult.catalogRevision,
+        skills,
+      );
       if (current && snapshotContentIdentity(current) === contentIdentity) return current;
       const snapshotRevision = current
         ? current.snapshotRevision + 1
@@ -194,6 +197,11 @@ export class FileExecutionAssetCache implements ExecutionAssetCatalogPort {
     try {
       const current = await this.current();
       if (current?.digest === snapshot.digest) return current;
+      assertSkillCatalogTransition(
+        current,
+        snapshot.skillCatalogRevision,
+        snapshot.skills,
+      );
       if (current && snapshot.snapshotRevision <= current.snapshotRevision) {
         throw new TypeError("Execution asset snapshot revision cannot be rewritten or rolled back");
       }
@@ -205,7 +213,7 @@ export class FileExecutionAssetCache implements ExecutionAssetCatalogPort {
   }
 
   async bundle(): Promise<ExecutionAssetBundle | undefined> {
-    const snapshot = await this.#safeCurrent();
+    const snapshot = await this.current();
     if (!snapshot) return undefined;
     const refs = await snapshotArtifactRefs(snapshot, this.artifacts);
     return {
@@ -266,23 +274,28 @@ export class FileExecutionAssetCache implements ExecutionAssetCatalogPort {
     return this.install(snapshot);
   }
 
-  async #safeCurrent(): Promise<ExecutionAssetSnapshot | undefined> {
-    try {
-      return await this.current();
-    } catch {
-      return undefined;
-    }
-  }
 }
 
-async function filterReadableSkills(
+async function assertReadableSkills(
   entries: ExecutionAssetSnapshot["skills"],
   artifacts: FileArtifactStore,
 ): Promise<ExecutionAssetSnapshot["skills"]> {
-  const readable = await Promise.all(entries.map(async (entry) =>
-    await isReadable(entry.contentRef, artifacts) ? entry : undefined,
-  ));
-  return readable.filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
+  await Promise.all(entries.map((entry) => assertReadableSkill(entry, artifacts)));
+  return entries;
+}
+
+async function assertReadableSkill(
+  entry: ExecutionAssetSnapshot["skills"][number],
+  artifacts: FileArtifactStore,
+): Promise<void> {
+  try {
+    await artifacts.get(entry.contentRef);
+  } catch (error) {
+    throw new Error(
+      `Execution asset skill body is missing or corrupt: ${entry.id}`,
+      { cause: error },
+    );
+  }
 }
 
 async function filterReadableIndex(
@@ -333,6 +346,36 @@ function snapshotContentIdentity(snapshot: ExecutionAssetSnapshot): string {
     skills: snapshot.skills,
     rubrics: snapshot.rubrics,
     promptAssets: snapshot.promptAssets,
+  });
+}
+
+function assertSkillCatalogTransition(
+  current: ExecutionAssetSnapshot | undefined,
+  nextRevision: number,
+  nextSkills: ExecutionAssetSnapshot["skills"],
+): void {
+  if (!current) return;
+  if (nextRevision < current.skillCatalogRevision) {
+    throw new TypeError("Skill catalog revision cannot be rolled back");
+  }
+  if (
+    nextRevision === current.skillCatalogRevision &&
+    skillCatalogIdentity(nextRevision, nextSkills) !==
+      skillCatalogIdentity(current.skillCatalogRevision, current.skills)
+  ) {
+    throw new TypeError(
+      "Skill catalog revision cannot change signed Skill content or order",
+    );
+  }
+}
+
+function skillCatalogIdentity(
+  catalogRevision: number,
+  skills: ExecutionAssetSnapshot["skills"],
+): string {
+  return protocolDigest("ExecutionAssetSkillCatalog", 1, {
+    catalogRevision,
+    skills,
   });
 }
 

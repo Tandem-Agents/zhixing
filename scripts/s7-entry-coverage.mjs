@@ -1069,7 +1069,7 @@ export async function validateS7Structure() {
   if (failures.length > 0) throw new Error(`S7 structure gate failed:\n- ${failures.join("\n- ")}`);
 }
 
-/** A2 Skill Catalog management must have one domain application owner. */
+/** A2 Skill Catalog applications and immutable execution projection have one owner. */
 export function inspectSkillCatalogApplicationOwnership(records) {
   const failures = [];
   const byPath = new Map(records.map((record) => [record.relative, record.text]));
@@ -1099,6 +1099,12 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   );
   const agentRuntime = required(
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+  );
+  const executionSnapshot = required(
+    "packages/core/src/protocol/execution-asset-snapshot.ts",
+  );
+  const executionAssetCache = required(
+    "packages/cli/src/serve/execution-asset-cache.ts",
   );
   const builtinSkill = required("packages/tools-builtin/src/skill.ts");
   const builtinFactories = required("packages/tools-builtin/src/factories.ts");
@@ -1207,6 +1213,45 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   ) {
     failures.push(
       "Skill Catalog Kernel projection rules lack one immutable domain application owner",
+    );
+  }
+  if (
+    !executionSnapshot.includes("skills: [...input.skills],") ||
+    /skills:\s*\[\.\.\.input\.skills\]\.sort/u.test(executionSnapshot)
+  ) {
+    failures.push(
+      "Signed execution assets do not preserve Skill Authority order",
+    );
+  }
+  if (
+    executionAssetCache.includes("filterReadableSkills") ||
+    executionAssetCache.split("assertReadableSkills(").length - 1 < 4 ||
+    !executionAssetCache.includes("await assertReadableSkill(entry, this.artifacts)") ||
+    executionAssetCache.includes("#safeCurrent")
+  ) {
+    failures.push(
+      "Executor execution assets can expose a partial or corrupt Skill catalog",
+    );
+  }
+  if (
+    executionAssetCache.split("assertSkillCatalogTransition(").length - 1 < 3 ||
+    !executionAssetCache.includes("nextRevision < current.skillCatalogRevision") ||
+    !executionAssetCache.includes("nextRevision === current.skillCatalogRevision") ||
+    !executionAssetCache.includes(
+      "skillCatalogIdentity(nextRevision, nextSkills)",
+    )
+  ) {
+    failures.push(
+      "Executor execution assets do not reject Skill rollback or same-revision equivocation",
+    );
+  }
+  if (
+    /(?:SkillCatalogKernelProjection|renderSkillIndex|builtinIndexEntries)/u.test(
+      executionAssetCache,
+    )
+  ) {
+    failures.push(
+      "Executor execution asset cache became a second Skill projection owner",
     );
   }
   if (

@@ -2356,6 +2356,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/core/src/protocol/assignment-mutation.ts",
     "packages/cli/src/serve/assignment-schedule-stager.ts",
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+    "packages/core/src/protocol/execution-asset-snapshot.ts",
+    "packages/cli/src/serve/execution-asset-cache.ts",
     "packages/tools-builtin/src/skill.ts",
     "packages/tools-builtin/src/factories.ts",
     "packages/tools-builtin/src/index.ts",
@@ -2378,6 +2380,43 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       ),
     )).join("\n"),
     /projection rules lack one immutable domain application owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/protocol/execution-asset-snapshot.ts",
+      (text) => text.replace(
+        "skills: [...input.skills],",
+        'skills: [...input.skills].sort((left, right) => left.id.localeCompare(right.id, "en-US")),',
+      ),
+    )).join("\n"),
+    /do not preserve Skill Authority order/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/execution-asset-cache.ts",
+      (text) => text.replace(
+        "await assertReadableSkills(snapshot.skills, this.artifacts)",
+        "await filterReadableSkills(snapshot.skills, this.artifacts)",
+      ),
+    )).join("\n"),
+    /partial or corrupt Skill catalog/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/execution-asset-cache.ts",
+      (text) => text.replace(
+        "nextRevision < current.skillCatalogRevision",
+        "false",
+      ),
+    )).join("\n"),
+    /do not reject Skill rollback or same-revision equivocation/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/execution-asset-cache.ts",
+      (text) => `${text}\nconst duplicateProjection = renderSkillIndex([]);`,
+    )).join("\n"),
+    /became a second Skill projection owner/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
