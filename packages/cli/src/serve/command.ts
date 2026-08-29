@@ -12,7 +12,7 @@
  *   4. 构造核心 Scheduler（读 ctx.deliveryStack）+ start + seed 系统任务
  *   5. createServerContext + runServer
  *   6. `setupAssemblyUnits(post-server)`（confirmationBridge，依赖 runServer 后的 connections）
- *   7. registerCoreCleanup 用接入面产物注册 teardown（shutdown-chain，LIFO）
+ *   7. 类型化 lifecycle contribution 在 activation gate 内接管 teardown（LIFO）
  *   8. banner / idle reaper / waitForShutdown
  *
  * profile 不"砍主干"，只声明启用哪组接入面（见 PROFILES 描述符）；新增接入面 = 写一个
@@ -55,7 +55,6 @@ import {
   ServerStateFile,
   ServerLogLifecycle,
   CleanupRegistry,
-  registerCleanup,
   createAdvancementEventSink,
   createAdvancementOriginalTaskAdmissionPort,
   createAdvancementProxyTurnPort,
@@ -65,7 +64,6 @@ import {
   getDefaultLogPath,
   resolveProcessStartTime,
   type RunningServer,
-  type ProcessLockPaths,
   type ServerContext,
 } from "@zhixing/server";
 import {
@@ -135,7 +133,6 @@ import { PostAdoptionReviewCoordinator } from "./post-adoption-review.js";
 import { loadOrCreateToken } from "./token.js";
 import { resolveHostProcessMode } from "./self-exec.js";
 import { homeToPort } from "./host-port.js";
-import { registerTailCleanup, registerCoreCleanup } from "./shutdown-chain.js";
 import { shouldIdleExit } from "./idle-policy.js";
 import { setupAssemblyUnits, type AssemblyContext } from "./access-surface.js";
 import { DEFAULT_PROFILE, type ServerProfile } from "./profile.js";
@@ -192,6 +189,7 @@ import {
   type AnchorInternalStopPort,
   type AnchorInternalStopRequest,
 } from "./anchor-internal-stop.js";
+import { AnchorHostShellLifecycle } from "./anchor-host-shell-lifecycle.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
@@ -243,6 +241,16 @@ async function runServerProcess(
   );
   const isBackground = processMode !== "foreground";
   const daemonLogPath = isBackground ? getDefaultLogPath() : undefined;
+  const hostShellLifecycle = new AnchorHostShellLifecycle({
+    startupRollback,
+    processInfo: {
+      version: SERVER_VERSION,
+      kind: processMode,
+      ...(daemonLogPath ? { logPath: daemonLogPath } : {}),
+      startTime: processStartTime,
+      startedAt: processStartedAt,
+    },
+  });
   const serverLogLifecycle = isBackground
     ? new ServerLogLifecycle({
         logger: {
@@ -252,11 +260,7 @@ async function runServerProcess(
         },
       })
     : undefined;
-  const serverLogCleanup = serverLogLifecycle
-    ? startupRollback.register("serverLogLifecycle.stop", () =>
-        serverLogLifecycle.stop(),
-      )
-    : undefined;
+  if (serverLogLifecycle) hostShellLifecycle.acquireServerLog(serverLogLifecycle);
   await serverLogLifecycle?.start();
   // 端口按 home 派生（同 home 同端口 → listen 的 EADDRINUSE 原子仲裁单例 + 并发安全；
   // 不同 home 不同端口 → 多实例并行不撞）。受控内部入口仍可显式传入端口。
@@ -740,10 +744,10 @@ async function runServerProcess(
   const serverBinding = await bindServer({
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
   });
-  startupRollback.register("serverBinding.close", () => serverBinding.close());
+  hostShellLifecycle.acquireBinding(serverBinding);
 
-  // 4. CleanupRegistry —— 唯一清理出口。LIFO 语义 + 跨包注入。注册序列封装在
-  //    shutdown-chain.ts，方便单测顺序正确性。post-server 接入面在自己 setup 内注册到此。
+  // 4. CleanupRegistry —— 唯一正常关闭出口。Host shell 与 Assembly lifecycle
+  //    各自提供有限类型化贡献，不再由 command 拼装字段式 shutdown chain。
   const registry = new CleanupRegistry({
     activeOwners: plan.activeCleanupOwners,
     logger: {
@@ -753,13 +757,6 @@ async function runServerProcess(
     },
   });
   startupRegistry = registry;
-  if (serverLogLifecycle) {
-    registerCleanup(
-      registry,
-      { owner: "anchor-host", role: "runtime", id: "serverLogLifecycle.stop" },
-      () => serverLogCleanup!.run(),
-    );
-  }
 
   const stopEndpointLock = {
     pid: process.pid,
@@ -768,17 +765,12 @@ async function runServerProcess(
     startedAt: processStartedAt,
   } as const;
   const stateFile = new ServerStateFile({ publishReadyMarker: isBackground });
+  hostShellLifecycle.acquireStateFile(stateFile);
   const meshConnectionProjection = createMeshCompatibilityStateProjection(stateFile, {
     ...stopEndpointLock,
     host: serverBinding.host,
   });
   await meshConnectionProjection.replaceCurrent([]);
-  const heartbeatTimerRef: { current: NodeJS.Timeout | null } = { current: null };
-
-  // lockPaths —— 单一事实源。同时传给 runServer（acquireLock）和 registerTailCleanup（releaseLock），
-  // 保证 acquire/release 走同一路径。当前 undefined = 默认 ~/.zhixing/server.pid。
-  const lockPaths: ProcessLockPaths | undefined = undefined;
-
   // ============================================================================
   // 有序装配 —— 稳定核心单元恒启用，profile 仅选择可选接入面；setupAssemblyUnits
   // 按依赖拓扑序遍历、各自 setup（产物写回 ctx）。主干不出现任何 `if (profile === ...)`。
@@ -878,6 +870,9 @@ async function runServerProcess(
       error instanceof Error ? error.message : String(error),
     ),
   });
+  if (ctx.authorityCheckpointOwner) {
+    hostShellLifecycle.acquireCheckpointOwner(ctx.authorityCheckpointOwner);
+  }
   await ctx.authorityCheckpointOwner?.start();
   ctx.meshRuntime?.bindAuthorityCheckpointOwner(ctx.authorityCheckpointOwner);
   authorityRuntimeRef.current = ctx.authorityRuntime;
@@ -2160,21 +2155,12 @@ async function runServerProcess(
     });
   }
 
-  if (ctx.authorityCheckpointOwner) {
-    const checkpointOwner = ctx.authorityCheckpointOwner;
-    registerCleanup(registry, { owner: "anchor-host", role: "runtime", id: "authorityCheckpointOwner.stop" }, async () => {
-      await checkpointOwner.stop();
-    });
-  }
-
   ctx.deliveryStack?.onStatus((notice) => {
     serverCtx.broadcastAll?.("delivery.status", notice);
   });
 
-  // runServer 之前：尾部清理（LIFO 最后执行 —— releaseLock / state 文件）
-  registerTailCleanup(registry, { stateFile, lockPaths });
-
-  // runServer —— 内部会向 registry 注册 server.close（注入模式）
+  // runServer 将同一 prepared endpoint 单向转交给 Host shell；activation
+  // gate、ready publication 与正常终止共享同一个幂等 owner。
   if (!await verifyManagedHostAdmission(
     initialManagedHostAdmission,
     processMode,
@@ -2192,20 +2178,17 @@ async function runServerProcess(
     ...(scheduler ? { scheduler } : {}),
     schedulerEventBus,
     cleanupRegistry: registry,
-    lockPaths, // 与 registerTailCleanup 使用同一引用——acquire/release 路径一致
-    processInfo: {
-      version: SERVER_VERSION,
-      kind: processMode,
-      logPath: daemonLogPath,
-      startTime: processStartTime,
-      startedAt: processStartedAt,
-    },
+    lifecycleOwner: hostShellLifecycle,
     logger: {
       info: (msg) => console.log(chalk.dim(`[server] ${msg}`)),
       warn: (msg) => console.warn(chalk.yellow(`[server] ${msg}`)),
       error: (msg) => console.error(chalk.red(`[server] ${msg}`)),
     },
     beforeActivate: async (openingRunner) => {
+      hostShellLifecycle.assertActivationOwnership({
+        serverLog: !!serverLogLifecycle,
+        checkpointOwner: !!ctx.authorityCheckpointOwner,
+      });
       anchorInternalStop.current = createAnchorInternalStopPort({
         requestId: `anchor-internal-stop:${protocolDigest("AnchorInternalStopRequest", 1, {
           homeId: lifecycleHomeId,
@@ -2235,12 +2218,10 @@ async function runServerProcess(
         await schedulerRuntime?.resumeManualJobSurfaces();
       }
 
-      // 激活前让正常关闭链接管核心资源（LIFO 最先执行）。
-      registerCoreCleanup(registry, {
-        stateFile,
-        heartbeatTimerRef,
-        lifecycleContributions,
-      });
+      // Host shell 已接管 endpoint/state/discovery。既有 pre-server 贡献按
+      // 稳定阶段转交，并在 LIFO 中先于 shell 终止。
+      lifecycleContributions.transferTo(registry, "foundation");
+      lifecycleContributions.transferTo(registry, "surface");
 
       // post-server contribution 依赖 prepared server.connections，但不要求入口已激活。
       // 每个资源先进入同一 startup rollback，再由 gate 作有限、类型化移交。
@@ -2277,22 +2258,21 @@ async function runServerProcess(
       lifecycleContributions.assertTransferred();
       startupRollback.commit();
     },
+    beforePublish: async (openingServer) => {
+      hostShellLifecycle.assertActiveEndpoint(openingServer);
+    },
     publishReady: async (openingRunner) => {
       // All listener owners publish the same local generation; only background
       // startup uses the separate ready marker handshake.
       // 只有同一 bound handle 已激活且 PID/port 已发布后，才发布 state/ready。
-      await stateFile.markReady({
+      await hostShellLifecycle.markReady({
         pid: process.pid,
         startedAt: processStartedAt,
         port: openingRunner.server.port,
         host: openingRunner.server.host,
       });
-      await stateFile.markRunning();
-      const hbTimer = setInterval(() => {
-        void stateFile.heartbeat();
-      }, 60_000);
-      hbTimer.unref();
-      heartbeatTimerRef.current = hbTimer;
+      await hostShellLifecycle.markRunning();
+      hostShellLifecycle.startHeartbeat();
 
       if (processMode !== "managed") {
         console.log();
@@ -2330,7 +2310,7 @@ async function runServerProcess(
   // 退出走正常 shutdown(drain 在跑任务)、不改 idempotent shutdown 契约。
   if (processMode === "on-demand") {
     const IDLE_CHECK_MS = 60_000;
-    const idleTimer = setInterval(() => {
+    hostShellLifecycle.startIdleReaper(async () => {
       const exit = shouldIdleExit({
         connectionCount: runner!.server.connections.size,
         channelStates:
@@ -2339,21 +2319,14 @@ async function runServerProcess(
           scheduler?.listTasks().some((t) => !isInternal(t) && t.enabled) ?? false,
       });
       if (exit) {
-        void requestAnchorInternalStop({ reason: "idle", strategy: "drain" })
-          .catch((error) => {
-            console.error(
-              chalk.red("[idle] durable Host stop failed; the same operation will retry"),
-              error instanceof Error ? error.message : String(error),
-            );
-          });
+        await requestAnchorInternalStop({ reason: "idle", strategy: "drain" });
       }
+    }, (error) => {
+      console.error(
+        chalk.red("[idle] durable Host stop failed; the same operation will retry"),
+        error instanceof Error ? error.message : String(error),
+      );
     }, IDLE_CHECK_MS);
-    idleTimer.unref();
-    registerCleanup(
-      registry,
-      { owner: "anchor-host", role: "runtime", id: "idleReaper.clear" },
-      () => clearInterval(idleTimer),
-    );
   }
 
   // 等待停机 —— 所有清理由 lifecycle.ts 的 shutdown → registry.runAll 统一完成

@@ -444,6 +444,8 @@ export function collectCleanupRegistrationsFromSource(relative, text) {
   const source = sourceFile(relative, text);
   const assemblyLifecycleSource =
     relative === "packages/cli/src/serve/assembly-lifecycle.ts";
+  const anchorHostShellSource =
+    relative === "packages/cli/src/serve/anchor-host-shell-lifecycle.ts";
   const helperNames = new Set();
   const cleanupTypeNames = new Set();
   for (const statement of source.statements) {
@@ -511,7 +513,13 @@ export function collectCleanupRegistrationsFromSource(relative, text) {
   }
   const result = assemblyLifecycleSource
     ? collectAssemblyLifecycleDescriptors(relative, source)
-    : [];
+    : anchorHostShellSource
+      ? [collectNamedCleanupDescriptor(
+          relative,
+          source,
+          "ANCHOR_HOST_SHELL_CLEANUP_DESCRIPTOR",
+        )]
+      : [];
   const failures = [];
   const cleanupOwners = new Set([
     "anchor-host",
@@ -525,10 +533,13 @@ export function collectCleanupRegistrationsFromSource(relative, text) {
         helperNames.has(node.expression.text)
       ) {
         const descriptor = node.arguments[1];
-        const typedAssemblyTransfer = assemblyLifecycleSource &&
+        const typedLifecycleTransfer = (assemblyLifecycleSource || anchorHostShellSource) &&
           descriptor && ts.isIdentifier(descriptor) &&
-          descriptor.text === "descriptor";
-        if (typedAssemblyTransfer) {
+          (
+            descriptor.text === "descriptor" ||
+            descriptor.text === "ANCHOR_HOST_SHELL_CLEANUP_DESCRIPTOR"
+          );
+        if (typedLifecycleTransfer) {
           // The finite literal descriptor table above is the contract source;
           // this call transfers one of those typed entries without rebuilding it.
         } else if (!descriptor || !ts.isObjectLiteralExpression(descriptor)) {
@@ -561,6 +572,23 @@ export function collectCleanupRegistrationsFromSource(relative, text) {
   visit(source);
   if (failures.length > 0) throw new Error(failures.join("\n"));
   return result;
+}
+
+function collectNamedCleanupDescriptor(relative, source, name) {
+  for (const statement of source.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(declaration.name) || declaration.name.text !== name) continue;
+      const descriptor = unwrapStaticExpression(declaration.initializer);
+      if (!descriptor || !ts.isObjectLiteralExpression(descriptor)) break;
+      const owner = literalProperty(descriptor, "owner");
+      const role = literalProperty(descriptor, "role");
+      const id = literalProperty(descriptor, "id");
+      if (!owner || !role || !id) break;
+      return { owner, role, id, source: relative };
+    }
+  }
+  throw new Error(`${relative}: ${name} must be one literal cleanup descriptor`);
 }
 
 function collectAssemblyLifecycleDescriptors(relative, source) {
@@ -1105,7 +1133,9 @@ export function inspectManagedHostAssembly(records) {
   const assemblyLifecycle = byPath.get("packages/cli/src/serve/assembly-lifecycle.ts");
   const executorRoleLifecycle = byPath.get("packages/cli/src/serve/executor-role-lifecycle.ts");
   const executorServerLifecycle = byPath.get("packages/cli/src/serve/executor-server-lifecycle.ts");
-  const shutdownChain = byPath.get("packages/cli/src/serve/shutdown-chain.ts");
+  const anchorHostShell = byPath.get(
+    "packages/cli/src/serve/anchor-host-shell-lifecycle.ts",
+  );
   const anchorInternalStop = byPath.get("packages/cli/src/serve/anchor-internal-stop.ts");
   const executorRoot = byPath.get("packages/cli/src/serve/executor-role-runtime.ts");
   const executorInternalStop = byPath.get("packages/cli/src/serve/executor-internal-stop.ts");
@@ -1124,13 +1154,14 @@ export function inspectManagedHostAssembly(records) {
   const serverShutdown = byPath.get("packages/server/src/rpc/methods/server.ts");
   const serverLifecycle = byPath.get("packages/server/src/lifecycle.ts");
   const server = byPath.get("packages/server/src/server.ts");
+  const serverIndex = byPath.get("packages/server/src/index.ts");
   if (
     !reconciler || !service || !serviceRuntime || !bootstrap || !pairing || !config ||
     !command || !accessSurface || !accessSurfaces || !assemblyLifecycle ||
-    !executorRoleLifecycle || !executorServerLifecycle || !shutdownChain ||
+    !executorRoleLifecycle || !executorServerLifecycle || !anchorHostShell ||
     !anchorInternalStop || !executorRoot || !executorInternalStop || !topology || !applicationHost || !connection || !repl || !surfaceLink || !secrets || !status ||
     !publicStatus || !statusRoute || !scheduler || !manifest || !serverContext || !serverShutdown ||
-    !serverLifecycle || !server
+    !serverLifecycle || !server || !serverIndex
   ) return ["managed host production assembly sources are missing"];
   const count = (text, token) => text.split(token).length - 1;
   const assemblyLifecycleIds = [
@@ -1238,15 +1269,10 @@ export function inspectManagedHostAssembly(records) {
     lifecycleDescriptors.length !== allAnchorLifecycleIds.length ||
     lifecycleDescriptors.map(({ id }) => id).join("\n") !== allAnchorLifecycleIds.join("\n") ||
     assemblyLifecycleIds.some((identity) => contributionCount(identity) !== 1) ||
-    [accessSurface, accessSurfaces, command, shutdownChain]
+    [accessSurface, accessSurfaces, command, anchorHostShell]
       .some((source) => source.includes("startupCleanups") || source.includes("AssemblyStartupCleanups")) ||
-    count(shutdownChain, 'resources: TailCleanupResources') !== 1 ||
-    count(shutdownChain, 'resources: CoreCleanupResources') !== 1 ||
-    count(shutdownChain, 'readonly lifecycleContributions: AssemblyLifecycleContributions;') !== 1 ||
-    shutdownChain.includes('lifecycleContributions?:') ||
-    shutdownChain.includes('lifecycleContributions?.') ||
-    count(shutdownChain, 'lifecycleContributions.transferTo(registry, "foundation")') !== 1 ||
-    count(shutdownChain, 'lifecycleContributions.transferTo(registry, "surface")') !== 1 ||
+    count(command, 'lifecycleContributions.transferTo(registry, "foundation")') !== 1 ||
+    count(command, 'lifecycleContributions.transferTo(registry, "surface")') !== 1 ||
     count(command, 'lifecycleContributions.transferTo(registry, "runtime")') !== 1 ||
     runtimeTransfer < 0 || transferAssertion < runtimeTransfer || rollbackCommit < transferAssertion ||
     count(assemblyLifecycle, "registerCleanup(registry, descriptor, () => contribution.handle.run())") !== 1 ||
@@ -1257,8 +1283,6 @@ export function inspectManagedHostAssembly(records) {
     anchorRuntimeLifecycleIds.some((identity) => contributionCount(identity) !== 1) ||
     accessSurface.includes("readonly cleanup: CleanupRegistry") ||
     accessSurfaces.includes("registerCleanup(") ||
-    shutdownChain.includes("scheduler?: SchedulerBackend") ||
-    shutdownChain.includes('role: "common", id: "scheduler.stop"') ||
     postServerSetup < 0 || postServerTransfer <= postServerSetup ||
     runtimeTransfer <= postServerTransfer || activationTransfer <= runtimeTransfer ||
     transferAssertion <= activationTransfer || rollbackCommit <= transferAssertion ||
@@ -1584,16 +1608,31 @@ export function inspectManagedHostAssembly(records) {
   ) failures.push("Executor trust/idle durable stop owner drifted");
   const anchorRunServer = command.indexOf("runner = await runServer({");
   const anchorOpenGate = command.indexOf("beforeActivate: async (openingRunner) =>", anchorRunServer);
+  const anchorShellOwner = command.indexOf(
+    "hostShellLifecycle.assertActivationOwnership({",
+    anchorOpenGate,
+  );
   const deliveryActivation = command.indexOf("ctx.deliveryStack?.activate()", anchorOpenGate);
   const schedulerActivation = command.indexOf("schedulerRuntime?.activate()", anchorOpenGate);
-  const normalCleanupOwner = command.indexOf("registerCoreCleanup(registry, {", anchorOpenGate);
+  const foundationTransfer = command.indexOf(
+    'lifecycleContributions.transferTo(registry, "foundation")',
+    anchorOpenGate,
+  );
+  const surfaceTransfer = command.indexOf(
+    'lifecycleContributions.transferTo(registry, "surface")',
+    foundationTransfer,
+  );
   const postServerContribution = command.indexOf(
     'await setupAssemblyUnits(assemblyUnits, ctx, "post-server")',
     anchorOpenGate,
   );
   const cleanupTransfer = command.indexOf("startupRollback.commit()", anchorOpenGate);
+  const activeEndpointProof = command.indexOf(
+    "hostShellLifecycle.assertActiveEndpoint(openingServer)",
+    cleanupTransfer,
+  );
   const readyPublication = command.indexOf("publishReady: async (openingRunner) =>", anchorOpenGate);
-  const readyMarker = command.indexOf("await stateFile.markReady({", readyPublication);
+  const readyMarker = command.indexOf("await hostShellLifecycle.markReady({", readyPublication);
   const executorRunServer = executorRoot.indexOf("const localConversationServer = await runServer({");
   const executorOpenGate = executorRoot.indexOf(
     "beforeActivate: async (openingRunner) =>",
@@ -1623,12 +1662,24 @@ export function inspectManagedHostAssembly(records) {
     "activationGate: async (preparedServer) =>",
   );
   const lifecycleCloseOwner = serverLifecycle.indexOf(
-    'id: "server.close"',
+    "opts.lifecycleOwner.transferPreparedServer(preparedServer, registry)",
     lifecycleActivationGate,
   );
   const lifecycleOpenPrerequisite = serverLifecycle.indexOf(
     "await opts.beforeActivate?.(runner)",
     lifecycleCloseOwner,
+  );
+  const lifecycleActiveProof = serverLifecycle.indexOf(
+    "await opts.beforePublish?.(server)",
+    lifecycleOpenPrerequisite,
+  );
+  const lifecycleDiscoveryPublication = serverLifecycle.indexOf(
+    "await opts.lifecycleOwner.publishDiscovery(server)",
+    lifecycleActiveProof,
+  );
+  const lifecycleReadyPublication = serverLifecycle.indexOf(
+    "await opts.publishReady?.(runner)",
+    lifecycleDiscoveryPublication,
   );
   const serverGate = server.indexOf("await opts.activationGate?.(server)");
   const serverActivate = server.indexOf("boundServer.activate({", serverGate);
@@ -1637,24 +1688,115 @@ export function inspectManagedHostAssembly(records) {
     count(command, "runner = await runServer({") !== 1 ||
     count(command, "beforeActivate: async (openingRunner) =>") !== 1 ||
     count(command, "publishReady: async (openingRunner) =>") !== 1 ||
+    count(command, "lifecycleOwner: hostShellLifecycle") !== 1 ||
+    count(command, "hostShellLifecycle.acquireServerLog(") !== 1 ||
+    count(command, "hostShellLifecycle.acquireBinding(") !== 1 ||
+    count(command, "hostShellLifecycle.acquireStateFile(") !== 1 ||
+    count(command, "hostShellLifecycle.acquireCheckpointOwner(") !== 1 ||
+    count(command, "hostShellLifecycle.startHeartbeat(") !== 1 ||
+    count(command, "hostShellLifecycle.startIdleReaper(") !== 1 ||
+    command.includes("registerCoreCleanup") ||
+    command.includes("registerTailCleanup") ||
+    command.includes("shutdown-chain.js") ||
     anchorRunServer < 0 ||
     anchorOpenGate < anchorRunServer ||
     [
+      anchorShellOwner,
       deliveryActivation,
       schedulerActivation,
-      normalCleanupOwner,
+      foundationTransfer,
+      surfaceTransfer,
       postServerContribution,
       cleanupTransfer,
     ].some((position) => position < anchorOpenGate || position >= readyPublication) ||
+    foundationTransfer >= surfaceTransfer ||
+    activeEndpointProof < cleanupTransfer ||
+    activeEndpointProof >= readyPublication ||
     readyMarker < readyPublication ||
     count(serverLifecycle, "activationGate: async (preparedServer) =>") !== 1 ||
+    count(serverLifecycle, "await opts.lifecycleOwner.publishDiscovery(server)") !== 1 ||
+    count(serverLifecycle, "await opts.publishReady?.(runner)") !== 1 ||
     lifecycleCloseOwner < lifecycleActivationGate ||
     lifecycleOpenPrerequisite < lifecycleCloseOwner ||
+    lifecycleActiveProof < lifecycleOpenPrerequisite ||
+    lifecycleDiscoveryPublication < lifecycleActiveProof ||
+    lifecycleReadyPublication < lifecycleDiscoveryPublication ||
     count(server, "await opts.activationGate?.(server)") !== 1 ||
     count(server, "boundServer.activate({") !== 1 ||
+    server.includes("activationFailureCleanupOwner") ||
+    count(server, "await activationFailureOwner.cleanupActivationFailure()") !== 1 ||
+    serverIndex.includes("startServerWithActivationFailureOwner") ||
+    serverIndex.includes("ServerActivationFailureOwner") ||
+    count(
+      serverLifecycle,
+      "await startServerWithActivationFailureOwner(startOptions, opts.lifecycleOwner)",
+    ) !== 1 ||
     serverGate < 0 ||
     serverActivate < serverGate
   ) failures.push("managed host entry-last activation or publication order drifted");
+  const anchorHostShellResourceIds = [
+    "serverLogLifecycle.stop",
+    "endpoint.close",
+    "authorityCheckpointOwner.stop",
+    "serverState.lifecycle",
+    "heartbeatTimer.clear",
+    "idleTimer.clearAndSettle",
+    "processDiscovery.release",
+  ];
+  const endpointTerminalGuard = anchorHostShell.indexOf("if (endpointTerminal) {");
+  const stoppedAfterTerminal = anchorHostShell.indexOf(
+    "this.#stateFile?.markStopped()",
+    endpointTerminalGuard,
+  );
+  const stateCleanupAfterTerminal = anchorHostShell.indexOf(
+    "this.#stateFile?.cleanup()",
+    endpointTerminalGuard,
+  );
+  const discoveryReleaseBeforeEndpoint = anchorHostShell.indexOf(
+    "await attempt(() => this.#releaseOwnedDiscovery(), failures);",
+  );
+  const bindingCloseAfterRelease = anchorHostShell.indexOf(
+    "endpoint.binding.close()",
+    discoveryReleaseBeforeEndpoint,
+  );
+  const serverCloseAfterRelease = anchorHostShell.indexOf(
+    "endpoint.server.close()",
+    discoveryReleaseBeforeEndpoint,
+  );
+  const discoveryRestoreAfterFailure = anchorHostShell.indexOf(
+    "this.#restoreOwnedDiscovery(ownedEndpoint)",
+    serverCloseAfterRelease,
+  );
+  if (
+    anchorHostShellResourceIds.some((id) =>
+      count(anchorHostShell, `{ owner: "anchor-host", id: "${id}" }`) !== 1
+    ) ||
+    count(anchorHostShell, "new AnchorHostShellLifecycle") !== 0 ||
+    count(anchorHostShell, "registerCleanup(registry, ANCHOR_HOST_SHELL_CLEANUP_DESCRIPTOR") !== 1 ||
+    count(anchorHostShell, "return this.#handle.run()") !== 3 ||
+    count(anchorHostShell, "cleanupActivationFailure(): Promise<void>") !== 1 ||
+    !anchorHostShell.includes("this.#assertSameEndpoint(server, current.binding)") ||
+    !anchorHostShell.includes("server.httpServer !== binding.httpServer") ||
+    !anchorHostShell.includes("server.port !== binding.port") ||
+    !anchorHostShell.includes("server.host !== binding.host") ||
+    !anchorHostShell.includes("await this.#idleCheck?.catch(() => undefined)") ||
+    endpointTerminalGuard < 0 ||
+    stoppedAfterTerminal < endpointTerminalGuard ||
+    stateCleanupAfterTerminal < stoppedAfterTerminal ||
+    discoveryReleaseBeforeEndpoint < 0 ||
+    bindingCloseAfterRelease < discoveryReleaseBeforeEndpoint ||
+    serverCloseAfterRelease < discoveryReleaseBeforeEndpoint ||
+    endpointTerminalGuard < serverCloseAfterRelease ||
+    discoveryRestoreAfterFailure < endpointTerminalGuard ||
+    !anchorHostShell.includes("current.pid !== process.pid") ||
+    !anchorHostShell.includes("current.startedAt !== this.#processInfo.startedAt") ||
+    !anchorHostShell.includes("current.startTime !== (this.#processInfo.startTime ?? null)") ||
+    !anchorHostShell.includes("current.port !== this.#discoveryPort") ||
+    command.includes('id: "serverLogLifecycle.stop"') ||
+    command.includes('id: "authorityCheckpointOwner.stop"') ||
+    command.includes('id: "server.close"') ||
+    command.includes('id: "releaseLock"')
+  ) failures.push("Anchor Host shell lifecycle ownership or truthful terminal drifted");
   if (
     count(executorRoot, "const localConversationServer = await runServer({") !== 1 ||
     count(executorRoot, "beforeActivate: async (openingRunner) =>") !== 1 ||
@@ -1761,7 +1903,8 @@ export function inspectRecoveryBackupAssembly(records) {
   if (
     count(command, "createConfiguredCheckpointOwner({") !== 1 ||
     count(command, "ctx.authorityCheckpointOwner?.start()") !== 1 ||
-    count(command, 'id: "authorityCheckpointOwner.stop"') !== 1
+    count(command, "hostShellLifecycle.acquireCheckpointOwner(ctx.authorityCheckpointOwner)") !== 1 ||
+    command.includes('id: "authorityCheckpointOwner.stop"')
   ) {
     failures.push("packages/cli/src/serve/command.ts: recovery checkpoint owner must have one create/start/stop lifecycle");
   }

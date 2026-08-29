@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `9c3c0b03b03d4b604f3b278df1718154a0ccf0fe`；A1-01～A1-09 已由协调者独立复核并提交 |
+| 已接受基线 | `410ace9b`；A1-01～A1-10 已由协调者独立复核并提交 |
 | 当前 A 项 | A1：收束 ApplicationHost 生命周期边界 |
-| 活跃工作包 | A1-10：Anchor activation gate 内六项 post-server/运行期停机职责已迁入同一类型化 lifecycle contribution，直接测试、S7、CLI typecheck/build 均完成，等待协调者独立复核 |
-| 下一责任链 | A1-10 只闭合 confirmation bridge、recovery、scheduler、inbound、execution 与 evidence 这一组 activation-gate runtime contribution；接受后再核对 Anchor endpoint/state/timer 与 `A1-HOST-DELEGATE-01` 的退场边界，不进入 A2 |
+| 活跃工作包 | A1-11：Host shell 七项资源及 activation-failure/discovery 并发纠正已收束；最窄验证完成，等待协调者独立复核 |
+| 下一责任链 | 协调者先复核 A1-11 的真实 activation owner、同 generation discovery 释放、同 endpoint 接管、诚实终态与 golden 差异；接受后独立核对 `A1-HOST-DELEGATE-01` 的唯一退场条件，不进入 A2 |
 | 打开的单向桥 | `A1-HOST-DELEGATE-01`：唯一 `PersistentApplicationHost` 已拥有外层 bootstrap/lease/terminal 生命周期，但仍以类型化 loader 单向委托既有 Anchor/Executor role root；唯一事实与产品装配仍在既有 root，退场上限为 A1，其后续包不得形成第二 Host 或双 owner |
-| 已失效证据 | 无当前未恢复证据；A1-10 当前最窄直接闭包 6 文件 33/33、canonical S7 21/21 与 registry golden、CLI typecheck/build 均通过。A1-07 的 12 项 pre-server owner exact-set 未漂移，A1-09 与其他未改输入证据继续有效，不得重复全量验证 |
+| 已失效证据 | 无当前未恢复证据；A1-10 中依赖旧 shutdown-chain 的顺序证据已由 A1-11 的 Host shell 直接反例、lifecycle golden 与 S7 重取恢复。A1-07 的 12 项 pre-server 与 A1-10 的 6 项 runtime contribution identity/condition 未漂移；A1-09 与其他未改输入证据继续有效 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1385,6 +1385,23 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 结构、golden 与构建证据：S7 collector 从两张有限 literal descriptor 表机械取得 18 项 Anchor lifecycle，并要求六项各有唯一 production contribution、取得早于首个真实 effect、三段 transfer 严格有序、exact-set 完整、旧 direct/self-register/common-scheduler owner 归零。四条反向 mutation分别恢复 confirmation self-registration、把 recovery start 移到 handle 之前、错绑 activation stage 和新增第二 direct owner，均必须失败。首次 canonical 运行只因 inspector 把 ConversationManager 回调体内未执行的 `await` 误作构造后 effect 而失败；改绑真实 `executorDataPlane.start` 后，canonical write 的人工差异仅为六项 source 迁至 `assembly-lifecycle.ts` 并删除无生产调用的 `anchor-host/common/scheduler.stop`，owner/role/id 无漂移。最终 `pnpm s7:lint` 为 21/21 且 registry golden 通过；CLI canonical typecheck、`pnpm cli:build` 与最窄 Biome 通过。
 - 失效、遗留与状态：若六项资源构造/启动、conversation recovery start/stop、scheduler generation handle、condition/topology、三段 transfer、LIFO 顺序、StartupRollback provenance、CleanupRegistry descriptor collector/golden 或 entry-last commit/ready 任一变化，恢复 `A1-10-anchor-runtime-lifecycle-contributions-v1` 并只重验上述 6 文件、S7 与 CLI typecheck/build。Anchor binding/ServerStateFile/heartbeat/PID-lock 与 `A1-HOST-DELEGATE-01` 仍未收束，故 A1、完成度和最终退出门保持不变。
 - 交接类型：完成，等待协调者独立复核；无本包内遗留。下一检查点由协调者在 Anchor endpoint/state/timer 与 `A1-HOST-DELEGATE-01` 退场中选择最高价值的单一 A1 责任链，不进入 A2。
+
+### A1-11：收束 Anchor Host shell 的唯一类型化生命周期
+
+- 基线与边界：`HEAD 410ace9bec4041e0814cc09f090e38c94ba27792 + A1-11-anchor-host-shell-lifecycle-v1`；进场索引为空，工作区只有协调者预先登记的本文台账差异。本包只收束 Anchor/Anchor+local Executor 常驻 root 的 Host shell；未改 Executor-only A1-08/A1-09 owner、HostStop、accepted-work、领域、公开协议、standalone Server 默认行为或 `A1-HOST-DELEGATE-01`，未执行 Git 写操作。
+- exact-set 与首个安全点：新建有限 `AnchorHostShellLifecycle`，七项责任固定为 `serverLogLifecycle.stop`、`endpoint.close`、`authorityCheckpointOwner.stop`、`serverState.lifecycle`、`heartbeatTimer.clear`、`idleTimer.clearAndSettle`、`processDiscovery.release`。Server log、inactive binding、state file 与 checkpoint owner 均在取得后首个安全点纳入构造期已登记的同一 `StartupRollback` handle；heartbeat/idle 只能在 normal owner 接管后创建，idle 停止先 clear timer 并等已开始 check settle。条件不适用时不伪造 log/checkpoint 资源，activation 前以当前拓扑 exact-set 直接 fail closed。
+- 同 endpoint 单向接管：`runServer` 只在注入 `CleanupRegistry` 时接受类型化 `ServerLifecycleOwner`；activation gate 中把 prepared server 的 `httpServer` object identity、host 与 port 与已取得 binding 三重全等后，把同一幂等 handle 注册进 normal `CleanupRegistry`。公开 `StartServerOptions` 没有可声明“caller 已拥有 cleanup”的字符串开关；普通 `startServer` activation failure 始终由 Server 默认关闭，持久 Host 只经包内 lifecycle 入口调用实际 owner 的 `cleanupActivationFailure()`，且该方法运行的正是上述同一 handle。Anchor 入口在 A1-10 的 18 项 contribution 完整移交并 commit rollback 之前仍只返回 503；激活后还要通过同 object 的 active proof，才可发布 discovery 与 ready/running。
+- 诚实终态与旧路退场：终止操作先停 idle/heartbeat、等待在途 idle check 并尝试 `markStopping`；随后在旧 endpoint 仍占有 OS 端口时校验并删除本 process generation 的 PID/port，令合法 successor 无法落入“校验后、删除前”窗口，再关闭当前 binding/running server。只有 endpoint close 真实成功才尝试 `markStopped` 与 state/ready cleanup；若 endpoint close 失败，则不伪造 stopped，并用冻结 generation 恢复仍存活 endpoint 的 discovery。发现发布部分失败也只删除与本 generation 全等的记录，不删除 foreign generation。`markStopping`、state、discovery、checkpoint 或 log 的单项失败都不截断其他安全动作，失败以 `AggregateError` 保留。`command.ts` 中本 exact-set 的 direct registration、可选引用袋、idle direct timer/fallback 及 `registerCoreCleanup/registerTailCleanup` 全部删除，`shutdown-chain.ts` 与其专属测试退役。canonical catalog 将原 9 个散落 Anchor shell cleanup descriptor 收束为唯一 `cleanup:anchor-host:server:hostShell.stop`；无 lifecycle owner 的通用注入模式不再冒充 Anchor production owner。
+- 直接与保护证据：CLI 新 Host shell、production order 与 lifecycle golden 为 3 文件 15/15；A1-07/A1-10 未改贡献的 assembly、runtime、surface、rollback 保护为 4 文件 18/18，合计 CLI 7 文件 33/33。Server 的 bound activation、lifecycle、state、cleanup registry 与 log lifecycle 为 5 文件 76/76；最后改动的 lifecycle 单文件另行重取 15/15，不重复计入 76。反例覆盖七项 exact-set、duplicate/foreign/missing/late，同 handle rollback/normal/repeat，异组 endpoint，gate 失败、真实 loopback 503→200→端口释放，idle in-flight settle，endpoint 失败禁止 stopped/cleanup 并恢复 discovery、单项失败继续与同 generation release。
+- 结构、构建与失效：S7 现机械取得七项 shell 资源与唯一 cleanup descriptor，要求 production root 的取得/接管/发布、同 endpoint provenance、idle settle、endpoint-terminal 条件和 discovery generation 全部成立；反向 mutation 能检出无条件 stopped、不等 idle check、丢 lifecycle owner、丢 discovery publication 和恢复 direct ready。canonical write 差异只收束上述 shell descriptor/source，A1-07/A1-10 的 18 项 owner/role/id 未漂移；最终 `pnpm s7:lint` 为 21/21 且 registry golden 通过。Server 上游 build、CLI canonical typecheck、`pnpm cli:build`、适用 TypeScript 路径的最窄 Biome 与 `git diff --check` 通过；MJS 结构脚本被 Biome 配置排除，由 canonical S7 直接执行取证。未运行包全测、根级全量、package check 或制品验收。若七项 exact-set/取得点、endpoint provenance/transfer、activation-failure ownership、A1-10 transfer 顺序、state/discovery 终态条件、timer settle、cleanup descriptor/golden 或 standalone Server 默认任一变化，恢复 `A1-11-anchor-host-shell-lifecycle-v1` 并只重验上述失效闭包。
+- 交接类型：完成，等待协调者独立复核；无本包内遗留。A1 与最终退出门继续保持 `[ ]`；唯一下一检查点是独立裁决并退场 `A1-HOST-DELEGATE-01`，不进入 A2。
+
+#### A1-11 协调反证纠正：真实 activation owner 与 successor-safe discovery
+
+- 反证与根因：初版 `StartServerOptions.activationFailureCleanupOwner?: "server" | "caller"` 只靠可伪造字符串声明外部 owner，direct caller 可在没有 cleanup handle 时跳过 inactive binding 关闭；初版 discovery 又在 endpoint close 后执行 `readLock → releaseLock`，合法 successor 可在两步间绑定同一端口并覆盖 discovery，随后被旧 Host 删除。两处都恢复了 `A1-11-anchor-host-shell-lifecycle-v1` 的 endpoint/discovery 子证据，未扩大到七项 exact-set、A1-07/A1-10 contribution 或 `A1-HOST-DELEGATE-01`。
+- 纠正结果：公开 `startServer` 已无跳过清理字段，包根也不导出内部 owner-aware 入口；默认路径自行关闭，Host 路径实际调用同一 `StartupRollback` handle 的 `cleanupActivationFailure()`，后续 registry/rollback 重入不产生第二 close。discovery 的 generation check/release 已移到 endpoint close 之前；真实端口竞争反例在该窗口只能得到 `EADDRINUSE`，旧 endpoint terminal 后 successor 才能绑定并发布且记录保持。endpoint close 失败会恢复旧 generation discovery；partial acquire 失败只条件清理本 generation，foreign record 不受影响。
+- 本轮有效证据：`server.test.ts + lifecycle.test.ts` 为 2 文件 28/28，`anchor-host-shell-lifecycle.test.ts` 为 12/12，合计 3 文件 40/40；其中公开伪造 owner 与真实 successor 竞争两个新增对抗均先隔离通过，未重复计数。`pnpm --filter @zhixing/server build`、`pnpm --filter @zhixing/cli exec tsc -p tsconfig.json --noEmit`、`pnpm cli:build` 与 12 个受影响 TypeScript 路径的最窄 Biome 均通过。S7 新增公开字段/包根出口、实际 owner cleanup、release-before-close、restore 与对应反向 mutation；首次 canonical 重取暴露测试输入漏读 `packages/server/src/index.ts`，补入真实扫描集合后最终 `pnpm s7:lint` 为 21/21 且 registry golden 通过。
+- 状态与失效：A1-11 纠正完成并等待协调者独立复核；A1 与最终退出门仍为 `[ ]`。以后若 `StartServerOptions`/包根导出、owner-aware lifecycle 调用、同 handle cleanup、discovery generation 校验与 release/restore 顺序、endpoint close 终态或相应 S7 mutation 任一变化，只恢复本纠正与 A1-11 endpoint/discovery 失效闭包；其余未变 A1 证据继续复用。
 
 ## 十、用户提示词
 

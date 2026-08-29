@@ -11,24 +11,12 @@
  *
  * 两种使用模式：
  * 1. **注入模式**（command.ts 传入 cleanupRegistry）：
- *    - runServer 只在 registry 中注册 `server.close`
- *    - 其余资源（scheduler / channels / delivery / stateFile / releaseLock）
- *      由 command.ts 注册——它是唯一知道全部资源的编排点
- *    - LIFO 保证：命令行注册尾部项（释放锁）→ server.close → 命令行注册核心资源
+ *    - 默认由 runServer 注册 `server.close`；持久 Host 可注入一个类型化
+ *      lifecycle owner，以同一 handle 接管 endpoint 与 discovery
+ *    - 其余资源由持久 Host 的有限类型化 lifecycle owner 接管
  * 2. **独立模式**（cleanupRegistry 未传入，lifecycle.test.ts 等场景）：
  *    - runServer 内部创建默认 registry
  *    - 额外注册 scheduler.stop + releaseLock，保持 M3 之前的 shutdown 语义不变
- *
- * 关闭顺序（LIFO 展开示例，注入模式 + 全量资源）：
- * 1. stateFile.markStopping        ← 对外宣告
- * 2. scheduler.stop                ← 业务子系统
- * 3. channels.dispose
- * 4. delivery.stop
- * 5. clearInterval(heartbeat)
- * 6. server.close                  ← HTTP/WS
- * 7. stateFile.markStopped
- * 8. stateFile.cleanup             ← 删 state/ready
- * 9. releaseLock                   ← 删 PID 文件，最后
  *
  * 多次信号处理：
  * - 第一次 SIGTERM/SIGINT → 进入优雅停机流程，shutdown resolve 后 process.exit(0)
@@ -40,7 +28,13 @@
  */
 
 import type { SchedulerBackend } from "@zhixing/core";
-import { startServer, type StartServerOptions, type ZhixingServerInstance } from "./server.js";
+import {
+  startServer,
+  startServerWithActivationFailureOwner,
+  type ServerActivationFailureOwner,
+  type StartServerOptions,
+  type ZhixingServerInstance,
+} from "./server.js";
 import {
   acquireLock,
   releaseLock,
@@ -59,6 +53,12 @@ export interface RunServerOptions extends Omit<StartServerOptions, "activationGa
   beforePublish?: (server: ZhixingServerInstance) => Promise<void>;
   /** PID/port 已发布后写入 Host state/ready；失败仍走同一 shutdown registry。 */
   publishReady?: (runner: RunningServer) => Promise<void>;
+  /**
+   * Optional typed outer owner for persistent Host endpoint/discovery cleanup.
+   * When present it replaces this module's direct `server.close` registration
+   * and owns activation-failure compensation through the injected registry.
+   */
+  lifecycleOwner?: ServerLifecycleOwner;
   /** Scheduler 实例（已 start）。独立模式会在 registry 中注册 scheduler.stop */
   scheduler?: SchedulerBackend;
   /** 进程锁文件路径覆盖 */
@@ -74,7 +74,7 @@ export interface RunServerOptions extends Omit<StartServerOptions, "activationGa
   skipSignalHandlers?: boolean;
   /**
    * 外部注入的 cleanup registry。
-   * - 传入：lifecycle 只注册 server.close，其他由调用方负责
+   * - 传入：lifecycle 注册 server.close，或把它移交给 lifecycleOwner；其他由调用方负责
    * - 未传入：内部创建默认 registry，注册 scheduler.stop + server.close + releaseLock
    *   （向后兼容模式——lifecycle.test.ts 等直接调用方场景）
    */
@@ -85,6 +85,14 @@ export interface RunServerOptions extends Omit<StartServerOptions, "activationGa
     warn: (msg: string) => void;
     error: (msg: string) => void;
   };
+}
+
+export interface ServerLifecycleOwner extends ServerActivationFailureOwner {
+  transferPreparedServer(
+    server: ZhixingServerInstance,
+    registry: CleanupRegistry,
+  ): void;
+  publishDiscovery(server: ZhixingServerInstance): Promise<void>;
 }
 
 export interface RunningServer {
@@ -105,6 +113,9 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
   // 1. Cleanup registry：在公开入口激活之前成立，令 staging/open/publication
   //    任一失败都由同一 owner 逆序补偿。
   const injected = !!opts.cleanupRegistry;
+  if (opts.lifecycleOwner && !injected) {
+    throw new Error("A Server lifecycle owner requires an injected CleanupRegistry");
+  }
   const registry =
     opts.cleanupRegistry ??
     new CleanupRegistry({
@@ -143,7 +154,7 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
   try {
     // 3. startServer 先准备 handler/connection/context，但 activationGate resolve 前
     //    同一最终 endpoint 仍只返回 inactive 503。
-    const server = await startServer({
+    const startOptions: StartServerOptions = {
       context: opts.context,
       ...(opts.boundServer ? { boundServer: opts.boundServer } : {}),
       config: opts.config,
@@ -161,12 +172,8 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
             },
           );
         }
-        if (injected) {
-          registerCleanup(
-            registry,
-            { owner: "anchor-host", role: "server", id: "server.close" },
-            async () => preparedServer.close(),
-          );
+        if (opts.lifecycleOwner) {
+          opts.lifecycleOwner.transferPreparedServer(preparedServer, registry);
         } else {
           registerCleanup(
             registry,
@@ -197,7 +204,10 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
         };
         await opts.beforeActivate?.(runner);
       },
-    });
+    };
+    const server = opts.lifecycleOwner
+      ? await startServerWithActivationFailureOwner(startOptions, opts.lifecycleOwner)
+      : await startServer(startOptions);
 
     if (!runner) {
       throw new Error("Server activation completed without lifecycle ownership");
@@ -208,7 +218,9 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
     await assertStartupActive();
 
     // 5. 写 PID / port 发现文件。若失败，同一 registry 会关闭已激活入口并补偿。
-    if (!opts.skipProcessLock) {
+    if (opts.lifecycleOwner) {
+      await opts.lifecycleOwner.publishDiscovery(server);
+    } else if (!opts.skipProcessLock) {
       await acquireLock(server.port, {
         ...opts.lockPaths,
         ...opts.processInfo,

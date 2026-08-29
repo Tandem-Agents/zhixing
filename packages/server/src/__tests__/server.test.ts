@@ -2,7 +2,12 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { connect } from "node:net";
 import { fork, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { bindServer, startServer, type ZhixingServerInstance } from "../server.js";
+import {
+  bindServer,
+  startServer,
+  type StartServerOptions,
+  type ZhixingServerInstance,
+} from "../server.js";
 import { createRpcClient } from "../client/rpc-client.js";
 import { createServerContext } from "../context.js";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
@@ -198,6 +203,29 @@ describe("HTTP Server (S2.B)", () => {
     await expect(started).rejects.toThrow("post-server contribution failed");
     expect(candidate.httpServer.listening).toBe(false);
     await expect(fetch(`http://127.0.0.1:${candidate.port}/api/health`)).rejects.toThrow();
+  });
+
+  it("cannot forge an activation cleanup owner through public start options", async () => {
+    await server.close();
+    const ctx = createServerContext({
+      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
+      version: TEST_VERSION,
+      token: TEST_TOKEN,
+    });
+    const bound = await bindServer({ config: ctx.config });
+    const port = bound.port;
+    const forgedOptions = {
+      context: ctx,
+      boundServer: bound,
+      activationFailureCleanupOwner: "caller",
+      activationGate: async () => {
+        throw new Error("forged owner gate failed");
+      },
+    } as StartServerOptions & { activationFailureCleanupOwner: "caller" };
+
+    await expect(startServer(forgedOptions)).rejects.toThrow("forged owner gate failed");
+    expect(bound.httpServer.listening).toBe(false);
+    await expect(fetch(`http://127.0.0.1:${port}/api/health`)).rejects.toThrow();
   });
 
   it("lets exactly one real process own the same fixed endpoint", async () => {

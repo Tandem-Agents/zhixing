@@ -227,7 +227,7 @@ test("cleanup and channel coverage are bound to actual production calls", async 
   const cleanupSources = [
     "packages/server/src/lifecycle.ts",
     "packages/cli/src/serve/command.ts",
-    "packages/cli/src/serve/shutdown-chain.ts",
+    "packages/cli/src/serve/anchor-host-shell-lifecycle.ts",
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/assembly-lifecycle.ts",
   ];
@@ -1680,7 +1680,7 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     "packages/cli/src/serve/assembly-lifecycle.ts",
     "packages/cli/src/serve/executor-role-lifecycle.ts",
     "packages/cli/src/serve/executor-server-lifecycle.ts",
-    "packages/cli/src/serve/shutdown-chain.ts",
+    "packages/cli/src/serve/anchor-host-shell-lifecycle.ts",
     "packages/cli/src/serve/anchor-internal-stop.ts",
     "packages/cli/src/serve/executor-role-runtime.ts",
     "packages/cli/src/serve/executor-internal-stop.ts",
@@ -1699,6 +1699,7 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     "packages/server/src/rpc/methods/server.ts",
     "packages/server/src/lifecycle.ts",
     "packages/server/src/server.ts",
+    "packages/server/src/index.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -1867,23 +1868,85 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
   );
   assert.match(
     inspectManagedHostAssembly(mutate(
-      "packages/cli/src/serve/shutdown-chain.ts",
+      "packages/cli/src/serve/anchor-host-shell-lifecycle.ts",
       (text) => text.replace(
-        "readonly lifecycleContributions: AssemblyLifecycleContributions;",
-        "readonly lifecycleContributions?: AssemblyLifecycleContributions;",
+        "    if (endpointTerminal) {",
+        "    if (true) {",
       ),
     )).join("\n"),
-    /pre-server lifecycle contribution ownership drifted/,
+    /Anchor Host shell lifecycle ownership or truthful terminal drifted/,
   );
   assert.match(
     inspectManagedHostAssembly(mutate(
-      "packages/cli/src/serve/shutdown-chain.ts",
+      "packages/cli/src/serve/anchor-host-shell-lifecycle.ts",
+      (text) => text
+        .replace(
+          "    await attempt(() => this.#releaseOwnedDiscovery(), failures);\n",
+          "",
+        )
+        .replace(
+          "    if (endpointTerminal) {",
+          "    if (endpointTerminal) {\n      await attempt(() => this.#releaseOwnedDiscovery(), failures);",
+        ),
+    )).join("\n"),
+    /Anchor Host shell lifecycle ownership or truthful terminal drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/server/src/server.ts",
       (text) => text.replace(
-        'resources.lifecycleContributions.transferTo(registry, "foundation")',
-        'resources.lifecycleContributions?.transferTo(registry, "foundation")',
+        "  activationGate?: (server: ZhixingServerInstance) => Promise<void>;",
+        '  activationGate?: (server: ZhixingServerInstance) => Promise<void>;\n  activationFailureCleanupOwner?: "server" | "caller";',
       ),
     )).join("\n"),
-    /pre-server lifecycle contribution ownership drifted/,
+    /entry-last activation or publication order drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/server/src/server.ts",
+      (text) => text.replace(
+        "await activationFailureOwner.cleanupActivationFailure();",
+        "await Promise.resolve();",
+      ),
+    )).join("\n"),
+    /entry-last activation or publication order drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/anchor-host-shell-lifecycle.ts",
+      (text) => text.replace(
+        "await this.#idleCheck?.catch(() => undefined);",
+        "void this.#idleCheck;",
+      ),
+    )).join("\n"),
+    /Anchor Host shell lifecycle ownership or truthful terminal drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace("    lifecycleOwner: hostShellLifecycle,\n", ""),
+    )).join("\n"),
+    /entry-last activation or publication order drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/server/src/lifecycle.ts",
+      (text) => text.replace(
+        "await opts.lifecycleOwner.publishDiscovery(server);",
+        "void server.port;",
+      ),
+    )).join("\n"),
+    /entry-last activation or publication order drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "      await hostShellLifecycle.markReady({",
+        "      await stateFile.markReady({",
+      ),
+    )).join("\n"),
+    /entry-last activation or publication order drifted/,
   );
   assert.match(
     inspectManagedHostAssembly(mutate(

@@ -24,7 +24,14 @@ export * from "./client/index.js";
 export * from "./types.js";
 export * from "./managed-host-status.js";
 export * from "./context.js";
-export * from "./server.js";
+export {
+  BoundZhixingServer,
+  bindServer,
+  startServer,
+  type BindServerOptions,
+  type StartServerOptions,
+  type ZhixingServerInstance,
+} from "./server.js";
 export * from "./channels/index.js";
 export * from "./confirmation/index.js";
 export {

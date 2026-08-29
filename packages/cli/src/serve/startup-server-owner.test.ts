@@ -23,12 +23,28 @@ describe("production startup server ownership", () => {
     const activation = source.slice(location(source, "runner = await runServer"));
     expect(activation).toContain("boundServer: serverBinding");
     expect(activation).toContain("config: { ...DEFAULT_SERVER_CONFIG, port, host }");
-    expect(activation).toContain("startTime: processStartTime");
-    expect(activation).toContain("startedAt: processStartedAt");
+    expect(activation).toContain("lifecycleOwner: hostShellLifecycle");
+    const shell = source.slice(
+      location(source, "const hostShellLifecycle = new AnchorHostShellLifecycle({"),
+      location(source, "const serverLogLifecycle = isBackground"),
+    );
+    expect(shell).toContain("startTime: processStartTime");
+    expect(shell).toContain("startedAt: processStartedAt");
     const gate = location(activation, "beforeActivate: async (openingRunner) =>");
+    const shellOwner = location(
+      activation,
+      "hostShellLifecycle.assertActivationOwnership({",
+    );
     const delivery = location(activation, "ctx.deliveryStack?.activate()");
     const scheduler = location(activation, "schedulerRuntime?.activate()");
-    const cleanupOwner = location(activation, "registerCoreCleanup(registry, {");
+    const foundationTransfer = location(
+      activation,
+      'lifecycleContributions.transferTo(registry, "foundation")',
+    );
+    const surfaceTransfer = location(
+      activation,
+      'lifecycleContributions.transferTo(registry, "surface")',
+    );
     const contribution = location(
       activation,
       'await setupAssemblyUnits(assemblyUnits, ctx, "post-server")',
@@ -50,12 +66,27 @@ describe("production startup server ownership", () => {
       "lifecycleContributions.assertTransferred()",
     );
     const cleanupCommit = location(activation, "startupRollback.commit()");
+    const activeEndpoint = location(
+      activation,
+      "hostShellLifecycle.assertActiveEndpoint(openingServer)",
+    );
     const publish = location(activation, "publishReady: async (openingRunner) =>");
-    const ready = location(activation, "await stateFile.markReady({");
-    for (const prerequisite of [delivery, scheduler, cleanupOwner, contribution, cleanupCommit]) {
+    const ready = location(activation, "await hostShellLifecycle.markReady({");
+    for (const prerequisite of [
+      shellOwner,
+      delivery,
+      scheduler,
+      foundationTransfer,
+      surfaceTransfer,
+      contribution,
+      cleanupCommit,
+    ]) {
       expect(prerequisite).toBeGreaterThan(gate);
       expect(prerequisite).toBeLessThan(publish);
     }
+    expect(foundationTransfer).toBeLessThan(surfaceTransfer);
+    expect(activeEndpoint).toBeGreaterThan(cleanupCommit);
+    expect(activeEndpoint).toBeLessThan(publish);
     expect(postServerTransfer).toBeGreaterThan(contribution);
     expect(runtimeTransfer).toBeGreaterThan(postServerTransfer);
     expect(activationTransfer).toBeGreaterThan(runtimeTransfer);
@@ -64,6 +95,19 @@ describe("production startup server ownership", () => {
     expect(source).not.toContain("startupCleanups");
     expect(source).not.toContain("AssemblyStartupCleanups");
     expect(source).not.toContain("cleanup: registry");
+    expect(source).not.toContain("registerCoreCleanup");
+    expect(source).not.toContain("registerTailCleanup");
+    expect(source).not.toContain("shutdown-chain.js");
+    for (const directOwner of [
+      'id: "serverLogLifecycle.stop"',
+      'id: "authorityCheckpointOwner.stop"',
+      'id: "server.close"',
+      'id: "stateFile.markStopping"',
+      'id: "stateFile.markStopped"',
+      'id: "releaseLock"',
+    ]) {
+      expect(source).not.toContain(directOwner);
+    }
     for (const identity of [
       "execution.abortAllAndWait",
       "conversationProtocol.stopRecovery",

@@ -1098,24 +1098,16 @@
           "cleanup:anchor-host:common:authorityRuntime.stopStorageMaintenance",
           "cleanup:anchor-host:common:channels.dispose",
           "cleanup:anchor-host:common:deliveryStack.stop",
-          "cleanup:anchor-host:common:heartbeat.clear",
           "cleanup:anchor-host:common:mcpHub.dispose",
-          "cleanup:anchor-host:common:releaseLock",
-          "cleanup:anchor-host:common:stateFile.cleanup",
-          "cleanup:anchor-host:common:stateFile.markStopped",
-          "cleanup:anchor-host:common:stateFile.markStopping",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
-          "cleanup:anchor-host:runtime:authorityCheckpointOwner.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
           "cleanup:anchor-host:runtime:execution.abortAllAndWait",
-          "cleanup:anchor-host:runtime:idleReaper.clear",
           "cleanup:anchor-host:runtime:inboundRouter.refuseNew",
           "cleanup:anchor-host:runtime:jobStatus.dispose",
           "cleanup:anchor-host:runtime:losslessDataPlane.close",
           "cleanup:anchor-host:runtime:meshRuntime.stop",
           "cleanup:anchor-host:runtime:scheduler.stop",
-          "cleanup:anchor-host:runtime:serverLogLifecycle.stop",
-          "cleanup:anchor-host:server:server.close",
+          "cleanup:anchor-host:server:hostShell.stop",
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
           "cleanup:anchor-local-executor:common:localWorkspaceHost.close",
           "cleanup:anchor-local-executor:runtime:evidenceHandler.stopAccepting",
@@ -1285,24 +1277,16 @@
           "cleanup:anchor-host:common:authorityRuntime.stopStorageMaintenance",
           "cleanup:anchor-host:common:channels.dispose",
           "cleanup:anchor-host:common:deliveryStack.stop",
-          "cleanup:anchor-host:common:heartbeat.clear",
           "cleanup:anchor-host:common:mcpHub.dispose",
-          "cleanup:anchor-host:common:releaseLock",
-          "cleanup:anchor-host:common:stateFile.cleanup",
-          "cleanup:anchor-host:common:stateFile.markStopped",
-          "cleanup:anchor-host:common:stateFile.markStopping",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
-          "cleanup:anchor-host:runtime:authorityCheckpointOwner.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
           "cleanup:anchor-host:runtime:execution.abortAllAndWait",
-          "cleanup:anchor-host:runtime:idleReaper.clear",
           "cleanup:anchor-host:runtime:inboundRouter.refuseNew",
           "cleanup:anchor-host:runtime:jobStatus.dispose",
           "cleanup:anchor-host:runtime:losslessDataPlane.close",
           "cleanup:anchor-host:runtime:meshRuntime.stop",
           "cleanup:anchor-host:runtime:scheduler.stop",
-          "cleanup:anchor-host:runtime:serverLogLifecycle.stop",
-          "cleanup:anchor-host:server:server.close",
+          "cleanup:anchor-host:server:hostShell.stop",
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
           "cleanup:anchor-local-executor:common:localWorkspaceHost.close",
           "cleanup:anchor-local-executor:runtime:evidenceHandler.stopAccepting",
@@ -1469,24 +1453,16 @@
           "cleanup:anchor-host:common:authorityRuntime.stopStorageMaintenance",
           "cleanup:anchor-host:common:channels.dispose",
           "cleanup:anchor-host:common:deliveryStack.stop",
-          "cleanup:anchor-host:common:heartbeat.clear",
           "cleanup:anchor-host:common:mcpHub.dispose",
-          "cleanup:anchor-host:common:releaseLock",
-          "cleanup:anchor-host:common:stateFile.cleanup",
-          "cleanup:anchor-host:common:stateFile.markStopped",
-          "cleanup:anchor-host:common:stateFile.markStopping",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
-          "cleanup:anchor-host:runtime:authorityCheckpointOwner.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
           "cleanup:anchor-host:runtime:execution.abortAllAndWait",
-          "cleanup:anchor-host:runtime:idleReaper.clear",
           "cleanup:anchor-host:runtime:inboundRouter.refuseNew",
           "cleanup:anchor-host:runtime:jobStatus.dispose",
           "cleanup:anchor-host:runtime:losslessDataPlane.close",
           "cleanup:anchor-host:runtime:meshRuntime.stop",
           "cleanup:anchor-host:runtime:scheduler.stop",
-          "cleanup:anchor-host:runtime:serverLogLifecycle.stop",
-          "cleanup:anchor-host:server:server.close",
+          "cleanup:anchor-host:server:hostShell.stop",
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
           "cli:zhixing",
           "cli:zhixing app",
@@ -1630,24 +1606,16 @@
           "cleanup:anchor-host:common:authorityRuntime.stopStorageMaintenance",
           "cleanup:anchor-host:common:channels.dispose",
           "cleanup:anchor-host:common:deliveryStack.stop",
-          "cleanup:anchor-host:common:heartbeat.clear",
           "cleanup:anchor-host:common:mcpHub.dispose",
-          "cleanup:anchor-host:common:releaseLock",
-          "cleanup:anchor-host:common:stateFile.cleanup",
-          "cleanup:anchor-host:common:stateFile.markStopped",
-          "cleanup:anchor-host:common:stateFile.markStopping",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
-          "cleanup:anchor-host:runtime:authorityCheckpointOwner.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
           "cleanup:anchor-host:runtime:execution.abortAllAndWait",
-          "cleanup:anchor-host:runtime:idleReaper.clear",
           "cleanup:anchor-host:runtime:inboundRouter.refuseNew",
           "cleanup:anchor-host:runtime:jobStatus.dispose",
           "cleanup:anchor-host:runtime:losslessDataPlane.close",
           "cleanup:anchor-host:runtime:meshRuntime.stop",
           "cleanup:anchor-host:runtime:scheduler.stop",
-          "cleanup:anchor-host:runtime:serverLogLifecycle.stop",
-          "cleanup:anchor-host:server:server.close",
+          "cleanup:anchor-host:server:hostShell.stop",
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
           "cli:zhixing",
           "cli:zhixing app",
@@ -2164,64 +2132,9 @@
       {
         "owner": "anchor-host",
         "role": "common",
-        "id": "heartbeat.clear",
-        "source": "packages/cli/src/serve/shutdown-chain.ts",
-        "key": "cleanup:anchor-host:common:heartbeat.clear",
-        "category": "cleanup",
-        "target": {
-          "rowId": "shutdown"
-        }
-      },
-      {
-        "owner": "anchor-host",
-        "role": "common",
         "id": "mcpHub.dispose",
         "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-host:common:mcpHub.dispose",
-        "category": "cleanup",
-        "target": {
-          "rowId": "shutdown"
-        }
-      },
-      {
-        "owner": "anchor-host",
-        "role": "common",
-        "id": "releaseLock",
-        "source": "packages/cli/src/serve/shutdown-chain.ts",
-        "key": "cleanup:anchor-host:common:releaseLock",
-        "category": "cleanup",
-        "target": {
-          "rowId": "shutdown"
-        }
-      },
-      {
-        "owner": "anchor-host",
-        "role": "common",
-        "id": "stateFile.cleanup",
-        "source": "packages/cli/src/serve/shutdown-chain.ts",
-        "key": "cleanup:anchor-host:common:stateFile.cleanup",
-        "category": "cleanup",
-        "target": {
-          "rowId": "shutdown"
-        }
-      },
-      {
-        "owner": "anchor-host",
-        "role": "common",
-        "id": "stateFile.markStopped",
-        "source": "packages/cli/src/serve/shutdown-chain.ts",
-        "key": "cleanup:anchor-host:common:stateFile.markStopped",
-        "category": "cleanup",
-        "target": {
-          "rowId": "shutdown"
-        }
-      },
-      {
-        "owner": "anchor-host",
-        "role": "common",
-        "id": "stateFile.markStopping",
-        "source": "packages/cli/src/serve/shutdown-chain.ts",
-        "key": "cleanup:anchor-host:common:stateFile.markStopping",
         "category": "cleanup",
         "target": {
           "rowId": "shutdown"
@@ -2233,17 +2146,6 @@
         "id": "assetMaintenance.stop",
         "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-host:runtime:assetMaintenance.stop",
-        "category": "cleanup",
-        "target": {
-          "rowId": "shutdown"
-        }
-      },
-      {
-        "owner": "anchor-host",
-        "role": "runtime",
-        "id": "authorityCheckpointOwner.stop",
-        "source": "packages/cli/src/serve/command.ts",
-        "key": "cleanup:anchor-host:runtime:authorityCheckpointOwner.stop",
         "category": "cleanup",
         "target": {
           "rowId": "shutdown"
@@ -2266,17 +2168,6 @@
         "id": "execution.abortAllAndWait",
         "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-host:runtime:execution.abortAllAndWait",
-        "category": "cleanup",
-        "target": {
-          "rowId": "shutdown"
-        }
-      },
-      {
-        "owner": "anchor-host",
-        "role": "runtime",
-        "id": "idleReaper.clear",
-        "source": "packages/cli/src/serve/command.ts",
-        "key": "cleanup:anchor-host:runtime:idleReaper.clear",
         "category": "cleanup",
         "target": {
           "rowId": "shutdown"
@@ -2339,21 +2230,10 @@
       },
       {
         "owner": "anchor-host",
-        "role": "runtime",
-        "id": "serverLogLifecycle.stop",
-        "source": "packages/cli/src/serve/command.ts",
-        "key": "cleanup:anchor-host:runtime:serverLogLifecycle.stop",
-        "category": "cleanup",
-        "target": {
-          "rowId": "shutdown"
-        }
-      },
-      {
-        "owner": "anchor-host",
         "role": "server",
-        "id": "server.close",
-        "source": "packages/server/src/lifecycle.ts",
-        "key": "cleanup:anchor-host:server:server.close",
+        "id": "hostShell.stop",
+        "source": "packages/cli/src/serve/anchor-host-shell-lifecycle.ts",
+        "key": "cleanup:anchor-host:server:hostShell.stop",
         "category": "cleanup",
         "target": {
           "rowId": "shutdown"

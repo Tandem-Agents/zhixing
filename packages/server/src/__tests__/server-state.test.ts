@@ -284,11 +284,11 @@ describe("ServerStateFile", () => {
     });
 
     it("full startup-failure path: registry.runAll produces no noise", async () => {
-      // 模拟 shutdown-chain 的 registry.runAll 在 startup 失败场景下被调
+      // 模拟类型化 Host lifecycle 在 startup 失败场景下收口状态
       const f = newFile();
       // phase = starting（未 markReady）
-      await expect(f.markStopping("error")).resolves.toBeUndefined(); // 从 registerCoreCleanup
-      await expect(f.markStopped()).resolves.toBeUndefined(); // 从 registerTailCleanup
+      await expect(f.markStopping("error")).resolves.toBeUndefined();
+      await expect(f.markStopped()).resolves.toBeUndefined();
       await expect(f.cleanup()).resolves.toBeUndefined(); // 文件不存在，也 no-op
       // 全程不抛，不污染日志
     });

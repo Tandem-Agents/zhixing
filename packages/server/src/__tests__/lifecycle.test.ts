@@ -408,7 +408,7 @@ describe("runServer lifecycle (S2.F)", () => {
     });
     const registry = new CleanupRegistry({ logger: { error: () => {} } });
 
-    // 模拟 command.ts 的 registerTailCleanup：runServer 之前注册 releaseLock
+    // 模拟持久 Host 在 runServer 之前已有的外层 cleanup contribution。
     registry.register("releaseLock", async () => {
       await releaseLock({ pidPath, portPath });
     });

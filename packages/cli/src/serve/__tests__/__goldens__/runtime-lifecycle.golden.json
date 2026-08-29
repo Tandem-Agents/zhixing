@@ -1,22 +1,19 @@
 {
   "executed": [
-    "stateFile.markStopping",
     "mcpHub.dispose",
     "deliveryStack.stop",
     "channels.dispose",
+    "stateFile.markStopping",
     "server.close",
     "stateFile.markStopped",
-    "stateFile.cleanup"
+    "stateFile.cleanup",
+    "authorityCheckpointOwner.stop",
+    "serverLogLifecycle.stop"
   ],
   "registered": [
-    "releaseLock",
-    "stateFile.cleanup",
-    "stateFile.markStopped",
-    "server.close",
-    "heartbeat.clear",
+    "hostShell.stop",
     "channels.dispose",
     "deliveryStack.stop",
-    "mcpHub.dispose",
-    "stateFile.markStopping"
+    "mcpHub.dispose"
   ]
 }

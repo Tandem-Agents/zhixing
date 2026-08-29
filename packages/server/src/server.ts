@@ -70,9 +70,15 @@ export interface StartServerOptions {
   boundServer?: BoundZhixingServer;
   /**
    * 已建立内部 handler/connection 设施、但同一 bound handle 仍只返回 503 时执行。
-   * resolve 后才会一次性开放 REST/RPC/WS；reject 时关闭该 inactive handle。
+   * resolve 后才会一次性开放 REST/RPC/WS；reject 时默认由 Server
+   * 关闭该 inactive handle。
    */
   activationGate?: (server: ZhixingServerInstance) => Promise<void>;
+}
+
+/** @internal 只由本包 lifecycle 组合根注入，不从包根公开。 */
+export interface ServerActivationFailureOwner {
+  cleanupActivationFailure(): Promise<void>;
 }
 
 export interface BindServerOptions {
@@ -222,6 +228,25 @@ export function bindServer(options: BindServerOptions = {}): Promise<BoundZhixin
  * 端口被占用会 reject EADDRINUSE。
  */
 export async function startServer(opts: StartServerOptions): Promise<ZhixingServerInstance> {
+  return startServerWithOwner(opts);
+}
+
+/** @internal 持久 Host 将 activation failure 交回已取得 endpoint 的真实 owner。 */
+export async function startServerWithActivationFailureOwner(
+  opts: StartServerOptions,
+  owner: ServerActivationFailureOwner,
+): Promise<ZhixingServerInstance> {
+  if (!owner || typeof owner.cleanupActivationFailure !== "function") {
+    await opts.boundServer?.close().catch(() => undefined);
+    throw new TypeError("Server activation failure owner is invalid");
+  }
+  return startServerWithOwner(opts, owner);
+}
+
+async function startServerWithOwner(
+  opts: StartServerOptions,
+  activationFailureOwner?: ServerActivationFailureOwner,
+): Promise<ZhixingServerInstance> {
   const config = { ...DEFAULT_SERVER_CONFIG, ...opts.context.config, ...opts.config };
   const ctx = opts.context;
   const wsPath = opts.wsPath ?? "/ws";
@@ -367,7 +392,18 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
   } catch (error) {
     disposeBridge();
     wss.close();
-    await boundServer.close().catch(() => {});
+    if (activationFailureOwner) {
+      try {
+        await activationFailureOwner.cleanupActivationFailure();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Server activation and owner cleanup failed",
+        );
+      }
+    } else {
+      await boundServer.close().catch(() => {});
+    }
     throw error;
   }
 

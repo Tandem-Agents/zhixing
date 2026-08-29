@@ -5,7 +5,7 @@
  * →lossless data plane→channel 门面→delivery），setupAssemblyUnits 按此序遍历。每个 setup 内聚自己的
  * 运行时条件（如 channel 判 messaging 配置）与失败处理；profile 是否启用由
  * PROFILES.surfaces 决定、不在 setup 内判 profile。teardown 策略见 access-surface.ts
- * 文件头（pre-server 走 shutdown-chain、post-server 在 activation gate 内自注册）。
+ * 文件头（pre-server 与 post-server 都经 activation gate 的类型化 contribution 移交）。
  */
 
 import chalk from "chalk";
