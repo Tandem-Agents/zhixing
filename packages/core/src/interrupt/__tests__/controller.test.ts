@@ -40,7 +40,8 @@ describe("createInterruptController", () => {
   });
 
   it("外部 signal 已用 abortWithReason 触发 typed reason → controller 透传 reason 不覆盖", () => {
-    // cli KeyboardSource 按 Esc 触发 user-cancel,signal 通过 RunParams.abortSignal
+    // cli KeyboardSource 按 Esc 触发 user-cancel，signal 通过
+    // KernelRunEnvelope.control.abortSignal
     // 跨层传到 agent-loop;agent-loop 内 createInterruptController 应透传原 typed reason,
     // 让下游 (REPL renderSummary 等) 能展示差异化中断原因 ("interrupted by user (esc)" 等),
     // 而不是被笼统覆盖为 "external signal"。

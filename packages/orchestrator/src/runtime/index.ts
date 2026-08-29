@@ -7,7 +7,7 @@
  *
  * 1. 核心入口与类型
  *    - `createAgentRuntime` + `AgentRuntime` / `CreateAgentRuntimeOptions` /
- *      `RunParams` / `RunResult` / `RunBusContext` / `DecorateRunBusFn` /
+ *      `KernelRunEnvelope` / `RunResult` / `RunBusContext` / `DecorateRunBusFn` /
  *      `ForceCompactResult`
  *
  * 2. M2 子 agent 实现需要的 system prompt 装配能力
@@ -51,10 +51,10 @@ export {
   type ForceCompactResult,
   type RunBusContext,
   type RunOrchestrationV1Params,
-  type RunParams,
   type RunResult,
   type TextCallOptions,
 } from "./create-agent-runtime.js";
+export type { KernelRunEnvelope } from "./kernel-run-envelope.js";
 export {
   createControlCompletionPort,
   type ControlCompletionPortOptions,

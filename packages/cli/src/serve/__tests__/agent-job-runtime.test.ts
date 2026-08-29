@@ -3,7 +3,10 @@ import type {
   IConfirmationBroker,
   ToolSideEffectObserver,
 } from "@zhixing/core";
-import type { AgentRuntime } from "@zhixing/orchestrator/runtime";
+import type {
+  AgentRuntime,
+  KernelRunEnvelope,
+} from "@zhixing/orchestrator/runtime";
 import { describe, expect, it, vi } from "vitest";
 import { createAgentJobRuntimePort } from "../agent-job-runtime.js";
 
@@ -33,6 +36,16 @@ function runOptions(signal = new AbortController().signal) {
     onProtocolEvent: vi.fn(async () => undefined),
     authorizeToolExecution: vi.fn(async () => []),
     toolSideEffectObserver: {} as ToolSideEffectObserver,
+    stageScheduleMutation: {} as never,
+    assignmentMutations: {} as never,
+    globalQuery: {} as never,
+    assignmentIssuedAt: "2026-08-29T00:00:00.000Z",
+    modelCallResourceMeter: {} as never,
+    resourceReservation: {
+      port: {} as never,
+      parentLease: {} as never,
+      contextFor: () => ({}) as never,
+    },
   };
 }
 
@@ -47,13 +60,46 @@ async function createHandle(runtime: AgentRuntime) {
 }
 
 describe("agent job runtime structured lifecycle", () => {
+  it("constructs the durable job Envelope with one identity and all Correctness ports", async () => {
+    let captured: KernelRunEnvelope | undefined;
+    const runtime = Object.assign({} as AgentRuntime, {
+      run: vi.fn(async (envelope: KernelRunEnvelope) => {
+        captured = envelope;
+        return completedRunResult();
+      }),
+      dispose: vi.fn(async () => undefined),
+    });
+    const handle = await createHandle(runtime);
+    const options = runOptions();
+    const generator = handle.run(instruction, options);
+    await expect(generator.next()).resolves.toMatchObject({ done: true });
+
+    expect(captured!.modelInput.messages).toHaveLength(1);
+    expect(captured!.identity).toMatchObject({
+      turnIndex: 0,
+      source: "scheduler",
+    });
+    expect(captured!.control).toMatchObject({
+      modelCallResourceMeter: options.modelCallResourceMeter,
+    });
+    expect(captured!.correctness).toMatchObject({
+      authorizeToolExecution: options.authorizeToolExecution,
+      toolSideEffectObserver: options.toolSideEffectObserver,
+      stageScheduleMutation: options.stageScheduleMutation,
+      assignmentMutations: options.assignmentMutations,
+      globalQuery: options.globalQuery,
+      assignmentIssuedAt: options.assignmentIssuedAt,
+      resourceReservation: options.resourceReservation,
+    });
+    expect(captured!.observation.onProtocolEvent).toBeTypeOf("function");
+    expect(captured!.observation.onYield).toBeTypeOf("function");
+  });
+
   it("streams yields and joins one runtime task before returning", async () => {
     const dispose = vi.fn(async () => undefined);
     const runtime = Object.assign({} as AgentRuntime, {
-      run: vi.fn(async (options: {
-        onYield(event: AgentYield): void;
-      }) => {
-        options.onYield({ type: "text_delta", text: "hello" });
+      run: vi.fn(async (envelope: KernelRunEnvelope) => {
+        envelope.observation.onYield?.({ type: "text_delta", text: "hello" });
         return completedRunResult();
       }),
       dispose,
@@ -117,15 +163,12 @@ describe("agent job runtime structured lifecycle", () => {
     const dispose = vi.fn(async () => undefined);
     const runtime = Object.assign({} as AgentRuntime, {
       run: vi.fn(
-        (options: {
-          abortSignal: AbortSignal;
-          onYield(event: AgentYield): void;
-        }) =>
+        (envelope: KernelRunEnvelope) =>
           new Promise<ReturnType<typeof completedRunResult>>((_, reject) => {
-            options.onYield({ type: "text_delta", text: "first" });
-            options.abortSignal.addEventListener(
+            envelope.observation.onYield?.({ type: "text_delta", text: "first" });
+            envelope.control.abortSignal!.addEventListener(
               "abort",
-              () => reject(options.abortSignal.reason),
+              () => reject(envelope.control.abortSignal!.reason),
               { once: true },
             );
           }),
@@ -148,15 +191,12 @@ describe("agent job runtime structured lifecycle", () => {
     const dispose = vi.fn(async () => undefined);
     const runtime = Object.assign({} as AgentRuntime, {
       run: vi.fn(
-        (options: {
-          abortSignal: AbortSignal;
-          onYield(event: AgentYield): void;
-        }) =>
+        (envelope: KernelRunEnvelope) =>
           new Promise<ReturnType<typeof completedRunResult>>((_, reject) => {
-            options.onYield({ type: "text_delta", text: "first" });
-            options.abortSignal.addEventListener(
+            envelope.observation.onYield?.({ type: "text_delta", text: "first" });
+            envelope.control.abortSignal!.addEventListener(
               "abort",
-              () => reject(options.abortSignal.reason),
+              () => reject(envelope.control.abortSignal!.reason),
               { once: true },
             );
           }),
@@ -179,15 +219,15 @@ describe("agent job runtime structured lifecycle", () => {
     const dispose = vi.fn(async () => undefined);
     const runtime = Object.assign({} as AgentRuntime, {
       run: vi.fn(
-        (options: { abortSignal: AbortSignal }) =>
+        (envelope: KernelRunEnvelope) =>
           new Promise<ReturnType<typeof completedRunResult>>((_, reject) => {
-            if (options.abortSignal.aborted) {
-              reject(options.abortSignal.reason);
+            if (envelope.control.abortSignal!.aborted) {
+              reject(envelope.control.abortSignal!.reason);
               return;
             }
-            options.abortSignal.addEventListener(
+            envelope.control.abortSignal!.addEventListener(
               "abort",
-              () => reject(options.abortSignal.reason),
+              () => reject(envelope.control.abortSignal!.reason),
               { once: true },
             );
           }),

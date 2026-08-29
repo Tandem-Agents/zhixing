@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A3-02 已由协调者独立复核，A3 阶段退出门成立；下一检查点为 A4 首条 Kernel 合同责任链<br>
+> 当前检查点：A4-01 已由协调者独立复核；下一检查点为 Kernel Event 输出合同及生产投影<br>
 > 完成度：4/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `b2f7398f`；A0、A1-01～A1-12、A2-01～A2-07、A3-01 已由协调者独立复核并提交，A1、A2 阶段退出门成立 |
+| 已接受基线 | `ceda8f65`；A0～A3 已由协调者独立复核并提交，A1、A2、A3 阶段退出门成立 |
 | 当前 A 项 | A4：封闭 Intelligence Kernel 合同及其生产边界 |
-| 活跃工作包 | 无；A3-02 已由协调者独立复核，A3 与 A5 Skill Catalog 行均已闭合 |
-| 下一责任链 | 从全部现有运行形态和当前 `AgentRuntime` 公共面中选择 A4 第一条可独立证伪的 Kernel 合同责任链；不得整阶段派发或提前迁移未归域产品状态机 |
+| 活跃工作包 | 无；A4-01 已由协调者独立复核，唯一 Envelope owner、三类生产 binding、不可变 capture 与旧 `RunParams` 退场均成立 |
+| 下一责任链 | 单独建立 Kernel Event 输出合同及真实生产投影，封闭 Loop 内部事件与 Kernel 消费者之间的边界；Terminal 留给后续独立工作包，不提前收窄其他公共成员或迁移 RuntimeHost 产品装配 |
 | 打开的单向桥 | 无；Skill 管理、保存、admission、load/usage、Kernel 与 Executor 投影均只经 `@zhixing/core/skills/catalog` 及既有 Authority/CAS/assignment Correctness 端口成立，旧 writable Store 不再承担正式应用行为 |
-| 已失效证据 | 无。A3-02 的 Skill client、RPC binding、CLI Surface 与 Fact 订阅闭包已重取；A3-01 dispatcher/RPC server 与 A2 证据继续有效 |
+| 已失效证据 | 无。`A4-01-kernel-run-envelope-v1` 已由协调者重取；A3-02 Skill client/RPC binding/CLI Surface 与 A3-01/A2 既有证据输入未变 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1504,6 +1504,24 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 协调反证与纠正：首次 A3-02 把完整 Product API RPC binding 放在 `@zhixing/cli`，虽然行为和 codec 成立，但违反 AE-001 的 `@zhixing/rpc = Product API RPC 绑定`、`@zhixing/cli = Surface/进程入口` 依赖方向，因而原物理 owner 结论作废。当前 binding 源码、直接测试、build entry 和 package export 已整体唯一归入 `@zhixing/rpc`；RPC 根导出不泄漏，CLI 无转导文件、镜像 DTO、wire 字符串或第二 binding，既有领域/Surface/公开 wire 行为没有重做或改变。
 - 协调者独立验收：在纠正后的同一工作区重跑 RPC binding 9/9、CLI manager/dynamic Surface 25/25，依次完成 core、RPC、CLI 构建与 CLI typecheck；canonical `pnpm s7:lint` 为 22/22 且 registry golden 通过，`pnpm runtime:package-exports` 通过。生产反扫确认 Skill wire 只存在于 RPC binding 与服务端 provider，CLI 没有 wire、镜像 DTO、第二 binding 或根级转导；一个 client 实例同时供两个 Surface 使用，Fact 只触发 Query 重取。协调者接受 A3-02 终态。
 - 失效与交接：若 Skill 领域 client Query/Command/Fact 合同、catalog subpath、RPC 窄 binding subpath/transport port/严格 codec、RPC root/export/build entry、CoreHost notification forwarding、REPL 单实例装配、manager/dynamic source、Skill wire exact-set、Channel 排除、S7 或 package-export gate 任一变化，只恢复 A3-02 及上述直接闭包；A3-01/A2 证据继续复用。当前无遗留旧 Skill client 主链或未处置本包问题，A3 与 A5 Skill Catalog 行均为 `[x]`，完成度为 `4/8`；下一检查点为 A4 首条 Kernel 合同责任链。
+
+### A4-01：冻结唯一 Kernel Run Envelope 输入合同及生产调用入口
+
+- 派发基线：`HEAD ceda8f65f767d6874a8c0377f840c82a24a0b048 + task-doc:A4-01-dispatch`。A3-02 已由协调者独立复跑 RPC binding 9/9、CLI Skill Surface 25/25、core/RPC/CLI build、CLI typecheck、S7 22/22 与 package exports，并以生产反扫确认 RPC binding 归属及 CLI 单 client 主链；提交后索引与工作区为空。
+- 唯一架构结果：以现有 `AgentRuntime.run` 为唯一 Kernel 执行入口，把其输入收敛为由 `@zhixing/orchestrator/runtime` 拥有的唯一、不可变、显式分区 `Run Envelope` 合同；conversation、ephemeral scheduler 与 durable job 生产路径都只构造这份合同，不再依赖未命名的参数袋或各自复制输入语义。本包只固定输入边界，不重写 Agent Loop。
+- 工作包边界：正向覆盖 `createAgentRuntime` 的执行入口，以及 `runtime-host/session-adapter`、`cli/serve/ephemeral-executor`、`cli/serve/agent-job-runtime` 三类直接生产调用；workscene/power 只作为 conversation 装配变体验证同一入口，不建立第二合同。Envelope 必须清楚区分模型输入、调用/运行身份、取消与预算、受控效果/Correctness 端口和事件观察，不让 Conversation、Advancement、Schedule 或 Assignment 规则进入 Kernel；现有必要字段只能作为调用方已经裁决后的值或窄端口进入，不能在 Kernel 重新解释产品状态。
+- 明确不做：不在本包迁移 Kernel Event/Terminal、收窄 `AgentRuntime` 其他查询/管理成员、移动 Workscene/Schedule 装配、修改 Product API、领域 owner、公开 RPC/Event、持久协议或产品行为；不新建万能 Context/Capability、可选字段垃圾袋、并行 `runV2`、兼容别名或只包一层的空抽象。旧 `RunParams` 名称、重复类型和调用形态必须随唯一合同落地而退场。
+- 完成与证据：类型与生产调用图证明只有一个正式 Envelope owner 和一个 `run` 入口；直接测试分别识别 conversation 的 turn/identity/observer、ephemeral 的单次/取消、durable job 的 assignment Correctness/effect 端口及 workscene/power 复用，不靠纯类型编译自证。保持消息、事件顺序、取消 first-wins、错误、终态、资源计量、schedule mutation、global query 和协议投影完全等价；补充只针对该输入边界的反向结构门禁。按验证手册只跑受影响最窄测试、typecheck/build 与相关 S7/package-export 闭包，不重复 A0～A3 或根级全量。
+- 安全交接：若约四小时仍不能闭合，必须停在单一 `run` 入口、无双合同、可构建可运行的状态，记录未迁移的唯一调用链和有效证据；不得顺带进入 Event/Terminal、其他公共面或产品装配迁移。完成后更新本文并停止等待协调者复核，不执行 Git 写操作。
+
+- 实际责任迁移：新增稳定证据 `A4-01-kernel-run-envelope-v1`。`KernelRunEnvelope` 只由 `@zhixing/orchestrator/runtime` 声明并从该窄 subpath 导出；顶层 required exact-set 固定为 `modelInput / identity / control / correctness / observation`，各分区及字段均 readonly，运行入口在首个异步边界前复制并冻结调用方拥有的容器。`AgentRuntime.run` 仍是唯一执行入口，旧 `RunParams` 声明、导出、正向注释和调用形态已归零，没有 `runV2`、兼容别名、镜像输入或第二入口。
+- 输入与 owner 边界：`modelInput` 只承载已组装消息；`identity` 只承载 turn、conversation、source、advancement 与 turn context 的已裁决投影；`control` 承载 abort、watchdog 与模型调用资源计量；`correctness` 承载工具权威、受控效果、schedule/assignment/global query、稳定 assignment time 与子资源 reservation 窄端口；`observation` 承载 yield 与 protocol event observer。Conversation/Advancement/Schedule/Assignment 的规则、事实和状态机仍由调用方裁决，Kernel 只消费投影或端口。本轮同时补齐原调用方已提供而 adapter 类型/转发遗漏的 `resourceReservation` 与 durable-job `modelCallResourceMeter`，没有新增产品决定或第二 Correctness owner。
+- 生产调用闭包：`runtime-host/session-adapter` 将 conversation 的 messages、turn/conversation identity、first-wins abort、observer 与全部 assignment Correctness 端口构造成同一 Envelope；`ephemeral-executor` 构造单次 turn、abort 与 observation；`agent-job-runtime` 构造 scheduler identity、durable assignment/effect/resource 端口和 observer。`RuntimeHost` 仍只有一个 `createAgentRuntime` 装配点，main/workscene power、ephemeral 与 job 都复用同一 assembly/run 合同；workscene/power 没有第二输入类型或执行主链。消息、事件、错误、终态、取消、资源计量、schedule mutation、global query 与协议投影实现未改变。
+- 直接证据与归因：orchestrator Envelope/runtime 直接测试为 2 文件 72/72；CLI 四类 binding 合并证据为 4 文件 41/41，其中首次命令的 session adapter 11 项失败仅因 CLI 测试加载了迁移前的 `runtime-host/dist`，同一命令其余 3 文件与 session 既有 7 项共 30 项通过；按验证手册先完成 `@zhixing/runtime-host` 上游构建，再只重验失败文件为 18/18，故没有用重复全测掩盖失败。新增直接断言分别锁定 conversation 五分区/observer/Correctness、ephemeral 单次与 abort、durable job assignment/effect/resource 端口及不可变 capture；既有 `runtime-host.test.ts` 继续识别 main/workscene power/ephemeral/job 共用装配。
+- 结构、导出与构建：S7 新 inspector 从 TypeScript AST 机械冻结唯一 owner、五分区及字段 exact-set、三个直接 production `.run` binding、单一 RuntimeHost assembly 与 `RunParams/runV2` 负向集合；反向 mutation 能识别 optional/字段袋、capture bypass、任一 binding 展平和第二 RuntimeHost factory。canonical `pnpm s7:lint` 初次只暴露 inspector 把 `import type KernelRunEnvelope` 误认声明的门禁实现错误；改为 AST 顶层 interface/type 声明判定后，仅重跑失效 canonical 闭包，23/23 mutation/coverage 与 registry golden 全部通过。`@zhixing/core`、`@zhixing/owner-kernel`、`@zhixing/orchestrator`、`@zhixing/runtime-host` 依赖顺序构建及受影响 typecheck 已通过，最终 `pnpm cli:build`、`pnpm runtime:package-exports`、19 个适用源码/门禁文件 Biome 均通过；未运行根级全量或制品验收。
+- 失效与状态：若 `KernelRunEnvelope` owner/export、任一分区/字段、capture、`AgentRuntime.run` 签名、三个直接 binding、RuntimeHost assembly、相关 observation/Correctness 投影、S7 inspector/mutation 或 runtime package export 任一变化，恢复本证据并只重验上述闭包。Kernel Event/Terminal、其他查询/管理成员、Workscene/Schedule 产品装配与 RuntimeExecutionProfile 后续收口均未迁移，因此 A4 仍为 `[ ]`、完成度仍为 `4/8`、最终退出门保持 `[ ]`；下一检查点仍由协调者接受本证据后派发 Kernel Event/Terminal 的单一责任链，不进入 A5。
+- 交接类型：完成，等待协调者独立复核；索引为空，未执行 Git 暂存、提交、历史改写或推送。
+- 协调者独立验收：在同一未修改工作区重跑 orchestrator Envelope/runtime 2 文件 72/72、CLI conversation/ephemeral/durable-job/RuntimeHost 4 文件 41/41，orchestrator、runtime-host、CLI typecheck 与 canonical S7 23/23 + registry golden 均通过。生产反扫确认 `KernelRunEnvelope` 只有一个声明和窄导出，`AgentRuntime.run` 只有一个入口，三个直接调用方均构造五分区合同，`RuntimeHost` 只有一个 factory 装配点，旧 `RunParams`、`runV2` 和镜像类型归零。协调者接受 `A4-01-kernel-run-envelope-v1`；durable job 的 meter/reservation 变更经 HEAD 对照确认是调用方原已提供而 adapter 丢弃的 Correctness 端口补全，不是新增产品语义。A4 继续为 `[ ]`，下一责任链只处理 Kernel Event，不与 Terminal 合包。
 
 ## 十、用户提示词
 

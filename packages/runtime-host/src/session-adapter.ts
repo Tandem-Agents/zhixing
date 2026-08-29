@@ -87,27 +87,36 @@ export function createOwnerRuntimeAdapter(
       // 导致 partial 内容丢失 + abortReason 拿不到 channel 渲染层。
       agentRuntime
         .run({
-          messages: [...messages],
-          turnIndex: options?.turnIndex ?? 0,
-          source: options?.source,
-          advancement: options?.advancement,
-          turnContext: options?.turnContext,
-          // sessionId 即 conversationId（ConversationManager 中是同一标识），
-          // 透传到 RunContext 让按需取 conversationId 的工具可用（持久化会话上下文）。
-          conversationId: sessionId,
-          abortSignal: controller.signal,
-          onYield: (event) => {
-            queue.push({ kind: "yield", value: event });
-            wakeOne();
+          modelInput: { messages },
+          identity: {
+            turnIndex: options?.turnIndex ?? 0,
+            source: options?.source,
+            advancement: options?.advancement,
+            turnContext: options?.turnContext,
+            // sessionId 即 conversationId（ConversationManager 中是同一标识），
+            // 透传到 RunContext 让按需取 conversationId 的工具可用（持久化会话上下文）。
+            conversationId: sessionId,
           },
-          onProtocolEvent: options?.onProtocolEvent,
-          toolSideEffectObserver: options?.toolSideEffectObserver,
-          authorizeToolExecution: options?.authorizeToolExecution,
-          modelCallResourceMeter: options?.modelCallResourceMeter,
-          stageScheduleMutation: options?.stageScheduleMutation,
-          assignmentMutations: options?.assignmentMutations,
-          globalQuery: options?.globalQuery,
-          assignmentIssuedAt: options?.assignmentIssuedAt,
+          control: {
+            abortSignal: controller.signal,
+            modelCallResourceMeter: options?.modelCallResourceMeter,
+          },
+          correctness: {
+            toolSideEffectObserver: options?.toolSideEffectObserver,
+            authorizeToolExecution: options?.authorizeToolExecution,
+            stageScheduleMutation: options?.stageScheduleMutation,
+            assignmentMutations: options?.assignmentMutations,
+            globalQuery: options?.globalQuery,
+            assignmentIssuedAt: options?.assignmentIssuedAt,
+            resourceReservation: options?.resourceReservation,
+          },
+          observation: {
+            onYield: (event) => {
+              queue.push({ kind: "yield", value: event });
+              wakeOne();
+            },
+            onProtocolEvent: options?.onProtocolEvent,
+          },
         })
         .then(
           (runResult) => {

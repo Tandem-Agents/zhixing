@@ -13,6 +13,9 @@ import type {
   ExecutionAbortRequest,
   JobInteractionSettlementPort,
   JobExecutionInstruction,
+  ModelCallResourceMeter,
+  ResourceLease,
+  ResourceReservationPort,
   SessionEventProjection,
 } from "@zhixing/core/contracts";
 import { AuthorityStorageError } from "@zhixing/core/authority";
@@ -77,6 +80,12 @@ export interface JobRuntimeRunOptions {
   readonly assignmentMutations: import("@zhixing/core/contracts").AssignmentMutationPort;
   readonly globalQuery?: import("@zhixing/core/contracts").AssignmentGlobalQueryPort;
   readonly assignmentIssuedAt: string;
+  readonly modelCallResourceMeter?: ModelCallResourceMeter;
+  readonly resourceReservation?: {
+    readonly port: ResourceReservationPort;
+    readonly parentLease: ResourceLease;
+    readonly contextFor: (requestId: string) => AuthorityCallContext;
+  };
 }
 
 export interface JobRuntimeHandle {

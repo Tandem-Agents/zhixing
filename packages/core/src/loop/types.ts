@@ -148,7 +148,8 @@ export interface AgentLoopParams {
    * stream 看门狗策略 —— 控制 LLM 流 chunk 间隔的 idle-timer 行为。
    *
    * 缺省 (`undefined`) 时本层**不** fallback 到默认值 —— 默认 fallback 由调用边界
-   * (cli/src/run-agent.ts) 单点注入,保证用户通过 RunParams 显式传入的 policy
+   * (orchestrator runtime) 单点注入，保证调用方通过 KernelRunEnvelope.control
+   * 显式传入的 policy
    * (包括 `createWatchdogPolicy({ idleTimeoutMs: 0 })` 显式禁用 idle-timer) 一路透传
    * 到看门狗, 不被 agent-loop 二次默认覆盖。
    *

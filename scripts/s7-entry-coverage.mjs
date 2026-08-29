@@ -1015,6 +1015,195 @@ async function productionTypeScriptFiles(directory) {
   return result;
 }
 
+/** A4 Kernel runs have one finite Envelope owner and three production bindings. */
+export function inspectKernelRunEnvelopeOwnership(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const text = byPath.get(relative);
+    if (text === undefined) failures.push(`${relative}: Kernel Run Envelope source is missing`);
+    return text ?? "";
+  };
+  const envelopePath = "packages/orchestrator/src/runtime/kernel-run-envelope.ts";
+  const envelopeSource = required(envelopePath);
+  const runtimeSource = required(
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+  );
+  const runtimeIndex = required("packages/orchestrator/src/runtime/index.ts");
+  const sessionAdapter = required("packages/runtime-host/src/session-adapter.ts");
+  const ephemeral = required("packages/cli/src/serve/ephemeral-executor.ts");
+  const durableJob = required("packages/cli/src/serve/agent-job-runtime.ts");
+  const runtimeHost = required("packages/runtime-host/src/runtime-host.ts");
+
+  const sourceFile = ts.createSourceFile(
+    envelopePath,
+    envelopeSource,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const envelopeDeclarations = sourceFile.statements.filter(
+    (statement) =>
+      ts.isInterfaceDeclaration(statement) &&
+      statement.name.text === "KernelRunEnvelope",
+  );
+  const envelopeDeclaration = envelopeDeclarations[0];
+  const expectedPartitions = {
+    modelInput: ["messages"],
+    identity: [
+      "turnIndex",
+      "conversationId",
+      "source",
+      "advancement",
+      "turnContext",
+    ],
+    control: ["abortSignal", "watchdog", "modelCallResourceMeter"],
+    correctness: [
+      "toolSideEffectObserver",
+      "authorizeToolExecution",
+      "stageScheduleMutation",
+      "assignmentMutations",
+      "globalQuery",
+      "assignmentIssuedAt",
+      "resourceReservation",
+    ],
+    observation: ["onYield", "onProtocolEvent"],
+  };
+  if (envelopeDeclarations.length !== 1 || !envelopeDeclaration) {
+    failures.push("Kernel Run Envelope lacks one interface owner");
+  } else {
+    const partitionNames = envelopeDeclaration.members
+      .filter(ts.isPropertySignature)
+      .map((member) => member.name.getText(sourceFile));
+    if (JSON.stringify(partitionNames) !== JSON.stringify(Object.keys(expectedPartitions))) {
+      failures.push("Kernel Run Envelope top-level partition exact-set drifted");
+    }
+    for (const member of envelopeDeclaration.members) {
+      if (!ts.isPropertySignature(member)) {
+        failures.push("Kernel Run Envelope admits a non-property or dictionary member");
+        continue;
+      }
+      const name = member.name.getText(sourceFile);
+      const expected = expectedPartitions[name];
+      const readonly = member.modifiers?.some(
+        (modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword,
+      );
+      if (!readonly || member.questionToken || !expected || !member.type || !ts.isTypeLiteralNode(member.type)) {
+        failures.push(`Kernel Run Envelope partition is not required, readonly and finite: ${name}`);
+        continue;
+      }
+      const fields = member.type.members
+        .filter(ts.isPropertySignature)
+        .map((field) => field.name.getText(sourceFile));
+      if (JSON.stringify(fields) !== JSON.stringify(expected)) {
+        failures.push(`Kernel Run Envelope ${name} field exact-set drifted`);
+      }
+      if (
+        member.type.members.some(
+          (field) =>
+            !ts.isPropertySignature(field) ||
+            !field.modifiers?.some(
+              (modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword,
+            ),
+        )
+      ) {
+        failures.push(`Kernel Run Envelope ${name} fields are not all readonly properties`);
+      }
+    }
+  }
+
+  const declarationOwners = records
+    .filter((record) => {
+      const file = ts.createSourceFile(
+        record.relative,
+        record.text,
+        ts.ScriptTarget.Latest,
+        true,
+        ts.ScriptKind.TS,
+      );
+      return file.statements.some(
+        (statement) =>
+          (ts.isInterfaceDeclaration(statement) ||
+            ts.isTypeAliasDeclaration(statement)) &&
+          statement.name.text === "KernelRunEnvelope",
+      );
+    })
+    .map((record) => record.relative);
+  if (
+    declarationOwners.length !== 1 ||
+    declarationOwners[0] !== envelopePath ||
+    records.some((record) => /\bRunParams\b/u.test(record.text))
+  ) {
+    failures.push("Kernel run input has a second owner or the retired RunParams contract remains");
+  }
+  if (
+    !runtimeSource.includes("run: (envelope: KernelRunEnvelope) => Promise<RunResult>") ||
+    !runtimeSource.includes("async run(input: KernelRunEnvelope): Promise<RunResult>") ||
+    !runtimeSource.includes("const envelope = captureKernelRunEnvelope(input);") ||
+    runtimeSource.includes("runV2") ||
+    !runtimeIndex.includes('export type { KernelRunEnvelope } from "./kernel-run-envelope.js";')
+  ) {
+    failures.push("AgentRuntime does not expose one captured Kernel Run Envelope entry");
+  }
+
+  const assertRunBinding = (relative, text, receiver) => {
+    const file = ts.createSourceFile(
+      relative,
+      text,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const calls = [];
+    const visit = (node) => {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === "run" &&
+        node.expression.expression.getText(file) === receiver
+      ) {
+        calls.push(node);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+    const argument = calls[0]?.arguments[0];
+    const keys = argument && ts.isObjectLiteralExpression(argument)
+      ? argument.properties.map((property) => property.name?.getText(file) ?? "")
+      : [];
+    if (
+      calls.length !== 1 ||
+      JSON.stringify(keys) !== JSON.stringify(Object.keys(expectedPartitions))
+    ) {
+      failures.push(`${relative}: production run binding bypasses the five-part Kernel Envelope`);
+    }
+  };
+  assertRunBinding(
+    "packages/runtime-host/src/session-adapter.ts",
+    sessionAdapter,
+    "agentRuntime",
+  );
+  assertRunBinding(
+    "packages/cli/src/serve/ephemeral-executor.ts",
+    ephemeral,
+    "opts.runtime",
+  );
+  assertRunBinding(
+    "packages/cli/src/serve/agent-job-runtime.ts",
+    durableJob,
+    "runtime!",
+  );
+
+  if (
+    runtimeHost.split("createAgentRuntime({").length - 1 !== 1 ||
+    runtimeHost.split("return this.assemble(").length - 1 < 4 ||
+    !runtimeHost.includes('primaryRole: "power"')
+  ) {
+    failures.push("Conversation, workscene/power or ephemeral runtime gained a second Kernel assembly path");
+  }
+  return failures;
+}
+
 export async function validateS7Structure() {
   const files = await productionTypeScriptFiles(path.join(root, "packages"));
   const records = await Promise.all(files.map(async (absolute) => ({
@@ -1042,6 +1231,7 @@ export async function validateS7Structure() {
   failures.push(...inspectPlannedAnchorTransferAssembly(records));
   failures.push(...inspectManagedHostAssembly(records));
   failures.push(...inspectDeviceLifecycleAssembly(records));
+  failures.push(...inspectKernelRunEnvelopeOwnership(records));
   failures.push(...inspectSkillCatalogApplicationOwnership([
     ...records,
     {

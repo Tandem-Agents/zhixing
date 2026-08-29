@@ -51,6 +51,7 @@ import type {
   GlobalReadResult,
   ModelCallResourceMeter,
 } from "@zhixing/core/contracts";
+import type { KernelRunEnvelope } from "../kernel-run-envelope.js";
 
 // ─── hoisted ref:让 vi.mock 工厂在 import 之前能引用 ───
 
@@ -193,6 +194,13 @@ const { mainProfile } = await import("../../profile/default-profiles.js");
 
 // ─── 测试辅助 ───
 
+function runKernel(
+  runtime: Awaited<ReturnType<typeof createAgentRuntimeImpl>>,
+  envelope: KernelRunEnvelope,
+) {
+  return runtime.run(envelope);
+}
+
 beforeEach(() => {
   providerRef.current = null;
   powerRoleRef.current = null;
@@ -224,9 +232,16 @@ describe("createAgentRuntime · run() lineage 契约", () => {
     const runtime = await createAgentRuntime({
       decorateRunBus: decorate,
     });
-    await runtime.run({
-      messages: [userMessage("hi")],
-      turnIndex: 0,
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("hi")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
 
     expect(decorateCalls).toHaveLength(1);
@@ -277,7 +292,17 @@ describe("createAgentRuntime · decorateRunBus 调用契约", () => {
     const { decorate, dispose } = makeDecorateRunBus();
 
     const runtime = await createAgentRuntime({ decorateRunBus: decorate });
-    await runtime.run({ messages: [userMessage("hi")], turnIndex: 0 });
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("hi")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
 
     expect(decorateCalls).toHaveLength(1);
     expect(dispose).toHaveBeenCalledTimes(1);
@@ -292,9 +317,16 @@ describe("createAgentRuntime · decorateRunBus 调用契约", () => {
     const { decorate, dispose } = makeDecorateRunBus();
 
     const runtime = await createAgentRuntime({ decorateRunBus: decorate });
-    const result = await runtime.run({
-      messages: [userMessage("hi")],
-      turnIndex: 0,
+    const result = await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("hi")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
 
     expect(result.agentResult.reason).toBe("error");
@@ -308,10 +340,18 @@ describe("createAgentRuntime · decorateRunBus 调用契约", () => {
     controller.abort();
 
     const runtime = await createAgentRuntime({ decorateRunBus: decorate });
-    const result = await runtime.run({
-      messages: [userMessage("hi")],
-      turnIndex: 0,
-      abortSignal: controller.signal,
+    const result = await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("hi")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {
+        abortSignal: controller.signal,
+      },
+      correctness: {},
+      observation: {},
     });
 
     expect(result.agentResult.reason).toBe("aborted");
@@ -322,9 +362,16 @@ describe("createAgentRuntime · decorateRunBus 调用契约", () => {
     providerRef.current = new MockLLMProvider([{ text: "ok" }]);
 
     const runtime = await createAgentRuntime({});
-    const result = await runtime.run({
-      messages: [userMessage("hi")],
-      turnIndex: 0,
+    const result = await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("hi")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
 
     expect(result.agentResult.reason).toBe("completed");
@@ -351,9 +398,16 @@ describe("createAgentRuntime · safeDispose 故障隔离契约", () => {
     const runtime = await createAgentRuntime({ decorateRunBus: decorate });
 
     // run() 正常返回 —— dispose throw 被 safeDispose 吞掉
-    const result = await runtime.run({
-      messages: [userMessage("hi")],
-      turnIndex: 0,
+    const result = await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("hi")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
     expect(result.agentResult.reason).toBe("completed");
 
@@ -374,8 +428,28 @@ describe("createAgentRuntime · safeDispose 故障隔离契约", () => {
     const runtime = await createAgentRuntime({ decorateRunBus: decorate });
 
     // 跑两轮:每轮 dispose 都应被独立调用
-    await runtime.run({ messages: [userMessage("hi")], turnIndex: 0 });
-    await runtime.run({ messages: [userMessage("hi2")], turnIndex: 1 });
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("hi")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("hi2")],
+      },
+      identity: {
+        turnIndex: 1,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
 
     expect(dispose).toHaveBeenCalledTimes(2);
     // 装饰器收到的两次 ctx.bus 应当是独立实例
@@ -396,9 +470,39 @@ describe("createAgentRuntime · per-run 隔离契约", () => {
     const { decorate } = makeDecorateRunBus();
 
     const runtime = await createAgentRuntime({ decorateRunBus: decorate });
-    await runtime.run({ messages: [userMessage("a")], turnIndex: 0 });
-    await runtime.run({ messages: [userMessage("b")], turnIndex: 1 });
-    await runtime.run({ messages: [userMessage("c")], turnIndex: 2 });
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("a")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("b")],
+      },
+      identity: {
+        turnIndex: 1,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("c")],
+      },
+      identity: {
+        turnIndex: 2,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
 
     expect(decorateCalls).toHaveLength(3);
     expect(decorateCalls[0]?.lineage).toBe("main");
@@ -417,13 +521,27 @@ describe("createAgentRuntime · per-run 隔离契约", () => {
     ]);
 
     const runtime = await createAgentRuntime({});
-    const r1 = await runtime.run({
-      messages: [userMessage("ask 1")],
-      turnIndex: 0,
+    const r1 = await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("ask 1")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
-    const r2 = await runtime.run({
-      messages: [userMessage("ask 2")],
-      turnIndex: 1,
+    const r2 = await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("ask 2")],
+      },
+      identity: {
+        turnIndex: 1,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
 
     // 两次 run 各自只产生本轮 assistant message,不互相累积
@@ -552,7 +670,17 @@ describe("createAgentRuntime · ALS RunContext 透传契约", () => {
         return () => {};
       },
     });
-    await runtime.run({ messages: [userMessage("hi")], turnIndex: 0 });
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("hi")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
 
     expect(alsState).toBeDefined();
     expect(alsState!.bus).toBe(capturedBus);
@@ -567,9 +695,16 @@ describe("createAgentRuntime · ALS RunContext 透传契约", () => {
       enabledTools: mainProfile().enabledTools.filter((n) => n !== "Task"),
     };
     const runtime = await createAgentRuntime({ profile: noTaskProfile });
-    const result = await runtime.run({
-      messages: [userMessage("hi")],
-      turnIndex: 0,
+    const result = await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("hi")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
     expect(result.agentResult.reason).toBe("completed");
   });
@@ -637,8 +772,28 @@ describe("createAgentRuntime · ALS RunContext 透传契约", () => {
 
     // 关键:Promise.all 真并发,两个 runtime.run() 的 ALS root 独立创建
     const [r1, r2] = await Promise.all([
-      runtime1.run({ messages: [userMessage("first")], turnIndex: 0 }),
-      runtime2.run({ messages: [userMessage("second")], turnIndex: 0 }),
+      runKernel(runtime1, {
+        modelInput: {
+          messages: [userMessage("first")],
+        },
+        identity: {
+          turnIndex: 0,
+        },
+        control: {},
+        correctness: {},
+        observation: {},
+      }),
+      runKernel(runtime2, {
+        modelInput: {
+          messages: [userMessage("second")],
+        },
+        identity: {
+          turnIndex: 0,
+        },
+        control: {},
+        correctness: {},
+        observation: {},
+      }),
     ]);
 
     expect(r1.agentResult.reason).toBe("completed");
@@ -688,10 +843,18 @@ describe("createAgentRuntime · Task 装配契约（profile.enabledTools 驱动�
     };
 
     const runtime = await createAgentRuntime({ profile: mainProfile() });
-    await runtime.run({
-      messages: [userMessage("research X please")],
-      turnIndex: 0,
-      modelCallResourceMeter: meter,
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("research X please")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {
+        modelCallResourceMeter: meter,
+      },
+      correctness: {},
+      observation: {},
     });
 
     expect(reserved).toEqual([1, 2, 3]);
@@ -714,9 +877,16 @@ describe("createAgentRuntime · Task 装配契约（profile.enabledTools 驱动�
     ]);
 
     const runtime = await createAgentRuntime({ profile: mainProfile() });
-    const result = await runtime.run({
-      messages: [userMessage("research X please")],
-      turnIndex: 0,
+    const result = await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("research X please")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
 
     expect(result.agentResult.reason).toBe("completed");
@@ -756,10 +926,18 @@ describe("createAgentRuntime · Task 装配契约（profile.enabledTools 驱动�
     );
 
     const runtime = await createAgentRuntime({ profile: mainProfile() });
-    const result = await runtime.run({
-      messages: [userMessage("inspect X")],
-      turnIndex: 0,
-      authorizeToolExecution,
+    const result = await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("inspect X")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {
+        authorizeToolExecution,
+      },
+      observation: {},
     });
 
     expect(result.agentResult.reason).toBe("completed");
@@ -790,9 +968,16 @@ describe("createAgentRuntime · Task 装配契约（profile.enabledTools 驱动�
     ]);
 
     const runtime = await createAgentRuntime({ profile: mainProfile() });
-    const result = await runtime.run({
-      messages: [userMessage("test recursion guard")],
-      turnIndex: 0,
+    const result = await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("test recursion guard")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
 
     // 主 run 应正常完成 —— 子的"递归 Task"被工具集过滤拒绝,
@@ -850,9 +1035,16 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
     ]);
 
     const runtime = await createAgentRuntime({ profile: mainProfile() });
-    const result = await runtime.run({
-      messages: [userMessage("user question")],
-      turnIndex: 0,
+    const result = await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("user question")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
 
     expect(result.agentResult.reason).toBe("completed");
@@ -910,9 +1102,16 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
     ]);
 
     const runtime = await createAgentRuntime({ profile: mainProfile() });
-    const result = await runtime.run({
-      messages: [userMessage("compare A vs B vs C")],
-      turnIndex: 0,
+    const result = await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("compare A vs B vs C")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
 
     expect(result.agentResult.reason).toBe("completed");
@@ -951,9 +1150,16 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
     ]);
 
     const runtime = await createAgentRuntime({ profile: mainProfile() });
-    const result = await runtime.run({
-      messages: [userMessage("research X")],
-      turnIndex: 0,
+    const result = await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("research X")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
 
     // 主 turn 完成 —— 不被子 fail 反向 abort
@@ -1003,9 +1209,16 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
       },
     });
 
-    const result = await runtime.run({
-      messages: [userMessage("compare A B C")],
-      turnIndex: 0,
+    const result = await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("compare A B C")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
 
     expect(result.agentResult.reason).toBe("completed");
@@ -1116,7 +1329,7 @@ describe("createAgentRuntime · resetConversationState", () => {
 // ─── 契约: RunContext.conversationId 透传到 ALS ───
 
 describe("createAgentRuntime · run() conversationId 透传", () => {
-  it("RunParams.conversationId → runContextStorage.getStore()?.conversationId", async () => {
+  it("KernelRunEnvelope.identity.conversationId → runContextStorage", async () => {
     // 用 extraTool 在工具调用时探查 ALS，验证 conversationId 透传到位。
     // mock provider 必须发 tool_use 让 secure-executor 真正调到 probe.call。
     providerRef.current = new MockLLMProvider([
@@ -1145,16 +1358,23 @@ describe("createAgentRuntime · run() conversationId 透传", () => {
     };
 
     const runtime = await createAgentRuntime({ extraTools: [probe] });
-    await runtime.run({
-      messages: [userMessage("trigger probe")],
-      turnIndex: 0,
-      conversationId: "conv-xyz-123",
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("trigger probe")],
+      },
+      identity: {
+        turnIndex: 0,
+        conversationId: "conv-xyz-123",
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
 
     expect(observedConvId).toBe("conv-xyz-123");
   });
 
-  it("RunParams 不传 conversationId → ALS 中为 undefined", async () => {
+  it("KernelRunEnvelope 不带 conversationId → ALS 中为 undefined", async () => {
     providerRef.current = new MockLLMProvider([
       {
         toolCalls: [{ id: "u1", name: "ctx_probe2", input: {} }],
@@ -1181,10 +1401,16 @@ describe("createAgentRuntime · run() conversationId 透传", () => {
     };
 
     const runtime = await createAgentRuntime({ extraTools: [probe] });
-    await runtime.run({
-      messages: [userMessage("trigger probe")],
-      turnIndex: 0,
-      // 不传 conversationId
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("trigger probe")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
 
     expect(observedConvId).toBeNull();
@@ -1212,7 +1438,17 @@ describe("createAgentRuntime · primaryRole 槽位", () => {
     // 返回 providerId+model（六处之一，直接可观测）指向 power
     expect(runtime.model).toBe("power-model");
 
-    await runtime.run({ messages: [userMessage("hi")], turnIndex: 0 });
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("hi")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
 
     // 主对话 loop 的 LLM 调用打到 power provider，main provider 零调用
     expect(powerProvider.calls.length).toBeGreaterThan(0);
@@ -1229,7 +1465,17 @@ describe("createAgentRuntime · primaryRole 槽位", () => {
 
     expect(runtime.model).toBe("mock-model");
 
-    await runtime.run({ messages: [userMessage("hi")], turnIndex: 0 });
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("hi")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
 
     expect(mainProvider.calls.length).toBeGreaterThan(0);
     expect(powerProvider.calls.length).toBe(0);
@@ -1299,7 +1545,17 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     // 首窗在装配期已触发（不等 run）
     expect(opens).toEqual([{ reason: "instance-start", windowIndex: 0 }]);
 
-    await runtime.run({ messages: [userMessage("hi")], turnIndex: 0 });
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("hi")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
     // 贡献的 skill-index 段进了首个 LLM call 的 system prompt
     expect(providerRef.current.calls[0]!.systemPrompt).toContain(SKILL_MARKER);
   });
@@ -1328,7 +1584,17 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       ],
     });
 
-    await runtime.run({ messages: [userMessage("hi")], turnIndex: 7 });
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("hi")],
+      },
+      identity: {
+        turnIndex: 7,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
 
     expect(order).toEqual(["before", "after"]);
     expect(beforeMsgCount).toBe(1); // onBeforeRun 观测到的是用户原始输入
@@ -1383,9 +1649,16 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       ],
     });
 
-    const result = await runtime.run({
-      messages: [userMessage("hi")],
-      turnIndex: 0,
+    const result = await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("hi")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
 
     expect(result.agentResult.reason).toBe("completed");
@@ -1422,7 +1695,17 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       ],
     });
 
-    await runtime.run({ messages: [userMessage("hi")], turnIndex: 0 });
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("hi")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
 
     expect(seenRuntimeKind).toBe("conversation");
     expect(warnings).toHaveLength(1);
@@ -1491,7 +1774,17 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       ],
     });
 
-    await runtime.run({ messages: [userMessage("hi")], turnIndex: 0 });
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("hi")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
 
     // 两次 LLM call（工具轮 + 收尾轮）—— 同一窗口内无换代,systemPrompt byte-equal
     expect(providerRef.current.calls.length).toBe(2);
@@ -1518,9 +1811,16 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       ],
     });
 
-    const result = await runtime.run({
-      messages: [userMessage("real user")],
-      turnIndex: 0,
+    const result = await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("real user")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
 
     expect(providerRef.current.calls[0]!.messages.map((m) => m.role)).toEqual([
@@ -1562,9 +1862,16 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       ],
     });
 
-    const result = await runtime.run({
-      messages: [userMessage("真实问题")],
-      turnIndex: 0,
+    const result = await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("真实问题")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
 
     const sent = providerRef.current.calls[0]!.messages;
@@ -1641,7 +1948,17 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     await expect(runtime.onAttentionWindowChange("clear")).rejects.toThrow(
       "onAttentionWindowChange",
     );
-    await runtime.run({ messages: [userMessage("after clear")], turnIndex: 0 });
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("after clear")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
 
     const sentText = providerRef.current.calls[0]!.messages
       .flatMap((message) => message.content)
@@ -1700,8 +2017,9 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       },
     });
 
-    await runtime.run({
-      messages: [
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [
         userMessage(huge),
         { role: "assistant", content: [{ type: "text", text: huge }] },
         userMessage(huge),
@@ -1710,9 +2028,15 @@ describe("createAgentRuntime · 生命周期钩子", () => {
         { role: "assistant", content: [{ type: "text", text: "small-a1" }] },
         userMessage("small-2"),
         { role: "assistant", content: [{ type: "text", text: "small-a2" }] },
-      ],
-      turnIndex: 0,
-      conversationId: "conv-prefix-invalid",
+        ],
+      },
+      identity: {
+        turnIndex: 0,
+        conversationId: "conv-prefix-invalid",
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
 
     expect(failures).toMatchObject([
@@ -1757,8 +2081,9 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       },
     });
 
-    await runtime.run({
-      messages: [
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [
         userMessage(huge),
         { role: "assistant", content: [{ type: "text", text: huge }] },
         userMessage(huge),
@@ -1767,9 +2092,15 @@ describe("createAgentRuntime · 生命周期钩子", () => {
         { role: "assistant", content: [{ type: "text", text: "small-a1" }] },
         userMessage("small-2"),
         { role: "assistant", content: [{ type: "text", text: "small-a2" }] },
-      ],
-      turnIndex: 0,
-      conversationId: "conv-guidance-reopen",
+        ],
+      },
+      identity: {
+        turnIndex: 0,
+        conversationId: "conv-guidance-reopen",
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
 
     expect(openCount).toBeGreaterThanOrEqual(2);
@@ -1920,7 +2251,17 @@ describe("createAgentRuntime · 生命周期钩子", () => {
 
     // 首窗已 open（贡献 v0）
     expect(events).toEqual(["open:instance-start"]);
-    await runtime.run({ messages: [userMessage("a")], turnIndex: 0 });
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("a")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
     expect(providerRef.current.calls[0]!.systemPrompt).toContain("SKILL_v0");
 
     // clear 换代：close(clear) → open(clear)（贡献 v1）
@@ -1928,7 +2269,17 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     expect(events).toEqual(["open:instance-start", "close:clear", "open:clear"]);
 
     // 下个 run 入口 capture 更新后的实例权威（含 v1、不再是 v0）
-    await runtime.run({ messages: [userMessage("b")], turnIndex: 1 });
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("b")],
+      },
+      identity: {
+        turnIndex: 1,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
     expect(providerRef.current.calls[1]!.systemPrompt).toContain("SKILL_v1");
     expect(providerRef.current.calls[1]!.systemPrompt).not.toContain("SKILL_v0");
   });
@@ -2010,7 +2361,17 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     });
 
     // 飞行 run 入口 capture V0;第一个 call 发出后卡在 probe(两 call 之间）
-    const inflight = runtime.run({ messages: [userMessage("x")], turnIndex: 0 });
+    const inflight = runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("x")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
     await probeReady;
 
     // 飞行中途改实例权威(V1）—— 不得穿透飞行 run 的局部 prompt
@@ -2045,11 +2406,19 @@ describe("createAgentRuntime · 生命周期钩子", () => {
 
     // onYield 抛错 → 传播出 runMainLoop → run() reject(ALS 内抛,onAfterRun 不触发)
     await expect(
-      runtime.run({
-        messages: [userMessage("hi")],
-        turnIndex: 0,
-        onYield: () => {
+      runKernel(runtime, {
+        modelInput: {
+          messages: [userMessage("hi")],
+        },
+        identity: {
+          turnIndex: 0,
+        },
+        control: {},
+        correctness: {},
+        observation: {
+          onYield: () => {
           throw new Error("yield boom");
+          },
         },
       }),
     ).rejects.toThrow("yield boom");
@@ -2071,15 +2440,22 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     });
     let settled = false;
 
-    const run = runtime
-      .run({
+    const run = runKernel(runtime, {
+      modelInput: {
         messages: [userMessage("hi")],
+      },
+      identity: {
         turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {
         onYield: async () => {
-          entered();
-          await callbackGate;
+        entered();
+        await callbackGate;
         },
-      })
+      },
+    })
       .then((result) => {
         settled = true;
         return result;
@@ -2098,11 +2474,19 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     const runtime = await createAgentRuntime();
 
     await expect(
-      runtime.run({
-        messages: [userMessage("hi")],
-        turnIndex: 0,
-        onProtocolEvent: () => {
+      runKernel(runtime, {
+        modelInput: {
+          messages: [userMessage("hi")],
+        },
+        identity: {
+          turnIndex: 0,
+        },
+        control: {},
+        correctness: {},
+        observation: {
+          onProtocolEvent: () => {
           throw new Error("protocol persistence failed");
+          },
         },
       }),
     ).rejects.toThrow("protocol persistence failed");
@@ -2111,18 +2495,33 @@ describe("createAgentRuntime · 生命周期钩子", () => {
   it("Skill 领域投影:无 global query 保留 builtin,own 同名时遮蔽", async () => {
     providerRef.current = new MockLLMProvider([{ text: "ok" }, { text: "ok" }]);
     const runtime = await createAgentRuntime();
-    await runtime.run({
-      messages: [userMessage("hi")],
-      turnIndex: 0,
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("hi")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
     });
     expect(providerRef.current.calls[0]!.systemPrompt).toContain("提炼技能");
 
     const own = makeSkillCatalogQuery([ownSkillEntry()]);
     const runtime2 = await createAgentRuntime();
-    await runtime2.run({
-      messages: [userMessage("hi")],
-      turnIndex: 0,
-      globalQuery: own.port,
+    await runKernel(runtime2, {
+      modelInput: {
+        messages: [userMessage("hi")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {
+        globalQuery: own.port,
+      },
+      observation: {},
     });
     const prompt2 = providerRef.current.calls[1]!.systemPrompt!;
     expect(prompt2).toContain("用户定制版描述");
@@ -2133,10 +2532,18 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     providerRef.current = new MockLLMProvider([{ text: "ok" }]);
     const query = makeSkillCatalogQuery([ownSkillEntry({ disabled: true })]);
     const runtime = await createAgentRuntime();
-    await runtime.run({
-      messages: [userMessage("hi")],
-      turnIndex: 0,
-      globalQuery: query.port,
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("hi")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {
+        globalQuery: query.port,
+      },
+      observation: {},
     });
     const prompt = providerRef.current.calls[0]!.systemPrompt!;
     // 禁用 = 该 id 从索引整体消失(用户版剔除、builtin 不得回落)。
@@ -2153,15 +2560,51 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     const query = makeSkillCatalogQuery([ownSkillEntry()], 7);
     const runtime = await createAgentRuntime();
 
-    await runtime.run({ messages: [userMessage("one")], turnIndex: 0, globalQuery: query.port });
-    await runtime.run({ messages: [userMessage("two")], turnIndex: 1, globalQuery: query.port });
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("one")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {
+        globalQuery: query.port,
+      },
+      observation: {},
+    });
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("two")],
+      },
+      identity: {
+        turnIndex: 1,
+      },
+      control: {},
+      correctness: {
+        globalQuery: query.port,
+      },
+      observation: {},
+    });
     expect(query.read).toHaveBeenCalledTimes(1);
     expect(providerRef.current.calls[1]!.systemPrompt).toBe(
       providerRef.current.calls[0]!.systemPrompt,
     );
 
     await runtime.onAttentionWindowChange("clear");
-    await runtime.run({ messages: [userMessage("three")], turnIndex: 0, globalQuery: query.port });
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("three")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {
+        globalQuery: query.port,
+      },
+      observation: {},
+    });
     expect(query.read).toHaveBeenCalledTimes(2);
     expect(providerRef.current.calls[2]!.systemPrompt).toBe(
       providerRef.current.calls[0]!.systemPrompt,
@@ -2178,16 +2621,32 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     ], 6);
     const runtime = await createAgentRuntime();
 
-    await runtime.run({
-      messages: [userMessage("current")],
-      turnIndex: 0,
-      globalQuery: current.port,
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("current")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {
+        globalQuery: current.port,
+      },
+      observation: {},
     });
     await runtime.onAttentionWindowChange("clear");
-    await runtime.run({
-      messages: [userMessage("stale")],
-      turnIndex: 0,
-      globalQuery: stale.port,
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("stale")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {
+        globalQuery: stale.port,
+      },
+      observation: {},
     });
 
     expect(providerRef.current.calls[1]!.systemPrompt).toContain(
@@ -2228,23 +2687,49 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       };
     });
     const runtime = await createAgentRuntime();
-    await runtime.run({
-      messages: [userMessage("current")],
-      turnIndex: 0,
-      globalQuery: current.port,
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("current")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {
+        globalQuery: current.port,
+      },
+      observation: {},
     });
     await runtime.onAttentionWindowChange("clear");
 
-    const staleRun = runtime.run({
-      messages: [userMessage("delayed")],
-      turnIndex: 0,
-      globalQuery: { read: delayedRead },
+    const staleRun = runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("delayed")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {
+        globalQuery: { read: delayedRead },
+      },
+      observation: {},
     });
     await entered;
     await runtime.onAttentionWindowChange("resume");
     releaseQuery();
     await staleRun;
-    await runtime.run({ messages: [userMessage("after")], turnIndex: 0 });
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("after")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
 
     expect(providerRef.current.calls[1]!.systemPrompt).toContain(
       "ZX_SKILL_CURRENT_WINDOW",
@@ -2318,10 +2803,18 @@ describe("trustContext 装配分叉", () => {
       sceneId: "s1",
     });
 
-    await runtime.run({
-      messages: [userMessage("hi")],
-      turnIndex: 0,
-      globalQuery: query.port,
+    await runKernel(runtime, {
+      modelInput: {
+        messages: [userMessage("hi")],
+      },
+      identity: {
+        turnIndex: 0,
+      },
+      control: {},
+      correctness: {
+        globalQuery: query.port,
+      },
+      observation: {},
     });
     expect(providerRef.current.calls[0]!.systemPrompt).toContain(
       "ZX_WORK_SKILL_MARKER",

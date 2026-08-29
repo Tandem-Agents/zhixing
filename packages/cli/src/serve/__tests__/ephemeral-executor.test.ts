@@ -5,7 +5,10 @@
 import { describe, it, expect, vi } from "vitest";
 import type { AbortReason, AgentResult, AgentYield, Message } from "@zhixing/core";
 import type { RunResult } from "@zhixing/core";
-import type { AgentRuntime, RunParams } from "@zhixing/orchestrator/runtime";
+import type {
+  AgentRuntime,
+  KernelRunEnvelope,
+} from "@zhixing/orchestrator/runtime";
 import { runEphemeralTurn } from "../ephemeral-executor.js";
 
 interface MockBehavior {
@@ -21,11 +24,11 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
   return Object.assign(stub, {
     providerId: "mock",
     model: "mock-model",
-    async run(params: RunParams): Promise<RunResult> {
+    async run(envelope: KernelRunEnvelope): Promise<RunResult> {
       if (behavior.throwError) throw new Error(behavior.throwError);
 
       const yields = behavior.yields ?? [];
-      for (const y of yields) params.onYield?.(y);
+      for (const y of yields) envelope.observation.onYield?.(y);
 
       const reason = behavior.reason ?? "completed";
       const completedResult: AgentResult = {
@@ -137,7 +140,7 @@ describe("runEphemeralTurn", () => {
   });
 
   it("仅传本轮 messages（验证 stateless 语义）", async () => {
-    const runSpy = vi.fn(async (_params: RunParams): Promise<RunResult> => ({
+    const runSpy = vi.fn(async (_envelope: KernelRunEnvelope): Promise<RunResult> => ({
       agentResult: {
         reason: "completed",
         message: { role: "assistant", content: [{ type: "text", text: "ok" }] },
@@ -156,10 +159,15 @@ describe("runEphemeralTurn", () => {
     await runEphemeralTurn({ runtime, prompt: "question two" });
 
     expect(runSpy).toHaveBeenCalledTimes(2);
-    const firstCallMsgs = runSpy.mock.calls[0]![0].messages;
-    const secondCallMsgs = runSpy.mock.calls[1]![0].messages;
+    const firstCallMsgs = runSpy.mock.calls[0]![0].modelInput.messages;
+    const secondCallMsgs = runSpy.mock.calls[1]![0].modelInput.messages;
     expect(firstCallMsgs).toHaveLength(1);
     expect(secondCallMsgs).toHaveLength(1);
+    expect(runSpy.mock.calls[0]![0].identity).toMatchObject({ turnIndex: 0 });
+    expect(runSpy.mock.calls[0]![0].correctness).toEqual({});
+    expect(runSpy.mock.calls[0]![0].observation.onYield).toBeTypeOf(
+      "function",
+    );
   });
 
   it("onYield 回调透传给调用方", async () => {
@@ -179,7 +187,7 @@ describe("runEphemeralTurn", () => {
   // ─── PR-2 / remote-confirmation-execution.md §3.3：turnContext 透传 ───
 
   it("可选 turnContext 透传给 runtime.run（scheduler → ephemeral 路径）", async () => {
-    const runSpy = vi.fn(async (_params: RunParams): Promise<RunResult> => ({
+    const runSpy = vi.fn(async (_envelope: KernelRunEnvelope): Promise<RunResult> => ({
       agentResult: {
         reason: "completed",
         message: { role: "assistant", content: [{ type: "text", text: "ok" }] },
@@ -208,8 +216,8 @@ describe("runEphemeralTurn", () => {
     });
 
     const received = runSpy.mock.calls[0]![0];
-    expect(received.turnContext?.turnId).toBe("turn_abc");
-    expect(received.turnContext?.turnOrigin).toEqual({
+    expect(received.identity.turnContext?.turnId).toBe("turn_abc");
+    expect(received.identity.turnContext?.turnOrigin).toEqual({
       channel: "scheduler",
       target: { channelId: "feishu", to: "ou_xyz" },
       triggeredBy: "task-42",
@@ -217,7 +225,7 @@ describe("runEphemeralTurn", () => {
   });
 
   it("无 turnContext 时 runtime.run 的 turnContext 为 undefined", async () => {
-    const runSpy = vi.fn(async (_params: RunParams): Promise<RunResult> => ({
+    const runSpy = vi.fn(async (_envelope: KernelRunEnvelope): Promise<RunResult> => ({
       agentResult: {
         reason: "completed",
         message: { role: "assistant", content: [{ type: "text", text: "ok" }] },
@@ -234,6 +242,34 @@ describe("runEphemeralTurn", () => {
 
     await runEphemeralTurn({ runtime, prompt: "no origin" });
 
-    expect(runSpy.mock.calls[0]![0].turnContext).toBeUndefined();
+    expect(runSpy.mock.calls[0]![0].identity.turnContext).toBeUndefined();
+  });
+
+  it("ephemeral cancellation 只经 Envelope control 原样进入 Kernel", async () => {
+    let captured: KernelRunEnvelope | undefined;
+    const runtime = Object.assign({} as AgentRuntime, {
+      run: vi.fn(async (envelope: KernelRunEnvelope) => {
+        captured = envelope;
+        return {
+          agentResult: {
+            reason: "aborted" as const,
+            usage: { inputTokens: 0, outputTokens: 0 },
+          },
+          newMessages: [],
+          durationMs: 1,
+        };
+      }),
+    });
+    const abort = new AbortController();
+
+    await runEphemeralTurn({
+      runtime,
+      prompt: "cancel me",
+      abortSignal: abort.signal,
+    });
+
+    expect(captured!.control.abortSignal).toBe(abort.signal);
+    expect(captured!.identity).toMatchObject({ turnIndex: 0 });
+    expect(captured!.identity.conversationId).toBeUndefined();
   });
 });

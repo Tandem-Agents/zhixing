@@ -58,14 +58,19 @@ export async function runEphemeralTurn(
   try {
     const messages: Message[] = [userMessage(opts.prompt)];
     const runResult = await opts.runtime.run({
-      messages,
-      turnIndex: 0,   // ephemeral 单次执行（不累积 counter，钩子上下文里恒为 0）
-      onYield: (event) => {
-        if (event.type === "text_delta") textChunks.push(event.text);
-        opts.onYield?.(event);
+      modelInput: { messages },
+      identity: {
+        turnIndex: 0, // ephemeral 单次执行（不累积 counter，钩子上下文里恒为 0）
+        turnContext: opts.turnContext,
       },
-      turnContext: opts.turnContext,
-      abortSignal: opts.abortSignal,
+      control: { abortSignal: opts.abortSignal },
+      correctness: {},
+      observation: {
+        onYield: (event) => {
+          if (event.type === "text_delta") textChunks.push(event.text);
+          opts.onYield?.(event);
+        },
+      },
     });
 
     const output = textChunks.join("") || undefined;

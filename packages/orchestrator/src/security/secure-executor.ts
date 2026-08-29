@@ -119,7 +119,7 @@ export interface SecureExecuteToolOptions {
    */
   confirmationFallback?: ConfirmationFallbackStrategy;
   /**
-   * 当前 turn 的上下文 —— 由调用方从 RunParams.turnContext 透传。
+   * 当前 turn 的上下文 —— 由调用方从 KernelRunEnvelope.identity.turnContext 透传。
    *
    * 包装函数入口会把其中的 `turnId` / `emissionTarget` / `commitToUser` /
    * `turnOrigin` 一次性展开到 ToolExecutionContext,保证:

@@ -26,7 +26,10 @@ import {
   createOwnerRuntimeAdapter,
 } from "@zhixing/runtime-host/session-adapter";
 import type { RunResult } from "@zhixing/core";
-import type { AgentRuntime, RunParams } from "@zhixing/orchestrator/runtime";
+import type {
+  AgentRuntime,
+  KernelRunEnvelope,
+} from "@zhixing/orchestrator/runtime";
 
 /** 本轮用户消息构造——run 输入由调用方组装(此处模拟 runTurnWithCommit 的构造) */
 function um(text: string): Message {
@@ -40,7 +43,7 @@ interface MockBehavior {
   /** 模拟 LLM 流的延迟,让测试有空间在中途触发 abort */
   yieldDelayMs?: number;
   /** 捕获 run 收到的参数,供透传契约断言 */
-  capture?: (params: RunParams) => void;
+  capture?: (envelope: KernelRunEnvelope) => void;
 }
 
 function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
@@ -74,45 +77,51 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
       confirmations: [],
     }),
     calibrationFactor: 1,
-    async run(params: RunParams): Promise<RunResult> {
-      behavior.capture?.(params);
+    async run(envelope: KernelRunEnvelope): Promise<RunResult> {
+      behavior.capture?.(envelope);
       if (behavior.throwError) {
         throw new Error(behavior.throwError);
       }
 
       // pre-flight:已 aborted 的 signal 直接走 aborted 路径,模拟 agent-loop 行为
-      if (params.abortSignal?.aborted) {
-        const abortReason = getAbortReason(params.abortSignal) ?? undefined;
-        return buildAbortedResult(params, abortReason);
+      if (envelope.control.abortSignal?.aborted) {
+        const abortReason =
+          getAbortReason(envelope.control.abortSignal) ?? undefined;
+        return buildAbortedResult(envelope, abortReason);
       }
 
       const yields = behavior.yields ?? [
         { type: "text_delta", text: "hello" } as AgentYield,
       ];
       for (const y of yields) {
-        if (params.abortSignal?.aborted) {
-          const abortReason = getAbortReason(params.abortSignal) ?? undefined;
-          return buildAbortedResult(params, abortReason);
+        if (envelope.control.abortSignal?.aborted) {
+          const abortReason =
+            getAbortReason(envelope.control.abortSignal) ?? undefined;
+          return buildAbortedResult(envelope, abortReason);
         }
-        params.onYield?.(y);
+        envelope.observation.onYield?.(y);
         if (behavior.yieldDelayMs && behavior.yieldDelayMs > 0) {
-          await sleepWithAbort(behavior.yieldDelayMs, params.abortSignal);
-          if (params.abortSignal?.aborted) {
-            const abortReason = getAbortReason(params.abortSignal) ?? undefined;
-            return buildAbortedResult(params, abortReason);
+          await sleepWithAbort(
+            behavior.yieldDelayMs,
+            envelope.control.abortSignal,
+          );
+          if (envelope.control.abortSignal?.aborted) {
+            const abortReason =
+              getAbortReason(envelope.control.abortSignal) ?? undefined;
+            return buildAbortedResult(envelope, abortReason);
           }
         }
       }
 
       const reason = behavior.reason ?? "completed";
-      return buildResultByReason(params, reason);
+      return buildResultByReason(envelope, reason);
     },
     async dispose() {},
   });
 }
 
 function buildAbortedResult(
-  params: RunParams,
+  envelope: KernelRunEnvelope,
   abortReason: AbortReason | undefined,
 ): RunResult {
   return {
@@ -124,7 +133,7 @@ function buildAbortedResult(
     runRecord: {
       timestamp: new Date().toISOString(),
       messages: [
-        params.messages[params.messages.length - 1] ??
+        envelope.modelInput.messages[envelope.modelInput.messages.length - 1] ??
           ({ role: "user", content: [] } as Message),
         { role: "assistant", content: [] } as Message,
       ],
@@ -136,7 +145,7 @@ function buildAbortedResult(
 }
 
 function buildResultByReason(
-  params: RunParams,
+  envelope: KernelRunEnvelope,
   reason: AgentResult["reason"],
 ): RunResult {
   const assistantMsg: Message = {
@@ -168,7 +177,7 @@ function buildResultByReason(
     runRecord: {
       timestamp: new Date().toISOString(),
       messages: [
-        params.messages[params.messages.length - 1] ??
+        envelope.modelInput.messages[envelope.modelInput.messages.length - 1] ??
           ({ role: "user", content: [] } as Message),
         reason === "completed"
           ? assistantMsg
@@ -222,7 +231,7 @@ describe("createOwnerRuntimeAdapter", () => {
   });
 
   it("纯执行体透传契约:messages 原样、conversationId=sessionId、turnIndex/source 透传", async () => {
-    let captured: RunParams | undefined;
+    let captured: KernelRunEnvelope | undefined;
     const runtime = createOwnerRuntimeAdapter(
       "conv-42",
       createMockAgentRuntime({ capture: (p) => (captured = p) }),
@@ -232,10 +241,74 @@ describe("createOwnerRuntimeAdapter", () => {
     const gen = runtime.run(input, { turnIndex: 7, source: "channel" });
     while (!(await gen.next()).done) {/* drain */}
 
-    expect(captured!.messages).toEqual(input);
-    expect(captured!.conversationId).toBe("conv-42");
-    expect(captured!.turnIndex).toBe(7);
-    expect(captured!.source).toBe("channel");
+    expect(captured!.modelInput.messages).toEqual(input);
+    expect(captured!.identity.conversationId).toBe("conv-42");
+    expect(captured!.identity.turnIndex).toBe(7);
+    expect(captured!.identity.source).toBe("channel");
+  });
+
+  it("conversation 只构造唯一五分区 Envelope 并原样投影 observer/Correctness 端口", async () => {
+    let captured: KernelRunEnvelope | undefined;
+    const runtime = createOwnerRuntimeAdapter(
+      "conv-envelope",
+      createMockAgentRuntime({ capture: (envelope) => (captured = envelope) }),
+    );
+    const onProtocolEvent = async () => undefined;
+    const toolSideEffectObserver = {} as never;
+    const authorizeToolExecution = async () => [];
+    const modelCallResourceMeter = {} as never;
+    const stageScheduleMutation = {} as never;
+    const assignmentMutations = {} as never;
+    const globalQuery = {} as never;
+    const resourceReservation = {
+      port: {} as never,
+      parentLease: {} as never,
+      contextFor: () => ({}) as never,
+    };
+
+    const gen = runtime.run([um("hello")], {
+      turnIndex: 11,
+      source: "interactive",
+      turnContext: { turnId: "turn-envelope" },
+      onProtocolEvent,
+      toolSideEffectObserver,
+      authorizeToolExecution,
+      modelCallResourceMeter,
+      stageScheduleMutation,
+      assignmentMutations,
+      globalQuery,
+      assignmentIssuedAt: "2026-08-29T00:00:00.000Z",
+      resourceReservation,
+    });
+    while (!(await gen.next()).done) {/* drain */}
+
+    expect(Object.keys(captured!).sort()).toEqual([
+      "control",
+      "correctness",
+      "identity",
+      "modelInput",
+      "observation",
+    ]);
+    expect(captured!.identity).toMatchObject({
+      conversationId: "conv-envelope",
+      turnIndex: 11,
+      source: "interactive",
+      turnContext: { turnId: "turn-envelope" },
+    });
+    expect(captured!.control.modelCallResourceMeter).toBe(
+      modelCallResourceMeter,
+    );
+    expect(captured!.correctness).toMatchObject({
+      toolSideEffectObserver,
+      authorizeToolExecution,
+      stageScheduleMutation,
+      assignmentMutations,
+      globalQuery,
+      assignmentIssuedAt: "2026-08-29T00:00:00.000Z",
+      resourceReservation,
+    });
+    expect(captured!.observation.onProtocolEvent).toBe(onProtocolEvent);
+    expect(captured!.observation.onYield).toBeTypeOf("function");
   });
 
   it("propagates errors from agentRuntime.run via throw", async () => {

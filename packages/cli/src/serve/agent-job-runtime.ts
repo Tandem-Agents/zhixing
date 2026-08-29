@@ -60,18 +60,27 @@ export function createAgentJobRuntimePort(
           const settled = Promise.resolve()
             .then(() =>
               runtime!.run({
-                messages: [userMessage(instruction.prompt)],
-                turnIndex: 0,
-                source: "scheduler",
-                abortSignal: stop.signal,
-                onYield: (event) => yields.push(event),
-                onProtocolEvent: (event) => options.onProtocolEvent(event),
-                authorizeToolExecution: options.authorizeToolExecution,
-                toolSideEffectObserver: options.toolSideEffectObserver,
-                stageScheduleMutation: options.stageScheduleMutation,
-                assignmentMutations: options.assignmentMutations,
-                globalQuery: options.globalQuery,
-                assignmentIssuedAt: options.assignmentIssuedAt,
+                modelInput: {
+                  messages: [userMessage(instruction.prompt)],
+                },
+                identity: { turnIndex: 0, source: "scheduler" },
+                control: {
+                  abortSignal: stop.signal,
+                  modelCallResourceMeter: options.modelCallResourceMeter,
+                },
+                correctness: {
+                  authorizeToolExecution: options.authorizeToolExecution,
+                  toolSideEffectObserver: options.toolSideEffectObserver,
+                  stageScheduleMutation: options.stageScheduleMutation,
+                  assignmentMutations: options.assignmentMutations,
+                  globalQuery: options.globalQuery,
+                  assignmentIssuedAt: options.assignmentIssuedAt,
+                  resourceReservation: options.resourceReservation,
+                },
+                observation: {
+                  onYield: (event) => yields.push(event),
+                  onProtocolEvent: (event) => options.onProtocolEvent(event),
+                },
               }),
             )
             .then(

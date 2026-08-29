@@ -10,7 +10,6 @@
 
 import { randomUUID } from "node:crypto";
 import {
-  type AgentYield,
   type AgentEventMap,
   type EventBus,
   type WindowCompact,
@@ -26,7 +25,6 @@ import {
   type RunResult,
   type ChatRequest,
   type StreamEvent,
-  type RunRecordAdvancementMetadata,
   type ToolResultBlock,
   type IPermissionStore,
   type IToolArgumentExtractor,
@@ -44,7 +42,6 @@ import {
   type ToolDefinition,
   type TurnContext,
   type TurnContextProvider,
-  type TurnSource,
   type WatchdogPolicy,
   buildRunRecord,
   BoundaryRegistry,
@@ -90,14 +87,7 @@ import {
   SkillCatalogKernelProjectionApplicationService,
   SkillCatalogLoadApplicationService,
 } from "@zhixing/core/skills/catalog";
-import type {
-  AssignmentGlobalQueryPort,
-  AssignmentMutationPort,
-  AuthorityCallContext,
-  ModelCallResourceMeter,
-  ResourceLease,
-  ResourceReservationPort,
-} from "@zhixing/core/contracts";
+import type { ModelCallResourceMeter } from "@zhixing/core/contracts";
 import {
   createProviderRoles,
   ensureWorkspaceDir,
@@ -169,6 +159,10 @@ import {
   createAssignmentSkillPorts,
   createAssignmentSkillProjectionApplication,
 } from "./assignment-skill-port.js";
+import {
+  captureKernelRunEnvelope,
+  type KernelRunEnvelope,
+} from "./kernel-run-envelope.js";
 
 /**
  * 注入系统提示词的技能索引上限(按当前模式 top-N)。
@@ -290,7 +284,7 @@ export type DecorateRunBusFn = (ctx: RunBusContext) => () => void;
 export interface AgentRuntime {
   providerId: string;
   model: string;
-  run: (params: RunParams) => Promise<RunResult>;
+  run: (envelope: KernelRunEnvelope) => Promise<RunResult>;
   /**
    * 估算当前窗口下一次主对话 provider 请求的上下文预算状态。
    *
@@ -442,78 +436,6 @@ export interface ForceCompactResult {
    * 有损截断伪装成正常摘要。
    */
   emergencyFloor?: { droppedTurns: number; error: string };
-}
-
-export interface RunParams {
-  messages: Message[];
-  /**
-   * 本 turn 序号 —— 由调用方维护的 counter，进生命周期钩子上下文
-   * （LifecycleBeforeRunContext / LifecycleAfterRunContext）供订阅者观测。
-   *
-   * - REPL: `state.turnCounter`（每次持久化成功后 +1）
-   * - server: `ManagedSession.turnCount`
-   * - ephemeral / 单次运行：0
-   */
-  turnIndex: number;
-  /**
-   * 当前 conversation id —— 透传到 runContextStorage，工具按需取（用于
-   * 在持久化会话中区分写入目标 / 读取上下文）。
-   *
-   * 可选：ephemeral 路径（定时任务 / 单测 fixture）省略；
-   * 工具收到 undefined 时显式分支处理（拒绝执行 / graceful degrade）。
-   */
-  conversationId?: string;
-  /** 触发源，落盘为 run record 的 source 字段。不指定时字段为 undefined */
-  source?: TurnSource;
-  /** 推进侧代理 run 的产品层元数据；不进入 Message role/content */
-  advancement?: RunRecordAdvancementMetadata;
-  onYield?: (event: AgentYield) => void | Promise<void>;
-  onProtocolEvent?: (
-    event: import("@zhixing/core").SessionEventProjection,
-    meta: { readonly lineage?: string },
-  ) => void | Promise<void>;
-  toolSideEffectObserver?: import("@zhixing/core").ToolSideEffectObserver;
-  /** Optional durable authority check run before the security pipeline and tool. */
-  authorizeToolExecution?: DurableToolExecutionAuthorizer;
-  /** Durable budget pre-reservation and settlement for every provider attempt in this run. */
-  modelCallResourceMeter?: ModelCallResourceMeter;
-  /** Durable assignment-local scheduler mutation append port. */
-  stageScheduleMutation?: import("@zhixing/core").ScheduleMutationStager;
-  /** Unified assignment-local staged mutation and overlay port. */
-  assignmentMutations?: AssignmentMutationPort;
-  /** Assignment-bound read-only global authority facade. */
-  globalQuery?: AssignmentGlobalQueryPort;
-  /** Stable issue time of the durable assignment. */
-  assignmentIssuedAt?: string;
-  /** Durable parent assignment root for Task and orchestration child leases. */
-  resourceReservation?: {
-    readonly port: ResourceReservationPort;
-    readonly parentLease: ResourceLease;
-    readonly contextFor: (requestId: string) => AuthorityCallContext;
-  };
-  /**
-   * Turn 级上下文。channel 会话传入含 commitToUser；
-   * REPL / 定时任务 ephemeral turn 省略。字段进入每个工具调用的
-   * ToolExecutionContext（turnId / emissionTarget / commitToUser）。
-   */
-  turnContext?: TurnContext;
-  /**
-   * Abort 信号 —— 透传到 agent-loop 与段切换内的 LLM 调用。
-   * 上游来源：SessionRuntime.abort()、用户 /abort、daemon grace timer。
-   * 未设置时所有 LLM 调用无限制运行。
-   */
-  abortSignal?: AbortSignal;
-  /**
-   * stream 看门狗策略 —— 控制 LLM 流 chunk 间隔的 idle-timer 行为。
-   *
-   * 缺省时本层注入 `DEFAULT_WATCHDOG_POLICY`(60s idle, 50% warn)。这是契约规定的
-   * **唯一** fallback 注入点 —— agent-loop 内部不再二次 fallback。
-   *
-   * 调用方显式传入(包括 `createWatchdogPolicy({ idleTimeoutMs: 0 })` 禁用 idle-timer)
-   * 时一路透传到看门狗,不被默认值覆盖。配置错误的 policy(如 warnThresholdRatio 超出
-   * 开区间)应通过 createWatchdogPolicy 工厂构造,在创建期 throw 而非运行期失败。
-   */
-  watchdog?: WatchdogPolicy;
 }
 
 // RunResult 从 @zhixing/core 统一（单一事实源）。
@@ -1508,7 +1430,8 @@ export async function createAgentRuntime(
       };
     },
 
-    async run(params: RunParams): Promise<RunResult> {
+    async run(input: KernelRunEnvelope): Promise<RunResult> {
+      const envelope = captureKernelRunEnvelope(input);
       // 主 agent 的 root EventBus 显式标记 lineage="main",建立父子事件契约的根:
       //   - 主 run 事件 meta.lineage === "main" (订阅方可按 lineage 过滤/路由)
       //   - 子 agent EventBus 通过 createEventBus({ parent, lineage: "main/<id>" })
@@ -1523,12 +1446,12 @@ export async function createAgentRuntime(
           console.error(`[EventBus] Error in listener for "${eventName}":`, error);
         },
       });
-      const disposeProtocolEvents = params.onProtocolEvent
+      const disposeProtocolEvents = envelope.observation.onProtocolEvent
         ? eventBus.onAny(async (event, payload, meta) => {
             const projected = projectSessionEvent(event, payload);
             if (projected) {
               try {
-                await params.onProtocolEvent?.(projected, {
+                await envelope.observation.onProtocolEvent?.(projected, {
                   ...(meta?.lineage ? { lineage: meta.lineage } : {}),
                 });
               } catch (error) {
@@ -1545,9 +1468,9 @@ export async function createAgentRuntime(
 
       // 通过 deps.callLLM 注入容错能力，agent-loop.ts 零修改
       let providerCallIndex = 0;
-      const modelCallMetering = params.modelCallResourceMeter
+      const modelCallMetering = envelope.control.modelCallResourceMeter
         ? {
-            meter: params.modelCallResourceMeter,
+            meter: envelope.control.modelCallResourceMeter,
             nextCallIndex: () => ++providerCallIndex,
           }
         : undefined;
@@ -1574,7 +1497,8 @@ export async function createAgentRuntime(
       //
       // segmentDeps 缺省 → 不构造 SegmentManager —— 该 run 没有任何窗口压缩
       // （段切换是唯一压缩机制），仅剩测试 / 纯嵌入消费这么用。
-      const segmentWatchdog = params.watchdog ?? DEFAULT_WATCHDOG_POLICY;
+      const segmentWatchdog =
+        envelope.control.watchdog ?? DEFAULT_WATCHDOG_POLICY;
       const segmentStreamFactory = makeSegmentStreamFactory(
         eventBus,
         segmentWatchdog,
@@ -1604,8 +1528,8 @@ export async function createAgentRuntime(
       // 运行身份(对话 / turn)透传——跨进程转发类装饰器据此路由事件归属。
       const disposeRender = options.decorateRunBus?.({
         bus: eventBus,
-        conversationId: params.conversationId,
-        turnContext: params.turnContext,
+        conversationId: envelope.identity.conversationId,
+        turnContext: envelope.identity.turnContext,
       });
 
       //
@@ -1647,9 +1571,9 @@ export async function createAgentRuntime(
       const isWindowFirstRun = entryWindowIndex !== lastRunEntryWindowIndex;
       lastRunEntryWindowIndex = entryWindowIndex;
 
-      if (isWindowFirstRun && params.globalQuery) {
+      if (isWindowFirstRun && envelope.correctness.globalQuery) {
         const skillIndex = await createAssignmentSkillProjectionApplication(
-          params.globalQuery,
+          envelope.correctness.globalQuery,
         ).project(skillMode);
         if (
           entryInstanceEpoch === instanceEpoch &&
@@ -1690,9 +1614,9 @@ export async function createAgentRuntime(
           const nextLocalMessagePrefixContributions: PrefixContributionHolder =
             new Map(localMessagePrefixContributions);
 
-          if (params.globalQuery) {
+          if (envelope.correctness.globalQuery) {
             const skillIndex = await createAssignmentSkillProjectionApplication(
-              params.globalQuery,
+              envelope.correctness.globalQuery,
             ).project(skillMode);
             localSegmentOverrides["skill-index"] = skillIndex.content;
             if (
@@ -1814,10 +1738,10 @@ export async function createAgentRuntime(
             windowIndex: entryWindowIndex,
             eventBus,
           }),
-          conversationId: params.conversationId,
-          turnIndex: params.turnIndex,
+          conversationId: envelope.identity.conversationId,
+          turnIndex: envelope.identity.turnIndex,
           isWindowFirstRun,
-          messages: params.messages,
+          messages: envelope.modelInput.messages,
           injectUserContext(content) {
             if (content !== null && content.trim().length > 0) {
               userContextContributions.push(content);
@@ -1836,7 +1760,7 @@ export async function createAgentRuntime(
       }
       // 收齐贡献 → 注入当前 run 用户消息,作为本 run loop 的输入起点。
       const injectedMessages = prependContextBlock(
-        params.messages,
+        envelope.modelInput.messages,
         userContextContributions,
       );
 
@@ -1856,14 +1780,16 @@ export async function createAgentRuntime(
           {
             bus: eventBus,
             lineage: "main",
-            conversationId: params.conversationId,
-            turnOrigin: params.turnContext?.turnOrigin,
-            authorizeToolExecution: params.authorizeToolExecution,
-            stageScheduleMutation: params.stageScheduleMutation,
-            assignmentMutations: params.assignmentMutations,
-            globalQuery: params.globalQuery,
-            assignmentIssuedAt: params.assignmentIssuedAt,
-            resourceReservation: params.resourceReservation,
+            conversationId: envelope.identity.conversationId,
+            turnOrigin: envelope.identity.turnContext?.turnOrigin,
+            authorizeToolExecution:
+              envelope.correctness.authorizeToolExecution,
+            stageScheduleMutation:
+              envelope.correctness.stageScheduleMutation,
+            assignmentMutations: envelope.correctness.assignmentMutations,
+            globalQuery: envelope.correctness.globalQuery,
+            assignmentIssuedAt: envelope.correctness.assignmentIssuedAt,
+            resourceReservation: envelope.correctness.resourceReservation,
             orchestrationCapacity: options.orchestrationCapacity,
             ...(modelCallMetering ? { modelCallMetering } : {}),
           },
@@ -1881,8 +1807,8 @@ export async function createAgentRuntime(
               windowIndex: windowCounter - 1,
               eventBus,
             }),
-            conversationId: params.conversationId,
-            turnIndex: params.turnIndex,
+            conversationId: envelope.identity.conversationId,
+            turnIndex: envelope.identity.turnIndex,
             result,
           };
           try {
@@ -1907,7 +1833,7 @@ export async function createAgentRuntime(
         // pre-flight compact 检查 —— 防止上 run 尾累积到超标、下 run 入口直接送 LLM 爆 context。
         //
         // 关键设计：跑在 injectedMessages（含 onBeforeRun 注入的 <context>）上，不在
-        //   params.messages。注入可能带来数 K token 增量（小模型 32K 上可能跨越预算
+        //   envelope.modelInput.messages。注入可能带来数 K token 增量（小模型 32K 上可能跨越预算
         //   阈值），pre-flight 必须看真实输入才能做出正确决策。
         //
         // turn-context 块（时间、任务状态等）由 agent-loop 在每次 LLM call 之前 per-call inject，
@@ -1915,10 +1841,10 @@ export async function createAgentRuntime(
         // turn-context 体积较小（百级 tokens），pre-flight 评估的 under-estimate 不会跨预算阈值。
         const loopMessages = injectedMessages;
 
-        // 原始 user 消息（params.messages 最后一条，未经 <context> / turn-context 注入增强）
+        // 原始 user 消息（envelope.modelInput.messages 最后一条，未经 <context> / turn-context 注入增强）
         // —— 持久化输入的 messages[0] 必须是用户真实输入，不是内部增强版
         const originalUserMessage =
-          params.messages[params.messages.length - 1] ??
+          envelope.modelInput.messages[envelope.modelInput.messages.length - 1] ??
           (userMessage("") as Message);
 
 
@@ -1948,14 +1874,15 @@ export async function createAgentRuntime(
           sessionType,
           confirmationFallback: options.confirmationFallback,
           turnContext: {
-            ...params.turnContext,
+            ...envelope.identity.turnContext,
             userIntent: extractText(originalUserMessage),
           },
           onBlocked: options.onSecurityBlocked,
           onUserDenied: options.onUserDenied,
           // per-run 事件总线 —— 启用安全审计发射（pipeline 决策事件 + 管家三态裁决事件）
           eventBus,
-          authorizeToolExecution: params.authorizeToolExecution,
+          authorizeToolExecution:
+            envelope.correctness.authorizeToolExecution,
         });
         const governedExecuteTool = secureExecuteTool;
 
@@ -1981,10 +1908,10 @@ export async function createAgentRuntime(
             workspace.source === "none"
               ? undefined
               : (workspace.path ?? process.cwd()),
-          abortSignal: params.abortSignal,
+          abortSignal: envelope.control.abortSignal,
           // watchdog fallback 单点: 调用边界注入默认值, agent-loop 内部不二次 fallback
           // 保证调用方显式传入的 policy(含禁用 idle-timer 的 `{ idleTimeoutMs: 0 }`)一路透传
-          watchdog: params.watchdog ?? DEFAULT_WATCHDOG_POLICY,
+          watchdog: envelope.control.watchdog ?? DEFAULT_WATCHDOG_POLICY,
           deps: {
             callLLM: resilientCallLLM,
             executeTool: governedExecuteTool,
@@ -1993,7 +1920,8 @@ export async function createAgentRuntime(
           // 各角色生效思考配置，沿 llmRoles 同路径注入到工具 ctx.roleThinking，
           // 让工具 I/O 边界调对应角色（如 WebFetch 蒸馏走 light）遵循用户配置。
           roleThinking,
-          toolSideEffectObserver: params.toolSideEffectObserver,
+          toolSideEffectObserver:
+            envelope.correctness.toolSideEffectObserver,
           // 视图层 turn-context 注入由 agent-loop 在每次 LLM call 之前调用，
           // 让任务状态 / 定时任务 / 时间等动态信息在多 LLM call 之间实时刷新
           turnContextInjector,
@@ -2002,7 +1930,7 @@ export async function createAgentRuntime(
           tokenEstimator: estimator,
           // 段切换：attention-driven 主路径，按 turn 边界评估 + 可选切段
           segmentManager,
-          conversationId: params.conversationId,
+          conversationId: envelope.identity.conversationId,
           // 注意力窗口换代回调 —— run 内 messages 重构后触发窗口钩子、重拼本 run
           // 局部 prompt（让重建后的 system prompt 在下个 LLM call 生效）。
           windowLifecycle,
@@ -2017,8 +1945,8 @@ export async function createAgentRuntime(
             return {
               agentResult: value,
               runRecord: buildRunRecord({
-                source: params.source,
-                advancement: params.advancement,
+                source: envelope.identity.source,
+                advancement: envelope.identity.advancement,
                 userMessage: originalUserMessage,
                 newMessages,
                 agentResult: value,
@@ -2031,7 +1959,7 @@ export async function createAgentRuntime(
           }
 
           // 通知调用方（渲染用）
-          await params.onYield?.(value);
+          await envelope.observation.onYield?.(value);
 
           // 追踪消息以维护对话历史
           trackMessages(value, newMessages, pendingToolResults);

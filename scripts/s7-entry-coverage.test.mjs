@@ -15,6 +15,7 @@ import {
   inspectCleanupRegistryConstructions,
   inspectConversationAdoptionAssembly,
   inspectDeviceLifecycleAssembly,
+  inspectKernelRunEnvelopeOwnership,
   inspectLocalConversationOwnerIsolation,
   inspectManagedHostAssembly,
   inspectPlannedAnchorTransferAssembly,
@@ -2338,6 +2339,74 @@ test("retired entry, live writable Store and reverse package dependency mutation
   assert.match(
     inspectProductionSource("packages/cli/src/bad.ts", 'const name = "LegacyDeliveryDrainer";')[0],
     /retired token LegacyDeliveryDrainer/,
+  );
+});
+
+test("Kernel run input has one finite Envelope owner and three production bindings", async () => {
+  const paths = [
+    "packages/orchestrator/src/runtime/kernel-run-envelope.ts",
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+    "packages/orchestrator/src/runtime/index.ts",
+    "packages/runtime-host/src/session-adapter.ts",
+    "packages/runtime-host/src/runtime-host.ts",
+    "packages/cli/src/serve/ephemeral-executor.ts",
+    "packages/cli/src/serve/agent-job-runtime.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectKernelRunEnvelopeOwnership(records), []);
+  assert.match(
+    inspectKernelRunEnvelopeOwnership(mutate(
+      "packages/orchestrator/src/runtime/kernel-run-envelope.ts",
+      (text) => text.replace(
+        "readonly observation: {",
+        "readonly observation?: {",
+      ),
+    )).join("\n"),
+    /partition is not required, readonly and finite/,
+  );
+  assert.match(
+    inspectKernelRunEnvelopeOwnership(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => `${text}\ninterface RunParams { messages: unknown[] }`,
+    )).join("\n"),
+    /retired RunParams contract remains/,
+  );
+  assert.match(
+    inspectKernelRunEnvelopeOwnership(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => text.replace(
+        "const envelope = captureKernelRunEnvelope(input);",
+        "const envelope = input;",
+      ),
+    )).join("\n"),
+    /does not expose one captured Kernel Run Envelope entry/,
+  );
+  for (const relative of [
+    "packages/runtime-host/src/session-adapter.ts",
+    "packages/cli/src/serve/ephemeral-executor.ts",
+    "packages/cli/src/serve/agent-job-runtime.ts",
+  ]) {
+    assert.match(
+      inspectKernelRunEnvelopeOwnership(mutate(
+        relative,
+        (text) => text.replace("modelInput: {", "messages: {"),
+      )).join("\n"),
+      /production run binding bypasses/,
+    );
+  }
+  assert.match(
+    inspectKernelRunEnvelopeOwnership(mutate(
+      "packages/runtime-host/src/runtime-host.ts",
+      (text) => `${text}\nvoid createAgentRuntime({} as never);`,
+    )).join("\n"),
+    /second Kernel assembly path/,
   );
 });
 

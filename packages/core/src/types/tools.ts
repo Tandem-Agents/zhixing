@@ -186,7 +186,7 @@ export interface ToolExecutionContext {
 
   /**
    * Turn 发起入口的元信息——远程确认的回程地址。
-   * 由 AgentRuntime 从 `RunParams.turnContext.turnOrigin` 展开注入；
+   * 由 AgentRuntime 从 `KernelRunEnvelope.identity.turnContext.turnOrigin` 展开注入；
    * secure-executor 透传到 ConfirmationRequest.turnOrigin 让 Renderer / Hub / Bridge
    * 知道把确认请求推回哪个通道对话 / RPC 连接。
    *

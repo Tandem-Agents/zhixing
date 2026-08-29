@@ -33,8 +33,11 @@ import type {
 import type {
   AssignmentGlobalQueryPort,
   AssignmentMutationPort,
+  AuthorityCallContext,
   ContentAssetRef,
   ModelCallResourceMeter,
+  ResourceLease,
+  ResourceReservationPort,
 } from "@zhixing/core/contracts";
 import type { ScheduleMutationStager } from "@zhixing/core";
 
@@ -84,6 +87,12 @@ export interface RunTurnOptions {
   globalQuery?: AssignmentGlobalQueryPort;
   /** Stable issue time of the durable assignment. */
   assignmentIssuedAt?: string;
+  /** Durable parent assignment root inherited by Task/orchestration descendants. */
+  resourceReservation?: {
+    readonly port: ResourceReservationPort;
+    readonly parentLease: ResourceLease;
+    readonly contextFor: (requestId: string) => AuthorityCallContext;
+  };
 }
 
 export type RuntimeDisposeReason =
