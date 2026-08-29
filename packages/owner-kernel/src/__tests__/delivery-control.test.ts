@@ -1,5 +1,6 @@
 import path from "node:path";
 import {
+  AuthorityStorageError,
   FileArtifactStore,
   FileAuthorityCommitLog,
 } from "@zhixing/core/authority";
@@ -13,6 +14,7 @@ import {
   type DeliveryEnqueueInput,
 } from "@zhixing/core/delivery";
 import {
+  DeliveryProjectionInvariantError,
   DeliveryUncertainResolutionApplicationService,
   type DeliveryUncertainResolutionCommand,
 } from "@zhixing/core/delivery/application";
@@ -28,6 +30,7 @@ import {
   type TrustedControlSource,
 } from "../control-admission.js";
 import { createDeliveryResolutionCorrectnessPort } from "../delivery-control.js";
+import { createOwnerDeliveryLifecycleBinding } from "../delivery-obligation-correctness.js";
 import {
   DURABLE_IO_TEST_TIMEOUT_MS,
   trackAuthorityLog,
@@ -43,6 +46,7 @@ async function createHarness() {
     clock: () => NOW,
   }));
   const authority = new DeliveryAuthority({ log, anchorEpoch: 7 });
+  const lifecycle = createOwnerDeliveryLifecycleBinding({ authority }).application;
   const admission = new ControlAdmissionJournal(log, artifacts);
   const input: DeliveryEnqueueInput = {
     keyBody: {
@@ -121,8 +125,8 @@ async function createHarness() {
   ).value);
   if (!created.accepted) throw new Error("fixture delivery was rejected");
   const itemId = created.items[0]!.itemId;
-  await authority.claim({ itemId, outcomePolicy: { kind: "manual-resolution" } });
-  await authority.claim({ itemId, outcomePolicy: { kind: "manual-resolution" } });
+  await lifecycle.claim({ itemId, outcomePolicy: { kind: "manual-resolution" } });
+  await lifecycle.claim({ itemId, outcomePolicy: { kind: "manual-resolution" } });
   const item = await authority.get(itemId);
   if (!item?.openFact) throw new Error("fixture delivery did not become uncertain");
   return { artifacts, log, authority, admission, item };
@@ -166,6 +170,70 @@ function application(input: {
 }
 
 describe("delivery resolution control", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
+  it("maps a Delivery projection invariant to the stable Authority corruption contract", async () => {
+    const prepared = prepareDeliveryEnqueues(emptyDeliveryProjection(), [
+      {
+        keyBody: {
+          kind: "conversation-final-delivery",
+          conversationId: "conversation-corrupt",
+          runId: "run-corrupt",
+          commitRevision: 1,
+        },
+        intent: {
+          endpoint: {
+            kind: "channel",
+            target: { channelId: "feishu", to: "user-1" },
+          },
+          content: { text: "corrupt" },
+          priority: "normal",
+          createdAt: NOW,
+          maxAttempts: 3,
+        },
+      },
+    ], NOW);
+    if (!prepared.accepted) throw new Error("fixture enqueue was rejected");
+    const itemId = prepared.items[0]!.itemId;
+    const enqueued = prepared.records[0];
+    if (enqueued?.t !== "enqueued") throw new Error("expected enqueue fixture record");
+    const projection = emptyDeliveryProjection();
+    projection.items.set(itemId, {
+      id: itemId,
+      idempotencyKey: enqueued.idempotencyKey,
+      keyBody: enqueued.keyBody,
+      intentDigest: enqueued.intentDigest,
+      intent: enqueued.intent,
+      state: "attempting",
+      statusRevision: 2,
+      currentAttempt: 1,
+      automaticAttemptsUsed: 1,
+    });
+    const authority = {
+      transactDeliveryLifecycle: async <Value>(decide: Parameters<
+        DeliveryAuthority["transactDeliveryLifecycle"]
+      >[0]) => decide({
+        projection,
+        transactionAt: NOW,
+        currentAnchorEpoch: 7,
+      }).value as Value,
+      list: async () => [],
+      snapshot: () => [],
+      lifecycleAcceptedWorkItems: async () => [],
+    } as unknown as DeliveryAuthority;
+
+    const application = createOwnerDeliveryLifecycleBinding({ authority }).application;
+    const failure = await application.claim({
+      itemId,
+      outcomePolicy: { kind: "manual-resolution" },
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(AuthorityStorageError);
+    expect(failure).toMatchObject({
+      code: "commit-log-corrupt",
+      message: "Open delivery attempt has no start fact",
+      cause: expect.any(DeliveryProjectionInvariantError),
+    });
+  });
+
   it("atomically appends the user decision and its applied control result", async () => {
     const fixture = await createHarness();
     const trusted = source();

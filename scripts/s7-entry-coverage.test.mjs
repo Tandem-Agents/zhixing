@@ -3033,8 +3033,10 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
 test("Skill Catalog management, load, save, admission and Kernel projection have one domain application boundary", async () => {
   const paths = [
     "packages/core/src/skills/catalog-application.ts",
-    "packages/core/src/delivery/resolution-application.ts",
+    "packages/core/src/delivery/application.ts",
     "packages/core/src/delivery/authority.ts",
+    "packages/core/src/delivery/authority-pipeline.ts",
+    "packages/core/src/delivery/lifecycle-policy.ts",
     "packages/core/src/delivery/index.ts",
     "packages/core/src/product-api/catalog.ts",
     "packages/core/src/skills/global-state-adapter.ts",
@@ -3306,9 +3308,93 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/core/src/delivery/index.ts",
-      (text) => `${text}\nexport * from "./resolution-application.js";`,
+      (text) => `${text}\nexport * from "./application.js";`,
     )).join("\n"),
     /one narrow non-root core subpath/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership([
+      ...records,
+      {
+        relative: "packages/core/src/delivery/resolution-application.ts",
+        text: 'export * from "./application.js";',
+      },
+    ]).join("\n"),
+    /resolution-only source path/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/delivery/application.ts",
+      (text) => `${text}\nimport { AuthorityStorageError } from "../authority/index.js";`,
+    )).join("\n"),
+    /one narrow non-root core subpath/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/owner-kernel/src/delivery-obligation-correctness.ts",
+      (text) => text.replace(
+        'new AuthorityStorageError("commit-log-corrupt", error.message',
+        'new Error(error.message',
+      ),
+    )).join("\n"),
+    /one narrow Correctness transaction/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/package.json",
+      (text) => text.replaceAll(
+        "./dist/delivery/application",
+        "./dist/delivery/resolution-application",
+      ),
+    )).join("\n"),
+    /one narrow non-root core subpath/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/tsup.config.ts",
+      (text) => text.replace(
+        '"src/delivery/application.ts"',
+        '"src/delivery/resolution-application.ts"',
+      ),
+    )).join("\n"),
+    /one narrow non-root core subpath/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/delivery/authority-pipeline.ts",
+      (text) => text.replace("this.#application.claim(", "this.#authority.claim("),
+    )).join("\n"),
+    /attempt lifecycle does not have one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/delivery/authority.ts",
+      (text) => text.replace(
+        "async transactDeliveryLifecycle<Value>",
+        "async claim<Value>",
+      ),
+    )).join("\n"),
+    /attempt lifecycle does not have one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/owner-kernel/src/delivery-obligation-correctness.ts",
+      (text) => text.replace(
+        "authority.transactDeliveryLifecycle<Value>",
+        "authority.claim",
+      ),
+    )).join("\n"),
+    /attempt lifecycle does not have one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/delivery/lifecycle-policy.ts",
+      (text) => text.replace(
+        "deliveryUnknownOutcomeDisposition",
+        "legacyUnknownOutcomeDisposition",
+      ),
+    )).join("\n"),
+    /attempt lifecycle does not have one domain application/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(

@@ -16,6 +16,7 @@ import {
   sealedBundleArtifact,
 } from "@zhixing/core/protocol";
 import { createTempDir } from "@zhixing/test-utils";
+import { createOwnerDeliveryLifecycleBinding } from "@zhixing/owner-kernel/delivery";
 import {
   setupAuthorityRuntime,
   setupDelivery,
@@ -191,12 +192,15 @@ describe("setupDelivery authority production path", () => {
         { candidateReferences: [sourceRef] },
       ),
     );
-    const claim = await stack.authority.claim({
+    const lifecycle = createOwnerDeliveryLifecycleBinding({
+      authority: stack.authority,
+    }).application;
+    const claim = await lifecycle.claim({
       itemId: prepared.value,
       outcomePolicy: { kind: "manual-resolution" },
     });
     expect(claim.kind).toBe("send");
-    await stack.authority.claim({ itemId: prepared.value });
+    await lifecycle.claim({ itemId: prepared.value });
     const uncertain = await stack.authority.get(prepared.value);
     expect(uncertain?.state).toBe("uncertain");
     const listener = vi.fn();

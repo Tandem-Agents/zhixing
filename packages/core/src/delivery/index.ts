@@ -45,10 +45,6 @@ export {
   projectDeliveryDisplayText,
 } from "./validation.js";
 export type {
-  DeliveryAttemptClaim,
-  DeliveryClaimResult,
-  DeliveryOutcome,
-  DeliveryOutcomeDecision,
   DeliveryProjection,
   DeliveryResolutionDecision,
   DeliveryResolutionInput,

@@ -13,6 +13,7 @@ import type {
   DeliveryTransport,
 } from "../types.js";
 import {
+  createDeliveryLifecycleTestBinding,
   createDeliveryTestHarness,
   deliveryTestInput,
 } from "./delivery-test-harness.js";
@@ -30,14 +31,17 @@ async function createPipeline(
   } = {},
 ) {
   const fixture = await createDeliveryTestHarness();
+  const lifecycle = createDeliveryLifecycleTestBinding(fixture.authority, {
+    baseRetryDelayMs: options.baseRetryDelayMs ?? 1_000,
+  });
   const eventBus = createEventBus<AuthorityDeliveryEventMap>();
   const pipeline = new AuthorityDeliveryPipeline({
-    authority: fixture.authority,
+    application: lifecycle.application,
+    projection: lifecycle.projection,
     artifacts: fixture.artifacts,
     transport,
     eventBus,
     config: {
-      baseRetryDelayMs: options.baseRetryDelayMs ?? 1_000,
       flushIntervalMs: options.flushIntervalMs ?? 0,
     },
     now: options.now ?? fixture.now,
@@ -119,12 +123,16 @@ describe("AuthorityDeliveryPipeline", () => {
     const created = await fixture.enqueue();
     if (!created.accepted) throw new Error("fixture enqueue failed");
     const send = vi.fn(async () => ({ success: true, retryable: false } as const));
+    const lifecycle = createDeliveryLifecycleTestBinding(fixture.authority, {
+      baseRetryDelayMs: 1_000,
+    });
     const pipeline = new AuthorityDeliveryPipeline({
-      authority: fixture.authority,
+      application: lifecycle.application,
+      projection: lifecycle.projection,
       artifacts: fixture.artifacts,
       transport: transport(send),
       eventBus: createEventBus<AuthorityDeliveryEventMap>(),
-      config: { baseRetryDelayMs: 1_000, flushIntervalMs: 0 },
+      config: { flushIntervalMs: 0 },
       now: fixture.now,
     });
 
@@ -350,7 +358,7 @@ describe("AuthorityDeliveryPipeline", () => {
 
       const flush = fixture.pipeline.flush();
       await sending;
-      const uncertain = await fixture.authority.claim({ itemId: created.items[0]!.itemId });
+      const uncertain = await fixture.lifecycle.claim({ itemId: created.items[0]!.itemId });
       if (uncertain.kind !== "uncertain") throw new Error("fixture did not open uncertainty");
       release(result);
       await flush;

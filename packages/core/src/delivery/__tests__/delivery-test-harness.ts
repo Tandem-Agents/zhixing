@@ -1,6 +1,7 @@
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import {
+  AuthorityStorageError,
   FileArtifactStore,
   FileAuthorityCommitLog,
 } from "../../authority/index.js";
@@ -29,6 +30,12 @@ import {
   type DeliveryEnqueueInput,
   type DeliveryEnqueueResult,
 } from "../index.js";
+import {
+  DeliveryLifecycleApplicationService,
+  DeliveryProjectionInvariantError,
+  type DeliveryLifecycleCorrectnessPort,
+  type DeliveryLifecycleProjectionPort,
+} from "../application.js";
 
 export const DELIVERY_TEST_TIME = "2026-07-17T02:00:00.000Z";
 const FIXTURE_DIGEST = `sha256:${"0".repeat(64)}` as const;
@@ -41,12 +48,15 @@ export async function createDeliveryTestHarness() {
     clock: () => now,
   });
   const authority = new DeliveryAuthority({ log, anchorEpoch: 7 });
+  const lifecycle = createDeliveryLifecycleTestBinding(authority);
 
   return {
     root,
     artifacts,
     log,
     authority,
+    lifecycle: lifecycle.application,
+    lifecycleProjection: lifecycle.projection,
     now: () => new Date(now),
     setNow(value: string) {
       now = value;
@@ -54,6 +64,38 @@ export async function createDeliveryTestHarness() {
     async enqueue(input = deliveryTestInput({ createdAt: now })) {
       return enqueueDelivery(log, artifacts, authority, input);
     },
+  };
+}
+
+export function createDeliveryLifecycleTestBinding(
+  authority: DeliveryAuthority,
+  options: { readonly baseRetryDelayMs?: number } = {},
+) {
+  const correctness: DeliveryLifecycleCorrectnessPort = {
+    transact: <Value>(decide: Parameters<
+      DeliveryLifecycleCorrectnessPort["transact"]
+    >[0]) => authority.transactDeliveryLifecycle<Value>((context) => {
+      try {
+        return decide(context);
+      } catch (error) {
+        if (error instanceof DeliveryProjectionInvariantError) {
+          throw new AuthorityStorageError("commit-log-corrupt", error.message, {
+            cause: error,
+          });
+        }
+        throw error;
+      }
+    }),
+  };
+  const projection: DeliveryLifecycleProjectionPort = {
+    list: () => authority.list(),
+    snapshot: () => authority.snapshot(),
+    lifecycleAcceptedWorkItems: (operationId) =>
+      authority.lifecycleAcceptedWorkItems(operationId),
+  };
+  return {
+    application: new DeliveryLifecycleApplicationService(correctness, options),
+    projection,
   };
 }
 

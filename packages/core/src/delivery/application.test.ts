@@ -4,13 +4,18 @@ import {
   createDeliveryResolutionProductApiContribution,
   DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET,
   DELIVERY_RESOLVE_UNCERTAIN_COMMAND,
+  DeliveryLifecycleApplicationService,
   DeliveryObligationApplicationService,
+  DeliveryProjectionInvariantError,
   DeliveryUncertainResolutionApplicationService,
   type DeliveryObligation,
   type DeliveryObligationDecide,
   type DeliveryUncertainResolutionCommand,
-} from "./resolution-application.js";
-import { emptyDeliveryProjection } from "./authority.js";
+} from "./application.js";
+import {
+  emptyDeliveryProjection,
+  projectDeliveryLifecycleRecords,
+} from "./authority.js";
 import type { DeliveryEnqueueInput } from "./types.js";
 
 const COMMAND: DeliveryUncertainResolutionCommand = {
@@ -136,5 +141,55 @@ describe("Delivery obligation application", () => {
       },
       { maxAttempts: 0 },
     )).toThrow("Delivery max attempts must be a positive safe integer");
+  });
+
+  it("reports a Delivery-owned invariant signal for a malformed lifecycle projection", async () => {
+    let projection = emptyDeliveryProjection();
+    const prepare = (
+      inputs: readonly DeliveryEnqueueInput[],
+      _commitAt: string,
+      decide: DeliveryObligationDecide,
+    ) => {
+      const decision = decide({
+        projection: emptyDeliveryProjection(),
+        lifecycleBindings: inputs.map(() => undefined),
+      });
+      if (decision.accepted) {
+        projection = projectDeliveryLifecycleRecords(
+          emptyDeliveryProjection(),
+          decision.records,
+          NOW,
+        );
+      }
+      return decision;
+    };
+    const obligation = new DeliveryObligationApplicationService({
+      coordinate: (operation) => operation(),
+      prepare,
+    }).prepare([OBLIGATION], NOW);
+    if (!obligation.accepted) throw new Error("expected accepted fixture");
+    const itemId = obligation.items[0]!.itemId;
+    const item = projection.items.get(itemId);
+    if (!item) throw new Error("expected projected delivery item");
+    item.state = "attempting";
+    item.currentAttempt = 1;
+    item.automaticAttemptsUsed = 1;
+
+    const application = new DeliveryLifecycleApplicationService({
+      transact: (decide) => Promise.resolve(decide({
+        projection,
+        transactionAt: NOW,
+        currentAnchorEpoch: 7,
+      }).value),
+    });
+
+    await expect(application.claim({
+      itemId,
+      outcomePolicy: { kind: "manual-resolution" },
+    })).rejects.toEqual(expect.objectContaining({
+      name: "DeliveryProjectionInvariantError",
+      kind: "delivery-projection-invariant",
+      message: "Open delivery attempt has no start fact",
+    } satisfies Partial<DeliveryProjectionInvariantError>));
   });
 });

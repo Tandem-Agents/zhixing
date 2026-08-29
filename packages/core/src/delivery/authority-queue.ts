@@ -1,8 +1,8 @@
-import type { DeliveryAuthority } from "./authority.js";
+import type { DeliveryLifecycleProjectionPort } from "./application.js";
 import type { AuthorityDeliveryItem } from "./types.js";
 
 export interface AuthorityDeliveryQueueOptions {
-  readonly authority: DeliveryAuthority;
+  readonly source: Pick<DeliveryLifecycleProjectionPort, "list">;
 }
 
 /**
@@ -10,15 +10,15 @@ export interface AuthorityDeliveryQueueOptions {
  * stream whenever a drain cycle starts.
  */
 export class AuthorityDeliveryQueue {
-  readonly #authority: DeliveryAuthority;
+  readonly #source: Pick<DeliveryLifecycleProjectionPort, "list">;
   #items: readonly AuthorityDeliveryItem[] = [];
 
   constructor(options: AuthorityDeliveryQueueOptions) {
-    this.#authority = options.authority;
+    this.#source = options.source;
   }
 
   async load(): Promise<number> {
-    this.#items = await this.#authority.list();
+    this.#items = await this.#source.list();
     return this.pending.length;
   }
 

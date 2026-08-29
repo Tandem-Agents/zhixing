@@ -26,16 +26,17 @@ import {
   prepareDeliveryEnqueues,
   reduceDeliveryAuthorityRecord,
   validateDeliveryStreamRecord,
-  type DeliveryClaimResult,
   type DeliveryEnqueueInput,
   type DeliveryEnqueueResult,
   type DeliveryProjection,
   type DeliveryResolutionDecision,
 } from "../index.js";
 import {
+  createDeliveryLifecycleTestBinding,
   createDeliverySourceFixture,
   deliverySourceRecords,
 } from "./delivery-test-harness.js";
+import type { DeliveryClaimResult } from "../application.js";
 import { MAX_INLINE_DELIVERY_CONTENT_BYTES } from "../content-schema.js";
 
 // Both suites exercise a real durable authority log. The isolated file completes in
@@ -46,7 +47,7 @@ const DURABLE_IO_TEST_TIMEOUT_MS = 60_000;
 
 const FIRST = "2026-07-17T02:00:00.000Z";
 
-async function harness(maxAttempts = 3) {
+async function harness(maxAttempts = 3, baseRetryDelayMs = 5_000) {
   let now = FIRST;
   const root = await createTempDir("delivery-authority");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
@@ -54,6 +55,9 @@ async function harness(maxAttempts = 3) {
     clock: () => now,
   });
   const authority = new DeliveryAuthority({ log, anchorEpoch: 7 });
+  const lifecycle = createDeliveryLifecycleTestBinding(authority, {
+    baseRetryDelayMs,
+  }).application;
   const input = deliveryInput(maxAttempts);
   const created = await enqueue(log, artifacts, authority, input);
   if (!created.accepted) throw new Error("fixture enqueue was rejected");
@@ -63,6 +67,7 @@ async function harness(maxAttempts = 3) {
     artifacts,
     log,
     authority,
+    lifecycle,
     input,
     itemId,
     setNow(value: string) {
@@ -144,9 +149,9 @@ async function openUncertain(
   },
 ) {
   const claim = requireSend(
-    await fixture.authority.claim({ itemId: fixture.itemId, outcomePolicy: policy }),
+    await fixture.lifecycle.claim({ itemId: fixture.itemId, outcomePolicy: policy }),
   );
-  const uncertain = await fixture.authority.claim({
+  const uncertain = await fixture.lifecycle.claim({
     itemId: fixture.itemId,
     outcomePolicy: policy,
   });
@@ -229,7 +234,7 @@ describe(
   it("row 2 durably starts the next attempt before it is sendable", async () => {
     const fixture = await harness();
     const claim = requireSend(
-      await fixture.authority.claim({
+      await fixture.lifecycle.claim({
         itemId: fixture.itemId,
         outcomePolicy: { kind: "manual-resolution" },
       }),
@@ -245,13 +250,13 @@ describe(
   it("row 3 accepts success only for the current open attempt", async () => {
     const fixture = await harness();
     const claim = requireSend(
-      await fixture.authority.claim({
+      await fixture.lifecycle.claim({
         itemId: fixture.itemId,
         outcomePolicy: { kind: "manual-resolution" },
       }),
     );
     await expect(
-      fixture.authority.recordOutcome({
+      fixture.lifecycle.recordOutcome({
         itemId: fixture.itemId,
         attempt: claim.attempt,
         responseBindingDigest: claim.responseBindingDigest,
@@ -267,12 +272,12 @@ describe(
   it("row 4 schedules a bounded retry after a retryable failure", async () => {
     const fixture = await harness();
     const claim = requireSend(
-      await fixture.authority.claim({
+      await fixture.lifecycle.claim({
         itemId: fixture.itemId,
         outcomePolicy: { kind: "manual-resolution" },
       }),
     );
-    await fixture.authority.recordOutcome({
+    await fixture.lifecycle.recordOutcome({
       itemId: fixture.itemId,
       attempt: claim.attempt,
       responseBindingDigest: claim.responseBindingDigest,
@@ -280,7 +285,6 @@ describe(
         kind: "failed",
         error: { code: "unavailable", message: "temporarily unavailable", retryable: true },
       },
-      retryDelayMs: 5_000,
     });
     expect(await fixture.authority.get(fixture.itemId)).toMatchObject({
       state: "retry-wait",
@@ -292,12 +296,12 @@ describe(
   it("row 5 closes a non-retryable failure as terminal", async () => {
     const fixture = await harness();
     const claim = requireSend(
-      await fixture.authority.claim({
+      await fixture.lifecycle.claim({
         itemId: fixture.itemId,
         outcomePolicy: { kind: "manual-resolution" },
       }),
     );
-    await fixture.authority.recordOutcome({
+    await fixture.lifecycle.recordOutcome({
       itemId: fixture.itemId,
       attempt: claim.attempt,
       responseBindingDigest: claim.responseBindingDigest,
@@ -318,14 +322,14 @@ describe(
   it("row 6 reuses one idempotent attempt inside its redrive window", async () => {
     const fixture = await harness();
     const first = requireSend(
-      await fixture.authority.claim({
+      await fixture.lifecycle.claim({
         itemId: fixture.itemId,
         outcomePolicy: { kind: "idempotent-redrive", windowMs: 10_000 },
       }),
     );
     fixture.setNow("2026-07-17T02:00:05.000Z");
     const redrive = requireSend(
-      await fixture.authority.claim({
+      await fixture.lifecycle.claim({
         itemId: fixture.itemId,
         outcomePolicy: { kind: "idempotent-redrive", windowMs: 10_000 },
       }),
@@ -362,12 +366,12 @@ describe(
   it("row 8 starts the next retry only after retryAt", async () => {
     const fixture = await harness();
     const first = requireSend(
-      await fixture.authority.claim({
+      await fixture.lifecycle.claim({
         itemId: fixture.itemId,
         outcomePolicy: { kind: "manual-resolution" },
       }),
     );
-    await fixture.authority.recordOutcome({
+    await fixture.lifecycle.recordOutcome({
       itemId: fixture.itemId,
       attempt: first.attempt,
       responseBindingDigest: first.responseBindingDigest,
@@ -375,10 +379,9 @@ describe(
         kind: "failed",
         error: { code: "busy", message: "busy", retryable: true },
       },
-      retryDelayMs: 5_000,
     });
     expect(
-      await fixture.authority.claim({
+      await fixture.lifecycle.claim({
         itemId: fixture.itemId,
         outcomePolicy: { kind: "manual-resolution" },
       }),
@@ -386,7 +389,7 @@ describe(
     fixture.setNow("2026-07-17T02:00:05.000Z");
     expect(
       requireSend(
-        await fixture.authority.claim({
+        await fixture.lifecycle.claim({
           itemId: fixture.itemId,
           outcomePolicy: { kind: "manual-resolution" },
         }),
@@ -398,7 +401,7 @@ describe(
     const fixture = await harness();
     const { claim, uncertain } = await openUncertain(fixture);
     await expect(
-      fixture.authority.recordOutcome({
+      fixture.lifecycle.recordOutcome({
         itemId: fixture.itemId,
         attempt: claim.attempt,
         responseBindingDigest: claim.responseBindingDigest,
@@ -420,7 +423,7 @@ describe(
   it("row 10 accepts a bound late retryable failure while uncertainty remains open", async () => {
     const fixture = await harness();
     const { claim, uncertain } = await openUncertain(fixture);
-    await fixture.authority.recordOutcome({
+    await fixture.lifecycle.recordOutcome({
       itemId: fixture.itemId,
       attempt: claim.attempt,
       responseBindingDigest: claim.responseBindingDigest,
@@ -428,7 +431,6 @@ describe(
         kind: "failed",
         error: { code: "busy", message: "busy", retryable: true },
       },
-      retryDelayMs: 5_000,
     });
     expect(await fixture.authority.get(fixture.itemId)).toMatchObject({ state: "retry-wait" });
     await expect(fixture.authority.statusHistory(fixture.itemId, 3)).resolves.toEqual([
@@ -444,7 +446,7 @@ describe(
   it("row 11 accepts a bound late permanent failure while uncertainty remains open", async () => {
     const fixture = await harness();
     const { claim, uncertain } = await openUncertain(fixture);
-    await fixture.authority.recordOutcome({
+    await fixture.lifecycle.recordOutcome({
       itemId: fixture.itemId,
       attempt: claim.attempt,
       responseBindingDigest: claim.responseBindingDigest,
@@ -515,7 +517,7 @@ describe(
       }),
     ]);
     const extra = requireSend(
-      await fixture.authority.claim({
+      await fixture.lifecycle.claim({
         itemId: fixture.itemId,
         outcomePolicy: { kind: "manual-resolution" },
       }),
@@ -529,15 +531,15 @@ describe(
   it.each([1, 2, 3])(
     "keeps automatic budget independent when risk acknowledgement opens at attempt %i",
     async (uncertainAt) => {
-      const fixture = await harness(3);
+      const fixture = await harness(3, 0);
       let claim = requireSend(
-        await fixture.authority.claim({
+        await fixture.lifecycle.claim({
           itemId: fixture.itemId,
           outcomePolicy: { kind: "manual-resolution" },
         }),
       );
       for (let ordinal = 1; ordinal < uncertainAt; ordinal += 1) {
-        await fixture.authority.recordOutcome({
+        await fixture.lifecycle.recordOutcome({
           itemId: fixture.itemId,
           attempt: claim.attempt,
           responseBindingDigest: claim.responseBindingDigest,
@@ -545,24 +547,23 @@ describe(
             kind: "failed",
             error: { code: "busy", message: "busy", retryable: true },
           },
-          retryDelayMs: 0,
         });
         claim = requireSend(
-          await fixture.authority.claim({
+          await fixture.lifecycle.claim({
             itemId: fixture.itemId,
             outcomePolicy: { kind: "manual-resolution" },
           }),
         );
       }
 
-      const opened = await fixture.authority.claim({
+      const opened = await fixture.lifecycle.claim({
         itemId: fixture.itemId,
         outcomePolicy: { kind: "manual-resolution" },
       });
       expect(opened.kind).toBe("uncertain");
       await resolve(fixture, "retry-risk-ack");
       let manual = requireSend(
-        await fixture.authority.claim({
+        await fixture.lifecycle.claim({
           itemId: fixture.itemId,
           outcomePolicy: { kind: "manual-resolution" },
         }),
@@ -578,7 +579,7 @@ describe(
       });
 
       for (;;) {
-        const decision = await fixture.authority.recordOutcome({
+        const decision = await fixture.lifecycle.recordOutcome({
           itemId: fixture.itemId,
           attempt: manual.attempt,
           responseBindingDigest: manual.responseBindingDigest,
@@ -586,11 +587,10 @@ describe(
             kind: "failed",
             error: { code: "busy", message: "busy", retryable: true },
           },
-          retryDelayMs: 0,
         });
         if (!decision.accepted || decision.state === "failed") break;
         manual = requireSend(
-          await fixture.authority.claim({
+          await fixture.lifecycle.claim({
             itemId: fixture.itemId,
             outcomePolicy: { kind: "manual-resolution" },
           }),
@@ -616,12 +616,12 @@ describe(
     const fixture = await harness(1);
     const { claim: first } = await openUncertain(fixture);
     await resolve(fixture, "retry-risk-ack");
-    const second = requireSend(await fixture.authority.claim({
+    const second = requireSend(await fixture.lifecycle.claim({
       itemId: fixture.itemId,
       outcomePolicy: { kind: "manual-resolution" },
     }));
 
-    await expect(fixture.authority.recordOutcome({
+    await expect(fixture.lifecycle.recordOutcome({
       itemId: fixture.itemId,
       attempt: first.attempt,
       responseBindingDigest: first.responseBindingDigest,
@@ -636,12 +636,12 @@ describe(
   it("row 15 keeps terminal items unchanged under late outcomes and resolutions", async () => {
     const fixture = await harness();
     const claim = requireSend(
-      await fixture.authority.claim({
+      await fixture.lifecycle.claim({
         itemId: fixture.itemId,
         outcomePolicy: { kind: "manual-resolution" },
       }),
     );
-    await fixture.authority.recordOutcome({
+    await fixture.lifecycle.recordOutcome({
       itemId: fixture.itemId,
       attempt: claim.attempt,
       responseBindingDigest: claim.responseBindingDigest,
@@ -649,7 +649,7 @@ describe(
     });
     const before = await fixture.authority.get(fixture.itemId);
     await expect(
-      fixture.authority.recordOutcome({
+      fixture.lifecycle.recordOutcome({
         itemId: fixture.itemId,
         attempt: claim.attempt,
         responseBindingDigest: claim.responseBindingDigest,
@@ -903,13 +903,14 @@ describe(
 
   it("keeps an in-flight response binding valid when the anchor migrates before uncertainty", async () => {
     const fixture = await harness();
-    const started = requireSend(await fixture.authority.claim({
+    const started = requireSend(await fixture.lifecycle.claim({
       itemId: fixture.itemId,
       outcomePolicy: { kind: "manual-resolution" },
     }));
     const migrated = new DeliveryAuthority({ log: fixture.log, anchorEpoch: 8 });
+    const migratedLifecycle = createDeliveryLifecycleTestBinding(migrated).application;
 
-    await expect(migrated.recordOutcome({
+    await expect(migratedLifecycle.recordOutcome({
       itemId: fixture.itemId,
       attempt: started.attempt,
       responseBindingDigest: started.responseBindingDigest,
@@ -919,13 +920,13 @@ describe(
 
   it("preserves an open uncertainty fact across an anchor epoch change", async () => {
     const fixture = await harness();
-    const started = await fixture.authority.claim({
+    const started = await fixture.lifecycle.claim({
       itemId: fixture.itemId,
       outcomePolicy: { kind: "manual-resolution" },
     });
     if (started.kind !== "send") throw new Error("fixture attempt did not start");
     fixture.setNow("2026-07-17T02:00:01.000Z");
-    const uncertain = await fixture.authority.claim({
+    const uncertain = await fixture.lifecycle.claim({
       itemId: fixture.itemId,
       outcomePolicy: { kind: "manual-resolution" },
     });
@@ -934,6 +935,7 @@ describe(
     }
 
     const migrated = new DeliveryAuthority({ log: fixture.log, anchorEpoch: 8 });
+    const migratedLifecycle = createDeliveryLifecycleTestBinding(migrated).application;
     await expect(migrated.statusHistory(fixture.itemId, 0)).resolves.toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -943,7 +945,7 @@ describe(
       ]),
     );
     await expect(
-      migrated.recordOutcome({
+      migratedLifecycle.recordOutcome({
         itemId: fixture.itemId,
         attempt: started.attempt,
         responseBindingDigest: started.responseBindingDigest,
@@ -1267,7 +1269,7 @@ describe(
   it("keeps a good projection snapshot after a failed transaction", async () => {
     const fixture = await harness();
     await expect(
-      fixture.authority.claim({
+      fixture.lifecycle.claim({
         itemId: fixture.itemId,
         outcomePolicy: { kind: "idempotent-redrive", windowMs: 0 },
       }),
@@ -1276,7 +1278,7 @@ describe(
       expect.objectContaining({ id: fixture.itemId, state: "queued" }),
     ]);
     await expect(
-      fixture.authority.claim({
+      fixture.lifecycle.claim({
         itemId: fixture.itemId,
         outcomePolicy: { kind: "manual-resolution" },
       }),
@@ -1316,7 +1318,7 @@ describe(
       return transaction;
     };
     await expect(
-      fixture.authority.claim({
+      fixture.lifecycle.claim({
         itemId: fixture.itemId,
         outcomePolicy: { kind: "manual-resolution" },
       }),
@@ -1362,7 +1364,7 @@ describe(
   it("rejects sibling lifecycle transitions during cold replay", async () => {
     const earlyFailed = await harness(3);
     const claim = requireSend(
-      await earlyFailed.authority.claim({
+      await earlyFailed.lifecycle.claim({
         itemId: earlyFailed.itemId,
         outcomePolicy: { kind: "manual-resolution" },
       }),
@@ -1382,7 +1384,7 @@ describe(
 
     const premature = await harness(3);
     const idempotent = requireSend(
-      await premature.authority.claim({
+      await premature.lifecycle.claim({
         itemId: premature.itemId,
         outcomePolicy: { kind: "idempotent-redrive", windowMs: 10_000 },
       }),
@@ -1589,13 +1591,13 @@ describe(
 
   it("validates a transport outcome before appending it", async () => {
     const fixture = await harness();
-    const claim = requireSend(await fixture.authority.claim({
+    const claim = requireSend(await fixture.lifecycle.claim({
       itemId: fixture.itemId,
       outcomePolicy: { kind: "manual-resolution" },
     }));
     const before = (await fixture.log.readAll()).length;
 
-    await expect(fixture.authority.recordOutcome({
+    await expect(fixture.lifecycle.recordOutcome({
       itemId: fixture.itemId,
       attempt: claim.attempt,
       responseBindingDigest: claim.responseBindingDigest,

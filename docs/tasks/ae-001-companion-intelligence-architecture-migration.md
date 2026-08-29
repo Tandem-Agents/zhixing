@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-02 已通过独立验收，等待纳入提交；Delivery 领域仍未完成<br>
+> 当前检查点：A5-03 已通过协调者独立复核，等待提交；Delivery accepted-work/lifecycle 与 Channel effect 尚未归位<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,10 +202,10 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `b9e6a30d + A5-02 accepted worktree`；A0～A4 与 A5-01 已提交，A5-02 已通过协调者独立复核并等待纳入提交 |
+| 已接受基线 | `c8220440 + A5-03 accepted worktree`；A0～A4 与 A5-01～A5-03 已通过协调者独立复核，其中 A5-03 等待提交 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | 无；A5-02 已通过协调者独立验收，等待提交 |
-| 下一责任链 | A5-02 验收后，沿同一 Delivery 责任链迁移终态推进，再单独收束 Channel effect；不得提前跨入其他领域 |
+| 活跃工作包 | 无；A5-03 已验收，等待协调者提交完整责任链 |
+| 下一责任链 | 继续收束 Delivery accepted-work/lifecycle；Channel effect 留在后续独立责任链，不得提前跨入其他领域 |
 | 打开的单向桥 | 无；Skill 管理、保存、admission、load/usage、Kernel 与 Executor 投影均只经 `@zhixing/core/skills/catalog` 及既有 Authority/CAS/assignment Correctness 端口成立，旧 writable Store 不再承担正式应用行为 |
 | 已失效证据 | 无当前未恢复证据；A4-10 已恢复 A4-07/A4-08 的包级产品无知结论，A4 全部合同与退出证据当前有效 |
 | 阻塞/用户决策 | 无 |
@@ -1738,6 +1738,27 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据：领域 application/Authority 2 文件 46/46，owner participant/Scheduler notice 2 文件 14/14，Conversation/Job 真实 assignment ledger 2 文件 442/442，Anchor Delivery 组合与恢复 1 文件 3/3，合计 7 文件 505/505。依赖顺序的 core、owner-kernel、executor 与 CLI 构建通过，CLI `tsc --noEmit`、canonical `pnpm s7:lint` 30/30 与 registry golden、fresh `pnpm runtime:package-exports`、最窄 Biome 和 `git diff --check` 通过；S7 反向 mutation 可识别 participant 直调 Authority、root barrel 回流和 producer 漏改绑。
 - 交接与失效：A5-02 完成，等待协调者独立复核；A5 与 Delivery 行继续为 `[ ]`。Delivery application/Authority enqueue 签名、participant 八类来源映射、Conversation/Job/Scheduler producer、Anchor participant 组合、owner-kernel delivery subpath、S7/exports 或相关持久/恢复合同变化时，本记录失效并只重验上述闭包。下一检查点由协调者沿 Delivery 的 attempt/retry/uncertain/terminal 与 Channel effect 剩余责任选择最窄工作包，不得把本包扩大为整个 Delivery 迁移。
 - 协调者独立验收：从 Delivery application、Authority projection/fence、owner-kernel Correctness adapter、八条 producer 映射、两个 Anchor generation 与真实 Conversation/Job/Scheduler 消费端正反核对，确认领域拥有 retry/route/content/unique-index 入队决定，Correctness 只提供串行、投影、生命周期 binding 与同提交机制，participant 不再持有 Authority 或第二决定。独立完成 core/owner-kernel fresh build、Delivery application/participant/Scheduler/真实 CLI 组合 21/21、CLI typecheck、canonical S7 30/30、registry golden、fresh package exports 与 `git diff --check`；结合本包同基线 505/505 生产闭包证据，未发现旧直调、双写、持久格式或恢复语义漂移。接受 `A5-02-delivery-obligation-application-v1`；Delivery 的 attempt/retry/terminal 与 Channel effect 尚未迁移，因此 Delivery 行和 A5 继续为 `[ ]`。
+
+### A5-03：归位 Delivery 尝试、重试与终态决定边界
+
+- 派发基线：`HEAD c8220440 + task-doc:A5-03-dispatch`；A5-02 已由协调者独立复核并提交，派发前索引与工作区为空。
+- 唯一架构结果：Delivery 领域应用拥有从 ready item 到 attempt claim、unknown/uncertain、永久 preflight failure、sent/retry/failed 终态的全部状态决定；Authority/Correctness 只提供串行投影事务、时间与 anchor fence，现有 pipeline 只驱动领域应用并执行 transport/content/event 效果，不再直接拥有或调用 Authority 业务决定。
+- 生产闭包：正反追踪 `AuthorityDeliveryPipeline → DeliveryAuthority.claim/recordPreflightFailure/recordOutcome` 及 queue/recovery 的真实链，把 outcome policy、attempt authorization、response binding、receipt、automatic-attempt budget、backoff、unknown redrive/manual-resolution、status revision/notice 和冷启动重放规则归入唯一 Delivery 应用边界。保持 send 前耐久 claim、响应丢失、幂等 redrive、stale/mismatched outcome 拒绝、retry deadline、uncertain 人工裁决衔接和所有事件投影完全等价。
+- 旧路与门禁：pipeline 不得持有或取得用于 claim/outcome 决定的 DeliveryAuthority 实现对象；`claim`、`recordPreflightFailure`、`recordOutcome` 的生产直接 consumer 只能是窄 Correctness adapter，Authority 不得继续内置相同状态分支。禁止兼容回调、第二 lifecycle application、双写、旧方法旁路或仅改名；结构证据必须能识别任一决定回流 Authority/pipeline、应用重复、根/barrel 泄漏和生产 consumer 漏改绑。
+- 明确不做：不改变 transport resolve/readiness/send、content materialization、event bus、Channel sender/adapter、pipeline Host lifecycle、accepted-work transfer 或其他领域；不改变 outcome policy、重试次数/延迟、持久 record、公开 RPC/Event、用户文案和 uncertain-resolution A5-01 合同，不执行 A6 边缘收束。
+- 直接证据：覆盖 queued/retry-wait claim、attempting restart 的 idempotent redrive 与 manual uncertain、缺 transport/policy skip、永久 content failure、sent receipt、retryable/non-retryable failure、attempt budget、binding/epoch/revision fence、response loss、cold replay、notice/event exact-set；反向证明 pipeline 无 Authority 决定直调且旧分支归零。只运行 Delivery application/authority/pipeline/queue/integration 的直接测试、必要依赖顺序构建、canonical S7、fresh package exports、最窄格式和 `git diff --check`，不重复 producer、根级回归或制品验收。
+- 完成与止损：只有 attempt、retry、unknown 与 terminal 规则由一个 Delivery 应用入口闭合，Authority/pipeline 各自只剩机制和效果职责，旧决定路径归零且现有行为证据通过，才算完成。预计超过四小时、出现两个可独立失败的未知、必须改变产品/持久语义、无法保持 send 前 claim 或响应丢失终态，或影响面扩到 Channel/accepted-work 时，停在可构建、可运行、单一真相成立的安全检查点反馈；不得顺带完成整个 Delivery。
+- 执行基线与边界：`HEAD c82204409138e5b71e8e049f9b4db4151518420f + task-doc:A5-03-dispatch + A5-03-delivery-lifecycle-application-v1`；只迁移 ready item 到 attempt/unknown/retry/terminal 的决定 owner，没有改变 producer、transport/content/event effect、Channel、accepted-work lifecycle、持久 record、公开 RPC/Event 或 A5-01 uncertain-resolution Product API。
+- 领域决定与 Correctness：`@zhixing/core/delivery/application` 新增唯一 `DeliveryLifecycleApplicationService`，集中 queued/retry-wait admission、automatic/manual authorization、unknown redrive/manual uncertain、response binding、永久 preflight failure、receipt、attempt budget、指数 backoff、sent/retry/failed、status revision 与 notice 结果；共用的 authorization/failure/unknown policy 位于 Delivery 私有 `lifecycle-policy.ts`，Authority reducer只复用其规则校验持久记录，不再复制应用分支。`DeliveryAuthority` 的 `claim/recordPreflightFailure/recordOutcome` 业务入口和对应公共 barrel types 已删除，只保留 `transactDeliveryLifecycle` 串行机制，向窄 Correctness adapter 提供克隆投影、authority transaction time、anchor epoch、record 校验与单次耐久 append。
+- Pipeline、投影与旧路清理：`@zhixing/owner-kernel/delivery` 的 `createOwnerDeliveryLifecycleBinding` 是唯一生产 Correctness 适配，分别发放领域 application 与只读 projection；`setupDelivery` 只在唯一 Anchor 组合根构造该 binding。`AuthorityDeliveryPipeline` 只调用 application 并执行 transport resolve/readiness/send、content materialization 和 event emit，queue/stats/accepted-work 只消费 projection port；pipeline 已不持有 `DeliveryAuthority`，retry delay 也从 effect-driver config 收回领域应用。`AuthorityDeliveryQueue` 改为只读 projection source，旧 Authority 直接决定、兼容 callback、第二 application、双写和根/barrel 回流均归零。
+- 行为与恢复保护：send 前 `attempt-started` 仍先耐久提交；transport response loss 仍不伪造 outcome，冷启动由相同 attempt policy 决定 idempotent redrive 或 durable uncertain。缺 transport/outcome policy 继续 skip，永久 content failure 仍原子写 attempt+failed，retry deadline 仍取 Authority commit time，manual risk-ack 与 automatic budget 独立，stale attempt、错误 binding、late uncertain outcome 和 epoch/revision fence 均 fail closed；sent receipt、retry/failed/uncertain notice 与事件 exact-set、Host lifecycle 和恢复投影未改。
+- 直接证据与门禁：Delivery application/Authority、pipeline、queue/outbox integration 共 5 文件 89/89，owner-kernel 真实 Correctness/control 1 文件 7/7，CLI 真实 setup 1 文件 3/3，合计 7 文件 99/99；覆盖 queued/retry claim、manual/idempotent unknown、preflight permanent failure、receipt、retryable/non-retryable、budget、binding/epoch/revision、response loss、cold replay、notice/event。core、owner-kernel、CLI 依赖顺序 build 与 CLI `tsc --noEmit` 通过；canonical `pnpm s7:lint` 为 30/30 且 registry golden 通过，fresh `pnpm runtime:package-exports`、最窄 Biome 与 `git diff --check` 通过。S7/exports 反向 mutation 能识别 pipeline 恢复 Authority 决定、Authority 恢复 claim/outcome 分支、Correctness adapter 漏绑、私有 policy 漂移、application 根/barrel 泄漏和第二 export。
+- 交接与失效：A5-03 实施完成，等待协调者独立复核；A5 与 Delivery 行继续为 `[ ]`。Delivery lifecycle application/policy、Authority transaction/reducer、owner-kernel binding、pipeline/queue/setup、transport outcome policy、status notice/event、S7/exports 或相关持久/恢复合同变化时，本记录失效并只重验上述闭包。协调者接受后再选择 Delivery accepted-work/lifecycle 与 Channel effect 的最窄后续责任链；本包未进入该边界、其他领域或 A6，也未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立复核纠正：状态迁移、响应丢失与恢复链的判别性验证成立，但领域应用仍直接导入 `AuthorityStorageError`，且统一承载 resolution/obligation/lifecycle 三类用例的源码和制品仍命名为 `resolution-application`；这两项分别违反 Domain 只依赖 Correctness port 的依赖方向和当前真实职责命名。A5-03 暂不接受，须在原包内移除实现错误依赖并把唯一应用入口收敛为职责一致的 `delivery/application` 源码与制品，保持公开 subpath、错误语义和全部现有行为不变后重验失效闭包。
+- 纠正实施与错误边界：Delivery application 已删除对 `../authority` 与 `AuthorityStorageError` 的依赖，投影违反领域生命周期不变量时只产生有限 `DeliveryProjectionInvariantError`；唯一生产 Correctness adapter 在 `transactDeliveryLifecycle` 的决定回调边界把该信号映射为 `AuthorityStorageError("commit-log-corrupt", ..., { cause })`，投影校验和状态规则仍由领域 application 持有，Authority 仍只负责串行投影、record 校验与耐久 append。直接反例分别证明领域信号不泄漏 Correctness 实现，以及生产 adapter 保持原 `commit-log-corrupt` code/message/reason 语义并保留 cause；未改成普通 Error、未把规则移回 Authority、未形成第二状态机。
+- 唯一 application 源码与制品：统一承载 uncertain resolution、obligation、lifecycle 的唯一实现和测试已从 resolution-only 名称收敛为 `packages/core/src/delivery/application.ts` / `application.test.ts`；公开 subpath 仍为 `@zhixing/core/delivery/application`，其 package export、tsup entry 与 fresh declaration/runtime target 唯一指向 `dist/delivery/application.{d.ts,js}`。旧 `resolution-application` source/test/build/dist target 与兼容转导均归零；fresh build 会清除旧制品，package-export gate 显式拒绝旧 dist 文件，S7 反向 mutation 可识别旧 source、旧 build/manifest target、根/barrel 第二入口、Domain→Authority 依赖和 Correctness 错误映射丢失。
+- 纠正验证与状态：本次失效闭包为 core application/authority/pipeline 3 文件 82/82、owner-kernel 真实 Correctness/control 1 文件 8/8，合计 4 文件 90/90；core 与 owner-kernel fresh build 通过，fresh `pnpm runtime:package-exports` 通过，canonical `pnpm s7:lint` 为 30/30 且 registry golden 通过，最窄 Biome 与 `git diff --check` 通过。A5-03 纠正实施完成，等待协调者独立复核；A5 与 Delivery 行继续为 `[ ]`，producer、Channel、accepted-work 与后续 Delivery 责任均未进入，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：从统一 application、Authority 事务机制、owner-kernel Correctness 翻译、pipeline/queue 与 CLI 组合根正反核对，确认领域投影不变量只以有限领域信号跨端口，原 `commit-log-corrupt` code/message/cause 在唯一生产适配器恢复；旧 `resolution-application` source/test/build/dist 与兼容入口均归零，公开 subpath 唯一指向职责一致的 `delivery/application`。独立完成 core fresh build与 82/82、owner-kernel fresh build与 8/8、CLI 真实组合 3/3及 typecheck、canonical S7 30/30、registry golden、fresh package exports、旧 dist 缺失检查和 `git diff --check`，全部通过；接受 `A5-03-delivery-lifecycle-application-v1`。Delivery accepted-work/lifecycle 与 Channel effect 尚未迁移，因此 Delivery 行和 A5 继续为 `[ ]`。
 
 ## 十、用户提示词
 

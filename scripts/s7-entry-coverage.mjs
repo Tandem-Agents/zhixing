@@ -2788,10 +2788,19 @@ export function inspectSkillCatalogApplicationOwnership(records) {
 
   const application = required("packages/core/src/skills/catalog-application.ts");
   const deliveryApplication = required(
-    "packages/core/src/delivery/resolution-application.ts",
+    "packages/core/src/delivery/application.ts",
   );
+  if (byPath.has("packages/core/src/delivery/resolution-application.ts")) {
+    failures.push("Delivery resolution-only source path remains alongside the canonical application");
+  }
   const deliveryIndex = required("packages/core/src/delivery/index.ts");
   const deliveryAuthority = required("packages/core/src/delivery/authority.ts");
+  const deliveryPipeline = required(
+    "packages/core/src/delivery/authority-pipeline.ts",
+  );
+  const deliveryLifecyclePolicy = required(
+    "packages/core/src/delivery/lifecycle-policy.ts",
+  );
   const deliveryControl = required("packages/owner-kernel/src/delivery-control.ts");
   const deliveryObligationCorrectness = required(
     "packages/owner-kernel/src/delivery-obligation-correctness.ts",
@@ -2964,13 +2973,17 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     );
   if (
     deliveryApplicationExport?.types !==
-      "./dist/delivery/resolution-application.d.ts" ||
+      "./dist/delivery/application.d.ts" ||
     deliveryApplicationExport?.import !==
-      "./dist/delivery/resolution-application.js" ||
+      "./dist/delivery/application.js" ||
     duplicateDeliveryApplicationExports.length > 0 ||
-    coreBuild.split('"src/delivery/resolution-application.ts"').length - 1 !== 1 ||
-    coreIndex.includes("resolution-application") ||
-    deliveryIndex.includes("resolution-application")
+    coreBuild.split('"src/delivery/application.ts"').length - 1 !== 1 ||
+    coreBuild.includes("resolution-application") ||
+    coreIndex.includes("delivery/application") ||
+    deliveryIndex.includes("./application.js") ||
+    deliveryApplication.includes("../authority/") ||
+    deliveryApplication.includes("AuthorityStorageError") ||
+    !deliveryApplication.includes("class DeliveryProjectionInvariantError")
   ) {
     failures.push("Delivery application must have one narrow non-root core subpath");
   }
@@ -3261,11 +3274,59 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !deliveryApplication.includes("DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET") ||
     !deliveryApplication.includes("facts: []") ||
     deliveryApplication.includes("DeliveryAuthority") ||
-    deliveryApplication.includes("ControlAdmissionJournal") ||
-    deliveryApplication.includes("DeliveryStatusNotice")
+    deliveryApplication.includes("ControlAdmissionJournal")
   ) {
     failures.push(
       "Delivery domain does not uniquely own its finite uncertain-resolution application command",
+    );
+  }
+  const deliveryLifecycleTransactionConsumers = records
+    .filter((record) => record.text.includes(".transactDeliveryLifecycle"))
+    .map((record) => record.relative);
+  if (
+    !deliveryApplication.includes("interface DeliveryLifecycleApplication") ||
+    !deliveryApplication.includes("class DeliveryLifecycleApplicationService") ||
+    !deliveryApplication.includes("deliveryUnknownOutcomeDisposition(") ||
+    !deliveryApplication.includes("deliveryFailureDisposition(") ||
+    !deliveryApplication.includes("deliveryDeadlineAt(") ||
+    !deliveryApplication.includes("responseBindingDigest") ||
+    !deliveryLifecyclePolicy.includes("deliveryAttemptAuthorizationMatches") ||
+    !deliveryLifecyclePolicy.includes("deliveryUnknownOutcomeDisposition") ||
+    !deliveryLifecyclePolicy.includes("deliveryFailureDisposition") ||
+    !deliveryAuthority.includes("transactDeliveryLifecycle<Value>") ||
+    /\basync\s+(?:claim|recordPreflightFailure|recordOutcome)\s*\(/u.test(deliveryAuthority) ||
+    deliveryAuthority.includes("function makeAttemptStarted(") ||
+    deliveryAuthority.includes("function deliveryFailureDisposition(") ||
+    deliveryAuthority.includes("function deliveryUnknownOutcomeDisposition(") ||
+    !deliveryObligationCorrectness.includes("createOwnerDeliveryLifecycleBinding") ||
+    !deliveryObligationCorrectness.includes("authority.transactDeliveryLifecycle<Value>") ||
+    !deliveryObligationCorrectness.includes("DeliveryProjectionInvariantError") ||
+    !deliveryObligationCorrectness.includes(
+      'new AuthorityStorageError("commit-log-corrupt", error.message',
+    ) ||
+    !deliveryObligationCorrectness.includes("cause: error") ||
+    deliveryLifecycleTransactionConsumers.length !== 1 ||
+    deliveryLifecycleTransactionConsumers[0] !==
+      "packages/owner-kernel/src/delivery-obligation-correctness.ts" ||
+    deliveryPipeline.includes("DeliveryAuthority") ||
+    deliveryPipeline.includes("readonly authority:") ||
+    /#authority\.(?:claim|recordPreflightFailure|recordOutcome)\s*\(/u.test(
+      deliveryPipeline,
+    ) ||
+    !deliveryPipeline.includes("readonly application: DeliveryLifecycleApplication") ||
+    !deliveryPipeline.includes("readonly projection: DeliveryLifecycleProjectionPort") ||
+    !deliveryPipeline.includes("this.#application.claim(") ||
+    !deliveryPipeline.includes("this.#application.recordPreflightFailure(") ||
+    !deliveryPipeline.includes("this.#application.recordOutcome(") ||
+    deliveryPipeline.includes("baseRetryDelayMs") ||
+    !setupDelivery.includes("createOwnerDeliveryLifecycleBinding") ||
+    !setupDelivery.includes("application: deliveryLifecycle.application") ||
+    !setupDelivery.includes("projection: deliveryLifecycle.projection") ||
+    deliveryIndex.includes("DeliveryLifecycleApplication") ||
+    coreIndex.includes("DeliveryLifecycleApplication")
+  ) {
+    failures.push(
+      "Delivery attempt lifecycle does not have one domain application and one narrow Correctness transaction",
     );
   }
   if (
@@ -3306,9 +3367,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !deliveryAuthority.includes("return decide(this.#enqueueProjection") ||
     ownerKernelIndex.includes("delivery-obligation-correctness") ||
     !ownerKernelDelivery.includes("delivery-obligation-correctness") ||
-    !setupDelivery.includes(
-      'createOwnerDeliveryParticipant } from "@zhixing/owner-kernel/delivery"',
-    ) ||
+    !setupDelivery.includes("createOwnerDeliveryParticipant,") ||
     setupDelivery.includes("ownerRuntime!.createOwnerDeliveryParticipant") ||
     setupDelivery.includes("ownerRuntime.createOwnerDeliveryParticipant")
   ) {

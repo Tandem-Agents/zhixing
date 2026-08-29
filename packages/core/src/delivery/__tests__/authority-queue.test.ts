@@ -8,7 +8,7 @@ describe("AuthorityDeliveryQueue projection", () => {
   it("rebuilds queued items from the authority log", async () => {
     const fixture = await createDeliveryTestHarness();
     await fixture.enqueue();
-    const queue = new AuthorityDeliveryQueue({ authority: fixture.authority });
+    const queue = new AuthorityDeliveryQueue({ source: fixture.lifecycleProjection });
 
     await expect(queue.load()).resolves.toBe(1);
     expect(queue.getReady(fixture.now())).toHaveLength(1);
@@ -19,7 +19,7 @@ describe("AuthorityDeliveryQueue projection", () => {
     const created = await fixture.enqueue();
     if (!created.accepted) throw new Error("fixture enqueue failed");
     const itemId = created.items[0]!.itemId;
-    const queue = new AuthorityDeliveryQueue({ authority: fixture.authority });
+    const queue = new AuthorityDeliveryQueue({ source: fixture.lifecycleProjection });
     await queue.load();
 
     expect("enqueue" in queue).toBe(false);
@@ -32,18 +32,18 @@ describe("AuthorityDeliveryQueue projection", () => {
     const created = await fixture.enqueue();
     if (!created.accepted) throw new Error("fixture enqueue failed");
     const itemId = created.items[0]!.itemId;
-    const claim = await fixture.authority.claim({
+    const claim = await fixture.lifecycle.claim({
       itemId,
       outcomePolicy: { kind: "manual-resolution" },
     });
     if (claim.kind !== "send") throw new Error("fixture claim failed");
-    await fixture.authority.recordOutcome({
+    await fixture.lifecycle.recordOutcome({
       itemId,
       attempt: claim.attempt,
       responseBindingDigest: claim.responseBindingDigest,
       outcome: { kind: "sent" },
     });
-    const queue = new AuthorityDeliveryQueue({ authority: fixture.authority });
+    const queue = new AuthorityDeliveryQueue({ source: fixture.lifecycleProjection });
 
     await queue.load();
     expect(queue.all[0]?.state).toBe("sent");
@@ -56,15 +56,15 @@ describe("AuthorityDeliveryQueue projection", () => {
     const created = await fixture.enqueue();
     if (!created.accepted) throw new Error("fixture enqueue failed");
     const itemId = created.items[0]!.itemId;
-    await fixture.authority.claim({
+    await fixture.lifecycle.claim({
       itemId,
       outcomePolicy: { kind: "manual-resolution" },
     });
-    await fixture.authority.claim({
+    await fixture.lifecycle.claim({
       itemId,
       outcomePolicy: { kind: "manual-resolution" },
     });
-    const queue = new AuthorityDeliveryQueue({ authority: fixture.authority });
+    const queue = new AuthorityDeliveryQueue({ source: fixture.lifecycleProjection });
 
     await queue.load();
     expect(queue.pending[0]?.state).toBe("uncertain");

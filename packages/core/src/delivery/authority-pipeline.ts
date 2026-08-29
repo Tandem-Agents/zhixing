@@ -8,11 +8,13 @@ import type {
 } from "../contracts/index.js";
 import type { IEventBus } from "../events/index.js";
 import { byteDigest, canonicalize } from "../protocol/index.js";
-import {
-  DeliveryAuthority,
-} from "./authority.js";
 import { validateOutboundContentDto } from "./content-schema.js";
 import { AuthorityDeliveryQueue } from "./authority-queue.js";
+import type {
+  DeliveryAttemptClaim,
+  DeliveryLifecycleApplication,
+  DeliveryLifecycleProjectionPort,
+} from "./application.js";
 import type {
   AuthorityDeliveryEventMap,
   AuthorityDeliveryItem,
@@ -30,17 +32,16 @@ import {
 } from "./transport-contract.js";
 
 export interface AuthorityDeliveryPipelineConfig {
-  readonly baseRetryDelayMs: number;
   readonly flushIntervalMs: number;
 }
 
 export const DEFAULT_AUTHORITY_DELIVERY_CONFIG: AuthorityDeliveryPipelineConfig = {
-  baseRetryDelayMs: 5_000,
   flushIntervalMs: 30_000,
 };
 
 export interface AuthorityDeliveryPipelineDeps {
-  readonly authority: DeliveryAuthority;
+  readonly application: DeliveryLifecycleApplication;
+  readonly projection: DeliveryLifecycleProjectionPort;
   readonly artifacts: ArtifactStore;
   readonly eventBus: IEventBus<AuthorityDeliveryEventMap>;
   readonly config: AuthorityDeliveryPipelineConfig;
@@ -65,7 +66,8 @@ type PipelineState = "unstarted" | "prepared" | "running" | "quiesced" | "stoppe
 
 /** Drains authority facts; it cannot create, delete, or rewrite delivery items. */
 export class AuthorityDeliveryPipeline {
-  readonly #authority: DeliveryAuthority;
+  readonly #application: DeliveryLifecycleApplication;
+  readonly #projection: DeliveryLifecycleProjectionPort;
   readonly #artifacts: ArtifactStore;
   readonly #queue: AuthorityDeliveryQueue;
   readonly #transport: DeliveryTransport;
@@ -85,11 +87,11 @@ export class AuthorityDeliveryPipeline {
     if (!deps.transport && !deps.sender) {
       throw new TypeError("Delivery pipeline requires a transport adapter");
     }
-    assertNonNegativeMs(deps.config.baseRetryDelayMs, "Delivery retry delay");
     assertTimerIntervalMs(deps.config.flushIntervalMs);
-    this.#authority = deps.authority;
+    this.#application = deps.application;
+    this.#projection = deps.projection;
     this.#artifacts = deps.artifacts;
-    this.#queue = new AuthorityDeliveryQueue({ authority: deps.authority });
+    this.#queue = new AuthorityDeliveryQueue({ source: deps.projection });
     this.#transport = deps.transport ?? singleDeliveryTransport(
       channelAuthorityDeliveryTransport(deps.sender!),
     );
@@ -139,7 +141,7 @@ export class AuthorityDeliveryPipeline {
   }
 
   acceptedWorkItems(): readonly { readonly id: string; readonly revision: string }[] {
-    return Object.freeze(this.#authority.snapshot()
+    return Object.freeze(this.#projection.snapshot()
       .filter((item) =>
         item.state === "queued" ||
         item.state === "retry-wait" ||
@@ -182,9 +184,9 @@ export class AuthorityDeliveryPipeline {
     try {
       while (true) {
         await this.flush();
-        const pending = await this.#authority.lifecycleAcceptedWorkItems(operationId);
+        const pending = await this.#projection.lifecycleAcceptedWorkItems(operationId);
         if (pending.length === 0) return;
-        const uncertain = this.#authority.snapshot().find((item) => item.state === "uncertain");
+        const uncertain = this.#projection.snapshot().find((item) => item.state === "uncertain");
         if (uncertain) {
           throw new Error(
             `Delivery ${uncertain.id} has an uncertain outcome that requires the existing user decision`,
@@ -237,7 +239,7 @@ export class AuthorityDeliveryPipeline {
   }
 
   stats(): AuthorityDeliveryStats {
-    const items = this.#authority.snapshot();
+    const items = this.#projection.snapshot();
     return {
       pending: items.filter((item) =>
         item.state === "queued" ||
@@ -325,7 +327,7 @@ export class AuthorityDeliveryPipeline {
     }
     if (permanentContentFailure) {
       const error = contentFailure();
-      const result = await this.#authority.recordPreflightFailure({
+      const result = await this.#application.recordPreflightFailure({
         itemId: item.id,
         outcomePolicy: outcomePolicy!,
         error,
@@ -342,7 +344,7 @@ export class AuthorityDeliveryPipeline {
       }
       return;
     }
-    const claim = await this.#authority.claim({
+    const claim = await this.#application.claim({
       itemId: item.id,
       ...(outcomePolicy ? { outcomePolicy } : {}),
     });
@@ -403,7 +405,7 @@ export class AuthorityDeliveryPipeline {
                 : {}),
             }
           : undefined;
-        const decision = await this.#authority.recordOutcome({
+        const decision = await this.#application.recordOutcome({
           itemId: claim.item.id,
           attempt: claim.attempt,
           responseBindingDigest: claim.responseBindingDigest,
@@ -438,15 +440,14 @@ export class AuthorityDeliveryPipeline {
   }
 
   async #recordFailure(
-    claim: import("./authority.js").DeliveryAttemptClaim,
+    claim: DeliveryAttemptClaim,
     error: DeliveryFailure,
   ): Promise<void> {
-    const decision = await this.#authority.recordOutcome({
+    const decision = await this.#application.recordOutcome({
       itemId: claim.item.id,
       attempt: claim.attempt,
       responseBindingDigest: claim.responseBindingDigest,
       outcome: { kind: "failed", error },
-      ...(error.retryable ? { retryDelayMs: this.#config.baseRetryDelayMs } : {}),
     });
     if (!decision.accepted) return;
     if (decision.retryAt) {

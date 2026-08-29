@@ -36,7 +36,7 @@ const [
 ] = await Promise.all([
   import("../packages/core/dist/index.js"),
   import("../packages/core/dist/skills/catalog-application.js"),
-  import("../packages/core/dist/delivery/resolution-application.js"),
+  import("../packages/core/dist/delivery/application.js"),
   import("../packages/core/dist/product-api/catalog.js"),
   import("../packages/core/dist/authority/index.js"),
   import("../packages/core/dist/persistence/index.js"),
@@ -609,24 +609,42 @@ async function verifyCorePackageExports(failures) {
   if (
     !deliveryApplicationConditions ||
     deliveryApplicationConditions.types !==
-      "./dist/delivery/resolution-application.d.ts" ||
+      "./dist/delivery/application.d.ts" ||
     deliveryApplicationConditions.import !==
-      "./dist/delivery/resolution-application.js" ||
+      "./dist/delivery/application.js" ||
     typeof coreDeliveryApplication.DeliveryUncertainResolutionApplicationService !==
       "function" ||
     typeof coreDeliveryApplication.DeliveryObligationApplicationService !==
       "function" ||
+    typeof coreDeliveryApplication.DeliveryLifecycleApplicationService !==
+      "function" ||
+    typeof coreDeliveryApplication.DeliveryProjectionInvariantError !== "function" ||
     typeof coreDeliveryApplication.createDeliveryResolutionProductApiContribution !==
       "function" ||
     "DeliveryUncertainResolutionApplicationService" in coreRoot ||
     "DeliveryObligationApplicationService" in coreRoot ||
+    "DeliveryLifecycleApplicationService" in coreRoot ||
+    "DeliveryProjectionInvariantError" in coreRoot ||
     "createDeliveryResolutionProductApiContribution" in coreRoot
   ) {
     failures.push("core-exports:delivery-application:invalid-runtime-boundary");
   }
+  for (const retiredTarget of [
+    "dist/delivery/resolution-application.d.ts",
+    "dist/delivery/resolution-application.js",
+  ]) {
+    try {
+      await access(new URL(retiredTarget, packageRoot));
+      failures.push(`core-exports:delivery-application:retired-target:${retiredTarget}`);
+    } catch {
+      // A fresh build must leave no resolution-only compatibility artifact.
+    }
+  }
   if (
     typeof ownerKernelDelivery.createOwnerDeliveryParticipant !== "function" ||
-    "createOwnerDeliveryParticipant" in ownerKernel
+    typeof ownerKernelDelivery.createOwnerDeliveryLifecycleBinding !== "function" ||
+    "createOwnerDeliveryParticipant" in ownerKernel ||
+    "createOwnerDeliveryLifecycleBinding" in ownerKernel
   ) {
     failures.push("owner-kernel-exports:delivery-obligation:invalid-runtime-boundary");
   }

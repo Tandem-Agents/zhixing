@@ -103,7 +103,10 @@ import type {
   JobAssignmentCredentialPolicy,
   GlobalMutationCommitParticipant,
 } from "@zhixing/owner-kernel";
-import { createOwnerDeliveryParticipant } from "@zhixing/owner-kernel/delivery";
+import {
+  createOwnerDeliveryLifecycleBinding,
+  createOwnerDeliveryParticipant,
+} from "@zhixing/owner-kernel/delivery";
 import type { ExecutorResourceGovernor } from "@zhixing/executor";
 import {
   DeviceKey,
@@ -2387,11 +2390,15 @@ export async function setupDelivery(
         onResolved: (notice) => eventBus.emit("delivery:notice", { notice }),
       }),
     );
+    const deliveryLifecycle = createOwnerDeliveryLifecycleBinding({
+      authority: options.authorityRuntime.authority,
+    });
 
     // 权威 Pipeline 只消费已提交事实；conversation 生产入口在 owner commit。
     const buildAuthorityDelivery = async () => {
       const pipeline = new AuthorityDeliveryPipeline({
-        authority: options.authorityRuntime.authority,
+        application: deliveryLifecycle.application,
+        projection: deliveryLifecycle.projection,
         artifacts,
         transport: transports,
         eventBus,

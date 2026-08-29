@@ -8,6 +8,7 @@ import type { OutboxDoSend, OutboxEvent } from "../outbox-types.js";
 import { AuthorityDeliveryPipeline } from "../authority-pipeline.js";
 import type { AuthorityDeliveryEventMap } from "../types.js";
 import {
+  createDeliveryLifecycleTestBinding,
   createDeliveryTestHarness,
   deliveryTestInput,
 } from "./delivery-test-harness.js";
@@ -22,6 +23,9 @@ async function integrationHarness(
   logs: unknown[] = [],
 ) {
   const fixture = await createDeliveryTestHarness();
+  const lifecycle = createDeliveryLifecycleTestBinding(fixture.authority, {
+    baseRetryDelayMs: 1_000,
+  });
   const registry = new OutboxRegistry(send, {
     onEvent: (event) => events.push(event),
     sendTimeoutMs: 0,
@@ -33,11 +37,12 @@ async function integrationHarness(
     },
   });
   const pipeline = new AuthorityDeliveryPipeline({
-    authority: fixture.authority,
+    application: lifecycle.application,
+    projection: lifecycle.projection,
     artifacts: fixture.artifacts,
     sender: createOutboxSender(registry, { isReady: () => true }),
     eventBus: createEventBus<AuthorityDeliveryEventMap>(),
-    config: { baseRetryDelayMs: 1_000, flushIntervalMs: 0 },
+    config: { flushIntervalMs: 0 },
     now: fixture.now,
   });
   await pipeline.start();
