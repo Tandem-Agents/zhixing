@@ -18,6 +18,7 @@ import {
   inspectKernelRunEnvelopeOwnership,
   inspectKernelRunEventOwnership,
   inspectKernelTerminalOwnership,
+  inspectAgentRuntimeSecurityEncapsulation,
   inspectLocalConversationOwnerIsolation,
   inspectManagedHostAssembly,
   inspectPlannedAnchorTransferAssembly,
@@ -2575,6 +2576,69 @@ test("Kernel terminals have one finite owner, zero-copy artifact transfer and th
       (text) => `${text}\nexport { type KernelTerminal } from "./runtime/index.js";`,
     )).join("\n"),
     /leaked through the package root/,
+  );
+});
+
+test("AgentRuntime keeps one internal security chain behind finite public ports", async () => {
+  const paths = [
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+    "packages/runtime-host/src/session-adapter.ts",
+    "packages/runtime-host/src/runtime-host.ts",
+    "packages/cli/src/serve/agent-job-runtime.ts",
+    "packages/cli/src/serve/ephemeral-executor.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectAgentRuntimeSecurityEncapsulation(records), []);
+  assert.match(
+    inspectAgentRuntimeSecurityEncapsulation(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => text.replace(
+        "  readonly confirmationBroker: IConfirmationBroker;",
+        "  readonly securityPipeline: SecurityPipeline;\n  readonly confirmationBroker: IConfirmationBroker;",
+      ),
+    )).join("\n"),
+    /exposes a security implementation/,
+  );
+  assert.match(
+    inspectAgentRuntimeSecurityEncapsulation(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => text.replace(
+        "    confirmationBroker,",
+        "    permissionStore: persistentStore,\n    confirmationBroker,",
+      ),
+    )).join("\n"),
+    /returns a security implementation/,
+  );
+  assert.match(
+    inspectAgentRuntimeSecurityEncapsulation(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => text.replace(
+        "    confirmationBroker,",
+        "    securityImplementation() { return securityPipeline; },\n    confirmationBroker,",
+      ),
+    )).join("\n"),
+    /returns a security implementation/,
+  );
+  assert.match(
+    inspectAgentRuntimeSecurityEncapsulation(mutate(
+      "packages/runtime-host/src/session-adapter.ts",
+      (text) => `${text}\nexport const leakedPipeline = (runtime: AgentRuntime) => runtime.securityPipeline;`,
+    )).join("\n"),
+    /external production code reads AgentRuntime security internals/,
+  );
+  assert.match(
+    inspectAgentRuntimeSecurityEncapsulation(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => text.replace("      securityPipeline,", ""),
+    )).join("\n"),
+    /internal security chain is no longer single and shared/,
   );
 });
 

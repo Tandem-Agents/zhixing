@@ -2794,11 +2794,7 @@ describe("trustContext 装配分叉", () => {
       ],
     });
     expect(opens).toEqual([{ mode: "work", sceneId: "s1" }]);
-    expect(runtime.securityPipeline.getTrust()).toEqual({
-      kind: "scene",
-      sceneId: "s1",
-    });
-    expect(runtime.securityPipeline.getContextId()).toEqual({
+    expect(runtime.securitySnapshot().contextId).toEqual({
       kind: "scene",
       sceneId: "s1",
     });
@@ -2827,8 +2823,10 @@ describe("trustContext 装配分叉", () => {
   it("非场景实例:无工作区 → global 信任与 main 上下文", async () => {
     providerRef.current = new MockLLMProvider([{ text: "ok" }]);
     const runtime = await createAgentRuntime({ workspace: null });
-    expect(runtime.securityPipeline.getTrust()).toEqual({ kind: "global" });
-    expect(runtime.securityPipeline.getContextId()).toEqual({ kind: "main" });
+    expect(runtime.securitySnapshot()).toMatchObject({
+      contextId: { kind: "main" },
+      workspacePath: null,
+    });
   });
 
   it("securitySnapshot 暴露宿主 /security 所需的运行体安全事实", async () => {
@@ -2848,23 +2846,64 @@ describe("trustContext 装配分叉", () => {
         expect.objectContaining({ scope: "builtin" }),
       ]),
     );
+    expect("securityPipeline" in runtime).toBe(false);
+    expect("permissionStore" in runtime).toBe(false);
   });
 
   it("把组合根的实际秘密路径注入每个运行体并旁路免疫地阻断", async () => {
-    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const effect = vi.fn(async () => ({ content: "must-not-run", isError: false }));
+    const onSecurityBlocked = vi.fn();
+    const probe: ToolDefinition = {
+      name: "protected_path_probe",
+      description: "attempt a controlled read through the runtime security boundary",
+      inputSchema: {
+        type: "object",
+        properties: { path: { type: "string" } },
+        required: ["path"],
+      },
+      needsPermission: false,
+      permissionArgumentKey: "path",
+      boundaries: [
+        { boundaryType: "filesystem", access: "read", dynamic: false },
+      ],
+      call: effect,
+    };
     const protectedPrefix = path.resolve(process.cwd(), "custom-home", "secret-vault");
+    providerRef.current = new MockLLMProvider([
+      {
+        toolCalls: [
+          {
+            id: "protected-path-1",
+            name: probe.name,
+            input: { path: `${protectedPrefix}.json` },
+          },
+        ],
+      },
+      { text: "blocked as expected" },
+    ]);
     const runtime = await createAgentRuntime({
       workspace: null,
       systemProtectedPaths: [protectedPrefix],
+      extraTools: [probe],
+      onSecurityBlocked,
     });
 
-    const result = await runtime.securityPipeline.evaluate(
-      "read",
-      { path: `${protectedPrefix}.json` },
-      process.cwd(),
-    );
-    expect(result.allowed).toBe(false);
-    expect(result.decision?.matchedRules.map((rule) => rule.id)).toContain(
+    const completion = await runKernel(runtime, {
+      modelInput: { messages: [userMessage("read the protected path")] },
+      identity: { turnIndex: 0 },
+      control: {},
+      correctness: {},
+      observation: {},
+    });
+
+    expect(completion.terminal.reason).toBe("completed");
+    expect(effect).not.toHaveBeenCalled();
+    expect(onSecurityBlocked).toHaveBeenCalledTimes(1);
+    expect(
+      onSecurityBlocked.mock.calls[0]![2].decision?.matchedRules.map(
+        (rule: { id: string }) => rule.id,
+      ),
+    ).toContain(
       "bi-system-protected-paths",
     );
   });

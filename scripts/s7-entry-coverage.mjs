@@ -1676,6 +1676,225 @@ export function inspectKernelTerminalOwnership(records) {
   return failures;
 }
 
+/** A4 AgentRuntime exposes finite security projections/effects, never implementation objects. */
+export function inspectAgentRuntimeSecurityEncapsulation(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const runtimePath = "packages/orchestrator/src/runtime/create-agent-runtime.ts";
+  const runtimeSource = byPath.get(runtimePath);
+  if (runtimeSource === undefined) {
+    return [`${runtimePath}: AgentRuntime security boundary source is missing`];
+  }
+  const runtimeFile = ts.createSourceFile(
+    runtimePath,
+    runtimeSource,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const runtimeDeclarations = records.flatMap((record) => {
+    const file = ts.createSourceFile(
+      record.relative,
+      record.text,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    return file.statements
+      .filter(
+        (statement) =>
+          ts.isInterfaceDeclaration(statement) &&
+          statement.name.text === "AgentRuntime",
+      )
+      .map(() => record.relative);
+  });
+  const declaration = runtimeFile.statements.find(
+    (statement) =>
+      ts.isInterfaceDeclaration(statement) && statement.name.text === "AgentRuntime",
+  );
+  if (
+    runtimeDeclarations.length !== 1 ||
+    runtimeDeclarations[0] !== runtimePath ||
+    !declaration ||
+    !ts.isInterfaceDeclaration(declaration)
+  ) {
+    failures.push("AgentRuntime lacks one public contract owner");
+  } else {
+    const forbiddenNames = new Set(["securityPipeline", "permissionStore"]);
+    for (const member of declaration.members) {
+      const name = member.name ? propertyNameText(member.name) : undefined;
+      const text = member.getText(runtimeFile);
+      if (
+        (name && forbiddenNames.has(name)) ||
+        /\b(?:SecurityPipeline|IPermissionStore)\b/u.test(text) ||
+        /(?:security.*pipeline|permission.*store)/iu.test(name ?? "")
+      ) {
+        failures.push("AgentRuntime exposes a security implementation field, getter or alias");
+      }
+    }
+  }
+
+  const factory = runtimeFile.statements.find(
+    (statement) =>
+      ts.isFunctionDeclaration(statement) &&
+      statement.name?.text === "createAgentRuntime",
+  );
+  if (
+    !factory ||
+    factory.type?.getText(runtimeFile) !== "Promise<AgentRuntime>" ||
+    !factory.body
+  ) {
+    failures.push("createAgentRuntime no longer returns the one AgentRuntime contract");
+  } else {
+    const candidates = [];
+    const visit = (node) => {
+      if (ts.isObjectLiteralExpression(node)) {
+        const names = new Set(
+          node.properties
+            .map((property) => property.name && propertyNameText(property.name))
+            .filter(Boolean),
+        );
+        if (
+          names.has("providerId") &&
+          names.has("model") &&
+          names.has("confirmationBroker") &&
+          names.has("securitySnapshot") &&
+          names.has("executionPermissionRules") &&
+          names.has("run")
+        ) {
+          candidates.push(node);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(factory.body);
+    const returnedRuntime = candidates[0];
+    if (candidates.length !== 1 || !returnedRuntime) {
+      failures.push("createAgentRuntime return object is missing or duplicated");
+    } else {
+      const allowedInternalClosures = new Set([
+        "run",
+        "runOrchestrationV1",
+        "securitySnapshot",
+        "executionPermissionRules",
+      ]);
+      for (const property of returnedRuntime.properties) {
+        const name = property.name ? propertyNameText(property.name) : undefined;
+        const text = property.getText(runtimeFile);
+        if (
+          name === "securityPipeline" ||
+          name === "permissionStore" ||
+          /(?:security.*pipeline|permission.*store)/iu.test(name ?? "") ||
+          (!allowedInternalClosures.has(name ?? "") &&
+            /\b(?:securityPipeline|persistentStore)\b/u.test(text))
+        ) {
+          failures.push(
+            "createAgentRuntime returns a security implementation field, getter or alias",
+          );
+        }
+      }
+    }
+  }
+
+  const pipelineConstructions =
+    runtimeSource.match(/new SecurityPipeline\s*\(/gu) ?? [];
+  const storeConstructions =
+    runtimeSource.match(/new PermissionStore\s*\(/gu) ?? [];
+  const securityBindings = new Map([
+    [
+      "createSecureExecuteTool",
+      { property: "pipeline", expected: "securityPipeline" },
+    ],
+    [
+      "createTaskTool",
+      { property: "securityPipeline", expected: "securityPipeline" },
+    ],
+    [
+      "createAgentNodeExecutorV1",
+      { property: "securityPipeline", expected: "securityPipeline" },
+    ],
+  ]);
+  const observedBindings = new Map(
+    [...securityBindings].map(([name]) => [name, []]),
+  );
+  const visitSecurityBindings = (node) => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      securityBindings.has(node.expression.text)
+    ) {
+      const spec = securityBindings.get(node.expression.text);
+      const options = node.arguments[0];
+      const property =
+        options && ts.isObjectLiteralExpression(options)
+          ? options.properties.find(
+              (candidate) =>
+                candidate.name &&
+                propertyNameText(candidate.name) === spec.property,
+            )
+          : undefined;
+      const value = property
+        ? ts.isShorthandPropertyAssignment(property)
+          ? property.name.text
+          : ts.isPropertyAssignment(property)
+            ? property.initializer.getText(runtimeFile)
+            : undefined
+        : undefined;
+      observedBindings.get(node.expression.text).push(value);
+    }
+    ts.forEachChild(node, visitSecurityBindings);
+  };
+  visitSecurityBindings(runtimeFile);
+  if (
+    pipelineConstructions.length !== 1 ||
+    storeConstructions.length !== 1 ||
+    !runtimeSource.includes("permissionStore: persistentStore,") ||
+    !runtimeSource.includes("const securityPipeline = new SecurityPipeline({") ||
+    [...securityBindings].some(
+      ([name, spec]) =>
+        JSON.stringify(observedBindings.get(name)) !==
+        JSON.stringify([spec.expected]),
+    )
+  ) {
+    failures.push("AgentRuntime internal security chain is no longer single and shared");
+  }
+
+  for (const record of records) {
+    if (
+      record.relative === runtimePath ||
+      record.relative.startsWith("packages/orchestrator/") ||
+      record.relative.startsWith("packages/core/")
+    ) continue;
+    const file = ts.createSourceFile(
+      record.relative,
+      record.text,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    let leaked = false;
+    const visit = (node) => {
+      if (
+        (ts.isPropertyAccessExpression(node) &&
+          (node.name.text === "securityPipeline" ||
+            node.name.text === "permissionStore")) ||
+        (ts.isElementAccessExpression(node) &&
+          ts.isStringLiteral(node.argumentExpression) &&
+          (node.argumentExpression.text === "securityPipeline" ||
+            node.argumentExpression.text === "permissionStore"))
+      ) {
+        leaked = true;
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+    if (leaked) {
+      failures.push(`${record.relative}: external production code reads AgentRuntime security internals`);
+    }
+  }
+  return failures;
+}
+
 export async function validateS7Structure() {
   const files = await productionTypeScriptFiles(path.join(root, "packages"));
   const records = await Promise.all(files.map(async (absolute) => ({
@@ -1706,6 +1925,7 @@ export async function validateS7Structure() {
   failures.push(...inspectKernelRunEnvelopeOwnership(records));
   failures.push(...inspectKernelRunEventOwnership(records));
   failures.push(...inspectKernelTerminalOwnership(records));
+  failures.push(...inspectAgentRuntimeSecurityEncapsulation(records));
   failures.push(...inspectSkillCatalogApplicationOwnership([
     ...records,
     {

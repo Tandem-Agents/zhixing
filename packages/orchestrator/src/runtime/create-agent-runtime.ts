@@ -335,10 +335,6 @@ export interface AgentRuntime {
   executionProfile: () => RuntimeExecutionProfile;
   /** 当前 Token 估算器的校准因子（1.0 = 未校准） */
   readonly calibrationFactor: number;
-  /** 安全管线（用于 /trust /security 命令访问权限规则、审计日志等） */
-  readonly securityPipeline: SecurityPipeline;
-  /** 权限规则存储的快捷访问 */
-  readonly permissionStore: IPermissionStore;
   /**
    * 确认交互 broker——会话级单例，跨多次 run() 共享队列和 grace period。
    * REPL 负责 attach 一个 TerminalConfirmationRenderer 到它。
@@ -1215,8 +1211,6 @@ export async function createAgentRuntime(
   return {
     providerId: roles[primaryRole].provider.id,
     model: roles[primaryRole].model,
-    securityPipeline,
-    permissionStore: persistentStore,
     confirmationBroker,
     resolvedWorkspace: workspace,
     workspaceDirStatus,

@@ -353,6 +353,17 @@ if (
 ) {
   failures.push("orchestrator-kernel-terminal:invalid-declaration-boundary");
 }
+const agentRuntimeDeclaration = orchestratorRuntimeDeclarations.match(
+  /interface AgentRuntime \{(?<body>[\s\S]*?)\n\}/u,
+)?.groups?.body;
+if (
+  !agentRuntimeDeclaration ||
+  /\b(?:securityPipeline|permissionStore|SecurityPipeline|IPermissionStore)\b/u.test(
+    agentRuntimeDeclaration,
+  )
+) {
+  failures.push("orchestrator-agent-runtime:security-implementation-leak");
+}
 for (const name of runtimeHostLegacyNames) {
   if (
     name in runtimeHost ||

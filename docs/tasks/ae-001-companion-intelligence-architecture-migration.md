@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A4-03 已通过协调者独立复核，等待提交；A4 仍未完成<br>
+> 当前检查点：A4-04 已完成，等待协调者独立复核；AgentRuntime 返回面已移除安全实现对象<br>
 > 完成度：4/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `4a99495d`；A0～A3、A4-01 与 A4-02 已由协调者独立复核并提交，A1、A2、A3 阶段退出门成立 |
+| 已接受基线 | `a4e9ff87`；A0～A3、A4-01～A4-03 已由协调者独立复核并提交，A1、A2、A3 阶段退出门成立 |
 | 当前 A 项 | A4：封闭 Intelligence Kernel 合同及其生产边界 |
-| 活跃工作包 | A4-03 已通过协调者独立复核，等待纳入本地提交；四类终态、五项非终态产物、三类生产结果投影、零深拷贝所有权交付与旧 `RunResult/AgentResult` Kernel 直通已在 `A4-03-kernel-run-terminal-v1` 中闭合，A4 保持未完成 |
-| 下一责任链 | A4-03 提交后，移除 `AgentRuntime` 对 `SecurityPipeline` 与权限存储实现对象的公共暴露，以现有有限安全查询、确认和效果端口保持行为等价；不同时处理工作区信息、其他公共成员、RuntimeHost 产品装配或 Kernel Conformance |
+| 活跃工作包 | A4-04 已完成，等待协调者独立复核：`AgentRuntime` 返回对象与正式声明已移除 `SecurityPipeline` / `IPermissionStore` 实现实例；内部安全执行链继续唯一持有实现，Host 与产品调用方只消费有限查询、确认和效果端口 |
+| 下一责任链 | 协调者独立复核 A4-04 后，再从工作区解析/宿主管理公共成员、RuntimeHost 产品特有装配或 Kernel Conformance 中选择最高价值的单一 A4 责任链；不提前进入 A5 |
 | 打开的单向桥 | 无；Skill 管理、保存、admission、load/usage、Kernel 与 Executor 投影均只经 `@zhixing/core/skills/catalog` 及既有 Authority/CAS/assignment Correctness 端口成立，旧 writable Store 不再承担正式应用行为 |
-| 已失效证据 | 无当前未恢复证据。A4-03 将 A4-01 completion 子合同从 core `RunResult/AgentResult` 收口为 `KernelRunCompletion { terminal, artifacts }`；同一 Envelope、A4-02 Event、三个 production binding、Conversation 下游 `RunResult` 与公开产品语义均由本包直接测试和 S7 重新证明，A4-01/A4-02 其余证据及 A3/A2 输入未变 |
+| 已失效证据 | 无当前未恢复证据。新增 `A4-04-agent-runtime-security-encapsulation-v1` 等待协调者独立复核；A4-04 只改变 AgentRuntime 返回对象的安全实现可见性，Envelope/Event/Terminal、内部安全执行与现有有限安全查询/效果合同未失效 |
 | 阻塞/用户决策 | 无 |
 
 ### A0 基线索引
@@ -1567,6 +1567,27 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 纠正后的产品交付：Conversation 继续创建新的 core `AgentResult` 外壳并仅为旧 `RunResult.newMessages: Message[]` 的可变容器做一次引用级浅拷贝；`runRecord`、消息/工具结果/思考/图片正文、window compact 与控制提议均按单向所有权直接交付，`error` 分支只新建产品侧所需的真实 `AgentError`。ephemeral 不消费 artifacts，durable job 直接消费只读 usage；两者不再为未使用 artifacts 付出复制成本，也不存在同一 Conversation 结果的重复深拷贝。
 - 纠正直接证据：更新后的 Kernel 单测 3/3 直接 spy 证明 completion 边界没有调用 `structuredClone`、terminal 与四类大 artifacts 保持正确 identity，同时源 `AgentResult` 的 message/usage 后续修改不能破坏已交付终态。`create-agent-runtime` 只重验对象图隔离和 lifecycle completion 2/2；runtime-host 上游重建后，Conversation 四终态与 artifacts 交付定向证据 6/6，durable job 13/13。第一次 Conversation 定向运行使用了未重建的 runtime-host dist，唯一 1 项 identity 断言失败，按验证手册归因为旧产物后先完成 orchestrator/runtime-host 构建再重取并通过，不作为产品失败。新增 S7 mutation 分别恢复 completion 深拷贝与 Conversation 逐消息 clone，均被门禁拒绝；canonical S7 25/25 与 golden、三包 typecheck、依赖顺序三包 build、runtime package exports 均通过。A4-03 其余架构与行为证据未失效，仍等待协调者独立复核。
 - 协调者独立验收：反查完成结果的生产所有权、生命周期观察顺序和三个直接消费面，确认 Kernel 只对跨责任边界的有限终态做必要快照，五项 artifacts 由 run 创建后单向转交，Conversation 只浅拷贝旧合同要求的 `newMessages` 容器，不存在未消费大对象复制或第二结果真相。纠正后的同一工作区独立重跑 Kernel terminal 3/3、runtime 对象图与 lifecycle 2/2、Conversation 四终态及 artifacts 6/6，依次重建 orchestrator 与 runtime-host；canonical S7 25/25、registry golden、fresh dist 上的 runtime package exports 和 `git diff --check` 均通过。协调者接受 `A4-03-kernel-run-terminal-v1`；A4 继续为 `[ ]`，下一责任链只处理安全实现对象退出 AgentRuntime 公共面。
+
+### A4-04：移除 AgentRuntime 返回对象的安全实现泄漏
+
+- 派发基线：`HEAD a4e9ff87ec2d4a14f4f59ae2b4c282543491c806 + task-doc:A4-04-dispatch`；A4-03 已由协调者独立复核并纳入提交，派发前索引和工作区为空。
+- 唯一架构结果：`AgentRuntime` 返回对象不再公开 `SecurityPipeline` 或 `IPermissionStore` 实现实例；Kernel 继续在内部唯一拥有安全决定、工具准入、权限读取、确认跟踪与子运行安全链，Host、Conversation 和其他产品调用方只能消费已经存在的有限查询、确认和效果端口。
+- 生产闭包：从 `AgentRuntime` 合同、工厂返回对象、runtime/root declarations、RuntimeHost 适配和全部生产消费者双向删除两个实现对象出口；反查 `secureExecutor`、Task 子 Agent、独立 orchestration、`securitySnapshot`、`executionPermissionRules`、confirmation broker 与正常工具调用，确保它们仍由同一个内部 pipeline/store 驱动，不新增第二 pipeline、第二 store、服务定位器或绕过准入的执行路径。
+- 保护边界：保持权限规则、builtin rules、trust/workscene context、确认、rate limit、阻断通知、durable permission snapshot、Task/编排子执行及公开 `/security` 行为完全等价；安全拒绝继续 fail closed。把原来直接读取实现对象的测试改为通过真实有限合同或实际受控效果验证，不得增加 test-only getter、类型断言、反射、根导出或兼容别名。
+- 旧路径与门禁：删除返回对象上的 `securityPipeline`、`permissionStore` 字段及其公开声明；增加能识别任一字段、实现类型、getter/别名重新进入 `AgentRuntime` 返回面或外部生产消费者直接取得实例的结构门禁。内部闭包、`CreateAgentRuntimeOptions` 的装配输入和 core 安全实现不因本包机械改造；若生产事实证明某个装配输入本身构成 Host 泄漏，只登记为下一条独立责任链，不在本包扩面。
+- 直接证据：最窄验证必须同时证明公共类型/产物没有两个实现对象、内部安全链仍能允许与拒绝工具、快照与 durable permission 投影等价、Task/编排不绕过；按依赖顺序构建 orchestrator、runtime-host 及实际受影响下游，运行 S7 和 package exports。不得重跑 Envelope/Event/Terminal 全文件、根级全量回归或与本包无关的安全矩阵。
+- 明确不做：不改变权限、确认、沙箱或信任产品语义；不迁移 Trust Administration；不重构 SecurityPipeline/IPermissionStore 内部实现，不处理工作区解析、provider/model、生命周期、压缩、文本调用、其他 AgentRuntime 成员、RuntimeHost 产品特有装配或 Kernel Conformance，不进入 A5。
+- 完成与止损：只有两个实现对象从 AgentRuntime 返回公共面和全部外部生产消费面归零、内部唯一安全链及全部直接行为证据成立、工作区可构建且没有临时访问桥，才算完成。预计超过四小时、需要改动安全产品语义或公开协议、出现两个以上独立未知、连续两条实质路径失败或影响扩至 Create options/Trust 领域时，停在原公共合同仍成立或新合同已完整接管的可构建检查点，记录唯一未闭合链并反馈；不执行 Git 写操作。
+
+执行记录（证据 ID：`A4-04-agent-runtime-security-encapsulation-v1`）：
+
+- 责任迁移与生产 exact-set：`AgentRuntime` 接口与 `createAgentRuntime` 返回对象上的 `securityPipeline`、`permissionStore` 两个实现出口已删除；fresh `dist/runtime/index.d.ts` 的同一接口不再出现字段、实现类型、getter 或别名。反向扫描 RuntimeHost、CLI、Server、Owner、RPC 与 Executor production source 没有外部属性读取；RuntimeHost conversation adapter 继续只透传 `securitySnapshot`、`executionPermissionRules`、`confirmationBroker` 与既有受控运行/效果合同。`CreateAgentRuntimeOptions.permissionStore` 作为本包明确排除的装配输入保留，当前 production caller 对它为零注入，因此未发现需要在本包扩面的第二 Host 消费链。
+- 内部唯一安全链与行为保护：工厂仍只构造一个 `persistentStore` 和一个 `SecurityPipeline`；同一闭包实例继续注入正常工具 `createSecureExecuteTool`、Task 子 Agent 与 `createAgentNodeExecutorV1` 独立编排，并生成 `/security` 的只读 `securitySnapshot`、耐久 assignment 的 `executionPermissionRules`、confirmation broker、builtin rules、trust/workscene context、rate limit 与阻断通知。测试不再取得实现对象：scene/global 上下文只从有限安全快照观察，宿主秘密路径保护改为实际让模型请求一个 filesystem-read 工具，并直接证明效果函数零调用、`onSecurityBlocked` 收到 bypass-immune rule，安全拒绝保持 fail closed。
+- 旧路与机械门禁：S7 新增 AgentRuntime security encapsulation inspector，解析唯一接口 owner 与真实工厂返回对象，拒绝实现字段、实现类型、getter/改名别名、外部 production 属性读取、第二 pipeline/store，以及正常工具、Task 或独立编排脱离同一内部链；五类反向 mutation 均被直接测试识别。runtime package-export gate 在 fresh 声明产物中截取 `AgentRuntime` 本体并拒绝两字段/两实现类型回流；没有 test-only getter、类型断言、反射、兼容字段、根导出或第二访问桥。
+- 直接证据：orchestrator runtime 的 trust/context、有限快照与真实受控拒绝 5/5，Task 内部共享安全链 4/4，secure-executor allow/deny 与独立 orchestration 2 文件 35/35；fresh upstream dist 上的 RuntimeHost adapter 有限安全/confirmation 透传 2/2，durable conversation assignment 的 permission/profile 绑定与 readiness fail-closed 1/1，合计 5 个直接文件 47/47。canonical `pnpm s7:lint` 最终 26/26 且 registry golden 通过；首次 canonical 运行只暴露门禁把 Executor 私有派生 type alias 误判为第二公共接口 owner，收窄为真实 `interface AgentRuntime` owner 后同一结构反例完整通过，不是产品失败。
+- 类型、构建与静态边界：orchestrator、runtime-host、CLI 三包 typecheck 均通过；按依赖顺序完成 orchestrator build、runtime-host build 与 `pnpm cli:build`；fresh dist 上 `pnpm runtime:package-exports` 与本包两个 TypeScript 文件的最窄 Biome 均通过。没有运行 Envelope/Event/Terminal 全文件、根级测试/构建、package check、制品验收或无关安全矩阵。
+- 失效、遗留与状态：若 `AgentRuntime` 接口/工厂返回对象、runtime/root declaration、RuntimeHost adapter、`securitySnapshot`、`executionPermissionRules`、confirmation broker、正常工具/Task/独立编排安全注入、S7 inspector/mutation 或 package-export 声明门变化，恢复本证据并只重验对应闭包。权限/信任产品语义、core 安全实现、`CreateAgentRuntimeOptions`、工作区解析、RuntimeHost 产品装配和 Kernel Conformance 均未迁移；A4 与完成度继续为 `[ ]` / `4/8`。交接类型为完成、等待协调者独立复核；无本包内遗留，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：反查 `AgentRuntime` 唯一声明、工厂返回对象、fresh declaration 与全部外部生产属性访问，确认安全实现实例已退出公共面而内部同一 pipeline/store 仍唯一驱动主工具、Task、独立编排及有限安全投影。独立重跑 trust/context 与真实受控拒绝 5/5、Task/secure executor/agent-node executor 75/75、orchestrator build、canonical S7 26/26、registry golden、fresh runtime package exports 和 `git diff --check`，全部通过；接受 `A4-04-agent-runtime-security-encapsulation-v1`。A4 继续为 `[ ]`，下一责任链不进入 A5。
 
 ## 十、用户提示词
 
