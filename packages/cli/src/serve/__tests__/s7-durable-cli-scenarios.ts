@@ -16,7 +16,7 @@ import {
   readLocalWorkspaceHostStatus,
 } from "../../runtime/local-workspace-management-host.js";
 import { acquireLocalWorkspaceOwner } from "../../runtime/local-workspace-owner.js";
-import { WORKSPACE_CATALOG_RESET_IMPACT } from "../../runtime/workspace-reset-impact.js";
+import { WORKSPACE_CATALOG_RESET_IMPACT } from "@zhixing/core/environment/workspace-administration";
 
 export async function executeLocalWorkspaceOutboxCase(
   kind: DurableCaseKind,

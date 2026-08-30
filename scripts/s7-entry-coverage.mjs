@@ -2787,7 +2787,7 @@ export async function validateS7Structure() {
   if (failures.length > 0) throw new Error(`S7 structure gate failed:\n- ${failures.join("\n- ")}`);
 }
 
-/** A5 Workspace Administration owns binding CRUD while CLI only binds effects. */
+/** A5 Workspace Administration owns binding CRUD and reset lifecycle decisions. */
 export function inspectWorkspaceAdministrationOwnership(records) {
   const failures = [];
   const byPath = new Map(records.map((record) => [record.relative, record.text]));
@@ -2808,11 +2808,15 @@ export function inspectWorkspaceAdministrationOwnership(records) {
   const host = required(
     "packages/cli/src/runtime/local-workspace-management-host.ts",
   );
+  const bootstrap = required(
+    "packages/cli/src/runtime/local-workspace-bootstrap.ts",
+  );
+  const accessSurfaces = required("packages/cli/src/serve/access-surfaces.ts");
+  const executorRole = required(
+    "packages/cli/src/serve/executor-role-runtime.ts",
+  );
   const control = required(
     "packages/cli/src/runtime/local-workspace-control.ts",
-  );
-  const recovery = required(
-    "packages/cli/src/runtime/local-workspace-recovery.ts",
   );
   const command = required("packages/cli/src/runtime/workspace-command.ts");
   const repl = required("packages/cli/src/repl.ts");
@@ -2831,6 +2835,15 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     !application.includes("class WorkspaceAdministrationApplicationService") ||
     !application.includes("class WorkspaceAdministrationBusinessError") ||
     !application.includes("interface WorkspaceAdministrationControlPort") ||
+    !application.includes("WorkspaceBindingRecoveryPort") ||
+    !application.includes("WORKSPACE_CATALOG_RESET_IMPACT") ||
+    !application.includes("async status()") ||
+    !application.includes("async previewReset(input:") ||
+    !application.includes("async reset(") ||
+    !application.includes("this.#recovery.beginReset(") ||
+    !application.includes("this.#recovery.completeReset(requestId, abort)") ||
+    !application.includes("confirmationIssuedAt") ||
+    !application.includes("operationNonce(execution.operation)") ||
     !application.includes("async viewByName(displayName: string)") ||
     !application.includes(
       "toView(await this.#bindingByName(displayName, control))",
@@ -2842,24 +2855,35 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     !/return Object\.freeze\(\{\s*deviceId: this\.#deviceId,\s*bindingRef: binding\.bindingRef,\s*\}\)/u.test(
       application,
     ) ||
-    /@zhixing\/(?:cli|executor)|LocalWorkspaceManagementHost|WorkspaceBindingRecovery|Workscene/u.test(
+    /@zhixing\/(?:cli|executor)|LocalWorkspaceManagementHost|Workscene/u.test(
       application,
     )
   ) {
     failures.push(
-      "Workspace Administration does not uniquely own CRUD, views, name resolution and request identity",
+      "Workspace Administration does not uniquely own CRUD, reset lifecycle, generation preview and durable request identity",
     );
   }
   if (
     byPath.has("packages/cli/src/runtime/local-workspace-facade.ts") ||
+    byPath.has("packages/cli/src/runtime/local-workspace-recovery.ts") ||
+    byPath.has("packages/cli/src/runtime/workspace-reset-impact.ts") ||
     records.some((record) =>
-      /\bLocalWorkspaceFacade\b|withLocalWorkspaceFacade/u.test(record.text),
+      /\bLocalWorkspaceFacade\b|withLocalWorkspaceFacade|\bLocalWorkspaceRecovery\b/u.test(
+        record.text,
+      ),
     ) ||
     constructionOwners.length !== 1 ||
     constructionOwners[0] !==
       "packages/cli/src/runtime/local-workspace-management-host.ts" ||
     !host.includes('from "@zhixing/core/environment/workspace-administration"') ||
     !host.includes("new ExecutorWorkspaceAdministrationControl(") ||
+    (host.match(/new WorkspaceAdministrationApplicationService\s*\(/gu) ?? [])
+      .length !== 1 ||
+    !host.includes("recovery: input.management.recovery") ||
+    !host.includes("previewReset: (command) => workspace.previewReset(command)") ||
+    !host.includes("reset: (command, execution) => workspace.reset(command, execution)") ||
+    !host.includes("confirmationIssuedAt: operation.preparedAt") ||
+    !host.includes("confirmationToken: operation.confirmationToken") ||
     !host.includes("operation: {") ||
     !host.includes('["bindingRef", "deviceId"]') ||
     !host.includes("return this.#applications.viewByName(request.displayName)") ||
@@ -2873,12 +2897,11 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     !control.includes("this.#resources.acquireRoot(") ||
     !control.includes("this.#resources.settle(") ||
     !control.includes("this.#resources.release(") ||
-    /WorkspaceAdministration(?:ApplicationService|BusinessError)|#bindingByName/u.test(
-      recovery,
-    )
+    host.includes("requestNonce") ||
+    host.includes("catalogGeneration !== request.input.expectedCatalogGeneration")
   ) {
     failures.push(
-      "Workspace CLI binding retains a second CRUD owner or bypasses its finite Correctness port",
+      "Workspace CLI binding retains a second CRUD/reset owner or bypasses its finite Correctness ports",
     );
   }
   if (
@@ -2892,12 +2915,27 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     !command.includes("deviceId: authorization.deviceId") ||
     !command.includes("bindingRef: authorization.bindingRef") ||
     !command.includes("validateWorkspaceControlAuthorization(result.value)") ||
+    command.includes("WORKSPACE_CATALOG_RESET_IMPACT") ||
     !repl.includes("withLocalWorkspaceClient(") ||
     !repl.includes("createWorksceneFromLocalWorkspaceAuthorization(") ||
     repl.includes("withLocalWorkspaceFacade")
   ) {
     failures.push(
-      "Workspace CLI or Workscene binding still interprets Workspace Administration facts",
+      "Workspace CLI or Workscene binding still interprets Workspace Administration facts or reset impact",
+    );
+  }
+  if (
+    (bootstrap.match(/createLocalWorkspaceManagementHost\s*\(/gu) ?? [])
+      .length !== 1 ||
+    (accessSurfaces.match(/createExecutorLocalWorkspaceHost\s*\(/gu) ?? [])
+      .length !== 1 ||
+    (executorRole.match(/createExecutorLocalWorkspaceHost\s*\(/gu) ?? [])
+      .length !== 1 ||
+    (command.match(/createExecutorLocalWorkspaceHost\s*\(/gu) ?? [])
+      .length !== 1
+  ) {
+    failures.push(
+      "Workspace Administration three production roots do not converge through one shared Host factory",
     );
   }
   if (

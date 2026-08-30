@@ -45,6 +45,7 @@ describe("LocalWorkspaceManagementHost", () => {
     }));
     const applications = {
       status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+      previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
       list: async () => [],
       viewByName: vi.fn(),
       create,
@@ -97,6 +98,7 @@ describe("LocalWorkspaceManagementHost", () => {
       lease,
       applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
         viewByName: vi.fn(),
         create,
@@ -169,6 +171,7 @@ describe("LocalWorkspaceManagementHost", () => {
       lease,
       applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
         viewByName: vi.fn(),
         create: vi.fn(),
@@ -235,6 +238,7 @@ describe("LocalWorkspaceManagementHost", () => {
       lease,
       applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
         viewByName,
         create: vi.fn(),
@@ -291,6 +295,7 @@ describe("LocalWorkspaceManagementHost", () => {
       lease,
       applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
         viewByName: vi.fn(async () => { throw viewFailure; }),
         create: vi.fn(),
@@ -346,6 +351,7 @@ describe("LocalWorkspaceManagementHost", () => {
       lease,
       applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
         viewByName,
         create: async ({ displayName, absolutePath }) => ({
@@ -405,6 +411,7 @@ describe("LocalWorkspaceManagementHost", () => {
       lease,
       applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
         viewByName: vi.fn(),
         create: vi.fn(),
@@ -454,6 +461,7 @@ describe("LocalWorkspaceManagementHost", () => {
       lease,
       applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
         viewByName: vi.fn(),
         create: async () => {
@@ -507,6 +515,7 @@ describe("LocalWorkspaceManagementHost", () => {
       lease,
       applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
         viewByName: vi.fn(),
         create: async ({ displayName, absolutePath }) => ({
@@ -551,6 +560,7 @@ describe("LocalWorkspaceManagementHost", () => {
       lease,
       applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
         viewByName: vi.fn(),
         create: async ({ displayName, absolutePath }) => ({
@@ -606,7 +616,15 @@ describe("LocalWorkspaceManagementHost", () => {
     const host = new LocalWorkspaceManagementHost({
       lease,
       applications: {
-        status: async () => ({ state: "degraded" as const, catalogGeneration: "catalog-a", reason: "broken" }),
+        status: async () => ({
+          state: "degraded" as const,
+          catalogGeneration: "catalog-a",
+          reason: "broken",
+        }),
+        previewReset: async (input: {
+          expectedCatalogGeneration: string;
+          impact: string;
+        }) => input,
         list: async () => [],
         viewByName: vi.fn(),
         create: vi.fn(),
@@ -632,13 +650,23 @@ describe("LocalWorkspaceManagementHost", () => {
         operationId: "workspace-operation-forged",
       }, preview.impact)).rejects.toThrow("identity");
       expect(reset).not.toHaveBeenCalled();
-      await expect(client.confirmReset(preview, preview.impact)).resolves.toMatchObject({
-        catalogGeneration: "catalog-b",
-      });
+      const receipt = await client.confirmReset(preview, preview.impact);
+      expect(receipt).toMatchObject({ catalogGeneration: "catalog-b" });
       expect(reset).toHaveBeenCalledTimes(1);
-      expect(reset.mock.calls[0]![2]).toMatchObject({
-        requestNonce: expect.stringContaining(preview.operationId),
+      expect(reset.mock.calls[0]![1]).toMatchObject({
+        operation: {
+          outboxId: expect.stringMatching(/^outbox-/u),
+          localSeq: preview.localSeq,
+          operationId: preview.operationId,
+          inputDigest: preview.inputDigest,
+        },
+        confirmationIssuedAt: "2026-08-01T00:00:00.000Z",
+        confirmationToken: expect.stringMatching(/^[A-Za-z0-9_-]{32,}$/u),
       });
+      await expect(
+        createLocalWorkspaceClient(home).confirmReset(preview, preview.impact),
+      ).resolves.toEqual(receipt);
+      expect(reset).toHaveBeenCalledTimes(1);
     } finally {
       await host.close();
       await lease.release();
@@ -670,6 +698,7 @@ describe("LocalWorkspaceManagementHost", () => {
       lease,
       applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
         viewByName: vi.fn(),
         create,
@@ -737,6 +766,7 @@ describe("LocalWorkspaceManagementHost", () => {
       lease,
       applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
         viewByName: vi.fn(),
         create,
@@ -808,6 +838,7 @@ describe("LocalWorkspaceManagementHost", () => {
       lease,
       applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
         viewByName: vi.fn(),
         create: async () => { throw error; },
@@ -850,6 +881,7 @@ describe("LocalWorkspaceManagementHost", () => {
       lease,
       applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
         viewByName: vi.fn(),
         create: async () => {
@@ -897,6 +929,7 @@ describe("LocalWorkspaceManagementHost", () => {
       lease: firstLease,
       applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
         viewByName: vi.fn(),
         create: async (_input, execution) => {
@@ -942,6 +975,7 @@ describe("LocalWorkspaceManagementHost", () => {
       lease: secondLease,
       applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
         viewByName: vi.fn(),
         create: async ({ displayName, absolutePath }) => ({
@@ -980,6 +1014,7 @@ describe("LocalWorkspaceManagementHost", () => {
       lease,
       applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
         viewByName: vi.fn(),
         create: vi.fn(),

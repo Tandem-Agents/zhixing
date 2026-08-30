@@ -1,10 +1,15 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type {
   LocalEnvironmentControlContext,
   LocalWorkspaceBinding,
   WorkspaceBindingAdminPort,
+  WorkspaceBindingRecoveryPort,
+  WorkspaceBindingResetReceipt,
 } from "../contracts/ports.js";
 import { localEnvironmentControlSubject } from "./workspace-bindings.js";
+
+export const WORKSPACE_CATALOG_RESET_IMPACT =
+  "将撤回本机全部工作区能力；旧工作区引用立即失效，所有目录都需要逐项重新授权。";
 
 export interface WorkspaceAdministrationView {
   readonly name: string;
@@ -30,6 +35,24 @@ export interface WorkspaceAdministrationExecution {
   readonly abort?: AbortSignal;
 }
 
+export interface WorkspaceAdministrationResetExecution
+  extends WorkspaceAdministrationExecution {
+  readonly confirmationToken?: string;
+  readonly confirmationIssuedAt?: string;
+}
+
+export interface WorkspaceAdministrationCatalogStatus {
+  readonly state: "healthy" | "degraded";
+  readonly catalogGeneration: string;
+  readonly reason?: string;
+  readonly resetImpact?: string;
+}
+
+export interface WorkspaceAdministrationResetPreview {
+  readonly expectedCatalogGeneration: string;
+  readonly impact: string;
+}
+
 export interface WorkspaceAdministrationControlPort {
   execute<T>(
     requestId: string,
@@ -39,8 +62,13 @@ export interface WorkspaceAdministrationControlPort {
 }
 
 export interface WorkspaceAdministrationApplication {
+  status(): Promise<WorkspaceAdministrationCatalogStatus>;
   list(): Promise<readonly WorkspaceAdministrationView[]>;
   viewByName(displayName: string): Promise<WorkspaceAdministrationView>;
+  previewReset(input: {
+    readonly expectedCatalogGeneration: string;
+    readonly impact: string;
+  }): Promise<WorkspaceAdministrationResetPreview>;
   create(
     input: { readonly displayName: string; readonly absolutePath: string },
     execution?: WorkspaceAdministrationExecution,
@@ -69,6 +97,13 @@ export interface WorkspaceAdministrationApplication {
     input: { readonly name: string; readonly expectedRevision: number },
     execution?: WorkspaceAdministrationExecution,
   ): Promise<void>;
+  reset(
+    input: {
+      readonly expectedCatalogGeneration: string;
+      readonly confirmedImpact: string;
+    },
+    execution?: WorkspaceAdministrationResetExecution,
+  ): Promise<WorkspaceBindingResetReceipt>;
 }
 
 export class WorkspaceAdministrationBusinessError extends Error {
@@ -82,25 +117,39 @@ export class WorkspaceAdministrationBusinessError extends Error {
 }
 
 /**
- * Workspace Administration owns the finite binding CRUD use cases. The
- * injected ports provide only serialized binding effects and local control
- * admission; neither paths nor Authority implementations escape this boundary.
+ * Workspace Administration owns the finite binding CRUD and reset lifecycle
+ * use cases. The injected ports provide only serialized binding/recovery
+ * effects and local control admission; neither paths nor Authority
+ * implementations escape this boundary.
  */
 export class WorkspaceAdministrationApplicationService
   implements WorkspaceAdministrationApplication
 {
   readonly #deviceId: string;
   readonly #admin: WorkspaceBindingAdminPort;
+  readonly #recovery: WorkspaceBindingRecoveryPort;
   readonly #control: WorkspaceAdministrationControlPort;
 
   constructor(input: {
     readonly deviceId: string;
     readonly admin: WorkspaceBindingAdminPort;
+    readonly recovery: WorkspaceBindingRecoveryPort;
     readonly control: WorkspaceAdministrationControlPort;
   }) {
     this.#deviceId = input.deviceId;
     this.#admin = input.admin;
+    this.#recovery = input.recovery;
     this.#control = input.control;
+  }
+
+  async status(): Promise<WorkspaceAdministrationCatalogStatus> {
+    const status = await this.#recovery.status();
+    return Object.freeze({
+      ...status,
+      ...(status.state === "degraded"
+        ? { resetImpact: WORKSPACE_CATALOG_RESET_IMPACT }
+        : {}),
+    });
   }
 
   async list(): Promise<readonly WorkspaceAdministrationView[]> {
@@ -113,6 +162,26 @@ export class WorkspaceAdministrationApplicationService
     return this.#execute("workspace-view", undefined, async (control) =>
       toView(await this.#bindingByName(displayName, control)),
     );
+  }
+
+  async previewReset(input: {
+    readonly expectedCatalogGeneration: string;
+    readonly impact: string;
+  }): Promise<WorkspaceAdministrationResetPreview> {
+    if (input.impact !== WORKSPACE_CATALOG_RESET_IMPACT) {
+      throw new TypeError("工作区目录恢复确认内容不完整");
+    }
+    const status = await this.#recovery.status();
+    if (status.catalogGeneration !== input.expectedCatalogGeneration) {
+      throw new WorkspaceAdministrationBusinessError(
+        "LOCAL_WORKSPACE_CATALOG_CHANGED",
+        "工作区目录世代已经变化，请重新查看恢复影响",
+      );
+    }
+    return Object.freeze({
+      expectedCatalogGeneration: input.expectedCatalogGeneration,
+      impact: WORKSPACE_CATALOG_RESET_IMPACT,
+    });
   }
 
   async create(
@@ -195,6 +264,39 @@ export class WorkspaceAdministrationApplicationService
     });
   }
 
+  async reset(
+    input: {
+      readonly expectedCatalogGeneration: string;
+      readonly confirmedImpact: string;
+    },
+    execution?: WorkspaceAdministrationResetExecution,
+  ): Promise<WorkspaceBindingResetReceipt> {
+    if (input.confirmedImpact !== WORKSPACE_CATALOG_RESET_IMPACT) {
+      throw new TypeError("工作区目录恢复确认内容不完整");
+    }
+    const requestId = this.#requestId("workspace-reset", execution);
+    const abort = execution?.abort ?? new AbortController().signal;
+    await this.#control.execute(requestId, abort, (control) =>
+      this.#recovery.beginReset(
+        { expectedCatalogGeneration: input.expectedCatalogGeneration },
+        {
+          ...control,
+          confirmation: {
+            kind: "workspace-binding-reset",
+            token:
+              execution?.confirmationToken ??
+              randomBytes(32).toString("base64url"),
+            requestId,
+            catalogGeneration: input.expectedCatalogGeneration,
+            issuedAt:
+              execution?.confirmationIssuedAt ?? new Date().toISOString(),
+          },
+        },
+      ),
+    );
+    return this.#recovery.completeReset(requestId, abort);
+  }
+
   async #bindingByName(
     displayName: string,
     control: LocalEnvironmentControlContext,
@@ -220,15 +322,22 @@ export class WorkspaceAdministrationApplicationService
     execution: WorkspaceAdministrationExecution | undefined,
     operation: (control: LocalEnvironmentControlContext) => Promise<T>,
   ): Promise<T> {
-    const nonce = execution?.operation
-      ? operationNonce(execution.operation)
-      : `${prefix}:${randomUUID()}`;
-    const requestId = localEnvironmentControlSubject(this.#deviceId, nonce);
+    const requestId = this.#requestId(prefix, execution);
     return this.#control.execute(
       requestId,
       execution?.abort ?? new AbortController().signal,
       operation,
     );
+  }
+
+  #requestId(
+    prefix: string,
+    execution: WorkspaceAdministrationExecution | undefined,
+  ): string {
+    const nonce = execution?.operation
+      ? operationNonce(execution.operation)
+      : `${prefix}:${randomUUID()}`;
+    return localEnvironmentControlSubject(this.#deviceId, nonce);
   }
 }
 

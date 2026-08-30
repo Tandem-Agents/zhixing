@@ -4,7 +4,7 @@ import { protocolDigest } from "@zhixing/core/protocol";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import { LocalWorkspaceOperationOutbox } from "./local-workspace-operation-outbox.js";
-import { WORKSPACE_CATALOG_RESET_IMPACT } from "./workspace-reset-impact.js";
+import { WORKSPACE_CATALOG_RESET_IMPACT } from "@zhixing/core/environment/workspace-administration";
 
 async function createRoot(): Promise<string> {
   return path.join(await createTempDir("workspace-outbox"), "outbox");

@@ -3031,7 +3031,7 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
   );
 });
 
-test("Workspace Administration CRUD has one domain application and one CLI binding", async () => {
+test("Workspace Administration CRUD and reset have one domain application and one CLI binding", async () => {
   const paths = [
     "packages/core/src/environment/workspace-administration.ts",
     "packages/core/src/environment/index.ts",
@@ -3039,9 +3039,11 @@ test("Workspace Administration CRUD has one domain application and one CLI bindi
     "packages/core/package.json",
     "packages/core/tsup.config.ts",
     "packages/cli/src/runtime/local-workspace-management-host.ts",
+    "packages/cli/src/runtime/local-workspace-bootstrap.ts",
     "packages/cli/src/runtime/local-workspace-control.ts",
-    "packages/cli/src/runtime/local-workspace-recovery.ts",
     "packages/cli/src/runtime/workspace-command.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
     "packages/cli/src/repl.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
@@ -3060,7 +3062,7 @@ test("Workspace Administration CRUD has one domain application and one CLI bindi
       "packages/cli/src/runtime/local-workspace-management-host.ts",
       (text) => `${text}\nclass LocalWorkspaceFacade {}`,
     )).join("\n"),
-    /second CRUD owner/,
+    /second CRUD\/reset owner/,
   );
   assert.match(
     inspectWorkspaceAdministrationOwnership(mutate(
@@ -3085,6 +3087,47 @@ test("Workspace Administration CRUD has one domain application and one CLI bindi
       (text) => `${text}\nconst selected = views.filter(({ name }) => name === sceneName);`,
     )).join("\n"),
     /still interprets Workspace Administration facts/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership([
+      ...records,
+      {
+        relative: "packages/cli/src/runtime/local-workspace-recovery.ts",
+        text: "export class LocalWorkspaceRecovery {}",
+      },
+    ]).join("\n"),
+    /second CRUD\/reset owner/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/core/src/environment/workspace-administration.ts",
+      (text) => text.replace("this.#recovery.beginReset(", "this.#recovery.prepareReset("),
+    )).join("\n"),
+    /uniquely own CRUD, reset lifecycle/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/cli/src/runtime/local-workspace-management-host.ts",
+      (text) => `${text}\nconst requestNonce = "host-owned-reset";`,
+    )).join("\n"),
+    /second CRUD\/reset owner/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/cli/src/runtime/workspace-command.ts",
+      (text) => `${text}\nconst WORKSPACE_CATALOG_RESET_IMPACT = "CLI-owned";`,
+    )).join("\n"),
+    /still interprets Workspace Administration facts or reset impact/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace(
+        "createExecutorLocalWorkspaceHost({",
+        "createOtherWorkspaceHost({",
+      ),
+    )).join("\n"),
+    /three production roots/,
   );
   assert.match(
     inspectWorkspaceAdministrationOwnership(mutate(

@@ -3,10 +3,12 @@ import type {
   LocalEnvironmentControlContext,
   LocalWorkspaceBinding,
   WorkspaceBindingAdminPort,
+  WorkspaceBindingRecoveryPort,
 } from "../contracts/ports.js";
 import {
   WorkspaceAdministrationApplicationService,
   WorkspaceAdministrationBusinessError,
+  WORKSPACE_CATALOG_RESET_IMPACT,
   type WorkspaceAdministrationControlPort,
 } from "./workspace-administration.js";
 import {
@@ -30,7 +32,13 @@ function binding(
   };
 }
 
-function harness(initial: readonly LocalWorkspaceBinding[] = []) {
+function harness(
+  initial: readonly LocalWorkspaceBinding[] = [],
+  catalogStatus: Awaited<ReturnType<WorkspaceBindingRecoveryPort["status"]>> = {
+    state: "healthy",
+    catalogGeneration: "catalog-a",
+  },
+) {
   let entries = initial.map((entry) => ({ ...entry }));
   const requestIds: string[] = [];
   const aborts: AbortSignal[] = [];
@@ -78,13 +86,34 @@ function harness(initial: readonly LocalWorkspaceBinding[] = []) {
       });
     },
   };
+  const recovery: WorkspaceBindingRecoveryPort = {
+    status: vi.fn(async () => ({ ...catalogStatus })),
+    beginReset: vi.fn(async (_input, context) => ({
+      requestId: context.requestId,
+      confirmationDigest: "sha256:confirmation",
+      previousCatalogGeneration: context.confirmation.catalogGeneration,
+      catalogGeneration: "catalog-b",
+      preparedAt: context.confirmation.issuedAt,
+    })),
+    completeReset: vi.fn(async (requestId) => ({
+      requestId,
+      confirmationDigest: "sha256:confirmation",
+      previousCatalogGeneration: "catalog-a",
+      catalogGeneration: "catalog-b",
+      logId: "workspace-log-b",
+      capabilityRevision: 2,
+      preparedAt: "2026-08-01T00:00:00.000Z",
+    })),
+  };
   return {
     admin,
+    recovery,
     requestIds,
     aborts,
     application: new WorkspaceAdministrationApplicationService({
       deviceId: "device-a",
       admin,
+      recovery,
       control,
     }),
   };
@@ -228,5 +257,141 @@ describe("WorkspaceAdministrationApplicationService", () => {
       ),
     ).rejects.toBeInstanceOf(WorkspaceBindingCancelledError);
     expect(cancelledHarness.admin.create).not.toHaveBeenCalled();
+  });
+
+  it("owns catalog status, reset impact and preview generation consistency", async () => {
+    const degraded = harness([], {
+      state: "degraded",
+      catalogGeneration: "catalog-a",
+      reason: "broken-generation-link",
+    });
+    await expect(degraded.application.status()).resolves.toEqual({
+      state: "degraded",
+      catalogGeneration: "catalog-a",
+      reason: "broken-generation-link",
+      resetImpact: WORKSPACE_CATALOG_RESET_IMPACT,
+    });
+    await expect(
+      degraded.application.previewReset({
+        expectedCatalogGeneration: "catalog-a",
+        impact: WORKSPACE_CATALOG_RESET_IMPACT,
+      }),
+    ).resolves.toEqual({
+      expectedCatalogGeneration: "catalog-a",
+      impact: WORKSPACE_CATALOG_RESET_IMPACT,
+    });
+    await expect(
+      degraded.application.previewReset({
+        expectedCatalogGeneration: "catalog-other",
+        impact: WORKSPACE_CATALOG_RESET_IMPACT,
+      }),
+    ).rejects.toMatchObject({
+      code: "LOCAL_WORKSPACE_CATALOG_CHANGED",
+      message: "工作区目录世代已经变化，请重新查看恢复影响",
+    });
+    await expect(
+      degraded.application.previewReset({
+        expectedCatalogGeneration: "catalog-a",
+        impact: "different impact",
+      }),
+    ).rejects.toThrow("工作区目录恢复确认内容不完整");
+
+    await expect(harness().application.status()).resolves.toEqual({
+      state: "healthy",
+      catalogGeneration: "catalog-a",
+    });
+  });
+
+  it("owns stable reset identity, confirmation and begin/complete sequencing", async () => {
+    const { application, recovery, requestIds } = harness([], {
+      state: "degraded",
+      catalogGeneration: "catalog-a",
+      reason: "broken-generation-link",
+    });
+    const operation = {
+      outboxId: "outbox-01234567890123456789012345678901",
+      localSeq: 9,
+      operationId: "workspace-operation-reset",
+      inputDigest: `sha256:${"b".repeat(64)}`,
+    };
+    const execution = {
+      operation,
+      confirmationToken: "confirmation-token-with-at-least-32-bytes",
+      confirmationIssuedAt: "2026-08-01T00:00:00.000Z",
+    };
+
+    await application.reset(
+      {
+        expectedCatalogGeneration: "catalog-a",
+        confirmedImpact: WORKSPACE_CATALOG_RESET_IMPACT,
+      },
+      execution,
+    );
+    await application.reset(
+      {
+        expectedCatalogGeneration: "catalog-a",
+        confirmedImpact: WORKSPACE_CATALOG_RESET_IMPACT,
+      },
+      execution,
+    );
+
+    const requestId =
+      "environment-admin:device-a:workspace-operation:outbox-01234567890123456789012345678901:9:workspace-operation-reset:sha256:" +
+      "b".repeat(64);
+    expect(requestIds).toEqual([requestId, requestId]);
+    expect(recovery.beginReset).toHaveBeenCalledTimes(2);
+    expect(recovery.beginReset).toHaveBeenNthCalledWith(
+      1,
+      { expectedCatalogGeneration: "catalog-a" },
+      expect.objectContaining({
+        requestId,
+        confirmation: {
+          kind: "workspace-binding-reset",
+          token: execution.confirmationToken,
+          requestId,
+          catalogGeneration: "catalog-a",
+          issuedAt: execution.confirmationIssuedAt,
+        },
+      }),
+    );
+    expect(recovery.beginReset).toHaveBeenNthCalledWith(
+      2,
+      { expectedCatalogGeneration: "catalog-a" },
+      expect.objectContaining({
+        confirmation: expect.objectContaining({
+          token: execution.confirmationToken,
+          issuedAt: execution.confirmationIssuedAt,
+        }),
+      }),
+    );
+    expect(recovery.completeReset).toHaveBeenCalledTimes(2);
+    expect(recovery.completeReset).toHaveBeenCalledWith(
+      requestId,
+      expect.any(AbortSignal),
+    );
+    expect(recovery.status).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid impact before effects and preserves recovery conflicts", async () => {
+    const degraded = harness();
+    await expect(
+      degraded.application.reset({
+        expectedCatalogGeneration: "catalog-a",
+        confirmedImpact: "different impact",
+      }),
+    ).rejects.toThrow("工作区目录恢复确认内容不完整");
+    expect(degraded.recovery.beginReset).not.toHaveBeenCalled();
+
+    const conflict = Object.assign(new Error("catalog conflict"), {
+      code: "WORKSPACE_CATALOG_CONFLICT",
+    });
+    degraded.recovery.beginReset.mockRejectedValueOnce(conflict);
+    await expect(
+      degraded.application.reset({
+        expectedCatalogGeneration: "catalog-a",
+        confirmedImpact: WORKSPACE_CATALOG_RESET_IMPACT,
+      }),
+    ).rejects.toBe(conflict);
+    expect(degraded.recovery.completeReset).not.toHaveBeenCalled();
   });
 });

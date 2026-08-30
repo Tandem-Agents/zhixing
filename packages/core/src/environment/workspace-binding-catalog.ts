@@ -49,7 +49,7 @@ import {
 } from "./workspace-bindings.js";
 
 const MANIFEST_VERSION = 1;
-const CONFIRMATION_MAX_AGE_MS = 5 * 60_000;
+const CONFIRMATION_MAX_AGE_MS = 15 * 60_000;
 const RESET_RESERVATION_BUDGET: DeviceCapacityBudget = {
   occupancy: {
     memoryReservationBytes: 64 * 1024,

@@ -3,7 +3,9 @@ import path from "node:path";
 import {
   WorkspaceAdministrationApplicationService,
   WorkspaceAdministrationBusinessError,
+  WORKSPACE_CATALOG_RESET_IMPACT,
   type WorkspaceAdministrationApplication,
+  type WorkspaceAdministrationCatalogStatus,
   type WorkspaceControlAuthorization,
   type WorkspaceAdministrationView,
 } from "@zhixing/core/environment/workspace-administration";
@@ -38,14 +40,7 @@ import {
   callLocalWorkspaceHost,
   type LocalWorkspaceOwnerLease,
 } from "./local-workspace-owner.js";
-import { WORKSPACE_CATALOG_RESET_IMPACT } from "./workspace-reset-impact.js";
 import { ExecutorWorkspaceAdministrationControl } from "./local-workspace-control.js";
-import {
-  LocalWorkspaceRecoveryBusinessError,
-  LocalWorkspaceRecoveryService,
-  type LocalWorkspaceCatalogStatus,
-  type LocalWorkspaceRecoveryApplication,
-} from "./local-workspace-recovery.js";
 
 const PAGE_SIZE = 64;
 
@@ -122,8 +117,9 @@ type OperationDecision =
   | { readonly kind: "completed"; readonly result: OperationResult }
   | InfrastructureDecision;
 
-type LocalWorkspaceHostApplications = WorkspaceAdministrationApplication &
-  LocalWorkspaceRecoveryApplication;
+type LocalWorkspaceHostApplications = WorkspaceAdministrationApplication;
+
+export type LocalWorkspaceCatalogStatus = WorkspaceAdministrationCatalogStatus;
 
 export interface LocalWorkspaceClient {
   status(): Promise<LocalWorkspaceCatalogStatus>;
@@ -303,13 +299,12 @@ export class LocalWorkspaceManagementHost {
       return this.#serializeMutation(async () => {
         this.#requireWritable();
         if (request.input.kind === "reset") {
-          const status = await this.#applications.status();
-          if (status.catalogGeneration !== request.input.expectedCatalogGeneration) {
-            throw new LocalWorkspaceRecoveryBusinessError(
-              "LOCAL_WORKSPACE_CATALOG_CHANGED",
-              "工作区目录世代已经变化，请重新查看恢复影响",
-            );
-          }
+          const preview = await this.#applications.previewReset({
+            expectedCatalogGeneration:
+              request.input.expectedCatalogGeneration,
+            impact: request.input.impact,
+          });
+          return this.#outbox.prepare({ kind: "reset", ...preview });
         }
         return this.#outbox.prepare(request.input);
       });
@@ -472,19 +467,15 @@ export class LocalWorkspaceManagementHost {
         );
         return null;
       case "reset": {
-        const requestNonce = [
-          "workspace-operation",
-          this.#outbox.outboxId,
-          operation.localSeq,
-          operation.operationId,
-          operation.inputDigest,
-        ].join(":");
         return this.#applications.reset(
-          input.expectedCatalogGeneration,
-          input.impact,
           {
-            requestNonce,
+            expectedCatalogGeneration: input.expectedCatalogGeneration,
+            confirmedImpact: input.impact,
+          },
+          {
+            operation: execution.operation,
             abort,
+            confirmationIssuedAt: operation.preparedAt,
             ...(operation.confirmationToken
               ? { confirmationToken: operation.confirmationToken }
               : {}),
@@ -614,7 +605,6 @@ function classifyExecutionFailure(
 ): OperationDecision {
   if (
     error instanceof WorkspaceAdministrationBusinessError ||
-    error instanceof LocalWorkspaceRecoveryBusinessError ||
     error instanceof WorkspaceBindingNotFoundError ||
     error instanceof WorkspaceBindingConflictError ||
     error instanceof WorkspaceBindingRevisionError ||
@@ -733,10 +723,6 @@ export function createLocalWorkspaceManagementHost(input: {
   const workspace = new WorkspaceAdministrationApplicationService({
     deviceId: input.management.deviceId,
     admin: input.management.admin,
-    control,
-  });
-  const recovery = new LocalWorkspaceRecoveryService({
-    deviceId: input.management.deviceId,
     recovery: input.management.recovery,
     control,
   });
@@ -751,9 +737,9 @@ export function createLocalWorkspaceManagementHost(input: {
       rename: (command, execution) => workspace.rename(command, execution),
       repath: (command, execution) => workspace.repath(command, execution),
       remove: (command, execution) => workspace.remove(command, execution),
-      status: () => recovery.status(),
-      reset: (generation, impact, authority) =>
-        recovery.reset(generation, impact, authority),
+      status: () => workspace.status(),
+      previewReset: (command) => workspace.previewReset(command),
+      reset: (command, execution) => workspace.reset(command, execution),
     },
     outbox: new LocalWorkspaceOperationOutbox({
       rootDir: path.join(

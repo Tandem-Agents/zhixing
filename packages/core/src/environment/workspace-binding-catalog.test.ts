@@ -176,6 +176,40 @@ describe("WorkspaceBindingCatalog", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () 
     });
     expect(fixture.published.at(-1)).toEqual([]);
   });
+
+  it("accepts the durable preview confirmation for the full fifteen-minute window", async () => {
+    const accepted = await createFixture(corruptLog());
+    await accepted.catalog.initialize();
+    const withinWindow = recoveryControl("reset-within-window", "catalog-initial");
+    await expect(
+      accepted.catalog.beginReset(
+        { expectedCatalogGeneration: "catalog-initial" },
+        {
+          ...withinWindow,
+          confirmation: {
+            ...withinWindow.confirmation,
+            issuedAt: new Date(Date.parse(NOW) - 14 * 60_000).toISOString(),
+          },
+        },
+      ),
+    ).resolves.toMatchObject({ requestId: withinWindow.requestId });
+
+    const expired = await createFixture(corruptLog());
+    await expired.catalog.initialize();
+    const outsideWindow = recoveryControl("reset-outside-window", "catalog-initial");
+    await expect(
+      expired.catalog.beginReset(
+        { expectedCatalogGeneration: "catalog-initial" },
+        {
+          ...outsideWindow,
+          confirmation: {
+            ...outsideWindow.confirmation,
+            issuedAt: new Date(Date.parse(NOW) - 16 * 60_000).toISOString(),
+          },
+        },
+      ),
+    ).rejects.toThrow("expired");
+  });
 });
 
 function corruptLog(): AuthorityCommitLog {

@@ -31,7 +31,6 @@ import {
   defineLocalWorkspaceAssemblyIdentity,
   createExecutorLocalWorkspaceHost,
 } from "./local-workspace-bootstrap.js";
-import { WORKSPACE_CATALOG_RESET_IMPACT } from "./workspace-reset-impact.js";
 import {
   CoreHostConnection,
   defaultCoreHostConnectionDeps,
@@ -42,8 +41,6 @@ import type {
   WorkspaceControlAuthorization,
 } from "@zhixing/core/environment/workspace-administration";
 import type { WorksceneSummary } from "@zhixing/rpc";
-
-export { WORKSPACE_CATALOG_RESET_IMPACT };
 
 export function worksceneCreateRequestIdForLocalWorkspace(
   credential: LocalWorkspaceConsumptionCredential,
