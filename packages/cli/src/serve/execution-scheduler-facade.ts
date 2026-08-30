@@ -195,7 +195,13 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
         staged.state.tasks.delete(taskId);
       },
     };
-    return new ScheduleManagementApplicationService(repository);
+    return new ScheduleManagementApplicationService(repository, {
+      run: ({ taskId, operation }) =>
+        this.base().run(taskId, { operationId: operation.operationId }),
+      abort: async () => {
+        throw new Error("Schedule cancellation is unavailable in assignment staging");
+      },
+    });
   }
 
   #operationId(

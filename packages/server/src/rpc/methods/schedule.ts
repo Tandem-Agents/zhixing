@@ -22,6 +22,8 @@ import {
   SCHEDULE_MANAGEMENT_DELETE_COMMAND,
   SCHEDULE_MANAGEMENT_LIST_QUERY,
   SCHEDULE_MANAGEMENT_UPDATE_COMMAND,
+  SCHEDULE_MANUAL_ABORT_COMMAND,
+  SCHEDULE_MANUAL_RUN_COMMAND,
   ScheduleManagementApplicationError,
   type ScheduleManagementOperation,
 } from "@zhixing/core/scheduler/application";
@@ -208,19 +210,19 @@ export function buildScheduleRunMethod(): MethodEntry {
       if (typeof params.id !== "string") {
         throw RpcErrors.invalidParams("schedule.run requires 'id'");
       }
-      const scheduler = requireScheduler(ctx.server);
       try {
         const operationId = requiredRequestId(params.requestId, "schedule.run");
-        return await scheduler.runTask(
-          params.id,
-          operationId,
-          scheduleControlSource(ctx, operationId),
+        const result = await requireScheduleManagement(ctx.server).command(
+          SCHEDULE_MANUAL_RUN_COMMAND,
+          {
+            kind: "run",
+            taskId: params.id,
+            operation: scheduleManagementOperation(ctx, operationId),
+          },
         );
+        return result.result.result;
       } catch (err) {
-        if (err instanceof Error && err.message.startsWith("Task not found")) {
-          throw RpcErrors.notFound(err.message);
-        }
-        throw err;
+        throw mapScheduleManagementError(err, "schedule.run");
       }
     },
   };
@@ -244,24 +246,25 @@ export function buildScheduleAbortRunMethod(): MethodEntry {
       if (typeof params.runId !== "string") {
         throw RpcErrors.invalidParams("schedule.abortRun requires 'runId'");
       }
-      const scheduler = requireScheduler(ctx.server);
-      if (scheduler.abortRun) {
+      try {
         const operationId = requiredRequestId(
           params.requestId,
           "schedule.abortRun",
         );
+        const result = await requireScheduleManagement(ctx.server).command(
+          SCHEDULE_MANUAL_ABORT_COMMAND,
+          {
+            kind: "abort-run",
+            runId: params.runId,
+            operation: scheduleManagementOperation(ctx, operationId),
+          },
+        );
         return {
-          aborted: await scheduler.abortRun(
-            params.runId,
-            operationId,
-            scheduleControlSource(ctx, operationId),
-          ),
+          aborted: result.result.aborted,
         };
+      } catch (error) {
+        throw mapScheduleManagementError(error, "schedule.abortRun");
       }
-      throw new RpcAppError(
-        RPC_ERROR_CODES.INTERNAL_ERROR,
-        "Scheduler cancellation is unavailable",
-      );
     },
   };
 }
@@ -381,23 +384,15 @@ function mapScheduleManagementError(error: unknown, method: string): unknown {
 
 // ─── 工具 ───
 
-function requireScheduler(server: ServerContext) {
-  if (!server.scheduler) {
-    throw new RpcAppError(
-      RPC_ERROR_CODES.INTERNAL_ERROR,
-      "Scheduler not configured on server",
-    );
-  }
-  return server.scheduler;
-}
-
 function requireScheduleManagement(server: ServerContext): ProductApiDispatcher {
   if (
     !server.productApi ||
     !server.productApi.supports(SCHEDULE_MANAGEMENT_LIST_QUERY) ||
     !server.productApi.supports(SCHEDULE_MANAGEMENT_CREATE_COMMAND) ||
     !server.productApi.supports(SCHEDULE_MANAGEMENT_UPDATE_COMMAND) ||
-    !server.productApi.supports(SCHEDULE_MANAGEMENT_DELETE_COMMAND)
+    !server.productApi.supports(SCHEDULE_MANAGEMENT_DELETE_COMMAND) ||
+    !server.productApi.supports(SCHEDULE_MANUAL_RUN_COMMAND) ||
+    !server.productApi.supports(SCHEDULE_MANUAL_ABORT_COMMAND)
   ) {
     throw new RpcAppError(
       RPC_ERROR_CODES.INTERNAL_ERROR,

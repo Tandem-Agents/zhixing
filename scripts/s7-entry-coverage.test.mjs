@@ -3471,6 +3471,13 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/server/src/rpc/methods/schedule.ts",
+      (text) => `${text}\nserver.scheduler.runTask("task");`,
+    )).join("\n"),
+    /Schedule RPC management binding bypasses its Product API application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/schedule.ts",
       (text) => text.replace(
         /case "system-task":\s*return error;/u,
         'case "system-task":\n      return RpcErrors.invalidParams(error.message);',
@@ -3504,6 +3511,26 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       (text) => `${text}\nthrow new Error("Cannot modify system task");`,
     )).join("\n"),
     /Schedule facades or Correctness adapter retain a second management decision path/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/scheduler/facade.ts",
+      (text) => text.replace(
+        "return result.result;",
+        "return this.scheduler.runTask(id);",
+      ),
+    )).join("\n"),
+    /Schedule facades or Correctness adapter retain a second management decision path/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/scheduler/application.ts",
+      (text) => text.replace(
+        "    SCHEDULE_MANUAL_ABORT_COMMAND,",
+        "",
+      ),
+    )).join("\n"),
+    /Schedule definition management lacks one domain application owner/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(

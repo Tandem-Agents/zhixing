@@ -3,7 +3,7 @@
  *
  * 所有调度消费者（schedule 工具、turn-context、cli 命令）只依赖此接口，不直接 new Scheduler、
  * 也不直接碰 RPC：
- * - LocalSchedulerFacade —— 直调本进程 SchedulerBackend（核心宿主内部用）。
+ * - LocalSchedulerFacade —— 经同一 Schedule application 调用本机权威。
  * - RpcSchedulerFacade —— 经 RPC 接入核心宿主（cli 用，在 cli 包实现，叠加 ensure）。
  */
 
@@ -90,27 +90,17 @@ export type ScheduleMutationStager = (input: {
 }) => Promise<{ readonly seq: number; readonly taskId?: string }>;
 
 /**
- * Temporary host-owned scheduler runtime bridge.
+ * Temporary host-owned scheduler runtime/event bridge.
  *
  * Definition management is owned by ScheduleManagementApplication. This
- * surface intentionally keeps only start/stop and run control until A5-11b
- * migrates the scheduler runtime lifecycle.
+ * Manual run/cancel has moved to ScheduleManagementApplication. This surface
+ * intentionally keeps only lifecycle and event projection until A5-11b2.
  */
 export interface SchedulerBackend {
   start(): Promise<void>;
   stop(): Promise<void>;
   listTasks(): TaskView[];
-  runTask(
-    id: string,
-    requestId?: string,
-    source?: SchedulerControlSource,
-  ): Promise<AgentTurnResult>;
   getTask(id: string): TaskView | undefined;
-  abortRun?(
-    runId: string,
-    requestId?: string,
-    source?: SchedulerControlSource,
-  ): Promise<boolean> | boolean;
   readonly activeTaskCount?: number;
 }
 
@@ -194,10 +184,13 @@ export class LocalSchedulerFacade implements SchedulerFacade {
   }
 
   async run(id: string, context?: ScheduleMutationContext): Promise<AgentTurnResult> {
-    return this.scheduler.runTask(
-      id,
-      requireOperationId(context, "Schedule run"),
-    );
+    const result = await this.management.execute({
+      kind: "run",
+      taskId: id,
+      operation: { operationId: requireOperationId(context, "Schedule run") },
+    });
+    if (result.kind !== "ran") throw new TypeError("Schedule run returned wrong result");
+    return result.result;
   }
 
   #observe(task: TaskView): void {

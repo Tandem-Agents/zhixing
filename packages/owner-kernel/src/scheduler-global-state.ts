@@ -14,6 +14,7 @@ import type {
   ScheduleWriteMutation,
 } from "@zhixing/core/contracts";
 import type {
+  ScheduleManualExecutionPort,
   ScheduleManagementOperation,
   ScheduleManagementRepository,
 } from "@zhixing/core/scheduler/application";
@@ -143,7 +144,7 @@ export class AnchorSchedulerGlobalStateAdapter implements GlobalStatePort {
  * admitted by GlobalState while execution controls remain owned by JobJournal.
  */
 export class AnchorSchedulerProductPort
-  implements SchedulerBackend, ScheduleManagementRepository
+  implements SchedulerBackend, ScheduleManagementRepository, ScheduleManualExecutionPort
 {
   constructor(
     private readonly scheduler: AnchorScheduler,
@@ -240,15 +241,14 @@ export class AnchorSchedulerProductPort
     );
   }
 
-  runTask(
-    id: string,
-    requestId?: string,
-    source?: SchedulerControlSource,
-  ) {
+  run(input: {
+    readonly taskId: string;
+    readonly operation: ScheduleManagementOperation;
+  }) {
     return this.scheduler.runTask(
-      id,
-      requiredRequestId(requestId, "schedule run"),
-      source,
+      input.taskId,
+      requiredRequestId(input.operation.operationId, "schedule run"),
+      schedulerManagementSource(input.operation),
     );
   }
 
@@ -256,15 +256,14 @@ export class AnchorSchedulerProductPort
     return this.scheduler.getTask(id);
   }
 
-  abortRun(
-    runId: string,
-    requestId?: string,
-    source?: SchedulerControlSource,
-  ) {
+  abort(input: {
+    readonly runId: string;
+    readonly operation: ScheduleManagementOperation;
+  }) {
     return this.scheduler.abortRun(
-      runId,
-      requiredRequestId(requestId, "schedule cancellation"),
-      source,
+      input.runId,
+      requiredRequestId(input.operation.operationId, "schedule cancellation"),
+      schedulerManagementSource(input.operation),
     );
   }
 

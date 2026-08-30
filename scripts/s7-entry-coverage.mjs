@@ -3453,11 +3453,18 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   if (
     !scheduleApplication.includes("class ScheduleManagementApplicationService") ||
     !scheduleApplication.includes("interface ScheduleManagementRepository") ||
+    !scheduleApplication.includes("interface ScheduleManualExecutionPort") ||
     !scheduleApplication.includes("draft.enabled ?? true") ||
     !scheduleApplication.includes('draft.priority ?? "normal"') ||
     !scheduleApplication.includes("validateTaskDefinition({") ||
     scheduleApplication.split("normalizeOperation(command.operation, true)").length - 1 !== 2 ||
-    scheduleApplication.split('requireString(command.taskId, "Schedule task id")').length - 1 !== 2 ||
+    scheduleApplication.split("normalizeOperation(command.operation, false)").length - 1 !== 3 ||
+    scheduleApplication.split('requireString(command.taskId, "Schedule task id")').length - 1 !== 3 ||
+    scheduleApplication.split("SCHEDULE_MANUAL_RUN_COMMAND").length - 1 !== 3 ||
+    scheduleApplication.split("SCHEDULE_MANUAL_ABORT_COMMAND").length - 1 !== 3 ||
+    !scheduleApplication.includes("await this.#requiredUserTask(taskId);") ||
+    !scheduleApplication.includes("await this.execution.run({ taskId, operation })") ||
+    !scheduleApplication.includes("await this.execution.abort({ runId, operation })") ||
     scheduleApplication.includes("nonEmpty(command.taskId") ||
     !scheduleApplication.includes("if (task.system)") ||
     !scheduleApplication.includes("createScheduleManagementProductApiContribution") ||
@@ -3471,6 +3478,10 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !scheduleHandler.includes("SCHEDULE_MANAGEMENT_CREATE_COMMAND") ||
     !scheduleHandler.includes("SCHEDULE_MANAGEMENT_UPDATE_COMMAND") ||
     !scheduleHandler.includes("SCHEDULE_MANAGEMENT_DELETE_COMMAND") ||
+    !scheduleHandler.includes("SCHEDULE_MANUAL_RUN_COMMAND") ||
+    !scheduleHandler.includes("SCHEDULE_MANUAL_ABORT_COMMAND") ||
+    scheduleHandler.includes("function requireScheduler(") ||
+    /\.scheduler\.(?:runTask|abortRun)\(/u.test(scheduleHandler) ||
     !/case "system-task":\s*return error;/u.test(scheduleHandler) ||
     !/case "invalid-command":\s*return method === "schedule\.create"\s*\?/u.test(
       scheduleHandler,
@@ -3484,13 +3495,16 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   if (
     !scheduleFacade.includes("this.management.execute({") ||
     !scheduleFacade.includes("this.management.query({ kind: \"list\" })") ||
-    /this\.scheduler\.(?:createTask|updateTask|deleteTask)\(/u.test(scheduleFacade) ||
-    !executionSchedule.includes("new ScheduleManagementApplicationService(repository)") ||
+    !scheduleFacade.includes('kind: "run"') ||
+    /this\.scheduler\.(?:createTask|updateTask|deleteTask|runTask|abortRun)\(/u.test(scheduleFacade) ||
+    !executionSchedule.includes("new ScheduleManagementApplicationService(repository, {") ||
     /Cannot modify system task|\.\.\.structuredClone\(patch\)/u.test(executionSchedule) ||
-    !scheduleCorrectness.includes("implements SchedulerBackend, ScheduleManagementRepository") ||
+    !scheduleCorrectness.includes("implements SchedulerBackend, ScheduleManagementRepository, ScheduleManualExecutionPort") ||
     !scheduleCorrectness.includes("commitCreate(input:") ||
     !scheduleCorrectness.includes("commitUpdate(input:") ||
     !scheduleCorrectness.includes("commitDelete(input:") ||
+    !scheduleCorrectness.includes("return this.scheduler.runTask(") ||
+    !scheduleCorrectness.includes("return this.scheduler.abortRun(") ||
     !scheduleCorrectness.includes("return this.scheduler.listTaskProjections();") ||
     scheduleCorrectness.includes("async list(): Promise<readonly TaskView[]> {\n    return this.scheduler.listTasks();")
   ) {
@@ -3501,9 +3515,12 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     scheduleTool.includes("enabled: true") ||
     scheduleTool.includes('?? "normal"') ||
     !rpcSchedule.includes('client.request<TaskView>("schedule.create"') ||
+    !rpcSchedule.includes('client.request<AgentTurnResult>("schedule.run"') ||
     !composition.includes("createScheduleManagementProductApiContribution(schedulerManagement)") ||
     composition.split("createScheduleManagementProductApiContribution(").length - 1 !== 1 ||
-    composition.split("new ScheduleManagementApplicationService(").length - 1 !== 1
+    composition.split("new ScheduleManagementApplicationService(").length - 1 !== 1 ||
+    !composition.includes("const schedulerManualExecution: ScheduleManualExecutionPort") ||
+    /schedulerBackend[\s\S]*?(?:runTask|abortRun)\s*:/u.test(composition)
   ) {
     failures.push("Schedule consumers do not converge on the one management application");
   }

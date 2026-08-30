@@ -122,16 +122,28 @@ describe("AnchorSchedulerProductPort", () => {
       7,
     );
 
-    const runtimeSource = {
-      connectionId: surface.connectionId,
-      ingress: { kind: "first-party" as const, ...surface },
-    };
-    await port.runTask("task-1", "run-1", runtimeSource);
-    await port.abortRun("job-1", "cancel-1", runtimeSource);
+    await port.run({
+      taskId: "task-1",
+      operation: { operationId: "run-1", surface },
+    });
+    await port.abort({
+      runId: "job-1",
+      operation: { operationId: "cancel-1", surface },
+    });
 
     expect(mutate).not.toHaveBeenCalled();
-    expect(runTask).toHaveBeenCalledWith("task-1", "run-1", runtimeSource);
-    expect(abortRun).toHaveBeenCalledWith("job-1", "cancel-1", runtimeSource);
+    const expectedSource = {
+      connectionId: surface.connectionId,
+      ingress: expect.objectContaining({
+        kind: "first-party",
+        surfacePrincipal: surface.surfacePrincipal,
+        deviceId: surface.deviceId,
+        ingressId: surface.ingressId,
+        receivedAt: surface.receivedAt,
+      }),
+    };
+    expect(runTask).toHaveBeenCalledWith("task-1", "run-1", expectedSource);
+    expect(abortRun).toHaveBeenCalledWith("job-1", "cancel-1", expectedSource);
   });
 
   it("rejects revisionless writes before reaching GlobalState", async () => {

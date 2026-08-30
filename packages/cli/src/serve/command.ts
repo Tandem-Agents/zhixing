@@ -49,6 +49,7 @@ import {
   createScheduleManagementProductApiContribution,
   SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET,
   ScheduleManagementApplicationService,
+  type ScheduleManualExecutionPort,
   type ScheduleManagementRepository,
 } from "@zhixing/core/scheduler/application";
 import {
@@ -395,13 +396,14 @@ async function runServerProcess(
     start: () => currentSchedulerProduct().start(),
     stop: () => currentSchedulerProduct().stop(),
     listTasks: () => currentSchedulerProduct().listTasks(),
-    runTask: (...args) => currentSchedulerProduct().runTask(...args),
     getTask: (id) => currentSchedulerProduct().getTask(id),
-    abortRun: (runId, requestId, source) =>
-      currentSchedulerProduct().abortRun?.(runId, requestId, source) ?? false,
     get activeTaskCount() {
       return currentSchedulerProduct().activeTaskCount;
     },
+  };
+  const schedulerManualExecution: ScheduleManualExecutionPort = {
+    run: (input) => currentSchedulerProduct().run(input),
+    abort: (input) => currentSchedulerProduct().abort(input),
   };
   const schedulerManagementRepository: ScheduleManagementRepository = {
     list: () => currentSchedulerProduct().list(),
@@ -412,6 +414,7 @@ async function runServerProcess(
   };
   const schedulerManagement = new ScheduleManagementApplicationService(
     schedulerManagementRepository,
+    schedulerManualExecution,
   );
   // schedule 工具经门面接入锚点唯一 scheduler 权威。实例化落点在权威创建后；
   // per-runtime 工具只持 getter，不持第二套 scheduler 状态。

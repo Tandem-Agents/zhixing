@@ -49,6 +49,10 @@ describe("LocalSchedulerFacade", () => {
     const facade = new LocalSchedulerFacade(
       new ScheduleManagementApplicationService(
         managementRepository(scheduler),
+        {
+          run: ({ taskId }) => scheduler.runTask(taskId),
+          abort: async () => false,
+        },
       ),
       scheduler,
       eventBus,

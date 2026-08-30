@@ -8,6 +8,7 @@ import {
 } from "../product-api/catalog.js";
 import { validateTaskDefinition } from "../protocol/job.js";
 import type { TaskPatch, TaskSpec, TaskView } from "./facade.js";
+import type { AgentTurnResult } from "./types.js";
 
 /** User-authored schedule definition before domain defaults are applied. */
 export type ScheduleTaskDraft = Omit<TaskSpec, "enabled" | "priority"> & {
@@ -48,6 +49,16 @@ export type ScheduleManagementCommand =
       readonly kind: "delete";
       readonly taskId: string;
       readonly operation: ScheduleManagementOperation;
+    }
+  | {
+      readonly kind: "run";
+      readonly taskId: string;
+      readonly operation: ScheduleManagementOperation;
+    }
+  | {
+      readonly kind: "abort-run";
+      readonly runId: string;
+      readonly operation: ScheduleManagementOperation;
     };
 
 export interface ScheduleManagementView {
@@ -57,7 +68,9 @@ export interface ScheduleManagementView {
 export type ScheduleManagementCommandResult =
   | { readonly kind: "created"; readonly task: TaskView }
   | { readonly kind: "updated"; readonly task: TaskView }
-  | { readonly kind: "deleted"; readonly taskId: string };
+  | { readonly kind: "deleted"; readonly taskId: string }
+  | { readonly kind: "ran"; readonly result: AgentTurnResult }
+  | { readonly kind: "run-aborted"; readonly runId: string; readonly aborted: boolean };
 
 export interface ScheduleManagementApplication {
   query(query: ScheduleManagementQuery): Promise<ScheduleManagementView>;
@@ -87,6 +100,22 @@ export interface ScheduleManagementRepository {
   }): Promise<void>;
 }
 
+/**
+ * Correctness/effect port for an already-admitted manual schedule control.
+ * Job Journal, Assignment, cancellation and response-loss replay stay behind
+ * this boundary; it owns no user-task visibility or public result semantics.
+ */
+export interface ScheduleManualExecutionPort {
+  run(input: {
+    readonly taskId: string;
+    readonly operation: ScheduleManagementOperation;
+  }): Promise<AgentTurnResult>;
+  abort(input: {
+    readonly runId: string;
+    readonly operation: ScheduleManagementOperation;
+  }): Promise<boolean>;
+}
+
 export type ScheduleManagementApplicationErrorCode =
   | "invalid-command"
   | "not-found"
@@ -107,7 +136,10 @@ export class ScheduleManagementApplicationError extends Error {
 export class ScheduleManagementApplicationService
   implements ScheduleManagementApplication
 {
-  constructor(private readonly repository: ScheduleManagementRepository) {}
+  constructor(
+    private readonly repository: ScheduleManagementRepository,
+    private readonly execution: ScheduleManualExecutionPort,
+  ) {}
 
   async query(query: ScheduleManagementQuery): Promise<ScheduleManagementView> {
     if (query.kind !== "list") throw invalid("Unsupported Schedule management query");
@@ -163,6 +195,30 @@ export class ScheduleManagementApplicationService
           throw mapRepositoryError(error);
         }
       }
+      case "run": {
+        const taskId = requireString(command.taskId, "Schedule task id");
+        const operation = normalizeOperation(command.operation, false);
+        await this.#requiredUserTask(taskId);
+        try {
+          const result = await this.execution.run({ taskId, operation });
+          return Object.freeze({
+            kind: "ran" as const,
+            result: structuredClone(result),
+          });
+        } catch (error) {
+          throw mapRepositoryError(error);
+        }
+      }
+      case "abort-run": {
+        const runId = requireString(command.runId, "Schedule run id");
+        const operation = normalizeOperation(command.operation, false);
+        try {
+          const aborted = await this.execution.abort({ runId, operation });
+          return Object.freeze({ kind: "run-aborted" as const, runId, aborted });
+        } catch (error) {
+          throw mapRepositoryError(error);
+        }
+      }
     }
   }
 
@@ -208,12 +264,28 @@ export const SCHEDULE_MANAGEMENT_DELETE_COMMAND = defineProductApiCommand<
   never
 >("schedule-management.command.delete", []);
 
+export const SCHEDULE_MANUAL_RUN_COMMAND = defineProductApiCommand<
+  "schedule-management.command.run",
+  Extract<ScheduleManagementCommand, { readonly kind: "run" }>,
+  Extract<ScheduleManagementCommandResult, { readonly kind: "ran" }>,
+  never
+>("schedule-management.command.run", []);
+
+export const SCHEDULE_MANUAL_ABORT_COMMAND = defineProductApiCommand<
+  "schedule-management.command.abort-run",
+  Extract<ScheduleManagementCommand, { readonly kind: "abort-run" }>,
+  Extract<ScheduleManagementCommandResult, { readonly kind: "run-aborted" }>,
+  never
+>("schedule-management.command.abort-run", []);
+
 export const SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET = defineProductApiExactSet({
   operations: [
     SCHEDULE_MANAGEMENT_LIST_QUERY,
     SCHEDULE_MANAGEMENT_CREATE_COMMAND,
     SCHEDULE_MANAGEMENT_UPDATE_COMMAND,
     SCHEDULE_MANAGEMENT_DELETE_COMMAND,
+    SCHEDULE_MANUAL_RUN_COMMAND,
+    SCHEDULE_MANUAL_ABORT_COMMAND,
   ],
   factEvents: [],
 });
@@ -245,6 +317,20 @@ export function createScheduleManagementProductApiContribution(
         result: await application.execute(command) as Extract<
           ScheduleManagementCommandResult,
           { readonly kind: "deleted" }
+        >,
+        facts: [],
+      })),
+      bindProductApiOperation(SCHEDULE_MANUAL_RUN_COMMAND, async (command) => ({
+        result: await application.execute(command) as Extract<
+          ScheduleManagementCommandResult,
+          { readonly kind: "ran" }
+        >,
+        facts: [],
+      })),
+      bindProductApiOperation(SCHEDULE_MANUAL_ABORT_COMMAND, async (command) => ({
+        result: await application.execute(command) as Extract<
+          ScheduleManagementCommandResult,
+          { readonly kind: "run-aborted" }
         >,
         facts: [],
       })),

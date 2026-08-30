@@ -38,8 +38,10 @@ import {
 } from "../methods/skill.js";
 import {
   buildScheduleCreateMethod,
+  buildScheduleAbortRunMethod,
   buildScheduleDeleteMethod,
   buildScheduleListMethod,
+  buildScheduleRunMethod,
   buildScheduleUpdateMethod,
 } from "../methods/schedule.js";
 import { RpcDispatcher } from "../dispatcher.js";
@@ -143,6 +145,8 @@ async function dispatchScheduleRequest(input: {
     buildScheduleCreateMethod(),
     buildScheduleUpdateMethod(),
     buildScheduleDeleteMethod(),
+    buildScheduleRunMethod(),
+    buildScheduleAbortRunMethod(),
   ]);
   const sendSuccess = vi.fn();
   const sendError = vi.fn();
@@ -521,7 +525,14 @@ describe("schedule management Product API", () => {
         }
         if (command.kind === "create") return { kind: "created", task };
         if (command.kind === "update") return { kind: "updated", task };
-        return { kind: "deleted", taskId: command.taskId };
+        if (command.kind === "delete") return { kind: "deleted", taskId: command.taskId };
+        if (command.kind === "run") {
+          return {
+            kind: "ran",
+            result: { status: "ok", output: "ran", durationMs: 3 },
+          };
+        }
+        return { kind: "run-aborted", runId: command.runId, aborted: command.runId !== "ghost" };
       },
     };
   }
@@ -549,7 +560,10 @@ describe("schedule management Product API", () => {
         tasks.delete(taskId);
       },
     };
-    return new ScheduleManagementApplicationService(repository);
+    return new ScheduleManagementApplicationService(repository, {
+      run: async () => ({ status: "ok", output: "ran", durationMs: 3 }),
+      abort: async ({ runId }) => runId !== "ghost",
+    });
   }
 
   function makeScheduleContext(application: ScheduleManagementApplication) {
@@ -571,7 +585,7 @@ describe("schedule management Product API", () => {
     } as never;
   }
 
-  it("binds list/create/update/delete only through one dispatcher and stable surface identity", async () => {
+  it("binds all six operations only through one dispatcher and stable surface identity", async () => {
     const application = makeApplication();
     const ctx = makeScheduleContext(application);
     await expect(call(buildScheduleListMethod(), {}, ctx)).resolves.toEqual([task]);
@@ -592,6 +606,14 @@ describe("schedule management Product API", () => {
       id: task.id,
       taskRevision: 2,
     }, ctx)).resolves.toBeUndefined();
+    await expect(call(buildScheduleRunMethod(), {
+      requestId: "run-1",
+      id: task.id,
+    }, ctx)).resolves.toEqual({ status: "ok", output: "ran", durationMs: 3 });
+    await expect(call(buildScheduleAbortRunMethod(), {
+      requestId: "abort-1",
+      runId: "job-1",
+    }, ctx)).resolves.toEqual({ aborted: true });
 
     expect(application.calls).toMatchObject([
       ["query", { kind: "list" }],
@@ -609,7 +631,56 @@ describe("schedule management Product API", () => {
       }],
       ["execute", { kind: "update", taskId: "task-1" }],
       ["execute", { kind: "delete", taskId: "task-1" }],
+      ["execute", {
+        kind: "run",
+        taskId: "task-1",
+        operation: { operationId: "run-1" },
+      }],
+      ["execute", {
+        kind: "abort-run",
+        runId: "job-1",
+        operation: { operationId: "abort-1" },
+      }],
     ]);
+  });
+
+  it("preserves run not-found and idempotent ghost abort through the real dispatcher", async () => {
+    const application = makeRealApplication([task]);
+    const runMissing = await dispatchScheduleRequest({
+      method: "schedule.run",
+      params: { requestId: "run-missing", id: "missing" },
+      application,
+    });
+    expect(runMissing.sendError).toHaveBeenCalledWith("schedule-wire", {
+      code: RPC_ERROR_CODES.NOT_FOUND,
+      message: "Task not found: missing",
+    });
+
+    const abortGhost = await dispatchScheduleRequest({
+      method: "schedule.abortRun",
+      params: { requestId: "abort-ghost", runId: "ghost" },
+      application,
+    });
+    expect(abortGhost.sendSuccess).toHaveBeenCalledWith("schedule-wire", {
+      aborted: false,
+    });
+
+    const systemTask: TaskView = {
+      ...task,
+      id: "system",
+      system: true,
+      action: { kind: "system", handler: "__transcript-gc" },
+    };
+    const runSystem = await dispatchScheduleRequest({
+      method: "schedule.run",
+      params: { requestId: "run-system", id: "system" },
+      application: makeRealApplication([systemTask]),
+    });
+    expect(runSystem.sendError).toHaveBeenCalledWith("schedule-wire", {
+      code: RPC_ERROR_CODES.INTERNAL_ERROR,
+      message: "Internal error",
+      data: { message: "Cannot modify system task: system" },
+    });
   });
 
   it("preserves binding errors and fails closed without the contribution", async () => {

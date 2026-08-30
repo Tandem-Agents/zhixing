@@ -369,11 +369,12 @@ describe("AnchorScheduler authority", () => {
   it("publishes the durable manual job identity before returning its result", async () => {
     const journal = new MemoryJobJournal();
     let accepted: { taskId: string; jobRunId: string; name: string } | undefined;
+    const activateUserJob = vi.fn(async ({ occurrence }: { occurrence: JobOccurrence }) => {
+      journal.setState(occurrence.jobRunId, "committed");
+    });
     const { scheduler, eventBus } = fixture({
       journals: new Map([["task-1", journal]]),
-      activateUserJob: async ({ occurrence }) => {
-        journal.setState(occurrence.jobRunId, "committed");
-      },
+      activateUserJob,
     });
     journal.definition = {
       taskId: "task-1",
@@ -408,6 +409,10 @@ describe("AnchorScheduler authority", () => {
       name: "daily",
     });
     expect(result.status).toBe("ok");
+    await expect(scheduler.runTask("task-1", "manual-1")).resolves.toEqual(result);
+    expect(journal.controlRuns).toEqual(new Map([["manual-1", "job:manual-1"]]));
+    expect(journal.triggerCalls).toHaveLength(1);
+    expect(activateUserJob).toHaveBeenCalledOnce();
     const readsAfterCompletion = journal.currentState.mock.calls.length;
     await new Promise((resolve) => setTimeout(resolve, 120));
     expect(journal.currentState).toHaveBeenCalledTimes(readsAfterCompletion);

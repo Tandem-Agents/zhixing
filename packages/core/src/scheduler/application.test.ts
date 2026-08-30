@@ -4,8 +4,11 @@ import {
   SCHEDULE_MANAGEMENT_CREATE_COMMAND,
   SCHEDULE_MANAGEMENT_LIST_QUERY,
   SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET,
+  SCHEDULE_MANUAL_ABORT_COMMAND,
+  SCHEDULE_MANUAL_RUN_COMMAND,
   ScheduleManagementApplicationError,
   ScheduleManagementApplicationService,
+  type ScheduleManualExecutionPort,
   type ScheduleManagementRepository,
 } from "./application.js";
 import { ProductApiDispatcher } from "../product-api/catalog.js";
@@ -108,10 +111,20 @@ function repository(initial: TaskView[] = []) {
   return { port, tasks, commits };
 }
 
+function manualExecution(): ScheduleManualExecutionPort & {
+  readonly run: ReturnType<typeof vi.fn>;
+  readonly abort: ReturnType<typeof vi.fn>;
+} {
+  return {
+    run: vi.fn(async () => ({ status: "ok" as const, output: "done", durationMs: 2 })),
+    abort: vi.fn(async ({ runId }: { readonly runId: string }) => runId !== "ghost"),
+  };
+}
+
 describe("ScheduleManagementApplicationService", () => {
   it("owns create defaults, validation, stable replay and committed projection", async () => {
     const repo = repository();
-    const application = new ScheduleManagementApplicationService(repo.port);
+    const application = new ScheduleManagementApplicationService(repo.port, manualExecution());
     const command = {
       kind: "create" as const,
       draft: {
@@ -147,7 +160,7 @@ describe("ScheduleManagementApplicationService", () => {
       action: { kind: "system", handler: "__transcript-gc" },
     });
     const repo = repository([system, user]);
-    const application = new ScheduleManagementApplicationService(repo.port);
+    const application = new ScheduleManagementApplicationService(repo.port, manualExecution());
 
     await expect(application.query({ kind: "list" })).resolves.toEqual({ tasks: [user] });
     const update = {
@@ -229,7 +242,7 @@ describe("ScheduleManagementApplicationService", () => {
 
   it("contributes the finite Product API exact-set to one dispatcher", async () => {
     const repo = repository();
-    const application = new ScheduleManagementApplicationService(repo.port);
+    const application = new ScheduleManagementApplicationService(repo.port, manualExecution());
     const dispatcher = new ProductApiDispatcher(
       SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET,
       [createScheduleManagementProductApiContribution(application)],
@@ -245,12 +258,78 @@ describe("ScheduleManagementApplicationService", () => {
       },
       operation: { operationId: "product-create" },
     })).resolves.toMatchObject({ result: { kind: "created" }, facts: [] });
+    await expect(dispatcher.command(SCHEDULE_MANUAL_RUN_COMMAND, {
+      kind: "run",
+      taskId: "missing",
+      operation: { operationId: "product-run" },
+    })).rejects.toMatchObject({ code: "not-found" });
+    await expect(dispatcher.command(SCHEDULE_MANUAL_ABORT_COMMAND, {
+      kind: "abort-run",
+      runId: "ghost",
+      operation: { operationId: "product-abort" },
+    })).resolves.toEqual({
+      result: { kind: "run-aborted", runId: "ghost", aborted: false },
+      facts: [],
+    });
+  });
+
+  it("owns manual run admission, stable execution identity and ghost cancellation result", async () => {
+    const user = view("user", 3);
+    const system = view("system", 1, {
+      system: true,
+      action: { kind: "system", handler: "__transcript-gc" },
+    });
+    const repo = repository([user, system]);
+    const execution = manualExecution();
+    const application = new ScheduleManagementApplicationService(repo.port, execution);
+
+    await expect(application.execute({
+      kind: "run",
+      taskId: "user",
+      operation: { operationId: "run-1" },
+    })).resolves.toEqual({
+      kind: "ran",
+      result: { status: "ok", output: "done", durationMs: 2 },
+    });
+    expect(execution.run).toHaveBeenCalledWith({
+      taskId: "user",
+      operation: { operationId: "run-1" },
+    });
+    await expect(application.execute({
+      kind: "run",
+      taskId: "missing",
+      operation: { operationId: "run-missing" },
+    })).rejects.toMatchObject({ code: "not-found", message: "Task not found: missing" });
+    await expect(application.execute({
+      kind: "run",
+      taskId: "system",
+      operation: { operationId: "run-system" },
+    })).rejects.toMatchObject({
+      code: "system-task",
+      message: "Cannot modify system task: system",
+    });
+    expect(execution.run).toHaveBeenCalledOnce();
+
+    await expect(application.execute({
+      kind: "abort-run",
+      runId: "ghost",
+      operation: { operationId: "abort-ghost" },
+    })).resolves.toEqual({ kind: "run-aborted", runId: "ghost", aborted: false });
+    await expect(application.execute({
+      kind: "abort-run",
+      runId: "job-1",
+      operation: { operationId: "abort-1" },
+    })).resolves.toEqual({ kind: "run-aborted", runId: "job-1", aborted: true });
+    expect(execution.abort).toHaveBeenNthCalledWith(1, {
+      runId: "ghost",
+      operation: { operationId: "abort-ghost" },
+    });
   });
 
   it("rejects invalid identity before I/O and delegates revision CAS for replay-safe conflicts", async () => {
     const repo = repository([view("user", 2)]);
     const commit = vi.spyOn(repo.port, "commitUpdate");
-    const application = new ScheduleManagementApplicationService(repo.port);
+    const application = new ScheduleManagementApplicationService(repo.port, manualExecution());
     await expect(application.execute({
       kind: "update",
       taskId: "user",
