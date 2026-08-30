@@ -11,6 +11,12 @@ import {
   SkillCatalogApplicationError,
   type SkillCatalogApplication,
 } from "@zhixing/core/skills/catalog";
+import {
+  createTrustAdministrationProductApiContribution,
+  TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET,
+  TrustAdministrationApplicationError,
+  type TrustAdministrationApplication,
+} from "@zhixing/core/trust-administration";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import {
   buildTrustListMethod,
@@ -25,10 +31,8 @@ import { RpcDispatcher } from "../dispatcher.js";
 import { HandlerRegistry } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 import type { ServerContext } from "../../context.js";
-import type { TrustDirectory } from "../../runtime/management-directories.js";
 
 function makeCtx(slots: {
-  trust?: TrustDirectory;
   productApi?: ProductApiDispatcher;
   broadcastAll?: (method: string, params: unknown) => void;
 }) {
@@ -79,13 +83,80 @@ async function dispatchSkillRequest(input: {
   return { sendSuccess, sendError };
 }
 
+async function dispatchTrustRequest(input: {
+  readonly method: string;
+  readonly params?: unknown;
+  readonly productApi: ProductApiDispatcher;
+  readonly authenticated?: boolean;
+}) {
+  const registry = new HandlerRegistry();
+  registry.registerAll([buildTrustListMethod(), buildTrustRevokeMethod()]);
+  const sendSuccess = vi.fn();
+  const sendError = vi.fn();
+  const dispatcher = new RpcDispatcher({
+    registry,
+    server: { productApi: input.productApi } as ServerContext,
+  });
+  await dispatcher.handleMessage({
+    id: 1,
+    authenticated: input.authenticated ?? true,
+    loopback: true,
+    closed: false,
+    clientInfo: { id: "trust-management-test" },
+    sendSuccess,
+    sendError,
+    notify: vi.fn(),
+    close: vi.fn(),
+    onClose: () => () => undefined,
+  }, JSON.stringify({
+    jsonrpc: "2.0",
+    id: "trust-wire",
+    method: input.method,
+    params: input.params,
+  }));
+  return { sendSuccess, sendError };
+}
+
 describe("trust.*", () => {
-  it("list 透传目录;revoke 不存在 NOT_FOUND、存在 revoked:true", async () => {
+  function makeProductApi(
+    application: TrustAdministrationApplication,
+  ): ProductApiDispatcher {
+    return new ProductApiDispatcher(TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET, [
+      createTrustAdministrationProductApiContribution(application),
+    ]);
+  }
+
+  function makeTrust(): TrustAdministrationApplication & { calls: unknown[] } {
+    const calls: unknown[] = [];
+    return {
+      calls,
+      async query(query) {
+        calls.push(["query", query]);
+        return { rules: [{ id: "r1", scope: "global" }] as never };
+      },
+      async execute(command) {
+        calls.push(["execute", command]);
+        if (command.ruleId === "ghost") {
+          throw new TrustAdministrationApplicationError(
+            "not-found",
+            `Trust rule not found: ${command.ruleId}`,
+          );
+        }
+        return {
+          revoked: true,
+          fact: {
+            kind: "trust-administration-rule-revoked",
+            ruleId: command.ruleId,
+          },
+        };
+      },
+    };
+  }
+
+  it("list/revoke 只经同一 Product API;不存在保持 NOT_FOUND", async () => {
     const rules = [{ id: "r1", scope: "global" }];
-    const revoke = vi.fn(async (id: string) => id === "r1");
-    const ctx = makeCtx({
-      trust: { list: async () => rules, revoke } as unknown as TrustDirectory,
-    });
+    const trust = makeTrust();
+    const ctx = makeCtx({ productApi: makeProductApi(trust) });
 
     expect(await call(buildTrustListMethod(), {}, ctx)).toEqual({ rules });
     expect(await call(buildTrustRevokeMethod(), { ruleId: "r1" }, ctx)).toEqual({
@@ -97,6 +168,60 @@ describe("trust.*", () => {
     await expect(
       call(buildTrustRevokeMethod(), {}, ctx),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    expect(trust.calls).toEqual([
+      ["query", { kind: "list", conversationId: undefined }],
+      ["execute", { kind: "revoke", ruleId: "r1", conversationId: undefined }],
+      ["execute", { kind: "revoke", ruleId: "ghost", conversationId: undefined }],
+    ]);
+  });
+
+  it("fails closed when the Host did not contribute Trust Administration", async () => {
+    await expect(call(buildTrustListMethod(), {}, makeCtx({})))
+      .rejects.toMatchObject({
+        code: RPC_ERROR_CODES.INTERNAL_ERROR,
+        message: "Trust Administration application not configured on server",
+      });
+  });
+
+  it("preserves authentication, wire results, invalid params, and not-found through the dispatcher", async () => {
+    const productApi = makeProductApi(makeTrust());
+    const unauthorized = await dispatchTrustRequest({
+      method: "trust.list",
+      productApi,
+      authenticated: false,
+    });
+    expect(unauthorized.sendError).toHaveBeenCalledWith("trust-wire", {
+      code: RPC_ERROR_CODES.UNAUTHORIZED,
+      message: "Method requires authentication: trust.list",
+      data: undefined,
+    });
+
+    const list = await dispatchTrustRequest({ method: "trust.list", productApi });
+    expect(list.sendSuccess).toHaveBeenCalledWith("trust-wire", {
+      rules: [{ id: "r1", scope: "global" }],
+    });
+
+    const invalid = await dispatchTrustRequest({
+      method: "trust.revoke",
+      params: {},
+      productApi,
+    });
+    expect(invalid.sendError).toHaveBeenCalledWith("trust-wire", {
+      code: RPC_ERROR_CODES.INVALID_PARAMS,
+      message: "trust.revoke requires 'ruleId'",
+      data: undefined,
+    });
+
+    const missing = await dispatchTrustRequest({
+      method: "trust.revoke",
+      params: { ruleId: "ghost" },
+      productApi,
+    });
+    expect(missing.sendError).toHaveBeenCalledWith("trust-wire", {
+      code: RPC_ERROR_CODES.NOT_FOUND,
+      message: "Trust rule not found: ghost",
+      data: undefined,
+    });
   });
 });
 

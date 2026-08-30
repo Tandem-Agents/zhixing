@@ -44,6 +44,10 @@
       "types": "./dist/product-api/catalog.d.ts",
       "import": "./dist/product-api/catalog.js"
     },
+    "./trust-administration": {
+      "types": "./dist/trust-administration/application.d.ts",
+      "import": "./dist/trust-administration/application.js"
+    },
     "./advancement": {
       "types": "./dist/advancement/index.d.ts",
       "import": "./dist/advancement/index.js"

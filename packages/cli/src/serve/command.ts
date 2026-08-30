@@ -46,6 +46,10 @@ import {
   SkillCatalogApplicationService,
 } from "@zhixing/core/skills/catalog";
 import {
+  createTrustAdministrationProductApiContribution,
+  TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET,
+} from "@zhixing/core/trust-administration";
+import {
   createDeliveryResolutionProductApiContribution,
   DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET,
 } from "@zhixing/core/delivery/application";
@@ -136,7 +140,7 @@ import { createConversationAliveCheck } from "./advancement-gc.js";
 import { createConversationDirectory } from "./conversation-directory.js";
 import { createWorksceneDirectory } from "./workscene-directory.js";
 import { createWorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
-import { createTrustDirectory } from "./management-directories.js";
+import { createTrustAdministrationApplication } from "./trust-administration-adapter.js";
 import { PostAdoptionReviewCoordinator } from "./post-adoption-review.js";
 import { loadOrCreateToken } from "./token.js";
 import { resolveHostProcessMode } from "./self-exec.js";
@@ -369,9 +373,9 @@ async function runServerProcess(
   const providerCredentials = credentials.providers
     ? { providers: credentials.providers }
     : {};
-  // 管理面两域——trust(盘上持久规则);skill 经锚点
-  // GlobalStatePort 的 path-free query/control 合同装配。
-  const trustDirectory = createTrustDirectory({
+  // Trust Administration owns management semantics; this Host projection is
+  // the temporary A5-TRUST-STORE-01 bridge to the existing PermissionStore.
+  const trustAdministration = createTrustAdministrationApplication({
     config,
   });
   // 3. Scheduler facade lazy ref —— 打破组合根装配顺序依赖。
@@ -1882,12 +1886,14 @@ async function runServerProcess(
     defineProductApiExactSet({
       operations: [
         ...SKILL_CATALOG_PRODUCT_API_EXACT_SET.operations,
+        ...TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET.operations,
         ...(deliveryProductApi
           ? DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET.operations
           : []),
       ],
       factEvents: [
         ...SKILL_CATALOG_PRODUCT_API_EXACT_SET.factEvents,
+        ...TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET.factEvents,
         ...(deliveryProductApi
           ? DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET.factEvents
           : []),
@@ -1898,6 +1904,7 @@ async function runServerProcess(
         globalState: () => authorityRuntime.globalState!,
         anchorEpoch: () => authorityRuntime.anchorEpoch,
       })),
+      createTrustAdministrationProductApiContribution(trustAdministration),
       ...(deliveryProductApi ? [deliveryProductApi] : []),
     ],
   );
@@ -1923,7 +1930,6 @@ async function runServerProcess(
     perspectives: perspectivesController,
     conversationDirectory,
     workscenes: worksceneDirectory,
-    trust: trustDirectory,
     productApi,
     hostInfo: {
       // 宿主单点解析的工作区——接入面 @ 补全 root 取此

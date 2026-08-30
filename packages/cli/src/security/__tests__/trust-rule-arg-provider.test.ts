@@ -15,16 +15,16 @@ import { describe, expect, it } from "vitest";
 import {
   type ArgQueryContext,
   type CommandDef,
-  type PermissionRule,
 } from "@zhixing/core";
+import type { TrustAdministrationRule } from "@zhixing/core/trust-administration";
 import { createTrustRuleArgProvider } from "../trust-rule-arg-provider.js";
 
 // ─── 装配 ───
 
-function makeRule(overrides: Partial<PermissionRule> & {
+function makeRule(overrides: Partial<TrustAdministrationRule> & {
   argument?: string;
   tool?: string;
-}): PermissionRule {
+}): TrustAdministrationRule {
   return {
     id: overrides.id ?? `rule-${Math.random().toString(36).slice(2, 8)}`,
     pattern: {
@@ -43,7 +43,9 @@ function makeRule(overrides: Partial<PermissionRule> & {
 }
 
 /** 宿主 trust.list 的替身——builtin 过滤与语境派生在宿主,此处直接喂用户可管规则 */
-function listRulesOf(rules: PermissionRule[]): () => Promise<PermissionRule[]> {
+function listRulesOf(
+  rules: TrustAdministrationRule[],
+): () => Promise<TrustAdministrationRule[]> {
   return async () => rules;
 }
 

@@ -24,6 +24,7 @@ import {
   inspectTurnContextProviderAssembly,
   inspectWorksceneRuntimeProjectionBoundary,
   inspectWorkspaceAdministrationOwnership,
+  inspectTrustAdministrationOwnership,
   inspectLocalConversationOwnerIsolation,
   inspectManagedHostAssembly,
   inspectPlannedAnchorTransferAssembly,
@@ -3254,6 +3255,87 @@ test("Workspace Administration CRUD, reset, durable lifecycle and result deliver
   );
 });
 
+test("Trust Administration management has one domain application and Product API boundary", async () => {
+  const paths = [
+    "packages/core/src/trust-administration/application.ts",
+    "packages/core/src/product-api/catalog.ts",
+    "packages/core/src/index.ts",
+    "packages/core/package.json",
+    "packages/core/tsup.config.ts",
+    "packages/server/src/rpc/methods/trust.ts",
+    "packages/server/src/context.ts",
+    "packages/server/src/runtime/index.ts",
+    "packages/cli/src/serve/trust-administration-adapter.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/runtime/rpc-management-facade.ts",
+    "packages/cli/src/security/commands.ts",
+    "packages/cli/src/security/trust-rule-arg-provider.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  assert.deepEqual(inspectTrustAdministrationOwnership(records), []);
+
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectTrustAdministrationOwnership(mutate(
+      "packages/core/src/trust-administration/application.ts",
+      (text) => `${text}\nimport type { PermissionRule } from "../security/index.js";`,
+    )).join("\n"),
+    /does not uniquely own context, visibility, revoke, and committed fact semantics/,
+  );
+  assert.match(
+    inspectTrustAdministrationOwnership(mutate(
+      "packages/server/src/rpc/methods/trust.ts",
+      (text) => text.replace(
+        ".query(\n        TRUST_ADMINISTRATION_LIST_QUERY",
+        ".trust.list(\n        TRUST_ADMINISTRATION_LIST_QUERY",
+      ),
+    )).join("\n"),
+    /bypasses the Product API dispatcher/,
+  );
+  assert.match(
+    inspectTrustAdministrationOwnership(mutate(
+      "packages/server/src/context.ts",
+      (text) => text.replace(
+        "productApi?: ProductApiDispatcher;",
+        "trust?: TrustDirectory;\n  productApi?: ProductApiDispatcher;",
+      ),
+    )).join("\n"),
+    /retains the retired TrustDirectory application path/,
+  );
+  assert.match(
+    inspectTrustAdministrationOwnership(mutate(
+      "packages/cli/src/serve/trust-administration-adapter.ts",
+      (text) => `${text}\nconst leakedDecision = rules.filter((rule) => rule.scope !== "builtin");`,
+    )).join("\n"),
+    /bridge owns product context or visibility semantics/,
+  );
+  assert.match(
+    inspectTrustAdministrationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "createTrustAdministrationProductApiContribution(trustAdministration),",
+        "",
+      ),
+    )).join("\n"),
+    /does not compose Trust Administration/,
+  );
+  assert.match(
+    inspectTrustAdministrationOwnership([
+      ...records,
+      {
+        relative: "packages/server/src/runtime/management-directories.ts",
+        text: "export interface TrustDirectory {}",
+      },
+    ]).join("\n"),
+    /retains the retired TrustDirectory application path/,
+  );
+});
+
 test("Skill Catalog management, load, save, admission and Kernel projection have one domain application boundary", async () => {
   const paths = [
     "packages/core/src/skills/catalog-application.ts",
@@ -3295,7 +3377,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/owner-kernel/src/conversation-assignment.ts",
     "packages/owner-kernel/src/job-assignment.ts",
     "packages/owner-kernel/src/scheduler-user-notices.ts",
-    "packages/cli/src/serve/management-directories.ts",
+    "packages/cli/src/serve/trust-administration-adapter.ts",
     "packages/orchestrator/src/runtime/assignment-skill-port.ts",
     "packages/core/src/protocol/assignment-mutation.ts",
     "packages/cli/src/serve/assignment-schedule-stager.ts",
@@ -3388,7 +3470,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/cli/src/serve/management-directories.ts",
+      "packages/cli/src/serve/trust-administration-adapter.ts",
       (text) => `${text}\nexport const createSkillDirectory = () => undefined;`,
     )).join("\n"),
     /retired parallel Skill management application owner/,

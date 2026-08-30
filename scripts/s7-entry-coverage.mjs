@@ -2756,6 +2756,17 @@ export async function validateS7Structure() {
       text: await readFile(path.join(root, "packages/core/tsup.config.ts"), "utf8"),
     },
   ]));
+  failures.push(...inspectTrustAdministrationOwnership([
+    ...records,
+    {
+      relative: "packages/core/package.json",
+      text: await readFile(path.join(root, "packages/core/package.json"), "utf8"),
+    },
+    {
+      relative: "packages/core/tsup.config.ts",
+      text: await readFile(path.join(root, "packages/core/tsup.config.ts"), "utf8"),
+    },
+  ]));
   failures.push(...inspectSkillCatalogApplicationOwnership([
     ...records,
     {
@@ -3058,6 +3069,151 @@ export function inspectWorkspaceAdministrationOwnership(records) {
   return failures;
 }
 
+/** A5 Trust Administration owns user-visible rule management semantics. */
+export function inspectTrustAdministrationOwnership(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const text = byPath.get(relative);
+    if (text === undefined) {
+      failures.push(`${relative}: Trust Administration production source is missing`);
+    }
+    return text ?? "";
+  };
+
+  const application = required(
+    "packages/core/src/trust-administration/application.ts",
+  );
+  const productApi = required("packages/core/src/product-api/catalog.ts");
+  const handler = required("packages/server/src/rpc/methods/trust.ts");
+  const context = required("packages/server/src/context.ts");
+  const serverRuntimeIndex = required("packages/server/src/runtime/index.ts");
+  const adapter = required(
+    "packages/cli/src/serve/trust-administration-adapter.ts",
+  );
+  const composition = required("packages/cli/src/serve/command.ts");
+  const managementFacade = required(
+    "packages/cli/src/runtime/rpc-management-facade.ts",
+  );
+  const trustCommand = required("packages/cli/src/security/commands.ts");
+  const trustArgumentProvider = required(
+    "packages/cli/src/security/trust-rule-arg-provider.ts",
+  );
+  const coreIndex = required("packages/core/src/index.ts");
+  const manifestText = required("packages/core/package.json");
+  const build = required("packages/core/tsup.config.ts");
+
+  if (
+    !application.includes("export interface TrustAdministrationRule") ||
+    !application.includes("export interface TrustAdministrationRepository") ||
+    !application.includes("export class TrustAdministrationApplicationService") ||
+    !application.includes("parseConversationId(id)") ||
+    !application.includes('scope.kind === "workscene"') ||
+    !application.includes("filter(isManageableTrustAdministrationRule)") ||
+    !application.includes(
+      'return rule.scope === "context" || rule.scope === "global"',
+    ) ||
+    !application.includes("await this.options.repository.list(context)") ||
+    !application.includes("await this.options.repository.revoke(context, ruleId)") ||
+    !application.includes('kind: "trust-administration-rule-revoked"') ||
+    !application.includes("createTrustAdministrationProductApiContribution") ||
+    !application.includes("TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET") ||
+    /PermissionRule|PermissionContextId|PermissionStore|SecurityPipeline/u.test(application)
+  ) {
+    failures.push(
+      "Trust Administration does not uniquely own context, visibility, revoke, and committed fact semantics",
+    );
+  }
+
+  if (
+    !handler.includes('from "@zhixing/core/trust-administration"') ||
+    !handler.includes(".query(\n        TRUST_ADMINISTRATION_LIST_QUERY") ||
+    !handler.includes(".command(\n          TRUST_ADMINISTRATION_REVOKE_COMMAND") ||
+    handler.includes("TrustDirectory") ||
+    handler.includes("ctx.server.trust") ||
+    handler.includes("../../runtime/management-directories")
+  ) {
+    failures.push("Trust RPC binding bypasses the Product API dispatcher");
+  }
+
+  if (
+    /trust\?:|TrustDirectory|management-directories/u.test(context) ||
+    /TrustDirectory|management-directories/u.test(serverRuntimeIndex) ||
+    byPath.has("packages/server/src/runtime/management-directories.ts") ||
+    byPath.has("packages/cli/src/serve/management-directories.ts")
+  ) {
+    failures.push("Server or CLI retains the retired TrustDirectory application path");
+  }
+
+  if (
+    !adapter.includes('from "@zhixing/core/trust-administration"') ||
+    !adapter.includes("createTrustAdministrationRepository") ||
+    !adapter.includes("new PermissionStore()") ||
+    !adapter.includes("resolveWorkspace(deps.config") ||
+    adapter.includes("parseConversationId") ||
+    adapter.includes('.filter((rule) => rule.scope !== "builtin")')
+  ) {
+    failures.push(
+      "Trust PermissionStore bridge owns product context or visibility semantics",
+    );
+  }
+
+  if (
+    composition.split("new ProductApiDispatcher(").length - 1 !== 1 ||
+    composition.split("createTrustAdministrationApplication({").length - 1 !== 1 ||
+    composition.split("createTrustAdministrationProductApiContribution(").length - 1 !== 1 ||
+    !composition.includes("...TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET.operations") ||
+    !composition.includes("...TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET.factEvents") ||
+    /\btrust:\s*trust/u.test(composition)
+  ) {
+    failures.push(
+      "Anchor Host does not compose Trust Administration into the one sealed Product API dispatcher",
+    );
+  }
+
+  for (const [relative, text] of [
+    ["packages/cli/src/runtime/rpc-management-facade.ts", managementFacade],
+    ["packages/cli/src/security/commands.ts", trustCommand],
+    ["packages/cli/src/security/trust-rule-arg-provider.ts", trustArgumentProvider],
+  ]) {
+    if (
+      !text.includes('from "@zhixing/core/trust-administration"') ||
+      /\bPermissionRule\b/u.test(text) && relative !== "packages/cli/src/security/commands.ts"
+    ) {
+      failures.push(`${relative}: Trust Surface bypasses its domain projection`);
+    }
+  }
+
+  let manifest;
+  try {
+    manifest = JSON.parse(manifestText);
+  } catch {
+    failures.push("Core manifest is invalid while checking Trust Administration");
+  }
+  const narrow = manifest?.exports?.["./trust-administration"];
+  const duplicate = Object.entries(manifest?.exports ?? {}).filter(
+    ([subpath, conditions]) =>
+      subpath !== "./trust-administration" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === narrow?.types || conditions.import === narrow?.import),
+  );
+  if (
+    narrow?.types !== "./dist/trust-administration/application.d.ts" ||
+    narrow?.import !== "./dist/trust-administration/application.js" ||
+    duplicate.length > 0 ||
+    build.split('"src/trust-administration/application.ts"').length - 1 !== 1 ||
+    /trust-administration|TrustAdministration/u.test(coreIndex) ||
+    /TrustAdministration|trust\.list|PermissionRule/u.test(productApi)
+  ) {
+    failures.push(
+      "Trust Administration must have one narrow non-root domain subpath and a domain-neutral Product API",
+    );
+  }
+
+  return failures;
+}
+
 /** A2 Skill Catalog applications and immutable execution projection have one owner. */
 export function inspectSkillCatalogApplicationOwnership(records) {
   const failures = [];
@@ -3140,7 +3296,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const skillCommandSource = required(
     "packages/cli/src/commands/skill-command-source.ts",
   );
-  const cliDirectories = required("packages/cli/src/serve/management-directories.ts");
+  const cliDirectories = required(
+    "packages/cli/src/serve/trust-administration-adapter.ts",
+  );
   const assignmentSkillPort = required(
     "packages/orchestrator/src/runtime/assignment-skill-port.ts",
   );

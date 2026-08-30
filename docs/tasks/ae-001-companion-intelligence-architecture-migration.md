@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-09b 已通过协调者独立复核并提交前验收；Workspace Administration 已完整归位<br>
+> 当前检查点：A5-10a 已通过协调者独立复核，等待提交；下一责任链为 A5-10b<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,11 +202,11 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `f46e15a0`；A0～A4、Skill Catalog、Delivery 及 Workspace Administration CRUD、reset/recovery、durable operation 合同、分派与准入/执行/恢复生命周期已通过协调者独立复核并提交 |
+| 已接受基线 | `ab31fb9f`；A0～A4、Skill Catalog、Delivery 与完整 Workspace Administration 已通过协调者独立复核并提交 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | 无；A5-09b 已验收，等待提交后选择下一条 A5 责任链 |
-| 下一责任链 | 从仍为 `[ ]` 的 A5 领域中按已接受无环依赖与当前生产事实选择下一条最窄责任链 |
-| 打开的单向桥 | 无 Workspace Administration 当前桥；pending/ack 仅是 P10 耐久机制端口，result claim/recovery/credential/confirmation 已由领域应用唯一决定 |
+| 活跃工作包 | 无；A5-10a 已验收，等待提交后派发 A5-10b |
+| 下一责任链 | A5-10b：在 A5-10a 证明的合同上归位用户信任规则写入/沉淀与安全执行投影，删除暂存储桥并裁决 Trust Administration 行 |
+| 打开的单向桥 | `A5-TRUST-STORE-01`：A5-10a 允许 Trust Administration 经窄 repository adapter 复用现有 PermissionStore 耐久机制；规则创建/确认沉淀与 Security 执行快照仍在旧链，唯一退场包为紧邻 A5-10b |
 | 已失效证据 | 无当前未恢复证据；A4-10 已恢复 A4-07/A4-08 的包级产品无知结论，A4 全部合同与退出证据当前有效 |
 | 阻塞/用户决策 | 无技术阻塞；用户已明确恢复调度 |
 
@@ -1870,6 +1870,23 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 行为与恢复保护：pending/ack wire 与严格 codec 未改；领域应用只接受从 confirmation watermark 开始的连续 completed/abandoned 终态记录，abandoned 进入确认前缀但不形成用户恢复结果。当前成功或失败结果只有在同 outbox exact identity/digest 内才形成 credential；其他 completed 仍先以原错误名、code、中文文案交给 Surface，确认失败或 response loss 保留当前 pending/credential，同一确认可重驱，成功后才清空；重启可由 durable operation input/identity 重建 claim。list/status/reset-preview 的新读取会先放弃旧 current claim，view 则保留并重新核对 current，create-scene credential、失败 deliveryConfirmed、旧 two-field control authorization、reset TTL/identity 与三生产根行为未改。
 - 直接证据、状态与失效：领域 Workspace Administration 16/16，其中新增 result-delivery 4 项直接覆盖 claimed/unclaimed、重启重建、空前缀与身份/digest mismatch、ack response loss/exact prefix/重复确认；CLI Host/outbox/client/command/bootstrap/owner、真实 S7 environment 与 durable registry 共 7 文件 50/50，覆盖成功/失败/current-view、其他恢复结果、旧记录、reset、三根和 P10 witness。core fresh build、CLI `tsc --noEmit` 与正式 build、canonical S7 31/31 + registry golden、fresh package exports、最窄 Biome 与 `git diff --check` 通过。S7 反向 mutation 会拒绝 Host 直连 outbox pending、领域 current claim 缺失、旧 helper/error owner 或第二 delivery handle 回流。A5-09b 实施完成，等待协调者独立复核；Workspace Administration 从身份、CRUD、reset/recovery、durable operation 到 result delivery 的完整责任与消费链当前闭合，故登记行改为 `[x]`，A5 仍为 `[ ]`。若领域 delivery claim/credential/error、Host lifecycle pending/ack、IPC codec、P10 pending/ack schema/digest/marker/compaction、client/Workscene consumption、三根、S7/exports 或上述直接行为任一变化，恢复 `A5-09b-workspace-administration-result-delivery-v1` 与 Workspace Administration 行并只重验本闭包；未进入 Workscene 或其他领域，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：从领域 delivery application、Host lifecycle 转发、客户端调用/呈现、Workscene credential 消费和 P10 outbox 双向反查，确认结果认领、未认领恢复、有限凭据与 exact-prefix 确认只有一个领域 owner；Host 无 pending/ack 之外的交付判断，CLI 无旧 helper/错误 owner，outbox 无产品状态机。独立重跑领域 16/16、CLI Host/outbox/command/bootstrap/owner 37/37、core/CLI 正式构建、CLI typecheck、canonical S7 31/31 + registry golden、fresh package exports、最窄 Biome、旧 owner 残留反扫与 `git diff --check`，全部通过。接受 `A5-09b-workspace-administration-result-delivery-v1`，Workspace Administration 行保持 `[x]`；A5 继续为 `[ ]`。
+
+### A5-10a：归位 Trust Administration 用户管理应用与 Product API binding
+
+- 派发基线：`HEAD ab31fb9f + task-doc:A5-10a-dispatch`；Workspace Administration 已完整归位并提交，进场索引应为空，工作区只应有本文派发记录。
+- 唯一架构结果：把现有 `/trust` 的“按当前对话语境列出用户可管理规则、撤销一条可见规则”形成 Trust Administration 拥有的 Query/Command、规则投影、语境解析、应用用例与 Product API contribution；`trust.list/revoke` RPC 和 REPL/typeahead 只做认证、codec、调用、错误映射与呈现。Security 只通过窄 repository adapter 提供既有规则存取机制，不再决定什么规则可管理、如何从 conversation/workspace/scene 得到管理语境或 not-found 产品语义。
+- 必须迁移与删除：建立不依赖 CLI、Server、Provider、文件路径、`PermissionStore`、`SecurityPipeline` 或 Mesh 的领域窄入口；以当前 main/workspace/scene 语义和默认 workspace 投影解析 `conversationId?`，由应用过滤 builtin、验证撤销目标属于当前可见集合并在成功提交后形成有限事实。将两个 Product API operation 加入现有 sealed exact-set 与唯一组合根，RPC handler 改为调用同一 dispatcher；删除 Server `TrustDirectory` 平行合同、`ServerContext.trust` 服务定位和 handler 直接目录调用。CLI 只保留 PermissionStore repository adapter 与默认语境投影，`RpcManagementFacade`、`/trust`、typeahead 继续消费原 RPC。
+- 临时桥与边界：`A5-TRUST-STORE-01` 只允许 repository adapter 把领域 context/rule 投影映射到当前 PermissionStore 的 list/revoke；A5-10a 不迁移确认链创建/沉淀、session/context/global 持久化机制、Security match/frozen snapshot、AI steward、builtin 执行规则或设备信任链。不得把 `PermissionRule`/`PermissionContextId` 直接提升为新的领域公共合同，也不得建立通用权限/策略框架；这些旧写入与执行交界必须由紧邻 A5-10b 退场或收窄。
+- 行为保护：严格保持 `trust.list/revoke` 方法名、认证、参数与响应形状、invalid params/not-found 错误，main/workspace/scene/global 可见性、builtin/session 边界、撤销耐久性、活跃实例最终一致语义，以及 `/trust` 文案、typeahead、删除手势和所有模式可达性；不得改变权限审批、安全执行、规则冲突和设备信任产品行为。
+- 最窄证据：新增领域应用/Product API 直接测试，覆盖 main/workspace/scene 语境、global 合并、builtin 排除、可见撤销、跨语境/不存在拒绝、提交后事实与 sealed exact-set；重跑 Server 两个 RPC 的认证/codec/error、CLI repository adapter、facade、`/trust`/typeahead 直接测试。源码稳定后按依赖顺序完成必要 core/server/CLI build 或 typecheck、canonical S7、fresh package exports、最窄 Biome 与 `git diff --check`；不运行根级全测、正式制品或无关 Security/Device/DR 回归。
+- 完成与交接：领域应用是用户信任管理语义唯一 owner，Product API 是唯一应用入口，Server/CLI 无业务判断，旧 `TrustDirectory`/`ServerContext.trust`/直接调用归零，当前行为证据有效；Trust Administration 行继续为 `[ ]`，下一包只处理规则写入/沉淀与 Security 执行投影并删除 `A5-TRUST-STORE-01`。若约四小时仍未完成、需要改变公开 RPC/REPL、权限审批结果、PermissionStore 持久格式或设备信任链，停在可构建、单一管理入口成立的安全检查点反馈，不得扩面。
+- 固定不做：Conversation、Workscene、Schedule、Advancement、Device、Backup & Recovery、A6、A7、AE-001 修改、新能力、设备 trust chain、通用授权平台或 Git 写操作。
+- 执行基线与领域责任：`HEAD ab31fb9feecc5038a3143b86d99d0c8bd08d4ea4 + task-doc:A5-10a-dispatch + A5-10a-trust-administration-management-v1`。新增唯一窄入口 `@zhixing/core/trust-administration`，由 `TrustAdministrationApplicationService` 拥有 main/workspace/scene 管理语境、global 合并、builtin/session 排除、可见撤销、not-found 与提交后 `trust-administration-rule-revoked` 事实；公开规则投影只允许 context/global，临时 repository 投影才允许 Security 的四类 scope。领域不导入 CLI、Server、Provider、路径、`PermissionStore`、Security 实现或 Mesh，也未从 core 根导出。
+- Product API、Host 与旧路退场：Trust 的 list Query、revoke Command 和 Fact Event contribution 与 Skill/Delivery contribution 进入同一个 sealed `ProductApiDispatcher`；唯一 Anchor 组合根构造一次领域应用并注入同一 dispatcher。`trust.list/revoke` handler 只保留认证、wire 参数、Product API 调用和 not-found 映射；Server `TrustDirectory`、`ServerContext.trust`、CLI `createTrustDirectory`、两个 `management-directories.ts` 及旧直调测试均删除。`RpcManagementFacade`、`/trust` 与 typeahead 改为消费领域只读投影，公开 RPC 名称、参数/响应、认证、invalid/not-found、中文呈现、删除手势和 active-instance 最终一致行为未变。
+- 临时桥与行为保护：`A5-TRUST-STORE-01` 现只有 `trust-administration-adapter.ts` 一处，单向把领域 context/repository rule 映射到既有 `PermissionStore` list/revoke，并以原 `resolveWorkspace`、session type 与 workspace hash 形成默认语境；管理可见性、conversation scene 解析和撤销资格均不在 adapter。规则创建/确认沉淀、session/context/global 耐久机制、Security match/frozen snapshot、AI steward、builtin 与设备信任链未迁移，桥的唯一退场包仍为 A5-10b，故 Trust Administration 行与 A5 继续为 `[ ]`。
+- 直接证据与验证：领域应用/Product API 4/4 覆盖 workspace/scene/global、builtin/session 排除、可见/跨语境撤销、repository race、提交后事实与 sealed exact-set；Server 真实 dispatcher/RPC 9/9 覆盖认证、strict params、list/revoke、not-found 与缺 contribution fail closed；CLI adapter、Host composition、`/trust`、typeahead、facade、candidate delete 共 6 文件 34/34。core/server/CLI `tsc --noEmit`、core/server/CLI 正式 build、canonical S7 32/32 + registry golden、fresh package exports 均通过；最窄 Biome 与 `git diff --check` 在交接检查通过。结构反例会拒绝领域反向依赖 Security、handler 绕过 Product API、`ServerContext.trust`/旧目录回流、adapter 重获过滤决定、Host 漏 contribution、core 根导出或第二窄入口。
+- 交接与精确失效：A5-10a 实施完成，等待协调者独立复核；无技术阻塞，下一责任链固定为 A5-10b。Trust 管理 context/rule/Query/Command/Fact、repository bridge、Product API exact-set/Host composition、RPC codec/error、REPL/typeahead 消费、core 窄导出/build、S7 或上述直接行为任一变化时，精确恢复 `A5-10a-trust-administration-management-v1` 并只重验本闭包；规则写入/沉淀与 Security 执行投影变化归 A5-10b。本包未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：从 Trust Administration 应用、PermissionStore 窄适配、唯一 Host 组合、Product API dispatcher、两个 RPC binding、REPL/typeahead 与 package/结构门禁双向反查，确认管理语境、用户可见性、撤销资格、not-found 和提交后事实只有一个领域 owner；Server/CLI 无平行业务目录，Security 当前只提供登记退场点明确的存取机制。独立完成 core 4/4、Server 9/9、CLI 6 文件 34/34，依次重建 core、Server、CLI 并通过 CLI typecheck、canonical S7 32/32 + registry golden、fresh package exports、最窄 Biome、旧入口残留反扫与 `git diff --check`；公开 RPC、中文呈现、耐久撤销和活跃实例最终一致边界未发现漂移。接受 `A5-10a-trust-administration-management-v1`；Trust Administration 行与 A5 继续为 `[ ]`，下一包只处理规则写入/沉淀与 Security 执行投影并退场 `A5-TRUST-STORE-01`。
 
 ## 十、用户提示词
 

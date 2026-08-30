@@ -38,7 +38,6 @@ import type { RpcSurfaceRegistry } from "./rpc/surface-identity.js";
 import type { PerspectivesController } from "./perspectives/index.js";
 import type { ConversationDirectory } from "./runtime/conversation-directory.js";
 import type { WorksceneDirectory } from "./runtime/workscene-directory.js";
-import type { TrustDirectory } from "./runtime/management-directories.js";
 
 export type ServerShutdownStrategy = "immediate" | "drain" | "cancel";
 
@@ -205,8 +204,6 @@ export interface ServerContext {
   conversationDirectory?: ConversationDirectory;
   /** 工作场景域(注册表管理 + 场景对话取建)。不传则 workscene.* 不可用。 */
   workscenes?: WorksceneDirectory;
-  /** 信任规则管理面。不传则 trust.* 不可用。 */
-  trust?: TrustDirectory;
   /** Host 组合的传输无关 Product API。不传则相应产品 API 不可用。 */
   productApi?: ProductApiDispatcher;
   /** 宿主装配信息(server.info 的运维字段:工作区 / 日志路径)。 */
@@ -378,7 +375,6 @@ export interface CreateContextOptions {
   perspectives?: PerspectivesController;
   conversationDirectory?: ConversationDirectory;
   workscenes?: WorksceneDirectory;
-  trust?: TrustDirectory;
   productApi?: ProductApiDispatcher;
   hostInfo?: { workspace?: string; logPath?: string };
   managedHostPublicStatus?: ServerContext["managedHostPublicStatus"];
@@ -410,7 +406,6 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     perspectives: opts.perspectives,
     conversationDirectory: opts.conversationDirectory,
     workscenes: opts.workscenes,
-    trust: opts.trust,
     productApi: opts.productApi,
     hostInfo: opts.hostInfo,
     managedHostPublicStatus: opts.managedHostPublicStatus,

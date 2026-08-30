@@ -14,11 +14,13 @@ describe("production startup server ownership", () => {
       .toBe(false);
   });
 
-  it("composes one sealed Skill and Delivery Product API dispatcher at the Anchor Host boundary", async () => {
+  it("composes one sealed Skill, Delivery, and Trust Product API dispatcher at the Anchor Host boundary", async () => {
     const source = await readSource("command.ts");
     expect(source.match(/new ProductApiDispatcher\(/gu)).toHaveLength(1);
     expect(source.match(/createSkillCatalogProductApiContribution\(/gu)).toHaveLength(1);
     expect(source.match(/createDeliveryResolutionProductApiContribution\(/gu)).toHaveLength(1);
+    expect(source.match(/createTrustAdministrationProductApiContribution\(/gu)).toHaveLength(1);
+    expect(source.match(/createTrustAdministrationApplication\(\{/gu)).toHaveLength(1);
     expect(source.match(/new SkillCatalogApplicationService\(\{/gu)).toHaveLength(1);
     const context = source.slice(location(source, "serverCtx = createServerContext({"));
     const dispatcher = location(source, "const productApi = new ProductApiDispatcher(");
@@ -28,12 +30,23 @@ describe("production startup server ownership", () => {
       source,
       "createDeliveryResolutionProductApiContribution(",
     );
+    const trustApplication = location(
+      source,
+      "const trustAdministration = createTrustAdministrationApplication({",
+    );
+    const trustContribution = location(
+      source,
+      "createTrustAdministrationProductApiContribution(trustAdministration)",
+    );
     expect(contribution).toBeGreaterThan(dispatcher);
     expect(application).toBeGreaterThan(contribution);
     expect(deliveryContribution).toBeLessThan(dispatcher);
+    expect(trustApplication).toBeLessThan(dispatcher);
+    expect(trustContribution).toBeGreaterThan(dispatcher);
     expect(context).toContain("productApi,");
     expect(context).not.toContain("skillCatalog:");
     expect(context).not.toContain("resolveDelivery:");
+    expect(context).not.toContain("trust:");
   });
 
   it("keeps the anchor endpoint inactive until every open prerequisite has one cleanup owner", async () => {

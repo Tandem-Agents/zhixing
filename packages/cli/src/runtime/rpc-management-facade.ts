@@ -9,8 +9,8 @@
 
 import type {
   ChannelStatus,
-  PermissionRule,
 } from "@zhixing/core";
+import type { TrustAdministrationRule } from "@zhixing/core/trust-administration";
 import {
   RPC_ERROR_CODES,
   RpcClientError,
@@ -123,9 +123,9 @@ export class RpcManagementFacade {
 
   // ─── trust ───
 
-  async trustList(conversationId?: string): Promise<PermissionRule[]> {
+  async trustList(conversationId?: string): Promise<TrustAdministrationRule[]> {
     const client = await this.link.getClient();
-    const result = await client.request<{ rules: PermissionRule[] }>(
+    const result = await client.request<{ rules: TrustAdministrationRule[] }>(
       "trust.list",
       { conversationId },
     );

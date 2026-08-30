@@ -4,6 +4,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import type { PermissionRule, SecurityRule } from "@zhixing/core";
+import type { TrustAdministrationRule } from "@zhixing/core/trust-administration";
 import { handleSecurityCommand, handleTrustCommand } from "../commands.js";
 import type { CliWriter } from "../../screen/index.js";
 
@@ -15,7 +16,7 @@ function makeWriter(): CliWriter & { text: () => string } {
   } as unknown as CliWriter & { text: () => string };
 }
 
-function makeRule(id: string): PermissionRule {
+function makeRule(id: string): TrustAdministrationRule {
   return {
     id,
     pattern: { tool: "bash", argument: "ls" },
@@ -25,7 +26,7 @@ function makeRule(id: string): PermissionRule {
     lastMatchedAt: 0,
     matchCount: 0,
     contextId: { kind: "main" },
-  } as PermissionRule;
+  };
 }
 
 function policyRule(id: string, patch: Partial<SecurityRule> = {}): SecurityRule {
@@ -52,7 +53,7 @@ describe("handleSecurityCommand", () => {
       status: async () => ({
         contextId: { kind: "main" },
         workspacePath: null,
-        permissionRules: [makeRule("rule-a")],
+        permissionRules: [makeRule("rule-a") as PermissionRule],
         builtinRules: [
           policyRule("safe-confirm"),
           policyRule("hard-block", {

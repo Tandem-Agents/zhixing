@@ -13,6 +13,7 @@ export default defineConfig({
     "src/rubrics/index.ts",
     "src/skills/catalog-application.ts",
     "src/product-api/catalog.ts",
+    "src/trust-administration/application.ts",
     "src/advancement/index.ts",
     "src/resources/index.ts",
     "src/security/index.ts",

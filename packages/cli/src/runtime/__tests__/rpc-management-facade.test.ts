@@ -37,7 +37,7 @@ describe("RpcManagementFacade", () => {
     const request = vi.fn(async () => {
       throw new RpcClientError(
         RPC_ERROR_CODES.INTERNAL_ERROR,
-        "TrustDirectory not configured",
+        "Trust Administration application not configured",
       );
     }) as unknown as RpcClient["request"];
     const facade = new RpcManagementFacade(linkWithRequest(request));

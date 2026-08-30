@@ -7,7 +7,8 @@
  */
 
 import chalk from "chalk";
-import type { PermissionContextId, PermissionRule, SecurityRule } from "@zhixing/core";
+import type { PermissionContextId, SecurityRule } from "@zhixing/core";
+import type { TrustAdministrationRule } from "@zhixing/core/trust-administration";
 import type { SessionSecurityResult } from "@zhixing/rpc";
 import type { CliWriter } from "../screen/index.js";
 import { formatRuleDescription } from "./trust-rule-format.js";
@@ -157,7 +158,7 @@ async function showPolicyRules(opts: SecurityOptions): Promise<void> {
 
 interface TrustOptions {
   /** 列当前语境的用户可管规则(宿主 trust.list) */
-  listRules: () => Promise<PermissionRule[]>;
+  listRules: () => Promise<TrustAdministrationRule[]>;
   /** 撤销规则(宿主 trust.revoke);不存在返回 false */
   revokeRule: (id: string) => Promise<boolean>;
   writer: CliWriter;
@@ -187,7 +188,7 @@ export async function handleTrustCommand(
 
 async function listTrustRules(opts: TrustOptions): Promise<void> {
   const { writer } = opts;
-  let rules: PermissionRule[];
+  let rules: TrustAdministrationRule[];
   try {
     rules = await opts.listRules();
   } catch (err) {

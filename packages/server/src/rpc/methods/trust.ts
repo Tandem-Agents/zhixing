@@ -6,20 +6,29 @@
  * 此处只承接管理面读与撤销。
  */
 
+import {
+  TRUST_ADMINISTRATION_LIST_QUERY,
+  TRUST_ADMINISTRATION_REVOKE_COMMAND,
+  TrustAdministrationApplicationError,
+} from "@zhixing/core/trust-administration";
+import type { ProductApiDispatcher } from "@zhixing/core/product-api";
 import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 import type { ServerContext } from "../../context.js";
-import type { TrustDirectory } from "../../runtime/management-directories.js";
 
-function requireTrust(server: ServerContext): TrustDirectory {
-  if (!server.trust) {
+function requireTrust(server: ServerContext): ProductApiDispatcher {
+  if (
+    !server.productApi ||
+    !server.productApi.supports(TRUST_ADMINISTRATION_LIST_QUERY) ||
+    !server.productApi.supports(TRUST_ADMINISTRATION_REVOKE_COMMAND)
+  ) {
     throw new RpcAppError(
       RPC_ERROR_CODES.INTERNAL_ERROR,
-      "TrustDirectory not configured on server",
+      "Trust Administration application not configured on server",
     );
   }
-  return server.trust;
+  return server.productApi;
 }
 
 function optionalConversationId(value: unknown): string | undefined {
@@ -38,10 +47,14 @@ export function buildTrustListMethod(): MethodEntry {
     requiresAuth: true,
     async handler(rawParams, ctx) {
       const params = (rawParams ?? {}) as { conversationId?: unknown };
-      const rules = await requireTrust(ctx.server).list(
-        optionalConversationId(params.conversationId),
+      const result = await requireTrust(ctx.server).query(
+        TRUST_ADMINISTRATION_LIST_QUERY,
+        {
+          kind: "list",
+          conversationId: optionalConversationId(params.conversationId),
+        },
       );
-      return { rules };
+      return { rules: result.rules };
     },
   };
 }
@@ -58,14 +71,25 @@ export function buildTrustRevokeMethod(): MethodEntry {
       if (typeof params.ruleId !== "string" || params.ruleId.length === 0) {
         throw RpcErrors.invalidParams("trust.revoke requires 'ruleId'");
       }
-      const revoked = await requireTrust(ctx.server).revoke(
-        params.ruleId,
-        optionalConversationId(params.conversationId),
-      );
-      if (!revoked) {
-        throw RpcErrors.notFound(`Trust rule not found: ${params.ruleId}`);
+      try {
+        const result = await requireTrust(ctx.server).command(
+          TRUST_ADMINISTRATION_REVOKE_COMMAND,
+          {
+            kind: "revoke",
+            ruleId: params.ruleId,
+            conversationId: optionalConversationId(params.conversationId),
+          },
+        );
+        return { revoked: result.result.revoked };
+      } catch (error) {
+        if (
+          error instanceof TrustAdministrationApplicationError &&
+          error.code === "not-found"
+        ) {
+          throw RpcErrors.notFound(error.message);
+        }
+        throw error;
       }
-      return { revoked: true };
     },
   };
 }

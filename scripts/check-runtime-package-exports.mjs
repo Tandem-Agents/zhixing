@@ -6,6 +6,7 @@ const [
   coreDeliveryApplication,
   coreChannelDeliveryEffect,
   coreProductApi,
+  coreTrustAdministration,
   coreAuthority,
   corePersistence,
   coreProtocol,
@@ -41,6 +42,7 @@ const [
   import("../packages/core/dist/delivery/application.js"),
   import("../packages/core/dist/delivery/channel-effect.js"),
   import("../packages/core/dist/product-api/catalog.js"),
+  import("../packages/core/dist/trust-administration/application.js"),
   import("../packages/core/dist/authority/index.js"),
   import("../packages/core/dist/persistence/index.js"),
   import("../packages/core/dist/protocol/index.js"),
@@ -88,6 +90,7 @@ const retiredServerCompatibilityValues = [
   "createObserverBroadcast",
   "createRunEventForwarder",
   "toWireAgentResult",
+  "TrustDirectory",
 ];
 
 const ownerServiceCanonicalValues = [
@@ -609,6 +612,22 @@ async function verifyCorePackageExports(failures) {
   ) {
     failures.push("core-exports:product-api:invalid-runtime-boundary");
   }
+  const trustAdministrationConditions = manifest.exports["./trust-administration"];
+  if (
+    !trustAdministrationConditions ||
+    trustAdministrationConditions.types !==
+      "./dist/trust-administration/application.d.ts" ||
+    trustAdministrationConditions.import !==
+      "./dist/trust-administration/application.js" ||
+    typeof coreTrustAdministration.TrustAdministrationApplicationService !==
+      "function" ||
+    typeof coreTrustAdministration.createTrustAdministrationProductApiContribution !==
+      "function" ||
+    "TrustAdministrationApplicationService" in coreRoot ||
+    "TrustAdministrationApplicationService" in coreProductApi
+  ) {
+    failures.push("core-exports:trust-administration:invalid-runtime-boundary");
+  }
   const workspaceAdministrationConditions =
     manifest.exports["./environment/workspace-administration"];
   if (
@@ -681,6 +700,17 @@ async function verifyCorePackageExports(failures) {
     "createOwnerDeliveryLifecycleBinding" in ownerKernel
   ) {
     failures.push("owner-kernel-exports:delivery-obligation:invalid-runtime-boundary");
+  }
+  for (const [subpath, conditions] of Object.entries(manifest.exports)) {
+    if (
+      subpath !== "./trust-administration" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === trustAdministrationConditions?.types ||
+        conditions.import === trustAdministrationConditions?.import)
+    ) {
+      failures.push(`core-exports:${subpath}:duplicate-trust-administration-entry`);
+    }
   }
   for (const [subpath, conditions] of Object.entries(manifest.exports)) {
     if (
