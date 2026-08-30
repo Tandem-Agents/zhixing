@@ -8,7 +8,13 @@ import type {
 import {
   WorkspaceAdministrationApplicationService,
   WorkspaceAdministrationBusinessError,
+  WorkspaceAdministrationDurableLifecycleApplicationService,
   WORKSPACE_CATALOG_RESET_IMPACT,
+  type WorkspaceAdministrationDurableLifecycleDelegate,
+  type WorkspaceAdministrationDurableOperation,
+  type WorkspaceAdministrationDurableOperationKey,
+  type WorkspaceAdministrationDurableOperationMechanismPort,
+  type WorkspaceAdministrationDurableOperationRecord,
   type WorkspaceAdministrationControlPort,
   validateWorkspaceAdministrationDurableOperation,
   validateWorkspaceAdministrationDurableResult,
@@ -120,6 +126,99 @@ function harness(
       recovery,
       control,
     }),
+  };
+}
+
+function durableLifecycleHarness(input?: {
+  readonly committed?: WorkspaceAdministrationDurableOperationRecord;
+  readonly execute?: WorkspaceAdministrationDurableLifecycleDelegate["executeDurableOperation"];
+  readonly initialize?: () => Promise<void>;
+}) {
+  let operation = input?.committed
+    ? structuredClone(input.committed)
+    : undefined;
+  let nextSeq = operation ? operation.localSeq + 1 : 1;
+  const mechanism: WorkspaceAdministrationDurableOperationMechanismPort = {
+    outboxId: "outbox-lifecycle-test",
+    initialize: vi.fn(input?.initialize ?? (async () => undefined)),
+    prepare: vi.fn(async (candidate: WorkspaceAdministrationDurableOperation) => {
+      operation = {
+        localSeq: nextSeq++,
+        operationId: `workspace-operation-${nextSeq}`,
+        inputDigest: `sha256:${String(nextSeq).padStart(64, "0")}`,
+        input: structuredClone(candidate),
+        state: "prepared",
+        preparedAt: "2026-08-30T00:00:00.000Z",
+      };
+      return structuredClone(operation);
+    }),
+    commit: vi.fn(async (identity: WorkspaceAdministrationDurableOperationKey) => {
+      if (!operation || operation.localSeq !== identity.localSeq) {
+        throw new Error("missing operation");
+      }
+      operation = { ...operation, state: "committed" };
+      return structuredClone(operation);
+    }),
+    complete: vi.fn(async (
+      identity: WorkspaceAdministrationDurableOperationKey,
+      result: unknown,
+    ) => {
+      if (!operation || operation.localSeq !== identity.localSeq) {
+        throw new Error("missing operation");
+      }
+      operation = { ...operation, state: "completed", result };
+      return structuredClone(operation);
+    }),
+    operation: vi.fn((identity: WorkspaceAdministrationDurableOperationKey) => {
+      if (!operation || operation.localSeq !== identity.localSeq) {
+        throw new Error("missing operation");
+      }
+      return structuredClone(operation);
+    }),
+    oldestCommitted: vi.fn(async () =>
+      operation?.state === "committed" ? structuredClone(operation) : undefined,
+    ),
+  };
+  const execute = vi.fn(
+    input?.execute ??
+      (async () => ({
+        name: "Project",
+        path: "C:\\project",
+        revision: 1,
+        workspaceBindingRevision: 1,
+      })),
+  );
+  const application: WorkspaceAdministrationDurableLifecycleDelegate = {
+    status: vi.fn(async () => ({
+      state: "healthy",
+      catalogGeneration: "catalog-a",
+    })),
+    list: vi.fn(async () => []),
+    viewByName: vi.fn(async () => {
+      throw new Error("not used");
+    }),
+    previewReset: vi.fn(async (preview) => preview),
+    executeDurableOperation: execute,
+  };
+  const observeInfrastructureFailure = vi.fn((error: unknown) => ({
+    code: error instanceof Error ? error.name : "INFRASTRUCTURE_ERROR",
+    message: error instanceof Error ? error.message : "infrastructure failure",
+    ...(error instanceof Error && error.message === "retry"
+      ? { retryAfterMs: 0 }
+      : {}),
+  }));
+  const lifecycle = new WorkspaceAdministrationDurableLifecycleApplicationService({
+    application,
+    mechanism,
+    observeInfrastructureFailure,
+  });
+  return {
+    application,
+    execute,
+    lifecycle,
+    mechanism,
+    observeInfrastructureFailure,
+    operation: () => (operation ? structuredClone(operation) : undefined),
   };
 }
 
@@ -499,5 +598,146 @@ describe("WorkspaceAdministrationApplicationService", () => {
       }),
     ).rejects.toBe(conflict);
     expect(degraded.recovery.completeReset).not.toHaveBeenCalled();
+  });
+});
+
+describe("WorkspaceAdministrationDurableLifecycleApplicationService", () => {
+  const createInput: WorkspaceAdministrationDurableOperation = {
+    kind: "create",
+    purpose: "settings",
+    displayName: "Project",
+    absolutePath: "C:\\project",
+  };
+
+  it("owns prepare, commit, execution and business completion", async () => {
+    const fixture = durableLifecycleHarness({
+      execute: async () => {
+        throw new WorkspaceAdministrationBusinessError(
+          "LOCAL_WORKSPACE_NAME_CONFLICT",
+          "duplicate workspace",
+        );
+      },
+    });
+    await fixture.lifecycle.start();
+
+    const prepared = await fixture.lifecycle.prepare(createInput);
+    const completed = await fixture.lifecycle.commit(prepared);
+
+    expect(completed).toMatchObject({
+      state: "completed",
+      result: {
+        ok: false,
+        error: {
+          code: "LOCAL_WORKSPACE_NAME_CONFLICT",
+          message: "duplicate workspace",
+        },
+      },
+    });
+    expect(fixture.execute).toHaveBeenCalledTimes(1);
+    expect(fixture.mechanism.complete).toHaveBeenCalledTimes(1);
+    expect(fixture.observeInfrastructureFailure).not.toHaveBeenCalled();
+    expect(fixture.lifecycle.hostStatus()).toEqual({ state: "ready" });
+  });
+
+  it("recovers the oldest committed record and preserves its durable identity", async () => {
+    const committed: WorkspaceAdministrationDurableOperationRecord = {
+      localSeq: 4,
+      operationId: "workspace-operation-recovered",
+      inputDigest: `sha256:${"4".repeat(64)}`,
+      input: createInput,
+      state: "committed",
+      preparedAt: "2026-08-30T00:00:00.000Z",
+    };
+    const fixture = durableLifecycleHarness({ committed });
+    vi.mocked(fixture.mechanism.oldestCommitted).mockRejectedValueOnce(
+      new Error("retry"),
+    );
+
+    await fixture.lifecycle.start();
+    await vi.waitFor(() => {
+      expect(fixture.lifecycle.hostStatus()).toEqual({ state: "ready" });
+    });
+
+    expect(fixture.execute).toHaveBeenCalledTimes(1);
+    expect(fixture.execute).toHaveBeenCalledWith(
+      createInput,
+      expect.objectContaining({
+        operation: {
+          outboxId: "outbox-lifecycle-test",
+          localSeq: 4,
+          operationId: committed.operationId,
+          inputDigest: committed.inputDigest,
+        },
+      }),
+    );
+    expect(fixture.operation()).toMatchObject({
+      localSeq: 4,
+      state: "completed",
+    });
+  });
+
+  it("retries infrastructure failure in-order and degrades without completing on a terminal failure", async () => {
+    let attempts = 0;
+    const retrying = durableLifecycleHarness({
+      execute: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("retry");
+        return { ok: "after-retry" };
+      },
+    });
+    await retrying.lifecycle.start();
+    const prepared = await retrying.lifecycle.prepare(createInput);
+    await expect(retrying.lifecycle.commit(prepared)).resolves.toMatchObject({
+      state: "completed",
+      result: { ok: true, value: { ok: "after-retry" } },
+    });
+    expect(retrying.execute).toHaveBeenCalledTimes(2);
+
+    const degraded = durableLifecycleHarness({
+      execute: async () => {
+        throw new Error("permanent infrastructure failure");
+      },
+    });
+    await degraded.lifecycle.start();
+    const degradedPrepared = await degraded.lifecycle.prepare(createInput);
+    await expect(degraded.lifecycle.commit(degradedPrepared)).rejects.toThrow(
+      "permanent infrastructure failure",
+    );
+    expect(degraded.lifecycle.hostStatus()).toEqual({
+      state: "degraded",
+      diagnostic: {
+        code: "Error",
+        message: "permanent infrastructure failure",
+        localSeq: degradedPrepared.localSeq,
+      },
+    });
+    expect(degraded.operation()?.state).toBe("committed");
+    expect(degraded.mechanism.complete).not.toHaveBeenCalled();
+  });
+
+  it("aborts an in-flight attempt on close and leaves committed work recoverable", async () => {
+    const fixture = durableLifecycleHarness({
+      execute: async (_input, execution) =>
+        new Promise((_resolve, reject) => {
+          execution.abort.addEventListener(
+            "abort",
+            () => reject(Object.assign(new Error("cancelled"), { name: "AbortError" })),
+            { once: true },
+          );
+        }),
+    });
+    await fixture.lifecycle.start();
+    const prepared = await fixture.lifecycle.prepare(createInput);
+    const commit = fixture.lifecycle.commit(prepared);
+    await vi.waitFor(() => expect(fixture.execute).toHaveBeenCalledTimes(1));
+
+    await fixture.lifecycle.close();
+
+    await expect(commit).rejects.toMatchObject({
+      code: "LOCAL_WORKSPACE_DRAINING",
+    });
+    expect(fixture.lifecycle.hostStatus()).toEqual({ state: "closed" });
+    expect(fixture.operation()?.state).toBe("committed");
+    expect(fixture.mechanism.complete).not.toHaveBeenCalled();
   });
 });

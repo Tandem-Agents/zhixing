@@ -17,8 +17,10 @@ import {
 import { acquireLocalWorkspaceOwner } from "../../runtime/local-workspace-owner.js";
 import {
   WORKSPACE_CATALOG_RESET_IMPACT,
+  WorkspaceAdministrationDurableLifecycleApplicationService,
   type WorkspaceAdministrationDurableOperation,
 } from "@zhixing/core/environment/workspace-administration";
+import { observeLocalWorkspaceDurableInfrastructureFailure } from "../../runtime/local-workspace-durable-lifecycle-adapter.js";
 
 export async function executeLocalWorkspaceOutboxCase(
   kind: DurableCaseKind,
@@ -209,9 +211,8 @@ async function recoverOutboxWithHost(outbox: LocalWorkspaceOperationOutbox): Pro
   const recoveredOutbox = new LocalWorkspaceOperationOutbox({ rootDir: root });
   let executions = 0;
   const unavailable = async (): Promise<never> => { throw new Error("Unexpected local workspace recovery operation"); };
-  const host = new LocalWorkspaceManagementHost({
-    lease,
-    applications: {
+  const lifecycle = new WorkspaceAdministrationDurableLifecycleApplicationService({
+    application: {
       status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
       list: async () => [],
       viewByName: unavailable,
@@ -229,7 +230,14 @@ async function recoverOutboxWithHost(outbox: LocalWorkspaceOperationOutbox): Pro
         };
       },
     },
-    outbox: recoveredOutbox,
+    mechanism: recoveredOutbox,
+    observeInfrastructureFailure:
+      observeLocalWorkspaceDurableInfrastructureFailure,
+  });
+  const host = new LocalWorkspaceManagementHost({
+    lease,
+    lifecycle,
+    delivery: recoveredOutbox,
   });
   try {
     await host.start();

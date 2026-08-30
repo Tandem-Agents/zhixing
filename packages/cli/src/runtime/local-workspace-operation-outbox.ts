@@ -5,6 +5,8 @@ import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
 import { defineDurableRuntimeContract } from "@zhixing/core/contracts";
 import {
   type WorkspaceAdministrationDurableOperation,
+  type WorkspaceAdministrationDurableOperationKey,
+  type WorkspaceAdministrationDurableOperationRecord,
   validateWorkspaceAdministrationDurableOperation,
 } from "@zhixing/core/environment/workspace-administration";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
@@ -57,7 +59,7 @@ export const LOCAL_WORKSPACE_OPERATION_OUTBOX_DURABLE_CONTRACT =
   defineDurableRuntimeContract({
     recordFamily: "local-workspace-operation-outbox",
     producer: "LocalWorkspaceOperationOutbox",
-    recoveryOwner: "LocalWorkspaceManagementHost",
+    recoveryOwner: "WorkspaceAdministrationDurableLifecycleApplicationService",
     resourceIdentity: "zhixingHome/runtime/local-workspace-operation-outbox",
     recoveryClass: "committed-forward-recovery",
     cases: [
@@ -71,25 +73,6 @@ export const LOCAL_WORKSPACE_OPERATION_OUTBOX_DURABLE_CONTRACT =
       { kind: "corruption", key: "establishment-marker", reasonCode: "LOCAL_WORKSPACE_OUTBOX_IDENTITY_CORRUPT" },
     ],
   });
-
-export type LocalWorkspaceOperationState =
-  | "prepared"
-  | "committed"
-  | "completed"
-  | "abandoned";
-
-export interface LocalWorkspaceOperation {
-  readonly localSeq: number;
-  readonly operationId: string;
-  readonly input: WorkspaceAdministrationDurableOperation;
-  readonly inputDigest: string;
-  readonly state: LocalWorkspaceOperationState;
-  readonly preparedAt: string;
-  readonly expiresAt?: string;
-  readonly confirmationToken?: string;
-  readonly result?: unknown;
-  readonly resultDigest?: string;
-}
 
 interface Checkpoint {
   readonly v: typeof VERSION;
@@ -111,12 +94,12 @@ interface Event {
   readonly eventSeq: number;
   readonly previousDigest: string;
   readonly digest: string;
-  readonly operation: LocalWorkspaceOperation;
+  readonly operation: WorkspaceAdministrationDurableOperationRecord;
 }
 
 interface PersistedState {
   checkpoint: Checkpoint;
-  operations: Map<number, LocalWorkspaceOperation>;
+  operations: Map<number, WorkspaceAdministrationDurableOperationRecord>;
   nextLocalSeq: number;
   nextEventSeq: number;
   headDigest: string;
@@ -183,7 +166,7 @@ export class LocalWorkspaceOperationOutbox {
 
   async prepare(
     input: WorkspaceAdministrationDurableOperation,
-  ): Promise<LocalWorkspaceOperation> {
+  ): Promise<WorkspaceAdministrationDurableOperationRecord> {
     await this.initialize();
     return this.#serial(async () => {
       await this.#expirePrepared();
@@ -195,7 +178,7 @@ export class LocalWorkspaceOperationOutbox {
       if (existing) return cloneOperation(existing);
       const state = this.#requireState();
       const preparedAt = this.#clock();
-      const operation: LocalWorkspaceOperation = {
+      const operation: WorkspaceAdministrationDurableOperationRecord = {
         localSeq: state.nextLocalSeq,
         operationId: `workspace-operation-${randomUUID()}`,
         input: normalized,
@@ -217,9 +200,9 @@ export class LocalWorkspaceOperationOutbox {
   }
 
   async commit(
-    identity: { readonly localSeq: number; readonly operationId: string; readonly inputDigest: string },
+    identity: WorkspaceAdministrationDurableOperationKey,
     confirmation?: { readonly impact: string },
-  ): Promise<LocalWorkspaceOperation> {
+  ): Promise<WorkspaceAdministrationDurableOperationRecord> {
     await this.initialize();
     return this.#serial(async () => {
       await this.#expirePrepared();
@@ -257,9 +240,9 @@ export class LocalWorkspaceOperationOutbox {
   }
 
   async complete(
-    identity: { readonly localSeq: number; readonly operationId: string; readonly inputDigest: string },
+    identity: WorkspaceAdministrationDurableOperationKey,
     result: unknown,
-  ): Promise<LocalWorkspaceOperation> {
+  ): Promise<WorkspaceAdministrationDurableOperationRecord> {
     await this.initialize();
     return this.#serial(async () => {
       const operation = this.#requireOperation(identity);
@@ -282,7 +265,7 @@ export class LocalWorkspaceOperationOutbox {
 
   async pending(afterSeq = 0, limit = 64): Promise<{
     readonly outboxId: string;
-    readonly operations: readonly LocalWorkspaceOperation[];
+    readonly operations: readonly WorkspaceAdministrationDurableOperationRecord[];
     readonly next?: number;
     readonly confirmation: { readonly throughSeq: number; readonly prefixDigest: string };
   }> {
@@ -403,11 +386,15 @@ export class LocalWorkspaceOperationOutbox {
     });
   }
 
-  operation(identity: { readonly localSeq: number; readonly operationId: string; readonly inputDigest: string }): LocalWorkspaceOperation {
+  operation(
+    identity: WorkspaceAdministrationDurableOperationKey,
+  ): WorkspaceAdministrationDurableOperationRecord {
     return cloneOperation(this.#requireOperation(identity));
   }
 
-  async oldestCommitted(): Promise<LocalWorkspaceOperation | undefined> {
+  async oldestCommitted(): Promise<
+    WorkspaceAdministrationDurableOperationRecord | undefined
+  > {
     await this.initialize();
     const operation = [...this.#requireState().operations.values()]
       .filter((candidate) => candidate.state === "committed")
@@ -506,7 +493,9 @@ export class LocalWorkspaceOperationOutbox {
     this.#state = await this.#read();
   }
 
-  async #append(operation: LocalWorkspaceOperation): Promise<void> {
+  async #append(
+    operation: WorkspaceAdministrationDurableOperationRecord,
+  ): Promise<void> {
     const state = this.#requireState();
     const body = {
       v: VERSION as typeof VERSION,
@@ -532,7 +521,10 @@ export class LocalWorkspaceOperationOutbox {
     state.headDigest = event.digest;
   }
 
-  async #replace(checkpoint: Checkpoint, operations: readonly LocalWorkspaceOperation[]): Promise<void> {
+  async #replace(
+    checkpoint: Checkpoint,
+    operations: readonly WorkspaceAdministrationDurableOperationRecord[],
+  ): Promise<void> {
     const checkpointDigest = protocolDigest("LocalWorkspaceOperationCheckpoint", 1, checkpoint);
     const lines = [canonicalize({ checkpoint, digest: checkpointDigest })];
     let previousDigest = checkpointDigest;
@@ -574,7 +566,10 @@ export class LocalWorkspaceOperationOutbox {
       const checkpoint = validateCheckpoint(first.checkpoint);
       const checkpointDigest = protocolDigest("LocalWorkspaceOperationCheckpoint", 1, checkpoint);
       if (first.digest !== checkpointDigest) throw new Error("Local workspace outbox checkpoint digest is invalid");
-      const operations = new Map<number, LocalWorkspaceOperation>();
+      const operations = new Map<
+        number,
+        WorkspaceAdministrationDurableOperationRecord
+      >();
       let headDigest = checkpointDigest;
       let nextEventSeq = 1;
       for (const line of lines.slice(1)) {
@@ -629,7 +624,9 @@ export class LocalWorkspaceOperationOutbox {
     return this.#state;
   }
 
-  #requireOperation(identity: { readonly localSeq: number; readonly operationId: string; readonly inputDigest: string }): LocalWorkspaceOperation {
+  #requireOperation(
+    identity: WorkspaceAdministrationDurableOperationKey,
+  ): WorkspaceAdministrationDurableOperationRecord {
     const state = this.#requireState();
     if (identity.localSeq <= state.checkpoint.confirmedThroughSeq) {
       throw new Error("Local workspace operation was already acknowledged and compacted");
@@ -705,7 +702,9 @@ function validateEvent(value: unknown, eventSeq: number, previousDigest: string,
   return { ...body, digest: record.digest as string } as Event;
 }
 
-export function validateLocalWorkspaceOperation(value: unknown): LocalWorkspaceOperation {
+export function validateLocalWorkspaceOperation(
+  value: unknown,
+): WorkspaceAdministrationDurableOperationRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Local workspace operation is invalid");
   const record = value as Record<string, unknown>;
   const allowed = ["confirmationToken", "expiresAt", "input", "inputDigest", "localSeq", "operationId", "preparedAt", "result", "resultDigest", "state"];
@@ -731,10 +730,15 @@ export function validateLocalWorkspaceOperation(value: unknown): LocalWorkspaceO
       ? typeof record.resultDigest !== "string" || record.resultDigest !== protocolDigest("LocalWorkspaceOperationResult", 1, record.result ?? null)
       : record.result !== undefined || record.resultDigest !== undefined)
   ) throw new Error("Local workspace operation is invalid");
-  return structuredClone(value) as LocalWorkspaceOperation;
+  return structuredClone(
+    value,
+  ) as WorkspaceAdministrationDurableOperationRecord;
 }
 
-function validateTransition(previous: LocalWorkspaceOperation | undefined, next: LocalWorkspaceOperation): void {
+function validateTransition(
+  previous: WorkspaceAdministrationDurableOperationRecord | undefined,
+  next: WorkspaceAdministrationDurableOperationRecord,
+): void {
   if (!previous) {
     if (next.state !== "prepared" && next.state !== "committed" && next.state !== "completed" && next.state !== "abandoned") {
       throw new Error("Local workspace operation initial state is invalid");
@@ -759,11 +763,15 @@ function parseExact(value: unknown, keys: readonly string[], label: string): Rec
   return record;
 }
 
-function cloneOperation(operation: LocalWorkspaceOperation): LocalWorkspaceOperation {
+function cloneOperation(
+  operation: WorkspaceAdministrationDurableOperationRecord,
+): WorkspaceAdministrationDurableOperationRecord {
   return structuredClone(operation);
 }
 
-function isTerminal(operation: LocalWorkspaceOperation): boolean {
+function isTerminal(
+  operation: WorkspaceAdministrationDurableOperationRecord,
+): boolean {
   return operation.state === "completed" || operation.state === "abandoned";
 }
 

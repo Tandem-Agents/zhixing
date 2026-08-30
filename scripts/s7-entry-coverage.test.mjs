@@ -3031,7 +3031,7 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
   );
 });
 
-test("Workspace Administration CRUD and reset have one domain application and one CLI binding", async () => {
+test("Workspace Administration CRUD, reset and durable lifecycle have one domain application boundary", async () => {
   const paths = [
     "packages/core/src/environment/workspace-administration.ts",
     "packages/core/src/environment/index.ts",
@@ -3040,6 +3040,7 @@ test("Workspace Administration CRUD and reset have one domain application and on
     "packages/core/tsup.config.ts",
     "packages/cli/src/runtime/local-workspace-management-host.ts",
     "packages/cli/src/runtime/local-workspace-operation-outbox.ts",
+    "packages/cli/src/runtime/local-workspace-durable-lifecycle-adapter.ts",
     "packages/cli/src/runtime/local-workspace-bootstrap.ts",
     "packages/cli/src/runtime/local-workspace-control.ts",
     "packages/cli/src/runtime/workspace-command.ts",
@@ -3063,7 +3064,7 @@ test("Workspace Administration CRUD and reset have one domain application and on
       "packages/cli/src/runtime/local-workspace-management-host.ts",
       (text) => `${text}\nclass LocalWorkspaceFacade {}`,
     )).join("\n"),
-    /second CRUD\/reset owner/,
+    /second durable lifecycle owner/,
   );
   assert.match(
     inspectWorkspaceAdministrationOwnership(mutate(
@@ -3097,7 +3098,7 @@ test("Workspace Administration CRUD and reset have one domain application and on
         text: "export class LocalWorkspaceRecovery {}",
       },
     ]).join("\n"),
-    /second CRUD\/reset owner/,
+    /second durable lifecycle owner/,
   );
   assert.match(
     inspectWorkspaceAdministrationOwnership(mutate(
@@ -3111,7 +3112,7 @@ test("Workspace Administration CRUD and reset have one domain application and on
       "packages/cli/src/runtime/local-workspace-management-host.ts",
       (text) => `${text}\nconst requestNonce = "host-owned-reset";`,
     )).join("\n"),
-    /second CRUD\/reset owner/,
+    /second durable lifecycle owner/,
   );
   assert.match(
     inspectWorkspaceAdministrationOwnership(mutate(
@@ -3138,7 +3139,7 @@ test("Workspace Administration CRUD and reset have one domain application and on
         "currentResult = undefined; const claimed = undefined;",
       ),
     )).join("\n"),
-    /second CRUD owner|finite Correctness port/,
+    /second durable lifecycle owner/,
   );
   assert.match(
     inspectWorkspaceAdministrationOwnership(mutate(
@@ -3185,17 +3186,51 @@ test("Workspace Administration CRUD and reset have one domain application and on
       "packages/cli/src/runtime/local-workspace-operation-outbox.ts",
       (text) => `${text}\ntype LocalWorkspaceWriteOperation = { kind: string };`,
     )).join("\n"),
-    /outbox redefines the domain operation contract/,
+    /outbox redefines the domain contract/,
   );
   assert.match(
     inspectWorkspaceAdministrationOwnership(mutate(
       "packages/cli/src/runtime/local-workspace-management-host.ts",
       (text) => text.replace(
-        "this.#applications.executeDurableOperation(",
-        "this.#applications.create(",
+        "this.#lifecycle.prepare(request.input)",
+        "this.#applications.create(request.input)",
       ),
     )).join("\n"),
-    /second CRUD\/reset owner/,
+    /second durable lifecycle owner/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/core/src/environment/workspace-administration.ts",
+      (text) => text.replace(
+        "class WorkspaceAdministrationDurableLifecycleApplicationService",
+        "class WorkspaceAdministrationDurableMechanismService",
+      ),
+    )).join("\n"),
+    /uniquely own CRUD/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/cli/src/runtime/local-workspace-management-host.ts",
+      (text) => `${text}\nfunction #drainLoop() {}`,
+    )).join("\n"),
+    /second durable lifecycle owner/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/cli/src/runtime/local-workspace-durable-lifecycle-adapter.ts",
+      (text) => `${text}\nsetTimeout(() => undefined, 50);`,
+    )).join("\n"),
+    /finite infrastructure-failure projection/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/cli/src/runtime/local-workspace-operation-outbox.ts",
+      (text) => text.replace(
+        'recoveryOwner: "WorkspaceAdministrationDurableLifecycleApplicationService"',
+        'recoveryOwner: "LocalWorkspaceManagementHost"',
+      ),
+    )).join("\n"),
+    /owns lifecycle admission and settlement decisions/,
   );
   assert.match(
     inspectWorkspaceAdministrationOwnership(mutate(

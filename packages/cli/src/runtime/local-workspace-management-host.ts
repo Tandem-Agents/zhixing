@@ -2,42 +2,25 @@ import { protocolDigest } from "@zhixing/core/protocol";
 import path from "node:path";
 import {
   WorkspaceAdministrationApplicationService,
-  WorkspaceAdministrationBusinessError,
+  WorkspaceAdministrationDurableLifecycleApplicationService,
   WORKSPACE_CATALOG_RESET_IMPACT,
-  type WorkspaceAdministrationApplication,
   type WorkspaceAdministrationCatalogStatus,
+  type WorkspaceAdministrationDurableLifecycleApplication,
+  type WorkspaceAdministrationDurableLifecycleStatus,
   type WorkspaceAdministrationDurableOperation,
+  type WorkspaceAdministrationDurableOperationKey,
+  type WorkspaceAdministrationDurableOperationRecord,
   type WorkspaceAdministrationDurableResult,
   type WorkspaceControlAuthorization,
   type WorkspaceAdministrationView,
   validateWorkspaceAdministrationDurableOperation,
   validateWorkspaceAdministrationDurableResult,
   validateWorkspaceAdministrationDurableValue,
-  workspaceAdministrationDurableFailure,
-  workspaceAdministrationDurableSuccess,
 } from "@zhixing/core/environment/workspace-administration";
-import {
-  DeviceCapacityAdmissionError,
-  StorageMaintenanceAdmissionError,
-  StorageMaintenanceCancelledError,
-  type StorageMaintenanceGovernorPort,
-} from "@zhixing/core/resources";
-import {
-  WorkspaceBindingCancelledError,
-  WorkspaceBindingCatalogConflictError,
-  WorkspaceBindingConflictError,
-  WorkspaceBindingNotFoundError,
-  WorkspaceBindingRevisionError,
-} from "@zhixing/core/environment";
-import {
-  ExecutorResourceAdmissionExpiredError,
-  ExecutorResourceAdmissionPendingError,
-  ExecutorResourceBackpressureError,
-} from "@zhixing/executor";
+import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import type { WorkspaceBindingResetReceipt } from "@zhixing/core/contracts";
 import {
   LocalWorkspaceOperationOutbox,
-  type LocalWorkspaceOperation,
   validateLocalWorkspaceOperation,
 } from "./local-workspace-operation-outbox.js";
 import {
@@ -46,16 +29,12 @@ import {
   type LocalWorkspaceOwnerLease,
 } from "./local-workspace-owner.js";
 import { ExecutorWorkspaceAdministrationControl } from "./local-workspace-control.js";
+import { observeLocalWorkspaceDurableInfrastructureFailure } from "./local-workspace-durable-lifecycle-adapter.js";
 
 const PAGE_SIZE = 64;
 
-export interface OperationIdentity {
-  readonly localSeq: number;
-  readonly operationId: string;
-  readonly inputDigest: string;
-}
-
-export interface LocalWorkspaceConsumptionCredential extends OperationIdentity {
+export interface LocalWorkspaceConsumptionCredential
+  extends WorkspaceAdministrationDurableOperationKey {
   readonly outboxId: string;
   readonly resultDigest: string;
 }
@@ -71,7 +50,7 @@ type HostRequest =
     }
   | {
       readonly kind: "commit";
-      readonly identity: OperationIdentity;
+      readonly identity: WorkspaceAdministrationDurableOperationKey;
       readonly confirmation?: { readonly impact: string };
     }
   | { readonly kind: "pending"; readonly afterSeq: number }
@@ -83,53 +62,9 @@ type HostRequest =
       readonly entries: readonly ConfirmationEntry[];
     };
 
-interface ConfirmationEntry extends OperationIdentity {
+interface ConfirmationEntry extends WorkspaceAdministrationDurableOperationKey {
   readonly resultDigest: string;
 }
-
-export type LocalWorkspaceHostState =
-  | "recovering"
-  | "ready"
-  | "degraded"
-  | "draining"
-  | "closed";
-
-export interface LocalWorkspaceHostStatus {
-  readonly state: LocalWorkspaceHostState;
-  readonly diagnostic?: {
-    readonly code: string;
-    readonly message: string;
-    readonly localSeq?: number;
-  };
-}
-
-type RetryDecision = {
-  readonly kind: "retry";
-  readonly code: string;
-  readonly message: string;
-  readonly delayMs: number;
-};
-type DegradedDecision = {
-  readonly kind: "degraded";
-  readonly code: string;
-  readonly message: string;
-};
-type InfrastructureDecision = RetryDecision | DegradedDecision;
-type OperationDecision =
-  | {
-      readonly kind: "completed";
-      readonly result: WorkspaceAdministrationDurableResult;
-    }
-  | InfrastructureDecision;
-
-type LocalWorkspaceHostApplications = Pick<
-  WorkspaceAdministrationApplication,
-  | "status"
-  | "list"
-  | "viewByName"
-  | "previewReset"
-  | "executeDurableOperation"
->;
 
 export type LocalWorkspaceCatalogStatus = WorkspaceAdministrationCatalogStatus;
 
@@ -154,7 +89,8 @@ export interface LocalWorkspaceClient {
   confirmDelivered(): Promise<void>;
 }
 
-export interface LocalWorkspaceResetPreview extends OperationIdentity {
+export interface LocalWorkspaceResetPreview
+  extends WorkspaceAdministrationDurableOperationKey {
   readonly expectedCatalogGeneration: string;
   readonly impact: string;
   readonly expiresAt: string;
@@ -198,9 +134,12 @@ export function decodeLocalWorkspaceResetPreview(
 export class RecoveredLocalWorkspaceOperationsError extends Error {
   readonly code = "LOCAL_WORKSPACE_RESULTS_RECOVERED";
   readonly outboxId: string;
-  readonly operations: readonly LocalWorkspaceOperation[];
+  readonly operations: readonly WorkspaceAdministrationDurableOperationRecord[];
 
-  constructor(outboxId: string, operations: readonly LocalWorkspaceOperation[]) {
+  constructor(
+    outboxId: string,
+    operations: readonly WorkspaceAdministrationDurableOperationRecord[],
+  ) {
     super("已恢复先前未确认的本机工作区操作结果，请查看后重试当前命令");
     this.name = "RecoveredLocalWorkspaceOperationsError";
     this.outboxId = outboxId;
@@ -228,437 +167,81 @@ export class CompletedLocalWorkspaceOperationError extends Error {
 }
 
 export class LocalWorkspaceManagementHost {
-  readonly #applications: LocalWorkspaceHostApplications;
-  readonly #outbox: LocalWorkspaceOperationOutbox;
+  readonly #lifecycle: WorkspaceAdministrationDurableLifecycleApplication;
+  readonly #delivery: Pick<
+    LocalWorkspaceOperationOutbox,
+    "pending" | "acknowledge"
+  >;
   readonly #transport: LocalWorkspaceTransportServer;
-  #state: LocalWorkspaceHostState | "created" = "created";
-  #diagnostic: LocalWorkspaceHostStatus["diagnostic"];
-  #outboxReady = false;
-  #mutationTail = Promise.resolve();
-  #drain: Promise<void> | undefined;
-  #recovery: Promise<void> | undefined;
-  #retryAbort = new AbortController();
-  #attemptAbort: AbortController | undefined;
+  #started = false;
+  #closed = false;
 
   constructor(input: {
     readonly lease: LocalWorkspaceOwnerLease;
-    readonly applications: LocalWorkspaceHostApplications;
-    readonly outbox: LocalWorkspaceOperationOutbox;
+    readonly lifecycle: WorkspaceAdministrationDurableLifecycleApplication;
+    readonly delivery: Pick<
+      LocalWorkspaceOperationOutbox,
+      "pending" | "acknowledge"
+    >;
   }) {
-    this.#applications = input.applications;
-    this.#outbox = input.outbox;
+    this.#lifecycle = input.lifecycle;
+    this.#delivery = input.delivery;
     this.#transport = new LocalWorkspaceTransportServer(input.lease, (request) =>
       this.#handle(validateHostRequest(request)),
     );
   }
 
   async start(): Promise<void> {
-    if (this.#state !== "created") return;
-    this.#state = "recovering";
-    this.#diagnostic = {
-      code: "LOCAL_WORKSPACE_RECOVERING",
-      message: "Local workspace host is recovering durable operations",
-    };
+    if (this.#started || this.#closed) return;
     try {
       await this.#transport.start();
+      this.#started = true;
+      await this.#lifecycle.start();
     } catch (error) {
-      this.#state = "closed";
+      this.#closed = true;
+      const lifecycleClose = this.#lifecycle.close();
       await this.#transport.close().catch(() => undefined);
+      await lifecycleClose;
       throw error;
     }
-    await this.#tryInitializeOutbox();
   }
 
   async close(): Promise<void> {
-    if (this.#state === "closed") return;
-    if (this.#state === "created") {
-      this.#state = "closed";
+    if (this.#closed) return;
+    this.#closed = true;
+    const lifecycleClose = this.#lifecycle.close();
+    if (!this.#started) {
       await this.#transport.close();
+      await lifecycleClose;
       return;
     }
-    this.#state = "draining";
-    this.#diagnostic = {
-      code: "LOCAL_WORKSPACE_DRAINING",
-      message: "Local workspace host is draining to a durable safe point",
-    };
-    this.#retryAbort.abort();
-    this.#attemptAbort?.abort();
     await this.#transport.unpublish();
     await this.#transport.close();
-    await Promise.allSettled([
-      this.#drain,
-      this.#recovery,
-      this.#mutationTail,
-    ].filter((value): value is Promise<void> => value !== undefined));
-    this.#state = "closed";
-    this.#diagnostic = undefined;
+    await lifecycleClose;
   }
 
   async #handle(request: HostRequest): Promise<unknown> {
-    if (this.#state === "created" || this.#state === "closed") {
+    if (!this.#started || this.#closed) {
       throw new Error("Local workspace management host is shutting down");
     }
-    if (request.kind === "host-status") return this.#hostStatus();
-    if (request.kind === "status") return this.#applications.status();
-    if (request.kind === "list") return this.#applications.list();
+    if (request.kind === "host-status") return this.#lifecycle.hostStatus();
+    if (request.kind === "status") return this.#lifecycle.catalogStatus();
+    if (request.kind === "list") return this.#lifecycle.list();
     if (request.kind === "view") {
-      return this.#applications.viewByName(request.displayName);
+      return this.#lifecycle.viewByName(request.displayName);
     }
-    this.#requireOutbox();
-    if (request.kind === "pending") return this.#outbox.pending(request.afterSeq, PAGE_SIZE);
-    if (request.kind === "acknowledge") return this.#outbox.acknowledge(request);
+    this.#lifecycle.assertDeliveryMechanismReady();
+    if (request.kind === "pending") {
+      return this.#delivery.pending(request.afterSeq, PAGE_SIZE);
+    }
+    if (request.kind === "acknowledge") {
+      return this.#delivery.acknowledge(request);
+    }
     if (request.kind === "prepare") {
-      return this.#serializeMutation(async () => {
-        this.#requireWritable();
-        if (request.input.kind === "reset") {
-          const preview = await this.#applications.previewReset({
-            expectedCatalogGeneration:
-              request.input.expectedCatalogGeneration,
-            impact: request.input.impact,
-          });
-          return this.#outbox.prepare({ kind: "reset", ...preview });
-        }
-        return this.#outbox.prepare(request.input);
-      });
+      return this.#lifecycle.prepare(request.input);
     }
-    const admitted = await this.#serializeMutation(async () => {
-      const existing = this.#outbox.operation(request.identity);
-      const replay = existing.state === "committed" || existing.state === "completed";
-      if (!replay) this.#requireWritable();
-      const committed = await this.#outbox.commit(
-        request.identity,
-        request.confirmation,
-      );
-      if (committed.state === "completed") {
-        return { committed, drain: Promise.resolve() };
-      }
-      this.#state = "recovering";
-      this.#diagnostic = {
-        code: "LOCAL_WORKSPACE_COMMITTED_DRAIN",
-        message: "Local workspace host is completing a committed operation",
-        localSeq: committed.localSeq,
-      };
-      return { committed, drain: this.#ensureDrain() };
-    });
-    await admitted.drain;
-    const current = this.#outbox.operation(admitted.committed);
-    if (current.state === "completed") return current;
-    throw this.#stateError();
+    return this.#lifecycle.commit(request.identity, request.confirmation);
   }
-
-  async #oldestCommitted(): Promise<LocalWorkspaceOperation | undefined> {
-    return this.#outbox.oldestCommitted();
-  }
-
-  #ensureDrain(): Promise<void> {
-    if (this.#drain) return this.#drain;
-    const drain = this.#drainLoop();
-    const wrapped = drain.finally(() => {
-      if (this.#drain === wrapped) this.#drain = undefined;
-    });
-    this.#drain = wrapped;
-    return wrapped;
-  }
-
-  async #drainLoop(): Promise<void> {
-    let retryAttempt = 0;
-    for (;;) {
-      if (this.#state === "draining" || this.#state === "closed") return;
-      let operation: LocalWorkspaceOperation | undefined;
-      try {
-        operation = await this.#oldestCommitted();
-      } catch (error) {
-        const decision = classifyInfrastructureFailure(error, retryAttempt);
-        if (decision.kind === "retry") {
-          retryAttempt += 1;
-          this.#setDiagnostic(decision);
-          if (!(await waitForRetry(decision.delayMs, this.#retryAbort.signal))) return;
-          continue;
-        }
-        this.#degrade(decision);
-        return;
-      }
-      if (!operation) {
-        this.#state = "ready";
-        this.#diagnostic = undefined;
-        return;
-      }
-      const decision = await this.#executeDecision(operation, retryAttempt);
-      if (decision.kind === "retry") {
-        retryAttempt += 1;
-        this.#setDiagnostic(decision, operation.localSeq);
-        if (!(await waitForRetry(decision.delayMs, this.#retryAbort.signal))) return;
-        continue;
-      }
-      if (decision.kind === "degraded") {
-        this.#degrade(decision, operation.localSeq);
-        return;
-      }
-      try {
-        await this.#outbox.complete(operation, decision.result);
-        retryAttempt = 0;
-      } catch (error) {
-        const completion = classifyInfrastructureFailure(error, retryAttempt);
-        if (completion.kind === "retry") {
-          retryAttempt += 1;
-          this.#setDiagnostic(completion, operation.localSeq);
-          if (!(await waitForRetry(completion.delayMs, this.#retryAbort.signal))) return;
-          continue;
-        }
-        this.#degrade(completion, operation.localSeq);
-        return;
-      }
-    }
-  }
-
-  async #executeDecision(
-    operation: LocalWorkspaceOperation,
-    retryAttempt: number,
-  ): Promise<OperationDecision> {
-    const abort = new AbortController();
-    this.#attemptAbort = abort;
-    try {
-      const value = await this.#applications.executeDurableOperation(
-        operation.input,
-        {
-          operation: {
-            outboxId: this.#outbox.outboxId,
-            localSeq: operation.localSeq,
-            operationId: operation.operationId,
-            inputDigest: operation.inputDigest,
-          },
-          abort: abort.signal,
-          preparedAt: operation.preparedAt,
-          ...(operation.confirmationToken
-            ? { confirmationToken: operation.confirmationToken }
-            : {}),
-        },
-      );
-      return {
-        kind: "completed",
-        result: workspaceAdministrationDurableSuccess(value ?? null),
-      };
-    } catch (error) {
-      return classifyExecutionFailure(error, retryAttempt);
-    } finally {
-      if (this.#attemptAbort === abort) this.#attemptAbort = undefined;
-    }
-  }
-
-  async #tryInitializeOutbox(): Promise<void> {
-    try {
-      await this.#outbox.initialize();
-      this.#outboxReady = true;
-      const committed = await this.#oldestCommitted();
-      if (!committed) {
-        this.#state = "ready";
-        this.#diagnostic = undefined;
-        return;
-      }
-      this.#state = "recovering";
-      this.#diagnostic = {
-        code: "LOCAL_WORKSPACE_RECOVERING_COMMITTED",
-        message: "Local workspace host is recovering committed operations",
-        localSeq: committed.localSeq,
-      };
-      void this.#ensureDrain();
-    } catch (error) {
-      const decision = classifyInfrastructureFailure(error, 0);
-      if (decision.kind === "retry") {
-        this.#setDiagnostic(decision);
-        this.#scheduleOutboxRecovery(decision.delayMs);
-      } else {
-        this.#degrade(decision);
-      }
-    }
-  }
-
-  #scheduleOutboxRecovery(initialDelayMs: number): void {
-    if (this.#recovery) return;
-    const recovery = (async () => {
-      let attempt = 1;
-      let delayMs = initialDelayMs;
-      while (this.#state === "recovering" && !this.#outboxReady) {
-        if (!(await waitForRetry(delayMs, this.#retryAbort.signal))) return;
-        try {
-          await this.#outbox.initialize();
-          this.#outboxReady = true;
-          void this.#ensureDrain();
-          return;
-        } catch (error) {
-          const decision = classifyInfrastructureFailure(error, attempt);
-          if (decision.kind !== "retry") {
-            this.#degrade(decision);
-            return;
-          }
-          attempt += 1;
-          delayMs = decision.delayMs;
-          this.#setDiagnostic(decision);
-        }
-      }
-    })();
-    const wrapped = recovery.finally(() => {
-      if (this.#recovery === wrapped) this.#recovery = undefined;
-    });
-    this.#recovery = wrapped;
-  }
-
-  #hostStatus(): LocalWorkspaceHostStatus {
-    const state = this.#state === "created" ? "recovering" : this.#state;
-    return {
-      state,
-      ...(this.#diagnostic ? { diagnostic: { ...this.#diagnostic } } : {}),
-    };
-  }
-
-  #setDiagnostic(
-    decision: RetryDecision,
-    localSeq?: number,
-  ): void {
-    if (this.#state !== "draining" && this.#state !== "closed") this.#state = "recovering";
-    this.#diagnostic = {
-      code: decision.code,
-      message: decision.message,
-      ...(localSeq === undefined ? {} : { localSeq }),
-    };
-  }
-
-  #degrade(
-    decision: DegradedDecision,
-    localSeq?: number,
-  ): void {
-    if (this.#state === "draining" || this.#state === "closed") return;
-    this.#state = "degraded";
-    this.#diagnostic = {
-      code: decision.code,
-      message: decision.message,
-      ...(localSeq === undefined ? {} : { localSeq }),
-    };
-  }
-
-  #requireOutbox(): void {
-    if (!this.#outboxReady) throw this.#stateError();
-  }
-
-  #requireWritable(): void {
-    if (this.#state !== "ready") throw this.#stateError();
-  }
-
-  #stateError(): Error & { code: string } {
-    const error = new Error(
-      this.#diagnostic?.message ?? "Local workspace management host is not ready",
-    ) as Error & { code: string };
-    error.code = this.#diagnostic?.code ?? "LOCAL_WORKSPACE_HOST_NOT_READY";
-    return error;
-  }
-
-  #serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
-    const run = this.#mutationTail.then(operation, operation);
-    this.#mutationTail = run.then(() => undefined, () => undefined);
-    return run;
-  }
-}
-
-function classifyExecutionFailure(
-  error: unknown,
-  attempt: number,
-): OperationDecision {
-  if (
-    error instanceof WorkspaceAdministrationBusinessError ||
-    error instanceof WorkspaceBindingNotFoundError ||
-    error instanceof WorkspaceBindingConflictError ||
-    error instanceof WorkspaceBindingRevisionError ||
-    error instanceof WorkspaceBindingCatalogConflictError
-  ) {
-    return {
-      kind: "completed",
-        result: workspaceAdministrationDurableFailure(
-          stableErrorCode(error),
-          error.message,
-        ),
-    };
-  }
-  return classifyInfrastructureFailure(error, attempt);
-}
-
-function classifyInfrastructureFailure(
-  error: unknown,
-  attempt: number,
-): InfrastructureDecision {
-  const message = error instanceof Error
-    ? error.message
-    : "Local workspace operation failed";
-  const code = stableErrorCode(error);
-  const retryAfterMs = retryDelayFrom(error);
-  if (retryAfterMs !== undefined) {
-    return {
-      kind: "retry",
-      code,
-      message,
-      delayMs: Math.min(2_000, Math.max(retryAfterMs, retryBackoffMs(attempt))),
-    };
-  }
-  return { kind: "degraded", code, message };
-}
-
-function retryDelayFrom(error: unknown): number | undefined {
-  if (
-    error instanceof ExecutorResourceBackpressureError ||
-    error instanceof ExecutorResourceAdmissionPendingError ||
-    error instanceof ExecutorResourceAdmissionExpiredError ||
-    error instanceof WorkspaceBindingCancelledError ||
-    error instanceof StorageMaintenanceCancelledError ||
-    (error instanceof Error && error.name === "AbortError")
-  ) {
-    return 0;
-  }
-  if (error instanceof DeviceCapacityAdmissionError) {
-    return "retryAfterMs" in error.admission &&
-        typeof error.admission.retryAfterMs === "number"
-      ? error.admission.retryAfterMs
-      : 0;
-  }
-  if (error instanceof StorageMaintenanceAdmissionError) {
-    return "retryAfterMs" in error.admission &&
-        typeof error.admission.retryAfterMs === "number"
-      ? error.admission.retryAfterMs
-      : 0;
-  }
-  if (error instanceof Error && "code" in error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (
-      code === "EAGAIN" ||
-      code === "EBUSY" ||
-      code === "EINTR" ||
-      code === "EMFILE" ||
-      code === "ENFILE" ||
-      code === "ENOSPC" ||
-      code === "ETIMEDOUT" ||
-      code === "ECONNRESET"
-    ) {
-      return 0;
-    }
-  }
-  return undefined;
-}
-
-function retryBackoffMs(attempt: number): number {
-  return Math.min(2_000, 50 * 2 ** Math.min(attempt, 5));
-}
-
-function waitForRetry(delayMs: number, abort: AbortSignal): Promise<boolean> {
-  if (abort.aborted) return Promise.resolve(false);
-  return new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => {
-      abort.removeEventListener("abort", onAbort);
-      resolve(true);
-    }, delayMs);
-    const onAbort = () => {
-      clearTimeout(timer);
-      resolve(false);
-    };
-    abort.addEventListener("abort", onAbort, { once: true });
-  });
 }
 
 export function createLocalWorkspaceManagementHost(input: {
@@ -683,23 +266,30 @@ export function createLocalWorkspaceManagementHost(input: {
     recovery: input.management.recovery,
     control,
   });
+  const outbox = new LocalWorkspaceOperationOutbox({
+    rootDir: path.join(
+      input.zhixingHome,
+      "runtime",
+      "local-workspace-operation-outbox",
+    ),
+    storageMaintenance: input.storageMaintenance,
+  });
+  const lifecycle = new WorkspaceAdministrationDurableLifecycleApplicationService({
+    application: workspace,
+    mechanism: outbox,
+    observeInfrastructureFailure:
+      observeLocalWorkspaceDurableInfrastructureFailure,
+  });
   return new LocalWorkspaceManagementHost({
     lease: input.lease,
-    applications: workspace,
-    outbox: new LocalWorkspaceOperationOutbox({
-      rootDir: path.join(
-        input.zhixingHome,
-        "runtime",
-        "local-workspace-operation-outbox",
-      ),
-      storageMaintenance: input.storageMaintenance,
-    }),
+    lifecycle,
+    delivery: outbox,
   });
 }
 
 export function createLocalWorkspaceClient(zhixingHome: string): LocalWorkspaceClient {
   let pendingDelivery: PendingDelivery | undefined;
-  let currentResult: LocalWorkspaceOperation | undefined;
+  let currentResult: WorkspaceAdministrationDurableOperationRecord | undefined;
   const recover = async (): Promise<PendingDelivery> => {
     pendingDelivery = await readPendingDelivery(zhixingHome);
     return pendingDelivery;
@@ -846,7 +436,7 @@ export function createLocalWorkspaceClient(zhixingHome: string): LocalWorkspaceC
 
 function consumptionCredentialOf(
   delivery: PendingDelivery | undefined,
-  operation: LocalWorkspaceOperation | undefined,
+  operation: WorkspaceAdministrationDurableOperationRecord | undefined,
 ): LocalWorkspaceConsumptionCredential | undefined {
   if (!delivery || !operation?.resultDigest) return undefined;
   const credential = {
@@ -867,7 +457,7 @@ function consumptionCredentialOf(
 }
 
 function matchesConsumptionCredential(
-  operation: LocalWorkspaceOperation,
+  operation: WorkspaceAdministrationDurableOperationRecord,
   credential: LocalWorkspaceConsumptionCredential,
 ): boolean {
   return (
@@ -891,7 +481,7 @@ export async function localWorkspaceHostIsReachable(zhixingHome: string): Promis
 
 export async function readLocalWorkspaceHostStatus(
   zhixingHome: string,
-): Promise<LocalWorkspaceHostStatus> {
+): Promise<WorkspaceAdministrationDurableLifecycleStatus> {
   return validateHostStatus(
     await callLocalWorkspaceHost(zhixingHome, { kind: "host-status" }),
   );
@@ -904,7 +494,7 @@ async function execute(
   confirmation?: { readonly impact: string },
 ): Promise<{
   readonly result: WorkspaceAdministrationDurableResult;
-  readonly operation: LocalWorkspaceOperation;
+  readonly operation: WorkspaceAdministrationDurableOperationRecord;
 }> {
   const normalized = validateWorkspaceAdministrationDurableOperation(input);
   const inputDigest = protocolDigest("LocalWorkspaceOperationInput", 1, normalized);
@@ -954,14 +544,14 @@ function resultValue(
 interface PendingDelivery {
   readonly outboxId: string;
   readonly confirmation: { readonly throughSeq: number; readonly prefixDigest: string };
-  readonly operations: readonly LocalWorkspaceOperation[];
+  readonly operations: readonly WorkspaceAdministrationDurableOperationRecord[];
 }
 
 async function readPendingDelivery(zhixingHome: string): Promise<PendingDelivery> {
   let afterSeq = 0;
   let outboxId: string | undefined;
   let confirmation: { throughSeq: number; prefixDigest: string } | undefined;
-  const terminal: LocalWorkspaceOperation[] = [];
+  const terminal: WorkspaceAdministrationDurableOperationRecord[] = [];
   for (;;) {
     const page = validatePendingPage(await callLocalWorkspaceHost(zhixingHome, {
       kind: "pending",
@@ -1023,7 +613,9 @@ async function acknowledgeDelivery(
   }
 }
 
-function resetPreviewOf(operation: LocalWorkspaceOperation): LocalWorkspaceResetPreview {
+function resetPreviewOf(
+  operation: WorkspaceAdministrationDurableOperationRecord,
+): LocalWorkspaceResetPreview {
   if (operation.input.kind !== "reset" || !operation.expiresAt) {
     throw new TypeError("Local workspace reset preview is invalid");
   }
@@ -1053,7 +645,7 @@ function validateResetPreview(value: LocalWorkspaceResetPreview): void {
 
 function reportUnclaimedResults(
   outboxId: string,
-  operations: readonly LocalWorkspaceOperation[],
+  operations: readonly WorkspaceAdministrationDurableOperationRecord[],
 ): void {
   const completed = operations.filter((operation) => operation.state === "completed");
   if (completed.length > 0) {
@@ -1061,7 +653,9 @@ function reportUnclaimedResults(
   }
 }
 
-function identityOf(operation: LocalWorkspaceOperation): OperationIdentity {
+function identityOf(
+  operation: WorkspaceAdministrationDurableOperationRecord,
+): WorkspaceAdministrationDurableOperationKey {
   return {
     localSeq: operation.localSeq,
     operationId: operation.operationId,
@@ -1155,7 +749,9 @@ function validateHostRequest(value: unknown): HostRequest {
   throw new TypeError("Local workspace host request kind is invalid");
 }
 
-function validateHostStatus(value: unknown): LocalWorkspaceHostStatus {
+function validateHostStatus(
+  value: unknown,
+): WorkspaceAdministrationDurableLifecycleStatus {
   const record = exactRecord(
     value,
     value && typeof value === "object" && "diagnostic" in value
@@ -1192,7 +788,9 @@ function validateHostStatus(value: unknown): LocalWorkspaceHostStatus {
       throw new TypeError("Local workspace host diagnostic is invalid");
     }
   }
-  return structuredClone(value) as LocalWorkspaceHostStatus;
+  return structuredClone(
+    value,
+  ) as WorkspaceAdministrationDurableLifecycleStatus;
 }
 
 function validateAcknowledgmentReceipt(value: unknown): {
@@ -1222,7 +820,9 @@ function validateAcknowledgmentReceipt(value: unknown): {
   };
 }
 
-function validateIdentity(value: unknown): OperationIdentity {
+function validateIdentity(
+  value: unknown,
+): WorkspaceAdministrationDurableOperationKey {
   const record = exactRecord(value, ["inputDigest", "localSeq", "operationId"], "operation identity");
   if (
     !Number.isSafeInteger(record.localSeq) ||
@@ -1234,7 +834,7 @@ function validateIdentity(value: unknown): OperationIdentity {
   ) {
     throw new TypeError("Local workspace operation identity is invalid");
   }
-  return record as unknown as OperationIdentity;
+  return record as unknown as WorkspaceAdministrationDurableOperationKey;
 }
 
 function validateConfirmationEntry(value: unknown): ConfirmationEntry {
@@ -1256,7 +856,7 @@ function validateConfirmationEntry(value: unknown): ConfirmationEntry {
 
 function validatePendingPage(value: unknown): {
   outboxId: string;
-  operations: LocalWorkspaceOperation[];
+  operations: WorkspaceAdministrationDurableOperationRecord[];
   next?: number;
   confirmation: { throughSeq: number; prefixDigest: string };
 } {
@@ -1335,22 +935,4 @@ function exactRecord(value: unknown, keys: readonly string[], label: string): Re
     throw new TypeError(`Local workspace ${label} fields are invalid`);
   }
   return record;
-}
-
-function stableErrorCode(error: unknown): string {
-  if (error instanceof Error && "code" in error && typeof (error as { code?: unknown }).code === "string") {
-    return (error as { code: string }).code;
-  }
-  if (error instanceof WorkspaceBindingNotFoundError) return "WORKSPACE_BINDING_NOT_FOUND";
-  if (error instanceof WorkspaceBindingConflictError) return "WORKSPACE_BINDING_CONFLICT";
-  if (error instanceof WorkspaceBindingRevisionError) return "WORKSPACE_BINDING_REVISION";
-  if (error instanceof WorkspaceBindingCancelledError) return "WORKSPACE_BINDING_CANCELLED";
-  if (error instanceof DeviceCapacityAdmissionError) return "DEVICE_CAPACITY_NOT_ADMITTED";
-  if (error instanceof StorageMaintenanceAdmissionError) return "STORAGE_MAINTENANCE_NOT_ADMITTED";
-  if (error instanceof StorageMaintenanceCancelledError) return "STORAGE_MAINTENANCE_CANCELLED";
-  if (error instanceof ExecutorResourceBackpressureError) return "EXECUTOR_RESOURCE_BACKPRESSURE";
-  if (error instanceof ExecutorResourceAdmissionPendingError) return "EXECUTOR_RESOURCE_ADMISSION_PENDING";
-  if (error instanceof ExecutorResourceAdmissionExpiredError) return "EXECUTOR_RESOURCE_ADMISSION_EXPIRED";
-  if (error instanceof Error && error.name === "AbortError") return "LOCAL_WORKSPACE_OPERATION_CANCELLED";
-  return "LOCAL_WORKSPACE_OPERATION_FAILED";
 }

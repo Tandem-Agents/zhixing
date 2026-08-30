@@ -6,6 +6,12 @@ import type {
   WorkspaceBindingRecoveryPort,
   WorkspaceBindingResetReceipt,
 } from "../contracts/ports.js";
+import { WorkspaceBindingCatalogConflictError } from "./workspace-binding-catalog.js";
+import {
+  WorkspaceBindingConflictError,
+  WorkspaceBindingNotFoundError,
+  WorkspaceBindingRevisionError,
+} from "./workspace-bindings.js";
 import { localEnvironmentControlSubject } from "./workspace-bindings.js";
 
 export const WORKSPACE_CATALOG_RESET_IMPACT =
@@ -84,6 +90,99 @@ export type WorkspaceAdministrationDurableResult =
       readonly ok: false;
       readonly error: { readonly code: string; readonly message: string };
     };
+
+export interface WorkspaceAdministrationDurableOperationKey {
+  readonly localSeq: number;
+  readonly operationId: string;
+  readonly inputDigest: string;
+}
+
+export type WorkspaceAdministrationDurableOperationState =
+  | "prepared"
+  | "committed"
+  | "completed"
+  | "abandoned";
+
+export interface WorkspaceAdministrationDurableOperationRecord
+  extends WorkspaceAdministrationDurableOperationKey {
+  readonly input: WorkspaceAdministrationDurableOperation;
+  readonly state: WorkspaceAdministrationDurableOperationState;
+  readonly preparedAt: string;
+  readonly expiresAt?: string;
+  readonly confirmationToken?: string;
+  readonly result?: unknown;
+  readonly resultDigest?: string;
+}
+
+export type WorkspaceAdministrationDurableLifecycleState =
+  | "recovering"
+  | "ready"
+  | "degraded"
+  | "draining"
+  | "closed";
+
+export interface WorkspaceAdministrationDurableLifecycleStatus {
+  readonly state: WorkspaceAdministrationDurableLifecycleState;
+  readonly diagnostic?: {
+    readonly code: string;
+    readonly message: string;
+    readonly localSeq?: number;
+  };
+}
+
+export interface WorkspaceAdministrationDurableOperationMechanismPort {
+  initialize(): Promise<void>;
+  readonly outboxId: string;
+  prepare(
+    input: WorkspaceAdministrationDurableOperation,
+  ): Promise<WorkspaceAdministrationDurableOperationRecord>;
+  commit(
+    identity: WorkspaceAdministrationDurableOperationKey,
+    confirmation?: { readonly impact: string },
+  ): Promise<WorkspaceAdministrationDurableOperationRecord>;
+  complete(
+    identity: WorkspaceAdministrationDurableOperationKey,
+    result: unknown,
+  ): Promise<WorkspaceAdministrationDurableOperationRecord>;
+  operation(
+    identity: WorkspaceAdministrationDurableOperationKey,
+  ): WorkspaceAdministrationDurableOperationRecord;
+  oldestCommitted(): Promise<
+    WorkspaceAdministrationDurableOperationRecord | undefined
+  >;
+}
+
+export interface WorkspaceAdministrationDurableInfrastructureFailure {
+  readonly code: string;
+  readonly message: string;
+  readonly retryAfterMs?: number;
+}
+
+export interface WorkspaceAdministrationDurableLifecycleApplication {
+  start(): Promise<void>;
+  close(): Promise<void>;
+  hostStatus(): WorkspaceAdministrationDurableLifecycleStatus;
+  catalogStatus(): Promise<WorkspaceAdministrationCatalogStatus>;
+  list(): Promise<readonly WorkspaceAdministrationView[]>;
+  viewByName(displayName: string): Promise<WorkspaceAdministrationView>;
+  assertDeliveryMechanismReady(): void;
+  prepare(
+    input: WorkspaceAdministrationDurableOperation,
+  ): Promise<WorkspaceAdministrationDurableOperationRecord>;
+  commit(
+    identity: WorkspaceAdministrationDurableOperationKey,
+    confirmation?: { readonly impact: string },
+  ): Promise<WorkspaceAdministrationDurableOperationRecord>;
+}
+
+export type WorkspaceAdministrationDurableLifecycleDelegate = Pick<
+  WorkspaceAdministrationApplication,
+  | "status"
+  | "list"
+  | "viewByName"
+  | "previewReset"
+  | "executeDurableOperation"
+>;
 
 export interface WorkspaceAdministrationCatalogStatus {
   readonly state: "healthy" | "degraded";
@@ -465,6 +564,506 @@ export class WorkspaceAdministrationApplicationService
       : `${prefix}:${randomUUID()}`;
     return localEnvironmentControlSubject(this.#deviceId, nonce);
   }
+}
+
+type DurableRetryDecision = {
+  readonly kind: "retry";
+  readonly code: string;
+  readonly message: string;
+  readonly delayMs: number;
+};
+
+type DurableDegradedDecision = {
+  readonly kind: "degraded";
+  readonly code: string;
+  readonly message: string;
+};
+
+type DurableInfrastructureDecision =
+  | DurableRetryDecision
+  | DurableDegradedDecision;
+
+type DurableOperationDecision =
+  | {
+      readonly kind: "completed";
+      readonly result: WorkspaceAdministrationDurableResult;
+    }
+  | DurableInfrastructureDecision;
+
+/**
+ * Owns Workspace Administration's durable operation admission and recovery
+ * decisions. The mechanism port persists and replays P10 records but does not
+ * decide when an operation is admitted, retried, completed, or degraded.
+ */
+export class WorkspaceAdministrationDurableLifecycleApplicationService
+  implements WorkspaceAdministrationDurableLifecycleApplication
+{
+  readonly #application: WorkspaceAdministrationDurableLifecycleDelegate;
+  readonly #mechanism: WorkspaceAdministrationDurableOperationMechanismPort;
+  readonly #observeInfrastructureFailure: (
+    error: unknown,
+  ) => WorkspaceAdministrationDurableInfrastructureFailure;
+  #state: WorkspaceAdministrationDurableLifecycleState | "created" = "created";
+  #diagnostic: WorkspaceAdministrationDurableLifecycleStatus["diagnostic"];
+  #mechanismReady = false;
+  #mutationTail = Promise.resolve();
+  #drain: Promise<void> | undefined;
+  #recovery: Promise<void> | undefined;
+  #retryAbort = new AbortController();
+  #attemptAbort: AbortController | undefined;
+
+  constructor(input: {
+    readonly application: WorkspaceAdministrationDurableLifecycleDelegate;
+    readonly mechanism: WorkspaceAdministrationDurableOperationMechanismPort;
+    readonly observeInfrastructureFailure: (
+      error: unknown,
+    ) => WorkspaceAdministrationDurableInfrastructureFailure;
+  }) {
+    this.#application = input.application;
+    this.#mechanism = input.mechanism;
+    this.#observeInfrastructureFailure = input.observeInfrastructureFailure;
+  }
+
+  async start(): Promise<void> {
+    if (this.#state !== "created") return;
+    this.#state = "recovering";
+    this.#diagnostic = {
+      code: "LOCAL_WORKSPACE_RECOVERING",
+      message: "Local workspace host is recovering durable operations",
+    };
+    await this.#tryInitializeMechanism();
+  }
+
+  async close(): Promise<void> {
+    if (this.#state === "closed") return;
+    if (this.#state === "created") {
+      this.#state = "closed";
+      this.#diagnostic = undefined;
+      return;
+    }
+    this.#state = "draining";
+    this.#diagnostic = {
+      code: "LOCAL_WORKSPACE_DRAINING",
+      message: "Local workspace host is draining to a durable safe point",
+    };
+    this.#retryAbort.abort();
+    this.#attemptAbort?.abort();
+    await Promise.allSettled(
+      [this.#drain, this.#recovery, this.#mutationTail].filter(
+        (value): value is Promise<void> => value !== undefined,
+      ),
+    );
+    this.#state = "closed";
+    this.#diagnostic = undefined;
+  }
+
+  hostStatus(): WorkspaceAdministrationDurableLifecycleStatus {
+    const state = this.#state === "created" ? "recovering" : this.#state;
+    return Object.freeze({
+      state,
+      ...(this.#diagnostic
+        ? { diagnostic: Object.freeze({ ...this.#diagnostic }) }
+        : {}),
+    });
+  }
+
+  catalogStatus(): Promise<WorkspaceAdministrationCatalogStatus> {
+    return this.#application.status();
+  }
+
+  list(): Promise<readonly WorkspaceAdministrationView[]> {
+    return this.#application.list();
+  }
+
+  viewByName(displayName: string): Promise<WorkspaceAdministrationView> {
+    return this.#application.viewByName(displayName);
+  }
+
+  assertDeliveryMechanismReady(): void {
+    if (!this.#mechanismReady) throw this.#stateError();
+  }
+
+  async prepare(
+    input: WorkspaceAdministrationDurableOperation,
+  ): Promise<WorkspaceAdministrationDurableOperationRecord> {
+    this.assertDeliveryMechanismReady();
+    return this.#serializeMutation(async () => {
+      this.#requireWritable();
+      if (input.kind === "reset") {
+        const preview = await this.#application.previewReset({
+          expectedCatalogGeneration: input.expectedCatalogGeneration,
+          impact: input.impact,
+        });
+        return this.#mechanism.prepare({ kind: "reset", ...preview });
+      }
+      return this.#mechanism.prepare(input);
+    });
+  }
+
+  async commit(
+    identity: WorkspaceAdministrationDurableOperationKey,
+    confirmation?: { readonly impact: string },
+  ): Promise<WorkspaceAdministrationDurableOperationRecord> {
+    this.assertDeliveryMechanismReady();
+    const admitted = await this.#serializeMutation(async () => {
+      const existing = this.#mechanism.operation(identity);
+      const replay =
+        existing.state === "committed" || existing.state === "completed";
+      if (!replay) this.#requireWritable();
+      const committed = await this.#mechanism.commit(identity, confirmation);
+      if (committed.state === "completed") {
+        return { committed, drain: Promise.resolve() };
+      }
+      this.#state = "recovering";
+      this.#diagnostic = {
+        code: "LOCAL_WORKSPACE_COMMITTED_DRAIN",
+        message: "Local workspace host is completing a committed operation",
+        localSeq: committed.localSeq,
+      };
+      return { committed, drain: this.#ensureDrain() };
+    });
+    await admitted.drain;
+    const current = this.#mechanism.operation(admitted.committed);
+    if (current.state === "completed") return current;
+    throw this.#stateError();
+  }
+
+  #ensureDrain(): Promise<void> {
+    if (this.#drain) return this.#drain;
+    const drain = this.#drainLoop();
+    const wrapped = drain.finally(() => {
+      if (this.#drain === wrapped) this.#drain = undefined;
+    });
+    this.#drain = wrapped;
+    return wrapped;
+  }
+
+  async #drainLoop(): Promise<void> {
+    let retryAttempt = 0;
+    for (;;) {
+      if (this.#state === "draining" || this.#state === "closed") return;
+      let operation: WorkspaceAdministrationDurableOperationRecord | undefined;
+      try {
+        operation = await this.#mechanism.oldestCommitted();
+      } catch (error) {
+        const decision = this.#classifyInfrastructureFailure(
+          error,
+          retryAttempt,
+        );
+        if (decision.kind === "retry") {
+          retryAttempt += 1;
+          this.#setDiagnostic(decision);
+          if (!(await waitForWorkspaceAdministrationRetry(
+            decision.delayMs,
+            this.#retryAbort.signal,
+          ))) return;
+          continue;
+        }
+        this.#degrade(decision);
+        return;
+      }
+      if (!operation) {
+        this.#state = "ready";
+        this.#diagnostic = undefined;
+        return;
+      }
+      const decision = await this.#executeDecision(operation, retryAttempt);
+      if (decision.kind === "retry") {
+        retryAttempt += 1;
+        this.#setDiagnostic(decision, operation.localSeq);
+        if (!(await waitForWorkspaceAdministrationRetry(
+          decision.delayMs,
+          this.#retryAbort.signal,
+        ))) return;
+        continue;
+      }
+      if (decision.kind === "degraded") {
+        this.#degrade(decision, operation.localSeq);
+        return;
+      }
+      try {
+        await this.#mechanism.complete(operation, decision.result);
+        retryAttempt = 0;
+      } catch (error) {
+        const completion = this.#classifyInfrastructureFailure(
+          error,
+          retryAttempt,
+        );
+        if (completion.kind === "retry") {
+          retryAttempt += 1;
+          this.#setDiagnostic(completion, operation.localSeq);
+          if (!(await waitForWorkspaceAdministrationRetry(
+            completion.delayMs,
+            this.#retryAbort.signal,
+          ))) return;
+          continue;
+        }
+        this.#degrade(completion, operation.localSeq);
+        return;
+      }
+    }
+  }
+
+  async #executeDecision(
+    operation: WorkspaceAdministrationDurableOperationRecord,
+    retryAttempt: number,
+  ): Promise<DurableOperationDecision> {
+    const abort = new AbortController();
+    this.#attemptAbort = abort;
+    try {
+      const value = await this.#application.executeDurableOperation(
+        operation.input,
+        {
+          operation: {
+            outboxId: this.#mechanism.outboxId,
+            localSeq: operation.localSeq,
+            operationId: operation.operationId,
+            inputDigest: operation.inputDigest,
+          },
+          abort: abort.signal,
+          preparedAt: operation.preparedAt,
+          ...(operation.confirmationToken
+            ? { confirmationToken: operation.confirmationToken }
+            : {}),
+        },
+      );
+      return {
+        kind: "completed",
+        result: workspaceAdministrationDurableSuccess(value ?? null),
+      };
+    } catch (error) {
+      return this.#classifyExecutionFailure(error, retryAttempt);
+    } finally {
+      if (this.#attemptAbort === abort) this.#attemptAbort = undefined;
+    }
+  }
+
+  async #tryInitializeMechanism(): Promise<void> {
+    try {
+      await this.#mechanism.initialize();
+      this.#mechanismReady = true;
+      const committed = await this.#mechanism.oldestCommitted();
+      if (!committed) {
+        this.#state = "ready";
+        this.#diagnostic = undefined;
+        return;
+      }
+      this.#state = "recovering";
+      this.#diagnostic = {
+        code: "LOCAL_WORKSPACE_RECOVERING_COMMITTED",
+        message: "Local workspace host is recovering committed operations",
+        localSeq: committed.localSeq,
+      };
+      void this.#ensureDrain();
+    } catch (error) {
+      const decision = this.#classifyInfrastructureFailure(error, 0);
+      if (decision.kind === "retry") {
+        this.#setDiagnostic(decision);
+        if (this.#mechanismReady) {
+          void this.#ensureDrain();
+        } else {
+          this.#scheduleMechanismRecovery(decision.delayMs);
+        }
+      } else {
+        this.#degrade(decision);
+      }
+    }
+  }
+
+  #scheduleMechanismRecovery(initialDelayMs: number): void {
+    if (this.#recovery) return;
+    const recovery = (async () => {
+      let attempt = 1;
+      let delayMs = initialDelayMs;
+      while (this.#state === "recovering" && !this.#mechanismReady) {
+        if (!(await waitForWorkspaceAdministrationRetry(
+          delayMs,
+          this.#retryAbort.signal,
+        ))) return;
+        try {
+          await this.#mechanism.initialize();
+          this.#mechanismReady = true;
+          void this.#ensureDrain();
+          return;
+        } catch (error) {
+          const decision = this.#classifyInfrastructureFailure(error, attempt);
+          if (decision.kind !== "retry") {
+            this.#degrade(decision);
+            return;
+          }
+          attempt += 1;
+          delayMs = decision.delayMs;
+          this.#setDiagnostic(decision);
+        }
+      }
+    })();
+    const wrapped = recovery.finally(() => {
+      if (this.#recovery === wrapped) this.#recovery = undefined;
+    });
+    this.#recovery = wrapped;
+  }
+
+  #classifyExecutionFailure(
+    error: unknown,
+    attempt: number,
+  ): DurableOperationDecision {
+    if (isWorkspaceAdministrationDurableBusinessFailure(error)) {
+      return {
+        kind: "completed",
+        result: workspaceAdministrationDurableFailure(
+          workspaceAdministrationDurableBusinessErrorCode(error),
+          error.message,
+        ),
+      };
+    }
+    return this.#classifyInfrastructureFailure(error, attempt);
+  }
+
+  #classifyInfrastructureFailure(
+    error: unknown,
+    attempt: number,
+  ): DurableInfrastructureDecision {
+    const observed = validateDurableInfrastructureFailure(
+      this.#observeInfrastructureFailure(error),
+    );
+    if (observed.retryAfterMs !== undefined) {
+      return {
+        kind: "retry",
+        code: observed.code,
+        message: observed.message,
+        delayMs: Math.min(
+          2_000,
+          Math.max(
+            observed.retryAfterMs,
+            workspaceAdministrationRetryBackoffMs(attempt),
+          ),
+        ),
+      };
+    }
+    return {
+      kind: "degraded",
+      code: observed.code,
+      message: observed.message,
+    };
+  }
+
+  #setDiagnostic(decision: DurableRetryDecision, localSeq?: number): void {
+    if (this.#state !== "draining" && this.#state !== "closed") {
+      this.#state = "recovering";
+    }
+    this.#diagnostic = {
+      code: decision.code,
+      message: decision.message,
+      ...(localSeq === undefined ? {} : { localSeq }),
+    };
+  }
+
+  #degrade(decision: DurableDegradedDecision, localSeq?: number): void {
+    if (this.#state === "draining" || this.#state === "closed") return;
+    this.#state = "degraded";
+    this.#diagnostic = {
+      code: decision.code,
+      message: decision.message,
+      ...(localSeq === undefined ? {} : { localSeq }),
+    };
+  }
+
+  #requireWritable(): void {
+    if (this.#state !== "ready") throw this.#stateError();
+  }
+
+  #stateError(): Error & { code: string } {
+    const error = new Error(
+      this.#diagnostic?.message ??
+        "Local workspace management host is not ready",
+    ) as Error & { code: string };
+    error.code =
+      this.#diagnostic?.code ?? "LOCAL_WORKSPACE_HOST_NOT_READY";
+    return error;
+  }
+
+  #serializeMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.#mutationTail.then(operation, operation);
+    this.#mutationTail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+}
+
+function isWorkspaceAdministrationDurableBusinessFailure(
+  error: unknown,
+): error is Error {
+  return (
+    error instanceof WorkspaceAdministrationBusinessError ||
+    error instanceof WorkspaceBindingNotFoundError ||
+    error instanceof WorkspaceBindingConflictError ||
+    error instanceof WorkspaceBindingRevisionError ||
+    error instanceof WorkspaceBindingCatalogConflictError
+  );
+}
+
+function workspaceAdministrationDurableBusinessErrorCode(
+  error: Error,
+): string {
+  if (
+    "code" in error &&
+    typeof (error as { readonly code?: unknown }).code === "string"
+  ) {
+    return (error as { readonly code: string }).code;
+  }
+  if (error instanceof WorkspaceBindingNotFoundError) {
+    return "WORKSPACE_BINDING_NOT_FOUND";
+  }
+  if (error instanceof WorkspaceBindingConflictError) {
+    return "WORKSPACE_BINDING_CONFLICT";
+  }
+  if (error instanceof WorkspaceBindingRevisionError) {
+    return "WORKSPACE_BINDING_REVISION";
+  }
+  return "LOCAL_WORKSPACE_OPERATION_FAILED";
+}
+
+function validateDurableInfrastructureFailure(
+  value: WorkspaceAdministrationDurableInfrastructureFailure,
+): WorkspaceAdministrationDurableInfrastructureFailure {
+  if (
+    !value ||
+    typeof value.code !== "string" ||
+    value.code.length === 0 ||
+    typeof value.message !== "string" ||
+    value.message.length === 0 ||
+    (value.retryAfterMs !== undefined &&
+      (!Number.isFinite(value.retryAfterMs) || value.retryAfterMs < 0))
+  ) {
+    throw new TypeError(
+      "Workspace administration infrastructure failure is invalid",
+    );
+  }
+  return value;
+}
+
+function workspaceAdministrationRetryBackoffMs(attempt: number): number {
+  return Math.min(2_000, 50 * 2 ** Math.min(attempt, 5));
+}
+
+function waitForWorkspaceAdministrationRetry(
+  delayMs: number,
+  abort: AbortSignal,
+): Promise<boolean> {
+  if (abort.aborted) return Promise.resolve(false);
+  return new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => {
+      abort.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, delayMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    abort.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function operationNonce(identity: WorkspaceAdministrationOperationIdentity): string {

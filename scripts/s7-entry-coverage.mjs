@@ -2811,6 +2811,9 @@ export function inspectWorkspaceAdministrationOwnership(records) {
   const outbox = required(
     "packages/cli/src/runtime/local-workspace-operation-outbox.ts",
   );
+  const lifecycleAdapter = required(
+    "packages/cli/src/runtime/local-workspace-durable-lifecycle-adapter.ts",
+  );
   const bootstrap = required(
     "packages/cli/src/runtime/local-workspace-bootstrap.ts",
   );
@@ -2848,6 +2851,9 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     !application.includes("confirmationIssuedAt") ||
     !application.includes("operationNonce(execution.operation)") ||
     !application.includes("type WorkspaceAdministrationDurableOperation =") ||
+    !application.includes("interface WorkspaceAdministrationDurableOperationMechanismPort") ||
+    !application.includes("interface WorkspaceAdministrationDurableLifecycleApplication") ||
+    !application.includes("class WorkspaceAdministrationDurableLifecycleApplicationService") ||
     !application.includes("interface WorkspaceAdministrationDurableExecution") ||
     !application.includes("type WorkspaceAdministrationDurableResult =") ||
     !application.includes("async executeDurableOperation(") ||
@@ -2858,6 +2864,12 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     !application.includes("validateWorkspaceAdministrationDurableValue(") ||
     !application.includes("workspaceAdministrationDurableSuccess(") ||
     !application.includes("workspaceAdministrationDurableFailure(") ||
+    !application.includes("this.#mechanism.oldestCommitted()") ||
+    !application.includes("this.#application.executeDurableOperation(") ||
+    !application.includes("this.#mechanism.complete(operation, decision.result)") ||
+    !application.includes("isWorkspaceAdministrationDurableBusinessFailure(error)") ||
+    !application.includes("this.#observeInfrastructureFailure(error)") ||
+    !application.includes("this.#attemptAbort?.abort()") ||
     !application.includes('["bindingRef", "deviceId"]') ||
     !application.includes("async viewByName(displayName: string)") ||
     !application.includes(
@@ -2870,7 +2882,7 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     !/return Object\.freeze\(\{\s*deviceId: this\.#deviceId,\s*bindingRef: binding\.bindingRef,\s*\}\)/u.test(
       application,
     ) ||
-    /@zhixing\/(?:cli|executor)|LocalWorkspaceManagementHost|Workscene/u.test(
+    /@zhixing\/(?:cli|executor)|LocalWorkspaceManagementHost|Workscene|ExecutorBackpressure|DeviceCapacity|StorageMaintenanceAdmission/u.test(
       application,
     )
   ) {
@@ -2894,26 +2906,36 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     !host.includes("new ExecutorWorkspaceAdministrationControl(") ||
     (host.match(/new WorkspaceAdministrationApplicationService\s*\(/gu) ?? [])
       .length !== 1 ||
+    (host.match(/new WorkspaceAdministrationDurableLifecycleApplicationService\s*\(/gu) ?? [])
+      .length !== 1 ||
     !host.includes("recovery: input.management.recovery") ||
-    !host.includes("applications: workspace") ||
-    !host.includes("this.#applications.executeDurableOperation(") ||
-    !host.includes("preparedAt: operation.preparedAt") ||
-    !host.includes("confirmationToken: operation.confirmationToken") ||
-    !host.includes("operation: {") ||
-    !host.includes("return this.#applications.viewByName(request.displayName)") ||
+    !host.includes("application: workspace") ||
+    !host.includes("mechanism: outbox") ||
+    !host.includes("observeLocalWorkspaceDurableInfrastructureFailure") ||
+    !host.includes("lifecycle,") ||
+    !host.includes("delivery: outbox") ||
+    !host.includes("this.#lifecycle.prepare(request.input)") ||
+    !host.includes("this.#lifecycle.commit(request.identity, request.confirmation)") ||
+    !host.includes("this.#lifecycle.assertDeliveryMechanismReady()") ||
+    !host.includes("return this.#lifecycle.viewByName(request.displayName)") ||
     !host.includes(
       "const claimed = consumptionCredentialOf(pendingDelivery, currentResult)",
     ) ||
     !host.includes("!matchesConsumptionCredential(operation, claimed)") ||
     !host.includes("validateWorkspaceAdministrationDurableResult(") ||
     !host.includes("validateWorkspaceAdministrationDurableValue(input, result.value)") ||
-    !host.includes("workspaceAdministrationDurableSuccess(") ||
-    !host.includes("workspaceAdministrationDurableFailure(") ||
     host.includes("LocalWorkspaceWriteOperation") ||
     host.includes("validateLocalWorkspaceWriteOperation") ||
     host.includes("interface OperationResult") ||
     host.includes("function validateOperationResult") ||
-    host.includes("async #execute(") ||
+    host.includes("#drainLoop(") ||
+    host.includes("#executeDecision(") ||
+    host.includes("#classifyInfrastructureFailure(") ||
+    host.includes("#requireWritable(") ||
+    host.includes("this.#applications") ||
+    /ExecutorBackpressure|DeviceCapacity|StorageMaintenanceAdmission|WorkspaceBindingCancelledError/u.test(
+      host,
+    ) ||
     host.includes("this.#applications.create(") ||
     host.includes("this.#applications.authorizeForControl(") ||
     host.includes("this.#applications.rename(") ||
@@ -2929,21 +2951,40 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     host.includes("catalogGeneration !== request.input.expectedCatalogGeneration")
   ) {
     failures.push(
-      "Workspace CLI binding retains a second CRUD/reset owner or bypasses its finite Correctness ports",
+      "Workspace Host retains a second durable lifecycle owner or bypasses the domain lifecycle application",
+    );
+  }
+  if (
+    !lifecycleAdapter.includes("observeLocalWorkspaceDurableInfrastructureFailure") ||
+    !lifecycleAdapter.includes("ExecutorResourceBackpressureError") ||
+    !lifecycleAdapter.includes("DeviceCapacityAdmissionError") ||
+    !lifecycleAdapter.includes("StorageMaintenanceAdmissionError") ||
+    !lifecycleAdapter.includes("retryAfterMs") ||
+    /WorkspaceAdministrationDurableLifecycleApplicationService|\.complete\(|oldestCommitted|setTimeout|LOCAL_WORKSPACE_RECOVERING|LOCAL_WORKSPACE_DRAINING/u.test(
+      lifecycleAdapter,
+    )
+  ) {
+    failures.push(
+      "Workspace Correctness adapter does not remain a finite infrastructure-failure projection",
     );
   }
   if (
     !outbox.includes("type WorkspaceAdministrationDurableOperation") ||
+    !outbox.includes("type WorkspaceAdministrationDurableOperationRecord") ||
     !outbox.includes("validateWorkspaceAdministrationDurableOperation") ||
+    !outbox.includes('recoveryOwner: "WorkspaceAdministrationDurableLifecycleApplicationService"') ||
     outbox.includes("type LocalWorkspaceWriteOperation") ||
     outbox.includes("function validateLocalWorkspaceWriteOperation") ||
     outbox.includes('case "create"') ||
     outbox.includes('case "rename"') ||
     outbox.includes('case "repath"') ||
-    outbox.includes('case "remove"')
+    outbox.includes('case "remove"') ||
+    /#drainLoop|#executeDecision|classifyInfrastructureFailure|LOCAL_WORKSPACE_RECOVERING|LOCAL_WORKSPACE_DRAINING/u.test(
+      outbox,
+    )
   ) {
     failures.push(
-      "Workspace outbox redefines the domain operation contract or durable dispatch",
+      "Workspace outbox redefines the domain contract or owns lifecycle admission and settlement decisions",
     );
   }
   if (

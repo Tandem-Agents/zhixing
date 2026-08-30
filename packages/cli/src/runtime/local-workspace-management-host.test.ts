@@ -12,6 +12,7 @@ import {
 } from "@zhixing/core/environment";
 import {
   WorkspaceAdministrationBusinessError,
+  WorkspaceAdministrationDurableLifecycleApplicationService,
   type WorkspaceAdministrationApplication,
 } from "@zhixing/core/environment/workspace-administration";
 import {
@@ -33,6 +34,7 @@ import {
   callLocalWorkspaceHost,
 } from "./local-workspace-owner.js";
 import { useLocalWorkspaceClient } from "./workspace-command.js";
+import { observeLocalWorkspaceDurableInfrastructureFailure } from "./local-workspace-durable-lifecycle-adapter.js";
 
 type TestWorkspaceApplications = Omit<
   WorkspaceAdministrationApplication,
@@ -78,6 +80,23 @@ function testWorkspaceApplications(
   };
 }
 
+function createTestLocalWorkspaceManagementHost(input: {
+  readonly lease: Awaited<ReturnType<typeof acquireLocalWorkspaceOwner>>;
+  readonly applications: WorkspaceAdministrationApplication;
+  readonly outbox: LocalWorkspaceOperationOutbox;
+}): LocalWorkspaceManagementHost {
+  return new LocalWorkspaceManagementHost({
+    lease: input.lease,
+    lifecycle: new WorkspaceAdministrationDurableLifecycleApplicationService({
+      application: input.applications,
+      mechanism: input.outbox,
+      observeInfrastructureFailure:
+        observeLocalWorkspaceDurableInfrastructureFailure,
+    }),
+    delivery: input.outbox,
+  });
+}
+
 describe("LocalWorkspaceManagementHost", () => {
   it("owns side effects after commit and replays one result to concurrent clients", async () => {
     const home = await createTempDir("workspace-host");
@@ -106,7 +125,7 @@ describe("LocalWorkspaceManagementHost", () => {
       reset: vi.fn(),
     });
     const lease = await acquireLocalWorkspaceOwner(home);
-    const host = new LocalWorkspaceManagementHost({
+    const host = createTestLocalWorkspaceManagementHost({
       lease,
       applications,
       outbox: new LocalWorkspaceOperationOutbox({
@@ -141,7 +160,7 @@ describe("LocalWorkspaceManagementHost", () => {
       workspaceBindingRevision: 1,
     }));
     const lease = await acquireLocalWorkspaceOwner(home);
-    const host = new LocalWorkspaceManagementHost({
+    const host = createTestLocalWorkspaceManagementHost({
       lease,
       applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
@@ -214,7 +233,7 @@ describe("LocalWorkspaceManagementHost", () => {
       deviceId: "device-a",
       bindingRef: "binding-a",
     };
-    const host = new LocalWorkspaceManagementHost({
+    const host = createTestLocalWorkspaceManagementHost({
       lease,
       applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
@@ -281,7 +300,7 @@ describe("LocalWorkspaceManagementHost", () => {
       workspaceBindingRevision: 7,
     };
     const viewByName = vi.fn(async () => view);
-    const host = new LocalWorkspaceManagementHost({
+    const host = createTestLocalWorkspaceManagementHost({
       lease,
       applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
@@ -338,7 +357,7 @@ describe("LocalWorkspaceManagementHost", () => {
     const home = await createTempDir("workspace-host-current-delivery-view-failure");
     const lease = await acquireLocalWorkspaceOwner(home);
     const viewFailure = new Error("workspace view unavailable");
-    const host = new LocalWorkspaceManagementHost({
+    const host = createTestLocalWorkspaceManagementHost({
       lease,
       applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
@@ -394,7 +413,7 @@ describe("LocalWorkspaceManagementHost", () => {
     const home = await createTempDir("workspace-host-current-delivery-other-pending");
     const lease = await acquireLocalWorkspaceOwner(home);
     const viewByName = vi.fn();
-    const host = new LocalWorkspaceManagementHost({
+    const host = createTestLocalWorkspaceManagementHost({
       lease,
       applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
@@ -454,7 +473,7 @@ describe("LocalWorkspaceManagementHost", () => {
   it("keeps the durable control authorization exact instead of accepting a third field", async () => {
     const home = await createTempDir("workspace-host-control-invalid");
     const lease = await acquireLocalWorkspaceOwner(home);
-    const host = new LocalWorkspaceManagementHost({
+    const host = createTestLocalWorkspaceManagementHost({
       lease,
       applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
@@ -504,7 +523,7 @@ describe("LocalWorkspaceManagementHost", () => {
   it("keeps a completed business failure addressable until the caller confirms delivery", async () => {
     const home = await createTempDir("workspace-host-failed-delivery");
     const lease = await acquireLocalWorkspaceOwner(home);
-    const host = new LocalWorkspaceManagementHost({
+    const host = createTestLocalWorkspaceManagementHost({
       lease,
       applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
@@ -558,7 +577,7 @@ describe("LocalWorkspaceManagementHost", () => {
   it("keeps unrelated recovered results pending until the caller durably delivers them", async () => {
     const home = await createTempDir("workspace-host-recovered-delivery");
     const lease = await acquireLocalWorkspaceOwner(home);
-    const host = new LocalWorkspaceManagementHost({
+    const host = createTestLocalWorkspaceManagementHost({
       lease,
       applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
@@ -603,7 +622,7 @@ describe("LocalWorkspaceManagementHost", () => {
   it("replays one stable consumption credential until the caller confirms delivery", async () => {
     const home = await createTempDir("workspace-host-consumption-credential");
     const lease = await acquireLocalWorkspaceOwner(home);
-    const host = new LocalWorkspaceManagementHost({
+    const host = createTestLocalWorkspaceManagementHost({
       lease,
       applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
@@ -660,7 +679,7 @@ describe("LocalWorkspaceManagementHost", () => {
       preparedAt: "2026-08-01T00:00:00.000Z",
     }));
     const lease = await acquireLocalWorkspaceOwner(home);
-    const host = new LocalWorkspaceManagementHost({
+    const host = createTestLocalWorkspaceManagementHost({
       lease,
       applications: testWorkspaceApplications({
         status: async () => ({
@@ -741,7 +760,7 @@ describe("LocalWorkspaceManagementHost", () => {
       };
     });
     const lease = await acquireLocalWorkspaceOwner(home);
-    const host = new LocalWorkspaceManagementHost({
+    const host = createTestLocalWorkspaceManagementHost({
       lease,
       applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
@@ -809,7 +828,7 @@ describe("LocalWorkspaceManagementHost", () => {
     const outbox = new LocalWorkspaceOperationOutbox({
       rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
     });
-    const host = new LocalWorkspaceManagementHost({
+    const host = createTestLocalWorkspaceManagementHost({
       lease,
       applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
@@ -881,7 +900,7 @@ describe("LocalWorkspaceManagementHost", () => {
     const outbox = new LocalWorkspaceOperationOutbox({
       rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
     });
-    const host = new LocalWorkspaceManagementHost({
+    const host = createTestLocalWorkspaceManagementHost({
       lease,
       applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
@@ -924,7 +943,7 @@ describe("LocalWorkspaceManagementHost", () => {
     const outbox = new LocalWorkspaceOperationOutbox({
       rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
     });
-    const host = new LocalWorkspaceManagementHost({
+    const host = createTestLocalWorkspaceManagementHost({
       lease,
       applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
@@ -972,7 +991,7 @@ describe("LocalWorkspaceManagementHost", () => {
     const rootDir = path.join(home, "runtime", "local-workspace-operation-outbox");
     const firstLease = await acquireLocalWorkspaceOwner(home);
     const firstOutbox = new LocalWorkspaceOperationOutbox({ rootDir });
-    const firstHost = new LocalWorkspaceManagementHost({
+    const firstHost = createTestLocalWorkspaceManagementHost({
       lease: firstLease,
       applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
@@ -1018,7 +1037,7 @@ describe("LocalWorkspaceManagementHost", () => {
 
     const secondLease = await acquireLocalWorkspaceOwner(home);
     const secondOutbox = new LocalWorkspaceOperationOutbox({ rootDir });
-    const secondHost = new LocalWorkspaceManagementHost({
+    const secondHost = createTestLocalWorkspaceManagementHost({
       lease: secondLease,
       applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
@@ -1057,7 +1076,7 @@ describe("LocalWorkspaceManagementHost", () => {
     await new LocalWorkspaceOperationOutbox({ rootDir }).initialize();
     await writeFile(path.join(rootDir, "operations.ndjson"), "not-json\n", "utf8");
     const lease = await acquireLocalWorkspaceOwner(home);
-    const host = new LocalWorkspaceManagementHost({
+    const host = createTestLocalWorkspaceManagementHost({
       lease,
       applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),

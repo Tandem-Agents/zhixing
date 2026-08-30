@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-08 已通过协调者独立复核并提交前验收；下一责任链收束 Workspace Administration durable operation delivery 生命周期<br>
+> 当前检查点：A5-09a 已通过协调者独立复核并提交前验收；下一责任链归位 pending/ack 与 client result delivery 生命周期<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,11 +202,11 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `d67364e5 + A5-08-accepted-worktree`；A0～A4、Skill Catalog、Delivery 及 Workspace Administration CRUD、reset/recovery、durable operation 合同与分派已通过协调者独立复核 |
+| 已接受基线 | `8d8fcede + A5-09a-accepted-worktree`；A0～A4、Skill Catalog、Delivery 及 Workspace Administration CRUD、reset/recovery、durable operation 合同、分派与准入/执行/恢复生命周期已通过协调者独立复核 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | 无；A5-08 已验收，等待提交后派发 A5-09 |
-| 下一责任链 | A5-09：收束 durable operation delivery 生命周期、退场临时 binding 并裁决 Workspace Administration 行；不得进入 Workscene |
-| 打开的单向桥 | 无；Skill 管理、保存、admission、load/usage、Kernel 与 Executor 投影均只经 `@zhixing/core/skills/catalog` 及既有 Authority/CAS/assignment Correctness 端口成立，旧 writable Store 不再承担正式应用行为 |
+| 活跃工作包 | 无；A5-09a 已验收，等待提交后派发 A5-09b |
+| 下一责任链 | A5-09b：归位 pending/ack 与 client result delivery 生命周期、删除最后临时 binding 并裁决 Workspace Administration 行；不得进入 Workscene |
+| 打开的单向桥 | Workspace Administration 的 `pending/acknowledge`、client result delivery/recovered presentation 与 consumption credential 仍由 Host/CLI 临时绑定，唯一退场包为紧邻 A5-09b；本包没有复制其产品状态或提前改写交付语义 |
 | 已失效证据 | 无当前未恢复证据；A4-10 已恢复 A4-07/A4-08 的包级产品无知结论，A4 全部合同与退出证据当前有效 |
 | 阻塞/用户决策 | 无技术阻塞；用户已明确恢复调度 |
 
@@ -1839,6 +1839,22 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 旧路与直接证据：删除 CLI `LocalWorkspaceWriteOperation`、`validateLocalWorkspaceWriteOperation`、Host `OperationResult`/六分支 `#execute`、command 本地 target switch 及同责 result/value/control codec；outbox/Host/command 不再定义业务字段或分派。当前源码上 core Workspace Administration 8/8，CLI Host/outbox/command 3 文件 27/27，真实 `local-workspace-operation-outbox` S7 environment witness 1/1；core fresh build、CLI `tsc --noEmit` 与正式 `pnpm cli:build`、canonical `pnpm s7:lint` 31/31 与 registry golden、fresh `pnpm runtime:package-exports`、最窄 Biome 与 `git diff --check` 均通过。S7 反向 mutation 拒绝 outbox/Host 重新定义 operation、Host direct CRUD/switch、command target 旁路、应用分支或 durable metadata 缺失。
 - 交接与失效：A5-08 实施完成，等待协调者独立复核；Workspace Administration 行与 A5 继续为 `[ ]`。下一责任链只能在 A5-09 收束 outbox-ready/writable、prepare/commit、drain、retry/degraded、pending/ack 与 client delivery lifecycle，不进入 Workscene。领域 durable operation/validator/target/result、应用六分派、outbox codec/digest/state、Host 单次调用与 metadata、client recovery/result、P10 旧记录兼容、三个生产组合根、core 窄 subpath/build/export 或上述直接/结构证据任一变化时，本证据精确失效并只重验本包闭包。本包未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：从领域应用、outbox writer/reader、Host committed drain、client prepare/commit/recovery/ack、CLI recovered notice 与三个生产组合根双向追踪，确认 durable operation 的 discriminant、strict 输入、target、result/value codec 和六类业务分派只有一个领域 owner；Host/outbox/command 中同责 union、validator、switch 与 result schema 已删除，剩余 retry/degraded/pending/ack 仅是登记给 A5-09 的 delivery lifecycle。独立验证 core Workspace Administration 8/8、CLI Host/outbox/command 27/27、真实 S7 environment 1/1、core fresh build、CLI typecheck/正式构建、canonical S7 31/31 + registry golden、fresh package exports、最窄 Biome 与 `git diff --check`，全部通过；P10 wire、canonical digest、旧记录、响应丢失重放、业务/基础设施错误、reset stable token/preparedAt 与公开输出未发现漂移。接受 `A5-08-workspace-administration-durable-operation-v1`；Workspace Administration 行与 A5 继续为 `[ ]`，下一包只收束 durable operation delivery 生命周期。
+
+### A5-09a：归位 Workspace Administration durable operation 准入、执行与恢复生命周期决定
+
+- 派发基线：`HEAD 8d8fceded07682b46f2737ec0f5893a24ed5f0b8 + task-doc:A5-09a-dispatch`；A5-08 已由协调者独立复核并提交，进场索引为空，工作区只应有本文派发记录。
+- 唯一架构结果：A5-08 的同一个 Workspace Administration 应用边界拥有 durable operation 的 ready/recovering/degraded 产品状态、prepare/commit 准入、committed operation 执行、业务完成与 retry/degraded 决策；P10 outbox 只实现耐久 identity、状态转换、重放与原子存储机制，Host 只启动/关闭组件、承载 IPC 并把请求交给一个有限 lifecycle 应用端口，不再编排 operation 生命周期。
+- 生产闭包：闭合三个 `createExecutorLocalWorkspaceHost` 生产根、`LocalWorkspaceManagementHost.start/close/#handle`、outbox initialize/prepare/commit/complete/oldestCommitted、committed drain、恢复调度、取消/资源/存储错误分类和 host-status 投影。领域拥有端口与生命周期策略，CLI/outbox 实现窄机制适配；领域不得导入 CLI、Executor 具体错误、IPC、路径、文件存储或 Workscene，Host 不得保留独立 ready gate、mutation tail、drain/recovery state machine、retry counter 或业务/基础设施完成裁决。
+- 保护边界：保持 P10 文件、marker、operation 状态与 digest、prepared TTL、reset confirmation、串行与幂等、response-loss/restart replay、重试退避、degraded diagnostic code/message/localSeq、Host start/close/unpublish/abort、安全排空及公开 status/prepare/commit 行为全等；不得把 outbox 持久状态复制进领域，不能形成第二 lifecycle、双写、第二队列或 Host service locator。
+- 临时边界与退场：本包保留 `pending/acknowledge`、client `readPendingDelivery/confirmDelivered`、recovered-result presentation 与 consumption credential 交付语义，作为紧邻 A5-09b 的唯一退场点；Host/IPC 可以暂时转发这两个机制请求，但不得继续决定其产品语义。A5-09a 完成后 Workspace Administration 行仍为 `[ ]`，不得进入 Workscene。
+- 直接证据：最窄测试必须覆盖 start initialize、空队列 ready、committed 重启恢复、prepare/commit 幂等、一次执行、业务失败完成、资源/取消/存储 retry、不可恢复 degraded、并发 commit/drain、close 排空与 abort、P10 旧记录/digest/marker 全等，以及三个生产根只装配一个 lifecycle 应用。结构反例必须能识别 Host ready/mutation/drain/retry/degraded 状态机回流、应用绕过 outbox port、领域导入具体基础设施和第二入口。只运行本包失效闭包、必要上游构建、CLI typecheck/正式构建、canonical S7、fresh exports、最窄格式和 `git diff --check`；不重复 A5-06～A5-08 业务深测、pending/ack 全闭包、根级回归或制品验收。
+- 明确不做：不改变公开协议、P10 wire/digest/状态、owner/IPC transport、pending/ack/client delivery 语义，不迁移 binding catalog Authority/存储，不进入 Workscene/A6，不新增能力或通用 durable workflow 框架。
+- 完成与止损：只有准入、执行、恢复、retry/degraded 和产品状态均由唯一应用 lifecycle 决定，Host/outbox 只承担生命周期调用、IPC 与耐久机制且旧 Host state machine 归零，现有行为证据成立，才算完成。预计超过四小时、必须同时迁移 pending/ack、改变 P10/公开错误/退避/关闭语义、出现两个独立 lifecycle owner，或无法在可构建、可运行、无双写的安全点交接时，立即停止并记录唯一未闭合链；不得顺带裁决整个 Workspace Administration。
+- 执行基线与责任变化：`HEAD 8d8fceded07682b46f2737ec0f5893a24ed5f0b8 + task-doc:A5-09a-dispatch + A5-09a-workspace-administration-durable-lifecycle-v1`。现有 Workspace Administration 窄领域入口新增有限 lifecycle application 与 P10 mechanism port；前者唯一拥有 `recovering/ready/degraded/draining/closed` 状态、prepare/commit 准入、committed 串行执行、业务失败完成、基础设施 retry/degraded、冷恢复与 close abort/safe-point，后者只提供 initialize/prepare/commit/complete/operation/oldestCommitted 耐久机制。具体 Executor、storage、capacity 与 Node error 仅在 CLI Correctness adapter 投影为有限 code/message/retryAfter，领域不导入 CLI、Executor、IPC、路径、文件存储或 Workscene。
+- 生产链与旧路清理：三个 `createExecutorLocalWorkspaceHost` 根仍经同一个 factory 构造 A5-08 应用、一个 outbox 和一个 lifecycle application；`LocalWorkspaceManagementHost` 只启动/关闭 transport 与 lifecycle、承载 IPC 并转发有限调用。Host 原 ready gate、mutation tail、committed drain/recovery loop、retry/degraded 分类、attempt abort 与业务完成裁决全部删除；outbox 的 operation record/state 合同改用领域定义，仍唯一拥有 P10 原子日志、marker、digest、TTL 与状态转换，durable registry recovery owner 已改绑领域 lifecycle。初始化已成立而首次 committed 扫描可重试失败时由同一 drain 重驱，不会留下无恢复 owner 的永久 recovering。`pending/acknowledge` 与 client delivery 仅按已登记 A5-09b 临时桥原样保留。
+- 直接证据与行为保护：领域 Workspace Administration 12/12（其中 lifecycle 4 项直接覆盖 prepare/commit/business completion、committed identity 冷恢复及首次扫描 retry、retry→成功/degraded、close abort 后保留 committed）；CLI Host/outbox 24/24 覆盖幂等与 response loss、旧记录、reset TTL/identity、串行 retry、业务完成、unknown degraded、close/restart；workspace command/bootstrap/owner 13/13；真实 durable registry 12/12（含 `local-workspace-operation-outbox` witness）。core fresh build、CLI typecheck 与 `pnpm cli:build`、canonical S7 31/31 + registry golden、fresh package exports、最窄 Biome 与 `git diff --check` 均通过；P10 wire/digest/marker、公开 status/error、退避、三生产根、pending/ack 与 client delivery 未发现漂移。
+- 交接与精确失效：A5-09a 实施完成，等待协调者独立复核；Workspace Administration 行与 A5 继续为 `[ ]`，下一责任链固定为 A5-09b，不得进入 Workscene。领域 durable lifecycle 状态/端口/业务完成分类、CLI infrastructure observation、Host start/close/unpublish/request routing、outbox schema/atomic transition/recovery owner、三个生产根、P10 witness、core 窄导出/build、S7 或上述直接行为任一变化时，本证据精确失效并只重验本包闭包；pending/ack/client delivery 的变化只恢复 A5-09b。本包未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：从三个生产根、Host transport start/unpublish/close、领域 lifecycle、Correctness failure adapter 与 P10 outbox 双向反查，确认 ready/recovering/degraded、prepare/commit、committed drain、业务完成、retry/degraded、冷恢复与 close abort 只有一个领域应用 owner；Host 仅保留自身 started/closed 与 IPC 转发，outbox 仅保留 identity、原子状态转换、digest/marker、TTL 和重放机制。独立验证 core 12/12、CLI Host/outbox/command/bootstrap/owner 37/37、真实 S7 environment 1/1、durable registry 12/12、core fresh build、CLI typecheck/正式构建、canonical S7 31/31 + registry golden、fresh exports、最窄 Biome 与 `git diff --check` 全部通过。额外确认初始化成功但首次 committed 扫描遇可重试故障时，旧实现因 ready flag 已置位却只启动 initialize recovery 而可能永久停在 recovering；当前在同一 lifecycle 内直接重驱 committed drain，恢复既有 retry/重启语义，不改变 P10、公开入口、错误、退避或产品能力。接受 `A5-09a-workspace-administration-durable-lifecycle-v1`；Workspace Administration 行与 A5 继续为 `[ ]`，下一包只闭合 pending/ack 与 client result delivery。
 
 ## 十、用户提示词
 

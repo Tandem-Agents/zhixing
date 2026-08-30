@@ -21,7 +21,6 @@ import {
   type LocalWorkspaceManagementHost,
   type LocalWorkspaceClient,
 } from "./local-workspace-management-host.js";
-import type { LocalWorkspaceOperation } from "./local-workspace-operation-outbox.js";
 import {
   acquireExecutorLocalWorkspaceOwner,
   defineLocalWorkspaceAssemblyIdentity,
@@ -35,6 +34,7 @@ import { RpcWorksceneFacade } from "./rpc-workscene-facade.js";
 import {
   validateWorkspaceControlAuthorization,
   workspaceAdministrationOperationTarget,
+  type WorkspaceAdministrationDurableOperationRecord,
   type WorkspaceAdministrationView,
   type WorkspaceControlAuthorization,
 } from "@zhixing/core/environment/workspace-administration";
@@ -54,7 +54,7 @@ export function worksceneCreateRequestIdForLocalWorkspace(
 
 export interface LocalWorkspaceRecoveryNotice {
   readonly operationId: string;
-  readonly operation: LocalWorkspaceOperation["input"]["kind"];
+  readonly operation: WorkspaceAdministrationDurableOperationRecord["input"]["kind"];
   readonly target: string;
   readonly outcome: "succeeded" | "failed";
   readonly credential: LocalWorkspaceConsumptionCredential;
@@ -376,7 +376,7 @@ async function renderLocalWorkspaceFailure(
 
 function recoveryNoticeOf(
   outboxId: string,
-  operation: LocalWorkspaceOperation,
+  operation: WorkspaceAdministrationDurableOperationRecord,
 ): LocalWorkspaceRecoveryNotice {
   const result = operation.result as
     | {
@@ -407,7 +407,7 @@ function recoveryNoticeOf(
 }
 
 function controlWorkspaceResult(
-  operation: LocalWorkspaceOperation,
+  operation: WorkspaceAdministrationDurableOperationRecord,
 ): WorkspaceControlAuthorization | undefined {
   if (
     operation.input.kind !== "create" ||
