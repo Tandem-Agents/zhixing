@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { protocolDigest } from "../protocol/canonical.js";
 import type {
   LocalEnvironmentControlContext,
   LocalWorkspaceBinding,
@@ -114,6 +115,59 @@ export interface WorkspaceAdministrationDurableOperationRecord
   readonly resultDigest?: string;
 }
 
+export interface WorkspaceAdministrationDeliveryConfirmationEntry
+  extends WorkspaceAdministrationDurableOperationKey {
+  readonly resultDigest: string;
+}
+
+export interface WorkspaceAdministrationPendingDeliveryPage {
+  readonly outboxId: string;
+  readonly operations: readonly WorkspaceAdministrationDurableOperationRecord[];
+  readonly next?: number;
+  readonly confirmation: {
+    readonly throughSeq: number;
+    readonly prefixDigest: string;
+  };
+}
+
+export interface WorkspaceAdministrationDeliveryAcknowledgment {
+  readonly outboxId: string;
+  readonly throughSeq: number;
+  readonly prefixDigest: string;
+  readonly entries: readonly WorkspaceAdministrationDeliveryConfirmationEntry[];
+}
+
+export interface WorkspaceAdministrationDeliveryAcknowledgmentReceipt {
+  readonly outboxId: string;
+  readonly throughSeq: number;
+  readonly prefixDigest: string;
+}
+
+export interface WorkspaceAdministrationConsumptionCredential
+  extends WorkspaceAdministrationDurableOperationKey {
+  readonly outboxId: string;
+  readonly resultDigest: string;
+}
+
+export type WorkspaceAdministrationDeliveryClaim =
+  | { readonly kind: "none" }
+  | { readonly kind: "current" }
+  | {
+      readonly kind: "operation-input";
+      readonly input: WorkspaceAdministrationDurableOperation;
+    }
+  | {
+      readonly kind: "operation";
+      readonly identity: WorkspaceAdministrationDurableOperationKey;
+    };
+
+export interface WorkspaceAdministrationResultDeliveryMechanismPort {
+  pending(afterSeq: number): Promise<WorkspaceAdministrationPendingDeliveryPage>;
+  acknowledge(
+    input: WorkspaceAdministrationDeliveryAcknowledgment,
+  ): Promise<WorkspaceAdministrationDeliveryAcknowledgmentReceipt>;
+}
+
 export type WorkspaceAdministrationDurableLifecycleState =
   | "recovering"
   | "ready"
@@ -130,7 +184,8 @@ export interface WorkspaceAdministrationDurableLifecycleStatus {
   };
 }
 
-export interface WorkspaceAdministrationDurableOperationMechanismPort {
+export interface WorkspaceAdministrationDurableOperationMechanismPort
+  extends WorkspaceAdministrationResultDeliveryMechanismPort {
   initialize(): Promise<void>;
   readonly outboxId: string;
   prepare(
@@ -166,6 +221,10 @@ export interface WorkspaceAdministrationDurableLifecycleApplication {
   list(): Promise<readonly WorkspaceAdministrationView[]>;
   viewByName(displayName: string): Promise<WorkspaceAdministrationView>;
   assertDeliveryMechanismReady(): void;
+  pending(afterSeq: number): Promise<WorkspaceAdministrationPendingDeliveryPage>;
+  acknowledge(
+    input: WorkspaceAdministrationDeliveryAcknowledgment,
+  ): Promise<WorkspaceAdministrationDeliveryAcknowledgmentReceipt>;
   prepare(
     input: WorkspaceAdministrationDurableOperation,
   ): Promise<WorkspaceAdministrationDurableOperationRecord>;
@@ -173,6 +232,53 @@ export interface WorkspaceAdministrationDurableLifecycleApplication {
     identity: WorkspaceAdministrationDurableOperationKey,
     confirmation?: { readonly impact: string },
   ): Promise<WorkspaceAdministrationDurableOperationRecord>;
+}
+
+export interface WorkspaceAdministrationResultDeliveryApplication {
+  forgetCurrentClaim(): void;
+  recover(
+    claim: WorkspaceAdministrationDeliveryClaim,
+  ): Promise<WorkspaceAdministrationDurableOperationRecord | undefined>;
+  capture(
+    operation: WorkspaceAdministrationDurableOperationKey,
+  ): Promise<WorkspaceAdministrationDurableOperationRecord>;
+  consumptionCredential(): WorkspaceAdministrationConsumptionCredential | undefined;
+  confirmDelivered(): Promise<void>;
+}
+
+export class RecoveredWorkspaceAdministrationOperationsError extends Error {
+  readonly code = "LOCAL_WORKSPACE_RESULTS_RECOVERED";
+  readonly outboxId: string;
+  readonly operations: readonly WorkspaceAdministrationDurableOperationRecord[];
+
+  constructor(
+    outboxId: string,
+    operations: readonly WorkspaceAdministrationDurableOperationRecord[],
+  ) {
+    super("已恢复先前未确认的本机工作区操作结果，请查看后重试当前命令");
+    this.name = "RecoveredLocalWorkspaceOperationsError";
+    this.outboxId = outboxId;
+    this.operations = operations.map((operation) => structuredClone(operation));
+  }
+}
+
+export class CompletedWorkspaceAdministrationOperationError extends Error {
+  readonly code: string;
+  #deliveryConfirmed = false;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "CompletedLocalWorkspaceOperationError";
+    this.code = code;
+  }
+
+  get deliveryConfirmed(): boolean {
+    return this.#deliveryConfirmed;
+  }
+
+  markDeliveryConfirmed(): void {
+    this.#deliveryConfirmed = true;
+  }
 }
 
 export type WorkspaceAdministrationDurableLifecycleDelegate = Pick<
@@ -590,6 +696,261 @@ type DurableOperationDecision =
     }
   | DurableInfrastructureDecision;
 
+const EMPTY_WORKSPACE_ADMINISTRATION_DELIVERY_PREFIX = protocolDigest(
+  "LocalWorkspaceOperationPrefix",
+  1,
+  null,
+);
+
+interface WorkspaceAdministrationPendingDelivery {
+  readonly outboxId: string;
+  readonly confirmation: {
+    readonly throughSeq: number;
+    readonly prefixDigest: string;
+  };
+  readonly operations: readonly WorkspaceAdministrationDurableOperationRecord[];
+}
+
+/**
+ * Owns the finite result-delivery decision above the P10 outbox mechanism.
+ * The mechanism only pages and acknowledges durable records; this service
+ * decides which result belongs to the current invocation and which recovered
+ * results must be presented before new work proceeds.
+ */
+export class WorkspaceAdministrationResultDeliveryApplicationService
+  implements WorkspaceAdministrationResultDeliveryApplication
+{
+  readonly #mechanism: WorkspaceAdministrationResultDeliveryMechanismPort;
+  #pending: WorkspaceAdministrationPendingDelivery | undefined;
+  #current: WorkspaceAdministrationDurableOperationRecord | undefined;
+
+  constructor(input: {
+    readonly mechanism: WorkspaceAdministrationResultDeliveryMechanismPort;
+  }) {
+    this.#mechanism = input.mechanism;
+  }
+
+  forgetCurrentClaim(): void {
+    this.#current = undefined;
+  }
+
+  async recover(
+    claim: WorkspaceAdministrationDeliveryClaim,
+  ): Promise<WorkspaceAdministrationDurableOperationRecord | undefined> {
+    if (claim.kind === "none") this.forgetCurrentClaim();
+    const currentCredential =
+      claim.kind === "current" ? this.consumptionCredential() : undefined;
+    const delivery = await this.#readPendingDelivery();
+    const claimed = delivery.operations.find((operation) => {
+      if (operation.state !== "completed") return false;
+      switch (claim.kind) {
+        case "none":
+          return false;
+        case "current":
+          return currentCredential !== undefined &&
+            delivery.outboxId === currentCredential.outboxId &&
+            matchesWorkspaceAdministrationConsumptionCredential(
+              operation,
+              currentCredential,
+            );
+        case "operation-input":
+          return operation.inputDigest === protocolDigest(
+            "LocalWorkspaceOperationInput",
+            1,
+            validateWorkspaceAdministrationDurableOperation(claim.input),
+          );
+        case "operation":
+          return matchesWorkspaceAdministrationOperationIdentity(
+            operation,
+            claim.identity,
+          );
+      }
+    });
+    this.#pending = delivery;
+    this.#current = claimed;
+    const unclaimed = delivery.operations.filter(
+      (operation) =>
+        operation.state === "completed" &&
+        (claimed === undefined || operation.localSeq !== claimed.localSeq),
+    );
+    if (unclaimed.length > 0) {
+      throw new RecoveredWorkspaceAdministrationOperationsError(
+        delivery.outboxId,
+        unclaimed,
+      );
+    }
+    return claimed ? structuredClone(claimed) : undefined;
+  }
+
+  async capture(
+    operation: WorkspaceAdministrationDurableOperationKey,
+  ): Promise<WorkspaceAdministrationDurableOperationRecord> {
+    const delivery = await this.#readPendingDelivery();
+    const current = delivery.operations.find(
+      (candidate) =>
+        candidate.state === "completed" &&
+        matchesWorkspaceAdministrationOperationIdentity(candidate, operation),
+    );
+    if (!current?.resultDigest) {
+      throw new Error(
+        "Local workspace result is not part of the recoverable delivery prefix",
+      );
+    }
+    this.#pending = delivery;
+    this.#current = current;
+    return structuredClone(current);
+  }
+
+  consumptionCredential():
+    | WorkspaceAdministrationConsumptionCredential
+    | undefined {
+    const delivery = this.#pending;
+    const operation = this.#current;
+    if (!delivery || !operation?.resultDigest) return undefined;
+    const credential = Object.freeze({
+      outboxId: delivery.outboxId,
+      ...workspaceAdministrationOperationIdentityOf(operation),
+      resultDigest: operation.resultDigest,
+    });
+    if (
+      !delivery.operations.some((candidate) =>
+        matchesWorkspaceAdministrationConsumptionCredential(
+          candidate,
+          credential,
+        ),
+      )
+    ) {
+      throw new Error(
+        "Local workspace result is not part of the recoverable delivery prefix",
+      );
+    }
+    return credential;
+  }
+
+  async confirmDelivered(): Promise<void> {
+    const delivery = this.#pending;
+    if (!delivery || delivery.operations.length === 0) return;
+    let prefixDigest = delivery.confirmation.prefixDigest;
+    const entries = delivery.operations.map((operation) => {
+      if (!operation.resultDigest) {
+        throw new Error("Local workspace terminal result digest is missing");
+      }
+      const entry = Object.freeze({
+        ...workspaceAdministrationOperationIdentityOf(operation),
+        resultDigest: operation.resultDigest,
+      });
+      prefixDigest = protocolDigest("LocalWorkspaceOperationPrefix", 1, {
+        previous: prefixDigest,
+        ...entry,
+      });
+      return entry;
+    });
+    const throughSeq = delivery.operations.at(-1)!.localSeq;
+    const receipt = await this.#mechanism.acknowledge({
+      outboxId: delivery.outboxId,
+      throughSeq,
+      prefixDigest,
+      entries,
+    });
+    if (
+      receipt.outboxId !== delivery.outboxId ||
+      receipt.throughSeq !== throughSeq ||
+      receipt.prefixDigest !== prefixDigest
+    ) {
+      throw new Error(
+        "Local workspace acknowledgment receipt is bound to another delivery",
+      );
+    }
+    this.#pending = undefined;
+    this.#current = undefined;
+  }
+
+  async #readPendingDelivery(): Promise<WorkspaceAdministrationPendingDelivery> {
+    let afterSeq = 0;
+    let outboxId: string | undefined;
+    let confirmation:
+      | { readonly throughSeq: number; readonly prefixDigest: string }
+      | undefined;
+    const terminal: WorkspaceAdministrationDurableOperationRecord[] = [];
+    let terminalPrefixOpen = true;
+    for (;;) {
+      const page = await this.#mechanism.pending(afterSeq);
+      outboxId ??= page.outboxId;
+      if (outboxId !== page.outboxId) {
+        throw new Error(
+          "Local workspace outbox identity changed during delivery recovery",
+        );
+      }
+      confirmation ??= page.confirmation;
+      if (
+        confirmation.throughSeq !== page.confirmation.throughSeq ||
+        confirmation.prefixDigest !== page.confirmation.prefixDigest
+      ) {
+        throw new Error(
+          "Local workspace confirmation watermark changed during delivery recovery",
+        );
+      }
+      for (const operation of page.operations) {
+        if (!terminalPrefixOpen) continue;
+        const expectedSeq =
+          (terminal.at(-1)?.localSeq ?? confirmation.throughSeq) + 1;
+        if (
+          operation.localSeq !== expectedSeq ||
+          (operation.state !== "completed" && operation.state !== "abandoned") ||
+          !operation.resultDigest
+        ) {
+          terminalPrefixOpen = false;
+          continue;
+        }
+        terminal.push(structuredClone(operation));
+      }
+      if (page.next === undefined) break;
+      afterSeq = page.next;
+    }
+    return Object.freeze({
+      outboxId: outboxId ?? "",
+      confirmation:
+        confirmation ??
+        Object.freeze({
+          throughSeq: 0,
+          prefixDigest: EMPTY_WORKSPACE_ADMINISTRATION_DELIVERY_PREFIX,
+        }),
+      operations: Object.freeze(terminal),
+    });
+  }
+}
+
+function matchesWorkspaceAdministrationOperationIdentity(
+  operation: WorkspaceAdministrationDurableOperationRecord,
+  identity: WorkspaceAdministrationDurableOperationKey,
+): boolean {
+  return (
+    operation.localSeq === identity.localSeq &&
+    operation.operationId === identity.operationId &&
+    operation.inputDigest === identity.inputDigest
+  );
+}
+
+function matchesWorkspaceAdministrationConsumptionCredential(
+  operation: WorkspaceAdministrationDurableOperationRecord,
+  credential: WorkspaceAdministrationConsumptionCredential,
+): boolean {
+  return (
+    matchesWorkspaceAdministrationOperationIdentity(operation, credential) &&
+    operation.resultDigest === credential.resultDigest
+  );
+}
+
+function workspaceAdministrationOperationIdentityOf(
+  operation: WorkspaceAdministrationDurableOperationRecord,
+): WorkspaceAdministrationDurableOperationKey {
+  return Object.freeze({
+    localSeq: operation.localSeq,
+    operationId: operation.operationId,
+    inputDigest: operation.inputDigest,
+  });
+}
+
 /**
  * Owns Workspace Administration's durable operation admission and recovery
  * decisions. The mechanism port persists and replays P10 records but does not
@@ -681,6 +1042,18 @@ export class WorkspaceAdministrationDurableLifecycleApplicationService
 
   assertDeliveryMechanismReady(): void {
     if (!this.#mechanismReady) throw this.#stateError();
+  }
+
+  pending(afterSeq: number): Promise<WorkspaceAdministrationPendingDeliveryPage> {
+    this.assertDeliveryMechanismReady();
+    return this.#mechanism.pending(afterSeq);
+  }
+
+  acknowledge(
+    input: WorkspaceAdministrationDeliveryAcknowledgment,
+  ): Promise<WorkspaceAdministrationDeliveryAcknowledgmentReceipt> {
+    this.assertDeliveryMechanismReady();
+    return this.#mechanism.acknowledge(input);
   }
 
   async prepare(
@@ -1197,6 +1570,19 @@ export function workspaceAdministrationDurableFailure(
     ok: false,
     error: Object.freeze({ code, message }),
   });
+}
+
+export function workspaceAdministrationResultValue(
+  input: WorkspaceAdministrationDurableOperation,
+  result: WorkspaceAdministrationDurableResult,
+): unknown {
+  if (!result.ok) {
+    throw new CompletedWorkspaceAdministrationOperationError(
+      result.error.code,
+      result.error.message,
+    );
+  }
+  return validateWorkspaceAdministrationDurableValue(input, result.value);
 }
 
 export function validateWorkspaceAdministrationDurableValue(

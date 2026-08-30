@@ -1,15 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  CompletedLocalWorkspaceOperationError,
+  CompletedWorkspaceAdministrationOperationError,
+  type WorkspaceAdministrationConsumptionCredential,
+} from "@zhixing/core/environment/workspace-administration";
+import {
   type LocalWorkspaceClient,
-  type LocalWorkspaceConsumptionCredential,
 } from "./local-workspace-management-host.js";
 import {
   createWorksceneAndReadWorkspaceView,
   useLocalWorkspaceClient,
 } from "./workspace-command.js";
 
-const credential: LocalWorkspaceConsumptionCredential = {
+const credential: WorkspaceAdministrationConsumptionCredential = {
   outboxId: "outbox-a",
   localSeq: 1,
   operationId: "workspace-operation-a",
@@ -37,7 +39,7 @@ function client(confirmDelivered: () => Promise<void>): LocalWorkspaceClient {
 describe("useLocalWorkspaceClient", () => {
   it("confirms a completed business failure only after its delivery callback succeeds", async () => {
     const order: string[] = [];
-    const failure = new CompletedLocalWorkspaceOperationError(
+    const failure = new CompletedWorkspaceAdministrationOperationError(
       "WORKSPACE_POLICY_REJECTED",
       "rejected by policy",
     );
@@ -67,7 +69,7 @@ describe("useLocalWorkspaceClient", () => {
   it("retains a completed business failure when its delivery callback fails", async () => {
     const confirmDelivered = vi.fn(async () => undefined);
     const deliveryFailure = new Error("presentation unavailable");
-    const failure = new CompletedLocalWorkspaceOperationError(
+    const failure = new CompletedWorkspaceAdministrationOperationError(
       "WORKSPACE_POLICY_REJECTED",
       "rejected by policy",
     );

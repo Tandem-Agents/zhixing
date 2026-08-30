@@ -3031,7 +3031,7 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
   );
 });
 
-test("Workspace Administration CRUD, reset and durable lifecycle have one domain application boundary", async () => {
+test("Workspace Administration CRUD, reset, durable lifecycle and result delivery have one domain application boundary", async () => {
   const paths = [
     "packages/core/src/environment/workspace-administration.ts",
     "packages/core/src/environment/index.ts",
@@ -3064,7 +3064,7 @@ test("Workspace Administration CRUD, reset and durable lifecycle have one domain
       "packages/cli/src/runtime/local-workspace-management-host.ts",
       (text) => `${text}\nclass LocalWorkspaceFacade {}`,
     )).join("\n"),
-    /second durable lifecycle owner/,
+    /second durable\/result-delivery lifecycle owner/,
   );
   assert.match(
     inspectWorkspaceAdministrationOwnership(mutate(
@@ -3098,21 +3098,21 @@ test("Workspace Administration CRUD, reset and durable lifecycle have one domain
         text: "export class LocalWorkspaceRecovery {}",
       },
     ]).join("\n"),
-    /second durable lifecycle owner/,
+    /second durable\/result-delivery lifecycle owner/,
   );
   assert.match(
     inspectWorkspaceAdministrationOwnership(mutate(
       "packages/core/src/environment/workspace-administration.ts",
       (text) => text.replace("this.#recovery.beginReset(", "this.#recovery.prepareReset("),
     )).join("\n"),
-    /uniquely own CRUD, reset lifecycle/,
+    /uniquely own CRUD, reset, durable lifecycle and result delivery/,
   );
   assert.match(
     inspectWorkspaceAdministrationOwnership(mutate(
       "packages/cli/src/runtime/local-workspace-management-host.ts",
       (text) => `${text}\nconst requestNonce = "host-owned-reset";`,
     )).join("\n"),
-    /second durable lifecycle owner/,
+    /second durable\/result-delivery lifecycle owner/,
   );
   assert.match(
     inspectWorkspaceAdministrationOwnership(mutate(
@@ -3135,11 +3135,21 @@ test("Workspace Administration CRUD, reset and durable lifecycle have one domain
     inspectWorkspaceAdministrationOwnership(mutate(
       "packages/cli/src/runtime/local-workspace-management-host.ts",
       (text) => text.replace(
-        "const claimed = consumptionCredentialOf(pendingDelivery, currentResult);",
-        "currentResult = undefined; const claimed = undefined;",
+        "return this.#lifecycle.pending(request.afterSeq);",
+        "return this.#delivery.pending(request.afterSeq, 64);",
       ),
     )).join("\n"),
-    /second durable lifecycle owner/,
+    /second durable\/result-delivery lifecycle owner/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/core/src/environment/workspace-administration.ts",
+      (text) => text.replace(
+        'readonly kind: "current"',
+        'readonly kind: "lost-current-claim"',
+      ),
+    )).join("\n"),
+    /does not uniquely own CRUD/,
   );
   assert.match(
     inspectWorkspaceAdministrationOwnership(mutate(
@@ -3196,7 +3206,7 @@ test("Workspace Administration CRUD, reset and durable lifecycle have one domain
         "this.#applications.create(request.input)",
       ),
     )).join("\n"),
-    /second durable lifecycle owner/,
+    /second durable\/result-delivery lifecycle owner/,
   );
   assert.match(
     inspectWorkspaceAdministrationOwnership(mutate(
@@ -3213,7 +3223,7 @@ test("Workspace Administration CRUD, reset and durable lifecycle have one domain
       "packages/cli/src/runtime/local-workspace-management-host.ts",
       (text) => `${text}\nfunction #drainLoop() {}`,
     )).join("\n"),
-    /second durable lifecycle owner/,
+    /second durable\/result-delivery lifecycle owner/,
   );
   assert.match(
     inspectWorkspaceAdministrationOwnership(mutate(

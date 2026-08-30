@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { protocolDigest } from "../protocol/canonical.js";
 import type {
   LocalEnvironmentControlContext,
   LocalWorkspaceBinding,
@@ -9,12 +10,15 @@ import {
   WorkspaceAdministrationApplicationService,
   WorkspaceAdministrationBusinessError,
   WorkspaceAdministrationDurableLifecycleApplicationService,
+  WorkspaceAdministrationResultDeliveryApplicationService,
+  RecoveredWorkspaceAdministrationOperationsError,
   WORKSPACE_CATALOG_RESET_IMPACT,
   type WorkspaceAdministrationDurableLifecycleDelegate,
   type WorkspaceAdministrationDurableOperation,
   type WorkspaceAdministrationDurableOperationKey,
   type WorkspaceAdministrationDurableOperationMechanismPort,
   type WorkspaceAdministrationDurableOperationRecord,
+  type WorkspaceAdministrationResultDeliveryMechanismPort,
   type WorkspaceAdministrationControlPort,
   validateWorkspaceAdministrationDurableOperation,
   validateWorkspaceAdministrationDurableResult,
@@ -141,6 +145,19 @@ function durableLifecycleHarness(input?: {
   const mechanism: WorkspaceAdministrationDurableOperationMechanismPort = {
     outboxId: "outbox-lifecycle-test",
     initialize: vi.fn(input?.initialize ?? (async () => undefined)),
+    pending: vi.fn(async () => ({
+      outboxId: "outbox-lifecycle-test",
+      operations: operation ? [structuredClone(operation)] : [],
+      confirmation: {
+        throughSeq: 0,
+        prefixDigest: `sha256:${"0".repeat(64)}`,
+      },
+    })),
+    acknowledge: vi.fn(async (acknowledgment) => ({
+      outboxId: acknowledgment.outboxId,
+      throughSeq: acknowledgment.throughSeq,
+      prefixDigest: acknowledgment.prefixDigest,
+    })),
     prepare: vi.fn(async (candidate: WorkspaceAdministrationDurableOperation) => {
       operation = {
         localSeq: nextSeq++,
@@ -598,6 +615,162 @@ describe("WorkspaceAdministrationApplicationService", () => {
       }),
     ).rejects.toBe(conflict);
     expect(degraded.recovery.completeReset).not.toHaveBeenCalled();
+  });
+});
+
+describe("WorkspaceAdministrationResultDeliveryApplicationService", () => {
+  const outboxId = "outbox-01234567890123456789012345678901";
+  const input: WorkspaceAdministrationDurableOperation = {
+    kind: "create",
+    purpose: "settings",
+    displayName: "Project",
+    absolutePath: "C:\\project",
+  };
+
+  function completed(
+    localSeq: number,
+    operationInput: WorkspaceAdministrationDurableOperation = input,
+  ): WorkspaceAdministrationDurableOperationRecord {
+    const result = { ok: true, value: { localSeq } };
+    return {
+      localSeq,
+      operationId: `workspace-operation-${localSeq}`,
+      inputDigest: protocolDigest(
+        "LocalWorkspaceOperationInput",
+        1,
+        operationInput,
+      ),
+      input: operationInput,
+      state: "completed",
+      preparedAt: "2026-08-30T00:00:00.000Z",
+      result,
+      resultDigest: protocolDigest(
+        "LocalWorkspaceOperationResult",
+        1,
+        result,
+      ),
+    };
+  }
+
+  function deliveryHarness(
+    operations: readonly WorkspaceAdministrationDurableOperationRecord[],
+  ) {
+    const prefixDigest = protocolDigest(
+      "LocalWorkspaceOperationPrefix",
+      1,
+      null,
+    );
+    const acknowledge = vi.fn(async (request) => ({
+      outboxId: request.outboxId,
+      throughSeq: request.throughSeq,
+      prefixDigest: request.prefixDigest,
+    }));
+    const mechanism: WorkspaceAdministrationResultDeliveryMechanismPort = {
+      pending: vi.fn(async () => ({
+        outboxId,
+        operations: operations.map((operation) => structuredClone(operation)),
+        confirmation: { throughSeq: 0, prefixDigest },
+      })),
+      acknowledge,
+    };
+    return {
+      acknowledge,
+      application:
+        new WorkspaceAdministrationResultDeliveryApplicationService({
+          mechanism,
+        }),
+    };
+  }
+
+  it("claims the current operation while surfacing every other recovered result", async () => {
+    const first = completed(1);
+    const secondInput: WorkspaceAdministrationDurableOperation = {
+      ...input,
+      displayName: "Other",
+    };
+    const second = completed(2, secondInput);
+    const fixture = deliveryHarness([first, second]);
+
+    await expect(
+      fixture.application.recover({
+        kind: "operation",
+        identity: first,
+      }),
+    ).rejects.toMatchObject({
+      name: "RecoveredLocalWorkspaceOperationsError",
+      outboxId,
+      operations: [expect.objectContaining({ localSeq: 2 })],
+    });
+    expect(fixture.application.consumptionCredential()).toMatchObject({
+      outboxId,
+      localSeq: 1,
+      resultDigest: first.resultDigest,
+    });
+  });
+
+  it("reconstructs the same claim from durable operation input after restart", async () => {
+    const operation = completed(1);
+    const fixture = deliveryHarness([operation]);
+
+    await expect(
+      fixture.application.recover({ kind: "operation-input", input }),
+    ).resolves.toMatchObject({ localSeq: 1, operationId: operation.operationId });
+    expect(fixture.application.consumptionCredential()).toEqual({
+      outboxId,
+      localSeq: operation.localSeq,
+      operationId: operation.operationId,
+      inputDigest: operation.inputDigest,
+      resultDigest: operation.resultDigest,
+    });
+  });
+
+  it("returns no claim for an empty prefix and rejects a mismatched durable identity", async () => {
+    const empty = deliveryHarness([]);
+    await expect(
+      empty.application.recover({ kind: "none" }),
+    ).resolves.toBeUndefined();
+    expect(empty.application.consumptionCredential()).toBeUndefined();
+
+    const operation = completed(1);
+    const fixture = deliveryHarness([operation]);
+    await expect(
+      fixture.application.capture({
+        ...operation,
+        inputDigest: `sha256:${"f".repeat(64)}`,
+      }),
+    ).rejects.toThrow(
+      "Local workspace result is not part of the recoverable delivery prefix",
+    );
+    expect(fixture.application.consumptionCredential()).toBeUndefined();
+  });
+
+  it("acknowledges the exact terminal prefix and clears state only after success", async () => {
+    const operation = completed(1);
+    const fixture = deliveryHarness([operation]);
+    await fixture.application.capture(operation);
+    fixture.acknowledge.mockRejectedValueOnce(new Error("response lost"));
+
+    await expect(fixture.application.confirmDelivered()).rejects.toThrow(
+      "response lost",
+    );
+    expect(fixture.application.consumptionCredential()).toBeDefined();
+    await fixture.application.confirmDelivered();
+    expect(fixture.acknowledge).toHaveBeenCalledTimes(2);
+    expect(fixture.acknowledge.mock.calls[1]?.[0]).toMatchObject({
+      outboxId,
+      throughSeq: 1,
+      entries: [
+        {
+          localSeq: 1,
+          operationId: operation.operationId,
+          inputDigest: operation.inputDigest,
+          resultDigest: operation.resultDigest,
+        },
+      ],
+    });
+    expect(fixture.application.consumptionCredential()).toBeUndefined();
+    await fixture.application.confirmDelivered();
+    expect(fixture.acknowledge).toHaveBeenCalledTimes(2);
   });
 });
 

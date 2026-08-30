@@ -14,10 +14,7 @@ import { resolveSystemProtectedSecretPaths } from "../security/secret-boundary.j
 import { createExecutorReadinessSource } from "../serve/executor-readiness.js";
 import {
   createLocalWorkspaceClient,
-  CompletedLocalWorkspaceOperationError,
   localWorkspaceHostIsReachable,
-  RecoveredLocalWorkspaceOperationsError,
-  type LocalWorkspaceConsumptionCredential,
   type LocalWorkspaceManagementHost,
   type LocalWorkspaceClient,
 } from "./local-workspace-management-host.js";
@@ -34,6 +31,9 @@ import { RpcWorksceneFacade } from "./rpc-workscene-facade.js";
 import {
   validateWorkspaceControlAuthorization,
   workspaceAdministrationOperationTarget,
+  CompletedWorkspaceAdministrationOperationError,
+  RecoveredWorkspaceAdministrationOperationsError,
+  type WorkspaceAdministrationConsumptionCredential,
   type WorkspaceAdministrationDurableOperationRecord,
   type WorkspaceAdministrationView,
   type WorkspaceControlAuthorization,
@@ -43,7 +43,7 @@ import type {
 } from "@zhixing/rpc";
 
 export function worksceneCreateRequestIdForLocalWorkspace(
-  credential: LocalWorkspaceConsumptionCredential,
+  credential: WorkspaceAdministrationConsumptionCredential,
 ): string {
   return `workscene-create:${protocolDigest(
     "LocalWorkspaceConsumptionCredential",
@@ -57,7 +57,7 @@ export interface LocalWorkspaceRecoveryNotice {
   readonly operation: WorkspaceAdministrationDurableOperationRecord["input"]["kind"];
   readonly target: string;
   readonly outcome: "succeeded" | "failed";
-  readonly credential: LocalWorkspaceConsumptionCredential;
+  readonly credential: WorkspaceAdministrationConsumptionCredential;
   readonly controlWorkspace?: {
     readonly deviceId: string;
     readonly bindingRef: string;
@@ -68,14 +68,14 @@ export interface LocalWorkspaceRecoveryNotice {
 interface LocalWorkspaceDelivery<T, R> {
   readonly result: (
     value: T,
-    credential: LocalWorkspaceConsumptionCredential | undefined,
+    credential: WorkspaceAdministrationConsumptionCredential | undefined,
   ) => Promise<R>;
   readonly recovered: (
     operations: readonly LocalWorkspaceRecoveryNotice[],
   ) => Promise<void>;
   readonly failure: (
-    error: CompletedLocalWorkspaceOperationError,
-    credential: LocalWorkspaceConsumptionCredential,
+    error: CompletedWorkspaceAdministrationOperationError,
+    credential: WorkspaceAdministrationConsumptionCredential,
   ) => Promise<void>;
 }
 
@@ -164,7 +164,7 @@ export function createWorksceneFromLocalWorkspaceAuthorization(
   workscenes: Pick<RpcWorksceneFacade, "create">,
   sceneName: string,
   authorization: WorkspaceControlAuthorization,
-  credential: LocalWorkspaceConsumptionCredential,
+  credential: WorkspaceAdministrationConsumptionCredential,
 ): Promise<WorksceneSummary> {
   return workscenes.create(
     sceneName,
@@ -181,7 +181,7 @@ export async function createWorksceneAndReadWorkspaceView(
   workspace: Pick<LocalWorkspaceClient, "viewByName">,
   sceneName: string,
   authorization: WorkspaceControlAuthorization,
-  credential: LocalWorkspaceConsumptionCredential,
+  credential: WorkspaceAdministrationConsumptionCredential,
 ): Promise<{
   readonly scene: WorksceneSummary;
   readonly authorization: WorkspaceControlAuthorization;
@@ -343,7 +343,7 @@ export async function useLocalWorkspaceClient<T, R>(
       await client.confirmDelivered();
       return delivered;
     } catch (error) {
-      if (error instanceof CompletedLocalWorkspaceOperationError) {
+      if (error instanceof CompletedWorkspaceAdministrationOperationError) {
         const credential = client.consumptionCredential();
         if (!credential) {
           throw new Error(
@@ -356,7 +356,7 @@ export async function useLocalWorkspaceClient<T, R>(
         error.markDeliveryConfirmed();
         throw error;
       }
-      if (!(error instanceof RecoveredLocalWorkspaceOperationsError)) throw error;
+      if (!(error instanceof RecoveredWorkspaceAdministrationOperationsError)) throw error;
       await delivery.recovered(
         error.operations.map((operation) =>
           recoveryNoticeOf(error.outboxId, operation)),
@@ -367,7 +367,7 @@ export async function useLocalWorkspaceClient<T, R>(
 }
 
 async function renderLocalWorkspaceFailure(
-  error: CompletedLocalWorkspaceOperationError,
+  error: CompletedWorkspaceAdministrationOperationError,
   writer: ReturnType<typeof createStdoutWriter>,
 ): Promise<void> {
   const { renderError } = await import("../render.js");

@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-09a 已通过协调者独立复核并提交前验收；下一责任链归位 pending/ack 与 client result delivery 生命周期<br>
+> 当前检查点：A5-09b 已通过协调者独立复核并提交前验收；Workspace Administration 已完整归位<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -105,7 +105,7 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
   | 领域或管理责任 | 状态 | 必须成立的目标边界 |
   |---|---|---|
   | Conversation | [ ] | 会话合同、用例和事实归域；历史与运行投影不被 Surface、Kernel 或 Server 拥有 |
-  | Workspace Administration | [ ] | 本机 workspace 身份、绑定、修订、操作交付与 reset 归域；Workscene、CLI fallback 与 Executor 只消费明确端口 |
+  | Workspace Administration | [x] | 本机 workspace 身份、绑定、修订、操作交付与 reset 归域；Workscene、CLI fallback 与 Executor 只消费明确端口 |
   | Workscene | [ ] | 场景身份、工作区与会话关系归域；RuntimeHost 不认识场景产品规则 |
   | Schedule | [ ] | 调度产品规则与耐久事实归域；执行触发只消费 Kernel/Effect 端口 |
   | Advancement | [ ] | 执行、评价、证据与成果准入边界保持现有语义且归属唯一 |
@@ -202,11 +202,11 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `8d8fcede + A5-09a-accepted-worktree`；A0～A4、Skill Catalog、Delivery 及 Workspace Administration CRUD、reset/recovery、durable operation 合同、分派与准入/执行/恢复生命周期已通过协调者独立复核 |
+| 已接受基线 | `f46e15a0`；A0～A4、Skill Catalog、Delivery 及 Workspace Administration CRUD、reset/recovery、durable operation 合同、分派与准入/执行/恢复生命周期已通过协调者独立复核并提交 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | 无；A5-09a 已验收，等待提交后派发 A5-09b |
-| 下一责任链 | A5-09b：归位 pending/ack 与 client result delivery 生命周期、删除最后临时 binding 并裁决 Workspace Administration 行；不得进入 Workscene |
-| 打开的单向桥 | Workspace Administration 的 `pending/acknowledge`、client result delivery/recovered presentation 与 consumption credential 仍由 Host/CLI 临时绑定，唯一退场包为紧邻 A5-09b；本包没有复制其产品状态或提前改写交付语义 |
+| 活跃工作包 | 无；A5-09b 已验收，等待提交后选择下一条 A5 责任链 |
+| 下一责任链 | 从仍为 `[ ]` 的 A5 领域中按已接受无环依赖与当前生产事实选择下一条最窄责任链 |
+| 打开的单向桥 | 无 Workspace Administration 当前桥；pending/ack 仅是 P10 耐久机制端口，result claim/recovery/credential/confirmation 已由领域应用唯一决定 |
 | 已失效证据 | 无当前未恢复证据；A4-10 已恢复 A4-07/A4-08 的包级产品无知结论，A4 全部合同与退出证据当前有效 |
 | 阻塞/用户决策 | 无技术阻塞；用户已明确恢复调度 |
 
@@ -1855,6 +1855,21 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据与行为保护：领域 Workspace Administration 12/12（其中 lifecycle 4 项直接覆盖 prepare/commit/business completion、committed identity 冷恢复及首次扫描 retry、retry→成功/degraded、close abort 后保留 committed）；CLI Host/outbox 24/24 覆盖幂等与 response loss、旧记录、reset TTL/identity、串行 retry、业务完成、unknown degraded、close/restart；workspace command/bootstrap/owner 13/13；真实 durable registry 12/12（含 `local-workspace-operation-outbox` witness）。core fresh build、CLI typecheck 与 `pnpm cli:build`、canonical S7 31/31 + registry golden、fresh package exports、最窄 Biome 与 `git diff --check` 均通过；P10 wire/digest/marker、公开 status/error、退避、三生产根、pending/ack 与 client delivery 未发现漂移。
 - 交接与精确失效：A5-09a 实施完成，等待协调者独立复核；Workspace Administration 行与 A5 继续为 `[ ]`，下一责任链固定为 A5-09b，不得进入 Workscene。领域 durable lifecycle 状态/端口/业务完成分类、CLI infrastructure observation、Host start/close/unpublish/request routing、outbox schema/atomic transition/recovery owner、三个生产根、P10 witness、core 窄导出/build、S7 或上述直接行为任一变化时，本证据精确失效并只重验本包闭包；pending/ack/client delivery 的变化只恢复 A5-09b。本包未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：从三个生产根、Host transport start/unpublish/close、领域 lifecycle、Correctness failure adapter 与 P10 outbox 双向反查，确认 ready/recovering/degraded、prepare/commit、committed drain、业务完成、retry/degraded、冷恢复与 close abort 只有一个领域应用 owner；Host 仅保留自身 started/closed 与 IPC 转发，outbox 仅保留 identity、原子状态转换、digest/marker、TTL 和重放机制。独立验证 core 12/12、CLI Host/outbox/command/bootstrap/owner 37/37、真实 S7 environment 1/1、durable registry 12/12、core fresh build、CLI typecheck/正式构建、canonical S7 31/31 + registry golden、fresh exports、最窄 Biome 与 `git diff --check` 全部通过。额外确认初始化成功但首次 committed 扫描遇可重试故障时，旧实现因 ready flag 已置位却只启动 initialize recovery 而可能永久停在 recovering；当前在同一 lifecycle 内直接重驱 committed drain，恢复既有 retry/重启语义，不改变 P10、公开入口、错误、退避或产品能力。接受 `A5-09a-workspace-administration-durable-lifecycle-v1`；Workspace Administration 行与 A5 继续为 `[ ]`，下一包只闭合 pending/ack 与 client result delivery。
+
+### A5-09b：归位 Workspace Administration pending/ack 与结果交付生命周期
+
+- 派发基线：`HEAD f46e15a0 + task-doc:A5-09b-dispatch`；A5-09a 已由协调者独立复核并提交，进场索引应为空，工作区只应有本文派发记录。
+- 唯一架构结果：让 Workspace Administration 的领域应用唯一决定“哪些已完成操作属于同一可恢复交付前缀、当前调用结果是否被该前缀认领、哪些结果作为未认领恢复结果交给当前 Surface、何时形成有限 consumption credential、成功呈现后确认哪个连续前缀已交付”。P10 outbox 只提供 pending page 与 acknowledge 的耐久机制，Host 只做 IPC 编解码和有限调用转发，CLI/Workscene binding 只做调用、呈现与消费凭据，不再拥有前缀、认领、过滤、确认或恢复结果状态机。
+- 必须迁移与删除：在现有 Workspace Administration 窄领域入口形成有限 delivery application/port，并由三个 `createExecutorLocalWorkspaceHost` 生产根装配同一实例；迁入并删除 CLI Host/client 中的 `readPendingDelivery`、`acknowledgeDelivery`、`consumptionCredentialOf`、credential matching、claimed/unclaimed filtering、recovered-result bookkeeping 和等价判断。Host 的 `pending/acknowledge` IPC 只可映射领域端口；outbox 的 contiguous prefix、outbox identity、result/input digest、ack marker、compaction 和旧记录兼容继续唯一归 P10 机制，不得搬进领域或 Surface。`workspace create-scene` 只消费有限 credential 并维持既有幂等 request identity，不进入 Workscene 领域迁移。
+- 行为保护：原样保持 pending/ack wire、严格 codec、连续前缀与 digest/bytes 绑定、response loss、重启恢复、当前结果认领、其他已完成结果恢复呈现、失败结果消费、交付确认、重复确认、旧记录兼容、三生产根、全部公开文案/错误/终态以及 `create-scene` 的凭据消费和幂等语义；不得增加产品能力、通用 delivery 框架、网络协议或第二状态机。
+- 最窄证据：先补领域 delivery application 的直接测试，覆盖当前结果成功/失败、无当前结果、claimed 与 unclaimed 分离、身份或 digest 不匹配拒绝、response-loss/restart 后恢复、确认 exact-prefix 与重复确认；再运行受影响的 CLI Host/outbox/client/command/REPL/create-scene 直接测试和对应 S7 environment/durable registry。源码稳定后按依赖顺序完成必要 core build、CLI typecheck/正式构建、canonical S7、fresh package exports、最窄 Biome 与 `git diff --check`；不得运行根级全测或重做 A5-06～A5-09a 未失效闭包。
+- 完成与裁决：领域 application 是交付语义唯一 owner，Host/CLI/Workscene 无业务判断，P10 outbox 无产品语义，全部旧临时 binding 和平行判断归零；Workspace Administration 从身份、CRUD、reset/recovery、durable operation 到 delivery 的整条生产责任、全部消费端和直接证据闭合后，将登记表该行改为 `[x]`，并更新台账到下一真实 A5 责任链。若约四小时仍未完成、需要改变 P10 wire/marker/digest、公开错误或 Workscene 产品流程，或出现两个可独立迁移的生命周期，停在可构建、单一交付真相成立的安全检查点反馈，不得扩面。
+- 固定边界：只处理 Workspace Administration 的 pending/ack 与结果交付；不进入 Conversation、Workscene、Schedule、Advancement、Trust、Device、Backup & Recovery、A6 或 A7，不修改 AE-001，不执行 Git 写操作。
+- 执行基线与领域交付应用：`HEAD f46e15a0ff73a12828bbdafe6ad7a8ed68d157c9 + task-doc:A5-09b-dispatch + A5-09b-workspace-administration-result-delivery-v1`。唯一窄入口 `@zhixing/core/environment/workspace-administration` 新增 `WorkspaceAdministrationResultDeliveryApplicationService`，领域现拥有有限 `none/current/operation-input/operation` claim、未认领完成结果、当前 consumption credential、交付失败标记和 exact-prefix confirmation 决定。operation-input claim 直接从规范化 durable input 重建稳定 digest，current claim 绑定 outbox/localSeq/operationId/inputDigest/resultDigest；无进程缓存身份、Surface filter、第二状态机或通用 Delivery 框架。
+- Host、Correctness 与旧路退场：`WorkspaceAdministrationDurableLifecycleApplication` 现是 Host 唯一有限入口，`pending/acknowledge` 只把严格 IPC 请求交给同一 lifecycle application 再访问 P10 mechanism；`LocalWorkspaceManagementHost` 不再持有 outbox delivery handle。每个 `createLocalWorkspaceClient` 只装配领域 result-delivery application 与严格 IPC mechanism adapter，CLI 保留 wire codec、调用和中文呈现，Workscene create-scene 只消费领域 credential 形成既有稳定 request identity。旧 `readPendingDelivery`、`acknowledgeDelivery`、`consumptionCredentialOf`、credential matcher、claimed/unclaimed filter、recovered bookkeeping、CLI error/credential owner、`delivery: outbox` 与 Host `#delivery` 均归零。P10 outbox 继续唯一拥有物理 localSeq 链、outbox identity、input/result digest、ack watermark、prefix digest 校验、marker/compaction 与旧记录机制；领域只裁决该机制返回的连续终态记录如何归属本次产品交付。
+- 行为与恢复保护：pending/ack wire 与严格 codec 未改；领域应用只接受从 confirmation watermark 开始的连续 completed/abandoned 终态记录，abandoned 进入确认前缀但不形成用户恢复结果。当前成功或失败结果只有在同 outbox exact identity/digest 内才形成 credential；其他 completed 仍先以原错误名、code、中文文案交给 Surface，确认失败或 response loss 保留当前 pending/credential，同一确认可重驱，成功后才清空；重启可由 durable operation input/identity 重建 claim。list/status/reset-preview 的新读取会先放弃旧 current claim，view 则保留并重新核对 current，create-scene credential、失败 deliveryConfirmed、旧 two-field control authorization、reset TTL/identity 与三生产根行为未改。
+- 直接证据、状态与失效：领域 Workspace Administration 16/16，其中新增 result-delivery 4 项直接覆盖 claimed/unclaimed、重启重建、空前缀与身份/digest mismatch、ack response loss/exact prefix/重复确认；CLI Host/outbox/client/command/bootstrap/owner、真实 S7 environment 与 durable registry 共 7 文件 50/50，覆盖成功/失败/current-view、其他恢复结果、旧记录、reset、三根和 P10 witness。core fresh build、CLI `tsc --noEmit` 与正式 build、canonical S7 31/31 + registry golden、fresh package exports、最窄 Biome 与 `git diff --check` 通过。S7 反向 mutation 会拒绝 Host 直连 outbox pending、领域 current claim 缺失、旧 helper/error owner 或第二 delivery handle 回流。A5-09b 实施完成，等待协调者独立复核；Workspace Administration 从身份、CRUD、reset/recovery、durable operation 到 result delivery 的完整责任与消费链当前闭合，故登记行改为 `[x]`，A5 仍为 `[ ]`。若领域 delivery claim/credential/error、Host lifecycle pending/ack、IPC codec、P10 pending/ack schema/digest/marker/compaction、client/Workscene consumption、三根、S7/exports 或上述直接行为任一变化，恢复 `A5-09b-workspace-administration-result-delivery-v1` 与 Workspace Administration 行并只重验本闭包；未进入 Workscene 或其他领域，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：从领域 delivery application、Host lifecycle 转发、客户端调用/呈现、Workscene credential 消费和 P10 outbox 双向反查，确认结果认领、未认领恢复、有限凭据与 exact-prefix 确认只有一个领域 owner；Host 无 pending/ack 之外的交付判断，CLI 无旧 helper/错误 owner，outbox 无产品状态机。独立重跑领域 16/16、CLI Host/outbox/command/bootstrap/owner 37/37、core/CLI 正式构建、CLI typecheck、canonical S7 31/31 + registry golden、fresh package exports、最窄 Biome、旧 owner 残留反扫与 `git diff --check`，全部通过。接受 `A5-09b-workspace-administration-result-delivery-v1`，Workspace Administration 行保持 `[x]`；A5 继续为 `[ ]`。
 
 ## 十、用户提示词
 

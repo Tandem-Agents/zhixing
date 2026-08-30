@@ -11,19 +11,18 @@ import {
   WorkspaceBindingCatalogIntegrityError,
 } from "@zhixing/core/environment";
 import {
+  RecoveredWorkspaceAdministrationOperationsError,
   WorkspaceAdministrationBusinessError,
   WorkspaceAdministrationDurableLifecycleApplicationService,
+  type WorkspaceAdministrationConsumptionCredential,
   type WorkspaceAdministrationApplication,
 } from "@zhixing/core/environment/workspace-administration";
 import {
-  CompletedLocalWorkspaceOperationError,
   LocalWorkspaceManagementHost,
-  RecoveredLocalWorkspaceOperationsError,
   createLocalWorkspaceClient,
   decodeLocalWorkspaceResetPreview,
   encodeLocalWorkspaceResetPreview,
   readLocalWorkspaceHostStatus,
-  type LocalWorkspaceConsumptionCredential,
 } from "./local-workspace-management-host.js";
 import {
   LocalWorkspaceOperationOutbox,
@@ -93,7 +92,6 @@ function createTestLocalWorkspaceManagementHost(input: {
       observeInfrastructureFailure:
         observeLocalWorkspaceDurableInfrastructureFailure,
     }),
-    delivery: input.outbox,
   });
 }
 
@@ -321,7 +319,7 @@ describe("LocalWorkspaceManagementHost", () => {
     try {
       await host.start();
       const client = createLocalWorkspaceClient(home);
-      let deliveredCredential: LocalWorkspaceConsumptionCredential | undefined;
+      let deliveredCredential: WorkspaceAdministrationConsumptionCredential | undefined;
       await expect(
         useLocalWorkspaceClient(
           client,
@@ -381,7 +379,7 @@ describe("LocalWorkspaceManagementHost", () => {
     try {
       await host.start();
       const client = createLocalWorkspaceClient(home);
-      let deliveredCredential: LocalWorkspaceConsumptionCredential | undefined;
+      let deliveredCredential: WorkspaceAdministrationConsumptionCredential | undefined;
       await expect(
         useLocalWorkspaceClient(
           client,
@@ -460,7 +458,7 @@ describe("LocalWorkspaceManagementHost", () => {
       });
 
       await expect(client.viewByName("paper")).rejects.toBeInstanceOf(
-        RecoveredLocalWorkspaceOperationsError,
+        RecoveredWorkspaceAdministrationOperationsError,
       );
       expect(viewByName).not.toHaveBeenCalled();
       expect(client.consumptionCredential()).toBeDefined();
@@ -605,11 +603,11 @@ describe("LocalWorkspaceManagementHost", () => {
       await createLocalWorkspaceClient(home).create("paper", "C:\\paper");
       const recovering = createLocalWorkspaceClient(home);
       const error = await recovering.list().catch((caught: unknown) => caught);
-      expect(error).toBeInstanceOf(RecoveredLocalWorkspaceOperationsError);
-      expect((error as RecoveredLocalWorkspaceOperationsError).operations)
+      expect(error).toBeInstanceOf(RecoveredWorkspaceAdministrationOperationsError);
+      expect((error as RecoveredWorkspaceAdministrationOperationsError).operations)
         .toEqual([expect.objectContaining({ state: "completed" })]);
       await expect(recovering.list()).rejects.toBeInstanceOf(
-        RecoveredLocalWorkspaceOperationsError,
+        RecoveredWorkspaceAdministrationOperationsError,
       );
       await recovering.confirmDelivered();
       await expect(recovering.list()).resolves.toEqual([]);

@@ -2854,6 +2854,18 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     !application.includes("interface WorkspaceAdministrationDurableOperationMechanismPort") ||
     !application.includes("interface WorkspaceAdministrationDurableLifecycleApplication") ||
     !application.includes("class WorkspaceAdministrationDurableLifecycleApplicationService") ||
+    !application.includes("interface WorkspaceAdministrationResultDeliveryApplication") ||
+    !application.includes("class WorkspaceAdministrationResultDeliveryApplicationService") ||
+    !application.includes("type WorkspaceAdministrationDeliveryClaim =") ||
+    !application.includes('readonly kind: "current"') ||
+    !application.includes('readonly kind: "operation-input"') ||
+    !application.includes("RecoveredWorkspaceAdministrationOperationsError") ||
+    !application.includes("CompletedWorkspaceAdministrationOperationError") ||
+    !application.includes("async #readPendingDelivery()") ||
+    !application.includes("forgetCurrentClaim(): void") ||
+    !application.includes("matchesWorkspaceAdministrationConsumptionCredential(") ||
+    !application.includes("this.#mechanism.acknowledge({") ||
+    !application.includes("workspaceAdministrationResultValue(") ||
     !application.includes("interface WorkspaceAdministrationDurableExecution") ||
     !application.includes("type WorkspaceAdministrationDurableResult =") ||
     !application.includes("async executeDurableOperation(") ||
@@ -2887,7 +2899,7 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     )
   ) {
     failures.push(
-      "Workspace Administration does not uniquely own CRUD, reset lifecycle, generation preview and durable request identity",
+      "Workspace Administration does not uniquely own CRUD, reset, durable lifecycle and result delivery",
     );
   }
   if (
@@ -2913,17 +2925,26 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     !host.includes("mechanism: outbox") ||
     !host.includes("observeLocalWorkspaceDurableInfrastructureFailure") ||
     !host.includes("lifecycle,") ||
-    !host.includes("delivery: outbox") ||
+    !host.includes("new WorkspaceAdministrationResultDeliveryApplicationService({") ||
+    !host.includes("createWorkspaceAdministrationResultDeliveryMechanism(") ||
+    (host.match(/delivery\.forgetCurrentClaim\(\)/gu) ?? []).length !== 2 ||
     !host.includes("this.#lifecycle.prepare(request.input)") ||
     !host.includes("this.#lifecycle.commit(request.identity, request.confirmation)") ||
     !host.includes("this.#lifecycle.assertDeliveryMechanismReady()") ||
+    !host.includes("return this.#lifecycle.pending(request.afterSeq)") ||
+    !host.includes("return this.#lifecycle.acknowledge(request)") ||
     !host.includes("return this.#lifecycle.viewByName(request.displayName)") ||
-    !host.includes(
-      "const claimed = consumptionCredentialOf(pendingDelivery, currentResult)",
-    ) ||
-    !host.includes("!matchesConsumptionCredential(operation, claimed)") ||
     !host.includes("validateWorkspaceAdministrationDurableResult(") ||
-    !host.includes("validateWorkspaceAdministrationDurableValue(input, result.value)") ||
+    !host.includes("workspaceAdministrationResultValue(input, completed.result)") ||
+    host.includes("delivery: outbox") ||
+    host.includes("this.#delivery") ||
+    host.includes("function readPendingDelivery(") ||
+    host.includes("function acknowledgeDelivery(") ||
+    host.includes("function reportUnclaimedResults(") ||
+    host.includes("function consumptionCredentialOf(") ||
+    host.includes("function matchesConsumptionCredential(") ||
+    host.includes("class RecoveredLocalWorkspaceOperationsError") ||
+    host.includes("class CompletedLocalWorkspaceOperationError") ||
     host.includes("LocalWorkspaceWriteOperation") ||
     host.includes("validateLocalWorkspaceWriteOperation") ||
     host.includes("interface OperationResult") ||
@@ -2951,7 +2972,7 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     host.includes("catalogGeneration !== request.input.expectedCatalogGeneration")
   ) {
     failures.push(
-      "Workspace Host retains a second durable lifecycle owner or bypasses the domain lifecycle application",
+      "Workspace Host retains a second durable/result-delivery lifecycle owner or bypasses the domain application",
     );
   }
   if (

@@ -237,7 +237,6 @@ async function recoverOutboxWithHost(outbox: LocalWorkspaceOperationOutbox): Pro
   const host = new LocalWorkspaceManagementHost({
     lease,
     lifecycle,
-    delivery: recoveredOutbox,
   });
   try {
     await host.start();
