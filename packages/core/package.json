@@ -76,6 +76,10 @@
       "types": "./dist/conversation/index.d.ts",
       "import": "./dist/conversation/index.js"
     },
+    "./conversation/application": {
+      "types": "./dist/conversation/application.d.ts",
+      "import": "./dist/conversation/application.js"
+    },
     "./contracts": {
       "types": "./dist/contracts/index.d.ts",
       "import": "./dist/contracts/index.js"

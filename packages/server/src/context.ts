@@ -195,8 +195,7 @@ export interface ServerContext {
   /** 多视角发散收敛门面。不传则多视角发起意图不可执行。 */
   perspectives?: PerspectivesController;
   /**
-   * 对话目录(盘上事实:清单 / 改名 / 删除 / 倒读)。装配方注入持久层实现;
-   * 不传则 session.list / history / rename / delete 不可用。
+   * 尚未迁移的对话生命周期持久端口(ensure/touch/clear/delete)。
    */
   conversationDirectory?: ConversationDirectory;
   /** 工作场景域(注册表管理 + 场景对话取建)。不传则 workscene.* 不可用。 */

@@ -10,6 +10,7 @@ export default defineConfig({
     "src/context/index.ts",
     "src/transcript/index.ts",
     "src/conversation/index.ts",
+    "src/conversation/application.ts",
     "src/rubrics/index.ts",
     "src/skills/catalog-application.ts",
     "src/product-api/catalog.ts",

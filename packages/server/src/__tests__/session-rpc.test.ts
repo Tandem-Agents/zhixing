@@ -70,6 +70,15 @@ import {
 } from "../perspectives/index.js";
 import { createTempDir } from "@zhixing/test-utils";
 import { protocolDigest } from "@zhixing/core/protocol";
+import {
+  CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+  ConversationDirectoryApplicationService,
+  createConversationDirectoryProductApiContribution,
+  type ConversationDirectoryStorage,
+} from "@zhixing/core/conversation/application";
+import { ProductApiDispatcher } from "@zhixing/core/product-api";
+import { loadAdvancementState } from "../rpc/methods/session.js";
+import type { ConversationDirectory } from "../runtime/conversation-directory.js";
 
 const TEST_VERSION = "0.1.0-test";
 const TEST_TOKEN = "test-token-session";
@@ -344,7 +353,7 @@ async function waitUntil(
  */
 function createMemoryDirectory(
   records: Map<string, unknown[]>,
-): import("../runtime/conversation-directory.js").ConversationDirectory {
+): ConversationDirectory & ConversationDirectoryStorage {
   const names = new Map<string, string>();
   const removed = new Set<string>();
   let createdSeq = 0;
@@ -367,7 +376,7 @@ function createMemoryDirectory(
       return [...new Set([...records.keys(), ...names.keys()])]
         .filter((id) => !removed.has(id))
         .map((id) => ({
-          id,
+          conversationId: id,
           name: names.get(id) ?? id,
           createdAt: now,
           lastActiveAt: now,
@@ -382,7 +391,13 @@ function createMemoryDirectory(
       const id = `conv_created_${createdSeq++}`;
       names.set(id, id);
       records.set(id, []);
-      return meta(id);
+      const created = meta(id);
+      return {
+        conversationId: created.id,
+        name: created.name,
+        createdAt: created.createdAt,
+        lastActiveAt: created.lastActiveAt,
+      };
     },
     async ensure(id) {
       if (!exists(id)) {
@@ -405,7 +420,7 @@ function createMemoryDirectory(
       names.set(id, name);
       const now = new Date().toISOString();
       return {
-        id,
+        conversationId: id,
         name,
         createdAt: now,
         lastActiveAt: now,
@@ -418,7 +433,7 @@ function createMemoryDirectory(
       removed.add(id);
       return true;
     },
-    async readRunsReverse(id, opts) {
+    async readHistory(id, opts) {
       const all = (records.get(id) ?? []) as Array<{ messages: unknown }>;
       const reversed = all
         .map((record, runIndex) => ({
@@ -438,6 +453,42 @@ function createMemoryDirectory(
       };
     },
   };
+}
+
+function createConversationProductApi(input: {
+  readonly directory: ConversationDirectoryStorage;
+  readonly conversations: ConversationManager;
+  readonly advancement?: AdvancementController;
+}): ProductApiDispatcher {
+  const application = new ConversationDirectoryApplicationService({
+    storage: input.directory,
+    runtime: {
+      read: (conversationId) => {
+        const active = input.conversations.getSession(conversationId);
+        return {
+          ...(active ? { lastActiveAt: active.lastActiveAt } : {}),
+          active: active !== undefined,
+          busy: active?.busy ?? false,
+          observerCount:
+            input.conversations.getObserverCount(conversationId),
+          pendingCount: input.conversations.pendingCount(conversationId),
+        };
+      },
+    },
+    advancement: input.advancement
+      ? {
+          read: (conversationId) =>
+            loadAdvancementState(
+              { advancement: input.advancement } as never,
+              conversationId,
+            ),
+        }
+      : undefined,
+  });
+  return new ProductApiDispatcher(
+    CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+    [createConversationDirectoryProductApiContribution(application)],
+  );
 }
 
 // ─── 客户端辅助 ───
@@ -851,9 +902,24 @@ describe("session.* RPC (S2.D)", () => {
     const conversationDirectory = createMemoryDirectory(recordsByConversation);
     const advancementRecovery =
       opts.advancement && opts.withAdvancementRecovery
-        ? createAdvancementRecoveryMaintenance({
-            advancement: opts.advancement,
-            directory: conversationDirectory,
+      ? createAdvancementRecoveryMaintenance({
+          advancement: opts.advancement,
+          directory: {
+            list: async () =>
+              (await conversationDirectory.list()).map((record) => ({
+                id: record.conversationId,
+                name: record.name,
+                createdAt: record.createdAt,
+                lastActiveAt: record.lastActiveAt,
+                isDefault: false,
+                archived: false,
+                scope: { kind: "user" as const },
+              })),
+            exists: (conversationId) =>
+              conversationDirectory.exists(conversationId),
+            readRunsReverse: (conversationId, options) =>
+              conversationDirectory.readHistory(conversationId, options),
+          },
             proxyTurns: createAdvancementProxyTurnPort({
               manager: conversations,
               conversationExists: (conversationId) =>
@@ -871,6 +937,11 @@ describe("session.* RPC (S2.D)", () => {
       advancementRecovery,
       perspectives: opts.perspectives,
       conversationDirectory,
+      productApi: createConversationProductApi({
+        directory: conversationDirectory,
+        conversations,
+        advancement: opts.advancement,
+      }),
     });
     server = await startServer({ context: ctx });
   }

@@ -14,9 +14,9 @@
  */
 
 import type {
-  RunsPage,
-  RunsPageCursor,
-} from "@zhixing/server";
+  ConversationHistoryPage as RunsPage,
+  ConversationHistoryCursor as RunsPageCursor,
+} from "@zhixing/core/conversation/application";
 import type {
   SessionChangedPayload,
   SessionActivityPayload,

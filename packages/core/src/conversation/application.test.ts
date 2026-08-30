@@ -1,0 +1,208 @@
+import { describe, expect, it, vi } from "vitest";
+import { ProductApiDispatcher } from "../product-api/catalog.js";
+import {
+  CONVERSATION_CREATE_COMMAND,
+  CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+  CONVERSATION_HISTORY_QUERY,
+  CONVERSATION_LIST_QUERY,
+  CONVERSATION_RENAME_COMMAND,
+  ConversationApplicationError,
+  ConversationDirectoryApplicationService,
+  createConversationDirectoryProductApiContribution,
+  mergeConversationDirectoryViews,
+  type ConversationDirectoryRecord,
+  type ConversationDirectoryStorage,
+} from "./application.js";
+
+function fixture(records: ConversationDirectoryRecord[] = []) {
+  const state = new Map(records.map((record) => [record.conversationId, record]));
+  let created = 0;
+  const history = vi.fn<ConversationDirectoryStorage["readHistory"]>(
+    async () => ({ runs: [], hasMore: false }),
+  );
+  const storage: ConversationDirectoryStorage = {
+    list: async () => [...state.values()],
+    create: async () => {
+      const conversationId = `created-${++created}`;
+      const record = {
+        conversationId,
+        name: conversationId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        lastActiveAt: "2026-01-01T00:00:00.000Z",
+      };
+      state.set(conversationId, record);
+      return record;
+    },
+    rename: async (conversationId, name) => {
+      const prior = state.get(conversationId);
+      if (!prior) return null;
+      const renamed = { ...prior, name };
+      state.set(conversationId, renamed);
+      return renamed;
+    },
+    readHistory: history,
+  };
+  const application = new ConversationDirectoryApplicationService({ storage });
+  const dispatcher = new ProductApiDispatcher(
+    CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+    [createConversationDirectoryProductApiContribution(application)],
+  );
+  return { application, dispatcher, history };
+}
+
+describe("ConversationDirectoryApplicationService", () => {
+  it("preserves durable ordering while overlaying read-only runtime/Advancement projections", async () => {
+    const older = {
+      conversationId: "older",
+      name: "旧",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      lastActiveAt: "2026-01-01T00:00:01.000Z",
+    };
+    const newer = {
+      conversationId: "newer",
+      name: "新",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      lastActiveAt: "2026-01-01T00:00:02.000Z",
+    };
+    const storage: ConversationDirectoryStorage = {
+      list: async () => [older, newer],
+      create: async () => older,
+      rename: async () => older,
+      readHistory: async () => ({ runs: [], hasMore: false }),
+    };
+    const projected = new ConversationDirectoryApplicationService({
+      storage,
+      runtime: {
+        read: (id) =>
+          id === "older"
+            ? {
+                lastActiveAt: "2026-01-01T00:00:03.000Z",
+                active: true,
+                busy: true,
+                observerCount: 2,
+                pendingCount: 1,
+              }
+            : undefined,
+      },
+      advancement: {
+        read: async (id) =>
+          id === "older"
+            ? { advancementSessionId: "adv-1", status: "active" }
+            : undefined,
+      },
+    });
+    await expect(projected.queryList()).resolves.toEqual({
+      conversations: [
+        expect.objectContaining({ conversationId: "newer", active: false }),
+        expect.objectContaining({
+          conversationId: "older",
+          lastActiveAt: "2026-01-01T00:00:03.000Z",
+          active: true,
+          busy: true,
+          observerCount: 2,
+          pendingCount: 1,
+          advancement: { advancementSessionId: "adv-1", status: "active" },
+        }),
+      ],
+    });
+  });
+
+  it("applies history defaults/cap and rejects invalid pagination", async () => {
+    const { dispatcher, history } = fixture();
+    await dispatcher.query(CONVERSATION_HISTORY_QUERY, {
+      kind: "history",
+      conversationId: "missing",
+    });
+    await dispatcher.query(CONVERSATION_HISTORY_QUERY, {
+      kind: "history",
+      conversationId: "c-1",
+      limit: 999,
+    });
+    expect(history.mock.calls.map((call) => call[1].limit)).toEqual([20, 200]);
+    await expect(
+      dispatcher.query(CONVERSATION_HISTORY_QUERY, {
+        kind: "history",
+        conversationId: "c-1",
+        limit: 0,
+      }),
+    ).rejects.toMatchObject({ code: "invalid-input" });
+  });
+
+  it("uses one dispatcher for list/create/rename and emits rename fact after storage", async () => {
+    const initial = {
+      conversationId: "c-1",
+      name: "原名",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      lastActiveAt: "2026-01-01T00:00:00.000Z",
+    };
+    const { dispatcher } = fixture([initial]);
+    await expect(
+      dispatcher.query(CONVERSATION_LIST_QUERY, { kind: "list" }),
+    ).resolves.toMatchObject({ conversations: [{ conversationId: "c-1" }] });
+    await expect(
+      dispatcher.command(CONVERSATION_CREATE_COMMAND, { kind: "create" }),
+    ).resolves.toMatchObject({ facts: [], result: { conversationId: "created-1" } });
+    await expect(
+      dispatcher.command(CONVERSATION_RENAME_COMMAND, {
+        kind: "rename",
+        conversationId: "c-1",
+        name: "  新名  ",
+      }),
+    ).resolves.toEqual({
+      result: {
+        conversationId: "c-1",
+        name: "新名",
+        fact: {
+          kind: "conversation-renamed",
+          conversationId: "c-1",
+          name: "新名",
+        },
+      },
+      facts: [
+        {
+          kind: "conversation-renamed",
+          conversationId: "c-1",
+          name: "新名",
+        },
+      ],
+    });
+    await expect(
+      dispatcher.command(CONVERSATION_RENAME_COMMAND, {
+        kind: "rename",
+        conversationId: "missing",
+        name: "x",
+      }),
+    ).rejects.toBeInstanceOf(ConversationApplicationError);
+  });
+
+  it("owns cross-owner list merge ordering without changing local availability", () => {
+    const entry = (conversationId: string, lastActiveAt: string) => ({
+      conversationId,
+      name: conversationId,
+      createdAt: lastActiveAt,
+      lastActiveAt,
+      active: false,
+      busy: false,
+      observerCount: 0,
+      pendingCount: 0,
+    });
+    expect(
+      mergeConversationDirectoryViews(
+        {
+          conversations: [entry("local", "2026-01-01T00:00:01.000Z")],
+          availability: {
+            mode: "local-only",
+            unavailableCapabilities: ["排程暂不可用"],
+          },
+        },
+        [entry("remote", "2026-01-01T00:00:02.000Z")],
+      ),
+    ).toMatchObject({
+      conversations: [
+        { conversationId: "remote" },
+        { conversationId: "local" },
+      ],
+      availability: { mode: "local-only" },
+    });
+  });
+});

@@ -3389,6 +3389,8 @@ test("Trust Administration management has one domain application and Product API
 test("Skill Catalog management, load, save, admission and Kernel projection have one domain application boundary", async () => {
   const paths = [
     "packages/core/src/skills/catalog-application.ts",
+    "packages/core/src/conversation/application.ts",
+    "packages/core/src/conversation/index.ts",
     "packages/core/src/scheduler/application.ts",
     "packages/core/src/scheduler/runtime-policy.ts",
     "packages/core/src/scheduler/facade.ts",
@@ -3419,6 +3421,11 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/server/src/lifecycle.ts",
     "packages/rpc/src/event-bridge.ts",
     "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/conversation-directory.ts",
+    "packages/cli/src/serve/local-conversation-directory-application.ts",
+    "packages/cli/src/serve/local-conversation-rpc.ts",
+    "packages/server/src/runtime/conversation-directory.ts",
+    "packages/server/src/rpc/methods/session.ts",
     "packages/cli/src/serve/anchor-scheduler-runtime.ts",
     "packages/cli/src/serve/execution-scheduler-facade.ts",
     "packages/cli/src/runtime/rpc-scheduler-facade.ts",
@@ -3461,6 +3468,38 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
 
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/conversation/index.ts",
+      (text) => `${text}\nexport * from "./application.js";`,
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/conversation/application.ts",
+      (text) =>
+        `import type { AdvancementReviewDecision } from "../advancement/types.js";\n${text}`,
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/runtime/conversation-directory.ts",
+      (text) => text.replace(
+        "export interface ConversationDirectory {",
+        "export interface ConversationDirectory {\n  list(): Promise<unknown[]>;",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/local-conversation-rpc.ts",
+      (text) => `${text}\nvoid input.owner.createConversation();`,
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(

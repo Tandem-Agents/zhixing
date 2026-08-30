@@ -2,6 +2,7 @@ import { access, readFile } from "node:fs/promises";
 
 const [
   coreRoot,
+  coreConversationApplication,
   coreSkillCatalog,
   coreScheduleApplication,
   coreDeliveryApplication,
@@ -39,6 +40,7 @@ const [
   secrets,
 ] = await Promise.all([
   import("../packages/core/dist/index.js"),
+  import("../packages/core/dist/conversation/application.js"),
   import("../packages/core/dist/skills/catalog-application.js"),
   import("../packages/core/dist/scheduler/application.js"),
   import("../packages/core/dist/delivery/application.js"),
@@ -591,6 +593,25 @@ async function verifyCorePackageExports(failures) {
     failures.push("core-exports:retired-memory-subpath");
   }
 
+  const conversationApplicationConditions =
+    manifest.exports["./conversation/application"];
+  if (
+    !conversationApplicationConditions ||
+    conversationApplicationConditions.types !==
+      "./dist/conversation/application.d.ts" ||
+    conversationApplicationConditions.import !==
+      "./dist/conversation/application.js" ||
+    typeof coreConversationApplication.ConversationDirectoryApplicationService !==
+      "function" ||
+    typeof coreConversationApplication.createConversationDirectoryProductApiContribution !==
+      "function" ||
+    "ConversationDirectoryApplicationService" in coreRoot
+  ) {
+    failures.push(
+      "core-exports:conversation-application:invalid-runtime-boundary",
+    );
+  }
+
   const skillCatalogConditions = manifest.exports["./skills/catalog"];
   if (
     !skillCatalogConditions ||
@@ -716,6 +737,19 @@ async function verifyCorePackageExports(failures) {
   }
   for (const [subpath, conditions] of Object.entries(manifest.exports)) {
     if (
+      subpath !== "./conversation/application" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === conversationApplicationConditions?.types ||
+        conditions.import === conversationApplicationConditions?.import)
+    ) {
+      failures.push(
+        `core-exports:${subpath}:duplicate-conversation-application-entry`,
+      );
+    }
+  }
+  for (const [subpath, conditions] of Object.entries(manifest.exports)) {
+    if (
       subpath !== "./scheduler/application" &&
       conditions &&
       typeof conditions === "object" &&
@@ -816,6 +850,14 @@ async function verifyCorePackageExports(failures) {
         try {
           const exported = await import(targetUrl.href);
           if (
+            subpath !== "./conversation/application" &&
+            "ConversationDirectoryApplicationService" in exported
+          ) {
+            failures.push(
+              `core-exports:${subpath}:conversation-application-runtime-leak`,
+            );
+          }
+          if (
             subpath === "." &&
             ("SkillStore" in exported || "getSkillsRoot" in exported)
           ) {
@@ -846,6 +888,14 @@ async function verifyCorePackageExports(failures) {
         }
       } else if (subpath !== "./skills/catalog") {
         const declaration = await readFile(targetUrl, "utf8");
+        if (
+          subpath !== "./conversation/application" &&
+          /ConversationDirectoryApplication(?:Service)?/u.test(declaration)
+        ) {
+          failures.push(
+            `core-exports:${subpath}:conversation-application-type-leak`,
+          );
+        }
         if (
           subpath === "." &&
           /\b(?:SkillStore|getSkillsRoot)\b/u.test(declaration)

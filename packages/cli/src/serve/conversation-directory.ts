@@ -19,9 +19,9 @@ import {
   type RunRecordWithRef,
 } from "@zhixing/core";
 import type {
-  ConversationDirectory,
-  RunsPageCursor,
-} from "@zhixing/server";
+  ConversationDirectoryStorage,
+} from "@zhixing/core/conversation/application";
+import type { ConversationDirectory } from "@zhixing/server";
 import type { WorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 
 interface ScopeHandles {
@@ -49,7 +49,11 @@ export function createConversationDirectory(deps: {
    * 保证同一 meta.json 的并发写不会因各自 new repository 绕开 per-id 锁。
    */
   repoForConversationId?: (conversationId: string) => ConversationRepoRoute;
-}): ConversationDirectory {
+}): ConversationDirectory & ConversationDirectoryStorage & {
+  /** Temporary read-only Advancement recovery bridge; it shares the same storage primitive. */
+  readRunsReverse: ConversationDirectoryStorage["readHistory"];
+  listForAdvancement(): Promise<readonly Conversation[]>;
+} {
   const sceneHandles = new Map<string, ScopeHandles>();
 
   const handlesFor = (conversationId: string): ScopeHandles & { localId: string } => {
@@ -73,8 +77,36 @@ export function createConversationDirectory(deps: {
     };
   };
 
+  const readHistory: ConversationDirectoryStorage["readHistory"] = async (
+    id,
+    opts,
+  ) => {
+    const h = handlesFor(id);
+    // 多读一条探测 hasMore——倒读生成器跨分片续读、读容错自愈
+    const runs: RunRecordWithRef[] = [];
+    let hasMore = false;
+    for await (const item of readRunsReverse(h.transcript, h.localId, {
+      before: opts.before,
+    })) {
+      if (runs.length >= opts.limit) {
+        hasMore = true;
+        break;
+      }
+      runs.push(item);
+    }
+    return { runs, hasMore };
+  };
+
   return {
-    list() {
+    async list() {
+      return (await deps.repo.list()).map((item) => ({
+        conversationId: item.id,
+        name: item.name,
+        createdAt: item.createdAt,
+        lastActiveAt: item.lastActiveAt,
+      }));
+    },
+    listForAdvancement() {
       return deps.repo.list();
     },
 
@@ -86,11 +118,16 @@ export function createConversationDirectory(deps: {
       );
     },
 
-    async create(): Promise<Conversation> {
+    async create() {
       // user 域新对话:meta + transcript 壳一并建——身份即刻进列表
       const created = await deps.repo.create({});
       await deps.transcript.init(created.id);
-      return created;
+      return {
+        conversationId: created.id,
+        name: created.name,
+        createdAt: created.createdAt,
+        lastActiveAt: created.lastActiveAt,
+      };
     },
 
     async ensure(id): Promise<Conversation> {
@@ -128,10 +165,16 @@ export function createConversationDirectory(deps: {
       return true;
     },
 
-    async rename(id, name): Promise<Conversation | null> {
+    async rename(id, name) {
       const h = handlesFor(id);
       try {
-        return await h.repo.rename(h.localId, name);
+        const renamed = await h.repo.rename(h.localId, name);
+        return {
+          conversationId: id,
+          name: renamed.name,
+          createdAt: renamed.createdAt,
+          lastActiveAt: renamed.lastActiveAt,
+        };
       } catch {
         // repo 对不存在的对话 throw——目录契约用 null 表达"不存在"
         return null;
@@ -156,24 +199,7 @@ export function createConversationDirectory(deps: {
       return true;
     },
 
-    async readRunsReverse(
-      id,
-      opts: { limit: number; before?: RunsPageCursor },
-    ) {
-      const h = handlesFor(id);
-      // 多读一条探测 hasMore——倒读生成器跨分片续读、读容错自愈
-      const runs: RunRecordWithRef[] = [];
-      let hasMore = false;
-      for await (const item of readRunsReverse(h.transcript, h.localId, {
-        before: opts.before,
-      })) {
-        if (runs.length >= opts.limit) {
-          hasMore = true;
-          break;
-        }
-        runs.push(item);
-      }
-      return { runs, hasMore };
-    },
+    readHistory,
+    readRunsReverse: readHistory,
   };
 }

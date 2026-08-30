@@ -50,7 +50,7 @@ import type {
   SessionSendEngage,
   SessionSendResult,
 } from "@zhixing/rpc";
-import type { RunsPage } from "@zhixing/server";
+import type { ConversationHistoryPage as RunsPage } from "@zhixing/core/conversation/application";
 import { RPC_ERROR_CODES, RpcClientError } from "@zhixing/server";
 import type { RpcConversationFacade } from "./rpc-conversation-facade.js";
 import type { RpcWorksceneFacade } from "./rpc-workscene-facade.js";

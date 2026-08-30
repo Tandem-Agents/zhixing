@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-11b2 已通过协调者独立复核，等待提交<br>
+> 当前检查点：A5-12a 已通过协调者独立复核，等待提交<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `f6532e8b`；A0～A4、Skill Catalog、Delivery、完整 Workspace Administration、完整 Trust Administration、Schedule 定义管理与手动控制已通过协调者独立复核并提交 |
+| 已接受基线 | `10f71c8b`；A0～A4、Skill Catalog、Delivery、完整 Workspace Administration、完整 Trust Administration、完整 Schedule 已通过协调者独立复核并提交 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | A5-11b2 已通过协调者独立复核，等待提交；Schedule 行为 `[x]`，A5 仍为 `[ ]` |
-| 下一责任链 | 提交 A5-11b2 后，按剩余领域依赖图选择下一条责任链；不得在本提交顺带展开 |
+| 活跃工作包 | A5-12a 已通过协调者独立复核，等待提交；Conversation 行与 A5 仍为 `[ ]` |
+| 下一责任链 | 验收 A5-12a 后，沿 Conversation 的 resume/clear/delete 或 turn admission/run 生命周期选择下一条最窄责任链；不得提前进入 Workscene/Advancement |
 | 打开的单向桥 | 无；`A5-SCHEDULE-RUNTIME-01` 已由 A5-11b2 退场，历史登记仅保留追溯用途 |
-| 已失效证据 | 无当前未恢复证据；A5-11a 初次错误映射已按迁移前生产语义纠正，并由真实 dispatcher 反例与协调者独立复核恢复 |
+| 已失效证据 | 无当前未恢复证据；A5-12a 的目录排序与跨域依赖反证已由最窄纠正和独立复核恢复 |
 | 阻塞/用户决策 | 无技术阻塞；用户已明确恢复调度 |
 
 ### A0 基线索引
@@ -1958,6 +1958,29 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 协调者复核反证与证据失效：初次完成记录遗漏 `packages/cli/src/commands/info-commands.ts` 的 `/tasks` 表面仍自行调用 `isInternal()` 过滤 `SchedulerFacade.list()`，因此“全部表面旧路归零”和 Schedule 行裁决在该残留闭合前均不成立；同时 lifecycle contract 虽接受 `immediate / drain / cancel`，初次直接测试只命中 `cancel`，尚未证明迁移前 Schedule 对三种 HostStop strategy 都使用同一耐久 pause-and-settle。该反证只失效 `/tasks` 可见性消费与三策略直接识别证据，不作废其余运行策略、Journal/Authority、Host/Server、wire、构建和 153 项已成立闭包。
 - 纠正与证据恢复：`/tasks` 删除 `isInternal` 导入和二次过滤，直接按既有顺序展示 Schedule management Query 已裁决的任务集合；直接反例让 facade 返回带 `system` 标记但已裁决可见的条目，Surface 仍展示该条目，从而可识别同责过滤回流，空态、格式、排序来源与公开行为未变。领域 lifecycle 参数化 `immediate / drain / cancel` 三种输入，逐一证明均先核对相同 frozen accepted-work exact-set，再且只再调用一次既有 `pauseAndSettle`，foreign exact-set 仍在机制效果前拒绝，未新增策略差异。纠正最窄验证为 CLI `info-commands.test.ts` 11/11、core `application.test.ts` 13/13、canonical S7 32/32 与 registry golden、三份适用 TS 文件最窄 Biome 及 `git diff --check`；S7 新增反向 mutation 拒绝 `/tasks` 或其他已登记 Surface 恢复 `isInternal`/同责 filter，并拒绝三种 strategy 分叉或跳过统一 settlement。上游产物与其余输入未变，未重复构建、package exports 或先前 153 项。上述子证据现已恢复，A5-11b2 继续处于等待协调者独立复核，Schedule 行保持 `[x]`、A5 保持 `[ ]`，未进入下一领域。
 - 协调者独立验收：从 Schedule 纯策略、唯一 runtime/lifecycle application、Anchor generation mechanism、Host 装配、Product API、Server status/auth、RPC event bridge、Local/RPC/REPL/Agent 工具及 Job Journal/Assignment 双向复核，确认定时、恢复、事件、可见性、效果和生命周期责任已形成唯一垂直边界，`SchedulerBackend`、`ServerContext.scheduler` 与表面同责判断归零；迁移前一次/周期、离线、失败禁用、重放、取消、换代、HostStop、公开 RPC/Event 和持久语义未改变。独立重取纠正失效的 CLI 11/11、core 13/13，canonical S7 进程树完整退出且 `git diff --check` 通过；其余 153 项、fresh builds、package exports 与 registry golden 的输入未变化，沿验证手册继续有效。接受 `A5-11b2-schedule-runtime-lifecycle-v1`，Schedule 行保持 `[x]`，A5 等待剩余领域。
+
+### A5-12a：归位 Conversation 持久身份、目录与历史应用责任
+
+- 派发基线：`HEAD 10f71c8b + task-doc:A5-12a-dispatch`；完整 Schedule 已独立验收并提交，派发前索引为空且工作区只有本文调度登记。
+- 唯一架构结果：Conversation Domain 唯一拥有可恢复会话身份、名称、目录排序、创建、改名、存在性与历史倒读的产品合同、校验、错误和稳定投影；`session.list/new/history/rename` 及对应进程内消费只经同一 Product API 应用入口。持久 Repository/Transcript 只实现 Conversation 需求方定义的窄 Correctness/Storage 端口，Server、CLI 与 Surface 不再拥有上述产品决定或直接读取目录机制。
+- 生产边界：从四个公开 RPC、REPL/Controller/历史尾部与 Host 组合根正向追踪全部直接消费端，再从 `ConversationDirectory`、Repository、Transcript 与全域 conversation id 路由反向核对。`session.list` 的 active/busy/observer/pending 与既有 advancement 摘要只作为只读外部投影输入，由 Conversation 应用决定最终列表形状；尚未迁移的 Manager/Advancement 只允许通过登记的最短只读端口供给，不得复制事实、回写或形成第二列表规则。场景会话的全域键与 user 列表隔离保持不变。
+- 明确不做：不迁移 `resume/send/resolve/subscribe/unsubscribe/abort/clear/delete/compact/contextBudget/usage/security/taskList*`，不改变 turn admission、Run/Authority/Assignment、窗口与摘要、恢复、删除清理、Advancement、Workscene 或 Channel；不新增能力、协议方法、持久 schema、兼容入口或通用领域框架，不勾选 Conversation 行。
+- 旧路与证据：删除 Server handler 对目录默认、校验、分页上限、改名 not-found、列表叠加和变更通知决定的所有权，只保留认证、wire decode/encode、调用、错误映射与 notification binding；删除 `ServerContext.conversationDirectory` 对这四项应用调用的服务定位旁路，Host 只组合唯一应用 contribution。直接证据必须覆盖空/非空列表、纯内存会话不入列表、active/busy/observer/pending、Advancement 摘要、创建壳、场景全域键、改名/缺失、history 默认/上限/坏游标/不存在容错/跨 shard 分页、通知与本机/RPC 等价；S7 反向拒绝 handler/Surface 恢复目录直调或同责规则。只运行受影响闭包、必要上游构建、canonical S7、package exports、最窄格式与 `git diff --check`，不跑根级全量或制品验收。
+- 完成与安全交接：只有上述四项产品责任、全部生产 binding、旧目录服务定位旁路、直接回归和结构门禁同时闭合且公开行为逐项等价，A5-12a 才完成；Conversation 行与 A5 保持 `[ ]`。预计超过四小时、发现列表投影不能在不迁移另一领域写权的情况下闭合、出现多个独立未知或需要改变协议/持久语义时，停在可构建、可运行且持久目录只有一个产品 owner 的安全检查点反馈，不得扩入 Conversation 其余生命周期或其他领域。
+- 实施基线与唯一领域应用：进场为 `HEAD 10f71c8b39f06e0c3a79f07dadc7629512c9e4 + task-doc:A5-12a-dispatch`，索引为空。新增唯一窄入口 `@zhixing/core/conversation/application`，由 `ConversationDirectoryApplicationService` 拥有目录列表、历史倒读、创建与改名四项有限 Query/Command，以及提交后 `conversation-renamed` Fact；领域合同只暴露稳定 identity、目录/历史投影、外部运行/Advancement 只读投影和需求方 Storage port，不暴露 Repository、Transcript、路径、Authority、RPC 或 Surface 类型。四项 operation exact-set、默认 history limit `20`、上限 `200`、名称与 cursor 校验、not-found 和稳定目录排序均在此唯一应用边界冻结；core 根与 conversation 宽入口均未新增转导。
+- 生产绑定与旧路退场：Anchor Host 只构造一份 Conversation 应用并将其 contribution 合入既有唯一 sealed Product API dispatcher；Repository/Transcript adapter 只实现目录记录、创建、改名和历史倒读，Manager 与 Advancement 只提供 active/busy/observer/pending 和摘要的只读投影。`session.list / session.new / session.history / session.rename` 只经 Product API descriptor，Server handler 仅保留 wire 校验、领域错误映射和改名成功后的既有 `session.renamed` 广播；无显式 id 的 `session.send` 壳创建也复用同一 create 应用决定。Executor-local binding 复用同一领域应用服务并只保留 topology/consent/wire 投影，没有第二 Product API dispatcher。`ServerContext.conversationDirectory` 已缩窄为尚未迁移的 exists/ensure/transcript/touch/clear/remove 生命周期桥，四项应用方法与 Server 业务 DTO 归零；CLI facade/controller 的历史类型改从领域窄入口消费，旧 handler/owner 目录直调与同责排序、默认、校验和列表叠加归零。
+- 行为、Correctness 与邻接边界：目录仍只列耐久记录，纯内存 runtime 不自行成为条目；先按耐久记录 `lastActiveAt` 降序确定目录次序，再以 active/busy/observer/pending 和 Advancement 摘要覆盖既有条目的展示字段而不重排，保持 user/workscene 全域 identity 隔离。创建壳、改名 trim/not-found、跨 shard history、空历史与缺记录容错、RPC code/message/data、改名通知时机和本机/远端合并行为均保持。local-only 改名继续通过稳定 staged operation identity 提交，同责产品判断由领域应用作出。`listForAdvancement/readRunsReverse` 仅作为尚未迁移 Advancement 恢复读取的显式只读短桥，共用同一 Repository/Transcript storage primitive，不取得 Conversation 写权；resume/send 其余生命周期、clear/delete、turn admission、Run/Authority/Assignment、恢复与 Advancement/Workscene/Channel 均未迁移。
+- 直接证据与验证：core Conversation 应用 1 文件 4/4，CLI Repository adapter 与 local-only Product binding 2 文件 15/15，Server 真实 session RPC/Product API 1 文件 76/76，distributed runtime golden 1 文件 3/3；覆盖四项 exact-set、目录叠加与排序、create/rename/history、改名 Fact、local-only 同应用消费、场景 identity、wire/error/notification 和缺 contribution fail closed。按依赖顺序 fresh build `@zhixing/core`、`@zhixing/server` 与 `pnpm cli:build` 均通过，CLI typecheck 通过；canonical S7 coverage/mutation 32/32 与 registry golden、fresh `pnpm runtime:package-exports`、本包 15 文件最窄 Biome 均通过。验证没有运行根级回归或制品验收。
+- 结构失效与交接：S7/package-export 及反向 mutation 冻结唯一 Conversation application/export/exact-set、Host contribution、Server 四 handler 的 Product API 消费、Server directory 四项应用方法退场、local-only 同应用消费，以及 core 根/宽入口零泄漏；能拒绝 handler/Surface 恢复目录直调、第二排序/校验、owner 直接 create/transcript、第二 contribution 或错误 barrel 回流。以后若四项领域合同、Storage/runtime/Advancement 只读 port、Host composition、Server/local binding、RPC wire/error/notification、Repository/Transcript adapter、S7 或 package export 任一变化，本记录失效并只重验上述闭包。A5-12a 当前完成并等待协调者独立复核；Conversation 行与 A5 继续 `[ ]`，下一检查点由协调者从未迁移的 Conversation 生命周期中另行裁决。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+#### A5-12a 协调复核纠正：耐久目录顺序与跨域依赖
+
+- 公开行为反证：迁移前 `ConversationRepository.list()` 按耐久 meta 的 `lastActiveAt` 排序，Server 只把活跃 runtime 的 `lastActiveAt` 覆盖进返回字段而不重新排序；当前应用在覆盖后再次排序，使一个耐久上较旧但本轮活跃的对话提前，属于未授权列表顺序变化。现有应用测试把该变化写成新预期，不能作为等价证据。
+- 架构反证：`packages/core/src/conversation/application.ts` 直接导入 `../advancement/types.js` 的 `AdvancementReviewDecision` 与 `RubricContractDraftSnapshot`。Conversation 可以拥有自己所需的只读投影端口，但不得依赖 Advancement 内部类型；AE-001 要求跨领域调用显式且同步依赖无环，A0 固定的是 `Conversation + Skill → Advancement`，不是反向依赖。
+- 最窄纠正边界：Conversation 应用应先按耐久记录时间保持迁移前目录顺序，再叠加 runtime/Advancement 只读字段；增加“耐久顺序与 runtime 时间冲突”反例。把 Advancement 投影改为 Conversation 自有的稳定只读结构，由组合根适配，不导入 Advancement 源码类型；S7 增加可识别的反向依赖与顺序 mutation。不得改变四项 Product API、RPC/wire/error/notification、本机合并排序、持久 schema或扩入其他 Conversation 生命周期。只重验 core 应用、Server list 真实 binding、受影响类型/构建、S7、package exports、Biome 与 diff；其余已通过证据输入未变时不得重复。
+- 纠正实现与责任边界：`queryList()` 现在先复制并按耐久 `ConversationDirectoryRecord.lastActiveAt` 排序，再逐项叠加 runtime/Advancement 只读字段；叠加后的活跃时间仍按迁移前值进入 payload，但不再参与目录重排。直接反例锁定“耐久 newer 仍在前，即使 older 的 runtime 时间更新”；local-only 的 `mergeConversationDirectoryViews()` 未改，跨设备最终排序语义保持。Conversation 自己定义查询结果需要的 readonly rubric draft/review 投影，`application.ts` 对 Advancement 源码零导入；Anchor 组合根继续把 Advancement 当前快照逐字段映射到该需求方结构，没有复制其写权、规则或状态机。
+- 纠正证据与失效恢复：core Conversation 应用 1 文件 4/4，Server 真实 `session.list` binding 1 文件 3/3（同文件其余 73 项未运行）；fresh core/server build、CLI typecheck 与 `pnpm cli:build`、canonical S7 32/32 与 registry golden、fresh package exports、两份适用 TS 文件最窄 Biome 通过。S7 新增反向 mutation，Conversation 应用重新导入 `../advancement/types.js` 必然失败，并继续冻结耐久排序入口；core 反例直接识别 overlay 后重排回流。其余已成立证据输入未变，按要求未重复。上述两项失效证据现已恢复，A5-12a 等待协调者独立复核；Conversation 行与 A5 继续 `[ ]`，未进入其他生命周期，也未执行任何 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：从 Conversation 应用合同、耐久 Storage/Transcript adapter、runtime/Advancement 只读投影、Host Product API contribution、四个 Server RPC、local-only 同应用消费、CLI facade/controller 与 S7/package export 双向复核，确认目录事实、四项产品决定和列表投影只有一个 Conversation owner，旧目录服务定位的同责方法归零，公开 wire/error/notification、持久 schema、Anchor/Executor-local 行为均未漂移。独立运行 core 应用 4/4、CLI adapter/local binding 15/15、Server session/golden 79/79；纠正后再重取 core 4/4、Server list 3/3 与 canonical S7 32/32 + registry golden，`git diff --check` 通过。耐久顺序反例与 Conversation → Advancement 反向依赖门禁均成立，接受 `A5-12a-conversation-directory-application-v1`；Conversation 行和 A5 继续 `[ ]`。
 
 ## 十、用户提示词
 

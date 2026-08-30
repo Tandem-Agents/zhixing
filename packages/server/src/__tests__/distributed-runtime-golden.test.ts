@@ -45,6 +45,13 @@ import { toJsonRpcError, type HandlerContext } from "../rpc/handlers.js";
 import type { RuntimeFactory, SessionRuntime } from "@zhixing/owner-kernel";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
 import type { ConversationDirectory } from "../runtime/conversation-directory.js";
+import {
+  CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+  ConversationDirectoryApplicationService,
+  createConversationDirectoryProductApiContribution,
+  type ConversationDirectoryStorage,
+} from "@zhixing/core/conversation/application";
+import { ProductApiDispatcher } from "@zhixing/core/product-api";
 
 const FIXED_NOW = new Date("2026-07-11T12:00:00.000Z");
 
@@ -180,6 +187,7 @@ async function captureControlAdmissionShadow() {
     token: "golden-token",
     conversations,
     conversationDirectory: directory,
+    productApi: createGoldenConversationProductApi(directory),
   });
   const context = {
     connection: {
@@ -285,7 +293,22 @@ async function captureControlAdmissionShadow() {
   }
 }
 
-function createGoldenConversationDirectory(): ConversationDirectory {
+type GoldenConversationDirectory = ConversationDirectory & ConversationDirectoryStorage;
+
+function createGoldenConversationProductApi(
+  directory: ConversationDirectoryStorage,
+): ProductApiDispatcher {
+  return new ProductApiDispatcher(
+    CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+    [
+      createConversationDirectoryProductApiContribution(
+        new ConversationDirectoryApplicationService({ storage: directory }),
+      ),
+    ],
+  );
+}
+
+function createGoldenConversationDirectory(): GoldenConversationDirectory {
   const conversations = new Map<string, { id: string; name: string }>();
   let sequence = 0;
   const record = (id: string) => {
@@ -301,7 +324,15 @@ function createGoldenConversationDirectory(): ConversationDirectory {
   };
   return {
     async list() {
-      return [...conversations].map(([id]) => record(id));
+      return [...conversations].map(([id]) => {
+        const item = record(id);
+        return {
+          conversationId: item.id,
+          name: item.name,
+          createdAt: item.createdAt,
+          lastActiveAt: item.lastActiveAt,
+        };
+      });
     },
     async exists(id) {
       return conversations.has(id);
@@ -309,7 +340,13 @@ function createGoldenConversationDirectory(): ConversationDirectory {
     async create() {
       const id = `conversation-golden-${sequence++}`;
       conversations.set(id, { id, name: id });
-      return record(id);
+      const item = record(id);
+      return {
+        conversationId: item.id,
+        name: item.name,
+        createdAt: item.createdAt,
+        lastActiveAt: item.lastActiveAt,
+      };
     },
     async ensure(id) {
       if (!conversations.has(id)) conversations.set(id, { id, name: id });
@@ -318,7 +355,13 @@ function createGoldenConversationDirectory(): ConversationDirectory {
     async rename(id, name) {
       if (!conversations.has(id)) return null;
       conversations.set(id, { id, name });
-      return record(id);
+      const item = record(id);
+      return {
+        conversationId: item.id,
+        name: item.name,
+        createdAt: item.createdAt,
+        lastActiveAt: item.lastActiveAt,
+      };
     },
     async touch(id) {
       return conversations.has(id) ? record(id) : null;
@@ -329,7 +372,7 @@ function createGoldenConversationDirectory(): ConversationDirectory {
     async remove(id) {
       return conversations.delete(id);
     },
-    async readRunsReverse() {
+    async readHistory() {
       return { runs: [], hasMore: false };
     },
   };

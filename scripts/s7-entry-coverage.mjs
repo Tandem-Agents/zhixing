@@ -3349,6 +3349,12 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   };
 
   const application = required("packages/core/src/skills/catalog-application.ts");
+  const conversationApplication = required(
+    "packages/core/src/conversation/application.ts",
+  );
+  const conversationIndex = required(
+    "packages/core/src/conversation/index.ts",
+  );
   const scheduleApplication = required(
     "packages/core/src/scheduler/application.ts",
   );
@@ -3414,6 +3420,21 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const deliveryHandler = required("packages/server/src/rpc/methods/server.ts");
   const context = required("packages/server/src/context.ts");
   const composition = required("packages/cli/src/serve/command.ts");
+  const conversationStorage = required(
+    "packages/cli/src/serve/conversation-directory.ts",
+  );
+  const localConversationApplication = required(
+    "packages/cli/src/serve/local-conversation-directory-application.ts",
+  );
+  const localConversationRpc = required(
+    "packages/cli/src/serve/local-conversation-rpc.ts",
+  );
+  const serverConversationDirectory = required(
+    "packages/server/src/runtime/conversation-directory.ts",
+  );
+  const sessionHandler = required(
+    "packages/server/src/rpc/methods/session.ts",
+  );
   const executionSchedule = required(
     "packages/cli/src/serve/execution-scheduler-facade.ts",
   );
@@ -3747,6 +3768,73 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     skillIndex.includes("ProductApiDispatcher")
   ) {
     failures.push("Product API catalog must have one narrow non-root core subpath");
+  }
+  const conversationApplicationExport =
+    coreManifest?.exports?.["./conversation/application"];
+  const duplicateConversationApplicationExports = Object.entries(
+    coreManifest?.exports ?? {},
+  ).filter(([subpath, conditions]) =>
+    subpath !== "./conversation/application" &&
+    conditions &&
+    typeof conditions === "object" &&
+    (conditions.types === conversationApplicationExport?.types ||
+      conditions.import === conversationApplicationExport?.import)
+  );
+  if (
+    conversationApplicationExport?.types !==
+      "./dist/conversation/application.d.ts" ||
+    conversationApplicationExport?.import !==
+      "./dist/conversation/application.js" ||
+    duplicateConversationApplicationExports.length > 0 ||
+    coreBuild.split('"src/conversation/application.ts"').length - 1 !== 1 ||
+    coreIndex.includes("conversation/application") ||
+    conversationIndex.includes("./application.js") ||
+    !conversationApplication.includes(
+      "class ConversationDirectoryApplicationService",
+    ) ||
+    !conversationApplication.includes(
+      "CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET",
+    ) ||
+    !conversationApplication.includes(
+      "createConversationDirectoryProductApiContribution",
+    ) ||
+    !conversationApplication.includes("HISTORY_DEFAULT_LIMIT = 20") ||
+    !conversationApplication.includes("HISTORY_MAX_LIMIT = 200") ||
+    conversationApplication.includes('../advancement/') ||
+    !conversationApplication.includes("orderDurableConversationRecords(") ||
+    !sessionHandler.includes(
+      'from "@zhixing/core/conversation/application"',
+    ) ||
+    !sessionHandler.includes("CONVERSATION_LIST_QUERY") ||
+    !sessionHandler.includes("CONVERSATION_HISTORY_QUERY") ||
+    !sessionHandler.includes("CONVERSATION_CREATE_COMMAND") ||
+    !sessionHandler.includes("CONVERSATION_RENAME_COMMAND") ||
+    /requireDirectory\(ctx\.server\)\.(?:list|create|rename|readRunsReverse|readHistory)/u.test(
+      sessionHandler,
+    ) ||
+    /\b(?:list|create|rename|readRunsReverse|readHistory)\s*\(/u.test(
+      serverConversationDirectory,
+    ) ||
+    !conversationStorage.includes("implements") &&
+      !conversationStorage.includes("ConversationDirectoryStorage") ||
+    !composition.includes("new ConversationDirectoryApplicationService({") ||
+    composition.split("new ConversationDirectoryApplicationService({").length - 1 !== 1 ||
+    !composition.includes("createConversationDirectoryProductApiContribution(") ||
+    !composition.includes("...CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET.operations") ||
+    !localConversationApplication.includes(
+      "new ConversationDirectoryApplicationService({",
+    ) ||
+    !localConversationRpc.includes("this.#application.queryList()") ||
+    !localConversationRpc.includes("this.#application.queryHistory({") ||
+    !localConversationRpc.includes("this.#application.create()") ||
+    !localConversationRpc.includes("this.#application.rename({") ||
+    /input\.owner\.(?:createConversation|sessionState\.readTranscriptTail)\(/u.test(
+      localConversationRpc,
+    )
+  ) {
+    failures.push(
+      "Conversation directory management lacks one domain application and Product API owner",
+    );
   }
   const deliveryApplicationExport = coreManifest?.exports?.["./delivery/application"];
   const duplicateDeliveryApplicationExports = Object.entries(coreManifest?.exports ?? {})

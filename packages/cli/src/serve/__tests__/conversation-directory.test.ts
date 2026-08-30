@@ -58,7 +58,7 @@ describe("conversation directory(持久层实现)", () => {
     const renamed = await directory.rename(created.id, "新名");
     expect(renamed?.name).toBe("新名");
     const list = await directory.list();
-    expect(list.find((c) => c.id === created.id)?.name).toBe("新名");
+    expect(list.find((c) => c.conversationId === created.id)?.name).toBe("新名");
   });
 
   it("remove:不存在返回 false;存在删除后盘上消失", async () => {
@@ -74,12 +74,12 @@ describe("conversation directory(持久层实现)", () => {
 
   it("create:meta + transcript 壳一并建,身份即刻进列表", async () => {
     const created = await directory.create();
-    expect(created.name).toBe(created.id);
-    expect(await directory.exists(created.id)).toBe(true);
+    expect(created.name).toBe(created.conversationId);
+    expect(await directory.exists(created.conversationId)).toBe(true);
     const list = await directory.list();
-    expect(list.some((c) => c.id === created.id)).toBe(true);
+    expect(list.some((c) => c.conversationId === created.conversationId)).toBe(true);
     // transcript 壳已建——倒读空页而非异常
-    expect(await directory.readRunsReverse(created.id, { limit: 5 })).toEqual({
+    expect(await directory.readHistory(created.conversationId, { limit: 5 })).toEqual({
       runs: [],
       hasMore: false,
     });
@@ -92,15 +92,15 @@ describe("conversation directory(持久层实现)", () => {
     expect(ensured.id).toBe(id);
     expect(ensured.name).toBe(id);
     expect(await directory.exists(id)).toBe(true);
-    expect((await directory.list()).some((c) => c.id === id)).toBe(true);
-    expect(await directory.readRunsReverse(id, { limit: 5 })).toEqual({
+    expect((await directory.list()).some((c) => c.conversationId === id)).toBe(true);
+    expect(await directory.readHistory(id, { limit: 5 })).toEqual({
       runs: [],
       hasMore: false,
     });
 
     const second = await directory.ensure(id);
     expect(second).toEqual(ensured);
-    expect((await directory.list()).filter((c) => c.id === id)).toHaveLength(1);
+    expect((await directory.list()).filter((c) => c.conversationId === id)).toHaveLength(1);
   });
 
   it("touch:不存在返回 null;存在返回最新 meta", async () => {
@@ -128,7 +128,7 @@ describe("conversation directory(持久层实现)", () => {
     expect(await dir.clear(created.id)).toBe(true);
     expect(clearedCache).toEqual([created.id]);
     // 清空事件之后倒读不再见旧内容
-    expect(await dir.readRunsReverse(created.id, { limit: 5 })).toEqual({
+    expect(await dir.readHistory(created.id, { limit: 5 })).toEqual({
       runs: [],
       hasMore: false,
     });
@@ -162,25 +162,25 @@ describe("conversation directory(持久层实现)", () => {
 
     expect((await sceneRepo.get(created.id))?.taskListState).toBeUndefined();
     expect(clearedCache).toEqual([globalId]);
-    expect(await dir.readRunsReverse(globalId, { limit: 5 })).toEqual({
+    expect(await dir.readHistory(globalId, { limit: 5 })).toEqual({
       runs: [],
       hasMore: false,
     });
   });
 
-  it("readRunsReverse:倒序分页、hasMore 探测、游标续读;未知对话空页", async () => {
+  it("readHistory:倒序分页、hasMore 探测、游标续读;未知对话空页", async () => {
     for (const t of ["一", "二", "三"]) {
       await transcript.appendRunRecord("c3", record(t));
     }
 
-    const page1 = await directory.readRunsReverse("c3", { limit: 2 });
+    const page1 = await directory.readHistory("c3", { limit: 2 });
     expect(page1.runs).toHaveLength(2);
     expect(extractFirstText(page1.runs[0]!.record.messages[0]!)).toBe("三");
     expect(extractFirstText(page1.runs[1]!.record.messages[0]!)).toBe("二");
     expect(page1.hasMore).toBe(true);
 
     const last = page1.runs[1]!;
-    const page2 = await directory.readRunsReverse("c3", {
+    const page2 = await directory.readHistory("c3", {
       limit: 2,
       before: { shardId: last.shardId, runIndex: last.record.runIndex },
     });
@@ -188,7 +188,7 @@ describe("conversation directory(持久层实现)", () => {
     expect(extractFirstText(page2.runs[0]!.record.messages[0]!)).toBe("一");
     expect(page2.hasMore).toBe(false);
 
-    expect(await directory.readRunsReverse("nope", { limit: 5 })).toEqual({
+    expect(await directory.readHistory("nope", { limit: 5 })).toEqual({
       runs: [],
       hasMore: false,
     });

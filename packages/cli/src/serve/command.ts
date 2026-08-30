@@ -43,6 +43,12 @@ import {
   SkillCatalogApplicationService,
 } from "@zhixing/core/skills/catalog";
 import {
+  CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+  ConversationDirectoryApplicationService,
+  createConversationDirectoryProductApiContribution,
+  type ConversationAdvancementProjection,
+} from "@zhixing/core/conversation/application";
+import {
   createScheduleManagementProductApiContribution,
   createScheduleRuntimeProductApiContribution,
   SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET,
@@ -1235,7 +1241,13 @@ async function runServerProcess(
     ctx.advancement && ctx.conversations
       ? createAdvancementRecoveryMaintenance({
           advancement: ctx.advancement,
-          directory: conversationDirectory,
+          directory: {
+            list: () => conversationDirectory.listForAdvancement(),
+            exists: (conversationId) =>
+              conversationDirectory.exists(conversationId),
+            readRunsReverse: (conversationId, options) =>
+              conversationDirectory.readRunsReverse(conversationId, options),
+          },
           proxyTurns: createAdvancementProxyTurnPort({
             manager: ctx.conversations,
             sessionBroadcast: () => sessionBroadcastRef.current,
@@ -1906,9 +1918,67 @@ async function runServerProcess(
         ctx.deliveryStack.resolutionApplication,
       )
     : undefined;
+  const conversationApplication = new ConversationDirectoryApplicationService({
+    storage: conversationDirectory,
+    runtime: {
+      read: (conversationId) => {
+        const active = ctx.conversations?.getSession(conversationId);
+        if (!ctx.conversations) return undefined;
+        return {
+          ...(active ? { lastActiveAt: active.lastActiveAt } : {}),
+          active: active !== undefined,
+          busy: active?.busy ?? false,
+          observerCount: ctx.conversations.getObserverCount(conversationId),
+          pendingCount: ctx.conversations.pendingCount(conversationId),
+        };
+      },
+    },
+    advancement: ctx.advancement
+      ? {
+          read: async (conversationId) => {
+            const session = await ctx.advancement!.loadActiveSession(
+              conversationId,
+            );
+            if (
+              !session ||
+              (session.status !== "awaiting-rubric-confirmation" &&
+                session.status !== "active")
+            ) {
+              return undefined;
+            }
+            const lastReview = session.runs[session.runs.length - 1];
+            return {
+              advancementSessionId: session.id,
+              status: session.status,
+              rubricTitle:
+                session.confirmedRubric?.title ??
+                session.pendingRubricDraft?.title,
+              rubricDraftId: session.pendingRubricDraft?.draftId,
+              ...(session.status === "awaiting-rubric-confirmation" &&
+              session.pendingRubricDraft
+                ? { pendingRubricDraft: session.pendingRubricDraft }
+                : {}),
+              outstandingProxyMessageId: session.outstandingProxyMessageId,
+              ...(lastReview
+                ? {
+                    lastReview: {
+                      id: lastReview.id,
+                      runIndex: lastReview.runIndex,
+                      round: session.runs.length,
+                      decision: lastReview.decision,
+                      reviewedAt: lastReview.reviewedAt,
+                    },
+                  }
+                : {}),
+            } satisfies ConversationAdvancementProjection;
+          },
+        }
+      : undefined,
+  });
   const productApi = new ProductApiDispatcher(
     defineProductApiExactSet({
       operations: [
+        ...CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET.operations,
         ...SKILL_CATALOG_PRODUCT_API_EXACT_SET.operations,
         ...TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET.operations,
         ...SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET.operations,
@@ -1918,6 +1988,7 @@ async function runServerProcess(
           : []),
       ],
       factEvents: [
+        ...CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET.factEvents,
         ...SKILL_CATALOG_PRODUCT_API_EXACT_SET.factEvents,
         ...TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET.factEvents,
         ...SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET.factEvents,
@@ -1928,6 +1999,9 @@ async function runServerProcess(
       ],
     }),
     [
+      createConversationDirectoryProductApiContribution(
+        conversationApplication,
+      ),
       createSkillCatalogProductApiContribution(new SkillCatalogApplicationService({
         globalState: () => authorityRuntime.globalState!,
         anchorEpoch: () => authorityRuntime.anchorEpoch,

@@ -38,6 +38,15 @@ import {
   userTurnInputFromText,
 } from "@zhixing/core";
 import type { ExplicitEnvironmentSelection } from "@zhixing/core/contracts";
+import {
+  CONVERSATION_CREATE_COMMAND,
+  CONVERSATION_HISTORY_QUERY,
+  CONVERSATION_LIST_QUERY,
+  CONVERSATION_RENAME_COMMAND,
+  ConversationApplicationError,
+  type ConversationDirectoryEntry,
+} from "@zhixing/core/conversation/application";
+import type { ProductApiOperationDescriptor } from "@zhixing/core/product-api";
 import { validateExplicitEnvironmentSelection } from "@zhixing/core/protocol";
 import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
@@ -1396,14 +1405,21 @@ function createConversationCallback(
   server: ServerContext,
   preallocatedConversationId?: string,
 ): (() => Promise<string>) | undefined {
-  const directory = server.conversationDirectory;
   if (preallocatedConversationId) {
     return async () => {
-      await directory?.ensure(preallocatedConversationId);
+      await server.conversationDirectory?.ensure(preallocatedConversationId);
       return preallocatedConversationId;
     };
   }
-  return directory ? async () => (await directory.create()).id : undefined;
+  if (!server.productApi?.supports(CONVERSATION_CREATE_COMMAND)) {
+    return undefined;
+  }
+  return async () =>
+    (
+      await server.productApi!.command(CONVERSATION_CREATE_COMMAND, {
+        kind: "create",
+      })
+    ).result.conversationId;
 }
 
 async function ensureConversationShell(
@@ -1855,26 +1871,16 @@ export function buildSessionListMethod(): MethodEntry {
     name: "session.list",
     requiresAuth: true,
     async handler(_params, ctx): Promise<SessionListResult> {
-      const manager = requireConversations(ctx.server);
-      const directory = requireDirectory(ctx.server);
-      const conversations = await directory.list();
+      const productApi = requireConversationProductApi(
+        ctx.server,
+        CONVERSATION_LIST_QUERY,
+      );
+      const view = await productApi.query(CONVERSATION_LIST_QUERY, {
+        kind: "list",
+      });
       return {
-        conversations: await Promise.all(
-          conversations.map(async (c): Promise<SessionConversationEntry> => {
-            const active = manager.getSession(c.id);
-            return {
-              conversationId: c.id,
-              name: c.name,
-              createdAt: c.createdAt,
-              lastActiveAt: active?.lastActiveAt ?? c.lastActiveAt,
-              active: !!active,
-              busy: active?.busy ?? false,
-              observerCount: manager.getObserverCount(c.id),
-              pendingCount: manager.pendingCount(c.id),
-              advancement: await loadAdvancementState(ctx.server, c.id),
-            };
-          }),
-        ),
+        conversations: view.conversations.map(projectConversationEntry),
+        ...(view.availability ? { availability: view.availability } : {}),
       };
     },
   };
@@ -1930,9 +1936,6 @@ interface SessionHistoryParams {
   before?: { shardId: string; runIndex: number };
 }
 
-const HISTORY_DEFAULT_LIMIT = 20;
-const HISTORY_MAX_LIMIT = 200;
-
 /**
  * 倒读落盘事实流(新→旧分页),不要求会话活跃——历史是持久层投影,
  * 注意力窗口(LLM 视图)不经此暴露。
@@ -1949,14 +1952,8 @@ export function buildSessionHistoryMethod(): MethodEntry {
           "session.history requires 'conversationId'",
         );
       }
-      // limit / before 严格校验——坏 limit(字符串 / 非正数)会让分页判定
-      // 失真甚至退化为无界读取;接入面统一后 RPC 契约必须 fail-fast。
       if (params.limit !== undefined) {
-        if (
-          typeof params.limit !== "number" ||
-          !Number.isInteger(params.limit) ||
-          params.limit < 1
-        ) {
+        if (typeof params.limit !== "number") {
           throw RpcErrors.invalidParams(
             "session.history 'limit' must be a positive integer",
           );
@@ -1974,14 +1971,20 @@ export function buildSessionHistoryMethod(): MethodEntry {
           );
         }
       }
-      const directory = requireDirectory(ctx.server);
-      return directory.readRunsReverse(id, {
-        limit: Math.min(
-          params.limit ?? HISTORY_DEFAULT_LIMIT,
-          HISTORY_MAX_LIMIT,
-        ),
-        before: params.before,
-      });
+      const productApi = requireConversationProductApi(
+        ctx.server,
+        CONVERSATION_HISTORY_QUERY,
+      );
+      try {
+        return await productApi.query(CONVERSATION_HISTORY_QUERY, {
+          kind: "history",
+          conversationId: id,
+          ...(params.limit !== undefined ? { limit: params.limit } : {}),
+          ...(params.before ? { before: params.before } : {}),
+        });
+      } catch (error) {
+        throw mapConversationApplicationError(error, "history", id);
+      }
     },
   };
 }
@@ -2004,34 +2007,45 @@ export function buildSessionRenameMethod(): MethodEntry {
           "session.rename requires 'conversationId'",
         );
       }
-      if (typeof params.name !== "string" || params.name.trim().length === 0) {
+      if (typeof params.name !== "string") {
         throw RpcErrors.invalidParams(
           "session.rename requires non-empty 'name'",
         );
       }
-      const directory = requireDirectory(ctx.server);
-      const renamed = await directory.rename(
-        params.conversationId,
-        params.name.trim(),
+      const productApi = requireConversationProductApi(
+        ctx.server,
+        CONVERSATION_RENAME_COMMAND,
       );
-      if (!renamed) {
-        throw RpcErrors.notFound(`Session not found: ${params.conversationId}`);
+      let dispatch;
+      try {
+        dispatch = await productApi.command(CONVERSATION_RENAME_COMMAND, {
+          kind: "rename",
+          conversationId: params.conversationId,
+          name: params.name,
+        });
+      } catch (error) {
+        throw mapConversationApplicationError(
+          error,
+          "rename",
+          params.conversationId,
+        );
       }
+      const renamed = dispatch.result;
       // 会话级变更组播——observer 名册在 conversation 身份层,因此已落盘但
       // 未激活 runtime 的当前对话也能收到 run 外变更。
       ctx.server.sessionBroadcast?.(
         params.conversationId,
         SESSION_NOTIFICATIONS.changed,
         {
-          conversationId: params.conversationId,
+          conversationId: renamed.fact.conversationId,
           change: "renamed",
-          name: renamed.name,
+          name: renamed.fact.name,
         } satisfies SessionChangedPayload,
       );
       // 返回入参全域键——目录契约返回库内身份(场景对话是 localId),
       // 全域键(ws: 前缀)由 RPC 层保持,断键即断静态归属路由
       return {
-        conversationId: params.conversationId,
+        conversationId: renamed.conversationId,
         name: renamed.name,
       } satisfies SessionRenameResult;
     },
@@ -2813,9 +2827,14 @@ export function buildSessionNewMethod(): MethodEntry {
     name: "session.new",
     requiresAuth: true,
     async handler(_params, ctx): Promise<SessionNewResult> {
-      const directory = requireDirectory(ctx.server);
-      const created = await directory.create();
-      return { conversationId: created.id, name: created.name };
+      const productApi = requireConversationProductApi(
+        ctx.server,
+        CONVERSATION_CREATE_COMMAND,
+      );
+      const created = await productApi.command(CONVERSATION_CREATE_COMMAND, {
+        kind: "create",
+      });
+      return created.result;
     },
   };
 }
@@ -3129,4 +3148,57 @@ function requireDirectory(server: ServerContext): ConversationDirectory {
     );
   }
   return server.conversationDirectory;
+}
+
+function requireConversationProductApi(
+  server: ServerContext,
+  descriptor: ProductApiOperationDescriptor,
+): NonNullable<ServerContext["productApi"]> {
+  if (!server.productApi?.supports(descriptor)) {
+    throw new RpcAppError(
+      RPC_ERROR_CODES.INTERNAL_ERROR,
+      "ConversationDirectory not configured on server",
+    );
+  }
+  return server.productApi;
+}
+
+function projectConversationEntry(
+  entry: ConversationDirectoryEntry,
+): SessionConversationEntry {
+  return {
+    conversationId: entry.conversationId,
+    name: entry.name,
+    createdAt: entry.createdAt,
+    lastActiveAt: entry.lastActiveAt,
+    active: entry.active,
+    busy: entry.busy,
+    observerCount: entry.observerCount,
+    pendingCount: entry.pendingCount,
+    ...(entry.advancement ? { advancement: entry.advancement } : {}),
+  };
+}
+
+function mapConversationApplicationError(
+  error: unknown,
+  operation: "history" | "rename",
+  conversationId: string,
+): unknown {
+  if (!(error instanceof ConversationApplicationError)) return error;
+  if (error.code === "not-found") {
+    return RpcErrors.notFound(`Session not found: ${conversationId}`);
+  }
+  if (operation === "rename") {
+    return RpcErrors.invalidParams(
+      "session.rename requires non-empty 'name'",
+    );
+  }
+  if (error.message.includes("cursor")) {
+    return RpcErrors.invalidParams(
+      "session.history 'before' must be { shardId: string, runIndex: number }",
+    );
+  }
+  return RpcErrors.invalidParams(
+    "session.history 'limit' must be a positive integer",
+  );
 }

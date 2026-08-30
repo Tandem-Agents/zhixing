@@ -7,6 +7,12 @@ import {
   type TaskListState,
   type UserTurnInput,
 } from "@zhixing/core";
+import {
+  ConversationApplicationError,
+  mergeConversationDirectoryViews,
+  type ConversationDirectoryApplication,
+  type ConversationDirectoryEntry,
+} from "@zhixing/core/conversation/application";
 import type { AuthorityCallContext } from "@zhixing/core/contracts";
 import { canonicalize, isProtocolIdentifier } from "@zhixing/core/protocol";
 import type {
@@ -30,6 +36,7 @@ import {
   isCurrentAnchorRelayMethod,
   type FirstPartyIngressConnection,
 } from "./first-party-conversation-mesh.js";
+import { createLocalConversationDirectoryApplication } from "./local-conversation-directory-application.js";
 
 export const LOCAL_CONVERSATION_RPC_METHODS = Object.freeze([
   "session.abort",
@@ -60,12 +67,6 @@ export const LOCAL_CONVERSATION_RPC_METHODS = Object.freeze([
 
 const LOCAL_METHODS = new Set<string>(LOCAL_CONVERSATION_RPC_METHODS);
 
-const LOCAL_ONLY_CAPABILITIES = Object.freeze([
-  "排程暂不可用",
-  "旧设备上的对话暂不可修改",
-  "任务推进确认将在重新连接后处理",
-]);
-
 /** executor-only 第一方入口：只覆盖已冻结的 session 方法，不接管其它 RPC。 */
 export class LocalConversationRpcRouter
   implements FirstPartyConversationRpcRouter
@@ -73,6 +74,7 @@ export class LocalConversationRpcRouter
   readonly #observers = new Map<string, Map<number, FirstPartyConnection>>();
   readonly #connections = new Map<number, () => void>();
   readonly #remote = new Map<string, FirstPartyConversationMeshClient>();
+  readonly #application: ConversationDirectoryApplication;
 
   constructor(
     private readonly input: {
@@ -80,7 +82,13 @@ export class LocalConversationRpcRouter
       readonly owner: LocalConversationOwnerPort;
       readonly remoteFor: (deviceId: string) => FirstPartyConversationMeshClient;
     },
-  ) {}
+  ) {
+    this.#application = createLocalConversationDirectoryApplication({
+      owner: input.owner,
+      observerCount: (conversationId) =>
+        this.#observers.get(conversationId)?.size ?? 0,
+    });
+  }
 
   async dispatch(input: {
     readonly method: string;
@@ -194,20 +202,30 @@ export class LocalConversationRpcRouter
       }
       ids.add(route.conversationId);
     }
-    const conversations = [...local.conversations];
+    const remoteEntries: ConversationDirectoryEntry[] = [];
     for (const [deviceId, ids] of byDevice) {
       const remote = await this.#remoteFor(deviceId).dispatch(
         "session.list",
         {},
         connection,
       ) as SessionListResult;
-      conversations.push(...remote.conversations.filter((item) => ids.has(item.conversationId)));
+      remoteEntries.push(
+        ...remote.conversations
+          .filter((item) => ids.has(item.conversationId))
+          .map(projectWireConversationEntry),
+      );
     }
-    conversations.sort((left, right) =>
-      right.lastActiveAt.localeCompare(left.lastActiveAt, "en-US") ||
-      left.conversationId.localeCompare(right.conversationId, "en-US")
+    const merged = mergeConversationDirectoryViews(
+      {
+        conversations: local.conversations.map(projectWireConversationEntry),
+        ...(local.availability ? { availability: local.availability } : {}),
+      },
+      remoteEntries,
     );
-    return { ...local, conversations };
+    return {
+      conversations: merged.conversations.map(projectDomainConversationEntry),
+      ...(merged.availability ? { availability: merged.availability } : {}),
+    };
   }
 
   async #listAllConfirmations(
@@ -267,11 +285,7 @@ export class LocalConversationRpcRouter
         return this.#list();
       case "session.new": {
         requireLocalConsent(params);
-        const conversationId = await this.input.owner.createConversation();
-        return {
-          conversationId,
-          name: "本机对话",
-        } satisfies SessionNewResult;
+        return (await this.#application.create()) satisfies SessionNewResult;
       }
       case "session.resume": {
         requireLocalConsent(params);
@@ -326,18 +340,27 @@ export class LocalConversationRpcRouter
       case "session.rename": {
         requireLocalConsent(params);
         const conversationId = this.#conversationId(params, method);
-        const name = nonEmptyText(params.name, "对话名称");
-        await this.#mutate(
-          conversationId,
-          stableRequest("rename", { conversationId, name }),
-          { kind: "session-meta", patch: { name } },
-        );
-        this.#notify(conversationId, "session.changed", {
-          conversationId,
-          change: "renamed",
-          name,
-        });
-        return { conversationId, name };
+        if (typeof params.name !== "string") {
+          throw RpcErrors.invalidParams("对话名称不能为空。");
+        }
+        try {
+          const renamed = await this.#application.rename({
+            kind: "rename",
+            conversationId,
+            name: params.name,
+          });
+          this.#notify(conversationId, "session.changed", {
+            conversationId,
+            change: "renamed",
+            name: renamed.fact.name,
+          });
+          return {
+            conversationId: renamed.conversationId,
+            name: renamed.name,
+          };
+        } catch (error) {
+          throw mapLocalConversationApplicationError(error, "rename");
+        }
       }
       case "session.clear": {
         requireLocalConsent(params);
@@ -403,51 +426,29 @@ export class LocalConversationRpcRouter
   }
 
   async #list(): Promise<SessionListResult> {
-    const conversations: SessionConversationEntry[] = [];
-    for (const conversationId of await this.input.owner.listConversations()) {
-      const meta = await this.input.owner.sessionState.readSessionMeta(
-        conversationId,
-        context(`list:${conversationId}`),
-      );
-      conversations.push({
-        conversationId,
-        name: meta.name ?? "本机对话",
-        createdAt: meta.lastActiveAt,
-        lastActiveAt: meta.lastActiveAt,
-        active: false,
-        busy: false,
-        observerCount: this.#observers.get(conversationId)?.size ?? 0,
-        pendingCount: 0,
-      });
-    }
-    conversations.sort((left, right) =>
-      right.lastActiveAt.localeCompare(left.lastActiveAt, "en-US")
-    );
+    const view = await this.#application.queryList();
     return {
-      conversations,
-      availability: {
-        mode: "local-only",
-        unavailableCapabilities: LOCAL_ONLY_CAPABILITIES,
-      },
+      conversations: view.conversations.map(projectDomainConversationEntry),
+      ...(view.availability ? { availability: view.availability } : {}),
     };
   }
 
   async #history(params: Record<string, unknown>) {
     const conversationId = this.#conversationId(params, "session.history");
-    const limit = positiveLimit(params.limit);
     const before = transcriptCursor(params.before);
-    const page = await this.input.owner.sessionState.readTranscriptTail(
-      conversationId,
-      context(`history:${conversationId}`),
-      before,
-      limit,
-    );
-    return {
-      runs: [...page.records]
-        .reverse()
-        .map((record) => ({ record, shardId: "owner-log" })),
-      hasMore: page.next !== undefined,
-    };
+    if (params.limit !== undefined && typeof params.limit !== "number") {
+      throw RpcErrors.invalidParams("历史记录条数必须是正整数。");
+    }
+    try {
+      return await this.#application.queryHistory({
+        kind: "history",
+        conversationId,
+        ...(params.limit !== undefined ? { limit: params.limit } : {}),
+        ...(before ? { before } : {}),
+      });
+    } catch (error) {
+      throw mapLocalConversationApplicationError(error, "history");
+    }
   }
 
   async #send(
@@ -688,6 +689,57 @@ function nonEmptyText(value: unknown, label: string): string {
   return value.trim();
 }
 
+function projectDomainConversationEntry(
+  entry: ConversationDirectoryEntry,
+): SessionConversationEntry {
+  return {
+    conversationId: entry.conversationId,
+    name: entry.name,
+    createdAt: entry.createdAt,
+    lastActiveAt: entry.lastActiveAt,
+    active: entry.active,
+    busy: entry.busy,
+    observerCount: entry.observerCount,
+    pendingCount: entry.pendingCount,
+    ...(entry.advancement ? { advancement: entry.advancement } : {}),
+  };
+}
+
+function projectWireConversationEntry(
+  entry: SessionConversationEntry,
+): ConversationDirectoryEntry {
+  return {
+    conversationId: entry.conversationId,
+    name: entry.name,
+    createdAt: entry.createdAt,
+    lastActiveAt: entry.lastActiveAt,
+    active: entry.active,
+    busy: entry.busy,
+    observerCount: entry.observerCount,
+    pendingCount: entry.pendingCount,
+    ...(entry.advancement ? { advancement: entry.advancement } : {}),
+  };
+}
+
+function mapLocalConversationApplicationError(
+  error: unknown,
+  operation: "history" | "rename",
+): unknown {
+  if (!(error instanceof ConversationApplicationError)) return error;
+  if (error.code === "not-found") {
+    return RpcErrors.notFound(
+      "这台电脑上没有这个对话，请从列表中重新选择。",
+    );
+  }
+  return RpcErrors.invalidParams(
+    operation === "rename"
+      ? "对话名称不能为空。"
+      : error.message.includes("cursor")
+        ? "历史记录位置无效，请重新打开对话。"
+        : "历史记录条数必须是正整数。",
+  );
+}
+
 function normalizeInput(params: Record<string, unknown>): UserTurnInput {
   const value = typeof params.text === "string"
     ? userTurnInputFromText(params.text)
@@ -696,14 +748,6 @@ function normalizeInput(params: Record<string, unknown>): UserTurnInput {
     throw RpcErrors.invalidParams("消息不能为空。");
   }
   return value;
-}
-
-function positiveLimit(value: unknown): number {
-  if (value === undefined) return 20;
-  if (!Number.isSafeInteger(value) || (value as number) < 1) {
-    throw RpcErrors.invalidParams("历史记录条数必须是正整数。");
-  }
-  return Math.min(value as number, 200);
 }
 
 function transcriptCursor(value: unknown) {
