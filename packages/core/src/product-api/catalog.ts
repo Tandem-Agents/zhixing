@@ -18,6 +18,8 @@ export interface ProductApiOperationDescriptor<
   readonly identity: Identity;
   readonly kind: Kind;
   readonly factEvents: readonly string[];
+  /** Defaults to exact; subset is reserved for commands with valid no-write outcomes. */
+  readonly factEmission?: "subset";
   readonly [INPUT_TYPE]?: Input;
   readonly [RESULT_TYPE]?: Result;
   readonly [FACT_TYPE]?: Fact;
@@ -89,11 +91,13 @@ export function defineProductApiCommand<
 >(
   identity: Identity,
   factEvents: readonly ProductApiFactEventDescriptor<string, Fact>[],
+  options?: Readonly<{ factEmission: "subset" }>,
 ): ProductApiOperationDescriptor<Identity, "command", Input, Result, Fact> {
   return Object.freeze({
     identity,
     kind: "command",
     factEvents: Object.freeze(factEvents.map((event) => event.identity)),
+    ...(options ? { factEmission: options.factEmission } : {}),
   });
 }
 
@@ -257,7 +261,12 @@ export class ProductApiDispatcher {
         throw new TypeError(`Product API command emitted an unknown fact event: ${descriptor.identity}`);
       }
     }
-    if (!sameIdentitySet(descriptor.factEvents, invocation.facts.map((fact) => fact.kind))) {
+    const emittedFactKinds = invocation.facts.map((fact) => fact.kind);
+    if (
+      new Set(emittedFactKinds).size !== emittedFactKinds.length ||
+      (descriptor.factEmission !== "subset" &&
+        !sameIdentitySet(descriptor.factEvents, emittedFactKinds))
+    ) {
       throw new TypeError(`Product API command fact set mismatch: ${descriptor.identity}`);
     }
     return Object.freeze({

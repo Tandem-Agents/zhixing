@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { Buffer } from "node:buffer";
 import {
   buildStartupBootstrapPair,
@@ -33,6 +33,8 @@ import {
   type ConversationAgentTurnExecutionPort,
   type ConversationLifecycleFact,
   type ConversationRunControlPort,
+  type ConversationTaskListMutationDecision,
+  type ConversationTaskListPort,
 } from "@zhixing/core/conversation/application";
 import {
   ConversationManager,
@@ -127,6 +129,7 @@ export interface LocalConversationOwnerPort {
   cancelConversationRuns: ConversationRunControlPort["cancel"];
   resolveConversationUncertain: ConversationRunControlPort["resolveUncertain"];
   readonly agentTurnAdmission: ConversationAgentTurnAdmissionPort;
+  readonly taskLists: ConversationTaskListPort;
   createAgentTurnExecution(input: {
     readonly input: UserTurnInput;
     readonly environment?: ExplicitEnvironmentSelection;
@@ -386,6 +389,79 @@ export class LocalConversationOwnerAssembly {
         }
       },
     });
+    const taskLists: ConversationTaskListPort = Object.freeze({
+      requiresStableOperationIdentity: true,
+      createOperationIdentity: () => {
+        throw new Error(
+          "Local Conversation task-list update requires a stable operation identity",
+        );
+      },
+      createTaskIdentity: ({ operationId, content }: Parameters<
+        ConversationTaskListPort["createTaskIdentity"]
+      >[0]) =>
+        createHash("sha256")
+          .update(canonicalize({ requestId: operationId, content }))
+          .digest("hex")
+          .slice(0, 32),
+      read: async (conversationId: string) => {
+        await this.#assertConversationCurrent(conversationId);
+        return sessionState.readTaskList(
+          conversationId,
+          hostRequestContext(
+            "local-conversation-task-list",
+            `task-list:${conversationId}`,
+          ),
+        );
+      },
+      maintain: async (
+        request: Parameters<ConversationTaskListPort["maintain"]>[0],
+      ) =>
+        this.#runCommand(async () => {
+          const outcome = await this.#manager.runMaintenanceExisting(
+            request.conversationId,
+            async () =>
+              (await this.#port.listConversations()).includes(
+                request.conversationId,
+              ),
+            async () => {
+              await this.#assertConversationCurrent(request.conversationId);
+              const current = await sessionState.readTaskList(
+                request.conversationId,
+                hostRequestContext(
+                  "local-conversation-task-list",
+                  `task-list-read:${request.operationId}`,
+                ),
+              );
+              const decision = request.decide(current);
+              if (hasTaskListWrite(decision)) {
+                await sessionState.mutate(
+                  request.conversationId,
+                  {
+                    kind: "task-list-op",
+                    op: { op: "set", state: decision.next },
+                  },
+                  hostRequestContext(
+                    "local-conversation-task-list",
+                    request.operationId,
+                  ),
+                );
+              }
+              const taskList = hasTaskListWrite(decision)
+                ? await sessionState.readTaskList(
+                    request.conversationId,
+                    hostRequestContext(
+                      "local-conversation-task-list",
+                      `task-list-committed:${request.operationId}`,
+                    ),
+                  )
+                : current;
+              return Object.freeze({ decision, taskList });
+            },
+          );
+          if (outcome.status !== "done") return outcome;
+          return Object.freeze({ status: "done" as const, ...outcome.value });
+        }),
+    });
     this.#port = Object.freeze<LocalConversationOwnerPort>({
       createConversation: async () => {
         return this.#runCommand(async () => {
@@ -546,6 +622,7 @@ export class LocalConversationOwnerAssembly {
         });
       },
       agentTurnAdmission,
+      taskLists,
       createAgentTurnExecution: (turn) => {
         let settle!: (result: ProjectedSessionTurnResult) => void;
         const outcome = new Promise<ProjectedSessionTurnResult>((resolve) => {
@@ -1683,6 +1760,15 @@ async function readAllTranscript(
 
 function hostContext(component: string) {
   return hostRequestContext(component, `${component}:${Date.now()}`);
+}
+
+function hasTaskListWrite(
+  decision: ConversationTaskListMutationDecision,
+): decision is Extract<
+  ConversationTaskListMutationDecision,
+  { readonly next: unknown }
+> {
+  return "next" in decision;
 }
 
 function hostRequestContext(component: string, requestId: string) {

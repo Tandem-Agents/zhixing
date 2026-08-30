@@ -15,6 +15,7 @@ import {
 } from "../types/user-input.js";
 import type { TurnOrigin } from "../types/tools.js";
 import type { ExplicitEnvironmentSelection } from "../contracts/protocol.js";
+import type { TaskItem, TaskListState } from "./types.js";
 
 /** Persisted Conversation identity projected by the domain storage port. */
 export interface ConversationDirectoryRecord {
@@ -239,6 +240,67 @@ export interface ConversationAgentTurnIdentityPort {
   ensure(conversationId: string): Promise<void>;
 }
 
+export type ConversationTaskListAction =
+  | Readonly<{ kind: "add"; content: string }>
+  | Readonly<{ kind: "done"; token: string }>;
+
+export type ConversationTaskListMutationDecision =
+  | Readonly<{
+      outcome: "added";
+      taskContent: string;
+      next: TaskListState;
+    }>
+  | Readonly<{
+      outcome: "completed";
+      taskContent: string;
+      next: TaskListState;
+    }>
+  | Readonly<{
+      outcome: "invalid-add";
+      token: string;
+    }>
+  | Readonly<{
+      outcome: "invalid-done";
+      token: string;
+    }>
+  | Readonly<{
+      outcome: "not-found";
+      token: string;
+    }>
+  | Readonly<{
+      outcome: "already-completed";
+      taskContent: string;
+    }>;
+
+/**
+ * Owner/Correctness mechanism consumed by Conversation task-list use cases.
+ * The callback is evaluated while the implementation holds its existing
+ * per-conversation maintenance boundary; only the returned state is written.
+ */
+export interface ConversationTaskListPort {
+  readonly requiresStableOperationIdentity: boolean;
+  createOperationIdentity(): string;
+  createTaskIdentity(input: Readonly<{
+    conversationId: string;
+    operationId: string;
+    content: string;
+  }>): string;
+  read(conversationId: string): Promise<TaskListState | null>;
+  maintain(input: Readonly<{
+    conversationId: string;
+    operationId: string;
+    decide(current: TaskListState): ConversationTaskListMutationDecision;
+  }>): Promise<
+    | Readonly<{ status: "busy" }>
+    | Readonly<{ status: "not-found" }>
+    | Readonly<{
+        status: "done";
+        decision: ConversationTaskListMutationDecision;
+        taskList: TaskListState;
+      }>
+  >;
+}
+
 export type ConversationAdoptionReviewProjection =
   | Readonly<{
       status: "ready";
@@ -360,6 +422,10 @@ export interface ConversationAdvancementProjectionReader {
 export type ConversationDirectoryQuery =
   | Readonly<{ kind: "list" }>
   | Readonly<{
+      kind: "task-list";
+      conversationId: string;
+    }>
+  | Readonly<{
       kind: "history";
       conversationId: string;
       limit?: number;
@@ -423,6 +489,12 @@ export type ConversationDirectoryCommand =
       turnOrigin?: TurnOrigin;
       environment?: ExplicitEnvironmentSelection;
       execution: ConversationAgentTurnExecutionPort;
+    }>
+  | Readonly<{
+      kind: "update-task-list";
+      conversationId: string;
+      action: ConversationTaskListAction;
+      operationId?: string;
     }>;
 
 export interface ConversationCreatedResult {
@@ -484,6 +556,27 @@ export interface ConversationAgentTurnAdmissionResult {
   readonly status: "immediate" | "queued" | "replayed";
 }
 
+export interface ConversationTaskListView {
+  readonly taskList: TaskListState | null;
+}
+
+export interface ConversationTaskListChangedFact {
+  readonly kind: "conversation-task-list-changed";
+  readonly conversationId: string;
+  readonly taskList: TaskListState;
+}
+
+export interface ConversationTaskListUpdateResult {
+  readonly ok: boolean;
+  readonly message: string;
+  readonly taskList: TaskListState;
+}
+
+export interface ConversationTaskListUpdateOutcome {
+  readonly result: ConversationTaskListUpdateResult;
+  readonly fact?: ConversationTaskListChangedFact;
+}
+
 export type ConversationLifecycleFact =
   | ConversationClearedFact
   | ConversationDeletedFact;
@@ -505,7 +598,11 @@ export class ConversationApplicationError extends Error {
       | "turn-identity-invalid"
       | "turn-conversation-not-found"
       | "turn-queue-full"
-      | "turn-lifecycle-busy",
+      | "turn-lifecycle-busy"
+      | "task-list-operation-required"
+      | "task-list-operation-invalid"
+      | "task-list-conversation-not-found"
+      | "task-list-busy",
   ) {
     super(message);
     this.name = "ConversationApplicationError";
@@ -514,6 +611,9 @@ export class ConversationApplicationError extends Error {
 
 export interface ConversationDirectoryApplication {
   queryList(): Promise<ConversationDirectoryView>;
+  queryTaskList(
+    query: Extract<ConversationDirectoryQuery, { readonly kind: "task-list" }>,
+  ): Promise<ConversationTaskListView>;
   queryHistory(
     query: Extract<ConversationDirectoryQuery, { readonly kind: "history" }>,
   ): Promise<ConversationHistoryPage>;
@@ -551,6 +651,12 @@ export interface ConversationDirectoryApplication {
       { readonly kind: "admit-agent-turn" }
     >,
   ): Promise<ConversationAgentTurnAdmissionResult>;
+  updateTaskList(
+    command: Extract<
+      ConversationDirectoryCommand,
+      { readonly kind: "update-task-list" }
+    >,
+  ): Promise<ConversationTaskListUpdateOutcome>;
 }
 
 const HISTORY_DEFAULT_LIMIT = 20;
@@ -581,6 +687,7 @@ export class ConversationDirectoryApplicationService
       runControl?: ConversationRunControlPort;
       agentTurns?: ConversationAgentTurnAdmissionPort;
       agentTurnIdentity?: ConversationAgentTurnIdentityPort;
+      taskLists?: ConversationTaskListPort;
       clock?: () => number;
     }>,
   ) {}
@@ -611,6 +718,28 @@ export class ConversationDirectoryApplicationService
       ...(this.input.availability
         ? { availability: this.input.availability }
         : {}),
+    });
+  }
+
+  async queryTaskList(
+    query: Extract<ConversationDirectoryQuery, { readonly kind: "task-list" }>,
+  ): Promise<ConversationTaskListView> {
+    if (
+      typeof query.conversationId !== "string" ||
+      query.conversationId.trim().length === 0
+    ) {
+      throw new ConversationApplicationError(
+        "invalid-input",
+        "Conversation task-list query requires a conversation id",
+      );
+    }
+    const port = this.input.taskLists;
+    if (!port) {
+      throw new Error("Conversation task-list application is not assembled");
+    }
+    const taskList = await port.read(query.conversationId);
+    return Object.freeze({
+      taskList: taskList ? freezeTaskListState(taskList) : null,
     });
   }
 
@@ -970,6 +1099,101 @@ export class ConversationDirectoryApplicationService
     });
   }
 
+  async updateTaskList(
+    command: Extract<
+      ConversationDirectoryCommand,
+      { readonly kind: "update-task-list" }
+    >,
+  ): Promise<ConversationTaskListUpdateOutcome> {
+    if (
+      typeof command.conversationId !== "string" ||
+      command.conversationId.trim().length === 0
+    ) {
+      throw new ConversationApplicationError(
+        "invalid-input",
+        "Conversation task-list update requires a conversation id",
+      );
+    }
+    const port = this.input.taskLists;
+    if (!port) {
+      throw new Error("Conversation task-list application is not assembled");
+    }
+    let operationId = command.operationId;
+    if (operationId === undefined) {
+      if (port.requiresStableOperationIdentity) {
+        throw new ConversationApplicationError(
+          "invalid-input",
+          "Conversation task-list update requires a stable operation identity",
+          "task-list-operation-required",
+        );
+      }
+      operationId = port.createOperationIdentity();
+    }
+    if (!isProtocolIdentifier(operationId)) {
+      throw new ConversationApplicationError(
+        "invalid-input",
+        "Conversation task-list operation identity is invalid",
+        "task-list-operation-invalid",
+      );
+    }
+    const maintained = await port.maintain({
+      conversationId: command.conversationId,
+      operationId,
+      decide: (current) =>
+        decideTaskListMutation({
+          conversationId: command.conversationId,
+          operationId,
+          action: command.action,
+          current,
+          createTaskIdentity: (input) => port.createTaskIdentity(input),
+        }),
+    });
+    if (maintained.status === "busy") {
+      throw new ConversationApplicationError(
+        "busy",
+        "Conversation has an in-flight turn or maintenance operation; update tasks after it completes",
+        "task-list-busy",
+      );
+    }
+    if (maintained.status === "not-found") {
+      throw new ConversationApplicationError(
+        "not-found",
+        `Conversation not found: ${command.conversationId}`,
+        "task-list-conversation-not-found",
+      );
+    }
+    const taskList = freezeTaskListState(maintained.taskList);
+    const decision = maintained.decision;
+    if (decision.outcome === "added" || decision.outcome === "completed") {
+      const fact = createConversationTaskListChangedFact(
+        command.conversationId,
+        taskList,
+      );
+      return Object.freeze({
+        result: Object.freeze({
+          ok: true,
+          message:
+            decision.outcome === "added"
+              ? `✓ 添加：“${decision.taskContent}”`
+              : `✓ 完成：“${decision.taskContent}”`,
+          taskList,
+        }),
+        fact,
+      });
+    }
+    const message =
+      decision.outcome === "invalid-add"
+        ? "用法：/task new <内容>"
+        : decision.outcome === "invalid-done"
+          ? "用法：/task done <序号或 id>"
+          : decision.outcome === "not-found"
+            ? `未找到任务："${decision.token}"。使用 /tasklist 查看当前列表。`
+            : `任务已是 completed 状态："${decision.taskContent}"`;
+    return Object.freeze({
+      result: Object.freeze({ ok: false, message, taskList }),
+    });
+  }
+
   async admitAgentTurn(
     command: Extract<
       ConversationDirectoryCommand,
@@ -1137,6 +1361,111 @@ function isPreparedAgentTurnIdentity(
   );
 }
 
+function decideTaskListMutation(input: Readonly<{
+  conversationId: string;
+  operationId: string;
+  action: ConversationTaskListAction;
+  current: TaskListState;
+  createTaskIdentity(
+    input: Readonly<{
+      conversationId: string;
+      operationId: string;
+      content: string;
+    }>,
+  ): string;
+}>): ConversationTaskListMutationDecision {
+  if (input.action.kind === "add") {
+    const content = input.action.content.trim();
+    if (!content) {
+      return Object.freeze({ outcome: "invalid-add" as const, token: content });
+    }
+    const taskId = input.createTaskIdentity({
+      conversationId: input.conversationId,
+      operationId: input.operationId,
+      content,
+    });
+    if (typeof taskId !== "string" || taskId.length === 0) {
+      throw new Error("Conversation task-list mechanism returned an invalid task identity");
+    }
+    return Object.freeze({
+      outcome: "added" as const,
+      taskContent: content,
+      next: {
+        items: [
+          ...input.current.items,
+          { id: taskId, content, status: "pending" as const },
+        ],
+      },
+    });
+  }
+
+  const token = input.action.token.trim();
+  if (!token) {
+    return Object.freeze({ outcome: "invalid-done" as const, token });
+  }
+  const target = locateTaskListTarget(input.current.items, token);
+  if (!target) {
+    return Object.freeze({ outcome: "not-found" as const, token });
+  }
+  if (target.status === "completed") {
+    return Object.freeze({
+      outcome: "already-completed" as const,
+      taskContent: target.content,
+    });
+  }
+  return Object.freeze({
+    outcome: "completed" as const,
+    taskContent: target.content,
+    next: {
+      items: input.current.items.map((item) =>
+        item.id === target.id
+          ? { ...item, status: "completed" as const }
+          : item,
+      ),
+    },
+  });
+}
+
+function locateTaskListTarget(
+  items: readonly TaskItem[],
+  token: string,
+): TaskItem | null {
+  if (/^\d+$/u.test(token)) {
+    const index = Number.parseInt(token, 10);
+    if (index >= 1 && index <= items.length) return items[index - 1] ?? null;
+  }
+  const matches = items.filter((item) => item.id.startsWith(token));
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+function freezeTaskListState(state: TaskListState): TaskListState {
+  return Object.freeze({
+    items: Object.freeze(
+      state.items.map((item) =>
+        Object.freeze({
+          id: item.id,
+          content: item.content,
+          status: item.status,
+        }),
+      ),
+    ),
+  });
+}
+
+export function createConversationTaskListChangedFact(
+  conversationId: string,
+  taskList: TaskListState,
+): ConversationTaskListChangedFact {
+  if (typeof conversationId !== "string" || conversationId.length === 0) {
+    throw new TypeError("Conversation task-list fact requires a conversation id");
+  }
+  return Object.freeze({
+    kind: "conversation-task-list-changed" as const,
+    conversationId,
+    taskList: freezeTaskListState(taskList),
+  });
+}
+
 /**
  * Projects one authoritative clear fact. The domain owns the ordering and
  * outcome; Owner/storage implementations only supply serialization mechanics.
@@ -1269,6 +1598,12 @@ export const CONVERSATION_DELETED_FACT_EVENT = defineProductApiFactEvent<
   ConversationDeletedFact
 >("conversation-deleted");
 
+export const CONVERSATION_TASK_LIST_CHANGED_FACT_EVENT =
+  defineProductApiFactEvent<
+    "conversation-task-list-changed",
+    ConversationTaskListChangedFact
+  >("conversation-task-list-changed");
+
 export const CONVERSATION_LIST_QUERY = defineProductApiQuery<
   "conversation-directory.query.list",
   Extract<ConversationDirectoryQuery, { readonly kind: "list" }>,
@@ -1280,6 +1615,12 @@ export const CONVERSATION_HISTORY_QUERY = defineProductApiQuery<
   Extract<ConversationDirectoryQuery, { readonly kind: "history" }>,
   ConversationHistoryPage
 >("conversation-directory.query.history");
+
+export const CONVERSATION_TASK_LIST_QUERY = defineProductApiQuery<
+  "conversation-task-list.query.current",
+  Extract<ConversationDirectoryQuery, { readonly kind: "task-list" }>,
+  ConversationTaskListView
+>("conversation-task-list.query.current");
 
 export const CONVERSATION_CREATE_COMMAND = defineProductApiCommand<
   "conversation-directory.command.create",
@@ -1354,11 +1695,24 @@ export const CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND =
     never
   >("conversation-run.command.prepare-agent-turn-identity", []);
 
+export const CONVERSATION_UPDATE_TASK_LIST_COMMAND = defineProductApiCommand<
+  "conversation-task-list.command.update",
+  Extract<
+    ConversationDirectoryCommand,
+    { readonly kind: "update-task-list" }
+  >,
+  ConversationTaskListUpdateResult,
+  ConversationTaskListChangedFact
+>("conversation-task-list.command.update", [
+  CONVERSATION_TASK_LIST_CHANGED_FACT_EVENT,
+], { factEmission: "subset" });
+
 export const CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET =
   defineProductApiExactSet({
     operations: [
       CONVERSATION_LIST_QUERY,
       CONVERSATION_HISTORY_QUERY,
+      CONVERSATION_TASK_LIST_QUERY,
       CONVERSATION_CREATE_COMMAND,
       CONVERSATION_RESUME_COMMAND,
       CONVERSATION_RENAME_COMMAND,
@@ -1368,11 +1722,13 @@ export const CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET =
       CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
       CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND,
       CONVERSATION_ADMIT_AGENT_TURN_COMMAND,
+      CONVERSATION_UPDATE_TASK_LIST_COMMAND,
     ],
     factEvents: [
       CONVERSATION_RENAMED_FACT_EVENT,
       CONVERSATION_CLEARED_FACT_EVENT,
       CONVERSATION_DELETED_FACT_EVENT,
+      CONVERSATION_TASK_LIST_CHANGED_FACT_EVENT,
     ],
   });
 
@@ -1387,6 +1743,10 @@ export function createConversationDirectoryProductApiContribution(
       })),
       bindProductApiOperation(CONVERSATION_HISTORY_QUERY, async (query) => ({
         result: await application.queryHistory(query),
+        facts: [],
+      })),
+      bindProductApiOperation(CONVERSATION_TASK_LIST_QUERY, async (query) => ({
+        result: await application.queryTaskList(query),
         facts: [],
       })),
       bindProductApiOperation(CONVERSATION_CREATE_COMMAND, async () => ({
@@ -1434,11 +1794,22 @@ export function createConversationDirectoryProductApiContribution(
           facts: [],
         }),
       ),
+      bindProductApiOperation(
+        CONVERSATION_UPDATE_TASK_LIST_COMMAND,
+        async (command) => {
+          const outcome = await application.updateTaskList(command);
+          return {
+            result: outcome.result,
+            facts: outcome.fact ? [outcome.fact] : [],
+          };
+        },
+      ),
     ],
     factEvents: [
       CONVERSATION_RENAMED_FACT_EVENT,
       CONVERSATION_CLEARED_FACT_EVENT,
       CONVERSATION_DELETED_FACT_EVENT,
+      CONVERSATION_TASK_LIST_CHANGED_FACT_EVENT,
     ],
   });
 }

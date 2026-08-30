@@ -133,6 +133,33 @@ describe("ProductApiDispatcher", () => {
     ).rejects.toThrow("Product API command fact set mismatch: example.command");
   });
 
+  it("allows only explicitly declared commands to omit a fact on no-write outcomes", async () => {
+    const optionalWrite = defineProductApiCommand<
+      "example.optional-command",
+      { readonly value: string },
+      { readonly ok: false },
+      { readonly kind: "example-changed"; readonly revision: number }
+    >("example.optional-command", [changed], { factEmission: "subset" });
+    const dispatcher = new ProductApiDispatcher(
+      defineProductApiExactSet({
+        operations: [optionalWrite],
+        factEvents: [changed],
+      }),
+      [defineProductApiContribution({
+        operations: [
+          bindProductApiOperation(optionalWrite, async () => ({
+            result: { ok: false },
+            facts: [],
+          })),
+        ],
+        factEvents: [changed],
+      })],
+    );
+
+    await expect(dispatcher.command(optionalWrite, { value: "unchanged" }))
+      .resolves.toEqual({ result: { ok: false }, facts: [] });
+  });
+
   it("uses the Skill-owned contribution as the single application call and fact source", async () => {
     const query = vi.fn<SkillCatalogApplication["query"]>(async () => ({
       entries: [],

@@ -108,7 +108,6 @@ import {
   SESSION_NOTIFICATIONS,
   type SessionActivityBroadcast,
   type SessionBroadcast,
-  type SessionChangedPayload,
 } from "@zhixing/rpc";
 import { AssignmentStreamPathUnavailableError } from "./assignment-stream-path-manager.js";
 import {
@@ -146,7 +145,6 @@ import {
   type ConversationRepoTaskListRoute,
 } from "../runtime/task-list-stores.js";
 import { createCliTurnContextProviders } from "../runtime/turn-context-providers.js";
-import { applyTaskListAction } from "../runtime/task-list-actions.js";
 import { createServeAdvancementController } from "./advancement-controller.js";
 import { createAdvancementAcceptanceLifecycle } from "./advancement-acceptance-lifecycle.js";
 import { createZhixingGuidanceLifecycle } from "./zhixing-guidance-lifecycle.js";
@@ -156,6 +154,7 @@ import { createConversationDirectory } from "./conversation-directory.js";
 import { createAnchorConversationClearCommitPort } from "./conversation-clear-binding.js";
 import { createAnchorConversationResumePort } from "./conversation-resume-binding.js";
 import { createAnchorConversationRunControlPort } from "./conversation-run-control-binding.js";
+import { createAnchorConversationTaskListPort } from "./conversation-task-list-application.js";
 import {
   createAnchorConversationDeleteCommitPort,
   createConversationWorksceneDeleteProjectionBridge,
@@ -511,16 +510,6 @@ async function runServerProcess(
     extraTools: builtinExtraTools,
     scheduler: getSchedulerFacade,
   });
-  // task_list 状态变更 → 会话级变更组播(meta 变更):接入面屏底任务区的
-  // 实时数据源。装配期 broadcast 未回填时静默丢弃(无会话 turn 流动)。
-  builtinExtraTools.taskListService.subscribe(({ conversationId, state }) => {
-    sessionBroadcastRef.current?.(conversationId, SESSION_NOTIFICATIONS.changed, {
-      conversationId,
-      change: "taskList",
-      taskList: state,
-    } satisfies SessionChangedPayload);
-  });
-
   // 3c'. 段切换外部依赖 —— serve 全部 runtime（per-session + ephemeral）共享：
   //   注意力窗口的段保护对一切运行体生效。persistence 为 no-op（serve 未接
   //   ConversationRepository，segmentMeta 缺写无害）；taskListReader 复用同一
@@ -1933,6 +1922,11 @@ async function runServerProcess(
     : undefined;
   const conversationApplication = new ConversationDirectoryApplicationService({
     storage: conversationDirectory,
+    taskLists: createAnchorConversationTaskListPort({
+      conversations: ctx.conversations!,
+      exists: (conversationId) => conversationDirectory.exists(conversationId),
+      taskLists: builtinExtraTools.taskListService,
+    }),
     agentTurns: createConversationAgentTurnAdmissionPort({
       manager: ctx.conversations!,
     }),
@@ -2234,18 +2228,6 @@ async function runServerProcess(
         raw,
       );
     })(),
-    // /task new·done 的执行体——写单点在宿主 task_list 服务,变更经
-    // taskListService.subscribe 的组播自然回流接入面视图
-    taskListUpdate: (conversationId, action) =>
-      applyTaskListAction(
-        builtinExtraTools.taskListService,
-        conversationId,
-        action,
-      ),
-    taskListSnapshot: async (conversationId) => {
-      await builtinExtraTools.taskListService.prime(conversationId);
-      return builtinExtraTools.taskListService.getCached(conversationId);
-    },
     channels: ctx.channels,
     channelHttpRoutes,
     confirmationHub,

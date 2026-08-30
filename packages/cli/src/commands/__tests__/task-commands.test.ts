@@ -2,7 +2,7 @@
  * registerTaskCommands 测试 —— 读为只读视图缓存、写经宿主执行体(update 回调)。
  *
  * /task new·done 的动作语义(定位 / 状态机 / 反馈文案)在宿主执行体
- * (task-list-actions,随 serve 装配),此处只锁命令层的动作翻译与反馈呈现。
+ * (Conversation task-list application,随 serve 装配),此处只锁命令层的动作翻译与反馈呈现。
  */
 
 import { describe, expect, it, vi } from "vitest";

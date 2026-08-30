@@ -3453,6 +3453,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const conversationRunControlBinding = required(
     "packages/cli/src/serve/conversation-run-control-binding.ts",
   );
+  const conversationTaskListApplication = required(
+    "packages/cli/src/serve/conversation-task-list-application.ts",
+  );
   const conversationDeleteBinding = required(
     "packages/cli/src/serve/conversation-delete-binding.ts",
   );
@@ -3951,6 +3954,21 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       "CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND",
     ) ||
     !conversationApplication.includes("CONVERSATION_ADMIT_AGENT_TURN_COMMAND") ||
+    !conversationApplication.includes("interface ConversationTaskListPort") ||
+    !conversationApplication.includes("CONVERSATION_TASK_LIST_QUERY") ||
+    !conversationApplication.includes("CONVERSATION_UPDATE_TASK_LIST_COMMAND") ||
+    !conversationApplication.includes(
+      "CONVERSATION_TASK_LIST_CHANGED_FACT_EVENT",
+    ) ||
+    !conversationApplication.includes('factEmission: "subset"') ||
+    !conversationApplication.includes("interface ConversationTaskListUpdateOutcome") ||
+    /interface ConversationTaskListUpdateResult\s*\{[^}]*\b(?:fact|facts)\??\s*:/su.test(
+      conversationApplication,
+    ) ||
+    !conversationApplication.includes("result: outcome.result") ||
+    !conversationApplication.includes("facts: outcome.fact ? [outcome.fact] : []") ||
+    !conversationApplication.includes("async queryTaskList(") ||
+    !conversationApplication.includes("async updateTaskList(") ||
     !conversationApplication.includes("interface ConversationAgentTurnAdmissionPort") ||
     !conversationApplication.includes(
       "interface ConversationPreparedAgentTurnIdentity",
@@ -3982,6 +4000,10 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       "CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND",
     ) ||
     !sessionHandler.includes("CONVERSATION_ADMIT_AGENT_TURN_COMMAND") ||
+    !sessionHandler.includes("CONVERSATION_TASK_LIST_QUERY") ||
+    !sessionHandler.includes("CONVERSATION_UPDATE_TASK_LIST_COMMAND") ||
+    !sessionHandler.includes("const fact = dispatch.facts[0]") ||
+    sessionHandler.includes("dispatch.result.fact") ||
     sessionSend.length === 0 ||
     sessionTurnIdentityPreparation < 0 ||
     sessionConversationManagerLookup < 0 ||
@@ -3998,6 +4020,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       sessionHandler,
     ) ||
     /requireDirectory\(ctx\.server\)\.(?:list|create|rename|readRunsReverse|readHistory)/u.test(
+      sessionHandler,
+    ) ||
+    /ctx\.server\.(?:taskListSnapshot|taskListUpdate)\s*\(/u.test(
       sessionHandler,
     ) ||
     /\b(?:list|create|rename|readRunsReverse|readHistory)\s*\(/u.test(
@@ -4028,11 +4053,18 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       "this.#application.prepareAgentTurnIdentity({",
     ) ||
     !localConversationRpc.includes("this.#application.admitAgentTurn({") ||
+    !localConversationRpc.includes("this.#application.queryTaskList({") ||
+    !localConversationRpc.includes("this.#application.updateTaskList({") ||
+    !localConversationRpc.includes("return outcome.result;") ||
+    localConversationRpc.includes("return outcome;") ||
     localConversationRpc.indexOf(
       "this.#application.prepareAgentTurnIdentity({",
     ) > localConversationRpc.indexOf("this.#application.admitAgentTurn({") ||
     /this\.input\.owner\.admitTurn\s*\(/u.test(localConversationRpc) ||
     /this\.input\.owner\.(?:cancelTurns|cancelConversationRuns|resolveDurableUncertain|resolveConversationUncertain)\s*\(/u.test(
+      localConversationRpc,
+    ) ||
+    /this\.input\.owner\.(?:mutateSession|sessionState\.readTaskList)\s*\(/u.test(
       localConversationRpc,
     ) ||
     /case "session\.clear":(?:(?!case "session\.delete")[\s\S])*?this\.#mutate\(/u.test(
@@ -4053,6 +4085,23 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !composition.includes(
       "runControl: createAnchorConversationRunControlPort({",
     ) ||
+    !composition.includes(
+      "taskLists: createAnchorConversationTaskListPort({",
+    ) ||
+    !conversationTaskListApplication.includes(
+      "createAnchorConversationTaskListPort",
+    ) ||
+    !conversationTaskListApplication.includes(
+      "input.conversations.runMaintenanceExisting",
+    ) ||
+    !conversationTaskListApplication.includes("input.taskLists.set(") ||
+    !localConversationApplication.includes("taskLists: input.owner.taskLists") ||
+    !localConversationOwner.includes("readonly taskLists: ConversationTaskListPort") ||
+    !localConversationOwner.includes("taskLists,") ||
+    !accessSurfaces.includes("createConversationTaskListChangedFact(") ||
+    context.includes("taskListSnapshot") ||
+    context.includes("taskListUpdate") ||
+    byPath.has("packages/cli/src/runtime/task-list-actions.ts") ||
     !conversationRunControlBinding.includes(
       "createAnchorConversationRunControlPort",
     ) ||
@@ -6919,6 +6968,7 @@ export function inspectLocalConversationOwnerIsolation(records) {
       "rubricCatalog",
       "sessionState",
       "statusHistory",
+      "taskLists",
       "currentAuthority",
       "subscribeConversationFacts",
     ]);

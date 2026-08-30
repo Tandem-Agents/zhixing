@@ -118,6 +118,47 @@ async function expectWritesFenced(
 }
 
 describe("local conversation owner lifecycle", () => {
+  it("keeps task-list read/decision/write inside the real local owner boundary", async () => {
+    const fixture = await createLocalOwnerAssemblyFixture({ profile: "executor-only" });
+    await fixture.assembly.start();
+    const conversationId = await fixture.port.createConversation();
+    try {
+      await expect(fixture.port.taskLists.read(conversationId)).resolves.toEqual({
+        items: [],
+      });
+      const operationId = "local-task-list-write-1";
+      const taskId = fixture.port.taskLists.createTaskIdentity({
+        conversationId,
+        operationId,
+        content: "写周报",
+      });
+      await expect(fixture.port.taskLists.maintain({
+        conversationId,
+        operationId,
+        decide: (current) => ({
+          outcome: "added",
+          taskContent: "写周报",
+          next: {
+            items: [
+              ...current.items,
+              { id: taskId, content: "写周报", status: "pending" },
+            ],
+          },
+        }),
+      })).resolves.toMatchObject({
+        status: "done",
+        taskList: {
+          items: [{ id: taskId, content: "写周报", status: "pending" }],
+        },
+      });
+      await expect(fixture.port.taskLists.read(conversationId)).resolves.toEqual({
+        items: [{ id: taskId, content: "写周报", status: "pending" }],
+      });
+    } finally {
+      await fixture.assembly.close();
+    }
+  }, LIFECYCLE_TIMEOUT_MS);
+
   it("replays one durable delete identity and projects its fact exactly once", async () => {
     const fixture = await createLocalOwnerAssemblyFixture({ profile: "executor-only" });
     await fixture.assembly.start();

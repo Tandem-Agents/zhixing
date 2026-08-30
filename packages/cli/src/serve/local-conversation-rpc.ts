@@ -1,10 +1,7 @@
-import { createHash } from "node:crypto";
 import {
   assertLocalConversationIdForDevice,
   isNonEmptyUserTurnInput,
   userTurnInputFromText,
-  type TaskItem,
-  type TaskListState,
   type UserTurnInput,
 } from "@zhixing/core";
 import {
@@ -13,7 +10,6 @@ import {
   type ConversationDirectoryApplication,
   type ConversationDirectoryEntry,
 } from "@zhixing/core/conversation/application";
-import type { AuthorityCallContext } from "@zhixing/core/contracts";
 import { canonicalize, isProtocolIdentifier } from "@zhixing/core/protocol";
 import type {
   SessionConversationEntry,
@@ -455,12 +451,14 @@ export class LocalConversationRpcRouter
       }
       case "session.taskList": {
         const conversationId = this.#conversationId(params, method);
-        return {
-          taskList: await this.input.owner.sessionState.readTaskList(
+        try {
+          return (await this.#application.queryTaskList({
+            kind: "task-list",
             conversationId,
-            context(`task-list:${conversationId}`),
-          ),
-        } satisfies SessionTaskListResult;
+          })) satisfies SessionTaskListResult;
+        } catch (error) {
+          throw mapLocalConversationApplicationError(error, "task-list");
+        }
       }
       case "session.taskListUpdate":
         requireLocalConsent(params);
@@ -564,65 +562,32 @@ export class LocalConversationRpcRouter
     const conversationId = this.#conversationId(params, "session.taskListUpdate");
     const requestId = requiredIdentifier(params.requestId, "任务更新");
     const action = objectParams(params.action);
-    const current = await this.input.owner.sessionState.readTaskList(
-      conversationId,
-      context(`task-list-read:${requestId}`),
-    );
-    let next: TaskListState;
-    let message: string;
-    if (action.kind === "add") {
-      const content = nonEmptyText(action.content, "任务内容");
-      const item: TaskItem = {
-        id: stableRequest("task", { requestId, content }).slice(-32),
-        content,
-        status: "pending",
-      };
-      next = { items: [...current.items, item] };
-      message = `✓ 添加：“${content}”`;
-    } else if (action.kind === "done") {
-      const token = nonEmptyText(action.token, "任务序号或标识");
-      const target = locateTask(current.items, token);
-      if (!target) {
-        return {
-          ok: false,
-          message: `未找到任务：“${token}”。使用 /tasklist 查看当前列表。`,
-          taskList: current,
-        };
-      }
-      next = {
-        items: current.items.map((item) =>
-          item.id === target.id ? { ...item, status: "completed" as const } : item
-        ),
-      };
-      message = `✓ 完成：“${target.content}”`;
-    } else {
+    const domainAction = action.kind === "add" && typeof action.content === "string"
+      ? { kind: "add" as const, content: action.content }
+      : action.kind === "done" && typeof action.token === "string"
+        ? { kind: "done" as const, token: action.token }
+        : undefined;
+    if (!domainAction) {
       throw RpcErrors.invalidParams("任务操作无效，请使用 /task new 或 /task done。");
     }
-    await this.#mutate(conversationId, requestId, {
-      kind: "task-list-op",
-      op: { op: "set", state: next },
-    });
-    this.#notify(conversationId, "session.changed", {
-      conversationId,
-      change: "taskList",
-      taskList: next,
-    });
-    return { ok: true, message, taskList: next };
-  }
-
-  async #mutate(
-    conversationId: string,
-    requestId: string,
-    mutation: Parameters<LocalConversationOwnerPort["mutateSession"]>[1],
-  ): Promise<void> {
-    if (!(await this.input.owner.listConversations()).includes(conversationId)) {
-      throw RpcErrors.notFound("这台电脑上没有这个对话，请从列表中重新选择。");
+    try {
+      const outcome = await this.#application.updateTaskList({
+        kind: "update-task-list",
+        conversationId,
+        operationId: requestId,
+        action: domainAction,
+      });
+      if (outcome.fact) {
+        this.#notify(conversationId, "session.changed", {
+          conversationId,
+          change: "taskList",
+          taskList: outcome.fact.taskList,
+        });
+      }
+      return outcome.result;
+    } catch (error) {
+      throw mapLocalConversationApplicationError(error, "task-list");
     }
-    await this.input.owner.mutateSession(
-      conversationId,
-      mutation,
-      context(requestId),
-    );
   }
 
   #conversationId(params: Record<string, unknown>, method: string): string {
@@ -693,14 +658,6 @@ interface FirstPartyConnection extends FirstPartyIngressConnection {
   onClose(handler: () => void): () => void;
 }
 
-function context(requestId: string): AuthorityCallContext {
-  return {
-    principal: { kind: "host", component: "local-conversation-rpc" },
-    requestId,
-    deadlineAt: new Date(Date.now() + 30_000).toISOString(),
-  };
-}
-
 function objectParams(value: unknown): Record<string, unknown> {
   if (value === undefined) return {};
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -766,13 +723,6 @@ function parseSessionResolve(params: Record<string, unknown>): {
   return params as ReturnType<typeof parseSessionResolve>;
 }
 
-function nonEmptyText(value: unknown, label: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw RpcErrors.invalidParams(`${label}不能为空。`);
-  }
-  return value.trim();
-}
-
 function projectDomainConversationEntry(
   entry: ConversationDirectoryEntry,
 ): SessionConversationEntry {
@@ -815,7 +765,8 @@ function mapLocalConversationApplicationError(
     | "delete"
     | "abort"
     | "resolve"
-    | "send",
+    | "send"
+    | "task-list",
 ): unknown {
   if (!(error instanceof ConversationApplicationError)) return error;
   if (error.code === "not-found") {
@@ -874,13 +825,6 @@ function transcriptCursor(value: unknown) {
   return { shardId: "owner-log", runIndex: cursor.runIndex as number };
 }
 
-function stableRequest(kind: string, payload: unknown): string {
-  return `local-${kind}-${createHash("sha256")
-    .update(canonicalize(payload))
-    .digest("hex")
-    .slice(0, 32)}`;
-}
-
 function confirmationItemKey(value: unknown): string {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return `~:${canonicalize(value)}`;
@@ -891,13 +835,4 @@ function confirmationItemKey(value: unknown): string {
     : "";
   const requestId = typeof item.requestId === "string" ? item.requestId : "";
   return `${conversationId}:${requestId}:${canonicalize(value)}`;
-}
-
-function locateTask(items: readonly TaskItem[], token: string): TaskItem | undefined {
-  if (/^\d+$/u.test(token)) {
-    const index = Number.parseInt(token, 10) - 1;
-    if (index >= 0 && index < items.length) return items[index];
-  }
-  const matches = items.filter((item) => item.id.startsWith(token));
-  return matches.length === 1 ? matches[0] : undefined;
 }

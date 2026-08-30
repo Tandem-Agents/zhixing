@@ -84,6 +84,7 @@ export function createLocalConversationDirectoryApplication(input: {
   };
   return new ConversationDirectoryApplicationService({
     storage,
+    taskLists: input.owner.taskLists,
     agentTurns: input.owner.agentTurnAdmission,
     agentTurnIdentity: {
       exists: async (conversationId) =>

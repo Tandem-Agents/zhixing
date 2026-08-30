@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { localConversationId } from "@zhixing/core";
-import { RpcAppError } from "@zhixing/server";
+import { localConversationId, type TaskListState } from "@zhixing/core";
+import { RPC_ERROR_CODES, RpcAppError } from "@zhixing/server";
 import {
   ExecutorFirstPartyRpcRouter,
   LocalConversationRpcRouter,
@@ -93,6 +93,120 @@ describe("LocalConversationRpcRouter", () => {
         error.message ===
           "这个对话目前无法在这台电脑修改，请连接值班设备后重试。",
     );
+  });
+
+  it("task-list 查询与更新只经 Conversation 应用并投影一次 committed fact", async () => {
+    const port = ownerPort();
+    const router = new LocalConversationRpcRouter({
+      deviceId: DEVICE_ID,
+      owner: port,
+      remoteFor: () => { throw new Error("unexpected remote route"); },
+    });
+    const connection = fakeConnection();
+    await router.dispatch({
+      method: "session.subscribe",
+      params: { conversationId: CONVERSATION_ID },
+      connection,
+    });
+
+    await expect(router.dispatch({
+      method: "session.taskList",
+      params: { conversationId: CONVERSATION_ID },
+      connection,
+    })).resolves.toEqual({
+      handled: true,
+      result: { taskList: { items: [] } },
+    });
+    await expect(router.dispatch({
+      method: "session.taskListUpdate",
+      params: {
+        conversationId: CONVERSATION_ID,
+        requestId: "task-operation-1",
+        action: { kind: "add", content: "写周报" },
+        continueLocally: true,
+      },
+      connection,
+    })).resolves.toEqual({
+      handled: true,
+      result: {
+        ok: true,
+        message: '✓ 添加：“写周报”',
+        taskList: {
+          items: [{ id: "task-operation-1-task", content: "写周报", status: "pending" }],
+        },
+      },
+    });
+
+    expect(port.taskLists.maintain).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: CONVERSATION_ID,
+        operationId: "task-operation-1",
+      }),
+    );
+    expect(port.mutateSession).not.toHaveBeenCalled();
+    expect(port.sessionState.readTaskList).not.toHaveBeenCalled();
+    expect(connection.notify).toHaveBeenCalledTimes(1);
+    expect(connection.notify).toHaveBeenCalledWith(
+      "session.changed",
+      expect.objectContaining({
+        conversationId: CONVERSATION_ID,
+        change: "taskList",
+      }),
+    );
+
+    await expect(router.dispatch({
+      method: "session.taskListUpdate",
+      params: {
+        conversationId: CONVERSATION_ID,
+        requestId: "task-operation-2",
+        action: { kind: "done", token: "missing" },
+        continueLocally: true,
+      },
+      connection,
+    })).resolves.toEqual({
+      handled: true,
+      result: {
+        ok: false,
+        message: expect.any(String),
+        taskList: {
+          items: [{ id: "task-operation-1-task", content: "写周报", status: "pending" }],
+        },
+      },
+    });
+    expect(connection.notify).toHaveBeenCalledTimes(1);
+  });
+
+  it("task-list owner busy/not-found 由同一应用拒绝且不投影 fact", async () => {
+    const port = ownerPort();
+    const router = new LocalConversationRpcRouter({
+      deviceId: DEVICE_ID,
+      owner: port,
+      remoteFor: () => { throw new Error("unexpected remote route"); },
+    });
+    const connection = fakeConnection();
+    vi.mocked(port.taskLists.maintain)
+      .mockResolvedValueOnce({ status: "busy" })
+      .mockResolvedValueOnce({ status: "not-found" });
+
+    const update = (requestId: string) => router.dispatch({
+      method: "session.taskListUpdate",
+      params: {
+        conversationId: CONVERSATION_ID,
+        requestId,
+        action: { kind: "add", content: "写周报" },
+        continueLocally: true,
+      },
+      connection,
+    });
+    await expect(update("task-operation-busy")).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.BUSY,
+    });
+    await expect(update("task-operation-missing")).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.NOT_FOUND,
+    });
+    expect(connection.notify).not.toHaveBeenCalled();
+    expect(port.mutateSession).not.toHaveBeenCalled();
+    expect(port.sessionState.readTaskList).not.toHaveBeenCalled();
   });
 
   it("resume 经 Conversation 应用恢复本机身份并保持缺失终态", async () => {
@@ -497,6 +611,7 @@ function ownerPort(): LocalConversationOwnerPort {
   >();
   const projectedClearOperations = new Set<string>();
   const projectedDeleteOperations = new Set<string>();
+  let taskList: TaskListState = { items: [] };
   return {
     createConversation: vi.fn(async () => CONVERSATION_ID),
     ensureSession: vi.fn(async () => {}),
@@ -569,6 +684,19 @@ function ownerPort(): LocalConversationOwnerPort {
             turnId: input.turnId,
           }),
       })),
+    },
+    taskLists: {
+      requiresStableOperationIdentity: true,
+      createOperationIdentity: () => {
+        throw new Error("stable task-list operation identity required");
+      },
+      createTaskIdentity: ({ operationId }) => `${operationId}-task`,
+      read: vi.fn(async () => taskList),
+      maintain: vi.fn(async (input) => {
+        const decision = input.decide(taskList);
+        if ("next" in decision) taskList = decision.next;
+        return { status: "done" as const, decision, taskList };
+      }),
     },
     createAgentTurnExecution: vi.fn((input) => ({
       execution: {

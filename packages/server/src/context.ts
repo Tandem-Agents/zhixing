@@ -8,7 +8,6 @@
 import type {
   ChannelRegistry,
   HttpHandler,
-  TaskListState,
   AuthorityDeliveryStats,
   DeliveryStatusNotice,
 } from "@zhixing/core";
@@ -294,17 +293,6 @@ export interface ServerContext {
    * 的单发文本调用。装配方注入(如 ephemeral runtime 的 callText)。
    */
   llmComplete?: (prompt: string, role?: "main" | "light") => Promise<string>;
-  /**
-   * task_list 用户侧动作执行体(session.taskListUpdate)——写单点在宿主的
-   * task_list 服务,动作语义由装配实现定义。返回写后权威快照,让发起
-   * 接入面同步只读视图,不依赖 observer 广播回环。
-   */
-  taskListUpdate?: (
-    conversationId: string,
-    action: { kind: "add"; content: string } | { kind: "done"; token: string },
-  ) => Promise<{ ok: boolean; message: string; taskList: TaskListState | null }>;
-  /** task_list 权威快照(session.taskList 读模型)。 */
-  taskListSnapshot?: (conversationId: string) => Promise<TaskListState | null>;
   /** 当前连接数(startServer 回填,server.info 用)。 */
   connectionCount?: () => number;
   /** Stable first-party RPC surface identity registry. */
@@ -366,8 +354,6 @@ export interface CreateContextOptions {
   deviceLifecycle?: ServerContext["deviceLifecycle"];
   mcpStatuses?: ServerContext["mcpStatuses"];
   llmComplete?: (prompt: string, role?: "main" | "light") => Promise<string>;
-  taskListUpdate?: ServerContext["taskListUpdate"];
-  taskListSnapshot?: ServerContext["taskListSnapshot"];
   channels?: ChannelRegistry;
   channelHttpRoutes?: ReadonlyMap<string, HttpHandler>;
   confirmationHub?: ConfirmationHub;
@@ -396,8 +382,6 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     deviceLifecycle: opts.deviceLifecycle,
     mcpStatuses: opts.mcpStatuses,
     llmComplete: opts.llmComplete,
-    taskListUpdate: opts.taskListUpdate,
-    taskListSnapshot: opts.taskListSnapshot,
     channels: opts.channels,
     channelHttpRoutes: opts.channelHttpRoutes,
     confirmationHub: opts.confirmationHub,

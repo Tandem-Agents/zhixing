@@ -3439,6 +3439,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/cli/src/serve/conversation-clear-binding.ts",
     "packages/cli/src/serve/conversation-resume-binding.ts",
     "packages/cli/src/serve/conversation-run-control-binding.ts",
+    "packages/cli/src/serve/conversation-task-list-application.ts",
     "packages/cli/src/serve/conversation-delete-binding.ts",
     "packages/cli/src/serve/conversation-directory.ts",
     "packages/cli/src/serve/workscene-directory.ts",
@@ -3511,6 +3512,33 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/conversation/application.ts",
+      (text) => text.replace(
+        "readonly taskList: TaskListState;\n}\n\nexport interface ConversationTaskListUpdateOutcome",
+        "readonly taskList: TaskListState;\n  readonly fact?: ConversationTaskListChangedFact;\n}\n\nexport interface ConversationTaskListUpdateOutcome",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace(
+        "const fact = dispatch.facts[0];",
+        "const fact = dispatch.result.fact;",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/local-conversation-rpc.ts",
+      (text) => text.replace("return outcome.result;", "return outcome;"),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
       "packages/server/src/runtime/conversation-directory.ts",
       (text) => text.replace(
         "export interface ConversationDirectory {",
@@ -3524,6 +3552,53 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       "packages/cli/src/serve/local-conversation-rpc.ts",
       (text) => `${text}\nvoid input.owner.createConversation();`,
     )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/conversation/application.ts",
+      (text) => text.replace('factEmission: "subset"', 'factEmission: "exact"'),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/context.ts",
+      (text) => text.replace(
+        "productApi?: ProductApiDispatcher;",
+        "taskListUpdate?: () => Promise<unknown>;\n  productApi?: ProductApiDispatcher;",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/local-conversation-rpc.ts",
+      (text) => text.replace(
+        "this.#application.updateTaskList({",
+        "this.input.owner.mutateSession({",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "taskLists: createAnchorConversationTaskListPort({",
+        "taskLists: undefined,",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership([
+      ...records,
+      {
+        relative: "packages/cli/src/runtime/task-list-actions.ts",
+        text: "export function applyTaskListAction() {}",
+      },
+    ]).join("\n"),
     /Conversation directory management lacks one domain application/,
   );
   assert.match(

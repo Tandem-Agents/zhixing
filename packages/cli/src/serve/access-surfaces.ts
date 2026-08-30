@@ -21,6 +21,7 @@ import {
 } from "@zhixing/core";
 import type { AuthorityCallContext } from "@zhixing/core/contracts";
 import {
+  createConversationTaskListChangedFact,
   projectConversationClear,
   projectConversationDelete,
 } from "@zhixing/core/conversation/application";
@@ -660,6 +661,19 @@ const conversationSurface: AccessSurface = {
             ctx.taskListService.acceptCommitted(
               conversationId,
               record.mutation.op.state,
+            );
+            const fact = createConversationTaskListChangedFact(
+              conversationId,
+              record.mutation.op.state,
+            );
+            ctx.sessionBroadcastRef.current?.(
+              conversationId,
+              SESSION_NOTIFICATIONS.changed,
+              {
+                conversationId: fact.conversationId,
+                change: "taskList",
+                taskList: fact.taskList,
+              } satisfies SessionChangedPayload,
             );
             continue;
           }

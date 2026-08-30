@@ -81,6 +81,8 @@ import {
   type ConversationDeleteProjectionPort,
   type ConversationDirectoryStorage,
   type ConversationAdoptionReviewProjection,
+  type ConversationTaskListMutationDecision,
+  type ConversationTaskListPort,
 } from "@zhixing/core/conversation/application";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import { loadAdvancementState } from "../rpc/methods/session.js";
@@ -484,8 +486,9 @@ function createConversationProductApi(input: {
         lastActiveAt: string;
       }> | null>;
       deleteStoredConversation(conversationId: string): Promise<boolean>;
-    }>;
+  }>;
   readonly conversations: ConversationManager;
+  readonly taskLists?: ConversationTaskListPort;
   readonly advancement?: AdvancementController;
   readonly advancementRecovery?: Readonly<{
     recoverConversation(conversationId: string): Promise<unknown>;
@@ -500,6 +503,7 @@ function createConversationProductApi(input: {
 }): ProductApiDispatcher {
   const application = new ConversationDirectoryApplicationService({
     storage: input.directory,
+    ...(input.taskLists ? { taskLists: input.taskLists } : {}),
     agentTurns: createConversationAgentTurnAdmissionPort({
       manager: input.conversations,
     }),
@@ -776,6 +780,49 @@ function createConversationProductApi(input: {
     CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
     [createConversationDirectoryProductApiContribution(application)],
   );
+}
+
+function createMemoryTaskListPort(input: Readonly<{
+  conversations: ConversationManager;
+  exists(conversationId: string): Promise<boolean>;
+  onWrite?: (conversationId: string, state: TaskListState) => void;
+}>): ConversationTaskListPort {
+  const taskLists = new Map<string, TaskListState>();
+  return {
+    requiresStableOperationIdentity: false,
+    createOperationIdentity: () => "task-list-operation-1",
+    createTaskIdentity: () => "task-1",
+    read: async (conversationId) => taskLists.get(conversationId) ?? null,
+    maintain: async (request) => {
+      const result = await input.conversations.runMaintenanceExisting(
+        request.conversationId,
+        () => input.exists(request.conversationId),
+        async () => {
+          const current = taskLists.get(request.conversationId) ?? { items: [] };
+          const decision = request.decide(current);
+          const taskList = hasTaskListWrite(decision)
+            ? { items: [...decision.next.items] }
+            : current;
+          if (hasTaskListWrite(decision)) {
+            taskLists.set(request.conversationId, taskList);
+            input.onWrite?.(request.conversationId, taskList);
+          }
+          return { decision, taskList };
+        },
+      );
+      if (result.status !== "done") return result;
+      return { status: "done", ...result.value };
+    },
+  };
+}
+
+function hasTaskListWrite(
+  decision: ConversationTaskListMutationDecision,
+): decision is Extract<
+  ConversationTaskListMutationDecision,
+  { readonly next: unknown }
+> {
+  return "next" in decision;
 }
 
 // ─── 客户端辅助 ───
@@ -3457,37 +3504,33 @@ describe("session.* RPC (S2.D)", () => {
   });
 
   it("session.taskListUpdate 返回写后权威快照;session.taskList 可读同源快照", async () => {
-    const taskLists = new Map<string, TaskListState>();
     const conversations = new ConversationManager(createMockFactory(), {
       graceTimeoutMs: 60_000,
       idleTimeoutMs: 30 * 60_000,
       idleCheckIntervalMs: 999_999,
+    });
+    const directory = createMemoryDirectory(recordsByConversation);
+    await directory.ensure("conv-task");
+    const taskLists = createMemoryTaskListPort({
+      conversations,
+      exists: (conversationId) => directory.exists(conversationId),
     });
     const ctx = createServerContext({
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
-      taskListSnapshot: async (conversationId) =>
-        taskLists.get(conversationId) ?? null,
-      taskListUpdate: async (conversationId, action) => {
-        const curr = taskLists.get(conversationId) ?? { items: [] };
-        const next: TaskListState =
-          action.kind === "add"
-            ? {
-                items: [
-                  ...curr.items,
-                  { id: "task-1", content: action.content, status: "pending" },
-                ],
-              }
-            : curr;
-        taskLists.set(conversationId, next);
-        return { ok: true, message: "ok", taskList: next };
-      },
+      conversationDirectory: directory,
+      productApi: createConversationProductApi({
+        directory,
+        conversations,
+        taskLists,
+      }),
     });
     server = await startServer({ context: ctx });
     const client = await connect(server.port);
     await client.request("auth", { token: TEST_TOKEN });
+    await client.request("session.subscribe", { conversationId: "conv-task" });
 
     const before = await client.request("session.taskList", {
       conversationId: "conv-task",
@@ -3501,9 +3544,34 @@ describe("session.* RPC (S2.D)", () => {
     });
     expect(isSuccessResponse(updated)).toBe(true);
     const updateResult = (
-      updated as { result: { taskList: TaskListState } }
+      updated as {
+        result: { ok: boolean; message: string; taskList: TaskListState };
+      }
     ).result;
+    expect(Object.keys(updateResult).sort()).toEqual(["message", "ok", "taskList"]);
     expect(updateResult.taskList.items[0]?.content).toBe("写周报");
+    await expect(client.waitNotification("session.changed")).resolves.toMatchObject({
+      params: {
+        conversationId: "conv-task",
+        change: "taskList",
+      },
+    });
+
+    const noWrite = await client.request("session.taskListUpdate", {
+      conversationId: "conv-task",
+      action: { kind: "done", token: "missing" },
+    });
+    expect(isSuccessResponse(noWrite)).toBe(true);
+    const noWriteResult = (
+      noWrite as {
+        result: { ok: boolean; message: string; taskList: TaskListState };
+      }
+    ).result;
+    expect(Object.keys(noWriteResult).sort()).toEqual(["message", "ok", "taskList"]);
+    expect(noWriteResult.ok).toBe(false);
+    await expect(client.waitNotification("session.changed", 100)).rejects.toThrow(
+      "Timeout waiting for notification: session.changed",
+    );
 
     const after = await client.request("session.taskList", {
       conversationId: "conv-task",
@@ -3542,12 +3610,12 @@ describe("session.* RPC (S2.D)", () => {
       productApi: createConversationProductApi({
         directory,
         conversations,
+        taskLists: createMemoryTaskListPort({
+          conversations,
+          exists: (conversationId) => directory.exists(conversationId),
+          onWrite: (_conversationId, state) => updates.push(state),
+        }),
       }),
-      taskListSnapshot: async () => null,
-      taskListUpdate: async (_conversationId, action) => {
-        updates.push(action);
-        return { ok: true, message: "ok", taskList: { items: [] } };
-      },
     });
     server = await startServer({ context: ctx });
     const client = await connect(server.port);

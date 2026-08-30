@@ -12,6 +12,8 @@ import {
   CONVERSATION_RENAME_COMMAND,
   CONVERSATION_RESUME_COMMAND,
   CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
+  CONVERSATION_TASK_LIST_QUERY,
+  CONVERSATION_UPDATE_TASK_LIST_COMMAND,
   ConversationApplicationError,
   ConversationDirectoryApplicationService,
   createConversationDirectoryProductApiContribution,
@@ -21,6 +23,7 @@ import {
   type ConversationDirectoryRecord,
   type ConversationDirectoryStorage,
   type ConversationAgentTurnAdmissionPort,
+  type ConversationTaskListPort,
 } from "./application.js";
 
 function fixture(records: ConversationDirectoryRecord[] = []) {
@@ -57,6 +60,55 @@ function fixture(records: ConversationDirectoryRecord[] = []) {
     [createConversationDirectoryProductApiContribution(application)],
   );
   return { application, dispatcher, history, storage };
+}
+
+function taskListFixture(input?: Readonly<{
+  requiresStableOperationIdentity?: boolean;
+}>) {
+  let state = { items: [] } as {
+    items: Array<{
+      id: string;
+      content: string;
+      status: "pending" | "in_progress" | "completed";
+    }>;
+  };
+  let terminal: "done" | "busy" | "not-found" = "done";
+  const writes: typeof state[] = [];
+  const port: ConversationTaskListPort = {
+    requiresStableOperationIdentity:
+      input?.requiresStableOperationIdentity ?? false,
+    createOperationIdentity: () => "task-list-operation-1",
+    createTaskIdentity: () => "task-1",
+    read: async () => state,
+    maintain: async (request) => {
+      if (terminal !== "done") return { status: terminal };
+      const decision = request.decide(state);
+      if ("next" in decision) {
+        state = { items: [...decision.next.items] };
+        writes.push(state);
+      }
+      return { status: "done", decision, taskList: state };
+    },
+  };
+  const application = new ConversationDirectoryApplicationService({
+    storage: fixture().storage,
+    taskLists: port,
+  });
+  const dispatcher = new ProductApiDispatcher(
+    CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+    [createConversationDirectoryProductApiContribution(application)],
+  );
+  return {
+    application,
+    dispatcher,
+    writes,
+    set state(value: typeof state) {
+      state = value;
+    },
+    set terminal(value: typeof terminal) {
+      terminal = value;
+    },
+  };
 }
 
 describe("ConversationDirectoryApplicationService", () => {
@@ -135,6 +187,108 @@ describe("ConversationDirectoryApplicationService", () => {
         limit: 0,
       }),
     ).rejects.toMatchObject({ code: "invalid-input" });
+  });
+
+  it("owns task-list query, write decision, committed snapshot and fact", async () => {
+    const harness = taskListFixture();
+    await expect(
+      harness.dispatcher.query(CONVERSATION_TASK_LIST_QUERY, {
+        kind: "task-list",
+        conversationId: "conversation-1",
+      }),
+    ).resolves.toEqual({ taskList: { items: [] } });
+
+    const dispatched = await harness.dispatcher.command(
+      CONVERSATION_UPDATE_TASK_LIST_COMMAND,
+      {
+        kind: "update-task-list",
+        conversationId: "conversation-1",
+        action: { kind: "add", content: "  写周报  " },
+      },
+    );
+    expect(dispatched).toEqual({
+      result: {
+        ok: true,
+        message: '✓ 添加：“写周报”',
+        taskList: {
+          items: [{ id: "task-1", content: "写周报", status: "pending" }],
+        },
+      },
+      facts: [
+        {
+          kind: "conversation-task-list-changed",
+          conversationId: "conversation-1",
+          taskList: {
+            items: [{ id: "task-1", content: "写周报", status: "pending" }],
+          },
+        },
+      ],
+    });
+    expect(harness.writes).toHaveLength(1);
+  });
+
+  it("keeps invalid, missing and already-completed task updates read-only", async () => {
+    const harness = taskListFixture();
+    harness.state = {
+      items: [{ id: "task-1", content: "已做", status: "completed" }],
+    };
+    for (const action of [
+      { kind: "add" as const, content: "   " },
+      { kind: "done" as const, token: "" },
+      { kind: "done" as const, token: "missing" },
+      { kind: "done" as const, token: "1" },
+    ]) {
+      const dispatch = await harness.dispatcher.command(
+        CONVERSATION_UPDATE_TASK_LIST_COMMAND,
+        {
+          kind: "update-task-list",
+          conversationId: "conversation-1",
+          action,
+        },
+      );
+      expect(dispatch.result.ok).toBe(false);
+      expect(dispatch.facts).toEqual([]);
+    }
+    expect(harness.writes).toEqual([]);
+  });
+
+  it("maps task-list maintenance busy/not-found before any write", async () => {
+    const harness = taskListFixture();
+    harness.terminal = "busy";
+    await expect(
+      harness.application.updateTaskList({
+        kind: "update-task-list",
+        conversationId: "conversation-1",
+        action: { kind: "add", content: "x" },
+      }),
+    ).rejects.toMatchObject({ code: "busy", reason: "task-list-busy" });
+    harness.terminal = "not-found";
+    await expect(
+      harness.application.updateTaskList({
+        kind: "update-task-list",
+        conversationId: "conversation-1",
+        action: { kind: "add", content: "x" },
+      }),
+    ).rejects.toMatchObject({
+      code: "not-found",
+      reason: "task-list-conversation-not-found",
+    });
+    expect(harness.writes).toEqual([]);
+  });
+
+  it("requires stable task-list operation identity when the mechanism does", async () => {
+    const harness = taskListFixture({ requiresStableOperationIdentity: true });
+    await expect(
+      harness.application.updateTaskList({
+        kind: "update-task-list",
+        conversationId: "conversation-1",
+        action: { kind: "add", content: "x" },
+      }),
+    ).rejects.toMatchObject({
+      code: "invalid-input",
+      reason: "task-list-operation-required",
+    });
+    expect(harness.writes).toEqual([]);
   });
 
   it("uses one dispatcher for list/create/rename and emits rename fact after storage", async () => {

@@ -49,6 +49,8 @@ import {
   CONVERSATION_RENAME_COMMAND,
   CONVERSATION_RESUME_COMMAND,
   CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
+  CONVERSATION_TASK_LIST_QUERY,
+  CONVERSATION_UPDATE_TASK_LIST_COMMAND,
   ConversationApplicationError,
   type ConversationDirectoryEntry,
   type ConversationPreparedAgentTurnIdentity,
@@ -2704,7 +2706,7 @@ interface SessionTaskListUpdateParams {
   action?: SessionTaskListAction;
 }
 
-/** /task new·done 的宿主执行体——写单点在宿主 task_list 服务。 */
+/** /task new·done wire binding; Conversation owns the application decision. */
 export function buildSessionTaskListUpdateMethod(): MethodEntry {
   return {
     name: "session.taskListUpdate",
@@ -2727,29 +2729,35 @@ export function buildSessionTaskListUpdateMethod(): MethodEntry {
         );
       }
       const conversationId = params.conversationId;
-      const update = ctx.server.taskListUpdate;
-      if (!update) {
-        throw new RpcAppError(
-          RPC_ERROR_CODES.INTERNAL_ERROR,
-          "Task list update executor not configured on server",
-        );
-      }
-      const manager = requireConversations(ctx.server);
-      const result = await manager.runMaintenanceExisting(
-        conversationId,
-        existingConversationCheck(ctx.server, conversationId),
-        () => update(conversationId, action),
+      const productApi = requireConversationProductApi(
+        ctx.server,
+        CONVERSATION_UPDATE_TASK_LIST_COMMAND,
       );
-      if (result.status === "busy") {
-        throw new RpcAppError(
-          RPC_ERROR_CODES.BUSY,
-          "Conversation has an in-flight turn or maintenance operation; update tasks after it completes",
+      try {
+        const dispatch = await productApi.command(
+          CONVERSATION_UPDATE_TASK_LIST_COMMAND,
+          {
+            kind: "update-task-list",
+            conversationId,
+            action,
+          },
         );
+        const fact = dispatch.facts[0];
+        if (fact) {
+          ctx.server.sessionBroadcast?.(
+            conversationId,
+            SESSION_NOTIFICATIONS.changed,
+            {
+              conversationId: fact.conversationId,
+              change: "taskList",
+              taskList: fact.taskList,
+            } satisfies SessionChangedPayload,
+          );
+        }
+        return dispatch.result;
+      } catch (error) {
+        throw mapConversationTaskListApplicationError(error, conversationId);
       }
-      if (result.status === "not-found") {
-        throw RpcErrors.notFound(`Session not found: ${conversationId}`);
-      }
-      return result.value;
     },
   };
 }
@@ -2760,7 +2768,7 @@ interface SessionTaskListParams {
   conversationId?: string;
 }
 
-/** task_list 权威读模型——发起端启动 / 切换 / 清空后同步只读视图。 */
+/** task_list wire query; Conversation owns the authoritative projection. */
 export function buildSessionTaskListMethod(): MethodEntry {
   return {
     name: "session.taskList",
@@ -2772,14 +2780,21 @@ export function buildSessionTaskListMethod(): MethodEntry {
           "session.taskList requires 'conversationId'",
         );
       }
-      const snapshot = ctx.server.taskListSnapshot;
-      if (!snapshot) {
-        throw new RpcAppError(
-          RPC_ERROR_CODES.INTERNAL_ERROR,
-          "Task list snapshot reader not configured on server",
+      const productApi = requireConversationProductApi(
+        ctx.server,
+        CONVERSATION_TASK_LIST_QUERY,
+      );
+      try {
+        return await productApi.query(CONVERSATION_TASK_LIST_QUERY, {
+          kind: "task-list",
+          conversationId: params.conversationId,
+        });
+      } catch (error) {
+        throw mapConversationTaskListApplicationError(
+          error,
+          params.conversationId,
         );
       }
-      return { taskList: await snapshot(params.conversationId) };
     },
   };
 }
@@ -3141,6 +3156,25 @@ function mapConversationApplicationError(
   }
   return RpcErrors.invalidParams(
     "session.history 'limit' must be a positive integer",
+  );
+}
+
+function mapConversationTaskListApplicationError(
+  error: unknown,
+  conversationId: string,
+): unknown {
+  if (!(error instanceof ConversationApplicationError)) return error;
+  if (error.code === "not-found") {
+    return RpcErrors.notFound(`Session not found: ${conversationId}`);
+  }
+  if (error.code === "busy") {
+    return new RpcAppError(
+      RPC_ERROR_CODES.BUSY,
+      "Conversation has an in-flight turn or maintenance operation; update tasks after it completes",
+    );
+  }
+  return RpcErrors.invalidParams(
+    "session.taskListUpdate requires 'action' of kind add{content} or done{token}",
   );
 }
 
