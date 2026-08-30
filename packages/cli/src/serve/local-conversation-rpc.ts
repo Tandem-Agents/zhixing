@@ -88,6 +88,12 @@ export class LocalConversationRpcRouter
       observerCount: (conversationId) =>
         this.#observers.get(conversationId)?.size ?? 0,
     });
+    input.owner.subscribeConversationFacts((fact) => {
+      this.#notify(fact.conversationId, "session.changed", {
+        conversationId: fact.conversationId,
+        change: "cleared",
+      });
+    });
   }
 
   async dispatch(input: {
@@ -365,16 +371,20 @@ export class LocalConversationRpcRouter
       case "session.clear": {
         requireLocalConsent(params);
         const conversationId = this.#conversationId(params, method);
-        await this.#mutate(
-          conversationId,
-          requiredIdentifier(params.requestId, "清空请求"),
-          { kind: "window-op", op: "clear" },
-        );
-        this.#notify(conversationId, "session.changed", {
-          conversationId,
-          change: "cleared",
-        });
-        return { cleared: true };
+        try {
+          const cleared = await this.#application.clear({
+            kind: "clear",
+            conversationId,
+            operationId: requiredIdentifier(params.requestId, "清空请求"),
+            caller: {
+              kind: "host",
+              component: "local-conversation-rpc",
+            },
+          });
+          return { cleared: cleared.cleared };
+        } catch (error) {
+          throw mapLocalConversationApplicationError(error, "clear");
+        }
       }
       case "session.delete": {
         requireLocalConsent(params);
@@ -723,7 +733,7 @@ function projectWireConversationEntry(
 
 function mapLocalConversationApplicationError(
   error: unknown,
-  operation: "history" | "rename",
+  operation: "history" | "rename" | "clear",
 ): unknown {
   if (!(error instanceof ConversationApplicationError)) return error;
   if (error.code === "not-found") {
@@ -731,8 +741,15 @@ function mapLocalConversationApplicationError(
       "这台电脑上没有这个对话，请从列表中重新选择。",
     );
   }
+  if (error.code === "busy") {
+    return RpcErrors.busy(
+      "这个对话正在处理其他操作，请稍后重试。",
+    );
+  }
   return RpcErrors.invalidParams(
-    operation === "rename"
+    operation === "clear"
+      ? "清空请求缺少有效的请求标识。"
+      : operation === "rename"
       ? "对话名称不能为空。"
       : error.message.includes("cursor")
         ? "历史记录位置无效，请重新打开对话。"

@@ -26,6 +26,7 @@ import type {
   ShardedTranscriptStore,
   SnapshotStore,
 } from "@zhixing/core";
+import type { ConversationClearProjectionPort } from "@zhixing/core/conversation/application";
 import type {
   DeviceRole,
   EvidenceHandlerPort,
@@ -142,6 +143,11 @@ export interface AssemblyContext {
   readonly convRepo: ConversationRepository;
   /** 对话目录——会话执行面经此归口创建 / 确保持久化身份 */
   readonly conversationDirectory: ConversationDirectory;
+  /** Conversation-owned clear projection; never exposed through ServerContext. */
+  readonly conversationClearProjection: Pick<
+    ConversationClearProjectionPort,
+    "clearStoredView"
+  >;
   readonly conversationRepoFor: (conversationId: string) => {
     readonly repo: import("@zhixing/core").IConversationRepository;
     readonly localId: string;

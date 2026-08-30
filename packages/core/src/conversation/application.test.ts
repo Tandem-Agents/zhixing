@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ProductApiDispatcher } from "../product-api/catalog.js";
 import {
   CONVERSATION_CREATE_COMMAND,
+  CONVERSATION_CLEAR_COMMAND,
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
   CONVERSATION_HISTORY_QUERY,
   CONVERSATION_LIST_QUERY,
@@ -10,6 +11,7 @@ import {
   ConversationDirectoryApplicationService,
   createConversationDirectoryProductApiContribution,
   mergeConversationDirectoryViews,
+  projectConversationClear,
   type ConversationDirectoryRecord,
   type ConversationDirectoryStorage,
 } from "./application.js";
@@ -173,6 +175,115 @@ describe("ConversationDirectoryApplicationService", () => {
         name: "x",
       }),
     ).rejects.toBeInstanceOf(ConversationApplicationError);
+  });
+
+  it("owns stable clear admission and emits its fact only after the commit boundary", async () => {
+    const committed: string[] = [];
+    const application = new ConversationDirectoryApplicationService({
+      storage: {
+        list: async () => [],
+        create: async () => { throw new Error("unused"); },
+        rename: async () => null,
+        readHistory: async () => ({ runs: [], hasMore: false }),
+      },
+      clear: {
+        requiresStableOperationIdentity: true,
+        createOperationIdentity: () => { throw new Error("must not generate"); },
+        commit: async (input) => {
+          committed.push(input.operationId);
+          return { status: "cleared" };
+        },
+      },
+    });
+    const dispatcher = new ProductApiDispatcher(
+      CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+      [createConversationDirectoryProductApiContribution(application)],
+    );
+    await expect(dispatcher.command(CONVERSATION_CLEAR_COMMAND, {
+      kind: "clear",
+      conversationId: "conversation-1",
+      operationId: "clear-operation-1",
+      caller: { kind: "host", component: "test" },
+    })).resolves.toEqual({
+      result: {
+        cleared: true,
+        fact: {
+          kind: "conversation-cleared",
+          conversationId: "conversation-1",
+          operationId: "clear-operation-1",
+        },
+      },
+      facts: [{
+        kind: "conversation-cleared",
+        conversationId: "conversation-1",
+        operationId: "clear-operation-1",
+      }],
+    });
+    expect(committed).toEqual(["clear-operation-1"]);
+    await expect(application.clear({
+      kind: "clear",
+      conversationId: "conversation-1",
+      caller: { kind: "host", component: "test" },
+    })).rejects.toMatchObject({ code: "invalid-input" });
+  });
+
+  it("owns clear busy and not-found terminals", async () => {
+    let outcome:
+      | { readonly status: "busy"; readonly reason: "active-turn" }
+      | { readonly status: "not-found" } = {
+        status: "busy",
+        reason: "active-turn",
+      };
+    const application = new ConversationDirectoryApplicationService({
+      storage: {
+        list: async () => [],
+        create: async () => { throw new Error("unused"); },
+        rename: async () => null,
+        readHistory: async () => ({ runs: [], hasMore: false }),
+      },
+      clear: {
+        requiresStableOperationIdentity: true,
+        createOperationIdentity: () => { throw new Error("must not generate"); },
+        commit: async () => outcome,
+      },
+    });
+    const command = {
+      kind: "clear" as const,
+      conversationId: "conversation-1",
+      operationId: "clear-operation-1",
+      caller: { kind: "host" as const, component: "test" },
+    };
+
+    await expect(application.clear(command)).rejects.toMatchObject({
+      code: "busy",
+      reason: "active-turn",
+    });
+    outcome = { status: "not-found" };
+    await expect(application.clear(command)).rejects.toMatchObject({
+      code: "not-found",
+    });
+  });
+
+  it("projects storage before runtime reset and publishes only a cleared result", async () => {
+    const steps: string[] = [];
+    const fact = await projectConversationClear({
+      conversationId: "conversation-1",
+      operationId: "clear-operation-1",
+      projection: {
+        clearStoredView: async () => {
+          steps.push("storage");
+          return true;
+        },
+        clearRuntimeView: async (_conversationId, persist) => {
+          expect(await persist()).toBe(true);
+          steps.push("runtime");
+          return "cleared";
+        },
+      },
+      publishFact: () => { steps.push("fact"); },
+    });
+    expect(fact.kind).toBe("conversation-cleared");
+    expect(steps).toEqual(["storage", "runtime", "fact"]);
   });
 
   it("owns cross-owner list merge ordering without changing local availability", () => {

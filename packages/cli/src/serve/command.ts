@@ -152,6 +152,7 @@ import { createZhixingGuidanceLifecycle } from "./zhixing-guidance-lifecycle.js"
 import { readGuidanceFile } from "./read-guidance-file.js";
 import { createConversationAliveCheck } from "./advancement-gc.js";
 import { createConversationDirectory } from "./conversation-directory.js";
+import { createAnchorConversationClearCommitPort } from "./conversation-clear-binding.js";
 import { createWorksceneDirectory } from "./workscene-directory.js";
 import { createWorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 import { createTrustAdministrationApplication } from "./trust-administration-adapter.js";
@@ -842,6 +843,7 @@ async function runServerProcess(
     ...(executor ? { executorRoleModule: executor } : {}),
     convRepo,
     conversationDirectory,
+    conversationClearProjection: conversationDirectory,
     conversationRepoFor: repoForConversationId,
     taskListService: builtinExtraTools.taskListService,
     conversationAuthorityRef,
@@ -1920,6 +1922,17 @@ async function runServerProcess(
     : undefined;
   const conversationApplication = new ConversationDirectoryApplicationService({
     storage: conversationDirectory,
+    clear: createAnchorConversationClearCommitPort({
+      conversations: ctx.conversations!,
+      directory: conversationDirectory,
+      publishFact: (fact) => {
+        ctx.sessionBroadcastRef.current?.(
+          fact.conversationId,
+          SESSION_NOTIFICATIONS.changed,
+          { conversationId: fact.conversationId, change: "cleared" },
+        );
+      },
+    }),
     runtime: {
       read: (conversationId) => {
         const active = ctx.conversations?.getSession(conversationId);

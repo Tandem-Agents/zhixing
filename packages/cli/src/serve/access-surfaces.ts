@@ -20,6 +20,7 @@ import {
   parseConversationId,
 } from "@zhixing/core";
 import type { AuthorityCallContext } from "@zhixing/core/contracts";
+import { projectConversationClear } from "@zhixing/core/conversation/application";
 import { ConversationManager } from "@zhixing/owner-kernel";
 import {
   createControlSessionEventEnvelope,
@@ -526,22 +527,27 @@ const conversationSurface: AccessSurface = {
       },
       projectLifecycle: async (input) => {
         if (input.mutation === "clear") {
-          const outcome = await manager.clear(input.conversationId, async () => {
-            await ctx.conversationDirectory.ensure(input.conversationId);
-            await ctx.conversationDirectory.clear(input.conversationId);
-            return true;
+          await projectConversationClear({
+            conversationId: input.conversationId,
+            operationId: input.requestId,
+            projection: {
+              clearStoredView: async (conversationId) => {
+                await ctx.conversationDirectory.ensure(conversationId);
+                return ctx.conversationClearProjection.clearStoredView(
+                  conversationId,
+                );
+              },
+              clearRuntimeView: (conversationId, persist) =>
+                manager.clear(conversationId, persist),
+            },
+            publishFact: (fact) => {
+              ctx.sessionBroadcastRef.current?.(
+                fact.conversationId,
+                SESSION_NOTIFICATIONS.changed,
+                { conversationId: fact.conversationId, change: "cleared" },
+              );
+            },
           });
-          if (outcome === "busy") {
-            throw new Error("Conversation lifecycle projection is busy");
-          }
-          if (outcome === "not-found") {
-            throw new Error("Conversation lifecycle projection lost its identity");
-          }
-          ctx.sessionBroadcastRef.current?.(
-            input.conversationId,
-            SESSION_NOTIFICATIONS.changed,
-            { conversationId: input.conversationId, change: "cleared" },
-          );
           return;
         }
         const outcome = await manager.delete(input.conversationId, {

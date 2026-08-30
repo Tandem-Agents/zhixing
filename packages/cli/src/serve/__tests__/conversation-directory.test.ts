@@ -15,6 +15,12 @@ import {
   type ConversationScope,
   worksceneConversationId,
 } from "@zhixing/core";
+import { ConversationDirectoryApplicationService } from "@zhixing/core/conversation/application";
+import {
+  ConversationManager,
+  type RuntimeFactory,
+} from "@zhixing/owner-kernel";
+import { createAnchorConversationClearCommitPort } from "../conversation-clear-binding.js";
 import { createConversationDirectory } from "../conversation-directory.js";
 import { createWorksceneStorageCleanup } from "../workscene-storage-cleanup.js";
 
@@ -119,19 +125,53 @@ describe("conversation directory(持久层实现)", () => {
       clearTaskListCache: (id) => clearedCache.push(id),
     });
 
-    expect(await dir.clear("ghost")).toBe(false);
+    expect(await dir.clearStoredView("ghost")).toBe(false);
 
     const created = await repo.create({ name: "待清" });
     await transcript.init(created.id);
     await transcript.appendRunRecord(created.id, record("清空前"));
 
-    expect(await dir.clear(created.id)).toBe(true);
+    expect(await dir.clearStoredView(created.id)).toBe(true);
     expect(clearedCache).toEqual([created.id]);
     // 清空事件之后倒读不再见旧内容
     expect(await dir.readHistory(created.id, { limit: 5 })).toEqual({
       runs: [],
       hasMore: false,
     });
+  });
+
+  it("legacy clear binding:未知身份保持 NOT_FOUND 且零目录/正文/通知副作用", async () => {
+    const manager = new ConversationManager(
+      {
+        create: async () => {
+          throw new Error("runtime must not be created while clearing a missing id");
+        },
+      } satisfies RuntimeFactory,
+      { idleCheckIntervalMs: 999_999 },
+    );
+    const facts: string[] = [];
+    const application = new ConversationDirectoryApplicationService({
+      storage: directory,
+      clear: createAnchorConversationClearCommitPort({
+        conversations: manager,
+        directory,
+        publishFact: (fact) => facts.push(fact.conversationId),
+      }),
+    });
+
+    try {
+      await expect(application.clear({
+        kind: "clear",
+        conversationId: "ghost",
+        caller: { kind: "host", component: "test" },
+      })).rejects.toMatchObject({ code: "not-found" });
+      expect(await directory.exists("ghost")).toBe(false);
+      expect(await repo.get("ghost")).toBeNull();
+      expect(await transcript.exists("ghost")).toBe(false);
+      expect(facts).toEqual([]);
+    } finally {
+      await manager.disposeAll();
+    }
   });
 
   it("clear:workscene 全域 id 走共享 routed repo,清理 local meta 的 task_list", async () => {
@@ -158,7 +198,7 @@ describe("conversation directory(持久层实现)", () => {
       clearTaskListCache: (id) => clearedCache.push(id),
     });
 
-    expect(await dir.clear(globalId)).toBe(true);
+    expect(await dir.clearStoredView(globalId)).toBe(true);
 
     expect((await sceneRepo.get(created.id))?.taskListState).toBeUndefined();
     expect(clearedCache).toEqual([globalId]);

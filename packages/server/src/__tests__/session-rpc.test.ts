@@ -74,6 +74,8 @@ import {
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
   ConversationDirectoryApplicationService,
   createConversationDirectoryProductApiContribution,
+  projectConversationClear,
+  type ConversationClearProjectionPort,
   type ConversationDirectoryStorage,
 } from "@zhixing/core/conversation/application";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
@@ -353,7 +355,8 @@ async function waitUntil(
  */
 function createMemoryDirectory(
   records: Map<string, unknown[]>,
-): ConversationDirectory & ConversationDirectoryStorage {
+): ConversationDirectory & ConversationDirectoryStorage &
+  Pick<ConversationClearProjectionPort, "clearStoredView"> {
   const names = new Map<string, string>();
   const removed = new Set<string>();
   let createdSeq = 0;
@@ -410,7 +413,7 @@ function createMemoryDirectory(
       if (!exists(id)) return null;
       return meta(id);
     },
-    async clear(id) {
+    async clearStoredView(id) {
       if (!exists(id)) return false;
       records.set(id, []);
       return true;
@@ -456,12 +459,54 @@ function createMemoryDirectory(
 }
 
 function createConversationProductApi(input: {
-  readonly directory: ConversationDirectoryStorage;
+  readonly directory: ConversationDirectoryStorage &
+    Pick<ConversationClearProjectionPort, "clearStoredView"> &
+    Pick<ConversationDirectory, "exists" | "ensure">;
   readonly conversations: ConversationManager;
   readonly advancement?: AdvancementController;
+  readonly publishCleared?: (conversationId: string) => void;
 }): ProductApiDispatcher {
   const application = new ConversationDirectoryApplicationService({
     storage: input.directory,
+    clear: {
+      requiresStableOperationIdentity:
+        input.conversations.usesDurableTurnProtocol(),
+      createOperationIdentity: () => "session.clear:test-legacy-operation",
+      commit: async ({ conversationId, operationId, caller }) => {
+        if (input.conversations.usesDurableTurnProtocol()) {
+          if (caller.kind !== "surface") throw new Error("surface caller required");
+          const write = await input.conversations.writeDurableSession({
+            conversationId,
+            requestId: operationId,
+            mutation: { kind: "window-op", op: "clear" },
+            principal: input.conversations.durableControlPrincipal(caller),
+            conversationExists: () => input.directory.exists(conversationId),
+          });
+          if (write.status === "busy") {
+            return { status: "busy", reason: "pending-lifecycle" } as const;
+          }
+          if (write.status === "not-found") return write;
+          await input.conversations.projectDurableSession({
+            conversationId,
+            requestId: operationId,
+            mutation: "clear",
+            domainRevision: write.domainRevision,
+          });
+          return { status: "cleared" } as const;
+        }
+        await projectConversationClear({
+          conversationId,
+          operationId,
+          projection: {
+            clearStoredView: (id) => input.directory.clearStoredView(id),
+            clearRuntimeView: (id, persist) =>
+              input.conversations.clear(id, persist),
+          },
+          publishFact: (fact) => input.publishCleared?.(fact.conversationId),
+        });
+        return { status: "cleared" } as const;
+      },
+    },
     runtime: {
       read: (conversationId) => {
         const active = input.conversations.getSession(conversationId);
@@ -928,7 +973,19 @@ describe("session.* RPC (S2.D)", () => {
             events: createAdvancementEventSink(() => null),
           })
         : undefined;
-    const ctx = createServerContext({
+    let ctx!: ReturnType<typeof createServerContext>;
+    const productApi = createConversationProductApi({
+      directory: conversationDirectory,
+      conversations,
+      advancement: opts.advancement,
+      publishCleared: (conversationId) => {
+        ctx.sessionBroadcast?.(conversationId, "session.changed", {
+          conversationId,
+          change: "cleared",
+        });
+      },
+    });
+    ctx = createServerContext({
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
@@ -937,11 +994,7 @@ describe("session.* RPC (S2.D)", () => {
       advancementRecovery,
       perspectives: opts.perspectives,
       conversationDirectory,
-      productApi: createConversationProductApi({
-        directory: conversationDirectory,
-        conversations,
-        advancement: opts.advancement,
-      }),
+      productApi,
     });
     server = await startServer({ context: ctx });
   }
@@ -2805,6 +2858,32 @@ describe("session.* RPC (S2.D)", () => {
       conversationId: sessionId,
       change: "cleared",
     });
+
+    client.close();
+  });
+
+  it("session.clear:legacy 未知身份保持 NOT_FOUND 且不建目录、不写正文、不广播", async () => {
+    await startWithFactory(createMockFactory());
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const cleared = await client.request("session.clear", {
+      conversationId: "missing-clear",
+    });
+    expect(isErrorResponse(cleared)).toBe(true);
+    if (isErrorResponse(cleared)) {
+      expect(cleared.error.code).toBe(RPC_ERROR_CODES.NOT_FOUND);
+      expect(cleared.error.message).toBe("Session not found: missing-clear");
+    }
+    expect(recordsByConversation.has("missing-clear")).toBe(false);
+    const list = await client.request("session.list");
+    expect(isSuccessResponse(list)).toBe(true);
+    if (isSuccessResponse(list)) {
+      expect(list.result).toEqual({ conversations: [] });
+    }
+    await expect(
+      client.waitNotification("session.changed", 100),
+    ).rejects.toThrow("Timeout waiting for notification: session.changed");
 
     client.close();
   });

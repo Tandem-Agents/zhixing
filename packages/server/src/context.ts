@@ -194,9 +194,7 @@ export interface ServerContext {
   advancementRecovery?: AdvancementRecoveryMaintenance;
   /** 多视角发散收敛门面。不传则多视角发起意图不可执行。 */
   perspectives?: PerspectivesController;
-  /**
-   * 尚未迁移的对话生命周期持久端口(ensure/touch/clear/delete)。
-   */
+  /** 尚未迁移的对话身份/删除持久桥(ensure/touch/delete)。 */
   conversationDirectory?: ConversationDirectory;
   /** 工作场景域(注册表管理 + 场景对话取建)。不传则 workscene.* 不可用。 */
   workscenes?: WorksceneDirectory;

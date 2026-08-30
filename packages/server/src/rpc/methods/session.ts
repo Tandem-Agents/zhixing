@@ -40,6 +40,7 @@ import {
 import type { ExplicitEnvironmentSelection } from "@zhixing/core/contracts";
 import {
   CONVERSATION_CREATE_COMMAND,
+  CONVERSATION_CLEAR_COMMAND,
   CONVERSATION_HISTORY_QUERY,
   CONVERSATION_LIST_QUERY,
   CONVERSATION_RENAME_COMMAND,
@@ -2474,51 +2475,32 @@ export function buildSessionClearMethod(): MethodEntry {
       }
       const id = params.conversationId;
       const manager = requireConversations(ctx.server);
-      const directory = requireDirectory(ctx.server);
-      const requestId = lifecycleRequestId(
-        params.requestId,
-        manager.usesDurableTurnProtocol(),
-        "session.clear",
-      );
-      const durableControl = manager.usesDurableTurnProtocol()
-        ? {
-            requestId,
-            principal: authenticatedConversationPrincipal(ctx),
-          }
-        : undefined;
-
-      const outcome = durableControl
-        ? await (async () => {
-            const write = await manager.writeDurableSession({
-              conversationId: id,
-              requestId: durableControl.requestId,
-              mutation: { kind: "window-op", op: "clear" },
-              principal: durableControl.principal,
-              conversationExists: async () =>
-                manager.has(id) || (await directory.exists(id)),
-            });
-            const revision = requireDurableLifecycleRevision(
-              write,
-              id,
-              "clearing",
-            );
-            await manager.projectDurableSession({
-              conversationId: id,
-              requestId: durableControl.requestId,
-              mutation: "clear",
-              domainRevision: revision,
-            });
-            return "cleared" as const;
-          })()
-        : await manager.clear(id, () => directory.clear(id));
-      if (outcome === "busy") {
-        throw new RpcAppError(
-          RPC_ERROR_CODES.BUSY,
-          "Conversation has an in-flight turn; abort it before clearing",
-        );
+      if (
+        params.requestId !== undefined &&
+        (!isProtocolIdentifier(params.requestId) ||
+          params.requestId.trim().length === 0)
+      ) {
+        throw RpcErrors.invalidParams("session.clear request identity is invalid");
       }
-      if (outcome === "not-found") {
-        throw RpcErrors.notFound(`Session not found: ${id}`);
+      const productApi = requireConversationProductApi(
+        ctx.server,
+        CONVERSATION_CLEAR_COMMAND,
+      );
+      try {
+        await productApi.command(CONVERSATION_CLEAR_COMMAND, {
+          kind: "clear",
+          conversationId: id,
+          ...(params.requestId !== undefined
+            ? { operationId: params.requestId }
+            : {}),
+          caller: {
+            kind: "surface",
+            surfacePrincipal: rpcSurfacePrincipal(ctx.connection),
+            connectionId: String(ctx.connection.id),
+          },
+        });
+      } catch (error) {
+        throw mapConversationClearApplicationError(error, id);
       }
 
       notifyLifecycleDiagnostics({
@@ -2527,12 +2509,6 @@ export function buildSessionClearMethod(): MethodEntry {
         connection: ctx.connection,
         broadcast: ctx.server.sessionBroadcast,
       });
-      if (!durableControl) {
-        ctx.server.sessionBroadcast?.(id, SESSION_NOTIFICATIONS.changed, {
-          conversationId: id,
-          change: "cleared",
-        } satisfies SessionChangedPayload);
-      }
       return { cleared: true };
     },
   };
@@ -2926,7 +2902,7 @@ function validateTurnId(value: unknown): string {
 function lifecycleRequestId(
   value: unknown,
   durable: boolean,
-  method: "session.clear" | "session.delete",
+  method: "session.delete",
 ): string {
   if (value === undefined) {
     if (durable) {
@@ -2945,7 +2921,7 @@ function lifecycleRequestId(
 function requireDurableLifecycleRevision(
   result: Awaited<ReturnType<ConversationManager["writeDurableSession"]>>,
   conversationId: string,
-  operation: "clearing" | "deleting",
+  operation: "deleting",
 ): number {
   if (result.status === "busy") {
     throw new RpcAppError(
@@ -3200,5 +3176,23 @@ function mapConversationApplicationError(
   }
   return RpcErrors.invalidParams(
     "session.history 'limit' must be a positive integer",
+  );
+}
+
+function mapConversationClearApplicationError(
+  error: unknown,
+  conversationId: string,
+): unknown {
+  if (!(error instanceof ConversationApplicationError)) return error;
+  if (error.code === "not-found") {
+    return RpcErrors.notFound(`Session not found: ${conversationId}`);
+  }
+  if (error.code === "busy") {
+    return new RpcAppError(RPC_ERROR_CODES.BUSY, error.message);
+  }
+  return RpcErrors.invalidParams(
+    error.message.includes("stable operation")
+      ? "session.clear requires a stable 'requestId' while durable execution is enabled"
+      : "session.clear request identity is invalid",
   );
 }

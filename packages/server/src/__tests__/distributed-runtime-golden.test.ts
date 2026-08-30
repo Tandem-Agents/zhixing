@@ -366,9 +366,6 @@ function createGoldenConversationDirectory(): GoldenConversationDirectory {
     async touch(id) {
       return conversations.has(id) ? record(id) : null;
     },
-    async clear(id) {
-      return conversations.has(id);
-    },
     async remove(id) {
       return conversations.delete(id);
     },

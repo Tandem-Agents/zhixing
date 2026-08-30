@@ -95,6 +95,45 @@ describe("LocalConversationRpcRouter", () => {
     );
   });
 
+  it("clear 经领域应用重放同一耐久操作且只投影一次通知", async () => {
+    const port = ownerPort();
+    const router = new LocalConversationRpcRouter({
+      deviceId: DEVICE_ID,
+      owner: port,
+      remoteFor: () => { throw new Error("unexpected remote route"); },
+    });
+    const connection = fakeConnection();
+    await router.dispatch({
+      method: "session.subscribe",
+      params: { conversationId: CONVERSATION_ID },
+      connection,
+    });
+    const request = {
+      method: "session.clear",
+      params: {
+        conversationId: CONVERSATION_ID,
+        requestId: "clear-local-1",
+        continueLocally: true,
+      },
+      connection,
+    };
+    await expect(router.dispatch(request)).resolves.toMatchObject({
+      handled: true,
+      result: { cleared: true },
+    });
+    await expect(router.dispatch(request)).resolves.toMatchObject({
+      handled: true,
+      result: { cleared: true },
+    });
+    expect(port.commitConversationClear).toHaveBeenCalledTimes(2);
+    expect(connection.notify).toHaveBeenCalledTimes(1);
+    expect(connection.notify).toHaveBeenCalledWith("session.changed", {
+      conversationId: CONVERSATION_ID,
+      change: "cleared",
+    });
+    expect(port.mutateSession).not.toHaveBeenCalled();
+  });
+
   it("全局确认能力返回可行动产品语言且不泄漏内部术语", async () => {
     const router = new LocalConversationRpcRouter({
       deviceId: DEVICE_ID,
@@ -303,6 +342,10 @@ describe("LocalConversationRpcRouter", () => {
 });
 
 function ownerPort(): LocalConversationOwnerPort {
+  const factListeners = new Set<
+    Parameters<LocalConversationOwnerPort["subscribeConversationFacts"]>[0]
+  >();
+  const projectedClearOperations = new Set<string>();
   return {
     createConversation: vi.fn(async () => CONVERSATION_ID),
     ensureSession: vi.fn(async () => {}),
@@ -316,6 +359,22 @@ function ownerPort(): LocalConversationOwnerPort {
       ownerEpoch: 1,
       state: "current",
     })),
+    commitConversationClear: vi.fn(async ({ conversationId, operationId }) => {
+      const fact = {
+        kind: "conversation-cleared" as const,
+        conversationId,
+        operationId,
+      };
+      if (!projectedClearOperations.has(operationId)) {
+        projectedClearOperations.add(operationId);
+        for (const listener of factListeners) listener(fact);
+      }
+      return { status: "cleared" };
+    }),
+    subscribeConversationFacts: vi.fn((listener) => {
+      factListeners.add(listener);
+      return () => factListeners.delete(listener);
+    }),
     mutateSession: vi.fn(async () => ({ revision: 1 })),
     cancelTurns: vi.fn(async () => {}),
     resolveDurableUncertain: vi.fn(async () => ({

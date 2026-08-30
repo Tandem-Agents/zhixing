@@ -84,6 +84,13 @@ export function createLocalConversationDirectoryApplication(input: {
   };
   return new ConversationDirectoryApplicationService({
     storage,
+    clear: {
+      requiresStableOperationIdentity: true,
+      createOperationIdentity: () => {
+        throw new Error("Local Conversation clear requires a stable operation identity");
+      },
+      commit: (request) => input.owner.commitConversationClear(request),
+    },
     runtime: {
       read: (conversationId) => ({
         active: false,

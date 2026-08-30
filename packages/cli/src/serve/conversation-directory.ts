@@ -19,6 +19,7 @@ import {
   type RunRecordWithRef,
 } from "@zhixing/core";
 import type {
+  ConversationClearProjectionPort,
   ConversationDirectoryStorage,
 } from "@zhixing/core/conversation/application";
 import type { ConversationDirectory } from "@zhixing/server";
@@ -49,7 +50,8 @@ export function createConversationDirectory(deps: {
    * 保证同一 meta.json 的并发写不会因各自 new repository 绕开 per-id 锁。
    */
   repoForConversationId?: (conversationId: string) => ConversationRepoRoute;
-}): ConversationDirectory & ConversationDirectoryStorage & {
+}): ConversationDirectory & ConversationDirectoryStorage &
+  Pick<ConversationClearProjectionPort, "clearStoredView"> & {
   /** Temporary read-only Advancement recovery bridge; it shares the same storage primitive. */
   readRunsReverse: ConversationDirectoryStorage["readHistory"];
   listForAdvancement(): Promise<readonly Conversation[]>;
@@ -153,7 +155,7 @@ export function createConversationDirectory(deps: {
       }
     },
 
-    async clear(id): Promise<boolean> {
+    async clearStoredView(id): Promise<boolean> {
       const h = handlesFor(id);
       const existing = await h.repo.get(h.localId);
       if (!existing) return false;

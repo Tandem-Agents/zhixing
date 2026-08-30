@@ -26,6 +26,11 @@ import type {
 import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
 import type { ArtifactStore } from "@zhixing/core/authority";
 import {
+  projectConversationClear,
+  type ConversationClearCommitPort,
+  type ConversationClearedFact,
+} from "@zhixing/core/conversation/application";
+import {
   ConversationManager,
   ConversationTransferSource,
   DeferredGlobalIntentRepository,
@@ -108,6 +113,10 @@ export interface LocalConversationOwnerPort {
     readonly authority: CurrentConversationAuthority;
   }[]>;
   currentAuthority(conversationId: string): Promise<CurrentConversationAuthority>;
+  commitConversationClear: ConversationClearCommitPort["commit"];
+  subscribeConversationFacts(
+    listener: (fact: ConversationClearedFact) => void,
+  ): () => void;
   mutateSession: SessionStatePort["mutate"];
   cancelTurns(input: {
     readonly conversationId: string;
@@ -237,6 +246,9 @@ export class LocalConversationOwnerAssembly {
   #commandDrain: Promise<void> | undefined;
   #resolveCommandDrain: (() => void) | undefined;
   readonly #transferringConversations = new Set<string>();
+  readonly #conversationFactListeners: Set<
+    (fact: ConversationClearedFact) => void
+  >;
   readonly #transferAbort = new AbortController();
   #removalOperationId: string | undefined;
   #removalSnapshot: LocalConversationRemovalSnapshot | undefined;
@@ -253,12 +265,16 @@ export class LocalConversationOwnerAssembly {
     readonly intents: DeferredGlobalIntentRepository;
     readonly scheduleIntents: DeferredScheduleIntentProducer;
     readonly rubricCatalog: GlobalRubricCatalog;
+    readonly conversationFactListeners: Set<
+      (fact: ConversationClearedFact) => void
+    >;
   }) {
     this.#owner = input.options.owner;
     this.#protocol = input.protocol;
     this.#manager = input.manager;
     this.#recovery = input.recovery;
     this.#intents = input.intents;
+    this.#conversationFactListeners = input.conversationFactListeners;
     this.#closeDrainBudgetMs = input.options.closeDrainBudgetMs ?? 30_000;
     this.#transferSource = new ConversationTransferSource({
       deviceId: this.#owner.deviceId,
@@ -494,6 +510,42 @@ export class LocalConversationOwnerAssembly {
         return authorities;
       },
       currentAuthority: (conversationId) => this.#currentAuthority(conversationId),
+      commitConversationClear: async ({ conversationId, operationId }) => {
+        return this.#runCommand(async () => {
+          if (!(await this.#isConversationCurrent(conversationId))) {
+            return { status: "not-found" } as const;
+          }
+          try {
+            const write = await sessionState.mutate(
+              conversationId,
+              { kind: "window-op", op: "clear" },
+              hostRequestContext("local-conversation-clear", operationId),
+            );
+            await this.#protocol.projectSession({
+              conversationId,
+              requestId: operationId,
+              mutation: "clear",
+              domainRevision: write.revision,
+            });
+            return { status: "cleared" } as const;
+          } catch (error) {
+            if (isAuthorityErrorCode(error, "not-found")) {
+              return { status: "not-found" } as const;
+            }
+            if (isAuthorityErrorCode(error, "busy")) {
+              return {
+                status: "busy",
+                reason: "pending-lifecycle",
+              } as const;
+            }
+            throw error;
+          }
+        });
+      },
+      subscribeConversationFacts: (listener) => {
+        this.#conversationFactListeners.add(listener);
+        return () => this.#conversationFactListeners.delete(listener);
+      },
       mutateSession: async (conversationId, mutation, context) => {
         return this.#runCommand(async () => {
           await this.#assertConversationCurrent(conversationId);
@@ -615,6 +667,9 @@ export class LocalConversationOwnerAssembly {
     let recovery: AdvancementRecoveryMaintenance;
     let reviewCommitted: ((info: TurnCommittedInfo) => void) | undefined;
     const projectedRuns = new Set<string>();
+    const conversationFactListeners = new Set<
+      (fact: ConversationClearedFact) => void
+    >();
 
     let protocol!: ConversationProtocolRuntime;
     protocol = new ConversationProtocolRuntime({
@@ -630,13 +685,26 @@ export class LocalConversationOwnerAssembly {
         createStream: (input) => options.dataPlane.createStream(input),
       },
       onFinal: (frame) => verifyLocalConversationFinal(protocol, frame),
-      projectLifecycle: async ({ conversationId, mutation }) => {
-        if (!manager.has(conversationId)) return;
+      projectLifecycle: async ({ conversationId, mutation, requestId }) => {
         if (mutation === "clear") {
-          const outcome = await manager.clear(conversationId, async () => true);
-          if (outcome === "busy") throw new Error("Local conversation clear is busy");
+          await projectConversationClear({
+            conversationId,
+            operationId: requestId,
+            projection: {
+              clearStoredView: async () => true,
+              clearRuntimeView: async (id, persist) =>
+                manager.has(id) ? manager.clear(id, persist) :
+                  (await persist()) ? "cleared" : "not-found",
+            },
+            publishFact: (fact) => {
+              for (const listener of conversationFactListeners) {
+                listener(fact);
+              }
+            },
+          });
           return;
         }
+        if (!manager.has(conversationId)) return;
         const outcome = await manager.delete(conversationId, {
           removeDisk: async () => true,
         });
@@ -801,6 +869,7 @@ export class LocalConversationOwnerAssembly {
       intents,
       scheduleIntents,
       rubricCatalog,
+      conversationFactListeners,
     });
   }
 
@@ -1564,11 +1633,23 @@ async function readAllTranscript(
 }
 
 function hostContext(component: string) {
+  return hostRequestContext(component, `${component}:${Date.now()}`);
+}
+
+function hostRequestContext(component: string, requestId: string) {
   return {
     principal: { kind: "host" as const, component },
-    requestId: `${component}:${Date.now()}`,
+    requestId,
     deadlineAt: new Date(Date.now() + 30_000).toISOString(),
   };
+}
+
+function isAuthorityErrorCode(
+  error: unknown,
+  code: "busy" | "not-found",
+): boolean {
+  return !!error && typeof error === "object" && "code" in error &&
+    error.code === code;
 }
 
 function createUlid(now = Date.now()): string {

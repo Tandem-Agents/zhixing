@@ -23,12 +23,6 @@ export interface ConversationDirectory {
   ensureTranscript(id: string): Promise<void>;
   /** 更新最近活跃时刻(切换到该对话即"使用"),返回更新后 meta;不存在 null */
   touch(id: string, at?: string): Promise<Conversation | null>;
-  /**
-   * 清空对话的盘上事实——transcript 追加 clear 事件(倒读遇之即止,旧原文
-   * 物理仍在、由时间窗清理收走)+ meta 视图层状态清理(task_list / 段切换
-   * 历史;身份字段保留)。不存在返回 false。
-   */
-  clear(id: string): Promise<boolean>;
   /** 删除落盘数据(meta + transcript + 派生);不存在返回 false */
   remove(id: string): Promise<boolean>;
 }

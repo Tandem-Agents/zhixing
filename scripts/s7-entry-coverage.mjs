@@ -3423,11 +3423,17 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const conversationStorage = required(
     "packages/cli/src/serve/conversation-directory.ts",
   );
+  const conversationClearBinding = required(
+    "packages/cli/src/serve/conversation-clear-binding.ts",
+  );
   const localConversationApplication = required(
     "packages/cli/src/serve/local-conversation-directory-application.ts",
   );
   const localConversationRpc = required(
     "packages/cli/src/serve/local-conversation-rpc.ts",
+  );
+  const localConversationOwner = required(
+    "packages/cli/src/serve/local-conversation-owner.ts",
   );
   const serverConversationDirectory = required(
     "packages/server/src/runtime/conversation-directory.ts",
@@ -3798,6 +3804,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !conversationApplication.includes(
       "createConversationDirectoryProductApiContribution",
     ) ||
+    !conversationApplication.includes("CONVERSATION_CLEAR_COMMAND") ||
+    !conversationApplication.includes("CONVERSATION_CLEARED_FACT_EVENT") ||
+    !conversationApplication.includes("projectConversationClear(") ||
     !conversationApplication.includes("HISTORY_DEFAULT_LIMIT = 20") ||
     !conversationApplication.includes("HISTORY_MAX_LIMIT = 200") ||
     conversationApplication.includes('../advancement/') ||
@@ -3809,12 +3818,14 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !sessionHandler.includes("CONVERSATION_HISTORY_QUERY") ||
     !sessionHandler.includes("CONVERSATION_CREATE_COMMAND") ||
     !sessionHandler.includes("CONVERSATION_RENAME_COMMAND") ||
+    !sessionHandler.includes("CONVERSATION_CLEAR_COMMAND") ||
     /requireDirectory\(ctx\.server\)\.(?:list|create|rename|readRunsReverse|readHistory)/u.test(
       sessionHandler,
     ) ||
     /\b(?:list|create|rename|readRunsReverse|readHistory)\s*\(/u.test(
       serverConversationDirectory,
     ) ||
+    /\bclear\s*\(/u.test(serverConversationDirectory) ||
     !conversationStorage.includes("implements") &&
       !conversationStorage.includes("ConversationDirectoryStorage") ||
     !composition.includes("new ConversationDirectoryApplicationService({") ||
@@ -3828,6 +3839,26 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !localConversationRpc.includes("this.#application.queryHistory({") ||
     !localConversationRpc.includes("this.#application.create()") ||
     !localConversationRpc.includes("this.#application.rename({") ||
+    !localConversationRpc.includes("this.#application.clear({") ||
+    /case "session\.clear":(?:(?!case "session\.delete")[\s\S])*?this\.#mutate\(/u.test(
+      localConversationRpc,
+    ) ||
+    !localConversationOwner.includes("commitConversationClear:") ||
+    !localConversationOwner.includes("projectConversationClear({") ||
+    !accessSurfaces.includes("projectConversationClear({") ||
+    !composition.includes("clear: createAnchorConversationClearCommitPort({") ||
+    !conversationClearBinding.includes(
+      "clearStoredView: (id) => input.directory.clearStoredView(id)",
+    ) ||
+    /(?:input\.directory|conversationDirectory)\.ensure\(/u.test(
+      conversationClearBinding,
+    ) ||
+    !conversationStorage.includes("clearStoredView(id)") ||
+    /conversationDirectory\.clear\(/u.test(composition) ||
+    /conversationDirectory\.clear\(/u.test(accessSurfaces) ||
+    /manager\.writeDurableSession\([\s\S]*?mutation: \{ kind: "window-op", op: "clear" \}/u.test(
+      sessionHandler,
+    ) ||
     /input\.owner\.(?:createConversation|sessionState\.readTranscriptTail)\(/u.test(
       localConversationRpc,
     )
@@ -6556,6 +6587,7 @@ export function inspectLocalConversationOwnerIsolation(records) {
       "admitTurn",
       "answerInteractionWithTicket",
       "cancelTurns",
+      "commitConversationClear",
       "createConversation",
       "deferSchedule",
       "discardDeferredIntent",
@@ -6573,6 +6605,7 @@ export function inspectLocalConversationOwnerIsolation(records) {
       "sessionState",
       "statusHistory",
       "currentAuthority",
+      "subscribeConversationFacts",
     ]);
     for (const member of ownerPort.members) {
       if (

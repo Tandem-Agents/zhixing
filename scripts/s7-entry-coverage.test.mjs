@@ -3421,9 +3421,11 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/server/src/lifecycle.ts",
     "packages/rpc/src/event-bridge.ts",
     "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/conversation-clear-binding.ts",
     "packages/cli/src/serve/conversation-directory.ts",
     "packages/cli/src/serve/local-conversation-directory-application.ts",
     "packages/cli/src/serve/local-conversation-rpc.ts",
+    "packages/cli/src/serve/local-conversation-owner.ts",
     "packages/server/src/runtime/conversation-directory.ts",
     "packages/server/src/rpc/methods/session.ts",
     "packages/cli/src/serve/anchor-scheduler-runtime.ts",
@@ -3498,6 +3500,36 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/local-conversation-rpc.ts",
       (text) => `${text}\nvoid input.owner.createConversation();`,
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/conversation-clear-binding.ts",
+      (text) => text.replace(
+        "clearStoredView: (id) => input.directory.clearStoredView(id),",
+        "clearStoredView: async (id) => { await input.directory.ensure(id); return input.directory.clearStoredView(id); },",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/runtime/conversation-directory.ts",
+      (text) => text.replace(
+        "export interface ConversationDirectory {",
+        "export interface ConversationDirectory {\n  clear(id: string): Promise<boolean>;",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/local-conversation-rpc.ts",
+      (text) => text.replace(
+        "const cleared = await this.#application.clear({",
+        "await this.#mutate(conversationId, operationId, { kind: \"window-op\", op: \"clear\" });\n          const cleared = await this.#application.clear({",
+      ),
     )).join("\n"),
     /Conversation directory management lacks one domain application/,
   );

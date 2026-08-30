@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-12a 已通过协调者独立复核，等待提交<br>
+> 当前检查点：A5-12b legacy NOT_FOUND 纠正已完成，等待协调者独立复核<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `10f71c8b`；A0～A4、Skill Catalog、Delivery、完整 Workspace Administration、完整 Trust Administration、完整 Schedule 已通过协调者独立复核并提交 |
+| 已接受基线 | `52dd209f`；A0～A4、Skill Catalog、Delivery、完整 Workspace Administration、完整 Trust Administration、完整 Schedule 与 Conversation 目录应用已通过协调者独立复核并提交 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | A5-12a 已通过协调者独立复核，等待提交；Conversation 行与 A5 仍为 `[ ]` |
-| 下一责任链 | 验收 A5-12a 后，沿 Conversation 的 resume/clear/delete 或 turn admission/run 生命周期选择下一条最窄责任链；不得提前进入 Workscene/Advancement |
-| 打开的单向桥 | 无；`A5-SCHEDULE-RUNTIME-01` 已由 A5-11b2 退场，历史登记仅保留追溯用途 |
-| 已失效证据 | 无当前未恢复证据；A5-12a 的目录排序与跨域依赖反证已由最窄纠正和独立复核恢复 |
+| 活跃工作包 | A5-12b：legacy NOT_FOUND 纠正与最窄验证已完成，等待协调者独立复核；Conversation 行与 A5 仍为 `[ ]` |
+| 下一责任链 | 验收 A5-12b 后，沿 Conversation 的 delete、resume/observer 或 turn admission/run 生命周期选择下一条最窄责任链 |
+| 打开的单向桥 | `A5-CONVERSATION-LIFECYCLE-01`：`ServerContext.conversationDirectory` 已退出 clear，暂仅承载 exists/ensure/transcript/touch/remove；Conversation 最终包前全部归零 |
+| 已失效证据 | 无当前未恢复证据；A5-12b 的 legacy clear 身份预创建反证已由最窄纠正恢复，等待协调者独立复核 |
 | 阻塞/用户决策 | 无技术阻塞；用户已明确恢复调度 |
 
 ### A0 基线索引
@@ -1981,6 +1981,27 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 纠正实现与责任边界：`queryList()` 现在先复制并按耐久 `ConversationDirectoryRecord.lastActiveAt` 排序，再逐项叠加 runtime/Advancement 只读字段；叠加后的活跃时间仍按迁移前值进入 payload，但不再参与目录重排。直接反例锁定“耐久 newer 仍在前，即使 older 的 runtime 时间更新”；local-only 的 `mergeConversationDirectoryViews()` 未改，跨设备最终排序语义保持。Conversation 自己定义查询结果需要的 readonly rubric draft/review 投影，`application.ts` 对 Advancement 源码零导入；Anchor 组合根继续把 Advancement 当前快照逐字段映射到该需求方结构，没有复制其写权、规则或状态机。
 - 纠正证据与失效恢复：core Conversation 应用 1 文件 4/4，Server 真实 `session.list` binding 1 文件 3/3（同文件其余 73 项未运行）；fresh core/server build、CLI typecheck 与 `pnpm cli:build`、canonical S7 32/32 与 registry golden、fresh package exports、两份适用 TS 文件最窄 Biome 通过。S7 新增反向 mutation，Conversation 应用重新导入 `../advancement/types.js` 必然失败，并继续冻结耐久排序入口；core 反例直接识别 overlay 后重排回流。其余已成立证据输入未变，按要求未重复。上述两项失效证据现已恢复，A5-12a 等待协调者独立复核；Conversation 行与 A5 继续 `[ ]`，未进入其他生命周期，也未执行任何 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：从 Conversation 应用合同、耐久 Storage/Transcript adapter、runtime/Advancement 只读投影、Host Product API contribution、四个 Server RPC、local-only 同应用消费、CLI facade/controller 与 S7/package export 双向复核，确认目录事实、四项产品决定和列表投影只有一个 Conversation owner，旧目录服务定位的同责方法归零，公开 wire/error/notification、持久 schema、Anchor/Executor-local 行为均未漂移。独立运行 core 应用 4/4、CLI adapter/local binding 15/15、Server session/golden 79/79；纠正后再重取 core 4/4、Server list 3/3 与 canonical S7 32/32 + registry golden，`git diff --check` 通过。耐久顺序反例与 Conversation → Advancement 反向依赖门禁均成立，接受 `A5-12a-conversation-directory-application-v1`；Conversation 行和 A5 继续 `[ ]`。
+
+### A5-12b：归位 Conversation clear 生命周期应用责任
+
+- 派发基线：`HEAD 52dd209f + task-doc:A5-12b-dispatch`；A5-12a 已独立验收并提交，派发前索引为空且工作区只有本文调度登记。
+- 唯一架构结果：Conversation Domain 唯一拥有“清空既有对话”的 Command、准入、稳定 operation identity、busy/not-found/cleared 终态、提交后 Fact 与用户投影；Anchor RPC、Executor-local 第一方入口和耐久恢复重放只调用同一应用语义。Conversation 需求方端口明确区分领域决定与 owner 串行、Authority/Journal、Transcript clear、窗口重置和恢复 claim 等 Correctness 机制。
+- 生产闭包：正向覆盖 `session.clear`、local-only router、Product API contribution 与通知 binding，反向覆盖 `ConversationManager.clear` 的活动/非活动互斥、durable `writeSession/projectSession`、`ConversationProtocolRuntime.projectLifecycle/recovery`、目录 `appendClear + clearViewLayerState + task-list cache` 及全域 workscene id 路由。耐久在线与重启重放必须命中同一应用/投影责任，响应丢失不得重复产生领域事实或通知。
+- 旧路与桥：删除 Server handler 与 local router 对 clear 的业务编排、错误决定和 manager/directory 直调；从 `ServerContext.conversationDirectory` 删除 `clear`，把 `A5-CONVERSATION-LIFECYCLE-01` 缩窄为 exists/ensure/transcript/touch/remove。Host 只装配 Conversation 应用所需窄机制端口；不得把 clear 决定移入 Protocol、Manager、Directory、Server 或 Surface，也不得形成第二 application/dispatcher。
+- 行为保护：保持 requestId 接受域、durable/legacy 分支、BUSY/NOT_FOUND code/message、active busy 串行、inactive 与激活 FIFO、transcript clear 边界、meta view/task-list/segment 清理、窗口重置、runtime change hook、changed/diagnostic 通知时机、workscene 全域键、响应丢失重放与 local-only consent/wire 逐项不变。
+- 明确不做：不迁移 delete、resume/subscribe、send/abort/resolve、compact/context/usage/security/taskList、turn admission/run、Advancement/Workscene/Channel；不改变持久 schema、公开 RPC/Event 或能力，不勾选 Conversation 行。
+- 证据与安全点：直接测试至少覆盖 active/inactive/busy/not-found、legacy/durable、同 request 重放、projection 失败后恢复、窗口/盘/缓存一致性、通知恰一次、workscene 路由和 local-only 等价；S7 反向拒绝 handler/router 直调、第二 clear owner、ServerContext clear 回流或事实在投影前发布。只运行受影响测试、必要上游构建、canonical S7、package exports、Biome 与 `git diff --check`。约四小时未完成、出现第二独立未知、需要改变公开/持久合同或扩入 delete 时，停在可构建、可运行且 clear 只有一个产品 owner 的安全检查点反馈。
+- 实施基线与唯一应用责任：进场为 `HEAD 52dd209fa79fd2dade6a686cfef536b502236c82 + task-doc:A5-12b-dispatch`，索引为空。Conversation 窄入口新增 `CONVERSATION_CLEAR_COMMAND`、`CONVERSATION_CLEARED_FACT_EVENT`、`ConversationClearCommitPort` 与 `projectConversationClear`；`ConversationDirectoryApplicationService.clear()` 唯一拥有 conversation/operation identity 校验、durable identity admission、active-turn/pending-lifecycle busy、not-found/cleared 终态和提交后 Fact。Host 只装配 owner 串行、Authority/Journal commit、Transcript/view 清理、runtime window reset 与 Fact transport 所需窄机制；这些机制不再决定 clear 产品语义。
+- 三条生产绑定与恢复：Anchor `session.clear` 只经唯一 sealed Product API dispatcher 调用领域命令；legacy 分支使用同一 projector 执行 storage-before-runtime reset，durable 分支以 authenticated surface principal 与稳定 requestId 写入 `window-op clear`，再由 `ConversationProtocolRuntime` 的 lifecycle claim/ack/recovery 重放同一 projector。Executor-local router 复用同一应用，真实 `SessionStatePort.mutate` 与 protocol projection 保持相同 request identity；投影 Fact 订阅才传输一次 `session.changed { change: "cleared" }`，相同 request 的应用响应重放不产生第二 durable record 或第二通知。active runtime 仍由 `ConversationManager.clear` 串行，inactive 当前 owner 仍完成耐久投影；目录 adapter 继续执行 `appendClear`、view/task-list cache 清理与全域 workscene id 路由，持久 schema、协议和公开 wire 未改变。
+- 旧路、桥与行为保护：Server handler 已删除 manager/directory clear 编排、durable write/project 和直接 changed 广播，只保留 wire 校验、surface principal、Product API 调用、既有 error/diagnostic 投影；local router 删除直接 window mutation 与提前通知。`ServerContext.conversationDirectory` 与 Server `ConversationDirectory` 的 `clear` 应用入口归零，CLI storage adapter 缩窄为需求方 `clearStoredView`，`A5-CONVERSATION-LIFECYCLE-01` 现只剩 exists/ensure/transcript/touch/remove。legacy 无 requestId 自动生成、durable 缺/坏 requestId、BUSY/NOT_FOUND code/message、active/inactive FIFO、runtime change hook、transcript/meta/task-list/segment 清理、local consent 和 workscene 全域键保持迁移前语义；delete 及其他 Conversation 生命周期未进入本包。
+- 直接证据与验证：core Conversation 应用 1 文件 7/7，覆盖稳定 identity、commit 后 Fact、busy/not-found 与 storage-before-runtime 投影；Server 真实 session RPC/Product API 1 文件 76/76，覆盖 legacy/durable clear、wire/error、窗口清理、diagnostic 与 changed；CLI directory/local router 2 文件 16/16，覆盖本机同应用消费、真实 wire 与 response-loss exact replay 的单通知；durable lifecycle claim/ack 真实协议反例 1/1（同文件其余 24 项按输入未变跳过）。fresh `@zhixing/core`、`@zhixing/server` 与 `pnpm cli:build`、CLI package-filtered typecheck均通过；canonical S7 coverage/mutation 32/32 与 registry golden、fresh package exports 和本包最窄 Biome 均通过。一次扩大探索中，未纳入本包有效证据的既有 fixture 暴露 storage-maintenance backpressure（13/14）和缺失 baseline lifecycle contribution（0/2）；二者不命中本包 clear 断言，随后只重取上述真实 protocol 投影闭包，未以失败组冒充通过。
+- 结构失效与交接：S7 与反向 mutation 冻结 Conversation clear command/fact/projector exact-set、Host composition、Anchor/Executor-local 应用消费、Server directory clear 退场、storage/runtime 投影次序、通知只由投影 Fact 产生以及旧 handler/router 直调归零；能拒绝第二 clear owner、local direct mutation、ServerContext clear 回流、projection 前广播或 production binding 漏接。以后若 clear command/fact、stable operation identity、busy/not-found mapping、Manager/Authority/Journal projection、directory clear storage primitive、恢复 claim/ack、notification binding、Server/local consumer、S7 或 package export任一变化，本记录失效并只重验该闭包。A5-12b 当前实施完成并等待协调者独立复核；Conversation 行与 A5 继续 `[ ]`，`A5-CONVERSATION-LIFECYCLE-01` 尚未关闭。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+#### A5-12b 协调复核纠正：legacy clear 不得预创建身份
+
+- 公开行为反证：初次实现的 Anchor legacy commit 在 `clearStoredView` 前调用 `conversationDirectory.ensure(id)`；不存在的 conversation 会因此先获得 meta/transcript 身份，再被清空并返回成功，而迁移前 `ConversationManager.clear → directory.clear(false)` 的终态是公开 `NOT_FOUND`、零身份和零 changed 通知。durable admission 已在 Authority 写入前验证身份，提交后的 projector 按恢复合同物化视图，不受该反证影响。
+- 最窄纠正与单一 owner：新增 Anchor 内部 `createAnchorConversationClearCommitPort` 作为唯一生产 Correctness binding，`command.ts` 只把该 port 装入既有 Conversation application；legacy projector 直接以 `clearStoredView` 的 false 判定 not-found，完全不调用 ensure，durable write/project、surface principal、稳定 requestId 与恢复顺序原样保留。该 binding 不新增命令、Fact、dispatcher或产品决定，clear 仍只有 `ConversationDirectoryApplicationService.clear()` 一个产品 owner。
+- 直接反例与恢复证据：CLI 真实 `ConversationDirectory + ConversationManager + Conversation application + Anchor binding` 1 文件 9/9，新增反例证明未知 id 返回领域 not-found，repo 身份、transcript 与 Fact transport 均为空；真实 Server `session.clear` 定向 3/3（同文件其余 74 项按输入未变跳过），锁定既有 `NOT_FOUND` code/message、空目录/正文和零 `session.changed`；core clear 7/7、Executor-local clear/replay 8/8继续通过。canonical S7 32/32 与 registry golden通过，并新增 mutation 使 legacy binding 恢复 ensure 必失败；CLI package-filtered typecheck 与 fresh `pnpm cli:build` 通过。该反证所失效的 A5-12b legacy 行为证据现已恢复，Conversation 行、A5 与最终退出门继续 `[ ]`；未进入其他生命周期，也未执行任何 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 
