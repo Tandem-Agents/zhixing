@@ -5,6 +5,7 @@ import {
   CONVERSATION_ADMIT_AGENT_TURN_COMMAND,
   CONVERSATION_CREATE_COMMAND,
   CONVERSATION_CLEAR_COMMAND,
+  CONVERSATION_COMPACT_COMMAND,
   CONVERSATION_DELETE_COMMAND,
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
   CONVERSATION_HISTORY_QUERY,
@@ -23,6 +24,7 @@ import {
   type ConversationDirectoryRecord,
   type ConversationDirectoryStorage,
   type ConversationAgentTurnAdmissionPort,
+  type ConversationCompactPort,
   type ConversationTaskListPort,
 } from "./application.js";
 
@@ -289,6 +291,77 @@ describe("ConversationDirectoryApplicationService", () => {
       reason: "task-list-operation-required",
     });
     expect(harness.writes).toEqual([]);
+  });
+
+  it("owns compact result semantics and emits no Product API fact", async () => {
+    const compactExisting = vi.fn<ConversationCompactPort["compactExisting"]>(
+      async () => ({
+        status: "done",
+        outcome: {
+          runtimeModified: true,
+          windowApplied: true,
+          tokensBefore: 1_000,
+          tokensAfter: 100,
+          emergencyFloor: { droppedTurns: 2, error: "summary failed" },
+        },
+      }),
+    );
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      compact: { compactExisting },
+    });
+    const dispatcher = new ProductApiDispatcher(
+      CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+      [createConversationDirectoryProductApiContribution(application)],
+    );
+
+    await expect(dispatcher.command(CONVERSATION_COMPACT_COMMAND, {
+      kind: "compact",
+      conversationId: "conversation-1",
+    })).resolves.toEqual({
+      result: {
+        modified: true,
+        tokensBefore: 1_000,
+        tokensAfter: 100,
+        emergencyFloor: { droppedTurns: 2, error: "summary failed" },
+      },
+      facts: [],
+    });
+    expect(compactExisting).toHaveBeenCalledWith("conversation-1");
+
+    compactExisting.mockResolvedValueOnce({
+      status: "done",
+      outcome: { runtimeModified: true, windowApplied: false },
+    });
+    await expect(application.compact({
+      kind: "compact",
+      conversationId: "conversation-1",
+    })).resolves.toEqual({ modified: false });
+  });
+
+  it("owns compact busy/not-found/unsupported/local-unavailable terminals", async () => {
+    const compactExisting = vi.fn<ConversationCompactPort["compactExisting"]>();
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      compact: { compactExisting },
+    });
+    const cases = [
+      ["busy", "busy", "compact-busy"],
+      ["not-found", "not-found", "compact-conversation-not-found"],
+      ["unsupported", "unsupported", "compact-unsupported"],
+      ["unavailable", "busy", "compact-unavailable"],
+    ] as const;
+    for (const [status, code, reason] of cases) {
+      compactExisting.mockResolvedValueOnce({ status });
+      await expect(application.compact({
+        kind: "compact",
+        conversationId: "conversation-1",
+      })).rejects.toMatchObject({ code, reason });
+    }
+    await expect(application.compact({
+      kind: "compact",
+      conversationId: "",
+    })).rejects.toMatchObject({ code: "invalid-input" });
   });
 
   it("uses one dispatcher for list/create/rename and emits rename fact after storage", async () => {

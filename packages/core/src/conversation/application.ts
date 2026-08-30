@@ -301,6 +301,30 @@ export interface ConversationTaskListPort {
   >;
 }
 
+export interface ConversationCompactMechanismOutcome {
+  readonly runtimeModified: boolean;
+  readonly windowApplied: boolean;
+  readonly tokensBefore?: number;
+  readonly tokensAfter?: number;
+  readonly emergencyFloor?: Readonly<{
+    droppedTurns: number;
+    error: string;
+  }>;
+}
+
+/** Owner/runtime mechanisms consumed by the Conversation compact use case. */
+export interface ConversationCompactPort {
+  compactExisting(conversationId: string): Promise<
+    | Readonly<{
+        status: "done";
+        outcome: ConversationCompactMechanismOutcome;
+      }>
+    | Readonly<{
+        status: "busy" | "not-found" | "unsupported" | "unavailable";
+      }>
+  >;
+}
+
 export type ConversationAdoptionReviewProjection =
   | Readonly<{
       status: "ready";
@@ -495,6 +519,10 @@ export type ConversationDirectoryCommand =
       conversationId: string;
       action: ConversationTaskListAction;
       operationId?: string;
+    }>
+  | Readonly<{
+      kind: "compact";
+      conversationId: string;
     }>;
 
 export interface ConversationCreatedResult {
@@ -577,13 +605,23 @@ export interface ConversationTaskListUpdateOutcome {
   readonly fact?: ConversationTaskListChangedFact;
 }
 
+export interface ConversationCompactResult {
+  readonly modified: boolean;
+  readonly tokensBefore?: number;
+  readonly tokensAfter?: number;
+  readonly emergencyFloor?: Readonly<{
+    droppedTurns: number;
+    error: string;
+  }>;
+}
+
 export type ConversationLifecycleFact =
   | ConversationClearedFact
   | ConversationDeletedFact;
 
 export class ConversationApplicationError extends Error {
   constructor(
-    readonly code: "invalid-input" | "not-found" | "busy",
+    readonly code: "invalid-input" | "not-found" | "busy" | "unsupported",
     message: string,
     readonly reason?:
       | "active-turn"
@@ -602,7 +640,11 @@ export class ConversationApplicationError extends Error {
       | "task-list-operation-required"
       | "task-list-operation-invalid"
       | "task-list-conversation-not-found"
-      | "task-list-busy",
+      | "task-list-busy"
+      | "compact-conversation-not-found"
+      | "compact-busy"
+      | "compact-unsupported"
+      | "compact-unavailable",
   ) {
     super(message);
     this.name = "ConversationApplicationError";
@@ -657,6 +699,12 @@ export interface ConversationDirectoryApplication {
       { readonly kind: "update-task-list" }
     >,
   ): Promise<ConversationTaskListUpdateOutcome>;
+  compact(
+    command: Extract<
+      ConversationDirectoryCommand,
+      { readonly kind: "compact" }
+    >,
+  ): Promise<ConversationCompactResult>;
 }
 
 const HISTORY_DEFAULT_LIMIT = 20;
@@ -688,6 +736,7 @@ export class ConversationDirectoryApplicationService
       agentTurns?: ConversationAgentTurnAdmissionPort;
       agentTurnIdentity?: ConversationAgentTurnIdentityPort;
       taskLists?: ConversationTaskListPort;
+      compact?: ConversationCompactPort;
       clock?: () => number;
     }>,
   ) {}
@@ -1192,6 +1241,74 @@ export class ConversationDirectoryApplicationService
     return Object.freeze({
       result: Object.freeze({ ok: false, message, taskList }),
     });
+  }
+
+  async compact(
+    command: Extract<
+      ConversationDirectoryCommand,
+      { readonly kind: "compact" }
+    >,
+  ): Promise<ConversationCompactResult> {
+    if (
+      typeof command.conversationId !== "string" ||
+      command.conversationId.trim().length === 0
+    ) {
+      throw new ConversationApplicationError(
+        "invalid-input",
+        "Conversation compact requires a conversation id",
+      );
+    }
+    const port = this.input.compact;
+    if (!port) {
+      throw new Error("Conversation compact application is not assembled");
+    }
+    const compacted = await port.compactExisting(command.conversationId);
+    switch (compacted.status) {
+      case "busy":
+        throw new ConversationApplicationError(
+          "busy",
+          "Conversation has an in-flight turn; compact after it completes",
+          "compact-busy",
+        );
+      case "not-found":
+        throw new ConversationApplicationError(
+          "not-found",
+          `Conversation not found: ${command.conversationId}`,
+          "compact-conversation-not-found",
+        );
+      case "unsupported":
+        throw new ConversationApplicationError(
+          "unsupported",
+          "Runtime does not support manual compaction",
+          "compact-unsupported",
+        );
+      case "unavailable":
+        throw new ConversationApplicationError(
+          "busy",
+          "这项查看或维护暂不可用；你仍可继续本机对话，重新连接后再试。",
+          "compact-unavailable",
+        );
+      case "done": {
+        const outcome = compacted.outcome;
+        return Object.freeze({
+          modified: outcome.runtimeModified && outcome.windowApplied,
+          ...(outcome.tokensBefore !== undefined
+            ? { tokensBefore: outcome.tokensBefore }
+            : {}),
+          ...(outcome.tokensAfter !== undefined
+            ? { tokensAfter: outcome.tokensAfter }
+            : {}),
+          ...(outcome.emergencyFloor
+            ? {
+                emergencyFloor: Object.freeze({
+                  droppedTurns: outcome.emergencyFloor.droppedTurns,
+                  error: outcome.emergencyFloor.error,
+                }),
+              }
+            : {}),
+        });
+      }
+    }
   }
 
   async admitAgentTurn(
@@ -1707,6 +1824,13 @@ export const CONVERSATION_UPDATE_TASK_LIST_COMMAND = defineProductApiCommand<
   CONVERSATION_TASK_LIST_CHANGED_FACT_EVENT,
 ], { factEmission: "subset" });
 
+export const CONVERSATION_COMPACT_COMMAND = defineProductApiCommand<
+  "conversation-window.command.compact",
+  Extract<ConversationDirectoryCommand, { readonly kind: "compact" }>,
+  ConversationCompactResult,
+  never
+>("conversation-window.command.compact", []);
+
 export const CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET =
   defineProductApiExactSet({
     operations: [
@@ -1723,6 +1847,7 @@ export const CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET =
       CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND,
       CONVERSATION_ADMIT_AGENT_TURN_COMMAND,
       CONVERSATION_UPDATE_TASK_LIST_COMMAND,
+      CONVERSATION_COMPACT_COMMAND,
     ],
     factEvents: [
       CONVERSATION_RENAMED_FACT_EVENT,
@@ -1804,6 +1929,10 @@ export function createConversationDirectoryProductApiContribution(
           };
         },
       ),
+      bindProductApiOperation(CONVERSATION_COMPACT_COMMAND, async (command) => ({
+        result: await application.compact(command),
+        facts: [],
+      })),
     ],
     factEvents: [
       CONVERSATION_RENAMED_FACT_EVENT,

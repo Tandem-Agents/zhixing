@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-12g Conversation task-list 公开 wire Fact 泄漏已纠正，等待协调者复核<br>
+> 当前检查点：A5-12h Conversation 手动上下文压缩应用责任实施完成，等待协调者复核<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `0851629c`；A0～A4、Skill Catalog、Delivery、完整 Workspace Administration、完整 Trust Administration、完整 Schedule、Conversation 目录、clear/delete/resume、abort/resolve 运行控制及普通 Agent turn identity/admission/start 均已通过协调者独立复核并提交 |
+| 已接受基线 | `1c039ec5`；A0～A4、Skill Catalog、Delivery、完整 Workspace Administration、完整 Trust Administration、完整 Schedule、Conversation 目录、clear/delete/resume、abort/resolve、普通 Agent turn identity/admission/start 与 task-list 均已通过协调者独立复核并提交 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | A5-12g：归位 Conversation task-list 查询、更新、在途互斥和变更投影应用责任，实施完成并等待协调者独立复核；Conversation 行与 A5 仍为 `[ ]` |
-| 下一责任链 | A5-12g 验收后，只按 Conversation 剩余未归位责任继续拆包；不得扩入 Advancement 内部状态机、Perspectives、Channel、Workscene 或 A6 |
+| 活跃工作包 | A5-12h：归位 Conversation 手动上下文压缩的准入、互斥、存在性、支持性与结果应用责任，实施完成并等待协调者独立复核；Conversation 行与 A5 仍为 `[ ]` |
+| 下一责任链 | A5-12h 验收后，只按 Conversation 剩余未归位查询/管理责任继续拆包；不得扩入 Advancement、Perspectives、Channel、Workscene 或 A6 |
 | 打开的单向桥 | `A5-CONVERSATION-LIFECYCLE-01`：`ServerContext.conversationDirectory` 已退出 clear/delete/resume，暂仅承载 exists/ensure/transcript，Conversation 最终包前归零。<br>`A5-CONVERSATION-WORKSCENE-DELETE-01`：Anchor 组合根唯一创建 `ConversationWorksceneDeleteProjectionBridge`，唯一 consumer 为 `WorksceneSessionOwner.removeScene`；只允许 Workscene Authority delete 后调用 Conversation 物理存储投影，不拥有 delete 准入、终态、Fact 或通知，必须在 Workscene A5 迁移包退场 |
-| 已失效证据 | 无当前未恢复证据；A5-12g 初版把内部 task-list Fact 放入公开 Command result 的结论已由内部 outcome、Product API fact 分离、两拓扑 exact-shape 反例与 fresh 构建恢复，等待协调者独立复核 |
+| 已失效证据 | 无当前未恢复证据；A5-12g 已由协调者独立复核并以 `1c039ec5` 提交，A5-12h 当前证据等待协调者独立复核 |
 | 阻塞/用户决策 | 无技术阻塞；用户已明确恢复调度 |
 
 ### A0 基线索引
@@ -2058,6 +2058,13 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据与验证：core Conversation application 与 Product API catalog 2 文件 30/30，覆盖查询、成功提交/committed Fact、invalid/missing/already-completed 零写零 Fact、busy/not-found、stable operation 与 subset/default-exact Fact 规则；Server 完整 `session-rpc.test.ts` 1 文件 79/79；CLI Anchor adapter、Executor-local RPC 与既有 task command 3 文件 21/21，真实 local-owner task-list authority 边界定向 1/1。一次把完整 local-owner lifecycle 与上述三文件合跑为 36/37，唯一失败是未受本包影响的既有恢复用例触发 storage maintenance `backpressured:ioOperations`；随后只重取本包新增的 real-owner 用例通过，未以该无关失败冒充本包回退。fresh core/server build、`pnpm cli:build`、canonical S7 coverage/mutation 32/32 与 registry golden、fresh `pnpm runtime:package-exports`、17 个受影响文件最窄 Biome 与 `git diff --check` 均通过；package-filtered CLI typecheck 仅保留进场基线中 A5-12 其他未归位文件的既有诊断，本包新增/修改 task-list 文件无新增诊断。
 - 结构失效与交接：S7 与反向 mutation 冻结领域 Query/Command/port/Fact、13-operation/4-fact exact-set、合法 no-write 的显式 subset policy、Anchor 唯一 adapter、Executor-local 同应用消费、ServerContext 两回调和旧 `task-list-actions` 退场、local router 业务直调归零及 access surface 只从领域 Fact helper 投影；能拒绝第二 task-list owner、恢复 direct mutate、Host 漏接、宽松 Product API Fact 或旧文件复活。以后 task-list action/result/view/Fact、operation/task identity、Manager/Authority/SessionState mechanism、Anchor/local binding、RPC wire/error/notification、Product API Fact policy、S7 或 package export 任一变化，本记录精确失效并只重验该闭包。A5-12g 实施完成并等待协调者独立复核；Conversation 行与 A5 继续 `[ ]`，下一检查点只按 Conversation 剩余未归位责任拆包，不进入 Advancement 内部状态机、Perspectives、Channel、Workscene 或 A6。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调反证与恢复：初版 `ConversationTaskListUpdateResult` 直接携带可选 `fact`，使 Product API `dispatch.result`、Anchor JSON-RPC 和 Executor-local result 都可能新增内部字段；`toMatchObject` 未识别该公开 wire 回退。纠正后领域应用返回只在进程内使用的 `{ result, fact? }` outcome，正式 `ConversationTaskListUpdateResult` 严格只有 `ok/message/taskList`；Product API contribution 从同一次 outcome 分离 `result` 与 `facts`，Anchor 只从 `dispatch.facts`、Executor-local 只从 `outcome.fact` 投影恰一次 `session.changed`，两者都原样返回三字段 `result`，合法 no-write 与失败仍为零 Fact/零通知。core application/catalog 2 文件 30/30、真实 Anchor 完整 `session-rpc` 79/79、Executor-local router 与 Anchor adapter 2 文件 15/15通过；两拓扑测试均以实际对象 exact key-set 拒绝任何 `fact` 泄漏，并覆盖成功单次通知、no-write/失败零通知。fresh core/server/CLI build、canonical S7 32/32 与 registry golden、fresh package exports、6 个适用 TypeScript 文件最窄 Biome 通过；S7 新增反向 mutation，公开 result 恢复 Fact、Server 从 `dispatch.result.fact` 取值或 local 返回内部 outcome 均必失败。该反证所失效的 wire 与所有权证据现已恢复；A5-12g 仍停在同一等待协调者复核的安全交接点，Conversation 行与 A5 保持 `[ ]`，未进入其他责任链。
+
+### A5-12h：归位 Conversation 手动上下文压缩应用责任
+
+- 实施基线与唯一应用责任：进场为 `HEAD 1c039ec53393527ea5fceff5dc45c63cd9132093 + task-doc:A5-12h-dispatch`，索引为空。`ConversationDirectoryApplicationService` 新增有限 `ConversationCompactPort`、`ConversationCompactResult` 与 `conversation-window.command.compact`，Conversation Product API exact-set 从 13 个 operation 扩为 14 个、Fact Event 保持 4 个；领域应用唯一裁决非空 identity、busy/not-found/unsupported/local-unavailable 终态及 `modified = runtimeModified && windowApplied`、tokens 与 emergency-floor 的公开投影，compact 不产生领域 Fact。`ConversationManager.compactExisting` 继续只负责既有串行互斥、inactive-existing 激活、运行体 `forceCompact`、窗口折叠、派生 snapshot 与 attention-window hook 机制，不获得 Product API 或 wire 责任。
+- 生产绑定与行为保护：Anchor 唯一 `createAnchorConversationCompactPort` 把 Manager 的机制状态和窗口产物投影给领域应用，`command.ts` 在唯一 Conversation application 组合点注入；Server `session.compact` 只校验 wire identity、dispatch Product API、映射既有 NOT_FOUND/BUSY/INTERNAL_ERROR 并在成功后转发现有 lifecycle diagnostics，不再直接调用 Manager 或解释窗口产物。Executor-local 应用显式贡献 unavailable mechanism，local router 仍经同一应用返回迁移前中文 BUSY，未把 context-budget/usage/security 或 Anchor runtime 能力引入本机拓扑。公开成功结果严格保持 `modified/tokensBefore/tokensAfter/emergencyFloor`，无 `windowCompact` 时即使运行体报告 modified 也返回 `modified:false`；存在性、在途互斥、运行体不支持、窗口折叠/snapshot/diagnostics、inactive 激活、公开方法名和错误文案均保持既有行为。
+- 直接证据与验证：core Conversation application 1 文件 27/27，覆盖 Product API 零 Fact、结果 exact shape、no-window、四类机制终态与非法 identity；Anchor/Executor-local adapter 2 文件 16/16，覆盖 Manager 参数/产物映射、无窗口/status 透传及 local-only exact BUSY/零副作用。Server 完整 `session-rpc.test.ts` 81/81，真实 dispatcher 证明成功 exact wire + lifecycle warning、in-flight BUSY、NOT_FOUND 零激活和 unsupported INTERNAL_ERROR；Manager compact 定向闭包 14/14，保持窗口折叠、inactive/deletion race 与运行体支持机制。fresh core/server build 与 `pnpm cli:build` 通过；CLI package 无独立 `typecheck` script，未虚报该门禁。canonical S7 coverage/mutation 32/32 与 registry golden、fresh `pnpm runtime:package-exports`、10 个适用文件最窄 Biome 和 `git diff --check` 通过。
+- 旧路、失效规则与交接：Server 对 `compactExisting` 的业务直调、结果判断和窗口字段拼装归零，local hardcoded compact 分支归零；S7 与反向 mutation 冻结 14-operation/4-fact exact-set、领域 port/command/result 决定、Anchor adapter 唯一接线、Server Product API dispatch、local 同应用 unavailable 终态，并拒绝 Host 漏接、Server Manager 旁路或本机硬编码回流。以后 compact command/result/error、Manager compact mechanism、窗口产物/diagnostics、Anchor/local binding、RPC wire、Product API exact-set、S7 或 package export 任一变化，本记录精确失效并只重验该闭包。A5-12h 实施完成并等待协调者独立复核；Conversation 行与 A5 继续 `[ ]`，下一检查点只按 Conversation 剩余未归位查询/管理责任拆包，不进入 Advancement、Perspectives、Channel、Workscene 或 A6。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 

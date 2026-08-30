@@ -84,6 +84,9 @@ export function createLocalConversationDirectoryApplication(input: {
   };
   return new ConversationDirectoryApplicationService({
     storage,
+    compact: {
+      compactExisting: async () => ({ status: "unavailable" as const }),
+    },
     taskLists: input.owner.taskLists,
     agentTurns: input.owner.agentTurnAdmission,
     agentTurnIdentity: {

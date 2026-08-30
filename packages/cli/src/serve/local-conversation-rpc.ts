@@ -473,7 +473,17 @@ export class LocalConversationRpcRouter
         throw RpcErrors.busy(
           "这项确认需要连接值班设备；当前对话已保留，可在重新连接后继续。",
         );
-      case "session.compact":
+      case "session.compact": {
+        const conversationId = this.#conversationId(params, method);
+        try {
+          return await this.#application.compact({
+            kind: "compact",
+            conversationId,
+          });
+        } catch (error) {
+          throw mapLocalConversationApplicationError(error, "compact");
+        }
+      }
       case "session.contextBudget":
       case "session.security":
       case "session.usage":
@@ -766,7 +776,8 @@ function mapLocalConversationApplicationError(
     | "abort"
     | "resolve"
     | "send"
-    | "task-list",
+    | "task-list"
+    | "compact",
 ): unknown {
   if (!(error instanceof ConversationApplicationError)) return error;
   if (error.code === "not-found") {
@@ -776,9 +787,11 @@ function mapLocalConversationApplicationError(
   }
   if (error.code === "busy") {
     return RpcErrors.busy(
-      operation === "send" && error.reason === "turn-queue-full"
-        ? "Conversation has too many pending messages"
-        : "这个对话正在处理其他操作，请稍后重试。",
+      operation === "compact" && error.reason === "compact-unavailable"
+        ? "这项查看或维护暂不可用；你仍可继续本机对话，重新连接后再试。"
+        : operation === "send" && error.reason === "turn-queue-full"
+          ? "Conversation has too many pending messages"
+          : "这个对话正在处理其他操作，请稍后重试。",
     );
   }
   return RpcErrors.invalidParams(

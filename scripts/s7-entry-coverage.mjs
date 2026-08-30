@@ -3456,6 +3456,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const conversationTaskListApplication = required(
     "packages/cli/src/serve/conversation-task-list-application.ts",
   );
+  const conversationCompactApplication = required(
+    "packages/cli/src/serve/conversation-compact-application.ts",
+  );
   const conversationDeleteBinding = required(
     "packages/cli/src/serve/conversation-delete-binding.ts",
   );
@@ -3969,6 +3972,12 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !conversationApplication.includes("facts: outcome.fact ? [outcome.fact] : []") ||
     !conversationApplication.includes("async queryTaskList(") ||
     !conversationApplication.includes("async updateTaskList(") ||
+    !conversationApplication.includes("interface ConversationCompactPort") ||
+    !conversationApplication.includes("CONVERSATION_COMPACT_COMMAND") ||
+    !conversationApplication.includes("async compact(") ||
+    !conversationApplication.includes(
+      "modified: outcome.runtimeModified && outcome.windowApplied",
+    ) ||
     !conversationApplication.includes("interface ConversationAgentTurnAdmissionPort") ||
     !conversationApplication.includes(
       "interface ConversationPreparedAgentTurnIdentity",
@@ -4002,6 +4011,11 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !sessionHandler.includes("CONVERSATION_ADMIT_AGENT_TURN_COMMAND") ||
     !sessionHandler.includes("CONVERSATION_TASK_LIST_QUERY") ||
     !sessionHandler.includes("CONVERSATION_UPDATE_TASK_LIST_COMMAND") ||
+    !sessionHandler.includes("CONVERSATION_COMPACT_COMMAND") ||
+    !/productApi\.command\(\s*CONVERSATION_COMPACT_COMMAND/u.test(
+      sessionHandler,
+    ) ||
+    /\.compactExisting\s*\(/u.test(sessionHandler) ||
     !sessionHandler.includes("const fact = dispatch.facts[0]") ||
     sessionHandler.includes("dispatch.result.fact") ||
     sessionSend.length === 0 ||
@@ -4055,6 +4069,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !localConversationRpc.includes("this.#application.admitAgentTurn({") ||
     !localConversationRpc.includes("this.#application.queryTaskList({") ||
     !localConversationRpc.includes("this.#application.updateTaskList({") ||
+    !localConversationRpc.includes("this.#application.compact({") ||
     !localConversationRpc.includes("return outcome.result;") ||
     localConversationRpc.includes("return outcome;") ||
     localConversationRpc.indexOf(
@@ -4088,6 +4103,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !composition.includes(
       "taskLists: createAnchorConversationTaskListPort({",
     ) ||
+    !composition.includes(
+      "compact: createAnchorConversationCompactPort({",
+    ) ||
     !conversationTaskListApplication.includes(
       "createAnchorConversationTaskListPort",
     ) ||
@@ -4095,6 +4113,15 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       "input.conversations.runMaintenanceExisting",
     ) ||
     !conversationTaskListApplication.includes("input.taskLists.set(") ||
+    !conversationCompactApplication.includes(
+      "createAnchorConversationCompactPort",
+    ) ||
+    !conversationCompactApplication.includes(
+      "input.conversations.compactExisting(",
+    ) ||
+    !localConversationApplication.includes(
+      'compactExisting: async () => ({ status: "unavailable" as const })',
+    ) ||
     !localConversationApplication.includes("taskLists: input.owner.taskLists") ||
     !localConversationOwner.includes("readonly taskLists: ConversationTaskListPort") ||
     !localConversationOwner.includes("taskLists,") ||

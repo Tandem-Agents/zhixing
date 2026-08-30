@@ -78,6 +78,7 @@ import {
   projectConversationClear,
   projectConversationDelete,
   type ConversationClearProjectionPort,
+  type ConversationCompactPort,
   type ConversationDeleteProjectionPort,
   type ConversationDirectoryStorage,
   type ConversationAdoptionReviewProjection,
@@ -123,6 +124,8 @@ interface MockOptions {
   lifecycleDiagnostics?: readonly AgentEventMap["lifecycle:warning"][];
   /** run 外窗口换代后追加到诊断缓冲的 warning */
   windowChangeDiagnostics?: readonly AgentEventMap["lifecycle:warning"][];
+  /** 手动窗口压缩能力 */
+  forceCompact?: SessionRuntime["forceCompact"];
 }
 
 function createMockRuntime(
@@ -233,6 +236,7 @@ function createMockRuntime(
     onAttentionWindowChange: async () => {
       lifecycleDiagnostics.push(...(opts.windowChangeDiagnostics ?? []));
     },
+    ...(opts.forceCompact ? { forceCompact: opts.forceCompact } : {}),
     async dispose() {},
   };
 }
@@ -503,6 +507,32 @@ function createConversationProductApi(input: {
 }): ProductApiDispatcher {
   const application = new ConversationDirectoryApplicationService({
     storage: input.directory,
+    compact: {
+      compactExisting: async (conversationId) => {
+        const result = await input.conversations.compactExisting(
+          conversationId,
+          () => input.directory.exists(conversationId),
+        );
+        if (result.status !== "done") return result;
+        const windowCompact = result.outcome.windowCompact;
+        return {
+          status: "done",
+          outcome: {
+            runtimeModified: result.outcome.modified,
+            windowApplied: windowCompact !== undefined,
+            ...(windowCompact
+              ? {
+                  tokensBefore: windowCompact.tokensBefore,
+                  tokensAfter: windowCompact.tokensAfter,
+                }
+              : {}),
+            ...(result.outcome.emergencyFloor
+              ? { emergencyFloor: result.outcome.emergencyFloor }
+              : {}),
+          },
+        } satisfies Awaited<ReturnType<ConversationCompactPort["compactExisting"]>>;
+      },
+    },
     ...(input.taskLists ? { taskLists: input.taskLists } : {}),
     agentTurns: createConversationAgentTurnAdmissionPort({
       manager: input.conversations,
@@ -3332,8 +3362,93 @@ describe("session.* RPC (S2.D)", () => {
     const compactResp = await client.request("session.compact", {
       conversationId: sessionId,
     });
-    expect(isSuccessResponse(compactResp)).toBe(false);
+    expect(isErrorResponse(compactResp)).toBe(true);
+    if (isErrorResponse(compactResp)) {
+      expect(compactResp.error).toMatchObject({
+        code: RPC_ERROR_CODES.INTERNAL_ERROR,
+        message: "Runtime does not support manual compaction",
+      });
+    }
 
+    client.close();
+  });
+
+  it("session.compact 经 Product API 返回 exact wire result 并转发窗口诊断", async () => {
+    await startWithFactory(createMockFactory({
+      deltaCount: 1,
+      forceCompact: async () => ({
+        modified: true,
+        windowCompact: {
+          summary: "压缩摘要",
+          pairsCompacted: 1,
+          tokensBefore: 1_000,
+          tokensAfter: 100,
+        },
+        emergencyFloor: { droppedTurns: 2, error: "summary failed" },
+      }),
+      windowChangeDiagnostics: [{
+        hookId: "zhixing-guidance",
+        phase: "onWindowOpen",
+        runtimeId: "runtime-conv",
+        windowIndex: 1,
+        message: "压缩后约定加载失败",
+      }],
+    }));
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", { text: "你好" });
+    const sessionId = (sendResp as { result: { sessionId: string } }).result
+      .sessionId;
+    await client.waitNotification("session.complete");
+
+    const compactResp = await client.request("session.compact", {
+      conversationId: sessionId,
+    });
+    expect(compactResp).toEqual(expect.objectContaining({
+      result: {
+        modified: true,
+        tokensBefore: 1_000,
+        tokensAfter: 100,
+        emergencyFloor: { droppedTurns: 2, error: "summary failed" },
+      },
+    }));
+    const event = await client.waitNotification("session.event");
+    expect(event.params).toMatchObject({
+      conversationId: sessionId,
+      scope: "control",
+      event: "lifecycle:warning",
+      payload: { message: "压缩后约定加载失败" },
+    });
+
+    client.close();
+  });
+
+  it("session.compact 在 in-flight turn 期间保持 BUSY wire 语义", async () => {
+    await startWithFactory(createMockFactory({
+      deltaCount: 8,
+      yieldDelayMs: 30,
+      forceCompact: async () => ({ modified: false }),
+    }));
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", { text: "长任务" });
+    const sessionId = (sendResp as { result: { sessionId: string } }).result
+      .sessionId;
+    await client.waitNotification("session.delta");
+    const compactResp = await client.request("session.compact", {
+      conversationId: sessionId,
+    });
+    expect(isErrorResponse(compactResp)).toBe(true);
+    if (isErrorResponse(compactResp)) {
+      expect(compactResp.error).toMatchObject({
+        code: RPC_ERROR_CODES.BUSY,
+        message: "Conversation has an in-flight turn; compact after it completes",
+      });
+    }
+
+    await client.waitNotification("session.complete", 5_000);
     client.close();
   });
 

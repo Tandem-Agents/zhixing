@@ -3440,6 +3440,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/cli/src/serve/conversation-resume-binding.ts",
     "packages/cli/src/serve/conversation-run-control-binding.ts",
     "packages/cli/src/serve/conversation-task-list-application.ts",
+    "packages/cli/src/serve/conversation-compact-application.ts",
     "packages/cli/src/serve/conversation-delete-binding.ts",
     "packages/cli/src/serve/conversation-directory.ts",
     "packages/cli/src/serve/workscene-directory.ts",
@@ -3587,6 +3588,36 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       (text) => text.replace(
         "taskLists: createAnchorConversationTaskListPort({",
         "taskLists: undefined,",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "compact: createAnchorConversationCompactPort({",
+        "compact: undefined,",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace(
+        "const dispatch = await productApi.command(\n          CONVERSATION_COMPACT_COMMAND,",
+        "const dispatch = await requireConversations(ctx.server).compactExisting(\n          conversationId,",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/local-conversation-rpc.ts",
+      (text) => text.replace(
+        "return await this.#application.compact({",
+        "throw RpcErrors.busy(\"compact unavailable\");\n        return await Promise.resolve({",
       ),
     )).join("\n"),
     /Conversation directory management lacks one domain application/,

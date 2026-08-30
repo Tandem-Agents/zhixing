@@ -43,6 +43,7 @@ import {
   CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND,
   CONVERSATION_ABORT_COMMAND,
   CONVERSATION_CLEAR_COMMAND,
+  CONVERSATION_COMPACT_COMMAND,
   CONVERSATION_DELETE_COMMAND,
   CONVERSATION_HISTORY_QUERY,
   CONVERSATION_LIST_QUERY,
@@ -2522,41 +2523,28 @@ export function buildSessionCompactMethod(): MethodEntry {
     async handler(rawParams, ctx): Promise<SessionCompactResult> {
       const params = (rawParams ?? {}) as SessionCompactParams;
       const conversationId = requireConversationId(params, "session.compact");
-      const manager = requireConversations(ctx.server);
-      const result = await manager.compactExisting(
-        conversationId,
-        requiredExistingConversationCheck(ctx.server, conversationId),
+      const productApi = requireConversationProductApi(
+        ctx.server,
+        CONVERSATION_COMPACT_COMMAND,
       );
-
-      if (result.status === "busy") {
-        throw new RpcAppError(
-          RPC_ERROR_CODES.BUSY,
-          "Conversation has an in-flight turn; compact after it completes",
+      let result: SessionCompactResult;
+      try {
+        const dispatch = await productApi.command(
+          CONVERSATION_COMPACT_COMMAND,
+          { kind: "compact", conversationId },
         );
+        result = dispatch.result;
+      } catch (error) {
+        throw mapConversationCompactApplicationError(error, conversationId);
       }
-      if (result.status === "not-found") {
-        throw RpcErrors.notFound(`Session not found: ${conversationId}`);
-      }
-      if (result.status === "unsupported") {
-        throw new RpcAppError(
-          RPC_ERROR_CODES.INTERNAL_ERROR,
-          "Runtime does not support manual compaction",
-        );
-      }
-
-      const { outcome } = result;
+      const manager = requireConversations(ctx.server);
       notifyLifecycleDiagnostics({
         manager,
         conversationId,
         connection: ctx.connection,
         broadcast: ctx.server.sessionBroadcast,
       });
-      return {
-        modified: outcome.modified && !!outcome.windowCompact,
-        tokensBefore: outcome.windowCompact?.tokensBefore,
-        tokensAfter: outcome.windowCompact?.tokensAfter,
-        emergencyFloor: outcome.emergencyFloor,
-      };
+      return result;
     },
   };
 }
@@ -3176,6 +3164,29 @@ function mapConversationTaskListApplicationError(
   return RpcErrors.invalidParams(
     "session.taskListUpdate requires 'action' of kind add{content} or done{token}",
   );
+}
+
+function mapConversationCompactApplicationError(
+  error: unknown,
+  conversationId: string,
+): unknown {
+  if (!(error instanceof ConversationApplicationError)) return error;
+  if (error.code === "not-found") {
+    return RpcErrors.notFound(`Session not found: ${conversationId}`);
+  }
+  if (error.code === "busy") {
+    return new RpcAppError(
+      RPC_ERROR_CODES.BUSY,
+      "Conversation has an in-flight turn; compact after it completes",
+    );
+  }
+  if (error.code === "unsupported") {
+    return new RpcAppError(
+      RPC_ERROR_CODES.INTERNAL_ERROR,
+      "Runtime does not support manual compaction",
+    );
+  }
+  return RpcErrors.invalidParams("session.compact requires 'conversationId'");
 }
 
 function mapConversationRunControlError(

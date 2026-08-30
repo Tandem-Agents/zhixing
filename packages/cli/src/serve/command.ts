@@ -155,6 +155,7 @@ import { createAnchorConversationClearCommitPort } from "./conversation-clear-bi
 import { createAnchorConversationResumePort } from "./conversation-resume-binding.js";
 import { createAnchorConversationRunControlPort } from "./conversation-run-control-binding.js";
 import { createAnchorConversationTaskListPort } from "./conversation-task-list-application.js";
+import { createAnchorConversationCompactPort } from "./conversation-compact-application.js";
 import {
   createAnchorConversationDeleteCommitPort,
   createConversationWorksceneDeleteProjectionBridge,
@@ -1922,6 +1923,10 @@ async function runServerProcess(
     : undefined;
   const conversationApplication = new ConversationDirectoryApplicationService({
     storage: conversationDirectory,
+    compact: createAnchorConversationCompactPort({
+      conversations: ctx.conversations!,
+      exists: (conversationId) => conversationDirectory.exists(conversationId),
+    }),
     taskLists: createAnchorConversationTaskListPort({
       conversations: ctx.conversations!,
       exists: (conversationId) => conversationDirectory.exists(conversationId),
