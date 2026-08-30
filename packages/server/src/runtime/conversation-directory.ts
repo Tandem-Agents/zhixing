@@ -23,6 +23,4 @@ export interface ConversationDirectory {
   ensureTranscript(id: string): Promise<void>;
   /** 更新最近活跃时刻(切换到该对话即"使用"),返回更新后 meta;不存在 null */
   touch(id: string, at?: string): Promise<Conversation | null>;
-  /** 删除落盘数据(meta + transcript + 派生);不存在返回 false */
-  remove(id: string): Promise<boolean>;
 }

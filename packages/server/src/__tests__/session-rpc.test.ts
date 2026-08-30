@@ -75,7 +75,9 @@ import {
   ConversationDirectoryApplicationService,
   createConversationDirectoryProductApiContribution,
   projectConversationClear,
+  projectConversationDelete,
   type ConversationClearProjectionPort,
+  type ConversationDeleteProjectionPort,
   type ConversationDirectoryStorage,
 } from "@zhixing/core/conversation/application";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
@@ -431,7 +433,7 @@ function createMemoryDirectory(
         archived: false,
       } as never;
     },
-    async remove(id) {
+    async deleteStoredConversation(id) {
       if (!exists(id)) return false;
       removed.add(id);
       return true;
@@ -461,10 +463,12 @@ function createMemoryDirectory(
 function createConversationProductApi(input: {
   readonly directory: ConversationDirectoryStorage &
     Pick<ConversationClearProjectionPort, "clearStoredView"> &
-    Pick<ConversationDirectory, "exists" | "ensure">;
+    Pick<ConversationDirectory, "exists" | "ensure"> &
+    Readonly<{ deleteStoredConversation(conversationId: string): Promise<boolean> }>;
   readonly conversations: ConversationManager;
   readonly advancement?: AdvancementController;
   readonly publishCleared?: (conversationId: string) => void;
+  readonly publishDeleted?: (conversationId: string) => void;
 }): ProductApiDispatcher {
   const application = new ConversationDirectoryApplicationService({
     storage: input.directory,
@@ -505,6 +509,72 @@ function createConversationProductApi(input: {
           publishFact: (fact) => input.publishCleared?.(fact.conversationId),
         });
         return { status: "cleared" } as const;
+      },
+    },
+    delete: {
+      requiresStableOperationIdentity:
+        input.conversations.usesDurableTurnProtocol(),
+      createOperationIdentity: () => "session.delete:test-legacy-operation",
+      commit: async ({ conversationId, operationId, caller }) => {
+        if (input.conversations.usesDurableTurnProtocol()) {
+          if (caller.kind !== "surface") throw new Error("surface caller required");
+          const write = await input.conversations.writeDurableSession({
+            conversationId,
+            requestId: operationId,
+            mutation: { kind: "conversation-delete" },
+            principal: input.conversations.durableControlPrincipal(caller),
+            conversationExists: () => input.directory.exists(conversationId),
+          });
+          if (write.status === "busy") {
+            return { status: "busy", reason: "pending-lifecycle" } as const;
+          }
+          if (write.status === "not-found") return write;
+          await input.conversations.projectDurableSession({
+            conversationId,
+            requestId: operationId,
+            mutation: "delete",
+            domainRevision: write.domainRevision,
+          });
+          return { status: "deleted" } as const;
+        }
+        const projection: ConversationDeleteProjectionPort = {
+          deleteRuntimeAndStorage: async ({ onDeleted }) => {
+            const outcome = await input.conversations.delete(conversationId, {
+              removeDisk: () => input.directory.deleteStoredConversation(conversationId),
+              onDeleted,
+            });
+            return outcome === "busy" ? "busy" : outcome ? "deleted" : "not-found";
+          },
+          ...(input.advancement
+            ? {
+                cancelDependentLifecycle: (id: string) =>
+                  input.advancement!.cancelOpenConversationSession({
+                    conversationId: id,
+                    reason: "user-cancelled",
+                    message: "原始对话已删除，推进会话已取消。",
+                  }).then(() => undefined),
+                removeDependentData: (id: string) =>
+                  input.advancement!.removeConversationData(id),
+              }
+            : {}),
+        };
+        await projectConversationDelete({
+          conversationId,
+          operationId,
+          deletionAlreadyCommitted: false,
+          dependentFailure: "best-effort",
+          projection,
+          publishFact: () => input.publishDeleted?.(conversationId),
+          onDependentFailure: (step, error) => {
+            console.error(
+              step === "cancel-lifecycle"
+                ? "[session.delete] advancement cleanup failed:"
+                : "[session.delete] advancement data removal failed:",
+              error,
+            );
+          },
+        });
+        return { status: "deleted" } as const;
       },
     },
     runtime: {
@@ -982,6 +1052,12 @@ describe("session.* RPC (S2.D)", () => {
         ctx.sessionBroadcast?.(conversationId, "session.changed", {
           conversationId,
           change: "cleared",
+        });
+      },
+      publishDeleted: (conversationId) => {
+        ctx.sessionBroadcast?.(conversationId, "session.changed", {
+          conversationId,
+          change: "deleted",
         });
       },
     });
@@ -2082,6 +2158,44 @@ describe("session.* RPC (S2.D)", () => {
       errorSpy.mockRestore();
       client.close();
     }
+  });
+
+  it("session.delete durable binding requires a stable identity and dispatches it once", async () => {
+    const durable = createDurableReplayExecutor("run-delete-durable");
+    const write = vi.spyOn(durable, "writeSession");
+    const project = vi.spyOn(durable, "projectSession");
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      durableTurnExecutor: durable,
+      seedConversations: ["conv-delete-durable"],
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const missing = await client.request("session.delete", {
+      conversationId: "conv-delete-durable",
+    });
+    expect(isErrorResponse(missing)).toBe(true);
+    if (isErrorResponse(missing)) {
+      expect(missing.error.code).toBe(RPC_ERROR_CODES.INVALID_PARAMS);
+      expect(missing.error.message).toBe(
+        "session.delete requires a stable 'requestId' while durable execution is enabled",
+      );
+    }
+    expect(write).not.toHaveBeenCalled();
+
+    const deleted = await client.request("session.delete", {
+      conversationId: "conv-delete-durable",
+      requestId: "delete-durable-1",
+    });
+    expect(isSuccessResponse(deleted)).toBe(true);
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(write).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: "conv-delete-durable",
+      requestId: "delete-durable-1",
+      mutation: { kind: "conversation-delete" },
+    }));
+    expect(project).toHaveBeenCalledTimes(1);
+    client.close();
   });
 
   it("session.advancementCancel 可降级为直接执行原始任务", async () => {
@@ -3448,8 +3562,8 @@ describe("session.* RPC (S2.D)", () => {
     const removeGate = new Promise<void>((r) => {
       releaseRemove = r;
     });
-    const rawRemove = directory.remove.bind(directory);
-    directory.remove = async (id) => {
+    const rawRemove = directory.deleteStoredConversation.bind(directory);
+    directory.deleteStoredConversation = async (id) => {
       removeEntered();
       await removeGate;
       return rawRemove(id);
@@ -3481,6 +3595,10 @@ describe("session.* RPC (S2.D)", () => {
       token: TEST_TOKEN,
       conversations,
       conversationDirectory: directory,
+      productApi: createConversationProductApi({
+        directory,
+        conversations,
+      }),
     });
     server = await startServer({ context: ctx });
     const client = await connect(server.port);

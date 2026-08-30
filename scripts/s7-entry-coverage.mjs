@@ -3426,6 +3426,15 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const conversationClearBinding = required(
     "packages/cli/src/serve/conversation-clear-binding.ts",
   );
+  const conversationDeleteBinding = required(
+    "packages/cli/src/serve/conversation-delete-binding.ts",
+  );
+  const worksceneDirectory = required(
+    "packages/cli/src/serve/workscene-directory.ts",
+  );
+  const worksceneSessionOwner = required(
+    "packages/cli/src/serve/workscene-session-owner.ts",
+  );
   const localConversationApplication = required(
     "packages/cli/src/serve/local-conversation-directory-application.ts",
   );
@@ -3502,6 +3511,30 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const taskSurface = taskSurfaceStart >= 0 && taskSurfaceEnd > taskSurfaceStart
     ? infoCommands.slice(taskSurfaceStart, taskSurfaceEnd)
     : "";
+  const worksceneDeleteBridgeFactoryConsumers = records.filter(
+    (record) =>
+      record.relative !==
+        "packages/cli/src/serve/conversation-delete-binding.ts" &&
+      record.text.includes(
+        "createConversationWorksceneDeleteProjectionBridge(",
+      ),
+  );
+  const worksceneDeleteBridgeProjectionConsumers = records.filter(
+    (record) =>
+      record.relative !==
+        "packages/cli/src/serve/conversation-delete-binding.ts" &&
+      record.text.includes(".deleteConversationStorageProjection("),
+  );
+  const directConversationStorageDeleteConsumers = records.filter(
+    (record) =>
+      ![
+        "packages/cli/src/serve/conversation-delete-binding.ts",
+        "packages/cli/src/serve/conversation-directory.ts",
+        "packages/cli/src/serve/access-surfaces.ts",
+        "packages/cli/src/serve/command.ts",
+      ].includes(record.relative) &&
+      record.text.includes(".deleteStoredConversation("),
+  );
 
   if (
     !scheduleApplication.includes("class ScheduleManagementApplicationService") ||
@@ -3807,6 +3840,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !conversationApplication.includes("CONVERSATION_CLEAR_COMMAND") ||
     !conversationApplication.includes("CONVERSATION_CLEARED_FACT_EVENT") ||
     !conversationApplication.includes("projectConversationClear(") ||
+    !conversationApplication.includes("CONVERSATION_DELETE_COMMAND") ||
+    !conversationApplication.includes("CONVERSATION_DELETED_FACT_EVENT") ||
+    !conversationApplication.includes("projectConversationDelete(") ||
     !conversationApplication.includes("HISTORY_DEFAULT_LIMIT = 20") ||
     !conversationApplication.includes("HISTORY_MAX_LIMIT = 200") ||
     conversationApplication.includes('../advancement/') ||
@@ -3819,6 +3855,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !sessionHandler.includes("CONVERSATION_CREATE_COMMAND") ||
     !sessionHandler.includes("CONVERSATION_RENAME_COMMAND") ||
     !sessionHandler.includes("CONVERSATION_CLEAR_COMMAND") ||
+    !sessionHandler.includes("CONVERSATION_DELETE_COMMAND") ||
     /requireDirectory\(ctx\.server\)\.(?:list|create|rename|readRunsReverse|readHistory)/u.test(
       sessionHandler,
     ) ||
@@ -3840,13 +3877,21 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !localConversationRpc.includes("this.#application.create()") ||
     !localConversationRpc.includes("this.#application.rename({") ||
     !localConversationRpc.includes("this.#application.clear({") ||
+    !localConversationRpc.includes("this.#application.delete({") ||
     /case "session\.clear":(?:(?!case "session\.delete")[\s\S])*?this\.#mutate\(/u.test(
+      localConversationRpc,
+    ) ||
+    /case "session\.delete":(?:(?!case "session\.taskList")[\s\S])*?this\.#mutate\(/u.test(
       localConversationRpc,
     ) ||
     !localConversationOwner.includes("commitConversationClear:") ||
     !localConversationOwner.includes("projectConversationClear({") ||
+    !localConversationOwner.includes("commitConversationDelete:") ||
+    !localConversationOwner.includes("projectConversationDelete({") ||
     !accessSurfaces.includes("projectConversationClear({") ||
+    !accessSurfaces.includes("projectConversationDelete({") ||
     !composition.includes("clear: createAnchorConversationClearCommitPort({") ||
+    !composition.includes("delete: createAnchorConversationDeleteCommitPort({") ||
     !conversationClearBinding.includes(
       "clearStoredView: (id) => input.directory.clearStoredView(id)",
     ) ||
@@ -3856,6 +3901,42 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !conversationStorage.includes("clearStoredView(id)") ||
     /conversationDirectory\.clear\(/u.test(composition) ||
     /conversationDirectory\.clear\(/u.test(accessSurfaces) ||
+    !conversationDeleteBinding.includes("createAnchorConversationDeleteCommitPort") ||
+    !conversationDeleteBinding.includes("projectConversationDelete({") ||
+    !conversationDeleteBinding.includes(
+      "interface ConversationWorksceneDeleteProjectionBridge",
+    ) ||
+    !conversationDeleteBinding.includes(
+      "createConversationWorksceneDeleteProjectionBridge(",
+    ) ||
+    !conversationDeleteBinding.includes("!deletionAlreadyCommitted ||") ||
+    /(?:input\.storage|conversationDirectory)\.ensure\(/u.test(
+      conversationDeleteBinding,
+    ) ||
+    worksceneDeleteBridgeFactoryConsumers.length !== 1 ||
+    worksceneDeleteBridgeFactoryConsumers[0]?.relative !==
+      "packages/cli/src/serve/command.ts" ||
+    worksceneDeleteBridgeProjectionConsumers.length !== 1 ||
+    worksceneDeleteBridgeProjectionConsumers[0]?.relative !==
+      "packages/cli/src/serve/workscene-session-owner.ts" ||
+    directConversationStorageDeleteConsumers.length !== 0 ||
+    !/conversationDeleteProjectionBridge:\s*worksceneConversationDeleteProjectionBridge/u.test(
+      composition,
+    ) ||
+    !worksceneDirectory.includes(
+      "conversationDeleteProjectionBridge: ConversationWorksceneDeleteProjectionBridge",
+    ) ||
+    worksceneDirectory.includes("deleteStoredConversation") ||
+    !worksceneSessionOwner.includes(
+      ".deleteConversationStorageProjection(conversationId)",
+    ) ||
+    worksceneSessionOwner.includes("deleteStoredConversation") ||
+    !conversationStorage.includes("deleteStoredConversation(id)") ||
+    /\bremove\s*\(/u.test(serverConversationDirectory) ||
+    /manager\.writeDurableSession\([\s\S]*?mutation: \{ kind: "conversation-delete" \}/u.test(
+      sessionHandler,
+    ) ||
+    /requireConversations\(ctx\.server\)\.delete\(/u.test(sessionHandler) ||
     /manager\.writeDurableSession\([\s\S]*?mutation: \{ kind: "window-op", op: "clear" \}/u.test(
       sessionHandler,
     ) ||
@@ -6588,6 +6669,7 @@ export function inspectLocalConversationOwnerIsolation(records) {
       "answerInteractionWithTicket",
       "cancelTurns",
       "commitConversationClear",
+      "commitConversationDelete",
       "createConversation",
       "deferSchedule",
       "discardDeferredIntent",

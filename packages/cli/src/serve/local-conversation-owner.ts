@@ -27,8 +27,10 @@ import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
 import type { ArtifactStore } from "@zhixing/core/authority";
 import {
   projectConversationClear,
+  projectConversationDelete,
   type ConversationClearCommitPort,
-  type ConversationClearedFact,
+  type ConversationDeleteCommitPort,
+  type ConversationLifecycleFact,
 } from "@zhixing/core/conversation/application";
 import {
   ConversationManager,
@@ -114,8 +116,9 @@ export interface LocalConversationOwnerPort {
   }[]>;
   currentAuthority(conversationId: string): Promise<CurrentConversationAuthority>;
   commitConversationClear: ConversationClearCommitPort["commit"];
+  commitConversationDelete: ConversationDeleteCommitPort["commit"];
   subscribeConversationFacts(
-    listener: (fact: ConversationClearedFact) => void,
+    listener: (fact: ConversationLifecycleFact) => void,
   ): () => void;
   mutateSession: SessionStatePort["mutate"];
   cancelTurns(input: {
@@ -247,7 +250,7 @@ export class LocalConversationOwnerAssembly {
   #resolveCommandDrain: (() => void) | undefined;
   readonly #transferringConversations = new Set<string>();
   readonly #conversationFactListeners: Set<
-    (fact: ConversationClearedFact) => void
+    (fact: ConversationLifecycleFact) => void
   >;
   readonly #transferAbort = new AbortController();
   #removalOperationId: string | undefined;
@@ -266,7 +269,7 @@ export class LocalConversationOwnerAssembly {
     readonly scheduleIntents: DeferredScheduleIntentProducer;
     readonly rubricCatalog: GlobalRubricCatalog;
     readonly conversationFactListeners: Set<
-      (fact: ConversationClearedFact) => void
+      (fact: ConversationLifecycleFact) => void
     >;
   }) {
     this.#owner = input.options.owner;
@@ -542,6 +545,38 @@ export class LocalConversationOwnerAssembly {
           }
         });
       },
+      commitConversationDelete: async ({ conversationId, operationId }) => {
+        return this.#runCommand(async () => {
+          if (!(await this.#isConversationCurrent(conversationId))) {
+            return { status: "not-found" } as const;
+          }
+          try {
+            const write = await sessionState.mutate(
+              conversationId,
+              { kind: "conversation-delete" },
+              hostRequestContext("local-conversation-delete", operationId),
+            );
+            await this.#protocol.projectSession({
+              conversationId,
+              requestId: operationId,
+              mutation: "delete",
+              domainRevision: write.revision,
+            });
+            return { status: "deleted" } as const;
+          } catch (error) {
+            if (isAuthorityErrorCode(error, "not-found")) {
+              return { status: "not-found" } as const;
+            }
+            if (isAuthorityErrorCode(error, "busy")) {
+              return {
+                status: "busy",
+                reason: "pending-lifecycle",
+              } as const;
+            }
+            throw error;
+          }
+        });
+      },
       subscribeConversationFacts: (listener) => {
         this.#conversationFactListeners.add(listener);
         return () => this.#conversationFactListeners.delete(listener);
@@ -668,7 +703,7 @@ export class LocalConversationOwnerAssembly {
     let reviewCommitted: ((info: TurnCommittedInfo) => void) | undefined;
     const projectedRuns = new Set<string>();
     const conversationFactListeners = new Set<
-      (fact: ConversationClearedFact) => void
+      (fact: ConversationLifecycleFact) => void
     >();
 
     let protocol!: ConversationProtocolRuntime;
@@ -704,11 +739,30 @@ export class LocalConversationOwnerAssembly {
           });
           return;
         }
-        if (!manager.has(conversationId)) return;
-        const outcome = await manager.delete(conversationId, {
-          removeDisk: async () => true,
+        await projectConversationDelete({
+          conversationId,
+          operationId: requestId,
+          deletionAlreadyCommitted: true,
+          dependentFailure: "propagate",
+          projection: {
+            deleteRuntimeAndStorage: async ({ onDeleted }) => {
+              if (!manager.has(conversationId)) {
+                onDeleted();
+                return "deleted";
+              }
+              const outcome = await manager.delete(conversationId, {
+                removeDisk: async () => true,
+                onDeleted,
+              });
+              return outcome === "busy" ? "busy" : "deleted";
+            },
+          },
+          publishFact: (fact) => {
+            for (const listener of conversationFactListeners) {
+              listener(fact);
+            }
+          },
         });
-        if (outcome === "busy") throw new Error("Local conversation delete is busy");
       },
       recoverAuxiliary: async (conversationId) => {
         if (!recovery) return;

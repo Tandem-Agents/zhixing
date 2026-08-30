@@ -20,7 +20,10 @@ import {
   parseConversationId,
 } from "@zhixing/core";
 import type { AuthorityCallContext } from "@zhixing/core/contracts";
-import { projectConversationClear } from "@zhixing/core/conversation/application";
+import {
+  projectConversationClear,
+  projectConversationDelete,
+} from "@zhixing/core/conversation/application";
 import { ConversationManager } from "@zhixing/owner-kernel";
 import {
   createControlSessionEventEnvelope,
@@ -43,6 +46,7 @@ import {
 } from "../setup-delivery.js";
 import { MeshRuntimeAssembly, executorIdForDevice } from "./mesh-runtime-assembly.js";
 import { SurfaceAssetMaintenance } from "./surface-asset-maintenance.js";
+import { createAnchorConversationDeleteProjectionPort } from "./conversation-delete-binding.js";
 import { createAdvancementReviewMaintenance } from "./advancement-review-maintenance.js";
 import { createTurnMaintenance } from "./turn-maintenance.js";
 import { governControlTextCall } from "./governed-control-llm.js";
@@ -550,33 +554,45 @@ const conversationSurface: AccessSurface = {
           });
           return;
         }
-        const outcome = await manager.delete(input.conversationId, {
-          removeDisk: async () => {
-            await ctx.conversationDirectory.remove(input.conversationId);
-            return true;
-          },
-          onDeleted: () => {
+        const advancement = ctx.advancement;
+        await projectConversationDelete({
+          conversationId: input.conversationId,
+          operationId: input.requestId,
+          deletionAlreadyCommitted: true,
+          dependentFailure: "propagate",
+          projection: createAnchorConversationDeleteProjectionPort({
+            conversations: manager,
+            storage: {
+              exists: (conversationId) =>
+                ctx.conversationDirectory.exists(conversationId),
+              deleteStoredConversation: (conversationId) =>
+                ctx.conversationDeleteProjection.deleteStoredConversation(
+                  conversationId,
+                ),
+            },
+            ...(advancement
+              ? {
+                  related: {
+                    cancelDependentLifecycle: (conversationId) =>
+                      advancement.cancelOpenConversationSession({
+                        conversationId,
+                        reason: "user-cancelled",
+                        message: "原始对话已删除，推进会话已取消。",
+                      }),
+                    removeDependentData: (conversationId) =>
+                      advancement.removeConversationData(conversationId),
+                  },
+                }
+              : {}),
+          }),
+          publishFact: (fact) => {
             ctx.sessionBroadcastRef.current?.(
-              input.conversationId,
+              fact.conversationId,
               SESSION_NOTIFICATIONS.changed,
-              { conversationId: input.conversationId, change: "deleted" },
+              { conversationId: fact.conversationId, change: "deleted" },
             );
           },
         });
-        if (outcome === "busy") {
-          throw new Error("Conversation lifecycle projection is busy");
-        }
-        // 权威删除的全部级联消费者在同一投影 claim 内幂等完成:推进会话
-        // 取消与控制日志删除失败即抛错保持投影待办,由在线/启动恢复重驱;
-        // advancement 子系统整体缺席时无级联数据,是显式判定而非能力兜底。
-        if (ctx.advancement) {
-          await ctx.advancement.cancelOpenConversationSession({
-            conversationId: input.conversationId,
-            reason: "user-cancelled",
-            message: "原始对话已删除，推进会话已取消。",
-          });
-          await ctx.advancement.removeConversationData(input.conversationId);
-        }
       },
       recoverAuxiliary: async (conversationId) => {
         const recovery = ctx.advancementRecoveryRef.current;

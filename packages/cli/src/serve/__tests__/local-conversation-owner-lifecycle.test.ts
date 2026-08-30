@@ -109,6 +109,34 @@ async function expectWritesFenced(
 }
 
 describe("local conversation owner lifecycle", () => {
+  it("replays one durable delete identity and projects its fact exactly once", async () => {
+    const fixture = await createLocalOwnerAssemblyFixture({ profile: "executor-only" });
+    await fixture.assembly.start();
+    const conversationId = await fixture.port.createConversation();
+    const facts: string[] = [];
+    const unsubscribe = fixture.port.subscribeConversationFacts((fact) => {
+      if (fact.kind === "conversation-deleted") facts.push(fact.operationId);
+    });
+    const request = {
+      conversationId,
+      operationId: "local-delete-replay-1",
+      caller: { kind: "host" as const, component: "test" },
+    };
+    try {
+      await expect(fixture.port.commitConversationDelete(request)).resolves.toEqual({
+        status: "deleted",
+      });
+      await expect(fixture.port.commitConversationDelete(request)).resolves.toEqual({
+        status: "deleted",
+      });
+      expect(facts).toEqual(["local-delete-replay-1"]);
+      expect(await fixture.port.listConversations()).not.toContain(conversationId);
+    } finally {
+      unsubscribe();
+      await fixture.assembly.close();
+    }
+  }, LIFECYCLE_TIMEOUT_MS);
+
   it(
     "freezes one exact device-removal operation and restores admission only for its authenticated release",
     async () => {

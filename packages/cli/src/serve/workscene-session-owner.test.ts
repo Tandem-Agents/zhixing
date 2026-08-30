@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ConversationDirectory } from "@zhixing/server";
 import { createTempDir } from "@zhixing/test-utils";
 import { WorksceneSessionOwner } from "./workscene-session-owner.js";
 
@@ -32,7 +31,7 @@ describe("WorksceneSessionOwner cleanup", () => {
     };
     const owner = new WorksceneSessionOwner({
       conversations: () => manager as never,
-      directory: {} as ConversationDirectory,
+      conversationDeleteProjectionBridge: {} as never,
       authority: () => ({
         async touchWorksceneSession() {
           order.push("activity");
@@ -65,7 +64,7 @@ describe("WorksceneSessionOwner cleanup", () => {
     };
     const owner = new WorksceneSessionOwner({
       conversations: () => manager as never,
-      directory: {} as ConversationDirectory,
+      conversationDeleteProjectionBridge: {} as never,
       authority: () => ({
         async touchWorksceneSession(input) {
           order.push(`activity:${input.conversationId}:${input.requestId}`);
@@ -94,15 +93,15 @@ describe("WorksceneSessionOwner cleanup", () => {
 
   it("keeps authority writes ahead of the shared physical cleanup owner", async () => {
     const order: string[] = [];
-    const directory = {
-      remove: vi.fn(async (conversationId: string) => {
+    const conversationDeleteProjectionBridge = {
+      deleteConversationStorageProjection: vi.fn(async (conversationId: string) => {
         order.push(`remove:${conversationId}`);
         return true;
       }),
-    } as unknown as ConversationDirectory;
+    };
     const owner = new WorksceneSessionOwner({
       conversations: () => null,
-      directory,
+      conversationDeleteProjectionBridge,
       authority: () => ({
         async touchWorksceneSession() {
           throw new Error("not used");

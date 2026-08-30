@@ -15,12 +15,20 @@ import {
   type ConversationScope,
   worksceneConversationId,
 } from "@zhixing/core";
-import { ConversationDirectoryApplicationService } from "@zhixing/core/conversation/application";
+import {
+  ConversationDirectoryApplicationService,
+  projectConversationDelete,
+} from "@zhixing/core/conversation/application";
 import {
   ConversationManager,
   type RuntimeFactory,
+  type SessionRuntime,
 } from "@zhixing/owner-kernel";
 import { createAnchorConversationClearCommitPort } from "../conversation-clear-binding.js";
+import {
+  createAnchorConversationDeleteCommitPort,
+  createAnchorConversationDeleteProjectionPort,
+} from "../conversation-delete-binding.js";
 import { createConversationDirectory } from "../conversation-directory.js";
 import { createWorksceneStorageCleanup } from "../workscene-storage-cleanup.js";
 
@@ -67,13 +75,13 @@ describe("conversation directory(持久层实现)", () => {
     expect(list.find((c) => c.conversationId === created.id)?.name).toBe("新名");
   });
 
-  it("remove:不存在返回 false;存在删除后盘上消失", async () => {
+  it("deleteStoredConversation:不存在返回 false;存在删除后盘上消失", async () => {
     expect(await directory.exists("ghost")).toBe(false);
-    expect(await directory.remove("ghost")).toBe(false);
+    expect(await directory.deleteStoredConversation("ghost")).toBe(false);
 
     const created = await repo.create({ name: "待删" });
     expect(await directory.exists(created.id)).toBe(true);
-    expect(await directory.remove(created.id)).toBe(true);
+    expect(await directory.deleteStoredConversation(created.id)).toBe(true);
     expect(await repo.get(created.id)).toBeNull();
     expect(await directory.exists(created.id)).toBe(false);
   });
@@ -169,6 +177,148 @@ describe("conversation directory(持久层实现)", () => {
       expect(await repo.get("ghost")).toBeNull();
       expect(await transcript.exists("ghost")).toBe(false);
       expect(facts).toEqual([]);
+    } finally {
+      await manager.disposeAll();
+    }
+  });
+
+  it("legacy delete binding:提交后发布一次事实并保持未知身份零副作用", async () => {
+    const manager = new ConversationManager(
+      {
+        create: async () => { throw new Error("runtime must not be created by delete"); },
+      } satisfies RuntimeFactory,
+      { idleCheckIntervalMs: 999_999 },
+    );
+    const facts: string[] = [];
+    const application = new ConversationDirectoryApplicationService({
+      storage: directory,
+      delete: createAnchorConversationDeleteCommitPort({
+        conversations: manager,
+        storage: directory,
+        publishFact: (fact) => facts.push(fact.conversationId),
+      }),
+    });
+    const created = await directory.create();
+
+    try {
+      await expect(application.delete({
+        kind: "delete",
+        conversationId: created.conversationId,
+        caller: { kind: "host", component: "test" },
+      })).resolves.toMatchObject({ deleted: true });
+      expect(await directory.exists(created.conversationId)).toBe(false);
+      expect(facts).toEqual([created.conversationId]);
+
+      await expect(application.delete({
+        kind: "delete",
+        conversationId: "ghost",
+        caller: { kind: "host", component: "test" },
+      })).rejects.toMatchObject({ code: "not-found" });
+      expect(await directory.exists("ghost")).toBe(false);
+      expect(facts).toEqual([created.conversationId]);
+    } finally {
+      await manager.disposeAll();
+    }
+  });
+
+  it("legacy delete binding:锁内刚激活的 runtime-only 身份成功删除并发布一次事实", async () => {
+    let releaseRuntime!: (runtime: SessionRuntime) => void;
+    const runtimeReady = new Promise<SessionRuntime>((resolve) => {
+      releaseRuntime = resolve;
+    });
+    let markFactoryEntered!: () => void;
+    const factoryEntered = new Promise<void>((resolve) => {
+      markFactoryEntered = resolve;
+    });
+    let disposeCalls = 0;
+    const runtime = {
+      sessionId: "runtime-only",
+      run: async function* () {
+        throw new Error("run is not used by delete");
+      },
+      abort: () => false,
+      dispose: async () => {
+        disposeCalls += 1;
+      },
+    } as unknown as SessionRuntime;
+    const manager = new ConversationManager(
+      {
+        create: async () => {
+          markFactoryEntered();
+          return runtimeReady;
+        },
+      } satisfies RuntimeFactory,
+      { idleCheckIntervalMs: 999_999 },
+    );
+    const facts: string[] = [];
+    const application = new ConversationDirectoryApplicationService({
+      storage: directory,
+      delete: createAnchorConversationDeleteCommitPort({
+        conversations: manager,
+        storage: directory,
+        publishFact: (fact) => facts.push(fact.conversationId),
+      }),
+    });
+
+    try {
+      const activation = manager.getOrCreate("runtime-only");
+      await factoryEntered;
+      const deletion = application.delete({
+        kind: "delete",
+        conversationId: "runtime-only",
+        caller: { kind: "host", component: "test" },
+      });
+      releaseRuntime(runtime);
+      await activation;
+
+      await expect(deletion).resolves.toMatchObject({ deleted: true });
+      expect(await directory.exists("runtime-only")).toBe(false);
+      expect(facts).toEqual(["runtime-only"]);
+      expect(disposeCalls).toBe(1);
+    } finally {
+      releaseRuntime(runtime);
+      await manager.disposeAll();
+    }
+  });
+
+  it("durable delete recovery retries strict dependent cleanup without rebroadcasting", async () => {
+    const manager = new ConversationManager(
+      { create: async () => { throw new Error("runtime must not be created by delete"); } },
+      { idleCheckIntervalMs: 999_999 },
+    );
+    const created = await directory.create();
+    let cancelAttempts = 0;
+    const removedData: string[] = [];
+    const facts: string[] = [];
+    const projection = createAnchorConversationDeleteProjectionPort({
+      conversations: manager,
+      storage: directory,
+      related: {
+        cancelDependentLifecycle: async () => {
+          if (++cancelAttempts === 1) throw new Error("retry advancement");
+        },
+        removeDependentData: async (conversationId) => {
+          removedData.push(conversationId);
+        },
+      },
+    });
+    const project = () => projectConversationDelete({
+      conversationId: created.conversationId,
+      operationId: "delete-recovery-1",
+      deletionAlreadyCommitted: true,
+      dependentFailure: "propagate" as const,
+      projection,
+      publishFact: (fact) => { facts.push(fact.operationId); },
+    });
+
+    try {
+      await expect(project()).rejects.toThrow("retry advancement");
+      expect(await directory.exists(created.conversationId)).toBe(false);
+      expect(facts).toEqual(["delete-recovery-1"]);
+      await expect(project()).resolves.toMatchObject({ kind: "conversation-deleted" });
+      expect(facts).toEqual(["delete-recovery-1"]);
+      expect(cancelAttempts).toBe(2);
+      expect(removedData).toEqual([created.conversationId]);
     } finally {
       await manager.disposeAll();
     }

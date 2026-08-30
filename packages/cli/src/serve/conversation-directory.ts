@@ -52,6 +52,7 @@ export function createConversationDirectory(deps: {
   repoForConversationId?: (conversationId: string) => ConversationRepoRoute;
 }): ConversationDirectory & ConversationDirectoryStorage &
   Pick<ConversationClearProjectionPort, "clearStoredView"> & {
+  deleteStoredConversation(conversationId: string): Promise<boolean>;
   /** Temporary read-only Advancement recovery bridge; it shares the same storage primitive. */
   readRunsReverse: ConversationDirectoryStorage["readHistory"];
   listForAdvancement(): Promise<readonly Conversation[]>;
@@ -183,7 +184,7 @@ export function createConversationDirectory(deps: {
       }
     },
 
-    async remove(id): Promise<boolean> {
+    async deleteStoredConversation(id): Promise<boolean> {
       const h = handlesFor(id);
       const { scope } = parseConversationId(id);
       const existing =

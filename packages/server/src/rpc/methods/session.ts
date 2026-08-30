@@ -41,6 +41,7 @@ import type { ExplicitEnvironmentSelection } from "@zhixing/core/contracts";
 import {
   CONVERSATION_CREATE_COMMAND,
   CONVERSATION_CLEAR_COMMAND,
+  CONVERSATION_DELETE_COMMAND,
   CONVERSATION_HISTORY_QUERY,
   CONVERSATION_LIST_QUERY,
   CONVERSATION_RENAME_COMMAND,
@@ -2276,84 +2277,32 @@ export function buildSessionDeleteMethod(): MethodEntry {
           "session.delete requires 'conversationId'",
         );
       }
-      const manager = requireConversations(ctx.server);
-      const requestId = lifecycleRequestId(
-        params.requestId,
-        manager.usesDurableTurnProtocol(),
-        "session.delete",
+      if (
+        params.requestId !== undefined &&
+        (!isProtocolIdentifier(params.requestId) ||
+          params.requestId.trim().length === 0)
+      ) {
+        throw RpcErrors.invalidParams("session.delete request identity is invalid");
+      }
+      const productApi = requireConversationProductApi(
+        ctx.server,
+        CONVERSATION_DELETE_COMMAND,
       );
-      const durableControl = manager.usesDurableTurnProtocol()
-        ? {
-            requestId,
-            principal: authenticatedConversationPrincipal(ctx),
-          }
-        : undefined;
-      const directory = ctx.server.conversationDirectory;
-      // Durable lifecycle materialization has one consumer shared by the online
-      // call and recovery. Legacy mode keeps the pre-authority manager path.
-      const result = durableControl
-        ? await (async () => {
-            const write = await manager.writeDurableSession({
-              conversationId: id,
-              requestId: durableControl.requestId,
-              mutation: { kind: "conversation-delete" },
-              principal: durableControl.principal,
-              conversationExists: async () =>
-                manager.has(id) || (await directory?.exists(id)) === true,
-            });
-            const revision = requireDurableLifecycleRevision(
-              write,
-              id,
-              "deleting",
-            );
-            await manager.projectDurableSession({
-              conversationId: id,
-              requestId: durableControl.requestId,
-              mutation: "delete",
-              domainRevision: revision,
-            });
-            return true;
-          })()
-        : await manager.delete(id, {
-            removeDisk: async () => (directory ? directory.remove(id) : false),
-            onDeleted: () => {
-              ctx.server.sessionBroadcast?.(id, SESSION_NOTIFICATIONS.changed, {
-                conversationId: id,
-                change: "deleted",
-              } satisfies SessionChangedPayload);
-            },
-          });
-      if (result === "busy") {
-        throw new RpcAppError(
-          RPC_ERROR_CODES.BUSY,
-          "Conversation has an in-flight turn; abort it before deleting",
-        );
-      }
-      if (!result) {
-        throw RpcErrors.notFound(`Session not found: ${id}`);
-      }
-      // 耐久路径的 advancement 级联归 lifecycle delete projector 拥有
-      // (与目录/运行时清理同一投影 claim,失败保持待办由恢复重驱);
-      // 仅非耐久兼容路径保留旧的 RPC 侧 best-effort 清理。
-      if (!durableControl) {
-        try {
-          await ctx.server.advancement?.cancelOpenConversationSession({
-            conversationId: id,
-            reason: "user-cancelled",
-            message: "原始对话已删除，推进会话已取消。",
-          });
-        } catch (err) {
-          console.error("[session.delete] advancement cleanup failed:", err);
-        }
-        // 控制日志生命周期跟随对话本体——连带删除，失败不影响主对话删除结果。
-        try {
-          await ctx.server.advancement?.removeConversationData(id);
-        } catch (err) {
-          console.error(
-            "[session.delete] advancement data removal failed:",
-            err,
-          );
-        }
+      try {
+        await productApi.command(CONVERSATION_DELETE_COMMAND, {
+          kind: "delete",
+          conversationId: id,
+          ...(params.requestId !== undefined
+            ? { operationId: params.requestId }
+            : {}),
+          caller: {
+            kind: "surface",
+            surfacePrincipal: rpcSurfacePrincipal(ctx.connection),
+            connectionId: String(ctx.connection.id),
+          },
+        });
+      } catch (error) {
+        throw mapConversationDeleteApplicationError(error, id);
       }
     },
   };
@@ -2899,42 +2848,6 @@ function validateTurnId(value: unknown): string {
   return value;
 }
 
-function lifecycleRequestId(
-  value: unknown,
-  durable: boolean,
-  method: "session.delete",
-): string {
-  if (value === undefined) {
-    if (durable) {
-      throw RpcErrors.invalidParams(
-        `${method} requires a stable 'requestId' while durable execution is enabled`,
-      );
-    }
-    return `${method}:${generateTurnId()}`;
-  }
-  if (!isProtocolIdentifier(value) || value.trim().length === 0) {
-    throw RpcErrors.invalidParams(`${method} request identity is invalid`);
-  }
-  return value;
-}
-
-function requireDurableLifecycleRevision(
-  result: Awaited<ReturnType<ConversationManager["writeDurableSession"]>>,
-  conversationId: string,
-  operation: "deleting",
-): number {
-  if (result.status === "busy") {
-    throw new RpcAppError(
-      RPC_ERROR_CODES.BUSY,
-      `Conversation has an in-flight or pending lifecycle operation; retry before ${operation}`,
-    );
-  }
-  if (result.status === "not-found") {
-    throw RpcErrors.notFound(`Session not found: ${conversationId}`);
-  }
-  return result.domainRevision;
-}
-
 function requireAdvancementSessionId(
   params: SessionAdvancementActionParams,
   method: string,
@@ -3194,5 +3107,23 @@ function mapConversationClearApplicationError(
     error.message.includes("stable operation")
       ? "session.clear requires a stable 'requestId' while durable execution is enabled"
       : "session.clear request identity is invalid",
+  );
+}
+
+function mapConversationDeleteApplicationError(
+  error: unknown,
+  conversationId: string,
+): unknown {
+  if (!(error instanceof ConversationApplicationError)) return error;
+  if (error.code === "not-found") {
+    return RpcErrors.notFound(`Session not found: ${conversationId}`);
+  }
+  if (error.code === "busy") {
+    return new RpcAppError(RPC_ERROR_CODES.BUSY, error.message);
+  }
+  return RpcErrors.invalidParams(
+    error.message.includes("stable operation")
+      ? "session.delete requires a stable 'requestId' while durable execution is enabled"
+      : "session.delete request identity is invalid",
   );
 }

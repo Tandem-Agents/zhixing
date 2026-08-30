@@ -3,6 +3,7 @@ import { ProductApiDispatcher } from "../product-api/catalog.js";
 import {
   CONVERSATION_CREATE_COMMAND,
   CONVERSATION_CLEAR_COMMAND,
+  CONVERSATION_DELETE_COMMAND,
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
   CONVERSATION_HISTORY_QUERY,
   CONVERSATION_LIST_QUERY,
@@ -12,6 +13,7 @@ import {
   createConversationDirectoryProductApiContribution,
   mergeConversationDirectoryViews,
   projectConversationClear,
+  projectConversationDelete,
   type ConversationDirectoryRecord,
   type ConversationDirectoryStorage,
 } from "./application.js";
@@ -264,6 +266,67 @@ describe("ConversationDirectoryApplicationService", () => {
     });
   });
 
+  it("owns stable delete admission and its busy/not-found terminals", async () => {
+    let outcome:
+      | { readonly status: "deleted" }
+      | { readonly status: "busy"; readonly reason: "active-turn" }
+      | { readonly status: "not-found" } = { status: "deleted" };
+    const application = new ConversationDirectoryApplicationService({
+      storage: {
+        list: async () => [],
+        create: async () => { throw new Error("unused"); },
+        rename: async () => null,
+        readHistory: async () => ({ runs: [], hasMore: false }),
+      },
+      delete: {
+        requiresStableOperationIdentity: true,
+        createOperationIdentity: () => { throw new Error("must not generate"); },
+        commit: async () => outcome,
+      },
+    });
+    const dispatcher = new ProductApiDispatcher(
+      CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+      [createConversationDirectoryProductApiContribution(application)],
+    );
+    const command = {
+      kind: "delete" as const,
+      conversationId: "conversation-1",
+      operationId: "delete-operation-1",
+      caller: { kind: "host" as const, component: "test" },
+    };
+    await expect(
+      dispatcher.command(CONVERSATION_DELETE_COMMAND, command),
+    ).resolves.toEqual({
+      result: {
+        deleted: true,
+        fact: {
+          kind: "conversation-deleted",
+          conversationId: "conversation-1",
+          operationId: "delete-operation-1",
+        },
+      },
+      facts: [{
+        kind: "conversation-deleted",
+        conversationId: "conversation-1",
+        operationId: "delete-operation-1",
+      }],
+    });
+    await expect(application.delete({
+      kind: "delete",
+      conversationId: "conversation-1",
+      caller: { kind: "host", component: "test" },
+    })).rejects.toMatchObject({ code: "invalid-input" });
+    outcome = { status: "busy", reason: "active-turn" };
+    await expect(application.delete(command)).rejects.toMatchObject({
+      code: "busy",
+      reason: "active-turn",
+    });
+    outcome = { status: "not-found" };
+    await expect(application.delete(command)).rejects.toMatchObject({
+      code: "not-found",
+    });
+  });
+
   it("projects storage before runtime reset and publishes only a cleared result", async () => {
     const steps: string[] = [];
     const fact = await projectConversationClear({
@@ -284,6 +347,45 @@ describe("ConversationDirectoryApplicationService", () => {
     });
     expect(fact.kind).toBe("conversation-cleared");
     expect(steps).toEqual(["storage", "runtime", "fact"]);
+  });
+
+  it("projects delete fact before dependent lifecycle and preserves strict/best-effort failure", async () => {
+    const steps: string[] = [];
+    const projection = {
+      deleteRuntimeAndStorage: async (input: { readonly onDeleted: () => void }) => {
+        steps.push("delete");
+        input.onDeleted();
+        return "deleted" as const;
+      },
+      cancelDependentLifecycle: async () => {
+        steps.push("cancel");
+        throw new Error("cancel failed");
+      },
+      removeDependentData: async () => { steps.push("remove"); },
+    };
+    await expect(projectConversationDelete({
+      conversationId: "conversation-1",
+      operationId: "delete-operation-1",
+      deletionAlreadyCommitted: false,
+      dependentFailure: "propagate",
+      projection,
+      publishFact: () => { steps.push("fact"); },
+    })).rejects.toThrow("cancel failed");
+    expect(steps).toEqual(["delete", "fact", "cancel"]);
+
+    steps.length = 0;
+    const failed: string[] = [];
+    await expect(projectConversationDelete({
+      conversationId: "conversation-1",
+      operationId: "delete-operation-1",
+      deletionAlreadyCommitted: false,
+      dependentFailure: "best-effort",
+      projection,
+      publishFact: () => { steps.push("fact"); },
+      onDependentFailure: (step) => { failed.push(step); },
+    })).resolves.toMatchObject({ kind: "conversation-deleted" });
+    expect(steps).toEqual(["delete", "fact", "cancel", "remove"]);
+    expect(failed).toEqual(["cancel-lifecycle"]);
   });
 
   it("owns cross-owner list merge ordering without changing local availability", () => {

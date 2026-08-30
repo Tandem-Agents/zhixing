@@ -134,6 +134,43 @@ describe("LocalConversationRpcRouter", () => {
     expect(port.mutateSession).not.toHaveBeenCalled();
   });
 
+  it("delete 经同一领域操作重放且只投影一次删除通知", async () => {
+    const port = ownerPort();
+    const router = new LocalConversationRpcRouter({
+      deviceId: DEVICE_ID,
+      owner: port,
+      remoteFor: () => { throw new Error("unexpected remote route"); },
+    });
+    const connection = fakeConnection();
+    await router.dispatch({
+      method: "session.subscribe",
+      params: { conversationId: CONVERSATION_ID },
+      connection,
+    });
+    const request = {
+      method: "session.delete",
+      params: {
+        conversationId: CONVERSATION_ID,
+        requestId: "delete-local-1",
+        continueLocally: true,
+      },
+      connection,
+    };
+    await expect(router.dispatch(request)).resolves.toMatchObject({
+      handled: true,
+    });
+    await expect(router.dispatch(request)).resolves.toMatchObject({
+      handled: true,
+    });
+    expect(port.commitConversationDelete).toHaveBeenCalledTimes(2);
+    expect(connection.notify).toHaveBeenCalledTimes(1);
+    expect(connection.notify).toHaveBeenCalledWith("session.changed", {
+      conversationId: CONVERSATION_ID,
+      change: "deleted",
+    });
+    expect(port.mutateSession).not.toHaveBeenCalled();
+  });
+
   it("全局确认能力返回可行动产品语言且不泄漏内部术语", async () => {
     const router = new LocalConversationRpcRouter({
       deviceId: DEVICE_ID,
@@ -346,6 +383,7 @@ function ownerPort(): LocalConversationOwnerPort {
     Parameters<LocalConversationOwnerPort["subscribeConversationFacts"]>[0]
   >();
   const projectedClearOperations = new Set<string>();
+  const projectedDeleteOperations = new Set<string>();
   return {
     createConversation: vi.fn(async () => CONVERSATION_ID),
     ensureSession: vi.fn(async () => {}),
@@ -370,6 +408,18 @@ function ownerPort(): LocalConversationOwnerPort {
         for (const listener of factListeners) listener(fact);
       }
       return { status: "cleared" };
+    }),
+    commitConversationDelete: vi.fn(async ({ conversationId, operationId }) => {
+      const fact = {
+        kind: "conversation-deleted" as const,
+        conversationId,
+        operationId,
+      };
+      if (!projectedDeleteOperations.has(operationId)) {
+        projectedDeleteOperations.add(operationId);
+        for (const listener of factListeners) listener(fact);
+      }
+      return { status: "deleted" };
     }),
     subscribeConversationFacts: vi.fn((listener) => {
       factListeners.add(listener);

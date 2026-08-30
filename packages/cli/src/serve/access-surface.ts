@@ -148,6 +148,10 @@ export interface AssemblyContext {
     ConversationClearProjectionPort,
     "clearStoredView"
   >;
+  /** Conversation-owned delete projection; never exposed through ServerContext. */
+  readonly conversationDeleteProjection: {
+    deleteStoredConversation(conversationId: string): Promise<boolean>;
+  };
   readonly conversationRepoFor: (conversationId: string) => {
     readonly repo: import("@zhixing/core").IConversationRepository;
     readonly localId: string;

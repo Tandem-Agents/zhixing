@@ -91,6 +91,13 @@ export function createLocalConversationDirectoryApplication(input: {
       },
       commit: (request) => input.owner.commitConversationClear(request),
     },
+    delete: {
+      requiresStableOperationIdentity: true,
+      createOperationIdentity: () => {
+        throw new Error("Local Conversation delete requires a stable operation identity");
+      },
+      commit: (request) => input.owner.commitConversationDelete(request),
+    },
     runtime: {
       read: (conversationId) => ({
         active: false,

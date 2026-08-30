@@ -163,6 +163,35 @@ export type ConversationClearCaller =
     }>
   | Readonly<{ kind: "host"; component: string }>;
 
+/** Correctness boundary used by the delete application command. */
+export interface ConversationDeleteCommitPort {
+  readonly requiresStableOperationIdentity: boolean;
+  createOperationIdentity(): string;
+  commit(input: Readonly<{
+    conversationId: string;
+    operationId: string;
+    caller: ConversationClearCaller;
+  }>): Promise<
+    | Readonly<{ status: "deleted" }>
+    | Readonly<{
+        status: "busy";
+        reason: "active-turn" | "pending-lifecycle";
+      }>
+    | Readonly<{ status: "not-found" }>
+  >;
+}
+
+/** Owner/storage and cross-domain mechanisms required by delete projection. */
+export interface ConversationDeleteProjectionPort {
+  deleteRuntimeAndStorage(input: Readonly<{
+    conversationId: string;
+    deletionAlreadyCommitted: boolean;
+    onDeleted: () => void;
+  }>): Promise<"deleted" | "busy" | "not-found">;
+  cancelDependentLifecycle?(conversationId: string): Promise<void>;
+  removeDependentData?(conversationId: string): Promise<void>;
+}
+
 /** Read-only external facts used to decorate the durable directory. */
 export interface ConversationRuntimeProjectionReader {
   read(conversationId: string): ConversationRuntimeProjection | undefined;
@@ -196,6 +225,12 @@ export type ConversationDirectoryCommand =
       conversationId: string;
       operationId?: string;
       caller: ConversationClearCaller;
+    }>
+  | Readonly<{
+      kind: "delete";
+      conversationId: string;
+      operationId?: string;
+      caller: ConversationClearCaller;
     }>;
 
 export interface ConversationCreatedResult {
@@ -226,6 +261,21 @@ export interface ConversationClearedResult {
   readonly fact: ConversationClearedFact;
 }
 
+export interface ConversationDeletedFact {
+  readonly kind: "conversation-deleted";
+  readonly conversationId: string;
+  readonly operationId: string;
+}
+
+export interface ConversationDeletedResult {
+  readonly deleted: true;
+  readonly fact: ConversationDeletedFact;
+}
+
+export type ConversationLifecycleFact =
+  | ConversationClearedFact
+  | ConversationDeletedFact;
+
 export class ConversationApplicationError extends Error {
   constructor(
     readonly code: "invalid-input" | "not-found" | "busy",
@@ -249,6 +299,9 @@ export interface ConversationDirectoryApplication {
   clear(
     command: Extract<ConversationDirectoryCommand, { readonly kind: "clear" }>,
   ): Promise<ConversationClearedResult>;
+  delete(
+    command: Extract<ConversationDirectoryCommand, { readonly kind: "delete" }>,
+  ): Promise<ConversationDeletedResult>;
 }
 
 const HISTORY_DEFAULT_LIMIT = 20;
@@ -274,6 +327,7 @@ export class ConversationDirectoryApplicationService
       advancement?: ConversationAdvancementProjectionReader;
       availability?: ConversationAvailability;
       clear?: ConversationClearCommitPort;
+      delete?: ConversationDeleteCommitPort;
     }>,
   ) {}
 
@@ -439,6 +493,61 @@ export class ConversationDirectoryApplicationService
       fact: conversationClearedFact(command.conversationId, operationId),
     });
   }
+
+  async delete(
+    command: Extract<ConversationDirectoryCommand, { readonly kind: "delete" }>,
+  ): Promise<ConversationDeletedResult> {
+    if (typeof command.conversationId !== "string") {
+      throw new ConversationApplicationError(
+        "invalid-input",
+        "Conversation delete requires a conversation id",
+      );
+    }
+    const port = this.input.delete;
+    if (!port) {
+      throw new Error("Conversation delete application is not assembled");
+    }
+    let operationId = command.operationId;
+    if (operationId === undefined) {
+      if (port.requiresStableOperationIdentity) {
+        throw new ConversationApplicationError(
+          "invalid-input",
+          "Conversation delete requires a stable operation identity",
+        );
+      }
+      operationId = port.createOperationIdentity();
+    }
+    if (!isProtocolIdentifier(operationId) || operationId.trim().length === 0) {
+      throw new ConversationApplicationError(
+        "invalid-input",
+        "Conversation delete operation identity is invalid",
+      );
+    }
+    const outcome = await port.commit({
+      conversationId: command.conversationId,
+      operationId,
+      caller: command.caller,
+    });
+    if (outcome.status === "busy") {
+      throw new ConversationApplicationError(
+        "busy",
+        outcome.reason === "pending-lifecycle"
+          ? "Conversation has an in-flight or pending lifecycle operation; retry before deleting"
+          : "Conversation has an in-flight turn; abort it before deleting",
+        outcome.reason,
+      );
+    }
+    if (outcome.status === "not-found") {
+      throw new ConversationApplicationError(
+        "not-found",
+        `Conversation not found: ${command.conversationId}`,
+      );
+    }
+    return Object.freeze({
+      deleted: true as const,
+      fact: conversationDeletedFact(command.conversationId, operationId),
+    });
+  }
 }
 
 /**
@@ -484,6 +593,80 @@ function conversationClearedFact(
   });
 }
 
+/**
+ * Projects one committed delete through Owner/storage, then its dependent
+ * lifecycle. Legacy callers retain best-effort dependency cleanup; durable
+ * projection stays pending when a dependency fails.
+ */
+export async function projectConversationDelete(input: Readonly<{
+  conversationId: string;
+  operationId: string;
+  deletionAlreadyCommitted: boolean;
+  dependentFailure: "propagate" | "best-effort";
+  projection: ConversationDeleteProjectionPort;
+  publishFact?: (fact: ConversationDeletedFact) => void;
+  onDependentFailure?: (
+    step: "cancel-lifecycle" | "remove-data",
+    error: unknown,
+  ) => void;
+}>): Promise<ConversationDeletedFact> {
+  const fact = conversationDeletedFact(input.conversationId, input.operationId);
+  const outcome = await input.projection.deleteRuntimeAndStorage({
+    conversationId: input.conversationId,
+    deletionAlreadyCommitted: input.deletionAlreadyCommitted,
+    onDeleted: () => input.publishFact?.(fact),
+  });
+  if (outcome === "busy") {
+    throw new ConversationApplicationError(
+      "busy",
+      "Conversation lifecycle projection is busy",
+      "pending-lifecycle",
+    );
+  }
+  if (outcome === "not-found") {
+    throw new ConversationApplicationError(
+      "not-found",
+      `Conversation lifecycle projection lost its identity: ${input.conversationId}`,
+    );
+  }
+
+  const dependentSteps = [
+    [
+      "cancel-lifecycle",
+      input.projection.cancelDependentLifecycle
+        ? () => input.projection.cancelDependentLifecycle!(input.conversationId)
+        : undefined,
+    ],
+    [
+      "remove-data",
+      input.projection.removeDependentData
+        ? () => input.projection.removeDependentData!(input.conversationId)
+        : undefined,
+    ],
+  ] as const;
+  for (const [step, project] of dependentSteps) {
+    if (!project) continue;
+    try {
+      await project();
+    } catch (error) {
+      if (input.dependentFailure === "propagate") throw error;
+      input.onDependentFailure?.(step, error);
+    }
+  }
+  return fact;
+}
+
+function conversationDeletedFact(
+  conversationId: string,
+  operationId: string,
+): ConversationDeletedFact {
+  return Object.freeze({
+    kind: "conversation-deleted" as const,
+    conversationId,
+    operationId,
+  });
+}
+
 export const CONVERSATION_RENAMED_FACT_EVENT = defineProductApiFactEvent<
   "conversation-renamed",
   ConversationRenamedFact
@@ -493,6 +676,11 @@ export const CONVERSATION_CLEARED_FACT_EVENT = defineProductApiFactEvent<
   "conversation-cleared",
   ConversationClearedFact
 >("conversation-cleared");
+
+export const CONVERSATION_DELETED_FACT_EVENT = defineProductApiFactEvent<
+  "conversation-deleted",
+  ConversationDeletedFact
+>("conversation-deleted");
 
 export const CONVERSATION_LIST_QUERY = defineProductApiQuery<
   "conversation-directory.query.list",
@@ -527,6 +715,13 @@ export const CONVERSATION_CLEAR_COMMAND = defineProductApiCommand<
   ConversationClearedFact
 >("conversation-directory.command.clear", [CONVERSATION_CLEARED_FACT_EVENT]);
 
+export const CONVERSATION_DELETE_COMMAND = defineProductApiCommand<
+  "conversation-directory.command.delete",
+  Extract<ConversationDirectoryCommand, { readonly kind: "delete" }>,
+  ConversationDeletedResult,
+  ConversationDeletedFact
+>("conversation-directory.command.delete", [CONVERSATION_DELETED_FACT_EVENT]);
+
 export const CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET =
   defineProductApiExactSet({
     operations: [
@@ -535,8 +730,13 @@ export const CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET =
       CONVERSATION_CREATE_COMMAND,
       CONVERSATION_RENAME_COMMAND,
       CONVERSATION_CLEAR_COMMAND,
+      CONVERSATION_DELETE_COMMAND,
     ],
-    factEvents: [CONVERSATION_RENAMED_FACT_EVENT, CONVERSATION_CLEARED_FACT_EVENT],
+    factEvents: [
+      CONVERSATION_RENAMED_FACT_EVENT,
+      CONVERSATION_CLEARED_FACT_EVENT,
+      CONVERSATION_DELETED_FACT_EVENT,
+    ],
   });
 
 export function createConversationDirectoryProductApiContribution(
@@ -564,8 +764,16 @@ export function createConversationDirectoryProductApiContribution(
         const result = await application.clear(command);
         return { result, facts: [result.fact] };
       }),
+      bindProductApiOperation(CONVERSATION_DELETE_COMMAND, async (command) => {
+        const result = await application.delete(command);
+        return { result, facts: [result.fact] };
+      }),
     ],
-    factEvents: [CONVERSATION_RENAMED_FACT_EVENT, CONVERSATION_CLEARED_FACT_EVENT],
+    factEvents: [
+      CONVERSATION_RENAMED_FACT_EVENT,
+      CONVERSATION_CLEARED_FACT_EVENT,
+      CONVERSATION_DELETED_FACT_EVENT,
+    ],
   });
 }
 

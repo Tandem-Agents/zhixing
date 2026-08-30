@@ -91,8 +91,11 @@ export class LocalConversationRpcRouter
     input.owner.subscribeConversationFacts((fact) => {
       this.#notify(fact.conversationId, "session.changed", {
         conversationId: fact.conversationId,
-        change: "cleared",
+        change: fact.kind === "conversation-cleared" ? "cleared" : "deleted",
       });
+      if (fact.kind === "conversation-deleted") {
+        this.#observers.delete(fact.conversationId);
+      }
     });
   }
 
@@ -389,17 +392,20 @@ export class LocalConversationRpcRouter
       case "session.delete": {
         requireLocalConsent(params);
         const conversationId = this.#conversationId(params, method);
-        await this.#mutate(
-          conversationId,
-          requiredIdentifier(params.requestId, "删除请求"),
-          { kind: "conversation-delete" },
-        );
-        this.#notify(conversationId, "session.changed", {
-          conversationId,
-          change: "deleted",
-        });
-        this.#observers.delete(conversationId);
-        return undefined;
+        try {
+          await this.#application.delete({
+            kind: "delete",
+            conversationId,
+            operationId: requiredIdentifier(params.requestId, "删除请求"),
+            caller: {
+              kind: "host",
+              component: "local-conversation-rpc",
+            },
+          });
+          return undefined;
+        } catch (error) {
+          throw mapLocalConversationApplicationError(error, "delete");
+        }
       }
       case "session.taskList": {
         const conversationId = this.#conversationId(params, method);
@@ -733,7 +739,7 @@ function projectWireConversationEntry(
 
 function mapLocalConversationApplicationError(
   error: unknown,
-  operation: "history" | "rename" | "clear",
+  operation: "history" | "rename" | "clear" | "delete",
 ): unknown {
   if (!(error instanceof ConversationApplicationError)) return error;
   if (error.code === "not-found") {
@@ -747,8 +753,10 @@ function mapLocalConversationApplicationError(
     );
   }
   return RpcErrors.invalidParams(
-    operation === "clear"
-      ? "清空请求缺少有效的请求标识。"
+    operation === "clear" || operation === "delete"
+      ? operation === "clear"
+        ? "清空请求缺少有效的请求标识。"
+        : "删除请求缺少有效的请求标识。"
       : operation === "rename"
       ? "对话名称不能为空。"
       : error.message.includes("cursor")

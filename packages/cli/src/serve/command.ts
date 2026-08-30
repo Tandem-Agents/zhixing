@@ -153,6 +153,10 @@ import { readGuidanceFile } from "./read-guidance-file.js";
 import { createConversationAliveCheck } from "./advancement-gc.js";
 import { createConversationDirectory } from "./conversation-directory.js";
 import { createAnchorConversationClearCommitPort } from "./conversation-clear-binding.js";
+import {
+  createAnchorConversationDeleteCommitPort,
+  createConversationWorksceneDeleteProjectionBridge,
+} from "./conversation-delete-binding.js";
 import { createWorksceneDirectory } from "./workscene-directory.js";
 import { createWorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 import { createTrustAdministrationApplication } from "./trust-administration-adapter.js";
@@ -367,11 +371,14 @@ async function runServerProcess(
     current: import("./conversation-protocol-runtime.js").ConversationProtocolRuntime | undefined;
   } = { current: undefined };
   // 工作场景域——注册表单例(管理面 + factory 的场景装配路由共用)与场景对话取建。
+  const worksceneConversationDeleteProjectionBridge =
+    createConversationWorksceneDeleteProjectionBridge(conversationDirectory);
   const worksceneDirectory = createWorksceneDirectory({
     authority: () => authorityRuntimeRef.current,
     conversations: () => conversationsRef.current,
     conversationAuthority: () => conversationAuthorityRef.current,
-    conversationDirectory,
+    conversationDeleteProjectionBridge:
+      worksceneConversationDeleteProjectionBridge,
     worksceneStorageCleanup,
     recoverWorksceneState: async () => {
       await authorityRuntimeRef.current?.recoverWorksceneState();
@@ -844,6 +851,7 @@ async function runServerProcess(
     convRepo,
     conversationDirectory,
     conversationClearProjection: conversationDirectory,
+    conversationDeleteProjection: conversationDirectory,
     conversationRepoFor: repoForConversationId,
     taskListService: builtinExtraTools.taskListService,
     conversationAuthorityRef,
@@ -1930,6 +1938,36 @@ async function runServerProcess(
           fact.conversationId,
           SESSION_NOTIFICATIONS.changed,
           { conversationId: fact.conversationId, change: "cleared" },
+        );
+      },
+    }),
+    delete: createAnchorConversationDeleteCommitPort({
+      conversations: ctx.conversations!,
+      storage: {
+        exists: (conversationId) =>
+          conversationDirectory.exists(conversationId),
+        deleteStoredConversation: (conversationId) =>
+          conversationDirectory.deleteStoredConversation(conversationId),
+      },
+      ...(ctx.advancement
+        ? {
+            related: {
+              cancelDependentLifecycle: (conversationId) =>
+                ctx.advancement!.cancelOpenConversationSession({
+                  conversationId,
+                  reason: "user-cancelled",
+                  message: "原始对话已删除，推进会话已取消。",
+                }),
+              removeDependentData: (conversationId) =>
+                ctx.advancement!.removeConversationData(conversationId),
+            },
+          }
+        : {}),
+      publishFact: (fact) => {
+        ctx.sessionBroadcastRef.current?.(
+          fact.conversationId,
+          SESSION_NOTIFICATIONS.changed,
+          { conversationId: fact.conversationId, change: "deleted" },
         );
       },
     }),

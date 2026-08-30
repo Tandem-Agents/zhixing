@@ -3422,7 +3422,10 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/rpc/src/event-bridge.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/conversation-clear-binding.ts",
+    "packages/cli/src/serve/conversation-delete-binding.ts",
     "packages/cli/src/serve/conversation-directory.ts",
+    "packages/cli/src/serve/workscene-directory.ts",
+    "packages/cli/src/serve/workscene-session-owner.ts",
     "packages/cli/src/serve/local-conversation-directory-application.ts",
     "packages/cli/src/serve/local-conversation-rpc.ts",
     "packages/cli/src/serve/local-conversation-owner.ts",
@@ -3500,6 +3503,57 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/local-conversation-rpc.ts",
       (text) => `${text}\nvoid input.owner.createConversation();`,
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/local-conversation-rpc.ts",
+      (text) => text.replace(
+        "await this.#application.delete({",
+        "await this.#mutate(conversationId, operationId, { kind: \"conversation-delete\" });\n          await this.#application.delete({",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/runtime/conversation-directory.ts",
+      (text) => text.replace(
+        "export interface ConversationDirectory {",
+        "export interface ConversationDirectory {\n  remove(id: string): Promise<boolean>;",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => `${text}\nvoid requireConversations(ctx.server).delete(id);`,
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/conversation-delete-binding.ts",
+      (text) => text.replace(
+        "!deletionAlreadyCommitted ||",
+        "deletionAlreadyCommitted &&",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/workscene-directory.ts",
+      (text) => `${text}\nvoid deps.conversationDeleteProjectionBridge.deleteConversationStorageProjection("second-consumer");`,
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/workscene-session-owner.ts",
+      (text) => `${text}\nvoid this.#directory.deleteStoredConversation("direct-delete");`,
     )).join("\n"),
     /Conversation directory management lacks one domain application/,
   );

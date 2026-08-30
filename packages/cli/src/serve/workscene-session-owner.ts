@@ -4,12 +4,12 @@ import {
   worksceneConversationId,
 } from "@zhixing/core";
 import type { ConversationManager } from "@zhixing/owner-kernel";
-import type { ConversationDirectory } from "@zhixing/server";
+import type { ConversationWorksceneDeleteProjectionBridge } from "./conversation-delete-binding.js";
 import type { WorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 
 export interface WorksceneSessionOwnerOptions {
   readonly conversations: () => ConversationManager | null;
-  readonly directory: ConversationDirectory;
+  readonly conversationDeleteProjectionBridge: ConversationWorksceneDeleteProjectionBridge;
   readonly authority: () =>
     | {
         touchWorksceneSession(input: {
@@ -40,13 +40,14 @@ export interface WorksceneSessionOwnerOptions {
  */
 export class WorksceneSessionOwner {
   readonly #conversations: () => ConversationManager | null;
-  readonly #directory: ConversationDirectory;
+  readonly #conversationDeleteProjectionBridge: ConversationWorksceneDeleteProjectionBridge;
   readonly #authority: WorksceneSessionOwnerOptions["authority"];
   readonly #storageCleanup: WorksceneStorageCleanup;
 
   constructor(options: WorksceneSessionOwnerOptions) {
     this.#conversations = options.conversations;
-    this.#directory = options.directory;
+    this.#conversationDeleteProjectionBridge =
+      options.conversationDeleteProjectionBridge;
     this.#authority = options.authority;
     this.#storageCleanup = options.storageCleanup;
   }
@@ -147,7 +148,8 @@ export class WorksceneSessionOwner {
         requestId: `workscene-delete:${sceneId}:${conversationId}`,
         at,
       });
-      await this.#directory.remove(conversationId);
+      await this.#conversationDeleteProjectionBridge
+        .deleteConversationStorageProjection(conversationId);
     }
     await this.#storageCleanup.removeScene(sceneId);
   }
