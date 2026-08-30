@@ -10,7 +10,10 @@ import {
   WorkspaceBindingCatalogDegradedError,
   WorkspaceBindingCatalogIntegrityError,
 } from "@zhixing/core/environment";
-import { WorkspaceAdministrationBusinessError } from "@zhixing/core/environment/workspace-administration";
+import {
+  WorkspaceAdministrationBusinessError,
+  type WorkspaceAdministrationApplication,
+} from "@zhixing/core/environment/workspace-administration";
 import {
   CompletedLocalWorkspaceOperationError,
   LocalWorkspaceManagementHost,
@@ -31,6 +34,50 @@ import {
 } from "./local-workspace-owner.js";
 import { useLocalWorkspaceClient } from "./workspace-command.js";
 
+type TestWorkspaceApplications = Omit<
+  WorkspaceAdministrationApplication,
+  "executeDurableOperation"
+>;
+
+function testWorkspaceApplications(
+  applications: TestWorkspaceApplications,
+): WorkspaceAdministrationApplication {
+  return {
+    ...applications,
+    async executeDurableOperation(operation, execution) {
+      const commonExecution = {
+        operation: execution.operation,
+        abort: execution.abort,
+      };
+      switch (operation.kind) {
+        case "create":
+          return operation.purpose === "control"
+            ? applications.authorizeForControl(operation, commonExecution)
+            : applications.create(operation, commonExecution);
+        case "rename":
+          return applications.rename(operation, commonExecution);
+        case "repath":
+          return applications.repath(operation, commonExecution);
+        case "remove":
+          await applications.remove(operation, commonExecution);
+          return null;
+        case "reset":
+          return applications.reset(
+            {
+              expectedCatalogGeneration: operation.expectedCatalogGeneration,
+              confirmedImpact: operation.impact,
+            },
+            {
+              ...commonExecution,
+              confirmationToken: execution.confirmationToken,
+              confirmationIssuedAt: execution.preparedAt,
+            },
+          );
+      }
+    },
+  };
+}
+
 describe("LocalWorkspaceManagementHost", () => {
   it("owns side effects after commit and replays one result to concurrent clients", async () => {
     const home = await createTempDir("workspace-host");
@@ -43,7 +90,7 @@ describe("LocalWorkspaceManagementHost", () => {
       revision: 1,
       workspaceBindingRevision: 1,
     }));
-    const applications = {
+    const applications = testWorkspaceApplications({
       status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
       previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
       list: async () => [],
@@ -57,7 +104,7 @@ describe("LocalWorkspaceManagementHost", () => {
       repath: vi.fn(),
       remove: vi.fn(),
       reset: vi.fn(),
-    };
+    });
     const lease = await acquireLocalWorkspaceOwner(home);
     const host = new LocalWorkspaceManagementHost({
       lease,
@@ -96,7 +143,7 @@ describe("LocalWorkspaceManagementHost", () => {
     const lease = await acquireLocalWorkspaceOwner(home);
     const host = new LocalWorkspaceManagementHost({
       lease,
-      applications: {
+      applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
@@ -110,7 +157,7 @@ describe("LocalWorkspaceManagementHost", () => {
         repath: vi.fn(),
         remove: vi.fn(),
         reset: vi.fn(),
-      },
+      }),
       outbox: new LocalWorkspaceOperationOutbox({
         rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
       }),
@@ -169,7 +216,7 @@ describe("LocalWorkspaceManagementHost", () => {
     };
     const host = new LocalWorkspaceManagementHost({
       lease,
-      applications: {
+      applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
@@ -180,7 +227,7 @@ describe("LocalWorkspaceManagementHost", () => {
         repath: vi.fn(),
         remove: vi.fn(),
         reset: vi.fn(),
-      },
+      }),
       outbox: new LocalWorkspaceOperationOutbox({
         rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
       }),
@@ -236,7 +283,7 @@ describe("LocalWorkspaceManagementHost", () => {
     const viewByName = vi.fn(async () => view);
     const host = new LocalWorkspaceManagementHost({
       lease,
-      applications: {
+      applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
@@ -247,7 +294,7 @@ describe("LocalWorkspaceManagementHost", () => {
         repath: vi.fn(),
         remove: vi.fn(),
         reset: vi.fn(),
-      },
+      }),
       outbox: new LocalWorkspaceOperationOutbox({
         rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
       }),
@@ -293,7 +340,7 @@ describe("LocalWorkspaceManagementHost", () => {
     const viewFailure = new Error("workspace view unavailable");
     const host = new LocalWorkspaceManagementHost({
       lease,
-      applications: {
+      applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
@@ -307,7 +354,7 @@ describe("LocalWorkspaceManagementHost", () => {
         repath: vi.fn(),
         remove: vi.fn(),
         reset: vi.fn(),
-      },
+      }),
       outbox: new LocalWorkspaceOperationOutbox({
         rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
       }),
@@ -349,7 +396,7 @@ describe("LocalWorkspaceManagementHost", () => {
     const viewByName = vi.fn();
     const host = new LocalWorkspaceManagementHost({
       lease,
-      applications: {
+      applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
@@ -368,7 +415,7 @@ describe("LocalWorkspaceManagementHost", () => {
         repath: vi.fn(),
         remove: vi.fn(),
         reset: vi.fn(),
-      },
+      }),
       outbox: new LocalWorkspaceOperationOutbox({
         rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
       }),
@@ -409,7 +456,7 @@ describe("LocalWorkspaceManagementHost", () => {
     const lease = await acquireLocalWorkspaceOwner(home);
     const host = new LocalWorkspaceManagementHost({
       lease,
-      applications: {
+      applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
@@ -424,7 +471,7 @@ describe("LocalWorkspaceManagementHost", () => {
         repath: vi.fn(),
         remove: vi.fn(),
         reset: vi.fn(),
-      },
+      }),
       outbox: new LocalWorkspaceOperationOutbox({
         rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
       }),
@@ -459,7 +506,7 @@ describe("LocalWorkspaceManagementHost", () => {
     const lease = await acquireLocalWorkspaceOwner(home);
     const host = new LocalWorkspaceManagementHost({
       lease,
-      applications: {
+      applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
@@ -475,7 +522,7 @@ describe("LocalWorkspaceManagementHost", () => {
         repath: vi.fn(),
         remove: vi.fn(),
         reset: vi.fn(),
-      },
+      }),
       outbox: new LocalWorkspaceOperationOutbox({
         rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
       }),
@@ -513,7 +560,7 @@ describe("LocalWorkspaceManagementHost", () => {
     const lease = await acquireLocalWorkspaceOwner(home);
     const host = new LocalWorkspaceManagementHost({
       lease,
-      applications: {
+      applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
@@ -529,7 +576,7 @@ describe("LocalWorkspaceManagementHost", () => {
         repath: vi.fn(),
         remove: vi.fn(),
         reset: vi.fn(),
-      },
+      }),
       outbox: new LocalWorkspaceOperationOutbox({
         rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
       }),
@@ -558,7 +605,7 @@ describe("LocalWorkspaceManagementHost", () => {
     const lease = await acquireLocalWorkspaceOwner(home);
     const host = new LocalWorkspaceManagementHost({
       lease,
-      applications: {
+      applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
@@ -574,7 +621,7 @@ describe("LocalWorkspaceManagementHost", () => {
         repath: vi.fn(),
         remove: vi.fn(),
         reset: vi.fn(),
-      },
+      }),
       outbox: new LocalWorkspaceOperationOutbox({
         rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
       }),
@@ -615,7 +662,7 @@ describe("LocalWorkspaceManagementHost", () => {
     const lease = await acquireLocalWorkspaceOwner(home);
     const host = new LocalWorkspaceManagementHost({
       lease,
-      applications: {
+      applications: testWorkspaceApplications({
         status: async () => ({
           state: "degraded" as const,
           catalogGeneration: "catalog-a",
@@ -633,7 +680,7 @@ describe("LocalWorkspaceManagementHost", () => {
         repath: vi.fn(),
         remove: vi.fn(),
         reset,
-      },
+      }),
       outbox: new LocalWorkspaceOperationOutbox({
         rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
         clock: () => "2026-08-01T00:00:00.000Z",
@@ -696,7 +743,7 @@ describe("LocalWorkspaceManagementHost", () => {
     const lease = await acquireLocalWorkspaceOwner(home);
     const host = new LocalWorkspaceManagementHost({
       lease,
-      applications: {
+      applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
@@ -707,7 +754,7 @@ describe("LocalWorkspaceManagementHost", () => {
         repath: vi.fn(),
         remove: vi.fn(),
         reset: vi.fn(),
-      },
+      }),
       outbox: new LocalWorkspaceOperationOutbox({
         rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
       }),
@@ -764,7 +811,7 @@ describe("LocalWorkspaceManagementHost", () => {
     });
     const host = new LocalWorkspaceManagementHost({
       lease,
-      applications: {
+      applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
@@ -775,7 +822,7 @@ describe("LocalWorkspaceManagementHost", () => {
         repath: vi.fn(),
         remove: vi.fn(),
         reset: vi.fn(),
-      },
+      }),
       outbox,
     });
     try {
@@ -836,7 +883,7 @@ describe("LocalWorkspaceManagementHost", () => {
     });
     const host = new LocalWorkspaceManagementHost({
       lease,
-      applications: {
+      applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
@@ -847,7 +894,7 @@ describe("LocalWorkspaceManagementHost", () => {
         repath: vi.fn(),
         remove: vi.fn(),
         reset: vi.fn(),
-      },
+      }),
       outbox,
     });
     try {
@@ -879,7 +926,7 @@ describe("LocalWorkspaceManagementHost", () => {
     });
     const host = new LocalWorkspaceManagementHost({
       lease,
-      applications: {
+      applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
@@ -892,7 +939,7 @@ describe("LocalWorkspaceManagementHost", () => {
         repath: vi.fn(),
         remove: vi.fn(),
         reset: vi.fn(),
-      },
+      }),
       outbox,
     });
     try {
@@ -927,7 +974,7 @@ describe("LocalWorkspaceManagementHost", () => {
     const firstOutbox = new LocalWorkspaceOperationOutbox({ rootDir });
     const firstHost = new LocalWorkspaceManagementHost({
       lease: firstLease,
-      applications: {
+      applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
@@ -948,7 +995,7 @@ describe("LocalWorkspaceManagementHost", () => {
         repath: vi.fn(),
         remove: vi.fn(),
         reset: vi.fn(),
-      },
+      }),
       outbox: firstOutbox,
     });
     await firstHost.start();
@@ -973,7 +1020,7 @@ describe("LocalWorkspaceManagementHost", () => {
     const secondOutbox = new LocalWorkspaceOperationOutbox({ rootDir });
     const secondHost = new LocalWorkspaceManagementHost({
       lease: secondLease,
-      applications: {
+      applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
@@ -989,7 +1036,7 @@ describe("LocalWorkspaceManagementHost", () => {
         repath: vi.fn(),
         remove: vi.fn(),
         reset: vi.fn(),
-      },
+      }),
       outbox: secondOutbox,
     });
     try {
@@ -1012,7 +1059,7 @@ describe("LocalWorkspaceManagementHost", () => {
     const lease = await acquireLocalWorkspaceOwner(home);
     const host = new LocalWorkspaceManagementHost({
       lease,
-      applications: {
+      applications: testWorkspaceApplications({
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         previewReset: async (input: { expectedCatalogGeneration: string; impact: string }) => input,
         list: async () => [],
@@ -1023,7 +1070,7 @@ describe("LocalWorkspaceManagementHost", () => {
         repath: vi.fn(),
         remove: vi.fn(),
         reset: vi.fn(),
-      },
+      }),
       outbox: new LocalWorkspaceOperationOutbox({ rootDir }),
     });
     try {

@@ -2808,6 +2808,9 @@ export function inspectWorkspaceAdministrationOwnership(records) {
   const host = required(
     "packages/cli/src/runtime/local-workspace-management-host.ts",
   );
+  const outbox = required(
+    "packages/cli/src/runtime/local-workspace-operation-outbox.ts",
+  );
   const bootstrap = required(
     "packages/cli/src/runtime/local-workspace-bootstrap.ts",
   );
@@ -2844,6 +2847,18 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     !application.includes("this.#recovery.completeReset(requestId, abort)") ||
     !application.includes("confirmationIssuedAt") ||
     !application.includes("operationNonce(execution.operation)") ||
+    !application.includes("type WorkspaceAdministrationDurableOperation =") ||
+    !application.includes("interface WorkspaceAdministrationDurableExecution") ||
+    !application.includes("type WorkspaceAdministrationDurableResult =") ||
+    !application.includes("async executeDurableOperation(") ||
+    !application.includes("validateWorkspaceAdministrationDurableOperation(input)") ||
+    !application.includes("switch (operation.kind)") ||
+    !application.includes("workspaceAdministrationOperationTarget(") ||
+    !application.includes("validateWorkspaceAdministrationDurableResult(") ||
+    !application.includes("validateWorkspaceAdministrationDurableValue(") ||
+    !application.includes("workspaceAdministrationDurableSuccess(") ||
+    !application.includes("workspaceAdministrationDurableFailure(") ||
+    !application.includes('["bindingRef", "deviceId"]') ||
     !application.includes("async viewByName(displayName: string)") ||
     !application.includes(
       "toView(await this.#bindingByName(displayName, control))",
@@ -2880,18 +2895,31 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     (host.match(/new WorkspaceAdministrationApplicationService\s*\(/gu) ?? [])
       .length !== 1 ||
     !host.includes("recovery: input.management.recovery") ||
-    !host.includes("previewReset: (command) => workspace.previewReset(command)") ||
-    !host.includes("reset: (command, execution) => workspace.reset(command, execution)") ||
-    !host.includes("confirmationIssuedAt: operation.preparedAt") ||
+    !host.includes("applications: workspace") ||
+    !host.includes("this.#applications.executeDurableOperation(") ||
+    !host.includes("preparedAt: operation.preparedAt") ||
     !host.includes("confirmationToken: operation.confirmationToken") ||
     !host.includes("operation: {") ||
-    !host.includes('["bindingRef", "deviceId"]') ||
     !host.includes("return this.#applications.viewByName(request.displayName)") ||
-    !host.includes("viewByName: (displayName) => workspace.viewByName(displayName)") ||
     !host.includes(
       "const claimed = consumptionCredentialOf(pendingDelivery, currentResult)",
     ) ||
     !host.includes("!matchesConsumptionCredential(operation, claimed)") ||
+    !host.includes("validateWorkspaceAdministrationDurableResult(") ||
+    !host.includes("validateWorkspaceAdministrationDurableValue(input, result.value)") ||
+    !host.includes("workspaceAdministrationDurableSuccess(") ||
+    !host.includes("workspaceAdministrationDurableFailure(") ||
+    host.includes("LocalWorkspaceWriteOperation") ||
+    host.includes("validateLocalWorkspaceWriteOperation") ||
+    host.includes("interface OperationResult") ||
+    host.includes("function validateOperationResult") ||
+    host.includes("async #execute(") ||
+    host.includes("this.#applications.create(") ||
+    host.includes("this.#applications.authorizeForControl(") ||
+    host.includes("this.#applications.rename(") ||
+    host.includes("this.#applications.repath(") ||
+    host.includes("this.#applications.remove(") ||
+    host.includes("this.#applications.reset(") ||
     host.includes("#bindingByName(") ||
     !control.includes("implements WorkspaceAdministrationControlPort") ||
     !control.includes("this.#resources.acquireRoot(") ||
@@ -2905,6 +2933,20 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     );
   }
   if (
+    !outbox.includes("type WorkspaceAdministrationDurableOperation") ||
+    !outbox.includes("validateWorkspaceAdministrationDurableOperation") ||
+    outbox.includes("type LocalWorkspaceWriteOperation") ||
+    outbox.includes("function validateLocalWorkspaceWriteOperation") ||
+    outbox.includes('case "create"') ||
+    outbox.includes('case "rename"') ||
+    outbox.includes('case "repath"') ||
+    outbox.includes('case "remove"')
+  ) {
+    failures.push(
+      "Workspace outbox redefines the domain operation contract or durable dispatch",
+    );
+  }
+  if (
     !command.includes("withLocalWorkspaceClient(") ||
     command.includes("withLocalWorkspaceFacade") ||
     /views\.filter\(\(\{ name \}\)/u.test(command) ||
@@ -2915,6 +2957,8 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     !command.includes("deviceId: authorization.deviceId") ||
     !command.includes("bindingRef: authorization.bindingRef") ||
     !command.includes("validateWorkspaceControlAuthorization(result.value)") ||
+    !command.includes("workspaceAdministrationOperationTarget(operation.input)") ||
+    command.includes("function operationTarget(") ||
     command.includes("WORKSPACE_CATALOG_RESET_IMPACT") ||
     !repl.includes("withLocalWorkspaceClient(") ||
     !repl.includes("createWorksceneFromLocalWorkspaceAuthorization(") ||

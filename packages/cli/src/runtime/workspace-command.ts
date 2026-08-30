@@ -20,12 +20,8 @@ import {
   type LocalWorkspaceConsumptionCredential,
   type LocalWorkspaceManagementHost,
   type LocalWorkspaceClient,
-  validateWorkspaceControlAuthorization,
 } from "./local-workspace-management-host.js";
-import type {
-  LocalWorkspaceOperation,
-  LocalWorkspaceWriteOperation,
-} from "./local-workspace-operation-outbox.js";
+import type { LocalWorkspaceOperation } from "./local-workspace-operation-outbox.js";
 import {
   acquireExecutorLocalWorkspaceOwner,
   defineLocalWorkspaceAssemblyIdentity,
@@ -36,11 +32,15 @@ import {
   defaultCoreHostConnectionDeps,
 } from "./core-host-connection.js";
 import { RpcWorksceneFacade } from "./rpc-workscene-facade.js";
-import type {
-  WorkspaceAdministrationView,
-  WorkspaceControlAuthorization,
+import {
+  validateWorkspaceControlAuthorization,
+  workspaceAdministrationOperationTarget,
+  type WorkspaceAdministrationView,
+  type WorkspaceControlAuthorization,
 } from "@zhixing/core/environment/workspace-administration";
-import type { WorksceneSummary } from "@zhixing/rpc";
+import type {
+  WorksceneSummary,
+} from "@zhixing/rpc";
 
 export function worksceneCreateRequestIdForLocalWorkspace(
   credential: LocalWorkspaceConsumptionCredential,
@@ -390,7 +390,7 @@ function recoveryNoticeOf(
   return {
     operationId: operation.operationId,
     operation: operation.input.kind,
-    target: operationTarget(operation.input),
+    target: workspaceAdministrationOperationTarget(operation.input),
     outcome: failed ? "failed" : "succeeded",
     credential: {
       outboxId,
@@ -423,19 +423,4 @@ function controlWorkspaceResult(
     Array.isArray(result.value)
   ) return undefined;
   return validateWorkspaceControlAuthorization(result.value);
-}
-
-function operationTarget(input: LocalWorkspaceWriteOperation): string {
-  switch (input.kind) {
-    case "create":
-      return input.displayName;
-    case "rename":
-      return input.currentName;
-    case "repath":
-    case "remove":
-      return input.name;
-    case "reset":
-      return input.expectedCatalogGeneration;
-  }
-  throw new TypeError("Unknown local workspace operation");
 }

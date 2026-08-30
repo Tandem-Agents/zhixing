@@ -10,6 +10,10 @@ import {
   WorkspaceAdministrationBusinessError,
   WORKSPACE_CATALOG_RESET_IMPACT,
   type WorkspaceAdministrationControlPort,
+  validateWorkspaceAdministrationDurableOperation,
+  validateWorkspaceAdministrationDurableResult,
+  validateWorkspaceAdministrationDurableValue,
+  workspaceAdministrationOperationTarget,
 } from "./workspace-administration.js";
 import {
   WorkspaceBindingCancelledError,
@@ -120,6 +124,108 @@ function harness(
 }
 
 describe("WorkspaceAdministrationApplicationService", () => {
+  it("owns strict durable operation dispatch, targets and result values", async () => {
+    const { application, admin } = harness();
+    const execution = (localSeq: number) => ({
+      operation: {
+        outboxId: "outbox-01234567890123456789012345678901",
+        localSeq,
+        operationId: `workspace-operation-${localSeq}`,
+        inputDigest: `sha256:${String(localSeq).padStart(64, "0")}`,
+      },
+      abort: new AbortController().signal,
+      preparedAt: "2026-08-01T00:00:00.000Z",
+    });
+    const operations = [
+      {
+        kind: "create" as const,
+        purpose: "settings" as const,
+        displayName: "Project",
+        absolutePath: "C:\\project",
+      },
+      {
+        kind: "create" as const,
+        purpose: "control" as const,
+        displayName: "Control",
+        absolutePath: "C:\\control",
+      },
+      {
+        kind: "rename" as const,
+        currentName: "Project",
+        displayName: "Renamed",
+        expectedRevision: 1,
+      },
+      {
+        kind: "repath" as const,
+        name: "Renamed",
+        absolutePath: "D:\\project",
+        expectedRevision: 2,
+      },
+      {
+        kind: "remove" as const,
+        name: "Renamed",
+        expectedRevision: 3,
+      },
+      {
+        kind: "reset" as const,
+        expectedCatalogGeneration: "catalog-a",
+        impact: WORKSPACE_CATALOG_RESET_IMPACT,
+      },
+    ];
+
+    await expect(
+      application.executeDurableOperation(operations[0]!, execution(1)),
+    ).resolves.toMatchObject({ name: "Project" });
+    await expect(
+      application.executeDurableOperation(operations[1]!, execution(2)),
+    ).resolves.toEqual({ deviceId: "device-a", bindingRef: "binding-2" });
+    await expect(
+      application.executeDurableOperation(operations[2]!, execution(3)),
+    ).resolves.toMatchObject({ name: "Renamed", revision: 2 });
+    await expect(
+      application.executeDurableOperation(operations[3]!, execution(4)),
+    ).resolves.toMatchObject({ path: "D:\\project", revision: 3 });
+    await expect(
+      application.executeDurableOperation(operations[4]!, execution(5)),
+    ).resolves.toBeNull();
+    await expect(
+      application.executeDurableOperation(operations[5]!, {
+        ...execution(6),
+        confirmationToken: "confirmation-token-with-at-least-32-bytes",
+      }),
+    ).resolves.toMatchObject({ catalogGeneration: "catalog-b" });
+    expect(admin.remove).toHaveBeenCalledTimes(1);
+    expect(operations.map(workspaceAdministrationOperationTarget)).toEqual([
+      "Project",
+      "Control",
+      "Project",
+      "Renamed",
+      "Renamed",
+      "catalog-a",
+    ]);
+
+    expect(() =>
+      validateWorkspaceAdministrationDurableOperation({
+        ...operations[0],
+        extra: true,
+      }),
+    ).toThrow("operation fields are invalid");
+    expect(() =>
+      validateWorkspaceAdministrationDurableResult({
+        ok: true,
+        value: null,
+        extra: true,
+      }),
+    ).toThrow("operation result fields are invalid");
+    expect(() =>
+      validateWorkspaceAdministrationDurableValue(operations[1]!, {
+        deviceId: "device-a",
+        bindingRef: "binding-a",
+        extra: true,
+      }),
+    ).toThrow("control authorization fields are invalid");
+  });
+
   it("owns stable views, CRUD and control authorization", async () => {
     const { application, admin } = harness();
     await expect(

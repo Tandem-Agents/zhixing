@@ -3,6 +3,10 @@ import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
 import { defineDurableRuntimeContract } from "@zhixing/core/contracts";
+import {
+  type WorkspaceAdministrationDurableOperation,
+  validateWorkspaceAdministrationDurableOperation,
+} from "@zhixing/core/environment/workspace-administration";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import {
   runStorageMaintenanceStep,
@@ -68,13 +72,6 @@ export const LOCAL_WORKSPACE_OPERATION_OUTBOX_DURABLE_CONTRACT =
     ],
   });
 
-export type LocalWorkspaceWriteOperation =
-  | { readonly kind: "create"; readonly purpose: "settings" | "control"; readonly displayName: string; readonly absolutePath: string }
-  | { readonly kind: "rename"; readonly currentName: string; readonly displayName: string; readonly expectedRevision: number }
-  | { readonly kind: "repath"; readonly name: string; readonly absolutePath: string; readonly expectedRevision: number }
-  | { readonly kind: "remove"; readonly name: string; readonly expectedRevision: number }
-  | { readonly kind: "reset"; readonly expectedCatalogGeneration: string; readonly impact: string };
-
 export type LocalWorkspaceOperationState =
   | "prepared"
   | "committed"
@@ -84,7 +81,7 @@ export type LocalWorkspaceOperationState =
 export interface LocalWorkspaceOperation {
   readonly localSeq: number;
   readonly operationId: string;
-  readonly input: LocalWorkspaceWriteOperation;
+  readonly input: WorkspaceAdministrationDurableOperation;
   readonly inputDigest: string;
   readonly state: LocalWorkspaceOperationState;
   readonly preparedAt: string;
@@ -184,11 +181,13 @@ export class LocalWorkspaceOperationOutbox {
     return this.#requireState().checkpoint.outboxId;
   }
 
-  async prepare(input: LocalWorkspaceWriteOperation): Promise<LocalWorkspaceOperation> {
+  async prepare(
+    input: WorkspaceAdministrationDurableOperation,
+  ): Promise<LocalWorkspaceOperation> {
     await this.initialize();
     return this.#serial(async () => {
       await this.#expirePrepared();
-      const normalized = validateLocalWorkspaceWriteOperation(input);
+      const normalized = validateWorkspaceAdministrationDurableOperation(input);
       const inputDigest = protocolDigest("LocalWorkspaceOperationInput", 1, normalized);
       const existing = [...this.#requireState().operations.values()].find(
         (operation) => operation.inputDigest === inputDigest && operation.state !== "abandoned",
@@ -651,34 +650,6 @@ export class LocalWorkspaceOperationOutbox {
   }
 }
 
-export function validateLocalWorkspaceWriteOperation(value: unknown): LocalWorkspaceWriteOperation {
-  const record = value as Record<string, unknown>;
-  const keysByKind: Record<LocalWorkspaceWriteOperation["kind"], readonly string[]> = {
-    create: ["absolutePath", "displayName", "kind", "purpose"],
-    rename: ["currentName", "displayName", "expectedRevision", "kind"],
-    repath: ["absolutePath", "expectedRevision", "kind", "name"],
-    remove: ["expectedRevision", "kind", "name"],
-    reset: ["expectedCatalogGeneration", "impact", "kind"],
-  };
-  if (!record || typeof record.kind !== "string" || !(record.kind in keysByKind)) {
-    throw new TypeError("Local workspace operation kind is invalid");
-  }
-  parseExact(record, keysByKind[record.kind as LocalWorkspaceWriteOperation["kind"]]!, "operation");
-  for (const [key, item] of Object.entries(record)) {
-    if (key === "kind") continue;
-    if (key === "purpose") {
-      if (item !== "settings" && item !== "control") throw new TypeError("Local workspace create purpose is invalid");
-      continue;
-    }
-    if (key === "expectedRevision") {
-      if (!Number.isSafeInteger(item) || (item as number) < 1) throw new TypeError("Local workspace revision is invalid");
-    } else if (typeof item !== "string" || item.length === 0 || item.length > 4096 || item.includes("\0")) {
-      throw new TypeError(`Local workspace operation ${key} is invalid`);
-    }
-  }
-  return structuredClone(value) as LocalWorkspaceWriteOperation;
-}
-
 function validateCheckpoint(value: unknown): Checkpoint {
   const record = parseExact(value, ["confirmedPrefixDigest", "confirmedThroughSeq", "nextSeq", "outboxId", "v"], "checkpoint");
   if (
@@ -741,7 +712,7 @@ export function validateLocalWorkspaceOperation(value: unknown): LocalWorkspaceO
   if (Object.keys(record).some((key) => !allowed.includes(key)) || !Object.keys(record).every((key) => allowed.includes(key))) {
     throw new Error("Local workspace operation fields are invalid");
   }
-  const input = validateLocalWorkspaceWriteOperation(record.input);
+  const input = validateWorkspaceAdministrationDurableOperation(record.input);
   if (
     !Number.isSafeInteger(record.localSeq) || (record.localSeq as number) < 1 ||
     typeof record.operationId !== "string" || !record.operationId.startsWith("workspace-operation-") ||

@@ -9,14 +9,16 @@ import {
 } from "@zhixing/core/test-support/s7-durable-harness";
 import {
   LocalWorkspaceOperationOutbox,
-  type LocalWorkspaceWriteOperation,
 } from "../../runtime/local-workspace-operation-outbox.js";
 import {
   LocalWorkspaceManagementHost,
   readLocalWorkspaceHostStatus,
 } from "../../runtime/local-workspace-management-host.js";
 import { acquireLocalWorkspaceOwner } from "../../runtime/local-workspace-owner.js";
-import { WORKSPACE_CATALOG_RESET_IMPACT } from "@zhixing/core/environment/workspace-administration";
+import {
+  WORKSPACE_CATALOG_RESET_IMPACT,
+  type WorkspaceAdministrationDurableOperation,
+} from "@zhixing/core/environment/workspace-administration";
 
 export async function executeLocalWorkspaceOutboxCase(
   kind: DurableCaseKind,
@@ -174,7 +176,7 @@ export async function executeLocalWorkspaceOutboxCase(
   }
 }
 
-function createInput(name: string): LocalWorkspaceWriteOperation {
+function createInput(name: string): WorkspaceAdministrationDurableOperation {
   return { kind: "create", purpose: "settings", displayName: name, absolutePath: path.resolve(name) };
 }
 
@@ -213,18 +215,19 @@ async function recoverOutboxWithHost(outbox: LocalWorkspaceOperationOutbox): Pro
       status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
       list: async () => [],
       viewByName: unavailable,
-      create: async ({ displayName, absolutePath }) => {
+      previewReset: unavailable,
+      executeDurableOperation: async (operation) => {
+        if (operation.kind !== "create" || operation.purpose !== "settings") {
+          return unavailable();
+        }
         executions += 1;
-        return { name: displayName, path: absolutePath, revision: 1, workspaceBindingRevision: 1 };
+        return {
+          name: operation.displayName,
+          path: operation.absolutePath,
+          revision: 1,
+          workspaceBindingRevision: 1,
+        };
       },
-      authorizeForControl: async () => ({
-        deviceId: "device-a",
-        bindingRef: "binding-a",
-      }),
-      rename: unavailable,
-      repath: unavailable,
-      remove: unavailable,
-      reset: unavailable,
     },
     outbox: recoveredOutbox,
   });

@@ -41,6 +41,50 @@ export interface WorkspaceAdministrationResetExecution
   readonly confirmationIssuedAt?: string;
 }
 
+export type WorkspaceAdministrationDurableOperation =
+  | {
+      readonly kind: "create";
+      readonly purpose: "settings" | "control";
+      readonly displayName: string;
+      readonly absolutePath: string;
+    }
+  | {
+      readonly kind: "rename";
+      readonly currentName: string;
+      readonly displayName: string;
+      readonly expectedRevision: number;
+    }
+  | {
+      readonly kind: "repath";
+      readonly name: string;
+      readonly absolutePath: string;
+      readonly expectedRevision: number;
+    }
+  | {
+      readonly kind: "remove";
+      readonly name: string;
+      readonly expectedRevision: number;
+    }
+  | {
+      readonly kind: "reset";
+      readonly expectedCatalogGeneration: string;
+      readonly impact: string;
+    };
+
+export interface WorkspaceAdministrationDurableExecution {
+  readonly operation: WorkspaceAdministrationOperationIdentity;
+  readonly abort: AbortSignal;
+  readonly preparedAt: string;
+  readonly confirmationToken?: string;
+}
+
+export type WorkspaceAdministrationDurableResult =
+  | { readonly ok: true; readonly value: unknown }
+  | {
+      readonly ok: false;
+      readonly error: { readonly code: string; readonly message: string };
+    };
+
 export interface WorkspaceAdministrationCatalogStatus {
   readonly state: "healthy" | "degraded";
   readonly catalogGeneration: string;
@@ -104,6 +148,10 @@ export interface WorkspaceAdministrationApplication {
     },
     execution?: WorkspaceAdministrationResetExecution,
   ): Promise<WorkspaceBindingResetReceipt>;
+  executeDurableOperation(
+    input: WorkspaceAdministrationDurableOperation,
+    execution: WorkspaceAdministrationDurableExecution,
+  ): Promise<unknown>;
 }
 
 export class WorkspaceAdministrationBusinessError extends Error {
@@ -297,6 +345,84 @@ export class WorkspaceAdministrationApplicationService
     return this.#recovery.completeReset(requestId, abort);
   }
 
+  async executeDurableOperation(
+    input: WorkspaceAdministrationDurableOperation,
+    execution: WorkspaceAdministrationDurableExecution,
+  ): Promise<unknown> {
+    const operation = validateWorkspaceAdministrationDurableOperation(input);
+    const commonExecution = {
+      operation: execution.operation,
+      abort: execution.abort,
+    };
+    let value: unknown;
+    switch (operation.kind) {
+      case "create":
+        value =
+          operation.purpose === "control"
+            ? await this.authorizeForControl(
+                {
+                  displayName: operation.displayName,
+                  absolutePath: operation.absolutePath,
+                },
+                commonExecution,
+              )
+            : await this.create(
+                {
+                  displayName: operation.displayName,
+                  absolutePath: operation.absolutePath,
+                },
+                commonExecution,
+              );
+        break;
+      case "rename":
+        value = await this.rename(
+          {
+            currentName: operation.currentName,
+            displayName: operation.displayName,
+            expectedRevision: operation.expectedRevision,
+          },
+          commonExecution,
+        );
+        break;
+      case "repath":
+        value = await this.repath(
+          {
+            name: operation.name,
+            absolutePath: operation.absolutePath,
+            expectedRevision: operation.expectedRevision,
+          },
+          commonExecution,
+        );
+        break;
+      case "remove":
+        await this.remove(
+          { name: operation.name, expectedRevision: operation.expectedRevision },
+          commonExecution,
+        );
+        value = null;
+        break;
+      case "reset":
+        if (!execution.confirmationToken) {
+          throw new TypeError(
+            "Local workspace reset durable confirmation token is invalid",
+          );
+        }
+        value = await this.reset(
+          {
+            expectedCatalogGeneration: operation.expectedCatalogGeneration,
+            confirmedImpact: operation.impact,
+          },
+          {
+            ...commonExecution,
+            confirmationToken: execution.confirmationToken,
+            confirmationIssuedAt: execution.preparedAt,
+          },
+        );
+        break;
+    }
+    return validateWorkspaceAdministrationDurableValue(operation, value);
+  }
+
   async #bindingByName(
     displayName: string,
     control: LocalEnvironmentControlContext,
@@ -358,4 +484,212 @@ function toView(binding: LocalWorkspaceBinding): WorkspaceAdministrationView {
     revision: binding.revision,
     workspaceBindingRevision: binding.workspaceBindingRevision,
   });
+}
+
+export function validateWorkspaceAdministrationDurableOperation(
+  value: unknown,
+): WorkspaceAdministrationDurableOperation {
+  const record = value as Record<string, unknown>;
+  const keysByKind: Record<
+    WorkspaceAdministrationDurableOperation["kind"],
+    readonly string[]
+  > = {
+    create: ["absolutePath", "displayName", "kind", "purpose"],
+    rename: ["currentName", "displayName", "expectedRevision", "kind"],
+    repath: ["absolutePath", "expectedRevision", "kind", "name"],
+    remove: ["expectedRevision", "kind", "name"],
+    reset: ["expectedCatalogGeneration", "impact", "kind"],
+  };
+  if (
+    !record ||
+    typeof record.kind !== "string" ||
+    !(record.kind in keysByKind)
+  ) {
+    throw new TypeError("Local workspace operation kind is invalid");
+  }
+  exactRecord(
+    record,
+    keysByKind[record.kind as WorkspaceAdministrationDurableOperation["kind"]]!,
+    "operation",
+  );
+  for (const [key, item] of Object.entries(record)) {
+    if (key === "kind") continue;
+    if (key === "purpose") {
+      if (item !== "settings" && item !== "control") {
+        throw new TypeError("Local workspace create purpose is invalid");
+      }
+      continue;
+    }
+    if (key === "expectedRevision") {
+      if (!Number.isSafeInteger(item) || (item as number) < 1) {
+        throw new TypeError("Local workspace revision is invalid");
+      }
+    } else if (
+      typeof item !== "string" ||
+      item.length === 0 ||
+      item.length > 4096 ||
+      item.includes("\0")
+    ) {
+      throw new TypeError(`Local workspace operation ${key} is invalid`);
+    }
+  }
+  return structuredClone(value) as WorkspaceAdministrationDurableOperation;
+}
+
+export function workspaceAdministrationOperationTarget(
+  input: WorkspaceAdministrationDurableOperation,
+): string {
+  switch (input.kind) {
+    case "create":
+      return input.displayName;
+    case "rename":
+      return input.currentName;
+    case "repath":
+    case "remove":
+      return input.name;
+    case "reset":
+      return input.expectedCatalogGeneration;
+  }
+}
+
+export function validateWorkspaceAdministrationDurableResult(
+  value: unknown,
+): WorkspaceAdministrationDurableResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Local workspace operation result is invalid");
+  }
+  const candidate = value as Record<string, unknown>;
+  if (candidate.ok === true) {
+    const record = exactRecord(value, ["ok", "value"], "operation result");
+    return Object.freeze({ ok: true, value: record.value });
+  }
+  if (candidate.ok === false) {
+    const record = exactRecord(value, ["error", "ok"], "operation result");
+    const error = exactRecord(
+      record.error,
+      ["code", "message"],
+      "operation error",
+    );
+    if (typeof error.code !== "string" || typeof error.message !== "string") {
+      throw new TypeError("Local workspace operation error is invalid");
+    }
+    return Object.freeze({
+      ok: false,
+      error: Object.freeze({ code: error.code, message: error.message }),
+    });
+  }
+  throw new TypeError("Local workspace operation result is invalid");
+}
+
+export function workspaceAdministrationDurableSuccess(
+  value: unknown,
+): WorkspaceAdministrationDurableResult {
+  return Object.freeze({ ok: true, value });
+}
+
+export function workspaceAdministrationDurableFailure(
+  code: string,
+  message: string,
+): WorkspaceAdministrationDurableResult {
+  if (!code || !message) {
+    throw new TypeError("Local workspace operation error is invalid");
+  }
+  return Object.freeze({
+    ok: false,
+    error: Object.freeze({ code, message }),
+  });
+}
+
+export function validateWorkspaceAdministrationDurableValue(
+  input: WorkspaceAdministrationDurableOperation,
+  value: unknown,
+): unknown {
+  if (input.kind === "remove") {
+    if (value !== null) {
+      throw new TypeError("Local workspace remove result is invalid");
+    }
+    return null;
+  }
+  if (input.kind === "create" && input.purpose === "control") {
+    return validateWorkspaceControlAuthorization(value);
+  }
+  if (input.kind === "reset") {
+    const record = exactRecord(
+      value,
+      [
+        "capabilityRevision",
+        "catalogGeneration",
+        "confirmationDigest",
+        "logId",
+        "preparedAt",
+        "previousCatalogGeneration",
+        "requestId",
+      ],
+      "reset receipt",
+    );
+    if (
+      typeof record.requestId !== "string" ||
+      typeof record.confirmationDigest !== "string" ||
+      typeof record.previousCatalogGeneration !== "string" ||
+      typeof record.catalogGeneration !== "string" ||
+      typeof record.logId !== "string" ||
+      !Number.isSafeInteger(record.capabilityRevision) ||
+      typeof record.preparedAt !== "string"
+    ) {
+      throw new TypeError("Local workspace reset receipt is invalid");
+    }
+    return record;
+  }
+  return validateWorkspaceAdministrationView(value);
+}
+
+export function validateWorkspaceControlAuthorization(
+  value: unknown,
+): WorkspaceControlAuthorization {
+  const record = exactRecord(
+    value,
+    ["bindingRef", "deviceId"],
+    "control authorization",
+  );
+  if (
+    typeof record.bindingRef !== "string" ||
+    typeof record.deviceId !== "string"
+  ) {
+    throw new TypeError("Local workspace control authorization is invalid");
+  }
+  return record as unknown as WorkspaceControlAuthorization;
+}
+
+function validateWorkspaceAdministrationView(
+  value: unknown,
+): WorkspaceAdministrationView {
+  const record = exactRecord(
+    value,
+    ["name", "path", "revision", "workspaceBindingRevision"],
+    "workspace view",
+  );
+  if (
+    typeof record.name !== "string" ||
+    typeof record.path !== "string" ||
+    !Number.isSafeInteger(record.revision) ||
+    !Number.isSafeInteger(record.workspaceBindingRevision)
+  ) {
+    throw new TypeError("Local workspace view is invalid");
+  }
+  return record as unknown as WorkspaceAdministrationView;
+}
+
+function exactRecord(
+  value: unknown,
+  keys: readonly string[],
+  label: string,
+): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`Local workspace ${label} is invalid`);
+  }
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).sort().join(",") !== [...keys].sort().join(",")) {
+    throw new TypeError(`Local workspace ${label} fields are invalid`);
+  }
+  return record;
 }

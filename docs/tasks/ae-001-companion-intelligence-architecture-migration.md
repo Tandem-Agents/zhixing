@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-07 已通过协调者独立复核；Workspace Administration reset/recovery 应用责任已闭合<br>
+> 当前检查点：A5-08 已通过协调者独立复核并提交前验收；下一责任链收束 Workspace Administration durable operation delivery 生命周期<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,10 +202,10 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `fb1598f6 + A5-07-accepted-worktree`；A0～A4、Skill Catalog、Delivery 及 Workspace Administration CRUD、reset/recovery 已通过协调者独立复核；A5-07 待本轮提交固化 |
+| 已接受基线 | `d67364e5 + A5-08-accepted-worktree`；A0～A4、Skill Catalog、Delivery 及 Workspace Administration CRUD、reset/recovery、durable operation 合同与分派已通过协调者独立复核 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | 无；A5-07 已通过协调者独立复核，等待提交 |
-| 下一责任链 | 只收束 Workspace Administration 的 durable operation delivery 应用责任并裁决该行；不得进入 Workscene |
+| 活跃工作包 | 无；A5-08 已验收，等待提交后派发 A5-09 |
+| 下一责任链 | A5-09：收束 durable operation delivery 生命周期、退场临时 binding 并裁决 Workspace Administration 行；不得进入 Workscene |
 | 打开的单向桥 | 无；Skill 管理、保存、admission、load/usage、Kernel 与 Executor 投影均只经 `@zhixing/core/skills/catalog` 及既有 Authority/CAS/assignment Correctness 端口成立，旧 writable Store 不再承担正式应用行为 |
 | 已失效证据 | 无当前未恢复证据；A4-10 已恢复 A4-07/A4-08 的包级产品无知结论，A4 全部合同与退出证据当前有效 |
 | 阻塞/用户决策 | 无技术阻塞；用户已明确恢复调度 |
@@ -1823,6 +1823,22 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 旧路、行为证据与门禁：删除 `local-workspace-recovery.ts`、`workspace-reset-impact.ts`、`LocalWorkspaceRecoveryService/BusinessError`、Host generation 分支和 Host 自建 reset nonce；领域窄 subpath 成为 status/reset impact/preview/reset 的唯一正式入口。当前源码上 core application + real catalog 2 文件 12/12，CLI Host/outbox/command 3 文件 27/27，真实 in-process/mesh S7 environment conformance 1/1；覆盖 healthy/degraded status、impact、generation/确认拒绝、begin/complete、15 分钟边界、stable confirmation/operation、响应丢失 replay、Catalog 重启恢复、receipt、client preview/confirm 与 ack。core fresh build、CLI `tsc --noEmit` 与 `pnpm cli:build`、canonical `pnpm s7:lint` 31/31 与 registry golden、fresh `pnpm runtime:package-exports`、最窄 Biome 与 `git diff --check` 均通过。S7 反向 mutation 拒绝临时 recovery/impact 文件回流、第二应用、Host 自建 identity/generation 决定、任一 begin/complete 缺失、三个生产根漏经共享 factory、宽根或重复 export。
 - 交接与失效：A5-07 实施完成，等待协调者独立复核；Workspace Administration 行与 A5 继续为 `[ ]`，下一责任链仍只能收束其 durable operation delivery 应用责任并裁决该行，不进入 Workscene。Workspace Administration status/preview/reset 合同、impact 文案、operation identity、outbox confirmation/preparedAt、Catalog confirmation TTL/reservation/receipt、Host/client strict codec、三个生产组合根、core subpath/build/export、S7 或上述直接行为任一变化时，本证据精确失效并只重验本包闭包。本包未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：从唯一 Workspace Administration 应用、三个生产根、Host prepare/commit/drain、client preview/confirm/ack、P10 outbox 与真实 Catalog reservation/receipt/recovery 双向反查，确认 status、impact、generation、确认与 reset 用例只有一个领域 owner，Host/client 只保留 durable binding，旧 recovery service、impact 文件和 Host 业务分支均已退场。独立验证 core application/Catalog 12/12、CLI Host/outbox/command 与真实 S7 environment 28/28、core fresh build、CLI typecheck/正式构建、canonical S7 31/31 + registry golden、fresh package exports、最窄 Biome 与 `git diff --check`，全部通过。额外裁决确认：迁移前用户表面的 preview/outbox 窗口本就是 15 分钟，旧 Catalog 的 5 分钟只从每次调用新生成的 `issuedAt` 计算，无法形成稳定崩溃重放摘要；当前以耐久 `preparedAt` 和 token 固定确认并统一 15 分钟，不扩大公开入口、wire 或用户操作，只恢复既有 15 分钟两阶段体验的响应丢失/重启语义。接受 `A5-07-workspace-administration-reset-recovery-application-v1`；Workspace Administration 行与 A5 继续为 `[ ]`，下一包只收束 durable operation delivery。
+
+### A5-08：归位 Workspace Administration durable operation 合同与分派责任
+
+- 派发基线：`HEAD d67364e5 + task-doc:A5-08-dispatch`；A5-07 已由协调者独立复核并提交，进场索引与工作区应只有本文派发记录。
+- 唯一架构结果：Workspace Administration 的唯一应用边界拥有 durable management operation 的有限合同、strict 输入校验、目标投影和 create/settings、authorize/control、rename、repath、remove、reset 六类分派与结果语义；P10 outbox 只持久化领域 operation，Host 只把已提交 operation 与耐久 execution metadata 交给同一个应用入口，不再拥有业务 switch、字段解释或结果决定。
+- 生产闭包：把 `LocalWorkspaceWriteOperation` 及其 strict validator、operation target 和 Host `#execute` 六分支归入 A5-06/A5-07 的 Workspace Administration 窄 subpath与同一 service；outbox writer/reader、Host request codec、client prepare/commit/recovery notice、CLI/REPL 和真实三个组合根统一消费该合同。operation identity 必须继续由 outboxId/localSeq/operationId/inputDigest 反绑领域 requestId，reset 继续携带 stable token/preparedAt，create-control 只返回 strict `{deviceId,bindingRef}`。
+- 保护边界：保持 P10 operation discriminant、字段、canonical digest、prepared/committed/completed/abandoned 转换、result/resultDigest、业务错误、资源/取消、revision conflict、recovered notice target、旧记录读取、响应丢失和全部公开输出全等。领域不得导入 CLI、outbox、owner/IPC、Executor、文件存储或 Workscene；outbox 不得重新定义 operation union、产品字段默认值或业务分派。
+- 临时边界与退场：本包保留 Host 的 outbox-ready/writable gate、prepare/commit、drain、retry/degraded、pending/ack 与 client delivery lifecycle，它们是紧邻 A5-09 的唯一退场点；不得在本包迁移 owner/IPC、耐久状态机或基础设施错误分类。删除 Host 业务 switch、CLI-owned operation contract/validator/target 与重复 result schema；不得以 adapter callback、第二 dispatcher、兼容 union 或宽根导出保留旧路。
+- 直接证据：最窄测试覆盖六类 operation 的 strict 正反输入、应用分派、结果、错误、稳定 request identity、target projection，P10 旧记录/digest/replay 与 Host/client/CLI 真实调用全等；结构反例能识别 outbox/Host 重定义 operation、Host switch 回流、应用分支缺失、第二入口和宽导出。只运行领域 operation、outbox codec、Host/client/command 失效闭包、真实 S7 environment、必要依赖构建、canonical S7、fresh exports、最窄格式与 `git diff --check`；不重复 reset Catalog 深层恢复、A5-06 CRUD 全闭包、根级回归或制品验收。
+- 明确不做：不迁移 durable delivery 的 admission/retry/degraded/pending/ack/生命周期，不改变 P10 持久格式、owner/IPC、公开命令或产品能力，不进入 Workscene/A6。
+- 完成与止损：只有 operation 合同、输入/目标/结果语义与六类分派均归唯一应用，outbox/Host/client 只消费且旧定义和 switch 归零，当前行为证据成立，才算完成。预计超过四小时、必须同时迁移 delivery lifecycle、改变 P10 wire/digest/错误/公开输出、出现第二独立 owner，或无法保持可构建、可运行、单一 operation 真相时，停在安全检查点反馈；不得顺带裁决整个 Workspace Administration。
+- 执行基线与唯一事实：`HEAD d67364e5c9efab174ca220af862d57397c5f7979 + task-doc:A5-08-dispatch + A5-08-workspace-administration-durable-operation-v1`。A5-06/A5-07 的同一个 `WorkspaceAdministrationApplicationService` 现唯一拥有五种 discriminant、create/settings 与 create/control 两条语义分支、strict operation/result/value codec、recovered target 投影及六类 durable 分派；operation identity、abort、`preparedAt` 与 reset confirmation token 只作为已经耐久裁决的 execution metadata 输入。领域继续只消费既有 workspace control/recovery ports，不导入 CLI、outbox、owner/IPC、Executor、文件存储或 Workscene。
+- 生产接线与 P10 等价：`LocalWorkspaceOperationOutbox` 直接持久化、重读领域 operation，Host 在 committed operation 上只调用一次 `executeDurableOperation` 并传入 `outboxId/localSeq/operationId/inputDigest`、abort、`preparedAt` 与可选 confirmation token；同一应用再分派 create/settings、authorize/control、rename、repath、remove、reset。client/request codec、result codec、create-control exact `{deviceId,bindingRef}`、reset receipt、recovered notice target 均消费领域合同；P10 discriminant/字段、canonical input/result digest、prepared/committed/completed/abandoned、业务与基础设施错误分类、资源/取消、revision conflict、旧记录读取、response-loss replay、pending/ack 和公开输出未改变。
+- 旧路与直接证据：删除 CLI `LocalWorkspaceWriteOperation`、`validateLocalWorkspaceWriteOperation`、Host `OperationResult`/六分支 `#execute`、command 本地 target switch 及同责 result/value/control codec；outbox/Host/command 不再定义业务字段或分派。当前源码上 core Workspace Administration 8/8，CLI Host/outbox/command 3 文件 27/27，真实 `local-workspace-operation-outbox` S7 environment witness 1/1；core fresh build、CLI `tsc --noEmit` 与正式 `pnpm cli:build`、canonical `pnpm s7:lint` 31/31 与 registry golden、fresh `pnpm runtime:package-exports`、最窄 Biome 与 `git diff --check` 均通过。S7 反向 mutation 拒绝 outbox/Host 重新定义 operation、Host direct CRUD/switch、command target 旁路、应用分支或 durable metadata 缺失。
+- 交接与失效：A5-08 实施完成，等待协调者独立复核；Workspace Administration 行与 A5 继续为 `[ ]`。下一责任链只能在 A5-09 收束 outbox-ready/writable、prepare/commit、drain、retry/degraded、pending/ack 与 client delivery lifecycle，不进入 Workscene。领域 durable operation/validator/target/result、应用六分派、outbox codec/digest/state、Host 单次调用与 metadata、client recovery/result、P10 旧记录兼容、三个生产组合根、core 窄 subpath/build/export 或上述直接/结构证据任一变化时，本证据精确失效并只重验本包闭包。本包未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：从领域应用、outbox writer/reader、Host committed drain、client prepare/commit/recovery/ack、CLI recovered notice 与三个生产组合根双向追踪，确认 durable operation 的 discriminant、strict 输入、target、result/value codec 和六类业务分派只有一个领域 owner；Host/outbox/command 中同责 union、validator、switch 与 result schema 已删除，剩余 retry/degraded/pending/ack 仅是登记给 A5-09 的 delivery lifecycle。独立验证 core Workspace Administration 8/8、CLI Host/outbox/command 27/27、真实 S7 environment 1/1、core fresh build、CLI typecheck/正式构建、canonical S7 31/31 + registry golden、fresh package exports、最窄 Biome 与 `git diff --check`，全部通过；P10 wire、canonical digest、旧记录、响应丢失重放、业务/基础设施错误、reset stable token/preparedAt 与公开输出未发现漂移。接受 `A5-08-workspace-administration-durable-operation-v1`；Workspace Administration 行与 A5 继续为 `[ ]`，下一包只收束 durable operation delivery 生命周期。
 
 ## 十、用户提示词
 

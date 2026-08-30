@@ -3039,6 +3039,7 @@ test("Workspace Administration CRUD and reset have one domain application and on
     "packages/core/package.json",
     "packages/core/tsup.config.ts",
     "packages/cli/src/runtime/local-workspace-management-host.ts",
+    "packages/cli/src/runtime/local-workspace-operation-outbox.ts",
     "packages/cli/src/runtime/local-workspace-bootstrap.ts",
     "packages/cli/src/runtime/local-workspace-control.ts",
     "packages/cli/src/runtime/workspace-command.ts",
@@ -3175,6 +3176,33 @@ test("Workspace Administration CRUD and reset have one domain application and on
       (text) => text.replace(
         "deviceId: authorization.deviceId,",
         "...authorization,",
+      ),
+    )).join("\n"),
+    /still interprets Workspace Administration facts/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/cli/src/runtime/local-workspace-operation-outbox.ts",
+      (text) => `${text}\ntype LocalWorkspaceWriteOperation = { kind: string };`,
+    )).join("\n"),
+    /outbox redefines the domain operation contract/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/cli/src/runtime/local-workspace-management-host.ts",
+      (text) => text.replace(
+        "this.#applications.executeDurableOperation(",
+        "this.#applications.create(",
+      ),
+    )).join("\n"),
+    /second CRUD\/reset owner/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/cli/src/runtime/workspace-command.ts",
+      (text) => text.replace(
+        "workspaceAdministrationOperationTarget(operation.input)",
+        "operation.input.kind",
       ),
     )).join("\n"),
     /still interprets Workspace Administration facts/,
