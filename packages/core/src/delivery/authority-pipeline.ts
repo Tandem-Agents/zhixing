@@ -2,10 +2,7 @@ import {
   AuthorityStorageError,
   type ArtifactStore,
 } from "../authority/index.js";
-import type {
-  DeliveryEndpointDto,
-  DeliveryFailure,
-} from "../contracts/index.js";
+import type { DeliveryFailure } from "../contracts/index.js";
 import type { IEventBus } from "../events/index.js";
 import { byteDigest, canonicalize } from "../protocol/index.js";
 import { validateOutboundContentDto } from "./content-schema.js";
@@ -16,20 +13,19 @@ import type {
   DeliveryLifecycleEffectPort,
   DeliveryLifecycleProjectionPort,
 } from "./application.js";
+import { decideDeliveryAttemptOutcomePolicy } from "./application.js";
 import type {
   AuthorityDeliveryEventMap,
   AuthorityDeliveryItem,
   AuthorityDeliveryStats,
   AuthorityDeliveryLogger,
-  DeliverySender,
   DeliveryTransport,
   DeliveryEndpointTransport,
 } from "./types.js";
 import {
-  normalizeDeliveryOutcomePolicy,
+  normalizeDeliveryResponseLossEvidence,
   normalizeDeliveryResult,
   requireDeliveryEndpointTransport,
-  requireDeliveryReadiness,
 } from "./transport-contract.js";
 
 export interface AuthorityDeliveryPipelineConfig {
@@ -46,8 +42,7 @@ export interface AuthorityDeliveryPipelineDeps {
   readonly artifacts: ArtifactStore;
   readonly eventBus: IEventBus<AuthorityDeliveryEventMap>;
   readonly config: AuthorityDeliveryPipelineConfig;
-  readonly transport?: DeliveryTransport;
-  readonly sender?: DeliverySender;
+  readonly transport: DeliveryTransport;
   readonly now?: () => Date;
   readonly logger?: AuthorityDeliveryLogger;
   readonly materializeContent?: (
@@ -82,20 +77,12 @@ export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
   #activeFlush: Promise<void> | undefined;
 
   constructor(deps: AuthorityDeliveryPipelineDeps) {
-    if (deps.transport && deps.sender) {
-      throw new TypeError("Delivery pipeline accepts one transport adapter");
-    }
-    if (!deps.transport && !deps.sender) {
-      throw new TypeError("Delivery pipeline requires a transport adapter");
-    }
     assertTimerIntervalMs(deps.config.flushIntervalMs);
     this.#application = deps.application;
     this.#projection = deps.projection;
     this.#artifacts = deps.artifacts;
     this.#queue = new AuthorityDeliveryQueue({ source: deps.projection });
-    this.#transport = deps.transport ?? singleDeliveryTransport(
-      channelAuthorityDeliveryTransport(deps.sender!),
-    );
+    this.#transport = deps.transport;
     this.#eventBus = deps.eventBus;
     this.#config = deps.config;
     this.#now = deps.now ?? (() => new Date());
@@ -293,14 +280,16 @@ export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
       }
     }
 
-    let outcomePolicy: ReturnType<DeliveryEndpointTransport["outcomePolicy"]> | undefined;
+    let outcomePolicy: Parameters<DeliveryLifecycleApplication["claim"]>[0]["outcomePolicy"];
     if (startingAttempt && transport) {
       try {
-        outcomePolicy = normalizeDeliveryOutcomePolicy(
-          transport.outcomePolicy(item.endpoint),
+        outcomePolicy = decideDeliveryAttemptOutcomePolicy(
+          normalizeDeliveryResponseLossEvidence(
+            transport.responseLossEvidence(item.endpoint),
+          ),
         );
       } catch {
-        this.#logger.warn("Delivery transport policy check failed", { itemId: item.id });
+        this.#logger.warn("Delivery response-loss evidence check failed", { itemId: item.id });
         return;
       }
     }
@@ -368,9 +357,11 @@ export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
         }),
       );
       if (result.success) {
-        const receipt = result.receiptBytes
+        const receiptBytes = result.receiptBytes ??
+          (result.messageId ? Buffer.from(result.messageId, "utf8") : undefined);
+        const receipt = receiptBytes
           ? {
-              digest: byteDigest(result.receiptBytes),
+              digest: byteDigest(receiptBytes),
               ...(result.messageId && claim.item.endpoint.kind === "channel"
                 ? {
                     platformMessage: {
@@ -455,43 +446,6 @@ export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
       throw new Error(`Pipeline.${operation}: pipeline not running (state="${this.#state}")`);
     }
   }
-}
-
-export function channelAuthorityDeliveryTransport(sender: DeliverySender): DeliveryEndpointTransport {
-  return {
-    endpointKind: "channel",
-    isReady(endpoint: DeliveryEndpointDto): boolean {
-      return endpoint.kind === "channel" && sender.isReady(endpoint.target.channelId);
-    },
-    outcomePolicy(): { readonly kind: "manual-resolution" } {
-      return { kind: "manual-resolution" };
-    },
-    async send(endpoint, content, meta) {
-      if (endpoint.kind !== "channel") {
-        throw new TypeError("Channel delivery transport received another endpoint kind");
-      }
-      const result = normalizeDeliveryResult(
-        await sender.send(endpoint.target, content, meta),
-      );
-      if (result.success && result.receiptBytes === undefined && result.messageId) {
-        return { ...result, receiptBytes: Buffer.from(result.messageId, "utf8") };
-      }
-      return result;
-    },
-  };
-}
-
-function singleDeliveryTransport(
-  transport: DeliveryEndpointTransport,
-): DeliveryTransport {
-  return {
-    resolve(endpoint) {
-      return endpoint.kind === transport.endpointKind &&
-        requireDeliveryReadiness(transport.isReady(endpoint))
-        ? transport
-        : undefined;
-    },
-  };
 }
 
 async function defaultMaterializeContent(

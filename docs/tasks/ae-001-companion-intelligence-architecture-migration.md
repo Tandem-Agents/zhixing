@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-04 已通过协调者独立复核，等待提交；按用户要求提交后暂停，不派发 Channel effect<br>
+> 当前检查点：A5-05 已通过协调者独立复核，Delivery 行已闭合；等待提交<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -109,7 +109,7 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
   | Workscene | [ ] | 场景身份、工作区与会话关系归域；RuntimeHost 不认识场景产品规则 |
   | Schedule | [ ] | 调度产品规则与耐久事实归域；执行触发只消费 Kernel/Effect 端口 |
   | Advancement | [ ] | 执行、评价、证据与成果准入边界保持现有语义且归属唯一 |
-  | Delivery | [ ] | “结果需要交付及其终态”归域；Channel 只实现发送效果 |
+  | Delivery | [x] | “结果需要交付及其终态”归域；Channel 只实现发送效果 |
   | Trust Administration | [ ] | 用户可管理的信任规则归域；Security Substrate 只负责执行决定 |
   | Skill Catalog | [x] | 技能资产与生命周期归域；Kernel 只消费不可变能力投影 |
   | Device Administration | [ ] | 用户可见设备关系、移除和值班迁移归域；Executor/Mesh 只实现物理效果 |
@@ -202,13 +202,13 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `d181e926 + A5-04 accepted worktree`；A0～A4 与 A5-01～A5-04 已通过协调者独立复核，其中 A5-04 等待提交 |
+| 已接受基线 | `bf05dfa0 + A5-05 accepted worktree`；A0～A4 与 A5-01～A5-05 已通过协调者独立复核，其中 A5-05 等待提交 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | 无；A5-04 已通过协调者独立验收，等待提交 |
-| 下一责任链 | 用户要求暂停调度；恢复后单独收束 Channel effect 并裁决 Delivery 行，不得提前跨入其他领域 |
+| 活跃工作包 | 无；A5-05 已通过协调者独立验收，等待提交 |
+| 下一责任链 | A5-05 提交后按 A0 无环依赖图选择一个基础领域的最窄责任链；不得整域派发 |
 | 打开的单向桥 | 无；Skill 管理、保存、admission、load/usage、Kernel 与 Executor 投影均只经 `@zhixing/core/skills/catalog` 及既有 Authority/CAS/assignment Correctness 端口成立，旧 writable Store 不再承担正式应用行为 |
 | 已失效证据 | 无当前未恢复证据；A4-10 已恢复 A4-07/A4-08 的包级产品无知结论，A4 全部合同与退出证据当前有效 |
-| 阻塞/用户决策 | 无技术阻塞；按用户要求在 A5-04 提交后暂停，等待新任务 |
+| 阻塞/用户决策 | 无技术阻塞；用户已明确恢复调度 |
 
 ### A0 基线索引
 
@@ -1775,6 +1775,21 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据与门禁：最终当前源码上 core application/authority/pipeline 3 文件 84/84，owner-kernel participant/control 2 文件 18/18，CLI setup/真实 authority recovery/HostStop/device-removal/Executor terminal 5 文件 57/57，合计 10 文件 159/159；覆盖七类既有 producer 的冻结 exact-set、运行期捕获、重启恢复、sealed/release、canonical replay、响应丢失重驱、三种 settlement、uncertain、deadline、quiesce/resume 与 executor 隔离。core、owner-kernel 与 CLI 依赖顺序 build、CLI `tsc --noEmit`、canonical `pnpm s7:lint` 30/30 与 registry golden、fresh `pnpm runtime:package-exports`、最窄 Biome 与 `git diff --check` 均通过；S7 反向 mutation 可识别 Authority/pipeline 决定回流、Host/Executor 直调 Authority、唯一 binding/端口丢失及 planned-transfer 与 lifecycle resume 混淆。
 - 交接与失效：A5-04 实施完成，等待协调者独立复核；A5 与 Delivery 行继续为 `[ ]`，下一责任链仍只能单独收束 Channel effect 并裁决 Delivery 行。Delivery application 的 admission/binding/membership/settlement、Authority admission transaction、owner-kernel binding、pipeline effect port、DeliveryStack lifecycle port、startup/HostStop/device-removal/Executor 隔离、全部 producer lifecycle source、外部 accepted-work artifact、S7/exports 或相关持久/恢复合同任一变化时，本证据精确失效并只重验上述 10 文件与构建/门禁闭包。本包未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：从 Delivery application、Authority admission transaction、owner-kernel binding、pipeline effect port、动态 Authority 换代、DeliveryStack lifecycle 端口及 Anchor/Executor 两类生产根正反核对，确认 admission、binding、membership 和 settlement 只有一个领域决定 owner，Authority/pipeline/Host 已无旧业务直调或第二状态机；Executor-only 对意外 Anchor Delivery accepted-work 明确 fail closed。独立完成 core/owner-kernel/CLI 依赖顺序构建与 CLI typecheck，并重跑 core 84/84、owner-kernel 18/18、CLI 57/57；canonical S7 30/30、registry golden、fresh package exports 与 `git diff --check` 全部通过。接受 `A5-04-delivery-accepted-work-lifecycle-application-v1`；Channel effect 尚未迁移，因此 Delivery 行和 A5 继续为 `[ ]`。按用户要求，本包提交后暂停调度。
+
+### A5-05：收束 Delivery → Channel 发送效果边界并裁决 Delivery
+
+- 派发基线：`HEAD bf05dfa0 + task-doc:A5-05-dispatch`；A5-04 已由协调者独立复核并提交，派发前索引与工作区为空。
+- 唯一架构结果：Delivery 领域拥有调用发送效果所需的窄端口、输入/输出合同与结果解释边界；Channel、Outbox 和具体 adapter 只报告就绪事实、执行发送并返回有限效果证据，不能定义投递义务、重试/未知/终态、产品事件或用户流程。完成后从 Delivery 合同、应用、权威适配、效果调用、Product API、生命周期和恢复正反追踪，裁决该领域行是否真实闭合。
+- 生产闭包：即时正反核对 `AuthorityDeliveryPipeline → DeliveryTransportRegistry/channelAuthorityDeliveryTransport → OutboxSender/OutboxRegistry → ChannelRegistry/ChannelAdapter.send`、内容物化、receipt/idempotency、outcome policy/readiness、状态 notice/event、`setupDelivery` 与 Channel generation/lifecycle。需求方拥有稳定语义的端口；Host 只选择并装配具体实现，不能保留缺 adapter、重试或投递结果的业务分支。保留 per-target FIFO、turn slot/after-slot 顺序、send 前耐久 claim、响应丢失、重连窗口、receipt、人工裁决/idempotent redrive、状态事件和启动/关闭行为完全等价。
+- 旧路与门禁：删除 pipeline 的 `sender` 兼容入口、领域 pipeline 内的 Channel 具体适配工厂、Host 中可由领域或效果适配器拥有的投递决定，以及任何第二 transport/send 合同；不得把旧结构仅改名或移动。Delivery 的生产调用只能依赖领域拥有的窄效果端口，Channel adapter 不得导入 Delivery application/Authority/状态机；结构证据必须识别旧 sender 回流、Channel/Host 生成业务决定、第二 registry/port、根 barrel 旁路和真实组合根漏改绑。
+- 明确不做：不改变公开 RPC/Event、Delivery record/content schema、Channel 入站会话、确认卡片/交互、普通会话即时回复、具体飞书产品表现、Transport/Outbox 的既有顺序与超时语义；不迁移 Channel 整体生命周期、Provider/Storage/Executor/Mesh，不进入 A6 或其他 A5 领域，不顺手抽象万能 effect/capability。
+- 直接证据：覆盖 adapter 缺失/未连接/连接竞态、成功 receipt、retryable/non-retryable 拒绝、发送抛错导致 unknown、outcome policy、idempotency meta、FIFO/slot/after-slot、内容物化永久/暂时失败、状态 event/notice、恢复 drain、generation rebind 与关闭清理；反向证明 Host/Channel 无投递业务决定、pipeline 无旧 sender/具体 Channel 工厂且唯一生产组合根只绑定一次。只运行 Delivery pipeline/transport/outbox、Channel adapter/registry 与真实 CLI setup 的受影响闭包、必要依赖构建、canonical S7、fresh package exports、最窄格式和 `git diff --check`，不重复 A5-01～A5-04、根级回归或制品验收。
+- 完成与止损：只有 Delivery 的产品义务与终态全部由唯一领域应用闭合、发送效果合同由需求方拥有、Channel 只实现效果、Host 只装配、旧桥和第二入口归零，且现有行为直接证据成立，才可把 Delivery 行标为 `[x]`。预计超过四小时、发现两个独立责任链、必须改变公开/持久/产品语义、影响面扩到 Channel 入站或 A6 其他边缘，或无法在单一真相下删除旧 sender/transport 路径时，停在可构建、可运行、可发布的安全检查点反馈；不得借裁决继续迁移下一领域。
+- 执行基线与领域决定：`HEAD bf05dfa07ae6855af0cdf188cdf10d3638cbf587 + task-doc:A5-05-dispatch + A5-05-delivery-channel-send-effect-v1`。`DeliveryEndpointTransport` 是 Delivery 需求方拥有的唯一发送效果端口；具体 effect 只返回连接就绪、脱敏后的有限发送结果及 `DeliveryResponseLossEvidence`。`decideDeliveryAttemptOutcomePolicy` 位于 Delivery application，将 `unverified/idempotent` 效果证据裁决为既有 `manual-resolution/idempotent-redrive`；pipeline 只驱动领域应用、物化内容、调用效果并把 message id/receipt 解释为领域 outcome，没有把 Channel 证据提升为第二终态决定。
+- Channel、Outbox 与 Host 边界：`createChannelDeliveryEffect` 是 `@zhixing/core/delivery/channel-effect` 唯一窄实现，复用单一 `OutboxRegistry`，只实现 adapter presence/readiness、source、idempotency meta、agent turn-slot 与 scheduler after-slot 的发送效果；generation 切换竞态中 adapter 消失返回 retryable 的有限效果证据，adapter 失败细节仍按迁移前合同在专用效果边界脱敏。Outbox 只保持 per-target FIFO、slot 顺序和既有通用诊断，不再按 Authority origin/idempotency key 解释 Delivery 失败。`setupDelivery` 只构造并注册该 effect；旧 `DeliverySender`、`outbox-sender.ts`、pipeline sender 兼容入口、pipeline 内具体 Channel 工厂及 Host 的 adapter 缺失/发送业务分支均已删除，没有第二 registry、send 合同或根 barrel 旁路。
+- 行为保护与直接证据：send 前耐久 claim、内容物化、receipt/idempotency、retryable/non-retryable、抛错 unknown、manual/idempotent redrive、响应丢失、重连竞态、FIFO/turn-slot/after-slot、状态 notice/event、恢复 drain、generation rebind 与关闭清理保持原合同。最终当前源码上 core pipeline/真实 Channel effect/Outbox 4 文件 75/75，CLI setup/Authority recovery 2 文件 27/27，合计 6 文件 102/102；其中协调者首次包内复核以 23/24 识别出 CLI 测试错误依赖已删除的 `Channel not found` 字面量，本次删除该无识别力邻域断言后，core effect 4/4 直接证明 readiness 后 adapter 消失返回 retryable 有限证据，CLI setup 24/24 只证明窄 subpath 的单次 effect 装配且 Host 不含 adapter/send/outcome 决定，CLI 两文件随后 27/27。生产源码未因纠正改变，既有 core build、CLI `tsc --noEmit` 与 `pnpm cli:build`、canonical `pnpm s7:lint` 30/30 与 registry golden、fresh `pnpm runtime:package-exports`、最窄 Biome 均继续有效；最终 `git diff --check` 通过。S7/exports 反向 mutation 可识别旧 sender、Channel/Host 业务 policy、Outbox Authority 分支、具体 effect 根/索引转导、第二 build/export 入口和生产组合根漏改绑。
+- Delivery 行裁决与失效：A5-01 已闭合 uncertain-resolution Product API，A5-02 已闭合义务/入队，A5-03 已闭合 attempt/unknown/terminal，A5-04 已闭合 accepted-work/lifecycle，本包再闭合唯一发送效果边界，因此 Delivery 当前全部产品责任、应用、Correctness、Product API、生命周期、恢复和效果消费已形成单一生产链，Delivery 行标为 `[x]`；A5 仍为 `[ ]`，未迁移下一领域。Delivery application/response-loss 证据、transport contract/registry、Channel effect、Outbox/ChannelAdapter result、pipeline outcome 解释、setup composition、core package export/build entry、S7/exports 或上述行为任一变化时，本证据精确失效并恢复 Delivery 行。本包未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：正反核对 Delivery effect contract、领域 outcome policy、pipeline、Channel effect、Outbox、唯一 CLI 组合根、subpath/build/export 与 S7 负向门禁，确认 Delivery 独占义务、未知/重试/终态和效果证据解释，Channel/Outbox 只执行有限发送效果，Host 只装配，旧 sender、具体 Channel 工厂和 Outbox Authority 分支归零。首次复核识别并退回无效 `Channel not found` 字符串测试；纠正后独立完成 core 4 文件 75/75、CLI 2 文件 27/27、core/CLI typecheck、canonical S7 30/30 + registry golden、fresh package exports 与 `git diff --check`，全部通过。接受 `A5-05-delivery-channel-send-effect-v1` 并确认 Delivery 行 `[x]`；A5 继续为 `[ ]`。
 
 ## 十、用户提示词
 

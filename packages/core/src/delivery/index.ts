@@ -1,5 +1,4 @@
 export { AuthorityDeliveryPipeline } from "./authority-pipeline.js";
-export { channelAuthorityDeliveryTransport } from "./authority-pipeline.js";
 export type {
   AuthorityDeliveryPipelineConfig,
   AuthorityDeliveryPipelineDeps,
@@ -80,7 +79,7 @@ export type {
   AuthorityDeliveryLogger,
   DeliveryOpenFact,
   DeliveryPriority,
-  DeliverySender,
+  DeliveryResponseLossEvidence,
   DeliverySource,
   DeliveryStats,
   DeliveryTransport,
@@ -89,9 +88,6 @@ export type {
 // ─── Outbox（顺序层 / ADR-007） ───
 export { Outbox } from "./outbox.js";
 export { OutboxRegistry, makeKey as makeOutboxKey } from "./outbox-registry.js";
-export { createOutboxSender } from "./outbox-sender.js";
-export type { OutboxSenderOptions } from "./outbox-sender.js";
-export type { DeliverySendMeta } from "./types.js";
 export type {
   EmissionSource,
   OpenSlotOptions,

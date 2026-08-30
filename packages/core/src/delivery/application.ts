@@ -44,6 +44,7 @@ import type {
   DeliveryLifecycleAdmission,
   DeliveryLifecycleRestoration,
   DeliveryLifecycleSourceRef,
+  DeliveryResponseLossEvidence,
 } from "./types.js";
 import {
   bindProductApiOperation,
@@ -242,6 +243,15 @@ export class DeliveryObligationApplicationService
 export type DeliveryAttemptOutcomePolicy =
   | { readonly kind: "manual-resolution" }
   | { readonly kind: "idempotent-redrive"; readonly windowMs: number };
+
+/** Delivery owns how finite send-effect evidence governs an unknown response. */
+export function decideDeliveryAttemptOutcomePolicy(
+  evidence: DeliveryResponseLossEvidence,
+): DeliveryAttemptOutcomePolicy {
+  return evidence.kind === "unverified"
+    ? { kind: "manual-resolution" }
+    : { kind: "idempotent-redrive", windowMs: evidence.windowMs };
+}
 
 export interface DeliveryAttemptClaim {
   readonly kind: "send";

@@ -1,12 +1,8 @@
 /**
  * setup-delivery 回归测试
  *
- * 专注于 TD#1 修复：channel-not-found 返回 retryable:true 而非 false。
- * Daemon 长时运行期间，channel adapter 重连过渡窗口里查不到，必须重试，
- * 否则投递会被 Outbox 静默丢弃。
- *
- * 直接验证源码的最小方式：读文件查 retryable:true 字面量 + 确保 setupDelivery
- * 能正常组装栈。深度 Outbox 重试行为由 core 包自己的测试覆盖。
+ * 专注于 Host 的 Channel effect 装配边界；adapter 重连竞态的 retryable
+ * 行为由 core 包的真实 effect 测试直接证明，这里只防止业务决定回流 Host。
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -83,7 +79,7 @@ function prepareAuthority(
 
 vi.setConfig({ testTimeout: 30_000 });
 
-describe("setupDelivery — TD#1 channel-not-found retryable", () => {
+describe("setupDelivery — Channel effect binding", () => {
   let home: string;
   let stack: DeliveryStack | null = null;
 
@@ -98,17 +94,19 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
     }
   });
 
-  it("source code: channel-not-found path uses retryable:true (TD#1 regression guard)", async () => {
-    // 直接读源码断言——防止未来误改回 retryable:false
-    const srcPath = resolve(__dirname, "..", "setup-delivery.ts");
-    const src = await readFile(srcPath, "utf-8");
+  it("assembles the narrow Channel effect without recreating send decisions in Host", async () => {
+    const setup = await readFile(resolve(__dirname, "..", "setup-delivery.ts"), "utf-8");
 
-    // 查找 "Channel not found" 周围的 retryable 字段
-    const idx = src.indexOf("Channel not found");
-    expect(idx).toBeGreaterThan(0);
-    const chunk = src.slice(idx, idx + 300);
-    expect(chunk).toMatch(/retryable:\s*true/);
-    expect(chunk).not.toMatch(/retryable:\s*false/);
+    expect(setup).toContain(
+      'from "@zhixing/core/delivery/channel-effect"',
+    );
+    expect(setup.match(/createChannelDeliveryEffect\(/g)).toHaveLength(1);
+    expect(setup).toContain("createChannelDeliveryEffect(channels");
+    expect(setup).toContain("transports.register(channelDelivery.transport)");
+    expect(setup).not.toMatch(/channels\.(?:get|getStatus)\(/);
+    expect(setup).not.toContain("Channel not found");
+    expect(setup).not.toContain("adapter.send(");
+    expect(setup).not.toMatch(/responseLossEvidence|manual-resolution|idempotent-redrive/);
   });
 
   it("assembles a valid DeliveryStack with an empty channel registry", async () => {

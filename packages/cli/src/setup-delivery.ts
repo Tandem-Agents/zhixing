@@ -11,22 +11,23 @@
  */
 
 import {
+  type RuntimeExecutionProfile,
+  createEventBus,
+  type ChannelRegistry,
+  type PermissionRule,
+} from "@zhixing/core";
+import {
   AuthorityDeliveryPipeline,
   DeliveryAuthority,
   DeliveryTransportRegistry,
   DEFAULT_AUTHORITY_DELIVERY_CONFIG,
-  OutboxRegistry,
-  type RuntimeExecutionProfile,
-  createEventBus,
-  createOutboxSender,
-  channelAuthorityDeliveryTransport,
-  type ChannelRegistry,
   type AuthorityDeliveryEventMap,
   type AuthorityDeliveryStats,
   type DeliveryStatusNotice,
   type OutboxEvent,
-  type PermissionRule,
-} from "@zhixing/core";
+  type OutboxRegistry,
+} from "@zhixing/core/delivery";
+import { createChannelDeliveryEffect } from "@zhixing/core/delivery/channel-effect";
 import type {
   AuthorityError,
   CapabilityDescriptor,
@@ -2335,24 +2336,9 @@ export async function setupDelivery(
   const { createDeliveryResolutionCorrectnessPort } =
     await import("@zhixing/owner-kernel/delivery");
 
-  // 1. OutboxRegistry — 顺序层，per-target FIFO
-  //    doSend 直通 channel adapter；adapter 未就绪则返回可重试失败
-  const outboxRegistry = new OutboxRegistry(
-    async (target, content, meta) => {
-      const adapter = channels.get(target.channelId);
-      if (!adapter) {
-        // Adapter 可能正处于重连窗口；保持可重试，避免把瞬时不可用误判为永久失败。
-        return {
-          success: false,
-          error: `Channel not found: ${target.channelId}`,
-          retryable: true,
-        };
-      }
-      return meta
-        ? adapter.send(target, content, meta)
-        : adapter.send(target, content);
-    },
-    {
+  // Delivery owns the effect contract; this concrete binding only combines
+  // Channel readiness/send evidence with the shared per-target Outbox.
+  const channelDelivery = createChannelDeliveryEffect(channels, {
       onEvent: options.onOutboxEvent,
       logger: {
         debug: logger.debug,
@@ -2360,8 +2346,8 @@ export async function setupDelivery(
         warn: (msg) => logger.warn(msg),
         error: (msg) => logger.error(msg),
       },
-    },
-  );
+    });
+  const { outboxRegistry } = channelDelivery;
   const statusListeners = new Set<
     (notice: DeliveryStatusNotice) => void | Promise<void>
   >();
@@ -2378,18 +2364,10 @@ export async function setupDelivery(
   );
 
   try {
-    // 2. Sender — outbox-bound，Pipeline 的 drain 现在经 Outbox
-    const sender = createOutboxSender(outboxRegistry, {
-      isReady: (channelId) => {
-        const status = channels.getStatus(channelId);
-        return status?.state === "connected";
-      },
-    });
-
     const { artifacts, authorityLog } = options.authorityRuntime;
 
     const transports = new DeliveryTransportRegistry();
-    transports.register(channelAuthorityDeliveryTransport(sender));
+    transports.register(channelDelivery.transport);
     const eventBus = createEventBus<AuthorityDeliveryEventMap>();
     const publishNotice = async (notice: DeliveryStatusNotice) => {
       await Promise.allSettled(

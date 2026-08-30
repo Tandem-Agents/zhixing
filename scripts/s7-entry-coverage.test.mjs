@@ -3036,7 +3036,10 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/core/src/delivery/application.ts",
     "packages/core/src/delivery/authority.ts",
     "packages/core/src/delivery/authority-pipeline.ts",
+    "packages/core/src/delivery/channel-effect.ts",
     "packages/core/src/delivery/lifecycle-policy.ts",
+    "packages/core/src/delivery/outbox.ts",
+    "packages/core/src/delivery/types.ts",
     "packages/core/src/delivery/index.ts",
     "packages/core/src/product-api/catalog.ts",
     "packages/core/src/skills/global-state-adapter.ts",
@@ -3367,6 +3370,54 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       (text) => text.replace("this.#application.claim(", "this.#authority.claim("),
     )).join("\n"),
     /attempt lifecycle does not have one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/delivery/authority-pipeline.ts",
+      (text) => `${text}\ninterface LegacyPipeline { readonly sender: DeliverySender }`,
+    )).join("\n"),
+    /send effect is not uniquely domain-owned/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/delivery/channel-effect.ts",
+      (text) => `${text}\nconst leakedAuthority: DeliveryAuthority | undefined = undefined;`,
+    )).join("\n"),
+    /send effect is not uniquely domain-owned/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/delivery/channel-effect.ts",
+      (text) => text.replace(
+        'kind: "unverified"',
+        'kind: "manual-resolution"',
+      ),
+    )).join("\n"),
+    /send effect is not uniquely domain-owned/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/delivery/outbox.ts",
+      (text) => `${text}\nconst authorityOrigin = true;`,
+    )).join("\n"),
+    /send effect is not uniquely domain-owned/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/setup-delivery.ts",
+      (text) => text.replace(
+        '@zhixing/core/delivery/channel-effect',
+        '@zhixing/core',
+      ),
+    )).join("\n"),
+    /send effect is not uniquely domain-owned/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/delivery/index.ts",
+      (text) => `${text}\nexport * from "./channel-effect.js";`,
+    )).join("\n"),
+    /Channel effect must have one narrow non-root adapter subpath/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(

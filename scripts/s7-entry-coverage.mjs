@@ -2798,6 +2798,11 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const deliveryPipeline = required(
     "packages/core/src/delivery/authority-pipeline.ts",
   );
+  const deliveryTypes = required("packages/core/src/delivery/types.ts");
+  const deliveryOutbox = required("packages/core/src/delivery/outbox.ts");
+  const channelDeliveryEffect = required(
+    "packages/core/src/delivery/channel-effect.ts",
+  );
   const deliveryLifecyclePolicy = required(
     "packages/core/src/delivery/lifecycle-policy.ts",
   );
@@ -2990,6 +2995,25 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !deliveryApplication.includes("class DeliveryProjectionInvariantError")
   ) {
     failures.push("Delivery application must have one narrow non-root core subpath");
+  }
+  const channelDeliveryEffectExport = coreManifest?.exports?.["./delivery/channel-effect"];
+  const duplicateChannelDeliveryEffectExports = Object.entries(coreManifest?.exports ?? {})
+    .filter(([subpath, conditions]) =>
+      subpath !== "./delivery/channel-effect" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === channelDeliveryEffectExport?.types ||
+        conditions.import === channelDeliveryEffectExport?.import)
+    );
+  if (
+    channelDeliveryEffectExport?.types !== "./dist/delivery/channel-effect.d.ts" ||
+    channelDeliveryEffectExport?.import !== "./dist/delivery/channel-effect.js" ||
+    duplicateChannelDeliveryEffectExports.length > 0 ||
+    coreBuild.split('"src/delivery/channel-effect.ts"').length - 1 !== 1 ||
+    coreIndex.includes("channel-effect") ||
+    deliveryIndex.includes("channel-effect")
+  ) {
+    failures.push("Delivery Channel effect must have one narrow non-root adapter subpath");
   }
   for (const retiredPath of [
     "packages/core/src/skills/store.ts",
@@ -3293,6 +3317,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !deliveryApplication.includes("deliveryUnknownOutcomeDisposition(") ||
     !deliveryApplication.includes("deliveryFailureDisposition(") ||
     !deliveryApplication.includes("deliveryDeadlineAt(") ||
+    !deliveryApplication.includes("decideDeliveryAttemptOutcomePolicy(") ||
     !deliveryApplication.includes("responseBindingDigest") ||
     !deliveryLifecyclePolicy.includes("deliveryAttemptAuthorizationMatches") ||
     !deliveryLifecyclePolicy.includes("deliveryUnknownOutcomeDisposition") ||
@@ -3331,6 +3356,41 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   ) {
     failures.push(
       "Delivery attempt lifecycle does not have one domain application and one narrow Correctness transaction",
+    );
+  }
+  if (
+    !channelDeliveryEffect.includes("createChannelDeliveryEffect(") ||
+    !channelDeliveryEffect.includes("new OutboxRegistry(") ||
+    !channelDeliveryEffect.includes('endpointKind: "channel"') ||
+    !channelDeliveryEffect.includes("responseLossEvidence(") ||
+    !channelDeliveryEffect.includes('kind: "unverified"') ||
+    channelDeliveryEffect.includes('kind: "manual-resolution"') ||
+    channelDeliveryEffect.includes('kind: "idempotent-redrive"') ||
+    !channelDeliveryEffect.includes("channels.get(target.channelId)") ||
+    !channelDeliveryEffect.includes('state === "connected"') ||
+    channelDeliveryEffect.includes("DeliveryLifecycleApplication") ||
+    channelDeliveryEffect.includes("DeliveryAuthority") ||
+    channelDeliveryEffect.includes("recordOutcome") ||
+    deliveryPipeline.includes("DeliverySender") ||
+    deliveryPipeline.includes("readonly sender") ||
+    deliveryPipeline.includes("channelAuthorityDeliveryTransport") ||
+    deliveryPipeline.includes("singleDeliveryTransport") ||
+    deliveryTypes.includes("interface DeliverySender") ||
+    deliveryTypes.includes("interface DeliverySendMeta") ||
+    deliveryOutbox.includes("authorityOrigin") ||
+    deliveryOutbox.includes("normalizeAuthorityDeliveryResult") ||
+    deliveryOutbox.includes("authorityDeliveryFailure") ||
+    !setupDelivery.includes(
+      'from "@zhixing/core/delivery/channel-effect"',
+    ) ||
+    !setupDelivery.includes("createChannelDeliveryEffect(channels") ||
+    setupDelivery.includes("createOutboxSender") ||
+    setupDelivery.includes("channelAuthorityDeliveryTransport") ||
+    setupDelivery.includes("Channel not found") ||
+    setupDelivery.includes("adapter.send(")
+  ) {
+    failures.push(
+      "Delivery send effect is not uniquely domain-owned, Channel-implemented and Host-assembled",
     );
   }
   const deliveryAdmissionTransactionConsumers = records

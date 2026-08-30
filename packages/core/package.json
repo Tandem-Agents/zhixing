@@ -92,6 +92,10 @@
       "types": "./dist/delivery/application.d.ts",
       "import": "./dist/delivery/application.js"
     },
+    "./delivery/channel-effect": {
+      "types": "./dist/delivery/channel-effect.d.ts",
+      "import": "./dist/delivery/channel-effect.js"
+    },
     "./environment": {
       "types": "./dist/environment/index.d.ts",
       "import": "./dist/environment/index.js"

@@ -56,15 +56,15 @@ async function createPipeline(
 
 function transport(
   send: DeliveryEndpointTransport["send"],
-  policy: ReturnType<DeliveryEndpointTransport["outcomePolicy"]> = {
-    kind: "manual-resolution",
+  evidence: ReturnType<DeliveryEndpointTransport["responseLossEvidence"]> = {
+    kind: "unverified",
   },
 ): DeliveryTransport {
   const adapter = {
     endpointKind: "channel" as const,
     send,
     isReady: () => true,
-    outcomePolicy: () => policy,
+    responseLossEvidence: () => evidence,
   };
   return {
     resolve: () => adapter,
@@ -438,7 +438,7 @@ describe("AuthorityDeliveryPipeline", () => {
       return { success: true, retryable: false };
     });
     const fixture = await createPipeline(
-      transport(send, { kind: "idempotent-redrive", windowMs: 60_000 }),
+      transport(send, { kind: "idempotent", windowMs: 60_000 }),
     );
     const created = await fixture.enqueue();
     if (!created.accepted) throw new Error("fixture enqueue failed");
@@ -455,16 +455,16 @@ describe("AuthorityDeliveryPipeline", () => {
     await fixture.pipeline.stop();
   });
 
-  it("recovers an open attempt without rereading the current outcome policy", async () => {
-    let policyCalls = 0;
+  it("recovers an open attempt without rereading current effect evidence", async () => {
+    let evidenceCalls = 0;
     let sendCalls = 0;
     const adapter: DeliveryEndpointTransport = {
       endpointKind: "channel",
       isReady: () => true,
-      outcomePolicy: () => {
-        policyCalls += 1;
-        if (policyCalls > 1) throw new Error("current policy is unavailable");
-        return { kind: "idempotent-redrive", windowMs: 60_000 };
+      responseLossEvidence: () => {
+        evidenceCalls += 1;
+        if (evidenceCalls > 1) throw new Error("current evidence is unavailable");
+        return { kind: "idempotent", windowMs: 60_000 };
       },
       send: async () => {
         sendCalls += 1;
@@ -479,7 +479,7 @@ describe("AuthorityDeliveryPipeline", () => {
     await fixture.pipeline.flush();
     await fixture.pipeline.flush();
 
-    expect(policyCalls).toBe(1);
+    expect(evidenceCalls).toBe(1);
     expect(sendCalls).toBe(2);
     expect(await fixture.authority.get(created.items[0]!.itemId)).toMatchObject({
       state: "sent",
@@ -494,7 +494,7 @@ describe("AuthorityDeliveryPipeline", () => {
     });
     const fixture = await createPipeline(
       transport(send, {
-        kind: "idempotent-redrive",
+        kind: "idempotent",
         windowMs: Number.MAX_SAFE_INTEGER,
       }),
     );
@@ -518,7 +518,7 @@ describe("AuthorityDeliveryPipeline", () => {
     });
     let materializations = 0;
     const fixture = await createPipeline(
-      transport(send, { kind: "idempotent-redrive", windowMs: 1_000 }),
+      transport(send, { kind: "idempotent", windowMs: 1_000 }),
       {
         materializeContent: async () => {
           materializations += 1;
@@ -619,7 +619,7 @@ describe("AuthorityDeliveryPipeline", () => {
       endpointKind: "channel" as const,
       send,
       isReady: () => ready,
-      outcomePolicy: () => ({ kind: "manual-resolution" }),
+      responseLossEvidence: () => ({ kind: "unverified" }),
     };
     const fixture = await createPipeline({
       resolve: (endpoint) => adapter.isReady(endpoint) ? adapter : undefined,
@@ -714,7 +714,7 @@ describe("AuthorityDeliveryPipeline", () => {
     registry.register({
       endpointKind: "webhook",
       isReady: () => true,
-      outcomePolicy: () => ({ kind: "idempotent-redrive", windowMs: 60_000 }),
+      responseLossEvidence: () => ({ kind: "idempotent", windowMs: 60_000 }),
       send,
     });
     await fixture.pipeline.flush();
@@ -733,9 +733,9 @@ describe("AuthorityDeliveryPipeline", () => {
     unregister = registry.register({
       endpointKind: "channel",
       isReady: () => true,
-      outcomePolicy: () => {
+      responseLossEvidence: () => {
         unregister();
-        return { kind: "manual-resolution" };
+        return { kind: "unverified" };
       },
       send,
     });
@@ -789,7 +789,7 @@ describe("AuthorityDeliveryPipeline", () => {
     registry.register({
       endpointKind: "channel",
       isReady: (() => "yes") as unknown as DeliveryEndpointTransport["isReady"],
-      outcomePolicy: () => ({ kind: "manual-resolution" }),
+      responseLossEvidence: () => ({ kind: "unverified" }),
       send: async () => ({ success: true, retryable: false }),
     });
     const fixture = await createPipeline(registry);
@@ -805,11 +805,11 @@ describe("AuthorityDeliveryPipeline", () => {
     await fixture.pipeline.stop();
   });
 
-  it("fails closed before starting an attempt when the outcome policy is malformed", async () => {
+  it("fails closed before starting an attempt when response-loss evidence is malformed", async () => {
     const adapter = {
       endpointKind: "channel" as const,
       isReady: () => true,
-      outcomePolicy: () => ({ kind: "unknown" }),
+      responseLossEvidence: () => ({ kind: "unknown" }),
       send: vi.fn(async () => ({ success: true, retryable: false } as const)),
     };
     const fixture = await createPipeline({
@@ -857,7 +857,6 @@ describe("AuthorityDeliveryPipeline", () => {
         success: true,
         retryable: false,
         messageId,
-        receiptBytes: Buffer.from(messageId, "utf8"),
       })),
     );
     const created = await fixture.enqueue();
@@ -875,6 +874,9 @@ describe("AuthorityDeliveryPipeline", () => {
       };
     }>("delivery")).find((entry) => entry.body.t === "sent");
     expect(sent?.body.receipt?.platformMessage?.messageId).toBe(messageId);
+    expect(await fixture.authority.get(created.items[0]!.itemId)).toMatchObject({
+      receiptDigest: byteDigest(Buffer.from(messageId, "utf8")),
+    });
     await fixture.pipeline.stop();
   });
 

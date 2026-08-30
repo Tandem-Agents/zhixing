@@ -38,11 +38,6 @@ import {
   type SlotTerminalState,
   type TurnSlotId,
 } from "./outbox-types.js";
-import {
-  authorityDeliveryFailure,
-  normalizeAuthorityDeliveryResult,
-} from "./transport-contract.js";
-
 // ─── 内部队列项（绑定 promise 回调） ───
 
 interface PendingItem {
@@ -461,12 +456,8 @@ export class Outbox {
       this.lastActivityAt = this.now();
 
       const startedAt = this.now();
-      const authorityOrigin = item.entry.idempotencyKey !== undefined;
       try {
-        const rawResult = await this.sendWithTimeout(item.entry);
-        const result = authorityOrigin
-          ? normalizeAuthorityDeliveryResult(rawResult)
-          : rawResult;
+        const result = await this.sendWithTimeout(item.entry);
         const latency = this.now() - startedAt;
 
         if (!result.success) {
@@ -496,11 +487,7 @@ export class Outbox {
         }
         item.resolve(result);
       } catch (err) {
-        const error = authorityOrigin
-          ? authorityDeliveryFailure()
-          : err instanceof Error
-            ? err
-            : new Error(String(err));
+        const error = err instanceof Error ? err : new Error(String(err));
         this.emit({
           type: "entry:failed",
           key: this.key,

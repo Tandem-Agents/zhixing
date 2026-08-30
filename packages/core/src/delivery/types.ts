@@ -86,29 +86,6 @@ export interface DeliveryEventMap extends EventMap {
   };
 }
 
-// ─── 发送器（抽象通道发送，解耦 ChannelRegistry） ───
-
-/**
- * 传递给 sender.send 的元数据（可选）。
- * Pipeline 调用时会传入 item 的 source 和 id，供 Outbox 等上游生成更精细的事件/日志/源标签。
- * 兼容：meta 可选，不影响不需要此信息的实现。
- */
-export interface DeliverySendMeta {
-  readonly source?: DeliverySource;
-  readonly itemId?: string;
-  readonly idempotencyKey?: string;
-  readonly attempt?: number;
-}
-
-export interface DeliverySender {
-  send(
-    target: DeliveryTarget,
-    content: OutboundContent,
-    meta?: DeliverySendMeta,
-  ): Promise<DeliveryResult>;
-  isReady(channelId: string): boolean;
-}
-
 // ─── 权威投递流的只读投影与执行适配 ───
 
 export interface DeliveryOpenFact {
@@ -194,7 +171,8 @@ export interface AuthorityDeliveryEventMap extends EventMap {
   };
 }
 
-export interface AuthorityDeliverySendMeta extends DeliverySendMeta {
+export interface AuthorityDeliverySendMeta {
+  readonly source?: DeliverySource;
   readonly itemId: string;
   readonly idempotencyKey: string;
   readonly attempt: number;
@@ -205,6 +183,10 @@ export interface DeliveryTransport {
   resolve(endpoint: DeliveryEndpointDto): DeliveryEndpointTransport | undefined;
 }
 
+export type DeliveryResponseLossEvidence =
+  | { readonly kind: "unverified" }
+  | { readonly kind: "idempotent"; readonly windowMs: number };
+
 export interface DeliveryEndpointTransport {
   readonly endpointKind: DeliveryEndpointDto["kind"];
   send(
@@ -213,9 +195,7 @@ export interface DeliveryEndpointTransport {
     meta: AuthorityDeliverySendMeta,
   ): Promise<DeliveryResult>;
   isReady(endpoint: DeliveryEndpointDto): boolean;
-  outcomePolicy(endpoint: DeliveryEndpointDto):
-    | { readonly kind: "manual-resolution" }
-    | { readonly kind: "idempotent-redrive"; readonly windowMs: number };
+  responseLossEvidence(endpoint: DeliveryEndpointDto): DeliveryResponseLossEvidence;
 }
 
 export interface DeliveryEnqueueInput {

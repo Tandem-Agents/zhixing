@@ -1,11 +1,10 @@
 import type { DeliveryResult } from "../channels/types.js";
 import type { DeliveryEndpointDto } from "../contracts/index.js";
-import type { DeliveryEndpointTransport } from "./types.js";
+import type {
+  DeliveryEndpointTransport,
+  DeliveryResponseLossEvidence,
+} from "./types.js";
 import { assertDeliveryIdentifier } from "./validation.js";
-
-export type DeliveryOutcomePolicy = ReturnType<DeliveryEndpointTransport["outcomePolicy"]>;
-
-const SAFE_AUTHORITY_FAILURE = "Delivery transport rejected the request";
 
 export function requireDeliveryEndpointTransport(
   value: unknown,
@@ -19,7 +18,7 @@ export function requireDeliveryEndpointTransport(
     (transport.endpointKind !== "channel" && transport.endpointKind !== "webhook") ||
     (endpointKind !== undefined && transport.endpointKind !== endpointKind) ||
     typeof transport.isReady !== "function" ||
-    typeof transport.outcomePolicy !== "function" ||
+    typeof transport.responseLossEvidence !== "function" ||
     typeof transport.send !== "function"
   ) {
     throw new TypeError("Delivery endpoint transport contract is invalid");
@@ -33,20 +32,22 @@ export function requireDeliveryReadiness(value: unknown): boolean {
   return value;
 }
 
-export function normalizeDeliveryOutcomePolicy(value: unknown): DeliveryOutcomePolicy {
-  const record = requirePlainDataRecord(value, "Delivery outcome policy");
-  if (record.kind === "manual-resolution") {
+export function normalizeDeliveryResponseLossEvidence(
+  value: unknown,
+): DeliveryResponseLossEvidence {
+  const record = requirePlainDataRecord(value, "Delivery response-loss evidence");
+  if (record.kind === "unverified") {
     requireExactKeys(record, ["kind"]);
-    return { kind: "manual-resolution" };
+    return { kind: "unverified" };
   }
-  if (record.kind === "idempotent-redrive") {
+  if (record.kind === "idempotent") {
     requireExactKeys(record, ["kind", "windowMs"]);
     if (!Number.isSafeInteger(record.windowMs) || (record.windowMs as number) <= 0) {
       throw new TypeError("Delivery redrive window must be a positive safe integer");
     }
-    return { kind: "idempotent-redrive", windowMs: record.windowMs as number };
+    return { kind: "idempotent", windowMs: record.windowMs as number };
   }
-  throw new TypeError("Delivery outcome policy kind is invalid");
+  throw new TypeError("Delivery response-loss evidence kind is invalid");
 }
 
 export function normalizeDeliveryResult(value: unknown): DeliveryResult {
@@ -87,21 +88,6 @@ export function normalizeDeliveryResult(value: unknown): DeliveryResult {
     retryable: record.retryable,
     ...(record.error !== undefined ? { error: record.error } : {}),
   };
-}
-
-export function normalizeAuthorityDeliveryResult(value: unknown): DeliveryResult {
-  const result = normalizeDeliveryResult(value);
-  return result.success
-    ? result
-    : {
-        success: false,
-        retryable: result.retryable,
-        error: SAFE_AUTHORITY_FAILURE,
-      };
-}
-
-export function authorityDeliveryFailure(): Error {
-  return new Error("Authority delivery transport failed");
 }
 
 function requirePlainDataRecord(

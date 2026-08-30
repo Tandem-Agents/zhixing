@@ -2,10 +2,10 @@ import { createEventBus } from "../../events/event-bus.js";
 import type { DeliveryResult, DeliveryTarget, OutboundContent } from "../../channels/types.js";
 import { describe, expect, it, vi } from "vitest";
 import { deliveryIdempotencyKey } from "../authority.js";
-import { OutboxRegistry } from "../outbox-registry.js";
-import { createOutboxSender } from "../outbox-sender.js";
+import { createChannelDeliveryEffect } from "../channel-effect.js";
 import type { OutboxDoSend, OutboxEvent } from "../outbox-types.js";
 import { AuthorityDeliveryPipeline } from "../authority-pipeline.js";
+import { DeliveryTransportRegistry } from "../transport-registry.js";
 import type { AuthorityDeliveryEventMap } from "../types.js";
 import {
   createDeliveryLifecycleTestBinding,
@@ -26,7 +26,10 @@ async function integrationHarness(
   const lifecycle = createDeliveryLifecycleTestBinding(fixture.authority, {
     baseRetryDelayMs: 1_000,
   });
-  const registry = new OutboxRegistry(send, {
+  const effect = createChannelDeliveryEffect({
+    get: () => ({ send }),
+    getStatus: () => ({ state: "connected" }),
+  }, {
     onEvent: (event) => events.push(event),
     sendTimeoutMs: 0,
     logger: {
@@ -36,17 +39,19 @@ async function integrationHarness(
       error: (message, data) => logs.push({ message, data }),
     },
   });
+  const transports = new DeliveryTransportRegistry();
+  transports.register(effect.transport);
   const pipeline = new AuthorityDeliveryPipeline({
     application: lifecycle.application,
     projection: lifecycle.projection,
     artifacts: fixture.artifacts,
-    sender: createOutboxSender(registry, { isReady: () => true }),
+    transport: transports,
     eventBus: createEventBus<AuthorityDeliveryEventMap>(),
     config: { flushIntervalMs: 0 },
     now: fixture.now,
   });
   await pipeline.start();
-  return { ...fixture, registry, pipeline, events, logs };
+  return { ...fixture, registry: effect.outboxRegistry, pipeline, events, logs };
 }
 
 describe("delivery authority to outbox integration", () => {

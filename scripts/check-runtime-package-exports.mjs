@@ -4,6 +4,7 @@ const [
   coreRoot,
   coreSkillCatalog,
   coreDeliveryApplication,
+  coreChannelDeliveryEffect,
   coreProductApi,
   coreAuthority,
   corePersistence,
@@ -37,6 +38,7 @@ const [
   import("../packages/core/dist/index.js"),
   import("../packages/core/dist/skills/catalog-application.js"),
   import("../packages/core/dist/delivery/application.js"),
+  import("../packages/core/dist/delivery/channel-effect.js"),
   import("../packages/core/dist/product-api/catalog.js"),
   import("../packages/core/dist/authority/index.js"),
   import("../packages/core/dist/persistence/index.js"),
@@ -629,6 +631,17 @@ async function verifyCorePackageExports(failures) {
   ) {
     failures.push("core-exports:delivery-application:invalid-runtime-boundary");
   }
+  const channelEffectConditions = manifest.exports["./delivery/channel-effect"];
+  if (
+    !channelEffectConditions ||
+    channelEffectConditions.types !== "./dist/delivery/channel-effect.d.ts" ||
+    channelEffectConditions.import !== "./dist/delivery/channel-effect.js" ||
+    typeof coreChannelDeliveryEffect.createChannelDeliveryEffect !== "function" ||
+    "createChannelDeliveryEffect" in coreRoot ||
+    "createChannelDeliveryEffect" in coreDeliveryApplication
+  ) {
+    failures.push("core-exports:delivery-channel-effect:invalid-runtime-boundary");
+  }
   for (const retiredTarget of [
     "dist/delivery/resolution-application.d.ts",
     "dist/delivery/resolution-application.js",
@@ -657,6 +670,17 @@ async function verifyCorePackageExports(failures) {
         conditions.import === productApiConditions?.import)
     ) {
       failures.push(`core-exports:${subpath}:duplicate-product-api-entry`);
+    }
+  }
+  for (const [subpath, conditions] of Object.entries(manifest.exports)) {
+    if (
+      subpath !== "./delivery/channel-effect" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === channelEffectConditions?.types ||
+        conditions.import === channelEffectConditions?.import)
+    ) {
+      failures.push(`core-exports:${subpath}:duplicate-delivery-channel-effect-entry`);
     }
   }
   for (const [subpath, conditions] of Object.entries(manifest.exports)) {
