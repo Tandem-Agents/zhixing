@@ -13,6 +13,10 @@ import { isInternal } from "./status-summary.js";
 import type { AgentTurnResult, ScheduledTask, TaskAction } from "./types.js";
 import type { ScheduleWriteMutation } from "../contracts/state.js";
 import type { IngressContext } from "../contracts/protocol.js";
+import type {
+  ScheduleManagementApplication,
+  ScheduleTaskDraft,
+} from "./application.js";
 
 /** 任务视图 —— 当前等于完整 ScheduledTask；保留为命名缝，未来可换投影类型而不动消费者签名。 */
 export type TaskView = ScheduledTask;
@@ -86,35 +90,16 @@ export type ScheduleMutationStager = (input: {
 }) => Promise<{ readonly seq: number; readonly taskId?: string }>;
 
 /**
- * Host-owned scheduler product port.
+ * Temporary host-owned scheduler runtime bridge.
  *
- * The legacy in-process Scheduler and the durable anchor scheduler both
- * implement this surface. Consumers must not depend on either implementation
- * class, otherwise replacing the legacy direct-execution path would require a
- * second facade and create two scheduler owners.
+ * Definition management is owned by ScheduleManagementApplication. This
+ * surface intentionally keeps only start/stop and run control until A5-11b
+ * migrates the scheduler runtime lifecycle.
  */
 export interface SchedulerBackend {
   start(): Promise<void>;
   stop(): Promise<void>;
-  createTask(
-    spec: TaskSpec,
-    requestId?: string,
-    source?: SchedulerControlSource,
-  ): Promise<TaskView>;
   listTasks(): TaskView[];
-  updateTask(
-    id: string,
-    patch: TaskPatch,
-    requestId?: string,
-    taskRevision?: number,
-    source?: SchedulerControlSource,
-  ): Promise<TaskView>;
-  deleteTask(
-    id: string,
-    requestId?: string,
-    taskRevision?: number,
-    source?: SchedulerControlSource,
-  ): Promise<void>;
   runTask(
     id: string,
     requestId?: string,
@@ -131,7 +116,7 @@ export interface SchedulerBackend {
 
 export interface SchedulerFacade {
   /** 创建任务，返回创建后的任务视图（含内核算出的 nextRunAt）。 */
-  create(spec: TaskSpec, context?: ScheduleMutationContext): Promise<TaskView>;
+  create(spec: ScheduleTaskDraft, context?: ScheduleMutationContext): Promise<TaskView>;
   /** 列出任务（纯读）。 */
   list(): Promise<TaskView[]>;
   /** 更新任务，返回更新后的任务视图。 */
@@ -146,25 +131,29 @@ export interface SchedulerFacade {
   dispose?(): Promise<void>;
 }
 
-/** 直调本进程 scheduler 权威后端的门面实现（核心宿主内部用）。 */
+/** 领域管理应用 + 本机运行桥的 facade（核心宿主内部用）。 */
 export class LocalSchedulerFacade implements SchedulerFacade {
   readonly #observedRevisions = new Map<string, number>();
   constructor(
+    private readonly management: ScheduleManagementApplication,
     private readonly scheduler: SchedulerBackend,
     private readonly eventBus: IEventBus<SchedulerEventMap>,
   ) {}
 
-  async create(spec: TaskSpec, context?: ScheduleMutationContext): Promise<TaskView> {
-    const task = await this.scheduler.createTask(
-      spec,
-      requireOperationId(context, "Schedule creation"),
-    );
+  async create(spec: ScheduleTaskDraft, context?: ScheduleMutationContext): Promise<TaskView> {
+    const result = await this.management.execute({
+      kind: "create",
+      draft: spec,
+      operation: { operationId: requireOperationId(context, "Schedule creation") },
+    });
+    if (result.kind !== "created") throw new TypeError("Schedule create returned wrong result");
+    const task = result.task;
     this.#observe(task);
     return task;
   }
 
   async list(): Promise<TaskView[]> {
-    const tasks = this.scheduler.listTasks();
+    const tasks = [...(await this.management.query({ kind: "list" })).tasks];
     for (const task of tasks) this.#observe(task);
     return tasks;
   }
@@ -175,23 +164,32 @@ export class LocalSchedulerFacade implements SchedulerFacade {
     context?: ScheduleMutationContext,
   ): Promise<TaskView> {
     const revision = context?.taskRevision ?? this.#observedRevisions.get(id);
-    const task = await this.scheduler.updateTask(
-      id,
+    const result = await this.management.execute({
+      kind: "update",
+      taskId: id,
       patch,
-      requireOperationId(context, "Schedule update"),
-      revision,
-    );
+      operation: {
+        operationId: requireOperationId(context, "Schedule update"),
+        ...(revision !== undefined ? { expectedRevision: revision } : {}),
+      },
+    });
+    if (result.kind !== "updated") throw new TypeError("Schedule update returned wrong result");
+    const task = result.task;
     this.#observe(task);
     return task;
   }
 
   async delete(id: string, context?: ScheduleMutationContext): Promise<void> {
     const revision = context?.taskRevision ?? this.#observedRevisions.get(id);
-    await this.scheduler.deleteTask(
-      id,
-      requireOperationId(context, "Schedule deletion"),
-      revision,
-    );
+    const result = await this.management.execute({
+      kind: "delete",
+      taskId: id,
+      operation: {
+        operationId: requireOperationId(context, "Schedule deletion"),
+        ...(revision !== undefined ? { expectedRevision: revision } : {}),
+      },
+    });
+    if (result.kind !== "deleted") throw new TypeError("Schedule delete returned wrong result");
     this.#observedRevisions.delete(id);
   }
 

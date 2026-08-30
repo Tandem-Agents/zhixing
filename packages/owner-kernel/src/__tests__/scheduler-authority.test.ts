@@ -483,6 +483,9 @@ describe("AnchorScheduler authority", () => {
       schedule: { kind: "cron", expr: "0 3 * * *" },
     });
     expect(first.scheduler.listTasks()).toEqual([]);
+    expect(first.scheduler.listTaskProjections()).toEqual([
+      expect.objectContaining({ id: "__transcript-gc", system: true }),
+    ]);
     await first.scheduler.stop();
 
     const restarted = fixture({ journals: first.journals, systemTasks });

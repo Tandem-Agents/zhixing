@@ -46,6 +46,12 @@ import {
   SkillCatalogApplicationService,
 } from "@zhixing/core/skills/catalog";
 import {
+  createScheduleManagementProductApiContribution,
+  SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET,
+  ScheduleManagementApplicationService,
+  type ScheduleManagementRepository,
+} from "@zhixing/core/scheduler/application";
+import {
   createTrustAdministrationProductApiContribution,
   TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET,
 } from "@zhixing/core/trust-administration";
@@ -380,18 +386,15 @@ async function runServerProcess(
   });
   // 3. Scheduler facade lazy ref —— 打破组合根装配顺序依赖。
   let schedulerRef: SchedulerBackend | null = null;
-  let schedulerProductRef: SchedulerBackend | undefined;
-  const currentSchedulerProduct = (): SchedulerBackend => {
+  let schedulerProductRef: AnchorSchedulerProductPort | undefined;
+  const currentSchedulerProduct = (): AnchorSchedulerProductPort => {
     if (!schedulerProductRef) throw new Error("Scheduler generation is not installed");
     return schedulerProductRef;
   };
   const schedulerBackend: SchedulerBackend = {
     start: () => currentSchedulerProduct().start(),
     stop: () => currentSchedulerProduct().stop(),
-    createTask: (...args) => currentSchedulerProduct().createTask(...args),
     listTasks: () => currentSchedulerProduct().listTasks(),
-    updateTask: (...args) => currentSchedulerProduct().updateTask(...args),
-    deleteTask: (...args) => currentSchedulerProduct().deleteTask(...args),
     runTask: (...args) => currentSchedulerProduct().runTask(...args),
     getTask: (id) => currentSchedulerProduct().getTask(id),
     abortRun: (runId, requestId, source) =>
@@ -400,6 +403,16 @@ async function runServerProcess(
       return currentSchedulerProduct().activeTaskCount;
     },
   };
+  const schedulerManagementRepository: ScheduleManagementRepository = {
+    list: () => currentSchedulerProduct().list(),
+    find: (taskId) => currentSchedulerProduct().find(taskId),
+    commitCreate: (input) => currentSchedulerProduct().commitCreate(input),
+    commitUpdate: (input) => currentSchedulerProduct().commitUpdate(input),
+    commitDelete: (input) => currentSchedulerProduct().commitDelete(input),
+  };
+  const schedulerManagement = new ScheduleManagementApplicationService(
+    schedulerManagementRepository,
+  );
   // schedule 工具经门面接入锚点唯一 scheduler 权威。实例化落点在权威创建后；
   // per-runtime 工具只持 getter，不持第二套 scheduler 状态。
   let schedulerFacadeRef: LocalSchedulerFacade | null = null;
@@ -1102,6 +1115,7 @@ async function runServerProcess(
       schedulerProductRef = schedulerProduct;
       schedulerRef = schedulerBackend;
       schedulerFacadeRef ??= new LocalSchedulerFacade(
+        schedulerManagement,
         schedulerBackend,
         schedulerEventBus,
       );
@@ -1887,6 +1901,7 @@ async function runServerProcess(
       operations: [
         ...SKILL_CATALOG_PRODUCT_API_EXACT_SET.operations,
         ...TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET.operations,
+        ...SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET.operations,
         ...(deliveryProductApi
           ? DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET.operations
           : []),
@@ -1894,6 +1909,7 @@ async function runServerProcess(
       factEvents: [
         ...SKILL_CATALOG_PRODUCT_API_EXACT_SET.factEvents,
         ...TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET.factEvents,
+        ...SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET.factEvents,
         ...(deliveryProductApi
           ? DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET.factEvents
           : []),
@@ -1905,6 +1921,7 @@ async function runServerProcess(
         anchorEpoch: () => authorityRuntime.anchorEpoch,
       })),
       createTrustAdministrationProductApiContribution(trustAdministration),
+      createScheduleManagementProductApiContribution(schedulerManagement),
       ...(deliveryProductApi ? [deliveryProductApi] : []),
     ],
   );

@@ -5,9 +5,13 @@ import type {
   SchedulerFacade,
   SchedulerFacadeEventHandler,
   TaskPatch,
-  TaskSpec,
   TaskView,
 } from "@zhixing/core";
+import {
+  ScheduleManagementApplicationService,
+  type ScheduleManagementRepository,
+  type ScheduleTaskDraft,
+} from "@zhixing/core/scheduler/application";
 import type { ScheduleTaskSpecDto } from "@zhixing/core/contracts";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 
@@ -23,34 +27,22 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
 
   constructor(private readonly base: () => SchedulerFacade) {}
 
-  async create(spec: TaskSpec, context?: ScheduleMutationContext): Promise<TaskView> {
+  async create(spec: ScheduleTaskDraft, context?: ScheduleMutationContext): Promise<TaskView> {
     const staged = this.#stagedState();
     if (!staged) return this.base().create(spec, context);
-    const result = await staged.stage({
-      mutation: { kind: "schedule-create", spec: taskSpecDto(spec) },
-      operationId: this.#operationId(staged.state, context),
+    const result = await this.#application(staged).execute({
+      kind: "create",
+      draft: spec,
+      operation: { operationId: this.#operationId(staged.state, context) },
     });
-    if (!result.taskId) {
-      throw new Error("Staged schedule creation did not return its stable task id");
-    }
-    const now = new Date().toISOString();
-    const view: TaskView = {
-      id: result.taskId,
-      taskRevision: 1,
-      ...structuredClone(spec),
-      state: { consecutiveErrors: 0, runCount: 0 },
-      createdAt: now,
-      updatedAt: now,
-    };
-    staged.state.tasks.set(view.id, view);
-    return structuredClone(view);
+    if (result.kind !== "created") throw new TypeError("Schedule create returned wrong result");
+    return result.task;
   }
 
   async list(): Promise<TaskView[]> {
     const staged = this.#stagedState();
     if (!staged) return this.base().list();
-    await this.#prime(staged.state);
-    return [...staged.state.tasks.values()].map((task) => structuredClone(task));
+    return [...(await this.#application(staged).query({ kind: "list" })).tasks];
   }
 
   async update(
@@ -60,40 +52,35 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
   ): Promise<TaskView> {
     const staged = this.#stagedState();
     if (!staged) return this.base().update(id, patch, context);
-    const current = await this.#current(staged.state, id);
-    const taskRevision = requiredRevision(current);
-    const next: TaskView = {
-      ...current,
-      ...structuredClone(patch),
-      taskRevision: taskRevision + 1,
-      updatedAt: new Date().toISOString(),
-    };
-    await staged.stage({
-      mutation: {
-        kind: "schedule-update",
-        taskId: id,
-        taskRevision,
-        spec: taskSpecDto(next),
+    const result = await this.#application(staged).execute({
+      kind: "update",
+      taskId: id,
+      patch,
+      operation: {
+        operationId: this.#operationId(staged.state, context),
+        ...(context?.taskRevision !== undefined
+          ? { expectedRevision: context.taskRevision }
+          : await this.#observedRevision(staged.state, id)),
       },
-      operationId: this.#operationId(staged.state, context),
     });
-    staged.state.tasks.set(id, next);
-    return structuredClone(next);
+    if (result.kind !== "updated") throw new TypeError("Schedule update returned wrong result");
+    return result.task;
   }
 
   async delete(id: string, context?: ScheduleMutationContext): Promise<void> {
     const staged = this.#stagedState();
     if (!staged) return this.base().delete(id, context);
-    const current = await this.#current(staged.state, id);
-    await staged.stage({
-      mutation: {
-        kind: "schedule-delete",
-        taskId: id,
-        taskRevision: requiredRevision(current),
+    const result = await this.#application(staged).execute({
+      kind: "delete",
+      taskId: id,
+      operation: {
+        operationId: this.#operationId(staged.state, context),
+        ...(context?.taskRevision !== undefined
+          ? { expectedRevision: context.taskRevision }
+          : await this.#observedRevision(staged.state, id)),
       },
-      operationId: this.#operationId(staged.state, context),
     });
-    staged.state.tasks.delete(id);
+    if (result.kind !== "deleted") throw new TypeError("Schedule delete returned wrong result");
   }
 
   run(id: string, context?: ScheduleMutationContext): Promise<AgentTurnResult> {
@@ -132,12 +119,83 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
     state.primed = true;
   }
 
-  async #current(state: StagedViewState, id: string): Promise<TaskView> {
+  async #observedRevision(
+    state: StagedViewState,
+    id: string,
+  ): Promise<{ readonly expectedRevision: number }> {
     await this.#prime(state);
     const task = state.tasks.get(id);
-    if (!task) throw new Error(`Task not found: ${id}`);
-    if (task.system) throw new Error(`Cannot modify system task: ${id}`);
-    return task;
+    return { expectedRevision: requiredRevision(task) };
+  }
+
+  #application(staged: {
+    readonly stage: ScheduleMutationStager;
+    readonly state: StagedViewState;
+  }): ScheduleManagementApplicationService {
+    const repository: ScheduleManagementRepository = {
+      list: async () => {
+        await this.#prime(staged.state);
+        return [...staged.state.tasks.values()].map((task) => structuredClone(task));
+      },
+      find: async (taskId) => {
+        await this.#prime(staged.state);
+        const task = staged.state.tasks.get(taskId);
+        return task ? structuredClone(task) : undefined;
+      },
+      commitCreate: async ({ spec, operation }) => {
+        const result = await staged.stage({
+          mutation: { kind: "schedule-create", spec: taskSpecDto(spec) },
+          operationId: operation.operationId,
+        });
+        if (!result.taskId) {
+          throw new Error("Staged schedule creation did not return its stable task id");
+        }
+        const now = new Date().toISOString();
+        const view: TaskView = {
+          id: result.taskId,
+          taskRevision: 1,
+          ...structuredClone(spec),
+          state: { consecutiveErrors: 0, runCount: 0 },
+          createdAt: now,
+          updatedAt: now,
+        };
+        staged.state.tasks.set(view.id, view);
+        return structuredClone(view);
+      },
+      commitUpdate: async ({ taskId, spec, operation }) => {
+        const current = staged.state.tasks.get(taskId);
+        if (!current) throw new Error(`Task not found: ${taskId}`);
+        await staged.stage({
+          mutation: {
+            kind: "schedule-update",
+            taskId,
+            taskRevision: operation.expectedRevision,
+            spec: taskSpecDto(spec),
+          },
+          operationId: operation.operationId,
+        });
+        const next: TaskView = {
+          ...current,
+          ...structuredClone(spec),
+          taskRevision: operation.expectedRevision + 1,
+          updatedAt: new Date().toISOString(),
+        };
+        staged.state.tasks.set(taskId, next);
+        return structuredClone(next);
+      },
+      commitDelete: async ({ taskId, operation }) => {
+        await staged.stage({
+          mutation: {
+            kind: "schedule-delete",
+            taskId,
+            taskRevision: operation.expectedRevision,
+          },
+          operationId: operation.operationId,
+        });
+        staged.state.tasks.delete(taskId);
+      },
+    };
+    return new ScheduleManagementApplicationService(repository);
   }
 
   #operationId(
@@ -151,14 +209,15 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
   }
 }
 
-function requiredRevision(task: TaskView): number {
+function requiredRevision(task: TaskView | undefined): number {
+  if (!task) throw new Error("Scheduled task projection is unavailable");
   if (!Number.isSafeInteger(task.taskRevision) || task.taskRevision! <= 0) {
     throw new Error("Scheduled task projection has no authority revision");
   }
   return task.taskRevision!;
 }
 
-function taskSpecDto(spec: TaskSpec | TaskView): ScheduleTaskSpecDto {
+function taskSpecDto(spec: TaskView | Omit<TaskView, "id" | "state" | "createdAt" | "updatedAt">): ScheduleTaskSpecDto {
   if (spec.action.kind !== "agent-turn") {
     throw new TypeError("User schedule mutations only accept agent-turn tasks");
   }

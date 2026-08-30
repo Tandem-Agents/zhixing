@@ -21,10 +21,40 @@ import {
   type SchedulerFacade,
   type ToolExecutionContext,
 } from "@zhixing/core";
+import {
+  ScheduleManagementApplicationService,
+  type ScheduleManagementRepository,
+} from "@zhixing/core/scheduler/application";
 import { createTempDir } from "@zhixing/test-utils";
 import { createScheduleTool } from "../schedule.js";
 
 // ─── 测试工具 ───
+
+function managementRepository(scheduler: Scheduler): ScheduleManagementRepository {
+  const revisions = new Map<string, number>();
+  const project = (task: ReturnType<Scheduler["getTask"]>) => {
+    if (!task) return undefined;
+    return { ...task, taskRevision: revisions.get(task.id) ?? 1 };
+  };
+  return {
+    list: async () => scheduler.listTasks().map((task) => project(task)!),
+    find: async (taskId) => project(scheduler.getTask(taskId)),
+    commitCreate: async ({ spec }) => {
+      const task = await scheduler.createTask(spec);
+      revisions.set(task.id, 1);
+      return project(task)!;
+    },
+    commitUpdate: async ({ taskId, spec, operation }) => {
+      const task = await scheduler.updateTask(taskId, spec);
+      revisions.set(taskId, operation.expectedRevision + 1);
+      return project(task)!;
+    },
+    commitDelete: async ({ taskId }) => {
+      await scheduler.deleteTask(taskId);
+      revisions.delete(taskId);
+    },
+  };
+}
 
 async function withScheduler<T>(
   fn: (scheduler: Scheduler, facade: SchedulerFacade, dir: string) => Promise<T>,
@@ -44,7 +74,13 @@ async function withScheduler<T>(
     },
   });
   await scheduler.start();
-  const facade = new LocalSchedulerFacade(scheduler, eventBus);
+  const facade = new LocalSchedulerFacade(
+    new ScheduleManagementApplicationService(
+      managementRepository(scheduler),
+    ),
+    scheduler,
+    eventBus,
+  );
   try {
     return await fn(scheduler, facade, dir);
   } finally {

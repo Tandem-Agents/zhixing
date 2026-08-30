@@ -3349,6 +3349,10 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   };
 
   const application = required("packages/core/src/skills/catalog-application.ts");
+  const scheduleApplication = required(
+    "packages/core/src/scheduler/application.ts",
+  );
+  const scheduleFacade = required("packages/core/src/scheduler/facade.ts");
   const deliveryApplication = required(
     "packages/core/src/delivery/application.ts",
   );
@@ -3401,9 +3405,22 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const rpcManifestText = required("packages/rpc/package.json");
   const rpcBuild = required("packages/rpc/tsup.config.ts");
   const handler = required("packages/server/src/rpc/methods/skill.ts");
+  const scheduleHandler = required(
+    "packages/server/src/rpc/methods/schedule.ts",
+  );
   const deliveryHandler = required("packages/server/src/rpc/methods/server.ts");
   const context = required("packages/server/src/context.ts");
   const composition = required("packages/cli/src/serve/command.ts");
+  const executionSchedule = required(
+    "packages/cli/src/serve/execution-scheduler-facade.ts",
+  );
+  const rpcSchedule = required(
+    "packages/cli/src/runtime/rpc-scheduler-facade.ts",
+  );
+  const scheduleTool = required("packages/tools-builtin/src/schedule.ts");
+  const scheduleCorrectness = required(
+    "packages/owner-kernel/src/scheduler-global-state.ts",
+  );
   const skillClientBinding = required(
     "packages/rpc/src/skill-catalog-client.ts",
   );
@@ -3432,6 +3449,64 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const assignmentMutationPort = required(
     "packages/cli/src/serve/assignment-schedule-stager.ts",
   );
+
+  if (
+    !scheduleApplication.includes("class ScheduleManagementApplicationService") ||
+    !scheduleApplication.includes("interface ScheduleManagementRepository") ||
+    !scheduleApplication.includes("draft.enabled ?? true") ||
+    !scheduleApplication.includes('draft.priority ?? "normal"') ||
+    !scheduleApplication.includes("validateTaskDefinition({") ||
+    scheduleApplication.split("normalizeOperation(command.operation, true)").length - 1 !== 2 ||
+    scheduleApplication.split('requireString(command.taskId, "Schedule task id")').length - 1 !== 2 ||
+    scheduleApplication.includes("nonEmpty(command.taskId") ||
+    !scheduleApplication.includes("if (task.system)") ||
+    !scheduleApplication.includes("createScheduleManagementProductApiContribution") ||
+    !scheduleApplication.includes("SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET")
+  ) {
+    failures.push("Schedule definition management lacks one domain application owner");
+  }
+  if (
+    !scheduleHandler.includes('from "@zhixing/core/scheduler/application"') ||
+    !scheduleHandler.includes("SCHEDULE_MANAGEMENT_LIST_QUERY") ||
+    !scheduleHandler.includes("SCHEDULE_MANAGEMENT_CREATE_COMMAND") ||
+    !scheduleHandler.includes("SCHEDULE_MANAGEMENT_UPDATE_COMMAND") ||
+    !scheduleHandler.includes("SCHEDULE_MANAGEMENT_DELETE_COMMAND") ||
+    !/case "system-task":\s*return error;/u.test(scheduleHandler) ||
+    !/case "invalid-command":\s*return method === "schedule\.create"\s*\?/u.test(
+      scheduleHandler,
+    ) ||
+    /\.createTask\(|\.updateTask\(|\.deleteTask\(|validateTaskDefinition|enabled:\s*params\.enabled\s*\?\?|priority:\s*params\.priority\s*\?\?/u.test(
+      scheduleHandler,
+    )
+  ) {
+    failures.push("Schedule RPC management binding bypasses its Product API application");
+  }
+  if (
+    !scheduleFacade.includes("this.management.execute({") ||
+    !scheduleFacade.includes("this.management.query({ kind: \"list\" })") ||
+    /this\.scheduler\.(?:createTask|updateTask|deleteTask)\(/u.test(scheduleFacade) ||
+    !executionSchedule.includes("new ScheduleManagementApplicationService(repository)") ||
+    /Cannot modify system task|\.\.\.structuredClone\(patch\)/u.test(executionSchedule) ||
+    !scheduleCorrectness.includes("implements SchedulerBackend, ScheduleManagementRepository") ||
+    !scheduleCorrectness.includes("commitCreate(input:") ||
+    !scheduleCorrectness.includes("commitUpdate(input:") ||
+    !scheduleCorrectness.includes("commitDelete(input:") ||
+    !scheduleCorrectness.includes("return this.scheduler.listTaskProjections();") ||
+    scheduleCorrectness.includes("async list(): Promise<readonly TaskView[]> {\n    return this.scheduler.listTasks();")
+  ) {
+    failures.push("Schedule facades or Correctness adapter retain a second management decision path");
+  }
+  if (
+    scheduleTool.includes(".filter((t) => !isInternal(t))") ||
+    scheduleTool.includes("enabled: true") ||
+    scheduleTool.includes('?? "normal"') ||
+    !rpcSchedule.includes('client.request<TaskView>("schedule.create"') ||
+    !composition.includes("createScheduleManagementProductApiContribution(schedulerManagement)") ||
+    composition.split("createScheduleManagementProductApiContribution(").length - 1 !== 1 ||
+    composition.split("new ScheduleManagementApplicationService(").length - 1 !== 1
+  ) {
+    failures.push("Schedule consumers do not converge on the one management application");
+  }
   const agentRuntime = required(
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
   );
@@ -3456,6 +3531,24 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     coreManifest = JSON.parse(coreManifestText);
   } catch {
     failures.push("Core manifest is invalid while checking the Skill Catalog subpath");
+  }
+  const scheduleApplicationExport = coreManifest?.exports?.["./scheduler/application"];
+  const duplicateScheduleApplicationExports = Object.entries(coreManifest?.exports ?? {})
+    .filter(([subpath, conditions]) =>
+      subpath !== "./scheduler/application" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === scheduleApplicationExport?.types ||
+        conditions.import === scheduleApplicationExport?.import)
+    );
+  if (
+    scheduleApplicationExport?.types !== "./dist/scheduler/application.d.ts" ||
+    scheduleApplicationExport?.import !== "./dist/scheduler/application.js" ||
+    duplicateScheduleApplicationExports.length > 0 ||
+    coreBuild.split('"src/scheduler/application.ts"').length - 1 !== 1 ||
+    /ScheduleManagementApplication|scheduler\/application/u.test(coreIndex)
+  ) {
+    failures.push("Schedule management application must have one narrow non-root core subpath");
   }
   const skillCatalogExport = coreManifest?.exports?.["./skills/catalog"];
   if (

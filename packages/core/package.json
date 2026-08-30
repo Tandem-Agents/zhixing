@@ -64,6 +64,10 @@
       "types": "./dist/scheduler/index.d.ts",
       "import": "./dist/scheduler/index.js"
     },
+    "./scheduler/application": {
+      "types": "./dist/scheduler/application.d.ts",
+      "import": "./dist/scheduler/application.js"
+    },
     "./orchestration": {
       "types": "./dist/orchestration/index.d.ts",
       "import": "./dist/orchestration/index.js"

@@ -10,7 +10,6 @@
 
 import {
   type SchedulerFacade,
-  type TaskSpec,
   type TaskPatch,
   type TaskView,
   type AgentTurnResult,
@@ -18,6 +17,7 @@ import {
   type SchedulerFacadeEventHandler,
   type ScheduleMutationContext,
 } from "@zhixing/core";
+import type { ScheduleTaskDraft } from "@zhixing/core/scheduler/application";
 import type { CoreHostRpcLink } from "./core-host-connection.js";
 
 export interface RpcSchedulerFacadeOptions {
@@ -33,7 +33,7 @@ export class RpcSchedulerFacade implements SchedulerFacade {
     this.link = opts.connection;
   }
 
-  async create(spec: TaskSpec, context?: ScheduleMutationContext): Promise<TaskView> {
+  async create(spec: ScheduleTaskDraft, context?: ScheduleMutationContext): Promise<TaskView> {
     const client = await this.link.getClient();
     const task = await client.request<TaskView>("schedule.create", {
       ...spec,

@@ -777,10 +777,14 @@ export class AnchorScheduler {
   }
 
   listTasks(): ScheduledTask[] {
-    return [...this.#views.values()]
+    return this.listTaskProjections()
       .filter((task) => !task.system)
-      .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id))
-      .map((task) => structuredClone(task));
+      .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+  }
+
+  /** Raw mechanism projection; product visibility and ordering belong to Schedule Domain. */
+  listTaskProjections(): ScheduledTask[] {
+    return [...this.#views.values()].map((task) => structuredClone(task));
   }
 
   listDefinitions(includeDisabled = true): TaskDefinition[] {

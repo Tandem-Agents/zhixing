@@ -3,6 +3,7 @@ import { access, readFile } from "node:fs/promises";
 const [
   coreRoot,
   coreSkillCatalog,
+  coreScheduleApplication,
   coreDeliveryApplication,
   coreChannelDeliveryEffect,
   coreProductApi,
@@ -39,6 +40,7 @@ const [
 ] = await Promise.all([
   import("../packages/core/dist/index.js"),
   import("../packages/core/dist/skills/catalog-application.js"),
+  import("../packages/core/dist/scheduler/application.js"),
   import("../packages/core/dist/delivery/application.js"),
   import("../packages/core/dist/delivery/channel-effect.js"),
   import("../packages/core/dist/product-api/catalog.js"),
@@ -612,6 +614,17 @@ async function verifyCorePackageExports(failures) {
   ) {
     failures.push("core-exports:product-api:invalid-runtime-boundary");
   }
+  const scheduleApplicationConditions = manifest.exports["./scheduler/application"];
+  if (
+    !scheduleApplicationConditions ||
+    scheduleApplicationConditions.types !== "./dist/scheduler/application.d.ts" ||
+    scheduleApplicationConditions.import !== "./dist/scheduler/application.js" ||
+    typeof coreScheduleApplication.ScheduleManagementApplicationService !== "function" ||
+    typeof coreScheduleApplication.createScheduleManagementProductApiContribution !== "function" ||
+    "ScheduleManagementApplicationService" in coreRoot
+  ) {
+    failures.push("core-exports:schedule-application:invalid-runtime-boundary");
+  }
   const trustAdministrationConditions = manifest.exports["./trust-administration"];
   if (
     !trustAdministrationConditions ||
@@ -700,6 +713,17 @@ async function verifyCorePackageExports(failures) {
     "createOwnerDeliveryLifecycleBinding" in ownerKernel
   ) {
     failures.push("owner-kernel-exports:delivery-obligation:invalid-runtime-boundary");
+  }
+  for (const [subpath, conditions] of Object.entries(manifest.exports)) {
+    if (
+      subpath !== "./scheduler/application" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === scheduleApplicationConditions?.types ||
+        conditions.import === scheduleApplicationConditions?.import)
+    ) {
+      failures.push(`core-exports:${subpath}:duplicate-schedule-application-entry`);
+    }
   }
   for (const [subpath, conditions] of Object.entries(manifest.exports)) {
     if (

@@ -4,6 +4,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
+import type { TaskView } from "@zhixing/core";
 import {
   createSkillCatalogProductApiContribution,
   SKILL_CATALOG_LIST_QUERY,
@@ -19,6 +20,14 @@ import {
 } from "@zhixing/core/trust-administration";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import {
+  createScheduleManagementProductApiContribution,
+  SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET,
+  ScheduleManagementApplicationError,
+  ScheduleManagementApplicationService,
+  type ScheduleManagementApplication,
+  type ScheduleManagementRepository,
+} from "@zhixing/core/scheduler/application";
+import {
   buildTrustListMethod,
   buildTrustRevokeMethod,
 } from "../methods/trust.js";
@@ -27,6 +36,12 @@ import {
   buildSkillSetStateMethod,
   buildSkillArchiveMethod,
 } from "../methods/skill.js";
+import {
+  buildScheduleCreateMethod,
+  buildScheduleDeleteMethod,
+  buildScheduleListMethod,
+  buildScheduleUpdateMethod,
+} from "../methods/schedule.js";
 import { RpcDispatcher } from "../dispatcher.js";
 import { HandlerRegistry } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
@@ -111,6 +126,52 @@ async function dispatchTrustRequest(input: {
   }, JSON.stringify({
     jsonrpc: "2.0",
     id: "trust-wire",
+    method: input.method,
+    params: input.params,
+  }));
+  return { sendSuccess, sendError };
+}
+
+async function dispatchScheduleRequest(input: {
+  readonly method: string;
+  readonly params?: unknown;
+  readonly application: ScheduleManagementApplication;
+}) {
+  const registry = new HandlerRegistry();
+  registry.registerAll([
+    buildScheduleListMethod(),
+    buildScheduleCreateMethod(),
+    buildScheduleUpdateMethod(),
+    buildScheduleDeleteMethod(),
+  ]);
+  const sendSuccess = vi.fn();
+  const sendError = vi.fn();
+  const dispatcher = new RpcDispatcher({
+    registry,
+    server: {
+      productApi: new ProductApiDispatcher(
+        SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET,
+        [createScheduleManagementProductApiContribution(input.application)],
+      ),
+      conversations: {
+        durableControlPrincipal: () => ({ deviceId: "device-1" }),
+      },
+    } as unknown as ServerContext,
+  });
+  await dispatcher.handleMessage({
+    id: 1,
+    authenticated: true,
+    loopback: true,
+    closed: false,
+    clientInfo: { id: "schedule-management-test" },
+    sendSuccess,
+    sendError,
+    notify: vi.fn(),
+    close: vi.fn(),
+    onClose: () => () => undefined,
+  }, JSON.stringify({
+    jsonrpc: "2.0",
+    id: "schedule-wire",
     method: input.method,
     params: input.params,
   }));
@@ -424,6 +485,237 @@ describe("skill.*", () => {
       code: RPC_ERROR_CODES.INTERNAL_ERROR,
       message: "Internal error",
       data: { message: "commit failed" },
+    });
+  });
+});
+
+describe("schedule management Product API", () => {
+  const task: TaskView = {
+    id: "task-1",
+    taskRevision: 2,
+    name: "morning",
+    enabled: true,
+    priority: "normal" as const,
+    schedule: { kind: "interval" as const, everyMs: 60_000 },
+    action: { kind: "agent-turn" as const, prompt: "work" },
+    state: { consecutiveErrors: 0, runCount: 0 },
+    createdAt: "2026-08-30T00:00:00.000Z",
+    updatedAt: "2026-08-30T00:00:00.000Z",
+  };
+
+  function makeApplication(): ScheduleManagementApplication & { calls: unknown[] } {
+    const calls: unknown[] = [];
+    return {
+      calls,
+      async query(query) {
+        calls.push(["query", query]);
+        return { tasks: [task] };
+      },
+      async execute(command) {
+        calls.push(["execute", command]);
+        if ("taskId" in command && command.taskId === "missing") {
+          throw new ScheduleManagementApplicationError(
+            "not-found",
+            "Task not found: missing",
+          );
+        }
+        if (command.kind === "create") return { kind: "created", task };
+        if (command.kind === "update") return { kind: "updated", task };
+        return { kind: "deleted", taskId: command.taskId };
+      },
+    };
+  }
+
+  function makeRealApplication(initial: readonly TaskView[] = []) {
+    const tasks = new Map(initial.map((entry) => [entry.id, structuredClone(entry)]));
+    const repository: ScheduleManagementRepository = {
+      list: async () => [...tasks.values()].map((entry) => structuredClone(entry)),
+      find: async (taskId) => {
+        const entry = tasks.get(taskId);
+        return entry ? structuredClone(entry) : undefined;
+      },
+      commitCreate: async ({ spec }) => ({
+        ...structuredClone(task),
+        id: "created",
+        ...structuredClone(spec),
+      }),
+      commitUpdate: async ({ taskId, spec, operation }) => ({
+        ...structuredClone(tasks.get(taskId)!),
+        ...structuredClone(spec),
+        taskRevision: operation.expectedRevision + 1,
+      }),
+      commitDelete: async ({ taskId }) => {
+        if (!tasks.has(taskId)) throw new Error(`Task not found: ${taskId}`);
+        tasks.delete(taskId);
+      },
+    };
+    return new ScheduleManagementApplicationService(repository);
+  }
+
+  function makeScheduleContext(application: ScheduleManagementApplication) {
+    const productApi = new ProductApiDispatcher(
+      SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET,
+      [createScheduleManagementProductApiContribution(application)],
+    );
+    return {
+      server: {
+        productApi,
+        conversations: {
+          durableControlPrincipal: () => ({ deviceId: "device-1" }),
+        },
+      } as unknown as ServerContext,
+      connection: {
+        id: 7,
+        clientInfo: { id: "schedule-management-test" },
+      },
+    } as never;
+  }
+
+  it("binds list/create/update/delete only through one dispatcher and stable surface identity", async () => {
+    const application = makeApplication();
+    const ctx = makeScheduleContext(application);
+    await expect(call(buildScheduleListMethod(), {}, ctx)).resolves.toEqual([task]);
+    await expect(call(buildScheduleCreateMethod(), {
+      requestId: "create-1",
+      name: "morning",
+      schedule: task.schedule,
+      action: task.action,
+    }, ctx)).resolves.toEqual(task);
+    await expect(call(buildScheduleUpdateMethod(), {
+      requestId: "update-1",
+      id: task.id,
+      taskRevision: 2,
+      patch: { enabled: false },
+    }, ctx)).resolves.toEqual(task);
+    await expect(call(buildScheduleDeleteMethod(), {
+      requestId: "delete-1",
+      id: task.id,
+      taskRevision: 2,
+    }, ctx)).resolves.toBeUndefined();
+
+    expect(application.calls).toMatchObject([
+      ["query", { kind: "list" }],
+      ["execute", {
+        kind: "create",
+        draft: { name: "morning" },
+        operation: {
+          operationId: "create-1",
+          surface: {
+            surfacePrincipal: "rpc:schedule-management-test",
+            connectionId: "7",
+            deviceId: "device-1",
+          },
+        },
+      }],
+      ["execute", { kind: "update", taskId: "task-1" }],
+      ["execute", { kind: "delete", taskId: "task-1" }],
+    ]);
+  });
+
+  it("preserves binding errors and fails closed without the contribution", async () => {
+    const application = makeApplication();
+    const ctx = makeScheduleContext(application);
+    await expect(call(buildScheduleCreateMethod(), {
+      requestId: "bad",
+      name: "morning",
+    }, ctx)).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    await expect(call(buildScheduleDeleteMethod(), {
+      requestId: "missing-1",
+      id: "missing",
+      taskRevision: 1,
+    }, ctx)).rejects.toMatchObject({ code: RPC_ERROR_CODES.NOT_FOUND });
+    await expect(call(buildScheduleListMethod(), {}, makeCtx({})))
+      .rejects.toMatchObject({
+        code: RPC_ERROR_CODES.INTERNAL_ERROR,
+        message: "Schedule management application not configured on server",
+      });
+  });
+
+  it("preserves the pre-migration update/delete generic errors and create validation error", async () => {
+    const systemTask: TaskView = {
+      ...task,
+      id: "system",
+      system: true,
+      action: { kind: "system", handler: "__transcript-gc" },
+    };
+    for (const method of ["schedule.update", "schedule.delete"] as const) {
+      const params = method === "schedule.update"
+        ? {
+            requestId: `${method}-system`,
+            id: "system",
+            taskRevision: 2,
+            patch: { enabled: false },
+          }
+        : {
+            requestId: `${method}-system`,
+            id: "system",
+            taskRevision: 2,
+          };
+      const result = await dispatchScheduleRequest({
+        method,
+        params,
+        application: makeRealApplication([systemTask]),
+      });
+      expect(result.sendError).toHaveBeenCalledWith("schedule-wire", {
+        code: RPC_ERROR_CODES.INTERNAL_ERROR,
+        message: "Internal error",
+        data: { message: "Cannot modify system task: system" },
+      });
+    }
+
+    const invalidUpdate = await dispatchScheduleRequest({
+      method: "schedule.update",
+      params: {
+        requestId: "update-invalid",
+        id: task.id,
+        taskRevision: 2,
+        patch: { name: "" },
+      },
+      application: makeRealApplication([task]),
+    });
+    expect(invalidUpdate.sendError).toHaveBeenCalledWith("schedule-wire", {
+      code: RPC_ERROR_CODES.INTERNAL_ERROR,
+      message: "Internal error",
+      data: { message: "Schedule task name must be a bounded string" },
+    });
+
+    for (const method of ["schedule.update", "schedule.delete"] as const) {
+      const params = method === "schedule.update"
+        ? {
+            requestId: `${method}-empty`,
+            id: "",
+            taskRevision: 1,
+            patch: { enabled: false },
+          }
+        : {
+            requestId: `${method}-empty`,
+            id: "",
+            taskRevision: 1,
+          };
+      const result = await dispatchScheduleRequest({
+        method,
+        params,
+        application: makeRealApplication(),
+      });
+      expect(result.sendError).toHaveBeenCalledWith("schedule-wire", {
+        code: RPC_ERROR_CODES.NOT_FOUND,
+        message: "Task not found: ",
+      });
+    }
+
+    const invalidCreate = await dispatchScheduleRequest({
+      method: "schedule.create",
+      params: {
+        requestId: "create-invalid",
+        name: "invalid",
+        schedule: { kind: "interval", everyMs: 0 },
+        action: { kind: "agent-turn", prompt: "work" },
+      },
+      application: makeRealApplication(),
+    });
+    expect(invalidCreate.sendError).toHaveBeenCalledWith("schedule-wire", {
+      code: RPC_ERROR_CODES.INVALID_PARAMS,
+      message: "schedule.create is invalid: Schedule interval must be a positive safe integer",
     });
   });
 });

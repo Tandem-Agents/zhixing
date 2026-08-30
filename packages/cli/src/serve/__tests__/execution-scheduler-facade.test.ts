@@ -98,4 +98,46 @@ describe("ExecutionSchedulerFacade", () => {
     expect(base.update).not.toHaveBeenCalled();
     expect(base.delete).not.toHaveBeenCalled();
   });
+
+  it("uses domain defaults and rejects system-task mutation before assignment staging", async () => {
+    const stage = vi.fn(async () => ({ seq: 1, taskId: "task-created" }));
+    const bus = createEventBus<SchedulerEventMap>();
+    const direct = baseFacade();
+    const facade = new ExecutionSchedulerFacade(() => direct);
+    await runContextStorage.run(
+      { bus, lineage: "main", stageScheduleMutation: stage },
+      async () => {
+        const created = await facade.create({
+          name: "defaulted",
+          schedule: { kind: "interval", everyMs: 60_000 },
+          action: { kind: "agent-turn", prompt: "work" },
+        }, { operationId: "create-defaulted" });
+        expect(created).toMatchObject({ enabled: true, priority: "normal" });
+      },
+    );
+    expect(stage).toHaveBeenCalledWith(expect.objectContaining({
+      mutation: expect.objectContaining({
+        kind: "schedule-create",
+        spec: expect.objectContaining({ enabled: true, priority: "normal" }),
+      }),
+    }));
+
+    const system = task("system", 4);
+    system.system = true;
+    system.action = { kind: "system", handler: "__transcript-gc" };
+    const systemBase = baseFacade();
+    systemBase.list = vi.fn(async () => [system]);
+    const systemFacade = new ExecutionSchedulerFacade(() => systemBase);
+    const systemStage = vi.fn();
+    await runContextStorage.run(
+      { bus, lineage: "main", stageScheduleMutation: systemStage },
+      async () => {
+        await expect(systemFacade.update("system", { enabled: false }, {
+          operationId: "update-system",
+          taskRevision: 4,
+        })).rejects.toMatchObject({ code: "system-task" });
+      },
+    );
+    expect(systemStage).not.toHaveBeenCalled();
+  });
 });

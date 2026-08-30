@@ -2,10 +2,40 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { Scheduler } from "../scheduler.js";
 import { InMemoryTaskStore } from "../in-memory-task-store.js";
 import { LocalSchedulerFacade } from "../facade.js";
+import {
+  ScheduleManagementApplicationService,
+  type ScheduleManagementRepository,
+} from "../application.js";
 import { createEventBus } from "../../events/event-bus.js";
 import type { SchedulerEventMap } from "../events.js";
 import type { SchedulerFacadeEvent } from "../facade.js";
 import type { AgentTurnResult } from "../types.js";
+
+function managementRepository(scheduler: Scheduler): ScheduleManagementRepository {
+  const revisions = new Map<string, number>();
+  const project = (task: ReturnType<Scheduler["getTask"]>) => {
+    if (!task) return undefined;
+    return { ...task, taskRevision: revisions.get(task.id) ?? 1 };
+  };
+  return {
+    list: async () => scheduler.listTasks().map((task) => project(task)!),
+    find: async (taskId) => project(scheduler.getTask(taskId)),
+    commitCreate: async ({ spec }) => {
+      const task = await scheduler.createTask(spec);
+      revisions.set(task.id, 1);
+      return project(task)!;
+    },
+    commitUpdate: async ({ taskId, spec, operation }) => {
+      const task = await scheduler.updateTask(taskId, spec);
+      revisions.set(taskId, operation.expectedRevision + 1);
+      return project(task)!;
+    },
+    commitDelete: async ({ taskId }) => {
+      await scheduler.deleteTask(taskId);
+      revisions.delete(taskId);
+    },
+  };
+}
 
 describe("LocalSchedulerFacade", () => {
   function setup(runAgentTurn?: () => Promise<AgentTurnResult>) {
@@ -16,7 +46,13 @@ describe("LocalSchedulerFacade", () => {
       runAgentTurn:
         runAgentTurn ?? (async () => ({ status: "ok", output: "done", durationMs: 1 })),
     });
-    const facade = new LocalSchedulerFacade(scheduler, eventBus);
+    const facade = new LocalSchedulerFacade(
+      new ScheduleManagementApplicationService(
+        managementRepository(scheduler),
+      ),
+      scheduler,
+      eventBus,
+    );
     return { scheduler, eventBus, facade };
   }
 

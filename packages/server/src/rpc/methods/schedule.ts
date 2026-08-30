@@ -17,7 +17,15 @@ import type {
   TaskPatch,
   TaskSpec,
 } from "@zhixing/core";
-import { validateTaskDefinition } from "@zhixing/core/protocol";
+import {
+  SCHEDULE_MANAGEMENT_CREATE_COMMAND,
+  SCHEDULE_MANAGEMENT_DELETE_COMMAND,
+  SCHEDULE_MANAGEMENT_LIST_QUERY,
+  SCHEDULE_MANAGEMENT_UPDATE_COMMAND,
+  ScheduleManagementApplicationError,
+  type ScheduleManagementOperation,
+} from "@zhixing/core/scheduler/application";
+import type { ProductApiDispatcher } from "@zhixing/core/product-api";
 import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
@@ -30,9 +38,12 @@ export function buildScheduleListMethod(): MethodEntry {
   return {
     name: "schedule.list",
     requiresAuth: true,
-    handler(params, ctx): ScheduledTask[] {
+    async handler(params, ctx): Promise<readonly ScheduledTask[]> {
       strictParams(params, [], "schedule.list");
-      return requireScheduler(ctx.server).listTasks();
+      return (await requireScheduleManagement(ctx.server).query(
+        SCHEDULE_MANAGEMENT_LIST_QUERY,
+        { kind: "list" },
+      )).tasks;
     },
   };
 }
@@ -70,23 +81,29 @@ export function buildScheduleCreateMethod(): MethodEntry {
         throw RpcErrors.invalidParams("schedule.create requires 'action'");
       }
 
-      const scheduler = requireScheduler(ctx.server);
-      const spec = {
+      const draft = {
         name: params.name,
         ...(params.description !== undefined ? { description: params.description } : {}),
-        enabled: params.enabled ?? true,
-        priority: params.priority ?? "normal",
+        ...(params.enabled !== undefined ? { enabled: params.enabled } : {}),
+        ...(params.priority !== undefined ? { priority: params.priority } : {}),
         schedule: params.schedule,
         action: params.action,
         ...(params.delivery !== undefined ? { delivery: params.delivery } : {}),
       };
-      validateUserSpec(spec, "schedule.create");
       const operationId = requiredRequestId(params.requestId, "schedule.create");
-      return scheduler.createTask(
-        spec,
-        operationId,
-        scheduleControlSource(ctx, operationId),
-      );
+      try {
+        const result = await requireScheduleManagement(ctx.server).command(
+          SCHEDULE_MANAGEMENT_CREATE_COMMAND,
+          {
+            kind: "create",
+            draft,
+            operation: scheduleManagementOperation(ctx, operationId),
+          },
+        );
+        return result.result.task;
+      } catch (error) {
+        throw mapScheduleManagementError(error, "schedule.create");
+      }
     },
   };
 }
@@ -117,21 +134,20 @@ export function buildScheduleUpdateMethod(): MethodEntry {
         ["name", "description", "enabled", "priority", "schedule", "action", "delivery"],
         "schedule.update patch",
       );
-      const scheduler = requireScheduler(ctx.server);
       const operationId = requiredRequestId(params.requestId, "schedule.update");
       try {
-        return await scheduler.updateTask(
-          params.id,
-          patch,
-          operationId,
-          taskRevision,
-          scheduleControlSource(ctx, operationId),
+        const result = await requireScheduleManagement(ctx.server).command(
+          SCHEDULE_MANAGEMENT_UPDATE_COMMAND,
+          {
+            kind: "update",
+            taskId: params.id,
+            patch,
+            operation: scheduleManagementOperation(ctx, operationId, taskRevision),
+          },
         );
-      } catch (err) {
-        if (err instanceof Error && err.message.startsWith("Task not found")) {
-          throw RpcErrors.notFound(err.message);
-        }
-        throw err;
+        return result.result.task;
+      } catch (error) {
+        throw mapScheduleManagementError(error, "schedule.update");
       }
     },
   };
@@ -157,24 +173,18 @@ export function buildScheduleDeleteMethod(): MethodEntry {
         throw RpcErrors.invalidParams("schedule.delete requires 'id'");
       }
       const taskRevision = requiredTaskRevision(params.taskRevision, "schedule.delete");
-      const scheduler = requireScheduler(ctx.server);
       const operationId = requiredRequestId(params.requestId, "schedule.delete");
       try {
-        await scheduler.deleteTask(
-          params.id,
-          operationId,
-          taskRevision,
-          scheduleControlSource(ctx, operationId),
+        await requireScheduleManagement(ctx.server).command(
+          SCHEDULE_MANAGEMENT_DELETE_COMMAND,
+          {
+            kind: "delete",
+            taskId: params.id,
+            operation: scheduleManagementOperation(ctx, operationId, taskRevision),
+          },
         );
-      } catch (err) {
-        if (err instanceof Error && err.message.startsWith("Task not found")) {
-          throw RpcErrors.notFound(err.message);
-        }
-        // "Cannot delete system task: xxx" 转为 INVALID_PARAMS
-        if (err instanceof Error && err.message.startsWith("Cannot delete system task")) {
-          throw RpcErrors.invalidParams(err.message);
-        }
-        throw err;
+      } catch (error) {
+        throw mapScheduleManagementError(error, "schedule.delete");
       }
     },
   };
@@ -297,24 +307,6 @@ function strictParams<T>(
   return value as T;
 }
 
-function validateUserSpec(
-  spec: TaskSpec,
-  label: string,
-): void {
-  try {
-    validateTaskDefinition({
-      taskId: "rpc-schedule-validation",
-      taskRevision: 1,
-      definition: { kind: "user", spec },
-      state: spec.enabled ? "enabled" : "disabled",
-    });
-  } catch (error) {
-    throw RpcErrors.invalidParams(
-      `${label} is invalid: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-}
-
 function scheduleControlSource(
   ctx: Parameters<MethodEntry["handler"]>[1],
   ingressId: string,
@@ -350,6 +342,43 @@ function scheduleControlSource(
   };
 }
 
+function scheduleManagementOperation(
+  ctx: Parameters<MethodEntry["handler"]>[1],
+  operationId: string,
+  expectedRevision?: number,
+): ScheduleManagementOperation {
+  const source = scheduleControlSource(ctx, operationId);
+  return {
+    operationId,
+    ...(expectedRevision !== undefined ? { expectedRevision } : {}),
+    surface: {
+      surfacePrincipal: source.ingress.surfacePrincipal,
+      connectionId: source.connectionId,
+      deviceId: source.ingress.deviceId,
+      ingressId: source.ingress.ingressId,
+      receivedAt: source.ingress.receivedAt,
+    },
+  };
+}
+
+function mapScheduleManagementError(error: unknown, method: string): unknown {
+  if (!(error instanceof ScheduleManagementApplicationError)) return error;
+  switch (error.code) {
+    case "not-found":
+      return RpcErrors.notFound(error.message);
+    case "system-task":
+      return error;
+    case "invalid-command":
+      return method === "schedule.create"
+        ? RpcErrors.invalidParams(`${method} is invalid: ${error.message}`)
+        : error;
+    case "conflict":
+      // Migration preserves the pre-existing generic RPC conversion for
+      // optimistic conflicts; the domain classification remains internal.
+      return error;
+  }
+}
+
 // ─── 工具 ───
 
 function requireScheduler(server: ServerContext) {
@@ -360,4 +389,20 @@ function requireScheduler(server: ServerContext) {
     );
   }
   return server.scheduler;
+}
+
+function requireScheduleManagement(server: ServerContext): ProductApiDispatcher {
+  if (
+    !server.productApi ||
+    !server.productApi.supports(SCHEDULE_MANAGEMENT_LIST_QUERY) ||
+    !server.productApi.supports(SCHEDULE_MANAGEMENT_CREATE_COMMAND) ||
+    !server.productApi.supports(SCHEDULE_MANAGEMENT_UPDATE_COMMAND) ||
+    !server.productApi.supports(SCHEDULE_MANAGEMENT_DELETE_COMMAND)
+  ) {
+    throw new RpcAppError(
+      RPC_ERROR_CODES.INTERNAL_ERROR,
+      "Schedule management application not configured on server",
+    );
+  }
+  return server.productApi;
 }

@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-10b 已通过协调者独立复核，等待提交后派发下一条 A5 责任链<br>
+> 当前检查点：A5-11a 已通过协调者独立复核，等待提交<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `614f598c`；A0～A4、Skill Catalog、Delivery、完整 Workspace Administration 及 Trust Administration 管理应用/Product API 已通过协调者独立复核并提交 |
+| 已接受基线 | `ba1df018`；A0～A4、Skill Catalog、Delivery、完整 Workspace Administration 与完整 Trust Administration 已通过协调者独立复核并提交 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | A5-10b 已通过协调者独立复核；Trust Administration 为 `[x]`，等待协调者提交本包 |
-| 下一责任链 | 提交 A5-10b 后，从仍为 `[ ]` 的 A5 领域按无环依赖与当前生产事实选择下一条最窄责任链 |
-| 打开的单向桥 | 无；`A5-TRUST-STORE-01` 已由 A5-10b 退场，现仅保留一个不含产品决定的 Trust repository → PermissionStore 最终机制适配器 |
-| 已失效证据 | 无当前未恢复证据；A5-10b 的混合风险阈值与空 argument 两项行为反证已由当前审批风险/观察最高风险分离及可信 wire→领域→repository 直接证据恢复并通过协调者复核；A4 全部合同与退出证据当前有效 |
+| 活跃工作包 | A5-11a 已通过协调者独立复核，等待提交；Schedule 行保持 `[ ]` |
+| 下一责任链 | A5-11a 验收后继续同一 Schedule 链，归位 run/abort、触发恢复、运行事件和 Delivery/Kernel 效果交界，随后删除临时执行桥并裁决 Schedule 行 |
+| 打开的单向桥 | `A5-SCHEDULE-RUNTIME-01`：A5-11a 允许 Schedule 管理应用经一个窄端口委托现有 Scheduler/Anchor 权威机制；仅保留执行、触发与恢复能力，唯一退场包为紧邻 A5-11b |
+| 已失效证据 | 无当前未恢复证据；A5-11a 初次错误映射已按迁移前生产语义纠正，并由真实 dispatcher 反例与协调者独立复核恢复 |
 | 阻塞/用户决策 | 无技术阻塞；用户已明确恢复调度 |
 
 ### A0 基线索引
@@ -1905,6 +1905,26 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 原边界纠正与证据恢复：`TrustAdministrationExecutionApplicationService` 的沉淀阈值恢复为当前 `approval.riskLevel`；累计 `highestRisk` 继续更新且只进入 `/security` observation，mixed `high(user) → low(steward) → low(user)` 因当前 low 的第三次贡献产生规则，同时完整时间线与最高风险 high 均保留。显式 `allow-session/context/global` 的 tool 仍须非空，argument 则按可信 `confirmation.resolve` 的既有合同接受任意 string（包括空字符串），领域与 repository 不再在耐久 resolve 后追加收紧；非 string 仍 fail closed。这两项仅恢复迁移前行为，不包装成新能力或宽松兼容承诺。
 - 纠正直接证据与交接：core Trust execution 1 文件 9/9、Server 真实 `confirmation.resolve` 1 文件 26/26、orchestrator `secure-executor` 1 文件 33/33 均通过，分别直接锁定 mixed-risk 当前阈值/最高风险观察分离、三类可信 wire 空 argument 原样进入 broker、以及三作用域规则写入后实际执行成功。依赖顺序 fresh `@zhixing/core`、`@zhixing/orchestrator` 与 CLI build 通过；canonical S7 32/32 与 registry golden、4 个本轮纠正文件的最窄 Biome 及 `git diff --check` 通过。此前 A5-10b 其余 owner、只读执行投影、管理/快照/child propagation 与 package-export 证据输入未变并继续有效；`A5-10b-trust-administration-execution-v1` 与 Trust Administration 行恢复为 `[x]`，A5 仍为 `[ ]`，等待协调者独立复核。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：从可信确认 wire、Trust execution 应用、最终 PermissionStore 适配、SecurityPipeline 只读 source、secure-executor、主/Task/编排 child 传播、runtime security/assignment snapshot 与 S7 负向门禁双向复核，确认两项反证已恢复迁移前行为，用户规则生命周期只有一个 Trust 应用 owner，Security 无可变写口，旧 tracker/helper 与临时桥归零。独立运行 core 4 文件 57/57、orchestrator 4 文件 113/113、Server confirmation 26/26、CLI 管理消费 3 文件 12/12，另以单文件纠正集 68/68 交叉取证；canonical S7 32/32、registry golden、fresh package exports、最窄 Biome 与 `git diff --check` 通过。接受 `A5-10b-trust-administration-execution-v1`，Trust Administration 保持 `[x]`，A5 继续 `[ ]`。
+
+### A5-11a：归位用户调度定义的管理责任
+
+- 派发基线：`HEAD ba1df018 + task-doc:A5-11a-dispatch`；A5-10b 已独立验收并提交，进场索引为空且工作区应只有本文派发记录。
+- 唯一架构结果：让 Schedule Domain 成为用户调度定义 `list/create/update/delete` 的唯一应用 owner，统一拥有任务定义默认值与校验、稳定 operation identity、revision 并发前置、用户/系统任务边界、not-found/冲突结果和提交后的任务投影；RPC、Agent schedule 工具、本机与远端 facade 只做各自真实存在的 wire、身份、调用和呈现，不再解释或复制调度管理规则。
+- 必须迁移与退场：建立有限的 Schedule Command/Query 与应用服务，并把其现有管理入口接入已证明的 Product API 模式；从 `schedule.*` RPC handler 移出 spec 默认、产品校验、not-found/system-task 错误判断，从 `LocalSchedulerFacade`、`ExecutionSchedulerFacade` 与 Agent schedule 工具反查所有直接管理消费端，使它们最终调用同一个领域用例或只作当前 execution/assignment context 的窄适配。现有 Scheduler/Anchor authority 只经一个不含产品决定的 repository/commit 端口提供耐久机制；不得保留第二管理应用、Surface 直写、facade 自有任务规则或第二 revision 状态机。
+- 行为保护：公开 `schedule.list/create/update/delete` 方法、参数 exact-set、认证、稳定 requestId/surface principal、默认 enabled/priority、definition validation、taskRevision 乐观并发、系统任务不可删、not-found/invalid/conflict 错误、返回投影与操作重放必须 byte/语义等价。保持 Agent 工具的本机/assignment staged mutation、RPC facade、REPL/Channel 投影、内部维护任务过滤及 schedule run/abort/trigger/recovery/event/Delivery 行为不变；不得让管理迁移绕过 durable control principal 或把 execution/Authority/Mesh 术语暴露给领域和用户。
+- 临时桥与边界：登记 `A5-SCHEDULE-RUNTIME-01`，只允许新领域应用经一个窄端口委托当前 Scheduler/Anchor 权威机制完成已经裁决的写入与读取；该桥不得决定默认值、校验、可删性、错误或用户投影，不得双写。唯一退场包为紧邻 A5-11b，负责 run/abort、定时触发、恢复、运行事件及 Kernel/Delivery 效果交界；本包不得提前迁移这些执行状态机，也不得勾选 Schedule 行。
+- 最窄证据：领域直接测试覆盖 list/create/update/delete 的默认、校验、revision、重放、not-found、system-task 与 committed projection；Server 真实 handler/Product API 测试证明四个管理 RPC 只保留 binding 且公开行为等价；Agent schedule 工具、Local/RPC/Execution facade 的直接测试证明全部管理消费端共享唯一应用语义，assignment staged 写入不回退。更新 S7/Product API exact-set 与负向结构证据，使其能拒绝 handler/facade 重获产品规则、第二 Schedule 应用或 management write 绕过；源码稳定后只按失效闭包完成必要上游构建、最窄测试、canonical S7、fresh package exports、最窄 Biome 与 `git diff --check`，不运行根级全测、正式制品或无关领域回归。
+- 完成与安全交接：只有用户调度定义管理的生产端、全部直接消费端、旧管理规则与入口、直接测试和 Product API/结构门禁同时闭合，且运行、恢复、投递和公开行为未改变时，才算 A5-11a 完成；Schedule 行继续 `[ ]`。约四小时仍未完成、发现管理与执行无法在可构建单一真相下分离、需要改变公开协议/持久 schema/运行终态或影响其他领域时，停在可构建、可运行且管理写入只有一个 owner 的检查点反馈，不得扩面。
+- 固定不做：Conversation、Workscene、Advancement、Device、Backup & Recovery、A6、A7、AE-001 修改、新调度能力、cron/重试策略调整、持久 schema 重写、执行/恢复状态机迁移或 Git 写操作。
+- 实施基线与唯一领域入口：进场为 `HEAD ba1df01851c62b25e7d682bae1fbeaab6baa52de + task-doc:A5-11a-dispatch`，索引为空。新增唯一窄入口 `@zhixing/core/scheduler/application`，由 `ScheduleManagementApplicationService` 拥有有限 `list/create/update/delete` Query/Command、默认 `enabled=true`/`priority=normal`、完整 definition 校验、稳定 operation identity、observed revision 必填/绑定、用户/系统边界、not-found/conflict 与提交后投影；真正的 revision CAS 与同 operation exact replay 仍由窄 Correctness commit 机制原子区分，因此 update/delete 响应丢失后不会被应用层的旧 revision 前查误挡，也没有第二 revision 状态机。Product API exact-set 为一项 Query、三项 Command、零 Fact Event，未从 core 根新增转导或第二应用入口。
+- 生产链与 Correctness 边界：Anchor 的 `ScheduleManagementRepository` 只接受领域已裁决的完整 `TaskSpec`、operation identity、surface principal 与 expected revision，并经既有 GlobalState/Authority 机制串行提交；读取只返回未做用户/system过滤与排序的 raw task projection，repository 不再决定默认值、merge、可见性、可删性或产品错误。唯一 Host Product API dispatcher 同时组合 Schedule 与既有 contributions；四个管理 RPC 只保留认证、wire 参数/身份映射、dispatcher 调用及既有错误/返回投影。`LocalSchedulerFacade` 以同一应用服务管理定义，`ExecutionSchedulerFacade` 只把 assignment context 适配为 repository/staged mutation，RPC facade 只处理 wire；Agent schedule 工具移除 system filter 与 create 默认，继续只负责 schema、文案、operation id 和呈现。
+- 旧路退场与行为保护：`SchedulerBackend` 与 Anchor product port 的公开管理 CRUD 入口归零，Server handler 的 spec 默认、`validateTaskDefinition`、not-found/system 判断及直接 scheduler 管理调用归零，工具/facade 不再复制默认、merge、revision 或 system-task 规则。公开四个 RPC、request/surface identity、Agent tool 文案、本机与 assignment staged read-own-writes、durable replay、内部 system task、run/abort/trigger/recovery/event/Delivery 语义和持久 record 均未改变；当前 `SchedulerBackend` 只保留 start/stop/run/get/abort 的执行桥，仍登记为 `A5-SCHEDULE-RUNTIME-01`，唯一退场点为紧邻 A5-11b。
+- 直接证据：Schedule Domain 与 Local facade 2 文件 8/8，owner-kernel Authority/GlobalState/运行隔离 2 文件 15/15，Server 真实 dispatcher/binding 1 文件 11/11，Agent tool 1 文件 4/4，RPC/assignment facade 2 文件 8/8，合计 8 文件 46/46；覆盖默认/校验/replay/committed projection、revision/not-found/system、raw Correctness projection、Product API exact-set、durable principal、四个 wire binding、缺 contribution fail closed、工具呈现、assignment staged read-own-writes 与 system guard。受影响 core、owner-kernel、server、tools-builtin、CLI 依赖构建及 CLI typecheck 通过；最终 canonical S7 32/32 与 registry golden、fresh `pnpm runtime:package-exports`、最窄 Biome 通过。
+- 结构、失效与交接：S7 与 package-export 门禁冻结 Schedule 应用唯一窄 export/build entry、四操作 exact-set、Host 唯一 contribution、handler/facade/tool/Correctness 责任差集，并以反向 mutation 拒绝 Server 直写、facade 重获 system/default 规则、第二应用 export 或 core 根泄漏。若 Schedule application Query/Command/default/validation/revision/system/error、repository/GlobalState adapter、任一 management facade/tool/RPC binding、Host contribution、S7 或 package export 变化，本记录失效并只重验上述闭包。A5-11a 当前完成并等待协调者复核；A5 与 Schedule 行继续 `[ ]`，下一检查点仅为 A5-11b 的运行/触发/恢复/事件与 Kernel/Delivery 效果链，不进入其他领域。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者复核反证：迁移前真实生产组合根使用 `AnchorSchedulerProductPort`，其 update/delete 对系统任务均抛出 `Cannot modify system task: <taskId>`；旧 Server binding 只把 not-found 转为 `NOT_FOUND`，并未把该错误转为 `INVALID_PARAMS`。非法 update spec 同样沿通用内部错误路径；空字符串 update/delete id 则由 authority 判为 `Task not found`。当前 `mapScheduleManagementError` 把 system-task 和全部 invalid-command 统一转为 `INVALID_PARAMS`，且应用先拒绝空 id，造成三个可观察 RPC 错误语义回退。A5-11a 不予接受；纠正只允许恢复上述既有映射并增加可识别的应用与真实 binding 回归，不得改变已成立的领域 owner、Product API、Correctness 适配、公开方法/返回或扩大到 A5-11b。纠正后只重验 Schedule 应用、四个管理 RPC、相关 S7/Biome/diff 闭包。
+- 原包纠正与证据恢复：领域应用继续保留 `not-found / system-task / invalid-command / conflict` 的内部分类，但 update/delete 的字符串 id（含空字符串）先进入权威查询，因此空 id 恢复为 `Task not found: `；系统任务仍产生 `Cannot modify system task: <taskId>`；update 的无效完整 definition 继续由既有 validator 形成原错误。Server binding 只按方法恢复迁移前 wire：create 的无效 spec 仍映射 `INVALID_PARAMS`，update 的 invalid-command 与 update/delete 的 system-task 均交给通用 RPC 转换形成 `INTERNAL_ERROR / Internal error` 并保留原错误 data，not-found 仍映射 `NOT_FOUND`。本纠正没有恢复旧管理 owner、第二写入口或扩大 `A5-SCHEDULE-RUNTIME-01`。
+- 纠正直接证据与失效边界：Schedule Domain/Local 2 文件 8/8 直接锁定空 id not-found、系统任务精确分类与既有管理行为；Server 真实 Product API + `RpcDispatcher` 1 文件 12/12 直接锁定 system update/delete、非法 update、空 id update/delete 与非法 create 的精确 code/message/data。因跨包测试必须消费 fresh core 产物，仅重建 `@zhixing/core`，ESM/DTS 通过；随后 canonical S7 32/32 与 registry golden、纠正文件最窄 Biome 和 `git diff --check` 通过，并新增反向 mutation 拒绝 system-task/非法 update 回流 `INVALID_PARAMS` 或空 id 被应用层提前拒绝。初次 8 文件 46/46 中未受错误映射影响的证据继续有效，不能与本纠正计数重复相加。以后若 Schedule application 的 task-id/definition 接受域、领域错误分类、Server 分方法错误映射、通用 dispatcher conversion 或对应 S7 约束变化，只恢复本纠正闭包；A5-11a 现等待协调者独立复核，A5 与 Schedule 行仍为 `[ ]`，未进入 A5-11b。
+- 协调者独立验收：从唯一 Schedule management application、Anchor repository/GlobalState 机制适配、Host Product API composition、四个 RPC、Local/RPC/Execution facade 和 Agent tool 双向反查，确认默认、校验、用户可见性、merge、revision、system guard 与产品错误只有一个领域 owner；Correctness 只提交完整已裁决 spec，Server/工具/facade 无第二规则或管理写入口，临时 `SchedulerBackend` 只剩 A5-11b 的执行职责。独立验证领域/Local 8/8、Owner/Correctness 15/15、真实 RPC dispatcher 12/12、Agent tool 4/4、RPC/Execution facade 8/8、canonical S7 32/32 + registry golden、最窄 Biome、旧管理入口反扫与 `git diff --check` 全部通过；三个公开错误反证均恢复。接受 `A5-11a-schedule-definition-management-v1`；Schedule 行与 A5 继续 `[ ]`，`A5-SCHEDULE-RUNTIME-01` 保持打开并必须由紧邻 A5-11b 退场。
 
 ## 十、用户提示词
 

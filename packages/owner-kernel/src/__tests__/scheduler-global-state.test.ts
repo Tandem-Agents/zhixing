@@ -1,7 +1,4 @@
-import type {
-  SchedulerControlSource,
-  TaskView,
-} from "@zhixing/core";
+import type { TaskView } from "@zhixing/core";
 import type { GlobalStatePort } from "@zhixing/core/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -30,15 +27,12 @@ function task(id: string): TaskView {
   };
 }
 
-const source: SchedulerControlSource = {
-  connectionId: "connection-1",
-  ingress: {
-    kind: "first-party",
+const surface = {
+    connectionId: "connection-1",
     surfacePrincipal: "rpc:cli-1",
     deviceId: "device-1",
     ingressId: "ingress-1",
     receivedAt: "2026-08-02T00:00:00.000Z",
-  },
 };
 
 describe("AnchorSchedulerProductPort", () => {
@@ -63,19 +57,25 @@ describe("AnchorSchedulerProductPort", () => {
       7,
     );
 
-    const created = await port.createTask(
-      {
+    const created = await port.commitCreate({
+      spec: {
         name: "daily",
         enabled: true,
         priority: "normal",
         schedule: { kind: "interval", everyMs: 60_000 },
         action: { kind: "agent-turn", prompt: "summarize" },
       },
-      "create-1",
-      source,
-    );
-    await port.updateTask(created.id, { name: "renamed" }, "update-1", 3, source);
-    await port.deleteTask(created.id, "delete-1", 3, source);
+      operation: { operationId: "create-1", surface },
+    });
+    await port.commitUpdate({
+      taskId: created.id,
+      spec: { ...created, name: "renamed" },
+      operation: { operationId: "update-1", expectedRevision: 3, surface },
+    });
+    await port.commitDelete({
+      taskId: created.id,
+      operation: { operationId: "delete-1", expectedRevision: 3, surface },
+    });
 
     expect(mutate.mock.calls.map(([mutation]) => mutation.kind)).toEqual([
       "schedule-create",
@@ -122,12 +122,16 @@ describe("AnchorSchedulerProductPort", () => {
       7,
     );
 
-    await port.runTask("task-1", "run-1", source);
-    await port.abortRun("job-1", "cancel-1", source);
+    const runtimeSource = {
+      connectionId: surface.connectionId,
+      ingress: { kind: "first-party" as const, ...surface },
+    };
+    await port.runTask("task-1", "run-1", runtimeSource);
+    await port.abortRun("job-1", "cancel-1", runtimeSource);
 
     expect(mutate).not.toHaveBeenCalled();
-    expect(runTask).toHaveBeenCalledWith("task-1", "run-1", source);
-    expect(abortRun).toHaveBeenCalledWith("job-1", "cancel-1", source);
+    expect(runTask).toHaveBeenCalledWith("task-1", "run-1", runtimeSource);
+    expect(abortRun).toHaveBeenCalledWith("job-1", "cancel-1", runtimeSource);
   });
 
   it("rejects revisionless writes before reaching GlobalState", async () => {
@@ -144,10 +148,17 @@ describe("AnchorSchedulerProductPort", () => {
     );
 
     await expect(
-      port.updateTask("task-1", { name: "renamed" }, "update-1"),
+      port.commitUpdate({
+        taskId: "task-1",
+        spec: { ...task("task-1"), name: "renamed" },
+        operation: { operationId: "update-1", expectedRevision: 0 },
+      }),
     ).rejects.toThrow("observed task revision");
     await expect(
-      port.deleteTask("task-1", "delete-1"),
+      port.commitDelete({
+        taskId: "task-1",
+        operation: { operationId: "delete-1", expectedRevision: 0 },
+      }),
     ).rejects.toThrow("observed task revision");
     expect(mutate).not.toHaveBeenCalled();
   });

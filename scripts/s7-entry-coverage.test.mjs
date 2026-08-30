@@ -3389,6 +3389,8 @@ test("Trust Administration management has one domain application and Product API
 test("Skill Catalog management, load, save, admission and Kernel projection have one domain application boundary", async () => {
   const paths = [
     "packages/core/src/skills/catalog-application.ts",
+    "packages/core/src/scheduler/application.ts",
+    "packages/core/src/scheduler/facade.ts",
     "packages/core/src/delivery/application.ts",
     "packages/core/src/delivery/authority.ts",
     "packages/core/src/delivery/authority-pipeline.ts",
@@ -3408,9 +3410,12 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/rpc/package.json",
     "packages/rpc/tsup.config.ts",
     "packages/server/src/rpc/methods/skill.ts",
+    "packages/server/src/rpc/methods/schedule.ts",
     "packages/server/src/rpc/methods/server.ts",
     "packages/server/src/context.ts",
     "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/execution-scheduler-facade.ts",
+    "packages/cli/src/runtime/rpc-scheduler-facade.ts",
     "packages/cli/src/runtime/rpc-management-facade.ts",
     "packages/cli/src/repl.ts",
     "packages/cli/src/skills/manager-controller.ts",
@@ -3427,6 +3432,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/owner-kernel/src/conversation-assignment.ts",
     "packages/owner-kernel/src/job-assignment.ts",
     "packages/owner-kernel/src/scheduler-user-notices.ts",
+    "packages/owner-kernel/src/scheduler-global-state.ts",
     "packages/cli/src/serve/trust-administration-adapter.ts",
     "packages/orchestrator/src/runtime/assignment-skill-port.ts",
     "packages/core/src/protocol/assignment-mutation.ts",
@@ -3435,6 +3441,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/core/src/protocol/execution-asset-snapshot.ts",
     "packages/cli/src/serve/execution-asset-cache.ts",
     "packages/tools-builtin/src/skill.ts",
+    "packages/tools-builtin/src/schedule.ts",
     "packages/tools-builtin/src/factories.ts",
     "packages/tools-builtin/src/index.ts",
   ];
@@ -3446,6 +3453,67 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
 
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/scheduler/application.ts",
+      (text) => text.replace("draft.enabled ?? true", "draft.enabled!"),
+    )).join("\n"),
+    /Schedule definition management lacks one domain application owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/schedule.ts",
+      (text) => `${text}\nserver.scheduler.createTask({});`,
+    )).join("\n"),
+    /Schedule RPC management binding bypasses its Product API application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/schedule.ts",
+      (text) => text.replace(
+        /case "system-task":\s*return error;/u,
+        'case "system-task":\n      return RpcErrors.invalidParams(error.message);',
+      ),
+    )).join("\n"),
+    /Schedule RPC management binding bypasses its Product API application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/schedule.ts",
+      (text) => text.replace(
+        'method === "schedule.create"',
+        'method.startsWith("schedule.")',
+      ),
+    )).join("\n"),
+    /Schedule RPC management binding bypasses its Product API application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/scheduler/application.ts",
+      (text) => text.replace(
+        'requireString(command.taskId, "Schedule task id")',
+        'nonEmpty(command.taskId, "Schedule task id")',
+      ),
+    )).join("\n"),
+    /Schedule definition management lacks one domain application owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/execution-scheduler-facade.ts",
+      (text) => `${text}\nthrow new Error("Cannot modify system task");`,
+    )).join("\n"),
+    /Schedule facades or Correctness adapter retain a second management decision path/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/package.json",
+      (text) => text.replace(
+        '    "./advancement": {',
+        '    "./scheduler/application-compat": {\n      "types": "./dist/scheduler/application.d.ts",\n      "import": "./dist/scheduler/application.js"\n    },\n    "./advancement": {',
+      ),
+    )).join("\n"),
+    /one narrow non-root core subpath/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(

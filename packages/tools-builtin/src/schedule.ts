@@ -18,12 +18,10 @@
  */
 
 import type { ToolDefinition, ToolExecutionContext, ToolResult } from "@zhixing/core";
-import { isInternal } from "@zhixing/core";
 import type {
   SchedulerFacade,
   ScheduledTask,
   TaskSchedule,
-  TaskPriority,
 } from "@zhixing/core";
 
 const SCHEDULE_SYSTEM_PROMPT_HINTS: readonly string[] = [
@@ -202,8 +200,9 @@ async function handleCreate(
   const task = await facade.create({
     name,
     description: (input.description as string) ?? undefined,
-    enabled: true,
-    priority: (input.priority as TaskPriority) ?? "normal",
+    ...(input.priority !== undefined
+      ? { priority: input.priority as ScheduledTask["priority"] }
+      : {}),
     schedule,
     action: { kind: "agent-turn", prompt },
   }, scheduleMutationContext(context));
@@ -217,8 +216,7 @@ async function handleCreate(
 }
 
 async function handleList(facade: SchedulerFacade): Promise<ToolResult> {
-  // 只列外部（用户）任务——内部系统维护任务不进用户视图。
-  const tasks = (await facade.list()).filter((t) => !isInternal(t));
+  const tasks = await facade.list();
 
   if (tasks.length === 0) {
     return { content: "No scheduled tasks." };

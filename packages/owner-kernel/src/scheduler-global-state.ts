@@ -14,9 +14,12 @@ import type {
   ScheduleWriteMutation,
 } from "@zhixing/core/contracts";
 import type {
+  ScheduleManagementOperation,
+  ScheduleManagementRepository,
+} from "@zhixing/core/scheduler/application";
+import type {
   SchedulerBackend,
   SchedulerControlSource,
-  TaskPatch,
   TaskSpec,
   TaskView,
 } from "@zhixing/core";
@@ -139,7 +142,9 @@ export class AnchorSchedulerGlobalStateAdapter implements GlobalStatePort {
  * The only production scheduler product port. Definition reads and writes are
  * admitted by GlobalState while execution controls remain owned by JobJournal.
  */
-export class AnchorSchedulerProductPort implements SchedulerBackend {
+export class AnchorSchedulerProductPort
+  implements SchedulerBackend, ScheduleManagementRepository
+{
   constructor(
     private readonly scheduler: AnchorScheduler,
     private readonly globalState: GlobalStatePort,
@@ -154,76 +159,82 @@ export class AnchorSchedulerProductPort implements SchedulerBackend {
     return this.scheduler.stop();
   }
 
-  async createTask(
-    spec: TaskSpec,
-    requestId?: string,
-    source?: SchedulerControlSource,
-  ): Promise<TaskView> {
-    const stableRequestId = requiredRequestId(requestId, "schedule create");
+  async commitCreate(input: {
+    readonly spec: TaskSpec;
+    readonly operation: ScheduleManagementOperation;
+  }): Promise<TaskView> {
+    const stableRequestId = requiredRequestId(input.operation.operationId, "schedule create");
+    const source = schedulerManagementSource(input.operation);
     await this.globalState.mutate(
-      { kind: "schedule-create", spec: taskSpecDto(spec) },
+      { kind: "schedule-create", spec: taskSpecDto(input.spec) },
       this.#context(
         stableRequestId,
         source,
-        protocolDigest("ScheduleCreateIntent", 1, { spec }),
+        protocolDigest("ScheduleCreateIntent", 1, { spec: input.spec }),
       ),
     );
     return this.#requiredTask(scheduleTaskIdForRequest(stableRequestId));
+  }
+
+  async list(): Promise<readonly TaskView[]> {
+    return this.scheduler.listTaskProjections();
   }
 
   listTasks(): TaskView[] {
     return this.scheduler.listTasks();
   }
 
-  async updateTask(
-    id: string,
-    patch: TaskPatch,
-    requestId?: string,
-    taskRevision?: number,
-    source?: SchedulerControlSource,
-  ): Promise<TaskView> {
-    const stableRequestId = requiredRequestId(requestId, "schedule update");
-    const revision = requiredTaskRevision(taskRevision, "Schedule update");
-    const current = this.#requiredTask(id);
+  async find(taskId: string): Promise<TaskView | undefined> {
+    return this.scheduler.getTask(taskId);
+  }
+
+  async commitUpdate(input: {
+    readonly taskId: string;
+    readonly spec: TaskSpec;
+    readonly operation: ScheduleManagementOperation & { readonly expectedRevision: number };
+  }): Promise<TaskView> {
+    const stableRequestId = requiredRequestId(input.operation.operationId, "schedule update");
+    const revision = requiredTaskRevision(input.operation.expectedRevision, "Schedule update");
+    const source = schedulerManagementSource(input.operation);
     await this.globalState.mutate(
       {
         kind: "schedule-update",
-        taskId: id,
+        taskId: input.taskId,
         taskRevision: revision,
-        spec: taskSpecDto({ ...current, ...structuredClone(patch) }),
+        spec: taskSpecDto(input.spec),
       },
       this.#context(
         stableRequestId,
         source,
         protocolDigest("ScheduleUpdateIntent", 1, {
-          taskId: id,
+          taskId: input.taskId,
           taskRevision: revision,
-          patch,
+          spec: input.spec,
         }),
       ),
     );
-    return this.#requiredTask(id);
+    return this.#requiredTask(input.taskId);
   }
 
-  async deleteTask(
-    id: string,
-    requestId?: string,
-    taskRevision?: number,
-    source?: SchedulerControlSource,
-  ): Promise<void> {
-    const stableRequestId = requiredRequestId(requestId, "schedule delete");
+  async commitDelete(input: {
+    readonly taskId: string;
+    readonly operation: ScheduleManagementOperation & { readonly expectedRevision: number };
+  }): Promise<void> {
+    const stableRequestId = requiredRequestId(input.operation.operationId, "schedule delete");
+    const revision = requiredTaskRevision(input.operation.expectedRevision, "Schedule deletion");
+    const source = schedulerManagementSource(input.operation);
     await this.globalState.mutate(
       {
         kind: "schedule-delete",
-        taskId: id,
-        taskRevision: requiredTaskRevision(taskRevision, "Schedule deletion"),
+        taskId: input.taskId,
+        taskRevision: revision,
       },
       this.#context(
         stableRequestId,
         source,
         protocolDigest("ScheduleDeleteIntent", 1, {
-          taskId: id,
-          taskRevision: requiredTaskRevision(taskRevision, "Schedule deletion"),
+          taskId: input.taskId,
+          taskRevision: revision,
         }),
       ),
     );
@@ -287,6 +298,24 @@ export class AnchorSchedulerProductPort implements SchedulerBackend {
       deadlineAt: new Date(Date.now() + 60_000).toISOString(),
     };
   }
+}
+
+function schedulerManagementSource(
+  operation: ScheduleManagementOperation,
+): SchedulerControlSource | undefined {
+  const surface = operation.surface;
+  if (!surface) return undefined;
+  return {
+    connectionId: surface.connectionId,
+    ingress: {
+      kind: "first-party",
+      surfacePrincipal: surface.surfacePrincipal,
+      deviceId: surface.deviceId,
+      ingressId: surface.ingressId,
+      receivedAt: surface.receivedAt,
+      turnOrigin: { channel: "rpc", triggeredBy: surface.surfacePrincipal },
+    },
+  };
 }
 
 function scheduleMutationDigest(mutation: ScheduleWriteMutation): string {

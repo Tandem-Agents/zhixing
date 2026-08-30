@@ -20,6 +20,7 @@ export default defineConfig({
     "src/confirmation/index.ts",
     "src/identity/index.ts",
     "src/scheduler/index.ts",
+    "src/scheduler/application.ts",
     "src/orchestration/index.ts",
     "src/contracts/index.ts",
     "src/protocol/index.ts",
