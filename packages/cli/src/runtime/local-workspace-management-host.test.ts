@@ -3,12 +3,14 @@ import { writeFile } from "node:fs/promises";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { ExecutorResourceBackpressureError } from "@zhixing/executor";
+import { protocolDigest } from "@zhixing/core/protocol";
 import {
   WorkspaceBindingCancelledError,
   WorkspaceBindingCatalogConflictError,
   WorkspaceBindingCatalogDegradedError,
   WorkspaceBindingCatalogIntegrityError,
 } from "@zhixing/core/environment";
+import { WorkspaceAdministrationBusinessError } from "@zhixing/core/environment/workspace-administration";
 import {
   CompletedLocalWorkspaceOperationError,
   LocalWorkspaceManagementHost,
@@ -17,8 +19,8 @@ import {
   decodeLocalWorkspaceResetPreview,
   encodeLocalWorkspaceResetPreview,
   readLocalWorkspaceHostStatus,
+  type LocalWorkspaceConsumptionCredential,
 } from "./local-workspace-management-host.js";
-import { LocalWorkspaceBusinessError } from "./local-workspace-facade.js";
 import {
   LocalWorkspaceOperationOutbox,
   validateLocalWorkspaceOperation,
@@ -27,21 +29,29 @@ import {
   acquireLocalWorkspaceOwner,
   callLocalWorkspaceHost,
 } from "./local-workspace-owner.js";
+import { useLocalWorkspaceClient } from "./workspace-command.js";
 
 describe("LocalWorkspaceManagementHost", () => {
   it("owns side effects after commit and replays one result to concurrent clients", async () => {
     const home = await createTempDir("workspace-host");
-    const create = vi.fn(async (displayName: string, absolutePath: string) => ({
+    const create = vi.fn(async ({ displayName, absolutePath }: {
+      displayName: string;
+      absolutePath: string;
+    }) => ({
       name: displayName,
       path: absolutePath,
       revision: 1,
       workspaceBindingRevision: 1,
     }));
-    const facade = {
+    const applications = {
       status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
       list: async () => [],
+      viewByName: vi.fn(),
       create,
-      authorizeForControl: async () => ({ deviceId: "device-a", bindingRef: "binding-a" }),
+      authorizeForControl: async () => ({
+        deviceId: "device-a",
+        bindingRef: "binding-a",
+      }),
       rename: vi.fn(),
       repath: vi.fn(),
       remove: vi.fn(),
@@ -50,7 +60,7 @@ describe("LocalWorkspaceManagementHost", () => {
     const lease = await acquireLocalWorkspaceOwner(home);
     const host = new LocalWorkspaceManagementHost({
       lease,
-      facade,
+      applications,
       outbox: new LocalWorkspaceOperationOutbox({
         rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
       }),
@@ -73,7 +83,10 @@ describe("LocalWorkspaceManagementHost", () => {
 
   it("returns the prior completed result instead of repeating a side effect after response loss", async () => {
     const home = await createTempDir("workspace-host-response-loss");
-    const create = vi.fn(async (displayName: string, absolutePath: string) => ({
+    const create = vi.fn(async ({ displayName, absolutePath }: {
+      displayName: string;
+      absolutePath: string;
+    }) => ({
       name: displayName,
       path: absolutePath,
       revision: 1,
@@ -82,11 +95,15 @@ describe("LocalWorkspaceManagementHost", () => {
     const lease = await acquireLocalWorkspaceOwner(home);
     const host = new LocalWorkspaceManagementHost({
       lease,
-      facade: {
+      applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         list: async () => [],
+        viewByName: vi.fn(),
         create,
-        authorizeForControl: async () => ({ deviceId: "device-a", bindingRef: "binding-a" }),
+        authorizeForControl: async () => ({
+          deviceId: "device-a",
+          bindingRef: "binding-a",
+        }),
         rename: vi.fn(),
         repath: vi.fn(),
         remove: vi.fn(),
@@ -141,16 +158,306 @@ describe("LocalWorkspaceManagementHost", () => {
     }
   });
 
+  it("recovers and confirms a completed legacy two-field control authorization", async () => {
+    const home = await createTempDir("workspace-host-control-recovery");
+    const lease = await acquireLocalWorkspaceOwner(home);
+    const authorization = {
+      deviceId: "device-a",
+      bindingRef: "binding-a",
+    };
+    const host = new LocalWorkspaceManagementHost({
+      lease,
+      applications: {
+        status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        list: async () => [],
+        viewByName: vi.fn(),
+        create: vi.fn(),
+        authorizeForControl: vi.fn(async () => authorization),
+        rename: vi.fn(),
+        repath: vi.fn(),
+        remove: vi.fn(),
+        reset: vi.fn(),
+      },
+      outbox: new LocalWorkspaceOperationOutbox({
+        rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
+      }),
+    });
+    try {
+      await host.start();
+      await expect(
+        createLocalWorkspaceClient(home).authorizeForControl("paper", "C:\\paper"),
+      ).resolves.toEqual(authorization);
+      const pending = await callLocalWorkspaceHost(home, {
+        kind: "pending",
+        afterSeq: 0,
+      }) as { readonly operations: readonly unknown[] };
+      const completed = validateLocalWorkspaceOperation(pending.operations[0]);
+      expect(completed.result).toEqual({ ok: true, value: authorization });
+      expect(completed.resultDigest).toBe(
+        protocolDigest("LocalWorkspaceOperationResult", 1, completed.result),
+      );
+
+      const recovered = vi.fn(async (operations) => {
+        expect(operations).toEqual([
+          expect.objectContaining({ controlWorkspace: authorization }),
+        ]);
+      });
+      await expect(
+        useLocalWorkspaceClient(
+          createLocalWorkspaceClient(home),
+          (workspace) => workspace.list(),
+          {
+            result: async (value) => value,
+            recovered,
+            failure: vi.fn(),
+          },
+        ),
+      ).resolves.toEqual([]);
+      expect(recovered).toHaveBeenCalledTimes(1);
+    } finally {
+      await host.close();
+      await lease.release();
+    }
+  });
+
+  it("keeps the current credential claimed while a real delivery callback reads its view", async () => {
+    const home = await createTempDir("workspace-host-current-delivery-view");
+    const lease = await acquireLocalWorkspaceOwner(home);
+    const authorization = { deviceId: "device-a", bindingRef: "binding-a" };
+    const view = {
+      name: "paper",
+      path: "C:\\paper",
+      revision: 1,
+      workspaceBindingRevision: 7,
+    };
+    const viewByName = vi.fn(async () => view);
+    const host = new LocalWorkspaceManagementHost({
+      lease,
+      applications: {
+        status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        list: async () => [],
+        viewByName,
+        create: vi.fn(),
+        authorizeForControl: vi.fn(async () => authorization),
+        rename: vi.fn(),
+        repath: vi.fn(),
+        remove: vi.fn(),
+        reset: vi.fn(),
+      },
+      outbox: new LocalWorkspaceOperationOutbox({
+        rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
+      }),
+    });
+    try {
+      await host.start();
+      const client = createLocalWorkspaceClient(home);
+      let deliveredCredential: LocalWorkspaceConsumptionCredential | undefined;
+      await expect(
+        useLocalWorkspaceClient(
+          client,
+          (workspace) => workspace.authorizeForControl("paper", "C:\\paper"),
+          {
+            result: async (result, credential) => {
+              expect(result).toEqual(authorization);
+              expect(credential).toBeDefined();
+              deliveredCredential = credential;
+              expect(client.consumptionCredential()).toEqual(credential);
+              return client.viewByName("paper");
+            },
+            recovered: vi.fn(),
+            failure: vi.fn(),
+          },
+        ),
+      ).resolves.toEqual(view);
+      expect(viewByName).toHaveBeenCalledWith("paper");
+      expect(deliveredCredential).toBeDefined();
+      expect(client.consumptionCredential()).toBeUndefined();
+      const pending = await callLocalWorkspaceHost(home, {
+        kind: "pending",
+        afterSeq: 0,
+      }) as { readonly operations: readonly unknown[] };
+      expect(pending.operations).toEqual([]);
+    } finally {
+      await host.close();
+      await lease.release();
+    }
+  });
+
+  it("retains the current credential and pending result when its view fails", async () => {
+    const home = await createTempDir("workspace-host-current-delivery-view-failure");
+    const lease = await acquireLocalWorkspaceOwner(home);
+    const viewFailure = new Error("workspace view unavailable");
+    const host = new LocalWorkspaceManagementHost({
+      lease,
+      applications: {
+        status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        list: async () => [],
+        viewByName: vi.fn(async () => { throw viewFailure; }),
+        create: vi.fn(),
+        authorizeForControl: vi.fn(async () => ({
+          deviceId: "device-a",
+          bindingRef: "binding-a",
+        })),
+        rename: vi.fn(),
+        repath: vi.fn(),
+        remove: vi.fn(),
+        reset: vi.fn(),
+      },
+      outbox: new LocalWorkspaceOperationOutbox({
+        rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
+      }),
+    });
+    try {
+      await host.start();
+      const client = createLocalWorkspaceClient(home);
+      let deliveredCredential: LocalWorkspaceConsumptionCredential | undefined;
+      await expect(
+        useLocalWorkspaceClient(
+          client,
+          (workspace) => workspace.authorizeForControl("paper", "C:\\paper"),
+          {
+            result: async (_result, credential) => {
+              deliveredCredential = credential;
+              return client.viewByName("paper");
+            },
+            recovered: vi.fn(),
+            failure: vi.fn(),
+          },
+        ),
+      ).rejects.toMatchObject({ message: viewFailure.message });
+      expect(deliveredCredential).toBeDefined();
+      expect(client.consumptionCredential()).toEqual(deliveredCredential);
+      const pending = await callLocalWorkspaceHost(home, {
+        kind: "pending",
+        afterSeq: 0,
+      }) as { readonly operations: readonly unknown[] };
+      expect(pending.operations).toHaveLength(1);
+    } finally {
+      await host.close();
+      await lease.release();
+    }
+  });
+
+  it("still rejects another completed result while reading the claimed operation view", async () => {
+    const home = await createTempDir("workspace-host-current-delivery-other-pending");
+    const lease = await acquireLocalWorkspaceOwner(home);
+    const viewByName = vi.fn();
+    const host = new LocalWorkspaceManagementHost({
+      lease,
+      applications: {
+        status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        list: async () => [],
+        viewByName,
+        create: async ({ displayName, absolutePath }) => ({
+          name: displayName,
+          path: absolutePath,
+          revision: 1,
+          workspaceBindingRevision: 1,
+        }),
+        authorizeForControl: vi.fn(async () => ({
+          deviceId: "device-a",
+          bindingRef: "binding-a",
+        })),
+        rename: vi.fn(),
+        repath: vi.fn(),
+        remove: vi.fn(),
+        reset: vi.fn(),
+      },
+      outbox: new LocalWorkspaceOperationOutbox({
+        rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
+      }),
+    });
+    try {
+      await host.start();
+      const client = createLocalWorkspaceClient(home);
+      await client.authorizeForControl("paper", "C:\\paper");
+      const prepared = validateLocalWorkspaceOperation(
+        await callLocalWorkspaceHost(home, {
+          kind: "prepare",
+          input: {
+            kind: "create",
+            purpose: "settings",
+            displayName: "other",
+            absolutePath: "C:\\other",
+          },
+        }),
+      );
+      await callLocalWorkspaceHost(home, {
+        kind: "commit",
+        identity: operationIdentity(prepared),
+      });
+
+      await expect(client.viewByName("paper")).rejects.toBeInstanceOf(
+        RecoveredLocalWorkspaceOperationsError,
+      );
+      expect(viewByName).not.toHaveBeenCalled();
+      expect(client.consumptionCredential()).toBeDefined();
+    } finally {
+      await host.close();
+      await lease.release();
+    }
+  });
+
+  it("keeps the durable control authorization exact instead of accepting a third field", async () => {
+    const home = await createTempDir("workspace-host-control-invalid");
+    const lease = await acquireLocalWorkspaceOwner(home);
+    const host = new LocalWorkspaceManagementHost({
+      lease,
+      applications: {
+        status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
+        list: async () => [],
+        viewByName: vi.fn(),
+        create: vi.fn(),
+        authorizeForControl: vi.fn(async () => ({
+          deviceId: "device-a",
+          bindingRef: "binding-a",
+          workspaceBindingRevision: 7,
+        }) as never),
+        rename: vi.fn(),
+        repath: vi.fn(),
+        remove: vi.fn(),
+        reset: vi.fn(),
+      },
+      outbox: new LocalWorkspaceOperationOutbox({
+        rootDir: path.join(home, "runtime", "local-workspace-operation-outbox"),
+      }),
+    });
+    try {
+      await host.start();
+      await expect(
+        createLocalWorkspaceClient(home).authorizeForControl("paper", "C:\\paper"),
+      ).rejects.toThrow("control authorization fields are invalid");
+
+      const recovered = vi.fn();
+      await expect(
+        useLocalWorkspaceClient(
+          createLocalWorkspaceClient(home),
+          (workspace) => workspace.list(),
+          {
+            result: async (value) => value,
+            recovered,
+            failure: vi.fn(),
+          },
+        ),
+      ).rejects.toThrow("control authorization fields are invalid");
+      expect(recovered).not.toHaveBeenCalled();
+    } finally {
+      await host.close();
+      await lease.release();
+    }
+  });
+
   it("keeps a completed business failure addressable until the caller confirms delivery", async () => {
     const home = await createTempDir("workspace-host-failed-delivery");
     const lease = await acquireLocalWorkspaceOwner(home);
     const host = new LocalWorkspaceManagementHost({
       lease,
-      facade: {
+      applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         list: async () => [],
+        viewByName: vi.fn(),
         create: async () => {
-          throw new LocalWorkspaceBusinessError(
+          throw new WorkspaceAdministrationBusinessError(
             "WORKSPACE_POLICY_REJECTED",
             "rejected by policy",
           );
@@ -198,10 +505,11 @@ describe("LocalWorkspaceManagementHost", () => {
     const lease = await acquireLocalWorkspaceOwner(home);
     const host = new LocalWorkspaceManagementHost({
       lease,
-      facade: {
+      applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         list: async () => [],
-        create: async (displayName: string, absolutePath: string) => ({
+        viewByName: vi.fn(),
+        create: async ({ displayName, absolutePath }) => ({
           name: displayName,
           path: absolutePath,
           revision: 1,
@@ -241,10 +549,11 @@ describe("LocalWorkspaceManagementHost", () => {
     const lease = await acquireLocalWorkspaceOwner(home);
     const host = new LocalWorkspaceManagementHost({
       lease,
-      facade: {
+      applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         list: async () => [],
-        create: async (displayName: string, absolutePath: string) => ({
+        viewByName: vi.fn(),
+        create: async ({ displayName, absolutePath }) => ({
           name: displayName,
           path: absolutePath,
           revision: 1,
@@ -296,9 +605,10 @@ describe("LocalWorkspaceManagementHost", () => {
     const lease = await acquireLocalWorkspaceOwner(home);
     const host = new LocalWorkspaceManagementHost({
       lease,
-      facade: {
+      applications: {
         status: async () => ({ state: "degraded" as const, catalogGeneration: "catalog-a", reason: "broken" }),
         list: async () => [],
+        viewByName: vi.fn(),
         create: vi.fn(),
         authorizeForControl: vi.fn(),
         rename: vi.fn(),
@@ -339,7 +649,10 @@ describe("LocalWorkspaceManagementHost", () => {
     const home = await createTempDir("workspace-host-ordered-drain");
     const attempts: string[] = [];
     let firstAttempt = true;
-    const create = vi.fn(async (displayName: string, absolutePath: string) => {
+    const create = vi.fn(async ({ displayName, absolutePath }: {
+      displayName: string;
+      absolutePath: string;
+    }) => {
       attempts.push(displayName);
       if (displayName === "first" && firstAttempt) {
         firstAttempt = false;
@@ -355,9 +668,10 @@ describe("LocalWorkspaceManagementHost", () => {
     const lease = await acquireLocalWorkspaceOwner(home);
     const host = new LocalWorkspaceManagementHost({
       lease,
-      facade: {
+      applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         list: async () => [],
+        viewByName: vi.fn(),
         create,
         authorizeForControl: vi.fn(),
         rename: vi.fn(),
@@ -407,9 +721,12 @@ describe("LocalWorkspaceManagementHost", () => {
   it("persists deterministic rejection but keeps unknown failure committed and diagnosable", async () => {
     const home = await createTempDir("workspace-host-decisions");
     const lease = await acquireLocalWorkspaceOwner(home);
-    const create = vi.fn(async (displayName: string) => {
+    const create = vi.fn(async ({ displayName }: { displayName: string }) => {
       if (displayName === "rejected") {
-        throw new LocalWorkspaceBusinessError("WORKSPACE_POLICY_REJECTED", "rejected by policy");
+        throw new WorkspaceAdministrationBusinessError(
+          "WORKSPACE_POLICY_REJECTED",
+          "rejected by policy",
+        );
       }
       throw new Error("unexpected storage state");
     });
@@ -418,9 +735,10 @@ describe("LocalWorkspaceManagementHost", () => {
     });
     const host = new LocalWorkspaceManagementHost({
       lease,
-      facade: {
+      applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         list: async () => [],
+        viewByName: vi.fn(),
         create,
         authorizeForControl: vi.fn(),
         rename: vi.fn(),
@@ -488,9 +806,10 @@ describe("LocalWorkspaceManagementHost", () => {
     });
     const host = new LocalWorkspaceManagementHost({
       lease,
-      facade: {
+      applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         list: async () => [],
+        viewByName: vi.fn(),
         create: async () => { throw error; },
         authorizeForControl: vi.fn(),
         rename: vi.fn(),
@@ -529,9 +848,10 @@ describe("LocalWorkspaceManagementHost", () => {
     });
     const host = new LocalWorkspaceManagementHost({
       lease,
-      facade: {
+      applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         list: async () => [],
+        viewByName: vi.fn(),
         create: async () => {
           throw new WorkspaceBindingCatalogConflictError("request generation changed");
         },
@@ -575,13 +895,14 @@ describe("LocalWorkspaceManagementHost", () => {
     const firstOutbox = new LocalWorkspaceOperationOutbox({ rootDir });
     const firstHost = new LocalWorkspaceManagementHost({
       lease: firstLease,
-      facade: {
+      applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         list: async () => [],
-        create: async (_displayName: string, _absolutePath: string, authority?: { abort?: AbortSignal }) => {
+        viewByName: vi.fn(),
+        create: async (_input, execution) => {
           executionStarted();
           await new Promise<void>((_resolve, reject) => {
-            authority?.abort?.addEventListener(
+            execution?.abort?.addEventListener(
               "abort",
               () => reject(new WorkspaceBindingCancelledError()),
               { once: true },
@@ -619,10 +940,11 @@ describe("LocalWorkspaceManagementHost", () => {
     const secondOutbox = new LocalWorkspaceOperationOutbox({ rootDir });
     const secondHost = new LocalWorkspaceManagementHost({
       lease: secondLease,
-      facade: {
+      applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         list: async () => [],
-        create: async (displayName: string, absolutePath: string) => ({
+        viewByName: vi.fn(),
+        create: async ({ displayName, absolutePath }) => ({
           name: displayName,
           path: absolutePath,
           revision: 1,
@@ -656,9 +978,10 @@ describe("LocalWorkspaceManagementHost", () => {
     const lease = await acquireLocalWorkspaceOwner(home);
     const host = new LocalWorkspaceManagementHost({
       lease,
-      facade: {
+      applications: {
         status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
         list: async () => [],
+        viewByName: vi.fn(),
         create: vi.fn(),
         authorizeForControl: vi.fn(),
         rename: vi.fn(),

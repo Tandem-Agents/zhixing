@@ -23,6 +23,7 @@ import {
   inspectAgentRuntimeWorkspaceEncapsulation,
   inspectTurnContextProviderAssembly,
   inspectWorksceneRuntimeProjectionBoundary,
+  inspectWorkspaceAdministrationOwnership,
   inspectLocalConversationOwnerIsolation,
   inspectManagedHostAssembly,
   inspectPlannedAnchorTransferAssembly,
@@ -3027,6 +3028,113 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
       (text) => `${text}\nvoid createAnchorRuntimeProjectionAssembly;`,
     )).join("\n"),
     /ExecutorRuntimeSubstrate/,
+  );
+});
+
+test("Workspace Administration CRUD has one domain application and one CLI binding", async () => {
+  const paths = [
+    "packages/core/src/environment/workspace-administration.ts",
+    "packages/core/src/environment/index.ts",
+    "packages/core/src/index.ts",
+    "packages/core/package.json",
+    "packages/core/tsup.config.ts",
+    "packages/cli/src/runtime/local-workspace-management-host.ts",
+    "packages/cli/src/runtime/local-workspace-control.ts",
+    "packages/cli/src/runtime/local-workspace-recovery.ts",
+    "packages/cli/src/runtime/workspace-command.ts",
+    "packages/cli/src/repl.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  assert.deepEqual(inspectWorkspaceAdministrationOwnership(records), []);
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative
+      ? { ...record, text: transform(record.text) }
+      : record
+  );
+
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/cli/src/runtime/local-workspace-management-host.ts",
+      (text) => `${text}\nclass LocalWorkspaceFacade {}`,
+    )).join("\n"),
+    /second CRUD owner/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/core/src/environment/workspace-administration.ts",
+      (text) => text.replace(
+        "class WorkspaceAdministrationBusinessError",
+        "class WorkspaceAdministrationPolicyError",
+      ),
+    )).join("\n"),
+    /uniquely own CRUD/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/core/src/environment/index.ts",
+      (text) => `${text}\nexport * from \"./workspace-administration.js\";`,
+    )).join("\n"),
+    /one narrow non-root core subpath/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/cli/src/runtime/workspace-command.ts",
+      (text) => `${text}\nconst selected = views.filter(({ name }) => name === sceneName);`,
+    )).join("\n"),
+    /still interprets Workspace Administration facts/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/cli/src/runtime/local-workspace-management-host.ts",
+      (text) => text.replace(
+        "const claimed = consumptionCredentialOf(pendingDelivery, currentResult);",
+        "currentResult = undefined; const claimed = undefined;",
+      ),
+    )).join("\n"),
+    /second CRUD owner|finite Correctness port/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/core/src/environment/workspace-administration.ts",
+      (text) => text.replace(
+        "toView(await this.#bindingByName(displayName, control))",
+        "toView((await this.#admin.list(control))[0])",
+      ),
+    )).join("\n"),
+    /uniquely own CRUD/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/cli/src/runtime/workspace-command.ts",
+      (text) => text.replace(
+        "created.workspace.workspaceBindingRevision",
+        "created.scene.workspace?.workspaceBindingRevision",
+      ),
+    )).join("\n"),
+    /still interprets Workspace Administration facts/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/cli/src/runtime/workspace-command.ts",
+      (text) => text.replace(
+        "workspace: await workspace.viewByName(sceneName)",
+        "workspace: (await workspace.list())[0]",
+      ),
+    )).join("\n"),
+    /still interprets Workspace Administration facts/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/cli/src/runtime/workspace-command.ts",
+      (text) => text.replace(
+        "deviceId: authorization.deviceId,",
+        "...authorization,",
+      ),
+    )).join("\n"),
+    /still interprets Workspace Administration facts/,
   );
 });
 

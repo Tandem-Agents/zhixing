@@ -2745,6 +2745,17 @@ export async function validateS7Structure() {
       ),
     },
   ]));
+  failures.push(...inspectWorkspaceAdministrationOwnership([
+    ...records,
+    {
+      relative: "packages/core/package.json",
+      text: await readFile(path.join(root, "packages/core/package.json"), "utf8"),
+    },
+    {
+      relative: "packages/core/tsup.config.ts",
+      text: await readFile(path.join(root, "packages/core/tsup.config.ts"), "utf8"),
+    },
+  ]));
   failures.push(...inspectSkillCatalogApplicationOwnership([
     ...records,
     {
@@ -2774,6 +2785,133 @@ export async function validateS7Structure() {
     failures.push("current authority delivery entry was removed");
   }
   if (failures.length > 0) throw new Error(`S7 structure gate failed:\n- ${failures.join("\n- ")}`);
+}
+
+/** A5 Workspace Administration owns binding CRUD while CLI only binds effects. */
+export function inspectWorkspaceAdministrationOwnership(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const text = byPath.get(relative);
+    if (text === undefined) {
+      failures.push(`${relative}: Workspace Administration production source is missing`);
+    }
+    return text ?? "";
+  };
+  const application = required(
+    "packages/core/src/environment/workspace-administration.ts",
+  );
+  const environmentIndex = required("packages/core/src/environment/index.ts");
+  const coreIndex = required("packages/core/src/index.ts");
+  const manifestText = required("packages/core/package.json");
+  const build = required("packages/core/tsup.config.ts");
+  const host = required(
+    "packages/cli/src/runtime/local-workspace-management-host.ts",
+  );
+  const control = required(
+    "packages/cli/src/runtime/local-workspace-control.ts",
+  );
+  const recovery = required(
+    "packages/cli/src/runtime/local-workspace-recovery.ts",
+  );
+  const command = required("packages/cli/src/runtime/workspace-command.ts");
+  const repl = required("packages/cli/src/repl.ts");
+  const manifest = manifestText ? JSON.parse(manifestText) : {};
+
+  const constructionOwners = records
+    .filter((record) => record.text.includes("new WorkspaceAdministrationApplicationService("))
+    .map((record) => record.relative);
+  const narrowExports = Object.entries(manifest.exports ?? {})
+    .filter(([, value]) =>
+      JSON.stringify(value).includes("workspace-administration"),
+    )
+    .map(([name]) => name);
+  if (
+    !application.includes("interface WorkspaceAdministrationApplication") ||
+    !application.includes("class WorkspaceAdministrationApplicationService") ||
+    !application.includes("class WorkspaceAdministrationBusinessError") ||
+    !application.includes("interface WorkspaceAdministrationControlPort") ||
+    !application.includes("async viewByName(displayName: string)") ||
+    !application.includes(
+      "toView(await this.#bindingByName(displayName, control))",
+    ) ||
+    !application.includes("#bindingByName(") ||
+    !application.includes('"LOCAL_WORKSPACE_NOT_FOUND"') ||
+    !application.includes('"LOCAL_WORKSPACE_NAME_CONFLICT"') ||
+    !application.includes('"workspace-operation"') ||
+    !/return Object\.freeze\(\{\s*deviceId: this\.#deviceId,\s*bindingRef: binding\.bindingRef,\s*\}\)/u.test(
+      application,
+    ) ||
+    /@zhixing\/(?:cli|executor)|LocalWorkspaceManagementHost|WorkspaceBindingRecovery|Workscene/u.test(
+      application,
+    )
+  ) {
+    failures.push(
+      "Workspace Administration does not uniquely own CRUD, views, name resolution and request identity",
+    );
+  }
+  if (
+    byPath.has("packages/cli/src/runtime/local-workspace-facade.ts") ||
+    records.some((record) =>
+      /\bLocalWorkspaceFacade\b|withLocalWorkspaceFacade/u.test(record.text),
+    ) ||
+    constructionOwners.length !== 1 ||
+    constructionOwners[0] !==
+      "packages/cli/src/runtime/local-workspace-management-host.ts" ||
+    !host.includes('from "@zhixing/core/environment/workspace-administration"') ||
+    !host.includes("new ExecutorWorkspaceAdministrationControl(") ||
+    !host.includes("operation: {") ||
+    !host.includes('["bindingRef", "deviceId"]') ||
+    !host.includes("return this.#applications.viewByName(request.displayName)") ||
+    !host.includes("viewByName: (displayName) => workspace.viewByName(displayName)") ||
+    !host.includes(
+      "const claimed = consumptionCredentialOf(pendingDelivery, currentResult)",
+    ) ||
+    !host.includes("!matchesConsumptionCredential(operation, claimed)") ||
+    host.includes("#bindingByName(") ||
+    !control.includes("implements WorkspaceAdministrationControlPort") ||
+    !control.includes("this.#resources.acquireRoot(") ||
+    !control.includes("this.#resources.settle(") ||
+    !control.includes("this.#resources.release(") ||
+    /WorkspaceAdministration(?:ApplicationService|BusinessError)|#bindingByName/u.test(
+      recovery,
+    )
+  ) {
+    failures.push(
+      "Workspace CLI binding retains a second CRUD owner or bypasses its finite Correctness port",
+    );
+  }
+  if (
+    !command.includes("withLocalWorkspaceClient(") ||
+    command.includes("withLocalWorkspaceFacade") ||
+    /views\.filter\(\(\{ name \}\)/u.test(command) ||
+    command.includes("workspace.list(") ||
+    command.includes("created.scene.workspace?.workspaceBindingRevision") ||
+    !command.includes("created.workspace.workspaceBindingRevision") ||
+    !command.includes("workspace: await workspace.viewByName(sceneName)") ||
+    !command.includes("deviceId: authorization.deviceId") ||
+    !command.includes("bindingRef: authorization.bindingRef") ||
+    !command.includes("validateWorkspaceControlAuthorization(result.value)") ||
+    !repl.includes("withLocalWorkspaceClient(") ||
+    !repl.includes("createWorksceneFromLocalWorkspaceAuthorization(") ||
+    repl.includes("withLocalWorkspaceFacade")
+  ) {
+    failures.push(
+      "Workspace CLI or Workscene binding still interprets Workspace Administration facts",
+    );
+  }
+  if (
+    JSON.stringify(narrowExports) !==
+      JSON.stringify(["./environment/workspace-administration"]) ||
+    !build.includes('"src/environment/workspace-administration.ts"') ||
+    /WorkspaceAdministration|workspace-administration/u.test(environmentIndex) ||
+    /WorkspaceAdministration|workspace-administration/u.test(coreIndex)
+  ) {
+    failures.push(
+      "Workspace Administration application must have one narrow non-root core subpath",
+    );
+  }
+  return failures;
 }
 
 /** A2 Skill Catalog applications and immutable execution projection have one owner. */

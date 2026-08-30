@@ -280,7 +280,7 @@ export async function runExecutorRole(
       identity: bootstrap.localWorkspaceIdentity,
       host: {
         zhixingHome,
-        facade: {
+        management: {
           deviceId: authority.deviceId,
           executorId: executorIdForDevice(authority.deviceId),
           admin: authority.workspaceBindingAdmin,

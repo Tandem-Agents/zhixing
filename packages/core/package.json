@@ -100,6 +100,10 @@
       "types": "./dist/environment/index.d.ts",
       "import": "./dist/environment/index.js"
     },
+    "./environment/workspace-administration": {
+      "types": "./dist/environment/workspace-administration.d.ts",
+      "import": "./dist/environment/workspace-administration.js"
+    },
     "./test-support/s7-durable": {
       "types": "./dist/test-support/s7-durable.d.ts",
       "import": "./dist/test-support/s7-durable.js"

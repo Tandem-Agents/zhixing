@@ -209,14 +209,18 @@ async function recoverOutboxWithHost(outbox: LocalWorkspaceOperationOutbox): Pro
   const unavailable = async (): Promise<never> => { throw new Error("Unexpected local workspace recovery operation"); };
   const host = new LocalWorkspaceManagementHost({
     lease,
-    facade: {
+    applications: {
       status: async () => ({ state: "healthy" as const, catalogGeneration: "catalog-a" }),
       list: async () => [],
-      create: async (displayName: string, absolutePath: string) => {
+      viewByName: unavailable,
+      create: async ({ displayName, absolutePath }) => {
         executions += 1;
         return { name: displayName, path: absolutePath, revision: 1, workspaceBindingRevision: 1 };
       },
-      authorizeForControl: async () => ({ deviceId: "device-a", bindingRef: "binding-a" }),
+      authorizeForControl: async () => ({
+        deviceId: "device-a",
+        bindingRef: "binding-a",
+      }),
       rename: unavailable,
       repath: unavailable,
       remove: unavailable,

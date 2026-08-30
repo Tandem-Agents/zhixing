@@ -20,6 +20,7 @@ import {
   type LocalWorkspaceConsumptionCredential,
   type LocalWorkspaceManagementHost,
   type LocalWorkspaceClient,
+  validateWorkspaceControlAuthorization,
 } from "./local-workspace-management-host.js";
 import type {
   LocalWorkspaceOperation,
@@ -36,6 +37,11 @@ import {
   defaultCoreHostConnectionDeps,
 } from "./core-host-connection.js";
 import { RpcWorksceneFacade } from "./rpc-workscene-facade.js";
+import type {
+  WorkspaceAdministrationView,
+  WorkspaceControlAuthorization,
+} from "@zhixing/core/environment/workspace-administration";
+import type { WorksceneSummary } from "@zhixing/rpc";
 
 export { WORKSPACE_CATALOG_RESET_IMPACT };
 
@@ -80,7 +86,7 @@ export async function runWorkspaceCommand(
   operation: (workspace: LocalWorkspaceClient) => Promise<unknown>,
 ): Promise<void> {
   const writer = createStdoutWriter();
-  await withLocalWorkspaceFacade(operation, {
+  await withLocalWorkspaceClient(operation, {
     result: async (result) => {
       if (result !== undefined) writer.line(JSON.stringify(result, null, 2));
     },
@@ -109,55 +115,47 @@ export async function runWorkspaceSceneCreateCommand(
   try {
     await coreHost.ensure();
     const workscenes = new RpcWorksceneFacade(coreHost);
-    const created = await withLocalWorkspaceFacade(
-      (workspace) => workspace.authorizeForControl(sceneName, absolutePath),
+    const created = await withLocalWorkspaceClient(
+      async (workspace) => ({
+        authorization: await workspace.authorizeForControl(
+          sceneName,
+          absolutePath,
+        ),
+        workspace,
+      }),
       {
-        result: async (workspace, credential) => {
+        result: async ({ authorization, workspace }, credential) => {
           if (!credential) {
             throw new Error("本机工作区授权缺少可恢复的消费凭据");
           }
-          const scene = await workscenes.create(
-            sceneName,
+          return createWorksceneAndReadWorkspaceView(
+            workscenes,
             workspace,
-            worksceneCreateRequestIdForLocalWorkspace(credential),
+            sceneName,
+            authorization,
+            credential,
           );
-          return { scene, workspace };
         },
         recovered: async (operations) => {
           for (const operation of operations) {
             if (!operation.controlWorkspace) continue;
-            await workscenes.create(
+            await createWorksceneFromLocalWorkspaceAuthorization(
+              workscenes,
               operation.target,
               operation.controlWorkspace,
-              worksceneCreateRequestIdForLocalWorkspace(operation.credential),
+              operation.credential,
             );
           }
         },
         failure: (error) => renderLocalWorkspaceFailure(error, writer),
       },
     );
-    const views = await withLocalWorkspaceFacade(
-      (workspace) => workspace.list(),
-      {
-        result: async (result) => result,
-        recovered: async (operations) => {
-          if (operations.length > 0) {
-            throw new Error("本机工作区授权仍有未消费的恢复结果");
-          }
-        },
-        failure: (error) => renderLocalWorkspaceFailure(error, writer),
-      },
-    );
-    const matching = views.filter(({ name }) => name === sceneName);
-    if (matching.length !== 1) {
-      throw new Error("无法唯一读取刚创建的本机工作区授权");
-    }
     writer.line(
       JSON.stringify({
         sceneId: created.scene.sceneId,
-        deviceId: created.workspace.deviceId,
-        bindingRef: created.workspace.bindingRef,
-        workspaceBindingRevision: matching[0]!.workspaceBindingRevision,
+        deviceId: created.authorization.deviceId,
+        bindingRef: created.authorization.bindingRef,
+        workspaceBindingRevision: created.workspace.workspaceBindingRevision,
       }),
     );
   } finally {
@@ -165,7 +163,47 @@ export async function runWorkspaceSceneCreateCommand(
   }
 }
 
-export async function withLocalWorkspaceFacade<T, R = T>(
+export function createWorksceneFromLocalWorkspaceAuthorization(
+  workscenes: Pick<RpcWorksceneFacade, "create">,
+  sceneName: string,
+  authorization: WorkspaceControlAuthorization,
+  credential: LocalWorkspaceConsumptionCredential,
+): Promise<WorksceneSummary> {
+  return workscenes.create(
+    sceneName,
+    {
+      deviceId: authorization.deviceId,
+      bindingRef: authorization.bindingRef,
+    },
+    worksceneCreateRequestIdForLocalWorkspace(credential),
+  );
+}
+
+export async function createWorksceneAndReadWorkspaceView(
+  workscenes: Pick<RpcWorksceneFacade, "create">,
+  workspace: Pick<LocalWorkspaceClient, "viewByName">,
+  sceneName: string,
+  authorization: WorkspaceControlAuthorization,
+  credential: LocalWorkspaceConsumptionCredential,
+): Promise<{
+  readonly scene: WorksceneSummary;
+  readonly authorization: WorkspaceControlAuthorization;
+  readonly workspace: WorkspaceAdministrationView;
+}> {
+  const scene = await createWorksceneFromLocalWorkspaceAuthorization(
+    workscenes,
+    sceneName,
+    authorization,
+    credential,
+  );
+  return {
+    scene,
+    authorization,
+    workspace: await workspace.viewByName(sceneName),
+  };
+}
+
+export async function withLocalWorkspaceClient<T, R = T>(
   operation: (workspace: LocalWorkspaceClient) => Promise<T>,
   delivery: LocalWorkspaceDelivery<T, R>,
 ): Promise<R> {
@@ -267,7 +305,7 @@ export async function withLocalWorkspaceFacade<T, R = T>(
       identity: defineLocalWorkspaceAssemblyIdentity(mesh.roles, owner),
       host: {
         zhixingHome,
-        facade: {
+        management: {
           deviceId: runtime.deviceId,
           executorId: executorIdForDevice(runtime.deviceId),
           admin,
@@ -373,7 +411,7 @@ function recoveryNoticeOf(
 
 function controlWorkspaceResult(
   operation: LocalWorkspaceOperation,
-): { readonly deviceId: string; readonly bindingRef: string } | undefined {
+): WorkspaceControlAuthorization | undefined {
   if (
     operation.input.kind !== "create" ||
     operation.input.purpose !== "control"
@@ -387,12 +425,7 @@ function controlWorkspaceResult(
     typeof result.value !== "object" ||
     Array.isArray(result.value)
   ) return undefined;
-  const value = result.value as Record<string, unknown>;
-  if (
-    typeof value.deviceId !== "string" ||
-    typeof value.bindingRef !== "string"
-  ) return undefined;
-  return { deviceId: value.deviceId, bindingRef: value.bindingRef };
+  return validateWorkspaceControlAuthorization(result.value);
 }
 
 function operationTarget(input: LocalWorkspaceWriteOperation): string {

@@ -9,6 +9,7 @@ const [
   coreAuthority,
   corePersistence,
   coreProtocol,
+  coreWorkspaceAdministration,
   orchestratorRoot,
   orchestratorRuntime,
   rpcRoot,
@@ -43,6 +44,7 @@ const [
   import("../packages/core/dist/authority/index.js"),
   import("../packages/core/dist/persistence/index.js"),
   import("../packages/core/dist/protocol/index.js"),
+  import("../packages/core/dist/environment/workspace-administration.js"),
   import("../packages/orchestrator/dist/index.js"),
   import("../packages/orchestrator/dist/runtime/index.js"),
   import("../packages/rpc/dist/index.js"),
@@ -607,6 +609,25 @@ async function verifyCorePackageExports(failures) {
   ) {
     failures.push("core-exports:product-api:invalid-runtime-boundary");
   }
+  const workspaceAdministrationConditions =
+    manifest.exports["./environment/workspace-administration"];
+  if (
+    !workspaceAdministrationConditions ||
+    workspaceAdministrationConditions.types !==
+      "./dist/environment/workspace-administration.d.ts" ||
+    workspaceAdministrationConditions.import !==
+      "./dist/environment/workspace-administration.js" ||
+    typeof coreWorkspaceAdministration.WorkspaceAdministrationApplicationService !==
+      "function" ||
+    typeof coreWorkspaceAdministration.WorkspaceAdministrationBusinessError !==
+      "function" ||
+    "WorkspaceAdministrationApplicationService" in coreRoot ||
+    "WorkspaceAdministrationBusinessError" in coreRoot
+  ) {
+    failures.push(
+      "core-exports:workspace-administration:invalid-runtime-boundary",
+    );
+  }
   const deliveryApplicationConditions = manifest.exports["./delivery/application"];
   if (
     !deliveryApplicationConditions ||
@@ -660,6 +681,19 @@ async function verifyCorePackageExports(failures) {
     "createOwnerDeliveryLifecycleBinding" in ownerKernel
   ) {
     failures.push("owner-kernel-exports:delivery-obligation:invalid-runtime-boundary");
+  }
+  for (const [subpath, conditions] of Object.entries(manifest.exports)) {
+    if (
+      subpath !== "./environment/workspace-administration" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === workspaceAdministrationConditions?.types ||
+        conditions.import === workspaceAdministrationConditions?.import)
+    ) {
+      failures.push(
+        `core-exports:${subpath}:duplicate-workspace-administration-entry`,
+      );
+    }
   }
   for (const [subpath, conditions] of Object.entries(manifest.exports)) {
     if (
@@ -743,6 +777,15 @@ async function verifyCorePackageExports(failures) {
               "SkillCatalogSaveApplicationService" in exported)
           ) {
             failures.push(`core-exports:${subpath}:skill-catalog-runtime-leak`);
+          }
+          if (
+            subpath !== "./environment/workspace-administration" &&
+            ("WorkspaceAdministrationApplicationService" in exported ||
+              "WorkspaceAdministrationBusinessError" in exported)
+          ) {
+            failures.push(
+              `core-exports:${subpath}:workspace-administration-runtime-leak`,
+            );
           }
         } catch {
           failures.push(`core-exports:${subpath}:${condition}:unloadable-target`);

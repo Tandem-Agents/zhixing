@@ -4,7 +4,10 @@ import {
   type LocalWorkspaceClient,
   type LocalWorkspaceConsumptionCredential,
 } from "./local-workspace-management-host.js";
-import { useLocalWorkspaceClient } from "./workspace-command.js";
+import {
+  createWorksceneAndReadWorkspaceView,
+  useLocalWorkspaceClient,
+} from "./workspace-command.js";
 
 const credential: LocalWorkspaceConsumptionCredential = {
   outboxId: "outbox-a",
@@ -18,6 +21,7 @@ function client(confirmDelivered: () => Promise<void>): LocalWorkspaceClient {
   return {
     status: vi.fn(),
     list: vi.fn(),
+    viewByName: vi.fn(),
     create: vi.fn(),
     authorizeForControl: vi.fn(),
     rename: vi.fn(),
@@ -84,5 +88,56 @@ describe("useLocalWorkspaceClient", () => {
     ).rejects.toBe(deliveryFailure);
     expect(confirmDelivered).not.toHaveBeenCalled();
     expect(failure.deliveryConfirmed).toBe(false);
+  });
+});
+
+describe("createWorksceneFromLocalWorkspaceAuthorization", () => {
+  it("creates with the legacy authorization wire and then reads the domain view when metadata is absent", async () => {
+    const order: string[] = [];
+    const scene = { sceneId: "scene-a", name: "Paper" };
+    const create = vi.fn(async () => {
+      order.push("create");
+      return scene as never;
+    });
+    const workspace = client(async () => undefined);
+    vi.mocked(workspace.viewByName).mockImplementation(async () => {
+      order.push("view");
+      return {
+        name: "Paper",
+        path: "C:\\paper",
+        revision: 1,
+        workspaceBindingRevision: 7,
+      };
+    });
+
+    await expect(
+      createWorksceneAndReadWorkspaceView(
+        { create },
+        workspace,
+        "Paper",
+        {
+          deviceId: "device-a",
+          bindingRef: "binding-a",
+        },
+        credential,
+      ),
+    ).resolves.toEqual({
+      scene,
+      authorization: { deviceId: "device-a", bindingRef: "binding-a" },
+      workspace: {
+        name: "Paper",
+        path: "C:\\paper",
+        revision: 1,
+        workspaceBindingRevision: 7,
+      },
+    });
+    expect(create).toHaveBeenCalledWith(
+      "Paper",
+      { deviceId: "device-a", bindingRef: "binding-a" },
+      expect.stringMatching(/^workscene-create:sha256:/u),
+    );
+    expect(workspace.viewByName).toHaveBeenCalledWith("Paper");
+    expect(workspace.list).not.toHaveBeenCalled();
+    expect(order).toEqual(["create", "view"]);
   });
 });

@@ -81,8 +81,8 @@ import { RpcSchedulerFacade } from "./runtime/rpc-scheduler-facade.js";
 import { RpcConversationFacade } from "./runtime/rpc-conversation-facade.js";
 import { RpcWorksceneFacade } from "./runtime/rpc-workscene-facade.js";
 import {
-  withLocalWorkspaceFacade,
-  worksceneCreateRequestIdForLocalWorkspace,
+  createWorksceneFromLocalWorkspaceAuthorization,
+  withLocalWorkspaceClient,
 } from "./runtime/workspace-command.js";
 import {
   RpcManagementFacade,
@@ -1612,7 +1612,7 @@ export async function startRepl(): Promise<void> {
                       complete: (prompt, signal) =>
                         managementFacade.llmComplete(prompt, "main", signal),
                       createWithLocalWorkspace: (sceneName, absolutePath) =>
-                        withLocalWorkspaceFacade(
+                        withLocalWorkspaceClient(
                           (workspace) =>
                             workspace.authorizeForControl(
                               sceneName,
@@ -1625,12 +1625,11 @@ export async function startRepl(): Promise<void> {
                                   "本机工作区授权缺少可恢复的消费凭据",
                                 );
                               }
-                              return worksceneFacade.create(
+                              return createWorksceneFromLocalWorkspaceAuthorization(
+                                worksceneFacade,
                                 sceneName,
                                 workspace,
-                                worksceneCreateRequestIdForLocalWorkspace(
-                                  credential,
-                                ),
+                                credential,
                               );
                             },
                             recovered: async (operations) => {
@@ -1641,12 +1640,11 @@ export async function startRepl(): Promise<void> {
                               );
                               for (const operation of operations) {
                                 if (operation.controlWorkspace) {
-                                  await worksceneFacade.create(
+                                  await createWorksceneFromLocalWorkspaceAuthorization(
+                                    worksceneFacade,
                                     operation.target,
                                     operation.controlWorkspace,
-                                    worksceneCreateRequestIdForLocalWorkspace(
-                                      operation.credential,
-                                    ),
+                                    operation.credential,
                                   );
                                 }
                                 cliWriter.line(

@@ -129,7 +129,7 @@ const authorityRuntimeSurface: AccessSurface = {
         identity: ctx.localWorkspaceIdentity,
         host: {
           zhixingHome: ctx.zhixingHome,
-          facade: {
+          management: {
             deviceId: authorityRuntime.deviceId,
             executorId: executorIdForDevice(authorityRuntime.deviceId),
             admin,

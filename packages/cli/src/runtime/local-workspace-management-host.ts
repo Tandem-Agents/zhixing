@@ -1,14 +1,12 @@
 import { protocolDigest } from "@zhixing/core/protocol";
 import path from "node:path";
 import {
-  LocalWorkspaceFacade,
-  LocalWorkspaceBusinessError,
-  type LocalWorkspaceFacadeOptions,
-} from "./local-workspace-facade.js";
-import type {
-  LocalWorkspaceCatalogStatus,
-  LocalWorkspaceView,
-} from "./local-workspace-facade.js";
+  WorkspaceAdministrationApplicationService,
+  WorkspaceAdministrationBusinessError,
+  type WorkspaceAdministrationApplication,
+  type WorkspaceControlAuthorization,
+  type WorkspaceAdministrationView,
+} from "@zhixing/core/environment/workspace-administration";
 import {
   DeviceCapacityAdmissionError,
   StorageMaintenanceAdmissionError,
@@ -41,6 +39,13 @@ import {
   type LocalWorkspaceOwnerLease,
 } from "./local-workspace-owner.js";
 import { WORKSPACE_CATALOG_RESET_IMPACT } from "./workspace-reset-impact.js";
+import { ExecutorWorkspaceAdministrationControl } from "./local-workspace-control.js";
+import {
+  LocalWorkspaceRecoveryBusinessError,
+  LocalWorkspaceRecoveryService,
+  type LocalWorkspaceCatalogStatus,
+  type LocalWorkspaceRecoveryApplication,
+} from "./local-workspace-recovery.js";
 
 const PAGE_SIZE = 64;
 
@@ -59,6 +64,7 @@ type HostRequest =
   | { readonly kind: "host-status" }
   | { readonly kind: "status" }
   | { readonly kind: "list" }
+  | { readonly kind: "view"; readonly displayName: string }
   | { readonly kind: "prepare"; readonly input: LocalWorkspaceWriteOperation }
   | {
       readonly kind: "commit";
@@ -116,18 +122,20 @@ type OperationDecision =
   | { readonly kind: "completed"; readonly result: OperationResult }
   | InfrastructureDecision;
 
-type LocalWorkspaceHostFacade = Pick<
-  LocalWorkspaceFacade,
-  "status" | "list" | "create" | "authorizeForControl" | "rename" | "repath" | "remove" | "reset"
->;
+type LocalWorkspaceHostApplications = WorkspaceAdministrationApplication &
+  LocalWorkspaceRecoveryApplication;
 
 export interface LocalWorkspaceClient {
   status(): Promise<LocalWorkspaceCatalogStatus>;
-  list(): Promise<LocalWorkspaceView[]>;
-  create(displayName: string, absolutePath: string): Promise<LocalWorkspaceView>;
-  authorizeForControl(displayName: string, absolutePath: string): Promise<{ deviceId: string; bindingRef: string }>;
-  rename(currentName: string, displayName: string, expectedRevision: number): Promise<LocalWorkspaceView>;
-  repath(name: string, absolutePath: string, expectedRevision: number): Promise<LocalWorkspaceView>;
+  list(): Promise<readonly WorkspaceAdministrationView[]>;
+  viewByName(displayName: string): Promise<WorkspaceAdministrationView>;
+  create(displayName: string, absolutePath: string): Promise<WorkspaceAdministrationView>;
+  authorizeForControl(
+    displayName: string,
+    absolutePath: string,
+  ): Promise<WorkspaceControlAuthorization>;
+  rename(currentName: string, displayName: string, expectedRevision: number): Promise<WorkspaceAdministrationView>;
+  repath(name: string, absolutePath: string, expectedRevision: number): Promise<WorkspaceAdministrationView>;
   remove(name: string, expectedRevision: number): Promise<void>;
   previewReset(expectedCatalogGeneration: string): Promise<LocalWorkspaceResetPreview>;
   confirmReset(
@@ -212,7 +220,7 @@ export class CompletedLocalWorkspaceOperationError extends Error {
 }
 
 export class LocalWorkspaceManagementHost {
-  readonly #facade: LocalWorkspaceHostFacade;
+  readonly #applications: LocalWorkspaceHostApplications;
   readonly #outbox: LocalWorkspaceOperationOutbox;
   readonly #transport: LocalWorkspaceTransportServer;
   #state: LocalWorkspaceHostState | "created" = "created";
@@ -226,10 +234,10 @@ export class LocalWorkspaceManagementHost {
 
   constructor(input: {
     readonly lease: LocalWorkspaceOwnerLease;
-    readonly facade: LocalWorkspaceHostFacade;
+    readonly applications: LocalWorkspaceHostApplications;
     readonly outbox: LocalWorkspaceOperationOutbox;
   }) {
-    this.#facade = input.facade;
+    this.#applications = input.applications;
     this.#outbox = input.outbox;
     this.#transport = new LocalWorkspaceTransportServer(input.lease, (request) =>
       this.#handle(validateHostRequest(request)),
@@ -283,8 +291,11 @@ export class LocalWorkspaceManagementHost {
       throw new Error("Local workspace management host is shutting down");
     }
     if (request.kind === "host-status") return this.#hostStatus();
-    if (request.kind === "status") return this.#facade.status();
-    if (request.kind === "list") return this.#facade.list();
+    if (request.kind === "status") return this.#applications.status();
+    if (request.kind === "list") return this.#applications.list();
+    if (request.kind === "view") {
+      return this.#applications.viewByName(request.displayName);
+    }
     this.#requireOutbox();
     if (request.kind === "pending") return this.#outbox.pending(request.afterSeq, PAGE_SIZE);
     if (request.kind === "acknowledge") return this.#outbox.acknowledge(request);
@@ -292,9 +303,9 @@ export class LocalWorkspaceManagementHost {
       return this.#serializeMutation(async () => {
         this.#requireWritable();
         if (request.input.kind === "reset") {
-          const status = await this.#facade.status();
+          const status = await this.#applications.status();
           if (status.catalogGeneration !== request.input.expectedCatalogGeneration) {
-            throw new LocalWorkspaceBusinessError(
+            throw new LocalWorkspaceRecoveryBusinessError(
               "LOCAL_WORKSPACE_CATALOG_CHANGED",
               "工作区目录世代已经变化，请重新查看恢复影响",
             );
@@ -415,39 +426,71 @@ export class LocalWorkspaceManagementHost {
     operation: LocalWorkspaceOperation,
     abort: AbortSignal,
   ): Promise<unknown> {
-    const requestNonce = [
-      "workspace-operation",
-      this.#outbox.outboxId,
-      operation.localSeq,
-      operation.operationId,
-      operation.inputDigest,
-    ].join(":");
-    const authority = {
-      requestNonce,
+    const execution = {
+      operation: {
+        outboxId: this.#outbox.outboxId,
+        localSeq: operation.localSeq,
+        operationId: operation.operationId,
+        inputDigest: operation.inputDigest,
+      },
       abort,
-      ...(operation.confirmationToken
-        ? { confirmationToken: operation.confirmationToken }
-        : {}),
     };
     const input = operation.input;
     switch (input.kind) {
       case "create":
         return input.purpose === "control"
-          ? this.#facade.authorizeForControl(input.displayName, input.absolutePath, authority)
-          : this.#facade.create(input.displayName, input.absolutePath, authority);
+          ? this.#applications.authorizeForControl(
+              { displayName: input.displayName, absolutePath: input.absolutePath },
+              execution,
+            )
+          : this.#applications.create(
+              { displayName: input.displayName, absolutePath: input.absolutePath },
+              execution,
+            );
       case "rename":
-        return this.#facade.rename(input.currentName, input.displayName, input.expectedRevision, authority);
+        return this.#applications.rename(
+          {
+            currentName: input.currentName,
+            displayName: input.displayName,
+            expectedRevision: input.expectedRevision,
+          },
+          execution,
+        );
       case "repath":
-        return this.#facade.repath(input.name, input.absolutePath, input.expectedRevision, authority);
+        return this.#applications.repath(
+          {
+            name: input.name,
+            absolutePath: input.absolutePath,
+            expectedRevision: input.expectedRevision,
+          },
+          execution,
+        );
       case "remove":
-        await this.#facade.remove(input.name, input.expectedRevision, authority);
+        await this.#applications.remove(
+          { name: input.name, expectedRevision: input.expectedRevision },
+          execution,
+        );
         return null;
-      case "reset":
-        return this.#facade.reset(
+      case "reset": {
+        const requestNonce = [
+          "workspace-operation",
+          this.#outbox.outboxId,
+          operation.localSeq,
+          operation.operationId,
+          operation.inputDigest,
+        ].join(":");
+        return this.#applications.reset(
           input.expectedCatalogGeneration,
           input.impact,
-          authority,
+          {
+            requestNonce,
+            abort,
+            ...(operation.confirmationToken
+              ? { confirmationToken: operation.confirmationToken }
+              : {}),
+          },
         );
+      }
     }
   }
 
@@ -570,7 +613,8 @@ function classifyExecutionFailure(
   attempt: number,
 ): OperationDecision {
   if (
-    error instanceof LocalWorkspaceBusinessError ||
+    error instanceof WorkspaceAdministrationBusinessError ||
+    error instanceof LocalWorkspaceRecoveryBusinessError ||
     error instanceof WorkspaceBindingNotFoundError ||
     error instanceof WorkspaceBindingConflictError ||
     error instanceof WorkspaceBindingRevisionError ||
@@ -673,12 +717,44 @@ function waitForRetry(delayMs: number, abort: AbortSignal): Promise<boolean> {
 export function createLocalWorkspaceManagementHost(input: {
   readonly lease: LocalWorkspaceOwnerLease;
   readonly zhixingHome: string;
-  readonly facade: LocalWorkspaceFacadeOptions;
+  readonly management: {
+    readonly deviceId: string;
+    readonly executorId: string;
+    readonly admin: import("@zhixing/core/contracts").WorkspaceBindingAdminPort;
+    readonly recovery: import("@zhixing/core/contracts").WorkspaceBindingRecoveryPort;
+    readonly resources: import("@zhixing/executor").ExecutorResourceGovernor;
+  };
   readonly storageMaintenance: StorageMaintenanceGovernorPort;
 }): LocalWorkspaceManagementHost {
+  const control = new ExecutorWorkspaceAdministrationControl({
+    executorId: input.management.executorId,
+    resources: input.management.resources,
+  });
+  const workspace = new WorkspaceAdministrationApplicationService({
+    deviceId: input.management.deviceId,
+    admin: input.management.admin,
+    control,
+  });
+  const recovery = new LocalWorkspaceRecoveryService({
+    deviceId: input.management.deviceId,
+    recovery: input.management.recovery,
+    control,
+  });
   return new LocalWorkspaceManagementHost({
     lease: input.lease,
-    facade: new LocalWorkspaceFacade(input.facade),
+    applications: {
+      list: () => workspace.list(),
+      viewByName: (displayName) => workspace.viewByName(displayName),
+      create: (command, execution) => workspace.create(command, execution),
+      authorizeForControl: (command, execution) =>
+        workspace.authorizeForControl(command, execution),
+      rename: (command, execution) => workspace.rename(command, execution),
+      repath: (command, execution) => workspace.repath(command, execution),
+      remove: (command, execution) => workspace.remove(command, execution),
+      status: () => recovery.status(),
+      reset: (generation, impact, authority) =>
+        recovery.reset(generation, impact, authority),
+    },
     outbox: new LocalWorkspaceOperationOutbox({
       rootDir: path.join(
         input.zhixingHome,
@@ -709,6 +785,29 @@ export function createLocalWorkspaceClient(zhixingHome: string): LocalWorkspaceC
     const result = await callLocalWorkspaceHost(zhixingHome, { kind });
     return kind === "status" ? validateStatus(result) : validateWorkspaceList(result);
   };
+  const viewByName = async (
+    displayName: string,
+  ): Promise<WorkspaceAdministrationView> => {
+    const claimed = consumptionCredentialOf(pendingDelivery, currentResult);
+    const lifecycle = await readLocalWorkspaceHostStatus(zhixingHome);
+    if (lifecycle.state === "ready") {
+      const recovered = await recover();
+      reportUnclaimedResults(
+        recovered.outboxId,
+        claimed && recovered.outboxId === claimed.outboxId
+          ? recovered.operations.filter(
+              (operation) => !matchesConsumptionCredential(operation, claimed),
+            )
+          : recovered.operations,
+      );
+    }
+    return validateWorkspaceView(
+      await callLocalWorkspaceHost(zhixingHome, {
+        kind: "view",
+        displayName,
+      }),
+    );
+  };
   const write = (
     input: LocalWorkspaceWriteOperation,
     confirmation?: { readonly impact: string },
@@ -718,16 +817,21 @@ export function createLocalWorkspaceClient(zhixingHome: string): LocalWorkspaceC
   });
   return {
     status: read("status") as () => Promise<LocalWorkspaceCatalogStatus>,
-    list: read("list") as () => Promise<LocalWorkspaceView[]>,
-    create: (displayName, absolutePath) => write({ kind: "create", purpose: "settings", displayName, absolutePath }) as Promise<LocalWorkspaceView>,
+    list: read("list") as () => Promise<readonly WorkspaceAdministrationView[]>,
+    viewByName,
+    create: (displayName, absolutePath) => write({ kind: "create", purpose: "settings", displayName, absolutePath }) as Promise<WorkspaceAdministrationView>,
     authorizeForControl: async (displayName, absolutePath) => {
-      const view = await write({ kind: "create", purpose: "control", displayName, absolutePath }) as { bindingRef?: string; deviceId?: string };
-      return view as { deviceId: string; bindingRef: string };
+      return write({
+        kind: "create",
+        purpose: "control",
+        displayName,
+        absolutePath,
+      }) as Promise<WorkspaceControlAuthorization>;
     },
     rename: (currentName, displayName, expectedRevision) =>
-      write({ kind: "rename", currentName, displayName, expectedRevision }) as Promise<LocalWorkspaceView>,
+      write({ kind: "rename", currentName, displayName, expectedRevision }) as Promise<WorkspaceAdministrationView>,
     repath: (name, absolutePath, expectedRevision) =>
-      write({ kind: "repath", name, absolutePath, expectedRevision }) as Promise<LocalWorkspaceView>,
+      write({ kind: "repath", name, absolutePath, expectedRevision }) as Promise<WorkspaceAdministrationView>,
     remove: async (name, expectedRevision) => {
       await write({ kind: "remove", name, expectedRevision });
     },
@@ -792,21 +896,7 @@ export function createLocalWorkspaceClient(zhixingHome: string): LocalWorkspaceC
       return resultValue(input, result) as WorkspaceBindingResetReceipt;
     },
     consumptionCredential: () => {
-      const delivery = pendingDelivery;
-      const operation = currentResult;
-      if (!delivery || !operation?.resultDigest) return undefined;
-      if (!delivery.operations.some((candidate) =>
-        candidate.localSeq === operation.localSeq &&
-        candidate.operationId === operation.operationId &&
-        candidate.inputDigest === operation.inputDigest &&
-        candidate.resultDigest === operation.resultDigest)) {
-        throw new Error("Local workspace result is not part of the recoverable delivery prefix");
-      }
-      return {
-        outboxId: delivery.outboxId,
-        ...identityOf(operation),
-        resultDigest: operation.resultDigest,
-      };
+      return consumptionCredentialOf(pendingDelivery, currentResult);
     },
     confirmDelivered: async () => {
       const delivery = pendingDelivery;
@@ -816,6 +906,40 @@ export function createLocalWorkspaceClient(zhixingHome: string): LocalWorkspaceC
       currentResult = undefined;
     },
   };
+}
+
+function consumptionCredentialOf(
+  delivery: PendingDelivery | undefined,
+  operation: LocalWorkspaceOperation | undefined,
+): LocalWorkspaceConsumptionCredential | undefined {
+  if (!delivery || !operation?.resultDigest) return undefined;
+  const credential = {
+    outboxId: delivery.outboxId,
+    ...identityOf(operation),
+    resultDigest: operation.resultDigest,
+  };
+  if (
+    !delivery.operations.some((candidate) =>
+      matchesConsumptionCredential(candidate, credential),
+    )
+  ) {
+    throw new Error(
+      "Local workspace result is not part of the recoverable delivery prefix",
+    );
+  }
+  return credential;
+}
+
+function matchesConsumptionCredential(
+  operation: LocalWorkspaceOperation,
+  credential: LocalWorkspaceConsumptionCredential,
+): boolean {
+  return (
+    operation.localSeq === credential.localSeq &&
+    operation.operationId === credential.operationId &&
+    operation.inputDigest === credential.inputDigest &&
+    operation.resultDigest === credential.resultDigest
+  );
 }
 
 export async function localWorkspaceHostIsReachable(zhixingHome: string): Promise<boolean> {
@@ -1030,6 +1154,7 @@ function validateHostRequest(value: unknown): HostRequest {
     "host-status": ["kind"],
     status: ["kind"],
     list: ["kind"],
+    view: ["displayName", "kind"],
     prepare: ["input", "kind"],
     commit: "confirmation" in request
       ? ["confirmation", "identity", "kind"]
@@ -1046,6 +1171,16 @@ function validateHostRequest(value: unknown): HostRequest {
     case "status":
     case "list":
       return { kind: request.kind };
+    case "view":
+      if (
+        typeof request.displayName !== "string" ||
+        request.displayName.length === 0 ||
+        request.displayName.length > 4096 ||
+        request.displayName.includes("\0")
+      ) {
+        throw new TypeError("Local workspace view name is invalid");
+      }
+      return { kind: "view", displayName: request.displayName };
     case "prepare":
       return { kind: "prepare", input: validateLocalWorkspaceWriteOperation(request.input) };
     case "commit": {
@@ -1248,7 +1383,7 @@ function validateStatus(value: unknown): LocalWorkspaceCatalogStatus {
   return exact as unknown as LocalWorkspaceCatalogStatus;
 }
 
-function validateWorkspaceList(value: unknown): LocalWorkspaceView[] {
+function validateWorkspaceList(value: unknown): WorkspaceAdministrationView[] {
   if (!Array.isArray(value)) throw new TypeError("Local workspace list is invalid");
   return value.map((item) => {
     const record = exactRecord(item, ["name", "path", "revision", "workspaceBindingRevision"], "workspace view");
@@ -1258,7 +1393,7 @@ function validateWorkspaceList(value: unknown): LocalWorkspaceView[] {
       !Number.isSafeInteger(record.revision) ||
       !Number.isSafeInteger(record.workspaceBindingRevision)
     ) throw new TypeError("Local workspace view is invalid");
-    return record as unknown as LocalWorkspaceView;
+    return record as unknown as WorkspaceAdministrationView;
   });
 }
 
@@ -1271,11 +1406,7 @@ function validateOperationValue(
     return null;
   }
   if (input.kind === "create" && input.purpose === "control") {
-    const record = exactRecord(value, ["bindingRef", "deviceId"], "control authorization");
-    if (typeof record.bindingRef !== "string" || typeof record.deviceId !== "string") {
-      throw new TypeError("Local workspace control authorization is invalid");
-    }
-    return record;
+    return validateWorkspaceControlAuthorization(value);
   }
   if (input.kind === "reset") {
     const record = exactRecord(
@@ -1303,6 +1434,27 @@ function validateOperationValue(
     return record;
   }
   return validateWorkspaceList([value])[0]!;
+}
+
+function validateWorkspaceView(value: unknown): WorkspaceAdministrationView {
+  return validateWorkspaceList([value])[0]!;
+}
+
+export function validateWorkspaceControlAuthorization(
+  value: unknown,
+): WorkspaceControlAuthorization {
+  const record = exactRecord(
+    value,
+    ["bindingRef", "deviceId"],
+    "control authorization",
+  );
+  if (
+    typeof record.bindingRef !== "string" ||
+    typeof record.deviceId !== "string"
+  ) {
+    throw new TypeError("Local workspace control authorization is invalid");
+  }
+  return record as unknown as WorkspaceControlAuthorization;
 }
 
 function exactRecord(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {

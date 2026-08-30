@@ -11,10 +11,12 @@ import {
   ConversationRepository,
   ShardedTranscriptStore,
   conversationsDir,
-  type AgentYield,
   type Message,
-  type RunResult,
 } from "@zhixing/core";
+import type {
+  KernelRunCompletion,
+  KernelRunEnvelope,
+} from "@zhixing/orchestrator/runtime";
 import {
   createExecutorRole,
   createInProcessAssignmentRuntimeFactory,
@@ -191,7 +193,7 @@ async function runChain(topology: "in-process" | "mesh") {
       ),
       host: {
         zhixingHome: executorHome,
-        facade: {
+        management: {
           deviceId: executor.deviceId,
           executorId: executor.executorId,
           admin: executor.workspaceBindingAdmin,
@@ -252,12 +254,7 @@ async function runChain(topology: "in-process" | "mesh") {
       throw new Error("Workscene create did not return an applied result");
     }
     await workspaceClient.confirmDelivered();
-    const bindingView = (await workspaceClient.list()).find(
-      (candidate) => candidate.name === "Project",
-    );
-    if (!bindingView) {
-      throw new Error("S7 local workspace client did not read back the created binding");
-    }
+    const bindingView = await workspaceClient.viewByName("Project");
 
     const conversationId = `ws:${created.scene.id}:conv_main`;
     const prepared = await anchor.prepareConversationAssignment({
@@ -575,26 +572,25 @@ function deterministicAgentRuntime(
       rateLimits: [],
       confirmations: [],
     }),
-    async run(input: {
-      readonly messages: readonly Message[];
-      readonly onYield: (event: AgentYield) => void;
-    }): Promise<RunResult> {
-      input.onYield({ type: "text_delta", text: "ready" });
-      input.onYield({ type: "text_delta", text: "." });
+    async run(input: KernelRunEnvelope): Promise<KernelRunCompletion> {
+      await input.observation.onEvent?.({ type: "text_delta", text: "ready" });
+      await input.observation.onEvent?.({ type: "text_delta", text: "." });
       return {
-        agentResult: {
+        terminal: {
           reason: "completed",
           message: assistant,
           usage: { inputTokens: 1, outputTokens: 1 },
         },
-        runRecord: {
-          timestamp: NOW,
-          messages: [input.messages.at(-1)!, assistant],
-          usage: { inputTokens: 1, outputTokens: 1 },
-          source: "interactive",
+        artifacts: {
+          runRecord: {
+            timestamp: NOW,
+            messages: [input.modelInput.messages.at(-1)!, assistant],
+            usage: { inputTokens: 1, outputTokens: 1 },
+            source: "interactive",
+          },
+          newMessages: [assistant],
+          durationMs: 1,
         },
-        newMessages: [assistant],
-        durationMs: 1,
       };
     },
     abort: () => false,
