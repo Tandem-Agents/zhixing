@@ -1,9 +1,8 @@
 /**
  * trust.* RPC 方法 —— 信任规则管理面(/trust 查看与撤销的执行体)。
  *
- * 操作对象是盘上持久规则(global / context 作用域);规则的沉淀走确认链路
- * (可信面 allow-session/context/global 决策经 broker 落 permissionStore),
- * 此处只承接管理面读与撤销。
+ * 操作对象是盘上持久规则(global / context 作用域)；规则创建与沉淀由
+ * Trust Administration 应用消费确认决定，此处只绑定管理 Query/Command。
  */
 
 import {

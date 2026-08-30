@@ -28,7 +28,7 @@ import type { ServerContext } from "../../context.js";
  *
  * 信任边界在身份而非传输形态:cli 收编后本机接入面同样经 RPC,"进程内 = 可信"
  * 的旧前提不复存在。trusted = authenticated(持 home 凭证)+ loopback(本机)——
- * 可信面可提交完整决策(含持久授权,统一沉淀宿主 permissionStore);非可信面
+ * 可信面可提交完整决策（含由 Trust Administration 处理的持久授权）；非可信面
  * 维持受限白名单,"远程不得沉淀永久规则"的安全意图在身份模型下完整保留
  * (远程接入面的可信身份模型留待真实需求)。
  *

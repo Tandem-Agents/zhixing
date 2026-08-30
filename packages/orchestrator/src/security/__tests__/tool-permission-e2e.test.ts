@@ -2,7 +2,7 @@
  * 端到端验收测试 —— 信任沉淀(自动持久化)链路
  *
  * 验收目标:验证整条链路端到端工作:
- *   1. 连续多次放行(用户选 allow-once)→ ConfirmationTracker 累积计数
+ *   1. 连续多次放行(用户选 allow-once)→ Trust Administration 累积贡献
  *   2. 累计触达风险等级阈值 → 自动沉淀为持久 allow 规则(origin=user)
  *   3. 用户选 allow-context → applyBrokerDecision 调 store.create 创建规则
  *   4. 同操作再次执行 → pipeline.evaluate 匹配规则 → 直接 allow(不触发 confirm)
@@ -20,6 +20,11 @@ import {
   type ToolExecutionContext,
   type ToolResult,
 } from "@zhixing/core";
+import {
+  bindPermissionRuleExecutionSource,
+  createPermissionStoreTrustAdministrationRepository,
+} from "@zhixing/core/security";
+import { TrustAdministrationExecutionApplicationService } from "@zhixing/core/trust-administration";
 import { createSecureExecuteTool } from "../secure-executor.js";
 
 // ─── 测试辅助 ───
@@ -56,22 +61,43 @@ function mockExecuteFactory() {
   };
 }
 
+function createTrustRuntime(
+  store: PermissionStore,
+  workspacePath: string | null,
+) {
+  const trustAdministration = new TrustAdministrationExecutionApplicationService({
+    repository: createPermissionStoreTrustAdministrationRepository(() => store),
+    workspacePath,
+  });
+  const pipeline = new SecurityPipeline({
+    trustContext: workspacePath
+      ? { kind: "workspace", dir: workspacePath }
+      : { kind: "global" },
+    permissionRuleSource: bindPermissionRuleExecutionSource(
+      store,
+      trustAdministration.context,
+    ),
+  });
+  return { pipeline, trustAdministration };
+}
+
 // ─── 测试 ───
 
 describe("Confirmation → PermissionRule 端到端链路", () => {
-  it("连续 5 次 allow-once 累计达阈值 → 自动沉淀规则 → 后续直接 allow", async () => {
+  it("连续 3 次 allow-once 累计达阈值 → 自动沉淀规则 → 后续直接 allow", async () => {
     // ─── 装配 ───
     // 真实 PermissionStore（in-memory）+ 真实 SecurityPipeline + 真实 broker。
-    // SecurityPipeline 内部默认实例化 ConfirmationTracker（per-pipeline 生命周期）。
+    // Security 只读匹配，同一 Trust Administration 应用拥有贡献与规则写入。
     const store = new PermissionStore({ rootDir: null });
-    const pipeline = new SecurityPipeline({
-      trustContext: { kind: "workspace", dir: "/tmp/ws-e2e" },
-      permissionStore: store,
-    });
+    const { pipeline, trustAdministration } = createTrustRuntime(
+      store,
+      "/tmp/ws-e2e",
+    );
     const broker = new ConfirmationBroker();
     const exec = mockExecuteFactory();
     const wrapped = createSecureExecuteTool({
       pipeline,
+      trustAdministration,
       originalExecute: exec.fn,
       broker,
     });
@@ -100,7 +126,7 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
       expect(exec.callCount()).toBe(3);
 
       // 自动沉淀：中间精度 allow 规则（curl *），标记 origin=user
-      const wsId = pipeline.getContextId();
+      const wsId = trustAdministration.context;
       expect(wsId).toBeTruthy();
       const wsRules = store.list(wsId).filter((r) => r.scope === "context");
       expect(wsRules).toHaveLength(1);
@@ -118,19 +144,20 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
     }
   });
 
-  it("中途切换命令：累计同 tracker key（curl *）→ 自动沉淀中间精度规则 → 切换命令也命中", async () => {
+  it("中途切换命令：累计同领域 key（curl *）→ 自动沉淀中间精度规则 → 切换命令也命中", async () => {
     // 验证 buildKey 用 patterns[1]（中间精度）的语义：
-    // - tracker 把 "curl https://a.com" 与 "curl https://b.com" 视为同一计数 key
+    // - Trust 应用把 "curl https://a.com" 与 "curl https://b.com" 视为同一计数 key
     // - 但 allow-context 用精确 pattern 时，规则 argument 是用户选的具体 pattern
     const store = new PermissionStore({ rootDir: null });
-    const pipeline = new SecurityPipeline({
-      trustContext: { kind: "workspace", dir: "/tmp/ws-e2e" },
-      permissionStore: store,
-    });
+    const { pipeline, trustAdministration } = createTrustRuntime(
+      store,
+      "/tmp/ws-e2e",
+    );
     const broker = new ConfirmationBroker();
     const exec = mockExecuteFactory();
     const wrapped = createSecureExecuteTool({
       pipeline,
+      trustAdministration,
       originalExecute: exec.fn,
       broker,
     });
@@ -144,7 +171,7 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       const bashTool = makeTool("bash");
-      // 5 次不同的 curl 命令——tracker 用 "curl *" 作为 key 累计
+      // 3 次不同的 curl 命令——领域用 "curl *" 作为 key 累计
       const commands = [
         "curl https://a.com",
         "curl https://b.com",
@@ -155,8 +182,8 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
       }
       expect(capturedRequests).toHaveLength(3);
 
-      // 5 次不同 curl 累计到同一 key（curl *）→ 第 5 次自动沉淀中间精度规则
-      const wsId = pipeline.getContextId();
+      // 3 次不同 curl 累计到同一 key（curl *）→ 第 3 次自动沉淀中间精度规则
+      const wsId = trustAdministration.context;
       const wsRules = store.list(wsId).filter((r) => r.scope === "context");
       expect(wsRules).toHaveLength(1);
       expect(wsRules[0]!.pattern.argument).toBe("curl *");
@@ -175,19 +202,19 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
     }
   });
 
-  it("用户中途选 allow-context（未到阈值）：仍创建规则；不影响 tracker 进度", async () => {
+  it("用户中途选 allow-context（未到阈值）：仍创建规则；不影响贡献进度", async () => {
     // 验证 secure-executor.applyBrokerDecision 的分支独立性：
-    // allow-context kind 走 store.create 路径，**不**调 tracker.record。
-    // tracker 保持原有计数（即不会因为某次 allow-context 跳过计数）。
+    // allow-context kind 走领域显式规则路径，**不**计入自动沉淀贡献。
     const store = new PermissionStore({ rootDir: null });
-    const pipeline = new SecurityPipeline({
-      trustContext: { kind: "workspace", dir: "/tmp/ws-e2e" },
-      permissionStore: store,
-    });
+    const { pipeline, trustAdministration } = createTrustRuntime(
+      store,
+      "/tmp/ws-e2e",
+    );
     const broker = new ConfirmationBroker();
     const exec = mockExecuteFactory();
     const wrapped = createSecureExecuteTool({
       pipeline,
+      trustAdministration,
       originalExecute: exec.fn,
       broker,
     });
@@ -226,7 +253,7 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
       );
 
       // 验证规则创建
-      const wsId = pipeline.getContextId();
+      const wsId = trustAdministration.context;
       const wsRules = store.list(wsId).filter((r) => r.scope === "context");
       expect(wsRules).toHaveLength(1);
       expect(wsRules[0]!.pattern.argument).toBe("curl https://api1.com");
@@ -241,18 +268,18 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
       expect(exec.callCount()).toBe(2);
 
       // 第 3 次不同命令（同工具但不命中规则）→ 仍触发 confirm；
-      // tracker 应从 0 开始（allow-context 不 record）
+      // 自动沉淀贡献应从 0 开始（allow-context 不计数）
       await wrapped(
         bashTool,
         { command: "curl https://api2.com" },
         makeContext(),
       );
       expect(capturedRequests).toHaveLength(2);
-      // allow-context 不 record：tracker 对 curl 的累计只来自第 3 次 allow-once（count=1），
+      // allow-context 不计数：领域累计只来自第 3 次 allow-once（count=1），
       // 不含第 1 次 allow-context（否则会是 2）
-      const curlEntry = pipeline
-        .getConfirmationTracker()
-        .snapshot()
+      const curlEntry = trustAdministration
+        .securitySnapshot()
+        .observations
         .find((e) => e.key.includes("curl"));
       expect(curlEntry?.count).toBe(1);
     } finally {
@@ -268,14 +295,12 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
   // 在此处失败。
   it("主模式自动沉淀 → scope=context + contextId={kind:'main'}，不创建 global 规则", async () => {
     const store = new PermissionStore({ rootDir: null });
-    const pipeline = new SecurityPipeline({
-      trustContext: { kind: "global" },
-      permissionStore: store,
-    });
+    const { pipeline, trustAdministration } = createTrustRuntime(store, null);
     const broker = new ConfirmationBroker();
     const exec = mockExecuteFactory();
     const wrapped = createSecureExecuteTool({
       pipeline,
+      trustAdministration,
       originalExecute: exec.fn,
       broker,
     });
@@ -293,7 +318,7 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
       }
 
       // 主模式 contextId = {kind:"main"} discriminated union
-      expect(pipeline.getContextId()).toEqual({ kind: "main" });
+      expect(trustAdministration.context).toEqual({ kind: "main" });
 
       const all = store.list({ kind: "main" });
       const ctxRules = all.filter((r) => r.scope === "context");

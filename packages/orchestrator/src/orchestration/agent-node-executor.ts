@@ -10,6 +10,7 @@ import type {
   ThinkingConfig,
   ToolDefinition,
 } from "@zhixing/core";
+import type { TrustAdministrationExecutionApplication } from "@zhixing/core/trust-administration";
 import {
   runChildAgent,
   type ChildAgentResult,
@@ -33,6 +34,7 @@ export interface AgentNodeExecutorOptionsV1 {
   readonly roleThinking?: ResolvedRoleThinking;
   readonly llmRoles: LLMRoles;
   readonly securityPipeline: SecurityPipeline;
+  readonly trustAdministration: TrustAdministrationExecutionApplication;
   readonly workspace: string | null;
   readonly workspaceSource?: string;
   readonly globalConfigPath?: string;
@@ -84,6 +86,7 @@ export class ChildAgentNodeExecutorV1 implements AgentNodeExecutorV1 {
       roleThinking: this.options.roleThinking,
       llmRoles: this.options.llmRoles,
       securityPipeline: this.options.securityPipeline,
+      trustAdministration: this.options.trustAdministration,
       workspace: this.options.workspace,
       workspaceSource: this.options.workspaceSource,
       globalConfigPath: this.options.globalConfigPath,

@@ -7,14 +7,26 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { PermissionMatcherMiddleware } from "../permission-matcher.js";
-import { PermissionStore } from "../permission-store.js";
+import {
+  bindPermissionRuleExecutionSource,
+  PermissionStore,
+} from "../permission-store.js";
 import type {
   IPermissionStore,
+  PermissionContextId,
+  PermissionRuleExecutionSource,
   PermissionRule,
   SecurityDecision,
   SecurityMiddlewareContext,
   SessionType,
 } from "../types.js";
+
+function executionSource(
+  store: IPermissionStore,
+  context: PermissionContextId = { kind: "main" },
+): PermissionRuleExecutionSource {
+  return bindPermissionRuleExecutionSource(store, context);
+}
 
 // ─── 测试辅助 ───
 
@@ -70,7 +82,7 @@ describe("PermissionMatcherMiddleware", () => {
   describe("不介入的情况", () => {
     it("decision 为 undefined → 透传", async () => {
       const store = new PermissionStore({ rootDir: null });
-      const matcher = new PermissionMatcherMiddleware(store, () => null);
+      const matcher = new PermissionMatcherMiddleware(executionSource(store));
       const ctx = makeCtx(undefined);
       const next = vi.fn(async () => ({ allowed: true }));
 
@@ -82,7 +94,7 @@ describe("PermissionMatcherMiddleware", () => {
     it("decision.action = allow → 透传，不查询 store", async () => {
       const store = new PermissionStore({ rootDir: null });
       const matchSpy = vi.spyOn(store, "match");
-      const matcher = new PermissionMatcherMiddleware(store, () => null);
+      const matcher = new PermissionMatcherMiddleware(executionSource(store));
       const ctx = makeCtx({
         action: "allow",
         matchedRules: [],
@@ -115,7 +127,7 @@ describe("PermissionMatcherMiddleware", () => {
         reset: () => {},
         resetAll: () => {},
       };
-      const matcher = new PermissionMatcherMiddleware(store, () => "ws-1");
+      const matcher = new PermissionMatcherMiddleware(executionSource(store));
       const ctx = makeCtx(confirmDecision());
       const next = vi.fn(async () => ({ allowed: true }));
 
@@ -146,7 +158,7 @@ describe("PermissionMatcherMiddleware", () => {
         reset: () => {},
         resetAll: () => {},
       };
-      const matcher = new PermissionMatcherMiddleware(store, () => "ws-1");
+      const matcher = new PermissionMatcherMiddleware(executionSource(store));
       const ctx = makeCtx(confirmDecision());
       const next = vi.fn(async () => ({ allowed: true }));
 
@@ -172,7 +184,7 @@ describe("PermissionMatcherMiddleware", () => {
         reset: () => {},
         resetAll: () => {},
       };
-      const matcher = new PermissionMatcherMiddleware(store, () => null);
+      const matcher = new PermissionMatcherMiddleware(executionSource(store));
       const ctx = makeCtx(confirmDecision(), "interactive");
       const next = vi.fn(async () => ({
         allowed: true,
@@ -197,7 +209,7 @@ describe("PermissionMatcherMiddleware", () => {
           reset: () => {},
           resetAll: () => {},
         };
-        const matcher = new PermissionMatcherMiddleware(store, () => null);
+        const matcher = new PermissionMatcherMiddleware(executionSource(store));
         const ctx = makeCtx(confirmDecision(), sessionType);
         const next = vi.fn(async () => ({
           allowed: true,
@@ -213,7 +225,7 @@ describe("PermissionMatcherMiddleware", () => {
   });
 
   describe("作用域 ID 传递", () => {
-    it("match 调用使用 getContextId 返回的值", async () => {
+    it("match 调用使用预绑定的不可变上下文", async () => {
       const store: IPermissionStore = {
         match: vi.fn(() => null),
         matchFrozen: () => null,
@@ -224,16 +236,14 @@ describe("PermissionMatcherMiddleware", () => {
         reset: () => {},
         resetAll: () => {},
       };
-      const matcher = new PermissionMatcherMiddleware(
-        store,
-        () => "specific-ws-id",
-      );
+      const context = { kind: "workspace" as const, hash: "specific-ws-id" };
+      const matcher = new PermissionMatcherMiddleware(executionSource(store, context));
       const ctx = makeCtx(confirmDecision());
 
       await matcher.execute(ctx, async () => ({ allowed: true }));
 
       expect(store.match).toHaveBeenCalledWith(
-        "specific-ws-id",
+        context,
         expect.objectContaining({ tool: "bash" }),
       );
     });

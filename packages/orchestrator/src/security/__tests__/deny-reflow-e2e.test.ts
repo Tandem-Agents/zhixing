@@ -39,6 +39,7 @@ import { describe, expect, it } from "vitest";
 import {
   ConfirmationBroker,
   MockLLMProvider,
+  PermissionStore,
   SecurityPipeline,
   drainAgentLoop,
   userMessage,
@@ -47,6 +48,11 @@ import {
   type Message,
   type ToolDefinition,
 } from "@zhixing/core";
+import {
+  bindPermissionRuleExecutionSource,
+  createPermissionStoreTrustAdministrationRepository,
+} from "@zhixing/core/security";
+import { TrustAdministrationExecutionApplicationService } from "@zhixing/core/trust-administration";
 import { createSecureExecuteTool } from "../secure-executor.js";
 
 // ─── 测试辅助 ───
@@ -58,6 +64,23 @@ function makeBashTool(): ToolDefinition {
     inputSchema: { type: "object" } as never,
     call: async () => ({ content: "(should not execute)", isError: false }),
   } as ToolDefinition;
+}
+
+function createSecurityBoundary() {
+  const store = new PermissionStore({ rootDir: null });
+  const trustAdministration = new TrustAdministrationExecutionApplicationService({
+    repository: createPermissionStoreTrustAdministrationRepository(() => store),
+    workspacePath: "/tmp/ws",
+  });
+  const pipeline = new SecurityPipeline({
+    trustContext: { kind: "workspace", dir: "/tmp/ws" },
+    sessionType: "interactive",
+    permissionRuleSource: bindPermissionRuleExecutionSource(
+      store,
+      trustAdministration.context,
+    ),
+  });
+  return { pipeline, trustAdministration };
 }
 
 /** 把 broker 的 onRequest 挂上一个按脚本 resolve 的假 renderer */
@@ -103,10 +126,7 @@ describe("端到端：拒绝理由回流到模型", () => {
     ]);
 
     // 2. 构造真实的 SecurityPipeline + Broker
-    const pipeline = new SecurityPipeline({
-      trustContext: { kind: "workspace", dir: "/tmp/ws" },
-      sessionType: "interactive",
-    });
+    const { pipeline, trustAdministration } = createSecurityBoundary();
     const broker = new ConfirmationBroker();
 
     // 3. 挂一个按脚本 resolve 的假 renderer——模拟用户选 "拒绝并说明原因"
@@ -118,6 +138,7 @@ describe("端到端：拒绝理由回流到模型", () => {
     // 4. 构造 secureExecuteTool
     const secureExecute = createSecureExecuteTool({
       pipeline,
+      trustAdministration,
       originalExecute: (tool, input, context) => tool.call(input, context),
       broker,
     });
@@ -184,15 +205,13 @@ describe("端到端：拒绝理由回流到模型", () => {
       { text: "OK, no curl then" },
     ]);
 
-    const pipeline = new SecurityPipeline({
-      trustContext: { kind: "workspace", dir: "/tmp/ws" },
-      sessionType: "interactive",
-    });
+    const { pipeline, trustAdministration } = createSecurityBoundary();
     const broker = new ConfirmationBroker();
     attachScriptedRenderer(broker, () => ({ kind: "deny" })); // 无 reason
 
     const secureExecute = createSecureExecuteTool({
       pipeline,
+      trustAdministration,
       originalExecute: (tool, input, context) => tool.call(input, context),
       broker,
     });
@@ -237,10 +256,7 @@ describe("端到端：拒绝理由回流到模型", () => {
       { text: "done" },
     ]);
 
-    const pipeline = new SecurityPipeline({
-      trustContext: { kind: "workspace", dir: "/tmp/ws" },
-      sessionType: "interactive",
-    });
+    const { pipeline, trustAdministration } = createSecurityBoundary();
     const broker = new ConfirmationBroker();
     attachScriptedRenderer(broker, () => ({ kind: "allow-once" }));
 
@@ -255,6 +271,7 @@ describe("端到端：拒绝理由回流到模型", () => {
 
     const secureExecute = createSecureExecuteTool({
       pipeline,
+      trustAdministration,
       originalExecute: (tool, input, context) => tool.call(input, context),
       broker,
     });

@@ -41,6 +41,7 @@ import {
   type ToolExecutionContext,
   type ToolResult,
 } from "@zhixing/core";
+import type { TrustAdministrationExecutionApplication } from "@zhixing/core/trust-administration";
 import { runChildAgent, type ChildAgentResult } from "../subagent/factory.js";
 import { formatAbortReasonForLLM } from "../subagent/abort-format.js";
 import { runContextStorage, type RunContext } from "../runtime/run-context.js";
@@ -83,6 +84,8 @@ export interface TaskToolEnv {
   llmRoles: LLMRoles;
   /** 父 SecurityPipeline —— 权限规则 / boundary registry 跨 agent 共用 */
   securityPipeline: SecurityPipeline;
+  /** 与父 runtime 共用的信任管理应用，子执行不得重新拥有规则写入。 */
+  trustAdministration: TrustAdministrationExecutionApplication;
   /** 工作区路径(null 表示无工作区) */
   workspace: string | null;
   /** 工作区来源标识(runtime / global-config / cwd-fallback / none) */
@@ -568,6 +571,7 @@ export function createTaskTool(env: TaskToolEnv): ToolDefinition {
         roleThinking: env.roleThinking,
         llmRoles: env.llmRoles,
         securityPipeline: env.securityPipeline,
+        trustAdministration: env.trustAdministration,
         workspace: env.workspace,
         workspaceSource: env.workspaceSource,
         globalConfigPath: env.globalConfigPath,

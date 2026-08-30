@@ -16,6 +16,7 @@ export type {
   PermissionDecision,
   PortableTrustRule,
   PermissionRule,
+  PermissionRuleExecutionSource,
   PermissionScope,
   RiskLevel,
   RuleAction,
@@ -63,12 +64,18 @@ export { BoundaryRegistry } from "./boundary-registry.js";
 
 // 权限存储
 export {
+  bindPermissionRuleExecutionSource,
   PermissionStore,
   globMatches,
   globSpecificity,
   globToRegex,
 } from "./permission-store.js";
 export type { PermissionStoreOptions } from "./permission-store.js";
+export {
+  createPermissionStoreTrustAdministrationRepository,
+  toPermissionContext,
+} from "./trust-administration-adapter.js";
+export type { PermissionStoreTrustAdministrationRepository } from "./trust-administration-adapter.js";
 // 注：`defaultExtractArgument` 不导出——仅作为 ToolArgumentExtractor 内部 fallback 使用，
 // 避免外部 caller 误用绕过 tool-aware 路径破坏 M3 的"显式声明优先"语义。
 
@@ -80,17 +87,6 @@ export { PermissionMatcherMiddleware } from "./permission-matcher.js";
 
 // 信任等级分类中间件
 export { TrustClassifierMiddleware } from "./trust-classifier.js";
-
-// 确认追踪与建议
-export {
-  ConfirmationTracker,
-  suggestPatterns,
-} from "./confirmation-tracker.js";
-export type {
-  IConfirmationTracker,
-  SuggestedPattern,
-  SuggestionStatus,
-} from "./confirmation-tracker.js";
 
 // 命令预解析器
 export {
@@ -129,9 +125,6 @@ export type {
   SecurityEvaluationOptions,
   SecurityPipelineOptions,
 } from "./security-pipeline.js";
-
-// /trust 命令的 target 无关核心查询（用户可管信任规则的单一定义）
-export { listUserTrustRules } from "./trust-rules.js";
 
 // 通用 secret 脱敏（系统层共用：技能正文为首个消费者，落地前过滤固化密钥）
 export { scrubSecrets } from "./secret-scrubber.js";

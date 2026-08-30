@@ -626,6 +626,41 @@ describe("confirmation.resolve", () => {
     expect((await p).kind).toBe("allow-global");
   });
 
+  it.each(["allow-session", "allow-context", "allow-global"] as const)(
+    "可信面 kind='%s' 保留空 argument 并原样交付 broker",
+    async (kind) => {
+      const hub = new ConfirmationHub();
+      const broker = new ConfirmationBroker();
+      broker.onRequest(() => {});
+      hub.attach("b1", broker, { conversationId: "conv-A" });
+
+      const requestId = `empty-${kind}`;
+      const pending = broker.requestConfirmation(makeRequest(requestId));
+      const server = {
+        confirmationHub: hub,
+        conversations: makeFakeConversations(
+          new Map([["conv-A", new Set(["1"])]]),
+        ),
+      } as unknown as ServerContext;
+      const decision = {
+        kind,
+        pattern: {
+          pattern: { tool: "bash", argument: "" },
+          label: "exact empty argument",
+        },
+      };
+
+      await expect(
+        invoke<{ ok: boolean }>(
+          buildConfirmationResolveMethod(),
+          { requestId, decision },
+          makeContext(server, makeConnection(1)),
+        ),
+      ).resolves.toEqual({ ok: true });
+      await expect(pending).resolves.toEqual(decision);
+    },
+  );
+
   it("可信面 kind='allow-once' / 'deny'（±reason）→ 都在白名单", async () => {
     const hub = new ConfirmationHub();
     const broker = new ConfirmationBroker();

@@ -43,7 +43,7 @@ interface TrustAdministrationRuleRecord<Scope extends string> {
 export interface TrustAdministrationRule
   extends TrustAdministrationRuleRecord<"context" | "global"> {}
 
-/** Security persistence projection accepted only by the temporary bridge. */
+/** Finite persistence projection shared with the final Security mechanism adapter. */
 export interface TrustAdministrationRepositoryRule
   extends TrustAdministrationRuleRecord<
     "session" | "context" | "global" | "builtin"
@@ -79,11 +79,7 @@ export interface TrustAdministrationApplication {
   execute(command: TrustAdministrationCommand): Promise<TrustAdministrationCommandResult>;
 }
 
-/**
- * Temporary A5-TRUST-STORE-01 bridge. The adapter may translate this finite
- * domain projection to the existing Security persistence mechanism, but it cannot
- * decide visibility, management context, or not-found semantics.
- */
+/** Persistence mechanism port; management visibility and semantics stay here. */
 export interface TrustAdministrationRepository {
   list(
     context: TrustAdministrationContext,
@@ -95,6 +91,23 @@ export interface TrustAdministrationApplicationOptions {
   readonly repository: TrustAdministrationRepository;
   readonly defaultContext: () => TrustAdministrationContext;
 }
+
+export {
+  TrustAdministrationExecutionApplicationService,
+  suggestTrustAdministrationPatterns,
+} from "./execution.js";
+export type {
+  TrustAdministrationApproval,
+  TrustAdministrationApprovalResult,
+  TrustAdministrationExecutionApplication,
+  TrustAdministrationExecutionApplicationOptions,
+  TrustAdministrationExecutionRepository,
+  TrustAdministrationExecutionSnapshot,
+  TrustAdministrationObservation,
+  TrustAdministrationOperation,
+  TrustAdministrationRiskLevel,
+  TrustAdministrationSuggestedPattern,
+} from "./execution.js";
 
 export type TrustAdministrationApplicationErrorCode =
   | "invalid-command"

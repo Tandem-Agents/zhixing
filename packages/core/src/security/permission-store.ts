@@ -26,6 +26,7 @@ import type {
   IPermissionStore,
   PermissionContextId,
   PermissionRule,
+  PermissionRuleExecutionSource,
   PermissionScope,
   SecurityRequest,
   TrustContribution,
@@ -854,5 +855,31 @@ export class PermissionStore implements IPermissionStore {
     if (!fs.existsSync(this.rootDir)) {
       fs.mkdirSync(this.rootDir, { recursive: true });
     }
+  }
+}
+
+/** Bind one already-decided Trust context without exposing mutable storage. */
+export function bindPermissionRuleExecutionSource(
+  store: Pick<IPermissionStore, "match" | "matchFrozen">,
+  contextId: PermissionContextId,
+): PermissionRuleExecutionSource {
+  const context = cloneContextId(contextId);
+  return Object.freeze({
+    match: (request: SecurityRequest) => store.match(context, request),
+    matchFrozen: (
+      rules: readonly PermissionRule[],
+      request: SecurityRequest,
+    ) => store.matchFrozen(rules, request),
+  });
+}
+
+function cloneContextId(context: PermissionContextId): PermissionContextId {
+  switch (context.kind) {
+    case "main":
+      return Object.freeze({ kind: "main" });
+    case "workspace":
+      return Object.freeze({ kind: "workspace", hash: context.hash });
+    case "scene":
+      return Object.freeze({ kind: "scene", sceneId: context.sceneId });
   }
 }

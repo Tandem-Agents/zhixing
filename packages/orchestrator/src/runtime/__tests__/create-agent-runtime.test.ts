@@ -33,6 +33,7 @@ import {
   AgentError,
   buildGuidanceMessagePair,
   MockLLMProvider,
+  PermissionStore,
   skillNameToId,
   deriveToolCalls,
   userMessage,
@@ -41,6 +42,7 @@ import {
   type LLMRoles,
   type AgentEventMap,
   type Message,
+  type PermissionRule,
   type ToolDefinition,
   type SkillCatalogEntry,
   type TurnContextProvider,
@@ -2855,6 +2857,36 @@ describe("trustContext 装配分叉", () => {
     );
     expect("securityPipeline" in runtime).toBe(false);
     expect("permissionStore" in runtime).toBe(false);
+  });
+
+  it("Trust Administration projects user rules to security and durable assignment snapshots", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const store = new PermissionStore({ rootDir: null });
+    const userRule = PermissionStore.createRule({
+      pattern: { tool: "bash", argument: "npm *" },
+      decision: "allow",
+      scope: "global",
+    });
+    store.create({ kind: "main" }, userRule);
+    const runtime = await createAgentRuntime({
+      workspace: null,
+      permissionStore: store,
+    });
+
+    expect(runtime.securitySnapshot().permissionRules).toMatchObject([
+      { id: userRule.id, scope: "global" },
+    ]);
+    expect(runtime.executionPermissionRules()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: userRule.id, scope: "global" }),
+      ]),
+    );
+    const first = runtime.executionPermissionRules() as PermissionRule[];
+    first[0]!.pattern.argument = "mutated";
+    expect(
+      runtime.executionPermissionRules().find((rule) => rule.id === userRule.id)
+        ?.pattern.argument,
+    ).toBe("npm *");
   });
 
   it("把组合根的实际秘密路径注入每个运行体并旁路免疫地阻断", async () => {

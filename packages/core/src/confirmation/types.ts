@@ -21,9 +21,12 @@ import type {
   SecurityDecision,
   SessionType,
 } from "../security/types.js";
-import type { SuggestedPattern } from "../security/confirmation-tracker.js";
+import type { TrustAdministrationSuggestedPattern } from "../trust-administration/application.js";
 import type { TurnOrigin } from "../types/tools.js";
 import { MAX_INTERACTION_RESPONSE_TEXT_BYTES } from "../contracts/protocol.js";
+
+/** Confirmation surface projection of the Trust Administration suggestion. */
+export type SuggestedPattern = TrustAdministrationSuggestedPattern;
 
 // ─── 请求标识 ───
 

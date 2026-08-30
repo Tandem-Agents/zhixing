@@ -15,7 +15,6 @@
  */
 
 import {
-  PermissionStore,
   SecurityAuditor,
   truncateOutput,
   wrapWithConstraints,
@@ -27,10 +26,9 @@ import {
   type ExecutionConstraints,
   type IConfirmationBroker,
   type IEventBus,
-  type IPermissionStore,
+  type PermissionContextId,
   type SecurityMiddlewareResult,
   type SecurityPipeline,
-  type SecurityRequest,
   type SessionType,
   type ToolDefinition,
   type ToolExecutionContext,
@@ -38,6 +36,10 @@ import {
   type RiskLevel,
   type TurnContext,
 } from "@zhixing/core";
+import type {
+  TrustAdministrationContext,
+  TrustAdministrationExecutionApplication,
+} from "@zhixing/core/trust-administration";
 import { AISecuritySteward } from "./ai-steward.js";
 import type { StewardOperation, StewardVerdict } from "./ai-steward.js";
 
@@ -99,6 +101,8 @@ export type OnUserDeniedFn = (
 
 export interface SecureExecuteToolOptions {
   pipeline: SecurityPipeline;
+  /** Sole application owner for user trust approvals and sedimentation. */
+  trustAdministration: TrustAdministrationExecutionApplication;
   /** 原始 executeTool 实现(通常是 (tool, input, ctx) => tool.call(input, ctx)) */
   originalExecute: ExecuteToolFn;
   /**
@@ -150,6 +154,7 @@ export function createSecureExecuteTool(
 ): ExecuteToolFn {
   const {
     pipeline,
+    trustAdministration,
     originalExecute,
     broker,
     turnContext,
@@ -263,7 +268,7 @@ export function createSecureExecuteTool(
         // needs-confirm / 未触发管家 → broker（非交互由其 fail-to-deny 兜底）
         await handleBrokerPath({
           broker,
-          pipeline,
+          trustAdministration,
           toolName: tool.name,
           input,
           context: augmentedContext,
@@ -279,17 +284,9 @@ export function createSecureExecuteTool(
         });
       } else {
         // 管家放行 → 喂信任沉淀（累计达阈值后免管家），跳过 broker、落到下方执行
-        await maybePersistTrust({
-          pipeline,
-          request: {
-            tool: tool.name,
-            arguments: input,
-            context: {
-              cwd: augmentedContext.workingDirectory,
-              trust: pipeline.getTrust(),
-              sessionType,
-            },
-          },
+        await recordTrustApproval({
+          trustAdministration,
+          operation: { tool: tool.name, arguments: input },
           riskLevel: result.decision?.riskLevel ?? "medium",
           origin: "steward",
           bypassImmune: false,
@@ -356,7 +353,7 @@ async function consultSteward(params: {
 
 async function handleBrokerPath(params: {
   broker: IConfirmationBroker;
-  pipeline: SecurityPipeline;
+  trustAdministration: TrustAdministrationExecutionApplication;
   toolName: string;
   input: Record<string, unknown>;
   context: ToolExecutionContext;
@@ -375,7 +372,7 @@ async function handleBrokerPath(params: {
 }): Promise<void> {
   const {
     broker,
-    pipeline,
+    trustAdministration,
     toolName,
     input,
     context,
@@ -394,7 +391,7 @@ async function handleBrokerPath(params: {
     input,
     workingDirectory: context.workingDirectory,
     result,
-    contextId: pipeline.getContextId(),
+    contextId: toPermissionContext(trustAdministration.context),
     sessionType,
     // 远程确认回程地址透传：AgentRuntime → ToolExecutionContext.turnOrigin
     //   → ConfirmationRequest.turnOrigin → Hub / Renderer / Bridge
@@ -464,10 +461,9 @@ async function handleBrokerPath(params: {
       }
       await applyBrokerDecision({
         decision,
-        pipeline,
+        trustAdministration,
         toolName,
         input,
-        workingDirectory: context.workingDirectory,
         riskLevel: result.decision?.riskLevel ?? "medium",
         bypassImmune:
           result.decision?.matchedRules.some((r) => r.bypassImmune) ?? false,
@@ -609,15 +605,15 @@ function formatBytes(bytes: number): string {
  * 把一次放行喂给信任机制：累计达阈值则自动沉淀为持久 allow 规则（contributors 完整
  * 时间线 + scope=context 绑当前上下文，可在 /trust 面板撤销）。
  *
- * bypassImmune 永不沉淀（禁区底线）；critical 由 tracker 阈值 -1 自动排除。
+ * bypassImmune 永不沉淀（禁区底线）；critical 由领域阈值 -1 自动排除。
  *
  * 沉淀产出规则的 contextId 由 pipeline 当前上下文决定（PermissionContextId
  * discriminated union），永远非空。global 规则**不**由自动沉淀产出 —— 仅在用户
  * confirm 弹窗显式选 allow-global 时建立。
  */
-async function maybePersistTrust(params: {
-  pipeline: SecurityPipeline;
-  request: SecurityRequest;
+async function recordTrustApproval(params: {
+  trustAdministration: TrustAdministrationExecutionApplication;
+  operation: { readonly tool: string; readonly arguments: Readonly<Record<string, unknown>> };
   riskLevel: RiskLevel;
   origin: "user" | "steward";
   bypassImmune: boolean;
@@ -625,43 +621,37 @@ async function maybePersistTrust(params: {
   toolInput: Record<string, unknown>;
   auditor: SecurityAuditor | null;
 }): Promise<void> {
-  if (params.bypassImmune) return;
   const {
-    pipeline,
-    request,
+    trustAdministration,
+    operation,
     riskLevel,
     origin,
+    bypassImmune,
     toolName,
     toolInput,
     auditor,
   } = params;
-  const tracker = pipeline.getConfirmationTracker();
-  tracker.record(request, riskLevel, origin);
-  const status = tracker.shouldSuggest(request, riskLevel);
-  if (!status.suggest) return;
-  const pattern = tracker.persistencePattern(request);
-  if (!pattern) return;
-  const contextId = pipeline.getContextId();
-  const contextPath = pipeline.getWorkspace() ?? undefined;
-  // status.contributors 已是独立副本（shouldSuggest 内部深拷贝）—— 直接持有
-  const rule = PermissionStore.createRule({
-    pattern: pattern.pattern,
-    decision: "allow",
-    scope: "context",
-    contextId,
-    contextPath,
-    contributors: status.contributors,
+  const outcome = trustAdministration.recordApproval({
+    kind: "allow-once",
+    operation,
+    riskLevel,
+    origin,
+    bypassImmune,
   });
-  pipeline.getPermissionStore().create(contextId, rule);
-  if (auditor) {
+  if (outcome.kind === "rule-sedimented" && auditor) {
+    const context = outcome.rule.contextId;
+    if (!context) {
+      throw new TypeError("Sedimented Trust rule must be context-bound");
+    }
+    const contextId = toPermissionContext(context);
     await auditor.auditRuleSedimented({
       toolName,
       toolInput,
-      pattern: pattern.pattern,
+      pattern: { ...outcome.rule.pattern },
       scope: "context",
       contextId,
-      ruleId: rule.id,
-      contributors: rule.contributors ?? [],
+      ruleId: outcome.rule.id,
+      contributors: outcome.rule.contributors?.map((entry) => ({ ...entry })) ?? [],
     });
   }
 }
@@ -679,46 +669,28 @@ async function applyBrokerDecision(params: {
         | "allow-global";
     }
   >;
-  pipeline: SecurityPipeline;
+  trustAdministration: TrustAdministrationExecutionApplication;
   toolName: string;
   input: Record<string, unknown>;
-  workingDirectory: string;
   riskLevel: RiskLevel;
   bypassImmune: boolean;
   auditor: SecurityAuditor | null;
 }): Promise<void> {
   const {
     decision,
-    pipeline,
+    trustAdministration,
     toolName,
     input,
-    workingDirectory,
     riskLevel,
     bypassImmune,
     auditor,
   } = params;
 
-  const store: IPermissionStore = pipeline.getPermissionStore();
-  const contextId = pipeline.getContextId();
-
-  const request: SecurityRequest = {
-    tool: toolName,
-    arguments: input,
-    context: {
-      cwd: workingDirectory,
-      trust: pipeline.getTrust(),
-      sessionType: "interactive",
-    },
-  };
-
-  const now = Date.now();
-
   switch (decision.kind) {
     case "allow-once":
-      // 一次性允许 → 喂信任沉淀（累计达阈值后自动沉淀放行规则）
-      await maybePersistTrust({
-        pipeline,
-        request,
+      await recordTrustApproval({
+        trustAdministration,
+        operation: { tool: toolName, arguments: input },
         riskLevel,
         origin: "user",
         bypassImmune,
@@ -729,48 +701,37 @@ async function applyBrokerDecision(params: {
       return;
 
     case "allow-session":
-      // session 规则不落盘、不进 contributors 时间线 —— 重启即消失，无沉淀语义
-      store.create(
-        contextId,
-        PermissionStore.createRule({
-          pattern: decision.pattern.pattern,
-          decision: "allow",
-          scope: "session",
-        }),
-      );
+      trustAdministration.recordApproval({
+        kind: "allow-session",
+        pattern: decision.pattern,
+      });
       return;
 
-    case "allow-context": {
-      // 用户显式选 allow-context → 直接在本上下文建立 allow 规则
-      // contributors 为单条 user 记录（与决策 4「完整保留每次记录」一致：本次显式
-      // 选择就是一次 user contribution）
-      const contextPath = pipeline.getWorkspace() ?? undefined;
-      store.create(
-        contextId,
-        PermissionStore.createRule({
-          pattern: decision.pattern.pattern,
-          decision: "allow",
-          scope: "context",
-          contextId,
-          contextPath,
-          contributors: [{ origin: "user", timestamp: now }],
-        }),
-      );
+    case "allow-context":
+      trustAdministration.recordApproval({
+        kind: "allow-context",
+        pattern: decision.pattern,
+      });
       return;
-    }
 
     case "allow-global":
-      // 用户显式选 allow-global → 跨所有上下文 allow 规则
-      // 不传 contextId / contextPath —— global 规则不绑任何具体上下文
-      store.create(
-        contextId,
-        PermissionStore.createRule({
-          pattern: decision.pattern.pattern,
-          decision: "allow",
-          scope: "global",
-          contributors: [{ origin: "user", timestamp: now }],
-        }),
-      );
+      trustAdministration.recordApproval({
+        kind: "allow-global",
+        pattern: decision.pattern,
+      });
       return;
+  }
+}
+
+function toPermissionContext(
+  context: TrustAdministrationContext,
+): PermissionContextId {
+  switch (context.kind) {
+    case "main":
+      return { kind: "main" };
+    case "workspace":
+      return { kind: "workspace", hash: context.hash };
+    case "scene":
+      return { kind: "scene", sceneId: context.sceneId };
   }
 }

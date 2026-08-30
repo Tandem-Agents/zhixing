@@ -40,6 +40,7 @@ import {
   type TokenUsage,
   type ToolDefinition,
 } from "@zhixing/core";
+import type { TrustAdministrationExecutionApplication } from "@zhixing/core/trust-administration";
 import { protocolDigest } from "@zhixing/core/protocol";
 import type { ChildResourceLease, ModelCallResourceMeter } from "@zhixing/core/contracts";
 import { buildSystemPrompt, SUB_AGENT_SEGMENTS } from "../runtime/system-prompt.js";
@@ -116,6 +117,8 @@ export interface RunChildAgentOptions {
   llmRoles: LLMRoles;
   /** 共享父 SecurityPipeline 实例 —— 权限规则 / boundary registry 跨 agent 共用 */
   securityPipeline: SecurityPipeline;
+  /** 共享父信任管理应用，所有规则写入保持同一领域 owner。 */
+  trustAdministration: TrustAdministrationExecutionApplication;
   /** 工作区路径(透传 buildSystemPrompt;null 表示无工作区) */
   workspace: string | null;
   /** 工作区来源标识(runtime / global-config / cwd-fallback / none) */
@@ -413,6 +416,7 @@ async function runChildAgentInner(
           roleThinking: opts.roleThinking,
           llmRoles: opts.llmRoles,
           securityPipeline: opts.securityPipeline,
+          trustAdministration: opts.trustAdministration,
           confirmationBroker: childBroker,
           eventBus: childBus,
           // 顶层用户意图沿子链路透传 —— 子 secure-executor 在 augmentedContext

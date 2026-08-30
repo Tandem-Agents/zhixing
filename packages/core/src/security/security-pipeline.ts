@@ -3,7 +3,8 @@
  *
  * 将命令预解析、策略评估、操作分类、信任分级、权限匹配、守卫串联执行。
  * 安全审计（事件发射）由 run 级 SecurityAuditor 在 secure-executor 中调用，
- * 与 pipeline 解耦——pipeline 是 runtime 级单例（持沉淀状态），audit 是 per-run。
+ * 与 pipeline 解耦——pipeline 是 runtime 级只读执行投影，audit 是 per-run；
+ * 用户信任规则的创建与沉淀由 Trust Administration 应用负责。
  *
  * 安全管线：
  *   authorize
@@ -26,24 +27,19 @@ import {
   createDefaultClassifier,
 } from "./classifier.js";
 import { CommandAnalyzerMiddleware } from "./command-analyzer.js";
-import { ConfirmationTracker } from "./confirmation-tracker.js";
-import type { IConfirmationTracker } from "./confirmation-tracker.js";
 import {
   ExecutionGuardMiddleware,
   type ExecutionGuardOptions,
 } from "./execution-guard.js";
 import { PathResolveMiddleware } from "./path-resolve.js";
 import { PermissionMatcherMiddleware } from "./permission-matcher.js";
-import { PermissionStore } from "./permission-store.js";
 import { PolicyEngine } from "./policy-engine.js";
 import { TrustClassifierMiddleware } from "./trust-classifier.js";
-import { workspaceDirOf } from "./trust.js";
 import type { TrustContext } from "./trust.js";
 import type {
-  IPermissionStore,
   OperationClass,
   OperationClassifier,
-  PermissionContextId,
+  PermissionRuleExecutionSource,
   PermissionRule,
   SecurityDecision,
   SecurityMiddleware,
@@ -186,16 +182,8 @@ export interface SecurityPipelineOptions {
    * 工具边界注册表。当未提供 classifier 时用于构造默认分类器。
    */
   toolBoundaryRegistry?: ToolBoundaryRegistry;
-  /**
-   * 权限规则存储。未提供时使用 in-memory 默认 store（rootDir=null）。
-   * 生产环境应显式构造 `new PermissionStore({})` 以启用 ~/.zhixing/permissions/ 持久化。
-   */
-  permissionStore?: IPermissionStore;
-  /**
-   * 确认追踪器。未提供时使用默认的 in-memory tracker。
-   * 跨多次调用共享一个实例才能积累计数。
-   */
-  confirmationTracker?: IConfirmationTracker;
+  /** Already context-bound, read-only user trust input. */
+  permissionRuleSource?: PermissionRuleExecutionSource;
   /**
    * 执行守卫选项。控制工具 profile、频率限制窗口、共享 limiter 等。
    */
@@ -207,6 +195,11 @@ export interface SecurityPipelineOptions {
 export interface SecurityEvaluationOptions {
   readonly permissionRules?: readonly PermissionRule[];
 }
+
+const EMPTY_PERMISSION_RULE_SOURCE: PermissionRuleExecutionSource = Object.freeze({
+  match: () => null,
+  matchFrozen: () => null,
+});
 
 /**
  * 安全管线 — Phase 2 实现。
@@ -231,30 +224,14 @@ export interface SecurityEvaluationOptions {
  * 全局规则只在用户 confirm 显式选 allow-global 时建立，从根本上消除"主模式不
  * 知不觉建全局规则"的安全风险。
  */
-function deriveContextId(trust: TrustContext): PermissionContextId {
-  switch (trust.kind) {
-    case "workspace":
-      return {
-        kind: "workspace",
-        hash: PermissionStore.workspaceHashFromPath(trust.dir),
-      };
-    case "scene":
-      return { kind: "scene", sceneId: trust.sceneId };
-    case "global":
-      return { kind: "main" };
-  }
-}
-
 export class SecurityPipeline {
   private readonly middlewares: SecurityMiddleware[];
   private readonly policyEngine: PolicyEngine;
   private readonly classifier: OperationClassifier;
-  private readonly permissionStore: IPermissionStore;
-  private readonly confirmationTracker: IConfirmationTracker;
+  private readonly permissionRuleSource: PermissionRuleExecutionSource;
   private readonly executionGuard: ExecutionGuardMiddleware;
   private readonly sessionType: SessionType;
   private readonly trustContext: TrustContext;
-  private readonly contextId: PermissionContextId;
 
   constructor(options: SecurityPipelineOptions = {}) {
     this.policyEngine = new PolicyEngine(
@@ -264,15 +241,11 @@ export class SecurityPipeline {
     );
     this.sessionType = options.sessionType ?? "interactive";
     this.trustContext = options.trustContext ?? { kind: "global" };
-    this.contextId = deriveContextId(this.trustContext);
     this.classifier =
       options.classifier ??
       createDefaultClassifier({ registry: options.toolBoundaryRegistry });
-    // 默认 store 是纯内存的——生产代码显式传入持久化 store 以避免污染测试环境
-    this.permissionStore =
-      options.permissionStore ?? new PermissionStore({ rootDir: null });
-    this.confirmationTracker =
-      options.confirmationTracker ?? new ConfirmationTracker();
+    this.permissionRuleSource =
+      options.permissionRuleSource ?? EMPTY_PERMISSION_RULE_SOURCE;
     this.executionGuard = new ExecutionGuardMiddleware(
       options.executionGuard ?? {},
     );
@@ -285,8 +258,7 @@ export class SecurityPipeline {
       new OperationClassifierMiddleware(this.classifier),
       new TrustClassifierMiddleware(),
       new PermissionMatcherMiddleware(
-        this.permissionStore,
-        () => this.contextId,
+        this.permissionRuleSource,
       ),
       this.executionGuard,
     ];
@@ -349,39 +321,14 @@ export class SecurityPipeline {
     return this.classifier;
   }
 
-  /** 获取权限规则存储（用于 /trust 命令、CLI 规则管理） */
-  getPermissionStore(): IPermissionStore {
-    return this.permissionStore;
-  }
-
-  /** 获取确认追踪器（CLI 在用户选 [y] 后调用 record 累计计数） */
-  getConfirmationTracker(): IConfirmationTracker {
-    return this.confirmationTracker;
-  }
-
   /** 获取执行守卫实例（用于查询 rate limiter 状态、调试） */
   getExecutionGuard(): ExecutionGuardMiddleware {
     return this.executionGuard;
   }
 
-  /**
-   * 获取当前信任上下文的 ID（PermissionContextId discriminated union）。
-   *
-   * 主模式与工作场景在权限层平等都是"上下文"；三种 kind 各有独立 namespace，
-   * 由 type system 保证不互相碰撞。
-   */
-  getContextId(): PermissionContextId {
-    return this.contextId;
-  }
-
   /** 获取当前信任上下文。 */
   getTrust(): TrustContext {
     return this.trustContext;
-  }
-
-  /** 获取当前工作区的绝对路径（用于 UI 友好显示；仅 workspace 信任有，其余为 null）。 */
-  getWorkspace(): string | null {
-    return workspaceDirOf(this.trustContext);
   }
 
   /** 获取所有中间件（用于调试和测试） */

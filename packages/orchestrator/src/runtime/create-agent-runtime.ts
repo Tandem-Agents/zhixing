@@ -59,7 +59,6 @@ import {
   computeContextTokens,
   toToolSpec,
   DEFAULT_WATCHDOG_POLICY,
-  PermissionStore,
   resolveAgentIdentity,
   resolveModelInfo,
   SecurityPipeline,
@@ -80,11 +79,21 @@ import {
   projectSessionEvent,
   type AgentLoopDeps,
 } from "@zhixing/core";
+import {
+  bindPermissionRuleExecutionSource,
+  createPermissionStoreTrustAdministrationRepository,
+  PermissionStore,
+  toPermissionContext,
+} from "@zhixing/core/security";
 import type { ArtifactStore } from "@zhixing/core/authority";
 import {
   SkillCatalogKernelProjectionApplicationService,
   SkillCatalogLoadApplicationService,
 } from "@zhixing/core/skills/catalog";
+import {
+  TrustAdministrationExecutionApplicationService,
+  type TrustAdministrationRepositoryRule,
+} from "@zhixing/core/trust-administration";
 import type { ModelCallResourceMeter } from "@zhixing/core/contracts";
 import {
   createProviderRoles,
@@ -253,6 +262,25 @@ function assembleMessagePrefix(
     out.push(...cloneAndValidateMessagePrefix(contribution));
   }
   return out;
+}
+
+function toPermissionRule(rule: TrustAdministrationRepositoryRule): PermissionRule {
+  return {
+    id: rule.id,
+    pattern: { ...rule.pattern },
+    decision: rule.decision,
+    scope: rule.scope,
+    createdAt: rule.createdAt,
+    lastMatchedAt: rule.lastMatchedAt,
+    matchCount: rule.matchCount,
+    ...(rule.contextId
+      ? { contextId: toPermissionContext(rule.contextId) }
+      : {}),
+    ...(rule.contextPath === undefined ? {} : { contextPath: rule.contextPath }),
+    ...(rule.contributors
+      ? { contributors: rule.contributors.map((entry) => ({ ...entry })) }
+      : {}),
+  };
 }
 
 function captureTurnContextProviders(
@@ -783,6 +811,13 @@ export async function createAgentRuntime(
       fresh.registerBuiltinRules("web_fetch", [...WEB_FETCH_DEFAULT_RULES]);
       return fresh;
     })();
+  const trustAdministration = new TrustAdministrationExecutionApplicationService({
+    repository: createPermissionStoreTrustAdministrationRepository(
+      () => persistentStore,
+    ),
+    ...(sceneId === undefined ? {} : { sceneId }),
+    workspacePath: workspace.path,
+  });
   const boundaryRegistry: MutableToolBoundaryRegistry =
     BoundaryRegistry.fromTools(baseTools);
   const securityPipeline = new SecurityPipeline({
@@ -798,7 +833,10 @@ export async function createAgentRuntime(
           ? { kind: "workspace", dir: workspace.path }
           : { kind: "global" },
     sessionType,
-    permissionStore: persistentStore,
+    permissionRuleSource: bindPermissionRuleExecutionSource(
+      persistentStore,
+      toPermissionContext(trustAdministration.context),
+    ),
     toolBoundaryRegistry: boundaryRegistry,
     ...(options.systemProtectedPaths
       ? { systemProtectedPaths: options.systemProtectedPaths }
@@ -857,6 +895,7 @@ export async function createAgentRuntime(
       roleThinking,
       llmRoles: roles,
       securityPipeline,
+      trustAdministration,
       workspace: workspace.path,
       workspaceSource: workspace.source,
       globalConfigPath: getGlobalConfigPath(),
@@ -1273,6 +1312,7 @@ export async function createAgentRuntime(
         roleThinking,
         llmRoles: roles,
         securityPipeline,
+        trustAdministration,
         workspace: workspace.path,
         workspaceSource: workspace.source,
         globalConfigPath: getGlobalConfigPath(),
@@ -1310,24 +1350,22 @@ export async function createAgentRuntime(
     },
 
     securitySnapshot(): RuntimeSecuritySnapshot {
-      const contextId = securityPipeline.getContextId();
+      const trust = trustAdministration.securitySnapshot();
       return {
-        contextId,
-        workspacePath: securityPipeline.getWorkspace(),
-        permissionRules: securityPipeline.getPermissionStore().list(contextId),
+        contextId: toPermissionContext(trust.context),
+        workspacePath: trust.workspacePath,
+        permissionRules: trust.userRules.map(toPermissionRule),
         builtinRules: securityPipeline.getPolicyEngine().getActiveRules(),
         rateLimits: securityPipeline
           .getExecutionGuard()
           .getRateLimiter()
           .snapshot(),
-        confirmations: securityPipeline.getConfirmationTracker().snapshot(),
+        confirmations: trust.observations.map((entry) => ({ ...entry })),
       };
     },
 
     executionPermissionRules(): readonly PermissionRule[] {
-      return securityPipeline
-        .getPermissionStore()
-        .snapshot(securityPipeline.getContextId());
+      return trustAdministration.executionRules().map(toPermissionRule);
     },
 
     executionProfile(): RuntimeExecutionProfile {
@@ -1828,6 +1866,7 @@ export async function createAgentRuntime(
           : baseExecuteTool;
         const secureExecuteTool = createSecureExecuteTool({
           pipeline: securityPipeline,
+          trustAdministration,
           originalExecute: executeToolWithCapacity,
           broker: confirmationBroker,
           sessionType,

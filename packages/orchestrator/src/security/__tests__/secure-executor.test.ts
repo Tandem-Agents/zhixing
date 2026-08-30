@@ -27,8 +27,17 @@ import {
   type ToolResult,
 } from "@zhixing/core";
 import {
+  bindPermissionRuleExecutionSource,
+  createPermissionStoreTrustAdministrationRepository,
+} from "@zhixing/core/security";
+import {
+  TrustAdministrationExecutionApplicationService,
+  type TrustAdministrationExecutionApplication,
+} from "@zhixing/core/trust-administration";
+import {
   SecurityBlockError,
-  createSecureExecuteTool,
+  createSecureExecuteTool as createProductionSecureExecuteTool,
+  type SecureExecuteToolOptions,
 } from "../secure-executor.js";
 
 // ─── 测试辅助 ───
@@ -87,13 +96,47 @@ function mockExecute(): {
   };
 }
 
-function makePipeline(): { pipeline: SecurityPipeline; store: PermissionStore } {
+const trustByPipeline = new WeakMap<
+  SecurityPipeline,
+  TrustAdministrationExecutionApplication
+>();
+
+function makePipeline(): {
+  pipeline: SecurityPipeline;
+  store: PermissionStore;
+  trustAdministration: TrustAdministrationExecutionApplication;
+} {
   const store = new PermissionStore({ rootDir: null });
+  const repository = createPermissionStoreTrustAdministrationRepository(
+    () => store,
+  );
+  const trustAdministration = new TrustAdministrationExecutionApplicationService({
+    repository,
+    workspacePath: "/tmp/ws",
+  });
   const pipeline = new SecurityPipeline({
     trustContext: { kind: "workspace", dir: "/tmp/ws" },
-    permissionStore: store,
+    permissionRuleSource: bindPermissionRuleExecutionSource(
+      store,
+      trustAdministration.context,
+    ),
   });
-  return { pipeline, store };
+  trustByPipeline.set(pipeline, trustAdministration);
+  return { pipeline, store, trustAdministration };
+}
+
+function createSecureExecuteTool(
+  options: Omit<SecureExecuteToolOptions, "trustAdministration">,
+) {
+  const trustAdministration = trustByPipeline.get(options.pipeline);
+  if (!trustAdministration) throw new Error("test trust application missing");
+  return createProductionSecureExecuteTool({ ...options, trustAdministration });
+}
+
+function contextOf(pipeline: SecurityPipeline) {
+  const context = trustByPipeline.get(pipeline)?.context;
+  if (!context) throw new Error("test trust context missing");
+  return context;
 }
 
 /**
@@ -191,7 +234,7 @@ describe("createSecureExecuteTool", () => {
       const exec = mockExecute();
       const { pipeline, store } = makePipeline();
       store.create(
-        pipeline.getContextId(),
+        contextOf(pipeline),
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "curl *" },
           decision: "deny",
@@ -332,7 +375,7 @@ describe("createSecureExecuteTool", () => {
       }
       expect(exec.callCount()).toBe(3);
 
-      const wsId = pipeline.getContextId();
+      const wsId = contextOf(pipeline);
       const wsRules = store.list(wsId).filter((r) => r.scope === "context");
       expect(wsRules).toHaveLength(1);
       expect(wsRules[0]!.decision).toBe("allow");
@@ -364,7 +407,7 @@ describe("createSecureExecuteTool", () => {
           // block 路径抛 SecurityBlockError —— 同样不沉淀
         }
       }
-      expect(store.list(pipeline.getContextId())).toHaveLength(0);
+      expect(store.list(contextOf(pipeline))).toHaveLength(0);
     });
 
     it("bypassImmune confirm（写 .zhixing/）多次 allow-once → 永不沉淀", async () => {
@@ -387,7 +430,7 @@ describe("createSecureExecuteTool", () => {
           makeContext(),
         );
       }
-      expect(store.list(pipeline.getContextId())).toHaveLength(0);
+      expect(store.list(contextOf(pipeline))).toHaveLength(0);
     });
   });
 
@@ -503,6 +546,41 @@ describe("createSecureExecuteTool", () => {
       expect(exec.callCount()).toBe(1);
     });
 
+    it.each([
+      ["allow-session", "session"],
+      ["allow-context", "context"],
+      ["allow-global", "global"],
+    ] as const)(
+      "%s 保留 confirmation.resolve 已接受的空 argument",
+      async (decisionKind, expectedScope) => {
+        const broker = new ConfirmationBroker();
+        const exec = mockExecute();
+        const { pipeline, store } = makePipeline();
+        autoResolveBroker(broker, {
+          kind: decisionKind,
+          pattern: {
+            pattern: { tool: "bash", argument: "" },
+            label: "exact empty argument",
+          },
+        });
+        const wrapped = createSecureExecuteTool({
+          pipeline,
+          originalExecute: exec.fn,
+          broker,
+        });
+
+        await expect(
+          wrapped(makeTool("bash"), CONFIRM_TOOL_INPUT, makeContext()),
+        ).resolves.toMatchObject({ content: "executed" });
+        expect(store.list(contextOf(pipeline))).toMatchObject([
+          {
+            pattern: { tool: "bash", argument: "" },
+            scope: expectedScope,
+          },
+        ]);
+      },
+    );
+
     it("等待用户确认时 turn abort 会取消 broker pending 且不执行工具", async () => {
       const broker = new ConfirmationBroker();
       const exec = mockExecute();
@@ -580,12 +658,12 @@ describe("createSecureExecuteTool", () => {
       const exec = mockExecute();
       const { pipeline, store } = makePipeline();
       store.create(
-        pipeline.getContextId(),
+        contextOf(pipeline),
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "curl *" },
           decision: "allow",
           scope: "context",
-          contextId: pipeline.getContextId(),
+          contextId: contextOf(pipeline),
         }),
       );
 
@@ -651,7 +729,7 @@ describe("createSecureExecuteTool", () => {
       }
 
       expect(exec.callCount()).toBe(4);
-      expect(store.list(pipeline.getContextId())).toHaveLength(0);
+      expect(store.list(contextOf(pipeline))).toHaveLength(0);
       expect(sedimented).toHaveLength(0);
     });
 
@@ -675,7 +753,7 @@ describe("createSecureExecuteTool", () => {
       await wrapped(explicitTool(), { command }, makeContext());
 
       expect(exec.callCount()).toBe(1);
-      expect(store.list(pipeline.getContextId())).toHaveLength(0);
+      expect(store.list(contextOf(pipeline))).toHaveLength(0);
     });
   });
 

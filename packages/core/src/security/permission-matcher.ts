@@ -17,8 +17,7 @@
  */
 
 import type {
-  IPermissionStore,
-  PermissionContextId,
+  PermissionRuleExecutionSource,
   SecurityDecision,
   SecurityMiddleware,
   SecurityMiddlewareContext,
@@ -31,9 +30,7 @@ export class PermissionMatcherMiddleware implements SecurityMiddleware {
   readonly order = 20;
 
   constructor(
-    private readonly store: IPermissionStore,
-    /** 返回当前信任上下文 ID 的 getter（PermissionContextId discriminated union，永远非空）。 */
-    private readonly getContextId: () => PermissionContextId,
+    private readonly rules: PermissionRuleExecutionSource,
   ) {}
 
   async execute(
@@ -47,10 +44,9 @@ export class PermissionMatcherMiddleware implements SecurityMiddleware {
       return next();
     }
 
-    const contextId = this.getContextId();
     const matched = ctx.permissionRules === undefined
-      ? this.store.match(contextId, ctx.request)
-      : this.store.matchFrozen(ctx.permissionRules, ctx.request);
+      ? this.rules.match(ctx.request)
+      : this.rules.matchFrozen(ctx.permissionRules, ctx.request);
 
     if (matched) {
       ctx.state.matchedPermissionRule = matched;

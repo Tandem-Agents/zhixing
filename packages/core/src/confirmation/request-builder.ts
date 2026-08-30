@@ -25,8 +25,10 @@ import type {
   DisplayBody,
 } from "./types.js";
 import { getAgentIdentity } from "../identity/index.js";
-import { suggestPatterns } from "../security/confirmation-tracker.js";
-import type { SuggestedPattern } from "../security/confirmation-tracker.js";
+import {
+  suggestTrustAdministrationPatterns,
+  type TrustAdministrationSuggestedPattern as SuggestedPattern,
+} from "../trust-administration/application.js";
 import type {
   OperationClass,
   PermissionContextId,
@@ -175,7 +177,7 @@ export function buildPanelTitle(toolName: string): string {
  * "持久授权"，只是作用域不同（本上下文 vs 跨所有上下文）。
  */
 function pickPersistentPattern(
-  patterns: SuggestedPattern[],
+  patterns: readonly SuggestedPattern[],
 ): SuggestedPattern | undefined {
   if (patterns.length === 0) return undefined;
 
@@ -226,12 +228,12 @@ export function buildConfirmationOptions(
     requiresExplicitConfirmation?: boolean;
   },
 ): ConfirmationOption[] {
+  void sessionType;
   const { displayName } = getAgentIdentity();
 
-  const patterns = suggestPatterns({
+  const patterns = suggestTrustAdministrationPatterns({
     tool: toolName,
     arguments: input,
-    context: { cwd: "", trust: { kind: "global" }, sessionType },
   });
 
   const persistentPattern = pickPersistentPattern(patterns);

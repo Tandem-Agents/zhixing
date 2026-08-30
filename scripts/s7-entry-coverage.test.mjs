@@ -3258,6 +3258,9 @@ test("Workspace Administration CRUD, reset, durable lifecycle and result deliver
 test("Trust Administration management has one domain application and Product API boundary", async () => {
   const paths = [
     "packages/core/src/trust-administration/application.ts",
+    "packages/core/src/trust-administration/execution.ts",
+    "packages/core/src/security/trust-administration-adapter.ts",
+    "packages/core/src/security/security-pipeline.ts",
     "packages/core/src/product-api/catalog.ts",
     "packages/core/src/index.ts",
     "packages/core/package.json",
@@ -3270,6 +3273,12 @@ test("Trust Administration management has one domain application and Product API
     "packages/cli/src/runtime/rpc-management-facade.ts",
     "packages/cli/src/security/commands.ts",
     "packages/cli/src/security/trust-rule-arg-provider.ts",
+    "packages/orchestrator/src/security/secure-executor.ts",
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+    "packages/orchestrator/src/tools/task.ts",
+    "packages/orchestrator/src/subagent/factory.ts",
+    "packages/orchestrator/src/subagent/loop-runner.ts",
+    "packages/orchestrator/src/orchestration/agent-node-executor.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -3333,6 +3342,47 @@ test("Trust Administration management has one domain application and Product API
       },
     ]).join("\n"),
     /retains the retired TrustDirectory application path/,
+  );
+  assert.match(
+    inspectTrustAdministrationOwnership(mutate(
+      "packages/core/src/trust-administration/execution.ts",
+      (text) => `${text}\nimport { PermissionStore } from "../security/permission-store.js";`,
+    )).join("\n"),
+    /does not uniquely own explicit rules, contributions, sedimentation, and execution projections/,
+  );
+  assert.match(
+    inspectTrustAdministrationOwnership(mutate(
+      "packages/orchestrator/src/security/secure-executor.ts",
+      (text) => `${text}\nPermissionStore.createRule({});`,
+    )).join("\n"),
+    /retains Trust rule creation or sedimentation ownership/,
+  );
+  assert.match(
+    inspectTrustAdministrationOwnership(mutate(
+      "packages/core/src/security/security-pipeline.ts",
+      (text) => `${text}\ngetPermissionStore() { return undefined; }`,
+    )).join("\n"),
+    /retains mutable Trust Administration state or writer access/,
+  );
+  assert.match(
+    inspectTrustAdministrationOwnership(mutate(
+      "packages/orchestrator/src/subagent/loop-runner.ts",
+      (text) => text.replace(
+        "trustAdministration: opts.trustAdministration,",
+        "",
+      ),
+    )).join("\n"),
+    /child execution can bypass the one Trust application/,
+  );
+  assert.match(
+    inspectTrustAdministrationOwnership([
+      ...records,
+      {
+        relative: "packages/core/src/security/confirmation-tracker.ts",
+        text: "export class ConfirmationTracker {}",
+      },
+    ]).join("\n"),
+    /retired Trust tracker, helper, or temporary store bridge remains reachable/,
   );
 });
 

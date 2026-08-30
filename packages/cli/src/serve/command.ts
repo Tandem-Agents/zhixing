@@ -373,8 +373,8 @@ async function runServerProcess(
   const providerCredentials = credentials.providers
     ? { providers: credentials.providers }
     : {};
-  // Trust Administration owns management semantics; this Host projection is
-  // the temporary A5-TRUST-STORE-01 bridge to the existing PermissionStore.
+  // Trust Administration owns management semantics; the adapter below only
+  // maps its finite repository port to the existing storage mechanism.
   const trustAdministration = createTrustAdministrationApplication({
     config,
   });

@@ -223,7 +223,7 @@ export type PermissionContextId =
 
 /**
  * 一次"信任贡献"记录——用户在 confirm 中选 allow-once 或 AI 安全助理判 safe 的
- * 时间点 + 来源。`ConfirmationTracker` 累积一组此记录达阈值时触发自动沉淀；
+ * 时间点 + 来源。Trust Administration 累积一组此记录达阈值时触发自动沉淀；
  * 沉淀产出的 `PermissionRule.contributors` 字段直接拷贝累积数组，保留完整时间线。
  */
 export interface TrustContribution {
@@ -364,6 +364,18 @@ export interface IPermissionStore {
 
   /** 清除全部规则（包括 global 和所有上下文）。不影响 builtin（boot-time 系统配置）。 */
   resetAll(): void;
+}
+
+/**
+ * Context-bound, read-only rule source consumed by Security. The binding owns
+ * no rule lifecycle decision and exposes no mutable store capability.
+ */
+export interface PermissionRuleExecutionSource {
+  match(request: SecurityRequest): PermissionRule | null;
+  matchFrozen(
+    rules: readonly PermissionRule[],
+    request: SecurityRequest,
+  ): PermissionRule | null;
 }
 
 /**

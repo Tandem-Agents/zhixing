@@ -2110,6 +2110,10 @@ export function inspectAgentRuntimeSecurityEncapsulation(records) {
     runtimeSource.match(/new SecurityPipeline\s*\(/gu) ?? [];
   const storeConstructions =
     runtimeSource.match(/new PermissionStore\s*\(/gu) ?? [];
+  const trustApplicationConstructions =
+    runtimeSource.match(
+      /new TrustAdministrationExecutionApplicationService\s*\(/gu,
+    ) ?? [];
   const securityBindings = new Map([
     [
       "createSecureExecuteTool",
@@ -2158,7 +2162,8 @@ export function inspectAgentRuntimeSecurityEncapsulation(records) {
   if (
     pipelineConstructions.length !== 1 ||
     storeConstructions.length !== 1 ||
-    !runtimeSource.includes("permissionStore: persistentStore,") ||
+    trustApplicationConstructions.length !== 1 ||
+    !runtimeSource.includes("bindPermissionRuleExecutionSource(") ||
     !runtimeSource.includes("const securityPipeline = new SecurityPipeline({") ||
     [...securityBindings].some(
       ([name, spec]) =>
@@ -3084,6 +3089,27 @@ export function inspectTrustAdministrationOwnership(records) {
   const application = required(
     "packages/core/src/trust-administration/application.ts",
   );
+  const execution = required(
+    "packages/core/src/trust-administration/execution.ts",
+  );
+  const mechanismAdapter = required(
+    "packages/core/src/security/trust-administration-adapter.ts",
+  );
+  const securityPipeline = required(
+    "packages/core/src/security/security-pipeline.ts",
+  );
+  const secureExecutor = required(
+    "packages/orchestrator/src/security/secure-executor.ts",
+  );
+  const agentRuntime = required(
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+  );
+  const taskTool = required("packages/orchestrator/src/tools/task.ts");
+  const childFactory = required("packages/orchestrator/src/subagent/factory.ts");
+  const childLoop = required("packages/orchestrator/src/subagent/loop-runner.ts");
+  const agentNode = required(
+    "packages/orchestrator/src/orchestration/agent-node-executor.ts",
+  );
   const productApi = required("packages/core/src/product-api/catalog.ts");
   const handler = required("packages/server/src/rpc/methods/trust.ts");
   const context = required("packages/server/src/context.ts");
@@ -3123,6 +3149,104 @@ export function inspectTrustAdministrationOwnership(records) {
     failures.push(
       "Trust Administration does not uniquely own context, visibility, revoke, and committed fact semantics",
     );
+  }
+
+  if (
+    !execution.includes("export class TrustAdministrationExecutionApplicationService") ||
+    !execution.includes("recordApproval(") ||
+    !execution.includes('kind: "rule-sedimented"') ||
+    !execution.includes("SUGGESTION_THRESHOLDS") ||
+    !execution.includes("highestRisk") ||
+    !execution.includes("contributors") ||
+    /PermissionStore|SecurityPipeline|IPermissionStore|PermissionRuleExecutionSource/u.test(execution)
+  ) {
+    failures.push(
+      "Trust Administration does not uniquely own explicit rules, contributions, sedimentation, and execution projections",
+    );
+  }
+
+  if (
+    !mechanismAdapter.includes("createPermissionStoreTrustAdministrationRepository") ||
+    !mechanismAdapter.includes("createExecutionRule(") ||
+    !mechanismAdapter.includes("snapshotExecutionRules(") ||
+    !mechanismAdapter.includes("toPermissionContext(") ||
+    /parseConversationId|SUGGESTION_THRESHOLDS|recordApproval/u.test(mechanismAdapter)
+  ) {
+    failures.push(
+      "PermissionStore is not confined to the one Trust Administration mechanism adapter",
+    );
+  }
+
+  if (
+    /ConfirmationTracker|permissionStore|getPermissionStore|getConfirmationTracker|getContextId|getWorkspace/u.test(
+      securityPipeline,
+    ) ||
+    !securityPipeline.includes("PermissionRuleExecutionSource")
+  ) {
+    failures.push(
+      "SecurityPipeline retains mutable Trust Administration state or writer access",
+    );
+  }
+
+  if (
+    !secureExecutor.includes("trustAdministration.recordApproval({") ||
+    /PermissionStore|ConfirmationTracker|getPermissionStore|getConfirmationTracker|createExecutionRule/u.test(
+      secureExecutor,
+    )
+  ) {
+    failures.push(
+      "secure-executor retains Trust rule creation or sedimentation ownership",
+    );
+  }
+
+  if (
+    !agentRuntime.includes("new TrustAdministrationExecutionApplicationService({") ||
+    !agentRuntime.includes("createPermissionStoreTrustAdministrationRepository(") ||
+    !agentRuntime.includes("bindPermissionRuleExecutionSource(") ||
+    !agentRuntime.includes("trustAdministration.securitySnapshot()") ||
+    !agentRuntime.includes("trustAdministration.executionRules()")
+  ) {
+    failures.push(
+      "Agent runtime does not compose the one Trust application and readonly Security projection",
+    );
+  }
+
+  for (const [relative, text, binding] of [
+    [
+      "packages/orchestrator/src/tools/task.ts",
+      taskTool,
+      "trustAdministration: env.trustAdministration,",
+    ],
+    [
+      "packages/orchestrator/src/subagent/factory.ts",
+      childFactory,
+      "trustAdministration: opts.trustAdministration,",
+    ],
+    [
+      "packages/orchestrator/src/subagent/loop-runner.ts",
+      childLoop,
+      "trustAdministration: opts.trustAdministration,",
+    ],
+    [
+      "packages/orchestrator/src/orchestration/agent-node-executor.ts",
+      agentNode,
+      "trustAdministration: this.options.trustAdministration,",
+    ],
+  ]) {
+    if (
+      !text.includes("TrustAdministrationExecutionApplication") ||
+      !text.includes(binding)
+    ) {
+      failures.push(`${relative}: child execution can bypass the one Trust application`);
+    }
+  }
+
+  if (
+    byPath.has("packages/core/src/security/confirmation-tracker.ts") ||
+    byPath.has("packages/core/src/security/trust-rules.ts") ||
+    records.some((record) => record.text.includes("A5-TRUST-STORE-01"))
+  ) {
+    failures.push("retired Trust tracker, helper, or temporary store bridge remains reachable");
   }
 
   if (

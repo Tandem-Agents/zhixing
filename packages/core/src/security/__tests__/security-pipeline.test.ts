@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { PermissionStore } from "../permission-store.js";
+import {
+  bindPermissionRuleExecutionSource,
+  PermissionStore,
+} from "../permission-store.js";
 import { SlidingWindowRateLimiter } from "../rate-limiter.js";
 import { SecurityPipeline } from "../security-pipeline.js";
 import type {
@@ -276,7 +279,9 @@ describe("SecurityPipeline", () => {
 
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: "/home/user/project" },
-        permissionStore: store,
+        permissionRuleSource: bindPermissionRuleExecutionSource(store, {
+          kind: "main",
+        }),
       });
 
       const result = await pipeline.evaluate(
@@ -304,7 +309,9 @@ describe("SecurityPipeline", () => {
 
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: "/home/user/project" },
-        permissionStore: store,
+        permissionRuleSource: bindPermissionRuleExecutionSource(store, {
+          kind: "main",
+        }),
       });
 
       const result = await pipeline.evaluate(
@@ -348,7 +355,9 @@ describe("SecurityPipeline", () => {
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: "/home/user/project" },
         sessionType: "ci",
-        permissionStore: store,
+        permissionRuleSource: bindPermissionRuleExecutionSource(store, {
+          kind: "main",
+        }),
       });
 
       const result = await pipeline.evaluate(
@@ -379,7 +388,7 @@ describe("SecurityPipeline", () => {
 
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: wsPath },
-        permissionStore: store,
+        permissionRuleSource: bindPermissionRuleExecutionSource(store, wsCtx),
       });
 
       // npm install 本身是 internal（不会触发 confirm），
@@ -416,7 +425,9 @@ describe("SecurityPipeline", () => {
 
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: "/home/user/project" },
-        permissionStore: store,
+        permissionRuleSource: bindPermissionRuleExecutionSource(store, {
+          kind: "main",
+        }),
       });
 
       const result = await pipeline.evaluate(
@@ -440,48 +451,13 @@ describe("SecurityPipeline", () => {
       expect(names).toContain("PermissionMatcher");
     });
 
-    it("pipeline.getPermissionStore 和 getContextId 暴露访问", () => {
+    it("pipeline 不暴露可写 store、上下文规则创建或 tracker", () => {
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
-
-      expect(pipeline.getPermissionStore()).toBeDefined();
-      const id = pipeline.getContextId();
-      expect(id.kind).toBe("workspace");
-    });
-
-    // 决策 6 核心 invariant：主模式与工作场景在权限层平等都是"上下文"，三种 kind
-    // 由 type system 严守独立 namespace —— 永不可能产生 namespace 碰撞（例如用户
-    // 起名 "Main" 的 scene 与主模式撞 contextId 字符串）。锁住主模式自动沉淀绑
-    // 当前上下文（而非建全局规则）的安全语义起点。
-    it("getContextId 主模式（global 信任）返回 {kind:'main'} union", () => {
-      const pipeline = new SecurityPipeline({ trustContext: { kind: "global" } });
-      expect(pipeline.getContextId()).toEqual({ kind: "main" });
-    });
-
-    it("getContextId 工作场景返回 {kind:'workspace', hash} union（与主模式不同 kind）", () => {
-      const pipeline = new SecurityPipeline({
-        trustContext: { kind: "workspace", dir: "/home/user/project" },
-      });
-      const id = pipeline.getContextId();
-      expect(id.kind).toBe("workspace");
-      if (id.kind === "workspace") {
-        expect(id.hash).toMatch(/^[0-9a-f]{16}$/);
-      }
-    });
-
-    // namespace 隔离反向断言：sceneId 即使等于 "main" 字符串也走 kind="scene"
-    // 分支，与主模式上下文完全独立（discriminated union 保证）。
-    it("getContextId scene 信任与同名主模式上下文 namespace 隔离", () => {
-      const main = new SecurityPipeline({ trustContext: { kind: "global" } });
-      // sceneId 故意取 "main" —— 旧 string 实现下会与主模式撞 contextId
-      const scene = new SecurityPipeline({
-        trustContext: { kind: "scene", sceneId: "main" },
-      });
-      expect(main.getContextId()).toEqual({ kind: "main" });
-      expect(scene.getContextId()).toEqual({ kind: "scene", sceneId: "main" });
-      // 两个 ID 不相等：kind 不同 → 持久化文件名不同 → 规则永不互相泄漏
-      expect(main.getContextId()).not.toEqual(scene.getContextId());
+      expect(pipeline).not.toHaveProperty("getPermissionStore");
+      expect(pipeline).not.toHaveProperty("getContextId");
+      expect(pipeline).not.toHaveProperty("getConfirmationTracker");
     });
 
     it("result 透出 trustLevel（global 上下文 → global）", async () => {
@@ -492,7 +468,7 @@ describe("SecurityPipeline", () => {
 
   });
 
-  describe("信任沉淀 tracker 集成", () => {
+  describe("信任执行投影集成", () => {
     it("权限规则 allow 命中后直接放行，不再触发 confirm", async () => {
       const store = new PermissionStore({ rootDir: null });
       store.create(
@@ -506,7 +482,9 @@ describe("SecurityPipeline", () => {
 
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: "/home/user/project" },
-        permissionStore: store,
+        permissionRuleSource: bindPermissionRuleExecutionSource(store, {
+          kind: "main",
+        }),
       });
 
       const result = await pipeline.evaluate(
@@ -519,14 +497,6 @@ describe("SecurityPipeline", () => {
       expect(result.requiresConfirmation).toBeFalsy();
     });
 
-    it("pipeline.getConfirmationTracker 暴露访问", () => {
-      const pipeline = new SecurityPipeline({
-        trustContext: { kind: "workspace", dir: "/home/user/project" },
-      });
-
-      expect(pipeline.getConfirmationTracker()).toBeDefined();
-      expect(typeof pipeline.getConfirmationTracker().record).toBe("function");
-    });
   });
 
   describe("执行守卫集成", () => {
