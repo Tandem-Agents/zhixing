@@ -45,6 +45,7 @@ import {
   CONVERSATION_HISTORY_QUERY,
   CONVERSATION_LIST_QUERY,
   CONVERSATION_RENAME_COMMAND,
+  CONVERSATION_RESUME_COMMAND,
   ConversationApplicationError,
   type ConversationDirectoryEntry,
 } from "@zhixing/core/conversation/application";
@@ -2786,39 +2787,60 @@ export function buildSessionResumeMethod(): MethodEntry {
           "session.resume requires 'conversationId'",
         );
       }
-      const directory = requireDirectory(ctx.server);
-      const touched = await directory.touch(params.conversationId);
-      if (!touched) {
-        throw RpcErrors.notFound(`Session not found: ${params.conversationId}`);
-      }
       const manager = requireConversations(ctx.server);
       // 先入组播名册再恢复——恢复期的推进事件（proxy_recovered /
       // recovery_failed / 补审结果）必须对触发 resume 的这个用户可见；
       // 订阅若留给客户端事后补做，事件恒早于订阅、知情面必然丢失。
-      manager.addObserver(params.conversationId, String(ctx.connection.id), {
-        allowInactive: true,
-      });
-      await ctx.server.advancementRecovery?.recoverConversation(
+      const connectionId = String(ctx.connection.id);
+      const alreadyObserved = manager
+        .getObserverConnectionIds(params.conversationId)
+        .has(connectionId);
+      const observerAdded = manager.addObserver(
         params.conversationId,
+        connectionId,
+        { allowInactive: true },
       );
-      const active = manager.getSession(params.conversationId);
-      const adoptionReview = await ctx.server.conversationAdoptionReview?.({
-        conversationId: params.conversationId,
-        surfacePrincipal: rpcSurfacePrincipal(ctx.connection),
-        connectionId: String(ctx.connection.id),
-      });
-      return {
-        // 返回入参全域键——与 rename 同纪律,目录契约返回库内身份
-        conversationId: params.conversationId,
-        name: touched.name,
-        active: !!active,
-        busy: active?.busy ?? false,
-        advancement: await loadAdvancementState(
-          ctx.server,
+      const productApi = requireConversationProductApi(
+        ctx.server,
+        CONVERSATION_RESUME_COMMAND,
+      );
+      try {
+        const dispatch = await productApi.command(CONVERSATION_RESUME_COMMAND, {
+          kind: "resume",
+          conversationId: params.conversationId,
+          caller: {
+            kind: "surface",
+            surfacePrincipal: rpcSurfacePrincipal(ctx.connection),
+            connectionId,
+          },
+        });
+        const resumed = dispatch.result;
+        return {
+          conversationId: resumed.conversationId,
+          name: resumed.name,
+          active: resumed.active,
+          busy: resumed.busy,
+          ...(resumed.advancement
+            ? { advancement: resumed.advancement }
+            : {}),
+          ...(resumed.adoptionReview
+            ? { adoptionReview: resumed.adoptionReview }
+            : {}),
+        } satisfies SessionResumeResult;
+      } catch (error) {
+        if (
+          error instanceof ConversationApplicationError &&
+          error.code === "not-found" &&
+          observerAdded &&
+          !alreadyObserved
+        ) {
+          manager.removeObserver(params.conversationId, connectionId);
+        }
+        throw mapConversationResumeApplicationError(
+          error,
           params.conversationId,
-        ),
-        ...(adoptionReview ? { adoptionReview } : {}),
-      };
+        );
+      }
     },
   };
 }
@@ -3089,6 +3111,19 @@ function mapConversationApplicationError(
   }
   return RpcErrors.invalidParams(
     "session.history 'limit' must be a positive integer",
+  );
+}
+
+function mapConversationResumeApplicationError(
+  error: unknown,
+  conversationId: string,
+): unknown {
+  if (!(error instanceof ConversationApplicationError)) return error;
+  if (error.code === "not-found") {
+    return RpcErrors.notFound(`Session not found: ${conversationId}`);
+  }
+  return RpcErrors.invalidParams(
+    "session.resume requires non-empty 'conversationId'",
   );
 }
 

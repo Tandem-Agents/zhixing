@@ -299,20 +299,40 @@ export class LocalConversationRpcRouter
       case "session.resume": {
         requireLocalConsent(params);
         const conversationId = this.#conversationId(params, method);
-        if (!(await this.input.owner.listConversations()).includes(conversationId)) {
-          throw RpcErrors.notFound("这台电脑上没有这个对话，请从列表中重新选择。");
-        }
-        const meta = await this.input.owner.sessionState.readSessionMeta(
-          conversationId,
-          context(`resume:${conversationId}`),
-        );
+        const alreadySubscribed =
+          this.#observers.get(conversationId)?.has(connection.id) ?? false;
         this.#subscribe(conversationId, connection);
-        return {
-          conversationId,
-          name: meta.name ?? "本机对话",
-          active: false,
-          busy: false,
-        } satisfies SessionResumeResult;
+        try {
+          const resumed = await this.#application.resume({
+            kind: "resume",
+            conversationId,
+            caller: {
+              kind: "host",
+              component: "local-conversation-rpc",
+            },
+          });
+          return {
+            conversationId: resumed.conversationId,
+            name: resumed.name,
+            active: resumed.active,
+            busy: resumed.busy,
+            ...(resumed.advancement
+              ? { advancement: resumed.advancement }
+              : {}),
+            ...(resumed.adoptionReview
+              ? { adoptionReview: resumed.adoptionReview }
+              : {}),
+          } satisfies SessionResumeResult;
+        } catch (error) {
+          if (
+            error instanceof ConversationApplicationError &&
+            error.code === "not-found" &&
+            !alreadySubscribed
+          ) {
+            this.#observers.get(conversationId)?.delete(connection.id);
+          }
+          throw mapLocalConversationApplicationError(error, "resume");
+        }
       }
       case "session.subscribe": {
         const conversationId = this.#conversationId(params, method);
@@ -739,7 +759,7 @@ function projectWireConversationEntry(
 
 function mapLocalConversationApplicationError(
   error: unknown,
-  operation: "history" | "rename" | "clear" | "delete",
+  operation: "history" | "resume" | "rename" | "clear" | "delete",
 ): unknown {
   if (!(error instanceof ConversationApplicationError)) return error;
   if (error.code === "not-found") {
@@ -757,6 +777,8 @@ function mapLocalConversationApplicationError(
       ? operation === "clear"
         ? "清空请求缺少有效的请求标识。"
         : "删除请求缺少有效的请求标识。"
+      : operation === "resume"
+        ? "对话标识无效，请从列表中重新选择。"
       : operation === "rename"
       ? "对话名称不能为空。"
       : error.message.includes("cursor")

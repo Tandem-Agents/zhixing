@@ -79,6 +79,7 @@ import {
   type ConversationClearProjectionPort,
   type ConversationDeleteProjectionPort,
   type ConversationDirectoryStorage,
+  type ConversationAdoptionReviewProjection,
 } from "@zhixing/core/conversation/application";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import { loadAdvancementState } from "../rpc/methods/session.js";
@@ -358,7 +359,17 @@ async function waitUntil(
 function createMemoryDirectory(
   records: Map<string, unknown[]>,
 ): ConversationDirectory & ConversationDirectoryStorage &
-  Pick<ConversationClearProjectionPort, "clearStoredView"> {
+  Pick<ConversationClearProjectionPort, "clearStoredView"> &
+  Readonly<{
+    touch(conversationId: string): Promise<Readonly<{
+      id: string;
+      name: string;
+      createdAt: string;
+      lastActiveAt: string;
+      isDefault: boolean;
+      archived: boolean;
+    }> | null>;
+  }> {
   const names = new Map<string, string>();
   const removed = new Set<string>();
   let createdSeq = 0;
@@ -464,14 +475,58 @@ function createConversationProductApi(input: {
   readonly directory: ConversationDirectoryStorage &
     Pick<ConversationClearProjectionPort, "clearStoredView"> &
     Pick<ConversationDirectory, "exists" | "ensure"> &
-    Readonly<{ deleteStoredConversation(conversationId: string): Promise<boolean> }>;
+    Readonly<{
+      touch(conversationId: string): Promise<Readonly<{
+        id: string;
+        name: string;
+        createdAt: string;
+        lastActiveAt: string;
+      }> | null>;
+      deleteStoredConversation(conversationId: string): Promise<boolean>;
+    }>;
   readonly conversations: ConversationManager;
   readonly advancement?: AdvancementController;
+  readonly advancementRecovery?: Readonly<{
+    recoverConversation(conversationId: string): Promise<unknown>;
+  }>;
+  readonly adoptionReview?: (input: Readonly<{
+    conversationId: string;
+    surfacePrincipal: string;
+    connectionId: string;
+  }>) => Promise<ConversationAdoptionReviewProjection | undefined>;
   readonly publishCleared?: (conversationId: string) => void;
   readonly publishDeleted?: (conversationId: string) => void;
 }): ProductApiDispatcher {
   const application = new ConversationDirectoryApplicationService({
     storage: input.directory,
+    resume: {
+      restoreIdentity: async (conversationId) => {
+        const restored = await input.directory.touch(conversationId);
+        return restored
+          ? {
+              conversationId,
+              name: restored.name,
+              createdAt: restored.createdAt,
+              lastActiveAt: restored.lastActiveAt,
+            }
+          : null;
+      },
+      recoverDependentLifecycle: async (conversationId) => {
+        await input.advancementRecovery?.recoverConversation(conversationId);
+      },
+      ...(input.adoptionReview
+        ? {
+            reviewAdoption: async ({ conversationId, caller }) =>
+              caller.kind === "surface"
+                ? input.adoptionReview!({
+                    conversationId,
+                    surfacePrincipal: caller.surfacePrincipal,
+                    connectionId: caller.connectionId,
+                  })
+                : undefined,
+          }
+        : {}),
+    },
     clear: {
       requiresStableOperationIdentity:
         input.conversations.usesDurableTurnProtocol(),
@@ -1048,6 +1103,7 @@ describe("session.* RPC (S2.D)", () => {
       directory: conversationDirectory,
       conversations,
       advancement: opts.advancement,
+      advancementRecovery,
       publishCleared: (conversationId) => {
         ctx.sessionBroadcast?.(conversationId, "session.changed", {
           conversationId,
@@ -2899,40 +2955,71 @@ describe("session.* RPC (S2.D)", () => {
 
   it("session.resume 先入组播名册再恢复推进（handler 直测顺序锚）", async () => {
     const calls: string[] = [];
-    const serverCtx = {
-      conversationDirectory: {
-        touch: async () => ({ name: "conv" }),
+    const storage: ConversationDirectoryStorage = {
+      list: async () => [],
+      create: async () => {
+        throw new Error("not used");
       },
-      conversations: {
-        addObserver: () => calls.push("addObserver"),
-        getSession: () => undefined,
-      },
-      advancementRecovery: {
-        recoverConversation: async () => {
+      rename: async () => null,
+      readHistory: async () => ({ runs: [], hasMore: false }),
+    };
+    const application = new ConversationDirectoryApplicationService({
+      storage,
+      resume: {
+        restoreIdentity: async () => {
+          calls.push("restoreIdentity");
+          return {
+            conversationId: "conv-order",
+            name: "conv",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            lastActiveAt: "2026-01-01T00:00:00.000Z",
+          };
+        },
+        recoverDependentLifecycle: async () => {
           calls.push("recoverConversation");
-          return { status: "no-pending-recovery" };
+        },
+        reviewAdoption: async ({ caller }) => {
+          calls.push("reviewAdoption");
+          expect(caller).toEqual({
+            kind: "surface",
+            surfacePrincipal: "rpc:test-cli",
+            connectionId: "7",
+          });
+          return {
+            status: "ready" as const,
+            mergedConversationCount: 1,
+            appliedRuleCount: 0,
+            pendingScheduleCount: 1,
+            pendingRuleCount: 0,
+            message: "已合并 1 个本机对话；1 项排程等待确认。",
+          };
         },
       },
-      conversationAdoptionReview: async (input: {
-        conversationId: string;
-        surfacePrincipal: string;
-        connectionId: string;
-      }) => {
-        calls.push("reviewAdoption");
-        expect(input).toEqual({
-          conversationId: "conv-order",
-          surfacePrincipal: "rpc:test-cli",
-          connectionId: "7",
-        });
-        return {
-          status: "ready" as const,
-          mergedConversationCount: 1,
-          appliedRuleCount: 0,
-          pendingScheduleCount: 1,
-          pendingRuleCount: 0,
-          message: "已合并 1 个本机对话；1 项排程等待确认。",
-        };
+      runtime: {
+        read: () => {
+          calls.push("readRuntime");
+          return {
+            active: false,
+            busy: false,
+            observerCount: 1,
+            pendingCount: 0,
+          };
+        },
       },
+    });
+    const serverCtx = {
+      conversations: {
+        getObserverConnectionIds: () => new Set<string>(),
+        addObserver: () => {
+          calls.push("addObserver");
+          return true;
+        },
+        removeObserver: () => calls.push("removeObserver"),
+      },
+      productApi: new ProductApiDispatcher(
+        CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+        [createConversationDirectoryProductApiContribution(application)],
+      ),
     } as never;
 
     const { buildSessionResumeMethod } = await import(
@@ -2948,9 +3035,75 @@ describe("session.* RPC (S2.D)", () => {
 
     expect(calls).toEqual([
       "addObserver",
+      "restoreIdentity",
       "recoverConversation",
+      "readRuntime",
       "reviewAdoption",
     ]);
+  });
+
+  it("session.resume missing 只回滚本次新增的 observer", async () => {
+    const storage: ConversationDirectoryStorage = {
+      list: async () => [],
+      create: async () => {
+        throw new Error("not used");
+      },
+      rename: async () => null,
+      readHistory: async () => ({ runs: [], hasMore: false }),
+    };
+    const application = new ConversationDirectoryApplicationService({
+      storage,
+      resume: {
+        restoreIdentity: async () => null,
+        recoverDependentLifecycle: async () => {
+          throw new Error("missing resume must not enter recovery");
+        },
+      },
+      runtime: {
+        read: () => ({
+          active: false,
+          busy: false,
+          observerCount: 0,
+          pendingCount: 0,
+        }),
+      },
+    });
+    const observers = new Set<string>();
+    const manager = {
+      getObserverConnectionIds: () => observers,
+      addObserver: (_conversationId: string, connectionId: string) => {
+        observers.add(connectionId);
+        return true;
+      },
+      removeObserver: (_conversationId: string, connectionId: string) => {
+        observers.delete(connectionId);
+      },
+    };
+    const serverCtx = {
+      conversations: manager,
+      productApi: new ProductApiDispatcher(
+        CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+        [createConversationDirectoryProductApiContribution(application)],
+      ),
+    } as never;
+    const { buildSessionResumeMethod } = await import(
+      "../rpc/methods/session.js"
+    );
+    const invokeMissing = () =>
+      buildSessionResumeMethod().handler(
+        { conversationId: "conv-missing" },
+        {
+          server: serverCtx,
+          connection: { id: 7, clientInfo: { id: "test-cli" } },
+        } as never,
+      );
+
+    await expect(invokeMissing()).rejects.toThrow("Session not found");
+    expect(observers.has("7")).toBe(false);
+
+    observers.add("7");
+    await expect(invokeMissing()).rejects.toThrow("Session not found");
+    expect(observers.has("7")).toBe(true);
   });
 
   it("session.clear:清空活跃会话并组播 session.changed cleared;busy 时拒绝", async () => {

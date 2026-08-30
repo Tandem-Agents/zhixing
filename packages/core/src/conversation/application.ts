@@ -144,7 +144,7 @@ export interface ConversationClearCommitPort {
   commit(input: Readonly<{
     conversationId: string;
     operationId: string;
-    caller: ConversationClearCaller;
+    caller: ConversationCommandCaller;
   }>): Promise<
     | Readonly<{ status: "cleared" }>
     | Readonly<{
@@ -155,13 +155,44 @@ export interface ConversationClearCommitPort {
   >;
 }
 
-export type ConversationClearCaller =
+export type ConversationCommandCaller =
   | Readonly<{
       kind: "surface";
       surfacePrincipal: string;
       connectionId: string;
     }>
   | Readonly<{ kind: "host"; component: string }>;
+
+export type ConversationAdoptionReviewProjection =
+  | Readonly<{
+      status: "ready";
+      mergedConversationCount: number;
+      appliedRuleCount: number;
+      pendingScheduleCount: number;
+      pendingRuleCount: number;
+      message: string;
+    }>
+  | Readonly<{
+      status: "retry";
+      mergedConversationCount: number;
+      pendingScheduleCount: number;
+      pendingRuleCount: number;
+      message: string;
+    }>;
+
+/** Owner/recovery mechanisms consumed by the Conversation resume command. */
+export interface ConversationResumePort {
+  restoreIdentity(
+    conversationId: string,
+  ): Promise<ConversationDirectoryRecord | null>;
+  recoverDependentLifecycle(conversationId: string): Promise<void>;
+  reviewAdoption?(
+    input: Readonly<{
+      conversationId: string;
+      caller: ConversationCommandCaller;
+    }>,
+  ): Promise<ConversationAdoptionReviewProjection | undefined>;
+}
 
 /** Correctness boundary used by the delete application command. */
 export interface ConversationDeleteCommitPort {
@@ -170,7 +201,7 @@ export interface ConversationDeleteCommitPort {
   commit(input: Readonly<{
     conversationId: string;
     operationId: string;
-    caller: ConversationClearCaller;
+    caller: ConversationCommandCaller;
   }>): Promise<
     | Readonly<{ status: "deleted" }>
     | Readonly<{
@@ -216,6 +247,11 @@ export type ConversationDirectoryQuery =
 export type ConversationDirectoryCommand =
   | Readonly<{ kind: "create" }>
   | Readonly<{
+      kind: "resume";
+      conversationId: string;
+      caller: ConversationCommandCaller;
+    }>
+  | Readonly<{
       kind: "rename";
       conversationId: string;
       name: string;
@@ -224,18 +260,27 @@ export type ConversationDirectoryCommand =
       kind: "clear";
       conversationId: string;
       operationId?: string;
-      caller: ConversationClearCaller;
+      caller: ConversationCommandCaller;
     }>
   | Readonly<{
       kind: "delete";
       conversationId: string;
       operationId?: string;
-      caller: ConversationClearCaller;
+      caller: ConversationCommandCaller;
     }>;
 
 export interface ConversationCreatedResult {
   readonly conversationId: string;
   readonly name: string;
+}
+
+export interface ConversationResumeResult {
+  readonly conversationId: string;
+  readonly name: string;
+  readonly active: boolean;
+  readonly busy: boolean;
+  readonly advancement?: ConversationAdvancementProjection;
+  readonly adoptionReview?: ConversationAdoptionReviewProjection;
 }
 
 export interface ConversationRenamedFact {
@@ -293,6 +338,9 @@ export interface ConversationDirectoryApplication {
     query: Extract<ConversationDirectoryQuery, { readonly kind: "history" }>,
   ): Promise<ConversationHistoryPage>;
   create(): Promise<ConversationCreatedResult>;
+  resume(
+    command: Extract<ConversationDirectoryCommand, { readonly kind: "resume" }>,
+  ): Promise<ConversationResumeResult>;
   rename(
     command: Extract<ConversationDirectoryCommand, { readonly kind: "rename" }>,
   ): Promise<ConversationRenamedResult>;
@@ -326,6 +374,7 @@ export class ConversationDirectoryApplicationService
       runtime?: ConversationRuntimeProjectionReader;
       advancement?: ConversationAdvancementProjectionReader;
       availability?: ConversationAvailability;
+      resume?: ConversationResumePort;
       clear?: ConversationClearCommitPort;
       delete?: ConversationDeleteCommitPort;
     }>,
@@ -399,6 +448,50 @@ export class ConversationDirectoryApplicationService
     return Object.freeze({
       conversationId: created.conversationId,
       name: created.name,
+    });
+  }
+
+  async resume(
+    command: Extract<ConversationDirectoryCommand, { readonly kind: "resume" }>,
+  ): Promise<ConversationResumeResult> {
+    if (
+      typeof command.conversationId !== "string" ||
+      command.conversationId.trim().length === 0
+    ) {
+      throw new ConversationApplicationError(
+        "invalid-input",
+        "Conversation resume requires a conversation id",
+      );
+    }
+    const port = this.input.resume;
+    if (!port) {
+      throw new Error("Conversation resume application is not assembled");
+    }
+    const restored = await port.restoreIdentity(command.conversationId);
+    if (!restored) {
+      throw new ConversationApplicationError(
+        "not-found",
+        `Conversation not found: ${command.conversationId}`,
+      );
+    }
+    await port.recoverDependentLifecycle(command.conversationId);
+    const runtime = this.input.runtime?.read(command.conversationId);
+    const adoptionReview = await port.reviewAdoption?.({
+      conversationId: command.conversationId,
+      caller: command.caller,
+    });
+    const advancement = await this.input.advancement?.read(
+      command.conversationId,
+    );
+    return Object.freeze({
+      conversationId: command.conversationId,
+      name: restored.name,
+      active: runtime?.active ?? false,
+      busy: runtime?.busy ?? false,
+      ...(advancement ? { advancement } : {}),
+      ...(adoptionReview
+        ? { adoptionReview: freezeConversationAdoptionReview(adoptionReview) }
+        : {}),
     });
   }
 
@@ -701,6 +794,13 @@ export const CONVERSATION_CREATE_COMMAND = defineProductApiCommand<
   never
 >("conversation-directory.command.create", []);
 
+export const CONVERSATION_RESUME_COMMAND = defineProductApiCommand<
+  "conversation-directory.command.resume",
+  Extract<ConversationDirectoryCommand, { readonly kind: "resume" }>,
+  ConversationResumeResult,
+  never
+>("conversation-directory.command.resume", []);
+
 export const CONVERSATION_RENAME_COMMAND = defineProductApiCommand<
   "conversation-directory.command.rename",
   Extract<ConversationDirectoryCommand, { readonly kind: "rename" }>,
@@ -728,6 +828,7 @@ export const CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET =
       CONVERSATION_LIST_QUERY,
       CONVERSATION_HISTORY_QUERY,
       CONVERSATION_CREATE_COMMAND,
+      CONVERSATION_RESUME_COMMAND,
       CONVERSATION_RENAME_COMMAND,
       CONVERSATION_CLEAR_COMMAND,
       CONVERSATION_DELETE_COMMAND,
@@ -756,6 +857,10 @@ export function createConversationDirectoryProductApiContribution(
         result: await application.create(),
         facts: [],
       })),
+      bindProductApiOperation(CONVERSATION_RESUME_COMMAND, async (command) => ({
+        result: await application.resume(command),
+        facts: [],
+      })),
       bindProductApiOperation(CONVERSATION_RENAME_COMMAND, async (command) => {
         const result = await application.rename(command);
         return { result, facts: [result.fact] };
@@ -775,6 +880,27 @@ export function createConversationDirectoryProductApiContribution(
       CONVERSATION_DELETED_FACT_EVENT,
     ],
   });
+}
+
+function freezeConversationAdoptionReview(
+  review: ConversationAdoptionReviewProjection,
+): ConversationAdoptionReviewProjection {
+  return review.status === "ready"
+    ? Object.freeze({
+        status: review.status,
+        mergedConversationCount: review.mergedConversationCount,
+        appliedRuleCount: review.appliedRuleCount,
+        pendingScheduleCount: review.pendingScheduleCount,
+        pendingRuleCount: review.pendingRuleCount,
+        message: review.message,
+      })
+    : Object.freeze({
+        status: review.status,
+        mergedConversationCount: review.mergedConversationCount,
+        pendingScheduleCount: review.pendingScheduleCount,
+        pendingRuleCount: review.pendingRuleCount,
+        message: review.message,
+      });
 }
 
 /** Cross-owner list merge remains Conversation-owned; topology supplies inputs only. */

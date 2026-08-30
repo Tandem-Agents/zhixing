@@ -8,6 +8,7 @@ import {
   CONVERSATION_HISTORY_QUERY,
   CONVERSATION_LIST_QUERY,
   CONVERSATION_RENAME_COMMAND,
+  CONVERSATION_RESUME_COMMAND,
   ConversationApplicationError,
   ConversationDirectoryApplicationService,
   createConversationDirectoryProductApiContribution,
@@ -177,6 +178,118 @@ describe("ConversationDirectoryApplicationService", () => {
         name: "x",
       }),
     ).rejects.toBeInstanceOf(ConversationApplicationError);
+  });
+
+  it("owns resume identity restoration, dependent recovery, runtime and review projection", async () => {
+    const calls: string[] = [];
+    const storage: ConversationDirectoryStorage = {
+      list: async () => [],
+      create: async () => {
+        throw new Error("not used");
+      },
+      rename: async () => null,
+      readHistory: async () => ({ runs: [], hasMore: false }),
+    };
+    const application = new ConversationDirectoryApplicationService({
+      storage,
+      resume: {
+        restoreIdentity: async (conversationId) => {
+          calls.push("restore");
+          return conversationId === "c-resume"
+            ? {
+                conversationId: "storage-local-id",
+                name: "恢复的对话",
+                createdAt: "2026-01-01T00:00:00.000Z",
+                lastActiveAt: "2026-01-02T00:00:00.000Z",
+              }
+            : null;
+        },
+        recoverDependentLifecycle: async () => {
+          calls.push("recover");
+        },
+        reviewAdoption: async ({ caller }) => {
+          calls.push("review");
+          expect(caller).toEqual({
+            kind: "surface",
+            surfacePrincipal: "rpc:test",
+            connectionId: "7",
+          });
+          return {
+            status: "ready",
+            mergedConversationCount: 1,
+            appliedRuleCount: 2,
+            pendingScheduleCount: 0,
+            pendingRuleCount: 0,
+            message: "ready",
+          };
+        },
+      },
+      runtime: {
+        read: () => {
+          calls.push("runtime");
+          return {
+            active: true,
+            busy: true,
+            observerCount: 1,
+            pendingCount: 0,
+          };
+        },
+      },
+      advancement: {
+        read: async () => {
+          calls.push("advancement");
+          return { advancementSessionId: "adv-1", status: "active" };
+        },
+      },
+    });
+    const dispatcher = new ProductApiDispatcher(
+      CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+      [createConversationDirectoryProductApiContribution(application)],
+    );
+
+    await expect(
+      dispatcher.command(CONVERSATION_RESUME_COMMAND, {
+        kind: "resume",
+        conversationId: "c-resume",
+        caller: {
+          kind: "surface",
+          surfacePrincipal: "rpc:test",
+          connectionId: "7",
+        },
+      }),
+    ).resolves.toEqual({
+      result: {
+        conversationId: "c-resume",
+        name: "恢复的对话",
+        active: true,
+        busy: true,
+        advancement: { advancementSessionId: "adv-1", status: "active" },
+        adoptionReview: {
+          status: "ready",
+          mergedConversationCount: 1,
+          appliedRuleCount: 2,
+          pendingScheduleCount: 0,
+          pendingRuleCount: 0,
+          message: "ready",
+        },
+      },
+      facts: [],
+    });
+    expect(calls).toEqual([
+      "restore",
+      "recover",
+      "runtime",
+      "review",
+      "advancement",
+    ]);
+    await expect(
+      dispatcher.command(CONVERSATION_RESUME_COMMAND, {
+        kind: "resume",
+        conversationId: "missing",
+        caller: { kind: "host", component: "test" },
+      }),
+    ).rejects.toMatchObject({ code: "not-found" });
+    expect(calls.at(-1)).toBe("restore");
   });
 
   it("owns stable clear admission and emits its fact only after the commit boundary", async () => {

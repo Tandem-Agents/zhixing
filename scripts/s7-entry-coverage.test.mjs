@@ -718,6 +718,7 @@ test("conversation adoption stays bound to the two production roots and ordered 
     "packages/cli/src/serve/first-party-conversation-mesh.ts",
     "packages/cli/src/serve/local-conversation-rpc.ts",
     "packages/cli/src/serve/post-adoption-review.ts",
+    "packages/cli/src/serve/conversation-resume-binding.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/runtime/rpc-confirmation-broker.ts",
     "packages/cli/src/repl.ts",
@@ -847,8 +848,22 @@ test("conversation adoption stays bound to the two production roots and ordered 
   );
   assert.match(
     inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/conversation-resume-binding.ts",
+      (text) => text.replace("input.adoptionReview!.reviewForSurface", "Promise.resolve"),
+    )).join("\n"),
+    /public resume must reuse the authenticated anchor review coordinator/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
       "packages/server/src/rpc/methods/session.ts",
-      (text) => text.replace("ctx.server.conversationAdoptionReview?.({", "Promise.resolve({"),
+      (text) => text.replace("const observerAdded = manager.addObserver(", "const observerAdded = manager.getObserverCount("),
+    )).join("\n"),
+    /session resume must bind the authenticated observer before adoption review/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace("observerAdded &&\n          !alreadyObserved", "true"),
     )).join("\n"),
     /session resume must bind the authenticated observer before adoption review/,
   );
@@ -3422,6 +3437,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/rpc/src/event-bridge.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/conversation-clear-binding.ts",
+    "packages/cli/src/serve/conversation-resume-binding.ts",
     "packages/cli/src/serve/conversation-delete-binding.ts",
     "packages/cli/src/serve/conversation-directory.ts",
     "packages/cli/src/serve/workscene-directory.ts",
@@ -3503,6 +3519,63 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/local-conversation-rpc.ts",
       (text) => `${text}\nvoid input.owner.createConversation();`,
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace(
+        "const dispatch = await productApi.command(CONVERSATION_RESUME_COMMAND, {",
+        "await requireDirectory(ctx.server).touch(params.conversationId);\n        const dispatch = await productApi.command(CONVERSATION_RESUME_COMMAND, {",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace("observerAdded &&\n          !alreadyObserved", "true"),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/local-conversation-rpc.ts",
+      (text) => text.replace(
+        'case "session.resume": {',
+        'case "session.resume": {\n        await this.input.owner.listConversations();',
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/context.ts",
+      (text) => text.replace(
+        "productApi?: ProductApiDispatcher;",
+        "conversationAdoptionReview?: () => Promise<unknown>;\n  productApi?: ProductApiDispatcher;",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/runtime/conversation-directory.ts",
+      (text) => text.replace(
+        "export interface ConversationDirectory {",
+        "export interface ConversationDirectory {\n  touch(id: string): Promise<unknown>;",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace(
+        "const observerAdded = manager.addObserver(",
+        "const observerAdded = manager.getObserverCount(",
+      ),
     )).join("\n"),
     /Conversation directory management lacks one domain application/,
   );

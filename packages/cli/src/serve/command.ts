@@ -153,6 +153,7 @@ import { readGuidanceFile } from "./read-guidance-file.js";
 import { createConversationAliveCheck } from "./advancement-gc.js";
 import { createConversationDirectory } from "./conversation-directory.js";
 import { createAnchorConversationClearCommitPort } from "./conversation-clear-binding.js";
+import { createAnchorConversationResumePort } from "./conversation-resume-binding.js";
 import {
   createAnchorConversationDeleteCommitPort,
   createConversationWorksceneDeleteProjectionBridge,
@@ -1930,6 +1931,11 @@ async function runServerProcess(
     : undefined;
   const conversationApplication = new ConversationDirectoryApplicationService({
     storage: conversationDirectory,
+    resume: createAnchorConversationResumePort({
+      identity: conversationDirectory,
+      ...(advancementRecovery ? { recovery: advancementRecovery } : {}),
+      ...(adoptionReview ? { adoptionReview } : {}),
+    }),
     clear: createAnchorConversationClearCommitPort({
       conversations: ctx.conversations!,
       directory: conversationDirectory,
@@ -2203,14 +2209,6 @@ async function runServerProcess(
     channels: ctx.channels,
     channelHttpRoutes,
     confirmationHub,
-    ...(adoptionReview
-      ? {
-          conversationAdoptionReview: (
-            input: Parameters<PostAdoptionReviewCoordinator["reviewForSurface"]>[0],
-          ) =>
-            adoptionReview!.reviewForSurface(input),
-        }
-      : {}),
     runtimeControl: {
       openFirstPartyFinality: async (input) => {
         const factory = ctx.firstPartyFinality;

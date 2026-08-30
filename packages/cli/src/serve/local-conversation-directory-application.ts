@@ -84,6 +84,24 @@ export function createLocalConversationDirectoryApplication(input: {
   };
   return new ConversationDirectoryApplicationService({
     storage,
+    resume: {
+      async restoreIdentity(conversationId) {
+        if (!(await input.owner.listConversations()).includes(conversationId)) {
+          return null;
+        }
+        const meta = await input.owner.sessionState.readSessionMeta(
+          conversationId,
+          context(`resume:${conversationId}`),
+        );
+        return {
+          conversationId,
+          name: meta.name ?? "本机对话",
+          createdAt: meta.lastActiveAt,
+          lastActiveAt: meta.lastActiveAt,
+        };
+      },
+      recoverDependentLifecycle: async () => {},
+    },
     clear: {
       requiresStableOperationIdentity: true,
       createOperationIdentity: () => {

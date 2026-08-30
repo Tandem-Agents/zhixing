@@ -30,7 +30,6 @@ import type {
   SessionActivityBroadcast,
   SessionBroadcast,
 } from "@zhixing/rpc/session-broadcast";
-import type { SessionAdoptionReviewResult } from "@zhixing/rpc";
 import type { ServerConfig } from "./types.js";
 import type { ManagedHostPublicStatus } from "./managed-host-status.js";
 import type { RpcSurfaceRegistry } from "./rpc/surface-identity.js";
@@ -194,7 +193,7 @@ export interface ServerContext {
   advancementRecovery?: AdvancementRecoveryMaintenance;
   /** 多视角发散收敛门面。不传则多视角发起意图不可执行。 */
   perspectives?: PerspectivesController;
-  /** 尚未迁移的对话身份/删除持久桥(ensure/touch/delete)。 */
+  /** 尚未迁移的对话身份/转录持久桥(ensure/transcript)。 */
   conversationDirectory?: ConversationDirectory;
   /** 工作场景域(注册表管理 + 场景对话取建)。不传则 workscene.* 不可用。 */
   workscenes?: WorksceneDirectory;
@@ -330,15 +329,6 @@ export interface ServerContext {
   lifecycleShutdown?: LifecycleShutdownAdapter;
   /** executor-only 宿主的有限第一方会话路由；锚点宿主不注入。 */
   conversationRpc?: FirstPartyConversationRpcRouter;
-  /**
-   * 收编后复核的窄接缝。session.resume 在 observer 身份成立后调用，需用户
-   * 再确认的排程由现有 confirmation 链定向交给当前已认证接入面。
-   */
-  conversationAdoptionReview?: (input: {
-    readonly conversationId: string;
-    readonly surfacePrincipal: string;
-    readonly connectionId: string;
-  }) => Promise<SessionAdoptionReviewResult | undefined>;
   /** 实际监听的地址（startServer 监听就绪后回填） */
   listenAddr?: { port: number; host: string };
   /**

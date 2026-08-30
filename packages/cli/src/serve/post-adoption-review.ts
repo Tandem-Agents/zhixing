@@ -9,8 +9,8 @@ import type {
   AuthorityCallContext,
   DeferredGlobalIntent,
 } from "@zhixing/core/contracts";
+import type { ConversationAdoptionReviewProjection } from "@zhixing/core/conversation/application";
 import type { ConfirmationHub } from "@zhixing/owner-kernel";
-import type { SessionAdoptionReviewResult } from "@zhixing/rpc";
 
 interface DeferredIntentReviewPort {
   list(
@@ -94,7 +94,9 @@ export class PostAdoptionReviewCoordinator {
   }
 
   /** Runs immediately after commit/recovery; rubric writes need no user gesture. */
-  async reviewAfterAdoption(conversationId: string): Promise<SessionAdoptionReviewResult> {
+  async reviewAfterAdoption(
+    conversationId: string,
+  ): Promise<ConversationAdoptionReviewProjection> {
     return this.#reviewConversation(conversationId);
   }
 
@@ -103,7 +105,7 @@ export class PostAdoptionReviewCoordinator {
     readonly conversationId: string;
     readonly surfacePrincipal: string;
     readonly connectionId: string;
-  }): Promise<SessionAdoptionReviewResult | undefined> {
+  }): Promise<ConversationAdoptionReviewProjection | undefined> {
     if (!parseLocalConversationId(input.conversationId)) return undefined;
     const summary = await this.#reviewConversation(input.conversationId);
     if (summary.status !== "ready") return summary;
@@ -135,7 +137,7 @@ export class PostAdoptionReviewCoordinator {
 
   async #reviewConversation(
     conversationId: string,
-  ): Promise<SessionAdoptionReviewResult> {
+  ): Promise<ConversationAdoptionReviewProjection> {
     if (!parseLocalConversationId(conversationId)) return readySummary(0, 0, 0);
     const context = hostContext(conversationId, this.#now());
     let intents: readonly DeferredGlobalIntent[];
@@ -317,7 +319,7 @@ function readySummary(
   appliedRuleCount: number,
   pendingScheduleCount: number,
   pendingRuleCount: number,
-): SessionAdoptionReviewResult {
+): ConversationAdoptionReviewProjection {
   const pending: string[] = [];
   if (pendingScheduleCount > 0) pending.push(`${pendingScheduleCount} 项排程等待确认`);
   if (pendingRuleCount > 0) pending.push(`${pendingRuleCount} 项规则保存需要处理`);
@@ -333,7 +335,7 @@ function readySummary(
   };
 }
 
-function retrySummary(): SessionAdoptionReviewResult {
+function retrySummary(): ConversationAdoptionReviewProjection {
   return {
     status: "retry",
     mergedConversationCount: 1,

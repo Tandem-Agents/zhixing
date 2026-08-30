@@ -95,6 +95,76 @@ describe("LocalConversationRpcRouter", () => {
     );
   });
 
+  it("resume 经 Conversation 应用恢复本机身份并保持缺失终态", async () => {
+    const owner = ownerPort();
+    const router = new LocalConversationRpcRouter({
+      deviceId: DEVICE_ID,
+      owner,
+      remoteFor: () => {
+        throw new Error("unexpected remote route");
+      },
+    });
+    const connection = fakeConnection();
+
+    await expect(
+      router.dispatch({
+        method: "session.resume",
+        params: {
+          conversationId: CONVERSATION_ID,
+          continueLocally: true,
+        },
+        connection,
+      }),
+    ).resolves.toEqual({
+      handled: true,
+      result: {
+        conversationId: CONVERSATION_ID,
+        name: "本机对话",
+        active: false,
+        busy: false,
+      },
+    });
+    expect(owner.listConversations).toHaveBeenCalled();
+    expect(owner.sessionState.readSessionMeta).toHaveBeenCalledWith(
+      CONVERSATION_ID,
+      expect.objectContaining({
+        principal: {
+          kind: "host",
+          component: "local-conversation-product-api",
+        },
+      }),
+    );
+
+    const missingOwner = ownerPort();
+    missingOwner.listConversations = vi.fn(async () => []);
+    const missingRouter = new LocalConversationRpcRouter({
+      deviceId: DEVICE_ID,
+      owner: missingOwner,
+      remoteFor: () => {
+        throw new Error("unexpected remote route");
+      },
+    });
+    const missingConnection = fakeConnection();
+    await expect(
+      missingRouter.dispatch({
+        method: "session.resume",
+        params: {
+          conversationId: CONVERSATION_ID,
+          continueLocally: true,
+        },
+        connection: missingConnection,
+      }),
+    ).rejects.toMatchObject({
+      message: "这台电脑上没有这个对话，请从列表中重新选择。",
+    });
+    await missingOwner.commitConversationClear({
+      conversationId: CONVERSATION_ID,
+      operationId: "probe-missing-resume-observer",
+      caller: { kind: "host", component: "test" },
+    });
+    expect(missingConnection.notify).not.toHaveBeenCalled();
+  });
+
   it("clear 经领域应用重放同一耐久操作且只投影一次通知", async () => {
     const port = ownerPort();
     const router = new LocalConversationRpcRouter({

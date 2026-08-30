@@ -3426,6 +3426,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const conversationClearBinding = required(
     "packages/cli/src/serve/conversation-clear-binding.ts",
   );
+  const conversationResumeBinding = required(
+    "packages/cli/src/serve/conversation-resume-binding.ts",
+  );
   const conversationDeleteBinding = required(
     "packages/cli/src/serve/conversation-delete-binding.ts",
   );
@@ -3535,6 +3538,26 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       ].includes(record.relative) &&
       record.text.includes(".deleteStoredConversation("),
   );
+  const sessionResumeStart = sessionHandler.indexOf(
+    'export function buildSessionResumeMethod()',
+  );
+  const sessionResumeEnd = sessionHandler.indexOf(
+    "// ─── 工具 ───",
+    sessionResumeStart,
+  );
+  const sessionResume = sessionResumeStart >= 0 && sessionResumeEnd > sessionResumeStart
+    ? sessionHandler.slice(sessionResumeStart, sessionResumeEnd)
+    : "";
+  const localResumeStart = localConversationRpc.indexOf(
+    'case "session.resume":',
+  );
+  const localResumeEnd = localConversationRpc.indexOf(
+    'case "session.subscribe":',
+    localResumeStart,
+  );
+  const localResume = localResumeStart >= 0 && localResumeEnd > localResumeStart
+    ? localConversationRpc.slice(localResumeStart, localResumeEnd)
+    : "";
 
   if (
     !scheduleApplication.includes("class ScheduleManagementApplicationService") ||
@@ -3843,6 +3866,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !conversationApplication.includes("CONVERSATION_DELETE_COMMAND") ||
     !conversationApplication.includes("CONVERSATION_DELETED_FACT_EVENT") ||
     !conversationApplication.includes("projectConversationDelete(") ||
+    !conversationApplication.includes("CONVERSATION_RESUME_COMMAND") ||
+    !conversationApplication.includes("interface ConversationResumePort") ||
+    !conversationApplication.includes("async resume(") ||
     !conversationApplication.includes("HISTORY_DEFAULT_LIMIT = 20") ||
     !conversationApplication.includes("HISTORY_MAX_LIMIT = 200") ||
     conversationApplication.includes('../advancement/') ||
@@ -3856,6 +3882,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !sessionHandler.includes("CONVERSATION_RENAME_COMMAND") ||
     !sessionHandler.includes("CONVERSATION_CLEAR_COMMAND") ||
     !sessionHandler.includes("CONVERSATION_DELETE_COMMAND") ||
+    !sessionHandler.includes("CONVERSATION_RESUME_COMMAND") ||
     /requireDirectory\(ctx\.server\)\.(?:list|create|rename|readRunsReverse|readHistory)/u.test(
       sessionHandler,
     ) ||
@@ -3863,6 +3890,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       serverConversationDirectory,
     ) ||
     /\bclear\s*\(/u.test(serverConversationDirectory) ||
+    /\btouch\s*\(/u.test(serverConversationDirectory) ||
     !conversationStorage.includes("implements") &&
       !conversationStorage.includes("ConversationDirectoryStorage") ||
     !composition.includes("new ConversationDirectoryApplicationService({") ||
@@ -3872,12 +3900,14 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !localConversationApplication.includes(
       "new ConversationDirectoryApplicationService({",
     ) ||
+    !localConversationApplication.includes("resume: {") ||
     !localConversationRpc.includes("this.#application.queryList()") ||
     !localConversationRpc.includes("this.#application.queryHistory({") ||
     !localConversationRpc.includes("this.#application.create()") ||
     !localConversationRpc.includes("this.#application.rename({") ||
     !localConversationRpc.includes("this.#application.clear({") ||
     !localConversationRpc.includes("this.#application.delete({") ||
+    !localConversationRpc.includes("this.#application.resume({") ||
     /case "session\.clear":(?:(?!case "session\.delete")[\s\S])*?this\.#mutate\(/u.test(
       localConversationRpc,
     ) ||
@@ -3892,6 +3922,37 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !accessSurfaces.includes("projectConversationDelete({") ||
     !composition.includes("clear: createAnchorConversationClearCommitPort({") ||
     !composition.includes("delete: createAnchorConversationDeleteCommitPort({") ||
+    !composition.includes("resume: createAnchorConversationResumePort({") ||
+    !conversationResumeBinding.includes("createAnchorConversationResumePort") ||
+    !conversationResumeBinding.includes("restoreIdentity:") ||
+    !conversationResumeBinding.includes("recoverDependentLifecycle:") ||
+    !conversationResumeBinding.includes("reviewAdoption:") ||
+    sessionResume.length === 0 ||
+    !/const alreadyObserved\s*=\s*manager\s*\.getObserverConnectionIds\(params\.conversationId\)\s*\.has\(connectionId\)/u.test(
+      sessionResume,
+    ) ||
+    !/const observerAdded\s*=\s*manager\.addObserver\(\s*params\.conversationId,\s*connectionId/u.test(
+      sessionResume,
+    ) ||
+    !sessionResume.includes("manager.addObserver(") ||
+    !sessionResume.includes("productApi.command(CONVERSATION_RESUME_COMMAND") ||
+    sessionResume.indexOf("manager.addObserver(") >
+      sessionResume.indexOf("productApi.command(CONVERSATION_RESUME_COMMAND") ||
+    !/error\.code === "not-found"\s*&&\s*observerAdded\s*&&\s*!alreadyObserved[\s\S]*?manager\.removeObserver\(params\.conversationId, connectionId\)/u.test(
+      sessionResume,
+    ) ||
+    /requireDirectory\(|\.advancementRecovery|conversationAdoptionReview/u.test(
+      sessionResume,
+    ) ||
+    localResume.length === 0 ||
+    !localResume.includes("this.#subscribe(conversationId, connection)") ||
+    !localResume.includes("this.#application.resume({") ||
+    localResume.indexOf("this.#subscribe(conversationId, connection)") >
+      localResume.indexOf("this.#application.resume({") ||
+    /input\.owner\.(?:listConversations|sessionState\.readSessionMeta)/u.test(
+      localResume,
+    ) ||
+    context.includes("conversationAdoptionReview") ||
     !conversationClearBinding.includes(
       "clearStoredView: (id) => input.directory.clearStoredView(id)",
     ) ||
@@ -7320,6 +7381,7 @@ export function inspectConversationAdoptionAssembly(records) {
     ["packages/cli/src/serve/first-party-conversation-mesh.ts", undefined],
     ["packages/cli/src/serve/local-conversation-rpc.ts", undefined],
     ["packages/cli/src/serve/post-adoption-review.ts", undefined],
+    ["packages/cli/src/serve/conversation-resume-binding.ts", undefined],
     ["packages/cli/src/serve/command.ts", undefined],
     ["packages/cli/src/runtime/rpc-confirmation-broker.ts", undefined],
     ["packages/cli/src/repl.ts", undefined],
@@ -7483,7 +7545,18 @@ export function inspectConversationAdoptionAssembly(records) {
   ) {
     failures.push(`${command.relative}: adoption review recovery must bind before public server admission`);
   }
-  if (!/conversationAdoptionReview\s*:[\s\S]*?adoptionReview!\.reviewForSurface\s*\(input\)/u.test(command.text)) {
+  const resumeBinding = required.get(
+    "packages/cli/src/serve/conversation-resume-binding.ts",
+  );
+  if (
+    !/resume:\s*createAnchorConversationResumePort\s*\(\s*\{[\s\S]*?adoptionReview/u.test(
+      command.text,
+    ) ||
+    !/reviewAdoption:[\s\S]*?input\.adoptionReview!\.reviewForSurface/u.test(
+      resumeBinding.text,
+    ) ||
+    /conversationAdoptionReview/u.test(command.text)
+  ) {
     failures.push(`${command.relative}: public resume must reuse the authenticated anchor review coordinator`);
   }
 
@@ -7545,9 +7618,24 @@ export function inspectConversationAdoptionAssembly(records) {
   }
 
   const session = required.get("packages/server/src/rpc/methods/session.ts");
-  const addObserver = session.text.indexOf("manager.addObserver(params.conversationId");
-  const reviewSurface = session.text.indexOf("ctx.server.conversationAdoptionReview?.({");
-  if (addObserver < 0 || reviewSurface < 0 || addObserver > reviewSurface) {
+  const addObserver = session.text.indexOf(
+    "const observerAdded = manager.addObserver(",
+  );
+  const resumeCommand = session.text.indexOf(
+    "productApi.command(CONVERSATION_RESUME_COMMAND",
+  );
+  if (
+    addObserver < 0 ||
+    resumeCommand < 0 ||
+    addObserver > resumeCommand ||
+    !/const alreadyObserved\s*=\s*manager\s*\.getObserverConnectionIds\(params\.conversationId\)\s*\.has\(connectionId\)/u.test(
+      session.text,
+    ) ||
+    !/error\.code === "not-found"\s*&&\s*observerAdded\s*&&\s*!alreadyObserved[\s\S]*?manager\.removeObserver\(params\.conversationId, connectionId\)/u.test(
+      session.text,
+    ) ||
+    /conversationAdoptionReview/u.test(session.text)
+  ) {
     failures.push(`${session.relative}: session resume must bind the authenticated observer before adoption review`);
   }
 

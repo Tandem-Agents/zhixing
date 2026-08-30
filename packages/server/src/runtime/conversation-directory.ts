@@ -5,8 +5,7 @@
  * 目录在哪个 scope、用什么 store 是装配决策,server 不直接触持久层。
  *
  * 与 ConversationManager 的分界:manager 管"活跃会话"(内存窗口 / 串行点 /
- * observer),directory 管"盘上事实"(meta 清单 / 落盘 run 序列)。session.list
- * 以盘上全量为底、叠加活跃态;session.history 倒读落盘事实流,不要求会话活跃。
+ * observer),directory 只保留尚未迁移的身份确保与 transcript 初始化机制。
  */
 
 import type { Conversation } from "@zhixing/core";
@@ -21,6 +20,4 @@ export interface ConversationDirectory {
    * 不得为兼容目录另写一份可变 meta 事实。
    */
   ensureTranscript(id: string): Promise<void>;
-  /** 更新最近活跃时刻(切换到该对话即"使用"),返回更新后 meta;不存在 null */
-  touch(id: string, at?: string): Promise<Conversation | null>;
 }

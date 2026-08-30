@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-12c legacy Fact 与 Workscene 临时桥纠正已完成，等待协调者独立复核<br>
+> 当前检查点：A5-12d Conversation resume 应用责任已完成，等待协调者独立复核<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `685dffb0`；A0～A4、Skill Catalog、Delivery、完整 Workspace Administration、完整 Trust Administration、完整 Schedule、Conversation 目录与 clear 生命周期应用已通过协调者独立复核并提交 |
+| 已接受基线 | `a04c4f2e8201c24336ea0741c5c80d1ee1ef83f8`；A0～A4、Skill Catalog、Delivery、完整 Workspace Administration、完整 Trust Administration、完整 Schedule、Conversation 目录、clear/delete 生命周期及 A5-12c 纠正均已通过协调者独立复核并提交 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | A5-12c：legacy Fact 与 Workscene 临时桥纠正已完成，等待协调者独立复核；Conversation 行与 A5 仍为 `[ ]` |
-| 下一责任链 | 验收 A5-12c 后，沿 Conversation 的 resume/observer 或 turn admission/run 生命周期选择下一条最窄责任链 |
-| 打开的单向桥 | `A5-CONVERSATION-LIFECYCLE-01`：`ServerContext.conversationDirectory` 已退出 clear/delete，暂仅承载 exists/ensure/transcript/touch，Conversation 最终包前归零。<br>`A5-CONVERSATION-WORKSCENE-DELETE-01`：Anchor 组合根唯一创建 `ConversationWorksceneDeleteProjectionBridge`，唯一 consumer 为 `WorksceneSessionOwner.removeScene`；只允许 Workscene Authority delete 后调用 Conversation 物理存储投影，不拥有 delete 准入、终态、Fact 或通知，必须在 Workscene A5 迁移包退场 |
-| 已失效证据 | 无当前未恢复证据；A5-12c 的 legacy runtime-only Fact 与 durable recovery 去重反证、Workscene bridge exact-set 均已恢复，等待协调者独立复核 |
+| 活跃工作包 | A5-12d：Conversation resume 应用责任已完成，等待协调者独立复核；observer/subscribe 仍是 Server/Surface binding，Conversation 行与 A5 仍为 `[ ]` |
+| 下一责任链 | 验收 A5-12d 后，从 Conversation turn admission/run 生命周期选择下一条最窄责任链；不得把 observer/subscribe 误迁成领域事实 |
+| 打开的单向桥 | `A5-CONVERSATION-LIFECYCLE-01`：`ServerContext.conversationDirectory` 已退出 clear/delete/resume，暂仅承载 exists/ensure/transcript，Conversation 最终包前归零。<br>`A5-CONVERSATION-WORKSCENE-DELETE-01`：Anchor 组合根唯一创建 `ConversationWorksceneDeleteProjectionBridge`，唯一 consumer 为 `WorksceneSessionOwner.removeScene`；只允许 Workscene Authority delete 后调用 Conversation 物理存储投影，不拥有 delete 准入、终态、Fact 或通知，必须在 Workscene A5 迁移包退场 |
+| 已失效证据 | 无当前未恢复证据；A5-12d 已恢复 resume identity/recovery/adoption/observer 顺序与 Anchor/Executor-local 等价证据，等待协调者独立复核 |
 | 阻塞/用户决策 | 无技术阻塞；用户已明确恢复调度 |
 
 ### A0 基线索引
@@ -2018,6 +2018,19 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 独立桥裁决：初次记录把 Workscene 的 `WorksceneSessionOwner → deleteStoredConversation` 描述为普通物理 consumer，却没有给出可退场桥身份，因而“旧路径归零”只对 Server/Anchor/Executor-local delete 应用旁路成立，不能覆盖 Workscene cascade。现新增独立 `A5-CONVERSATION-WORKSCENE-DELETE-01`：Anchor 组合根是 `ConversationWorksceneDeleteProjectionBridge` 唯一 producer，`WorksceneSessionOwner.removeScene` 是唯一 consumer；桥只在 Workscene Authority 的 session delete fact 后执行 Conversation storage projection，不取得 Conversation delete command、准入、busy/not-found/deleted 终态、Fact 或通知权。`A5-CONVERSATION-LIFECYCLE-01` 仍只描述 `ServerContext` 的 exists/ensure/transcript/touch，二者不混写；本桥必须由 Workscene A5 迁移包退场。
 - 代码与结构闭包：Workscene directory/owner 不再取得裸 `deleteStoredConversation` 能力，而只依赖具名冻结桥；物理 primitive 仍由 Conversation adapter 实现，没有第二 storage owner。S7 在 production exact-set 上冻结唯一 factory consumer 为 Anchor `command.ts`、唯一 projection consumer 为 `workscene-session-owner.ts`，并拒绝第二 bridge consumer、Workscene direct storage delete、ServerContext/remove 回流或 legacy Fact 条件回退；桥标识及退场责任是后续 Workscene 完成门禁的显式输入。
 - 纠正证据与状态：CLI Conversation directory/binding 1 文件 12/12（含 runtime-only legacy 锁竞态与 durable recovery 去重），Workscene directory/owner 2 文件 11/11，Executor-local delete 代表集 1 文件 9/9；core Conversation application 9/9、Server delete Product API/wire/并发/通知定向 7/7。canonical S7 32/32 与 registry golden、fresh `pnpm cli:build`、最窄 Biome 和 `git diff --check` 均通过；core/server 输入未变，未重复其构建。Conversation 行、A5 与最终退出门继续 `[ ]`，两个桥均保持显式打开；未进入 Workscene、resume/observer 或 turn 主链，也未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+### A5-12d：归位 Conversation resume 应用责任
+
+- 实施基线与唯一应用：进场为 `HEAD a04c4f2e8201c24336ea0741c5c80d1ee1ef83f8 + task-doc:A5-12d-dispatch`，索引为空。Conversation 窄入口新增唯一 `resume` Command、`ConversationResumePort` 与稳定结果投影；`ConversationDirectoryApplicationService.resume()` 唯一拥有 identity restore/not-found、依赖恢复、runtime/adoption/Advancement 投影的应用顺序。领域端口只表达 Conversation 所需的耐久身份、依赖恢复与 adoption review 稳定投影，不暴露 Directory、Manager、Advancement 实现、RPC、Server 或 Surface 类型，也未新增 resume Fact 或第二 dispatcher。
+- 两种拓扑与绑定边界：Anchor `session.resume` 在认证和 wire 校验后先建立 observer，再经唯一 sealed Product API dispatcher 调用 Conversation 应用；应用依次恢复耐久 identity、依赖 lifecycle、runtime、adoption review 与 Advancement 摘要，Server 最后只投影既有 wire 结果和错误。Executor-local router 同样先建立 observer，再调用同一领域应用；local Correctness binding 只从 local owner/meta 恢复稳定 identity，依赖恢复为空操作，不复制应用规则。observer/subscribe、historical final replay、unsubscribe 与 disconnect cleanup 继续属于 Server/Surface binding，不被误写为领域事实；缺失 identity 时只回滚本次 provisional observer。
+- 行为与旧路收敛：保持输入/global conversation id、not-found code/message、active/busy/runtime projection、Advancement 恢复与摘要、surface principal adoption review、observer-before-recovery、已订阅 historical final、unsubscribe/disconnect 及 Anchor/Executor-local 公开结果等价。Server handler 已删除 directory `touch`、Advancement recovery、active/busy 读取、adoption review 与结果拼装；local router 已删除 owner list/meta 的 resume 业务判断。`ServerContext.conversationAdoptionReview` 与 `ServerContext.conversationDirectory.touch`、Server `ConversationDirectory.touch` 均归零；Host 只在 Conversation resume Correctness binding 中持有具体 directory touch/recovery/review 机制，`A5-CONVERSATION-LIFECYCLE-01` 因而缩窄为 exists/ensure/transcript。clear/delete、turn admission/run、observer 协议、Advancement 与 Workscene 领域责任均未迁移。
+- 直接证据与验证：core Conversation application 1 文件 10/10，覆盖 resume 顺序、稳定投影与 not-found；CLI Anchor resume binding 与 Executor-local RPC 2 文件 11/11，覆盖 surface/host adoption、同应用结果与本机 missing；Server 真实 dispatcher resume 定向 1 文件 7/7，覆盖 observer-before-recovery、existing/missing、active/busy 与 wire，另以 session send/subscribe 代表集 1 文件 2/2 锁定 historical final 与 disconnect observer cleanup。fresh `@zhixing/core`、`@zhixing/server` 与 `pnpm cli:build` 均通过；canonical S7 coverage/mutation 32/32 与 registry golden、fresh `pnpm runtime:package-exports` 和本包最窄 Biome 均通过。未运行根级回归或制品验收。
+- 结构失效与交接：S7 与反向 mutation 冻结 resume command/port/application、Anchor 与 Executor-local production binding、observer-before-command、Server directory/adoption hook 退场及 handler/router 旧业务判断归零；能拒绝 Server/local 恢复 direct touch/owner 判断、observer 晚于恢复、第二 resume owner、Host binding 漏接或旧 adoption hook 回流。以后若 resume command/result、identity/recovery/adoption/runtime/Advancement 投影次序、observer rollback/subscribe binding、Server/local wire/error、Host composition、S7 或 package export 任一变化，本记录失效并只重验该闭包。A5-12d 当前完成并等待协调者独立复核；Conversation 行与 A5 继续 `[ ]`，下一检查点为 turn admission/run，不把 observer/subscribe 扩入领域应用。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+#### A5-12d 协调复核纠正：missing resume 只回滚本次 observer
+
+- 反证与修复：初次实现虽然把 observer 建立放在恢复前，却在 resume identity not-found 时无条件 `removeObserver`；同一 connection 先前已订阅，或 quiescing 使本次 add 返回 false 但既有名册身份仍在时，会误删非本次建立的 observer并可能错误启动 grace。Anchor binding 现在先从 manager 只读名册记录 `alreadyObserved`，再记录本次 `observerAdded`；not-found 只有在“此前不存在且本次 add 成功”时移除。fresh missing 仍零泄漏，already-subscribed missing 保留原 observer，existing identity 仍严格 observer-before-recovery；quiescing、grace 和其他错误路径未改变。Executor-local 原有 `alreadySubscribed` 纪律保持，并新增 fresh missing 后注入 Conversation Fact 不再通知该连接的直接断言。
+- 纠正证据与失效恢复：Server `session.resume` 定向 1 文件 5/5（同文件其余 74 项未运行），直接覆盖 fresh missing 回滚、already-subscribed missing 保留和 existing observer-before-recovery；CLI local resume 定向 1 文件 1/1（其余 9 项未运行），覆盖 fresh missing 零 observer 泄漏。canonical S7 coverage/mutation 32/32 与 registry golden 通过；反向 mutation 把条件回滚恢复为 unconditional 时，Conversation owner 与 adoption 两条结构检查均失败。协调者独立复核后在纠正基线上重新取得同一定向结果与 S7 结果，并因 Server handler 构建输入已经变化补跑 fresh `@zhixing/server` build 与 `pnpm cli:build`，二者均通过；core 与公共导出输入未变，未重复 core build 或 package exports。初次“只回滚本次 provisional observer”的未成立声明现已由对抗证据恢复；A5-12d 继续等待协调者独立复核，Conversation 行与 A5 保持 `[ ]`，未进入 turn admission/run，也未执行任何 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 
