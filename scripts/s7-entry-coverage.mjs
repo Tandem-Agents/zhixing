@@ -3429,6 +3429,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const conversationResumeBinding = required(
     "packages/cli/src/serve/conversation-resume-binding.ts",
   );
+  const conversationRunControlBinding = required(
+    "packages/cli/src/serve/conversation-run-control-binding.ts",
+  );
   const conversationDeleteBinding = required(
     "packages/cli/src/serve/conversation-delete-binding.ts",
   );
@@ -3869,6 +3872,11 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !conversationApplication.includes("CONVERSATION_RESUME_COMMAND") ||
     !conversationApplication.includes("interface ConversationResumePort") ||
     !conversationApplication.includes("async resume(") ||
+    !conversationApplication.includes("interface ConversationRunControlPort") ||
+    !conversationApplication.includes("CONVERSATION_ABORT_COMMAND") ||
+    !conversationApplication.includes("CONVERSATION_RESOLVE_UNCERTAIN_COMMAND") ||
+    !conversationApplication.includes("async abort(") ||
+    !conversationApplication.includes("async resolveUncertain(") ||
     !conversationApplication.includes("HISTORY_DEFAULT_LIMIT = 20") ||
     !conversationApplication.includes("HISTORY_MAX_LIMIT = 200") ||
     conversationApplication.includes('../advancement/') ||
@@ -3883,6 +3891,15 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !sessionHandler.includes("CONVERSATION_CLEAR_COMMAND") ||
     !sessionHandler.includes("CONVERSATION_DELETE_COMMAND") ||
     !sessionHandler.includes("CONVERSATION_RESUME_COMMAND") ||
+    !sessionHandler.includes("CONVERSATION_ABORT_COMMAND") ||
+    !sessionHandler.includes("CONVERSATION_RESOLVE_UNCERTAIN_COMMAND") ||
+    !sessionHandler.includes("productApi.command(CONVERSATION_ABORT_COMMAND") ||
+    !/productApi\.command\(\s*CONVERSATION_RESOLVE_UNCERTAIN_COMMAND/u.test(
+      sessionHandler,
+    ) ||
+    /requireConversations\(ctx\.server\)\.(?:cancelDurableRuns|resolveDurableUncertain|abort)\s*\(/u.test(
+      sessionHandler,
+    ) ||
     /requireDirectory\(ctx\.server\)\.(?:list|create|rename|readRunsReverse|readHistory)/u.test(
       sessionHandler,
     ) ||
@@ -3908,6 +3925,11 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !localConversationRpc.includes("this.#application.clear({") ||
     !localConversationRpc.includes("this.#application.delete({") ||
     !localConversationRpc.includes("this.#application.resume({") ||
+    !localConversationRpc.includes("this.#application.abort({") ||
+    !localConversationRpc.includes("this.#application.resolveUncertain({") ||
+    /this\.input\.owner\.(?:cancelTurns|cancelConversationRuns|resolveDurableUncertain|resolveConversationUncertain)\s*\(/u.test(
+      localConversationRpc,
+    ) ||
     /case "session\.clear":(?:(?!case "session\.delete")[\s\S])*?this\.#mutate\(/u.test(
       localConversationRpc,
     ) ||
@@ -3923,6 +3945,19 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !composition.includes("clear: createAnchorConversationClearCommitPort({") ||
     !composition.includes("delete: createAnchorConversationDeleteCommitPort({") ||
     !composition.includes("resume: createAnchorConversationResumePort({") ||
+    !composition.includes(
+      "runControl: createAnchorConversationRunControlPort({",
+    ) ||
+    !conversationRunControlBinding.includes(
+      "createAnchorConversationRunControlPort",
+    ) ||
+    !conversationRunControlBinding.includes("cancelDurableRuns({") ||
+    !conversationRunControlBinding.includes("resolveDurableUncertain({") ||
+    !conversationRunControlBinding.includes("durableControlPrincipal({") ||
+    !localConversationApplication.includes("runControl: {") ||
+    !localConversationOwner.includes("cancelConversationRuns:") ||
+    !localConversationOwner.includes("resolveConversationUncertain:") ||
+    localConversationOwner.includes("cancelTurns:") ||
     !conversationResumeBinding.includes("createAnchorConversationResumePort") ||
     !conversationResumeBinding.includes("restoreIdentity:") ||
     !conversationResumeBinding.includes("recoverDependentLifecycle:") ||
@@ -6728,7 +6763,7 @@ export function inspectLocalConversationOwnerIsolation(records) {
     const allowedPortCapabilities = new Set([
       "admitTurn",
       "answerInteractionWithTicket",
-      "cancelTurns",
+      "cancelConversationRuns",
       "commitConversationClear",
       "commitConversationDelete",
       "createConversation",
@@ -6741,7 +6776,7 @@ export function inspectLocalConversationOwnerIsolation(records) {
       "listDeferredIntents",
       "mutateSession",
       "pendingInteractions",
-      "resolveDurableUncertain",
+      "resolveConversationUncertain",
       "resolveNoInteractiveSurface",
       "rubricCatalog",
       "runTurn",

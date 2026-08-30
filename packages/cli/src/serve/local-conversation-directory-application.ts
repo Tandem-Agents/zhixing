@@ -116,6 +116,19 @@ export function createLocalConversationDirectoryApplication(input: {
       },
       commit: (request) => input.owner.commitConversationDelete(request),
     },
+    runControl: {
+      requiresStableCancellationIdentity: true,
+      requiresAuthoritativeRunIdentity: false,
+      emptyCancellationIsSuccess: true,
+      createCancellationIdentity: () => {
+        throw new Error(
+          "Local Conversation abort requires a stable operation identity",
+        );
+      },
+      cancel: (request) => input.owner.cancelConversationRuns(request),
+      resolveUncertain: (request) =>
+        input.owner.resolveConversationUncertain(request),
+    },
     runtime: {
       read: (conversationId) => ({
         active: false,

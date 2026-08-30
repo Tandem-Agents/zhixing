@@ -154,6 +154,7 @@ import { createConversationAliveCheck } from "./advancement-gc.js";
 import { createConversationDirectory } from "./conversation-directory.js";
 import { createAnchorConversationClearCommitPort } from "./conversation-clear-binding.js";
 import { createAnchorConversationResumePort } from "./conversation-resume-binding.js";
+import { createAnchorConversationRunControlPort } from "./conversation-run-control-binding.js";
 import {
   createAnchorConversationDeleteCommitPort,
   createConversationWorksceneDeleteProjectionBridge,
@@ -1976,6 +1977,33 @@ async function runServerProcess(
           { conversationId: fact.conversationId, change: "deleted" },
         );
       },
+    }),
+    runControl: createAnchorConversationRunControlPort({
+      conversations: ctx.conversations!,
+      ...(ctx.advancement
+        ? {
+            advancement: {
+              settle: async ({ conversationId, ingressId }) => {
+                const active = await ctx.advancement!.loadActiveSession(
+                  conversationId,
+                );
+                if (
+                  active?.status === "active" &&
+                  active.outstandingProxyMessageId === ingressId
+                ) {
+                  await ctx.advancement!.settleProxyMessage({
+                    conversationId,
+                    advancementSessionId: active.id,
+                    proxyMessageId: ingressId,
+                  });
+                }
+              },
+              recover: async (conversationId) => {
+                await advancementRecovery?.recoverConversation(conversationId);
+              },
+            },
+          }
+        : {}),
     }),
     runtime: {
       read: (conversationId) => {

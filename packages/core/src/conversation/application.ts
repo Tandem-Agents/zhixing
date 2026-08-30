@@ -223,6 +223,52 @@ export interface ConversationDeleteProjectionPort {
   removeDependentData?(conversationId: string): Promise<void>;
 }
 
+export type ConversationUncertainResolutionDecision =
+  | "user-verified-side-effects"
+  | "user-abandoned"
+  | "user-retry-acknowledged";
+
+export interface ConversationCancellationProjection {
+  readonly matchedDurableRuns: number;
+  readonly abortedInFlight: boolean;
+  readonly cancelledPending: number;
+  readonly dependentLifecycleIngressId?: string;
+}
+
+export interface ConversationUncertainResolutionResult {
+  readonly state: "queued" | "cancelled" | "failed";
+  readonly factDigest: string;
+}
+
+/** Owner/Authority mechanisms consumed by the Conversation run-control use cases. */
+export interface ConversationRunControlPort {
+  readonly requiresStableCancellationIdentity: boolean;
+  readonly requiresAuthoritativeRunIdentity: boolean;
+  readonly emptyCancellationIsSuccess: boolean;
+  createCancellationIdentity(): string;
+  cancel(input: Readonly<{
+    conversationId: string;
+    operationId: string;
+    runId?: string;
+    caller: ConversationCommandCaller;
+    occurredAt: number;
+  }>): Promise<ConversationCancellationProjection>;
+  settleDependentCancellation?(input: Readonly<{
+    conversationId: string;
+    ingressId: string;
+  }>): Promise<void>;
+  recoverDependentCancellation?(conversationId: string): Promise<void>;
+  resolveUncertain(input: Readonly<{
+    conversationId: string;
+    runId: string;
+    operationId: string;
+    ownerEpoch: number;
+    openFactDigest: string;
+    decision: ConversationUncertainResolutionDecision;
+    caller: ConversationCommandCaller;
+  }>): Promise<ConversationUncertainResolutionResult>;
+}
+
 /** Read-only external facts used to decorate the durable directory. */
 export interface ConversationRuntimeProjectionReader {
   read(conversationId: string): ConversationRuntimeProjection | undefined;
@@ -266,6 +312,23 @@ export type ConversationDirectoryCommand =
       kind: "delete";
       conversationId: string;
       operationId?: string;
+      caller: ConversationCommandCaller;
+    }>
+  | Readonly<{
+      kind: "abort";
+      conversationId: string;
+      operationId?: string;
+      runId?: string;
+      caller: ConversationCommandCaller;
+    }>
+  | Readonly<{
+      kind: "resolve-uncertain";
+      conversationId: string;
+      runId: string;
+      operationId: string;
+      ownerEpoch: number;
+      openFactDigest: string;
+      decision: ConversationUncertainResolutionDecision;
       caller: ConversationCommandCaller;
     }>;
 
@@ -317,6 +380,10 @@ export interface ConversationDeletedResult {
   readonly fact: ConversationDeletedFact;
 }
 
+export interface ConversationAbortedResult {
+  readonly cancelled: true;
+}
+
 export type ConversationLifecycleFact =
   | ConversationClearedFact
   | ConversationDeletedFact;
@@ -325,7 +392,15 @@ export class ConversationApplicationError extends Error {
   constructor(
     readonly code: "invalid-input" | "not-found" | "busy",
     message: string,
-    readonly reason?: "active-turn" | "pending-lifecycle",
+    readonly reason?:
+      | "active-turn"
+      | "pending-lifecycle"
+      | "abort-run-without-operation"
+      | "abort-operation-required"
+      | "abort-run-required"
+      | "control-identity-invalid"
+      | "uncertain-resolution-invalid"
+      | "surface-caller-invalid",
   ) {
     super(message);
     this.name = "ConversationApplicationError";
@@ -350,6 +425,15 @@ export interface ConversationDirectoryApplication {
   delete(
     command: Extract<ConversationDirectoryCommand, { readonly kind: "delete" }>,
   ): Promise<ConversationDeletedResult>;
+  abort(
+    command: Extract<ConversationDirectoryCommand, { readonly kind: "abort" }>,
+  ): Promise<ConversationAbortedResult>;
+  resolveUncertain(
+    command: Extract<
+      ConversationDirectoryCommand,
+      { readonly kind: "resolve-uncertain" }
+    >,
+  ): Promise<ConversationUncertainResolutionResult>;
 }
 
 const HISTORY_DEFAULT_LIMIT = 20;
@@ -377,6 +461,8 @@ export class ConversationDirectoryApplicationService
       resume?: ConversationResumePort;
       clear?: ConversationClearCommitPort;
       delete?: ConversationDeleteCommitPort;
+      runControl?: ConversationRunControlPort;
+      clock?: () => number;
     }>,
   ) {}
 
@@ -641,6 +727,129 @@ export class ConversationDirectoryApplicationService
       fact: conversationDeletedFact(command.conversationId, operationId),
     });
   }
+
+  async abort(
+    command: Extract<ConversationDirectoryCommand, { readonly kind: "abort" }>,
+  ): Promise<ConversationAbortedResult> {
+    assertConversationControlCaller(command.caller);
+    if (
+      typeof command.conversationId !== "string" ||
+      command.conversationId.trim().length === 0
+    ) {
+      throw new ConversationApplicationError(
+        "invalid-input",
+        "Conversation abort requires a conversation id",
+        "control-identity-invalid",
+      );
+    }
+    const port = this.input.runControl;
+    if (!port) {
+      throw new Error("Conversation run-control application is not assembled");
+    }
+    if (command.runId !== undefined && command.operationId === undefined) {
+      throw new ConversationApplicationError(
+        "invalid-input",
+        "Conversation abort requires an operation identity when a run identity is present",
+        "abort-run-without-operation",
+      );
+    }
+    let operationId = command.operationId;
+    if (operationId === undefined) {
+      if (port.requiresStableCancellationIdentity) {
+        throw new ConversationApplicationError(
+          "invalid-input",
+          "Conversation abort requires a stable operation identity",
+          "abort-operation-required",
+        );
+      }
+      operationId = port.createCancellationIdentity();
+    }
+    if (port.requiresAuthoritativeRunIdentity && command.runId === undefined) {
+      throw new ConversationApplicationError(
+        "invalid-input",
+        "Conversation abort requires an authoritative run identity",
+        "abort-run-required",
+      );
+    }
+    if (
+      !isProtocolIdentifier(operationId) ||
+      (command.runId !== undefined && !isProtocolIdentifier(command.runId))
+    ) {
+      throw new ConversationApplicationError(
+        "invalid-input",
+        "Conversation abort control identity is invalid",
+        "control-identity-invalid",
+      );
+    }
+    const cancellation = await port.cancel({
+      conversationId: command.conversationId,
+      operationId,
+      ...(command.runId ? { runId: command.runId } : {}),
+      caller: command.caller,
+      occurredAt: (this.input.clock ?? Date.now)(),
+    });
+    if (cancellation.dependentLifecycleIngressId) {
+      try {
+        await port.settleDependentCancellation?.({
+          conversationId: command.conversationId,
+          ingressId: cancellation.dependentLifecycleIngressId,
+        });
+      } catch {
+        void port
+          .recoverDependentCancellation?.(command.conversationId)
+          .catch(() => {});
+      }
+    }
+    if (
+      !port.emptyCancellationIsSuccess &&
+      cancellation.matchedDurableRuns === 0 &&
+      !cancellation.abortedInFlight &&
+      cancellation.cancelledPending === 0
+    ) {
+      throw new ConversationApplicationError(
+        "not-found",
+        `Conversation has no cancellable work: ${command.conversationId}`,
+      );
+    }
+    return Object.freeze({ cancelled: true as const });
+  }
+
+  async resolveUncertain(
+    command: Extract<
+      ConversationDirectoryCommand,
+      { readonly kind: "resolve-uncertain" }
+    >,
+  ): Promise<ConversationUncertainResolutionResult> {
+    assertConversationControlCaller(command.caller);
+    if (
+      !isProtocolIdentifier(command.conversationId) ||
+      !isProtocolIdentifier(command.operationId) ||
+      !isProtocolIdentifier(command.runId) ||
+      !Number.isSafeInteger(command.ownerEpoch) ||
+      command.ownerEpoch < 0 ||
+      !/^sha256:[a-f0-9]{64}$/u.test(command.openFactDigest) ||
+      !isConversationResolutionDecision(command.decision)
+    ) {
+      throw new ConversationApplicationError(
+        "invalid-input",
+        "Conversation uncertain resolution is invalid",
+        "uncertain-resolution-invalid",
+      );
+    }
+    const port = this.input.runControl;
+    if (!port) {
+      throw new Error("Conversation run-control application is not assembled");
+    }
+    return port.resolveUncertain({
+      conversationId: command.conversationId,
+      runId: command.runId,
+      operationId: command.operationId,
+      ownerEpoch: command.ownerEpoch,
+      openFactDigest: command.openFactDigest,
+      decision: command.decision,
+      caller: command.caller,
+    });
+  }
 }
 
 /**
@@ -822,6 +1031,23 @@ export const CONVERSATION_DELETE_COMMAND = defineProductApiCommand<
   ConversationDeletedFact
 >("conversation-directory.command.delete", [CONVERSATION_DELETED_FACT_EVENT]);
 
+export const CONVERSATION_ABORT_COMMAND = defineProductApiCommand<
+  "conversation-run.command.abort",
+  Extract<ConversationDirectoryCommand, { readonly kind: "abort" }>,
+  ConversationAbortedResult,
+  never
+>("conversation-run.command.abort", []);
+
+export const CONVERSATION_RESOLVE_UNCERTAIN_COMMAND = defineProductApiCommand<
+  "conversation-run.command.resolve-uncertain",
+  Extract<
+    ConversationDirectoryCommand,
+    { readonly kind: "resolve-uncertain" }
+  >,
+  ConversationUncertainResolutionResult,
+  never
+>("conversation-run.command.resolve-uncertain", []);
+
 export const CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET =
   defineProductApiExactSet({
     operations: [
@@ -832,6 +1058,8 @@ export const CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET =
       CONVERSATION_RENAME_COMMAND,
       CONVERSATION_CLEAR_COMMAND,
       CONVERSATION_DELETE_COMMAND,
+      CONVERSATION_ABORT_COMMAND,
+      CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
     ],
     factEvents: [
       CONVERSATION_RENAMED_FACT_EVENT,
@@ -873,6 +1101,17 @@ export function createConversationDirectoryProductApiContribution(
         const result = await application.delete(command);
         return { result, facts: [result.fact] };
       }),
+      bindProductApiOperation(CONVERSATION_ABORT_COMMAND, async (command) => ({
+        result: await application.abort(command),
+        facts: [],
+      })),
+      bindProductApiOperation(
+        CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
+        async (command) => ({
+          result: await application.resolveUncertain(command),
+          facts: [],
+        }),
+      ),
     ],
     factEvents: [
       CONVERSATION_RENAMED_FACT_EVENT,
@@ -880,6 +1119,32 @@ export function createConversationDirectoryProductApiContribution(
       CONVERSATION_DELETED_FACT_EVENT,
     ],
   });
+}
+
+function assertConversationControlCaller(
+  caller: ConversationCommandCaller,
+): asserts caller is Extract<ConversationCommandCaller, { kind: "surface" }> {
+  if (
+    caller.kind !== "surface" ||
+    !isProtocolIdentifier(caller.surfacePrincipal) ||
+    !isProtocolIdentifier(caller.connectionId)
+  ) {
+    throw new ConversationApplicationError(
+      "invalid-input",
+      "Conversation control requires an authenticated surface caller",
+      "surface-caller-invalid",
+    );
+  }
+}
+
+function isConversationResolutionDecision(
+  value: unknown,
+): value is ConversationUncertainResolutionDecision {
+  return (
+    value === "user-verified-side-effects" ||
+    value === "user-abandoned" ||
+    value === "user-retry-acknowledged"
+  );
 }
 
 function freezeConversationAdoptionReview(

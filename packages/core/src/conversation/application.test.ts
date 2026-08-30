@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ProductApiDispatcher } from "../product-api/catalog.js";
 import {
+  CONVERSATION_ABORT_COMMAND,
   CONVERSATION_CREATE_COMMAND,
   CONVERSATION_CLEAR_COMMAND,
   CONVERSATION_DELETE_COMMAND,
@@ -9,6 +10,7 @@ import {
   CONVERSATION_LIST_QUERY,
   CONVERSATION_RENAME_COMMAND,
   CONVERSATION_RESUME_COMMAND,
+  CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
   ConversationApplicationError,
   ConversationDirectoryApplicationService,
   createConversationDirectoryProductApiContribution,
@@ -52,7 +54,7 @@ function fixture(records: ConversationDirectoryRecord[] = []) {
     CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
     [createConversationDirectoryProductApiContribution(application)],
   );
-  return { application, dispatcher, history };
+  return { application, dispatcher, history, storage };
 }
 
 describe("ConversationDirectoryApplicationService", () => {
@@ -438,6 +440,228 @@ describe("ConversationDirectoryApplicationService", () => {
     await expect(application.delete(command)).rejects.toMatchObject({
       code: "not-found",
     });
+  });
+
+  it("owns durable abort identity, cancellation terminal, and dependent settlement order", async () => {
+    const steps: string[] = [];
+    const cancel = vi.fn(async () => {
+      steps.push("cancel");
+      return {
+        matchedDurableRuns: 1,
+        abortedInFlight: true,
+        cancelledPending: 0,
+        dependentLifecycleIngressId: "proxy-1",
+      };
+    });
+    const settle = vi.fn(async () => {
+      steps.push("settle");
+    });
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      clock: () => 123,
+      runControl: {
+        requiresStableCancellationIdentity: true,
+        requiresAuthoritativeRunIdentity: true,
+        emptyCancellationIsSuccess: false,
+        createCancellationIdentity: () => {
+          throw new Error("must not generate");
+        },
+        cancel,
+        settleDependentCancellation: settle,
+        recoverDependentCancellation: vi.fn(async () => {}),
+        resolveUncertain: vi.fn(async () => ({
+          state: "cancelled",
+          factDigest: `sha256:${"b".repeat(64)}`,
+        })),
+      },
+    });
+    const dispatcher = new ProductApiDispatcher(
+      CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+      [createConversationDirectoryProductApiContribution(application)],
+    );
+    await expect(
+      dispatcher.command(CONVERSATION_ABORT_COMMAND, {
+        kind: "abort",
+        conversationId: "conversation-1",
+        operationId: "abort-operation-1",
+        runId: "run-1",
+        caller: {
+          kind: "surface",
+          surfacePrincipal: "rpc:test",
+          connectionId: "connection-1",
+        },
+      }),
+    ).resolves.toEqual({ result: { cancelled: true }, facts: [] });
+    expect(steps).toEqual(["cancel", "settle"]);
+    expect(cancel).toHaveBeenCalledWith({
+      conversationId: "conversation-1",
+      operationId: "abort-operation-1",
+      runId: "run-1",
+      caller: {
+        kind: "surface",
+        surfacePrincipal: "rpc:test",
+        connectionId: "connection-1",
+      },
+      occurredAt: 123,
+    });
+  });
+
+  it("fails closed on incomplete abort identities and empty cancellation", async () => {
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      runControl: {
+        requiresStableCancellationIdentity: true,
+        requiresAuthoritativeRunIdentity: true,
+        emptyCancellationIsSuccess: false,
+        createCancellationIdentity: () => "unused",
+        cancel: async () => ({
+          matchedDurableRuns: 0,
+          abortedInFlight: false,
+          cancelledPending: 0,
+        }),
+        resolveUncertain: vi.fn(async () => ({
+          state: "cancelled",
+          factDigest: `sha256:${"b".repeat(64)}`,
+        })),
+      },
+    });
+    const caller = {
+      kind: "surface" as const,
+      surfacePrincipal: "rpc:test",
+      connectionId: "connection-1",
+    };
+    await expect(
+      application.abort({
+        kind: "abort",
+        conversationId: "conversation-1",
+        runId: "run-1",
+        caller,
+      }),
+    ).rejects.toMatchObject({ reason: "abort-run-without-operation" });
+    await expect(
+      application.abort({
+        kind: "abort",
+        conversationId: "conversation-1",
+        operationId: "abort-operation-1",
+        caller,
+      }),
+    ).rejects.toMatchObject({ reason: "abort-run-required" });
+    await expect(
+      application.abort({
+        kind: "abort",
+        conversationId: "conversation-1",
+        operationId: "abort-operation-1",
+        runId: "run-1",
+        caller,
+      }),
+    ).rejects.toMatchObject({ code: "not-found" });
+  });
+
+  it("keeps an authoritative cancellation successful and starts dependent recovery after settlement failure", async () => {
+    const recover = vi.fn(async () => {});
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      runControl: {
+        requiresStableCancellationIdentity: true,
+        requiresAuthoritativeRunIdentity: true,
+        emptyCancellationIsSuccess: false,
+        createCancellationIdentity: () => "unused",
+        cancel: async () => ({
+          matchedDurableRuns: 1,
+          abortedInFlight: true,
+          cancelledPending: 0,
+          dependentLifecycleIngressId: "proxy-1",
+        }),
+        settleDependentCancellation: async () => {
+          throw new Error("projection unavailable");
+        },
+        recoverDependentCancellation: recover,
+        resolveUncertain: vi.fn(async () => ({
+          state: "cancelled",
+          factDigest: `sha256:${"b".repeat(64)}`,
+        })),
+      },
+    });
+    await expect(
+      application.abort({
+        kind: "abort",
+        conversationId: "conversation-1",
+        operationId: "abort-operation-1",
+        runId: "run-1",
+        caller: {
+          kind: "surface",
+          surfacePrincipal: "rpc:test",
+          connectionId: "connection-1",
+        },
+      }),
+    ).resolves.toEqual({ cancelled: true });
+    await vi.waitFor(() => {
+      expect(recover).toHaveBeenCalledWith("conversation-1");
+    });
+  });
+
+  it("owns uncertain-resolution validation and returns the correctness result unchanged", async () => {
+    const resolveUncertain = vi.fn(async () => ({
+      state: "cancelled" as const,
+      factDigest: `sha256:${"b".repeat(64)}`,
+    }));
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      runControl: {
+        requiresStableCancellationIdentity: true,
+        requiresAuthoritativeRunIdentity: true,
+        emptyCancellationIsSuccess: false,
+        createCancellationIdentity: () => "unused",
+        cancel: vi.fn(async () => ({
+          matchedDurableRuns: 0,
+          abortedInFlight: false,
+          cancelledPending: 0,
+        })),
+        resolveUncertain,
+      },
+    });
+    const dispatcher = new ProductApiDispatcher(
+      CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+      [createConversationDirectoryProductApiContribution(application)],
+    );
+    await expect(
+      dispatcher.command(CONVERSATION_RESOLVE_UNCERTAIN_COMMAND, {
+        kind: "resolve-uncertain",
+        conversationId: "conversation-1",
+        runId: "run-1",
+        operationId: "resolve-operation-1",
+        ownerEpoch: 1,
+        openFactDigest: `sha256:${"a".repeat(64)}`,
+        decision: "user-abandoned",
+        caller: {
+          kind: "surface",
+          surfacePrincipal: "rpc:test",
+          connectionId: "connection-1",
+        },
+      }),
+    ).resolves.toEqual({
+      result: {
+        state: "cancelled",
+        factDigest: `sha256:${"b".repeat(64)}`,
+      },
+      facts: [],
+    });
+    await expect(
+      application.resolveUncertain({
+        kind: "resolve-uncertain",
+        conversationId: "conversation-1",
+        runId: "run-1",
+        operationId: "resolve-operation-1",
+        ownerEpoch: -1,
+        openFactDigest: `sha256:${"a".repeat(64)}`,
+        decision: "user-abandoned",
+        caller: {
+          kind: "surface",
+          surfacePrincipal: "rpc:test",
+          connectionId: "connection-1",
+        },
+      }),
+    ).rejects.toMatchObject({ reason: "uncertain-resolution-invalid" });
   });
 
   it("projects storage before runtime reset and publishes only a cleared result", async () => {

@@ -632,6 +632,112 @@ function createConversationProductApi(input: {
         return { status: "deleted" } as const;
       },
     },
+    runControl: {
+      requiresStableCancellationIdentity:
+        input.conversations.usesDurableTurnProtocol(),
+      requiresAuthoritativeRunIdentity:
+        input.conversations.usesDurableTurnProtocol(),
+      emptyCancellationIsSuccess: false,
+      createCancellationIdentity: () => "session.abort:test-legacy-operation",
+      cancel: async ({
+        conversationId,
+        operationId,
+        runId,
+        caller,
+        occurredAt,
+      }) => {
+        if (caller.kind !== "surface") throw new Error("surface caller required");
+        if (!input.conversations.usesDurableTurnProtocol()) {
+          const result = input.conversations.abort(conversationId, {
+            kind: "user-cancel",
+            source: "rpc",
+            pressedAt: occurredAt,
+          });
+          return {
+            matchedDurableRuns: 0,
+            abortedInFlight: result.abortedInFlight,
+            cancelledPending: result.cancelledPending,
+          };
+        }
+        const result = await input.conversations.cancelDurableRuns({
+          conversationId,
+          requestId: operationId,
+          ...(runId ? { runId } : {}),
+          reason: {
+            kind: "user-cancel",
+            source: "rpc",
+            pressedAt: occurredAt,
+          },
+          principal: input.conversations.durableControlPrincipal(caller),
+        });
+        return {
+          matchedDurableRuns: result.dispositions.length,
+          abortedInFlight: result.dispositions.some(
+            (item) => item.abortedInFlight,
+          ),
+          cancelledPending: result.dispositions.reduce(
+            (sum, item) => sum + item.cancelledPending,
+            0,
+          ),
+          ...(result.dispositions.find((item) => item.source === "advancement")
+            ?.ingressId
+            ? {
+                dependentLifecycleIngressId: result.dispositions.find(
+                  (item) => item.source === "advancement",
+                )!.ingressId,
+              }
+            : {}),
+        };
+      },
+      ...(input.advancement
+        ? {
+            settleDependentCancellation: async ({
+              conversationId,
+              ingressId,
+            }: {
+              conversationId: string;
+              ingressId: string;
+            }) => {
+              const active = await input.advancement!.loadActiveSession(
+                conversationId,
+              );
+              if (
+                active?.status === "active" &&
+                active.outstandingProxyMessageId === ingressId
+              ) {
+                await input.advancement!.settleProxyMessage({
+                  conversationId,
+                  advancementSessionId: active.id,
+                  proxyMessageId: ingressId,
+                });
+              }
+            },
+            recoverDependentCancellation: async (conversationId: string) => {
+              await input.advancementRecovery?.recoverConversation(conversationId);
+            },
+          }
+        : {}),
+      resolveUncertain: async ({
+        conversationId,
+        runId,
+        operationId,
+        ownerEpoch,
+        openFactDigest,
+        decision,
+        caller,
+      }) => {
+        if (caller.kind !== "surface") throw new Error("surface caller required");
+        return input.conversations.resolveDurableUncertain({
+          conversationId,
+          runId,
+          requestId: operationId,
+          ownerEpoch,
+          openFactDigest,
+          decision,
+          principal: input.conversations.durableControlPrincipal(caller),
+        });
+      },
+    },
     runtime: {
       read: (conversationId) => {
         const active = input.conversations.getSession(conversationId);

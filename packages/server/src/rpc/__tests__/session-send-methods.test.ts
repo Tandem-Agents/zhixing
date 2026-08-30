@@ -6,6 +6,13 @@ import { describe, expect, it, vi } from "vitest";
 import type { ServerContext } from "../../context.js";
 import type { AgentYield, Message, RunResult } from "@zhixing/core";
 import {
+  CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+  ConversationDirectoryApplicationService,
+  createConversationDirectoryProductApiContribution,
+  type ConversationRunControlPort,
+} from "@zhixing/core/conversation/application";
+import { ProductApiDispatcher } from "@zhixing/core/product-api";
+import {
   ConversationManager,
   WorksceneBusyError,
   type SessionRuntime,
@@ -19,6 +26,42 @@ import {
   buildSessionSubscribeMethod,
 } from "../methods/session.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
+
+function runControlProductApi(
+  overrides: Partial<ConversationRunControlPort> = {},
+): ProductApiDispatcher {
+  const runControl: ConversationRunControlPort = {
+    requiresStableCancellationIdentity: true,
+    requiresAuthoritativeRunIdentity: true,
+    emptyCancellationIsSuccess: false,
+    createCancellationIdentity: () => "unused",
+    cancel: async () => ({
+      matchedDurableRuns: 1,
+      abortedInFlight: true,
+      cancelledPending: 0,
+    }),
+    resolveUncertain: async () => ({
+      state: "cancelled",
+      factDigest: `sha256:${"b".repeat(64)}`,
+    }),
+    ...overrides,
+  };
+  const application = new ConversationDirectoryApplicationService({
+    storage: {
+      list: async () => [],
+      create: async () => {
+        throw new Error("unused");
+      },
+      rename: async () => null,
+      readHistory: async () => ({ runs: [], hasMore: false }),
+    },
+    runControl,
+  });
+  return new ProductApiDispatcher(
+    CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+    [createConversationDirectoryProductApiContribution(application)],
+  );
+}
 
 describe("session.send 方法", () => {
   it("admitTurn 撞工作场景静默闸时返回 BUSY", async () => {
@@ -104,21 +147,48 @@ describe("session.subscribe publish result history", () => {
 });
 
 describe("session durable control 方法", () => {
+  it("preserves durable cancellation identity validation at the application boundary", async () => {
+    const method = buildSessionAbortMethod();
+    const ctx = {
+      server: { productApi: runControlProductApi() } as unknown as ServerContext,
+      connection: { id: "connection-1", clientInfo: { id: "desktop" } },
+    } as never;
+    await expect(
+      method.handler({ conversationId: "conversation-1" }, ctx),
+    ).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.INVALID_PARAMS,
+      message:
+        "session.abort requires a stable 'requestId' while durable execution is enabled",
+    });
+    await expect(
+      method.handler(
+        { conversationId: "conversation-1", requestId: "cancel-request-1" },
+        ctx,
+      ),
+    ).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.INVALID_PARAMS,
+      message:
+        "session.abort requires an authoritative 'runId' while durable execution is enabled",
+    });
+    await expect(
+      method.handler(
+        { conversationId: "conversation-1", runId: "run-1" },
+        ctx,
+      ),
+    ).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.INVALID_PARAMS,
+      message: "session.abort requires 'requestId' when 'runId' is present",
+    });
+  });
+
   it("durably admits cancellation before signalling the local runtime", async () => {
     const order: string[] = [];
     const cancelDurableRuns = vi.fn(async () => {
       order.push("durable");
       return {
-        dispositions: [
-          {
-            runId: "run-1",
-            runState: "cancelled" as const,
-            source: "interactive" as const,
-            ingressId: "turn-1",
-            abortedInFlight: true,
-            cancelledPending: 0,
-          },
-        ],
+        matchedDurableRuns: 1,
+        abortedInFlight: true,
+        cancelledPending: 0,
       };
     });
     const method = buildSessionAbortMethod();
@@ -130,14 +200,7 @@ describe("session durable control 方法", () => {
       },
       {
         server: {
-          conversations: {
-            cancelDurableRuns,
-            usesDurableTurnProtocol: () => true,
-            durableControlPrincipal: (input: {
-              surfacePrincipal: string;
-              connectionId: string;
-            }) => ({ ...input, deviceId: "anchor-device" }),
-          },
+          productApi: runControlProductApi({ cancel: cancelDurableRuns }),
         } as unknown as ServerContext,
         connection: { id: "connection-1", clientInfo: { id: "desktop" } },
       } as never,
@@ -146,36 +209,30 @@ describe("session durable control 方法", () => {
     expect(cancelDurableRuns).toHaveBeenCalledWith(
       expect.objectContaining({
         conversationId: "conversation-1",
-        requestId: "cancel-request-1",
+        operationId: "cancel-request-1",
         runId: "run-1",
-        reason: expect.objectContaining({ kind: "user-cancel", source: "rpc" }),
-        principal: {
+        caller: {
+          kind: "surface",
           surfacePrincipal: "rpc:desktop",
           connectionId: "connection-1",
-          deviceId: "anchor-device",
         },
+        occurredAt: expect.any(Number),
       }),
     );
   });
 
   it("settles only the advancement proxy bound to the cancelled run ingress", async () => {
     const settleProxyMessage = vi.fn(async () => {});
-    const loadActiveSession = vi.fn(async () => ({
+    const loadActiveSession = vi.fn(async (_conversationId: string) => ({
       id: "advancement-1",
       status: "active" as const,
       outstandingProxyMessageId: "proxy-current",
     }));
     const cancelDurableRuns = vi.fn(async () => ({
-      dispositions: [
-        {
-          runId: "run-old",
-          runState: "cancelled" as const,
-          source: "advancement" as const,
-          ingressId: "proxy-old",
-          abortedInFlight: true,
-          cancelledPending: 0,
-        },
-      ],
+      matchedDurableRuns: 1,
+      abortedInFlight: true,
+      cancelledPending: 0,
+      dependentLifecycleIngressId: "proxy-old",
     }));
     const method = buildSessionAbortMethod();
     await method.handler(
@@ -186,15 +243,18 @@ describe("session durable control 方法", () => {
       },
       {
         server: {
-          conversations: {
-            cancelDurableRuns,
-            usesDurableTurnProtocol: () => true,
-            durableControlPrincipal: (input: {
-              surfacePrincipal: string;
-              connectionId: string;
-            }) => ({ ...input, deviceId: "anchor-device" }),
-          },
-          advancement: { loadActiveSession, settleProxyMessage },
+          productApi: runControlProductApi({
+            cancel: cancelDurableRuns,
+            settleDependentCancellation: async ({
+              conversationId,
+              ingressId,
+            }) => {
+              const active = await loadActiveSession(conversationId);
+              if (active.outstandingProxyMessageId === ingressId) {
+                await settleProxyMessage({ conversationId, ingressId });
+              }
+            },
+          }),
         } as unknown as ServerContext,
         connection: { id: "connection-1", clientInfo: { id: "desktop" } },
       } as never,
@@ -205,7 +265,7 @@ describe("session durable control 方法", () => {
 
   it("settles the advancement proxy bound to the cancelled run ingress", async () => {
     const settleProxyMessage = vi.fn(async () => {});
-    const loadActiveSession = vi.fn(async () => ({
+    const loadActiveSession = vi.fn(async (_conversationId: string) => ({
       id: "advancement-1",
       status: "active" as const,
       outstandingProxyMessageId: "proxy-current",
@@ -219,26 +279,27 @@ describe("session durable control 方法", () => {
       },
       {
         server: {
-          conversations: {
-            cancelDurableRuns: vi.fn(async () => ({
-              dispositions: [
-                {
-                  runId: "run-current",
-                  runState: "cancelled" as const,
-                  source: "advancement" as const,
-                  ingressId: "proxy-current",
-                  abortedInFlight: true,
-                  cancelledPending: 0,
-                },
-              ],
+          productApi: runControlProductApi({
+            cancel: vi.fn(async () => ({
+              matchedDurableRuns: 1,
+              abortedInFlight: true,
+              cancelledPending: 0,
+              dependentLifecycleIngressId: "proxy-current",
             })),
-            usesDurableTurnProtocol: () => true,
-            durableControlPrincipal: (input: {
-              surfacePrincipal: string;
-              connectionId: string;
-            }) => ({ ...input, deviceId: "anchor-device" }),
-          },
-          advancement: { loadActiveSession, settleProxyMessage },
+            settleDependentCancellation: async ({
+              conversationId,
+              ingressId,
+            }) => {
+              const active = await loadActiveSession(conversationId);
+              if (active.outstandingProxyMessageId === ingressId) {
+                await settleProxyMessage({
+                  conversationId,
+                  advancementSessionId: active.id,
+                  proxyMessageId: ingressId,
+                });
+              }
+            },
+          }),
         } as unknown as ServerContext,
         connection: { id: "connection-1", clientInfo: { id: "desktop" } },
       } as never,
@@ -265,31 +326,20 @@ describe("session durable control 方法", () => {
         },
         {
           server: {
-            conversations: {
-              cancelDurableRuns: vi.fn(async () => ({
-                dispositions: [
-                  {
-                    runId: "run-current",
-                    runState: "cancelled" as const,
-                    source: "advancement" as const,
-                    ingressId: "proxy-current",
-                    abortedInFlight: true,
-                    cancelledPending: 0,
-                  },
-                ],
+            productApi: runControlProductApi({
+              cancel: vi.fn(async () => ({
+                matchedDurableRuns: 1,
+                abortedInFlight: true,
+                cancelledPending: 0,
+                dependentLifecycleIngressId: "proxy-current",
               })),
-              usesDurableTurnProtocol: () => true,
-              durableControlPrincipal: (input: {
-                surfacePrincipal: string;
-                connectionId: string;
-              }) => ({ ...input, deviceId: "anchor-device" }),
-            },
-            advancement: {
-              loadActiveSession: vi.fn(async () => {
+              settleDependentCancellation: async () => {
                 throw new Error("advancement store temporarily unavailable");
-              }),
-            },
-            advancementRecovery: { recoverConversation },
+              },
+              recoverDependentCancellation: async (conversationId) => {
+                await recoverConversation(conversationId);
+              },
+            }),
           } as unknown as ServerContext,
           connection: { id: "connection-1", clientInfo: { id: "desktop" } },
         } as never,
@@ -318,13 +368,9 @@ describe("session durable control 方法", () => {
         },
         {
           server: {
-            conversations: {
-              resolveDurableUncertain,
-              durableControlPrincipal: (input: {
-                surfacePrincipal: string;
-                connectionId: string;
-              }) => ({ ...input, deviceId: "anchor-device" }),
-            },
+            productApi: runControlProductApi({
+              resolveUncertain: resolveDurableUncertain,
+            }),
           } as unknown as ServerContext,
           connection: { id: "connection-2", clientInfo: { id: "desktop" } },
         } as never,
@@ -334,10 +380,11 @@ describe("session durable control 方法", () => {
       expect.objectContaining({
         ownerEpoch: 1,
         decision: "user-abandoned",
-        principal: {
+        operationId: "resolve-request-1",
+        caller: {
+          kind: "surface",
           surfacePrincipal: "rpc:desktop",
           connectionId: "connection-2",
-          deviceId: "anchor-device",
         },
       }),
     );

@@ -40,12 +40,14 @@ import {
 import type { ExplicitEnvironmentSelection } from "@zhixing/core/contracts";
 import {
   CONVERSATION_CREATE_COMMAND,
+  CONVERSATION_ABORT_COMMAND,
   CONVERSATION_CLEAR_COMMAND,
   CONVERSATION_DELETE_COMMAND,
   CONVERSATION_HISTORY_QUERY,
   CONVERSATION_LIST_QUERY,
   CONVERSATION_RENAME_COMMAND,
   CONVERSATION_RESUME_COMMAND,
+  CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
   ConversationApplicationError,
   type ConversationDirectoryEntry,
 } from "@zhixing/core/conversation/application";
@@ -2077,94 +2079,24 @@ export function buildSessionAbortMethod(): MethodEntry {
           "session.abort requires 'conversationId'",
         );
       }
-      const manager = requireConversations(ctx.server);
-      const hasRequestId = params.requestId !== undefined;
-      const hasRunId = params.runId !== undefined;
-      if (hasRunId && !hasRequestId) {
-        throw RpcErrors.invalidParams(
-          "session.abort requires 'requestId' when 'runId' is present",
-        );
-      }
-      if (manager.usesDurableTurnProtocol() && !hasRequestId) {
-        throw RpcErrors.invalidParams(
-          "session.abort requires a stable 'requestId' while durable execution is enabled",
-        );
-      }
-      if (manager.usesDurableTurnProtocol() && !hasRunId) {
-        throw RpcErrors.invalidParams(
-          "session.abort requires an authoritative 'runId' while durable execution is enabled",
-        );
-      }
-      if (
-        (hasRequestId && !isProtocolIdentifier(params.requestId)) ||
-        (hasRunId && !isProtocolIdentifier(params.runId))
-      ) {
-        throw RpcErrors.invalidParams(
-          "session.abort control identity is invalid",
-        );
-      }
-      const abortReason = {
-        kind: "user-cancel" as const,
-        source: "rpc" as const,
-        pressedAt: Date.now(),
-      };
-      const durableCancellation = manager.usesDurableTurnProtocol()
-        ? await manager.cancelDurableRuns({
-            conversationId: id,
-            requestId: params.requestId as string,
-            runId: params.runId as string,
-            reason: abortReason,
-            principal: authenticatedConversationPrincipal(ctx),
-          })
-        : undefined;
-      const result = durableCancellation
-        ? {
-            abortedInFlight: durableCancellation.dispositions.some(
-              (item) => item.abortedInFlight,
-            ),
-            cancelledPending: durableCancellation.dispositions.reduce(
-              (sum, item) => sum + item.cancelledPending,
-              0,
-            ),
-          }
-        : manager.abort(id, abortReason);
-      const cancelledAdvancement = durableCancellation?.dispositions.find(
-        (item) => item.source === "advancement",
+      const productApi = requireConversationProductApi(
+        ctx.server,
+        CONVERSATION_ABORT_COMMAND,
       );
-      if (cancelledAdvancement) {
-        try {
-          const activeAdvancement =
-            await ctx.server.advancement?.loadActiveSession(id);
-          if (
-            activeAdvancement?.status === "active" &&
-            activeAdvancement.outstandingProxyMessageId ===
-              cancelledAdvancement.ingressId
-          ) {
-            await ctx.server.advancement?.settleProxyMessage({
-              conversationId: id,
-              advancementSessionId: activeAdvancement.id,
-              proxyMessageId: cancelledAdvancement.ingressId,
-            });
-          }
-        } catch {
-          // The exact run cancellation is already authoritative and locally
-          // effective. Auxiliary projection recovery owns this durable proxy.
-          void ctx.server.advancementRecovery
-            ?.recoverConversation(id)
-            .catch(() => {});
-        }
-      }
-      // RPC client 视角:in-flight 和 pending 都没动 = 没有可取消的对象 → notFound。
-      // 任一维度动了 = 取消生效;细分计数 client 当前不消费(IDE 同步场景 pending 通常为 0),
-      // 不暴露在 RPC schema 中,留作后续若需要时扩。
-      if (
-        (durableCancellation?.dispositions.length ?? 0) === 0 &&
-        !result.abortedInFlight &&
-        result.cancelledPending === 0
-      ) {
-        throw RpcErrors.notFound(
-          `Session not found or no in-flight turn / pending message: ${id}`,
-        );
+      try {
+        await productApi.command(CONVERSATION_ABORT_COMMAND, {
+          kind: "abort",
+          conversationId: id,
+          ...(params.requestId !== undefined
+            ? { operationId: params.requestId as string }
+            : {}),
+          ...(params.runId !== undefined
+            ? { runId: params.runId as string }
+            : {}),
+          caller: conversationControlCaller(ctx),
+        });
+      } catch (error) {
+        throw mapConversationRunControlError(error, "abort", id);
       }
     },
   };
@@ -2185,10 +2117,32 @@ export function buildSessionResolveMethod(): MethodEntry {
     requiresAuth: true,
     async handler(rawParams, ctx) {
       const params = parseSessionResolveParams(rawParams);
-      return requireConversations(ctx.server).resolveDurableUncertain({
-        ...params,
-        principal: authenticatedConversationPrincipal(ctx),
-      });
+      const productApi = requireConversationProductApi(
+        ctx.server,
+        CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
+      );
+      try {
+        const dispatch = await productApi.command(
+          CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
+          {
+            kind: "resolve-uncertain",
+            conversationId: params.conversationId,
+            runId: params.runId,
+            operationId: params.requestId,
+            ownerEpoch: params.ownerEpoch,
+            openFactDigest: params.openFactDigest,
+            decision: params.decision,
+            caller: conversationControlCaller(ctx),
+          },
+        );
+        return dispatch.result;
+      } catch (error) {
+        throw mapConversationRunControlError(
+          error,
+          "resolve",
+          params.conversationId,
+        );
+      }
     },
   };
 }
@@ -2238,7 +2192,7 @@ function parseSessionResolveParams(raw: unknown): {
   return value as ReturnType<typeof parseSessionResolveParams>;
 }
 
-function authenticatedConversationPrincipal(
+function conversationControlCaller(
   ctx: Parameters<MethodEntry["handler"]>[1],
 ) {
   const surfacePrincipal = rpcSurfacePrincipal(ctx.connection);
@@ -2251,10 +2205,11 @@ function authenticatedConversationPrincipal(
       "authenticated conversation identity is invalid",
     );
   }
-  return requireConversations(ctx.server).durableControlPrincipal({
+  return {
+    kind: "surface" as const,
     surfacePrincipal,
     connectionId,
-  });
+  };
 }
 
 // ─── session.delete ───
@@ -3112,6 +3067,43 @@ function mapConversationApplicationError(
   return RpcErrors.invalidParams(
     "session.history 'limit' must be a positive integer",
   );
+}
+
+function mapConversationRunControlError(
+  error: unknown,
+  operation: "abort" | "resolve",
+  conversationId: string,
+): unknown {
+  if (!(error instanceof ConversationApplicationError)) return error;
+  if (operation === "abort") {
+    if (error.code === "not-found") {
+      return RpcErrors.notFound(
+        `Session not found or no in-flight turn / pending message: ${conversationId}`,
+      );
+    }
+    switch (error.reason) {
+      case "abort-run-without-operation":
+        return RpcErrors.invalidParams(
+          "session.abort requires 'requestId' when 'runId' is present",
+        );
+      case "abort-operation-required":
+        return RpcErrors.invalidParams(
+          "session.abort requires a stable 'requestId' while durable execution is enabled",
+        );
+      case "abort-run-required":
+        return RpcErrors.invalidParams(
+          "session.abort requires an authoritative 'runId' while durable execution is enabled",
+        );
+      case "control-identity-invalid":
+      case "surface-caller-invalid":
+        return RpcErrors.invalidParams(
+          "session.abort control identity is invalid",
+        );
+      default:
+        return RpcErrors.invalidParams(error.message);
+    }
+  }
+  return RpcErrors.invalidParams("session.resolve params are invalid");
 }
 
 function mapConversationResumeApplicationError(

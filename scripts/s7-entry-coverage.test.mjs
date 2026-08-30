@@ -3438,6 +3438,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/conversation-clear-binding.ts",
     "packages/cli/src/serve/conversation-resume-binding.ts",
+    "packages/cli/src/serve/conversation-run-control-binding.ts",
     "packages/cli/src/serve/conversation-delete-binding.ts",
     "packages/cli/src/serve/conversation-directory.ts",
     "packages/cli/src/serve/workscene-directory.ts",
@@ -3519,6 +3520,30 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/local-conversation-rpc.ts",
       (text) => `${text}\nvoid input.owner.createConversation();`,
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => `${text}\nvoid requireConversations(ctx.server).cancelDurableRuns({});`,
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/local-conversation-rpc.ts",
+      (text) => `${text}\nvoid this.input.owner.cancelConversationRuns({});`,
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/conversation/application.ts",
+      (text) => text.replace(
+        "async resolveUncertain(",
+        "async resolvePending(",
+      ),
     )).join("\n"),
     /Conversation directory management lacks one domain application/,
   );

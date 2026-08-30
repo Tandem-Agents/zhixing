@@ -379,6 +379,41 @@ describe("LocalConversationRpcRouter", () => {
     );
   });
 
+  it("本机取消经同一领域应用提交且空 disposition 仍保持既有成功语义", async () => {
+    const owner = ownerPort();
+    owner.cancelConversationRuns = vi.fn(async () => ({
+      matchedDurableRuns: 0,
+      abortedInFlight: false,
+      cancelledPending: 0,
+    }));
+    const router = new LocalConversationRpcRouter({
+      deviceId: DEVICE_ID,
+      owner,
+      remoteFor: () => { throw new Error("unexpected remote route"); },
+    });
+
+    await expect(router.dispatch({
+      method: "session.abort",
+      params: {
+        conversationId: CONVERSATION_ID,
+        requestId: "cancel-request-1",
+        continueLocally: true,
+      },
+      connection: fakeConnection(),
+    })).resolves.toEqual({ handled: true, result: undefined });
+    expect(owner.cancelConversationRuns).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: CONVERSATION_ID,
+        operationId: "cancel-request-1",
+        caller: {
+          kind: "surface",
+          surfacePrincipal: "rpc:test",
+          connectionId: "7",
+        },
+      }),
+    );
+  });
+
   it("在本机 owner 上以同一 surface identity 解析 durable uncertain run", async () => {
     const owner = ownerPort();
     const router = new LocalConversationRpcRouter({
@@ -403,10 +438,18 @@ describe("LocalConversationRpcRouter", () => {
       handled: true,
       result: { state: "cancelled" },
     });
-    expect(owner.resolveDurableUncertain).toHaveBeenCalledWith({
-      ...input,
-      surfacePrincipal: "rpc:test",
-      connectionId: "7",
+    expect(owner.resolveConversationUncertain).toHaveBeenCalledWith({
+      conversationId: input.conversationId,
+      runId: input.runId,
+      operationId: input.requestId,
+      ownerEpoch: input.ownerEpoch,
+      openFactDigest: input.openFactDigest,
+      decision: input.decision,
+      caller: {
+        kind: "surface",
+        surfacePrincipal: "rpc:test",
+        connectionId: "7",
+      },
     });
   });
 
@@ -496,8 +539,12 @@ function ownerPort(): LocalConversationOwnerPort {
       return () => factListeners.delete(listener);
     }),
     mutateSession: vi.fn(async () => ({ revision: 1 })),
-    cancelTurns: vi.fn(async () => {}),
-    resolveDurableUncertain: vi.fn(async () => ({
+    cancelConversationRuns: vi.fn(async () => ({
+      matchedDurableRuns: 1,
+      abortedInFlight: true,
+      cancelledPending: 0,
+    })),
+    resolveConversationUncertain: vi.fn(async () => ({
       state: "cancelled",
       factDigest: `sha256:${"b".repeat(64)}`,
     })),

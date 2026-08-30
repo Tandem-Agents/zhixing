@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-12d Conversation resume 应用责任已完成，等待协调者独立复核<br>
+> 当前检查点：A5-12e Conversation abort/resolve 运行控制应用责任完成，等待协调者复核<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `a04c4f2e8201c24336ea0741c5c80d1ee1ef83f8`；A0～A4、Skill Catalog、Delivery、完整 Workspace Administration、完整 Trust Administration、完整 Schedule、Conversation 目录、clear/delete 生命周期及 A5-12c 纠正均已通过协调者独立复核并提交 |
+| 已接受基线 | `879d0f41067cbe96c714c0a54a738565e1f7d024`；A0～A4、Skill Catalog、Delivery、完整 Workspace Administration、完整 Trust Administration、完整 Schedule、Conversation 目录、clear/delete/resume 生命周期及 A5-12d 纠正均已通过协调者独立复核并提交 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | A5-12d：Conversation resume 应用责任已完成，等待协调者独立复核；observer/subscribe 仍是 Server/Surface binding，Conversation 行与 A5 仍为 `[ ]` |
-| 下一责任链 | 验收 A5-12d 后，从 Conversation turn admission/run 生命周期选择下一条最窄责任链；不得把 observer/subscribe 误迁成领域事实 |
+| 活跃工作包 | A5-12e：Conversation abort/resolve 运行控制应用责任完成，等待协调者复核；Conversation 行与 A5 仍为 `[ ]` |
+| 下一责任链 | A5-12e 验收后进入 Conversation send/admission/run；不得扩入 Advancement 内部状态机、Workscene 或 A6 |
 | 打开的单向桥 | `A5-CONVERSATION-LIFECYCLE-01`：`ServerContext.conversationDirectory` 已退出 clear/delete/resume，暂仅承载 exists/ensure/transcript，Conversation 最终包前归零。<br>`A5-CONVERSATION-WORKSCENE-DELETE-01`：Anchor 组合根唯一创建 `ConversationWorksceneDeleteProjectionBridge`，唯一 consumer 为 `WorksceneSessionOwner.removeScene`；只允许 Workscene Authority delete 后调用 Conversation 物理存储投影，不拥有 delete 准入、终态、Fact 或通知，必须在 Workscene A5 迁移包退场 |
-| 已失效证据 | 无当前未恢复证据；A5-12d 已恢复 resume identity/recovery/adoption/observer 顺序与 Anchor/Executor-local 等价证据，等待协调者独立复核 |
+| 已失效证据 | 无当前未恢复证据；A5-12d 已由协调者独立复核并提交，A5-12e 的 abort/resolve 责任链证据已在当前工作区恢复并等待独立复核 |
 | 阻塞/用户决策 | 无技术阻塞；用户已明确恢复调度 |
 
 ### A0 基线索引
@@ -2031,6 +2031,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 
 - 反证与修复：初次实现虽然把 observer 建立放在恢复前，却在 resume identity not-found 时无条件 `removeObserver`；同一 connection 先前已订阅，或 quiescing 使本次 add 返回 false 但既有名册身份仍在时，会误删非本次建立的 observer并可能错误启动 grace。Anchor binding 现在先从 manager 只读名册记录 `alreadyObserved`，再记录本次 `observerAdded`；not-found 只有在“此前不存在且本次 add 成功”时移除。fresh missing 仍零泄漏，already-subscribed missing 保留原 observer，existing identity 仍严格 observer-before-recovery；quiescing、grace 和其他错误路径未改变。Executor-local 原有 `alreadySubscribed` 纪律保持，并新增 fresh missing 后注入 Conversation Fact 不再通知该连接的直接断言。
 - 纠正证据与失效恢复：Server `session.resume` 定向 1 文件 5/5（同文件其余 74 项未运行），直接覆盖 fresh missing 回滚、already-subscribed missing 保留和 existing observer-before-recovery；CLI local resume 定向 1 文件 1/1（其余 9 项未运行），覆盖 fresh missing 零 observer 泄漏。canonical S7 coverage/mutation 32/32 与 registry golden 通过；反向 mutation 把条件回滚恢复为 unconditional 时，Conversation owner 与 adoption 两条结构检查均失败。协调者独立复核后在纠正基线上重新取得同一定向结果与 S7 结果，并因 Server handler 构建输入已经变化补跑 fresh `@zhixing/server` build 与 `pnpm cli:build`，二者均通过；core 与公共导出输入未变，未重复 core build 或 package exports。初次“只回滚本次 provisional observer”的未成立声明现已由对抗证据恢复；A5-12d 继续等待协调者独立复核，Conversation 行与 A5 保持 `[ ]`，未进入 turn admission/run，也未执行任何 Git 暂存、取消暂存、提交、历史改写或推送。
+
+### A5-12e：归位 Conversation abort/resolve 运行控制应用责任
+
+- 实施基线与唯一应用：进场为 `HEAD 879d0f41067cbe96c714c0a54a738565e1f7d024 + task-doc:A5-12e-dispatch`，索引为空。Conversation 窄入口在 A5-12d 的同一个 `ConversationDirectoryApplicationService` 上新增 `abort`、`resolve-uncertain` 两个 Command、有限 `ConversationRunControlPort` 与稳定结果投影；Conversation Product API exact-set 由 7 个 operation 扩为 9 个、Fact Event 仍为既有 3 个。领域应用唯一拥有 stable cancellation operation/run identity 的必需性与校验、durable/legacy 取消成功或 not-found 终态、权威取消后 Advancement proxy 结算/恢复顺序，以及 uncertain resolution 的 identity/epoch/open-fact/decision 校验；端口只表达 Owner/Authority principal、取消/resolve 提交和跨领域投影机制，不暴露 Manager、Authority、Advancement、RPC、Server 或本地 owner 实现。
+- Anchor 与 Executor-local 绑定：Anchor 唯一 `createAnchorConversationRunControlPort` 把已认证 surface caller 映射为 durable principal；durable 形态保持 requestId + authoritative runId、耐久取消后才作用本机 runtime、同 request replay 与异载荷冲突，legacy 形态继续生成本次 operation identity 并调用既有内存 abort。取消 disposition 只在 binding 聚合为匹配数、in-flight/pending 效果与可选 Advancement ingress；领域应用再按既有顺序结算当前 active/outstanding proxy，结算异常不回滚已权威取消并 fire-and-forget 启动既有恢复。Executor-local router 继续要求 `continueLocally` 和 stable requestId，但不虚构 authoritative runId；同一应用经 local owner 的 current-authority fence 调用 durable cancellation/resolve mechanism，空 disposition 仍保持迁移前成功语义。两种表面均只解析 wire、构造 caller、调用应用并映射错误/结果。
+- 行为保护与旧路收敛：保持 `conversationId/sessionId` alias、Anchor durable 缺 requestId/runId 与非法 identity 的原错误、legacy no-work 的 NOT_FOUND、local consent/中文错误、user-cancel reason/time、resolve strict exact-key wire、三种 decision、owner epoch/open-fact digest、authenticated principal、resolve result、response-loss/replay、取消 first-wins 与公开 RPC/Event 全等。Server `session.abort` 已删除对 `ConversationManager.abort/cancelDurableRuns`、durable principal、Advancement load/settle/recovery 的业务编排，`session.resolve` 已删除 manager 直调；local router 已删除 `owner.cancelTurns/resolveDurableUncertain` 直调，local owner 只保留 `cancelConversationRuns/resolveConversationUncertain` Correctness mechanism。未进入 send/admission/run、Advancement 内部状态机、Workscene、Channel 或 A6，两个既有 bridge 均未改变。
+- 直接证据与验证：core Conversation application 1 文件 14/14，覆盖两 Command、identity/epoch/digest/decision fail-closed、空取消、依赖结算及失败后恢复；Server handler 1 文件 9/9，覆盖 wire identity/error、同 dispatcher 调用、Advancement 匹配/恢复和 resolve principal；真实 Server loopback abort/resolve 定向 1 文件 7/7（同文件其余 72 项未运行）；CLI Anchor binding 与 Executor-local router 2 文件 14/14，覆盖 durable/legacy principal、resolve、local empty-success 与唯一应用调用；local owner lifecycle 只重验受接口变化影响的 write-fence 1/1。首次把完整 local-owner lifecycle 与本包两文件合跑时为 27/28，唯一失败是既有 storage maintenance `backpressured:ioOperations`，与 run-control 调用图无关；随后只重验失效的 write-fence 闭包通过，未重复其余长时测试。fresh `@zhixing/core`、`@zhixing/server` 与 `pnpm cli:build`、canonical S7 coverage/mutation 32/32 与 registry golden、fresh `pnpm runtime:package-exports`、最窄 Biome 均通过；未运行根级回归或制品验收。
+- 结构失效与交接：S7 与反向 mutation 冻结两个领域 Command/port/application、9-operation exact-set、Anchor 唯一 binding、Executor-local 同应用调用、Server/local 旧直调归零，并拒绝漏 command、恢复 Manager/owner 直调、第二 run-control owner 或 Host 漏接。以后 abort/resolve command/result、durable/legacy/local identity 规则、principal、disposition/Advancement 后置顺序、empty/no-work 终态、strict resolve wire、Owner/Authority mechanism、Product API composition、Server/local binding、S7 或 package export 任一变化，本记录精确失效并只重验该闭包。A5-12e 当前完成并等待协调者独立复核；Conversation 行与 A5 继续 `[ ]`，下一检查点只进入 send/admission/run，不扩入 Workscene 或 A6。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 

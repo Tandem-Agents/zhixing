@@ -355,16 +355,42 @@ export class LocalConversationRpcRouter
         requireLocalConsent(params);
         const conversationId = this.#conversationId(params, method);
         const requestId = requiredIdentifier(params.requestId, "取消请求");
-        await this.input.owner.cancelTurns({ conversationId, requestId });
+        try {
+          await this.#application.abort({
+            kind: "abort",
+            conversationId,
+            operationId: requestId,
+            caller: {
+              kind: "surface",
+              surfacePrincipal: requireRpcSurfacePrincipal(connection),
+              connectionId: String(connection.id),
+            },
+          });
+        } catch (error) {
+          throw mapLocalConversationApplicationError(error, "abort");
+        }
         return undefined;
       }
       case "session.resolve": {
         const value = parseSessionResolve(params);
-        return this.input.owner.resolveDurableUncertain({
-          ...value,
-          surfacePrincipal: requireRpcSurfacePrincipal(connection),
-          connectionId: String(connection.id),
-        });
+        try {
+          return await this.#application.resolveUncertain({
+            kind: "resolve-uncertain",
+            conversationId: value.conversationId,
+            runId: value.runId,
+            operationId: value.requestId,
+            ownerEpoch: value.ownerEpoch,
+            openFactDigest: value.openFactDigest,
+            decision: value.decision,
+            caller: {
+              kind: "surface",
+              surfacePrincipal: requireRpcSurfacePrincipal(connection),
+              connectionId: String(connection.id),
+            },
+          });
+        } catch (error) {
+          throw mapLocalConversationApplicationError(error, "resolve");
+        }
       }
       case "session.rename": {
         requireLocalConsent(params);
@@ -759,7 +785,14 @@ function projectWireConversationEntry(
 
 function mapLocalConversationApplicationError(
   error: unknown,
-  operation: "history" | "resume" | "rename" | "clear" | "delete",
+  operation:
+    | "history"
+    | "resume"
+    | "rename"
+    | "clear"
+    | "delete"
+    | "abort"
+    | "resolve",
 ): unknown {
   if (!(error instanceof ConversationApplicationError)) return error;
   if (error.code === "not-found") {
@@ -773,7 +806,11 @@ function mapLocalConversationApplicationError(
     );
   }
   return RpcErrors.invalidParams(
-    operation === "clear" || operation === "delete"
+    operation === "abort"
+      ? "取消请求缺少有效的请求标识。"
+      : operation === "resolve"
+        ? "session.resolve params are invalid"
+    : operation === "clear" || operation === "delete"
       ? operation === "clear"
         ? "清空请求缺少有效的请求标识。"
         : "删除请求缺少有效的请求标识。"

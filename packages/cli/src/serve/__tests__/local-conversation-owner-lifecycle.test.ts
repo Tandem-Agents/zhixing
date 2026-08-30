@@ -89,7 +89,16 @@ async function expectWritesFenced(
     port.runTurn({ conversationId, text: "fenced", turnId: "fence-turn" }),
   ).rejects.toThrow(/not ready/);
   await expect(
-    port.cancelTurns({ conversationId, requestId: "fence-cancel" }),
+    port.cancelConversationRuns({
+      conversationId,
+      operationId: "fence-cancel",
+      caller: {
+        kind: "surface",
+        surfacePrincipal: "rpc:test",
+        connectionId: "connection-test",
+      },
+      occurredAt: 1,
+    }),
   ).rejects.toThrow(/not ready/);
   await expect(
     port.answerInteractionWithTicket({
