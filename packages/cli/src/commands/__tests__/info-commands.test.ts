@@ -10,6 +10,8 @@ import {
   CommandDispatcher,
   DefaultCommandRegistry,
   type RuntimeContext,
+  type SchedulerFacade,
+  type TaskView,
 } from "@zhixing/core";
 import { registerInfoCommands } from "../info-commands.js";
 import { stripAnsi } from "../../tui/index.js";
@@ -36,7 +38,11 @@ function makeWriter(): CliWriter & { text: () => string } {
   } as unknown as CliWriter & { text: () => string };
 }
 
-function setup(options: { selection?: SelectionService; requestExit?: () => void } = {}) {
+function setup(options: {
+  selection?: SelectionService;
+  requestExit?: () => void;
+  schedulerTasks?: readonly TaskView[];
+} = {}) {
   const registry = new DefaultCommandRegistry();
   const dispatcher = new CommandDispatcher({ registry });
   const writer = makeWriter();
@@ -103,6 +109,7 @@ function setup(options: { selection?: SelectionService; requestExit?: () => void
     })),
     serverShutdown: vi.fn(async () => {}),
   } as unknown as RpcManagementFacade;
+  const schedulerList = vi.fn(async () => options.schedulerTasks ?? []);
 
   registerInfoCommands({
     registry,
@@ -111,7 +118,7 @@ function setup(options: { selection?: SelectionService; requestExit?: () => void
     getConfig: () => config,
     controller,
     getNetworkProxy: () => ({ mode: "off", resolved: null, display: "off" }) as never,
-    getScheduler: () => ({ list: async () => [] }) as never,
+    getScheduler: () => ({ list: schedulerList }) as unknown as SchedulerFacade,
     management,
     selection: options.selection,
     requestExit: options.requestExit,
@@ -123,6 +130,7 @@ function setup(options: { selection?: SelectionService; requestExit?: () => void
     contextBudget,
     usage,
     management,
+    schedulerList,
     setConfig: (next: ZhixingConfig) => {
       config = next;
     },
@@ -284,5 +292,31 @@ describe("registerInfoCommands", () => {
     expect(text).toContain("子任务拆分");
     expect(text).toContain("#1");
     expect(text).toContain("调研模块结构");
+  });
+
+  it("/tasks 直接展示领域应用已裁决的集合，不重复解释 system 标记", async () => {
+    const h = setup({
+      schedulerTasks: [{
+        id: "domain-visible",
+        taskRevision: 1,
+        name: "领域已裁决任务",
+        enabled: true,
+        priority: "normal",
+        schedule: { kind: "once", at: "2026-08-31T08:00:00.000Z" },
+        action: { kind: "agent-turn", prompt: "提醒" },
+        system: true,
+        state: { consecutiveErrors: 0, runCount: 0 },
+        createdAt: "2026-08-30T08:00:00.000Z",
+        updatedAt: "2026-08-30T08:00:00.000Z",
+      }],
+    });
+
+    await h.dispatcher.dispatch("/tasks", RUNTIME);
+
+    expect(h.schedulerList).toHaveBeenCalledOnce();
+    const text = stripAnsi(h.writer.text());
+    expect(text).toContain("领域已裁决任务");
+    expect(text).toContain("domain-visible");
+    expect(text).not.toContain("没有定时任务");
   });
 });

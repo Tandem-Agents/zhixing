@@ -107,12 +107,12 @@ export class RpcSchedulerFacade implements SchedulerFacade {
 // event-bridge 推送的 payload 形状已含这些字段（task-failed 已并入 completed{status:error}）。
 
 function toAccepted(payload: unknown): SchedulerFacadeEvent {
-  const p = payload as { taskId: string; jobRunId: string; name: string };
+  const p = exactRecord(payload, ["jobRunId", "name", "taskId"], []);
   return {
     kind: "accepted",
-    taskId: p.taskId,
-    jobRunId: p.jobRunId,
-    name: p.name,
+    taskId: requiredString(p.taskId, "schedule.accepted taskId"),
+    jobRunId: requiredString(p.jobRunId, "schedule.accepted jobRunId"),
+    name: requiredString(p.name, "schedule.accepted name"),
   };
 }
 
@@ -128,46 +128,107 @@ function requireOperationId(
 }
 
 function toStarted(payload: unknown): SchedulerFacadeEvent {
-  const p = payload as { taskId: string; name: string };
-  return { kind: "started", taskId: p.taskId, name: p.name };
+  const p = exactRecord(payload, ["name", "taskId"], []);
+  return {
+    kind: "started",
+    taskId: requiredString(p.taskId, "schedule.started taskId"),
+    name: requiredString(p.name, "schedule.started name"),
+  };
 }
 
 function toCompleted(payload: unknown): SchedulerFacadeEvent {
-  const p = payload as {
-    taskId: string;
-    name: string;
-    status: "ok" | "error";
-    durationMs?: number;
-    summary?: string;
-    error?: string;
-    consecutiveErrors?: number;
-    nextRunAt?: string;
-  };
-  return {
-    kind: "completed",
-    taskId: p.taskId,
-    name: p.name,
-    status: p.status,
-    durationMs: p.durationMs,
-    summary: p.summary,
-    error: p.error,
-    consecutiveErrors: p.consecutiveErrors,
-    nextRunAt: p.nextRunAt,
-  };
+  const base = exactRecord(payload, ["name", "status", "taskId"], [
+    "consecutiveErrors",
+    "durationMs",
+    "error",
+    "nextRunAt",
+    "summary",
+  ]);
+  const taskId = requiredString(base.taskId, "schedule.completed taskId");
+  const name = requiredString(base.name, "schedule.completed name");
+  const p = base;
+  if (
+    p.status === "ok" &&
+    typeof p.durationMs === "number" &&
+    Number.isFinite(p.durationMs) &&
+    p.durationMs >= 0
+  ) {
+    exactRecord(payload, ["durationMs", "name", "status", "taskId"], ["summary"]);
+    return {
+      kind: "completed",
+      taskId,
+      name,
+      status: p.status,
+      durationMs: p.durationMs,
+      ...(p.summary !== undefined
+        ? { summary: requiredString(p.summary, "schedule.completed summary") }
+        : {}),
+    };
+  }
+  if (
+    p.status === "error" &&
+    typeof p.error === "string" &&
+    Number.isSafeInteger(p.consecutiveErrors) &&
+    (p.consecutiveErrors as number) >= 0
+  ) {
+    exactRecord(payload, [
+      "consecutiveErrors",
+      "error",
+      "name",
+      "status",
+      "taskId",
+    ], ["nextRunAt"]);
+    return {
+      kind: "completed",
+      taskId,
+      name,
+      status: p.status,
+      error: p.error,
+      consecutiveErrors: p.consecutiveErrors as number,
+      ...(p.nextRunAt !== undefined
+        ? { nextRunAt: requiredString(p.nextRunAt, "schedule.completed nextRunAt") }
+        : {}),
+    };
+  }
+  throw new TypeError("Invalid schedule.completed notification");
 }
 
 function toDisabled(payload: unknown): SchedulerFacadeEvent {
-  const p = payload as {
-    taskId: string;
-    name: string;
-    reason?: string;
-    lastError?: string;
-  };
+  const p = exactRecord(payload, ["name", "reason", "taskId"], ["lastError"]);
   return {
     kind: "disabled",
-    taskId: p.taskId,
-    name: p.name,
-    reason: p.reason,
-    lastError: p.lastError,
+    taskId: requiredString(p.taskId, "schedule.disabled taskId"),
+    name: requiredString(p.name, "schedule.disabled name"),
+    reason: requiredString(p.reason, "schedule.disabled reason"),
+    ...(p.lastError !== undefined
+      ? { lastError: requiredString(p.lastError, "schedule.disabled lastError") }
+      : {}),
   };
+}
+
+function exactRecord(
+  value: unknown,
+  required: readonly string[],
+  optional: readonly string[],
+): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Invalid Schedule notification payload");
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  const allowed = [...required, ...optional].sort();
+  if (
+    required.some((key) => !Object.hasOwn(record, key)) ||
+    keys.some((key) => !allowed.includes(key))
+  ) {
+    throw new TypeError("Invalid Schedule notification payload");
+  }
+  return record;
+}
+
+function requiredString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new TypeError(`${label} must be a non-empty string`);
+  }
+  return value;
 }

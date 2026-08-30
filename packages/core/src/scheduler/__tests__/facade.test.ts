@@ -4,9 +4,12 @@ import { InMemoryTaskStore } from "../in-memory-task-store.js";
 import { LocalSchedulerFacade } from "../facade.js";
 import {
   ScheduleManagementApplicationService,
+  ScheduleRuntimeApplicationService,
   type ScheduleManagementRepository,
+  type ScheduleRuntimeProjectionPort,
 } from "../application.js";
 import { createEventBus } from "../../events/event-bus.js";
+import type { IEventBus } from "../../events/types.js";
 import type { SchedulerEventMap } from "../events.js";
 import type { SchedulerFacadeEvent } from "../facade.js";
 import type { AgentTurnResult } from "../types.js";
@@ -37,6 +40,33 @@ function managementRepository(scheduler: Scheduler): ScheduleManagementRepositor
   };
 }
 
+function runtimeProjection(
+  scheduler: Scheduler,
+  eventBus: IEventBus<SchedulerEventMap>,
+): ScheduleRuntimeProjectionPort {
+  return {
+    snapshot: () => ({
+      tasks: scheduler.listTasks(),
+      activeRunCount: scheduler.activeTaskCount,
+    }),
+    onSignal: (handler) => {
+      const disposers = [
+        eventBus.on("scheduler:task-accepted", (event) =>
+          handler({ kind: "accepted", ...event })),
+        eventBus.on("scheduler:task-started", (event) =>
+          handler({ kind: "started", taskId: event.taskId, name: event.name })),
+        eventBus.on("scheduler:task-completed", (event) =>
+          handler({ kind: "completed", ...event })),
+        eventBus.on("scheduler:task-failed", (event) =>
+          handler({ kind: "failed", ...event })),
+        eventBus.on("scheduler:task-disabled", (event) =>
+          handler({ kind: "disabled", ...event })),
+      ];
+      return () => disposers.forEach((dispose) => dispose());
+    },
+  };
+}
+
 describe("LocalSchedulerFacade", () => {
   function setup(runAgentTurn?: () => Promise<AgentTurnResult>) {
     const eventBus = createEventBus<SchedulerEventMap>();
@@ -54,8 +84,7 @@ describe("LocalSchedulerFacade", () => {
           abort: async () => false,
         },
       ),
-      scheduler,
-      eventBus,
+      new ScheduleRuntimeApplicationService(runtimeProjection(scheduler, eventBus)),
     );
     return { scheduler, eventBus, facade };
   }

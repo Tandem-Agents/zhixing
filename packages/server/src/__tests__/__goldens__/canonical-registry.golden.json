@@ -2334,17 +2334,6 @@
       {
         "owner": "standalone-server",
         "role": "server",
-        "id": "scheduler.stop",
-        "source": "packages/server/src/lifecycle.ts",
-        "key": "cleanup:standalone-server:server:scheduler.stop",
-        "category": "cleanup",
-        "target": {
-          "rowId": "shutdown"
-        }
-      },
-      {
-        "owner": "standalone-server",
-        "role": "server",
         "id": "server.close",
         "source": "packages/server/src/lifecycle.ts",
         "key": "cleanup:standalone-server:server:server.close",

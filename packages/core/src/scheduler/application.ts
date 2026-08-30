@@ -8,7 +8,27 @@ import {
 } from "../product-api/catalog.js";
 import { validateTaskDefinition } from "../protocol/job.js";
 import type { TaskPatch, TaskSpec, TaskView } from "./facade.js";
-import type { AgentTurnResult } from "./types.js";
+import { computeStatusSummary, isInternal } from "./status-summary.js";
+import type { AgentTurnResult, TaskStatusSummary } from "./types.js";
+
+export {
+  DEFAULT_SCHEDULE_FAILURE_THRESHOLD,
+  countScheduleConsecutiveFailures,
+  decideScheduleFailurePolicy,
+  decideScheduleTrigger,
+  deriveScheduleNextRun,
+  scheduleAutoDisableOperationId,
+  scheduleJobRunId,
+  scheduleTimerDelay,
+  selectPendingScheduleAutoDisable,
+  selectDueScheduleEntries,
+} from "./runtime-policy.js";
+export type { ScheduleTriggerDecision } from "./runtime-policy.js";
+export type {
+  ScheduleFailureFact,
+  ScheduleFailurePolicyDecision,
+} from "./runtime-policy.js";
+export { ScheduleRuntimePolicyError } from "./runtime-policy.js";
 
 /** User-authored schedule definition before domain defaults are applied. */
 export type ScheduleTaskDraft = Omit<TaskSpec, "enabled" | "priority"> & {
@@ -75,6 +95,272 @@ export type ScheduleManagementCommandResult =
 export interface ScheduleManagementApplication {
   query(query: ScheduleManagementQuery): Promise<ScheduleManagementView>;
   execute(command: ScheduleManagementCommand): Promise<ScheduleManagementCommandResult>;
+}
+
+/** Raw runtime facts exposed by the Schedule Correctness mechanism. */
+export type ScheduleRuntimeSignal =
+  | {
+      readonly kind: "accepted";
+      readonly taskId: string;
+      readonly jobRunId: string;
+      readonly name: string;
+    }
+  | { readonly kind: "started"; readonly taskId: string; readonly name: string }
+  | {
+      readonly kind: "completed";
+      readonly taskId: string;
+      readonly name: string;
+      readonly durationMs: number;
+      readonly summary?: string;
+    }
+  | {
+      readonly kind: "failed";
+      readonly taskId: string;
+      readonly name: string;
+      readonly error: string;
+      readonly consecutiveErrors: number;
+      readonly nextRunAt?: string;
+    }
+  | {
+      readonly kind: "disabled";
+      readonly taskId: string;
+      readonly name: string;
+      readonly reason: string;
+      readonly lastError?: string;
+    };
+
+/** User-visible runtime event owned by the Schedule domain. */
+export type ScheduleRuntimeEvent =
+  | {
+      readonly kind: "accepted";
+      readonly taskId: string;
+      readonly jobRunId: string;
+      readonly name: string;
+    }
+  | { readonly kind: "started"; readonly taskId: string; readonly name: string }
+  | {
+      readonly kind: "completed";
+      readonly taskId: string;
+      readonly name: string;
+      readonly status: "ok";
+      readonly durationMs: number;
+      readonly summary?: string;
+    }
+  | {
+      readonly kind: "completed";
+      readonly taskId: string;
+      readonly name: string;
+      readonly status: "error";
+      readonly error: string;
+      readonly consecutiveErrors: number;
+      readonly nextRunAt?: string;
+    }
+  | {
+      readonly kind: "disabled";
+      readonly taskId: string;
+      readonly name: string;
+      readonly reason: string;
+      readonly lastError?: string;
+    };
+
+export interface ScheduleRuntimeStatusView {
+  readonly activeRunCount: number;
+  readonly enabledUserTaskCount: number;
+  readonly turnContext: TaskStatusSummary;
+}
+
+/** Path-free runtime facts supplied by the current durable Schedule generation. */
+export interface ScheduleRuntimeProjectionPort {
+  snapshot(): {
+    readonly tasks: readonly TaskView[];
+    readonly activeRunCount: number;
+  };
+  onSignal(handler: (signal: ScheduleRuntimeSignal) => void): () => void;
+}
+
+/** Finite read/event surface consumed by Kernel, RPC and local product surfaces. */
+export interface ScheduleRuntimeApplication {
+  readStatus(): ScheduleRuntimeStatusView;
+  onEvent(handler: (event: ScheduleRuntimeEvent) => void): () => void;
+}
+
+/**
+ * Sole owner of Schedule runtime visibility and event semantics. The adapter
+ * supplies mechanism facts only; user visibility, failure folding and status
+ * projection are decided here.
+ */
+export class ScheduleRuntimeApplicationService implements ScheduleRuntimeApplication {
+  constructor(
+    private readonly projection: ScheduleRuntimeProjectionPort,
+    private readonly now: () => Date = () => new Date(),
+  ) {}
+
+  readStatus(): ScheduleRuntimeStatusView {
+    const snapshot = this.projection.snapshot();
+    const visible = snapshot.tasks.filter((task) => !isInternal(task));
+    return Object.freeze({
+      activeRunCount: requireNonNegativeInteger(snapshot.activeRunCount),
+      enabledUserTaskCount: visible.filter((task) => task.enabled).length,
+      turnContext: freezeStatusSummary(computeStatusSummary([...visible], this.now())),
+    });
+  }
+
+  onEvent(handler: (event: ScheduleRuntimeEvent) => void): () => void {
+    return this.projection.onSignal((signal) => {
+      const task = this.projection.snapshot().tasks.find((candidate) =>
+        candidate.id === signal.taskId
+      );
+      if (task && isInternal(task)) return;
+      handler(projectScheduleRuntimeEvent(signal));
+    });
+  }
+}
+
+export interface ScheduleAcceptedWorkItem {
+  readonly id: string;
+  readonly revision: string;
+}
+
+/** Correctness mechanism required by the Schedule lifecycle application. */
+export interface ScheduleLifecycleMechanismPort {
+  readonly anchorEpoch: number;
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  activate(): void;
+  closeAdmission(): void;
+  listAcceptedWork(): Promise<readonly ScheduleAcceptedWorkItem[]>;
+  recoverAcceptedWork(frozen: readonly ScheduleAcceptedWorkItem[]): Promise<void>;
+  pauseAndSettle(): Promise<void>;
+  resumeAdmission(): void;
+  recoverInstalledAuthority(): Promise<void>;
+  resumeManualSurfaces(): Promise<void>;
+}
+
+/** Host-facing, finite lifecycle application owned by Schedule. */
+export interface ScheduleLifecycleApplication {
+  readonly currentAnchorEpoch: number | undefined;
+  install(mechanism: ScheduleLifecycleMechanismPort): void;
+  release(mechanism: ScheduleLifecycleMechanismPort): void;
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  activate(): void;
+  closeAdmission(): void;
+  captureAcceptedWork(): Promise<readonly ScheduleAcceptedWorkItem[]>;
+  recoverAcceptedWork(frozen: readonly ScheduleAcceptedWorkItem[]): Promise<void>;
+  settleAcceptedWork(input: {
+    readonly strategy: "immediate" | "drain" | "cancel";
+    readonly frozen: readonly ScheduleAcceptedWorkItem[];
+  }): Promise<void>;
+  assertAcceptedWorkSettled(frozen: readonly ScheduleAcceptedWorkItem[]): Promise<void>;
+  resumeAdmission(): void;
+  recoverInstalledAuthority(): Promise<void>;
+  resumeManualSurfaces(): Promise<void>;
+}
+
+/** One stable Host boundary for Schedule runtime visibility and lifecycle. */
+export interface ScheduleApplication
+  extends ScheduleRuntimeApplication, ScheduleLifecycleApplication {}
+
+export class ScheduleApplicationService implements ScheduleApplication {
+  #mechanism: ScheduleLifecycleMechanismPort | undefined;
+
+  constructor(private readonly runtime: ScheduleRuntimeApplication) {}
+
+  get currentAnchorEpoch(): number | undefined {
+    return this.#mechanism?.anchorEpoch;
+  }
+
+  install(mechanism: ScheduleLifecycleMechanismPort): void {
+    if (this.#mechanism === mechanism) return;
+    if (this.#mechanism) {
+      throw new Error("Schedule lifecycle generation is already installed");
+    }
+    this.#mechanism = mechanism;
+  }
+
+  release(mechanism: ScheduleLifecycleMechanismPort): void {
+    if (this.#mechanism !== mechanism) {
+      throw new Error("Cannot release a foreign Schedule lifecycle generation");
+    }
+    this.#mechanism = undefined;
+  }
+
+  readStatus(): ScheduleRuntimeStatusView {
+    return this.runtime.readStatus();
+  }
+
+  onEvent(handler: (event: ScheduleRuntimeEvent) => void): () => void {
+    return this.runtime.onEvent(handler);
+  }
+
+  start(): Promise<void> {
+    return this.#requireMechanism().start();
+  }
+
+  stop(): Promise<void> {
+    return this.#mechanism?.stop() ?? Promise.resolve();
+  }
+
+  activate(): void {
+    this.#requireMechanism().activate();
+  }
+
+  closeAdmission(): void {
+    this.#requireMechanism().closeAdmission();
+  }
+
+  async captureAcceptedWork(): Promise<readonly ScheduleAcceptedWorkItem[]> {
+    return freezeAcceptedWork(await (this.#mechanism?.listAcceptedWork() ?? []));
+  }
+
+  recoverAcceptedWork(frozen: readonly ScheduleAcceptedWorkItem[]): Promise<void> {
+    const acceptedWork = freezeAcceptedWork(frozen);
+    if (!this.#mechanism && acceptedWork.length === 0) return Promise.resolve();
+    return this.#requireMechanism().recoverAcceptedWork(acceptedWork);
+  }
+
+  async settleAcceptedWork(input: {
+    readonly strategy: "immediate" | "drain" | "cancel";
+    readonly frozen: readonly ScheduleAcceptedWorkItem[];
+  }): Promise<void> {
+    const frozen = freezeAcceptedWork(input.frozen);
+    assertSettlementStrategy(input.strategy);
+    if (!this.#mechanism && frozen.length === 0) return;
+    const mechanism = this.#requireMechanism();
+    assertAcceptedWorkSubset(await mechanism.listAcceptedWork(), frozen);
+    await mechanism.pauseAndSettle();
+  }
+
+  async assertAcceptedWorkSettled(
+    frozen: readonly ScheduleAcceptedWorkItem[],
+  ): Promise<void> {
+    const expected = freezeAcceptedWork(frozen);
+    if (!this.#mechanism && expected.length === 0) return;
+    const current = await this.#requireMechanism().listAcceptedWork();
+    assertAcceptedWorkSubset(current, expected);
+    if (current.length !== 0) {
+      throw new Error("Schedule accepted work is not settled");
+    }
+  }
+
+  resumeAdmission(): void {
+    this.#requireMechanism().resumeAdmission();
+  }
+
+  recoverInstalledAuthority(): Promise<void> {
+    return this.#requireMechanism().recoverInstalledAuthority();
+  }
+
+  resumeManualSurfaces(): Promise<void> {
+    return this.#requireMechanism().resumeManualSurfaces();
+  }
+
+  #requireMechanism(): ScheduleLifecycleMechanismPort {
+    if (!this.#mechanism) {
+      throw new Error("Schedule lifecycle generation is not installed");
+    }
+    return this.#mechanism;
+  }
 }
 
 /**
@@ -243,6 +529,12 @@ export const SCHEDULE_MANAGEMENT_LIST_QUERY = defineProductApiQuery<
   ScheduleManagementView
 >("schedule-management.query.list");
 
+export const SCHEDULE_RUNTIME_STATUS_QUERY = defineProductApiQuery<
+  "schedule-runtime.query.status",
+  { readonly kind: "runtime-status" },
+  ScheduleRuntimeStatusView
+>("schedule-runtime.query.status");
+
 export const SCHEDULE_MANAGEMENT_CREATE_COMMAND = defineProductApiCommand<
   "schedule-management.command.create",
   Extract<ScheduleManagementCommand, { readonly kind: "create" }>,
@@ -287,6 +579,11 @@ export const SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET = defineProductApiExactSe
     SCHEDULE_MANUAL_RUN_COMMAND,
     SCHEDULE_MANUAL_ABORT_COMMAND,
   ],
+  factEvents: [],
+});
+
+export const SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET = defineProductApiExactSet({
+  operations: [SCHEDULE_RUNTIME_STATUS_QUERY],
   factEvents: [],
 });
 
@@ -337,6 +634,100 @@ export function createScheduleManagementProductApiContribution(
     ],
     factEvents: [],
   });
+}
+
+export function createScheduleRuntimeProductApiContribution(
+  application: ScheduleRuntimeApplication,
+): ProductApiContribution {
+  return defineProductApiContribution({
+    operations: [
+      bindProductApiOperation(SCHEDULE_RUNTIME_STATUS_QUERY, async (query) => {
+        if (query.kind !== "runtime-status") {
+          throw invalid("Unsupported Schedule runtime query");
+        }
+        return { result: application.readStatus(), facts: [] };
+      }),
+    ],
+    factEvents: [],
+  });
+}
+
+function projectScheduleRuntimeEvent(signal: ScheduleRuntimeSignal): ScheduleRuntimeEvent {
+  switch (signal.kind) {
+    case "accepted":
+      return Object.freeze({ ...signal });
+    case "started":
+      return Object.freeze({ ...signal });
+    case "completed":
+      return Object.freeze({ ...signal, status: "ok" as const });
+    case "failed":
+      return Object.freeze({
+        kind: "completed" as const,
+        taskId: signal.taskId,
+        name: signal.name,
+        status: "error" as const,
+        error: signal.error,
+        consecutiveErrors: signal.consecutiveErrors,
+        ...(signal.nextRunAt ? { nextRunAt: signal.nextRunAt } : {}),
+      });
+    case "disabled":
+      return Object.freeze({ ...signal });
+  }
+}
+
+function requireNonNegativeInteger(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError("Schedule active run count must be a non-negative integer");
+  }
+  return value;
+}
+
+function freezeStatusSummary(summary: TaskStatusSummary): TaskStatusSummary {
+  return Object.freeze({
+    active: Object.freeze(summary.active.map((entry) => Object.freeze({ ...entry }))),
+    recentlyCompleted: Object.freeze(
+      summary.recentlyCompleted.map((entry) => Object.freeze({ ...entry })),
+    ),
+    recentlyFailed: Object.freeze(
+      summary.recentlyFailed.map((entry) => Object.freeze({ ...entry })),
+    ),
+  });
+}
+
+function assertSettlementStrategy(
+  strategy: "immediate" | "drain" | "cancel",
+): void {
+  switch (strategy) {
+    case "immediate":
+    case "drain":
+    case "cancel":
+      return;
+  }
+}
+
+function freezeAcceptedWork(
+  items: readonly ScheduleAcceptedWorkItem[],
+): readonly ScheduleAcceptedWorkItem[] {
+  const ids = new Set<string>();
+  return Object.freeze(items.map((item) => {
+    const id = nonEmpty(item.id, "Schedule accepted-work id");
+    const revision = nonEmpty(item.revision, "Schedule accepted-work revision");
+    if (ids.has(id)) throw new TypeError(`Duplicate Schedule accepted-work id: ${id}`);
+    ids.add(id);
+    return Object.freeze({ id, revision });
+  }).sort((left, right) => left.id.localeCompare(right.id, "en-US")));
+}
+
+function assertAcceptedWorkSubset(
+  current: readonly ScheduleAcceptedWorkItem[],
+  frozen: readonly ScheduleAcceptedWorkItem[],
+): void {
+  const expected = new Map(frozen.map((item) => [item.id, item.revision]));
+  for (const item of current) {
+    if (expected.get(item.id) !== item.revision) {
+      throw new Error("Schedule lifecycle observed work outside the frozen generation");
+    }
+  }
 }
 
 function normalizeOperation(

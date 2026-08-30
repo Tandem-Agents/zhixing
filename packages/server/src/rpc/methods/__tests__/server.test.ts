@@ -5,6 +5,10 @@ import {
   DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET,
   type DeliveryUncertainResolutionApplication,
 } from "@zhixing/core/delivery/application";
+import {
+  createScheduleRuntimeProductApiContribution,
+  SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET,
+} from "@zhixing/core/scheduler/application";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import type { RuntimeControlAdapter } from "../../../context.js";
 import {
@@ -521,14 +525,17 @@ describe("server.info", () => {
             },
           ],
         } as never,
-        scheduler: {
-          activeTaskCount: 1,
-          listTasks: () => [
-            { id: "user-task", enabled: true, system: false },
-            { id: "system-task", enabled: true, system: true },
-            { id: "disabled-task", enabled: false, system: false },
-          ],
-        } as never,
+        productApi: new ProductApiDispatcher(
+          SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET,
+          [createScheduleRuntimeProductApiContribution({
+            readStatus: () => ({
+              activeRunCount: 1,
+              enabledUserTaskCount: 1,
+              turnContext: { active: [], recentlyCompleted: [], recentlyFailed: [] },
+            }),
+            onEvent: () => () => undefined,
+          })],
+        ),
         runtimeControl: {
           deliveryStats: () => ({
             pending: 3,

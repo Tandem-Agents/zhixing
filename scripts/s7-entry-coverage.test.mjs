@@ -3390,6 +3390,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   const paths = [
     "packages/core/src/skills/catalog-application.ts",
     "packages/core/src/scheduler/application.ts",
+    "packages/core/src/scheduler/runtime-policy.ts",
     "packages/core/src/scheduler/facade.ts",
     "packages/core/src/delivery/application.ts",
     "packages/core/src/delivery/authority.ts",
@@ -3412,12 +3413,18 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/server/src/rpc/methods/skill.ts",
     "packages/server/src/rpc/methods/schedule.ts",
     "packages/server/src/rpc/methods/server.ts",
+    "packages/server/src/rpc/methods/auth.ts",
     "packages/server/src/context.ts",
+    "packages/server/src/server.ts",
+    "packages/server/src/lifecycle.ts",
+    "packages/rpc/src/event-bridge.ts",
     "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/anchor-scheduler-runtime.ts",
     "packages/cli/src/serve/execution-scheduler-facade.ts",
     "packages/cli/src/runtime/rpc-scheduler-facade.ts",
     "packages/cli/src/runtime/rpc-management-facade.ts",
     "packages/cli/src/repl.ts",
+    "packages/cli/src/commands/info-commands.ts",
     "packages/cli/src/skills/manager-controller.ts",
     "packages/cli/src/skills/manager-command.ts",
     "packages/cli/src/commands/skill-command-source.ts",
@@ -3433,6 +3440,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/owner-kernel/src/job-assignment.ts",
     "packages/owner-kernel/src/scheduler-user-notices.ts",
     "packages/owner-kernel/src/scheduler-global-state.ts",
+    "packages/owner-kernel/src/scheduler-authority.ts",
     "packages/cli/src/serve/trust-administration-adapter.ts",
     "packages/orchestrator/src/runtime/assignment-skill-port.ts",
     "packages/core/src/protocol/assignment-mutation.ts",
@@ -3460,6 +3468,121 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       (text) => text.replace("draft.enabled ?? true", "draft.enabled!"),
     )).join("\n"),
     /Schedule definition management lacks one domain application owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/runtime/rpc-scheduler-facade.ts",
+      (text) => text.replace("function exactRecord(", "function looseRecord("),
+    )).join("\n"),
+    /Schedule consumers do not converge on the one management application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/commands/info-commands.ts",
+      (text) => text.replace(
+        "const tasks = await deps.getScheduler().list();",
+        "const tasks = (await deps.getScheduler().list()).filter((task) => !task.system);",
+      ),
+    )).join("\n"),
+    /Schedule consumers do not converge on the one management application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/scheduler/application.ts",
+      (text) => text.replace(
+        "handler(projectScheduleRuntimeEvent(signal));",
+        "handler(signal);",
+      ),
+    )).join("\n"),
+    /Schedule runtime and lifecycle lack one finite domain application boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/scheduler/application.ts",
+      (text) => text.replace(
+        "await mechanism.pauseAndSettle();",
+        'if (input.strategy !== "immediate") await mechanism.pauseAndSettle();',
+      ),
+    )).join("\n"),
+    /Schedule runtime and lifecycle lack one finite domain application boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/scheduler/runtime-policy.ts",
+      (text) => text.replace(
+        "export function decideScheduleTrigger(",
+        "export function decideTimedTrigger(",
+      ),
+    )).join("\n"),
+    /Schedule timing, offline and failure policy escaped its domain owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/owner-kernel/src/scheduler-authority.ts",
+      (text) => `${text}\nconst offlineMiss = true;`,
+    )).join("\n"),
+    /Schedule timing, offline and failure policy escaped its domain owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/owner-kernel/src/job-assignment.ts",
+      (text) => `${text}\nfunction frozenFailureNextFire() { return undefined; }`,
+    )).join("\n"),
+    /Schedule timing, offline and failure policy escaped its domain owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/owner-kernel/src/job-assignment.ts",
+      (text) => text.replace(
+        "pendingAutoDisable: selectPendingScheduleAutoDisable(",
+        "pendingAutoDisable: [...state.failurePolicyByRun.values()].filter(",
+      ),
+    )).join("\n"),
+    /Schedule timing, offline and failure policy escaped its domain owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "schedulerApplication.install(runtime);",
+        "void runtime;",
+      ),
+    )).join("\n"),
+    /Schedule runtime and lifecycle lack one finite domain application boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/anchor-scheduler-runtime.ts",
+      (text) => text.replace(
+        "readonly #scheduler: AnchorScheduler;",
+        "readonly scheduler: AnchorScheduler;",
+      ),
+    )).join("\n"),
+    /Schedule runtime and lifecycle lack one finite domain application boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "if (!startupLifecycle) schedulerApplication.activate();",
+        "if (!startupLifecycle) schedulerRuntime?.activate();",
+      ),
+    )).join("\n"),
+    /Schedule runtime and lifecycle lack one finite domain application boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/context.ts",
+      (text) => `${text}\ninterface LegacyScheduleOwner { scheduler?: SchedulerBackend }`,
+    )).join("\n"),
+    /Host, Server or Surface retains a raw Schedule runtime decision path/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/rpc/src/event-bridge.ts",
+      (text) => `${text}\nconst rawEvent = \"scheduler:task-failed\";`,
+    )).join("\n"),
+    /Host, Server or Surface retains a raw Schedule runtime decision path/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(

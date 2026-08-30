@@ -23,6 +23,7 @@ import {
 } from "@zhixing/core";
 import {
   ScheduleManagementApplicationService,
+  ScheduleRuntimeApplicationService,
   type ScheduleManagementRepository,
 } from "@zhixing/core/scheduler/application";
 import { createTempDir } from "@zhixing/test-utils";
@@ -82,8 +83,10 @@ async function withScheduler<T>(
         abort: async () => false,
       },
     ),
-    scheduler,
-    eventBus,
+    new ScheduleRuntimeApplicationService({
+      snapshot: () => ({ tasks: scheduler.listTasks(), activeRunCount: 0 }),
+      onSignal: () => () => undefined,
+    }),
   );
   try {
     return await fn(scheduler, facade, dir);

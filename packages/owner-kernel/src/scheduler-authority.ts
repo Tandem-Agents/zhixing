@@ -12,8 +12,13 @@ import type {
   TaskSchedule,
 } from "@zhixing/core";
 import {
-  nextScheduleTime,
-} from "@zhixing/core";
+  countScheduleConsecutiveFailures,
+  decideScheduleTrigger,
+  deriveScheduleNextRun,
+  scheduleAutoDisableOperationId,
+  scheduleTimerDelay,
+  selectDueScheduleEntries,
+} from "@zhixing/core/scheduler/application";
 import type {
   AuthorityCallContext,
   IngressContext,
@@ -72,7 +77,6 @@ export interface AnchorSchedulerOptions {
   readonly now?: () => Date;
   readonly pollMs?: number;
   readonly missedGraceMs?: number;
-  readonly failureThreshold?: number;
   readonly schedulerNotices?: SchedulerUserNoticeJournal;
 }
 
@@ -835,9 +839,7 @@ export class AnchorScheduler {
     try {
       await this.#resumeQueuedUserJobs();
       const now = this.#now();
-      const due = [...this.#nextRunByTask]
-        .filter(([, scheduledFor]) => Date.parse(scheduledFor) <= now.getTime())
-        .sort((left, right) => left[1].localeCompare(right[1]) || left[0].localeCompare(right[0]));
+      const due = selectDueScheduleEntries(this.#nextRunByTask, now);
       for (const [taskId, scheduledFor] of due) {
         try {
           await this.#triggerScheduled(taskId, scheduledFor);
@@ -880,13 +882,11 @@ export class AnchorScheduler {
   #arm(): void {
     if (!this.#accepting) return;
     if (this.#timer) clearTimeout(this.#timer);
-    const next = [...this.#nextRunByTask.values()]
-      .map(Date.parse)
-      .filter(Number.isFinite)
-      .sort((left, right) => left - right)[0];
-    const delay = next === undefined
-      ? this.#pollMs
-      : Math.max(0, Math.min(this.#pollMs, next - this.#now().getTime()));
+    const delay = scheduleTimerDelay(
+      this.#nextRunByTask.values(),
+      this.#now(),
+      this.#pollMs,
+    );
     this.#timer = setTimeout(() => void this.tick(), delay);
     this.#timer.unref?.();
   }
@@ -898,39 +898,20 @@ export class AnchorScheduler {
       return;
     }
     const journal = this.#journal(taskId);
-    const offlineMiss =
-      this.#onlineSince !== undefined &&
-      Date.parse(scheduledFor) < this.#onlineSince - this.#missedGraceMs;
-    // System maintenance coalesces the entire offline interval into one
-    // catch-up occurrence at the fixed ready boundary. That durable timestamp
-    // advances the next schedule into the future after restart instead of
-    // replaying every historical tick.
-    const effectiveScheduledFor =
-      offlineMiss && definition.definition.kind === "system"
-        ? new Date(this.#onlineSince!).toISOString()
-        : scheduledFor;
-    const jobRunId = scheduledJobRunId(taskId, effectiveScheduledFor);
+    const decision = decideScheduleTrigger({
+      taskId,
+      scheduledFor,
+      definition,
+      ...(this.#onlineSince !== undefined ? { onlineSince: this.#onlineSince } : {}),
+      missedGraceMs: this.#missedGraceMs,
+    });
     const occurrence = await journal.trigger({
-      jobRunId,
-      scheduledFor: effectiveScheduledFor,
-      context: this.#hostContext(`schedule-trigger-${jobRunId}`),
+      jobRunId: decision.jobRunId,
+      scheduledFor: decision.effectiveScheduledFor,
+      context: this.#hostContext(`schedule-trigger-${decision.jobRunId}`),
       source: definition.definition.kind,
-      ...(offlineMiss && definition.definition.kind === "user"
-        ? {
-            disposition: "missed-offline" as const,
-            missedNextFire: {
-              readyBoundary: new Date(this.#onlineSince!).toISOString(),
-              ...(definition.definition.spec.schedule.kind === "once"
-                ? {}
-                : {
-                    nextFire: nextScheduleTime(
-                      definition.definition.spec.schedule,
-                      new Date(this.#onlineSince!),
-                    ),
-                  }),
-            },
-          }
-        : {}),
+      ...(decision.disposition ? { disposition: decision.disposition } : {}),
+      ...(decision.missedNextFire ? { missedNextFire: decision.missedNextFire } : {}),
     });
     if (occurrence.state === "missed") {
       this.#missedSummaryPending = true;
@@ -1118,12 +1099,12 @@ export class AnchorScheduler {
       await this.updateTask(
         taskId,
         { enabled: false },
-        `schedule-auto-disable:${protocolDigest("SchedulerAutoDisable", 1, {
+        scheduleAutoDisableOperationId({
           taskId,
           jobRunId: policy.jobRunId,
           taskRevision: policy.taskRevision,
           failureCount: policy.failureCount,
-        })}`,
+        }),
       );
       definition = await journal.taskDefinition();
     }
@@ -1231,7 +1212,7 @@ export class AnchorScheduler {
       ? undefined
       : frozen ?? legacyNext ??
         (unchangedDefinition ? this.#nextRunByTask.get(taskId) : undefined) ??
-        deriveNextRun(view.schedule, occurrences, new Date(projection.updatedAt));
+        deriveScheduleNextRun(view.schedule, occurrences, new Date(projection.updatedAt));
     if (definition.state === "enabled" && next) this.#nextRunByTask.set(taskId, next);
     else this.#nextRunByTask.delete(taskId);
     view.state.nextRunAt = this.#nextRunByTask.get(taskId);
@@ -1425,7 +1406,7 @@ function projectUserTask(input: TaskRuntimeProjection): ScheduledTask {
     definition: Extract<TaskDefinition["definition"], { kind: "user" }>;
   };
   const last = input.occurrences.at(-1);
-  const failures = countConsecutiveFailures(input.occurrences);
+  const failures = countScheduleConsecutiveFailures(input.occurrences);
   return {
     id: definition.taskId,
     taskRevision: definition.taskRevision,
@@ -1503,7 +1484,7 @@ function projectSystemTask(
     },
     system: true,
     state: {
-      consecutiveErrors: countConsecutiveFailures(input.occurrences),
+      consecutiveErrors: countScheduleConsecutiveFailures(input.occurrences),
       runCount: input.occurrences.filter((occurrence) => occurrence.state !== "missed").length,
       ...(last ? { lastRunAt: last.scheduledFor } : {}),
       ...(last?.state === "committed"
@@ -1524,35 +1505,6 @@ function systemView(spec: AnchorSystemTaskSpec) {
     priority: spec.priority ?? ("low" as const),
     ...(spec.description ? { description: spec.description } : {}),
   };
-}
-
-function deriveNextRun(
-  schedule: TaskSchedule,
-  occurrences: readonly JobOccurrence[],
-  now: Date,
-): string | undefined {
-  const last = occurrences.at(-1);
-  if (!last) {
-    if (schedule.kind === "once") return schedule.at;
-    return nextScheduleTime(schedule, now);
-  }
-  if (schedule.kind === "once") return undefined;
-  return nextScheduleTime(schedule, new Date(last.scheduledFor));
-}
-
-function countConsecutiveFailures(occurrences: readonly JobOccurrence[]): number {
-  let count = 0;
-  for (let index = occurrences.length - 1; index >= 0; index -= 1) {
-    const state = occurrences[index]!.state;
-    if (state === "committed") break;
-    if (state === "failed" || state === "expired") count += 1;
-    else if (state !== "missed") break;
-  }
-  return count;
-}
-
-function scheduledJobRunId(taskId: string, scheduledFor: string): string {
-  return `job-${shortHash(taskId)}-${shortHash(`${taskId}\n${scheduledFor}`)}`;
 }
 
 function shortHash(value: string): string {

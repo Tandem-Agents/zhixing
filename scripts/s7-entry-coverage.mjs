@@ -3352,6 +3352,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const scheduleApplication = required(
     "packages/core/src/scheduler/application.ts",
   );
+  const scheduleRuntimePolicy = required(
+    "packages/core/src/scheduler/runtime-policy.ts",
+  );
   const scheduleFacade = required("packages/core/src/scheduler/facade.ts");
   const deliveryApplication = required(
     "packages/core/src/delivery/application.ts",
@@ -3421,6 +3424,18 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const scheduleCorrectness = required(
     "packages/owner-kernel/src/scheduler-global-state.ts",
   );
+  const scheduleAuthority = required(
+    "packages/owner-kernel/src/scheduler-authority.ts",
+  );
+  const scheduleRuntimeMechanism = required(
+    "packages/cli/src/serve/anchor-scheduler-runtime.ts",
+  );
+  const scheduleEventBridge = required(
+    "packages/rpc/src/event-bridge.ts",
+  );
+  const serverRuntime = required("packages/server/src/server.ts");
+  const serverLifecycle = required("packages/server/src/lifecycle.ts");
+  const authHandler = required("packages/server/src/rpc/methods/auth.ts");
   const skillClientBinding = required(
     "packages/rpc/src/skill-catalog-client.ts",
   );
@@ -3428,6 +3443,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     "packages/cli/src/runtime/rpc-management-facade.ts",
   );
   const repl = required("packages/cli/src/repl.ts");
+  const infoCommands = required("packages/cli/src/commands/info-commands.ts");
   const skillManager = required(
     "packages/cli/src/skills/manager-controller.ts",
   );
@@ -3449,6 +3465,16 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const assignmentMutationPort = required(
     "packages/cli/src/serve/assignment-schedule-stager.ts",
   );
+  const taskSurfaceStart = infoCommands.indexOf(
+    'dispatcher.registerHandler("tasks:repl"',
+  );
+  const taskSurfaceEnd = infoCommands.indexOf(
+    "function formatRecoveryBackupState(",
+    taskSurfaceStart,
+  );
+  const taskSurface = taskSurfaceStart >= 0 && taskSurfaceEnd > taskSurfaceStart
+    ? infoCommands.slice(taskSurfaceStart, taskSurfaceEnd)
+    : "";
 
   if (
     !scheduleApplication.includes("class ScheduleManagementApplicationService") ||
@@ -3499,7 +3525,10 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     /this\.scheduler\.(?:createTask|updateTask|deleteTask|runTask|abortRun)\(/u.test(scheduleFacade) ||
     !executionSchedule.includes("new ScheduleManagementApplicationService(repository, {") ||
     /Cannot modify system task|\.\.\.structuredClone\(patch\)/u.test(executionSchedule) ||
-    !scheduleCorrectness.includes("implements SchedulerBackend, ScheduleManagementRepository, ScheduleManualExecutionPort") ||
+    !scheduleCorrectness.includes("ScheduleRuntimeProjectionPort") ||
+    !scheduleCorrectness.includes("ScheduleManagementRepository,") ||
+    !scheduleCorrectness.includes("ScheduleManualExecutionPort,") ||
+    /SchedulerBackend/u.test(scheduleCorrectness) ||
     !scheduleCorrectness.includes("commitCreate(input:") ||
     !scheduleCorrectness.includes("commitUpdate(input:") ||
     !scheduleCorrectness.includes("commitDelete(input:") ||
@@ -3511,11 +3540,85 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     failures.push("Schedule facades or Correctness adapter retain a second management decision path");
   }
   if (
+    !scheduleRuntimePolicy.includes("function selectDueScheduleEntries(") ||
+    !scheduleRuntimePolicy.includes("DEFAULT_SCHEDULE_FAILURE_THRESHOLD = 5") ||
+    !scheduleRuntimePolicy.includes("function scheduleTimerDelay(") ||
+    !scheduleRuntimePolicy.includes("function decideScheduleTrigger(") ||
+    !scheduleRuntimePolicy.includes("function deriveScheduleNextRun(") ||
+    !scheduleRuntimePolicy.includes("function countScheduleConsecutiveFailures(") ||
+    !scheduleRuntimePolicy.includes("function decideScheduleFailurePolicy(") ||
+    !scheduleRuntimePolicy.includes("function scheduleAutoDisableOperationId(") ||
+    !scheduleRuntimePolicy.includes("function selectPendingScheduleAutoDisable<") ||
+    !scheduleAuthority.includes("selectDueScheduleEntries(this.#nextRunByTask, now)") ||
+    !scheduleAuthority.includes("const decision = decideScheduleTrigger({") ||
+    !scheduleAuthority.includes("deriveScheduleNextRun(view.schedule, occurrences") ||
+    !scheduleAuthority.includes("countScheduleConsecutiveFailures(input.occurrences)") ||
+    !scheduleAuthority.includes("scheduleAutoDisableOperationId({") ||
+    !jobAssignment.includes("policy = decideScheduleFailurePolicy({") ||
+    !jobAssignment.includes("pendingAutoDisable: selectPendingScheduleAutoDisable(") ||
+    !/options\.schedulerFailureThreshold\s*\?\?\s*DEFAULT_SCHEDULE_FAILURE_THRESHOLD/u.test(jobAssignment) ||
+    !jobAssignment.includes("error instanceof ScheduleRuntimePolicyError") ||
+    /function (?:consecutiveSchedulerFailures|frozenFailureNextFire)\(/u.test(jobAssignment) ||
+    /pendingAutoDisable:\s*\[\.\.\.state\.failurePolicyByRun\.values\(\)\]/u.test(
+      jobAssignment,
+    ) ||
+    /function (?:deriveNextRun|countConsecutiveFailures|scheduledJobRunId)\(/u.test(scheduleAuthority) ||
+    /const offlineMiss\s*=/u.test(scheduleAuthority)
+  ) {
+    failures.push("Schedule timing, offline and failure policy escaped its domain owner");
+  }
+  if (
+    !scheduleApplication.includes("class ScheduleApplicationService") ||
+    !scheduleApplication.includes("interface ScheduleRuntimeProjectionPort") ||
+    !scheduleApplication.includes("interface ScheduleLifecycleMechanismPort") ||
+    !scheduleApplication.includes("projectScheduleRuntimeEvent(signal)") ||
+    !scheduleApplication.includes("freezeStatusSummary(computeStatusSummary") ||
+    !scheduleApplication.includes("return freezeAcceptedWork(await") ||
+    !scheduleApplication.includes("assertAcceptedWorkSubset(await mechanism.listAcceptedWork(), frozen)") ||
+    !scheduleApplication.includes("assertSettlementStrategy(input.strategy);") ||
+    scheduleApplication.split("await mechanism.pauseAndSettle();").length - 1 !== 1 ||
+    /switch\s*\(input\.strategy\)|input\.strategy\s*[!=]==?/u.test(scheduleApplication) ||
+    !scheduleApplication.includes("Schedule lifecycle generation is already installed") ||
+    !scheduleRuntimeMechanism.includes("implements ScheduleLifecycleMechanismPort") ||
+    !scheduleRuntimeMechanism.includes("createProductBoundary()") ||
+    !scheduleRuntimeMechanism.includes("return this.#scheduler.acceptedWorkItems()") ||
+    !scheduleRuntimeMechanism.includes("return this.#scheduler.pauseForAuthorityTransfer()") ||
+    /readonly scheduler: AnchorScheduler/u.test(scheduleRuntimeMechanism) ||
+    !composition.includes("const schedulerApplication = new ScheduleApplicationService(") ||
+    composition.split("new ScheduleApplicationService(").length - 1 !== 1 ||
+    !composition.includes("schedulerApplication.install(runtime)") ||
+    !composition.includes("schedulerApplication.release(previous)") ||
+    !composition.includes("createScheduleRuntimeProductApiContribution(schedulerApplication)") ||
+    !composition.includes("scheduleRuntimeEvents: schedulerApplication") ||
+    /schedulerLifecycle|ScheduleLifecycleApplicationService/u.test(composition) ||
+    /schedulerRuntime\??\.activate\(/u.test(composition)
+  ) {
+    failures.push("Schedule runtime and lifecycle lack one finite domain application boundary");
+  }
+  if (
+    /SchedulerBackend|schedulerEventBus|SchedulerEventMap|isInternal/u.test(context) ||
+    /SchedulerBackend|schedulerEventBus/u.test(serverRuntime) ||
+    /SchedulerBackend|scheduler\.stop/u.test(serverLifecycle) ||
+    !scheduleEventBridge.includes("Pick<ScheduleRuntimeApplication, \"onEvent\">") ||
+    /SchedulerEventMap|isInternal|scheduler:task-/u.test(scheduleEventBridge) ||
+    !authHandler.includes("productApi?.supports(SCHEDULE_MANAGEMENT_LIST_QUERY)") ||
+    /server\.scheduler/u.test(authHandler) ||
+    /createEventBus<SchedulerEventMap>|scheduler:task-failed/u.test(repl)
+  ) {
+    failures.push("Host, Server or Surface retains a raw Schedule runtime decision path");
+  }
+  if (
     scheduleTool.includes(".filter((t) => !isInternal(t))") ||
     scheduleTool.includes("enabled: true") ||
     scheduleTool.includes('?? "normal"') ||
+    taskSurfaceStart < 0 ||
+    taskSurface.length === 0 ||
+    !taskSurface.includes("const tasks = await deps.getScheduler().list();") ||
+    /\bisInternal\b|\.filter\s*\(/u.test(taskSurface) ||
     !rpcSchedule.includes('client.request<TaskView>("schedule.create"') ||
     !rpcSchedule.includes('client.request<AgentTurnResult>("schedule.run"') ||
+    !rpcSchedule.includes("function exactRecord(") ||
+    !rpcSchedule.includes("Invalid schedule.completed notification") ||
     !composition.includes("createScheduleManagementProductApiContribution(schedulerManagement)") ||
     composition.split("createScheduleManagementProductApiContribution(").length - 1 !== 1 ||
     composition.split("new ScheduleManagementApplicationService(").length - 1 !== 1 ||
@@ -5060,7 +5163,7 @@ export function inspectManagedHostAssembly(records) {
     anchorOpenGate,
   );
   const deliveryActivation = command.indexOf("ctx.deliveryStack?.activate()", anchorOpenGate);
-  const schedulerActivation = command.indexOf("schedulerRuntime?.activate()", anchorOpenGate);
+  const schedulerActivation = command.indexOf("schedulerApplication.activate()", anchorOpenGate);
   const foundationTransfer = command.indexOf(
     'lifecycleContributions.transferTo(registry, "foundation")',
     anchorOpenGate,
@@ -5276,7 +5379,7 @@ export function inspectManagedHostAssembly(records) {
     !statusRoute.includes("return await ctx.managedHostPublicStatus?.() ?? projectManagedHostStatus({") ||
     !command.includes("managedHostPublicStatus: () => buildManagedHostPublicStatus(") ||
     !scheduler.includes("executorCapabilities.onAccepted(") ||
-    !scheduler.includes("this.scheduler.wakeQueuedUserJobs()") ||
+    !scheduler.includes("this.#scheduler.wakeQueuedUserJobs()") ||
     !manifest.includes("onAccepted(listener:")
   ) failures.push("managed host public status or executor queue wake drifted");
   if (

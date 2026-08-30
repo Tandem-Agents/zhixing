@@ -1,8 +1,8 @@
 /**
  * Server 生命周期编排器
  *
- * 把进程锁、Server、Scheduler、信号处理器编排到一起。调用方只需要：
- *   await runServer({ context, scheduler, cleanupRegistry })
+ * 把进程锁、Server 与信号处理器编排到一起。领域生命周期由 Host 独立拥有。
+ * 调用方只需要：await runServer({ context, cleanupRegistry })
  *
  * Shutdown 架构（M4 重构）：
  * - 所有清理职责统一走 CleanupRegistry（LIFO 栈）
@@ -16,7 +16,7 @@
  *    - 其余资源由持久 Host 的有限类型化 lifecycle owner 接管
  * 2. **独立模式**（cleanupRegistry 未传入，lifecycle.test.ts 等场景）：
  *    - runServer 内部创建默认 registry
- *    - 额外注册 scheduler.stop + releaseLock，保持 M3 之前的 shutdown 语义不变
+ *    - 额外注册 server.close + releaseLock
  *
  * 多次信号处理：
  * - 第一次 SIGTERM/SIGINT → 进入优雅停机流程，shutdown resolve 后 process.exit(0)
@@ -27,7 +27,6 @@
  * - SIGTERM 在 Windows 等价 force-kill（仍尽量调 handler）
  */
 
-import type { SchedulerBackend } from "@zhixing/core";
 import {
   startServer,
   startServerWithActivationFailureOwner,
@@ -59,8 +58,6 @@ export interface RunServerOptions extends Omit<StartServerOptions, "activationGa
    * and owns activation-failure compensation through the injected registry.
    */
   lifecycleOwner?: ServerLifecycleOwner;
-  /** Scheduler 实例（已 start）。独立模式会在 registry 中注册 scheduler.stop */
-  scheduler?: SchedulerBackend;
   /** 进程锁文件路径覆盖 */
   lockPaths?: ProcessLockPaths;
   /** 写入 PID 发现文件的诊断元数据 */
@@ -75,8 +72,8 @@ export interface RunServerOptions extends Omit<StartServerOptions, "activationGa
   /**
    * 外部注入的 cleanup registry。
    * - 传入：lifecycle 注册 server.close，或把它移交给 lifecycleOwner；其他由调用方负责
-   * - 未传入：内部创建默认 registry，注册 scheduler.stop + server.close + releaseLock
-   *   （向后兼容模式——lifecycle.test.ts 等直接调用方场景）
+   * - 未传入：内部创建默认 registry，注册 server.close + releaseLock
+   *   （lifecycle.test.ts 等直接调用方场景）
    */
   cleanupRegistry?: CleanupRegistry;
   /** 日志钩子 */
@@ -161,7 +158,7 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
       registry: opts.registry,
       wsPath: opts.wsPath,
       onError: opts.onError,
-      schedulerEventBus: opts.schedulerEventBus,
+      scheduleRuntimeEvents: opts.scheduleRuntimeEvents,
       activationGate: async (preparedServer) => {
         if (!injected && !opts.skipProcessLock) {
           registerCleanup(
@@ -181,14 +178,6 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
             async () => preparedServer.close(),
           );
         }
-        if (!injected && opts.scheduler) {
-          registerCleanup(
-            registry,
-            { owner: "standalone-server", role: "server", id: "scheduler.stop" },
-            async () => opts.scheduler!.stop(),
-          );
-        }
-
         runner = {
           server: preparedServer,
           shutdown,

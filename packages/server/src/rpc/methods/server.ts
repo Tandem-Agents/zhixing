@@ -10,9 +10,9 @@
  * RPC 响应只确认可重放的 ready-to-stop，不会把后台失败吞掉。
  */
 
-import { isInternal } from "@zhixing/core";
 import { isDeliveryItemId } from "@zhixing/core/delivery";
 import { DELIVERY_RESOLVE_UNCERTAIN_COMMAND } from "@zhixing/core/delivery/application";
+import { SCHEDULE_RUNTIME_STATUS_QUERY } from "@zhixing/core/scheduler/application";
 import { isProtocolIdentifier } from "@zhixing/core/protocol";
 import type { ExecutionStatusNotice } from "@zhixing/core/contracts";
 import { SESSION_NOTIFICATIONS } from "@zhixing/rpc";
@@ -159,7 +159,7 @@ export function buildServerInfoMethod(): MethodEntry {
     requiresAuth: true,
     async handler(params, ctx) {
       const conversations = ctx.server.conversations?.list() ?? [];
-      const runtimeControl = buildRuntimeControlSnapshot(ctx);
+      const runtimeControl = await buildRuntimeControlSnapshot(ctx);
       const statusAfter = parseStatusAfter(params);
       let deliveryStatus: ExecutionStatusNotice[] = [];
       let conversationStatus: ExecutionStatusNotice[] = [];
@@ -990,9 +990,9 @@ function shutdownEstimatedCompleteAt(timeoutMs: number): string {
   return estimated.toISOString();
 }
 
-function buildRuntimeControlSnapshot(
+async function buildRuntimeControlSnapshot(
   ctx: Parameters<NonNullable<MethodEntry["handler"]>>[1],
-): RuntimeControlSnapshot {
+): Promise<RuntimeControlSnapshot> {
   const channels = ctx.server.channels?.listStatuses() ?? [];
   const liveChannels = channels.filter(
     (s) => s.state === "connected" || s.state === "connecting",
@@ -1016,7 +1016,12 @@ function buildRuntimeControlSnapshot(
     });
   }
 
-  const runCount = ctx.server.scheduler?.activeTaskCount ?? 0;
+  const scheduleStatus = ctx.server.productApi?.supports(SCHEDULE_RUNTIME_STATUS_QUERY)
+    ? await ctx.server.productApi.query(SCHEDULE_RUNTIME_STATUS_QUERY, {
+        kind: "runtime-status",
+      })
+    : { activeRunCount: 0, enabledUserTaskCount: 0 };
+  const runCount = scheduleStatus.activeRunCount;
   if (runCount > 0) {
     cancellableWork.push({
       id: "scheduler:runs",
@@ -1038,17 +1043,15 @@ function buildRuntimeControlSnapshot(
     });
   }
 
-  const keepAliveTasks =
-    ctx.server.scheduler?.listTasks().filter((task) => task.enabled && !isInternal(task)) ??
-    [];
+  const keepAliveTaskCount = scheduleStatus.enabledUserTaskCount;
   const keepAliveWork =
-    keepAliveTasks.length > 0
+    keepAliveTaskCount > 0
       ? [
           {
             id: "scheduler:enabled",
             kind: "schedule" as const,
             label: "已启用定时任务",
-            count: keepAliveTasks.length,
+            count: keepAliveTaskCount,
           },
         ]
       : [];

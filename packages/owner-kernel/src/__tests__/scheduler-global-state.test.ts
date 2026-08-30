@@ -1,4 +1,4 @@
-import type { TaskView } from "@zhixing/core";
+import { createEventBus, type SchedulerEventMap, type TaskView } from "@zhixing/core";
 import type { GlobalStatePort } from "@zhixing/core/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -55,6 +55,7 @@ describe("AnchorSchedulerProductPort", () => {
       scheduler,
       { mutate } as unknown as GlobalStatePort,
       7,
+      createEventBus<SchedulerEventMap>(),
     );
 
     const created = await port.commitCreate({
@@ -120,6 +121,7 @@ describe("AnchorSchedulerProductPort", () => {
       scheduler,
       { mutate } as unknown as GlobalStatePort,
       7,
+      createEventBus<SchedulerEventMap>(),
     );
 
     await port.run({
@@ -157,6 +159,7 @@ describe("AnchorSchedulerProductPort", () => {
       scheduler,
       { mutate } as unknown as GlobalStatePort,
       7,
+      createEventBus<SchedulerEventMap>(),
     );
 
     await expect(
@@ -173,5 +176,46 @@ describe("AnchorSchedulerProductPort", () => {
       }),
     ).rejects.toThrow("observed task revision");
     expect(mutate).not.toHaveBeenCalled();
+  });
+
+  it("projects only raw runtime facts while preserving system signals for the domain", async () => {
+    const eventBus = createEventBus<SchedulerEventMap>();
+    const scheduler = {
+      listTaskProjections: () => [task("user"), { ...task("__system"), system: true }],
+      activeTaskCount: 2,
+    } as unknown as AnchorScheduler;
+    const port = new AnchorSchedulerProductPort(
+      scheduler,
+      {} as GlobalStatePort,
+      7,
+      eventBus,
+    );
+    const signals: unknown[] = [];
+    const dispose = port.onSignal((signal) => signals.push(signal));
+
+    expect(port.snapshot()).toEqual({
+      tasks: [task("user"), { ...task("__system"), system: true }],
+      activeRunCount: 2,
+    });
+    await eventBus.emit("scheduler:task-failed", {
+      taskId: "__system",
+      name: "maintenance",
+      error: "offline",
+      consecutiveErrors: 1,
+    });
+    expect(signals).toEqual([{
+      kind: "failed",
+      taskId: "__system",
+      name: "maintenance",
+      error: "offline",
+      consecutiveErrors: 1,
+    }]);
+
+    dispose();
+    await eventBus.emit("scheduler:task-started", {
+      taskId: "user",
+      name: "daily",
+    });
+    expect(signals).toHaveLength(1);
   });
 });

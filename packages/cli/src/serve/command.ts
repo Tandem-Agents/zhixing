@@ -20,15 +20,12 @@
  */
 
 import {
-  computeStatusSummary,
-  isInternal,
   createEventBus,
   getZhixingHome,
   loadLayeredGuidance,
   type AgentEventMap,
   type SchedulerEventMap,
   type SchedulerFacade,
-  type SchedulerBackend,
   LocalSchedulerFacade,
   ConversationRepository,
   parseConversationId,
@@ -47,10 +44,15 @@ import {
 } from "@zhixing/core/skills/catalog";
 import {
   createScheduleManagementProductApiContribution,
+  createScheduleRuntimeProductApiContribution,
   SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET,
+  SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET,
+  ScheduleApplicationService,
   ScheduleManagementApplicationService,
+  ScheduleRuntimeApplicationService,
   type ScheduleManualExecutionPort,
   type ScheduleManagementRepository,
+  type ScheduleRuntimeProjectionPort,
 } from "@zhixing/core/scheduler/application";
 import {
   createTrustAdministrationProductApiContribution,
@@ -91,7 +93,6 @@ import {
   type ServerContext,
 } from "@zhixing/server";
 import {
-  AnchorSchedulerGlobalStateAdapter,
   AnchorSchedulerProductPort,
   ConfirmationHub,
   type ConversationManager,
@@ -385,22 +386,26 @@ async function runServerProcess(
   const trustAdministration = createTrustAdministrationApplication({
     config,
   });
-  // 3. Scheduler facade lazy ref —— 打破组合根装配顺序依赖。
-  let schedulerRef: SchedulerBackend | null = null;
+  // 3. Schedule domain lazy projection —— generation 安装后只切换 Correctness
+  // mechanism；产品可见状态、事件与 lifecycle 语义均由领域应用持有。
   let schedulerProductRef: AnchorSchedulerProductPort | undefined;
   const currentSchedulerProduct = (): AnchorSchedulerProductPort => {
     if (!schedulerProductRef) throw new Error("Scheduler generation is not installed");
     return schedulerProductRef;
   };
-  const schedulerBackend: SchedulerBackend = {
-    start: () => currentSchedulerProduct().start(),
-    stop: () => currentSchedulerProduct().stop(),
-    listTasks: () => currentSchedulerProduct().listTasks(),
-    getTask: (id) => currentSchedulerProduct().getTask(id),
-    get activeTaskCount() {
-      return currentSchedulerProduct().activeTaskCount;
+  const schedulerRuntimeProjection: ScheduleRuntimeProjectionPort = {
+    snapshot: () => schedulerProductRef?.snapshot() ?? {
+      tasks: Object.freeze([]),
+      activeRunCount: 0,
     },
+    onSignal: (handler) => schedulerProductRef?.onSignal(handler) ?? (() => undefined),
   };
+  const schedulerRuntimeApplication = new ScheduleRuntimeApplicationService(
+    schedulerRuntimeProjection,
+  );
+  const schedulerApplication = new ScheduleApplicationService(
+    schedulerRuntimeApplication,
+  );
   const schedulerManualExecution: ScheduleManualExecutionPort = {
     run: (input) => currentSchedulerProduct().run(input),
     abort: (input) => currentSchedulerProduct().abort(input),
@@ -563,7 +568,7 @@ async function runServerProcess(
   //   Schedule / Task / MCP / Workscene 已由上面的 Anchor 产品投影统一裁决。
   //   投递 origin 执行期从 RunContext 派生,实例装配不再按对话定制。
   //   turn-context provider 集合在 runtime 发布前作为固定装配输入建立——scheduler
-  //   是 lazy ref（顶层 let schedulerRef），LLM 调用时刻 ref 已就绪；未就绪时
+  //   是 generation-safe 的领域运行投影，LLM 调用时刻权威已就绪；未就绪时
   //   fallback 空状态。
   const resolveWorksceneRoot = async (sceneId: string): Promise<string | null> => {
     const scene = await worksceneDirectory.get(sceneId);
@@ -613,13 +618,7 @@ async function runServerProcess(
     onSecurityBlocked: createBlockedRenderer(serveWriter),
     turnContextProviders: () =>
       createCliTurnContextProviders({
-        getSchedulerStatus: () =>
-          schedulerRef
-            ? computeStatusSummary(
-                schedulerRef.listTasks().filter((t) => !isInternal(t)),
-                new Date(),
-              )
-            : { active: [], recentlyCompleted: [], recentlyFailed: [] },
+        getSchedulerStatus: () => schedulerApplication.readStatus().turnContext,
         taskListService: builtinExtraTools.taskListService,
       }),
   });
@@ -994,6 +993,12 @@ async function runServerProcess(
   // Anchor 是 scheduler/job 唯一 owner。非 anchor 拓扑不装 timer、journal
   // recovery 或兼容迁移器，schedule 产品入口保持明确不可用。
   let schedulerRuntime: AnchorSchedulerRuntime | undefined;
+  const settleScheduleForTransfer = async (): Promise<void> => {
+    await schedulerApplication.settleAcceptedWork({
+      strategy: "drain",
+      frozen: await schedulerApplication.captureAcceptedWork(),
+    });
+  };
   let adoptionReview: PostAdoptionReviewCoordinator | undefined;
   let schedulerCleanup: ReturnType<StartupRollback["register"]> | undefined;
   let startupLifecycleFrozenRecoveryStarted = startupLifecycle?.recoverAcceptedWork ?? true;
@@ -1007,7 +1012,7 @@ async function runServerProcess(
       await ctx.executorJobOwner?.recoverAcceptedWorkForLifecycle();
       await ctx.meshRuntime?.recoverAcceptedWorkForLifecycle();
       await ctx.channelCoordinator?.recover();
-      await schedulerRuntime?.recoverAcceptedWorkForLifecycle(
+      await schedulerApplication.recoverAcceptedWork(
         sources
           .filter((source) => source.owner === "scheduler")
           .map(({ id, revision }) => ({ id, revision })),
@@ -1098,7 +1103,11 @@ async function runServerProcess(
       "scheduler.stop",
       async () => {
         adoptionReview?.close();
-        await schedulerRuntime?.stop();
+        await schedulerApplication.stop();
+        if (schedulerRuntime) {
+          schedulerApplication.release(schedulerRuntime);
+          schedulerRuntime = undefined;
+        }
       },
     );
     lifecycleContributions.contribute("scheduler.stop", schedulerCleanup);
@@ -1106,28 +1115,21 @@ async function runServerProcess(
       runtime: AnchorSchedulerRuntime,
       activate: boolean,
     ) => {
-      const schedulerGlobalState = new AnchorSchedulerGlobalStateAdapter(
-        runtime.scheduler,
-        ctx.authorityRuntime!.anchorEpoch,
-      );
-      const schedulerProduct = new AnchorSchedulerProductPort(
-        runtime.scheduler,
-        schedulerGlobalState,
-        ctx.authorityRuntime!.anchorEpoch,
-      );
+      const boundary = runtime.createProductBoundary();
+      const schedulerGlobalState = boundary.globalState;
+      const schedulerProduct = boundary.product;
       schedulerProductRef = schedulerProduct;
-      schedulerRef = schedulerBackend;
+      schedulerApplication.install(runtime);
       schedulerFacadeRef ??= new LocalSchedulerFacade(
         schedulerManagement,
-        schedulerBackend,
-        schedulerEventBus,
+        schedulerApplication,
       );
       ctx.authorityRuntime!.installSchedulerGlobalState(schedulerGlobalState);
-      await runtime.start();
+      await schedulerApplication.start();
       if (startupLifecycle) {
-        runtime.scheduler.closeAdmissionForLifecycle();
+        schedulerApplication.closeAdmission();
         if (startupLifecycle.recoverAcceptedWork) {
-          await runtime.recoverAcceptedWorkForLifecycle(
+          await schedulerApplication.recoverAcceptedWork(
             startupLifecycle.delivery.sources
               .filter((source) => source.owner === "scheduler")
               .map(({ id, revision }) => ({ id, revision })),
@@ -1135,8 +1137,8 @@ async function runServerProcess(
         }
       }
       if (activate && !startupLifecycle) {
-        runtime.activate();
-        await runtime.resumeManualJobSurfaces();
+        schedulerApplication.activate();
+        await schedulerApplication.resumeManualSurfaces();
       }
       adoptionReview?.close();
       adoptionReview = new PostAdoptionReviewCoordinator({
@@ -1152,7 +1154,10 @@ async function runServerProcess(
         await ctx.inboundRouter?.drainAcceptedMessages();
         await ctx.channelConnections?.disconnectConfigured();
         await ctx.deliveryStack?.quiesceForAuthorityTransfer();
-        await schedulerRuntime!.scheduler.pauseForAuthorityTransfer();
+        await schedulerApplication.settleAcceptedWork({
+          strategy: "drain",
+          frozen: await schedulerApplication.captureAcceptedWork(),
+        });
       },
       drainAccepted: async () => {
         await ctx.conversations?.abortAllAndWait(
@@ -1168,7 +1173,7 @@ async function runServerProcess(
       resumeAfterAbort: async () => {
         await ctx.deliveryStack?.resumeAfterAuthorityTransfer();
         ctx.conversationProtocol?.startRecoveryLoop();
-        schedulerRuntime!.scheduler.resumeAfterAuthorityTransfer();
+        schedulerApplication.resumeAdmission();
         ctx.inboundRouter?.resumeNewMessages();
         await ctx.channelConnections?.connectConfigured();
       },
@@ -1193,13 +1198,18 @@ async function runServerProcess(
         return receipt;
       },
       recoverScheduler: async (obligations) => {
-        if (schedulerRuntime!.anchorEpoch !== ctx.authorityRuntime!.anchorEpoch) {
-          await schedulerRuntime!.stop();
+        if (schedulerApplication.currentAnchorEpoch !== ctx.authorityRuntime!.anchorEpoch) {
+          const previous = schedulerRuntime;
+          await schedulerApplication.stop();
+          if (!previous) {
+            throw new Error("Schedule lifecycle generation is unavailable");
+          }
+          schedulerApplication.release(previous);
           const replacement = await createSchedulerRuntime();
           schedulerRuntime = replacement;
           await installSchedulerGeneration(replacement, runner !== undefined);
         } else {
-          await schedulerRuntime!.recoverInstalledAuthority();
+          await schedulerApplication.recoverInstalledAuthority();
         }
         return obligations;
       },
@@ -1218,9 +1228,6 @@ async function runServerProcess(
       },
     });
   }
-  const scheduler: SchedulerBackend | undefined =
-    ctx.enabledRoles.includes("anchor") ? schedulerBackend : undefined;
-
   // ============================================================================
   // ServerContext + runServer —— 读接入面产物（conversations / channels）。
   // ============================================================================
@@ -1348,7 +1355,7 @@ async function runServerProcess(
         }));
     }
     if (owner === "scheduler") {
-      return await schedulerRuntime?.scheduler.acceptedWorkItems() ?? [];
+      return await schedulerApplication.captureAcceptedWork();
     }
     if (owner === "delivery") {
       return ctx.deliveryStack?.lifecycle.capture() ?? [];
@@ -1371,6 +1378,10 @@ async function runServerProcess(
         strategy,
         frozen,
       );
+      return;
+    }
+    if (owner === "scheduler") {
+      await schedulerApplication.assertAcceptedWorkSettled(frozen);
       return;
     }
     const current = owner === "delivery"
@@ -1408,10 +1419,6 @@ async function runServerProcess(
       if ((ctx.channels?.listStatuses() ?? []).some((status) => status.state !== "disconnected")) {
         throw new Error("Channel accepted work is not settled");
       }
-      return;
-    }
-    if (owner === "scheduler") {
-      if (current.length !== 0) throw new Error("Scheduler accepted work is not settled");
       return;
     }
     if (owner === "delivery") {
@@ -1494,7 +1501,7 @@ async function runServerProcess(
       await ctx.channelConnections?.disconnectConfigured();
     }),
     scheduler: stopPort("scheduler", async () => {
-      await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
+      await settleScheduleForTransfer();
       await ctx.executorJobOwner?.drain();
     }),
     delivery: stopPort("delivery", async ({ operationId, strategy, timeoutMs }) => {
@@ -1574,7 +1581,7 @@ async function runServerProcess(
         managedHostStopping = true;
         ctx.inboundRouter?.refuseNewMessages();
         ctx.executorJobOwner?.pauseAccepting();
-        schedulerRuntime?.scheduler.closeAdmissionForLifecycle();
+        schedulerApplication.closeAdmission();
         ctx.deliveryStack?.lifecycle.close();
         await Promise.all([
           ctx.localConversationOwner?.closeHostStopAdmission(operationId),
@@ -1631,7 +1638,7 @@ async function runServerProcess(
       );
     }
     await recoverAdvancementAcceptedWork();
-    schedulerRuntime?.scheduler.resumeAfterAuthorityTransfer();
+    schedulerApplication.resumeAdmission();
     ctx.executorJobOwner?.resumeAccepting();
     ctx.meshRuntime?.resumeAcceptingAfterLifecycle();
     ctx.inboundRouter?.resumeNewMessages();
@@ -1694,7 +1701,7 @@ async function runServerProcess(
       ctx.inboundRouter?.refuseNewMessages();
       ctx.executorJobOwner?.pauseAccepting();
       await ctx.channelConnections?.suspendConfigured();
-      schedulerRuntime?.scheduler.closeAdmissionForLifecycle();
+      schedulerApplication.closeAdmission();
       ctx.deliveryStack?.lifecycle.close();
     },
     captureAcceptedWork: async (operationId) => {
@@ -1741,7 +1748,7 @@ async function runServerProcess(
         } else if (owner === "channel") {
           await ctx.channelConnections?.disconnectConfigured();
         } else if (owner === "scheduler") {
-          await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
+          await settleScheduleForTransfer();
         } else {
           await ctx.deliveryStack?.lifecycle.seal(operationId);
           await ctx.deliveryStack?.lifecycle.settle({
@@ -1769,7 +1776,7 @@ async function runServerProcess(
       }
       await ctx.deliveryStack?.lifecycle.release(operationId);
       await ctx.deliveryStack?.lifecycle.resume();
-      schedulerRuntime?.scheduler.resumeAfterAuthorityTransfer();
+      schedulerApplication.resumeAdmission();
       ctx.executorJobOwner?.resumeAccepting();
       ctx.inboundRouter?.resumeNewMessages();
       await ctx.channelConnections?.resumeConfigured();
@@ -1836,13 +1843,13 @@ async function runServerProcess(
           await ctx.inboundRouter?.drainAcceptedMessages();
           await ctx.channelConnections?.disconnectConfigured();
           await ctx.deliveryStack?.quiesceForAuthorityTransfer();
-          await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
+          await settleScheduleForTransfer();
         },
         releaseAdmission: async (operationId) => {
           await ctx.deliveryStack?.lifecycle.release(operationId);
           await ctx.deliveryStack?.lifecycle.resume();
           ctx.conversationProtocol?.startRecoveryLoop();
-          schedulerRuntime?.scheduler.resumeAfterAuthorityTransfer();
+          schedulerApplication.resumeAdmission();
           ctx.inboundRouter?.resumeNewMessages();
           await ctx.channelConnections?.connectConfigured();
         },
@@ -1853,7 +1860,7 @@ async function runServerProcess(
             managedHostStopping = true;
             ctx.inboundRouter?.refuseNewMessages();
             ctx.executorJobOwner?.pauseAccepting();
-            schedulerRuntime?.scheduler.closeAdmissionForLifecycle();
+            schedulerApplication.closeAdmission();
             ctx.deliveryStack?.lifecycle.close();
             await Promise.all([
               ctx.localConversationOwner?.closeHostStopAdmission(operationId),
@@ -1905,6 +1912,7 @@ async function runServerProcess(
         ...SKILL_CATALOG_PRODUCT_API_EXACT_SET.operations,
         ...TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET.operations,
         ...SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET.operations,
+        ...SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET.operations,
         ...(deliveryProductApi
           ? DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET.operations
           : []),
@@ -1913,6 +1921,7 @@ async function runServerProcess(
         ...SKILL_CATALOG_PRODUCT_API_EXACT_SET.factEvents,
         ...TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET.factEvents,
         ...SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET.factEvents,
+        ...SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET.factEvents,
         ...(deliveryProductApi
           ? DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET.factEvents
           : []),
@@ -1925,6 +1934,7 @@ async function runServerProcess(
       })),
       createTrustAdministrationProductApiContribution(trustAdministration),
       createScheduleManagementProductApiContribution(schedulerManagement),
+      createScheduleRuntimeProductApiContribution(schedulerApplication),
       ...(deliveryProductApi ? [deliveryProductApi] : []),
     ],
   );
@@ -1943,7 +1953,6 @@ async function runServerProcess(
           }),
         }
       : {}),
-    ...(scheduler ? { scheduler } : {}),
     conversations: ctx.conversations,
     advancement: ctx.advancement,
     advancementRecovery,
@@ -2162,7 +2171,7 @@ async function runServerProcess(
         ctx.inboundRouter?.refuseNewMessages();
         await ctx.channelConnections?.disconnectConfigured();
         await ctx.deliveryStack?.quiesceForAuthorityTransfer();
-        await schedulerRuntime?.scheduler.pauseForAuthorityTransfer();
+        await settleScheduleForTransfer();
       },
       drainAcceptedWork: async () => {
         await ctx.inboundRouter?.drainAcceptedMessages();
@@ -2204,8 +2213,7 @@ async function runServerProcess(
     boundServer: serverBinding,
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
     registry: serverRegistry,
-    ...(scheduler ? { scheduler } : {}),
-    schedulerEventBus,
+    scheduleRuntimeEvents: schedulerApplication,
     cleanupRegistry: registry,
     lifecycleOwner: hostShellLifecycle,
     logger: {
@@ -2239,12 +2247,12 @@ async function runServerProcess(
 
       // Delivery/Scheduler 的既有 activation 是公开入口开放的必要前置。
       ctx.deliveryStack?.activate();
-      if (!startupLifecycle) schedulerRuntime?.activate();
+      if (!startupLifecycle) schedulerApplication.activate();
 
       // prepared runner 只提供内部 connection/cleanup 设施；activation gate 尚未释放。
       ctx.runner = openingRunner;
       if (!startupLifecycle || startupLifecycleFrozenRecoveryStarted) {
-        await schedulerRuntime?.resumeManualJobSurfaces();
+        await schedulerApplication.resumeManualSurfaces();
       }
 
       // Host shell 已接管 endpoint/state/discovery。既有 pre-server 贡献按
@@ -2345,7 +2353,7 @@ async function runServerProcess(
         channelStates:
           ctx.channels?.listStatuses().map((s) => s.state) ?? [],
         hasUserPendingWork:
-          scheduler?.listTasks().some((t) => !isInternal(t) && t.enabled) ?? false,
+          schedulerApplication.readStatus().enabledUserTaskCount > 0,
       });
       if (exit) {
         await requestAnchorInternalStop({ reason: "idle", strategy: "drain" });

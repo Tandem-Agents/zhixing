@@ -7,13 +7,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { join } from "node:path";
 import { writeFile } from "node:fs/promises";
-import {
-  Scheduler,
-  InMemoryTaskStore,
-  createEventBus,
-  type SchedulerEventMap,
-  type AgentTurnResult,
-} from "@zhixing/core";
 import { createTempDir } from "@zhixing/test-utils";
 import { runServer, type RunningServer } from "../lifecycle.js";
 import { bindServer } from "../server.js";
@@ -28,7 +21,6 @@ describe("runServer lifecycle (S2.F)", () => {
   let tempDir: string;
   let pidPath: string;
   let portPath: string;
-  let scheduler: Scheduler;
   let runner: RunningServer | null = null;
 
   beforeEach(async () => {
@@ -36,18 +28,6 @@ describe("runServer lifecycle (S2.F)", () => {
     pidPath = join(tempDir, "server.pid");
     portPath = join(tempDir, "server.port");
 
-    const eventBus = createEventBus<SchedulerEventMap>();
-    scheduler = new Scheduler({
-      store: new InMemoryTaskStore(),
-      eventBus,
-      runAgentTurn: async (): Promise<AgentTurnResult> => ({
-        status: "ok",
-        output: "x",
-        durationMs: 1,
-      }),
-      config: { minTickIntervalMs: 100, maxTickIntervalMs: 500 },
-    });
-    await scheduler.start();
   });
 
   afterEach(async () => {
@@ -59,9 +39,6 @@ describe("runServer lifecycle (S2.F)", () => {
       }
       runner = null;
     }
-    // 注入模式下 runner.shutdown 不停 scheduler（调用方负责注册）——测试必须自己 stop，
-    // 否则 scheduler 的 setInterval 定时器会跨 test 累积。
-    await scheduler.stop().catch(() => {});
   });
 
   async function startTestServer(): Promise<RunningServer> {
@@ -69,11 +46,9 @@ describe("runServer lifecycle (S2.F)", () => {
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: "0.1.0-test",
       token: TEST_TOKEN,
-      scheduler,
     });
     return runServer({
       context: ctx,
-      scheduler,
       lockPaths: { pidPath, portPath },
       skipSignalHandlers: true,
       logger: { info() {}, warn() {}, error() {} },
@@ -98,7 +73,6 @@ describe("runServer lifecycle (S2.F)", () => {
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: "0.1.0-test",
       token: TEST_TOKEN,
-      scheduler,
     });
     const bound = await bindServer({ config: ctx.config });
     const httpServer = bound.httpServer;
@@ -109,7 +83,6 @@ describe("runServer lifecycle (S2.F)", () => {
     runner = await runServer({
       context: ctx,
       boundServer: bound,
-      scheduler,
       lockPaths: { pidPath, portPath },
       skipSignalHandlers: true,
       logger: { info() {}, warn() {}, error() {} },
@@ -141,7 +114,6 @@ describe("runServer lifecycle (S2.F)", () => {
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: "0.1.0-test",
       token: TEST_TOKEN,
-      scheduler,
     });
     const bound = await bindServer({ config: ctx.config });
     const registry = new CleanupRegistry({ logger: { error: () => {} } });
@@ -150,7 +122,6 @@ describe("runServer lifecycle (S2.F)", () => {
     await expect(runServer({
       context: ctx,
       boundServer: bound,
-      scheduler,
       lockPaths: { pidPath, portPath },
       skipSignalHandlers: true,
       cleanupRegistry: registry,
@@ -174,7 +145,6 @@ describe("runServer lifecycle (S2.F)", () => {
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: "0.1.0-test",
       token: TEST_TOKEN,
-      scheduler,
     });
     const bound = await bindServer({ config: ctx.config });
     const registry = new CleanupRegistry({ logger: { error: () => {} } });
@@ -186,7 +156,6 @@ describe("runServer lifecycle (S2.F)", () => {
     await expect(runServer({
       context: ctx,
       boundServer: bound,
-      scheduler,
       lockPaths: { pidPath, portPath },
       skipSignalHandlers: true,
       cleanupRegistry: registry,
@@ -206,7 +175,6 @@ describe("runServer lifecycle (S2.F)", () => {
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: "0.1.0-test",
       token: TEST_TOKEN,
-      scheduler,
     });
     const bound = await bindServer({ config: ctx.config });
     const registry = new CleanupRegistry({ logger: { error: () => {} } });
@@ -221,7 +189,6 @@ describe("runServer lifecycle (S2.F)", () => {
     await expect(runServer({
       context: ctx,
       boundServer: bound,
-      scheduler,
       lockPaths: { pidPath, portPath },
       skipSignalHandlers: true,
       cleanupRegistry: registry,
@@ -243,7 +210,6 @@ describe("runServer lifecycle (S2.F)", () => {
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: "0.1.0-test",
       token: TEST_TOKEN,
-      scheduler,
     });
     const bound = await bindServer({ config: ctx.config });
     const registry = new CleanupRegistry({ logger: { error: () => {} } });
@@ -255,7 +221,6 @@ describe("runServer lifecycle (S2.F)", () => {
     await expect(runServer({
       context: ctx,
       boundServer: bound,
-      scheduler,
       lockPaths: { pidPath, portPath },
       skipSignalHandlers: true,
       cleanupRegistry: registry,
@@ -279,12 +244,10 @@ describe("runServer lifecycle (S2.F)", () => {
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: "0.1.0-test",
       token: TEST_TOKEN,
-      scheduler,
     });
 
     runner = await runServer({
       context: ctx,
-      scheduler,
       lockPaths: { pidPath, portPath },
       processInfo: {
         version: "0.1.0-test",
@@ -335,20 +298,6 @@ describe("runServer lifecycle (S2.F)", () => {
     expect(lock?.pid).toBe(process.pid); // PID 文件被覆盖为本宿主
   });
 
-  it("scheduler is stopped during shutdown", async () => {
-    runner = await startTestServer();
-
-    // Sanity check scheduler is running
-    expect(scheduler.activeTaskCount).toBe(0);
-
-    await runner.shutdown("test");
-
-    // scheduler.stop() should have been called — adding a new task should fail or
-    // the scheduler should be in stopped state. Best signal: call scheduler.start
-    // again should not throw (idempotent stop).
-    // We just verify no exception during shutdown.
-  });
-
   it("server is closed after shutdown (port released)", async () => {
     runner = await startTestServer();
     const port = runner.server.port;
@@ -370,20 +319,18 @@ describe("runServer lifecycle (S2.F)", () => {
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: "0.1.0-test",
       token: TEST_TOKEN,
-      scheduler,
     });
     const registry = new CleanupRegistry({ logger: { error: () => {} } });
 
     runner = await runServer({
       context: ctx,
-      scheduler,
       lockPaths: { pidPath, portPath },
       skipSignalHandlers: true,
       cleanupRegistry: registry,
       logger: { info() {}, warn() {}, error() {} },
     });
 
-    // 注入模式：lifecycle 只注册 server.close（不注册 scheduler / releaseLock）
+    // 注入模式：lifecycle 只注册 server.close（不注册领域资源 / releaseLock）
     // 调用方（实际场景是 command.ts）负责注册其他清理项
     expect(registry.size).toBe(1);
 
@@ -404,7 +351,6 @@ describe("runServer lifecycle (S2.F)", () => {
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: "0.1.0-test",
       token: TEST_TOKEN,
-      scheduler,
     });
     const registry = new CleanupRegistry({ logger: { error: () => {} } });
 
@@ -415,7 +361,6 @@ describe("runServer lifecycle (S2.F)", () => {
 
     runner = await runServer({
       context: ctx,
-      scheduler,
       lockPaths: { pidPath, portPath },
       skipSignalHandlers: true,
       cleanupRegistry: registry,
@@ -438,7 +383,6 @@ describe("runServer lifecycle (S2.F)", () => {
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: "0.1.0-test",
       token: TEST_TOKEN,
-      scheduler,
     });
     const registry = new CleanupRegistry({ logger: { error: () => {} } });
     registry.register("releaseLock", async () => {
@@ -447,7 +391,6 @@ describe("runServer lifecycle (S2.F)", () => {
 
     runner = await runServer({
       context: ctx,
-      scheduler,
       lockPaths: { pidPath, portPath },
       skipSignalHandlers: true,
       cleanupRegistry: registry,

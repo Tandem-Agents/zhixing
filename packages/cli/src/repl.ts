@@ -25,8 +25,6 @@ import {
   UsageTracker,
   type RuntimeContext,
   type DispatchResult,
-  createEventBus,
-  type SchedulerEventMap,
   type PostTurnControlOutcome,
   CommandDispatcher,
 } from "@zhixing/core";
@@ -530,10 +528,6 @@ export async function startRepl(): Promise<void> {
 
   // renderer 接收 cliWriter，所有 AI 输出（text/thinking/tool 卡片）经 writer 协调。
   const renderer = createOutputRenderer({ writer: cliWriter });
-
-  // schedulerEventBus 作为渲染中转——REPL 订阅它渲染任务通知。cli 无本地 scheduler，
-  // 事件来自下面 schedulerFacade.onEvent 经 RPC 订阅核心宿主后桥接到此 bus。
-  const schedulerEventBus = createEventBus<SchedulerEventMap>();
 
   // 核心宿主连接 —— cli 进程级唯一(连接即接入面身份单位):调度 / 会话 / 确认 /
   // 管理域经各自 facade 共用这一条已认证连接;释放在退出链(本入口持有)。
@@ -1455,57 +1449,25 @@ export async function startRepl(): Promise<void> {
   const writeScheduledNotice = (text: string): void => {
     cliWriter.notify(text);
   };
-  // 经门面订阅核心宿主任务事件，桥回 schedulerEventBus 复用下面的终端渲染。
-  // RPC 事件模型 completed 含 ok/error，拆回本地 task-completed / task-failed；
-  // started 终端无渲染需求，不桥（避免只发不收的空事件 + 失真的占位字段）。
+  // Surface 只呈现已经由 Schedule 领域裁决的公开事件；不重建 raw EventBus 语义。
   schedulerFacade.onEvent((e) => {
     if (e.kind === "completed" && e.status === "ok") {
-      void schedulerEventBus.emit("scheduler:task-completed", {
-        taskId: e.taskId,
-        name: e.name,
-        durationMs: e.durationMs ?? 0,
-        summary: e.summary,
-      });
+      writeScheduledNotice(chalk.green(`  ✓ 任务完成: ${e.name}`) +
+        chalk.dim(` (${Math.round(e.durationMs / 1000)}s)`) +
+        (e.summary ? `\n  ${chalk.dim(e.summary.slice(0, 120))}` : ""));
     } else if (e.kind === "completed") {
-      void schedulerEventBus.emit("scheduler:task-failed", {
-        taskId: e.taskId,
-        name: e.name,
-        error: e.error ?? "Unknown error",
-        consecutiveErrors: e.consecutiveErrors ?? 0,
-        nextRunAt: e.nextRunAt,
-      });
+      writeScheduledNotice(chalk.red(`  ✗ 任务失败: ${e.name}`) +
+        chalk.dim(` (连续 ${e.consecutiveErrors} 次)`) +
+        `\n  ${chalk.dim(e.error.slice(0, 120))}` +
+        (e.nextRunAt
+          ? chalk.dim(`\n  下次重试: ${new Date(e.nextRunAt).toLocaleTimeString()}`)
+          : ""));
     } else if (e.kind === "disabled") {
-      void schedulerEventBus.emit("scheduler:task-disabled", {
-        taskId: e.taskId,
-        name: e.name,
-        reason: e.reason ?? "",
-        lastError: e.lastError,
-      });
+      writeScheduledNotice(chalk.red(`  ⊘ 任务已自动停用: ${e.name}`) +
+        chalk.dim(`\n  原因: ${e.reason}`) +
+        (e.lastError ? chalk.dim(`\n  最后错误: ${e.lastError.slice(0, 120)}`) : ""));
     }
   });
-  schedulerEventBus.on("scheduler:task-completed", (info) => {
-    writeScheduledNotice(
-      chalk.green(`  ✓ 任务完成: ${info.name}`) +
-      chalk.dim(` (${Math.round(info.durationMs / 1000)}s)`) +
-      (info.summary ? `\n  ${chalk.dim(info.summary.slice(0, 120))}` : ""),
-    );
-  });
-  schedulerEventBus.on("scheduler:task-failed", (info) => {
-    writeScheduledNotice(
-      chalk.red(`  ✗ 任务失败: ${info.name}`) +
-      chalk.dim(` (连续 ${info.consecutiveErrors} 次)`) +
-      `\n  ${chalk.dim(info.error.slice(0, 120))}` +
-      (info.nextRunAt ? chalk.dim(`\n  下次重试: ${new Date(info.nextRunAt).toLocaleTimeString()}`) : ""),
-    );
-  });
-  schedulerEventBus.on("scheduler:task-disabled", (info) => {
-    writeScheduledNotice(
-      chalk.red(`  ⊘ 任务已自动停用: ${info.name}`) +
-      chalk.dim(`\n  原因: ${info.reason}`) +
-      (info.lastError ? chalk.dim(`\n  最后错误: ${info.lastError.slice(0, 120)}`) : ""),
-    );
-  });
-
   // ── dispatcher 分派结果落地（两条输入路径共用）──
   //
   // typeahead 持久输入区与 legacy rl.question 都把命令交给同一个 dispatcher,再把

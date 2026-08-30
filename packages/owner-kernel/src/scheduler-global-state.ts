@@ -14,12 +14,15 @@ import type {
   ScheduleWriteMutation,
 } from "@zhixing/core/contracts";
 import type {
+  ScheduleRuntimeProjectionPort,
+  ScheduleRuntimeSignal,
   ScheduleManualExecutionPort,
   ScheduleManagementOperation,
   ScheduleManagementRepository,
 } from "@zhixing/core/scheduler/application";
 import type {
-  SchedulerBackend,
+  IEventBus,
+  SchedulerEventMap,
   SchedulerControlSource,
   TaskSpec,
   TaskView,
@@ -144,21 +147,17 @@ export class AnchorSchedulerGlobalStateAdapter implements GlobalStatePort {
  * admitted by GlobalState while execution controls remain owned by JobJournal.
  */
 export class AnchorSchedulerProductPort
-  implements SchedulerBackend, ScheduleManagementRepository, ScheduleManualExecutionPort
+  implements
+    ScheduleManagementRepository,
+    ScheduleManualExecutionPort,
+    ScheduleRuntimeProjectionPort
 {
   constructor(
     private readonly scheduler: AnchorScheduler,
     private readonly globalState: GlobalStatePort,
     private readonly anchorEpoch: number,
+    private readonly eventBus: IEventBus<SchedulerEventMap>,
   ) {}
-
-  start(): Promise<void> {
-    return this.scheduler.start();
-  }
-
-  stop(): Promise<void> {
-    return this.scheduler.stop();
-  }
 
   async commitCreate(input: {
     readonly spec: TaskSpec;
@@ -179,10 +178,6 @@ export class AnchorSchedulerProductPort
 
   async list(): Promise<readonly TaskView[]> {
     return this.scheduler.listTaskProjections();
-  }
-
-  listTasks(): TaskView[] {
-    return this.scheduler.listTasks();
   }
 
   async find(taskId: string): Promise<TaskView | undefined> {
@@ -252,10 +247,6 @@ export class AnchorSchedulerProductPort
     );
   }
 
-  getTask(id: string): TaskView | undefined {
-    return this.scheduler.getTask(id);
-  }
-
   abort(input: {
     readonly runId: string;
     readonly operation: ScheduleManagementOperation;
@@ -267,8 +258,34 @@ export class AnchorSchedulerProductPort
     );
   }
 
-  get activeTaskCount(): number {
-    return this.scheduler.activeTaskCount;
+  snapshot(): { readonly tasks: readonly TaskView[]; readonly activeRunCount: number } {
+    return Object.freeze({
+      tasks: Object.freeze(this.scheduler.listTaskProjections()),
+      activeRunCount: this.scheduler.activeTaskCount,
+    });
+  }
+
+  onSignal(handler: (signal: ScheduleRuntimeSignal) => void): () => void {
+    const disposers = [
+      this.eventBus.on("scheduler:task-accepted", (event) => {
+        handler(Object.freeze({ kind: "accepted", ...event }));
+      }),
+      this.eventBus.on("scheduler:task-started", (event) => {
+        handler(Object.freeze({ kind: "started", taskId: event.taskId, name: event.name }));
+      }),
+      this.eventBus.on("scheduler:task-completed", (event) => {
+        handler(Object.freeze({ kind: "completed", ...event }));
+      }),
+      this.eventBus.on("scheduler:task-failed", (event) => {
+        handler(Object.freeze({ kind: "failed", ...event }));
+      }),
+      this.eventBus.on("scheduler:task-disabled", (event) => {
+        handler(Object.freeze({ kind: "disabled", ...event }));
+      }),
+    ];
+    return () => {
+      for (const dispose of disposers) dispose();
+    };
   }
 
   #requiredTask(id: string): TaskView {

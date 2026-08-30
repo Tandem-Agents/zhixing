@@ -16,8 +16,7 @@ import {
 } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { IEventBus, SchedulerEventMap } from "@zhixing/core";
-import { isInternal } from "@zhixing/core";
+import type { ScheduleRuntimeApplication } from "@zhixing/core/scheduler/application";
 import { createEventBridge, type DisposeBridge } from "@zhixing/rpc/event-bridge";
 import {
   createActivityBroadcast,
@@ -64,8 +63,8 @@ export interface StartServerOptions {
   wsPath?: string;
   /** 错误日志钩子 */
   onError?: (err: unknown, context: { method?: string; messageId?: string | number | null }) => void;
-  /** Scheduler EventBus（提供则自动桥接事件到 RPC 推送） */
-  schedulerEventBus?: IEventBus<SchedulerEventMap>;
+  /** Schedule 领域已裁决的用户可见运行事件。 */
+  scheduleRuntimeEvents?: Pick<ScheduleRuntimeApplication, "onEvent">;
   /** 已在最终端点取得 OS owner、但尚未开放业务入口的 server handle。 */
   boundServer?: BoundZhixingServer;
   /**
@@ -340,16 +339,11 @@ async function startServerWithOwner(
   };
   ctx.connectionCount = () => connections.size;
 
-  // EventBus → RPC notification 桥接（订阅 scheduler 等事件，向所有连接广播）。
-  // 内部维护任务的运行事件不广播给 client（结果触达：内部静默）——谓词用 ctx.scheduler
-  // 现查 task.system，与 channel 投递、facade.onEvent 两个触达边界一致。
+  // Schedule product event → RPC notification。内部任务过滤与失败折叠已由
+  // Schedule 领域应用裁决；Server 只拥有 wire 投影。
   const disposeBridge: DisposeBridge = createEventBridge({
     connections,
-    schedulerEventBus: opts.schedulerEventBus,
-    isInternalTask: (taskId) => {
-      const task = ctx.scheduler?.getTask(taskId);
-      return task ? isInternal(task) : false;
-    },
+    scheduleRuntimeEvents: opts.scheduleRuntimeEvents,
   });
 
   let activeClosed = false;

@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createScheduleManagementProductApiContribution,
+  countScheduleConsecutiveFailures,
+  decideScheduleFailurePolicy,
+  decideScheduleTrigger,
+  deriveScheduleNextRun,
   SCHEDULE_MANAGEMENT_CREATE_COMMAND,
   SCHEDULE_MANAGEMENT_LIST_QUERY,
   SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET,
@@ -8,10 +12,20 @@ import {
   SCHEDULE_MANUAL_RUN_COMMAND,
   ScheduleManagementApplicationError,
   ScheduleManagementApplicationService,
+  ScheduleApplicationService,
+  ScheduleRuntimeApplicationService,
+  scheduleAutoDisableOperationId,
+  scheduleTimerDelay,
+  selectPendingScheduleAutoDisable,
+  selectDueScheduleEntries,
+  type ScheduleRuntimeSignal,
+  type ScheduleLifecycleMechanismPort,
+  type ScheduleRuntimeProjectionPort,
   type ScheduleManualExecutionPort,
   type ScheduleManagementRepository,
 } from "./application.js";
 import { ProductApiDispatcher } from "../product-api/catalog.js";
+import type { JobOccurrence, TaskDefinition } from "../contracts/state.js";
 import type { TaskSpec, TaskView } from "./facade.js";
 
 const NOW = "2026-08-30T00:00:00.000Z";
@@ -343,5 +357,297 @@ describe("ScheduleManagementApplicationService", () => {
       operation: { operationId: "stale", expectedRevision: 1 },
     })).rejects.toMatchObject({ code: "conflict" });
     expect(commit).toHaveBeenCalledOnce();
+  });
+});
+
+describe("Schedule runtime domain policy", () => {
+  const userDefinition = {
+    taskId: "task-a",
+    taskRevision: 2,
+    state: "enabled",
+    definition: {
+      kind: "user",
+      spec: {
+        name: "daily",
+        enabled: true,
+        priority: "normal",
+        schedule: { kind: "interval", everyMs: 60_000 },
+        action: { kind: "agent-turn", prompt: "x" },
+      },
+    },
+  } as TaskDefinition;
+
+  it("owns due ordering, timer delay and offline trigger identity", () => {
+    const now = new Date("2026-08-30T10:00:00.000Z");
+    expect(selectDueScheduleEntries(new Map([
+      ["b", "2026-08-30T09:59:00.000Z"],
+      ["a", "2026-08-30T09:59:00.000Z"],
+      ["future", "2026-08-30T10:01:00.000Z"],
+    ]), now)).toEqual([
+      ["a", "2026-08-30T09:59:00.000Z"],
+      ["b", "2026-08-30T09:59:00.000Z"],
+    ]);
+    expect(scheduleTimerDelay(
+      ["2026-08-30T10:00:00.250Z"],
+      now,
+      1_000,
+    )).toBe(250);
+
+    const missed = decideScheduleTrigger({
+      taskId: "task-a",
+      scheduledFor: "2026-08-30T09:00:00.000Z",
+      definition: userDefinition,
+      onlineSince: now.getTime(),
+      missedGraceMs: 30_000,
+    });
+    expect(missed).toMatchObject({
+      effectiveScheduledFor: "2026-08-30T09:00:00.000Z",
+      disposition: "missed-offline",
+      missedNextFire: {
+        readyBoundary: "2026-08-30T10:00:00.000Z",
+        nextFire: "2026-08-30T10:01:00.000Z",
+      },
+    });
+    expect(missed.jobRunId).toBe("job-37bbbbed5fd87cbc8c1b2084-0e8a3550f820aef344741ad4");
+
+    const system = decideScheduleTrigger({
+      taskId: "__system",
+      scheduledFor: "2026-08-30T09:00:00.000Z",
+      definition: {
+        taskId: "__system",
+        taskRevision: 1,
+        state: "enabled",
+        definition: { kind: "system", handler: "__health" },
+      } as TaskDefinition,
+      onlineSince: now.getTime(),
+      missedGraceMs: 30_000,
+    });
+    expect(system).toMatchObject({
+      effectiveScheduledFor: "2026-08-30T10:00:00.000Z",
+    });
+    expect(system).not.toHaveProperty("disposition");
+  });
+
+  it("owns next-fire, failure streak and auto-disable operation identity", () => {
+    const occurrences = [
+      { state: "committed", scheduledFor: "2026-08-30T09:00:00.000Z" },
+      { state: "missed", scheduledFor: "2026-08-30T09:01:00.000Z" },
+      { state: "failed", scheduledFor: "2026-08-30T09:02:00.000Z" },
+      { state: "expired", scheduledFor: "2026-08-30T09:03:00.000Z" },
+    ] as JobOccurrence[];
+    expect(countScheduleConsecutiveFailures(occurrences)).toBe(2);
+    expect(deriveScheduleNextRun(
+      { kind: "interval", everyMs: 60_000 },
+      occurrences,
+      new Date(NOW),
+    )).toBe("2026-08-30T09:04:00.000Z");
+    expect(scheduleAutoDisableOperationId({
+      taskId: "task-a",
+      jobRunId: "job-a",
+      taskRevision: 2,
+      failureCount: 3,
+    })).toMatch(/^schedule-auto-disable:sha256:[a-f0-9]{64}$/u);
+
+    const failurePolicy = decideScheduleFailurePolicy({
+      taskId: "task-a",
+      jobRunId: "job-2",
+      schedule: { kind: "interval", everyMs: 60_000 },
+      occurrences: [
+        { jobRunId: "job-1", scheduledFor: "2026-08-30T09:00:00.000Z", state: "failed" },
+        { jobRunId: "job-missed", scheduledFor: "2026-08-30T09:01:00.000Z", state: "missed" },
+        { jobRunId: "job-2", scheduledFor: "2026-08-30T09:02:00.000Z", state: "failed" },
+      ],
+      threshold: 2,
+      decidedAt: "2026-08-30T09:02:01.000Z",
+    });
+    expect(failurePolicy).toMatchObject({
+      failureCount: 2,
+      threshold: 2,
+      autoDisableRequired: true,
+    });
+    expect(failurePolicy.nextFire).toMatch(/^2026-08-30T09:/u);
+    expect(() => decideScheduleFailurePolicy({
+      taskId: "task-a",
+      jobRunId: "missing",
+      schedule: { kind: "once", at: "2026-08-30T09:00:00.000Z" },
+      occurrences: [],
+      threshold: 2,
+      decidedAt: NOW,
+    })).toThrow("Scheduler failure occurrence is absent");
+
+    const pending = selectPendingScheduleAutoDisable([
+      { jobRunId: "job-1", autoDisableRequired: true },
+      { jobRunId: "job-2", autoDisableRequired: true },
+      { jobRunId: "job-3", autoDisableRequired: false },
+    ], new Set(["job-1"]));
+    expect(pending).toEqual([{ jobRunId: "job-2", autoDisableRequired: true }]);
+    expect(Object.isFrozen(pending)).toBe(true);
+  });
+});
+
+describe("Schedule runtime application boundaries", () => {
+  it("owns user visibility, status projection and failure-event folding", () => {
+    let listener: ((signal: ScheduleRuntimeSignal) => void) | undefined;
+    const projection: ScheduleRuntimeProjectionPort = {
+      snapshot: () => ({
+        tasks: [
+          view("user", 1, {
+            enabled: true,
+            state: {
+              consecutiveErrors: 0,
+              runCount: 0,
+              nextRunAt: "2026-08-30T01:00:00.000Z",
+            },
+          }),
+          view("__system", 1, { system: true, enabled: true }),
+        ],
+        activeRunCount: 2,
+      }),
+      onSignal: (handler) => {
+        listener = handler;
+        return () => {
+          listener = undefined;
+        };
+      },
+    };
+    const application = new ScheduleRuntimeApplicationService(
+      projection,
+      () => new Date(NOW),
+    );
+    const status = application.readStatus();
+    expect(status).toMatchObject({
+      activeRunCount: 2,
+      enabledUserTaskCount: 1,
+      turnContext: { active: [{ name: "morning" }] },
+    });
+    expect(Object.isFrozen(status)).toBe(true);
+    expect(Object.isFrozen(status.turnContext)).toBe(true);
+    expect(Object.isFrozen(status.turnContext.active)).toBe(true);
+    expect(Object.isFrozen(status.turnContext.active[0])).toBe(true);
+    const events: unknown[] = [];
+    const dispose = application.onEvent((event) => events.push(event));
+    listener?.({
+      kind: "failed",
+      taskId: "user",
+      name: "morning",
+      error: "offline",
+      consecutiveErrors: 3,
+      nextRunAt: "2026-08-30T02:00:00.000Z",
+    });
+    listener?.({
+      kind: "completed",
+      taskId: "__system",
+      name: "maintenance",
+      durationMs: 1,
+    });
+    expect(events).toEqual([{
+      kind: "completed",
+      taskId: "user",
+      name: "morning",
+      status: "error",
+      error: "offline",
+      consecutiveErrors: 3,
+      nextRunAt: "2026-08-30T02:00:00.000Z",
+    }]);
+    dispose();
+    expect(listener).toBeUndefined();
+  });
+
+  it("fails closed on invalid runtime counts", () => {
+    const application = new ScheduleRuntimeApplicationService({
+      snapshot: () => ({ tasks: [], activeRunCount: -1 }),
+      onSignal: () => () => undefined,
+    });
+    expect(() => application.readStatus()).toThrow(
+      "Schedule active run count must be a non-negative integer",
+    );
+  });
+
+  it.each(["immediate", "drain", "cancel"] as const)(
+    "settles the same frozen accepted-work exact-set for %s",
+    async (strategy) => {
+      let current = [{ id: "run-1", revision: "rev-1" }];
+      const settledExactSets: Array<readonly { readonly id: string; readonly revision: string }[]> = [];
+      const mechanism: ScheduleLifecycleMechanismPort = {
+        anchorEpoch: 7,
+        start: vi.fn(async () => undefined),
+        stop: vi.fn(async () => undefined),
+        activate: vi.fn(),
+        closeAdmission: vi.fn(),
+        listAcceptedWork: vi.fn(async () => current),
+        recoverAcceptedWork: vi.fn(async () => undefined),
+        pauseAndSettle: vi.fn(async () => {
+          settledExactSets.push(structuredClone(current));
+          current = [];
+        }),
+        resumeAdmission: vi.fn(),
+        recoverInstalledAuthority: vi.fn(async () => undefined),
+        resumeManualSurfaces: vi.fn(async () => undefined),
+      };
+      const lifecycle = new ScheduleApplicationService({
+        readStatus: () => ({
+          activeRunCount: 0,
+          enabledUserTaskCount: 0,
+          turnContext: { active: [], recentlyCompleted: [], recentlyFailed: [] },
+        }),
+        onEvent: () => () => undefined,
+      });
+      lifecycle.install(mechanism);
+      const frozen = await lifecycle.captureAcceptedWork();
+
+      await lifecycle.settleAcceptedWork({ strategy, frozen });
+
+      expect(settledExactSets).toEqual([[{ id: "run-1", revision: "rev-1" }]]);
+      expect(mechanism.pauseAndSettle).toHaveBeenCalledOnce();
+      await expect(lifecycle.assertAcceptedWorkSettled(frozen)).resolves.toBeUndefined();
+    },
+  );
+
+  it("owns frozen accepted-work settlement and rejects foreign generations", async () => {
+    let current = [{ id: "run-1", revision: "rev-1" }];
+    const mechanism: ScheduleLifecycleMechanismPort = {
+      anchorEpoch: 7,
+      start: vi.fn(async () => undefined),
+      stop: vi.fn(async () => undefined),
+      activate: vi.fn(),
+      closeAdmission: vi.fn(),
+      listAcceptedWork: vi.fn(async () => current),
+      recoverAcceptedWork: vi.fn(async () => undefined),
+      pauseAndSettle: vi.fn(async () => {
+        current = [];
+      }),
+      resumeAdmission: vi.fn(),
+      recoverInstalledAuthority: vi.fn(async () => undefined),
+      resumeManualSurfaces: vi.fn(async () => undefined),
+    };
+    const lifecycle = new ScheduleApplicationService({
+      readStatus: () => ({
+        activeRunCount: 0,
+        enabledUserTaskCount: 0,
+        turnContext: { active: [], recentlyCompleted: [], recentlyFailed: [] },
+      }),
+      onEvent: () => () => undefined,
+    });
+    lifecycle.install(mechanism);
+    expect(lifecycle.currentAnchorEpoch).toBe(7);
+    expect(() => lifecycle.install({ ...mechanism })).toThrow(
+      "Schedule lifecycle generation is already installed",
+    );
+    const frozen = await lifecycle.captureAcceptedWork();
+    expect(Object.isFrozen(frozen)).toBe(true);
+    expect(Object.isFrozen(frozen[0])).toBe(true);
+
+    current = [{ id: "run-2", revision: "foreign" }];
+    await expect(lifecycle.settleAcceptedWork({
+      strategy: "drain",
+      frozen,
+    })).rejects.toThrow("outside the frozen generation");
+    expect(mechanism.pauseAndSettle).not.toHaveBeenCalled();
+
+    expect(() => lifecycle.release({ ...mechanism })).toThrow(
+      "Cannot release a foreign Schedule lifecycle generation",
+    );
+    lifecycle.release(mechanism);
+    expect(lifecycle.currentAnchorEpoch).toBeUndefined();
   });
 });

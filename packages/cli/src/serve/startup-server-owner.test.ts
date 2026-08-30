@@ -14,12 +14,13 @@ describe("production startup server ownership", () => {
       .toBe(false);
   });
 
-  it("composes one sealed Skill, Delivery, and Trust Product API dispatcher at the Anchor Host boundary", async () => {
+  it("composes one sealed Skill, Delivery, Trust, and Schedule Product API dispatcher at the Anchor Host boundary", async () => {
     const source = await readSource("command.ts");
     expect(source.match(/new ProductApiDispatcher\(/gu)).toHaveLength(1);
     expect(source.match(/createSkillCatalogProductApiContribution\(/gu)).toHaveLength(1);
     expect(source.match(/createDeliveryResolutionProductApiContribution\(/gu)).toHaveLength(1);
     expect(source.match(/createTrustAdministrationProductApiContribution\(/gu)).toHaveLength(1);
+    expect(source.match(/createScheduleRuntimeProductApiContribution\(/gu)).toHaveLength(1);
     expect(source.match(/createTrustAdministrationApplication\(\{/gu)).toHaveLength(1);
     expect(source.match(/new SkillCatalogApplicationService\(\{/gu)).toHaveLength(1);
     const context = source.slice(location(source, "serverCtx = createServerContext({"));
@@ -71,7 +72,7 @@ describe("production startup server ownership", () => {
       "hostShellLifecycle.assertActivationOwnership({",
     );
     const delivery = location(activation, "ctx.deliveryStack?.activate()");
-    const scheduler = location(activation, "schedulerRuntime?.activate()");
+    const scheduler = location(activation, "schedulerApplication.activate()");
     const foundationTransfer = location(
       activation,
       'lifecycleContributions.transferTo(registry, "foundation")',

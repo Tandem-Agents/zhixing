@@ -37,7 +37,6 @@ export type {
   TaskPatch,
   SchedulerFacadeEvent,
   SchedulerFacadeEventHandler,
-  SchedulerBackend,
   SchedulerControlSource,
   ScheduleMutationContext,
   ScheduleMutationStager,

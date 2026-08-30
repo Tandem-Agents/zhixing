@@ -15,6 +15,8 @@
  */
 
 import { timingSafeEqual } from "node:crypto";
+import { SCHEDULE_MANAGEMENT_LIST_QUERY } from "@zhixing/core/scheduler/application";
+import type { ProductApiDispatcher } from "@zhixing/core/product-api";
 import type { MethodEntry } from "../handlers.js";
 import { RpcErrors } from "../handlers.js";
 import { PROTOCOL_VERSION, SUPPORTED_PROTOCOL_RANGE } from "../protocol.js";
@@ -87,9 +89,12 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(bufA, bufB);
 }
 
-function collectCapabilities(server: { scheduler?: unknown; conversations?: unknown }): string[] {
+function collectCapabilities(server: {
+  productApi?: ProductApiDispatcher;
+  conversations?: unknown;
+}): string[] {
   const caps: string[] = [];
   if (server.conversations) caps.push("session");
-  if (server.scheduler) caps.push("schedule");
+  if (server.productApi?.supports(SCHEDULE_MANAGEMENT_LIST_QUERY)) caps.push("schedule");
   return caps;
 }

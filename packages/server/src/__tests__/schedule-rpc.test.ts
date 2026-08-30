@@ -9,11 +9,23 @@ import {
   Scheduler,
   InMemoryTaskStore,
   createEventBus,
+  type IEventBus,
   type SchedulerEventMap,
   type AgentTurnResult,
   type ScheduledTask,
 } from "@zhixing/core";
-import { createTempDir } from "@zhixing/test-utils";
+import {
+  createScheduleManagementProductApiContribution,
+  createScheduleRuntimeProductApiContribution,
+  SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET,
+  SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET,
+  ScheduleManagementApplicationService,
+  ScheduleRuntimeApplicationService,
+  type ScheduleManagementRepository,
+  type ScheduleRuntimeApplication,
+  type ScheduleRuntimeProjectionPort,
+} from "@zhixing/core/scheduler/application";
+import { defineProductApiExactSet, ProductApiDispatcher } from "@zhixing/core/product-api";
 import { startServer, type ZhixingServerInstance } from "../server.js";
 import { createServerContext } from "../context.js";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
@@ -52,6 +64,94 @@ function mockRunAgentTurn(
     durationMs: 10,
     ...result,
   });
+}
+
+function createManagementRepository(scheduler: Scheduler): ScheduleManagementRepository {
+  const revisions = new Map<string, number>();
+  const project = (task: ReturnType<Scheduler["getTask"]>) =>
+    task ? { ...task, taskRevision: revisions.get(task.id) ?? 1 } : undefined;
+  return {
+    list: async () => scheduler.listTasks().map((task) => project(task)!),
+    find: async (taskId) => project(scheduler.getTask(taskId)),
+    commitCreate: async ({ spec }) => {
+      const task = await scheduler.createTask(spec);
+      revisions.set(task.id, 1);
+      return project(task)!;
+    },
+    commitUpdate: async ({ taskId, spec, operation }) => {
+      const task = await scheduler.updateTask(taskId, spec);
+      revisions.set(taskId, operation.expectedRevision + 1);
+      return project(task)!;
+    },
+    commitDelete: async ({ taskId }) => {
+      await scheduler.deleteTask(taskId);
+      revisions.delete(taskId);
+    },
+  };
+}
+
+function createRuntimeProjection(
+  scheduler: Scheduler,
+  eventBus: IEventBus<SchedulerEventMap>,
+): ScheduleRuntimeProjectionPort {
+  return {
+    snapshot: () => ({
+      tasks: scheduler.listTasks(),
+      activeRunCount: scheduler.activeTaskCount,
+    }),
+    onSignal: (handler) => {
+      const disposers = [
+        eventBus.on("scheduler:task-accepted", (event) =>
+          handler({ kind: "accepted", ...event })),
+        eventBus.on("scheduler:task-started", (event) =>
+          handler({ kind: "started", taskId: event.taskId, name: event.name })),
+        eventBus.on("scheduler:task-completed", (event) =>
+          handler({ kind: "completed", ...event })),
+        eventBus.on("scheduler:task-failed", (event) =>
+          handler({ kind: "failed", ...event })),
+        eventBus.on("scheduler:task-disabled", (event) =>
+          handler({ kind: "disabled", ...event })),
+      ];
+      return () => disposers.forEach((dispose) => dispose());
+    },
+  };
+}
+
+function createScheduleBoundary(input: {
+  readonly scheduler: Scheduler;
+  readonly eventBus: IEventBus<SchedulerEventMap>;
+  readonly abort?: (runId: string) => Promise<boolean>;
+}): {
+  readonly productApi: ProductApiDispatcher;
+  readonly runtime: ScheduleRuntimeApplication;
+} {
+  const management = new ScheduleManagementApplicationService(
+    createManagementRepository(input.scheduler),
+    {
+      run: ({ taskId }) => input.scheduler.runTask(taskId),
+      abort: ({ runId }) =>
+        input.abort?.(runId) ?? Promise.reject(new Error("Schedule run abort is unavailable")),
+    },
+  );
+  const runtime = new ScheduleRuntimeApplicationService(
+    createRuntimeProjection(input.scheduler, input.eventBus),
+  );
+  return {
+    productApi: new ProductApiDispatcher(
+      defineProductApiExactSet({
+        operations: [
+          ...SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET.operations,
+          ...SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET.operations,
+        ],
+        factEvents: [],
+      }),
+      [
+        createScheduleManagementProductApiContribution(management),
+        createScheduleRuntimeProductApiContribution(runtime),
+      ],
+    ),
+    runtime,
+  };
 }
 
 // ─── Client helper (re-used pattern from session-rpc.test.ts) ───
@@ -154,10 +254,8 @@ async function connect(port: number): Promise<RpcClient> {
 describe("schedule.* RPC + event bridge (S2.E)", () => {
   let server: ZhixingServerInstance;
   let scheduler: Scheduler;
-  let tempDir: string;
 
   beforeEach(async () => {
-    tempDir = await createTempDir("schedrpc");
     const eventBus = createEventBus<SchedulerEventMap>();
     scheduler = new Scheduler({
       store: new InMemoryTaskStore(),
@@ -167,15 +265,16 @@ describe("schedule.* RPC + event bridge (S2.E)", () => {
       config: { minTickIntervalMs: 100, maxTickIntervalMs: 500 },
     });
     await scheduler.start();
+    const boundary = createScheduleBoundary({ scheduler, eventBus });
 
     const ctx = createServerContext({
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
-      scheduler,
+      productApi: boundary.productApi,
       conversations,
     });
-    server = await startServer({ context: ctx, schedulerEventBus: eventBus });
+    server = await startServer({ context: ctx, scheduleRuntimeEvents: boundary.runtime });
   });
 
   afterEach(async () => {
@@ -403,7 +502,7 @@ describe("schedule.* RPC + event bridge (S2.E)", () => {
       expect(isErrorResponse(r)).toBe(true);
       if (isErrorResponse(r)) {
         expect(r.error.code).toBe(RPC_ERROR_CODES.INTERNAL_ERROR);
-        expect(r.error.message).toContain("unavailable");
+        expect(r.error.message).toBe("Internal error");
       }
       client.close();
     });
@@ -413,10 +512,8 @@ describe("schedule.* RPC + event bridge (S2.E)", () => {
     let serverWithReg: ZhixingServerInstance;
     let schedulerWithReg: Scheduler;
     let abortRun: (runId: string) => Promise<boolean>;
-    let tempDir2: string;
 
     beforeEach(async () => {
-      tempDir2 = await createTempDir("schedrun");
       const eventBus = createEventBus<SchedulerEventMap>();
       schedulerWithReg = new Scheduler({
         store: new InMemoryTaskStore(),
@@ -427,16 +524,23 @@ describe("schedule.* RPC + event bridge (S2.E)", () => {
       });
       await schedulerWithReg.start();
       abortRun = async (runId) => runId === "task-42";
-      Object.assign(schedulerWithReg, { abortRun });
+      const boundary = createScheduleBoundary({
+        scheduler: schedulerWithReg,
+        eventBus,
+        abort: abortRun,
+      });
 
       const ctx = createServerContext({
         config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
         version: TEST_VERSION,
         token: TEST_TOKEN,
-        scheduler: schedulerWithReg,
+        productApi: boundary.productApi,
         conversations,
       });
-      serverWithReg = await startServer({ context: ctx, schedulerEventBus: eventBus });
+      serverWithReg = await startServer({
+        context: ctx,
+        scheduleRuntimeEvents: boundary.runtime,
+      });
     });
 
     afterEach(async () => {

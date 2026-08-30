@@ -86,6 +86,7 @@ describe("RpcSchedulerFacade", () => {
       name: "x",
       status: "error",
       error: "boom",
+      consecutiveErrors: 2,
     });
     expect(events).toContainEqual({
       kind: "accepted",
@@ -98,10 +99,28 @@ describe("RpcSchedulerFacade", () => {
       taskId: "t1",
       name: "x",
       status: "error",
-      durationMs: undefined,
-      summary: undefined,
       error: "boom",
+      consecutiveErrors: 2,
     });
+  });
+
+  it("rejects malformed or extended Schedule notification payloads", () => {
+    const fake = makeFakeHostLink();
+    const facade = new RpcSchedulerFacade({ connection: fake.link });
+    facade.onEvent(() => undefined);
+
+    expect(() => fake.notify("schedule.completed", {
+      taskId: "t1",
+      name: "x",
+      status: "error",
+      error: "boom",
+    })).toThrow("Invalid schedule.completed notification");
+    expect(() => fake.notify("schedule.accepted", {
+      taskId: "t1",
+      jobRunId: "j1",
+      name: "x",
+      extra: true,
+    })).toThrow("Invalid Schedule notification payload");
   });
 
   it("onEvent 返回的退订函数解除全部订阅", () => {

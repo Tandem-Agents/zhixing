@@ -3,6 +3,7 @@ import type {
   SchedulerEventMap,
   SystemHandler,
 } from "@zhixing/core";
+import type { ScheduleLifecycleMechanismPort } from "@zhixing/core/scheduler/application";
 import type {
   AuthorityCallContext,
   AuthorityCapability,
@@ -23,6 +24,8 @@ import {
 } from "@zhixing/core/protocol";
 import {
   AnchorScheduler,
+  AnchorSchedulerGlobalStateAdapter,
+  AnchorSchedulerProductPort,
   InProcessJobDispatcher,
   JobAssignmentAuthority,
   JobJournal,
@@ -98,9 +101,9 @@ export interface AnchorSchedulerRuntimeOptions {
  * All execution and projection state comes from the assignment journal,
  * executor job owner and durable submission protocol.
  */
-export class AnchorSchedulerRuntime {
+export class AnchorSchedulerRuntime implements ScheduleLifecycleMechanismPort {
   readonly anchorEpoch: number;
-  readonly scheduler: AnchorScheduler;
+  readonly #scheduler: AnchorScheduler;
   readonly schedulerNotices: SchedulerUserNoticeJournal;
   readonly deferredIntents: DeferredGlobalIntentAnchorReviewService;
   readonly #options: AnchorSchedulerRuntimeOptions;
@@ -145,7 +148,7 @@ export class AnchorSchedulerRuntime {
     this.#schedulerNoticeDisposer = options.jobStatus.registerScheduler(
       this.schedulerNotices,
     );
-    this.scheduler = new AnchorScheduler({
+    this.#scheduler = new AnchorScheduler({
       anchorEpoch: options.authority.anchorEpoch,
       deviceId: options.authority.deviceId,
       admission: options.authority.controlAdmission,
@@ -162,14 +165,14 @@ export class AnchorSchedulerRuntime {
       ...(options.onError ? { onError: options.onError } : {}),
     });
     this.#capabilityReadyDisposer = options.authority.executorCapabilities.onAccepted(
-      () => this.scheduler.wakeQueuedUserJobs(),
+      () => this.#scheduler.wakeQueuedUserJobs(),
     );
     this.#mutationCoordinator = new GlobalMutationCommitCoordinator({
       log: options.authority.authorityLog,
       artifacts: options.authority.artifacts,
       participants: options.authority.globalMutationParticipants,
-      refreshSchedule: (taskIds) => this.scheduler.refreshCommittedDefinitions(taskIds),
-      scheduleDefinitionFor: (taskId) => this.scheduler.getDefinition(taskId),
+      refreshSchedule: (taskIds) => this.#scheduler.refreshCommittedDefinitions(taskIds),
+      scheduleDefinitionFor: (taskId) => this.#scheduler.getDefinition(taskId),
     });
     const rubricGlobalState = options.authority.rubricGlobalState;
     if (!rubricGlobalState) {
@@ -202,7 +205,7 @@ export class AnchorSchedulerRuntime {
       artifacts: options.authority.artifacts,
       onFatal: (error) => {
         options.onError?.(error);
-        void this.scheduler.stop().catch((stopError) => {
+        void this.#scheduler.stop().catch((stopError) => {
           options.onError?.(
             stopError instanceof Error ? stopError : new Error(String(stopError)),
           );
@@ -239,9 +242,28 @@ export class AnchorSchedulerRuntime {
     return runtime;
   }
 
+  createProductBoundary(): {
+    readonly globalState: AnchorSchedulerGlobalStateAdapter;
+    readonly product: AnchorSchedulerProductPort;
+  } {
+    const globalState = new AnchorSchedulerGlobalStateAdapter(
+      this.#scheduler,
+      this.anchorEpoch,
+    );
+    return Object.freeze({
+      globalState,
+      product: new AnchorSchedulerProductPort(
+        this.#scheduler,
+        globalState,
+        this.anchorEpoch,
+        this.#options.eventBus,
+      ),
+    });
+  }
+
   async start(): Promise<void> {
     await this.#intentRepository.recover();
-    await this.scheduler.prepare();
+    await this.#scheduler.prepare();
     await this.#mutationCoordinator.recoverDerivedState();
     await this.#commitParticipant.start();
   }
@@ -261,26 +283,42 @@ export class AnchorSchedulerRuntime {
     this.#executorByAssignment.clear();
     this.#artifactAuthorityByAssignment.clear();
     await this.#intentRepository.recover();
-    await this.scheduler.recoverInstalledAuthority();
+    await this.#scheduler.recoverInstalledAuthority();
     await this.#mutationCoordinator.recoverDerivedState();
     await this.#commitParticipant.start();
   }
 
   activate(): void {
-    this.scheduler.activate();
+    this.#scheduler.activate();
   }
 
-  recoverAcceptedWorkForLifecycle(
+  closeAdmission(): void {
+    this.#scheduler.closeAdmissionForLifecycle();
+  }
+
+  listAcceptedWork(): Promise<readonly { readonly id: string; readonly revision: string }[]> {
+    return this.#scheduler.acceptedWorkItems();
+  }
+
+  recoverAcceptedWork(
     frozen: readonly { readonly id: string; readonly revision: string }[],
   ): Promise<void> {
-    return this.scheduler.recoverAcceptedWorkForLifecycle(frozen);
+    return this.#scheduler.recoverAcceptedWorkForLifecycle(frozen);
+  }
+
+  pauseAndSettle(): Promise<void> {
+    return this.#scheduler.pauseForAuthorityTransfer();
+  }
+
+  resumeAdmission(): void {
+    this.#scheduler.resumeAfterAuthorityTransfer();
   }
 
   async stop(): Promise<void> {
     this.#capabilityReadyDisposer();
     let stopFailure: unknown;
     try {
-      await this.scheduler.stop();
+      await this.#scheduler.stop();
     } catch (error) {
       stopFailure = error;
     }
@@ -310,7 +348,7 @@ export class AnchorSchedulerRuntime {
   }
 
   /** Called after the RPC server exists, so recovered manual surfaces can resume. */
-  async resumeManualJobSurfaces(): Promise<void> {
+  async resumeManualSurfaces(): Promise<void> {
     await this.#manualSurfaces.resume();
   }
 

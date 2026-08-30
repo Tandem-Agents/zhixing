@@ -1,118 +1,94 @@
-/**
- * event-bridge 内部任务过滤 —— 守护「结果触达：内部维护静默」这条分流。
- *
- * 内部任务（system:true）的运行事件不得广播给 client；外部任务正常广播。
- * 过滤由注入的 isInternalTask 谓词推导（与 channel 投递、facade.onEvent 同一边界语义）。
- */
-
-import { describe, it, expect, vi } from "vitest";
-import { createEventBus, type SchedulerEventMap } from "@zhixing/core";
+import type { ScheduleRuntimeEvent } from "@zhixing/core/scheduler/application";
 import { createEventBridge } from "@zhixing/rpc";
+import { describe, expect, it, vi } from "vitest";
 import type { RpcConnection } from "../connection.js";
 
-function fakeConn(): RpcConnection & { notify: ReturnType<typeof vi.fn> } {
+function fakeConn(authenticated = true): RpcConnection & { notify: ReturnType<typeof vi.fn> } {
   return {
-    authenticated: true,
+    authenticated,
     closed: false,
     notify: vi.fn(),
   } as unknown as RpcConnection & { notify: ReturnType<typeof vi.fn> };
 }
 
-describe("event-bridge 内部任务过滤", () => {
-  it("isInternalTask 命中的任务事件不广播，外部任务正常广播", async () => {
-    const bus = createEventBus<SchedulerEventMap>();
+function eventSource() {
+  let handler: ((event: ScheduleRuntimeEvent) => void) | undefined;
+  return {
+    source: {
+      onEvent(next: (event: ScheduleRuntimeEvent) => void) {
+        handler = next;
+        return () => {
+          handler = undefined;
+        };
+      },
+    },
+    emit(event: ScheduleRuntimeEvent) {
+      handler?.(event);
+    },
+    active: () => handler !== undefined,
+  };
+}
+
+describe("Schedule product-event RPC bridge", () => {
+  it("maps the four public notification names without reinterpreting domain events", () => {
+    const events = eventSource();
     const conn = fakeConn();
-    createEventBridge({
-      connections: new Set([conn]),
-      schedulerEventBus: bus,
-      isInternalTask: (taskId) => taskId === "__gc",
-    });
+    createEventBridge({ connections: new Set([conn]), scheduleRuntimeEvents: events.source });
 
-    await bus.emit("scheduler:task-completed", {
-      taskId: "__gc",
-      name: "gc",
-      durationMs: 1,
-    });
-    expect(conn.notify).not.toHaveBeenCalled();
-
-    await bus.emit("scheduler:task-completed", {
-      taskId: "u1",
-      name: "user",
+    events.emit({ kind: "accepted", taskId: "task", jobRunId: "job", name: "daily" });
+    events.emit({ kind: "started", taskId: "task", name: "daily" });
+    events.emit({
+      kind: "completed",
+      taskId: "task",
+      name: "daily",
+      status: "ok",
       durationMs: 2,
+      summary: "done",
     });
-    expect(conn.notify).toHaveBeenCalledWith(
-      "schedule.completed",
-      expect.objectContaining({ taskId: "u1", status: "ok" }),
-    );
-  });
-
-  it("accepted / started / failed / disabled 同样按 isInternalTask 过滤", async () => {
-    const bus = createEventBus<SchedulerEventMap>();
-    const conn = fakeConn();
-    createEventBridge({
-      connections: new Set([conn]),
-      schedulerEventBus: bus,
-      isInternalTask: (taskId) => taskId === "__gc",
-    });
-
-    await bus.emit("scheduler:task-accepted", {
-      taskId: "__gc",
-      jobRunId: "job-gc",
-      name: "gc",
-    });
-    await bus.emit("scheduler:task-started", {
-      taskId: "__gc",
-      name: "gc",
-      actionKind: "system-handler",
-    });
-    await bus.emit("scheduler:task-failed", {
-      taskId: "__gc",
-      name: "gc",
+    events.emit({
+      kind: "completed",
+      taskId: "task",
+      name: "daily",
+      status: "error",
       error: "boom",
-      consecutiveErrors: 1,
+      consecutiveErrors: 2,
     });
-    await bus.emit("scheduler:task-disabled", {
-      taskId: "__gc",
-      name: "gc",
-      reason: "x",
-    });
-    expect(conn.notify).not.toHaveBeenCalled();
+    events.emit({ kind: "disabled", taskId: "task", name: "daily", reason: "limit" });
+
+    expect(conn.notify.mock.calls).toEqual([
+      ["schedule.accepted", { taskId: "task", jobRunId: "job", name: "daily" }],
+      ["schedule.started", { taskId: "task", name: "daily" }],
+      ["schedule.completed", {
+        taskId: "task",
+        name: "daily",
+        status: "ok",
+        durationMs: 2,
+        summary: "done",
+      }],
+      ["schedule.completed", {
+        taskId: "task",
+        name: "daily",
+        status: "error",
+        error: "boom",
+        consecutiveErrors: 2,
+      }],
+      ["schedule.disabled", { taskId: "task", name: "daily", reason: "limit" }],
+    ]);
   });
 
-  it("手动运行受理先广播稳定 jobRunId", async () => {
-    const bus = createEventBus<SchedulerEventMap>();
-    const conn = fakeConn();
-    createEventBridge({
-      connections: new Set([conn]),
-      schedulerEventBus: bus,
+  it("only notifies authenticated connections and disposes the subscription", () => {
+    const events = eventSource();
+    const authenticated = fakeConn();
+    const anonymous = fakeConn(false);
+    const dispose = createEventBridge({
+      connections: new Set([authenticated, anonymous]),
+      scheduleRuntimeEvents: events.source,
     });
-
-    await bus.emit("scheduler:task-accepted", {
-      taskId: "task-1",
-      jobRunId: "job-1",
-      name: "daily",
-    });
-
-    expect(conn.notify).toHaveBeenCalledWith("schedule.accepted", {
-      taskId: "task-1",
-      jobRunId: "job-1",
-      name: "daily",
-    });
-  });
-
-  it("不传 isInternalTask 时全部广播（向后兼容）", async () => {
-    const bus = createEventBus<SchedulerEventMap>();
-    const conn = fakeConn();
-    createEventBridge({
-      connections: new Set([conn]),
-      schedulerEventBus: bus,
-    });
-
-    await bus.emit("scheduler:task-completed", {
-      taskId: "__gc",
-      name: "gc",
-      durationMs: 1,
-    });
-    expect(conn.notify).toHaveBeenCalledOnce();
+    expect(events.active()).toBe(true);
+    events.emit({ kind: "started", taskId: "task", name: "daily" });
+    expect(authenticated.notify).toHaveBeenCalledOnce();
+    expect(anonymous.notify).not.toHaveBeenCalled();
+    dispose();
+    expect(events.active()).toBe(false);
   });
 });

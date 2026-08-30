@@ -7,14 +7,13 @@
  * - RpcSchedulerFacade —— 经 RPC 接入核心宿主（cli 用，在 cli 包实现，叠加 ensure）。
  */
 
-import type { IEventBus } from "../events/index.js";
-import type { SchedulerEventMap } from "./events.js";
-import { isInternal } from "./status-summary.js";
 import type { AgentTurnResult, ScheduledTask, TaskAction } from "./types.js";
 import type { ScheduleWriteMutation } from "../contracts/state.js";
 import type { IngressContext } from "../contracts/protocol.js";
 import type {
   ScheduleManagementApplication,
+  ScheduleRuntimeApplication,
+  ScheduleRuntimeEvent,
   ScheduleTaskDraft,
 } from "./application.js";
 
@@ -57,22 +56,7 @@ export type TaskPatch = Partial<
  * 调度运行事件 —— 统一 Local（订阅内核 EventBus）与 Rpc（订阅 RPC notification）两侧的事件契约。
  * completed 合并成功/失败（status 区分），与 RPC 事件桥的语义一致，便于消费者一处处理。
  */
-export type SchedulerFacadeEvent =
-  | { kind: "accepted"; taskId: string; jobRunId: string; name: string }
-  | { kind: "started"; taskId: string; name: string }
-  | {
-      kind: "completed";
-      taskId: string;
-      name: string;
-      status: "ok" | "error";
-      durationMs?: number;
-      summary?: string;
-      error?: string;
-      /** 仅 status==="error" 时有意义：连续失败次数 + 下次重试时刻。 */
-      consecutiveErrors?: number;
-      nextRunAt?: string;
-    }
-  | { kind: "disabled"; taskId: string; name: string; reason?: string; lastError?: string };
+export type SchedulerFacadeEvent = ScheduleRuntimeEvent;
 
 export type SchedulerFacadeEventHandler = (event: SchedulerFacadeEvent) => void;
 
@@ -88,21 +72,6 @@ export type ScheduleMutationStager = (input: {
   readonly mutation: ScheduleWriteMutation;
   readonly operationId?: string;
 }) => Promise<{ readonly seq: number; readonly taskId?: string }>;
-
-/**
- * Temporary host-owned scheduler runtime/event bridge.
- *
- * Definition management is owned by ScheduleManagementApplication. This
- * Manual run/cancel has moved to ScheduleManagementApplication. This surface
- * intentionally keeps only lifecycle and event projection until A5-11b2.
- */
-export interface SchedulerBackend {
-  start(): Promise<void>;
-  stop(): Promise<void>;
-  listTasks(): TaskView[];
-  getTask(id: string): TaskView | undefined;
-  readonly activeTaskCount?: number;
-}
 
 export interface SchedulerFacade {
   /** 创建任务，返回创建后的任务视图（含内核算出的 nextRunAt）。 */
@@ -126,8 +95,7 @@ export class LocalSchedulerFacade implements SchedulerFacade {
   readonly #observedRevisions = new Map<string, number>();
   constructor(
     private readonly management: ScheduleManagementApplication,
-    private readonly scheduler: SchedulerBackend,
-    private readonly eventBus: IEventBus<SchedulerEventMap>,
+    private readonly runtime: ScheduleRuntimeApplication,
   ) {}
 
   async create(spec: ScheduleTaskDraft, context?: ScheduleMutationContext): Promise<TaskView> {
@@ -200,57 +168,7 @@ export class LocalSchedulerFacade implements SchedulerFacade {
   }
 
   onEvent(handler: SchedulerFacadeEventHandler): () => void {
-    // 内部维护任务静默：不向消费者派发其运行事件——与 RPC 事件广播 / channel 投递
-    // 两个触达边界一致，统一由 isInternal 谓词推导（task 已删则按外部放行，安全侧）。
-    const visible = (taskId: string): boolean => {
-      const t = this.scheduler.getTask(taskId);
-      return !t || !isInternal(t);
-    };
-    const offs = [
-      this.eventBus.on("scheduler:task-accepted", (e) => {
-        if (visible(e.taskId)) handler({ kind: "accepted", ...e });
-      }),
-      this.eventBus.on("scheduler:task-started", (e) => {
-        if (visible(e.taskId))
-          handler({ kind: "started", taskId: e.taskId, name: e.name });
-      }),
-      this.eventBus.on("scheduler:task-completed", (e) => {
-        if (visible(e.taskId))
-          handler({
-            kind: "completed",
-            taskId: e.taskId,
-            name: e.name,
-            status: "ok",
-            durationMs: e.durationMs,
-            summary: e.summary,
-          });
-      }),
-      this.eventBus.on("scheduler:task-failed", (e) => {
-        if (visible(e.taskId))
-          handler({
-            kind: "completed",
-            taskId: e.taskId,
-            name: e.name,
-            status: "error",
-            error: e.error,
-            consecutiveErrors: e.consecutiveErrors,
-            nextRunAt: e.nextRunAt,
-          });
-      }),
-      this.eventBus.on("scheduler:task-disabled", (e) => {
-        if (visible(e.taskId))
-          handler({
-            kind: "disabled",
-            taskId: e.taskId,
-            name: e.name,
-            reason: e.reason,
-            lastError: e.lastError,
-          });
-      }),
-    ];
-    return () => {
-      for (const off of offs) off();
-    };
+    return this.runtime.onEvent(handler);
   }
 }
 

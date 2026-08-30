@@ -1,12 +1,11 @@
 /**
  * ServerContext — 服务运行时共享上下文
  *
- * 持有所有跨模块共享的状态：配置、Scheduler、auth token、启动时间等。
+ * 持有网关所需共享状态：配置、auth token、启动时间与有限产品 API 等。
  * 通过显式传递（而不是单例）保持可测试性。
  */
 
 import type {
-  SchedulerBackend,
   ChannelRegistry,
   HttpHandler,
   TaskListState,
@@ -187,8 +186,6 @@ export interface ServerContext {
   readonly startedAt: number;
   /** 共享 token（auth 验证用）。由 ServerOrchestrator 注入 */
   readonly token: string;
-  /** 调度器实例（S2.E 注入） */
-  scheduler?: SchedulerBackend;
   /** 对话运行时管理器（不传则 session.* 方法不可用） */
   conversations?: ConversationManager;
   /** 任务推进闭环控制面。不传则 session.send 保持纯执行语义。 */
@@ -368,7 +365,6 @@ export interface CreateContextOptions {
   config: ServerConfig;
   version: string;
   token: string;
-  scheduler?: SchedulerBackend;
   conversations?: ConversationManager;
   advancement?: AdvancementController;
   advancementRecovery?: AdvancementRecoveryMaintenance;
@@ -399,7 +395,6 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     version: opts.version,
     token: opts.token,
     startedAt: Date.now(),
-    scheduler: opts.scheduler,
     conversations: opts.conversations,
     advancement: opts.advancement,
     advancementRecovery: opts.advancementRecovery,

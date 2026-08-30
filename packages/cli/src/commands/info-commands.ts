@@ -8,7 +8,6 @@
 
 import chalk from "chalk";
 import {
-  isInternal,
   type SchedulerFacade,
   type ChannelStatus,
   type ICommandRegistry,
@@ -509,11 +508,9 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     tag: "builtin",
   });
   dispatcher.registerHandler("tasks:repl", async () => {
-    // 从当前宿主 scheduler authority 读取；只列外部任务。
+    // 领域应用已经裁决用户可见任务；Surface 只负责展示该投影。
     // 「执行中」是宿主内存瞬态，读投影拿不到，故不显示。
-    const tasks = (await deps.getScheduler().list()).filter(
-      (t) => !isInternal(t),
-    );
+    const tasks = await deps.getScheduler().list();
     if (tasks.length === 0) {
       writer.line(
         chalk.dim(

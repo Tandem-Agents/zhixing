@@ -2,9 +2,14 @@ import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import {
   SCHEDULER_USER_NOTICE_STREAM,
-  nextScheduleTime,
-  type TaskSchedule,
 } from "@zhixing/core";
+import {
+  DEFAULT_SCHEDULE_FAILURE_THRESHOLD,
+  decideScheduleFailurePolicy,
+  ScheduleRuntimePolicyError,
+  selectPendingScheduleAutoDisable,
+  type ScheduleFailurePolicyDecision,
+} from "@zhixing/core/scheduler/application";
 import {
   AuthorityStorageError,
   collectArtifactRefs,
@@ -790,7 +795,8 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
     this.#systemResources = options.systemResources;
     this.#systemHandlers = options.systemHandlers ?? new Map();
     this.#clock = options.clock ?? (() => new Date().toISOString());
-    this.#schedulerFailureThreshold = options.schedulerFailureThreshold ?? 5;
+    this.#schedulerFailureThreshold =
+      options.schedulerFailureThreshold ?? DEFAULT_SCHEDULE_FAILURE_THRESHOLD;
     this.#schedulerNotices = options.schedulerNotices;
     this.#localExecutorId = options.localExecutorId;
     assertPositive(this.#schedulerFailureThreshold, "Scheduler failure threshold");
@@ -1237,12 +1243,10 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       failurePolicyByRun: new Map(
         [...state.failurePolicyByRun].map(([key, value]) => [key, structuredClone(value)]),
       ),
-      pendingAutoDisable: [...state.failurePolicyByRun.values()]
-        .filter(
-          (policy) =>
-            policy.autoDisableRequired &&
-            !state.autoDisableSettledRuns.has(policy.jobRunId),
-        )
+      pendingAutoDisable: selectPendingScheduleAutoDisable(
+        state.failurePolicyByRun.values(),
+        state.autoDisableSettledRuns,
+      )
         .map((policy) => structuredClone(policy)),
     }));
   }
@@ -8444,27 +8448,35 @@ export class JobJournal implements AssignmentSubmissionPreflightPort {
       if (!occurrence) {
         throw corruptJobJournal("Scheduler failure policy has no occurrence");
       }
-      const failureCount = consecutiveSchedulerFailures(
-        state,
-        occurrence.jobRunId,
-      );
-      const nextFire = frozenFailureNextFire({
-        taskId: this.#taskId,
-        jobRunId: occurrence.jobRunId,
-        schedule: definition.definition.spec.schedule,
-        scheduledFor: occurrence.scheduledFor,
-        failureCount,
-        decidedAt: at,
-      });
+      let policy: ScheduleFailurePolicyDecision;
+      try {
+        policy = decideScheduleFailurePolicy({
+          taskId: this.#taskId,
+          jobRunId: occurrence.jobRunId,
+          schedule: definition.definition.spec.schedule,
+          occurrences: [...state.occurrences.values()].map((item) => ({
+            jobRunId: item.jobRunId,
+            scheduledFor: item.scheduledFor,
+            state: state.states.get(item.jobRunId)?.state,
+          })),
+          threshold: this.#schedulerFailureThreshold,
+          decidedAt: at,
+        });
+      } catch (error) {
+        if (error instanceof ScheduleRuntimePolicyError) {
+          throw corruptJobJournal(error.message);
+        }
+        throw error;
+      }
       result.push(jobRecord(this.#taskId, {
         t: "failure-policy",
         jobRunId: occurrence.jobRunId,
         taskRevision: occurrence.taskRevision,
         statusRevision: body.statusRevision,
-        failureCount,
-        threshold: this.#schedulerFailureThreshold,
-        ...(nextFire ? { nextFire } : {}),
-        autoDisableRequired: failureCount >= this.#schedulerFailureThreshold,
+        failureCount: policy.failureCount,
+        threshold: policy.threshold,
+        ...(policy.nextFire ? { nextFire: policy.nextFire } : {}),
+        autoDisableRequired: policy.autoDisableRequired,
       }));
     }
     if (this.#schedulerNotices) {
@@ -9517,54 +9529,6 @@ function stateRecord(
     state,
     statusRevision,
   });
-}
-
-function consecutiveSchedulerFailures(
-  state: JobProjection,
-  currentJobRunId: string,
-): number {
-  const ordered = [...state.occurrences.values()].sort(
-    (left, right) =>
-      left.scheduledFor.localeCompare(right.scheduledFor) ||
-      left.jobRunId.localeCompare(right.jobRunId),
-  );
-  const index = ordered.findIndex((occurrence) => occurrence.jobRunId === currentJobRunId);
-  if (index < 0) throw corruptJobJournal("Scheduler failure occurrence is absent");
-  let count = 1;
-  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-    const previous = state.states.get(ordered[cursor]!.jobRunId)?.state;
-    if (previous === "failed" || previous === "expired") count += 1;
-    else if (previous !== "missed") break;
-  }
-  return count;
-}
-
-function frozenFailureNextFire(input: {
-  readonly taskId: string;
-  readonly jobRunId: string;
-  readonly schedule: TaskSchedule;
-  readonly scheduledFor: string;
-  readonly failureCount: number;
-  readonly decidedAt: string;
-}): string | undefined {
-  if (input.schedule.kind === "once") return undefined;
-  const scheduled = nextScheduleTime(input.schedule, new Date(input.scheduledFor));
-  if (!scheduled) return undefined;
-  const capMs = Math.min(
-    60_000 * 2 ** Math.min(input.failureCount - 1, 6),
-    3_600_000,
-  );
-  const entropy = Number.parseInt(
-    createHash("sha256")
-      .update(`${input.taskId}\n${input.jobRunId}\n${input.failureCount}`)
-      .digest("hex")
-      .slice(0, 12),
-    16,
-  );
-  const jitterMs = entropy % (capMs + 1);
-  return new Date(
-    Math.max(Date.parse(scheduled), Date.parse(input.decidedAt) + jitterMs),
-  ).toISOString();
 }
 
 const CROCKFORD_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
