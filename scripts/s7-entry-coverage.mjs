@@ -2782,6 +2782,20 @@ export async function validateS7Structure() {
       relative: "packages/rpc/package.json",
       text: await readFile(path.join(root, "packages/rpc/package.json"), "utf8"),
     },
+    {
+      relative: "packages/owner-kernel/package.json",
+      text: await readFile(
+        path.join(root, "packages/owner-kernel/package.json"),
+        "utf8",
+      ),
+    },
+    {
+      relative: "packages/owner-kernel/tsup.config.ts",
+      text: await readFile(
+        path.join(root, "packages/owner-kernel/tsup.config.ts"),
+        "utf8",
+      ),
+    },
   ]));
   for (const packageName of [
     "server",
@@ -3389,6 +3403,13 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     "packages/owner-kernel/src/delivery-participant.ts",
   );
   const ownerKernelIndex = required("packages/owner-kernel/src/index.ts");
+  const conversationAgentTurnAdmission = required(
+    "packages/owner-kernel/src/conversation-agent-turn-admission.ts",
+  );
+  const ownerKernelManifestText = required(
+    "packages/owner-kernel/package.json",
+  );
+  const ownerKernelBuild = required("packages/owner-kernel/tsup.config.ts");
   const ownerKernelDelivery = required("packages/owner-kernel/src/delivery.ts");
   const conversationAssignment = required(
     "packages/owner-kernel/src/conversation-assignment.ts",
@@ -3561,6 +3582,38 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const localResume = localResumeStart >= 0 && localResumeEnd > localResumeStart
     ? localConversationRpc.slice(localResumeStart, localResumeEnd)
     : "";
+  const sessionSendStart = sessionHandler.indexOf(
+    "export function buildSessionSendMethod()",
+  );
+  const sessionSendEnd = sessionHandler.indexOf(
+    "// ─── session.advancementConfirm",
+    sessionSendStart,
+  );
+  const sessionSend =
+    sessionSendStart >= 0 && sessionSendEnd > sessionSendStart
+      ? sessionHandler.slice(sessionSendStart, sessionSendEnd)
+      : "";
+  const sessionTurnIdentityPreparation = sessionSend.indexOf(
+    "const turnIdentity = await prepareSessionSendTurnIdentity(",
+  );
+  const sessionConversationManagerLookup = sessionSend.indexOf(
+    "const manager = requireConversations(ctx.server);",
+  );
+  const sessionAgentAdmissionStart = sessionHandler.indexOf(
+    "async function admitAndMaybeStartTurn(",
+  );
+  const sessionAgentAdmissionEnd = sessionHandler.indexOf(
+    "function throwWorksceneBusyAsRpc(",
+    sessionAgentAdmissionStart,
+  );
+  const sessionAgentAdmission =
+    sessionAgentAdmissionStart >= 0 &&
+      sessionAgentAdmissionEnd > sessionAgentAdmissionStart
+      ? sessionHandler.slice(
+          sessionAgentAdmissionStart,
+          sessionAgentAdmissionEnd,
+        )
+      : "";
 
   if (
     !scheduleApplication.includes("class ScheduleManagementApplicationService") ||
@@ -3738,6 +3791,25 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   } catch {
     failures.push("Core manifest is invalid while checking the Skill Catalog subpath");
   }
+  let ownerKernelManifest;
+  try {
+    ownerKernelManifest = JSON.parse(ownerKernelManifestText);
+  } catch {
+    failures.push(
+      "Owner Kernel manifest is invalid while checking Conversation turn admission",
+    );
+  }
+  const conversationAgentTurnAdmissionExport =
+    ownerKernelManifest?.exports?.["./conversation-agent-turn-admission"];
+  const duplicateConversationAgentTurnAdmissionExports = Object.entries(
+    ownerKernelManifest?.exports ?? {},
+  ).filter(([subpath, conditions]) =>
+    subpath !== "./conversation-agent-turn-admission" &&
+    conditions &&
+    typeof conditions === "object" &&
+    (conditions.types === conversationAgentTurnAdmissionExport?.types ||
+      conditions.import === conversationAgentTurnAdmissionExport?.import)
+  );
   const scheduleApplicationExport = coreManifest?.exports?.["./scheduler/application"];
   const duplicateScheduleApplicationExports = Object.entries(coreManifest?.exports ?? {})
     .filter(([subpath, conditions]) =>
@@ -3875,6 +3947,19 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !conversationApplication.includes("interface ConversationRunControlPort") ||
     !conversationApplication.includes("CONVERSATION_ABORT_COMMAND") ||
     !conversationApplication.includes("CONVERSATION_RESOLVE_UNCERTAIN_COMMAND") ||
+    !conversationApplication.includes(
+      "CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND",
+    ) ||
+    !conversationApplication.includes("CONVERSATION_ADMIT_AGENT_TURN_COMMAND") ||
+    !conversationApplication.includes("interface ConversationAgentTurnAdmissionPort") ||
+    !conversationApplication.includes(
+      "interface ConversationPreparedAgentTurnIdentity",
+    ) ||
+    !conversationApplication.includes("prepareAgentTurnIdentity(") ||
+    !conversationApplication.includes("isPreparedAgentTurnIdentity(") ||
+    !conversationApplication.includes("async admitAgentTurn(") ||
+    !conversationApplication.includes("admission.requiresStableTurnIdentity") ||
+    conversationApplication.includes("command.turnIdentitySource") ||
     !conversationApplication.includes("async abort(") ||
     !conversationApplication.includes("async resolveUncertain(") ||
     !conversationApplication.includes("HISTORY_DEFAULT_LIMIT = 20") ||
@@ -3893,6 +3978,18 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !sessionHandler.includes("CONVERSATION_RESUME_COMMAND") ||
     !sessionHandler.includes("CONVERSATION_ABORT_COMMAND") ||
     !sessionHandler.includes("CONVERSATION_RESOLVE_UNCERTAIN_COMMAND") ||
+    !sessionHandler.includes(
+      "CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND",
+    ) ||
+    !sessionHandler.includes("CONVERSATION_ADMIT_AGENT_TURN_COMMAND") ||
+    sessionSend.length === 0 ||
+    sessionTurnIdentityPreparation < 0 ||
+    sessionConversationManagerLookup < 0 ||
+    sessionTurnIdentityPreparation > sessionConversationManagerLookup ||
+    /usesDurableTurnProtocol|generateTurnId|validateTurnId/u.test(sessionSend) ||
+    !sessionHandler.includes(
+      "productApi.command(\n    CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND",
+    ) ||
     !sessionHandler.includes("productApi.command(CONVERSATION_ABORT_COMMAND") ||
     !/productApi\.command\(\s*CONVERSATION_RESOLVE_UNCERTAIN_COMMAND/u.test(
       sessionHandler,
@@ -3927,6 +4024,14 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !localConversationRpc.includes("this.#application.resume({") ||
     !localConversationRpc.includes("this.#application.abort({") ||
     !localConversationRpc.includes("this.#application.resolveUncertain({") ||
+    !localConversationRpc.includes(
+      "this.#application.prepareAgentTurnIdentity({",
+    ) ||
+    !localConversationRpc.includes("this.#application.admitAgentTurn({") ||
+    localConversationRpc.indexOf(
+      "this.#application.prepareAgentTurnIdentity({",
+    ) > localConversationRpc.indexOf("this.#application.admitAgentTurn({") ||
+    /this\.input\.owner\.admitTurn\s*\(/u.test(localConversationRpc) ||
     /this\.input\.owner\.(?:cancelTurns|cancelConversationRuns|resolveDurableUncertain|resolveConversationUncertain)\s*\(/u.test(
       localConversationRpc,
     ) ||
@@ -3957,6 +4062,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !localConversationApplication.includes("runControl: {") ||
     !localConversationOwner.includes("cancelConversationRuns:") ||
     !localConversationOwner.includes("resolveConversationUncertain:") ||
+    !localConversationOwner.includes("createConversationAgentTurnAdmissionPort({") ||
+    !localConversationOwner.includes("createAgentTurnExecution:") ||
+    /\b(?:runTurn|admitTurn):/u.test(localConversationOwner) ||
     localConversationOwner.includes("cancelTurns:") ||
     !conversationResumeBinding.includes("createAnchorConversationResumePort") ||
     !conversationResumeBinding.includes("restoreIdentity:") ||
@@ -4038,7 +4146,36 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     ) ||
     /input\.owner\.(?:createConversation|sessionState\.readTranscriptTail)\(/u.test(
       localConversationRpc,
-    )
+    ) ||
+    sessionAgentAdmission.length === 0 ||
+    !sessionAgentAdmission.includes(
+      "productApi.command(\n      CONVERSATION_ADMIT_AGENT_TURN_COMMAND",
+    ) ||
+    !sessionAgentAdmission.includes("turnIdentity: input.turnIdentity") ||
+    /turnIdentitySource|usesDurableTurnProtocol/u.test(sessionAgentAdmission) ||
+    /input\.manager\.(?:admitTurn|admitDurableTurn)\s*\(/u.test(
+      sessionAgentAdmission,
+    ) ||
+    !conversationAgentTurnAdmission.includes(
+      "createConversationAgentTurnAdmissionPort",
+    ) ||
+    !conversationAgentTurnAdmission.includes("input.manager.admitTurn({") ||
+    !conversationAgentTurnAdmission.includes("input.manager.admitDurableTurn({") ||
+    !conversationAgentTurnAdmission.includes("start: admitted.task.execute") ||
+    ownerKernelIndex.includes("conversation-agent-turn-admission") ||
+    conversationAgentTurnAdmissionExport?.types !==
+      "./dist/conversation-agent-turn-admission.d.ts" ||
+    conversationAgentTurnAdmissionExport?.import !==
+      "./dist/conversation-agent-turn-admission.js" ||
+    duplicateConversationAgentTurnAdmissionExports.length > 0 ||
+    ownerKernelBuild.split(
+      '"src/conversation-agent-turn-admission.ts"',
+    ).length - 1 !== 1 ||
+    !composition.includes(
+      'from "@zhixing/owner-kernel/conversation-agent-turn-admission"',
+    ) ||
+    !composition.includes("agentTurns: createConversationAgentTurnAdmissionPort({") ||
+    !localConversationApplication.includes("agentTurns: input.owner.agentTurnAdmission")
   ) {
     failures.push(
       "Conversation directory management lacks one domain application and Product API owner",
@@ -6761,12 +6898,13 @@ export function inspectLocalConversationOwnerIsolation(records) {
     failures.push(`${assemblyRecord.relative}: narrowed local owner port contract is missing`);
   } else {
     const allowedPortCapabilities = new Set([
-      "admitTurn",
+      "agentTurnAdmission",
       "answerInteractionWithTicket",
       "cancelConversationRuns",
       "commitConversationClear",
       "commitConversationDelete",
       "createConversation",
+      "createAgentTurnExecution",
       "deferSchedule",
       "discardDeferredIntent",
       "ensureSession",
@@ -6779,7 +6917,6 @@ export function inspectLocalConversationOwnerIsolation(records) {
       "resolveConversationUncertain",
       "resolveNoInteractiveSurface",
       "rubricCatalog",
-      "runTurn",
       "sessionState",
       "statusHistory",
       "currentAuthority",

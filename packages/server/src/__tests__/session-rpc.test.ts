@@ -35,6 +35,7 @@ import {
   ConversationManager,
   DurableConversationAdmissionRejectedError,
 } from "@zhixing/owner-kernel";
+import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
 import type {
   ConversationBootstrap,
   DurableConversationTurnExecutor,
@@ -499,6 +500,16 @@ function createConversationProductApi(input: {
 }): ProductApiDispatcher {
   const application = new ConversationDirectoryApplicationService({
     storage: input.directory,
+    agentTurns: createConversationAgentTurnAdmissionPort({
+      manager: input.conversations,
+    }),
+    agentTurnIdentity: {
+      exists: (conversationId) => input.directory.exists(conversationId),
+      create: async () => (await input.directory.create()).conversationId,
+      ensure: async (conversationId) => {
+        await input.directory.ensure(conversationId);
+      },
+    },
     resume: {
       restoreIdentity: async (conversationId) => {
         const restored = await input.directory.touch(conversationId);
@@ -3506,6 +3517,7 @@ describe("session.* RPC (S2.D)", () => {
 
   it("session.taskListUpdate 不绕过会话 owner:in-flight turn 期间返回 BUSY 且不写入", async () => {
     const updates: unknown[] = [];
+    const directory = createMemoryDirectory(recordsByConversation);
     const conversations = new ConversationManager(
       createMockFactory({ deltaCount: 8, yieldDelayMs: 30 }),
       {
@@ -3526,6 +3538,11 @@ describe("session.* RPC (S2.D)", () => {
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
+      conversationDirectory: directory,
+      productApi: createConversationProductApi({
+        directory,
+        conversations,
+      }),
       taskListSnapshot: async () => null,
       taskListUpdate: async (_conversationId, action) => {
         updates.push(action);
@@ -4250,11 +4267,14 @@ describe("session.* RPC (S2.D)", () => {
       idleCheckIntervalMs: 999_999,
       maxPending: 2,
     });
+    const directory = createMemoryDirectory(recordsByConversation);
     const ctx = createServerContext({
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
+      conversationDirectory: directory,
+      productApi: createConversationProductApi({ directory, conversations }),
     });
     server = await startServer({ context: ctx });
     const client = await connect(server.port);
@@ -4313,11 +4333,14 @@ describe("session.* RPC (S2.D)", () => {
         return { runIndex: appendedRecords.length - 1, shardId: "000001" };
       },
     });
+    const directory = createMemoryDirectory(recordsByConversation);
     const ctx = createServerContext({
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
+      conversationDirectory: directory,
+      productApi: createConversationProductApi({ directory, conversations }),
     });
     server = await startServer({ context: ctx });
     const client = await connect(server.port);
@@ -4351,11 +4374,14 @@ describe("session.* RPC (S2.D)", () => {
         return { runIndex: appendedRecords.length - 1, shardId: "000001" };
       },
     });
+    const directory = createMemoryDirectory(recordsByConversation);
     const ctx = createServerContext({
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
+      conversationDirectory: directory,
+      productApi: createConversationProductApi({ directory, conversations }),
     });
     server = await startServer({ context: ctx });
     const client = await connect(server.port);
@@ -4391,11 +4417,15 @@ describe("session.* RPC (S2.D)", () => {
         appendRun: async () => ({ runIndex: 1, shardId: "000001" }),
       },
     );
+    recordsByConversation.set("conv_restored", []);
+    const directory = createMemoryDirectory(recordsByConversation);
     const ctx = createServerContext({
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
+      conversationDirectory: directory,
+      productApi: createConversationProductApi({ directory, conversations }),
     });
     server = await startServer({ context: ctx });
     const client = await connect(server.port);

@@ -3465,6 +3465,9 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/owner-kernel/src/delivery-participant.ts",
     "packages/owner-kernel/src/delivery.ts",
     "packages/owner-kernel/src/index.ts",
+    "packages/owner-kernel/src/conversation-agent-turn-admission.ts",
+    "packages/owner-kernel/package.json",
+    "packages/owner-kernel/tsup.config.ts",
     "packages/owner-kernel/src/conversation-assignment.ts",
     "packages/owner-kernel/src/job-assignment.ts",
     "packages/owner-kernel/src/scheduler-user-notices.ts",
@@ -3520,6 +3523,76 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/local-conversation-rpc.ts",
       (text) => `${text}\nvoid input.owner.createConversation();`,
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace(
+        "productApi.command(\n      CONVERSATION_ADMIT_AGENT_TURN_COMMAND",
+        "input.manager.admitTurn(\n      CONVERSATION_ADMIT_AGENT_TURN_COMMAND",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace(
+        "const turnIdentity = await prepareSessionSendTurnIdentity(",
+        "const turnIdentity = await Promise.resolve(",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace(
+        "const manager = requireConversations(ctx.server);",
+        "const manager = requireConversations(ctx.server);\n      if (manager.usesDurableTurnProtocol()) void 0;",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => {
+        const target = "turnIdentity: input.turnIdentity,";
+        const index = text.lastIndexOf(target);
+        return index < 0
+          ? text
+          : `${text.slice(0, index)}turnIdentitySource: "provided",\n        turnId: input.turnIdentity.turnId,${text.slice(index + target.length)}`;
+      },
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/local-conversation-rpc.ts",
+      (text) => text.replace(
+        "this.#application.admitAgentTurn({",
+        "this.input.owner.admitTurn({",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/owner-kernel/src/conversation-agent-turn-admission.ts",
+      (text) => text.replace(
+        "input.manager.admitDurableTurn({",
+        "input.manager.writeDurableTurn({",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/owner-kernel/src/index.ts",
+      (text) => `${text}\nexport * from "./conversation-agent-turn-admission.js";`,
     )).join("\n"),
     /Conversation directory management lacks one domain application/,
   );

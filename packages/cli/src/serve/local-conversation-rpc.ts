@@ -521,13 +521,35 @@ export class LocalConversationRpcRouter
     const conversationId = this.#conversationId(params, "session.send");
     const turnId = requiredIdentifier(params.turnId, "消息");
     const input = normalizeInput(params);
-    this.#subscribe(conversationId, connection);
-    const admitted = await this.input.owner.admitTurn({
-      conversationId,
-      input,
+    const caller = {
+      kind: "surface" as const,
+      surfacePrincipal: "surface:local:first-party",
+      connectionId: String(connection.id),
+    };
+    const turnIdentity = this.#application.prepareAgentTurnIdentity({
+      kind: "prepare-agent-turn-identity",
       turnId,
+      identitySource: "provided",
+      caller,
+    });
+    this.#subscribe(conversationId, connection);
+    const turn = this.input.owner.createAgentTurnExecution({
+      input,
       notify: (method, payload) => this.#notify(conversationId, method, payload),
     });
+    let admitted;
+    try {
+      admitted = await this.#application.admitAgentTurn({
+        kind: "admit-agent-turn",
+        conversationId,
+        input,
+        turnIdentity,
+        caller,
+        execution: turn.execution,
+      });
+    } catch (error) {
+      throw mapLocalConversationApplicationError(error, "send");
+    }
     return {
       conversationId,
       sessionId: conversationId,
@@ -792,7 +814,8 @@ function mapLocalConversationApplicationError(
     | "clear"
     | "delete"
     | "abort"
-    | "resolve",
+    | "resolve"
+    | "send",
 ): unknown {
   if (!(error instanceof ConversationApplicationError)) return error;
   if (error.code === "not-found") {
@@ -802,11 +825,15 @@ function mapLocalConversationApplicationError(
   }
   if (error.code === "busy") {
     return RpcErrors.busy(
-      "这个对话正在处理其他操作，请稍后重试。",
+      operation === "send" && error.reason === "turn-queue-full"
+        ? "Conversation has too many pending messages"
+        : "这个对话正在处理其他操作，请稍后重试。",
     );
   }
   return RpcErrors.invalidParams(
-    operation === "abort"
+    operation === "send"
+      ? "消息缺少有效的请求标识。"
+      : operation === "abort"
       ? "取消请求缺少有效的请求标识。"
       : operation === "resolve"
         ? "session.resolve params are invalid"

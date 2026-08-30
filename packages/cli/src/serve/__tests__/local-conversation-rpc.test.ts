@@ -548,20 +548,45 @@ function ownerPort(): LocalConversationOwnerPort {
       state: "cancelled",
       factDigest: `sha256:${"b".repeat(64)}`,
     })),
-    runTurn: vi.fn(async () => ({ kind: "aborted" })),
-    admitTurn: vi.fn(async (input) => {
-      input.notify("session.complete", {
-        conversationId: input.conversationId,
-        sessionId: input.conversationId,
-        turnId: input.turnId,
-        result: { reason: "stop", usage: { inputTokens: 1, outputTokens: 1 } },
-      });
-      return {
-        status: "immediate",
+    agentTurnAdmission: {
+      requiresStableTurnIdentity: true,
+      createTurnIdentity: () => {
+        throw new Error("stable turn identity required");
+      },
+      admit: vi.fn(async (input) => ({
+        status: "immediate" as const,
+        conversationId:
+          input.identity.kind === "existing"
+            ? input.identity.conversationId
+            : await input.identity.create(),
         runId: "run-local-1",
-        outcome: Promise.resolve({ kind: "aborted" }),
-      };
-    }),
+        start: async () =>
+          input.execution.execute({
+            conversationId:
+              input.identity.kind === "existing"
+                ? input.identity.conversationId
+                : "local-created",
+            turnId: input.turnId,
+          }),
+      })),
+    },
+    createAgentTurnExecution: vi.fn((input) => ({
+      execution: {
+        execute: async ({ conversationId, turnId }) => {
+          input.notify("session.complete", {
+            conversationId,
+            sessionId: conversationId,
+            turnId,
+            result: {
+              reason: "stop",
+              usage: { inputTokens: 1, outputTokens: 1 },
+            },
+          });
+        },
+        cancelPending: () => {},
+      },
+      outcome: Promise.resolve({ kind: "aborted" as const }),
+    })),
     answerInteractionWithTicket: vi.fn(async () => {}),
     resolveNoInteractiveSurface: vi.fn(async () => {}),
     deferSchedule: vi.fn(),

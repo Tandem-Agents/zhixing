@@ -27,7 +27,6 @@ import {
   assistantMessage,
   buildClosureFacts,
   emptyUsage,
-  generateTurnId,
   isNonEmptyUserTurnInput,
   type AgentEventMap,
   type AgentYield,
@@ -40,6 +39,8 @@ import {
 import type { ExplicitEnvironmentSelection } from "@zhixing/core/contracts";
 import {
   CONVERSATION_CREATE_COMMAND,
+  CONVERSATION_ADMIT_AGENT_TURN_COMMAND,
+  CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND,
   CONVERSATION_ABORT_COMMAND,
   CONVERSATION_CLEAR_COMMAND,
   CONVERSATION_DELETE_COMMAND,
@@ -50,6 +51,7 @@ import {
   CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
   ConversationApplicationError,
   type ConversationDirectoryEntry,
+  type ConversationPreparedAgentTurnIdentity,
 } from "@zhixing/core/conversation/application";
 import type { ProductApiOperationDescriptor } from "@zhixing/core/product-api";
 import { validateExplicitEnvironmentSelection } from "@zhixing/core/protocol";
@@ -144,17 +146,14 @@ export function buildSessionSendMethod(): MethodEntry {
         params.surfaceCapabilities,
       );
 
-      const manager = requireConversations(ctx.server);
       const id = optionalConversationId(params, "session.send");
-      if (manager.usesDurableTurnProtocol() && params.turnId === undefined) {
-        throw RpcErrors.invalidParams(
-          "session.send requires a stable 'turnId' while durable execution is enabled",
-        );
-      }
-      const turnId =
-        params.turnId !== undefined
-          ? validateTurnId(params.turnId)
-          : generateTurnId();
+      const turnIdentity = await prepareSessionSendTurnIdentity(
+        ctx.server,
+        ctx.connection,
+        params.turnId,
+      );
+      const { turnId } = turnIdentity;
+      const manager = requireConversations(ctx.server);
       const connectionId = String(ctx.connection.id);
       const broadcast = ctx.server.sessionBroadcast;
       const advancement = ctx.server.advancement;
@@ -242,6 +241,7 @@ export function buildSessionSendMethod(): MethodEntry {
             input,
             engage,
             turnId,
+            turnIdentity,
             connectionId,
             connection: ctx.connection,
             broadcast,
@@ -269,6 +269,7 @@ export function buildSessionSendMethod(): MethodEntry {
             input,
             engage,
             turnId,
+            turnIdentity,
             connectionId,
             connection: ctx.connection,
             broadcast,
@@ -297,6 +298,7 @@ export function buildSessionSendMethod(): MethodEntry {
             input,
             engage,
             turnId,
+            turnIdentity,
             connectionId,
             connection: ctx.connection,
             broadcast,
@@ -379,15 +381,17 @@ export function buildSessionSendMethod(): MethodEntry {
             broadcast,
           });
           const admitted = await admitAndMaybeStartTurn({
+            server: ctx.server,
             manager,
             conversationId: prepared.session.conversationId,
-            exists: existingConversationCheck(
-              ctx.server,
-              prepared.session.conversationId,
-            ),
             connectionId,
             input: prepared.originalUserTask,
-            turnId: prepared.originalTurnId,
+            turnIdentity: await prepareConversationAgentTurnIdentity(
+              ctx.server,
+              ctx.connection,
+              prepared.originalTurnId,
+              "provided",
+            ),
             connection: ctx.connection,
             broadcast,
             surfaceCapabilities: { postTurnControl: false },
@@ -463,6 +467,7 @@ export function buildSessionSendMethod(): MethodEntry {
           input,
           engage,
           turnId,
+          turnIdentity,
           connectionId,
           connection: ctx.connection,
           broadcast,
@@ -488,6 +493,7 @@ export function buildSessionSendMethod(): MethodEntry {
         input,
         engage,
         turnId,
+        turnIdentity,
         connectionId,
         connection: ctx.connection,
         broadcast,
@@ -595,12 +601,17 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
       let admitted: Awaited<ReturnType<typeof admitAndMaybeStartTurn>>;
       try {
         admitted = await admitAndMaybeStartTurn({
+          server: ctx.server,
           manager,
           conversationId,
-          exists: existingConversationCheck(ctx.server, conversationId),
           connectionId: String(ctx.connection.id),
           input: confirmed.originalUserTask,
-          turnId: confirmed.originalTurnId,
+          turnIdentity: await prepareConversationAgentTurnIdentity(
+            ctx.server,
+            ctx.connection,
+            confirmed.originalTurnId,
+            "provided",
+          ),
           connection: ctx.connection,
           broadcast: ctx.server.sessionBroadcast,
           surfaceCapabilities: { postTurnControl: false },
@@ -801,12 +812,17 @@ export function buildSessionAdvancementCancelMethod(): MethodEntry {
       }
 
       const admitted = await admitAndMaybeStartTurn({
+        server: ctx.server,
         manager,
         conversationId,
-        exists: existingConversationCheck(ctx.server, conversationId),
         connectionId: String(ctx.connection.id),
         input: cancelled.originalUserTask,
-        turnId: cancelled.originalTurnId,
+        turnIdentity: await prepareConversationAgentTurnIdentity(
+          ctx.server,
+          ctx.connection,
+          cancelled.originalTurnId,
+          "provided",
+        ),
         connection: ctx.connection,
         broadcast: ctx.server.sessionBroadcast,
         surfaceCapabilities: { postTurnControl: false },
@@ -1000,12 +1016,73 @@ interface SendDirectTurnInput {
   readonly preallocatedConversationId?: string;
   readonly input: UserTurnInput;
   readonly turnId: string;
+  readonly turnIdentity: ConversationPreparedAgentTurnIdentity;
   readonly connectionId: string;
   readonly connection: RpcConnection;
   readonly broadcast?: SessionBroadcast;
   readonly server: ServerContext;
   readonly surfaceCapabilities: SessionSurfaceCapabilities;
   readonly environment?: ExplicitEnvironmentSelection;
+}
+
+async function prepareSessionSendTurnIdentity(
+  server: ServerContext,
+  connection: RpcConnection,
+  rawTurnId: unknown,
+): Promise<ConversationPreparedAgentTurnIdentity> {
+  try {
+    return await prepareConversationAgentTurnIdentity(
+      server,
+      connection,
+      rawTurnId,
+      rawTurnId === undefined ? "legacy-generated" : "provided",
+    );
+  } catch (error) {
+    const mapped = sessionTurnIdentityRpcError(error);
+    if (mapped) throw mapped;
+    throw error;
+  }
+}
+
+async function prepareConversationAgentTurnIdentity(
+  server: ServerContext,
+  connection: RpcConnection,
+  turnId: unknown,
+  identitySource: "provided" | "legacy-generated",
+): Promise<ConversationPreparedAgentTurnIdentity> {
+  const productApi = requireConversationProductApi(
+    server,
+    CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND,
+  );
+  const dispatch = await productApi.command(
+    CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND,
+    {
+      kind: "prepare-agent-turn-identity",
+      ...(turnId !== undefined ? { turnId } : {}),
+      identitySource,
+      caller: {
+        kind: "surface",
+        surfacePrincipal: rpcSurfacePrincipal(connection),
+        connectionId: String(connection.id),
+      },
+    },
+  );
+  return dispatch.result;
+}
+
+function sessionTurnIdentityRpcError(error: unknown): RpcAppError | undefined {
+  if (!(error instanceof ConversationApplicationError)) return undefined;
+  if (error.reason === "turn-identity-required") {
+    return RpcErrors.invalidParams(
+      "session.send requires a stable 'turnId' while durable execution is enabled",
+    );
+  }
+  if (error.reason === "turn-identity-invalid") {
+    return RpcErrors.invalidParams(
+      "session.send 'turnId' must be a non-empty bounded identifier",
+    );
+  }
+  return undefined;
 }
 
 interface SendUserTurnInput extends SendDirectTurnInput {
@@ -1025,16 +1102,13 @@ async function sendDirectTurn(
   input: SendDirectTurnInput,
 ): Promise<SessionSendResult> {
   const admitted = await admitAndMaybeStartTurn({
+    server: input.server,
     manager: input.manager,
     conversationId: input.conversationId,
-    createConversation: createConversationCallback(
-      input.server,
-      input.preallocatedConversationId,
-    ),
-    exists: existingConversationCheck(input.server, input.conversationId),
+    preallocatedConversationId: input.preallocatedConversationId,
     connectionId: input.connectionId,
     input: input.input,
-    turnId: input.turnId,
+    turnIdentity: input.turnIdentity,
     connection: input.connection,
     broadcast: input.broadcast,
     surfaceCapabilities: input.surfaceCapabilities,
@@ -1072,13 +1146,13 @@ async function sendPerspectiveTurn(
 }
 
 interface AdmitAndMaybeStartTurnInput {
+  readonly server: ServerContext;
   readonly manager: ConversationManager;
   readonly conversationId?: string;
-  readonly createConversation?: () => Promise<string>;
-  readonly exists?: () => Promise<boolean>;
+  readonly preallocatedConversationId?: string;
   readonly connectionId: string;
   readonly input: UserTurnInput;
-  readonly turnId: string;
+  readonly turnIdentity: ConversationPreparedAgentTurnIdentity;
   readonly connection: RpcConnection;
   readonly broadcast?: SessionBroadcast;
   readonly surfaceCapabilities: SessionSurfaceCapabilities;
@@ -1203,102 +1277,112 @@ async function admitAndMaybeStartTurn(
   runId?: string;
   runStatus: "immediate" | "queued";
 }> {
-  let admission: Awaited<ReturnType<ConversationManager["admitTurn"]>>;
   try {
-    admission = await input.manager.admitTurn({
+    const productApi = requireConversationProductApi(
+      input.server,
+      CONVERSATION_ADMIT_AGENT_TURN_COMMAND,
+    );
+    const { turnId } = input.turnIdentity;
+    const turnOrigin = input.admissionIdentity?.turnOrigin ??
+      rpcTurnContext(
+        turnId,
+        input.connection,
+        input.surfaceCapabilities,
+      ).turnOrigin;
+    const dispatch = await productApi.command(
+      CONVERSATION_ADMIT_AGENT_TURN_COMMAND,
+      {
+        kind: "admit-agent-turn",
       conversationId: input.conversationId,
-      createConversation: input.createConversation,
-      exists: input.exists,
-      connectionId: input.connectionId,
-      source: "interactive",
-      beforeEnqueue: (managed) =>
-        input.manager.admitDurableTurn({
-          conversationId: managed.conversationId,
-          input: input.input,
-          invocation: { kind: "agent", source: "interactive" },
-          ...(input.environment
-            ? { environment: structuredClone(input.environment) }
-            : {}),
-          options: {
-            turnContext: input.admissionIdentity
-              ? {
-                  turnId: input.turnId,
-                  turnOrigin: input.admissionIdentity.turnOrigin,
-                }
-              : rpcTurnContext(
-                  input.turnId,
-                  input.connection,
-                  input.surfaceCapabilities,
-                ),
-            source: "interactive",
-            surfacePrincipal:
-              input.admissionIdentity?.surfacePrincipal ??
-              rpcSurfacePrincipal(input.connection),
-          },
+        ...(input.preallocatedConversationId
+          ? { preallocatedConversationId: input.preallocatedConversationId }
+          : {}),
+        input: input.input,
+        turnIdentity: input.turnIdentity,
+        caller: {
+          kind: "surface",
           surfacePrincipal:
             input.admissionIdentity?.surfacePrincipal ??
             rpcSurfacePrincipal(input.connection),
-        }),
-      makeTask: (managed) => ({
-        source: "interactive",
-        execute: () =>
-          runManagedTurn(
-            managed,
-            input.input,
-            input.turnId,
-            input.connection,
-            input.manager,
-            input.broadcast,
-            input.surfaceCapabilities,
-            input.environment,
-          ),
-        // 取消通知是排队发起者的私人回执,不组播——其他端没见过这条排队项
-        cancel: () => {
+          connectionId: input.connectionId,
+        },
+        ...(turnOrigin ? { turnOrigin } : {}),
+        ...(input.environment
+          ? { environment: structuredClone(input.environment) }
+          : {}),
+        execution: {
+          execute: async ({ conversationId, turnId }) => {
+            const managed = input.manager.getSession(conversationId);
+            if (!managed) {
+              throw new Error(
+                `Admitted Conversation runtime is missing: ${conversationId}`,
+              );
+            }
+            await runManagedTurn(
+              managed,
+              input.input,
+              turnId,
+              input.connection,
+              input.manager,
+              input.broadcast,
+              input.surfaceCapabilities,
+              input.environment,
+            );
+          },
+          // 取消通知是排队发起者的私人回执,不组播——其他端没见过这条排队项
+          cancelPending: ({ conversationId, turnId }) => {
           input.connection.notify(SESSION_NOTIFICATIONS.complete, {
-            conversationId: managed.conversationId,
-            sessionId: managed.conversationId,
-            turnId: input.turnId,
+              conversationId,
+              sessionId: conversationId,
+              turnId,
             result: {
               reason: "error",
               error: { name: "Cancelled", message: "Pending turn cancelled" },
               usage: { inputTokens: 0, outputTokens: 0 },
             },
           } satisfies SessionCompletePayload);
+          },
+          onAdmitted: ({ conversationId, runId, turnId }) => {
+            notifyLifecycleDiagnostics({
+              manager: input.manager,
+              conversationId,
+              runId: runId ?? turnId,
+              connection: input.connection,
+              broadcast: input.broadcast,
+            });
+          },
         },
-      }),
-    });
-  } catch (err) {
-    throwWorksceneBusyAsRpc(err);
-  }
-
-  if (admission.status === "not-found") {
-    throw RpcErrors.notFound(`Session not found: ${admission.conversationId}`);
-  }
-  if (admission.status === "full") {
-    throw new RpcAppError(
-      RPC_ERROR_CODES.BUSY,
-      "Too many pending messages for this conversation",
+      },
     );
+    const admission = dispatch.result;
+    return {
+      conversationId: admission.conversationId,
+      turnId: admission.turnId,
+      ...(admission.runId ? { runId: admission.runId } : {}),
+      runStatus:
+        admission.status === "replayed" ? "queued" : admission.status,
+    };
+  } catch (err) {
+    const identityError = sessionTurnIdentityRpcError(err);
+    if (identityError) throw identityError;
+    if (err instanceof ConversationApplicationError) {
+      if (err.reason === "turn-conversation-not-found") {
+        throw RpcErrors.notFound(
+          `Session not found: ${input.conversationId ?? input.preallocatedConversationId ?? "unknown"}`,
+        );
+      }
+      if (err.reason === "turn-queue-full") {
+        throw new RpcAppError(
+          RPC_ERROR_CODES.BUSY,
+          "Too many pending messages for this conversation",
+        );
+      }
+      if (err.reason === "turn-lifecycle-busy") {
+        throw RpcErrors.busy("场景正在切换或目录变更，请稍后重试。");
+      }
+    }
+    throw err;
   }
-
-  notifyLifecycleDiagnostics({
-    manager: input.manager,
-    conversationId: admission.conversationId,
-    runId: admission.runId ?? input.turnId,
-    connection: input.connection,
-    broadcast: input.broadcast,
-  });
-
-  if (admission.status === "immediate") {
-    void admission.task.execute();
-  }
-
-  return {
-    conversationId: admission.conversationId,
-    turnId: input.turnId,
-    ...(admission.runId ? { runId: admission.runId } : {}),
-    runStatus: admission.status === "replayed" ? "queued" : admission.status,
-  };
 }
 
 function throwWorksceneBusyAsRpc(err: unknown): never {
@@ -2811,15 +2895,6 @@ function validateConversationId(value: unknown, method: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
     throw RpcErrors.invalidParams(
       `${method} requires non-empty 'conversationId'`,
-    );
-  }
-  return value;
-}
-
-function validateTurnId(value: unknown): string {
-  if (!isProtocolIdentifier(value) || value.trim().length === 0) {
-    throw RpcErrors.invalidParams(
-      "session.send 'turnId' must be a non-empty bounded identifier",
     );
   }
   return value;

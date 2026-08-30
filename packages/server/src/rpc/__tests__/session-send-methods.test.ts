@@ -10,14 +10,15 @@ import {
   ConversationDirectoryApplicationService,
   createConversationDirectoryProductApiContribution,
   type ConversationRunControlPort,
+  type ConversationAgentTurnAdmissionPort,
 } from "@zhixing/core/conversation/application";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import {
   ConversationManager,
-  WorksceneBusyError,
   type SessionRuntime,
 } from "@zhixing/owner-kernel";
 import type { DurableConversationTurnExecutor } from "@zhixing/owner-kernel/run-turn";
+import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
 import { stubDurableTurnExecutor } from "../../__tests__/durable-turn-executor-stub.js";
 import {
   buildSessionAbortMethod,
@@ -63,19 +64,229 @@ function runControlProductApi(
   );
 }
 
+function agentTurnProductApi(
+  agentTurns: ConversationAgentTurnAdmissionPort,
+): ProductApiDispatcher {
+  const application = new ConversationDirectoryApplicationService({
+    storage: {
+      list: async () => [],
+      create: async () => ({
+        conversationId: "conversation-created",
+        name: "new",
+        createdAt: "2026-08-31T00:00:00.000Z",
+        lastActiveAt: "2026-08-31T00:00:00.000Z",
+      }),
+      rename: async () => null,
+      readHistory: async () => ({ runs: [], hasMore: false }),
+    },
+    agentTurns,
+    agentTurnIdentity: {
+      exists: async () => true,
+      create: async () => "conversation-created",
+      ensure: async () => {},
+    },
+  });
+  return new ProductApiDispatcher(
+    CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+    [createConversationDirectoryProductApiContribution(application)],
+  );
+}
+
 describe("session.send 方法", () => {
-  it("admitTurn 撞工作场景静默闸时返回 BUSY", async () => {
+  it("preserves the durable stable-turn identity rejection at the wire boundary", async () => {
+    const admit = vi.fn();
+    const method = buildSessionSendMethod();
+    const ctx = {
+      server: {
+        conversations: {},
+        productApi: agentTurnProductApi({
+          requiresStableTurnIdentity: true,
+          createTurnIdentity: () => "turn-generated",
+          admit,
+        }),
+      } as unknown as ServerContext,
+      connection: {
+        id: "conn-1",
+        surfacePrincipal: "rpc:test",
+        clientInfo: { id: "test" },
+      },
+    } as never;
+
+    await expect(
+      method.handler({ text: "继续", conversationId: "conversation-1" }, ctx),
+    ).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.INVALID_PARAMS,
+      message:
+        "session.send requires a stable 'turnId' while durable execution is enabled",
+    });
+    expect(admit).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing durable turn identity before Advancement draft effects", async () => {
+    const loadActiveSession = vi.fn();
+    const prepareUserTurn = vi.fn();
+    const addObserver = vi.fn();
+    const runMaintenanceExisting = vi.fn();
+    const ensure = vi.fn();
+    const notify = vi.fn();
+    const method = buildSessionSendMethod();
+    const ctx = {
+      server: {
+        conversations: { addObserver, runMaintenanceExisting },
+        conversationDirectory: { ensure },
+        advancement: { loadActiveSession, prepareUserTurn },
+        productApi: agentTurnProductApi({
+          requiresStableTurnIdentity: true,
+          createTurnIdentity: () => "turn-generated",
+          admit: vi.fn(),
+        }),
+      } as unknown as ServerContext,
+      connection: {
+        id: "conn-1",
+        surfacePrincipal: "rpc:test",
+        clientInfo: { id: "test" },
+        notify,
+      },
+    } as never;
+
+    await expect(
+      method.handler({ text: "继续", conversationId: "conversation-1" }, ctx),
+    ).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.INVALID_PARAMS,
+      message:
+        "session.send requires a stable 'turnId' while durable execution is enabled",
+    });
+    expect(loadActiveSession).not.toHaveBeenCalled();
+    expect(prepareUserTurn).not.toHaveBeenCalled();
+    expect(addObserver).not.toHaveBeenCalled();
+    expect(runMaintenanceExisting).not.toHaveBeenCalled();
+    expect(ensure).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing durable turn identity before Perspectives admission", async () => {
+    const admitTurn = vi.fn();
+    const createPendingTask = vi.fn();
+    const notify = vi.fn();
+    const method = buildSessionSendMethod();
+    const ctx = {
+      server: {
+        conversations: { admitTurn },
+        perspectives: { createPendingTask },
+        productApi: agentTurnProductApi({
+          requiresStableTurnIdentity: true,
+          createTurnIdentity: () => "turn-generated",
+          admit: vi.fn(),
+        }),
+      } as unknown as ServerContext,
+      connection: {
+        id: "conn-1",
+        surfacePrincipal: "rpc:test",
+        clientInfo: { id: "test" },
+        notify,
+      },
+    } as never;
+
+    await expect(
+      method.handler(
+        {
+          text: "继续",
+          conversationId: "conversation-1",
+          engage: { kind: "perspectives", question: "评估这个方案" },
+        },
+        ctx,
+      ),
+    ).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.INVALID_PARAMS,
+      message:
+        "session.send requires a stable 'turnId' while durable execution is enabled",
+    });
+    expect(admitTurn).not.toHaveBeenCalled();
+    expect(createPendingTask).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("generates one legacy identity before Advancement preprocessing", async () => {
+    const createTurnIdentity = vi.fn(() => "turn-generated");
+    const admit = vi.fn();
+    const prepareUserTurn = vi.fn(async (input: { readonly turnId: string }) => ({
+      kind: "contract-failed" as const,
+      conversationId: "conversation-1",
+      originalTurnId: input.turnId,
+      error: { message: "draft failed" },
+    }));
+    const addObserver = vi.fn(() => true);
+    const notify = vi.fn();
     const method = buildSessionSendMethod();
     const ctx = {
       server: {
         conversations: {
-          usesDurableTurnProtocol: () => false,
-          admitTurn: async () => {
-            throw new WorksceneBusyError("quiescing");
-          },
+          addObserver,
+          runMaintenanceExisting: async (
+            _conversationId: string,
+            _exists: () => Promise<boolean>,
+            run: () => Promise<unknown>,
+          ) => ({ status: "ok", value: await run() }),
         },
+        advancement: {
+          loadActiveSession: async () => null,
+          prepareUserTurn,
+        },
+        productApi: agentTurnProductApi({
+          requiresStableTurnIdentity: false,
+          createTurnIdentity,
+          admit,
+        }),
       } as unknown as ServerContext,
-      connection: { id: "conn-1" },
+      connection: {
+        id: "conn-1",
+        surfacePrincipal: "rpc:test",
+        clientInfo: { id: "test" },
+        notify,
+      },
+    } as never;
+
+    await expect(
+      method.handler({ text: "继续", conversationId: "conversation-1" }, ctx),
+    ).resolves.toMatchObject({
+      conversationId: "conversation-1",
+      turnId: "turn-generated",
+      status: "contract-failed",
+    });
+    expect(createTurnIdentity).toHaveBeenCalledTimes(1);
+    expect(prepareUserTurn).toHaveBeenCalledWith(expect.objectContaining({
+      turnId: "turn-generated",
+    }));
+    expect(addObserver).toHaveBeenCalledTimes(1);
+    expect(admit).not.toHaveBeenCalled();
+  });
+
+  it("admitTurn 撞工作场景静默闸时返回 BUSY", async () => {
+    const createTurnIdentity = vi.fn(() => "turn-generated");
+    const admit = vi.fn(async (
+      input: Parameters<ConversationAgentTurnAdmissionPort["admit"]>[0],
+    ) => {
+      expect(input.turnId).toBe("turn-generated");
+      return {
+        status: "lifecycle-busy" as const,
+        conversationId: "ws:scene-1:conv-main",
+      };
+    });
+    const method = buildSessionSendMethod();
+    const ctx = {
+      server: {
+        conversations: {},
+        productApi: agentTurnProductApi({
+          requiresStableTurnIdentity: false,
+          createTurnIdentity,
+          admit,
+        }),
+      } as unknown as ServerContext,
+      connection: {
+        id: "conn-1",
+        surfacePrincipal: "rpc:test",
+        clientInfo: { id: "test" },
+      },
     } as never;
 
     await expect(
@@ -87,6 +298,8 @@ describe("session.send 方法", () => {
         ctx,
       ),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.BUSY });
+    expect(createTurnIdentity).toHaveBeenCalledTimes(1);
+    expect(admit).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -466,7 +679,12 @@ describe("session durable control 方法", () => {
       method.handler(
         { text: "keep working", conversationId: "conversation-1", turnId: "turn-1" },
         {
-          server: { conversations: manager } as unknown as ServerContext,
+          server: {
+            conversations: manager,
+            productApi: agentTurnProductApi(
+              createConversationAgentTurnAdmissionPort({ manager }),
+            ),
+          } as unknown as ServerContext,
           connection,
         } as never,
       ),

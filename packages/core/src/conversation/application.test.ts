@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ProductApiDispatcher } from "../product-api/catalog.js";
 import {
   CONVERSATION_ABORT_COMMAND,
+  CONVERSATION_ADMIT_AGENT_TURN_COMMAND,
   CONVERSATION_CREATE_COMMAND,
   CONVERSATION_CLEAR_COMMAND,
   CONVERSATION_DELETE_COMMAND,
@@ -19,6 +20,7 @@ import {
   projectConversationDelete,
   type ConversationDirectoryRecord,
   type ConversationDirectoryStorage,
+  type ConversationAgentTurnAdmissionPort,
 } from "./application.js";
 
 function fixture(records: ConversationDirectoryRecord[] = []) {
@@ -662,6 +664,250 @@ describe("ConversationDirectoryApplicationService", () => {
         },
       }),
     ).rejects.toMatchObject({ reason: "uncertain-resolution-invalid" });
+  });
+
+  it("owns stable turn identity and refuses durable admission before any mechanism effect", async () => {
+    const admit = vi.fn<ConversationAgentTurnAdmissionPort["admit"]>();
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      agentTurns: {
+        requiresStableTurnIdentity: true,
+        createTurnIdentity: () => "legacy-generated",
+        admit,
+      },
+      agentTurnIdentity: {
+        exists: async () => true,
+        create: async () => "created-1",
+        ensure: async () => {},
+      },
+    });
+    let rejection: unknown;
+    try {
+      application.prepareAgentTurnIdentity({
+        kind: "prepare-agent-turn-identity",
+        identitySource: "legacy-generated",
+        caller: {
+          kind: "surface",
+          surfacePrincipal: "rpc:test",
+          connectionId: "connection-1",
+        },
+      });
+    } catch (error) {
+      rejection = error;
+    }
+    expect(rejection).toMatchObject({ reason: "turn-identity-required" });
+    expect(admit).not.toHaveBeenCalled();
+  });
+
+  it("rejects a fabricated prepared turn identity before admission", async () => {
+    const admit = vi.fn<ConversationAgentTurnAdmissionPort["admit"]>();
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      agentTurns: {
+        requiresStableTurnIdentity: false,
+        createTurnIdentity: () => "turn-generated",
+        admit,
+      },
+      agentTurnIdentity: {
+        exists: async () => true,
+        create: async () => "created-1",
+        ensure: async () => {},
+      },
+    });
+    await expect(application.admitAgentTurn({
+      kind: "admit-agent-turn",
+      conversationId: "conversation-1",
+      input: { parts: [{ type: "text", text: "hello" }] },
+      turnIdentity: { turnId: "turn-1" },
+      caller: {
+        kind: "surface",
+        surfacePrincipal: "rpc:test",
+        connectionId: "connection-1",
+      },
+      execution: { execute: async () => {}, cancelPending: () => {} },
+    } as never)).rejects.toMatchObject({ reason: "turn-identity-invalid" });
+    expect(admit).not.toHaveBeenCalled();
+  });
+
+  it("keeps existence inside admission and starts one immediate task after projection", async () => {
+    const order: string[] = [];
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      agentTurns: {
+        requiresStableTurnIdentity: true,
+        createTurnIdentity: () => "unused",
+        admit: async (input) => {
+          expect(input.identity.kind).toBe("existing");
+          if (input.identity.kind === "existing") {
+            expect(await input.identity.exists()).toBe(true);
+          }
+          order.push("durable-admission");
+          return {
+            status: "immediate",
+            conversationId: "conversation-1",
+            runId: "run-1",
+            start: async () => { order.push("start"); },
+          };
+        },
+      },
+      agentTurnIdentity: {
+        exists: async () => {
+          order.push("exists");
+          return true;
+        },
+        create: async () => "created-1",
+        ensure: async () => {},
+      },
+    });
+    const turnIdentity = application.prepareAgentTurnIdentity({
+      kind: "prepare-agent-turn-identity",
+      turnId: "turn-1",
+      identitySource: "provided",
+      caller: {
+        kind: "surface",
+        surfacePrincipal: "rpc:test",
+        connectionId: "connection-1",
+      },
+    });
+    await expect(application.admitAgentTurn({
+      kind: "admit-agent-turn",
+      conversationId: "conversation-1",
+      input: { parts: [{ type: "text", text: "hello" }] },
+      turnIdentity,
+      caller: {
+        kind: "surface",
+        surfacePrincipal: "rpc:test",
+        connectionId: "connection-1",
+      },
+      execution: {
+        execute: async () => {},
+        cancelPending: () => {},
+        onAdmitted: () => { order.push("admitted"); },
+      },
+    })).resolves.toEqual({
+      conversationId: "conversation-1",
+      turnId: "turn-1",
+      runId: "run-1",
+      status: "immediate",
+    });
+    await vi.waitFor(() => expect(order).toContain("start"));
+    expect(order).toEqual(["exists", "durable-admission", "admitted", "start"]);
+  });
+
+  it("preserves preallocated identity and queued/replayed Product API results", async () => {
+    const starts = vi.fn();
+    const ensure = vi.fn(async () => {});
+    let status: "queued" | "replayed" = "queued";
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      agentTurns: {
+        requiresStableTurnIdentity: true,
+        createTurnIdentity: () => "unused",
+        admit: async (input) => {
+          expect(input.identity.kind).toBe("create");
+          const conversationId = input.identity.kind === "create"
+            ? await input.identity.create()
+            : "unexpected";
+          return { status, conversationId, runId: "run-1" };
+        },
+      },
+      agentTurnIdentity: {
+        exists: async () => false,
+        create: async () => "created-1",
+        ensure,
+      },
+    });
+    const dispatcher = new ProductApiDispatcher(
+      CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+      [createConversationDirectoryProductApiContribution(application)],
+    );
+    const turnIdentity = application.prepareAgentTurnIdentity({
+      kind: "prepare-agent-turn-identity",
+      turnId: "turn-1",
+      identitySource: "provided",
+      caller: {
+        kind: "surface",
+        surfacePrincipal: "rpc:test",
+        connectionId: "connection-1",
+      },
+    });
+    const command = {
+      kind: "admit-agent-turn" as const,
+      preallocatedConversationId: "conversation-preallocated",
+      input: { parts: [{ type: "text" as const, text: "hello" }] },
+      turnIdentity,
+      caller: {
+        kind: "surface" as const,
+        surfacePrincipal: "rpc:test",
+        connectionId: "connection-1",
+      },
+      execution: {
+        execute: async () => { starts(); },
+        cancelPending: () => {},
+      },
+    };
+    await expect(
+      dispatcher.command(CONVERSATION_ADMIT_AGENT_TURN_COMMAND, command),
+    ).resolves.toMatchObject({
+      result: {
+        status: "queued",
+        conversationId: "conversation-preallocated",
+      },
+      facts: [],
+    });
+    status = "replayed";
+    await expect(application.admitAgentTurn(command)).resolves.toMatchObject({
+      status: "replayed",
+      conversationId: "conversation-preallocated",
+    });
+    expect(ensure).toHaveBeenCalledTimes(2);
+    expect(starts).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["not-found", "turn-conversation-not-found", "not-found"],
+    ["full", "turn-queue-full", "busy"],
+    ["lifecycle-busy", "turn-lifecycle-busy", "busy"],
+  ] as const)("maps %s admission to one stable domain failure", async (
+    status,
+    reason,
+    code,
+  ) => {
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      agentTurns: {
+        requiresStableTurnIdentity: true,
+        createTurnIdentity: () => "unused",
+        admit: async () => ({ status, conversationId: "conversation-1" }),
+      },
+      agentTurnIdentity: {
+        exists: async () => true,
+        create: async () => "created-1",
+        ensure: async () => {},
+      },
+    });
+    const turnIdentity = application.prepareAgentTurnIdentity({
+      kind: "prepare-agent-turn-identity",
+      turnId: "turn-1",
+      identitySource: "provided",
+      caller: {
+        kind: "surface",
+        surfacePrincipal: "rpc:test",
+        connectionId: "connection-1",
+      },
+    });
+    await expect(application.admitAgentTurn({
+      kind: "admit-agent-turn",
+      conversationId: "conversation-1",
+      input: { parts: [{ type: "text", text: "hello" }] },
+      turnIdentity,
+      caller: {
+        kind: "surface",
+        surfacePrincipal: "rpc:test",
+        connectionId: "connection-1",
+      },
+      execution: { execute: async () => {}, cancelPending: () => {} },
+    })).rejects.toMatchObject({ code, reason });
   });
 
   it("projects storage before runtime reset and publishes only a cleared result", async () => {

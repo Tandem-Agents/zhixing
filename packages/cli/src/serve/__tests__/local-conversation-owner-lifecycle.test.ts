@@ -2,7 +2,6 @@ import { localConversationId } from "@zhixing/core";
 import { DeferredGlobalIntentRepository } from "@zhixing/owner-kernel";
 import { describe, expect, it, vi } from "vitest";
 import { ConversationProtocolRuntime } from "../conversation-protocol-runtime.js";
-import type { LocalConversationOwnerPort } from "../local-conversation-owner.js";
 import {
   createLocalOwnerAssemblyFixture,
   type LocalOwnerAssemblyFixture,
@@ -73,9 +72,10 @@ async function waitForAsync(
 }
 
 async function expectWritesFenced(
-  port: LocalConversationOwnerPort,
+  fixture: LocalOwnerAssemblyFixture,
   conversationId: string,
 ): Promise<void> {
+  const { port } = fixture;
   await expect(port.createConversation()).rejects.toThrow(/not ready/);
   await expect(port.ensureSession(conversationId)).rejects.toThrow(/not ready/);
   await expect(
@@ -86,7 +86,7 @@ async function expectWritesFenced(
     ),
   ).rejects.toThrow(/not ready/);
   await expect(
-    port.runTurn({ conversationId, text: "fenced", turnId: "fence-turn" }),
+    fixture.runTurn({ conversationId, text: "fenced", turnId: "fence-turn" }),
   ).rejects.toThrow(/not ready/);
   await expect(
     port.cancelConversationRuns({
@@ -343,7 +343,7 @@ describe("local conversation owner lifecycle", () => {
       await fixture.assembly.start();
       await expect(fixture.assembly.hasIdleBlockingWork()).resolves.toBe(false);
       const conversationId = await fixture.port.createConversation();
-      const turn = fixture.port.runTurn({
+      const turn = fixture.runTurn({
         conversationId,
         text: "finish current work",
         turnId: "host-stop-active-turn",
@@ -445,14 +445,14 @@ describe("local conversation owner lifecycle", () => {
         fixture.authority.deviceId,
         "01ARZ3NDEKTSV4RRFFQ69G5FAV",
       );
-      await expectWritesFenced(fixture.port, probe);
+      await expectWritesFenced(fixture, probe);
 
       await fixture.assembly.start();
       const conversationId = await fixture.port.createConversation();
       expect(conversationId).toContain("local-");
 
       await fixture.assembly.close();
-      await expectWritesFenced(fixture.port, conversationId);
+      await expectWritesFenced(fixture, conversationId);
       await expect(fixture.port.listConversations()).resolves.toEqual([
         conversationId,
       ]);
@@ -500,7 +500,7 @@ describe("local conversation owner lifecycle", () => {
         fixture.authority.deviceId,
         "01ARZ3NDEKTSV4RRFFQ69G5FAW",
       );
-      await expectWritesFenced(fixture.port, probe);
+      await expectWritesFenced(fixture, probe);
     },
     LIFECYCLE_TIMEOUT_MS,
   );
@@ -513,7 +513,7 @@ describe("local conversation owner lifecycle", () => {
       });
       await fixture.assembly.start();
       const conversationId = await fixture.port.createConversation();
-      const outcome = await fixture.port.runTurn({
+      const outcome = await fixture.runTurn({
         conversationId,
         text: "complete me",
         turnId: "complete-turn",
@@ -523,7 +523,7 @@ describe("local conversation owner lifecycle", () => {
       await expect(fixture.port.listConversations()).resolves.toEqual([
         conversationId,
       ]);
-      await expectWritesFenced(fixture.port, conversationId);
+      await expectWritesFenced(fixture, conversationId);
     },
     LIFECYCLE_TIMEOUT_MS,
   );
@@ -558,7 +558,7 @@ describe("local conversation owner lifecycle", () => {
       control = fixture.runtime;
       await fixture.assembly.start();
       const conversationId = await fixture.port.createConversation();
-      const activeTurn = fixture.port
+      const activeTurn = fixture
         .runTurn({ conversationId, text: "active", turnId: "drain-active" })
         .then(
           (outcome) => ({ kind: "settled" as const, outcome }),
@@ -568,7 +568,7 @@ describe("local conversation owner lifecycle", () => {
         () => fixture.runtime.executions() === 1,
         "active turn to start",
       );
-      const queuedTurn = fixture.port
+      const queuedTurn = fixture
         .runTurn({ conversationId, text: "queued", turnId: "drain-queued" })
         .then(
           (outcome) => ({ kind: "settled" as const, outcome }),
@@ -595,7 +595,7 @@ describe("local conversation owner lifecycle", () => {
       if (queuedOutcome.kind === "settled") {
         expect(queuedOutcome.outcome.kind).toBe("aborted");
       }
-      await expectWritesFenced(fixture.port, conversationId);
+      await expectWritesFenced(fixture, conversationId);
     },
     LIFECYCLE_TIMEOUT_MS,
   );
@@ -609,7 +609,7 @@ describe("local conversation owner lifecycle", () => {
       });
       await fixture.assembly.start();
       const conversationId = await fixture.port.createConversation();
-      const turn = fixture.port.runTurn({
+      const turn = fixture.runTurn({
         conversationId,
         text: "needs confirmation",
         turnId: "pending-confirmation-turn",
@@ -667,7 +667,7 @@ describe("local conversation owner lifecycle", () => {
       control = fixture.runtime;
       await fixture.assembly.start();
       const conversationId = await fixture.port.createConversation();
-      const stuckTurn = fixture.port
+      const stuckTurn = fixture
         .runTurn({ conversationId, text: "stuck", turnId: "stuck-turn" })
         .then(
           () => "settled" as const,
@@ -682,7 +682,7 @@ describe("local conversation owner lifecycle", () => {
       const closing = fixture.assembly.close();
       await expect(closing).rejects.toThrow(/not provably settled/);
       expect(fixture.assembly.close()).toBe(closing);
-      await expectWritesFenced(fixture.port, conversationId);
+      await expectWritesFenced(fixture, conversationId);
       await expect(stuckTurn).resolves.toBe("settled");
       expect(fixture.runtime.executions()).toBe(1);
       await fixture.authority.stopStorageMaintenance();

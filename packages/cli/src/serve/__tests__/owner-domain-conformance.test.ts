@@ -202,13 +202,21 @@ describe("conversation owner domain conformance", () => {
           status: "awaiting-rubric-confirmation",
         });
 
-        const turn = fixture.port.runTurn({
+        const turn = fixture.runTurn({
           conversationId,
           text: `production conformance ${profile}`,
           turnId: `production-conformance-${profile}`,
           ...(fixture.environment ? { environment: fixture.environment } : {}),
         });
-        const pending = await waitForPendingInteraction(fixture.port);
+        const pending = await Promise.race([
+          waitForPendingInteraction(fixture.port),
+          turn.then((outcome) => {
+            if (outcome.kind === "error") throw outcome.error;
+            throw new Error(
+              `Conversation turn settled before exposing its pending interaction: ${JSON.stringify(outcome)}`,
+            );
+          }),
+        ]);
         await fixture.port.resolveNoInteractiveSurface({
           assignmentId: pending.assignmentId,
           requestId: pending.request.requestId,

@@ -9,6 +9,12 @@ import {
 } from "../product-api/catalog.js";
 import { isProtocolIdentifier } from "../protocol/index.js";
 import type { RunRecordWithRef } from "../transcript/shard/reader.js";
+import {
+  isNonEmptyUserTurnInput,
+  type UserTurnInput,
+} from "../types/user-input.js";
+import type { TurnOrigin } from "../types/tools.js";
+import type { ExplicitEnvironmentSelection } from "../contracts/protocol.js";
 
 /** Persisted Conversation identity projected by the domain storage port. */
 export interface ConversationDirectoryRecord {
@@ -162,6 +168,76 @@ export type ConversationCommandCaller =
       connectionId: string;
     }>
   | Readonly<{ kind: "host"; component: string }>;
+
+export type ConversationAgentTurnIdentity =
+  | Readonly<{
+      kind: "existing";
+      conversationId: string;
+      exists: () => Promise<boolean>;
+    }>
+  | Readonly<{
+      kind: "create";
+      create: () => Promise<string>;
+    }>;
+
+const preparedAgentTurnIdentity = Symbol("prepared-agent-turn-identity");
+
+export interface ConversationPreparedAgentTurnIdentity {
+  readonly turnId: string;
+  readonly [preparedAgentTurnIdentity]: true;
+}
+
+export interface ConversationAgentTurnExecutionPort {
+  execute(input: Readonly<{
+    conversationId: string;
+    turnId: string;
+  }>): Promise<void>;
+  cancelPending(input: Readonly<{
+    conversationId: string;
+    turnId: string;
+  }>): void;
+  onAdmitted?(input: Readonly<{
+    conversationId: string;
+    turnId: string;
+    runId?: string;
+    status: "immediate" | "queued" | "replayed";
+  }>): void;
+}
+
+export interface ConversationAgentTurnAdmissionPort {
+  readonly requiresStableTurnIdentity: boolean;
+  createTurnIdentity(): string;
+  admit(input: Readonly<{
+    identity: ConversationAgentTurnIdentity;
+    input: UserTurnInput;
+    turnId: string;
+    caller: Extract<ConversationCommandCaller, { readonly kind: "surface" }>;
+    turnOrigin?: TurnOrigin;
+    environment?: ExplicitEnvironmentSelection;
+    execution: ConversationAgentTurnExecutionPort;
+  }>): Promise<
+    | Readonly<{
+        status: "immediate";
+        conversationId: string;
+        runId?: string;
+        start: () => Promise<void>;
+      }>
+    | Readonly<{
+        status: "queued" | "replayed";
+        conversationId: string;
+        runId?: string;
+      }>
+    | Readonly<{ status: "full"; conversationId: string }>
+    | Readonly<{ status: "not-found"; conversationId: string }>
+    | Readonly<{ status: "lifecycle-busy"; conversationId: string }>
+  >;
+}
+
+export interface ConversationAgentTurnIdentityPort {
+  exists(conversationId: string): Promise<boolean>;
+  create(): Promise<string>;
+  ensure(conversationId: string): Promise<void>;
+}
 
 export type ConversationAdoptionReviewProjection =
   | Readonly<{
@@ -330,6 +406,23 @@ export type ConversationDirectoryCommand =
       openFactDigest: string;
       decision: ConversationUncertainResolutionDecision;
       caller: ConversationCommandCaller;
+    }>
+  | Readonly<{
+      kind: "prepare-agent-turn-identity";
+      turnId?: unknown;
+      identitySource: "provided" | "legacy-generated";
+      caller: ConversationCommandCaller;
+    }>
+  | Readonly<{
+      kind: "admit-agent-turn";
+      conversationId?: string;
+      preallocatedConversationId?: string;
+      input: UserTurnInput;
+      turnIdentity: ConversationPreparedAgentTurnIdentity;
+      caller: ConversationCommandCaller;
+      turnOrigin?: TurnOrigin;
+      environment?: ExplicitEnvironmentSelection;
+      execution: ConversationAgentTurnExecutionPort;
     }>;
 
 export interface ConversationCreatedResult {
@@ -384,6 +477,13 @@ export interface ConversationAbortedResult {
   readonly cancelled: true;
 }
 
+export interface ConversationAgentTurnAdmissionResult {
+  readonly conversationId: string;
+  readonly turnId: string;
+  readonly runId?: string;
+  readonly status: "immediate" | "queued" | "replayed";
+}
+
 export type ConversationLifecycleFact =
   | ConversationClearedFact
   | ConversationDeletedFact;
@@ -400,7 +500,12 @@ export class ConversationApplicationError extends Error {
       | "abort-run-required"
       | "control-identity-invalid"
       | "uncertain-resolution-invalid"
-      | "surface-caller-invalid",
+      | "surface-caller-invalid"
+      | "turn-identity-required"
+      | "turn-identity-invalid"
+      | "turn-conversation-not-found"
+      | "turn-queue-full"
+      | "turn-lifecycle-busy",
   ) {
     super(message);
     this.name = "ConversationApplicationError";
@@ -434,6 +539,18 @@ export interface ConversationDirectoryApplication {
       { readonly kind: "resolve-uncertain" }
     >,
   ): Promise<ConversationUncertainResolutionResult>;
+  prepareAgentTurnIdentity(
+    command: Extract<
+      ConversationDirectoryCommand,
+      { readonly kind: "prepare-agent-turn-identity" }
+    >,
+  ): ConversationPreparedAgentTurnIdentity;
+  admitAgentTurn(
+    command: Extract<
+      ConversationDirectoryCommand,
+      { readonly kind: "admit-agent-turn" }
+    >,
+  ): Promise<ConversationAgentTurnAdmissionResult>;
 }
 
 const HISTORY_DEFAULT_LIMIT = 20;
@@ -462,6 +579,8 @@ export class ConversationDirectoryApplicationService
       clear?: ConversationClearCommitPort;
       delete?: ConversationDeleteCommitPort;
       runControl?: ConversationRunControlPort;
+      agentTurns?: ConversationAgentTurnAdmissionPort;
+      agentTurnIdentity?: ConversationAgentTurnIdentityPort;
       clock?: () => number;
     }>,
   ) {}
@@ -850,6 +969,172 @@ export class ConversationDirectoryApplicationService
       caller: command.caller,
     });
   }
+
+  async admitAgentTurn(
+    command: Extract<
+      ConversationDirectoryCommand,
+      { readonly kind: "admit-agent-turn" }
+    >,
+  ): Promise<ConversationAgentTurnAdmissionResult> {
+    assertConversationControlCaller(command.caller);
+    if (!isNonEmptyUserTurnInput(command.input)) {
+      throw new ConversationApplicationError(
+        "invalid-input",
+        "Conversation turn requires non-empty user input",
+      );
+    }
+    if (
+      command.conversationId !== undefined &&
+      !isProtocolIdentifier(command.conversationId)
+    ) {
+      throw new ConversationApplicationError(
+        "invalid-input",
+        "Conversation turn identity is invalid",
+        "turn-identity-invalid",
+      );
+    }
+    if (
+      command.preallocatedConversationId !== undefined &&
+      (!isProtocolIdentifier(command.preallocatedConversationId) ||
+        command.conversationId !== undefined)
+    ) {
+      throw new ConversationApplicationError(
+        "invalid-input",
+        "Conversation turn preallocated identity is invalid",
+        "turn-identity-invalid",
+      );
+    }
+    const admission = this.input.agentTurns;
+    const identity = this.input.agentTurnIdentity;
+    if (!admission || !identity) {
+      throw new Error("Conversation agent-turn application is not assembled");
+    }
+    if (!isPreparedAgentTurnIdentity(command.turnIdentity)) {
+      throw new ConversationApplicationError(
+        "invalid-input",
+        "Conversation turn identity is invalid",
+        "turn-identity-invalid",
+      );
+    }
+    const { turnId } = command.turnIdentity;
+    const conversationIdentity: ConversationAgentTurnIdentity =
+      command.conversationId !== undefined
+        ? {
+            kind: "existing",
+            conversationId: command.conversationId,
+            exists: () => identity.exists(command.conversationId!),
+          }
+        : command.preallocatedConversationId !== undefined
+          ? {
+              kind: "create",
+              create: async () => {
+                await identity.ensure(command.preallocatedConversationId!);
+                return command.preallocatedConversationId!;
+              },
+            }
+          : {
+              kind: "create",
+              create: async () => (await identity.create()),
+            };
+    const outcome = await admission.admit({
+      identity: conversationIdentity,
+      input: command.input,
+      turnId,
+      caller: command.caller,
+      ...(command.turnOrigin ? { turnOrigin: command.turnOrigin } : {}),
+      ...(command.environment
+        ? { environment: structuredClone(command.environment) }
+        : {}),
+      execution: command.execution,
+    });
+    if (outcome.status === "not-found") {
+      throw new ConversationApplicationError(
+        "not-found",
+        `Conversation not found: ${outcome.conversationId}`,
+        "turn-conversation-not-found",
+      );
+    }
+    if (outcome.status === "full") {
+      throw new ConversationApplicationError(
+        "busy",
+        "Conversation has too many pending messages",
+        "turn-queue-full",
+      );
+    }
+    if (outcome.status === "lifecycle-busy") {
+      throw new ConversationApplicationError(
+        "busy",
+        "Conversation lifecycle is changing",
+        "turn-lifecycle-busy",
+      );
+    }
+    command.execution.onAdmitted?.({
+      conversationId: outcome.conversationId,
+      turnId,
+      ...(outcome.runId ? { runId: outcome.runId } : {}),
+      status: outcome.status,
+    });
+    if (outcome.status === "immediate") void outcome.start();
+    return Object.freeze({
+      conversationId: outcome.conversationId,
+      turnId,
+      ...(outcome.runId ? { runId: outcome.runId } : {}),
+      status: outcome.status,
+    });
+  }
+
+  prepareAgentTurnIdentity(
+    command: Extract<
+      ConversationDirectoryCommand,
+      { readonly kind: "prepare-agent-turn-identity" }
+    >,
+  ): ConversationPreparedAgentTurnIdentity {
+    assertConversationControlCaller(command.caller);
+    const admission = this.input.agentTurns;
+    if (!admission) {
+      throw new Error("Conversation agent-turn application is not assembled");
+    }
+    let turnId = command.turnId;
+    if (command.identitySource === "legacy-generated") {
+      if (turnId !== undefined) {
+        throw new ConversationApplicationError(
+          "invalid-input",
+          "Conversation turn identity is invalid",
+          "turn-identity-invalid",
+        );
+      }
+      if (admission.requiresStableTurnIdentity) {
+        throw new ConversationApplicationError(
+          "invalid-input",
+          "Conversation turn requires a stable turn identity",
+          "turn-identity-required",
+        );
+      }
+      turnId = admission.createTurnIdentity();
+    }
+    if (!isProtocolIdentifier(turnId)) {
+      throw new ConversationApplicationError(
+        "invalid-input",
+        "Conversation turn identity is invalid",
+        "turn-identity-invalid",
+      );
+    }
+    return Object.freeze({
+      turnId,
+      [preparedAgentTurnIdentity]: true as const,
+    });
+  }
+}
+
+function isPreparedAgentTurnIdentity(
+  value: ConversationPreparedAgentTurnIdentity,
+): value is ConversationPreparedAgentTurnIdentity {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    value[preparedAgentTurnIdentity] === true &&
+    isProtocolIdentifier(value.turnId)
+  );
 }
 
 /**
@@ -1048,6 +1333,27 @@ export const CONVERSATION_RESOLVE_UNCERTAIN_COMMAND = defineProductApiCommand<
   never
 >("conversation-run.command.resolve-uncertain", []);
 
+export const CONVERSATION_ADMIT_AGENT_TURN_COMMAND = defineProductApiCommand<
+  "conversation-run.command.admit-agent-turn",
+  Extract<
+    ConversationDirectoryCommand,
+    { readonly kind: "admit-agent-turn" }
+  >,
+  ConversationAgentTurnAdmissionResult,
+  never
+>("conversation-run.command.admit-agent-turn", []);
+
+export const CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND =
+  defineProductApiCommand<
+    "conversation-run.command.prepare-agent-turn-identity",
+    Extract<
+      ConversationDirectoryCommand,
+      { readonly kind: "prepare-agent-turn-identity" }
+    >,
+    ConversationPreparedAgentTurnIdentity,
+    never
+  >("conversation-run.command.prepare-agent-turn-identity", []);
+
 export const CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET =
   defineProductApiExactSet({
     operations: [
@@ -1060,6 +1366,8 @@ export const CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET =
       CONVERSATION_DELETE_COMMAND,
       CONVERSATION_ABORT_COMMAND,
       CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
+      CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND,
+      CONVERSATION_ADMIT_AGENT_TURN_COMMAND,
     ],
     factEvents: [
       CONVERSATION_RENAMED_FACT_EVENT,
@@ -1109,6 +1417,20 @@ export function createConversationDirectoryProductApiContribution(
         CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
         async (command) => ({
           result: await application.resolveUncertain(command),
+          facts: [],
+        }),
+      ),
+      bindProductApiOperation(
+        CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND,
+        async (command) => ({
+          result: application.prepareAgentTurnIdentity(command),
+          facts: [],
+        }),
+      ),
+      bindProductApiOperation(
+        CONVERSATION_ADMIT_AGENT_TURN_COMMAND,
+        async (command) => ({
+          result: await application.admitAgentTurn(command),
           facts: [],
         }),
       ),

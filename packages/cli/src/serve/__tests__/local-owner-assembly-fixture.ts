@@ -5,7 +5,8 @@ import type {
   SecretRef,
   SecretStorePort,
 } from "@zhixing/core/contracts";
-import { ConfirmationBroker } from "@zhixing/core";
+import { ConfirmationBroker, userTurnInputFromText } from "@zhixing/core";
+import type { ProjectedSessionTurnResult } from "@zhixing/rpc";
 import type { AuthorityRuntimeStack } from "../../setup-delivery.js";
 import { setupAuthorityRuntime } from "../../setup-delivery.js";
 import type { ZhixingConfig } from "@zhixing/providers";
@@ -37,6 +38,7 @@ import {
   type LocalConversationOwnerPort,
 } from "../local-conversation-owner.js";
 import { createSignedTrustRuleSnapshot, StreamDigestChain } from "@zhixing/core/protocol";
+import { createLocalConversationDirectoryApplication } from "../local-conversation-directory-application.js";
 
 export const FIXTURE_EXECUTOR_READINESS = {
   tools: [] as string[],
@@ -132,6 +134,12 @@ export interface LocalOwnerAssemblyFixture {
   readonly port: LocalConversationOwnerPort;
   readonly runtime: FixtureRuntimeControl;
   readonly environment?: ExplicitEnvironmentSelection;
+  runTurn(input: Readonly<{
+    conversationId: string;
+    text: string;
+    turnId: string;
+    environment?: ExplicitEnvironmentSelection;
+  }>): Promise<ProjectedSessionTurnResult>;
 }
 
 export interface CreateLocalOwnerAssemblyFixtureOptions {
@@ -312,11 +320,44 @@ export async function createLocalOwnerAssemblyFixture(
       ? {}
       : { closeDrainBudgetMs: options.closeDrainBudgetMs }),
   });
+  const port = assembly.port();
+  const conversationApplication = createLocalConversationDirectoryApplication({
+    owner: port,
+    observerCount: () => 0,
+  });
   return {
     home,
     authority,
     assembly,
-    port: assembly.port(),
+    port,
+    runTurn: async (input) => {
+      const turn = port.createAgentTurnExecution({
+        input: userTurnInputFromText(input.text),
+        ...(input.environment ? { environment: input.environment } : {}),
+        notify: () => {},
+      });
+      const caller = {
+        kind: "surface" as const,
+        surfacePrincipal: "surface:local:first-party",
+        connectionId: "test-fixture-connection",
+      };
+      const turnIdentity = conversationApplication.prepareAgentTurnIdentity({
+        kind: "prepare-agent-turn-identity",
+        turnId: input.turnId,
+        identitySource: "provided",
+        caller,
+      });
+      await conversationApplication.admitAgentTurn({
+        kind: "admit-agent-turn",
+        conversationId: input.conversationId,
+        input: userTurnInputFromText(input.text),
+        turnIdentity,
+        ...(input.environment ? { environment: input.environment } : {}),
+        caller,
+        execution: turn.execution,
+      });
+      return turn.outcome;
+    },
     runtime: {
       executions: () => executions,
       aborts: () => aborts,

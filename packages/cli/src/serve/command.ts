@@ -127,6 +127,7 @@ import { isProcessAlive } from "@zhixing/server";
 import { RuntimeHost } from "@zhixing/runtime-host";
 import { createBuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
 import { createTransientSegmentDeps } from "./segment-deps.js";
+import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
 import type {
   ExecutorRoleModule,
   ServeBootstrapContext,
@@ -1932,6 +1933,17 @@ async function runServerProcess(
     : undefined;
   const conversationApplication = new ConversationDirectoryApplicationService({
     storage: conversationDirectory,
+    agentTurns: createConversationAgentTurnAdmissionPort({
+      manager: ctx.conversations!,
+    }),
+    agentTurnIdentity: {
+      exists: (conversationId) => conversationDirectory.exists(conversationId),
+      create: async () =>
+        (await conversationDirectory.create()).conversationId,
+      ensure: async (conversationId) => {
+        await conversationDirectory.ensure(conversationId);
+      },
+    },
     resume: createAnchorConversationResumePort({
       identity: conversationDirectory,
       ...(advancementRecovery ? { recovery: advancementRecovery } : {}),

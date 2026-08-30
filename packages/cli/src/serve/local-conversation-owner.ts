@@ -7,7 +7,6 @@ import {
   projectRubricContractDraft,
   rubricDocumentId,
   stringifyRubricDraft,
-  userTurnInputFromText,
   type Conversation,
   type RubricContractDraftSnapshot,
   type RubricDraftPersistenceChoice,
@@ -30,6 +29,8 @@ import {
   projectConversationDelete,
   type ConversationClearCommitPort,
   type ConversationDeleteCommitPort,
+  type ConversationAgentTurnAdmissionPort,
+  type ConversationAgentTurnExecutionPort,
   type ConversationLifecycleFact,
   type ConversationRunControlPort,
 } from "@zhixing/core/conversation/application";
@@ -77,6 +78,7 @@ import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js"
 import type { LocalConversationOwnerRuntimeStack } from "./conversation-owner-runtime.js";
 import { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
 import { GlobalRubricCatalog } from "./advancement-rubric-library.js";
+import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
 
 /** 本地域 port 的会话只读面:冻结读取子集;写入只能经 port 的命令 wrapper。 */
 export type LocalConversationSessionReadPort = Readonly<
@@ -124,24 +126,15 @@ export interface LocalConversationOwnerPort {
   mutateSession: SessionStatePort["mutate"];
   cancelConversationRuns: ConversationRunControlPort["cancel"];
   resolveConversationUncertain: ConversationRunControlPort["resolveUncertain"];
-  runTurn(input: {
-    readonly conversationId: string;
-    readonly text: string;
-    readonly turnId: string;
-    readonly environment?: ExplicitEnvironmentSelection;
-    readonly notify?: SessionTurnNotify;
-  }): Promise<ProjectedSessionTurnResult>;
-  admitTurn(input: {
-    readonly conversationId: string;
+  readonly agentTurnAdmission: ConversationAgentTurnAdmissionPort;
+  createAgentTurnExecution(input: {
     readonly input: UserTurnInput;
-    readonly turnId: string;
     readonly environment?: ExplicitEnvironmentSelection;
     readonly notify: SessionTurnNotify;
-  }): Promise<{
-    readonly status: "immediate" | "queued" | "replayed";
-    readonly runId?: string;
+  }): {
+    readonly execution: ConversationAgentTurnExecutionPort;
     readonly outcome: Promise<ProjectedSessionTurnResult>;
-  }>;
+  };
   answerInteractionWithTicket(
     input: Parameters<DurableConversationInteractionObserver["answerInteractionWithTicket"]>[0],
   ): Promise<void>;
@@ -372,99 +365,27 @@ export class LocalConversationOwnerAssembly {
       listForMatching: () => rubricCatalog.listForMatching(),
       load: (id: string) => rubricCatalog.load(id),
     });
-    const admitLocalTurn: LocalConversationOwnerPort["admitTurn"] = async (
-      turn,
-    ) => {
-      const releaseCommand = this.#beginCommand();
-      let settle!: (result: ProjectedSessionTurnResult) => void;
-      const outcome = new Promise<ProjectedSessionTurnResult>((resolve) => {
-        settle = resolve;
-      });
-      try {
-        await this.#assertConversationCurrent(turn.conversationId);
-        const admission = await this.#manager.admitTurn({
-          conversationId: turn.conversationId,
-          exists: () => this.#protocol.sessionExists(turn.conversationId),
-          source: "interactive",
-          beforeEnqueue: (managed) =>
-            this.#manager.admitDurableTurn({
-              conversationId: managed.conversationId,
-              input: turn.input,
-              invocation: { kind: "agent", source: "interactive" },
-              ...(turn.environment
-                ? { environment: structuredClone(turn.environment) }
-                : {}),
-              options: {
-                turnContext: { turnId: turn.turnId },
-                source: "interactive",
-                surfacePrincipal: "surface:local:first-party",
-              },
-              surfacePrincipal: "surface:local:first-party",
-            }),
-          makeTask: (managed) => ({
-            source: "interactive" as const,
-            execute: async () => {
-              try {
-                settle(
-                  await projectSessionTurn({
-                    manager: this.#manager,
-                    managed,
-                    input: turn.input,
-                    turnId: turn.turnId,
-                    runOptions: {
-                      source: "interactive",
-                      turnContext: { turnId: turn.turnId },
-                      surfacePrincipal: "surface:local:first-party",
-                    },
-                    ...(turn.environment ? { environment: turn.environment } : {}),
-                    notify: turn.notify,
-                    onPostTurnControlIntent: (control) => {
-                      turn.notify("session.postTurnControlIntent", {
-                        conversationId: turn.conversationId,
-                        turnId: turn.turnId,
-                        intent: control.intent,
-                        ...(control.conflict ? { conflict: control.conflict } : {}),
-                      });
-                    },
-                  }),
-                );
-              } catch (error) {
-                settle({ kind: "error", error });
-              } finally {
-                this.#manager.setBusy(turn.conversationId, false);
-              }
-            },
-            cancel: () => {
-              turn.notify("session.complete", {
-                conversationId: turn.conversationId,
-                sessionId: turn.conversationId,
-                turnId: turn.turnId,
-                result: {
-                  reason: "error",
-                  error: { name: "Cancelled", message: "Pending turn cancelled" },
-                  usage: { inputTokens: 0, outputTokens: 0 },
-                },
-              });
-              settle({ kind: "aborted" });
-            },
-          }),
-        });
-        if (admission.status === "not-found") {
-          throw new Error("Conversation is not available on this device");
+    const baseAgentTurnAdmission = createConversationAgentTurnAdmissionPort({
+      manager: this.#manager,
+    });
+    const agentTurnAdmission: ConversationAgentTurnAdmissionPort = Object.freeze({
+      ...baseAgentTurnAdmission,
+      admit: async (
+        request: Parameters<ConversationAgentTurnAdmissionPort["admit"]>[0],
+      ) => {
+        const releaseCommand = this.#beginCommand();
+        try {
+          if (request.identity.kind === "existing") {
+            await this.#assertConversationCurrent(
+              request.identity.conversationId,
+            );
+          }
+          return await baseAgentTurnAdmission.admit(request);
+        } finally {
+          releaseCommand();
         }
-        if (admission.status === "full") {
-          throw new Error("Conversation has too many pending messages");
-        }
-        if (admission.status === "immediate") void admission.task.execute();
-        return {
-          status: admission.status,
-          ...(admission.runId ? { runId: admission.runId } : {}),
-          outcome,
-        };
-      } finally {
-        releaseCommand();
-      }
-    };
+      },
+    });
     this.#port = Object.freeze<LocalConversationOwnerPort>({
       createConversation: async () => {
         return this.#runCommand(async () => {
@@ -624,17 +545,85 @@ export class LocalConversationOwnerAssembly {
           });
         });
       },
-      runTurn: async (input) => {
-        const admitted = await admitLocalTurn({
-          conversationId: input.conversationId,
-          input: userTurnInputFromText(input.text),
-          turnId: input.turnId,
-          ...(input.environment ? { environment: input.environment } : {}),
-          notify: input.notify ?? (() => {}),
+      agentTurnAdmission,
+      createAgentTurnExecution: (turn) => {
+        let settle!: (result: ProjectedSessionTurnResult) => void;
+        const outcome = new Promise<ProjectedSessionTurnResult>((resolve) => {
+          settle = resolve;
         });
-        return admitted.outcome;
+        return {
+          outcome,
+          execution: Object.freeze({
+            execute: async (
+              { conversationId, turnId }: Parameters<
+                ConversationAgentTurnExecutionPort["execute"]
+              >[0],
+            ) => {
+              const managed = this.#manager.getSession(conversationId);
+              if (!managed) {
+                settle({
+                  kind: "error",
+                  error: new Error("Local Conversation runtime is not available"),
+                });
+                return;
+              }
+              try {
+                settle(
+                  await projectSessionTurn({
+                    manager: this.#manager,
+                    managed,
+                    input: turn.input,
+                    turnId,
+                    runOptions: {
+                      source: "interactive",
+                      turnContext: { turnId },
+                      surfacePrincipal: "surface:local:first-party",
+                    },
+                    ...(turn.environment
+                      ? { environment: turn.environment }
+                      : {}),
+                    notify: turn.notify,
+                    onPostTurnControlIntent: (control) => {
+                      turn.notify("session.postTurnControlIntent", {
+                        conversationId,
+                        turnId,
+                        intent: control.intent,
+                        ...(control.conflict
+                          ? { conflict: control.conflict }
+                          : {}),
+                      });
+                    },
+                  }),
+                );
+              } catch (error) {
+                settle({ kind: "error", error });
+              } finally {
+                this.#manager.setBusy(conversationId, false);
+              }
+            },
+            cancelPending: (
+              { conversationId, turnId }: Parameters<
+                ConversationAgentTurnExecutionPort["cancelPending"]
+              >[0],
+            ) => {
+              turn.notify("session.complete", {
+                conversationId,
+                sessionId: conversationId,
+                turnId,
+                result: {
+                  reason: "error",
+                  error: {
+                    name: "Cancelled",
+                    message: "Pending turn cancelled",
+                  },
+                  usage: { inputTokens: 0, outputTokens: 0 },
+                },
+              });
+              settle({ kind: "aborted" });
+            },
+          }),
+        };
       },
-      admitTurn: admitLocalTurn,
       answerInteractionWithTicket: async (input) => {
         await this.#runCommand(async () => {
           await this.#assertConversationCurrent(
