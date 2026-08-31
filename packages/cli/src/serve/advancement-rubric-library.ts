@@ -18,7 +18,7 @@ import type {
 import type {
   RubricPublicationOutcome,
   RubricPublicationPort,
-} from "@zhixing/owner-services";
+} from "@zhixing/core/advancement/application";
 
 export interface AdvancementRubricLibraryOptions {
   readonly globalState: () => GlobalStatePort | undefined;

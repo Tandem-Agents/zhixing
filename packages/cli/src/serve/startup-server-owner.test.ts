@@ -87,8 +87,13 @@ describe("production startup server ownership", () => {
     expect(source).toContain("ADVANCEMENT_PRODUCT_API_EXACT_SET.operations");
     expect(source).toContain("rubricRevision: advancementDetailController");
     expect(source).toContain("rubricCancellation: advancementDetailController");
+    expect(source).toContain("rubricConfirmation: advancementDetailController");
+    expect(source).toContain("rubricPublication: {");
     expect(source).toContain(
       "createAnchorAdvancementOriginalTaskExecutionPort(\n              conversationApplication",
+    );
+    expect(source).toContain(
+      "createAnchorAdvancementConfirmedOriginalTaskAdmissionPort(\n              conversationApplication",
     );
     expect(source).toContain("ctx.conversations!.runMaintenanceExisting(");
     expect(context).toContain("productApi,");

@@ -161,7 +161,10 @@ import {
 import { createCliTurnContextProviders } from "../runtime/turn-context-providers.js";
 import { createServeAdvancementController } from "./advancement-controller.js";
 import { createAdvancementAcceptanceLifecycle } from "./advancement-acceptance-lifecycle.js";
-import { createAnchorAdvancementOriginalTaskExecutionPort } from "./advancement-original-task-application.js";
+import {
+  createAnchorAdvancementConfirmedOriginalTaskAdmissionPort,
+  createAnchorAdvancementOriginalTaskExecutionPort,
+} from "./advancement-original-task-application.js";
 import { createZhixingGuidanceLifecycle } from "./zhixing-guidance-lifecycle.js";
 import { readGuidanceFile } from "./read-guidance-file.js";
 import { createConversationAliveCheck } from "./advancement-gc.js";
@@ -2153,8 +2156,17 @@ async function runServerProcess(
           },
           rubricRevision: advancementDetailController,
           rubricCancellation: advancementDetailController,
+          rubricConfirmation: advancementDetailController,
+          rubricPublication: {
+            publish: (input) =>
+              advancementDetailController.publishRubric(input),
+          },
           originalTask:
             createAnchorAdvancementOriginalTaskExecutionPort(
+              conversationApplication,
+            ),
+          confirmedOriginalTask:
+            createAnchorAdvancementConfirmedOriginalTaskAdmissionPort(
               conversationApplication,
             ),
         }),

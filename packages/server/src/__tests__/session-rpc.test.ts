@@ -91,6 +91,7 @@ import {
 import {
   ADVANCEMENT_PRODUCT_API_EXACT_SET,
   AdvancementApplicationService,
+  AdvancementOriginalTaskAdmissionError,
   createAdvancementProductApiContribution,
 } from "@zhixing/core/advancement/application";
 import {
@@ -900,6 +901,10 @@ function createConversationProductApi(input: {
           },
           rubricRevision: advancement,
           rubricCancellation: advancement,
+          rubricConfirmation: advancement,
+          rubricPublication: {
+            publish: (request) => advancement.publishRubric(request),
+          },
           originalTask: {
             execute: async (input) => {
               const caller = {
@@ -943,6 +948,77 @@ function createConversationProductApi(input: {
                 runStatus:
                   admitted.status === "replayed" ? "queued" : admitted.status,
               };
+            },
+          },
+          confirmedOriginalTask: {
+            admit: async (input) => {
+              const caller = {
+                kind: "surface" as const,
+                surfacePrincipal: input.admissionIntent.surfacePrincipal,
+                connectionId: input.surface.caller.connectionId,
+              };
+              try {
+                const turnIdentity = application.prepareAgentTurnIdentity({
+                  kind: "prepare-agent-turn-identity",
+                  turnId: input.admissionIntent.turnId,
+                  identitySource: "provided",
+                  caller,
+                });
+                const admitted = await application.admitAgentTurn({
+                  kind: "admit-agent-turn",
+                  conversationId: input.conversationId,
+                  input: input.originalUserTask,
+                  turnIdentity,
+                  caller,
+                  turnOrigin: input.admissionIntent.turnOrigin,
+                  execution: {
+                    execute: ({ conversationId, turnId }) =>
+                      input.surface.execute({
+                        conversationId,
+                        turnId,
+                        originalUserTask: input.originalUserTask,
+                      }),
+                    cancelPending: (cancelled) =>
+                      input.surface.cancelPending(cancelled),
+                    ...(input.surface.onAdmitted
+                      ? { onAdmitted: input.surface.onAdmitted }
+                      : {}),
+                  },
+                });
+                return {
+                  conversationId: admitted.conversationId,
+                  turnId: admitted.turnId,
+                  ...(admitted.runId ? { runId: admitted.runId } : {}),
+                  status: admitted.status,
+                };
+              } catch (error) {
+                if (error instanceof DurableConversationAdmissionRejectedError) {
+                  throw new AdvancementOriginalTaskAdmissionError(
+                    error.code,
+                    error,
+                  );
+                }
+                if (error instanceof ConversationApplicationError) {
+                  const reason =
+                    error.reason === "turn-conversation-not-found"
+                      ? "conversation-not-found"
+                      : error.reason === "turn-queue-full"
+                        ? "queue-full"
+                        : error.reason === "turn-lifecycle-busy"
+                          ? "lifecycle-busy"
+                          : error.reason === "turn-identity-invalid" ||
+                              error.reason === "turn-identity-required"
+                            ? "turn-identity-invalid"
+                            : undefined;
+                  if (reason) {
+                    throw new AdvancementOriginalTaskAdmissionError(
+                      reason,
+                      error,
+                    );
+                  }
+                }
+                throw error;
+              }
             },
           },
         }),
@@ -2442,6 +2518,81 @@ describe("session.* RPC (S2.D)", () => {
     expect(session?.status).toBe("cancelled");
     client.close();
   });
+
+  it.each([
+    {
+      label: "queue full",
+      reason: "turn-queue-full" as const,
+      message: "Too many pending messages for this conversation",
+    },
+    {
+      label: "lifecycle busy",
+      reason: "turn-lifecycle-busy" as const,
+      message: "场景正在切换或目录变更，请稍后重试。",
+    },
+  ])(
+    "session.advancementConfirm 保留 $label 且不补偿取消已确认事实",
+    async ({ reason, message }) => {
+      const advancement = await createTestAdvancementHarness();
+      await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+        advancement: advancement.controller,
+      });
+      const client = await connect(server.port);
+      await client.request("auth", { token: TEST_TOKEN });
+      const sendResp = await client.request("session.send", {
+        text: "请继续完成原任务",
+        turnId: `turn-confirm-${reason}`,
+      });
+      expect(isSuccessResponse(sendResp)).toBe(true);
+      if (!isSuccessResponse(sendResp)) return;
+      const awaiting = sendResp.result as {
+        conversationId: string;
+        advancementSessionId: string;
+        rubricDraftId: string;
+      };
+      await client.waitNotification("session.event");
+
+      const spy = vi
+        .spyOn(
+          ConversationDirectoryApplicationService.prototype,
+          "admitAgentTurn",
+        )
+        .mockRejectedValueOnce(
+          new ConversationApplicationError(
+            "busy",
+            "Injected original-task admission refusal",
+            reason,
+          ),
+        );
+      try {
+        const confirmResp = await client.request("session.advancementConfirm", {
+          conversationId: awaiting.conversationId,
+          advancementSessionId: awaiting.advancementSessionId,
+          rubricDraftId: awaiting.rubricDraftId,
+        });
+        expect(isErrorResponse(confirmResp)).toBe(true);
+        if (isErrorResponse(confirmResp)) {
+          expect(confirmResp.error).toMatchObject({
+            code: RPC_ERROR_CODES.BUSY,
+            message,
+          });
+        }
+        const confirmedEvent = await client.waitNotification("session.event");
+        expect(confirmedEvent.params).toMatchObject({
+          event: "advancement:contract_confirmed",
+        });
+        const durable = await advancement.store.loadSession(
+          awaiting.conversationId,
+          awaiting.advancementSessionId,
+        );
+        expect(durable?.status).toBe("active");
+        expect(durable?.originalTaskAdmission?.status).toBe("pending");
+      } finally {
+        spy.mockRestore();
+        client.close();
+      }
+    },
+  );
 
   it("session.advancementCancel 不可取消已确认的 active 推进会话", async () => {
     const advancement = await createTestAdvancementHarness();

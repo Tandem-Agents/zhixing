@@ -41,8 +41,8 @@ import {
   AdvancementEvidenceCoordinator,
   SessionAdvancementStore,
   type AdvancementEvidenceTarget,
-  type RubricPublicationPort,
 } from "@zhixing/owner-services";
+import type { RubricPublicationPort } from "@zhixing/core/advancement/application";
 import {
   GlobalRubricCatalog,
   GlobalRubricPublication,

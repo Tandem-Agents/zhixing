@@ -3356,7 +3356,7 @@ export function inspectTrustAdministrationOwnership(records) {
   return failures;
 }
 
-/** A5 Advancement detail/revision/cancellation have one domain application owner. */
+/** A5 Advancement detail and Rubric lifecycle have one domain application owner. */
 export function inspectAdvancementDetailApplicationOwnership(records) {
   const failures = [];
   const byPath = new Map(records.map((record) => [record.relative, record.text]));
@@ -3392,6 +3392,12 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   const reviseStart = handler.indexOf(
     "export function buildSessionAdvancementReviseMethod()",
   );
+  const confirmStart = handler.indexOf(
+    "export function buildSessionAdvancementConfirmMethod()",
+  );
+  const confirm = confirmStart >= 0 && reviseStart > confirmStart
+    ? handler.slice(confirmStart, reviseStart)
+    : "";
   const reviseEnd = handler.indexOf(
     "export function buildSessionAdvancementCancelMethod()",
     reviseStart,
@@ -3407,11 +3413,17 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   const cancel = cancelStart >= 0 && cancelEnd > cancelStart
     ? handler.slice(cancelStart, cancelEnd)
     : "";
-  const cancellationFact = application.indexOf(
+  const cancellationFact = application.lastIndexOf(
     "await command.fact.publish(decision.fact)",
   );
-  const originalTaskHandoff = application.indexOf(
+  const originalTaskHandoff = application.lastIndexOf(
     "await this.#originalTask.execute",
+  );
+  const confirmationFact = application.indexOf(
+    "await command.fact.publish(decision.fact)",
+  );
+  const confirmedAdmission = application.indexOf(
+    "await this.#confirmedOriginalTask.admit",
   );
 
   let manifest;
@@ -3445,12 +3457,20 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes("persistRubricDraftRevision") ||
     !application.includes("const committedDraft = updated.pendingRubricDraft") ||
     !application.includes("interface AdvancementRubricCancellationMechanismPort") ||
+    !application.includes("interface AdvancementRubricConfirmationMechanismPort") ||
+    !application.includes("interface AdvancementConfirmedOriginalTaskAdmissionPort") ||
     !application.includes("interface AdvancementOriginalTaskExecutionPort") ||
     !application.includes("interface AdvancementOriginalTaskSurfacePort") ||
     !application.includes("ADVANCEMENT_CANCEL_RUBRIC_COMMAND") ||
     !application.includes('"advancement.command.cancel-rubric"') ||
     !application.includes("ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT") ||
     !application.includes('"advancement-contract-cancelled"') ||
+    !application.includes("ADVANCEMENT_CONFIRM_RUBRIC_COMMAND") ||
+    !application.includes('"advancement.command.confirm-rubric"') ||
+    !application.includes("ADVANCEMENT_CONTRACT_CONFIRMED_FACT_EVENT") ||
+    !application.includes('"advancement-contract-confirmed"') ||
+    application.split("ADVANCEMENT_CONFIRM_RUBRIC_COMMAND").length - 1 !== 3 ||
+    application.split("ADVANCEMENT_CONTRACT_CONFIRMED_FACT_EVENT").length - 1 !== 4 ||
     application.split("ADVANCEMENT_CANCEL_RUBRIC_COMMAND").length - 1 !== 3 ||
     application.split("ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT").length - 1 !== 4 ||
     !application.includes("loadRubricCancellationSession(") ||
@@ -3464,13 +3484,21 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     cancellationFact < 0 ||
     originalTaskHandoff < 0 ||
     cancellationFact > originalTaskHandoff ||
+    confirmationFact < 0 ||
+    confirmedAdmission < 0 ||
+    confirmationFact > confirmedAdmission ||
+    !application.includes("persistRubricConfirmation({") ||
+    !application.includes("persistOriginalTaskAdmissionSettlement({") ||
+    !application.includes('error.reason === "conversation-not-found"') ||
+    !application.includes('error.reason === "idempotency-conflict"') ||
+    !application.includes('reason: "original-task-admission-failed"') ||
     application.includes("freezeSnapshot(revisedDraft)") ||
     !application.includes("ADVANCEMENT_PRODUCT_API_EXACT_SET") ||
     !application.includes("createAdvancementProductApiContribution") ||
     !application.includes("buildClosureFacts(session)") ||
     application.split("defineProductApiQuery<").length - 1 !== 1 ||
-    application.split("defineProductApiCommand<").length - 1 !== 2 ||
-    application.split("defineProductApiFactEvent<").length - 1 !== 2 ||
+    application.split("defineProductApiCommand<").length - 1 !== 3 ||
+    application.split("defineProductApiFactEvent<").length - 1 !== 3 ||
     /@zhixing\/(?:server|rpc|owner-services)|\.\.\/\.\.\/server|\.\.\/\.\.\/owner-services/u.test(
       application,
     ) ||
@@ -3495,6 +3523,16 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     /requireAdvancement\(|requireConversations\(|runAdvancementMaintenance\(|\.reviseRubricDraft\(/u.test(
       revise,
     ) ||
+    confirm.length === 0 ||
+    !confirm.includes("requireAdvancementProductApi(") ||
+    !confirm.includes("ADVANCEMENT_CONFIRM_RUBRIC_COMMAND") ||
+    !confirm.includes("productApi.command(") ||
+    !confirm.includes("publishAdvancementRubricConfirmationFact(") ||
+    !confirm.includes("surface: createAdvancementOriginalTaskSurface({") ||
+    !confirm.includes("mapAdvancementRubricConfirmationError(") ||
+    /requireAdvancement\(|runAdvancementMaintenance\(|\.confirmRubric\(|admitAndMaybeStartTurn\(|prepareConversationAgentTurnIdentity\(|settleOriginalTaskAdmission\(/u.test(
+      confirm,
+    ) ||
     cancel.length === 0 ||
     !cancel.includes("requireAdvancementProductApi(") ||
     !cancel.includes("ADVANCEMENT_CANCEL_RUBRIC_COMMAND") ||
@@ -3507,6 +3545,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !handler.includes('error.reason === "turn-lifecycle-busy"') ||
     !handler.includes("const mapped = sessionAgentTurnAdmissionRpcError(") ||
     !handler.includes("const admissionError = sessionAgentTurnAdmissionRpcError(") ||
+    handler.split("const admissionError = sessionAgentTurnAdmissionRpcError(").length - 1 !== 2 ||
     /runAdvancementMaintenance\(|requireAdvancement\(|\.cancelRubric\(|admitAndMaybeStartTurn\(|prepareConversationAgentTurnIdentity\(|cancelled\.session|cancelled\.originalUserTask/u.test(
       cancel,
     ) ||
@@ -3519,6 +3558,12 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     controller.includes("async cancelRubric(input:") ||
     !controller.includes("loadRubricCancellationSession(") ||
     !controller.includes("persistRubricCancellation(input:") ||
+    controller.includes("async confirmRubric(input:") ||
+    controller.includes("async settleOriginalTaskAdmission(input:") ||
+    !controller.includes("loadRubricConfirmationSession(") ||
+    !controller.includes("confirmRubricDraftContent(") ||
+    !controller.includes("persistRubricConfirmation(input:") ||
+    !controller.includes("persistOriginalTaskAdmissionSettlement(input:") ||
     !composition.includes('from "@zhixing/core/advancement/application"') ||
     composition.split("new AdvancementApplicationService(").length - 1 !== 1 ||
     composition.split("createAdvancementProductApiContribution(").length - 1 !== 1 ||
@@ -3526,18 +3571,25 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !composition.includes("ctx.conversations!.runMaintenanceExisting(") ||
     !composition.includes("rubricRevision: advancementDetailController") ||
     !composition.includes("rubricCancellation: advancementDetailController") ||
+    !composition.includes("rubricConfirmation: advancementDetailController") ||
+    !composition.includes("rubricPublication: {") ||
     !composition.includes("createAnchorAdvancementOriginalTaskExecutionPort(") ||
+    !composition.includes("createAnchorAdvancementConfirmedOriginalTaskAdmissionPort(") ||
     !composition.includes("conversationApplication,") ||
     !originalTaskAdapter.includes("createAnchorAdvancementOriginalTaskExecutionPort(") ||
     !originalTaskAdapter.includes("conversations.prepareAgentTurnIdentity({") ||
     !originalTaskAdapter.includes("await conversations.admitAgentTurn({") ||
+    originalTaskAdapter.split("await conversations.admitAgentTurn({").length - 1 !== 2 ||
+    !originalTaskAdapter.includes("createAnchorAdvancementConfirmedOriginalTaskAdmissionPort(") ||
+    !originalTaskAdapter.includes("new AdvancementOriginalTaskAdmissionError(") ||
+    originalTaskAdapter.split("new AdvancementOriginalTaskAdmissionError(").length - 1 !== 2 ||
     /@zhixing\/(?:server|rpc)|\.\.\/\.\.\/server/u.test(originalTaskAdapter) ||
     !composition.includes("? ADVANCEMENT_PRODUCT_API_EXACT_SET.operations") ||
     !composition.includes("? ADVANCEMENT_PRODUCT_API_EXACT_SET.factEvents") ||
     !composition.includes("...(advancementProductApi ? [advancementProductApi] : [])")
   ) {
     failures.push(
-      "Advancement detail/revision/cancellation lacks one domain application and Product API owner",
+      "Advancement detail/rubric lifecycle lacks one domain application and Product API owner",
     );
   }
 

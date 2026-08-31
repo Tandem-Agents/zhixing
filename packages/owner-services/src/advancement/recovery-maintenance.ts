@@ -189,7 +189,7 @@ class DefaultAdvancementRecoveryMaintenance
           });
           return { status: "not-active", conversationId };
         }
-        session = await this.options.advancement.settleOriginalTaskAdmission({
+        session = await this.options.advancement.persistOriginalTaskAdmissionSettlement({
           conversationId,
           advancementSessionId: session.id,
           turnId: session.originalTaskAdmission.intent.turnId,

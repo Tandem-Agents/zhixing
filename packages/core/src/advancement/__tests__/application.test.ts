@@ -3,20 +3,26 @@ import { ProductApiDispatcher } from "../../product-api/catalog.js";
 import {
   ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
   ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT,
+  ADVANCEMENT_CONTRACT_CONFIRMED_FACT_EVENT,
   ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT,
+  ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
   ADVANCEMENT_DETAIL_QUERY,
   ADVANCEMENT_PRODUCT_API_EXACT_SET,
   ADVANCEMENT_REVISE_RUBRIC_COMMAND,
   AdvancementApplicationError,
   AdvancementApplicationService,
+  AdvancementOriginalTaskAdmissionError,
   createAdvancementProductApiContribution,
   type AdvancementApplicationOptions,
   type AdvancementConversationMaintenancePort,
   type AdvancementDetailReadPort,
   type AdvancementRubricRevisionMechanismPort,
   type AdvancementRubricCancellationMechanismPort,
+  type AdvancementRubricConfirmationMechanismPort,
+  type AdvancementConfirmedOriginalTaskAdmissionPort,
   type AdvancementOriginalTaskExecutionPort,
   type AdvancementOriginalTaskSurfacePort,
+  type RubricPublicationPort,
 } from "../application.js";
 import type {
   AdvancementRunReview,
@@ -541,7 +547,287 @@ describe("AdvancementApplicationService detail query", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it("contributes one Query plus revision/cancellation Commands and Facts", async () => {
+  it("owns confirmation, publishes the committed Fact before admission and settles the durable run identity", async () => {
+    const source = session({
+      status: "awaiting-rubric-confirmation",
+      pendingRubricDraft: pendingRubric("待确认标准"),
+      confirmedRubric: undefined,
+    });
+    const order: string[] = [];
+    let committed = source;
+    const fixture = createRevisionFixture(source, {
+      persistRubricConfirmation: async ({ confirmedRubric, admissionIntent }) => {
+        order.push("commit-confirmation");
+        committed = {
+          ...source,
+          status: "active",
+          confirmedRubric,
+          pendingRubricDraft: undefined,
+          originalTaskAdmission: { status: "pending", intent: admissionIntent },
+        };
+        return committed;
+      },
+      confirmedOriginalTask: {
+        admit: async (input) => {
+          order.push("admit");
+          expect(input.admissionIntent).toMatchObject({
+            turnId: "turn-1",
+            surfacePrincipal: "surface-test",
+            turnOrigin: { channel: "rpc", triggeredBy: "surface-test" },
+          });
+          return {
+            conversationId: "conv-1",
+            turnId: "turn-1",
+            runId: "run-confirmed",
+            status: "queued",
+          };
+        },
+      },
+      persistOriginalTaskAdmissionSettlement: async ({ runId }) => {
+        order.push("settle");
+        committed = {
+          ...committed,
+          originalTaskAdmission: {
+            status: "admitted",
+            intent: committed.originalTaskAdmission!.intent,
+            runId,
+          },
+        };
+        return committed;
+      },
+      rubricPublication: {
+        publish: async () => {
+          order.push("publish-rubric");
+          return { kind: "saved", rubricId: "rubric-new", revision: 1 };
+        },
+      },
+    });
+
+    const confirmed = await fixture.application.confirmRubric(
+      confirmationCommand({
+        persistence: { kind: "save-new" },
+        fact: {
+          publish: (fact) => {
+            order.push(`fact:${fact.kind}`);
+            expect(fact).toMatchObject({
+              kind: "advancement-contract-confirmed",
+              advancementSessionId: "adv-1",
+              originalTurnId: "turn-1",
+              controlSeq: 2,
+            });
+          },
+        },
+      }),
+    );
+
+    expect(order).toEqual([
+      "commit-confirmation",
+      "fact:advancement-contract-confirmed",
+      "publish-rubric",
+      "admit",
+      "settle",
+    ]);
+    expect(confirmed.result).toEqual({
+      conversationId: "conv-1",
+      advancementSessionId: "adv-1",
+      turnId: "turn-1",
+      runId: "run-confirmed",
+      runStatus: "queued",
+      rubricPublicationMessage: "准则已保存到准则库。",
+    });
+    expect(confirmed.fact.kind).toBe("advancement-contract-confirmed");
+  });
+
+  it("cancels a pre-confirmation conversation miss without projecting a cancellation Fact", async () => {
+    const source = session({
+      status: "awaiting-rubric-confirmation",
+      pendingRubricDraft: pendingRubric("待确认标准"),
+      confirmedRubric: undefined,
+    });
+    const publish = vi.fn();
+    const admit = vi.fn();
+    const persistRubricCancellation = vi.fn(async ({ message }) => ({
+      ...source,
+      status: "cancelled" as const,
+      exit: {
+        reason: "system-error" as const,
+        message,
+        occurredAt: "2026-01-01T00:06:00.000Z",
+      },
+    }));
+    const fixture = createRevisionFixture(source, {
+      maintenance: {
+        runExisting: async () => ({ status: "not-found" }),
+      },
+      persistRubricCancellation,
+      confirmedOriginalTask: { admit },
+    });
+
+    await expect(
+      fixture.application.confirmRubric(
+        confirmationCommand({ fact: { publish } }),
+      ),
+    ).rejects.toMatchObject<Partial<AdvancementApplicationError>>({
+      code: "conversation-not-found",
+    });
+
+    expect(persistRubricCancellation).toHaveBeenCalledTimes(1);
+    expect(publish).not.toHaveBeenCalled();
+    expect(admit).not.toHaveBeenCalled();
+  });
+
+  it("keeps a successful admission result when durable settlement must be recovered", async () => {
+    const source = session({
+      status: "awaiting-rubric-confirmation",
+      pendingRubricDraft: pendingRubric("待确认标准"),
+      confirmedRubric: undefined,
+    });
+    let committed = source;
+    const fixture = createRevisionFixture(source, {
+      persistRubricConfirmation: async ({ confirmedRubric, admissionIntent }) => {
+        committed = {
+          ...source,
+          status: "active",
+          confirmedRubric,
+          pendingRubricDraft: undefined,
+          originalTaskAdmission: { status: "pending", intent: admissionIntent },
+        };
+        return committed;
+      },
+      confirmedOriginalTask: {
+        admit: async () => ({
+          conversationId: "conv-1",
+          turnId: "turn-1",
+          runId: "run-recover-settlement",
+          status: "queued",
+        }),
+      },
+      persistOriginalTaskAdmissionSettlement: async () => {
+        throw new Error("settlement response lost");
+      },
+    });
+
+    await expect(
+      fixture.application.confirmRubric(confirmationCommand()),
+    ).resolves.toMatchObject({
+      result: {
+        conversationId: "conv-1",
+        advancementSessionId: "adv-1",
+        turnId: "turn-1",
+        runId: "run-recover-settlement",
+        runStatus: "queued",
+      },
+      fact: { kind: "advancement-contract-confirmed" },
+    });
+    expect(committed.originalTaskAdmission).toMatchObject({
+      status: "pending",
+      intent: { turnId: "turn-1" },
+    });
+  });
+
+  it.each([
+    ["conversation-not-found", true],
+    ["idempotency-conflict", true],
+    ["queue-full", false],
+    ["lifecycle-busy", false],
+  ] as const)(
+    "compensates only terminal original-task admission failure %s",
+    async (reason, shouldCancel) => {
+      const source = session({
+        status: "awaiting-rubric-confirmation",
+        pendingRubricDraft: pendingRubric("待确认标准"),
+        confirmedRubric: undefined,
+      });
+      const originalError = new Error(`admission:${reason}`);
+      const persistRubricCancellation = vi.fn(async ({ message }) => ({
+        ...source,
+        status: "cancelled" as const,
+        exit: {
+          reason: "system-error" as const,
+          message,
+          occurredAt: "2026-01-01T00:06:00.000Z",
+        },
+      }));
+      const facts: string[] = [];
+      const fixture = createRevisionFixture(source, {
+        persistRubricCancellation,
+        confirmedOriginalTask: {
+          admit: async () => {
+            throw new AdvancementOriginalTaskAdmissionError(
+              reason,
+              originalError,
+            );
+          },
+        },
+      });
+
+      await expect(
+        fixture.application.confirmRubric(
+          confirmationCommand({
+            fact: {
+              publish: (fact) => {
+                facts.push(fact.kind);
+                if (fact.kind === "advancement-contract-cancelled") {
+                  expect(fact.reason).toBe("original-task-admission-failed");
+                  expect(fact.executeOriginal).toBe(false);
+                }
+              },
+            },
+          }),
+        ),
+      ).rejects.toBe(originalError);
+
+      expect(persistRubricCancellation).toHaveBeenCalledTimes(
+        shouldCancel ? 1 : 0,
+      );
+      expect(facts).toEqual(
+        shouldCancel
+          ? [
+              "advancement-contract-confirmed",
+              "advancement-contract-cancelled",
+            ]
+          : ["advancement-contract-confirmed"],
+      );
+    },
+  );
+
+  it("fails closed for a stale draft or unproved committed confirmation before Fact/admission", async () => {
+    const source = session({
+      status: "awaiting-rubric-confirmation",
+      pendingRubricDraft: pendingRubric("待确认标准"),
+      confirmedRubric: undefined,
+    });
+    const publish = vi.fn();
+    const admit = vi.fn();
+    const fixture = createRevisionFixture(source, {
+      confirmedOriginalTask: { admit },
+    });
+    await expect(
+      fixture.application.confirmRubric(
+        confirmationCommand({ expectedRubricDraftId: "draft-stale", fact: { publish } }),
+      ),
+    ).rejects.toMatchObject<Partial<AdvancementApplicationError>>({
+      code: "rubric-draft-stale",
+    });
+    expect(publish).not.toHaveBeenCalled();
+    expect(admit).not.toHaveBeenCalled();
+
+    const invalidCommit = createRevisionFixture(source, {
+      persistRubricConfirmation: async () => source,
+      confirmedOriginalTask: { admit },
+    });
+    await expect(
+      invalidCommit.application.confirmRubric(
+        confirmationCommand({ fact: { publish } }),
+      ),
+    ).rejects.toMatchObject<Partial<AdvancementApplicationError>>({
+      code: "committed-rubric-confirmation-missing",
+    });
+    expect(publish).not.toHaveBeenCalled();
+    expect(admit).not.toHaveBeenCalled();
+  });
+
+  it("contributes one Query plus revision/confirmation/cancellation Commands and Facts", async () => {
     const source = session({
       status: "awaiting-rubric-confirmation",
       pendingRubricDraft: pendingRubric("待修订标准"),
@@ -556,10 +842,12 @@ describe("AdvancementApplicationService detail query", () => {
     expect(ADVANCEMENT_PRODUCT_API_EXACT_SET.operations).toEqual([
       ADVANCEMENT_DETAIL_QUERY,
       ADVANCEMENT_REVISE_RUBRIC_COMMAND,
+      ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
       ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
     ]);
     expect(ADVANCEMENT_PRODUCT_API_EXACT_SET.factEvents).toEqual([
       ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT,
+      ADVANCEMENT_CONTRACT_CONFIRMED_FACT_EVENT,
       ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT,
     ]);
     await expect(
@@ -633,16 +921,25 @@ function createApplication(
       overrides.rubricRevision ?? fixture.options.rubricRevision,
     rubricCancellation:
       overrides.rubricCancellation ?? fixture.options.rubricCancellation,
+    rubricConfirmation:
+      overrides.rubricConfirmation ?? fixture.options.rubricConfirmation,
+    rubricPublication:
+      overrides.rubricPublication ?? fixture.options.rubricPublication,
     originalTask: overrides.originalTask ?? fixture.options.originalTask,
+    confirmedOriginalTask:
+      overrides.confirmedOriginalTask ?? fixture.options.confirmedOriginalTask,
   });
 }
 
 type RevisionFixtureOverrides =
   Partial<AdvancementRubricRevisionMechanismPort> &
   Partial<AdvancementRubricCancellationMechanismPort> &
+  Partial<AdvancementRubricConfirmationMechanismPort> &
   Readonly<{
     maintenance?: AdvancementConversationMaintenancePort;
     originalTask?: AdvancementOriginalTaskExecutionPort;
+    confirmedOriginalTask?: AdvancementConfirmedOriginalTaskAdmissionPort;
+    rubricPublication?: RubricPublicationPort;
   }>;
 
 function createRevisionFixture(
@@ -698,11 +995,75 @@ function createRevisionFixture(
         return current;
       }),
   };
+  const rubricConfirmation: AdvancementRubricConfirmationMechanismPort = {
+    loadRubricConfirmationSession:
+      overrides.loadRubricConfirmationSession ?? (async () => current),
+    confirmRubricDraftContent:
+      overrides.confirmRubricDraftContent ??
+      (async (draft) => ({
+        source: {
+          kind: "generated" as const,
+          draftId: draft.draftId,
+          candidateRubricIds: draft.candidateRubricIds,
+        },
+        title: draft.title,
+        description: draft.description,
+        content: {
+          passCriteria: draft.content.passCriteria.map((text, index) => ({
+            id: `pc-${index + 1}`,
+            text,
+          })),
+          evidenceRequirements: draft.content.evidenceRequirements.map(
+            (text, index) => ({ id: `er-${index + 1}`, text }),
+          ),
+          failureHandling: draft.content.failureHandling.map((text, index) => ({
+            id: `fh-${index + 1}`,
+            text,
+          })),
+        },
+        confirmedAt: "2026-01-01T00:05:00.000Z",
+        confirmedBy: "user" as const,
+      })),
+    persistRubricConfirmation:
+      overrides.persistRubricConfirmation ??
+      (async ({ confirmedRubric, admissionIntent }) => {
+        current = {
+          ...current,
+          status: "active",
+          confirmedRubric,
+          pendingRubricDraft: undefined,
+          originalTaskAdmission: {
+            status: "pending",
+            intent: admissionIntent,
+          },
+        };
+        return current;
+      }),
+    persistOriginalTaskAdmissionSettlement:
+      overrides.persistOriginalTaskAdmissionSettlement ??
+      (async ({ runId }) => {
+        const pending = current.originalTaskAdmission;
+        if (!pending) throw new Error("missing admission intent");
+        current = {
+          ...current,
+          originalTaskAdmission: {
+            status: "admitted",
+            intent: pending.intent,
+            runId,
+          },
+        };
+        return current;
+      }),
+  };
   const options: AdvancementApplicationOptions = {
     detail: port(current),
     maintenance,
     rubricRevision,
     rubricCancellation,
+    rubricConfirmation,
+    ...(overrides.rubricPublication
+      ? { rubricPublication: overrides.rubricPublication }
+      : {}),
     originalTask:
       overrides.originalTask ??
       {
@@ -718,6 +1079,16 @@ function createRevisionFixture(
             runStatus: "immediate",
           };
         },
+      },
+    confirmedOriginalTask:
+      overrides.confirmedOriginalTask ??
+      {
+        admit: async (input) => ({
+          conversationId: input.conversationId,
+          turnId: input.admissionIntent.turnId,
+          runId: "run-1",
+          status: "immediate",
+        }),
       },
   };
   return Object.freeze({
@@ -739,6 +1110,25 @@ function testSurface(): AdvancementOriginalTaskSurfacePort {
     execute: vi.fn(async () => undefined),
     cancelPending: vi.fn(),
   });
+}
+
+function confirmationCommand(
+  overrides: Partial<
+    Parameters<AdvancementApplicationService["confirmRubric"]>[0]
+  > = {},
+): Parameters<AdvancementApplicationService["confirmRubric"]>[0] {
+  return {
+    conversationId: "conv-1",
+    advancementSessionId: "adv-1",
+    expectedRubricDraftId: "draft-1",
+    originalTaskTurnOrigin: {
+      channel: "rpc",
+      triggeredBy: "surface-test",
+    },
+    fact: { publish: vi.fn() },
+    surface: testSurface(),
+    ...overrides,
+  };
 }
 
 function session(overrides: Partial<AdvancementSession> = {}): AdvancementSession {

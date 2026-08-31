@@ -62,9 +62,11 @@ import {
 } from "@zhixing/core/conversation/application";
 import {
   ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
+  ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
   ADVANCEMENT_DETAIL_QUERY,
   ADVANCEMENT_REVISE_RUBRIC_COMMAND,
   AdvancementApplicationError,
+  type AdvancementContractConfirmedFact,
   type AdvancementContractCancelledFact,
   type AdvancementDetailProjection,
   type AdvancementOriginalTaskSurfacePort,
@@ -114,7 +116,6 @@ import {
 } from "@zhixing/rpc/session-wire";
 import { createControlSessionEventEnvelope } from "@zhixing/rpc/session-events";
 import type { AdvancementPrepareResult } from "@zhixing/owner-services";
-import { DurableConversationAdmissionRejectedError } from "@zhixing/owner-kernel/run-turn";
 import {
   generateConversationId,
   WorksceneBusyError,
@@ -563,149 +564,62 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
         params,
         "session.advancementConfirm",
       );
-      const advancement = requireAdvancement(ctx.server);
       const manager = requireConversations(ctx.server);
-      let confirmed: Awaited<ReturnType<typeof advancement.confirmRubric>>;
+      const productApi = requireAdvancementProductApi(
+        ctx.server,
+        ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
+      );
       try {
-        confirmed = await runAdvancementMaintenance({
-          manager,
-          server: ctx.server,
-          conversationId,
-          busyMessage:
-            "Conversation is busy; confirm the Rubric after the current turn completes",
-          fn: () =>
-            advancement.confirmRubric({
-              conversationId,
-              advancementSessionId,
-              expectedRubricDraftId: rubricDraftId,
-              persistence,
-              surfacePrincipal: rpcSurfacePrincipal(ctx.connection),
-            }),
-        });
-      } catch (err) {
-        if (
-          err instanceof RpcAppError &&
-          err.code === RPC_ERROR_CODES.NOT_FOUND
-        ) {
-          await advancement
-            .cancelOpenSession({
-              conversationId,
-              advancementSessionId,
-              reason: "system-error",
-              message: "原始对话已不存在，推进会话已取消以避免悬空状态。",
-            })
-            .catch(() => null);
-        }
-        throw err;
-      }
-      notifyAdvancementEvent({
-        conversationId,
-        turnId: confirmed.originalTurnId,
-        seq: nextContractControlSeq(confirmed.session),
-        event: "advancement:contract_confirmed",
-        payload: {
-          advancementSessionId: confirmed.session.id,
-          rubricId:
-            confirmed.session.confirmedRubric?.source.kind === "library"
-              ? confirmed.session.confirmedRubric.source.rubricId
-              : undefined,
-        },
-        connection: ctx.connection,
-        broadcast: ctx.server.sessionBroadcast,
-      });
-
-      let admitted: Awaited<ReturnType<typeof admitAndMaybeStartTurn>>;
-      try {
-        admitted = await admitAndMaybeStartTurn({
-          server: ctx.server,
-          manager,
-          conversationId,
-          connectionId: String(ctx.connection.id),
-          input: confirmed.originalUserTask,
-          turnIdentity: await prepareConversationAgentTurnIdentity(
-            ctx.server,
-            ctx.connection,
-            confirmed.originalTurnId,
-            "provided",
-          ),
-          connection: ctx.connection,
-          broadcast: ctx.server.sessionBroadcast,
-          surfaceCapabilities: { postTurnControl: false },
-          admissionIdentity: confirmed.session.originalTaskAdmission?.intent,
-        });
-      } catch (err) {
-        const cancelled =
-          (err instanceof RpcAppError && err.code === RPC_ERROR_CODES.NOT_FOUND) ||
-          err instanceof DurableConversationAdmissionRejectedError
-            ? await advancement
-                .cancelOpenSession({
-                  conversationId,
-                  advancementSessionId,
-                  reason: "system-error",
-                  message:
-                    err instanceof DurableConversationAdmissionRejectedError
-                      ? "原始任务的耐久准入身份发生冲突，推进会话已安全取消。"
-                      : "原始对话已不存在，推进会话已取消以避免悬空状态。",
-                })
-                .catch(() => null)
-            : null;
-        if (cancelled) {
-          notifyAdvancementEvent({
-            conversationId,
-            turnId: confirmed.originalTurnId,
-            seq: nextContractControlSeq(confirmed.session) + 1,
-            event: "advancement:contract_cancelled",
-            payload: {
-              advancementSessionId: cancelled.id,
-              executeOriginal: false,
-              reason: "original-task-admission-failed",
-            },
-            connection: ctx.connection,
-            broadcast: ctx.server.sessionBroadcast,
-          });
-        }
-        throw err;
-      }
-
-      const admissionIntent = confirmed.session.originalTaskAdmission?.intent;
-      if (admitted.runId && admissionIntent) {
-        await advancement
-          .settleOriginalTaskAdmission({
+        const confirmed = await productApi.command(
+          ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
+          {
             conversationId,
             advancementSessionId,
-            turnId: admissionIntent.turnId,
-            inputDigest: admissionIntent.inputDigest,
-            runId: admitted.runId,
-          })
-          .catch(() => undefined);
+            expectedRubricDraftId: rubricDraftId,
+            ...(persistence ? { persistence } : {}),
+            originalTaskTurnOrigin: {
+              channel: "rpc",
+              triggeredBy: rpcSurfacePrincipal(ctx.connection),
+            },
+            fact: {
+              publish: (fact) =>
+                publishAdvancementRubricConfirmationFact(
+                  fact,
+                  ctx.connection,
+                  ctx.server.sessionBroadcast,
+                ),
+            },
+            surface: createAdvancementOriginalTaskSurface({
+              manager,
+              connection: ctx.connection,
+              broadcast: ctx.server.sessionBroadcast,
+            }),
+          },
+        );
+        return {
+          conversationId: confirmed.result.conversationId,
+          sessionId: confirmed.result.conversationId,
+          turnId: confirmed.result.turnId,
+          ...(confirmed.result.runId
+            ? { runId: confirmed.result.runId }
+            : {}),
+          status: "confirmed",
+          advancementSessionId: confirmed.result.advancementSessionId,
+          runStatus: confirmed.result.runStatus,
+          ...(confirmed.result.rubricPublicationMessage
+            ? {
+                rubricPublicationMessage:
+                  confirmed.result.rubricPublicationMessage,
+              }
+            : {}),
+        };
+      } catch (error) {
+        throw mapAdvancementRubricConfirmationError(
+          error,
+          conversationId,
+          advancementSessionId,
+        );
       }
-
-      let rubricPublicationMessage: string | undefined;
-      if (confirmed.rubricPublicationTask) {
-        try {
-          const publication = await confirmed.rubricPublicationTask;
-          rubricPublicationMessage =
-            publication.kind === "saved"
-              ? "准则已保存到准则库。"
-              : publication.message;
-        } catch {
-          rubricPublicationMessage =
-            "任务已继续执行，但准则暂未保存；稍后可重新保存。";
-        }
-      }
-
-      return {
-        conversationId: admitted.conversationId,
-        sessionId: admitted.conversationId,
-        turnId: admitted.turnId,
-        ...(admitted.runId ? { runId: admitted.runId } : {}),
-        status: "confirmed",
-        advancementSessionId: confirmed.session.id,
-        runStatus: admitted.runStatus,
-        ...(rubricPublicationMessage
-          ? { rubricPublicationMessage }
-          : {}),
-      };
     },
   };
 }
@@ -903,6 +817,30 @@ function publishAdvancementCancellationFact(
     payload: {
       advancementSessionId: fact.advancementSessionId,
       executeOriginal: fact.executeOriginal,
+      ...(fact.reason ? { reason: fact.reason } : {}),
+    },
+    connection,
+    broadcast,
+  });
+}
+
+function publishAdvancementRubricConfirmationFact(
+  fact: AdvancementContractConfirmedFact | AdvancementContractCancelledFact,
+  connection: RpcConnection,
+  broadcast: SessionBroadcast,
+): void {
+  if (fact.kind === "advancement-contract-cancelled") {
+    publishAdvancementCancellationFact(fact, connection, broadcast);
+    return;
+  }
+  notifyAdvancementEvent({
+    conversationId: fact.conversationId,
+    turnId: fact.originalTurnId,
+    seq: fact.controlSeq,
+    event: "advancement:contract_confirmed",
+    payload: {
+      advancementSessionId: fact.advancementSessionId,
+      ...(fact.rubricId ? { rubricId: fact.rubricId } : {}),
     },
     connection,
     broadcast,
@@ -3226,6 +3164,42 @@ function mapAdvancementRubricRevisionError(
   if (error.code === "conversation-busy") {
     return RpcErrors.busy(
       "Conversation is busy; revise the Rubric after the current turn completes",
+    );
+  }
+  const sessionId = error.advancementSessionId ?? advancementSessionId;
+  if (error.code === "advancement-session-not-found") {
+    return new Error(`AdvancementController: session "${sessionId}" not found`);
+  }
+  if (error.code === "not-awaiting-rubric-confirmation") {
+    return new Error(
+      `AdvancementController: session "${sessionId}" is not awaiting rubric confirmation`,
+    );
+  }
+  if (error.code === "pending-rubric-draft-missing") {
+    return new Error(
+      `AdvancementController: session "${sessionId}" has no pending rubric draft`,
+    );
+  }
+  return new Error(error.message);
+}
+
+function mapAdvancementRubricConfirmationError(
+  error: unknown,
+  conversationId: string,
+  advancementSessionId: string,
+): unknown {
+  const admissionError = sessionAgentTurnAdmissionRpcError(
+    error,
+    conversationId,
+  );
+  if (admissionError) return admissionError;
+  if (!(error instanceof AdvancementApplicationError)) return error;
+  if (error.code === "conversation-not-found") {
+    return RpcErrors.notFound(`Session not found: ${conversationId}`);
+  }
+  if (error.code === "conversation-busy") {
+    return RpcErrors.busy(
+      "Conversation is busy; confirm the Rubric after the current turn completes",
     );
   }
   const sessionId = error.advancementSessionId ?? advancementSessionId;

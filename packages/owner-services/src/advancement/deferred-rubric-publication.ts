@@ -7,7 +7,7 @@ import type {
 import type {
   RubricPublicationOutcome,
   RubricPublicationPort,
-} from "./controller.js";
+} from "@zhixing/core/advancement/application";
 
 const DEFERRED_MESSAGE = "已用于本任务，连接值班设备后保存";
 

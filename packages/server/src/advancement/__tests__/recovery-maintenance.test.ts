@@ -1223,7 +1223,7 @@ describe("AdvancementRecoveryMaintenance", () => {
     };
     const advancement = {
       loadActiveSession: vi.fn(async () => pending),
-      settleOriginalTaskAdmission: vi.fn(async () => admitted),
+      persistOriginalTaskAdmissionSettlement: vi.fn(async () => admitted),
       rebuildMissingProxyMessage: vi.fn(async () => ({
         kind: "not-applicable" as const,
       })),
@@ -1255,7 +1255,7 @@ describe("AdvancementRecoveryMaintenance", () => {
       conversationId: "conv-1",
     });
     expect(originalTasks.admit).toHaveBeenCalledWith(pending);
-    expect(advancement.settleOriginalTaskAdmission).toHaveBeenCalledWith({
+    expect(advancement.persistOriginalTaskAdmissionSettlement).toHaveBeenCalledWith({
       conversationId: "conv-1",
       advancementSessionId: "adv-admission-recovery",
       turnId: "turn-original",
@@ -1292,7 +1292,7 @@ describe("AdvancementRecoveryMaintenance", () => {
         ...pending,
         status: "cancelled" as const,
       })),
-      settleOriginalTaskAdmission: vi.fn(),
+      persistOriginalTaskAdmissionSettlement: vi.fn(),
     };
     const recovery = createOwnerAdvancementRecoveryMaintenance({
       advancement: advancement as never,
@@ -1326,7 +1326,7 @@ describe("AdvancementRecoveryMaintenance", () => {
         reason: "system-error",
       }),
     );
-    expect(advancement.settleOriginalTaskAdmission).not.toHaveBeenCalled();
+    expect(advancement.persistOriginalTaskAdmissionSettlement).not.toHaveBeenCalled();
   });
 
   it("原任务 runId 下界尚未出现在日志时不猜测后续 accepted run", async () => {

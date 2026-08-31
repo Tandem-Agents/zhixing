@@ -14,11 +14,12 @@ import {
   type AdvancementReviewAttempt,
   type AdvancementReviewRootContract,
   type AdvancementSession,
+  type AdvancementOriginalTaskAdmissionIntent,
   type AdvancementWindowState,
+  type ConfirmedRubricSnapshot,
   type RunRecordInput,
   type RunRecordRef,
   type RubricContractDraftSnapshot,
-  type RubricDraftPersistenceChoice,
   type Message,
   type UserTurnInput,
   type AdvancementClosureFacts,
@@ -30,14 +31,19 @@ import {
   renderClosureReport,
   sumAdvancementUsage,
 } from "@zhixing/core";
-import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
+import { canonicalize } from "@zhixing/core/protocol";
 import type {
   AdvancementReviewerPort,
   AuthorityCallContext,
   ImmediateRootResourceLease,
   ResourceReservationPort,
 } from "@zhixing/core/contracts";
-import type { AdvancementRubricRevisionMechanismPort } from "@zhixing/core/advancement/application";
+import type {
+  AdvancementRubricConfirmationMechanismPort,
+  AdvancementRubricRevisionMechanismPort,
+  RubricPublicationOutcome,
+  RubricPublicationPort,
+} from "@zhixing/core/advancement/application";
 import { ImmediateRootReplayTerminalError } from "@zhixing/core/contracts";
 import { randomUUID } from "node:crypto";
 import {
@@ -105,27 +111,6 @@ export type AdvancementPrepareResult =
       readonly session: AdvancementSession;
       readonly draft: RubricContractDraftSnapshot;
     };
-
-export interface AdvancementConfirmedTurn {
-  readonly session: AdvancementSession;
-  readonly originalTurnId: string;
-  readonly originalUserTask: UserTurnInput;
-  readonly rubricPublicationTask?: Promise<RubricPublicationOutcome>;
-}
-
-export type RubricPublicationOutcome =
-  | { readonly kind: "saved"; readonly rubricId: string; readonly revision: number }
-  | { readonly kind: "deferred"; readonly message: string }
-  | { readonly kind: "failed"; readonly message: string };
-
-export interface RubricPublicationPort {
-  acceptanceOutcome(): RubricPublicationOutcome;
-  publish(input: {
-    readonly conversationId: string;
-    readonly draft: RubricContractDraftSnapshot;
-    readonly persistence: RubricDraftPersistenceChoice;
-  }): Promise<RubricPublicationOutcome>;
-}
 
 export interface AdvancementControllerOptions {
   /** 推进会话存储——生产装配注入权威日志适配实现，无隐式回退。 */
@@ -219,7 +204,10 @@ export type AdvancementTurnReviewResult =
       readonly closure: AdvancementClosureReport;
     };
 
-export class AdvancementController implements AdvancementRubricRevisionMechanismPort {
+export class AdvancementController implements
+  AdvancementRubricRevisionMechanismPort,
+  AdvancementRubricConfirmationMechanismPort
+{
   private readonly store: AdvancementSessionStore;
   private readonly contractBuilder: RubricContractBuilder;
   private readonly admissionStrategy: AdvancementAdmissionStrategy;
@@ -521,93 +509,41 @@ export class AdvancementController implements AdvancementRubricRevisionMechanism
     return { summary: renderClosureReport(facts), synthesized: false, facts };
   }
 
-  async confirmRubric(input: {
-    readonly conversationId: string;
-    readonly advancementSessionId: string;
-    /**
-     * 发起端所见草案版本——「确认你所见」是协议语义，必填强制：
-     * 草案被并发修订后拒绝盲确认，不依赖调用方自觉。
-     */
-    readonly expectedRubricDraftId: string;
-    readonly persistence?: RubricDraftPersistenceChoice;
-    readonly surfacePrincipal: string;
-  }): Promise<AdvancementConfirmedTurn> {
-    const session = await this.requireSession(
-      input.conversationId,
-      input.advancementSessionId,
-    );
-    if (session.status !== "awaiting-rubric-confirmation") {
-      throw new Error(
-        `AdvancementController: session "${session.id}" is not awaiting rubric confirmation`,
-      );
-    }
-    const draft = session.pendingRubricDraft;
-    if (!draft) {
-      throw new Error(
-        `AdvancementController: session "${session.id}" has no pending rubric draft`,
-      );
-    }
-    if (draft.draftId !== input.expectedRubricDraftId) {
-      throw new Error(
-        "推进准则草案已被修订，请查看最新内容后再确认。",
-      );
-    }
-    const confirmedRubric = await this.contractBuilder.confirmDraft(draft);
-    const inputDigest = protocolDigest(
-      "AdvancementOriginalTaskInput",
-      1,
-      session.originalUserTask,
-    );
-    const confirmed = await this.store.confirmRubric(
-      input.conversationId,
-      input.advancementSessionId,
-      confirmedRubric,
-      {
-        turnId: draft.originalTurnId,
-        surfacePrincipal: input.surfacePrincipal,
-        turnOrigin: {
-          channel: "rpc",
-          triggeredBy: input.surfacePrincipal,
-        },
-        inputDigest,
-      },
-      confirmedRubric.confirmedAt,
-    );
-    let rubricPublicationTask: Promise<RubricPublicationOutcome> | undefined;
-    if (draft.source === "generated" && input.persistence) {
-      if (this.rubricPublication) {
-        rubricPublicationTask = this.rubricPublication
-          .publish({
-            conversationId: input.conversationId,
-            draft,
-            persistence: input.persistence,
-          })
-          .catch(() => ({
-            kind: "failed",
-            message: "任务已继续执行，但准则暂未保存；稍后可重新保存。",
-          }));
-      } else {
-        rubricPublicationTask = Promise.resolve({
-          kind: "deferred",
-          message: "准则已用于本任务，连接值班设备后可保存到准则库。",
-        });
-      }
-    }
-    return {
-      session: confirmed,
-      originalTurnId: draft.originalTurnId,
-      originalUserTask: confirmed.originalUserTask,
-      ...(rubricPublicationTask ? { rubricPublicationTask } : {}),
-    };
+  loadRubricConfirmationSession(
+    conversationId: string,
+    advancementSessionId: string,
+  ): Promise<AdvancementSession | null> {
+    return this.store.loadSession(conversationId, advancementSessionId);
   }
 
-  settleOriginalTaskAdmission(input: {
+  confirmRubricDraftContent(
+    draft: RubricContractDraftSnapshot,
+  ): Promise<ConfirmedRubricSnapshot> {
+    return this.contractBuilder.confirmDraft(draft);
+  }
+
+  persistRubricConfirmation(input: Readonly<{
+    readonly conversationId: string;
+    readonly advancementSessionId: string;
+    readonly confirmedRubric: ConfirmedRubricSnapshot;
+    readonly admissionIntent: AdvancementOriginalTaskAdmissionIntent;
+  }>): Promise<AdvancementSession> {
+    return this.store.confirmRubric(
+      input.conversationId,
+      input.advancementSessionId,
+      input.confirmedRubric,
+      input.admissionIntent,
+      input.confirmedRubric.confirmedAt,
+    );
+  }
+
+  persistOriginalTaskAdmissionSettlement(input: Readonly<{
     readonly conversationId: string;
     readonly advancementSessionId: string;
     readonly turnId: string;
     readonly inputDigest: import("@zhixing/core").Digest;
     readonly runId: string;
-  }): Promise<AdvancementSession> {
+  }>): Promise<AdvancementSession> {
     return this.store.settleOriginalTaskAdmission(
       input.conversationId,
       input.advancementSessionId,
@@ -617,6 +553,14 @@ export class AdvancementController implements AdvancementRubricRevisionMechanism
         runId: input.runId,
       },
     );
+  }
+
+  publishRubric(input: Parameters<RubricPublicationPort["publish"]>[0]): Promise<
+    RubricPublicationOutcome | Readonly<{ kind: "unavailable" }>
+  > {
+    return this.rubricPublication
+      ? this.rubricPublication.publish(input)
+      : Promise.resolve({ kind: "unavailable" });
   }
 
   loadRubricRevisionSession(
