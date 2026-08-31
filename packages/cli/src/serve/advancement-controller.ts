@@ -43,7 +43,11 @@ import {
   type AdvancementEvidenceTarget,
 } from "@zhixing/owner-services";
 import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
-import type { RubricPublicationPort } from "@zhixing/core/advancement/application";
+import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
+import type {
+  AdvancementReviewAttemptApplication,
+  RubricPublicationPort,
+} from "@zhixing/core/advancement/application";
 import {
   GlobalRubricCatalog,
   GlobalRubricPublication,
@@ -133,9 +137,14 @@ function lazyResourcePort(
 
 const ADVANCEMENT_CONTROL_BUDGET = { maxCalls: 1, maxTokens: 300_000 } as const;
 
-export async function createServeAdvancementController(
+export interface ServeAdvancementApplications {
+  readonly controller: AdvancementController;
+  readonly reviews: AdvancementReviewAttemptApplication;
+}
+
+export async function createServeAdvancementApplications(
   deps: ServeAdvancementControllerDeps,
-): Promise<AdvancementController> {
+): Promise<ServeAdvancementApplications> {
   const { roles: rawRoles, resolvedRoles, config } = createProviderRoles({
     config: deps.config,
     credentials: deps.credentials,
@@ -294,21 +303,21 @@ export async function createServeAdvancementController(
     },
   });
 
-  return new AdvancementController({
+  const reviews = createAdvancementReviewAttemptApplication({
+    store,
+    resources: governor,
+    mechanism: createAdvancementReviewExternalMechanism({ evidence, reviewer }),
+    reviewerAvailable: true,
+    closureSynthesizer,
+    ...(config.advancement?.sessionTokenBudget !== undefined
+      ? { sessionTokenBudget: config.advancement.sessionTokenBudget }
+      : {}),
+  });
+  const controller = new AdvancementController({
     store,
     admissionStrategy: new LLMAdvancementAdmissionStrategy({
       complete: (prompt) => completeViaPort("light", prompt),
     }),
-    reviewAttempts: createAdvancementReviewAttemptApplication({
-      store,
-      resources: governor,
-      reviewerAvailable: true,
-      closureSynthesizer,
-      ...(config.advancement?.sessionTokenBudget !== undefined
-        ? { sessionTokenBudget: config.advancement.sessionTokenBudget }
-        : {}),
-    }),
-    ...(evidence ? { evidence } : {}),
     ...(deps.rubricPublication
       ? { rubricPublication: deps.rubricPublication }
       : deps.rubricScope === "local"
@@ -323,8 +332,8 @@ export async function createServeAdvancementController(
     // 收场合成走轻推理通道；失败由领域投影降级结构化直出。
     closureSynthesizer,
     contractBuilder,
-    reviewer,
   });
+  return Object.freeze({ controller, reviews });
 }
 
 function resolveConfiguredThinking(

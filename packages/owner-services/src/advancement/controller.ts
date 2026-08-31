@@ -4,20 +4,15 @@ import {
   type AdvancementAdmissionDecision,
   type AdvancementAdmissionStrategy,
   type AdvancementExit,
-  type AdvancementReviewRunOutcome,
-  type AdvancementRunReview,
   type AdvancementSession,
   type AdvancementOriginalTaskAdmissionIntent,
   type ConfirmedRubricSnapshot,
-  type RunRecordInput,
-  type RunRecordRef,
   type RubricContractDraftSnapshot,
   type Message,
   type UserTurnInput,
   type AdvancementClosureReport,
   extractText,
 } from "@zhixing/core";
-import type { AdvancementReviewerPort } from "@zhixing/core/contracts";
 import type {
   AdvancementActiveUserTurnMechanismPort,
   AdvancementAwaitingRubricAdmissionDecision,
@@ -25,33 +20,19 @@ import type {
   AdvancementNewTaskMechanismPort,
   AdvancementRubricConfirmationMechanismPort,
   AdvancementRubricRevisionMechanismPort,
-  AdvancementReviewAttemptApplication,
-  AdvancementReviewAttemptMechanismPort,
   AdvancementClosureSynthesizer,
-  AdvancementMissingProxyRebuildResult,
-  AdvancementTurnReviewResult,
   RubricPublicationOutcome,
   RubricPublicationPort,
 } from "@zhixing/core/advancement/application";
 import { randomUUID } from "node:crypto";
 import { composeAdvancementClosureReport } from "@zhixing/core/advancement/application";
 import type { AdvancementSessionStore } from "./session-store.js";
-import {
-  AdvancementEvidenceCoordinator,
-  AdvancementEvidenceDeferredError,
-  type AdvancementEvidenceTarget,
-} from "./evidence.js";
 
 export interface AdvancementControllerOptions {
   /** 推进会话存储——生产装配注入权威日志适配实现，无隐式回退。 */
   readonly store: AdvancementSessionStore;
   readonly contractBuilder?: RubricContractBuilder;
   readonly admissionStrategy?: AdvancementAdmissionStrategy;
-  readonly reviewer?: AdvancementReviewerPort;
-  /** owner 侧耐久取证协调器；未装配时只允许无独立取证的既有测试/兼容路径。 */
-  readonly evidence?: AdvancementEvidenceCoordinator;
-  /** Advancement-owned durable attempt/root lifecycle application. */
-  readonly reviewAttempts?: AdvancementReviewAttemptApplication;
   /** Optional global-library publication; active session adoption never waits on it. */
   readonly rubricPublication?: RubricPublicationPort;
   /**
@@ -67,17 +48,6 @@ export interface AdvancementControllerOptions {
   readonly closureSynthesizer?: AdvancementClosureSynthesizer;
   readonly now?: () => string;
 }
-
-export type {
-  AdvancementReviewRunInput,
-  AdvancementReviewRunOutcome,
-} from "@zhixing/core";
-
-/** 推进侧裁判端口——与 contracts AdvancementReviewerPort 同一抽象。 */
-export type AdvancementRunReviewer = AdvancementReviewerPort;
-
-export type { AdvancementTurnReviewResult } from "@zhixing/core/advancement/application";
-
 export class AdvancementController implements
   AdvancementActiveUserTurnMechanismPort,
   AdvancementAwaitingRubricAdmissionMechanismPort,
@@ -88,9 +58,6 @@ export class AdvancementController implements
   private readonly store: AdvancementSessionStore;
   private readonly contractBuilder: RubricContractBuilder;
   private readonly admissionStrategy: AdvancementAdmissionStrategy;
-  private readonly reviewer?: AdvancementRunReviewer;
-  private readonly evidence?: AdvancementEvidenceCoordinator;
-  private readonly reviewAttempts?: AdvancementReviewAttemptApplication;
   private readonly rubricPublication?: RubricPublicationPort;
   private readonly recentContextProvider?: (
     conversationId: string,
@@ -104,9 +71,6 @@ export class AdvancementController implements
     this.contractBuilder = options.contractBuilder ?? new RubricContractBuilder();
     this.admissionStrategy =
       options.admissionStrategy ?? new ConservativeAdvancementAdmissionStrategy();
-    this.reviewer = options.reviewer;
-    this.evidence = options.evidence;
-    this.reviewAttempts = options.reviewAttempts;
     this.rubricPublication = options.rubricPublication;
     this.recentContextProvider = options.recentContextProvider;
     this.onAdmissionTiming = options.onAdmissionTiming;
@@ -382,53 +346,10 @@ export class AdvancementController implements
     return this.store.loadSession(conversationId, advancementSessionId);
   }
 
-  persistRubricCancellation(input: Readonly<{
-    conversationId: string;
-    advancementSessionId: string;
-    reason: AdvancementExit["reason"];
-    message: string;
-  }>): Promise<AdvancementSession> {
-    return this.cancelSession(
-      input.conversationId,
-      input.advancementSessionId,
-      input.message,
-      input.reason,
-    );
-  }
-
-  async cancelOpenSession(input: {
-    readonly conversationId: string;
-    readonly advancementSessionId: string;
-    readonly reason?: AdvancementExit["reason"];
-    readonly message: string;
-  }): Promise<AdvancementSession> {
-    await this.requireSession(input.conversationId, input.advancementSessionId);
-    return await this.cancelSession(
-      input.conversationId,
-      input.advancementSessionId,
-      input.message,
-      input.reason,
-    );
-  }
-
   loadOpenConversationLifecycleSession(
     conversationId: string,
   ): Promise<AdvancementSession | null> {
     return this.store.loadActiveSession(conversationId);
-  }
-
-  persistConversationLifecycleCancellation(input: Readonly<{
-    conversationId: string;
-    advancementSessionId: string;
-    reason: AdvancementExit["reason"];
-    message: string;
-  }>): Promise<AdvancementSession> {
-    return this.cancelSession(
-      input.conversationId,
-      input.advancementSessionId,
-      input.message,
-      input.reason,
-    );
   }
 
   removeConversationLifecycleData(conversationId: string): Promise<void> {
@@ -448,12 +369,6 @@ export class AdvancementController implements
   async loadActiveSession(
     conversationId: string,
   ): Promise<AdvancementSession | null> {
-    if (!this.reviewAttempts) {
-      throw new Error(
-        "AdvancementController: review attempt application is not assembled",
-      );
-    }
-    await this.reviewAttempts.reconcileConversation(conversationId);
     return await this.store.loadActiveSession(conversationId);
   }
 
@@ -487,184 +402,6 @@ export class AdvancementController implements
     );
   }
 
-  /**
-   * missing-proxy 自愈：最新 failed review 带 proxyMessageId 但实体不在
-   * proxyMessages（review 与 proxy 的双事件写入被中断 / 日志掉尾）时，
-   * 从已持久化 review 确定性重建并补写 proxy_enqueued。
-   * id 恒复用 review.proxyMessageId，content 由同一组纯函数按同一 review
-   * 重渲染（byte 等价）；createdAt 为重建时刻。
-   */
-  async rebuildMissingProxyMessage(session: AdvancementSession): Promise<
-    AdvancementMissingProxyRebuildResult
-  > {
-    if (!this.reviewAttempts) {
-      throw new Error(
-        "AdvancementController: review attempt application is not assembled",
-      );
-    }
-    return await this.reviewAttempts.rebuildMissingProxyMessage(session);
-  }
-
-  async afterTurnCommitted(input: {
-    readonly conversationId: string;
-    readonly runId?: string;
-    readonly runIndex: number;
-    readonly runRecord: RunRecordInput;
-    readonly runRecordRef?: RunRecordRef;
-    readonly abortSignal?: AbortSignal;
-  }): Promise<AdvancementTurnReviewResult> {
-    if (!this.reviewAttempts) {
-      throw new Error(
-        "AdvancementController: review attempt application is not assembled",
-      );
-    }
-    return await this.reviewAttempts.reviewAcceptedRun(
-      input,
-      this.reviewAttemptMechanism(),
-    );
-  }
-
-  private reviewAttemptMechanism(): AdvancementReviewAttemptMechanismPort {
-    let evidenceTarget: AdvancementEvidenceTarget | undefined;
-    return {
-      resolveRootTarget: async (session, input) => {
-        if (!this.evidence || !input.runId) return undefined;
-        const carried = this.evidence.carriedOutcomeRootTarget(
-          session,
-          input.runId,
-        );
-        if (carried) return carried;
-        evidenceTarget = await this.evidence.resolveTarget(
-          input.conversationId,
-          input.runId,
-        );
-        return evidenceTarget;
-      },
-      prepareEvidence: async ({
-        session,
-        request,
-        attempt,
-        rootLease,
-      }) => {
-        try {
-          const collected =
-            this.evidence && request.runId
-              ? await this.evidence.collect({
-                  session,
-                  runId: request.runId,
-                  reviewId: attempt.lineageId,
-                  generation: attempt.generation,
-                  runRecord: request.runRecord,
-                  rootLease,
-                  target: evidenceTarget,
-                  abort:
-                    request.abortSignal ?? new AbortController().signal,
-                })
-              : undefined;
-          return {
-            kind: "ready",
-            ...(collected
-              ? {
-                  canonicalEvidence: collected.canonicalEvidence,
-                  ...(collected.requestId
-                    ? { requestId: collected.requestId }
-                    : {}),
-                }
-              : {}),
-          };
-        } catch (error) {
-          return {
-            kind: "deferred",
-            cause:
-              error instanceof AdvancementEvidenceDeferredError ||
-              (error instanceof Error && error.name === "AbortError")
-                ? "aborted"
-                : "infrastructure",
-            reason: `独立取证未能形成可消费终态：${errorMessage(error)}`,
-          };
-        }
-      },
-      invokeReviewer: async ({
-        session,
-        rubric,
-        request,
-        rootLease,
-        canonicalEvidence,
-      }) => {
-        if (!this.reviewer) {
-          throw new Error("Advancement reviewer is not assembled");
-        }
-        let outcome: AdvancementReviewRunOutcome;
-        try {
-          outcome = await this.reviewer.review(
-            {
-              sessionId: session.id,
-              originalUserTask: session.originalUserTask,
-              rubric,
-              runIndex: request.runIndex,
-              runRecord: request.runRecord,
-              runRecordRef: request.runRecordRef,
-              priorReviews: session.runs,
-              advancementWindow: session.advancementWindow,
-              ...(canonicalEvidence ? { canonicalEvidence } : {}),
-            },
-            rootLease,
-            request.abortSignal ?? new AbortController().signal,
-          );
-        } catch (error) {
-          outcome = {
-            kind: "deferred",
-            cause:
-              error instanceof Error && error.name === "AbortError"
-                ? "aborted"
-                : "infrastructure",
-            reason: `推进侧验收运行失败：${errorMessage(error)}`,
-          };
-        }
-        if (outcome.kind !== "deferred") {
-          assertReviewMatchesAcceptedRun(request, outcome.review);
-        }
-        return outcome;
-      },
-    };
-  }
-
-  private async cancelSession(
-    conversationId: string,
-    sessionId: string,
-    message: string,
-    reason: AdvancementExit["reason"] = "user-cancelled",
-  ): Promise<AdvancementSession> {
-    if (!this.reviewAttempts) {
-      throw new Error(
-        "AdvancementController: review attempt application is not assembled",
-      );
-    }
-    return await this.reviewAttempts.cancelSession({
-      conversationId,
-      advancementSessionId: sessionId,
-      reason,
-      message,
-    });
-  }
-
-  private async requireSession(
-    conversationId: string,
-    sessionId: string,
-  ): Promise<AdvancementSession> {
-    const session = await this.store.loadSession(conversationId, sessionId);
-    if (!session) {
-      throw new Error(`AdvancementController: session "${sessionId}" not found`);
-    }
-    return session;
-  }
-
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error && err.message.trim().length > 0
-    ? err.message
-    : "Rubric contract draft generation failed";
 }
 
 const RECENT_CONTEXT_MESSAGE_CHARS = 200;
@@ -693,29 +430,4 @@ export function renderRecentContextFromMessages(
     total += line.length;
   }
   return lines.length > 0 ? lines.join("\n") : undefined;
-}
-
-function assertReviewMatchesAcceptedRun(
-  accepted: {
-    readonly runIndex: number;
-    readonly runRecordRef?: RunRecordRef;
-  },
-  review: AdvancementRunReview,
-): void {
-  if (review.runIndex !== accepted.runIndex) {
-    throw new Error(
-      `review runIndex ${review.runIndex} does not match accepted runIndex ${accepted.runIndex}`,
-    );
-  }
-  if (!sameRunRecordRef(review.runRecordRef, accepted.runRecordRef)) {
-    throw new Error("review runRecordRef does not match accepted runRecordRef");
-  }
-}
-
-function sameRunRecordRef(
-  a: RunRecordRef | undefined,
-  b: RunRecordRef | undefined,
-): boolean {
-  if (!a || !b) return a === b;
-  return a.shardId === b.shardId && a.runIndex === b.runIndex;
 }

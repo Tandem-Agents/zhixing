@@ -1857,7 +1857,7 @@ describe("Advancement accepted-turn application", () => {
         },
       },
       review: {
-        reviewAcceptedTurn: async (input) => {
+        reviewAcceptedRun: async (input) => {
           order.push(`review:${input.runIndex}`);
           return acceptedTurnReviewResult("reviewed");
         },
@@ -1892,7 +1892,7 @@ describe("Advancement accepted-turn application", () => {
         },
       },
       review: {
-        reviewAcceptedTurn: async (input) => {
+        reviewAcceptedRun: async (input) => {
           reviewed.push(`${input.conversationId}:${input.runIndex}`);
           if (failNext) {
             failNext = false;
@@ -1926,22 +1926,22 @@ describe("Advancement accepted-turn application", () => {
   it.each(["failed", "awaiting-original-run"] as const)(
     "does not review across a %s catch-up gap",
     async (status) => {
-      const reviewAcceptedTurn = vi.fn(async () =>
+      const reviewAcceptedRun = vi.fn(async () =>
         acceptedTurnReviewResult("reviewed"),
       );
       const application = new AdvancementAcceptedTurnApplicationService({
         catchUp: { catchUpAcceptedTurn: async () => ({ status }) },
-        review: { reviewAcceptedTurn },
+        review: { reviewAcceptedRun },
         results: { projectReviewResult: async () => {} },
       });
       application.acceptCommittedTurn(committedTurn());
       await flushAcceptedTurns();
-      expect(reviewAcceptedTurn).not.toHaveBeenCalled();
+      expect(reviewAcceptedRun).not.toHaveBeenCalled();
     },
   );
 
   it("does not review when catch-up rejects", async () => {
-    const reviewAcceptedTurn = vi.fn(async () =>
+    const reviewAcceptedRun = vi.fn(async () =>
       acceptedTurnReviewResult("reviewed"),
     );
     const application = new AdvancementAcceptedTurnApplicationService({
@@ -1950,12 +1950,12 @@ describe("Advancement accepted-turn application", () => {
           throw new Error("recovery unavailable");
         },
       },
-      review: { reviewAcceptedTurn },
+      review: { reviewAcceptedRun },
       results: { projectReviewResult: async () => {} },
     });
     application.acceptCommittedTurn(committedTurn());
     await flushAcceptedTurns();
-    expect(reviewAcceptedTurn).not.toHaveBeenCalled();
+    expect(reviewAcceptedRun).not.toHaveBeenCalled();
   });
 });
 

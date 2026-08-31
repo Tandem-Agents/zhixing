@@ -25,9 +25,9 @@
       "types": "./dist/advancement/recovery-maintenance.d.ts",
       "import": "./dist/advancement/recovery-maintenance.js"
     },
-    "./advancement/review-application-bridge": {
-      "types": "./dist/advancement/review-application-bridge.d.ts",
-      "import": "./dist/advancement/review-application-bridge.js"
+    "./advancement/review-external-mechanism": {
+      "types": "./dist/advancement/review-external-mechanism.d.ts",
+      "import": "./dist/advancement/review-external-mechanism.js"
     },
     "./advancement/review-attempt-correctness": {
       "types": "./dist/advancement/review-attempt-correctness.d.ts",

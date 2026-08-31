@@ -7,7 +7,7 @@ export default defineConfig({
     "src/advancement/controller.ts",
     "src/advancement/proxy-scheduler.ts",
     "src/advancement/recovery-maintenance.ts",
-    "src/advancement/review-application-bridge.ts",
+    "src/advancement/review-external-mechanism.ts",
     "src/advancement/review-attempt-correctness.ts",
   ],
   format: ["esm"],

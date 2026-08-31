@@ -30,10 +30,10 @@ import {
 } from "@zhixing/orchestrator/advancement";
 import { AnchorResourceGovernor } from "@zhixing/owner-kernel";
 import {
-  AdvancementController,
   AdvancementEvidenceCoordinator,
 } from "@zhixing/owner-services";
 import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
+import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, onTestFinished } from "vitest";
 
@@ -176,26 +176,20 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
       runRecordRef: RUN_REF,
     } as const;
 
-    const firstController = new AdvancementController({
-      store,
-      reviewAttempts: reviewAttemptApplication(store, resources),
+    const firstReviews = reviewAttemptApplication(store, resources, {
       reviewer,
       evidence,
-      now: () => NOW,
     });
-    await expect(firstController.afterTurnCommitted(input)).rejects.toThrow(
+    await expect(firstReviews.reviewAcceptedRun(input)).rejects.toThrow(
       "simulated process crash after invoking",
     );
     expect(provider.callCount).toBe(0);
 
-    const recoveredController = new AdvancementController({
-      store,
-      reviewAttempts: reviewAttemptApplication(store, resources),
+    const recoveredReviews = reviewAttemptApplication(store, resources, {
       reviewer,
       evidence,
-      now: () => NOW,
     });
-    const result = await recoveredController.afterTurnCommitted(input);
+    const result = await recoveredReviews.reviewAcceptedRun(input);
 
     expect(result.kind, JSON.stringify(result)).toBe("completed");
     expect(provider.callCount).toBe(1);
@@ -221,14 +215,12 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
       state: "settled",
     });
 
-    const cleanupController = new AdvancementController({
-      store,
-      reviewAttempts: reviewAttemptApplication(store, resources),
+    const cleanupReviews = reviewAttemptApplication(store, resources, {
       reviewer,
       evidence,
-      now: () => NOW,
     });
-    await expect(cleanupController.loadActiveSession("conversation-1")).resolves.toBeNull();
+    await cleanupReviews.reconcileConversation("conversation-1");
+    await expect(store.loadActiveSession("conversation-1")).resolves.toBeNull();
     await expect(governor.inspectImmediateRoot(workload(2))).resolves.toMatchObject({
       kind: "reservation",
       state: "released",
@@ -270,14 +262,11 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
       runRecordRef: RUN_REF,
     } as const;
 
-    const firstController = new AdvancementController({
-      store,
-      reviewAttempts: reviewAttemptApplication(store, governor),
+    const firstReviews = reviewAttemptApplication(store, governor, {
       reviewer,
       evidence,
-      now: () => NOW,
     });
-    await expect(firstController.afterTurnCommitted(input)).rejects.toThrow(
+    await expect(firstReviews.reviewAcceptedRun(input)).rejects.toThrow(
       "simulated process crash before review commit",
     );
     expect(provider.callCount).toBe(1);
@@ -287,14 +276,11 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
       reviewAttempts: [expect.objectContaining({ generation: 1, phase: "invoking" })],
     });
 
-    const recoveredController = new AdvancementController({
-      store,
-      reviewAttempts: reviewAttemptApplication(store, governor),
+    const recoveredReviews = reviewAttemptApplication(store, governor, {
       reviewer,
       evidence,
-      now: () => NOW,
     });
-    const result = await recoveredController.afterTurnCommitted(input);
+    const result = await recoveredReviews.reviewAcceptedRun(input);
 
     expect(result.kind).toBe("completed");
     expect(provider.callCount).toBe(2);
@@ -338,20 +324,18 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
       now: () => new Date(NOW),
       idGenerator: () => "review-1",
     });
-    const controller = new AdvancementController({
+    const evidence = new AdvancementEvidenceCoordinator({
       store,
-      reviewAttempts: reviewAttemptApplication(store, governor),
-      reviewer,
-      evidence: new AdvancementEvidenceCoordinator({
-        store,
-        resources: governor,
-        resolveTarget: async () => undefined,
-        clientFor: () => undefined,
-        signer,
-        verifier,
-        now: () => NOW,
-      }),
+      resources: governor,
+      resolveTarget: async () => undefined,
+      clientFor: () => undefined,
+      signer,
+      verifier,
       now: () => NOW,
+    });
+    const reviews = reviewAttemptApplication(store, governor, {
+      reviewer,
+      evidence,
     });
     const input = {
       conversationId: "conversation-1",
@@ -361,7 +345,7 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
       runRecordRef: RUN_REF,
     } as const;
 
-    await expect(controller.afterTurnCommitted(input)).resolves.toMatchObject({
+    await expect(reviews.reviewAcceptedRun(input)).resolves.toMatchObject({
       kind: "review-deferred",
       cause: "infrastructure",
     });
@@ -376,7 +360,7 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
       state: "released",
     });
 
-    await expect(controller.afterTurnCommitted(input)).resolves.toMatchObject({
+    await expect(reviews.reviewAcceptedRun(input)).resolves.toMatchObject({
       kind: "completed",
     });
     expect(provider.callCount).toBe(2);
@@ -436,12 +420,9 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
       verifier,
       now: () => NOW,
     });
-    const controller = new AdvancementController({
-      store,
-      reviewAttempts: reviewAttemptApplication(store, governor),
+    const reviews = reviewAttemptApplication(store, governor, {
       reviewer,
       evidence,
-      now: () => NOW,
     });
     const input = {
       conversationId: "conversation-1",
@@ -451,7 +432,7 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
       runRecordRef: RUN_REF,
     } as const;
 
-    const drifted = await controller.afterTurnCommitted(input);
+    const drifted = await reviews.reviewAcceptedRun(input);
     expect(drifted.kind).toBe("review-deferred");
     expect(provider.callCount).toBe(0);
     await expect(store.loadSession("conversation-1", "session-1")).resolves.toMatchObject({
@@ -483,14 +464,11 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
       verifier,
       now: () => NOW,
     });
-    const controller = new AdvancementController({
-      store,
-      reviewAttempts: reviewAttemptApplication(store, held.resources),
+    const reviews = reviewAttemptApplication(store, held.resources, {
       reviewer,
       evidence,
-      now: () => NOW,
     });
-    const review = controller.afterTurnCommitted({
+    const review = reviews.reviewAcceptedRun({
       conversationId: "conversation-1",
       runId: "run-1",
       runIndex: 0,
@@ -499,9 +477,10 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
     });
 
     await held.acquired;
-    await controller.cancelOpenSession({
+    await reviews.cancelSession({
       conversationId: "conversation-1",
       advancementSessionId: "session-1",
+      reason: "user-cancelled",
       message: "用户停止推进",
     });
     held.releaseResponse();
@@ -544,14 +523,11 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
       verifier,
       now: () => NOW,
     });
-    const controller = new AdvancementController({
-      store,
-      reviewAttempts: reviewAttemptApplication(store, held.resources),
+    const reviews = reviewAttemptApplication(store, held.resources, {
       reviewer,
       evidence,
-      now: () => NOW,
     });
-    const review = controller.afterTurnCommitted({
+    const review = reviews.reviewAcceptedRun({
       conversationId: "conversation-1",
       runId: "run-1",
       runIndex: 0,
@@ -560,9 +536,10 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
     });
 
     await held.queued;
-    await controller.cancelOpenSession({
+    await reviews.cancelSession({
       conversationId: "conversation-1",
       advancementSessionId: "session-1",
+      reason: "user-cancelled",
       message: "用户停止推进",
     });
     held.releaseAcquire();
@@ -587,28 +564,27 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
     await makeActive(store);
 
     const governor = createGovernor(root);
-    const controller = new AdvancementController({
-      store,
-      reviewAttempts: reviewAttemptApplication(store, governor),
-      reviewer: {
-        review: async () => ({
-          kind: "deferred",
-          cause: "infrastructure",
-          reason: "review deferred",
-        }),
-      },
-      evidence: new AdvancementEvidenceCoordinator({
-        store,
-        resources: governor,
-        resolveTarget: async () => undefined,
-        clientFor: () => undefined,
-        signer,
-        verifier,
-        now: () => NOW,
+    const reviewer = {
+      review: async () => ({
+        kind: "deferred" as const,
+        cause: "infrastructure" as const,
+        reason: "review deferred",
       }),
+    };
+    const evidence = new AdvancementEvidenceCoordinator({
+      store,
+      resources: governor,
+      resolveTarget: async () => undefined,
+      clientFor: () => undefined,
+      signer,
+      verifier,
       now: () => NOW,
     });
-    const review = controller.afterTurnCommitted({
+    const reviews = reviewAttemptApplication(store, governor, {
+      reviewer,
+      evidence,
+    });
+    const review = reviews.reviewAcceptedRun({
       conversationId: "conversation-1",
       runId: "run-1",
       runIndex: 0,
@@ -617,9 +593,10 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
     });
 
     await store.deferredReached;
-    await controller.cancelOpenSession({
+    await reviews.cancelSession({
       conversationId: "conversation-1",
       advancementSessionId: "session-1",
+      reason: "user-cancelled",
       message: "用户停止推进",
     });
     store.releaseDeferred();
@@ -659,10 +636,14 @@ function createGovernor(root: string): AnchorResourceGovernor {
 function reviewAttemptApplication(
   store: AdvancementStore,
   resources: ResourceReservationPort,
+  mechanismOptions: Parameters<
+    typeof createAdvancementReviewExternalMechanism
+  >[0],
 ) {
   return createAdvancementReviewAttemptApplication({
     store,
     resources,
+    mechanism: createAdvancementReviewExternalMechanism(mechanismOptions),
     reviewerAvailable: true,
     now: () => NOW,
   });

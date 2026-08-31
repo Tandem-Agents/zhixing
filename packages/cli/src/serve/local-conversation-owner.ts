@@ -57,10 +57,7 @@ import {
   type AdvancementRecoveryMaintenance,
   type DeferredScheduleIntentResult,
 } from "@zhixing/owner-services";
-import {
-  createAdvancementAcceptedTurnReviewMechanism,
-  createAdvancementReviewProxySchedulePort,
-} from "@zhixing/owner-services/advancement/review-application-bridge";
+import { createAdvancementReviewProxySchedulePort } from "@zhixing/owner-services/advancement/proxy-scheduler";
 import {
   createAdvancementEventSink,
   createAdvancementOriginalTaskAdmissionPort,
@@ -79,7 +76,7 @@ import {
   type ProjectedSessionTurnResult,
   type SessionTurnNotify,
 } from "@zhixing/rpc";
-import { createServeAdvancementController } from "./advancement-controller.js";
+import { createServeAdvancementApplications } from "./advancement-controller.js";
 import { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
 import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import type { LocalConversationOwnerRuntimeStack } from "./conversation-owner-runtime.js";
@@ -897,7 +894,8 @@ export class LocalConversationOwnerAssembly {
           artifacts: owner.artifacts,
         }),
     });
-    const advancement = await createServeAdvancementController({
+    const { controller: advancement, reviews } =
+      await createServeAdvancementApplications({
       config: options.config,
       credentials: options.credentials,
       governor: () => owner.resources,
@@ -929,6 +927,7 @@ export class LocalConversationOwnerAssembly {
     });
     const recovery = createAdvancementRecoveryMaintenance({
       advancement,
+      reviews,
       directory: {
         list: async () => {
           const items: Conversation[] = [];
@@ -978,7 +977,7 @@ export class LocalConversationOwnerAssembly {
         catchUpAcceptedTurn: (conversationId, beforeRunIndex) =>
           recovery.recoverConversation(conversationId, { beforeRunIndex }),
       },
-      review: createAdvancementAcceptedTurnReviewMechanism(advancement),
+      review: reviews,
       results: reviewResults,
     });
 

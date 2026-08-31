@@ -15,7 +15,10 @@ import {
   type AdvancementControllerOptions,
 } from "@zhixing/owner-services";
 import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
+import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
+import type { AdvancementReviewAttemptApplication } from "@zhixing/core/advancement/application";
 import type {
+  AdvancementReviewerPort,
   ImmediateRootResourceLease,
   ResourceReservationPort,
 } from "@zhixing/core/contracts";
@@ -62,25 +65,28 @@ function fakeResources(): ResourceReservationPort {
 }
 
 class AdvancementController extends OwnerAdvancementController {
-  constructor(options: Omit<AdvancementControllerOptions, "reviewAttempts"> & {
+  readonly reviews: AdvancementReviewAttemptApplication;
+
+  constructor(options: AdvancementControllerOptions & {
     readonly resources?: ResourceReservationPort;
+    readonly reviewer?: AdvancementReviewerPort;
     readonly sessionTokenBudget?: number;
     readonly reviewIdGenerator?: () => string;
     readonly proxyIdGenerator?: () => string;
   }) {
     const {
       resources = fakeResources(),
+      reviewer,
       sessionTokenBudget,
       reviewIdGenerator,
       proxyIdGenerator,
       ...rest
     } = options;
-    super({
-      ...rest,
-      reviewAttempts: createAdvancementReviewAttemptApplication({
+    const reviews = createAdvancementReviewAttemptApplication({
         store: options.store,
         resources,
-        reviewerAvailable: options.reviewer !== undefined,
+        mechanism: createAdvancementReviewExternalMechanism({ reviewer }),
+        reviewerAvailable: reviewer !== undefined,
         ...(options.closureSynthesizer
           ? { closureSynthesizer: options.closureSynthesizer }
           : {}),
@@ -88,8 +94,9 @@ class AdvancementController extends OwnerAdvancementController {
         ...(options.now ? { now: options.now } : {}),
         ...(reviewIdGenerator ? { reviewIdGenerator } : {}),
         ...(proxyIdGenerator ? { proxyIdGenerator } : {}),
-      }),
     });
+    super(rest);
+    this.reviews = reviews;
   }
 }
 
@@ -259,7 +266,7 @@ async function makeStore() {
   return new AdvancementStore(root);
 }
 
-describe("AdvancementController.afterTurnCommitted", () => {
+describe("AdvancementReviewAttemptApplication.reviewAcceptedRun", () => {
   it("active user-turn 只提供 path-free admission、exit 与 closure 机制", async () => {
     const store = await makeStore();
     await makeActive(store);
@@ -313,7 +320,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       proxyIdGenerator: () => "proxy-1",
     });
 
-    const result = await controller.afterTurnCommitted({
+    const result = await controller.reviews.reviewAcceptedRun({
       conversationId: "conv-1",
       runIndex: 0,
       runRecord: runRecord(),
@@ -375,7 +382,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       proxyIdGenerator: () => "proxy-1",
     });
 
-    await controller.afterTurnCommitted({
+    await controller.reviews.reviewAcceptedRun({
       conversationId: "conv-1",
       runIndex: 1,
       runRecord: runRecord(),
@@ -420,7 +427,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       now: () => "2026-01-01T00:04:00.000Z",
     });
 
-    const result = await controller.afterTurnCommitted({
+    const result = await controller.reviews.reviewAcceptedRun({
       conversationId: "conv-1",
       runIndex: 0,
       runRecordRef: { shardId: "000001", runIndex: 0 },
@@ -474,7 +481,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       now: () => "2026-01-01T00:04:00.000Z",
     });
 
-    const result = await controller.afterTurnCommitted({
+    const result = await controller.reviews.reviewAcceptedRun({
       conversationId: "conv-1",
       runIndex: 1,
       runRecord: {
@@ -540,8 +547,8 @@ describe("AdvancementController.afterTurnCommitted", () => {
       runRecordRef: { shardId: "000001", runIndex: 0 },
     } as const;
 
-    const first = controller.afterTurnCommitted(input);
-    const second = controller.afterTurnCommitted(input);
+    const first = controller.reviews.reviewAcceptedRun(input);
+    const second = controller.reviews.reviewAcceptedRun(input);
     await vi.waitFor(() => expect(reviewer.review).toHaveBeenCalledTimes(1));
     finishReview({
       kind: "reviewed",
@@ -587,7 +594,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       reviewIdGenerator: () => "review-system-error",
     });
 
-    const result = await controller.afterTurnCommitted({
+    const result = await controller.reviews.reviewAcceptedRun({
       conversationId: "conv-1",
       runIndex: 1,
       runRecord: {
@@ -624,7 +631,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       now: () => "2026-01-01T00:04:00.000Z",
     });
 
-    const result = await controller.afterTurnCommitted({
+    const result = await controller.reviews.reviewAcceptedRun({
       conversationId: "conv-1",
       runIndex: 0,
       runRecord: runRecord(),
@@ -736,7 +743,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
     const reviewer = { review: vi.fn(async () => ({ kind: "reviewed" as const, review: review() })) };
     const controller = new AdvancementController({ store, reviewer });
 
-    const result = await controller.afterTurnCommitted({
+    const result = await controller.reviews.reviewAcceptedRun({
       conversationId: "conv-1",
       runIndex: 0,
       runRecord: runRecord(),
@@ -770,7 +777,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       now: () => "2026-01-01T00:04:00.000Z",
     });
 
-    const result = await controller.afterTurnCommitted({
+    const result = await controller.reviews.reviewAcceptedRun({
       conversationId: "conv-1",
       runIndex: 1,
       runRecord: runRecord(),
@@ -812,7 +819,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       now: () => "2026-01-01T00:04:00.000Z",
     });
 
-    const result = await controller.afterTurnCommitted({
+    const result = await controller.reviews.reviewAcceptedRun({
       conversationId: "conv-1",
       runIndex: 0,
       runRecord: runRecord(),
@@ -972,7 +979,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
         now: () => "2026-01-01T00:04:00.000Z",
       });
 
-      const result = await controller.afterTurnCommitted({
+    const result = await controller.reviews.reviewAcceptedRun({
         conversationId: "conv-1",
         runIndex: 0,
         runRecord: runRecord(),
@@ -1008,7 +1015,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
     };
     const controller = new AdvancementController({ store, reviewer });
 
-    const result = await controller.afterTurnCommitted({
+    const result = await controller.reviews.reviewAcceptedRun({
       conversationId: "conv-1",
       runIndex: 0,
       runRecord: runRecord(),
@@ -1033,7 +1040,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       now: () => "2026-01-01T00:04:00.000Z",
     });
 
-    const result = await controller.afterTurnCommitted({
+    const result = await controller.reviews.reviewAcceptedRun({
       conversationId: "conv-1",
       runIndex: 0,
       runRecordRef: { shardId: "000001", runIndex: 0 },
@@ -1059,7 +1066,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       now: () => "2026-01-01T00:04:00.000Z",
     });
 
-    const result = await controller.afterTurnCommitted({
+    const result = await controller.reviews.reviewAcceptedRun({
       conversationId: "conv-1",
       runIndex: 0,
       runRecordRef: { shardId: "000001", runIndex: 0 },
@@ -1091,7 +1098,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       });
 
       await expect(
-        controller.afterTurnCommitted({
+        controller.reviews.reviewAcceptedRun({
           conversationId: "conv-1",
           runIndex: 0,
           runRecord: runRecord(),

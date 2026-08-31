@@ -3409,8 +3409,11 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   const originalTaskAdapter = required(
     "packages/cli/src/serve/advancement-original-task-application.ts",
   );
-  const reviewBridge = required(
-    "packages/owner-services/src/advancement/review-application-bridge.ts",
+  const reviewExternalMechanism = required(
+    "packages/owner-services/src/advancement/review-external-mechanism.ts",
+  );
+  const proxyScheduler = required(
+    "packages/owner-services/src/advancement/proxy-scheduler.ts",
   );
   const reviewAttemptCorrectness = required(
     "packages/owner-services/src/advancement/review-attempt-correctness.ts",
@@ -3608,7 +3611,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes("interface AdvancementConversationMaintenancePort") ||
     !application.includes("interface AdvancementConversationLifecycleMechanismPort") ||
     !application.includes("interface AdvancementAcceptedTurnCatchUpPort") ||
-    !application.includes("interface AdvancementAcceptedTurnReviewMechanismPort") ||
+    application.includes("interface AdvancementAcceptedTurnReviewMechanismPort") ||
     !application.includes("interface AdvancementReviewAttemptStatePort") ||
     !application.includes("interface AdvancementReviewRootLifecyclePort") ||
     !application.includes("interface AdvancementReviewAttemptMechanismPort") ||
@@ -3617,6 +3620,12 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes("class AdvancementReviewAttemptApplicationService") ||
     application.split("class AdvancementReviewAttemptApplicationService").length - 1 !== 1 ||
     !application.includes("readonly #flights = new Map<string, Promise<AdvancementTurnReviewResult>>();") ||
+    !application.includes("readonly #mechanism: AdvancementReviewAttemptMechanismPort;") ||
+    !application.includes("this.#mechanism = options.mechanism;") ||
+    !application.includes("this.#mechanism.resolveRootTarget(") ||
+    !application.includes("this.#mechanism.prepareEvidence({") ||
+    !application.includes("this.#mechanism.invokeReviewer({") ||
+    /reviewAcceptedRun\([\s\S]{0,180}mechanism:/u.test(application) ||
     !application.includes("const legacyGeneration =") ||
     !application.includes('attempt.phase === "invoking"') ||
     !application.includes("reviewRootTargetMatches(attempt.root, rootTarget)") ||
@@ -3638,19 +3647,26 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !acceptedTurnApplication.includes("readonly #chains = new Map<string, Promise<void>>()") ||
     !acceptedTurnApplication.includes("catchUpAcceptedTurn(") ||
     !acceptedTurnApplication.includes("if (!catchUpProvedContinuous(catchUp.status)) return") ||
-    !acceptedTurnApplication.includes("reviewAcceptedTurn({") ||
+    !acceptedTurnApplication.includes("reviewAcceptedRun({") ||
     !acceptedTurnApplication.includes("projectReviewResult({") ||
     !application.includes('status === "closed-run-recovered"') ||
-    !reviewBridge.includes("createAdvancementAcceptedTurnReviewMechanism(") ||
-    !reviewBridge.includes("controller.afterTurnCommitted(input)") ||
-    !reviewBridge.includes("createAdvancementReviewProxySchedulePort(") ||
-    !reviewBridge.includes("proxyTurns: AdvancementProxyTurnPort") ||
-    reviewBridge.includes("proxyTurns: () =>") ||
-    /ConversationManager|SessionBroadcast|@zhixing\/(?:server|rpc)|\.current|new Map</u.test(
-      reviewBridge,
+    !reviewExternalMechanism.includes("createAdvancementReviewExternalMechanism(") ||
+    !reviewExternalMechanism.includes("new WeakMap<") ||
+    !reviewExternalMechanism.includes("options.evidence.resolveTarget(") ||
+    !reviewExternalMechanism.includes("options.evidence.collect({") ||
+    !reviewExternalMechanism.includes("options.reviewer.review(") ||
+    /AdvancementSessionStore|transitionReviewAttempt|commitReviewOutcome|prepareEligibility|persistReviewOutcome|buildAdvancementProxyMessage/u.test(
+      reviewExternalMechanism,
+    ) ||
+    !proxyScheduler.includes("createAdvancementReviewProxySchedulePort(") ||
+    !proxyScheduler.includes("proxyTurns: AdvancementProxyTurnPort") ||
+    proxyScheduler.includes("proxyTurns: () =>") ||
+    /ConversationManager|SessionBroadcast|@zhixing\/(?:server|rpc)|\.current/u.test(
+      proxyScheduler,
     ) ||
     !reviewAttemptCorrectness.includes("createAdvancementReviewAttemptApplication(") ||
     !reviewAttemptCorrectness.includes("new AdvancementReviewAttemptApplicationService({") ||
+    !reviewAttemptCorrectness.includes("mechanism: options.mechanism,") ||
     !reviewAttemptCorrectness.includes("options.store.transitionReviewAttempt(") ||
     !reviewAttemptCorrectness.includes("options.store.settleProxyMessage(") ||
     !reviewAttemptCorrectness.includes("options.store.enqueueProxyMessage(") ||
@@ -3661,10 +3677,9 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     /generation\s*=|phase\s*===|terminalReviewAttempt|reviewRootTargetMatches/u.test(
       reviewAttemptCorrectness,
     ) ||
-    !controller.includes("this.reviewAttempts.reviewAcceptedRun(") ||
-    !controller.includes("this.reviewAttempts.reconcileConversation(") ||
-    !controller.includes("this.reviewAttempts.cancelSession({") ||
-    !controller.includes("private reviewAttemptMechanism(): AdvancementReviewAttemptMechanismPort") ||
+    /afterTurnCommitted|reviewAttemptMechanism|reviewAttempts|AdvancementEvidenceCoordinator|AdvancementReviewerPort|readonly reviewer\?|readonly evidence\?/u.test(
+      controller,
+    ) ||
     /prepareEligibility|commitMissingDurableRun|commitConsumed|settleAcceptedProxyRun|systemExitReview|persistReviewOutcome|persistProxyOutcome|buildAdvancementProxyMessage|selectFailureHandling/u.test(
       controller,
     ) ||
@@ -3678,10 +3693,20 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
       'from "@zhixing/owner-services/advancement/review-attempt-correctness"',
     ) ||
     !advancementComposition.includes("createAdvancementReviewAttemptApplication({") ||
-    !advancementComposition.includes("reviewAttempts:") ||
+    advancementComposition.split("createAdvancementReviewAttemptApplication(").length - 1 !== 1 ||
+    !advancementComposition.includes("createAdvancementReviewExternalMechanism({") ||
+    !advancementComposition.includes("return Object.freeze({ controller, reviews });") ||
+    !recovery.includes("readonly reviews: AdvancementReviewAttemptApplication;") ||
+    !recovery.includes("this.options.reviews.reconcileConversation(conversationId)") ||
+    !recovery.includes("this.options.reviews.reviewAcceptedRun({") ||
+    !recovery.includes("this.options.reviews.rebuildMissingProxyMessage(session)") ||
+    !composition.includes("reviews: advancementReviews,") ||
+    !composition.includes("advancementReviews,") ||
     !recovery.includes("this.options.reviewResults.projectReviewResult({") ||
     recovery.includes("dispatchAdvancementReviewResult") ||
     !accessSurfaces.includes("new AdvancementAcceptedTurnApplicationService({") ||
+    !accessSurfaces.includes("reviews: ctx.advancementReviews,") ||
+    !accessSurfaces.includes("review: ctx.advancementReviews,") ||
     !accessSurfaces.includes("advancementAcceptedTurns?.acceptCommittedTurn(info)") ||
     !accessSurfaces.includes("manager.bindTurnCommittedListener((info) =>") ||
     !accessSurfaces.includes("manager.assertTurnCommittedListenerBound()") ||
@@ -3700,6 +3725,8 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     accessSurfaces.includes("createAdvancementReviewMaintenance") ||
     accessSurfaces.includes("advancementRecoveryRef") ||
     !localOwner.includes("new AdvancementAcceptedTurnApplicationService({") ||
+    !localOwner.includes("const { controller: advancement, reviews }") ||
+    !localOwner.includes("review: reviews,") ||
     !localOwner.includes("acceptedTurns.acceptCommittedTurn(info)") ||
     !localOwner.includes("manager.bindTurnCommittedListener((info) =>") ||
     !localOwner.includes("manager.assertTurnCommittedListenerBound()") ||
@@ -3731,23 +3758,23 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     ownerIndex.includes("dispatchAdvancementReviewResult") ||
     ownerIndex.includes("createAdvancementAcceptedTurnReviewMechanism") ||
     ownerIndex.includes("createAdvancementReviewAttemptApplication") ||
-    !accessSurfaces.includes(
-      'from "@zhixing/owner-services/advancement/review-application-bridge"',
-    ) ||
-    !localOwner.includes(
-      'from "@zhixing/owner-services/advancement/review-application-bridge"',
-    ) ||
+    accessSurfaces.includes("review-application-bridge") ||
+    localOwner.includes("review-application-bridge") ||
     ownerBuild.includes("review-dispatch.ts") ||
     ownerManifest?.exports?.["./advancement/review-dispatch"] !== undefined ||
-    ownerManifest?.exports?.["./advancement/review-application-bridge"] === undefined ||
+    ownerManifest?.exports?.["./advancement/review-application-bridge"] !== undefined ||
+    ownerManifest?.exports?.["./advancement/review-external-mechanism"] === undefined ||
     ownerManifest?.exports?.["./advancement/review-attempt-correctness"] === undefined ||
     ownerManifest?.exports?.["./advancement/proxy-content"] !== undefined ||
     !ownerBuild.includes("src/advancement/review-attempt-correctness.ts") ||
+    !ownerBuild.includes("src/advancement/review-external-mechanism.ts") ||
+    ownerBuild.includes("src/advancement/review-application-bridge.ts") ||
     ownerBuild.includes("src/advancement/proxy-content.ts") ||
     ownerIndex.includes("buildAdvancementProxyMessage") ||
     byPath.has("packages/owner-services/src/advancement/proxy-content.ts") ||
     byPath.has("packages/cli/src/serve/advancement-review-maintenance.ts") ||
     byPath.has("packages/owner-services/src/advancement/review-dispatch.ts") ||
+    byPath.has("packages/owner-services/src/advancement/review-application-bridge.ts") ||
     !application.includes("interface AdvancementConversationLifecycleApplication") ||
     !application.includes("interface AdvancementConversationAlivePort") ||
     lifecycleApplication.length === 0 ||
@@ -3984,7 +4011,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !controller.includes("persistRubricDraftRevision(") ||
     controller.includes("async cancelRubric(input:") ||
     !controller.includes("loadRubricCancellationSession(") ||
-    !controller.includes("persistRubricCancellation(input:") ||
+    controller.includes("persistRubricCancellation(input:") ||
     !controller.includes("decideAwaitingRubricAdmission(") ||
     !controller.includes("loadOpenNewTaskSession(") ||
     !controller.includes("decideNewTaskAdmission(") ||
@@ -4016,7 +4043,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     controller.includes("removeConversationData(") ||
     controller.includes("sweepOrphanData(") ||
     !controller.includes("loadOpenConversationLifecycleSession(") ||
-    !controller.includes("persistConversationLifecycleCancellation(") ||
+    controller.includes("persistConversationLifecycleCancellation(") ||
     !controller.includes("removeConversationLifecycleData(") ||
     !controller.includes("listConversationLifecycleDataCandidates(") ||
     !controller.includes("removeConversationLifecycleDataCandidate(") ||
@@ -4079,7 +4106,8 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !composition.includes('.ensureShell({ kind: "ensure-shell", conversationId })') ||
     !composition.includes("ctx.conversations!.runMaintenanceExisting(") ||
     !composition.includes("rubricRevision: advancementDetailController") ||
-    !composition.includes("rubricCancellation: advancementDetailController") ||
+    !composition.includes("rubricCancellation: {") ||
+    !composition.includes("ctx.advancementReviews.cancelSession(input)") ||
     !composition.includes("awaitingRubricAdmission: advancementDetailController") ||
     !composition.includes("rubricConfirmation: advancementDetailController") ||
     !composition.includes("rubricPublication: {") ||

@@ -3413,7 +3413,8 @@ test("Advancement detail/rubric has one Product API application and conversation
     "packages/core/tsup.config.ts",
     "packages/owner-services/src/advancement/controller.ts",
     "packages/owner-services/src/advancement/session-store.ts",
-    "packages/owner-services/src/advancement/review-application-bridge.ts",
+    "packages/owner-services/src/advancement/review-external-mechanism.ts",
+    "packages/owner-services/src/advancement/proxy-scheduler.ts",
     "packages/owner-services/src/advancement/review-attempt-correctness.ts",
     "packages/owner-services/src/advancement/recovery-maintenance.ts",
     "packages/owner-services/src/advancement/index.ts",
@@ -3464,6 +3465,33 @@ test("Advancement detail/rubric has one Product API application and conversation
   );
   assert.match(
     inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/core/src/advancement/application.ts",
+      (text) => text.replace(
+        "this.#mechanism.prepareEvidence({",
+        "mechanism.prepareEvidence({",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/owner-services/src/advancement/controller.ts",
+      (text) => `${text}\nafterTurnCommitted() { return undefined; }`,
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "review: ctx.advancementReviews,",
+        "review: createSecondReviewApplication(),",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
         "advancementAcceptedTurns?.acceptCommittedTurn(info)",
@@ -3504,12 +3532,22 @@ test("Advancement detail/rubric has one Product API application and conversation
   );
   assert.match(
     inspectAdvancementDetailApplicationOwnership(mutate(
-      "packages/owner-services/src/advancement/review-application-bridge.ts",
+      "packages/owner-services/src/advancement/review-external-mechanism.ts",
       (text) => text.replace(
-        "proxyTurns: AdvancementProxyTurnPort",
-        "proxyTurns: () => AdvancementProxyTurnPort",
+        "options.evidence.collect({",
+        "transitionReviewAttempt({",
       ),
     )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership([
+      ...records,
+      {
+        relative: "packages/owner-services/src/advancement/review-application-bridge.ts",
+        text: "export function createAdvancementAcceptedTurnReviewMechanism() {}",
+      },
+    ]).join("\n"),
     failure,
   );
   assert.match(

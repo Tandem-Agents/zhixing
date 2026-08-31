@@ -111,6 +111,12 @@ export interface AdvancementReviewAttemptInput {
   readonly abortSignal?: AbortSignal;
 }
 
+function hasDurableRunRecordRef(
+  input: AdvancementReviewAttemptInput,
+): input is AdvancementReviewAttemptInput & { readonly runRecordRef: RunRecordRef } {
+  return input.runRecordRef !== undefined;
+}
+
 export interface AdvancementReviewAttemptStatePort {
   loadActiveSession(conversationId: string): Promise<AdvancementSession | null>;
   loadSession(
@@ -208,11 +214,7 @@ export type AdvancementReviewEvidencePreparationResult =
       reason: string;
     }>;
 
-/**
- * A5-ADVANCEMENT-REVIEW-01 remainder. It owns only the three external
- * evidence/reviewer mechanisms; eligibility and outcome decisions stay in the
- * application service below.
- */
+/** External mechanisms fixed when the review application is assembled. */
 export interface AdvancementReviewAttemptMechanismPort {
   resolveRootTarget(
     session: AdvancementSession,
@@ -255,10 +257,7 @@ export async function composeAdvancementClosureReport(
 }
 
 export interface AdvancementReviewAttemptApplication {
-  reviewAcceptedRun(
-    input: AdvancementReviewAttemptInput,
-    mechanism: AdvancementReviewAttemptMechanismPort,
-  ): Promise<AdvancementTurnReviewResult>;
+  reviewAcceptedRun(input: AdvancementReviewAttemptInput): Promise<AdvancementTurnReviewResult>;
   reconcileConversation(conversationId: string): Promise<void>;
   cancelSession(input: Readonly<{
     conversationId: string;
@@ -292,6 +291,7 @@ export class AdvancementReviewAttemptApplicationService
 {
   readonly #state: AdvancementReviewAttemptStatePort;
   readonly #roots: AdvancementReviewRootLifecyclePort;
+  readonly #mechanism: AdvancementReviewAttemptMechanismPort;
   readonly #reviewerAvailable: boolean;
   readonly #sessionTokenBudget: number;
   readonly #closureSynthesizer?: AdvancementClosureSynthesizer;
@@ -303,6 +303,7 @@ export class AdvancementReviewAttemptApplicationService
   constructor(options: Readonly<{
     state: AdvancementReviewAttemptStatePort;
     roots: AdvancementReviewRootLifecyclePort;
+    mechanism: AdvancementReviewAttemptMechanismPort;
     reviewerAvailable: boolean;
     sessionTokenBudget?: number;
     closureSynthesizer?: AdvancementClosureSynthesizer;
@@ -312,6 +313,7 @@ export class AdvancementReviewAttemptApplicationService
   }>) {
     this.#state = options.state;
     this.#roots = options.roots;
+    this.#mechanism = options.mechanism;
     this.#reviewerAvailable = options.reviewerAvailable;
     this.#sessionTokenBudget =
       options.sessionTokenBudget ?? DEFAULT_ADVANCEMENT_SESSION_TOKEN_BUDGET;
@@ -325,12 +327,11 @@ export class AdvancementReviewAttemptApplicationService
 
   async reviewAcceptedRun(
     input: AdvancementReviewAttemptInput,
-    mechanism: AdvancementReviewAttemptMechanismPort,
   ): Promise<AdvancementTurnReviewResult> {
     const key = reviewAttemptFlightKey(input);
     const current = this.#flights.get(key);
     if (current) return await current;
-    const flight = this.#reviewAcceptedRun(input, mechanism).finally(() => {
+    const flight = this.#reviewAcceptedRun(input).finally(() => {
       if (this.#flights.get(key) === flight) this.#flights.delete(key);
     });
     this.#flights.set(key, flight);
@@ -433,7 +434,6 @@ export class AdvancementReviewAttemptApplicationService
 
   async #reviewAcceptedRun(
     input: AdvancementReviewAttemptInput,
-    mechanism: AdvancementReviewAttemptMechanismPort,
   ): Promise<AdvancementTurnReviewResult> {
     let session = await this.#state.loadActiveSession(input.conversationId);
     if (!session) return { kind: "skipped", reason: "no-active-session" };
@@ -463,7 +463,7 @@ export class AdvancementReviewAttemptApplicationService
     session = eligibility.session;
     const rubric = eligibility.rubric;
 
-    if (!input.runRecordRef) {
+    if (!hasDurableRunRecordRef(input)) {
       return await this.#persistReviewOutcome(
         session,
         this.#systemExitReview(
@@ -472,7 +472,7 @@ export class AdvancementReviewAttemptApplicationService
         ),
       );
     }
-    const request = { ...input, runRecordRef: input.runRecordRef };
+    const request = input;
     const runId = input.runId ?? stableAcceptedRunId(input.runRecordRef);
 
     let attempt = reviewAttemptForRun(session, input.runRecordRef);
@@ -511,7 +511,7 @@ export class AdvancementReviewAttemptApplicationService
     }
 
     const lineageId = advancementReviewLineageId(session.id, input.runRecordRef);
-    const rootTarget = await mechanism.resolveRootTarget(session, input);
+    const rootTarget = await this.#mechanism.resolveRootTarget(session, input);
     attempt = reviewAttemptForRun(session, input.runRecordRef);
     if (!attempt || isTerminalReviewAttempt(attempt)) {
       const legacyGeneration =
@@ -677,7 +677,7 @@ export class AdvancementReviewAttemptApplicationService
     session = afterAcquire;
     attempt = durableAfterAcquire;
 
-    const evidence = await mechanism.prepareEvidence({
+    const evidence = await this.#mechanism.prepareEvidence({
       session,
       request,
       attempt,
@@ -746,7 +746,7 @@ export class AdvancementReviewAttemptApplicationService
       throw error;
     }
 
-    const outcome = await mechanism.invokeReviewer({
+    const outcome = await this.#mechanism.invokeReviewer({
       session,
       rubric,
       request,
@@ -1494,17 +1494,6 @@ export interface AdvancementAcceptedTurnCatchUpPort {
   ): Promise<AdvancementAcceptedTurnCatchUpResult>;
 }
 
-/** A5-ADVANCEMENT-REVIEW-01: finite bridge to the existing review mechanism. */
-export interface AdvancementAcceptedTurnReviewMechanismPort {
-  reviewAcceptedTurn(input: Readonly<{
-    conversationId: string;
-    runId: string;
-    runIndex: number;
-    runRecord: RunRecordInput;
-    runRecordRef?: RunRecordRef;
-  }>): Promise<AdvancementTurnReviewResult>;
-}
-
 export type AdvancementReviewPresentationEvent =
   | Readonly<{
       conversationId: string;
@@ -1675,19 +1664,19 @@ export interface AdvancementAcceptedTurnApplication {
 
 /**
  * Fire-and-forget application use case for accepted turns. Per-conversation ordering
- * is product semantics; review attempt deduplication remains in the review mechanism.
+ * is product semantics; review attempt deduplication remains in the review application.
  */
 export class AdvancementAcceptedTurnApplicationService
   implements AdvancementAcceptedTurnApplication
 {
   readonly #catchUp: AdvancementAcceptedTurnCatchUpPort;
-  readonly #review: AdvancementAcceptedTurnReviewMechanismPort;
+  readonly #review: Pick<AdvancementReviewAttemptApplication, "reviewAcceptedRun">;
   readonly #results: AdvancementReviewResultProjectionApplication;
   readonly #chains = new Map<string, Promise<void>>();
 
   constructor(options: Readonly<{
     catchUp: AdvancementAcceptedTurnCatchUpPort;
-    review: AdvancementAcceptedTurnReviewMechanismPort;
+    review: Pick<AdvancementReviewAttemptApplication, "reviewAcceptedRun">;
     results: AdvancementReviewResultProjectionApplication;
   }>) {
     this.#catchUp = options.catchUp;
@@ -1719,7 +1708,7 @@ export class AdvancementAcceptedTurnApplicationService
       return;
     }
     if (!catchUpProvedContinuous(catchUp.status)) return;
-    const result = await this.#review.reviewAcceptedTurn({
+    const result = await this.#review.reviewAcceptedRun({
       conversationId: turn.conversationId,
       runId: turn.turnId,
       runIndex: turn.runIndex,

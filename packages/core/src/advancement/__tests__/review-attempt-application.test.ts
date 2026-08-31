@@ -28,11 +28,13 @@ describe("AdvancementReviewAttemptApplicationService", () => {
     const state = new ReviewAttemptState();
     const roots = new ReviewRoots();
     const reviewer = vi.fn(async () => reviewedOutcome());
-    const application = createApplication(state, roots);
+    const application = createApplication(state, roots, {
+      mechanism: mechanism(state, { reviewer }),
+    });
 
-    await expect(
-      application.reviewAcceptedRun(request(), mechanism(state, { reviewer })),
-    ).resolves.toMatchObject({ kind: "proxy-enqueued" });
+    await expect(application.reviewAcceptedRun(request())).resolves.toMatchObject({
+      kind: "proxy-enqueued",
+    });
 
     expect(state.transitions.map(({ phase }) => phase)).toEqual([
       "started",
@@ -65,10 +67,9 @@ describe("AdvancementReviewAttemptApplicationService", () => {
     const roots = new ReviewRoots(first.root, lease(first.root), "active");
     const reviewer = vi.fn(async () => reviewedOutcome());
 
-    await createApplication(state, roots).reviewAcceptedRun(
-      request(),
-      mechanism(state, { reviewer }),
-    );
+    await createApplication(state, roots, {
+      mechanism: mechanism(state, { reviewer }),
+    }).reviewAcceptedRun(request());
 
     expect(reviewer).toHaveBeenCalledOnce();
     expect(state.transitions).toEqual([
@@ -86,13 +87,12 @@ describe("AdvancementReviewAttemptApplicationService", () => {
     const reviewer = vi.fn(async () => reviewedOutcome());
 
     await expect(
-      createApplication(state, roots).reviewAcceptedRun(
-        request(),
-        mechanism(state, {
+      createApplication(state, roots, {
+        mechanism: mechanism(state, {
           reviewer,
           target: { executorId: "executor-a", ownerEpoch: 2 },
         }),
-      ),
+      }).reviewAcceptedRun(request()),
     ).resolves.toMatchObject({ kind: "review-deferred" });
 
     expect(state.transitions).toEqual([
@@ -108,10 +108,9 @@ describe("AdvancementReviewAttemptApplicationService", () => {
     roots.loseNextAcquireResponse = true;
     const reviewer = vi.fn(async () => reviewedOutcome());
 
-    await createApplication(state, roots).reviewAcceptedRun(
-      request(),
-      mechanism(state, { reviewer }),
-    );
+    await createApplication(state, roots, {
+      mechanism: mechanism(state, { reviewer }),
+    }).reviewAcceptedRun(request());
 
     expect(roots.acquireCalls).toBe(1);
     expect(reviewer).toHaveBeenCalledOnce();
@@ -133,10 +132,9 @@ describe("AdvancementReviewAttemptApplicationService", () => {
     const reviewer = vi.fn(async () => reviewedOutcome());
 
     await expect(
-      createApplication(state, roots).reviewAcceptedRun(
-        request(),
-        mechanism(state, { reviewer }),
-      ),
+      createApplication(state, roots, {
+        mechanism: mechanism(state, { reviewer }),
+      }).reviewAcceptedRun(request()),
     ).resolves.toMatchObject({ kind: "review-deferred" });
 
     expect(reviewer).not.toHaveBeenCalled();
@@ -156,14 +154,15 @@ describe("AdvancementReviewAttemptApplicationService", () => {
     const activeLease = lease(active.root);
     const roots = new ReviewRoots(active.root, activeLease, "active");
     roots.failNextSettle = true;
-    const application = createApplication(state, roots);
+    const application = createApplication(state, roots, {
+      mechanism: mechanism(state, {
+        reviewer: vi.fn(async () => reviewedOutcome()),
+      }),
+    });
 
-    await expect(
-      application.reviewAcceptedRun(
-        request(),
-        mechanism(state, { reviewer: vi.fn(async () => reviewedOutcome()) }),
-      ),
-    ).resolves.toMatchObject({ kind: "review-deferred" });
+    await expect(application.reviewAcceptedRun(request())).resolves.toMatchObject({
+      kind: "review-deferred",
+    });
     expect(state.current.reviewAttempts?.[0]).toMatchObject({
       phase: "expired",
       detail: "cancel won",
@@ -216,17 +215,16 @@ describe("AdvancementReviewAttemptApplicationService", () => {
       outstandingProxyMessageId: proxy.id,
     }));
     const acceptedReviewer = vi.fn(async () => reviewedOutcome());
-    await createApplication(accepted, new ReviewRoots()).reviewAcceptedRun(
-      request({
-        runRecord: {
+    await createApplication(accepted, new ReviewRoots(), {
+      mechanism: mechanism(accepted, { reviewer: acceptedReviewer }),
+    }).reviewAcceptedRun(request({
+          runRecord: {
           timestamp: NOW,
           messages: [],
           source: "advancement",
           advancement: { sessionId: "adv-1", proxyMessageId: proxy.id },
         },
-      }),
-      mechanism(accepted, { reviewer: acceptedReviewer }),
-    );
+      }));
     expect(accepted.settledProxyIds).toEqual([proxy.id]);
     expect(acceptedReviewer).toHaveBeenCalledOnce();
 
@@ -234,17 +232,18 @@ describe("AdvancementReviewAttemptApplicationService", () => {
       proxyMessages: [proxy],
     }));
     const alreadySettledReviewer = vi.fn(async () => reviewedOutcome());
-    await createApplication(alreadySettled, new ReviewRoots()).reviewAcceptedRun(
-      request({
+    await createApplication(alreadySettled, new ReviewRoots(), {
+      mechanism: mechanism(alreadySettled, {
+        reviewer: alreadySettledReviewer,
+      }),
+    }).reviewAcceptedRun(request({
         runRecord: {
           timestamp: NOW,
           messages: [],
           source: "advancement",
           advancement: { sessionId: "adv-1", proxyMessageId: proxy.id },
         },
-      }),
-      mechanism(alreadySettled, { reviewer: alreadySettledReviewer }),
-    );
+      }));
     expect(alreadySettled.settledProxyIds).toEqual([]);
     expect(alreadySettledReviewer).toHaveBeenCalledOnce();
 
@@ -258,17 +257,16 @@ describe("AdvancementReviewAttemptApplicationService", () => {
       }));
       const reviewer = vi.fn(async () => reviewedOutcome());
       await expect(
-        createApplication(rejected, new ReviewRoots()).reviewAcceptedRun(
-          request({
+        createApplication(rejected, new ReviewRoots(), {
+          mechanism: mechanism(rejected, { reviewer }),
+        }).reviewAcceptedRun(request({
             runRecord: {
               timestamp: NOW,
               messages: [],
               source: "advancement",
               advancement,
             },
-          }),
-          mechanism(rejected, { reviewer }),
-        ),
+          })),
       ).resolves.toMatchObject({ kind: "exited" });
       expect(reviewer).not.toHaveBeenCalled();
       expect(rejected.decisions[0]).toMatchObject({
@@ -282,22 +280,38 @@ describe("AdvancementReviewAttemptApplicationService", () => {
     const cases = [
       {
         state: new ReviewAttemptState(session({ confirmedRubric: undefined })),
-        application: (state: ReviewAttemptState) =>
-          createApplication(state, new ReviewRoots()),
+        application: (
+          state: ReviewAttemptState,
+          reviewer: AdvancementReviewAttemptMechanismPort["invokeReviewer"],
+        ) =>
+          createApplication(state, new ReviewRoots(), {
+            mechanism: mechanism(state, { reviewer }),
+          }),
         input: request(),
         message: "缺少已确认 Rubric",
       },
       {
         state: new ReviewAttemptState(),
-        application: (state: ReviewAttemptState) =>
-          createApplication(state, new ReviewRoots(), { reviewerAvailable: false }),
+        application: (
+          state: ReviewAttemptState,
+          reviewer: AdvancementReviewAttemptMechanismPort["invokeReviewer"],
+        ) =>
+          createApplication(state, new ReviewRoots(), {
+            reviewerAvailable: false,
+            mechanism: mechanism(state, { reviewer }),
+          }),
         input: request(),
         message: "验收运行体未装配",
       },
       {
         state: new ReviewAttemptState(),
-        application: (state: ReviewAttemptState) =>
-          createApplication(state, new ReviewRoots()),
+        application: (
+          state: ReviewAttemptState,
+          reviewer: AdvancementReviewAttemptMechanismPort["invokeReviewer"],
+        ) =>
+          createApplication(state, new ReviewRoots(), {
+            mechanism: mechanism(state, { reviewer }),
+          }),
         input: request({ runRecordRef: undefined }),
         message: "缺少 accepted run 的耐久位置",
       },
@@ -308,18 +322,23 @@ describe("AdvancementReviewAttemptApplicationService", () => {
             run: { inputTokens: 0, outputTokens: 0 },
           },
         })] })),
-        application: (state: ReviewAttemptState) =>
-          createApplication(state, new ReviewRoots(), { sessionTokenBudget: 1 }),
+        application: (
+          state: ReviewAttemptState,
+          reviewer: AdvancementReviewAttemptMechanismPort["invokeReviewer"],
+        ) =>
+          createApplication(state, new ReviewRoots(), {
+            sessionTokenBudget: 1,
+            mechanism: mechanism(state, { reviewer }),
+          }),
         input: request({ runIndex: 1, runRecordRef: { shardId: "000001", runIndex: 1 } }),
         message: "成本上限",
       },
     ];
     for (const entry of cases) {
       const reviewer = vi.fn(async () => reviewedOutcome());
-      const result = await entry.application(entry.state).reviewAcceptedRun(
-        entry.input,
-        mechanism(entry.state, { reviewer }),
-      );
+      const result = await entry
+        .application(entry.state, reviewer)
+        .reviewAcceptedRun(entry.input);
       expect(result).toMatchObject({ kind: "exited" });
       if (result.kind !== "exited") throw new Error("expected exited");
       expect(result.exit.message).toContain(entry.message);
@@ -364,15 +383,13 @@ describe("AdvancementReviewAttemptApplicationService", () => {
       ));
       const result = await createApplication(state, new ReviewRoots(), {
         ...(scenario.budget ? { sessionTokenBudget: scenario.budget } : {}),
-      }).reviewAcceptedRun(
-        request(),
-        mechanism(state, {
+        mechanism: mechanism(state, {
           reviewer: vi.fn(async () => ({
             kind: "reviewed" as const,
             review: scenario.outcome,
           })),
         }),
-      );
+      }).reviewAcceptedRun(request());
       expect(result.kind).toBe(scenario.expected);
       expect(state.decisions).toHaveLength(1);
       expect(state.decisions[0]?.reviewAttempt).toMatchObject({
@@ -397,9 +414,8 @@ describe("AdvancementReviewAttemptApplicationService", () => {
       },
     };
 
-    await createApplication(state, new ReviewRoots()).reviewAcceptedRun(
-      request(),
-      mechanism(state, {
+    await createApplication(state, new ReviewRoots(), {
+      mechanism: mechanism(state, {
         evidenceRequestId: "evidence-request-1",
         reviewer: vi.fn(async () => ({
           kind: "reviewed" as const,
@@ -407,7 +423,7 @@ describe("AdvancementReviewAttemptApplicationService", () => {
           advancementWindow,
         })),
       }),
-    );
+    }).reviewAcceptedRun(request());
 
     expect(state.decisions).toHaveLength(1);
     expect(state.decisions[0]).toMatchObject({
@@ -423,15 +439,14 @@ describe("AdvancementReviewAttemptApplicationService", () => {
     state.failNextDecision = true;
     const roots = new ReviewRoots();
     await expect(
-      createApplication(state, roots).reviewAcceptedRun(
-        request(),
-        mechanism(state, {
+      createApplication(state, roots, {
+        mechanism: mechanism(state, {
           reviewer: vi.fn(async () => ({
             kind: "reviewed" as const,
             review: review({ decision: "passed", unmetCriteria: [] }),
           })),
         }),
-      ),
+      }).reviewAcceptedRun(request()),
     ).rejects.toThrow("outcome commit failed");
     expect(state.current.status).toBe("active");
     expect(state.current.runs).toHaveLength(0);
@@ -672,11 +687,17 @@ function createApplication(
   options: Readonly<{
     reviewerAvailable?: boolean;
     sessionTokenBudget?: number;
+    mechanism?: AdvancementReviewAttemptMechanismPort;
   }> = {},
 ): AdvancementReviewAttemptApplicationService {
   return new AdvancementReviewAttemptApplicationService({
     state,
     roots,
+    mechanism:
+      options.mechanism ??
+      mechanism(state, {
+        reviewer: async () => reviewedOutcome(),
+      }),
     reviewerAvailable: options.reviewerAvailable ?? true,
     ...(options.sessionTokenBudget !== undefined
       ? { sessionTokenBudget: options.sessionTokenBudget }
@@ -688,7 +709,7 @@ function createApplication(
 }
 
 function mechanism(
-  _state: ReviewAttemptState,
+  _state: AdvancementReviewAttemptStatePort,
   options: Readonly<{
     reviewer: AdvancementReviewAttemptMechanismPort["invokeReviewer"];
     target?: AdvancementReviewRootTarget;

@@ -3,6 +3,7 @@ import {
   AdvancementReviewAttemptApplicationService,
   type AdvancementClosureSynthesizer,
   type AdvancementReviewAttemptApplication,
+  type AdvancementReviewAttemptMechanismPort,
   type AdvancementReviewAttemptStatePort,
   type AdvancementReviewRootLifecyclePort,
 } from "@zhixing/core/advancement/application";
@@ -15,6 +16,7 @@ import type { AdvancementSessionStore } from "./session-store.js";
 export interface AdvancementReviewAttemptCorrectnessOptions {
   readonly store: AdvancementSessionStore;
   readonly resources: ResourceReservationPort;
+  readonly mechanism: AdvancementReviewAttemptMechanismPort;
   readonly reviewerAvailable: boolean;
   readonly sessionTokenBudget?: number;
   readonly closureSynthesizer?: AdvancementClosureSynthesizer;
@@ -108,6 +110,7 @@ export function createAdvancementReviewAttemptApplication(
   return new AdvancementReviewAttemptApplicationService({
     state,
     roots,
+    mechanism: options.mechanism,
     reviewerAvailable: options.reviewerAvailable,
     ...(options.sessionTokenBudget !== undefined
       ? { sessionTokenBudget: options.sessionTokenBudget }

@@ -1,4 +1,5 @@
 import type {
+  AdvancementReviewAttemptApplication,
   AdvancementReviewResultProjectionApplication,
 } from "@zhixing/core/advancement/application";
 import type {
@@ -24,6 +25,7 @@ const RECOVERY_SCAN_PAGE_SIZE = 50;
 
 export interface AdvancementRecoveryMaintenanceOptions {
   readonly advancement: AdvancementController;
+  readonly reviews: AdvancementReviewAttemptApplication;
   readonly directory: AdvancementConversationDirectory;
   readonly proxyTurns: AdvancementProxyTurnPort;
   readonly events?: AdvancementEventSink;
@@ -90,7 +92,7 @@ export type AdvancementRecoveryResult =
 export interface AdvancementRecoveryOptions {
   /**
    * 只补审此 runIndex 之前的欠账。turn 提交触发的 catch-up 用它排除
-   * 当轮——当轮由 afterTurnCommitted 正常验收（补审走 scheduleProxy:false，
+   * 当轮——当轮由唯一 review application 正常验收（补审走 scheduleProxy:false，
    * 吞掉当轮 proxy 调度）。
    */
   readonly beforeRunIndex?: number;
@@ -159,6 +161,7 @@ class DefaultAdvancementRecoveryMaintenance
   ): Promise<AdvancementRecoveryResult> {
     let session: AdvancementSession | null;
     try {
+      await this.options.reviews.reconcileConversation(conversationId);
       session = await this.options.advancement.loadActiveSession(conversationId);
     } catch (err) {
       return this.failed(conversationId, undefined, undefined, err);
@@ -181,7 +184,7 @@ class DefaultAdvancementRecoveryMaintenance
       try {
         const admitted = await originalTasks.admit(session);
         if (admitted.status === "rejected") {
-          await this.options.advancement.cancelOpenSession({
+          await this.options.reviews.cancelSession({
             conversationId,
             advancementSessionId: session.id,
             reason: "system-error",
@@ -241,12 +244,10 @@ class DefaultAdvancementRecoveryMaintenance
 
     if (!session.outstandingProxyMessageId) {
       let rebuilt: Awaited<
-        ReturnType<AdvancementController["rebuildMissingProxyMessage"]>
+        ReturnType<AdvancementReviewAttemptApplication["rebuildMissingProxyMessage"]>
       >;
       try {
-        rebuilt = await this.options.advancement.rebuildMissingProxyMessage(
-          session,
-        );
+        rebuilt = await this.options.reviews.rebuildMissingProxyMessage(session);
       } catch (err) {
         return this.failed(conversationId, session.id, undefined, err);
       }
@@ -466,7 +467,7 @@ class DefaultAdvancementRecoveryMaintenance
     },
   ): Promise<AdvancementRecoveryResult> {
     try {
-      const result = await this.options.advancement.afterTurnCommitted({
+      const result = await this.options.reviews.reviewAcceptedRun({
         conversationId: session.conversationId,
         runId: recoveryRunId(accepted),
         runIndex: accepted.record.runIndex,

@@ -2,16 +2,13 @@ export {
   AdvancementController,
   renderRecentContextFromMessages,
   type AdvancementControllerOptions,
-  type AdvancementReviewRunInput,
-  type AdvancementReviewRunOutcome,
-  type AdvancementRunReviewer,
-  type AdvancementTurnReviewResult,
 } from "./controller.js";
 export {
   DeferredRubricPublication,
   type DeferredRubricPublicationOptions,
 } from "./deferred-rubric-publication.js";
 export {
+  createAdvancementReviewProxySchedulePort,
   ProxyMessageScheduler,
   type ProxyMessageSchedulerOptions,
   type ScheduleProxyMessageInput,

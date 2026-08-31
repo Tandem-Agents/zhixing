@@ -153,7 +153,7 @@ import {
   type ConversationRepoTaskListRoute,
 } from "../runtime/task-list-stores.js";
 import { createCliTurnContextProviders } from "../runtime/turn-context-providers.js";
-import { createServeAdvancementController } from "./advancement-controller.js";
+import { createServeAdvancementApplications } from "./advancement-controller.js";
 import { createAdvancementAcceptanceLifecycle } from "./advancement-acceptance-lifecycle.js";
 import {
   createAnchorAdvancementConfirmedOriginalTaskAdmissionPort,
@@ -557,7 +557,10 @@ async function runServerProcess(
     : {};
   const durableInteractions = new DurableConversationInteractionObserver();
   const assemblyUnits = createAssemblyUnits(channelCredentials);
-  const advancementController = await createServeAdvancementController({
+  const {
+    controller: advancementController,
+    reviews: advancementReviews,
+  } = await createServeAdvancementApplications({
     config,
     credentials: providerCredentials,
     // control 治理端口——authority runtime 在 pre-server surface 装配（晚于此处），
@@ -611,7 +614,7 @@ async function runServerProcess(
             conversationId,
           ),
         persistConversationLifecycleCancellation: (input) =>
-          advancementController.persistConversationLifecycleCancellation(input),
+          advancementReviews.cancelSession(input),
         removeConversationData: (conversationId) =>
           advancementController.removeConversationLifecycleData(conversationId),
         listConversationDataCandidates: () =>
@@ -931,6 +934,7 @@ async function runServerProcess(
     lifecycleContributions,
     channelHttpRoutes,
     advancement: advancementController,
+    advancementReviews,
     advancementConversationLifecycle,
     enabledRoles: bootstrap.mesh.roles,
     meshBootstrap: bootstrap.mesh,
@@ -2178,7 +2182,15 @@ async function runServerProcess(
             },
           },
           rubricRevision: advancementDetailController,
-          rubricCancellation: advancementDetailController,
+          rubricCancellation: {
+            loadRubricCancellationSession: (conversationId, sessionId) =>
+              advancementDetailController.loadRubricCancellationSession(
+                conversationId,
+                sessionId,
+              ),
+            persistRubricCancellation: (input) =>
+              ctx.advancementReviews.cancelSession(input),
+          },
           awaitingRubricAdmission: advancementDetailController,
           rubricConfirmation: advancementDetailController,
           rubricPublication: {

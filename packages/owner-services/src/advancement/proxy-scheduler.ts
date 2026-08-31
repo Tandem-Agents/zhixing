@@ -5,6 +5,9 @@ import type {
   TurnContext,
 } from "@zhixing/core";
 import type {
+  AdvancementReviewProxySchedulePort,
+} from "@zhixing/core/advancement/application";
+import type {
   AdvancementProxyScheduleResult,
   AdvancementProxyTurnPort,
 } from "./ports.js";
@@ -40,6 +43,16 @@ export class ProxyMessageScheduler {
       onTaskSettled: input.onTaskSettled,
     });
   }
+}
+
+/** Keeps proxy scheduling mechanics behind the Domain application port. */
+export function createAdvancementReviewProxySchedulePort(
+  proxyTurns: AdvancementProxyTurnPort,
+): AdvancementReviewProxySchedulePort {
+  const scheduler = new ProxyMessageScheduler({ proxyTurns });
+  return {
+    schedule: (input) => scheduler.schedule(input).then(() => undefined),
+  };
 }
 
 function proxyTurnContext(proxyMessage: AdvancementProxyMessage): TurnContext {

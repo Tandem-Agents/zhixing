@@ -33,10 +33,7 @@ import { ConversationManager } from "@zhixing/owner-kernel";
 import {
   createAdvancementRecoveryMaintenance,
 } from "@zhixing/owner-services";
-import {
-  createAdvancementAcceptedTurnReviewMechanism,
-  createAdvancementReviewProxySchedulePort,
-} from "@zhixing/owner-services/advancement/review-application-bridge";
+import { createAdvancementReviewProxySchedulePort } from "@zhixing/owner-services/advancement/proxy-scheduler";
 import {
   createAdvancementEventSink,
   createAdvancementOriginalTaskAdmissionPort,
@@ -687,8 +684,9 @@ const conversationSurface: AccessSurface = {
       : undefined;
     const advancementRecovery =
       ctx.advancement && reviewResults
-        ? createAdvancementRecoveryMaintenance({
+          ? createAdvancementRecoveryMaintenance({
             advancement: ctx.advancement,
+            reviews: ctx.advancementReviews,
             directory: ctx.advancementDirectory,
             proxyTurns,
             originalTasks: createAdvancementOriginalTaskAdmissionPort(
@@ -711,9 +709,7 @@ const conversationSurface: AccessSurface = {
                   beforeRunIndex,
                 }),
             },
-            review: createAdvancementAcceptedTurnReviewMechanism(
-              ctx.advancement,
-            ),
+            review: ctx.advancementReviews,
             results: reviewResults,
           })
         : undefined;

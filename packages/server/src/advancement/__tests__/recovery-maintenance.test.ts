@@ -20,13 +20,16 @@ import {
   type AdvancementRecoveryMaintenance,
 } from "@zhixing/owner-services";
 import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
+import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
 import type { SessionBroadcast } from "@zhixing/rpc";
 import type {
+  AdvancementReviewerPort,
   ImmediateRootResourceLease,
   ResourceReservationPort,
 } from "@zhixing/core/contracts";
 import { protocolDigest } from "@zhixing/core/protocol";
 import {
+  type AdvancementReviewAttemptApplication,
   AdvancementReviewResultProjectionApplicationService,
   buildAdvancementProxyMessage,
 } from "@zhixing/core/advancement/application";
@@ -83,25 +86,28 @@ function fakeResources(): ResourceReservationPort {
 }
 
 class AdvancementController extends OwnerAdvancementController {
-  constructor(options: Omit<AdvancementControllerOptions, "reviewAttempts"> & {
+  readonly reviews: AdvancementReviewAttemptApplication;
+
+  constructor(options: AdvancementControllerOptions & {
     readonly resources?: ResourceReservationPort;
+    readonly reviewer?: AdvancementReviewerPort;
     readonly sessionTokenBudget?: number;
     readonly reviewIdGenerator?: () => string;
     readonly proxyIdGenerator?: () => string;
   }) {
     const {
       resources = fakeResources(),
+      reviewer,
       sessionTokenBudget,
       reviewIdGenerator,
       proxyIdGenerator,
       ...rest
     } = options;
-    super({
-      ...rest,
-      reviewAttempts: createAdvancementReviewAttemptApplication({
+    const reviews = createAdvancementReviewAttemptApplication({
         store: options.store,
         resources,
-        reviewerAvailable: options.reviewer !== undefined,
+        mechanism: createAdvancementReviewExternalMechanism({ reviewer }),
+        reviewerAvailable: reviewer !== undefined,
         ...(options.closureSynthesizer
           ? { closureSynthesizer: options.closureSynthesizer }
           : {}),
@@ -109,8 +115,9 @@ class AdvancementController extends OwnerAdvancementController {
         ...(options.now ? { now: options.now } : {}),
         ...(reviewIdGenerator ? { reviewIdGenerator } : {}),
         ...(proxyIdGenerator ? { proxyIdGenerator } : {}),
-      }),
     });
+    super(rest);
+    this.reviews = reviews;
   }
 }
 import {
@@ -120,6 +127,24 @@ import {
 } from "../adapters.js";
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+function fakeReviewApplication(
+  overrides: Partial<AdvancementReviewAttemptApplication> = {},
+): AdvancementReviewAttemptApplication {
+  return {
+    reconcileConversation: async () => {},
+    reviewAcceptedRun: async () => ({ kind: "skipped", reason: "not-active" }),
+    cancelSession: async () => {
+      throw new Error("unexpected cancellation");
+    },
+    rebuildMissingProxyMessage: async () => ({ kind: "not-applicable" }),
+    ...overrides,
+  };
+}
+
+function emptyReviewResults(): AdvancementReviewResultProjectionApplicationService {
+  return new AdvancementReviewResultProjectionApplicationService({});
+}
 
 function createAdvancementRecoveryMaintenance(options: {
   readonly advancement: AdvancementController;
@@ -131,6 +156,7 @@ function createAdvancementRecoveryMaintenance(options: {
   const sessionBroadcast = options.sessionBroadcast ?? (() => null);
   return createOwnerAdvancementRecoveryMaintenance({
     advancement: options.advancement,
+    reviews: options.advancement.reviews,
     directory: options.directory,
     proxyTurns: createAdvancementProxyTurnPort({
       manager: options.manager,
@@ -1199,9 +1225,6 @@ describe("AdvancementRecoveryMaintenance", () => {
       loadActiveSession: vi.fn(async (conversationId: string) =>
         conversationId === "conv-bad" ? active : null,
       ),
-      rebuildMissingProxyMessage: vi.fn(async () => ({
-        kind: "not-applicable" as const,
-      })),
     };
     const directoryPort: AdvancementConversationDirectory = {
       list: async () => [
@@ -1216,6 +1239,8 @@ describe("AdvancementRecoveryMaintenance", () => {
     };
     const recovery = createOwnerAdvancementRecoveryMaintenance({
       advancement: advancement as never,
+      reviews: fakeReviewApplication(),
+      reviewResults: emptyReviewResults(),
       directory: directoryPort,
       proxyTurns: {
         isRunning: () => false,
@@ -1264,10 +1289,6 @@ describe("AdvancementRecoveryMaintenance", () => {
     const advancement = {
       loadActiveSession: vi.fn(async () => pending),
       persistOriginalTaskAdmissionSettlement: vi.fn(async () => admitted),
-      rebuildMissingProxyMessage: vi.fn(async () => ({
-        kind: "not-applicable" as const,
-      })),
-      afterTurnCommitted: vi.fn(),
     };
     const originalTasks = {
       admit: vi.fn(async () => ({
@@ -1277,6 +1298,8 @@ describe("AdvancementRecoveryMaintenance", () => {
     };
     const recovery = createOwnerAdvancementRecoveryMaintenance({
       advancement: advancement as never,
+      reviews: fakeReviewApplication(),
+      reviewResults: emptyReviewResults(),
       originalTasks,
       directory: {
         list: async () => [{ id: "conv-1" }] as never,
@@ -1328,14 +1351,16 @@ describe("AdvancementRecoveryMaintenance", () => {
     };
     const advancement = {
       loadActiveSession: vi.fn(async () => pending),
-      cancelOpenSession: vi.fn(async () => ({
-        ...pending,
-        status: "cancelled" as const,
-      })),
       persistOriginalTaskAdmissionSettlement: vi.fn(),
     };
+    const cancelSession = vi.fn(async () => ({
+      ...pending,
+      status: "cancelled" as const,
+    }));
     const recovery = createOwnerAdvancementRecoveryMaintenance({
       advancement: advancement as never,
+      reviews: fakeReviewApplication({ cancelSession }),
+      reviewResults: emptyReviewResults(),
       originalTasks: {
         admit: vi.fn(async () => ({
           status: "rejected" as const,
@@ -1359,7 +1384,7 @@ describe("AdvancementRecoveryMaintenance", () => {
       status: "not-active",
       conversationId: "conv-1",
     });
-    expect(advancement.cancelOpenSession).toHaveBeenCalledWith(
+    expect(cancelSession).toHaveBeenCalledWith(
       expect.objectContaining({
         conversationId: "conv-1",
         advancementSessionId: "adv-admission-rejected",
@@ -1394,11 +1419,8 @@ describe("AdvancementRecoveryMaintenance", () => {
     };
     const advancement = {
       loadActiveSession: vi.fn(async () => active),
-      rebuildMissingProxyMessage: vi.fn(async () => ({
-        kind: "not-applicable" as const,
-      })),
-      afterTurnCommitted: vi.fn(),
     };
+    const reviewAcceptedRun = vi.fn();
     const later: RunRecord & { runId: string } = {
       type: "run",
       runId: "run-later",
@@ -1409,6 +1431,8 @@ describe("AdvancementRecoveryMaintenance", () => {
     };
     const recovery = createOwnerAdvancementRecoveryMaintenance({
       advancement: advancement as never,
+      reviews: fakeReviewApplication({ reviewAcceptedRun }),
+      reviewResults: emptyReviewResults(),
       directory: {
         list: async () => [{ id: "conv-1" }] as never,
         exists: async () => true,
@@ -1428,7 +1452,7 @@ describe("AdvancementRecoveryMaintenance", () => {
       status: "awaiting-original-run",
       conversationId: "conv-1",
     });
-    expect(advancement.afterTurnCommitted).not.toHaveBeenCalled();
+    expect(reviewAcceptedRun).not.toHaveBeenCalled();
   });
 });
 
