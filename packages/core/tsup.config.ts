@@ -11,6 +11,7 @@ export default defineConfig({
     "src/transcript/index.ts",
     "src/conversation/index.ts",
     "src/conversation/application.ts",
+    "src/workscene/application.ts",
     "src/rubrics/index.ts",
     "src/skills/catalog-application.ts",
     "src/product-api/catalog.ts",

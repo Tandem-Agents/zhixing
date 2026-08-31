@@ -64,7 +64,7 @@ function sceneProductTools(
   const identity = { sceneId: scene.id, sceneName: scene.name };
   return [
     createWorkmodeExitTool(),
-    createWorksceneRenameCurrentTool(workscenes, identity),
+    createWorksceneRenameCurrentTool(identity),
     createWorksceneSetWorkdirCurrentTool(identity, workscenes),
     createWorksceneClearWorkdirCurrentTool(identity),
   ];

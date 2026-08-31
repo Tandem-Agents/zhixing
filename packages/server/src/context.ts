@@ -194,7 +194,7 @@ export interface ServerContext {
   perspectives?: PerspectivesController;
   /** 尚未迁移的对话身份/转录持久桥(ensure/transcript)。 */
   conversationDirectory?: ConversationDirectory;
-  /** 工作场景域(注册表管理 + 场景对话取建)。不传则 workscene.* 不可用。 */
+  /** 尚未迁移的 Workscene enter/exit 桥；管理面只经 Product API。 */
   workscenes?: WorksceneDirectory;
   /** Host 组合的传输无关 Product API。不传则相应产品 API 不可用。 */
   productApi?: ProductApiDispatcher;

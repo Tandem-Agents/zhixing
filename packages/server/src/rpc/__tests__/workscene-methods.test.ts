@@ -7,6 +7,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
+import { readFile } from "node:fs/promises";
 import { AdvancementStore, type WorkScene } from "@zhixing/core";
 import { createTempDir } from "@zhixing/test-utils";
 import { AdvancementController } from "@zhixing/owner-services";
@@ -21,9 +22,35 @@ import {
 } from "../methods/workscene.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 import { WorksceneBusyError } from "@zhixing/owner-kernel";
+import {
+  createWorksceneManagementProductApiContribution,
+  WORKSCENE_MANAGEMENT_PRODUCT_API_EXACT_SET,
+  WorksceneManagementApplicationService,
+} from "@zhixing/core/workscene/application";
+import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import type { WorksceneDirectory } from "../../runtime/workscene-directory.js";
 import type { ServerContext } from "../../context.js";
 import type { ConversationManager } from "@zhixing/owner-kernel";
+
+type TestWorksceneDirectory = WorksceneDirectory & {
+  readonly touched: string[];
+  recover(): Promise<void>;
+  list(): Promise<WorkScene[]>;
+  get(id: string): Promise<WorkScene | null>;
+  create(input: {
+    name: string;
+    workspace?: { deviceId: string; bindingRef: string };
+    requestId: string;
+  }): Promise<{ scene: WorkScene; workspaceWarning?: string }>;
+  rename(id: string, name: string, requestId: string): Promise<WorkScene | null>;
+  setWorkdir(
+    id: string,
+    workspace: { deviceId: string; bindingRef: string } | null,
+    requestId: string,
+  ): Promise<{ scene: WorkScene; workspaceWarning?: string } | null>;
+  remove(id: string, requestId: string): Promise<boolean>;
+  recordActivity(id: string, conversationId: string, at: string): Promise<void>;
+};
 
 function makeScene(id: string, name = id): WorkScene {
   return {
@@ -42,7 +69,7 @@ function inputError(message: string): Error {
   });
 }
 
-function memoryWorkscenes(): WorksceneDirectory & { touched: string[] } {
+function memoryWorkscenes(): TestWorksceneDirectory {
   const scenes = new Map<string, WorkScene>();
   const touched: string[] = [];
   let next = 0;
@@ -102,12 +129,45 @@ function memoryWorkscenes(): WorksceneDirectory & { touched: string[] } {
 }
 
 function makeCtx(opts: {
-  workscenes?: WorksceneDirectory;
+  workscenes?: TestWorksceneDirectory;
   activeConversations?: string[];
   advancement?: AdvancementController;
 }) {
+  const productApi = opts.workscenes
+    ? new ProductApiDispatcher(
+        WORKSCENE_MANAGEMENT_PRODUCT_API_EXACT_SET,
+        [
+          createWorksceneManagementProductApiContribution(
+            new WorksceneManagementApplicationService(
+              {
+                list: () => opts.workscenes!.list(),
+                create: (input) => opts.workscenes!.create(input),
+                rename: (input) =>
+                  opts.workscenes!.rename(
+                    input.sceneId,
+                    input.name,
+                    input.requestId,
+                  ),
+                setWorkspace: (input) =>
+                  opts.workscenes!.setWorkdir(
+                    input.sceneId,
+                    input.workspace,
+                    input.requestId,
+                  ),
+                delete: (input) =>
+                  opts.workscenes!.remove(input.sceneId, input.requestId),
+              },
+              {
+                list: () => opts.workscenes!.workspaceCatalog?.() ?? Promise.resolve([]),
+              },
+            ),
+          ),
+        ],
+      )
+    : undefined;
   const server = {
     workscenes: opts.workscenes,
+    productApi,
     advancement: opts.advancement,
     conversations: {
       list: () =>
@@ -125,6 +185,22 @@ async function call(entry: { handler: (p: unknown, c: never) => unknown }, param
 }
 
 describe("workscene.* 方法", () => {
+  it("管理面只经 Workscene Product API，enter/exit 才保留 Directory 桥", async () => {
+    const source = await readFile(
+      new URL("../methods/workscene.ts", import.meta.url),
+      "utf8",
+    );
+    const management = source.slice(
+      source.indexOf("export function buildWorksceneListMethod"),
+      source.indexOf("export function buildWorksceneEnterMethod"),
+    );
+    expect(management).toContain("requireWorksceneManagement(ctx.server)");
+    expect(management).not.toContain("requireWorkscenes(ctx.server)");
+    expect(management).not.toContain("sceneSummary(");
+    const entry = source.slice(source.indexOf("export function buildWorksceneEnterMethod"));
+    expect(entry).toContain("requireWorkscenes(ctx.server)");
+  });
+
   it("管理面全链:create → list → rename → delete;不存在 NOT_FOUND", async () => {
     const workscenes = memoryWorkscenes();
     const ctx = makeCtx({ workscenes });

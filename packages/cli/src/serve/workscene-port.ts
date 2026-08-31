@@ -1,31 +1,14 @@
 import type { WorksceneDto } from "@zhixing/core/contracts";
 
-export interface WorksceneWriteResult {
-  readonly scene: WorksceneDto;
-  readonly workspaceWarning?: string;
-}
-
 /** Anchor 产品工具所需的最小工作场景端口；持久化与 owner 装配留在组合根。 */
 export interface WorksceneToolDirectory {
-  list(): Promise<WorksceneDto[]>;
   get(id: string): Promise<WorksceneDto | null>;
-  create(options: {
-    readonly name: string;
-    readonly workspace?: { deviceId: string; bindingRef: string };
-    readonly requestId: string;
-  }): Promise<WorksceneWriteResult>;
-  rename(id: string, name: string, requestId: string): Promise<WorksceneDto | null>;
-  setWorkdir(
-    id: string,
-    workspace: { deviceId: string; bindingRef: string } | null,
-    requestId: string,
-  ): Promise<WorksceneWriteResult | null>;
-  remove(id: string, requestId: string): Promise<boolean>;
   workspaceCatalog(): Promise<
     readonly {
       deviceId: string;
       deviceName: string;
       bindingRef: string;
+      workspaceBindingRevision: number;
       workspaceName: string;
     }[]
   >;

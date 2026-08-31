@@ -35,6 +35,7 @@ import type {
   RuntimeSubAgentUsageEntry,
 } from "@zhixing/owner-kernel/types";
 import type { ConversationSecurityResult } from "@zhixing/core/conversation/application";
+import type { WorksceneManagementSummary } from "@zhixing/core/workscene/application";
 
 // ─── wire 投影 ───
 
@@ -381,20 +382,7 @@ export interface SessionCompactResult {
 
 // ─── workscene 方法结果 ───
 
-export interface WorksceneSummary {
-  sceneId: string;
-  revision: number;
-  name: string;
-  workspace?: {
-    deviceId: string;
-    bindingRef: string;
-    workspaceBindingRevision?: number;
-    deviceName?: string;
-    workspaceName?: string;
-  };
-  workspaceWarning?: string;
-  lastActiveAt?: string;
-}
+export type WorksceneSummary = WorksceneManagementSummary;
 
 export interface WorksceneListResult {
   scenes: WorksceneSummary[];

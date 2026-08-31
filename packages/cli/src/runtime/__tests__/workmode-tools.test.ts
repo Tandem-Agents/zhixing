@@ -188,7 +188,7 @@ describe("workscene staged management", () => {
     const staged: AssignmentMutationOverlayRecord[] = [];
     const renamed = await callInRun(
       () =>
-        createWorksceneRenameCurrentTool(directory, current).call(
+        createWorksceneRenameCurrentTool(current).call(
           { name: "新场景名" },
           { toolCallId: "rename-call" } as never,
         ),

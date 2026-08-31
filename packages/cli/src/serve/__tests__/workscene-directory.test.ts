@@ -106,7 +106,7 @@ describe("workscene directory", { timeout: 30_000 }, () => {
     const fixture = await createFixture();
     await expect(
       fixture.directory.create({ name: "   ", requestId: requestId("create") }),
-    ).rejects.toMatchObject({ code: "WORKSCENE_INPUT" });
+    ).rejects.toThrow("Workscene name must be a non-empty bounded string");
 
     const workspace = { deviceId: "device-a", bindingRef: "workspace-a" };
     const created = await fixture.directory.create({

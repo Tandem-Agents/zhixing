@@ -3363,6 +3363,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   };
 
   const application = required("packages/core/src/skills/catalog-application.ts");
+  const worksceneApplication = required(
+    "packages/core/src/workscene/application.ts",
+  );
   const conversationApplication = required(
     "packages/core/src/conversation/application.ts",
   );
@@ -3471,6 +3474,24 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   );
   const worksceneDirectory = required(
     "packages/cli/src/serve/workscene-directory.ts",
+  );
+  const worksceneTools = required(
+    "packages/cli/src/serve/workmode-tools.ts",
+  );
+  const worksceneRuntimeProjection = required(
+    "packages/cli/src/serve/workscene-runtime-projection.ts",
+  );
+  const worksceneManagementAdapter = required(
+    "packages/cli/src/serve/workscene-management-adapter.ts",
+  );
+  const worksceneToolPort = required(
+    "packages/cli/src/serve/workscene-port.ts",
+  );
+  const worksceneHandler = required(
+    "packages/server/src/rpc/methods/workscene.ts",
+  );
+  const serverWorksceneBridge = required(
+    "packages/server/src/runtime/workscene-directory.ts",
   );
   const worksceneSessionOwner = required(
     "packages/cli/src/serve/workscene-session-owner.ts",
@@ -3627,6 +3648,63 @@ export function inspectSkillCatalogApplicationOwnership(records) {
           sessionAgentAdmissionEnd,
         )
       : "";
+
+  const worksceneManagementStart = worksceneHandler.indexOf(
+    "export function buildWorksceneListMethod()",
+  );
+  const worksceneManagementEnd = worksceneHandler.indexOf(
+    "export function buildWorksceneEnterMethod()",
+    worksceneManagementStart,
+  );
+  const worksceneManagementHandlers =
+    worksceneManagementStart >= 0 && worksceneManagementEnd > worksceneManagementStart
+      ? worksceneHandler.slice(worksceneManagementStart, worksceneManagementEnd)
+      : "";
+  if (
+    !worksceneApplication.includes("class WorksceneManagementApplicationService") ||
+    !worksceneApplication.includes("interface WorksceneManagementPort") ||
+    !worksceneApplication.includes("interface WorksceneWorkspaceAdministrationReadPort") ||
+    !worksceneApplication.includes("WORKSCENE_MANAGEMENT_PRODUCT_API_EXACT_SET") ||
+    !worksceneApplication.includes("createWorksceneManagementProductApiContribution") ||
+    worksceneApplication.split("defineProductApiQuery<").length - 1 !== 1 ||
+    worksceneApplication.split("defineProductApiCommand<").length - 1 !== 4 ||
+    !worksceneApplication.includes("factEvents: []") ||
+    !worksceneManagementAdapter.includes(
+      'from "@zhixing/core/workscene/application"',
+    ) ||
+    !worksceneManagementAdapter.includes("createAnchorWorksceneManagementPorts") ||
+    !worksceneDirectory.includes("export type AnchorWorksceneDirectory = WorksceneDirectory &") ||
+    !worksceneDirectory.includes("WorksceneToolDirectory & {") ||
+    /export interface AnchorWorksceneDirectory\s+extends/u.test(worksceneDirectory) ||
+    /\b(?:list|create|rename|setWorkdir|remove)\s*\(/u.test(worksceneToolPort) ||
+    worksceneTools.includes('Pick<WorksceneToolDirectory, "rename">') ||
+    !/createWorksceneRenameCurrentTool\(\s*scene:\s*WorksceneCurrentToolContext/u.test(
+      worksceneTools,
+    ) ||
+    !worksceneRuntimeProjection.includes("createWorksceneRenameCurrentTool(identity)") ||
+    worksceneRuntimeProjection.includes(
+      "createWorksceneRenameCurrentTool(workscenes, identity)",
+    ) ||
+    !worksceneHandler.includes(
+      'from "@zhixing/core/workscene/application"',
+    ) ||
+    !worksceneManagementHandlers.includes("requireWorksceneManagement(ctx.server)") ||
+    worksceneManagementHandlers.includes("requireWorkscenes(ctx.server)") ||
+    worksceneManagementHandlers.includes("sceneSummary(") ||
+    !composition.includes("createWorksceneManagementProductApiContribution(") ||
+    !composition.includes("new WorksceneManagementApplicationService(") ||
+    !composition.includes("...WORKSCENE_MANAGEMENT_PRODUCT_API_EXACT_SET.operations") ||
+    !coreManifestText.includes('"./workscene/application"') ||
+    !coreBuild.includes('"src/workscene/application.ts"') ||
+    coreIndex.includes("workscene/application") ||
+    /\b(?:list|create|rename|setWorkdir|remove)\s*\(/u.test(
+      serverWorksceneBridge.slice(
+        serverWorksceneBridge.indexOf("export interface WorksceneDirectory"),
+      ),
+    )
+  ) {
+    failures.push("Workscene management lacks one domain application and Product API owner");
+  }
 
   if (
     !scheduleApplication.includes("class ScheduleManagementApplicationService") ||

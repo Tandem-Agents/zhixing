@@ -513,7 +513,6 @@ export function createWorksceneListTool(
  * workscene_rename_current（power-only）—— 确认后轻量改当前场景登记名。
  */
 export function createWorksceneRenameCurrentTool(
-  _workscenes: Pick<WorksceneToolDirectory, "rename">,
   scene: WorksceneCurrentToolContext,
 ): ToolDefinition {
   const inputSchema: JsonSchema = {

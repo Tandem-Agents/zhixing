@@ -10,11 +10,18 @@
  *
  * 不设 workscene.status:接入面当前在哪个场景是连接级 UI 态,宿主零知识。
  *
- * 业务规则居于 WorksceneDirectory:名称 / workdir 校验、运行态静默、
- * enter 原子化与删除守卫均不在 RPC handler 内复写。
+ * 管理业务规则居于 Workscene Product API；WorksceneDirectory 仅保留尚未迁移的
+ * enter/exit 原子桥。两者都不在 RPC handler 内复写。
  */
 
-import { WorksceneBusyError } from "@zhixing/owner-kernel/conversation-manager";
+import {
+  WORKSCENE_MANAGEMENT_CREATE_COMMAND,
+  WORKSCENE_MANAGEMENT_DELETE_COMMAND,
+  WORKSCENE_MANAGEMENT_LIST_QUERY,
+  WORKSCENE_MANAGEMENT_RENAME_COMMAND,
+  WORKSCENE_MANAGEMENT_SET_WORKSPACE_COMMAND,
+  WorksceneManagementError,
+} from "@zhixing/core/workscene/application";
 import type {
   WorksceneEnterResult,
   WorksceneListResult,
@@ -24,10 +31,7 @@ import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 import type { ServerContext } from "../../context.js";
-import {
-  WorksceneInputError,
-  type WorksceneDirectory,
-} from "../../runtime/workscene-directory.js";
+import type { WorksceneDirectory } from "../../runtime/workscene-directory.js";
 import { loadAdvancementState } from "./session.js";
 
 function requireWorkscenes(server: ServerContext): WorksceneDirectory {
@@ -38,6 +42,23 @@ function requireWorkscenes(server: ServerContext): WorksceneDirectory {
     );
   }
   return server.workscenes;
+}
+
+function requireWorksceneManagement(server: ServerContext) {
+  if (
+    !server.productApi ||
+    !server.productApi.supports(WORKSCENE_MANAGEMENT_LIST_QUERY) ||
+    !server.productApi.supports(WORKSCENE_MANAGEMENT_CREATE_COMMAND) ||
+    !server.productApi.supports(WORKSCENE_MANAGEMENT_RENAME_COMMAND) ||
+    !server.productApi.supports(WORKSCENE_MANAGEMENT_SET_WORKSPACE_COMMAND) ||
+    !server.productApi.supports(WORKSCENE_MANAGEMENT_DELETE_COMMAND)
+  ) {
+    throw new RpcAppError(
+      RPC_ERROR_CODES.INTERNAL_ERROR,
+      "Workscene management Product API not configured on server",
+    );
+  }
+  return server.productApi;
 }
 
 async function sceneSummary(
@@ -133,10 +154,22 @@ async function mapWorksceneErrors<T>(fn: () => Promise<T>): Promise<T> {
   try {
     return await fn();
   } catch (err) {
-    if (err instanceof WorksceneInputError || hasErrorCode(err, "WORKSCENE_INPUT")) {
+    if (
+      (err instanceof WorksceneManagementError && err.kind === "invalid-input") ||
+      hasErrorCode(err, "WORKSCENE_INPUT")
+    ) {
       throw RpcErrors.invalidParams(err.message);
     }
-    if (err instanceof WorksceneBusyError || hasErrorCode(err, "WORKSCENE_BUSY")) {
+    if (
+      (err instanceof WorksceneManagementError && err.kind === "not-found") ||
+      hasErrorCode(err, "WORKSCENE_NOT_FOUND")
+    ) {
+      throw RpcErrors.notFound(err.message);
+    }
+    if (
+      (err instanceof WorksceneManagementError && err.kind === "busy") ||
+      hasErrorCode(err, "WORKSCENE_BUSY")
+    ) {
       throw RpcErrors.busy(err.message);
     }
     throw err;
@@ -157,12 +190,12 @@ export function buildWorksceneListMethod(): MethodEntry {
     requiresAuth: true,
     async handler(_params, ctx): Promise<WorksceneListResult> {
       requireOnlyFields(_params ?? {}, "workscene.list", []);
-      const scenes = await requireWorkscenes(ctx.server).list();
-      const directory = requireWorkscenes(ctx.server);
+      const result = await requireWorksceneManagement(ctx.server).query(
+        WORKSCENE_MANAGEMENT_LIST_QUERY,
+        { kind: "list" },
+      );
       return {
-        scenes: await Promise.all(
-          scenes.map((scene) => sceneSummary(directory, scene)),
-        ),
+        scenes: [...result.scenes],
       };
     },
   };
@@ -187,17 +220,17 @@ export function buildWorksceneCreateMethod(): MethodEntry {
           ? undefined
           : workspaceReference(params.workspace, "workscene.create 'workspace'");
       const result = await mapWorksceneErrors(() =>
-        requireWorkscenes(ctx.server).create({
+        requireWorksceneManagement(ctx.server).command(
+          WORKSCENE_MANAGEMENT_CREATE_COMMAND,
+          {
+            kind: "create",
           name,
           ...(workspace ? { workspace } : {}),
           requestId: requestId(params.requestId, "workscene.create"),
-        }),
+          },
+        ),
       );
-      return sceneSummary(
-        requireWorkscenes(ctx.server),
-        result.scene,
-        result.workspaceWarning,
-      );
+      return result.result.scene;
     },
   };
 }
@@ -221,16 +254,17 @@ export function buildWorksceneRenameMethod(): MethodEntry {
       }
       const name = params.name;
       const renamed = await mapWorksceneErrors(() =>
-        requireWorkscenes(ctx.server).rename(
-          sceneId,
-          name,
-          requestId(params.requestId, "workscene.rename"),
+        requireWorksceneManagement(ctx.server).command(
+          WORKSCENE_MANAGEMENT_RENAME_COMMAND,
+          {
+            kind: "rename",
+            sceneId,
+            name,
+            requestId: requestId(params.requestId, "workscene.rename"),
+          },
         ),
       );
-      if (!renamed) {
-        throw RpcErrors.notFound(`Workscene not found: ${sceneId}`);
-      }
-      return sceneSummary(requireWorkscenes(ctx.server), renamed);
+      return renamed.result.scene;
     },
   };
 }
@@ -260,20 +294,17 @@ export function buildWorksceneSetWorkdirMethod(): MethodEntry {
               "workscene.setWorkdir 'workspace'",
             );
       const result = await mapWorksceneErrors(() =>
-        requireWorkscenes(ctx.server).setWorkdir(
-          sceneId,
-          workspace,
-          requestId(params.requestId, "workscene.setWorkdir"),
+        requireWorksceneManagement(ctx.server).command(
+          WORKSCENE_MANAGEMENT_SET_WORKSPACE_COMMAND,
+          {
+            kind: "set-workspace",
+            sceneId,
+            workspace,
+            requestId: requestId(params.requestId, "workscene.setWorkdir"),
+          },
         ),
       );
-      if (!result) {
-        throw RpcErrors.notFound(`Workscene not found: ${params.sceneId}`);
-      }
-      return sceneSummary(
-        requireWorkscenes(ctx.server),
-        result.scene,
-        result.workspaceWarning,
-      );
+      return result.result.scene;
     },
   };
 }
@@ -291,15 +322,16 @@ export function buildWorksceneDeleteMethod(): MethodEntry {
         throw RpcErrors.invalidParams("workscene.delete requires 'sceneId'");
       }
       const sceneId = params.sceneId;
-      const removed = await mapWorksceneErrors(() =>
-        requireWorkscenes(ctx.server).remove(
-          sceneId,
-          requestId(params.requestId, "workscene.delete"),
+      await mapWorksceneErrors(() =>
+        requireWorksceneManagement(ctx.server).command(
+          WORKSCENE_MANAGEMENT_DELETE_COMMAND,
+          {
+            kind: "delete",
+            sceneId,
+            requestId: requestId(params.requestId, "workscene.delete"),
+          },
         ),
       );
-      if (!removed) {
-        throw RpcErrors.notFound(`Workscene not found: ${params.sceneId}`);
-      }
     },
   };
 }

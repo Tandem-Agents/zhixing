@@ -72,6 +72,11 @@ import {
   defineProductApiExactSet,
   ProductApiDispatcher,
 } from "@zhixing/core/product-api";
+import {
+  createWorksceneManagementProductApiContribution,
+  WORKSCENE_MANAGEMENT_PRODUCT_API_EXACT_SET,
+  WorksceneManagementApplicationService,
+} from "@zhixing/core/workscene/application";
 import { DeviceLifecycleJournal } from "@zhixing/core/authority";
 import {
   protocolDigest,
@@ -163,6 +168,7 @@ import {
   createConversationWorksceneDeleteProjectionBridge,
 } from "./conversation-delete-binding.js";
 import { createWorksceneDirectory } from "./workscene-directory.js";
+import { createAnchorWorksceneManagementPorts } from "./workscene-management-adapter.js";
 import { createWorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 import { createTrustAdministrationApplication } from "./trust-administration-adapter.js";
 import { PostAdoptionReviewCoordinator } from "./post-adoption-review.js";
@@ -2081,6 +2087,13 @@ async function runServerProcess(
         }
       : undefined,
   });
+  const worksceneManagementPorts =
+    createAnchorWorksceneManagementPorts(worksceneDirectory);
+  const worksceneManagementApplication =
+    new WorksceneManagementApplicationService(
+      worksceneManagementPorts.management,
+      worksceneManagementPorts.workspaces,
+    );
   const productApi = new ProductApiDispatcher(
     defineProductApiExactSet({
       operations: [
@@ -2089,6 +2102,7 @@ async function runServerProcess(
         ...TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET.operations,
         ...SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET.operations,
         ...SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET.operations,
+        ...WORKSCENE_MANAGEMENT_PRODUCT_API_EXACT_SET.operations,
         ...(deliveryProductApi
           ? DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET.operations
           : []),
@@ -2099,6 +2113,7 @@ async function runServerProcess(
         ...TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET.factEvents,
         ...SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET.factEvents,
         ...SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET.factEvents,
+        ...WORKSCENE_MANAGEMENT_PRODUCT_API_EXACT_SET.factEvents,
         ...(deliveryProductApi
           ? DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET.factEvents
           : []),
@@ -2115,6 +2130,9 @@ async function runServerProcess(
       createTrustAdministrationProductApiContribution(trustAdministration),
       createScheduleManagementProductApiContribution(schedulerManagement),
       createScheduleRuntimeProductApiContribution(schedulerApplication),
+      createWorksceneManagementProductApiContribution(
+        worksceneManagementApplication,
+      ),
       ...(deliveryProductApi ? [deliveryProductApi] : []),
     ],
   );

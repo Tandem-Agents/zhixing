@@ -1,7 +1,4 @@
 import { randomUUID } from "node:crypto";
-import {
-  normalizeSceneName,
-} from "@zhixing/core";
 import type {
   AuthorityCallContext,
   GlobalControlCallContext,
@@ -14,7 +11,6 @@ import type {
 import { environmentControlSubject } from "@zhixing/core/protocol";
 import type {
   WorksceneDirectory,
-  WorksceneWriteResult,
 } from "@zhixing/server";
 import type { WorksceneToolDirectory } from "./workscene-port.js";
 import type { ConversationManager } from "@zhixing/owner-kernel";
@@ -24,6 +20,36 @@ import { WorksceneSessionOwner } from "./workscene-session-owner.js";
 import type { WorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 
 const CONTROL_BUDGET = { maxCalls: 8 };
+
+export type AnchorWorksceneDirectory = WorksceneDirectory &
+  WorksceneToolDirectory & {
+  recover(): Promise<void>;
+  list(): Promise<WorksceneDto[]>;
+  create(options: {
+    readonly name: string;
+    readonly workspace?: { deviceId: string; bindingRef: string };
+    readonly requestId: string;
+  }): Promise<{ readonly scene: WorksceneDto; readonly workspaceWarning?: string }>;
+  rename(
+    sceneId: string,
+    name: string,
+    requestId: string,
+  ): Promise<WorksceneDto | null>;
+  setWorkdir(
+    sceneId: string,
+    workspace: { deviceId: string; bindingRef: string } | null,
+    requestId: string,
+  ): Promise<
+    { readonly scene: WorksceneDto; readonly workspaceWarning?: string } | null
+  >;
+  remove(sceneId: string, requestId: string): Promise<boolean>;
+  recordActivity(
+    sceneId: string,
+    conversationId: string,
+    at: string,
+    requestId?: string,
+  ): Promise<void>;
+  };
 
 export function createWorksceneDirectory(deps: {
   authority: () => AuthorityRuntimeStack | undefined;
@@ -58,7 +84,7 @@ export function createWorksceneDirectory(deps: {
       NonNullable<AuthorityRuntimeStack["workspaceProbe"]>["probe"]
     >[0],
   ) => Promise<WorkspaceProbeResult>;
-}): WorksceneDirectory & WorksceneToolDirectory {
+}): AnchorWorksceneDirectory {
   const sceneChains = new Map<string, Promise<unknown>>();
   let sessionOwner: WorksceneSessionOwner | undefined;
 
@@ -92,16 +118,6 @@ export function createWorksceneDirectory(deps: {
       name: "WorksceneInputError",
       code: "WORKSCENE_INPUT",
     });
-  const normalizeName = (name: string): string => {
-    try {
-      return normalizeSceneName(name);
-    } catch (error) {
-      throw inputError(
-        error instanceof Error ? error.message : "工作场景名称无效",
-      );
-    }
-  };
-
   function runSceneOperation<T>(
     sceneId: string,
     operation: () => Promise<T>,
@@ -273,13 +289,12 @@ export function createWorksceneDirectory(deps: {
       return readScene(sceneId);
     },
 
-    async create(options): Promise<WorksceneWriteResult> {
-      const name = normalizeName(options.name);
+    async create(options) {
       const workspaceWarning = await validateWorkspace(options.workspace);
       const result = await globalState().mutate(
         {
           kind: "workscene-create",
-          name,
+          name: options.name,
           ...(options.workspace ? { workspace: options.workspace } : {}),
         },
         worksceneContext(options.requestId),
@@ -300,7 +315,7 @@ export function createWorksceneDirectory(deps: {
         {
           kind: "workscene-rename",
           sceneId,
-          name: normalizeName(name),
+          name,
           expectedRevision: current.revision,
         },
         worksceneContext(requestId, current.revision),

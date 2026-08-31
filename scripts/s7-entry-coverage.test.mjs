@@ -3404,6 +3404,7 @@ test("Trust Administration management has one domain application and Product API
 test("Skill Catalog management, load, save, admission and Kernel projection have one domain application boundary", async () => {
   const paths = [
     "packages/core/src/skills/catalog-application.ts",
+    "packages/core/src/workscene/application.ts",
     "packages/core/src/conversation/application.ts",
     "packages/core/src/conversation/index.ts",
     "packages/core/src/scheduler/application.ts",
@@ -3429,6 +3430,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/rpc/package.json",
     "packages/rpc/tsup.config.ts",
     "packages/server/src/rpc/methods/skill.ts",
+    "packages/server/src/rpc/methods/workscene.ts",
+    "packages/server/src/runtime/workscene-directory.ts",
     "packages/server/src/rpc/methods/schedule.ts",
     "packages/server/src/rpc/methods/server.ts",
     "packages/server/src/rpc/methods/auth.ts",
@@ -3447,6 +3450,10 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/cli/src/serve/conversation-delete-binding.ts",
     "packages/cli/src/serve/conversation-directory.ts",
     "packages/cli/src/serve/workscene-directory.ts",
+    "packages/cli/src/serve/workmode-tools.ts",
+    "packages/cli/src/serve/workscene-runtime-projection.ts",
+    "packages/cli/src/serve/workscene-management-adapter.ts",
+    "packages/cli/src/serve/workscene-port.ts",
     "packages/cli/src/serve/workscene-session-owner.ts",
     "packages/cli/src/serve/local-conversation-directory-application.ts",
     "packages/cli/src/serve/local-conversation-rpc.ts",
@@ -3498,6 +3505,56 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
 
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/workscene.ts",
+      (text) => text.replace(
+        "requireWorksceneManagement(ctx.server).query(",
+        "requireWorkscenes(ctx.server).list(",
+      ),
+    )).join("\n"),
+    /Workscene management lacks one domain application and Product API owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/runtime/workscene-directory.ts",
+      (text) => text.replace(
+        "export interface WorksceneDirectory {",
+        "export interface WorksceneDirectory {\n  list(): Promise<unknown[]>;",
+      ),
+    )).join("\n"),
+    /Workscene management lacks one domain application and Product API owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/workscene-port.ts",
+      (text) => text.replace(
+        "export interface WorksceneToolDirectory {",
+        "export interface WorksceneToolDirectory {\n  rename(): Promise<void>;",
+      ),
+    )).join("\n"),
+    /Workscene management lacks one domain application and Product API owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/workmode-tools.ts",
+      (text) => text.replace(
+        "export function createWorksceneRenameCurrentTool(\n  scene: WorksceneCurrentToolContext,",
+        'export function createWorksceneRenameCurrentTool(\n  _workscenes: Pick<WorksceneToolDirectory, "rename">,\n  scene: WorksceneCurrentToolContext,',
+      ),
+    )).join("\n"),
+    /Workscene management lacks one domain application and Product API owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/workscene-directory.ts",
+      (text) => text.replace(
+        "export type AnchorWorksceneDirectory = WorksceneDirectory &\n  WorksceneToolDirectory & {",
+        "export interface AnchorWorksceneDirectory\n  extends WorksceneDirectory, WorksceneToolDirectory {",
+      ),
+    )).join("\n"),
+    /Workscene management lacks one domain application and Product API owner/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
