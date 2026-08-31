@@ -1,6 +1,7 @@
 import type {
   WorksceneEntryPort,
   WorksceneManagementPort,
+  WorksceneRuntimeProjectionReadPort,
   WorksceneWorkspaceAdministrationReadPort,
 } from "@zhixing/core/workscene/application";
 import type { AnchorWorksceneDirectory } from "./workscene-directory.js";
@@ -15,6 +16,7 @@ type ApplicationDirectory = Pick<
   | "workspaceCatalog"
   | "enterScene"
   | "exitScene"
+  | "get"
 >;
 
 /** Maps the current Anchor mechanisms to the path-free Workscene application ports. */
@@ -24,6 +26,7 @@ export function createAnchorWorksceneApplicationPorts(
   readonly management: WorksceneManagementPort;
   readonly workspaces: WorksceneWorkspaceAdministrationReadPort;
   readonly entry: WorksceneEntryPort;
+  readonly runtime: WorksceneRuntimeProjectionReadPort;
 } {
   const management: WorksceneManagementPort = {
     list: () => directory.list(),
@@ -53,9 +56,13 @@ export function createAnchorWorksceneApplicationPorts(
         input.requestId,
       ),
   };
+  const runtime: WorksceneRuntimeProjectionReadPort = {
+    get: (sceneId) => directory.get(sceneId),
+  };
   return Object.freeze({
     management: Object.freeze(management),
     workspaces: Object.freeze(workspaces),
     entry: Object.freeze(entry),
+    runtime: Object.freeze(runtime),
   });
 }

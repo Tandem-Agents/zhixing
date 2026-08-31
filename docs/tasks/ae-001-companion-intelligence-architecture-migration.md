@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-13b Workscene enter/exit 应用责任已迁移，等待协调者复核<br>
+> 当前检查点：A5-13c Workscene 会话运行投影产品裁决已完成，等待协调者独立复核<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `9009d931`；A5-13a 五项 Workscene 管理行为及类型纠正已由协调者独立复核并提交，初次反证与恢复历史继续保留 |
+| 已接受基线 | `4189ec7d`；A5-13a/b 已由协调者独立复核并提交，七项 Workscene RPC 通过同一应用/Product API，Server WorksceneDirectory 已退役 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | A5-13b 已完成，等待协调者独立复核；Workscene 行与 A5 仍为 `[ ]` |
-| 下一责任链 | 协调者复核 A5-13b 后，按 Workscene 剩余真实责任重新裁决最窄下一包；不得由本包扩入 Advancement、Conversation transcript/删除桥、Channel、Device、Backup 或 A6 |
+| 活跃工作包 | A5-13c 已形成可复核终态：Workscene 会话运行投影由唯一领域应用裁决，当前等待协调者独立复核；Workscene 行与 A5 仍为 `[ ]` |
+| 下一责任链 | 先独立复核 A5-13c；本包未处理 `A5-CONVERSATION-WORKSCENE-DELETE-01`，不得由当前执行对话继续删除级联桥、Advancement、Channel、Device、Backup 或 A6 |
 | 打开的单向桥 | `A5-CONVERSATION-LIFECYCLE-01`：`ServerContext.conversationDirectory` 已退出 clear/delete/resume，暂仅承载 exists/ensure/transcript，Conversation 最终包前归零。<br>`A5-CONVERSATION-WORKSCENE-DELETE-01`：Anchor 组合根唯一创建 `ConversationWorksceneDeleteProjectionBridge`，唯一 consumer 为 `WorksceneSessionOwner.removeScene`；只允许 Workscene Authority delete 后调用 Conversation 物理存储投影，不拥有 delete 准入、终态、Fact 或通知，必须在 Workscene A5 迁移包退场。 |
-| 已失效证据 | 无当前未恢复证据；`A5-13b-workscene-entry-application-v1` 已在同一工作区恢复，等待协调者独立复核；A5-13a 证据继续有效 |
+| 已失效证据 | 无当前未恢复证据；`A5-13c-workscene-runtime-projection-v1` 已由唯一 Workscene 应用、Anchor path-free adapter、runtime binding 与结构反例恢复，A5-13a/b 证据继续有效 |
 | 阻塞/用户决策 | 无技术阻塞；用户已明确恢复调度 |
 
 ### A0 基线索引
@@ -2097,6 +2097,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 生产链、旧桥退场与跨领域边界：Anchor 只创建一次 `createAnchorWorksceneApplicationPorts`，把管理、workspace read 与 entry Correctness ports 注入同一个应用和 sealed Product API dispatcher。`workscene.enter/exit` RPC 只保留认证连接到稳定 observer identity、strict wire 参数解析、Product API dispatch、既有错误映射和结果传输；enter 提交成功后的 Advancement `recoverConversation/loadAdvancementState` 仍是独立跨领域响应投影，失败只记录并软降级，不回滚已经成立的 Workscene observer/entry 事实。`ServerContext.workscenes`、`CreateContextOptions.workscenes`、Server `WorksceneDirectory`、`packages/server/src/runtime/workscene-directory.ts`、runtime 转导和旧 management adapter 全部删除；CLI 的 `AnchorWorksceneDirectory` 只作为一个具体 Correctness 组合类型存在，Server/RPC 不再取得该实现对象。公开方法名、请求/结果、全域 conversation id、workspace metadata、Advancement 状态、response-loss replay、并发 observer 和 activity 行为不变。
 - 直接证据与验证：core 应用 1 文件 5/5，覆盖 enter/exit identity、scene-conversation 绑定、workspace 投影、not-found/input 与 1 Query + 6 Command + 0 Fact exact-set；Server 真实 dispatcher/wire 1 文件 10/10，覆盖七项 operation 支持门、enter/exit 参数与 observer/request 转发、NOT_FOUND/INVALID_PARAMS/BUSY、Advancement 成功投影和恢复失败软降级；CLI Correctness/组合 3 文件 14/14，覆盖同 scene 并发 enter 的单一 conversation、observer guard、activity、请求重放、adapter 映射、Host 单 dispatcher 和 `ServerContext.workscenes` 退场，合计 5 文件 29/29。fresh core→rpc→server→CLI 依赖顺序构建、canonical S7 coverage/mutation 32/32 与 registry golden、fresh `pnpm runtime:package-exports` 均通过。core package typecheck 通过；server/CLI 额外 `tsc --noEmit` 未出现本包诊断，只保留已登记的 Conversation A5 后续责任链诊断，故不把 package typecheck 虚报为全绿。
 - 失效规则与交接：S7 与反向 mutation 冻结 1 Query + 6 Command + 0 Fact、同一领域应用/adapter/contribution、enter/exit handler Product API dispatch、Server context/runtime bridge 零残留、工具端 management 零回流、core 窄 subpath/build/export和单一 Host composition；恢复 Server Directory/context 直连、漏 entry operation、第二 adapter/application/dispatcher、根导出、RPC 结果重组或 scene-conversation 归属旁路都会使本证据失效。以后 Workscene Query/Command/result/error、entry observer/request/replay/activity、workspace 投影、Product API exact-set、Advancement 响应投影、RPC wire、Host composition、S7 或 package export 任一变化，只恢复对应闭包。`A5-WORKSCENE-ENTRY-01` 已退役；Workscene 行与 A5 继续 `[ ]`，本包停在等待协调者复核，不进入 Advancement、Conversation transcript/删除桥、Channel、Device、Backup 或 A6。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调验收：协调者已在同一 A5-13b 交付物上独立复核并提交为 `4189ec7d`；该记录转为已接受基线，A5-13c 只使 Workscene 会话运行投影闭包失效，不重开七项 RPC、Server bridge 退场或 Advancement 响应投影。
+
+### A5-13c：归位 Workscene 会话运行投影产品裁决
+
+- 实施基线与唯一应用：进场为 `HEAD 4189ec7dd658f88242459121676e3bdd49305e01 + task-doc:A5-13c-dispatch`，索引为空且工作区只有协调者预登记的本文台账。既有唯一 `@zhixing/core/workscene/application` 增加 path-free `WorksceneRuntimeProjectionReadPort`、有限 `WorksceneConversationRuntimeQuery` 与冻结的 `main | scene { sceneId, name, workspace binding }` 投影；同一个 `WorksceneApplicationService` 唯一裁决 conversation scope、当前 scene identity、workspace binding、not-found 与 invalid-input。Product API exact-set 仍严格为 1 Query + 6 Command + 0 Fact，runtime query 不是新增公开 Product Surface operation；Authority-backed directory 只作为同一 adapter 的 Correctness read mechanism，不拥有路由、profile、workspace 选择或运行结果。
+- 生产组合与基础设施 binding：Anchor 在 `worksceneDirectory` 后只创建一次 ports 与应用实例，该实例同时供七项 Product API contribution、conversation runtime factory 和 guidance workspace 查询消费。runtime factory 已删除 `parseConversationId`、`WorksceneDto` 与 `getScene` 直读：首次领域投影冻结 scene identity/name；调用方显式 environment workspace 时保持该裁决且不二读；无 binding 时发放 null workspace；存在 binding 时以同一领域 query 二读当前 Authority，仅用最新 binding 交给 Anchor adapter 做 device/executor 归属、`resolveWorkspace`、`probePath` 与按需建目录，首次 scene name/identity 仍保持。首次 scene 消失继续报原“不存在”终态；二读消失、binding 消失或无法解析继续在 runtime 发布前报原“工作区无法在当前 executor 解析”；remote binding、非目录/非法 probe 与准备失败也不发布 runtime。guidance 通过同一应用读取一次当前 binding，缺 scene/无 workspace 仍退化为原 global guidance；`command.ts` 的 `worksceneDirectory.get` 产品旁路归零。
+- 行为保护、旧路与直接证据：main、带/不带 caller workspace 的 scene、二读 binding 更新/消失、power profile/prompt、Kernel scene identity、七项 Workscene 工具和 capability catalog 均继续由既有 Anchor projection 机械映射；RuntimeHost/Kernel 合同、A5-13b 七项 RPC、Advancement 响应投影、Workscene Authority/持久格式和删除桥未改变。core 领域应用 1 文件 7/7 覆盖 main/scene、冻结 finite projection、当前 binding、not-found/invalid 与重复读取；CLI 3 文件 14/14 覆盖 main/scene 路由、显式/null/二读 workspace、消失/更新、零提前发放、adapter runtime port、Host 单应用/双消费和 directory 旁路归零；Server dispatcher/wire 1 文件 10/10 证明新增必需 runtime port 未改变七项 RPC，合计 5 文件 31/31。
+- 构建、门禁、失效与交接：fresh core build 与 `pnpm cli:build` 通过；额外 CLI `tsc --noEmit` 未出现 Workscene/A5-13c 诊断，只保留接受基线中的 Conversation delete/resume/run-control 诊断，未虚报为全绿。canonical S7 coverage/mutation 32/32 与 registry golden、fresh `pnpm runtime:package-exports`、最窄 Biome 和 `git diff --check` 通过；反向 mutation 能拒绝 runtime factory 恢复 directory/getScene/parse 旁路、command 直读、adapter 漏 runtime port、第二应用或 Product API exact-set 漂移。以后领域 runtime query/projection、directory read adapter、同一应用组合、首次/二读 binding 时序、Anchor device/path/probe binding、profile/identity/tool/capability 映射、S7 或 package export 任一变化，本证据精确失效并只重验上述闭包。`A5-CONVERSATION-WORKSCENE-DELETE-01` 仍保持打开且未触碰，Workscene 行与 A5 继续 `[ ]`；A5-13c 当前完成并等待协调者独立复核，不进入删除桥、Advancement、Channel、Device、Backup、A6 或其他责任链。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 

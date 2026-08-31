@@ -1,19 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
-import type { WorksceneDto } from "@zhixing/core/contracts";
+import {
+  WorksceneApplicationError,
+  type WorksceneConversationRuntimeProjection,
+} from "@zhixing/core/workscene/application";
 import {
   createWorksceneConversationRuntimeFactory,
   createAnchorRuntimeProjectionAssembly,
 } from "../workscene-runtime-projection.js";
 
 function scene(
-  overrides: Partial<WorksceneDto> = {},
-): WorksceneDto {
+  overrides: Partial<
+    Extract<WorksceneConversationRuntimeProjection, { readonly kind: "scene" }>
+  > = {},
+): Extract<WorksceneConversationRuntimeProjection, { readonly kind: "scene" }> {
   return {
-    id: "scene-1",
-    revision: 1,
-    name: "写作场景",
-    createdAt: "2026-08-29T00:00:00.000Z",
-    lastActiveAt: "2026-08-29T00:00:00.000Z",
+    kind: "scene",
+    scene: { sceneId: "scene-1", name: "写作场景" },
+    workspace: null,
     ...overrides,
   };
 }
@@ -46,11 +49,13 @@ describe("Workscene product runtime projection", () => {
     const assembly = fixture();
     const main = assembly.main();
     const withWorkspace = assembly.scene({
-      scene: scene(),
+      scene: scene().scene,
       absolutePath: "/workspace",
     });
     const withoutWorkspace = assembly.scene({
-      scene: scene({ id: "scene-2", name: "纯对话场景" }),
+      scene: scene({
+        scene: { sceneId: "scene-2", name: "纯对话场景" },
+      }).scene,
       absolutePath: null,
     });
 
@@ -145,27 +150,29 @@ describe("Anchor conversation runtime routing", () => {
     const issued: unknown[] = [];
     const resolveWorkspaceRoot = vi.fn(async () => "/resolved");
     const prepareWorkspaceRoot = vi.fn(async () => {});
-    const getScene = vi.fn(async () =>
-      scene({ workspace: { deviceId: "device-1", bindingRef: "binding-1" } }),
-    );
+    const projectConversationRuntime = vi.fn(async ({ conversationId }) => {
+      if (!conversationId.startsWith("ws:")) return { kind: "main" as const };
+      if (conversationId.includes("no-workspace")) {
+        return scene({ scene: { sceneId: "scene-2", name: "无目录" } });
+      }
+      return scene({
+        workspace: { deviceId: "device-1", bindingRef: "binding-1" },
+      });
+    });
     const create = createWorksceneConversationRuntimeFactory({
       issue: async (projection) => {
         issued.push(projection);
         return { marker: "runtime" } as never;
       },
       projections,
-      getScene,
+      projectConversationRuntime,
       resolveWorkspaceRoot,
       prepareWorkspaceRoot,
     });
 
     await create("conversation-main", { workspaceRoot: "/main" });
     await create("ws:scene-1:provided", { workspaceRoot: "/provided" });
-    getScene.mockResolvedValueOnce(scene({ id: "scene-2", name: "无目录" }));
     await create("ws:scene-2:no-workspace");
-    getScene.mockResolvedValueOnce(
-      scene({ workspace: { deviceId: "device-1", bindingRef: "binding-2" } }),
-    );
     await create("ws:scene-1:resolved");
 
     expect(issued).toHaveLength(4);
@@ -174,17 +181,27 @@ describe("Anchor conversation runtime routing", () => {
     expect(issued[2]).toMatchObject({ workspace: null, primaryRole: "power" });
     expect(issued[3]).toMatchObject({ workspace: "/resolved", primaryRole: "power" });
     expect(resolveWorkspaceRoot).toHaveBeenCalledTimes(1);
+    expect(resolveWorkspaceRoot).toHaveBeenCalledWith(
+      "scene-1",
+      { deviceId: "device-1", bindingRef: "binding-1" },
+    );
     expect(prepareWorkspaceRoot).toHaveBeenCalledWith("scene-1", "/resolved");
+    expect(projectConversationRuntime).toHaveBeenCalledTimes(5);
   });
 
   it("fails before publication when reread loses the scene workspace", async () => {
     const issue = vi.fn(async () => ({}) as never);
+    const projectConversationRuntime = vi
+      .fn()
+      .mockResolvedValueOnce(scene({
+        workspace: { deviceId: "device-1", bindingRef: "binding-1" },
+      }))
+      .mockResolvedValueOnce(scene());
     const create = createWorksceneConversationRuntimeFactory({
       issue,
       projections: fixture(),
-      getScene: async () =>
-        scene({ workspace: { deviceId: "device-1", bindingRef: "binding-1" } }),
-      resolveWorkspaceRoot: async () => null,
+      projectConversationRuntime,
+      resolveWorkspaceRoot: vi.fn(),
       prepareWorkspaceRoot: async () => {},
     });
 
@@ -199,7 +216,12 @@ describe("Anchor conversation runtime routing", () => {
     const create = createWorksceneConversationRuntimeFactory({
       issue,
       projections: fixture(),
-      getScene: async () => null,
+      projectConversationRuntime: async () => {
+        throw new WorksceneApplicationError(
+          "not-found",
+          '工作场景 "scene-gone" 不存在,无法装配会话',
+        );
+      },
       resolveWorkspaceRoot: vi.fn(),
       prepareWorkspaceRoot: vi.fn(),
     });
@@ -213,15 +235,22 @@ describe("Anchor conversation runtime routing", () => {
   it("uses the first scene snapshot while the reread supplies only the resolved root", async () => {
     const projections = fixture();
     const issue = vi.fn(async () => ({}) as never);
+    const projectConversationRuntime = vi
+      .fn()
+      .mockResolvedValueOnce(scene({
+        scene: { sceneId: "scene-1", name: "首次名称" },
+        workspace: { deviceId: "device-1", bindingRef: "binding-old" },
+      }))
+      .mockResolvedValueOnce(scene({
+        scene: { sceneId: "scene-1", name: "更新后名称" },
+        workspace: { deviceId: "device-1", bindingRef: "binding-new" },
+      }));
+    const resolveWorkspaceRoot = vi.fn(async () => "/updated-binding-root");
     const create = createWorksceneConversationRuntimeFactory({
       issue,
       projections,
-      getScene: async () =>
-        scene({
-          name: "首次名称",
-          workspace: { deviceId: "device-1", bindingRef: "binding-old" },
-        }),
-      resolveWorkspaceRoot: async () => "/updated-binding-root",
+      projectConversationRuntime,
+      resolveWorkspaceRoot,
       prepareWorkspaceRoot: async () => {},
     });
 
@@ -230,6 +259,10 @@ describe("Anchor conversation runtime routing", () => {
     const projection = issue.mock.calls[0]![0];
     expect(projection.workspace).toBe("/updated-binding-root");
     expect(projection.profile.instructions).toContain('work scene "首次名称"');
+    expect(resolveWorkspaceRoot).toHaveBeenCalledWith(
+      "scene-1",
+      { deviceId: "device-1", bindingRef: "binding-new" },
+    );
   });
 
   it("does not publish when product projection construction fails", async () => {
@@ -247,7 +280,7 @@ describe("Anchor conversation runtime routing", () => {
     const create = createWorksceneConversationRuntimeFactory({
       issue,
       projections,
-      getScene: vi.fn(),
+      projectConversationRuntime: vi.fn(async () => ({ kind: "main" })),
       resolveWorkspaceRoot: vi.fn(),
       prepareWorkspaceRoot: vi.fn(),
     });

@@ -12,6 +12,7 @@ import {
   WorksceneApplicationService,
   type WorksceneEntryPort,
   type WorksceneManagementPort,
+  type WorksceneRuntimeProjectionReadPort,
   type WorksceneWorkspaceAdministrationReadPort,
 } from "./application.js";
 
@@ -90,15 +91,58 @@ function fixture(overrides: Partial<WorksceneManagementPort> = {}) {
     }),
     exit: vi.fn(async () => {}),
   };
+  const runtime: WorksceneRuntimeProjectionReadPort = {
+    get: vi.fn(async (sceneId) => scenes.get(sceneId) ?? null),
+  };
   const application = new WorksceneApplicationService(
     management,
     workspaces,
     entry,
+    runtime,
   );
-  return { application, management, workspaces, entry, scenes };
+  return { application, management, workspaces, entry, runtime, scenes };
 }
 
 describe("WorksceneApplicationService", () => {
+  it("owns finite frozen conversation runtime routing without infrastructure details", async () => {
+    const f = fixture();
+
+    await expect(f.application.projectConversationRuntime({
+      conversationId: "conversation-main",
+    })).resolves.toEqual({ kind: "main" });
+    const projected = await f.application.projectConversationRuntime({
+      conversationId: "ws:scene-a:conversation-1",
+    });
+    expect(projected).toEqual({
+      kind: "scene",
+      scene: { sceneId: "scene-a", name: "场景 A" },
+      workspace: { deviceId: "device-a", bindingRef: "binding-a" },
+    });
+    expect(Object.isFrozen(projected)).toBe(true);
+    if (projected.kind === "scene") {
+      expect(Object.isFrozen(projected.scene)).toBe(true);
+      expect(Object.isFrozen(projected.workspace)).toBe(true);
+    }
+    expect(f.runtime.get).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed for invalid or missing runtime projection input and rereads current authority", async () => {
+    const f = fixture();
+    await expect(f.application.projectConversationRuntime({} as never)).rejects
+      .toMatchObject({ kind: "invalid-input" });
+    await expect(f.application.projectConversationRuntime({
+      conversationId: "ws:missing:conversation-1",
+    })).rejects.toMatchObject({
+      kind: "not-found",
+      message: '工作场景 "missing" 不存在,无法装配会话',
+    });
+
+    f.scenes.set("scene-a", scene("scene-a", { name: "更新后" }));
+    await expect(f.application.projectConversationRuntime({
+      conversationId: "ws:scene-a:conversation-1",
+    })).resolves.toMatchObject({ scene: { name: "更新后" }, workspace: null });
+  });
+
   it("owns the stable list projection and Workspace Administration enrichment", async () => {
     const f = fixture();
     const result = await f.application.query({ kind: "list" });

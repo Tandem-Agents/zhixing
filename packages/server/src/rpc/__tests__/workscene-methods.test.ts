@@ -196,6 +196,9 @@ function makeCtx(opts: {
                     input.requestId,
                   ),
               },
+              {
+                get: (sceneId) => opts.workscenes!.get(sceneId),
+              },
             ),
           ),
         ],

@@ -24,6 +24,9 @@ describe("production startup server ownership", () => {
     expect(source.match(/createWorksceneProductApiContribution\(/gu)).toHaveLength(1);
     expect(source.match(/new WorksceneApplicationService\(/gu)).toHaveLength(1);
     expect(source.match(/createAnchorWorksceneApplicationPorts\(/gu)).toHaveLength(1);
+    expect(source.match(/worksceneApplication\.projectConversationRuntime\(/gu))
+      .toHaveLength(2);
+    expect(source).not.toContain("worksceneDirectory.get(");
     expect(source.match(/createTrustAdministrationApplication\(\{/gu)).toHaveLength(1);
     expect(source.match(/new SkillCatalogApplicationService\(\{/gu)).toHaveLength(1);
     const context = source.slice(location(source, "serverCtx = createServerContext({"));

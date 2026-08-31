@@ -29,6 +29,7 @@ import {
   LocalSchedulerFacade,
   ConversationRepository,
   parseConversationId,
+  worksceneConversationId,
   ShardedTranscriptStore,
   SnapshotStore,
   conversationsDir,
@@ -75,7 +76,9 @@ import {
 import {
   createWorksceneProductApiContribution,
   WORKSCENE_PRODUCT_API_EXACT_SET,
+  WorksceneApplicationError,
   WorksceneApplicationService,
+  type WorksceneWorkspaceReference,
 } from "@zhixing/core/workscene/application";
 import { DeviceLifecycleJournal } from "@zhixing/core/authority";
 import {
@@ -403,6 +406,14 @@ async function runServerProcess(
       return mesh.workspaceProbeForDevice(deviceId).probe(request);
     },
   });
+  const worksceneApplicationPorts =
+    createAnchorWorksceneApplicationPorts(worksceneDirectory);
+  const worksceneApplication = new WorksceneApplicationService(
+    worksceneApplicationPorts.management,
+    worksceneApplicationPorts.workspaces,
+    worksceneApplicationPorts.entry,
+    worksceneApplicationPorts.runtime,
+  );
   const providerCredentials = credentials.providers
     ? { providers: credentials.providers }
     : {};
@@ -585,17 +596,32 @@ async function runServerProcess(
   //   turn-context provider 集合在 runtime 发布前作为固定装配输入建立——scheduler
   //   是 generation-safe 的领域运行投影，LLM 调用时刻权威已就绪；未就绪时
   //   fallback 空状态。
-  const resolveWorksceneRoot = async (sceneId: string): Promise<string | null> => {
-    const scene = await worksceneDirectory.get(sceneId);
-    if (!scene?.workspace) return null;
+  const resolveWorksceneWorkspaceRoot = async (
+    sceneId: string,
+    workspace: WorksceneWorkspaceReference,
+  ): Promise<string> => {
     const runtime = authorityRuntimeRef.current;
-    if (!runtime?.environment || scene.workspace.deviceId !== runtime.deviceId) {
+    if (!runtime?.environment || workspace.deviceId !== runtime.deviceId) {
       throw new Error(`工作场景 "${sceneId}" 的工作区不属于当前 executor`);
     }
     const resolved = await runtime.environment.resolveWorkspace(
-      scene.workspace.bindingRef,
+      workspace.bindingRef,
     );
     return resolved.absolutePath;
+  };
+  const resolveWorksceneRoot = async (sceneId: string): Promise<string | null> => {
+    try {
+      const projection = await worksceneApplication.projectConversationRuntime({
+        conversationId: worksceneConversationId(sceneId, "guidance"),
+      });
+      if (projection.kind !== "scene" || !projection.workspace) return null;
+      return resolveWorksceneWorkspaceRoot(sceneId, projection.workspace);
+    } catch (error) {
+      if (error instanceof WorksceneApplicationError && error.kind === "not-found") {
+        return null;
+      }
+      throw error;
+    }
   };
 
   const runtimeHost = new RuntimeHost({
@@ -641,8 +667,9 @@ async function runServerProcess(
   const createConversationAgentRuntime = createWorksceneConversationRuntimeFactory({
     issue: (projection) => runtimeHost.createConversationRuntime(projection),
     projections: anchorRuntimeProjections,
-    getScene: (sceneId) => worksceneDirectory.get(sceneId),
-    resolveWorkspaceRoot: resolveWorksceneRoot,
+    projectConversationRuntime: (query) =>
+      worksceneApplication.projectConversationRuntime(query),
+    resolveWorkspaceRoot: resolveWorksceneWorkspaceRoot,
     prepareWorkspaceRoot: async (sceneId, absolutePath) => {
       const runtime = authorityRuntimeRef.current!;
       const probe = await runtime.environment!.probePath(absolutePath);
@@ -2086,14 +2113,6 @@ async function runServerProcess(
         }
       : undefined,
   });
-  const worksceneApplicationPorts =
-    createAnchorWorksceneApplicationPorts(worksceneDirectory);
-  const worksceneApplication =
-    new WorksceneApplicationService(
-      worksceneApplicationPorts.management,
-      worksceneApplicationPorts.workspaces,
-      worksceneApplicationPorts.entry,
-    );
   const productApi = new ProductApiDispatcher(
     defineProductApiExactSet({
       operations: [

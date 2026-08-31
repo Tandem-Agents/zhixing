@@ -73,6 +73,15 @@ export interface WorksceneEntryPort {
   }): Promise<void>;
 }
 
+/**
+ * Path-free read mechanism for projecting the current conversation runtime.
+ * The application owns conversation routing and the finite scene projection;
+ * the adapter only reads the current authority snapshot.
+ */
+export interface WorksceneRuntimeProjectionReadPort {
+  get(sceneId: string): Promise<WorksceneDto | null>;
+}
+
 /** Path-free Workspace Administration read projection used for result enrichment. */
 export interface WorksceneWorkspaceAdministrationReadPort {
   list(): Promise<readonly WorksceneWorkspaceMetadata[]>;
@@ -101,6 +110,21 @@ export interface WorksceneEntryResult {
   readonly conversationId: string;
   readonly scene: WorksceneManagementSummary;
 }
+
+export interface WorksceneConversationRuntimeQuery {
+  readonly conversationId: string;
+}
+
+export type WorksceneConversationRuntimeProjection =
+  | { readonly kind: "main" }
+  | {
+      readonly kind: "scene";
+      readonly scene: Readonly<{
+        readonly sceneId: string;
+        readonly name: string;
+      }>;
+      readonly workspace: WorksceneWorkspaceReference | null;
+    };
 
 export type WorksceneManagementQuery = { readonly kind: "list" };
 
@@ -173,6 +197,9 @@ export class WorksceneApplicationError extends Error {
 export interface WorksceneApplication {
   query(query: WorksceneManagementQuery): Promise<WorksceneManagementListResult>;
   execute(command: WorksceneCommand): Promise<WorksceneCommandResult>;
+  projectConversationRuntime(
+    query: WorksceneConversationRuntimeQuery,
+  ): Promise<WorksceneConversationRuntimeProjection>;
 }
 
 export class WorksceneApplicationService
@@ -182,7 +209,41 @@ export class WorksceneApplicationService
     private readonly management: WorksceneManagementPort,
     private readonly workspaces: WorksceneWorkspaceAdministrationReadPort,
     private readonly entry: WorksceneEntryPort,
+    private readonly runtime: WorksceneRuntimeProjectionReadPort,
   ) {}
+
+  async projectConversationRuntime(
+    query: WorksceneConversationRuntimeQuery,
+  ): Promise<WorksceneConversationRuntimeProjection> {
+    if (
+      !query ||
+      typeof query !== "object" ||
+      typeof query.conversationId !== "string"
+    ) {
+      throw invalid("Workscene runtime projection requires a conversation identity");
+    }
+    const { scope } = parseConversationId(query.conversationId);
+    if (scope.kind !== "workscene") {
+      return Object.freeze({ kind: "main" as const });
+    }
+    const scene = await this.runtime.get(scope.sceneId);
+    if (!scene) {
+      throw new WorksceneApplicationError(
+        "not-found",
+        `工作场景 "${scope.sceneId}" 不存在,无法装配会话`,
+      );
+    }
+    return Object.freeze({
+      kind: "scene" as const,
+      scene: Object.freeze({ sceneId: scene.id, name: scene.name }),
+      workspace: scene.workspace
+        ? Object.freeze({
+            deviceId: scene.workspace.deviceId,
+            bindingRef: scene.workspace.bindingRef,
+          })
+        : null,
+    });
+  }
 
   async query(query: WorksceneManagementQuery): Promise<WorksceneManagementListResult> {
     if (query.kind !== "list") throw invalid("Unsupported Workscene query");

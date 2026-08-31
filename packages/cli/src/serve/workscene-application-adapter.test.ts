@@ -30,6 +30,7 @@ describe("createAnchorWorksceneApplicationPorts", () => {
         scene,
       })),
       exitScene: vi.fn(async () => {}),
+      get: vi.fn(async () => scene),
     };
     const ports = createAnchorWorksceneApplicationPorts(directory);
 
@@ -86,5 +87,7 @@ describe("createAnchorWorksceneApplicationPorts", () => {
       "connection:1",
       "exit:1",
     );
+    await expect(ports.runtime.get("scene-1")).resolves.toEqual(scene);
+    expect(directory.get).toHaveBeenCalledWith("scene-1");
   });
 });

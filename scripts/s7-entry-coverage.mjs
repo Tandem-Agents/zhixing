@@ -735,11 +735,8 @@ async function collectProductionConstants() {
       ? productAssembly.main()
       : productAssembly.scene({
           scene: {
-            id: "coverage",
-            revision: 1,
+            sceneId: "coverage",
             name: "coverage",
-            createdAt: "1970-01-01T00:00:00.000Z",
-            lastActiveAt: "1970-01-01T00:00:00.000Z",
           },
           absolutePath: "/coverage",
         });
@@ -1212,7 +1209,7 @@ export function inspectKernelRunEnvelopeOwnership(records) {
     runtimeHost.split("createAgentRuntime({").length - 1 !== 1 ||
     runtimeHost.split("return this.assemble(").length - 1 < 3 ||
     !worksceneProjection.includes('primaryRole: "power"') ||
-    !worksceneProjection.includes("input.issue(input.projections.scene(")
+    !worksceneProjection.includes("input.projections.scene({ scene: current.scene")
   ) {
     failures.push("Conversation, workscene/power or ephemeral runtime gained a second Kernel assembly path");
   }
@@ -2645,7 +2642,7 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     !product.includes("const runtimeTools = (") ||
     !product.includes("createRuntimeToolProjection({") ||
     !product.includes("createConversationRuntimeProjection({") ||
-    !product.includes("createKernelRuntimeIdentityContribution(options.scene.id)") ||
+    !product.includes("createKernelRuntimeIdentityContribution(options.scene.sceneId)") ||
     !product.includes("profile: mainProfile(") ||
     !product.includes("profile: powerProfile(") ||
     !product.includes("const ephemeral = (): RuntimeToolProjection => runtimeTools();") ||
@@ -3659,6 +3656,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !worksceneApplication.includes("interface WorksceneManagementPort") ||
     !worksceneApplication.includes("interface WorksceneEntryPort") ||
     !worksceneApplication.includes("interface WorksceneWorkspaceAdministrationReadPort") ||
+    !worksceneApplication.includes("interface WorksceneRuntimeProjectionReadPort") ||
+    !worksceneApplication.includes("projectConversationRuntime(") ||
+    !worksceneApplication.includes("type WorksceneConversationRuntimeProjection") ||
     !worksceneApplication.includes("WORKSCENE_PRODUCT_API_EXACT_SET") ||
     !worksceneApplication.includes("createWorksceneProductApiContribution") ||
     worksceneApplication.split("defineProductApiQuery<").length - 1 !== 1 ||
@@ -3669,6 +3669,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     ) ||
     !worksceneApplicationAdapter.includes("createAnchorWorksceneApplicationPorts") ||
     !worksceneApplicationAdapter.includes("readonly entry: WorksceneEntryPort") ||
+    !worksceneApplicationAdapter.includes("readonly runtime: WorksceneRuntimeProjectionReadPort") ||
     !worksceneDirectory.includes("export type AnchorWorksceneDirectory = WorksceneToolDirectory &") ||
     !worksceneDirectory.includes("WorksceneToolDirectory & {") ||
     /\bWorksceneDirectory\b/u.test(worksceneDirectory) ||
@@ -3680,6 +3681,11 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       worksceneTools,
     ) ||
     !worksceneRuntimeProjection.includes("createWorksceneRenameCurrentTool(identity)") ||
+    !worksceneRuntimeProjection.includes("type WorksceneConversationRuntimeProjection") ||
+    worksceneRuntimeProjection.split("input.projectConversationRuntime(").length - 1 !== 2 ||
+    worksceneRuntimeProjection.includes("getScene:") ||
+    worksceneRuntimeProjection.includes("parseConversationId") ||
+    worksceneRuntimeProjection.includes("WorksceneDto") ||
     worksceneRuntimeProjection.includes(
       "createWorksceneRenameCurrentTool(workscenes, identity)",
     ) ||
@@ -3695,6 +3701,8 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !composition.includes("createWorksceneProductApiContribution(") ||
     !composition.includes("new WorksceneApplicationService(") ||
     !composition.includes("createAnchorWorksceneApplicationPorts(") ||
+    composition.includes("worksceneDirectory.get(") ||
+    composition.split("worksceneApplication.projectConversationRuntime(").length - 1 !== 2 ||
     !composition.includes("...WORKSCENE_PRODUCT_API_EXACT_SET.operations") ||
     context.includes("WorksceneDirectory") ||
     /\bworkscenes\??\s*:/u.test(context) ||

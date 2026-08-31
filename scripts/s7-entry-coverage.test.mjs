@@ -3518,6 +3518,26 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/workscene-runtime-projection.ts",
+      (text) => text.replace(
+        "input.projectConversationRuntime({ conversationId: sessionId })",
+        "input.getScene(sessionId)",
+      ),
+    )).join("\n"),
+    /Workscene management and entry lack one domain application and Product API owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "const providerCredentials = credentials.providers",
+        "void worksceneDirectory.get(\"runtime-bypass\");\n  const providerCredentials = credentials.providers",
+      ),
+    )).join("\n"),
+    /Workscene management and entry lack one domain application and Product API owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
       "packages/server/src/context.ts",
       (text) => text.replace(
         "export interface ServerContext {",
