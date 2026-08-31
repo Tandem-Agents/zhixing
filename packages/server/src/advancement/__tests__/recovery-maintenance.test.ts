@@ -14,7 +14,6 @@ import {
 import { createTempDir } from "@zhixing/test-utils";
 import {
   AdvancementController as OwnerAdvancementController,
-  buildAdvancementProxyMessage,
   createAdvancementRecoveryMaintenance as createOwnerAdvancementRecoveryMaintenance,
   type AdvancementControllerOptions,
   type AdvancementConversationDirectory,
@@ -27,7 +26,10 @@ import type {
   ResourceReservationPort,
 } from "@zhixing/core/contracts";
 import { protocolDigest } from "@zhixing/core/protocol";
-import { AdvancementReviewResultProjectionApplicationService } from "@zhixing/core/advancement/application";
+import {
+  AdvancementReviewResultProjectionApplicationService,
+  buildAdvancementProxyMessage,
+} from "@zhixing/core/advancement/application";
 
 function fakeResources(): ResourceReservationPort {
   const leaseFor = (
@@ -83,14 +85,30 @@ function fakeResources(): ResourceReservationPort {
 class AdvancementController extends OwnerAdvancementController {
   constructor(options: Omit<AdvancementControllerOptions, "reviewAttempts"> & {
     readonly resources?: ResourceReservationPort;
+    readonly sessionTokenBudget?: number;
+    readonly reviewIdGenerator?: () => string;
+    readonly proxyIdGenerator?: () => string;
   }) {
-    const { resources = fakeResources(), ...rest } = options;
+    const {
+      resources = fakeResources(),
+      sessionTokenBudget,
+      reviewIdGenerator,
+      proxyIdGenerator,
+      ...rest
+    } = options;
     super({
       ...rest,
       reviewAttempts: createAdvancementReviewAttemptApplication({
         store: options.store,
         resources,
+        reviewerAvailable: options.reviewer !== undefined,
+        ...(options.closureSynthesizer
+          ? { closureSynthesizer: options.closureSynthesizer }
+          : {}),
+        ...(sessionTokenBudget !== undefined ? { sessionTokenBudget } : {}),
         ...(options.now ? { now: options.now } : {}),
+        ...(reviewIdGenerator ? { reviewIdGenerator } : {}),
+        ...(proxyIdGenerator ? { proxyIdGenerator } : {}),
       }),
     });
   }

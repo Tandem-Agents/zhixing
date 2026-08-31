@@ -1,29 +1,21 @@
 import {
   RubricContractBuilder,
   ConservativeAdvancementAdmissionStrategy,
-  createAdvancementWindowReviewEntry,
   type AdvancementAdmissionDecision,
   type AdvancementAdmissionStrategy,
   type AdvancementExit,
-  type AdvancementProxyMessage,
-  type AdvancementReviewAttempt,
   type AdvancementReviewRunOutcome,
   type AdvancementRunReview,
   type AdvancementSession,
   type AdvancementOriginalTaskAdmissionIntent,
-  type AdvancementWindowState,
   type ConfirmedRubricSnapshot,
   type RunRecordInput,
   type RunRecordRef,
   type RubricContractDraftSnapshot,
   type Message,
   type UserTurnInput,
-  type AdvancementClosureFacts,
   type AdvancementClosureReport,
-  buildClosureFacts,
   extractText,
-  renderClosureReport,
-  sumAdvancementUsage,
 } from "@zhixing/core";
 import type { AdvancementReviewerPort } from "@zhixing/core/contracts";
 import type {
@@ -35,15 +27,14 @@ import type {
   AdvancementRubricRevisionMechanismPort,
   AdvancementReviewAttemptApplication,
   AdvancementReviewAttemptMechanismPort,
+  AdvancementClosureSynthesizer,
+  AdvancementMissingProxyRebuildResult,
   AdvancementTurnReviewResult,
   RubricPublicationOutcome,
   RubricPublicationPort,
 } from "@zhixing/core/advancement/application";
 import { randomUUID } from "node:crypto";
-import {
-  buildAdvancementProxyMessage,
-  selectFailureHandling,
-} from "./proxy-content.js";
+import { composeAdvancementClosureReport } from "@zhixing/core/advancement/application";
 import type { AdvancementSessionStore } from "./session-store.js";
 import {
   AdvancementEvidenceCoordinator,
@@ -74,14 +65,7 @@ export interface AdvancementControllerOptions {
   readonly onAdmissionTiming?: (elapsedMs: number) => void;
   /** 收场报告合成执行体——缺省时收场恒为结构化直出。 */
   readonly closureSynthesizer?: AdvancementClosureSynthesizer;
-  /**
-   * 单会话 token 保险丝阈值（全量口径，含裁判与被审 run 两半）。
-   * 触达即 budget-exceeded 退出 + 收场交付。
-   */
-  readonly sessionTokenBudget?: number;
   readonly now?: () => string;
-  readonly reviewIdGenerator?: () => string;
-  readonly proxyIdGenerator?: () => string;
 }
 
 export type {
@@ -91,20 +75,6 @@ export type {
 
 /** 推进侧裁判端口——与 contracts AdvancementReviewerPort 同一抽象。 */
 export type AdvancementRunReviewer = AdvancementReviewerPort;
-
-/**
- * 收场报告合成执行体——可替换 strategy（与准入 / 草案生成同构），默认
- * 走宿主轻推理通道。合成失败降级为结构化数据直出，不阻塞退出。
- */
-export interface AdvancementClosureSynthesizer {
-  synthesize(facts: AdvancementClosureFacts): Promise<string>;
-}
-
-/**
- * 单会话失控保险丝默认阈值（token 全量口径）——默认宽到正常任务永不触碰，
- * 它是失控保险，不是推进机制。
- */
-export const DEFAULT_SESSION_TOKEN_BUDGET = 20_000_000;
 
 export type { AdvancementTurnReviewResult } from "@zhixing/core/advancement/application";
 
@@ -127,10 +97,7 @@ export class AdvancementController implements
   ) => Promise<string | undefined>;
   private readonly onAdmissionTiming?: (elapsedMs: number) => void;
   private readonly closureSynthesizer?: AdvancementClosureSynthesizer;
-  private readonly sessionTokenBudget: number;
   private readonly now: () => string;
-  private readonly reviewIdGenerator: () => string;
-  private readonly proxyIdGenerator: () => string;
 
   constructor(options: AdvancementControllerOptions) {
     this.store = options.store;
@@ -144,13 +111,7 @@ export class AdvancementController implements
     this.recentContextProvider = options.recentContextProvider;
     this.onAdmissionTiming = options.onAdmissionTiming;
     this.closureSynthesizer = options.closureSynthesizer;
-    this.sessionTokenBudget =
-      options.sessionTokenBudget ?? DEFAULT_SESSION_TOKEN_BUDGET;
     this.now = options.now ?? (() => new Date().toISOString());
-    this.reviewIdGenerator =
-      options.reviewIdGenerator ?? (() => `adv_review_${randomUUID()}`);
-    this.proxyIdGenerator =
-      options.proxyIdGenerator ?? (() => `adv_proxy_${randomUUID()}`);
   }
 
   /** 准入判断统一出口：喂最近会话投影、计延迟基线；投影失败按无投影降级。 */
@@ -326,16 +287,10 @@ export class AdvancementController implements
   private async composeClosureReport(
     session: AdvancementSession,
   ): Promise<AdvancementClosureReport> {
-    const facts = buildClosureFacts(session);
-    if (this.closureSynthesizer) {
-      try {
-        const summary = (await this.closureSynthesizer.synthesize(facts)).trim();
-        if (summary) return { summary, synthesized: true, facts };
-      } catch {
-        // 合成失败降级直出，不阻塞退出。
-      }
-    }
-    return { summary: renderClosureReport(facts), synthesized: false, facts };
+    return await composeAdvancementClosureReport(
+      session,
+      this.closureSynthesizer,
+    );
   }
 
   loadRubricConfirmationSession(
@@ -540,47 +495,14 @@ export class AdvancementController implements
    * 重渲染（byte 等价）；createdAt 为重建时刻。
    */
   async rebuildMissingProxyMessage(session: AdvancementSession): Promise<
-    | {
-        readonly kind: "rebuilt";
-        readonly session: AdvancementSession;
-        readonly proxyMessage: AdvancementProxyMessage;
-        readonly review: AdvancementRunReview;
-      }
-    | { readonly kind: "not-applicable" }
+    AdvancementMissingProxyRebuildResult
   > {
-    if (session.status !== "active" || session.outstandingProxyMessageId) {
-      return { kind: "not-applicable" };
+    if (!this.reviewAttempts) {
+      throw new Error(
+        "AdvancementController: review attempt application is not assembled",
+      );
     }
-    const review = session.runs[session.runs.length - 1];
-    if (!review || review.decision !== "failed" || !review.proxyMessageId) {
-      return { kind: "not-applicable" };
-    }
-    if (
-      session.proxyMessages.some(
-        (message) => message.id === review.proxyMessageId,
-      )
-    ) {
-      return { kind: "not-applicable" };
-    }
-    const rubric = session.confirmedRubric;
-    const handling = rubric
-      ? selectFailureHandling(rubric, review.selectedFailureHandlingId)
-      : undefined;
-    if (!rubric || !handling) return { kind: "not-applicable" };
-    const proxyMessage = buildAdvancementProxyMessage({
-      id: review.proxyMessageId,
-      sessionId: session.id,
-      review,
-      handling,
-      rubric,
-      createdAt: this.now(),
-    });
-    const updated = await this.store.enqueueProxyMessage(
-      session.conversationId,
-      session.id,
-      proxyMessage,
-    );
-    return { kind: "rebuilt", session: updated, proxyMessage, review };
+    return await this.reviewAttempts.rebuildMissingProxyMessage(session);
   }
 
   async afterTurnCommitted(input: {
@@ -605,51 +527,6 @@ export class AdvancementController implements
   private reviewAttemptMechanism(): AdvancementReviewAttemptMechanismPort {
     let evidenceTarget: AdvancementEvidenceTarget | undefined;
     return {
-      prepareEligibility: async (session, input) => {
-        const settled = await this.settleAcceptedProxyRun(session, input);
-        if (isTurnReviewResult(settled)) {
-          return { kind: "return", result: settled };
-        }
-        session = settled;
-        const rubric = session.confirmedRubric;
-        if (!rubric) {
-          const review = this.systemExitReview(
-            input,
-            "推进会话已激活但缺少已确认 Rubric，无法继续可靠验收。",
-          );
-          return {
-            kind: "return",
-            result: await this.persistReviewOutcome(session, review),
-          };
-        }
-        if (!this.reviewer) {
-          const review = this.systemExitReview(
-            input,
-            "推进侧验收运行体未装配，无法继续可靠验收。",
-          );
-          return {
-            kind: "return",
-            result: await this.persistReviewOutcome(session, review),
-          };
-        }
-        const spentTokens = sumAdvancementUsage(session.runs).totalTokens;
-        if (spentTokens >= this.sessionTokenBudget) {
-          const review = this.systemExitReview(
-            input,
-            `本次推进累计消耗约 ${spentTokens} tokens，已达单任务成本上限（${this.sessionTokenBudget}），按系统边界退出。如需继续可调高推进保险丝阈值后重新发起。`,
-            "budget-exceeded",
-          );
-          return {
-            kind: "return",
-            result: await this.persistReviewOutcome(session, review),
-          };
-        }
-        return { kind: "ready", session, rubric };
-      },
-      commitMissingDurableRun: async (session, input, reason) => {
-        const review = this.systemExitReview(input, reason);
-        return await this.persistReviewOutcome(session, review);
-      },
       resolveRootTarget: async (session, input) => {
         if (!this.evidence || !input.runId) return undefined;
         const carried = this.evidence.carriedOutcomeRootTarget(
@@ -749,19 +626,6 @@ export class AdvancementController implements
         }
         return outcome;
       },
-      commitConsumed: async ({
-        session,
-        outcome,
-        evidenceRequestId,
-        attempt,
-      }) =>
-        await this.persistReviewOutcome(
-          session,
-          outcome.review,
-          outcome.advancementWindow,
-          evidenceRequestId,
-          attempt,
-        ),
     };
   }
 
@@ -795,259 +659,6 @@ export class AdvancementController implements
     return session;
   }
 
-  private async persistReviewOutcome(
-    session: AdvancementSession,
-    review: AdvancementRunReview,
-    advancementWindow?: AdvancementWindowState,
-    evidenceRequestId?: string,
-    reviewAttempt?: AdvancementReviewAttempt,
-  ): Promise<AdvancementTurnReviewResult> {
-    if (review.decision === "passed") {
-      const exit: AdvancementExit = {
-        reason: "passed",
-        message: "Rubric 已验收通过，任务推进闭环结束。",
-        occurredAt: this.now(),
-      };
-      const completed = await this.store.appendTerminalRunReview(
-        session.conversationId,
-        session.id,
-        review,
-        { type: "completed", exit, timestamp: exit.occurredAt },
-        review.reviewedAt,
-        advancementWindow,
-        evidenceRequestId,
-        reviewAttempt,
-      );
-      return {
-        kind: "completed",
-        session: completed,
-        review,
-        exit,
-        closure: await this.composeClosureReport(completed),
-      };
-    }
-    if (review.decision === "exit") {
-      const exit: AdvancementExit = {
-        reason: review.exitReason ?? "system-error",
-        message: review.unmetCriteria[0] ?? "推进侧判断继续推进已不合适。",
-        occurredAt: this.now(),
-      };
-      const exited = await this.store.appendTerminalRunReview(
-        session.conversationId,
-        session.id,
-        review,
-        { type: "exited", exit, timestamp: exit.occurredAt },
-        review.reviewedAt,
-        advancementWindow,
-        evidenceRequestId,
-        reviewAttempt,
-      );
-      return {
-        kind: "exited",
-        session: exited,
-        review,
-        exit,
-        closure: await this.composeClosureReport(exited),
-      };
-    }
-    // 审后保险丝：本轮 usage 落账后已打穿阈值 → 不再入队续推，就地
-    // budget-exceeded 终局。与审前检查互补——审前挡裁判调用的消耗，
-    // 审后挡下一轮执行的启动；「触达即退出」不允许超阈后再跑一轮。
-    const spentWithThisRun = sumAdvancementUsage([
-      ...session.runs,
-      review,
-    ]).totalTokens;
-    if (spentWithThisRun >= this.sessionTokenBudget) {
-      const exit: AdvancementExit = {
-        reason: "budget-exceeded",
-        message: `本次推进累计消耗约 ${spentWithThisRun} tokens，已达单任务成本上限（${this.sessionTokenBudget}），不再自动续推。如需继续可调高推进保险丝阈值后重新发起。`,
-        occurredAt: this.now(),
-      };
-      const exitReview: AdvancementRunReview = {
-        ...review,
-        decision: "exit",
-        exitReason: "budget-exceeded",
-      };
-      const exited = await this.store.appendTerminalRunReview(
-        session.conversationId,
-        session.id,
-        exitReview,
-        { type: "exited", exit, timestamp: exit.occurredAt },
-        review.reviewedAt,
-        syncAdvancementWindowReview(advancementWindow, exitReview),
-        evidenceRequestId,
-        reviewAttempt,
-      );
-      return {
-        kind: "exited",
-        session: exited,
-        review: exited.runs[exited.runs.length - 1]!,
-        exit,
-        closure: await this.composeClosureReport(exited),
-      };
-    }
-
-    return await this.persistProxyOutcome(
-      session,
-      review,
-      advancementWindow,
-      evidenceRequestId,
-      reviewAttempt,
-    );
-  }
-
-  private async persistProxyOutcome(
-    session: AdvancementSession,
-    review: AdvancementRunReview,
-    advancementWindow?: AdvancementWindowState,
-    evidenceRequestId?: string,
-    reviewAttempt?: AdvancementReviewAttempt,
-  ): Promise<AdvancementTurnReviewResult> {
-    const rubric = session.confirmedRubric;
-    const handling = rubric
-      ? selectFailureHandling(rubric, review.selectedFailureHandlingId)
-      : undefined;
-    if (!rubric || !handling) {
-      const exit: AdvancementExit = {
-        reason: "dead-end",
-        message: "推进侧未能找到可执行的未通过处理准则，继续推进没有可靠收益。",
-        occurredAt: this.now(),
-      };
-      const exitReview: AdvancementRunReview = {
-        ...review,
-        decision: "exit",
-        exitReason: "dead-end",
-        unmetCriteria:
-          review.unmetCriteria.length > 0 ? review.unmetCriteria : [exit.message],
-      };
-      const exited = await this.store.appendTerminalRunReview(
-        session.conversationId,
-        session.id,
-        exitReview,
-        { type: "exited", exit, timestamp: exit.occurredAt },
-        review.reviewedAt,
-        syncAdvancementWindowReview(advancementWindow, exitReview),
-        evidenceRequestId,
-        reviewAttempt,
-      );
-      return {
-        kind: "exited",
-        session: exited,
-        review: exited.runs[exited.runs.length - 1]!,
-        exit,
-        closure: await this.composeClosureReport(exited),
-      };
-    }
-
-    const proxyMessageId = this.proxyIdGenerator();
-    const proxyMessage = buildAdvancementProxyMessage({
-      id: proxyMessageId,
-      sessionId: session.id,
-      review,
-      handling,
-      rubric,
-      createdAt: this.now(),
-    });
-    const reviewWithProxy: AdvancementRunReview = {
-      ...review,
-      selectedFailureHandlingId: handling.id,
-      proxyMessageId,
-    };
-    const updated = await this.store.appendRunReviewWithProxyMessage(
-      session.conversationId,
-      session.id,
-      reviewWithProxy,
-      proxyMessage,
-      review.reviewedAt,
-      syncAdvancementWindowReview(advancementWindow, reviewWithProxy),
-      evidenceRequestId,
-      reviewAttempt,
-    );
-    return {
-      kind: "proxy-enqueued",
-      session: updated,
-      review: reviewWithProxy,
-      proxyMessage,
-    };
-  }
-
-  private async settleAcceptedProxyRun(
-    session: AdvancementSession,
-    input: {
-      readonly conversationId: string;
-      readonly runIndex: number;
-      readonly runRecordRef?: RunRecordRef;
-      readonly runRecord: RunRecordInput;
-    },
-  ): Promise<AdvancementSession | AdvancementTurnReviewResult> {
-    if (input.runRecord.source !== "advancement") return session;
-    const proxyMessageId = input.runRecord.advancement?.proxyMessageId;
-    if (
-      !input.runRecord.advancement ||
-      input.runRecord.advancement.sessionId !== session.id ||
-      !proxyMessageId
-    ) {
-      const review = this.systemExitReview(
-        {
-          runIndex: input.runIndex,
-          runRecordRef: input.runRecordRef,
-        },
-        "推进侧代理 run 缺少匹配的来源元数据，无法可靠继续。",
-      );
-      return await this.persistReviewOutcome(session, review);
-    }
-    if (!session.outstandingProxyMessageId) {
-      const knownProxy = session.proxyMessages.some(
-        (message) => message.id === proxyMessageId,
-      );
-      if (knownProxy) return session;
-      const review = this.systemExitReview(
-        {
-          runIndex: input.runIndex,
-          runRecordRef: input.runRecordRef,
-        },
-        "推进侧代理 run 来源元数据指向未知代理消息，无法可靠继续。",
-      );
-      return await this.persistReviewOutcome(session, review);
-    }
-    if (session.outstandingProxyMessageId !== proxyMessageId) {
-      const review = this.systemExitReview(
-        {
-          runIndex: input.runIndex,
-          runRecordRef: input.runRecordRef,
-        },
-        "推进侧代理 run 与 outstanding proxy 不匹配，无法可靠继续。",
-      );
-      return await this.persistReviewOutcome(session, review);
-    }
-    return await this.store.settleProxyMessage(
-      input.conversationId,
-      session.id,
-      proxyMessageId,
-      this.now(),
-    );
-  }
-
-  private systemExitReview(
-    input: {
-      readonly runIndex: number;
-      readonly runRecordRef?: RunRecordRef;
-    },
-    message: string,
-    exitReason: AdvancementExit["reason"] = "system-error",
-  ): AdvancementRunReview {
-    return {
-      id: this.reviewIdGenerator(),
-      runIndex: input.runIndex,
-      runRecordRef: input.runRecordRef,
-      reviewedAt: this.now(),
-      decision: "exit",
-      evidence: [],
-      attribution: { criteria: [] },
-      unmetCriteria: [message],
-      exitReason,
-    };
-  }
 }
 
 function errorMessage(err: unknown): string {
@@ -1084,21 +695,6 @@ export function renderRecentContextFromMessages(
   return lines.length > 0 ? lines.join("\n") : undefined;
 }
 
-function syncAdvancementWindowReview(
-  advancementWindow: AdvancementWindowState | undefined,
-  review: AdvancementRunReview,
-): AdvancementWindowState | undefined {
-  if (!advancementWindow) return undefined;
-  return {
-    ...advancementWindow,
-    entries: advancementWindow.entries.map((entry) =>
-      entry.kind === "review" && entry.reviewId === review.id
-        ? createAdvancementWindowReviewEntry(review)
-        : entry,
-    ),
-  };
-}
-
 function assertReviewMatchesAcceptedRun(
   accepted: {
     readonly runIndex: number;
@@ -1114,20 +710,6 @@ function assertReviewMatchesAcceptedRun(
   if (!sameRunRecordRef(review.runRecordRef, accepted.runRecordRef)) {
     throw new Error("review runRecordRef does not match accepted runRecordRef");
   }
-}
-
-function isTurnReviewResult(
-  value: AdvancementSession | AdvancementTurnReviewResult,
-): value is AdvancementTurnReviewResult {
-  if (!("kind" in value)) return false;
-  return (
-    value.kind === "skipped" ||
-    value.kind === "review-deferred" ||
-    value.kind === "reviewed" ||
-    value.kind === "proxy-enqueued" ||
-    value.kind === "completed" ||
-    value.kind === "exited"
-  );
 }
 
 function sameRunRecordRef(

@@ -1,6 +1,7 @@
 import type { AdvancementReviewRootContract } from "@zhixing/core";
 import {
   AdvancementReviewAttemptApplicationService,
+  type AdvancementClosureSynthesizer,
   type AdvancementReviewAttemptApplication,
   type AdvancementReviewAttemptStatePort,
   type AdvancementReviewRootLifecyclePort,
@@ -14,7 +15,12 @@ import type { AdvancementSessionStore } from "./session-store.js";
 export interface AdvancementReviewAttemptCorrectnessOptions {
   readonly store: AdvancementSessionStore;
   readonly resources: ResourceReservationPort;
+  readonly reviewerAvailable: boolean;
+  readonly sessionTokenBudget?: number;
+  readonly closureSynthesizer?: AdvancementClosureSynthesizer;
   readonly now?: () => string;
+  readonly reviewIdGenerator?: () => string;
+  readonly proxyIdGenerator?: () => string;
 }
 
 /**
@@ -46,6 +52,42 @@ export function createAdvancementReviewAttemptApplication(
       ),
     cancelSession: (conversationId, sessionId, exit, timestamp) =>
       options.store.cancelSession(conversationId, sessionId, exit, timestamp),
+    settleProxyMessage: (conversationId, sessionId, proxyMessageId, timestamp) =>
+      options.store.settleProxyMessage(
+        conversationId,
+        sessionId,
+        proxyMessageId,
+        timestamp,
+      ),
+    enqueueProxyMessage: (conversationId, sessionId, proxyMessage, timestamp) =>
+      options.store.enqueueProxyMessage(
+        conversationId,
+        sessionId,
+        proxyMessage,
+        timestamp,
+      ),
+    commitReviewOutcome: (decision) =>
+      decision.kind === "terminal"
+        ? options.store.appendTerminalRunReview(
+            decision.conversationId,
+            decision.sessionId,
+            decision.review,
+            decision.terminal,
+            decision.timestamp,
+            decision.advancementWindow,
+            decision.evidenceRequestId,
+            decision.reviewAttempt,
+          )
+        : options.store.appendRunReviewWithProxyMessage(
+            decision.conversationId,
+            decision.sessionId,
+            decision.review,
+            decision.proxyMessage,
+            decision.timestamp,
+            decision.advancementWindow,
+            decision.evidenceRequestId,
+            decision.reviewAttempt,
+          ),
   };
   const roots: AdvancementReviewRootLifecyclePort = {
     inspect: (root) => options.resources.inspectImmediateRoot(root.workload),
@@ -66,7 +108,20 @@ export function createAdvancementReviewAttemptApplication(
   return new AdvancementReviewAttemptApplicationService({
     state,
     roots,
+    reviewerAvailable: options.reviewerAvailable,
+    ...(options.sessionTokenBudget !== undefined
+      ? { sessionTokenBudget: options.sessionTokenBudget }
+      : {}),
+    ...(options.closureSynthesizer
+      ? { closureSynthesizer: options.closureSynthesizer }
+      : {}),
     ...(options.now ? { now: options.now } : {}),
+    ...(options.reviewIdGenerator
+      ? { reviewIdGenerator: options.reviewIdGenerator }
+      : {}),
+    ...(options.proxyIdGenerator
+      ? { proxyIdGenerator: options.proxyIdGenerator }
+      : {}),
   });
 }
 

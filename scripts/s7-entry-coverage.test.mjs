@@ -3909,6 +3909,33 @@ test("Advancement detail/rubric has one Product API application and conversation
     )).join("\n"),
     failure,
   );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/core/src/advancement/application.ts",
+      (text) => text.replace(
+        "  resolveRootTarget(\n",
+        "  prepareEligibility(): Promise<void>;\n  resolveRootTarget(\n",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/owner-services/src/advancement/controller.ts",
+      (text) => `${text}\nvoid controller.persistReviewOutcome;`,
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/owner-services/src/advancement/review-attempt-correctness.ts",
+      (text) => text.replace(
+        "options.store.appendTerminalRunReview(",
+        "options.store.retiredTerminalWrite(",
+      ),
+    )).join("\n"),
+    failure,
+  );
 });
 
 test("Skill Catalog management, load, save, admission and Kernel projection have one domain application boundary", async () => {

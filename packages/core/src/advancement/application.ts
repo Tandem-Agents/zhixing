@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   bindProductApiOperation,
   defineProductApiCommand,
@@ -12,6 +13,8 @@ import { canonicalize, protocolDigest } from "../protocol/canonical.js";
 import type { AdvancementAdmissionDecision } from "./admission.js";
 import {
   buildClosureFacts,
+  renderClosureReport,
+  sumAdvancementUsage,
   type AdvancementClosureFacts,
   type AdvancementClosureReport,
 } from "./closure.js";
@@ -25,7 +28,10 @@ import type {
   AdvancementRunReview,
   AdvancementSession,
   AdvancementSessionStatus,
+  AdvancementWindowState,
   ConfirmedRubricSnapshot,
+  FailureHandlingSpec,
+  ReviewAttribution,
   ReviewEvidence,
   RubricContractDraftSnapshot,
   RubricDraftPersistenceChoice,
@@ -36,6 +42,7 @@ import {
   advancementReviewLineageId,
   advancementReviewRootRequestId,
 } from "./review-attempt-identity.js";
+import { createAdvancementWindowReviewEntry } from "./window-state.js";
 import type {
   ImmediateRootResourceLease,
   ImmediateRootReservationInspection,
@@ -47,9 +54,11 @@ import type {
 import {
   extractUserTurnInputText,
   isNonEmptyUserTurnInput,
+  userTurnInputFromText,
   type UserTurnInput,
 } from "../types/user-input.js";
 import type { TurnOrigin } from "../types/tools.js";
+import { renderReviewAttribution } from "./attribution.js";
 
 export type AdvancementTurnReviewResult =
   | {
@@ -123,7 +132,50 @@ export interface AdvancementReviewAttemptStatePort {
     exit: AdvancementExit,
     timestamp: string,
   ): Promise<AdvancementSession>;
+  settleProxyMessage(
+    conversationId: string,
+    sessionId: string,
+    proxyMessageId: string,
+    timestamp: string,
+  ): Promise<AdvancementSession>;
+  enqueueProxyMessage(
+    conversationId: string,
+    sessionId: string,
+    proxyMessage: AdvancementProxyMessage,
+    timestamp: string,
+  ): Promise<AdvancementSession>;
+  commitReviewOutcome(
+    decision: AdvancementReviewPersistenceDecision,
+  ): Promise<AdvancementSession>;
 }
+
+export type AdvancementReviewPersistenceDecision =
+  | Readonly<{
+      kind: "terminal";
+      conversationId: string;
+      sessionId: string;
+      review: AdvancementRunReview;
+      terminal: Readonly<{
+        type: "completed" | "exited";
+        exit: AdvancementExit;
+        timestamp: string;
+      }>;
+      timestamp: string;
+      advancementWindow?: AdvancementWindowState;
+      evidenceRequestId?: string;
+      reviewAttempt?: AdvancementReviewAttempt;
+    }>
+  | Readonly<{
+      kind: "proxy";
+      conversationId: string;
+      sessionId: string;
+      review: AdvancementRunReview;
+      proxyMessage: AdvancementProxyMessage;
+      timestamp: string;
+      advancementWindow?: AdvancementWindowState;
+      evidenceRequestId?: string;
+      reviewAttempt?: AdvancementReviewAttempt;
+    }>;
 
 /** Generic immediate-root mechanics. Advancement owns every lifecycle decision. */
 export interface AdvancementReviewRootLifecyclePort {
@@ -144,14 +196,6 @@ export interface AdvancementReviewRootLifecyclePort {
   ): Promise<void>;
 }
 
-export type AdvancementReviewEligibilityResult =
-  | Readonly<{ kind: "return"; result: AdvancementTurnReviewResult }>
-  | Readonly<{
-      kind: "ready";
-      session: AdvancementSession;
-      rubric: ConfirmedRubricSnapshot;
-    }>;
-
 export type AdvancementReviewEvidencePreparationResult =
   | Readonly<{
       kind: "ready";
@@ -165,20 +209,11 @@ export type AdvancementReviewEvidencePreparationResult =
     }>;
 
 /**
- * A5-ADVANCEMENT-REVIEW-01 remainder. It owns only eligibility, evidence,
- * reviewer invocation and outcome persistence; attempt/root decisions stay in
- * the application service below.
+ * A5-ADVANCEMENT-REVIEW-01 remainder. It owns only the three external
+ * evidence/reviewer mechanisms; eligibility and outcome decisions stay in the
+ * application service below.
  */
 export interface AdvancementReviewAttemptMechanismPort {
-  prepareEligibility(
-    session: AdvancementSession,
-    input: AdvancementReviewAttemptInput,
-  ): Promise<AdvancementReviewEligibilityResult>;
-  commitMissingDurableRun(
-    session: AdvancementSession,
-    input: AdvancementReviewAttemptInput,
-    reason: string,
-  ): Promise<AdvancementTurnReviewResult>;
   resolveRootTarget(
     session: AdvancementSession,
     input: AdvancementReviewAttemptInput,
@@ -197,12 +232,26 @@ export interface AdvancementReviewAttemptMechanismPort {
     rootLease: ImmediateRootResourceLease;
     canonicalEvidence?: readonly ReviewEvidence[];
   }>): Promise<AdvancementReviewRunOutcome>;
-  commitConsumed(input: Readonly<{
-    session: AdvancementSession;
-    outcome: Exclude<AdvancementReviewRunOutcome, { readonly kind: "deferred" }>;
-    evidenceRequestId?: string;
-    attempt: AdvancementReviewAttempt;
-  }>): Promise<AdvancementTurnReviewResult>;
+}
+
+export interface AdvancementClosureSynthesizer {
+  synthesize(facts: AdvancementClosureFacts): Promise<string>;
+}
+
+export async function composeAdvancementClosureReport(
+  session: AdvancementSession,
+  synthesizer?: AdvancementClosureSynthesizer,
+): Promise<AdvancementClosureReport> {
+  const facts = buildClosureFacts(session);
+  if (synthesizer) {
+    try {
+      const summary = (await synthesizer.synthesize(facts)).trim();
+      if (summary) return { summary, synthesized: true, facts };
+    } catch {
+      // Optional synthesis never blocks the deterministic closure projection.
+    }
+  }
+  return { summary: renderClosureReport(facts), synthesized: false, facts };
 }
 
 export interface AdvancementReviewAttemptApplication {
@@ -217,7 +266,21 @@ export interface AdvancementReviewAttemptApplication {
     reason: AdvancementExit["reason"];
     message: string;
   }>): Promise<AdvancementSession>;
+  rebuildMissingProxyMessage(
+    session: AdvancementSession,
+  ): Promise<AdvancementMissingProxyRebuildResult>;
 }
+
+export type AdvancementMissingProxyRebuildResult =
+  | Readonly<{
+      kind: "rebuilt";
+      session: AdvancementSession;
+      proxyMessage: AdvancementProxyMessage;
+      review: AdvancementRunReview;
+    }>
+  | Readonly<{ kind: "not-applicable" }>;
+
+export const DEFAULT_ADVANCEMENT_SESSION_TOKEN_BUDGET = 20_000_000;
 
 /**
  * Unique durable review-attempt state machine. Persistence and resource ports
@@ -229,17 +292,35 @@ export class AdvancementReviewAttemptApplicationService
 {
   readonly #state: AdvancementReviewAttemptStatePort;
   readonly #roots: AdvancementReviewRootLifecyclePort;
+  readonly #reviewerAvailable: boolean;
+  readonly #sessionTokenBudget: number;
+  readonly #closureSynthesizer?: AdvancementClosureSynthesizer;
   readonly #now: () => string;
+  readonly #reviewIdGenerator: () => string;
+  readonly #proxyIdGenerator: () => string;
   readonly #flights = new Map<string, Promise<AdvancementTurnReviewResult>>();
 
   constructor(options: Readonly<{
     state: AdvancementReviewAttemptStatePort;
     roots: AdvancementReviewRootLifecyclePort;
+    reviewerAvailable: boolean;
+    sessionTokenBudget?: number;
+    closureSynthesizer?: AdvancementClosureSynthesizer;
     now?: () => string;
+    reviewIdGenerator?: () => string;
+    proxyIdGenerator?: () => string;
   }>) {
     this.#state = options.state;
     this.#roots = options.roots;
+    this.#reviewerAvailable = options.reviewerAvailable;
+    this.#sessionTokenBudget =
+      options.sessionTokenBudget ?? DEFAULT_ADVANCEMENT_SESSION_TOKEN_BUDGET;
+    this.#closureSynthesizer = options.closureSynthesizer;
     this.#now = options.now ?? (() => new Date().toISOString());
+    this.#reviewIdGenerator =
+      options.reviewIdGenerator ?? (() => `adv_review_${randomUUID()}`);
+    this.#proxyIdGenerator =
+      options.proxyIdGenerator ?? (() => `adv_proxy_${randomUUID()}`);
   }
 
   async reviewAcceptedRun(
@@ -315,6 +396,41 @@ export class AdvancementReviewAttemptApplicationService
     return cancelled;
   }
 
+  async rebuildMissingProxyMessage(
+    session: AdvancementSession,
+  ): Promise<AdvancementMissingProxyRebuildResult> {
+    if (session.status !== "active" || session.outstandingProxyMessageId) {
+      return { kind: "not-applicable" };
+    }
+    const review = session.runs[session.runs.length - 1];
+    if (!review || review.decision !== "failed" || !review.proxyMessageId) {
+      return { kind: "not-applicable" };
+    }
+    if (session.proxyMessages.some((message) => message.id === review.proxyMessageId)) {
+      return { kind: "not-applicable" };
+    }
+    const rubric = session.confirmedRubric;
+    const handling = rubric
+      ? selectFailureHandling(rubric, review.selectedFailureHandlingId)
+      : undefined;
+    if (!rubric || !handling) return { kind: "not-applicable" };
+    const proxyMessage = buildAdvancementProxyMessage({
+      id: review.proxyMessageId,
+      sessionId: session.id,
+      review,
+      handling,
+      rubric,
+      createdAt: this.#now(),
+    });
+    const updated = await this.#state.enqueueProxyMessage(
+      session.conversationId,
+      session.id,
+      proxyMessage,
+      proxyMessage.createdAt,
+    );
+    return { kind: "rebuilt", session: updated, proxyMessage, review };
+  }
+
   async #reviewAcceptedRun(
     input: AdvancementReviewAttemptInput,
     mechanism: AdvancementReviewAttemptMechanismPort,
@@ -342,16 +458,18 @@ export class AdvancementReviewAttemptApplicationService
       return { kind: "skipped", reason: "already-reviewed" };
     }
 
-    const eligibility = await mechanism.prepareEligibility(session, input);
+    const eligibility = await this.#prepareEligibility(session, input);
     if (eligibility.kind === "return") return eligibility.result;
     session = eligibility.session;
     const rubric = eligibility.rubric;
 
     if (!input.runRecordRef) {
-      return await mechanism.commitMissingDurableRun(
+      return await this.#persistReviewOutcome(
         session,
-        input,
-        "推进侧验收缺少 accepted run 的耐久位置，无法建立可恢复的裁判身份。",
+        this.#systemExitReview(
+          input,
+          "推进侧验收缺少 accepted run 的耐久位置，无法建立可恢复的裁判身份。",
+        ),
       );
     }
     const request = { ...input, runRecordRef: input.runRecordRef };
@@ -659,14 +777,326 @@ export class AdvancementReviewAttemptApplicationService
     }
 
     const consumed = terminalReviewAttempt(invoking, "consumed", undefined, lease);
-    const result = await mechanism.commitConsumed({
+    const result = await this.#persistReviewOutcome(
       session,
-      outcome,
-      ...(evidence.requestId ? { evidenceRequestId: evidence.requestId } : {}),
-      attempt: consumed,
-    });
+      outcome.review,
+      outcome.advancementWindow,
+      evidence.requestId,
+      consumed,
+    );
     await this.#cleanupTerminalRoot(consumed);
     return result;
+  }
+
+  async #prepareEligibility(
+    initialSession: AdvancementSession,
+    input: AdvancementReviewAttemptInput,
+  ): Promise<
+    | Readonly<{ kind: "return"; result: AdvancementTurnReviewResult }>
+    | Readonly<{
+        kind: "ready";
+        session: AdvancementSession;
+        rubric: ConfirmedRubricSnapshot;
+      }>
+  > {
+    const settled = await this.#settleAcceptedProxyRun(initialSession, input);
+    if (isTurnReviewResult(settled)) {
+      return { kind: "return", result: settled };
+    }
+    const session = settled;
+    const rubric = session.confirmedRubric;
+    if (!rubric) {
+      return {
+        kind: "return",
+        result: await this.#persistReviewOutcome(
+          session,
+          this.#systemExitReview(
+            input,
+            "推进会话已激活但缺少已确认 Rubric，无法继续可靠验收。",
+          ),
+        ),
+      };
+    }
+    if (!this.#reviewerAvailable) {
+      return {
+        kind: "return",
+        result: await this.#persistReviewOutcome(
+          session,
+          this.#systemExitReview(
+            input,
+            "推进侧验收运行体未装配，无法继续可靠验收。",
+          ),
+        ),
+      };
+    }
+    const spentTokens = sumAdvancementUsage(session.runs).totalTokens;
+    if (spentTokens >= this.#sessionTokenBudget) {
+      return {
+        kind: "return",
+        result: await this.#persistReviewOutcome(
+          session,
+          this.#systemExitReview(
+            input,
+            `本次推进累计消耗约 ${spentTokens} tokens，已达单任务成本上限（${this.#sessionTokenBudget}），按系统边界退出。如需继续可调高推进保险丝阈值后重新发起。`,
+            "budget-exceeded",
+          ),
+        ),
+      };
+    }
+    return { kind: "ready", session, rubric };
+  }
+
+  async #settleAcceptedProxyRun(
+    session: AdvancementSession,
+    input: AdvancementReviewAttemptInput,
+  ): Promise<AdvancementSession | AdvancementTurnReviewResult> {
+    if (input.runRecord.source !== "advancement") return session;
+    const proxyMessageId = input.runRecord.advancement?.proxyMessageId;
+    if (
+      !input.runRecord.advancement ||
+      input.runRecord.advancement.sessionId !== session.id ||
+      !proxyMessageId
+    ) {
+      return await this.#persistReviewOutcome(
+        session,
+        this.#systemExitReview(
+          input,
+          "推进侧代理 run 缺少匹配的来源元数据，无法可靠继续。",
+        ),
+      );
+    }
+    if (!session.outstandingProxyMessageId) {
+      if (session.proxyMessages.some((message) => message.id === proxyMessageId)) {
+        return session;
+      }
+      return await this.#persistReviewOutcome(
+        session,
+        this.#systemExitReview(
+          input,
+          "推进侧代理 run 来源元数据指向未知代理消息，无法可靠继续。",
+        ),
+      );
+    }
+    if (session.outstandingProxyMessageId !== proxyMessageId) {
+      return await this.#persistReviewOutcome(
+        session,
+        this.#systemExitReview(
+          input,
+          "推进侧代理 run 与 outstanding proxy 不匹配，无法可靠继续。",
+        ),
+      );
+    }
+    return await this.#state.settleProxyMessage(
+      input.conversationId,
+      session.id,
+      proxyMessageId,
+      this.#now(),
+    );
+  }
+
+  #systemExitReview(
+    input: Pick<AdvancementReviewAttemptInput, "runIndex" | "runRecordRef">,
+    message: string,
+    exitReason: AdvancementExit["reason"] = "system-error",
+  ): AdvancementRunReview {
+    return {
+      id: this.#reviewIdGenerator(),
+      runIndex: input.runIndex,
+      runRecordRef: input.runRecordRef,
+      reviewedAt: this.#now(),
+      decision: "exit",
+      evidence: [],
+      attribution: { criteria: [] },
+      unmetCriteria: [message],
+      exitReason,
+    };
+  }
+
+  async #persistReviewOutcome(
+    session: AdvancementSession,
+    review: AdvancementRunReview,
+    advancementWindow?: AdvancementWindowState,
+    evidenceRequestId?: string,
+    reviewAttempt?: AdvancementReviewAttempt,
+  ): Promise<AdvancementTurnReviewResult> {
+    if (review.decision === "passed") {
+      const exit: AdvancementExit = {
+        reason: "passed",
+        message: "Rubric 已验收通过，任务推进闭环结束。",
+        occurredAt: this.#now(),
+      };
+      const completed = await this.#state.commitReviewOutcome({
+        kind: "terminal",
+        conversationId: session.conversationId,
+        sessionId: session.id,
+        review,
+        terminal: { type: "completed", exit, timestamp: exit.occurredAt },
+        timestamp: review.reviewedAt,
+        ...(advancementWindow ? { advancementWindow } : {}),
+        ...(evidenceRequestId ? { evidenceRequestId } : {}),
+        ...(reviewAttempt ? { reviewAttempt } : {}),
+      });
+      return {
+        kind: "completed",
+        session: completed,
+        review,
+        exit,
+        closure: await composeAdvancementClosureReport(
+          completed,
+          this.#closureSynthesizer,
+        ),
+      };
+    }
+    if (review.decision === "exit") {
+      const exit: AdvancementExit = {
+        reason: review.exitReason ?? "system-error",
+        message: review.unmetCriteria[0] ?? "推进侧判断继续推进已不合适。",
+        occurredAt: this.#now(),
+      };
+      const exited = await this.#state.commitReviewOutcome({
+        kind: "terminal",
+        conversationId: session.conversationId,
+        sessionId: session.id,
+        review,
+        terminal: { type: "exited", exit, timestamp: exit.occurredAt },
+        timestamp: review.reviewedAt,
+        ...(advancementWindow ? { advancementWindow } : {}),
+        ...(evidenceRequestId ? { evidenceRequestId } : {}),
+        ...(reviewAttempt ? { reviewAttempt } : {}),
+      });
+      return {
+        kind: "exited",
+        session: exited,
+        review,
+        exit,
+        closure: await composeAdvancementClosureReport(
+          exited,
+          this.#closureSynthesizer,
+        ),
+      };
+    }
+
+    const spentWithThisRun = sumAdvancementUsage([
+      ...session.runs,
+      review,
+    ]).totalTokens;
+    if (spentWithThisRun >= this.#sessionTokenBudget) {
+      const exit: AdvancementExit = {
+        reason: "budget-exceeded",
+        message: `本次推进累计消耗约 ${spentWithThisRun} tokens，已达单任务成本上限（${this.#sessionTokenBudget}），不再自动续推。如需继续可调高推进保险丝阈值后重新发起。`,
+        occurredAt: this.#now(),
+      };
+      const exitReview: AdvancementRunReview = {
+        ...review,
+        decision: "exit",
+        exitReason: "budget-exceeded",
+      };
+      const window = syncAdvancementWindowReview(
+        advancementWindow,
+        exitReview,
+      );
+      const exited = await this.#state.commitReviewOutcome({
+        kind: "terminal",
+        conversationId: session.conversationId,
+        sessionId: session.id,
+        review: exitReview,
+        terminal: { type: "exited", exit, timestamp: exit.occurredAt },
+        timestamp: review.reviewedAt,
+        ...(window ? { advancementWindow: window } : {}),
+        ...(evidenceRequestId ? { evidenceRequestId } : {}),
+        ...(reviewAttempt ? { reviewAttempt } : {}),
+      });
+      return {
+        kind: "exited",
+        session: exited,
+        review: exited.runs[exited.runs.length - 1]!,
+        exit,
+        closure: await composeAdvancementClosureReport(
+          exited,
+          this.#closureSynthesizer,
+        ),
+      };
+    }
+
+    const rubric = session.confirmedRubric;
+    const handling = rubric
+      ? selectFailureHandling(rubric, review.selectedFailureHandlingId)
+      : undefined;
+    if (!rubric || !handling) {
+      const exit: AdvancementExit = {
+        reason: "dead-end",
+        message: "推进侧未能找到可执行的未通过处理准则，继续推进没有可靠收益。",
+        occurredAt: this.#now(),
+      };
+      const exitReview: AdvancementRunReview = {
+        ...review,
+        decision: "exit",
+        exitReason: "dead-end",
+        unmetCriteria:
+          review.unmetCriteria.length > 0 ? review.unmetCriteria : [exit.message],
+      };
+      const window = syncAdvancementWindowReview(
+        advancementWindow,
+        exitReview,
+      );
+      const exited = await this.#state.commitReviewOutcome({
+        kind: "terminal",
+        conversationId: session.conversationId,
+        sessionId: session.id,
+        review: exitReview,
+        terminal: { type: "exited", exit, timestamp: exit.occurredAt },
+        timestamp: review.reviewedAt,
+        ...(window ? { advancementWindow: window } : {}),
+        ...(evidenceRequestId ? { evidenceRequestId } : {}),
+        ...(reviewAttempt ? { reviewAttempt } : {}),
+      });
+      return {
+        kind: "exited",
+        session: exited,
+        review: exited.runs[exited.runs.length - 1]!,
+        exit,
+        closure: await composeAdvancementClosureReport(
+          exited,
+          this.#closureSynthesizer,
+        ),
+      };
+    }
+
+    const proxyMessageId = this.#proxyIdGenerator();
+    const proxyMessage = buildAdvancementProxyMessage({
+      id: proxyMessageId,
+      sessionId: session.id,
+      review,
+      handling,
+      rubric,
+      createdAt: this.#now(),
+    });
+    const reviewWithProxy: AdvancementRunReview = {
+      ...review,
+      selectedFailureHandlingId: handling.id,
+      proxyMessageId,
+    };
+    const window = syncAdvancementWindowReview(
+      advancementWindow,
+      reviewWithProxy,
+    );
+    const updated = await this.#state.commitReviewOutcome({
+      kind: "proxy",
+      conversationId: session.conversationId,
+      sessionId: session.id,
+      review: reviewWithProxy,
+      proxyMessage,
+      timestamp: review.reviewedAt,
+      ...(window ? { advancementWindow: window } : {}),
+      ...(evidenceRequestId ? { evidenceRequestId } : {}),
+      ...(reviewAttempt ? { reviewAttempt } : {}),
+    });
+    return {
+      kind: "proxy-enqueued",
+      session: updated,
+      review: reviewWithProxy,
+      proxyMessage,
+    };
   }
 
   async #commitTerminal(
@@ -799,6 +1229,98 @@ export class AdvancementReviewAttemptApplicationService
         (inspection.state === "released" || inspection.state === "reclaimed"))
     );
   }
+}
+
+export function selectFailureHandling(
+  rubric: ConfirmedRubricSnapshot,
+  selectedId: string | undefined,
+): FailureHandlingSpec | undefined {
+  const handlers = rubric.content.failureHandling;
+  return selectedId
+    ? handlers.find((handler) => handler.id === selectedId)
+    : handlers[0];
+}
+
+function buildProxyVariables(
+  review: AdvancementRunReview,
+): Readonly<Record<string, string>> {
+  return {
+    unmet_criteria: review.unmetCriteria.join("\n"),
+    review_id: review.id,
+  };
+}
+
+function renderFailureHandlingReply(
+  handling: FailureHandlingSpec,
+  variables: Readonly<Record<string, string>>,
+): string {
+  return handling.reply.replace(/\{([a-zA-Z0-9_]+)\}/g, (match, key) => {
+    const value = variables[key];
+    return value === undefined ? match : value;
+  });
+}
+
+function composeProxyContent(
+  handling: FailureHandlingSpec,
+  variables: Readonly<Record<string, string>>,
+  attribution: ReviewAttribution,
+  rubric: ConfirmedRubricSnapshot,
+): string {
+  const reply = renderFailureHandlingReply(handling, variables);
+  const facts = renderReviewAttribution(
+    attribution,
+    rubric.content.passCriteria,
+  );
+  return facts ? `${reply}\n\n${facts}` : reply;
+}
+
+export function buildAdvancementProxyMessage(input: Readonly<{
+  id: string;
+  sessionId: string;
+  review: AdvancementRunReview;
+  handling: FailureHandlingSpec;
+  rubric: ConfirmedRubricSnapshot;
+  createdAt: string;
+}>): AdvancementProxyMessage {
+  const variables = buildProxyVariables(input.review);
+  return {
+    id: input.id,
+    sessionId: input.sessionId,
+    reviewId: input.review.id,
+    content: userTurnInputFromText(
+      composeProxyContent(
+        input.handling,
+        variables,
+        input.review.attribution,
+        input.rubric,
+      ),
+    ),
+    rubricFailureHandlingId: input.handling.id,
+    variables,
+    attribution: input.review.attribution,
+    createdAt: input.createdAt,
+  };
+}
+
+function syncAdvancementWindowReview(
+  advancementWindow: AdvancementWindowState | undefined,
+  review: AdvancementRunReview,
+): AdvancementWindowState | undefined {
+  if (!advancementWindow) return undefined;
+  return {
+    ...advancementWindow,
+    entries: advancementWindow.entries.map((entry) =>
+      entry.kind === "review" && entry.reviewId === review.id
+        ? createAdvancementWindowReviewEntry(review)
+        : entry,
+    ),
+  };
+}
+
+function isTurnReviewResult(
+  value: AdvancementSession | AdvancementTurnReviewResult,
+): value is AdvancementTurnReviewResult {
+  return "kind" in value;
 }
 
 function reviewAttemptFlightKey(input: AdvancementReviewAttemptInput): string {

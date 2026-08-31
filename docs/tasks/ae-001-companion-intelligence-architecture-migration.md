@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-15j 已实施，等待协调者复核——Advancement review attempt 代际与根资源生命周期已归入唯一应用状态机<br>
+> 当前检查点：A5-15k 已实施，等待协调者独立复核<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,13 +202,13 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `d0e27b53`；A5-15i 已由协调者独立复核并提交，accepted-turn 串行补审、当轮验收与结果投影归入唯一应用链，两类 Host 通过 bind-once/pre-open 固定装配消除 late-bound getter |
+| 已接受基线 | `bab398e2`；A5-15j 已由协调者独立复核并提交，review attempt lineage/generation/phase、terminal winner 与 immediate-root 生命周期归入唯一 Advancement 应用状态机 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | A5-15j 已实施并等待协调者复核；review attempt lineage/generation/phase 与根资源生命周期现只有一个 Advancement 应用 owner，Advancement 行与 A5 仍为 `[ ]` |
-| 下一责任链 | A5-15j 通过后迁移 evidence/reviewer/outcome 持久提交并退场 `A5-ADVANCEMENT-REVIEW-01`；不得把两条独立状态链并成单日工作包 |
-| 打开的单向桥 | `A5-ADVANCEMENT-REVIEW-01`：当前只暂载尚未迁移的 eligibility、evidence 收集、reviewer 调用和 review/proxy outcome 持久提交；review attempt 代际、phase、flight 与 root lifecycle 已从 Controller 归零，由紧邻 A5-15k 完全退场 |
-| 已失效证据 | A5-15j 的实施证据已恢复并等待协调者独立复核；A5-15a～A5-15i 其他证据继续有效。以后只有 attempt 应用/port、Correctness adapter、Controller bridge exact-set、root lifecycle、持久 attempt transition、生产组合或本包直接门禁变化时精确恢复 A5-15j |
-| 阻塞/用户决策 | 无；当前 review attempt 状态机与资源终态由生产事实唯一裁决，可在不进入 evidence/reviewer/outcome 的边界内独立迁移 |
+| 活跃工作包 | A5-15k 已实施，等待协调者独立复核；Advancement 行与 A5 仍为 `[ ]` |
+| 下一责任链 | A5-15k 通过后只迁移 evidence target/collect 与 reviewer 外调适配并删除 `A5-ADVANCEMENT-REVIEW-01`；不得扩入 recovery、proxy delivery 或其他管理用例 |
+| 打开的单向桥 | `A5-ADVANCEMENT-REVIEW-01`：A5-15k 已将其收窄为只含 `resolveRootTarget / prepareEvidence / invokeReviewer` 三项 evidence/reviewer 外部机制；A5-15l 随后完全退场 |
+| 已失效证据 | `A5-15k-advancement-review-outcome-application-v1` 等待协调者独立复核；A5-15a～A5-15j 其他证据继续有效 |
+| 阻塞/用户决策 | 无；A5-15j 已由协调者接受，剩余桥按“领域状态决定/持久写入”与“外部 evidence/reviewer 机制”两个独立验证闭包收束 |
 
 ### A0 基线索引
 
@@ -2307,6 +2307,22 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 过渡桥与行为保护：Controller 现只保留 `prepareEligibility / commitMissingDurableRun / resolveRootTarget / prepareEvidence / invokeReviewer / commitConsumed` 六项 A5-15k 待迁机制；Evidence 完整 target 仍由 bridge 在同次调用内保留，领域应用只取得冻结的 executor/owner-epoch root target。重启 invoking 先耐久转 deferred 且绝不重放旧代 provider，legacy evidence generation 与当前 attempt 单调取下一代；target drift、acquire 响应丢失/terminal、owner 前后推进、cancel/exit、terminal winner、cleanup 失败与 load/recovery reconcile 均保持原 fail-closed 与有界重驱。无 `runRecordRef` system exit、already-reviewed、review/proxy/closure 持久提交、Evidence/reviewer 调用、公开事件/RPC、预算和用户文案未改变；旧 Controller flight map、attempt transition/root acquire/cleanup/reconcile 和 direct Store/Resource 编排归零。
 - 直接证据与结构门禁：新增独立领域状态机 7/7，覆盖三段 phase、generation/legacy merge、invoking 禁止重放、target drift、acquire response loss、owner 漂移、terminal winner、cleanup retry/reconcile 与 started/invoking cancellation；真实 governor/持久 store/reviewer 闭包 7/7 覆盖崩溃、响应丢失、队列、竞态和资源终态；Server Controller+recovery 2 文件 48/48、owner-services Evidence 8/8 证明既有 bridge、恢复与取证行为不漂移，合计 5 文件 70/70。S7/反向 mutation 现冻结唯一应用 class/flight、phase/generation/root 决定、窄 Correctness export/build、生产注入和 Controller 直管归零，并能拒绝应用缺失、Controller 恢复 Resource 访问、Correctness 吸收 phase 决定、根转导或生产漏装配。
 - 构建、失效与交接：core typecheck/fresh build、owner-services typecheck/fresh build、CLI typecheck 与 `pnpm cli:build` 通过；canonical S7 coverage/mutation 33/33 与 registry golden、fresh `pnpm runtime:package-exports`、10 个适用变更文件的最窄 Biome 检查和 `git diff --check` 通过，未运行根级回归、制品或 A5-15i Host 组合闭包。以后若 review attempt input/state/root/mechanism port、identity/generation/phase/terminal winner、root target/acquire/replay/cleanup、Store transition/恢复、Resource adapter、Controller 六项 remainder、生产组合、S7/package export 或上述直接测试任一变化，只恢复 `A5-15j-advancement-review-attempt-lifecycle-v1` 并重验本闭包；A5-15a～A5-15i 不随之失效。A5-15j 当前完成并等待协调者独立复核；`A5-ADVANCEMENT-REVIEW-01` 仍待 A5-15k 迁移剩余 evidence/reviewer/outcome 链后完全退场，Advancement 行与 A5 继续为 `[ ]`，本轮未进入 A6，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+- 协调者独立验收：重新沿生产装配、accepted-turn 调用、attempt 持久转换、Resource Governor 适配与 recovery/load 调和追踪 A5-15j，确认生产只有一个 review-attempt 应用实例，Controller 已归零 lineage/generation/phase、flight、root contract、acquire/replay/cleanup/reconcile 决策；取消会话时的 attempt 终态化与根回收仍由同一应用状态机保证顺序，不构成第二取消 owner。独立重跑 core attempt 状态机 7/7、真实 CLI governor/store/reviewer 7/7、Server Controller+recovery 48/48、owner-services Evidence 8/8，合计 70/70；canonical S7 33/33 与 registry golden、`git diff --check` 通过。接受 `A5-15j-advancement-review-attempt-lifecycle-v1`，提交为 `bab398e2`。
+
+### A5-15k：归位 Advancement review eligibility、outcome 与 proxy 持久状态链
+
+- 派发基线与唯一架构结果：以 `HEAD bab398e2` 加本节调度记录为基线。把 accepted proxy run 合法性与结算、Rubric/reviewer/审前预算 eligibility、缺少耐久 run 的 system exit，以及 passed/failed/exit、审后预算、dead-end、proxy message 选择与 review/proxy/closure 持久提交收归唯一 Advancement 应用状态链。应用拥有这些产品决定及其写入顺序；Store/Authority 只提交领域已决定的事件，Controller 不再解释 review 结果或选择推进终态。
+- 必须保持的生产语义：代理 run 的 session/proxy identity 校验、known/outstanding proxy 幂等结算；缺 Rubric、缺 reviewer、缺 `runRecordRef` 与审前预算触发的现有 system-exit 原因和文案；passed→completed、explicit exit、failed 后审后预算退出、failure handling 选择、dead-end 退出、proxy id/content、review/window 同步、evidence request 与 consumed attempt 原子提交；closure report、返回 kind、持久事件顺序、响应丢失/重放、公开 RPC/event 和用户可见结果均不得漂移。禁止先写 review 再由第二 owner 补终态或 proxy，禁止 Controller 与应用同时判断 eligibility/outcome。
+- 旧路与桥边界：从 `AdvancementController` 删除 `settleAcceptedProxyRun`、`systemExitReview`、`persistReviewOutcome`、`persistProxyOutcome` 及等价 eligibility/outcome 分支；相关预算、Rubric、failure-handling、proxy 构造和终态规则只能存在于 Advancement 应用。`A5-ADVANCEMENT-REVIEW-01` 完成本包后只允许保留 `resolveRootTarget / prepareEvidence / invokeReviewer` 三项外部机制，不得持有产品状态决定、Store 写入口、结果投影或 fallback；紧邻 A5-15l 迁移这三项适配并删除整座桥。
+- 明确不做：不迁移 Evidence target/collect 内部算法、Reviewer Provider 调用及其资源计量，不改变 attempt lineage/generation/phase/root lifecycle，不迁移 recovery scan、proxy scheduler/delivery、closure report 的数据采集实现、其他 Advancement 管理用例、其他领域或 A6；不新增能力、协议、持久 schema、预算、重试、用户文案或兼容入口。
+- 直接证据与完成条件：新增/扩展应用直接测试，逐项覆盖 accepted proxy 正常/已结算/未知/错配、缺 Rubric/reviewer/durable run、审前与审后预算边界、passed/exit/failed、dead-end、failure handling、proxy 原子写入、closure 结果、evidence/window/attempt 透传及持久失败；复用真实 Controller/Store/recovery 直接测试证明调用次数、事件序列、返回结果和恢复不变。更新 S7 与反向 mutation，拒绝 Controller outcome helper、eligibility 分支、review/proxy Store 写入回流，冻结桥三项 exact-set 和唯一应用 owner。按验证手册只运行 core/owner-services/Server/CLI 的失效闭包、changed-file lint、canonical S7、必要上游构建与 `git diff --check`，不得运行根级回归、制品、A5-15j 资源闭包或未失效领域测试。完成时领域状态决定与持久写入只有一个应用 owner，桥只剩三项外部机制，工作区可构建可运行并登记证据后停在安全交接点；执行者不得执行 Git 操作。
+
+- 实施责任与生产链：唯一 `AdvancementReviewAttemptApplicationService` 现拥有 accepted proxy 的 session/proxy identity 校验、known/already-settled 幂等与 outstanding settlement，Rubric/reviewer/durable-run/审前预算 eligibility，以及 passed/explicit-exit/审后预算/dead-end/proxy 的完整 outcome 决定。应用以有限 `AdvancementReviewPersistenceDecision` 一次性交给 Correctness port 提交 review、window/evidence settlement、consumed attempt 与 terminal/proxy/closure；`AdvancementSessionStore` 只执行已决定的原子事件事务。缺失 proxy 的恢复重建也调用同一领域 failure-handling/proxy 规则，不在 Controller 形成第二选择器。
+- 旧路与桥收口：`AdvancementController` 的 `settleAcceptedProxyRun`、`systemExitReview`、`persistReviewOutcome`、`persistProxyOutcome`、eligibility/budget/failure-handling/proxy 规则与 review/proxy Store 直写全部归零；owner-services 原 `proxy-content` 源码、导出和 build entry 同步退役。`A5-ADVANCEMENT-REVIEW-01` 只剩 `resolveRootTarget / prepareEvidence / invokeReviewer` 三项外部机制，Controller 只保留 Evidence target/collect 与 reviewer Provider 调用，不拥有产品状态决定、持久写入口或 fallback。审查结果、closure report、proxy id/content、结构版本、公开 RPC/Event 和用户文案保持既有值与顺序。
+- 直接证据：Core 应用 13/13 直接覆盖 accepted proxy 正常/已结算/未知/错配、缺 Rubric/reviewer/durable run、审前/审后预算、passed/exit/dead-end/proxy、review/window/evidence/attempt 同事务透传、原子持久失败与 missing-proxy 同规则重建；CLI 真实 governor/store/metered reviewer 7/7；Server Controller+recovery 2 文件 48/48，合计 4 文件 68/68。直接反例证明已知且已结算 proxy 不重复结算，未知/错配 system-exit，提交失败不产生假 terminal/root release，review/window/evidence/attempt 与 proxy/closure 仍由同一事务提交。
+- 构建、门禁、失效与交接：core、owner-services 与 CLI typecheck 通过，core/owner-services fresh build 与 `pnpm cli:build` 通过；canonical S7 coverage/mutation 33/33 与 registry golden、fresh `pnpm runtime:package-exports`、适用变更文件最窄 Biome 和 `git diff --check` 通过。S7 冻结三项 mechanism exact-set、唯一 state/persistence owner、Correctness Store 映射、Controller 旧 helper/直写归零及 owner-services 旧 proxy 源码/导出/build entry 归零，并能拒绝桥增项、Controller outcome helper 与 Correctness terminal 映射缺失。以后若 proxy settlement、eligibility/budget、review outcome/failure handling/proxy/closure 规则、持久 decision/Store 映射、missing-proxy 重建、三项 mechanism、生产装配、S7/package export 或上述直接测试任一变化，只恢复 `A5-15k-advancement-review-outcome-application-v1` 并重验本闭包；A5-15a～A5-15j 不随之失效。A5-15k 当前完成并等待协调者独立复核；下一责任链只允许 A5-15l 迁移三项 Evidence/Reviewer 适配并删除 `A5-ADVANCEMENT-REVIEW-01`，Advancement 行与 A5 继续为 `[ ]`，未进入 A6，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调复核纠正：删除 `#settleAcceptedProxyRun` 中首个 `!outstandingProxyMessageId` 分支已完整返回后紧邻复制的不可达同条件分支；保留唯一的 known/already-settled 幂等返回、unknown proxy system-exit 与 outstanding mismatch 裁决。对本包迁入 core 的 `#prepareEligibility / #settleAcceptedProxyRun / #systemExitReview / #persistReviewOutcome` 作一次同类局部反扫，未发现其他连续不可达重复。Core 应用 13/13 与 `git diff --check` 重新通过；既有 68/68、构建、S7、package-export 证据未因纯删除不可达逻辑失效。`A5-15k-advancement-review-outcome-application-v1` 据此恢复，仍等待协调者独立复核。
 
 ## 十、用户提示词
 

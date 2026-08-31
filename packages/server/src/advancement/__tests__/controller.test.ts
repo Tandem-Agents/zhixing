@@ -64,14 +64,30 @@ function fakeResources(): ResourceReservationPort {
 class AdvancementController extends OwnerAdvancementController {
   constructor(options: Omit<AdvancementControllerOptions, "reviewAttempts"> & {
     readonly resources?: ResourceReservationPort;
+    readonly sessionTokenBudget?: number;
+    readonly reviewIdGenerator?: () => string;
+    readonly proxyIdGenerator?: () => string;
   }) {
-    const { resources = fakeResources(), ...rest } = options;
+    const {
+      resources = fakeResources(),
+      sessionTokenBudget,
+      reviewIdGenerator,
+      proxyIdGenerator,
+      ...rest
+    } = options;
     super({
       ...rest,
       reviewAttempts: createAdvancementReviewAttemptApplication({
         store: options.store,
         resources,
+        reviewerAvailable: options.reviewer !== undefined,
+        ...(options.closureSynthesizer
+          ? { closureSynthesizer: options.closureSynthesizer }
+          : {}),
+        ...(sessionTokenBudget !== undefined ? { sessionTokenBudget } : {}),
         ...(options.now ? { now: options.now } : {}),
+        ...(reviewIdGenerator ? { reviewIdGenerator } : {}),
+        ...(proxyIdGenerator ? { proxyIdGenerator } : {}),
       }),
     });
   }

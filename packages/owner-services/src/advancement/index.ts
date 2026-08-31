@@ -1,8 +1,6 @@
 export {
   AdvancementController,
-  DEFAULT_SESSION_TOKEN_BUDGET,
   renderRecentContextFromMessages,
-  type AdvancementClosureSynthesizer,
   type AdvancementControllerOptions,
   type AdvancementReviewRunInput,
   type AdvancementReviewRunOutcome,
@@ -13,12 +11,6 @@ export {
   DeferredRubricPublication,
   type DeferredRubricPublicationOptions,
 } from "./deferred-rubric-publication.js";
-export {
-  buildAdvancementProxyMessage,
-  buildProxyVariables,
-  composeProxyContent,
-  selectFailureHandling,
-} from "./proxy-content.js";
 export {
   ProxyMessageScheduler,
   type ProxyMessageSchedulerOptions,

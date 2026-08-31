@@ -272,6 +272,27 @@ export async function createServeAdvancementController(
         },
       })
     : undefined;
+  const closureSynthesizer = {
+    synthesize: (facts: Parameters<typeof buildClosureSynthesisPrompt>[0]) =>
+      completeViaPort("light", buildClosureSynthesisPrompt(facts)),
+  };
+  const reviewer = createAdvancementRuntime({
+    provider: roles.main.provider,
+    model: roles.main.model,
+    thinking: mainThinking,
+    lightProvider: roles.light.provider,
+    lightModel: roles.light.model,
+    lightThinking,
+    resourceMeter: governor,
+    defaultMaxOutputTokens:
+      PROTOCOL_BUDGET_DEFAULTS[resolvedRoles.main.resolved.protocol]
+        .maxOutputTokens,
+    workingDirectory: workspacePath,
+    ...(evidenceCapabilities ? { evidenceCapabilities } : {}),
+    contextWindow: {
+      capability: advancementWindowCapability,
+    },
+  });
 
   return new AdvancementController({
     store,
@@ -281,6 +302,11 @@ export async function createServeAdvancementController(
     reviewAttempts: createAdvancementReviewAttemptApplication({
       store,
       resources: governor,
+      reviewerAvailable: true,
+      closureSynthesizer,
+      ...(config.advancement?.sessionTokenBudget !== undefined
+        ? { sessionTokenBudget: config.advancement.sessionTokenBudget }
+        : {}),
     }),
     ...(evidence ? { evidence } : {}),
     ...(deps.rubricPublication
@@ -294,32 +320,10 @@ export async function createServeAdvancementController(
     ...(deps.onAdmissionTiming
       ? { onAdmissionTiming: deps.onAdmissionTiming }
       : {}),
-    // 收场合成走轻推理通道；失败由 controller 降级结构化直出。
-    closureSynthesizer: {
-      synthesize: (facts) =>
-        completeViaPort("light", buildClosureSynthesisPrompt(facts)),
-    },
-    ...(config.advancement?.sessionTokenBudget !== undefined
-      ? { sessionTokenBudget: config.advancement.sessionTokenBudget }
-      : {}),
+    // 收场合成走轻推理通道；失败由领域投影降级结构化直出。
+    closureSynthesizer,
     contractBuilder,
-    reviewer: createAdvancementRuntime({
-      provider: roles.main.provider,
-      model: roles.main.model,
-      thinking: mainThinking,
-      lightProvider: roles.light.provider,
-      lightModel: roles.light.model,
-      lightThinking,
-      resourceMeter: governor,
-      defaultMaxOutputTokens:
-        PROTOCOL_BUDGET_DEFAULTS[resolvedRoles.main.resolved.protocol]
-          .maxOutputTokens,
-      workingDirectory: workspacePath,
-      ...(evidenceCapabilities ? { evidenceCapabilities } : {}),
-      contextWindow: {
-        capability: advancementWindowCapability,
-      },
-    }),
+    reviewer,
   });
 }
 

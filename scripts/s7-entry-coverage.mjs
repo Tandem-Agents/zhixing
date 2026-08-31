@@ -3585,6 +3585,20 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     application.indexOf("export class AdvancementAcceptedTurnApplicationService"),
     application.indexOf("/** Path-free read mechanism", 1),
   );
+  const reviewMechanismStart = application.indexOf(
+    "export interface AdvancementReviewAttemptMechanismPort",
+  );
+  const reviewMechanismEnd = application.indexOf(
+    "export interface AdvancementClosureSynthesizer",
+    reviewMechanismStart,
+  );
+  const reviewMechanism =
+    reviewMechanismStart >= 0 && reviewMechanismEnd > reviewMechanismStart
+      ? application.slice(reviewMechanismStart, reviewMechanismEnd)
+      : "";
+  const reviewMechanismMethods = [
+    ...reviewMechanism.matchAll(/^  ([A-Za-z][A-Za-z0-9]*)\(/gmu),
+  ].map((match) => match[1]);
 
   if (
     !application.includes("interface AdvancementDetailReadPort") ||
@@ -3598,6 +3612,8 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes("interface AdvancementReviewAttemptStatePort") ||
     !application.includes("interface AdvancementReviewRootLifecyclePort") ||
     !application.includes("interface AdvancementReviewAttemptMechanismPort") ||
+    JSON.stringify(reviewMechanismMethods) !==
+      JSON.stringify(["resolveRootTarget", "prepareEvidence", "invokeReviewer"]) ||
     !application.includes("class AdvancementReviewAttemptApplicationService") ||
     application.split("class AdvancementReviewAttemptApplicationService").length - 1 !== 1 ||
     !application.includes("readonly #flights = new Map<string, Promise<AdvancementTurnReviewResult>>();") ||
@@ -3607,6 +3623,14 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes("const afterAcquire = await this.#state.loadSession(") ||
     !application.includes("async #cleanupTerminalRoot(") ||
     !application.includes("async reconcileConversation(") ||
+    !application.includes("async #prepareEligibility(") ||
+    !application.includes("async #settleAcceptedProxyRun(") ||
+    !application.includes("async #persistReviewOutcome(") ||
+    !application.includes("async rebuildMissingProxyMessage(") ||
+    !application.includes("commitReviewOutcome(") ||
+    !application.includes("settleProxyMessage(") ||
+    !application.includes("buildAdvancementProxyMessage(") ||
+    !application.includes("selectFailureHandling(") ||
     !application.includes("interface AdvancementReviewResultProjectionApplication") ||
     !application.includes("class AdvancementReviewResultProjectionApplicationService") ||
     !application.includes("class AdvancementAcceptedTurnApplicationService") ||
@@ -3628,6 +3652,10 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !reviewAttemptCorrectness.includes("createAdvancementReviewAttemptApplication(") ||
     !reviewAttemptCorrectness.includes("new AdvancementReviewAttemptApplicationService({") ||
     !reviewAttemptCorrectness.includes("options.store.transitionReviewAttempt(") ||
+    !reviewAttemptCorrectness.includes("options.store.settleProxyMessage(") ||
+    !reviewAttemptCorrectness.includes("options.store.enqueueProxyMessage(") ||
+    !reviewAttemptCorrectness.includes("options.store.appendTerminalRunReview(") ||
+    !reviewAttemptCorrectness.includes("options.store.appendRunReviewWithProxyMessage(") ||
     !reviewAttemptCorrectness.includes("options.resources.inspectImmediateRoot(") ||
     !reviewAttemptCorrectness.includes("options.resources.acquireRoot(") ||
     /generation\s*=|phase\s*===|terminalReviewAttempt|reviewRootTargetMatches/u.test(
@@ -3637,6 +3665,12 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !controller.includes("this.reviewAttempts.reconcileConversation(") ||
     !controller.includes("this.reviewAttempts.cancelSession({") ||
     !controller.includes("private reviewAttemptMechanism(): AdvancementReviewAttemptMechanismPort") ||
+    /prepareEligibility|commitMissingDurableRun|commitConsumed|settleAcceptedProxyRun|systemExitReview|persistReviewOutcome|persistProxyOutcome|buildAdvancementProxyMessage|selectFailureHandling/u.test(
+      controller,
+    ) ||
+    /store\.(?:appendTerminalRunReview|appendRunReviewWithProxyMessage)/u.test(
+      controller,
+    ) ||
     /advancementReview(?:LineageId|AttemptId|RootRequestId)|inspectImmediateRoot|acquireRoot\(|transitionReviewAttempt\(|cleanupReviewAttemptRoot|reviewFlights/u.test(
       controller,
     ) ||
@@ -3707,7 +3741,11 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     ownerManifest?.exports?.["./advancement/review-dispatch"] !== undefined ||
     ownerManifest?.exports?.["./advancement/review-application-bridge"] === undefined ||
     ownerManifest?.exports?.["./advancement/review-attempt-correctness"] === undefined ||
+    ownerManifest?.exports?.["./advancement/proxy-content"] !== undefined ||
     !ownerBuild.includes("src/advancement/review-attempt-correctness.ts") ||
+    ownerBuild.includes("src/advancement/proxy-content.ts") ||
+    ownerIndex.includes("buildAdvancementProxyMessage") ||
+    byPath.has("packages/owner-services/src/advancement/proxy-content.ts") ||
     byPath.has("packages/cli/src/serve/advancement-review-maintenance.ts") ||
     byPath.has("packages/owner-services/src/advancement/review-dispatch.ts") ||
     !application.includes("interface AdvancementConversationLifecycleApplication") ||

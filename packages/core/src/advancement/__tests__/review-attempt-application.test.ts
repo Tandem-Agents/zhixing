@@ -10,6 +10,7 @@ import {
   type AdvancementReviewAttemptStatePort,
   type AdvancementReviewRootLifecyclePort,
   type AdvancementReviewRootTarget,
+  type AdvancementReviewPersistenceDecision,
 } from "../application.js";
 import type {
   AdvancementExit,
@@ -31,7 +32,7 @@ describe("AdvancementReviewAttemptApplicationService", () => {
 
     await expect(
       application.reviewAcceptedRun(request(), mechanism(state, { reviewer })),
-    ).resolves.toMatchObject({ kind: "reviewed" });
+    ).resolves.toMatchObject({ kind: "proxy-enqueued" });
 
     expect(state.transitions.map(({ phase }) => phase)).toEqual([
       "started",
@@ -198,11 +199,278 @@ describe("AdvancementReviewAttemptApplicationService", () => {
     ]);
     expect(roots.operations.filter((operation) => operation === "release")).toHaveLength(2);
   });
+
+  it("settles the matching accepted proxy exactly once and rejects unknown or mismatched origins", async () => {
+    const proxy = {
+      id: "proxy-old",
+      sessionId: "adv-1",
+      reviewId: "review-old",
+      content: { parts: [{ type: "text" as const, text: "continue" }] },
+      rubricFailureHandlingId: "continue",
+      variables: {},
+      attribution: { criteria: [] },
+      createdAt: NOW,
+    };
+    const accepted = new ReviewAttemptState(session({
+      proxyMessages: [proxy],
+      outstandingProxyMessageId: proxy.id,
+    }));
+    const acceptedReviewer = vi.fn(async () => reviewedOutcome());
+    await createApplication(accepted, new ReviewRoots()).reviewAcceptedRun(
+      request({
+        runRecord: {
+          timestamp: NOW,
+          messages: [],
+          source: "advancement",
+          advancement: { sessionId: "adv-1", proxyMessageId: proxy.id },
+        },
+      }),
+      mechanism(accepted, { reviewer: acceptedReviewer }),
+    );
+    expect(accepted.settledProxyIds).toEqual([proxy.id]);
+    expect(acceptedReviewer).toHaveBeenCalledOnce();
+
+    const alreadySettled = new ReviewAttemptState(session({
+      proxyMessages: [proxy],
+    }));
+    const alreadySettledReviewer = vi.fn(async () => reviewedOutcome());
+    await createApplication(alreadySettled, new ReviewRoots()).reviewAcceptedRun(
+      request({
+        runRecord: {
+          timestamp: NOW,
+          messages: [],
+          source: "advancement",
+          advancement: { sessionId: "adv-1", proxyMessageId: proxy.id },
+        },
+      }),
+      mechanism(alreadySettled, { reviewer: alreadySettledReviewer }),
+    );
+    expect(alreadySettled.settledProxyIds).toEqual([]);
+    expect(alreadySettledReviewer).toHaveBeenCalledOnce();
+
+    for (const advancement of [
+      { sessionId: "wrong", proxyMessageId: proxy.id },
+      { sessionId: "adv-1", proxyMessageId: "proxy-unknown" },
+    ]) {
+      const rejected = new ReviewAttemptState(session({
+        proxyMessages: [proxy],
+        outstandingProxyMessageId: proxy.id,
+      }));
+      const reviewer = vi.fn(async () => reviewedOutcome());
+      await expect(
+        createApplication(rejected, new ReviewRoots()).reviewAcceptedRun(
+          request({
+            runRecord: {
+              timestamp: NOW,
+              messages: [],
+              source: "advancement",
+              advancement,
+            },
+          }),
+          mechanism(rejected, { reviewer }),
+        ),
+      ).resolves.toMatchObject({ kind: "exited" });
+      expect(reviewer).not.toHaveBeenCalled();
+      expect(rejected.decisions[0]).toMatchObject({
+        kind: "terminal",
+        terminal: { type: "exited", exit: { reason: "system-error" } },
+      });
+    }
+  });
+
+  it("owns missing rubric, reviewer, durable run and pre-review budget exits", async () => {
+    const cases = [
+      {
+        state: new ReviewAttemptState(session({ confirmedRubric: undefined })),
+        application: (state: ReviewAttemptState) =>
+          createApplication(state, new ReviewRoots()),
+        input: request(),
+        message: "缺少已确认 Rubric",
+      },
+      {
+        state: new ReviewAttemptState(),
+        application: (state: ReviewAttemptState) =>
+          createApplication(state, new ReviewRoots(), { reviewerAvailable: false }),
+        input: request(),
+        message: "验收运行体未装配",
+      },
+      {
+        state: new ReviewAttemptState(),
+        application: (state: ReviewAttemptState) =>
+          createApplication(state, new ReviewRoots()),
+        input: request({ runRecordRef: undefined }),
+        message: "缺少 accepted run 的耐久位置",
+      },
+      {
+        state: new ReviewAttemptState(session({ runs: [review({
+          usage: {
+            judge: { inputTokens: 1, outputTokens: 0 },
+            run: { inputTokens: 0, outputTokens: 0 },
+          },
+        })] })),
+        application: (state: ReviewAttemptState) =>
+          createApplication(state, new ReviewRoots(), { sessionTokenBudget: 1 }),
+        input: request({ runIndex: 1, runRecordRef: { shardId: "000001", runIndex: 1 } }),
+        message: "成本上限",
+      },
+    ];
+    for (const entry of cases) {
+      const reviewer = vi.fn(async () => reviewedOutcome());
+      const result = await entry.application(entry.state).reviewAcceptedRun(
+        entry.input,
+        mechanism(entry.state, { reviewer }),
+      );
+      expect(result).toMatchObject({ kind: "exited" });
+      if (result.kind !== "exited") throw new Error("expected exited");
+      expect(result.exit.message).toContain(entry.message);
+      expect(reviewer).not.toHaveBeenCalled();
+    }
+  });
+
+  it("decides passed, explicit exit, post-review budget, dead-end and proxy transactions", async () => {
+    const scenarios = [
+      { outcome: review({ decision: "passed", unmetCriteria: [] }), expected: "completed" },
+      {
+        outcome: review({ decision: "exit", exitReason: "dead-end" }),
+        expected: "exited",
+      },
+      {
+        outcome: review({ usage: {
+          judge: { inputTokens: 2, outputTokens: 0 },
+          run: { inputTokens: 0, outputTokens: 0 },
+        } }),
+        expected: "exited",
+        budget: 2,
+      },
+      { outcome: review(), expected: "exited", noHandling: true },
+      {
+        outcome: review({ selectedFailureHandlingId: "continue" }),
+        expected: "proxy-enqueued",
+      },
+    ] as const;
+    for (const scenario of scenarios) {
+      const state = new ReviewAttemptState(session(
+        scenario.noHandling
+          ? {
+              confirmedRubric: {
+                ...session().confirmedRubric!,
+                content: {
+                  ...session().confirmedRubric!.content,
+                  failureHandling: [],
+                },
+              },
+            }
+          : {},
+      ));
+      const result = await createApplication(state, new ReviewRoots(), {
+        ...(scenario.budget ? { sessionTokenBudget: scenario.budget } : {}),
+      }).reviewAcceptedRun(
+        request(),
+        mechanism(state, {
+          reviewer: vi.fn(async () => ({
+            kind: "reviewed" as const,
+            review: scenario.outcome,
+          })),
+        }),
+      );
+      expect(result.kind).toBe(scenario.expected);
+      expect(state.decisions).toHaveLength(1);
+      expect(state.decisions[0]?.reviewAttempt).toMatchObject({
+        phase: "consumed",
+      });
+    }
+  });
+
+  it("commits the evidence request, window and consumed attempt in the same outcome decision", async () => {
+    const state = new ReviewAttemptState();
+    const advancementWindow = {
+      source: "advancement-window" as const,
+      reviewCount: 1,
+      entries: [],
+      updatedAt: NOW,
+      lastSnapshot: {
+        source: "advancement-window" as const,
+        priorReviewCount: 0,
+        inputMessageCount: 1,
+        outputMessageCount: 1,
+        decision: { kind: "pass" as const, reason: "未触发压缩" },
+      },
+    };
+
+    await createApplication(state, new ReviewRoots()).reviewAcceptedRun(
+      request(),
+      mechanism(state, {
+        evidenceRequestId: "evidence-request-1",
+        reviewer: vi.fn(async () => ({
+          kind: "reviewed" as const,
+          review: review({ decision: "passed", unmetCriteria: [] }),
+          advancementWindow,
+        })),
+      }),
+    );
+
+    expect(state.decisions).toHaveLength(1);
+    expect(state.decisions[0]).toMatchObject({
+      kind: "terminal",
+      evidenceRequestId: "evidence-request-1",
+      advancementWindow,
+      reviewAttempt: { phase: "consumed" },
+    });
+  });
+
+  it("does not report a terminal or release the root when the atomic outcome commit fails", async () => {
+    const state = new ReviewAttemptState();
+    state.failNextDecision = true;
+    const roots = new ReviewRoots();
+    await expect(
+      createApplication(state, roots).reviewAcceptedRun(
+        request(),
+        mechanism(state, {
+          reviewer: vi.fn(async () => ({
+            kind: "reviewed" as const,
+            review: review({ decision: "passed", unmetCriteria: [] }),
+          })),
+        }),
+      ),
+    ).rejects.toThrow("outcome commit failed");
+    expect(state.current.status).toBe("active");
+    expect(state.current.runs).toHaveLength(0);
+    expect(roots.operations).toEqual(["acquire"]);
+  });
+
+  it("rebuilds a missing proxy from the same domain-owned failure selection", async () => {
+    const failed = review({
+      selectedFailureHandlingId: "continue",
+      proxyMessageId: "proxy-rebuild",
+    });
+    const state = new ReviewAttemptState(session({ runs: [failed] }));
+    const result = await createApplication(
+      state,
+      new ReviewRoots(),
+    ).rebuildMissingProxyMessage(state.current);
+    expect(result).toMatchObject({
+      kind: "rebuilt",
+      proxyMessage: {
+        id: "proxy-rebuild",
+        reviewId: failed.id,
+        rubricFailureHandlingId: "continue",
+      },
+    });
+    expect(state.current.outstandingProxyMessageId).toBe("proxy-rebuild");
+    await expect(
+      createApplication(state, new ReviewRoots()).rebuildMissingProxyMessage(
+        state.current,
+      ),
+    ).resolves.toEqual({ kind: "not-applicable" });
+  });
 });
 
 class ReviewAttemptState implements AdvancementReviewAttemptStatePort {
   current: AdvancementSession;
   readonly transitions: AdvancementReviewAttempt[] = [];
+  readonly decisions: AdvancementReviewPersistenceDecision[] = [];
+  readonly settledProxyIds: string[] = [];
+  failNextDecision = false;
   onTransition?: (attempt: AdvancementReviewAttempt) => void;
 
   constructor(initial = session()) {
@@ -259,6 +527,74 @@ class ReviewAttemptState implements AdvancementReviewAttemptStatePort {
     exit: AdvancementExit,
   ): Promise<AdvancementSession> {
     this.current = { ...this.current, status: "cancelled", exit, updatedAt: NOW };
+    return this.current;
+  }
+
+  async settleProxyMessage(
+    _conversationId: string,
+    _sessionId: string,
+    proxyMessageId: string,
+  ): Promise<AdvancementSession> {
+    this.settledProxyIds.push(proxyMessageId);
+    if (this.current.outstandingProxyMessageId === proxyMessageId) {
+      this.current = {
+        ...this.current,
+        outstandingProxyMessageId: undefined,
+        updatedAt: NOW,
+      };
+    }
+    return this.current;
+  }
+
+  async enqueueProxyMessage(
+    _conversationId: string,
+    _sessionId: string,
+    proxyMessage: AdvancementSession["proxyMessages"][number],
+  ): Promise<AdvancementSession> {
+    this.current = {
+      ...this.current,
+      proxyMessages: [...this.current.proxyMessages, proxyMessage],
+      outstandingProxyMessageId: proxyMessage.id,
+      updatedAt: NOW,
+    };
+    return this.current;
+  }
+
+  async commitReviewOutcome(
+    decision: AdvancementReviewPersistenceDecision,
+  ): Promise<AdvancementSession> {
+    if (this.failNextDecision) {
+      this.failNextDecision = false;
+      throw new Error("outcome commit failed");
+    }
+    this.decisions.push(decision);
+    if (decision.reviewAttempt) {
+      await this.transitionReviewAttempt(
+        decision.conversationId,
+        decision.sessionId,
+        decision.reviewAttempt,
+      );
+    }
+    this.current = {
+      ...this.current,
+      runs: [...this.current.runs, decision.review],
+      ...(decision.advancementWindow
+        ? { advancementWindow: decision.advancementWindow }
+        : {}),
+      ...(decision.kind === "terminal"
+        ? {
+            status: decision.terminal.type === "completed" ? "completed" : "exited",
+            exit: decision.terminal.exit,
+          }
+        : {
+            proxyMessages: [
+              ...this.current.proxyMessages,
+              decision.proxyMessage,
+            ],
+            outstandingProxyMessageId: decision.proxyMessage.id,
+          }),
+      updatedAt: NOW,
+    };
     return this.current;
   }
 }
@@ -333,56 +669,54 @@ class ReviewRoots implements AdvancementReviewRootLifecyclePort {
 function createApplication(
   state: AdvancementReviewAttemptStatePort,
   roots: AdvancementReviewRootLifecyclePort,
+  options: Readonly<{
+    reviewerAvailable?: boolean;
+    sessionTokenBudget?: number;
+  }> = {},
 ): AdvancementReviewAttemptApplicationService {
   return new AdvancementReviewAttemptApplicationService({
     state,
     roots,
+    reviewerAvailable: options.reviewerAvailable ?? true,
+    ...(options.sessionTokenBudget !== undefined
+      ? { sessionTokenBudget: options.sessionTokenBudget }
+      : {}),
+    reviewIdGenerator: () => "review-system",
+    proxyIdGenerator: () => "proxy-1",
     now: () => NOW,
   });
 }
 
 function mechanism(
-  state: ReviewAttemptState,
+  _state: ReviewAttemptState,
   options: Readonly<{
     reviewer: AdvancementReviewAttemptMechanismPort["invokeReviewer"];
     target?: AdvancementReviewRootTarget;
+    evidenceRequestId?: string;
   }>,
 ): AdvancementReviewAttemptMechanismPort {
   return {
-    prepareEligibility: async (current) => ({
-      kind: "ready",
-      session: current,
-      rubric: current.confirmedRubric!,
-    }),
-    commitMissingDurableRun: async () => {
-      throw new Error("unexpected missing durable run");
-    },
     resolveRootTarget: async () => options.target,
-    prepareEvidence: async () => ({ kind: "ready" }),
+    prepareEvidence: async () => ({
+      kind: "ready",
+      ...(options.evidenceRequestId
+        ? { requestId: options.evidenceRequestId }
+        : {}),
+    }),
     invokeReviewer: options.reviewer,
-    commitConsumed: async ({ attempt: consumed, outcome }) => {
-      const current = await state.transitionReviewAttempt(
-        state.current.conversationId,
-        state.current.id,
-        consumed,
-        NOW,
-      );
-      return {
-        kind: "reviewed",
-        session: current,
-        review: outcome.review,
-      };
-    },
   };
 }
 
-function request(): AdvancementReviewAttemptInput {
+function request(
+  overrides: Partial<AdvancementReviewAttemptInput> = {},
+): AdvancementReviewAttemptInput {
   return {
     conversationId: "conv-1",
     runId: "run-1",
     runIndex: 0,
     runRecord: { timestamp: NOW, messages: [] },
     runRecordRef: RUN_REF,
+    ...overrides,
   };
 }
 
@@ -390,7 +724,9 @@ function reviewedOutcome() {
   return { kind: "reviewed" as const, review: review() };
 }
 
-function review(): AdvancementRunReview {
+function review(
+  overrides: Partial<AdvancementRunReview> = {},
+): AdvancementRunReview {
   return {
     id: "review-1",
     runIndex: 0,
@@ -399,6 +735,7 @@ function review(): AdvancementRunReview {
     evidence: [],
     attribution: { criteria: [] },
     unmetCriteria: ["not done"],
+    ...overrides,
   };
 }
 
@@ -415,7 +752,13 @@ function session(overrides: Partial<AdvancementSession> = {}): AdvancementSessio
       source: { kind: "library", rubricId: "rubric-1", rubricVersion: "v1" },
       title: "done",
       description: "done",
-      content: { passCriteria: [], evidenceRequirements: [], failureHandling: [] },
+      content: {
+        passCriteria: [],
+        evidenceRequirements: [],
+        failureHandling: [
+          { id: "continue", scenario: "not done", reply: "continue" },
+        ],
+      },
       confirmedAt: NOW,
       confirmedBy: "user",
     },

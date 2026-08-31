@@ -17,10 +17,6 @@
       "types": "./dist/advancement/controller.d.ts",
       "import": "./dist/advancement/controller.js"
     },
-    "./advancement/proxy-content": {
-      "types": "./dist/advancement/proxy-content.d.ts",
-      "import": "./dist/advancement/proxy-content.js"
-    },
     "./advancement/proxy-scheduler": {
       "types": "./dist/advancement/proxy-scheduler.d.ts",
       "import": "./dist/advancement/proxy-scheduler.js"

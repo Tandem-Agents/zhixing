@@ -663,6 +663,7 @@ function reviewAttemptApplication(
   return createAdvancementReviewAttemptApplication({
     store,
     resources,
+    reviewerAvailable: true,
     now: () => NOW,
   });
 }
