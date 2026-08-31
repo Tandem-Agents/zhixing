@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-12i Conversation 上下文预算与用量只读应用责任实施完成，等待协调者复核<br>
+> 当前检查点：A5-12j Conversation 会话安全状态只读投影等待协调者复核<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `53ba829d`；A0～A4、Skill Catalog、Delivery、完整 Workspace Administration、完整 Trust Administration、完整 Schedule、Conversation 目录、clear/delete/resume、abort/resolve、普通 Agent turn identity/admission/start、task-list 与手动 compact 均已通过协调者独立复核并提交 |
+| 已接受基线 | `a9545507`；A0～A4、Skill Catalog、Delivery、完整 Workspace Administration、完整 Trust Administration、完整 Schedule、Conversation 目录、clear/delete/resume、abort/resolve、普通 Agent turn identity/admission/start、task-list、手动 compact、上下文预算与用量查询均已通过协调者独立复核并提交 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | A5-12i：归位 Conversation 上下文预算与用量只读应用责任，实施完成并等待协调者独立复核；Conversation 行与 A5 仍为 `[ ]` |
-| 下一责任链 | A5-12i 验收后，只按 Conversation 剩余未归位查询/管理责任继续拆包；不得扩入 Advancement、Perspectives、Channel、Workscene 或 A6 |
+| 活跃工作包 | A5-12j：归位 Conversation 会话安全状态只读投影，实施完成并等待协调者独立复核；Conversation 行与 A5 仍为 `[ ]` |
+| 下一责任链 | 协调者独立复核 A5-12j 后，只按 Conversation 剩余未归位查询/管理责任继续拆包；不得扩入 Advancement、Perspectives、Channel、Workscene 或 A6 |
 | 打开的单向桥 | `A5-CONVERSATION-LIFECYCLE-01`：`ServerContext.conversationDirectory` 已退出 clear/delete/resume，暂仅承载 exists/ensure/transcript，Conversation 最终包前归零。<br>`A5-CONVERSATION-WORKSCENE-DELETE-01`：Anchor 组合根唯一创建 `ConversationWorksceneDeleteProjectionBridge`，唯一 consumer 为 `WorksceneSessionOwner.removeScene`；只允许 Workscene Authority delete 后调用 Conversation 物理存储投影，不拥有 delete 准入、终态、Fact 或通知，必须在 Workscene A5 迁移包退场 |
-| 已失效证据 | 无当前未恢复证据；A5-12h 已由协调者独立复核并以 `53ba829d` 提交，A5-12i 当前证据等待协调者独立复核 |
+| 已失效证据 | 无当前未恢复证据；A5-12i 已由协调者独立复核并以 `a9545507` 提交，A5-12j 当前实施证据等待协调者独立复核，尚未转为接受基线 |
 | 阻塞/用户决策 | 无技术阻塞；用户已明确恢复调度 |
 
 ### A0 基线索引
@@ -2073,6 +2073,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 生产绑定与行为保护：Anchor 唯一 `createAnchorConversationUsageProjectionPort` 把 Manager 的两个现有机制状态投影给同一领域应用，`command.ts` 在唯一 Conversation application 组合点注入；Server `session.contextBudget/session.usage` 只保留 wire identity、Product API Query dispatch、迁移前 NOT_FOUND/INTERNAL_ERROR 映射、exact result 返回及成功后的 lifecycle diagnostics 传输，不再直接调用 Manager 或拼装用量字段。Executor-local 应用显式贡献两项 unavailable mechanism，local router 仍经同一应用返回迁移前中文 BUSY 且零 Owner/存储副作用；`session.security` 保持原独立路径，未纳入或改变。公开方法名、result key-set、预算值、turnCount、calibrationFactor、完整 sub-usage 可选字段、inactive-existing 激活、ghost 零激活、unsupported 文案和 diagnostics 均保持既有行为。
 - 直接证据与验证：core Conversation application 1 文件 29/29，覆盖两 Query、零 Fact、context/usage 分流、完整 immutable exact shape、not-found/unsupported/unavailable 与非法 identity；Anchor adapter 与 Executor-local router 2 文件 17/17，覆盖两个 Manager mechanism/exists check、非成功终态、local-only exact BUSY 和零副作用。Server 完整 `session-rpc.test.ts` 83/83，真实 dispatcher 证明 context 不触发 sub-agent usage、usage 保留全部字段、两种 unsupported exact wire、ghost 零激活、两个 inactive identity 各激活一次并转发 lifecycle diagnostics。fresh core/server build 与 `pnpm cli:build` 通过；canonical S7 coverage/mutation 32/32 与 registry golden、fresh `pnpm runtime:package-exports`、10 个适用文件最窄 Biome 均通过，未运行根级回归或制品验收。
 - 旧路、失效规则与交接：Server 对 `inspectContextBudgetExisting/inspectUsageExisting` 的业务直调和字段拼装归零，local hardcoded context/usage BUSY 分支归零；S7 与反向 mutation 冻结 16-operation/4-fact exact-set、领域 port/Query/result 决定、Anchor 唯一 adapter/组合、Server Product API dispatch、local 同应用 unavailable 终态，并拒绝 Host 漏接、Server Manager 旁路或本机硬编码回流。以后 context-budget/usage Query/result/error、Manager/runtime mechanism、sub-usage 边界、inactive 激活/diagnostics、Anchor/local binding、RPC wire、Product API exact-set、S7 或 package export 任一变化，本记录精确失效并只重验该闭包。A5-12i 实施完成并等待协调者独立复核；Conversation 行与 A5 继续 `[ ]`，下一检查点只按 Conversation 剩余未归位查询/管理责任拆包，不进入 Advancement、Perspectives、Channel、Workscene、security 或 A6。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调验收：协调者已在同一 A5-12i 交付物上独立复核并提交为 `a9545507`；该记录转为已接受基线，A5-12j 只使会话安全状态只读投影闭包失效，不重开 context-budget/usage 责任。
+
+### A5-12j：归位 Conversation 会话安全状态只读投影
+
+- 实施基线与唯一应用责任：进场为 `HEAD a9545507b323dbd0fb45c2e33a1920f8c928c957 + task-doc:A5-12j-dispatch`，索引为空。既有 `ConversationDirectoryApplicationService` 新增有限、只读的 `ConversationSecurityProjectionPort`、`security` Query 与领域自有 `ConversationSecurityResult`；Conversation Product API exact-set 由 16 个 operation 扩为 17 个、Fact Event 仍为 4 个，本 Query 零 Fact。领域结果不依赖或别名 `RuntimeSecuritySnapshot`，而是逐字段新建并深度冻结 `contextId/workspacePath/permissionRules/builtinRules/rateLimits/confirmations`，包括嵌套 context、contributors、match spec 和数组；后续机制对象变更不能污染已交付结果。SecurityPipeline、permission/rate-limit/confirmation 与 `ConversationManager.inspectSecurityExisting` 继续只是 Correctness/Owner 机制，Conversation 应用唯一拥有 identity、not-found/unsupported/local-unavailable 终态和稳定产品投影。
+- 生产绑定与行为保护：Anchor 唯一 `createAnchorConversationSecurityProjectionPort` 只把 Manager 的 existing/inactive 机制状态交给领域应用，`command.ts` 在唯一 Conversation application 组合点注入；Server `session.security` 只保留 wire identity、Product API Query dispatch、迁移前 NOT_FOUND/INTERNAL_ERROR 映射、成功后的 lifecycle diagnostics 传输和 exact result 返回，不再直接调用 Manager 或解释安全字段。`@zhixing/rpc` 的 `SessionSecurityResult` 改为领域结果类型，不再把 Owner `RuntimeSecuritySnapshot` 提升为公开 wire 合同；CLI `/security` 直接消费 readonly 领域结果且渲染字段、排序与文案不变。Executor-local 应用显式贡献 unavailable mechanism，local router 经同一应用保持原中文 BUSY 与零 Owner/存储副作用。Perspectives 的独立 runtime security snapshot、Trust/Security 决策、权限/确认行为和运行时安全链均未迁移或改变。
+- 直接证据与验证：core Conversation application 1 文件 31/31，覆盖 Product API 零 Fact、全部字段与嵌套 union 的 fresh/deep-frozen 投影、源对象变更隔离、not-found/unsupported/unavailable 和非法 identity；Anchor adapter 与 Executor-local router 2 文件 17/17，覆盖 Manager existing check、状态透传、local-only exact BUSY 与零副作用。Server 完整 `session-rpc.test.ts` 83/83，以真实 dispatcher 证明完整 security wire、unsupported exact INTERNAL_ERROR、ghost 零激活和 security inactive identity 激活后 lifecycle diagnostics；CLI `/security` 表面 5/5 保持现有呈现消费。fresh core→rpc→server→CLI 依赖顺序构建全部通过；canonical S7 coverage/mutation 32/32 与 registry golden、fresh `pnpm runtime:package-exports`、12 个适用文件最窄 Biome 和 `git diff --check` 通过。CLI package 仍无独立 `typecheck` script；额外非 canonical 的 `tsc --noEmit` 已确认本包 readonly DTO 适配错误归零，剩余报错均位于既有 delete/resume/run-control binding，未据此扩大本包或虚报 typecheck 通过。
+- 旧路、失效规则与交接：Server 对 `inspectSecurityExisting` 的业务直调、Owner snapshot wire alias 与 local hardcoded security BUSY 分支归零；S7 和反向 mutation 冻结 17-operation/4-fact exact-set、领域 port/Query/result、Anchor adapter/唯一组合、Server Product API dispatch、local 同应用 unavailable 终态和 RPC 领域 DTO，并拒绝 Host 漏接、Server Manager 旁路、本机硬编码或 `RuntimeSecuritySnapshot` wire 回流。以后 security Query/result/error、Manager/runtime security mechanism、nested snapshot shape、inactive 激活/diagnostics、Anchor/local binding、RPC/CLI 表面、Product API exact-set、S7 或 package export 任一变化，本记录精确失效并只重验该闭包。A5-12j 实施完成并等待协调者独立复核；Conversation 行与 A5 继续 `[ ]`，下一检查点只按 Conversation 剩余未归位查询/管理责任拆包，不进入 Advancement、Perspectives、Channel、Workscene 或 A6。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 

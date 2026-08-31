@@ -93,6 +93,9 @@ export function createLocalConversationDirectoryApplication(input: {
       }),
       inspectUsageExisting: async () => ({ status: "unavailable" as const }),
     },
+    security: {
+      inspectSecurityExisting: async () => ({ status: "unavailable" as const }),
+    },
     taskLists: input.owner.taskLists,
     agentTurns: input.owner.agentTurnAdmission,
     agentTurnIdentity: {

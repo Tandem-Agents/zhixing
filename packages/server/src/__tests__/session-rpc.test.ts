@@ -85,6 +85,7 @@ import {
   type ConversationTaskListMutationDecision,
   type ConversationTaskListPort,
   type ConversationUsageProjectionPort,
+  type ConversationSecurityProjectionPort,
 } from "@zhixing/core/conversation/application";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import { loadAdvancementState } from "../rpc/methods/session.js";
@@ -580,6 +581,15 @@ function createConversationProductApi(input: {
           ReturnType<ConversationUsageProjectionPort["inspectUsageExisting"]>
         >;
       },
+    },
+    security: {
+      inspectSecurityExisting: async (conversationId) =>
+        await input.conversations.inspectSecurityExisting(
+          conversationId,
+          () => input.directory.exists(conversationId),
+        ) satisfies Awaited<
+          ReturnType<ConversationSecurityProjectionPort["inspectSecurityExisting"]>
+        >,
     },
     ...(input.taskLists ? { taskLists: input.taskLists } : {}),
     agentTurns: createConversationAgentTurnAdmissionPort({
@@ -3507,8 +3517,37 @@ describe("session.* RPC (S2.D)", () => {
         securitySnapshot: {
           contextId: { kind: "main" },
           workspacePath: null,
-          permissionRules: [],
-          builtinRules: [],
+          permissionRules: [{
+            id: "permission-1",
+            pattern: { tool: "bash", argument: "pnpm *" },
+            decision: "allow",
+            scope: "context",
+            createdAt: 1,
+            lastMatchedAt: 2,
+            matchCount: 3,
+            contextId: { kind: "workspace", hash: "workspace-hash" },
+            contextPath: "C:/workspace",
+            contributors: [{ origin: "user", timestamp: 4 }],
+          }],
+          builtinRules: [{
+            id: "builtin-1",
+            name: "Protect hosts",
+            description: "Blocks protected network targets",
+            enabled: true,
+            match: {
+              type: "network",
+              hosts: ["127.0.0.1"],
+              ports: [22],
+              direction: "outbound",
+            },
+            action: "block",
+            bypassImmune: true,
+            severity: "critical",
+            category: "network_abuse",
+            source: "builtin",
+            message: "blocked",
+            suggestion: "choose another target",
+          }],
           rateLimits: [{ key: "bash", used: 1, limit: 5 }],
           confirmations: [
             { key: "bash::npm", count: 2, highestRisk: "medium" },
@@ -3529,9 +3568,42 @@ describe("session.* RPC (S2.D)", () => {
     });
     expect(isSuccessResponse(resp)).toBe(true);
     if (isSuccessResponse(resp)) {
-      expect(resp.result).toMatchObject({
+      expect(resp.result).toEqual({
         contextId: { kind: "main" },
+        workspacePath: null,
+        permissionRules: [{
+          id: "permission-1",
+          pattern: { tool: "bash", argument: "pnpm *" },
+          decision: "allow",
+          scope: "context",
+          createdAt: 1,
+          lastMatchedAt: 2,
+          matchCount: 3,
+          contextId: { kind: "workspace", hash: "workspace-hash" },
+          contextPath: "C:/workspace",
+          contributors: [{ origin: "user", timestamp: 4 }],
+        }],
+        builtinRules: [{
+          id: "builtin-1",
+          name: "Protect hosts",
+          description: "Blocks protected network targets",
+          enabled: true,
+          match: {
+            type: "network",
+            hosts: ["127.0.0.1"],
+            ports: [22],
+            direction: "outbound",
+          },
+          action: "block",
+          bypassImmune: true,
+          severity: "critical",
+          category: "network_abuse",
+          source: "builtin",
+          message: "blocked",
+          suggestion: "choose another target",
+        }],
         rateLimits: [{ key: "bash", used: 1, limit: 5 }],
+        confirmations: [{ key: "bash::npm", count: 2, highestRisk: "medium" }],
       });
     }
 
@@ -3642,7 +3714,7 @@ describe("session.* RPC (S2.D)", () => {
     client.close();
   });
 
-  it("contextBudget 与 usage 激活既有 inactive 会话并转发 lifecycle diagnostics", async () => {
+  it("contextBudget、usage 与 security 激活既有 inactive 会话并转发 lifecycle diagnostics", async () => {
     let createCalls = 0;
     await startWithFactory({
       async create(sessionId) {
@@ -3662,15 +3734,28 @@ describe("session.* RPC (S2.D)", () => {
             windowIndex: 0,
             message: `activated ${sessionId}`,
           }],
+          securitySnapshot: {
+            contextId: { kind: "main" },
+            workspacePath: null,
+            permissionRules: [],
+            builtinRules: [],
+            rateLimits: [],
+            confirmations: [],
+          },
         });
       },
-    }, { seedConversations: ["inactive-budget", "inactive-usage"] });
+    }, { seedConversations: [
+      "inactive-budget",
+      "inactive-usage",
+      "inactive-security",
+    ] });
     const client = await connect(server.port);
     await client.request("auth", { token: TEST_TOKEN });
 
     for (const [method, conversationId] of [
       ["session.contextBudget", "inactive-budget"],
       ["session.usage", "inactive-usage"],
+      ["session.security", "inactive-security"],
     ] as const) {
       await client.request("session.subscribe", { conversationId });
       const response = await client.request(method, { conversationId });
@@ -3682,7 +3767,7 @@ describe("session.* RPC (S2.D)", () => {
         payload: { message: `activated ${conversationId}` },
       });
     }
-    expect(createCalls).toBe(2);
+    expect(createCalls).toBe(3);
     client.close();
   });
 
@@ -3701,7 +3786,10 @@ describe("session.* RPC (S2.D)", () => {
     });
     expect(isSuccessResponse(resp)).toBe(false);
     if (isErrorResponse(resp)) {
-      expect(resp.error.code).toBe(RPC_ERROR_CODES.INTERNAL_ERROR);
+      expect(resp.error).toEqual({
+        code: RPC_ERROR_CODES.INTERNAL_ERROR,
+        message: "Runtime does not support security inspection",
+      });
     }
 
     client.close();

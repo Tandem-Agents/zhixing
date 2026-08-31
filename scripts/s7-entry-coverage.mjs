@@ -3432,6 +3432,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const coreManifestText = required("packages/core/package.json");
   const coreBuild = required("packages/core/tsup.config.ts");
   const rpcIndex = required("packages/rpc/src/index.ts");
+  const sessionWire = required("packages/rpc/src/session-wire.ts");
   const rpcManifestText = required("packages/rpc/package.json");
   const rpcBuild = required("packages/rpc/tsup.config.ts");
   const handler = required("packages/server/src/rpc/methods/skill.ts");
@@ -3461,6 +3462,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   );
   const conversationUsageApplication = required(
     "packages/cli/src/serve/conversation-usage-application.ts",
+  );
+  const conversationSecurityApplication = required(
+    "packages/cli/src/serve/conversation-security-application.ts",
   );
   const conversationDeleteBinding = required(
     "packages/cli/src/serve/conversation-delete-binding.ts",
@@ -3984,8 +3988,15 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !conversationApplication.includes("interface ConversationUsageProjectionPort") ||
     !conversationApplication.includes("CONVERSATION_CONTEXT_BUDGET_QUERY") ||
     !conversationApplication.includes("CONVERSATION_USAGE_QUERY") ||
+    !conversationApplication.includes("interface ConversationSecurityProjectionPort") ||
+    !conversationApplication.includes("CONVERSATION_SECURITY_QUERY") ||
     !conversationApplication.includes("async queryContextBudget(") ||
     !conversationApplication.includes("async queryUsage(") ||
+    !conversationApplication.includes("async querySecurity(") ||
+    !sessionWire.includes(
+      "export type SessionSecurityResult = ConversationSecurityResult",
+    ) ||
+    sessionWire.includes("RuntimeSecuritySnapshot") ||
     !conversationApplication.includes("interface ConversationAgentTurnAdmissionPort") ||
     !conversationApplication.includes(
       "interface ConversationPreparedAgentTurnIdentity",
@@ -4026,11 +4037,13 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     /\.compactExisting\s*\(/u.test(sessionHandler) ||
     !sessionHandler.includes("CONVERSATION_CONTEXT_BUDGET_QUERY") ||
     !sessionHandler.includes("CONVERSATION_USAGE_QUERY") ||
+    !sessionHandler.includes("CONVERSATION_SECURITY_QUERY") ||
     !/productApi\.query\(\s*CONVERSATION_CONTEXT_BUDGET_QUERY/u.test(
       sessionHandler,
     ) ||
     !/productApi\.query\(\s*CONVERSATION_USAGE_QUERY/u.test(sessionHandler) ||
-    /\.inspect(?:ContextBudget|Usage)Existing\s*\(/u.test(sessionHandler) ||
+    !/productApi\.query\(\s*CONVERSATION_SECURITY_QUERY/u.test(sessionHandler) ||
+    /\.inspect(?:ContextBudget|Usage|Security)Existing\s*\(/u.test(sessionHandler) ||
     !sessionHandler.includes("const fact = dispatch.facts[0]") ||
     sessionHandler.includes("dispatch.result.fact") ||
     sessionSend.length === 0 ||
@@ -4087,6 +4100,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !localConversationRpc.includes("this.#application.compact({") ||
     !localConversationRpc.includes("this.#application.queryContextBudget({") ||
     !localConversationRpc.includes("this.#application.queryUsage({") ||
+    !localConversationRpc.includes("this.#application.querySecurity({") ||
     !localConversationRpc.includes("return outcome.result;") ||
     localConversationRpc.includes("return outcome;") ||
     localConversationRpc.indexOf(
@@ -4126,6 +4140,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !composition.includes(
       "usage: createAnchorConversationUsageProjectionPort({",
     ) ||
+    !composition.includes(
+      "security: createAnchorConversationSecurityProjectionPort({",
+    ) ||
     !conversationTaskListApplication.includes(
       "createAnchorConversationTaskListPort",
     ) ||
@@ -4148,6 +4165,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !localConversationApplication.includes(
       "inspectUsageExisting: async () => ({ status: \"unavailable\" as const })",
     ) ||
+    !localConversationApplication.includes(
+      "inspectSecurityExisting: async () => ({ status: \"unavailable\" as const })",
+    ) ||
     !conversationUsageApplication.includes(
       "createAnchorConversationUsageProjectionPort",
     ) ||
@@ -4156,6 +4176,12 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     ) ||
     !conversationUsageApplication.includes(
       "input.conversations.inspectUsageExisting(",
+    ) ||
+    !conversationSecurityApplication.includes(
+      "createAnchorConversationSecurityProjectionPort",
+    ) ||
+    !conversationSecurityApplication.includes(
+      "input.conversations.inspectSecurityExisting(",
     ) ||
     !localConversationApplication.includes("taskLists: input.owner.taskLists") ||
     !localConversationOwner.includes("readonly taskLists: ConversationTaskListPort") ||

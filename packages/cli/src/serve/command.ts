@@ -157,6 +157,7 @@ import { createAnchorConversationRunControlPort } from "./conversation-run-contr
 import { createAnchorConversationTaskListPort } from "./conversation-task-list-application.js";
 import { createAnchorConversationCompactPort } from "./conversation-compact-application.js";
 import { createAnchorConversationUsageProjectionPort } from "./conversation-usage-application.js";
+import { createAnchorConversationSecurityProjectionPort } from "./conversation-security-application.js";
 import {
   createAnchorConversationDeleteCommitPort,
   createConversationWorksceneDeleteProjectionBridge,
@@ -1929,6 +1930,10 @@ async function runServerProcess(
       exists: (conversationId) => conversationDirectory.exists(conversationId),
     }),
     usage: createAnchorConversationUsageProjectionPort({
+      conversations: ctx.conversations!,
+      exists: (conversationId) => conversationDirectory.exists(conversationId),
+    }),
+    security: createAnchorConversationSecurityProjectionPort({
       conversations: ctx.conversations!,
       exists: (conversationId) => conversationDirectory.exists(conversationId),
     }),

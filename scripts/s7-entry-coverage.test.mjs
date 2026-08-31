@@ -3424,6 +3424,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/core/package.json",
     "packages/core/tsup.config.ts",
     "packages/rpc/src/index.ts",
+    "packages/rpc/src/session-wire.ts",
     "packages/rpc/src/skill-catalog-client.ts",
     "packages/rpc/package.json",
     "packages/rpc/tsup.config.ts",
@@ -3442,6 +3443,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/cli/src/serve/conversation-task-list-application.ts",
     "packages/cli/src/serve/conversation-compact-application.ts",
     "packages/cli/src/serve/conversation-usage-application.ts",
+    "packages/cli/src/serve/conversation-security-application.ts",
     "packages/cli/src/serve/conversation-delete-binding.ts",
     "packages/cli/src/serve/conversation-directory.ts",
     "packages/cli/src/serve/workscene-directory.ts",
@@ -3501,6 +3503,16 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/core/src/conversation/index.ts",
       (text) => `${text}\nexport * from "./application.js";`,
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/rpc/src/session-wire.ts",
+      (text) => text.replace(
+        "export type SessionSecurityResult = ConversationSecurityResult",
+        "export type SessionSecurityResult = RuntimeSecuritySnapshot",
+      ),
     )).join("\n"),
     /Conversation directory management lacks one domain application/,
   );
@@ -3597,6 +3609,16 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
+        "security: createAnchorConversationSecurityProjectionPort({",
+        "security: undefined,",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
         "usage: createAnchorConversationUsageProjectionPort({",
         "usage: undefined,",
       ),
@@ -3615,10 +3637,30 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace(
+        "result = await productApi.query(CONVERSATION_SECURITY_QUERY, {",
+        "result = await manager.inspectSecurityExisting(conversationId, {",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/local-conversation-rpc.ts",
       (text) => text.replace(
         "return await this.#application.queryUsage({",
         "throw RpcErrors.busy(\"usage unavailable\");\n          return await Promise.resolve({",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/local-conversation-rpc.ts",
+      (text) => text.replace(
+        "return await this.#application.querySecurity({",
+        "throw RpcErrors.busy(\"security unavailable\");\n          return await Promise.resolve({",
       ),
     )).join("\n"),
     /Conversation directory management lacks one domain application/,

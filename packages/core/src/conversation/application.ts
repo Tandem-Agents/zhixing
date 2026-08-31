@@ -365,6 +365,102 @@ export interface ConversationUsageProjectionPort {
   >;
 }
 
+export type ConversationSecurityContextId =
+  | Readonly<{ kind: "main" }>
+  | Readonly<{ kind: "workspace"; hash: string }>
+  | Readonly<{ kind: "scene"; sceneId: string }>;
+
+export type ConversationSecurityMatchSpec =
+  | Readonly<{ type: "command"; pattern: string; flags?: string }>
+  | Readonly<{ type: "command_prefix"; prefixes: readonly string[] }>
+  | Readonly<{
+      type: "path";
+      paths: readonly string[];
+      access: "read" | "write" | "any";
+    }>
+  | Readonly<{
+      type: "network";
+      hosts?: readonly string[];
+      ports?: readonly number[];
+      direction?: "inbound" | "outbound";
+    }>
+  | Readonly<{ type: "env_var"; names: readonly string[] }>
+  | Readonly<{ type: "tool"; tools: readonly string[] }>
+  | Readonly<{ type: "interpreter"; languages: readonly string[] }>
+  | Readonly<{
+      type: "composite";
+      op: "and" | "or" | "not";
+      specs: readonly ConversationSecurityMatchSpec[];
+    }>;
+
+export interface ConversationSecurityPermissionRule {
+  readonly id: string;
+  readonly pattern: Readonly<{ tool: string; argument: string }>;
+  readonly decision: "allow" | "deny";
+  readonly scope: "session" | "context" | "global" | "builtin";
+  readonly createdAt: number;
+  readonly lastMatchedAt: number;
+  readonly matchCount: number;
+  readonly contextId?: ConversationSecurityContextId;
+  readonly contextPath?: string;
+  readonly contributors?: readonly Readonly<{
+    origin: "user" | "steward";
+    timestamp: number;
+  }>[];
+}
+
+export interface ConversationSecurityBuiltinRule {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+  readonly enabled: boolean;
+  readonly match: ConversationSecurityMatchSpec;
+  readonly action: "block" | "confirm" | "audit";
+  readonly bypassImmune: boolean;
+  readonly severity: "low" | "medium" | "high" | "critical";
+  readonly category:
+    | "data_exfiltration"
+    | "privilege_escalation"
+    | "code_injection"
+    | "path_traversal"
+    | "env_manipulation"
+    | "network_abuse"
+    | "destructive_operation"
+    | "prompt_injection"
+    | "supply_chain";
+  readonly source: "builtin" | "project" | "user" | "community";
+  readonly message: string;
+  readonly suggestion?: string;
+}
+
+export interface ConversationSecurityResult {
+  readonly contextId: ConversationSecurityContextId;
+  readonly workspacePath: string | null;
+  readonly permissionRules: readonly ConversationSecurityPermissionRule[];
+  readonly builtinRules: readonly ConversationSecurityBuiltinRule[];
+  readonly rateLimits: readonly Readonly<{
+    key: string;
+    used: number;
+    limit: number;
+  }>[];
+  readonly confirmations: readonly Readonly<{
+    key: string;
+    count: number;
+    highestRisk: "low" | "medium" | "high" | "critical";
+  }>[];
+}
+
+/** Security/Owner mechanism consumed by the Conversation security query. */
+export interface ConversationSecurityProjectionPort {
+  inspectSecurityExisting(conversationId: string): Promise<
+    | Readonly<{
+        status: "done";
+        snapshot: ConversationSecurityResult;
+      }>
+    | Readonly<{ status: "not-found" | "unsupported" | "unavailable" }>
+  >;
+}
+
 export type ConversationAdoptionReviewProjection =
   | Readonly<{
       status: "ready";
@@ -501,6 +597,10 @@ export type ConversationDirectoryQuery =
     }>
   | Readonly<{
       kind: "usage";
+      conversationId: string;
+    }>
+  | Readonly<{
+      kind: "security";
       conversationId: string;
     }>;
 
@@ -708,7 +808,10 @@ export class ConversationApplicationError extends Error {
       | "context-budget-unavailable"
       | "usage-conversation-not-found"
       | "usage-unsupported"
-      | "usage-unavailable",
+      | "usage-unavailable"
+      | "security-conversation-not-found"
+      | "security-unsupported"
+      | "security-unavailable",
   ) {
     super(message);
     this.name = "ConversationApplicationError";
@@ -732,6 +835,9 @@ export interface ConversationDirectoryApplication {
   queryUsage(
     query: Extract<ConversationDirectoryQuery, { readonly kind: "usage" }>,
   ): Promise<ConversationUsageResult>;
+  querySecurity(
+    query: Extract<ConversationDirectoryQuery, { readonly kind: "security" }>,
+  ): Promise<ConversationSecurityResult>;
   create(): Promise<ConversationCreatedResult>;
   resume(
     command: Extract<ConversationDirectoryCommand, { readonly kind: "resume" }>,
@@ -811,6 +917,7 @@ export class ConversationDirectoryApplicationService
       taskLists?: ConversationTaskListPort;
       compact?: ConversationCompactPort;
       usage?: ConversationUsageProjectionPort;
+      security?: ConversationSecurityProjectionPort;
       clock?: () => number;
     }>,
   ) {}
@@ -906,7 +1013,7 @@ export class ConversationDirectoryApplicationService
       { readonly kind: "context-budget" }
     >,
   ): Promise<ConversationContextBudgetResult> {
-    assertConversationUsageQueryIdentity(query.conversationId, "context budget");
+    assertConversationInspectionQueryIdentity(query.conversationId, "context budget");
     const port = this.input.usage;
     if (!port) {
       throw new Error("Conversation usage application is not assembled");
@@ -927,7 +1034,7 @@ export class ConversationDirectoryApplicationService
   async queryUsage(
     query: Extract<ConversationDirectoryQuery, { readonly kind: "usage" }>,
   ): Promise<ConversationUsageResult> {
-    assertConversationUsageQueryIdentity(query.conversationId, "usage");
+    assertConversationInspectionQueryIdentity(query.conversationId, "usage");
     const port = this.input.usage;
     if (!port) {
       throw new Error("Conversation usage application is not assembled");
@@ -958,6 +1065,24 @@ export class ConversationDirectoryApplicationService
         ),
       ),
     });
+  }
+
+  async querySecurity(
+    query: Extract<ConversationDirectoryQuery, { readonly kind: "security" }>,
+  ): Promise<ConversationSecurityResult> {
+    assertConversationInspectionQueryIdentity(query.conversationId, "security");
+    const port = this.input.security;
+    if (!port) {
+      throw new Error("Conversation security application is not assembled");
+    }
+    const inspected = await port.inspectSecurityExisting(query.conversationId);
+    if (inspected.status !== "done") {
+      throwConversationSecurityInspectionError(
+        query.conversationId,
+        inspected.status,
+      );
+    }
+    return freezeConversationSecurityResult(inspected.snapshot);
   }
 
   async create(): Promise<ConversationCreatedResult> {
@@ -1885,6 +2010,12 @@ export const CONVERSATION_USAGE_QUERY = defineProductApiQuery<
   ConversationUsageResult
 >("conversation-window.query.usage");
 
+export const CONVERSATION_SECURITY_QUERY = defineProductApiQuery<
+  "conversation-security.query.current",
+  Extract<ConversationDirectoryQuery, { readonly kind: "security" }>,
+  ConversationSecurityResult
+>("conversation-security.query.current");
+
 export const CONVERSATION_CREATE_COMMAND = defineProductApiCommand<
   "conversation-directory.command.create",
   Extract<ConversationDirectoryCommand, { readonly kind: "create" }>,
@@ -1985,6 +2116,7 @@ export const CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET =
       CONVERSATION_TASK_LIST_QUERY,
       CONVERSATION_CONTEXT_BUDGET_QUERY,
       CONVERSATION_USAGE_QUERY,
+      CONVERSATION_SECURITY_QUERY,
       CONVERSATION_CREATE_COMMAND,
       CONVERSATION_RESUME_COMMAND,
       CONVERSATION_RENAME_COMMAND,
@@ -2031,6 +2163,10 @@ export function createConversationDirectoryProductApiContribution(
       ),
       bindProductApiOperation(CONVERSATION_USAGE_QUERY, async (query) => ({
         result: await application.queryUsage(query),
+        facts: [],
+      })),
+      bindProductApiOperation(CONVERSATION_SECURITY_QUERY, async (query) => ({
+        result: await application.querySecurity(query),
         facts: [],
       })),
       bindProductApiOperation(CONVERSATION_CREATE_COMMAND, async () => ({
@@ -2102,7 +2238,7 @@ export function createConversationDirectoryProductApiContribution(
   });
 }
 
-function assertConversationUsageQueryIdentity(
+function assertConversationInspectionQueryIdentity(
   conversationId: unknown,
   name: string,
 ): asserts conversationId is string {
@@ -2157,6 +2293,183 @@ function freezeConversationContextBudgetResult(
     turnCount: outcome.turnCount,
     calibrationFactor: outcome.calibrationFactor,
   });
+}
+
+function throwConversationSecurityInspectionError(
+  conversationId: string,
+  status: "not-found" | "unsupported" | "unavailable",
+): never {
+  if (status === "not-found") {
+    throw new ConversationApplicationError(
+      "not-found",
+      `Conversation not found: ${conversationId}`,
+      "security-conversation-not-found",
+    );
+  }
+  if (status === "unsupported") {
+    throw new ConversationApplicationError(
+      "unsupported",
+      "Runtime does not support security inspection",
+      "security-unsupported",
+    );
+  }
+  throw new ConversationApplicationError(
+    "busy",
+    "这项查看或维护暂不可用；你仍可继续本机对话，重新连接后再试。",
+    "security-unavailable",
+  );
+}
+
+function freezeConversationSecurityResult(
+  snapshot: ConversationSecurityResult,
+): ConversationSecurityResult {
+  return Object.freeze({
+    contextId: freezeConversationSecurityContextId(snapshot.contextId),
+    workspacePath: snapshot.workspacePath,
+    permissionRules: Object.freeze(
+      snapshot.permissionRules.map((rule) =>
+        Object.freeze({
+          id: rule.id,
+          pattern: Object.freeze({
+            tool: rule.pattern.tool,
+            argument: rule.pattern.argument,
+          }),
+          decision: rule.decision,
+          scope: rule.scope,
+          createdAt: rule.createdAt,
+          lastMatchedAt: rule.lastMatchedAt,
+          matchCount: rule.matchCount,
+          ...(rule.contextId
+            ? { contextId: freezeConversationSecurityContextId(rule.contextId) }
+            : {}),
+          ...(rule.contextPath !== undefined
+            ? { contextPath: rule.contextPath }
+            : {}),
+          ...(rule.contributors
+            ? {
+                contributors: Object.freeze(
+                  rule.contributors.map((entry) =>
+                    Object.freeze({
+                      origin: entry.origin,
+                      timestamp: entry.timestamp,
+                    }),
+                  ),
+                ),
+              }
+            : {}),
+        }),
+      ),
+    ),
+    builtinRules: Object.freeze(
+      snapshot.builtinRules.map((rule) =>
+        Object.freeze({
+          id: rule.id,
+          name: rule.name,
+          description: rule.description,
+          enabled: rule.enabled,
+          match: freezeConversationSecurityMatch(rule.match),
+          action: rule.action,
+          bypassImmune: rule.bypassImmune,
+          severity: rule.severity,
+          category: rule.category,
+          source: rule.source,
+          message: rule.message,
+          ...(rule.suggestion !== undefined
+            ? { suggestion: rule.suggestion }
+            : {}),
+        }),
+      ),
+    ),
+    rateLimits: Object.freeze(
+      snapshot.rateLimits.map((entry) =>
+        Object.freeze({
+          key: entry.key,
+          used: entry.used,
+          limit: entry.limit,
+        }),
+      ),
+    ),
+    confirmations: Object.freeze(
+      snapshot.confirmations.map((entry) =>
+        Object.freeze({
+          key: entry.key,
+          count: entry.count,
+          highestRisk: entry.highestRisk,
+        }),
+      ),
+    ),
+  });
+}
+
+function freezeConversationSecurityContextId(
+  contextId: ConversationSecurityContextId,
+): ConversationSecurityContextId {
+  switch (contextId.kind) {
+    case "main":
+      return Object.freeze({ kind: "main" });
+    case "workspace":
+      return Object.freeze({ kind: "workspace", hash: contextId.hash });
+    case "scene":
+      return Object.freeze({ kind: "scene", sceneId: contextId.sceneId });
+  }
+}
+
+function freezeConversationSecurityMatch(
+  match: ConversationSecurityMatchSpec,
+): ConversationSecurityMatchSpec {
+  switch (match.type) {
+    case "command":
+      return Object.freeze({
+        type: match.type,
+        pattern: match.pattern,
+        ...(match.flags !== undefined ? { flags: match.flags } : {}),
+      });
+    case "command_prefix":
+      return Object.freeze({
+        type: match.type,
+        prefixes: Object.freeze([...match.prefixes]),
+      });
+    case "path":
+      return Object.freeze({
+        type: match.type,
+        paths: Object.freeze([...match.paths]),
+        access: match.access,
+      });
+    case "network":
+      return Object.freeze({
+        type: match.type,
+        ...(match.hosts
+          ? { hosts: Object.freeze([...match.hosts]) }
+          : {}),
+        ...(match.ports
+          ? { ports: Object.freeze([...match.ports]) }
+          : {}),
+        ...(match.direction !== undefined
+          ? { direction: match.direction }
+          : {}),
+      });
+    case "env_var":
+      return Object.freeze({
+        type: match.type,
+        names: Object.freeze([...match.names]),
+      });
+    case "tool":
+      return Object.freeze({
+        type: match.type,
+        tools: Object.freeze([...match.tools]),
+      });
+    case "interpreter":
+      return Object.freeze({
+        type: match.type,
+        languages: Object.freeze([...match.languages]),
+      });
+    case "composite":
+      return Object.freeze({
+        type: match.type,
+        op: match.op,
+        specs: Object.freeze(match.specs.map(freezeConversationSecurityMatch)),
+      });
+  }
 }
 
 function assertConversationControlCaller(

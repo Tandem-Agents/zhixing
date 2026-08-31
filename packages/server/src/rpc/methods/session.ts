@@ -51,6 +51,7 @@ import {
   CONVERSATION_RENAME_COMMAND,
   CONVERSATION_RESUME_COMMAND,
   CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
+  CONVERSATION_SECURITY_QUERY,
   CONVERSATION_TASK_LIST_QUERY,
   CONVERSATION_UPDATE_TASK_LIST_COMMAND,
   CONVERSATION_USAGE_QUERY,
@@ -2663,27 +2664,27 @@ export function buildSessionSecurityMethod(): MethodEntry {
     async handler(rawParams, ctx): Promise<SessionSecurityResult> {
       const params = (rawParams ?? {}) as SessionSecurityParams;
       const conversationId = requireConversationId(params, "session.security");
-      const manager = requireConversations(ctx.server);
-      const result = await manager.inspectSecurityExisting(
-        conversationId,
-        requiredExistingConversationCheck(ctx.server, conversationId),
+      const productApi = requireConversationProductApi(
+        ctx.server,
+        CONVERSATION_SECURITY_QUERY,
       );
-      if (result.status === "not-found") {
-        throw RpcErrors.notFound(`Session not found: ${conversationId}`);
+      let result: SessionSecurityResult;
+      try {
+        result = await productApi.query(CONVERSATION_SECURITY_QUERY, {
+          kind: "security",
+          conversationId,
+        });
+      } catch (error) {
+        throw mapConversationSecurityApplicationError(error, conversationId);
       }
-      if (result.status === "unsupported") {
-        throw new RpcAppError(
-          RPC_ERROR_CODES.INTERNAL_ERROR,
-          "Runtime does not support security inspection",
-        );
-      }
+      const manager = requireConversations(ctx.server);
       notifyLifecycleDiagnostics({
         manager,
         conversationId,
         connection: ctx.connection,
         broadcast: ctx.server.sessionBroadcast,
       });
-      return result.snapshot;
+      return result;
     },
   };
 }
@@ -3211,6 +3212,25 @@ function mapConversationUsageApplicationError(
     operation === "context-budget"
       ? "session.contextBudget requires 'conversationId'"
       : "session.usage requires 'conversationId'",
+  );
+}
+
+function mapConversationSecurityApplicationError(
+  error: unknown,
+  conversationId: string,
+): unknown {
+  if (!(error instanceof ConversationApplicationError)) return error;
+  if (error.code === "not-found") {
+    return RpcErrors.notFound(`Session not found: ${conversationId}`);
+  }
+  if (error.code === "unsupported") {
+    return new RpcAppError(
+      RPC_ERROR_CODES.INTERNAL_ERROR,
+      "Runtime does not support security inspection",
+    );
+  }
+  return RpcErrors.invalidParams(
+    "session.security requires 'conversationId'",
   );
 }
 

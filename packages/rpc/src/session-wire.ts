@@ -32,9 +32,9 @@ import type {
   PostTurnControlOutcome,
 } from "@zhixing/core";
 import type {
-  RuntimeSecuritySnapshot,
   RuntimeSubAgentUsageEntry,
 } from "@zhixing/owner-kernel/types";
+import type { ConversationSecurityResult } from "@zhixing/core/conversation/application";
 
 // ─── wire 投影 ───
 
@@ -368,7 +368,7 @@ export interface SessionUsageResult extends SessionContextBudgetResult {
   subUsages: readonly RuntimeSubAgentUsageEntry[];
 }
 
-export type SessionSecurityResult = RuntimeSecuritySnapshot;
+export type SessionSecurityResult = ConversationSecurityResult;
 
 export interface SessionCompactResult {
   /** 是否真的发生了折叠(false = 无可压缩内容 / 未达执行条件) */

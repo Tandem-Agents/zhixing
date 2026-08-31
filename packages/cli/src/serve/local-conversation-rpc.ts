@@ -506,10 +506,17 @@ export class LocalConversationRpcRouter
           throw mapLocalConversationApplicationError(error, "usage");
         }
       }
-      case "session.security":
-        throw RpcErrors.busy(
-          "这项查看或维护暂不可用；你仍可继续本机对话，重新连接后再试。",
-        );
+      case "session.security": {
+        const conversationId = this.#conversationId(params, method);
+        try {
+          return await this.#application.querySecurity({
+            kind: "security",
+            conversationId,
+          });
+        } catch (error) {
+          throw mapLocalConversationApplicationError(error, "security");
+        }
+      }
       default:
         return undefined;
     }
@@ -799,7 +806,8 @@ function mapLocalConversationApplicationError(
     | "task-list"
     | "compact"
     | "context-budget"
-    | "usage",
+    | "usage"
+    | "security",
 ): unknown {
   if (!(error instanceof ConversationApplicationError)) return error;
   if (error.code === "not-found") {
@@ -812,7 +820,8 @@ function mapLocalConversationApplicationError(
       ((operation === "compact" && error.reason === "compact-unavailable") ||
         (operation === "context-budget" &&
           error.reason === "context-budget-unavailable") ||
-        (operation === "usage" && error.reason === "usage-unavailable"))
+        (operation === "usage" && error.reason === "usage-unavailable") ||
+        (operation === "security" && error.reason === "security-unavailable"))
         ? "这项查看或维护暂不可用；你仍可继续本机对话，重新连接后再试。"
         : operation === "send" && error.reason === "turn-queue-full"
           ? "Conversation has too many pending messages"

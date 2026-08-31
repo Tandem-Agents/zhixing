@@ -232,14 +232,18 @@ describe("LocalConversationRpcRouter", () => {
     expect(port.sessionState.readTranscriptTail).not.toHaveBeenCalled();
   });
 
-  it("contextBudget 与 usage 经同一 Conversation 应用保持 local-only BUSY 终态", async () => {
+  it("contextBudget、usage 与 security 经同一 Conversation 应用保持 local-only BUSY 终态", async () => {
     const port = ownerPort();
     const router = new LocalConversationRpcRouter({
       deviceId: DEVICE_ID,
       owner: port,
       remoteFor: () => { throw new Error("unexpected remote route"); },
     });
-    for (const method of ["session.contextBudget", "session.usage"] as const) {
+    for (const method of [
+      "session.contextBudget",
+      "session.usage",
+      "session.security",
+    ] as const) {
       await expect(router.dispatch({
         method,
         params: { conversationId: CONVERSATION_ID },

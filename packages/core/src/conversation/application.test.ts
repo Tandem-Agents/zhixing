@@ -14,6 +14,7 @@ import {
   CONVERSATION_RENAME_COMMAND,
   CONVERSATION_RESUME_COMMAND,
   CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
+  CONVERSATION_SECURITY_QUERY,
   CONVERSATION_TASK_LIST_QUERY,
   CONVERSATION_UPDATE_TASK_LIST_COMMAND,
   CONVERSATION_USAGE_QUERY,
@@ -29,6 +30,7 @@ import {
   type ConversationCompactPort,
   type ConversationTaskListPort,
   type ConversationUsageProjectionPort,
+  type ConversationSecurityProjectionPort,
 } from "./application.js";
 
 function fixture(records: ConversationDirectoryRecord[] = []) {
@@ -474,6 +476,117 @@ describe("ConversationDirectoryApplicationService", () => {
     })).rejects.toMatchObject({ code: "invalid-input" });
     await expect(application.queryUsage({
       kind: "usage",
+      conversationId: " ",
+    })).rejects.toMatchObject({ code: "invalid-input" });
+  });
+
+  it("owns a fresh deeply immutable security projection with zero Product API facts", async () => {
+    const snapshot = {
+      contextId: { kind: "scene" as const, sceneId: "review" },
+      workspacePath: "C:/workspace",
+      permissionRules: [{
+        id: "permission-1",
+        pattern: { tool: "bash", argument: "pnpm *" },
+        decision: "allow" as const,
+        scope: "context" as const,
+        createdAt: 1,
+        lastMatchedAt: 2,
+        matchCount: 3,
+        contextId: { kind: "workspace" as const, hash: "workspace-hash" },
+        contextPath: "C:/workspace",
+        contributors: [{ origin: "user" as const, timestamp: 4 }],
+      }],
+      builtinRules: [{
+        id: "builtin-1",
+        name: "Protect hosts",
+        description: "Blocks protected network targets",
+        enabled: true,
+        match: {
+          type: "composite" as const,
+          op: "or" as const,
+          specs: [{
+            type: "network" as const,
+            hosts: ["127.0.0.1"],
+            ports: [22],
+            direction: "outbound" as const,
+          }],
+        },
+        action: "block" as const,
+        bypassImmune: true,
+        severity: "critical" as const,
+        category: "network_abuse" as const,
+        source: "builtin" as const,
+        message: "blocked",
+        suggestion: "choose another target",
+      }],
+      rateLimits: [{ key: "bash", used: 1, limit: 5 }],
+      confirmations: [{ key: "bash::pnpm", count: 2, highestRisk: "high" as const }],
+    };
+    const inspectSecurityExisting = vi.fn<
+      ConversationSecurityProjectionPort["inspectSecurityExisting"]
+    >(async () => ({ status: "done", snapshot }));
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      security: { inspectSecurityExisting },
+    });
+    const dispatcher = new ProductApiDispatcher(
+      CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+      [createConversationDirectoryProductApiContribution(application)],
+    );
+
+    const result = await dispatcher.query(CONVERSATION_SECURITY_QUERY, {
+      kind: "security",
+      conversationId: "conversation-1",
+    });
+    expect(result).toEqual(snapshot);
+    expect(inspectSecurityExisting).toHaveBeenCalledWith("conversation-1");
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.isFrozen(result.contextId)).toBe(true);
+    expect(Object.isFrozen(result.permissionRules[0]?.pattern)).toBe(true);
+    expect(Object.isFrozen(result.permissionRules[0]?.contributors)).toBe(true);
+    expect(Object.isFrozen(result.builtinRules[0]?.match)).toBe(true);
+    expect(Object.isFrozen(
+      result.builtinRules[0]?.match.type === "composite"
+        ? result.builtinRules[0].match.specs[0]
+        : undefined,
+    )).toBe(true);
+
+    snapshot.permissionRules[0]!.pattern.argument = "changed";
+    snapshot.permissionRules[0]!.contributors![0]!.timestamp = 99;
+    snapshot.builtinRules[0]!.match.specs[0]!.hosts![0] = "changed";
+    snapshot.rateLimits[0]!.used = 99;
+    expect(result.permissionRules[0]?.pattern.argument).toBe("pnpm *");
+    expect(result.permissionRules[0]?.contributors?.[0]?.timestamp).toBe(4);
+    const projectedMatch = result.builtinRules[0]?.match;
+    expect(projectedMatch?.type === "composite"
+      ? projectedMatch.specs[0]?.type === "network"
+        ? projectedMatch.specs[0].hosts?.[0]
+        : undefined
+      : undefined).toBe("127.0.0.1");
+    expect(result.rateLimits[0]?.used).toBe(1);
+  });
+
+  it("owns security-query not-found, unsupported, unavailable, and invalid terminals", async () => {
+    const inspectSecurityExisting = vi.fn<
+      ConversationSecurityProjectionPort["inspectSecurityExisting"]
+    >();
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      security: { inspectSecurityExisting },
+    });
+    for (const [status, code, reason] of [
+      ["not-found", "not-found", "security-conversation-not-found"],
+      ["unsupported", "unsupported", "security-unsupported"],
+      ["unavailable", "busy", "security-unavailable"],
+    ] as const) {
+      inspectSecurityExisting.mockResolvedValueOnce({ status });
+      await expect(application.querySecurity({
+        kind: "security",
+        conversationId: "conversation-1",
+      })).rejects.toMatchObject({ code, reason });
+    }
+    await expect(application.querySecurity({
+      kind: "security",
       conversationId: " ",
     })).rejects.toMatchObject({ code: "invalid-input" });
   });

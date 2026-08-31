@@ -7,7 +7,7 @@
  */
 
 import chalk from "chalk";
-import type { PermissionContextId, SecurityRule } from "@zhixing/core";
+import type { PermissionContextId } from "@zhixing/core";
 import type { TrustAdministrationRule } from "@zhixing/core/trust-administration";
 import type { SessionSecurityResult } from "@zhixing/rpc";
 import type { CliWriter } from "../screen/index.js";
@@ -133,7 +133,7 @@ async function showSecurityOverview(opts: SecurityOptions): Promise<void> {
 async function showPolicyRules(opts: SecurityOptions): Promise<void> {
   const snapshot = await loadSecuritySnapshot(opts);
   if (!snapshot) return;
-  const rules: readonly SecurityRule[] = snapshot.builtinRules;
+  const rules = snapshot.builtinRules;
   opts.writer.line("");
   opts.writer.line(chalk.bold(`  策略规则 (${rules.length} 条)`));
   opts.writer.line(chalk.dim("  ─────────────────────────────────────────────────────"));
