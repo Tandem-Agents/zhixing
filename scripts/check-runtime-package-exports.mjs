@@ -3,6 +3,7 @@ import { access, readFile } from "node:fs/promises";
 const [
   coreRoot,
   coreConversationApplication,
+  coreAdvancementApplication,
   coreSkillCatalog,
   coreScheduleApplication,
   coreDeliveryApplication,
@@ -41,6 +42,7 @@ const [
 ] = await Promise.all([
   import("../packages/core/dist/index.js"),
   import("../packages/core/dist/conversation/application.js"),
+  import("../packages/core/dist/advancement/application.js"),
   import("../packages/core/dist/skills/catalog-application.js"),
   import("../packages/core/dist/scheduler/application.js"),
   import("../packages/core/dist/delivery/application.js"),
@@ -612,6 +614,26 @@ async function verifyCorePackageExports(failures) {
     );
   }
 
+  const advancementApplicationConditions =
+    manifest.exports["./advancement/application"];
+  if (
+    !advancementApplicationConditions ||
+    advancementApplicationConditions.types !==
+      "./dist/advancement/application.d.ts" ||
+    advancementApplicationConditions.import !==
+      "./dist/advancement/application.js" ||
+    typeof coreAdvancementApplication.AdvancementApplicationService !==
+      "function" ||
+    typeof coreAdvancementApplication.createAdvancementProductApiContribution !==
+      "function" ||
+    "AdvancementApplicationService" in coreRoot ||
+    "createAdvancementProductApiContribution" in coreRoot
+  ) {
+    failures.push(
+      "core-exports:advancement-application:invalid-runtime-boundary",
+    );
+  }
+
   const skillCatalogConditions = manifest.exports["./skills/catalog"];
   if (
     !skillCatalogConditions ||
@@ -750,6 +772,19 @@ async function verifyCorePackageExports(failures) {
   }
   for (const [subpath, conditions] of Object.entries(manifest.exports)) {
     if (
+      subpath !== "./advancement/application" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === advancementApplicationConditions?.types ||
+        conditions.import === advancementApplicationConditions?.import)
+    ) {
+      failures.push(
+        `core-exports:${subpath}:duplicate-advancement-application-entry`,
+      );
+    }
+  }
+  for (const [subpath, conditions] of Object.entries(manifest.exports)) {
+    if (
       subpath !== "./scheduler/application" &&
       conditions &&
       typeof conditions === "object" &&
@@ -855,6 +890,15 @@ async function verifyCorePackageExports(failures) {
           ) {
             failures.push(
               `core-exports:${subpath}:conversation-application-runtime-leak`,
+            );
+          }
+          if (
+            subpath !== "./advancement/application" &&
+            ("AdvancementApplicationService" in exported ||
+              "createAdvancementProductApiContribution" in exported)
+          ) {
+            failures.push(
+              `core-exports:${subpath}:advancement-application-runtime-leak`,
             );
           }
           if (

@@ -2769,6 +2769,13 @@ export async function validateS7Structure() {
       text: await readFile(path.join(root, "packages/core/tsup.config.ts"), "utf8"),
     },
   ]));
+  failures.push(...inspectAdvancementDetailApplicationOwnership([
+    ...records,
+    {
+      relative: "packages/core/package.json",
+      text: await readFile(path.join(root, "packages/core/package.json"), "utf8"),
+    },
+  ]));
   failures.push(...inspectSkillCatalogApplicationOwnership([
     ...records,
     {
@@ -3343,6 +3350,96 @@ export function inspectTrustAdministrationOwnership(records) {
   ) {
     failures.push(
       "Trust Administration must have one narrow non-root domain subpath and a domain-neutral Product API",
+    );
+  }
+
+  return failures;
+}
+
+/** A5 Advancement detail has one domain application and Product API query owner. */
+export function inspectAdvancementDetailApplicationOwnership(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const text = byPath.get(relative);
+    if (text === undefined) {
+      failures.push(`${relative}: Advancement detail production source is missing`);
+    }
+    return text ?? "";
+  };
+
+  const application = required("packages/core/src/advancement/application.ts");
+  const advancementIndex = required("packages/core/src/advancement/index.ts");
+  const coreIndex = required("packages/core/src/index.ts");
+  const manifestText = required("packages/core/package.json");
+  const build = required("packages/core/tsup.config.ts");
+  const controller = required(
+    "packages/owner-services/src/advancement/controller.ts",
+  );
+  const handler = required("packages/server/src/rpc/methods/session.ts");
+  const composition = required("packages/cli/src/serve/command.ts");
+
+  const detailStart = handler.indexOf(
+    "export function buildSessionAdvancementDetailMethod()",
+  );
+  const detailEnd = handler.indexOf("// ─── session.history", detailStart);
+  const detail = detailStart >= 0 && detailEnd > detailStart
+    ? handler.slice(detailStart, detailEnd)
+    : "";
+
+  let manifest;
+  try {
+    manifest = JSON.parse(manifestText);
+  } catch {
+    failures.push("Core manifest is invalid while checking Advancement detail");
+  }
+  const narrow = manifest?.exports?.["./advancement/application"];
+  const duplicate = Object.entries(manifest?.exports ?? {}).filter(
+    ([subpath, conditions]) =>
+      subpath !== "./advancement/application" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === narrow?.types || conditions.import === narrow?.import),
+  );
+
+  if (
+    !application.includes("interface AdvancementDetailReadPort") ||
+    !application.includes("class AdvancementApplicationService") ||
+    !application.includes("ADVANCEMENT_DETAIL_QUERY") ||
+    !application.includes('"advancement.query.detail"') ||
+    !application.includes("ADVANCEMENT_PRODUCT_API_EXACT_SET") ||
+    !application.includes("createAdvancementProductApiContribution") ||
+    !application.includes("buildClosureFacts(session)") ||
+    application.split("defineProductApiQuery<").length - 1 !== 1 ||
+    application.includes("defineProductApiCommand<") ||
+    !application.includes("factEvents: []") ||
+    /@zhixing\/(?:server|rpc|owner-services)|\.\.\/\.\.\/server|\.\.\/\.\.\/owner-services/u.test(
+      application,
+    ) ||
+    narrow?.types !== "./dist/advancement/application.d.ts" ||
+    narrow?.import !== "./dist/advancement/application.js" ||
+    duplicate.length > 0 ||
+    build.split('"src/advancement/application.ts"').length - 1 !== 1 ||
+    advancementIndex.includes("./application.js") ||
+    coreIndex.includes("advancement/application") ||
+    detail.length === 0 ||
+    !handler.includes('from "@zhixing/core/advancement/application"') ||
+    !detail.includes("productApi?.supports(ADVANCEMENT_DETAIL_QUERY)") ||
+    !detail.includes("productApi.query(ADVANCEMENT_DETAIL_QUERY") ||
+    !detail.includes("projectAdvancementDetail(detail)") ||
+    /buildClosureFacts|ctx\.server\.advancement|loadLatestSession/u.test(detail) ||
+    !controller.includes("async loadLatestSession(") ||
+    !controller.includes("return open ?? sessions[sessions.length - 1]!") ||
+    !composition.includes('from "@zhixing/core/advancement/application"') ||
+    composition.split("new AdvancementApplicationService(").length - 1 !== 1 ||
+    composition.split("createAdvancementProductApiContribution(").length - 1 !== 1 ||
+    !composition.includes("advancementDetailController.loadLatestSession(conversationId)") ||
+    !composition.includes("? ADVANCEMENT_PRODUCT_API_EXACT_SET.operations") ||
+    !composition.includes("? ADVANCEMENT_PRODUCT_API_EXACT_SET.factEvents") ||
+    !composition.includes("...(advancementProductApi ? [advancementProductApi] : [])")
+  ) {
+    failures.push(
+      "Advancement detail lacks one domain application and Product API owner",
     );
   }
 

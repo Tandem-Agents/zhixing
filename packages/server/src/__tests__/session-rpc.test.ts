@@ -87,7 +87,15 @@ import {
   type ConversationUsageProjectionPort,
   type ConversationSecurityProjectionPort,
 } from "@zhixing/core/conversation/application";
-import { ProductApiDispatcher } from "@zhixing/core/product-api";
+import {
+  ADVANCEMENT_PRODUCT_API_EXACT_SET,
+  AdvancementApplicationService,
+  createAdvancementProductApiContribution,
+} from "@zhixing/core/advancement/application";
+import {
+  defineProductApiExactSet,
+  ProductApiDispatcher,
+} from "@zhixing/core/product-api";
 import { loadAdvancementState } from "../rpc/methods/session.js";
 
 const TEST_VERSION = "0.1.0-test";
@@ -873,9 +881,34 @@ function createConversationProductApi(input: {
         }
       : undefined,
   });
+  const advancement = input.advancement;
+  const advancementContribution = advancement
+    ? createAdvancementProductApiContribution(
+        new AdvancementApplicationService({
+          loadLatestSession: (conversationId) =>
+            advancement.loadLatestSession(conversationId),
+        }),
+      )
+    : undefined;
   return new ProductApiDispatcher(
-    CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
-    [createConversationDirectoryProductApiContribution(application)],
+    defineProductApiExactSet({
+      operations: [
+        ...CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET.operations,
+        ...(advancementContribution
+          ? ADVANCEMENT_PRODUCT_API_EXACT_SET.operations
+          : []),
+      ],
+      factEvents: [
+        ...CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET.factEvents,
+        ...(advancementContribution
+          ? ADVANCEMENT_PRODUCT_API_EXACT_SET.factEvents
+          : []),
+      ],
+    }),
+    [
+      createConversationDirectoryProductApiContribution(application),
+      ...(advancementContribution ? [advancementContribution] : []),
+    ],
   );
 }
 
@@ -2941,6 +2974,16 @@ describe("session.* RPC (S2.D)", () => {
     });
     expect(isSuccessResponse(resp)).toBe(true);
     if (!isSuccessResponse(resp)) return;
+    const result = resp.result as Record<string, unknown>;
+    const detail = result.detail as Record<string, unknown>;
+    expect(Object.keys(result).sort()).toEqual(["conversationId", "detail"]);
+    expect(Object.keys(detail).sort()).toEqual([
+      "advancementSessionId",
+      "facts",
+      "lastReview",
+      "rubricTitle",
+      "status",
+    ]);
     expect(resp.result).toMatchObject({
       status: "awaiting-rubric-confirmation",
     });
@@ -3113,6 +3156,24 @@ describe("session.* RPC (S2.D)", () => {
     expect(isSuccessResponse(empty)).toBe(true);
     if (!isSuccessResponse(empty)) return;
     expect(empty.result).toMatchObject({ detail: null });
+    client.close();
+  });
+
+  it("session.advancementDetail 未装配 Advancement contribution 时保持 detail null", async () => {
+    await startWithFactory(createMockFactory({ deltaCount: 0 }));
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const response = await client.request("session.advancementDetail", {
+      conversationId: "conv-without-advancement",
+    });
+
+    expect(isSuccessResponse(response)).toBe(true);
+    if (!isSuccessResponse(response)) return;
+    expect(response.result).toEqual({
+      conversationId: "conv-without-advancement",
+      detail: null,
+    });
     client.close();
   });
 

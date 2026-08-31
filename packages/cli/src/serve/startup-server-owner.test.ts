@@ -14,7 +14,7 @@ describe("production startup server ownership", () => {
       .toBe(false);
   });
 
-  it("composes one sealed Skill, Delivery, Trust, Schedule, and Workscene Product API dispatcher at the Anchor Host boundary", async () => {
+  it("composes one sealed Skill, Delivery, Trust, Schedule, Workscene, and Advancement Product API dispatcher at the Anchor Host boundary", async () => {
     const source = await readSource("command.ts");
     expect(source.match(/new ProductApiDispatcher\(/gu)).toHaveLength(1);
     expect(source.match(/createSkillCatalogProductApiContribution\(/gu)).toHaveLength(1);
@@ -22,6 +22,8 @@ describe("production startup server ownership", () => {
     expect(source.match(/createTrustAdministrationProductApiContribution\(/gu)).toHaveLength(1);
     expect(source.match(/createScheduleRuntimeProductApiContribution\(/gu)).toHaveLength(1);
     expect(source.match(/createWorksceneProductApiContribution\(/gu)).toHaveLength(1);
+    expect(source.match(/createAdvancementProductApiContribution\(/gu)).toHaveLength(1);
+    expect(source.match(/new AdvancementApplicationService\(/gu)).toHaveLength(1);
     expect(source.match(/new WorksceneApplicationService\(/gu)).toHaveLength(1);
     expect(source.match(/createAnchorWorksceneApplicationPorts\(/gu)).toHaveLength(1);
     expect(
@@ -60,6 +62,14 @@ describe("production startup server ownership", () => {
       source,
       "createWorksceneProductApiContribution(",
     );
+    const advancementApplication = location(
+      source,
+      "new AdvancementApplicationService({",
+    );
+    const advancementContribution = location(
+      source,
+      "createAdvancementProductApiContribution(",
+    );
     expect(contribution).toBeGreaterThan(dispatcher);
     expect(application).toBeGreaterThan(contribution);
     expect(deliveryContribution).toBeLessThan(dispatcher);
@@ -67,6 +77,9 @@ describe("production startup server ownership", () => {
     expect(trustContribution).toBeGreaterThan(dispatcher);
     expect(worksceneApplication).toBeLessThan(dispatcher);
     expect(worksceneContribution).toBeGreaterThan(dispatcher);
+    expect(advancementApplication).toBeLessThan(dispatcher);
+    expect(advancementContribution).toBeLessThan(dispatcher);
+    expect(source).toContain("ADVANCEMENT_PRODUCT_API_EXACT_SET.operations");
     expect(context).toContain("productApi,");
     expect(context).not.toContain("skillCatalog:");
     expect(context).not.toContain("resolveDelivery:");

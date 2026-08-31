@@ -15,6 +15,7 @@ import {
   inspectCleanupRegistryConstructions,
   inspectConversationAdoptionAssembly,
   inspectDeviceLifecycleAssembly,
+  inspectAdvancementDetailApplicationOwnership,
   inspectKernelRunEnvelopeOwnership,
   inspectKernelRunEventOwnership,
   inspectKernelTerminalOwnership,
@@ -3398,6 +3399,64 @@ test("Trust Administration management has one domain application and Product API
       },
     ]).join("\n"),
     /retired Trust tracker, helper, or temporary store bridge remains reachable/,
+  );
+});
+
+test("Advancement detail has one narrow application and Product API query owner", async () => {
+  const paths = [
+    "packages/core/src/advancement/application.ts",
+    "packages/core/src/advancement/index.ts",
+    "packages/core/src/index.ts",
+    "packages/core/package.json",
+    "packages/core/tsup.config.ts",
+    "packages/owner-services/src/advancement/controller.ts",
+    "packages/server/src/rpc/methods/session.ts",
+    "packages/cli/src/serve/command.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  assert.deepEqual(inspectAdvancementDetailApplicationOwnership(records), []);
+
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  const failure = /Advancement detail lacks one domain application and Product API owner/;
+
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace(
+        "productApi.query(ADVANCEMENT_DETAIL_QUERY",
+        "ctx.server.advancement.loadLatestSession",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/core/src/advancement/index.ts",
+      (text) => `${text}\nexport * from "./application.js";`,
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "createAdvancementProductApiContribution(",
+        "createRetiredAdvancementDetailBypass(",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/core/src/advancement/application.ts",
+      (text) => text.replace("defineProductApiQuery<", "defineProductApiCommand<"),
+    )).join("\n"),
+    failure,
   );
 });
 

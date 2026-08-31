@@ -51,6 +51,11 @@ import {
   type ConversationAdvancementProjection,
 } from "@zhixing/core/conversation/application";
 import {
+  ADVANCEMENT_PRODUCT_API_EXACT_SET,
+  AdvancementApplicationService,
+  createAdvancementProductApiContribution,
+} from "@zhixing/core/advancement/application";
+import {
   createScheduleManagementProductApiContribution,
   createScheduleRuntimeProductApiContribution,
   SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET,
@@ -1971,6 +1976,15 @@ async function runServerProcess(
         ctx.deliveryStack.resolutionApplication,
       )
     : undefined;
+  const advancementDetailController = ctx.advancement;
+  const advancementProductApi = advancementDetailController
+    ? createAdvancementProductApiContribution(
+        new AdvancementApplicationService({
+          loadLatestSession: (conversationId) =>
+            advancementDetailController.loadLatestSession(conversationId),
+        }),
+      )
+    : undefined;
   const conversationApplication = new ConversationDirectoryApplicationService({
     storage: conversationDirectory,
     compact: createAnchorConversationCompactPort({
@@ -2138,6 +2152,9 @@ async function runServerProcess(
         ...SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET.operations,
         ...SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET.operations,
         ...WORKSCENE_PRODUCT_API_EXACT_SET.operations,
+        ...(advancementProductApi
+          ? ADVANCEMENT_PRODUCT_API_EXACT_SET.operations
+          : []),
         ...(deliveryProductApi
           ? DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET.operations
           : []),
@@ -2149,6 +2166,9 @@ async function runServerProcess(
         ...SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET.factEvents,
         ...SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET.factEvents,
         ...WORKSCENE_PRODUCT_API_EXACT_SET.factEvents,
+        ...(advancementProductApi
+          ? ADVANCEMENT_PRODUCT_API_EXACT_SET.factEvents
+          : []),
         ...(deliveryProductApi
           ? DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET.factEvents
           : []),
@@ -2168,6 +2188,7 @@ async function runServerProcess(
       createWorksceneProductApiContribution(
         worksceneApplication,
       ),
+      ...(advancementProductApi ? [advancementProductApi] : []),
       ...(deliveryProductApi ? [deliveryProductApi] : []),
     ],
   );

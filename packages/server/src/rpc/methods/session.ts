@@ -25,7 +25,6 @@
 import {
   abortWithReason,
   assistantMessage,
-  buildClosureFacts,
   emptyUsage,
   isNonEmptyUserTurnInput,
   type AgentEventMap,
@@ -61,6 +60,10 @@ import {
   type ConversationDirectoryEntry,
   type ConversationPreparedAgentTurnIdentity,
 } from "@zhixing/core/conversation/application";
+import {
+  ADVANCEMENT_DETAIL_QUERY,
+  type AdvancementDetailProjection,
+} from "@zhixing/core/advancement/application";
 import type { ProductApiOperationDescriptor } from "@zhixing/core/product-api";
 import { validateExplicitEnvironmentSelection } from "@zhixing/core/protocol";
 import type { MethodEntry } from "../handlers.js";
@@ -1990,8 +1993,8 @@ export function buildSessionListMethod(): MethodEntry {
 
 /**
  * 推进详情查询——归因块「可展开」的数据面。open 会话给当前状态与最近
- * 一轮验收全量；无 open 给最新终态会话（收场回看）；素材全部来自
- * AdvancementStore 的已持久化事实（closure facts 随查随算）。
+ * 一轮验收全量；无 open 给最新终态会话（收场回看）；领域应用从
+ * Advancement owner 的已持久化投影随查形成 closure facts。
  */
 export function buildSessionAdvancementDetailMethod(): MethodEntry {
   return {
@@ -2003,24 +2006,32 @@ export function buildSessionAdvancementDetailMethod(): MethodEntry {
         params.conversationId ?? params.sessionId,
         "session.advancementDetail",
       );
-      const advancement = ctx.server.advancement;
-      if (!advancement) return { conversationId, detail: null };
-      const session = await advancement.loadLatestSession(conversationId);
-      if (!session) return { conversationId, detail: null };
-      const lastReview = session.runs[session.runs.length - 1];
+      const productApi = ctx.server.productApi;
+      if (!productApi?.supports(ADVANCEMENT_DETAIL_QUERY)) {
+        return { conversationId, detail: null };
+      }
+      const detail = await productApi.query(ADVANCEMENT_DETAIL_QUERY, {
+        conversationId,
+      });
       return {
         conversationId,
-        detail: {
-          advancementSessionId: session.id,
-          status: session.status,
-          rubricTitle:
-            session.confirmedRubric?.title ?? session.pendingRubricDraft?.title,
-          exit: session.exit,
-          facts: buildClosureFacts(session),
-          ...(lastReview ? { lastReview } : {}),
-        },
+        detail: projectAdvancementDetail(detail),
       };
     },
+  };
+}
+
+function projectAdvancementDetail(
+  detail: AdvancementDetailProjection | null,
+): SessionAdvancementDetailResult["detail"] {
+  if (!detail) return null;
+  return {
+    advancementSessionId: detail.advancementSessionId,
+    status: detail.status,
+    rubricTitle: detail.rubricTitle,
+    exit: detail.exit,
+    facts: detail.facts,
+    ...(detail.lastReview ? { lastReview: detail.lastReview } : {}),
   };
 }
 

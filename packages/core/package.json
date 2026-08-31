@@ -80,6 +80,10 @@
       "types": "./dist/conversation/application.d.ts",
       "import": "./dist/conversation/application.js"
     },
+    "./advancement/application": {
+      "types": "./dist/advancement/application.d.ts",
+      "import": "./dist/advancement/application.js"
+    },
     "./workscene/application": {
       "types": "./dist/workscene/application.d.ts",
       "import": "./dist/workscene/application.js"
