@@ -2489,10 +2489,34 @@ test("Device Administration reads, paired/current removal and duty migration hav
   );
   assert.match(
     inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/cli/src/serve/anchor-uninstall.ts",
+      (text) => `${text}\nfunction projectState() { return { phase: "uninstalled" }; }`,
+    )).join("\n"),
+    /mechanism regained product state or cancellation decisions/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/core/src/device-administration/application.ts",
+      (text) => text.replace("assertCurrentRemovalCancellationEligible(lifecycle);", ""),
+    )).join("\n"),
+    /Query\/Product API exact-set drifted/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
         "currentRemovalContext: {",
         "currentRemovalContext: { recoveryBackupReady: true,",
+      ),
+    )).join("\n"),
+    /unique Host application composition drifted/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "currentDeviceRemoval: {",
+        'currentDeviceRemoval: { nextAction: "continue",',
       ),
     )).join("\n"),
     /unique Host application composition drifted/,

@@ -114,17 +114,34 @@ function currentRemovalPort(): DeviceAdministrationCurrentRemovalMechanismPort &
   readonly beginMigration: ReturnType<typeof vi.fn>;
   readonly beginRecoveryBackup: ReturnType<typeof vi.fn>;
   readonly continue: ReturnType<typeof vi.fn>;
-  readonly cancel: ReturnType<typeof vi.fn>;
-  readonly status: ReturnType<typeof vi.fn>;
+  readonly abort: ReturnType<typeof vi.fn>;
+  readonly read: ReturnType<typeof vi.fn>;
 } {
   return {
-    beginMigration: vi.fn(async () => ({ phase: "moving-duty-device" as const })),
-    beginRecoveryBackup: vi.fn(async () => ({ phase: "backup-verified" as const })),
-    continue: vi.fn(async () => ({ phase: "retiring-device" as const })),
-    cancel: vi.fn(async () => ({ phase: "cancelled" as const })),
-    status: vi.fn(async () => ({
-      phase: "choose-safe-path" as const,
-      nextAction: "choose-device" as const,
+    beginMigration: vi.fn(async () => ({
+      kind: "current-device-removal" as const,
+      path: "migration" as const,
+      phase: "gate-frozen" as const,
+    })),
+    beginRecoveryBackup: vi.fn(async () => ({
+      kind: "current-device-removal" as const,
+      path: "recovery-backup" as const,
+      phase: "checkpoint-verified" as const,
+    })),
+    continue: vi.fn(async () => ({
+      kind: "current-device-removal" as const,
+      path: "recovery-backup" as const,
+      phase: "retirement-decided" as const,
+    })),
+    abort: vi.fn(async () => ({
+      kind: "current-device-removal" as const,
+      path: "recovery-backup" as const,
+      phase: "aborted" as const,
+    })),
+    read: vi.fn(async () => ({
+      kind: "current-device-removal" as const,
+      path: "recovery-backup" as const,
+      phase: "accepted" as const,
     })),
   };
 }
@@ -156,19 +173,25 @@ describe("anchor uninstall local lifecycle RPC", () => {
       operationId: "uninstall-local",
       transferId: "transfer-local",
       targetName: "备用电脑",
-    }, ctx)).resolves.toEqual({ phase: "moving-duty-device" });
+    }, ctx)).resolves.toEqual({
+      phase: "moving-duty-device",
+      nextAction: "continue",
+    });
     await expect(buildAnchorUninstallContinueMethod().handler({
       operationId: "uninstall-local",
       confirmBackup: true,
       recoveryPackage: "recovery-package",
-    }, ctx)).resolves.toEqual({ phase: "retiring-device" });
+    }, ctx)).resolves.toEqual({
+      phase: "retiring-device",
+      nextAction: "continue",
+    });
     await expect(buildAnchorUninstallCancelMethod().handler({
       operationId: "uninstall-local",
     }, ctx)).resolves.toEqual({ phase: "cancelled" });
     await expect(buildAnchorUninstallStatusMethod().handler({
       operationId: "uninstall-local",
     }, ctx)).resolves.toEqual({
-      state: { phase: "choose-safe-path", nextAction: "choose-device" },
+      state: { phase: "choose-safe-path", nextAction: "continue" },
     });
 
     expect(port.beginMigration).toHaveBeenCalledWith({
@@ -182,8 +205,8 @@ describe("anchor uninstall local lifecycle RPC", () => {
       confirmBackup: true,
       recoveryPackage: "recovery-package",
     });
-    expect(port.cancel).toHaveBeenCalledWith({ operationId: "uninstall-local" });
-    expect(port.status).toHaveBeenCalledWith({ operationId: "uninstall-local" });
+    expect(port.abort).toHaveBeenCalledWith({ operationId: "uninstall-local" });
+    expect(port.read).toHaveBeenCalledWith({ operationId: "uninstall-local" });
   });
 
   it("requires explicit backup confirmation before the application command", async () => {
@@ -194,6 +217,34 @@ describe("anchor uninstall local lifecycle RPC", () => {
     }, context({ loopback: true, productApi: createProductApi(port) })))
       .rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
     expect(port.continue).not.toHaveBeenCalled();
+  });
+
+  it("projects raw status and rejects an irreversible cancellation before abort", async () => {
+    const port = currentRemovalPort();
+    const ctx = context({ loopback: true, productApi: createProductApi(port) });
+    port.read.mockResolvedValueOnce({
+      kind: "current-device-removal",
+      path: "recovery-backup",
+      phase: "checkpoint-verified",
+    });
+    await expect(buildAnchorUninstallStatusMethod().handler({
+      operationId: "uninstall-local",
+    }, ctx)).resolves.toEqual({
+      state: { phase: "backup-verified", nextAction: "confirm-backup" },
+    });
+
+    port.read.mockResolvedValueOnce({
+      kind: "current-device-removal",
+      path: "migration",
+      phase: "transfer-committed",
+    });
+    await expect(buildAnchorUninstallCancelMethod().handler({
+      operationId: "uninstall-local",
+    }, ctx)).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.INTERNAL_ERROR,
+      message: "永久卸载尚未完成；安全进度已保留，请使用同一操作继续",
+    });
+    expect(port.abort).not.toHaveBeenCalled();
   });
 
   it("fails closed when Product API or the mechanism contribution is unavailable", async () => {

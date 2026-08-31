@@ -38,23 +38,15 @@ import {
   type HostStopAcceptedWorkSnapshot,
 } from "./host-stop-lifecycle.js";
 import type { ArtifactStore } from "@zhixing/core/authority";
+import type {
+  DeviceAdministrationCurrentRemovalLifecyclePhase,
+  DeviceAdministrationCurrentRemovalLifecycleSnapshot,
+} from "@zhixing/core/device-administration/application";
 
 interface UninstallProjection {
   readonly trustEvents: readonly HomeTrustEvent[];
   readonly exposures: readonly CredentialExposureRecord[];
   readonly lifecycle: DeviceLifecycleProjection;
-}
-
-export interface AnchorUninstallPublicState {
-  readonly phase:
-    | "choose-safe-path"
-    | "moving-duty-device"
-    | "backup-verified"
-    | "retiring-device"
-    | "ready-to-uninstall"
-    | "uninstalled"
-    | "cancelled";
-  readonly nextAction?: "choose-device" | "confirm-backup" | "continue";
 }
 
 export class AnchorUninstallCoordinator {
@@ -99,7 +91,7 @@ export class AnchorUninstallCoordinator {
     readonly operationId: string;
     readonly transferId: string;
     readonly targetDeviceId: string;
-  }): Promise<AnchorUninstallPublicState> {
+  }): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot> {
     const trust = await this.#assertCurrentAuthority();
     const identity = Object.freeze({
       v: 1,
@@ -124,7 +116,7 @@ export class AnchorUninstallCoordinator {
     readonly requestId: string;
     readonly operationId: string;
     readonly recoveryPackage: string;
-  }): Promise<AnchorUninstallPublicState> {
+  }): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot> {
     const decoded = requireCurrentRecoveryPackage(
       decodeRecoveryPackage(input.recoveryPackage),
     );
@@ -169,7 +161,7 @@ export class AnchorUninstallCoordinator {
   async confirmRecoveryBackup(
     operationId: string,
     recoveryPackage: string,
-  ): Promise<AnchorUninstallPublicState> {
+  ): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot> {
     const operation = await this.#journal.state(operationId);
     if (!operation || operation.identity.kind !== "anchor-uninstall" ||
       operation.identity.path.kind !== "recovery-backup") {
@@ -182,7 +174,7 @@ export class AnchorUninstallCoordinator {
     return this.#driveRecovery(operation.identity, true, decoded.root);
   }
 
-  async abort(operationId: string): Promise<AnchorUninstallPublicState> {
+  async abort(operationId: string): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot> {
     const operation = await this.#journal.state(operationId);
     if (!operation || operation.identity.kind !== "anchor-uninstall") {
       throw new Error("Anchor uninstall operation is unknown");
@@ -196,15 +188,17 @@ export class AnchorUninstallCoordinator {
       reason: "user-cancelled",
       at: this.options.now?.() ?? new Date().toISOString(),
     }, this.options.issuerKey);
-    await this.#journal.abort(operationId, abort);
+    const aborted = await this.#journal.abort(operationId, abort);
     await this.options.releaseAdmission(operationId);
-    return { phase: "cancelled" };
+    return currentRemovalLifecycleSnapshot(aborted);
   }
 
-  async state(operationId: string): Promise<AnchorUninstallPublicState | undefined> {
+  async readLifecycle(
+    operationId: string,
+  ): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot | undefined> {
     const operation = await this.#journal.state(operationId);
     if (!operation || operation.identity.kind !== "anchor-uninstall") return undefined;
-    return projectState(operation);
+    return currentRemovalLifecycleSnapshot(operation);
   }
 
   async resumeActive(): Promise<void> {
@@ -253,7 +247,7 @@ export class AnchorUninstallCoordinator {
 
   async #driveMigration(
     identity: AnchorUninstallLifecycleIdentity,
-  ): Promise<AnchorUninstallPublicState> {
+  ): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot> {
     if (identity.path.kind !== "migration") {
       throw new Error("Anchor uninstall path is not a migration");
     }
@@ -312,16 +306,20 @@ export class AnchorUninstallCoordinator {
       }]);
     }
     if (operation.phase === "cleanup-complete") {
-      await this.#journal.terminal(identity.operationId, "retired", operation.evidence);
+      operation = await this.#journal.terminal(
+        identity.operationId,
+        "retired",
+        operation.evidence,
+      );
     }
-    return { phase: "uninstalled" };
+    return currentRemovalLifecycleSnapshot(operation);
   }
 
   async #driveRecovery(
     identity: AnchorUninstallLifecycleIdentity,
     confirmed: boolean,
     recoveryRoot: RecoveryRoot,
-  ): Promise<AnchorUninstallPublicState> {
+  ): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot> {
     if (identity.path.kind !== "recovery-backup") {
       throw new Error("Anchor uninstall path is not a recovery backup");
     }
@@ -345,7 +343,7 @@ export class AnchorUninstallCoordinator {
       }]);
     }
     if (operation.phase === "checkpoint-verified" && !confirmed) {
-      return { phase: "backup-verified", nextAction: "confirm-backup" };
+      return currentRemovalLifecycleSnapshot(operation);
     }
     if (operation.phase === "checkpoint-verified") {
       const closure = this.#requireRecoveryAcceptedWork();
@@ -406,10 +404,14 @@ export class AnchorUninstallCoordinator {
       operation = await this.#journal.advance(identity.operationId, "cleanup-complete", evidence);
     }
     if (operation.phase === "cleanup-complete") {
-      await this.#journal.terminal(identity.operationId, "retired", operation.evidence);
+      operation = await this.#journal.terminal(
+        identity.operationId,
+        "retired",
+        operation.evidence,
+      );
       await this.options.onRetired(identity.operationId);
     }
-    return { phase: "uninstalled" };
+    return currentRemovalLifecycleSnapshot(operation);
   }
 
   async #decideRetirement(
@@ -596,26 +598,39 @@ export class AnchorUninstallCoordinator {
   }
 }
 
-function projectState(operation: DeviceLifecycleOperation): AnchorUninstallPublicState {
-  if (operation.phase === "terminal") return { phase: "uninstalled" };
-  if (operation.phase === "aborted") return { phase: "cancelled" };
-  if (operation.phase === "checkpoint-verified") {
-    return { phase: "backup-verified", nextAction: "confirm-backup" };
+function currentRemovalLifecycleSnapshot(
+  operation: DeviceLifecycleOperation,
+): DeviceAdministrationCurrentRemovalLifecycleSnapshot {
+  if (operation.identity.kind !== "anchor-uninstall") {
+    throw new TypeError("Anchor uninstall lifecycle snapshot requires an anchor operation");
   }
-  if (operation.phase === "final-checkpoint-verified" || operation.phase === "cleanup-complete") {
-    return { phase: "ready-to-uninstall", nextAction: "continue" };
+  return Object.freeze({
+    kind: "current-device-removal",
+    path: operation.identity.path.kind,
+    phase: currentRemovalLifecyclePhase(operation.phase),
+  });
+}
+
+function currentRemovalLifecyclePhase(
+  phase: DeviceLifecycleOperation["phase"],
+): DeviceAdministrationCurrentRemovalLifecyclePhase {
+  switch (phase) {
+    case "accepted":
+    case "gate-frozen":
+    case "checkpoint-verified":
+    case "transfer-committed":
+    case "retirement-decided":
+    case "gate-closed":
+    case "work-settled":
+    case "flushed":
+    case "final-checkpoint-verified":
+    case "cleanup-complete":
+    case "terminal":
+    case "aborted":
+      return phase;
+    default:
+      throw new TypeError("Anchor uninstall lifecycle phase is invalid");
   }
-  if (
-    operation.phase === "retirement-decided" ||
-    operation.phase === "gate-closed" ||
-    operation.phase === "work-settled" ||
-    operation.phase === "flushed"
-  ) {
-    return { phase: "retiring-device", nextAction: "continue" };
-  }
-  return operation.identity.kind === "anchor-uninstall" && operation.identity.path.kind === "migration"
-    ? { phase: "moving-duty-device", nextAction: "continue" }
-    : { phase: "choose-safe-path", nextAction: "continue" };
 }
 
 function recoveryClosureStarted(phase: DeviceLifecycleOperation["phase"]): boolean {

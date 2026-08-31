@@ -270,11 +270,13 @@ describe("Device Administration command Product API input", () => {
     [buildAnchorUninstallStatusMethod, { operationId: "operation-1", extra: true }],
   ] as const)("rejects unknown uninstall fields before lifecycle effects", async (build, params) => {
     const uninstall = {
-      beginMigration: vi.fn(async () => ({ phase: "moving-duty-device" as const })),
-      beginRecoveryBackup: vi.fn(async () => ({ phase: "backup-verified" as const })),
-      continue: vi.fn(async () => ({ phase: "retiring-device" as const })),
-      cancel: vi.fn(async () => ({ phase: "cancelled" as const })),
-      status: vi.fn(async () => undefined),
+      beginMigration: vi.fn(async () => currentRemovalLifecycle("migration", "gate-frozen")),
+      beginRecoveryBackup: vi.fn(async () =>
+        currentRemovalLifecycle("recovery-backup", "checkpoint-verified")),
+      continue: vi.fn(async () =>
+        currentRemovalLifecycle("recovery-backup", "retirement-decided")),
+      abort: vi.fn(async () => currentRemovalLifecycle("recovery-backup", "aborted")),
+      read: vi.fn(async () => undefined),
     };
     const entry = build();
     const ctx = mkCtx({
@@ -305,6 +307,17 @@ describe("Device Administration command Product API input", () => {
     for (const operation of Object.values(uninstall)) expect(operation).not.toHaveBeenCalled();
   });
 });
+
+function currentRemovalLifecycle(
+  path: "migration" | "recovery-backup",
+  phase:
+    | "gate-frozen"
+    | "checkpoint-verified"
+    | "retirement-decided"
+    | "aborted",
+) {
+  return { kind: "current-device-removal" as const, path, phase };
+}
 
 describe("server.shutdown", () => {
   it("rejects authenticated non-loopback callers before decoding or lifecycle effects", async () => {

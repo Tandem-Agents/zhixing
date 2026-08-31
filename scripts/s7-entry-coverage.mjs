@@ -2912,6 +2912,14 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !application.includes("DeviceAdministrationCurrentRemovalMigrationTargetReadPort") ||
     !application.includes("DeviceAdministrationCurrentRemovalRecoveryBackupReadPort") ||
     !application.includes("DeviceAdministrationCurrentRemovalMechanismPort") ||
+    !application.includes("DeviceAdministrationCurrentRemovalLifecycleSnapshot") ||
+    !application.includes("projectCurrentRemovalState(") ||
+    !application.includes("assertCurrentRemovalCancellationEligible(") ||
+    !application.includes("assertCurrentRemovalCancellationEligible(lifecycle);") ||
+    !application.includes("const lifecycle = await port.read({ operationId });") ||
+    !application.includes("return projectCurrentRemovalState(await port.abort({ operationId }));") ||
+    !application.includes('throw new Error("Anchor uninstall operation is unknown")') ||
+    !application.includes('throw new TypeError("Irreversible lifecycle operation cannot be aborted")') ||
     !application.includes("context.currentDutyDeviceId !== context.localDeviceId") ||
     !application.includes("context.currentDutyIssuerKeyId !== context.localIssuerKeyId") ||
     !application.includes("context.executorRemovalInProgress") ||
@@ -2953,11 +2961,14 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !composition.includes("anchorUninstall.beginMigration(input)") ||
     !composition.includes("anchorUninstall.confirmRecoveryBackup(") ||
     !composition.includes("anchorUninstall.abort(input.operationId)") ||
-    !composition.includes("anchorUninstall.state(input.operationId)") ||
+    !composition.includes("anchorUninstall.readLifecycle(input.operationId)") ||
     composition.includes("anchorUninstall: {") ||
     currentRemovalAssembly.includes("recoveryBackupReady:") ||
     currentRemovalAssembly.includes(".filter((candidate)") ||
     currentRemovalAssembly.includes("No ready duty device has that name") ||
+    currentRemovalAssembly.includes("nextAction:") ||
+    currentRemovalAssembly.includes("moving-duty-device") ||
+    currentRemovalAssembly.includes("ready-to-uninstall") ||
     composition.includes('return { stage: "ready" as const }') ||
     composition.includes('return { stage: "completed" as const }') ||
     composition.includes('return { stage: "cancelled" as const }') ||
@@ -2975,6 +2986,21 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !uninstallCoordinator.includes("const trust = await this.#assertCurrentAuthority();")
   ) {
     failures.push("Anchor uninstall migration mechanism regained product path selection");
+  }
+  if (
+    uninstallCoordinator.includes("AnchorUninstallPublicState") ||
+    uninstallCoordinator.includes("function projectState(") ||
+    uninstallCoordinator.includes('phase: "moving-duty-device"') ||
+    uninstallCoordinator.includes('phase: "backup-verified"') ||
+    uninstallCoordinator.includes('phase: "retiring-device"') ||
+    uninstallCoordinator.includes('phase: "ready-to-uninstall"') ||
+    uninstallCoordinator.includes('phase: "uninstalled"') ||
+    uninstallCoordinator.includes('phase: "cancelled"') ||
+    uninstallCoordinator.includes("nextAction:") ||
+    !uninstallCoordinator.includes("currentRemovalLifecycleSnapshot(") ||
+    !uninstallCoordinator.includes("async readLifecycle(")
+  ) {
+    failures.push("Anchor uninstall mechanism regained product state or cancellation decisions");
   }
   if (
     !handler.includes('from "@zhixing/core/device-administration/application"') ||

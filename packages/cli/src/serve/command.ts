@@ -2246,10 +2246,10 @@ async function runServerProcess(
                     input.operationId,
                     input.recoveryPackage,
                   ),
-                  cancel: (input: { readonly operationId: string }) =>
+                  abort: (input: { readonly operationId: string }) =>
                     anchorUninstall.abort(input.operationId),
-                  status: (input: { readonly operationId: string }) =>
-                    anchorUninstall.state(input.operationId),
+                  read: (input: { readonly operationId: string }) =>
+                    anchorUninstall.readLifecycle(input.operationId),
                 },
               }
             : {}),

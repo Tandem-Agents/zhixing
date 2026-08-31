@@ -107,18 +107,29 @@ function fixture() {
   };
   const currentDeviceRemoval = {
     beginMigration: vi.fn(async () => ({
-      phase: "moving-duty-device" as const,
-      nextAction: "continue" as const,
+      kind: "current-device-removal" as const,
+      path: "migration" as const,
+      phase: "gate-frozen" as const,
     })),
     beginRecoveryBackup: vi.fn(async () => ({
-      phase: "backup-verified" as const,
-      nextAction: "confirm-backup" as const,
+      kind: "current-device-removal" as const,
+      path: "recovery-backup" as const,
+      phase: "checkpoint-verified" as const,
     })),
-    continue: vi.fn(async () => ({ phase: "retiring-device" as const })),
-    cancel: vi.fn(async () => ({ phase: "cancelled" as const })),
-    status: vi.fn(async () => ({
-      phase: "choose-safe-path" as const,
-      nextAction: "choose-device" as const,
+    continue: vi.fn(async () => ({
+      kind: "current-device-removal" as const,
+      path: "recovery-backup" as const,
+      phase: "retirement-decided" as const,
+    })),
+    abort: vi.fn(async () => ({
+      kind: "current-device-removal" as const,
+      path: "recovery-backup" as const,
+      phase: "aborted" as const,
+    })),
+    read: vi.fn(async () => ({
+      kind: "current-device-removal" as const,
+      path: "recovery-backup" as const,
+      phase: "accepted" as const,
     })),
   };
   const application = new DeviceAdministrationApplicationService({
@@ -263,7 +274,10 @@ describe("DeviceAdministrationApplicationService", () => {
       operationId: "uninstall-1",
       confirmBackup: true,
       recoveryPackage: "recovery-package",
-    })).resolves.toEqual({ result: { phase: "retiring-device" }, facts: [] });
+    })).resolves.toEqual({
+      result: { phase: "retiring-device", nextAction: "continue" },
+      facts: [],
+    });
     await expect(dispatcher.command(DEVICE_ADMINISTRATION_CANCEL_CURRENT_REMOVAL_COMMAND, {
       kind: "cancel-current-device-removal",
       operationId: "uninstall-1",
@@ -304,7 +318,7 @@ describe("DeviceAdministrationApplicationService", () => {
     expect(Object.isFrozen(preflight.migrationTargets)).toBe(true);
     expect(Object.isFrozen(preflight.migrationTargets[0])).toBe(true);
     expect(Object.isFrozen(status.state)).toBe(true);
-    f.currentDeviceRemoval.status.mockResolvedValueOnce(undefined);
+    f.currentDeviceRemoval.read.mockResolvedValueOnce(undefined);
     await expect(f.application.query({
       kind: "read-current-device-removal-status",
       operationId: "uninstall-missing",
@@ -335,6 +349,147 @@ describe("DeviceAdministrationApplicationService", () => {
       requestId: "request:uninstall-backup",
       operationId: "uninstall-backup",
       recoveryPackage: "recovery-package",
+    });
+  });
+
+  it("owns every current-removal lifecycle projection for both safe paths", async () => {
+    const f = fixture();
+    const cases = [
+      ["migration", "accepted", { phase: "moving-duty-device", nextAction: "continue" }],
+      ["migration", "gate-frozen", { phase: "moving-duty-device", nextAction: "continue" }],
+      ["migration", "transfer-committed", {
+        phase: "moving-duty-device",
+        nextAction: "continue",
+      }],
+      ["migration", "cleanup-complete", {
+        phase: "ready-to-uninstall",
+        nextAction: "continue",
+      }],
+      ["migration", "terminal", { phase: "uninstalled" }],
+      ["migration", "aborted", { phase: "cancelled" }],
+      ["recovery-backup", "accepted", {
+        phase: "choose-safe-path",
+        nextAction: "continue",
+      }],
+      ["recovery-backup", "gate-frozen", {
+        phase: "choose-safe-path",
+        nextAction: "continue",
+      }],
+      ["recovery-backup", "checkpoint-verified", {
+        phase: "backup-verified",
+        nextAction: "confirm-backup",
+      }],
+      ["recovery-backup", "retirement-decided", {
+        phase: "retiring-device",
+        nextAction: "continue",
+      }],
+      ["recovery-backup", "gate-closed", {
+        phase: "retiring-device",
+        nextAction: "continue",
+      }],
+      ["recovery-backup", "work-settled", {
+        phase: "retiring-device",
+        nextAction: "continue",
+      }],
+      ["recovery-backup", "flushed", {
+        phase: "retiring-device",
+        nextAction: "continue",
+      }],
+      ["recovery-backup", "final-checkpoint-verified", {
+        phase: "ready-to-uninstall",
+        nextAction: "continue",
+      }],
+      ["recovery-backup", "cleanup-complete", {
+        phase: "ready-to-uninstall",
+        nextAction: "continue",
+      }],
+      ["recovery-backup", "terminal", { phase: "uninstalled" }],
+      ["recovery-backup", "aborted", { phase: "cancelled" }],
+    ] as const;
+
+    for (const [path, phase, expected] of cases) {
+      f.currentDeviceRemoval.read.mockResolvedValueOnce({
+        kind: "current-device-removal",
+        path,
+        phase,
+      });
+      await expect(f.application.query({
+        kind: "read-current-device-removal-status",
+        operationId: `uninstall:${path}:${phase}`,
+      })).resolves.toEqual({ state: expected });
+    }
+
+    f.currentDeviceRemoval.read.mockResolvedValueOnce({
+      kind: "current-device-removal",
+      path: "recovery-backup",
+      phase: "transfer-committed",
+    });
+    await expect(f.application.query({
+      kind: "read-current-device-removal-status",
+      operationId: "uninstall:invalid-path-phase",
+    })).rejects.toThrow("Current removal lifecycle phase does not match its path");
+  });
+
+  it("owns cancellation eligibility before invoking the durable abort mechanism", async () => {
+    const f = fixture();
+    f.currentDeviceRemoval.read.mockResolvedValueOnce(undefined);
+    await expect(f.application.execute({
+      kind: "cancel-current-device-removal",
+      operationId: "uninstall-unknown",
+    })).rejects.toThrow("Anchor uninstall operation is unknown");
+
+    for (const [path, phase, message] of [
+      ["migration", "aborted", "Lifecycle aborted conflicts with replay"],
+      ["migration", "terminal", "Terminal lifecycle operation cannot advance"],
+      ["migration", "transfer-committed", "Irreversible lifecycle operation cannot be aborted"],
+      ["recovery-backup", "retirement-decided", "Irreversible lifecycle operation cannot be aborted"],
+    ] as const) {
+      f.currentDeviceRemoval.read.mockResolvedValueOnce({
+        kind: "current-device-removal",
+        path,
+        phase,
+      });
+      await expect(f.application.execute({
+        kind: "cancel-current-device-removal",
+        operationId: `uninstall:${phase}`,
+      })).rejects.toThrow(message);
+    }
+    expect(f.currentDeviceRemoval.abort).not.toHaveBeenCalled();
+
+    f.currentDeviceRemoval.read.mockResolvedValueOnce({
+      kind: "current-device-removal",
+      path: "migration",
+      phase: "gate-frozen",
+    });
+    f.currentDeviceRemoval.abort.mockResolvedValueOnce({
+      kind: "current-device-removal",
+      path: "migration",
+      phase: "aborted",
+    });
+    await expect(f.application.execute({
+      kind: "cancel-current-device-removal",
+      operationId: "uninstall:cancellable",
+    })).resolves.toEqual({ phase: "cancelled" });
+    expect(f.currentDeviceRemoval.abort).toHaveBeenCalledWith({
+      operationId: "uninstall:cancellable",
+    });
+
+    f.currentDeviceRemoval.read.mockResolvedValueOnce({
+      kind: "current-device-removal",
+      path: "recovery-backup",
+      phase: "checkpoint-verified",
+    });
+    f.currentDeviceRemoval.abort.mockResolvedValueOnce({
+      kind: "current-device-removal",
+      path: "recovery-backup",
+      phase: "aborted",
+    });
+    await expect(f.application.execute({
+      kind: "cancel-current-device-removal",
+      operationId: "uninstall:backup-cancellable",
+    })).resolves.toEqual({ phase: "cancelled" });
+    expect(f.currentDeviceRemoval.abort).toHaveBeenNthCalledWith(2, {
+      operationId: "uninstall:backup-cancellable",
     });
   });
 

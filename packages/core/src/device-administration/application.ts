@@ -86,6 +86,27 @@ export interface DeviceAdministrationCurrentRemovalState {
   readonly nextAction?: "choose-device" | "confirm-backup" | "continue";
 }
 
+export type DeviceAdministrationCurrentRemovalLifecyclePhase =
+  | "accepted"
+  | "gate-frozen"
+  | "checkpoint-verified"
+  | "transfer-committed"
+  | "retirement-decided"
+  | "gate-closed"
+  | "work-settled"
+  | "flushed"
+  | "final-checkpoint-verified"
+  | "cleanup-complete"
+  | "terminal"
+  | "aborted";
+
+/** Transport- and storage-free raw durable facts needed for product projection. */
+export interface DeviceAdministrationCurrentRemovalLifecycleSnapshot {
+  readonly kind: "current-device-removal";
+  readonly path: "migration" | "recovery-backup";
+  readonly phase: DeviceAdministrationCurrentRemovalLifecyclePhase;
+}
+
 export interface DeviceAdministrationCurrentRemovalPreflightResult {
   readonly currentDeviceName: string;
   readonly migrationTargets: readonly {
@@ -316,23 +337,23 @@ export interface DeviceAdministrationCurrentRemovalMechanismPort {
     readonly operationId: string;
     readonly transferId: string;
     readonly targetDeviceId: string;
-  }): Promise<DeviceAdministrationCurrentRemovalState>;
+  }): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot>;
   beginRecoveryBackup(input: {
     readonly requestId: string;
     readonly operationId: string;
     readonly recoveryPackage: string;
-  }): Promise<DeviceAdministrationCurrentRemovalState>;
+  }): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot>;
   continue(input: {
     readonly operationId: string;
     readonly confirmBackup: true;
     readonly recoveryPackage: string;
-  }): Promise<DeviceAdministrationCurrentRemovalState>;
-  cancel(input: {
+  }): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot>;
+  abort(input: {
     readonly operationId: string;
-  }): Promise<DeviceAdministrationCurrentRemovalState>;
-  status(input: {
+  }): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot>;
+  read(input: {
     readonly operationId: string;
-  }): Promise<DeviceAdministrationCurrentRemovalState | undefined>;
+  }): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot | undefined>;
 }
 
 export class DeviceAdministrationApplicationError extends Error {
@@ -479,9 +500,9 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
       }
       case "read-current-device-removal-status": {
         const operationId = requireStableText(query.operationId, "Uninstall operation id");
-        const state = await this.#currentDeviceRemoval().status({ operationId });
+        const lifecycle = await this.#currentDeviceRemoval().read({ operationId });
         return Object.freeze({
-          state: state === undefined ? null : freezeCurrentRemovalState(state),
+          state: lifecycle === undefined ? null : projectCurrentRemovalState(lifecycle),
         });
       }
       default:
@@ -713,7 +734,7 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
     const requestId = requireStableText(command.requestId, "Uninstall request id");
     const operationId = requireStableText(command.operationId, "Uninstall operation id");
     const port = this.#currentDeviceRemoval();
-    let result: DeviceAdministrationCurrentRemovalState;
+    let lifecycle: DeviceAdministrationCurrentRemovalLifecycleSnapshot;
     if (command.path === "migration") {
       const transferId = requireStableText(command.transferId, "Uninstall transfer id");
       const targetName = requireStableText(command.targetName, "Duty device name");
@@ -725,14 +746,14 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
           ? "No ready duty device has that name"
           : "More than one ready duty device has that name");
       }
-      result = await port.beginMigration({
+      lifecycle = await port.beginMigration({
         requestId,
         operationId,
         transferId,
         targetDeviceId: requireStableText(matches[0]!.deviceId, "Duty device id"),
       });
     } else if (command.path === "recovery-backup") {
-      result = await port.beginRecoveryBackup({
+      lifecycle = await port.beginRecoveryBackup({
         requestId,
         operationId,
         recoveryPackage: requireStableText(command.recoveryPackage, "Recovery package"),
@@ -740,7 +761,7 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
     } else {
       throw new TypeError("Permanent removal path is invalid");
     }
-    return freezeCurrentRemovalState(result);
+    return projectCurrentRemovalState(lifecycle);
   }
 
   async #readCurrentRemovalPreflight(): Promise<{
@@ -792,7 +813,7 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
     if (command.confirmBackup !== true) {
       throw new TypeError("Recovery-backup uninstall requires explicit confirmation");
     }
-    return freezeCurrentRemovalState(await this.#currentDeviceRemoval().continue({
+    return projectCurrentRemovalState(await this.#currentDeviceRemoval().continue({
       operationId: requireStableText(command.operationId, "Uninstall operation id"),
       confirmBackup: true,
       recoveryPackage: requireStableText(command.recoveryPackage, "Recovery package"),
@@ -802,9 +823,12 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
   async #cancelCurrentRemoval(
     command: DeviceAdministrationCancelCurrentRemovalCommand,
   ): Promise<DeviceAdministrationCurrentRemovalState> {
-    return freezeCurrentRemovalState(await this.#currentDeviceRemoval().cancel({
-      operationId: requireStableText(command.operationId, "Uninstall operation id"),
-    }));
+    const operationId = requireStableText(command.operationId, "Uninstall operation id");
+    const port = this.#currentDeviceRemoval();
+    const lifecycle = await port.read({ operationId });
+    if (!lifecycle) throw new Error("Anchor uninstall operation is unknown");
+    assertCurrentRemovalCancellationEligible(lifecycle);
+    return projectCurrentRemovalState(await port.abort({ operationId }));
   }
 
   #currentDeviceRemoval(): DeviceAdministrationCurrentRemovalMechanismPort {
@@ -1073,13 +1097,78 @@ function freezeCurrentRemovalPreflight(
   });
 }
 
-function freezeCurrentRemovalState(
-  value: DeviceAdministrationCurrentRemovalState,
+function projectCurrentRemovalState(
+  lifecycle: DeviceAdministrationCurrentRemovalLifecycleSnapshot,
 ): DeviceAdministrationCurrentRemovalState {
-  return Object.freeze({
-    phase: value.phase,
-    ...(value.nextAction === undefined ? {} : { nextAction: value.nextAction }),
-  });
+  assertCurrentRemovalLifecycle(lifecycle);
+  switch (lifecycle.phase) {
+    case "terminal":
+      return Object.freeze({ phase: "uninstalled" });
+    case "aborted":
+      return Object.freeze({ phase: "cancelled" });
+    case "checkpoint-verified":
+      return Object.freeze({ phase: "backup-verified", nextAction: "confirm-backup" });
+    case "final-checkpoint-verified":
+    case "cleanup-complete":
+      return Object.freeze({ phase: "ready-to-uninstall", nextAction: "continue" });
+    case "retirement-decided":
+    case "gate-closed":
+    case "work-settled":
+    case "flushed":
+      return Object.freeze({ phase: "retiring-device", nextAction: "continue" });
+    case "accepted":
+    case "gate-frozen":
+    case "transfer-committed":
+      return lifecycle.path === "migration"
+        ? Object.freeze({ phase: "moving-duty-device", nextAction: "continue" })
+        : Object.freeze({ phase: "choose-safe-path", nextAction: "continue" });
+  }
+}
+
+function assertCurrentRemovalLifecycle(
+  lifecycle: DeviceAdministrationCurrentRemovalLifecycleSnapshot,
+): void {
+  if (lifecycle.kind !== "current-device-removal") {
+    throw new TypeError("Current removal lifecycle kind is invalid");
+  }
+  const migrationOnly = lifecycle.phase === "transfer-committed";
+  const recoveryOnly = new Set<DeviceAdministrationCurrentRemovalLifecyclePhase>([
+    "checkpoint-verified",
+    "retirement-decided",
+    "gate-closed",
+    "work-settled",
+    "flushed",
+    "final-checkpoint-verified",
+  ]).has(lifecycle.phase);
+  if (
+    (migrationOnly && lifecycle.path !== "migration") ||
+    (recoveryOnly && lifecycle.path !== "recovery-backup")
+  ) {
+    throw new TypeError("Current removal lifecycle phase does not match its path");
+  }
+}
+
+function assertCurrentRemovalCancellationEligible(
+  lifecycle: DeviceAdministrationCurrentRemovalLifecycleSnapshot,
+): void {
+  assertCurrentRemovalLifecycle(lifecycle);
+  if (lifecycle.phase === "aborted") {
+    throw new TypeError("Lifecycle aborted conflicts with replay");
+  }
+  if (lifecycle.phase === "terminal") {
+    throw new TypeError("Terminal lifecycle operation cannot advance");
+  }
+  if (
+    lifecycle.phase === "transfer-committed" ||
+    lifecycle.phase === "retirement-decided" ||
+    lifecycle.phase === "gate-closed" ||
+    lifecycle.phase === "work-settled" ||
+    lifecycle.phase === "flushed" ||
+    lifecycle.phase === "final-checkpoint-verified" ||
+    lifecycle.phase === "cleanup-complete"
+  ) {
+    throw new TypeError("Irreversible lifecycle operation cannot be aborted");
+  }
 }
 
 function requireStableText(value: unknown, label: string): string {

@@ -64,7 +64,11 @@ describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
       operationId: "uninstall-migration",
       transferId: "transfer-migration",
       targetDeviceId: "target-1",
-    })).resolves.toEqual({ phase: "uninstalled" });
+    })).resolves.toEqual({
+      kind: "current-device-removal",
+      path: "migration",
+      phase: "terminal",
+    });
     expect(closeAdmission).toHaveBeenCalledTimes(1);
     expect(commitMigration).toHaveBeenCalledWith({
       requestId: "request-migration",
@@ -76,7 +80,11 @@ describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
     expect(effects.filter((item) => item.startsWith("settle:")).length)
       .toBe(HOST_STOP_ACCEPTED_WORK_OWNERS.length);
     expect(effects.indexOf("flush")).toBeLessThan(effects.indexOf("physical"));
-    await expect(coordinator.state("uninstall-migration")).resolves.toEqual({ phase: "uninstalled" });
+    await expect(coordinator.readLifecycle("uninstall-migration")).resolves.toEqual({
+      kind: "current-device-removal",
+      path: "migration",
+      phase: "terminal",
+    });
   });
 
   it("requires a second confirmation after real backup read-back and includes the retirement decision in the final backup", async () => {
@@ -204,10 +212,18 @@ describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
       requestId: "request-backup",
       operationId: "uninstall-backup",
       recoveryPackage: encodeRecoveryPackage(root),
-    })).resolves.toEqual({ phase: "backup-verified", nextAction: "confirm-backup" });
+    })).resolves.toEqual({
+      kind: "current-device-removal",
+      path: "recovery-backup",
+      phase: "checkpoint-verified",
+    });
     expect(cleanupRecovery).not.toHaveBeenCalled();
     await expect(coordinator.confirmRecoveryBackup("uninstall-backup", encodeRecoveryPackage(root)))
-      .resolves.toEqual({ phase: "uninstalled" });
+      .resolves.toEqual({
+        kind: "current-device-removal",
+        path: "recovery-backup",
+        phase: "terminal",
+      });
     expect(verify).toHaveBeenCalledTimes(2);
     expect(effects.indexOf("flush")).toBeLessThan(
       effects.indexOf("force:uninstall-backup:final-retirement"),
@@ -236,10 +252,82 @@ describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
     expect(finalUpToLsn).toBeGreaterThanOrEqual(flushed!.lsn);
     expect(cleanupRecovery).toHaveBeenCalledTimes(1);
     expect(onRetired).toHaveBeenCalledTimes(1);
-    await expect(coordinator.state("uninstall-backup")).resolves.toEqual({ phase: "uninstalled" });
+    await expect(coordinator.readLifecycle("uninstall-backup")).resolves.toEqual({
+      kind: "current-device-removal",
+      path: "recovery-backup",
+      phase: "terminal",
+    });
     await checkpointOwner.stop();
     await target.close();
   }, 120_000);
+
+  it("returns only raw lifecycle facts while preserving signed abort, journal and admission release", async () => {
+    const fixture = await createFixture();
+    const trust = await fixture.store.loadTrustRecord();
+    if (!trust) throw new Error("expected current trust");
+    await fixture.store.authorityLog().append([{
+      stream: "device-lifecycle",
+      body: validateDeviceLifecycleRecord({
+        v: 1,
+        t: "accepted",
+        identity: {
+          v: 1,
+          kind: "anchor-uninstall",
+          requestId: "request-cancel",
+          operationId: "uninstall-cancel",
+          homeId: trust.homeId,
+          currentDeviceId: fixture.issuerKey.deviceId,
+          anchorEpoch: 1,
+          trustHeadDigest: trust.chainHead.eventDigest,
+          path: {
+            kind: "migration",
+            targetDeviceId: "target-cancel",
+            transferId: "transfer-cancel",
+          },
+        },
+      }),
+    }]);
+    const releaseAdmission = vi.fn(async () => undefined);
+    const coordinator = new AnchorUninstallCoordinator({
+      ...fixture.base,
+      commitMigration: async () => undefined,
+      verifyMigration: async () => undefined,
+      retireMigratedDevice: async () => undefined,
+      closeAdmission: async () => undefined,
+      releaseAdmission,
+      cleanupRecovery: async () => [],
+      onRetired: async () => undefined,
+    });
+
+    await expect(coordinator.readLifecycle("uninstall-missing")).resolves.toBeUndefined();
+    await expect(coordinator.readLifecycle("uninstall-cancel")).resolves.toEqual({
+      kind: "current-device-removal",
+      path: "migration",
+      phase: "accepted",
+    });
+    const aborted = await coordinator.abort("uninstall-cancel");
+    expect(aborted).toEqual({
+      kind: "current-device-removal",
+      path: "migration",
+      phase: "aborted",
+    });
+    expect(Object.isFrozen(aborted)).toBe(true);
+    expect(releaseAdmission).toHaveBeenCalledOnce();
+    expect(releaseAdmission).toHaveBeenCalledWith("uninstall-cancel");
+    const lifecycle = await fixture.store.authorityLog().readStream<unknown>("device-lifecycle");
+    expect(lifecycle.map((entry) => validateDeviceLifecycleRecord(entry.body))).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          t: "aborted",
+          operationId: "uninstall-cancel",
+          abort: expect.objectContaining({
+            reason: "user-cancelled",
+            signature: expect.any(Object),
+          }),
+        }),
+      ]),
+    );
+  });
 });
 
 async function createFixture() {
