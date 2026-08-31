@@ -6,6 +6,12 @@ import {
   type DeliveryUncertainResolutionApplication,
 } from "@zhixing/core/delivery/application";
 import {
+  createDeviceAdministrationProductApiContribution,
+  DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET,
+  DeviceAdministrationApplicationService,
+  type DeviceAdministrationApplicationOptions,
+} from "@zhixing/core/device-administration/application";
+import {
   createScheduleRuntimeProductApiContribution,
   SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET,
 } from "@zhixing/core/scheduler/application";
@@ -19,6 +25,7 @@ import {
   buildDutyMigrationCommitMethod,
   buildDutyMigrationPrepareMethod,
   buildDutyMigrationTargetsMethod,
+  buildDeviceListMethod,
   buildDeviceContinueMethod,
   buildDeviceRemoveMethod,
   buildDeviceStatusMethod,
@@ -45,6 +52,20 @@ function mkCtx(overrides: Partial<HandlerContext["server"]> = {}): HandlerContex
       ...overrides,
     } as any,
   };
+}
+
+function deviceAdministrationProductApi(
+  overrides: Partial<DeviceAdministrationApplicationOptions> = {},
+): ProductApiDispatcher {
+  const application = new DeviceAdministrationApplicationService({
+    relationships: { list: async () => [] },
+    removalState: { read: async () => undefined },
+    dutyMigrationTargets: { list: async () => [] },
+    ...overrides,
+  });
+  return new ProductApiDispatcher(DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET, [
+    createDeviceAdministrationProductApiContribution(application),
+  ]);
 }
 
 describe("Unit 37 lifecycle facade input", () => {
@@ -339,7 +360,12 @@ describe("dutyMigration.*", () => {
     const prepare = vi.fn(async () => ({ stage: "ready" as const }));
     const commit = vi.fn(async () => ({ stage: "completed" as const }));
     const cancel = vi.fn(async () => ({ stage: "cancelled" as const }));
-    const ctx = mkCtx({ dutyMigration: { targets, prepare, commit, cancel } });
+    const ctx = mkCtx({
+      productApi: deviceAdministrationProductApi({
+        dutyMigrationTargets: { list: targets },
+      }),
+      dutyMigration: { prepare, commit, cancel },
+    });
     const identity = {
       requestId: "request:duty-1",
       transferId: "duty-1",
@@ -374,7 +400,6 @@ describe("dutyMigration.*", () => {
   it("严格拒绝未知字段和不稳定身份", async () => {
     const ctx = mkCtx({
       dutyMigration: {
-        targets: vi.fn(async () => []),
         prepare: vi.fn(async () => ({ stage: "ready" as const })),
         commit: vi.fn(async () => ({ stage: "completed" as const })),
         cancel: vi.fn(async () => ({ stage: "cancelled" as const })),
@@ -397,7 +422,6 @@ describe("dutyMigration.*", () => {
   it("把目标缺口、结果不明和提交后取消投影为可行动文案", async () => {
     const ctx = mkCtx({
       dutyMigration: {
-        targets: vi.fn(async () => []),
         prepare: vi.fn(async () => {
           throw new Error("Target credentials are not unlocked");
         }),
@@ -1052,6 +1076,60 @@ describe("delivery.resolve", () => {
       authorityRevision: 11,
       commitLsn: 13,
     });
+  });
+});
+
+describe("Device Administration read Product API binding", () => {
+  it("projects device relationships and removal state through the shared dispatcher", async () => {
+    const relationships = vi.fn(async () => [
+      { displayName: "书房设备", reachable: true },
+    ]);
+    const removalState = vi.fn(async () => ({
+      phase: "waiting-for-device" as const,
+      conversations: ["conv-main"],
+      localData: "known" as const,
+      credentialActions: ["等待设备上线"],
+    }));
+    const ctx = mkCtx({
+      productApi: deviceAdministrationProductApi({
+        relationships: { list: relationships },
+        removalState: { read: removalState },
+      }),
+    });
+
+    await expect(buildDeviceListMethod().handler({}, ctx)).resolves.toEqual({
+      devices: [{ displayName: "书房设备", reachable: true }],
+    });
+    await expect(buildDeviceStatusMethod().handler({ targetName: "书房设备" }, ctx))
+      .resolves.toEqual({
+        state: {
+          phase: "waiting-for-device",
+          conversations: ["conv-main"],
+          localData: "known",
+          credentialActions: ["等待设备上线"],
+        },
+      });
+    expect(relationships).toHaveBeenCalledTimes(1);
+    expect(removalState).toHaveBeenCalledWith("书房设备");
+  });
+
+  it("fails closed with the existing errors when the Host has no read contribution", async () => {
+    await expect(buildDeviceListMethod().handler({}, mkCtx())).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.INTERNAL_ERROR,
+      message: "设备管理当前不可用",
+    });
+    await expect(buildDeviceStatusMethod().handler(
+      { targetName: "书房设备" },
+      mkCtx(),
+    )).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.INTERNAL_ERROR,
+      message: "设备管理当前不可用",
+    });
+    await expect(buildDutyMigrationTargetsMethod().handler({}, mkCtx()))
+      .rejects.toMatchObject({
+        code: RPC_ERROR_CODES.INTERNAL_ERROR,
+        message: "值班设备迁移当前不可用",
+      });
   });
 });
 

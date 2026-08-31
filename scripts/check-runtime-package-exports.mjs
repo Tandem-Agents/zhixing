@@ -8,6 +8,7 @@ const [
   coreScheduleApplication,
   coreDeliveryApplication,
   coreChannelDeliveryEffect,
+  coreDeviceAdministrationApplication,
   coreProductApi,
   coreTrustAdministration,
   coreAuthority,
@@ -47,6 +48,7 @@ const [
   import("../packages/core/dist/scheduler/application.js"),
   import("../packages/core/dist/delivery/application.js"),
   import("../packages/core/dist/delivery/channel-effect.js"),
+  import("../packages/core/dist/device-administration/application.js"),
   import("../packages/core/dist/product-api/catalog.js"),
   import("../packages/core/dist/trust-administration/application.js"),
   import("../packages/core/dist/authority/index.js"),
@@ -744,6 +746,25 @@ async function verifyCorePackageExports(failures) {
   ) {
     failures.push("core-exports:delivery-channel-effect:invalid-runtime-boundary");
   }
+  const deviceAdministrationConditions =
+    manifest.exports["./device-administration/application"];
+  if (
+    !deviceAdministrationConditions ||
+    deviceAdministrationConditions.types !==
+      "./dist/device-administration/application.d.ts" ||
+    deviceAdministrationConditions.import !==
+      "./dist/device-administration/application.js" ||
+    typeof coreDeviceAdministrationApplication.DeviceAdministrationApplicationService !==
+      "function" ||
+    typeof coreDeviceAdministrationApplication.createDeviceAdministrationProductApiContribution !==
+      "function" ||
+    "DeviceAdministrationApplicationService" in coreRoot ||
+    "createDeviceAdministrationProductApiContribution" in coreRoot
+  ) {
+    failures.push(
+      "core-exports:device-administration-application:invalid-runtime-boundary",
+    );
+  }
   for (const retiredTarget of [
     "dist/delivery/resolution-application.d.ts",
     "dist/delivery/resolution-application.js",
@@ -848,6 +869,19 @@ async function verifyCorePackageExports(failures) {
   }
   for (const [subpath, conditions] of Object.entries(manifest.exports)) {
     if (
+      subpath !== "./device-administration/application" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === deviceAdministrationConditions?.types ||
+        conditions.import === deviceAdministrationConditions?.import)
+    ) {
+      failures.push(
+        `core-exports:${subpath}:duplicate-device-administration-application-entry`,
+      );
+    }
+  }
+  for (const [subpath, conditions] of Object.entries(manifest.exports)) {
+    if (
       subpath !== "./delivery/application" &&
       conditions &&
       typeof conditions === "object" &&
@@ -935,6 +969,15 @@ async function verifyCorePackageExports(failures) {
               `core-exports:${subpath}:workspace-administration-runtime-leak`,
             );
           }
+          if (
+            subpath !== "./device-administration/application" &&
+            ("DeviceAdministrationApplicationService" in exported ||
+              "createDeviceAdministrationProductApiContribution" in exported)
+          ) {
+            failures.push(
+              `core-exports:${subpath}:device-administration-application-runtime-leak`,
+            );
+          }
         } catch {
           failures.push(`core-exports:${subpath}:${condition}:unloadable-target`);
         }
@@ -959,6 +1002,14 @@ async function verifyCorePackageExports(failures) {
           declaration.includes("catalog-application")
         ) {
           failures.push(`core-exports:${subpath}:skill-catalog-type-leak`);
+        }
+        if (
+          subpath !== "./device-administration/application" &&
+          /DeviceAdministrationApplication(?:Service)?/u.test(declaration)
+        ) {
+          failures.push(
+            `core-exports:${subpath}:device-administration-application-type-leak`,
+          );
         }
       }
     }

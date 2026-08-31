@@ -76,6 +76,11 @@ import {
   DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET,
 } from "@zhixing/core/delivery/application";
 import {
+  createDeviceAdministrationProductApiContribution,
+  DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET,
+  DeviceAdministrationApplicationService,
+} from "@zhixing/core/device-administration/application";
+import {
   defineProductApiExactSet,
   ProductApiDispatcher,
 } from "@zhixing/core/product-api";
@@ -2165,6 +2170,22 @@ async function runServerProcess(
   const advancementProductApi = advancementApplication
     ? createAdvancementProductApiContribution(advancementApplication)
     : undefined;
+  const deviceAdministrationProductApi = ctx.meshRuntime
+    ? createDeviceAdministrationProductApiContribution(
+        new DeviceAdministrationApplicationService({
+          relationships: {
+            list: () => ctx.meshRuntime!.removableDevices(),
+          },
+          removalState: {
+            read: (targetName) =>
+              ctx.meshRuntime!.deviceRemovalStatus({ targetName }),
+          },
+          dutyMigrationTargets: {
+            list: () => ctx.meshRuntime!.plannedAnchorTargets(),
+          },
+        }),
+      )
+    : undefined;
   const productApi = new ProductApiDispatcher(
     defineProductApiExactSet({
       operations: [
@@ -2180,6 +2201,9 @@ async function runServerProcess(
         ...(deliveryProductApi
           ? DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET.operations
           : []),
+        ...(deviceAdministrationProductApi
+          ? DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET.operations
+          : []),
       ],
       factEvents: [
         ...CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET.factEvents,
@@ -2193,6 +2217,9 @@ async function runServerProcess(
           : []),
         ...(deliveryProductApi
           ? DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET.factEvents
+          : []),
+        ...(deviceAdministrationProductApi
+          ? DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET.factEvents
           : []),
       ],
     }),
@@ -2212,6 +2239,7 @@ async function runServerProcess(
       ),
       ...(advancementProductApi ? [advancementProductApi] : []),
       ...(deliveryProductApi ? [deliveryProductApi] : []),
+      ...(deviceAdministrationProductApi ? [deviceAdministrationProductApi] : []),
     ],
   );
   let serverCtx: ServerContext;
@@ -2274,7 +2302,6 @@ async function runServerProcess(
     ...(ctx.meshRuntime
       ? {
           dutyMigration: {
-            targets: async () => ctx.meshRuntime!.plannedAnchorTargets(),
             prepare: async (input: {
               readonly requestId: string;
               readonly transferId: string;
@@ -2293,7 +2320,6 @@ async function runServerProcess(
             },
           },
           deviceLifecycle: {
-            list: () => ctx.meshRuntime!.removableDevices(),
             remove: (input: {
               readonly requestId: string;
               readonly operationId: string;
@@ -2309,9 +2335,6 @@ async function runServerProcess(
                   readonly mode: "cancel";
                   readonly operationId?: string;
                 }) => ctx.meshRuntime!.continueDeviceRemoval(input),
-            status: (input: {
-              readonly targetName: string;
-            }) => ctx.meshRuntime!.deviceRemovalStatus(input),
           },
         }
       : {}),

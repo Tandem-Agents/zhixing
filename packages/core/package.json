@@ -116,6 +116,10 @@
       "types": "./dist/delivery/channel-effect.d.ts",
       "import": "./dist/delivery/channel-effect.js"
     },
+    "./device-administration/application": {
+      "types": "./dist/device-administration/application.d.ts",
+      "import": "./dist/device-administration/application.js"
+    },
     "./environment": {
       "types": "./dist/environment/index.d.ts",
       "import": "./dist/environment/index.js"

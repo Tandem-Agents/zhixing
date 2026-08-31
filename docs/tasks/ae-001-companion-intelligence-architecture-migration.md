@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-15m 已实施，等待协调者复核 Advancement 全领域零残留闭包<br>
+> 当前检查点：等待协调者复核 A5-16a Device Administration 用户可见读取投影与纯 binding<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,13 +202,13 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `29fca498`；A5-15l 已由协调者独立复核并提交，Evidence/Reviewer 外部机制固定注入唯一 Advancement review 应用，旧 review bridge 已归零 |
+| 已接受基线 | `d73fc944`；A5-15m 已由协调者独立复核并提交，Advancement 十三个生产责任族、全部 Store 写权、active-state 查询与 proxy settlement 均已收束到唯一应用边界，旧入口、导出与桥为零 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | A5-15m 已实施并等待协调者复核；`A5-15m-advancement-domain-closure-v1` 已闭合 13 个 production family、全 Store 写权与旧入口/导出反查 |
-| 下一责任链 | 协调者接受 A5-15m 后进入 Device Administration；不得重复迁移 Advancement、提前进入 Backup/A6 或扩大本闭包 |
-| 打开的单向桥 | 无；A5-15m 已从 CLI/RPC、committed-turn、recovery、system maintenance 与全部持久写入口反向证明桥登记为零 |
-| 已失效证据 | 无当前未恢复证据；A5-15a～A5-15l 继续有效，A0-06a 的“旧文件 Store 无生产根”结论未变；A0-07a 的 core 宽入口符号集合随 `AdvancementStore` 正式导出退场由 fresh package-export 门恢复 |
-| 阻塞/用户决策 | 无；等待协调者独立复核本包，不存在产品语义或公开协议决策 |
+| 活跃工作包 | `A5-16a-device-administration-read-projection-v1` 已实施并等待协调者独立复核：设备关系、设备移除状态和值班接班候选已共用唯一 Device Administration Query/Application/Product API；不含任何写入或效果链 |
+| 下一责任链 | 接受 A5-16a 后执行 `A5-16b`，只迁移 `device.remove/device.continue` 的设备移除写决定并退场对应两条桥；duty migration 三条写链继续后置，不得整体派发 Device Administration、提前进入 Backup/A6 或重复迁移 Advancement |
+| 打开的单向桥 | `A5-DEVICE-REMOVE-01=device.remove`、`A5-DEVICE-CONTINUE-01=device.continue`、`A5-DUTY-MIGRATION-PREPARE-01=dutyMigration.prepare`、`A5-DUTY-MIGRATION-COMMIT-01=dutyMigration.commit`、`A5-DUTY-MIGRATION-CANCEL-01=dutyMigration.cancel` 仍由既有 ServerContext/CLI 装配接口承接；每条只能在紧邻写链工作包退场，A5-16a 未新增其他桥 |
+| 已失效证据 | 无当前未恢复证据；`A5-16a-device-administration-read-projection-v1` 当前等待独立复核，A5-15a～A5-15m 继续有效；本包未改变 Device removal/duty migration 的持久机制、写链、公开 wire 或拓扑协议 |
+| 阻塞/用户决策 | 无；Device Administration 的现有公开语义与 AE-001 目标边界足以裁决当前读取切片 |
 
 ### A0 基线索引
 
@@ -2370,6 +2370,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 写权、导出与行为裁决：生产 Store 写调用只剩三个有限机制 owner：Controller 提供 Rubric/active/lifecycle persistence primitives，`AdvancementEvidenceCoordinator` 提交 evidence primitive，`review-attempt-correctness` 提交 attempt/outcome/proxy primitive；领域状态分支、顺序与终态均在上表应用中，CLI/Server/recovery/system maintenance 没有 Store 写入。无生产构造的旧文件 `AdvancementStore` 不属于 production exact-set，其正式 `@zhixing/core` 根/`./advancement` 转导已删除，fresh 声明与运行时导出均不再包含该类；源码内仅作为内部测试夹具，S7 明确拒绝任一 production import/new/export 或 build/public 入口回流。A0-06a 的“无第二持久根”结论因此不变。全部现有 Advancement RPC/Event、中文文案、Rubric、原任务/active turn、accepted review、Evidence、资源计量、proxy identity/delivery、closure、conversation deletion、恢复/replay、错误、终态与 Authority schema 均未改变。
 
 - 验证、失效与交接：Core application/review 2 文件 71/71；Server recovery/session/workscene 3 文件 131/131 与 Controller 21/21；CLI 真实 review recovery 7/7，合计 7 个直接文件 230/230。core、owner-services、server fresh build、CLI typecheck 与 `pnpm cli:build` 通过；canonical S7 coverage/mutation 33/33 + registry golden、fresh `pnpm runtime:package-exports`、changed-source Biome 与 `git diff --check` 通过。S7 冻结上述 13-family exact-set、active Query/settlement、两个生产消费面、recovery、ServerContext、Store write allowlist 和旧 Store 正式入口归零，并以反向 mutation 拒绝任一回流。以后若任一应用/机制 owner、Product API exact-set、Controller/Correctness/外部 adapter、Host 构造、Store primitive/event/schema、active projection、proxy settlement/recovery、公开 export/build 或上述 S7/direct evidence变化，只恢复本证据及实际受影响的 A5-15 子证据；无关 Device/Backup/A6 变化不误伤本闭包。Advancement 行已据当前实施结果更新为 `[x]`，A5 继续 `[ ]`，下一检查点为 Device Administration；本包未进入后续领域，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+### A5-16a：归位 Device Administration 用户可见读取投影与纯 binding
+
+- 实施基线与责任 exact-set：以 `HEAD d73fc944` 加协调者调度记录为基线，形成待复核证据 `A5-16a-device-administration-read-projection-v1`。即时正向追踪 `device.list`、`device.status`、`dutyMigration.targets` 三个认证 RPC，反向核对 `MeshRuntimeAssembly.removableDevices/deviceRemovalStatus/plannedAnchorTargets`、Host 组合、ServerContext 与 CLI management facade 后，确认本包读取 exact-set 恰为“设备关系候选、指定设备移除公开状态、值班接班候选”三个 Query；它们不产生 Fact Event，也不拥有 remove/continue/prepare/commit/cancel 写入、Trust/DeviceLifecycle/Assignment/Mesh 状态机或外部效果。
+- 唯一应用与机制边界：新增唯一窄入口 `@zhixing/core/device-administration/application`，由 `DeviceAdministrationApplicationService` 定义三个有限 readonly Query/Result、不可变用户投影和 `DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET`；三个 read port 只读取既有关系、移除状态和候选 readiness 机制，不暴露 Store、Authority、路径、Mesh/connection 或写端口。Anchor 唯一组合根只构造一次该应用与 contribution，并与既有领域 contribution 一并封入同一个 `ProductApiDispatcher`；应用缺失时三个 RPC 继续以迁移前“设备管理当前不可用/值班设备迁移当前不可用”fail closed。
+- Surface 与旧路退场：`device.list/device.status/dutyMigration.targets` handler 现只保留认证后的 exact 参数校验、Product API Query 调用及既有错误/结果投影；`ServerContext.dutyMigration.targets`、`ServerContext.deviceLifecycle.list/status` 与 CLI Host 三个直接 read closure 已删除。CLI `RpcManagementFacade` 继续只拥有原 wire 请求、严格解码和现有公开类型，设备列表、移除状态 `null`、候选 `ready/code`、中文错误和命令行为均未改变。五条写接口按实时台账桥 ID 保留，下一检查点固定为 `A5-16b device.remove/device.continue`，本包未迁移或重解释其写决定。
+- 直接证据与构建：Core Device Administration application/Product API 3/3、Server management binding 62/62、CLI management facade + device removal journey 2 文件 13/13，合计 4 文件 78/78；覆盖三 Query exact-set/零 Fact、不可变投影、缺状态为 `null`、无 contribution 拒绝、原 wire DTO、设备列表/状态消费与现有写方法不漂移。Core fresh build、Server fresh build、CLI typecheck 与 `pnpm cli:build` 通过；fresh `pnpm runtime:package-exports` 通过。canonical S7 coverage/mutation 34/34 与 registry golden 通过，新增反向 mutation 可识别 Query identity/kind 漂移、第二应用构造、RPC 恢复 ServerContext 直读、read owner 回流和根/重复导出；最窄 Biome 无修复。
+- 失效与交接：以后若三个 Query/Result、read port、应用/descriptor owner、Host contribution/exact-set、ServerContext、RPC handler、CLI wire codec、`MeshRuntimeAssembly` 三个读取机制、core 窄 export/build、S7/package-export 或上述直接测试任一变化，只恢复本证据并重验实际失效闭包；五条写桥、DeviceLifecycle/Trust/Assignment/Mesh 内部与后续 Backup/A6 变化不自动误伤本读取证据。Device Administration 行和 A5 继续为 `[ ]`；当前停在可构建、可运行、单一读取真相成立且写链未改的检查点等待协调者独立复核，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 

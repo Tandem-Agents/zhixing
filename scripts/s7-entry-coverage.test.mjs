@@ -15,6 +15,7 @@ import {
   inspectCleanupRegistryConstructions,
   inspectConversationAdoptionAssembly,
   inspectDeviceLifecycleAssembly,
+  inspectDeviceAdministrationReadOwnership,
   ADVANCEMENT_APPLICATION_OWNER_EXACT_SET,
   inspectAdvancementDetailApplicationOwnership,
   inspectKernelRunEnvelopeOwnership,
@@ -2365,6 +2366,70 @@ test("retired entry, live writable Store and reverse package dependency mutation
   assert.match(
     inspectProductionSource("packages/cli/src/bad.ts", 'const name = "LegacyDeliveryDrainer";')[0],
     /retired token LegacyDeliveryDrainer/,
+  );
+});
+
+test("Device Administration read projection has one application and pure RPC bindings", async () => {
+  const paths = [
+    "packages/core/src/device-administration/application.ts",
+    "packages/core/src/index.ts",
+    "packages/core/package.json",
+    "packages/core/tsup.config.ts",
+    "packages/server/src/context.ts",
+    "packages/server/src/rpc/methods/server.ts",
+    "packages/cli/src/serve/command.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: (await readFile(relative, "utf8")).replaceAll("\r\n", "\n"),
+  })));
+  assert.deepEqual(inspectDeviceAdministrationReadOwnership(records), []);
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/core/src/device-administration/application.ts",
+      (text) => text.replace("defineProductApiQuery<", "defineProductApiCommand<"),
+    )).join("\n"),
+    /Query\/Product API exact-set drifted/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "new DeviceAdministrationApplicationService({",
+        "new DeviceAdministrationApplicationService({}); new DeviceAdministrationApplicationService({",
+      ),
+    )).join("\n"),
+    /unique Host application composition drifted/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/server/src/rpc/methods/server.ts",
+      (text) => text.replace(
+        "productApi.query(DEVICE_ADMINISTRATION_LIST_QUERY",
+        "ctx.server.deviceLifecycle.list(); productApi.query(DEVICE_ADMINISTRATION_LIST_QUERY",
+      ),
+    )).join("\n"),
+    /RPC pure read binding drifted/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/server/src/context.ts",
+      (text) => text.replace(
+        "deviceLifecycle?: {",
+        "deviceLifecycle?: {\n    list(): Promise<readonly unknown[]>;",
+      ),
+    )).join("\n"),
+    /ServerContext read owner returned/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/core/src/index.ts",
+      (text) => `${text}\nexport * from \"./device-administration/application.js\";`,
+    )).join("\n"),
+    /narrow export\/build boundary drifted/,
   );
 });
 

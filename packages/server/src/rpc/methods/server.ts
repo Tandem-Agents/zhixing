@@ -12,6 +12,11 @@
 
 import { isDeliveryItemId } from "@zhixing/core/delivery";
 import { DELIVERY_RESOLVE_UNCERTAIN_COMMAND } from "@zhixing/core/delivery/application";
+import {
+  DEVICE_ADMINISTRATION_DUTY_MIGRATION_TARGETS_QUERY,
+  DEVICE_ADMINISTRATION_LIST_QUERY,
+  DEVICE_ADMINISTRATION_STATUS_QUERY,
+} from "@zhixing/core/device-administration/application";
 import { SCHEDULE_RUNTIME_STATUS_QUERY } from "@zhixing/core/scheduler/application";
 import { isProtocolIdentifier } from "@zhixing/core/protocol";
 import type { ExecutionStatusNotice } from "@zhixing/core/contracts";
@@ -376,11 +381,14 @@ export function buildDutyMigrationTargetsMethod(): MethodEntry {
     requiresAuth: true,
     async handler(params, ctx) {
       parseEmptyParams(params, "dutyMigration.targets");
-      const migration = ctx.server.dutyMigration;
-      if (!migration) throw RpcErrors.internal("值班设备迁移当前不可用");
-      return runDutyMigrationOperation("targets", async () => ({
-        devices: await migration.targets(),
-      }));
+      const productApi = ctx.server.productApi;
+      if (!productApi?.supports(DEVICE_ADMINISTRATION_DUTY_MIGRATION_TARGETS_QUERY)) {
+        throw RpcErrors.internal("值班设备迁移当前不可用");
+      }
+      return runDutyMigrationOperation("targets", () =>
+        productApi.query(DEVICE_ADMINISTRATION_DUTY_MIGRATION_TARGETS_QUERY, {
+          kind: "list-duty-migration-targets",
+        }));
     },
   };
 }
@@ -430,9 +438,13 @@ export function buildDeviceListMethod(): MethodEntry {
     requiresAuth: true,
     async handler(params, ctx) {
       parseEmptyParams(params, "device.list");
-      const lifecycle = ctx.server.deviceLifecycle;
-      if (!lifecycle) throw RpcErrors.internal("设备管理当前不可用");
-      return { devices: await lifecycle.list() };
+      const productApi = ctx.server.productApi;
+      if (!productApi?.supports(DEVICE_ADMINISTRATION_LIST_QUERY)) {
+        throw RpcErrors.internal("设备管理当前不可用");
+      }
+      return productApi.query(DEVICE_ADMINISTRATION_LIST_QUERY, {
+        kind: "list-device-relationships",
+      });
     },
   };
 }
@@ -468,10 +480,15 @@ export function buildDeviceStatusMethod(): MethodEntry {
     name: "device.status",
     requiresAuth: true,
     async handler(params, ctx) {
-      const lifecycle = ctx.server.deviceLifecycle;
-      if (!lifecycle) throw RpcErrors.internal("设备管理当前不可用");
       const input = parseDeviceRemovalIdentity(params);
-      return { state: await lifecycle.status(input) ?? null };
+      const productApi = ctx.server.productApi;
+      if (!productApi?.supports(DEVICE_ADMINISTRATION_STATUS_QUERY)) {
+        throw RpcErrors.internal("设备管理当前不可用");
+      }
+      return productApi.query(DEVICE_ADMINISTRATION_STATUS_QUERY, {
+        kind: "read-device-removal-state",
+        targetName: input.targetName,
+      });
     },
   };
 }

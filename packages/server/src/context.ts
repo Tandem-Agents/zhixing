@@ -199,22 +199,12 @@ export interface ServerContext {
   }>;
   /** 用户主动迁移值班设备；仅暴露设备与用户可理解的阶段。 */
   dutyMigration?: {
-    targets(): Promise<readonly {
-      readonly deviceId: string;
-      readonly displayName: string;
-      readonly ready: boolean;
-      readonly code?: "unavailable";
-    }[]>;
     prepare(input: { readonly requestId: string; readonly transferId: string; readonly targetDeviceId: string }): Promise<{ readonly stage: "ready" }>;
     commit(input: { readonly requestId: string; readonly transferId: string }): Promise<{ readonly stage: "completed" }>;
     cancel(input: { readonly requestId: string; readonly transferId: string }): Promise<{ readonly stage: "cancelled" }>;
   };
   /** Current-duty-device management surface for a paired executor lifecycle. */
   deviceLifecycle?: {
-    list(): Promise<readonly {
-      readonly displayName: string;
-      readonly reachable: boolean;
-    }[]>;
     remove(input: {
       readonly requestId: string;
       readonly operationId: string;
@@ -233,9 +223,6 @@ export interface ServerContext {
           readonly mode: "cancel";
           readonly operationId?: string;
         }): Promise<unknown>;
-    status(input: {
-      readonly targetName: string;
-    }): Promise<unknown>;
   };
   /** Loopback-only permanent removal of the current duty device. */
   anchorUninstall?: {
