@@ -1554,7 +1554,7 @@ describe("ConversationDirectoryApplicationService", () => {
     expect(steps).toEqual(["storage", "runtime", "fact"]);
   });
 
-  it("projects delete fact before dependent lifecycle and preserves strict/best-effort failure", async () => {
+  it("projects delete before dependent lifecycle and preserves strict/best-effort failures", async () => {
     const steps: string[] = [];
     const projection = {
       deleteRuntimeAndStorage: async (input: { readonly onDeleted: () => void }) => {
@@ -1564,9 +1564,11 @@ describe("ConversationDirectoryApplicationService", () => {
       },
       cancelDependentLifecycle: async () => {
         steps.push("cancel");
-        throw new Error("cancel failed");
       },
-      removeDependentData: async () => { steps.push("remove"); },
+      removeDependentData: async () => {
+        steps.push("remove");
+        throw new Error("remove failed");
+      },
     };
     await expect(projectConversationDelete({
       conversationId: "conversation-1",
@@ -1575,8 +1577,8 @@ describe("ConversationDirectoryApplicationService", () => {
       dependentFailure: "propagate",
       projection,
       publishFact: () => { steps.push("fact"); },
-    })).rejects.toThrow("cancel failed");
-    expect(steps).toEqual(["delete", "fact", "cancel"]);
+    })).rejects.toThrow("remove failed");
+    expect(steps).toEqual(["delete", "fact", "cancel", "remove"]);
 
     steps.length = 0;
     const failed: string[] = [];
@@ -1590,7 +1592,44 @@ describe("ConversationDirectoryApplicationService", () => {
       onDependentFailure: (step) => { failed.push(step); },
     })).resolves.toMatchObject({ kind: "conversation-deleted" });
     expect(steps).toEqual(["delete", "fact", "cancel", "remove"]);
-    expect(failed).toEqual(["cancel-lifecycle"]);
+    expect(failed).toEqual(["remove-data"]);
+
+    steps.length = 0;
+    failed.length = 0;
+    await expect(projectConversationDelete({
+      conversationId: "conversation-1",
+      operationId: "delete-operation-1",
+      deletionAlreadyCommitted: false,
+      dependentFailure: "best-effort",
+      projection: {
+        ...projection,
+        cancelDependentLifecycle: async () => {
+          steps.push("cancel");
+          throw new Error("cancel failed");
+        },
+      },
+      publishFact: () => { steps.push("fact"); },
+      onDependentFailure: (step) => { failed.push(step); },
+    })).resolves.toMatchObject({ kind: "conversation-deleted" });
+    expect(steps).toEqual(["delete", "fact", "cancel", "remove"]);
+    expect(failed).toEqual(["cancel-lifecycle", "remove-data"]);
+
+    steps.length = 0;
+    await expect(projectConversationDelete({
+      conversationId: "conversation-1",
+      operationId: "delete-operation-1",
+      deletionAlreadyCommitted: false,
+      dependentFailure: "propagate",
+      projection: {
+        ...projection,
+        cancelDependentLifecycle: async () => {
+          steps.push("cancel");
+          throw new Error("cancel failed");
+        },
+      },
+      publishFact: () => { steps.push("fact"); },
+    })).rejects.toThrow("cancel failed");
+    expect(steps).toEqual(["delete", "fact", "cancel"]);
   });
 
   it("owns cross-owner list merge ordering without changing local availability", () => {

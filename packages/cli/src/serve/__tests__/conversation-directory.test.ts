@@ -332,7 +332,7 @@ describe("conversation directory(持久层实现)", () => {
     }
   });
 
-  it("durable delete recovery retries strict dependent cleanup without rebroadcasting", async () => {
+  it("durable delete projects storage before strict lifecycle cleanup and replays dependencies", async () => {
     const manager = new ConversationManager(
       { create: async () => { throw new Error("runtime must not be created by delete"); } },
       { idleCheckIntervalMs: 999_999 },

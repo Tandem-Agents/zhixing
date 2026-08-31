@@ -557,7 +557,6 @@ const conversationSurface: AccessSurface = {
           });
           return;
         }
-        const advancement = ctx.advancement;
         await projectConversationDelete({
           conversationId: input.conversationId,
           operationId: input.requestId,
@@ -575,21 +574,16 @@ const conversationSurface: AccessSurface = {
                   conversationId,
                 ),
             },
-            ...(advancement
-              ? {
-                  related: {
-                    cancelDependentLifecycle: async (conversationId) => {
-                      await advancement.cancelOpenConversationSession({
-                        conversationId,
-                        reason: "user-cancelled",
-                        message: "原始对话已删除，推进会话已取消。",
-                      });
-                    },
-                    removeDependentData: (conversationId) =>
-                      advancement.removeConversationData(conversationId),
-                  },
-                }
-              : {}),
+            related: {
+              cancelDependentLifecycle: (conversationId) =>
+                ctx.advancementConversationLifecycle.cancelConversationLifecycle(
+                  conversationId,
+                ),
+              removeDependentData: (conversationId) =>
+                ctx.advancementConversationLifecycle.removeConversationData(
+                  conversationId,
+                ),
+            },
           }),
           publishFact: (fact) => {
             ctx.sessionBroadcastRef.current?.(

@@ -602,22 +602,23 @@ describe("AdvancementStore", () => {
     expect(await store.loadSession("conv-1", "session-1")).toBeNull();
   });
 
-  it("sweepOrphanDirs 只清理对话已不存在的孤儿目录", async () => {
+  it("只提供有限孤儿候选枚举和单候选删除机制", async () => {
     const { root, store } = await makeStore();
     await store.createSession(createInput());
     await store.createSession(
       createInput({ id: "session-2", conversationId: "conv-2" }),
     );
 
-    const result = await store.sweepOrphanDirs(
-      async (dirName) => dirName === "conv-1",
-    );
-
-    expect(result.scanned).toBe(2);
-    expect(result.removed).toBe(1);
-    expect(result.warnings).toEqual([]);
+    await expect(store.listConversationDataCandidates()).resolves.toEqual([
+      "conv-1",
+      "conv-2",
+    ]);
+    await store.removeConversationDataCandidate("conv-2");
     expect(await store.loadSession("conv-1", "session-1")).not.toBeNull();
     expect(await store.loadSession("conv-2", "session-2")).toBeNull();
+    await expect(
+      store.removeConversationDataCandidate("../foreign"),
+    ).rejects.toThrow("single path segment");
   });
 
   it("重放时隔离未条目化的旧形状 rubric_confirmed，会话干净退回待确认", async () => {

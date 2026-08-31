@@ -3376,8 +3376,22 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   const controller = required(
     "packages/owner-services/src/advancement/controller.ts",
   );
+  const lifecycleStore = required("packages/core/src/advancement/store.ts");
+  const sessionStore = required(
+    "packages/owner-services/src/advancement/session-store.ts",
+  );
+  const conversationApplication = required(
+    "packages/core/src/conversation/application.ts",
+  );
   const handler = required("packages/server/src/rpc/methods/session.ts");
+  const systemHandlers = required("packages/server/src/system-handlers.ts");
   const composition = required("packages/cli/src/serve/command.ts");
+  const accessSurfaces = required(
+    "packages/cli/src/serve/access-surfaces.ts",
+  );
+  const deleteBinding = required(
+    "packages/cli/src/serve/conversation-delete-binding.ts",
+  );
   const originalTaskAdapter = required(
     "packages/cli/src/serve/advancement-original-task-application.ts",
   );
@@ -3464,6 +3478,45 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   const send = sendStart >= 0 && sendEnd > sendStart
     ? handler.slice(sendStart, sendEnd)
     : "";
+  const deleteProjectionStart = conversationApplication.indexOf(
+    "export async function projectConversationDelete(",
+  );
+  const deleteProjectionEnd = conversationApplication.indexOf(
+    "function conversationDeletedFact(",
+    deleteProjectionStart,
+  );
+  const deleteProjection =
+    deleteProjectionStart >= 0 && deleteProjectionEnd > deleteProjectionStart
+      ? conversationApplication.slice(deleteProjectionStart, deleteProjectionEnd)
+      : "";
+  const deleteRuntimeIndex = deleteProjection.indexOf("deleteRuntimeAndStorage({");
+  const cancelDependentIndex = deleteProjection.indexOf(
+    "input.projection.cancelDependentLifecycle!(input.conversationId)",
+  );
+  const removeDependentIndex = deleteProjection.indexOf(
+    "input.projection.removeDependentData!(input.conversationId)",
+  );
+  const commitStart = deleteBinding.indexOf(
+    "export function createAnchorConversationDeleteCommitPort(",
+  );
+  const deleteCommit = commitStart >= 0 ? deleteBinding.slice(commitStart) : "";
+  const lifecycleApplicationStart = application.indexOf(
+    "export class AdvancementConversationLifecycleApplicationService",
+  );
+  const lifecycleApplicationEnd = application.indexOf(
+    "/** Path-free mechanisms used by the no-open-session new-task decision. */",
+    lifecycleApplicationStart,
+  );
+  const lifecycleApplication =
+    lifecycleApplicationStart >= 0 &&
+    lifecycleApplicationEnd > lifecycleApplicationStart
+      ? application.slice(lifecycleApplicationStart, lifecycleApplicationEnd)
+      : "";
+  const detailApplicationStart = application.indexOf(
+    "export class AdvancementApplicationService",
+  );
+  const detailApplication =
+    detailApplicationStart >= 0 ? application.slice(detailApplicationStart) : "";
 
   let manifest;
   try {
@@ -3486,6 +3539,26 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes("ADVANCEMENT_DETAIL_QUERY") ||
     !application.includes('"advancement.query.detail"') ||
     !application.includes("interface AdvancementConversationMaintenancePort") ||
+    !application.includes("interface AdvancementConversationLifecycleMechanismPort") ||
+    !application.includes("interface AdvancementConversationLifecycleApplication") ||
+    !application.includes("interface AdvancementConversationAlivePort") ||
+    lifecycleApplication.length === 0 ||
+    application.split("class AdvancementConversationLifecycleApplicationService")
+      .length -
+      1 !==
+      1 ||
+    !lifecycleApplication.includes("async cancelConversationLifecycle(") ||
+    !lifecycleApplication.includes("loadOpenConversationLifecycleSession(") ||
+    !lifecycleApplication.includes("persistConversationLifecycleCancellation(") ||
+    !lifecycleApplication.includes('reason: "user-cancelled"') ||
+    !lifecycleApplication.includes('message: "原始对话已删除，推进会话已取消。"') ||
+    !lifecycleApplication.includes("async removeConversationData(") ||
+    !lifecycleApplication.includes("async sweepOrphanData(") ||
+    !lifecycleApplication.includes("listConversationDataCandidates()") ||
+    !lifecycleApplication.includes("isConversationDataAlive(candidateId)") ||
+    !lifecycleApplication.includes("removeConversationDataCandidate(") ||
+    detailApplication.includes("cancelConversationLifecycle(") ||
+    detailApplication.includes("sweepOrphanData(") ||
     !application.includes("interface AdvancementNewTaskMechanismPort") ||
     !application.includes("interface AdvancementNewTaskConversationPort") ||
     !application.includes("interface AdvancementActiveUserTurnMechanismPort") ||
@@ -3731,6 +3804,41 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !controller.includes("settleInterruptedProxy(") ||
     controller.includes("async prepareUserTurn(") ||
     controller.includes("regenerateRubricContract(") ||
+    controller.includes("cancelOpenConversationSession(") ||
+    controller.includes("removeConversationData(") ||
+    controller.includes("sweepOrphanData(") ||
+    !controller.includes("loadOpenConversationLifecycleSession(") ||
+    !controller.includes("persistConversationLifecycleCancellation(") ||
+    !controller.includes("removeConversationLifecycleData(") ||
+    !controller.includes("listConversationLifecycleDataCandidates(") ||
+    !controller.includes("removeConversationLifecycleDataCandidate(") ||
+    lifecycleStore.includes("sweepOrphanDirs(") ||
+    !lifecycleStore.includes("listConversationDataCandidates()") ||
+    !lifecycleStore.includes("removeConversationDataCandidate(") ||
+    sessionStore.includes("sweepOrphanDirs(") ||
+    !sessionStore.includes("listConversationDataCandidates()") ||
+    !sessionStore.includes("removeConversationDataCandidate(") ||
+    deleteProjection.length === 0 ||
+    deleteRuntimeIndex < 0 ||
+    cancelDependentIndex < 0 ||
+    removeDependentIndex < 0 ||
+    deleteRuntimeIndex > cancelDependentIndex ||
+    cancelDependentIndex > removeDependentIndex ||
+    !deleteProjection.includes('"cancel-lifecycle"') ||
+    !deleteProjection.includes('"remove-data"') ||
+    deleteCommit.length === 0 ||
+    deleteCommit.includes("cancelDependentLifecycle?.(conversationId)") ||
+    !accessSurfaces.includes(
+      "ctx.advancementConversationLifecycle.cancelConversationLifecycle(",
+    ) ||
+    !accessSurfaces.includes(
+      "ctx.advancementConversationLifecycle.removeConversationData(",
+    ) ||
+    /advancementDetailController\.(?:cancelOpenConversationSession|removeConversationData|sweepOrphanData)/u.test(
+      accessSurfaces,
+    ) ||
+    !systemHandlers.includes("interface AdvancementGcDeps") ||
+    !systemHandlers.includes("const r = await deps.runSweep()") ||
     !composition.includes('from "@zhixing/core/advancement/application"') ||
     composition.split("new AdvancementApplicationService(").length - 1 !== 1 ||
     composition.split("createAdvancementProductApiContribution(").length - 1 !== 1 ||
@@ -3739,6 +3847,22 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !composition.includes("newTaskConversation: {") ||
     !composition.includes("activeUserTurn: advancementDetailController") ||
     !composition.includes("activeUserTurnRuntime: {") ||
+    composition.split("new AdvancementConversationLifecycleApplicationService(")
+      .length -
+      1 !==
+      1 ||
+    !composition.includes("const advancementConversationLifecycle =") ||
+    !composition.includes("mechanism: {") ||
+    !composition.includes(
+      "runSweep: () => advancementConversationLifecycle.sweepOrphanData()",
+    ) ||
+    !composition.includes("conversationAlive: {") ||
+    composition.includes("let advancementLifecycleApplication") ||
+    composition.includes("requireAdvancementLifecycleApplication") ||
+    composition.includes("advancementLifecycleApplication =") ||
+    /advancementDetailController\.(?:cancelOpenConversationSession|removeConversationData|sweepOrphanData)/u.test(
+      composition,
+    ) ||
     !composition.includes("cancelPendingBySource(") ||
     !composition.includes("getBusySource(conversationId)") ||
     !composition.includes("abortInFlight(conversationId, {") ||
@@ -3767,7 +3891,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !composition.includes("...(advancementProductApi ? [advancementProductApi] : [])")
   ) {
     failures.push(
-      "Advancement detail/rubric lifecycle lacks one domain application and Product API owner",
+      "Advancement detail/rubric lacks one Product API application or conversation lifecycle lacks one independent application owner",
     );
   }
 

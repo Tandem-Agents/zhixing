@@ -3402,16 +3402,22 @@ test("Trust Administration management has one domain application and Product API
   );
 });
 
-test("Advancement detail and rubric lifecycle have one Product API application owner", async () => {
+test("Advancement detail/rubric has one Product API application and conversation lifecycle has one independent owner", async () => {
   const paths = [
     "packages/core/src/advancement/application.ts",
+    "packages/core/src/advancement/store.ts",
+    "packages/core/src/conversation/application.ts",
     "packages/core/src/advancement/index.ts",
     "packages/core/src/index.ts",
     "packages/core/package.json",
     "packages/core/tsup.config.ts",
     "packages/owner-services/src/advancement/controller.ts",
+    "packages/owner-services/src/advancement/session-store.ts",
     "packages/server/src/rpc/methods/session.ts",
+    "packages/server/src/system-handlers.ts",
     "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/conversation-delete-binding.ts",
     "packages/cli/src/serve/advancement-original-task-application.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
@@ -3423,7 +3429,7 @@ test("Advancement detail and rubric lifecycle have one Product API application o
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
   );
-  const failure = /Advancement detail\/rubric lifecycle lacks one domain application and Product API owner/;
+  const failure = /Advancement detail\/rubric lacks one Product API application or conversation lifecycle lacks one independent application owner/;
 
   assert.match(
     inspectAdvancementDetailApplicationOwnership(mutate(
@@ -3704,6 +3710,69 @@ test("Advancement detail and rubric lifecycle have one Product API application o
       (text) => text.replace(
         "await this.#newTaskConversation.ensureShell(command.conversationId);",
         "void this.#newTaskConversation.ensureShell(command.conversationId);",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/owner-services/src/advancement/controller.ts",
+      (text) => `${text}\nasync cancelOpenConversationSession() { return null; }`,
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/core/src/advancement/store.ts",
+      (text) => `${text}\nasync sweepOrphanDirs() { return { scanned: 0, removed: 0, warnings: [] }; }`,
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/core/src/conversation/application.ts",
+      (text) => text.replace(
+        "const outcome = await input.projection.deleteRuntimeAndStorage({",
+        `await input.projection.cancelDependentLifecycle!(input.conversationId);
+  const outcome = await input.projection.deleteRuntimeAndStorage({`,
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/core/src/advancement/application.ts",
+      (text) => text.replace(
+        "export class AdvancementApplicationService implements AdvancementApplication {",
+        `export class AdvancementApplicationService implements AdvancementApplication {
+  async cancelConversationLifecycle(): Promise<void> {}`,
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => `${text}\nlet advancementLifecycleApplication;`,
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "runSweep: () => advancementConversationLifecycle.sweepOrphanData()",
+        "runSweep: () => advancementDetailController.sweepOrphanData()",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "ctx.advancementConversationLifecycle.cancelConversationLifecycle(",
+        "advancementDetailController.cancelOpenConversationSession(conversationId)",
       ),
     )).join("\n"),
     failure,

@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-15g 已完成，等待协调者独立复核<br>
+> 当前检查点：A5-15h 实施完成，等待协调者独立复核——Advancement 对话退场与孤儿清理生命周期已归入唯一应用边界<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,13 +202,13 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `943de5cc`；A5-15f 已由协调者独立复核并提交，新任务准入、Rubric 草案创建与 committed draft 投影现由唯一 Advancement 应用链拥有 |
+| 已接受基线 | `6a856ba0`；A5-15g 已由协调者独立复核并提交，active 输入继续、用户接管、Rubric 再生与最后单向桥退场均由唯一 Advancement 应用链闭合 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | A5-15g 已完成，等待协调者独立复核；Advancement 行与 A5 仍为 `[ ]` |
-| 下一责任链 | 协调者接受 A5-15g 后，重新枚举 Advancement 尚未归位的 review/evidence/recovery、closure/active summary 与运行事件责任，选择下一条最关键闭包 |
-| 打开的单向桥 | 无；`A5-ADVANCEMENT-PREPARE-01` 已在当前待复核工作区删除，未建立同责替代桥。 |
-| 已失效证据 | `A5-15g-advancement-active-user-turn-v1` 已在当前工作区恢复 active admission、proxy interrupt/settlement、takeover/regeneration、Server send 投影、Controller 机制边界与 Advancement Product API exact-set；A5-15a～A5-15f 证据继续有效 |
-| 阻塞/用户决策 | 无用户决策；active 三类行为、代理时序、退出/再生终态和失败重接均由当前生产行为唯一裁决 |
+| 活跃工作包 | A5-15h 已实施完成，等待协调者独立复核；Advancement 行与 A5 仍为 `[ ]` |
+| 下一责任链 | A5-15h 通过后继续拆分 after-turn review/evidence/recovery 主链，优先迁移一个可独立证伪的 owner/写权闭包 |
+| 打开的单向桥 | 无；A5-15h 不允许为删除或清理建立 Controller fallback、双写或第二维护入口 |
+| 已失效证据 | `A5-15h-advancement-conversation-retirement-v1` 已按协调复核反证纠正并在当前工作区重取，等待协调者独立复核；A5-12c 的 `Conversation runtime/storage delete → cancelDependentLifecycle → removeDependentData` 顺序继续有效，未被本包作废；A5-15a～A5-15g 证据继续有效 |
+| 阻塞/用户决策 | 无；对话删除与孤儿清理的现有顺序、错误传播、持久数据边界和无用户可见行为漂移由当前生产事实唯一裁决 |
 
 ### A0 基线索引
 
@@ -2247,6 +2247,29 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 精确失效与交接：若 active Command/Result/Fact、active identity 线性化重读、admission 分类、proxy interrupt/settle/recovery、exit/closure/regeneration 持久顺序、Fact/Event-before-handoff、Conversation handoff、初次/有界竞态 Product API 路由、Host contribution/dispatcher exact-set、Controller 机制边界、Server wire/observer/DTO/error 投影、S7 或上述直接测试任一变化，只恢复 `A5-15g-advancement-active-user-turn-v1` 并重验本闭包；review/evidence/recovery、closure/active summary 与运行事件后续迁移不误伤本证据，除非改变上述共享端口或 Product API exact-set。A5-15g 当前实施完成并等待协调者独立复核；Advancement 行与 A5 继续为 `[ ]`，不进入下一责任链或 A6。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 - 协调者独立验收：反查 active Command 的线性化身份重读、Advancement-only proxy 中断、admission、退出/再生耐久顺序、Fact/Event-before-handoff、失败恢复、Controller 机制边界、Server 两处同一 Product API 路由、Host 组合根与 S7 反向门禁，未发现第二 active 状态机或旧桥残留。独立重跑领域 application 37/37、Controller 21/21、Server send binding 13/13、真实 active `session.send` RPC 7/7、canonical S7 33/33 与 registry golden，并通过 `git diff --check`；接受 `A5-15g-advancement-active-user-turn-v1`。`A5-ADVANCEMENT-PREPARE-01` 已关闭，Advancement 行与 A5 仍待后续责任链。
+
+### A5-15h：迁移 Advancement 对话退场与孤儿清理生命周期
+
+- 派发基线与唯一结果：`HEAD 6a856ba0 + task-doc:coordinator-dispatch`，索引与工作区除本派发记录外为空。只迁移 Advancement 随 Conversation 删除而取消 open session、在 Conversation 删除提交后移除该对话全部 Advancement 控制数据，以及启动维护清理已无 Conversation owner 的孤儿控制目录这一个数据生命周期责任；使决定、顺序和结果由唯一 Advancement 应用边界拥有，Controller/store 只保留 path-free 读取、取消、删除与有限枚举机制。
+- 生产与消费链：从 Anchor `ConversationApplication.delete` 的 `cancelDependentLifecycle → Conversation authority/storage delete → removeDependentData` 顺序和 local access-surface 的同一删除投影双向追踪，二者必须调用同一 Advancement 应用用例，不能直调 Controller。系统维护 `advancement.runSweep` 也只调用同一应用边界的孤儿清理用例；alive probe 仍是 Host 注入的物理端口，领域应用只决定“Conversation 不存在的 Advancement 控制数据必须退场”。无 open session 时取消幂等空成功；存在 awaiting/active 时保持既有 `user-cancelled` reason/message、终态提交和错误传播；Conversation 删除提交前取消失败仍阻断主删除，主删除提交后控制数据删除失败仍按现有投影合同传播，不伪造清理成功。
+- 旧路与范围：删除 `AdvancementController.cancelOpenConversationSession`、`removeConversationData`、`sweepOrphanData` 这些应用级复合入口及 Anchor/local/system-handler 对 Controller 的直调；不得留下 fallback、双写、第二 sweep 或 Server/Surface 业务决定。可以保留 recovery 专用的精确 session cancellation、proxy settlement、store 机制和现有持久格式，本包不迁移 `cancelOpenSession`、after-turn review/evidence、recovery maintenance、proxy rebuild/dispatch、detail/closure 查询、Rubric 流程、Device/Backup/A6，也不改变 Conversation 删除协议、RPC/wire、用户文案或数据格式。
+- 直接证据与完成条件：领域直接测试覆盖 no-open、awaiting、active、取消失败、删除失败、幂等删除、alive/dead/混合孤儿、probe/枚举失败及扫描计数/告警；Anchor 与 local 删除真实消费链证明相同应用语义和原 `cancel → 主删除 → remove` 顺序；system maintenance 证明只经应用用例；S7 与反向 mutation 拒绝 Controller 旧入口或三处直调恢复、顺序漂移、第二清理 owner 和组合根缺失。只运行受影响测试、必要依赖构建/typecheck、changed-file Biome、canonical S7；Product API exact-set 或 package export/build entry 未变化时不重复无关门禁，不跑根级回归或制品验收。
+- 安全交接点：预计超过四小时、需要改变 Conversation 删除提交语义或 Advancement 持久格式、出现两个以上独立未知、影响进入 recovery/review 主链，或无法保持可构建可运行且单一 owner 时立即停在明确检查点反馈；不得扩成 Advancement 全量清理或 A6，不得执行任何 Git 写操作。
+
+- 实施基线与唯一应用责任：进场为 `HEAD 6a856ba0eb1b609ac98f3ac8c795ca7a730348b6 + task-doc:coordinator-dispatch`，索引为空。唯一 `@zhixing/core/advancement/application` 新增冻结的 `AdvancementConversationLifecycleApplication`；同一 `AdvancementApplicationService` 唯一拥有 open session 退场、对话控制数据移除和孤儿候选清理决定。它只消费 path-free cancellation/remove/enumeration mechanism 与 Host 注入的有限 Conversation alive probe，不取得 Store、路径、Conversation Authority、RPC 或 Surface 类型；Controller 只保留精确 session 读取/取消、数据删除和候选枚举机制，filesystem store 也只枚举 opaque 单段 candidate 并删除指定 candidate，不再判断 orphan。
+- 顺序、幂等与 A5-12c 精确纠正：durable Anchor delete 仍先验证 authenticated surface caller，再调用同一 Advancement 应用取消 open session，随后写入/投影 Conversation delete；local projector 与恢复重驱同样只经该应用，no-open 重放为空成功，存在 awaiting/active session 时继续提交固定 `user-cancelled` 与原中文 message。Conversation 主删除只在取消成功后发生，删除 Fact/本体成功后才移除 Advancement 数据；取消失败阻断主删除，durable post-delete removal 失败保持投影待重驱，legacy post-delete removal 仍按既有 best-effort 诊断。故 A5-12c 初次记录中“删除本体先于 Advancement 取消”的单句结论在当前基线上失效并由本包纠正；其 Command/Fact、Authority replay、wire/notification 与其他责任结论不受影响，公开协议和用户行为未改变。
+- 三类消费、清理终态与旧路退场：Anchor commit、local access-surface 和 `__advancement-gc` system maintenance 共享同一个 late-bound、fail-closed、有限 lifecycle application 端口；maintenance 只注入物理存活判断，应用对 alive 候选跳过、dead 候选删除，enumeration 失败收敛为空报告，单候选 probe/delete 失败聚合 warning 并继续其余候选。`AdvancementController.cancelOpenConversationSession/removeConversationData/sweepOrphanData`、Store `sweepOrphanDirs`、Host/Surface/system-handler 的 Controller 业务直调和 cancel 失败 best-effort 分支全部归零；recovery 专用 `cancelOpenSession`、review/evidence/proxy 机制、持久格式及其他领域未迁移。
+- 直接证据与验证：core Advancement application/Conversation delete/store 3 文件 93/93；Server Controller/session store/system maintenance 3 文件 34/34；真实 `session.delete` RPC 定向 4/4；CLI Conversation directory/delete 1 文件 14/14，合计 8 文件 145/145，覆盖 no-open、awaiting/active、取消阻断、post-delete removal、alive/dead/枚举/probe/delete 失败、Anchor/local 顺序、RPC 错误与重驱。fresh core、owner-services、server 与 `pnpm cli:build` 均通过，CLI `tsc --noEmit` 通过；changed-file Biome、canonical S7 coverage/mutation 33/33 与 registry golden 通过。package export/build entry 未变化，按派发边界未重复 package-export 门禁，也未运行根级回归或制品验收。
+- 结构失效与交接：S7 与反向 mutation 冻结唯一 lifecycle application/Host proxy、Controller/Store 机制边界、`cancel → Conversation delete → remove` 顺序、Anchor/local/system 三类生产消费，并拒绝 Controller 旧复合入口、Store orphan 决策、未 await cancel、第二 sweep 或 Surface 直调回流。以后 lifecycle application/mechanism、固定 cancellation 终态、Conversation delete projector/Authority replay、alive probe、candidate exact-set、三类 Host 消费、S7 或上述直接测试任一变化，只恢复 `A5-15h-advancement-conversation-retirement-v1` 并重验本闭包；review/evidence/recovery、proxy、detail/closure 与 Rubric 流程仍按各自证据独立失效。A5-15h 当前实施完成并等待协调者独立复核；Advancement 行与 A5 继续为 `[ ]`，不进入下一责任链或 A6。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+#### A5-15h 协调复核纠正：恢复已接受删除顺序并消除 lifecycle lazy ref
+
+- 反证与撤回：协调者独立复核确认，上方初次实施记录把 writer 取得 Advancement lifecycle 应用的时序误写成了 Conversation 删除事务本身的顺序，并由此未经授权改成 `cancel → Conversation delete → remove`；同时用可变 late-bound `advancementLifecycleApplication`/require proxy 在 Host consumer 已创建后补接完整 Advancement 应用，留下半装配和第二 owner 风险。撤回“本包精确纠正 A5-12c 顺序”“取消失败阻断主删除”“同一完整 AdvancementApplicationService 同时拥有管理与 lifecycle 用例”以及对应验证声明；这些不再代表当前实现。
+- 当前唯一责任与固定装配：新增独立、有限的 `AdvancementConversationLifecycleApplicationService`，只拥有 `cancelConversationLifecycle / removeConversationData / sweepOrphanData` 三项跨领域 lifecycle 用例，消费 Controller 的 path-free 机制和 Host 注入的 Conversation alive probe；完整 `AdvancementApplicationService` 不再实现或注入这些 lifecycle 端口。Anchor 在任何 delete/access-surface/system-maintenance consumer 发布前一次构造该固定实例，三类 consumer 共用它；生产中不存在 `let advancementLifecycleApplication`、`requireAdvancementLifecycleApplication`、后置赋值、proxy、第二 lifecycle application 或 Controller fallback。
+- 删除与失败顺序恢复：恢复 A5-12c 已接受的 `Conversation runtime/storage delete → cancelDependentLifecycle → removeDependentData`。durable Authority 写入/投影先提交 Conversation 删除，再由 committed projection 严格传播 cancel/remove 失败并保留依赖重驱；local access-surface 走同一严格投影。legacy Anchor 在主删除和 Fact 后依次 best-effort 执行 cancel、remove，任一步失败均记录诊断且不阻断另一项；因此 cancel 失败不回滚或伪装未发生的 Conversation 删除。no-open cancel 仍幂等空成功，open session 仍以固定 `user-cancelled` reason/message 提交；孤儿枚举、alive probe 和逐 candidate 删除决定不变。
+- 结构失效与证据：S7 冻结 lifecycle 独立应用恰一实例、完整 Advancement 应用不重叠、固定构造先于三类 consumer、Conversation delete/cancel/remove 顺序和 durable/local 严格与 legacy best-effort 语义；反向 mutation 可识别 cancel 前移、完整应用重新吸收 lifecycle、late-bound ref/proxy、Controller/Store 复合入口、Surface 直调或第二 sweep 回流。纠正后直接证据为 core application/store/Conversation delete 3 文件 93/93、Server Controller/session store/system maintenance 3 文件 34/34、真实 `session.delete` RPC 定向 4/4、CLI Conversation directory/delete 14/14，合计 8 文件 145/145；fresh core、owner-services、server build、CLI `tsc --noEmit` 与 `pnpm cli:build` 均通过，changed-file Biome 与 canonical S7 coverage/mutation 33/33、registry golden、`git diff --check` 通过。A5-12c 继续有效，只有本 A5-15h lifecycle application/mechanism、删除投影、候选 exact-set、三类消费或上述门禁变化时才恢复本证据。Advancement 行与 A5 继续为 `[ ]`，不进入下一责任链或 A6。
+
+- 协调者独立验收：按接受基线重新追踪 Conversation delete 的生产顺序、durable/local 严格依赖重驱、legacy best-effort、Advancement lifecycle 三项用例、Controller/Store 机制边界、Anchor/local/system 三类消费者和固定装配，确认纠正版没有功能语义漂移、可变 lazy ref、第二清理 owner 或旧复合入口。独立重跑 core application/store/Conversation delete 93/93、Server Controller/session store/system maintenance 34/34、真实 `session.delete` 4/4、CLI directory/delete 14/14、canonical S7 33/33 与 registry golden，并通过 `git diff --check`；接受 `A5-15h-advancement-conversation-retirement-v1`。Advancement 行与 A5 仍待 after-turn review/evidence/recovery 等后续责任链。
 
 ## 十、用户提示词
 

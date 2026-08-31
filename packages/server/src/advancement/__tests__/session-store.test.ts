@@ -413,11 +413,12 @@ describe("SessionAdvancementStore", () => {
     expect(await store.loadActiveSession("conv-1")).toBeNull();
   });
 
-  it("removeConversation 与 sweepOrphanDirs 不再承载独立清理对象", async () => {
+  it("removeConversation 与孤儿候选机制不再承载独立清理对象", async () => {
     const { store } = makeStore();
     await expect(store.removeConversation("conv-1")).resolves.toBeUndefined();
+    await expect(store.listConversationDataCandidates()).resolves.toEqual([]);
     await expect(
-      store.sweepOrphanDirs(async () => false),
-    ).resolves.toEqual({ scanned: 0, removed: 0, warnings: [] });
+      store.removeConversationDataCandidate("candidate-1"),
+    ).resolves.toBeUndefined();
   });
 });

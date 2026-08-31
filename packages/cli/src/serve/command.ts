@@ -53,6 +53,7 @@ import {
 import {
   ADVANCEMENT_PRODUCT_API_EXACT_SET,
   AdvancementApplicationService,
+  AdvancementConversationLifecycleApplicationService,
   createAdvancementProductApiContribution,
 } from "@zhixing/core/advancement/application";
 import {
@@ -614,6 +615,28 @@ async function runServerProcess(
       console.log(chalk.dim(`[advancement] admission ${elapsedMs}ms`));
     },
   });
+  const advancementConversationLifecycle =
+    new AdvancementConversationLifecycleApplicationService({
+      mechanism: {
+        loadOpenConversationLifecycleSession: (conversationId) =>
+          advancementController.loadOpenConversationLifecycleSession(
+            conversationId,
+          ),
+        persistConversationLifecycleCancellation: (input) =>
+          advancementController.persistConversationLifecycleCancellation(input),
+        removeConversationData: (conversationId) =>
+          advancementController.removeConversationLifecycleData(conversationId),
+        listConversationDataCandidates: () =>
+          advancementController.listConversationLifecycleDataCandidates(),
+        removeConversationDataCandidate: (candidateId) =>
+          advancementController.removeConversationLifecycleDataCandidate(
+            candidateId,
+          ),
+      },
+      conversationAlive: {
+        isConversationDataAlive: createConversationAliveCheck(),
+      },
+    });
 
   // 3d. RuntimeHost —— 通用 runtime 装配点:共享 Kernel 资产与渲染装饰；
   //   Schedule / Task / MCP / Workscene 已由上面的 Anchor 产品投影统一裁决。
@@ -915,6 +938,7 @@ async function runServerProcess(
     lifecycleContributions,
     channelHttpRoutes,
     advancement: advancementController,
+    advancementConversationLifecycle,
     enabledRoles: bootstrap.mesh.roles,
     meshBootstrap: bootstrap.mesh,
     meshConnectionProjection,
@@ -1051,10 +1075,7 @@ async function runServerProcess(
         runRetentionSweep({ roots: await collectConversationRoots() }),
     },
     advancement: {
-      runSweep: async () =>
-        await advancementController.sweepOrphanData(
-          createConversationAliveCheck(),
-        ),
+      runSweep: () => advancementConversationLifecycle.sweepOrphanData(),
     },
   });
 
@@ -2036,15 +2057,14 @@ async function runServerProcess(
       ...(ctx.advancement
         ? {
             related: {
-              cancelDependentLifecycle: async (conversationId) => {
-                await ctx.advancement!.cancelOpenConversationSession({
+              cancelDependentLifecycle: (conversationId) =>
+                advancementConversationLifecycle.cancelConversationLifecycle(
                   conversationId,
-                  reason: "user-cancelled",
-                  message: "原始对话已删除，推进会话已取消。",
-                });
-              },
+                ),
               removeDependentData: (conversationId) =>
-                ctx.advancement!.removeConversationData(conversationId),
+                advancementConversationLifecycle.removeConversationData(
+                  conversationId,
+                ),
             },
           }
         : {}),
@@ -2139,9 +2159,8 @@ async function runServerProcess(
       : undefined,
   });
   const advancementDetailController = ctx.advancement;
-  const advancementProductApi = advancementDetailController
-    ? createAdvancementProductApiContribution(
-        new AdvancementApplicationService({
+  const advancementApplication = advancementDetailController
+    ? new AdvancementApplicationService({
           detail: {
             loadLatestSession: (conversationId) =>
               advancementDetailController.loadLatestSession(conversationId),
@@ -2209,8 +2228,10 @@ async function runServerProcess(
             createAnchorAdvancementConfirmedOriginalTaskAdmissionPort(
               conversationApplication,
             ),
-        }),
-      )
+        })
+    : undefined;
+  const advancementProductApi = advancementApplication
+    ? createAdvancementProductApiContribution(advancementApplication)
     : undefined;
   const productApi = new ProductApiDispatcher(
     defineProductApiExactSet({

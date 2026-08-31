@@ -91,6 +91,7 @@ import {
 import {
   ADVANCEMENT_PRODUCT_API_EXACT_SET,
   AdvancementApplicationService,
+  AdvancementConversationLifecycleApplicationService,
   AdvancementOriginalTaskAdmissionError,
   createAdvancementProductApiContribution,
 } from "@zhixing/core/advancement/application";
@@ -536,6 +537,30 @@ function createConversationProductApi(input: {
   readonly publishCleared?: (conversationId: string) => void;
   readonly publishDeleted?: (conversationId: string) => void;
 }): ProductApiDispatcher {
+  const advancementConversationLifecycle = input.advancement
+    ? new AdvancementConversationLifecycleApplicationService({
+        mechanism: {
+          loadOpenConversationLifecycleSession: (conversationId) =>
+            input.advancement!.loadOpenConversationLifecycleSession(
+              conversationId,
+            ),
+          persistConversationLifecycleCancellation: (request) =>
+            input.advancement!.persistConversationLifecycleCancellation(request),
+          removeConversationData: (conversationId) =>
+            input.advancement!.removeConversationLifecycleData(conversationId),
+          listConversationDataCandidates: () =>
+            input.advancement!.listConversationLifecycleDataCandidates(),
+          removeConversationDataCandidate: (candidateId) =>
+            input.advancement!.removeConversationLifecycleDataCandidate(
+              candidateId,
+            ),
+        },
+        conversationAlive: {
+          isConversationDataAlive: (conversationId) =>
+            input.directory.exists(conversationId),
+        },
+      })
+    : undefined;
   const application = new ConversationDirectoryApplicationService({
     storage: input.directory,
     compact: {
@@ -695,6 +720,8 @@ function createConversationProductApi(input: {
       commit: async ({ conversationId, operationId, caller }) => {
         if (input.conversations.usesDurableTurnProtocol()) {
           if (caller.kind !== "surface") throw new Error("surface caller required");
+        }
+        if (input.conversations.usesDurableTurnProtocol()) {
           const write = await input.conversations.writeDurableSession({
             conversationId,
             requestId: operationId,
@@ -722,16 +749,12 @@ function createConversationProductApi(input: {
             });
             return outcome === "busy" ? "busy" : outcome ? "deleted" : "not-found";
           },
-          ...(input.advancement
+          ...(advancementConversationLifecycle
             ? {
                 cancelDependentLifecycle: (id: string) =>
-                  input.advancement!.cancelOpenConversationSession({
-                    conversationId: id,
-                    reason: "user-cancelled",
-                    message: "原始对话已删除，推进会话已取消。",
-                  }).then(() => undefined),
+                  advancementConversationLifecycle.cancelConversationLifecycle(id),
                 removeDependentData: (id: string) =>
-                  input.advancement!.removeConversationData(id),
+                  advancementConversationLifecycle.removeConversationData(id),
               }
             : {}),
         };
@@ -743,12 +766,14 @@ function createConversationProductApi(input: {
           projection,
           publishFact: () => input.publishDeleted?.(conversationId),
           onDependentFailure: (step, error) => {
-            console.error(
-              step === "cancel-lifecycle"
-                ? "[session.delete] advancement cleanup failed:"
-                : "[session.delete] advancement data removal failed:",
-              error,
-            );
+            if (step === "cancel-lifecycle") {
+              console.error("[session.delete] advancement cleanup failed:", error);
+            } else {
+              console.error(
+                "[session.delete] advancement data removal failed:",
+                error,
+              );
+            }
           },
         });
         return { status: "deleted" } as const;
@@ -884,9 +909,8 @@ function createConversationProductApi(input: {
       : undefined,
   });
   const advancement = input.advancement;
-  const advancementContribution = advancement
-    ? createAdvancementProductApiContribution(
-        new AdvancementApplicationService({
+  const advancementApplication = advancement
+    ? new AdvancementApplicationService({
           detail: {
             loadLatestSession: (conversationId) =>
               advancement.loadLatestSession(conversationId),
@@ -1064,8 +1088,10 @@ function createConversationProductApi(input: {
               }
             },
           },
-        }),
-      )
+        })
+    : undefined;
+  const advancementContribution = advancementApplication
+    ? createAdvancementProductApiContribution(advancementApplication)
     : undefined;
   return new ProductApiDispatcher(
     defineProductApiExactSet({
@@ -2802,7 +2828,7 @@ describe("session.* RPC (S2.D)", () => {
     });
     expect(isSuccessResponse(deleteResp)).toBe(true);
 
-    // 先取消 open 会话（控制面事件语义），随后控制日志连带删除、数据不可见
+    // Conversation 主删除后投影推进退场，最终控制日志连带删除、数据不可见。
     await expect(
       advancement.store.loadSession(
         awaiting.conversationId,
@@ -2815,12 +2841,11 @@ describe("session.* RPC (S2.D)", () => {
     client.close();
   });
 
-  it("session.delete 的推进清理失败不改变主对话删除结果", async () => {
+  it("session.delete legacy 在主删除后 best-effort 处理推进取消失败并继续移除数据", async () => {
     const advancement = await createTestAdvancementHarness();
     const cleanupSpy = vi
-      .spyOn(advancement.controller, "cancelOpenConversationSession")
+      .spyOn(advancement.controller, "persistConversationLifecycleCancellation")
       .mockRejectedValueOnce(new Error("advancement cleanup failed"));
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     await startWithFactory(createMockFactory({ deltaCount: 0 }), {
       advancement: advancement.controller,
     });
@@ -2844,10 +2869,10 @@ describe("session.* RPC (S2.D)", () => {
       });
       expect(isSuccessResponse(deleteResp)).toBe(true);
       expect(cleanupSpy).toHaveBeenCalledTimes(1);
-      expect(errorSpy).toHaveBeenCalledWith(
-        "[session.delete] advancement cleanup failed:",
-        expect.any(Error),
-      );
+
+      await expect(
+        advancement.store.loadActiveSession(awaiting.conversationId),
+      ).resolves.toBeNull();
 
       const list = await client.request("session.list");
       expect(isSuccessResponse(list)).toBe(true);
@@ -2861,7 +2886,6 @@ describe("session.* RPC (S2.D)", () => {
       }
     } finally {
       cleanupSpy.mockRestore();
-      errorSpy.mockRestore();
       client.close();
     }
   });

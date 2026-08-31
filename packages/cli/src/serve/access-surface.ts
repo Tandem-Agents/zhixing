@@ -92,6 +92,7 @@ import type { LocalConversationOwnerAssembly } from "./local-conversation-owner.
 import type { DeliveryLifecycleRestoration } from "@zhixing/core";
 import type { MeshConnectionProjectionPort } from "@zhixing/mesh/bootstrap";
 import type { ConversationIdentityLifecycleApplication } from "@zhixing/core/conversation/application";
+import type { AdvancementConversationLifecycleApplication } from "@zhixing/core/advancement/application";
 
 /** 接入面装配阶段 —— 适配真实交织（confirmationBridge 依赖 prepared connections）。 */
 export type SurfacePhase = "pre-server" | "post-server";
@@ -186,6 +187,7 @@ export interface AssemblyContext {
   // ── 接入面产物（surface.setup 写回） ──
   conversations?: ConversationManager;
   advancement?: AdvancementController;
+  readonly advancementConversationLifecycle: AdvancementConversationLifecycleApplication;
   channels?: ChannelRegistry;
   inboundRouter?: InboundRouter | null;
   channelConnections?: {

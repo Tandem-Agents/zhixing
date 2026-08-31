@@ -100,13 +100,13 @@ export function buildTranscriptGcHandler(
 
 export interface AdvancementGcDeps {
   /**
-   * 注入推进控制日志的孤儿目录清理能力（AdvancementStore.sweepOrphanDirs
-   * 的闭包，对话存在性判定由装配方解析）。不提供则 handler 报告未配置。
+   * 注入 Advancement 应用的孤儿控制数据清理用例；应用决定清理，Host 只提供
+   * 物理存活探针。不提供则 handler 报告未配置。
    */
   runSweep?: () => Promise<{
     scanned: number;
     removed: number;
-    warnings: string[];
+    warnings: readonly string[];
   }>;
 }
 

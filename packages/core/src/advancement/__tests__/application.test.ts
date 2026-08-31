@@ -17,9 +17,11 @@ import {
   ADVANCEMENT_SESSION_EXITED_FACT_EVENT,
   AdvancementApplicationError,
   AdvancementApplicationService,
+  AdvancementConversationLifecycleApplicationService,
   AdvancementOriginalTaskAdmissionError,
   createAdvancementProductApiContribution,
   type AdvancementApplicationOptions,
+  type AdvancementConversationLifecycleApplicationOptions,
   type AdvancementAwaitingRubricAdmissionMechanismPort,
   type AdvancementConversationMaintenancePort,
   type AdvancementDetailReadPort,
@@ -1700,8 +1702,167 @@ describe("AdvancementApplicationService detail query", () => {
   });
 });
 
+describe("AdvancementConversationLifecycleApplicationService", () => {
+  it("treats a missing open session as an idempotent cancellation success", async () => {
+    const persist = vi.fn();
+    const application = createConversationLifecycleApplication({
+      mechanism: {
+        loadOpenConversationLifecycleSession: async () => null,
+        persistConversationLifecycleCancellation: persist,
+        removeConversationData: async () => undefined,
+        listConversationDataCandidates: async () => [],
+        removeConversationDataCandidate: async () => undefined,
+      },
+    });
+
+    await expect(
+      application.cancelConversationLifecycle("conv-none"),
+    ).resolves.toBeUndefined();
+    expect(persist).not.toHaveBeenCalled();
+  });
+
+  it.each(["awaiting-rubric-confirmation", "active"] as const)(
+    "cancels an open %s session with the Conversation-retirement decision",
+    async (status) => {
+      const open = session({ status });
+      const persist = vi.fn(async (input) => ({
+        ...open,
+        status: "cancelled" as const,
+        exit: {
+          reason: input.reason,
+          message: input.message,
+          occurredAt: "2026-01-01T00:08:00.000Z",
+        },
+      }));
+      const application = createConversationLifecycleApplication({
+        mechanism: {
+          loadOpenConversationLifecycleSession: async () => open,
+          persistConversationLifecycleCancellation: persist,
+          removeConversationData: async () => undefined,
+          listConversationDataCandidates: async () => [],
+          removeConversationDataCandidate: async () => undefined,
+        },
+      });
+
+      await expect(
+        application.cancelConversationLifecycle("conv-1"),
+      ).resolves.toBeUndefined();
+      expect(persist).toHaveBeenCalledWith({
+        conversationId: "conv-1",
+        advancementSessionId: "adv-1",
+        reason: "user-cancelled",
+        message: "原始对话已删除，推进会话已取消。",
+      });
+    },
+  );
+
+  it("propagates cancellation and direct data-removal failures", async () => {
+    const open = session({ status: "active" });
+    const application = createConversationLifecycleApplication({
+      mechanism: {
+        loadOpenConversationLifecycleSession: async () => open,
+        persistConversationLifecycleCancellation: async () => {
+          throw new Error("cancel failed");
+        },
+        removeConversationData: async () => {
+          throw new Error("remove failed");
+        },
+        listConversationDataCandidates: async () => [],
+        removeConversationDataCandidate: async () => undefined,
+      },
+    });
+
+    await expect(
+      application.cancelConversationLifecycle("conv-1"),
+    ).rejects.toThrow("cancel failed");
+    await expect(application.removeConversationData("conv-1")).rejects.toThrow(
+      "remove failed",
+    );
+  });
+
+  it("owns the alive/dead orphan decision and isolates per-candidate failures", async () => {
+    const removed: string[] = [];
+    const application = createConversationLifecycleApplication({
+      mechanism: {
+        loadOpenConversationLifecycleSession: async () => null,
+        persistConversationLifecycleCancellation: async () => {
+          throw new Error("unused");
+        },
+        removeConversationData: async () => undefined,
+        listConversationDataCandidates: async () => [
+          "alive",
+          "dead",
+          "probe-failure",
+          "remove-failure",
+        ],
+        removeConversationDataCandidate: async (candidateId) => {
+          if (candidateId === "remove-failure") throw new Error("remove denied");
+          removed.push(candidateId);
+        },
+      },
+      conversationAlive: {
+        isConversationDataAlive: async (candidateId) => {
+          if (candidateId === "probe-failure") throw new Error("probe failed");
+          return candidateId === "alive";
+        },
+      },
+    });
+
+    await expect(application.sweepOrphanData()).resolves.toEqual({
+      scanned: 4,
+      removed: 1,
+      warnings: [
+        "probe-failure: probe failed",
+        "remove-failure: remove denied",
+      ],
+    });
+    expect(removed).toEqual(["dead"]);
+  });
+
+  it("keeps enumeration failure as an empty, idempotent sweep", async () => {
+    const application = createConversationLifecycleApplication({
+      mechanism: {
+        loadOpenConversationLifecycleSession: async () => null,
+        persistConversationLifecycleCancellation: async () => {
+          throw new Error("unused");
+        },
+        removeConversationData: async () => undefined,
+        listConversationDataCandidates: async () => {
+          throw new Error("root unavailable");
+        },
+        removeConversationDataCandidate: async () => undefined,
+      },
+    });
+
+    await expect(application.sweepOrphanData()).resolves.toEqual({
+      scanned: 0,
+      removed: 0,
+      warnings: [],
+    });
+  });
+});
+
 function port(session: AdvancementSession): AdvancementDetailReadPort {
   return { loadLatestSession: async () => session };
+}
+
+function createConversationLifecycleApplication(
+  overrides: Partial<AdvancementConversationLifecycleApplicationOptions> = {},
+): AdvancementConversationLifecycleApplicationService {
+  return new AdvancementConversationLifecycleApplicationService({
+    mechanism: overrides.mechanism ?? {
+      loadOpenConversationLifecycleSession: async () => null,
+      persistConversationLifecycleCancellation: async () => {
+        throw new Error("unused lifecycle cancellation");
+      },
+      removeConversationData: async () => undefined,
+      listConversationDataCandidates: async () => [],
+      removeConversationDataCandidate: async () => undefined,
+    },
+    conversationAlive: overrides.conversationAlive ?? {
+      isConversationDataAlive: async () => true,
+    },
+  });
 }
 
 function createApplication(

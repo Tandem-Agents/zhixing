@@ -57,6 +57,108 @@ export interface AdvancementConversationMaintenancePort {
   >;
 }
 
+/** Path-free mechanisms for Conversation-owned retirement and orphan cleanup. */
+export interface AdvancementConversationLifecycleMechanismPort {
+  loadOpenConversationLifecycleSession(
+    conversationId: string,
+  ): Promise<AdvancementSession | null>;
+  persistConversationLifecycleCancellation(input: Readonly<{
+    conversationId: string;
+    advancementSessionId: string;
+    reason: AdvancementExit["reason"];
+    message: string;
+  }>): Promise<AdvancementSession>;
+  removeConversationData(conversationId: string): Promise<void>;
+  listConversationDataCandidates(): Promise<readonly string[]>;
+  removeConversationDataCandidate(candidateId: string): Promise<void>;
+}
+
+/** Host-owned physical liveness probe injected into the domain application. */
+export interface AdvancementConversationAlivePort {
+  isConversationDataAlive(candidateId: string): Promise<boolean>;
+}
+
+export interface AdvancementOrphanSweepReport {
+  readonly scanned: number;
+  readonly removed: number;
+  readonly warnings: readonly string[];
+}
+
+/** Finite cross-domain lifecycle use cases; no Store or path escapes this boundary. */
+export interface AdvancementConversationLifecycleApplication {
+  cancelConversationLifecycle(conversationId: string): Promise<void>;
+  removeConversationData(conversationId: string): Promise<void>;
+  sweepOrphanData(): Promise<AdvancementOrphanSweepReport>;
+}
+
+export interface AdvancementConversationLifecycleApplicationOptions {
+  readonly mechanism: AdvancementConversationLifecycleMechanismPort;
+  readonly conversationAlive: AdvancementConversationAlivePort;
+}
+
+/** One finite lifecycle application assembled before any Host consumer is published. */
+export class AdvancementConversationLifecycleApplicationService
+  implements AdvancementConversationLifecycleApplication
+{
+  readonly #mechanism: AdvancementConversationLifecycleMechanismPort;
+  readonly #conversationAlive: AdvancementConversationAlivePort;
+
+  constructor(options: AdvancementConversationLifecycleApplicationOptions) {
+    this.#mechanism = options.mechanism;
+    this.#conversationAlive = options.conversationAlive;
+  }
+
+  async cancelConversationLifecycle(conversationId: string): Promise<void> {
+    assertConversationId(conversationId);
+    const open =
+      await this.#mechanism.loadOpenConversationLifecycleSession(conversationId);
+    if (!open) return;
+    await this.#mechanism.persistConversationLifecycleCancellation({
+      conversationId,
+      advancementSessionId: open.id,
+      reason: "user-cancelled",
+      message: "原始对话已删除，推进会话已取消。",
+    });
+  }
+
+  async removeConversationData(conversationId: string): Promise<void> {
+    assertConversationId(conversationId);
+    await this.#mechanism.removeConversationData(conversationId);
+  }
+
+  async sweepOrphanData(): Promise<AdvancementOrphanSweepReport> {
+    let candidates: readonly string[];
+    try {
+      candidates = await this.#mechanism.listConversationDataCandidates();
+    } catch {
+      return Object.freeze({
+        scanned: 0,
+        removed: 0,
+        warnings: Object.freeze([]),
+      });
+    }
+
+    let removed = 0;
+    const warnings: string[] = [];
+    for (const candidateId of candidates) {
+      try {
+        if (await this.#conversationAlive.isConversationDataAlive(candidateId)) {
+          continue;
+        }
+        await this.#mechanism.removeConversationDataCandidate(candidateId);
+        removed++;
+      } catch (error) {
+        warnings.push(`${candidateId}: ${applicationErrorMessage(error)}`);
+      }
+    }
+    return Object.freeze({
+      scanned: candidates.length,
+      removed,
+      warnings: Object.freeze(warnings),
+    });
+  }
+}
+
 /** Path-free mechanisms used by the no-open-session new-task decision. */
 export interface AdvancementNewTaskMechanismPort {
   loadOpenNewTaskSession(

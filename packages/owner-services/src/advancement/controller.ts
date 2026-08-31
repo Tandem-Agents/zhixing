@@ -500,34 +500,38 @@ export class AdvancementController implements
     );
   }
 
-  async cancelOpenConversationSession(input: {
-    readonly conversationId: string;
-    readonly reason?: AdvancementExit["reason"];
-    readonly message: string;
-  }): Promise<AdvancementSession | null> {
-    const session = await this.store.loadActiveSession(input.conversationId);
-    if (!session) return null;
-    return await this.cancelSession(
+  loadOpenConversationLifecycleSession(
+    conversationId: string,
+  ): Promise<AdvancementSession | null> {
+    return this.store.loadActiveSession(conversationId);
+  }
+
+  persistConversationLifecycleCancellation(input: Readonly<{
+    conversationId: string;
+    advancementSessionId: string;
+    reason: AdvancementExit["reason"];
+    message: string;
+  }>): Promise<AdvancementSession> {
+    return this.cancelSession(
       input.conversationId,
-      session.id,
+      input.advancementSessionId,
       input.message,
       input.reason,
     );
   }
 
-  /**
-   * 删除对话的全部推进控制数据（含孤儿 sweep 用的同一底层能力）——
-   * 控制日志生命周期跟随对话本体，对话删除时连带调用。
-   */
-  async removeConversationData(conversationId: string): Promise<void> {
-    await this.store.removeConversation(conversationId);
+  removeConversationLifecycleData(conversationId: string): Promise<void> {
+    return this.store.removeConversation(conversationId);
   }
 
-  /** 孤儿控制日志目录清理——对话已不存在时其控制日志没有独立存在意义。 */
-  async sweepOrphanData(
-    isConversationDirAlive: (dirName: string) => Promise<boolean>,
-  ): Promise<{ scanned: number; removed: number; warnings: string[] }> {
-    return await this.store.sweepOrphanDirs(isConversationDirAlive);
+  listConversationLifecycleDataCandidates(): Promise<readonly string[]> {
+    return this.store.listConversationDataCandidates();
+  }
+
+  removeConversationLifecycleDataCandidate(
+    candidateId: string,
+  ): Promise<void> {
+    return this.store.removeConversationDataCandidate(candidateId);
   }
 
   async loadActiveSession(

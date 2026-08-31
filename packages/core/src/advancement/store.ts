@@ -58,43 +58,27 @@ export class AdvancementStore {
     });
   }
 
-  /**
-   * 孤儿目录清理——枚举控制日志根目录，删除对应对话已不存在的目录
-   * （对话侧与本目录同用安全路径投影编码，目录名可直接比对）。
-   * 幂等；单点失败跳过并计入 warnings，不拖垮整轮。
-   */
-  async sweepOrphanDirs(
-    isConversationDirAlive: (dirName: string) => Promise<boolean>,
-  ): Promise<{ scanned: number; removed: number; warnings: string[] }> {
-    const warnings: string[] = [];
-    let scanned = 0;
-    let removed = 0;
-    let dirNames: string[];
-    try {
-      const entries = await fs.readdir(this.root, { withFileTypes: true });
-      dirNames = entries
-        .filter((entry) => entry.isDirectory())
-        .map((entry) => entry.name);
-    } catch {
-      return { scanned, removed, warnings };
+  /** Enumerates opaque directory identities; the application owns the orphan decision. */
+  async listConversationDataCandidates(): Promise<readonly string[]> {
+    const entries = await fs.readdir(this.root, { withFileTypes: true });
+    return entries
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  }
+
+  /** Deletes one previously enumerated opaque candidate without interpreting liveness. */
+  async removeConversationDataCandidate(candidateId: string): Promise<void> {
+    if (
+      path.basename(candidateId) !== candidateId ||
+      candidateId === "." ||
+      candidateId === ".."
+    ) {
+      throw new TypeError("Advancement data candidate must be a single path segment");
     }
-    for (const name of dirNames) {
-      const entry = { name };
-      scanned++;
-      try {
-        if (await isConversationDirAlive(entry.name)) continue;
-        await fs.rm(path.join(this.root, entry.name), {
-          recursive: true,
-          force: true,
-        });
-        removed++;
-      } catch (err) {
-        warnings.push(
-          `${entry.name}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
-    return { scanned, removed, warnings };
+    await fs.rm(path.join(this.root, candidateId), {
+      recursive: true,
+      force: true,
+    });
   }
 
   async createSession(

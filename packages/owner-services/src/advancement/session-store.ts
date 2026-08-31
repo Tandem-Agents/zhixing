@@ -148,9 +148,8 @@ export interface AdvancementSessionStore {
   loadActiveSession(conversationId: string): Promise<AdvancementSession | null>;
   loadConversationSessions(conversationId: string): Promise<AdvancementSession[]>;
   removeConversation(conversationId: string): Promise<void>;
-  sweepOrphanDirs(
-    isConversationDirAlive: (dirName: string) => Promise<boolean>,
-  ): Promise<{ scanned: number; removed: number; warnings: string[] }>;
+  listConversationDataCandidates(): Promise<readonly string[]>;
+  removeConversationDataCandidate(candidateId: string): Promise<void>;
 }
 
 export interface SessionAdvancementStoreOptions {
@@ -499,12 +498,12 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
    */
   async removeConversation(_conversationId: string): Promise<void> {}
 
-  /** 数据入住对话权威日志后不再产生孤儿目录；保留接口形状供治理任务调用。 */
-  async sweepOrphanDirs(
-    _isConversationDirAlive: (dirName: string) => Promise<boolean>,
-  ): Promise<{ scanned: number; removed: number; warnings: string[] }> {
-    return { scanned: 0, removed: 0, warnings: [] };
+  /** 数据入住对话权威日志后不再产生独立的孤儿候选。 */
+  async listConversationDataCandidates(): Promise<readonly string[]> {
+    return [];
   }
+
+  async removeConversationDataCandidate(_candidateId: string): Promise<void> {}
 
   async #requireHead(
     conversationId: string,

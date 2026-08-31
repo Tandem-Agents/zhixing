@@ -4,6 +4,7 @@ import {
   type ConversationDeleteCommitPort,
   type ConversationDeletedFact,
   type ConversationDeleteProjectionPort,
+  type ConversationCommandCaller,
 } from "@zhixing/core/conversation/application";
 import type { ConversationManager } from "@zhixing/owner-kernel";
 
@@ -13,8 +14,8 @@ interface AnchorConversationDeleteStorage {
 }
 
 interface AnchorConversationDeleteRelatedProjection {
-  cancelDependentLifecycle(conversationId: string): Promise<void>;
-  removeDependentData(conversationId: string): Promise<void>;
+  cancelDependentLifecycle?(conversationId: string): Promise<void>;
+  removeDependentData?(conversationId: string): Promise<void>;
 }
 
 export function createAnchorConversationDeleteProjectionPort(input: Readonly<{
@@ -50,12 +51,16 @@ export function createAnchorConversationDeleteProjectionPort(input: Readonly<{
       if (outcome === "busy") return "busy";
       return outcome ? "deleted" : "not-found";
     },
-    ...(related
+    ...(related?.cancelDependentLifecycle
       ? {
           cancelDependentLifecycle: (conversationId: string) =>
-            related.cancelDependentLifecycle(conversationId),
+            related.cancelDependentLifecycle!(conversationId),
+        }
+      : {}),
+    ...(related?.removeDependentData
+      ? {
           removeDependentData: (conversationId: string) =>
-            related.removeDependentData(conversationId),
+            related.removeDependentData!(conversationId),
         }
       : {}),
   };
@@ -67,25 +72,36 @@ export function createAnchorConversationDeleteCommitPort(input: Readonly<{
   related?: AnchorConversationDeleteRelatedProjection;
   publishFact?: (fact: ConversationDeletedFact) => void;
 }>): ConversationDeleteCommitPort {
-  const projection = createAnchorConversationDeleteProjectionPort(input);
+  const projection = createAnchorConversationDeleteProjectionPort({
+    conversations: input.conversations,
+    storage: input.storage,
+    ...(input.related ? { related: input.related } : {}),
+  });
   return {
     requiresStableOperationIdentity:
       input.conversations.usesDurableTurnProtocol(),
     createOperationIdentity: () => `session.delete:${generateTurnId()}`,
     commit: async ({ conversationId, operationId, caller }) => {
+      let durableCaller: Extract<
+        ConversationCommandCaller,
+        Readonly<{ kind: "surface" }>
+      > | null = null;
       if (input.conversations.usesDurableTurnProtocol()) {
         if (caller.kind !== "surface") {
           throw new Error(
             "Durable Conversation delete requires an authenticated surface caller",
           );
         }
+        durableCaller = caller;
+      }
+      if (durableCaller) {
         const write = await input.conversations.writeDurableSession({
           conversationId,
           requestId: operationId,
           mutation: { kind: "conversation-delete" },
           principal: input.conversations.durableControlPrincipal({
-            surfacePrincipal: caller.surfacePrincipal,
-            connectionId: caller.connectionId,
+            surfacePrincipal: durableCaller.surfacePrincipal,
+            connectionId: durableCaller.connectionId,
           }),
           conversationExists: async () =>
             input.conversations.has(conversationId) ||
