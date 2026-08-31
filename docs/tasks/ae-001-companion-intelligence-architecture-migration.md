@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-14a Conversation identity/shell Server bridge 退役完成，等待协调者独立复核<br>
+> 当前检查点：A5-14c Conversation adapter 类型闭包与领域终验完成，等待协调者独立复核<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -104,7 +104,7 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
   | 领域或管理责任 | 状态 | 必须成立的目标边界 |
   |---|---|---|
-  | Conversation | [ ] | 会话合同、用例和事实归域；历史与运行投影不被 Surface、Kernel 或 Server 拥有 |
+  | Conversation | [x] | 会话合同、用例和事实归域；历史与运行投影不被 Surface、Kernel 或 Server 拥有 |
   | Workspace Administration | [x] | 本机 workspace 身份、绑定、修订、操作交付与 reset 归域；Workscene、CLI fallback 与 Executor 只消费明确端口 |
   | Workscene | [x] | 场景身份、工作区与会话关系归域；RuntimeHost 不认识场景产品规则 |
   | Schedule | [x] | 调度产品规则与耐久事实归域；执行触发只消费 Kernel/Effect 端口 |
@@ -202,13 +202,13 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `8e99fa55`；A5-13a/b/c/d 已由协调者独立复核并提交，Workscene 行已关闭且其证据继续有效 |
+| 已接受基线 | `add620a6`；A5-14b 已由协调者独立复核并提交，`A5-CONVERSATION-LIFECYCLE-01` 已关闭；A5-14a 与 A5-13a/b/c/d 证据继续有效 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | A5-14a 已完成，等待协调者独立复核；Conversation 行与 A5 仍为 `[ ]` |
-| 下一责任链 | 只剩 `A5-CONVERSATION-LIFECYCLE-01` 的 CLI `AssemblyContext/access-surfaces` 本机 lifecycle 直接消费待另包归位；不得由本工作包顺带迁移 transcript、delete/clear/resume/run control、Advancement、Channel、Device、Backup、Executor/Mesh 或 A6/A7 |
-| 打开的单向桥 | `A5-CONVERSATION-LIFECYCLE-01`：Server/RPC identity/shell bridge 已退役；CLI `AssemblyContext.conversationDirectory` 与 `access-surfaces` 仍直接消费 exists/ensure/ensureTranscript，须在 Conversation 最终包前归零。 |
-| 已失效证据 | 无当前未恢复证据；`A5-14a-conversation-identity-shell-product-api-v1` 已由同一 Conversation application/Product API、四类 Server 消费改绑、旧 Server runtime/context 零残留和直接证据恢复；A5-13a/b/c/d 继续有效 |
-| 阻塞/用户决策 | 无技术阻塞；用户已明确恢复调度 |
+| 活跃工作包 | A5-14c 已完成，等待协调者独立复核；Conversation 行已关闭，A5 仍为 `[ ]` |
+| 下一责任链 | Advancement；由协调者按当前生产事实另行裁决并派发最窄责任链，不得在本包顺带进入其状态机、证据或 Product API |
+| 打开的单向桥 | 无当前打开的 Conversation lifecycle 单向桥；`A5-CONVERSATION-LIFECYCLE-01` 已由 A5-14b 关闭。 |
+| 已失效证据 | 无当前未恢复证据；A5-14b 已精确重取 A5-14a 受影响的 Conversation identity application/Host adapter、S7 与 package-export 闭包，Server handler 与 Product API operation 未变；A5-14a 其余证据及 A5-13a/b/c/d 继续有效 |
+| 阻塞/用户决策 | 无用户决策；CLI package typecheck 的 18 条 Conversation adapter 诊断已由 A5-14c 归零 |
 
 ### A0 基线索引
 
@@ -2121,6 +2121,29 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 生产消费、行为保护与旧桥退场：`session.send` 的预分配 ID、Advancement prepare/maintenance、Perspectives admission 与 inactive `session.subscribe` 四类 Server 消费现在只经同一 Product API dispatcher 查询或命令；handler 仅保留 wire 参数、既有错误映射和消费时序。Anchor adapter 的 `exists` 继续以 meta 或 transcript 任一存在为 true，不激活 runtime、不 touch；`ensure-shell` 继续按 user/workscene 全域 ID 路由并以同一 `repo.ensure → transcript.init` 建立 meta+transcript shell，重复调用幂等。identity descriptor 未装配时，原 optional bridge 的 ensure helper no-op、existing-check unavailable 与 inactive subscribe false 退化保持；需要其他 Conversation Product API 的入口仍按既有 `INTERNAL_ERROR` fail closed，已装配 application 但 identity mechanism 缺失也不静默放行。`ServerContext.conversationDirectory`、`CreateContextOptions.conversationDirectory`、Server `ConversationDirectory`、`packages/server/src/runtime/conversation-directory.ts`、runtime index/root 转导、handler 的 `requireDirectory` 与直接 exists/ensure 全部删除；fresh Server declaration 不再泄漏该合同。CLI 的 `AnchorConversationDirectoryMechanism` 只为现有 application/Correctness 与尚待归位的本机 lifecycle 直接消费者保留，未迁移 transcript、delete/clear/resume/run control。
 - 直接、结构与构建证据：core Conversation application 1 文件 32/32，新增 user/workscene exists、同一 shell 重复 ensure、冻结结果与非法 identity fail-closed；Server 真实 RPC/绑定 2 文件 96/96，覆盖四类生产消费、inactive persisted/ghost subscribe、Advancement/Perspectives/普通 send、busy/not-found 与既有通知；distributed runtime golden 1 文件 3/3。fresh core、server、CLI 依赖顺序 build 通过，fresh `pnpm runtime:package-exports` 通过，Server `dist/index.d.ts` 对旧字段/接口零泄漏；canonical `pnpm s7:lint` 为 coverage/mutation 32/32 且 registry golden 通过。受影响 structural test 已删除退役的 `server/runtime` zone；其运行继续暴露接受基线中与本包无关的旧 A4 runtime-host manifest 期望（仍期待已退役的 `@zhixing/mcp/@zhixing/tools-builtin` 依赖），本包未越界改写该历史断言，也未把它冒充当前失败。
 - 精确失效、遗留与交接：S7 与反向 mutation 冻结两个领域 operation、同一 contribution/dispatcher、四类 Server 消费、Server context/runtime/root export 零残留，并能拒绝旧 runtime 文件、context 字段、RPC directory 直连或漏 operation 回流。以后 identity query/ensure command、`agentTurnIdentity` mechanism、meta-or-transcript existence、meta+transcript shell 次序、四类 handler 消费、Product API exact-set/Host composition、Server declaration、S7 或 package export 任一变化，恢复 `A5-14a-conversation-identity-shell-product-api-v1` 并只重验上述闭包。`A5-CONVERSATION-LIFECYCLE-01` 尚未关闭：CLI `AssemblyContext/access-surfaces` 仍直接消费 exists/ensure/ensureTranscript，须由紧邻工作包归位；Conversation 行与 A5 保持 `[ ]`。本包完成并等待协调者独立复核，不进入该本机 lifecycle、transcript、普通 delete/clear/resume/run control、Advancement、Channel、Device、Backup、Executor/Mesh、A6 或 A7；未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+### A5-14b：退役 Conversation 本机 identity/shell lifecycle 旁路
+
+- 派发基线与唯一结果：`HEAD 99c2ffa41613d2b15c6ec7ae59f38e524f7b34ae + task-doc:coordinator-dispatch`，索引为空；只关闭 `A5-CONVERSATION-LIFECYCLE-01`。CLI 本机组合必须让 Conversation 应用边界拥有 identity 存在判断与持久 shell/transcript 初始化策略，`AssemblyContext` 和 `access-surfaces` 不再认识或直接消费 `AnchorConversationDirectoryMechanism`，也不得把该 mechanism、路径、Repository 或 Transcript 暴露给 Surface、Protocol、Manager 或其他领域。
+- 生产闭包与行为保护：迁移当前四类直接消费——Advancement review maintenance 的 conversation existence、Protocol clear 投影前的 shell 保证、Protocol delete 投影的 storage existence、ConversationManager 激活时 user/workscene storage 初始化。保持既有 `protocol.ensureSession` 先行、user scope 建立 meta+transcript、workscene scope 只初始化 transcript 且不创建第二 scene meta、exists 以 meta 或 transcript 任一存在为 true、重复调用幂等，以及 clear/delete/recovery 的顺序、错误、Fact/通知与异常终态；跨领域只消费 Conversation 拥有的有限应用端口。可以调整组合时序和现有应用合同，但不得新增运行期服务定位、可变 lazy ref、第二 application/dispatcher、第二事实源或永久桥。
+- 旧路与边界：删除 `AssemblyContext.conversationDirectory` 和 `access-surfaces` 中全部 `exists/ensure/ensureTranscript` 机制直调；若 `AnchorConversationDirectoryMechanism` 已无生产类型消费者，删除该兼容接口并让 `createConversationDirectory` 只暴露真实需求方端口。组合根仍可把同一物理 adapter 注入 Conversation application/Correctness 的窄机制端口，不能把普通 clear/delete/resume/run-control、transcript schema、Advancement 状态机、Channel、Workscene、Device、Backup、Executor/Mesh、A6 或 A7 扩入本包；`command.ts` 中仅用于现有唯一 Conversation application/Correctness adapter 和独立 Advancement storage reader 的 directory 使用不按名字误删。
+- 最窄证据与完成条件：直接覆盖 user/workscene 首次与重复激活、meta-only/transcript-only existence、clear/delete projection、Advancement maintenance、异常传播和装配顺序；结构门禁必须证明 Surface/AssemblyContext 机制直调及兼容接口零残留，并能反向识别其恢复。按验证手册只运行受影响 core/CLI 直接测试、必要 typecheck/build、S7 与 package export；共享 identity operation、adapter 或 Host composition 若变化，精确重取 A5-14a 受影响证据。只有生产端与全部四类消费端改绑、旧桥归零、行为等价且代码处于可构建可运行单一真相时，才登记 A5-14b 完成并关闭桥；Conversation 行只有在有限反向审计和 package typecheck 也无其他迁移残余时才能标为 `[x]`，否则保留 `[ ]` 并登记唯一下一责任链。预计超过四小时、出现独立跨域问题或无法同时保持 user/workscene 语义时，在上述单一真相检查点止损反馈，不得扩面。
+- 实施基线与唯一应用端口：进场为 `HEAD 99c2ffa41613d2b15c6ec7ae59f38e524f7b34ae + task-doc:coordinator-dispatch`，索引为空。Conversation 窄入口新增冻结的 `ConversationIdentityLifecycleApplication`，由 `createConversationIdentityLifecycleApplication` 唯一拥有 identity 存在、identity 创建、普通持久 shell 与 activation storage 初始化策略；它只依赖 `ConversationIdentityLifecycleMechanism`，不暴露 Repository、Transcript、路径、Surface、Protocol 或 Manager。Anchor 组合根只创建一份 lifecycle application，并把同一实例同时交给 A5-14a 的 `agentTurnIdentity` adapter 与四个本机协作者；没有第二 dispatcher、运行期 locator、可变 lazy ref 或第二事实源。
+- 四类消费与行为保护：Advancement review maintenance 和 durable delete projection 的存在判断只调用 `identityExists`；durable clear 投影前的 shell 保证只调用 `ensureShell`；ConversationManager activation 继续严格先 `protocol.ensureSession`，再调用 `initializeRuntimeStorage`。领域应用按 scope 决定 user 使用既有 `repo.ensure → transcript.init`、Workscene 只 `transcript.init` 且不创建第二 scene meta；meta-only 或 transcript-only 任一事实仍使 identity 存在，重复初始化幂等，mechanism 异常原样传播。clear/delete/recovery 的 Authority、投影、Fact/通知与异常次序未改变，跨领域消费者只见有限 Conversation 应用端口。
+- 旧路、结构与有限反查：`AssemblyContext.conversationDirectory`、`access-surfaces` 的全部 `.exists/.ensure/.ensureTranscript` 直调及 `AnchorConversationDirectoryMechanism` 兼容接口归零；`createConversationDirectory` 只按 `ConversationDirectoryStorage`、identity lifecycle mechanism 的需求方法及既有 clear/delete/resume/Advancement storage ports 暴露能力。S7 冻结 lifecycle application owner、Host 单实例、四个 Surface 消费、user/workscene 分支、core 根/Conversation 宽入口零转导，并以反向 mutation 拒绝 scope 反转、Surface mechanism 回流、AssemblyContext 旧字段或兼容接口复活。有限反向检索只剩 `command.ts` 中唯一 Conversation application/Correctness adapter 和独立 Advancement storage reader 对物理 directory 的合法消费；`A5-CONVERSATION-LIFECYCLE-01` 因而关闭。
+- 直接证据与验证：core Conversation application 1 文件 35/35，覆盖冻结端口、user/workscene scope、首次/重复初始化、非法 identity 与 mechanism 异常传播；CLI directory/surface 2 文件 16/16，覆盖 meta-only/transcript-only existence、真实 user shell、Workscene transcript-only/零 scene meta、历史恢复和 `protocol.ensureSession` 先于 lifecycle 初始化。fresh core build 与 `pnpm cli:build` 通过；canonical S7 coverage/mutation 32/32 与 registry golden、fresh `pnpm runtime:package-exports`、本包最窄 Biome 通过。CLI package-filtered `tsc --noEmit` 诚实返回 18 条既有 Conversation adapter 诊断：delete dependent cleanup 的返回类型，以及 resume/run-control adapter 的隐式参数类型；本包未越界修改这些普通 delete/resume/run-control 合同，也未把 typecheck 冒充通过。
+- 状态、失效与下一检查点：Conversation 行保持 `[ ]`，唯一下一链收敛为 A5-14c 的 application/Correctness adapter package type closure；它不得恢复本 bridge 或改变领域/公开行为。以后 identity lifecycle application/mechanism、scope 初始化策略、meta-or-transcript existence、`protocol.ensureSession` 顺序、四个本机 consumer、A5-14a agent-turn identity adapter、Host composition、S7 或 package export 任一变化，恢复本记录并只重验对应闭包；其他 Conversation application 责任仍按既有 A5-12 证据精确失效。A5-14b 完成并等待协调者独立复核，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+### A5-14c：闭合 Conversation adapter 类型边界并完成领域终验
+
+- 派发基线与唯一结果：`HEAD add620a6cd305e02c59a2554695217d867893b74 + task-doc:coordinator-dispatch`，索引为空；只消除当前 CLI package typecheck 精确报告的 18 条 Conversation adapter 诊断，并对 A5-12a～A5-14b 已迁移责任做一次有限反向闭包审计。不得借类型修复重开领域合同、改变公开或持久语义、恢复 lifecycle bridge或扩入其他领域。
+- 实现边界：delete projection/commit 的 dependent cleanup 必须显式适配现有 `Promise<void>` 端口，等待既有 Advancement 调用完成但丢弃其返回值，不改变调用次数、顺序或错误传播；resume 与 run-control binding 必须从现有 Conversation application port 类型推导或声明完整输入类型，消除隐式 `any`，不得复制 DTO、放宽类型或引入断言绕过。修复必须同时覆盖 Anchor 两个 delete 组合点和两个 binding 的真实消费者。
+- 领域终验：CLI package typecheck 归零后，从 Conversation Product API exact-set、application/Correctness ports、Anchor/Executor-local binding、Server/RPC/CLI surface、Host composition、identity/clear/delete/resume/run-control/turn/task-list/compact/usage/security、历史/恢复和物理 storage projection 正反核对，主动寻找第二 application/dispatcher、旧 Manager/directory 业务直调、Surface 决定、宽导出、打开桥和等价改名残余。只处理能够反绑 AE-001 与当前生产事实的 Conversation 迁移残余；无反证时关闭 Conversation 行，不重复 A5-12～A5-14 已有效的全部测试。
+- 证据、边界与交接：运行三个 adapter 的最窄直接测试、CLI package typecheck、必要 CLI build；只有相关 S7 输入变化才重跑对应 S7，其他有效证据复用。必须记录 18 条诊断归零、有限反向审计范围与结果、精确失效条件。不得进入 Advancement 状态机、Channel、Device、Backup、Executor/Mesh、A6 或 A7。完成条件是类型闭包真实成立、产品行为零变化、Conversation 无未处置迁移残余并可将其登记行标为 `[x]`；若审计发现独立真实残余，保持 `[ ]` 并停在可构建可运行检查点登记唯一下一链。
+- 实施与行为边界：Anchor 两个 delete 组合点把 Advancement dependent cleanup 收窄为显式 `async` 适配，等待既有 `cancelOpenConversationSession` 完成后丢弃其 session 返回值，调用次数、顺序、失败传播与后续 data removal 均未改变。resume binding 的 identity/adoption 输入和 run-control binding 的 cancel/uncertain 输入均以 `Parameters<现有 Conversation port>`（含 `NonNullable` 可选成员）直接推导，消除重复 DTO、隐式 `any` 与断言旁路；领域合同、Product API descriptor、公开 wire 和持久行为零变化。
+- 直接证据与类型闭包：CLI directory/resume/run-control 三个定向文件 18/18 通过；package-filtered `tsc --noEmit -p tsconfig.json` 零诊断，进场 18 条 Conversation adapter 诊断全部归零；`pnpm cli:build` 与四个受影响 TypeScript 文件的最窄 Biome 通过。`command.ts/access-surfaces.ts` 属于 S7 生产扫描输入，故精确复取一次 canonical `pnpm s7:lint`，coverage/mutation 32/32 与 registry golden 通过；导出与 build entry 未变，复用 A5-14b 已接受的 fresh package-export 证据，未重复无失效闭包。
+- 有限领域终验与退出裁决：从 7 Query + 12 Command + 4 Fact 的 Conversation Product API exact-set、唯一 `ConversationDirectoryApplicationService`、application/Correctness ports、Anchor 单 dispatcher、Executor-local 同应用直调、Server/RPC/CLI/Channel binding、identity/clear/delete/resume/run-control/agent-turn/task-list/compact/usage/security、历史/恢复与物理 storage projection 双向回扫；生产构造只剩 Anchor 与 Executor-local 两个拓扑适配点，Server directory/runtime bridge、Surface 业务决定、旧 lifecycle mechanism 直调、第二 dispatcher/application、core 根或 Conversation 宽入口转导及等价改名残余均为零。现存 Manager/Protocol/Directory 使用均属于已接受的串行 owner、observer/运行、Correctness/recovery 或独立 Advancement storage read 机制，不形成第二产品决定或写入口。Conversation 全部已登记责任因此闭合并将登记行标为 `[x]`；A5 仍保持 `[ ]`，下一领域为 Advancement。
+- 精确失效与交接：以后 delete related cleanup 端口/两个组合点、resume/run-control port 或 adapter、CLI package typecheck、Conversation operation/fact exact-set、领域应用/Correctness port、Anchor/Executor-local 绑定、Server/RPC/CLI/Channel 消费、Host dispatcher、Manager/Protocol/storage 投影边界、S7 或 package export 任一变化，只恢复对应 A5-12～A5-14 证据与 Conversation 行并重验受影响闭包；其他领域变化不误伤本记录。本包完成并等待协调者独立复核，未进入 Advancement、Channel、Device、Backup、Executor/Mesh、A6 或 A7，也未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 

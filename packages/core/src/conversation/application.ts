@@ -17,6 +17,7 @@ import type { TurnOrigin } from "../types/tools.js";
 import type { ExplicitEnvironmentSelection } from "../contracts/protocol.js";
 import type { ContextBudget } from "../context/types.js";
 import type { TaskItem, TaskListState } from "./types.js";
+import { parseConversationId } from "./scope-id.js";
 
 /** Persisted Conversation identity projected by the domain storage port. */
 export interface ConversationDirectoryRecord {
@@ -239,6 +240,54 @@ export interface ConversationAgentTurnIdentityPort {
   exists(conversationId: string): Promise<boolean>;
   create(): Promise<string>;
   ensure(conversationId: string): Promise<void>;
+}
+
+/**
+ * Correctness mechanism behind Conversation identity and local storage-shell
+ * lifecycle. The mechanism knows how to touch the durable stores, while the
+ * application below owns which shell a product identity is allowed to create.
+ */
+export interface ConversationIdentityLifecycleMechanism
+  extends ConversationAgentTurnIdentityPort {
+  ensureTranscript(conversationId: string): Promise<void>;
+}
+
+/** Finite Conversation application port consumed by Host-side collaborators. */
+export interface ConversationIdentityLifecycleApplication {
+  identityExists(conversationId: string): Promise<boolean>;
+  createIdentity(): Promise<string>;
+  ensureShell(conversationId: string): Promise<void>;
+  initializeRuntimeStorage(conversationId: string): Promise<void>;
+}
+
+/**
+ * Owns the scope-sensitive shell policy without exposing Repository,
+ * Transcript, paths, or the physical directory implementation to consumers.
+ */
+export function createConversationIdentityLifecycleApplication(
+  mechanism: ConversationIdentityLifecycleMechanism,
+): ConversationIdentityLifecycleApplication {
+  return Object.freeze({
+    async identityExists(conversationId: string) {
+      assertConversationIdentity(conversationId, "identity lifecycle query");
+      return mechanism.exists(conversationId);
+    },
+    async createIdentity() {
+      return mechanism.create();
+    },
+    async ensureShell(conversationId: string) {
+      assertConversationIdentity(conversationId, "identity lifecycle shell");
+      await mechanism.ensure(conversationId);
+    },
+    async initializeRuntimeStorage(conversationId: string) {
+      assertConversationIdentity(conversationId, "runtime storage initialization");
+      if (parseConversationId(conversationId).scope.kind === "workscene") {
+        await mechanism.ensureTranscript(conversationId);
+        return;
+      }
+      await mechanism.ensure(conversationId);
+    },
+  });
 }
 
 export type ConversationTaskListAction =

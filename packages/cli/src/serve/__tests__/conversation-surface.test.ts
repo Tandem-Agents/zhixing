@@ -89,18 +89,12 @@ async function setupCtx() {
       return stubRuntime(sessionId);
     },
   };
-  const conversationDirectory = {
-    ensure: vi.fn(async (id: string) => {
+  const conversationIdentityLifecycle = {
+    identityExists: vi.fn(async () => false),
+    createIdentity: vi.fn(async () => "created-conversation"),
+    ensureShell: vi.fn(async () => {}),
+    initializeRuntimeStorage: vi.fn(async (id: string) => {
       await transcript.init(id);
-      return {
-        id,
-        name: id,
-        createdAt: new Date().toISOString(),
-        lastActiveAt: new Date().toISOString(),
-        isDefault: false,
-        archived: false,
-        scope: { kind: "user" },
-      };
     }),
   };
   const secretStore = new MemorySecretStore();
@@ -125,10 +119,11 @@ async function setupCtx() {
     enabledRoles: [],
     runtimeFactory,
     confirmationHub: undefined,
-    conversationDirectory,
+    conversationIdentityLifecycle,
+    lifecycleContributions: { acquire: vi.fn() },
   } as unknown as AssemblyContext;
   await conversationSurface.setup(ctx);
-  return { transcript, created, ctx, convDir, conversationDirectory };
+  return { transcript, created, ctx, convDir, conversationIdentityLifecycle };
 }
 
 describe("conversation 接入面：历史装载服从持久层不变量", { timeout: 30_000 }, () => {
@@ -166,13 +161,21 @@ describe("conversation 接入面：历史装载服从持久层不变量", { time
   });
 
   it("真·新对话 → 窗口为空、turnCount 0，目录 ensure 建索引", async () => {
-    const { transcript, ctx, conversationDirectory } = await setupCtx();
+    const { transcript, ctx, conversationIdentityLifecycle } = await setupCtx();
+
+    const ensureSession = vi.spyOn(ctx.conversationProtocol!, "ensureSession");
 
     const session = await ctx.conversations!.getOrCreate("fresh");
 
     expect(ctx.conversations!.getHistory("fresh")).toEqual([]);
     expect(session.turnCount).toBe(0);
-    expect(conversationDirectory.ensure).toHaveBeenCalledWith("fresh");
+    expect(
+      conversationIdentityLifecycle.initializeRuntimeStorage,
+    ).toHaveBeenCalledWith("fresh");
+    expect(ensureSession.mock.invocationCallOrder[0]).toBeLessThan(
+      conversationIdentityLifecycle.initializeRuntimeStorage.mock
+        .invocationCallOrder[0]!,
+    );
     expect(await transcript.exists("fresh")).toBe(true);
 
     await ctx.conversations!.disposeAll();

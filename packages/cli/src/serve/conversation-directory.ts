@@ -22,6 +22,7 @@ import {
 import type {
   ConversationClearProjectionPort,
   ConversationDirectoryStorage,
+  ConversationIdentityLifecycleMechanism,
 } from "@zhixing/core/conversation/application";
 import type { WorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 
@@ -34,12 +35,6 @@ interface ConversationRepoRoute {
   repo: IConversationRepository;
   /** scope 库内的 conversation id。 */
   localId: string;
-}
-
-export interface AnchorConversationDirectoryMechanism {
-  exists(id: string): Promise<boolean>;
-  ensure(id: string): Promise<Conversation>;
-  ensureTranscript(id: string): Promise<void>;
 }
 
 export function createConversationDirectory(deps: {
@@ -56,14 +51,16 @@ export function createConversationDirectory(deps: {
    * 保证同一 meta.json 的并发写不会因各自 new repository 绕开 per-id 锁。
    */
   repoForConversationId?: (conversationId: string) => ConversationRepoRoute;
-}): AnchorConversationDirectoryMechanism & ConversationDirectoryStorage &
+}): ConversationDirectoryStorage &
+  Pick<ConversationIdentityLifecycleMechanism, "exists" | "ensureTranscript"> &
   Pick<ConversationClearProjectionPort, "clearStoredView"> & {
-  touch(id: string, at?: string): Promise<Conversation | null>;
-  deleteStoredConversation(conversationId: string): Promise<boolean>;
-  /** Temporary read-only Advancement recovery bridge; it shares the same storage primitive. */
-  readRunsReverse: ConversationDirectoryStorage["readHistory"];
-  listForAdvancement(): Promise<readonly Conversation[]>;
-} {
+    ensure(id: string): Promise<Conversation>;
+    touch(id: string, at?: string): Promise<Conversation | null>;
+    deleteStoredConversation(conversationId: string): Promise<boolean>;
+    /** Temporary read-only Advancement recovery bridge; it shares the same storage primitive. */
+    readRunsReverse: ConversationDirectoryStorage["readHistory"];
+    listForAdvancement(): Promise<readonly Conversation[]>;
+  } {
   const sceneHandles = new Map<string, ScopeHandles>();
 
   const handlesFor = (conversationId: string): ScopeHandles & { localId: string } => {

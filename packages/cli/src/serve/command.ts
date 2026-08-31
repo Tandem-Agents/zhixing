@@ -46,6 +46,7 @@ import {
 import {
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
   ConversationDirectoryApplicationService,
+  createConversationIdentityLifecycleApplication,
   createConversationDirectoryProductApiContribution,
   type ConversationAdvancementProjection,
 } from "@zhixing/core/conversation/application";
@@ -372,6 +373,17 @@ async function runServerProcess(
     clearTaskListCache: (conversationId) =>
       builtinExtraTools.taskListService.clear(conversationId),
   });
+  const conversationIdentityLifecycle =
+    createConversationIdentityLifecycleApplication({
+      exists: (conversationId) => conversationDirectory.exists(conversationId),
+      create: async () =>
+        (await conversationDirectory.create()).conversationId,
+      ensure: async (conversationId) => {
+        await conversationDirectory.ensure(conversationId);
+      },
+      ensureTranscript: (conversationId) =>
+        conversationDirectory.ensureTranscript(conversationId),
+    });
   // ConversationManager lazy ref——会话执行面(access surface)setup 后回填;
   // 工作场景领域服务与 workmode 工具删除入口运行期读取。
   const conversationsRef: { current: ConversationManager | null } = {
@@ -881,7 +893,7 @@ async function runServerProcess(
     executorReadiness,
     ...(executor ? { executorRoleModule: executor } : {}),
     convRepo,
-    conversationDirectory,
+    conversationIdentityLifecycle,
     conversationClearProjection: conversationDirectory,
     conversationDeleteProjection: conversationDirectory,
     conversationRepoFor: repoForConversationId,
@@ -1982,12 +1994,11 @@ async function runServerProcess(
       manager: ctx.conversations!,
     }),
     agentTurnIdentity: {
-      exists: (conversationId) => conversationDirectory.exists(conversationId),
-      create: async () =>
-        (await conversationDirectory.create()).conversationId,
-      ensure: async (conversationId) => {
-        await conversationDirectory.ensure(conversationId);
-      },
+      exists: (conversationId) =>
+        conversationIdentityLifecycle.identityExists(conversationId),
+      create: () => conversationIdentityLifecycle.createIdentity(),
+      ensure: (conversationId) =>
+        conversationIdentityLifecycle.ensureShell(conversationId),
     },
     resume: createAnchorConversationResumePort({
       identity: conversationDirectory,
@@ -2016,12 +2027,13 @@ async function runServerProcess(
       ...(ctx.advancement
         ? {
             related: {
-              cancelDependentLifecycle: (conversationId) =>
-                ctx.advancement!.cancelOpenConversationSession({
+              cancelDependentLifecycle: async (conversationId) => {
+                await ctx.advancement!.cancelOpenConversationSession({
                   conversationId,
                   reason: "user-cancelled",
                   message: "原始对话已删除，推进会话已取消。",
-                }),
+                });
+              },
               removeDependentData: (conversationId) =>
                 ctx.advancement!.removeConversationData(conversationId),
             },

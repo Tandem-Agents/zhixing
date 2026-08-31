@@ -17,6 +17,7 @@ import {
 } from "@zhixing/core";
 import {
   ConversationDirectoryApplicationService,
+  createConversationIdentityLifecycleApplication,
   projectConversationDelete,
 } from "@zhixing/core/conversation/application";
 import {
@@ -115,6 +116,56 @@ describe("conversation directory(持久层实现)", () => {
     const second = await directory.ensure(id);
     expect(second).toEqual(ensured);
     expect((await directory.list()).filter((c) => c.conversationId === id)).toHaveLength(1);
+  });
+
+  it("exists:meta-only 或 transcript-only 任一持久事实都视为存在", async () => {
+    const metaOnly = await repo.create({ name: "meta-only" });
+    await transcript.init("transcript-only");
+
+    expect(await directory.exists(metaOnly.id)).toBe(true);
+    expect(await directory.exists("transcript-only")).toBe(true);
+  });
+
+  it("runtime storage application creates user shell but only a transcript for workscene", async () => {
+    const sceneScope: ConversationScope = {
+      kind: "workscene",
+      sceneId: "scene-lifecycle",
+    };
+    const sceneRepo = new ConversationRepository(sceneScope);
+    const routedDirectory = createConversationDirectory({
+      repo,
+      transcript,
+      worksceneStorageCleanup: createWorksceneStorageCleanup(),
+      repoForConversationId: (conversationId) => {
+        const { scope, localId } = parseConversationId(conversationId);
+        return {
+          repo: scope.kind === "workscene" ? sceneRepo : repo,
+          localId,
+        };
+      },
+    });
+    const lifecycle = createConversationIdentityLifecycleApplication({
+      exists: (conversationId) => routedDirectory.exists(conversationId),
+      create: async () => (await routedDirectory.create()).conversationId,
+      ensure: async (conversationId) => {
+        await routedDirectory.ensure(conversationId);
+      },
+      ensureTranscript: (conversationId) =>
+        routedDirectory.ensureTranscript(conversationId),
+    });
+    const worksceneConversation = worksceneConversationId(
+      sceneScope.sceneId,
+      "runtime-conversation",
+    );
+
+    await lifecycle.initializeRuntimeStorage("user-runtime");
+    await lifecycle.initializeRuntimeStorage(worksceneConversation);
+    await lifecycle.initializeRuntimeStorage(worksceneConversation);
+
+    expect(await repo.get("user-runtime")).not.toBeNull();
+    expect(await transcript.exists("user-runtime")).toBe(true);
+    expect(await sceneRepo.get("runtime-conversation")).toBeNull();
+    expect(await routedDirectory.exists(worksceneConversation)).toBe(true);
   });
 
   it("touch:不存在返回 null;存在返回最新 meta", async () => {

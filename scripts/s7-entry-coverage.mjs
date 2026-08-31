@@ -3425,6 +3425,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     "packages/core/src/skills/global-state-adapter.ts",
   );
   const setupDelivery = required("packages/cli/src/setup-delivery.ts");
+  const accessSurfaceContext = required(
+    "packages/cli/src/serve/access-surface.ts",
+  );
   const accessSurfaces = required("packages/cli/src/serve/access-surfaces.ts");
   const executorRoleRuntime = required(
     "packages/cli/src/serve/executor-role-runtime.ts",
@@ -4184,6 +4187,49 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     byPath.has("packages/server/src/runtime/conversation-directory.ts") ||
     byPath.has("packages/server/src/runtime/index.ts") ||
     serverIndex.includes("./runtime/index.js") ||
+    !conversationApplication.includes(
+      "interface ConversationIdentityLifecycleApplication",
+    ) ||
+    !conversationApplication.includes(
+      "createConversationIdentityLifecycleApplication(",
+    ) ||
+    !conversationApplication.includes(
+      'parseConversationId(conversationId).scope.kind === "workscene"',
+    ) ||
+    !conversationApplication.includes(
+      "await mechanism.ensureTranscript(conversationId)",
+    ) ||
+    !conversationApplication.includes("await mechanism.ensure(conversationId)") ||
+    coreIndex.includes("ConversationIdentityLifecycle") ||
+    conversationIndex.includes("ConversationIdentityLifecycle") ||
+    !accessSurfaceContext.includes(
+      "readonly conversationIdentityLifecycle: ConversationIdentityLifecycleApplication",
+    ) ||
+    /AnchorConversationDirectoryMechanism|readonly conversationDirectory\s*:/u.test(
+      accessSurfaceContext,
+    ) ||
+    accessSurfaces.split("ctx.conversationIdentityLifecycle.").length - 1 !== 4 ||
+    /ctx\.conversationDirectory\.(?:exists|ensure|ensureTranscript)\s*\(/u.test(
+      accessSurfaces,
+    ) ||
+    !accessSurfaces.includes(
+      "ctx.conversationIdentityLifecycle.identityExists(conversationId)",
+    ) ||
+    !accessSurfaces.includes(
+      "ctx.conversationIdentityLifecycle.ensureShell(",
+    ) ||
+    !accessSurfaces.includes(
+      "ctx.conversationIdentityLifecycle.initializeRuntimeStorage(",
+    ) ||
+    !composition.includes(
+      "createConversationIdentityLifecycleApplication({",
+    ) ||
+    composition.split("createConversationIdentityLifecycleApplication({").length - 1 !== 1 ||
+    !composition.includes("conversationIdentityLifecycle,") ||
+    conversationStorage.includes("AnchorConversationDirectoryMechanism") ||
+    records.some((record) =>
+      record.text.includes("AnchorConversationDirectoryMechanism"),
+    ) ||
     !conversationStorage.includes("implements") &&
       !conversationStorage.includes("ConversationDirectoryStorage") ||
     !composition.includes("new ConversationDirectoryApplicationService({") ||

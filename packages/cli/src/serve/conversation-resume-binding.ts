@@ -3,6 +3,13 @@ import type {
   ConversationResumePort,
 } from "@zhixing/core/conversation/application";
 
+type ConversationResumeIdentity = Parameters<
+  ConversationResumePort["restoreIdentity"]
+>[0];
+type ConversationResumeAdoptionInput = Parameters<
+  NonNullable<ConversationResumePort["reviewAdoption"]>
+>[0];
+
 interface AnchorConversationResumeIdentity {
   touch(conversationId: string): Promise<Readonly<{
     id: string;
@@ -31,7 +38,7 @@ export function createAnchorConversationResumePort(input: Readonly<{
   adoptionReview?: AnchorConversationAdoptionReview;
 }>): ConversationResumePort {
   return Object.freeze({
-    restoreIdentity: async (conversationId) => {
+    restoreIdentity: async (conversationId: ConversationResumeIdentity) => {
       const restored = await input.identity.touch(conversationId);
       return restored
         ? Object.freeze({
@@ -42,17 +49,19 @@ export function createAnchorConversationResumePort(input: Readonly<{
           })
         : null;
     },
-    recoverDependentLifecycle: async (conversationId) => {
+    recoverDependentLifecycle: async (
+      conversationId: ConversationResumeIdentity,
+    ) => {
       await input.recovery?.recoverConversation(conversationId);
     },
     ...(input.adoptionReview
       ? {
-          reviewAdoption: async ({ conversationId, caller }) =>
-            caller.kind === "surface"
+          reviewAdoption: async (request: ConversationResumeAdoptionInput) =>
+            request.caller.kind === "surface"
               ? input.adoptionReview!.reviewForSurface({
-                  conversationId,
-                  surfacePrincipal: caller.surfacePrincipal,
-                  connectionId: caller.connectionId,
+                  conversationId: request.conversationId,
+                  surfacePrincipal: request.caller.surfacePrincipal,
+                  connectionId: request.caller.connectionId,
                 })
               : undefined,
         }

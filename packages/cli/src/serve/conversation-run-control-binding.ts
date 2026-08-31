@@ -5,6 +5,13 @@ import type {
 } from "@zhixing/core/conversation/application";
 import type { ConversationManager } from "@zhixing/owner-kernel";
 
+type ConversationCancellationInput = Parameters<
+  ConversationRunControlPort["cancel"]
+>[0];
+type ConversationUncertainResolutionInput = Parameters<
+  ConversationRunControlPort["resolveUncertain"]
+>[0];
+
 interface CancelledAdvancementLifecycle {
   settle(input: Readonly<{
     conversationId: string;
@@ -24,13 +31,9 @@ export function createAnchorConversationRunControlPort(input: Readonly<{
     requiresAuthoritativeRunIdentity: durable,
     emptyCancellationIsSuccess: false,
     createCancellationIdentity: () => `session.abort:${generateTurnId()}`,
-    cancel: async ({
-      conversationId,
-      operationId,
-      runId,
-      caller,
-      occurredAt,
-    }) => {
+    cancel: async (request: ConversationCancellationInput) => {
+      const { conversationId, operationId, runId, caller, occurredAt } =
+        request;
       if (caller.kind !== "surface") {
         throw new Error(
           "Anchor Conversation cancellation requires an authenticated surface caller",
@@ -85,15 +88,18 @@ export function createAnchorConversationRunControlPort(input: Readonly<{
           recoverDependentCancellation: input.advancement.recover,
         }
       : {}),
-    resolveUncertain: async ({
-      conversationId,
-      runId,
-      operationId,
-      ownerEpoch,
-      openFactDigest,
-      decision,
-      caller,
-    }): Promise<ConversationUncertainResolutionResult> => {
+    resolveUncertain: async (
+      request: ConversationUncertainResolutionInput,
+    ): Promise<ConversationUncertainResolutionResult> => {
+      const {
+        conversationId,
+        runId,
+        operationId,
+        ownerEpoch,
+        openFactDigest,
+        decision,
+        caller,
+      } = request;
       if (caller.kind !== "surface") {
         throw new Error(
           "Anchor Conversation resolution requires an authenticated surface caller",

@@ -22,6 +22,7 @@ import {
   CONVERSATION_USAGE_QUERY,
   ConversationApplicationError,
   ConversationDirectoryApplicationService,
+  createConversationIdentityLifecycleApplication,
   createConversationDirectoryProductApiContribution,
   mergeConversationDirectoryViews,
   projectConversationClear,
@@ -34,6 +35,106 @@ import {
   type ConversationUsageProjectionPort,
   type ConversationSecurityProjectionPort,
 } from "./application.js";
+
+describe("Conversation identity lifecycle application", () => {
+  it("owns shell and scope-sensitive runtime storage initialization", async () => {
+    const exists = vi.fn(async (conversationId: string) =>
+      conversationId.endsWith("present"),
+    );
+    const create = vi.fn(async () => "created-conversation");
+    const ensure = vi.fn(async () => {});
+    const ensureTranscript = vi.fn(async () => {});
+    const application = createConversationIdentityLifecycleApplication({
+      exists,
+      create,
+      ensure,
+      ensureTranscript,
+    });
+
+    expect(Object.isFrozen(application)).toBe(true);
+    await expect(application.identityExists("conversation-present")).resolves.toBe(
+      true,
+    );
+    await expect(application.createIdentity()).resolves.toBe(
+      "created-conversation",
+    );
+
+    await application.ensureShell("ws:scene-a:conversation-shell");
+    await application.initializeRuntimeStorage("conversation-user");
+    await application.initializeRuntimeStorage(
+      "ws:scene-a:conversation-workscene",
+    );
+    await application.initializeRuntimeStorage(
+      "ws:scene-a:conversation-workscene",
+    );
+
+    expect(ensure).toHaveBeenNthCalledWith(
+      1,
+      "ws:scene-a:conversation-shell",
+    );
+    expect(ensure).toHaveBeenNthCalledWith(2, "conversation-user");
+    expect(ensureTranscript).toHaveBeenCalledTimes(2);
+    expect(ensureTranscript).toHaveBeenCalledWith(
+      "ws:scene-a:conversation-workscene",
+    );
+  });
+
+  it("rejects invalid identities before invoking storage mechanisms", async () => {
+    const exists = vi.fn(async () => false);
+    const ensure = vi.fn(async () => {});
+    const ensureTranscript = vi.fn(async () => {});
+    const application = createConversationIdentityLifecycleApplication({
+      exists,
+      create: async () => "created-conversation",
+      ensure,
+      ensureTranscript,
+    });
+
+    await expect(application.identityExists("")).rejects.toThrow(
+      "identity lifecycle query",
+    );
+    await expect(application.ensureShell("")).rejects.toThrow(
+      "identity lifecycle shell",
+    );
+    await expect(application.initializeRuntimeStorage("")).rejects.toThrow(
+      "runtime storage initialization",
+    );
+    expect(exists).not.toHaveBeenCalled();
+    expect(ensure).not.toHaveBeenCalled();
+    expect(ensureTranscript).not.toHaveBeenCalled();
+  });
+
+  it("propagates storage failures without manufacturing a successful shell", async () => {
+    const failure = new Error("storage unavailable");
+    const application = createConversationIdentityLifecycleApplication({
+      exists: async () => {
+        throw failure;
+      },
+      create: async () => {
+        throw failure;
+      },
+      ensure: async () => {
+        throw failure;
+      },
+      ensureTranscript: async () => {
+        throw failure;
+      },
+    });
+
+    await expect(application.identityExists("conversation-user")).rejects.toBe(
+      failure,
+    );
+    await expect(application.createIdentity()).rejects.toBe(failure);
+    await expect(application.ensureShell("conversation-user")).rejects.toBe(
+      failure,
+    );
+    await expect(
+      application.initializeRuntimeStorage(
+        "ws:scene-a:conversation-workscene",
+      ),
+    ).rejects.toBe(failure);
+  });
+});
 
 function fixture(records: ConversationDirectoryRecord[] = []) {
   const state = new Map(records.map((record) => [record.conversationId, record]));

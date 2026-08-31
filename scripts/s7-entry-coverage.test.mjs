@@ -3469,6 +3469,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/cli/src/skills/manager-command.ts",
     "packages/cli/src/commands/skill-command-source.ts",
     "packages/cli/src/setup-delivery.ts",
+    "packages/cli/src/serve/access-surface.ts",
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/executor-role-runtime.ts",
     "packages/owner-kernel/src/delivery-control.ts",
@@ -4028,6 +4029,43 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
         "CONVERSATION_ENSURE_SHELL_COMMAND",
         "RETIRED_SHELL_COMMAND",
       ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/access-surface.ts",
+      (text) => text.replace(
+        "readonly conversationIdentityLifecycle: ConversationIdentityLifecycleApplication;",
+        "readonly conversationDirectory: AnchorConversationDirectoryMechanism;",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "ctx.conversationIdentityLifecycle.identityExists(conversationId)",
+        "ctx.conversationDirectory.exists(conversationId)",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/conversation/application.ts",
+      (text) => text.replace(
+        'parseConversationId(conversationId).scope.kind === "workscene"',
+        'parseConversationId(conversationId).scope.kind === "user"',
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/conversation-directory.ts",
+      (text) => `${text}\nexport interface AnchorConversationDirectoryMechanism { exists(id: string): Promise<boolean>; }`,
     )).join("\n"),
     /Conversation directory management lacks one domain application/,
   );

@@ -453,7 +453,7 @@ const conversationSurface: AccessSurface = {
       sessionBroadcast: () => ctx.sessionBroadcastRef.current,
       conversations: () => ctx.conversations ?? null,
       conversationExists: (conversationId) =>
-        ctx.conversationDirectory.exists(conversationId),
+        ctx.conversationIdentityLifecycle.identityExists(conversationId),
       recoverConversation: (conversationId, options) =>
         ctx.advancementRecoveryRef?.current?.recoverConversation(
           conversationId,
@@ -537,7 +537,9 @@ const conversationSurface: AccessSurface = {
             operationId: input.requestId,
             projection: {
               clearStoredView: async (conversationId) => {
-                await ctx.conversationDirectory.ensure(conversationId);
+                await ctx.conversationIdentityLifecycle.ensureShell(
+                  conversationId,
+                );
                 return ctx.conversationClearProjection.clearStoredView(
                   conversationId,
                 );
@@ -565,7 +567,9 @@ const conversationSurface: AccessSurface = {
             conversations: manager,
             storage: {
               exists: (conversationId) =>
-                ctx.conversationDirectory.exists(conversationId),
+                ctx.conversationIdentityLifecycle.identityExists(
+                  conversationId,
+                ),
               deleteStoredConversation: (conversationId) =>
                 ctx.conversationDeleteProjection.deleteStoredConversation(
                   conversationId,
@@ -574,12 +578,13 @@ const conversationSurface: AccessSurface = {
             ...(advancement
               ? {
                   related: {
-                    cancelDependentLifecycle: (conversationId) =>
-                      advancement.cancelOpenConversationSession({
+                    cancelDependentLifecycle: async (conversationId) => {
+                      await advancement.cancelOpenConversationSession({
                         conversationId,
                         reason: "user-cancelled",
                         message: "原始对话已删除，推进会话已取消。",
-                      }),
+                      });
+                    },
                     removeDependentData: (conversationId) =>
                       advancement.removeConversationData(conversationId),
                   },
@@ -639,11 +644,9 @@ const conversationSurface: AccessSurface = {
       },
       ensureConversation: async (conversationId) => {
         await protocol.ensureSession(conversationId);
-        if (parseConversationId(conversationId).scope.kind === "workscene") {
-          await ctx.conversationDirectory.ensureTranscript(conversationId);
-          return;
-        }
-        await ctx.conversationDirectory.ensure(conversationId);
+        await ctx.conversationIdentityLifecycle.initializeRuntimeStorage(
+          conversationId,
+        );
       },
       appendRun: async (conversationId, input) => {
         const s = storesFor(conversationId);

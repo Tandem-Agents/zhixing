@@ -91,7 +91,7 @@ import type { ProviderCredentialProjection } from "@zhixing/providers";
 import type { LocalConversationOwnerAssembly } from "./local-conversation-owner.js";
 import type { DeliveryLifecycleRestoration } from "@zhixing/core";
 import type { MeshConnectionProjectionPort } from "@zhixing/mesh/bootstrap";
-import type { AnchorConversationDirectoryMechanism } from "./conversation-directory.js";
+import type { ConversationIdentityLifecycleApplication } from "@zhixing/core/conversation/application";
 
 /** 接入面装配阶段 —— 适配真实交织（confirmationBridge 依赖 prepared connections）。 */
 export type SurfacePhase = "pre-server" | "post-server";
@@ -140,8 +140,8 @@ export interface AssemblyContext {
   readonly executorRoleModule?: ExecutorRoleModule;
   /** user 域对话 meta 仓——turn 后维护(自动命名)与对话目录共用同一实例 */
   readonly convRepo: ConversationRepository;
-  /** 对话目录——会话执行面经此归口创建 / 确保持久化身份 */
-  readonly conversationDirectory: AnchorConversationDirectoryMechanism;
+  /** Conversation-owned identity/shell lifecycle; no physical storage leaks. */
+  readonly conversationIdentityLifecycle: ConversationIdentityLifecycleApplication;
   /** Conversation-owned clear projection; never exposed through ServerContext. */
   readonly conversationClearProjection: Pick<
     ConversationClearProjectionPort,
