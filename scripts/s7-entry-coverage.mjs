@@ -3386,6 +3386,16 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   const detail = detailStart >= 0 && detailEnd > detailStart
     ? handler.slice(detailStart, detailEnd)
     : "";
+  const reviseStart = handler.indexOf(
+    "export function buildSessionAdvancementReviseMethod()",
+  );
+  const reviseEnd = handler.indexOf(
+    "export function buildSessionAdvancementCancelMethod()",
+    reviseStart,
+  );
+  const revise = reviseStart >= 0 && reviseEnd > reviseStart
+    ? handler.slice(reviseStart, reviseEnd)
+    : "";
 
   let manifest;
   try {
@@ -3407,12 +3417,29 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes("class AdvancementApplicationService") ||
     !application.includes("ADVANCEMENT_DETAIL_QUERY") ||
     !application.includes('"advancement.query.detail"') ||
+    !application.includes("interface AdvancementConversationMaintenancePort") ||
+    !application.includes("interface AdvancementRubricRevisionMechanismPort") ||
+    !application.includes("ADVANCEMENT_REVISE_RUBRIC_COMMAND") ||
+    !application.includes('"advancement.command.revise-rubric"') ||
+    !application.includes("ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT") ||
+    !application.includes('"advancement-contract-draft-revised"') ||
+    !application.includes('session.status !== "awaiting-rubric-confirmation"') ||
+    !application.includes("session.pendingRubricDraft") ||
+    !application.includes("persistRubricDraftRevision") ||
+    !application.includes("const committedDraft = updated.pendingRubricDraft") ||
+    application.includes("freezeSnapshot(revisedDraft)") ||
     !application.includes("ADVANCEMENT_PRODUCT_API_EXACT_SET") ||
     !application.includes("createAdvancementProductApiContribution") ||
     !application.includes("buildClosureFacts(session)") ||
     application.split("defineProductApiQuery<").length - 1 !== 1 ||
-    application.includes("defineProductApiCommand<") ||
-    !application.includes("factEvents: []") ||
+    application.split("defineProductApiCommand<").length - 1 !== 1 ||
+    application.split("defineProductApiFactEvent<").length - 1 !== 1 ||
+    !application.includes(
+      "operations: [ADVANCEMENT_DETAIL_QUERY, ADVANCEMENT_REVISE_RUBRIC_COMMAND]",
+    ) ||
+    !application.includes(
+      "factEvents: [ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT]",
+    ) ||
     /@zhixing\/(?:server|rpc|owner-services)|\.\.\/\.\.\/server|\.\.\/\.\.\/owner-services/u.test(
       application,
     ) ||
@@ -3428,18 +3455,33 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !detail.includes("productApi.query(ADVANCEMENT_DETAIL_QUERY") ||
     !detail.includes("projectAdvancementDetail(detail)") ||
     /buildClosureFacts|ctx\.server\.advancement|loadLatestSession/u.test(detail) ||
+    revise.length === 0 ||
+    !revise.includes("requireAdvancementProductApi(") ||
+    !revise.includes("productApi.command(") ||
+    !revise.includes("ADVANCEMENT_REVISE_RUBRIC_COMMAND") ||
+    !revise.includes("fact.rubricDraftVersion") ||
+    !revise.includes('event: "advancement:contract_draft"') ||
+    /requireAdvancement\(|requireConversations\(|runAdvancementMaintenance\(|\.reviseRubricDraft\(/u.test(
+      revise,
+    ) ||
     !controller.includes("async loadLatestSession(") ||
     !controller.includes("return open ?? sessions[sessions.length - 1]!") ||
+    controller.includes("async reviseRubricDraft(input:") ||
+    !controller.includes("loadRubricRevisionSession(") ||
+    !controller.includes("reviseRubricDraftContent(") ||
+    !controller.includes("persistRubricDraftRevision(") ||
     !composition.includes('from "@zhixing/core/advancement/application"') ||
     composition.split("new AdvancementApplicationService(").length - 1 !== 1 ||
     composition.split("createAdvancementProductApiContribution(").length - 1 !== 1 ||
     !composition.includes("advancementDetailController.loadLatestSession(conversationId)") ||
+    !composition.includes("ctx.conversations!.runMaintenanceExisting(") ||
+    !composition.includes("rubricRevision: advancementDetailController") ||
     !composition.includes("? ADVANCEMENT_PRODUCT_API_EXACT_SET.operations") ||
     !composition.includes("? ADVANCEMENT_PRODUCT_API_EXACT_SET.factEvents") ||
     !composition.includes("...(advancementProductApi ? [advancementProductApi] : [])")
   ) {
     failures.push(
-      "Advancement detail lacks one domain application and Product API owner",
+      "Advancement detail/revision lacks one domain application and Product API owner",
     );
   }
 

@@ -626,8 +626,14 @@ async function verifyCorePackageExports(failures) {
       "function" ||
     typeof coreAdvancementApplication.createAdvancementProductApiContribution !==
       "function" ||
+    typeof coreAdvancementApplication.ADVANCEMENT_REVISE_RUBRIC_COMMAND !==
+      "object" ||
+    typeof coreAdvancementApplication.ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT !==
+      "object" ||
     "AdvancementApplicationService" in coreRoot ||
-    "createAdvancementProductApiContribution" in coreRoot
+    "createAdvancementProductApiContribution" in coreRoot ||
+    "ADVANCEMENT_REVISE_RUBRIC_COMMAND" in coreRoot ||
+    "ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT" in coreRoot
   ) {
     failures.push(
       "core-exports:advancement-application:invalid-runtime-boundary",
@@ -895,7 +901,9 @@ async function verifyCorePackageExports(failures) {
           if (
             subpath !== "./advancement/application" &&
             ("AdvancementApplicationService" in exported ||
-              "createAdvancementProductApiContribution" in exported)
+              "createAdvancementProductApiContribution" in exported ||
+              "ADVANCEMENT_REVISE_RUBRIC_COMMAND" in exported ||
+              "ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT" in exported)
           ) {
             failures.push(
               `core-exports:${subpath}:advancement-application-runtime-leak`,

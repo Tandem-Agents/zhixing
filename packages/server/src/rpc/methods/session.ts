@@ -62,6 +62,8 @@ import {
 } from "@zhixing/core/conversation/application";
 import {
   ADVANCEMENT_DETAIL_QUERY,
+  ADVANCEMENT_REVISE_RUBRIC_COMMAND,
+  AdvancementApplicationError,
   type AdvancementDetailProjection,
 } from "@zhixing/core/advancement/application";
 import type { ProductApiOperationDescriptor } from "@zhixing/core/product-api";
@@ -722,32 +724,42 @@ export function buildSessionAdvancementReviseMethod(): MethodEntry {
         params,
         "session.advancementRevise",
       );
-      const advancement = requireAdvancement(ctx.server);
-      const manager = requireConversations(ctx.server);
-      const revised = await runAdvancementMaintenance({
-        manager,
-        server: ctx.server,
-        conversationId,
-        busyMessage:
-          "Conversation is busy; revise the Rubric after the current turn completes",
-        fn: () =>
-          advancement.reviseRubricDraft({
+      const productApi = requireAdvancementProductApi(
+        ctx.server,
+        ADVANCEMENT_REVISE_RUBRIC_COMMAND,
+      );
+      const revised = await (async () => {
+        try {
+          return await productApi.command(
+            ADVANCEMENT_REVISE_RUBRIC_COMMAND,
+            { conversationId, advancementSessionId, userFeedback },
+          );
+        } catch (error) {
+          throw mapAdvancementRubricRevisionError(
+            error,
             conversationId,
             advancementSessionId,
-            userFeedback,
-          }),
-      });
+          );
+        }
+      })();
+      const fact = revised.facts[0];
+      if (!fact) {
+        throw new RpcAppError(
+          RPC_ERROR_CODES.INTERNAL_ERROR,
+          "Advancement rubric revision emitted no contract-draft fact",
+        );
+      }
 
       notifyAdvancementEvent({
         conversationId,
-        turnId: revised.draft.originalTurnId,
-        seq: revised.session.rubricDraftVersion,
+        turnId: fact.originalTurnId,
+        seq: fact.rubricDraftVersion,
         event: "advancement:contract_draft",
         payload: {
-          advancementSessionId: revised.session.id,
-          rubricDraftId: revised.draft.draftId,
-          rubricDraft: revised.draft,
-          revised: true,
+          advancementSessionId: fact.advancementSessionId,
+          rubricDraftId: fact.rubricDraftId,
+          rubricDraft: fact.rubricDraft,
+          revised: fact.revised,
         },
         connection: ctx.connection,
         broadcast: ctx.server.sessionBroadcast,
@@ -757,9 +769,9 @@ export function buildSessionAdvancementReviseMethod(): MethodEntry {
         conversationId,
         sessionId: conversationId,
         status: "revised",
-        advancementSessionId: revised.session.id,
-        rubricDraftId: revised.draft.draftId,
-        rubricDraft: revised.draft,
+        advancementSessionId: revised.result.advancementSessionId,
+        rubricDraftId: revised.result.rubricDraftId,
+        rubricDraft: revised.result.rubricDraft,
       };
     },
   };
@@ -3110,6 +3122,50 @@ function requireConversationProductApi(
     );
   }
   return server.productApi;
+}
+
+function requireAdvancementProductApi(
+  server: ServerContext,
+  descriptor: ProductApiOperationDescriptor,
+): NonNullable<ServerContext["productApi"]> {
+  if (!server.productApi?.supports(descriptor)) {
+    throw new RpcAppError(
+      RPC_ERROR_CODES.INTERNAL_ERROR,
+      "AdvancementController not configured on server",
+    );
+  }
+  return server.productApi;
+}
+
+function mapAdvancementRubricRevisionError(
+  error: unknown,
+  conversationId: string,
+  advancementSessionId: string,
+): unknown {
+  if (!(error instanceof AdvancementApplicationError)) return error;
+  if (error.code === "conversation-not-found") {
+    return RpcErrors.notFound(`Session not found: ${conversationId}`);
+  }
+  if (error.code === "conversation-busy") {
+    return RpcErrors.busy(
+      "Conversation is busy; revise the Rubric after the current turn completes",
+    );
+  }
+  const sessionId = error.advancementSessionId ?? advancementSessionId;
+  if (error.code === "advancement-session-not-found") {
+    return new Error(`AdvancementController: session "${sessionId}" not found`);
+  }
+  if (error.code === "not-awaiting-rubric-confirmation") {
+    return new Error(
+      `AdvancementController: session "${sessionId}" is not awaiting rubric confirmation`,
+    );
+  }
+  if (error.code === "pending-rubric-draft-missing") {
+    return new Error(
+      `AdvancementController: session "${sessionId}" has no pending rubric draft`,
+    );
+  }
+  return new Error(error.message);
 }
 
 async function queryConversationIdentityExists(

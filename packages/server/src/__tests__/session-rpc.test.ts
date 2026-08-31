@@ -885,8 +885,19 @@ function createConversationProductApi(input: {
   const advancementContribution = advancement
     ? createAdvancementProductApiContribution(
         new AdvancementApplicationService({
-          loadLatestSession: (conversationId) =>
-            advancement.loadLatestSession(conversationId),
+          detail: {
+            loadLatestSession: (conversationId) =>
+              advancement.loadLatestSession(conversationId),
+          },
+          maintenance: {
+            runExisting: (conversationId, operation) =>
+              input.conversations.runMaintenanceExisting(
+                conversationId,
+                () => input.directory.exists(conversationId),
+                operation,
+              ),
+          },
+          rubricRevision: advancement,
         }),
       )
     : undefined;
@@ -1256,7 +1267,7 @@ describe("session.* RPC (S2.D)", () => {
   async function seedOutstandingProxySession(
     store: AdvancementStore,
     conversationId: string,
-  ): Promise<void> {
+  ): Promise<ConversationManager> {
     await store.createSession({
       id: "adv-recovery",
       conversationId,
@@ -1422,6 +1433,7 @@ describe("session.* RPC (S2.D)", () => {
       productApi,
     });
     server = await startServer({ context: ctx });
+    return conversations;
   }
 
   afterEach(async () => {
@@ -2025,7 +2037,7 @@ describe("session.* RPC (S2.D)", () => {
     const reviseResp = await client.request("session.advancementRevise", {
       conversationId: awaiting.conversationId,
       advancementSessionId: awaiting.advancementSessionId,
-      userFeedback: "补充文档验收",
+      userFeedback: "  补充文档验收  ",
     });
     expect(isSuccessResponse(reviseResp)).toBe(true);
     if (!isSuccessResponse(reviseResp)) return;
@@ -2039,13 +2051,18 @@ describe("session.* RPC (S2.D)", () => {
     expect(recordsByConversation.get(awaiting.conversationId)).toEqual([]);
 
     const event = await client.waitNotification("session.event");
-    expect(event.params).toMatchObject({
+    expect(event.params).toEqual({
+      conversationId: awaiting.conversationId,
       scope: "control",
+      meta: {},
       runId: "turn-adv-revise",
       seq: 1,
       event: "advancement:contract_draft",
       payload: {
         advancementSessionId: awaiting.advancementSessionId,
+        rubricDraftId: (reviseResp.result as { rubricDraftId: string })
+          .rubricDraftId,
+        rubricDraft: (reviseResp.result as { rubricDraft: unknown }).rubricDraft,
         revised: true,
       },
     });
@@ -2080,6 +2097,72 @@ describe("session.* RPC (S2.D)", () => {
       "再补充构建验收",
     );
     expect(session?.rubricDraftVersion).toBe(2);
+    client.close();
+  });
+
+  it("session.advancementRevise preserves not-found/busy wire errors through Product API", async () => {
+    const advancement = await createTestAdvancementHarness();
+    const conversations = await startWithFactory(createMockFactory(), {
+      advancement: advancement.controller,
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const notFound = await client.request("session.advancementRevise", {
+      conversationId: "conv_missing",
+      advancementSessionId: "adv-missing",
+      userFeedback: "补充验收",
+    });
+    expect(notFound).toMatchObject({
+      error: {
+        code: RPC_ERROR_CODES.NOT_FOUND,
+        message: "Session not found: conv_missing",
+      },
+    });
+
+    const send = await client.request("session.send", {
+      text: "请把测试修到全绿，盯到验收通过",
+      turnId: "turn-adv-revise-busy",
+    });
+    expect(isSuccessResponse(send)).toBe(true);
+    if (!isSuccessResponse(send)) return;
+    const awaiting = send.result as {
+      conversationId: string;
+      advancementSessionId: string;
+    };
+    await client.waitNotification("session.event");
+    await conversations.getOrCreate(awaiting.conversationId);
+    let release!: () => void;
+    let entered!: () => void;
+    const enteredPromise = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const releasePromise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const held = conversations.runMaintenanceExisting(
+      awaiting.conversationId,
+      async () => true,
+      async () => {
+        entered();
+        await releasePromise;
+      },
+    );
+    await enteredPromise;
+    const busy = await client.request("session.advancementRevise", {
+      conversationId: awaiting.conversationId,
+      advancementSessionId: awaiting.advancementSessionId,
+      userFeedback: "补充验收",
+    });
+    release();
+    await held;
+    expect(busy).toMatchObject({
+      error: {
+        code: RPC_ERROR_CODES.BUSY,
+        message:
+          "Conversation is busy; revise the Rubric after the current turn completes",
+      },
+    });
     client.close();
   });
 

@@ -12,7 +12,6 @@ export {
   type AdvancementReviewRunInput,
   type AdvancementReviewRunOutcome,
   type AdvancementRunReviewer,
-  type AdvancementRevisedDraft,
   type AdvancementTurnReviewResult,
 } from "./controller.js";
 export {

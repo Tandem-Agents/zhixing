@@ -37,6 +37,7 @@ import type {
   ImmediateRootResourceLease,
   ResourceReservationPort,
 } from "@zhixing/core/contracts";
+import type { AdvancementRubricRevisionMechanismPort } from "@zhixing/core/advancement/application";
 import { ImmediateRootReplayTerminalError } from "@zhixing/core/contracts";
 import { randomUUID } from "node:crypto";
 import {
@@ -124,11 +125,6 @@ export interface RubricPublicationPort {
     readonly draft: RubricContractDraftSnapshot;
     readonly persistence: RubricDraftPersistenceChoice;
   }): Promise<RubricPublicationOutcome>;
-}
-
-export interface AdvancementRevisedDraft {
-  readonly session: AdvancementSession;
-  readonly draft: RubricContractDraftSnapshot;
 }
 
 export type AdvancementCancelResult =
@@ -236,7 +232,7 @@ export type AdvancementTurnReviewResult =
       readonly closure: AdvancementClosureReport;
     };
 
-export class AdvancementController {
+export class AdvancementController implements AdvancementRubricRevisionMechanismPort {
   private readonly store: AdvancementSessionStore;
   private readonly contractBuilder: RubricContractBuilder;
   private readonly admissionStrategy: AdvancementAdmissionStrategy;
@@ -636,38 +632,32 @@ export class AdvancementController {
     );
   }
 
-  async reviseRubricDraft(input: {
-    readonly conversationId: string;
-    readonly advancementSessionId: string;
-    readonly userFeedback: string;
-  }): Promise<AdvancementRevisedDraft> {
-    const session = await this.requireSession(
+  loadRubricRevisionSession(
+    conversationId: string,
+    advancementSessionId: string,
+  ): Promise<AdvancementSession | null> {
+    return this.store.loadSession(conversationId, advancementSessionId);
+  }
+
+  reviseRubricDraftContent(input: Readonly<{
+    currentDraft: RubricContractDraftSnapshot;
+    originalUserTask: UserTurnInput;
+    userFeedback: string;
+  }>): Promise<RubricContractDraftSnapshot> {
+    return this.contractBuilder.reviseDraft(input);
+  }
+
+  persistRubricDraftRevision(input: Readonly<{
+    conversationId: string;
+    advancementSessionId: string;
+    draft: RubricContractDraftSnapshot;
+  }>): Promise<AdvancementSession> {
+    return this.store.reviseRubricDraft(
       input.conversationId,
       input.advancementSessionId,
+      input.draft,
+      input.draft.createdAt,
     );
-    if (session.status !== "awaiting-rubric-confirmation") {
-      throw new Error(
-        `AdvancementController: session "${session.id}" is not awaiting rubric confirmation`,
-      );
-    }
-    const draft = session.pendingRubricDraft;
-    if (!draft) {
-      throw new Error(
-        `AdvancementController: session "${session.id}" has no pending rubric draft`,
-      );
-    }
-    const revised = await this.contractBuilder.reviseDraft({
-      currentDraft: draft,
-      originalUserTask: session.originalUserTask,
-      userFeedback: input.userFeedback,
-    });
-    const updated = await this.store.reviseRubricDraft(
-      input.conversationId,
-      input.advancementSessionId,
-      revised,
-      revised.createdAt,
-    );
-    return { session: updated, draft: revised };
   }
 
   async cancelRubric(input: {

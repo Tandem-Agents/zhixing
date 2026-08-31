@@ -3402,7 +3402,7 @@ test("Trust Administration management has one domain application and Product API
   );
 });
 
-test("Advancement detail has one narrow application and Product API query owner", async () => {
+test("Advancement detail and rubric revision have one narrow Product API application owner", async () => {
   const paths = [
     "packages/core/src/advancement/application.ts",
     "packages/core/src/advancement/index.ts",
@@ -3422,7 +3422,7 @@ test("Advancement detail has one narrow application and Product API query owner"
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
   );
-  const failure = /Advancement detail lacks one domain application and Product API owner/;
+  const failure = /Advancement detail\/revision lacks one domain application and Product API owner/;
 
   assert.match(
     inspectAdvancementDetailApplicationOwnership(mutate(
@@ -3455,6 +3455,53 @@ test("Advancement detail has one narrow application and Product API query owner"
     inspectAdvancementDetailApplicationOwnership(mutate(
       "packages/core/src/advancement/application.ts",
       (text) => text.replace("defineProductApiQuery<", "defineProductApiCommand<"),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace(
+        "productApi.command(\n            ADVANCEMENT_REVISE_RUBRIC_COMMAND",
+        "ctx.server.advancement.reviseRubricDraft(\n            ADVANCEMENT_REVISE_RUBRIC_COMMAND",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/core/src/advancement/application.ts",
+      (text) => text.replaceAll(
+        "factEvents: [ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT],",
+        "factEvents: [],",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/core/src/advancement/application.ts",
+      (text) => text.replace(
+        "const committedDraft = updated.pendingRubricDraft",
+        "const committedDraft = revisedDraft",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "rubricRevision: advancementDetailController,",
+        "",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/owner-services/src/advancement/controller.ts",
+      (text) => `${text}\nasync reviseRubricDraft(input: unknown) { return input; }`,
     )).join("\n"),
     failure,
   );

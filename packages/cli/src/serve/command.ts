@@ -1980,8 +1980,19 @@ async function runServerProcess(
   const advancementProductApi = advancementDetailController
     ? createAdvancementProductApiContribution(
         new AdvancementApplicationService({
-          loadLatestSession: (conversationId) =>
-            advancementDetailController.loadLatestSession(conversationId),
+          detail: {
+            loadLatestSession: (conversationId) =>
+              advancementDetailController.loadLatestSession(conversationId),
+          },
+          maintenance: {
+            runExisting: (conversationId, operation) =>
+              ctx.conversations!.runMaintenanceExisting(
+                conversationId,
+                () => conversationDirectory.exists(conversationId),
+                operation,
+              ),
+          },
+          rubricRevision: advancementDetailController,
         }),
       )
     : undefined;

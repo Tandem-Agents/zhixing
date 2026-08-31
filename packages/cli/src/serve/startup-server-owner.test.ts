@@ -80,6 +80,8 @@ describe("production startup server ownership", () => {
     expect(advancementApplication).toBeLessThan(dispatcher);
     expect(advancementContribution).toBeLessThan(dispatcher);
     expect(source).toContain("ADVANCEMENT_PRODUCT_API_EXACT_SET.operations");
+    expect(source).toContain("rubricRevision: advancementDetailController");
+    expect(source).toContain("ctx.conversations!.runMaintenanceExisting(");
     expect(context).toContain("productApi,");
     expect(context).not.toContain("skillCatalog:");
     expect(context).not.toContain("resolveDelivery:");

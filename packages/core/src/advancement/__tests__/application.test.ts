@@ -1,11 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import { ProductApiDispatcher } from "../../product-api/catalog.js";
 import {
+  ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT,
   ADVANCEMENT_DETAIL_QUERY,
   ADVANCEMENT_PRODUCT_API_EXACT_SET,
+  ADVANCEMENT_REVISE_RUBRIC_COMMAND,
+  AdvancementApplicationError,
   AdvancementApplicationService,
   createAdvancementProductApiContribution,
+  type AdvancementApplicationOptions,
+  type AdvancementConversationMaintenancePort,
   type AdvancementDetailReadPort,
+  type AdvancementRubricRevisionMechanismPort,
 } from "../application.js";
 import type {
   AdvancementRunReview,
@@ -15,8 +21,8 @@ import type {
 describe("AdvancementApplicationService detail query", () => {
   it("returns null when the owner has no Advancement session", async () => {
     const loadLatestSession = vi.fn(async () => null);
-    const application = new AdvancementApplicationService({
-      loadLatestSession,
+    const application = createApplication({
+      detail: { loadLatestSession },
     });
 
     await expect(
@@ -44,7 +50,7 @@ describe("AdvancementApplicationService detail query", () => {
         review("review-2", 1, { attribution: { criteria: [criterion] } }),
       ],
     });
-    const application = new AdvancementApplicationService(port(source));
+    const application = createApplication({ detail: port(source) });
 
     const detail = await application.queryDetail({ conversationId: "conv-1" });
 
@@ -86,7 +92,7 @@ describe("AdvancementApplicationService detail query", () => {
         occurredAt: "2026-01-01T00:05:00.000Z",
       },
     });
-    const application = new AdvancementApplicationService(port(source));
+    const application = createApplication({ detail: port(source) });
 
     await expect(
       application.queryDetail({ conversationId: "conv-1" }),
@@ -98,8 +104,241 @@ describe("AdvancementApplicationService detail query", () => {
     });
   });
 
-  it("contributes one sealed Query and no Fact Event", async () => {
-    const application = new AdvancementApplicationService(port(session()));
+  it("owns trim, pending-draft preconditions, consecutive revision and immutable fact projection", async () => {
+    const source = session({
+      status: "awaiting-rubric-confirmation",
+      pendingRubricDraft: pendingRubric("待修订标准"),
+      confirmedRubric: undefined,
+    });
+    const reviseRubricDraftContent = vi.fn(
+      async (input: Parameters<AdvancementRubricRevisionMechanismPort["reviseRubricDraftContent"]>[0]) => ({
+        ...input.currentDraft,
+        draftId: `draft-${input.userFeedback}`,
+        content: {
+          ...input.currentDraft.content,
+          passCriteria: [
+            ...input.currentDraft.content.passCriteria,
+            input.userFeedback,
+          ],
+        },
+      }),
+    );
+    const fixture = createRevisionFixture(source, { reviseRubricDraftContent });
+
+    const first = await fixture.application.reviseRubricDraft({
+      conversationId: "conv-1",
+      advancementSessionId: "adv-1",
+      userFeedback: "  补充文档验收  ",
+    });
+    const second = await fixture.application.reviseRubricDraft({
+      conversationId: "conv-1",
+      advancementSessionId: "adv-1",
+      userFeedback: "再补充构建验收",
+    });
+
+    expect(reviseRubricDraftContent.mock.calls[0]?.[0].userFeedback).toBe(
+      "补充文档验收",
+    );
+    expect(reviseRubricDraftContent.mock.calls[1]?.[0].currentDraft.draftId).toBe(
+      "draft-补充文档验收",
+    );
+    expect(first.result.rubricDraftVersion).toBe(2);
+    expect(second.result.rubricDraftVersion).toBe(3);
+    expect(second.fact).toEqual({
+      kind: "advancement-contract-draft-revised",
+      conversationId: "conv-1",
+      originalTurnId: "turn-1",
+      advancementSessionId: "adv-1",
+      rubricDraftId: "draft-再补充构建验收",
+      rubricDraftVersion: 3,
+      rubricDraft: second.result.rubricDraft,
+      revised: true,
+    });
+    expect(Object.isFrozen(second.result)).toBe(true);
+    expect(Object.isFrozen(second.result.rubricDraft.content.passCriteria)).toBe(true);
+    expect(Object.isFrozen(second.fact)).toBe(true);
+  });
+
+  it("forms Result and Fact only from the committed authoritative session projection", async () => {
+    const source = session({
+      status: "awaiting-rubric-confirmation",
+      pendingRubricDraft: pendingRubric("待修订标准"),
+      confirmedRubric: undefined,
+    });
+    const candidate = {
+      ...pendingRubric("提交前候选"),
+      draftId: "draft-candidate",
+    };
+    const committed = {
+      ...pendingRubric("提交后规范化草案"),
+      draftId: "draft-committed",
+    };
+    const fixture = createRevisionFixture(source, {
+      reviseRubricDraftContent: async () => candidate,
+      persistRubricDraftRevision: async () => ({
+        ...source,
+        id: "adv-committed",
+        pendingRubricDraft: committed,
+        rubricDraftVersion: 7,
+      }),
+    });
+
+    const revised = await fixture.application.reviseRubricDraft({
+      conversationId: "conv-1",
+      advancementSessionId: "adv-1",
+      userFeedback: "规范化后提交",
+    });
+
+    expect(revised.result).toMatchObject({
+      advancementSessionId: "adv-committed",
+      rubricDraftId: "draft-committed",
+      rubricDraftVersion: 7,
+      rubricDraft: { title: "提交后规范化草案" },
+    });
+    expect(revised.fact).toMatchObject({
+      advancementSessionId: "adv-committed",
+      rubricDraftId: "draft-committed",
+      rubricDraftVersion: 7,
+      rubricDraft: { title: "提交后规范化草案" },
+    });
+    expect(revised.result.rubricDraft).toBe(revised.fact.rubricDraft);
+    expect(revised.result.rubricDraft).not.toBe(candidate);
+
+    const missing = createRevisionFixture(source, {
+      reviseRubricDraftContent: async () => candidate,
+      persistRubricDraftRevision: async () => ({
+        ...source,
+        pendingRubricDraft: undefined,
+        rubricDraftVersion: 7,
+      }),
+    });
+    await expect(
+      missing.application.reviseRubricDraft({
+        conversationId: "conv-1",
+        advancementSessionId: "adv-1",
+        userFeedback: "规范化后提交",
+      }),
+    ).rejects.toMatchObject<Partial<AdvancementApplicationError>>({
+      code: "committed-rubric-draft-missing",
+    });
+  });
+
+  it("fails closed before revision for invalid input, maintenance refusal, state mismatch and missing draft", async () => {
+    const awaiting = session({
+      status: "awaiting-rubric-confirmation",
+      pendingRubricDraft: pendingRubric("待修订标准"),
+      confirmedRubric: undefined,
+    });
+    const base = createRevisionFixture(awaiting);
+    await expect(
+      base.application.reviseRubricDraft({
+        conversationId: "conv-1",
+        advancementSessionId: "adv-1",
+        userFeedback: "   ",
+      }),
+    ).rejects.toThrow("requires non-empty user feedback");
+    await expect(
+      base.application.reviseRubricDraft({
+        conversationId: "",
+        advancementSessionId: "adv-1",
+        userFeedback: "修订",
+      }),
+    ).rejects.toThrow("conversation identity must be non-empty");
+    await expect(
+      base.application.reviseRubricDraft({
+        conversationId: "conv-1",
+        advancementSessionId: " ",
+        userFeedback: "修订",
+      }),
+    ).rejects.toThrow("Advancement session identity must be non-empty");
+
+    for (const status of ["busy", "not-found"] as const) {
+      const fixture = createRevisionFixture(awaiting, {
+        maintenance: {
+          runExisting: async () => ({ status }),
+        },
+      });
+      await expect(
+        fixture.application.reviseRubricDraft({
+          conversationId: "conv-1",
+          advancementSessionId: "adv-1",
+          userFeedback: "修订",
+        }),
+      ).rejects.toMatchObject<Partial<AdvancementApplicationError>>({
+        code: status === "busy" ? "conversation-busy" : "conversation-not-found",
+      });
+    }
+
+    const absent = createRevisionFixture(awaiting, {
+      loadRubricRevisionSession: async () => null,
+    });
+    await expect(
+      absent.application.reviseRubricDraft({
+        conversationId: "conv-1",
+        advancementSessionId: "adv-missing",
+        userFeedback: "修订",
+      }),
+    ).rejects.toMatchObject<Partial<AdvancementApplicationError>>({
+      code: "advancement-session-not-found",
+    });
+
+    const inactive = createRevisionFixture(session({ status: "active" }));
+    await expect(
+      inactive.application.reviseRubricDraft({
+        conversationId: "conv-1",
+        advancementSessionId: "adv-1",
+        userFeedback: "修订",
+      }),
+    ).rejects.toMatchObject<Partial<AdvancementApplicationError>>({
+      code: "not-awaiting-rubric-confirmation",
+    });
+    const missing = createRevisionFixture(session({
+      status: "awaiting-rubric-confirmation",
+      confirmedRubric: undefined,
+      pendingRubricDraft: undefined,
+    }));
+    await expect(
+      missing.application.reviseRubricDraft({
+        conversationId: "conv-1",
+        advancementSessionId: "adv-1",
+        userFeedback: "修订",
+      }),
+    ).rejects.toMatchObject<Partial<AdvancementApplicationError>>({
+      code: "pending-rubric-draft-missing",
+    });
+  });
+
+  it("propagates mechanism failures without persisting a revision or forming a fact", async () => {
+    const source = session({
+      status: "awaiting-rubric-confirmation",
+      pendingRubricDraft: pendingRubric("待修订标准"),
+      confirmedRubric: undefined,
+    });
+    const persistRubricDraftRevision = vi.fn();
+    const fixture = createRevisionFixture(source, {
+      reviseRubricDraftContent: async () => {
+        throw new Error("revision mechanism failed");
+      },
+      persistRubricDraftRevision,
+    });
+
+    await expect(
+      fixture.application.reviseRubricDraft({
+        conversationId: "conv-1",
+        advancementSessionId: "adv-1",
+        userFeedback: "修订",
+      }),
+    ).rejects.toThrow("revision mechanism failed");
+    expect(persistRubricDraftRevision).not.toHaveBeenCalled();
+  });
+
+  it("contributes one sealed Query plus one rubric-revision Command and Fact Event", async () => {
+    const source = session({
+      status: "awaiting-rubric-confirmation",
+      pendingRubricDraft: pendingRubric("待修订标准"),
+      confirmedRubric: undefined,
+    });
+    const application = createRevisionFixture(source).application;
     const dispatcher = new ProductApiDispatcher(
       ADVANCEMENT_PRODUCT_API_EXACT_SET,
       [createAdvancementProductApiContribution(application)],
@@ -107,18 +346,107 @@ describe("AdvancementApplicationService detail query", () => {
 
     expect(ADVANCEMENT_PRODUCT_API_EXACT_SET.operations).toEqual([
       ADVANCEMENT_DETAIL_QUERY,
+      ADVANCEMENT_REVISE_RUBRIC_COMMAND,
     ]);
-    expect(ADVANCEMENT_PRODUCT_API_EXACT_SET.factEvents).toEqual([]);
+    expect(ADVANCEMENT_PRODUCT_API_EXACT_SET.factEvents).toEqual([
+      ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT,
+    ]);
     await expect(
       dispatcher.query(ADVANCEMENT_DETAIL_QUERY, {
         conversationId: "conv-1",
       }),
     ).resolves.toMatchObject({ advancementSessionId: "adv-1" });
+    await expect(
+      dispatcher.command(ADVANCEMENT_REVISE_RUBRIC_COMMAND, {
+        conversationId: "conv-1",
+        advancementSessionId: "adv-1",
+        userFeedback: "补充制品验收",
+      }),
+    ).resolves.toMatchObject({
+      result: {
+        conversationId: "conv-1",
+        advancementSessionId: "adv-1",
+        rubricDraftVersion: 2,
+      },
+      facts: [
+        {
+          kind: "advancement-contract-draft-revised",
+          rubricDraftVersion: 2,
+          revised: true,
+        },
+      ],
+    });
   });
 });
 
 function port(session: AdvancementSession): AdvancementDetailReadPort {
   return { loadLatestSession: async () => session };
+}
+
+function createApplication(
+  overrides: Partial<AdvancementApplicationOptions> = {},
+): AdvancementApplicationService {
+  const fixture = createRevisionFixture(
+    session({
+      status: "awaiting-rubric-confirmation",
+      pendingRubricDraft: pendingRubric("待修订标准"),
+      confirmedRubric: undefined,
+    }),
+  );
+  return new AdvancementApplicationService({
+    detail: overrides.detail ?? fixture.options.detail,
+    maintenance: overrides.maintenance ?? fixture.options.maintenance,
+    rubricRevision:
+      overrides.rubricRevision ?? fixture.options.rubricRevision,
+  });
+}
+
+function createRevisionFixture(
+  initial: AdvancementSession,
+  overrides: Partial<AdvancementRubricRevisionMechanismPort> & Readonly<{
+    maintenance?: AdvancementConversationMaintenancePort;
+  }> = {},
+): Readonly<{
+  application: AdvancementApplicationService;
+  options: AdvancementApplicationOptions;
+}> {
+  let current = structuredClone(initial);
+  const rubricRevision: AdvancementRubricRevisionMechanismPort = {
+    loadRubricRevisionSession:
+      overrides.loadRubricRevisionSession ?? (async () => current),
+    reviseRubricDraftContent:
+      overrides.reviseRubricDraftContent ??
+      (async ({ currentDraft }) => ({
+        ...currentDraft,
+        draftId: `${currentDraft.draftId}-revised`,
+      })),
+    persistRubricDraftRevision:
+      overrides.persistRubricDraftRevision ??
+      (async ({ draft }) => {
+        current = {
+          ...current,
+          pendingRubricDraft: draft,
+          rubricDraftVersion: current.rubricDraftVersion + 1,
+        };
+        return current;
+      }),
+  };
+  const maintenance: AdvancementConversationMaintenancePort =
+    overrides.maintenance ?? {
+      runExisting: async (_conversationId, operation) => ({
+        status: "done",
+        value: await operation(),
+      }),
+    };
+  const options: AdvancementApplicationOptions = {
+    detail: port(current),
+    maintenance,
+    rubricRevision,
+  };
+  return Object.freeze({
+    options,
+    application: new AdvancementApplicationService(options),
+  });
 }
 
 function session(overrides: Partial<AdvancementSession> = {}): AdvancementSession {
