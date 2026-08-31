@@ -84,6 +84,7 @@ import {
   type ConversationAdoptionReviewProjection,
   type ConversationTaskListMutationDecision,
   type ConversationTaskListPort,
+  type ConversationUsageProjectionPort,
 } from "@zhixing/core/conversation/application";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import { loadAdvancementState } from "../rpc/methods/session.js";
@@ -116,8 +117,12 @@ interface MockOptions {
   observedRunOptions?: Array<RunTurnOptions | undefined>;
   /** /usage /context 的预算能力 */
   contextBudget?: ContextBudget;
+  /** Records context-budget estimator calls for query ownership assertions. */
+  contextBudgetCalls?: Message[][];
   /** /usage 的子 agent 拆分能力 */
   subAgentUsages?: readonly RuntimeSubAgentUsageEntry[];
+  /** Records sub-agent usage calls; context-budget must never trigger one. */
+  subAgentUsageCalls?: Message[][];
   /** /security 的运行体快照能力 */
   securitySnapshot?: RuntimeSecuritySnapshot;
   /** run 外 lifecycle 诊断缓冲 */
@@ -223,9 +228,15 @@ function createMockRuntime(
       : {}),
     ...(opts.contextBudget
       ? {
-          estimateConversationRequestBudget: () => opts.contextBudget!,
+          estimateConversationRequestBudget: (messages) => {
+            opts.contextBudgetCalls?.push([...messages]);
+            return opts.contextBudget!;
+          },
           calibrationFactor: 0.95,
-          subAgentUsages: () => opts.subAgentUsages ?? [],
+          subAgentUsages: (messages) => {
+            opts.subAgentUsageCalls?.push([...messages]);
+            return opts.subAgentUsages ?? [];
+          },
         }
       : {}),
     drainLifecycleDiagnostics: () => {
@@ -531,6 +542,43 @@ function createConversationProductApi(input: {
               : {}),
           },
         } satisfies Awaited<ReturnType<ConversationCompactPort["compactExisting"]>>;
+      },
+    },
+    usage: {
+      inspectContextBudgetExisting: async (conversationId) => {
+        const result = await input.conversations.inspectContextBudgetExisting(
+          conversationId,
+          () => input.directory.exists(conversationId),
+        );
+        if (result.status !== "done") return result;
+        return {
+          status: "done",
+          outcome: {
+            budget: result.budget,
+            turnCount: result.turnCount,
+            calibrationFactor: result.calibrationFactor,
+          },
+        } satisfies Awaited<
+          ReturnType<ConversationUsageProjectionPort["inspectContextBudgetExisting"]>
+        >;
+      },
+      inspectUsageExisting: async (conversationId) => {
+        const result = await input.conversations.inspectUsageExisting(
+          conversationId,
+          () => input.directory.exists(conversationId),
+        );
+        if (result.status !== "done") return result;
+        return {
+          status: "done",
+          outcome: {
+            budget: result.budget,
+            turnCount: result.turnCount,
+            calibrationFactor: result.calibrationFactor,
+            subUsages: result.subUsages,
+          },
+        } satisfies Awaited<
+          ReturnType<ConversationUsageProjectionPort["inspectUsageExisting"]>
+        >;
       },
     },
     ...(input.taskLists ? { taskLists: input.taskLists } : {}),
@@ -3491,16 +3539,21 @@ describe("session.* RPC (S2.D)", () => {
   });
 
   it("session.usage 返回预算与子 agent 拆分", async () => {
+    const contextBudgetCalls: Message[][] = [];
+    const subAgentUsageCalls: Message[][] = [];
+    const contextBudget = {
+      contextWindow: 200_000,
+      effectiveWindow: 180_000,
+      currentTokens: 12_000,
+      usageRatio: 0.067,
+      status: "normal" as const,
+    };
     await startWithFactory(
       createMockFactory({
         deltaCount: 1,
-        contextBudget: {
-          contextWindow: 200_000,
-          effectiveWindow: 180_000,
-          currentTokens: 12_000,
-          usageRatio: 0.067,
-          status: "normal",
-        },
+        contextBudget,
+        contextBudgetCalls,
+        subAgentUsageCalls,
         subAgentUsages: [
           {
             index: 1,
@@ -3522,12 +3575,27 @@ describe("session.* RPC (S2.D)", () => {
       .sessionId;
     await client.waitNotification("session.complete");
 
+    const budgetResp = await client.request("session.contextBudget", {
+      conversationId: sessionId,
+    });
+    expect(isSuccessResponse(budgetResp)).toBe(true);
+    if (isSuccessResponse(budgetResp)) {
+      expect(budgetResp.result).toEqual({
+        budget: contextBudget,
+        turnCount: 1,
+        calibrationFactor: 0.95,
+      });
+    }
+    expect(contextBudgetCalls).toHaveLength(1);
+    expect(subAgentUsageCalls).toHaveLength(0);
+
     const resp = await client.request("session.usage", {
       conversationId: sessionId,
     });
     expect(isSuccessResponse(resp)).toBe(true);
     if (isSuccessResponse(resp)) {
-      expect(resp.result).toMatchObject({
+      expect(resp.result).toEqual({
+        budget: contextBudget,
         turnCount: 1,
         calibrationFactor: 0.95,
         subUsages: [
@@ -3535,12 +3603,86 @@ describe("session.* RPC (S2.D)", () => {
             index: 1,
             description: "调研模块结构",
             tokens: 12_000,
+            toolUses: 2,
+            durationMs: 3000,
+            subId: "abc123",
             status: "succeeded",
           },
         ],
       });
     }
+    expect(contextBudgetCalls).toHaveLength(2);
+    expect(subAgentUsageCalls).toHaveLength(1);
 
+    client.close();
+  });
+
+  it("contextBudget 与 usage 保持迁移前 unsupported wire 错误", async () => {
+    await startWithFactory(createMockFactory({ deltaCount: 1 }));
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+    const sendResp = await client.request("session.send", { text: "你好" });
+    const sessionId = (sendResp as { result: { sessionId: string } }).result
+      .sessionId;
+    await client.waitNotification("session.complete");
+
+    for (const [method, message] of [
+      ["session.contextBudget", "Runtime does not support context budget inspection"],
+      ["session.usage", "Runtime does not support usage inspection"],
+    ] as const) {
+      const response = await client.request(method, { conversationId: sessionId });
+      expect(isErrorResponse(response)).toBe(true);
+      if (isErrorResponse(response)) {
+        expect(response.error).toEqual({
+          code: RPC_ERROR_CODES.INTERNAL_ERROR,
+          message,
+        });
+      }
+    }
+    client.close();
+  });
+
+  it("contextBudget 与 usage 激活既有 inactive 会话并转发 lifecycle diagnostics", async () => {
+    let createCalls = 0;
+    await startWithFactory({
+      async create(sessionId) {
+        createCalls++;
+        return createMockRuntime(sessionId, {
+          contextBudget: {
+            contextWindow: 100,
+            effectiveWindow: 90,
+            currentTokens: 10,
+            usageRatio: 1 / 9,
+            status: "normal",
+          },
+          lifecycleDiagnostics: [{
+            hookId: "usage-projection",
+            phase: "onWindowOpen",
+            runtimeId: sessionId,
+            windowIndex: 0,
+            message: `activated ${sessionId}`,
+          }],
+        });
+      },
+    }, { seedConversations: ["inactive-budget", "inactive-usage"] });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    for (const [method, conversationId] of [
+      ["session.contextBudget", "inactive-budget"],
+      ["session.usage", "inactive-usage"],
+    ] as const) {
+      await client.request("session.subscribe", { conversationId });
+      const response = await client.request(method, { conversationId });
+      expect(isSuccessResponse(response)).toBe(true);
+      const event = await client.waitNotification("session.event");
+      expect(event.params).toMatchObject({
+        conversationId,
+        event: "lifecycle:warning",
+        payload: { message: `activated ${conversationId}` },
+      });
+    }
+    expect(createCalls).toBe(2);
     client.close();
   });
 

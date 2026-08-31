@@ -15,6 +15,7 @@ import {
 } from "../types/user-input.js";
 import type { TurnOrigin } from "../types/tools.js";
 import type { ExplicitEnvironmentSelection } from "../contracts/protocol.js";
+import type { ContextBudget } from "../context/types.js";
 import type { TaskItem, TaskListState } from "./types.js";
 
 /** Persisted Conversation identity projected by the domain storage port. */
@@ -325,6 +326,45 @@ export interface ConversationCompactPort {
   >;
 }
 
+export interface ConversationSubAgentUsage {
+  readonly index: number;
+  readonly description: string;
+  readonly tokens: number;
+  readonly toolUses: number;
+  readonly durationMs?: number;
+  readonly subId?: string;
+  readonly status: "succeeded" | "failed" | "aborted";
+}
+
+export interface ConversationContextBudgetMechanismOutcome {
+  readonly budget: ContextBudget;
+  readonly turnCount: number;
+  readonly calibrationFactor: number;
+}
+
+export interface ConversationUsageMechanismOutcome
+  extends ConversationContextBudgetMechanismOutcome {
+  readonly subUsages: readonly ConversationSubAgentUsage[];
+}
+
+/** Owner/runtime mechanisms consumed by the two Conversation usage queries. */
+export interface ConversationUsageProjectionPort {
+  inspectContextBudgetExisting(conversationId: string): Promise<
+    | Readonly<{
+        status: "done";
+        outcome: ConversationContextBudgetMechanismOutcome;
+      }>
+    | Readonly<{ status: "not-found" | "unsupported" | "unavailable" }>
+  >;
+  inspectUsageExisting(conversationId: string): Promise<
+    | Readonly<{
+        status: "done";
+        outcome: ConversationUsageMechanismOutcome;
+      }>
+    | Readonly<{ status: "not-found" | "unsupported" | "unavailable" }>
+  >;
+}
+
 export type ConversationAdoptionReviewProjection =
   | Readonly<{
       status: "ready";
@@ -454,6 +494,14 @@ export type ConversationDirectoryQuery =
       conversationId: string;
       limit?: number;
       before?: ConversationHistoryCursor;
+    }>
+  | Readonly<{
+      kind: "context-budget";
+      conversationId: string;
+    }>
+  | Readonly<{
+      kind: "usage";
+      conversationId: string;
     }>;
 
 export type ConversationDirectoryCommand =
@@ -615,6 +663,16 @@ export interface ConversationCompactResult {
   }>;
 }
 
+export interface ConversationContextBudgetResult {
+  readonly budget: ContextBudget;
+  readonly turnCount: number;
+  readonly calibrationFactor: number;
+}
+
+export interface ConversationUsageResult extends ConversationContextBudgetResult {
+  readonly subUsages: readonly ConversationSubAgentUsage[];
+}
+
 export type ConversationLifecycleFact =
   | ConversationClearedFact
   | ConversationDeletedFact;
@@ -644,7 +702,13 @@ export class ConversationApplicationError extends Error {
       | "compact-conversation-not-found"
       | "compact-busy"
       | "compact-unsupported"
-      | "compact-unavailable",
+      | "compact-unavailable"
+      | "context-budget-conversation-not-found"
+      | "context-budget-unsupported"
+      | "context-budget-unavailable"
+      | "usage-conversation-not-found"
+      | "usage-unsupported"
+      | "usage-unavailable",
   ) {
     super(message);
     this.name = "ConversationApplicationError";
@@ -659,6 +723,15 @@ export interface ConversationDirectoryApplication {
   queryHistory(
     query: Extract<ConversationDirectoryQuery, { readonly kind: "history" }>,
   ): Promise<ConversationHistoryPage>;
+  queryContextBudget(
+    query: Extract<
+      ConversationDirectoryQuery,
+      { readonly kind: "context-budget" }
+    >,
+  ): Promise<ConversationContextBudgetResult>;
+  queryUsage(
+    query: Extract<ConversationDirectoryQuery, { readonly kind: "usage" }>,
+  ): Promise<ConversationUsageResult>;
   create(): Promise<ConversationCreatedResult>;
   resume(
     command: Extract<ConversationDirectoryCommand, { readonly kind: "resume" }>,
@@ -737,6 +810,7 @@ export class ConversationDirectoryApplicationService
       agentTurnIdentity?: ConversationAgentTurnIdentityPort;
       taskLists?: ConversationTaskListPort;
       compact?: ConversationCompactPort;
+      usage?: ConversationUsageProjectionPort;
       clock?: () => number;
     }>,
   ) {}
@@ -823,6 +897,66 @@ export class ConversationDirectoryApplicationService
     return this.input.storage.readHistory(query.conversationId, {
       limit: Math.min(query.limit ?? HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT),
       ...(query.before ? { before: query.before } : {}),
+    });
+  }
+
+  async queryContextBudget(
+    query: Extract<
+      ConversationDirectoryQuery,
+      { readonly kind: "context-budget" }
+    >,
+  ): Promise<ConversationContextBudgetResult> {
+    assertConversationUsageQueryIdentity(query.conversationId, "context budget");
+    const port = this.input.usage;
+    if (!port) {
+      throw new Error("Conversation usage application is not assembled");
+    }
+    const inspected = await port.inspectContextBudgetExisting(
+      query.conversationId,
+    );
+    if (inspected.status !== "done") {
+      throwConversationUsageInspectionError(
+        "context-budget",
+        query.conversationId,
+        inspected.status,
+      );
+    }
+    return freezeConversationContextBudgetResult(inspected.outcome);
+  }
+
+  async queryUsage(
+    query: Extract<ConversationDirectoryQuery, { readonly kind: "usage" }>,
+  ): Promise<ConversationUsageResult> {
+    assertConversationUsageQueryIdentity(query.conversationId, "usage");
+    const port = this.input.usage;
+    if (!port) {
+      throw new Error("Conversation usage application is not assembled");
+    }
+    const inspected = await port.inspectUsageExisting(query.conversationId);
+    if (inspected.status !== "done") {
+      throwConversationUsageInspectionError(
+        "usage",
+        query.conversationId,
+        inspected.status,
+      );
+    }
+    return Object.freeze({
+      ...freezeConversationContextBudgetResult(inspected.outcome),
+      subUsages: Object.freeze(
+        inspected.outcome.subUsages.map((usage) =>
+          Object.freeze({
+            index: usage.index,
+            description: usage.description,
+            tokens: usage.tokens,
+            toolUses: usage.toolUses,
+            ...(usage.durationMs !== undefined
+              ? { durationMs: usage.durationMs }
+              : {}),
+            ...(usage.subId !== undefined ? { subId: usage.subId } : {}),
+            status: usage.status,
+          }),
+        ),
+      ),
     });
   }
 
@@ -1739,6 +1873,18 @@ export const CONVERSATION_TASK_LIST_QUERY = defineProductApiQuery<
   ConversationTaskListView
 >("conversation-task-list.query.current");
 
+export const CONVERSATION_CONTEXT_BUDGET_QUERY = defineProductApiQuery<
+  "conversation-window.query.context-budget",
+  Extract<ConversationDirectoryQuery, { readonly kind: "context-budget" }>,
+  ConversationContextBudgetResult
+>("conversation-window.query.context-budget");
+
+export const CONVERSATION_USAGE_QUERY = defineProductApiQuery<
+  "conversation-window.query.usage",
+  Extract<ConversationDirectoryQuery, { readonly kind: "usage" }>,
+  ConversationUsageResult
+>("conversation-window.query.usage");
+
 export const CONVERSATION_CREATE_COMMAND = defineProductApiCommand<
   "conversation-directory.command.create",
   Extract<ConversationDirectoryCommand, { readonly kind: "create" }>,
@@ -1837,6 +1983,8 @@ export const CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET =
       CONVERSATION_LIST_QUERY,
       CONVERSATION_HISTORY_QUERY,
       CONVERSATION_TASK_LIST_QUERY,
+      CONVERSATION_CONTEXT_BUDGET_QUERY,
+      CONVERSATION_USAGE_QUERY,
       CONVERSATION_CREATE_COMMAND,
       CONVERSATION_RESUME_COMMAND,
       CONVERSATION_RENAME_COMMAND,
@@ -1872,6 +2020,17 @@ export function createConversationDirectoryProductApiContribution(
       })),
       bindProductApiOperation(CONVERSATION_TASK_LIST_QUERY, async (query) => ({
         result: await application.queryTaskList(query),
+        facts: [],
+      })),
+      bindProductApiOperation(
+        CONVERSATION_CONTEXT_BUDGET_QUERY,
+        async (query) => ({
+          result: await application.queryContextBudget(query),
+          facts: [],
+        }),
+      ),
+      bindProductApiOperation(CONVERSATION_USAGE_QUERY, async (query) => ({
+        result: await application.queryUsage(query),
         facts: [],
       })),
       bindProductApiOperation(CONVERSATION_CREATE_COMMAND, async () => ({
@@ -1940,6 +2099,63 @@ export function createConversationDirectoryProductApiContribution(
       CONVERSATION_DELETED_FACT_EVENT,
       CONVERSATION_TASK_LIST_CHANGED_FACT_EVENT,
     ],
+  });
+}
+
+function assertConversationUsageQueryIdentity(
+  conversationId: unknown,
+  name: string,
+): asserts conversationId is string {
+  if (typeof conversationId !== "string" || conversationId.trim().length === 0) {
+    throw new ConversationApplicationError(
+      "invalid-input",
+      `Conversation ${name} query requires a conversation id`,
+    );
+  }
+}
+
+function throwConversationUsageInspectionError(
+  kind: "context-budget" | "usage",
+  conversationId: string,
+  status: "not-found" | "unsupported" | "unavailable",
+): never {
+  const prefix = kind === "context-budget" ? "context-budget" : "usage";
+  if (status === "not-found") {
+    throw new ConversationApplicationError(
+      "not-found",
+      `Conversation not found: ${conversationId}`,
+      `${prefix}-conversation-not-found`,
+    );
+  }
+  if (status === "unsupported") {
+    throw new ConversationApplicationError(
+      "unsupported",
+      kind === "context-budget"
+        ? "Runtime does not support context budget inspection"
+        : "Runtime does not support usage inspection",
+      `${prefix}-unsupported`,
+    );
+  }
+  throw new ConversationApplicationError(
+    "busy",
+    "这项查看或维护暂不可用；你仍可继续本机对话，重新连接后再试。",
+    `${prefix}-unavailable`,
+  );
+}
+
+function freezeConversationContextBudgetResult(
+  outcome: ConversationContextBudgetMechanismOutcome,
+): ConversationContextBudgetResult {
+  return Object.freeze({
+    budget: Object.freeze({
+      contextWindow: outcome.budget.contextWindow,
+      effectiveWindow: outcome.budget.effectiveWindow,
+      currentTokens: outcome.budget.currentTokens,
+      usageRatio: outcome.budget.usageRatio,
+      status: outcome.budget.status,
+    }),
+    turnCount: outcome.turnCount,
+    calibrationFactor: outcome.calibrationFactor,
   });
 }
 

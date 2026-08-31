@@ -6,6 +6,7 @@ import {
   CONVERSATION_CREATE_COMMAND,
   CONVERSATION_CLEAR_COMMAND,
   CONVERSATION_COMPACT_COMMAND,
+  CONVERSATION_CONTEXT_BUDGET_QUERY,
   CONVERSATION_DELETE_COMMAND,
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
   CONVERSATION_HISTORY_QUERY,
@@ -15,6 +16,7 @@ import {
   CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
   CONVERSATION_TASK_LIST_QUERY,
   CONVERSATION_UPDATE_TASK_LIST_COMMAND,
+  CONVERSATION_USAGE_QUERY,
   ConversationApplicationError,
   ConversationDirectoryApplicationService,
   createConversationDirectoryProductApiContribution,
@@ -26,6 +28,7 @@ import {
   type ConversationAgentTurnAdmissionPort,
   type ConversationCompactPort,
   type ConversationTaskListPort,
+  type ConversationUsageProjectionPort,
 } from "./application.js";
 
 function fixture(records: ConversationDirectoryRecord[] = []) {
@@ -361,6 +364,117 @@ describe("ConversationDirectoryApplicationService", () => {
     await expect(application.compact({
       kind: "compact",
       conversationId: "",
+    })).rejects.toMatchObject({ code: "invalid-input" });
+  });
+
+  it("owns distinct context-budget and usage projections with zero Product API facts", async () => {
+    const budget = {
+      contextWindow: 200_000,
+      effectiveWindow: 180_000,
+      currentTokens: 9_000,
+      usageRatio: 0.05,
+      status: "normal" as const,
+    };
+    const inspectContextBudgetExisting = vi.fn<
+      ConversationUsageProjectionPort["inspectContextBudgetExisting"]
+    >(async () => ({
+      status: "done",
+      outcome: { budget, turnCount: 3, calibrationFactor: 1.25 },
+    }));
+    const inspectUsageExisting = vi.fn<
+      ConversationUsageProjectionPort["inspectUsageExisting"]
+    >(async () => ({
+      status: "done",
+      outcome: {
+        budget,
+        turnCount: 3,
+        calibrationFactor: 1.25,
+        subUsages: [{
+          index: 0,
+          description: "research",
+          tokens: 42,
+          toolUses: 2,
+          durationMs: 100,
+          subId: "sub-1",
+          status: "succeeded",
+        }],
+      },
+    }));
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      usage: { inspectContextBudgetExisting, inspectUsageExisting },
+    });
+    const dispatcher = new ProductApiDispatcher(
+      CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+      [createConversationDirectoryProductApiContribution(application)],
+    );
+
+    await expect(dispatcher.query(CONVERSATION_CONTEXT_BUDGET_QUERY, {
+      kind: "context-budget",
+      conversationId: "conversation-1",
+    })).resolves.toEqual({
+      budget,
+      turnCount: 3,
+      calibrationFactor: 1.25,
+    });
+    expect(inspectContextBudgetExisting).toHaveBeenCalledOnce();
+    expect(inspectUsageExisting).not.toHaveBeenCalled();
+
+    await expect(dispatcher.query(CONVERSATION_USAGE_QUERY, {
+      kind: "usage",
+      conversationId: "conversation-1",
+    })).resolves.toEqual({
+      budget,
+      turnCount: 3,
+      calibrationFactor: 1.25,
+      subUsages: [{
+        index: 0,
+        description: "research",
+        tokens: 42,
+        toolUses: 2,
+        durationMs: 100,
+        subId: "sub-1",
+        status: "succeeded",
+      }],
+    });
+    expect(inspectUsageExisting).toHaveBeenCalledOnce();
+  });
+
+  it("owns usage-query not-found, unsupported, unavailable, and invalid terminals", async () => {
+    const inspectContextBudgetExisting = vi.fn<
+      ConversationUsageProjectionPort["inspectContextBudgetExisting"]
+    >();
+    const inspectUsageExisting = vi.fn<
+      ConversationUsageProjectionPort["inspectUsageExisting"]
+    >();
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      usage: { inspectContextBudgetExisting, inspectUsageExisting },
+    });
+    for (const [method, kind, status, code, reason] of [
+      ["context", "context-budget", "not-found", "not-found", "context-budget-conversation-not-found"],
+      ["context", "context-budget", "unsupported", "unsupported", "context-budget-unsupported"],
+      ["context", "context-budget", "unavailable", "busy", "context-budget-unavailable"],
+      ["usage", "usage", "not-found", "not-found", "usage-conversation-not-found"],
+      ["usage", "usage", "unsupported", "unsupported", "usage-unsupported"],
+      ["usage", "usage", "unavailable", "busy", "usage-unavailable"],
+    ] as const) {
+      const port = method === "context"
+        ? inspectContextBudgetExisting
+        : inspectUsageExisting;
+      port.mockResolvedValueOnce({ status });
+      const call = kind === "context-budget"
+        ? application.queryContextBudget({ kind, conversationId: "conversation-1" })
+        : application.queryUsage({ kind, conversationId: "conversation-1" });
+      await expect(call).rejects.toMatchObject({ code, reason });
+    }
+    await expect(application.queryContextBudget({
+      kind: "context-budget",
+      conversationId: "",
+    })).rejects.toMatchObject({ code: "invalid-input" });
+    await expect(application.queryUsage({
+      kind: "usage",
+      conversationId: " ",
     })).rejects.toMatchObject({ code: "invalid-input" });
   });
 

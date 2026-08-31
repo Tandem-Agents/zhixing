@@ -232,6 +232,30 @@ describe("LocalConversationRpcRouter", () => {
     expect(port.sessionState.readTranscriptTail).not.toHaveBeenCalled();
   });
 
+  it("contextBudget 与 usage 经同一 Conversation 应用保持 local-only BUSY 终态", async () => {
+    const port = ownerPort();
+    const router = new LocalConversationRpcRouter({
+      deviceId: DEVICE_ID,
+      owner: port,
+      remoteFor: () => { throw new Error("unexpected remote route"); },
+    });
+    for (const method of ["session.contextBudget", "session.usage"] as const) {
+      await expect(router.dispatch({
+        method,
+        params: { conversationId: CONVERSATION_ID },
+        connection: fakeConnection(),
+      })).rejects.toSatisfy(
+        (error: unknown) =>
+          error instanceof RpcAppError &&
+          error.code === RPC_ERROR_CODES.BUSY &&
+          error.message ===
+            "这项查看或维护暂不可用；你仍可继续本机对话，重新连接后再试。",
+      );
+    }
+    expect(port.mutateSession).not.toHaveBeenCalled();
+    expect(port.sessionState.readTranscriptTail).not.toHaveBeenCalled();
+  });
+
   it("resume 经 Conversation 应用恢复本机身份并保持缺失终态", async () => {
     const owner = ownerPort();
     const router = new LocalConversationRpcRouter({

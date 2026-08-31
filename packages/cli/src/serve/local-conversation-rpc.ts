@@ -484,9 +484,29 @@ export class LocalConversationRpcRouter
           throw mapLocalConversationApplicationError(error, "compact");
         }
       }
-      case "session.contextBudget":
+      case "session.contextBudget": {
+        const conversationId = this.#conversationId(params, method);
+        try {
+          return await this.#application.queryContextBudget({
+            kind: "context-budget",
+            conversationId,
+          });
+        } catch (error) {
+          throw mapLocalConversationApplicationError(error, "context-budget");
+        }
+      }
+      case "session.usage": {
+        const conversationId = this.#conversationId(params, method);
+        try {
+          return await this.#application.queryUsage({
+            kind: "usage",
+            conversationId,
+          });
+        } catch (error) {
+          throw mapLocalConversationApplicationError(error, "usage");
+        }
+      }
       case "session.security":
-      case "session.usage":
         throw RpcErrors.busy(
           "这项查看或维护暂不可用；你仍可继续本机对话，重新连接后再试。",
         );
@@ -777,7 +797,9 @@ function mapLocalConversationApplicationError(
     | "resolve"
     | "send"
     | "task-list"
-    | "compact",
+    | "compact"
+    | "context-budget"
+    | "usage",
 ): unknown {
   if (!(error instanceof ConversationApplicationError)) return error;
   if (error.code === "not-found") {
@@ -787,7 +809,10 @@ function mapLocalConversationApplicationError(
   }
   if (error.code === "busy") {
     return RpcErrors.busy(
-      operation === "compact" && error.reason === "compact-unavailable"
+      ((operation === "compact" && error.reason === "compact-unavailable") ||
+        (operation === "context-budget" &&
+          error.reason === "context-budget-unavailable") ||
+        (operation === "usage" && error.reason === "usage-unavailable"))
         ? "这项查看或维护暂不可用；你仍可继续本机对话，重新连接后再试。"
         : operation === "send" && error.reason === "turn-queue-full"
           ? "Conversation has too many pending messages"

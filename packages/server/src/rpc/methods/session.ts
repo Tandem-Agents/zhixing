@@ -44,6 +44,7 @@ import {
   CONVERSATION_ABORT_COMMAND,
   CONVERSATION_CLEAR_COMMAND,
   CONVERSATION_COMPACT_COMMAND,
+  CONVERSATION_CONTEXT_BUDGET_QUERY,
   CONVERSATION_DELETE_COMMAND,
   CONVERSATION_HISTORY_QUERY,
   CONVERSATION_LIST_QUERY,
@@ -52,6 +53,7 @@ import {
   CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
   CONVERSATION_TASK_LIST_QUERY,
   CONVERSATION_UPDATE_TASK_LIST_COMMAND,
+  CONVERSATION_USAGE_QUERY,
   ConversationApplicationError,
   type ConversationDirectoryEntry,
   type ConversationPreparedAgentTurnIdentity,
@@ -2569,31 +2571,31 @@ export function buildSessionContextBudgetMethod(): MethodEntry {
         params,
         "session.contextBudget",
       );
-      const manager = requireConversations(ctx.server);
-      const result = await manager.inspectContextBudgetExisting(
-        conversationId,
-        requiredExistingConversationCheck(ctx.server, conversationId),
+      const productApi = requireConversationProductApi(
+        ctx.server,
+        CONVERSATION_CONTEXT_BUDGET_QUERY,
       );
-      if (result.status === "not-found") {
-        throw RpcErrors.notFound(`Session not found: ${conversationId}`);
-      }
-      if (result.status === "unsupported") {
-        throw new RpcAppError(
-          RPC_ERROR_CODES.INTERNAL_ERROR,
-          "Runtime does not support context budget inspection",
+      let result: SessionContextBudgetResult;
+      try {
+        result = await productApi.query(
+          CONVERSATION_CONTEXT_BUDGET_QUERY,
+          { kind: "context-budget", conversationId },
+        );
+      } catch (error) {
+        throw mapConversationUsageApplicationError(
+          error,
+          "context-budget",
+          conversationId,
         );
       }
+      const manager = requireConversations(ctx.server);
       notifyLifecycleDiagnostics({
         manager,
         conversationId,
         connection: ctx.connection,
         broadcast: ctx.server.sessionBroadcast,
       });
-      return {
-        budget: result.budget,
-        turnCount: result.turnCount,
-        calibrationFactor: result.calibrationFactor,
-      };
+      return result;
     },
   };
 }
@@ -2615,32 +2617,31 @@ export function buildSessionUsageMethod(): MethodEntry {
     async handler(rawParams, ctx): Promise<SessionUsageResult> {
       const params = (rawParams ?? {}) as SessionUsageParams;
       const conversationId = requireConversationId(params, "session.usage");
-      const manager = requireConversations(ctx.server);
-      const result = await manager.inspectUsageExisting(
-        conversationId,
-        requiredExistingConversationCheck(ctx.server, conversationId),
+      const productApi = requireConversationProductApi(
+        ctx.server,
+        CONVERSATION_USAGE_QUERY,
       );
-      if (result.status === "not-found") {
-        throw RpcErrors.notFound(`Session not found: ${conversationId}`);
-      }
-      if (result.status === "unsupported") {
-        throw new RpcAppError(
-          RPC_ERROR_CODES.INTERNAL_ERROR,
-          "Runtime does not support usage inspection",
+      let result: SessionUsageResult;
+      try {
+        result = await productApi.query(CONVERSATION_USAGE_QUERY, {
+          kind: "usage",
+          conversationId,
+        });
+      } catch (error) {
+        throw mapConversationUsageApplicationError(
+          error,
+          "usage",
+          conversationId,
         );
       }
+      const manager = requireConversations(ctx.server);
       notifyLifecycleDiagnostics({
         manager,
         conversationId,
         connection: ctx.connection,
         broadcast: ctx.server.sessionBroadcast,
       });
-      return {
-        budget: result.budget,
-        turnCount: result.turnCount,
-        calibrationFactor: result.calibrationFactor,
-        subUsages: result.subUsages,
-      };
+      return result;
     },
   };
 }
@@ -3187,6 +3188,30 @@ function mapConversationCompactApplicationError(
     );
   }
   return RpcErrors.invalidParams("session.compact requires 'conversationId'");
+}
+
+function mapConversationUsageApplicationError(
+  error: unknown,
+  operation: "context-budget" | "usage",
+  conversationId: string,
+): unknown {
+  if (!(error instanceof ConversationApplicationError)) return error;
+  if (error.code === "not-found") {
+    return RpcErrors.notFound(`Session not found: ${conversationId}`);
+  }
+  if (error.code === "unsupported") {
+    return new RpcAppError(
+      RPC_ERROR_CODES.INTERNAL_ERROR,
+      operation === "context-budget"
+        ? "Runtime does not support context budget inspection"
+        : "Runtime does not support usage inspection",
+    );
+  }
+  return RpcErrors.invalidParams(
+    operation === "context-budget"
+      ? "session.contextBudget requires 'conversationId'"
+      : "session.usage requires 'conversationId'",
+  );
 }
 
 function mapConversationRunControlError(
