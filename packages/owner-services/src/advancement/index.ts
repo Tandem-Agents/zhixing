@@ -2,7 +2,6 @@ export {
   AdvancementController,
   DEFAULT_SESSION_TOKEN_BUDGET,
   renderRecentContextFromMessages,
-  type AdvancementCancelResult,
   type AdvancementClosureSynthesizer,
   type AdvancementConfirmedTurn,
   type AdvancementControllerOptions,

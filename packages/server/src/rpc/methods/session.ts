@@ -61,10 +61,14 @@ import {
   type ConversationPreparedAgentTurnIdentity,
 } from "@zhixing/core/conversation/application";
 import {
+  ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
   ADVANCEMENT_DETAIL_QUERY,
   ADVANCEMENT_REVISE_RUBRIC_COMMAND,
   AdvancementApplicationError,
+  type AdvancementContractCancelledFact,
   type AdvancementDetailProjection,
+  type AdvancementOriginalTaskSurfacePort,
+  type AdvancementRubricCancellationResult,
 } from "@zhixing/core/advancement/application";
 import type { ProductApiOperationDescriptor } from "@zhixing/core/product-api";
 import { validateExplicitEnvironmentSelection } from "@zhixing/core/protocol";
@@ -792,74 +796,138 @@ export function buildSessionAdvancementCancelMethod(): MethodEntry {
         "session.advancementCancel",
       );
       const executeOriginal = params.executeOriginal === true;
-      const advancement = requireAdvancement(ctx.server);
       const manager = requireConversations(ctx.server);
-      const cancelled = await runAdvancementMaintenance({
-        manager,
-        server: ctx.server,
-        conversationId,
-        busyMessage:
-          "Conversation is busy; cancel the Rubric after the current turn completes",
-        fn: () =>
-          advancement.cancelRubric({
+      const productApi = requireAdvancementProductApi(
+        ctx.server,
+        ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
+      );
+      try {
+        const cancelled = await productApi.command(
+          ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
+          {
             conversationId,
             advancementSessionId,
             executeOriginal,
-          }),
-      });
-
-      notifyAdvancementEvent({
-        conversationId,
-        turnId:
-          cancelled.kind === "direct-original-task"
-            ? cancelled.originalTurnId
-            : (cancelled.originalTurnId ?? cancelled.session.id),
-        seq: nextContractControlSeq(cancelled.session),
-        event: "advancement:contract_cancelled",
-        payload: {
-          advancementSessionId: cancelled.session.id,
-          executeOriginal: cancelled.kind === "direct-original-task",
-        },
-        connection: ctx.connection,
-        broadcast: ctx.server.sessionBroadcast,
-      });
-
-      if (cancelled.kind === "cancelled") {
-        return {
+            fact: {
+              publish: (fact) =>
+                publishAdvancementCancellationFact(
+                  fact,
+                  ctx.connection,
+                  ctx.server.sessionBroadcast,
+                ),
+            },
+            surface: createAdvancementOriginalTaskSurface({
+              manager,
+              connection: ctx.connection,
+              broadcast: ctx.server.sessionBroadcast,
+            }),
+          },
+        );
+        return projectAdvancementRubricCancellationResult(cancelled.result);
+      } catch (error) {
+        throw mapAdvancementRubricCancellationError(
+          error,
           conversationId,
-          sessionId: conversationId,
-          status: "cancelled",
-          advancementSessionId: cancelled.session.id,
-        };
+          advancementSessionId,
+        );
       }
-
-      const admitted = await admitAndMaybeStartTurn({
-        server: ctx.server,
-        manager,
-        conversationId,
-        connectionId: String(ctx.connection.id),
-        input: cancelled.originalUserTask,
-        turnIdentity: await prepareConversationAgentTurnIdentity(
-          ctx.server,
-          ctx.connection,
-          cancelled.originalTurnId,
-          "provided",
-        ),
-        connection: ctx.connection,
-        broadcast: ctx.server.sessionBroadcast,
-        surfaceCapabilities: { postTurnControl: false },
-      });
-
-      return {
-        conversationId: admitted.conversationId,
-        sessionId: admitted.conversationId,
-        turnId: admitted.turnId,
-        ...(admitted.runId ? { runId: admitted.runId } : {}),
-        status: "direct-execution",
-        advancementSessionId: cancelled.session.id,
-        runStatus: admitted.runStatus,
-      };
     },
+  };
+}
+
+function createAdvancementOriginalTaskSurface(input: Readonly<{
+  manager: ConversationManager;
+  connection: RpcConnection;
+  broadcast: SessionBroadcast;
+}>): AdvancementOriginalTaskSurfacePort {
+  return Object.freeze({
+    caller: Object.freeze({
+      surfacePrincipal: rpcSurfacePrincipal(input.connection),
+      connectionId: String(input.connection.id),
+    }),
+    turnOrigin: Object.freeze({
+      channel: "rpc" as const,
+      triggeredBy: String(input.connection.id),
+    }),
+    execute: async (turn) => {
+      const managed = input.manager.getSession(turn.conversationId);
+      if (!managed) {
+        throw new Error(
+          `Admitted Conversation runtime is missing: ${turn.conversationId}`,
+        );
+      }
+      await runManagedTurn(
+        managed,
+        turn.originalUserTask,
+        turn.turnId,
+        input.connection,
+        input.manager,
+        input.broadcast,
+        { postTurnControl: false },
+      );
+    },
+    cancelPending: ({ conversationId, turnId }) => {
+      input.connection.notify(SESSION_NOTIFICATIONS.complete, {
+        conversationId,
+        sessionId: conversationId,
+        turnId,
+        result: {
+          reason: "error",
+          error: { name: "Cancelled", message: "Pending turn cancelled" },
+          usage: { inputTokens: 0, outputTokens: 0 },
+        },
+      } satisfies SessionCompletePayload);
+    },
+    onAdmitted: ({ conversationId, runId, turnId }) => {
+      notifyLifecycleDiagnostics({
+        manager: input.manager,
+        conversationId,
+        runId: runId ?? turnId,
+        connection: input.connection,
+        broadcast: input.broadcast,
+      });
+    },
+  });
+}
+
+function publishAdvancementCancellationFact(
+  fact: AdvancementContractCancelledFact,
+  connection: RpcConnection,
+  broadcast: SessionBroadcast,
+): void {
+  notifyAdvancementEvent({
+    conversationId: fact.conversationId,
+    turnId: fact.originalTurnId,
+    seq: fact.controlSeq,
+    event: "advancement:contract_cancelled",
+    payload: {
+      advancementSessionId: fact.advancementSessionId,
+      executeOriginal: fact.executeOriginal,
+    },
+    connection,
+    broadcast,
+  });
+}
+
+function projectAdvancementRubricCancellationResult(
+  result: AdvancementRubricCancellationResult,
+): SessionAdvancementCancelResult {
+  if (result.kind === "cancelled") {
+    return {
+      conversationId: result.conversationId,
+      sessionId: result.conversationId,
+      status: "cancelled",
+      advancementSessionId: result.advancementSessionId,
+    };
+  }
+  return {
+    conversationId: result.conversationId,
+    sessionId: result.conversationId,
+    turnId: result.turnId,
+    ...(result.runId ? { runId: result.runId } : {}),
+    status: "direct-execution",
+    advancementSessionId: result.advancementSessionId,
+    runStatus: result.runStatus,
   };
 }
 
@@ -1103,6 +1171,28 @@ function sessionTurnIdentityRpcError(error: unknown): RpcAppError | undefined {
     return RpcErrors.invalidParams(
       "session.send 'turnId' must be a non-empty bounded identifier",
     );
+  }
+  return undefined;
+}
+
+function sessionAgentTurnAdmissionRpcError(
+  error: unknown,
+  conversationId: string,
+): RpcAppError | undefined {
+  const identityError = sessionTurnIdentityRpcError(error);
+  if (identityError) return identityError;
+  if (!(error instanceof ConversationApplicationError)) return undefined;
+  if (error.reason === "turn-conversation-not-found") {
+    return RpcErrors.notFound(`Session not found: ${conversationId}`);
+  }
+  if (error.reason === "turn-queue-full") {
+    return new RpcAppError(
+      RPC_ERROR_CODES.BUSY,
+      "Too many pending messages for this conversation",
+    );
+  }
+  if (error.reason === "turn-lifecycle-busy") {
+    return RpcErrors.busy("场景正在切换或目录变更，请稍后重试。");
   }
   return undefined;
 }
@@ -1385,24 +1475,11 @@ async function admitAndMaybeStartTurn(
         admission.status === "replayed" ? "queued" : admission.status,
     };
   } catch (err) {
-    const identityError = sessionTurnIdentityRpcError(err);
-    if (identityError) throw identityError;
-    if (err instanceof ConversationApplicationError) {
-      if (err.reason === "turn-conversation-not-found") {
-        throw RpcErrors.notFound(
-          `Session not found: ${input.conversationId ?? input.preallocatedConversationId ?? "unknown"}`,
-        );
-      }
-      if (err.reason === "turn-queue-full") {
-        throw new RpcAppError(
-          RPC_ERROR_CODES.BUSY,
-          "Too many pending messages for this conversation",
-        );
-      }
-      if (err.reason === "turn-lifecycle-busy") {
-        throw RpcErrors.busy("场景正在切换或目录变更，请稍后重试。");
-      }
-    }
+    const mapped = sessionAgentTurnAdmissionRpcError(
+      err,
+      input.conversationId ?? input.preallocatedConversationId ?? "unknown",
+    );
+    if (mapped) throw mapped;
     throw err;
   }
 }
@@ -3163,6 +3240,37 @@ function mapAdvancementRubricRevisionError(
   if (error.code === "pending-rubric-draft-missing") {
     return new Error(
       `AdvancementController: session "${sessionId}" has no pending rubric draft`,
+    );
+  }
+  return new Error(error.message);
+}
+
+function mapAdvancementRubricCancellationError(
+  error: unknown,
+  conversationId: string,
+  advancementSessionId: string,
+): unknown {
+  const admissionError = sessionAgentTurnAdmissionRpcError(
+    error,
+    conversationId,
+  );
+  if (admissionError) return admissionError;
+  if (!(error instanceof AdvancementApplicationError)) return error;
+  if (error.code === "conversation-not-found") {
+    return RpcErrors.notFound(`Session not found: ${conversationId}`);
+  }
+  if (error.code === "conversation-busy") {
+    return RpcErrors.busy(
+      "Conversation is busy; cancel the Rubric after the current turn completes",
+    );
+  }
+  const sessionId = error.advancementSessionId ?? advancementSessionId;
+  if (error.code === "advancement-session-not-found") {
+    return new Error(`AdvancementController: session "${sessionId}" not found`);
+  }
+  if (error.code === "not-awaiting-rubric-confirmation") {
+    return new Error(
+      `AdvancementController: session "${sessionId}" is not awaiting rubric confirmation`,
     );
   }
   return new Error(error.message);

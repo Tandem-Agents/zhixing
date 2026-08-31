@@ -66,6 +66,10 @@ describe("production startup server ownership", () => {
       source,
       "new AdvancementApplicationService({",
     );
+    const conversationApplication = location(
+      source,
+      "const conversationApplication = new ConversationDirectoryApplicationService({",
+    );
     const advancementContribution = location(
       source,
       "createAdvancementProductApiContribution(",
@@ -78,9 +82,14 @@ describe("production startup server ownership", () => {
     expect(worksceneApplication).toBeLessThan(dispatcher);
     expect(worksceneContribution).toBeGreaterThan(dispatcher);
     expect(advancementApplication).toBeLessThan(dispatcher);
+    expect(advancementApplication).toBeGreaterThan(conversationApplication);
     expect(advancementContribution).toBeLessThan(dispatcher);
     expect(source).toContain("ADVANCEMENT_PRODUCT_API_EXACT_SET.operations");
     expect(source).toContain("rubricRevision: advancementDetailController");
+    expect(source).toContain("rubricCancellation: advancementDetailController");
+    expect(source).toContain(
+      "createAnchorAdvancementOriginalTaskExecutionPort(\n              conversationApplication",
+    );
     expect(source).toContain("ctx.conversations!.runMaintenanceExisting(");
     expect(context).toContain("productApi,");
     expect(context).not.toContain("skillCatalog:");

@@ -3356,7 +3356,7 @@ export function inspectTrustAdministrationOwnership(records) {
   return failures;
 }
 
-/** A5 Advancement detail has one domain application and Product API query owner. */
+/** A5 Advancement detail/revision/cancellation have one domain application owner. */
 export function inspectAdvancementDetailApplicationOwnership(records) {
   const failures = [];
   const byPath = new Map(records.map((record) => [record.relative, record.text]));
@@ -3378,6 +3378,9 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   );
   const handler = required("packages/server/src/rpc/methods/session.ts");
   const composition = required("packages/cli/src/serve/command.ts");
+  const originalTaskAdapter = required(
+    "packages/cli/src/serve/advancement-original-task-application.ts",
+  );
 
   const detailStart = handler.indexOf(
     "export function buildSessionAdvancementDetailMethod()",
@@ -3396,6 +3399,20 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   const revise = reviseStart >= 0 && reviseEnd > reviseStart
     ? handler.slice(reviseStart, reviseEnd)
     : "";
+  const cancelStart = reviseEnd;
+  const cancelEnd = handler.indexOf(
+    "type AdvancementPrepareOwnerResult",
+    cancelStart,
+  );
+  const cancel = cancelStart >= 0 && cancelEnd > cancelStart
+    ? handler.slice(cancelStart, cancelEnd)
+    : "";
+  const cancellationFact = application.indexOf(
+    "await command.fact.publish(decision.fact)",
+  );
+  const originalTaskHandoff = application.indexOf(
+    "await this.#originalTask.execute",
+  );
 
   let manifest;
   try {
@@ -3427,19 +3444,33 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes("session.pendingRubricDraft") ||
     !application.includes("persistRubricDraftRevision") ||
     !application.includes("const committedDraft = updated.pendingRubricDraft") ||
+    !application.includes("interface AdvancementRubricCancellationMechanismPort") ||
+    !application.includes("interface AdvancementOriginalTaskExecutionPort") ||
+    !application.includes("interface AdvancementOriginalTaskSurfacePort") ||
+    !application.includes("ADVANCEMENT_CANCEL_RUBRIC_COMMAND") ||
+    !application.includes('"advancement.command.cancel-rubric"') ||
+    !application.includes("ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT") ||
+    !application.includes('"advancement-contract-cancelled"') ||
+    application.split("ADVANCEMENT_CANCEL_RUBRIC_COMMAND").length - 1 !== 3 ||
+    application.split("ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT").length - 1 !== 4 ||
+    !application.includes("loadRubricCancellationSession(") ||
+    !application.includes("session.conversationId !== command.conversationId") ||
+    !application.includes("session.id !== command.advancementSessionId") ||
+    !application.includes("persistRubricCancellation({") ||
+    !application.includes('message: command.executeOriginal') ||
+    !application.includes('committed.status !== "cancelled"') ||
+    !application.includes("committed.conversationId !== command.conversationId") ||
+    !application.includes("committed.id !== command.advancementSessionId") ||
+    cancellationFact < 0 ||
+    originalTaskHandoff < 0 ||
+    cancellationFact > originalTaskHandoff ||
     application.includes("freezeSnapshot(revisedDraft)") ||
     !application.includes("ADVANCEMENT_PRODUCT_API_EXACT_SET") ||
     !application.includes("createAdvancementProductApiContribution") ||
     !application.includes("buildClosureFacts(session)") ||
     application.split("defineProductApiQuery<").length - 1 !== 1 ||
-    application.split("defineProductApiCommand<").length - 1 !== 1 ||
-    application.split("defineProductApiFactEvent<").length - 1 !== 1 ||
-    !application.includes(
-      "operations: [ADVANCEMENT_DETAIL_QUERY, ADVANCEMENT_REVISE_RUBRIC_COMMAND]",
-    ) ||
-    !application.includes(
-      "factEvents: [ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT]",
-    ) ||
+    application.split("defineProductApiCommand<").length - 1 !== 2 ||
+    application.split("defineProductApiFactEvent<").length - 1 !== 2 ||
     /@zhixing\/(?:server|rpc|owner-services)|\.\.\/\.\.\/server|\.\.\/\.\.\/owner-services/u.test(
       application,
     ) ||
@@ -3464,24 +3495,49 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     /requireAdvancement\(|requireConversations\(|runAdvancementMaintenance\(|\.reviseRubricDraft\(/u.test(
       revise,
     ) ||
+    cancel.length === 0 ||
+    !cancel.includes("requireAdvancementProductApi(") ||
+    !cancel.includes("ADVANCEMENT_CANCEL_RUBRIC_COMMAND") ||
+    !cancel.includes("productApi.command(") ||
+    !cancel.includes("publishAdvancementCancellationFact(") ||
+    !cancel.includes("surface: createAdvancementOriginalTaskSurface({") ||
+    !handler.includes("function sessionAgentTurnAdmissionRpcError(") ||
+    !handler.includes('error.reason === "turn-conversation-not-found"') ||
+    !handler.includes('error.reason === "turn-queue-full"') ||
+    !handler.includes('error.reason === "turn-lifecycle-busy"') ||
+    !handler.includes("const mapped = sessionAgentTurnAdmissionRpcError(") ||
+    !handler.includes("const admissionError = sessionAgentTurnAdmissionRpcError(") ||
+    /runAdvancementMaintenance\(|requireAdvancement\(|\.cancelRubric\(|admitAndMaybeStartTurn\(|prepareConversationAgentTurnIdentity\(|cancelled\.session|cancelled\.originalUserTask/u.test(
+      cancel,
+    ) ||
     !controller.includes("async loadLatestSession(") ||
     !controller.includes("return open ?? sessions[sessions.length - 1]!") ||
     controller.includes("async reviseRubricDraft(input:") ||
     !controller.includes("loadRubricRevisionSession(") ||
     !controller.includes("reviseRubricDraftContent(") ||
     !controller.includes("persistRubricDraftRevision(") ||
+    controller.includes("async cancelRubric(input:") ||
+    !controller.includes("loadRubricCancellationSession(") ||
+    !controller.includes("persistRubricCancellation(input:") ||
     !composition.includes('from "@zhixing/core/advancement/application"') ||
     composition.split("new AdvancementApplicationService(").length - 1 !== 1 ||
     composition.split("createAdvancementProductApiContribution(").length - 1 !== 1 ||
     !composition.includes("advancementDetailController.loadLatestSession(conversationId)") ||
     !composition.includes("ctx.conversations!.runMaintenanceExisting(") ||
     !composition.includes("rubricRevision: advancementDetailController") ||
+    !composition.includes("rubricCancellation: advancementDetailController") ||
+    !composition.includes("createAnchorAdvancementOriginalTaskExecutionPort(") ||
+    !composition.includes("conversationApplication,") ||
+    !originalTaskAdapter.includes("createAnchorAdvancementOriginalTaskExecutionPort(") ||
+    !originalTaskAdapter.includes("conversations.prepareAgentTurnIdentity({") ||
+    !originalTaskAdapter.includes("await conversations.admitAgentTurn({") ||
+    /@zhixing\/(?:server|rpc)|\.\.\/\.\.\/server/u.test(originalTaskAdapter) ||
     !composition.includes("? ADVANCEMENT_PRODUCT_API_EXACT_SET.operations") ||
     !composition.includes("? ADVANCEMENT_PRODUCT_API_EXACT_SET.factEvents") ||
     !composition.includes("...(advancementProductApi ? [advancementProductApi] : [])")
   ) {
     failures.push(
-      "Advancement detail/revision lacks one domain application and Product API owner",
+      "Advancement detail/revision/cancellation lacks one domain application and Product API owner",
     );
   }
 

@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { ProductApiDispatcher } from "../../product-api/catalog.js";
 import {
+  ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
+  ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT,
   ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT,
   ADVANCEMENT_DETAIL_QUERY,
   ADVANCEMENT_PRODUCT_API_EXACT_SET,
@@ -12,6 +14,9 @@ import {
   type AdvancementConversationMaintenancePort,
   type AdvancementDetailReadPort,
   type AdvancementRubricRevisionMechanismPort,
+  type AdvancementRubricCancellationMechanismPort,
+  type AdvancementOriginalTaskExecutionPort,
+  type AdvancementOriginalTaskSurfacePort,
 } from "../application.js";
 import type {
   AdvancementRunReview,
@@ -332,7 +337,211 @@ describe("AdvancementApplicationService detail query", () => {
     expect(persistRubricDraftRevision).not.toHaveBeenCalled();
   });
 
-  it("contributes one sealed Query plus one rubric-revision Command and Fact Event", async () => {
+  it("owns cancellation and publishes its committed Fact before original-task handoff", async () => {
+    const source = session({
+      status: "awaiting-rubric-confirmation",
+      pendingRubricDraft: pendingRubric("待确认标准"),
+      confirmedRubric: undefined,
+    });
+    const order: string[] = [];
+    const fixture = createRevisionFixture(source, {
+      persistRubricCancellation: async (input) => {
+        order.push("persist");
+        expect(input).toMatchObject({
+          reason: "user-cancelled",
+          message: "用户选择直接执行原始任务",
+        });
+        return {
+          ...source,
+          status: "cancelled",
+          exit: {
+            reason: input.reason,
+            message: input.message,
+            occurredAt: "2026-01-01T00:06:00.000Z",
+          },
+        };
+      },
+      originalTask: {
+        execute: async (input) => {
+          order.push("execute");
+          expect(input).toEqual({
+            conversationId: "conv-1",
+            originalTurnId: "turn-1",
+            originalUserTask: source.originalUserTask,
+            surface: expect.any(Object),
+          });
+          expect(Object.isFrozen(input.originalUserTask)).toBe(true);
+          return {
+            conversationId: input.conversationId,
+            turnId: input.originalTurnId,
+            runId: "run-1",
+            runStatus: "immediate",
+          };
+        },
+      },
+    });
+
+    const cancelled = await fixture.application.cancelRubric({
+      conversationId: "conv-1",
+      advancementSessionId: "adv-1",
+      executeOriginal: true,
+      fact: {
+        publish: (fact) => {
+          order.push("fact");
+          expect(fact).toMatchObject({
+            kind: "advancement-contract-cancelled",
+            originalTurnId: "turn-1",
+            controlSeq: 2,
+            executeOriginal: true,
+          });
+        },
+      },
+      surface: testSurface(),
+    });
+
+    expect(order).toEqual(["persist", "fact", "execute"]);
+    expect(cancelled.result).toEqual({
+      kind: "direct-original-task",
+      conversationId: "conv-1",
+      advancementSessionId: "adv-1",
+      turnId: "turn-1",
+      runId: "run-1",
+      runStatus: "immediate",
+    });
+    expect(cancelled.fact.executeOriginal).toBe(true);
+  });
+
+  it("cancels without handoff when no committed draft exists and fails closed before effects", async () => {
+    const source = session({
+      status: "awaiting-rubric-confirmation",
+      pendingRubricDraft: undefined,
+      confirmedRubric: undefined,
+    });
+    const publish = vi.fn();
+    const execute = vi.fn();
+    const fixture = createRevisionFixture(source, {
+      originalTask: { execute },
+    });
+
+    const cancelled = await fixture.application.cancelRubric({
+      conversationId: "conv-1",
+      advancementSessionId: "adv-1",
+      executeOriginal: true,
+      fact: { publish },
+      surface: testSurface(),
+    });
+
+    expect(cancelled.result).toEqual({
+      kind: "cancelled",
+      conversationId: "conv-1",
+      advancementSessionId: "adv-1",
+    });
+    expect(cancelled.fact).toMatchObject({
+      originalTurnId: "adv-1",
+      executeOriginal: false,
+    });
+    expect(publish).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
+
+    const inactive = createRevisionFixture(session({ status: "active" }));
+    await expect(
+      inactive.application.cancelRubric({
+        conversationId: "conv-1",
+        advancementSessionId: "adv-1",
+        executeOriginal: false,
+        fact: { publish },
+        surface: testSurface(),
+      }),
+    ).rejects.toMatchObject<Partial<AdvancementApplicationError>>({
+      code: "not-awaiting-rubric-confirmation",
+    });
+    expect(publish).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
+
+    const persistMismatched = vi.fn();
+    const mismatched = createRevisionFixture(source, {
+      loadRubricCancellationSession: async () => ({
+        ...source,
+        id: "adv-foreign",
+      }),
+      persistRubricCancellation: persistMismatched,
+    });
+    await expect(
+      mismatched.application.cancelRubric({
+        conversationId: "conv-1",
+        advancementSessionId: "adv-1",
+        executeOriginal: false,
+        fact: { publish },
+        surface: testSurface(),
+      }),
+    ).rejects.toMatchObject<Partial<AdvancementApplicationError>>({
+      code: "advancement-session-identity-mismatch",
+    });
+    expect(persistMismatched).not.toHaveBeenCalled();
+
+    for (const status of ["busy", "not-found"] as const) {
+      const refused = createRevisionFixture(source, {
+        maintenance: {
+          runExisting: async () => ({ status }),
+        },
+      });
+      await expect(
+        refused.application.cancelRubric({
+          conversationId: "conv-1",
+          advancementSessionId: "adv-1",
+          executeOriginal: false,
+          fact: { publish },
+          surface: testSurface(),
+        }),
+      ).rejects.toMatchObject<Partial<AdvancementApplicationError>>({
+        code: status === "busy" ? "conversation-busy" : "conversation-not-found",
+      });
+    }
+  });
+
+  it("does not hand off when cancellation persistence or Fact publication fails", async () => {
+    const source = session({
+      status: "awaiting-rubric-confirmation",
+      pendingRubricDraft: pendingRubric("待确认标准"),
+      confirmedRubric: undefined,
+    });
+    const execute = vi.fn();
+    const failedPersistence = createRevisionFixture(source, {
+      persistRubricCancellation: async () => {
+        throw new Error("cancel persistence failed");
+      },
+      originalTask: { execute },
+    });
+    await expect(
+      failedPersistence.application.cancelRubric({
+        conversationId: "conv-1",
+        advancementSessionId: "adv-1",
+        executeOriginal: true,
+        fact: { publish: vi.fn() },
+        surface: testSurface(),
+      }),
+    ).rejects.toThrow("cancel persistence failed");
+
+    const failedFact = createRevisionFixture(source, {
+      originalTask: { execute },
+    });
+    await expect(
+      failedFact.application.cancelRubric({
+        conversationId: "conv-1",
+        advancementSessionId: "adv-1",
+        executeOriginal: true,
+        fact: {
+          publish: () => {
+            throw new Error("fact projection failed");
+          },
+        },
+        surface: testSurface(),
+      }),
+    ).rejects.toThrow("fact projection failed");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("contributes one Query plus revision/cancellation Commands and Facts", async () => {
     const source = session({
       status: "awaiting-rubric-confirmation",
       pendingRubricDraft: pendingRubric("待修订标准"),
@@ -347,9 +556,11 @@ describe("AdvancementApplicationService detail query", () => {
     expect(ADVANCEMENT_PRODUCT_API_EXACT_SET.operations).toEqual([
       ADVANCEMENT_DETAIL_QUERY,
       ADVANCEMENT_REVISE_RUBRIC_COMMAND,
+      ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
     ]);
     expect(ADVANCEMENT_PRODUCT_API_EXACT_SET.factEvents).toEqual([
       ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT,
+      ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT,
     ]);
     await expect(
       dispatcher.query(ADVANCEMENT_DETAIL_QUERY, {
@@ -376,6 +587,28 @@ describe("AdvancementApplicationService detail query", () => {
         },
       ],
     });
+    await expect(
+      dispatcher.command(ADVANCEMENT_CANCEL_RUBRIC_COMMAND, {
+        conversationId: "conv-1",
+        advancementSessionId: "adv-1",
+        executeOriginal: false,
+        fact: { publish: vi.fn() },
+        surface: testSurface(),
+      }),
+    ).resolves.toMatchObject({
+      result: {
+        kind: "cancelled",
+        conversationId: "conv-1",
+        advancementSessionId: "adv-1",
+      },
+      facts: [
+        {
+          kind: "advancement-contract-cancelled",
+          controlSeq: 3,
+          executeOriginal: false,
+        },
+      ],
+    });
   });
 });
 
@@ -398,14 +631,23 @@ function createApplication(
     maintenance: overrides.maintenance ?? fixture.options.maintenance,
     rubricRevision:
       overrides.rubricRevision ?? fixture.options.rubricRevision,
+    rubricCancellation:
+      overrides.rubricCancellation ?? fixture.options.rubricCancellation,
+    originalTask: overrides.originalTask ?? fixture.options.originalTask,
   });
 }
 
+type RevisionFixtureOverrides =
+  Partial<AdvancementRubricRevisionMechanismPort> &
+  Partial<AdvancementRubricCancellationMechanismPort> &
+  Readonly<{
+    maintenance?: AdvancementConversationMaintenancePort;
+    originalTask?: AdvancementOriginalTaskExecutionPort;
+  }>;
+
 function createRevisionFixture(
   initial: AdvancementSession,
-  overrides: Partial<AdvancementRubricRevisionMechanismPort> & Readonly<{
-    maintenance?: AdvancementConversationMaintenancePort;
-  }> = {},
+  overrides: RevisionFixtureOverrides = {},
 ): Readonly<{
   application: AdvancementApplicationService;
   options: AdvancementApplicationOptions;
@@ -438,14 +680,64 @@ function createRevisionFixture(
         value: await operation(),
       }),
     };
+  const rubricCancellation: AdvancementRubricCancellationMechanismPort = {
+    loadRubricCancellationSession:
+      overrides.loadRubricCancellationSession ?? (async () => current),
+    persistRubricCancellation:
+      overrides.persistRubricCancellation ??
+      (async ({ reason, message }) => {
+        current = {
+          ...current,
+          status: "cancelled",
+          exit: {
+            reason,
+            message,
+            occurredAt: "2026-01-01T00:06:00.000Z",
+          },
+        };
+        return current;
+      }),
+  };
   const options: AdvancementApplicationOptions = {
     detail: port(current),
     maintenance,
     rubricRevision,
+    rubricCancellation,
+    originalTask:
+      overrides.originalTask ??
+      {
+        execute: async (input) => {
+          await input.surface.execute({
+            conversationId: input.conversationId,
+            turnId: input.originalTurnId,
+            originalUserTask: input.originalUserTask,
+          });
+          return {
+            conversationId: input.conversationId,
+            turnId: input.originalTurnId,
+            runStatus: "immediate",
+          };
+        },
+      },
   };
   return Object.freeze({
     options,
     application: new AdvancementApplicationService(options),
+  });
+}
+
+function testSurface(): AdvancementOriginalTaskSurfacePort {
+  return Object.freeze({
+    caller: Object.freeze({
+      surfacePrincipal: "surface-test",
+      connectionId: "connection-test",
+    }),
+    turnOrigin: Object.freeze({
+      channel: "rpc",
+      triggeredBy: "connection-test",
+    }),
+    execute: vi.fn(async () => undefined),
+    cancelPending: vi.fn(),
   });
 }
 

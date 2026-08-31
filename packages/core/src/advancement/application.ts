@@ -16,6 +16,8 @@ import type {
   AdvancementSessionStatus,
   RubricContractDraftSnapshot,
 } from "./types.js";
+import type { UserTurnInput } from "../types/user-input.js";
+import type { TurnOrigin } from "../types/tools.js";
 
 /** Path-free read mechanism for the current Advancement owner projection. */
 export interface AdvancementDetailReadPort {
@@ -52,10 +54,70 @@ export interface AdvancementRubricRevisionMechanismPort {
   }>): Promise<AdvancementSession>;
 }
 
+/** Path-free mechanisms for the durable Advancement cancellation transition. */
+export interface AdvancementRubricCancellationMechanismPort {
+  loadRubricCancellationSession(
+    conversationId: string,
+    advancementSessionId: string,
+  ): Promise<AdvancementSession | null>;
+  persistRubricCancellation(input: Readonly<{
+    conversationId: string;
+    advancementSessionId: string;
+    reason: AdvancementExit["reason"];
+    message: string;
+  }>): Promise<AdvancementSession>;
+}
+
+/** Cross-domain execution effect invoked only after the cancellation Fact is visible. */
+export interface AdvancementOriginalTaskExecutionPort {
+  execute(input: Readonly<{
+    conversationId: string;
+    originalTurnId: string;
+    originalUserTask: Readonly<UserTurnInput>;
+    surface: AdvancementOriginalTaskSurfacePort;
+  }>): Promise<Readonly<{
+    conversationId: string;
+    turnId: string;
+    runId?: string;
+    runStatus: "immediate" | "queued";
+  }>>;
+}
+
+/** Surface-owned effects needed by the Anchor cross-domain execution adapter. */
+export interface AdvancementOriginalTaskSurfacePort {
+  readonly caller: Readonly<{
+    surfacePrincipal: string;
+    connectionId: string;
+  }>;
+  readonly turnOrigin?: TurnOrigin;
+  execute(input: Readonly<{
+    conversationId: string;
+    turnId: string;
+    originalUserTask: Readonly<UserTurnInput>;
+  }>): Promise<void>;
+  cancelPending(input: Readonly<{
+    conversationId: string;
+    turnId: string;
+  }>): void;
+  onAdmitted?(input: Readonly<{
+    conversationId: string;
+    turnId: string;
+    runId?: string;
+    status: "immediate" | "queued" | "replayed";
+  }>): void;
+}
+
+/** Surface projection effect; it cannot decide or persist Advancement state. */
+export interface AdvancementRubricCancellationFactPort {
+  publish(fact: AdvancementContractCancelledFact): void | Promise<void>;
+}
+
 export interface AdvancementApplicationOptions {
   readonly detail: AdvancementDetailReadPort;
   readonly maintenance: AdvancementConversationMaintenancePort;
   readonly rubricRevision: AdvancementRubricRevisionMechanismPort;
+  readonly rubricCancellation: AdvancementRubricCancellationMechanismPort;
+  readonly originalTask: AdvancementOriginalTaskExecutionPort;
 }
 
 export interface AdvancementDetailQuery {
@@ -98,13 +160,47 @@ export interface AdvancementContractDraftRevisedFact extends ProductApiFact {
   readonly revised: true;
 }
 
+export interface AdvancementRubricCancellationCommand {
+  readonly conversationId: string;
+  readonly advancementSessionId: string;
+  readonly executeOriginal: boolean;
+  readonly fact: AdvancementRubricCancellationFactPort;
+  readonly surface: AdvancementOriginalTaskSurfacePort;
+}
+
+export type AdvancementRubricCancellationResult =
+  | Readonly<{
+      kind: "cancelled";
+      conversationId: string;
+      advancementSessionId: string;
+    }>
+  | Readonly<{
+      kind: "direct-original-task";
+      conversationId: string;
+      advancementSessionId: string;
+      turnId: string;
+      runId?: string;
+      runStatus: "immediate" | "queued";
+    }>;
+
+export interface AdvancementContractCancelledFact extends ProductApiFact {
+  readonly kind: "advancement-contract-cancelled";
+  readonly conversationId: string;
+  readonly originalTurnId: string;
+  readonly advancementSessionId: string;
+  readonly controlSeq: number;
+  readonly executeOriginal: boolean;
+}
+
 export type AdvancementApplicationErrorCode =
   | "conversation-not-found"
   | "conversation-busy"
   | "advancement-session-not-found"
+  | "advancement-session-identity-mismatch"
   | "not-awaiting-rubric-confirmation"
   | "pending-rubric-draft-missing"
-  | "committed-rubric-draft-missing";
+  | "committed-rubric-draft-missing"
+  | "committed-cancellation-missing";
 
 export class AdvancementApplicationError extends Error {
   readonly code: AdvancementApplicationErrorCode;
@@ -130,6 +226,12 @@ export interface AdvancementApplication {
     result: AdvancementRubricRevisionResult;
     fact: AdvancementContractDraftRevisedFact;
   }>>;
+  cancelRubric(
+    command: AdvancementRubricCancellationCommand,
+  ): Promise<Readonly<{
+    result: AdvancementRubricCancellationResult;
+    fact: AdvancementContractCancelledFact;
+  }>>;
 }
 
 /** Advancement-owned application decisions exposed through one finite Product API contribution. */
@@ -137,11 +239,15 @@ export class AdvancementApplicationService implements AdvancementApplication {
   readonly #detail: AdvancementDetailReadPort;
   readonly #maintenance: AdvancementConversationMaintenancePort;
   readonly #rubricRevision: AdvancementRubricRevisionMechanismPort;
+  readonly #rubricCancellation: AdvancementRubricCancellationMechanismPort;
+  readonly #originalTask: AdvancementOriginalTaskExecutionPort;
 
   constructor(options: AdvancementApplicationOptions) {
     this.#detail = options.detail;
     this.#maintenance = options.maintenance;
     this.#rubricRevision = options.rubricRevision;
+    this.#rubricCancellation = options.rubricCancellation;
+    this.#originalTask = options.originalTask;
   }
 
   async queryDetail(
@@ -262,6 +368,165 @@ export class AdvancementApplicationService implements AdvancementApplication {
     }
     return maintained.value;
   }
+
+  async cancelRubric(
+    command: AdvancementRubricCancellationCommand,
+  ): Promise<Readonly<{
+    result: AdvancementRubricCancellationResult;
+    fact: AdvancementContractCancelledFact;
+  }>> {
+    assertRubricRevisionIdentity(command.conversationId, "conversation");
+    assertRubricRevisionIdentity(
+      command.advancementSessionId,
+      "Advancement session",
+    );
+    if (typeof command.executeOriginal !== "boolean") {
+      throw new TypeError("Advancement rubric cancellation requires an executeOriginal decision");
+    }
+    if (typeof command.fact?.publish !== "function") {
+      throw new TypeError("Advancement rubric cancellation requires a Fact projection port");
+    }
+    if (
+      typeof command.surface?.caller?.surfacePrincipal !== "string" ||
+      command.surface.caller.surfacePrincipal.length === 0 ||
+      typeof command.surface.caller.connectionId !== "string" ||
+      command.surface.caller.connectionId.length === 0 ||
+      typeof command.surface.execute !== "function" ||
+      typeof command.surface.cancelPending !== "function"
+    ) {
+      throw new TypeError("Advancement rubric cancellation requires a surface effect port");
+    }
+
+    const maintained = await this.#maintenance.runExisting(
+      command.conversationId,
+      async () => {
+        const session =
+          await this.#rubricCancellation.loadRubricCancellationSession(
+            command.conversationId,
+            command.advancementSessionId,
+          );
+        if (!session) {
+          throw new AdvancementApplicationError(
+            "advancement-session-not-found",
+            `Advancement session not found: ${command.advancementSessionId}`,
+            { advancementSessionId: command.advancementSessionId },
+          );
+        }
+        if (
+          session.conversationId !== command.conversationId ||
+          session.id !== command.advancementSessionId
+        ) {
+          throw new AdvancementApplicationError(
+            "advancement-session-identity-mismatch",
+            "Advancement cancellation mechanism returned a mismatched session identity",
+            { advancementSessionId: command.advancementSessionId },
+          );
+        }
+        if (session.status !== "awaiting-rubric-confirmation") {
+          throw new AdvancementApplicationError(
+            "not-awaiting-rubric-confirmation",
+            `Advancement session is not awaiting rubric confirmation: ${session.id}`,
+            { advancementSessionId: session.id },
+          );
+        }
+
+        const committed =
+          await this.#rubricCancellation.persistRubricCancellation({
+            conversationId: command.conversationId,
+            advancementSessionId: command.advancementSessionId,
+            reason: "user-cancelled",
+            message: command.executeOriginal
+              ? "用户选择直接执行原始任务"
+              : "用户取消 Rubric 确认",
+          });
+        if (committed.status !== "cancelled") {
+          throw new AdvancementApplicationError(
+            "committed-cancellation-missing",
+            `Committed Advancement session is not cancelled: ${committed.id}`,
+            { advancementSessionId: committed.id },
+          );
+        }
+        if (
+          committed.conversationId !== command.conversationId ||
+          committed.id !== command.advancementSessionId
+        ) {
+          throw new AdvancementApplicationError(
+            "advancement-session-identity-mismatch",
+            "Committed Advancement cancellation has a mismatched session identity",
+            { advancementSessionId: command.advancementSessionId },
+          );
+        }
+        const draft = committed.pendingRubricDraft;
+        const executeOriginal = command.executeOriginal && draft !== undefined;
+        const fact = Object.freeze<AdvancementContractCancelledFact>({
+          kind: "advancement-contract-cancelled",
+          conversationId: committed.conversationId,
+          originalTurnId: draft?.originalTurnId ?? committed.id,
+          advancementSessionId: committed.id,
+          controlSeq: committed.rubricDraftVersion + 1,
+          executeOriginal,
+        });
+        return Object.freeze({
+          committed,
+          draft,
+          executeOriginal,
+          fact,
+          originalUserTask: freezeSnapshot(committed.originalUserTask),
+        });
+      },
+    );
+    if (maintained.status === "not-found") {
+      throw new AdvancementApplicationError(
+        "conversation-not-found",
+        `Conversation not found: ${command.conversationId}`,
+      );
+    }
+    if (maintained.status === "busy") {
+      throw new AdvancementApplicationError(
+        "conversation-busy",
+        `Conversation is busy: ${command.conversationId}`,
+      );
+    }
+
+    const decision = maintained.value;
+    await command.fact.publish(decision.fact);
+    if (!decision.executeOriginal || !decision.draft) {
+      return Object.freeze({
+        result: Object.freeze<AdvancementRubricCancellationResult>({
+          kind: "cancelled",
+          conversationId: decision.committed.conversationId,
+          advancementSessionId: decision.committed.id,
+        }),
+        fact: decision.fact,
+      });
+    }
+
+    const executed = await this.#originalTask.execute({
+      conversationId: decision.committed.conversationId,
+      originalTurnId: decision.draft.originalTurnId,
+      originalUserTask: decision.originalUserTask,
+      surface: command.surface,
+    });
+    if (
+      executed.conversationId !== decision.committed.conversationId ||
+      executed.turnId !== decision.draft.originalTurnId
+    ) {
+      throw new TypeError(
+        "Advancement original-task execution returned a mismatched identity",
+      );
+    }
+    return Object.freeze({
+      result: Object.freeze<AdvancementRubricCancellationResult>({
+        kind: "direct-original-task",
+        conversationId: executed.conversationId,
+        advancementSessionId: decision.committed.id,
+        turnId: executed.turnId,
+        ...(executed.runId ? { runId: executed.runId } : {}),
+        runStatus: executed.runStatus,
+      }),
+      fact: decision.fact,
+    });
+  }
 }
 
 export const ADVANCEMENT_DETAIL_QUERY = defineProductApiQuery<
@@ -285,9 +550,31 @@ export const ADVANCEMENT_REVISE_RUBRIC_COMMAND = defineProductApiCommand<
   ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT,
 ]);
 
+export const ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT =
+  defineProductApiFactEvent<
+    "advancement-contract-cancelled",
+    AdvancementContractCancelledFact
+  >("advancement-contract-cancelled");
+
+export const ADVANCEMENT_CANCEL_RUBRIC_COMMAND = defineProductApiCommand<
+  "advancement.command.cancel-rubric",
+  AdvancementRubricCancellationCommand,
+  AdvancementRubricCancellationResult,
+  AdvancementContractCancelledFact
+>("advancement.command.cancel-rubric", [
+  ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT,
+]);
+
 export const ADVANCEMENT_PRODUCT_API_EXACT_SET = defineProductApiExactSet({
-  operations: [ADVANCEMENT_DETAIL_QUERY, ADVANCEMENT_REVISE_RUBRIC_COMMAND],
-  factEvents: [ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT],
+  operations: [
+    ADVANCEMENT_DETAIL_QUERY,
+    ADVANCEMENT_REVISE_RUBRIC_COMMAND,
+    ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
+  ],
+  factEvents: [
+    ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT,
+    ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT,
+  ],
 });
 
 export function createAdvancementProductApiContribution(
@@ -306,8 +593,18 @@ export function createAdvancementProductApiContribution(
           return { result: revised.result, facts: [revised.fact] };
         },
       ),
+      bindProductApiOperation(
+        ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
+        async (command) => {
+          const cancelled = await application.cancelRubric(command);
+          return { result: cancelled.result, facts: [cancelled.fact] };
+        },
+      ),
     ],
-    factEvents: [ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT],
+    factEvents: [
+      ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT,
+      ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT,
+    ],
   });
 }
 

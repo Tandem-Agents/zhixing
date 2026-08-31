@@ -3402,7 +3402,7 @@ test("Trust Administration management has one domain application and Product API
   );
 });
 
-test("Advancement detail and rubric revision have one narrow Product API application owner", async () => {
+test("Advancement detail, rubric revision and cancellation have one Product API application owner", async () => {
   const paths = [
     "packages/core/src/advancement/application.ts",
     "packages/core/src/advancement/index.ts",
@@ -3412,6 +3412,7 @@ test("Advancement detail and rubric revision have one narrow Product API applica
     "packages/owner-services/src/advancement/controller.ts",
     "packages/server/src/rpc/methods/session.ts",
     "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/advancement-original-task-application.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -3422,7 +3423,7 @@ test("Advancement detail and rubric revision have one narrow Product API applica
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
   );
-  const failure = /Advancement detail\/revision lacks one domain application and Product API owner/;
+  const failure = /Advancement detail\/revision\/cancellation lacks one domain application and Product API owner/;
 
   assert.match(
     inspectAdvancementDetailApplicationOwnership(mutate(
@@ -3430,6 +3431,16 @@ test("Advancement detail and rubric revision have one narrow Product API applica
       (text) => text.replace(
         "productApi.query(ADVANCEMENT_DETAIL_QUERY",
         "ctx.server.advancement.loadLatestSession",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/advancement-original-task-application.ts",
+      (text) => text.replace(
+        "await conversations.admitAgentTurn({",
+        "await retiredConversationBypass({",
       ),
     )).join("\n"),
     failure,
@@ -3447,6 +3458,16 @@ test("Advancement detail and rubric revision have one narrow Product API applica
       (text) => text.replace(
         "createAdvancementProductApiContribution(",
         "createRetiredAdvancementDetailBypass(",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace(
+        "const admissionError = sessionAgentTurnAdmissionRpcError(",
+        "const admissionError = sessionTurnIdentityRpcError(",
       ),
     )).join("\n"),
     failure,
@@ -3472,8 +3493,8 @@ test("Advancement detail and rubric revision have one narrow Product API applica
     inspectAdvancementDetailApplicationOwnership(mutate(
       "packages/core/src/advancement/application.ts",
       (text) => text.replaceAll(
-        "factEvents: [ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT],",
-        "factEvents: [],",
+        "ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT,",
+        "",
       ),
     )).join("\n"),
     failure,
@@ -3485,6 +3506,33 @@ test("Advancement detail and rubric revision have one narrow Product API applica
         "const committedDraft = updated.pendingRubricDraft",
         "const committedDraft = revisedDraft",
       ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace(
+        "productApi.command(\n          ADVANCEMENT_CANCEL_RUBRIC_COMMAND",
+        "ctx.server.advancement.cancelRubric(\n          ADVANCEMENT_CANCEL_RUBRIC_COMMAND",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/core/src/advancement/application.ts",
+      (text) => text.replace(
+        "await command.fact.publish(decision.fact);",
+        "void command.fact.publish(decision.fact);",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/owner-services/src/advancement/controller.ts",
+      (text) => `${text}\nasync cancelRubric(input: unknown) { return input; }`,
     )).join("\n"),
     failure,
   );

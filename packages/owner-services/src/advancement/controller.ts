@@ -127,19 +127,6 @@ export interface RubricPublicationPort {
   }): Promise<RubricPublicationOutcome>;
 }
 
-export type AdvancementCancelResult =
-  | {
-      readonly kind: "cancelled";
-      readonly session: AdvancementSession;
-      readonly originalTurnId?: string;
-    }
-  | {
-      readonly kind: "direct-original-task";
-      readonly session: AdvancementSession;
-      readonly originalTurnId: string;
-      readonly originalUserTask: UserTurnInput;
-    };
-
 export interface AdvancementControllerOptions {
   /** 推进会话存储——生产装配注入权威日志适配实现，无隐式回退。 */
   readonly store: AdvancementSessionStore;
@@ -660,45 +647,25 @@ export class AdvancementController implements AdvancementRubricRevisionMechanism
     );
   }
 
-  async cancelRubric(input: {
-    readonly conversationId: string;
-    readonly advancementSessionId: string;
-    readonly executeOriginal?: boolean;
-    readonly reason?: AdvancementExit["reason"];
-    readonly message?: string;
-  }): Promise<AdvancementCancelResult> {
-    const session = await this.requireSession(
+  loadRubricCancellationSession(
+    conversationId: string,
+    advancementSessionId: string,
+  ): Promise<AdvancementSession | null> {
+    return this.store.loadSession(conversationId, advancementSessionId);
+  }
+
+  persistRubricCancellation(input: Readonly<{
+    conversationId: string;
+    advancementSessionId: string;
+    reason: AdvancementExit["reason"];
+    message: string;
+  }>): Promise<AdvancementSession> {
+    return this.cancelSession(
       input.conversationId,
       input.advancementSessionId,
-    );
-    if (session.status !== "awaiting-rubric-confirmation") {
-      throw new Error(
-        `AdvancementController: session "${session.id}" is not awaiting rubric confirmation`,
-      );
-    }
-    const draft = session.pendingRubricDraft;
-    const cancelled = await this.cancelSession(
-      input.conversationId,
-      input.advancementSessionId,
-      input.message ??
-        (input.executeOriginal
-          ? "用户选择直接执行原始任务"
-          : "用户取消 Rubric 确认"),
+      input.message,
       input.reason,
     );
-    if (input.executeOriginal && draft) {
-      return {
-        kind: "direct-original-task",
-        session: cancelled,
-        originalTurnId: draft.originalTurnId,
-        originalUserTask: session.originalUserTask,
-      };
-    }
-    return {
-      kind: "cancelled",
-      session: cancelled,
-      originalTurnId: draft?.originalTurnId,
-    };
   }
 
   async cancelOpenSession(input: {

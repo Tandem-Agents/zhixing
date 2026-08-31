@@ -73,6 +73,7 @@ import { createTempDir } from "@zhixing/test-utils";
 import { protocolDigest } from "@zhixing/core/protocol";
 import {
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+  ConversationApplicationError,
   ConversationDirectoryApplicationService,
   createConversationDirectoryProductApiContribution,
   projectConversationClear,
@@ -898,6 +899,52 @@ function createConversationProductApi(input: {
               ),
           },
           rubricRevision: advancement,
+          rubricCancellation: advancement,
+          originalTask: {
+            execute: async (input) => {
+              const caller = {
+                kind: "surface" as const,
+                surfacePrincipal: input.surface.caller.surfacePrincipal,
+                connectionId: input.surface.caller.connectionId,
+              };
+              const turnIdentity = application.prepareAgentTurnIdentity({
+                kind: "prepare-agent-turn-identity",
+                turnId: input.originalTurnId,
+                identitySource: "provided",
+                caller,
+              });
+              const admitted = await application.admitAgentTurn({
+                kind: "admit-agent-turn",
+                conversationId: input.conversationId,
+                input: input.originalUserTask,
+                turnIdentity,
+                caller,
+                ...(input.surface.turnOrigin
+                  ? { turnOrigin: input.surface.turnOrigin }
+                  : {}),
+                execution: {
+                  execute: ({ conversationId, turnId }) =>
+                    input.surface.execute({
+                      conversationId,
+                      turnId,
+                      originalUserTask: input.originalUserTask,
+                    }),
+                  cancelPending: (cancelled) =>
+                    input.surface.cancelPending(cancelled),
+                  ...(input.surface.onAdmitted
+                    ? { onAdmitted: input.surface.onAdmitted }
+                    : {}),
+                },
+              });
+              return {
+                conversationId: admitted.conversationId,
+                turnId: admitted.turnId,
+                ...(admitted.runId ? { runId: admitted.runId } : {}),
+                runStatus:
+                  admitted.status === "replayed" ? "queued" : admitted.status,
+              };
+            },
+          },
         }),
       )
     : undefined;
@@ -3241,6 +3288,128 @@ describe("session.* RPC (S2.D)", () => {
     expect(empty.result).toMatchObject({ detail: null });
     client.close();
   });
+
+  it.each([
+    {
+      label: "queue full",
+      phase: "admission" as const,
+      error: () =>
+        new ConversationApplicationError(
+          "busy",
+          "Conversation has too many pending messages",
+          "turn-queue-full",
+        ),
+      code: RPC_ERROR_CODES.BUSY,
+      message: "Too many pending messages for this conversation",
+    },
+    {
+      label: "lifecycle busy",
+      phase: "admission" as const,
+      error: () =>
+        new ConversationApplicationError(
+          "busy",
+          "Conversation lifecycle is changing",
+          "turn-lifecycle-busy",
+        ),
+      code: RPC_ERROR_CODES.BUSY,
+      message: "场景正在切换或目录变更，请稍后重试。",
+    },
+    {
+      label: "conversation not found",
+      phase: "admission" as const,
+      error: () =>
+        new ConversationApplicationError(
+          "not-found",
+          "Conversation not found",
+          "turn-conversation-not-found",
+        ),
+      code: RPC_ERROR_CODES.NOT_FOUND,
+      message: undefined,
+    },
+    {
+      label: "turn identity invalid",
+      phase: "identity" as const,
+      error: () =>
+        new ConversationApplicationError(
+          "invalid-input",
+          "Conversation turn identity is invalid",
+          "turn-identity-invalid",
+        ),
+      code: RPC_ERROR_CODES.INVALID_PARAMS,
+      message: "session.send 'turnId' must be a non-empty bounded identifier",
+    },
+  ])(
+    "session.advancementCancel 保留 direct-original 的 $label RPC 错误",
+    async ({ phase, error, code, message }) => {
+      const advancement = await createTestAdvancementHarness();
+      await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+        advancement: advancement.controller,
+      });
+      const client = await connect(server.port);
+      await client.request("auth", { token: TEST_TOKEN });
+
+      const sendResp = await client.request("session.send", {
+        text: "请持续推进到完成",
+        turnId: `turn-adv-cancel-error-${phase}`,
+      });
+      expect(isSuccessResponse(sendResp)).toBe(true);
+      if (!isSuccessResponse(sendResp)) return;
+      const awaiting = sendResp.result as {
+        conversationId: string;
+        advancementSessionId: string;
+      };
+      await client.waitNotification("session.event");
+
+      const injected = error();
+      const spy = phase === "identity"
+        ? vi
+            .spyOn(
+              ConversationDirectoryApplicationService.prototype,
+              "prepareAgentTurnIdentity",
+            )
+            .mockImplementationOnce(() => {
+              throw injected;
+            })
+        : vi
+            .spyOn(
+              ConversationDirectoryApplicationService.prototype,
+              "admitAgentTurn",
+            )
+            .mockRejectedValueOnce(injected);
+      try {
+        const cancelResp = await client.request("session.advancementCancel", {
+          conversationId: awaiting.conversationId,
+          advancementSessionId: awaiting.advancementSessionId,
+          executeOriginal: true,
+        });
+        expect(isErrorResponse(cancelResp)).toBe(true);
+        if (isErrorResponse(cancelResp)) {
+          expect(cancelResp.error.code).toBe(code);
+          expect(cancelResp.error.message).toBe(
+            message ?? `Session not found: ${awaiting.conversationId}`,
+          );
+        }
+        const event = await client.waitNotification("session.event");
+        expect(event.params).toMatchObject({
+          scope: "control",
+          runId: `turn-adv-cancel-error-${phase}`,
+          event: "advancement:contract_cancelled",
+          payload: {
+            advancementSessionId: awaiting.advancementSessionId,
+            executeOriginal: true,
+          },
+        });
+        const persisted = await advancement.store.loadSession(
+          awaiting.conversationId,
+          awaiting.advancementSessionId,
+        );
+        expect(persisted?.status).toBe("cancelled");
+      } finally {
+        spy.mockRestore();
+        client.close();
+      }
+    },
+  );
 
   it("session.advancementDetail 未装配 Advancement contribution 时保持 detail null", async () => {
     await startWithFactory(createMockFactory({ deltaCount: 0 }));

@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-15b Advancement Rubric 修订垂直切片等待协调者独立复核<br>
+> 当前检查点：A5-15c Advancement Rubric 取消与原任务交接垂直切片实施完成，等待协调者复核<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,13 +202,13 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `c96fea2a`；A5-15a 已由协调者独立复核并提交，Advancement detail 查询现由唯一领域应用和 Product API Query 拥有 |
+| 已接受基线 | `53b66c0a`；A5-15b 已由协调者独立复核并提交，Advancement Rubric 修订现由唯一领域应用、Command 与 Fact 拥有 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | A5-15b 已形成单一 Advancement Rubric 修订 application/Product API/RPC 生产链并等待协调者独立复核；Advancement 行与 A5 仍为 `[ ]` |
-| 下一责任链 | 协调者接受 A5-15b 后，单独裁决 rubric cancel（含直接执行原任务交接）或 confirm；不得顺带进入另一状态转换 |
+| 活跃工作包 | A5-15c 实施完成，等待协调者复核；Advancement 行与 A5 仍为 `[ ]` |
+| 下一责任链 | A5-15c 完成后单独迁移 rubric confirm 与准则沉淀/原任务准入结清；不得顺带进入 send/admission 总链 |
 | 打开的单向桥 | 无当前打开的 Conversation lifecycle 单向桥；`A5-CONVERSATION-LIFECYCLE-01` 已由 A5-14b 关闭。 |
-| 已失效证据 | 无当前未恢复证据；A5-15b 已重取 Rubric 修订 application、机制/maintenance 适配、Host contribution、Server binding、S7 与 package-export 闭包，A5-15a 与其他既有证据未失效 |
-| 阻塞/用户决策 | 无用户决策；A5-15b 已停在可构建、可运行、单一修订写入口成立的协调者复核点 |
+| 已失效证据 | 无当前未恢复证据；A5-15c 的 Rubric cancel、取消事件和 execute-original 交接直接证据已在当前工作区恢复，等待协调者复核 |
+| 阻塞/用户决策 | 无用户决策；取消、取消后直接执行原任务及事件先后顺序均由当前生产行为唯一裁决 |
 
 ### A0 基线索引
 
@@ -2169,6 +2169,20 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接与结构证据：领域 application 1 文件 8/8，覆盖 detail 既有投影、正常/连续修订、trim、空反馈、busy/not-found、错误状态/缺 draft、机制异常、提交前候选与提交后规范化投影分歧、提交后 draft 缺失 fail closed、冻结共享草案及 Query+Command+Fact exact-set；真实 Server RPC 1 文件 2/2，经实际 Controller/builder/store/Conversation maintenance 覆盖 trim、两次 revision、事件 exact shape、无 main run、NOT_FOUND 与 BUSY wire；Anchor 唯一组合根 1 文件 5/5，含同一 controller 机制和 maintenance 注入，总计 3 文件 15/15。core、owner-services、server 与 CLI 依赖顺序 build、CLI `tsc --noEmit` 通过；按验证手册以 PowerShell 数组向 Biome 传入本包全部 11 个代码/脚本文件，11/11 通过且 package-export 缩进漂移已归零；canonical S7 33/33 且 registry golden 通过，fresh `pnpm runtime:package-exports` 通过。
 - 精确失效与交接：若 Advancement revision Command/Result/Fact、awaiting/pending/trim 决定、Controller 三机制动作、Conversation maintenance/existence 适配、Host contribution/dispatcher exact-set、Server error/event/wire 投影、core 窄 subpath/build entry、S7/package-export 或上述直接测试任一变化，只恢复 A5-15b 并重验本闭包；confirm/cancel 等其他 Advancement 状态转换变化不误伤本证据，除非改变该 Command 的输入、maintenance 或待确认 session/draft 投影。A5-15b 当前完成并等待协调者独立复核；Advancement 行与 A5 继续为 `[ ]`。本包未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调复核纠正：独立复核指出初版 Result/Fact 在 persist 返回后仍读取提交前 `revisedDraft`，以及 package-export 检查脚本新增块缩进漂移；本轮以提交后权威 session 投影替代候选读取，并新增 S7 反向 mutation 拒绝 `revisedDraft` 回流。上述 8/8 application、2/2 RPC、5/5 Host、构建/typecheck、11/11 Biome、S7/golden、fresh exports 与 `git diff --check` 均在纠正后的同一工作区重取；初版未获接受，本条保留反证与恢复过程供后续复核。
+- 协调者独立验收：纠正后的同一工作区再次反查领域状态决定、persist 后权威投影、Controller 三项机制、Host maintenance 适配、Server Command/Fact 纯绑定及旧复合入口，确认只有一个修订 owner、一个持久写入口且无提交前候选回流。独立重跑 application 8/8、真实 RPC 2/2、Anchor 组合根 5/5、changed-file Biome、canonical S7 33/33 与 registry golden、package export 和 `git diff --check`，全部通过；接受 `A5-15b-advancement-rubric-revision-v1` 并提交为 `53b66c0a`。Advancement 行与 A5 继续为 `[ ]`。
+
+### A5-15c：迁移 Advancement Rubric 取消与原任务交接垂直切片
+
+- 派发基线与唯一结果：`HEAD 53b66c0a + task-doc:coordinator-dispatch`，索引为空。只把 `session.advancementCancel` 的“取消待确认准则，并按用户选择结束或直接执行原始任务”完整产品决定迁入现有唯一 `AdvancementApplicationService`，形成一个 Product API Command、取消 Fact 与可选 Conversation 原任务执行端口；不得新建第二 application/controller/dispatcher。
+- 生产责任链：领域应用在 Conversation maintenance 串行门内拥有 identity/executeOriginal 约束、awaiting-confirmation 前置、pending draft/original turn 选择、取消原因与消息、终态持久提交、取消结果/Fact 以及 execute-original 分支的先取消后交接顺序。现有 review-attempt 终止、资源清理、Advancement store 和 Conversation agent-turn 执行继续作为机制/Correctness 或跨领域应用端口由 Anchor 适配；`AdvancementController.cancelRubric` 复合产品入口必须退场。Server 只保留认证、wire 校验、表面身份准备、Product API 调用、既有错误映射及 Fact/DTO/进展呈现，不得再直接决定取消分支、读取 session 或调用 controller/Conversation manager 执行业务流程。
+- 行为保护与明确不做：严格保持仅 awaiting-confirmation 可取消；pending draft 存在且 `executeOriginal:true` 时复用原 `turnId`/原输入并返回 `direct-execution`，否则返回 `cancelled`；取消事件必须继续在原任务交接尝试前可观察，event seq/runId/payload、busy/not-found/error、runStatus、公开 response、review-attempt 终止与资源清理均不变。不得迁移 confirm、rubric publication、settleOriginalTaskAdmission、send/admission 总链、review/evidence/recovery、detail/revision 或 active summary；不得把 RPC/connection 类型带入领域合同。
+- 最窄证据与完成条件：领域 application/机制/跨域端口直接测试覆盖 cancelled、direct-original、无 draft 降级、错误状态、busy/not-found、持久后权威终态、取消 Fact 先于交接、交接异常和不可变结果；真实 `session.advancementCancel` RPC 覆盖普通取消、直接执行、事件 exact shape/order、原 turn identity、无重复 main run、错误与旧 handler/controller 直调退场。更新 S7/package-export 证据并反向识别第二 owner、Surface 分支、事件次序漂移、宽导出和漏装配；只运行本包失效的直接测试、必要依赖构建/typecheck、S7 与 package export。只有取消决定、终态、事件、跨域交接、全部消费端和旧路删除在一条生产链闭合时完成；Advancement 行仍保持 `[ ]`。
+- 安全交接点：若事件先于交接的既有语义无法在 Product API/Host 边界无重复地保持、约四小时仍未闭合、必须改变 Conversation 领域合同或持久协议，或影响面越出 cancel/execute-original 闭包，停在现有 endpoint 仍只有一条可运行主链且无双写/双 owner 的检查点反馈；不得以推迟事件、吞掉交接错误或保留永久 Surface 编排换取绿灯，不得执行任何 Git 写操作。
+- 实施与唯一应用链：进场为 `HEAD 53b66c0a + task-doc:coordinator-dispatch`，索引为空。现有 `AdvancementApplicationService` 新增唯一 cancellation Command、取消 Fact、持久取消机制端口和 Conversation 原任务执行端口；应用在同一 Conversation maintenance 内完成 identity、awaiting 状态、pending draft、取消原因/消息、持久终态与 execute-original 决定，退出 maintenance 后仍由同一应用严格先投影取消 Fact、再按决定调用 Anchor 跨领域执行端口，避免在 maintenance 锁内嵌套 Conversation admission。Anchor 适配只把既有 `ConversationDirectoryApplication` 的稳定 turn identity、admission 与运行效果接入；没有第二应用、dispatcher、状态或写入口。
+- 旧路与行为保护：`AdvancementController.cancelRubric` 复合产品入口及其 Result 已删除，只保留 session 读取和既有 `cancelSession` 持久/终止/清理机制；Server handler 不再读取 Advancement session、运行业务 maintenance、决定 cancel/direct 分支或直调 controller/Conversation admission，只保留 wire/身份/效果投影、Product API 调用、错误映射与取消 Fact/结果呈现。仅 awaiting-confirmation 可取消、无 pending draft 时降级 cancelled、原 draft 存在时复用原 `turnId`/原输入、取消 Fact 在原任务交接前可观察、事件 seq/payload、busy/not-found/internal error、runStatus、review-attempt 终止与资源清理均保持原行为；confirm/publication/settle-original/send 总链和其他 Advancement 责任未迁移。
+- 直接、结构与构建证据：领域 application 1 文件 11/11，覆盖持久后权威终态、cancel/direct/no-draft、busy/not-found/identity、Fact/交接失败及 Product API exact-set；Anchor 跨域适配与唯一组合根 2 文件 7/7，证明只经 Conversation 应用、原 identity/输入与 replay 映射；真实 `session.advancementCancel` RPC 定向 1 文件 6/6，覆盖普通取消、直接执行以及 direct-original 的 queue-full、lifecycle-busy、conversation-not-found、turn-identity-invalid 四类既有 wire 错误，合计 4 文件 24/24。core、owner-services、server 与 CLI 依赖顺序 build 通过；canonical S7 33/33 且 registry golden 通过，fresh `pnpm runtime:package-exports` 通过；Biome 对本包 10 个适用代码文件检查通过，`git diff --check` 通过。
+- 精确失效与交接：若 cancellation Command/Result/Fact、awaiting/pending/identity/取消消息决定、Controller 持久取消机制、Fact-before-handoff 顺序、Anchor Conversation 应用适配、Host contribution/dispatcher exact-set、Server wire/error/事件投影、S7/package-export 或上述直接测试任一变化，只恢复 A5-15c 并重验本闭包；其他 Advancement 状态转换不误伤本证据，除非改变共享 maintenance、待确认 session/draft 或原任务 admission 合同。A5-15c 当前实施完成并等待协调者独立复核；Advancement 行与 A5 继续为 `[ ]`，下一责任链仍为 rubric confirm 与准则沉淀/原任务准入结清。本包未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调复核纠正：独立复核指出初版 direct-original 交接已经改经 Anchor `ConversationDirectoryApplication`，但 `mapAdvancementRubricCancellationError` 未复用普通 send 的 Conversation admission→RPC 映射，导致 queue-full、lifecycle-busy、conversation-not-found 和 turn identity 错误可能退化为通用 INTERNAL。Server 现以唯一 `sessionAgentTurnAdmissionRpcError` 同时服务普通 send 与 Advancement 交接，保持原 code/message，RPC 四个对抗分支均直接证明取消 Fact 已先可观察且取消终态已耐久；S7 新增反向 mutation 拒绝 cancellation mapper 绕开共享映射。纠正后 application 11/11、Anchor 7/7、RPC 6/6、Server build、changed-file Biome、canonical S7 33/33 与 golden、`git diff --check` 均在同一工作区重取；初版 2/2 RPC 证据不足，本条保留反证与恢复过程。
 
 ## 十、用户提示词
 

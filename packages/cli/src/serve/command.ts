@@ -161,6 +161,7 @@ import {
 import { createCliTurnContextProviders } from "../runtime/turn-context-providers.js";
 import { createServeAdvancementController } from "./advancement-controller.js";
 import { createAdvancementAcceptanceLifecycle } from "./advancement-acceptance-lifecycle.js";
+import { createAnchorAdvancementOriginalTaskExecutionPort } from "./advancement-original-task-application.js";
 import { createZhixingGuidanceLifecycle } from "./zhixing-guidance-lifecycle.js";
 import { readGuidanceFile } from "./read-guidance-file.js";
 import { createConversationAliveCheck } from "./advancement-gc.js";
@@ -1976,26 +1977,6 @@ async function runServerProcess(
         ctx.deliveryStack.resolutionApplication,
       )
     : undefined;
-  const advancementDetailController = ctx.advancement;
-  const advancementProductApi = advancementDetailController
-    ? createAdvancementProductApiContribution(
-        new AdvancementApplicationService({
-          detail: {
-            loadLatestSession: (conversationId) =>
-              advancementDetailController.loadLatestSession(conversationId),
-          },
-          maintenance: {
-            runExisting: (conversationId, operation) =>
-              ctx.conversations!.runMaintenanceExisting(
-                conversationId,
-                () => conversationDirectory.exists(conversationId),
-                operation,
-              ),
-          },
-          rubricRevision: advancementDetailController,
-        }),
-      )
-    : undefined;
   const conversationApplication = new ConversationDirectoryApplicationService({
     storage: conversationDirectory,
     compact: createAnchorConversationCompactPort({
@@ -2154,6 +2135,31 @@ async function runServerProcess(
         }
       : undefined,
   });
+  const advancementDetailController = ctx.advancement;
+  const advancementProductApi = advancementDetailController
+    ? createAdvancementProductApiContribution(
+        new AdvancementApplicationService({
+          detail: {
+            loadLatestSession: (conversationId) =>
+              advancementDetailController.loadLatestSession(conversationId),
+          },
+          maintenance: {
+            runExisting: (conversationId, operation) =>
+              ctx.conversations!.runMaintenanceExisting(
+                conversationId,
+                () => conversationDirectory.exists(conversationId),
+                operation,
+              ),
+          },
+          rubricRevision: advancementDetailController,
+          rubricCancellation: advancementDetailController,
+          originalTask:
+            createAnchorAdvancementOriginalTaskExecutionPort(
+              conversationApplication,
+            ),
+        }),
+      )
+    : undefined;
   const productApi = new ProductApiDispatcher(
     defineProductApiExactSet({
       operations: [
