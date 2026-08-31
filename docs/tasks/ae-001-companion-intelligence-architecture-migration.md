@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：等待协调者复核 A5-16a Device Administration 用户可见读取投影与纯 binding<br>
+> 当前检查点：等待协调者复核 A5-16b Device Administration 设备移除写决定与 Product API binding<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,13 +202,13 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `d73fc944`；A5-15m 已由协调者独立复核并提交，Advancement 十三个生产责任族、全部 Store 写权、active-state 查询与 proxy settlement 均已收束到唯一应用边界，旧入口、导出与桥为零 |
+| 已接受基线 | `85d8eea9`；A5-16a 已由协调者独立复核并提交，设备关系、移除状态和值班候选三个读取族已归于唯一 Device Administration Query/Application/Product API，旧 ServerContext 读取旁路为零 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | `A5-16a-device-administration-read-projection-v1` 已实施并等待协调者独立复核：设备关系、设备移除状态和值班接班候选已共用唯一 Device Administration Query/Application/Product API；不含任何写入或效果链 |
-| 下一责任链 | 接受 A5-16a 后执行 `A5-16b`，只迁移 `device.remove/device.continue` 的设备移除写决定并退场对应两条桥；duty migration 三条写链继续后置，不得整体派发 Device Administration、提前进入 Backup/A6 或重复迁移 Advancement |
-| 打开的单向桥 | `A5-DEVICE-REMOVE-01=device.remove`、`A5-DEVICE-CONTINUE-01=device.continue`、`A5-DUTY-MIGRATION-PREPARE-01=dutyMigration.prepare`、`A5-DUTY-MIGRATION-COMMIT-01=dutyMigration.commit`、`A5-DUTY-MIGRATION-CANCEL-01=dutyMigration.cancel` 仍由既有 ServerContext/CLI 装配接口承接；每条只能在紧邻写链工作包退场，A5-16a 未新增其他桥 |
-| 已失效证据 | 无当前未恢复证据；`A5-16a-device-administration-read-projection-v1` 当前等待独立复核，A5-15a～A5-15m 继续有效；本包未改变 Device removal/duty migration 的持久机制、写链、公开 wire 或拓扑协议 |
-| 阻塞/用户决策 | 无；Device Administration 的现有公开语义与 AE-001 目标边界足以裁决当前读取切片 |
+| 活跃工作包 | `A5-16b-device-removal-application-v1` 已形成待复核实现：`device.remove/device.continue` 只经 Device Administration Command/Application/Product API，旧 ServerContext 写桥与 Mesh 产品决定已退场 |
+| 下一责任链 | 接受 A5-16b 后进入 duty migration 写链；不得把设备移除的 journal、签名 receipt、accepted-work、Mesh transport 或物理清理状态机搬入领域，也不得提前进入 Backup/A6 |
+| 打开的单向桥 | `A5-DUTY-MIGRATION-PREPARE-01=dutyMigration.prepare`、`A5-DUTY-MIGRATION-COMMIT-01=dutyMigration.commit`、`A5-DUTY-MIGRATION-CANCEL-01=dutyMigration.cancel` 仍由既有 ServerContext/CLI 装配接口承接；`A5-DEVICE-REMOVE-01` 与 `A5-DEVICE-CONTINUE-01` 已在 A5-16b 待复核实现中关闭 |
+| 已失效证据 | 无当前未恢复证据；A5-16a 与 A5-15a～A5-15m 继续有效；A5-16b 的 Command/Application/Product API、RPC 与 Mesh effect 证据等待协调者独立复核，三个读取 Query 与 duty migration 写链未漂移 |
+| 阻塞/用户决策 | 无；当前停在可构建、可运行、单一设备移除应用真相成立的检查点等待协调者复核 |
 
 ### A0 基线索引
 
@@ -2378,6 +2378,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - Surface 与旧路退场：`device.list/device.status/dutyMigration.targets` handler 现只保留认证后的 exact 参数校验、Product API Query 调用及既有错误/结果投影；`ServerContext.dutyMigration.targets`、`ServerContext.deviceLifecycle.list/status` 与 CLI Host 三个直接 read closure 已删除。CLI `RpcManagementFacade` 继续只拥有原 wire 请求、严格解码和现有公开类型，设备列表、移除状态 `null`、候选 `ready/code`、中文错误和命令行为均未改变。五条写接口按实时台账桥 ID 保留，下一检查点固定为 `A5-16b device.remove/device.continue`，本包未迁移或重解释其写决定。
 - 直接证据与构建：Core Device Administration application/Product API 3/3、Server management binding 62/62、CLI management facade + device removal journey 2 文件 13/13，合计 4 文件 78/78；覆盖三 Query exact-set/零 Fact、不可变投影、缺状态为 `null`、无 contribution 拒绝、原 wire DTO、设备列表/状态消费与现有写方法不漂移。Core fresh build、Server fresh build、CLI typecheck 与 `pnpm cli:build` 通过；fresh `pnpm runtime:package-exports` 通过。canonical S7 coverage/mutation 34/34 与 registry golden 通过，新增反向 mutation 可识别 Query identity/kind 漂移、第二应用构造、RPC 恢复 ServerContext 直读、read owner 回流和根/重复导出；最窄 Biome 无修复。
 - 失效与交接：以后若三个 Query/Result、read port、应用/descriptor owner、Host contribution/exact-set、ServerContext、RPC handler、CLI wire codec、`MeshRuntimeAssembly` 三个读取机制、core 窄 export/build、S7/package-export 或上述直接测试任一变化，只恢复本证据并重验实际失效闭包；五条写桥、DeviceLifecycle/Trust/Assignment/Mesh 内部与后续 Backup/A6 变化不自动误伤本读取证据。Device Administration 行和 A5 继续为 `[ ]`；当前停在可构建、可运行、单一读取真相成立且写链未改的检查点等待协调者独立复核，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+### A5-16b：归位 Device Administration 设备移除写决定与纯 binding
+
+- 实施基线与责任 exact-set：以已接受 `HEAD 85d8eea9` 加协调者调度记录为基线，形成待复核证据 `A5-16b-device-removal-application-v1`。即时正向追踪 `device.remove/device.continue`，反向核对 `CurrentIssuerDeviceRemovalAuthority`、DeviceLifecycle journal/receipt、target Mesh client、accepted-work、current-duty identity、Host composition、Server/RPC 与 CLI management facade，确认本包产品 exact-set 恰为“开始移除”和“继续 transfer/destroy/lost/cancel”两个 Command、既有开始/公开移除结果及零 Fact Event；journal、签名 receipt/abort、accepted-work settlement、target physical cleanup 与 Mesh transport 继续是有限 Correctness/Infrastructure 机制。
+- 应用决定与机制边界：唯一 `DeviceAdministrationApplicationService` 现拥有 current-duty guard、active/同名/自移除选择、稳定 request/operation identity、operation/target/name 全等、connected/offline、cancel/lost/transfer/destroy 分支，以及 cancelled replay、waiting-for-device、removed/unknown 和既有中文/凭据行动结果。泛型 `Accepted/Abort` token 对领域保持不透明；Authority port 只执行 accept-for-device、operation projection、durable abort/commit-lost，Mesh effect port 只执行 reachability 与同一 receipt/abort/decision 的目标效果，领域未复制签名、journal、恢复或 accepted-work 状态机。`MeshRuntimeAssembly.beginDeviceRemoval/continueDeviceRemoval` 产品入口已删除，只保留可逐项反查的 context/Authority/target effect 原语；同 request/operation 的 journal 幂等、响应丢失重放、accepted-work drift、sealed/release 和物理清理顺序继续由既有机制唯一负责。
+- Product API、Surface 与旧路退场：Device Administration sealed exact-set 由 3 Query 扩为 3 Query + 2 Command；Host 仍只构造一个应用与一个 contribution。`device.remove/device.continue` handler 只保留认证后的 exact wire 解码、dispatcher Command、既有 `runDeviceLifecycleOperation` 错误映射和结果传输；`ServerContext.deviceLifecycle.remove/continue`、CLI 同名 closure 以及两条桥 `A5-DEVICE-REMOVE-01/A5-DEVICE-CONTINUE-01` 归零。公开 RPC 名、字段、operationId 只对 exact cancel 可选、中文错误/行动、管理 facade、持久 schema 与单机/分布式拓扑均未改变；三条 duty migration 写桥按下一责任链保留，本包未进入 uninstall、Trust Administration、Backup/A6 或 duty migration 写决定。
+- 直接证据与构建：Core Device Administration application/Product API 8/8 与 Server management binding 64/64，合计 2 个直接文件 72/72；覆盖 begin connected/offline、current-duty/unknown/self/同名拒绝、transfer/lost、online/offline cancel、exact cancelled replay、inactive/mismatch/offline、opaque token 单次传递、Command exact-set/零 Fact、RPC exact decode、缺 contribution fail closed 与既有 wire error。A5-16a 的三个读取 Query 证据在同两文件中继续成立；未修改的 DeviceLifecycle/Mesh 既有 restart/response-loss/accepted-work drift 机制证据按已接受基线复用，未以本轮重复全测冒充新结果。Core、Server fresh build 与最终 `pnpm cli:build` 通过；canonical S7 coverage/mutation 34/34 + registry golden、fresh `pnpm runtime:package-exports`、changed-source Biome 与 `git diff --check` 通过。
+- 失效与交接：S7 现冻结 3 Query + 2 Command exact-set、唯一 Host 应用构造、opaque Authority/effect ports、两个 RPC 只走 dispatcher、ServerContext 写桥归零、Mesh 产品方法归零和 core 窄 export/build，并以反向 mutation 拒绝 Command/Query kind 或 identity 漂移、第二应用、RPC/ServerContext 直连、Mesh 恢复产品决定及根/重复导出。以后若两个 Command/Result、选择/分支规则、Authority/effect port、Host contribution/exact-set、ServerContext、RPC handler/error mapping、CLI wire、DeviceLifecycle/Mesh mechanism、core export/build、S7/package-export 或上述直接测试任一变化，只恢复本证据及真实失效的 A5-16a 交界；duty migration、Backup/A6 的无关变化不误伤。Device Administration 行和 A5 继续 `[ ]`；下一检查点固定为 duty migration 写链，当前停在可构建、可运行、可恢复且无双写/双 admission 的检查点等待协调者独立复核，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 

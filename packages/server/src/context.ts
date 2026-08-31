@@ -203,27 +203,6 @@ export interface ServerContext {
     commit(input: { readonly requestId: string; readonly transferId: string }): Promise<{ readonly stage: "completed" }>;
     cancel(input: { readonly requestId: string; readonly transferId: string }): Promise<{ readonly stage: "cancelled" }>;
   };
-  /** Current-duty-device management surface for a paired executor lifecycle. */
-  deviceLifecycle?: {
-    remove(input: {
-      readonly requestId: string;
-      readonly operationId: string;
-      readonly targetName: string;
-    }): Promise<{
-      readonly conversations: readonly string[];
-      readonly hasAcceptedWork: boolean;
-    }>;
-    continue(input:
-      | {
-          readonly targetName: string;
-          readonly mode: "transfer" | "destroy" | "lost";
-        }
-      | {
-          readonly targetName: string;
-          readonly mode: "cancel";
-          readonly operationId?: string;
-        }): Promise<unknown>;
-  };
   /** Loopback-only permanent removal of the current duty device. */
   anchorUninstall?: {
     preflight(): Promise<{
@@ -324,7 +303,6 @@ export interface CreateContextOptions {
   managedHostPublicStatus?: ServerContext["managedHostPublicStatus"];
   recoveryBackupStatus?: ServerContext["recoveryBackupStatus"];
   dutyMigration?: ServerContext["dutyMigration"];
-  deviceLifecycle?: ServerContext["deviceLifecycle"];
   mcpStatuses?: ServerContext["mcpStatuses"];
   llmComplete?: (prompt: string, role?: "main" | "light") => Promise<string>;
   channels?: ChannelRegistry;
@@ -349,7 +327,6 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     managedHostPublicStatus: opts.managedHostPublicStatus,
     recoveryBackupStatus: opts.recoveryBackupStatus,
     dutyMigration: opts.dutyMigration,
-    deviceLifecycle: opts.deviceLifecycle,
     mcpStatuses: opts.mcpStatuses,
     llmComplete: opts.llmComplete,
     channels: opts.channels,

@@ -2846,7 +2846,7 @@ export async function validateS7Structure() {
   if (failures.length > 0) throw new Error(`S7 structure gate failed:\n- ${failures.join("\n- ")}`);
 }
 
-/** A5 Device Administration owns the finite user-visible read projection. */
+/** A5 Device Administration owns finite reads and device-removal commands. */
 export function inspectDeviceAdministrationReadOwnership(records) {
   const failures = [];
   const byPath = new Map(records.map((record) => [record.relative, record.text]));
@@ -2866,15 +2866,8 @@ export function inspectDeviceAdministrationReadOwnership(records) {
   const context = required("packages/server/src/context.ts");
   const handler = required("packages/server/src/rpc/methods/server.ts");
   const composition = required("packages/cli/src/serve/command.ts");
+  const mesh = required("packages/cli/src/serve/mesh-runtime-assembly.ts");
   const manifest = manifestText ? JSON.parse(manifestText) : {};
-  const deviceLifecycleStart = context.indexOf("deviceLifecycle?: {");
-  const deviceLifecycleEnd = context.indexOf(
-    "/** Loopback-only permanent removal",
-    deviceLifecycleStart,
-  );
-  const deviceLifecycleBlock = deviceLifecycleStart >= 0 && deviceLifecycleEnd > deviceLifecycleStart
-    ? context.slice(deviceLifecycleStart, deviceLifecycleEnd)
-    : "";
   const narrow = manifest.exports?.["./device-administration/application"];
   const applicationOwners = records
     .filter((record) =>
@@ -2892,10 +2885,15 @@ export function inspectDeviceAdministrationReadOwnership(records) {
   if (
     !application.includes("class DeviceAdministrationApplicationService") ||
     application.split("defineProductApiQuery<").length - 1 !== 3 ||
-    application.split("bindProductApiOperation(").length - 1 !== 3 ||
+    application.split("defineProductApiCommand<").length - 1 !== 2 ||
+    application.split("bindProductApiOperation(").length - 1 !== 5 ||
     !application.includes('"device-administration.query.list"') ||
     !application.includes('"device-administration.query.removal-status"') ||
     !application.includes('"device-administration.query.duty-migration-targets"') ||
+    !application.includes('"device-administration.command.begin-removal"') ||
+    !application.includes('"device-administration.command.continue-removal"') ||
+    !application.includes("DeviceAdministrationRemovalAuthorityPort<Accepted, Abort>") ||
+    !application.includes("DeviceAdministrationRemovalEffectPort<Accepted, Abort>") ||
     !application.includes("DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET") ||
     !application.includes("createDeviceAdministrationProductApiContribution") ||
     !application.includes("factEvents: []")
@@ -2911,16 +2909,23 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !composition.includes("DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET.factEvents") ||
     !composition.includes("list: () => ctx.meshRuntime!.removableDevices()") ||
     !composition.includes("ctx.meshRuntime!.deviceRemovalStatus({ targetName })") ||
-    !composition.includes("list: () => ctx.meshRuntime!.plannedAnchorTargets()")
+    !composition.includes("list: () => ctx.meshRuntime!.plannedAnchorTargets()") ||
+    !composition.includes("ctx.meshRuntime!.deviceRemovalCommandContext()") ||
+    !composition.includes("ctx.meshRuntime!.acceptDeviceRemovalForTarget(input)") ||
+    !composition.includes("ctx.meshRuntime!.decideDeviceRemovalOnTarget(input)") ||
+    composition.includes("deviceLifecycle:")
   ) {
     failures.push("Device Administration unique Host application composition drifted");
   }
   if (
     !handler.includes('from "@zhixing/core/device-administration/application"') ||
-    handler.split("productApi?.supports(DEVICE_ADMINISTRATION_").length - 1 !== 3 ||
+    handler.split("productApi?.supports(DEVICE_ADMINISTRATION_").length - 1 !== 5 ||
     handler.split("productApi.query(DEVICE_ADMINISTRATION_").length - 1 !== 3 ||
+    handler.split("productApi.command(DEVICE_ADMINISTRATION_").length - 1 !== 2 ||
     handler.includes("ctx.server.deviceLifecycle.list") ||
     handler.includes("ctx.server.deviceLifecycle.status") ||
+    handler.includes("ctx.server.deviceLifecycle.remove") ||
+    handler.includes("ctx.server.deviceLifecycle.continue") ||
     handler.includes("ctx.server.dutyMigration.targets")
   ) {
     failures.push("Device Administration RPC pure read binding drifted");
@@ -2928,11 +2933,25 @@ export function inspectDeviceAdministrationReadOwnership(records) {
   if (
     context.includes("targets(): Promise<readonly") ||
     context.includes("list(): Promise<readonly") ||
-    deviceLifecycleBlock.includes("status(input:") ||
+    context.includes("deviceLifecycle?:") ||
     !context.includes("dutyMigration?: {") ||
-    !context.includes("deviceLifecycle?: {")
+    !context.includes("productApi?: ProductApiDispatcher")
   ) {
-    failures.push("Device Administration ServerContext read owner returned");
+    failures.push("Device Administration ServerContext owner returned");
+  }
+  if (
+    mesh.includes("beginDeviceRemoval(") ||
+    mesh.includes("continueDeviceRemoval(") ||
+    !mesh.includes("deviceRemovalCommandContext()") ||
+    !mesh.includes("acceptDeviceRemovalForTarget(input:") ||
+    !mesh.includes("deviceRemovalOperationForTarget(") ||
+    !mesh.includes("abortDeviceRemoval(operationId:") ||
+    !mesh.includes("commitLostDeviceRemoval(operationId:") ||
+    !mesh.includes("acceptDeviceRemovalOnTarget(input:") ||
+    !mesh.includes("abortDeviceRemovalOnTarget(input:") ||
+    !mesh.includes("decideDeviceRemovalOnTarget(input:")
+  ) {
+    failures.push("Device Administration decision returned to Mesh runtime");
   }
   if (
     narrow?.types !== "./dist/device-administration/application.d.ts" ||

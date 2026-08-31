@@ -13,6 +13,8 @@
 import { isDeliveryItemId } from "@zhixing/core/delivery";
 import { DELIVERY_RESOLVE_UNCERTAIN_COMMAND } from "@zhixing/core/delivery/application";
 import {
+  DEVICE_ADMINISTRATION_BEGIN_REMOVAL_COMMAND,
+  DEVICE_ADMINISTRATION_CONTINUE_REMOVAL_COMMAND,
   DEVICE_ADMINISTRATION_DUTY_MIGRATION_TARGETS_QUERY,
   DEVICE_ADMINISTRATION_LIST_QUERY,
   DEVICE_ADMINISTRATION_STATUS_QUERY,
@@ -454,10 +456,16 @@ export function buildDeviceRemoveMethod(): MethodEntry {
     name: "device.remove",
     requiresAuth: true,
     async handler(params, ctx) {
-      const lifecycle = ctx.server.deviceLifecycle;
-      if (!lifecycle) throw RpcErrors.internal("设备管理当前不可用");
       const input = parseDeviceRemovalStart(params);
-      return runDeviceLifecycleOperation(() => lifecycle.remove(input));
+      const productApi = ctx.server.productApi;
+      if (!productApi?.supports(DEVICE_ADMINISTRATION_BEGIN_REMOVAL_COMMAND)) {
+        throw RpcErrors.internal("设备管理当前不可用");
+      }
+      return runDeviceLifecycleOperation(async () =>
+        (await productApi.command(DEVICE_ADMINISTRATION_BEGIN_REMOVAL_COMMAND, {
+          kind: "begin-device-removal",
+          ...input,
+        })).result);
     },
   };
 }
@@ -467,10 +475,16 @@ export function buildDeviceContinueMethod(): MethodEntry {
     name: "device.continue",
     requiresAuth: true,
     async handler(params, ctx) {
-      const lifecycle = ctx.server.deviceLifecycle;
-      if (!lifecycle) throw RpcErrors.internal("设备管理当前不可用");
       const input = parseDeviceRemovalContinue(params);
-      return runDeviceLifecycleOperation(() => lifecycle.continue(input));
+      const productApi = ctx.server.productApi;
+      if (!productApi?.supports(DEVICE_ADMINISTRATION_CONTINUE_REMOVAL_COMMAND)) {
+        throw RpcErrors.internal("设备管理当前不可用");
+      }
+      return runDeviceLifecycleOperation(async () =>
+        (await productApi.command(DEVICE_ADMINISTRATION_CONTINUE_REMOVAL_COMMAND, {
+          kind: "continue-device-removal",
+          ...input,
+        })).result);
     },
   };
 }

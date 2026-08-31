@@ -2369,7 +2369,7 @@ test("retired entry, live writable Store and reverse package dependency mutation
   );
 });
 
-test("Device Administration read projection has one application and pure RPC bindings", async () => {
+test("Device Administration reads and removal commands have one application and pure RPC bindings", async () => {
   const paths = [
     "packages/core/src/device-administration/application.ts",
     "packages/core/src/index.ts",
@@ -2378,6 +2378,7 @@ test("Device Administration read projection has one application and pure RPC bin
     "packages/server/src/context.ts",
     "packages/server/src/rpc/methods/server.ts",
     "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/mesh-runtime-assembly.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -2390,7 +2391,7 @@ test("Device Administration read projection has one application and pure RPC bin
   assert.match(
     inspectDeviceAdministrationReadOwnership(mutate(
       "packages/core/src/device-administration/application.ts",
-      (text) => text.replace("defineProductApiQuery<", "defineProductApiCommand<"),
+      (text) => text.replace("defineProductApiQuery<", "defineProductApiQueryBroken<"),
     )).join("\n"),
     /Query\/Product API exact-set drifted/,
   );
@@ -2409,7 +2410,7 @@ test("Device Administration read projection has one application and pure RPC bin
       "packages/server/src/rpc/methods/server.ts",
       (text) => text.replace(
         "productApi.query(DEVICE_ADMINISTRATION_LIST_QUERY",
-        "ctx.server.deviceLifecycle.list(); productApi.query(DEVICE_ADMINISTRATION_LIST_QUERY",
+        "ctx.server.deviceLifecycle.remove(); productApi.query(DEVICE_ADMINISTRATION_LIST_QUERY",
       ),
     )).join("\n"),
     /RPC pure read binding drifted/,
@@ -2418,11 +2419,18 @@ test("Device Administration read projection has one application and pure RPC bin
     inspectDeviceAdministrationReadOwnership(mutate(
       "packages/server/src/context.ts",
       (text) => text.replace(
-        "deviceLifecycle?: {",
-        "deviceLifecycle?: {\n    list(): Promise<readonly unknown[]>;",
+        "productApi?: ProductApiDispatcher;",
+        "productApi?: ProductApiDispatcher;\n  deviceLifecycle?: { remove(): Promise<void> };",
       ),
     )).join("\n"),
-    /ServerContext read owner returned/,
+    /ServerContext owner returned/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => `${text}\nfunction beginDeviceRemoval() { return undefined; }`,
+    )).join("\n"),
+    /decision returned to Mesh runtime/,
   );
   assert.match(
     inspectDeviceAdministrationReadOwnership(mutate(

@@ -55,12 +55,49 @@ function mkCtx(overrides: Partial<HandlerContext["server"]> = {}): HandlerContex
 }
 
 function deviceAdministrationProductApi(
-  overrides: Partial<DeviceAdministrationApplicationOptions> = {},
+  overrides: Partial<DeviceAdministrationApplicationOptions<string, string>> = {},
 ): ProductApiDispatcher {
   const application = new DeviceAdministrationApplicationService({
     relationships: { list: async () => [] },
     removalState: { read: async () => undefined },
     dutyMigrationTargets: { list: async () => [] },
+    removalContext: {
+      read: () => ({
+        localDeviceId: "device-duty",
+        currentDutyDeviceId: "device-duty",
+        members: [{
+          deviceId: "device-target",
+          displayName: "设备",
+          state: "active",
+        }],
+      }),
+    },
+    removalAuthority: {
+      acceptForTarget: async () => "accepted-token",
+      operation: async (operationId) => ({ operationId, targetDeviceId: "device-target" }),
+      operationForTarget: async () => ({
+        operationId: "operation-1",
+        targetDeviceId: "device-target",
+      }),
+      abort: async () => "abort-token",
+      commitLost: async () => undefined,
+    },
+    removalEffects: {
+      isConnected: () => true,
+      accept: async () => ({ conversations: [], hasAcceptedWork: false }),
+      abort: async () => ({
+        phase: "cancelled",
+        conversations: [],
+        localData: "known",
+        credentialActions: [],
+      }),
+      decide: async () => ({
+        phase: "removed",
+        conversations: [],
+        localData: "removed",
+        credentialActions: [],
+      }),
+    },
     ...overrides,
   });
   return new ProductApiDispatcher(DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET, [
@@ -68,43 +105,138 @@ function deviceAdministrationProductApi(
   ]);
 }
 
-describe("Unit 37 lifecycle facade input", () => {
+describe("Device Administration command Product API input", () => {
   it.each([
     [buildDeviceRemoveMethod, { requestId: "request-1", operationId: "operation-1", targetName: "设备", extra: true }],
     [buildDeviceContinueMethod, { targetName: "设备", mode: "destroy", extra: true }],
     [buildDeviceStatusMethod, { targetName: "设备", extra: true }],
   ] as const)("rejects unknown device fields before lifecycle effects", async (build, params) => {
-    const lifecycle = { remove: vi.fn(), continue: vi.fn(), status: vi.fn() };
     const entry = build();
-    await expect(entry.handler(params, mkCtx({ deviceLifecycle: lifecycle as any })))
+    await expect(entry.handler(params, mkCtx({
+      productApi: deviceAdministrationProductApi(),
+    })))
       .rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
-    expect(lifecycle.remove).not.toHaveBeenCalled();
-    expect(lifecycle.continue).not.toHaveBeenCalled();
-    expect(lifecycle.status).not.toHaveBeenCalled();
   });
 
   it("accepts operationId only for exact cancel and forwards the complete identity", async () => {
-    const lifecycle = {
-      continue: vi.fn(async () => ({ phase: "cancelled" })),
-    };
+    const operation = vi.fn(async (operationId: string) => ({
+      operationId,
+      targetDeviceId: "device-target",
+    }));
     const entry = buildDeviceContinueMethod();
-    const ctx = mkCtx({ deviceLifecycle: lifecycle as any });
+    const ctx = mkCtx({
+      productApi: deviceAdministrationProductApi({
+        removalAuthority: {
+          acceptForTarget: async () => "accepted-token",
+          operation,
+          operationForTarget: async () => undefined,
+          abort: async () => "abort-token",
+          commitLost: async () => undefined,
+        },
+      }),
+    });
     await expect(entry.handler({
       targetName: "设备",
       operationId: "operation-1",
       mode: "cancel",
-    }, ctx)).resolves.toEqual({ phase: "cancelled" });
-    expect(lifecycle.continue).toHaveBeenCalledWith({
-      targetName: "设备",
-      operationId: "operation-1",
-      mode: "cancel",
+    }, ctx)).resolves.toEqual({
+      phase: "cancelled",
+      conversations: [],
+      localData: "known",
+      credentialActions: [],
     });
+    expect(operation).toHaveBeenCalledWith("operation-1");
     await expect(entry.handler({
       targetName: "设备",
       operationId: "operation-1",
       mode: "destroy",
     }, ctx)).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
-    expect(lifecycle.continue).toHaveBeenCalledTimes(1);
+    expect(operation).toHaveBeenCalledTimes(1);
+  });
+
+  it("dispatches remove through the shared application and preserves lifecycle errors", async () => {
+    const acceptForTarget = vi.fn(async () => "accepted-token");
+    const accept = vi.fn(async () => ({
+      conversations: ["conv-main"],
+      hasAcceptedWork: true,
+    }));
+    const ctx = mkCtx({
+      productApi: deviceAdministrationProductApi({
+        removalAuthority: {
+          acceptForTarget,
+          operation: async () => undefined,
+          operationForTarget: async () => undefined,
+          abort: async () => "abort-token",
+          commitLost: async () => undefined,
+        },
+        removalEffects: {
+          isConnected: () => true,
+          accept,
+          abort: async () => {
+            throw new Error("unexpected abort");
+          },
+          decide: async () => {
+            throw new Error("unexpected decide");
+          },
+        },
+      }),
+    });
+    await expect(buildDeviceRemoveMethod().handler({
+      requestId: "request-1",
+      operationId: "operation-1",
+      targetName: "设备",
+    }, ctx)).resolves.toEqual({
+      conversations: ["conv-main"],
+      hasAcceptedWork: true,
+    });
+    expect(acceptForTarget).toHaveBeenCalledWith({
+      requestId: "request-1",
+      operationId: "operation-1",
+      targetDeviceId: "device-target",
+    });
+    expect(accept).toHaveBeenCalledWith({
+      targetDeviceId: "device-target",
+      accepted: "accepted-token",
+    });
+
+    await expect(buildDeviceContinueMethod().handler({
+      targetName: "设备",
+      mode: "transfer",
+    }, mkCtx({
+      productApi: deviceAdministrationProductApi({
+        removalEffects: {
+          isConnected: () => false,
+          accept,
+          abort: async () => {
+            throw new Error("unexpected abort");
+          },
+          decide: async () => {
+            throw new Error("unexpected decide");
+          },
+        },
+      }),
+    }))).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.INTERNAL_ERROR,
+      message: "目标设备当前离线：可以等待它重新上线，或明确按失控设备撤销",
+    });
+  });
+
+  it("fails closed when the Host has no device removal command contribution", async () => {
+    await expect(buildDeviceRemoveMethod().handler({
+      requestId: "request-1",
+      operationId: "operation-1",
+      targetName: "设备",
+    }, mkCtx())).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.INTERNAL_ERROR,
+      message: "设备管理当前不可用",
+    });
+    await expect(buildDeviceContinueMethod().handler({
+      targetName: "设备",
+      mode: "lost",
+    }, mkCtx())).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.INTERNAL_ERROR,
+      message: "设备管理当前不可用",
+    });
   });
 
   it.each([

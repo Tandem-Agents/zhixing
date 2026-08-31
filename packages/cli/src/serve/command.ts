@@ -2183,6 +2183,31 @@ async function runServerProcess(
           dutyMigrationTargets: {
             list: () => ctx.meshRuntime!.plannedAnchorTargets(),
           },
+          removalContext: {
+            read: () => ctx.meshRuntime!.deviceRemovalCommandContext(),
+          },
+          removalAuthority: {
+            acceptForTarget: (input) =>
+              ctx.meshRuntime!.acceptDeviceRemovalForTarget(input),
+            operation: (operationId) =>
+              ctx.meshRuntime!.deviceRemovalOperation(operationId),
+            operationForTarget: (targetDeviceId) =>
+              ctx.meshRuntime!.deviceRemovalOperationForTarget(targetDeviceId),
+            abort: (operationId) =>
+              ctx.meshRuntime!.abortDeviceRemoval(operationId),
+            commitLost: (operationId) =>
+              ctx.meshRuntime!.commitLostDeviceRemoval(operationId),
+          },
+          removalEffects: {
+            isConnected: (targetDeviceId) =>
+              ctx.meshRuntime!.isDeviceRemovalTargetConnected(targetDeviceId),
+            accept: (input) =>
+              ctx.meshRuntime!.acceptDeviceRemovalOnTarget(input),
+            abort: (input) =>
+              ctx.meshRuntime!.abortDeviceRemovalOnTarget(input),
+            decide: (input) =>
+              ctx.meshRuntime!.decideDeviceRemovalOnTarget(input),
+          },
         }),
       )
     : undefined;
@@ -2318,23 +2343,6 @@ async function runServerProcess(
               await ctx.meshRuntime!.abortPlannedAnchorTransfer(input);
               return { stage: "cancelled" as const };
             },
-          },
-          deviceLifecycle: {
-            remove: (input: {
-              readonly requestId: string;
-              readonly operationId: string;
-              readonly targetName: string;
-            }) => ctx.meshRuntime!.beginDeviceRemoval(input),
-            continue: (input:
-              | {
-                  readonly targetName: string;
-                  readonly mode: "transfer" | "destroy" | "lost";
-                }
-              | {
-                  readonly targetName: string;
-                  readonly mode: "cancel";
-                  readonly operationId?: string;
-                }) => ctx.meshRuntime!.continueDeviceRemoval(input),
           },
         }
       : {}),

@@ -17,7 +17,12 @@ import type {
   EvidenceHandlerPort,
   CheckpointStreamRecord,
 } from "@zhixing/core/contracts";
-import { canonicalize } from "@zhixing/core/protocol";
+import {
+  canonicalize,
+  type DeviceLifecycleAbort,
+  type ExecutorRemovalLifecycleIdentity,
+  type ExecutorRemovalReceipt,
+} from "@zhixing/core/protocol";
 import {
   MeshConnectionRegistry,
   MeshEndpointDirectory,
@@ -1130,101 +1135,100 @@ export class MeshRuntimeAssembly {
     return this.#deviceRemovalAuthority.candidates();
   }
 
-  async beginDeviceRemoval(input: {
+  deviceRemovalCommandContext() {
+    const trust = this.#control.currentTrust();
+    return Object.freeze({
+      localDeviceId: this.options.authority.deviceId,
+      currentDutyDeviceId: trust.issuer.deviceId,
+      members: Object.freeze(trust.members.map((member) => Object.freeze({
+        deviceId: member.device.deviceId,
+        displayName: member.device.displayName,
+        state: member.state,
+      }))),
+    });
+  }
+
+  async acceptDeviceRemovalForTarget(input: {
     readonly requestId: string;
     readonly operationId: string;
-    readonly targetName: string;
+    readonly targetDeviceId: string;
+  }): Promise<ExecutorRemovalReceipt> {
+    if (!this.#deviceRemovalAuthority) {
+      throw new Error("Only the current duty device can remove a paired device");
+    }
+    return this.#deviceRemovalAuthority.acceptForDevice(input);
+  }
+
+  async deviceRemovalOperation(
+    operationId: string,
+  ): Promise<ExecutorRemovalLifecycleIdentity | undefined> {
+    if (!this.#deviceRemovalAuthority) {
+      throw new Error("Only the current duty device can continue device removal");
+    }
+    return this.#deviceRemovalAuthority.operation(operationId);
+  }
+
+  async deviceRemovalOperationForTarget(
+    targetDeviceId: string,
+  ): Promise<ExecutorRemovalLifecycleIdentity | undefined> {
+    if (!this.#deviceRemovalAuthority) {
+      throw new Error("Only the current duty device can continue device removal");
+    }
+    return this.#deviceRemovalAuthority.operationForTarget(targetDeviceId);
+  }
+
+  async abortDeviceRemoval(operationId: string): Promise<DeviceLifecycleAbort> {
+    if (!this.#deviceRemovalAuthority) {
+      throw new Error("Only the current duty device can continue device removal");
+    }
+    return this.#deviceRemovalAuthority.abort(operationId);
+  }
+
+  async commitLostDeviceRemoval(operationId: string): Promise<void> {
+    if (!this.#deviceRemovalAuthority) {
+      throw new Error("Only the current duty device can continue device removal");
+    }
+    await this.#deviceRemovalAuthority.commitLost(operationId);
+  }
+
+  isDeviceRemovalTargetConnected(targetDeviceId: string): boolean {
+    return this.connections.has(targetDeviceId);
+  }
+
+  acceptDeviceRemovalOnTarget(input: {
+    readonly targetDeviceId: string;
+    readonly accepted: ExecutorRemovalReceipt;
   }): Promise<{
     readonly conversations: readonly string[];
     readonly hasAcceptedWork: boolean;
   }> {
-    if (!this.#deviceRemovalAuthority) {
-      throw new Error("Only the current duty device can remove a paired device");
-    }
-    const receipt = await this.#deviceRemovalAuthority.accept(input);
-    if (!this.connections.has(receipt.targetDeviceId)) {
-      return { conversations: [], hasAcceptedWork: false };
-    }
     return new DeviceRemovalTargetMeshClient(
-      this.connections.client(receipt.targetDeviceId),
-    ).accept(receipt);
+      this.connections.client(input.targetDeviceId),
+    ).accept(input.accepted);
   }
 
-  async continueDeviceRemoval(input:
-    | {
-        readonly targetName: string;
-        readonly mode: "transfer" | "destroy" | "lost";
-      }
-    | {
-        readonly targetName: string;
-        readonly mode: "cancel";
-        readonly operationId?: string;
-      }) {
-    if (!this.#deviceRemovalAuthority) {
-      throw new Error("Only the current duty device can continue device removal");
-    }
-    const trust = this.#control.currentTrust();
-    const named = trust.members.filter((member) => member.device.displayName === input.targetName);
-    if (named.length !== 1) {
-      throw new Error(named.length === 0
-        ? "Paired device name is unknown"
-        : "Paired device name is not unique");
-    }
-    const operation = input.mode === "cancel" && input.operationId !== undefined
-      ? await this.#deviceRemovalAuthority.operation(input.operationId)
-      : await this.#deviceRemovalAuthority.operationForTarget(named[0]!.device.deviceId);
-    if (!operation) {
-      if (input.mode === "cancel" && input.operationId !== undefined) {
-        return {
-          phase: "cancelled" as const,
-          conversations: [] as readonly string[],
-          localData: "known" as const,
-          credentialActions: [] as readonly string[],
-        };
-      }
-      throw new Error("Removal operation is unknown");
-    }
-    const matches = trust.members.filter((member) =>
-      member.device.deviceId === operation.targetDeviceId &&
-      member.device.displayName === input.targetName);
-    if (matches.length !== 1) throw new Error("Removal target name does not match the accepted device");
-    const targetDeviceId = operation.targetDeviceId;
-    const operationId = operation.operationId;
-    if (input.mode === "cancel") {
-      const abort = await this.#deviceRemovalAuthority.abort(operationId);
-      if (this.connections.has(targetDeviceId)) {
-        return new DeviceRemovalTargetMeshClient(
-          this.connections.client(targetDeviceId),
-        ).abort(operationId, abort);
-      }
-      return {
-        phase: "waiting-for-device" as const,
-        conversations: [] as readonly string[],
-        localData: "known" as const,
-        credentialActions: ["取消已安全记录；目标设备上线后会自动恢复准入"] as readonly string[],
-      };
-    }
-    if (input.mode === "lost") {
-      await this.#deviceRemovalAuthority.commitLost(operationId);
-      return {
-        phase: "removed" as const,
-        conversations: [] as readonly string[],
-        localData: "unknown" as const,
-        credentialActions: ["Change credentials for accounts used on this device"],
-      };
-    }
-    if (matches[0]!.state !== "active") {
-      throw new Error("Removal target is no longer an active paired device");
-    }
-    if (!this.connections.has(targetDeviceId)) {
-      throw new Error("The device is offline; choose lost-device revocation or wait for it to reconnect");
-    }
+  abortDeviceRemovalOnTarget(input: {
+    readonly targetDeviceId: string;
+    readonly operationId: string;
+    readonly abort: DeviceLifecycleAbort;
+  }): Promise<ExecutorRemovalPublicState> {
     return new DeviceRemovalTargetMeshClient(
-      this.connections.client(targetDeviceId),
+      this.connections.client(input.targetDeviceId),
+    ).abort(input.operationId, input.abort);
+  }
+
+  decideDeviceRemovalOnTarget(input: {
+    readonly targetDeviceId: string;
+    readonly operationId: string;
+    readonly mode: "transfer" | "destroy";
+    readonly currentDutyDeviceId: string;
+  }): Promise<ExecutorRemovalPublicState> {
+    return new DeviceRemovalTargetMeshClient(
+      this.connections.client(input.targetDeviceId),
     ).decide({
-      operationId,
+      operationId: input.operationId,
       mode: input.mode,
-      currentAnchorDeviceId: this.#currentAnchorDeviceId(),
+      currentAnchorDeviceId: input.currentDutyDeviceId,
     });
   }
 
