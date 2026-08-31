@@ -1,14 +1,72 @@
+import {
+  createDeviceAdministrationProductApiContribution,
+  DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET,
+  DeviceAdministrationApplicationService,
+  type DeviceAdministrationCurrentRemovalPort,
+} from "@zhixing/core/device-administration/application";
+import { ProductApiDispatcher } from "@zhixing/core/product-api";
+import { describe, expect, it, vi } from "vitest";
 import type { HandlerContext } from "../../handlers.js";
 import { RPC_ERROR_CODES } from "../../protocol.js";
-import { describe, expect, it, vi } from "vitest";
 import {
   buildAnchorUninstallBeginMethod,
+  buildAnchorUninstallCancelMethod,
   buildAnchorUninstallContinueMethod,
+  buildAnchorUninstallPreflightMethod,
+  buildAnchorUninstallStatusMethod,
 } from "../server.js";
+
+function createProductApi(
+  currentDeviceRemoval?: DeviceAdministrationCurrentRemovalPort,
+): ProductApiDispatcher {
+  const application = new DeviceAdministrationApplicationService({
+    relationships: { list: async () => [] },
+    removalState: { read: async () => undefined },
+    dutyMigrationTargets: { list: async () => [] },
+    removalContext: {
+      read: () => ({
+        localDeviceId: "device-duty",
+        currentDutyDeviceId: "device-duty",
+        members: [],
+      }),
+    },
+    removalAuthority: {
+      acceptForTarget: async () => "accepted",
+      operation: async () => undefined,
+      operationForTarget: async () => undefined,
+      abort: async () => "abort",
+      commitLost: async () => undefined,
+    },
+    removalEffects: {
+      isConnected: () => false,
+      accept: async () => ({ conversations: [], hasAcceptedWork: false }),
+      abort: async () => removalState("cancelled"),
+      decide: async () => removalState("removed"),
+    },
+    dutyMigrationContext: {
+      read: () => ({
+        localDeviceId: "device-duty",
+        currentDutyDeviceId: "device-duty",
+        currentOwnerReady: true,
+        deviceRemovalInProgress: false,
+        members: [],
+      }),
+    },
+    dutyMigration: {
+      prepare: async () => undefined,
+      commit: async () => undefined,
+      cancel: async () => undefined,
+    },
+    ...(currentDeviceRemoval ? { currentDeviceRemoval } : {}),
+  });
+  return new ProductApiDispatcher(DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET, [
+    createDeviceAdministrationProductApiContribution(application),
+  ]);
+}
 
 function context(input: {
   readonly loopback: boolean;
-  readonly uninstall: Record<string, ReturnType<typeof vi.fn>>;
+  readonly productApi?: ProductApiDispatcher;
 }): HandlerContext {
   return {
     connection: { authenticated: true, loopback: input.loopback } as never,
@@ -17,48 +75,139 @@ function context(input: {
       version: "test",
       startedAt: Date.now(),
       token: "token",
-      anchorUninstall: input.uninstall,
+      ...(input.productApi ? { productApi: input.productApi } : {}),
     } as never,
   };
 }
 
+function currentRemovalPort(): DeviceAdministrationCurrentRemovalPort & {
+  readonly preflight: ReturnType<typeof vi.fn>;
+  readonly begin: ReturnType<typeof vi.fn>;
+  readonly continue: ReturnType<typeof vi.fn>;
+  readonly cancel: ReturnType<typeof vi.fn>;
+  readonly status: ReturnType<typeof vi.fn>;
+} {
+  return {
+    preflight: vi.fn(async () => ({
+      currentDeviceName: "当前设备",
+      migrationTargets: [{ displayName: "备用电脑", ready: true }],
+      recoveryBackupReady: true,
+    })),
+    begin: vi.fn(async () => ({ phase: "moving-duty-device" as const })),
+    continue: vi.fn(async () => ({ phase: "retiring-device" as const })),
+    cancel: vi.fn(async () => ({ phase: "cancelled" as const })),
+    status: vi.fn(async () => ({
+      phase: "choose-safe-path" as const,
+      nextAction: "choose-device" as const,
+    })),
+  };
+}
+
 describe("anchor uninstall local lifecycle RPC", () => {
-  it("rejects a non-loopback caller before invoking the coordinator", async () => {
-    const begin = vi.fn();
+  it("rejects a non-loopback caller before invoking Product API", async () => {
+    const port = currentRemovalPort();
     await expect(buildAnchorUninstallBeginMethod().handler({
       path: "recovery-backup",
       requestId: "request-uninstall",
       operationId: "uninstall-local",
-    }, context({ loopback: false, uninstall: { begin } })))
+    }, context({ loopback: false, productApi: createProductApi(port) })))
       .rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
-    expect(begin).not.toHaveBeenCalled();
+    expect(port.begin).not.toHaveBeenCalled();
   });
 
-  it("passes only stable migration identity and requires explicit backup confirmation", async () => {
-    const begin = vi.fn(async (input) => ({ phase: "moving-authority", ...input }));
+  it("dispatches all five wire operations through the shared Device application", async () => {
+    const port = currentRemovalPort();
+    const ctx = context({ loopback: true, productApi: createProductApi(port) });
+
+    await expect(buildAnchorUninstallPreflightMethod().handler({}, ctx)).resolves.toEqual({
+      currentDeviceName: "当前设备",
+      migrationTargets: [{ displayName: "备用电脑", ready: true }],
+      recoveryBackupReady: true,
+    });
     await expect(buildAnchorUninstallBeginMethod().handler({
       path: "migration",
       requestId: "request-uninstall",
       operationId: "uninstall-local",
       transferId: "transfer-local",
       targetName: "备用电脑",
-    }, context({ loopback: true, uninstall: { begin } }))).resolves.toMatchObject({
-      phase: "moving-authority",
+    }, ctx)).resolves.toEqual({ phase: "moving-duty-device" });
+    await expect(buildAnchorUninstallContinueMethod().handler({
+      operationId: "uninstall-local",
+      confirmBackup: true,
+      recoveryPackage: "recovery-package",
+    }, ctx)).resolves.toEqual({ phase: "retiring-device" });
+    await expect(buildAnchorUninstallCancelMethod().handler({
+      operationId: "uninstall-local",
+    }, ctx)).resolves.toEqual({ phase: "cancelled" });
+    await expect(buildAnchorUninstallStatusMethod().handler({
+      operationId: "uninstall-local",
+    }, ctx)).resolves.toEqual({
+      state: { phase: "choose-safe-path", nextAction: "choose-device" },
     });
-    expect(begin).toHaveBeenCalledWith({
+
+    expect(port.begin).toHaveBeenCalledWith({
       path: "migration",
       requestId: "request-uninstall",
       operationId: "uninstall-local",
       transferId: "transfer-local",
       targetName: "备用电脑",
     });
+    expect(port.continue).toHaveBeenCalledWith({
+      operationId: "uninstall-local",
+      confirmBackup: true,
+      recoveryPackage: "recovery-package",
+    });
+    expect(port.cancel).toHaveBeenCalledWith({ operationId: "uninstall-local" });
+    expect(port.status).toHaveBeenCalledWith({ operationId: "uninstall-local" });
+  });
 
-    const continueUninstall = vi.fn();
+  it("requires explicit backup confirmation before the application command", async () => {
+    const port = currentRemovalPort();
     await expect(buildAnchorUninstallContinueMethod().handler({
       operationId: "uninstall-local",
       confirmBackup: false,
-    }, context({ loopback: true, uninstall: { continue: continueUninstall } })))
+    }, context({ loopback: true, productApi: createProductApi(port) })))
       .rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
-    expect(continueUninstall).not.toHaveBeenCalled();
+    expect(port.continue).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when Product API or the mechanism contribution is unavailable", async () => {
+    await expect(buildAnchorUninstallPreflightMethod().handler({}, context({ loopback: true })))
+      .rejects.toMatchObject({
+        code: RPC_ERROR_CODES.INTERNAL_ERROR,
+        message: "当前设备不支持永久卸载",
+      });
+    await expect(buildAnchorUninstallPreflightMethod().handler(
+      {},
+      context({ loopback: true, productApi: createProductApi() }),
+    )).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.INTERNAL_ERROR,
+      message: "当前设备不支持永久卸载",
+    });
+  });
+
+  it("preserves the established current-removal error mapping", async () => {
+    const port = currentRemovalPort();
+    port.begin.mockRejectedValueOnce(new Error("target is not ready"));
+    await expect(buildAnchorUninstallBeginMethod().handler({
+      path: "migration",
+      requestId: "request-uninstall",
+      operationId: "uninstall-local",
+      transferId: "transfer-local",
+      targetName: "备用电脑",
+    }, context({ loopback: true, productApi: createProductApi(port) })))
+      .rejects.toMatchObject({
+        code: RPC_ERROR_CODES.INTERNAL_ERROR,
+        message: "请先选择可用的值班设备，或验证恢复备份后再继续",
+      });
   });
 });
+
+function removalState(phase: "cancelled" | "removed") {
+  return {
+    phase,
+    conversations: [],
+    localData: "known" as const,
+    credentialActions: [],
+  };
+}

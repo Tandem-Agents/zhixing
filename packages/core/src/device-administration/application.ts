@@ -46,10 +46,21 @@ export interface DeviceAdministrationDutyMigrationTargetsQuery {
   readonly kind: "list-duty-migration-targets";
 }
 
+export interface DeviceAdministrationCurrentRemovalPreflightQuery {
+  readonly kind: "preflight-current-device-removal";
+}
+
+export interface DeviceAdministrationCurrentRemovalStatusQuery {
+  readonly kind: "read-current-device-removal-status";
+  readonly operationId: string;
+}
+
 export type DeviceAdministrationQuery =
   | DeviceAdministrationListQuery
   | DeviceAdministrationStatusQuery
-  | DeviceAdministrationDutyMigrationTargetsQuery;
+  | DeviceAdministrationDutyMigrationTargetsQuery
+  | DeviceAdministrationCurrentRemovalPreflightQuery
+  | DeviceAdministrationCurrentRemovalStatusQuery;
 
 export interface DeviceAdministrationListResult {
   readonly devices: readonly DeviceAdministrationRelationship[];
@@ -63,10 +74,37 @@ export interface DeviceAdministrationDutyMigrationTargetsResult {
   readonly devices: readonly DeviceAdministrationDutyMigrationTarget[];
 }
 
+export interface DeviceAdministrationCurrentRemovalState {
+  readonly phase:
+    | "choose-safe-path"
+    | "moving-duty-device"
+    | "backup-verified"
+    | "retiring-device"
+    | "ready-to-uninstall"
+    | "uninstalled"
+    | "cancelled";
+  readonly nextAction?: "choose-device" | "confirm-backup" | "continue";
+}
+
+export interface DeviceAdministrationCurrentRemovalPreflightResult {
+  readonly currentDeviceName: string;
+  readonly migrationTargets: readonly {
+    readonly displayName: string;
+    readonly ready: boolean;
+  }[];
+  readonly recoveryBackupReady: boolean;
+}
+
+export interface DeviceAdministrationCurrentRemovalStatusResult {
+  readonly state: DeviceAdministrationCurrentRemovalState | null;
+}
+
 export type DeviceAdministrationResult =
   | DeviceAdministrationListResult
   | DeviceAdministrationStatusResult
-  | DeviceAdministrationDutyMigrationTargetsResult;
+  | DeviceAdministrationDutyMigrationTargetsResult
+  | DeviceAdministrationCurrentRemovalPreflightResult
+  | DeviceAdministrationCurrentRemovalStatusResult;
 
 export interface DeviceAdministrationBeginRemovalCommand {
   readonly kind: "begin-device-removal";
@@ -101,12 +139,44 @@ export interface DeviceAdministrationCancelDutyMigrationCommand {
   readonly transferId: string;
 }
 
+export type DeviceAdministrationBeginCurrentRemovalCommand =
+  | {
+      readonly kind: "begin-current-device-removal";
+      readonly path: "migration";
+      readonly requestId: string;
+      readonly operationId: string;
+      readonly transferId: string;
+      readonly targetName: string;
+    }
+  | {
+      readonly kind: "begin-current-device-removal";
+      readonly path: "recovery-backup";
+      readonly requestId: string;
+      readonly operationId: string;
+      readonly recoveryPackage: string;
+    };
+
+export interface DeviceAdministrationContinueCurrentRemovalCommand {
+  readonly kind: "continue-current-device-removal";
+  readonly operationId: string;
+  readonly confirmBackup: true;
+  readonly recoveryPackage: string;
+}
+
+export interface DeviceAdministrationCancelCurrentRemovalCommand {
+  readonly kind: "cancel-current-device-removal";
+  readonly operationId: string;
+}
+
 export type DeviceAdministrationCommand =
   | DeviceAdministrationBeginRemovalCommand
   | DeviceAdministrationContinueRemovalCommand
   | DeviceAdministrationPrepareDutyMigrationCommand
   | DeviceAdministrationCommitDutyMigrationCommand
-  | DeviceAdministrationCancelDutyMigrationCommand;
+  | DeviceAdministrationCancelDutyMigrationCommand
+  | DeviceAdministrationBeginCurrentRemovalCommand
+  | DeviceAdministrationContinueCurrentRemovalCommand
+  | DeviceAdministrationCancelCurrentRemovalCommand;
 
 export interface DeviceAdministrationBeginRemovalResult {
   readonly conversations: readonly string[];
@@ -130,7 +200,8 @@ export type DeviceAdministrationCommandResult =
   | DeviceAdministrationRemovalState
   | DeviceAdministrationPrepareDutyMigrationResult
   | DeviceAdministrationCommitDutyMigrationResult
-  | DeviceAdministrationCancelDutyMigrationResult;
+  | DeviceAdministrationCancelDutyMigrationResult
+  | DeviceAdministrationCurrentRemovalState;
 
 export interface DeviceAdministrationRemovalMember {
   readonly deviceId: string;
@@ -203,6 +274,47 @@ export interface DeviceAdministrationDutyMigrationPort {
   }): Promise<void>;
 }
 
+/** Temporary one-way mechanism bridge to the existing durable uninstall coordinator. */
+export interface DeviceAdministrationCurrentRemovalPort {
+  preflight(): Promise<DeviceAdministrationCurrentRemovalPreflightResult>;
+  begin(input:
+    | {
+        readonly path: "migration";
+        readonly requestId: string;
+        readonly operationId: string;
+        readonly transferId: string;
+        readonly targetName: string;
+      }
+    | {
+        readonly path: "recovery-backup";
+        readonly requestId: string;
+        readonly operationId: string;
+        readonly recoveryPackage: string;
+      }): Promise<DeviceAdministrationCurrentRemovalState>;
+  continue(input: {
+    readonly operationId: string;
+    readonly confirmBackup: true;
+    readonly recoveryPackage: string;
+  }): Promise<DeviceAdministrationCurrentRemovalState>;
+  cancel(input: {
+    readonly operationId: string;
+  }): Promise<DeviceAdministrationCurrentRemovalState>;
+  status(input: {
+    readonly operationId: string;
+  }): Promise<DeviceAdministrationCurrentRemovalState | undefined>;
+}
+
+export class DeviceAdministrationApplicationError extends Error {
+  readonly name = "DeviceAdministrationApplicationError";
+
+  constructor(
+    readonly kind: "current-device-removal-unavailable",
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 /** Durable lifecycle mechanism. Accepted/abort tokens stay opaque to this domain. */
 export interface DeviceAdministrationRemovalAuthorityPort<Accepted, Abort> {
   acceptForTarget(input: {
@@ -247,6 +359,7 @@ export interface DeviceAdministrationApplicationOptions<Accepted, Abort> {
   readonly removalEffects: DeviceAdministrationRemovalEffectPort<Accepted, Abort>;
   readonly dutyMigrationContext: DeviceAdministrationDutyMigrationContextReadPort;
   readonly dutyMigration: DeviceAdministrationDutyMigrationPort;
+  readonly currentDeviceRemoval?: DeviceAdministrationCurrentRemovalPort;
 }
 
 export interface DeviceAdministrationApplication {
@@ -255,6 +368,12 @@ export interface DeviceAdministrationApplication {
   query(
     query: DeviceAdministrationDutyMigrationTargetsQuery,
   ): Promise<DeviceAdministrationDutyMigrationTargetsResult>;
+  query(
+    query: DeviceAdministrationCurrentRemovalPreflightQuery,
+  ): Promise<DeviceAdministrationCurrentRemovalPreflightResult>;
+  query(
+    query: DeviceAdministrationCurrentRemovalStatusQuery,
+  ): Promise<DeviceAdministrationCurrentRemovalStatusResult>;
   execute(
     command: DeviceAdministrationBeginRemovalCommand,
   ): Promise<DeviceAdministrationBeginRemovalResult>;
@@ -270,6 +389,15 @@ export interface DeviceAdministrationApplication {
   execute(
     command: DeviceAdministrationCancelDutyMigrationCommand,
   ): Promise<DeviceAdministrationCancelDutyMigrationResult>;
+  execute(
+    command: DeviceAdministrationBeginCurrentRemovalCommand,
+  ): Promise<DeviceAdministrationCurrentRemovalState>;
+  execute(
+    command: DeviceAdministrationContinueCurrentRemovalCommand,
+  ): Promise<DeviceAdministrationCurrentRemovalState>;
+  execute(
+    command: DeviceAdministrationCancelCurrentRemovalCommand,
+  ): Promise<DeviceAdministrationCurrentRemovalState>;
 }
 
 /** Sole application owner of current Device Administration reads and commands. */
@@ -283,6 +411,12 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
   query(
     query: DeviceAdministrationDutyMigrationTargetsQuery,
   ): Promise<DeviceAdministrationDutyMigrationTargetsResult>;
+  query(
+    query: DeviceAdministrationCurrentRemovalPreflightQuery,
+  ): Promise<DeviceAdministrationCurrentRemovalPreflightResult>;
+  query(
+    query: DeviceAdministrationCurrentRemovalStatusQuery,
+  ): Promise<DeviceAdministrationCurrentRemovalStatusResult>;
   async query(query: DeviceAdministrationQuery): Promise<DeviceAdministrationResult> {
     switch (query.kind) {
       case "list-device-relationships":
@@ -304,6 +438,17 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
             (await this.options.dutyMigrationTargets.list()).map(freezeDutyMigrationTarget),
           ),
         });
+      case "preflight-current-device-removal":
+        return freezeCurrentRemovalPreflight(
+          await this.#currentDeviceRemoval().preflight(),
+        );
+      case "read-current-device-removal-status": {
+        const operationId = requireStableText(query.operationId, "Uninstall operation id");
+        const state = await this.#currentDeviceRemoval().status({ operationId });
+        return Object.freeze({
+          state: state === undefined ? null : freezeCurrentRemovalState(state),
+        });
+      }
       default:
         throw new TypeError("Unsupported Device Administration query");
     }
@@ -324,6 +469,15 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
   execute(
     command: DeviceAdministrationCancelDutyMigrationCommand,
   ): Promise<DeviceAdministrationCancelDutyMigrationResult>;
+  execute(
+    command: DeviceAdministrationBeginCurrentRemovalCommand,
+  ): Promise<DeviceAdministrationCurrentRemovalState>;
+  execute(
+    command: DeviceAdministrationContinueCurrentRemovalCommand,
+  ): Promise<DeviceAdministrationCurrentRemovalState>;
+  execute(
+    command: DeviceAdministrationCancelCurrentRemovalCommand,
+  ): Promise<DeviceAdministrationCurrentRemovalState>;
   async execute(command: DeviceAdministrationCommand): Promise<DeviceAdministrationCommandResult> {
     switch (command.kind) {
       case "begin-device-removal":
@@ -336,6 +490,12 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
         return this.#commitDutyMigration(command);
       case "cancel-duty-migration":
         return this.#cancelDutyMigration(command);
+      case "begin-current-device-removal":
+        return this.#beginCurrentRemoval(command);
+      case "continue-current-device-removal":
+        return this.#continueCurrentRemoval(command);
+      case "cancel-current-device-removal":
+        return this.#cancelCurrentRemoval(command);
       default:
         throw new TypeError("Unsupported Device Administration command");
     }
@@ -511,6 +671,66 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
     }
     return context;
   }
+
+  async #beginCurrentRemoval(
+    command: DeviceAdministrationBeginCurrentRemovalCommand,
+  ): Promise<DeviceAdministrationCurrentRemovalState> {
+    const requestId = requireStableText(command.requestId, "Uninstall request id");
+    const operationId = requireStableText(command.operationId, "Uninstall operation id");
+    const port = this.#currentDeviceRemoval();
+    let result: DeviceAdministrationCurrentRemovalState;
+    if (command.path === "migration") {
+      result = await port.begin({
+        path: "migration",
+        requestId,
+        operationId,
+        transferId: requireStableText(command.transferId, "Uninstall transfer id"),
+        targetName: requireStableText(command.targetName, "Duty device name"),
+      });
+    } else if (command.path === "recovery-backup") {
+      result = await port.begin({
+        path: "recovery-backup",
+        requestId,
+        operationId,
+        recoveryPackage: requireStableText(command.recoveryPackage, "Recovery package"),
+      });
+    } else {
+      throw new TypeError("Permanent removal path is invalid");
+    }
+    return freezeCurrentRemovalState(result);
+  }
+
+  async #continueCurrentRemoval(
+    command: DeviceAdministrationContinueCurrentRemovalCommand,
+  ): Promise<DeviceAdministrationCurrentRemovalState> {
+    if (command.confirmBackup !== true) {
+      throw new TypeError("Recovery-backup uninstall requires explicit confirmation");
+    }
+    return freezeCurrentRemovalState(await this.#currentDeviceRemoval().continue({
+      operationId: requireStableText(command.operationId, "Uninstall operation id"),
+      confirmBackup: true,
+      recoveryPackage: requireStableText(command.recoveryPackage, "Recovery package"),
+    }));
+  }
+
+  async #cancelCurrentRemoval(
+    command: DeviceAdministrationCancelCurrentRemovalCommand,
+  ): Promise<DeviceAdministrationCurrentRemovalState> {
+    return freezeCurrentRemovalState(await this.#currentDeviceRemoval().cancel({
+      operationId: requireStableText(command.operationId, "Uninstall operation id"),
+    }));
+  }
+
+  #currentDeviceRemoval(): DeviceAdministrationCurrentRemovalPort {
+    const port = this.options.currentDeviceRemoval;
+    if (!port) {
+      throw new DeviceAdministrationApplicationError(
+        "current-device-removal-unavailable",
+        "Current device does not support permanent removal",
+      );
+    }
+    return port;
+  }
 }
 
 export const DEVICE_ADMINISTRATION_LIST_QUERY = defineProductApiQuery<
@@ -530,6 +750,18 @@ export const DEVICE_ADMINISTRATION_DUTY_MIGRATION_TARGETS_QUERY = defineProductA
   DeviceAdministrationDutyMigrationTargetsQuery,
   DeviceAdministrationDutyMigrationTargetsResult
 >("device-administration.query.duty-migration-targets");
+
+export const DEVICE_ADMINISTRATION_CURRENT_REMOVAL_PREFLIGHT_QUERY = defineProductApiQuery<
+  "device-administration.query.current-removal-preflight",
+  DeviceAdministrationCurrentRemovalPreflightQuery,
+  DeviceAdministrationCurrentRemovalPreflightResult
+>("device-administration.query.current-removal-preflight");
+
+export const DEVICE_ADMINISTRATION_CURRENT_REMOVAL_STATUS_QUERY = defineProductApiQuery<
+  "device-administration.query.current-removal-status",
+  DeviceAdministrationCurrentRemovalStatusQuery,
+  DeviceAdministrationCurrentRemovalStatusResult
+>("device-administration.query.current-removal-status");
 
 export const DEVICE_ADMINISTRATION_BEGIN_REMOVAL_COMMAND = defineProductApiCommand<
   "device-administration.command.begin-removal",
@@ -566,16 +798,42 @@ export const DEVICE_ADMINISTRATION_CANCEL_DUTY_MIGRATION_COMMAND = defineProduct
   never
 >("device-administration.command.cancel-duty-migration", []);
 
+export const DEVICE_ADMINISTRATION_BEGIN_CURRENT_REMOVAL_COMMAND = defineProductApiCommand<
+  "device-administration.command.begin-current-removal",
+  DeviceAdministrationBeginCurrentRemovalCommand,
+  DeviceAdministrationCurrentRemovalState,
+  never
+>("device-administration.command.begin-current-removal", []);
+
+export const DEVICE_ADMINISTRATION_CONTINUE_CURRENT_REMOVAL_COMMAND = defineProductApiCommand<
+  "device-administration.command.continue-current-removal",
+  DeviceAdministrationContinueCurrentRemovalCommand,
+  DeviceAdministrationCurrentRemovalState,
+  never
+>("device-administration.command.continue-current-removal", []);
+
+export const DEVICE_ADMINISTRATION_CANCEL_CURRENT_REMOVAL_COMMAND = defineProductApiCommand<
+  "device-administration.command.cancel-current-removal",
+  DeviceAdministrationCancelCurrentRemovalCommand,
+  DeviceAdministrationCurrentRemovalState,
+  never
+>("device-administration.command.cancel-current-removal", []);
+
 export const DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET = defineProductApiExactSet({
   operations: [
     DEVICE_ADMINISTRATION_LIST_QUERY,
     DEVICE_ADMINISTRATION_STATUS_QUERY,
     DEVICE_ADMINISTRATION_DUTY_MIGRATION_TARGETS_QUERY,
+    DEVICE_ADMINISTRATION_CURRENT_REMOVAL_PREFLIGHT_QUERY,
+    DEVICE_ADMINISTRATION_CURRENT_REMOVAL_STATUS_QUERY,
     DEVICE_ADMINISTRATION_BEGIN_REMOVAL_COMMAND,
     DEVICE_ADMINISTRATION_CONTINUE_REMOVAL_COMMAND,
     DEVICE_ADMINISTRATION_PREPARE_DUTY_MIGRATION_COMMAND,
     DEVICE_ADMINISTRATION_COMMIT_DUTY_MIGRATION_COMMAND,
     DEVICE_ADMINISTRATION_CANCEL_DUTY_MIGRATION_COMMAND,
+    DEVICE_ADMINISTRATION_BEGIN_CURRENT_REMOVAL_COMMAND,
+    DEVICE_ADMINISTRATION_CONTINUE_CURRENT_REMOVAL_COMMAND,
+    DEVICE_ADMINISTRATION_CANCEL_CURRENT_REMOVAL_COMMAND,
   ],
   factEvents: [],
 });
@@ -595,6 +853,20 @@ export function createDeviceAdministrationProductApiContribution(
       })),
       bindProductApiOperation(
         DEVICE_ADMINISTRATION_DUTY_MIGRATION_TARGETS_QUERY,
+        async (query) => ({
+          result: await application.query(query),
+          facts: [],
+        }),
+      ),
+      bindProductApiOperation(
+        DEVICE_ADMINISTRATION_CURRENT_REMOVAL_PREFLIGHT_QUERY,
+        async (query) => ({
+          result: await application.query(query),
+          facts: [],
+        }),
+      ),
+      bindProductApiOperation(
+        DEVICE_ADMINISTRATION_CURRENT_REMOVAL_STATUS_QUERY,
         async (query) => ({
           result: await application.query(query),
           facts: [],
@@ -627,6 +899,27 @@ export function createDeviceAdministrationProductApiContribution(
       ),
       bindProductApiOperation(
         DEVICE_ADMINISTRATION_CANCEL_DUTY_MIGRATION_COMMAND,
+        async (command) => ({
+          result: await application.execute(command),
+          facts: [],
+        }),
+      ),
+      bindProductApiOperation(
+        DEVICE_ADMINISTRATION_BEGIN_CURRENT_REMOVAL_COMMAND,
+        async (command) => ({
+          result: await application.execute(command),
+          facts: [],
+        }),
+      ),
+      bindProductApiOperation(
+        DEVICE_ADMINISTRATION_CONTINUE_CURRENT_REMOVAL_COMMAND,
+        async (command) => ({
+          result: await application.execute(command),
+          facts: [],
+        }),
+      ),
+      bindProductApiOperation(
+        DEVICE_ADMINISTRATION_CANCEL_CURRENT_REMOVAL_COMMAND,
         async (command) => ({
           result: await application.execute(command),
           facts: [],
@@ -674,6 +967,28 @@ function freezeDutyMigrationTarget(
     displayName: value.displayName,
     ready: value.ready,
     ...(value.code === undefined ? {} : { code: value.code }),
+  });
+}
+
+function freezeCurrentRemovalPreflight(
+  value: DeviceAdministrationCurrentRemovalPreflightResult,
+): DeviceAdministrationCurrentRemovalPreflightResult {
+  return Object.freeze({
+    currentDeviceName: value.currentDeviceName,
+    migrationTargets: Object.freeze(value.migrationTargets.map((target) => Object.freeze({
+      displayName: target.displayName,
+      ready: target.ready,
+    }))),
+    recoveryBackupReady: value.recoveryBackupReady,
+  });
+}
+
+function freezeCurrentRemovalState(
+  value: DeviceAdministrationCurrentRemovalState,
+): DeviceAdministrationCurrentRemovalState {
+  return Object.freeze({
+    phase: value.phase,
+    ...(value.nextAction === undefined ? {} : { nextAction: value.nextAction }),
   });
 }
 

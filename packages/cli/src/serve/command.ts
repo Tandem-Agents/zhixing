@@ -2197,6 +2197,41 @@ async function runServerProcess(
               await ctx.meshRuntime!.abortPlannedAnchorTransfer(input);
             },
           },
+          ...(anchorUninstall
+            ? {
+                currentDeviceRemoval: {
+                  preflight: () => anchorUninstall.preflight(),
+                  begin: (input:
+                    | {
+                        readonly path: "migration";
+                        readonly requestId: string;
+                        readonly operationId: string;
+                        readonly transferId: string;
+                        readonly targetName: string;
+                      }
+                    | {
+                        readonly path: "recovery-backup";
+                        readonly requestId: string;
+                        readonly operationId: string;
+                        readonly recoveryPackage: string;
+                      }) => input.path === "recovery-backup"
+                    ? anchorUninstall.beginRecoveryBackup(input)
+                    : anchorUninstall.beginMigration(input),
+                  continue: (input: {
+                    readonly operationId: string;
+                    readonly confirmBackup: true;
+                    readonly recoveryPackage: string;
+                  }) => anchorUninstall.confirmRecoveryBackup(
+                    input.operationId,
+                    input.recoveryPackage,
+                  ),
+                  cancel: (input: { readonly operationId: string }) =>
+                    anchorUninstall.abort(input.operationId),
+                  status: (input: { readonly operationId: string }) =>
+                    anchorUninstall.state(input.operationId),
+                },
+              }
+            : {}),
           removalContext: {
             read: () => ctx.meshRuntime!.deviceRemovalCommandContext(),
           },
@@ -2312,32 +2347,6 @@ async function runServerProcess(
     recoveryBackupStatus: async () => projectRecoveryBackupStatus(ctx.authorityCheckpointOwner
       ? await ctx.authorityCheckpointOwner.status()
       : { state: "not-configured" as const, fullBackupReady: false }),
-    ...(anchorUninstall
-      ? {
-          anchorUninstall: {
-            preflight: () => anchorUninstall.preflight(),
-            begin: (input: Parameters<AnchorUninstallCoordinator["beginMigration"]>[0] & {
-              readonly path?: "migration";
-            } | Parameters<AnchorUninstallCoordinator["beginRecoveryBackup"]>[0] & {
-              readonly path: "recovery-backup";
-            }) => input.path === "recovery-backup"
-              ? anchorUninstall.beginRecoveryBackup(input)
-              : anchorUninstall.beginMigration(input),
-            continue: (input: {
-              readonly operationId: string;
-              readonly confirmBackup: true;
-              readonly recoveryPackage: string;
-            }) => anchorUninstall.confirmRecoveryBackup(
-              input.operationId,
-              input.recoveryPackage,
-            ),
-            cancel: (input: { readonly operationId: string }) =>
-              anchorUninstall.abort(input.operationId),
-            status: (input: { readonly operationId: string }) =>
-              anchorUninstall.state(input.operationId),
-          },
-        }
-      : {}),
     // /mcp 状态显示与接入向导的宿主侧数据面(MCP 连接在宿主)
     mcpStatuses: () => mcpHub.serverStatuses(),
     // 轻推理通道(llm.complete,仅可信面)——管理流程的单发文本调用；

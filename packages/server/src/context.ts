@@ -197,35 +197,6 @@ export interface ServerContext {
     fullBackupReady: boolean;
     nextAction?: string;
   }>;
-  /** Loopback-only permanent removal of the current duty device. */
-  anchorUninstall?: {
-    preflight(): Promise<{
-      readonly currentDeviceName: string;
-      readonly migrationTargets: readonly { readonly displayName: string; readonly ready: boolean }[];
-      readonly recoveryBackupReady: boolean;
-    }>;
-    begin(input:
-      | {
-          readonly path: "migration";
-          readonly requestId: string;
-          readonly operationId: string;
-          readonly transferId: string;
-          readonly targetName: string;
-        }
-      | {
-          readonly path: "recovery-backup";
-          readonly requestId: string;
-          readonly operationId: string;
-          readonly recoveryPackage: string;
-        }): Promise<unknown>;
-    continue(input: {
-      readonly operationId: string;
-      readonly confirmBackup: true;
-      readonly recoveryPackage: string;
-    }): Promise<unknown>;
-    cancel(input: { readonly operationId: string }): Promise<unknown>;
-    status(input: { readonly operationId: string }): Promise<unknown>;
-  };
   /**
    * MCP 连接状态快照(server.info 扩展字段,/mcp 状态显示的数据面)。
    * 结构与 MCP hub 的 serverStatuses 兼容(server 不依赖 mcp 包,结构形声明)。

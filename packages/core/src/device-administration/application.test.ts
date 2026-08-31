@@ -2,10 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 import { ProductApiDispatcher } from "../product-api/catalog.js";
 import {
   createDeviceAdministrationProductApiContribution,
+  DEVICE_ADMINISTRATION_BEGIN_CURRENT_REMOVAL_COMMAND,
   DEVICE_ADMINISTRATION_BEGIN_REMOVAL_COMMAND,
+  DEVICE_ADMINISTRATION_CANCEL_CURRENT_REMOVAL_COMMAND,
   DEVICE_ADMINISTRATION_CANCEL_DUTY_MIGRATION_COMMAND,
   DEVICE_ADMINISTRATION_COMMIT_DUTY_MIGRATION_COMMAND,
+  DEVICE_ADMINISTRATION_CONTINUE_CURRENT_REMOVAL_COMMAND,
   DEVICE_ADMINISTRATION_CONTINUE_REMOVAL_COMMAND,
+  DEVICE_ADMINISTRATION_CURRENT_REMOVAL_PREFLIGHT_QUERY,
+  DEVICE_ADMINISTRATION_CURRENT_REMOVAL_STATUS_QUERY,
   DEVICE_ADMINISTRATION_DUTY_MIGRATION_TARGETS_QUERY,
   DEVICE_ADMINISTRATION_LIST_QUERY,
   DEVICE_ADMINISTRATION_PREPARE_DUTY_MIGRATION_COMMAND,
@@ -79,6 +84,23 @@ function fixture() {
     commit: vi.fn(async () => undefined),
     cancel: vi.fn(async () => undefined),
   };
+  const currentDeviceRemoval = {
+    preflight: vi.fn(async () => ({
+      currentDeviceName: "当前设备",
+      migrationTargets: [{ displayName: "备用设备", ready: true }],
+      recoveryBackupReady: false,
+    })),
+    begin: vi.fn(async () => ({
+      phase: "moving-duty-device" as const,
+      nextAction: "continue" as const,
+    })),
+    continue: vi.fn(async () => ({ phase: "retiring-device" as const })),
+    cancel: vi.fn(async () => ({ phase: "cancelled" as const })),
+    status: vi.fn(async () => ({
+      phase: "choose-safe-path" as const,
+      nextAction: "choose-device" as const,
+    })),
+  };
   const application = new DeviceAdministrationApplicationService({
     relationships,
     removalState,
@@ -88,6 +110,7 @@ function fixture() {
     removalEffects,
     dutyMigrationContext,
     dutyMigration,
+    currentDeviceRemoval,
   });
   return {
     application,
@@ -99,6 +122,7 @@ function fixture() {
     removalEffects,
     dutyMigrationContext,
     dutyMigration,
+    currentDeviceRemoval,
   };
 }
 
@@ -149,7 +173,7 @@ describe("DeviceAdministrationApplicationService", () => {
     })).rejects.toThrow("Device name must be a non-empty string");
   });
 
-  it("contributes exactly three Query and five Command operations with no Fact event", async () => {
+  it("contributes exactly five Query and eight Command operations with no Fact event", async () => {
     const f = fixture();
     const dispatcher = new ProductApiDispatcher(
       DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET,
@@ -166,6 +190,13 @@ describe("DeviceAdministrationApplicationService", () => {
     await expect(dispatcher.query(DEVICE_ADMINISTRATION_DUTY_MIGRATION_TARGETS_QUERY, {
       kind: "list-duty-migration-targets",
     })).resolves.toMatchObject({ devices: [{ deviceId: "device-2" }] });
+    await expect(dispatcher.query(DEVICE_ADMINISTRATION_CURRENT_REMOVAL_PREFLIGHT_QUERY, {
+      kind: "preflight-current-device-removal",
+    })).resolves.toMatchObject({ currentDeviceName: "当前设备" });
+    await expect(dispatcher.query(DEVICE_ADMINISTRATION_CURRENT_REMOVAL_STATUS_QUERY, {
+      kind: "read-current-device-removal-status",
+      operationId: "uninstall-1",
+    })).resolves.toMatchObject({ state: { phase: "choose-safe-path" } });
     await expect(dispatcher.command(DEVICE_ADMINISTRATION_BEGIN_REMOVAL_COMMAND, {
       kind: "begin-device-removal",
       requestId: "request-1",
@@ -193,18 +224,113 @@ describe("DeviceAdministrationApplicationService", () => {
       requestId: "request:migration-1",
       transferId: "transfer-1",
     })).resolves.toEqual({ result: { stage: "cancelled" }, facts: [] });
+    await expect(dispatcher.command(DEVICE_ADMINISTRATION_BEGIN_CURRENT_REMOVAL_COMMAND, {
+      kind: "begin-current-device-removal",
+      path: "migration",
+      requestId: "request:uninstall-1",
+      operationId: "uninstall-1",
+      transferId: "transfer-1",
+      targetName: "备用设备",
+    })).resolves.toMatchObject({ result: { phase: "moving-duty-device" }, facts: [] });
+    await expect(dispatcher.command(DEVICE_ADMINISTRATION_CONTINUE_CURRENT_REMOVAL_COMMAND, {
+      kind: "continue-current-device-removal",
+      operationId: "uninstall-1",
+      confirmBackup: true,
+      recoveryPackage: "recovery-package",
+    })).resolves.toEqual({ result: { phase: "retiring-device" }, facts: [] });
+    await expect(dispatcher.command(DEVICE_ADMINISTRATION_CANCEL_CURRENT_REMOVAL_COMMAND, {
+      kind: "cancel-current-device-removal",
+      operationId: "uninstall-1",
+    })).resolves.toEqual({ result: { phase: "cancelled" }, facts: [] });
     expect(DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET.factEvents).toEqual([]);
     expect(DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET.operations.map(({ identity }) => identity))
       .toEqual([
         "device-administration.query.list",
         "device-administration.query.removal-status",
         "device-administration.query.duty-migration-targets",
+        "device-administration.query.current-removal-preflight",
+        "device-administration.query.current-removal-status",
         "device-administration.command.begin-removal",
         "device-administration.command.continue-removal",
         "device-administration.command.prepare-duty-migration",
         "device-administration.command.commit-duty-migration",
         "device-administration.command.cancel-duty-migration",
+        "device-administration.command.begin-current-removal",
+        "device-administration.command.continue-current-removal",
+        "device-administration.command.cancel-current-removal",
       ]);
+  });
+
+  it("owns both current-device removal paths and returns frozen mechanism projections", async () => {
+    const f = fixture();
+
+    const preflight = await f.application.query({ kind: "preflight-current-device-removal" });
+    const status = await f.application.query({
+      kind: "read-current-device-removal-status",
+      operationId: "uninstall-1",
+    });
+    expect(Object.isFrozen(preflight)).toBe(true);
+    expect(Object.isFrozen(preflight.migrationTargets)).toBe(true);
+    expect(Object.isFrozen(preflight.migrationTargets[0])).toBe(true);
+    expect(Object.isFrozen(status.state)).toBe(true);
+    f.currentDeviceRemoval.status.mockResolvedValueOnce(undefined);
+    await expect(f.application.query({
+      kind: "read-current-device-removal-status",
+      operationId: "uninstall-missing",
+    })).resolves.toEqual({ state: null });
+
+    await f.application.execute({
+      kind: "begin-current-device-removal",
+      path: "migration",
+      requestId: "request:uninstall-migration",
+      operationId: "uninstall-migration",
+      transferId: "transfer-1",
+      targetName: "备用设备",
+    });
+    await f.application.execute({
+      kind: "begin-current-device-removal",
+      path: "recovery-backup",
+      requestId: "request:uninstall-backup",
+      operationId: "uninstall-backup",
+      recoveryPackage: "recovery-package",
+    });
+    expect(f.currentDeviceRemoval.begin).toHaveBeenNthCalledWith(1, {
+      path: "migration",
+      requestId: "request:uninstall-migration",
+      operationId: "uninstall-migration",
+      transferId: "transfer-1",
+      targetName: "备用设备",
+    });
+    expect(f.currentDeviceRemoval.begin).toHaveBeenNthCalledWith(2, {
+      path: "recovery-backup",
+      requestId: "request:uninstall-backup",
+      operationId: "uninstall-backup",
+      recoveryPackage: "recovery-package",
+    });
+  });
+
+  it("fails closed when the current-device removal mechanism is unavailable", async () => {
+    const f = fixture();
+    const application = new DeviceAdministrationApplicationService({
+      relationships: f.relationships,
+      removalState: f.removalState,
+      dutyMigrationTargets: f.dutyMigrationTargets,
+      removalContext: f.removalContext,
+      removalAuthority: f.removalAuthority,
+      removalEffects: f.removalEffects,
+      dutyMigrationContext: f.dutyMigrationContext,
+      dutyMigration: f.dutyMigration,
+    });
+
+    await expect(application.query({ kind: "preflight-current-device-removal" }))
+      .rejects.toMatchObject({
+        name: "DeviceAdministrationApplicationError",
+        kind: "current-device-removal-unavailable",
+      });
+    await expect(application.execute({
+      kind: "cancel-current-device-removal",
+      operationId: "uninstall-1",
+    })).rejects.toMatchObject({ kind: "current-device-removal-unavailable" });
   });
 
   it("owns begin selection and only sends an accepted receipt to a connected target", async () => {

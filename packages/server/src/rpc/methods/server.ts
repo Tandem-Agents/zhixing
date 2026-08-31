@@ -13,10 +13,16 @@
 import { isDeliveryItemId } from "@zhixing/core/delivery";
 import { DELIVERY_RESOLVE_UNCERTAIN_COMMAND } from "@zhixing/core/delivery/application";
 import {
+  DeviceAdministrationApplicationError,
+  DEVICE_ADMINISTRATION_BEGIN_CURRENT_REMOVAL_COMMAND,
   DEVICE_ADMINISTRATION_BEGIN_REMOVAL_COMMAND,
+  DEVICE_ADMINISTRATION_CANCEL_CURRENT_REMOVAL_COMMAND,
   DEVICE_ADMINISTRATION_CANCEL_DUTY_MIGRATION_COMMAND,
   DEVICE_ADMINISTRATION_COMMIT_DUTY_MIGRATION_COMMAND,
+  DEVICE_ADMINISTRATION_CONTINUE_CURRENT_REMOVAL_COMMAND,
   DEVICE_ADMINISTRATION_CONTINUE_REMOVAL_COMMAND,
+  DEVICE_ADMINISTRATION_CURRENT_REMOVAL_PREFLIGHT_QUERY,
+  DEVICE_ADMINISTRATION_CURRENT_REMOVAL_STATUS_QUERY,
   DEVICE_ADMINISTRATION_DUTY_MIGRATION_TARGETS_QUERY,
   DEVICE_ADMINISTRATION_LIST_QUERY,
   DEVICE_ADMINISTRATION_PREPARE_DUTY_MIGRATION_COMMAND,
@@ -529,82 +535,124 @@ export function buildDeviceStatusMethod(): MethodEntry {
 }
 
 export function buildAnchorUninstallPreflightMethod(): MethodEntry {
-  return localAnchorUninstallMethod("server.uninstall.preflight", async (params, uninstall) => {
-    assertExactRecord(asRecord(params, "server.uninstall.preflight"), [], "server.uninstall.preflight");
-    return uninstall.preflight();
-  });
+  return localAnchorUninstallMethod(
+    "server.uninstall.preflight",
+    DEVICE_ADMINISTRATION_CURRENT_REMOVAL_PREFLIGHT_QUERY,
+    async (params, productApi) => {
+      assertExactRecord(
+        asRecord(params, "server.uninstall.preflight"),
+        [],
+        "server.uninstall.preflight",
+      );
+      return productApi.query(DEVICE_ADMINISTRATION_CURRENT_REMOVAL_PREFLIGHT_QUERY, {
+        kind: "preflight-current-device-removal",
+      });
+    },
+  );
 }
 
 export function buildAnchorUninstallBeginMethod(): MethodEntry {
-  return localAnchorUninstallMethod("server.uninstall.begin", async (params, uninstall) => {
-    const value = asRecord(params, "server.uninstall.begin");
-    const requestId = stableText(value.requestId, "uninstall requestId");
-    const operationId = stableText(value.operationId, "uninstall operationId");
-    if (value.path === "migration") {
-      assertExactRecord(value, ["operationId", "path", "requestId", "targetName", "transferId"], "server.uninstall.begin migration");
-      return uninstall.begin({
-        path: "migration",
-        requestId,
-        operationId,
-        transferId: stableText(value.transferId, "uninstall transferId"),
-        targetName: stableText(value.targetName, "duty device name"),
-      });
-    }
-    if (value.path === "recovery-backup") {
-      assertExactRecord(value, ["operationId", "path", "recoveryPackage", "requestId"], "server.uninstall.begin recovery backup");
-      return uninstall.begin({
-        path: "recovery-backup",
-        requestId,
-        operationId,
-        recoveryPackage: recoveryPackageText(value.recoveryPackage),
-      });
-    }
-    throw RpcErrors.invalidParams("永久卸载路径必须是 migration 或 recovery-backup");
-  });
+  return localAnchorUninstallMethod(
+    "server.uninstall.begin",
+    DEVICE_ADMINISTRATION_BEGIN_CURRENT_REMOVAL_COMMAND,
+    async (params, productApi) => {
+      const value = asRecord(params, "server.uninstall.begin");
+      const requestId = stableText(value.requestId, "uninstall requestId");
+      const operationId = stableText(value.operationId, "uninstall operationId");
+      if (value.path === "migration") {
+        assertExactRecord(
+          value,
+          ["operationId", "path", "requestId", "targetName", "transferId"],
+          "server.uninstall.begin migration",
+        );
+        return (await productApi.command(DEVICE_ADMINISTRATION_BEGIN_CURRENT_REMOVAL_COMMAND, {
+          kind: "begin-current-device-removal",
+          path: "migration",
+          requestId,
+          operationId,
+          transferId: stableText(value.transferId, "uninstall transferId"),
+          targetName: stableText(value.targetName, "duty device name"),
+        })).result;
+      }
+      if (value.path === "recovery-backup") {
+        assertExactRecord(
+          value,
+          ["operationId", "path", "recoveryPackage", "requestId"],
+          "server.uninstall.begin recovery backup",
+        );
+        return (await productApi.command(DEVICE_ADMINISTRATION_BEGIN_CURRENT_REMOVAL_COMMAND, {
+          kind: "begin-current-device-removal",
+          path: "recovery-backup",
+          requestId,
+          operationId,
+          recoveryPackage: recoveryPackageText(value.recoveryPackage),
+        })).result;
+      }
+      throw RpcErrors.invalidParams("永久卸载路径必须是 migration 或 recovery-backup");
+    },
+  );
 }
 
 export function buildAnchorUninstallContinueMethod(): MethodEntry {
-  return localAnchorUninstallMethod("server.uninstall.continue", async (params, uninstall) => {
-    const value = asRecord(params, "server.uninstall.continue");
-    assertExactRecord(value, ["confirmBackup", "operationId", "recoveryPackage"], "server.uninstall.continue");
-    if (value.confirmBackup !== true) {
-      throw RpcErrors.invalidParams("恢复备份卸载需要显式确认");
-    }
-    return uninstall.continue({
-      operationId: stableText(value.operationId, "uninstall operationId"),
-      confirmBackup: true,
-      recoveryPackage: recoveryPackageText(value.recoveryPackage),
-    });
-  });
+  return localAnchorUninstallMethod(
+    "server.uninstall.continue",
+    DEVICE_ADMINISTRATION_CONTINUE_CURRENT_REMOVAL_COMMAND,
+    async (params, productApi) => {
+      const value = asRecord(params, "server.uninstall.continue");
+      assertExactRecord(
+        value,
+        ["confirmBackup", "operationId", "recoveryPackage"],
+        "server.uninstall.continue",
+      );
+      if (value.confirmBackup !== true) {
+        throw RpcErrors.invalidParams("恢复备份卸载需要显式确认");
+      }
+      return (await productApi.command(DEVICE_ADMINISTRATION_CONTINUE_CURRENT_REMOVAL_COMMAND, {
+        kind: "continue-current-device-removal",
+        operationId: stableText(value.operationId, "uninstall operationId"),
+        confirmBackup: true,
+        recoveryPackage: recoveryPackageText(value.recoveryPackage),
+      })).result;
+    },
+  );
 }
 
 export function buildAnchorUninstallCancelMethod(): MethodEntry {
-  return localAnchorUninstallMethod("server.uninstall.cancel", async (params, uninstall) => {
-    const value = asRecord(params, "server.uninstall.cancel");
-    assertExactRecord(value, ["operationId"], "server.uninstall.cancel");
-    return uninstall.cancel({
-      operationId: stableText(value.operationId, "uninstall operationId"),
-    });
-  });
+  return localAnchorUninstallMethod(
+    "server.uninstall.cancel",
+    DEVICE_ADMINISTRATION_CANCEL_CURRENT_REMOVAL_COMMAND,
+    async (params, productApi) => {
+      const value = asRecord(params, "server.uninstall.cancel");
+      assertExactRecord(value, ["operationId"], "server.uninstall.cancel");
+      return (await productApi.command(DEVICE_ADMINISTRATION_CANCEL_CURRENT_REMOVAL_COMMAND, {
+        kind: "cancel-current-device-removal",
+        operationId: stableText(value.operationId, "uninstall operationId"),
+      })).result;
+    },
+  );
 }
 
 export function buildAnchorUninstallStatusMethod(): MethodEntry {
-  return localAnchorUninstallMethod("server.uninstall.status", async (params, uninstall) => {
-    const value = asRecord(params, "server.uninstall.status");
-    assertExactRecord(value, ["operationId"], "server.uninstall.status");
-    return {
-      state: await uninstall.status({
+  return localAnchorUninstallMethod(
+    "server.uninstall.status",
+    DEVICE_ADMINISTRATION_CURRENT_REMOVAL_STATUS_QUERY,
+    async (params, productApi) => {
+      const value = asRecord(params, "server.uninstall.status");
+      assertExactRecord(value, ["operationId"], "server.uninstall.status");
+      return productApi.query(DEVICE_ADMINISTRATION_CURRENT_REMOVAL_STATUS_QUERY, {
+        kind: "read-current-device-removal-status",
         operationId: stableText(value.operationId, "uninstall operationId"),
-      }) ?? null,
-    };
-  });
+      });
+    },
+  );
 }
 
 function localAnchorUninstallMethod(
   name: string,
+  descriptor: import("@zhixing/core/product-api").ProductApiOperationDescriptor,
   operation: (
     params: unknown,
-    uninstall: NonNullable<import("../../context.js").ServerContext["anchorUninstall"]>,
+    productApi: NonNullable<import("../../context.js").ServerContext["productApi"]>,
   ) => Promise<unknown>,
 ): MethodEntry {
   return {
@@ -614,12 +662,20 @@ function localAnchorUninstallMethod(
       if (!ctx.connection.loopback) {
         throw RpcErrors.invalidParams("永久卸载只能在当前设备本机执行");
       }
-      const uninstall = ctx.server.anchorUninstall;
-      if (!uninstall) throw RpcErrors.internal("当前设备不支持永久卸载");
+      const productApi = ctx.server.productApi;
+      if (!productApi?.supports(descriptor)) {
+        throw RpcErrors.internal("当前设备不支持永久卸载");
+      }
       try {
-        return await operation(params, uninstall);
+        return await operation(params, productApi);
       } catch (error) {
         if (error instanceof RpcAppError) throw error;
+        if (
+          error instanceof DeviceAdministrationApplicationError &&
+          error.kind === "current-device-removal-unavailable"
+        ) {
+          throw RpcErrors.internal("当前设备不支持永久卸载");
+        }
         const detail = error instanceof Error ? error.message.toLowerCase() : "";
         if (/confirm|backup|target|ready/u.test(detail)) {
           throw RpcErrors.internal("请先选择可用的值班设备，或验证恢复备份后再继续");

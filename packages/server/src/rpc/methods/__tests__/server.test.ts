@@ -270,10 +270,20 @@ describe("Device Administration command Product API input", () => {
     [buildAnchorUninstallStatusMethod, { operationId: "operation-1", extra: true }],
   ] as const)("rejects unknown uninstall fields before lifecycle effects", async (build, params) => {
     const uninstall = {
-      preflight: vi.fn(), begin: vi.fn(), continue: vi.fn(), cancel: vi.fn(), status: vi.fn(),
+      preflight: vi.fn(async () => ({
+        currentDeviceName: "当前设备",
+        migrationTargets: [],
+        recoveryBackupReady: false,
+      })),
+      begin: vi.fn(async () => ({ phase: "moving-duty-device" as const })),
+      continue: vi.fn(async () => ({ phase: "retiring-device" as const })),
+      cancel: vi.fn(async () => ({ phase: "cancelled" as const })),
+      status: vi.fn(async () => undefined),
     };
     const entry = build();
-    const ctx = mkCtx({ anchorUninstall: uninstall as any });
+    const ctx = mkCtx({
+      productApi: deviceAdministrationProductApi({ currentDeviceRemoval: uninstall }),
+    });
     ctx.connection.loopback = true;
     await expect(entry.handler(params, ctx))
       .rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
