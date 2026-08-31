@@ -1,12 +1,10 @@
 import type {
-  AdvancementClosureReport,
-  AdvancementExit,
-  AdvancementRunReview,
   RunRecordAdvancementMetadata,
   TurnContext,
   UserTurnInput,
   AdvancementSession,
 } from "@zhixing/core";
+import type { AdvancementReviewPresentationEvent } from "@zhixing/core/advancement/application";
 
 export type AdvancementProxyScheduleResult =
   | { readonly status: "immediate" | "queued" }
@@ -56,28 +54,7 @@ export interface AdvancementOriginalTaskAdmissionPort {
 }
 
 export type AdvancementPresentationEvent =
-  | {
-      readonly conversationId: string;
-      readonly runId: string;
-      readonly seq: 0;
-      readonly event: "advancement:review_deferred";
-      readonly payload: {
-        readonly advancementSessionId: string;
-        readonly cause: "infrastructure" | "aborted";
-        readonly reason: string;
-      };
-    }
-  | {
-      readonly conversationId: string;
-      readonly runId: string;
-      readonly seq: 0;
-      readonly event: "advancement:run_reviewed";
-      readonly payload: {
-        readonly advancementSessionId: string;
-        readonly review: AdvancementRunReview;
-        readonly reviewRound: number;
-      };
-    }
+  | AdvancementReviewPresentationEvent
   | {
       readonly conversationId: string;
       readonly runId: string;
@@ -87,18 +64,6 @@ export type AdvancementPresentationEvent =
         readonly advancementSessionId: string;
         readonly proxyMessageId: string;
         readonly reviewId: string;
-      };
-    }
-  | {
-      readonly conversationId: string;
-      readonly runId: string;
-      readonly seq: 1;
-      readonly event: "advancement:completed" | "advancement:exited";
-      readonly payload: {
-        readonly advancementSessionId: string;
-        readonly reviewId: string;
-        readonly exit: AdvancementExit;
-        readonly closure: AdvancementClosureReport;
       };
     }
   | {

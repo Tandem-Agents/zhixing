@@ -1,5 +1,8 @@
 import { localConversationId } from "@zhixing/core";
-import { DeferredGlobalIntentRepository } from "@zhixing/owner-kernel";
+import {
+  ConversationManager,
+  DeferredGlobalIntentRepository,
+} from "@zhixing/owner-kernel";
 import { describe, expect, it, vi } from "vitest";
 import { ConversationProtocolRuntime } from "../conversation-protocol-runtime.js";
 import {
@@ -10,6 +13,44 @@ import {
 const LIFECYCLE_TIMEOUT_MS = 60_000;
 
 describe("closed lifecycle startup", () => {
+  it("binds and verifies the committed-turn listener before publishing the local owner", async () => {
+    const bind = vi.spyOn(
+      ConversationManager.prototype,
+      "bindTurnCommittedListener",
+    );
+    const verify = vi.spyOn(
+      ConversationManager.prototype,
+      "assertTurnCommittedListenerBound",
+    );
+    const bindManager = vi.spyOn(
+      ConversationProtocolRuntime.prototype,
+      "bindManager",
+    );
+    const verifyManager = vi.spyOn(
+      ConversationProtocolRuntime.prototype,
+      "assertManagerBound",
+    );
+    const fixture = await createLocalOwnerAssemblyFixture({ profile: "executor-only" });
+    try {
+      expect(bind).toHaveBeenCalledOnce();
+      expect(verify).toHaveBeenCalledOnce();
+      expect(bindManager).toHaveBeenCalledOnce();
+      expect(verifyManager).toHaveBeenCalledOnce();
+      expect(bindManager.mock.invocationCallOrder[0]).toBeLessThan(
+        bind.mock.invocationCallOrder[0]!,
+      );
+      expect(bind.mock.invocationCallOrder[0]).toBeLessThan(
+        verify.mock.invocationCallOrder[0]!,
+      );
+    } finally {
+      await fixture.assembly.close();
+      bind.mockRestore();
+      verify.mockRestore();
+      bindManager.mockRestore();
+      verifyManager.mockRestore();
+    }
+  }, LIFECYCLE_TIMEOUT_MS);
+
   it("defers readiness and accepted-work recovery until the exact lifecycle resumes", async () => {
     const readiness = vi.spyOn(
       ConversationProtocolRuntime.prototype,

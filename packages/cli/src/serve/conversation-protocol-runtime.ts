@@ -159,7 +159,11 @@ export interface RemoteConversationExecutionDirectory {
 export interface ConversationProtocolRuntimeOptions {
   readonly authority?: AuthorityRuntimeStack;
   readonly owner?: ConversationOwnerRuntimeStack;
-  readonly manager: () => ConversationManager;
+  /**
+   * Legacy constructor seam used by isolated protocol tests. Production hosts
+   * bind a constructed manager once through `bindManager` before publication.
+   */
+  readonly manager?: () => ConversationManager;
   readonly clock?: () => string;
   readonly maxPendingInteractions?: number;
   readonly interactions: DurableConversationInteractionObserver;
@@ -240,7 +244,7 @@ type ConversationLosslessDataPlane = Pick<
 /** Single-process production composition for the durable conversation protocol. */
 export class ConversationProtocolRuntime implements DurableConversationTurnExecutor {
   readonly #authority: ConversationOwnerRuntimeStack;
-  readonly #manager: () => ConversationManager;
+  #manager: (() => ConversationManager) | undefined;
   readonly #clock: () => string;
   #sessionState: SessionStatePort | undefined;
   readonly #ledger: ConversationAssignmentLedger | undefined;
@@ -300,7 +304,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #projectLifecycle:
     | ((input: DurableConversationSessionProjectionInput) => Promise<void>)
     | undefined;
-  readonly #recoverAuxiliary: ((conversationId: string) => Promise<void>) | undefined;
+  #recoverAuxiliary: ((conversationId: string) => Promise<void>) | undefined;
   readonly #lifecycleProjectionClaims = new Map<string, Promise<number>>();
   readonly #activeRecoveryClaims = new Map<string, number>();
   readonly #pendingConversationRetirements = new Set<string>();
@@ -424,6 +428,35 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       conversationIdFor: (assignmentId) =>
         this.#conversationForAssignment(assignmentId),
     });
+  }
+
+  /**
+   * Binds the optional auxiliary recovery participant exactly once during
+   * host assembly. The protocol is not published until this finite seam has
+   * been completed, so no recovery event can observe a late-bound holder.
+   */
+  bindAuxiliaryRecovery(
+    recover: (conversationId: string) => Promise<void>,
+  ): void {
+    if (this.#recoverAuxiliary) {
+      throw new Error("Conversation auxiliary recovery is already bound");
+    }
+    this.#recoverAuxiliary = recover;
+  }
+
+  /** Completes the manager/protocol cycle once, before either side is published. */
+  bindManager(manager: ConversationManager): void {
+    if (this.#manager) {
+      throw new Error("Conversation protocol manager is already bound");
+    }
+    this.#manager = () => manager;
+  }
+
+  /** Fail closed if a host attempts to publish an incomplete protocol graph. */
+  assertManagerBound(): void {
+    if (!this.#manager) {
+      throw new Error("Conversation protocol manager is not bound");
+    }
   }
 
   bindRemoteExecution(directory: RemoteConversationExecutionDirectory): void {
@@ -882,7 +915,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     if (outcome.result.body.runState === "cancel-requested") {
       await this.#drivePendingCancellations(journal);
     }
-    const local = this.#manager().applyDurableCancellation(
+    const local = this.#requiredManager().applyDurableCancellation(
       input.conversationId,
       runId,
       input.reason,
@@ -951,7 +984,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     }
     const dispositions: DurableConversationCancellationDisposition[] = [];
     for (const run of outcome.result.body.runs) {
-      const local = this.#manager().applyDurableCancellation(
+      const local = this.#requiredManager().applyDurableCancellation(
         input.conversationId,
         run.runId,
         input.reason,
@@ -2619,7 +2652,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       ),
       authority: this.#commitAuthority(conversationId),
       projection: {
-        project: (projection) => this.#manager().project(projection),
+        project: (projection) => this.#requiredManager().project(projection),
       },
       ...(this.#authority.globalPublishing
         ? { publisher: this.#mutationPublisherProxy }
@@ -2937,7 +2970,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     if (this.#schedulingRuns.has(pending.runId)) {
       throw new Error(`Conversation run ${pending.runId} is still entering the scheduler`);
     }
-    const manager = this.#manager();
+    const manager = this.#requiredManager();
     const options = runOptionsForPending(pending);
     const retryAbort = new AbortController();
     this.#schedulingRuns.add(pending.runId);
@@ -3322,6 +3355,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#assignmentActivations.delete(assignmentId);
     this.#assignmentIngress.delete(assignmentId);
     this.#interactions.releaseAssignment(assignmentId);
+  }
+
+  #requiredManager(): ConversationManager {
+    const manager = this.#manager?.();
+    if (!manager) {
+      throw new Error("Conversation protocol manager is not bound");
+    }
+    return manager;
   }
 
   #requiredMutationPublisher(): ConversationMutationPublisher {

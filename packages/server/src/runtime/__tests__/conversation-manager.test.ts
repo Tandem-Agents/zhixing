@@ -2371,6 +2371,25 @@ describe("ConversationManager", () => {
       usage: { inputTokens: 0, outputTokens: 0 },
     });
 
+    it("committed-turn listener must be bound before publication and cannot be rebound", async () => {
+      const mgr = makePersistentManager();
+      const listener = vi.fn();
+
+      expect(() => mgr.assertTurnCommittedListenerBound()).toThrow(
+        "turn-committed listener is not bound",
+      );
+      mgr.bindTurnCommittedListener(listener);
+      expect(() => mgr.assertTurnCommittedListenerBound()).not.toThrow();
+      expect(() => mgr.bindTurnCommittedListener(vi.fn())).toThrow(
+        "turn-committed listener is already bound",
+      );
+
+      await mgr.getOrCreate("conv-bound-listener");
+      await mgr.recordTurn("conv-bound-listener", runRecord("bound"));
+      expect(listener).toHaveBeenCalledOnce();
+      await mgr.disposeAll();
+    });
+
     it("clear:窗口+turnCount 归零、换窗钩子被调、持久层 persistClear 在临界区调;busy 拒绝;不活跃 persist 即 cleared-inactive", async () => {
       const windowChangeSpy = vi.fn(async () => {});
       const mgr = makePersistentManager({

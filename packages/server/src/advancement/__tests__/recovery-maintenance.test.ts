@@ -25,6 +25,7 @@ import type {
   ResourceReservationPort,
 } from "@zhixing/core/contracts";
 import { protocolDigest } from "@zhixing/core/protocol";
+import { AdvancementReviewResultProjectionApplicationService } from "@zhixing/core/advancement/application";
 
 function fakeResources(): ResourceReservationPort {
   const leaseFor = (
@@ -102,6 +103,9 @@ function createAdvancementRecoveryMaintenance(options: {
         options.directory.exists(conversationId),
     }),
     events: createAdvancementEventSink(sessionBroadcast),
+    reviewResults: new AdvancementReviewResultProjectionApplicationService({
+      events: createAdvancementEventSink(sessionBroadcast),
+    }),
     logger: options.logger,
   });
 }

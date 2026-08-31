@@ -29,9 +29,9 @@
       "types": "./dist/advancement/recovery-maintenance.d.ts",
       "import": "./dist/advancement/recovery-maintenance.js"
     },
-    "./advancement/review-dispatch": {
-      "types": "./dist/advancement/review-dispatch.d.ts",
-      "import": "./dist/advancement/review-dispatch.js"
+    "./advancement/review-application-bridge": {
+      "types": "./dist/advancement/review-application-bridge.d.ts",
+      "import": "./dist/advancement/review-application-bridge.js"
     }
   },
   "files": [

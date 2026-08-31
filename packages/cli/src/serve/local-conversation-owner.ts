@@ -25,6 +25,10 @@ import type {
 import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
 import type { ArtifactStore } from "@zhixing/core/authority";
 import {
+  AdvancementAcceptedTurnApplicationService,
+  AdvancementReviewResultProjectionApplicationService,
+} from "@zhixing/core/advancement/application";
+import {
   projectConversationClear,
   projectConversationDelete,
   type ConversationClearCommitPort,
@@ -44,17 +48,19 @@ import {
   resolveCurrentConversationAuthority,
   type CurrentConversationAuthority,
   type RuntimeFactory,
-  type TurnCommittedInfo,
 } from "@zhixing/owner-kernel";
 import {
   createAdvancementRecoveryMaintenance,
   DeferredRubricPublication,
   DeferredScheduleIntentProducer,
   renderRecentContextFromMessages,
-  type AdvancementController,
   type AdvancementRecoveryMaintenance,
   type DeferredScheduleIntentResult,
 } from "@zhixing/owner-services";
+import {
+  createAdvancementAcceptedTurnReviewMechanism,
+  createAdvancementReviewProxySchedulePort,
+} from "@zhixing/owner-services/advancement/review-application-bridge";
 import {
   createAdvancementEventSink,
   createAdvancementOriginalTaskAdmissionPort,
@@ -73,7 +79,6 @@ import {
   type ProjectedSessionTurnResult,
   type SessionTurnNotify,
 } from "@zhixing/rpc";
-import { createAdvancementReviewMaintenance } from "./advancement-review-maintenance.js";
 import { createServeAdvancementController } from "./advancement-controller.js";
 import { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
 import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
@@ -770,9 +775,6 @@ export class LocalConversationOwnerAssembly {
   ): Promise<LocalConversationOwnerAssembly> {
     const owner = options.owner;
     let manager: ConversationManager;
-    let advancement: AdvancementController;
-    let recovery: AdvancementRecoveryMaintenance;
-    let reviewCommitted: ((info: TurnCommittedInfo) => void) | undefined;
     const projectedRuns = new Set<string>();
     const conversationFactListeners = new Set<
       (fact: ConversationLifecycleFact) => void
@@ -781,7 +783,6 @@ export class LocalConversationOwnerAssembly {
     let protocol!: ConversationProtocolRuntime;
     protocol = new ConversationProtocolRuntime({
       owner,
-      manager: () => manager,
       interactions: options.interactions,
       localExecutor: {
         ...(options.ledger ? { ledger: options.ledger } : {}),
@@ -836,19 +837,6 @@ export class LocalConversationOwnerAssembly {
           },
         });
       },
-      recoverAuxiliary: async (conversationId) => {
-        if (!recovery) return;
-        const result = await recovery.recoverConversation(conversationId);
-        if (
-          result.status === "failed" ||
-          result.status === "full" ||
-          result.status === "busy" ||
-          result.status === "not-found" ||
-          result.status === "missing-proxy"
-        ) {
-          throw new Error(result.message ?? `Local advancement recovery failed: ${result.status}`);
-        }
-      },
     });
 
     manager = new ConversationManager(options.runtimeFactory, undefined, {
@@ -878,9 +866,10 @@ export class LocalConversationOwnerAssembly {
         return { runIndex: record.runIndex, shardId: "owner-log", appended };
       },
       applyCommittedSessionMutations: async () => {},
-      onTurnCommitted: (info) => reviewCommitted?.(info),
       durableTurnExecutor: protocol,
     });
+    protocol.bindManager(manager);
+    protocol.assertManagerBound();
 
     const rubricCatalog = new GlobalRubricCatalog({
       globalState: () => undefined,
@@ -908,7 +897,7 @@ export class LocalConversationOwnerAssembly {
           artifacts: owner.artifacts,
         }),
     });
-    advancement = await createServeAdvancementController({
+    const advancement = await createServeAdvancementController({
       config: options.config,
       credentials: options.credentials,
       governor: () => owner.resources,
@@ -930,7 +919,15 @@ export class LocalConversationOwnerAssembly {
 
     const conversationExists = (conversationId: string) =>
       protocol.sessionExists(conversationId);
-    recovery = createAdvancementRecoveryMaintenance({
+    const proxyTurns = createAdvancementProxyTurnPort({
+      manager,
+      conversationExists,
+    });
+    const reviewResults = new AdvancementReviewResultProjectionApplicationService({
+      events: createAdvancementEventSink(() => null),
+      proxySchedule: createAdvancementReviewProxySchedulePort(proxyTurns),
+    });
+    const recovery = createAdvancementRecoveryMaintenance({
       advancement,
       directory: {
         list: async () => {
@@ -969,23 +966,37 @@ export class LocalConversationOwnerAssembly {
           };
         },
       },
-      proxyTurns: createAdvancementProxyTurnPort({
-        manager,
-        conversationExists,
-      }),
+      proxyTurns,
       originalTasks: createAdvancementOriginalTaskAdmissionPort(manager, {
         conversationExists,
       }),
       events: createAdvancementEventSink(() => null),
+      reviewResults,
     });
-    reviewCommitted = createAdvancementReviewMaintenance({
-      advancement,
-      sessionBroadcast: () => null,
-      conversations: () => manager,
-      conversationExists,
-      recoverConversation: (conversationId, options) =>
-        recovery.recoverConversation(conversationId, options),
+    const acceptedTurns = new AdvancementAcceptedTurnApplicationService({
+      catchUp: {
+        catchUpAcceptedTurn: (conversationId, beforeRunIndex) =>
+          recovery.recoverConversation(conversationId, { beforeRunIndex }),
+      },
+      review: createAdvancementAcceptedTurnReviewMechanism(advancement),
+      results: reviewResults,
     });
+
+    protocol.bindAuxiliaryRecovery(async (conversationId) => {
+      const result = await recovery.recoverConversation(conversationId);
+      if (
+        result.status === "failed" ||
+        result.status === "full" ||
+        result.status === "busy" ||
+        result.status === "not-found" ||
+        result.status === "missing-proxy"
+      ) {
+        throw new Error(result.message ?? `Local advancement recovery failed: ${result.status}`);
+      }
+    });
+    manager.bindTurnCommittedListener((info) =>
+      acceptedTurns.acceptCommittedTurn(info));
+    manager.assertTurnCommittedListenerBound();
 
     return new LocalConversationOwnerAssembly({
       options,

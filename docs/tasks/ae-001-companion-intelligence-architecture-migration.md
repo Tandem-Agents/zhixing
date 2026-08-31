@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-15h 实施完成，等待协调者独立复核——Advancement 对话退场与孤儿清理生命周期已归入唯一应用边界<br>
+> 当前检查点：A5-15i 协调复核纠正已完成，等待协调者独立复核<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,13 +202,13 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `6a856ba0`；A5-15g 已由协调者独立复核并提交，active 输入继续、用户接管、Rubric 再生与最后单向桥退场均由唯一 Advancement 应用链闭合 |
+| 已接受基线 | `60b7388b`；A5-15h 已由协调者独立复核并提交，Conversation 主删除后的 Advancement 取消、数据删除与孤儿清理由唯一有限生命周期应用闭合，既有严格重驱与 legacy best-effort 语义不变 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | A5-15h 已实施完成，等待协调者独立复核；Advancement 行与 A5 仍为 `[ ]` |
-| 下一责任链 | A5-15h 通过后继续拆分 after-turn review/evidence/recovery 主链，优先迁移一个可独立证伪的 owner/写权闭包 |
-| 打开的单向桥 | 无；A5-15h 不允许为删除或清理建立 Controller fallback、双写或第二维护入口 |
-| 已失效证据 | `A5-15h-advancement-conversation-retirement-v1` 已按协调复核反证纠正并在当前工作区重取，等待协调者独立复核；A5-12c 的 `Conversation runtime/storage delete → cancelDependentLifecycle → removeDependentData` 顺序继续有效，未被本包作废；A5-15a～A5-15g 证据继续有效 |
-| 阻塞/用户决策 | 无；对话删除与孤儿清理的现有顺序、错误传播、持久数据边界和无用户可见行为漂移由当前生产事实唯一裁决 |
+| 活跃工作包 | A5-15i 协调复核纠正已完成，等待协调者独立复核；accepted-turn 应用责任与两类 Host pre-open 固定装配均已恢复，Advancement 行与 A5 仍为 `[ ]` |
+| 下一责任链 | A5-15i 通过后继续拆分 review attempt/evidence/recovery 内部状态与写权，优先迁移一个可独立证伪的状态机闭包 |
+| 打开的单向桥 | `A5-ADVANCEMENT-REVIEW-01`：Advancement 应用暂经有限 review mechanism 调用现有 Controller 的 review attempt/evidence/持久提交实现；必须在 Advancement 行勾选前由紧邻后续包退场，不得形成第二调度、投影或写入口 |
+| 已失效证据 | 无当前未恢复证据；`A5-15i-advancement-accepted-turn-review-v1` 的 fixed-assembly 子证据已由本轮 bind-once/pre-open 纠正恢复，A5-15a～A5-15h 以及 A5-12c 删除顺序证据继续有效 |
+| 阻塞/用户决策 | 无；A5-15i 当前等待协调者独立复核，不得据执行者自报直接推进下一责任链 |
 
 ### A0 基线索引
 
@@ -2270,6 +2270,28 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 结构失效与证据：S7 冻结 lifecycle 独立应用恰一实例、完整 Advancement 应用不重叠、固定构造先于三类 consumer、Conversation delete/cancel/remove 顺序和 durable/local 严格与 legacy best-effort 语义；反向 mutation 可识别 cancel 前移、完整应用重新吸收 lifecycle、late-bound ref/proxy、Controller/Store 复合入口、Surface 直调或第二 sweep 回流。纠正后直接证据为 core application/store/Conversation delete 3 文件 93/93、Server Controller/session store/system maintenance 3 文件 34/34、真实 `session.delete` RPC 定向 4/4、CLI Conversation directory/delete 14/14，合计 8 文件 145/145；fresh core、owner-services、server build、CLI `tsc --noEmit` 与 `pnpm cli:build` 均通过，changed-file Biome 与 canonical S7 coverage/mutation 33/33、registry golden、`git diff --check` 通过。A5-12c 继续有效，只有本 A5-15h lifecycle application/mechanism、删除投影、候选 exact-set、三类消费或上述门禁变化时才恢复本证据。Advancement 行与 A5 继续为 `[ ]`，不进入下一责任链或 A6。
 
 - 协调者独立验收：按接受基线重新追踪 Conversation delete 的生产顺序、durable/local 严格依赖重驱、legacy best-effort、Advancement lifecycle 三项用例、Controller/Store 机制边界、Anchor/local/system 三类消费者和固定装配，确认纠正版没有功能语义漂移、可变 lazy ref、第二清理 owner 或旧复合入口。独立重跑 core application/store/Conversation delete 93/93、Server Controller/session store/system maintenance 34/34、真实 `session.delete` 4/4、CLI directory/delete 14/14、canonical S7 33/33 与 registry golden，并通过 `git diff --check`；接受 `A5-15h-advancement-conversation-retirement-v1`。Advancement 行与 A5 仍待 after-turn review/evidence/recovery 等后续责任链。
+
+### A5-15i：归位 Advancement accepted-turn 补审、验收与结果投影应用链
+
+- 派发基线与唯一架构结果：以 `HEAD 60b7388b` 加本节调度记录为基线。把非 ephemeral committed turn 触发后的“同会话串行 → 补齐当轮之前欠账 → 验收当轮 → 发布 review 事实投影/安排 proxy turn”收归唯一、有限、路径无关的 Advancement 应用用例；Anchor 与 Executor-local 两类 Host 只绑定该应用。应用拥有触发准入、catch-up 连续性结果判断、调用次序和 review result 的产品投影；Conversation committed hook、恢复设施、Controller、Server/CLI adapter 只提供明确端口或机制，不再各自编排这条业务链。
+- 生产链与必须保持：覆盖 `createAdvancementReviewMaintenance` 的两处真实组合、`TurnCommittedInfo` 的 ephemeral/identity/run record 输入、每 conversation promise chain、`beforeRunIndex` 补审、catch-up 抛错/非连续终态停止当轮、`afterTurnCommitted` 调用、review deferred/reviewed/proxy/completed/exited 事件顺序与 payload、proxy schedule 及 conversation existence；同时覆盖 recovery 对同一 review result 投影语义的复用。保持迁移前 fire-and-forget、不同会话可独立推进、同会话严格有序、上一轮失败不毒化后续、catch-up 失败不误审当轮、响应丢失与重放、事件 seq、代理消息身份和两种拓扑行为不变。
+- 旧路与有限过渡：删除 CLI `advancement-review-maintenance` 对业务顺序、连续性状态集合和结果投影的拥有；结果事件与 proxy 决定必须由同一 Advancement 应用合同产生，不能在 CLI、Server、recovery helper 或 Controller 留第二份。允许应用经登记桥 `A5-ADVANCEMENT-REVIEW-01` 调用现有 Controller 的有限 review mechanism，因为 review attempt/evidence/持久提交状态机由后续紧邻工作包迁移；桥只能承载 path-free 输入/结果，不得含 Surface、ConversationManager、RPC、路径、可变 lazy ref、第二 flight map 或 fallback。若一次性删除旧 `review-dispatch` 会迫使本包迁入 recovery 扫描/attempt/evidence 内部状态机，则只把其调用改绑同一应用拥有的结果投影用例，不扩大本包。
+- 明确不做：不迁移 review attempt generation/root lease、evidence 收集与验证、reviewer 调用、持久 review/proxy 提交、recovery 扫描/重驱算法、proxy scheduler mechanism、Rubric/closure/active-session、Conversation、Device、Backup、A6 或公开能力；不新增事件、状态、错误、重试、配置、诊断框架或 root/full 验证。
+- 直接证据与完成条件：先双向核对两类 Host committed hook、recovery 对 review result 的全部消费者及现有直接测试；以 Advancement 应用测试证明准入、串行、catch-up 连续/失败、review/dispatch 次序和所有 result variant，以 Anchor/local 真实组合测试证明只接同一应用，以 recovery 直接测试证明共享投影没有语义漂移，以 S7/反向 mutation 证明 CLI 旧编排、重复 dispatch、Controller 第二触发和 Host 漏接不能回流。受影响包按依赖顺序构建，运行最窄直接测试、changed-file lint、canonical S7 与 `git diff --check`；不重复根级回归、制品或未失效门禁。完成时生产只有一个 accepted-turn 应用调度/投影 owner、两类 Host 行为等价、桥 exact-set 与紧邻退场点可核验、工作区可构建可运行，并在本文登记证据后停在安全交接点；执行者不得执行 Git 操作。
+
+- 实施责任与固定装配：唯一 `@zhixing/core/advancement/application` 新增 `AdvancementAcceptedTurnApplicationService` 与同模块唯一 `AdvancementReviewResultProjectionApplicationService`。前者拥有 non-ephemeral 准入、每 conversation 串行链、`beforeRunIndex` catch-up 连续性判断、当轮 review 与结果投影次序；后者唯一拥有 deferred/reviewed/proxy/completed/exited 事件的 seq/payload、proxy 调度决定及 recovery 的 `emitProxyEnqueued/scheduleProxy` 抑制语义。Anchor 与 Executor-local 均按 `result projector → recovery → accepted-turn application → ConversationManager` 固定构造，committed hook 只调用应用端口；旧 `advancementRecoveryRef`、`reviewCommitted` 后置赋值和应用 lazy proxy 归零，应用发布前已完成全部机制绑定。
+- 过渡桥、恢复复用与旧路退场：`A5-ADVANCEMENT-REVIEW-01` 现唯一落在 `@zhixing/owner-services/advancement/review-application-bridge` 窄 subpath，只把 path-free accepted-turn input/result 委托给现有 `AdvancementController.afterTurnCommitted`，不含 Surface、ConversationManager、RPC、路径、可变 ref、flight map 或 fallback；其 proxy 端只封装既有 `ProxyMessageScheduler` 效果。Controller 的 attempt/evidence/reviewer/持久 review 状态机与内部同 run flight 继续留给紧邻后续包。recovery 扫描/重驱仍保留原算法，但已强制注入并调用同一个 application-owned result projector；CLI `advancement-review-maintenance`、owner-services `review-dispatch`、旧 package/build export、两处 Host 业务编排和 recovery 重复结果决定全部删除，公开事件、proxy identity、conversation-existence 门禁、响应丢失重放与持久格式不变。
+- 直接证据与验证：core Advancement application 56/56，覆盖 ephemeral 跳过、catch-up-before-current、连续/失败、同会话串行、跨会话独立、失败不毒化后继、六类 result variant、事件顺序/payload/proxy identity 和 recovery 抑制；Server recovery 与真实 session RPC 2 文件 121/121，证明冷恢复复用同一投影且既有公开行为不漂移。Anchor/Executor-local 组合闭包首轮 3 文件 22/23，唯一失败为测试资源治理的 `backpressured:ioOperations`；只重跑该 lifecycle 单例后 1/1 通过，其余 22 项首轮已通过。fresh core、owner-services、server 与 `pnpm cli:build` 均通过，CLI `tsc --noEmit`、changed-file Biome、fresh package exports、canonical S7 coverage/mutation 33/33 与 registry golden 通过；canonical S7 初次因新 owner-services manifest 未加入检查输入而 fail closed，补齐真实 manifest/build 输入后完整重跑通过。未运行根级回归或制品验收。
+- 结构失效与交接：S7 与反向 mutation 冻结 accepted-turn/result-projector 各一 owner、catch-up 连续集合、review/result 次序、两类 Host 固定消费、recovery 共用投影、桥窄导出和旧文件/根转导归零；可识别跳过 catch-up、Host 恢复 Controller 直调、recovery 重建 dispatch、旧 maintenance/dispatch 文件或第二导出回流。以后 committed-turn input、catch-up status、review result union/event/proxy 投影、recovery 接口、两类 Host hook、bridge exact-set/export、S7 或上述直接测试任一变化，只恢复 `A5-15i-advancement-accepted-turn-review-v1` 并重验本闭包；A5-15a～A5-15h 不随之失效。A5-15i 当前实施完成并等待协调者独立复核；Advancement 行与 A5 继续为 `[ ]`，下一包须收束 review attempt/evidence/recovery 内部状态与写权并退场 `A5-ADVANCEMENT-REVIEW-01`，本轮不进入该责任链或 A6，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+#### A5-15i 协调复核纠正：固定装配不得改名为 manager getter
+
+- 协调反证：实现删除了旧 `advancementRecoveryRef.current`，却为新 accepted-turn 链扩大 Server adapter 为 `ConversationManager | (() => ConversationManager)`，并在 Anchor 与 Executor-local 生产组合中新增 `manager: () => manager`、`createAdvancementOriginalTaskAdmissionPort(() => manager, ...)`。这些闭包在 consumer/recovery/application 构造时捕获尚未赋值的可变 `let manager`，只是把 late-bound ref 从显式 `.current` 改成 getter；与本包“应用发布前依赖固定”“桥不得含可变 lazy ref”及 AE-001 静态可追踪装配要求直接冲突。现有测试和 S7 未识别该反例，因此当前固定装配与结构门禁结论撤回。
+- 纠正边界：保留已迁移的 accepted-turn、result projector、recovery 共享投影和窄 Controller bridge，只修复新引入的装配循环。恢复 Server adapter 对已构造 `ConversationManager` 的直接依赖，生产中不得保留本包新增的 manager getter、可变 holder、require/proxy、use-before-bind fallback 或按事件重建应用。可采用显式且只能绑定一次、在任何入口开放前 fail-fast 完成并拒绝重绑的 committed-turn listener，或其他真正无环且依赖已构造的固定装配；不得借纠正改变业务顺序、公开合同或扩大到 review/evidence 内部迁移。S7/反向 mutation 与直接组合测试必须新增可识别证据，证明两类 Host 无 late-bound manager/recovery/application getter、未绑定不可运行且 pre-open 绑定后不能重绑。纠正后重跑 A5-15i 全部失效闭包并更新本记录，再停回协调复核；不得执行 Git 操作。
+
+- 纠正实施：`ConversationManager` 新增唯一 bind-once committed-turn listener seam，构造期 listener 与显式绑定互斥，未绑定断言 fail closed、重绑拒绝；既有 fire-and-forget 与“维护失败不污染已提交 turn”语义未变。Anchor 与 Executor-local 均先构造 protocol 与 manager，以实体 manager 一次性完成 protocol 绑定并验证，再构造 proxy/original-task adapters、result projector、recovery 与 accepted-turn application；随后一次性绑定 auxiliary recovery 与 committed-turn listener，验证 listener 已绑定后才把 manager/owner 发布给生产 ingress。Server adapter 恢复只接收实体 `ConversationManager`，review proxy bridge 也恢复为已构造端口的直接依赖；两类生产组合中的 `manager: () => manager`、widened union/`resolveManager`、proxy getter、recovery getter和 use-before-bind fallback 归零。Anchor 仍按 `turnMaintenance → accepted-turn application` 顺序 fire-and-forget，Executor-local 仍只调用 accepted-turn application；recovery、review、事件与持久协议均未改变。
+- 纠正直接证据：Server `conversation-manager` 122/122，新增反例直接证明未绑定断言、一次绑定、重绑拒绝及真实 committed turn 调用；Anchor `conversation-surface` 3/3，证明 bind→verify 后才返回已装配 manager；Executor-local 的同一组合测试定向重取 1/1，证明 owner 发布前完成 bind→verify。首次组合运行中 `local-conversation-owner-lifecycle` 的其余 16 项有 15 项通过，唯一既有末项在 Artifact lifecycle maintenance 收到 `backpressured:ioOperations`，与本轮 listener 装配无调用链关系，未用该失败冒充本轮绿灯；本轮只对新增组合反例作精确重取。Core accepted-turn application 56/56、Server recovery 27/27继续通过，既有 session RPC 94项输入未变，初次 A5-15i 的 121/121 recovery/RPC 证据继续有效。
+- 纠正结构与构建证据：S7 现要求 Server adapters 只能接收 direct manager、两类 Host 都在生产发布前执行 bind/verify、auxiliary recovery 以一次性 seam 绑定、review bridge 不接受 getter；反向 mutation 可恢复 widened union、移除 listener bind或把 proxy port改回 getter，均被同一 inspector拒绝。当前 `pnpm s7:lint` 为 33/33且registry golden通过；owner-kernel、owner-services、server与CLI依赖顺序构建通过，CLI `tsc --noEmit` 通过，9个适用变更文件的最窄Biome检查无修复。fresh package-export输入未变化，复用初次 A5-15i 已通过证据。`A5-15i-advancement-accepted-turn-review-v1` 的 fixed-assembly 子证据据此恢复，当前等待协调者独立复核；Advancement 行与 A5 继续为`[ ]`，未进入后续 review/evidence 状态机责任链，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 

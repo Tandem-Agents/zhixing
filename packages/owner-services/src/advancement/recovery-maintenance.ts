@@ -1,4 +1,7 @@
 import type {
+  AdvancementReviewResultProjectionApplication,
+} from "@zhixing/core/advancement/application";
+import type {
   AdvancementProxyMessage,
   AdvancementSession,
   RunRecord,
@@ -16,7 +19,6 @@ import {
   ProxyMessageScheduler,
   type ScheduleProxyMessageResult,
 } from "./proxy-scheduler.js";
-import { dispatchAdvancementReviewResult } from "./review-dispatch.js";
 
 const RECOVERY_SCAN_PAGE_SIZE = 50;
 
@@ -25,6 +27,7 @@ export interface AdvancementRecoveryMaintenanceOptions {
   readonly directory: AdvancementConversationDirectory;
   readonly proxyTurns: AdvancementProxyTurnPort;
   readonly events?: AdvancementEventSink;
+  readonly reviewResults: AdvancementReviewResultProjectionApplication;
   readonly originalTasks?: AdvancementOriginalTaskAdmissionPort;
   readonly logger?: Pick<Console, "warn">;
 }
@@ -470,18 +473,13 @@ class DefaultAdvancementRecoveryMaintenance
         runRecord: accepted.record,
         runRecordRef: accepted.runRecordRef,
       });
-      await dispatchAdvancementReviewResult(
-        {
-          events: this.options.events,
-        },
-        {
-          conversationId: session.conversationId,
-          runId: recoveryRunId(accepted),
-          result,
-          emitProxyEnqueued: false,
-          scheduleProxy: false,
-        },
-      );
+      await this.options.reviewResults.projectReviewResult({
+        conversationId: session.conversationId,
+        runId: recoveryRunId(accepted),
+        result,
+        emitProxyEnqueued: false,
+        scheduleProxy: false,
+      });
       if (result.kind === "review-deferred") {
         // 补审本身又挂起：review 没落盘、该 run 仍是未审态。必须中断
         // 本次恢复（否则扫描循环会反复命中同一 run 空转），等下一个

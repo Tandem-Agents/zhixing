@@ -43,6 +43,7 @@ import type {
   AdvancementNewTaskMechanismPort,
   AdvancementRubricConfirmationMechanismPort,
   AdvancementRubricRevisionMechanismPort,
+  AdvancementTurnReviewResult,
   RubricPublicationOutcome,
   RubricPublicationPort,
 } from "@zhixing/core/advancement/application";
@@ -114,42 +115,7 @@ export interface AdvancementClosureSynthesizer {
  */
 export const DEFAULT_SESSION_TOKEN_BUDGET = 20_000_000;
 
-export type AdvancementTurnReviewResult =
-  | {
-      readonly kind: "skipped";
-      readonly reason: "no-active-session" | "not-active" | "already-reviewed";
-    }
-  | {
-      readonly kind: "review-deferred";
-      readonly session: AdvancementSession;
-      readonly cause: "infrastructure" | "aborted";
-      readonly reason: string;
-    }
-  | {
-      readonly kind: "reviewed";
-      readonly session: AdvancementSession;
-      readonly review: AdvancementRunReview;
-    }
-  | {
-      readonly kind: "proxy-enqueued";
-      readonly session: AdvancementSession;
-      readonly review: AdvancementRunReview;
-      readonly proxyMessage: AdvancementProxyMessage;
-    }
-  | {
-      readonly kind: "completed";
-      readonly session: AdvancementSession;
-      readonly review: AdvancementRunReview;
-      readonly exit: AdvancementExit;
-      readonly closure: AdvancementClosureReport;
-    }
-  | {
-      readonly kind: "exited";
-      readonly session: AdvancementSession;
-      readonly review: AdvancementRunReview;
-      readonly exit: AdvancementExit;
-      readonly closure: AdvancementClosureReport;
-    };
+export type { AdvancementTurnReviewResult } from "@zhixing/core/advancement/application";
 
 export class AdvancementController implements
   AdvancementActiveUserTurnMechanismPort,

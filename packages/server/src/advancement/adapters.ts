@@ -59,6 +59,7 @@ export function createAdvancementProxyTurnPort(
         : { status: "owned", runId: durable.runId };
     },
     async schedule(request) {
+      const manager = options.manager;
       const conversationId = request.conversationId;
       let taskSettled = false;
       const settleTask = () => {
@@ -69,14 +70,14 @@ export function createAdvancementProxyTurnPort(
 
       let admission: Awaited<ReturnType<ConversationManager["admitTurn"]>>;
       try {
-        admission = await options.manager.admitTurn({
+        admission = await manager.admitTurn({
           conversationId,
           exists: options.conversationExists
             ? () => options.conversationExists!(conversationId)
             : undefined,
           source: "advancement",
           beforeEnqueue: (managed) =>
-            options.manager.admitDurableTurn({
+            manager.admitDurableTurn({
               conversationId: managed.conversationId,
               input: request.input,
               invocation: {
@@ -95,7 +96,7 @@ export function createAdvancementProxyTurnPort(
             execute: async () => {
               try {
                 await projectSessionTurn({
-                  manager: options.manager,
+                  manager,
                   managed,
                   input: request.input,
                   turnId: request.turnId,
@@ -114,7 +115,7 @@ export function createAdvancementProxyTurnPort(
                 });
               } finally {
                 try {
-                  options.manager.setBusy(conversationId, false);
+                  manager.setBusy(conversationId, false);
                 } finally {
                   settleTask();
                 }

@@ -3413,12 +3413,21 @@ test("Advancement detail/rubric has one Product API application and conversation
     "packages/core/tsup.config.ts",
     "packages/owner-services/src/advancement/controller.ts",
     "packages/owner-services/src/advancement/session-store.ts",
+    "packages/owner-services/src/advancement/review-application-bridge.ts",
+    "packages/owner-services/src/advancement/recovery-maintenance.ts",
+    "packages/owner-services/src/advancement/index.ts",
+    "packages/owner-services/package.json",
+    "packages/owner-services/tsup.config.ts",
     "packages/server/src/rpc/methods/session.ts",
     "packages/server/src/system-handlers.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/local-conversation-owner.ts",
+    "packages/cli/src/serve/conversation-protocol-runtime.ts",
     "packages/cli/src/serve/conversation-delete-binding.ts",
     "packages/cli/src/serve/advancement-original-task-application.ts",
+    "packages/server/src/advancement/adapters.ts",
+    "packages/owner-kernel/src/conversation-manager.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -3439,6 +3448,86 @@ test("Advancement detail/rubric has one Product API application and conversation
         "ctx.server.advancement.loadLatestSession",
       ),
     )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/core/src/advancement/application.ts",
+      (text) => text.replace(
+        "if (!catchUpProvedContinuous(catchUp.status)) return;",
+        "void catchUp;",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "advancementAcceptedTurns?.acceptCommittedTurn(info)",
+        "void ctx.advancement?.afterTurnCommitted(info)",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/local-conversation-owner.ts",
+      (text) => text.replace(
+        "protocol.bindManager(manager);",
+        "void manager;",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/server/src/advancement/adapters.ts",
+      (text) => text.replace(
+        "readonly manager: ConversationManager;",
+        "readonly manager: ConversationManager | (() => ConversationManager);",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "manager.bindTurnCommittedListener((info) =>",
+        "void ((info) =>",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/owner-services/src/advancement/review-application-bridge.ts",
+      (text) => text.replace(
+        "proxyTurns: AdvancementProxyTurnPort",
+        "proxyTurns: () => AdvancementProxyTurnPort",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/owner-services/src/advancement/recovery-maintenance.ts",
+      (text) => text.replace(
+        "this.options.reviewResults.projectReviewResult({",
+        "dispatchAdvancementReviewResult({",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership([
+      ...records,
+      {
+        relative: "packages/cli/src/serve/advancement-review-maintenance.ts",
+        text: "export function createAdvancementReviewMaintenance() {}",
+      },
+    ]).join("\n"),
     failure,
   );
   assert.match(

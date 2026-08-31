@@ -2775,6 +2775,20 @@ export async function validateS7Structure() {
       relative: "packages/core/package.json",
       text: await readFile(path.join(root, "packages/core/package.json"), "utf8"),
     },
+    {
+      relative: "packages/owner-services/package.json",
+      text: await readFile(
+        path.join(root, "packages/owner-services/package.json"),
+        "utf8",
+      ),
+    },
+    {
+      relative: "packages/owner-services/tsup.config.ts",
+      text: await readFile(
+        path.join(root, "packages/owner-services/tsup.config.ts"),
+        "utf8",
+      ),
+    },
   ]));
   failures.push(...inspectSkillCatalogApplicationOwnership([
     ...records,
@@ -3395,6 +3409,29 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   const originalTaskAdapter = required(
     "packages/cli/src/serve/advancement-original-task-application.ts",
   );
+  const reviewBridge = required(
+    "packages/owner-services/src/advancement/review-application-bridge.ts",
+  );
+  const recovery = required(
+    "packages/owner-services/src/advancement/recovery-maintenance.ts",
+  );
+  const ownerIndex = required(
+    "packages/owner-services/src/advancement/index.ts",
+  );
+  const ownerManifestText = required("packages/owner-services/package.json");
+  const ownerBuild = required("packages/owner-services/tsup.config.ts");
+  const localOwner = required(
+    "packages/cli/src/serve/local-conversation-owner.ts",
+  );
+  const advancementAdapters = required(
+    "packages/server/src/advancement/adapters.ts",
+  );
+  const conversationManager = required(
+    "packages/owner-kernel/src/conversation-manager.ts",
+  );
+  const conversationProtocol = required(
+    "packages/cli/src/serve/conversation-protocol-runtime.ts",
+  );
 
   const detailStart = handler.indexOf(
     "export function buildSessionAdvancementDetailMethod()",
@@ -3532,6 +3569,16 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
       typeof conditions === "object" &&
       (conditions.types === narrow?.types || conditions.import === narrow?.import),
   );
+  let ownerManifest;
+  try {
+    ownerManifest = JSON.parse(ownerManifestText);
+  } catch {
+    failures.push("Owner-services manifest is invalid while checking Advancement review");
+  }
+  const acceptedTurnApplication = application.slice(
+    application.indexOf("export class AdvancementAcceptedTurnApplicationService"),
+    application.indexOf("/** Path-free read mechanism", 1),
+  );
 
   if (
     !application.includes("interface AdvancementDetailReadPort") ||
@@ -3540,6 +3587,88 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes('"advancement.query.detail"') ||
     !application.includes("interface AdvancementConversationMaintenancePort") ||
     !application.includes("interface AdvancementConversationLifecycleMechanismPort") ||
+    !application.includes("interface AdvancementAcceptedTurnCatchUpPort") ||
+    !application.includes("interface AdvancementAcceptedTurnReviewMechanismPort") ||
+    !application.includes("interface AdvancementReviewResultProjectionApplication") ||
+    !application.includes("class AdvancementReviewResultProjectionApplicationService") ||
+    !application.includes("class AdvancementAcceptedTurnApplicationService") ||
+    application.split("class AdvancementAcceptedTurnApplicationService").length - 1 !== 1 ||
+    !acceptedTurnApplication.includes("readonly #chains = new Map<string, Promise<void>>()") ||
+    !acceptedTurnApplication.includes("catchUpAcceptedTurn(") ||
+    !acceptedTurnApplication.includes("if (!catchUpProvedContinuous(catchUp.status)) return") ||
+    !acceptedTurnApplication.includes("reviewAcceptedTurn({") ||
+    !acceptedTurnApplication.includes("projectReviewResult({") ||
+    !application.includes('status === "closed-run-recovered"') ||
+    !reviewBridge.includes("createAdvancementAcceptedTurnReviewMechanism(") ||
+    !reviewBridge.includes("controller.afterTurnCommitted(input)") ||
+    !reviewBridge.includes("createAdvancementReviewProxySchedulePort(") ||
+    !reviewBridge.includes("proxyTurns: AdvancementProxyTurnPort") ||
+    reviewBridge.includes("proxyTurns: () =>") ||
+    /ConversationManager|SessionBroadcast|@zhixing\/(?:server|rpc)|\.current|new Map</u.test(
+      reviewBridge,
+    ) ||
+    !recovery.includes("this.options.reviewResults.projectReviewResult({") ||
+    recovery.includes("dispatchAdvancementReviewResult") ||
+    !accessSurfaces.includes("new AdvancementAcceptedTurnApplicationService({") ||
+    !accessSurfaces.includes("advancementAcceptedTurns?.acceptCommittedTurn(info)") ||
+    !accessSurfaces.includes("manager.bindTurnCommittedListener((info) =>") ||
+    !accessSurfaces.includes("manager.assertTurnCommittedListenerBound()") ||
+    !accessSurfaces.includes("protocol.bindManager(manager)") ||
+    !accessSurfaces.includes("protocol.assertManagerBound()") ||
+    accessSurfaces.includes("manager: () => manager") ||
+    !accessSurfaces.includes("protocol.bindAuxiliaryRecovery(async (conversationId) =>") ||
+    /createAdvancementProxyTurnPort\(\{[\s\S]*?manager:\s*\(\)\s*=>\s*manager/u.test(
+      accessSurfaces,
+    ) ||
+    /createAdvancementOriginalTaskAdmissionPort\(\s*\(\)\s*=>\s*manager/u.test(
+      accessSurfaces,
+    ) ||
+    accessSurfaces.indexOf("manager.bindTurnCommittedListener((info) =>") >
+      accessSurfaces.indexOf("ctx.conversations = manager") ||
+    accessSurfaces.includes("createAdvancementReviewMaintenance") ||
+    accessSurfaces.includes("advancementRecoveryRef") ||
+    !localOwner.includes("new AdvancementAcceptedTurnApplicationService({") ||
+    !localOwner.includes("acceptedTurns.acceptCommittedTurn(info)") ||
+    !localOwner.includes("manager.bindTurnCommittedListener((info) =>") ||
+    !localOwner.includes("manager.assertTurnCommittedListenerBound()") ||
+    !localOwner.includes("protocol.bindManager(manager)") ||
+    !localOwner.includes("protocol.assertManagerBound()") ||
+    localOwner.includes("manager: () => manager") ||
+    !localOwner.includes("protocol.bindAuxiliaryRecovery(async (conversationId) =>") ||
+    /createAdvancementProxyTurnPort\(\{[\s\S]*?manager:\s*\(\)\s*=>\s*manager/u.test(
+      localOwner,
+    ) ||
+    /createAdvancementOriginalTaskAdmissionPort\(\s*\(\)\s*=>\s*manager/u.test(
+      localOwner,
+    ) ||
+    localOwner.indexOf("manager.bindTurnCommittedListener((info) =>") >
+      localOwner.indexOf("return new LocalConversationOwnerAssembly({") ||
+    localOwner.includes("reviewCommitted") ||
+    localOwner.includes("createAdvancementReviewMaintenance") ||
+    !advancementAdapters.includes("readonly manager: ConversationManager;") ||
+    advancementAdapters.includes("ConversationManager | (() => ConversationManager)") ||
+    advancementAdapters.includes("resolveManager(") ||
+    !conversationManager.includes("bindTurnCommittedListener(") ||
+    !conversationManager.includes("assertTurnCommittedListenerBound()") ||
+    !conversationManager.includes("turn-committed listener is already bound") ||
+    !conversationManager.includes("turn-committed listener is not bound") ||
+    !conversationProtocol.includes("bindAuxiliaryRecovery(") ||
+    !conversationProtocol.includes("bindManager(manager: ConversationManager)") ||
+    !conversationProtocol.includes("assertManagerBound()") ||
+    conversationProtocol.includes("#recoverAuxiliaryRef") ||
+    ownerIndex.includes("dispatchAdvancementReviewResult") ||
+    ownerIndex.includes("createAdvancementAcceptedTurnReviewMechanism") ||
+    !accessSurfaces.includes(
+      'from "@zhixing/owner-services/advancement/review-application-bridge"',
+    ) ||
+    !localOwner.includes(
+      'from "@zhixing/owner-services/advancement/review-application-bridge"',
+    ) ||
+    ownerBuild.includes("review-dispatch.ts") ||
+    ownerManifest?.exports?.["./advancement/review-dispatch"] !== undefined ||
+    ownerManifest?.exports?.["./advancement/review-application-bridge"] === undefined ||
+    byPath.has("packages/cli/src/serve/advancement-review-maintenance.ts") ||
+    byPath.has("packages/owner-services/src/advancement/review-dispatch.ts") ||
     !application.includes("interface AdvancementConversationLifecycleApplication") ||
     !application.includes("interface AdvancementConversationAlivePort") ||
     lifecycleApplication.length === 0 ||

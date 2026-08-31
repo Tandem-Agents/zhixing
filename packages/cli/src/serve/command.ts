@@ -102,9 +102,6 @@ import {
   ServerStateFile,
   ServerLogLifecycle,
   CleanupRegistry,
-  createAdvancementEventSink,
-  createAdvancementOriginalTaskAdmissionPort,
-  createAdvancementProxyTurnPort,
   LlmPerspectiveAllocationStrategy,
   PerspectivesController,
   RuntimePerspectivesOrchestrationExecutor,
@@ -125,11 +122,7 @@ import {
   type SessionBroadcast,
 } from "@zhixing/rpc";
 import { AssignmentStreamPathUnavailableError } from "./assignment-stream-path-manager.js";
-import {
-  createAdvancementRecoveryMaintenance,
-  renderRecentContextFromMessages,
-  type AdvancementRecoveryMaintenance,
-} from "@zhixing/owner-services";
+import { renderRecentContextFromMessages } from "@zhixing/owner-services";
 import {
   loadCredentials,
   type ZhixingConfig,
@@ -506,11 +499,6 @@ async function runServerProcess(
     current: null,
   };
   const sessionActivityBroadcastRef: { current: SessionActivityBroadcast | null } = {
-    current: null,
-  };
-  // 推进恢复设施 lazy ref——recovery 依赖 conversations(接入面产物),建成后回填;
-  // turn 提交触发的补审 catch-up 经此读最新值。
-  const advancementRecoveryRef: { current: AdvancementRecoveryMaintenance | null } = {
     current: null,
   };
   const runEventForwarder = createRunEventForwarder((conversationId, envelope) =>
@@ -933,7 +921,12 @@ async function runServerProcess(
     conversationAuthorityRef,
     sessionBroadcastRef,
     sessionActivityBroadcastRef,
-    advancementRecoveryRef,
+    advancementDirectory: {
+      list: () => conversationDirectory.listForAdvancement(),
+      exists: (conversationId) => conversationDirectory.exists(conversationId),
+      readRunsReverse: (conversationId, options) =>
+        conversationDirectory.readRunsReverse(conversationId, options),
+    },
     startupRollback,
     lifecycleContributions,
     channelHttpRoutes,
@@ -1320,35 +1313,7 @@ async function runServerProcess(
   // ============================================================================
   // ServerContext + runServer —— 读接入面产物（conversations / channels）。
   // ============================================================================
-  const advancementRecovery =
-    ctx.advancement && ctx.conversations
-      ? createAdvancementRecoveryMaintenance({
-          advancement: ctx.advancement,
-          directory: {
-            list: () => conversationDirectory.listForAdvancement(),
-            exists: (conversationId) =>
-              conversationDirectory.exists(conversationId),
-            readRunsReverse: (conversationId, options) =>
-              conversationDirectory.readRunsReverse(conversationId, options),
-          },
-          proxyTurns: createAdvancementProxyTurnPort({
-            manager: ctx.conversations,
-            sessionBroadcast: () => sessionBroadcastRef.current,
-            conversationExists: (conversationId) =>
-              conversationDirectory.exists(conversationId),
-          }),
-          originalTasks: createAdvancementOriginalTaskAdmissionPort(
-            ctx.conversations,
-            { conversationExists: (conversationId) =>
-              conversationDirectory.exists(conversationId) },
-          ),
-          events: createAdvancementEventSink(
-            () => sessionBroadcastRef.current,
-          ),
-          logger: console,
-        })
-      : undefined;
-  advancementRecoveryRef.current = advancementRecovery ?? null;
+  const advancementRecovery = ctx.advancementRecovery;
 
   const recoverAdvancementAcceptedWork = async (): Promise<void> => {
     if (!advancementRecovery) return;

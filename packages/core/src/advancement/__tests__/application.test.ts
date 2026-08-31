@@ -17,10 +17,13 @@ import {
   ADVANCEMENT_SESSION_EXITED_FACT_EVENT,
   AdvancementApplicationError,
   AdvancementApplicationService,
+  AdvancementAcceptedTurnApplicationService,
   AdvancementConversationLifecycleApplicationService,
+  AdvancementReviewResultProjectionApplicationService,
   AdvancementOriginalTaskAdmissionError,
   createAdvancementProductApiContribution,
   type AdvancementApplicationOptions,
+  type AdvancementCommittedTurn,
   type AdvancementConversationLifecycleApplicationOptions,
   type AdvancementAwaitingRubricAdmissionMechanismPort,
   type AdvancementConversationMaintenancePort,
@@ -1841,6 +1844,298 @@ describe("AdvancementConversationLifecycleApplicationService", () => {
     });
   });
 });
+
+describe("Advancement accepted-turn application", () => {
+  it("admits only durable turns and orders catch-up, review, and result projection", async () => {
+    const order: string[] = [];
+    const events: string[] = [];
+    const application = new AdvancementAcceptedTurnApplicationService({
+      catchUp: {
+        catchUpAcceptedTurn: async (_conversationId, beforeRunIndex) => {
+          order.push(`catch-up:${beforeRunIndex}`);
+          return { status: "no-pending-recovery" };
+        },
+      },
+      review: {
+        reviewAcceptedTurn: async (input) => {
+          order.push(`review:${input.runIndex}`);
+          return acceptedTurnReviewResult("reviewed");
+        },
+      },
+      results: {
+        projectReviewResult: async (input) => {
+          order.push(`project:${input.runId}`);
+          events.push(input.result.kind);
+        },
+      },
+    });
+
+    application.acceptCommittedTurn(committedTurn({ ephemeral: true }));
+    application.acceptCommittedTurn(committedTurn({ runIndex: 5 }));
+    await flushAcceptedTurns();
+
+    expect(order).toEqual(["catch-up:5", "review:5", "project:turn-1"]);
+    expect(events).toEqual(["reviewed"]);
+  });
+
+  it("serializes one conversation, permits another, and does not poison the next turn", async () => {
+    const first = deferred<void>();
+    const reviewed: string[] = [];
+    let failNext = false;
+    const application = new AdvancementAcceptedTurnApplicationService({
+      catchUp: {
+        catchUpAcceptedTurn: async (conversationId, beforeRunIndex) => {
+          if (conversationId === "conv-1" && beforeRunIndex === 0) {
+            await first.promise;
+          }
+          return { status: "no-pending-recovery" };
+        },
+      },
+      review: {
+        reviewAcceptedTurn: async (input) => {
+          reviewed.push(`${input.conversationId}:${input.runIndex}`);
+          if (failNext) {
+            failNext = false;
+            throw new Error("review unavailable");
+          }
+          return acceptedTurnReviewResult("reviewed");
+        },
+      },
+      results: { projectReviewResult: async () => {} },
+    });
+
+    application.acceptCommittedTurn(committedTurn({ runIndex: 0 }));
+    application.acceptCommittedTurn(committedTurn({ runIndex: 1, turnId: "turn-2" }));
+    application.acceptCommittedTurn(
+      committedTurn({ conversationId: "conv-2", runIndex: 0 }),
+    );
+    await flushAcceptedTurns();
+    expect(reviewed).toEqual(["conv-2:0"]);
+
+    first.resolve();
+    await flushAcceptedTurns();
+    expect(reviewed).toEqual(["conv-2:0", "conv-1:0", "conv-1:1"]);
+
+    failNext = true;
+    application.acceptCommittedTurn(committedTurn({ runIndex: 2 }));
+    application.acceptCommittedTurn(committedTurn({ runIndex: 3 }));
+    await flushAcceptedTurns();
+    expect(reviewed.slice(-2)).toEqual(["conv-1:2", "conv-1:3"]);
+  });
+
+  it.each(["failed", "awaiting-original-run"] as const)(
+    "does not review across a %s catch-up gap",
+    async (status) => {
+      const reviewAcceptedTurn = vi.fn(async () =>
+        acceptedTurnReviewResult("reviewed"),
+      );
+      const application = new AdvancementAcceptedTurnApplicationService({
+        catchUp: { catchUpAcceptedTurn: async () => ({ status }) },
+        review: { reviewAcceptedTurn },
+        results: { projectReviewResult: async () => {} },
+      });
+      application.acceptCommittedTurn(committedTurn());
+      await flushAcceptedTurns();
+      expect(reviewAcceptedTurn).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not review when catch-up rejects", async () => {
+    const reviewAcceptedTurn = vi.fn(async () =>
+      acceptedTurnReviewResult("reviewed"),
+    );
+    const application = new AdvancementAcceptedTurnApplicationService({
+      catchUp: {
+        catchUpAcceptedTurn: async () => {
+          throw new Error("recovery unavailable");
+        },
+      },
+      review: { reviewAcceptedTurn },
+      results: { projectReviewResult: async () => {} },
+    });
+    application.acceptCommittedTurn(committedTurn());
+    await flushAcceptedTurns();
+    expect(reviewAcceptedTurn).not.toHaveBeenCalled();
+  });
+});
+
+describe("Advancement review result projection application", () => {
+  it.each([
+    ["skipped", []],
+    ["review-deferred", ["advancement:review_deferred"]],
+    ["reviewed", ["advancement:run_reviewed"]],
+    ["proxy-enqueued", ["advancement:run_reviewed", "advancement:proxy_enqueued"]],
+    ["completed", ["advancement:run_reviewed", "advancement:completed"]],
+    ["exited", ["advancement:run_reviewed", "advancement:exited"]],
+  ] as const)("projects %s with the established event sequence", async (kind, expected) => {
+    const events: Array<{ readonly event: string; readonly seq: number }> = [];
+    const schedule = vi.fn(async () => {});
+    const application = new AdvancementReviewResultProjectionApplicationService({
+      events: { emit: (event) => events.push(event) },
+      proxySchedule: { schedule },
+    });
+    await application.projectReviewResult({
+      conversationId: "conv-1",
+      runId: "turn-1",
+      result: acceptedTurnReviewResult(kind),
+    });
+    expect(events.map((event) => event.event)).toEqual(expected);
+    expect(events.map((event) => event.seq)).toEqual(
+      expected.map((_, index) => index as 0 | 1),
+    );
+    expect(schedule).toHaveBeenCalledTimes(kind === "proxy-enqueued" ? 1 : 0);
+  });
+
+  it("lets recovery reuse the same projection without proxy emission or scheduling", async () => {
+    const events: string[] = [];
+    const schedule = vi.fn(async () => {});
+    const application = new AdvancementReviewResultProjectionApplicationService({
+      events: { emit: (event) => events.push(event.event) },
+      proxySchedule: { schedule },
+    });
+    await application.projectReviewResult({
+      conversationId: "conv-1",
+      runId: "turn-1",
+      result: acceptedTurnReviewResult("proxy-enqueued"),
+      emitProxyEnqueued: false,
+      scheduleProxy: false,
+    });
+    expect(events).toEqual(["advancement:run_reviewed"]);
+    expect(schedule).not.toHaveBeenCalled();
+  });
+
+  it("preserves review round, proxy identity, and terminal closure payloads", async () => {
+    const events: Array<import("../application.js").AdvancementReviewPresentationEvent> = [];
+    const application = new AdvancementReviewResultProjectionApplicationService({
+      events: { emit: (event) => events.push(event) },
+      proxySchedule: { schedule: async () => {} },
+    });
+    await application.projectReviewResult({
+      conversationId: "conv-1",
+      runId: "turn-1",
+      result: acceptedTurnReviewResult("proxy-enqueued"),
+    });
+    expect(events).toEqual([
+      expect.objectContaining({
+        runId: "turn-1",
+        seq: 0,
+        payload: expect.objectContaining({
+          advancementSessionId: "adv-1",
+          reviewRound: 1,
+        }),
+      }),
+      expect.objectContaining({
+        runId: "proxy-1",
+        seq: 1,
+        payload: expect.objectContaining({
+          proxyMessageId: "proxy-1",
+          reviewId: "review-accepted",
+        }),
+      }),
+    ]);
+
+    events.length = 0;
+    await application.projectReviewResult({
+      conversationId: "conv-1",
+      runId: "turn-1",
+      result: acceptedTurnReviewResult("completed"),
+    });
+    expect(events[1]).toEqual(
+      expect.objectContaining({
+        event: "advancement:completed",
+        seq: 1,
+        payload: expect.objectContaining({
+          reviewId: "review-accepted",
+          closure: expect.objectContaining({ synthesized: false }),
+        }),
+      }),
+    );
+  });
+});
+
+function committedTurn(
+  overrides: Partial<AdvancementCommittedTurn> = {},
+): AdvancementCommittedTurn {
+  return {
+    conversationId: "conv-1",
+    turnId: "turn-1",
+    runIndex: 0,
+    runRecord: {
+      timestamp: "2026-01-01T00:00:00.000Z",
+      messages: [],
+    },
+    runRecordRef: { shardId: "000001", runIndex: 0 },
+    ephemeral: false,
+    ...overrides,
+  };
+}
+
+function acceptedTurnReviewResult(
+  kind:
+    | "skipped"
+    | "review-deferred"
+    | "reviewed"
+    | "proxy-enqueued"
+    | "completed"
+    | "exited",
+): import("../application.js").AdvancementTurnReviewResult {
+  if (kind === "skipped") return { kind, reason: "no-active-session" };
+  const reviewed = review("review-accepted", 0);
+  const current = session({ runs: [reviewed] });
+  if (kind === "review-deferred") {
+    return {
+      kind,
+      session: current,
+      cause: "infrastructure",
+      reason: "review unavailable",
+    };
+  }
+  if (kind === "reviewed") return { kind, session: current, review: reviewed };
+  if (kind === "proxy-enqueued") {
+    return {
+      kind,
+      session: current,
+      review: reviewed,
+      proxyMessage: {
+        id: "proxy-1",
+        sessionId: current.id,
+        reviewId: reviewed.id,
+        content: { parts: [{ type: "text", text: "continue" }] },
+        rubricFailureHandlingId: "fix-tests",
+        variables: {},
+        createdAt: "2026-01-01T00:03:00.000Z",
+      },
+    };
+  }
+  return {
+    kind,
+    session: current,
+    review: reviewed,
+    exit: {
+      reason: kind === "completed" ? "passed" : "system-error",
+      message: "done",
+      occurredAt: "2026-01-01T00:04:00.000Z",
+    },
+    closure: {
+      summary: "done",
+      synthesized: false,
+      facts: buildClosureFacts(current),
+    },
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+async function flushAcceptedTurns(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 function port(session: AdvancementSession): AdvancementDetailReadPort {
   return { loadLatestSession: async () => session };

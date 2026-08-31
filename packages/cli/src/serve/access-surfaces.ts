@@ -25,7 +25,23 @@ import {
   projectConversationClear,
   projectConversationDelete,
 } from "@zhixing/core/conversation/application";
+import {
+  AdvancementAcceptedTurnApplicationService,
+  AdvancementReviewResultProjectionApplicationService,
+} from "@zhixing/core/advancement/application";
 import { ConversationManager } from "@zhixing/owner-kernel";
+import {
+  createAdvancementRecoveryMaintenance,
+} from "@zhixing/owner-services";
+import {
+  createAdvancementAcceptedTurnReviewMechanism,
+  createAdvancementReviewProxySchedulePort,
+} from "@zhixing/owner-services/advancement/review-application-bridge";
+import {
+  createAdvancementEventSink,
+  createAdvancementOriginalTaskAdmissionPort,
+  createAdvancementProxyTurnPort,
+} from "@zhixing/server";
 import {
   createControlSessionEventEnvelope,
   createConfirmationBridge,
@@ -48,7 +64,6 @@ import {
 import { MeshRuntimeAssembly, executorIdForDevice } from "./mesh-runtime-assembly.js";
 import { SurfaceAssetMaintenance } from "./surface-asset-maintenance.js";
 import { createAnchorConversationDeleteProjectionPort } from "./conversation-delete-binding.js";
-import { createAdvancementReviewMaintenance } from "./advancement-review-maintenance.js";
 import { createTurnMaintenance } from "./turn-maintenance.js";
 import { governControlTextCall } from "./governed-control-llm.js";
 import { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
@@ -448,19 +463,6 @@ const conversationSurface: AccessSurface = {
         );
       },
     });
-    const advancementReviewMaintenance = createAdvancementReviewMaintenance({
-      advancement: ctx.advancement,
-      sessionBroadcast: () => ctx.sessionBroadcastRef.current,
-      conversations: () => ctx.conversations ?? null,
-      conversationExists: (conversationId) =>
-        ctx.conversationIdentityLifecycle.identityExists(conversationId),
-      recoverConversation: (conversationId, options) =>
-        ctx.advancementRecoveryRef?.current?.recoverConversation(
-          conversationId,
-          options,
-        ) ?? Promise.resolve(),
-    });
-
     let manager: ConversationManager;
     if (ctx.enabledRoles.includes("executor") && !ctx.executorDataPlane) {
       throw new Error("Conversation executor requires its durable data plane");
@@ -481,7 +483,6 @@ const conversationSurface: AccessSurface = {
             },
           }
         : {}),
-      manager: () => manager,
       interactions: ctx.durableInteractions,
       executeRecoveredPerspective: async (input) => {
         const execution = await ctx.perspectives.executePerspectiveWork(input);
@@ -594,23 +595,6 @@ const conversationSurface: AccessSurface = {
           },
         });
       },
-      recoverAuxiliary: async (conversationId) => {
-        const recovery = ctx.advancementRecoveryRef.current;
-        if (!recovery) return;
-        const result = await recovery.recoverConversation(conversationId);
-        if (
-          result.status === "failed" ||
-          result.status === "full" ||
-          result.status === "busy" ||
-          result.status === "not-found" ||
-          result.status === "missing-proxy"
-        ) {
-          throw new Error(
-            result.message ??
-              `Advancement recovery did not converge: ${result.status}`,
-          );
-        }
-      },
     });
     manager = new ConversationManager(ctx.runtimeFactory, undefined, {
       onRelease: (conversationId) => protocol.releaseConversation(conversationId),
@@ -682,14 +666,82 @@ const conversationSurface: AccessSurface = {
         await s.snapshots.write(s.localId, input);
       },
       confirmationHub: ctx.confirmationHub,
-      // 所有入口的 accepted turn 经 recordTurn 汇聚；各维护任务各自
-      // fire-and-forget，不能反向影响已落定的对话事实。
-      onTurnCommitted: (info) => {
-        turnMaintenance(info);
-        advancementReviewMaintenance(info);
-      },
       durableTurnExecutor: protocol,
     });
+    protocol.bindManager(manager);
+    protocol.assertManagerBound();
+    const conversationExists = (conversationId: string) =>
+      ctx.conversationIdentityLifecycle.identityExists(conversationId);
+    const proxyTurns = createAdvancementProxyTurnPort({
+      manager,
+      sessionBroadcast: () => ctx.sessionBroadcastRef.current,
+      conversationExists,
+    });
+    const reviewResults = ctx.advancement
+      ? new AdvancementReviewResultProjectionApplicationService({
+          events: createAdvancementEventSink(
+            () => ctx.sessionBroadcastRef.current,
+          ),
+          proxySchedule: createAdvancementReviewProxySchedulePort(proxyTurns),
+        })
+      : undefined;
+    const advancementRecovery =
+      ctx.advancement && reviewResults
+        ? createAdvancementRecoveryMaintenance({
+            advancement: ctx.advancement,
+            directory: ctx.advancementDirectory,
+            proxyTurns,
+            originalTasks: createAdvancementOriginalTaskAdmissionPort(
+              manager,
+              { conversationExists },
+            ),
+            events: createAdvancementEventSink(
+              () => ctx.sessionBroadcastRef.current,
+            ),
+            reviewResults,
+            logger: console,
+          })
+        : undefined;
+    const advancementAcceptedTurns =
+      ctx.advancement && advancementRecovery && reviewResults
+        ? new AdvancementAcceptedTurnApplicationService({
+            catchUp: {
+              catchUpAcceptedTurn: (conversationId, beforeRunIndex) =>
+                advancementRecovery.recoverConversation(conversationId, {
+                  beforeRunIndex,
+                }),
+            },
+            review: createAdvancementAcceptedTurnReviewMechanism(
+              ctx.advancement,
+            ),
+            results: reviewResults,
+          })
+        : undefined;
+    if (advancementRecovery) {
+      protocol.bindAuxiliaryRecovery(async (conversationId) => {
+        const result = await advancementRecovery.recoverConversation(conversationId);
+        if (
+          result.status === "failed" ||
+          result.status === "full" ||
+          result.status === "busy" ||
+          result.status === "not-found" ||
+          result.status === "missing-proxy"
+        ) {
+          throw new Error(
+            result.message ??
+              `Advancement recovery did not converge: ${result.status}`,
+          );
+        }
+      });
+    }
+    // All accepted turns share one fire-and-forget listener. Bind and verify it
+    // before the manager becomes reachable through any production ingress.
+    manager.bindTurnCommittedListener((info) => {
+      turnMaintenance(info);
+      advancementAcceptedTurns?.acceptCommittedTurn(info);
+    });
+    manager.assertTurnCommittedListenerBound();
+    ctx.advancementRecovery = advancementRecovery;
     ctx.lifecycleContributions.acquire(
       "execution.abortAllAndWait",
       () => manager.abortAllAndWait(

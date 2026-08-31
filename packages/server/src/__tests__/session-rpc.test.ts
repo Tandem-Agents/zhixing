@@ -71,6 +71,7 @@ import {
 } from "../perspectives/index.js";
 import { createTempDir } from "@zhixing/test-utils";
 import { protocolDigest } from "@zhixing/core/protocol";
+import { AdvancementReviewResultProjectionApplicationService } from "@zhixing/core/advancement/application";
 import {
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
   ConversationApplicationError,
@@ -1593,6 +1594,9 @@ describe("session.* RPC (S2.D)", () => {
                 conversationDirectory.exists(conversationId),
             }),
             events: createAdvancementEventSink(() => null),
+            reviewResults: new AdvancementReviewResultProjectionApplicationService({
+              events: createAdvancementEventSink(() => null),
+            }),
           })
         : undefined;
     let ctx!: ReturnType<typeof createServerContext>;

@@ -19,6 +19,7 @@ import { projectConfirmedRubricToDraftContent } from "./contract.js";
 import type {
   AdvancementExit,
   AdvancementOriginalTaskAdmissionIntent,
+  AdvancementProxyMessage,
   AdvancementRunReview,
   AdvancementSession,
   AdvancementSessionStatus,
@@ -26,12 +27,344 @@ import type {
   RubricContractDraftSnapshot,
   RubricDraftPersistenceChoice,
 } from "./types.js";
+import type {
+  RunRecordInput,
+  RunRecordRef,
+} from "../transcript/shard/types.js";
 import {
   extractUserTurnInputText,
   isNonEmptyUserTurnInput,
   type UserTurnInput,
 } from "../types/user-input.js";
 import type { TurnOrigin } from "../types/tools.js";
+
+export type AdvancementTurnReviewResult =
+  | {
+      readonly kind: "skipped";
+      readonly reason: "no-active-session" | "not-active" | "already-reviewed";
+    }
+  | {
+      readonly kind: "review-deferred";
+      readonly session: AdvancementSession;
+      readonly cause: "infrastructure" | "aborted";
+      readonly reason: string;
+    }
+  | {
+      readonly kind: "reviewed";
+      readonly session: AdvancementSession;
+      readonly review: AdvancementRunReview;
+    }
+  | {
+      readonly kind: "proxy-enqueued";
+      readonly session: AdvancementSession;
+      readonly review: AdvancementRunReview;
+      readonly proxyMessage: AdvancementProxyMessage;
+    }
+  | {
+      readonly kind: "completed";
+      readonly session: AdvancementSession;
+      readonly review: AdvancementRunReview;
+      readonly exit: AdvancementExit;
+      readonly closure: AdvancementClosureReport;
+    }
+  | {
+      readonly kind: "exited";
+      readonly session: AdvancementSession;
+      readonly review: AdvancementRunReview;
+      readonly exit: AdvancementExit;
+      readonly closure: AdvancementClosureReport;
+    };
+
+export interface AdvancementCommittedTurn {
+  readonly conversationId: string;
+  readonly turnId: string;
+  readonly runIndex: number;
+  readonly runRecord: RunRecordInput;
+  readonly runRecordRef?: RunRecordRef;
+  readonly ephemeral: boolean;
+}
+
+export type AdvancementAcceptedTurnCatchUpResult = Readonly<{
+  status:
+    | "no-active-session"
+    | "not-active"
+    | "no-pending-recovery"
+    | "awaiting-original-run"
+    | "already-running"
+    | "already-scheduled"
+    | "durable-run-owned"
+    | "closed-run-recovered"
+    | "scheduled"
+    | "accepted-run-recovered"
+    | "review-deferred"
+    | "not-found"
+    | "full"
+    | "busy"
+    | "missing-proxy"
+    | "failed";
+}>;
+
+/** Path-free catch-up mechanism; the recovery scan and persistence remain outside Domain. */
+export interface AdvancementAcceptedTurnCatchUpPort {
+  catchUpAcceptedTurn(
+    conversationId: string,
+    beforeRunIndex: number,
+  ): Promise<AdvancementAcceptedTurnCatchUpResult>;
+}
+
+/** A5-ADVANCEMENT-REVIEW-01: finite bridge to the existing review mechanism. */
+export interface AdvancementAcceptedTurnReviewMechanismPort {
+  reviewAcceptedTurn(input: Readonly<{
+    conversationId: string;
+    runId: string;
+    runIndex: number;
+    runRecord: RunRecordInput;
+    runRecordRef?: RunRecordRef;
+  }>): Promise<AdvancementTurnReviewResult>;
+}
+
+export type AdvancementReviewPresentationEvent =
+  | Readonly<{
+      conversationId: string;
+      runId: string;
+      seq: 0;
+      event: "advancement:review_deferred";
+      payload: Readonly<{
+        advancementSessionId: string;
+        cause: "infrastructure" | "aborted";
+        reason: string;
+      }>;
+    }>
+  | Readonly<{
+      conversationId: string;
+      runId: string;
+      seq: 0;
+      event: "advancement:run_reviewed";
+      payload: Readonly<{
+        advancementSessionId: string;
+        review: AdvancementRunReview;
+        reviewRound: number;
+      }>;
+    }>
+  | Readonly<{
+      conversationId: string;
+      runId: string;
+      seq: 1;
+      event: "advancement:proxy_enqueued";
+      payload: Readonly<{
+        advancementSessionId: string;
+        proxyMessageId: string;
+        reviewId: string;
+      }>;
+    }>
+  | Readonly<{
+      conversationId: string;
+      runId: string;
+      seq: 1;
+      event: "advancement:completed" | "advancement:exited";
+      payload: Readonly<{
+        advancementSessionId: string;
+        reviewId: string;
+        exit: AdvancementExit;
+        closure: AdvancementClosureReport;
+      }>;
+    }>;
+
+export interface AdvancementReviewEventPort {
+  emit(event: AdvancementReviewPresentationEvent): void;
+}
+
+/** Path-free proxy effect; scheduling mechanics remain in owner-services. */
+export interface AdvancementReviewProxySchedulePort {
+  schedule(input: Readonly<{
+    session: AdvancementSession;
+    proxyMessage: AdvancementProxyMessage;
+  }>): Promise<void>;
+}
+
+export interface AdvancementReviewResultProjectionInput {
+  readonly conversationId: string;
+  readonly runId: string;
+  readonly result: AdvancementTurnReviewResult;
+  readonly emitProxyEnqueued?: boolean;
+  readonly scheduleProxy?: boolean;
+}
+
+/** Shared application-owned review result projection used by live turns and recovery. */
+export interface AdvancementReviewResultProjectionApplication {
+  projectReviewResult(input: AdvancementReviewResultProjectionInput): Promise<void>;
+}
+
+export class AdvancementReviewResultProjectionApplicationService
+  implements AdvancementReviewResultProjectionApplication
+{
+  readonly #events?: AdvancementReviewEventPort;
+  readonly #proxySchedule?: AdvancementReviewProxySchedulePort;
+
+  constructor(options: Readonly<{
+    events?: AdvancementReviewEventPort;
+    proxySchedule?: AdvancementReviewProxySchedulePort;
+  }>) {
+    this.#events = options.events;
+    this.#proxySchedule = options.proxySchedule;
+  }
+
+  async projectReviewResult(
+    input: AdvancementReviewResultProjectionInput,
+  ): Promise<void> {
+    this.#emitReviewEvents(input);
+    if (
+      input.scheduleProxy !== false &&
+      input.result.kind === "proxy-enqueued" &&
+      this.#proxySchedule
+    ) {
+      await this.#proxySchedule.schedule({
+        session: input.result.session,
+        proxyMessage: input.result.proxyMessage,
+      });
+    }
+  }
+
+  #emitReviewEvents(input: AdvancementReviewResultProjectionInput): void {
+    const result = input.result;
+    if (result.kind === "skipped" || !this.#events) return;
+    if (result.kind === "review-deferred") {
+      this.#events.emit({
+        conversationId: input.conversationId,
+        runId: input.runId,
+        seq: 0,
+        event: "advancement:review_deferred",
+        payload: {
+          advancementSessionId: result.session.id,
+          cause: result.cause,
+          reason: result.reason,
+        },
+      });
+      return;
+    }
+    this.#events.emit({
+      conversationId: input.conversationId,
+      runId: input.runId,
+      seq: 0,
+      event: "advancement:run_reviewed",
+      payload: {
+        advancementSessionId: result.session.id,
+        review: result.review,
+        reviewRound: result.session.runs.length,
+      },
+    });
+    if (result.kind === "proxy-enqueued") {
+      if (input.emitProxyEnqueued === false) return;
+      this.#events.emit({
+        conversationId: input.conversationId,
+        runId: result.proxyMessage.id,
+        seq: 1,
+        event: "advancement:proxy_enqueued",
+        payload: {
+          advancementSessionId: result.session.id,
+          proxyMessageId: result.proxyMessage.id,
+          reviewId: result.review.id,
+        },
+      });
+      return;
+    }
+    if (result.kind !== "completed" && result.kind !== "exited") return;
+    this.#events.emit({
+      conversationId: input.conversationId,
+      runId: input.runId,
+      seq: 1,
+      event:
+        result.kind === "completed"
+          ? "advancement:completed"
+          : "advancement:exited",
+      payload: {
+        advancementSessionId: result.session.id,
+        reviewId: result.review.id,
+        exit: result.exit,
+        closure: result.closure,
+      },
+    });
+  }
+}
+
+export interface AdvancementAcceptedTurnApplication {
+  acceptCommittedTurn(turn: AdvancementCommittedTurn): void;
+}
+
+/**
+ * Fire-and-forget application use case for accepted turns. Per-conversation ordering
+ * is product semantics; review attempt deduplication remains in the review mechanism.
+ */
+export class AdvancementAcceptedTurnApplicationService
+  implements AdvancementAcceptedTurnApplication
+{
+  readonly #catchUp: AdvancementAcceptedTurnCatchUpPort;
+  readonly #review: AdvancementAcceptedTurnReviewMechanismPort;
+  readonly #results: AdvancementReviewResultProjectionApplication;
+  readonly #chains = new Map<string, Promise<void>>();
+
+  constructor(options: Readonly<{
+    catchUp: AdvancementAcceptedTurnCatchUpPort;
+    review: AdvancementAcceptedTurnReviewMechanismPort;
+    results: AdvancementReviewResultProjectionApplication;
+  }>) {
+    this.#catchUp = options.catchUp;
+    this.#review = options.review;
+    this.#results = options.results;
+  }
+
+  acceptCommittedTurn(turn: AdvancementCommittedTurn): void {
+    if (turn.ephemeral) return;
+    const previous = this.#chains.get(turn.conversationId) ?? Promise.resolve();
+    const current = previous.then(() => this.#reviewCommittedTurn(turn));
+    const tail = current.catch(() => {});
+    this.#chains.set(turn.conversationId, tail);
+    void tail.finally(() => {
+      if (this.#chains.get(turn.conversationId) === tail) {
+        this.#chains.delete(turn.conversationId);
+      }
+    });
+  }
+
+  async #reviewCommittedTurn(turn: AdvancementCommittedTurn): Promise<void> {
+    let catchUp: AdvancementAcceptedTurnCatchUpResult;
+    try {
+      catchUp = await this.#catchUp.catchUpAcceptedTurn(
+        turn.conversationId,
+        turn.runIndex,
+      );
+    } catch {
+      return;
+    }
+    if (!catchUpProvedContinuous(catchUp.status)) return;
+    const result = await this.#review.reviewAcceptedTurn({
+      conversationId: turn.conversationId,
+      runId: turn.turnId,
+      runIndex: turn.runIndex,
+      runRecord: turn.runRecord,
+      ...(turn.runRecordRef ? { runRecordRef: turn.runRecordRef } : {}),
+    });
+    await this.#results.projectReviewResult({
+      conversationId: turn.conversationId,
+      runId: turn.turnId,
+      result,
+    });
+  }
+}
+
+function catchUpProvedContinuous(
+  status: AdvancementAcceptedTurnCatchUpResult["status"],
+): boolean {
+  return (
+    status === "no-pending-recovery" ||
+    status === "accepted-run-recovered" ||
+    status === "scheduled" ||
+    status === "already-running" ||
+    status === "already-scheduled" ||
+    status === "durable-run-owned" ||
+    status === "closed-run-recovered"
+  );
+}
 
 /** Path-free read mechanism for the current Advancement owner projection. */
 export interface AdvancementDetailReadPort {

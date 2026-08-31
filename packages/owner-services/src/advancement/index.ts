@@ -33,11 +33,6 @@ export {
   type AdvancementRecoveryResult,
 } from "./recovery-maintenance.js";
 export {
-  dispatchAdvancementReviewResult,
-  type AdvancementReviewDispatchDeps,
-  type AdvancementReviewDispatchInput,
-} from "./review-dispatch.js";
-export {
   type AdvancementConversationDirectory,
   type AdvancementRunsPage,
 } from "./conversation-directory-port.js";

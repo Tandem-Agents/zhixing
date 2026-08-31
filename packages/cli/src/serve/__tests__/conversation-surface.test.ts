@@ -18,11 +18,18 @@ import {
   SnapshotStore,
 } from "@zhixing/core";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import type { RuntimeFactory, SessionRuntime } from "@zhixing/owner-kernel";
+import {
+  ConversationManager,
+  type RuntimeFactory,
+  type SessionRuntime,
+} from "@zhixing/owner-kernel";
 import { createAssemblyUnits } from "../access-surfaces.js";
 import type { AssemblyContext } from "../access-surface.js";
 import { setupAuthorityRuntime } from "../../setup-delivery.js";
-import { DurableConversationInteractionObserver } from "../conversation-protocol-runtime.js";
+import {
+  ConversationProtocolRuntime,
+  DurableConversationInteractionObserver,
+} from "../conversation-protocol-runtime.js";
 
 const TEST_EXECUTOR_READINESS = {
   tools: [] as string[],
@@ -111,7 +118,11 @@ async function setupCtx() {
     durableInteractions: new DurableConversationInteractionObserver(),
     perspectives: { executePerspectiveWork: vi.fn() },
     sessionBroadcastRef: { current: null },
-    advancementRecoveryRef: { current: null },
+    advancementDirectory: {
+      list: vi.fn(async () => []),
+      exists: vi.fn(async () => false),
+      readRunsReverse: vi.fn(async () => ({ runs: [], hasMore: false })),
+    },
     conversationAuthorityRef: { current: null },
     transcript,
     snapshots,
@@ -127,6 +138,45 @@ async function setupCtx() {
 }
 
 describe("conversation 接入面：历史装载服从持久层不变量", { timeout: 30_000 }, () => {
+  it("binds and verifies the committed-turn listener before publishing the manager", async () => {
+    const bind = vi.spyOn(
+      ConversationManager.prototype,
+      "bindTurnCommittedListener",
+    );
+    const verify = vi.spyOn(
+      ConversationManager.prototype,
+      "assertTurnCommittedListenerBound",
+    );
+    const bindManager = vi.spyOn(
+      ConversationProtocolRuntime.prototype,
+      "bindManager",
+    );
+    const verifyManager = vi.spyOn(
+      ConversationProtocolRuntime.prototype,
+      "assertManagerBound",
+    );
+    const { ctx } = await setupCtx();
+    try {
+      expect(bind).toHaveBeenCalledOnce();
+      expect(verify).toHaveBeenCalledOnce();
+      expect(bindManager).toHaveBeenCalledOnce();
+      expect(verifyManager).toHaveBeenCalledOnce();
+      expect(bindManager.mock.invocationCallOrder[0]).toBeLessThan(
+        bind.mock.invocationCallOrder[0]!,
+      );
+      expect(bind.mock.invocationCallOrder[0]).toBeLessThan(
+        verify.mock.invocationCallOrder[0]!,
+      );
+      expect(() => ctx.conversations!.assertTurnCommittedListenerBound()).not.toThrow();
+    } finally {
+      await ctx.conversations!.disposeAll();
+      bind.mockRestore();
+      verify.mockRestore();
+      bindManager.mockRestore();
+      verifyManager.mockRestore();
+    }
+  });
+
   it("索引缺失但分片在 → 装填对含完整历史，不丢一轮（倒读自愈贯穿到入口）", async () => {
     const { transcript, created, ctx, convDir } = await setupCtx();
     await transcript.appendRunRecord("conv-x", {

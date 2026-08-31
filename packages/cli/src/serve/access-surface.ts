@@ -51,6 +51,7 @@ import type {
   SessionBroadcast,
 } from "@zhixing/rpc";
 import type {
+  AdvancementConversationDirectory,
   AdvancementController,
   AdvancementRecoveryMaintenance,
 } from "@zhixing/owner-services";
@@ -170,13 +171,7 @@ export interface AssemblyContext {
    * 当前对话的内容回显。
    */
   readonly sessionActivityBroadcastRef: { current: SessionActivityBroadcast | null };
-  /**
-   * 推进恢复设施 lazy ref(recovery 依赖 conversations,在接入面之后建成
-   * 回填)——turn 提交的补审 catch-up 经此读最新值。
-   */
-  readonly advancementRecoveryRef: {
-    current: AdvancementRecoveryMaintenance | null;
-  };
+  readonly advancementDirectory: AdvancementConversationDirectory;
   readonly startupRollback: StartupRollback;
   readonly lifecycleContributions: AssemblyLifecycleContributions;
   readonly channelHttpRoutes: Map<
@@ -186,6 +181,7 @@ export interface AssemblyContext {
 
   // ── 接入面产物（surface.setup 写回） ──
   conversations?: ConversationManager;
+  advancementRecovery?: AdvancementRecoveryMaintenance;
   advancement?: AdvancementController;
   readonly advancementConversationLifecycle: AdvancementConversationLifecycleApplication;
   channels?: ChannelRegistry;

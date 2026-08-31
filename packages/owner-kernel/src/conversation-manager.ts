@@ -396,7 +396,7 @@ export class ConversationManager implements ConversationCommitProjection {
     input: SnapshotInput,
   ) => Promise<void>;
   private readonly confirmationHub?: ConfirmationHub;
-  private readonly onTurnCommitted?: (info: TurnCommittedInfo) => void;
+  private onTurnCommitted?: (info: TurnCommittedInfo) => void;
   private readonly durableTurnExecutorCb?: DurableConversationTurnExecutor;
   /** conversationId 集合——已 attach 到 hub 的会话，用于 dispose 前反查 + 防重 */
   private readonly attachedBrokers = new Set<string>();
@@ -454,6 +454,27 @@ export class ConversationManager implements ConversationCommitProjection {
     }
 
     this.startIdleReaper(config?.idleCheckIntervalMs ?? DEFAULT_IDLE_CHECK_INTERVAL_MS);
+  }
+
+  /**
+   * Completes the finite host composition before the manager is published.
+   * The committed-turn listener has exactly one owner: constructor injection
+   * and this bind-once seam are mutually exclusive.
+   */
+  bindTurnCommittedListener(
+    listener: (info: TurnCommittedInfo) => void,
+  ): void {
+    if (this.onTurnCommitted) {
+      throw new Error("ConversationManager turn-committed listener is already bound");
+    }
+    this.onTurnCommitted = listener;
+  }
+
+  /** Fail closed when a host would publish a partially assembled manager. */
+  assertTurnCommittedListenerBound(): void {
+    if (!this.onTurnCommitted) {
+      throw new Error("ConversationManager turn-committed listener is not bound");
+    }
   }
 
   durableTurnExecutor(): DurableConversationTurnExecutor | undefined {
