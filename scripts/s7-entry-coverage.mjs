@@ -3425,6 +3425,25 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   const confirmedAdmission = application.indexOf(
     "await this.#confirmedOriginalTask.admit",
   );
+  const awaitingControlStart = application.indexOf(
+    "async controlAwaitingRubric(",
+  );
+  const awaitingControlEnd = application.indexOf(
+    "async cancelRubric(",
+    awaitingControlStart,
+  );
+  const awaitingControl =
+    awaitingControlStart >= 0 && awaitingControlEnd > awaitingControlStart
+      ? application.slice(awaitingControlStart, awaitingControlEnd)
+      : "";
+  const sendStart = handler.indexOf("export function buildSessionSendMethod()");
+  const sendEnd = handler.indexOf(
+    "export function buildSessionAdvancementConfirmMethod()",
+    sendStart,
+  );
+  const send = sendStart >= 0 && sendEnd > sendStart
+    ? handler.slice(sendStart, sendEnd)
+    : "";
 
   let manifest;
   try {
@@ -3457,12 +3476,16 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes("persistRubricDraftRevision") ||
     !application.includes("const committedDraft = updated.pendingRubricDraft") ||
     !application.includes("interface AdvancementRubricCancellationMechanismPort") ||
+    !application.includes("interface AdvancementAwaitingRubricAdmissionMechanismPort") ||
     !application.includes("interface AdvancementRubricConfirmationMechanismPort") ||
     !application.includes("interface AdvancementConfirmedOriginalTaskAdmissionPort") ||
     !application.includes("interface AdvancementOriginalTaskExecutionPort") ||
     !application.includes("interface AdvancementOriginalTaskSurfacePort") ||
     !application.includes("ADVANCEMENT_CANCEL_RUBRIC_COMMAND") ||
     !application.includes('"advancement.command.cancel-rubric"') ||
+    !application.includes("ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND") ||
+    !application.includes('"advancement.command.control-awaiting-rubric"') ||
+    !application.includes('factEmission: "subset"') ||
     !application.includes("ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT") ||
     !application.includes('"advancement-contract-cancelled"') ||
     !application.includes("ADVANCEMENT_CONFIRM_RUBRIC_COMMAND") ||
@@ -3472,7 +3495,8 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     application.split("ADVANCEMENT_CONFIRM_RUBRIC_COMMAND").length - 1 !== 3 ||
     application.split("ADVANCEMENT_CONTRACT_CONFIRMED_FACT_EVENT").length - 1 !== 4 ||
     application.split("ADVANCEMENT_CANCEL_RUBRIC_COMMAND").length - 1 !== 3 ||
-    application.split("ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT").length - 1 !== 4 ||
+    application.split("ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT").length - 1 !== 5 ||
+    application.split("ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND").length - 1 !== 3 ||
     !application.includes("loadRubricCancellationSession(") ||
     !application.includes("session.conversationId !== command.conversationId") ||
     !application.includes("session.id !== command.advancementSessionId") ||
@@ -3492,12 +3516,23 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes('error.reason === "conversation-not-found"') ||
     !application.includes('error.reason === "idempotency-conflict"') ||
     !application.includes('reason: "original-task-admission-failed"') ||
+    awaitingControl.length === 0 ||
+    !awaitingControl.includes("decideAwaitingRubricAdmission({") ||
+    !awaitingControl.includes('admission.action === "keep-awaiting-confirmation"') ||
+    !awaitingControl.includes('admission.action === "downgrade-to-direct"') ||
+    !awaitingControl.includes('admission.action !== "cancel-pending-task"') ||
+    !awaitingControl.includes('message: executeOriginal') ||
+    !awaitingControl.includes('reason: "user-cancelled"') ||
+    awaitingControl.indexOf("await command.fact.publish(decision.fact)") < 0 ||
+    awaitingControl.indexOf("await this.#originalTask.execute") < 0 ||
+    awaitingControl.indexOf("await command.fact.publish(decision.fact)") >
+      awaitingControl.indexOf("await this.#originalTask.execute") ||
     application.includes("freezeSnapshot(revisedDraft)") ||
     !application.includes("ADVANCEMENT_PRODUCT_API_EXACT_SET") ||
     !application.includes("createAdvancementProductApiContribution") ||
     !application.includes("buildClosureFacts(session)") ||
     application.split("defineProductApiQuery<").length - 1 !== 1 ||
-    application.split("defineProductApiCommand<").length - 1 !== 3 ||
+    application.split("defineProductApiCommand<").length - 1 !== 4 ||
     application.split("defineProductApiFactEvent<").length - 1 !== 3 ||
     /@zhixing\/(?:server|rpc|owner-services)|\.\.\/\.\.\/server|\.\.\/\.\.\/owner-services/u.test(
       application,
@@ -3539,6 +3574,17 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !cancel.includes("productApi.command(") ||
     !cancel.includes("publishAdvancementCancellationFact(") ||
     !cancel.includes("surface: createAdvancementOriginalTaskSurface({") ||
+    send.length === 0 ||
+    !send.includes("ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND") ||
+    send.split("ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND").length - 1 !== 2 ||
+    !send.includes("productApi.command(") ||
+    !send.includes('controlled.result.kind === "keep-awaiting"') ||
+    !send.includes('controlled.result.kind === "direct-original-task"') ||
+    !send.includes('controlled.result.kind === "cancelled"') ||
+    !send.includes("publishAdvancementCancellationFact(") ||
+    send.includes("hasAwaitingAdvancementConfirmation") ||
+    send.includes('prepared.kind === "await-existing-confirmation"') ||
+    send.includes('prepared.kind === "cancelled-pending-task"') ||
     !handler.includes("function sessionAgentTurnAdmissionRpcError(") ||
     !handler.includes('error.reason === "turn-conversation-not-found"') ||
     !handler.includes('error.reason === "turn-queue-full"') ||
@@ -3558,6 +3604,12 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     controller.includes("async cancelRubric(input:") ||
     !controller.includes("loadRubricCancellationSession(") ||
     !controller.includes("persistRubricCancellation(input:") ||
+    !controller.includes("decideAwaitingRubricAdmission(") ||
+    !controller.includes("hasOpenAdvancementSession: true") ||
+    controller.includes('readonly kind: "await-existing-confirmation"') ||
+    controller.includes('readonly kind: "cancelled-pending-task"') ||
+    controller.includes('readonly kind: "direct-original-task"') ||
+    controller.includes('admission.action === "downgrade-to-direct"') ||
     controller.includes("async confirmRubric(input:") ||
     controller.includes("async settleOriginalTaskAdmission(input:") ||
     !controller.includes("loadRubricConfirmationSession(") ||
@@ -3571,6 +3623,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !composition.includes("ctx.conversations!.runMaintenanceExisting(") ||
     !composition.includes("rubricRevision: advancementDetailController") ||
     !composition.includes("rubricCancellation: advancementDetailController") ||
+    !composition.includes("awaitingRubricAdmission: advancementDetailController") ||
     !composition.includes("rubricConfirmation: advancementDetailController") ||
     !composition.includes("rubricPublication: {") ||
     !composition.includes("createAnchorAdvancementOriginalTaskExecutionPort(") ||

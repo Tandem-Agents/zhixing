@@ -6,6 +6,7 @@ import {
   ADVANCEMENT_CONTRACT_CONFIRMED_FACT_EVENT,
   ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT,
   ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
+  ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
   ADVANCEMENT_DETAIL_QUERY,
   ADVANCEMENT_PRODUCT_API_EXACT_SET,
   ADVANCEMENT_REVISE_RUBRIC_COMMAND,
@@ -14,6 +15,7 @@ import {
   AdvancementOriginalTaskAdmissionError,
   createAdvancementProductApiContribution,
   type AdvancementApplicationOptions,
+  type AdvancementAwaitingRubricAdmissionMechanismPort,
   type AdvancementConversationMaintenancePort,
   type AdvancementDetailReadPort,
   type AdvancementRubricRevisionMechanismPort,
@@ -827,7 +829,296 @@ describe("AdvancementApplicationService detail query", () => {
     expect(admit).not.toHaveBeenCalled();
   });
 
-  it("contributes one Query plus revision/confirmation/cancellation Commands and Facts", async () => {
+  it("keeps an awaiting Rubric without writing or publishing and returns the authoritative draft", async () => {
+    const persistRubricCancellation = vi.fn();
+    const publish = vi.fn();
+    const execute = vi.fn();
+    const fixture = createRevisionFixture(
+      session({
+        status: "awaiting-rubric-confirmation",
+        pendingRubricDraft: pendingRubric("待确认标准"),
+        confirmedRubric: undefined,
+      }),
+      {
+        decideAwaitingRubricAdmission: async () => ({
+          kind: "question",
+          action: "keep-awaiting-confirmation",
+          reason: "继续等待",
+        }),
+        persistRubricCancellation,
+        originalTask: { execute },
+      },
+    );
+
+    const controlled = await fixture.application.controlAwaitingRubric({
+      conversationId: "conv-1",
+      userInput: { parts: [{ type: "text", text: "先等等" }] },
+      fact: { publish },
+      surface: testSurface(),
+    });
+
+    expect(controlled).toMatchObject({
+      result: {
+        kind: "keep-awaiting",
+        conversationId: "conv-1",
+        advancementSessionId: "adv-1",
+        rubricDraft: { title: "待确认标准" },
+      },
+    });
+    expect(Object.isFrozen(controlled.result)).toBe(true);
+    expect(persistRubricCancellation).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("reads and decides the awaiting state only inside Conversation maintenance", async () => {
+    const order: string[] = [];
+    let insideMaintenance = false;
+    const awaiting = session({
+      status: "awaiting-rubric-confirmation",
+      pendingRubricDraft: pendingRubric("并发后可见标准"),
+      confirmedRubric: undefined,
+    });
+    const loadLatestSession = vi.fn(async () => {
+      order.push(insideMaintenance ? "read-inside" : "read-outside");
+      return insideMaintenance ? awaiting : session({ status: "active" });
+    });
+    const decideAwaitingRubricAdmission = vi.fn(async () => {
+      order.push("decide");
+      return {
+        kind: "question" as const,
+        action: "keep-awaiting-confirmation" as const,
+        reason: "继续等待",
+      };
+    });
+    const application = createApplication({
+      detail: { loadLatestSession },
+      maintenance: {
+        runExisting: async (_conversationId, operation) => {
+          order.push("maintenance");
+          insideMaintenance = true;
+          try {
+            return { status: "done", value: await operation() };
+          } finally {
+            insideMaintenance = false;
+          }
+        },
+      },
+      awaitingRubricAdmission: { decideAwaitingRubricAdmission },
+    });
+
+    await expect(
+      application.controlAwaitingRubric({
+        conversationId: "conv-1",
+        userInput: { parts: [{ type: "text", text: "先等等" }] },
+        fact: { publish: vi.fn() },
+        surface: testSurface(),
+      }),
+    ).resolves.toMatchObject({
+      result: {
+        kind: "keep-awaiting",
+        rubricDraft: { title: "并发后可见标准" },
+      },
+    });
+    expect(order).toEqual(["maintenance", "read-inside", "decide"]);
+    expect(loadLatestSession).toHaveBeenCalledOnce();
+    expect(decideAwaitingRubricAdmission).toHaveBeenCalledOnce();
+  });
+
+  it("owns natural-language cancellation and publishes its committed user-cancelled Fact", async () => {
+    const order: string[] = [];
+    const source = session({
+      status: "awaiting-rubric-confirmation",
+      pendingRubricDraft: pendingRubric("待确认标准"),
+      confirmedRubric: undefined,
+    });
+    const fixture = createRevisionFixture(source, {
+      decideAwaitingRubricAdmission: async () => ({
+        kind: "question",
+        action: "cancel-pending-task",
+        reason: "用户取消",
+      }),
+      persistRubricCancellation: async (input) => {
+        order.push("persist");
+        expect(input).toMatchObject({
+          reason: "user-cancelled",
+          message: "用户取消待确认任务",
+        });
+        return {
+          ...source,
+          status: "cancelled",
+          exit: {
+            reason: input.reason,
+            message: input.message,
+            occurredAt: "2026-01-01T00:06:00.000Z",
+          },
+        };
+      },
+    });
+
+    const controlled = await fixture.application.controlAwaitingRubric({
+      conversationId: "conv-1",
+      userInput: { parts: [{ type: "text", text: "取消任务" }] },
+      fact: { publish: (fact) => {
+        order.push("fact");
+        expect(fact).toMatchObject({
+          kind: "advancement-contract-cancelled",
+          originalTurnId: "turn-1",
+          controlSeq: 2,
+          executeOriginal: false,
+          reason: "user-cancelled",
+        });
+      } },
+      surface: testSurface(),
+    });
+
+    expect(order).toEqual(["persist", "fact"]);
+    expect(controlled.result).toEqual({
+      kind: "cancelled",
+      conversationId: "conv-1",
+      advancementSessionId: "adv-1",
+    });
+  });
+
+  it("publishes cancellation before handing the original turn to Conversation", async () => {
+    const order: string[] = [];
+    const execute = vi.fn(async (input) => {
+      order.push("execute");
+      expect(input).toMatchObject({
+        conversationId: "conv-1",
+        originalTurnId: "turn-1",
+      });
+      return {
+        conversationId: "conv-1",
+        turnId: "turn-1",
+        runId: "run-1",
+        runStatus: "immediate" as const,
+      };
+    });
+    const fixture = createRevisionFixture(
+      session({
+        status: "awaiting-rubric-confirmation",
+        pendingRubricDraft: pendingRubric("待确认标准"),
+        confirmedRubric: undefined,
+      }),
+      {
+        decideAwaitingRubricAdmission: async () => ({
+          kind: "direct-task",
+          action: "downgrade-to-direct",
+          reason: "直接执行",
+        }),
+        persistRubricCancellation: async (input) => {
+          order.push("persist");
+          return {
+            ...session(),
+            status: "cancelled",
+            pendingRubricDraft: pendingRubric("待确认标准"),
+            confirmedRubric: undefined,
+            exit: {
+              reason: input.reason,
+              message: input.message,
+              occurredAt: "2026-01-01T00:06:00.000Z",
+            },
+          };
+        },
+        originalTask: { execute },
+      },
+    );
+
+    const controlled = await fixture.application.controlAwaitingRubric({
+      conversationId: "conv-1",
+      userInput: { parts: [{ type: "text", text: "直接执行" }] },
+      fact: { publish: () => { order.push("fact"); } },
+      surface: testSurface(),
+    });
+
+    expect(order).toEqual(["persist", "fact", "execute"]);
+    expect(controlled.result).toEqual({
+      kind: "direct-original-task",
+      conversationId: "conv-1",
+      advancementSessionId: "adv-1",
+      turnId: "turn-1",
+      runId: "run-1",
+      runStatus: "immediate",
+    });
+  });
+
+  it("distinguishes not-applicable from maintenance refusal and keeps a visible Fact when handoff fails", async () => {
+    const publish = vi.fn();
+    const notApplicable = createApplication({
+      detail: port(session({ status: "active" })),
+    });
+    await expect(
+      notApplicable.controlAwaitingRubric({
+        conversationId: "conv-1",
+        userInput: { parts: [{ type: "text", text: "继续" }] },
+        fact: { publish },
+        surface: testSurface(),
+      }),
+    ).resolves.toEqual({ result: { kind: "not-applicable" } });
+
+    const mismatched = createApplication({
+      detail: port(
+        session({
+          conversationId: "conv-other",
+          status: "awaiting-rubric-confirmation",
+        }),
+      ),
+    });
+    await expect(
+      mismatched.controlAwaitingRubric({
+        conversationId: "conv-1",
+        userInput: { parts: [{ type: "text", text: "继续" }] },
+        fact: { publish },
+        surface: testSurface(),
+      }),
+    ).rejects.toMatchObject<Partial<AdvancementApplicationError>>({
+      code: "advancement-session-identity-mismatch",
+    });
+
+    for (const status of ["not-found", "busy"] as const) {
+      const application = createApplication({
+        maintenance: { runExisting: async () => ({ status }) },
+      });
+      await expect(
+        application.controlAwaitingRubric({
+          conversationId: "conv-1",
+          userInput: { parts: [{ type: "text", text: "继续" }] },
+          fact: { publish },
+          surface: testSurface(),
+        }),
+      ).rejects.toMatchObject<Partial<AdvancementApplicationError>>({
+        code: status === "busy" ? "conversation-busy" : "conversation-not-found",
+      });
+    }
+
+    const failedHandoff = createRevisionFixture(
+      session({
+        status: "awaiting-rubric-confirmation",
+        pendingRubricDraft: pendingRubric("待确认标准"),
+        confirmedRubric: undefined,
+      }),
+      {
+        decideAwaitingRubricAdmission: async () => ({
+          kind: "direct-task",
+          action: "downgrade-to-direct",
+          reason: "直接执行",
+        }),
+        originalTask: { execute: async () => { throw new Error("handoff failed"); } },
+      },
+    );
+    await expect(
+      failedHandoff.application.controlAwaitingRubric({
+        conversationId: "conv-1",
+        userInput: { parts: [{ type: "text", text: "直接执行" }] },
+        fact: { publish },
+        surface: testSurface(),
+      }),
+    ).rejects.toThrow("handoff failed");
+    expect(publish).toHaveBeenCalledOnce();
+  });
+
+  it("contributes one Query plus four finite Commands and three Facts", async () => {
     const source = session({
       status: "awaiting-rubric-confirmation",
       pendingRubricDraft: pendingRubric("待修订标准"),
@@ -844,6 +1135,7 @@ describe("AdvancementApplicationService detail query", () => {
       ADVANCEMENT_REVISE_RUBRIC_COMMAND,
       ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
       ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
+      ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
     ]);
     expect(ADVANCEMENT_PRODUCT_API_EXACT_SET.factEvents).toEqual([
       ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT,
@@ -855,6 +1147,17 @@ describe("AdvancementApplicationService detail query", () => {
         conversationId: "conv-1",
       }),
     ).resolves.toMatchObject({ advancementSessionId: "adv-1" });
+    await expect(
+      dispatcher.command(ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND, {
+        conversationId: "conv-1",
+        userInput: { parts: [{ type: "text", text: "继续等待" }] },
+        fact: { publish: vi.fn() },
+        surface: testSurface(),
+      }),
+    ).resolves.toMatchObject({
+      result: { kind: "keep-awaiting" },
+      facts: [],
+    });
     await expect(
       dispatcher.command(ADVANCEMENT_REVISE_RUBRIC_COMMAND, {
         conversationId: "conv-1",
@@ -921,6 +1224,9 @@ function createApplication(
       overrides.rubricRevision ?? fixture.options.rubricRevision,
     rubricCancellation:
       overrides.rubricCancellation ?? fixture.options.rubricCancellation,
+    awaitingRubricAdmission:
+      overrides.awaitingRubricAdmission ??
+      fixture.options.awaitingRubricAdmission,
     rubricConfirmation:
       overrides.rubricConfirmation ?? fixture.options.rubricConfirmation,
     rubricPublication:
@@ -934,6 +1240,7 @@ function createApplication(
 type RevisionFixtureOverrides =
   Partial<AdvancementRubricRevisionMechanismPort> &
   Partial<AdvancementRubricCancellationMechanismPort> &
+  Partial<AdvancementAwaitingRubricAdmissionMechanismPort> &
   Partial<AdvancementRubricConfirmationMechanismPort> &
   Readonly<{
     maintenance?: AdvancementConversationMaintenancePort;
@@ -994,6 +1301,15 @@ function createRevisionFixture(
         };
         return current;
       }),
+  };
+  const awaitingRubricAdmission: AdvancementAwaitingRubricAdmissionMechanismPort = {
+    decideAwaitingRubricAdmission:
+      overrides.decideAwaitingRubricAdmission ??
+      (async () => ({
+        kind: "question",
+        action: "keep-awaiting-confirmation",
+        reason: "test",
+      })),
   };
   const rubricConfirmation: AdvancementRubricConfirmationMechanismPort = {
     loadRubricConfirmationSession:
@@ -1060,6 +1376,7 @@ function createRevisionFixture(
     maintenance,
     rubricRevision,
     rubricCancellation,
+    awaitingRubricAdmission,
     rubricConfirmation,
     ...(overrides.rubricPublication
       ? { rubricPublication: overrides.rubricPublication }

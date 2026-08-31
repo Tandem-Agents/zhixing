@@ -622,6 +622,48 @@ describe("AdvancementController.afterTurnCommitted", () => {
     expect(timings[0]).toBeGreaterThanOrEqual(0);
   });
 
+  it("awaiting Rubric 只提供无写入 admission 机制，旧 prepareUserTurn 入口 fail closed", async () => {
+    const store = await makeStore();
+    await store.createSession({
+      id: "session-1",
+      conversationId: "conv-1",
+      originalUserTask: task("把测试修到全绿"),
+      pendingRubricDraft: draft(),
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    const decide = vi.fn(async () => ({
+      kind: "question" as const,
+      action: "cancel-pending-task" as const,
+      reason: "用户取消",
+    }));
+    const controller = new AdvancementController({
+      store,
+      admissionStrategy: { decide },
+    });
+
+    await expect(
+      controller.decideAwaitingRubricAdmission({
+        conversationId: "conv-1",
+        userInput: task("取消任务"),
+      }),
+    ).resolves.toMatchObject({ action: "cancel-pending-task" });
+    expect(decide).toHaveBeenCalledWith(
+      expect.objectContaining({ hasOpenAdvancementSession: true }),
+    );
+    await expect(store.loadActiveSession("conv-1")).resolves.toMatchObject({
+      status: "awaiting-rubric-confirmation",
+    });
+    await expect(
+      controller.prepareUserTurn({
+        conversationId: "conv-1",
+        turnId: "turn-control",
+        userInput: task("取消任务"),
+      }),
+    ).rejects.toThrow(
+      "awaiting Rubric control must use the Advancement application",
+    );
+  });
+
   it("投影 provider 失败时按无投影降级，准入照常进行", async () => {
     const store = await makeStore();
     const decide = vi.fn(async () => ({

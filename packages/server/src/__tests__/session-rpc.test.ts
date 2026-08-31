@@ -901,6 +901,7 @@ function createConversationProductApi(input: {
           },
           rubricRevision: advancement,
           rubricCancellation: advancement,
+          awaitingRubricAdmission: advancement,
           rubricConfirmation: advancement,
           rubricPublication: {
             publish: (request) => advancement.publishRubric(request),
@@ -3017,6 +3018,7 @@ describe("session.* RPC (S2.D)", () => {
       payload: {
         advancementSessionId: awaiting.advancementSessionId,
         executeOriginal: false,
+        reason: "user-cancelled",
       },
     });
     await expect(client.waitNotification("session.complete", 100)).rejects.toThrow(

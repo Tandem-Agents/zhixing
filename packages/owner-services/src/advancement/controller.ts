@@ -39,6 +39,8 @@ import type {
   ResourceReservationPort,
 } from "@zhixing/core/contracts";
 import type {
+  AdvancementAwaitingRubricAdmissionDecision,
+  AdvancementAwaitingRubricAdmissionMechanismPort,
   AdvancementRubricConfirmationMechanismPort,
   AdvancementRubricRevisionMechanismPort,
   RubricPublicationOutcome,
@@ -90,26 +92,10 @@ export type AdvancementPrepareResult =
       readonly admission: AdvancementAdmissionDecision;
     }
   | {
-      readonly kind: "direct-original-task";
-      readonly session: AdvancementSession;
-      readonly originalTurnId: string;
-      readonly originalUserTask: UserTurnInput;
-    }
-  | {
-      readonly kind: "cancelled-pending-task";
-      readonly session: AdvancementSession;
-      readonly originalTurnId: string;
-    }
-  | {
       readonly kind: "contract-failed";
       readonly conversationId: string;
       readonly originalTurnId: string;
       readonly error: { readonly message: string };
-    }
-  | {
-      readonly kind: "await-existing-confirmation";
-      readonly session: AdvancementSession;
-      readonly draft: RubricContractDraftSnapshot;
     };
 
 export interface AdvancementControllerOptions {
@@ -205,6 +191,7 @@ export type AdvancementTurnReviewResult =
     };
 
 export class AdvancementController implements
+  AdvancementAwaitingRubricAdmissionMechanismPort,
   AdvancementRubricRevisionMechanismPort,
   AdvancementRubricConfirmationMechanismPort
 {
@@ -248,6 +235,31 @@ export class AdvancementController implements
   }
 
   /** 准入判断统一出口：喂最近会话投影、计延迟基线；投影失败按无投影降级。 */
+  async decideAwaitingRubricAdmission(input: Readonly<{
+    conversationId: string;
+    userInput: Readonly<UserTurnInput>;
+  }>): Promise<AdvancementAwaitingRubricAdmissionDecision> {
+    const decision = await this.decideAdmission({
+      conversationId: input.conversationId,
+      userInput: input.userInput,
+      hasOpenAdvancementSession: true,
+    });
+    if (
+      decision.action !== "keep-awaiting-confirmation" &&
+      decision.action !== "downgrade-to-direct" &&
+      decision.action !== "cancel-pending-task"
+    ) {
+      throw new Error(
+        `AdvancementController: invalid awaiting-Rubric admission action ${decision.action}`,
+      );
+    }
+    return Object.freeze({
+      kind: decision.kind,
+      action: decision.action,
+      reason: decision.reason,
+    });
+  }
+
   private async decideAdmission(input: {
     readonly conversationId: string;
     readonly userInput: UserTurnInput;
@@ -281,41 +293,9 @@ export class AdvancementController implements
   }): Promise<AdvancementPrepareResult> {
     const open = await this.store.loadActiveSession(input.conversationId);
     if (open?.status === "awaiting-rubric-confirmation") {
-      const admission = await this.decideAdmission({
-        conversationId: input.conversationId,
-        userInput: input.userInput,
-        hasOpenAdvancementSession: true,
-      });
-      if (admission.action === "downgrade-to-direct") {
-        const cancelled = await this.cancelSession(
-          input.conversationId,
-          open.id,
-          "用户选择直接执行原始任务",
-        );
-        return {
-          kind: "direct-original-task",
-          session: cancelled,
-          originalTurnId: open.pendingRubricDraft!.originalTurnId,
-          originalUserTask: open.originalUserTask,
-        };
-      }
-      if (admission.action === "cancel-pending-task") {
-        const cancelled = await this.cancelSession(
-          input.conversationId,
-          open.id,
-          "用户取消待确认任务",
-        );
-        return {
-          kind: "cancelled-pending-task",
-          session: cancelled,
-          originalTurnId: open.pendingRubricDraft!.originalTurnId,
-        };
-      }
-      return {
-        kind: "await-existing-confirmation",
-        session: open,
-        draft: open.pendingRubricDraft!,
-      };
+      throw new Error(
+        "AdvancementController: awaiting Rubric control must use the Advancement application",
+      );
     }
 
     if (open?.status === "active") {

@@ -2156,6 +2156,7 @@ async function runServerProcess(
           },
           rubricRevision: advancementDetailController,
           rubricCancellation: advancementDetailController,
+          awaitingRubricAdmission: advancementDetailController,
           rubricConfirmation: advancementDetailController,
           rubricPublication: {
             publish: (input) =>

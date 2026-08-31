@@ -63,6 +63,7 @@ import {
 import {
   ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
   ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
+  ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
   ADVANCEMENT_DETAIL_QUERY,
   ADVANCEMENT_REVISE_RUBRIC_COMMAND,
   AdvancementApplicationError,
@@ -276,10 +277,77 @@ export function buildSessionSendMethod(): MethodEntry {
           };
         }
 
-        if (
-          engage &&
-          !(await hasAwaitingAdvancementConfirmation(advancement, id))
-        ) {
+        if (id) {
+          const productApi = requireAdvancementProductApi(
+            ctx.server,
+            ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
+          );
+          const controlled = await (async () => {
+            try {
+              return await productApi.command(
+                ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
+                {
+                  conversationId: id,
+                  userInput: input,
+                  fact: {
+                    publish: (fact) => {
+                      if (!fact.executeOriginal) {
+                        manager.addObserver(fact.conversationId, connectionId, {
+                          allowInactive: true,
+                        });
+                      }
+                      publishAdvancementCancellationFact(
+                        fact,
+                        ctx.connection,
+                        broadcast,
+                      );
+                    },
+                  },
+                  surface: createAdvancementOriginalTaskSurface({
+                    manager,
+                    connection: ctx.connection,
+                    broadcast,
+                  }),
+                },
+              );
+            } catch (error) {
+              throw mapAdvancementRubricCancellationError(
+                error,
+                id,
+                id,
+              );
+            }
+          })();
+          if (controlled.result.kind === "keep-awaiting") {
+            manager.addObserver(controlled.result.conversationId, connectionId, {
+              allowInactive: true,
+            });
+            return awaitingRubricResult(
+              controlled.result.conversationId,
+              controlled.result.advancementSessionId,
+              controlled.result.rubricDraft,
+            );
+          }
+          if (controlled.result.kind === "direct-original-task") {
+            return {
+              conversationId: controlled.result.conversationId,
+              sessionId: controlled.result.conversationId,
+              turnId: controlled.result.turnId,
+            };
+          }
+          if (controlled.result.kind === "cancelled") {
+            return {
+              conversationId: controlled.result.conversationId,
+              sessionId: controlled.result.conversationId,
+              turnId,
+              status: "cancelled",
+              advancementSessionId:
+                controlled.result.advancementSessionId,
+            };
+          }
+        }
+
+        if (engage) {
           return await sendUserTurn({
             manager,
             conversationId: id,
@@ -371,79 +439,6 @@ export function buildSessionSendMethod(): MethodEntry {
             turnId,
             prepared.error,
           );
-        }
-
-        if (prepared.kind === "await-existing-confirmation") {
-          manager.addObserver(prepared.session.conversationId, connectionId, {
-            allowInactive: true,
-          });
-          return awaitingRubricResult(
-            prepared.session.conversationId,
-            prepared.session.id,
-            prepared.draft,
-          );
-        }
-
-        if (prepared.kind === "direct-original-task") {
-          notifyAdvancementEvent({
-            conversationId: prepared.session.conversationId,
-            turnId: prepared.originalTurnId,
-            seq: nextContractControlSeq(prepared.session),
-            event: "advancement:contract_cancelled",
-            payload: {
-              advancementSessionId: prepared.session.id,
-              executeOriginal: true,
-            },
-            connection: ctx.connection,
-            broadcast,
-          });
-          const admitted = await admitAndMaybeStartTurn({
-            server: ctx.server,
-            manager,
-            conversationId: prepared.session.conversationId,
-            connectionId,
-            input: prepared.originalUserTask,
-            turnIdentity: await prepareConversationAgentTurnIdentity(
-              ctx.server,
-              ctx.connection,
-              prepared.originalTurnId,
-              "provided",
-            ),
-            connection: ctx.connection,
-            broadcast,
-            surfaceCapabilities: { postTurnControl: false },
-          });
-          return {
-            conversationId: admitted.conversationId,
-            sessionId: admitted.conversationId,
-            turnId: admitted.turnId,
-          };
-        }
-
-        if (prepared.kind === "cancelled-pending-task") {
-          manager.addObserver(prepared.session.conversationId, connectionId, {
-            allowInactive: true,
-          });
-          notifyAdvancementEvent({
-            conversationId: prepared.session.conversationId,
-            turnId: prepared.originalTurnId,
-            seq: nextContractControlSeq(prepared.session),
-            event: "advancement:contract_cancelled",
-            payload: {
-              advancementSessionId: prepared.session.id,
-              executeOriginal: false,
-              reason: "user-cancelled",
-            },
-            connection: ctx.connection,
-            broadcast,
-          });
-          return {
-            conversationId: prepared.session.conversationId,
-            sessionId: prepared.session.conversationId,
-            turnId,
-            status: "cancelled",
-            advancementSessionId: prepared.session.id,
-          };
         }
 
         if (prepared.kind === "rubric-regenerated") {
@@ -946,15 +941,6 @@ async function prepareActiveAdvancementUserTurn(input: {
   // 必须放行给上层受控失败 + 重接，不得回落引发二次分类与二次修订。
   if (prepared.kind === "contract-failed") return prepared;
   return null;
-}
-
-async function hasAwaitingAdvancementConfirmation(
-  advancement: NonNullable<ServerContext["advancement"]>,
-  conversationId: string | undefined,
-): Promise<boolean> {
-  if (!conversationId) return false;
-  const open = await advancement.loadActiveSession(conversationId);
-  return open?.status === "awaiting-rubric-confirmation";
 }
 
 async function interruptAdvancementProxy(input: {
@@ -3067,12 +3053,6 @@ function requireUserFeedback(
     );
   }
   return params.userFeedback.trim();
-}
-
-function nextContractControlSeq(
-  session: Pick<AdvancementSession, "rubricDraftVersion">,
-): number {
-  return session.rubricDraftVersion + 1;
 }
 
 function optionalConversationId(

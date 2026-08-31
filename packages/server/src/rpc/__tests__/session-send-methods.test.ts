@@ -14,6 +14,7 @@ import {
   type ConversationAgentTurnIdentityPort,
 } from "@zhixing/core/conversation/application";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
+import { ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND } from "@zhixing/core/advancement/application";
 import {
   ConversationManager,
   type SessionRuntime,
@@ -220,6 +221,24 @@ describe("session.send 方法", () => {
     const addObserver = vi.fn(() => true);
     const notify = vi.fn();
     const method = buildSessionSendMethod();
+    const conversationProductApi = agentTurnProductApi({
+      requiresStableTurnIdentity: false,
+      createTurnIdentity,
+      admit,
+    });
+    const productApi = {
+      supports: (descriptor: Parameters<ProductApiDispatcher["supports"]>[0]) =>
+        descriptor === ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND ||
+        conversationProductApi.supports(descriptor),
+      query: conversationProductApi.query.bind(conversationProductApi),
+      command: async (descriptor: unknown, input: unknown) =>
+        descriptor === ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND
+          ? { result: { kind: "not-applicable" }, facts: [] }
+          : await conversationProductApi.command(
+              descriptor as never,
+              input as never,
+            ),
+    };
     const ctx = {
       server: {
         conversations: {
@@ -234,11 +253,7 @@ describe("session.send 方法", () => {
           loadActiveSession: async () => null,
           prepareUserTurn,
         },
-        productApi: agentTurnProductApi({
-          requiresStableTurnIdentity: false,
-          createTurnIdentity,
-          admit,
-        }),
+        productApi,
       } as unknown as ServerContext,
       connection: {
         id: "conn-1",

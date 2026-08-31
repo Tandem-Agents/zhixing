@@ -3590,6 +3590,53 @@ test("Advancement detail and rubric lifecycle have one Product API application o
     )).join("\n"),
     failure,
   );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/core/src/advancement/application.ts",
+      (text) => text.replace(
+        "decideAwaitingRubricAdmission({",
+        "decideRetiredAwaitingRubricBypass({",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace(
+        "return await productApi.command(\n                ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,",
+        "return await productApi.command(\n                ADVANCEMENT_CANCEL_RUBRIC_COMMAND,",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace(
+        "if (id) {\n          const productApi",
+        "if (id) {\n          void hasAwaitingAdvancementConfirmation;\n          const productApi",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/owner-services/src/advancement/controller.ts",
+      (text) => `${text}\ntype RetiredAwaiting = { readonly kind: "await-existing-confirmation" };`,
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "awaitingRubricAdmission: advancementDetailController,",
+        "",
+      ),
+    )).join("\n"),
+    failure,
+  );
 });
 
 test("Skill Catalog management, load, save, admission and Kernel projection have one domain application boundary", async () => {
