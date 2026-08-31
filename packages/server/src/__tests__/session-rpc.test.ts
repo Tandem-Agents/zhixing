@@ -892,12 +892,21 @@ function createConversationProductApi(input: {
               advancement.loadLatestSession(conversationId),
           },
           maintenance: {
+            runNew: (conversationId, operation) =>
+              input.conversations.runMaintenance(conversationId, operation),
             runExisting: (conversationId, operation) =>
               input.conversations.runMaintenanceExisting(
                 conversationId,
                 () => input.directory.exists(conversationId),
                 operation,
               ),
+          },
+          newTask: advancement,
+          newTaskConversation: {
+            ensureShell: (conversationId) =>
+              application
+                .ensureShell({ kind: "ensure-shell", conversationId })
+                .then(() => undefined),
           },
           rubricRevision: advancement,
           rubricCancellation: advancement,
@@ -1876,6 +1885,39 @@ describe("session.* RPC (S2.D)", () => {
       scope: "control",
       runId: "turn-adv-1",
       seq: 0,
+      event: "advancement:contract_draft",
+    });
+    client.close();
+  });
+
+  it("session.send 在既有 conversation 的同一 owner 门内创建待确认推进", async () => {
+    await startWithFactory(createMockFactory(), {
+      advancement: await createTestAdvancementController(),
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+    const created = await client.request("session.new");
+    expect(isSuccessResponse(created)).toBe(true);
+    if (!isSuccessResponse(created)) return;
+    const conversationId = (created.result as { conversationId: string })
+      .conversationId;
+
+    const sendResp = await client.request("session.send", {
+      conversationId,
+      text: "请把测试修到全绿，盯到验收通过",
+      turnId: "turn-existing-advancement",
+    });
+
+    expect(isSuccessResponse(sendResp)).toBe(true);
+    if (!isSuccessResponse(sendResp)) return;
+    expect(sendResp.result).toMatchObject({
+      conversationId,
+      turnId: "turn-existing-advancement",
+      status: "awaiting-rubric-confirmation",
+    });
+    const event = await client.waitNotification("session.event");
+    expect(event.params).toMatchObject({
+      runId: "turn-existing-advancement",
       event: "advancement:contract_draft",
     });
     client.close();
@@ -3677,6 +3719,58 @@ describe("session.* RPC (S2.D)", () => {
       advancementContinuation: { interruptedProxy: false },
     });
     client.close();
+  });
+
+  it("session.send 在线性化点发现竞态 active 时有界回到 active bridge", async () => {
+    const advancement = await createTestAdvancementHarness();
+    await seedOutstandingProxySession(advancement.store, "conv-active-race");
+    await advancement.store.settleProxyMessage(
+      "conv-active-race",
+      "adv-recovery",
+      "proxy-recovery",
+      "2026-01-01T00:04:00.000Z",
+    );
+    const loadActiveSession = advancement.controller.loadActiveSession.bind(
+      advancement.controller,
+    );
+    const activeReads = vi
+      .spyOn(advancement.controller, "loadActiveSession")
+      .mockResolvedValueOnce(null)
+      .mockImplementation((conversationId) => loadActiveSession(conversationId));
+    const newTaskAdmission = vi.spyOn(
+      advancement.controller,
+      "decideNewTaskAdmission",
+    );
+    const createSession = vi.spyOn(advancement.store, "createSession");
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: advancement.controller,
+      seedConversations: ["conv-active-race"],
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    try {
+      const resp = await client.request("session.send", {
+        conversationId: "conv-active-race",
+        text: "再补充一点背景",
+        turnId: "turn-active-race",
+      });
+      expect(isSuccessResponse(resp)).toBe(true);
+      if (!isSuccessResponse(resp)) return;
+      expect(resp.result).toMatchObject({
+        conversationId: "conv-active-race",
+        turnId: "turn-active-race",
+        advancementContinuation: { interruptedProxy: false },
+      });
+      expect(activeReads).toHaveBeenCalledTimes(2);
+      expect(newTaskAdmission).not.toHaveBeenCalled();
+      expect(createSession).not.toHaveBeenCalled();
+    } finally {
+      activeReads.mockRestore();
+      newTaskAdmission.mockRestore();
+      createSession.mockRestore();
+      client.close();
+    }
   });
 
   it("session.resume 先入组播名册再恢复推进（handler 直测顺序锚）", async () => {

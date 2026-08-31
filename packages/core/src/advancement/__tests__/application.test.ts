@@ -4,10 +4,12 @@ import {
   ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
   ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT,
   ADVANCEMENT_CONTRACT_CONFIRMED_FACT_EVENT,
+  ADVANCEMENT_CONTRACT_DRAFT_CREATED_FACT_EVENT,
   ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT,
   ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
   ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
   ADVANCEMENT_DETAIL_QUERY,
+  ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
   ADVANCEMENT_PRODUCT_API_EXACT_SET,
   ADVANCEMENT_REVISE_RUBRIC_COMMAND,
   AdvancementApplicationError,
@@ -1118,7 +1120,288 @@ describe("AdvancementApplicationService detail query", () => {
     expect(publish).toHaveBeenCalledOnce();
   });
 
-  it("contributes one Query plus four finite Commands and three Facts", async () => {
+  it("owns new-conversation admission, shell-before-session and committed draft Fact", async () => {
+    const order: string[] = [];
+    const draft = pendingRubric("新任务标准");
+    const application = createApplication({
+      maintenance: {
+        runNew: async (_conversationId, operation) => {
+          order.push("maintenance");
+          return { status: "done", value: await operation() };
+        },
+        runExisting: async (_conversationId, operation) => ({
+          status: "done",
+          value: await operation(),
+        }),
+      },
+      newTaskConversation: {
+        ensureShell: async () => {
+          order.push("shell");
+        },
+      },
+      newTask: {
+        loadOpenNewTaskSession: async () => {
+          order.push("open");
+          return null;
+        },
+        decideNewTaskAdmission: async () => {
+          order.push("admission");
+          return {
+            kind: "advancement-task",
+            action: "start-advancement",
+            reason: "needs rubric",
+          };
+        },
+        buildNewTaskRubricDraft: async () => {
+          order.push("draft");
+          return draft;
+        },
+        persistNewTaskAwaitingSession: async ({
+          conversationId,
+          originalUserTask,
+        }) => {
+          order.push("session");
+          return session({
+            id: "adv_draft-1",
+            conversationId,
+            status: "awaiting-rubric-confirmation",
+            originalUserTask,
+            pendingRubricDraft: draft,
+            confirmedRubric: undefined,
+          });
+        },
+      },
+    });
+
+    const prepared = await application.prepareNewTask({
+      conversationId: "conv-new",
+      conversationScope: "new",
+      turnId: "turn-1",
+      userInput: { parts: [{ type: "text", text: "把任务做完" }] },
+    });
+
+    expect(order).toEqual([
+      "maintenance",
+      "open",
+      "admission",
+      "draft",
+      "shell",
+      "session",
+    ]);
+    expect(prepared.result).toMatchObject({
+      kind: "awaiting-rubric-confirmation",
+      advancementSessionId: "adv_draft-1",
+      conversationId: "conv-new",
+    });
+    expect(prepared.fact).toMatchObject({
+      kind: "advancement-contract-draft-created",
+      conversationId: "conv-new",
+      originalTurnId: "turn-1",
+      advancementSessionId: "adv_draft-1",
+      rubricDraftId: "draft-1",
+    });
+  });
+
+  it("keeps direct, busy, not-found and draft failure free of shell, session and Fact", async () => {
+    const ensureShell = vi.fn(async () => undefined);
+    const persist = vi.fn();
+    const runDirect = createApplication({
+      newTaskConversation: { ensureShell },
+      newTask: {
+        loadOpenNewTaskSession: async () => null,
+        decideNewTaskAdmission: async () => ({
+          kind: "direct-task",
+          action: "run-direct",
+          reason: "direct",
+        }),
+        buildNewTaskRubricDraft: vi.fn(),
+        persistNewTaskAwaitingSession: persist,
+      },
+    });
+    await expect(
+      runDirect.prepareNewTask({
+        conversationId: "conv-1",
+        conversationScope: "existing",
+        turnId: "turn-1",
+        userInput: { parts: [{ type: "text", text: "直接回答" }] },
+      }),
+    ).resolves.toEqual({
+      result: {
+        kind: "run-direct",
+        admission: {
+          kind: "direct-task",
+          action: "run-direct",
+          reason: "direct",
+        },
+      },
+    });
+
+    const busy = createApplication({
+      maintenance: {
+        runNew: async () => ({ status: "busy" }),
+        runExisting: async () => ({ status: "busy" }),
+      },
+    });
+    await expect(
+      busy.prepareNewTask({
+        conversationId: "conv-new",
+        conversationScope: "new",
+        turnId: "turn-1",
+        userInput: { parts: [{ type: "text", text: "直接回答" }] },
+      }),
+    ).resolves.toEqual({ result: { kind: "owner-busy" } });
+
+    const notFound = createApplication({
+      maintenance: {
+        runNew: async () => ({ status: "busy" }),
+        runExisting: async () => ({ status: "not-found" }),
+      },
+    });
+    await expect(
+      notFound.prepareNewTask({
+        conversationId: "conv-missing",
+        conversationScope: "existing",
+        turnId: "turn-1",
+        userInput: { parts: [{ type: "text", text: "直接回答" }] },
+      }),
+    ).rejects.toMatchObject({ code: "conversation-not-found" });
+
+    const failed = createApplication({
+      newTaskConversation: { ensureShell },
+      newTask: {
+        loadOpenNewTaskSession: async () => null,
+        decideNewTaskAdmission: async () => ({
+          kind: "advancement-task",
+          action: "start-advancement",
+          reason: "needs rubric",
+        }),
+        buildNewTaskRubricDraft: async () => {
+          throw new Error("draft unavailable");
+        },
+        persistNewTaskAwaitingSession: persist,
+      },
+    });
+    await expect(
+      failed.prepareNewTask({
+        conversationId: "conv-new",
+        conversationScope: "new",
+        turnId: "turn-1",
+        userInput: { parts: [{ type: "text", text: "推进任务" }] },
+      }),
+    ).resolves.toEqual({
+      result: {
+        kind: "contract-failed",
+        conversationId: "conv-new",
+        originalTurnId: "turn-1",
+        error: { message: "draft unavailable" },
+      },
+    });
+    expect(ensureShell).not.toHaveBeenCalled();
+    expect(persist).not.toHaveBeenCalled();
+  });
+
+  it("fails closed for an open session and for a mismatched committed draft", async () => {
+    const open = createApplication({
+      newTask: {
+        loadOpenNewTaskSession: async () => session(),
+        decideNewTaskAdmission: vi.fn(),
+        buildNewTaskRubricDraft: vi.fn(),
+        persistNewTaskAwaitingSession: vi.fn(),
+      },
+    });
+    await expect(
+      open.prepareNewTask({
+        conversationId: "conv-1",
+        conversationScope: "existing",
+        turnId: "turn-1",
+        userInput: { parts: [{ type: "text", text: "推进任务" }] },
+      }),
+    ).resolves.toEqual({ result: { kind: "not-applicable" } });
+
+    const draft = pendingRubric("新任务标准");
+    const mismatched = createApplication({
+      newTask: {
+        loadOpenNewTaskSession: async () => null,
+        decideNewTaskAdmission: async () => ({
+          kind: "advancement-task",
+          action: "start-advancement",
+          reason: "needs rubric",
+        }),
+        buildNewTaskRubricDraft: async () => draft,
+        persistNewTaskAwaitingSession: async () =>
+          session({
+            id: "adv_other",
+            status: "awaiting-rubric-confirmation",
+            pendingRubricDraft: draft,
+            confirmedRubric: undefined,
+          }),
+      },
+    });
+    await expect(
+      mismatched.prepareNewTask({
+        conversationId: "conv-1",
+        conversationScope: "existing",
+        turnId: "turn-1",
+        userInput: { parts: [{ type: "text", text: "推进任务" }] },
+      }),
+    ).rejects.toMatchObject({ code: "committed-rubric-draft-missing" });
+  });
+
+  it("does not persist after shell failure and does not emit a Fact after persistence failure", async () => {
+    const draft = pendingRubric("新任务标准");
+    const persistAfterShell = vi.fn();
+    const shellFailure = createApplication({
+      newTaskConversation: {
+        ensureShell: async () => {
+          throw new Error("shell failed");
+        },
+      },
+      newTask: {
+        loadOpenNewTaskSession: async () => null,
+        decideNewTaskAdmission: async () => ({
+          kind: "advancement-task",
+          action: "start-advancement",
+          reason: "needs rubric",
+        }),
+        buildNewTaskRubricDraft: async () => draft,
+        persistNewTaskAwaitingSession: persistAfterShell,
+      },
+    });
+    await expect(
+      shellFailure.prepareNewTask({
+        conversationId: "conv-new",
+        conversationScope: "new",
+        turnId: "turn-1",
+        userInput: { parts: [{ type: "text", text: "推进任务" }] },
+      }),
+    ).rejects.toThrow("shell failed");
+    expect(persistAfterShell).not.toHaveBeenCalled();
+
+    const persistenceFailure = createApplication({
+      newTask: {
+        loadOpenNewTaskSession: async () => null,
+        decideNewTaskAdmission: async () => ({
+          kind: "advancement-task",
+          action: "start-advancement",
+          reason: "needs rubric",
+        }),
+        buildNewTaskRubricDraft: async () => draft,
+        persistNewTaskAwaitingSession: async () => {
+          throw new Error("session write failed");
+        },
+      },
+    });
+    await expect(
+      persistenceFailure.prepareNewTask({
+        conversationId: "conv-1",
+        conversationScope: "existing",
+        turnId: "turn-1",
+        userInput: { parts: [{ type: "text", text: "推进任务" }] },
+      }),
+    ).rejects.toThrow("session write failed");
+  });
+
+  it("contributes one Query plus five finite Commands and four Facts", async () => {
     const source = session({
       status: "awaiting-rubric-confirmation",
       pendingRubricDraft: pendingRubric("待修订标准"),
@@ -1132,12 +1415,14 @@ describe("AdvancementApplicationService detail query", () => {
 
     expect(ADVANCEMENT_PRODUCT_API_EXACT_SET.operations).toEqual([
       ADVANCEMENT_DETAIL_QUERY,
+      ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
       ADVANCEMENT_REVISE_RUBRIC_COMMAND,
       ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
       ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
       ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
     ]);
     expect(ADVANCEMENT_PRODUCT_API_EXACT_SET.factEvents).toEqual([
+      ADVANCEMENT_CONTRACT_DRAFT_CREATED_FACT_EVENT,
       ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT,
       ADVANCEMENT_CONTRACT_CONFIRMED_FACT_EVENT,
       ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT,
@@ -1147,6 +1432,17 @@ describe("AdvancementApplicationService detail query", () => {
         conversationId: "conv-1",
       }),
     ).resolves.toMatchObject({ advancementSessionId: "adv-1" });
+    await expect(
+      dispatcher.command(ADVANCEMENT_PREPARE_NEW_TASK_COMMAND, {
+        conversationId: "conv-new",
+        conversationScope: "new",
+        turnId: "turn-new",
+        userInput: { parts: [{ type: "text", text: "直接回答" }] },
+      }),
+    ).resolves.toMatchObject({
+      result: { kind: "run-direct" },
+      facts: [],
+    });
     await expect(
       dispatcher.command(ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND, {
         conversationId: "conv-1",
@@ -1220,6 +1516,9 @@ function createApplication(
   return new AdvancementApplicationService({
     detail: overrides.detail ?? fixture.options.detail,
     maintenance: overrides.maintenance ?? fixture.options.maintenance,
+    newTask: overrides.newTask ?? fixture.options.newTask,
+    newTaskConversation:
+      overrides.newTaskConversation ?? fixture.options.newTaskConversation,
     rubricRevision:
       overrides.rubricRevision ?? fixture.options.rubricRevision,
     rubricCancellation:
@@ -1244,6 +1543,8 @@ type RevisionFixtureOverrides =
   Partial<AdvancementRubricConfirmationMechanismPort> &
   Readonly<{
     maintenance?: AdvancementConversationMaintenancePort;
+    newTask?: AdvancementApplicationOptions["newTask"];
+    newTaskConversation?: AdvancementApplicationOptions["newTaskConversation"];
     originalTask?: AdvancementOriginalTaskExecutionPort;
     confirmedOriginalTask?: AdvancementConfirmedOriginalTaskAdmissionPort;
     rubricPublication?: RubricPublicationPort;
@@ -1279,6 +1580,10 @@ function createRevisionFixture(
   };
   const maintenance: AdvancementConversationMaintenancePort =
     overrides.maintenance ?? {
+      runNew: async (_conversationId, operation) => ({
+        status: "done",
+        value: await operation(),
+      }),
       runExisting: async (_conversationId, operation) => ({
         status: "done",
         value: await operation(),
@@ -1374,6 +1679,33 @@ function createRevisionFixture(
   const options: AdvancementApplicationOptions = {
     detail: port(current),
     maintenance,
+    newTask: overrides.newTask ?? {
+      loadOpenNewTaskSession: async () => null,
+      decideNewTaskAdmission: async () => ({
+        kind: "direct-task",
+        action: "run-direct",
+        reason: "test",
+      }),
+      buildNewTaskRubricDraft: async () => pendingRubric("新任务标准"),
+      persistNewTaskAwaitingSession: async ({
+        conversationId,
+        originalUserTask,
+        draft,
+      }) => {
+        current = session({
+          id: `adv_${draft.draftId}`,
+          conversationId,
+          status: "awaiting-rubric-confirmation",
+          originalUserTask,
+          pendingRubricDraft: draft,
+          confirmedRubric: undefined,
+        });
+        return current;
+      },
+    },
+    newTaskConversation: overrides.newTaskConversation ?? {
+      ensureShell: async () => undefined,
+    },
     rubricRevision,
     rubricCancellation,
     awaitingRubricAdmission,

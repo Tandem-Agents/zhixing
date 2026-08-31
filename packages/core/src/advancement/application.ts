@@ -8,7 +8,7 @@ import {
   type ProductApiFact,
   type ProductApiContribution,
 } from "../product-api/catalog.js";
-import { protocolDigest } from "../protocol/canonical.js";
+import { canonicalize, protocolDigest } from "../protocol/canonical.js";
 import type { AdvancementAdmissionDecision } from "./admission.js";
 import { buildClosureFacts, type AdvancementClosureFacts } from "./closure.js";
 import type {
@@ -34,6 +34,13 @@ export interface AdvancementDetailReadPort {
 
 /** Conversation-owned exclusivity mechanism; Advancement owns the enclosed decision. */
 export interface AdvancementConversationMaintenancePort {
+  runNew<T>(
+    conversationId: string,
+    operation: () => Promise<T>,
+  ): Promise<
+    | { readonly status: "done"; readonly value: T }
+    | { readonly status: "busy" }
+  >;
   runExisting<T>(
     conversationId: string,
     operation: () => Promise<T>,
@@ -42,6 +49,31 @@ export interface AdvancementConversationMaintenancePort {
     | { readonly status: "busy" }
     | { readonly status: "not-found" }
   >;
+}
+
+/** Path-free mechanisms used by the no-open-session new-task decision. */
+export interface AdvancementNewTaskMechanismPort {
+  loadOpenNewTaskSession(
+    conversationId: string,
+  ): Promise<AdvancementSession | null>;
+  decideNewTaskAdmission(input: Readonly<{
+    conversationId: string;
+    userInput: Readonly<UserTurnInput>;
+  }>): Promise<AdvancementAdmissionDecision>;
+  buildNewTaskRubricDraft(input: Readonly<{
+    originalTurnId: string;
+    originalUserTask: Readonly<UserTurnInput>;
+  }>): Promise<RubricContractDraftSnapshot>;
+  persistNewTaskAwaitingSession(input: Readonly<{
+    conversationId: string;
+    originalUserTask: Readonly<UserTurnInput>;
+    draft: RubricContractDraftSnapshot;
+  }>): Promise<AdvancementSession>;
+}
+
+/** Conversation application boundary used only after a draft has been built. */
+export interface AdvancementNewTaskConversationPort {
+  ensureShell(conversationId: string): Promise<void>;
 }
 
 /** Path-free mechanisms used by the Advancement rubric-revision application decision. */
@@ -228,6 +260,8 @@ export interface AdvancementRubricConfirmationFactPort {
 export interface AdvancementApplicationOptions {
   readonly detail: AdvancementDetailReadPort;
   readonly maintenance: AdvancementConversationMaintenancePort;
+  readonly newTask: AdvancementNewTaskMechanismPort;
+  readonly newTaskConversation: AdvancementNewTaskConversationPort;
   readonly rubricRevision: AdvancementRubricRevisionMechanismPort;
   readonly rubricCancellation: AdvancementRubricCancellationMechanismPort;
   readonly awaitingRubricAdmission: AdvancementAwaitingRubricAdmissionMechanismPort;
@@ -235,6 +269,44 @@ export interface AdvancementApplicationOptions {
   readonly rubricPublication?: RubricPublicationPort;
   readonly originalTask: AdvancementOriginalTaskExecutionPort;
   readonly confirmedOriginalTask: AdvancementConfirmedOriginalTaskAdmissionPort;
+}
+
+export interface AdvancementNewTaskCommand {
+  readonly conversationId: string;
+  readonly conversationScope: "existing" | "new";
+  readonly turnId: string;
+  readonly userInput: Readonly<UserTurnInput>;
+}
+
+export type AdvancementNewTaskResult =
+  | Readonly<{ kind: "not-applicable" }>
+  | Readonly<{
+      kind: "run-direct";
+      admission: AdvancementAdmissionDecision;
+    }>
+  | Readonly<{ kind: "owner-busy" }>
+  | Readonly<{
+      kind: "contract-failed";
+      conversationId: string;
+      originalTurnId: string;
+      error: Readonly<{ message: string }>;
+    }>
+  | Readonly<{
+      kind: "awaiting-rubric-confirmation";
+      conversationId: string;
+      advancementSessionId: string;
+      draft: RubricContractDraftSnapshot;
+      admission: AdvancementAdmissionDecision;
+    }>;
+
+export interface AdvancementContractDraftCreatedFact extends ProductApiFact {
+  readonly kind: "advancement-contract-draft-created";
+  readonly conversationId: string;
+  readonly originalTurnId: string;
+  readonly advancementSessionId: string;
+  readonly rubricDraftId: string;
+  readonly rubricDraft: RubricContractDraftSnapshot;
+  readonly admission: AdvancementAdmissionDecision;
 }
 
 export interface AdvancementDetailQuery {
@@ -398,6 +470,12 @@ export class AdvancementApplicationError extends Error {
 
 export interface AdvancementApplication {
   queryDetail(query: AdvancementDetailQuery): Promise<AdvancementDetailResult>;
+  prepareNewTask(
+    command: AdvancementNewTaskCommand,
+  ): Promise<Readonly<{
+    result: AdvancementNewTaskResult;
+    fact?: AdvancementContractDraftCreatedFact;
+  }>>;
   reviseRubricDraft(
     command: AdvancementRubricRevisionCommand,
   ): Promise<Readonly<{
@@ -428,6 +506,8 @@ export interface AdvancementApplication {
 export class AdvancementApplicationService implements AdvancementApplication {
   readonly #detail: AdvancementDetailReadPort;
   readonly #maintenance: AdvancementConversationMaintenancePort;
+  readonly #newTask: AdvancementNewTaskMechanismPort;
+  readonly #newTaskConversation: AdvancementNewTaskConversationPort;
   readonly #rubricRevision: AdvancementRubricRevisionMechanismPort;
   readonly #rubricCancellation: AdvancementRubricCancellationMechanismPort;
   readonly #awaitingRubricAdmission: AdvancementAwaitingRubricAdmissionMechanismPort;
@@ -439,6 +519,8 @@ export class AdvancementApplicationService implements AdvancementApplication {
   constructor(options: AdvancementApplicationOptions) {
     this.#detail = options.detail;
     this.#maintenance = options.maintenance;
+    this.#newTask = options.newTask;
+    this.#newTaskConversation = options.newTaskConversation;
     this.#rubricRevision = options.rubricRevision;
     this.#rubricCancellation = options.rubricCancellation;
     this.#awaitingRubricAdmission = options.awaitingRubricAdmission;
@@ -468,6 +550,119 @@ export class AdvancementApplicationService implements AdvancementApplication {
       facts: buildClosureFacts(session),
       ...(lastReview ? { lastReview } : {}),
     });
+  }
+
+  async prepareNewTask(
+    command: AdvancementNewTaskCommand,
+  ): Promise<Readonly<{
+    result: AdvancementNewTaskResult;
+    fact?: AdvancementContractDraftCreatedFact;
+  }>> {
+    assertConversationId(command.conversationId);
+    assertRubricRevisionIdentity(command.turnId, "Turn");
+    if (
+      command.conversationScope !== "existing" &&
+      command.conversationScope !== "new"
+    ) {
+      throw new TypeError("Advancement new task requires a conversation scope");
+    }
+    if (!isNonEmptyUserTurnInput(command.userInput)) {
+      throw new TypeError("Advancement new task requires non-empty user input");
+    }
+
+    const decide = async () => {
+      const open = await this.#newTask.loadOpenNewTaskSession(
+        command.conversationId,
+      );
+      if (open) {
+        return Object.freeze({
+          result: Object.freeze<AdvancementNewTaskResult>({
+            kind: "not-applicable",
+          }),
+        });
+      }
+
+      const admission = await this.#newTask.decideNewTaskAdmission({
+        conversationId: command.conversationId,
+        userInput: command.userInput,
+      });
+      if (admission.action !== "start-advancement") {
+        if (admission.action !== "run-direct") {
+          throw new TypeError(
+            `Advancement new-task admission returned invalid action: ${admission.action}`,
+          );
+        }
+        return Object.freeze({
+          result: Object.freeze<AdvancementNewTaskResult>({
+            kind: "run-direct",
+            admission: freezeSnapshot(admission),
+          }),
+        });
+      }
+
+      let draft: RubricContractDraftSnapshot;
+      try {
+        draft = await this.#newTask.buildNewTaskRubricDraft({
+          originalTurnId: command.turnId,
+          originalUserTask: command.userInput,
+        });
+      } catch (error) {
+        return Object.freeze({
+          result: Object.freeze<AdvancementNewTaskResult>({
+            kind: "contract-failed",
+            conversationId: command.conversationId,
+            originalTurnId: command.turnId,
+            error: Object.freeze({ message: applicationErrorMessage(error) }),
+          }),
+        });
+      }
+
+      if (command.conversationScope === "new") {
+        await this.#newTaskConversation.ensureShell(command.conversationId);
+      }
+      const committed = await this.#newTask.persistNewTaskAwaitingSession({
+        conversationId: command.conversationId,
+        originalUserTask: command.userInput,
+        draft,
+      });
+      assertCommittedNewTaskSession(committed, command, draft);
+      const admissionSnapshot = freezeSnapshot(admission);
+      const draftSnapshot = freezeSnapshot(draft);
+      const result = Object.freeze<AdvancementNewTaskResult>({
+        kind: "awaiting-rubric-confirmation",
+        conversationId: committed.conversationId,
+        advancementSessionId: committed.id,
+        draft: draftSnapshot,
+        admission: admissionSnapshot,
+      });
+      const fact = Object.freeze<AdvancementContractDraftCreatedFact>({
+        kind: "advancement-contract-draft-created",
+        conversationId: committed.conversationId,
+        originalTurnId: command.turnId,
+        advancementSessionId: committed.id,
+        rubricDraftId: draftSnapshot.draftId,
+        rubricDraft: draftSnapshot,
+        admission: admissionSnapshot,
+      });
+      return Object.freeze({ result, fact });
+    };
+
+    const maintained =
+      command.conversationScope === "existing"
+        ? await this.#maintenance.runExisting(command.conversationId, decide)
+        : await this.#maintenance.runNew(command.conversationId, decide);
+    if (maintained.status === "busy") {
+      return Object.freeze({
+        result: Object.freeze<AdvancementNewTaskResult>({ kind: "owner-busy" }),
+      });
+    }
+    if (maintained.status === "not-found") {
+      throw new AdvancementApplicationError(
+        "conversation-not-found",
+        `Conversation not found: ${command.conversationId}`,
+      );
+    }
+    return maintained.value;
   }
 
   async reviseRubricDraft(
@@ -1211,6 +1406,21 @@ export const ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT =
     AdvancementContractDraftRevisedFact
   >("advancement-contract-draft-revised");
 
+export const ADVANCEMENT_CONTRACT_DRAFT_CREATED_FACT_EVENT =
+  defineProductApiFactEvent<
+    "advancement-contract-draft-created",
+    AdvancementContractDraftCreatedFact
+  >("advancement-contract-draft-created");
+
+export const ADVANCEMENT_PREPARE_NEW_TASK_COMMAND = defineProductApiCommand<
+  "advancement.command.prepare-new-task",
+  AdvancementNewTaskCommand,
+  AdvancementNewTaskResult,
+  AdvancementContractDraftCreatedFact
+>("advancement.command.prepare-new-task", [
+  ADVANCEMENT_CONTRACT_DRAFT_CREATED_FACT_EVENT,
+], { factEmission: "subset" });
+
 export const ADVANCEMENT_REVISE_RUBRIC_COMMAND = defineProductApiCommand<
   "advancement.command.revise-rubric",
   AdvancementRubricRevisionCommand,
@@ -1263,12 +1473,14 @@ export const ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND =
 export const ADVANCEMENT_PRODUCT_API_EXACT_SET = defineProductApiExactSet({
   operations: [
     ADVANCEMENT_DETAIL_QUERY,
+    ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
     ADVANCEMENT_REVISE_RUBRIC_COMMAND,
     ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
     ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
     ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
   ],
   factEvents: [
+    ADVANCEMENT_CONTRACT_DRAFT_CREATED_FACT_EVENT,
     ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT,
     ADVANCEMENT_CONTRACT_CONFIRMED_FACT_EVENT,
     ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT,
@@ -1284,6 +1496,16 @@ export function createAdvancementProductApiContribution(
         result: await application.queryDetail(query),
         facts: [],
       })),
+      bindProductApiOperation(
+        ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
+        async (command) => {
+          const prepared = await application.prepareNewTask(command);
+          return {
+            result: prepared.result,
+            facts: prepared.fact ? [prepared.fact] : [],
+          };
+        },
+      ),
       bindProductApiOperation(
         ADVANCEMENT_REVISE_RUBRIC_COMMAND,
         async (command) => {
@@ -1317,6 +1539,7 @@ export function createAdvancementProductApiContribution(
       ),
     ],
     factEvents: [
+      ADVANCEMENT_CONTRACT_DRAFT_CREATED_FACT_EVENT,
       ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT,
       ADVANCEMENT_CONTRACT_CONFIRMED_FACT_EVENT,
       ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT,
@@ -1366,6 +1589,27 @@ function assertAdvancementSessionIdentity(
       "advancement-session-identity-mismatch",
       "Advancement confirmation mechanism returned a mismatched session identity",
       { advancementSessionId: command.advancementSessionId },
+    );
+  }
+}
+
+function assertCommittedNewTaskSession(
+  session: AdvancementSession,
+  command: AdvancementNewTaskCommand,
+  draft: RubricContractDraftSnapshot,
+): void {
+  if (
+    session.status !== "awaiting-rubric-confirmation" ||
+    session.conversationId !== command.conversationId ||
+    session.id !== `adv_${draft.draftId}` ||
+    !session.pendingRubricDraft ||
+    canonicalize(session.pendingRubricDraft) !== canonicalize(draft) ||
+    canonicalize(session.originalUserTask) !== canonicalize(command.userInput)
+  ) {
+    throw new AdvancementApplicationError(
+      "committed-rubric-draft-missing",
+      `Committed Advancement session has no matching new-task draft: ${session.id}`,
+      { advancementSessionId: session.id },
     );
   }
 }
@@ -1428,6 +1672,10 @@ function publicationMessage(outcome: RubricPublicationOutcome): string {
     : outcome.kind === "unavailable"
       ? "准则已用于本任务，连接值班设备后可保存到准则库。"
     : outcome.message;
+}
+
+function applicationErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function normalizeUserFeedback(value: string): string {

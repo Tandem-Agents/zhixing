@@ -85,6 +85,8 @@ describe("production startup server ownership", () => {
     expect(advancementApplication).toBeGreaterThan(conversationApplication);
     expect(advancementContribution).toBeLessThan(dispatcher);
     expect(source).toContain("ADVANCEMENT_PRODUCT_API_EXACT_SET.operations");
+    expect(source).toContain("newTask: advancementDetailController");
+    expect(source).toContain("newTaskConversation: {");
     expect(source).toContain("rubricRevision: advancementDetailController");
     expect(source).toContain("rubricCancellation: advancementDetailController");
     expect(source).toContain("awaitingRubricAdmission: advancementDetailController");
@@ -97,6 +99,10 @@ describe("production startup server ownership", () => {
       "createAnchorAdvancementConfirmedOriginalTaskAdmissionPort(\n              conversationApplication",
     );
     expect(source).toContain("ctx.conversations!.runMaintenanceExisting(");
+    expect(source).toContain("ctx.conversations!.runMaintenance(conversationId, operation)");
+    expect(source).toContain(
+      '.ensureShell({ kind: "ensure-shell", conversationId })',
+    );
     expect(context).toContain("productApi,");
     expect(context).not.toContain("skillCatalog:");
     expect(context).not.toContain("resolveDelivery:");

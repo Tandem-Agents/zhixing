@@ -2147,12 +2147,21 @@ async function runServerProcess(
               advancementDetailController.loadLatestSession(conversationId),
           },
           maintenance: {
+            runNew: (conversationId, operation) =>
+              ctx.conversations!.runMaintenance(conversationId, operation),
             runExisting: (conversationId, operation) =>
               ctx.conversations!.runMaintenanceExisting(
                 conversationId,
                 () => conversationDirectory.exists(conversationId),
                 operation,
               ),
+          },
+          newTask: advancementDetailController,
+          newTaskConversation: {
+            ensureShell: (conversationId) =>
+              conversationApplication
+                .ensureShell({ kind: "ensure-shell", conversationId })
+                .then(() => undefined),
           },
           rubricRevision: advancementDetailController,
           rubricCancellation: advancementDetailController,

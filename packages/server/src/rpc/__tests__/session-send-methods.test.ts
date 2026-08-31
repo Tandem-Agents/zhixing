@@ -14,7 +14,10 @@ import {
   type ConversationAgentTurnIdentityPort,
 } from "@zhixing/core/conversation/application";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
-import { ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND } from "@zhixing/core/advancement/application";
+import {
+  ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
+  ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
+} from "@zhixing/core/advancement/application";
 import {
   ConversationManager,
   type SessionRuntime,
@@ -212,12 +215,17 @@ describe("session.send 方法", () => {
   it("generates one legacy identity before Advancement preprocessing", async () => {
     const createTurnIdentity = vi.fn(() => "turn-generated");
     const admit = vi.fn();
-    const prepareUserTurn = vi.fn(async (input: { readonly turnId: string }) => ({
-      kind: "contract-failed" as const,
-      conversationId: "conversation-1",
-      originalTurnId: input.turnId,
-      error: { message: "draft failed" },
-    }));
+    const prepareNewTask = vi.fn(
+      async (input: { readonly turnId: string }) => ({
+        result: {
+          kind: "contract-failed" as const,
+          conversationId: "conversation-1",
+          originalTurnId: input.turnId,
+          error: { message: "draft failed" },
+        },
+        facts: [],
+      }),
+    );
     const addObserver = vi.fn(() => true);
     const notify = vi.fn();
     const method = buildSessionSendMethod();
@@ -229,11 +237,14 @@ describe("session.send 方法", () => {
     const productApi = {
       supports: (descriptor: Parameters<ProductApiDispatcher["supports"]>[0]) =>
         descriptor === ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND ||
+        descriptor === ADVANCEMENT_PREPARE_NEW_TASK_COMMAND ||
         conversationProductApi.supports(descriptor),
       query: conversationProductApi.query.bind(conversationProductApi),
       command: async (descriptor: unknown, input: unknown) =>
         descriptor === ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND
           ? { result: { kind: "not-applicable" }, facts: [] }
+          : descriptor === ADVANCEMENT_PREPARE_NEW_TASK_COMMAND
+            ? await prepareNewTask(input as { readonly turnId: string })
           : await conversationProductApi.command(
               descriptor as never,
               input as never,
@@ -251,7 +262,6 @@ describe("session.send 方法", () => {
         },
         advancement: {
           loadActiveSession: async () => null,
-          prepareUserTurn,
         },
         productApi,
       } as unknown as ServerContext,
@@ -271,7 +281,7 @@ describe("session.send 方法", () => {
       status: "contract-failed",
     });
     expect(createTurnIdentity).toHaveBeenCalledTimes(1);
-    expect(prepareUserTurn).toHaveBeenCalledWith(expect.objectContaining({
+    expect(prepareNewTask).toHaveBeenCalledWith(expect.objectContaining({
       turnId: "turn-generated",
     }));
     expect(addObserver).toHaveBeenCalledTimes(1);

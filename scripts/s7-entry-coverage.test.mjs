@@ -3541,6 +3541,16 @@ test("Advancement detail and rubric lifecycle have one Product API application o
   );
   assert.match(
     inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace(
+        "const racedActivePrepared = await prepareActiveAdvancementUserTurn({",
+        "const racedActivePrepared = null;\n            void prepareActiveAdvancementUserTurn({",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
       "packages/owner-services/src/advancement/controller.ts",
       (text) => `${text}\nasync cancelRubric(input: unknown) { return input; }`,
     )).join("\n"),
@@ -3633,6 +3643,40 @@ test("Advancement detail and rubric lifecycle have one Product API application o
       (text) => text.replace(
         "awaitingRubricAdmission: advancementDetailController,",
         "",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace(
+        "return await productApi.command(\n                ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,",
+        "return await ctx.server.advancement.prepareUserTurn(\n                ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/owner-services/src/advancement/controller.ts",
+      (text) => `${text}\ntype RetiredNewTask = { readonly kind: "run-direct" };`,
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace("newTask: advancementDetailController,", ""),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/core/src/advancement/application.ts",
+      (text) => text.replace(
+        "await this.#newTaskConversation.ensureShell(command.conversationId);",
+        "void this.#newTaskConversation.ensureShell(command.conversationId);",
       ),
     )).join("\n"),
     failure,

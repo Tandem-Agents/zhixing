@@ -3407,7 +3407,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     : "";
   const cancelStart = reviseEnd;
   const cancelEnd = handler.indexOf(
-    "type AdvancementPrepareOwnerResult",
+    "async function prepareActiveAdvancementUserTurn",
     cancelStart,
   );
   const cancel = cancelStart >= 0 && cancelEnd > cancelStart
@@ -3435,6 +3435,15 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   const awaitingControl =
     awaitingControlStart >= 0 && awaitingControlEnd > awaitingControlStart
       ? application.slice(awaitingControlStart, awaitingControlEnd)
+      : "";
+  const newTaskStart = application.indexOf("async prepareNewTask(");
+  const newTaskEnd = application.indexOf(
+    "async reviseRubricDraft(",
+    newTaskStart,
+  );
+  const newTask =
+    newTaskStart >= 0 && newTaskEnd > newTaskStart
+      ? application.slice(newTaskStart, newTaskEnd)
       : "";
   const sendStart = handler.indexOf("export function buildSessionSendMethod()");
   const sendEnd = handler.indexOf(
@@ -3466,7 +3475,15 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes("ADVANCEMENT_DETAIL_QUERY") ||
     !application.includes('"advancement.query.detail"') ||
     !application.includes("interface AdvancementConversationMaintenancePort") ||
+    !application.includes("interface AdvancementNewTaskMechanismPort") ||
+    !application.includes("interface AdvancementNewTaskConversationPort") ||
     !application.includes("interface AdvancementRubricRevisionMechanismPort") ||
+    !application.includes("ADVANCEMENT_PREPARE_NEW_TASK_COMMAND") ||
+    !application.includes('"advancement.command.prepare-new-task"') ||
+    !application.includes("ADVANCEMENT_CONTRACT_DRAFT_CREATED_FACT_EVENT") ||
+    !application.includes('"advancement-contract-draft-created"') ||
+    application.split("ADVANCEMENT_PREPARE_NEW_TASK_COMMAND").length - 1 !== 3 ||
+    application.split("ADVANCEMENT_CONTRACT_DRAFT_CREATED_FACT_EVENT").length - 1 !== 4 ||
     !application.includes("ADVANCEMENT_REVISE_RUBRIC_COMMAND") ||
     !application.includes('"advancement.command.revise-rubric"') ||
     !application.includes("ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT") ||
@@ -3527,13 +3544,30 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     awaitingControl.indexOf("await this.#originalTask.execute") < 0 ||
     awaitingControl.indexOf("await command.fact.publish(decision.fact)") >
       awaitingControl.indexOf("await this.#originalTask.execute") ||
+    newTask.length === 0 ||
+    !newTask.includes("loadOpenNewTaskSession(") ||
+    !newTask.includes("if (open)") ||
+    !newTask.includes('kind: "not-applicable"') ||
+    !newTask.includes("decideNewTaskAdmission({") ||
+    !newTask.includes('admission.action !== "start-advancement"') ||
+    !newTask.includes('admission.action !== "run-direct"') ||
+    !newTask.includes("buildNewTaskRubricDraft({") ||
+    !newTask.includes('command.conversationScope === "new"') ||
+    !newTask.includes("await this.#newTaskConversation.ensureShell(") ||
+    !newTask.includes("persistNewTaskAwaitingSession({") ||
+    !newTask.includes("assertCommittedNewTaskSession(") ||
+    newTask.indexOf("await this.#newTaskConversation.ensureShell(") >
+      newTask.indexOf("persistNewTaskAwaitingSession({") ||
+    !newTask.includes('kind: "advancement-contract-draft-created"') ||
+    !newTask.includes("this.#maintenance.runExisting(") ||
+    !newTask.includes("this.#maintenance.runNew(") ||
     application.includes("freezeSnapshot(revisedDraft)") ||
     !application.includes("ADVANCEMENT_PRODUCT_API_EXACT_SET") ||
     !application.includes("createAdvancementProductApiContribution") ||
     !application.includes("buildClosureFacts(session)") ||
     application.split("defineProductApiQuery<").length - 1 !== 1 ||
-    application.split("defineProductApiCommand<").length - 1 !== 4 ||
-    application.split("defineProductApiFactEvent<").length - 1 !== 3 ||
+    application.split("defineProductApiCommand<").length - 1 !== 5 ||
+    application.split("defineProductApiFactEvent<").length - 1 !== 4 ||
     /@zhixing\/(?:server|rpc|owner-services)|\.\.\/\.\.\/server|\.\.\/\.\.\/owner-services/u.test(
       application,
     ) ||
@@ -3582,6 +3616,25 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !send.includes('controlled.result.kind === "direct-original-task"') ||
     !send.includes('controlled.result.kind === "cancelled"') ||
     !send.includes("publishAdvancementCancellationFact(") ||
+    !send.includes("ADVANCEMENT_PREPARE_NEW_TASK_COMMAND") ||
+    send.split("ADVANCEMENT_PREPARE_NEW_TASK_COMMAND").length - 1 !== 2 ||
+    !send.includes(
+      "return await productApi.command(\n                ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,",
+    ) ||
+    !send.includes('conversationScope: id ? "existing" : "new"') ||
+    !send.includes('prepared.kind === "owner-busy"') ||
+    !send.includes('prepared.kind === "awaiting-rubric-confirmation"') ||
+    !send.includes('prepared.kind === "contract-failed"') ||
+    !send.includes("newTaskNotApplicable") ||
+    !send.includes(
+      "if (newTaskNotApplicable) {\n            const racedActivePrepared = await prepareActiveAdvancementUserTurn({",
+    ) ||
+    !send.includes(
+      "projectActiveAdvancementPreparation(racedActivePrepared)",
+    ) ||
+    send.split("prepareActiveAdvancementUserTurn({").length - 1 !== 2 ||
+    send.includes("Advancement state changed before new-task dispatch") ||
+    send.includes("prepareAdvancementUserTurn(") ||
     send.includes("hasAwaitingAdvancementConfirmation") ||
     send.includes('prepared.kind === "await-existing-confirmation"') ||
     send.includes('prepared.kind === "cancelled-pending-task"') ||
@@ -3605,6 +3658,15 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !controller.includes("loadRubricCancellationSession(") ||
     !controller.includes("persistRubricCancellation(input:") ||
     !controller.includes("decideAwaitingRubricAdmission(") ||
+    !controller.includes("loadOpenNewTaskSession(") ||
+    !controller.includes("decideNewTaskAdmission(") ||
+    !controller.includes("buildNewTaskRubricDraft(") ||
+    !controller.includes("persistNewTaskAwaitingSession(") ||
+    !controller.includes("no-open-session preparation must use the Advancement application") ||
+    controller.includes('readonly kind: "run-direct"') ||
+    controller.includes('readonly kind: "awaiting-rubric-confirmation"') ||
+    controller.includes("this.contractBuilder.buildDraft({") ||
+    controller.split("this.store.createSession({").length - 1 !== 2 ||
     !controller.includes("hasOpenAdvancementSession: true") ||
     controller.includes('readonly kind: "await-existing-confirmation"') ||
     controller.includes('readonly kind: "cancelled-pending-task"') ||
@@ -3620,6 +3682,10 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     composition.split("new AdvancementApplicationService(").length - 1 !== 1 ||
     composition.split("createAdvancementProductApiContribution(").length - 1 !== 1 ||
     !composition.includes("advancementDetailController.loadLatestSession(conversationId)") ||
+    !composition.includes("newTask: advancementDetailController") ||
+    !composition.includes("newTaskConversation: {") ||
+    !composition.includes("ctx.conversations!.runMaintenance(conversationId, operation)") ||
+    !composition.includes('.ensureShell({ kind: "ensure-shell", conversationId })') ||
     !composition.includes("ctx.conversations!.runMaintenanceExisting(") ||
     !composition.includes("rubricRevision: advancementDetailController") ||
     !composition.includes("rubricCancellation: advancementDetailController") ||

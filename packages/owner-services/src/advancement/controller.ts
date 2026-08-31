@@ -41,6 +41,7 @@ import type {
 import type {
   AdvancementAwaitingRubricAdmissionDecision,
   AdvancementAwaitingRubricAdmissionMechanismPort,
+  AdvancementNewTaskMechanismPort,
   AdvancementRubricConfirmationMechanismPort,
   AdvancementRubricRevisionMechanismPort,
   RubricPublicationOutcome,
@@ -61,10 +62,6 @@ import {
 
 export type AdvancementPrepareResult =
   | {
-      readonly kind: "run-direct";
-      readonly admission: AdvancementAdmissionDecision;
-    }
-  | {
       readonly kind: "active-user-turn";
       readonly session: AdvancementSession;
       readonly admission: AdvancementAdmissionDecision;
@@ -81,12 +78,6 @@ export type AdvancementPrepareResult =
       readonly exitedSession: AdvancementSession;
       readonly exit: AdvancementExit;
       readonly closure: AdvancementClosureReport;
-      readonly session: AdvancementSession;
-      readonly draft: RubricContractDraftSnapshot;
-      readonly admission: AdvancementAdmissionDecision;
-    }
-  | {
-      readonly kind: "awaiting-rubric-confirmation";
       readonly session: AdvancementSession;
       readonly draft: RubricContractDraftSnapshot;
       readonly admission: AdvancementAdmissionDecision;
@@ -192,6 +183,7 @@ export type AdvancementTurnReviewResult =
 
 export class AdvancementController implements
   AdvancementAwaitingRubricAdmissionMechanismPort,
+  AdvancementNewTaskMechanismPort,
   AdvancementRubricRevisionMechanismPort,
   AdvancementRubricConfirmationMechanismPort
 {
@@ -257,6 +249,49 @@ export class AdvancementController implements
       kind: decision.kind,
       action: decision.action,
       reason: decision.reason,
+    });
+  }
+
+  loadOpenNewTaskSession(
+    conversationId: string,
+  ): Promise<AdvancementSession | null> {
+    return this.store.loadActiveSession(conversationId);
+  }
+
+  async decideNewTaskAdmission(input: Readonly<{
+    conversationId: string;
+    userInput: Readonly<UserTurnInput>;
+  }>): Promise<AdvancementAdmissionDecision> {
+    const decision = await this.decideAdmission(input);
+    if (
+      decision.action !== "run-direct" &&
+      decision.action !== "start-advancement"
+    ) {
+      throw new Error(
+        `AdvancementController: invalid new-task admission action ${decision.action}`,
+      );
+    }
+    return decision;
+  }
+
+  buildNewTaskRubricDraft(input: Readonly<{
+    originalTurnId: string;
+    originalUserTask: Readonly<UserTurnInput>;
+  }>): Promise<RubricContractDraftSnapshot> {
+    return this.contractBuilder.buildDraft(input);
+  }
+
+  persistNewTaskAwaitingSession(input: Readonly<{
+    conversationId: string;
+    originalUserTask: Readonly<UserTurnInput>;
+    draft: RubricContractDraftSnapshot;
+  }>): Promise<AdvancementSession> {
+    return this.store.createSession({
+      id: `adv_${input.draft.draftId}`,
+      conversationId: input.conversationId,
+      originalUserTask: input.originalUserTask,
+      pendingRubricDraft: input.draft,
+      createdAt: input.draft.createdAt,
     });
   }
 
@@ -336,44 +371,9 @@ export class AdvancementController implements
       };
     }
 
-    const admission = await this.decideAdmission({
-      conversationId: input.conversationId,
-      userInput: input.userInput,
-    });
-    if (admission.action !== "start-advancement") {
-      return { kind: "run-direct", admission };
-    }
-
-    let draft: RubricContractDraftSnapshot;
-    try {
-      draft = await this.contractBuilder.buildDraft({
-        originalTurnId: input.turnId,
-        originalUserTask: input.userInput,
-      });
-    } catch (err) {
-      return {
-        kind: "contract-failed",
-        conversationId: input.conversationId,
-        originalTurnId: input.turnId,
-        error: { message: errorMessage(err) },
-      };
-    }
-
-    await input.beforeCreateSession?.();
-    const session = await this.store.createSession({
-      id: `adv_${draft.draftId}`,
-      conversationId: input.conversationId,
-      originalUserTask: input.userInput,
-      pendingRubricDraft: draft,
-      createdAt: draft.createdAt,
-    });
-
-    return {
-      kind: "awaiting-rubric-confirmation",
-      session,
-      draft,
-      admission,
-    };
+    throw new Error(
+      "AdvancementController: no-open-session preparation must use the Advancement application",
+    );
   }
 
   /**

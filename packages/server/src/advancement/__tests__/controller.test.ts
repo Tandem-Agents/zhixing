@@ -607,9 +607,8 @@ describe("AdvancementController.afterTurnCommitted", () => {
       onAdmissionTiming: (ms) => timings.push(ms),
     });
 
-    await controller.prepareUserTurn({
+    await controller.decideNewTaskAdmission({
       conversationId: "conv-projection",
-      turnId: "turn-projection",
       userInput: task("继续把它弄完"),
     });
 
@@ -679,14 +678,22 @@ describe("AdvancementController.afterTurnCommitted", () => {
       },
     });
 
-    const result = await controller.prepareUserTurn({
+    const result = await controller.decideNewTaskAdmission({
       conversationId: "conv-projection-fail",
-      turnId: "turn-projection-fail",
       userInput: task("继续"),
     });
 
-    expect(result.kind).toBe("run-direct");
+    expect(result.action).toBe("run-direct");
     expect(decide.mock.calls.at(-1)?.[0]?.recentContext).toBeUndefined();
+    await expect(
+      controller.prepareUserTurn({
+        conversationId: "conv-projection-fail",
+        turnId: "turn-projection-fail",
+        userInput: task("继续"),
+      }),
+    ).rejects.toThrow(
+      "no-open-session preparation must use the Advancement application",
+    );
   });
 
   it("没有 active session 时跳过且不调用 reviewer", async () => {
