@@ -2,12 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 import { ProductApiDispatcher } from "../product-api/catalog.js";
 import type { WorksceneDto } from "../contracts/state.js";
 import {
-  createWorksceneManagementProductApiContribution,
+  createWorksceneProductApiContribution,
+  WORKSCENE_ENTRY_ENTER_COMMAND,
+  WORKSCENE_ENTRY_EXIT_COMMAND,
   WORKSCENE_MANAGEMENT_CREATE_COMMAND,
   WORKSCENE_MANAGEMENT_LIST_QUERY,
-  WORKSCENE_MANAGEMENT_PRODUCT_API_EXACT_SET,
-  WorksceneManagementApplicationService,
-  WorksceneManagementError,
+  WORKSCENE_PRODUCT_API_EXACT_SET,
+  WorksceneApplicationError,
+  WorksceneApplicationService,
+  type WorksceneEntryPort,
   type WorksceneManagementPort,
   type WorksceneWorkspaceAdministrationReadPort,
 } from "./application.js";
@@ -78,14 +81,24 @@ function fixture(overrides: Partial<WorksceneManagementPort> = {}) {
       },
     ]),
   };
-  const application = new WorksceneManagementApplicationService(
+  const entry: WorksceneEntryPort = {
+    enter: vi.fn(async (input) => {
+      const current = scenes.get(input.sceneId);
+      return current
+        ? { conversationId: `ws:${input.sceneId}:conv_main`, scene: current }
+        : null;
+    }),
+    exit: vi.fn(async () => {}),
+  };
+  const application = new WorksceneApplicationService(
     management,
     workspaces,
+    entry,
   );
-  return { application, management, workspaces, scenes };
+  return { application, management, workspaces, entry, scenes };
 }
 
-describe("WorksceneManagementApplicationService", () => {
+describe("WorksceneApplicationService", () => {
   it("owns the stable list projection and Workspace Administration enrichment", async () => {
     const f = fixture();
     const result = await f.application.query({ kind: "list" });
@@ -157,7 +170,7 @@ describe("WorksceneManagementApplicationService", () => {
         name: "   ",
         requestId: "create:invalid",
       }),
-    ).rejects.toBeInstanceOf(WorksceneManagementError);
+    ).rejects.toBeInstanceOf(WorksceneApplicationError);
 
     const busy = fixture({
       setWorkspace: async () => {
@@ -190,11 +203,65 @@ describe("WorksceneManagementApplicationService", () => {
     ).rejects.toMatchObject({ kind: "invalid-input" });
   });
 
-  it("contributes exactly one query and four commands with no invented Fact Event", async () => {
+  it("owns enter/exit identity, terminal and stable scene projection", async () => {
+    const f = fixture();
+    const entered = await f.application.execute({
+      kind: "enter",
+      sceneId: "scene-a",
+      observerId: "connection:7",
+      requestId: "enter:7",
+    });
+    expect(f.entry.enter).toHaveBeenCalledWith({
+      sceneId: "scene-a",
+      observerId: "connection:7",
+      requestId: "enter:7",
+    });
+    expect(entered).toMatchObject({
+      kind: "entered",
+      conversationId: "ws:scene-a:conv_main",
+      scene: {
+        sceneId: "scene-a",
+        workspace: {
+          workspaceBindingRevision: 7,
+          deviceName: "本机",
+          workspaceName: "代码库",
+        },
+      },
+    });
+
+    await expect(f.application.execute({
+      kind: "enter",
+      sceneId: "missing",
+      observerId: "connection:7",
+      requestId: "enter:missing",
+    })).rejects.toMatchObject({ kind: "not-found" });
+    await expect(f.application.execute({
+      kind: "enter",
+      sceneId: "scene-a",
+      observerId: "",
+      requestId: "enter:invalid",
+    })).rejects.toMatchObject({ kind: "invalid-input" });
+
+    await expect(f.application.execute({
+      kind: "exit",
+      sceneId: "scene-a",
+      conversationId: "ws:scene-a:conv_main",
+      observerId: "connection:7",
+      requestId: "exit:7",
+    })).resolves.toEqual({ kind: "exited", ok: true });
+    expect(f.entry.exit).toHaveBeenCalledWith({
+      sceneId: "scene-a",
+      conversationId: "ws:scene-a:conv_main",
+      observerId: "connection:7",
+      requestId: "exit:7",
+    });
+  });
+
+  it("contributes exactly one query and six commands with no invented Fact Event", async () => {
     const f = fixture();
     const dispatcher = new ProductApiDispatcher(
-      WORKSCENE_MANAGEMENT_PRODUCT_API_EXACT_SET,
-      [createWorksceneManagementProductApiContribution(f.application)],
+      WORKSCENE_PRODUCT_API_EXACT_SET,
+      [createWorksceneProductApiContribution(f.application)],
     );
 
     expect(
@@ -207,6 +274,19 @@ describe("WorksceneManagementApplicationService", () => {
     });
     expect(result.result.kind).toBe("created");
     expect(result.facts).toEqual([]);
-    expect(WORKSCENE_MANAGEMENT_PRODUCT_API_EXACT_SET.factEvents).toEqual([]);
+    expect((await dispatcher.command(WORKSCENE_ENTRY_ENTER_COMMAND, {
+      kind: "enter",
+      sceneId: "scene-a",
+      observerId: "connection:1",
+      requestId: "product-api:enter",
+    })).result.kind).toBe("entered");
+    expect((await dispatcher.command(WORKSCENE_ENTRY_EXIT_COMMAND, {
+      kind: "exit",
+      sceneId: "scene-a",
+      conversationId: "ws:scene-a:conv_main",
+      observerId: "connection:1",
+      requestId: "product-api:exit",
+    })).result).toEqual({ kind: "exited", ok: true });
+    expect(WORKSCENE_PRODUCT_API_EXACT_SET.factEvents).toEqual([]);
   });
 });

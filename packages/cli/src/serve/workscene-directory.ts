@@ -9,9 +9,6 @@ import type {
   WorkspaceProbeResult,
 } from "@zhixing/core/contracts";
 import { environmentControlSubject } from "@zhixing/core/protocol";
-import type {
-  WorksceneDirectory,
-} from "@zhixing/server";
 import type { WorksceneToolDirectory } from "./workscene-port.js";
 import type { ConversationManager } from "@zhixing/owner-kernel";
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
@@ -21,8 +18,18 @@ import type { WorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 
 const CONTROL_BUDGET = { maxCalls: 8 };
 
-export type AnchorWorksceneDirectory = WorksceneDirectory &
-  WorksceneToolDirectory & {
+export type AnchorWorksceneDirectory = WorksceneToolDirectory & {
+  enterScene(
+    sceneId: string,
+    observerId: string,
+    options?: { readonly recordActivity?: boolean; readonly requestId?: string },
+  ): Promise<{ readonly conversationId: string; readonly scene: WorksceneDto } | null>;
+  exitScene(
+    sceneId: string,
+    conversationId: string,
+    observerId: string,
+    requestId: string,
+  ): Promise<void>;
   recover(): Promise<void>;
   list(): Promise<WorksceneDto[]>;
   create(options: {

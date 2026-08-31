@@ -3481,8 +3481,8 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const worksceneRuntimeProjection = required(
     "packages/cli/src/serve/workscene-runtime-projection.ts",
   );
-  const worksceneManagementAdapter = required(
-    "packages/cli/src/serve/workscene-management-adapter.ts",
+  const worksceneApplicationAdapter = required(
+    "packages/cli/src/serve/workscene-application-adapter.ts",
   );
   const worksceneToolPort = required(
     "packages/cli/src/serve/workscene-port.ts",
@@ -3490,9 +3490,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const worksceneHandler = required(
     "packages/server/src/rpc/methods/workscene.ts",
   );
-  const serverWorksceneBridge = required(
-    "packages/server/src/runtime/workscene-directory.ts",
-  );
+  const serverRuntimeIndex = required("packages/server/src/runtime/index.ts");
   const worksceneSessionOwner = required(
     "packages/cli/src/serve/workscene-session-owner.ts",
   );
@@ -3649,32 +3647,32 @@ export function inspectSkillCatalogApplicationOwnership(records) {
         )
       : "";
 
-  const worksceneManagementStart = worksceneHandler.indexOf(
+  const worksceneApplicationStart = worksceneHandler.indexOf(
     "export function buildWorksceneListMethod()",
   );
-  const worksceneManagementEnd = worksceneHandler.indexOf(
-    "export function buildWorksceneEnterMethod()",
-    worksceneManagementStart,
-  );
-  const worksceneManagementHandlers =
-    worksceneManagementStart >= 0 && worksceneManagementEnd > worksceneManagementStart
-      ? worksceneHandler.slice(worksceneManagementStart, worksceneManagementEnd)
+  const worksceneApplicationHandlers =
+    worksceneApplicationStart >= 0
+      ? worksceneHandler.slice(worksceneApplicationStart)
       : "";
   if (
-    !worksceneApplication.includes("class WorksceneManagementApplicationService") ||
+    !worksceneApplication.includes("class WorksceneApplicationService") ||
     !worksceneApplication.includes("interface WorksceneManagementPort") ||
+    !worksceneApplication.includes("interface WorksceneEntryPort") ||
     !worksceneApplication.includes("interface WorksceneWorkspaceAdministrationReadPort") ||
-    !worksceneApplication.includes("WORKSCENE_MANAGEMENT_PRODUCT_API_EXACT_SET") ||
-    !worksceneApplication.includes("createWorksceneManagementProductApiContribution") ||
+    !worksceneApplication.includes("WORKSCENE_PRODUCT_API_EXACT_SET") ||
+    !worksceneApplication.includes("createWorksceneProductApiContribution") ||
     worksceneApplication.split("defineProductApiQuery<").length - 1 !== 1 ||
-    worksceneApplication.split("defineProductApiCommand<").length - 1 !== 4 ||
+    worksceneApplication.split("defineProductApiCommand<").length - 1 !== 6 ||
     !worksceneApplication.includes("factEvents: []") ||
-    !worksceneManagementAdapter.includes(
+    !worksceneApplicationAdapter.includes(
       'from "@zhixing/core/workscene/application"',
     ) ||
-    !worksceneManagementAdapter.includes("createAnchorWorksceneManagementPorts") ||
-    !worksceneDirectory.includes("export type AnchorWorksceneDirectory = WorksceneDirectory &") ||
+    !worksceneApplicationAdapter.includes("createAnchorWorksceneApplicationPorts") ||
+    !worksceneApplicationAdapter.includes("readonly entry: WorksceneEntryPort") ||
+    !worksceneDirectory.includes("export type AnchorWorksceneDirectory = WorksceneToolDirectory &") ||
     !worksceneDirectory.includes("WorksceneToolDirectory & {") ||
+    /\bWorksceneDirectory\b/u.test(worksceneDirectory) ||
+    worksceneDirectory.includes('from "@zhixing/server"') ||
     /export interface AnchorWorksceneDirectory\s+extends/u.test(worksceneDirectory) ||
     /\b(?:list|create|rename|setWorkdir|remove)\s*\(/u.test(worksceneToolPort) ||
     worksceneTools.includes('Pick<WorksceneToolDirectory, "rename">') ||
@@ -3688,22 +3686,26 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !worksceneHandler.includes(
       'from "@zhixing/core/workscene/application"',
     ) ||
-    !worksceneManagementHandlers.includes("requireWorksceneManagement(ctx.server)") ||
-    worksceneManagementHandlers.includes("requireWorkscenes(ctx.server)") ||
-    worksceneManagementHandlers.includes("sceneSummary(") ||
-    !composition.includes("createWorksceneManagementProductApiContribution(") ||
-    !composition.includes("new WorksceneManagementApplicationService(") ||
-    !composition.includes("...WORKSCENE_MANAGEMENT_PRODUCT_API_EXACT_SET.operations") ||
+    !worksceneApplicationHandlers.includes("requireWorksceneApplication(ctx.server)") ||
+    !worksceneApplicationHandlers.includes("WORKSCENE_ENTRY_ENTER_COMMAND") ||
+    !worksceneApplicationHandlers.includes("WORKSCENE_ENTRY_EXIT_COMMAND") ||
+    worksceneApplicationHandlers.includes("requireWorkscenes(ctx.server)") ||
+    worksceneApplicationHandlers.includes("server.workscenes") ||
+    worksceneApplicationHandlers.includes("sceneSummary(") ||
+    !composition.includes("createWorksceneProductApiContribution(") ||
+    !composition.includes("new WorksceneApplicationService(") ||
+    !composition.includes("createAnchorWorksceneApplicationPorts(") ||
+    !composition.includes("...WORKSCENE_PRODUCT_API_EXACT_SET.operations") ||
+    context.includes("WorksceneDirectory") ||
+    /\bworkscenes\??\s*:/u.test(context) ||
+    serverRuntimeIndex.includes("workscene-directory") ||
+    byPath.has("packages/server/src/runtime/workscene-directory.ts") ||
+    byPath.has("packages/cli/src/serve/workscene-management-adapter.ts") ||
     !coreManifestText.includes('"./workscene/application"') ||
     !coreBuild.includes('"src/workscene/application.ts"') ||
-    coreIndex.includes("workscene/application") ||
-    /\b(?:list|create|rename|setWorkdir|remove)\s*\(/u.test(
-      serverWorksceneBridge.slice(
-        serverWorksceneBridge.indexOf("export interface WorksceneDirectory"),
-      ),
-    )
+    coreIndex.includes("workscene/application")
   ) {
-    failures.push("Workscene management lacks one domain application and Product API owner");
+    failures.push("Workscene management and entry lack one domain application and Product API owner");
   }
 
   if (

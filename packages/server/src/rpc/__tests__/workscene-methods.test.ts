@@ -23,16 +23,15 @@ import {
 import { RPC_ERROR_CODES } from "../protocol.js";
 import { WorksceneBusyError } from "@zhixing/owner-kernel";
 import {
-  createWorksceneManagementProductApiContribution,
-  WORKSCENE_MANAGEMENT_PRODUCT_API_EXACT_SET,
-  WorksceneManagementApplicationService,
+  createWorksceneProductApiContribution,
+  WORKSCENE_PRODUCT_API_EXACT_SET,
+  WorksceneApplicationService,
 } from "@zhixing/core/workscene/application";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
-import type { WorksceneDirectory } from "../../runtime/workscene-directory.js";
 import type { ServerContext } from "../../context.js";
 import type { ConversationManager } from "@zhixing/owner-kernel";
 
-type TestWorksceneDirectory = WorksceneDirectory & {
+type TestWorksceneMechanism = {
   readonly touched: string[];
   recover(): Promise<void>;
   list(): Promise<WorkScene[]>;
@@ -50,6 +49,24 @@ type TestWorksceneDirectory = WorksceneDirectory & {
   ): Promise<{ scene: WorkScene; workspaceWarning?: string } | null>;
   remove(id: string, requestId: string): Promise<boolean>;
   recordActivity(id: string, conversationId: string, at: string): Promise<void>;
+  enterScene(
+    sceneId: string,
+    observerId: string,
+    options?: { readonly requestId?: string },
+  ): Promise<{ readonly conversationId: string; readonly scene: WorkScene } | null>;
+  exitScene(
+    sceneId: string,
+    conversationId: string,
+    observerId: string,
+    requestId: string,
+  ): Promise<void>;
+  workspaceCatalog(): Promise<readonly {
+    deviceId: string;
+    deviceName: string;
+    bindingRef: string;
+    workspaceBindingRevision: number;
+    workspaceName: string;
+  }[]>;
 };
 
 function makeScene(id: string, name = id): WorkScene {
@@ -69,7 +86,7 @@ function inputError(message: string): Error {
   });
 }
 
-function memoryWorkscenes(): TestWorksceneDirectory {
+function memoryWorkscenes(): TestWorksceneMechanism {
   const scenes = new Map<string, WorkScene>();
   const touched: string[] = [];
   let next = 0;
@@ -116,6 +133,9 @@ function memoryWorkscenes(): TestWorksceneDirectory {
     async recordActivity(id, _conversationId, _at) {
       touched.push(id);
     },
+    async workspaceCatalog() {
+      return [];
+    },
     async enterScene(sceneId) {
       const scene = scenes.get(sceneId);
       if (!scene) return null;
@@ -129,16 +149,17 @@ function memoryWorkscenes(): TestWorksceneDirectory {
 }
 
 function makeCtx(opts: {
-  workscenes?: TestWorksceneDirectory;
+  workscenes?: TestWorksceneMechanism;
   activeConversations?: string[];
   advancement?: AdvancementController;
+  advancementRecovery?: ServerContext["advancementRecovery"];
 }) {
   const productApi = opts.workscenes
     ? new ProductApiDispatcher(
-        WORKSCENE_MANAGEMENT_PRODUCT_API_EXACT_SET,
+        WORKSCENE_PRODUCT_API_EXACT_SET,
         [
-          createWorksceneManagementProductApiContribution(
-            new WorksceneManagementApplicationService(
+          createWorksceneProductApiContribution(
+            new WorksceneApplicationService(
               {
                 list: () => opts.workscenes!.list(),
                 create: (input) => opts.workscenes!.create(input),
@@ -158,7 +179,22 @@ function makeCtx(opts: {
                   opts.workscenes!.remove(input.sceneId, input.requestId),
               },
               {
-                list: () => opts.workscenes!.workspaceCatalog?.() ?? Promise.resolve([]),
+                list: () => opts.workscenes!.workspaceCatalog(),
+              },
+              {
+                enter: (input) =>
+                  opts.workscenes!.enterScene(
+                    input.sceneId,
+                    input.observerId,
+                    { requestId: input.requestId },
+                  ),
+                exit: (input) =>
+                  opts.workscenes!.exitScene(
+                    input.sceneId,
+                    input.conversationId,
+                    input.observerId,
+                    input.requestId,
+                  ),
               },
             ),
           ),
@@ -166,9 +202,9 @@ function makeCtx(opts: {
       )
     : undefined;
   const server = {
-    workscenes: opts.workscenes,
     productApi,
     advancement: opts.advancement,
+    advancementRecovery: opts.advancementRecovery,
     conversations: {
       list: () =>
         (opts.activeConversations ?? []).map((conversationId) => ({
@@ -185,20 +221,15 @@ async function call(entry: { handler: (p: unknown, c: never) => unknown }, param
 }
 
 describe("workscene.* 方法", () => {
-  it("管理面只经 Workscene Product API，enter/exit 才保留 Directory 桥", async () => {
+  it("全部七项 Workscene 行为只经同一 Product API，旧 Directory 桥归零", async () => {
     const source = await readFile(
       new URL("../methods/workscene.ts", import.meta.url),
       "utf8",
     );
-    const management = source.slice(
-      source.indexOf("export function buildWorksceneListMethod"),
-      source.indexOf("export function buildWorksceneEnterMethod"),
-    );
-    expect(management).toContain("requireWorksceneManagement(ctx.server)");
-    expect(management).not.toContain("requireWorkscenes(ctx.server)");
-    expect(management).not.toContain("sceneSummary(");
-    const entry = source.slice(source.indexOf("export function buildWorksceneEnterMethod"));
-    expect(entry).toContain("requireWorkscenes(ctx.server)");
+    expect(source.match(/requireWorksceneApplication\(ctx\.server\)/gu)).toHaveLength(7);
+    expect(source).not.toContain("requireWorkscenes");
+    expect(source).not.toContain("sceneSummary(");
+    expect(source).not.toContain("server.workscenes");
   });
 
   it("管理面全链:create → list → rename → delete;不存在 NOT_FOUND", async () => {
@@ -366,6 +397,7 @@ describe("workscene.* 方法", () => {
 
   it("enter:返回全域键与场景元数据并 touch;场景不存在 NOT_FOUND", async () => {
     const workscenes = memoryWorkscenes();
+    const enterSpy = vi.spyOn(workscenes, "enterScene");
     const ctx = makeCtx({ workscenes });
     const created = (await call(buildWorksceneCreateMethod(), { name: "开发", requestId: "create-enter" }, ctx)) as {
       sceneId: string;
@@ -379,6 +411,11 @@ describe("workscene.* 方法", () => {
     expect(entered.conversationId).toBe(`ws:${created.sceneId}:conv_main`);
     expect(entered.scene.sceneId).toBe(created.sceneId);
     expect(workscenes.touched).toContain(created.sceneId);
+    expect(enterSpy).toHaveBeenCalledWith(
+      created.sceneId,
+      "1",
+      { requestId: "enter-main" },
+    );
 
     await expect(
       call(
@@ -455,7 +492,7 @@ describe("workscene.* 方法", () => {
       calls.push("enterScene");
       return { conversationId: `ws:${sceneId}:conv_main`, scene: makeScene(sceneId) };
     };
-    const server = {
+    const ctx = makeCtx({
       workscenes,
       advancementRecovery: {
         recoverConversation: async () => {
@@ -463,12 +500,12 @@ describe("workscene.* 方法", () => {
           return { status: "no-pending-recovery" };
         },
       },
-    } as unknown as ServerContext;
+    });
 
     await call(
       buildWorksceneEnterMethod(),
       { sceneId: created.sceneId, requestId: "enter-order" },
-      { server, connection: { id: 1 } } as never,
+      ctx,
     );
 
     expect(calls).toEqual(["enterScene", "recoverConversation"]);
@@ -487,17 +524,14 @@ describe("workscene.* 方法", () => {
       const entered = (await call(
         buildWorksceneEnterMethod(),
         { sceneId: created.sceneId, requestId: "enter-recovery-failure" },
-        {
-          server: {
-            workscenes,
-            advancementRecovery: {
-              recoverConversation: async () => {
-                throw new Error("recovery failed");
-              },
+        makeCtx({
+          workscenes,
+          advancementRecovery: {
+            recoverConversation: async () => {
+              throw new Error("recovery failed");
             },
           },
-          connection: { id: 1 },
-        } as never,
+        }),
       )) as { conversationId: string; advancement?: unknown };
 
       expect(entered.conversationId).toBe(`ws:${created.sceneId}:conv_main`);
@@ -509,6 +543,7 @@ describe("workscene.* 方法", () => {
 
   it("exit:记录离开会话的场景活动(无其他副作用)", async () => {
     const workscenes = memoryWorkscenes();
+    const exitSpy = vi.spyOn(workscenes, "exitScene");
     const ctx = makeCtx({ workscenes });
     const r = (await call(
       buildWorksceneExitMethod(),
@@ -523,6 +558,22 @@ describe("workscene.* 方法", () => {
     };
     expect(r.ok).toBe(true);
     expect(workscenes.touched).toEqual(["s1"]);
+    expect(exitSpy).toHaveBeenCalledWith(
+      "s1",
+      "ws:s1:conv_main",
+      "1",
+      "exit-s1",
+    );
+    await expect(call(
+      buildWorksceneExitMethod(),
+      {
+        sceneId: "s1",
+        conversationId: "ws:other:conv_main",
+        requestId: "exit-mismatch",
+      },
+      ctx,
+    )).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    expect(exitSpy).toHaveBeenCalledTimes(1);
   });
 
   it("delete 守卫由领域服务生效:BUSY 拒绝", async () => {

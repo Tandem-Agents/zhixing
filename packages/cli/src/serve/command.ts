@@ -73,9 +73,9 @@ import {
   ProductApiDispatcher,
 } from "@zhixing/core/product-api";
 import {
-  createWorksceneManagementProductApiContribution,
-  WORKSCENE_MANAGEMENT_PRODUCT_API_EXACT_SET,
-  WorksceneManagementApplicationService,
+  createWorksceneProductApiContribution,
+  WORKSCENE_PRODUCT_API_EXACT_SET,
+  WorksceneApplicationService,
 } from "@zhixing/core/workscene/application";
 import { DeviceLifecycleJournal } from "@zhixing/core/authority";
 import {
@@ -168,7 +168,7 @@ import {
   createConversationWorksceneDeleteProjectionBridge,
 } from "./conversation-delete-binding.js";
 import { createWorksceneDirectory } from "./workscene-directory.js";
-import { createAnchorWorksceneManagementPorts } from "./workscene-management-adapter.js";
+import { createAnchorWorksceneApplicationPorts } from "./workscene-application-adapter.js";
 import { createWorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 import { createTrustAdministrationApplication } from "./trust-administration-adapter.js";
 import { PostAdoptionReviewCoordinator } from "./post-adoption-review.js";
@@ -856,7 +856,6 @@ async function runServerProcess(
     conversationRepoFor: repoForConversationId,
     taskListService: builtinExtraTools.taskListService,
     conversationAuthorityRef,
-    worksceneDirectory,
     sessionBroadcastRef,
     sessionActivityBroadcastRef,
     advancementRecoveryRef,
@@ -2087,12 +2086,13 @@ async function runServerProcess(
         }
       : undefined,
   });
-  const worksceneManagementPorts =
-    createAnchorWorksceneManagementPorts(worksceneDirectory);
-  const worksceneManagementApplication =
-    new WorksceneManagementApplicationService(
-      worksceneManagementPorts.management,
-      worksceneManagementPorts.workspaces,
+  const worksceneApplicationPorts =
+    createAnchorWorksceneApplicationPorts(worksceneDirectory);
+  const worksceneApplication =
+    new WorksceneApplicationService(
+      worksceneApplicationPorts.management,
+      worksceneApplicationPorts.workspaces,
+      worksceneApplicationPorts.entry,
     );
   const productApi = new ProductApiDispatcher(
     defineProductApiExactSet({
@@ -2102,7 +2102,7 @@ async function runServerProcess(
         ...TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET.operations,
         ...SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET.operations,
         ...SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET.operations,
-        ...WORKSCENE_MANAGEMENT_PRODUCT_API_EXACT_SET.operations,
+        ...WORKSCENE_PRODUCT_API_EXACT_SET.operations,
         ...(deliveryProductApi
           ? DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET.operations
           : []),
@@ -2113,7 +2113,7 @@ async function runServerProcess(
         ...TRUST_ADMINISTRATION_PRODUCT_API_EXACT_SET.factEvents,
         ...SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET.factEvents,
         ...SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET.factEvents,
-        ...WORKSCENE_MANAGEMENT_PRODUCT_API_EXACT_SET.factEvents,
+        ...WORKSCENE_PRODUCT_API_EXACT_SET.factEvents,
         ...(deliveryProductApi
           ? DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET.factEvents
           : []),
@@ -2130,8 +2130,8 @@ async function runServerProcess(
       createTrustAdministrationProductApiContribution(trustAdministration),
       createScheduleManagementProductApiContribution(schedulerManagement),
       createScheduleRuntimeProductApiContribution(schedulerApplication),
-      createWorksceneManagementProductApiContribution(
-        worksceneManagementApplication,
+      createWorksceneProductApiContribution(
+        worksceneApplication,
       ),
       ...(deliveryProductApi ? [deliveryProductApi] : []),
     ],
@@ -2156,7 +2156,6 @@ async function runServerProcess(
     advancementRecovery,
     perspectives: perspectivesController,
     conversationDirectory,
-    workscenes: worksceneDirectory,
     productApi,
     hostInfo: {
       // 宿主单点解析的工作区——接入面 @ 补全 root 取此

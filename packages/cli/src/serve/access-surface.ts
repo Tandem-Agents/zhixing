@@ -41,7 +41,6 @@ import type {
   InboundRouter,
   PerspectivesController,
   RunningServer,
-  WorksceneDirectory,
 } from "@zhixing/server";
 import type {
   ConfirmationHub,
@@ -160,7 +159,6 @@ export interface AssemblyContext {
   readonly conversationAuthorityRef: {
     current: ConversationProtocolRuntime | undefined;
   };
-  readonly worksceneDirectory: WorksceneDirectory;
   /**
    * 会话组播 lazy ref(runServer 后回填)——turn 后维护的改名通知等运行期
    * 推送经此读最新值;装配期为 null,运行期必已就位。

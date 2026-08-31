@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { createAnchorWorksceneManagementPorts } from "./workscene-management-adapter.js";
+import { createAnchorWorksceneApplicationPorts } from "./workscene-application-adapter.js";
 
-describe("createAnchorWorksceneManagementPorts", () => {
-  it("only maps the finite Workscene mechanism and Workspace Administration read port", async () => {
+describe("createAnchorWorksceneApplicationPorts", () => {
+  it("maps management, entry and Workspace Administration to finite ports", async () => {
     const scene = {
       id: "scene-1",
       revision: 2,
@@ -25,8 +25,13 @@ describe("createAnchorWorksceneManagementPorts", () => {
           workspaceName: "代码库",
         },
       ]),
+      enterScene: vi.fn(async () => ({
+        conversationId: "ws:scene-1:conv_main",
+        scene,
+      })),
+      exitScene: vi.fn(async () => {}),
     };
-    const ports = createAnchorWorksceneManagementPorts(directory);
+    const ports = createAnchorWorksceneApplicationPorts(directory);
 
     await expect(ports.management.list()).resolves.toEqual([scene]);
     await ports.management.rename({
@@ -58,5 +63,28 @@ describe("createAnchorWorksceneManagementPorts", () => {
         workspaceName: "代码库",
       },
     ]);
+
+    await expect(ports.entry.enter({
+      sceneId: "scene-1",
+      observerId: "connection:1",
+      requestId: "enter:1",
+    })).resolves.toMatchObject({ conversationId: "ws:scene-1:conv_main" });
+    expect(directory.enterScene).toHaveBeenCalledWith(
+      "scene-1",
+      "connection:1",
+      { requestId: "enter:1" },
+    );
+    await ports.entry.exit({
+      sceneId: "scene-1",
+      conversationId: "ws:scene-1:conv_main",
+      observerId: "connection:1",
+      requestId: "exit:1",
+    });
+    expect(directory.exitScene).toHaveBeenCalledWith(
+      "scene-1",
+      "ws:scene-1:conv_main",
+      "connection:1",
+      "exit:1",
+    );
   });
 });

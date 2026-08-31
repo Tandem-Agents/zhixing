@@ -10,8 +10,8 @@
  *
  * 不设 workscene.status:接入面当前在哪个场景是连接级 UI 态,宿主零知识。
  *
- * 管理业务规则居于 Workscene Product API；WorksceneDirectory 仅保留尚未迁移的
- * enter/exit 原子桥。两者都不在 RPC handler 内复写。
+ * 全部业务规则居于 Workscene Product API；RPC 仅处理 authenticated wire，
+ * enter 成功后的 Advancement 恢复/读取是独立跨领域响应投影。
  */
 
 import {
@@ -20,88 +20,37 @@ import {
   WORKSCENE_MANAGEMENT_LIST_QUERY,
   WORKSCENE_MANAGEMENT_RENAME_COMMAND,
   WORKSCENE_MANAGEMENT_SET_WORKSPACE_COMMAND,
-  WorksceneManagementError,
+  WORKSCENE_ENTRY_ENTER_COMMAND,
+  WORKSCENE_ENTRY_EXIT_COMMAND,
+  WorksceneApplicationError,
 } from "@zhixing/core/workscene/application";
 import type {
   WorksceneEnterResult,
   WorksceneListResult,
-  WorksceneSummary,
 } from "@zhixing/rpc/session-wire";
 import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 import type { ServerContext } from "../../context.js";
-import type { WorksceneDirectory } from "../../runtime/workscene-directory.js";
 import { loadAdvancementState } from "./session.js";
 
-function requireWorkscenes(server: ServerContext): WorksceneDirectory {
-  if (!server.workscenes) {
-    throw new RpcAppError(
-      RPC_ERROR_CODES.INTERNAL_ERROR,
-      "WorksceneDirectory not configured on server",
-    );
-  }
-  return server.workscenes;
-}
-
-function requireWorksceneManagement(server: ServerContext) {
+function requireWorksceneApplication(server: ServerContext) {
   if (
     !server.productApi ||
     !server.productApi.supports(WORKSCENE_MANAGEMENT_LIST_QUERY) ||
     !server.productApi.supports(WORKSCENE_MANAGEMENT_CREATE_COMMAND) ||
     !server.productApi.supports(WORKSCENE_MANAGEMENT_RENAME_COMMAND) ||
     !server.productApi.supports(WORKSCENE_MANAGEMENT_SET_WORKSPACE_COMMAND) ||
-    !server.productApi.supports(WORKSCENE_MANAGEMENT_DELETE_COMMAND)
+    !server.productApi.supports(WORKSCENE_MANAGEMENT_DELETE_COMMAND) ||
+    !server.productApi.supports(WORKSCENE_ENTRY_ENTER_COMMAND) ||
+    !server.productApi.supports(WORKSCENE_ENTRY_EXIT_COMMAND)
   ) {
     throw new RpcAppError(
       RPC_ERROR_CODES.INTERNAL_ERROR,
-      "Workscene management Product API not configured on server",
+      "Workscene Product API not configured on server",
     );
   }
   return server.productApi;
-}
-
-async function sceneSummary(
-  directory: WorksceneDirectory,
-  scene: {
-    id: string;
-    revision: number;
-    name: string;
-    workspace?: { deviceId: string; bindingRef: string };
-    lastActiveAt?: string;
-  },
-  workspaceWarning?: string,
-): Promise<WorksceneSummary> {
-  const workspaceMetadata = scene.workspace
-    ? (await directory.workspaceCatalog?.())?.find(
-        (candidate) =>
-          candidate.deviceId === scene.workspace!.deviceId &&
-          candidate.bindingRef === scene.workspace!.bindingRef,
-      )
-    : undefined;
-  const summary: WorksceneSummary = {
-    sceneId: scene.id,
-    revision: scene.revision,
-    name: scene.name,
-    ...(scene.workspace
-      ? {
-          workspace: {
-            ...scene.workspace,
-            ...(workspaceMetadata
-              ? {
-                  workspaceBindingRevision:
-                    workspaceMetadata.workspaceBindingRevision,
-                  deviceName: workspaceMetadata.deviceName,
-                  workspaceName: workspaceMetadata.workspaceName,
-                }
-              : {}),
-          },
-        }
-      : {}),
-    lastActiveAt: scene.lastActiveAt,
-  };
-  if (workspaceWarning) summary.workspaceWarning = workspaceWarning;
-  return summary;
 }
 
 function workspaceReference(
@@ -155,19 +104,19 @@ async function mapWorksceneErrors<T>(fn: () => Promise<T>): Promise<T> {
     return await fn();
   } catch (err) {
     if (
-      (err instanceof WorksceneManagementError && err.kind === "invalid-input") ||
+      (err instanceof WorksceneApplicationError && err.kind === "invalid-input") ||
       hasErrorCode(err, "WORKSCENE_INPUT")
     ) {
       throw RpcErrors.invalidParams(err.message);
     }
     if (
-      (err instanceof WorksceneManagementError && err.kind === "not-found") ||
+      (err instanceof WorksceneApplicationError && err.kind === "not-found") ||
       hasErrorCode(err, "WORKSCENE_NOT_FOUND")
     ) {
       throw RpcErrors.notFound(err.message);
     }
     if (
-      (err instanceof WorksceneManagementError && err.kind === "busy") ||
+      (err instanceof WorksceneApplicationError && err.kind === "busy") ||
       hasErrorCode(err, "WORKSCENE_BUSY")
     ) {
       throw RpcErrors.busy(err.message);
@@ -190,7 +139,7 @@ export function buildWorksceneListMethod(): MethodEntry {
     requiresAuth: true,
     async handler(_params, ctx): Promise<WorksceneListResult> {
       requireOnlyFields(_params ?? {}, "workscene.list", []);
-      const result = await requireWorksceneManagement(ctx.server).query(
+      const result = await requireWorksceneApplication(ctx.server).query(
         WORKSCENE_MANAGEMENT_LIST_QUERY,
         { kind: "list" },
       );
@@ -220,7 +169,7 @@ export function buildWorksceneCreateMethod(): MethodEntry {
           ? undefined
           : workspaceReference(params.workspace, "workscene.create 'workspace'");
       const result = await mapWorksceneErrors(() =>
-        requireWorksceneManagement(ctx.server).command(
+        requireWorksceneApplication(ctx.server).command(
           WORKSCENE_MANAGEMENT_CREATE_COMMAND,
           {
             kind: "create",
@@ -254,7 +203,7 @@ export function buildWorksceneRenameMethod(): MethodEntry {
       }
       const name = params.name;
       const renamed = await mapWorksceneErrors(() =>
-        requireWorksceneManagement(ctx.server).command(
+        requireWorksceneApplication(ctx.server).command(
           WORKSCENE_MANAGEMENT_RENAME_COMMAND,
           {
             kind: "rename",
@@ -294,7 +243,7 @@ export function buildWorksceneSetWorkdirMethod(): MethodEntry {
               "workscene.setWorkdir 'workspace'",
             );
       const result = await mapWorksceneErrors(() =>
-        requireWorksceneManagement(ctx.server).command(
+        requireWorksceneApplication(ctx.server).command(
           WORKSCENE_MANAGEMENT_SET_WORKSPACE_COMMAND,
           {
             kind: "set-workspace",
@@ -323,7 +272,7 @@ export function buildWorksceneDeleteMethod(): MethodEntry {
       }
       const sceneId = params.sceneId;
       await mapWorksceneErrors(() =>
-        requireWorksceneManagement(ctx.server).command(
+        requireWorksceneApplication(ctx.server).command(
           WORKSCENE_MANAGEMENT_DELETE_COMMAND,
           {
             kind: "delete",
@@ -349,15 +298,18 @@ export function buildWorksceneEnterMethod(): MethodEntry {
         throw RpcErrors.invalidParams("workscene.enter requires 'sceneId'");
       }
       const sceneId = params.sceneId;
-      const workscenes = requireWorkscenes(ctx.server);
-      const entered = await mapWorksceneErrors(() =>
-        workscenes.enterScene(sceneId, String(ctx.connection.id), {
-          requestId: requestId(params.requestId, "workscene.enter"),
-        }),
+      const dispatch = await mapWorksceneErrors(() =>
+        requireWorksceneApplication(ctx.server).command(
+          WORKSCENE_ENTRY_ENTER_COMMAND,
+          {
+            kind: "enter",
+            sceneId,
+            observerId: String(ctx.connection.id),
+            requestId: requestId(params.requestId, "workscene.enter"),
+          },
+        ),
       );
-      if (!entered) {
-        throw RpcErrors.notFound(`Workscene not found: ${params.sceneId}`);
-      }
+      const entered = dispatch.result;
       // 场景对话与主对话走同一推进管线——进入场景即恢复停摆的推进并
       // 呈现推进状态，与 session.resume 同一「打开会话即浮现」裁决：
       // 入场事实已由领域服务登记 observer;恢复失败不撤销入场事实。
@@ -372,7 +324,7 @@ export function buildWorksceneEnterMethod(): MethodEntry {
       }
       return {
         conversationId: entered.conversationId,
-        scene: await sceneSummary(workscenes, entered.scene),
+        scene: entered.scene,
         ...(advancement ? { advancement } : {}),
       } satisfies WorksceneEnterResult;
     },
@@ -395,13 +347,21 @@ export function buildWorksceneExitMethod(): MethodEntry {
       if (typeof params.conversationId !== "string") {
         throw RpcErrors.invalidParams("workscene.exit requires 'conversationId'");
       }
-      await requireWorkscenes(ctx.server).exitScene(
-        params.sceneId,
-        params.conversationId,
-        String(ctx.connection.id),
-        requestId(params.requestId, "workscene.exit"),
+      const sceneId = params.sceneId;
+      const conversationId = params.conversationId;
+      const dispatch = await mapWorksceneErrors(() =>
+        requireWorksceneApplication(ctx.server).command(
+          WORKSCENE_ENTRY_EXIT_COMMAND,
+          {
+            kind: "exit",
+            sceneId,
+            conversationId,
+            observerId: String(ctx.connection.id),
+            requestId: requestId(params.requestId, "workscene.exit"),
+          },
+        ),
       );
-      return { ok: true };
+      return { ok: dispatch.result.ok };
     },
   };
 }

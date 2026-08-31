@@ -7,6 +7,7 @@ import {
   type ProductApiContribution,
 } from "../product-api/catalog.js";
 import type { WorksceneDto } from "../contracts/state.js";
+import { parseConversationId } from "../conversation/scope-id.js";
 import { normalizeSceneName } from "./validation.js";
 
 export interface WorksceneWorkspaceReference {
@@ -53,6 +54,25 @@ export interface WorksceneManagementPort {
   }): Promise<boolean>;
 }
 
+/**
+ * Correctness mechanism for Workscene-scoped conversation ownership.
+ * It owns atomic lookup/create, observer claims, activity facts and replay;
+ * the domain application owns validation, product terminal and projection.
+ */
+export interface WorksceneEntryPort {
+  enter(input: {
+    readonly sceneId: string;
+    readonly observerId: string;
+    readonly requestId: string;
+  }): Promise<{ readonly conversationId: string; readonly scene: WorksceneDto } | null>;
+  exit(input: {
+    readonly sceneId: string;
+    readonly conversationId: string;
+    readonly observerId: string;
+    readonly requestId: string;
+  }): Promise<void>;
+}
+
 /** Path-free Workspace Administration read projection used for result enrichment. */
 export interface WorksceneWorkspaceAdministrationReadPort {
   list(): Promise<readonly WorksceneWorkspaceMetadata[]>;
@@ -77,9 +97,14 @@ export interface WorksceneManagementListResult {
   readonly scenes: readonly WorksceneManagementSummary[];
 }
 
+export interface WorksceneEntryResult {
+  readonly conversationId: string;
+  readonly scene: WorksceneManagementSummary;
+}
+
 export type WorksceneManagementQuery = { readonly kind: "list" };
 
-export type WorksceneManagementCommand =
+export type WorksceneCommand =
   | {
       readonly kind: "create";
       readonly name: string;
@@ -102,26 +127,41 @@ export type WorksceneManagementCommand =
       readonly kind: "delete";
       readonly sceneId: string;
       readonly requestId: string;
+    }
+  | {
+      readonly kind: "enter";
+      readonly sceneId: string;
+      readonly observerId: string;
+      readonly requestId: string;
+    }
+  | {
+      readonly kind: "exit";
+      readonly sceneId: string;
+      readonly conversationId: string;
+      readonly observerId: string;
+      readonly requestId: string;
     };
 
-export type WorksceneManagementCommandResult =
+export type WorksceneCommandResult =
   | { readonly kind: "created"; readonly scene: WorksceneManagementSummary }
   | { readonly kind: "renamed"; readonly scene: WorksceneManagementSummary }
   | { readonly kind: "workspace-set"; readonly scene: WorksceneManagementSummary }
-  | { readonly kind: "deleted"; readonly sceneId: string };
+  | { readonly kind: "deleted"; readonly sceneId: string }
+  | ({ readonly kind: "entered" } & WorksceneEntryResult)
+  | { readonly kind: "exited"; readonly ok: true };
 
-export type WorksceneManagementErrorKind = "invalid-input" | "not-found" | "busy";
+export type WorksceneApplicationErrorKind = "invalid-input" | "not-found" | "busy";
 
-export class WorksceneManagementError extends Error {
+export class WorksceneApplicationError extends Error {
   readonly code: "WORKSCENE_INPUT" | "WORKSCENE_NOT_FOUND" | "WORKSCENE_BUSY";
 
   constructor(
-    readonly kind: WorksceneManagementErrorKind,
+    readonly kind: WorksceneApplicationErrorKind,
     message: string,
     options?: ErrorOptions,
   ) {
     super(message, options);
-    this.name = "WorksceneManagementError";
+    this.name = "WorksceneApplicationError";
     this.code = kind === "invalid-input"
       ? "WORKSCENE_INPUT"
       : kind === "not-found"
@@ -130,17 +170,18 @@ export class WorksceneManagementError extends Error {
   }
 }
 
-export interface WorksceneManagementApplication {
+export interface WorksceneApplication {
   query(query: WorksceneManagementQuery): Promise<WorksceneManagementListResult>;
-  execute(command: WorksceneManagementCommand): Promise<WorksceneManagementCommandResult>;
+  execute(command: WorksceneCommand): Promise<WorksceneCommandResult>;
 }
 
-export class WorksceneManagementApplicationService
-  implements WorksceneManagementApplication
+export class WorksceneApplicationService
+  implements WorksceneApplication
 {
   constructor(
     private readonly management: WorksceneManagementPort,
     private readonly workspaces: WorksceneWorkspaceAdministrationReadPort,
+    private readonly entry: WorksceneEntryPort,
   ) {}
 
   async query(query: WorksceneManagementQuery): Promise<WorksceneManagementListResult> {
@@ -156,7 +197,7 @@ export class WorksceneManagementApplicationService
     });
   }
 
-  async execute(command: WorksceneManagementCommand): Promise<WorksceneManagementCommandResult> {
+  async execute(command: WorksceneCommand): Promise<WorksceneCommandResult> {
     assertRequestId(command.requestId);
     try {
       switch (command.kind) {
@@ -206,6 +247,35 @@ export class WorksceneManagementApplicationService
           }
           return Object.freeze({ kind: "deleted" as const, sceneId });
         }
+        case "enter": {
+          const sceneId = assertSceneId(command.sceneId);
+          const entered = await this.entry.enter({
+            sceneId,
+            observerId: assertIdentity(command.observerId, "observer"),
+            requestId: command.requestId,
+          });
+          if (!entered) throw notFound(sceneId);
+          return Object.freeze({
+            kind: "entered" as const,
+            conversationId: assertSceneConversation(
+              sceneId,
+              entered.conversationId,
+            ),
+            scene: await this.project(entered.scene),
+          });
+        }
+        case "exit": {
+          await this.entry.exit({
+            sceneId: assertSceneId(command.sceneId),
+            conversationId: assertSceneConversation(
+              command.sceneId,
+              command.conversationId,
+            ),
+            observerId: assertIdentity(command.observerId, "observer"),
+            requestId: command.requestId,
+          });
+          return Object.freeze({ kind: "exited" as const, ok: true as const });
+        }
         default:
           throw invalid("Unsupported Workscene command");
       }
@@ -242,6 +312,25 @@ function assertSceneId(value: string): string {
     throw invalid("Workscene command requires a scene identity");
   }
   return value;
+}
+
+function assertIdentity(value: string, label: string): string {
+  if (typeof value !== "string" || !value) {
+    throw invalid(`Workscene command requires a ${label} identity`);
+  }
+  return value;
+}
+
+function assertSceneConversation(sceneId: string, conversationId: string): string {
+  const identity = assertIdentity(conversationId, "conversation");
+  const parsed = parseConversationId(identity);
+  if (
+    parsed.scope.kind !== "workscene" ||
+    parsed.scope.sceneId !== sceneId
+  ) {
+    throw invalid("Conversation does not belong to the workscene");
+  }
+  return identity;
 }
 
 function assertWorkspace(value: WorksceneWorkspaceReference): WorksceneWorkspaceReference {
@@ -294,21 +383,21 @@ function projectSummary(
   });
 }
 
-function invalid(message: string, cause?: unknown): WorksceneManagementError {
-  return new WorksceneManagementError("invalid-input", message, cause === undefined ? undefined : { cause });
+function invalid(message: string, cause?: unknown): WorksceneApplicationError {
+  return new WorksceneApplicationError("invalid-input", message, cause === undefined ? undefined : { cause });
 }
 
-function notFound(sceneId: string): WorksceneManagementError {
-  return new WorksceneManagementError("not-found", `Workscene not found: ${sceneId}`);
+function notFound(sceneId: string): WorksceneApplicationError {
+  return new WorksceneApplicationError("not-found", `Workscene not found: ${sceneId}`);
 }
 
 function translateMechanismError(error: unknown): unknown {
-  if (error instanceof WorksceneManagementError) return error;
+  if (error instanceof WorksceneApplicationError) return error;
   if (hasCode(error, "WORKSCENE_INPUT")) {
     return invalid(error.message, error);
   }
   if (hasCode(error, "WORKSCENE_BUSY")) {
-    return new WorksceneManagementError("busy", error.message, { cause: error });
+    return new WorksceneApplicationError("busy", error.message, { cause: error });
   }
   return error;
 }
@@ -325,45 +414,61 @@ export const WORKSCENE_MANAGEMENT_LIST_QUERY = defineProductApiQuery<
 
 export const WORKSCENE_MANAGEMENT_CREATE_COMMAND = defineProductApiCommand<
   "workscene-management.command.create",
-  Extract<WorksceneManagementCommand, { readonly kind: "create" }>,
-  Extract<WorksceneManagementCommandResult, { readonly kind: "created" }>,
+  Extract<WorksceneCommand, { readonly kind: "create" }>,
+  Extract<WorksceneCommandResult, { readonly kind: "created" }>,
   never
 >("workscene-management.command.create", []);
 
 export const WORKSCENE_MANAGEMENT_RENAME_COMMAND = defineProductApiCommand<
   "workscene-management.command.rename",
-  Extract<WorksceneManagementCommand, { readonly kind: "rename" }>,
-  Extract<WorksceneManagementCommandResult, { readonly kind: "renamed" }>,
+  Extract<WorksceneCommand, { readonly kind: "rename" }>,
+  Extract<WorksceneCommandResult, { readonly kind: "renamed" }>,
   never
 >("workscene-management.command.rename", []);
 
 export const WORKSCENE_MANAGEMENT_SET_WORKSPACE_COMMAND = defineProductApiCommand<
   "workscene-management.command.set-workspace",
-  Extract<WorksceneManagementCommand, { readonly kind: "set-workspace" }>,
-  Extract<WorksceneManagementCommandResult, { readonly kind: "workspace-set" }>,
+  Extract<WorksceneCommand, { readonly kind: "set-workspace" }>,
+  Extract<WorksceneCommandResult, { readonly kind: "workspace-set" }>,
   never
 >("workscene-management.command.set-workspace", []);
 
 export const WORKSCENE_MANAGEMENT_DELETE_COMMAND = defineProductApiCommand<
   "workscene-management.command.delete",
-  Extract<WorksceneManagementCommand, { readonly kind: "delete" }>,
-  Extract<WorksceneManagementCommandResult, { readonly kind: "deleted" }>,
+  Extract<WorksceneCommand, { readonly kind: "delete" }>,
+  Extract<WorksceneCommandResult, { readonly kind: "deleted" }>,
   never
 >("workscene-management.command.delete", []);
 
-export const WORKSCENE_MANAGEMENT_PRODUCT_API_EXACT_SET = defineProductApiExactSet({
+export const WORKSCENE_ENTRY_ENTER_COMMAND = defineProductApiCommand<
+  "workscene-entry.command.enter",
+  Extract<WorksceneCommand, { readonly kind: "enter" }>,
+  Extract<WorksceneCommandResult, { readonly kind: "entered" }>,
+  never
+>("workscene-entry.command.enter", []);
+
+export const WORKSCENE_ENTRY_EXIT_COMMAND = defineProductApiCommand<
+  "workscene-entry.command.exit",
+  Extract<WorksceneCommand, { readonly kind: "exit" }>,
+  Extract<WorksceneCommandResult, { readonly kind: "exited" }>,
+  never
+>("workscene-entry.command.exit", []);
+
+export const WORKSCENE_PRODUCT_API_EXACT_SET = defineProductApiExactSet({
   operations: [
     WORKSCENE_MANAGEMENT_LIST_QUERY,
     WORKSCENE_MANAGEMENT_CREATE_COMMAND,
     WORKSCENE_MANAGEMENT_RENAME_COMMAND,
     WORKSCENE_MANAGEMENT_SET_WORKSPACE_COMMAND,
     WORKSCENE_MANAGEMENT_DELETE_COMMAND,
+    WORKSCENE_ENTRY_ENTER_COMMAND,
+    WORKSCENE_ENTRY_EXIT_COMMAND,
   ],
   factEvents: [],
 });
 
-export function createWorksceneManagementProductApiContribution(
-  application: WorksceneManagementApplication,
+export function createWorksceneProductApiContribution(
+  application: WorksceneApplication,
 ): ProductApiContribution {
   return defineProductApiContribution({
     operations: [
@@ -373,29 +478,43 @@ export function createWorksceneManagementProductApiContribution(
       })),
       bindProductApiOperation(WORKSCENE_MANAGEMENT_CREATE_COMMAND, async (command) => ({
         result: await application.execute(command) as Extract<
-          WorksceneManagementCommandResult,
+          WorksceneCommandResult,
           { readonly kind: "created" }
         >,
         facts: [],
       })),
       bindProductApiOperation(WORKSCENE_MANAGEMENT_RENAME_COMMAND, async (command) => ({
         result: await application.execute(command) as Extract<
-          WorksceneManagementCommandResult,
+          WorksceneCommandResult,
           { readonly kind: "renamed" }
         >,
         facts: [],
       })),
       bindProductApiOperation(WORKSCENE_MANAGEMENT_SET_WORKSPACE_COMMAND, async (command) => ({
         result: await application.execute(command) as Extract<
-          WorksceneManagementCommandResult,
+          WorksceneCommandResult,
           { readonly kind: "workspace-set" }
         >,
         facts: [],
       })),
       bindProductApiOperation(WORKSCENE_MANAGEMENT_DELETE_COMMAND, async (command) => ({
         result: await application.execute(command) as Extract<
-          WorksceneManagementCommandResult,
+          WorksceneCommandResult,
           { readonly kind: "deleted" }
+        >,
+        facts: [],
+      })),
+      bindProductApiOperation(WORKSCENE_ENTRY_ENTER_COMMAND, async (command) => ({
+        result: await application.execute(command) as Extract<
+          WorksceneCommandResult,
+          { readonly kind: "entered" }
+        >,
+        facts: [],
+      })),
+      bindProductApiOperation(WORKSCENE_ENTRY_EXIT_COMMAND, async (command) => ({
+        result: await application.execute(command) as Extract<
+          WorksceneCommandResult,
+          { readonly kind: "exited" }
         >,
         facts: [],
       })),

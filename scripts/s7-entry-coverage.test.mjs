@@ -3431,7 +3431,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/rpc/tsup.config.ts",
     "packages/server/src/rpc/methods/skill.ts",
     "packages/server/src/rpc/methods/workscene.ts",
-    "packages/server/src/runtime/workscene-directory.ts",
+    "packages/server/src/runtime/index.ts",
     "packages/server/src/rpc/methods/schedule.ts",
     "packages/server/src/rpc/methods/server.ts",
     "packages/server/src/rpc/methods/auth.ts",
@@ -3452,7 +3452,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/cli/src/serve/workscene-directory.ts",
     "packages/cli/src/serve/workmode-tools.ts",
     "packages/cli/src/serve/workscene-runtime-projection.ts",
-    "packages/cli/src/serve/workscene-management-adapter.ts",
+    "packages/cli/src/serve/workscene-application-adapter.ts",
     "packages/cli/src/serve/workscene-port.ts",
     "packages/cli/src/serve/workscene-session-owner.ts",
     "packages/cli/src/serve/local-conversation-directory-application.ts",
@@ -3510,21 +3510,28 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/server/src/rpc/methods/workscene.ts",
       (text) => text.replace(
-        "requireWorksceneManagement(ctx.server).query(",
+        "requireWorksceneApplication(ctx.server).query(",
         "requireWorkscenes(ctx.server).list(",
       ),
     )).join("\n"),
-    /Workscene management lacks one domain application and Product API owner/,
+    /Workscene management and entry lack one domain application and Product API owner/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/server/src/runtime/workscene-directory.ts",
+      "packages/server/src/context.ts",
       (text) => text.replace(
-        "export interface WorksceneDirectory {",
-        "export interface WorksceneDirectory {\n  list(): Promise<unknown[]>;",
+        "export interface ServerContext {",
+        "export interface ServerContext {\n  workscenes?: unknown;",
       ),
     )).join("\n"),
-    /Workscene management lacks one domain application and Product API owner/,
+    /Workscene management and entry lack one domain application and Product API owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/runtime/index.ts",
+      (text) => `${text}\nexport * from "./workscene-directory.js";`,
+    )).join("\n"),
+    /Workscene management and entry lack one domain application and Product API owner/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
@@ -3534,7 +3541,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
         "export interface WorksceneToolDirectory {\n  rename(): Promise<void>;",
       ),
     )).join("\n"),
-    /Workscene management lacks one domain application and Product API owner/,
+    /Workscene management and entry lack one domain application and Product API owner/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
@@ -3544,17 +3551,27 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
         'export function createWorksceneRenameCurrentTool(\n  _workscenes: Pick<WorksceneToolDirectory, "rename">,\n  scene: WorksceneCurrentToolContext,',
       ),
     )).join("\n"),
-    /Workscene management lacks one domain application and Product API owner/,
+    /Workscene management and entry lack one domain application and Product API owner/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/workscene-directory.ts",
       (text) => text.replace(
-        "export type AnchorWorksceneDirectory = WorksceneDirectory &\n  WorksceneToolDirectory & {",
-        "export interface AnchorWorksceneDirectory\n  extends WorksceneDirectory, WorksceneToolDirectory {",
+        "export type AnchorWorksceneDirectory = WorksceneToolDirectory & {",
+        "export type AnchorWorksceneDirectory = WorksceneDirectory & WorksceneToolDirectory & {",
       ),
     )).join("\n"),
-    /Workscene management lacks one domain application and Product API owner/,
+    /Workscene management and entry lack one domain application and Product API owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/workscene/application.ts",
+      (text) => text.replace(
+        "export const WORKSCENE_ENTRY_EXIT_COMMAND = defineProductApiCommand<",
+        "export const WORKSCENE_ENTRY_EXIT_COMMAND = defineProductApiQuery<",
+      ),
+    )).join("\n"),
+    /Workscene management and entry lack one domain application and Product API owner/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(

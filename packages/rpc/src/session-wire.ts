@@ -35,7 +35,10 @@ import type {
   RuntimeSubAgentUsageEntry,
 } from "@zhixing/owner-kernel/types";
 import type { ConversationSecurityResult } from "@zhixing/core/conversation/application";
-import type { WorksceneManagementSummary } from "@zhixing/core/workscene/application";
+import type {
+  WorksceneEntryResult,
+  WorksceneManagementSummary,
+} from "@zhixing/core/workscene/application";
 
 // ─── wire 投影 ───
 
@@ -388,10 +391,7 @@ export interface WorksceneListResult {
   scenes: WorksceneSummary[];
 }
 
-export interface WorksceneEnterResult {
-  /** 场景当前对话的全域键(ws: 前缀)——接入面据此切当前对话指针 */
-  conversationId: string;
-  scene: WorksceneSummary;
+export interface WorksceneEnterResult extends WorksceneEntryResult {
   /** 场景对话的推进状态快照——进入场景即呈现，与 resume 同一裁决。 */
   advancement?: SessionAdvancementStateSnapshot;
 }

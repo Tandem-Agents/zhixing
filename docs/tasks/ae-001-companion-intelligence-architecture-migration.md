@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-13a Workscene 类型残余纠正等待协调者复核<br>
+> 当前检查点：A5-13b Workscene enter/exit 应用责任已迁移，等待协调者复核<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `e498fe8f`；A5-13a 初次实现已提交，但协调者包内 typecheck 使其验收与类型证据失效；A0～A4 及此前已接受领域结论不受影响 |
+| 已接受基线 | `9009d931`；A5-13a 五项 Workscene 管理行为及类型纠正已由协调者独立复核并提交，初次反证与恢复历史继续保留 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | A5-13a 类型残余纠正已完成，等待协调者独立复核；Workscene 行与 A5 仍为 `[ ]` |
-| 下一责任链 | A5-13a 验收后紧邻迁移 `workscene.enter/exit` 并退役 `ServerContext.workscenes` 最短桥；不得扩入 Advancement、Conversation transcript/删除桥、Channel、Device、Backup 或 A6 |
-| 打开的单向桥 | `A5-CONVERSATION-LIFECYCLE-01`：`ServerContext.conversationDirectory` 已退出 clear/delete/resume，暂仅承载 exists/ensure/transcript，Conversation 最终包前归零。<br>`A5-CONVERSATION-WORKSCENE-DELETE-01`：Anchor 组合根唯一创建 `ConversationWorksceneDeleteProjectionBridge`，唯一 consumer 为 `WorksceneSessionOwner.removeScene`；只允许 Workscene Authority delete 后调用 Conversation 物理存储投影，不拥有 delete 准入、终态、Fact 或通知，必须在 Workscene A5 迁移包退场。<br>`A5-WORKSCENE-ENTRY-01`：A5-13a 后 `ServerContext.workscenes` 只允许继续服务尚未迁移的 `workscene.enter/exit`；不得重新承载五项管理行为，紧邻 Workscene enter/exit 工作包必须退场 |
-| 已失效证据 | 无当前未恢复证据；协调者在 `e498fe8f` 上发现的 rename 旧端口依赖、Anchor catalog 组合冲突与四处 Workscene typecheck 诊断已由本纠正恢复，等待协调者复核 |
+| 活跃工作包 | A5-13b 已完成，等待协调者独立复核；Workscene 行与 A5 仍为 `[ ]` |
+| 下一责任链 | 协调者复核 A5-13b 后，按 Workscene 剩余真实责任重新裁决最窄下一包；不得由本包扩入 Advancement、Conversation transcript/删除桥、Channel、Device、Backup 或 A6 |
+| 打开的单向桥 | `A5-CONVERSATION-LIFECYCLE-01`：`ServerContext.conversationDirectory` 已退出 clear/delete/resume，暂仅承载 exists/ensure/transcript，Conversation 最终包前归零。<br>`A5-CONVERSATION-WORKSCENE-DELETE-01`：Anchor 组合根唯一创建 `ConversationWorksceneDeleteProjectionBridge`，唯一 consumer 为 `WorksceneSessionOwner.removeScene`；只允许 Workscene Authority delete 后调用 Conversation 物理存储投影，不拥有 delete 准入、终态、Fact 或通知，必须在 Workscene A5 迁移包退场。 |
+| 已失效证据 | 无当前未恢复证据；`A5-13b-workscene-entry-application-v1` 已在同一工作区恢复，等待协调者独立复核；A5-13a 证据继续有效 |
 | 阻塞/用户决策 | 无技术阻塞；用户已明确恢复调度 |
 
 ### A0 基线索引
@@ -2090,6 +2090,13 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 行为保护与初次直接证据：core 领域应用 1 文件 4/4，覆盖 authority 顺序、workspace enrichment/freeze、名称一次规范化、request/workspace identity、not-found/input/busy/未知机制错误和 1 Query + 4 Command + 0 Fact exact-set；Server 真实 dispatcher/wire 1 文件 10/10，覆盖 CRUD/list、workspace bind/unbind、strict 参数、INVALID_PARAMS/NOT_FOUND/BUSY、enter/exit/Advancement 桥及管理 handler 零 Directory 直调；CLI Correctness/组合 3 文件 14/14，覆盖 adapter 机械映射、Authority-backed revision/replay/workspace probe/quiesce/delete cleanup、Host 单 dispatcher contribution 与旧接口归零，合计 5 文件 28/28。fresh core→rpc→server→CLI 依赖顺序构建、canonical S7 coverage/mutation 32/32 与 registry golden、fresh `pnpm runtime:package-exports`、15 个适用文件最窄 Biome 和 `git diff --check` 均通过。初次记录把未成功闭合的额外 package typecheck 误写成“本包新增 Workscene 类型错误归零”；协调者随后在提交 `e498fe8f` 上直接复现四处 Workscene 诊断，该句与 A5-13a 验收证据当即失效，不能归入既有 Conversation 基线。
 - 协调反证与恢复：`createWorksceneRenameCurrentTool` 已删除从未消费的 `Pick<WorksceneToolDirectory, "rename">` 参数，唯一生产投影与直接测试均只传当前 scene identity，未把管理写入口加回工具端口。`AnchorWorksceneDirectory` 改为 `WorksceneDirectory & WorksceneToolDirectory & 管理机制` 的显式交叉组合：Server 的 optional catalog 仍只属于未迁移 enter 结果 metadata，工具与管理 adapter 在 Anchor 具体对象上取得同一个 required catalog，不使用非空断言或第二投影。当前 package typecheck 已确认 Workscene/A5-13a 文件与调用链诊断归零，只剩 HEAD 已登记的 Conversation delete/resume/run-control 诊断。原 A5-13a 五文件 28/28 全量重取通过，另加受影响 staged workmode 工具 1 文件 7/7，当前纠正直接闭包合计 6 文件 35/35；`pnpm cli:build` 通过。S7 新增两个反向 mutation，恢复旧 rename 管理参数或 optional/required 双接口继承均会失败；canonical coverage/mutation 32/32 与 registry golden 通过，4 个适用 TypeScript 文件的最窄 Biome、`git diff --check` 与空索引边界也已复核。enter/exit 桥、管理 Product API、Authority/Correctness 语义和 A5-13b 边界均未改变。
 - 结构失效与交接：S7 与反向 mutation 冻结 Workscene 领域应用/Correctness port、五 operation/零 Fact、core 窄 subpath/build/export、Anchor 唯一 adapter/application/contribution、Server 五 handler Product API dispatch、Server enter/exit 桥及工具端管理入口退场；恢复 Server Directory 直调、工具 management port、第二应用/dispatcher、根导出、漏 operation 或结果拼装都会使门禁失败。以后管理 Query/Command/result/error、name/request/workspace 规则、Authority revision/replay/probe/delete cleanup、workspace metadata、Product API exact-set/Host composition、五 RPC wire、S7 或 package export 任一变化，本记录精确失效并只重验该闭包。A5-13a 实施完成并等待协调者独立复核；Workscene 行与 A5 继续 `[ ]`，下一检查点固定为迁移 `workscene.enter/exit` 并退役 `A5-WORKSCENE-ENTRY-01`，不得进入 Advancement、Conversation transcript/删除桥、Channel、Device、Backup 或 A6。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+### A5-13b：归位 Workscene enter/exit 应用责任
+
+- 实施基线与唯一应用：进场为 `HEAD 9009d931af7667775c3b48cc0b93e8bd33badd06 + task-doc:A5-13b-dispatch`，索引为空。A5-13a 的唯一 `@zhixing/core/workscene/application` 从管理专用入口收敛为 `WorksceneApplicationService`，在原 1 Query + 4 Command 上增加 `workscene-entry.command.enter/exit`，形成 1 Query + 6 Command + 0 Fact 的有限 exact-set；领域应用拥有 scene/observer/request/conversation identity 校验、scene-conversation 归属、not-found/input/busy 终态和稳定 scene/workspace 元数据投影。`WorksceneSessionOwner`、Authority/global state 与 conversation manager 继续只作为 Correctness mechanism，唯一负责 observer claim、scene current conversation、请求 replay、activity fact、per-scene serialization 与恢复，不形成第二应用决定。
+- 生产链、旧桥退场与跨领域边界：Anchor 只创建一次 `createAnchorWorksceneApplicationPorts`，把管理、workspace read 与 entry Correctness ports 注入同一个应用和 sealed Product API dispatcher。`workscene.enter/exit` RPC 只保留认证连接到稳定 observer identity、strict wire 参数解析、Product API dispatch、既有错误映射和结果传输；enter 提交成功后的 Advancement `recoverConversation/loadAdvancementState` 仍是独立跨领域响应投影，失败只记录并软降级，不回滚已经成立的 Workscene observer/entry 事实。`ServerContext.workscenes`、`CreateContextOptions.workscenes`、Server `WorksceneDirectory`、`packages/server/src/runtime/workscene-directory.ts`、runtime 转导和旧 management adapter 全部删除；CLI 的 `AnchorWorksceneDirectory` 只作为一个具体 Correctness 组合类型存在，Server/RPC 不再取得该实现对象。公开方法名、请求/结果、全域 conversation id、workspace metadata、Advancement 状态、response-loss replay、并发 observer 和 activity 行为不变。
+- 直接证据与验证：core 应用 1 文件 5/5，覆盖 enter/exit identity、scene-conversation 绑定、workspace 投影、not-found/input 与 1 Query + 6 Command + 0 Fact exact-set；Server 真实 dispatcher/wire 1 文件 10/10，覆盖七项 operation 支持门、enter/exit 参数与 observer/request 转发、NOT_FOUND/INVALID_PARAMS/BUSY、Advancement 成功投影和恢复失败软降级；CLI Correctness/组合 3 文件 14/14，覆盖同 scene 并发 enter 的单一 conversation、observer guard、activity、请求重放、adapter 映射、Host 单 dispatcher 和 `ServerContext.workscenes` 退场，合计 5 文件 29/29。fresh core→rpc→server→CLI 依赖顺序构建、canonical S7 coverage/mutation 32/32 与 registry golden、fresh `pnpm runtime:package-exports` 均通过。core package typecheck 通过；server/CLI 额外 `tsc --noEmit` 未出现本包诊断，只保留已登记的 Conversation A5 后续责任链诊断，故不把 package typecheck 虚报为全绿。
+- 失效规则与交接：S7 与反向 mutation 冻结 1 Query + 6 Command + 0 Fact、同一领域应用/adapter/contribution、enter/exit handler Product API dispatch、Server context/runtime bridge 零残留、工具端 management 零回流、core 窄 subpath/build/export和单一 Host composition；恢复 Server Directory/context 直连、漏 entry operation、第二 adapter/application/dispatcher、根导出、RPC 结果重组或 scene-conversation 归属旁路都会使本证据失效。以后 Workscene Query/Command/result/error、entry observer/request/replay/activity、workspace 投影、Product API exact-set、Advancement 响应投影、RPC wire、Host composition、S7 或 package export 任一变化，只恢复对应闭包。`A5-WORKSCENE-ENTRY-01` 已退役；Workscene 行与 A5 继续 `[ ]`，本包停在等待协调者复核，不进入 Advancement、Conversation transcript/删除桥、Channel、Device、Backup 或 A6。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 

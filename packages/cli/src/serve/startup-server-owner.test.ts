@@ -21,8 +21,9 @@ describe("production startup server ownership", () => {
     expect(source.match(/createDeliveryResolutionProductApiContribution\(/gu)).toHaveLength(1);
     expect(source.match(/createTrustAdministrationProductApiContribution\(/gu)).toHaveLength(1);
     expect(source.match(/createScheduleRuntimeProductApiContribution\(/gu)).toHaveLength(1);
-    expect(source.match(/createWorksceneManagementProductApiContribution\(/gu)).toHaveLength(1);
-    expect(source.match(/new WorksceneManagementApplicationService\(/gu)).toHaveLength(1);
+    expect(source.match(/createWorksceneProductApiContribution\(/gu)).toHaveLength(1);
+    expect(source.match(/new WorksceneApplicationService\(/gu)).toHaveLength(1);
+    expect(source.match(/createAnchorWorksceneApplicationPorts\(/gu)).toHaveLength(1);
     expect(source.match(/createTrustAdministrationApplication\(\{/gu)).toHaveLength(1);
     expect(source.match(/new SkillCatalogApplicationService\(\{/gu)).toHaveLength(1);
     const context = source.slice(location(source, "serverCtx = createServerContext({"));
@@ -43,11 +44,11 @@ describe("production startup server ownership", () => {
     );
     const worksceneApplication = location(
       source,
-      "new WorksceneManagementApplicationService(",
+      "new WorksceneApplicationService(",
     );
     const worksceneContribution = location(
       source,
-      "createWorksceneManagementProductApiContribution(",
+      "createWorksceneProductApiContribution(",
     );
     expect(contribution).toBeGreaterThan(dispatcher);
     expect(application).toBeGreaterThan(contribution);
@@ -60,6 +61,7 @@ describe("production startup server ownership", () => {
     expect(context).not.toContain("skillCatalog:");
     expect(context).not.toContain("resolveDelivery:");
     expect(context).not.toContain("trust:");
+    expect(context).not.toContain("workscenes:");
   });
 
   it("keeps the anchor endpoint inactive until every open prerequisite has one cleanup owner", async () => {
