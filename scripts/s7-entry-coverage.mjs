@@ -3407,7 +3407,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     : "";
   const cancelStart = reviseEnd;
   const cancelEnd = handler.indexOf(
-    "async function prepareActiveAdvancementUserTurn",
+    "function createAdvancementOriginalTaskSurface",
     cancelStart,
   );
   const cancel = cancelStart >= 0 && cancelEnd > cancelStart
@@ -3445,6 +3445,17 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     newTaskStart >= 0 && newTaskEnd > newTaskStart
       ? application.slice(newTaskStart, newTaskEnd)
       : "";
+  const activeUserTurnStart = application.indexOf(
+    "async prepareActiveUserTurn(",
+  );
+  const activeUserTurnEnd = application.indexOf(
+    "async prepareNewTask(",
+    activeUserTurnStart,
+  );
+  const activeUserTurn =
+    activeUserTurnStart >= 0 && activeUserTurnEnd > activeUserTurnStart
+      ? application.slice(activeUserTurnStart, activeUserTurnEnd)
+      : "";
   const sendStart = handler.indexOf("export function buildSessionSendMethod()");
   const sendEnd = handler.indexOf(
     "export function buildSessionAdvancementConfirmMethod()",
@@ -3477,13 +3488,20 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes("interface AdvancementConversationMaintenancePort") ||
     !application.includes("interface AdvancementNewTaskMechanismPort") ||
     !application.includes("interface AdvancementNewTaskConversationPort") ||
+    !application.includes("interface AdvancementActiveUserTurnMechanismPort") ||
+    !application.includes("interface AdvancementActiveUserTurnRuntimePort") ||
+    !application.includes("interface AdvancementActiveUserTurnSurfacePort") ||
+    !application.includes("ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND") ||
+    !application.includes('"advancement.command.prepare-active-user-turn"') ||
+    !application.includes("ADVANCEMENT_SESSION_EXITED_FACT_EVENT") ||
+    !application.includes('"advancement-session-exited"') ||
     !application.includes("interface AdvancementRubricRevisionMechanismPort") ||
     !application.includes("ADVANCEMENT_PREPARE_NEW_TASK_COMMAND") ||
     !application.includes('"advancement.command.prepare-new-task"') ||
     !application.includes("ADVANCEMENT_CONTRACT_DRAFT_CREATED_FACT_EVENT") ||
     !application.includes('"advancement-contract-draft-created"') ||
     application.split("ADVANCEMENT_PREPARE_NEW_TASK_COMMAND").length - 1 !== 3 ||
-    application.split("ADVANCEMENT_CONTRACT_DRAFT_CREATED_FACT_EVENT").length - 1 !== 4 ||
+    application.split("ADVANCEMENT_CONTRACT_DRAFT_CREATED_FACT_EVENT").length - 1 !== 5 ||
     !application.includes("ADVANCEMENT_REVISE_RUBRIC_COMMAND") ||
     !application.includes('"advancement.command.revise-rubric"') ||
     !application.includes("ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT") ||
@@ -3561,13 +3579,39 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !newTask.includes('kind: "advancement-contract-draft-created"') ||
     !newTask.includes("this.#maintenance.runExisting(") ||
     !newTask.includes("this.#maintenance.runNew(") ||
+    activeUserTurn.length === 0 ||
+    !activeUserTurn.includes("loadActiveUserTurnSession(") ||
+    !activeUserTurn.includes("this.#maintenance.runExisting(") ||
+    !activeUserTurn.includes(
+      "const interruption = await this.#activeUserTurnRuntime.interruptProxy({",
+    ) ||
+    !activeUserTurn.includes("decideActiveUserTurnAdmission({") ||
+    !activeUserTurn.includes("persistActiveUserTurnExit({") ||
+    !activeUserTurn.includes("persistRegeneratedRubricSession({") ||
+    !activeUserTurn.includes("settleInterruptedProxy({") ||
+    !activeUserTurn.includes("await command.surface.publishExit(") ||
+    !activeUserTurn.includes("await command.surface.publishDraft(") ||
+    !activeUserTurn.includes("await command.surface.publishContractFailure(") ||
+    !activeUserTurn.includes("await command.surface.handoff({") ||
+    !activeUserTurn.includes("recoverInterruptedProxy(") ||
+    activeUserTurn.split("loadActiveUserTurnSession(").length - 1 !== 2 ||
+    activeUserTurn.lastIndexOf("loadActiveUserTurnSession(") >
+      activeUserTurn.indexOf(
+        "const interruption = await this.#activeUserTurnRuntime.interruptProxy({",
+      ) ||
+    activeUserTurn.indexOf("persistActiveUserTurnExit({") >
+      activeUserTurn.indexOf("persistRegeneratedRubricSession({") ||
+    activeUserTurn.indexOf("await command.surface.publishExit(") >
+      activeUserTurn.indexOf("await command.surface.handoff({") ||
+    activeUserTurn.indexOf("await command.surface.publishContractFailure(") >
+      activeUserTurn.indexOf("recoverInterruptedProxy(") ||
     application.includes("freezeSnapshot(revisedDraft)") ||
     !application.includes("ADVANCEMENT_PRODUCT_API_EXACT_SET") ||
     !application.includes("createAdvancementProductApiContribution") ||
     !application.includes("buildClosureFacts(session)") ||
     application.split("defineProductApiQuery<").length - 1 !== 1 ||
-    application.split("defineProductApiCommand<").length - 1 !== 5 ||
-    application.split("defineProductApiFactEvent<").length - 1 !== 4 ||
+    application.split("defineProductApiCommand<").length - 1 !== 6 ||
+    application.split("defineProductApiFactEvent<").length - 1 !== 5 ||
     /@zhixing\/(?:server|rpc|owner-services)|\.\.\/\.\.\/server|\.\.\/\.\.\/owner-services/u.test(
       application,
     ) ||
@@ -3626,14 +3670,17 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !send.includes('prepared.kind === "awaiting-rubric-confirmation"') ||
     !send.includes('prepared.kind === "contract-failed"') ||
     !send.includes("newTaskNotApplicable") ||
+    !send.includes("const dispatchActiveAdvancementUserTurn = async () =>") ||
+    !send.includes("ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND") ||
+    send.split("ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND").length - 1 !== 2 ||
+    send.split("dispatchActiveAdvancementUserTurn()").length - 1 !== 2 ||
+    send.split("projectActiveAdvancementPreparation(").length - 1 !== 2 ||
     !send.includes(
-      "if (newTaskNotApplicable) {\n            const racedActivePrepared = await prepareActiveAdvancementUserTurn({",
+      "if (newTaskNotApplicable) {\n            const racedActiveResponse = projectActiveAdvancementPreparation(\n              await dispatchActiveAdvancementUserTurn(),",
     ) ||
-    !send.includes(
-      "projectActiveAdvancementPreparation(racedActivePrepared)",
-    ) ||
-    send.split("prepareActiveAdvancementUserTurn({").length - 1 !== 2 ||
     send.includes("Advancement state changed before new-task dispatch") ||
+    send.includes("prepareActiveAdvancementUserTurn") ||
+    send.includes("interruptAdvancementProxy") ||
     send.includes("prepareAdvancementUserTurn(") ||
     send.includes("hasAwaitingAdvancementConfirmation") ||
     send.includes('prepared.kind === "await-existing-confirmation"') ||
@@ -3662,7 +3709,6 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !controller.includes("decideNewTaskAdmission(") ||
     !controller.includes("buildNewTaskRubricDraft(") ||
     !controller.includes("persistNewTaskAwaitingSession(") ||
-    !controller.includes("no-open-session preparation must use the Advancement application") ||
     controller.includes('readonly kind: "run-direct"') ||
     controller.includes('readonly kind: "awaiting-rubric-confirmation"') ||
     controller.includes("this.contractBuilder.buildDraft({") ||
@@ -3678,12 +3724,25 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !controller.includes("confirmRubricDraftContent(") ||
     !controller.includes("persistRubricConfirmation(input:") ||
     !controller.includes("persistOriginalTaskAdmissionSettlement(input:") ||
+    !controller.includes("loadActiveUserTurnSession(") ||
+    !controller.includes("decideActiveUserTurnAdmission(") ||
+    !controller.includes("persistActiveUserTurnExit(") ||
+    !controller.includes("persistRegeneratedRubricSession(") ||
+    !controller.includes("settleInterruptedProxy(") ||
+    controller.includes("async prepareUserTurn(") ||
+    controller.includes("regenerateRubricContract(") ||
     !composition.includes('from "@zhixing/core/advancement/application"') ||
     composition.split("new AdvancementApplicationService(").length - 1 !== 1 ||
     composition.split("createAdvancementProductApiContribution(").length - 1 !== 1 ||
     !composition.includes("advancementDetailController.loadLatestSession(conversationId)") ||
     !composition.includes("newTask: advancementDetailController") ||
     !composition.includes("newTaskConversation: {") ||
+    !composition.includes("activeUserTurn: advancementDetailController") ||
+    !composition.includes("activeUserTurnRuntime: {") ||
+    !composition.includes("cancelPendingBySource(") ||
+    !composition.includes("getBusySource(conversationId)") ||
+    !composition.includes("abortInFlight(conversationId, {") ||
+    !composition.includes("recoverConversation(conversationId)") ||
     !composition.includes("ctx.conversations!.runMaintenance(conversationId, operation)") ||
     !composition.includes('.ensureShell({ kind: "ensure-shell", conversationId })') ||
     !composition.includes("ctx.conversations!.runMaintenanceExisting(") ||

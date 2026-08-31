@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ProductApiDispatcher } from "../../product-api/catalog.js";
+import { buildClosureFacts, renderClosureReport } from "../closure.js";
 import {
   ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
   ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT,
@@ -9,9 +10,11 @@ import {
   ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
   ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
   ADVANCEMENT_DETAIL_QUERY,
+  ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,
   ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
   ADVANCEMENT_PRODUCT_API_EXACT_SET,
   ADVANCEMENT_REVISE_RUBRIC_COMMAND,
+  ADVANCEMENT_SESSION_EXITED_FACT_EVENT,
   AdvancementApplicationError,
   AdvancementApplicationService,
   AdvancementOriginalTaskAdmissionError,
@@ -1401,7 +1404,203 @@ describe("AdvancementApplicationService detail query", () => {
     ).rejects.toThrow("session write failed");
   });
 
-  it("contributes one Query plus five finite Commands and four Facts", async () => {
+  it("owns active continuation ordering and settles only a genuinely interrupted outstanding proxy", async () => {
+    const fixture = createActiveFixture({
+      interruption: {
+        interrupted: true,
+        proxyMessageId: "proxy-1",
+      },
+    });
+
+    const prepared = await fixture.application.prepareActiveUserTurn(
+      activeCommand(fixture.surface),
+    );
+
+    expect(prepared).toMatchObject({
+      result: {
+        kind: "active-user-turn",
+        interruptedProxy: true,
+        handoff: { conversationId: "conv-1", turnId: "turn-active" },
+      },
+      facts: [],
+    });
+    expect(fixture.order).toEqual([
+      "maintenance",
+      "load-current",
+      "interrupt",
+      "admission",
+      "settle",
+      "handoff",
+    ]);
+  });
+
+  it("keeps ordinary busy turns intact while the single application still classifies and hands off", async () => {
+    const fixture = createActiveFixture({
+      maintenanceStatus: "busy",
+      interruption: { interrupted: false },
+    });
+
+    await expect(
+      fixture.application.prepareActiveUserTurn(activeCommand(fixture.surface)),
+    ).resolves.toMatchObject({
+      result: { kind: "active-user-turn", interruptedProxy: false },
+    });
+    expect(fixture.order).toEqual([
+      "maintenance",
+      "load-current",
+      "interrupt",
+      "admission",
+      "handoff",
+    ]);
+  });
+
+  it("returns not-applicable without interrupting when the linearized active identity disappeared", async () => {
+    const interruptProxy = vi.fn();
+    let reads = 0;
+    const application = createApplication({
+      activeUserTurn: {
+        loadActiveUserTurnSession: async () => {
+          reads += 1;
+          return reads === 1 ? session() : null;
+        },
+      } as AdvancementApplicationOptions["activeUserTurn"],
+      activeUserTurnRuntime: {
+        interruptProxy,
+        recoverInterruptedProxy: vi.fn(),
+      },
+    });
+
+    await expect(
+      application.prepareActiveUserTurn(activeCommand(testActiveSurface())),
+    ).resolves.toEqual({ result: { kind: "not-applicable" }, facts: [] });
+    expect(interruptProxy).not.toHaveBeenCalled();
+  });
+
+  it("does not hand off when interrupted-proxy settlement fails", async () => {
+    const fixture = createActiveFixture({
+      interruption: { interrupted: true, proxyMessageId: "proxy-1" },
+      settlementError: new Error("settlement failed"),
+    });
+
+    await expect(
+      fixture.application.prepareActiveUserTurn(activeCommand(fixture.surface)),
+    ).rejects.toThrow("settlement failed");
+    expect(fixture.order).not.toContain("handoff");
+  });
+
+  it("keeps a committed exit Fact visible when the ordinary handoff fails", async () => {
+    const fixture = createActiveFixture({
+      admission: "take-over-active",
+      handoffError: new Error("handoff failed"),
+    });
+
+    await expect(
+      fixture.application.prepareActiveUserTurn(activeCommand(fixture.surface)),
+    ).rejects.toThrow("handoff failed");
+    expect(fixture.current().status).toBe("exited");
+    expect(fixture.order.slice(-2)).toEqual(["publish-exit", "handoff"]);
+  });
+
+  it.each([
+    {
+      label: "takeover",
+      admission: "take-over-active" as const,
+      confirmedRubric: confirmedRubric("已确认标准"),
+      reason: "user-took-over",
+    },
+    {
+      label: "missing confirmed Rubric",
+      admission: "revise-rubric" as const,
+      confirmedRubric: undefined,
+      reason: "system-error",
+    },
+  ])("commits and publishes $label exit before ordinary handoff", async ({
+    admission,
+    confirmedRubric,
+    reason,
+  }) => {
+    const fixture = createActiveFixture({ admission, confirmedRubric });
+
+    const prepared = await fixture.application.prepareActiveUserTurn(
+      activeCommand(fixture.surface),
+    );
+
+    expect(prepared.result).toMatchObject({
+      kind: "active-session-taken-over",
+      exit: { reason },
+    });
+    expect(prepared.facts).toEqual([
+      expect.objectContaining({
+        kind: "advancement-session-exited",
+        exit: expect.objectContaining({ reason }),
+      }),
+    ]);
+    expect(fixture.order.slice(-4)).toEqual([
+      "exit",
+      "closure",
+      "publish-exit",
+      "handoff",
+    ]);
+  });
+
+  it("regenerates from the confirmed Rubric and publishes exited before committed draft", async () => {
+    const fixture = createActiveFixture({ admission: "revise-rubric" });
+
+    const prepared = await fixture.application.prepareActiveUserTurn(
+      activeCommand(fixture.surface, "补充文档验收"),
+    );
+
+    expect(prepared.result).toMatchObject({
+      kind: "rubric-regenerated",
+      exitedAdvancementSessionId: "adv-1",
+      advancementSessionId: "adv_draft-regenerated",
+      exit: { reason: "superseded" },
+      draft: {
+        originalTurnId: "turn-active",
+        content: { passCriteria: ["测试通过", "补充文档验收"] },
+      },
+    });
+    expect(prepared.facts.map((fact) => fact.kind)).toEqual([
+      "advancement-session-exited",
+      "advancement-contract-draft-created",
+    ]);
+    expect(fixture.order.slice(-6)).toEqual([
+      "revise",
+      "exit",
+      "closure",
+      "create",
+      "publish-exit",
+      "publish-draft",
+    ]);
+  });
+
+  it("keeps the active contract on regeneration failure and projects failure before best-effort recovery", async () => {
+    const fixture = createActiveFixture({
+      admission: "revise-rubric",
+      revisionError: new Error("revision provider down"),
+      recoveryError: new Error("recovery unavailable"),
+    });
+
+    const prepared = await fixture.application.prepareActiveUserTurn(
+      activeCommand(fixture.surface),
+    );
+
+    expect(prepared).toMatchObject({
+      result: {
+        kind: "contract-failed",
+        error: { message: "revision provider down" },
+      },
+      facts: [],
+    });
+    expect(fixture.current().status).toBe("active");
+    expect(fixture.order.slice(-3)).toEqual([
+      "revise",
+      "publish-failure",
+      "recover",
+    ]);
+  });
+
+  it("contributes one Query plus six finite Commands and five Facts", async () => {
     const source = session({
       status: "awaiting-rubric-confirmation",
       pendingRubricDraft: pendingRubric("待修订标准"),
@@ -1415,6 +1614,7 @@ describe("AdvancementApplicationService detail query", () => {
 
     expect(ADVANCEMENT_PRODUCT_API_EXACT_SET.operations).toEqual([
       ADVANCEMENT_DETAIL_QUERY,
+      ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,
       ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
       ADVANCEMENT_REVISE_RUBRIC_COMMAND,
       ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
@@ -1422,6 +1622,7 @@ describe("AdvancementApplicationService detail query", () => {
       ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
     ]);
     expect(ADVANCEMENT_PRODUCT_API_EXACT_SET.factEvents).toEqual([
+      ADVANCEMENT_SESSION_EXITED_FACT_EVENT,
       ADVANCEMENT_CONTRACT_DRAFT_CREATED_FACT_EVENT,
       ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT,
       ADVANCEMENT_CONTRACT_CONFIRMED_FACT_EVENT,
@@ -1519,6 +1720,10 @@ function createApplication(
     newTask: overrides.newTask ?? fixture.options.newTask,
     newTaskConversation:
       overrides.newTaskConversation ?? fixture.options.newTaskConversation,
+    activeUserTurn:
+      overrides.activeUserTurn ?? fixture.options.activeUserTurn,
+    activeUserTurnRuntime:
+      overrides.activeUserTurnRuntime ?? fixture.options.activeUserTurnRuntime,
     rubricRevision:
       overrides.rubricRevision ?? fixture.options.rubricRevision,
     rubricCancellation:
@@ -1536,6 +1741,173 @@ function createApplication(
   });
 }
 
+function activeCommand(
+  surface: Parameters<AdvancementApplicationService["prepareActiveUserTurn"]>[0]["surface"],
+  text = "继续推进",
+): Parameters<AdvancementApplicationService["prepareActiveUserTurn"]>[0] {
+  return {
+    conversationId: "conv-1",
+    turnId: "turn-active",
+    userInput: { parts: [{ type: "text", text }] },
+    surface,
+  };
+}
+
+function testActiveSurface(): Parameters<
+  AdvancementApplicationService["prepareActiveUserTurn"]
+>[0]["surface"] {
+  return {
+    publishExit: vi.fn(),
+    publishDraft: vi.fn(),
+    publishContractFailure: vi.fn(),
+    handoff: vi.fn(async ({ conversationId, turnId }) => ({
+      conversationId,
+      turnId,
+    })),
+  };
+}
+
+function createActiveFixture(overrides: Readonly<{
+  admission?: "continue-active" | "take-over-active" | "revise-rubric";
+  confirmedRubric?: ReturnType<typeof confirmedRubric> | undefined;
+  interruption?: Readonly<{ interrupted: boolean; proxyMessageId?: string }>;
+  maintenanceStatus?: "done" | "busy";
+  revisionError?: Error;
+  settlementError?: Error;
+  handoffError?: Error;
+  recoveryError?: Error;
+}> = {}) {
+  const order: string[] = [];
+  let current = session({
+    outstandingProxyMessageId: "proxy-1",
+    ...(Object.prototype.hasOwnProperty.call(overrides, "confirmedRubric")
+      ? { confirmedRubric: overrides.confirmedRubric }
+      : {}),
+  });
+  let loads = 0;
+  const activeUserTurn: AdvancementApplicationOptions["activeUserTurn"] = {
+    loadActiveUserTurnSession: async () => {
+      loads += 1;
+      if (loads > 1) order.push("load-current");
+      return current;
+    },
+    decideActiveUserTurnAdmission: async () => {
+      order.push("admission");
+      return {
+        kind: "advancement-task",
+        action: overrides.admission ?? "continue-active",
+        reason: "test",
+      };
+    },
+    activeUserTurnNow: () => "2026-01-01T00:06:00.000Z",
+    createActiveRubricDraftId: () => "draft-regenerated",
+    reviseActiveRubricDraft: async ({ currentDraft, userFeedback }) => {
+      order.push("revise");
+      if (overrides.revisionError) throw overrides.revisionError;
+      return {
+        ...currentDraft,
+        content: {
+          ...currentDraft.content,
+          passCriteria: [
+            ...currentDraft.content.passCriteria,
+            userFeedback,
+          ],
+        },
+      };
+    },
+    persistActiveUserTurnExit: async ({ exit }) => {
+      order.push("exit");
+      current = { ...current, status: "exited", exit };
+      return current;
+    },
+    composeActiveUserTurnClosure: async (committed) => {
+      order.push("closure");
+      const facts = buildClosureFacts(committed);
+      return {
+        summary: renderClosureReport(facts),
+        synthesized: false,
+        facts,
+      };
+    },
+    persistRegeneratedRubricSession: async ({
+      advancementSessionId,
+      conversationId,
+      originalUserTask,
+      draft,
+    }) => {
+      order.push("create");
+      current = session({
+        id: advancementSessionId,
+        conversationId,
+        status: "awaiting-rubric-confirmation",
+        originalUserTask,
+        pendingRubricDraft: draft,
+        confirmedRubric: undefined,
+        outstandingProxyMessageId: undefined,
+      });
+      return current;
+    },
+    settleInterruptedProxy: async () => {
+      order.push("settle");
+      if (overrides.settlementError) throw overrides.settlementError;
+      current = { ...current, outstandingProxyMessageId: undefined };
+      return current;
+    },
+  };
+  const application = createApplication({
+    maintenance: {
+      runNew: async (_conversationId, operation) => ({
+        status: "done",
+        value: await operation(),
+      }),
+      runExisting: async (_conversationId, operation) => {
+        order.push("maintenance");
+        return overrides.maintenanceStatus === "busy"
+          ? { status: "busy" as const }
+          : { status: "done" as const, value: await operation() };
+      },
+    },
+    activeUserTurn,
+    activeUserTurnRuntime: {
+      interruptProxy: async () => {
+        order.push("interrupt");
+        return overrides.interruption ?? { interrupted: false };
+      },
+      recoverInterruptedProxy: async () => {
+        order.push("recover");
+        if (overrides.recoveryError) throw overrides.recoveryError;
+      },
+    },
+  });
+  const surface: Parameters<
+    AdvancementApplicationService["prepareActiveUserTurn"]
+  >[0]["surface"] = {
+    publishExit: async () => {
+      order.push("publish-exit");
+    },
+    publishDraft: async () => {
+      order.push("publish-draft");
+    },
+    publishContractFailure: async () => {
+      order.push("publish-failure");
+    },
+    handoff: async (input) => {
+      order.push("handoff");
+      if (overrides.handoffError) throw overrides.handoffError;
+      return {
+        conversationId: input.conversationId,
+        turnId: input.turnId,
+      };
+    },
+  };
+  return {
+    application,
+    current: () => current,
+    order,
+    surface,
+  };
+}
+
 type RevisionFixtureOverrides =
   Partial<AdvancementRubricRevisionMechanismPort> &
   Partial<AdvancementRubricCancellationMechanismPort> &
@@ -1545,6 +1917,8 @@ type RevisionFixtureOverrides =
     maintenance?: AdvancementConversationMaintenancePort;
     newTask?: AdvancementApplicationOptions["newTask"];
     newTaskConversation?: AdvancementApplicationOptions["newTaskConversation"];
+    activeUserTurn?: AdvancementApplicationOptions["activeUserTurn"];
+    activeUserTurnRuntime?: AdvancementApplicationOptions["activeUserTurnRuntime"];
     originalTask?: AdvancementOriginalTaskExecutionPort;
     confirmedOriginalTask?: AdvancementConfirmedOriginalTaskAdmissionPort;
     rubricPublication?: RubricPublicationPort;
@@ -1705,6 +2079,53 @@ function createRevisionFixture(
     },
     newTaskConversation: overrides.newTaskConversation ?? {
       ensureShell: async () => undefined,
+    },
+    activeUserTurn: overrides.activeUserTurn ?? {
+      loadActiveUserTurnSession: async () => current,
+      decideActiveUserTurnAdmission: async () => ({
+        kind: "advancement-task",
+        action: "continue-active",
+        reason: "test",
+      }),
+      activeUserTurnNow: () => "2026-01-01T00:06:00.000Z",
+      createActiveRubricDraftId: () => "draft-regenerated",
+      reviseActiveRubricDraft: async ({ currentDraft }) => currentDraft,
+      persistActiveUserTurnExit: async ({ exit }) => {
+        current = { ...current, status: "exited", exit };
+        return current;
+      },
+      composeActiveUserTurnClosure: async (committed) => {
+        const facts = buildClosureFacts(committed);
+        return {
+          summary: renderClosureReport(facts),
+          synthesized: false,
+          facts,
+        };
+      },
+      persistRegeneratedRubricSession: async ({
+        advancementSessionId,
+        conversationId,
+        originalUserTask,
+        draft,
+      }) => {
+        current = session({
+          id: advancementSessionId,
+          conversationId,
+          status: "awaiting-rubric-confirmation",
+          originalUserTask,
+          pendingRubricDraft: draft,
+          confirmedRubric: undefined,
+        });
+        return current;
+      },
+      settleInterruptedProxy: async () => {
+        current = { ...current, outstandingProxyMessageId: undefined };
+        return current;
+      },
+    },
+    activeUserTurnRuntime: overrides.activeUserTurnRuntime ?? {
+      interruptProxy: async () => ({ interrupted: false }),
+      recoverInterruptedProxy: async () => undefined,
     },
     rubricRevision,
     rubricCancellation,

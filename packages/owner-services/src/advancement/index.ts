@@ -4,7 +4,6 @@ export {
   renderRecentContextFromMessages,
   type AdvancementClosureSynthesizer,
   type AdvancementControllerOptions,
-  type AdvancementPrepareResult,
   type AdvancementReviewRunInput,
   type AdvancementReviewRunOutcome,
   type AdvancementRunReviewer,

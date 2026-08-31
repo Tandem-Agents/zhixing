@@ -2163,6 +2163,36 @@ async function runServerProcess(
                 .ensureShell({ kind: "ensure-shell", conversationId })
                 .then(() => undefined),
           },
+          activeUserTurn: advancementDetailController,
+          activeUserTurnRuntime: {
+            interruptProxy: async ({
+              conversationId,
+              outstandingProxyMessageId,
+            }) => {
+              const cancelledPending = await ctx.conversations!.cancelPendingBySource(
+                conversationId,
+                "advancement",
+              );
+              const abortedInFlight =
+                ctx.conversations!.getBusySource(conversationId) ===
+                  "advancement" &&
+                ctx.conversations!.abortInFlight(conversationId, {
+                  kind: "user-cancel",
+                  source: "rpc",
+                  pressedAt: Date.now(),
+                });
+              const interrupted = cancelledPending > 0 || abortedInFlight;
+              return Object.freeze({
+                interrupted,
+                ...(interrupted && outstandingProxyMessageId
+                  ? { proxyMessageId: outstandingProxyMessageId }
+                  : {}),
+              });
+            },
+            recoverInterruptedProxy: async (conversationId) => {
+              await advancementRecovery?.recoverConversation(conversationId);
+            },
+          },
           rubricRevision: advancementDetailController,
           rubricCancellation: advancementDetailController,
           awaitingRubricAdmission: advancementDetailController,

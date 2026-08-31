@@ -26,8 +26,6 @@ import {
   type AdvancementClosureReport,
   buildClosureFacts,
   extractText,
-  extractUserTurnInputText,
-  projectConfirmedRubricToDraftContent,
   renderClosureReport,
   sumAdvancementUsage,
 } from "@zhixing/core";
@@ -39,6 +37,7 @@ import type {
   ResourceReservationPort,
 } from "@zhixing/core/contracts";
 import type {
+  AdvancementActiveUserTurnMechanismPort,
   AdvancementAwaitingRubricAdmissionDecision,
   AdvancementAwaitingRubricAdmissionMechanismPort,
   AdvancementNewTaskMechanismPort,
@@ -59,35 +58,6 @@ import {
   AdvancementEvidenceDeferredError,
   type AdvancementEvidenceRootTarget,
 } from "./evidence.js";
-
-export type AdvancementPrepareResult =
-  | {
-      readonly kind: "active-user-turn";
-      readonly session: AdvancementSession;
-      readonly admission: AdvancementAdmissionDecision;
-    }
-  | {
-      readonly kind: "active-session-taken-over";
-      readonly session: AdvancementSession;
-      readonly admission: AdvancementAdmissionDecision;
-      readonly exit: AdvancementExit;
-      readonly closure: AdvancementClosureReport;
-    }
-  | {
-      readonly kind: "rubric-regenerated";
-      readonly exitedSession: AdvancementSession;
-      readonly exit: AdvancementExit;
-      readonly closure: AdvancementClosureReport;
-      readonly session: AdvancementSession;
-      readonly draft: RubricContractDraftSnapshot;
-      readonly admission: AdvancementAdmissionDecision;
-    }
-  | {
-      readonly kind: "contract-failed";
-      readonly conversationId: string;
-      readonly originalTurnId: string;
-      readonly error: { readonly message: string };
-    };
 
 export interface AdvancementControllerOptions {
   /** 推进会话存储——生产装配注入权威日志适配实现，无隐式回退。 */
@@ -182,6 +152,7 @@ export type AdvancementTurnReviewResult =
     };
 
 export class AdvancementController implements
+  AdvancementActiveUserTurnMechanismPort,
   AdvancementAwaitingRubricAdmissionMechanismPort,
   AdvancementNewTaskMechanismPort,
   AdvancementRubricRevisionMechanismPort,
@@ -320,157 +291,79 @@ export class AdvancementController implements
     }
   }
 
-  async prepareUserTurn(input: {
-    readonly conversationId: string;
-    readonly turnId: string;
-    readonly userInput: UserTurnInput;
-    readonly beforeCreateSession?: () => Promise<void>;
-  }): Promise<AdvancementPrepareResult> {
-    const open = await this.store.loadActiveSession(input.conversationId);
-    if (open?.status === "awaiting-rubric-confirmation") {
-      throw new Error(
-        "AdvancementController: awaiting Rubric control must use the Advancement application",
-      );
-    }
+  async loadActiveUserTurnSession(
+    conversationId: string,
+  ): Promise<AdvancementSession | null> {
+    return await this.loadActiveSession(conversationId);
+  }
 
-    if (open?.status === "active") {
-      const admission = await this.decideAdmission({
-        conversationId: input.conversationId,
-        userInput: input.userInput,
-        hasActiveAdvancementSession: true,
-      });
-      if (admission.action === "take-over-active") {
-        // 有推进事实的接管归 exited 并交付收场；cancelled 只留给
-        // 无执行事实的关闭（awaiting 取消、对话删除）。
-        const exit: AdvancementExit = {
-          reason: "user-took-over",
-          message: "用户接管或改变了当前推进目标，原推进闭环已退出。",
-          occurredAt: this.now(),
-        };
-        const exited = await this.store.exitSession(
-          input.conversationId,
-          open.id,
-          exit,
-          exit.occurredAt,
-        );
-        return {
-          kind: "active-session-taken-over",
-          session: exited,
-          admission,
-          exit,
-          closure: await this.composeClosureReport(exited),
-        };
-      }
-      if (admission.action === "revise-rubric") {
-        return await this.regenerateRubricContract(input, open, admission);
-      }
-      return {
-        kind: "active-user-turn",
-        session: open,
-        admission,
-      };
-    }
+  async decideActiveUserTurnAdmission(input: Readonly<{
+    conversationId: string;
+    userInput: Readonly<UserTurnInput>;
+  }>): Promise<AdvancementAdmissionDecision> {
+    return await this.decideAdmission({
+      conversationId: input.conversationId,
+      userInput: input.userInput,
+      hasActiveAdvancementSession: true,
+    });
+  }
 
-    throw new Error(
-      "AdvancementController: no-open-session preparation must use the Advancement application",
+  activeUserTurnNow(): string {
+    return this.now();
+  }
+
+  createActiveRubricDraftId(): string {
+    return randomUUID();
+  }
+
+  async reviseActiveRubricDraft(input: Readonly<{
+    currentDraft: RubricContractDraftSnapshot;
+    originalUserTask: AdvancementSession["originalUserTask"];
+    userFeedback: string;
+  }>): Promise<RubricContractDraftSnapshot> {
+    return await this.contractBuilder.reviseDraft(input);
+  }
+
+  async persistActiveUserTurnExit(input: Readonly<{
+    conversationId: string;
+    advancementSessionId: string;
+    exit: AdvancementExit;
+  }>): Promise<AdvancementSession> {
+    return await this.store.exitSession(
+      input.conversationId,
+      input.advancementSessionId,
+      input.exit,
+      input.exit.occurredAt,
     );
   }
 
-  /**
-   * 契约再生：标准修正类退出后一回合重启——先按用户修正生成新草案
-   * （可失败，失败时旧契约保持 active 不受损），成功后才退出旧契约
-   * （superseded + 收场），以反投影预填 + 用户修正的新草案开新 awaiting
-   * 会话。语义仍是「退出 + 新不可变快照」，无中途可变契约；执行侧历史
-   * 留在同一 conversation，执行进度零丢失。
-   */
-  private async regenerateRubricContract(
-    input: {
-      readonly conversationId: string;
-      readonly turnId: string;
-      readonly userInput: UserTurnInput;
-      readonly beforeCreateSession?: () => Promise<void>;
-    },
-    open: AdvancementSession,
-    admission: AdvancementAdmissionDecision,
-  ): Promise<AdvancementPrepareResult> {
-    const oldRubric = open.confirmedRubric;
-    if (!oldRubric) {
-      const exit: AdvancementExit = {
-        reason: "system-error",
-        message: "推进会话缺少已确认 Rubric，无法按其再生契约，已退出。",
-        occurredAt: this.now(),
-      };
-      const exited = await this.store.exitSession(
-        input.conversationId,
-        open.id,
-        exit,
-        exit.occurredAt,
-      );
-      return {
-        kind: "active-session-taken-over",
-        session: exited,
-        admission,
-        exit,
-        closure: await this.composeClosureReport(exited),
-      };
-    }
+  async composeActiveUserTurnClosure(
+    session: AdvancementSession,
+  ): Promise<AdvancementClosureReport> {
+    return await this.composeClosureReport(session);
+  }
 
-    const prefillDraft: RubricContractDraftSnapshot = {
-      draftId: randomUUID(),
-      originalTurnId: input.turnId,
-      source: "generated",
-      candidateRubricIds: [],
-      title: oldRubric.title,
-      description: oldRubric.description,
-      content: projectConfirmedRubricToDraftContent(oldRubric),
-      createdAt: this.now(),
-    };
-    let revised: RubricContractDraftSnapshot;
-    try {
-      revised = await this.contractBuilder.reviseDraft({
-        currentDraft: prefillDraft,
-        originalUserTask: open.originalUserTask,
-        userFeedback: extractUserTurnInputText(input.userInput).trim(),
-      });
-    } catch (err) {
-      // 修订失败不动旧契约——闭环保持原样，确认面受控失败提示。
-      return {
-        kind: "contract-failed",
-        conversationId: input.conversationId,
-        originalTurnId: input.turnId,
-        error: { message: errorMessage(err) },
-      };
-    }
-
-    const exit: AdvancementExit = {
-      reason: "superseded",
-      message: "用户修正验收标准，原契约退出，按修正后的标准重新确认。",
-      occurredAt: this.now(),
-    };
-    const exited = await this.store.exitSession(
-      input.conversationId,
-      open.id,
-      exit,
-      exit.occurredAt,
-    );
-    const closure = await this.composeClosureReport(exited);
-    await input.beforeCreateSession?.();
-    const session = await this.store.createSession({
-      id: `adv_${revised.draftId}`,
+  async persistRegeneratedRubricSession(input: Readonly<{
+    advancementSessionId: string;
+    conversationId: string;
+    originalUserTask: AdvancementSession["originalUserTask"];
+    draft: RubricContractDraftSnapshot;
+  }>): Promise<AdvancementSession> {
+    return await this.store.createSession({
+      id: input.advancementSessionId,
       conversationId: input.conversationId,
-      originalUserTask: open.originalUserTask,
-      pendingRubricDraft: revised,
-      createdAt: revised.createdAt,
+      originalUserTask: input.originalUserTask,
+      pendingRubricDraft: input.draft,
+      createdAt: input.draft.createdAt,
     });
-    return {
-      kind: "rubric-regenerated",
-      exitedSession: exited,
-      exit,
-      closure,
-      session,
-      draft: revised,
-      admission,
-    };
+  }
+
+  async settleInterruptedProxy(input: Readonly<{
+    conversationId: string;
+    advancementSessionId: string;
+    proxyMessageId: string;
+  }>): Promise<AdvancementSession> {
+    return await this.settleProxyMessage(input);
   }
 
   /** 收场报告：LLM 合成优先，失败或缺 synthesizer 时降级结构化直出。 */

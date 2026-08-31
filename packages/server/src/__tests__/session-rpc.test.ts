@@ -908,6 +908,39 @@ function createConversationProductApi(input: {
                 .ensureShell({ kind: "ensure-shell", conversationId })
                 .then(() => undefined),
           },
+          activeUserTurn: advancement,
+          activeUserTurnRuntime: {
+            interruptProxy: async ({
+              conversationId,
+              outstandingProxyMessageId,
+            }) => {
+              const cancelledPending =
+                await input.conversations.cancelPendingBySource(
+                  conversationId,
+                  "advancement",
+                );
+              const abortedInFlight =
+                input.conversations.getBusySource(conversationId) ===
+                  "advancement" &&
+                input.conversations.abortInFlight(conversationId, {
+                  kind: "user-cancel",
+                  source: "rpc",
+                  pressedAt: Date.now(),
+                });
+              const interrupted = cancelledPending > 0 || abortedInFlight;
+              return {
+                interrupted,
+                ...(interrupted && outstandingProxyMessageId
+                  ? { proxyMessageId: outstandingProxyMessageId }
+                  : {}),
+              };
+            },
+            recoverInterruptedProxy: async (conversationId) => {
+              await input.advancementRecovery?.recoverConversation(
+                conversationId,
+              );
+            },
+          },
           rubricRevision: advancement,
           rubricCancellation: advancement,
           awaitingRubricAdmission: advancement,
@@ -3299,15 +3332,14 @@ describe("session.* RPC (S2.D)", () => {
     });
     expect(isSuccessResponse(resp)).toBe(true);
     if (!isSuccessResponse(resp)) return;
-    const result = resp.result as Record<string, unknown>;
-    const detail = result.detail as Record<string, unknown>;
-    expect(Object.keys(result).sort()).toEqual(["conversationId", "detail"]);
-    expect(Object.keys(detail).sort()).toEqual([
+    expect(Object.keys(resp.result as Record<string, unknown>).sort()).toEqual([
       "advancementSessionId",
-      "facts",
-      "lastReview",
-      "rubricTitle",
+      "conversationId",
+      "rubricDraft",
+      "rubricDraftId",
+      "sessionId",
       "status",
+      "turnId",
     ]);
     expect(resp.result).toMatchObject({
       status: "awaiting-rubric-confirmation",
@@ -3435,6 +3467,62 @@ describe("session.* RPC (S2.D)", () => {
     );
     expect(session?.status).toBe("exited");
     client.close();
+  });
+
+  it("session.send 修正缺失 confirmed Rubric 的 active 推进时先 system-error 退出再交接当前输入", async () => {
+    const advancement = await createTestAdvancementHarness({
+      admissionStrategy: createActiveActionAdmissionStrategy("revise-rubric"),
+    });
+    await seedOutstandingProxySession(advancement.store, "conv-missing-rubric");
+    const load = advancement.controller.loadActiveUserTurnSession.bind(
+      advancement.controller,
+    );
+    const activeWithoutRubric = vi
+      .spyOn(advancement.controller, "loadActiveUserTurnSession")
+      .mockImplementation(async (conversationId) => {
+        const active = await load(conversationId);
+        return active ? { ...active, confirmedRubric: undefined } : null;
+      });
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: advancement.controller,
+      seedConversations: ["conv-missing-rubric"],
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    try {
+      const resp = await client.request("session.send", {
+        conversationId: "conv-missing-rubric",
+        text: "按新的标准继续",
+        turnId: "turn-missing-rubric",
+      });
+      expect(isSuccessResponse(resp)).toBe(true);
+      if (!isSuccessResponse(resp)) return;
+      expect(resp.result).toMatchObject({
+        conversationId: "conv-missing-rubric",
+        turnId: "turn-missing-rubric",
+      });
+      expect(resp.result).not.toHaveProperty("advancementContinuation");
+
+      const exitedEvent = await client.waitNotification("session.event");
+      expect(exitedEvent.params).toMatchObject({
+        scope: "control",
+        event: "advancement:exited",
+        payload: {
+          advancementSessionId: "adv-recovery",
+          exit: { reason: "system-error" },
+        },
+      });
+      const session = await advancement.store.loadSession(
+        "conv-missing-rubric",
+        "adv-recovery",
+      );
+      expect(session?.status).toBe("exited");
+      expect(session?.exit?.reason).toBe("system-error");
+    } finally {
+      activeWithoutRubric.mockRestore();
+      client.close();
+    }
   });
 
   it("session.advancementDetail 返回 open 会话的归因展开面；无记录时 detail 为 null", async () => {
@@ -3668,12 +3756,24 @@ describe("session.* RPC (S2.D)", () => {
   it("session.send 在 active 推进中补充输入时返回 continuation 告知", async () => {
     const advancement = await createTestAdvancementHarness();
     await seedOutstandingProxySession(advancement.store, "conv-continue");
-    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+    const conversations = await startWithFactory(createMockFactory({
+      deltaCount: 8,
+      yieldDelayMs: 30,
+      abortYieldsAborted: true,
+    }), {
       advancement: advancement.controller,
+      withAdvancementRecovery: true,
       seedConversations: ["conv-continue"],
     });
     const client = await connect(server.port);
     await client.request("auth", { token: TEST_TOKEN });
+    const resumed = await client.request("session.resume", {
+      conversationId: "conv-continue",
+    });
+    expect(isSuccessResponse(resumed)).toBe(true);
+    await waitUntil(
+      () => conversations.getBusySource("conv-continue") === "advancement",
+    );
 
     const resp = await client.request("session.send", {
       conversationId: "conv-continue",
@@ -3684,8 +3784,12 @@ describe("session.* RPC (S2.D)", () => {
     if (!isSuccessResponse(resp)) return;
     expect(resp.result).toMatchObject({
       turnId: "turn-continue",
-      advancementContinuation: { interruptedProxy: false },
+      advancementContinuation: { interruptedProxy: true },
     });
+    expect(
+      (await advancement.store.loadActiveSession("conv-continue"))
+        ?.outstandingProxyMessageId,
+    ).toBeUndefined();
     client.close();
   });
 
@@ -3762,7 +3866,9 @@ describe("session.* RPC (S2.D)", () => {
         turnId: "turn-active-race",
         advancementContinuation: { interruptedProxy: false },
       });
-      expect(activeReads).toHaveBeenCalledTimes(2);
+      // 第一次 Command 只做初始 not-applicable；竞态回交的同一 Command
+      // 先取得候选 identity，再在线性化点复核一次当前 active identity。
+      expect(activeReads).toHaveBeenCalledTimes(3);
       expect(newTaskAdmission).not.toHaveBeenCalled();
       expect(createSession).not.toHaveBeenCalled();
     } finally {

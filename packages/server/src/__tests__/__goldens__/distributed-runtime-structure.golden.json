@@ -163,11 +163,6 @@
       "name": "AdmitAndMaybeStartTurnInput"
     },
     {
-      "definition": "| AdvancementPrepareResult | { readonly kind: \"owner-busy\" }",
-      "kind": "type",
-      "name": "AdvancementPrepareOwnerResult"
-    },
-    {
       "definition": [
         "token?: string;",
         "client?: { id?: string; version?: string; };"

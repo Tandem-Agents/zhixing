@@ -10,7 +10,12 @@ import {
 } from "../product-api/catalog.js";
 import { canonicalize, protocolDigest } from "../protocol/canonical.js";
 import type { AdvancementAdmissionDecision } from "./admission.js";
-import { buildClosureFacts, type AdvancementClosureFacts } from "./closure.js";
+import {
+  buildClosureFacts,
+  type AdvancementClosureFacts,
+  type AdvancementClosureReport,
+} from "./closure.js";
+import { projectConfirmedRubricToDraftContent } from "./contract.js";
 import type {
   AdvancementExit,
   AdvancementOriginalTaskAdmissionIntent,
@@ -22,6 +27,7 @@ import type {
   RubricDraftPersistenceChoice,
 } from "./types.js";
 import {
+  extractUserTurnInputText,
   isNonEmptyUserTurnInput,
   type UserTurnInput,
 } from "../types/user-input.js";
@@ -74,6 +80,55 @@ export interface AdvancementNewTaskMechanismPort {
 /** Conversation application boundary used only after a draft has been built. */
 export interface AdvancementNewTaskConversationPort {
   ensureShell(conversationId: string): Promise<void>;
+}
+
+/** Path-free owner mechanisms for the active user-turn state transition. */
+export interface AdvancementActiveUserTurnMechanismPort {
+  loadActiveUserTurnSession(
+    conversationId: string,
+  ): Promise<AdvancementSession | null>;
+  decideActiveUserTurnAdmission(input: Readonly<{
+    conversationId: string;
+    userInput: Readonly<UserTurnInput>;
+  }>): Promise<AdvancementAdmissionDecision>;
+  activeUserTurnNow(): string;
+  createActiveRubricDraftId(): string;
+  reviseActiveRubricDraft(input: Readonly<{
+    currentDraft: RubricContractDraftSnapshot;
+    originalUserTask: AdvancementSession["originalUserTask"];
+    userFeedback: string;
+  }>): Promise<RubricContractDraftSnapshot>;
+  persistActiveUserTurnExit(input: Readonly<{
+    conversationId: string;
+    advancementSessionId: string;
+    exit: AdvancementExit;
+  }>): Promise<AdvancementSession>;
+  composeActiveUserTurnClosure(
+    session: AdvancementSession,
+  ): Promise<AdvancementClosureReport>;
+  persistRegeneratedRubricSession(input: Readonly<{
+    advancementSessionId: string;
+    conversationId: string;
+    originalUserTask: AdvancementSession["originalUserTask"];
+    draft: RubricContractDraftSnapshot;
+  }>): Promise<AdvancementSession>;
+  settleInterruptedProxy(input: Readonly<{
+    conversationId: string;
+    advancementSessionId: string;
+    proxyMessageId: string;
+  }>): Promise<AdvancementSession>;
+}
+
+/** Anchor-owned effects; Advancement alone decides their ordering. */
+export interface AdvancementActiveUserTurnRuntimePort {
+  interruptProxy(input: Readonly<{
+    conversationId: string;
+    outstandingProxyMessageId?: string;
+  }>): Promise<Readonly<{
+    interrupted: boolean;
+    proxyMessageId?: string;
+  }>>;
+  recoverInterruptedProxy(conversationId: string): Promise<void>;
 }
 
 /** Path-free mechanisms used by the Advancement rubric-revision application decision. */
@@ -262,6 +317,8 @@ export interface AdvancementApplicationOptions {
   readonly maintenance: AdvancementConversationMaintenancePort;
   readonly newTask: AdvancementNewTaskMechanismPort;
   readonly newTaskConversation: AdvancementNewTaskConversationPort;
+  readonly activeUserTurn: AdvancementActiveUserTurnMechanismPort;
+  readonly activeUserTurnRuntime: AdvancementActiveUserTurnRuntimePort;
   readonly rubricRevision: AdvancementRubricRevisionMechanismPort;
   readonly rubricCancellation: AdvancementRubricCancellationMechanismPort;
   readonly awaitingRubricAdmission: AdvancementAwaitingRubricAdmissionMechanismPort;
@@ -276,6 +333,116 @@ export interface AdvancementNewTaskCommand {
   readonly conversationScope: "existing" | "new";
   readonly turnId: string;
   readonly userInput: Readonly<UserTurnInput>;
+}
+
+export interface AdvancementActiveUserTurnHandoff {
+  readonly conversationId: string;
+  readonly turnId: string;
+  readonly runId?: string;
+}
+
+/** Surface effects only; no Advancement decision or persistence is allowed here. */
+export interface AdvancementActiveUserTurnSurfacePort {
+  publishExit(fact: AdvancementSessionExitedFact): void | Promise<void>;
+  publishDraft(fact: AdvancementContractDraftCreatedFact): void | Promise<void>;
+  publishContractFailure(input: Readonly<{
+    conversationId: string;
+    originalTurnId: string;
+    error: Readonly<{ message: string }>;
+  }>): void | Promise<void>;
+  handoff(input: Readonly<{
+    conversationId: string;
+    turnId: string;
+    userInput: Readonly<UserTurnInput>;
+  }>): Promise<AdvancementActiveUserTurnHandoff>;
+}
+
+export interface AdvancementActiveUserTurnCommand {
+  readonly conversationId: string;
+  readonly turnId: string;
+  readonly userInput: Readonly<UserTurnInput>;
+  readonly surface: AdvancementActiveUserTurnSurfacePort;
+}
+
+export type AdvancementActiveUserTurnResult =
+  | Readonly<{ kind: "not-applicable" }>
+  | Readonly<{ kind: "owner-busy" }>
+  | Readonly<{
+      kind: "active-user-turn";
+      conversationId: string;
+      advancementSessionId: string;
+      admission: AdvancementAdmissionDecision;
+      interruptedProxy: boolean;
+      handoff: AdvancementActiveUserTurnHandoff;
+    }>
+  | Readonly<{
+      kind: "active-session-taken-over";
+      conversationId: string;
+      advancementSessionId: string;
+      admission: AdvancementAdmissionDecision;
+      exit: AdvancementExit;
+      closure: AdvancementClosureReport;
+      handoff: AdvancementActiveUserTurnHandoff;
+    }>
+  | Readonly<{
+      kind: "rubric-regenerated";
+      conversationId: string;
+      exitedAdvancementSessionId: string;
+      advancementSessionId: string;
+      admission: AdvancementAdmissionDecision;
+      exit: AdvancementExit;
+      closure: AdvancementClosureReport;
+      draft: RubricContractDraftSnapshot;
+    }>
+  | Readonly<{
+      kind: "contract-failed";
+      conversationId: string;
+      originalTurnId: string;
+      error: Readonly<{ message: string }>;
+    }>;
+
+type AdvancementActiveUserTurnDecision =
+  | Readonly<{ kind: "not-applicable" }>
+  | Readonly<{
+      kind: "continue";
+      session: AdvancementSession;
+      admission: AdvancementAdmissionDecision;
+      interruptedProxy: boolean;
+    }>
+  | Readonly<{
+      kind: "take-over";
+      exited: AdvancementSession;
+      admission: AdvancementAdmissionDecision;
+      exit: AdvancementExit;
+      closure: AdvancementClosureReport;
+      fact: AdvancementSessionExitedFact;
+    }>
+  | Readonly<{
+      kind: "regenerated";
+      exited: AdvancementSession;
+      created: AdvancementSession;
+      admission: AdvancementAdmissionDecision;
+      exit: AdvancementExit;
+      closure: AdvancementClosureReport;
+      draft: RubricContractDraftSnapshot;
+      exitFact: AdvancementSessionExitedFact;
+      draftFact: AdvancementContractDraftCreatedFact;
+    }>
+  | Readonly<{
+      kind: "contract-failed";
+      conversationId: string;
+      originalTurnId: string;
+      error: Readonly<{ message: string }>;
+    }>;
+
+export interface AdvancementSessionExitedFact extends ProductApiFact {
+  readonly kind: "advancement-session-exited";
+  readonly conversationId: string;
+  readonly originalTurnId: string;
+  readonly advancementSessionId: string;
+  readonly exit: AdvancementExit;
+  readonly admission: AdvancementAdmissionDecision;
+  readonly closure: AdvancementClosureReport;
 }
 
 export type AdvancementNewTaskResult =
@@ -470,6 +637,15 @@ export class AdvancementApplicationError extends Error {
 
 export interface AdvancementApplication {
   queryDetail(query: AdvancementDetailQuery): Promise<AdvancementDetailResult>;
+  prepareActiveUserTurn(
+    command: AdvancementActiveUserTurnCommand,
+  ): Promise<Readonly<{
+    result: AdvancementActiveUserTurnResult;
+    facts: readonly (
+      | AdvancementSessionExitedFact
+      | AdvancementContractDraftCreatedFact
+    )[];
+  }>>;
   prepareNewTask(
     command: AdvancementNewTaskCommand,
   ): Promise<Readonly<{
@@ -508,6 +684,8 @@ export class AdvancementApplicationService implements AdvancementApplication {
   readonly #maintenance: AdvancementConversationMaintenancePort;
   readonly #newTask: AdvancementNewTaskMechanismPort;
   readonly #newTaskConversation: AdvancementNewTaskConversationPort;
+  readonly #activeUserTurn: AdvancementActiveUserTurnMechanismPort;
+  readonly #activeUserTurnRuntime: AdvancementActiveUserTurnRuntimePort;
   readonly #rubricRevision: AdvancementRubricRevisionMechanismPort;
   readonly #rubricCancellation: AdvancementRubricCancellationMechanismPort;
   readonly #awaitingRubricAdmission: AdvancementAwaitingRubricAdmissionMechanismPort;
@@ -521,6 +699,8 @@ export class AdvancementApplicationService implements AdvancementApplication {
     this.#maintenance = options.maintenance;
     this.#newTask = options.newTask;
     this.#newTaskConversation = options.newTaskConversation;
+    this.#activeUserTurn = options.activeUserTurn;
+    this.#activeUserTurnRuntime = options.activeUserTurnRuntime;
     this.#rubricRevision = options.rubricRevision;
     this.#rubricCancellation = options.rubricCancellation;
     this.#awaitingRubricAdmission = options.awaitingRubricAdmission;
@@ -549,6 +729,297 @@ export class AdvancementApplicationService implements AdvancementApplication {
       ...(session.exit ? { exit: session.exit } : {}),
       facts: buildClosureFacts(session),
       ...(lastReview ? { lastReview } : {}),
+    });
+  }
+
+  async prepareActiveUserTurn(
+    command: AdvancementActiveUserTurnCommand,
+  ): Promise<Readonly<{
+    result: AdvancementActiveUserTurnResult;
+    facts: readonly (
+      | AdvancementSessionExitedFact
+      | AdvancementContractDraftCreatedFact
+    )[];
+  }>> {
+    assertConversationId(command.conversationId);
+    assertRubricRevisionIdentity(command.turnId, "Turn");
+    if (!isNonEmptyUserTurnInput(command.userInput)) {
+      throw new TypeError("Advancement active user turn requires non-empty user input");
+    }
+    assertActiveUserTurnSurface(command.surface);
+
+    const initial = await this.#activeUserTurn.loadActiveUserTurnSession(
+      command.conversationId,
+    );
+    if (initial?.status !== "active") {
+      return noActiveUserTurn();
+    }
+
+    const decide = async (): Promise<AdvancementActiveUserTurnDecision> => {
+      const current = await this.#activeUserTurn.loadActiveUserTurnSession(
+        command.conversationId,
+      );
+      if (current?.status !== "active" || current.id !== initial.id) {
+        return Object.freeze({ kind: "not-applicable" });
+      }
+
+      const interruption = await this.#activeUserTurnRuntime.interruptProxy({
+        conversationId: command.conversationId,
+        ...(current.outstandingProxyMessageId
+          ? { outstandingProxyMessageId: current.outstandingProxyMessageId }
+          : {}),
+      });
+
+      const admission = await this.#activeUserTurn.decideActiveUserTurnAdmission({
+        conversationId: command.conversationId,
+        userInput: command.userInput,
+      });
+
+      const exitActiveSession = async (
+        exit: AdvancementExit,
+      ): Promise<Extract<
+        AdvancementActiveUserTurnDecision,
+        { readonly kind: "take-over" }
+      >> => {
+        const exited = await this.#activeUserTurn.persistActiveUserTurnExit({
+          conversationId: command.conversationId,
+          advancementSessionId: current.id,
+          exit,
+        });
+        assertCommittedActiveExit(exited, current, exit);
+        const closure = await this.#activeUserTurn.composeActiveUserTurnClosure(
+          exited,
+        );
+        const fact = freezeSnapshot<AdvancementSessionExitedFact>({
+          kind: "advancement-session-exited",
+          conversationId: exited.conversationId,
+          originalTurnId: command.turnId,
+          advancementSessionId: exited.id,
+          exit,
+          admission,
+          closure,
+        });
+        return Object.freeze({
+          kind: "take-over",
+          exited,
+          admission: freezeSnapshot(admission),
+          exit: freezeSnapshot(exit),
+          closure: freezeSnapshot(closure),
+          fact,
+        });
+      };
+
+      if (admission.action === "take-over-active") {
+        return await exitActiveSession({
+          reason: "user-took-over",
+          message: "用户接管或改变了当前推进目标，原推进闭环已退出。",
+          occurredAt: this.#activeUserTurn.activeUserTurnNow(),
+        });
+      }
+
+      if (admission.action === "revise-rubric") {
+        const oldRubric = current.confirmedRubric;
+        if (!oldRubric) {
+          return await exitActiveSession({
+            reason: "system-error",
+            message: "推进会话缺少已确认 Rubric，无法按其再生契约，已退出。",
+            occurredAt: this.#activeUserTurn.activeUserTurnNow(),
+          });
+        }
+
+        const prefillDraft: RubricContractDraftSnapshot = {
+          draftId: this.#activeUserTurn.createActiveRubricDraftId(),
+          originalTurnId: command.turnId,
+          source: "generated",
+          candidateRubricIds: [],
+          title: oldRubric.title,
+          description: oldRubric.description,
+          content: projectConfirmedRubricToDraftContent(oldRubric),
+          createdAt: this.#activeUserTurn.activeUserTurnNow(),
+        };
+        let revised: RubricContractDraftSnapshot;
+        try {
+          revised = await this.#activeUserTurn.reviseActiveRubricDraft({
+            currentDraft: prefillDraft,
+            originalUserTask: current.originalUserTask,
+            userFeedback: extractUserTurnInputText(command.userInput).trim(),
+          });
+        } catch (error) {
+          const failure = Object.freeze({
+            kind: "contract-failed" as const,
+            conversationId: command.conversationId,
+            originalTurnId: command.turnId,
+            error: Object.freeze({ message: applicationErrorMessage(error) }),
+          });
+          return failure;
+        }
+
+        const exit: AdvancementExit = {
+          reason: "superseded",
+          message: "用户修正验收标准，原契约退出，按修正后的标准重新确认。",
+          occurredAt: this.#activeUserTurn.activeUserTurnNow(),
+        };
+        const exited = await this.#activeUserTurn.persistActiveUserTurnExit({
+          conversationId: command.conversationId,
+          advancementSessionId: current.id,
+          exit,
+        });
+        assertCommittedActiveExit(exited, current, exit);
+        const closure = await this.#activeUserTurn.composeActiveUserTurnClosure(
+          exited,
+        );
+        const created = await this.#activeUserTurn.persistRegeneratedRubricSession({
+          advancementSessionId: `adv_${revised.draftId}`,
+          conversationId: command.conversationId,
+          originalUserTask: current.originalUserTask,
+          draft: revised,
+        });
+        assertCommittedRegeneratedSession(created, command, current, revised);
+        const admissionSnapshot = freezeSnapshot(admission);
+        const draftSnapshot = freezeSnapshot(revised);
+        const exitFact = freezeSnapshot<AdvancementSessionExitedFact>({
+          kind: "advancement-session-exited",
+          conversationId: exited.conversationId,
+          originalTurnId: command.turnId,
+          advancementSessionId: exited.id,
+          exit,
+          admission: admissionSnapshot,
+          closure,
+        });
+        const draftFact = freezeSnapshot<AdvancementContractDraftCreatedFact>({
+          kind: "advancement-contract-draft-created",
+          conversationId: created.conversationId,
+          originalTurnId: command.turnId,
+          advancementSessionId: created.id,
+          rubricDraftId: draftSnapshot.draftId,
+          rubricDraft: draftSnapshot,
+          admission: admissionSnapshot,
+        });
+        return Object.freeze({
+          kind: "regenerated",
+          exited,
+          created,
+          admission: admissionSnapshot,
+          exit: freezeSnapshot(exit),
+          closure: freezeSnapshot(closure),
+          draft: draftSnapshot,
+          exitFact,
+          draftFact,
+        });
+      }
+
+      if (interruption.interrupted && interruption.proxyMessageId) {
+        const settled = await this.#activeUserTurn.settleInterruptedProxy({
+          conversationId: command.conversationId,
+          advancementSessionId: current.id,
+          proxyMessageId: interruption.proxyMessageId,
+        });
+        if (
+          settled.id !== current.id ||
+          settled.conversationId !== current.conversationId
+        ) {
+          throw new TypeError(
+            "Advancement interrupted-proxy settlement returned a mismatched session",
+          );
+        }
+      }
+      return Object.freeze({
+        kind: "continue",
+        session: current,
+        admission: freezeSnapshot(admission),
+        interruptedProxy: interruption.interrupted,
+      });
+    };
+
+    const maintained = await this.#maintenance.runExisting(
+      command.conversationId,
+      decide,
+    );
+    if (maintained.status === "not-found") {
+      throw new AdvancementApplicationError(
+        "conversation-not-found",
+        `Conversation not found: ${command.conversationId}`,
+      );
+    }
+    const decision = maintained.status === "busy"
+      // A busy ordinary turn must not be interrupted, while an Advancement
+      // proxy already received its stop signal. Preserve the existing active
+      // classification/handoff semantics under the current session identity.
+      ? await decide()
+      : maintained.value;
+
+    if (decision.kind === "not-applicable") {
+      return noActiveUserTurn();
+    }
+    if (decision.kind === "contract-failed") {
+      await command.surface.publishContractFailure(decision);
+      try {
+        await this.#activeUserTurnRuntime.recoverInterruptedProxy(
+          command.conversationId,
+        );
+      } catch {
+        // Recovery remains best-effort; the controlled contract failure wins.
+      }
+      return Object.freeze({
+        result: Object.freeze<AdvancementActiveUserTurnResult>({
+          kind: "contract-failed",
+          conversationId: decision.conversationId,
+          originalTurnId: decision.originalTurnId,
+          error: decision.error,
+        }),
+        facts: Object.freeze([]),
+      });
+    }
+    if (decision.kind === "regenerated") {
+      await command.surface.publishExit(decision.exitFact);
+      await command.surface.publishDraft(decision.draftFact);
+      return Object.freeze({
+        result: Object.freeze<AdvancementActiveUserTurnResult>({
+          kind: "rubric-regenerated",
+          conversationId: decision.created.conversationId,
+          exitedAdvancementSessionId: decision.exited.id,
+          advancementSessionId: decision.created.id,
+          admission: decision.admission,
+          exit: decision.exit,
+          closure: decision.closure,
+          draft: decision.draft,
+        }),
+        facts: Object.freeze([decision.exitFact, decision.draftFact]),
+      });
+    }
+
+    const fact = decision.kind === "take-over" ? decision.fact : undefined;
+    if (fact) await command.surface.publishExit(fact);
+    const handoff = await command.surface.handoff({
+      conversationId: command.conversationId,
+      turnId: command.turnId,
+      userInput: command.userInput,
+    });
+    assertActiveUserTurnHandoff(handoff, command);
+    if (decision.kind === "take-over") {
+      return Object.freeze({
+        result: Object.freeze<AdvancementActiveUserTurnResult>({
+          kind: "active-session-taken-over",
+          conversationId: decision.exited.conversationId,
+          advancementSessionId: decision.exited.id,
+          admission: decision.admission,
+          exit: decision.exit,
+          closure: decision.closure,
+          handoff: freezeSnapshot(handoff),
+        }),
+        facts: Object.freeze([decision.fact]),
+      });
+    }
+    return Object.freeze({
+      result: Object.freeze<AdvancementActiveUserTurnResult>({
+        kind: "active-user-turn",
+        conversationId: decision.session.conversationId,
+        advancementSessionId: decision.session.id,
+        admission: decision.admission,
+        interruptedProxy: decision.interruptedProxy,
+        handoff: freezeSnapshot(handoff),
+      }),
+      facts: Object.freeze([]),
     });
   }
 
@@ -1412,6 +1883,27 @@ export const ADVANCEMENT_CONTRACT_DRAFT_CREATED_FACT_EVENT =
     AdvancementContractDraftCreatedFact
   >("advancement-contract-draft-created");
 
+export const ADVANCEMENT_SESSION_EXITED_FACT_EVENT =
+  defineProductApiFactEvent<
+    "advancement-session-exited",
+    AdvancementSessionExitedFact
+  >("advancement-session-exited");
+
+export const ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND =
+  defineProductApiCommand<
+    "advancement.command.prepare-active-user-turn",
+    AdvancementActiveUserTurnCommand,
+    AdvancementActiveUserTurnResult,
+    AdvancementSessionExitedFact | AdvancementContractDraftCreatedFact
+  >(
+    "advancement.command.prepare-active-user-turn",
+    [
+      ADVANCEMENT_SESSION_EXITED_FACT_EVENT,
+      ADVANCEMENT_CONTRACT_DRAFT_CREATED_FACT_EVENT,
+    ],
+    { factEmission: "subset" },
+  );
+
 export const ADVANCEMENT_PREPARE_NEW_TASK_COMMAND = defineProductApiCommand<
   "advancement.command.prepare-new-task",
   AdvancementNewTaskCommand,
@@ -1473,6 +1965,7 @@ export const ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND =
 export const ADVANCEMENT_PRODUCT_API_EXACT_SET = defineProductApiExactSet({
   operations: [
     ADVANCEMENT_DETAIL_QUERY,
+    ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,
     ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
     ADVANCEMENT_REVISE_RUBRIC_COMMAND,
     ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
@@ -1480,6 +1973,7 @@ export const ADVANCEMENT_PRODUCT_API_EXACT_SET = defineProductApiExactSet({
     ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
   ],
   factEvents: [
+    ADVANCEMENT_SESSION_EXITED_FACT_EVENT,
     ADVANCEMENT_CONTRACT_DRAFT_CREATED_FACT_EVENT,
     ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT,
     ADVANCEMENT_CONTRACT_CONFIRMED_FACT_EVENT,
@@ -1496,6 +1990,10 @@ export function createAdvancementProductApiContribution(
         result: await application.queryDetail(query),
         facts: [],
       })),
+      bindProductApiOperation(
+        ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,
+        async (command) => await application.prepareActiveUserTurn(command),
+      ),
       bindProductApiOperation(
         ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
         async (command) => {
@@ -1539,6 +2037,7 @@ export function createAdvancementProductApiContribution(
       ),
     ],
     factEvents: [
+      ADVANCEMENT_SESSION_EXITED_FACT_EVENT,
       ADVANCEMENT_CONTRACT_DRAFT_CREATED_FACT_EVENT,
       ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT,
       ADVANCEMENT_CONTRACT_CONFIRMED_FACT_EVENT,
@@ -1571,6 +2070,86 @@ function assertOriginalTaskSurface(
     typeof surface.cancelPending !== "function"
   ) {
     throw new TypeError("Advancement rubric confirmation requires a surface effect port");
+  }
+}
+
+function assertActiveUserTurnSurface(
+  surface: AdvancementActiveUserTurnSurfacePort,
+): void {
+  if (
+    typeof surface?.publishExit !== "function" ||
+    typeof surface.publishDraft !== "function" ||
+    typeof surface.publishContractFailure !== "function" ||
+    typeof surface.handoff !== "function"
+  ) {
+    throw new TypeError(
+      "Advancement active user turn requires a complete surface effect port",
+    );
+  }
+}
+
+function noActiveUserTurn(): Readonly<{
+  result: AdvancementActiveUserTurnResult;
+  facts: readonly never[];
+}> {
+  return Object.freeze({
+    result: Object.freeze<AdvancementActiveUserTurnResult>({
+      kind: "not-applicable",
+    }),
+    facts: Object.freeze([]),
+  });
+}
+
+function assertActiveUserTurnHandoff(
+  handoff: AdvancementActiveUserTurnHandoff,
+  command: AdvancementActiveUserTurnCommand,
+): void {
+  if (
+    handoff.conversationId !== command.conversationId ||
+    handoff.turnId !== command.turnId
+  ) {
+    throw new TypeError(
+      "Advancement active user-turn handoff returned a mismatched identity",
+    );
+  }
+}
+
+function assertCommittedActiveExit(
+  committed: AdvancementSession,
+  previous: AdvancementSession,
+  exit: AdvancementExit,
+): void {
+  if (
+    committed.id !== previous.id ||
+    committed.conversationId !== previous.conversationId ||
+    committed.status !== "exited" ||
+    !committed.exit ||
+    canonicalize(committed.exit) !== canonicalize(exit)
+  ) {
+    throw new TypeError(
+      "Advancement active user-turn exit did not return the committed terminal session",
+    );
+  }
+}
+
+function assertCommittedRegeneratedSession(
+  committed: AdvancementSession,
+  command: AdvancementActiveUserTurnCommand,
+  previous: AdvancementSession,
+  draft: RubricContractDraftSnapshot,
+): void {
+  if (
+    committed.id !== `adv_${draft.draftId}` ||
+    committed.conversationId !== command.conversationId ||
+    committed.status !== "awaiting-rubric-confirmation" ||
+    !committed.pendingRubricDraft ||
+    canonicalize(committed.pendingRubricDraft) !== canonicalize(draft) ||
+    canonicalize(committed.originalUserTask) !==
+      canonicalize(previous.originalUserTask)
+  ) {
+    throw new TypeError(
+      "Advancement rubric regeneration did not return the committed awaiting session",
+    );
   }
 }
 

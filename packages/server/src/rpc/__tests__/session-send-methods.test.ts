@@ -16,6 +16,7 @@ import {
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import {
   ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
+  ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,
   ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
 } from "@zhixing/core/advancement/application";
 import {
@@ -131,7 +132,6 @@ describe("session.send 方法", () => {
 
   it("rejects a missing durable turn identity before Advancement draft effects", async () => {
     const loadActiveSession = vi.fn();
-    const prepareUserTurn = vi.fn();
     const addObserver = vi.fn();
     const runMaintenanceExisting = vi.fn();
     const ensure = vi.fn();
@@ -140,7 +140,7 @@ describe("session.send 方法", () => {
     const ctx = {
       server: {
         conversations: { addObserver, runMaintenanceExisting },
-        advancement: { loadActiveSession, prepareUserTurn },
+        advancement: { loadActiveSession },
         productApi: agentTurnProductApi({
           requiresStableTurnIdentity: true,
           createTurnIdentity: () => "turn-generated",
@@ -163,7 +163,6 @@ describe("session.send 方法", () => {
         "session.send requires a stable 'turnId' while durable execution is enabled",
     });
     expect(loadActiveSession).not.toHaveBeenCalled();
-    expect(prepareUserTurn).not.toHaveBeenCalled();
     expect(addObserver).not.toHaveBeenCalled();
     expect(runMaintenanceExisting).not.toHaveBeenCalled();
     expect(ensure).not.toHaveBeenCalled();
@@ -236,12 +235,15 @@ describe("session.send 方法", () => {
     });
     const productApi = {
       supports: (descriptor: Parameters<ProductApiDispatcher["supports"]>[0]) =>
+        descriptor === ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND ||
         descriptor === ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND ||
         descriptor === ADVANCEMENT_PREPARE_NEW_TASK_COMMAND ||
         conversationProductApi.supports(descriptor),
       query: conversationProductApi.query.bind(conversationProductApi),
       command: async (descriptor: unknown, input: unknown) =>
-        descriptor === ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND
+        descriptor === ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND
+          ? { result: { kind: "not-applicable" }, facts: [] }
+          : descriptor === ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND
           ? { result: { kind: "not-applicable" }, facts: [] }
           : descriptor === ADVANCEMENT_PREPARE_NEW_TASK_COMMAND
             ? await prepareNewTask(input as { readonly turnId: string })

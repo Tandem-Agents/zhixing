@@ -3543,8 +3543,35 @@ test("Advancement detail and rubric lifecycle have one Product API application o
     inspectAdvancementDetailApplicationOwnership(mutate(
       "packages/server/src/rpc/methods/session.ts",
       (text) => text.replace(
-        "const racedActivePrepared = await prepareActiveAdvancementUserTurn({",
-        "const racedActivePrepared = null;\n            void prepareActiveAdvancementUserTurn({",
+        "if (newTaskNotApplicable) {\n            const racedActiveResponse = projectActiveAdvancementPreparation(\n              await dispatchActiveAdvancementUserTurn(),",
+        "if (newTaskNotApplicable) {\n            const racedActiveResponse = null;\n            void dispatchActiveAdvancementUserTurn();",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/core/src/advancement/application.ts",
+      (text) => text.replace(
+        "const interruption = await this.#activeUserTurnRuntime.interruptProxy({",
+        "const interruption = void this.#activeUserTurnRuntime.interruptProxy({",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/owner-services/src/advancement/controller.ts",
+      (text) => `${text}\nasync prepareUserTurn(input: unknown) { return input; }`,
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "activeUserTurn: advancementDetailController,",
+        "",
       ),
     )).join("\n"),
     failure,

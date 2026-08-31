@@ -224,7 +224,7 @@ async function makeStore() {
 }
 
 describe("AdvancementController.afterTurnCommitted", () => {
-  it("active 推进会话中用户接管会退出原推进闭环", async () => {
+  it("active user-turn 只提供 path-free admission、exit 与 closure 机制", async () => {
     const store = await makeStore();
     await makeActive(store);
     const controller = new AdvancementController({
@@ -239,21 +239,30 @@ describe("AdvancementController.afterTurnCommitted", () => {
       now: () => "2026-01-01T00:05:00.000Z",
     });
 
-    const result = await controller.prepareUserTurn({
+    const open = await controller.loadActiveUserTurnSession("conv-1");
+    const admission = await controller.decideActiveUserTurnAdmission({
       conversationId: "conv-1",
-      turnId: "turn-user",
       userInput: task("停掉这个推进，换成发布说明"),
     });
-
-    expect(result.kind).toBe("active-session-taken-over");
-    if (result.kind !== "active-session-taken-over") return;
-    // 有推进事实的接管归 exited 并交付收场；cancelled 只留给无执行事实的关闭。
+    expect(open?.status).toBe("active");
+    expect(admission.action).toBe("take-over-active");
+    const exit = {
+      reason: "user-took-over" as const,
+      message: "用户接管或改变了当前推进目标，原推进闭环已退出。",
+      occurredAt: controller.activeUserTurnNow(),
+    };
+    const exited = await controller.persistActiveUserTurnExit({
+      conversationId: "conv-1",
+      advancementSessionId: "session-1",
+      exit,
+    });
+    const closure = await controller.composeActiveUserTurnClosure(exited);
     const session = await store.loadSession("conv-1", "session-1");
     expect(session?.status).toBe("exited");
     expect(session?.exit?.reason).toBe("user-took-over");
-    expect(result.closure.synthesized).toBe(false);
-    expect(result.closure.summary).toContain("任务推进已退出");
-    expect(result.closure.facts.sessionId).toBe("session-1");
+    expect(closure.synthesized).toBe(false);
+    expect(closure.summary).toContain("任务推进已退出");
+    expect(closure.facts.sessionId).toBe("session-1");
   });
 
   it("failed review 会生成 Rubric 固定代理消息并保持 active", async () => {
@@ -621,7 +630,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
     expect(timings[0]).toBeGreaterThanOrEqual(0);
   });
 
-  it("awaiting Rubric 只提供无写入 admission 机制，旧 prepareUserTurn 入口 fail closed", async () => {
+  it("awaiting Rubric 只提供无写入 admission 机制且旧 prepareUserTurn 已退场", async () => {
     const store = await makeStore();
     await store.createSession({
       id: "session-1",
@@ -652,15 +661,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
     await expect(store.loadActiveSession("conv-1")).resolves.toMatchObject({
       status: "awaiting-rubric-confirmation",
     });
-    await expect(
-      controller.prepareUserTurn({
-        conversationId: "conv-1",
-        turnId: "turn-control",
-        userInput: task("取消任务"),
-      }),
-    ).rejects.toThrow(
-      "awaiting Rubric control must use the Advancement application",
-    );
+    expect("prepareUserTurn" in controller).toBe(false);
   });
 
   it("投影 provider 失败时按无投影降级，准入照常进行", async () => {
@@ -686,14 +687,12 @@ describe("AdvancementController.afterTurnCommitted", () => {
     expect(result.action).toBe("run-direct");
     expect(decide.mock.calls.at(-1)?.[0]?.recentContext).toBeUndefined();
     await expect(
-      controller.prepareUserTurn({
+      controller.decideActiveUserTurnAdmission({
         conversationId: "conv-projection-fail",
-        turnId: "turn-projection-fail",
         userInput: task("继续"),
       }),
-    ).rejects.toThrow(
-      "no-open-session preparation must use the Advancement application",
-    );
+    ).resolves.toMatchObject({ action: "run-direct" });
+    expect(decide.mock.calls.at(-1)?.[0]?.recentContext).toBeUndefined();
   });
 
   it("没有 active session 时跳过且不调用 reviewer", async () => {
@@ -802,7 +801,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
     expect(result.closure.facts.attemptedStrategies).toEqual([]);
   });
 
-  it("revise-rubric 走契约再生：旧契约 superseded 收场、新草案从反投影预填生成", async () => {
+  it("Rubric 再生只暴露 revise、exit、closure 与 create 的 path-free 机制", async () => {
     const store = await makeStore();
     await makeActive(store);
     const reviseDraft = vi.fn(
@@ -832,40 +831,48 @@ describe("AdvancementController.afterTurnCommitted", () => {
       now: () => "2026-01-01T00:05:00.000Z",
     });
 
-    const result = await controller.prepareUserTurn({
-      conversationId: "conv-1",
-      turnId: "turn-revise",
-      userInput: task("验收标准加一条：文档同步更新"),
+    const currentDraft = draft();
+    const revised = await controller.reviseActiveRubricDraft({
+      currentDraft,
+      originalUserTask: task("把测试修到全绿"),
+      userFeedback: "验收标准加一条：文档同步更新",
     });
-
-    expect(result.kind).toBe("rubric-regenerated");
-    if (result.kind !== "rubric-regenerated") return;
-    expect(result.exit.reason).toBe("superseded");
-    expect(result.exitedSession.status).toBe("exited");
-    expect(result.closure.summary).toContain("任务推进已退出");
-    expect(result.draft.content.passCriteria).toEqual([
+    const exit = {
+      reason: "superseded" as const,
+      message: "用户修正验收标准，原契约退出，按修正后的标准重新确认。",
+      occurredAt: controller.activeUserTurnNow(),
+    };
+    const exited = await controller.persistActiveUserTurnExit({
+      conversationId: "conv-1",
+      advancementSessionId: "session-1",
+      exit,
+    });
+    const closure = await controller.composeActiveUserTurnClosure(exited);
+    const created = await controller.persistRegeneratedRubricSession({
+      advancementSessionId: "adv_draft-regen",
+      conversationId: "conv-1",
+      originalUserTask: task("把测试修到全绿"),
+      draft: revised,
+    });
+    expect(exit.reason).toBe("superseded");
+    expect(exited.status).toBe("exited");
+    expect(closure.summary).toContain("任务推进已退出");
+    expect(revised.content.passCriteria).toEqual([
       "测试通过",
       "实现满足需求",
       "文档同步更新",
     ]);
-    // 反投影预填：reviseDraft 收到的当前草案来自旧契约（自然列表、素材保留）
     expect(reviseDraft).toHaveBeenCalledWith(
       expect.objectContaining({
-        currentDraft: expect.objectContaining({
-          title: "代码审查推进准则",
-          content: expect.objectContaining({
-            passCriteria: ["测试通过", "实现满足需求"],
-          }),
-        }),
+        currentDraft,
         userFeedback: "验收标准加一条：文档同步更新",
       }),
     );
     const old = await store.loadSession("conv-1", "session-1");
     expect(old?.status).toBe("exited");
-    const next = await store.loadActiveSession("conv-1");
-    expect(next?.id).toBe("adv_draft-regen");
-    expect(next?.status).toBe("awaiting-rubric-confirmation");
-    expect(next?.originalUserTask).toEqual(task("把测试修到全绿"));
+    expect(created.id).toBe("adv_draft-regen");
+    expect(created.status).toBe("awaiting-rubric-confirmation");
+    expect(created.originalUserTask).toEqual(task("把测试修到全绿"));
   });
 
   it("契约再生的草案修订失败时旧契约保持 active 不受损", async () => {
@@ -887,13 +894,13 @@ describe("AdvancementController.afterTurnCommitted", () => {
       } as never,
     });
 
-    const result = await controller.prepareUserTurn({
-      conversationId: "conv-1",
-      turnId: "turn-revise",
-      userInput: task("验收标准加一条"),
-    });
-
-    expect(result.kind).toBe("contract-failed");
+    await expect(
+      controller.reviseActiveRubricDraft({
+        currentDraft: draft(),
+        originalUserTask: task("把测试修到全绿"),
+        userFeedback: "验收标准加一条",
+      }),
+    ).rejects.toThrow("revision provider down");
     const session = await store.loadSession("conv-1", "session-1");
     expect(session?.status).toBe("active");
   });

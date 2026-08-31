@@ -65,12 +65,15 @@ import {
   ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
   ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
   ADVANCEMENT_DETAIL_QUERY,
+  ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,
   ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
   ADVANCEMENT_REVISE_RUBRIC_COMMAND,
   AdvancementApplicationError,
   type AdvancementContractConfirmedFact,
   type AdvancementContractCancelledFact,
+  type AdvancementContractDraftCreatedFact,
   type AdvancementDetailProjection,
+  type AdvancementSessionExitedFact,
   type AdvancementOriginalTaskSurfacePort,
   type AdvancementRubricCancellationResult,
 } from "@zhixing/core/advancement/application";
@@ -117,7 +120,6 @@ import {
   type SessionUnsubscribeResult,
 } from "@zhixing/rpc/session-wire";
 import { createControlSessionEventEnvelope } from "@zhixing/rpc/session-events";
-import type { AdvancementPrepareResult } from "@zhixing/owner-services";
 import {
   generateConversationId,
   WorksceneBusyError,
@@ -178,114 +180,127 @@ export function buildSessionSendMethod(): MethodEntry {
       const advancement = ctx.server.advancement;
 
       if (advancement) {
-        const projectActiveAdvancementPreparation = async (
-          activePrepared: Awaited<
-            ReturnType<typeof prepareActiveAdvancementUserTurn>
-          >,
-        ): Promise<SessionSendResult | null> => {
-          if (!activePrepared) return null;
-
-          if (activePrepared.kind === "active-session-taken-over") {
-            manager.addObserver(
-              activePrepared.session.conversationId,
-              connectionId,
-              { allowInactive: true },
-            );
-            notifyAdvancementEvent({
-              conversationId: activePrepared.session.conversationId,
+        const dispatchActiveAdvancementUserTurn = async () => {
+          if (!id) return null;
+          const productApi = requireAdvancementProductApi(
+            ctx.server,
+            ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,
+          );
+          return await productApi.command(
+            ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,
+            {
+              conversationId: id,
               turnId,
-              seq: 0,
-              event: "advancement:exited",
-              payload: {
-                advancementSessionId: activePrepared.session.id,
-                exit: activePrepared.exit,
-                admission: activePrepared.admission,
-                closure: activePrepared.closure,
+              userInput: input,
+              surface: {
+                publishExit: (fact: AdvancementSessionExitedFact) => {
+                  manager.addObserver(fact.conversationId, connectionId, {
+                    allowInactive: true,
+                  });
+                  publishActiveAdvancementExit(
+                    fact,
+                    ctx.connection,
+                    broadcast,
+                  );
+                },
+                publishDraft: (fact: AdvancementContractDraftCreatedFact) => {
+                  manager.addObserver(fact.conversationId, connectionId, {
+                    allowInactive: true,
+                  });
+                  publishActiveAdvancementDraft(
+                    fact,
+                    ctx.connection,
+                    broadcast,
+                  );
+                },
+                publishContractFailure: (failure) => {
+                  manager.addObserver(failure.conversationId, connectionId, {
+                    allowInactive: true,
+                  });
+                  notifyAdvancementEvent({
+                    conversationId: failure.conversationId,
+                    turnId: failure.originalTurnId,
+                    seq: 0,
+                    event: "advancement:contract_failed",
+                    payload: {
+                      originalTurnId: failure.originalTurnId,
+                      error: failure.error,
+                    },
+                    connection: ctx.connection,
+                    broadcast,
+                  });
+                },
+                handoff: async (handoff) => {
+                  const accepted = await sendUserTurn({
+                    manager,
+                    conversationId: handoff.conversationId,
+                    input: handoff.userInput,
+                    engage,
+                    turnId: handoff.turnId,
+                    turnIdentity,
+                    connectionId,
+                    connection: ctx.connection,
+                    broadcast,
+                    server: ctx.server,
+                    surfaceCapabilities,
+                    ...(environment ? { environment } : {}),
+                  });
+                  return Object.freeze({
+                    conversationId: accepted.conversationId,
+                    turnId: accepted.turnId,
+                    ...(accepted.runId ? { runId: accepted.runId } : {}),
+                  });
+                },
               },
-              connection: ctx.connection,
-              broadcast,
-            });
+            },
+          );
+        };
+
+        const projectActiveAdvancementPreparation = (
+          dispatched: Awaited<ReturnType<typeof dispatchActiveAdvancementUserTurn>>,
+        ): SessionSendResult | null => {
+          if (!dispatched) return null;
+          const activePrepared = dispatched.result;
+          if (
+            activePrepared.kind === "not-applicable" ||
+            activePrepared.kind === "owner-busy"
+          ) {
             return null;
           }
-
           if (activePrepared.kind === "rubric-regenerated") {
-            return respondRubricRegenerated({
-              prepared: activePrepared,
-              turnId,
-              connectionId,
-              connection: ctx.connection,
-              broadcast,
-              manager,
-            });
+            return awaitingRubricResult(
+              activePrepared.conversationId,
+              activePrepared.advancementSessionId,
+              activePrepared.draft,
+            );
           }
-
           if (activePrepared.kind === "contract-failed") {
-            manager.addObserver(activePrepared.conversationId, connectionId, {
-              allowInactive: true,
-            });
-            notifyAdvancementEvent({
-              conversationId: activePrepared.conversationId,
-              turnId: activePrepared.originalTurnId,
-              seq: 0,
-              event: "advancement:contract_failed",
-              payload: {
-                originalTurnId: activePrepared.originalTurnId,
-                error: activePrepared.error,
-              },
-              connection: ctx.connection,
-              broadcast,
-            });
-            // 修订失败没有改变旧契约，但代理 run 已为处理用户输入被中断——
-            // 用户此刻在场，立即重接被中断的推进，不停摆到下一个触发点。
-            try {
-              await ctx.server.advancementRecovery?.recoverConversation(
-                activePrepared.conversationId,
-              );
-            } catch {
-              // 重接失败交给下一个恢复触发点收敛，不影响受控失败响应。
-            }
             return contractFailedResult(
               activePrepared.conversationId,
               turnId,
               activePrepared.error,
             );
           }
-
-          const accepted = await sendUserTurn({
-            manager,
-            conversationId: id,
-            input,
-            engage,
-            turnId,
-            turnIdentity,
-            connectionId,
-            connection: ctx.connection,
-            broadcast,
-            server: ctx.server,
-            surfaceCapabilities,
-            ...(environment ? { environment } : {}),
-          });
-          // 中途插话可见性：输入被分类为同一目标的补充继续——发起端据此
-          // 告知用户，含是否为处理输入而中止了在跑的推进代理。
-          return {
-            ...accepted,
-            advancementContinuation: {
-              interruptedProxy: activePrepared.interruptedProxy,
-            },
+          const accepted: SessionSendResult = {
+            conversationId: activePrepared.handoff.conversationId,
+            sessionId: activePrepared.handoff.conversationId,
+            turnId: activePrepared.handoff.turnId,
+            ...(activePrepared.handoff.runId
+              ? { runId: activePrepared.handoff.runId }
+              : {}),
           };
+          return activePrepared.kind === "active-user-turn"
+            ? {
+                ...accepted,
+                advancementContinuation: {
+                  interruptedProxy: activePrepared.interruptedProxy,
+                },
+              }
+            : accepted;
         };
 
-        const activePrepared = id
-          ? await prepareActiveAdvancementUserTurn({
-              manager,
-              advancement,
-              conversationId: id,
-              turnId,
-              input,
-            })
-          : null;
-        const activeResponse = await projectActiveAdvancementPreparation(
-          activePrepared,
+        const activeResponse = projectActiveAdvancementPreparation(
+          await dispatchActiveAdvancementUserTurn(),
         );
         if (activeResponse) return activeResponse;
 
@@ -481,15 +496,9 @@ export function buildSessionSendMethod(): MethodEntry {
             };
           }
           if (newTaskNotApplicable) {
-            const racedActivePrepared = await prepareActiveAdvancementUserTurn({
-              manager,
-              advancement,
-              conversationId: id,
-              turnId,
-              input,
-            });
-            const racedActiveResponse =
-              await projectActiveAdvancementPreparation(racedActivePrepared);
+            const racedActiveResponse = projectActiveAdvancementPreparation(
+              await dispatchActiveAdvancementUserTurn(),
+            );
             if (racedActiveResponse) return racedActiveResponse;
           }
         }
@@ -890,102 +899,6 @@ function projectAdvancementRubricCancellationResult(
     advancementSessionId: result.advancementSessionId,
     runStatus: result.runStatus,
   };
-}
-
-async function prepareActiveAdvancementUserTurn(input: {
-  readonly manager: ConversationManager;
-  readonly advancement: NonNullable<ServerContext["advancement"]>;
-  readonly conversationId: string;
-  readonly turnId: string;
-  readonly input: UserTurnInput;
-}): Promise<
-  | (Extract<
-      AdvancementPrepareResult,
-      { readonly kind: "active-user-turn" }
-    > & {
-      /** 为处理本次输入中止了正在执行的推进代理——发起端告知素材。 */
-      readonly interruptedProxy: boolean;
-    })
-  | Extract<
-      AdvancementPrepareResult,
-      {
-        readonly kind:
-          | "active-session-taken-over"
-          | "rubric-regenerated"
-          | "contract-failed";
-      }
-    >
-  | null
-> {
-  const active = await input.advancement.loadActiveSession(
-    input.conversationId,
-  );
-  if (active?.status !== "active") return null;
-
-  // active 会话的用户输入一律先过准入分类——排队与分类正交：对话正忙于
-  // 普通 turn 时输入照样可能是接管 / 修正标准意图，跳过分类会让意图静默
-  // 丢进闭环按旧契约续推。中断只对推进代理（outstanding / advancement
-  // 在跑）执行，为用户让路；普通 turn 不受影响，消息按既有队列语义排队。
-  const advancementEngaged =
-    Boolean(active.outstandingProxyMessageId) ||
-    input.manager.getBusySource(input.conversationId) === "advancement";
-  const interruption = advancementEngaged
-    ? await interruptAdvancementProxy({
-        manager: input.manager,
-        conversationId: input.conversationId,
-        outstandingProxyMessageId: active.outstandingProxyMessageId,
-      })
-    : {};
-
-  const prepared = await input.advancement.prepareUserTurn({
-    conversationId: input.conversationId,
-    turnId: input.turnId,
-    userInput: input.input,
-  });
-
-  if (prepared.kind === "active-user-turn") {
-    if (interruption.proxyMessageId) {
-      await input.advancement.settleProxyMessage({
-        conversationId: input.conversationId,
-        advancementSessionId: active.id,
-        proxyMessageId: interruption.proxyMessageId,
-      });
-    }
-    return {
-      ...prepared,
-      interruptedProxy: interruption.proxyMessageId !== undefined,
-    };
-  }
-
-  if (prepared.kind === "active-session-taken-over") return prepared;
-  // 契约再生：旧会话已 exited（折叠即清 outstanding），新 awaiting 已建——
-  // 必须放行给上层发事件与确认面，不得回落到重新分类。
-  if (prepared.kind === "rubric-regenerated") return prepared;
-  // 再生修订失败：旧契约保持 active，但代理已为处理用户输入被中断——
-  // 必须放行给上层受控失败 + 重接，不得回落引发二次分类与二次修订。
-  if (prepared.kind === "contract-failed") return prepared;
-  return null;
-}
-
-async function interruptAdvancementProxy(input: {
-  readonly manager: ConversationManager;
-  readonly conversationId: string;
-  readonly outstandingProxyMessageId?: string;
-}): Promise<{ readonly proxyMessageId?: string }> {
-  const cancelledPending = await input.manager.cancelPendingBySource(
-    input.conversationId,
-    "advancement",
-  );
-  const abortedInFlight =
-    input.manager.getBusySource(input.conversationId) === "advancement" &&
-    input.manager.abortInFlight(input.conversationId, {
-      kind: "user-cancel",
-      source: "rpc",
-      pressedAt: Date.now(),
-    });
-  return cancelledPending > 0 || abortedInFlight
-    ? { proxyMessageId: input.outstandingProxyMessageId }
-    : {};
 }
 
 async function runAdvancementMaintenance<T>(input: {
@@ -1405,61 +1318,46 @@ function throwWorksceneBusyAsRpc(err: unknown): never {
   throw err;
 }
 
-/**
- * 契约再生的统一响应：旧会话 exited（带收场）+ 新草案确认面，一回合完成。
- */
-function respondRubricRegenerated(input: {
-  readonly prepared: Extract<
-    AdvancementPrepareResult,
-    { readonly kind: "rubric-regenerated" }
-  >;
-  readonly turnId: string;
-  readonly connectionId: string;
-  readonly connection: RpcConnection;
-  readonly broadcast?: SessionBroadcast;
-  readonly manager: ConversationManager;
-}): SessionAwaitingRubricResult {
-  const { prepared } = input;
-  input.manager.addObserver(
-    prepared.session.conversationId,
-    input.connectionId,
-    {
-      allowInactive: true,
-    },
-  );
+function publishActiveAdvancementExit(
+  fact: AdvancementSessionExitedFact,
+  connection: RpcConnection,
+  broadcast?: SessionBroadcast,
+): void {
   notifyAdvancementEvent({
-    conversationId: prepared.exitedSession.conversationId,
-    turnId: input.turnId,
+    conversationId: fact.conversationId,
+    turnId: fact.originalTurnId,
     seq: 0,
     event: "advancement:exited",
     payload: {
-      advancementSessionId: prepared.exitedSession.id,
-      exit: prepared.exit,
-      admission: prepared.admission,
-      closure: prepared.closure,
+      advancementSessionId: fact.advancementSessionId,
+      exit: fact.exit,
+      admission: fact.admission,
+      closure: fact.closure,
     },
-    connection: input.connection,
-    broadcast: input.broadcast,
+    connection,
+    broadcast,
   });
+}
+
+function publishActiveAdvancementDraft(
+  fact: AdvancementContractDraftCreatedFact,
+  connection: RpcConnection,
+  broadcast?: SessionBroadcast,
+): void {
   notifyAdvancementEvent({
-    conversationId: prepared.session.conversationId,
-    turnId: input.turnId,
+    conversationId: fact.conversationId,
+    turnId: fact.originalTurnId,
     seq: 1,
     event: "advancement:contract_draft",
     payload: {
-      advancementSessionId: prepared.session.id,
-      rubricDraftId: prepared.draft.draftId,
-      rubricDraft: prepared.draft,
-      admission: prepared.admission,
+      advancementSessionId: fact.advancementSessionId,
+      rubricDraftId: fact.rubricDraftId,
+      rubricDraft: fact.rubricDraft,
+      admission: fact.admission,
     },
-    connection: input.connection,
-    broadcast: input.broadcast,
+    connection,
+    broadcast,
   });
-  return awaitingRubricResult(
-    prepared.session.conversationId,
-    prepared.session.id,
-    prepared.draft,
-  );
 }
 
 /**
