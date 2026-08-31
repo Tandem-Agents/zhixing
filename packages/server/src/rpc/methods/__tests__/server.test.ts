@@ -98,6 +98,24 @@ function deviceAdministrationProductApi(
         credentialActions: [],
       }),
     },
+    dutyMigrationContext: {
+      read: () => ({
+        localDeviceId: "device-duty",
+        currentDutyDeviceId: "device-duty",
+        currentOwnerReady: true,
+        deviceRemovalInProgress: false,
+        members: [{
+          deviceId: "device-target",
+          state: "active",
+          dutyCapable: true,
+        }],
+      }),
+    },
+    dutyMigration: {
+      prepare: async () => undefined,
+      commit: async () => undefined,
+      cancel: async () => undefined,
+    },
     ...overrides,
   });
   return new ProductApiDispatcher(DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET, [
@@ -489,14 +507,27 @@ describe("dutyMigration.*", () => {
     const targets = vi.fn(async () => [
       { deviceId: "device-ready", displayName: "客厅主机", ready: true },
     ]);
-    const prepare = vi.fn(async () => ({ stage: "ready" as const }));
-    const commit = vi.fn(async () => ({ stage: "completed" as const }));
-    const cancel = vi.fn(async () => ({ stage: "cancelled" as const }));
+    const prepare = vi.fn(async () => undefined);
+    const commit = vi.fn(async () => undefined);
+    const cancel = vi.fn(async () => undefined);
     const ctx = mkCtx({
       productApi: deviceAdministrationProductApi({
         dutyMigrationTargets: { list: targets },
+        dutyMigrationContext: {
+          read: () => ({
+            localDeviceId: "device-duty",
+            currentDutyDeviceId: "device-duty",
+            currentOwnerReady: true,
+            deviceRemovalInProgress: false,
+            members: [{
+              deviceId: "device-ready",
+              state: "active",
+              dutyCapable: true,
+            }],
+          }),
+        },
+        dutyMigration: { prepare, commit, cancel },
       }),
-      dutyMigration: { prepare, commit, cancel },
     });
     const identity = {
       requestId: "request:duty-1",
@@ -531,11 +562,7 @@ describe("dutyMigration.*", () => {
 
   it("严格拒绝未知字段和不稳定身份", async () => {
     const ctx = mkCtx({
-      dutyMigration: {
-        prepare: vi.fn(async () => ({ stage: "ready" as const })),
-        commit: vi.fn(async () => ({ stage: "completed" as const })),
-        cancel: vi.fn(async () => ({ stage: "cancelled" as const })),
-      },
+      productApi: deviceAdministrationProductApi(),
     });
     await expect(buildDutyMigrationTargetsMethod().handler({ extra: true }, ctx))
       .rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
@@ -551,9 +578,41 @@ describe("dutyMigration.*", () => {
     }, ctx)).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
   });
 
+  it("缺少 Device Administration contribution 时三条写入口一致 fail closed", async () => {
+    const ctx = mkCtx();
+    const identity = { requestId: "request:duty-1", transferId: "duty-1" };
+    for (const action of [
+      () => buildDutyMigrationPrepareMethod().handler({
+        ...identity,
+        targetDeviceId: "device-ready",
+      }, ctx),
+      () => buildDutyMigrationCommitMethod().handler(identity, ctx),
+      () => buildDutyMigrationCancelMethod().handler(identity, ctx),
+    ]) {
+      await expect(action()).rejects.toMatchObject({
+        code: RPC_ERROR_CODES.INTERNAL_ERROR,
+        message: "值班设备迁移当前不可用",
+      });
+    }
+  });
+
   it("把目标缺口、结果不明和提交后取消投影为可行动文案", async () => {
     const ctx = mkCtx({
-      dutyMigration: {
+      productApi: deviceAdministrationProductApi({
+        dutyMigrationContext: {
+          read: () => ({
+            localDeviceId: "device-duty",
+            currentDutyDeviceId: "device-duty",
+            currentOwnerReady: true,
+            deviceRemovalInProgress: false,
+            members: [{
+              deviceId: "device-ready",
+              state: "active",
+              dutyCapable: true,
+            }],
+          }),
+        },
+        dutyMigration: {
         prepare: vi.fn(async () => {
           throw new Error("Target credentials are not unlocked");
         }),
@@ -563,7 +622,8 @@ describe("dutyMigration.*", () => {
         cancel: vi.fn(async () => {
           throw new Error("committed transfer rejects abort");
         }),
-      },
+        },
+      }),
     });
     const identity = { requestId: "request:duty-1", transferId: "duty-1" };
     const errors = await Promise.all([

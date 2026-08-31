@@ -3,9 +3,12 @@ import { ProductApiDispatcher } from "../product-api/catalog.js";
 import {
   createDeviceAdministrationProductApiContribution,
   DEVICE_ADMINISTRATION_BEGIN_REMOVAL_COMMAND,
+  DEVICE_ADMINISTRATION_CANCEL_DUTY_MIGRATION_COMMAND,
+  DEVICE_ADMINISTRATION_COMMIT_DUTY_MIGRATION_COMMAND,
   DEVICE_ADMINISTRATION_CONTINUE_REMOVAL_COMMAND,
   DEVICE_ADMINISTRATION_DUTY_MIGRATION_TARGETS_QUERY,
   DEVICE_ADMINISTRATION_LIST_QUERY,
+  DEVICE_ADMINISTRATION_PREPARE_DUTY_MIGRATION_COMMAND,
   DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET,
   DEVICE_ADMINISTRATION_STATUS_QUERY,
   DeviceAdministrationApplicationService,
@@ -59,6 +62,23 @@ function fixture() {
     abort: vi.fn(async () => removalPublicState("cancelled")),
     decide: vi.fn(async () => removalPublicState("moving-conversations")),
   };
+  const dutyMigrationContext = {
+    read: vi.fn(() => ({
+      localDeviceId: "device-duty",
+      currentDutyDeviceId: "device-duty",
+      currentOwnerReady: true,
+      deviceRemovalInProgress: false,
+      members: [
+        { deviceId: "device-duty", state: "active" as const, dutyCapable: true },
+        { deviceId: "device-target", state: "active" as const, dutyCapable: true },
+      ],
+    })),
+  };
+  const dutyMigration = {
+    prepare: vi.fn(async () => undefined),
+    commit: vi.fn(async () => undefined),
+    cancel: vi.fn(async () => undefined),
+  };
   const application = new DeviceAdministrationApplicationService({
     relationships,
     removalState,
@@ -66,6 +86,8 @@ function fixture() {
     removalContext,
     removalAuthority,
     removalEffects,
+    dutyMigrationContext,
+    dutyMigration,
   });
   return {
     application,
@@ -75,6 +97,8 @@ function fixture() {
     removalContext,
     removalAuthority,
     removalEffects,
+    dutyMigrationContext,
+    dutyMigration,
   };
 }
 
@@ -125,7 +149,7 @@ describe("DeviceAdministrationApplicationService", () => {
     })).rejects.toThrow("Device name must be a non-empty string");
   });
 
-  it("contributes exactly three Query and two Command operations with no Fact event", async () => {
+  it("contributes exactly three Query and five Command operations with no Fact event", async () => {
     const f = fixture();
     const dispatcher = new ProductApiDispatcher(
       DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET,
@@ -153,6 +177,22 @@ describe("DeviceAdministrationApplicationService", () => {
       targetName: "书房设备",
       mode: "transfer",
     })).resolves.toMatchObject({ result: { phase: "moving-conversations" }, facts: [] });
+    await expect(dispatcher.command(DEVICE_ADMINISTRATION_PREPARE_DUTY_MIGRATION_COMMAND, {
+      kind: "prepare-duty-migration",
+      requestId: "request:migration-1",
+      transferId: "transfer-1",
+      targetDeviceId: "device-target",
+    })).resolves.toEqual({ result: { stage: "ready" }, facts: [] });
+    await expect(dispatcher.command(DEVICE_ADMINISTRATION_COMMIT_DUTY_MIGRATION_COMMAND, {
+      kind: "commit-duty-migration",
+      requestId: "request:migration-1",
+      transferId: "transfer-1",
+    })).resolves.toEqual({ result: { stage: "completed" }, facts: [] });
+    await expect(dispatcher.command(DEVICE_ADMINISTRATION_CANCEL_DUTY_MIGRATION_COMMAND, {
+      kind: "cancel-duty-migration",
+      requestId: "request:migration-1",
+      transferId: "transfer-1",
+    })).resolves.toEqual({ result: { stage: "cancelled" }, facts: [] });
     expect(DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET.factEvents).toEqual([]);
     expect(DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET.operations.map(({ identity }) => identity))
       .toEqual([
@@ -161,6 +201,9 @@ describe("DeviceAdministrationApplicationService", () => {
         "device-administration.query.duty-migration-targets",
         "device-administration.command.begin-removal",
         "device-administration.command.continue-removal",
+        "device-administration.command.prepare-duty-migration",
+        "device-administration.command.commit-duty-migration",
+        "device-administration.command.cancel-duty-migration",
       ]);
   });
 
@@ -336,6 +379,111 @@ describe("DeviceAdministrationApplicationService", () => {
       mode: "transfer",
     })).rejects.toThrow("The device is offline");
     expect(f.removalEffects.decide).not.toHaveBeenCalled();
+  });
+
+  it("owns duty-migration admission, target qualification and stable replay results", async () => {
+    const f = fixture();
+    const prepare = {
+      kind: "prepare-duty-migration" as const,
+      requestId: "request:migration-1",
+      transferId: "transfer-1",
+      targetDeviceId: "device-target",
+    };
+
+    await expect(f.application.execute(prepare)).resolves.toEqual({ stage: "ready" });
+    await expect(f.application.execute(prepare)).resolves.toEqual({ stage: "ready" });
+    expect(f.dutyMigration.prepare).toHaveBeenNthCalledWith(1, {
+      requestId: "request:migration-1",
+      transferId: "transfer-1",
+      targetDeviceId: "device-target",
+    });
+    expect(f.dutyMigration.prepare).toHaveBeenNthCalledWith(2, {
+      requestId: "request:migration-1",
+      transferId: "transfer-1",
+      targetDeviceId: "device-target",
+    });
+    await expect(f.application.execute({
+      kind: "commit-duty-migration",
+      requestId: "request:migration-1",
+      transferId: "transfer-1",
+    })).resolves.toEqual({ stage: "completed" });
+    await expect(f.application.execute({
+      kind: "cancel-duty-migration",
+      requestId: "request:migration-1",
+      transferId: "transfer-1",
+    })).resolves.toEqual({ stage: "cancelled" });
+    expect(f.dutyMigration.commit).toHaveBeenCalledWith({
+      requestId: "request:migration-1",
+      transferId: "transfer-1",
+    });
+    expect(f.dutyMigration.cancel).toHaveBeenCalledWith({
+      requestId: "request:migration-1",
+      transferId: "transfer-1",
+    });
+  });
+
+  it("fails closed before migration effects when ownership, generation or target admission fails", async () => {
+    const f = fixture();
+    const prepare = {
+      kind: "prepare-duty-migration" as const,
+      requestId: "request:migration-1",
+      transferId: "transfer-1",
+      targetDeviceId: "device-target",
+    };
+
+    f.dutyMigrationContext.read.mockReturnValueOnce({
+      localDeviceId: "device-duty",
+      currentDutyDeviceId: "device-duty",
+      currentOwnerReady: false,
+      deviceRemovalInProgress: false,
+      members: [],
+    });
+    await expect(f.application.execute(prepare)).rejects.toThrow(
+      "Current duty device is completing its durable migration consumers",
+    );
+
+    f.dutyMigrationContext.read.mockReturnValueOnce({
+      localDeviceId: "device-duty",
+      currentDutyDeviceId: "device-other",
+      currentOwnerReady: true,
+      deviceRemovalInProgress: false,
+      members: [],
+    });
+    await expect(f.application.execute(prepare)).rejects.toThrow(
+      "This device is not the current duty device",
+    );
+
+    f.dutyMigrationContext.read.mockReturnValueOnce({
+      localDeviceId: "device-duty",
+      currentDutyDeviceId: "device-duty",
+      currentOwnerReady: true,
+      deviceRemovalInProgress: true,
+      members: [],
+    });
+    await expect(f.application.execute(prepare)).rejects.toThrow(
+      "Duty-device migration is unavailable while a paired device is being removed",
+    );
+
+    await expect(f.application.execute({ ...prepare, targetDeviceId: "device-unknown" }))
+      .rejects.toThrow("Migration target is not an active paired duty-capable device");
+    expect(f.dutyMigration.prepare).not.toHaveBeenCalled();
+  });
+
+  it("preserves the existing post-commit cancellation boundary during device removal", async () => {
+    const f = fixture();
+    f.dutyMigrationContext.read.mockReturnValueOnce({
+      localDeviceId: "device-duty",
+      currentDutyDeviceId: "device-duty",
+      currentOwnerReady: true,
+      deviceRemovalInProgress: true,
+      members: [],
+    });
+    await expect(f.application.execute({
+      kind: "cancel-duty-migration",
+      requestId: "request:migration-1",
+      transferId: "transfer-1",
+    })).resolves.toEqual({ stage: "cancelled" });
+    expect(f.dutyMigration.cancel).toHaveBeenCalledTimes(1);
   });
 });
 

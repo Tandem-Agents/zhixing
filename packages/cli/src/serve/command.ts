@@ -2183,6 +2183,20 @@ async function runServerProcess(
           dutyMigrationTargets: {
             list: () => ctx.meshRuntime!.plannedAnchorTargets(),
           },
+          dutyMigrationContext: {
+            read: () => ctx.meshRuntime!.dutyMigrationCommandContext(),
+          },
+          dutyMigration: {
+            prepare: async (input) => {
+              await ctx.meshRuntime!.preparePlannedAnchorTransfer(input);
+            },
+            commit: async (input) => {
+              await ctx.meshRuntime!.commitPlannedAnchorTransfer(input);
+            },
+            cancel: async (input) => {
+              await ctx.meshRuntime!.abortPlannedAnchorTransfer(input);
+            },
+          },
           removalContext: {
             read: () => ctx.meshRuntime!.deviceRemovalCommandContext(),
           },
@@ -2321,28 +2335,6 @@ async function runServerProcess(
               anchorUninstall.abort(input.operationId),
             status: (input: { readonly operationId: string }) =>
               anchorUninstall.state(input.operationId),
-          },
-        }
-      : {}),
-    ...(ctx.meshRuntime
-      ? {
-          dutyMigration: {
-            prepare: async (input: {
-              readonly requestId: string;
-              readonly transferId: string;
-              readonly targetDeviceId: string;
-            }) => {
-              await ctx.meshRuntime!.preparePlannedAnchorTransfer(input);
-              return { stage: "ready" as const };
-            },
-            commit: async (input: { readonly requestId: string; readonly transferId: string }) => {
-              await ctx.meshRuntime!.commitPlannedAnchorTransfer(input);
-              return { stage: "completed" as const };
-            },
-            cancel: async (input: { readonly requestId: string; readonly transferId: string }) => {
-              await ctx.meshRuntime!.abortPlannedAnchorTransfer(input);
-              return { stage: "cancelled" as const };
-            },
           },
         }
       : {}),

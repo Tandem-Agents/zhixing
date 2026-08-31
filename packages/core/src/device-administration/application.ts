@@ -82,18 +82,55 @@ export interface DeviceAdministrationContinueRemovalCommand {
   readonly operationId?: string;
 }
 
+export interface DeviceAdministrationPrepareDutyMigrationCommand {
+  readonly kind: "prepare-duty-migration";
+  readonly requestId: string;
+  readonly transferId: string;
+  readonly targetDeviceId: string;
+}
+
+export interface DeviceAdministrationCommitDutyMigrationCommand {
+  readonly kind: "commit-duty-migration";
+  readonly requestId: string;
+  readonly transferId: string;
+}
+
+export interface DeviceAdministrationCancelDutyMigrationCommand {
+  readonly kind: "cancel-duty-migration";
+  readonly requestId: string;
+  readonly transferId: string;
+}
+
 export type DeviceAdministrationCommand =
   | DeviceAdministrationBeginRemovalCommand
-  | DeviceAdministrationContinueRemovalCommand;
+  | DeviceAdministrationContinueRemovalCommand
+  | DeviceAdministrationPrepareDutyMigrationCommand
+  | DeviceAdministrationCommitDutyMigrationCommand
+  | DeviceAdministrationCancelDutyMigrationCommand;
 
 export interface DeviceAdministrationBeginRemovalResult {
   readonly conversations: readonly string[];
   readonly hasAcceptedWork: boolean;
 }
 
+export interface DeviceAdministrationPrepareDutyMigrationResult {
+  readonly stage: "ready";
+}
+
+export interface DeviceAdministrationCommitDutyMigrationResult {
+  readonly stage: "completed";
+}
+
+export interface DeviceAdministrationCancelDutyMigrationResult {
+  readonly stage: "cancelled";
+}
+
 export type DeviceAdministrationCommandResult =
   | DeviceAdministrationBeginRemovalResult
-  | DeviceAdministrationRemovalState;
+  | DeviceAdministrationRemovalState
+  | DeviceAdministrationPrepareDutyMigrationResult
+  | DeviceAdministrationCommitDutyMigrationResult
+  | DeviceAdministrationCancelDutyMigrationResult;
 
 export interface DeviceAdministrationRemovalMember {
   readonly deviceId: string;
@@ -110,6 +147,20 @@ export interface DeviceAdministrationRemovalContext {
 export interface DeviceAdministrationRemovalOperation {
   readonly operationId: string;
   readonly targetDeviceId: string;
+}
+
+export interface DeviceAdministrationDutyMigrationMember {
+  readonly deviceId: string;
+  readonly state: "active" | "revoked" | "pending-reenroll";
+  readonly dutyCapable: boolean;
+}
+
+export interface DeviceAdministrationDutyMigrationContext {
+  readonly localDeviceId: string;
+  readonly currentDutyDeviceId: string;
+  readonly currentOwnerReady: boolean;
+  readonly deviceRemovalInProgress: boolean;
+  readonly members: readonly DeviceAdministrationDutyMigrationMember[];
 }
 
 /** Existing device relationship mechanism; product visibility stays in the application. */
@@ -129,6 +180,27 @@ export interface DeviceAdministrationDutyMigrationTargetReadPort {
 
 export interface DeviceAdministrationRemovalContextReadPort {
   read(): DeviceAdministrationRemovalContext;
+}
+
+export interface DeviceAdministrationDutyMigrationContextReadPort {
+  read(): DeviceAdministrationDutyMigrationContext;
+}
+
+/** Durable transfer mechanism; it owns journal, signatures, checkpoints and replay. */
+export interface DeviceAdministrationDutyMigrationPort {
+  prepare(input: {
+    readonly requestId: string;
+    readonly transferId: string;
+    readonly targetDeviceId: string;
+  }): Promise<void>;
+  commit(input: {
+    readonly requestId: string;
+    readonly transferId: string;
+  }): Promise<void>;
+  cancel(input: {
+    readonly requestId: string;
+    readonly transferId: string;
+  }): Promise<void>;
 }
 
 /** Durable lifecycle mechanism. Accepted/abort tokens stay opaque to this domain. */
@@ -173,6 +245,8 @@ export interface DeviceAdministrationApplicationOptions<Accepted, Abort> {
   readonly removalContext: DeviceAdministrationRemovalContextReadPort;
   readonly removalAuthority: DeviceAdministrationRemovalAuthorityPort<Accepted, Abort>;
   readonly removalEffects: DeviceAdministrationRemovalEffectPort<Accepted, Abort>;
+  readonly dutyMigrationContext: DeviceAdministrationDutyMigrationContextReadPort;
+  readonly dutyMigration: DeviceAdministrationDutyMigrationPort;
 }
 
 export interface DeviceAdministrationApplication {
@@ -187,9 +261,18 @@ export interface DeviceAdministrationApplication {
   execute(
     command: DeviceAdministrationContinueRemovalCommand,
   ): Promise<DeviceAdministrationRemovalState>;
+  execute(
+    command: DeviceAdministrationPrepareDutyMigrationCommand,
+  ): Promise<DeviceAdministrationPrepareDutyMigrationResult>;
+  execute(
+    command: DeviceAdministrationCommitDutyMigrationCommand,
+  ): Promise<DeviceAdministrationCommitDutyMigrationResult>;
+  execute(
+    command: DeviceAdministrationCancelDutyMigrationCommand,
+  ): Promise<DeviceAdministrationCancelDutyMigrationResult>;
 }
 
-/** Sole application owner of current Device Administration reads and removal commands. */
+/** Sole application owner of current Device Administration reads and commands. */
 export class DeviceAdministrationApplicationService<Accepted, Abort>
   implements DeviceAdministrationApplication
 {
@@ -232,12 +315,27 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
   execute(
     command: DeviceAdministrationContinueRemovalCommand,
   ): Promise<DeviceAdministrationRemovalState>;
+  execute(
+    command: DeviceAdministrationPrepareDutyMigrationCommand,
+  ): Promise<DeviceAdministrationPrepareDutyMigrationResult>;
+  execute(
+    command: DeviceAdministrationCommitDutyMigrationCommand,
+  ): Promise<DeviceAdministrationCommitDutyMigrationResult>;
+  execute(
+    command: DeviceAdministrationCancelDutyMigrationCommand,
+  ): Promise<DeviceAdministrationCancelDutyMigrationResult>;
   async execute(command: DeviceAdministrationCommand): Promise<DeviceAdministrationCommandResult> {
     switch (command.kind) {
       case "begin-device-removal":
         return this.#beginRemoval(command);
       case "continue-device-removal":
         return this.#continueRemoval(command);
+      case "prepare-duty-migration":
+        return this.#prepareDutyMigration(command);
+      case "commit-duty-migration":
+        return this.#commitDutyMigration(command);
+      case "cancel-duty-migration":
+        return this.#cancelDutyMigration(command);
       default:
         throw new TypeError("Unsupported Device Administration command");
     }
@@ -358,6 +456,61 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
       currentDutyDeviceId: context.currentDutyDeviceId,
     }));
   }
+
+  async #prepareDutyMigration(
+    command: DeviceAdministrationPrepareDutyMigrationCommand,
+  ): Promise<DeviceAdministrationPrepareDutyMigrationResult> {
+    const input = {
+      requestId: requireStableText(command.requestId, "Migration request id"),
+      transferId: requireStableText(command.transferId, "Migration transfer id"),
+      targetDeviceId: requireStableText(command.targetDeviceId, "Migration target device id"),
+    };
+    const context = this.#assertDutyMigrationAdmission(false);
+    const target = context.members.find((member) => member.deviceId === input.targetDeviceId);
+    if (
+      input.targetDeviceId === context.localDeviceId ||
+      target?.state !== "active" ||
+      !target.dutyCapable
+    ) {
+      throw new TypeError("Migration target is not an active paired duty-capable device");
+    }
+    await this.options.dutyMigration.prepare(input);
+    return Object.freeze({ stage: "ready" });
+  }
+
+  async #commitDutyMigration(
+    command: DeviceAdministrationCommitDutyMigrationCommand,
+  ): Promise<DeviceAdministrationCommitDutyMigrationResult> {
+    const input = dutyMigrationIdentity(command);
+    this.#assertDutyMigrationAdmission(false);
+    await this.options.dutyMigration.commit(input);
+    return Object.freeze({ stage: "completed" });
+  }
+
+  async #cancelDutyMigration(
+    command: DeviceAdministrationCancelDutyMigrationCommand,
+  ): Promise<DeviceAdministrationCancelDutyMigrationResult> {
+    const input = dutyMigrationIdentity(command);
+    this.#assertDutyMigrationAdmission(true);
+    await this.options.dutyMigration.cancel(input);
+    return Object.freeze({ stage: "cancelled" });
+  }
+
+  #assertDutyMigrationAdmission(
+    allowDuringDeviceRemoval: boolean,
+  ): DeviceAdministrationDutyMigrationContext {
+    const context = this.options.dutyMigrationContext.read();
+    if (!context.currentOwnerReady) {
+      throw new Error("Current duty device is completing its durable migration consumers");
+    }
+    if (!allowDuringDeviceRemoval && context.deviceRemovalInProgress) {
+      throw new Error("Duty-device migration is unavailable while a paired device is being removed");
+    }
+    if (context.currentDutyDeviceId !== context.localDeviceId) {
+      throw new Error("This device is not the current duty device");
+    }
+    return context;
+  }
 }
 
 export const DEVICE_ADMINISTRATION_LIST_QUERY = defineProductApiQuery<
@@ -392,6 +545,27 @@ export const DEVICE_ADMINISTRATION_CONTINUE_REMOVAL_COMMAND = defineProductApiCo
   never
 >("device-administration.command.continue-removal", []);
 
+export const DEVICE_ADMINISTRATION_PREPARE_DUTY_MIGRATION_COMMAND = defineProductApiCommand<
+  "device-administration.command.prepare-duty-migration",
+  DeviceAdministrationPrepareDutyMigrationCommand,
+  DeviceAdministrationPrepareDutyMigrationResult,
+  never
+>("device-administration.command.prepare-duty-migration", []);
+
+export const DEVICE_ADMINISTRATION_COMMIT_DUTY_MIGRATION_COMMAND = defineProductApiCommand<
+  "device-administration.command.commit-duty-migration",
+  DeviceAdministrationCommitDutyMigrationCommand,
+  DeviceAdministrationCommitDutyMigrationResult,
+  never
+>("device-administration.command.commit-duty-migration", []);
+
+export const DEVICE_ADMINISTRATION_CANCEL_DUTY_MIGRATION_COMMAND = defineProductApiCommand<
+  "device-administration.command.cancel-duty-migration",
+  DeviceAdministrationCancelDutyMigrationCommand,
+  DeviceAdministrationCancelDutyMigrationResult,
+  never
+>("device-administration.command.cancel-duty-migration", []);
+
 export const DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET = defineProductApiExactSet({
   operations: [
     DEVICE_ADMINISTRATION_LIST_QUERY,
@@ -399,6 +573,9 @@ export const DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET = defineProductApiExact
     DEVICE_ADMINISTRATION_DUTY_MIGRATION_TARGETS_QUERY,
     DEVICE_ADMINISTRATION_BEGIN_REMOVAL_COMMAND,
     DEVICE_ADMINISTRATION_CONTINUE_REMOVAL_COMMAND,
+    DEVICE_ADMINISTRATION_PREPARE_DUTY_MIGRATION_COMMAND,
+    DEVICE_ADMINISTRATION_COMMIT_DUTY_MIGRATION_COMMAND,
+    DEVICE_ADMINISTRATION_CANCEL_DUTY_MIGRATION_COMMAND,
   ],
   factEvents: [],
 });
@@ -429,6 +606,27 @@ export function createDeviceAdministrationProductApiContribution(
       })),
       bindProductApiOperation(
         DEVICE_ADMINISTRATION_CONTINUE_REMOVAL_COMMAND,
+        async (command) => ({
+          result: await application.execute(command),
+          facts: [],
+        }),
+      ),
+      bindProductApiOperation(
+        DEVICE_ADMINISTRATION_PREPARE_DUTY_MIGRATION_COMMAND,
+        async (command) => ({
+          result: await application.execute(command),
+          facts: [],
+        }),
+      ),
+      bindProductApiOperation(
+        DEVICE_ADMINISTRATION_COMMIT_DUTY_MIGRATION_COMMAND,
+        async (command) => ({
+          result: await application.execute(command),
+          facts: [],
+        }),
+      ),
+      bindProductApiOperation(
+        DEVICE_ADMINISTRATION_CANCEL_DUTY_MIGRATION_COMMAND,
         async (command) => ({
           result: await application.execute(command),
           facts: [],
@@ -484,4 +682,14 @@ function requireStableText(value: unknown, label: string): string {
     throw new TypeError(`${label} must be a non-empty string`);
   }
   return value;
+}
+
+function dutyMigrationIdentity(input: {
+  readonly requestId: string;
+  readonly transferId: string;
+}): { readonly requestId: string; readonly transferId: string } {
+  return Object.freeze({
+    requestId: requireStableText(input.requestId, "Migration request id"),
+    transferId: requireStableText(input.transferId, "Migration transfer id"),
+  });
 }

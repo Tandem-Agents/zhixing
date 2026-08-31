@@ -14,9 +14,12 @@ import { isDeliveryItemId } from "@zhixing/core/delivery";
 import { DELIVERY_RESOLVE_UNCERTAIN_COMMAND } from "@zhixing/core/delivery/application";
 import {
   DEVICE_ADMINISTRATION_BEGIN_REMOVAL_COMMAND,
+  DEVICE_ADMINISTRATION_CANCEL_DUTY_MIGRATION_COMMAND,
+  DEVICE_ADMINISTRATION_COMMIT_DUTY_MIGRATION_COMMAND,
   DEVICE_ADMINISTRATION_CONTINUE_REMOVAL_COMMAND,
   DEVICE_ADMINISTRATION_DUTY_MIGRATION_TARGETS_QUERY,
   DEVICE_ADMINISTRATION_LIST_QUERY,
+  DEVICE_ADMINISTRATION_PREPARE_DUTY_MIGRATION_COMMAND,
   DEVICE_ADMINISTRATION_STATUS_QUERY,
 } from "@zhixing/core/device-administration/application";
 import { SCHEDULE_RUNTIME_STATUS_QUERY } from "@zhixing/core/scheduler/application";
@@ -400,10 +403,16 @@ export function buildDutyMigrationPrepareMethod(): MethodEntry {
     name: "dutyMigration.prepare",
     requiresAuth: true,
     async handler(params, ctx) {
-      const migration = ctx.server.dutyMigration;
-      if (!migration) throw RpcErrors.internal("值班设备迁移当前不可用");
       const input = parseDutyMigrationParams(params, true);
-      return runDutyMigrationOperation("prepare", () => migration.prepare(input));
+      const productApi = ctx.server.productApi;
+      if (!productApi?.supports(DEVICE_ADMINISTRATION_PREPARE_DUTY_MIGRATION_COMMAND)) {
+        throw RpcErrors.internal("值班设备迁移当前不可用");
+      }
+      return runDutyMigrationOperation("prepare", async () =>
+        (await productApi.command(DEVICE_ADMINISTRATION_PREPARE_DUTY_MIGRATION_COMMAND, {
+          kind: "prepare-duty-migration",
+          ...input,
+        })).result);
     },
   };
 }
@@ -413,10 +422,16 @@ export function buildDutyMigrationCommitMethod(): MethodEntry {
     name: "dutyMigration.commit",
     requiresAuth: true,
     async handler(params, ctx) {
-      const migration = ctx.server.dutyMigration;
-      if (!migration) throw RpcErrors.internal("值班设备迁移当前不可用");
       const input = parseDutyMigrationParams(params, false);
-      return runDutyMigrationOperation("commit", () => migration.commit(input));
+      const productApi = ctx.server.productApi;
+      if (!productApi?.supports(DEVICE_ADMINISTRATION_COMMIT_DUTY_MIGRATION_COMMAND)) {
+        throw RpcErrors.internal("值班设备迁移当前不可用");
+      }
+      return runDutyMigrationOperation("commit", async () =>
+        (await productApi.command(DEVICE_ADMINISTRATION_COMMIT_DUTY_MIGRATION_COMMAND, {
+          kind: "commit-duty-migration",
+          ...input,
+        })).result);
     },
   };
 }
@@ -426,10 +441,16 @@ export function buildDutyMigrationCancelMethod(): MethodEntry {
     name: "dutyMigration.cancel",
     requiresAuth: true,
     async handler(params, ctx) {
-      const migration = ctx.server.dutyMigration;
-      if (!migration) throw RpcErrors.internal("值班设备迁移当前不可用");
       const input = parseDutyMigrationParams(params, false);
-      return runDutyMigrationOperation("cancel", () => migration.cancel(input));
+      const productApi = ctx.server.productApi;
+      if (!productApi?.supports(DEVICE_ADMINISTRATION_CANCEL_DUTY_MIGRATION_COMMAND)) {
+        throw RpcErrors.internal("值班设备迁移当前不可用");
+      }
+      return runDutyMigrationOperation("cancel", async () =>
+        (await productApi.command(DEVICE_ADMINISTRATION_CANCEL_DUTY_MIGRATION_COMMAND, {
+          kind: "cancel-duty-migration",
+          ...input,
+        })).result);
     },
   };
 }

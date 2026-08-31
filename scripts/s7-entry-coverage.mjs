@@ -2846,7 +2846,7 @@ export async function validateS7Structure() {
   if (failures.length > 0) throw new Error(`S7 structure gate failed:\n- ${failures.join("\n- ")}`);
 }
 
-/** A5 Device Administration owns finite reads and device-removal commands. */
+/** A5 Device Administration owns finite reads, removal and duty-migration commands. */
 export function inspectDeviceAdministrationReadOwnership(records) {
   const failures = [];
   const byPath = new Map(records.map((record) => [record.relative, record.text]));
@@ -2885,15 +2885,20 @@ export function inspectDeviceAdministrationReadOwnership(records) {
   if (
     !application.includes("class DeviceAdministrationApplicationService") ||
     application.split("defineProductApiQuery<").length - 1 !== 3 ||
-    application.split("defineProductApiCommand<").length - 1 !== 2 ||
-    application.split("bindProductApiOperation(").length - 1 !== 5 ||
+    application.split("defineProductApiCommand<").length - 1 !== 5 ||
+    application.split("bindProductApiOperation(").length - 1 !== 8 ||
     !application.includes('"device-administration.query.list"') ||
     !application.includes('"device-administration.query.removal-status"') ||
     !application.includes('"device-administration.query.duty-migration-targets"') ||
     !application.includes('"device-administration.command.begin-removal"') ||
     !application.includes('"device-administration.command.continue-removal"') ||
+    !application.includes('"device-administration.command.prepare-duty-migration"') ||
+    !application.includes('"device-administration.command.commit-duty-migration"') ||
+    !application.includes('"device-administration.command.cancel-duty-migration"') ||
     !application.includes("DeviceAdministrationRemovalAuthorityPort<Accepted, Abort>") ||
     !application.includes("DeviceAdministrationRemovalEffectPort<Accepted, Abort>") ||
+    !application.includes("DeviceAdministrationDutyMigrationContextReadPort") ||
+    !application.includes("DeviceAdministrationDutyMigrationPort") ||
     !application.includes("DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET") ||
     !application.includes("createDeviceAdministrationProductApiContribution") ||
     !application.includes("factEvents: []")
@@ -2913,20 +2918,27 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !composition.includes("ctx.meshRuntime!.deviceRemovalCommandContext()") ||
     !composition.includes("ctx.meshRuntime!.acceptDeviceRemovalForTarget(input)") ||
     !composition.includes("ctx.meshRuntime!.decideDeviceRemovalOnTarget(input)") ||
+    !composition.includes("ctx.meshRuntime!.dutyMigrationCommandContext()") ||
+    !composition.includes("ctx.meshRuntime!.preparePlannedAnchorTransfer(input)") ||
+    !composition.includes("ctx.meshRuntime!.commitPlannedAnchorTransfer(input)") ||
+    !composition.includes("ctx.meshRuntime!.abortPlannedAnchorTransfer(input)") ||
+    composition.includes('return { stage: "ready" as const }') ||
+    composition.includes('return { stage: "completed" as const }') ||
+    composition.includes('return { stage: "cancelled" as const }') ||
     composition.includes("deviceLifecycle:")
   ) {
     failures.push("Device Administration unique Host application composition drifted");
   }
   if (
     !handler.includes('from "@zhixing/core/device-administration/application"') ||
-    handler.split("productApi?.supports(DEVICE_ADMINISTRATION_").length - 1 !== 5 ||
+    handler.split("productApi?.supports(DEVICE_ADMINISTRATION_").length - 1 !== 8 ||
     handler.split("productApi.query(DEVICE_ADMINISTRATION_").length - 1 !== 3 ||
-    handler.split("productApi.command(DEVICE_ADMINISTRATION_").length - 1 !== 2 ||
+    handler.split("productApi.command(DEVICE_ADMINISTRATION_").length - 1 !== 5 ||
     handler.includes("ctx.server.deviceLifecycle.list") ||
     handler.includes("ctx.server.deviceLifecycle.status") ||
     handler.includes("ctx.server.deviceLifecycle.remove") ||
     handler.includes("ctx.server.deviceLifecycle.continue") ||
-    handler.includes("ctx.server.dutyMigration.targets")
+    handler.includes("ctx.server.dutyMigration")
   ) {
     failures.push("Device Administration RPC pure read binding drifted");
   }
@@ -2934,7 +2946,7 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     context.includes("targets(): Promise<readonly") ||
     context.includes("list(): Promise<readonly") ||
     context.includes("deviceLifecycle?:") ||
-    !context.includes("dutyMigration?: {") ||
+    context.includes("dutyMigration?: {") ||
     !context.includes("productApi?: ProductApiDispatcher")
   ) {
     failures.push("Device Administration ServerContext owner returned");
@@ -2950,6 +2962,7 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !mesh.includes("acceptDeviceRemovalOnTarget(input:") ||
     !mesh.includes("abortDeviceRemovalOnTarget(input:") ||
     !mesh.includes("decideDeviceRemovalOnTarget(input:")
+    || !mesh.includes("dutyMigrationCommandContext()")
   ) {
     failures.push("Device Administration decision returned to Mesh runtime");
   }

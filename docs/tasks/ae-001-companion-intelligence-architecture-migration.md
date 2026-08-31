@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：等待协调者复核 A5-16b Device Administration 设备移除写决定与 Product API binding<br>
+> 当前检查点：A5-16c Device Administration 值班迁移写决定与 Product API binding 已实施，等待协调者复核<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,13 +202,13 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `85d8eea9`；A5-16a 已由协调者独立复核并提交，设备关系、移除状态和值班候选三个读取族已归于唯一 Device Administration Query/Application/Product API，旧 ServerContext 读取旁路为零 |
+| 已接受基线 | `5fdb7cd6`；A5-16b 已由协调者独立复核并提交，`device.remove/device.continue` 的产品决定只经 Device Administration Command/Application/Product API，旧 ServerContext 写桥与 Mesh 产品入口为零；A5-16a 读取证据继续有效 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | `A5-16b-device-removal-application-v1` 已形成待复核实现：`device.remove/device.continue` 只经 Device Administration Command/Application/Product API，旧 ServerContext 写桥与 Mesh 产品决定已退场 |
-| 下一责任链 | 接受 A5-16b 后进入 duty migration 写链；不得把设备移除的 journal、签名 receipt、accepted-work、Mesh transport 或物理清理状态机搬入领域，也不得提前进入 Backup/A6 |
-| 打开的单向桥 | `A5-DUTY-MIGRATION-PREPARE-01=dutyMigration.prepare`、`A5-DUTY-MIGRATION-COMMIT-01=dutyMigration.commit`、`A5-DUTY-MIGRATION-CANCEL-01=dutyMigration.cancel` 仍由既有 ServerContext/CLI 装配接口承接；`A5-DEVICE-REMOVE-01` 与 `A5-DEVICE-CONTINUE-01` 已在 A5-16b 待复核实现中关闭 |
-| 已失效证据 | 无当前未恢复证据；A5-16a 与 A5-15a～A5-15m 继续有效；A5-16b 的 Command/Application/Product API、RPC 与 Mesh effect 证据等待协调者独立复核，三个读取 Query 与 duty migration 写链未漂移 |
-| 阻塞/用户决策 | 无；当前停在可构建、可运行、单一设备移除应用真相成立的检查点等待协调者复核 |
+| 活跃工作包 | `A5-16c-duty-migration-application-v1` 已实施，等待协调者独立复核；三条 RPC 只经 Device Administration Command/Application/Product API，Mesh/Authority/Journal/Checkpoint/Transport 只保留物理机制 |
+| 下一责任链 | 接受 A5-16c 后，对 Device Administration 做有限零残留审计并裁决当前设备卸载的责任归属；只有该领域完整闭合后才进入 Backup，不得提前进入 A6 |
+| 打开的单向桥 | 无；`A5-DUTY-MIGRATION-PREPARE-01`、`A5-DUTY-MIGRATION-COMMIT-01`、`A5-DUTY-MIGRATION-CANCEL-01` 已随 `ServerContext.dutyMigration` 与 CLI 阶段闭包退场 |
+| 已失效证据 | 无当前未恢复证据；A5-16c 受影响的领域应用、RPC binding、Host composition、S7、fresh exports 与构建证据已在当前工作区恢复，A5-16a/A5-16b 及 A5-15a～A5-15m 继续有效，等待协调者复核 |
+| 阻塞/用户决策 | 无；当前工作区已形成可构建、可运行、单一 duty-migration 应用真相，等待协调者独立复核 |
 
 ### A0 基线索引
 
@@ -2386,6 +2386,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - Product API、Surface 与旧路退场：Device Administration sealed exact-set 由 3 Query 扩为 3 Query + 2 Command；Host 仍只构造一个应用与一个 contribution。`device.remove/device.continue` handler 只保留认证后的 exact wire 解码、dispatcher Command、既有 `runDeviceLifecycleOperation` 错误映射和结果传输；`ServerContext.deviceLifecycle.remove/continue`、CLI 同名 closure 以及两条桥 `A5-DEVICE-REMOVE-01/A5-DEVICE-CONTINUE-01` 归零。公开 RPC 名、字段、operationId 只对 exact cancel 可选、中文错误/行动、管理 facade、持久 schema 与单机/分布式拓扑均未改变；三条 duty migration 写桥按下一责任链保留，本包未进入 uninstall、Trust Administration、Backup/A6 或 duty migration 写决定。
 - 直接证据与构建：Core Device Administration application/Product API 8/8 与 Server management binding 64/64，合计 2 个直接文件 72/72；覆盖 begin connected/offline、current-duty/unknown/self/同名拒绝、transfer/lost、online/offline cancel、exact cancelled replay、inactive/mismatch/offline、opaque token 单次传递、Command exact-set/零 Fact、RPC exact decode、缺 contribution fail closed 与既有 wire error。A5-16a 的三个读取 Query 证据在同两文件中继续成立；未修改的 DeviceLifecycle/Mesh 既有 restart/response-loss/accepted-work drift 机制证据按已接受基线复用，未以本轮重复全测冒充新结果。Core、Server fresh build 与最终 `pnpm cli:build` 通过；canonical S7 coverage/mutation 34/34 + registry golden、fresh `pnpm runtime:package-exports`、changed-source Biome 与 `git diff --check` 通过。
 - 失效与交接：S7 现冻结 3 Query + 2 Command exact-set、唯一 Host 应用构造、opaque Authority/effect ports、两个 RPC 只走 dispatcher、ServerContext 写桥归零、Mesh 产品方法归零和 core 窄 export/build，并以反向 mutation 拒绝 Command/Query kind 或 identity 漂移、第二应用、RPC/ServerContext 直连、Mesh 恢复产品决定及根/重复导出。以后若两个 Command/Result、选择/分支规则、Authority/effect port、Host contribution/exact-set、ServerContext、RPC handler/error mapping、CLI wire、DeviceLifecycle/Mesh mechanism、core export/build、S7/package-export 或上述直接测试任一变化，只恢复本证据及真实失效的 A5-16a 交界；duty migration、Backup/A6 的无关变化不误伤。Device Administration 行和 A5 继续 `[ ]`；下一检查点固定为 duty migration 写链，当前停在可构建、可运行、可恢复且无双写/双 admission 的检查点等待协调者独立复核，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+### A5-16c：归位 Device Administration 值班迁移写决定与纯 binding
+
+- 实施基线与责任 exact-set：以已接受 `HEAD 5fdb7cd6` 加协调者调度记录为基线，形成待复核证据 `A5-16c-duty-migration-application-v1`。即时沿 `dutyMigration.prepare/commit/cancel → ServerContext/CLI closure → MeshRuntimeAssembly → PlannedAnchorTransferOwner/Journal/Checkpoint/Transport` 正向追踪，并从 Product API、当前值班/换代/设备移除 gate、target membership、prepare/freeze/commit/abort 与既有恢复入口反向核对；本包产品增量恰为 prepare、commit、cancel 三个 Command 与 `ready/completed/cancelled` 三个 readonly result，Device Administration 完整 exact-set 为 3 Query + 5 Command、零 Fact Event。
+- 应用决定与机制边界：唯一 `DeviceAdministrationApplicationService` 现形成稳定 request/transfer/target identity，拥有 current-duty、post-install generation、device-removal admission、active paired duty-capable target 选择与三阶段结果；prepare/commit 继续在设备移除期间拒绝，cancel 保留既有可达边界。窄 `dutyMigrationContext` 只投影本机/当前值班身份、换代 readiness、移除在途与成员资格，窄 mechanism port 原样交付稳定 identity；`PlannedAnchorTransferOwner`、运行期串行器、Authority log、签名、checkpoint、CAS/artifact、Mesh transport 与 journal 继续唯一拥有 durable claim、freeze、response-loss/restart replay、异载荷冲突、commit/abort 边界和 physical cleanup，未复制第二 admission state、journal 或恢复链。
+- Product API、Surface 与旧路退场：既有 Host 仍只构造一个 Device Administration 应用和一个 sealed contribution；三个 RPC handler 只保留认证后的 exact wire 解码、dispatcher Command、既有 `runDutyMigrationOperation` 错误/行动文案映射与结果传输。`ServerContext.dutyMigration`、CreateContext 字段、CLI 返回阶段 closure 及三条 `A5-DUTY-MIGRATION-*-01` 桥归零；公开 RPC 名、请求字段、中文错误、目标 query、CLI journey、持久格式、当前设备卸载和单机/双拓扑均未改变。本包没有进入 uninstall、Backup、Trust、Assignment、Channel 或 A6。
+- 直接证据与构建：Core Device Administration application/Product API 11/11 与 Server management binding 65/65，合计 2 个直接文件 76/76；覆盖 3 Query + 5 Command exact-set、稳定 identity 同载荷重驱、prepare target/current-duty/generation/removal admission、cancel 的既有 removal overlap、三阶段结果、严格 wire、缺 contribution fail closed、目标/unknown/busy/响应不明/提交后取消的原 wire error。未修改的 PlannedAnchorTransfer journal/checkpoint/signature/response-loss/restart 机制证据按已接受基线复用；本轮通过同一 identity 直传与生产结构门证明没有新的重放 owner。Core、Server fresh build、CLI `tsc --noEmit` 与 `pnpm cli:build` 通过；canonical S7 coverage/mutation 34/34 + registry golden、fresh `pnpm runtime:package-exports`、changed-source Biome 与 `git diff --check` 通过。
+- 失效与交接：S7 现冻结 3 Query + 5 Command/8 binding exact-set、唯一 Host 应用/contribution、duty migration context/mechanism ports、三个 RPC 只走 dispatcher、ServerContext 与 CLI 阶段闭包归零、core 窄 export/build，并以反向 mutation 拒绝 operation 漏项/第二应用、RPC 或 ServerContext 直连、阶段决定回流 CLI、context/mechanism 端口丢失及根/重复导出。以后若三 Command/Result、准入/目标规则、稳定 identity、context/mechanism port、Host composition、ServerContext、RPC handler/error mapping、planned transfer owner/journal/checkpoint/transport、S7/package-export 或上述直接测试任一变化，只恢复本证据及真实相交的 A5-16a/A5-16b 结论；uninstall、Backup/A6 的无关变化不自动误伤。Device Administration 行和 A5 继续 `[ ]`；下一检查点固定为有限零残留审计与当前设备卸载责任裁决，当前停在可构建、可运行、可恢复且无双写/双 admission 的检查点等待协调者独立复核，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 

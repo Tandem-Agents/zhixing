@@ -2369,7 +2369,7 @@ test("retired entry, live writable Store and reverse package dependency mutation
   );
 });
 
-test("Device Administration reads and removal commands have one application and pure RPC bindings", async () => {
+test("Device Administration reads, removal and duty migration have one application and pure RPC bindings", async () => {
   const paths = [
     "packages/core/src/device-administration/application.ts",
     "packages/core/src/index.ts",
@@ -2424,6 +2424,26 @@ test("Device Administration reads and removal commands have one application and 
       ),
     )).join("\n"),
     /ServerContext owner returned/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/server/src/context.ts",
+      (text) => text.replace(
+        "productApi?: ProductApiDispatcher;",
+        "productApi?: ProductApiDispatcher;\n  dutyMigration?: { prepare(): Promise<void> };",
+      ),
+    )).join("\n"),
+    /ServerContext owner returned/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/server/src/rpc/methods/server.ts",
+      (text) => text.replace(
+        "productApi.command(DEVICE_ADMINISTRATION_PREPARE_DUTY_MIGRATION_COMMAND",
+        "ctx.server.dutyMigration.prepare(); productApi.command(DEVICE_ADMINISTRATION_PREPARE_DUTY_MIGRATION_COMMAND",
+      ),
+    )).join("\n"),
+    /RPC pure read binding drifted/,
   );
   assert.match(
     inspectDeviceAdministrationReadOwnership(mutate(

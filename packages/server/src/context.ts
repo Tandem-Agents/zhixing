@@ -197,12 +197,6 @@ export interface ServerContext {
     fullBackupReady: boolean;
     nextAction?: string;
   }>;
-  /** 用户主动迁移值班设备；仅暴露设备与用户可理解的阶段。 */
-  dutyMigration?: {
-    prepare(input: { readonly requestId: string; readonly transferId: string; readonly targetDeviceId: string }): Promise<{ readonly stage: "ready" }>;
-    commit(input: { readonly requestId: string; readonly transferId: string }): Promise<{ readonly stage: "completed" }>;
-    cancel(input: { readonly requestId: string; readonly transferId: string }): Promise<{ readonly stage: "cancelled" }>;
-  };
   /** Loopback-only permanent removal of the current duty device. */
   anchorUninstall?: {
     preflight(): Promise<{
@@ -302,7 +296,6 @@ export interface CreateContextOptions {
   hostInfo?: { workspace?: string; logPath?: string };
   managedHostPublicStatus?: ServerContext["managedHostPublicStatus"];
   recoveryBackupStatus?: ServerContext["recoveryBackupStatus"];
-  dutyMigration?: ServerContext["dutyMigration"];
   mcpStatuses?: ServerContext["mcpStatuses"];
   llmComplete?: (prompt: string, role?: "main" | "light") => Promise<string>;
   channels?: ChannelRegistry;
@@ -326,7 +319,6 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     hostInfo: opts.hostInfo,
     managedHostPublicStatus: opts.managedHostPublicStatus,
     recoveryBackupStatus: opts.recoveryBackupStatus,
-    dutyMigration: opts.dutyMigration,
     mcpStatuses: opts.mcpStatuses,
     llmComplete: opts.llmComplete,
     channels: opts.channels,

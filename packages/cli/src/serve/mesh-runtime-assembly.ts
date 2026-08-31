@@ -1338,6 +1338,21 @@ export class MeshRuntimeAssembly {
     });
   }
 
+  dutyMigrationCommandContext() {
+    const trust = this.#control.currentTrust();
+    return Object.freeze({
+      localDeviceId: this.options.authority.deviceId,
+      currentDutyDeviceId: this.#currentAnchorDeviceId(),
+      currentOwnerReady: this.plannedCurrentOwnerReady(),
+      deviceRemovalInProgress: this.#deviceRemovalGuards.size > 0,
+      members: Object.freeze(trust.members.map((member) => Object.freeze({
+        deviceId: member.device.deviceId,
+        state: member.state,
+        dutyCapable: member.roles.includes("anchor"),
+      }))),
+    });
+  }
+
   preparePlannedAnchorTransfer(input: {
     readonly requestId: string;
     readonly transferId: string;
