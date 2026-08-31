@@ -270,19 +270,34 @@ describe("Device Administration command Product API input", () => {
     [buildAnchorUninstallStatusMethod, { operationId: "operation-1", extra: true }],
   ] as const)("rejects unknown uninstall fields before lifecycle effects", async (build, params) => {
     const uninstall = {
-      preflight: vi.fn(async () => ({
-        currentDeviceName: "当前设备",
-        migrationTargets: [],
-        recoveryBackupReady: false,
-      })),
-      begin: vi.fn(async () => ({ phase: "moving-duty-device" as const })),
+      beginMigration: vi.fn(async () => ({ phase: "moving-duty-device" as const })),
+      beginRecoveryBackup: vi.fn(async () => ({ phase: "backup-verified" as const })),
       continue: vi.fn(async () => ({ phase: "retiring-device" as const })),
       cancel: vi.fn(async () => ({ phase: "cancelled" as const })),
       status: vi.fn(async () => undefined),
     };
     const entry = build();
     const ctx = mkCtx({
-      productApi: deviceAdministrationProductApi({ currentDeviceRemoval: uninstall }),
+      productApi: deviceAdministrationProductApi({
+        currentRemovalContext: {
+          read: async () => ({
+            localDeviceId: "device-duty",
+            currentDutyDeviceId: "device-duty",
+            localIssuerKeyId: "key-duty",
+            currentDutyIssuerKeyId: "key-duty",
+            currentDeviceName: "当前设备",
+            executorRemovalInProgress: false,
+          }),
+        },
+        currentRemovalMigrationTargets: { list: async () => [] },
+        currentRemovalRecoveryBackup: {
+          read: async () => ({
+            state: "not-configured",
+            fullBackupReady: false,
+          }),
+        },
+        currentDeviceRemoval: uninstall,
+      }),
     });
     ctx.connection.loopback = true;
     await expect(entry.handler(params, ctx))

@@ -19,7 +19,7 @@ import {
 import { protocolDigest, validateDeviceLifecycleRecord } from "@zhixing/core/protocol";
 
 describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
-  it("uses a ready migration target and only reports terminal after transfer verification and local retirement", async () => {
+  it("uses the preselected migration target identity and only reports terminal after transfer verification and local retirement", async () => {
     const fixture = await createFixture();
     const closeAdmission = vi.fn(async () => undefined);
     const commitMigration = vi.fn(async () => undefined);
@@ -28,7 +28,6 @@ describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
     const effects: string[] = [];
     const coordinator = new AnchorUninstallCoordinator({
       ...fixture.base,
-      migrationTargets: async () => [{ deviceId: "target-1", displayName: "书房电脑", ready: true }],
       commitMigration,
       verifyMigration,
       retireMigratedDevice,
@@ -64,7 +63,7 @@ describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
       requestId: "request-migration",
       operationId: "uninstall-migration",
       transferId: "transfer-migration",
-      targetName: "书房电脑",
+      targetDeviceId: "target-1",
     })).resolves.toEqual({ phase: "uninstalled" });
     expect(closeAdmission).toHaveBeenCalledTimes(1);
     expect(commitMigration).toHaveBeenCalledWith({
@@ -160,7 +159,6 @@ describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
     const onRetired = vi.fn(async () => undefined);
     const coordinator = new AnchorUninstallCoordinator({
       ...fixture.base,
-      migrationTargets: async () => [],
       commitMigration: async () => undefined,
       verifyMigration: async () => undefined,
       retireMigratedDevice: async () => undefined,

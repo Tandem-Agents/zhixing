@@ -2379,6 +2379,7 @@ test("Device Administration reads, paired/current removal and duty migration hav
     "packages/server/src/rpc/methods/server.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/mesh-runtime-assembly.ts",
+    "packages/cli/src/serve/anchor-uninstall.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -2471,6 +2472,30 @@ test("Device Administration reads, paired/current removal and duty migration hav
       (text) => `${text}\nfunction beginDeviceRemoval() { return undefined; }`,
     )).join("\n"),
     /decision returned to Mesh runtime/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/cli/src/serve/anchor-uninstall.ts",
+      (text) => `${text}\nclass LegacyUninstall { async preflight() {} }`,
+    )).join("\n"),
+    /migration mechanism regained product path selection/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/cli/src/serve/anchor-uninstall.ts",
+      (text) => `${text}\ntype LegacyMigrationInput = { readonly targetName: string };`,
+    )).join("\n"),
+    /migration mechanism regained product path selection/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "currentRemovalContext: {",
+        "currentRemovalContext: { recoveryBackupReady: true,",
+      ),
+    )).join("\n"),
+    /unique Host application composition drifted/,
   );
   assert.match(
     inspectDeviceAdministrationReadOwnership(mutate(

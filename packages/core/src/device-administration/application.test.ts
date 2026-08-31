@@ -84,15 +84,35 @@ function fixture() {
     commit: vi.fn(async () => undefined),
     cancel: vi.fn(async () => undefined),
   };
-  const currentDeviceRemoval = {
-    preflight: vi.fn(async () => ({
+  const currentRemovalContext = {
+    read: vi.fn(async () => ({
+      localDeviceId: "device-duty",
+      currentDutyDeviceId: "device-duty",
+      localIssuerKeyId: "key-duty",
+      currentDutyIssuerKeyId: "key-duty",
       currentDeviceName: "当前设备",
-      migrationTargets: [{ displayName: "备用设备", ready: true }],
-      recoveryBackupReady: false,
+      executorRemovalInProgress: false,
     })),
-    begin: vi.fn(async () => ({
+  };
+  const currentRemovalMigrationTargets = {
+    list: vi.fn(async () => [
+      { deviceId: "device-backup", displayName: "备用设备", ready: true },
+    ]),
+  };
+  const currentRemovalRecoveryBackup = {
+    read: vi.fn(async () => ({
+      state: "pending-verification" as const,
+      fullBackupReady: false,
+    })),
+  };
+  const currentDeviceRemoval = {
+    beginMigration: vi.fn(async () => ({
       phase: "moving-duty-device" as const,
       nextAction: "continue" as const,
+    })),
+    beginRecoveryBackup: vi.fn(async () => ({
+      phase: "backup-verified" as const,
+      nextAction: "confirm-backup" as const,
     })),
     continue: vi.fn(async () => ({ phase: "retiring-device" as const })),
     cancel: vi.fn(async () => ({ phase: "cancelled" as const })),
@@ -110,6 +130,9 @@ function fixture() {
     removalEffects,
     dutyMigrationContext,
     dutyMigration,
+    currentRemovalContext,
+    currentRemovalMigrationTargets,
+    currentRemovalRecoveryBackup,
     currentDeviceRemoval,
   });
   return {
@@ -122,6 +145,9 @@ function fixture() {
     removalEffects,
     dutyMigrationContext,
     dutyMigration,
+    currentRemovalContext,
+    currentRemovalMigrationTargets,
+    currentRemovalRecoveryBackup,
     currentDeviceRemoval,
   };
 }
@@ -270,6 +296,11 @@ describe("DeviceAdministrationApplicationService", () => {
       operationId: "uninstall-1",
     });
     expect(Object.isFrozen(preflight)).toBe(true);
+    expect(preflight).toEqual({
+      currentDeviceName: "当前设备",
+      migrationTargets: [{ displayName: "备用设备", ready: true }],
+      recoveryBackupReady: false,
+    });
     expect(Object.isFrozen(preflight.migrationTargets)).toBe(true);
     expect(Object.isFrozen(preflight.migrationTargets[0])).toBe(true);
     expect(Object.isFrozen(status.state)).toBe(true);
@@ -294,19 +325,96 @@ describe("DeviceAdministrationApplicationService", () => {
       operationId: "uninstall-backup",
       recoveryPackage: "recovery-package",
     });
-    expect(f.currentDeviceRemoval.begin).toHaveBeenNthCalledWith(1, {
-      path: "migration",
+    expect(f.currentDeviceRemoval.beginMigration).toHaveBeenCalledWith({
       requestId: "request:uninstall-migration",
       operationId: "uninstall-migration",
       transferId: "transfer-1",
-      targetName: "备用设备",
+      targetDeviceId: "device-backup",
     });
-    expect(f.currentDeviceRemoval.begin).toHaveBeenNthCalledWith(2, {
-      path: "recovery-backup",
+    expect(f.currentDeviceRemoval.beginRecoveryBackup).toHaveBeenCalledWith({
       requestId: "request:uninstall-backup",
       operationId: "uninstall-backup",
       recoveryPackage: "recovery-package",
     });
+  });
+
+  it("owns current authority, removal conflict, backup readiness and unique ready target selection", async () => {
+    const f = fixture();
+    f.currentRemovalRecoveryBackup.read.mockResolvedValueOnce({
+      state: "recoverable",
+      fullBackupReady: true,
+      checkpointId: "checkpoint-1",
+      targetId: "target-1",
+      upToLsn: 42,
+    });
+    await expect(f.application.query({ kind: "preflight-current-device-removal" }))
+      .resolves.toMatchObject({ recoveryBackupReady: true });
+
+    f.currentRemovalContext.read.mockResolvedValueOnce({
+      localDeviceId: "device-duty",
+      currentDutyDeviceId: "device-duty",
+      localIssuerKeyId: "key-duty",
+      currentDutyIssuerKeyId: "key-duty",
+      executorRemovalInProgress: false,
+    });
+    f.currentRemovalMigrationTargets.list.mockResolvedValueOnce([
+      { deviceId: "device-z", displayName: "后序设备", ready: false },
+      { deviceId: "device-a", displayName: "前序设备", ready: true },
+    ]);
+    await expect(f.application.query({ kind: "preflight-current-device-removal" }))
+      .resolves.toEqual({
+        currentDeviceName: "当前设备",
+        migrationTargets: [
+          { displayName: "后序设备", ready: false },
+          { displayName: "前序设备", ready: true },
+        ],
+        recoveryBackupReady: false,
+      });
+
+    f.currentRemovalContext.read.mockResolvedValueOnce({
+      localDeviceId: "device-local",
+      currentDutyDeviceId: "device-other",
+      localIssuerKeyId: "key-local",
+      currentDutyIssuerKeyId: "key-other",
+      executorRemovalInProgress: false,
+    });
+    await expect(f.application.query({ kind: "preflight-current-device-removal" }))
+      .rejects.toThrow("Only the current duty device can uninstall itself");
+
+    f.currentRemovalContext.read.mockResolvedValueOnce({
+      localDeviceId: "device-duty",
+      currentDutyDeviceId: "device-duty",
+      localIssuerKeyId: "key-duty",
+      currentDutyIssuerKeyId: "key-duty",
+      currentDeviceName: "当前设备",
+      executorRemovalInProgress: true,
+    });
+    await expect(f.application.query({ kind: "preflight-current-device-removal" }))
+      .rejects.toThrow("Finish the current device removal before uninstalling this device");
+
+    f.currentRemovalMigrationTargets.list.mockResolvedValueOnce([]);
+    await expect(f.application.execute({
+      kind: "begin-current-device-removal",
+      path: "migration",
+      requestId: "request:no-target",
+      operationId: "uninstall-no-target",
+      transferId: "transfer-no-target",
+      targetName: "备用设备",
+    })).rejects.toThrow("No ready duty device has that name");
+
+    f.currentRemovalMigrationTargets.list.mockResolvedValueOnce([
+      { deviceId: "device-a", displayName: "同名设备", ready: true },
+      { deviceId: "device-b", displayName: "同名设备", ready: true },
+    ]);
+    await expect(f.application.execute({
+      kind: "begin-current-device-removal",
+      path: "migration",
+      requestId: "request:ambiguous-target",
+      operationId: "uninstall-ambiguous-target",
+      transferId: "transfer-ambiguous-target",
+      targetName: "同名设备",
+    })).rejects.toThrow("More than one ready duty device has that name");
+    expect(f.currentDeviceRemoval.beginMigration).not.toHaveBeenCalled();
   });
 
   it("fails closed when the current-device removal mechanism is unavailable", async () => {

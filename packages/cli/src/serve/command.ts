@@ -1886,7 +1886,6 @@ async function runServerProcess(
         issuerKey: uninstallIssuerKey,
         verifier: ctx.authorityRuntime!.verifier,
         anchorEpoch: () => ctx.authorityRuntime!.anchorEpoch,
-        migrationTargets: () => ctx.meshRuntime!.plannedAnchorTargets(),
         commitMigration: async (input) => {
           await ctx.meshRuntime!.preparePlannedAnchorTransfer(input);
           await ctx.meshRuntime!.commitPlannedAnchorTransfer(input);
@@ -2197,26 +2196,48 @@ async function runServerProcess(
               await ctx.meshRuntime!.abortPlannedAnchorTransfer(input);
             },
           },
-          ...(anchorUninstall
+          ...(anchorUninstall && uninstallIssuerKey
             ? {
+                currentRemovalContext: {
+                  read: async () => {
+                    const trust = await bootstrap.mesh.bootstrapStore.loadTrustRecord();
+                    if (!trust) throw new Error("Current home trust is unavailable");
+                    return Object.freeze({
+                      localDeviceId: bootstrap.mesh.deviceKey.deviceId,
+                      currentDutyDeviceId: trust.issuer.deviceId,
+                      localIssuerKeyId: uninstallIssuerKey.deviceId,
+                      currentDutyIssuerKeyId: trust.issuer.issuerKeyId,
+                      currentDeviceName: trust.members.find((member) =>
+                        member.device.deviceId === bootstrap.mesh.deviceKey.deviceId)
+                        ?.device.displayName,
+                      executorRemovalInProgress: (await lifecycleJournal.active())
+                        .some((operation) => operation.identity.kind === "executor-removal"),
+                    });
+                  },
+                },
+                currentRemovalMigrationTargets: {
+                  list: () => ctx.meshRuntime!.plannedAnchorTargets(),
+                },
+                currentRemovalRecoveryBackup: {
+                  read: () => ctx.authorityCheckpointOwner
+                    ? ctx.authorityCheckpointOwner.status()
+                    : Promise.resolve({
+                        state: "not-configured" as const,
+                        fullBackupReady: false,
+                      }),
+                },
                 currentDeviceRemoval: {
-                  preflight: () => anchorUninstall.preflight(),
-                  begin: (input:
-                    | {
-                        readonly path: "migration";
-                        readonly requestId: string;
-                        readonly operationId: string;
-                        readonly transferId: string;
-                        readonly targetName: string;
-                      }
-                    | {
-                        readonly path: "recovery-backup";
-                        readonly requestId: string;
-                        readonly operationId: string;
-                        readonly recoveryPackage: string;
-                      }) => input.path === "recovery-backup"
-                    ? anchorUninstall.beginRecoveryBackup(input)
-                    : anchorUninstall.beginMigration(input),
+                  beginMigration: (input: {
+                    readonly requestId: string;
+                    readonly operationId: string;
+                    readonly transferId: string;
+                    readonly targetDeviceId: string;
+                  }) => anchorUninstall.beginMigration(input),
+                  beginRecoveryBackup: (input: {
+                    readonly requestId: string;
+                    readonly operationId: string;
+                    readonly recoveryPackage: string;
+                  }) => anchorUninstall.beginRecoveryBackup(input),
                   continue: (input: {
                     readonly operationId: string;
                     readonly confirmBackup: true;

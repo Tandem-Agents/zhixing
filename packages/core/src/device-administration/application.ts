@@ -274,23 +274,54 @@ export interface DeviceAdministrationDutyMigrationPort {
   }): Promise<void>;
 }
 
+export interface DeviceAdministrationCurrentRemovalContext {
+  readonly localDeviceId: string;
+  readonly currentDutyDeviceId: string;
+  readonly localIssuerKeyId: string;
+  readonly currentDutyIssuerKeyId: string;
+  readonly currentDeviceName?: string;
+  readonly executorRemovalInProgress: boolean;
+}
+
+export interface DeviceAdministrationCurrentRemovalContextReadPort {
+  read(): Promise<DeviceAdministrationCurrentRemovalContext>;
+}
+
+export interface DeviceAdministrationCurrentRemovalMigrationTarget {
+  readonly deviceId: string;
+  readonly displayName: string;
+  readonly ready: boolean;
+}
+
+export interface DeviceAdministrationCurrentRemovalMigrationTargetReadPort {
+  list(): Promise<readonly DeviceAdministrationCurrentRemovalMigrationTarget[]>;
+}
+
+export interface DeviceAdministrationCurrentRemovalRecoveryBackupStatus {
+  readonly state: "not-configured" | "pending-verification" | "recoverable" | "unavailable";
+  readonly fullBackupReady: boolean;
+  readonly checkpointId?: string;
+  readonly targetId?: string;
+  readonly upToLsn?: number;
+}
+
+export interface DeviceAdministrationCurrentRemovalRecoveryBackupReadPort {
+  read(): Promise<DeviceAdministrationCurrentRemovalRecoveryBackupStatus>;
+}
+
 /** Temporary one-way mechanism bridge to the existing durable uninstall coordinator. */
-export interface DeviceAdministrationCurrentRemovalPort {
-  preflight(): Promise<DeviceAdministrationCurrentRemovalPreflightResult>;
-  begin(input:
-    | {
-        readonly path: "migration";
-        readonly requestId: string;
-        readonly operationId: string;
-        readonly transferId: string;
-        readonly targetName: string;
-      }
-    | {
-        readonly path: "recovery-backup";
-        readonly requestId: string;
-        readonly operationId: string;
-        readonly recoveryPackage: string;
-      }): Promise<DeviceAdministrationCurrentRemovalState>;
+export interface DeviceAdministrationCurrentRemovalMechanismPort {
+  beginMigration(input: {
+    readonly requestId: string;
+    readonly operationId: string;
+    readonly transferId: string;
+    readonly targetDeviceId: string;
+  }): Promise<DeviceAdministrationCurrentRemovalState>;
+  beginRecoveryBackup(input: {
+    readonly requestId: string;
+    readonly operationId: string;
+    readonly recoveryPackage: string;
+  }): Promise<DeviceAdministrationCurrentRemovalState>;
   continue(input: {
     readonly operationId: string;
     readonly confirmBackup: true;
@@ -359,7 +390,11 @@ export interface DeviceAdministrationApplicationOptions<Accepted, Abort> {
   readonly removalEffects: DeviceAdministrationRemovalEffectPort<Accepted, Abort>;
   readonly dutyMigrationContext: DeviceAdministrationDutyMigrationContextReadPort;
   readonly dutyMigration: DeviceAdministrationDutyMigrationPort;
-  readonly currentDeviceRemoval?: DeviceAdministrationCurrentRemovalPort;
+  readonly currentRemovalContext?: DeviceAdministrationCurrentRemovalContextReadPort;
+  readonly currentRemovalMigrationTargets?:
+    DeviceAdministrationCurrentRemovalMigrationTargetReadPort;
+  readonly currentRemovalRecoveryBackup?: DeviceAdministrationCurrentRemovalRecoveryBackupReadPort;
+  readonly currentDeviceRemoval?: DeviceAdministrationCurrentRemovalMechanismPort;
 }
 
 export interface DeviceAdministrationApplication {
@@ -438,10 +473,10 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
             (await this.options.dutyMigrationTargets.list()).map(freezeDutyMigrationTarget),
           ),
         });
-      case "preflight-current-device-removal":
-        return freezeCurrentRemovalPreflight(
-          await this.#currentDeviceRemoval().preflight(),
-        );
+      case "preflight-current-device-removal": {
+        const { preflight } = await this.#readCurrentRemovalPreflight();
+        return preflight;
+      }
       case "read-current-device-removal-status": {
         const operationId = requireStableText(query.operationId, "Uninstall operation id");
         const state = await this.#currentDeviceRemoval().status({ operationId });
@@ -680,16 +715,24 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
     const port = this.#currentDeviceRemoval();
     let result: DeviceAdministrationCurrentRemovalState;
     if (command.path === "migration") {
-      result = await port.begin({
-        path: "migration",
+      const transferId = requireStableText(command.transferId, "Uninstall transfer id");
+      const targetName = requireStableText(command.targetName, "Duty device name");
+      const { migrationTargets } = await this.#readCurrentRemovalPreflight();
+      const matches = migrationTargets.filter((candidate) =>
+        candidate.ready && candidate.displayName === targetName);
+      if (matches.length !== 1) {
+        throw new Error(matches.length === 0
+          ? "No ready duty device has that name"
+          : "More than one ready duty device has that name");
+      }
+      result = await port.beginMigration({
         requestId,
         operationId,
-        transferId: requireStableText(command.transferId, "Uninstall transfer id"),
-        targetName: requireStableText(command.targetName, "Duty device name"),
+        transferId,
+        targetDeviceId: requireStableText(matches[0]!.deviceId, "Duty device id"),
       });
     } else if (command.path === "recovery-backup") {
-      result = await port.begin({
-        path: "recovery-backup",
+      result = await port.beginRecoveryBackup({
         requestId,
         operationId,
         recoveryPackage: requireStableText(command.recoveryPackage, "Recovery package"),
@@ -698,6 +741,49 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
       throw new TypeError("Permanent removal path is invalid");
     }
     return freezeCurrentRemovalState(result);
+  }
+
+  async #readCurrentRemovalPreflight(): Promise<{
+    readonly preflight: DeviceAdministrationCurrentRemovalPreflightResult;
+    readonly migrationTargets: readonly DeviceAdministrationCurrentRemovalMigrationTarget[];
+  }> {
+    const contextPort = this.options.currentRemovalContext;
+    const migrationTargetsPort = this.options.currentRemovalMigrationTargets;
+    const recoveryBackupPort = this.options.currentRemovalRecoveryBackup;
+    if (!contextPort || !migrationTargetsPort || !recoveryBackupPort) {
+      throw this.#currentRemovalUnavailable();
+    }
+    const context = await contextPort.read();
+    if (
+      context.currentDutyDeviceId !== context.localDeviceId ||
+      context.currentDutyIssuerKeyId !== context.localIssuerKeyId
+    ) {
+      throw new Error("Only the current duty device can uninstall itself");
+    }
+    if (context.executorRemovalInProgress) {
+      throw new Error("Finish the current device removal before uninstalling this device");
+    }
+    const migrationTargets = Object.freeze(
+      (await migrationTargetsPort.list()).map((target) => Object.freeze({
+        deviceId: target.deviceId,
+        displayName: target.displayName,
+        ready: target.ready,
+      })),
+    );
+    const backup = await recoveryBackupPort.read();
+    return Object.freeze({
+      preflight: freezeCurrentRemovalPreflight({
+        currentDeviceName: context.currentDeviceName ?? "当前设备",
+        migrationTargets,
+        recoveryBackupReady:
+          backup.state === "recoverable" &&
+          backup.fullBackupReady &&
+          !!backup.checkpointId &&
+          !!backup.targetId &&
+          backup.upToLsn !== undefined,
+      }),
+      migrationTargets,
+    });
   }
 
   async #continueCurrentRemoval(
@@ -721,15 +807,19 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
     }));
   }
 
-  #currentDeviceRemoval(): DeviceAdministrationCurrentRemovalPort {
+  #currentDeviceRemoval(): DeviceAdministrationCurrentRemovalMechanismPort {
     const port = this.options.currentDeviceRemoval;
     if (!port) {
-      throw new DeviceAdministrationApplicationError(
-        "current-device-removal-unavailable",
-        "Current device does not support permanent removal",
-      );
+      throw this.#currentRemovalUnavailable();
     }
     return port;
+  }
+
+  #currentRemovalUnavailable(): DeviceAdministrationApplicationError {
+    return new DeviceAdministrationApplicationError(
+      "current-device-removal-unavailable",
+      "Current device does not support permanent removal",
+    );
   }
 }
 

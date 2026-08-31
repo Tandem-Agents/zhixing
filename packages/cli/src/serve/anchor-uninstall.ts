@@ -57,15 +57,6 @@ export interface AnchorUninstallPublicState {
   readonly nextAction?: "choose-device" | "confirm-backup" | "continue";
 }
 
-export interface AnchorUninstallPreflight {
-  readonly currentDeviceName: string;
-  readonly migrationTargets: readonly {
-    readonly displayName: string;
-    readonly ready: boolean;
-  }[];
-  readonly recoveryBackupReady: boolean;
-}
-
 export class AnchorUninstallCoordinator {
   readonly #journal: DeviceLifecycleJournal;
 
@@ -76,11 +67,6 @@ export class AnchorUninstallCoordinator {
     readonly issuerKey: DeviceKey;
     readonly verifier: ProtocolSignatureVerifier;
     readonly anchorEpoch: () => number;
-    readonly migrationTargets: () => Promise<readonly {
-      readonly deviceId: string;
-      readonly displayName: string;
-      readonly ready: boolean;
-    }[]>;
     readonly commitMigration: (input: {
       readonly requestId: string;
       readonly transferId: string;
@@ -108,46 +94,12 @@ export class AnchorUninstallCoordinator {
     this.#journal = new DeviceLifecycleJournal(options.log, options.verifier);
   }
 
-  async preflight(): Promise<AnchorUninstallPreflight> {
-    const trust = await this.#assertCurrentAuthority();
-    const active = await this.#journal.active();
-    if (active.some((operation) => operation.identity.kind === "executor-removal")) {
-      throw new Error("Finish the current device removal before uninstalling this device");
-    }
-    const migrationTargets = await this.options.migrationTargets();
-    const backup = this.options.checkpointOwner
-      ? await this.options.checkpointOwner.status()
-      : { state: "not-configured" as const, fullBackupReady: false };
-    return Object.freeze({
-      currentDeviceName: trust.members.find((member) =>
-        member.device.deviceId === this.options.currentDeviceId)?.device.displayName ?? "当前设备",
-      migrationTargets: Object.freeze(migrationTargets.map(({ displayName, ready }) => ({
-        displayName,
-        ready,
-      }))),
-      recoveryBackupReady:
-        backup.state === "recoverable" &&
-        backup.fullBackupReady &&
-        !!backup.checkpointId &&
-        !!backup.targetId &&
-        backup.upToLsn !== undefined,
-    });
-  }
-
   async beginMigration(input: {
     readonly requestId: string;
     readonly operationId: string;
     readonly transferId: string;
-    readonly targetName: string;
+    readonly targetDeviceId: string;
   }): Promise<AnchorUninstallPublicState> {
-    await this.preflight();
-    const matches = (await this.options.migrationTargets()).filter((candidate) =>
-      candidate.ready && candidate.displayName === input.targetName);
-    if (matches.length !== 1) {
-      throw new Error(matches.length === 0
-        ? "No ready duty device has that name"
-        : "More than one ready duty device has that name");
-    }
     const trust = await this.#assertCurrentAuthority();
     const identity = Object.freeze({
       v: 1,
@@ -160,7 +112,7 @@ export class AnchorUninstallCoordinator {
       trustHeadDigest: trust.chainHead.eventDigest,
       path: Object.freeze({
         kind: "migration" as const,
-        targetDeviceId: matches[0]!.deviceId,
+        targetDeviceId: input.targetDeviceId,
         transferId: input.transferId,
       }),
     }) satisfies AnchorUninstallLifecycleIdentity;
@@ -176,7 +128,7 @@ export class AnchorUninstallCoordinator {
     const decoded = requireCurrentRecoveryPackage(
       decodeRecoveryPackage(input.recoveryPackage),
     );
-    await this.preflight();
+    await this.#assertRecoveryBeginAdmission();
     const owner = this.options.checkpointOwner;
     if (!owner) throw new Error("No recovery backup target is configured");
     const status = await owner.status();
@@ -625,6 +577,14 @@ export class AnchorUninstallCoordinator {
       throw new Error("Only the current duty device can uninstall itself");
     }
     return trust;
+  }
+
+  async #assertRecoveryBeginAdmission(): Promise<void> {
+    await this.#assertCurrentAuthority();
+    const active = await this.#journal.active();
+    if (active.some((operation) => operation.identity.kind === "executor-removal")) {
+      throw new Error("Finish the current device removal before uninstalling this device");
+    }
   }
 
   async #requireOperation(operationId: string): Promise<DeviceLifecycleOperation> {

@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：等待协调者复核 A5-16d Device Administration 当前设备永久移除 Product API 主链<br>
+> 当前检查点：等待协调者复核 A5-16e Device Administration 当前设备永久移除 preflight 与迁移路径选择<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `a63c6151`；A5-16c 已由协调者独立复核并提交，值班迁移 prepare/commit/cancel 只经 Device Administration Command/Application/Product API，旧 ServerContext/CLI 阶段桥为零；A5-16a/A5-16b 继续有效 |
+| 已接受基线 | `de0f754b`；A5-16d 已由协调者独立复核并提交，五个 `server.uninstall.*` 只经 Device Administration Product API，`ServerContext.anchorUninstall` 服务定位旁路为零；A5-16a～A5-16c 继续有效 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | `A5-16d-current-device-removal-product-api-v1`：已形成五个 `server.uninstall.*` → Device Administration Product API 唯一主链并删除 `ServerContext.anchorUninstall`，等待协调者独立复核 |
-| 下一责任链 | A5-16d 接受后，沿 Device Administration 当前设备永久移除主链迁移路径选择、产品状态与生命周期决定；Backup & Recovery 只通过显式应用端口协作，不在本包重写其 checkpoint/recovery-root 规则 |
-| 打开的单向桥 | `A5-ANCHOR-UNINSTALL-SURFACE-01` 已在 A5-16d 关闭；`A5-ANCHOR-UNINSTALL-COORDINATOR-01=AnchorUninstallCoordinator` 仅作为 Device Application → 既有耐久机制的单向 port bridge 保留，唯一紧邻退场责任链仍是当前设备永久移除路径/状态/lifecycle 决定归位，且不得复制 Product API 状态机 |
-| 已失效证据 | 无当前未恢复证据；A5-16a～A5-16c 的产品行为与机制证据继续有效，共享 Device Administration exact-set/S7 已由待复核 `A5-16d-current-device-removal-product-api-v1` 恢复为 5 Query + 8 Command；A5-15a～A5-15m 未失效 |
+| 活跃工作包 | `A5-16e-current-removal-path-selection-v1`：已实现，等待协调者独立复核；preflight 产品投影与 migration 唯一候选选择现归于 Device Administration，Coordinator 只接收已裁决的 target device identity 并执行耐久机制 |
+| 下一责任链 | A5-16e 接受后迁移 current-removal 的公开状态投影、取消与 migration lifecycle 顺序；recovery-backup 路径继续通过显式 Backup 协作端口分步归位 |
+| 打开的单向桥 | `A5-ANCHOR-UNINSTALL-COORDINATOR-01=AnchorUninstallCoordinator` 继续作为 Device Application → 既有耐久机制单向桥；其 public preflight、`migrationTargets` 和目标名称选择已归零，后续紧邻包迁移状态、取消和 lifecycle 后关闭；recovery-backup mechanism 暂按既有 admission/恢复链保留 |
+| 已失效证据 | 无当前未恢复证据；A5-16e 已重取并恢复 A5-16d 中受 current-removal port、preflight、migration begin 与 Host adapter 变化影响的交界，A5-16a～A5-16d 与 A5-15a～A5-15m 其余结论继续有效 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2402,6 +2402,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - Product API、Surface 与旧路退场：五个 RPC handler 只保留认证后的 loopback gate、exact wire 解码、sealed dispatcher Query/Command、既有中文错误映射和结果传输；`ServerContext.anchorUninstall`、CreateContext 字段和 CLI 五方法服务定位 closure 已删除，`A5-ANCHOR-UNINSTALL-SURFACE-01` 关闭。公开 RPC 名、字段/大小边界、两条 path、explicit backup confirmation、status `null`、既有错误/management facade、Coordinator 持久记录、重启/响应丢失/取消/终态、单机与角色拓扑均未改变；本包未迁移 Backup & Recovery checkpoint/recovery-root 规则，也未进入 A6。
 - 直接证据与构建：Core Device Administration application/Product API 13/13；Server management/uninstall 两个直接文件 70/70，合计 3 个文件 83/83。证据覆盖 5 Query + 8 Command exact-set、nested readonly projection、migration/recovery-backup 两种输入、continue/cancel/status、缺机制 typed fail closed、五个 wire binding、loopback、unknown-field/explicit-confirm 拒绝、缺 Product API/contribution 与既有 current-removal 错误映射。Coordinator 内部 journal/recovery/accepted-work 代码未改，其已接受耐久证据继续复用；Core/Server fresh build、CLI `tsc --noEmit` 与 `pnpm cli:build` 通过，canonical S7 coverage/mutation 34/34 + registry golden、fresh `pnpm runtime:package-exports` 与 changed-source Biome 通过。
 - 失效与交接：S7 现冻结 5 Query + 8 Command/13 binding exact-set、唯一 Host application/contribution、current-removal port 的六个真实 coordinator 调用、五个 RPC 只走 dispatcher、`ServerContext.anchorUninstall`/CLI closure 归零、core 窄 export/build，并以反向 mutation 拒绝 operation 漏项、第二应用、RPC/ServerContext 直连、旧 surface bridge、错误根导出及 Host port 漏绑。以后若 current-removal Query/Command/result、两 path 输入、Host port/coordinator adapter、Product API exact-set、ServerContext、五个 RPC codec/error mapping、CLI management facade、AnchorUninstallCoordinator public mechanism、S7/package-export 或上述直接测试任一变化，只恢复本证据及真实相交的 A5-16a～A5-16c shared exact-set；Backup/A6 的无关变化不误伤。Device Administration 行和 A5 继续 `[ ]`；下一检查点仍为当前设备永久移除路径选择、产品状态与 lifecycle 决定归位，并通过显式 Backup 应用端口协作。当前停在可构建、可运行、可恢复且无双 Surface/Product API 主链的检查点等待协调者独立复核，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+### A5-16e：归位 Device Administration 当前设备永久移除 preflight 与迁移路径选择
+
+- 实施基线与责任 exact-set：以已接受 `HEAD de0f754b` 加协调者调度记录为基线，形成待复核证据 `A5-16e-current-removal-path-selection-v1`。即时沿 `server.uninstall.preflight/begin → DeviceAdministrationApplicationService → Host raw-fact/mechanism adapters → AnchorUninstallCoordinator` 正向追踪，并反查当前 trust/issuer、executor-removal journal、planned Anchor candidates、checkpoint status、migration begin 与 recovery begin；本包唯一产品增量是 preflight 的冻结公开投影和 migration `targetName → 唯一 ready targetDeviceId` 裁决，既有 Product API exact-set、五个 RPC wire、status/continue/cancel 及两条 durable mechanism 不变。
+- 应用决定与 Correctness 机制：Device Administration 现分别通过窄 readonly ports 取得本机/当前值班 device 与 issuer identity、当前设备名称、executor-removal conflict、保持 authority order 的 migration candidates，以及 recovery checkpoint 原始状态；应用验证双重 current-authority identity、阻断并行 executor removal，以默认名称“当前设备”形成冻结 preflight，并仅在 checkpoint 为 recoverable、full-ready 且 checkpoint/target/LSN 全部存在时公开 backup ready。migration begin 只允许唯一同名且 ready 的候选，并把已裁决 `targetDeviceId` 交给 mechanism；零候选与重名候选在任何 durable mutation 前 fail closed。普通持久 conversation 不参与该 admission，也未建立缓存、第二候选目录或第二 lifecycle state。
+- Coordinator、Host 与旧路退场：`AnchorUninstallCoordinator` 的 public `preflight()`、`migrationTargets` 依赖和 `targetName` 选择已删除；migration mechanism 只接收 `targetDeviceId`，并在 journal 接受前继续重新验证当前 Authority，因此选择与耐久提交间的 generation 变化仍 fail closed。Host 只把真实 trust/journal/planned-target/checkpoint raw facts 和五个既有 mechanism 调用适配给唯一 Device 应用，不生成 recovery readiness、不按名称过滤；recovery begin 继续由 Coordinator 的私有 admission 保持原 current-authority 与 executor-removal gate，随后沿既有 checkpoint、accepted-work、journal/replay/cleanup 链执行，未被本包提前迁入 Device 或 Backup。五个 RPC 仍只经 sealed Product API，公开结果、中文错误、响应丢失、重启恢复、持久格式和用户行为未改变。
+- 直接证据与构建：Core Device Administration application/Product API 14/14、CLI Coordinator 2/2、Server management/uninstall 两个文件 70/70，合计 4 个直接文件 86/86；覆盖冻结 preflight、默认名称与候选顺序、backup readiness exact 条件、非当前 Authority、executor-removal conflict、唯一/缺失/重名目标、migration/recovery mechanism、缺机制 fail closed、真实 RPC dispatcher 与 target identity 传递。Core fresh build、Server 与 CLI `tsc --noEmit`、最终 `pnpm cli:build` 通过；canonical S7 coverage/mutation 34/34 + registry golden、fresh `pnpm runtime:package-exports`、changed-source Biome 与 `git diff --check` 通过，索引为空。A5-16d 未变化的 status/continue/cancel、Coordinator journal/recovery/accepted-work 证据按已接受基线复用，没有以重复全测冒充新证据。
+- 失效与交接：S7 现冻结 raw fact port、应用内 current-authority/preflight/readiness/唯一名称选择、Host 真实 adapter、Coordinator 只接收 target identity 及 public preflight/name-selection 归零，并以反向 mutation 拒绝 Host 重建产品 readiness/filter、Coordinator 恢复 `preflight`/`migrationTargets`/`targetName` 或绕过应用选择。以后若 current-removal context/candidate/checkpoint facts、应用 admission/选择/readiness、Host adapter、Coordinator migration/recovery admission、五个 RPC、S7/package-export 或上述直接测试任一变化，只恢复本证据及真实相交的 A5-16d shared port/binding；status/cancel/lifecycle 与独立 Backup application 的后续变化按下一工作包裁决。Device Administration 行和 A5 继续 `[ ]`，`A5-ANCHOR-UNINSTALL-COORDINATOR-01` 仍为有限单向 mechanism 桥；当前停在可构建、可运行、可恢复且无双选择/双 admission 的检查点等待协调者独立复核，未进入后续责任链，也未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 
