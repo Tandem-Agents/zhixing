@@ -11,6 +11,7 @@ import {
   createConversationDirectoryProductApiContribution,
   type ConversationRunControlPort,
   type ConversationAgentTurnAdmissionPort,
+  type ConversationAgentTurnIdentityPort,
 } from "@zhixing/core/conversation/application";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import {
@@ -66,6 +67,7 @@ function runControlProductApi(
 
 function agentTurnProductApi(
   agentTurns: ConversationAgentTurnAdmissionPort,
+  identity: Partial<ConversationAgentTurnIdentityPort> = {},
 ): ProductApiDispatcher {
   const application = new ConversationDirectoryApplicationService({
     storage: {
@@ -84,6 +86,7 @@ function agentTurnProductApi(
       exists: async () => true,
       create: async () => "conversation-created",
       ensure: async () => {},
+      ...identity,
     },
   });
   return new ProductApiDispatcher(
@@ -133,13 +136,12 @@ describe("session.send 方法", () => {
     const ctx = {
       server: {
         conversations: { addObserver, runMaintenanceExisting },
-        conversationDirectory: { ensure },
         advancement: { loadActiveSession, prepareUserTurn },
         productApi: agentTurnProductApi({
           requiresStableTurnIdentity: true,
           createTurnIdentity: () => "turn-generated",
           admit: vi.fn(),
-        }),
+        }, { ensure }),
       } as unknown as ServerContext,
       connection: {
         id: "conn-1",

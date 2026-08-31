@@ -3282,7 +3282,7 @@ test("Trust Administration management has one domain application and Product API
     "packages/core/tsup.config.ts",
     "packages/server/src/rpc/methods/trust.ts",
     "packages/server/src/context.ts",
-    "packages/server/src/runtime/index.ts",
+    "packages/server/src/index.ts",
     "packages/cli/src/serve/trust-administration-adapter.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/runtime/rpc-management-facade.ts",
@@ -3431,7 +3431,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/rpc/tsup.config.ts",
     "packages/server/src/rpc/methods/skill.ts",
     "packages/server/src/rpc/methods/workscene.ts",
-    "packages/server/src/runtime/index.ts",
+    "packages/server/src/index.ts",
     "packages/server/src/rpc/methods/schedule.ts",
     "packages/server/src/rpc/methods/server.ts",
     "packages/server/src/rpc/methods/auth.ts",
@@ -3458,7 +3458,6 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/cli/src/serve/local-conversation-directory-application.ts",
     "packages/cli/src/serve/local-conversation-rpc.ts",
     "packages/cli/src/serve/local-conversation-owner.ts",
-    "packages/server/src/runtime/conversation-directory.ts",
     "packages/server/src/rpc/methods/session.ts",
     "packages/cli/src/serve/anchor-scheduler-runtime.ts",
     "packages/cli/src/serve/execution-scheduler-facade.ts",
@@ -3548,8 +3547,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/server/src/runtime/index.ts",
-      (text) => `${text}\nexport * from "./workscene-directory.js";`,
+      "packages/server/src/index.ts",
+      (text) => `${text}\nexport * from "./runtime/workscene-directory.js";`,
     )).join("\n"),
     /Workscene management and entry lack one domain application and Product API owner/,
   );
@@ -3646,13 +3645,13 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     /Conversation directory management lacks one domain application/,
   );
   assert.match(
-    inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/server/src/runtime/conversation-directory.ts",
-      (text) => text.replace(
-        "export interface ConversationDirectory {",
-        "export interface ConversationDirectory {\n  list(): Promise<unknown[]>;",
-      ),
-    )).join("\n"),
+    inspectSkillCatalogApplicationOwnership([
+      ...records,
+      {
+        relative: "packages/server/src/runtime/conversation-directory.ts",
+        text: "export interface ConversationDirectory { list(): Promise<unknown[]>; }",
+      },
+    ]).join("\n"),
     /Conversation directory management lacks one domain application/,
   );
   assert.match(
@@ -3932,11 +3931,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/server/src/runtime/conversation-directory.ts",
-      (text) => text.replace(
-        "export interface ConversationDirectory {",
-        "export interface ConversationDirectory {\n  touch(id: string): Promise<unknown>;",
-      ),
+      "packages/server/src/context.ts",
+      (text) => `${text}\ninterface LeakedConversationContext { conversationDirectory?: unknown; }`,
     )).join("\n"),
     /Conversation directory management lacks one domain application/,
   );
@@ -3962,11 +3958,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/server/src/runtime/conversation-directory.ts",
-      (text) => text.replace(
-        "export interface ConversationDirectory {",
-        "export interface ConversationDirectory {\n  remove(id: string): Promise<boolean>;",
-      ),
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => `${text}\nvoid ctx.server.conversationDirectory.ensure(id);`,
     )).join("\n"),
     /Conversation directory management lacks one domain application/,
   );
@@ -4030,10 +4023,10 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/server/src/runtime/conversation-directory.ts",
-      (text) => text.replace(
-        "export interface ConversationDirectory {",
-        "export interface ConversationDirectory {\n  clear(id: string): Promise<boolean>;",
+      "packages/core/src/conversation/application.ts",
+      (text) => text.replaceAll(
+        "CONVERSATION_ENSURE_SHELL_COMMAND",
+        "RETIRED_SHELL_COMMAND",
       ),
     )).join("\n"),
     /Conversation directory management lacks one domain application/,

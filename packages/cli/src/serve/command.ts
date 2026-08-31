@@ -2178,7 +2178,6 @@ async function runServerProcess(
     advancement: ctx.advancement,
     advancementRecovery,
     perspectives: perspectivesController,
-    conversationDirectory,
     productApi,
     hostInfo: {
       // 宿主单点解析的工作区——接入面 @ 补全 root 取此

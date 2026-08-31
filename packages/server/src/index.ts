@@ -10,7 +10,6 @@ export * from "./rpc/surface-identity.js";
 export * from "./rpc/dispatcher.js";
 export * from "./rpc/handlers.js";
 export * from "./rpc/methods/index.js";
-export * from "./runtime/index.js";
 export * from "./system-handlers.js";
 export * from "./paths.js";
 export * from "./server-log.js";

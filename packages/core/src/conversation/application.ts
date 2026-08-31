@@ -582,6 +582,10 @@ export interface ConversationAdvancementProjectionReader {
 export type ConversationDirectoryQuery =
   | Readonly<{ kind: "list" }>
   | Readonly<{
+      kind: "identity-exists";
+      conversationId: string;
+    }>
+  | Readonly<{
       kind: "task-list";
       conversationId: string;
     }>
@@ -606,6 +610,10 @@ export type ConversationDirectoryQuery =
 
 export type ConversationDirectoryCommand =
   | Readonly<{ kind: "create" }>
+  | Readonly<{
+      kind: "ensure-shell";
+      conversationId: string;
+    }>
   | Readonly<{
       kind: "resume";
       conversationId: string;
@@ -676,6 +684,14 @@ export type ConversationDirectoryCommand =
 export interface ConversationCreatedResult {
   readonly conversationId: string;
   readonly name: string;
+}
+
+export interface ConversationIdentityExistsResult {
+  readonly exists: boolean;
+}
+
+export interface ConversationShellEnsuredResult {
+  readonly conversationId: string;
 }
 
 export interface ConversationResumeResult {
@@ -820,6 +836,12 @@ export class ConversationApplicationError extends Error {
 
 export interface ConversationDirectoryApplication {
   queryList(): Promise<ConversationDirectoryView>;
+  queryIdentityExists(
+    query: Extract<
+      ConversationDirectoryQuery,
+      { readonly kind: "identity-exists" }
+    >,
+  ): Promise<ConversationIdentityExistsResult>;
   queryTaskList(
     query: Extract<ConversationDirectoryQuery, { readonly kind: "task-list" }>,
   ): Promise<ConversationTaskListView>;
@@ -839,6 +861,12 @@ export interface ConversationDirectoryApplication {
     query: Extract<ConversationDirectoryQuery, { readonly kind: "security" }>,
   ): Promise<ConversationSecurityResult>;
   create(): Promise<ConversationCreatedResult>;
+  ensureShell(
+    command: Extract<
+      ConversationDirectoryCommand,
+      { readonly kind: "ensure-shell" }
+    >,
+  ): Promise<ConversationShellEnsuredResult>;
   resume(
     command: Extract<ConversationDirectoryCommand, { readonly kind: "resume" }>,
   ): Promise<ConversationResumeResult>;
@@ -948,6 +976,22 @@ export class ConversationDirectoryApplicationService
       ...(this.input.availability
         ? { availability: this.input.availability }
         : {}),
+    });
+  }
+
+  async queryIdentityExists(
+    query: Extract<
+      ConversationDirectoryQuery,
+      { readonly kind: "identity-exists" }
+    >,
+  ): Promise<ConversationIdentityExistsResult> {
+    assertConversationIdentity(query.conversationId, "identity query");
+    const identity = this.input.agentTurnIdentity;
+    if (!identity) {
+      throw new Error("Conversation identity application is not assembled");
+    }
+    return Object.freeze({
+      exists: await identity.exists(query.conversationId),
     });
   }
 
@@ -1091,6 +1135,21 @@ export class ConversationDirectoryApplicationService
       conversationId: created.conversationId,
       name: created.name,
     });
+  }
+
+  async ensureShell(
+    command: Extract<
+      ConversationDirectoryCommand,
+      { readonly kind: "ensure-shell" }
+    >,
+  ): Promise<ConversationShellEnsuredResult> {
+    assertConversationIdentity(command.conversationId, "shell command");
+    const identity = this.input.agentTurnIdentity;
+    if (!identity) {
+      throw new Error("Conversation identity application is not assembled");
+    }
+    await identity.ensure(command.conversationId);
+    return Object.freeze({ conversationId: command.conversationId });
   }
 
   async resume(
@@ -1986,6 +2045,15 @@ export const CONVERSATION_LIST_QUERY = defineProductApiQuery<
   ConversationDirectoryView
 >("conversation-directory.query.list");
 
+export const CONVERSATION_IDENTITY_EXISTS_QUERY = defineProductApiQuery<
+  "conversation-identity.query.exists",
+  Extract<
+    ConversationDirectoryQuery,
+    { readonly kind: "identity-exists" }
+  >,
+  ConversationIdentityExistsResult
+>("conversation-identity.query.exists");
+
 export const CONVERSATION_HISTORY_QUERY = defineProductApiQuery<
   "conversation-directory.query.history",
   Extract<ConversationDirectoryQuery, { readonly kind: "history" }>,
@@ -2022,6 +2090,13 @@ export const CONVERSATION_CREATE_COMMAND = defineProductApiCommand<
   ConversationCreatedResult,
   never
 >("conversation-directory.command.create", []);
+
+export const CONVERSATION_ENSURE_SHELL_COMMAND = defineProductApiCommand<
+  "conversation-identity.command.ensure-shell",
+  Extract<ConversationDirectoryCommand, { readonly kind: "ensure-shell" }>,
+  ConversationShellEnsuredResult,
+  never
+>("conversation-identity.command.ensure-shell", []);
 
 export const CONVERSATION_RESUME_COMMAND = defineProductApiCommand<
   "conversation-directory.command.resume",
@@ -2112,12 +2187,14 @@ export const CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET =
   defineProductApiExactSet({
     operations: [
       CONVERSATION_LIST_QUERY,
+      CONVERSATION_IDENTITY_EXISTS_QUERY,
       CONVERSATION_HISTORY_QUERY,
       CONVERSATION_TASK_LIST_QUERY,
       CONVERSATION_CONTEXT_BUDGET_QUERY,
       CONVERSATION_USAGE_QUERY,
       CONVERSATION_SECURITY_QUERY,
       CONVERSATION_CREATE_COMMAND,
+      CONVERSATION_ENSURE_SHELL_COMMAND,
       CONVERSATION_RESUME_COMMAND,
       CONVERSATION_RENAME_COMMAND,
       CONVERSATION_CLEAR_COMMAND,
@@ -2146,6 +2223,13 @@ export function createConversationDirectoryProductApiContribution(
         result: await application.queryList(),
         facts: [],
       })),
+      bindProductApiOperation(
+        CONVERSATION_IDENTITY_EXISTS_QUERY,
+        async (query) => ({
+          result: await application.queryIdentityExists(query),
+          facts: [],
+        }),
+      ),
       bindProductApiOperation(CONVERSATION_HISTORY_QUERY, async (query) => ({
         result: await application.queryHistory(query),
         facts: [],
@@ -2173,6 +2257,13 @@ export function createConversationDirectoryProductApiContribution(
         result: await application.create(),
         facts: [],
       })),
+      bindProductApiOperation(
+        CONVERSATION_ENSURE_SHELL_COMMAND,
+        async (command) => ({
+          result: await application.ensureShell(command),
+          facts: [],
+        }),
+      ),
       bindProductApiOperation(CONVERSATION_RESUME_COMMAND, async (command) => ({
         result: await application.resume(command),
         facts: [],
@@ -2246,6 +2337,18 @@ function assertConversationInspectionQueryIdentity(
     throw new ConversationApplicationError(
       "invalid-input",
       `Conversation ${name} query requires a conversation id`,
+    );
+  }
+}
+
+function assertConversationIdentity(
+  conversationId: unknown,
+  name: string,
+): asserts conversationId is string {
+  if (!isProtocolIdentifier(conversationId)) {
+    throw new ConversationApplicationError(
+      "invalid-input",
+      `Conversation ${name} requires a valid conversation id`,
     );
   }
 }

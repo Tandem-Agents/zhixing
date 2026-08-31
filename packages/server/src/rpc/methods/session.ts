@@ -47,7 +47,9 @@ import {
   CONVERSATION_CONTEXT_BUDGET_QUERY,
   CONVERSATION_DELETE_COMMAND,
   CONVERSATION_HISTORY_QUERY,
+  CONVERSATION_IDENTITY_EXISTS_QUERY,
   CONVERSATION_LIST_QUERY,
+  CONVERSATION_ENSURE_SHELL_COMMAND,
   CONVERSATION_RENAME_COMMAND,
   CONVERSATION_RESUME_COMMAND,
   CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
@@ -68,7 +70,6 @@ import type { RpcConnection } from "../connection.js";
 import { requireRpcSurfacePrincipal } from "../surface-identity.js";
 import type { ServerContext } from "../../context.js";
 import type { SessionBroadcast } from "@zhixing/rpc/session-broadcast";
-import type { ConversationDirectory } from "../../runtime/conversation-directory.js";
 import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
 import {
   SESSION_NOTIFICATIONS,
@@ -1502,7 +1503,7 @@ function createConversationCallback(
 ): (() => Promise<string>) | undefined {
   if (preallocatedConversationId) {
     return async () => {
-      await server.conversationDirectory?.ensure(preallocatedConversationId);
+      await ensureConversationShell(server, preallocatedConversationId);
       return preallocatedConversationId;
     };
   }
@@ -1521,7 +1522,11 @@ async function ensureConversationShell(
   server: ServerContext,
   conversationId: string,
 ): Promise<void> {
-  await server.conversationDirectory?.ensure(conversationId);
+  if (!server.productApi?.supports(CONVERSATION_ENSURE_SHELL_COMMAND)) return;
+  await server.productApi.command(CONVERSATION_ENSURE_SHELL_COMMAND, {
+    kind: "ensure-shell",
+    conversationId,
+  });
 }
 
 function notifyAdvancementEvent(input: {
@@ -2389,7 +2394,10 @@ export function buildSessionSubscribeMethod(): MethodEntry {
       const active = manager.has(params.conversationId);
       const exists =
         active ||
-        (await ctx.server.conversationDirectory?.exists(params.conversationId));
+        (await queryConversationIdentityExists(
+          ctx.server,
+          params.conversationId,
+        ));
       if (!exists) return { subscribed: false };
 
       // observer 是 conversation 身份层名册;已落盘但未激活 runtime 的当前对话
@@ -3054,16 +3062,10 @@ function existingConversationCheck(
   conversationId: string | undefined,
 ): (() => Promise<boolean>) | undefined {
   if (!conversationId) return undefined;
-  const directory = server.conversationDirectory;
-  return directory ? () => directory.exists(conversationId) : undefined;
-}
-
-function requiredExistingConversationCheck(
-  server: ServerContext,
-  conversationId: string,
-): () => Promise<boolean> {
-  const directory = requireDirectory(server);
-  return () => directory.exists(conversationId);
+  if (!server.productApi?.supports(CONVERSATION_IDENTITY_EXISTS_QUERY)) {
+    return undefined;
+  }
+  return () => queryConversationIdentityExists(server, conversationId);
 }
 
 function requireConversations(server: ServerContext): ConversationManager {
@@ -3086,16 +3088,6 @@ function requireAdvancement(server: ServerContext) {
   return server.advancement;
 }
 
-function requireDirectory(server: ServerContext): ConversationDirectory {
-  if (!server.conversationDirectory) {
-    throw new RpcAppError(
-      RPC_ERROR_CODES.INTERNAL_ERROR,
-      "ConversationDirectory not configured on server",
-    );
-  }
-  return server.conversationDirectory;
-}
-
 function requireConversationProductApi(
   server: ServerContext,
   descriptor: ProductApiOperationDescriptor,
@@ -3107,6 +3099,21 @@ function requireConversationProductApi(
     );
   }
   return server.productApi;
+}
+
+async function queryConversationIdentityExists(
+  server: ServerContext,
+  conversationId: string,
+): Promise<boolean> {
+  if (!server.productApi?.supports(CONVERSATION_IDENTITY_EXISTS_QUERY)) {
+    return false;
+  }
+  return (
+    await server.productApi.query(CONVERSATION_IDENTITY_EXISTS_QUERY, {
+      kind: "identity-exists",
+      conversationId,
+    })
+  ).exists;
 }
 
 function projectConversationEntry(

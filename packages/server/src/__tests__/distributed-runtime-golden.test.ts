@@ -26,6 +26,7 @@ import {
   ConversationManager,
   createInitialControlEnvelope,
 } from "@zhixing/owner-kernel";
+import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
 import { createServerContext } from "../context.js";
 import {
   buildBuiltinRegistry,
@@ -44,7 +45,6 @@ import {
 import { toJsonRpcError, type HandlerContext } from "../rpc/handlers.js";
 import type { RuntimeFactory, SessionRuntime } from "@zhixing/owner-kernel";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
-import type { ConversationDirectory } from "../runtime/conversation-directory.js";
 import {
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
   ConversationDirectoryApplicationService,
@@ -186,8 +186,7 @@ async function captureControlAdmissionShadow() {
     version: "golden",
     token: "golden-token",
     conversations,
-    conversationDirectory: directory,
-    productApi: createGoldenConversationProductApi(directory),
+    productApi: createGoldenConversationProductApi(directory, conversations),
   });
   const context = {
     connection: {
@@ -293,16 +292,32 @@ async function captureControlAdmissionShadow() {
   }
 }
 
-type GoldenConversationDirectory = ConversationDirectory & ConversationDirectoryStorage;
+type GoldenConversationDirectory = ConversationDirectoryStorage & Readonly<{
+  exists(id: string): Promise<boolean>;
+  ensure(id: string): Promise<unknown>;
+}>;
 
 function createGoldenConversationProductApi(
-  directory: ConversationDirectoryStorage,
+  directory: GoldenConversationDirectory,
+  conversations: ConversationManager,
 ): ProductApiDispatcher {
   return new ProductApiDispatcher(
     CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
     [
       createConversationDirectoryProductApiContribution(
-        new ConversationDirectoryApplicationService({ storage: directory }),
+        new ConversationDirectoryApplicationService({
+          storage: directory,
+          agentTurnIdentity: {
+            exists: (conversationId) => directory.exists(conversationId),
+            create: async () => (await directory.create()).conversationId,
+            ensure: async (conversationId) => {
+              await directory.ensure(conversationId);
+            },
+          },
+          agentTurns: createConversationAgentTurnAdmissionPort({
+            manager: conversations,
+          }),
+        }),
       ),
     ],
   );

@@ -33,7 +33,6 @@ import type { ServerConfig } from "./types.js";
 import type { ManagedHostPublicStatus } from "./managed-host-status.js";
 import type { RpcSurfaceRegistry } from "./rpc/surface-identity.js";
 import type { PerspectivesController } from "./perspectives/index.js";
-import type { ConversationDirectory } from "./runtime/conversation-directory.js";
 
 export type ServerShutdownStrategy = "immediate" | "drain" | "cancel";
 
@@ -191,8 +190,6 @@ export interface ServerContext {
   advancementRecovery?: AdvancementRecoveryMaintenance;
   /** 多视角发散收敛门面。不传则多视角发起意图不可执行。 */
   perspectives?: PerspectivesController;
-  /** 尚未迁移的对话身份/转录持久桥(ensure/transcript)。 */
-  conversationDirectory?: ConversationDirectory;
   /** Host 组合的传输无关 Product API。不传则相应产品 API 不可用。 */
   productApi?: ProductApiDispatcher;
   /** 宿主装配信息(server.info 的运维字段:工作区 / 日志路径)。 */
@@ -341,7 +338,6 @@ export interface CreateContextOptions {
   advancement?: AdvancementController;
   advancementRecovery?: AdvancementRecoveryMaintenance;
   perspectives?: PerspectivesController;
-  conversationDirectory?: ConversationDirectory;
   productApi?: ProductApiDispatcher;
   hostInfo?: { workspace?: string; logPath?: string };
   managedHostPublicStatus?: ServerContext["managedHostPublicStatus"];
@@ -368,7 +364,6 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     advancement: opts.advancement,
     advancementRecovery: opts.advancementRecovery,
     perspectives: opts.perspectives,
-    conversationDirectory: opts.conversationDirectory,
     productApi: opts.productApi,
     hostInfo: opts.hostInfo,
     managedHostPublicStatus: opts.managedHostPublicStatus,

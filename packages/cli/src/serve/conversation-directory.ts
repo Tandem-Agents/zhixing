@@ -1,6 +1,7 @@
 /**
  * ConversationDirectory 的持久层实现 —— 包装 ConversationRepository(meta 清单 /
- * 改名 / 删除)与 ShardedTranscriptStore 的倒读通道,注入给 @zhixing/server。
+ * 改名 / 删除)与 ShardedTranscriptStore 的倒读通道,供 Anchor Conversation
+ * application、Correctness adapter 与尚待归位的本机 lifecycle 消费。
  *
  * scope 路由:对话归属编码在全域键里(ws: 前缀 = 场景对话)——rename / remove /
  * readRunsReverse 按键解析落对应库;list 保持 user scope(场景是独立工作台,
@@ -22,7 +23,6 @@ import type {
   ConversationClearProjectionPort,
   ConversationDirectoryStorage,
 } from "@zhixing/core/conversation/application";
-import type { ConversationDirectory } from "@zhixing/server";
 import type { WorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 
 interface ScopeHandles {
@@ -34,6 +34,12 @@ interface ConversationRepoRoute {
   repo: IConversationRepository;
   /** scope 库内的 conversation id。 */
   localId: string;
+}
+
+export interface AnchorConversationDirectoryMechanism {
+  exists(id: string): Promise<boolean>;
+  ensure(id: string): Promise<Conversation>;
+  ensureTranscript(id: string): Promise<void>;
 }
 
 export function createConversationDirectory(deps: {
@@ -50,7 +56,7 @@ export function createConversationDirectory(deps: {
    * 保证同一 meta.json 的并发写不会因各自 new repository 绕开 per-id 锁。
    */
   repoForConversationId?: (conversationId: string) => ConversationRepoRoute;
-}): ConversationDirectory & ConversationDirectoryStorage &
+}): AnchorConversationDirectoryMechanism & ConversationDirectoryStorage &
   Pick<ConversationClearProjectionPort, "clearStoredView"> & {
   touch(id: string, at?: string): Promise<Conversation | null>;
   deleteStoredConversation(conversationId: string): Promise<boolean>;

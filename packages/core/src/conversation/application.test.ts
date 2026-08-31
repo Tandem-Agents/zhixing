@@ -10,7 +10,9 @@ import {
   CONVERSATION_DELETE_COMMAND,
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
   CONVERSATION_HISTORY_QUERY,
+  CONVERSATION_IDENTITY_EXISTS_QUERY,
   CONVERSATION_LIST_QUERY,
+  CONVERSATION_ENSURE_SHELL_COMMAND,
   CONVERSATION_RENAME_COMMAND,
   CONVERSATION_RESUME_COMMAND,
   CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
@@ -119,6 +121,71 @@ function taskListFixture(input?: Readonly<{
 }
 
 describe("ConversationDirectoryApplicationService", () => {
+  it("owns durable identity existence and idempotent shell establishment through Product API", async () => {
+    const present = new Set(["conversation-1", "ws:scene-1:conversation-2"]);
+    const exists = vi.fn(async (conversationId: string) =>
+      present.has(conversationId),
+    );
+    const ensure = vi.fn(async (conversationId: string) => {
+      present.add(conversationId);
+    });
+    const create = vi.fn(async () => "unused");
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      agentTurnIdentity: { exists, create, ensure },
+    });
+    const dispatcher = new ProductApiDispatcher(
+      CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+      [createConversationDirectoryProductApiContribution(application)],
+    );
+
+    await expect(
+      dispatcher.query(CONVERSATION_IDENTITY_EXISTS_QUERY, {
+        kind: "identity-exists",
+        conversationId: "conversation-1",
+      }),
+    ).resolves.toEqual({ exists: true });
+    await expect(
+      dispatcher.query(CONVERSATION_IDENTITY_EXISTS_QUERY, {
+        kind: "identity-exists",
+        conversationId: "ws:scene-1:conversation-2",
+      }),
+    ).resolves.toEqual({ exists: true });
+    const ensured = await dispatcher.command(CONVERSATION_ENSURE_SHELL_COMMAND, {
+      kind: "ensure-shell",
+      conversationId: "ws:scene-1:new-conversation",
+    });
+    expect(ensured.result).toEqual({
+      conversationId: "ws:scene-1:new-conversation",
+    });
+    expect(Object.isFrozen(ensured.result)).toBe(true);
+    await dispatcher.command(CONVERSATION_ENSURE_SHELL_COMMAND, {
+      kind: "ensure-shell",
+      conversationId: "ws:scene-1:new-conversation",
+    });
+    await expect(
+      dispatcher.query(CONVERSATION_IDENTITY_EXISTS_QUERY, {
+        kind: "identity-exists",
+        conversationId: "ws:scene-1:new-conversation",
+      }),
+    ).resolves.toEqual({ exists: true });
+    expect(ensure).toHaveBeenCalledTimes(2);
+    expect(create).not.toHaveBeenCalled();
+
+    await expect(
+      application.queryIdentityExists({
+        kind: "identity-exists",
+        conversationId: "",
+      }),
+    ).rejects.toMatchObject({ code: "invalid-input" });
+    await expect(
+      application.ensureShell({
+        kind: "ensure-shell",
+        conversationId: "x".repeat(481),
+      }),
+    ).rejects.toMatchObject({ code: "invalid-input" });
+  });
+
   it("preserves durable ordering while overlaying read-only runtime/Advancement projections", async () => {
     const older = {
       conversationId: "older",

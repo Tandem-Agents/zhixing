@@ -3124,7 +3124,7 @@ export function inspectTrustAdministrationOwnership(records) {
   const productApi = required("packages/core/src/product-api/catalog.ts");
   const handler = required("packages/server/src/rpc/methods/trust.ts");
   const context = required("packages/server/src/context.ts");
-  const serverRuntimeIndex = required("packages/server/src/runtime/index.ts");
+  const serverIndex = required("packages/server/src/index.ts");
   const adapter = required(
     "packages/cli/src/serve/trust-administration-adapter.ts",
   );
@@ -3273,7 +3273,7 @@ export function inspectTrustAdministrationOwnership(records) {
 
   if (
     /trust\?:|TrustDirectory|management-directories/u.test(context) ||
-    /TrustDirectory|management-directories/u.test(serverRuntimeIndex) ||
+    /TrustDirectory|management-directories/u.test(serverIndex) ||
     byPath.has("packages/server/src/runtime/management-directories.ts") ||
     byPath.has("packages/cli/src/serve/management-directories.ts")
   ) {
@@ -3487,7 +3487,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const worksceneHandler = required(
     "packages/server/src/rpc/methods/workscene.ts",
   );
-  const serverRuntimeIndex = required("packages/server/src/runtime/index.ts");
+  const serverIndex = required("packages/server/src/index.ts");
   const worksceneSessionOwner = required(
     "packages/cli/src/serve/workscene-session-owner.ts",
   );
@@ -3499,9 +3499,6 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   );
   const localConversationOwner = required(
     "packages/cli/src/serve/local-conversation-owner.ts",
-  );
-  const serverConversationDirectory = required(
-    "packages/server/src/runtime/conversation-directory.ts",
   );
   const sessionHandler = required(
     "packages/server/src/rpc/methods/session.ts",
@@ -3721,7 +3718,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !composition.includes("...WORKSCENE_PRODUCT_API_EXACT_SET.operations") ||
     context.includes("WorksceneDirectory") ||
     /\bworkscenes\??\s*:/u.test(context) ||
-    serverRuntimeIndex.includes("workscene-directory") ||
+    serverIndex.includes("workscene-directory") ||
     byPath.has("packages/server/src/runtime/workscene-directory.ts") ||
     byPath.has("packages/cli/src/serve/workscene-management-adapter.ts") ||
     !coreManifestText.includes('"./workscene/application"') ||
@@ -4066,6 +4063,10 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !conversationApplication.includes(
       "CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND",
     ) ||
+    !conversationApplication.includes("CONVERSATION_IDENTITY_EXISTS_QUERY") ||
+    !conversationApplication.includes("CONVERSATION_ENSURE_SHELL_COMMAND") ||
+    !conversationApplication.includes("async queryIdentityExists(") ||
+    !conversationApplication.includes("async ensureShell(") ||
     !conversationApplication.includes("CONVERSATION_ADMIT_AGENT_TURN_COMMAND") ||
     !conversationApplication.includes("interface ConversationTaskListPort") ||
     !conversationApplication.includes("CONVERSATION_TASK_LIST_QUERY") ||
@@ -4130,6 +4131,8 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !sessionHandler.includes(
       "CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND",
     ) ||
+    !sessionHandler.includes("CONVERSATION_IDENTITY_EXISTS_QUERY") ||
+    !sessionHandler.includes("CONVERSATION_ENSURE_SHELL_COMMAND") ||
     !sessionHandler.includes("CONVERSATION_ADMIT_AGENT_TURN_COMMAND") ||
     !sessionHandler.includes("CONVERSATION_TASK_LIST_QUERY") ||
     !sessionHandler.includes("CONVERSATION_UPDATE_TASK_LIST_COMMAND") ||
@@ -4170,11 +4173,17 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     /ctx\.server\.(?:taskListSnapshot|taskListUpdate)\s*\(/u.test(
       sessionHandler,
     ) ||
-    /\b(?:list|create|rename|readRunsReverse|readHistory)\s*\(/u.test(
-      serverConversationDirectory,
+    /conversationDirectory\??\s*:/u.test(context) ||
+    /ctx\.server\.conversationDirectory|requireDirectory\(/u.test(sessionHandler) ||
+    !/productApi\.query\(\s*CONVERSATION_IDENTITY_EXISTS_QUERY/u.test(
+      sessionHandler,
     ) ||
-    /\bclear\s*\(/u.test(serverConversationDirectory) ||
-    /\btouch\s*\(/u.test(serverConversationDirectory) ||
+    !/productApi\.command\(\s*CONVERSATION_ENSURE_SHELL_COMMAND/u.test(
+      sessionHandler,
+    ) ||
+    byPath.has("packages/server/src/runtime/conversation-directory.ts") ||
+    byPath.has("packages/server/src/runtime/index.ts") ||
+    serverIndex.includes("./runtime/index.js") ||
     !conversationStorage.includes("implements") &&
       !conversationStorage.includes("ConversationDirectoryStorage") ||
     !composition.includes("new ConversationDirectoryApplicationService({") ||
@@ -4391,7 +4400,6 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     worksceneRemoveScene.indexOf("this.#storageCleanup.removeScene(sceneId)") <
       worksceneRemoveScene.indexOf(".removeCommittedProjection({") ||
     !conversationStorage.includes("deleteStoredConversation(id)") ||
-    /\bremove\s*\(/u.test(serverConversationDirectory) ||
     /manager\.writeDurableSession\([\s\S]*?mutation: \{ kind: "conversation-delete" \}/u.test(
       sessionHandler,
     ) ||

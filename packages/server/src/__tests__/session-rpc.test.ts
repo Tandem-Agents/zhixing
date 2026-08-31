@@ -89,7 +89,6 @@ import {
 } from "@zhixing/core/conversation/application";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import { loadAdvancementState } from "../rpc/methods/session.js";
-import type { ConversationDirectory } from "../runtime/conversation-directory.js";
 
 const TEST_VERSION = "0.1.0-test";
 const TEST_TOKEN = "test-token-session";
@@ -377,7 +376,7 @@ async function waitUntil(
  */
 function createMemoryDirectory(
   records: Map<string, unknown[]>,
-): ConversationDirectory & ConversationDirectoryStorage &
+): TestConversationIdentityStorage & ConversationDirectoryStorage &
   Pick<ConversationClearProjectionPort, "clearStoredView"> &
   Readonly<{
     touch(conversationId: string): Promise<Readonly<{
@@ -490,10 +489,20 @@ function createMemoryDirectory(
   };
 }
 
+interface TestConversationIdentityStorage {
+  exists(id: string): Promise<boolean>;
+  ensure(id: string): Promise<Readonly<{
+    id: string;
+    name: string;
+    createdAt: string;
+    lastActiveAt: string;
+  }>>;
+}
+
 function createConversationProductApi(input: {
   readonly directory: ConversationDirectoryStorage &
     Pick<ConversationClearProjectionPort, "clearStoredView"> &
-    Pick<ConversationDirectory, "exists" | "ensure"> &
+    TestConversationIdentityStorage &
     Readonly<{
       touch(conversationId: string): Promise<Readonly<{
         id: string;
@@ -1377,7 +1386,6 @@ describe("session.* RPC (S2.D)", () => {
       advancement: opts.advancement,
       advancementRecovery,
       perspectives: opts.perspectives,
-      conversationDirectory,
       productApi,
     });
     server = await startServer({ context: ctx });
@@ -3865,7 +3873,6 @@ describe("session.* RPC (S2.D)", () => {
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
-      conversationDirectory: directory,
       productApi: createConversationProductApi({
         directory,
         conversations,
@@ -3951,7 +3958,6 @@ describe("session.* RPC (S2.D)", () => {
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
-      conversationDirectory: directory,
       productApi: createConversationProductApi({
         directory,
         conversations,
@@ -4283,7 +4289,6 @@ describe("session.* RPC (S2.D)", () => {
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
-      conversationDirectory: directory,
       productApi: createConversationProductApi({
         directory,
         conversations,
@@ -4686,7 +4691,6 @@ describe("session.* RPC (S2.D)", () => {
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
-      conversationDirectory: directory,
       productApi: createConversationProductApi({ directory, conversations }),
     });
     server = await startServer({ context: ctx });
@@ -4752,7 +4756,6 @@ describe("session.* RPC (S2.D)", () => {
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
-      conversationDirectory: directory,
       productApi: createConversationProductApi({ directory, conversations }),
     });
     server = await startServer({ context: ctx });
@@ -4793,7 +4796,6 @@ describe("session.* RPC (S2.D)", () => {
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
-      conversationDirectory: directory,
       productApi: createConversationProductApi({ directory, conversations }),
     });
     server = await startServer({ context: ctx });
@@ -4837,7 +4839,6 @@ describe("session.* RPC (S2.D)", () => {
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
-      conversationDirectory: directory,
       productApi: createConversationProductApi({ directory, conversations }),
     });
     server = await startServer({ context: ctx });

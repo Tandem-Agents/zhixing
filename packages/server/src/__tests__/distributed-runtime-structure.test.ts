@@ -29,7 +29,6 @@ const ZONES = [
   ["server/advancement", "packages/server/src/advancement"],
   ["server/confirmation", "packages/server/src/confirmation"],
   ["server/rpc", "packages/server/src/rpc"],
-  ["server/runtime", "packages/server/src/runtime"],
   ["cli/runtime", "packages/cli/src/runtime"],
   ["cli/serve", "packages/cli/src/serve"],
 ] as const;

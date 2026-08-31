@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-13d Workscene 删除级联临时桥退役完成，等待协调者独立复核<br>
+> 当前检查点：A5-14a Conversation identity/shell Server bridge 退役完成，等待协调者独立复核<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `88aaa560`；A5-13a/b/c 已由协调者独立复核并提交，七项 Workscene RPC、会话运行投影与 Server bridge 退场证据有效 |
+| 已接受基线 | `8e99fa55`；A5-13a/b/c/d 已由协调者独立复核并提交，Workscene 行已关闭且其证据继续有效 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | A5-13d 已完成，等待协调者独立复核；Workscene 行据 A5-13a/b/c/d 的有限反向审查标为 `[x]`，A5 仍为 `[ ]` |
-| 下一责任链 | 由协调者从 A5 未完成领域中另行派发；不得由本工作包顺带迁移普通 Conversation delete、Advancement、Channel、Device、Backup、Executor/Mesh 或 A6/A7 |
-| 打开的单向桥 | `A5-CONVERSATION-LIFECYCLE-01`：`ServerContext.conversationDirectory` 已退出 clear/delete/resume，暂仅承载 exists/ensure/transcript，Conversation 最终包前归零。 |
-| 已失效证据 | 无当前未恢复证据；`A5-13d-workscene-delete-projection-cleanup-v1` 已由需求方 cleanup port、单一 Anchor adapter、提交后清理/重驱顺序与旧 bridge 零残留恢复，A5-13a/b/c 证据继续有效 |
+| 活跃工作包 | A5-14a 已完成，等待协调者独立复核；Conversation 行与 A5 仍为 `[ ]` |
+| 下一责任链 | 只剩 `A5-CONVERSATION-LIFECYCLE-01` 的 CLI `AssemblyContext/access-surfaces` 本机 lifecycle 直接消费待另包归位；不得由本工作包顺带迁移 transcript、delete/clear/resume/run control、Advancement、Channel、Device、Backup、Executor/Mesh 或 A6/A7 |
+| 打开的单向桥 | `A5-CONVERSATION-LIFECYCLE-01`：Server/RPC identity/shell bridge 已退役；CLI `AssemblyContext.conversationDirectory` 与 `access-surfaces` 仍直接消费 exists/ensure/ensureTranscript，须在 Conversation 最终包前归零。 |
+| 已失效证据 | 无当前未恢复证据；`A5-14a-conversation-identity-shell-product-api-v1` 已由同一 Conversation application/Product API、四类 Server 消费改绑、旧 Server runtime/context 零残留和直接证据恢复；A5-13a/b/c/d 继续有效 |
 | 阻塞/用户决策 | 无技术阻塞；用户已明确恢复调度 |
 
 ### A0 基线索引
@@ -2113,6 +2113,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 顺序、恢复与旧桥退场：`WorksceneSessionOwner.removeScene` 对每个 conversation 继续先以稳定 `workscene-delete:${sceneId}:${conversationId}` identity 提交/重放 `deleteWorksceneSession` Authority fact，成功后才调用领域需求 port；全部 conversation 均完成后才调用 scene storage cleanup。物理投影清理失败不会提前清 scene，既有 committed storage-maintenance obligation 保持 pending，启动/维护重驱重新进入同一顺序；Authority request replay 与幂等物理删除使响应丢失和重复 action 不产生第二事实或第二投影。`ConversationWorksceneDeleteProjectionBridge`、`createConversationWorksceneDeleteProjectionBridge` 及其 command/directory/session-owner 生产引用全部删除；普通 Conversation delete 仍走原 application/Correctness 链，Workscene 删除没有获得其产品权限。
 - 直接证据与验证：Workscene session owner/Anchor adapter/directory/storage 4 文件 21/21，覆盖两 conversation 的 `authority → projection → authority → projection → scene` 顺序、projection 失败后同 identity 重驱、跨 scene fail closed、端口 finite/frozen、同 scope 映射、scene storage 末位与幂等物理删除；core committed maintenance/recovery 1 文件 6/6，证明 cleanup 失败保留 obligation 并可恢复重驱；Conversation directory 1 文件 12/12，证明普通与 Workscene 物理路径边界未漂移；S7 生产装配与 startup owner 2 文件 6/6，证明单一 adapter/consumer、同一 Host 注入和旧 bridge 零残留，合计 8 文件 45/45。fresh core build、`pnpm cli:build`、canonical S7 coverage/mutation 32/32 与 registry golden、fresh `pnpm runtime:package-exports` 通过；CLI `tsc --noEmit` 未出现 A5-13d/Workscene 新诊断，只保留已接受的 Conversation 后续责任链诊断，未虚报 package typecheck 全绿。
 - 有限反查、状态与精确失效：从唯一 Workscene application/Product API contribution、Anchor application/cleanup adapter、Authority-backed session owner、runtime projection、七项工具/capability 与 RuntimeHost 隔离反向复核，A5-13a/b/c 的管理、enter/exit、运行投影证据继续有效；本包删除最后一个已登记 Workscene 临时桥后，未发现独立 Workscene 写入口、第二事实 owner、Product API/RPC 旁路或产品装配残余，故 Workscene 行标为 `[x]`，A5 仍为 `[ ]`。以后该 cleanup port/adapter、session delete Authority fact 或稳定 request identity、storage-maintenance obligation/recovery、Conversation physical projection primitive、逐 conversation/scene cleanup 次序、Host composition、S7 或 package export 任一变化，恢复 `A5-13d-workscene-delete-projection-cleanup-v1` 并只重验上述闭包；管理、entry 或 runtime projection 的独立变化仍按 A5-13a/b/c 精确恢复。本包完成并等待协调者独立复核，不进入普通 Conversation delete、Advancement、Channel、Device、Backup、Executor/Mesh、A6 或 A7；未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调验收：协调者已在同一 A5-13d 交付物上独立复核并提交为 `8e99fa55`；该记录转为已接受基线，Workscene 行保持 `[x]`。A5-14a 只使 Conversation identity/shell 的 Server bridge 闭包失效，不重开 Workscene 管理、entry、runtime projection 或删除投影清理。
+
+### A5-14a：退役 Conversation identity/shell Server bridge
+
+- 实施基线与唯一应用责任：进场为 `HEAD 8e99fa556304f260d72af61111b77645d9538db7`，索引与工作区为空；协调者派发文本预期有本文预登记差异，但仓库事实未携带该差异，本轮按真实基线补齐台账。既有唯一 `ConversationDirectoryApplicationService` 在同一个 `@zhixing/core/conversation/application` 窄入口增加 `conversation-identity.query.exists` 与 `conversation-identity.command.ensure-shell`，Product API exact-set 现为 7 Query + 12 Command + 4 Fact。领域应用唯一拥有 bounded conversation identity 校验、耐久身份存在判断与固定全域 ID 的幂等 shell 建立；两项 operation 经既有 `ConversationAgentTurnIdentityPort` 取得 Correctness mechanism，不产生 Fact Event、不读取路径/Store/Server 类型，也没有第二 application、dispatcher 或 identity state。
+- 生产消费、行为保护与旧桥退场：`session.send` 的预分配 ID、Advancement prepare/maintenance、Perspectives admission 与 inactive `session.subscribe` 四类 Server 消费现在只经同一 Product API dispatcher 查询或命令；handler 仅保留 wire 参数、既有错误映射和消费时序。Anchor adapter 的 `exists` 继续以 meta 或 transcript 任一存在为 true，不激活 runtime、不 touch；`ensure-shell` 继续按 user/workscene 全域 ID 路由并以同一 `repo.ensure → transcript.init` 建立 meta+transcript shell，重复调用幂等。identity descriptor 未装配时，原 optional bridge 的 ensure helper no-op、existing-check unavailable 与 inactive subscribe false 退化保持；需要其他 Conversation Product API 的入口仍按既有 `INTERNAL_ERROR` fail closed，已装配 application 但 identity mechanism 缺失也不静默放行。`ServerContext.conversationDirectory`、`CreateContextOptions.conversationDirectory`、Server `ConversationDirectory`、`packages/server/src/runtime/conversation-directory.ts`、runtime index/root 转导、handler 的 `requireDirectory` 与直接 exists/ensure 全部删除；fresh Server declaration 不再泄漏该合同。CLI 的 `AnchorConversationDirectoryMechanism` 只为现有 application/Correctness 与尚待归位的本机 lifecycle 直接消费者保留，未迁移 transcript、delete/clear/resume/run control。
+- 直接、结构与构建证据：core Conversation application 1 文件 32/32，新增 user/workscene exists、同一 shell 重复 ensure、冻结结果与非法 identity fail-closed；Server 真实 RPC/绑定 2 文件 96/96，覆盖四类生产消费、inactive persisted/ghost subscribe、Advancement/Perspectives/普通 send、busy/not-found 与既有通知；distributed runtime golden 1 文件 3/3。fresh core、server、CLI 依赖顺序 build 通过，fresh `pnpm runtime:package-exports` 通过，Server `dist/index.d.ts` 对旧字段/接口零泄漏；canonical `pnpm s7:lint` 为 coverage/mutation 32/32 且 registry golden 通过。受影响 structural test 已删除退役的 `server/runtime` zone；其运行继续暴露接受基线中与本包无关的旧 A4 runtime-host manifest 期望（仍期待已退役的 `@zhixing/mcp/@zhixing/tools-builtin` 依赖），本包未越界改写该历史断言，也未把它冒充当前失败。
+- 精确失效、遗留与交接：S7 与反向 mutation 冻结两个领域 operation、同一 contribution/dispatcher、四类 Server 消费、Server context/runtime/root export 零残留，并能拒绝旧 runtime 文件、context 字段、RPC directory 直连或漏 operation 回流。以后 identity query/ensure command、`agentTurnIdentity` mechanism、meta-or-transcript existence、meta+transcript shell 次序、四类 handler 消费、Product API exact-set/Host composition、Server declaration、S7 或 package export 任一变化，恢复 `A5-14a-conversation-identity-shell-product-api-v1` 并只重验上述闭包。`A5-CONVERSATION-LIFECYCLE-01` 尚未关闭：CLI `AssemblyContext/access-surfaces` 仍直接消费 exists/ensure/ensureTranscript，须由紧邻工作包归位；Conversation 行与 A5 保持 `[ ]`。本包完成并等待协调者独立复核，不进入该本机 lifecycle、transcript、普通 delete/clear/resume/run control、Advancement、Channel、Device、Backup、Executor/Mesh、A6 或 A7；未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 
