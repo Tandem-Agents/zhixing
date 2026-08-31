@@ -1,7 +1,7 @@
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createTempDir } from "@zhixing/test-utils";
-import { AdvancementStore } from "@zhixing/core";
+import { AdvancementStore } from "../../../../core/src/advancement/store.js";
 import type {
   AdvancementRunReview,
   AdvancementWindowState,

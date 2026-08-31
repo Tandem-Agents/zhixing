@@ -24,6 +24,82 @@ const NOW = "2026-08-31T00:00:00.000Z";
 const RUN_REF = { shardId: "000001", runIndex: 0 } as const;
 
 describe("AdvancementReviewAttemptApplicationService", () => {
+  it("owns the finite active-state projection for awaiting and active sessions", async () => {
+    const { confirmedRubric: _confirmedRubric, ...awaitingBase } = session();
+    const pendingRubricDraft = {
+      draftId: "draft-1",
+      originalTurnId: "turn-1",
+      source: "generated" as const,
+      candidateRubricIds: [],
+      title: "pending title",
+      description: "pending description",
+      content: {
+        passCriteria: ["done"],
+        evidenceRequirements: [],
+        failureHandling: [
+          { id: "continue", scenario: "not done", reply: "continue" },
+        ],
+      },
+      createdAt: NOW,
+    };
+    const awaitingState = new ReviewAttemptState({
+      ...awaitingBase,
+      status: "awaiting-rubric-confirmation",
+      pendingRubricDraft,
+    });
+    const awaiting = createApplication(awaitingState, new ReviewRoots());
+
+    await expect(awaiting.queryActiveState("conv-1")).resolves.toEqual({
+      advancementSessionId: "adv-1",
+      status: "awaiting-rubric-confirmation",
+      rubricTitle: "pending title",
+      rubricDraftId: "draft-1",
+      pendingRubricDraft,
+    });
+
+    const activeState = new ReviewAttemptState(session({
+      outstandingProxyMessageId: "proxy-1",
+      runs: [review({ runIndex: 3, decision: "passed" })],
+    }));
+    await expect(
+      createApplication(activeState, new ReviewRoots()).queryActiveState("conv-1"),
+    ).resolves.toEqual({
+      advancementSessionId: "adv-1",
+      status: "active",
+      rubricTitle: "done",
+      outstandingProxyMessageId: "proxy-1",
+      lastReview: {
+        id: "review-1",
+        runIndex: 3,
+        round: 1,
+        decision: "passed",
+        reviewedAt: NOW,
+      },
+    });
+  });
+
+  it("settles only the matching active proxy through the application boundary", async () => {
+    const state = new ReviewAttemptState(session({
+      outstandingProxyMessageId: "proxy-1",
+    }));
+    const application = createApplication(state, new ReviewRoots());
+
+    await expect(application.settleProxyRun({
+      conversationId: "conv-1",
+      proxyMessageId: "proxy-other",
+    })).resolves.toBe("not-applicable");
+    expect(state.settledProxyIds).toEqual([]);
+
+    await expect(application.settleProxyRun({
+      conversationId: "conv-1",
+      proxyMessageId: "proxy-1",
+    })).resolves.toBe("settled");
+    expect(state.settledProxyIds).toEqual(["proxy-1"]);
+    await expect(application.queryActiveState("conv-1")).resolves.toMatchObject({
+      status: "active",
+    });
+  });
+
   it("owns the started -> invoking -> consumed phases and terminal root cleanup", async () => {
     const state = new ReviewAttemptState();
     const roots = new ReviewRoots();

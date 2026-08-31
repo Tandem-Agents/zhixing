@@ -2,7 +2,6 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
-  AdvancementStore,
   advancementLogPath,
   type AdvancementProxyMessage,
   type AdvancementRunReview,
@@ -11,6 +10,7 @@ import {
   type RubricContractDraftSnapshot,
   type RunRecord,
 } from "@zhixing/core";
+import { AdvancementStore } from "../../../../core/src/advancement/store.js";
 import { createTempDir } from "@zhixing/test-utils";
 import {
   AdvancementController as OwnerAdvancementController,
@@ -132,6 +132,8 @@ function fakeReviewApplication(
   overrides: Partial<AdvancementReviewAttemptApplication> = {},
 ): AdvancementReviewAttemptApplication {
   return {
+    queryActiveState: async () => null,
+    settleProxyRun: async () => "not-applicable",
     reconcileConversation: async () => {},
     reviewAcceptedRun: async () => ({ kind: "skipped", reason: "not-active" }),
     cancelSession: async () => {

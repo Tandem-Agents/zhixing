@@ -29,7 +29,6 @@ import {
   isNonEmptyUserTurnInput,
   type AgentEventMap,
   type AgentYield,
-  type AdvancementSession,
   type RubricContractDraftSnapshot,
   type TurnContext,
   type UserTurnInput,
@@ -61,6 +60,7 @@ import {
   type ConversationPreparedAgentTurnIdentity,
 } from "@zhixing/core/conversation/application";
 import {
+  ADVANCEMENT_ACTIVE_STATE_QUERY,
   ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
   ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
   ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
@@ -76,6 +76,7 @@ import {
   type AdvancementSessionExitedFact,
   type AdvancementOriginalTaskSurfacePort,
   type AdvancementRubricCancellationResult,
+  type AdvancementActiveStateProjection,
 } from "@zhixing/core/advancement/application";
 import type { ProductApiOperationDescriptor } from "@zhixing/core/product-api";
 import { validateExplicitEnvironmentSelection } from "@zhixing/core/protocol";
@@ -177,9 +178,12 @@ export function buildSessionSendMethod(): MethodEntry {
       const manager = requireConversations(ctx.server);
       const connectionId = String(ctx.connection.id);
       const broadcast = ctx.server.sessionBroadcast;
-      const advancement = ctx.server.advancement;
+      const advancementEnabled = ctx.server.productApi?.supports(
+        ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,
+      );
 
-      if (advancement) {
+      if (advancementEnabled) {
+        const broadcast = requireSessionBroadcast(ctx.server);
         const dispatchActiveAdvancementUserTurn = async () => {
           if (!id) return null;
           const productApi = requireAdvancementProductApi(
@@ -597,6 +601,7 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
         "session.advancementConfirm",
       );
       const manager = requireConversations(ctx.server);
+      const broadcast = requireSessionBroadcast(ctx.server);
       const productApi = requireAdvancementProductApi(
         ctx.server,
         ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
@@ -618,13 +623,13 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
                 publishAdvancementRubricConfirmationFact(
                   fact,
                   ctx.connection,
-                  ctx.server.sessionBroadcast,
+                  broadcast,
                 ),
             },
             surface: createAdvancementOriginalTaskSurface({
               manager,
               connection: ctx.connection,
-              broadcast: ctx.server.sessionBroadcast,
+              broadcast,
             }),
           },
         );
@@ -743,6 +748,7 @@ export function buildSessionAdvancementCancelMethod(): MethodEntry {
       );
       const executeOriginal = params.executeOriginal === true;
       const manager = requireConversations(ctx.server);
+      const broadcast = requireSessionBroadcast(ctx.server);
       const productApi = requireAdvancementProductApi(
         ctx.server,
         ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
@@ -759,13 +765,13 @@ export function buildSessionAdvancementCancelMethod(): MethodEntry {
                 publishAdvancementCancellationFact(
                   fact,
                   ctx.connection,
-                  ctx.server.sessionBroadcast,
+                  broadcast,
                 ),
             },
             surface: createAdvancementOriginalTaskSurface({
               manager,
               connection: ctx.connection,
-              broadcast: ctx.server.sessionBroadcast,
+              broadcast,
             }),
           },
         );
@@ -833,7 +839,7 @@ function createAdvancementOriginalTaskSurface(input: Readonly<{
         broadcast: input.broadcast,
       });
     },
-  });
+  } satisfies AdvancementOriginalTaskSurfacePort);
 }
 
 function publishAdvancementCancellationFact(
@@ -899,27 +905,6 @@ function projectAdvancementRubricCancellationResult(
     advancementSessionId: result.advancementSessionId,
     runStatus: result.runStatus,
   };
-}
-
-async function runAdvancementMaintenance<T>(input: {
-  readonly manager: ConversationManager;
-  readonly server: ServerContext;
-  readonly conversationId: string;
-  readonly busyMessage: string;
-  readonly fn: () => Promise<T>;
-}): Promise<T> {
-  const result = await input.manager.runMaintenanceExisting(
-    input.conversationId,
-    existingConversationCheck(input.server, input.conversationId),
-    input.fn,
-  );
-  if (result.status === "not-found") {
-    throw RpcErrors.notFound(`Session not found: ${input.conversationId}`);
-  }
-  if (result.status === "busy") {
-    throw RpcErrors.busy(input.busyMessage);
-  }
-  return result.value;
 }
 
 interface SendDirectTurnInput {
@@ -2881,45 +2866,30 @@ export async function loadAdvancementState(
   server: ServerContext,
   conversationId: string,
 ): Promise<SessionAdvancementStateSnapshot | undefined> {
-  const session = await server.advancement?.loadActiveSession(conversationId);
-  if (!session) return undefined;
-  return projectAdvancementState(session);
+  if (!server.productApi?.supports(ADVANCEMENT_ACTIVE_STATE_QUERY)) {
+    return undefined;
+  }
+  const state = await server.productApi.query(ADVANCEMENT_ACTIVE_STATE_QUERY, {
+    conversationId,
+  });
+  return state ? projectAdvancementState(state) : undefined;
 }
 
 function projectAdvancementState(
-  session: AdvancementSession,
-): SessionAdvancementStateSnapshot | undefined {
-  if (
-    session.status !== "awaiting-rubric-confirmation" &&
-    session.status !== "active"
-  ) {
-    return undefined;
-  }
-  const lastReview = session.runs[session.runs.length - 1];
+  state: AdvancementActiveStateProjection,
+): SessionAdvancementStateSnapshot {
   return {
-    advancementSessionId: session.id,
-    status: session.status,
-    rubricTitle:
-      session.confirmedRubric?.title ?? session.pendingRubricDraft?.title,
-    rubricDraftId: session.pendingRubricDraft?.draftId,
-    // awaiting 的接入面半边靠它重建确认面——持久化不等于可见性，
-    // 快照必须携带草案全文，接入面才能主动浮现待确认任务。
-    ...(session.status === "awaiting-rubric-confirmation" &&
-    session.pendingRubricDraft
-      ? { pendingRubricDraft: session.pendingRubricDraft }
+    advancementSessionId: state.advancementSessionId,
+    status: state.status,
+    ...(state.rubricTitle ? { rubricTitle: state.rubricTitle } : {}),
+    ...(state.rubricDraftId ? { rubricDraftId: state.rubricDraftId } : {}),
+    ...(state.pendingRubricDraft
+      ? { pendingRubricDraft: state.pendingRubricDraft }
       : {}),
-    outstandingProxyMessageId: session.outstandingProxyMessageId,
-    ...(lastReview
-      ? {
-          lastReview: {
-            id: lastReview.id,
-            runIndex: lastReview.runIndex,
-            round: session.runs.length,
-            decision: lastReview.decision,
-            reviewedAt: lastReview.reviewedAt,
-          },
-        }
+    ...(state.outstandingProxyMessageId
+      ? { outstandingProxyMessageId: state.outstandingProxyMessageId }
       : {}),
+    ...(state.lastReview ? { lastReview: state.lastReview } : {}),
   };
 }
 
@@ -2979,16 +2949,6 @@ function requireConversations(server: ServerContext): ConversationManager {
   return server.conversations;
 }
 
-function requireAdvancement(server: ServerContext) {
-  if (!server.advancement) {
-    throw new RpcAppError(
-      RPC_ERROR_CODES.INTERNAL_ERROR,
-      "AdvancementController not configured on server",
-    );
-  }
-  return server.advancement;
-}
-
 function requireConversationProductApi(
   server: ServerContext,
   descriptor: ProductApiOperationDescriptor,
@@ -3000,6 +2960,16 @@ function requireConversationProductApi(
     );
   }
   return server.productApi;
+}
+
+function requireSessionBroadcast(server: ServerContext): SessionBroadcast {
+  if (!server.sessionBroadcast) {
+    throw new RpcAppError(
+      RPC_ERROR_CODES.INTERNAL_ERROR,
+      "Session broadcast not configured on server",
+    );
+  }
+  return server.sessionBroadcast;
 }
 
 function requireAdvancementProductApi(

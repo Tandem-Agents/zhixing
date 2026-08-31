@@ -310,9 +310,8 @@ class DefaultAdvancementRecoveryMaintenance
     }
     if (durableClaim.status === "closed") {
       try {
-        await this.options.advancement.settleProxyMessage({
+        await this.options.reviews.settleProxyRun({
           conversationId,
-          advancementSessionId: session.id,
           proxyMessageId: proxyMessage.id,
         });
       } catch (err) {

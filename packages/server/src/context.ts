@@ -21,10 +21,7 @@ import type {
   SchedulerUserNotice,
 } from "@zhixing/core/contracts";
 import type { ConfirmationHub, ConversationManager } from "@zhixing/owner-kernel";
-import type {
-  AdvancementController,
-  AdvancementRecoveryMaintenance,
-} from "@zhixing/owner-services";
+import type { AdvancementRecoveryMaintenance } from "@zhixing/owner-services";
 import type {
   SessionActivityBroadcast,
   SessionBroadcast,
@@ -184,8 +181,6 @@ export interface ServerContext {
   readonly token: string;
   /** 对话运行时管理器（不传则 session.* 方法不可用） */
   conversations?: ConversationManager;
-  /** 任务推进闭环控制面。不传则 session.send 保持纯执行语义。 */
-  advancement?: AdvancementController;
   /** 任务推进恢复维护面。不传则 session.resume/list 只暴露静态推进状态。 */
   advancementRecovery?: AdvancementRecoveryMaintenance;
   /** 多视角发散收敛门面。不传则多视角发起意图不可执行。 */
@@ -335,7 +330,6 @@ export interface CreateContextOptions {
   version: string;
   token: string;
   conversations?: ConversationManager;
-  advancement?: AdvancementController;
   advancementRecovery?: AdvancementRecoveryMaintenance;
   perspectives?: PerspectivesController;
   productApi?: ProductApiDispatcher;
@@ -361,7 +355,6 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     token: opts.token,
     startedAt: Date.now(),
     conversations: opts.conversations,
-    advancement: opts.advancement,
     advancementRecovery: opts.advancementRecovery,
     perspectives: opts.perspectives,
     productApi: opts.productApi,

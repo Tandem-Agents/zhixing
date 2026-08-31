@@ -257,6 +257,13 @@ export async function composeAdvancementClosureReport(
 }
 
 export interface AdvancementReviewAttemptApplication {
+  queryActiveState(
+    conversationId: string,
+  ): Promise<AdvancementActiveStateProjection | null>;
+  settleProxyRun(input: Readonly<{
+    conversationId: string;
+    proxyMessageId: string;
+  }>): Promise<"settled" | "not-applicable">;
   reviewAcceptedRun(input: AdvancementReviewAttemptInput): Promise<AdvancementTurnReviewResult>;
   reconcileConversation(conversationId: string): Promise<void>;
   cancelSession(input: Readonly<{
@@ -323,6 +330,36 @@ export class AdvancementReviewAttemptApplicationService
       options.reviewIdGenerator ?? (() => `adv_review_${randomUUID()}`);
     this.#proxyIdGenerator =
       options.proxyIdGenerator ?? (() => `adv_proxy_${randomUUID()}`);
+  }
+
+  async queryActiveState(
+    conversationId: string,
+  ): Promise<AdvancementActiveStateProjection | null> {
+    assertConversationId(conversationId);
+    const session = await this.#state.loadActiveSession(conversationId);
+    return session ? projectAdvancementActiveState(session) : null;
+  }
+
+  async settleProxyRun(input: Readonly<{
+    conversationId: string;
+    proxyMessageId: string;
+  }>): Promise<"settled" | "not-applicable"> {
+    assertConversationId(input.conversationId);
+    assertRubricRevisionIdentity(input.proxyMessageId, "Proxy message");
+    const session = await this.#state.loadActiveSession(input.conversationId);
+    if (
+      session?.status !== "active" ||
+      session.outstandingProxyMessageId !== input.proxyMessageId
+    ) {
+      return "not-applicable";
+    }
+    await this.#state.settleProxyMessage(
+      input.conversationId,
+      session.id,
+      input.proxyMessageId,
+      this.#now(),
+    );
+    return "settled";
   }
 
   async reviewAcceptedRun(
@@ -1342,6 +1379,48 @@ function reviewAttemptForRun(
   );
 }
 
+function projectAdvancementActiveState(
+  session: AdvancementSession,
+): AdvancementActiveStateProjection | null {
+  if (
+    session.status !== "awaiting-rubric-confirmation" &&
+    session.status !== "active"
+  ) {
+    return null;
+  }
+  const lastReview = session.runs[session.runs.length - 1];
+  return freezeSnapshot({
+    advancementSessionId: session.id,
+    status: session.status,
+    ...(session.confirmedRubric?.title
+      ? { rubricTitle: session.confirmedRubric.title }
+      : session.pendingRubricDraft?.title
+        ? { rubricTitle: session.pendingRubricDraft.title }
+        : {}),
+    ...(session.pendingRubricDraft?.draftId
+      ? { rubricDraftId: session.pendingRubricDraft.draftId }
+      : {}),
+    ...(session.status === "awaiting-rubric-confirmation" &&
+    session.pendingRubricDraft
+      ? { pendingRubricDraft: session.pendingRubricDraft }
+      : {}),
+    ...(session.outstandingProxyMessageId
+      ? { outstandingProxyMessageId: session.outstandingProxyMessageId }
+      : {}),
+    ...(lastReview
+      ? {
+          lastReview: {
+            id: lastReview.id,
+            runIndex: lastReview.runIndex,
+            round: session.runs.length,
+            decision: lastReview.decision,
+            reviewedAt: lastReview.reviewedAt,
+          },
+        }
+      : {}),
+  });
+}
+
 function sameRunRecordRef(left: RunRecordRef, right: RunRecordRef): boolean {
   return left.shardId === right.shardId && left.runIndex === right.runIndex;
 }
@@ -2119,6 +2198,7 @@ export interface AdvancementRubricConfirmationFactPort {
 }
 
 export interface AdvancementApplicationOptions {
+  readonly activeState: Pick<AdvancementReviewAttemptApplication, "queryActiveState">;
   readonly detail: AdvancementDetailReadPort;
   readonly maintenance: AdvancementConversationMaintenancePort;
   readonly newTask: AdvancementNewTaskMechanismPort;
@@ -2297,6 +2377,28 @@ export interface AdvancementDetailProjection {
 
 export type AdvancementDetailResult = AdvancementDetailProjection | null;
 
+export interface AdvancementActiveStateQuery {
+  readonly conversationId: string;
+}
+
+export interface AdvancementActiveStateProjection {
+  readonly advancementSessionId: string;
+  readonly status: "awaiting-rubric-confirmation" | "active";
+  readonly rubricTitle?: string;
+  readonly rubricDraftId?: string;
+  readonly pendingRubricDraft?: RubricContractDraftSnapshot;
+  readonly outstandingProxyMessageId?: string;
+  readonly lastReview?: Readonly<{
+    id: string;
+    runIndex: number;
+    round: number;
+    decision: AdvancementRunReview["decision"];
+    reviewedAt: string;
+  }>;
+}
+
+export type AdvancementActiveStateResult = AdvancementActiveStateProjection | null;
+
 export interface AdvancementRubricRevisionCommand {
   readonly conversationId: string;
   readonly advancementSessionId: string;
@@ -2442,6 +2544,9 @@ export class AdvancementApplicationError extends Error {
 }
 
 export interface AdvancementApplication {
+  queryActiveState(
+    query: AdvancementActiveStateQuery,
+  ): Promise<AdvancementActiveStateResult>;
   queryDetail(query: AdvancementDetailQuery): Promise<AdvancementDetailResult>;
   prepareActiveUserTurn(
     command: AdvancementActiveUserTurnCommand,
@@ -2486,6 +2591,7 @@ export interface AdvancementApplication {
 
 /** Advancement-owned application decisions exposed through one finite Product API contribution. */
 export class AdvancementApplicationService implements AdvancementApplication {
+  readonly #activeState: Pick<AdvancementReviewAttemptApplication, "queryActiveState">;
   readonly #detail: AdvancementDetailReadPort;
   readonly #maintenance: AdvancementConversationMaintenancePort;
   readonly #newTask: AdvancementNewTaskMechanismPort;
@@ -2501,6 +2607,7 @@ export class AdvancementApplicationService implements AdvancementApplication {
   readonly #confirmedOriginalTask: AdvancementConfirmedOriginalTaskAdmissionPort;
 
   constructor(options: AdvancementApplicationOptions) {
+    this.#activeState = options.activeState;
     this.#detail = options.detail;
     this.#maintenance = options.maintenance;
     this.#newTask = options.newTask;
@@ -2514,6 +2621,13 @@ export class AdvancementApplicationService implements AdvancementApplication {
     this.#rubricPublication = options.rubricPublication;
     this.#originalTask = options.originalTask;
     this.#confirmedOriginalTask = options.confirmedOriginalTask;
+  }
+
+  async queryActiveState(
+    query: AdvancementActiveStateQuery,
+  ): Promise<AdvancementActiveStateResult> {
+    assertConversationId(query.conversationId);
+    return await this.#activeState.queryActiveState(query.conversationId);
   }
 
   async queryDetail(
@@ -3677,6 +3791,12 @@ export const ADVANCEMENT_DETAIL_QUERY = defineProductApiQuery<
   AdvancementDetailResult
 >("advancement.query.detail");
 
+export const ADVANCEMENT_ACTIVE_STATE_QUERY = defineProductApiQuery<
+  "advancement.query.active-state",
+  AdvancementActiveStateQuery,
+  AdvancementActiveStateResult
+>("advancement.query.active-state");
+
 export const ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT =
   defineProductApiFactEvent<
     "advancement-contract-draft-revised",
@@ -3770,6 +3890,7 @@ export const ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND =
 
 export const ADVANCEMENT_PRODUCT_API_EXACT_SET = defineProductApiExactSet({
   operations: [
+    ADVANCEMENT_ACTIVE_STATE_QUERY,
     ADVANCEMENT_DETAIL_QUERY,
     ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,
     ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
@@ -3792,6 +3913,10 @@ export function createAdvancementProductApiContribution(
 ): ProductApiContribution {
   return defineProductApiContribution({
     operations: [
+      bindProductApiOperation(ADVANCEMENT_ACTIVE_STATE_QUERY, async (query) => ({
+        result: await application.queryActiveState(query),
+        facts: [],
+      })),
       bindProductApiOperation(ADVANCEMENT_DETAIL_QUERY, async (query) => ({
         result: await application.queryDetail(query),
         facts: [],

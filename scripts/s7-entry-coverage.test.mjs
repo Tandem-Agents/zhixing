@@ -15,6 +15,7 @@ import {
   inspectCleanupRegistryConstructions,
   inspectConversationAdoptionAssembly,
   inspectDeviceLifecycleAssembly,
+  ADVANCEMENT_APPLICATION_OWNER_EXACT_SET,
   inspectAdvancementDetailApplicationOwnership,
   inspectKernelRunEnvelopeOwnership,
   inspectKernelRunEventOwnership,
@@ -3402,7 +3403,7 @@ test("Trust Administration management has one domain application and Product API
   );
 });
 
-test("Advancement detail/rubric has one Product API application and conversation lifecycle has one independent owner", async () => {
+test("Advancement whole-domain exact-set has one application/mechanism owner per family", async () => {
   const paths = [
     "packages/core/src/advancement/application.ts",
     "packages/core/src/advancement/store.ts",
@@ -3412,6 +3413,7 @@ test("Advancement detail/rubric has one Product API application and conversation
     "packages/core/package.json",
     "packages/core/tsup.config.ts",
     "packages/owner-services/src/advancement/controller.ts",
+    "packages/owner-services/src/advancement/evidence.ts",
     "packages/owner-services/src/advancement/session-store.ts",
     "packages/owner-services/src/advancement/review-external-mechanism.ts",
     "packages/owner-services/src/advancement/proxy-scheduler.ts",
@@ -3421,6 +3423,7 @@ test("Advancement detail/rubric has one Product API application and conversation
     "packages/owner-services/package.json",
     "packages/owner-services/tsup.config.ts",
     "packages/server/src/rpc/methods/session.ts",
+    "packages/server/src/context.ts",
     "packages/server/src/system-handlers.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/access-surfaces.ts",
@@ -3437,11 +3440,69 @@ test("Advancement detail/rubric has one Product API application and conversation
     text: await readFile(relative, "utf8"),
   })));
   assert.deepEqual(inspectAdvancementDetailApplicationOwnership(records), []);
+  assert.deepEqual(
+    ADVANCEMENT_APPLICATION_OWNER_EXACT_SET.map(({ family }) => family),
+    [
+      "active-state",
+      "detail",
+      "rubric-lifecycle/publication",
+      "original-task-admission",
+      "active-user-turn",
+      "conversation-retirement",
+      "accepted-turn",
+      "review-attempt/outcome",
+      "review-result-projection",
+      "recovery",
+      "proxy-scheduling",
+      "evidence",
+      "persistence-correctness",
+    ],
+  );
 
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
   );
   const failure = /Advancement detail\/rubric lacks one Product API application or conversation lifecycle lacks one independent application owner/;
+  const closureFailure = /Advancement whole-domain exact-set has a second active-state, proxy-settlement, ServerContext, legacy Store export, or Store-write owner/;
+
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace("activeState: ctx.advancementReviews,", ""),
+    )).join("\n"),
+    closureFailure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/owner-services/src/advancement/recovery-maintenance.ts",
+      (text) => text.replace(
+        "this.options.reviews.settleProxyRun({",
+        "this.options.advancement.settleProxyMessage({",
+      ),
+    )).join("\n"),
+    closureFailure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/server/src/context.ts",
+      (text) => `${text}\ninterface Regression { readonly advancement?: AdvancementController }`,
+    )).join("\n"),
+    closureFailure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => `${text}\nvoid store.cancelSession(conversationId, sessionId);`,
+    )).join("\n"),
+    closureFailure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/core/src/advancement/index.ts",
+      (text) => `${text}\nexport { AdvancementStore } from "./store.js";`,
+    )).join("\n"),
+    closureFailure,
+  );
 
   assert.match(
     inspectAdvancementDetailApplicationOwnership(mutate(
@@ -3852,7 +3913,7 @@ test("Advancement detail/rubric has one Product API application and conversation
   );
   assert.match(
     inspectAdvancementDetailApplicationOwnership(mutate(
-      "packages/core/src/advancement/store.ts",
+      "packages/owner-services/src/advancement/session-store.ts",
       (text) => `${text}\nasync sweepOrphanDirs() { return { scanned: 0, removed: 0, warnings: [] }; }`,
     )).join("\n"),
     failure,

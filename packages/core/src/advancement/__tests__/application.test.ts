@@ -9,6 +9,7 @@ import {
   ADVANCEMENT_CONTRACT_DRAFT_REVISED_FACT_EVENT,
   ADVANCEMENT_CONFIRM_RUBRIC_COMMAND,
   ADVANCEMENT_CONTROL_AWAITING_RUBRIC_COMMAND,
+  ADVANCEMENT_ACTIVE_STATE_QUERY,
   ADVANCEMENT_DETAIL_QUERY,
   ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,
   ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
@@ -1605,7 +1606,7 @@ describe("AdvancementApplicationService detail query", () => {
     ]);
   });
 
-  it("contributes one Query plus six finite Commands and five Facts", async () => {
+  it("contributes two Queries plus six finite Commands and five Facts", async () => {
     const source = session({
       status: "awaiting-rubric-confirmation",
       pendingRubricDraft: pendingRubric("待修订标准"),
@@ -1618,6 +1619,7 @@ describe("AdvancementApplicationService detail query", () => {
     );
 
     expect(ADVANCEMENT_PRODUCT_API_EXACT_SET.operations).toEqual([
+      ADVANCEMENT_ACTIVE_STATE_QUERY,
       ADVANCEMENT_DETAIL_QUERY,
       ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,
       ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
@@ -1633,6 +1635,11 @@ describe("AdvancementApplicationService detail query", () => {
       ADVANCEMENT_CONTRACT_CONFIRMED_FACT_EVENT,
       ADVANCEMENT_CONTRACT_CANCELLED_FACT_EVENT,
     ]);
+    await expect(
+      dispatcher.query(ADVANCEMENT_ACTIVE_STATE_QUERY, {
+        conversationId: "conv-1",
+      }),
+    ).resolves.toBeNull();
     await expect(
       dispatcher.query(ADVANCEMENT_DETAIL_QUERY, {
         conversationId: "conv-1",
@@ -2171,6 +2178,7 @@ function createApplication(
     }),
   );
   return new AdvancementApplicationService({
+    activeState: overrides.activeState ?? fixture.options.activeState,
     detail: overrides.detail ?? fixture.options.detail,
     maintenance: overrides.maintenance ?? fixture.options.maintenance,
     newTask: overrides.newTask ?? fixture.options.newTask,
@@ -2507,6 +2515,9 @@ function createRevisionFixture(
       }),
   };
   const options: AdvancementApplicationOptions = {
+    activeState: overrides.activeState ?? {
+      queryActiveState: async () => null,
+    },
     detail: port(current),
     maintenance,
     newTask: overrides.newTask ?? {

@@ -48,7 +48,6 @@ import {
   ConversationDirectoryApplicationService,
   createConversationIdentityLifecycleApplication,
   createConversationDirectoryProductApiContribution,
-  type ConversationAdvancementProjection,
 } from "@zhixing/core/conversation/application";
 import {
   ADVANCEMENT_PRODUCT_API_EXACT_SET,
@@ -2050,21 +2049,10 @@ async function runServerProcess(
       ...(ctx.advancement
         ? {
             advancement: {
-              settle: async ({ conversationId, ingressId }) => {
-                const active = await ctx.advancement!.loadActiveSession(
-                  conversationId,
-                );
-                if (
-                  active?.status === "active" &&
-                  active.outstandingProxyMessageId === ingressId
-                ) {
-                  await ctx.advancement!.settleProxyMessage({
-                    conversationId,
-                    advancementSessionId: active.id,
-                    proxyMessageId: ingressId,
-                  });
-                }
-              },
+              settle: ({ conversationId, ingressId }) =>
+                ctx.advancementReviews
+                  .settleProxyRun({ conversationId, proxyMessageId: ingressId })
+                  .then(() => undefined),
               recover: async (conversationId) => {
                 await advancementRecovery?.recoverConversation(conversationId);
               },
@@ -2087,49 +2075,16 @@ async function runServerProcess(
     },
     advancement: ctx.advancement
       ? {
-          read: async (conversationId) => {
-            const session = await ctx.advancement!.loadActiveSession(
-              conversationId,
-            );
-            if (
-              !session ||
-              (session.status !== "awaiting-rubric-confirmation" &&
-                session.status !== "active")
-            ) {
-              return undefined;
-            }
-            const lastReview = session.runs[session.runs.length - 1];
-            return {
-              advancementSessionId: session.id,
-              status: session.status,
-              rubricTitle:
-                session.confirmedRubric?.title ??
-                session.pendingRubricDraft?.title,
-              rubricDraftId: session.pendingRubricDraft?.draftId,
-              ...(session.status === "awaiting-rubric-confirmation" &&
-              session.pendingRubricDraft
-                ? { pendingRubricDraft: session.pendingRubricDraft }
-                : {}),
-              outstandingProxyMessageId: session.outstandingProxyMessageId,
-              ...(lastReview
-                ? {
-                    lastReview: {
-                      id: lastReview.id,
-                      runIndex: lastReview.runIndex,
-                      round: session.runs.length,
-                      decision: lastReview.decision,
-                      reviewedAt: lastReview.reviewedAt,
-                    },
-                  }
-                : {}),
-            } satisfies ConversationAdvancementProjection;
-          },
+          read: async (conversationId) =>
+            (await ctx.advancementReviews.queryActiveState(conversationId)) ??
+            undefined,
         }
       : undefined,
   });
   const advancementDetailController = ctx.advancement;
   const advancementApplication = advancementDetailController
     ? new AdvancementApplicationService({
+          activeState: ctx.advancementReviews,
           detail: {
             loadLatestSession: (conversationId) =>
               advancementDetailController.loadLatestSession(conversationId),
@@ -2275,7 +2230,6 @@ async function runServerProcess(
         }
       : {}),
     conversations: ctx.conversations,
-    advancement: ctx.advancement,
     advancementRecovery,
     perspectives: perspectivesController,
     productApi,

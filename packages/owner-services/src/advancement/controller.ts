@@ -244,7 +244,12 @@ export class AdvancementController implements
     advancementSessionId: string;
     proxyMessageId: string;
   }>): Promise<AdvancementSession> {
-    return await this.settleProxyMessage(input);
+    return await this.store.settleProxyMessage(
+      input.conversationId,
+      input.advancementSessionId,
+      input.proxyMessageId,
+      this.now(),
+    );
   }
 
   /** 收场报告：LLM 合成优先，失败或缺 synthesizer 时降级结构化直出。 */
@@ -387,19 +392,6 @@ export class AdvancementController implements
         session.status === "active",
     );
     return open ?? sessions[sessions.length - 1]!;
-  }
-
-  async settleProxyMessage(input: {
-    readonly conversationId: string;
-    readonly advancementSessionId: string;
-    readonly proxyMessageId: string;
-  }): Promise<AdvancementSession> {
-    return await this.store.settleProxyMessage(
-      input.conversationId,
-      input.advancementSessionId,
-      input.proxyMessageId,
-      this.now(),
-    );
   }
 
 }

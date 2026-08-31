@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-15l 已实施，等待协调者独立复核<br>
+> 当前检查点：A5-15m 已实施，等待协调者复核 Advancement 全领域零残留闭包<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -108,7 +108,7 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
   | Workspace Administration | [x] | 本机 workspace 身份、绑定、修订、操作交付与 reset 归域；Workscene、CLI fallback 与 Executor 只消费明确端口 |
   | Workscene | [x] | 场景身份、工作区与会话关系归域；RuntimeHost 不认识场景产品规则 |
   | Schedule | [x] | 调度产品规则与耐久事实归域；执行触发只消费 Kernel/Effect 端口 |
-  | Advancement | [ ] | 执行、评价、证据与成果准入边界保持现有语义且归属唯一 |
+  | Advancement | [x] | 执行、评价、证据与成果准入边界保持现有语义且归属唯一 |
   | Delivery | [x] | “结果需要交付及其终态”归域；Channel 只实现发送效果 |
   | Trust Administration | [x] | 用户可管理的信任规则归域；Security Substrate 只负责执行决定 |
   | Skill Catalog | [x] | 技能资产与生命周期归域；Kernel 只消费不可变能力投影 |
@@ -202,13 +202,13 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `bab398e2`；A5-15j 已由协调者独立复核并提交，review attempt lineage/generation/phase、terminal winner 与 immediate-root 生命周期归入唯一 Advancement 应用状态机 |
+| 已接受基线 | `29fca498`；A5-15l 已由协调者独立复核并提交，Evidence/Reviewer 外部机制固定注入唯一 Advancement review 应用，旧 review bridge 已归零 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | A5-15l 已实施，等待协调者独立复核；Advancement 行与 A5 仍为 `[ ]` |
-| 下一责任链 | A5-15l 通过后对 Advancement 全领域做 owner/入口/桥/写权零残留收口并裁决 A5 Advancement 行；不得提前进入 Device、Backup 或 A6 |
-| 打开的单向桥 | 无；`A5-ADVANCEMENT-REVIEW-01` 的源码、导出、build entry 与生产消费已在 A5-15l 归零，proxy schedule 适配已回到既有 `proxy-scheduler` 边界 |
-| 已失效证据 | `A5-15l-advancement-review-external-mechanism-v1` 等待协调者独立复核；A5-15a～A5-15k 其他证据继续有效 |
-| 阻塞/用户决策 | 无；A5-15l 的唯一外部机制适配、生产组合与旧桥删除均已闭合，下一步只由协调者独立裁决 Advancement 全领域收口边界 |
+| 活跃工作包 | A5-15m 已实施并等待协调者复核；`A5-15m-advancement-domain-closure-v1` 已闭合 13 个 production family、全 Store 写权与旧入口/导出反查 |
+| 下一责任链 | 协调者接受 A5-15m 后进入 Device Administration；不得重复迁移 Advancement、提前进入 Backup/A6 或扩大本闭包 |
+| 打开的单向桥 | 无；A5-15m 已从 CLI/RPC、committed-turn、recovery、system maintenance 与全部持久写入口反向证明桥登记为零 |
+| 已失效证据 | 无当前未恢复证据；A5-15a～A5-15l 继续有效，A0-06a 的“旧文件 Store 无生产根”结论未变；A0-07a 的 core 宽入口符号集合随 `AdvancementStore` 正式导出退场由 fresh package-export 门恢复 |
+| 阻塞/用户决策 | 无；等待协调者独立复核本包，不存在产品语义或公开协议决策 |
 
 ### A0 基线索引
 
@@ -2338,6 +2338,38 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 旧路与机制归位：`AdvancementController.afterTurnCommitted`、逐调用 `reviewAttemptMechanism`、Controller 的 `reviewAttempts/evidence/reviewer` 字段与构造参数、`createAdvancementAcceptedTurnReviewMechanism`、`review-application-bridge` 源码/subpath/build entry 和全部生产消费归零；Controller 仅保留仍属管理面的读取与管理用例。旧桥中的 proxy schedule 效果适配原样迁至既有 `proxy-scheduler` 边界，未获得 review state、结果投影或 delivery 责任。carried target 优先、冻结 executor/owner epoch、无 Evidence/runId 跳过、collect/reviewer 输入与错误分类、accepted-run identity、invoking recovery 禁止重放、catch-up/projection/proxy schedule 顺序均保持既有合同。
 - 直接证据：Core application/review-attempt 2 文件 69/69，Server Controller/recovery 2 文件 48/48，新外部机制适配 2/2，CLI 真实 governor/store/metered reviewer 7/7，合计 6 个本包直接文件 126/126；Anchor access-surface 3/3 与 local-owner surface 5/5 进一步命中两类 Host 接线。直接反例覆盖并发 target 隔离、Evidence/reviewer 失败分类、accepted-run mismatch、invoking 不重放、固定应用调用和旧 Controller 路径归零。额外扩大执行的 local-owner lifecycle 中 16/17 通过，唯一既有用例 `fails close when settlement is unprovable...` 两次均在 artifact lifecycle maintenance 被 `backpressured:ioOperations` 拒绝，与本包 review 机制/组合输入无关；该用例不计作本包通过证据，也未据此放宽断言或修改实现。
 - 构建、门禁、失效与交接：core 与 owner-services fresh build、CLI typecheck 和 `pnpm cli:build` 通过；canonical `pnpm s7:lint` 的 coverage/mutation 33/33 与 registry golden、fresh `pnpm runtime:package-exports`、适用变更文件最窄 Biome 通过。S7 冻结固定三项 mechanism、adapter 无 state/outcome 写权、两个生产组合共享一个 review 应用、accepted-turn/recovery 直调、Controller 旧入口归零，以及旧桥 source/export/build 归零，并以反向 mutation 拒绝调用期 mechanism、第二 Host application、Controller fallback、桥复活和 adapter 状态写入。以后若三项 mechanism/adapter、review 应用构造、两类 Host 组合、accepted-turn/recovery/cancellation 消费、Controller review surface、proxy schedule 归属、owner-services export/build、S7/package export 或上述直接测试任一变化，只恢复 `A5-15l-advancement-review-external-mechanism-v1` 并重验本闭包；A5-15a～A5-15k 不随之失效。A5-15l 当前完成并等待协调者独立复核，Advancement 行与 A5 继续为 `[ ]`，未进入 A6，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+- 协调者独立验收：重新追踪 review 应用唯一构造、三项外部机制、两类 Host、accepted-turn、recovery、取消链、proxy schedule 适配和 owner-services 出口，确认 `A5-ADVANCEMENT-REVIEW-01` 的源码、子路径、build entry、Controller after-turn 与生产消费全部归零；应用在构造期固定 mechanism，Anchor/local 各自只有一个实例并在入口开放前交给全部消费者，无 getter、late bind、fallback 或第二实例。独立重跑 core application/review-attempt 69/69、Server Controller/recovery/external-mechanism 50/50、CLI 真实 governor/store/reviewer 7/7，合计 126/126；`git diff --check` 通过，并核验既有 S7 33/33、registry golden、fresh package-export 与本轮输入一致。接受 `A5-15l-advancement-review-external-mechanism-v1`，提交为 `29fca498`。
+
+### A5-15m：Advancement 全领域 owner、入口、桥与写权零残留收口
+
+- 派发基线与唯一架构结果：以 `HEAD 29fca498` 加本节调度记录为基线。复用 A5-15a～A5-15l 已接受证据，从当前生产入口重新枚举 Advancement 的 detail/query、Rubric revise/cancel/confirm/publication、原任务准入、active user turn、conversation retirement、accepted-turn review、attempt/evidence/reviewer/outcome、recovery、result projection、proxy scheduling 与持久 Store，证明每项产品决定只有一个 core Advancement 应用 owner，Controller/Correctness/外部 adapter 只保留有限机制，全部旧桥、第二入口和第二写权为零；成立后勾选 A5 登记表的 Advancement 行。
+- 核查方法与修复边界：从 CLI/RPC/Conversation committed-turn/recovery/system maintenance 四类生产入口正向追踪到应用，再从 `AdvancementSessionStore` 全部写方法、持久 event、公开导出、Host 构造和 package build 反向追踪消费者。逐个核对 A5-15a～A5-15l 的应用 owner、机制 port、Product API/accepted-turn 入口与退场点，确认没有 Surface/Server/CLI/Controller 直接复刻规则、绕 dispatcher 写入、旧文件/导出/build entry、兼容别名、fallback、双状态机或未登记桥。若发现真实残余，只修复所属同一责任链并精确恢复相应证据；影响超过一个独立子领域或不能在四小时内安全闭合时停止反馈，不得无界扩面。
+- 必须保护：所有现有 Advancement RPC/Event、用户文案、Rubric、原任务与 active turn 流程、accepted review、Evidence、资源计量、proxy identity/delivery、closure、conversation deletion、恢复/重放、持久 schema、错误和终态保持不变。不得因收口把 Controller 机械清空；仍作为有限 persistence/provider/adapter 机制的成员必须有真实应用消费者和唯一职责，不能为追求目录纯度误删。
+- 明确不做：不重新设计或重跑任何已接受 A5 子迁移，不进入 Device、Backup、A6，不改 Evidence/Reviewer/Proxy/Store 算法，不新增包、通用框架、能力或协议；不运行根级回归、制品、全量 S7 重复取证或全部 A5 历史测试。只有代码/门禁实际变化才运行对应最窄失效闭包；纯裁决使用生产调用图、现有直接证据索引、最窄静态门禁和 `git diff --check`。
+- 完成条件：形成紧凑的“产品入口 → 唯一应用 owner → 有限机制/写入 → 直接证据”exact-set，并由可执行结构门禁冻结；Advancement 所有生产写入口都有且只有一个应用决定者，A5-15a～A5-15l 无未处置反证，桥登记为零，Controller 与 adapter 不拥有产品状态机，公开/持久行为无变化。满足后把 A5 登记表 Advancement 行更新为 `[x]`，登记失效规则与下一检查点 Device Administration，停在干净、可构建、可运行的安全交接点；执行者不得执行 Git 操作。
+
+- 实施基线与反证修复：以 `HEAD 29fca498` 加协调者调度记录为基线，形成稳定证据 `A5-15m-advancement-domain-closure-v1`。正向复核四类正式入口、反向扫描 `AdvancementSessionStore` 全部读写方法、event、Host 构造、ServerContext、公开导出与 build 输入后发现两项真实残余：Server/CLI 对 active Advancement 状态仍各自读取 Controller 并复刻投影；Conversation run-control 与 recovery 在 proxy 已被 durable claim 关闭时仍直接经 Controller/Store 结算。现以 `AdvancementReviewAttemptApplicationService.queryActiveState / settleProxyRun` 成为唯一 projection/settlement 决定，`AdvancementApplicationService` 只把同一 active-state Query 纳入既有 sealed Product API；Server `session.list/resume/send` 和 Conversation 目录只消费有限投影，recovery/run-control 只调用同一个 review 应用。`ServerContext.advancement`、Controller 公共 `settleProxyMessage` 与两处旧编排归零，Controller 内只保留 active-user-turn interruption 所需的有限 persistence mechanism。
+
+  | production family / 入口 | 唯一应用 owner | 有限机制或唯一写入 | 直接证据 |
+  |---|---|---|---|
+  | active-state | `AdvancementReviewAttemptApplicationService`；Product API 仅转发同一 Query | `AdvancementReviewAttemptStatePort.loadActiveSession` | review application + session RPC |
+  | detail | `AdvancementApplicationService` | `AdvancementDetailReadPort.loadLatestSession` | application + session RPC |
+  | Rubric lifecycle / publication | `AdvancementApplicationService` | Controller rubric read/build/persist mechanism + Fact publisher | application + session RPC |
+  | original-task admission | `AdvancementApplicationService` | original-task execution/confirmed-admission ports | application + session RPC |
+  | active user turn | `AdvancementApplicationService` | Controller transition mechanism + Conversation runtime effect | application + session RPC |
+  | conversation retirement | `AdvancementConversationLifecycleApplicationService` | Controller data mechanism + Conversation lifecycle projector | application + Conversation delete/system maintenance |
+  | accepted committed turn | `AdvancementAcceptedTurnApplicationService` | catch-up + review + result projection ports | application + Anchor/local-owner binding |
+  | review attempt / outcome / proxy settlement | `AdvancementReviewAttemptApplicationService` | review Correctness state/root ports；三项 Evidence/Reviewer mechanism | review application + real review recovery |
+  | result projection | `AdvancementReviewResultProjectionApplicationService` | observer/proxy scheduling effects | application + recovery |
+  | recovery | `AdvancementRecoveryMaintenance` | 上述 lifecycle/review/result 三个应用；不直接决定 Store transition | recovery maintenance |
+  | proxy scheduling | `AdvancementProxyScheduler` | Conversation proxy-turn effect port | accepted-turn/recovery 既有证据 |
+  | evidence | `AdvancementEvidenceCoordinator` | 签名请求/验签与 `AdvancementSessionStore` evidence primitives | A5-15a/A5-15l 既有 Evidence 证据 |
+  | persistence correctness | `SessionAdvancementStore` | 唯一生产 `SessionStatePort`/Authority event commit 与折叠读取 | session-store/A0 P06 既有证据 |
+
+- 写权、导出与行为裁决：生产 Store 写调用只剩三个有限机制 owner：Controller 提供 Rubric/active/lifecycle persistence primitives，`AdvancementEvidenceCoordinator` 提交 evidence primitive，`review-attempt-correctness` 提交 attempt/outcome/proxy primitive；领域状态分支、顺序与终态均在上表应用中，CLI/Server/recovery/system maintenance 没有 Store 写入。无生产构造的旧文件 `AdvancementStore` 不属于 production exact-set，其正式 `@zhixing/core` 根/`./advancement` 转导已删除，fresh 声明与运行时导出均不再包含该类；源码内仅作为内部测试夹具，S7 明确拒绝任一 production import/new/export 或 build/public 入口回流。A0-06a 的“无第二持久根”结论因此不变。全部现有 Advancement RPC/Event、中文文案、Rubric、原任务/active turn、accepted review、Evidence、资源计量、proxy identity/delivery、closure、conversation deletion、恢复/replay、错误、终态与 Authority schema 均未改变。
+
+- 验证、失效与交接：Core application/review 2 文件 71/71；Server recovery/session/workscene 3 文件 131/131 与 Controller 21/21；CLI 真实 review recovery 7/7，合计 7 个直接文件 230/230。core、owner-services、server fresh build、CLI typecheck 与 `pnpm cli:build` 通过；canonical S7 coverage/mutation 33/33 + registry golden、fresh `pnpm runtime:package-exports`、changed-source Biome 与 `git diff --check` 通过。S7 冻结上述 13-family exact-set、active Query/settlement、两个生产消费面、recovery、ServerContext、Store write allowlist 和旧 Store 正式入口归零，并以反向 mutation 拒绝任一回流。以后若任一应用/机制 owner、Product API exact-set、Controller/Correctness/外部 adapter、Host 构造、Store primitive/event/schema、active projection、proxy settlement/recovery、公开 export/build 或上述 S7/direct evidence变化，只恢复本证据及实际受影响的 A5-15 子证据；无关 Device/Backup/A6 变化不误伤本闭包。Advancement 行已据当前实施结果更新为 `[x]`，A5 继续 `[ ]`，下一检查点为 Device Administration；本包未进入后续领域，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 

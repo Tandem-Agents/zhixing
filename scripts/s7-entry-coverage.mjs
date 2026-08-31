@@ -3370,7 +3370,23 @@ export function inspectTrustAdministrationOwnership(records) {
   return failures;
 }
 
-/** A5 Advancement detail and Rubric lifecycle have one domain application owner. */
+export const ADVANCEMENT_APPLICATION_OWNER_EXACT_SET = Object.freeze([
+  Object.freeze({ family: "active-state", owner: "AdvancementReviewAttemptApplicationService" }),
+  Object.freeze({ family: "detail", owner: "AdvancementApplicationService" }),
+  Object.freeze({ family: "rubric-lifecycle/publication", owner: "AdvancementApplicationService" }),
+  Object.freeze({ family: "original-task-admission", owner: "AdvancementApplicationService" }),
+  Object.freeze({ family: "active-user-turn", owner: "AdvancementApplicationService" }),
+  Object.freeze({ family: "conversation-retirement", owner: "AdvancementConversationLifecycleApplicationService" }),
+  Object.freeze({ family: "accepted-turn", owner: "AdvancementAcceptedTurnApplicationService" }),
+  Object.freeze({ family: "review-attempt/outcome", owner: "AdvancementReviewAttemptApplicationService" }),
+  Object.freeze({ family: "review-result-projection", owner: "AdvancementReviewResultProjectionApplicationService" }),
+  Object.freeze({ family: "recovery", owner: "AdvancementRecoveryMaintenance" }),
+  Object.freeze({ family: "proxy-scheduling", owner: "AdvancementProxyScheduler" }),
+  Object.freeze({ family: "evidence", owner: "AdvancementEvidenceCoordinator" }),
+  Object.freeze({ family: "persistence-correctness", owner: "AdvancementSessionStore" }),
+]);
+
+/** A5 Advancement has one finite set of domain application and mechanism owners. */
 export function inspectAdvancementDetailApplicationOwnership(records) {
   const failures = [];
   const byPath = new Map(records.map((record) => [record.relative, record.text]));
@@ -3390,7 +3406,6 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   const controller = required(
     "packages/owner-services/src/advancement/controller.ts",
   );
-  const lifecycleStore = required("packages/core/src/advancement/store.ts");
   const sessionStore = required(
     "packages/owner-services/src/advancement/session-store.ts",
   );
@@ -3398,6 +3413,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     "packages/core/src/conversation/application.ts",
   );
   const handler = required("packages/server/src/rpc/methods/session.ts");
+  const serverContext = required("packages/server/src/context.ts");
   const systemHandlers = required("packages/server/src/system-handlers.ts");
   const composition = required("packages/cli/src/serve/command.ts");
   const accessSurfaces = required(
@@ -3917,7 +3933,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes("ADVANCEMENT_PRODUCT_API_EXACT_SET") ||
     !application.includes("createAdvancementProductApiContribution") ||
     !application.includes("buildClosureFacts(session)") ||
-    application.split("defineProductApiQuery<").length - 1 !== 1 ||
+    application.split("defineProductApiQuery<").length - 1 !== 2 ||
     application.split("defineProductApiCommand<").length - 1 !== 6 ||
     application.split("defineProductApiFactEvent<").length - 1 !== 5 ||
     /@zhixing\/(?:server|rpc|owner-services)|\.\.\/\.\.\/server|\.\.\/\.\.\/owner-services/u.test(
@@ -3980,7 +3996,8 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !send.includes("newTaskNotApplicable") ||
     !send.includes("const dispatchActiveAdvancementUserTurn = async () =>") ||
     !send.includes("ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND") ||
-    send.split("ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND").length - 1 !== 2 ||
+    send.split("ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND").length - 1 !== 3 ||
+    !send.includes("productApi?.supports(\n        ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,") ||
     send.split("dispatchActiveAdvancementUserTurn()").length - 1 !== 2 ||
     send.split("projectActiveAdvancementPreparation(").length - 1 !== 2 ||
     !send.includes(
@@ -4047,9 +4064,6 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !controller.includes("removeConversationLifecycleData(") ||
     !controller.includes("listConversationLifecycleDataCandidates(") ||
     !controller.includes("removeConversationLifecycleDataCandidate(") ||
-    lifecycleStore.includes("sweepOrphanDirs(") ||
-    !lifecycleStore.includes("listConversationDataCandidates()") ||
-    !lifecycleStore.includes("removeConversationDataCandidate(") ||
     sessionStore.includes("sweepOrphanDirs(") ||
     !sessionStore.includes("listConversationDataCandidates()") ||
     !sessionStore.includes("removeConversationDataCandidate(") ||
@@ -4128,6 +4142,87 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   ) {
     failures.push(
       "Advancement detail/rubric lacks one Product API application or conversation lifecycle lacks one independent application owner",
+    );
+  }
+
+  const allowedStoreWriteOwners = new Set([
+    "packages/owner-services/src/advancement/controller.ts",
+    "packages/owner-services/src/advancement/evidence.ts",
+    "packages/owner-services/src/advancement/review-attempt-correctness.ts",
+  ]);
+  const storeWriteMethods = [
+    "createSession",
+    "confirmRubric",
+    "settleOriginalTaskAdmission",
+    "reviseRubricDraft",
+    "appendEvidenceRequest",
+    "appendEvidenceResult",
+    "settleEvidence",
+    "transitionReviewAttempt",
+    "appendRunReview",
+    "appendTerminalRunReview",
+    "appendRunReviewWithProxyMessage",
+    "enqueueProxyMessage",
+    "settleProxyMessage",
+    "completeSession",
+    "exitSession",
+    "cancelSession",
+    "removeConversation",
+    "removeConversationDataCandidate",
+  ];
+  const storeWritePattern = new RegExp(
+    String.raw`(?:this\.|options\.|#options\.)?(?:#?store)\.(?:${storeWriteMethods.join("|")})\(`,
+    "u",
+  );
+  const foreignStoreWrite = records.find((record) =>
+    record.relative.startsWith("packages/") &&
+    !record.relative.includes("/dist/") &&
+    !record.relative.includes(".test.") &&
+    !record.relative.endsWith("/advancement/session-store.ts") &&
+    !record.relative.endsWith("/advancement/store.ts") &&
+    storeWritePattern.test(record.text) &&
+    !allowedStoreWriteOwners.has(record.relative),
+  );
+  const legacyStoreProductionReachability = records.find((record) =>
+    record.relative.startsWith("packages/") &&
+    !record.relative.includes("/dist/") &&
+    !record.relative.includes(".test.") &&
+    !record.relative.endsWith("/advancement/store.ts") &&
+    /(?:new\s+AdvancementStore\b|(?:import|export)\s*\{[^}]*\bAdvancementStore\b[^}]*\}\s*from)/u.test(
+      record.text,
+    ),
+  );
+  if (
+    ADVANCEMENT_APPLICATION_OWNER_EXACT_SET.length !== 13 ||
+    !application.includes('"advancement.query.active-state"') ||
+    !application.includes("async queryActiveState(") ||
+    !application.includes("function projectAdvancementActiveState(") ||
+    !application.includes("return await this.#activeState.queryActiveState(query.conversationId)") ||
+    !application.includes("async settleProxyRun(") ||
+    !application.includes("bindProductApiOperation(ADVANCEMENT_ACTIVE_STATE_QUERY") ||
+    !composition.includes("activeState: ctx.advancementReviews") ||
+    !composition.includes("ctx.advancementReviews.queryActiveState(conversationId)") ||
+    !composition.includes("ctx.advancementReviews\n                  .settleProxyRun(") ||
+    !recovery.includes("this.options.reviews.settleProxyRun({") ||
+    recovery.includes("this.options.advancement.settleProxyMessage(") ||
+    controller.includes("async settleProxyMessage(") ||
+    controller.split("this.store.settleProxyMessage(").length - 1 !== 1 ||
+    !handler.includes("productApi?.supports(ADVANCEMENT_ACTIVE_STATE_QUERY)") ||
+    !handler.includes("productApi.query(ADVANCEMENT_ACTIVE_STATE_QUERY") ||
+    /server\.advancement|loadActiveSession\(/u.test(
+      handler.slice(
+        handler.indexOf("export async function loadAdvancementState("),
+        handler.indexOf("function requireUserFeedback(", handler.indexOf("export async function loadAdvancementState(")),
+      ),
+    ) ||
+    /AdvancementController|readonly advancement\??:/u.test(serverContext) ||
+    advancementIndex.includes("AdvancementStore") ||
+    advancementIndex.includes('"./store.js"') ||
+    legacyStoreProductionReachability ||
+    foreignStoreWrite
+  ) {
+    failures.push(
+      "Advancement whole-domain exact-set has a second active-state, proxy-settlement, ServerContext, legacy Store export, or Store-write owner",
     );
   }
 

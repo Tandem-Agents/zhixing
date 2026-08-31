@@ -1,6 +1,5 @@
 import path from "node:path";
 import {
-  AdvancementStore,
   MockLLMProvider,
   advancementReviewAttemptId,
   advancementReviewLineageId,
@@ -9,6 +8,7 @@ import {
   type ConfirmedRubricSnapshot,
   type RunRecordInput,
 } from "@zhixing/core";
+import { AdvancementStore } from "../../../../core/src/advancement/store.js";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,

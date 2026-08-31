@@ -7,13 +7,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import WebSocket from "ws";
 import {
-  AdvancementStore,
   AgentError,
   assistantMessage,
   RubricContractBuilder,
   RubricStore,
   userMessage,
 } from "@zhixing/core";
+import { AdvancementStore } from "../../../core/src/advancement/store.js";
 import type {
   AgentEventMap,
   AgentResult,
@@ -55,9 +55,12 @@ import {
   isErrorResponse,
 } from "../rpc/protocol.js";
 import {
-  AdvancementController,
+  AdvancementController as OwnerAdvancementController,
   createAdvancementRecoveryMaintenance,
+  type AdvancementControllerOptions,
 } from "@zhixing/owner-services";
+import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
+import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
 import {
   createAdvancementEventSink,
   createAdvancementProxyTurnPort,
@@ -71,7 +74,10 @@ import {
 } from "../perspectives/index.js";
 import { createTempDir } from "@zhixing/test-utils";
 import { protocolDigest } from "@zhixing/core/protocol";
-import { AdvancementReviewResultProjectionApplicationService } from "@zhixing/core/advancement/application";
+import {
+  AdvancementReviewResultProjectionApplicationService,
+  type AdvancementReviewAttemptApplication,
+} from "@zhixing/core/advancement/application";
 import {
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
   ConversationApplicationError,
@@ -100,11 +106,32 @@ import {
   defineProductApiExactSet,
   ProductApiDispatcher,
 } from "@zhixing/core/product-api";
-import { loadAdvancementState } from "../rpc/methods/session.js";
 
 const TEST_VERSION = "0.1.0-test";
 const TEST_TOKEN = "test-token-session";
 let nextTestClientInstance = 0;
+
+class AdvancementController extends OwnerAdvancementController {
+  readonly reviews: AdvancementReviewAttemptApplication;
+
+  constructor(options: AdvancementControllerOptions) {
+    super(options);
+    this.reviews = createAdvancementReviewAttemptApplication({
+      store: options.store,
+      resources: {
+        inspectImmediateRoot: async () => ({ kind: "absent" }),
+        acquireRoot: async () => {
+          throw new Error("unexpected review-root acquisition");
+        },
+        settle: async () => {},
+        release: async () => {},
+      } as never,
+      mechanism: createAdvancementReviewExternalMechanism({}),
+      reviewerAvailable: false,
+      ...(options.now ? { now: options.now } : {}),
+    });
+  }
+}
 
 // ─── Mock runtime ───
 
@@ -538,6 +565,8 @@ function createConversationProductApi(input: {
   readonly publishCleared?: (conversationId: string) => void;
   readonly publishDeleted?: (conversationId: string) => void;
 }): ProductApiDispatcher {
+  const advancement = input.advancement;
+  const advancementActiveState = advancement?.reviews;
   const advancementConversationLifecycle = input.advancement
     ? new AdvancementConversationLifecycleApplicationService({
         mechanism: {
@@ -546,7 +575,7 @@ function createConversationProductApi(input: {
               conversationId,
             ),
           persistConversationLifecycleCancellation: (request) =>
-            input.advancement!.persistConversationLifecycleCancellation(request),
+            input.advancement!.reviews.cancelSession(request),
           removeConversationData: (conversationId) =>
             input.advancement!.removeConversationLifecycleData(conversationId),
           listConversationDataCandidates: () =>
@@ -837,7 +866,7 @@ function createConversationProductApi(input: {
             : {}),
         };
       },
-      ...(input.advancement
+      ...(advancementActiveState
         ? {
             settleDependentCancellation: async ({
               conversationId,
@@ -846,19 +875,10 @@ function createConversationProductApi(input: {
               conversationId: string;
               ingressId: string;
             }) => {
-              const active = await input.advancement!.loadActiveSession(
+              await advancementActiveState.settleProxyRun({
                 conversationId,
-              );
-              if (
-                active?.status === "active" &&
-                active.outstandingProxyMessageId === ingressId
-              ) {
-                await input.advancement!.settleProxyMessage({
-                  conversationId,
-                  advancementSessionId: active.id,
-                  proxyMessageId: ingressId,
-                });
-              }
+                proxyMessageId: ingressId,
+              });
             },
             recoverDependentCancellation: async (conversationId: string) => {
               await input.advancementRecovery?.recoverConversation(conversationId);
@@ -899,23 +919,21 @@ function createConversationProductApi(input: {
         };
       },
     },
-    advancement: input.advancement
+    advancement: advancementActiveState
       ? {
-          read: (conversationId) =>
-            loadAdvancementState(
-              { advancement: input.advancement } as never,
-              conversationId,
-            ),
+          read: async (conversationId) =>
+            (await advancementActiveState.queryActiveState(conversationId)) ??
+            undefined,
         }
       : undefined,
   });
-  const advancement = input.advancement;
   const advancementApplication = advancement
     ? new AdvancementApplicationService({
           detail: {
             loadLatestSession: (conversationId) =>
               advancement.loadLatestSession(conversationId),
           },
+          activeState: advancement.reviews,
           maintenance: {
             runNew: (conversationId, operation) =>
               input.conversations.runMaintenance(conversationId, operation),
@@ -967,7 +985,15 @@ function createConversationProductApi(input: {
             },
           },
           rubricRevision: advancement,
-          rubricCancellation: advancement,
+          rubricCancellation: {
+            loadRubricCancellationSession: (conversationId, sessionId) =>
+              advancement.loadRubricCancellationSession(
+                conversationId,
+                sessionId,
+              ),
+            persistRubricCancellation: (request) =>
+              advancement.reviews.cancelSession(request),
+          },
           awaitingRubricAdmission: advancement,
           rubricConfirmation: advancement,
           rubricPublication: {
@@ -1572,6 +1598,7 @@ describe("session.* RPC (S2.D)", () => {
       opts.advancement && opts.withAdvancementRecovery
       ? createAdvancementRecoveryMaintenance({
           advancement: opts.advancement,
+          reviews: opts.advancement.reviews,
           directory: {
             list: async () =>
               (await conversationDirectory.list()).map((record) => ({
@@ -1623,7 +1650,6 @@ describe("session.* RPC (S2.D)", () => {
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
-      advancement: opts.advancement,
       advancementRecovery,
       perspectives: opts.perspectives,
       productApi,
@@ -2848,7 +2874,7 @@ describe("session.* RPC (S2.D)", () => {
   it("session.delete legacy 在主删除后 best-effort 处理推进取消失败并继续移除数据", async () => {
     const advancement = await createTestAdvancementHarness();
     const cleanupSpy = vi
-      .spyOn(advancement.controller, "persistConversationLifecycleCancellation")
+      .spyOn(advancement.controller.reviews, "cancelSession")
       .mockRejectedValueOnce(new Error("advancement cleanup failed"));
     await startWithFactory(createMockFactory({ deltaCount: 0 }), {
       advancement: advancement.controller,

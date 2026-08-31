@@ -8,7 +8,8 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { readFile } from "node:fs/promises";
-import { AdvancementStore, type WorkScene } from "@zhixing/core";
+import type { WorkScene } from "@zhixing/core";
+import { AdvancementStore } from "../../../../core/src/advancement/store.js";
 import { createTempDir } from "@zhixing/test-utils";
 import { AdvancementController } from "@zhixing/owner-services";
 import {
@@ -22,6 +23,15 @@ import {
 } from "../methods/workscene.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 import { WorksceneBusyError } from "@zhixing/owner-kernel";
+import {
+  ADVANCEMENT_ACTIVE_STATE_QUERY,
+  AdvancementReviewAttemptApplicationService,
+} from "@zhixing/core/advancement/application";
+import {
+  bindProductApiOperation,
+  defineProductApiContribution,
+  defineProductApiExactSet,
+} from "@zhixing/core/product-api";
 import {
   createWorksceneProductApiContribution,
   WORKSCENE_PRODUCT_API_EXACT_SET,
@@ -154,59 +164,95 @@ function makeCtx(opts: {
   advancement?: AdvancementController;
   advancementRecovery?: ServerContext["advancementRecovery"];
 }) {
-  const productApi = opts.workscenes
-    ? new ProductApiDispatcher(
-        WORKSCENE_PRODUCT_API_EXACT_SET,
-        [
-          createWorksceneProductApiContribution(
-            new WorksceneApplicationService(
-              {
-                list: () => opts.workscenes!.list(),
-                create: (input) => opts.workscenes!.create(input),
-                rename: (input) =>
-                  opts.workscenes!.rename(
-                    input.sceneId,
-                    input.name,
-                    input.requestId,
-                  ),
-                setWorkspace: (input) =>
-                  opts.workscenes!.setWorkdir(
-                    input.sceneId,
-                    input.workspace,
-                    input.requestId,
-                  ),
-                delete: (input) =>
-                  opts.workscenes!.remove(input.sceneId, input.requestId),
-              },
-              {
-                list: () => opts.workscenes!.workspaceCatalog(),
-              },
-              {
-                enter: (input) =>
-                  opts.workscenes!.enterScene(
-                    input.sceneId,
-                    input.observerId,
-                    { requestId: input.requestId },
-                  ),
-                exit: (input) =>
-                  opts.workscenes!.exitScene(
-                    input.sceneId,
-                    input.conversationId,
-                    input.observerId,
-                    input.requestId,
-                  ),
-              },
-              {
-                get: (sceneId) => opts.workscenes!.get(sceneId),
-              },
-            ),
+  const advancementActiveState = opts.advancement
+    ? new AdvancementReviewAttemptApplicationService({
+        state: {
+          loadActiveSession: (conversationId: string) =>
+            opts.advancement!.loadActiveSession(conversationId),
+        } as never,
+        roots: {} as never,
+        mechanism: {} as never,
+        reviewerAvailable: false,
+      })
+    : undefined;
+  const advancementContribution = opts.advancement
+    ? defineProductApiContribution({
+        operations: [
+          bindProductApiOperation(
+            ADVANCEMENT_ACTIVE_STATE_QUERY,
+            async (query) => ({
+              result: await advancementActiveState!.queryActiveState(
+                query.conversationId,
+              ),
+              facts: [],
+            }),
           ),
+        ],
+        factEvents: [],
+      })
+    : undefined;
+  const worksceneContribution = opts.workscenes
+    ? createWorksceneProductApiContribution(
+        new WorksceneApplicationService(
+          {
+            list: () => opts.workscenes!.list(),
+            create: (input) => opts.workscenes!.create(input),
+            rename: (input) =>
+              opts.workscenes!.rename(
+                input.sceneId,
+                input.name,
+                input.requestId,
+              ),
+            setWorkspace: (input) =>
+              opts.workscenes!.setWorkdir(
+                input.sceneId,
+                input.workspace,
+                input.requestId,
+              ),
+            delete: (input) =>
+              opts.workscenes!.remove(input.sceneId, input.requestId),
+          },
+          {
+            list: () => opts.workscenes!.workspaceCatalog(),
+          },
+          {
+            enter: (input) =>
+              opts.workscenes!.enterScene(
+                input.sceneId,
+                input.observerId,
+                { requestId: input.requestId },
+              ),
+            exit: (input) =>
+              opts.workscenes!.exitScene(
+                input.sceneId,
+                input.conversationId,
+                input.observerId,
+                input.requestId,
+              ),
+          },
+          {
+            get: (sceneId) => opts.workscenes!.get(sceneId),
+          },
+        ),
+      )
+    : undefined;
+  const productApi = worksceneContribution
+    ? new ProductApiDispatcher(
+        defineProductApiExactSet({
+          operations: [
+            ...WORKSCENE_PRODUCT_API_EXACT_SET.operations,
+            ...(advancementContribution ? [ADVANCEMENT_ACTIVE_STATE_QUERY] : []),
+          ],
+          factEvents: [...WORKSCENE_PRODUCT_API_EXACT_SET.factEvents],
+        }),
+        [
+          worksceneContribution,
+          ...(advancementContribution ? [advancementContribution] : []),
         ],
       )
     : undefined;
   const server = {
     productApi,
-    advancement: opts.advancement,
     advancementRecovery: opts.advancementRecovery,
     conversations: {
       list: () =>
