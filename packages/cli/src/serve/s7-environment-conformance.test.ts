@@ -62,7 +62,7 @@ import {
 import type { LocalWorkspaceOwnerLease } from "../runtime/local-workspace-owner.js";
 import { setupAuthorityRuntime } from "../setup-delivery.js";
 import { createConversationDirectory } from "./conversation-directory.js";
-import { createConversationWorksceneDeleteProjectionBridge } from "./conversation-delete-binding.js";
+import { createAnchorWorksceneConversationStorageProjectionCleanup } from "./workscene-application-adapter.js";
 import {
   ConversationProtocolRuntime,
   DurableConversationInteractionObserver,
@@ -375,8 +375,8 @@ async function runChain(topology: "in-process" | "mesh") {
       authority: () => anchor,
       conversations: () => conversationManager,
       conversationAuthority: () => conversationProtocol,
-      conversationDeleteProjectionBridge:
-        createConversationWorksceneDeleteProjectionBridge(
+      conversationStorageProjectionCleanup:
+        createAnchorWorksceneConversationStorageProjectionCleanup(
           conversationDirectory,
         ),
       worksceneStorageCleanup,

@@ -19,7 +19,7 @@ import type { ConversationManager } from "@zhixing/owner-kernel";
 import { createTempDir } from "@zhixing/test-utils";
 import type { AuthorityRuntimeStack } from "../../setup-delivery.js";
 import { createConversationDirectory } from "../conversation-directory.js";
-import { createConversationWorksceneDeleteProjectionBridge } from "../conversation-delete-binding.js";
+import { createAnchorWorksceneConversationStorageProjectionCleanup } from "../workscene-application-adapter.js";
 import { createWorksceneDirectory } from "../workscene-directory.js";
 import { createWorksceneStorageCleanup } from "../workscene-storage-cleanup.js";
 
@@ -374,8 +374,8 @@ async function createFixture(
           return { revision: 1, at: input.at };
         },
       }),
-      conversationDeleteProjectionBridge:
-        createConversationWorksceneDeleteProjectionBridge(
+      conversationStorageProjectionCleanup:
+        createAnchorWorksceneConversationStorageProjectionCleanup(
           conversationDirectory,
         ),
       worksceneStorageCleanup,

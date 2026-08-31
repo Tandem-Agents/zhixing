@@ -1,10 +1,38 @@
 import type {
+  WorksceneConversationStorageProjectionCleanupPort,
   WorksceneEntryPort,
   WorksceneManagementPort,
   WorksceneRuntimeProjectionReadPort,
   WorksceneWorkspaceAdministrationReadPort,
 } from "@zhixing/core/workscene/application";
+import { parseConversationId } from "@zhixing/core/conversation";
 import type { AnchorWorksceneDirectory } from "./workscene-directory.js";
+
+interface AnchorConversationStorageProjection {
+  deleteStoredConversation(conversationId: string): Promise<boolean>;
+}
+
+/** Anchor mechanism adapter for the single Workscene-owned cleanup demand. */
+export function createAnchorWorksceneConversationStorageProjectionCleanup(
+  storage: AnchorConversationStorageProjection,
+): WorksceneConversationStorageProjectionCleanupPort {
+  const cleanup: WorksceneConversationStorageProjectionCleanupPort = {
+    async removeCommittedProjection({ sceneId, conversationId }) {
+      const parsed = parseConversationId(conversationId);
+      if (
+        parsed.scope.kind !== "workscene" ||
+        parsed.scope.sceneId !== sceneId
+      ) {
+        throw Object.assign(
+          new TypeError("Conversation does not belong to the workscene"),
+          { code: "WORKSCENE_INPUT" },
+        );
+      }
+      await storage.deleteStoredConversation(conversationId);
+    },
+  };
+  return Object.freeze(cleanup);
+}
 
 type ApplicationDirectory = Pick<
   AnchorWorksceneDirectory,

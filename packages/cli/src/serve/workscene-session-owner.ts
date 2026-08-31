@@ -3,13 +3,13 @@ import {
   WORKSCENE_CONVERSATION_PREFIX,
   worksceneConversationId,
 } from "@zhixing/core";
+import type { WorksceneConversationStorageProjectionCleanupPort } from "@zhixing/core/workscene/application";
 import type { ConversationManager } from "@zhixing/owner-kernel";
-import type { ConversationWorksceneDeleteProjectionBridge } from "./conversation-delete-binding.js";
 import type { WorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 
 export interface WorksceneSessionOwnerOptions {
   readonly conversations: () => ConversationManager | null;
-  readonly conversationDeleteProjectionBridge: ConversationWorksceneDeleteProjectionBridge;
+  readonly conversationStorageProjectionCleanup: WorksceneConversationStorageProjectionCleanupPort;
   readonly authority: () =>
     | {
         touchWorksceneSession(input: {
@@ -40,14 +40,14 @@ export interface WorksceneSessionOwnerOptions {
  */
 export class WorksceneSessionOwner {
   readonly #conversations: () => ConversationManager | null;
-  readonly #conversationDeleteProjectionBridge: ConversationWorksceneDeleteProjectionBridge;
+  readonly #conversationStorageProjectionCleanup: WorksceneConversationStorageProjectionCleanupPort;
   readonly #authority: WorksceneSessionOwnerOptions["authority"];
   readonly #storageCleanup: WorksceneStorageCleanup;
 
   constructor(options: WorksceneSessionOwnerOptions) {
     this.#conversations = options.conversations;
-    this.#conversationDeleteProjectionBridge =
-      options.conversationDeleteProjectionBridge;
+    this.#conversationStorageProjectionCleanup =
+      options.conversationStorageProjectionCleanup;
     this.#authority = options.authority;
     this.#storageCleanup = options.storageCleanup;
   }
@@ -148,8 +148,10 @@ export class WorksceneSessionOwner {
         requestId: `workscene-delete:${sceneId}:${conversationId}`,
         at,
       });
-      await this.#conversationDeleteProjectionBridge
-        .deleteConversationStorageProjection(conversationId);
+      await this.#conversationStorageProjectionCleanup.removeCommittedProjection({
+        sceneId,
+        conversationId,
+      });
     }
     await this.#storageCleanup.removeScene(sceneId);
   }

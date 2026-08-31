@@ -168,10 +168,12 @@ import { createAnchorConversationUsageProjectionPort } from "./conversation-usag
 import { createAnchorConversationSecurityProjectionPort } from "./conversation-security-application.js";
 import {
   createAnchorConversationDeleteCommitPort,
-  createConversationWorksceneDeleteProjectionBridge,
 } from "./conversation-delete-binding.js";
 import { createWorksceneDirectory } from "./workscene-directory.js";
-import { createAnchorWorksceneApplicationPorts } from "./workscene-application-adapter.js";
+import {
+  createAnchorWorksceneApplicationPorts,
+  createAnchorWorksceneConversationStorageProjectionCleanup,
+} from "./workscene-application-adapter.js";
 import { createWorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 import { createTrustAdministrationApplication } from "./trust-administration-adapter.js";
 import { PostAdoptionReviewCoordinator } from "./post-adoption-review.js";
@@ -385,14 +387,16 @@ async function runServerProcess(
     current: import("./conversation-protocol-runtime.js").ConversationProtocolRuntime | undefined;
   } = { current: undefined };
   // 工作场景域——注册表单例(管理面 + factory 的场景装配路由共用)与场景对话取建。
-  const worksceneConversationDeleteProjectionBridge =
-    createConversationWorksceneDeleteProjectionBridge(conversationDirectory);
+  const worksceneConversationStorageProjectionCleanup =
+    createAnchorWorksceneConversationStorageProjectionCleanup(
+      conversationDirectory,
+    );
   const worksceneDirectory = createWorksceneDirectory({
     authority: () => authorityRuntimeRef.current,
     conversations: () => conversationsRef.current,
     conversationAuthority: () => conversationAuthorityRef.current,
-    conversationDeleteProjectionBridge:
-      worksceneConversationDeleteProjectionBridge,
+    conversationStorageProjectionCleanup:
+      worksceneConversationStorageProjectionCleanup,
     worksceneStorageCleanup,
     recoverWorksceneState: async () => {
       await authorityRuntimeRef.current?.recoverWorksceneState();

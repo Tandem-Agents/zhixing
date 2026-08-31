@@ -12,7 +12,7 @@ import { environmentControlSubject } from "@zhixing/core/protocol";
 import type { WorksceneToolDirectory } from "./workscene-port.js";
 import type { ConversationManager } from "@zhixing/owner-kernel";
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
-import type { ConversationWorksceneDeleteProjectionBridge } from "./conversation-delete-binding.js";
+import type { WorksceneConversationStorageProjectionCleanupPort } from "@zhixing/core/workscene/application";
 import { WorksceneSessionOwner } from "./workscene-session-owner.js";
 import type { WorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 
@@ -79,7 +79,7 @@ export function createWorksceneDirectory(deps: {
         >;
       }
     | undefined;
-  conversationDeleteProjectionBridge: ConversationWorksceneDeleteProjectionBridge;
+  conversationStorageProjectionCleanup: WorksceneConversationStorageProjectionCleanupPort;
   recoverWorksceneState: () => Promise<void>;
   replayWorksceneMutation: (
     requestId: string,
@@ -110,8 +110,8 @@ export function createWorksceneDirectory(deps: {
     const runtime = authority();
     sessionOwner = new WorksceneSessionOwner({
       conversations: () => deps.conversations?.() ?? null,
-      conversationDeleteProjectionBridge:
-        deps.conversationDeleteProjectionBridge,
+      conversationStorageProjectionCleanup:
+        deps.conversationStorageProjectionCleanup,
       authority: deps.conversationAuthority,
       storageCleanup: deps.worksceneStorageCleanup,
     });

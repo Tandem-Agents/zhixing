@@ -3567,19 +3567,19 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const taskSurface = taskSurfaceStart >= 0 && taskSurfaceEnd > taskSurfaceStart
     ? infoCommands.slice(taskSurfaceStart, taskSurfaceEnd)
     : "";
-  const worksceneDeleteBridgeFactoryConsumers = records.filter(
+  const worksceneConversationCleanupFactoryConsumers = records.filter(
     (record) =>
       record.relative !==
-        "packages/cli/src/serve/conversation-delete-binding.ts" &&
+        "packages/cli/src/serve/workscene-application-adapter.ts" &&
       record.text.includes(
-        "createConversationWorksceneDeleteProjectionBridge(",
+        "createAnchorWorksceneConversationStorageProjectionCleanup(",
       ),
   );
-  const worksceneDeleteBridgeProjectionConsumers = records.filter(
+  const worksceneConversationCleanupConsumers = records.filter(
     (record) =>
       record.relative !==
-        "packages/cli/src/serve/conversation-delete-binding.ts" &&
-      record.text.includes(".deleteConversationStorageProjection("),
+        "packages/core/src/workscene/application.ts" &&
+      record.text.includes(".removeCommittedProjection("),
   );
   const directConversationStorageDeleteConsumers = records.filter(
     (record) =>
@@ -3588,9 +3588,24 @@ export function inspectSkillCatalogApplicationOwnership(records) {
         "packages/cli/src/serve/conversation-directory.ts",
         "packages/cli/src/serve/access-surfaces.ts",
         "packages/cli/src/serve/command.ts",
+        "packages/cli/src/serve/workscene-application-adapter.ts",
       ].includes(record.relative) &&
       record.text.includes(".deleteStoredConversation("),
   );
+  const worksceneRemoveSceneStart = worksceneSessionOwner.indexOf(
+    "async removeScene(",
+  );
+  const worksceneRemoveSceneEnd = worksceneSessionOwner.indexOf(
+    "async #recordAuthority(",
+    worksceneRemoveSceneStart,
+  );
+  const worksceneRemoveScene =
+    worksceneRemoveSceneStart >= 0 && worksceneRemoveSceneEnd > worksceneRemoveSceneStart
+      ? worksceneSessionOwner.slice(
+          worksceneRemoveSceneStart,
+          worksceneRemoveSceneEnd,
+        )
+      : "";
   const sessionResumeStart = sessionHandler.indexOf(
     'export function buildSessionResumeMethod()',
   );
@@ -4332,34 +4347,49 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     /conversationDirectory\.clear\(/u.test(accessSurfaces) ||
     !conversationDeleteBinding.includes("createAnchorConversationDeleteCommitPort") ||
     !conversationDeleteBinding.includes("projectConversationDelete({") ||
-    !conversationDeleteBinding.includes(
-      "interface ConversationWorksceneDeleteProjectionBridge",
-    ) ||
-    !conversationDeleteBinding.includes(
-      "createConversationWorksceneDeleteProjectionBridge(",
-    ) ||
+    conversationDeleteBinding.includes("ConversationWorksceneDeleteProjectionBridge") ||
+    conversationDeleteBinding.includes("createConversationWorksceneDeleteProjectionBridge(") ||
     !conversationDeleteBinding.includes("!deletionAlreadyCommitted ||") ||
     /(?:input\.storage|conversationDirectory)\.ensure\(/u.test(
       conversationDeleteBinding,
     ) ||
-    worksceneDeleteBridgeFactoryConsumers.length !== 1 ||
-    worksceneDeleteBridgeFactoryConsumers[0]?.relative !==
+    !worksceneApplication.includes(
+      "interface WorksceneConversationStorageProjectionCleanupPort",
+    ) ||
+    !worksceneApplicationAdapter.includes(
+      "createAnchorWorksceneConversationStorageProjectionCleanup(",
+    ) ||
+    !worksceneApplicationAdapter.includes("parseConversationId(conversationId)") ||
+    !worksceneApplicationAdapter.includes("storage.deleteStoredConversation(conversationId)") ||
+    worksceneConversationCleanupFactoryConsumers.length !== 1 ||
+    worksceneConversationCleanupFactoryConsumers[0]?.relative !==
       "packages/cli/src/serve/command.ts" ||
-    worksceneDeleteBridgeProjectionConsumers.length !== 1 ||
-    worksceneDeleteBridgeProjectionConsumers[0]?.relative !==
+    worksceneConversationCleanupConsumers.length !== 1 ||
+    worksceneConversationCleanupConsumers[0]?.relative !==
       "packages/cli/src/serve/workscene-session-owner.ts" ||
     directConversationStorageDeleteConsumers.length !== 0 ||
-    !/conversationDeleteProjectionBridge:\s*worksceneConversationDeleteProjectionBridge/u.test(
+    !/conversationStorageProjectionCleanup:\s*worksceneConversationStorageProjectionCleanup/u.test(
       composition,
     ) ||
     !worksceneDirectory.includes(
-      "conversationDeleteProjectionBridge: ConversationWorksceneDeleteProjectionBridge",
+      "conversationStorageProjectionCleanup: WorksceneConversationStorageProjectionCleanupPort",
     ) ||
     worksceneDirectory.includes("deleteStoredConversation") ||
     !worksceneSessionOwner.includes(
-      ".deleteConversationStorageProjection(conversationId)",
+      ".removeCommittedProjection({",
     ) ||
     worksceneSessionOwner.includes("deleteStoredConversation") ||
+    records.some((record) =>
+      /ConversationWorksceneDeleteProjectionBridge|createConversationWorksceneDeleteProjectionBridge|conversationDeleteProjectionBridge|deleteConversationStorageProjection/u.test(
+        record.text,
+      ),
+    ) ||
+    worksceneRemoveScene.length === 0 ||
+    worksceneRemoveScene.indexOf("authority.deleteWorksceneSession({") < 0 ||
+    worksceneRemoveScene.indexOf(".removeCommittedProjection({") <
+      worksceneRemoveScene.indexOf("authority.deleteWorksceneSession({") ||
+    worksceneRemoveScene.indexOf("this.#storageCleanup.removeScene(sceneId)") <
+      worksceneRemoveScene.indexOf(".removeCommittedProjection({") ||
     !conversationStorage.includes("deleteStoredConversation(id)") ||
     /\bremove\s*\(/u.test(serverConversationDirectory) ||
     /manager\.writeDurableSession\([\s\S]*?mutation: \{ kind: "conversation-delete" \}/u.test(

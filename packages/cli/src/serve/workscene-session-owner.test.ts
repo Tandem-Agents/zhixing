@@ -31,7 +31,7 @@ describe("WorksceneSessionOwner cleanup", () => {
     };
     const owner = new WorksceneSessionOwner({
       conversations: () => manager as never,
-      conversationDeleteProjectionBridge: {} as never,
+      conversationStorageProjectionCleanup: {} as never,
       authority: () => ({
         async touchWorksceneSession() {
           order.push("activity");
@@ -64,7 +64,7 @@ describe("WorksceneSessionOwner cleanup", () => {
     };
     const owner = new WorksceneSessionOwner({
       conversations: () => manager as never,
-      conversationDeleteProjectionBridge: {} as never,
+      conversationStorageProjectionCleanup: {} as never,
       authority: () => ({
         async touchWorksceneSession(input) {
           order.push(`activity:${input.conversationId}:${input.requestId}`);
@@ -91,17 +91,17 @@ describe("WorksceneSessionOwner cleanup", () => {
     ]);
   });
 
-  it("keeps authority writes ahead of the shared physical cleanup owner", async () => {
+  it("keeps every authority write ahead of physical cleanup and scene storage last", async () => {
     const order: string[] = [];
-    const conversationDeleteProjectionBridge = {
-      deleteConversationStorageProjection: vi.fn(async (conversationId: string) => {
-        order.push(`remove:${conversationId}`);
+    const conversationStorageProjectionCleanup = {
+      removeCommittedProjection: vi.fn(async ({ conversationId }) => {
+        order.push(`projection:${conversationId}`);
         return true;
       }),
     };
     const owner = new WorksceneSessionOwner({
       conversations: () => null,
-      conversationDeleteProjectionBridge,
+      conversationStorageProjectionCleanup,
       authority: () => ({
         async touchWorksceneSession() {
           throw new Error("not used");
@@ -121,13 +121,95 @@ describe("WorksceneSessionOwner cleanup", () => {
       },
     });
 
-    await owner.removeScene("scene-a", ["ws:scene-a:primary"]);
+    await owner.removeScene("scene-a", [
+      "ws:scene-a:first",
+      "ws:scene-a:second",
+    ]);
 
     expect(order).toEqual([
-      "authority:ws:scene-a:primary",
-      "remove:ws:scene-a:primary",
+      "authority:ws:scene-a:first",
+      "projection:ws:scene-a:first",
+      "authority:ws:scene-a:second",
+      "projection:ws:scene-a:second",
       "cleanup:scene-a",
     ]);
+  });
+
+  it("redrives a partial projection failure with stable authority identities", async () => {
+    const order: string[] = [];
+    let failSecond = true;
+    const owner = new WorksceneSessionOwner({
+      conversations: () => null,
+      conversationStorageProjectionCleanup: {
+        async removeCommittedProjection({ conversationId }) {
+          order.push(`projection:${conversationId}`);
+          if (failSecond && conversationId.endsWith(":second")) {
+            failSecond = false;
+            throw new Error("projection unavailable");
+          }
+        },
+      },
+      authority: () => ({
+        async touchWorksceneSession() {
+          throw new Error("not used");
+        },
+        async deleteWorksceneSession(input) {
+          order.push(`authority:${input.requestId}`);
+          return { revision: 2, at: input.at };
+        },
+      }),
+      storageCleanup: {
+        async removeConversation() {
+          throw new Error("not used");
+        },
+        async removeScene(sceneId) {
+          order.push(`scene:${sceneId}`);
+        },
+      },
+    });
+    const conversations = ["ws:scene-a:first", "ws:scene-a:second"];
+
+    await expect(owner.removeScene("scene-a", conversations)).rejects.toThrow(
+      "projection unavailable",
+    );
+    expect(order).not.toContain("scene:scene-a");
+    await owner.removeScene("scene-a", conversations);
+
+    expect(order).toEqual([
+      "authority:workscene-delete:scene-a:ws:scene-a:first",
+      "projection:ws:scene-a:first",
+      "authority:workscene-delete:scene-a:ws:scene-a:second",
+      "projection:ws:scene-a:second",
+      "authority:workscene-delete:scene-a:ws:scene-a:first",
+      "projection:ws:scene-a:first",
+      "authority:workscene-delete:scene-a:ws:scene-a:second",
+      "projection:ws:scene-a:second",
+      "scene:scene-a",
+    ]);
+  });
+
+  it("rejects a cross-scene conversation before authority or projection effects", async () => {
+    const deleteWorksceneSession = vi.fn();
+    const removeCommittedProjection = vi.fn();
+    const removeScene = vi.fn();
+    const owner = new WorksceneSessionOwner({
+      conversations: () => null,
+      conversationStorageProjectionCleanup: { removeCommittedProjection },
+      authority: () => ({
+        touchWorksceneSession: vi.fn(),
+        deleteWorksceneSession,
+      }),
+      storageCleanup: {
+        removeConversation: vi.fn(),
+        removeScene,
+      },
+    });
+
+    await expect(owner.removeScene("scene-a", ["ws:scene-b:primary"]))
+      .rejects.toMatchObject({ code: "WORKSCENE_INPUT" });
+    expect(deleteWorksceneSession).not.toHaveBeenCalled();
+    expect(removeCommittedProjection).not.toHaveBeenCalled();
+    expect(removeScene).not.toHaveBeenCalled();
   });
 });
 

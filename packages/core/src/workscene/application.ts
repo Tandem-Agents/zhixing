@@ -82,6 +82,18 @@ export interface WorksceneRuntimeProjectionReadPort {
   get(sceneId: string): Promise<WorksceneDto | null>;
 }
 
+/**
+ * Workscene-owned demand for removing a Conversation physical projection
+ * after the Workscene session deletion fact has committed. It carries no
+ * Conversation delete admission, product terminal, Fact or notification.
+ */
+export interface WorksceneConversationStorageProjectionCleanupPort {
+  removeCommittedProjection(input: Readonly<{
+    sceneId: string;
+    conversationId: string;
+  }>): Promise<void>;
+}
+
 /** Path-free Workspace Administration read projection used for result enrichment. */
 export interface WorksceneWorkspaceAdministrationReadPort {
   list(): Promise<readonly WorksceneWorkspaceMetadata[]>;

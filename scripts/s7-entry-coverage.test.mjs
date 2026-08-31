@@ -3990,7 +3990,24 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/workscene-directory.ts",
-      (text) => `${text}\nvoid deps.conversationDeleteProjectionBridge.deleteConversationStorageProjection("second-consumer");`,
+      (text) => `${text}\nvoid deps.conversationStorageProjectionCleanup.removeCommittedProjection({ sceneId: "scene", conversationId: "ws:scene:second" });`,
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/conversation-delete-binding.ts",
+      (text) => `${text}\nexport interface ConversationWorksceneDeleteProjectionBridge { deleteConversationStorageProjection(id: string): Promise<boolean>; }`,
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/workscene-session-owner.ts",
+      (text) => text.replace(
+        "await authority.deleteWorksceneSession({",
+        "await this.#conversationStorageProjectionCleanup.removeCommittedProjection({ sceneId, conversationId });\n      await authority.deleteWorksceneSession({",
+      ),
     )).join("\n"),
     /Conversation directory management lacks one domain application/,
   );

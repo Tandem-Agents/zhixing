@@ -12,29 +12,6 @@ interface AnchorConversationDeleteStorage {
   deleteStoredConversation(conversationId: string): Promise<boolean>;
 }
 
-/**
- * Temporary one-way bridge for Workscene cascade cleanup.
- *
- * It exposes only the physical Conversation projection that the current
- * Workscene owner must remove after its own authority fact commits. It is not
- * a second Conversation delete decision and must retire with the Workscene A5
- * migration.
- */
-export interface ConversationWorksceneDeleteProjectionBridge {
-  deleteConversationStorageProjection(
-    conversationId: string,
-  ): Promise<boolean>;
-}
-
-export function createConversationWorksceneDeleteProjectionBridge(
-  storage: AnchorConversationDeleteStorage,
-): ConversationWorksceneDeleteProjectionBridge {
-  return Object.freeze({
-    deleteConversationStorageProjection: (conversationId: string) =>
-      storage.deleteStoredConversation(conversationId),
-  });
-}
-
 interface AnchorConversationDeleteRelatedProjection {
   cancelDependentLifecycle(conversationId: string): Promise<void>;
   removeDependentData(conversationId: string): Promise<void>;

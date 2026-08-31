@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { createAnchorWorksceneApplicationPorts } from "./workscene-application-adapter.js";
+import {
+  createAnchorWorksceneApplicationPorts,
+  createAnchorWorksceneConversationStorageProjectionCleanup,
+} from "./workscene-application-adapter.js";
 
 describe("createAnchorWorksceneApplicationPorts", () => {
   it("maps management, entry and Workspace Administration to finite ports", async () => {
@@ -89,5 +92,38 @@ describe("createAnchorWorksceneApplicationPorts", () => {
     );
     await expect(ports.runtime.get("scene-1")).resolves.toEqual(scene);
     expect(directory.get).toHaveBeenCalledWith("scene-1");
+  });
+});
+
+describe("createAnchorWorksceneConversationStorageProjectionCleanup", () => {
+  it("exposes only the committed physical projection and rejects another scope", async () => {
+    const storage = {
+      deleteStoredConversation: vi.fn(async () => true),
+      deleteProductConversation: vi.fn(),
+    };
+    const cleanup = createAnchorWorksceneConversationStorageProjectionCleanup(
+      storage,
+    );
+
+    await cleanup.removeCommittedProjection({
+      sceneId: "scene-1",
+      conversationId: "ws:scene-1:primary",
+    });
+    expect(storage.deleteStoredConversation).toHaveBeenCalledWith(
+      "ws:scene-1:primary",
+    );
+    expect(Object.keys(cleanup)).toEqual(["removeCommittedProjection"]);
+    expect(Object.isFrozen(cleanup)).toBe(true);
+
+    await expect(cleanup.removeCommittedProjection({
+      sceneId: "scene-1",
+      conversationId: "ws:scene-2:primary",
+    })).rejects.toMatchObject({ code: "WORKSCENE_INPUT" });
+    await expect(cleanup.removeCommittedProjection({
+      sceneId: "scene-1",
+      conversationId: "ordinary-conversation",
+    })).rejects.toMatchObject({ code: "WORKSCENE_INPUT" });
+    expect(storage.deleteStoredConversation).toHaveBeenCalledTimes(1);
+    expect(storage.deleteProductConversation).not.toHaveBeenCalled();
   });
 });
