@@ -17,6 +17,8 @@ import {
 } from "./closure.js";
 import { projectConfirmedRubricToDraftContent } from "./contract.js";
 import type {
+  AdvancementReviewAttempt,
+  AdvancementReviewRootContract,
   AdvancementExit,
   AdvancementOriginalTaskAdmissionIntent,
   AdvancementProxyMessage,
@@ -24,9 +26,20 @@ import type {
   AdvancementSession,
   AdvancementSessionStatus,
   ConfirmedRubricSnapshot,
+  ReviewEvidence,
   RubricContractDraftSnapshot,
   RubricDraftPersistenceChoice,
 } from "./types.js";
+import type { AdvancementReviewRunOutcome } from "./review.js";
+import {
+  advancementReviewAttemptId,
+  advancementReviewLineageId,
+  advancementReviewRootRequestId,
+} from "./review-attempt-identity.js";
+import type {
+  ImmediateRootResourceLease,
+  ImmediateRootReservationInspection,
+} from "../contracts/index.js";
 import type {
   RunRecordInput,
   RunRecordRef,
@@ -73,7 +86,854 @@ export type AdvancementTurnReviewResult =
       readonly review: AdvancementRunReview;
       readonly exit: AdvancementExit;
       readonly closure: AdvancementClosureReport;
+  };
+
+export interface AdvancementReviewRootTarget {
+  readonly executorId: string;
+  readonly ownerEpoch: number;
+}
+
+export interface AdvancementReviewAttemptInput {
+  readonly conversationId: string;
+  readonly runId?: string;
+  readonly runIndex: number;
+  readonly runRecord: RunRecordInput;
+  readonly runRecordRef?: RunRecordRef;
+  readonly abortSignal?: AbortSignal;
+}
+
+export interface AdvancementReviewAttemptStatePort {
+  loadActiveSession(conversationId: string): Promise<AdvancementSession | null>;
+  loadSession(
+    conversationId: string,
+    sessionId: string,
+  ): Promise<AdvancementSession | null>;
+  loadConversationSessions(
+    conversationId: string,
+  ): Promise<readonly AdvancementSession[]>;
+  transitionReviewAttempt(
+    conversationId: string,
+    sessionId: string,
+    attempt: AdvancementReviewAttempt,
+    timestamp: string,
+  ): Promise<AdvancementSession>;
+  cancelSession(
+    conversationId: string,
+    sessionId: string,
+    exit: AdvancementExit,
+    timestamp: string,
+  ): Promise<AdvancementSession>;
+}
+
+/** Generic immediate-root mechanics. Advancement owns every lifecycle decision. */
+export interface AdvancementReviewRootLifecyclePort {
+  inspect(
+    root: AdvancementReviewRootContract,
+  ): Promise<ImmediateRootReservationInspection>;
+  acquire(
+    root: AdvancementReviewRootContract,
+    deadlineMs?: number,
+  ): Promise<ImmediateRootResourceLease>;
+  settle(
+    root: AdvancementReviewRootContract,
+    lease: ImmediateRootResourceLease,
+  ): Promise<void>;
+  release(
+    root: AdvancementReviewRootContract,
+    lease: ImmediateRootResourceLease,
+  ): Promise<void>;
+}
+
+export type AdvancementReviewEligibilityResult =
+  | Readonly<{ kind: "return"; result: AdvancementTurnReviewResult }>
+  | Readonly<{
+      kind: "ready";
+      session: AdvancementSession;
+      rubric: ConfirmedRubricSnapshot;
+    }>;
+
+export type AdvancementReviewEvidencePreparationResult =
+  | Readonly<{
+      kind: "ready";
+      canonicalEvidence?: readonly ReviewEvidence[];
+      requestId?: string;
+    }>
+  | Readonly<{
+      kind: "deferred";
+      cause: "infrastructure" | "aborted";
+      reason: string;
+    }>;
+
+/**
+ * A5-ADVANCEMENT-REVIEW-01 remainder. It owns only eligibility, evidence,
+ * reviewer invocation and outcome persistence; attempt/root decisions stay in
+ * the application service below.
+ */
+export interface AdvancementReviewAttemptMechanismPort {
+  prepareEligibility(
+    session: AdvancementSession,
+    input: AdvancementReviewAttemptInput,
+  ): Promise<AdvancementReviewEligibilityResult>;
+  commitMissingDurableRun(
+    session: AdvancementSession,
+    input: AdvancementReviewAttemptInput,
+    reason: string,
+  ): Promise<AdvancementTurnReviewResult>;
+  resolveRootTarget(
+    session: AdvancementSession,
+    input: AdvancementReviewAttemptInput,
+  ): Promise<AdvancementReviewRootTarget | undefined>;
+  prepareEvidence(input: Readonly<{
+    session: AdvancementSession;
+    request: AdvancementReviewAttemptInput & { readonly runRecordRef: RunRecordRef };
+    attempt: AdvancementReviewAttempt;
+    rootLease: ImmediateRootResourceLease;
+  }>): Promise<AdvancementReviewEvidencePreparationResult>;
+  invokeReviewer(input: Readonly<{
+    session: AdvancementSession;
+    rubric: ConfirmedRubricSnapshot;
+    request: AdvancementReviewAttemptInput & { readonly runRecordRef: RunRecordRef };
+    attempt: AdvancementReviewAttempt;
+    rootLease: ImmediateRootResourceLease;
+    canonicalEvidence?: readonly ReviewEvidence[];
+  }>): Promise<AdvancementReviewRunOutcome>;
+  commitConsumed(input: Readonly<{
+    session: AdvancementSession;
+    outcome: Exclude<AdvancementReviewRunOutcome, { readonly kind: "deferred" }>;
+    evidenceRequestId?: string;
+    attempt: AdvancementReviewAttempt;
+  }>): Promise<AdvancementTurnReviewResult>;
+}
+
+export interface AdvancementReviewAttemptApplication {
+  reviewAcceptedRun(
+    input: AdvancementReviewAttemptInput,
+    mechanism: AdvancementReviewAttemptMechanismPort,
+  ): Promise<AdvancementTurnReviewResult>;
+  reconcileConversation(conversationId: string): Promise<void>;
+  cancelSession(input: Readonly<{
+    conversationId: string;
+    advancementSessionId: string;
+    reason: AdvancementExit["reason"];
+    message: string;
+  }>): Promise<AdvancementSession>;
+}
+
+/**
+ * Unique durable review-attempt state machine. Persistence and resource ports
+ * expose mechanics only; generation, phase, winner and root lifecycle remain
+ * Advancement decisions.
+ */
+export class AdvancementReviewAttemptApplicationService
+  implements AdvancementReviewAttemptApplication
+{
+  readonly #state: AdvancementReviewAttemptStatePort;
+  readonly #roots: AdvancementReviewRootLifecyclePort;
+  readonly #now: () => string;
+  readonly #flights = new Map<string, Promise<AdvancementTurnReviewResult>>();
+
+  constructor(options: Readonly<{
+    state: AdvancementReviewAttemptStatePort;
+    roots: AdvancementReviewRootLifecyclePort;
+    now?: () => string;
+  }>) {
+    this.#state = options.state;
+    this.#roots = options.roots;
+    this.#now = options.now ?? (() => new Date().toISOString());
+  }
+
+  async reviewAcceptedRun(
+    input: AdvancementReviewAttemptInput,
+    mechanism: AdvancementReviewAttemptMechanismPort,
+  ): Promise<AdvancementTurnReviewResult> {
+    const key = reviewAttemptFlightKey(input);
+    const current = this.#flights.get(key);
+    if (current) return await current;
+    const flight = this.#reviewAcceptedRun(input, mechanism).finally(() => {
+      if (this.#flights.get(key) === flight) this.#flights.delete(key);
+    });
+    this.#flights.set(key, flight);
+    return await flight;
+  }
+
+  async reconcileConversation(conversationId: string): Promise<void> {
+    const sessions = await this.#state.loadConversationSessions(conversationId);
+    for (const session of sessions) {
+      for (const attempt of session.reviewAttempts ?? []) {
+        if (isTerminalReviewAttempt(attempt)) {
+          await this.#cleanupTerminalRoot(attempt);
+        }
+      }
+    }
+  }
+
+  async cancelSession(input: Readonly<{
+    conversationId: string;
+    advancementSessionId: string;
+    reason: AdvancementExit["reason"];
+    message: string;
+  }>): Promise<AdvancementSession> {
+    let current = await this.#state.loadSession(
+      input.conversationId,
+      input.advancementSessionId,
+    );
+    if (!current) {
+      throw new Error(
+        `Advancement review attempt session "${input.advancementSessionId}" not found`,
+      );
+    }
+    const terminals: AdvancementReviewAttempt[] = [];
+    for (const attempt of current.reviewAttempts ?? []) {
+      if (attempt.phase !== "started" && attempt.phase !== "invoking") continue;
+      const terminal = terminalReviewAttempt(
+        attempt,
+        attempt.phase === "invoking" ? "deferred" : "expired",
+        "推进会话关闭，未完成裁判尝试停止推进。",
+      );
+      const settled = await this.#commitTerminal(
+        input.conversationId,
+        input.advancementSessionId,
+        terminal,
+      );
+      current = settled.session;
+      terminals.push(settled.attempt);
+    }
+    const occurredAt = this.#now();
+    const cancelled = await this.#state.cancelSession(
+      input.conversationId,
+      input.advancementSessionId,
+      {
+        reason: input.reason,
+        message: input.message,
+        occurredAt,
+      },
+      occurredAt,
+    );
+    for (const attempt of terminals) {
+      await this.#cleanupTerminalRoot(attempt);
+    }
+    return cancelled;
+  }
+
+  async #reviewAcceptedRun(
+    input: AdvancementReviewAttemptInput,
+    mechanism: AdvancementReviewAttemptMechanismPort,
+  ): Promise<AdvancementTurnReviewResult> {
+    let session = await this.#state.loadActiveSession(input.conversationId);
+    if (!session) return { kind: "skipped", reason: "no-active-session" };
+    if (session.status !== "active") {
+      return { kind: "skipped", reason: "not-active" };
+    }
+
+    const existingAttempt = input.runRecordRef
+      ? reviewAttemptForRun(session, input.runRecordRef)
+      : undefined;
+    if (
+      existingAttempt &&
+      isTerminalReviewAttempt(existingAttempt) &&
+      !(await this.#cleanupTerminalRoot(existingAttempt))
+    ) {
+      return deferredReview(
+        session,
+        "既有裁判终态已落盘，资源仍等待保守回收。",
+      );
+    }
+    if (session.runs.some((run) => run.runIndex === input.runIndex)) {
+      return { kind: "skipped", reason: "already-reviewed" };
+    }
+
+    const eligibility = await mechanism.prepareEligibility(session, input);
+    if (eligibility.kind === "return") return eligibility.result;
+    session = eligibility.session;
+    const rubric = eligibility.rubric;
+
+    if (!input.runRecordRef) {
+      return await mechanism.commitMissingDurableRun(
+        session,
+        input,
+        "推进侧验收缺少 accepted run 的耐久位置，无法建立可恢复的裁判身份。",
+      );
+    }
+    const request = { ...input, runRecordRef: input.runRecordRef };
+    const runId = input.runId ?? stableAcceptedRunId(input.runRecordRef);
+
+    let attempt = reviewAttemptForRun(session, input.runRecordRef);
+    if (attempt?.phase === "invoking") {
+      const settled = await this.#commitTerminal(
+        input.conversationId,
+        session.id,
+        terminalReviewAttempt(
+          attempt,
+          "deferred",
+          "裁判调用结果不明；本代禁止重放 provider。",
+        ),
+      );
+      session = settled.session;
+      attempt = settled.attempt;
+    }
+    if (attempt && isTerminalReviewAttempt(attempt)) {
+      const cleaned = await this.#cleanupTerminalRoot(attempt);
+      if (!cleaned) {
+        return deferredReview(
+          session,
+          "裁判资源仍在等待保守计量回收，暂不进入下一代验收。",
+        );
+      }
+      session =
+        (await this.#state.loadActiveSession(input.conversationId)) ?? session;
+      if (
+        session.runs.some(
+          (run) =>
+            run.runRecordRef !== undefined &&
+            sameRunRecordRef(run.runRecordRef, request.runRecordRef),
+        )
+      ) {
+        return { kind: "skipped", reason: "already-reviewed" };
+      }
+    }
+
+    const lineageId = advancementReviewLineageId(session.id, input.runRecordRef);
+    const rootTarget = await mechanism.resolveRootTarget(session, input);
+    attempt = reviewAttemptForRun(session, input.runRecordRef);
+    if (!attempt || isTerminalReviewAttempt(attempt)) {
+      const legacyGeneration =
+        session.evidence?.generations?.find((entry) => entry.runId === runId)
+          ?.generation ?? 0;
+      const generation = Math.max(attempt?.generation ?? 0, legacyGeneration) + 1;
+      attempt = {
+        lineageId,
+        generation,
+        runId,
+        runIndex: input.runIndex,
+        runRecordRef: structuredClone(input.runRecordRef),
+        phase: "started",
+        root: createReviewRootContract({
+          lineageId,
+          generation,
+          conversationId: input.conversationId,
+          target: rootTarget,
+        }),
+      };
+      session = await this.#state.transitionReviewAttempt(
+        input.conversationId,
+        session.id,
+        attempt,
+        this.#now(),
+      );
+    }
+
+    if (attempt.phase !== "started") {
+      throw new Error("Advancement review attempt is not restartable");
+    }
+    if (!reviewRootTargetMatches(attempt.root, rootTarget)) {
+      const expired = terminalReviewAttempt(
+        attempt,
+        "expired",
+        "取证目标在裁判调用前发生变化；冻结本代并等待下一次恢复。",
+      );
+      const settled = await this.#commitTerminal(
+        input.conversationId,
+        session.id,
+        expired,
+      );
+      await this.#cleanupTerminalRoot(settled.attempt);
+      return deferredReview(
+        settled.session,
+        settled.attempt.detail ?? expired.detail!,
+      );
+    }
+
+    let acquired:
+      | Readonly<{ kind: "active"; lease: ImmediateRootResourceLease }>
+      | Readonly<{
+          kind: "terminal";
+          inspection: Exclude<
+            ImmediateRootReservationInspection,
+            { readonly kind: "absent" | "queued" }
+          >;
+        }>;
+    try {
+      acquired = await this.#acquireRoot(attempt);
+    } catch (error) {
+      return deferredReview(
+        session,
+        `裁判根资源获取结果尚未确定：${advancementErrorMessage(error)}`,
+      );
+    }
+    if (acquired.kind === "terminal") {
+      const afterFailure = await this.#state.loadSession(
+        input.conversationId,
+        session.id,
+      );
+      const durable = afterFailure
+        ? reviewAttemptForRun(afterFailure, input.runRecordRef)
+        : undefined;
+      if (
+        afterFailure &&
+        (afterFailure.status !== "active" ||
+          !durable ||
+          durable.lineageId !== attempt.lineageId ||
+          durable.generation !== attempt.generation ||
+          durable.phase !== "started")
+      ) {
+        if (
+          durable &&
+          durable.lineageId === attempt.lineageId &&
+          durable.generation === attempt.generation &&
+          isTerminalReviewAttempt(durable)
+        ) {
+          await this.#cleanupTerminalRoot(durable);
+        }
+        return deferredReview(
+          afterFailure,
+          "裁判根获取结束前业务 owner 已推进，本代不再写入或调用外部裁判。",
+        );
+      }
+      if (!afterFailure) {
+        throw new Error(
+          "Advancement session disappeared after its review root became terminal",
+        );
+      }
+      session = afterFailure;
+      attempt = durable!;
+      const expired = terminalReviewAttempt(
+        attempt,
+        "expired",
+        `裁判根资源已${describeReviewRootTerminal(acquired.inspection)}，本代不再复活。`,
+        acquired.inspection.kind === "reservation"
+          ? acquired.inspection.lease
+          : undefined,
+      );
+      const settled = await this.#commitTerminal(
+        input.conversationId,
+        session.id,
+        expired,
+      );
+      await this.#cleanupTerminalRoot(settled.attempt);
+      return deferredReview(
+        settled.session,
+        settled.attempt.detail ?? expired.detail!,
+      );
+    }
+    const lease = acquired.lease;
+
+    const afterAcquire = await this.#state.loadSession(
+      input.conversationId,
+      session.id,
+    );
+    const durableAfterAcquire = afterAcquire
+      ? reviewAttemptForRun(afterAcquire, input.runRecordRef)
+      : undefined;
+    if (
+      !afterAcquire ||
+      afterAcquire.status !== "active" ||
+      !durableAfterAcquire ||
+      durableAfterAcquire.lineageId !== attempt.lineageId ||
+      durableAfterAcquire.generation !== attempt.generation ||
+      durableAfterAcquire.phase !== "started"
+    ) {
+      const cleanupAttempt =
+        durableAfterAcquire && isTerminalReviewAttempt(durableAfterAcquire)
+          ? durableAfterAcquire
+          : terminalReviewAttempt(
+              { ...attempt, rootLease: lease },
+              "expired",
+              "裁判根取得后业务 owner 已不再允许本代继续。",
+              lease,
+            );
+      if (durableAfterAcquire?.phase !== "invoking") {
+        await this.#cleanupTerminalRoot(cleanupAttempt);
+      }
+      if (!afterAcquire) {
+        throw new Error(
+          "Advancement session disappeared after acquiring its review root",
+        );
+      }
+      return deferredReview(
+        afterAcquire,
+        durableAfterAcquire?.phase === "invoking"
+          ? "本代裁判已由唯一调用者接管。"
+          : "裁判根取得后推进会话已进入终态，本代不再调用外部裁判。",
+      );
+    }
+    session = afterAcquire;
+    attempt = durableAfterAcquire;
+
+    const evidence = await mechanism.prepareEvidence({
+      session,
+      request,
+      attempt,
+      rootLease: lease,
+    });
+    if (evidence.kind === "deferred") {
+      const expired = terminalReviewAttempt(
+        { ...attempt, rootLease: lease },
+        "expired",
+        evidence.reason,
+        lease,
+      );
+      const settled = await this.#commitTerminal(
+        input.conversationId,
+        session.id,
+        expired,
+      );
+      await this.#cleanupTerminalRoot(settled.attempt);
+      return deferredReview(
+        settled.session,
+        settled.attempt.detail ?? evidence.reason,
+        evidence.cause,
+      );
+    }
+
+    const invoking: AdvancementReviewAttempt = {
+      ...attempt,
+      phase: "invoking",
+      rootLease: lease,
     };
+    try {
+      session = await this.#state.transitionReviewAttempt(
+        input.conversationId,
+        session.id,
+        invoking,
+        this.#now(),
+      );
+    } catch (error) {
+      const latestSession = await this.#state.loadSession(
+        input.conversationId,
+        session.id,
+      );
+      const latestAttempt = latestSession
+        ? reviewAttemptForRun(latestSession, input.runRecordRef)
+        : undefined;
+      if (
+        latestSession &&
+        (latestSession.status !== "active" ||
+          (latestAttempt !== undefined && isTerminalReviewAttempt(latestAttempt)))
+      ) {
+        await this.#cleanupTerminalRoot(
+          latestAttempt && isTerminalReviewAttempt(latestAttempt)
+            ? latestAttempt
+            : terminalReviewAttempt(
+                { ...attempt, rootLease: lease },
+                "expired",
+                "裁判调用前业务 owner 已进入终态。",
+                lease,
+              ),
+        );
+        return deferredReview(
+          latestSession,
+          "裁判调用前推进会话已进入终态，本代未调用外部裁判。",
+        );
+      }
+      throw error;
+    }
+
+    const outcome = await mechanism.invokeReviewer({
+      session,
+      rubric,
+      request,
+      attempt: invoking,
+      rootLease: lease,
+      ...(evidence.canonicalEvidence
+        ? { canonicalEvidence: evidence.canonicalEvidence }
+        : {}),
+    });
+    if (outcome.kind === "deferred") {
+      const deferred = terminalReviewAttempt(
+        invoking,
+        "deferred",
+        outcome.reason,
+        lease,
+      );
+      const settled = await this.#commitTerminal(
+        input.conversationId,
+        session.id,
+        deferred,
+      );
+      await this.#cleanupTerminalRoot(settled.attempt);
+      return deferredReview(
+        settled.session,
+        settled.attempt.detail ?? outcome.reason,
+        outcome.cause,
+      );
+    }
+
+    const consumed = terminalReviewAttempt(invoking, "consumed", undefined, lease);
+    const result = await mechanism.commitConsumed({
+      session,
+      outcome,
+      ...(evidence.requestId ? { evidenceRequestId: evidence.requestId } : {}),
+      attempt: consumed,
+    });
+    await this.#cleanupTerminalRoot(consumed);
+    return result;
+  }
+
+  async #commitTerminal(
+    conversationId: string,
+    sessionId: string,
+    proposed: AdvancementReviewAttempt,
+  ): Promise<Readonly<{
+    session: AdvancementSession;
+    attempt: AdvancementReviewAttempt;
+  }>> {
+    if (!isTerminalReviewAttempt(proposed)) {
+      throw new TypeError("Review attempt terminal commit requires a terminal phase");
+    }
+    try {
+      const session = await this.#state.transitionReviewAttempt(
+        conversationId,
+        sessionId,
+        proposed,
+        this.#now(),
+      );
+      return {
+        session,
+        attempt: reviewAttemptForRun(session, proposed.runRecordRef) ?? proposed,
+      };
+    } catch (error) {
+      const session = await this.#state.loadSession(conversationId, sessionId);
+      const winner = session
+        ? reviewAttemptForRun(session, proposed.runRecordRef)
+        : undefined;
+      if (
+        session &&
+        winner &&
+        winner.lineageId === proposed.lineageId &&
+        winner.generation === proposed.generation &&
+        isTerminalReviewAttempt(winner)
+      ) {
+        return { session, attempt: winner };
+      }
+      throw error;
+    }
+  }
+
+  async #acquireRoot(
+    attempt: AdvancementReviewAttempt,
+  ): Promise<
+    | Readonly<{ kind: "active"; lease: ImmediateRootResourceLease }>
+    | Readonly<{
+        kind: "terminal";
+        inspection: Exclude<
+          ImmediateRootReservationInspection,
+          { readonly kind: "absent" | "queued" }
+        >;
+      }>
+  > {
+    const inspection = await this.#roots.inspect(attempt.root);
+    if (inspection.kind === "reservation") {
+      assertFrozenReviewRootLease(attempt.root, inspection.lease);
+      return inspection.state === "active"
+        ? { kind: "active", lease: inspection.lease }
+        : { kind: "terminal", inspection };
+    }
+    if (inspection.kind === "dequeued") {
+      return { kind: "terminal", inspection };
+    }
+    try {
+      const lease = await this.#roots.acquire(attempt.root);
+      assertFrozenReviewRootLease(attempt.root, lease);
+      return { kind: "active", lease };
+    } catch (error) {
+      const afterFailure = await this.#roots.inspect(attempt.root);
+      if (
+        afterFailure.kind === "reservation" &&
+        afterFailure.state === "active"
+      ) {
+        assertFrozenReviewRootLease(attempt.root, afterFailure.lease);
+        return { kind: "active", lease: afterFailure.lease };
+      }
+      if (
+        afterFailure.kind === "dequeued" ||
+        (afterFailure.kind === "reservation" &&
+          afterFailure.state !== "active")
+      ) {
+        return { kind: "terminal", inspection: afterFailure };
+      }
+      throw error;
+    }
+  }
+
+  async #cleanupTerminalRoot(attempt: AdvancementReviewAttempt): Promise<boolean> {
+    if (!isTerminalReviewAttempt(attempt)) return false;
+    let inspection = await this.#roots.inspect(attempt.root);
+    if (inspection.kind === "absent" || inspection.kind === "dequeued") {
+      return true;
+    }
+    if (inspection.kind === "queued") {
+      try {
+        const lease = await this.#roots.acquire(attempt.root, 250);
+        assertFrozenReviewRootLease(attempt.root, lease);
+      } catch {
+        // The bounded acquire records dequeue when it cannot activate. The
+        // durable inspection below is authoritative for cleanup progress.
+      }
+      inspection = await this.#roots.inspect(attempt.root);
+      if (inspection.kind === "absent" || inspection.kind === "dequeued") {
+        return true;
+      }
+      if (inspection.kind === "queued") return false;
+    }
+    assertFrozenReviewRootLease(attempt.root, inspection.lease);
+    if (inspection.state === "released" || inspection.state === "reclaimed") {
+      return true;
+    }
+    if (inspection.state === "active") {
+      try {
+        await this.#roots.settle(attempt.root, inspection.lease);
+      } catch {
+        return false;
+      }
+    }
+    try {
+      await this.#roots.release(attempt.root, inspection.lease);
+    } catch {
+      return false;
+    }
+    inspection = await this.#roots.inspect(attempt.root);
+    return (
+      inspection.kind === "absent" ||
+      inspection.kind === "dequeued" ||
+      (inspection.kind === "reservation" &&
+        (inspection.state === "released" || inspection.state === "reclaimed"))
+    );
+  }
+}
+
+function reviewAttemptFlightKey(input: AdvancementReviewAttemptInput): string {
+  return input.runRecordRef
+    ? `${input.conversationId}:${input.runRecordRef.shardId}:${input.runRecordRef.runIndex}`
+    : `${input.conversationId}:legacy:${input.runIndex}`;
+}
+
+function stableAcceptedRunId(ref: RunRecordRef): string {
+  return `accepted-run:${ref.shardId}:${ref.runIndex}`;
+}
+
+function reviewAttemptForRun(
+  session: AdvancementSession,
+  ref: RunRecordRef,
+): AdvancementReviewAttempt | undefined {
+  return session.reviewAttempts?.find((attempt) =>
+    sameRunRecordRef(attempt.runRecordRef, ref),
+  );
+}
+
+function sameRunRecordRef(left: RunRecordRef, right: RunRecordRef): boolean {
+  return left.shardId === right.shardId && left.runIndex === right.runIndex;
+}
+
+function isTerminalReviewAttempt(attempt: AdvancementReviewAttempt): boolean {
+  return (
+    attempt.phase === "consumed" ||
+    attempt.phase === "deferred" ||
+    attempt.phase === "expired"
+  );
+}
+
+function terminalReviewAttempt(
+  attempt: AdvancementReviewAttempt,
+  phase: "consumed" | "deferred" | "expired",
+  detail?: string,
+  rootLease?: ImmediateRootResourceLease,
+): AdvancementReviewAttempt {
+  return {
+    lineageId: attempt.lineageId,
+    generation: attempt.generation,
+    runId: attempt.runId,
+    runIndex: attempt.runIndex,
+    runRecordRef: structuredClone(attempt.runRecordRef),
+    phase,
+    root: structuredClone(attempt.root),
+    ...(rootLease ?? attempt.rootLease
+      ? { rootLease: structuredClone(rootLease ?? attempt.rootLease!) }
+      : {}),
+    ...(detail === undefined ? {} : { detail }),
+  };
+}
+
+function createReviewRootContract(input: Readonly<{
+  lineageId: string;
+  generation: number;
+  conversationId: string;
+  target?: AdvancementReviewRootTarget;
+}>): AdvancementReviewRootContract {
+  const id = advancementReviewAttemptId(input.lineageId, input.generation);
+  return {
+    workload: { kind: "control", id, attempt: 1 },
+    budget: { maxCalls: 8, maxTokens: 300_000 },
+    requestId: advancementReviewRootRequestId(input.lineageId, input.generation),
+    ...(input.target
+      ? {
+          audience: { executorId: input.target.executorId },
+          scopeBinding: {
+            kind: "conversation" as const,
+            conversationId: input.conversationId,
+            ownerEpoch: input.target.ownerEpoch,
+          },
+        }
+      : {}),
+  };
+}
+
+function reviewRootTargetMatches(
+  root: AdvancementReviewRootContract,
+  target: AdvancementReviewRootTarget | undefined,
+): boolean {
+  if (!target) {
+    return root.audience === undefined && root.scopeBinding === undefined;
+  }
+  return (
+    root.audience?.executorId === target.executorId &&
+    root.scopeBinding?.kind === "conversation" &&
+    root.scopeBinding.ownerEpoch === target.ownerEpoch
+  );
+}
+
+function assertFrozenReviewRootLease(
+  root: AdvancementReviewRootContract,
+  lease: ImmediateRootResourceLease,
+): void {
+  const expectedScope = root.scopeBinding ?? {
+    kind: "control" as const,
+    subject: root.workload.id,
+  };
+  if (
+    canonicalize(lease.workload) !== canonicalize(root.workload) ||
+    canonicalize(lease.budget) !== canonicalize(root.budget) ||
+    canonicalize(lease.scopeBinding) !== canonicalize(expectedScope) ||
+    (root.audience !== undefined &&
+      canonicalize(lease.audience) !== canonicalize(root.audience))
+  ) {
+    throw new Error("Advancement review root changed its frozen contract");
+  }
+}
+
+function describeReviewRootTerminal(
+  inspection: Exclude<
+    ImmediateRootReservationInspection,
+    { readonly kind: "absent" | "queued" }
+  >,
+): string {
+  return inspection.kind === "dequeued"
+    ? `出队（${inspection.reason}）`
+    : `进入 ${inspection.state} 终态`;
+}
+
+function deferredReview(
+  session: AdvancementSession,
+  reason: string,
+  cause: "infrastructure" | "aborted" = "infrastructure",
+): AdvancementTurnReviewResult {
+  return { kind: "review-deferred", session, cause, reason };
+}
+
+function advancementErrorMessage(error: unknown): string {
+  return error instanceof Error && error.message.trim().length > 0
+    ? error.message
+    : "unknown error";
+}
 
 export interface AdvancementCommittedTurn {
   readonly conversationId: string;

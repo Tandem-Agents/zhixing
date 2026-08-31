@@ -10,7 +10,11 @@ import type {
   RubricContractDraftSnapshot,
   RunRecordInput,
 } from "@zhixing/core";
-import { AdvancementController } from "@zhixing/owner-services";
+import {
+  AdvancementController as OwnerAdvancementController,
+  type AdvancementControllerOptions,
+} from "@zhixing/owner-services";
+import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
 import type {
   ImmediateRootResourceLease,
   ResourceReservationPort,
@@ -55,6 +59,22 @@ function fakeResources(): ResourceReservationPort {
     settle: async () => {},
     release: async () => {},
   };
+}
+
+class AdvancementController extends OwnerAdvancementController {
+  constructor(options: Omit<AdvancementControllerOptions, "reviewAttempts"> & {
+    readonly resources?: ResourceReservationPort;
+  }) {
+    const { resources = fakeResources(), ...rest } = options;
+    super({
+      ...rest,
+      reviewAttempts: createAdvancementReviewAttemptApplication({
+        store: options.store,
+        resources,
+        ...(options.now ? { now: options.now } : {}),
+      }),
+    });
+  }
 }
 
 function task(text: string) {

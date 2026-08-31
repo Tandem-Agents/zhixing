@@ -13,12 +13,14 @@ import {
 } from "@zhixing/core";
 import { createTempDir } from "@zhixing/test-utils";
 import {
-  AdvancementController,
+  AdvancementController as OwnerAdvancementController,
   buildAdvancementProxyMessage,
   createAdvancementRecoveryMaintenance as createOwnerAdvancementRecoveryMaintenance,
+  type AdvancementControllerOptions,
   type AdvancementConversationDirectory,
   type AdvancementRecoveryMaintenance,
 } from "@zhixing/owner-services";
+import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
 import type { SessionBroadcast } from "@zhixing/rpc";
 import type {
   ImmediateRootResourceLease,
@@ -76,6 +78,22 @@ function fakeResources(): ResourceReservationPort {
     settle: async () => {},
     release: async () => {},
   };
+}
+
+class AdvancementController extends OwnerAdvancementController {
+  constructor(options: Omit<AdvancementControllerOptions, "reviewAttempts"> & {
+    readonly resources?: ResourceReservationPort;
+  }) {
+    const { resources = fakeResources(), ...rest } = options;
+    super({
+      ...rest,
+      reviewAttempts: createAdvancementReviewAttemptApplication({
+        store: options.store,
+        resources,
+        ...(options.now ? { now: options.now } : {}),
+      }),
+    });
+  }
 }
 import {
   createAdvancementEventSink,

@@ -33,6 +33,7 @@ import {
   AdvancementController,
   AdvancementEvidenceCoordinator,
 } from "@zhixing/owner-services";
+import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, onTestFinished } from "vitest";
 
@@ -177,7 +178,7 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
 
     const firstController = new AdvancementController({
       store,
-      resources,
+      reviewAttempts: reviewAttemptApplication(store, resources),
       reviewer,
       evidence,
       now: () => NOW,
@@ -189,7 +190,7 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
 
     const recoveredController = new AdvancementController({
       store,
-      resources,
+      reviewAttempts: reviewAttemptApplication(store, resources),
       reviewer,
       evidence,
       now: () => NOW,
@@ -222,7 +223,7 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
 
     const cleanupController = new AdvancementController({
       store,
-      resources,
+      reviewAttempts: reviewAttemptApplication(store, resources),
       reviewer,
       evidence,
       now: () => NOW,
@@ -271,7 +272,7 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
 
     const firstController = new AdvancementController({
       store,
-      resources: governor,
+      reviewAttempts: reviewAttemptApplication(store, governor),
       reviewer,
       evidence,
       now: () => NOW,
@@ -288,7 +289,7 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
 
     const recoveredController = new AdvancementController({
       store,
-      resources: governor,
+      reviewAttempts: reviewAttemptApplication(store, governor),
       reviewer,
       evidence,
       now: () => NOW,
@@ -339,7 +340,7 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
     });
     const controller = new AdvancementController({
       store,
-      resources: governor,
+      reviewAttempts: reviewAttemptApplication(store, governor),
       reviewer,
       evidence: new AdvancementEvidenceCoordinator({
         store,
@@ -437,7 +438,7 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
     });
     const controller = new AdvancementController({
       store,
-      resources: governor,
+      reviewAttempts: reviewAttemptApplication(store, governor),
       reviewer,
       evidence,
       now: () => NOW,
@@ -484,7 +485,7 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
     });
     const controller = new AdvancementController({
       store,
-      resources: held.resources,
+      reviewAttempts: reviewAttemptApplication(store, held.resources),
       reviewer,
       evidence,
       now: () => NOW,
@@ -545,7 +546,7 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
     });
     const controller = new AdvancementController({
       store,
-      resources: held.resources,
+      reviewAttempts: reviewAttemptApplication(store, held.resources),
       reviewer,
       evidence,
       now: () => NOW,
@@ -588,7 +589,7 @@ describe("advancement review attempt production recovery", { timeout: 30_000 }, 
     const governor = createGovernor(root);
     const controller = new AdvancementController({
       store,
-      resources: governor,
+      reviewAttempts: reviewAttemptApplication(store, governor),
       reviewer: {
         review: async () => ({
           kind: "deferred",
@@ -652,6 +653,17 @@ function createGovernor(root: string): AnchorResourceGovernor {
     localExecutorId: "executor-1",
     reporterKeyFor: () => "executor-1",
     clock: () => new Date().toISOString(),
+  });
+}
+
+function reviewAttemptApplication(
+  store: AdvancementStore,
+  resources: ResourceReservationPort,
+) {
+  return createAdvancementReviewAttemptApplication({
+    store,
+    resources,
+    now: () => NOW,
   });
 }
 

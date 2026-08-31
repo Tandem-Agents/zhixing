@@ -32,6 +32,10 @@
     "./advancement/review-application-bridge": {
       "types": "./dist/advancement/review-application-bridge.d.ts",
       "import": "./dist/advancement/review-application-bridge.js"
+    },
+    "./advancement/review-attempt-correctness": {
+      "types": "./dist/advancement/review-attempt-correctness.d.ts",
+      "import": "./dist/advancement/review-attempt-correctness.js"
     }
   },
   "files": [

@@ -3412,6 +3412,9 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   const reviewBridge = required(
     "packages/owner-services/src/advancement/review-application-bridge.ts",
   );
+  const reviewAttemptCorrectness = required(
+    "packages/owner-services/src/advancement/review-attempt-correctness.ts",
+  );
   const recovery = required(
     "packages/owner-services/src/advancement/recovery-maintenance.ts",
   );
@@ -3431,6 +3434,9 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   );
   const conversationProtocol = required(
     "packages/cli/src/serve/conversation-protocol-runtime.ts",
+  );
+  const advancementComposition = required(
+    "packages/cli/src/serve/advancement-controller.ts",
   );
 
   const detailStart = handler.indexOf(
@@ -3589,6 +3595,18 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes("interface AdvancementConversationLifecycleMechanismPort") ||
     !application.includes("interface AdvancementAcceptedTurnCatchUpPort") ||
     !application.includes("interface AdvancementAcceptedTurnReviewMechanismPort") ||
+    !application.includes("interface AdvancementReviewAttemptStatePort") ||
+    !application.includes("interface AdvancementReviewRootLifecyclePort") ||
+    !application.includes("interface AdvancementReviewAttemptMechanismPort") ||
+    !application.includes("class AdvancementReviewAttemptApplicationService") ||
+    application.split("class AdvancementReviewAttemptApplicationService").length - 1 !== 1 ||
+    !application.includes("readonly #flights = new Map<string, Promise<AdvancementTurnReviewResult>>();") ||
+    !application.includes("const legacyGeneration =") ||
+    !application.includes('attempt.phase === "invoking"') ||
+    !application.includes("reviewRootTargetMatches(attempt.root, rootTarget)") ||
+    !application.includes("const afterAcquire = await this.#state.loadSession(") ||
+    !application.includes("async #cleanupTerminalRoot(") ||
+    !application.includes("async reconcileConversation(") ||
     !application.includes("interface AdvancementReviewResultProjectionApplication") ||
     !application.includes("class AdvancementReviewResultProjectionApplicationService") ||
     !application.includes("class AdvancementAcceptedTurnApplicationService") ||
@@ -3607,6 +3625,26 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     /ConversationManager|SessionBroadcast|@zhixing\/(?:server|rpc)|\.current|new Map</u.test(
       reviewBridge,
     ) ||
+    !reviewAttemptCorrectness.includes("createAdvancementReviewAttemptApplication(") ||
+    !reviewAttemptCorrectness.includes("new AdvancementReviewAttemptApplicationService({") ||
+    !reviewAttemptCorrectness.includes("options.store.transitionReviewAttempt(") ||
+    !reviewAttemptCorrectness.includes("options.resources.inspectImmediateRoot(") ||
+    !reviewAttemptCorrectness.includes("options.resources.acquireRoot(") ||
+    /generation\s*=|phase\s*===|terminalReviewAttempt|reviewRootTargetMatches/u.test(
+      reviewAttemptCorrectness,
+    ) ||
+    !controller.includes("this.reviewAttempts.reviewAcceptedRun(") ||
+    !controller.includes("this.reviewAttempts.reconcileConversation(") ||
+    !controller.includes("this.reviewAttempts.cancelSession({") ||
+    !controller.includes("private reviewAttemptMechanism(): AdvancementReviewAttemptMechanismPort") ||
+    /advancementReview(?:LineageId|AttemptId|RootRequestId)|inspectImmediateRoot|acquireRoot\(|transitionReviewAttempt\(|cleanupReviewAttemptRoot|reviewFlights/u.test(
+      controller,
+    ) ||
+    !advancementComposition.includes(
+      'from "@zhixing/owner-services/advancement/review-attempt-correctness"',
+    ) ||
+    !advancementComposition.includes("createAdvancementReviewAttemptApplication({") ||
+    !advancementComposition.includes("reviewAttempts:") ||
     !recovery.includes("this.options.reviewResults.projectReviewResult({") ||
     recovery.includes("dispatchAdvancementReviewResult") ||
     !accessSurfaces.includes("new AdvancementAcceptedTurnApplicationService({") ||
@@ -3658,6 +3696,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     conversationProtocol.includes("#recoverAuxiliaryRef") ||
     ownerIndex.includes("dispatchAdvancementReviewResult") ||
     ownerIndex.includes("createAdvancementAcceptedTurnReviewMechanism") ||
+    ownerIndex.includes("createAdvancementReviewAttemptApplication") ||
     !accessSurfaces.includes(
       'from "@zhixing/owner-services/advancement/review-application-bridge"',
     ) ||
@@ -3667,6 +3706,8 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     ownerBuild.includes("review-dispatch.ts") ||
     ownerManifest?.exports?.["./advancement/review-dispatch"] !== undefined ||
     ownerManifest?.exports?.["./advancement/review-application-bridge"] === undefined ||
+    ownerManifest?.exports?.["./advancement/review-attempt-correctness"] === undefined ||
+    !ownerBuild.includes("src/advancement/review-attempt-correctness.ts") ||
     byPath.has("packages/cli/src/serve/advancement-review-maintenance.ts") ||
     byPath.has("packages/owner-services/src/advancement/review-dispatch.ts") ||
     !application.includes("interface AdvancementConversationLifecycleApplication") ||

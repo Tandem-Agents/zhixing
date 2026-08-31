@@ -42,6 +42,7 @@ import {
   SessionAdvancementStore,
   type AdvancementEvidenceTarget,
 } from "@zhixing/owner-services";
+import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
 import type { RubricPublicationPort } from "@zhixing/core/advancement/application";
 import {
   GlobalRubricCatalog,
@@ -277,7 +278,10 @@ export async function createServeAdvancementController(
     admissionStrategy: new LLMAdvancementAdmissionStrategy({
       complete: (prompt) => completeViaPort("light", prompt),
     }),
-    resources: governor,
+    reviewAttempts: createAdvancementReviewAttemptApplication({
+      store,
+      resources: governor,
+    }),
     ...(evidence ? { evidence } : {}),
     ...(deps.rubricPublication
       ? { rubricPublication: deps.rubricPublication }

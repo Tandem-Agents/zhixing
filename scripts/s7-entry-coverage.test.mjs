@@ -3414,6 +3414,7 @@ test("Advancement detail/rubric has one Product API application and conversation
     "packages/owner-services/src/advancement/controller.ts",
     "packages/owner-services/src/advancement/session-store.ts",
     "packages/owner-services/src/advancement/review-application-bridge.ts",
+    "packages/owner-services/src/advancement/review-attempt-correctness.ts",
     "packages/owner-services/src/advancement/recovery-maintenance.ts",
     "packages/owner-services/src/advancement/index.ts",
     "packages/owner-services/package.json",
@@ -3426,6 +3427,7 @@ test("Advancement detail/rubric has one Product API application and conversation
     "packages/cli/src/serve/conversation-protocol-runtime.ts",
     "packages/cli/src/serve/conversation-delete-binding.ts",
     "packages/cli/src/serve/advancement-original-task-application.ts",
+    "packages/cli/src/serve/advancement-controller.ts",
     "packages/server/src/advancement/adapters.ts",
     "packages/owner-kernel/src/conversation-manager.ts",
   ];
@@ -3862,6 +3864,47 @@ test("Advancement detail/rubric has one Product API application and conversation
       (text) => text.replace(
         "ctx.advancementConversationLifecycle.cancelConversationLifecycle(",
         "advancementDetailController.cancelOpenConversationSession(conversationId)",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/core/src/advancement/application.ts",
+      (text) => text.replace(
+        "export class AdvancementReviewAttemptApplicationService",
+        "class RetiredReviewAttemptApplicationService",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/owner-services/src/advancement/controller.ts",
+      (text) => `${text}\nvoid resources.inspectImmediateRoot;`,
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/owner-services/src/advancement/review-attempt-correctness.ts",
+      (text) => `${text}\nif (attempt.phase === "invoking") throw new Error();`,
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/owner-services/src/advancement/index.ts",
+      (text) => `${text}\nexport { createAdvancementReviewAttemptApplication } from "./review-attempt-correctness.js";`,
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/advancement-controller.ts",
+      (text) => text.replace(
+        "createAdvancementReviewAttemptApplication({",
+        "createRetiredReviewAttemptBypass({",
       ),
     )).join("\n"),
     failure,

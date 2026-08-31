@@ -9,6 +9,7 @@ export default defineConfig({
     "src/advancement/proxy-scheduler.ts",
     "src/advancement/recovery-maintenance.ts",
     "src/advancement/review-application-bridge.ts",
+    "src/advancement/review-attempt-correctness.ts",
   ],
   format: ["esm"],
   dts: true,
