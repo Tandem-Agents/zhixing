@@ -25,6 +25,7 @@ import {
   runBackupSetupCommand,
   runRecoveryRootApproveResetCommand,
   runRecoveryRootInvalidateCommand,
+  runRecoveryRootResetCommand,
   runRecoveryRootRotateCommand,
 } from "./backup-command.js";
 import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
@@ -368,6 +369,44 @@ describe("recovery root reset co-signer", () => {
 });
 
 describe("recovery root public lifecycle", () => {
+  it("rejects reset confirmation before decoding approval or opening issuer mechanisms", async () => {
+    const put = vi.fn(async () => undefined);
+    const get = vi.fn(async () => null);
+    const deleteSecret = vi.fn(async () => undefined);
+    const list = vi.fn(async () => [] as SecretRef[]);
+    const unlockState = vi.fn(async () => "unlocked" as const);
+    const readRecoveryPackage = vi.fn(async () => "must-not-read");
+    const openRecoveryTarget = vi.fn(async () => {
+      throw new Error("must not open recovery target");
+    });
+    const writeLine = vi.fn();
+    const secretStore = {
+      put,
+      get,
+      delete: deleteSecret,
+      list,
+      unlockState,
+    } satisfies SecretStorePort;
+
+    await expect(runRecoveryRootResetCommand(
+      { approval: "malformed-reset-approval", userConfirmed: false },
+      {
+        secretStore,
+        readRecoveryPackage,
+        openRecoveryTarget,
+        writeLine,
+      },
+    )).rejects.toThrow("请先确认旧恢复码已永久丢失并准备保存新恢复码");
+    expect(put).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+    expect(deleteSecret).not.toHaveBeenCalled();
+    expect(list).not.toHaveBeenCalled();
+    expect(unlockState).not.toHaveBeenCalled();
+    expect(readRecoveryPackage).not.toHaveBeenCalled();
+    expect(openRecoveryTarget).not.toHaveBeenCalled();
+    expect(writeLine).not.toHaveBeenCalled();
+  });
+
   it("rotates through a verified independent checkpoint and can then invalidate the new code", async () => {
     const fixture = await pairedHomeWithoutRecoveryRoot("v2");
     const initialRuntime = new RecoveryRootEstablishmentRuntime({
@@ -415,48 +454,8 @@ describe("recovery root public lifecycle", () => {
             if (!currentCode) throw new Error("new recovery code was not displayed");
             return currentCode;
           },
-          openRecoveryTarget: async (_binding, recipientKeyId) => {
-            const storedTarget = deferredPairedCheckpointTarget({
-              zhixingHome: fixture.targetHome,
-              deviceId: fixture.targetDeviceId,
-              storageMaintenance: fixture.targetStorage,
-            });
-            const receiver = new PairedCheckpointReceiver({
-              homeId: (await fixture.targetBootstrap.bootstrapStore.loadTrustRecord())!.homeId,
-              sourceDeviceId: fixture.sourceBootstrap.deviceKey.deviceId,
-              targetDeviceId: fixture.targetDeviceId,
-              recipientKeyId: keyIdForPublicKey(
-                (await fixture.targetBootstrap.bootstrapStore.loadTrustRecord())!.recoveryBackupPublicKey!,
-              ),
-              rootLifecycle: true,
-              commitRootActivation: ({ plan, record }) =>
-                commitRecoveryRootLifecycleActivation(
-                  fixture.targetBootstrap.bootstrapStore,
-                  plan,
-                  record,
-                ),
-              staging: new FilePairedCheckpointStaging({
-                root: path.join(
-                  fixture.targetHome,
-                  "distributed-runtime",
-                  "recovery-checkpoint-incoming",
-                ),
-                target: storedTarget,
-                storageMaintenance: fixture.targetStorage,
-              }),
-            });
-            return {
-              target: new PairedRecoveryCheckpointTarget({
-                homeId: (await fixture.sourceBootstrap.bootstrapStore.loadTrustRecord())!.homeId,
-                sourceDeviceId: fixture.sourceBootstrap.deviceKey.deviceId,
-                targetDeviceId: fixture.targetDeviceId,
-                recipientKeyId,
-                transport: receiver,
-                storageMaintenance: fixture.sourceStorage,
-              }),
-              close: async () => undefined,
-            };
-          },
+          openRecoveryTarget: (_binding, recipientKeyId) =>
+            openRootLifecycleTarget(fixture, recipientKeyId),
         },
       );
     expect(currentCode).not.toBe(oldCode);
@@ -482,7 +481,138 @@ describe("recovery root public lifecycle", () => {
     expect(bootstrap.trust.recoveryRootPublicKey).toBeUndefined();
     expect(bootstrap.trust.recoveryBackupPublicKey).toBeUndefined();
   });
+
+  it("resets through a distinct-device approval and one verified domain-reset activation", async () => {
+    const fixture = await pairedHomeWithoutRecoveryRoot("v2");
+    const initialRuntime = new RecoveryRootEstablishmentRuntime({
+      zhixingHome: fixture.targetHome,
+      mesh: fixture.targetBootstrap,
+      secretStore: fixture.targetSecrets,
+      storageMaintenance: fixture.targetStorage,
+    });
+    let initialCode: string | undefined;
+    try {
+      await initialRuntime.start();
+      await runBackupSetupCommand(
+        { pairedDeviceId: fixture.targetDeviceId },
+        {
+          zhixingHome: fixture.sourceHome,
+          secretStore: fixture.sourceSecrets,
+          storageMaintenance: fixture.sourceStorage,
+          writeLine: (line) => {
+            if (line.startsWith("恢复包：")) initialCode = line.slice("恢复包：".length);
+          },
+          readRecoveryPackage: async () => {
+            if (!initialCode) throw new Error("recovery code was not displayed");
+            return initialCode;
+          },
+        },
+      );
+      await withTimeout(initialRuntime.waitUntilActivated(), "target did not activate initial root");
+    } finally {
+      await initialRuntime.stop();
+    }
+    const before = await fixture.sourceBootstrap.bootstrapStore.loadTrustProjection();
+    if (!before) throw new Error("source trust projection was not persisted");
+
+    let approval: string | undefined;
+    await runRecoveryRootApproveResetCommand(
+      { userConfirmed: true },
+      {
+        zhixingHome: fixture.targetHome,
+        secretStore: fixture.targetSecrets,
+        writeLine: (line) => {
+          if (line.startsWith("重置确认码：")) approval = line.slice("重置确认码：".length);
+        },
+        now: () => "2026-08-10T00:20:00.000Z",
+      },
+    );
+    if (!approval) throw new Error("reset approval was not displayed");
+
+    let replacementCode: string | undefined;
+    await runRecoveryRootResetCommand(
+      { approval, userConfirmed: true },
+      {
+        zhixingHome: fixture.sourceHome,
+        secretStore: fixture.sourceSecrets,
+        storageMaintenance: fixture.sourceStorage,
+        writeLine: (line) => {
+          if (line.startsWith("新的恢复码：")) {
+            replacementCode = line.slice("新的恢复码：".length);
+          }
+        },
+        readRecoveryPackage: async () => {
+          if (!replacementCode) throw new Error("replacement recovery code was not displayed");
+          return replacementCode;
+        },
+        openRecoveryTarget: (_binding, recipientKeyId) =>
+          openRootLifecycleTarget(fixture, recipientKeyId),
+      },
+    );
+
+    const source = await fixture.sourceBootstrap.bootstrapStore.loadTrustProjection();
+    const target = await fixture.targetBootstrap.bootstrapStore.loadTrustProjection();
+    expect(source?.trustEpoch).toBe(before.trustEpoch + 1);
+    expect(source?.recoveryRootPublicKey).toBeDefined();
+    expect(source?.recoveryRootPublicKey).not.toBe(before.recoveryRootPublicKey);
+    expect(target?.chainHead).toEqual(source?.chainHead);
+    expect(target?.recoveryRootPublicKey).toBe(source?.recoveryRootPublicKey);
+    expect(source?.members.find((member) => member.device.deviceId === fixture.targetDeviceId)?.state)
+      .toBe("pending-reenroll");
+  });
 });
+
+async function openRootLifecycleTarget(
+  fixture: Awaited<ReturnType<typeof pairedHomeWithoutRecoveryRoot>>,
+  recipientKeyId: string,
+): Promise<{
+  readonly target: PairedRecoveryCheckpointTarget;
+  readonly close: () => Promise<void>;
+}> {
+  const targetTrust = await fixture.targetBootstrap.bootstrapStore.loadTrustRecord();
+  const sourceTrust = await fixture.sourceBootstrap.bootstrapStore.loadTrustRecord();
+  if (!targetTrust?.recoveryBackupPublicKey || !sourceTrust) {
+    throw new Error("root lifecycle target is not ready");
+  }
+  const storedTarget = deferredPairedCheckpointTarget({
+    zhixingHome: fixture.targetHome,
+    deviceId: fixture.targetDeviceId,
+    storageMaintenance: fixture.targetStorage,
+  });
+  const receiver = new PairedCheckpointReceiver({
+    homeId: targetTrust.homeId,
+    sourceDeviceId: fixture.sourceBootstrap.deviceKey.deviceId,
+    targetDeviceId: fixture.targetDeviceId,
+    recipientKeyId: keyIdForPublicKey(targetTrust.recoveryBackupPublicKey),
+    rootLifecycle: true,
+    commitRootActivation: ({ plan, record }) =>
+      commitRecoveryRootLifecycleActivation(
+        fixture.targetBootstrap.bootstrapStore,
+        plan,
+        record,
+      ),
+    staging: new FilePairedCheckpointStaging({
+      root: path.join(
+        fixture.targetHome,
+        "distributed-runtime",
+        "recovery-checkpoint-incoming",
+      ),
+      target: storedTarget,
+      storageMaintenance: fixture.targetStorage,
+    }),
+  });
+  return {
+    target: new PairedRecoveryCheckpointTarget({
+      homeId: sourceTrust.homeId,
+      sourceDeviceId: fixture.sourceBootstrap.deviceKey.deviceId,
+      targetDeviceId: fixture.targetDeviceId,
+      recipientKeyId,
+      transport: receiver,
+      storageMaintenance: fixture.sourceStorage,
+    }),
+    close: async () => undefined,
+  };
+}
 
 async function startActiveCheckpointReceiver(
   fixture: Awaited<ReturnType<typeof pairedHomeWithoutRecoveryRoot>>,

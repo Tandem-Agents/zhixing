@@ -907,7 +907,6 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     "packages/cli/src/serve/disaster-recovery-trust-evidence.ts",
     "packages/core/src/authority/artifact-retention.ts",
     "packages/core/src/authority/commit-log.ts",
-    "packages/cli/src/serve/recovery-root-lifecycle.ts",
     "packages/cli/src/serve/credential-exposure-authority.ts",
     "packages/cli/src/serve/credential-rotation-publication.ts",
     "packages/cli/src/startup.ts",
@@ -1273,10 +1272,30 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
-      "packages/cli/src/serve/recovery-root-lifecycle.ts",
-      (text) => text.replace('"domain-reset-establish"', '"domain-reset-bypass"'),
+      "packages/core/src/backup-recovery/application.ts",
+      (text) => text.replace('commands: Object.freeze(["rotate"', 'commands: Object.freeze(["bypass"'),
     )).join("\n"),
-    /recovery root lifecycle owner, plan exact-set or production binding drifted/,
+    /recovery root lifecycle application owner, confirmation priority, command exact-set or production binding drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/backup-command.ts",
+      (text) => `${text}\nclass RecoveryRootLifecycleService {}`,
+    )).join("\n"),
+    /recovery root lifecycle application owner, confirmation priority, command exact-set or production binding drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/core/src/backup-recovery/application.ts",
+      (text) => text.replace(
+        /    if \(!input\.userConfirmed\) \{\r?\n      throw new BackupRecoveryRootLifecycleError\("reset-confirmation-required"\);\r?\n    \}\r?\n    const approval = freezeResetApproval\(input\.decodeApproval\(\)\);/u,
+        '    const approval = freezeResetApproval(input.decodeApproval());\n' +
+          '    if (!input.userConfirmed) {\n' +
+          '      throw new BackupRecoveryRootLifecycleError("reset-confirmation-required");\n' +
+          "    }",
+      ),
+    )).join("\n"),
+    /recovery root lifecycle application owner, confirmation priority, command exact-set or production binding drifted/,
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(

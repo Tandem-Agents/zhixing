@@ -311,6 +311,444 @@ export class BackupRecoveryAdministrationApplicationService<PreparedRoot, Target
   }
 }
 
+export interface BackupRecoveryRootIdentity {
+  readonly rootPublicKey: string;
+  readonly backupPublicKey: string;
+}
+
+export interface BackupRecoveryRootLifecycleContext {
+  readonly homeId: string;
+  readonly trustEpoch: number;
+  readonly chainHead: {
+    readonly seq: number;
+    readonly eventDigest: string;
+  };
+  readonly currentDeviceId: string;
+  readonly issuerDeviceId: string;
+  readonly issuerKeyId: string;
+  readonly signerKeyId: string;
+  readonly activeDeviceIds: readonly string[];
+  readonly currentRoot?: BackupRecoveryRootIdentity;
+}
+
+export interface BackupRecoveryRootMaterial<Root> {
+  readonly root: Root;
+  readonly identity: BackupRecoveryRootIdentity;
+}
+
+export interface BackupRecoveryPreparedReplacementRoot<Root> {
+  readonly generated: BackupRecoveryRootMaterial<Root>;
+  readonly readBack: BackupRecoveryRootMaterial<Root>;
+}
+
+export interface BackupRecoveryRootResetApproval<Signature> {
+  readonly v: 1;
+  readonly homeId: string;
+  readonly seq: number;
+  readonly prevEventDigest: string;
+  readonly trustEpoch: number;
+  readonly at: string;
+  readonly coSign: {
+    readonly deviceId: string;
+    readonly sig: Signature;
+  };
+}
+
+export type BackupRecoveryRootActivationPlan<Event> =
+  | {
+      readonly v: 1;
+      readonly kind: "rotate";
+      readonly rootEvent: Event;
+    }
+  | {
+      readonly v: 1;
+      readonly kind: "domain-reset-establish";
+      readonly resetEvent: Event;
+      readonly rootEvent: Event;
+    };
+
+export interface BackupRecoveryRootIssuerSession<Root, Event, Checkpoint, Target, Signature> {
+  readonly context: BackupRecoveryRootLifecycleContext;
+  readCurrentPackage(): Promise<BackupRecoveryRootMaterial<Root>>;
+  prepareReplacementRoot(): Promise<BackupRecoveryPreparedReplacementRoot<Root>>;
+  createRotateEvent(input: {
+    readonly currentRoot: Root;
+    readonly candidateRoot: Root;
+    readonly at: string;
+  }): Event;
+  createInvalidationEvent(input: {
+    readonly currentRoot: Root;
+    readonly at: string;
+  }): Event;
+  createResetEvents(input: {
+    readonly approval: BackupRecoveryRootResetApproval<Signature>;
+    readonly candidateRoot: Root;
+    readonly at: string;
+  }): { readonly resetEvent: Event; readonly rootEvent: Event };
+  withCurrentTarget<Result>(
+    candidateRoot: Root,
+    use: (target: Target) => Promise<Result>,
+  ): Promise<Result>;
+  targetId(target: Target): string;
+  captureCheckpoint(input: {
+    readonly plan: BackupRecoveryRootActivationPlan<Event>;
+    readonly candidateRoot: Root;
+    readonly createdAt: string;
+  }): Promise<Checkpoint>;
+  currentCheckpointIds(targetId: string): Promise<readonly string[]>;
+  activate(input: {
+    readonly plan: BackupRecoveryRootActivationPlan<Event>;
+    readonly candidateRoot: Root;
+    readonly checkpoint: Checkpoint;
+    readonly target: Target;
+    readonly supersedeCheckpointIds: readonly string[];
+  }): Promise<void>;
+  commitInvalidation(event: Event): Promise<void>;
+}
+
+export interface BackupRecoveryRootApprovalSession<Signature> {
+  readonly context: BackupRecoveryRootLifecycleContext;
+  createApproval(at: string): BackupRecoveryRootResetApproval<Signature>;
+}
+
+export interface BackupRecoveryRootLifecycleMechanismPort<
+  Root,
+  Event,
+  Checkpoint,
+  Target,
+  Signature,
+> {
+  now(): string;
+  withIssuerSession<Result>(
+    use: (
+      session: BackupRecoveryRootIssuerSession<Root, Event, Checkpoint, Target, Signature>,
+    ) => Promise<Result>,
+  ): Promise<Result>;
+  withApprovalSession<Result>(
+    use: (session: BackupRecoveryRootApprovalSession<Signature>) => Promise<Result>,
+  ): Promise<Result>;
+}
+
+export type BackupRecoveryRootLifecycleErrorCode =
+  | "rotate-confirmation-required"
+  | "invalidate-confirmation-required"
+  | "approve-reset-confirmation-required"
+  | "reset-confirmation-required"
+  | "current-issuer-required"
+  | "current-root-missing"
+  | "reset-current-root-missing"
+  | "current-package-mismatch"
+  | "replacement-readback-mismatch"
+  | "approval-generation-mismatch"
+  | "approval-cosigner-ineligible"
+  | "approval-cosigner-is-issuer";
+
+export class BackupRecoveryRootLifecycleError extends Error {
+  readonly name = "BackupRecoveryRootLifecycleError";
+
+  constructor(readonly code: BackupRecoveryRootLifecycleErrorCode) {
+    super(code);
+  }
+}
+
+export type BackupRecoveryRootLifecycleOutcome<Signature> =
+  | { readonly kind: "rotated" }
+  | { readonly kind: "invalidated" }
+  | {
+      readonly kind: "reset-approved";
+      readonly approval: BackupRecoveryRootResetApproval<Signature>;
+    }
+  | { readonly kind: "reset" };
+
+export const BACKUP_RECOVERY_ROOT_LIFECYCLE_DESCRIPTOR = Object.freeze({
+  owner: "backup-recovery",
+  commands: Object.freeze(["rotate", "invalidate", "approve-reset", "reset"] as const),
+  checkpointed: Object.freeze(["rotate", "reset"] as const),
+});
+
+export interface BackupRecoveryRootLifecycleApplication<Signature> {
+  rotate(input: { readonly userConfirmed: boolean }): Promise<BackupRecoveryRootLifecycleOutcome<Signature>>;
+  invalidate(input: { readonly userConfirmed: boolean }): Promise<BackupRecoveryRootLifecycleOutcome<Signature>>;
+  approveReset(input: { readonly userConfirmed: boolean }): Promise<BackupRecoveryRootLifecycleOutcome<Signature>>;
+  reset(input: {
+    readonly userConfirmed: boolean;
+    readonly decodeApproval: () => BackupRecoveryRootResetApproval<Signature>;
+  }): Promise<BackupRecoveryRootLifecycleOutcome<Signature>>;
+}
+
+/** Sole owner of the public recovery-root lifecycle decisions and command progression. */
+export class BackupRecoveryRootLifecycleApplicationService<
+  Root,
+  Event,
+  Checkpoint,
+  Target,
+  Signature,
+> implements BackupRecoveryRootLifecycleApplication<Signature> {
+  constructor(private readonly mechanism:
+    BackupRecoveryRootLifecycleMechanismPort<Root, Event, Checkpoint, Target, Signature>) {}
+
+  async rotate(
+    input: { readonly userConfirmed: boolean },
+  ): Promise<BackupRecoveryRootLifecycleOutcome<Signature>> {
+    if (!input.userConfirmed) {
+      throw new BackupRecoveryRootLifecycleError("rotate-confirmation-required");
+    }
+    return this.mechanism.withIssuerSession(async (session) => {
+      const context = freezeRootLifecycleContext(session.context);
+      assertCurrentIssuer(context);
+      const current = await session.readCurrentPackage();
+      assertCurrentRoot(context, current.identity);
+      const candidate = await session.prepareReplacementRoot();
+      assertSameRoot(candidate.generated.identity, candidate.readBack.identity);
+      const at = requireCanonicalTime(this.mechanism.now());
+      const rootEvent = session.createRotateEvent({
+        currentRoot: current.root,
+        candidateRoot: candidate.readBack.root,
+        at,
+      });
+      const plan = Object.freeze({
+        v: 1 as const,
+        kind: "rotate" as const,
+        rootEvent,
+      });
+      await session.withCurrentTarget(candidate.readBack.root, async (target) => {
+        const targetId = requireText(session.targetId(target), "Recovery target id");
+        const checkpoint = await session.captureCheckpoint({
+          plan,
+          candidateRoot: candidate.readBack.root,
+          createdAt: at,
+        });
+        const supersedeCheckpointIds = Object.freeze([
+          ...await session.currentCheckpointIds(targetId),
+        ]);
+        await session.activate({
+          plan,
+          candidateRoot: candidate.readBack.root,
+          checkpoint,
+          target,
+          supersedeCheckpointIds,
+        });
+      });
+      return Object.freeze({ kind: "rotated" as const });
+    });
+  }
+
+  async invalidate(
+    input: { readonly userConfirmed: boolean },
+  ): Promise<BackupRecoveryRootLifecycleOutcome<Signature>> {
+    if (!input.userConfirmed) {
+      throw new BackupRecoveryRootLifecycleError("invalidate-confirmation-required");
+    }
+    return this.mechanism.withIssuerSession(async (session) => {
+      const context = freezeRootLifecycleContext(session.context);
+      assertCurrentIssuer(context);
+      const current = await session.readCurrentPackage();
+      assertCurrentRoot(context, current.identity);
+      const event = session.createInvalidationEvent({
+        currentRoot: current.root,
+        at: requireCanonicalTime(this.mechanism.now()),
+      });
+      await session.commitInvalidation(event);
+      return Object.freeze({ kind: "invalidated" as const });
+    });
+  }
+
+  async approveReset(
+    input: { readonly userConfirmed: boolean },
+  ): Promise<BackupRecoveryRootLifecycleOutcome<Signature>> {
+    if (!input.userConfirmed) {
+      throw new BackupRecoveryRootLifecycleError("approve-reset-confirmation-required");
+    }
+    return this.mechanism.withApprovalSession(async (session) => {
+      const context = freezeRootLifecycleContext(session.context);
+      assertEligibleCoSigner(context);
+      const approval = freezeResetApproval(
+        session.createApproval(requireCanonicalTime(this.mechanism.now())),
+      );
+      assertApprovalGeneration(context, approval);
+      return Object.freeze({ kind: "reset-approved" as const, approval });
+    });
+  }
+
+  async reset(input: {
+    readonly userConfirmed: boolean;
+    readonly decodeApproval: () => BackupRecoveryRootResetApproval<Signature>;
+  }): Promise<BackupRecoveryRootLifecycleOutcome<Signature>> {
+    if (!input.userConfirmed) {
+      throw new BackupRecoveryRootLifecycleError("reset-confirmation-required");
+    }
+    const approval = freezeResetApproval(input.decodeApproval());
+    return this.mechanism.withIssuerSession(async (session) => {
+      const context = freezeRootLifecycleContext(session.context);
+      assertCurrentIssuer(context);
+      if (!context.currentRoot) {
+        throw new BackupRecoveryRootLifecycleError("reset-current-root-missing");
+      }
+      assertApprovalGeneration(context, approval);
+      assertApprovalCoSigner(context, approval.coSign.deviceId);
+      const candidate = await session.prepareReplacementRoot();
+      assertSameRoot(candidate.generated.identity, candidate.readBack.identity);
+      const at = requireCanonicalTime(this.mechanism.now());
+      const events = session.createResetEvents({
+        approval,
+        candidateRoot: candidate.readBack.root,
+        at,
+      });
+      const plan = Object.freeze({
+        v: 1 as const,
+        kind: "domain-reset-establish" as const,
+        resetEvent: events.resetEvent,
+        rootEvent: events.rootEvent,
+      });
+      await session.withCurrentTarget(candidate.readBack.root, async (target) => {
+        const targetId = requireText(session.targetId(target), "Recovery target id");
+        const checkpoint = await session.captureCheckpoint({
+          plan,
+          candidateRoot: candidate.readBack.root,
+          createdAt: at,
+        });
+        const supersedeCheckpointIds = Object.freeze([
+          ...await session.currentCheckpointIds(targetId),
+        ]);
+        await session.activate({
+          plan,
+          candidateRoot: candidate.readBack.root,
+          checkpoint,
+          target,
+          supersedeCheckpointIds,
+        });
+      });
+      return Object.freeze({ kind: "reset" as const });
+    });
+  }
+}
+
+function freezeRootLifecycleContext(
+  value: BackupRecoveryRootLifecycleContext,
+): BackupRecoveryRootLifecycleContext {
+  const activeDeviceIds = Object.freeze(value.activeDeviceIds.map((id) =>
+    requireText(id, "Active recovery device id")));
+  if (new Set(activeDeviceIds).size !== activeDeviceIds.length) {
+    throw new TypeError("Active recovery device ids must be unique");
+  }
+  return Object.freeze({
+    homeId: requireText(value.homeId, "Recovery home id"),
+    trustEpoch: requireEpoch(value.trustEpoch),
+    chainHead: Object.freeze({
+      seq: requireEpoch(value.chainHead.seq),
+      eventDigest: requireText(value.chainHead.eventDigest, "Recovery trust head"),
+    }),
+    currentDeviceId: requireText(value.currentDeviceId, "Current recovery device id"),
+    issuerDeviceId: requireText(value.issuerDeviceId, "Recovery issuer device id"),
+    issuerKeyId: requireText(value.issuerKeyId, "Recovery issuer key id"),
+    signerKeyId: requireText(value.signerKeyId, "Recovery signer key id"),
+    activeDeviceIds,
+    ...(value.currentRoot ? { currentRoot: freezeRootIdentity(value.currentRoot) } : {}),
+  });
+}
+
+function freezeRootIdentity(value: BackupRecoveryRootIdentity): BackupRecoveryRootIdentity {
+  return Object.freeze({
+    rootPublicKey: requireText(value.rootPublicKey, "Recovery root public key"),
+    backupPublicKey: requireText(value.backupPublicKey, "Recovery backup public key"),
+  });
+}
+
+function freezeResetApproval<Signature>(
+  value: BackupRecoveryRootResetApproval<Signature>,
+): BackupRecoveryRootResetApproval<Signature> {
+  if (value.v !== 1) throw new TypeError("Recovery root reset approval version is unsupported");
+  return Object.freeze({
+    v: 1,
+    homeId: requireText(value.homeId, "Recovery reset home id"),
+    seq: requireEpoch(value.seq),
+    prevEventDigest: requireText(value.prevEventDigest, "Recovery reset trust head"),
+    trustEpoch: requireEpoch(value.trustEpoch),
+    at: requireCanonicalTime(value.at),
+    coSign: Object.freeze({
+      deviceId: requireText(value.coSign.deviceId, "Recovery reset co-signer"),
+      sig: value.coSign.sig,
+    }),
+  });
+}
+
+function assertCurrentIssuer(context: BackupRecoveryRootLifecycleContext): void {
+  if (
+    context.currentDeviceId !== context.issuerDeviceId ||
+    context.signerKeyId !== context.issuerKeyId
+  ) {
+    throw new BackupRecoveryRootLifecycleError("current-issuer-required");
+  }
+}
+
+function assertCurrentRoot(
+  context: BackupRecoveryRootLifecycleContext,
+  identity: BackupRecoveryRootIdentity,
+): void {
+  if (!context.currentRoot) {
+    throw new BackupRecoveryRootLifecycleError("current-root-missing");
+  }
+  if (!sameRoot(context.currentRoot, identity)) {
+    throw new BackupRecoveryRootLifecycleError("current-package-mismatch");
+  }
+}
+
+function assertSameRoot(
+  generated: BackupRecoveryRootIdentity,
+  readBack: BackupRecoveryRootIdentity,
+): void {
+  if (!sameRoot(generated, readBack)) {
+    throw new BackupRecoveryRootLifecycleError("replacement-readback-mismatch");
+  }
+}
+
+function sameRoot(a: BackupRecoveryRootIdentity, b: BackupRecoveryRootIdentity): boolean {
+  return a.rootPublicKey === b.rootPublicKey && a.backupPublicKey === b.backupPublicKey;
+}
+
+function assertEligibleCoSigner(context: BackupRecoveryRootLifecycleContext): void {
+  if (context.currentDeviceId === context.issuerDeviceId) {
+    throw new BackupRecoveryRootLifecycleError("approval-cosigner-is-issuer");
+  }
+  if (!context.activeDeviceIds.includes(context.currentDeviceId)) {
+    throw new BackupRecoveryRootLifecycleError("approval-cosigner-ineligible");
+  }
+}
+
+function assertApprovalGeneration<Signature>(
+  context: BackupRecoveryRootLifecycleContext,
+  approval: BackupRecoveryRootResetApproval<Signature>,
+): void {
+  if (
+    approval.homeId !== context.homeId ||
+    approval.seq !== context.chainHead.seq + 1 ||
+    approval.prevEventDigest !== context.chainHead.eventDigest ||
+    approval.trustEpoch !== context.trustEpoch
+  ) {
+    throw new BackupRecoveryRootLifecycleError("approval-generation-mismatch");
+  }
+}
+
+function assertApprovalCoSigner(
+  context: BackupRecoveryRootLifecycleContext,
+  deviceId: string,
+): void {
+  if (deviceId === context.issuerDeviceId) {
+    throw new BackupRecoveryRootLifecycleError("approval-cosigner-is-issuer");
+  }
+  if (!context.activeDeviceIds.includes(deviceId)) {
+    throw new BackupRecoveryRootLifecycleError("approval-cosigner-ineligible");
+  }
+}
+
+function requireCanonicalTime(value: string): string {
+  const time = requireText(value, "Recovery lifecycle time");
+  if (new Date(time).toISOString() !== time) {
+    throw new TypeError("Recovery lifecycle time must be canonical");
+  }
+  return time;
+}
+
 function requireBinding(
   configuration: BackupRecoveryAdministrationTargetConfiguration,
   targetId: string,

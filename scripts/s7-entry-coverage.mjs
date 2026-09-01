@@ -7372,7 +7372,6 @@ export function inspectRecoveryBackupAssembly(records) {
   const disasterTarget = byPath.get("packages/cli/src/serve/disaster-recovery-target.ts");
   const artifactRetention = byPath.get("packages/core/src/authority/artifact-retention.ts");
   const authorityCommitLog = byPath.get("packages/core/src/authority/commit-log.ts");
-  const rootLifecycle = byPath.get("packages/cli/src/serve/recovery-root-lifecycle.ts");
   const exposureAuthority = byPath.get("packages/cli/src/serve/credential-exposure-authority.ts");
   const credentialRotation = byPath.get("packages/cli/src/serve/credential-rotation-publication.ts");
   const startup = byPath.get("packages/cli/src/startup.ts");
@@ -7386,7 +7385,7 @@ export function inspectRecoveryBackupAssembly(records) {
     !rootActivation || !controlPlane ||
     !runtime || !pairing || !disasterCommand || !disasterCandidate || !disasterEvidence ||
     !disasterInstallation || !disasterTarget || !artifactRetention || !authorityCommitLog ||
-    !rootLifecycle || !exposureAuthority ||
+    !exposureAuthority ||
     !credentialRotation || !startup || !setupDelivery || !checkpointService ||
     !checkpointOwner || !pairedTarget
   ) {
@@ -7855,24 +7854,52 @@ export function inspectRecoveryBackupAssembly(records) {
     failures.push("disaster verified replay, install decision or target-wide terminal order drifted");
   }
   const rootLifecycleDescriptor = frozenLiteralDescriptor(
-    "packages/cli/src/serve/recovery-root-lifecycle.ts",
-    rootLifecycle,
-    "RECOVERY_ROOT_LIFECYCLE_DESCRIPTOR",
+    "packages/core/src/backup-recovery/application.ts",
+    backupApplication,
+    "BACKUP_RECOVERY_ROOT_LIFECYCLE_DESCRIPTOR",
   );
   const expectedRootLifecycleDescriptor = {
-    owner: "current-issuer",
-    roles: ["anchor-executor", "anchor-only"],
-    operations: ["rotate", "invalidate", "domain-reset-establish"],
-    checkpointed: ["rotate", "domain-reset-establish"],
+    owner: "backup-recovery",
+    commands: ["rotate", "invalidate", "approve-reset", "reset"],
+    checkpointed: ["rotate", "reset"],
   };
+  const rootResetStart = backupApplication.indexOf("  async reset(");
+  const rootResetConfirmation = backupApplication.indexOf(
+    'throw new BackupRecoveryRootLifecycleError("reset-confirmation-required")',
+    rootResetStart,
+  );
+  const rootResetDecode = backupApplication.indexOf("input.decodeApproval()", rootResetStart);
+  const rootResetIssuerSession = backupApplication.indexOf(
+    "return this.mechanism.withIssuerSession",
+    rootResetStart,
+  );
   if (
     JSON.stringify(rootLifecycleDescriptor) !== JSON.stringify(expectedRootLifecycleDescriptor) ||
-    count(rootLifecycle, "RECOVERY_ROOT_LIFECYCLE_DESCRIPTOR.operations[0]") !== 1 ||
-    count(rootLifecycle, "RECOVERY_ROOT_LIFECYCLE_DESCRIPTOR.operations[1]") !== 1 ||
-    count(rootLifecycle, "RECOVERY_ROOT_LIFECYCLE_DESCRIPTOR.operations[2]") !== 1 ||
-    count(backup, "new RecoveryRootLifecycleService({") !== 1
+    count(backupApplication, "class BackupRecoveryRootLifecycleApplicationService") !== 1 ||
+    count(backupApplication, "async rotate(") !== 1 ||
+    count(backupApplication, "async invalidate(") !== 1 ||
+    count(backupApplication, "async approveReset(") !== 1 ||
+    count(backupApplication, "async reset(") !== 1 ||
+    !backupApplication.includes("assertCurrentRoot(context, current.identity)") ||
+    !backupApplication.includes("assertApprovalGeneration(context, approval)") ||
+    !backupApplication.includes("assertApprovalCoSigner(context, approval.coSign.deviceId)") ||
+    count(backup, "new BackupRecoveryRootLifecycleApplicationService({") !== 1 ||
+    count(backup, ".rotate(input)") !== 1 ||
+    count(backup, ".invalidate(input)") !== 1 ||
+    count(backup, ".approveReset(input)") !== 1 ||
+    count(backup, ".reset({") !== 1 ||
+    !backup.includes("decodeApproval: () => decodeResetApproval(input.approval)") ||
+    backup.includes("approval: decodeResetApproval(input.approval)") ||
+    rootResetStart < 0 ||
+    rootResetConfirmation < rootResetStart ||
+    rootResetDecode < rootResetConfirmation ||
+    rootResetIssuerSession < rootResetDecode ||
+    backup.includes("RecoveryRootLifecycleService") ||
+    records.some(({ relative, text }) =>
+      relative.endsWith("recovery-root-lifecycle.ts") ||
+      text.includes('from "./recovery-root-lifecycle.js"'))
   ) {
-    failures.push("recovery root lifecycle owner, plan exact-set or production binding drifted");
+    failures.push("recovery root lifecycle application owner, confirmation priority, command exact-set or production binding drifted");
   }
   if (
     count(runtime, "registerPairedCheckpointMeshService(") !== 1 ||
@@ -7949,8 +7976,12 @@ export function inspectRecoveryBackupAssembly(records) {
     count(backup, "const context = await openResetApprovalContext(options)") !== 1 ||
     !approvalContext.includes("await loadDeviceKey(secretStore, deviceId)") ||
     !approvalContext.includes("store.loadTrustProjection()") ||
-    !approvalContext.includes('member.state !== "active"') ||
-    !approvalContext.includes("projection.issuer.deviceId === key.deviceId") ||
+    !backupApplication.includes("assertEligibleCoSigner(context)") ||
+    !backupApplication.includes("assertApprovalCoSigner(context, approval.coSign.deviceId)") ||
+    !backupApplication.includes("context.activeDeviceIds.includes(context.currentDeviceId)") ||
+    !backupApplication.includes("context.activeDeviceIds.includes(deviceId)") ||
+    approvalContext.includes('member.state !== "active"') ||
+    approvalContext.includes("projection.issuer.deviceId === key.deviceId") ||
     approvalContext.includes("loadOrCreateDeviceKey(") ||
     approvalContext.includes("authorityLog(")
   ) {

@@ -7,9 +7,15 @@ import {
   type BackupRecoveryAdministrationSetupResult,
   type BackupRecoveryAdministrationStatus,
   type BackupRecoveryAdministrationTargetBinding,
+  BackupRecoveryRootLifecycleApplicationService,
+  BackupRecoveryRootLifecycleError,
+  type BackupRecoveryRootActivationPlan,
+  type BackupRecoveryRootLifecycleContext,
 } from "@zhixing/core/backup-recovery/application";
 import type {
   DeviceIdentity,
+  HomeTrustEvent,
+  HomeTrustEventWithBody,
   HomeTrustRecord,
   MeshRoleBootConfig,
   SecretStorePort,
@@ -50,9 +56,11 @@ import {
 } from "@zhixing/mesh/paired-checkpoint-target";
 import {
   applyTrustEvent,
+  buildHomeTrustRecord,
   createDomainResetApproval,
   createDomainResetEventFromApproval,
   createRecoveryRootEvent,
+  createSignedTrustEvent,
   type DomainResetApproval,
   type TrustProjection,
 } from "@zhixing/mesh/trust-chain";
@@ -68,7 +76,6 @@ import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import { readRecoveryPackageFromTty } from "./recovery-package-input.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
-import { RecoveryRootLifecycleService } from "./recovery-root-lifecycle.js";
 
 export interface BackupCommandOptions {
   readonly zhixingHome?: string;
@@ -116,67 +123,38 @@ export async function runRecoveryRootRotateCommand(
   input: { readonly userConfirmed: boolean },
   options: BackupCommandOptions = {},
 ): Promise<void> {
-  if (!input.userConfirmed) throw new Error("请先确认已准备保存新的恢复码");
-  const context = await openContext(options, false);
-  const currentPackage = requireCurrentRecoveryPackage(
-    await readDecodedRecoveryPackage(options.readRecoveryPackage),
+  const outcome = await mapRootLifecycleError(() =>
+    createBackupRecoveryRootLifecycleApplication(options).rotate(input));
+  if (outcome.kind !== "rotated") throw new Error("恢复根轮换返回了错误的产品结果");
+  (options.writeLine ?? createStdoutWriter().line)(
+    "新的恢复码已回读验证并启用；旧恢复码已永久失效。",
   );
-  const candidate = await prepareReplacementRoot(context, options);
-  const target = await openCurrentTarget(context, candidate.root, options);
-  try {
-    const at = context.now();
-    const rootEvent = createRecoveryRootEvent({
-      current: context.projection,
-      op: "rotate",
-      candidate: candidate.root,
-      outerSigner: currentPackage.root,
-      at,
-    });
-    const checkpoint = await captureRootLifecycleCheckpoint(context, {
-      v: 1,
-      kind: "rotate",
-      rootEvent,
-    }, candidate.root, at);
-    await (await lifecycle(context)).rotate({
-      currentRoot: currentPackage.root,
-      candidateRoot: candidate.root,
-      rootEvent,
-      checkpoint,
-      target: target.target,
-      supersedeCheckpointIds: await currentRootCheckpointIds(context, target.target.targetId),
-    });
-    context.writeLine("新的恢复码已回读验证并启用；旧恢复码已永久失效。");
-  } finally {
-    await target.close();
-  }
 }
 
 export async function runRecoveryRootInvalidateCommand(
   input: { readonly userConfirmed: boolean },
   options: BackupCommandOptions = {},
 ): Promise<void> {
-  if (!input.userConfirmed) throw new Error("请先确认立即停用当前恢复码");
-  const context = await openContext(options, false);
-  const decoded = requireCurrentRecoveryPackage(
-    await readDecodedRecoveryPackage(options.readRecoveryPackage),
+  const outcome = await mapRootLifecycleError(() =>
+    createBackupRecoveryRootLifecycleApplication(options).invalidate(input));
+  if (outcome.kind !== "invalidated") throw new Error("恢复根停用返回了错误的产品结果");
+  (options.writeLine ?? createStdoutWriter().line)(
+    "当前恢复码已停用；创建新恢复码前，恢复备份不可用于接管值班。",
   );
-  await (await lifecycle(context)).invalidate(decoded.root);
-  context.writeLine("当前恢复码已停用；创建新恢复码前，恢复备份不可用于接管值班。");
 }
 
 export async function runRecoveryRootApproveResetCommand(
   input: { readonly userConfirmed: boolean },
   options: BackupCommandOptions = {},
 ): Promise<void> {
-  if (!input.userConfirmed) throw new Error("请先在另一台已加入设备上确认重置恢复码");
-  const context = await openResetApprovalContext(options);
-  const approval = createDomainResetApproval({
-    current: context.projection,
-    coSigner: context.key,
-    at: context.now(),
-  });
-  context.writeLine(`重置确认码：${encodeResetApproval(approval)}`);
-  context.writeLine("请把确认码交给当前主设备，并立即在那里完成恢复码重置。");
+  const outcome = await mapRootLifecycleError(() =>
+    createBackupRecoveryRootLifecycleApplication(options).approveReset(input));
+  if (outcome.kind !== "reset-approved") {
+    throw new Error("恢复根共同确认返回了错误的产品结果");
+  }
+  const writeLine = options.writeLine ?? createStdoutWriter().line;
+  writeLine(`重置确认码：${encodeResetApproval(outcome.approval)}`);
+  writeLine("请把确认码交给当前主设备，并立即在那里完成恢复码重置。");
 }
 
 async function openResetApprovalContext(options: BackupCommandOptions): Promise<{
@@ -205,14 +183,6 @@ async function openResetApprovalContext(options: BackupCommandOptions): Promise<
   if (!projection || !record || canonicalize(projection.chainHead) !== canonicalize(record.chainHead)) {
     throw new Error("当前设备缺少可验证的最新信任记录");
   }
-  const member = projection.members.find((candidate) =>
-    candidate.device.deviceId === key.deviceId);
-  if (!member || member.state !== "active") {
-    throw new Error("只有当前安全域中的有效设备可以共同确认恢复码重置");
-  }
-  if (projection.issuer.deviceId === key.deviceId) {
-    throw new Error("当前主设备不能同时作为第二台共同确认设备");
-  }
   return {
     key,
     projection,
@@ -225,42 +195,15 @@ export async function runRecoveryRootResetCommand(
   input: { readonly approval: string; readonly userConfirmed: boolean },
   options: BackupCommandOptions = {},
 ): Promise<void> {
-  if (!input.userConfirmed) throw new Error("请先确认旧恢复码已永久丢失并准备保存新恢复码");
-  const context = await openContext(options, false);
-  const resetEvent = createDomainResetEventFromApproval({
-    current: context.projection,
-    issuer: context.issuerKey,
-    approval: decodeResetApproval(input.approval),
-  });
-  const afterReset = applyTrustEvent(context.projection, resetEvent);
-  const candidate = await prepareReplacementRoot(context, options);
-  const rootEvent = createRecoveryRootEvent({
-    current: afterReset,
-    op: "establish",
-    candidate: candidate.root,
-    outerSigner: context.issuerKey,
-    at: context.now(),
-  });
-  const target = await openCurrentTarget(context, candidate.root, options);
-  try {
-    const checkpoint = await captureRootLifecycleCheckpoint(context, {
-      v: 1,
-      kind: "domain-reset-establish",
-      resetEvent,
-      rootEvent,
-    }, candidate.root, rootEvent.at);
-    await (await lifecycle(context)).reset({
-      resetEvent,
-      rootEvent,
-      candidateRoot: candidate.root,
-      checkpoint,
-      target: target.target,
-      supersedeCheckpointIds: await currentRootCheckpointIds(context, target.target.targetId),
-    });
-    context.writeLine("新的恢复码已在独立目标回读验证并启用；其他设备需要重新加入。");
-  } finally {
-    await target.close();
-  }
+  const outcome = await mapRootLifecycleError(() =>
+    createBackupRecoveryRootLifecycleApplication(options).reset({
+      userConfirmed: input.userConfirmed,
+      decodeApproval: () => decodeResetApproval(input.approval),
+    }));
+  if (outcome.kind !== "reset") throw new Error("恢复根重置返回了错误的产品结果");
+  (options.writeLine ?? createStdoutWriter().line)(
+    "新的恢复码已在独立目标回读验证并启用；其他设备需要重新加入。",
+  );
 }
 
 export function recoveryRootPublicError(_error: unknown): Error {
@@ -449,6 +392,276 @@ async function mapBackupAdministrationError<Result>(
       "verification-candidate-missing": "当前恢复根没有待验证的恢复备份",
       "verification-target-binding-missing": "待验证恢复备份的目标绑定不存在",
       "recovery-root-missing": "当前 home 尚未建立恢复根",
+    };
+    throw new Error(messages[error.code]);
+  }
+}
+
+type RecoveryRootLifecycleTrustEvent = HomeTrustEventWithBody<
+  Extract<HomeTrustEvent["body"], { readonly t: "recovery-root" | "domain-reset" }>
+>;
+
+type RecoveryRootRotateEvent = HomeTrustEventWithBody<
+  Extract<HomeTrustEvent["body"], { readonly t: "recovery-root"; readonly op: "rotate" }>
+>;
+
+type RecoveryRootEstablishEvent = HomeTrustEventWithBody<
+  Extract<HomeTrustEvent["body"], { readonly t: "recovery-root"; readonly op: "establish" }>
+>;
+
+type RecoveryRootResetEvent = HomeTrustEventWithBody<
+  Extract<HomeTrustEvent["body"], { readonly t: "domain-reset" }>
+>;
+
+type RecoveryRootResetSignature = DomainResetApproval["coSign"]["sig"];
+
+function createBackupRecoveryRootLifecycleApplication(
+  options: BackupCommandOptions,
+): BackupRecoveryRootLifecycleApplicationService<
+  RecoveryRoot,
+  RecoveryRootLifecycleTrustEvent,
+  CheckpointPackage,
+  RetirableRecoveryCheckpointTarget,
+  RecoveryRootResetSignature
+> {
+  return new BackupRecoveryRootLifecycleApplicationService({
+    now: options.now ?? (() => new Date().toISOString()),
+    withIssuerSession: async (use) => {
+      const context = await openContext(options, false);
+      return use({
+        context: projectRootLifecycleContext({
+          projection: context.projection,
+          currentDeviceId: context.key.deviceId,
+          signerKeyId: context.issuerKey.deviceId,
+        }),
+        readCurrentPackage: async () => rootMaterial(requireCurrentRecoveryPackage(
+          await readDecodedRecoveryPackage(options.readRecoveryPackage),
+        ).root),
+        prepareReplacementRoot: () => prepareReplacementRoot(context, options),
+        createRotateEvent: ({ currentRoot, candidateRoot, at }) => createRecoveryRootEvent({
+          current: context.projection,
+          op: "rotate",
+          candidate: candidateRoot,
+          outerSigner: currentRoot,
+          at,
+        }),
+        createInvalidationEvent: ({ currentRoot, at }) => createSignedTrustEvent({
+          current: context.projection,
+          at,
+          signer: currentRoot,
+          body: {
+            t: "recovery-root" as const,
+            op: "invalidate" as const,
+            signedBy: "recovery-root" as const,
+          },
+        }),
+        createResetEvents: ({ approval, candidateRoot, at }) => {
+          const resetEvent = createDomainResetEventFromApproval({
+            current: context.projection,
+            issuer: context.issuerKey,
+            approval,
+          });
+          const afterReset = applyTrustEvent(context.projection, resetEvent);
+          return {
+            resetEvent,
+            rootEvent: createRecoveryRootEvent({
+              current: afterReset,
+              op: "establish",
+              candidate: candidateRoot,
+              outerSigner: context.issuerKey,
+              at,
+            }),
+          };
+        },
+        withCurrentTarget: async (candidateRoot, useTarget) => {
+          const connection = await openCurrentTarget(context, candidateRoot, options);
+          try {
+            return await useTarget(connection.target);
+          } finally {
+            await connection.close();
+          }
+        },
+        targetId: (target) => target.targetId,
+        captureCheckpoint: ({ plan, candidateRoot, createdAt }) =>
+          captureRootLifecycleCheckpoint(
+            context,
+            toRecoveryActivationPlan(plan),
+            candidateRoot,
+            createdAt,
+          ),
+        currentCheckpointIds: (targetId) => currentRootCheckpointIds(context, targetId),
+        activate: async ({
+          plan,
+          candidateRoot,
+          checkpoint,
+          target,
+          supersedeCheckpointIds,
+        }) => {
+          const activationPlan = toRecoveryActivationPlan(plan);
+          let next = context.projection;
+          if (activationPlan.kind === "domain-reset-establish") {
+            next = applyTrustEvent(next, activationPlan.resetEvent);
+          }
+          next = applyTrustEvent(next, activationPlan.rootEvent);
+          const targetRecord = buildHomeTrustRecord(next, context.issuerKey);
+          await new RecoveryActivationCoordinator(context.store.bootstrapAuthority()).activatePrepared({
+            current: context.projection,
+            plan: activationPlan,
+            checkpoint,
+            candidateRoot,
+            issuerIdentity: currentIssuerIdentity(context),
+            target,
+            sourceIndependenceDomain: `filesystem:${await sourceDevice(context.store)}`,
+            now: context.now,
+            onStep: async (step) => {
+              if (step === "verified") {
+                await activateIndependentRootTarget(target, {
+                  checkpointId: checkpoint.envelope.checkpointId,
+                  event: activationPlan.rootEvent,
+                  record: targetRecord,
+                });
+              }
+            },
+            supersedeCheckpointIds,
+          });
+          const record = await context.store.loadTrustRecord();
+          if (!record) {
+            throw new Error(activationPlan.kind === "rotate"
+              ? "恢复根轮换没有形成耐久信任记录"
+              : "恢复根重置没有形成耐久信任记录");
+          }
+        },
+        commitInvalidation: async (event) => {
+          const next = applyTrustEvent(context.projection, event);
+          const record = buildHomeTrustRecord(next, context.issuerKey);
+          await context.store.appendTrustEvent({ event, record });
+        },
+      });
+    },
+    withApprovalSession: async (use) => {
+      const context = await openResetApprovalContext(options);
+      return use({
+        context: projectRootLifecycleContext({
+          projection: context.projection,
+          currentDeviceId: context.key.deviceId,
+          signerKeyId: context.key.deviceId,
+        }),
+        createApproval: (at) => createDomainResetApproval({
+          current: context.projection,
+          coSigner: context.key,
+          at,
+        }),
+      });
+    },
+  });
+}
+
+function projectRootLifecycleContext(input: {
+  readonly projection: TrustProjection;
+  readonly currentDeviceId: string;
+  readonly signerKeyId: string;
+}): BackupRecoveryRootLifecycleContext {
+  const root = input.projection.recoveryRootPublicKey && input.projection.recoveryBackupPublicKey
+    ? {
+        rootPublicKey: input.projection.recoveryRootPublicKey,
+        backupPublicKey: input.projection.recoveryBackupPublicKey,
+      }
+    : undefined;
+  return Object.freeze({
+    homeId: input.projection.homeId,
+    trustEpoch: input.projection.trustEpoch,
+    chainHead: Object.freeze({ ...input.projection.chainHead }),
+    currentDeviceId: input.currentDeviceId,
+    issuerDeviceId: input.projection.issuer.deviceId,
+    issuerKeyId: input.projection.issuer.issuerKeyId,
+    signerKeyId: input.signerKeyId,
+    activeDeviceIds: Object.freeze(input.projection.members
+      .filter((member) => member.state === "active")
+      .map((member) => member.device.deviceId)),
+    ...(root ? { currentRoot: Object.freeze(root) } : {}),
+  });
+}
+
+function rootMaterial(root: RecoveryRoot): {
+  readonly root: RecoveryRoot;
+  readonly identity: { readonly rootPublicKey: string; readonly backupPublicKey: string };
+} {
+  return Object.freeze({ root, identity: Object.freeze(root.publicIdentity()) });
+}
+
+function toRecoveryActivationPlan(
+  plan: BackupRecoveryRootActivationPlan<RecoveryRootLifecycleTrustEvent>,
+): Parameters<RecoveryActivationCoordinator["activatePrepared"]>[0]["plan"] {
+  if (plan.kind === "rotate") {
+    if (!isRecoveryRootRotateEvent(plan.rootEvent)) {
+      throw new TypeError("Recovery root rotate plan contains the wrong event");
+    }
+    return Object.freeze({ v: 1, kind: "rotate", rootEvent: plan.rootEvent });
+  }
+  if (
+    !isRecoveryRootResetEvent(plan.resetEvent) ||
+    !isRecoveryRootEstablishEvent(plan.rootEvent)
+  ) {
+    throw new TypeError("Recovery root reset plan contains the wrong events");
+  }
+  return Object.freeze({
+    v: 1,
+    kind: "domain-reset-establish",
+    resetEvent: plan.resetEvent,
+    rootEvent: plan.rootEvent,
+  });
+}
+
+function isRecoveryRootRotateEvent(
+  event: RecoveryRootLifecycleTrustEvent,
+): event is RecoveryRootRotateEvent {
+  return event.body.t === "recovery-root" && event.body.op === "rotate";
+}
+
+function isRecoveryRootEstablishEvent(
+  event: RecoveryRootLifecycleTrustEvent,
+): event is RecoveryRootEstablishEvent {
+  return event.body.t === "recovery-root" && event.body.op === "establish";
+}
+
+function isRecoveryRootResetEvent(
+  event: RecoveryRootLifecycleTrustEvent,
+): event is RecoveryRootResetEvent {
+  return event.body.t === "domain-reset";
+}
+
+async function activateIndependentRootTarget(
+  target: RetirableRecoveryCheckpointTarget,
+  input: {
+    readonly checkpointId: string;
+    readonly event: HomeTrustEvent;
+    readonly record: HomeTrustRecord;
+  },
+): Promise<void> {
+  if (!("activateRoot" in target) || typeof target.activateRoot !== "function") return;
+  await (target.activateRoot as (value: typeof input) => Promise<void>)(input);
+}
+
+async function mapRootLifecycleError<Result>(
+  action: () => Promise<Result>,
+): Promise<Result> {
+  try {
+    return await action();
+  } catch (error) {
+    if (!(error instanceof BackupRecoveryRootLifecycleError)) throw error;
+    const messages: Record<typeof error.code, string> = {
+      "rotate-confirmation-required": "请先确认已准备保存新的恢复码",
+      "invalidate-confirmation-required": "请先确认立即停用当前恢复码",
+      "approve-reset-confirmation-required": "请先在另一台已加入设备上确认重置恢复码",
+      "reset-confirmation-required": "请先确认旧恢复码已永久丢失并准备保存新恢复码",
+      "current-issuer-required": "只有当前值班设备可以管理恢复根",
+      "current-root-missing": "恢复包不是当前有效恢复根",
+      "reset-current-root-missing": "Domain reset requires an active recovery root",
+      "current-package-mismatch": "恢复包不是当前有效恢复根",
+      "replacement-readback-mismatch": "回读的恢复码与本次生成的新恢复码不一致",
+      "approval-generation-mismatch": "Domain reset approval does not match the current trust generation",
+      "approval-cosigner-ineligible": "只有当前安全域中的有效设备可以共同确认恢复码重置",
+      "approval-cosigner-is-issuer": "当前主设备不能同时作为第二台共同确认设备",
     };
     throw new Error(messages[error.code]);
   }
@@ -826,17 +1039,19 @@ function currentIssuerIdentity(context: BackupContext): DeviceIdentity {
 async function prepareReplacementRoot(
   context: BackupContext,
   options: BackupCommandOptions,
-): Promise<{ readonly root: RecoveryRoot }> {
+): Promise<{
+  readonly generated: ReturnType<typeof rootMaterial>;
+  readonly readBack: ReturnType<typeof rootMaterial>;
+}> {
   const generated = RecoveryRoot.generate();
   context.writeLine(`新的恢复码：${encodeRecoveryPackage(generated)}`);
   const readBack = requireCurrentRecoveryPackage(
     await readDecodedRecoveryPackage(options.readRecoveryPackage),
   );
-  if (
-    readBack.root.rootPublicKey !== generated.rootPublicKey ||
-    readBack.root.backupPublicKey !== generated.backupPublicKey
-  ) throw new Error("回读的恢复码与本次生成的新恢复码不一致");
-  return { root: readBack.root };
+  return Object.freeze({
+    generated: rootMaterial(generated),
+    readBack: rootMaterial(readBack.root),
+  });
 }
 
 async function openCurrentTarget(
@@ -884,16 +1099,6 @@ async function currentRootCheckpointIds(
     targetId,
   });
   return replay ? [replay.checkpointId] : [];
-}
-
-async function lifecycle(context: BackupContext): Promise<RecoveryRootLifecycleService> {
-  return new RecoveryRootLifecycleService({
-    store: context.store,
-    issuerKey: context.issuerKey,
-    issuerIdentity: currentIssuerIdentity(context),
-    sourceIndependenceDomain: `filesystem:${await sourceDevice(context.store)}`,
-    now: context.now,
-  });
 }
 
 const RESET_APPROVAL_PREFIX = "zxra1:";
