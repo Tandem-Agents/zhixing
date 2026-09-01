@@ -1,3 +1,335 @@
+export type BackupRecoveryAdministrationTargetSelection =
+  | { readonly kind: "directory"; readonly directory: string }
+  | {
+      readonly kind: "paired-device";
+      readonly selector:
+        | { readonly kind: "display-name"; readonly value: string }
+        | { readonly kind: "device-id"; readonly value: string };
+    };
+
+export type BackupRecoveryAdministrationTargetBinding =
+  | {
+      readonly kind: "directory";
+      readonly targetId: string;
+      readonly directory: string;
+    }
+  | {
+      readonly kind: "paired-device";
+      readonly targetId: string;
+      readonly deviceId: string;
+    };
+
+export interface BackupRecoveryAdministrationPairedDevice {
+  readonly deviceId: string;
+  readonly displayName: string;
+  readonly active: boolean;
+  readonly current: boolean;
+}
+
+export type BackupRecoveryAdministrationRootState =
+  | { readonly kind: "missing" }
+  | {
+      readonly kind: "established";
+      readonly recipientKeyId: string;
+      readonly checkpointRevision: string;
+    };
+
+export interface BackupRecoveryAdministrationTargetConfiguration {
+  readonly currentTargetId: string;
+  readonly bindings: readonly BackupRecoveryAdministrationTargetBinding[];
+}
+
+export interface BackupRecoveryAdministrationVerificationCandidate {
+  readonly checkpointId: string;
+  readonly targetId: string;
+}
+
+export type BackupRecoveryAdministrationStatus =
+  | {
+      readonly state: "not-configured";
+      readonly fullBackupReady: false;
+      readonly nextAction: "run-backup-setup";
+    }
+  | {
+      readonly state: "pending-verification";
+      readonly fullBackupReady: false;
+      readonly nextAction: "run-backup-verify";
+    }
+  | {
+      readonly state: "configured-empty";
+      readonly fullBackupReady: false;
+      readonly nextAction: "run-backup-setup";
+    }
+  | {
+      readonly state: "recoverable";
+      readonly fullBackupReady: true;
+    }
+  | {
+      readonly state: "unavailable";
+      readonly fullBackupReady: boolean;
+      readonly nextAction:
+        | "repair-backup-configuration"
+        | "start-authenticated-mesh"
+        | "check-backup-target";
+    };
+
+export type BackupRecoveryAdministrationSetupResult =
+  | { readonly kind: "initial-root-established" }
+  | { readonly kind: "legacy-root-established" }
+  | { readonly kind: "checkpoint-created"; readonly checkpointId: string };
+
+export type BackupRecoveryAdministrationErrorCode =
+  | "duplicate-paired-device-name"
+  | "invalid-paired-device"
+  | "missing-recipient-identity"
+  | "target-not-configured"
+  | "current-target-binding-missing"
+  | "verification-candidate-missing"
+  | "verification-target-binding-missing"
+  | "recovery-root-missing";
+
+export class BackupRecoveryAdministrationError extends Error {
+  readonly name = "BackupRecoveryAdministrationError";
+
+  constructor(readonly code: BackupRecoveryAdministrationErrorCode) {
+    super(code);
+  }
+}
+
+export interface BackupRecoveryAdministrationMechanismPort<PreparedRoot, Target, RecoveryPackage> {
+  listPairedDevices(): Promise<readonly BackupRecoveryAdministrationPairedDevice[]>;
+  readRootState(): Promise<BackupRecoveryAdministrationRootState>;
+  prepareInitialRoot(): Promise<PreparedRoot>;
+  preparedRootRecipientKeyId(prepared: PreparedRoot): string;
+  selectTarget(binding: BackupRecoveryAdministrationTargetBinding): Promise<void>;
+  withDirectoryTarget<Result>(
+    directory: string,
+    use: (
+      binding: Extract<BackupRecoveryAdministrationTargetBinding, { readonly kind: "directory" }>,
+      target: Target,
+    ) => Promise<Result>,
+  ): Promise<Result>;
+  withSelectedTarget<Result>(
+    binding: BackupRecoveryAdministrationTargetBinding,
+    recipientKeyId: string,
+    use: (target: Target) => Promise<Result>,
+  ): Promise<Result>;
+  replayRootActivation(
+    binding: BackupRecoveryAdministrationTargetBinding,
+    target: Target,
+  ): Promise<void>;
+  establishInitialRoot(prepared: PreparedRoot, target: Target): Promise<{
+    readonly legacyTrustOnly: boolean;
+  }>;
+  activateInitialRoot(
+    binding: BackupRecoveryAdministrationTargetBinding,
+    prepared: PreparedRoot,
+    target: Target,
+  ): Promise<void>;
+  createCheckpoint(target: Target, requestId: string): Promise<{ readonly checkpointId: string }>;
+  loadTargetConfiguration(): Promise<BackupRecoveryAdministrationTargetConfiguration | undefined>;
+  verificationCandidate(
+    targetId: string,
+  ): Promise<BackupRecoveryAdministrationVerificationCandidate | undefined>;
+  readRecoveryPackage(): Promise<RecoveryPackage>;
+  verifyCheckpoint(input: {
+    readonly target: Target;
+    readonly checkpointId: string;
+    readonly recoveryPackage: RecoveryPackage;
+  }): Promise<void>;
+  readStatus(targetId: string): Promise<{
+    readonly state: "not-configured" | "pending-verification" | "recoverable" | "unavailable";
+    readonly fullBackupReady: boolean;
+    readonly code?: "configuration-invalid" | "runtime-unavailable" | "target-unavailable";
+  }>;
+}
+
+export interface BackupRecoveryAdministrationApplication {
+  setup(target: BackupRecoveryAdministrationTargetSelection): Promise<BackupRecoveryAdministrationSetupResult>;
+  verify(): Promise<{ readonly checkpointId: string }>;
+  status(): Promise<BackupRecoveryAdministrationStatus>;
+}
+
+/**
+ * Owns the finite backup-target product decisions. Root rotation/reset and disaster recovery are
+ * deliberately outside this application boundary.
+ */
+export class BackupRecoveryAdministrationApplicationService<PreparedRoot, Target, RecoveryPackage>
+  implements BackupRecoveryAdministrationApplication
+{
+  constructor(
+    private readonly mechanism:
+      BackupRecoveryAdministrationMechanismPort<PreparedRoot, Target, RecoveryPackage>,
+  ) {}
+
+  async setup(
+    selection: BackupRecoveryAdministrationTargetSelection,
+  ): Promise<BackupRecoveryAdministrationSetupResult> {
+    if (selection.kind === "directory") {
+      const directory = requireNonEmpty(selection.directory, "Recovery backup directory");
+      return this.mechanism.withDirectoryTarget(directory, async (binding, target) => {
+        await this.mechanism.selectTarget(binding);
+        const root = await this.mechanism.readRootState();
+        if (root.kind === "established") {
+          const checkpoint = await this.mechanism.createCheckpoint(
+            target,
+            `backup-setup:${binding.targetId}:${root.checkpointRevision}`,
+          );
+          return Object.freeze({
+            kind: "checkpoint-created" as const,
+            checkpointId: checkpoint.checkpointId,
+          });
+        }
+        const prepared = await this.mechanism.prepareInitialRoot();
+        const established = await this.mechanism.establishInitialRoot(prepared, target);
+        return Object.freeze({
+          kind: established.legacyTrustOnly
+            ? "legacy-root-established" as const
+            : "initial-root-established" as const,
+        });
+      });
+    }
+
+    const binding = await this.#resolvePairedTarget(selection);
+    const root = await this.mechanism.readRootState();
+    if (root.kind === "established") {
+      await this.mechanism.selectTarget(binding);
+      return this.mechanism.withSelectedTarget(binding, root.recipientKeyId, async (target) => {
+        await this.mechanism.replayRootActivation(binding, target);
+        const checkpoint = await this.mechanism.createCheckpoint(
+          target,
+          `backup-setup:${binding.targetId}:${root.checkpointRevision}`,
+        );
+        return Object.freeze({
+          kind: "checkpoint-created" as const,
+          checkpointId: checkpoint.checkpointId,
+        });
+      });
+    }
+
+    const prepared = await this.mechanism.prepareInitialRoot();
+    const recipientKeyId = this.mechanism.preparedRootRecipientKeyId(prepared);
+    if (!recipientKeyId) {
+      throw new BackupRecoveryAdministrationError("missing-recipient-identity");
+    }
+    await this.mechanism.selectTarget(binding);
+    return this.mechanism.withSelectedTarget(binding, recipientKeyId, async (target) => {
+      const established = await this.mechanism.establishInitialRoot(prepared, target);
+      await this.mechanism.activateInitialRoot(binding, prepared, target);
+      return Object.freeze({
+        kind: established.legacyTrustOnly
+          ? "legacy-root-established" as const
+          : "initial-root-established" as const,
+      });
+    });
+  }
+
+  async verify(): Promise<{ readonly checkpointId: string }> {
+    const configured = await this.mechanism.loadTargetConfiguration();
+    if (!configured) throw new BackupRecoveryAdministrationError("target-not-configured");
+    const current = requireBinding(configured, configured.currentTargetId, "current");
+    const candidate = await this.mechanism.verificationCandidate(current.targetId);
+    if (!candidate) {
+      throw new BackupRecoveryAdministrationError("verification-candidate-missing");
+    }
+    const binding = requireBinding(configured, candidate.targetId, "verification");
+    const root = await this.mechanism.readRootState();
+    if (root.kind !== "established") {
+      throw new BackupRecoveryAdministrationError("recovery-root-missing");
+    }
+    await this.mechanism.withSelectedTarget(binding, root.recipientKeyId, async (target) => {
+      const recoveryPackage = await this.mechanism.readRecoveryPackage();
+      await this.mechanism.verifyCheckpoint({
+        target,
+        checkpointId: candidate.checkpointId,
+        recoveryPackage,
+      });
+    });
+    return Object.freeze({ checkpointId: candidate.checkpointId });
+  }
+
+  async status(): Promise<BackupRecoveryAdministrationStatus> {
+    const configured = await this.mechanism.loadTargetConfiguration();
+    if (!configured) {
+      return Object.freeze({
+        state: "not-configured" as const,
+        fullBackupReady: false as const,
+        nextAction: "run-backup-setup" as const,
+      });
+    }
+    const binding = requireBinding(configured, configured.currentTargetId, "current");
+    const status = await this.mechanism.readStatus(binding.targetId);
+    switch (status.state) {
+      case "recoverable":
+        return Object.freeze({ state: "recoverable", fullBackupReady: true });
+      case "pending-verification":
+        return Object.freeze({
+          state: "pending-verification",
+          fullBackupReady: false,
+          nextAction: "run-backup-verify",
+        });
+      case "unavailable":
+        return Object.freeze({
+          state: "unavailable",
+          fullBackupReady: status.fullBackupReady,
+          nextAction: status.code === "configuration-invalid"
+            ? "repair-backup-configuration"
+            : status.code === "runtime-unavailable"
+              ? "start-authenticated-mesh"
+              : "check-backup-target",
+        });
+      case "not-configured":
+        return Object.freeze({
+          state: "configured-empty",
+          fullBackupReady: false,
+          nextAction: "run-backup-setup",
+        });
+    }
+  }
+
+  async #resolvePairedTarget(
+    selection: Extract<BackupRecoveryAdministrationTargetSelection, { readonly kind: "paired-device" }>,
+  ): Promise<Extract<BackupRecoveryAdministrationTargetBinding, { readonly kind: "paired-device" }>> {
+    const value = requireNonEmpty(selection.selector.value, "Paired recovery backup device");
+    const devices = await this.mechanism.listPairedDevices();
+    const matches = devices.filter((device) =>
+      device.active && (selection.selector.kind === "device-id"
+        ? device.deviceId === value
+        : device.displayName === value));
+    if (matches.length > 1) {
+      throw new BackupRecoveryAdministrationError("duplicate-paired-device-name");
+    }
+    const device = matches[0];
+    if (!device || device.current) {
+      throw new BackupRecoveryAdministrationError("invalid-paired-device");
+    }
+    return Object.freeze({
+      kind: "paired-device",
+      targetId: `backup-device:${device.deviceId}`,
+      deviceId: device.deviceId,
+    });
+  }
+}
+
+function requireBinding(
+  configuration: BackupRecoveryAdministrationTargetConfiguration,
+  targetId: string,
+  role: "current" | "verification",
+): BackupRecoveryAdministrationTargetBinding {
+  const binding = configuration.bindings.find((candidate) => candidate.targetId === targetId);
+  if (!binding) {
+    throw new BackupRecoveryAdministrationError(role === "current"
+      ? "current-target-binding-missing"
+      : "verification-target-binding-missing");
+  }
+  return binding;
+}
+
+function requireNonEmpty(value: string, label: string): string {
+  if (value.length === 0) throw new TypeError(`${label} must not be empty`);
+  return value;
+}
+
 export interface BackupRecoveryCurrentRemovalStatus {
   readonly state: "not-configured" | "pending-verification" | "recoverable" | "unavailable";
   readonly fullBackupReady: boolean;

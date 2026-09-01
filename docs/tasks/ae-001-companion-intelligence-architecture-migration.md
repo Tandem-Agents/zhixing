@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：等待协调者复核 A5-16i Device Administration 零残留审计与桥退场<br>
+> 当前检查点：等待协调者复核 A5-17a Backup & Recovery 备份目标与验证用例<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `b1386f66`；A5-16h 已由协调者独立复核并提交，recovery package/root/checkpoint permission 只归 Backup & Recovery，recovery-backup removal phase drive 只归 Device Administration，旧 Coordinator recovery 产品驱动归零；A5-16a～A5-16g 继续有效 |
+| 已接受基线 | `414f9845`；A5-16i 已由协调者独立复核并提交，Device Administration 全部现有产品责任已归域，旧卸载 Coordinator 与 exposure 产品决定残余归零，领域行已闭合；A5-16a～A5-16h 继续有效 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | `A5-16i-device-administration-zero-residual-v1` 已实施，等待协调者独立复核：Device Administration 全部生产责任已有限审计，旧 Coordinator 与 exposure 产品决定残余已清除，领域行据当前实施结果更新为 `[x]` |
-| 下一责任链 | Device Administration 闭合后进入 Backup & Recovery Administration 剩余命令与灾难恢复责任链；不得提前进入 A6 |
-| 打开的单向桥 | 无；`A5-ANCHOR-UNINSTALL-COORDINATOR-01` 已随 A5-16i 关闭，Device current-removal 只保留领域拥有的有限 lifecycle/abort 合同与 Host/Correctness 原子机制适配 |
-| 已失效证据 | `A5-16i-device-administration-zero-residual-v1` 为当前待协调者复核证据；A5-16a～A5-16h 与 A5-15a～A5-15m 当前继续有效，本包已重取 Coordinator 退场、共享 lifecycle/current-authority/atomic-retirement、recovery consumer 与相交 S7/export 闭包 |
+| 活跃工作包 | `A5-17a-backup-target-lifecycle-v1` 已实施，等待协调者独立复核：backup setup/verify/status 的目标选择、备份创建、验证与状态下一步已归入唯一 Backup & Recovery 应用，CLI 只保留严格参数、机制资源生命周期、安全包输入和中文呈现 |
+| 下一责任链 | A5-17a 后归位 recovery-root rotate/invalidate/approve-reset/reset 产品状态机，再迁移 disaster recovery recover/recover-finish；不得把整域塞入一个工作包 |
+| 打开的单向桥 | `A5-BACKUP-COMMAND-01=serve/backup-command.ts` 现只为 backup setup/verify/status 提供文件/Mesh/checkpoint/恢复包机制适配，并继续承接尚未迁移的 recovery-root rotate/invalidate/approve-reset/reset 产品状态机；紧邻 A5-17b 退场根生命周期产品分支 |
+| 已失效证据 | `A5-17a-backup-target-lifecycle-v1` 为当前待协调者复核证据；A5-16a～A5-16i 与 A5-15a～A5-15m 当前均有效，本包已恢复 backup setup/verify/status、target/checkpoint、CLI/export/S7 的相交闭包 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2441,6 +2441,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 责任归位与旧路清理：Device Administration 现通过唯一窄入口 `@zhixing/core/device-administration/correctness` 提供 migration lifecycle、recovery lifecycle 与签名 abort/read 三个有限 Correctness adapter factory；Host 只读取当前 Authority 原始 facts、组合同一个 `DeviceLifecycleJournal`、注入原子提交与 admission release，不解释 phase、路径选择、公开状态或取消资格。atomic retirement 继续在同一 `trust/exposure/device-lifecycle` 串行事务内验证 accepted-work artifact、current Authority generation、lifecycle fence 并一次提交，但“当前设备全部 active exposure 转为 compromised、保留既有 rotation hint/否则给出默认提示”的选择已由 Device 应用决定；CLI transaction 只投影、校验并提交。旧 `AnchorUninstallCoordinator` 类、构造、方法集、源文件、测试入口、Host bridge 与同责 callback 归零，没有改名 god object、第二 journal、第二 admission state 或兼容旁路；`A5-ANCHOR-UNINSTALL-COORDINATOR-01` 关闭。
 - 行为保护与直接证据：current-removal migration/recovery 的稳定 identity、current-duty/issuer fence、executor-removal conflict、两阶段 checkpoint、drain/immediate accepted-work、final LSN、签名 cancel/release、响应丢失/重启重驱、terminal 与 exposure canonical digest/候选引用保持原格式和顺序。Core Device 应用 1 文件 21/21；CLI 真实 journal/checkpoint/atomic retirement、recovery consumer 与启动恢复 3 文件 11/11；Server uninstall/management binding 2 文件 19/19，合计 6 文件 51/51。Core fresh build、CLI typecheck 与 `pnpm cli:build` 通过；canonical S7 coverage/mutation 34/34 与 registry golden、fresh `pnpm runtime:package-exports`、changed-source Biome 和 `git diff --check` 通过。S7 新增反向 mutation 可识别旧/改名 Coordinator、Host 产品 phase/状态回流、retirement exposure 决定回流 Correctness、窄 export/build 丢失与第二入口。
 - 失效与交接：以后若 Device Administration 5 Query/8 Command、普通移除/值班迁移/current-removal 应用决定、三类 current-removal Correctness port、current-authority fence、DeviceLifecycle journal/signature、atomic retirement/exposure selection、accepted-work/planned transfer、Host composition、Product API/RPC、启动恢复、core 窄 export/build、S7/package-export 或上述直接证据任一变化，只恢复本证据及真实相交的 A5-16 子证据；Backup & Recovery 后续独立命令、无关 Channel/A6 变化不自动误伤。Device Administration 行据当前实施结果更新为 `[x]`，A5 与 Backup & Recovery Administration 继续 `[ ]`；下一检查点固定为 Backup & Recovery Administration，当前停在可构建、可运行、可恢复且无旧桥/双写/双 admission 的安全检查点等待协调者独立复核，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+### A5-17a：归位 Backup & Recovery 备份目标与验证用例
+
+- 实施基线与生产闭包：以已接受 `HEAD 414f9845` 加协调者调度记录为基线，形成待复核证据 `A5-17a-backup-target-lifecycle-v1`。即时沿 `zz backup setup/verify/status → serve/backup-command → backup target configuration → recovery-root bootstrap/activation → AuthorityCheckpointService → directory/paired target` 正向追踪，并从目标配置、checkpoint created/replicated/verified 投影、实际目标回读、恢复包安全输入、Mesh 连接释放和状态呈现反向对账；本包只迁移 setup/verify/status，未重开 current-device removal，也未进入 recovery-root rotate/reset 或 disaster recovery。
+- 应用责任与机制端口：既有窄入口 `@zhixing/core/backup-recovery/application` 新增唯一有限 `BackupRecoveryAdministrationApplicationService`。应用独占目录/配对目标选择、同名/本机/失效设备拒绝、初始根与既有根分支、稳定 `backup-setup:<targetId>:<trust-head>` checkpoint identity、已选 binding 与待验证 candidate 全等、verify 前真实目标会话、以及 `not-configured/configured-empty/pending-verification/recoverable/unavailable` 的产品状态和下一步。文件目标物理身份、配置原子写、Mesh 认证连接、checkpoint 捕获/复制/解封校验、恢复包生成/回读和 root activation 仍是窄机制；应用不导入路径库、Mesh、Authority、checkpoint 或 CLI 类型，现有 root-establishment 只作为紧邻 A5-17b 退场的有限机制端口被调用。
+- Surface、资源与旧路退场：三个公开 CLI 命令名、参数、退出/错误、中文文案和恢复包输入保持不变；CLI 只把严格参数投影为 typed selection，以 `withDirectoryTarget/withSelectedTarget` 在 `finally` 关闭同一文件或 Mesh target session，把 typed setup/status 结果映射为原中文呈现。`runBackupSetupCommand/runBackupVerifyCommand/runBackupStatusCommand` 内原 paired 筛选、root/checkpoint 分支、target configuration/candidate 选择和状态判断已删除，`completeBackupSetup` 旧应用入口归零；既有 v1/v2 root activation/replay、目标配置 schema、checkpoint package/signature/retention、verified 事实、响应丢失重放及用户数据边界未改变。`A5-BACKUP-COMMAND-01` 继续只因 root lifecycle 产品状态机尚在同文件而打开，不把本包已迁移决定包装成兼容双链。
+- 直接证据与构建：Core Backup & Recovery application 1 文件 12/12、CLI 真实 paired/root/checkpoint 命令 1 文件 6/6，合计 2 文件 18/18；覆盖目录与配对选择、同名/本机拒绝、initial/legacy/existing root、root replay、稳定 checkpoint identity、candidate/binding、actual-target package read/verify、配置缺失/损坏引用、全部状态下一步及 v1/v2 认证传输和历史 activation replay。`pnpm build` 的版本检查与 17 个生产包全依赖构建通过；canonical S7 coverage/mutation 34/34 与 registry golden、fresh `pnpm runtime:package-exports` 和 changed-source Biome 通过。S7 反向 mutation 可识别应用 owner/稳定 identity/verify binding 回流 CLI、core 根导出旁路，以及现有 root activation、checkpoint target、DR 相邻机制漂移。
+- 失效与交接：以后若 Backup Administration selection/binding/status/result、应用 setup/verify/status、target configuration、checkpoint request/candidate/status/verify、目录/paired target resource adapter、恢复包输入/呈现、root activation 协作、core 窄 export/build、S7/package-export 或上述直接测试任一变化，只恢复本证据及真实相交的 A5-16h current-removal permission；独立 attempt/Delivery、Device Administration 与无关 A6 变化不自动误伤。Backup & Recovery Administration 行与 A5 继续 `[ ]`；下一检查点固定为 A5-17b 归位 recovery-root rotate/invalidate/approve-reset/reset 并继续收窄 `A5-BACKUP-COMMAND-01`，之后再迁移 disaster recovery。当前停在可构建、可运行、可恢复且 backup setup/verify/status 只有一个产品应用 owner 的检查点等待协调者独立复核，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 

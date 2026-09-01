@@ -1,6 +1,13 @@
 import { hostname, platform } from "node:os";
 import path from "node:path";
 import { getZhixingHome } from "@zhixing/core";
+import {
+  BackupRecoveryAdministrationApplicationService,
+  BackupRecoveryAdministrationError,
+  type BackupRecoveryAdministrationSetupResult,
+  type BackupRecoveryAdministrationStatus,
+  type BackupRecoveryAdministrationTargetBinding,
+} from "@zhixing/core/backup-recovery/application";
 import type {
   DeviceIdentity,
   HomeTrustRecord,
@@ -93,77 +100,16 @@ export async function runBackupSetupCommand(
     throw new TypeError("请选择一个独立目录或一台已配对设备作为恢复备份目标");
   }
   const context = await openContext(options);
-  if (selectedDevice) {
-    const matches = context.trust.members.filter((candidate) =>
-      candidate.state === "active" && (
-        selection.pairedDeviceId
-          ? candidate.device.deviceId === selectedDevice
-          : candidate.device.displayName === selectedDevice
-      ));
-    if (matches.length > 1) throw new Error("存在同名配对设备，请先修改设备名称后重试");
-    const member = matches[0];
-    if (!member || member.device.deviceId === context.key.deviceId) {
-      throw new Error("恢复备份目标必须是另一台已配对且仍有效的设备");
-    }
-    const binding = {
-      kind: "paired-device",
-      targetId: `backup-device:${member.device.deviceId}`,
-      deviceId: member.device.deviceId,
-    } as const;
-    const prepared = !context.trust.recoveryRootPublicKey || !context.trust.recoveryBackupPublicKey
-      ? await prepareInitialRoot(context, options.readRecoveryPackage)
-      : undefined;
-    await context.targets.select(binding);
-    const replay = prepared
-      ? undefined
-      : await currentPairedRootActivation(context, binding.targetId);
-    const connection = await connectPairedTarget(
-      context,
-      binding.deviceId,
-      prepared
-        ? prepared.checkpoint.envelope.recipientKeyId
-        : keyIdForPublicKey(context.trust.recoveryBackupPublicKey!),
-    );
-    try {
-      if (replay) await connection.target.activateRoot(replay);
-      await completeBackupSetup(
-        context,
-        connection.target,
-        options.readRecoveryPackage,
-        prepared,
-      );
-      if (prepared) {
-        const record = await context.store.loadTrustRecord();
-        if (!record || prepared.plan.kind !== "establish") {
-          throw new Error("恢复根激活后缺少可提交的 current-issuer 信任事实");
-        }
-        await connection.target.activateRoot({
-          checkpointId: prepared.checkpoint.envelope.checkpointId,
-          event: prepared.plan.rootEvent,
-          record,
-        });
-      }
-    } finally {
-      await connection.close();
-    }
-    return;
-  }
-
-  const target = await FileRecoveryCheckpointTarget.open({
-    targetRoot: selection.directory!,
-    sourceRoot: path.join(context.home, "distributed-runtime", "authority"),
-    storageMaintenance: context.capacity.storage,
-  });
-  await context.targets.select({
-    kind: "directory",
-    targetId: target.targetId,
-    directory: path.resolve(selection.directory!),
-  });
-  try {
-    await completeBackupSetup(context, target, options.readRecoveryPackage);
-  } finally {
-    await target.close();
-  }
+  const application = createBackupRecoveryAdministration(context, options);
+  const result = await mapBackupAdministrationError(() => application.setup(selection.directory !== undefined
+    ? { kind: "directory", directory: selection.directory }
+    : {
+        kind: "paired-device",
+        selector: selection.pairedDeviceId
+          ? { kind: "device-id", value: selectedDevice! }
+          : { kind: "display-name", value: selectedDevice! },
+      }));
+  renderBackupSetupResult(context, result);
 }
 
 export async function runRecoveryRootRotateCommand(
@@ -325,45 +271,18 @@ export function recoveryRootPublicError(_error: unknown): Error {
 
 export async function runBackupVerifyCommand(options: BackupCommandOptions = {}): Promise<void> {
   const context = await openContext(options, false);
-  const configured = await context.targets.load();
-  if (!configured) throw new Error("尚未配置恢复备份目标，请先运行 zz backup setup");
-  const current = configured.bindings.find((candidate) => candidate.targetId === configured.currentTargetId);
-  if (!current) throw new Error("恢复备份目标配置缺少当前绑定");
-  const selector = createService(context, context.trust, metadataOnlyTarget(current.targetId));
-  const candidate = await selector.verificationCandidate();
-  if (!candidate) throw new Error("当前恢复根没有待验证的恢复备份");
-  const binding = configured.bindings.find((item) => item.targetId === candidate.targetId);
-  if (!binding) throw new Error("待验证恢复备份的目标绑定不存在");
-  const connection = await openTargetBinding(context, binding);
-  try {
-    const service = createService(context, context.trust, connection.target);
-    const decoded = requireCurrentRecoveryPackage(
-      await readDecodedRecoveryPackage(options.readRecoveryPackage),
-    );
-    await service.verify({ checkpointId: candidate.checkpointId, recoveryRoot: decoded.root });
-    context.writeLine("恢复备份已从实际目标完整解封并验证，可用于恢复。");
-  } finally {
-    await connection.close();
-  }
+  await mapBackupAdministrationError(() =>
+    createBackupRecoveryAdministration(context, options).verify());
+  context.writeLine("恢复备份已从实际目标完整解封并验证，可用于恢复。");
 }
 
 export async function runBackupStatusCommand(options: BackupCommandOptions = {}): Promise<void> {
   const context = await openContext(options, false);
-  const configured = await context.targets.load();
-  if (!configured) {
-    context.writeLine("恢复备份：未配置。下一步：运行 zz backup setup 选择独立目录或配对设备。");
-    return;
-  }
-  const binding = configured.bindings.find((candidate) => candidate.targetId === configured.currentTargetId);
-  if (!binding) throw new Error("恢复备份目标配置缺少当前绑定");
-  const status = await createService(context, context.trust, metadataOnlyTarget(binding.targetId)).status();
-  if (status.state === "recoverable") {
-    context.writeLine("恢复备份：可恢复。最近一份备份已从独立目标完整验证。");
-  } else if (status.state === "pending-verification") {
-    context.writeLine("恢复备份：待验证。下一步：运行 zz backup verify 并输入恢复包。");
-  } else {
-    context.writeLine("恢复备份：尚无可恢复副本。下一步：重新运行 zz backup setup。");
-  }
+  renderBackupStatus(
+    context,
+    await mapBackupAdministrationError(() =>
+      createBackupRecoveryAdministration(context, options).status()),
+  );
 }
 
 interface BackupContext {
@@ -380,6 +299,196 @@ interface BackupContext {
   readonly targets: FileBackupTargetConfiguration;
   readonly writeLine: (line: string) => void;
   readonly now: () => string;
+}
+
+interface BackupAdministrationTargetSession {
+  readonly target: RetirableRecoveryCheckpointTarget;
+  readonly paired?: PairedRecoveryCheckpointTarget;
+}
+
+function createBackupRecoveryAdministration(
+  context: BackupContext,
+  options: BackupCommandOptions,
+): BackupRecoveryAdministrationApplicationService<
+  PreparedInitialRoot,
+  BackupAdministrationTargetSession,
+  RecoveryRoot
+> {
+  return new BackupRecoveryAdministrationApplicationService({
+    listPairedDevices: async () => context.trust.members.map((member) => ({
+      deviceId: member.device.deviceId,
+      displayName: member.device.displayName,
+      active: member.state === "active",
+      current: member.device.deviceId === context.key.deviceId,
+    })),
+    readRootState: async () =>
+      context.trust.recoveryRootPublicKey && context.trust.recoveryBackupPublicKey
+        ? {
+            kind: "established" as const,
+            recipientKeyId: keyIdForPublicKey(context.trust.recoveryBackupPublicKey),
+            checkpointRevision: context.trust.chainHead.eventDigest,
+          }
+        : { kind: "missing" as const },
+    prepareInitialRoot: () => prepareInitialRoot(context, options.readRecoveryPackage),
+    preparedRootRecipientKeyId: (prepared) => prepared.checkpoint.envelope.recipientKeyId,
+    selectTarget: (binding) => context.targets.select(toBackupTargetBinding(binding)),
+    withDirectoryTarget: async (directory, use) => {
+      const target = await FileRecoveryCheckpointTarget.open({
+        targetRoot: directory,
+        sourceRoot: path.join(context.home, "distributed-runtime", "authority"),
+        storageMaintenance: context.capacity.storage,
+      });
+      const binding = {
+        kind: "directory" as const,
+        targetId: target.targetId,
+        directory: path.resolve(directory),
+      };
+      try {
+        return await use(binding, { target });
+      } finally {
+        await target.close();
+      }
+    },
+    withSelectedTarget: async (binding, recipientKeyId, use) => {
+      const connection = await openTargetBinding(
+        context,
+        toBackupTargetBinding(binding),
+        recipientKeyId,
+      );
+      try {
+        return await use({
+          target: connection.target,
+          ...(connection.target instanceof PairedRecoveryCheckpointTarget
+            ? { paired: connection.target }
+            : {}),
+        });
+      } finally {
+        await connection.close();
+      }
+    },
+    replayRootActivation: async (binding, session) => {
+      if (binding.kind !== "paired-device") return;
+      if (!session.paired) throw new Error("配对恢复备份目标没有建立认证传输");
+      const replay = await currentPairedRootActivation(context, binding.targetId);
+      if (replay) await session.paired.activateRoot(replay);
+    },
+    establishInitialRoot: async (prepared, session) => {
+      const established = await establishInitialRoot(
+        context,
+        session.target,
+        options.readRecoveryPackage,
+        prepared,
+      );
+      return { legacyTrustOnly: established.legacyTrustOnly };
+    },
+    activateInitialRoot: async (binding, prepared, session) => {
+      if (binding.kind !== "paired-device") return;
+      if (!session.paired) throw new Error("配对恢复备份目标没有建立认证传输");
+      const record = await context.store.loadTrustRecord();
+      if (!record || prepared.plan.kind !== "establish") {
+        throw new Error("恢复根激活后缺少可提交的 current-issuer 信任事实");
+      }
+      await session.paired.activateRoot({
+        checkpointId: prepared.checkpoint.envelope.checkpointId,
+        event: prepared.plan.rootEvent,
+        record,
+      });
+    },
+    createCheckpoint: async (session, requestId) => {
+      const checkpoint = await createService(context, context.trust, session.target)
+        .createAndReplicate({ request: { kind: "forced", requestId } });
+      return { checkpointId: checkpoint.envelope.checkpointId };
+    },
+    loadTargetConfiguration: () => context.targets.load(),
+    verificationCandidate: (targetId) =>
+      createService(context, context.trust, metadataOnlyTarget(targetId))
+        .verificationCandidate(),
+    readRecoveryPackage: async () => requireCurrentRecoveryPackage(
+      await readDecodedRecoveryPackage(options.readRecoveryPackage),
+    ).root,
+    verifyCheckpoint: async ({ target, checkpointId, recoveryPackage }) => {
+      await createService(context, context.trust, target.target).verify({
+        checkpointId,
+        recoveryRoot: recoveryPackage,
+      });
+    },
+    readStatus: (targetId) =>
+      createService(context, context.trust, metadataOnlyTarget(targetId)).status(),
+  });
+}
+
+function toBackupTargetBinding(
+  binding: BackupRecoveryAdministrationTargetBinding,
+): BackupTargetBinding {
+  return binding.kind === "paired-device"
+    ? {
+        kind: "paired-device",
+        targetId: binding.targetId,
+        deviceId: binding.deviceId,
+      }
+    : {
+        kind: "directory",
+        targetId: binding.targetId,
+        directory: binding.directory,
+      };
+}
+
+async function mapBackupAdministrationError<Result>(
+  action: () => Promise<Result>,
+): Promise<Result> {
+  try {
+    return await action();
+  } catch (error) {
+    if (!(error instanceof BackupRecoveryAdministrationError)) throw error;
+    const messages: Record<typeof error.code, string> = {
+      "duplicate-paired-device-name": "存在同名配对设备，请先修改设备名称后重试",
+      "invalid-paired-device": "恢复备份目标必须是另一台已配对且仍有效的设备",
+      "missing-recipient-identity": "恢复备份目标缺少候选恢复根身份",
+      "target-not-configured": "尚未配置恢复备份目标，请先运行 zz backup setup",
+      "current-target-binding-missing": "恢复备份目标配置缺少当前绑定",
+      "verification-candidate-missing": "当前恢复根没有待验证的恢复备份",
+      "verification-target-binding-missing": "待验证恢复备份的目标绑定不存在",
+      "recovery-root-missing": "当前 home 尚未建立恢复根",
+    };
+    throw new Error(messages[error.code]);
+  }
+}
+
+function renderBackupSetupResult(
+  context: BackupContext,
+  result: BackupRecoveryAdministrationSetupResult,
+): void {
+  switch (result.kind) {
+    case "initial-root-established":
+      context.writeLine("恢复备份已创建、回读并验证，可用于恢复。");
+      return;
+    case "legacy-root-established":
+      context.writeLine("旧恢复包中的恢复根已安全激活；请再次运行 zz backup setup 创建完整恢复备份。");
+      return;
+    case "checkpoint-created":
+      context.writeLine(
+        `恢复备份已写入目标，仍需运行 zz backup verify 完成验证（${result.checkpointId}）。`,
+      );
+  }
+}
+
+function renderBackupStatus(context: BackupContext, status: BackupRecoveryAdministrationStatus): void {
+  switch (status.state) {
+    case "recoverable":
+      context.writeLine("恢复备份：可恢复。最近一份备份已从独立目标完整验证。");
+      return;
+    case "pending-verification":
+      context.writeLine("恢复备份：待验证。下一步：运行 zz backup verify 并输入恢复包。");
+      return;
+    case "not-configured":
+      context.writeLine("恢复备份：未配置。下一步：运行 zz backup setup 选择独立目录或配对设备。");
+      return;
+    case "configured-empty":
+      context.writeLine("恢复备份：尚无可恢复副本。下一步：重新运行 zz backup setup。");
+      return;
+    case "unavailable":
+      context.writeLine("恢复备份：尚无可恢复副本。下一步：重新运行 zz backup setup。");
+  }
 }
 
 async function openContext(
@@ -535,28 +644,6 @@ async function establishInitialRoot(
     now: () => new Date().toISOString(),
   });
   return initial;
-}
-
-async function completeBackupSetup(
-  context: BackupContext,
-  target: RetirableRecoveryCheckpointTarget,
-  readRecoveryPackage?: () => Promise<string>,
-  prepared?: PreparedInitialRoot,
-): Promise<void> {
-  if (!context.trust.recoveryRootPublicKey || !context.trust.recoveryBackupPublicKey) {
-    const initial = await establishInitialRoot(context, target, readRecoveryPackage, prepared);
-    context.writeLine(initial.legacyTrustOnly
-      ? "旧恢复包中的恢复根已安全激活；请再次运行 zz backup setup 创建完整恢复备份。"
-      : "恢复备份已创建、回读并验证，可用于恢复。");
-    return;
-  }
-  const checkpoint = await createService(context, context.trust, target).createAndReplicate({
-    request: {
-      kind: "forced",
-      requestId: `backup-setup:${target.targetId}:${context.trust.chainHead.eventDigest}`,
-    },
-  });
-  context.writeLine(`恢复备份已写入目标，仍需运行 zz backup verify 完成验证（${checkpoint.envelope.checkpointId}）。`);
 }
 
 function createService(

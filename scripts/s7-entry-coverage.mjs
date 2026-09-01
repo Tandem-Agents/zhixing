@@ -2714,7 +2714,17 @@ export async function validateS7Structure() {
   failures.push(...await inspectCleanupRegistryConstructions(records));
   failures.push(...inspectLocalConversationOwnerIsolation(records));
   failures.push(...inspectConversationAdoptionAssembly(records));
-  failures.push(...inspectRecoveryBackupAssembly(records));
+  failures.push(...inspectRecoveryBackupAssembly([
+    ...records,
+    {
+      relative: "packages/core/package.json",
+      text: await readFile(path.join(root, "packages/core/package.json"), "utf8"),
+    },
+    {
+      relative: "packages/core/tsup.config.ts",
+      text: await readFile(path.join(root, "packages/core/tsup.config.ts"), "utf8"),
+    },
+  ]));
   failures.push(...inspectPlannedAnchorTransferAssembly(records));
   failures.push(...inspectManagedHostAssembly(records));
   failures.push(...inspectDeviceLifecycleAssembly(records));
@@ -7338,6 +7348,10 @@ export function inspectRecoveryBackupAssembly(records) {
   const command = byPath.get("packages/cli/src/serve/command.ts");
   const owner = byPath.get("packages/cli/src/serve/backup-runtime-owner.ts");
   const backup = byPath.get("packages/cli/src/serve/backup-command.ts");
+  const backupApplication = byPath.get("packages/core/src/backup-recovery/application.ts");
+  const coreIndex = byPath.get("packages/core/src/index.ts");
+  const coreManifestText = byPath.get("packages/core/package.json");
+  const coreBuild = byPath.get("packages/core/tsup.config.ts");
   const bootstrapStore = byPath.get("packages/cli/src/serve/mesh-bootstrap-store.ts");
   const bootstrap = byPath.get("packages/cli/src/serve/mesh-runtime-bootstrap.ts");
   const topology = byPath.get("packages/cli/src/serve/topology-command.ts");
@@ -7367,7 +7381,8 @@ export function inspectRecoveryBackupAssembly(records) {
   const checkpointOwner = byPath.get("packages/mesh/src/checkpoint-owner.ts");
   const pairedTarget = byPath.get("packages/mesh/src/paired-checkpoint-target.ts");
   if (
-    !command || !owner || !backup || !bootstrapStore || !bootstrap || !topology || !applicationHost || !rootEstablishment ||
+    !command || !owner || !backup || !backupApplication || !coreIndex || !coreManifestText || !coreBuild ||
+    !bootstrapStore || !bootstrap || !topology || !applicationHost || !rootEstablishment ||
     !rootActivation || !controlPlane ||
     !runtime || !pairing || !disasterCommand || !disasterCandidate || !disasterEvidence ||
     !disasterInstallation || !disasterTarget || !artifactRetention || !authorityCommitLog ||
@@ -7378,6 +7393,46 @@ export function inspectRecoveryBackupAssembly(records) {
     return ["recovery backup production assembly sources are missing"];
   }
   const count = (text, token) => text.split(token).length - 1;
+  let coreManifest;
+  try {
+    coreManifest = JSON.parse(coreManifestText);
+  } catch {
+    return ["recovery backup core package manifest is invalid"];
+  }
+  const backupApplicationExport = coreManifest.exports?.["./backup-recovery/application"];
+  const duplicateBackupApplicationExports = Object.entries(coreManifest.exports ?? {})
+    .filter(([subpath, conditions]) =>
+      subpath !== "./backup-recovery/application" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === backupApplicationExport?.types ||
+        conditions.import === backupApplicationExport?.import));
+  if (
+    backupApplicationExport?.types !== "./dist/backup-recovery/application.d.ts" ||
+    backupApplicationExport?.import !== "./dist/backup-recovery/application.js" ||
+    duplicateBackupApplicationExports.length > 0 ||
+    count(coreBuild, '"src/backup-recovery/application.ts"') !== 1 ||
+    coreIndex.includes("backup-recovery/application") ||
+    count(backupApplication, "class BackupRecoveryAdministrationApplicationService") !== 1 ||
+    count(backupApplication, "async setup(") !== 1 ||
+    count(backupApplication, "async verify()") !== 1 ||
+    count(backupApplication, "async status()") !== 1 ||
+    count(
+      backupApplication,
+      "`backup-setup:${binding.targetId}:${root.checkpointRevision}`",
+    ) !== 2 ||
+    !backupApplication.includes("await this.mechanism.replayRootActivation(binding, target)") ||
+    !backupApplication.includes("const binding = requireBinding(configured, candidate.targetId, \"verification\")") ||
+    !backupApplication.includes('nextAction: "run-backup-verify"') ||
+    !backup.includes('from "@zhixing/core/backup-recovery/application"') ||
+    count(backup, "new BackupRecoveryAdministrationApplicationService(") !== 1 ||
+    count(backup, ".setup(selection.directory !== undefined") !== 1 ||
+    count(backup, "createBackupRecoveryAdministration(context, options).verify()") !== 1 ||
+    count(backup, "createBackupRecoveryAdministration(context, options).status()") !== 1 ||
+    backup.includes("completeBackupSetup(")
+  ) {
+    failures.push("backup setup, verify and status must have one Backup & Recovery application owner");
+  }
   if (
     count(command, "createConfiguredCheckpointOwner({") !== 1 ||
     count(command, "ctx.authorityCheckpointOwner?.start()") !== 1 ||
@@ -7437,11 +7492,21 @@ export function inspectRecoveryBackupAssembly(records) {
   ) {
     failures.push("durable recovery readiness projector or unavailable consumer drifted");
   }
-  const prepareIdentity = backup.indexOf("await prepareInitialRoot(context, options.readRecoveryPackage)");
-  const pairedConnect = backup.indexOf("await connectPairedTarget(", prepareIdentity);
+  const prepareIdentity = backupApplication.indexOf(
+    "const prepared = await this.mechanism.prepareInitialRoot();",
+  );
+  const pairedSelect = backupApplication.indexOf(
+    "await this.mechanism.selectTarget(binding);",
+    prepareIdentity,
+  );
+  const pairedConnect = backupApplication.indexOf(
+    "return this.mechanism.withSelectedTarget(binding, recipientKeyId",
+    pairedSelect,
+  );
   if (
     prepareIdentity < 0 ||
-    pairedConnect < prepareIdentity ||
+    pairedSelect < prepareIdentity ||
+    pairedConnect < pairedSelect ||
     !backup.includes("prepared.checkpoint.envelope.recipientKeyId")
   ) {
     failures.push("paired root establishment must freeze package identity before target connection");
@@ -7498,8 +7563,8 @@ export function inspectRecoveryBackupAssembly(records) {
     !pairedTarget.includes("root-establishment.pending.json") ||
     !pairedTarget.includes("assertRootEstablishment(") ||
     !pairedTarget.includes('t: "checkpoint.activate-root"') ||
-    !backup.includes("connection.target.activateRoot(replay)") ||
-    !backup.includes("await connection.target.activateRoot({") ||
+    !backup.includes("await session.paired.activateRoot(replay)") ||
+    !backup.includes("await session.paired.activateRoot({") ||
     !runtime.includes("rootLifecycle: true") ||
     !runtime.includes("commitRootActivation:") ||
     !rootActivation.includes("appendTrustEvent({ event, record })") ||

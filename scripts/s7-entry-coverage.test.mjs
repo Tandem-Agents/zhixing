@@ -890,6 +890,10 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   const paths = [
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/backup-command.ts",
+    "packages/core/src/backup-recovery/application.ts",
+    "packages/core/src/index.ts",
+    "packages/core/package.json",
+    "packages/core/tsup.config.ts",
     "packages/cli/src/serve/mesh-bootstrap-store.ts",
     "packages/cli/src/serve/backup-runtime-owner.ts",
     "packages/cli/src/serve/mesh-runtime-bootstrap.ts",
@@ -924,6 +928,43 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   assert.deepEqual(inspectRecoveryBackupAssembly(records), []);
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/core/src/backup-recovery/application.ts",
+      (text) => text.replace(
+        "class BackupRecoveryAdministrationApplicationService",
+        "class BackupRecoveryAdministrationCoordinator",
+      ),
+    )).join("\n"),
+    /one Backup & Recovery application owner/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/core/src/backup-recovery/application.ts",
+      (text) => text.replaceAll(
+        "`backup-setup:${binding.targetId}:${root.checkpointRevision}`",
+        "`backup-setup:${binding.targetId}:latest`",
+      ),
+    )).join("\n"),
+    /one Backup & Recovery application owner/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/backup-command.ts",
+      (text) => text.replace(
+        "createBackupRecoveryAdministration(context, options).verify()",
+        "createService(context, context.trust, metadataOnlyTarget(\"latest\")).verify()",
+      ),
+    )).join("\n"),
+    /one Backup & Recovery application owner/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/core/src/index.ts",
+      (text) => `${text}\nexport * from \"./backup-recovery/application.js\";`,
+    )).join("\n"),
+    /one Backup & Recovery application owner/,
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
