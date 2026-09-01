@@ -53,18 +53,41 @@ describe("persistent ApplicationHost outer lifecycle", () => {
         expect(harness.roleBootstrap?.mesh.roles).toEqual(topology.roles);
         expect(harness.roleBootstrap).not.toHaveProperty("startup");
         expect(harness.roleBootstrap).not.toHaveProperty("config");
-        expect(harness.roleBootstrap).toHaveProperty("runtimeConfiguration");
+        expect(harness.roleBootstrap).not.toHaveProperty("runtimeConfiguration");
+        expect(harness.roleBootstrap).toHaveProperty("modelConfiguration");
+        expect(harness.roleBootstrap).toHaveProperty(
+          "kernelEnvironmentConfiguration",
+        );
+        expect(harness.roleBootstrap).toHaveProperty(
+          "advancementConfiguration",
+        );
+        expect(harness.roleBootstrap).toHaveProperty("mcpConfiguration");
+        expect(harness.roleBootstrap).toHaveProperty("authorityConfiguration");
         expect(harness.roleBootstrap).toHaveProperty("providerCredentials");
         expect(harness.roleBootstrap).toHaveProperty("mcpCredentials");
         expect(harness.roleBootstrap).toHaveProperty(
           "credentialExposureCredentials",
         );
         if (topology.roles.includes("anchor")) {
+          expect(harness.roleBootstrap).toHaveProperty("channelConfiguration");
+          expect(harness.roleBootstrap).toHaveProperty("workspaceConfiguration");
+          expect(harness.roleBootstrap).toHaveProperty(
+            "credentialRotationConfiguration",
+          );
           expect(harness.roleBootstrap).toHaveProperty("channelCredentials");
           expect(harness.roleBootstrap).toHaveProperty(
             "credentialRotationCredentials",
           );
         } else {
+          expect(harness.roleBootstrap).not.toHaveProperty(
+            "channelConfiguration",
+          );
+          expect(harness.roleBootstrap).not.toHaveProperty(
+            "workspaceConfiguration",
+          );
+          expect(harness.roleBootstrap).not.toHaveProperty(
+            "credentialRotationConfiguration",
+          );
           expect(harness.roleBootstrap).not.toHaveProperty("channelCredentials");
           expect(harness.roleBootstrap).not.toHaveProperty(
             "credentialRotationCredentials",

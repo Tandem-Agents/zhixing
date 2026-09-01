@@ -156,7 +156,6 @@ import type {
   ServeTopologyPlan,
 } from "./role-topology.js";
 import { projectRuntimeSecrets } from "../runtime/runtime-secret-projections.js";
-import type { RuntimeConfigurationSnapshot } from "../runtime/runtime-configuration-snapshot.js";
 import { createRenderSubscribers } from "../render.js";
 import { createStdoutWriter } from "../screen/index.js";
 import {
@@ -352,7 +351,16 @@ async function runServerProcess(
   const port = opts.port ?? homeToPort(zhixingHome);
   const host = opts.host ?? DEFAULT_SERVER_CONFIG.host;
 
-  const config: RuntimeConfigurationSnapshot = bootstrap.runtimeConfiguration;
+  const modelConfiguration = bootstrap.modelConfiguration;
+  const kernelEnvironmentConfiguration =
+    bootstrap.kernelEnvironmentConfiguration;
+  const advancementConfiguration = bootstrap.advancementConfiguration;
+  const mcpConfiguration = bootstrap.mcpConfiguration;
+  const channelConfiguration = bootstrap.channelConfiguration;
+  const workspaceConfiguration = bootstrap.workspaceConfiguration;
+  const credentialRotationConfiguration =
+    bootstrap.credentialRotationConfiguration;
+  const authorityConfiguration = bootstrap.authorityConfiguration;
   const providerCredentials = bootstrap.providerCredentials;
   const mcpCredentials = bootstrap.mcpCredentials;
   const channelCredentials = bootstrap.channelCredentials;
@@ -362,7 +370,9 @@ async function runServerProcess(
     bootstrap.credentialRotationCredentials;
   const credentialGeneration = bootstrap.credentialGeneration;
   const systemProtectedPaths = resolveSystemProtectedSecretPaths();
-  const hostDefaultWorkspace = createHostDefaultWorkspaceProjection(config);
+  const hostDefaultWorkspace = createHostDefaultWorkspaceProjection(
+    workspaceConfiguration,
+  );
 
   // ============================================================================
   // 恒定核心前置 —— 接入面 setup 从这里读依赖。
@@ -469,7 +479,7 @@ async function runServerProcess(
   // Trust Administration owns management semantics; the adapter below only
   // maps its finite repository port to the existing storage mechanism.
   const trustAdministration = createTrustAdministrationApplication({
-    config,
+    configuration: workspaceConfiguration,
   });
   // 3. Schedule domain lazy projection —— generation 安装后只切换 Correctness
   // mechanism；产品可见状态、事件与 lifecycle 语义均由领域应用持有。
@@ -557,9 +567,10 @@ async function runServerProcess(
   // 3b. MCP host —— 创建（不 eager 连接）。connectAll 由 mcp 接入面在 pre-server 阶段触发，
   //   故 schedule 档（无 mcp 接入面）省去 eager 连接，仅 hub 对象在位、ephemeral 可用 builtin 工具。
   //   serve 进程内单例，多 session 共享同一批连接。空配置时为 no-op。
-  const mcpHub = createMcpHub(parseServerSpecs(config.mcp, mcpCredentials.mcp), {
-    networkProxy: config.network?.proxy,
-  });
+  const mcpHub = createMcpHub(
+    parseServerSpecs(mcpConfiguration.mcp, mcpCredentials.mcp),
+    { networkProxy: mcpConfiguration.network?.proxy },
+  );
 
   // 3c. Builtin extra tools assembly —— task_list / schedule 工具的装配点，所有
   //   per-session runtime 共享同一 service 单例（cache by sessionId/conversationId）。
@@ -589,7 +600,7 @@ async function runServerProcess(
     reviews: advancementReviews,
   } = await createServeAdvancementApplications({
     modelProvider: createHostAdvancementModelProviderFactory({
-      config,
+      configuration: advancementConfiguration,
       credentials: providerCredentials,
     }),
     // control 治理端口——authority runtime 在 pre-server surface 装配（晚于此处），
@@ -694,10 +705,12 @@ async function runServerProcess(
 
   const runtimeHost = new RuntimeHost({
     modelProvider: createHostKernelModelProviderFactory({
-      config,
+      configuration: modelConfiguration,
       credentials: providerCredentials,
     }),
-    runtimeEnvironment: createHostKernelRuntimeEnvironmentFactory({ config }),
+    runtimeEnvironment: createHostKernelRuntimeEnvironmentFactory({
+      configuration: kernelEnvironmentConfiguration,
+    }),
     confirmationLifecycleObserver: durableInteractions,
     systemProtectedPaths,
     artifactStore: () => {
@@ -926,7 +939,10 @@ async function runServerProcess(
 
   const ctx: AssemblyContext = {
     profile,
-    runtimeConfiguration: config,
+    modelConfiguration,
+    advancementConfiguration,
+    channelConfiguration,
+    authorityConfiguration,
     providerCredentials,
     zhixingHome,
     secretStore: bootstrap.secretStore,
@@ -1050,7 +1066,7 @@ async function runServerProcess(
         secretStore: ctx.secretStore,
       }),
       deviceId: ctx.authorityRuntime.deviceId,
-      config,
+      configuration: credentialRotationConfiguration,
       credentials: credentialRotationCredentials,
       credentialGeneration,
       readCredentials: async () =>

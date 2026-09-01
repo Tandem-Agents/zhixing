@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ZhixingConfig } from "@zhixing/providers";
 import type { ServerInfoResult } from "../rpc-management-facade.js";
+import type { ReplRuntimeConfigurationProjection } from "../runtime-configuration-provider.js";
 import { ReplLocalView } from "../repl-local-view.js";
 
 function serverInfo(workspace: string): ServerInfoResult {
@@ -20,48 +20,55 @@ function serverInfo(workspace: string): ServerInfoResult {
 
 describe("ReplLocalView", () => {
   it("refresh 同步最新 config / workspace / proxy 派生视图", async () => {
-    let config = {
-      llm: { main: { provider: "anthropic", model: "claude-a" } },
-      network: { proxy: "off" },
-    } as unknown as ZhixingConfig;
+    let configuration = replConfiguration("anthropic", "claude-a", "off");
     const management = {
       serverInfo: vi.fn(async () => serverInfo("/ws-a")),
     };
     const view = new ReplLocalView({
       management,
-      loadConfig: () => config,
+      configuration: { readReplSurface: () => configuration },
     });
 
     await view.refresh();
-    expect(view.config.llm?.main?.model).toBe("claude-a");
+    expect(view.primaryModel.model).toBe("claude-a");
     expect(view.workspaceRoot).toBe("/ws-a");
     expect(view.networkProxy.mode).toBe("off");
 
-    config = {
-      llm: { main: { provider: "openai", model: "gpt-next" } },
-      network: { proxy: "auto" },
-    } as unknown as ZhixingConfig;
+    configuration = replConfiguration("openai", "gpt-next", "auto");
     management.serverInfo.mockResolvedValueOnce(serverInfo("/ws-b"));
 
     await view.refresh();
-    expect(view.config.llm?.main?.model).toBe("gpt-next");
+    expect(view.primaryModel.model).toBe("gpt-next");
     expect(view.workspaceRoot).toBe("/ws-b");
     expect(view.networkProxy.mode).toBe("auto");
   });
 
   it("serverInfo 不可用时保留配置派生,workspace 降为 null", async () => {
-    const config = {
-      llm: { main: { provider: "openai", model: "gpt-next" } },
-    } as unknown as ZhixingConfig;
+    const configuration = replConfiguration("openai", "gpt-next", "auto");
     const view = new ReplLocalView({
       management: { serverInfo: vi.fn(async () => Promise.reject(new Error("down"))) },
-      loadConfig: () => config,
+      configuration: { readReplSurface: () => configuration },
     });
 
-    await view.refresh();
+    const snapshot = await view.refresh();
 
-    expect(view.config).toBe(config);
+    expect(snapshot.primaryModel).toBe(configuration.primaryModel);
     expect(view.hostInfo).toBeNull();
     expect(view.workspaceRoot).toBeNull();
   });
 });
+
+function replConfiguration(
+  providerId: string,
+  model: string,
+  proxyMode: "off" | "auto",
+): ReplRuntimeConfigurationProjection {
+  return Object.freeze({
+    primaryModel: Object.freeze({ providerId, model }),
+    networkProxy: Object.freeze({
+      mode: proxyMode,
+      hasResolvedProxy: false,
+      display: proxyMode,
+    }),
+  });
+}

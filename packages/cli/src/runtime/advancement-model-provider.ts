@@ -18,18 +18,18 @@ import {
   resolveWorkspaceSessionType,
   type ProviderCredentialProjection,
 } from "@zhixing/providers";
-import type { RuntimeConfigurationSnapshot } from "./runtime-configuration-snapshot.js";
+import type { RuntimeAdvancementConfigurationProjection } from "./runtime-configuration-projections.js";
 
 export function createHostAdvancementModelProviderFactory(input: {
-  readonly config: RuntimeConfigurationSnapshot;
+  readonly configuration: RuntimeAdvancementConfigurationProjection;
   readonly credentials: ProviderCredentialProjection;
 }): AdvancementModelProviderFactory {
-  const hostConfig = input.config;
+  const hostConfiguration = input.configuration;
   const credentials = input.credentials;
   return Object.freeze({
     create(request: Parameters<AdvancementModelProviderFactory["create"]>[0]) {
       const { roles: rawRoles, resolvedRoles, config } = createProviderRoles({
-        config: hostConfig,
+        config: hostConfiguration,
         credentials,
       });
       const roles = Object.freeze({

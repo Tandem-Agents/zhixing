@@ -6,6 +6,8 @@ import { createTempDir } from "@zhixing/test-utils";
 import { createCredentialExposureRecord } from "@zhixing/mesh/credential-exposure";
 import type { ZhixingConfig } from "@zhixing/providers";
 import type { CredentialRotationSecretProjection } from "../runtime/runtime-secret-projections.js";
+import { projectRuntimeConfiguration } from "../runtime/runtime-configuration-projections.js";
+import { createRuntimeConfigurationSnapshot } from "../runtime/runtime-configuration-snapshot.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import { publishRequiredCredentialRotations } from "./credential-rotation-publication.js";
 
@@ -149,13 +151,16 @@ async function createFixture(bindings: readonly (readonly [BindingKind, string])
     messaging: { chat: { type: "feishu" } },
     mcp: { servers: { docs: { type: "http", url: "https://mcp.invalid" } } },
   };
+  const configuration = projectRuntimeConfiguration(
+    createRuntimeConfigurationSnapshot(config),
+  ).credentialRotation;
   return {
     authority,
     log,
     options: {
       authority,
       deviceId: "current-device",
-      config,
+      configuration,
       credentials,
       credentialGeneration: "generation-current",
       readCredentials: async () => credentials,

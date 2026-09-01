@@ -695,8 +695,8 @@ export async function startRepl(): Promise<void> {
     const lines: string[] = [];
     lines.push(
       ...renderHomeWelcome({
-        providerId: localView.config.llm?.main?.provider ?? "",
-        model: localView.config.llm?.main?.model ?? "",
+        providerId: localView.primaryModel.providerId,
+        model: localView.primaryModel.model,
         workspaceRoot: localView.workspaceRoot ?? undefined,
         conversationName: controller.current.name,
       }),
@@ -1122,7 +1122,7 @@ export async function startRepl(): Promise<void> {
     registry: tRegistry,
     dispatcher: typeaheadDispatcher,
     writer: cliWriter,
-    getConfig: () => localView.config,
+    getPrimaryModel: () => localView.primaryModel,
     controller,
     getNetworkProxy: () => localView.networkProxy,
     getScheduler: () => schedulerFacade,

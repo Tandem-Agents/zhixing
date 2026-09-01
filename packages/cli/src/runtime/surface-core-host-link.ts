@@ -4,7 +4,6 @@ import type { HomeTrustRecord } from "@zhixing/core/contracts";
 import { canonicalize } from "@zhixing/core/protocol";
 import { validateMeshRoleBootConfig } from "@zhixing/mesh/bootstrap";
 import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
-import { loadConfig } from "@zhixing/providers";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import {
   PROTOCOL_VERSION,
@@ -22,14 +21,22 @@ import { FileMeshBootstrapStore } from "../serve/mesh-bootstrap-store.js";
 import { ProductionMeshControlPlane } from "../serve/mesh-control-plane.js";
 import { loadExistingDeviceKey } from "../serve/mesh-device-key.js";
 import { CoreHostUnavailableError } from "./core-host-connection.js";
+import {
+  createRuntimeConfigurationProvider,
+  type RuntimeConfigurationProvider,
+} from "./runtime-configuration-provider.js";
 
 type NotificationHandler = (params: unknown) => void;
 type WildcardNotificationHandler = (method: string, params: unknown) => void;
 let nextSurfaceConnectionId = 1;
 
-export async function createCurrentAnchorSurfaceRpcClient(): Promise<CurrentAnchorSurfaceRpcClient> {
+export async function createCurrentAnchorSurfaceRpcClient(options: {
+  readonly configuration?: Pick<RuntimeConfigurationProvider, "readTopology">;
+} = {}): Promise<CurrentAnchorSurfaceRpcClient> {
   const homeDir = getZhixingHome();
-  const configuration = loadConfig({ homeDir }).mesh;
+  const configuration = (
+    options.configuration ?? createRuntimeConfigurationProvider()
+  ).readTopology({ homeDir }).mesh;
   if (!configuration) throw new CoreHostUnavailableError("这台设备尚未完成家庭配置");
   const secretStore = createPlatformSecretStore({ homeDir, context: "foreground" });
   if (await secretStore.unlockState() !== "unlocked") {

@@ -1,8 +1,9 @@
 import type { ArtifactStore, IConfirmationBroker } from "@zhixing/core";
 import type { McpHub } from "@zhixing/mcp";
 import type { AgentRuntime, AgentRuntimeCapacityBinding } from "@zhixing/orchestrator/runtime";
-import type { ZhixingConfig } from "@zhixing/providers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { projectRuntimeConfiguration } from "../../runtime/runtime-configuration-projections.js";
+import { createRuntimeConfigurationSnapshot } from "../../runtime/runtime-configuration-snapshot.js";
 
 const runtimeMocks = vi.hoisted(() => ({
   createAgentRuntime: vi.fn(),
@@ -45,8 +46,12 @@ describe("executor role conversation runtime production assembly", () => {
   it("forwards explicit workscene identity and keeps ordinary workspace runtimes in main mode", async () => {
     const runtime = {} as AgentRuntime;
     runtimeMocks.createAgentRuntime.mockResolvedValue(runtime);
+    const configuration = projectRuntimeConfiguration(
+      createRuntimeConfigurationSnapshot({}),
+    );
     const substrate = new ExecutorRuntimeSubstrate({
-      config: {} as ZhixingConfig,
+      modelConfiguration: configuration.model,
+      kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: {},
       mcpHub: {
         catalog: () => [],
@@ -101,8 +106,12 @@ describe("executor role conversation runtime production assembly", () => {
 
 describe("executor role job runtime production assembly", () => {
   it("capability catalog 与用户 job 工具选择都不再接受旧 memory 工具", () => {
+    const configuration = projectRuntimeConfiguration(
+      createRuntimeConfigurationSnapshot({}),
+    );
     const substrate = new ExecutorRuntimeSubstrate({
-      config: {} as ZhixingConfig,
+      modelConfiguration: configuration.model,
+      kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: {},
       mcpHub: {
         catalog: () => [],
@@ -133,8 +142,12 @@ describe("executor role job runtime production assembly", () => {
     const orchestrationCapacity = {} as AgentRuntimeCapacityBinding;
     const artifactStore = {} as ArtifactStore;
     const confirmationBroker = {} as IConfirmationBroker;
+    const configuration = projectRuntimeConfiguration(
+      createRuntimeConfigurationSnapshot({}),
+    );
     const substrate = new ExecutorRuntimeSubstrate({
-      config: {} as ZhixingConfig,
+      modelConfiguration: configuration.model,
+      kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: {},
       mcpHub: {
         catalog: () => [],

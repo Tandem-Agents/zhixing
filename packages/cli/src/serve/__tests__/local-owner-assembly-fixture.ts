@@ -40,6 +40,8 @@ import {
 import { createSignedTrustRuleSnapshot, StreamDigestChain } from "@zhixing/core/protocol";
 import { createLocalConversationDirectoryApplication } from "../local-conversation-directory-application.js";
 import { createHostAdvancementModelProviderFactory } from "../../runtime/advancement-model-provider.js";
+import { projectRuntimeConfiguration } from "../../runtime/runtime-configuration-projections.js";
+import { createRuntimeConfigurationSnapshot } from "../../runtime/runtime-configuration-snapshot.js";
 
 export const FIXTURE_EXECUTOR_READINESS = {
   tools: [] as string[],
@@ -52,6 +54,9 @@ export const FIXTURE_EXECUTOR_READINESS = {
 export const FIXTURE_CONFIG: ZhixingConfig = {
   llm: { main: { provider: "deepseek", model: "deepseek-chat" } },
 };
+const FIXTURE_CONFIGURATION = projectRuntimeConfiguration(
+  createRuntimeConfigurationSnapshot(FIXTURE_CONFIG),
+);
 
 export class FixtureSecretStore implements SecretStorePort {
   readonly #values = new Map<string, string>();
@@ -306,7 +311,7 @@ export async function createLocalOwnerAssemblyFixture(
     runtimeFactory,
     interactions,
     advancementModelProvider: createHostAdvancementModelProviderFactory({
-      config: FIXTURE_CONFIG,
+      configuration: FIXTURE_CONFIGURATION.advancement,
       credentials: {
         providers: { deepseek: { apiKey: "fixture-api-key" } },
       },

@@ -6,6 +6,8 @@ import {
 } from "@zhixing/core";
 import { createTempDir } from "@zhixing/test-utils";
 import { createTrustAdministrationApplication } from "../trust-administration-adapter.js";
+import { projectRuntimeConfiguration } from "../../runtime/runtime-configuration-projections.js";
+import { createRuntimeConfigurationSnapshot } from "../../runtime/runtime-configuration-snapshot.js";
 
 let originalHome: string | undefined;
 
@@ -37,6 +39,14 @@ function makeRule(
   };
 }
 
+function workspaceConfiguration(
+  configuration: Parameters<typeof createRuntimeConfigurationSnapshot>[0],
+) {
+  return projectRuntimeConfiguration(
+    createRuntimeConfigurationSnapshot(configuration),
+  ).workspace;
+}
+
 describe("Trust Administration PermissionStore adapter", () => {
   it("projects scene/global rules and preserves same-context durable revoke", async () => {
     const seed = new PermissionStore();
@@ -46,7 +56,7 @@ describe("Trust Administration PermissionStore adapter", () => {
     );
     seed.create({ kind: "main" }, makeRule("rule-global", "global"));
     const application = createTrustAdministrationApplication({
-      config: {} as never,
+      configuration: workspaceConfiguration({}),
       sessionType: "ci",
     });
     const sceneConversation = worksceneConversationId("s1", "conversation-1");
@@ -85,12 +95,12 @@ describe("Trust Administration PermissionStore adapter", () => {
     );
 
     await expect(createTrustAdministrationApplication({
-      config: { workspace: { root: "/proj" } } as never,
+      configuration: workspaceConfiguration({ workspace: { root: "/proj" } }),
     }).query({ kind: "list" })).resolves.toMatchObject({
       rules: [{ id: "configured" }],
     });
     await expect(createTrustAdministrationApplication({
-      config: {} as never,
+      configuration: workspaceConfiguration({}),
       sessionType: "interactive",
     }).query({ kind: "list" })).resolves.toMatchObject({
       rules: [{ id: "cwd" }],

@@ -1,9 +1,27 @@
 import type { HomeTrustRecord } from "@zhixing/core/contracts";
 import type { MeshServiceClient } from "@zhixing/mesh";
 import { describe, expect, it, vi } from "vitest";
-import { CurrentAnchorSurfaceRpcClient } from "../surface-core-host-link.js";
+import {
+  createCurrentAnchorSurfaceRpcClient,
+  CurrentAnchorSurfaceRpcClient,
+} from "../surface-core-host-link.js";
 
 describe("current anchor surface core-host link", () => {
+  it("consumes only the Configuration Provider topology projection", async () => {
+    const readTopology = vi.fn(() => Object.freeze({}));
+
+    await expect(
+      createCurrentAnchorSurfaceRpcClient({
+        configuration: { readTopology },
+      }),
+    ).rejects.toThrow("这台设备尚未完成家庭配置");
+
+    expect(readTopology).toHaveBeenCalledOnce();
+    expect(readTopology.mock.calls[0]?.[0]).toEqual({
+      homeDir: expect.any(String),
+    });
+  });
+
   it("relays only canonical methods, replaces the old owner and closes every poll", async () => {
     let owner = "device:anchor-a";
     let trustEpoch = 1;

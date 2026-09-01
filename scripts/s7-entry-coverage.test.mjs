@@ -28,7 +28,7 @@ import {
   inspectKernelProviderDependencyInversion,
   inspectAdvancementProviderDependencyInversion,
   inspectRuntimeSecretProjectionBoundary,
-  inspectRuntimeConfigurationSnapshotBoundary,
+  inspectRuntimeConfigurationProjectionBoundary,
   inspectWorksceneRuntimeProjectionBoundary,
   inspectWorkspaceAdministrationOwnership,
   inspectTrustAdministrationOwnership,
@@ -3193,7 +3193,10 @@ test("AgentRuntime keeps workspace resolution internal while Anchor shares one h
   assert.match(
     inspectAgentRuntimeWorkspaceEncapsulation(mutate(
       "packages/cli/src/serve/host-default-workspace.ts",
-      (text) => text.replace("resolveWorkspace(config, { sessionType })", "{ path: config.workspace?.root ?? null }"),
+      (text) => text.replace(
+        "resolveWorkspace(configuration, { sessionType })",
+        "{ path: configuration.workspace?.root ?? null }",
+      ),
     )).join("\n"),
     /authority resolver/,
   );
@@ -3477,17 +3480,23 @@ test("runtime secrets cross the Host boundary only as frozen purpose projections
     inspectRuntimeSecretProjectionBoundary(mutate(
       "packages/cli/src/serve/role-topology.ts",
       (text) => text.replace(
-        "readonly runtimeConfiguration: RuntimeConfigurationSnapshot;",
-        "readonly startup: StartupCheckResult;\n  readonly runtimeConfiguration: RuntimeConfigurationSnapshot;",
+        "readonly credentialGeneration: string | null;",
+        "readonly startup: StartupCheckResult;\n  readonly credentialGeneration: string | null;",
       ),
     )).join("\n"),
     /topology isolation/,
   );
 });
 
-test("validated configuration crosses the Host edge as one frozen process snapshot", async () => {
+test("validated configuration crosses composition roots as finite frozen projections", async () => {
   const paths = [
     "packages/cli/src/runtime/runtime-configuration-snapshot.ts",
+    "packages/cli/src/runtime/runtime-configuration-projections.ts",
+    "packages/cli/src/runtime/runtime-configuration-provider.ts",
+    "packages/cli/src/runtime/repl-local-view.ts",
+    "packages/cli/src/runtime/surface-core-host-link.ts",
+    "packages/cli/src/repl.ts",
+    "packages/cli/src/commands/info-commands.ts",
     "packages/cli/src/startup.ts",
     "packages/cli/src/serve/role-topology.ts",
     "packages/cli/src/serve/application-host.ts",
@@ -3510,16 +3519,16 @@ test("validated configuration crosses the Host edge as one frozen process snapsh
     record.relative === relative ? { ...record, text: transform(record.text) } : record
   );
 
-  assert.deepEqual(inspectRuntimeConfigurationSnapshotBoundary(records), []);
+  assert.deepEqual(inspectRuntimeConfigurationProjectionBoundary(records), []);
   assert.match(
-    inspectRuntimeConfigurationSnapshotBoundary(mutate(
+    inspectRuntimeConfigurationProjectionBoundary(mutate(
       "packages/cli/src/runtime/runtime-configuration-snapshot.ts",
       (text) => text.replace("structuredClone(configuration)", "configuration"),
     )).join("\n"),
     /uniquely cloned, branded and deeply frozen/,
   );
   assert.match(
-    inspectRuntimeConfigurationSnapshotBoundary(mutate(
+    inspectRuntimeConfigurationProjectionBoundary(mutate(
       "packages/cli/src/startup.ts",
       (text) => text.replace(
         "runtimeConfiguration: RuntimeConfigurationSnapshot;",
@@ -3529,38 +3538,92 @@ test("validated configuration crosses the Host edge as one frozen process snapsh
     /StartupCheckResult\.ready/,
   );
   assert.match(
-    inspectRuntimeConfigurationSnapshotBoundary(mutate(
+    inspectRuntimeConfigurationProjectionBoundary(mutate(
+      "packages/cli/src/runtime/runtime-configuration-projections.ts",
+      (text) => text.replace(
+        "const MCP_KEYS = [\"mcp\", \"network\"] as const;",
+        "const MCP_KEYS = [\"mcp\", \"network\", \"agent\"] as const;",
+      ),
+    )).join("\n"),
+    /MCP_KEYS: runtime configuration purpose exact-set drifted/,
+  );
+  assert.match(
+    inspectRuntimeConfigurationProjectionBoundary(mutate(
+      "packages/cli/src/runtime/runtime-configuration-projections.ts",
+      (text) => text.replace(
+        "structuredClone(configuration[key])",
+        "configuration[key]",
+      ),
+    )).join("\n"),
+    /purposes are not uniquely cloned/,
+  );
+  assert.match(
+    inspectRuntimeConfigurationProjectionBoundary(mutate(
       "packages/cli/src/serve/application-host.ts",
       (text) => `${text}\nconst reloaded = loadConfig();`,
     )).join("\n"),
-    /ApplicationHost reloads/,
+    /ApplicationHost does not perform/,
   );
   assert.match(
-    inspectRuntimeConfigurationSnapshotBoundary(mutate(
+    inspectRuntimeConfigurationProjectionBoundary(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => `${text}\nconst leaked = bootstrap.config;`,
     )).join("\n"),
-    /Anchor role does not consume only/,
+    /Anchor role can still consume/,
   );
   assert.match(
-    inspectRuntimeConfigurationSnapshotBoundary(mutate(
+    inspectRuntimeConfigurationProjectionBoundary(mutate(
       "packages/cli/src/serve/role-topology.ts",
       (text) => text.replace(
-        "readonly runtimeConfiguration: RuntimeConfigurationSnapshot;",
+        "readonly modelConfiguration: RuntimeModelConfigurationProjection;",
         "readonly config: ZhixingConfig;",
       ),
     )).join("\n"),
-    /role bootstrap exposes raw configuration/,
+    /role bootstrap exposes an aggregate configuration path/,
   );
   assert.match(
-    inspectRuntimeConfigurationSnapshotBoundary(mutate(
+    inspectRuntimeConfigurationProjectionBoundary(mutate(
       "packages/cli/src/serve/access-surface.ts",
       (text) => text.replace(
-        "readonly runtimeConfiguration: RuntimeConfigurationSnapshot;",
+        "readonly modelConfiguration: RuntimeModelConfigurationProjection;",
         "readonly config: ZhixingConfig;",
       ),
     )).join("\n"),
-    /Anchor assembly/,
+    /Anchor assembly can still consume/,
+  );
+  assert.match(
+    inspectRuntimeConfigurationProjectionBoundary(mutate(
+      "packages/cli/src/serve/trust-administration-adapter.ts",
+      (text) => text.replace(
+        "readonly configuration: RuntimeWorkspaceConfigurationProjection;",
+        "readonly configuration: RuntimeModelConfigurationProjection;",
+      ),
+    )).join("\n"),
+    /Trust edge misses its finite runtime configuration projection/,
+  );
+  assert.match(
+    inspectRuntimeConfigurationProjectionBoundary(mutate(
+      "packages/cli/src/runtime/repl-local-view.ts",
+      (text) => `${text}\nconst leaked = loadConfig();`,
+    )).join("\n"),
+    /REPL Surface regained|ordinary runtime Surface owns/,
+  );
+  assert.match(
+    inspectRuntimeConfigurationProjectionBoundary(mutate(
+      "packages/cli/src/runtime/surface-core-host-link.ts",
+      (text) => `${text}\nconst leaked = loadConfig();`,
+    )).join("\n"),
+    /current-anchor Surface link bypasses|ordinary runtime Surface owns/,
+  );
+  assert.match(
+    inspectRuntimeConfigurationProjectionBoundary(mutate(
+      "packages/cli/src/runtime/runtime-configuration-provider.ts",
+      (text) => text.replace(
+        "return project(options).topology;",
+        "return loadConfiguration(options);",
+      ),
+    )).join("\n"),
+    /Configuration Provider does not publish only finite frozen Surface projections/,
   );
 });
 
@@ -4138,6 +4201,37 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
   );
   const failure = /Advancement detail\/rubric lacks one Product API application or conversation lifecycle lacks one independent application owner/;
   const closureFailure = /Advancement whole-domain exact-set has a second active-state, proxy-settlement, ServerContext, legacy Store export, or Store-write owner/;
+
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "rubricCancellation: {",
+        "rubricCancellation: advancementDetailController,\n          retiredRubricCancellation: {",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "advancementDetailController.loadRubricCancellationSession(",
+        "ctx.advancementReviews.loadRubricCancellationSession(",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "ctx.advancementReviews.cancelSession(input)",
+        "advancementDetailController.persistRubricCancellation(input)",
+      ),
+    )).join("\n"),
+    failure,
+  );
 
   assert.match(
     inspectAdvancementDetailApplicationOwnership(mutate(
@@ -4840,8 +4934,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "const config: RuntimeConfigurationSnapshot = bootstrap.runtimeConfiguration;",
-        "const config: RuntimeConfigurationSnapshot = bootstrap.runtimeConfiguration;\n  void worksceneDirectory.get(\"runtime-bypass\");",
+        "const modelConfiguration = bootstrap.modelConfiguration;",
+        "const modelConfiguration = bootstrap.modelConfiguration;\n  void worksceneDirectory.get(\"runtime-bypass\");",
       ),
     )).join("\n"),
     /Workscene management and entry lack one domain application and Product API owner/,

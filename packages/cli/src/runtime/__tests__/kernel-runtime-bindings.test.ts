@@ -8,6 +8,8 @@ import {
   createHostKernelModelProviderFactory,
   createHostKernelRuntimeEnvironmentFactory,
 } from "../kernel-runtime-bindings.js";
+import { projectRuntimeConfiguration } from "../runtime-configuration-projections.js";
+import { createRuntimeConfigurationSnapshot } from "../runtime-configuration-snapshot.js";
 
 const credentials: ProviderCredentialProjection = {
   providers: { deepseek: { apiKey: "test-only" } },
@@ -22,10 +24,17 @@ function config(overrides: Partial<ZhixingConfig> = {}): ZhixingConfig {
   };
 }
 
+function projections(configuration: ZhixingConfig) {
+  return projectRuntimeConfiguration(
+    createRuntimeConfigurationSnapshot(configuration),
+  );
+}
+
 describe("Host Kernel runtime bindings", () => {
   it("resolves main/light/power once and applies a job main-model override", () => {
+    const configuration = projections(config());
     const factory = createHostKernelModelProviderFactory({
-      config: config(),
+      configuration: configuration.model,
       credentials,
     });
 
@@ -55,13 +64,14 @@ describe("Host Kernel runtime bindings", () => {
   it("keeps optional-role degradation visible while returning the main fallback", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
+      const configuration = projections(config({
+        llm: {
+          main: { provider: "deepseek", model: "deepseek-chat" },
+          light: { provider: "openai", model: "gpt-4o-mini" },
+        },
+      }));
       const factory = createHostKernelModelProviderFactory({
-        config: config({
-          llm: {
-            main: { provider: "deepseek", model: "deepseek-chat" },
-            light: { provider: "openai", model: "gpt-4o-mini" },
-          },
-        }),
+        configuration: configuration.model,
         credentials,
       });
 
@@ -75,11 +85,12 @@ describe("Host Kernel runtime bindings", () => {
   });
 
   it("projects identity/proxy and preserves explicit no-workspace without config leakage", () => {
+    const configuration = projections(config({
+      agent: { displayName: "测试知行" },
+      network: { proxy: "http://127.0.0.1:8080" },
+    }));
     const factory = createHostKernelRuntimeEnvironmentFactory({
-      config: config({
-        agent: { displayName: "测试知行" },
-        network: { proxy: "http://127.0.0.1:8080" },
-      }),
+      configuration: configuration.kernelEnvironment,
     });
 
     const environment = factory.create({ workspace: null });

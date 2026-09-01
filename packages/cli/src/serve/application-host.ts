@@ -25,6 +25,10 @@ import {
   type ServeTopologyPlan,
 } from "./role-topology.js";
 import type { HostProcessMode } from "./self-exec.js";
+import {
+  projectRuntimeConfiguration,
+  type RuntimeConfigurationProjections,
+} from "../runtime/runtime-configuration-projections.js";
 
 type ReadyStartup = Extract<StartupCheckResult, { readonly kind: "ready" }>;
 type TrustedHomeBootstrap = Extract<MeshRuntimeBootstrap, { readonly mode: "trusted-home" }>;
@@ -85,6 +89,7 @@ export class PersistentApplicationHost<Options> {
   }>;
   readonly #input: Readonly<PersistentApplicationHostInput<Options>>;
   readonly #dependencies: PersistentApplicationHostDependencies<Options>;
+  readonly #configuration: RuntimeConfigurationProjections;
   #mesh: (OwnedResource & { readonly value: MeshRuntimeBootstrap }) | undefined;
   #localWorkspaceOwner:
     | (OwnedResource & { readonly value: Exclude<LocalWorkspaceOwner, undefined> })
@@ -101,6 +106,9 @@ export class PersistentApplicationHost<Options> {
     });
     this.#input = Object.freeze({ ...input });
     this.#dependencies = dependencies;
+    this.#configuration = projectRuntimeConfiguration(
+      input.startup.runtimeConfiguration,
+    );
   }
 
   async run(): Promise<void> {
@@ -172,7 +180,11 @@ export class PersistentApplicationHost<Options> {
       mesh,
       deviceCapacity,
       secretStore: this.#input.secretStore,
-      runtimeConfiguration: this.#input.startup.runtimeConfiguration,
+      modelConfiguration: this.#configuration.model,
+      kernelEnvironmentConfiguration: this.#configuration.kernelEnvironment,
+      advancementConfiguration: this.#configuration.advancement,
+      mcpConfiguration: this.#configuration.mcp,
+      authorityConfiguration: this.#configuration.authority,
       credentialGeneration: this.#input.startup.credentialGeneration,
       localWorkspaceIdentity,
     }) satisfies ServeBootstrapContext;
@@ -199,6 +211,10 @@ export class PersistentApplicationHost<Options> {
           ...bootstrap,
           providerCredentials: this.#input.startup.providerCredentials,
           mcpCredentials: this.#input.startup.mcpCredentials,
+          channelConfiguration: this.#configuration.channel,
+          workspaceConfiguration: this.#configuration.workspace,
+          credentialRotationConfiguration:
+            this.#configuration.credentialRotation,
           channelCredentials: this.#input.startup.channelCredentials,
           credentialExposureCredentials:
             this.#input.startup.credentialExposureCredentials,
@@ -233,8 +249,8 @@ export class PersistentApplicationHost<Options> {
       zhixingHome: this.#input.zhixingHome,
       secretStore: this.#input.secretStore,
       storageMaintenance: deviceCapacity.storage,
-      ...(this.#input.startup.runtimeConfiguration.mesh
-        ? { configuration: this.#input.startup.runtimeConfiguration.mesh }
+      ...(this.#configuration.topology.mesh
+        ? { configuration: this.#configuration.topology.mesh }
         : {}),
     });
     this.#mesh = own(mesh, () => mesh.bootstrapStore.stopStorageMaintenance());

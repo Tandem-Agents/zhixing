@@ -120,7 +120,7 @@ const authorityRuntimeSurface: AccessSurface = {
           }
         : {}),
       configurationSnapshot: {
-        config: ctx.runtimeConfiguration,
+        config: ctx.authorityConfiguration,
         executableVersion: ZHIXING_CLI_VERSION,
       },
       executorReadiness: ctx.executorReadiness,
@@ -406,12 +406,14 @@ const conversationSurface: AccessSurface = {
   name: "conversation",
   phase: "pre-server",
   async setup(ctx) {
-    const { transcript, snapshots, runtimeConfiguration: config } = ctx;
+    const { transcript, snapshots, modelConfiguration } = ctx;
     if (!ctx.authorityRuntime) {
       throw new Error("Conversation surface requires the durable authority runtime");
     }
     // 装填预算按主模型能力取值（serve 会话统一用 main 模型；未知模型有保守兜底）
-    const capability = resolveModelCapability(config.llm?.main?.model ?? "");
+    const capability = resolveModelCapability(
+      modelConfiguration.llm?.main?.model ?? "",
+    );
 
     // 持久化路由——对话归属编码在全域键里(ws: 前缀 = 场景对话),持久层
     // 操作按 scope 选 store、用库内 id。场景库 store 惰性建、按 sceneId 缓存。
@@ -812,7 +814,7 @@ const localConversationOwnerUnit: CoreAssemblyUnit = {
       runtimeFactory: ctx.assignmentRuntimeFactory,
       interactions: ctx.durableInteractions,
       advancementModelProvider: createHostAdvancementModelProviderFactory({
-        config: ctx.runtimeConfiguration,
+        configuration: ctx.advancementConfiguration,
         credentials: ctx.providerCredentials ?? {},
       }),
       dataPlane: ctx.executorDataPlane,
@@ -971,13 +973,13 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
     async setup(ctx) {
       const {
         conversations,
-        runtimeConfiguration: config,
+        channelConfiguration,
         losslessDataPlane,
       } = ctx;
       if (
         !conversations ||
-        !config.messaging ||
-        Object.keys(config.messaging).length === 0
+        !channelConfiguration.messaging ||
+        Object.keys(channelConfiguration.messaging).length === 0
       ) {
         return;
       }
@@ -1006,11 +1008,11 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
       };
       try {
         const result = await setupChannels({
-          entries: config.messaging,
+          entries: channelConfiguration.messaging,
           credentials,
           conversations,
           logger: channelLogger,
-          cancelKeywords: config.intent?.cancelKeywords,
+          cancelKeywords: channelConfiguration.intent?.cancelKeywords,
           sessionBroadcast: () => ctx.sessionBroadcastRef.current,
           sessionActivityBroadcast: () =>
             ctx.sessionActivityBroadcastRef.current,
@@ -1076,8 +1078,8 @@ const deliverySurface: AccessSurface = {
   name: "delivery",
   phase: "pre-server",
   async setup(ctx) {
-    const { channels, runtimeConfiguration: config, zhixingHome } = ctx;
-    if (!channels || !config.messaging) return;
+    const { channels, channelConfiguration, zhixingHome } = ctx;
+    if (!channels || !channelConfiguration.messaging) return;
     if (!ctx.authorityRuntime) {
       throw new Error("Delivery requires the durable authority runtime");
     }

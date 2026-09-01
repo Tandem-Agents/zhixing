@@ -6,9 +6,14 @@
  * 刷新,集中在这里避免命令层各自捕获旧快照。
  */
 
-import { describeProxy, type ProxyDescription } from "@zhixing/network";
-import { loadConfig, type ZhixingConfig } from "@zhixing/providers";
 import type { ServerInfoResult } from "./rpc-management-facade.js";
+import {
+  createRuntimeConfigurationProvider,
+  type ReplRuntimeConfigurationProjection,
+  type RuntimeConfigurationProvider,
+  type RuntimeNetworkProxyDisplayProjection,
+  type RuntimePrimaryModelDisplayProjection,
+} from "./runtime-configuration-provider.js";
 
 export interface ReplLocalViewManagement {
   serverInfo(): Promise<ServerInfoResult>;
@@ -16,27 +21,34 @@ export interface ReplLocalViewManagement {
 
 export interface ReplLocalViewOptions {
   readonly management: ReplLocalViewManagement;
-  readonly loadConfig?: () => ZhixingConfig;
+  readonly configuration?: Pick<RuntimeConfigurationProvider, "readReplSurface">;
 }
 
 export interface ReplLocalViewSnapshot {
-  readonly config: ZhixingConfig;
+  readonly primaryModel: RuntimePrimaryModelDisplayProjection;
   readonly hostInfo: ServerInfoResult | null;
   readonly workspaceRoot: string | null;
-  readonly networkProxy: ProxyDescription;
+  readonly networkProxy: RuntimeNetworkProxyDisplayProjection;
 }
 
 export class ReplLocalView {
-  private readonly loadConfig: () => ZhixingConfig;
+  private readonly configuration: Pick<
+    RuntimeConfigurationProvider,
+    "readReplSurface"
+  >;
   private snapshot: ReplLocalViewSnapshot;
 
   constructor(private readonly opts: ReplLocalViewOptions) {
-    this.loadConfig = opts.loadConfig ?? loadConfig;
-    this.snapshot = this.buildSnapshot(this.loadConfig(), null);
+    this.configuration =
+      opts.configuration ?? createRuntimeConfigurationProvider();
+    this.snapshot = this.buildSnapshot(
+      this.configuration.readReplSurface(),
+      null,
+    );
   }
 
-  get config(): ZhixingConfig {
-    return this.snapshot.config;
+  get primaryModel(): RuntimePrimaryModelDisplayProjection {
+    return this.snapshot.primaryModel;
   }
 
   get hostInfo(): ServerInfoResult | null {
@@ -47,26 +59,26 @@ export class ReplLocalView {
     return this.snapshot.workspaceRoot;
   }
 
-  get networkProxy(): ProxyDescription {
+  get networkProxy(): RuntimeNetworkProxyDisplayProjection {
     return this.snapshot.networkProxy;
   }
 
   async refresh(): Promise<ReplLocalViewSnapshot> {
-    const config = this.loadConfig();
+    const configuration = this.configuration.readReplSurface();
     const hostInfo = await this.opts.management.serverInfo().catch(() => null);
-    this.snapshot = this.buildSnapshot(config, hostInfo);
+    this.snapshot = this.buildSnapshot(configuration, hostInfo);
     return this.snapshot;
   }
 
   private buildSnapshot(
-    config: ZhixingConfig,
+    configuration: ReplRuntimeConfigurationProjection,
     hostInfo: ServerInfoResult | null,
   ): ReplLocalViewSnapshot {
-    return {
-      config,
+    return Object.freeze({
+      primaryModel: configuration.primaryModel,
       hostInfo,
       workspaceRoot: hostInfo?.workspace ?? null,
-      networkProxy: describeProxy(config.network?.proxy),
-    };
+      networkProxy: configuration.networkProxy,
+    });
   }
 }

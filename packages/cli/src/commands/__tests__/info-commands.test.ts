@@ -18,7 +18,6 @@ import { stripAnsi } from "../../tui/index.js";
 import type { CliWriter } from "../../screen/index.js";
 import type { ConversationController } from "../../runtime/conversation-controller.js";
 import type { RpcManagementFacade } from "../../runtime/rpc-management-facade.js";
-import type { ZhixingConfig } from "@zhixing/providers";
 import type { SelectionService } from "../../tui/selection/index.js";
 
 const RUNTIME: RuntimeContext = {
@@ -46,9 +45,7 @@ function setup(options: {
   const registry = new DefaultCommandRegistry();
   const dispatcher = new CommandDispatcher({ registry });
   const writer = makeWriter();
-  let config = {
-    llm: { main: { provider: "anthropic", model: "claude-x" } },
-  } as unknown as ZhixingConfig;
+  let primaryModel = { providerId: "anthropic", model: "claude-x" };
   const contextBudget = vi.fn(async () => ({
     budget: {
       contextWindow: 200_000,
@@ -115,9 +112,13 @@ function setup(options: {
     registry,
     dispatcher,
     writer,
-    getConfig: () => config,
+    getPrimaryModel: () => primaryModel,
     controller,
-    getNetworkProxy: () => ({ mode: "off", resolved: null, display: "off" }) as never,
+    getNetworkProxy: () => ({
+      mode: "off",
+      hasResolvedProxy: false,
+      display: "off",
+    }),
     getScheduler: () => ({ list: schedulerList }) as unknown as SchedulerFacade,
     management,
     selection: options.selection,
@@ -131,8 +132,8 @@ function setup(options: {
     usage,
     management,
     schedulerList,
-    setConfig: (next: ZhixingConfig) => {
-      config = next;
+    setConfig: (next: { readonly providerId: string; readonly model: string }) => {
+      primaryModel = next;
     },
   };
 }
@@ -257,9 +258,7 @@ describe("registerInfoCommands", () => {
 
   it("/model 在执行时读取最新配置快照", async () => {
     const h = setup();
-    h.setConfig({
-      llm: { main: { provider: "openai", model: "gpt-next" } },
-    } as unknown as ZhixingConfig);
+    h.setConfig({ providerId: "openai", model: "gpt-next" });
 
     await h.dispatcher.dispatch("/model", RUNTIME);
 

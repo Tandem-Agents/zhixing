@@ -3,7 +3,7 @@ import {
   resolveWorkspaceSessionType,
   type WorkspaceSessionType,
 } from "@zhixing/providers";
-import type { RuntimeConfigurationSnapshot } from "../runtime/runtime-configuration-snapshot.js";
+import type { RuntimeWorkspaceConfigurationProjection } from "../runtime/runtime-configuration-projections.js";
 
 /**
  * Anchor 宿主对默认运行形态工作区的只读投影。
@@ -18,10 +18,10 @@ export interface HostDefaultWorkspaceProjection {
 }
 
 export function createHostDefaultWorkspaceProjection(
-  config: RuntimeConfigurationSnapshot,
+  configuration: RuntimeWorkspaceConfigurationProjection,
   sessionType: WorkspaceSessionType = resolveWorkspaceSessionType(),
 ): HostDefaultWorkspaceProjection {
-  const resolved = resolveWorkspace(config, { sessionType });
+  const resolved = resolveWorkspace(configuration, { sessionType });
   return Object.freeze({
     postAdoptionReviewWorkingDirectory: resolved.path ?? process.cwd(),
     hostInfoWorkspace: resolved.path ?? undefined,

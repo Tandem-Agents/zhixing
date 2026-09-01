@@ -16,8 +16,6 @@ import {
   type CommandDef,
   type CommandCategory,
 } from "@zhixing/core";
-import type { ZhixingConfig } from "@zhixing/providers";
-import type { ProxyDescription } from "@zhixing/network";
 import { renderUsageReport, renderContextVisual } from "../render.js";
 import { layout } from "../tui/style.js";
 import type { CliWriter } from "../screen/index.js";
@@ -28,6 +26,10 @@ import type {
   ServerInfoResult,
 } from "../runtime/rpc-management-facade.js";
 import type { ConversationController } from "../runtime/conversation-controller.js";
+import type {
+  RuntimeNetworkProxyDisplayProjection,
+  RuntimePrimaryModelDisplayProjection,
+} from "../runtime/runtime-configuration-provider.js";
 import { formatRelativeTime } from "./format.js";
 import type { SelectionService, SelectionOption } from "../tui/selection/index.js";
 import {
@@ -39,12 +41,12 @@ export interface InfoCommandsDeps {
   readonly registry: ICommandRegistry;
   readonly dispatcher: CommandDispatcher;
   readonly writer: CliWriter;
-  /** 本地配置——模型 / provider 显示来源;配置热重载后由 getter 读最新快照。 */
-  readonly getConfig: () => ZhixingConfig;
+  /** Configuration Provider 发布的有限模型显示投影。 */
+  readonly getPrimaryModel: () => RuntimePrimaryModelDisplayProjection;
   /** 会话控制器——当前对话指针与上下文预算(经宿主)的入口 */
   readonly controller: ConversationController;
   /** 网络代理诊断（/status，display 字段已脱敏）。 */
-  readonly getNetworkProxy: () => ProxyDescription;
+  readonly getNetworkProxy: () => RuntimeNetworkProxyDisplayProjection;
   /** 调度门面（/tasks 从当前宿主 scheduler authority 读取）。 */
   readonly getScheduler: () => SchedulerFacade;
   /** 管理面门面（宿主状态等只读执行体）。 */
@@ -320,10 +322,10 @@ function shutdownStrategyForChoice(choice: StopChoice): "immediate" | "drain" | 
 export function registerInfoCommands(deps: InfoCommandsDeps): void {
   const { registry, dispatcher, writer } = deps;
   const getModelView = (): { modelDisplay: string; providerDisplay: string } => {
-    const config = deps.getConfig();
+    const model = deps.getPrimaryModel();
     return {
-      modelDisplay: config.llm?.main?.model ?? "(未配置)",
-      providerDisplay: config.llm?.main?.provider ?? "(未配置)",
+      modelDisplay: model.model || "(未配置)",
+      providerDisplay: model.providerId || "(未配置)",
     };
   };
 
@@ -354,7 +356,7 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     // auto+url / explicit—— mode=auto+null 时 dim 灰色提示直连，其他状态正常色。
     const proxy = deps.getNetworkProxy();
     const proxyText =
-      proxy.resolved === null && proxy.mode === "auto"
+      !proxy.hasResolvedProxy && proxy.mode === "auto"
         ? chalk.dim(proxy.display)
         : proxy.display;
     const current = deps.controller.current;

@@ -2345,14 +2345,14 @@ export function inspectAgentRuntimeWorkspaceEncapsulation(records) {
   if (
     hostProjectionSource === undefined ||
     (hostProjectionSource.match(/\bresolveWorkspace\s*\(/gu) ?? []).length !== 1 ||
-    !hostProjectionSource.includes("resolveWorkspace(config, { sessionType })") ||
+    !hostProjectionSource.includes("resolveWorkspace(configuration, { sessionType })") ||
     hostProjectionSource.includes("ensureWorkspaceDir")
   ) {
     failures.push("Host default workspace projection no longer delegates once to the authority resolver");
   }
   if (
     commandSource === undefined ||
-    (commandSource.match(/\bcreateHostDefaultWorkspaceProjection\s*\(config\)/gu) ?? []).length !== 1 ||
+    (commandSource.match(/\bcreateHostDefaultWorkspaceProjection\s*\(\s*workspaceConfiguration,?\s*\)/gu) ?? []).length !== 1 ||
     (commandSource.match(/hostDefaultWorkspace\.postAdoptionReviewWorkingDirectory/gu) ?? []).length !== 1 ||
     (commandSource.match(/hostDefaultWorkspace\.hostInfoWorkspace/gu) ?? []).length !== 1 ||
     /ephemeralRuntime\.(?:resolvedWorkspace|workspaceDirStatus)/u.test(commandSource) ||
@@ -2565,6 +2565,8 @@ export function inspectKernelProviderDependencyInversion(records) {
     (edge.match(/\bcreateProviderRoles\s*\(/gu) ?? []).length !== 1 ||
     !edge.includes("createHostKernelModelProviderFactory(") ||
     !edge.includes("createHostKernelRuntimeEnvironmentFactory(") ||
+    !edge.includes("readonly configuration: RuntimeModelConfigurationProjection;") ||
+    !edge.includes("readonly configuration: RuntimeKernelEnvironmentConfigurationProjection;") ||
     !edge.includes("createKernelModelProviderBinding({") ||
     !edge.includes("createKernelRuntimeEnvironment({") ||
     !edge.includes("const primaryModelCapability = resolveModelCapability(") ||
@@ -2576,14 +2578,18 @@ export function inspectKernelProviderDependencyInversion(records) {
   }
   if (
     !command.includes("modelProvider: createHostKernelModelProviderFactory({") ||
-    !command.includes("runtimeEnvironment: createHostKernelRuntimeEnvironmentFactory({ config })") ||
+    !command.includes("configuration: modelConfiguration,") ||
+    !command.includes("runtimeEnvironment: createHostKernelRuntimeEnvironmentFactory({") ||
+    !command.includes("configuration: kernelEnvironmentConfiguration,") ||
     command.includes("providerConfiguration:")
   ) {
     failures.push("Anchor composition does not inject the one concrete Kernel provider edge");
   }
   if (
-    !executor.includes("this.#modelProvider = createHostKernelModelProviderFactory(options);") ||
-    !executor.includes("this.#runtimeEnvironment = createHostKernelRuntimeEnvironmentFactory(options);") ||
+    !executor.includes("this.#modelProvider = createHostKernelModelProviderFactory({") ||
+    !executor.includes("configuration: options.modelConfiguration,") ||
+    !executor.includes("this.#runtimeEnvironment = createHostKernelRuntimeEnvironmentFactory({") ||
+    !executor.includes("configuration: options.kernelEnvironmentConfiguration,") ||
     (executor.match(/modelProvider: this\.#modelProvider\.create\s*\(/gu) ?? []).length !== 2 ||
     (executor.match(/runtimeEnvironment: this\.#runtimeEnvironment\.create\s*\(/gu) ?? []).length !== 2 ||
     executor.includes("providerConfiguration:") ||
@@ -2653,6 +2659,7 @@ export function inspectAdvancementProviderDependencyInversion(records) {
   }
   if (
     !edge.includes("createHostAdvancementModelProviderFactory(") ||
+    !edge.includes("readonly configuration: RuntimeAdvancementConfigurationProjection;") ||
     !edge.includes("createProviderRoles({") ||
     !edge.includes("createControlCompletionPort({") ||
     !edge.includes("createAdvancementRuntime({") ||
@@ -2822,8 +2829,8 @@ export function inspectRuntimeSecretProjectionBoundary(records) {
   return failures;
 }
 
-/** A6 validated public configuration crosses the Host edge as one frozen process snapshot. */
-export function inspectRuntimeConfigurationSnapshotBoundary(records) {
+/** A6 public configuration is frozen once, then crosses only purpose-owned projections. */
+export function inspectRuntimeConfigurationProjectionBoundary(records) {
   const failures = [];
   const byPath = new Map(records.map((record) => [record.relative, record.text]));
   const required = (relative) => {
@@ -2836,6 +2843,20 @@ export function inspectRuntimeConfigurationSnapshotBoundary(records) {
   const snapshot = required(
     "packages/cli/src/runtime/runtime-configuration-snapshot.ts",
   );
+  const projections = required(
+    "packages/cli/src/runtime/runtime-configuration-projections.ts",
+  );
+  const provider = required(
+    "packages/cli/src/runtime/runtime-configuration-provider.ts",
+  );
+  const replLocalView = required(
+    "packages/cli/src/runtime/repl-local-view.ts",
+  );
+  const surfaceLink = required(
+    "packages/cli/src/runtime/surface-core-host-link.ts",
+  );
+  const repl = required("packages/cli/src/repl.ts");
+  const infoCommands = required("packages/cli/src/commands/info-commands.ts");
   const startup = required("packages/cli/src/startup.ts");
   const topology = required("packages/cli/src/serve/role-topology.ts");
   const host = required("packages/cli/src/serve/application-host.ts");
@@ -2873,6 +2894,118 @@ export function inspectRuntimeConfigurationSnapshotBoundary(records) {
     failures.push("runtime configuration snapshot is not uniquely cloned, branded and deeply frozen");
   }
 
+  const exactProjectionKeys = (constant, expected) => {
+    const match = new RegExp(
+      `const ${constant} = \\[([\\s\\S]*?)\\] as const`,
+      "u",
+    ).exec(projections);
+    const actual = match
+      ? [...match[1].matchAll(/"([^"]+)"/gu)].map((item) => item[1])
+      : [];
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      failures.push(`${constant}: runtime configuration purpose exact-set drifted`);
+    }
+  };
+  exactProjectionKeys("TOPOLOGY_KEYS", ["mesh"]);
+  exactProjectionKeys("MODEL_KEYS", ["llm", "modelCapabilityOverrides"]);
+  exactProjectionKeys("KERNEL_ENVIRONMENT_KEYS", [
+    "agent",
+    "workspace",
+    "network",
+  ]);
+  exactProjectionKeys("ADVANCEMENT_KEYS", [
+    "llm",
+    "workspace",
+    "advancement",
+    "modelCapabilityOverrides",
+  ]);
+  exactProjectionKeys("MCP_KEYS", ["mcp", "network"]);
+  exactProjectionKeys("CHANNEL_KEYS", ["messaging", "intent"]);
+  exactProjectionKeys("WORKSPACE_KEYS", ["workspace"]);
+  exactProjectionKeys("CREDENTIAL_ROTATION_KEYS", ["llm", "messaging"]);
+  exactProjectionKeys("AUTHORITY_KEYS", [
+    "mesh",
+    "llm",
+    "messaging",
+    "mcp",
+    "agent",
+    "intent",
+    "workspace",
+    "network",
+    "advancement",
+    "modelCapabilityOverrides",
+  ]);
+  if (
+    !projections.includes("declare const runtimeConfigurationProjectionBrand: unique symbol") ||
+    !projections.includes("export function projectRuntimeConfiguration(") ||
+    !projections.includes("Object.prototype.hasOwnProperty.call(configuration, key)") ||
+    !projections.includes("structuredClone(configuration[key])") ||
+    !projections.includes("return deepFreeze(selected)") ||
+    !projections.includes("return Object.freeze(value)") ||
+    /loadConfig|process\.env|node:path|ZhixingCredentials|SecretStore/u.test(projections)
+  ) {
+    failures.push("runtime configuration purposes are not uniquely cloned, branded and deeply frozen");
+  }
+
+  if (
+    !provider.includes("export interface RuntimeConfigurationProvider") ||
+    !provider.includes("readReplSurface(): ReplRuntimeConfigurationProjection;") ||
+    !provider.includes("readTopology(options:") ||
+    !provider.includes("export function createRuntimeConfigurationProvider(") ||
+    (provider.match(/projectRuntimeConfiguration\s*\(/gu) ?? []).length !== 1 ||
+    !provider.includes("primaryModel: Object.freeze({") ||
+    !provider.includes("networkProxy: Object.freeze({") ||
+    !provider.includes("hasResolvedProxy: proxy.resolved !== null") ||
+    !provider.includes("return project(options).topology;") ||
+    /readonly (?:config|resolved):|RuntimeConfigurationSnapshot/u.test(provider)
+  ) {
+    failures.push("Configuration Provider does not publish only finite frozen Surface projections");
+  }
+  if (
+    /@zhixing\/providers|\bloadConfig\b|\bZhixingConfig\b|get config\s*\(/u.test(
+      replLocalView,
+    ) ||
+    !replLocalView.includes("configuration.readReplSurface()") ||
+    !replLocalView.includes("get primaryModel(): RuntimePrimaryModelDisplayProjection") ||
+    /localView\.config|\bgetConfig\b|\bZhixingConfig\b/u.test(repl) ||
+    !repl.includes("localView.primaryModel.providerId") ||
+    !repl.includes("getPrimaryModel: () => localView.primaryModel") ||
+    /@zhixing\/providers|\bloadConfig\b|\bZhixingConfig\b|\bgetConfig\b/u.test(
+      infoCommands,
+    ) ||
+    !infoCommands.includes("getPrimaryModel: () => RuntimePrimaryModelDisplayProjection")
+  ) {
+    failures.push("REPL Surface regained a raw or aggregate configuration path");
+  }
+  if (
+    /@zhixing\/providers|\bloadConfig\b|\bZhixingConfig\b/u.test(surfaceLink) ||
+    !surfaceLink.includes("createRuntimeConfigurationProvider()") ||
+    !surfaceLink.includes(".readTopology({ homeDir }).mesh")
+  ) {
+    failures.push("current-anchor Surface link bypasses the finite Topology projection");
+  }
+
+  const allowedConfigurationSourceOwners = new Set([
+    "packages/cli/src/maintenance/doctor.ts",
+    "packages/cli/src/runtime/config-command.ts",
+    "packages/cli/src/runtime/runtime-configuration-provider.ts",
+    "packages/cli/src/serve/backup-command.ts",
+    "packages/cli/src/serve/disaster-recovery-command.ts",
+    "packages/cli/src/serve/managed-service-runtime.ts",
+    "packages/cli/src/serve/mesh-pair-command.ts",
+    "packages/cli/src/startup.ts",
+  ]);
+  for (const record of records) {
+    if (
+      record.relative.startsWith("packages/cli/src/") &&
+      !/\.test\.ts$|\/__tests__\//u.test(record.relative) &&
+      /\bloadConfig\b/u.test(record.text) &&
+      !allowedConfigurationSourceOwners.has(record.relative)
+    ) {
+      failures.push(`${record.relative}: ordinary runtime Surface owns a configuration loader`);
+    }
+  }
+
   if (
     !startup.includes("runtimeConfiguration: RuntimeConfigurationSnapshot;") ||
     (startup.match(/createRuntimeConfigurationSnapshot\s*\(/gu) ?? []).length !== 2 ||
@@ -2882,58 +3015,107 @@ export function inspectRuntimeConfigurationSnapshotBoundary(records) {
     failures.push("StartupCheckResult.ready does not publish only the one runtime configuration snapshot");
   }
 
-  if (
-    !topology.includes("readonly runtimeConfiguration: RuntimeConfigurationSnapshot;") ||
-    /readonly config:|readonly startup:/u.test(topology)
-  ) {
-    failures.push("role bootstrap exposes raw configuration beside the runtime snapshot");
+  for (const field of [
+    "modelConfiguration: RuntimeModelConfigurationProjection",
+    "kernelEnvironmentConfiguration: RuntimeKernelEnvironmentConfigurationProjection",
+    "advancementConfiguration: RuntimeAdvancementConfigurationProjection",
+    "mcpConfiguration: RuntimeMcpConfigurationProjection",
+    "authorityConfiguration: RuntimeAuthorityConfigurationProjection",
+    "channelConfiguration: RuntimeChannelConfigurationProjection",
+    "workspaceConfiguration: RuntimeWorkspaceConfigurationProjection",
+    "credentialRotationConfiguration: RuntimeCredentialRotationConfigurationProjection",
+  ]) {
+    if (!topology.includes(field)) {
+      failures.push(`role bootstrap misses purpose projection ${field}`);
+    }
   }
   if (
-    !host.includes("runtimeConfiguration: this.#input.startup.runtimeConfiguration") ||
-    !host.includes("this.#input.startup.runtimeConfiguration.mesh") ||
-    /startup\.config|bootstrap\.config|loadConfig\s*\(|createRuntimeConfigurationSnapshot\s*\(/u.test(
+    /RuntimeConfigurationSnapshot|ZhixingConfig|runtimeConfiguration|readonly config:|readonly startup:/u.test(
+      topology,
+    )
+  ) {
+    failures.push("role bootstrap exposes an aggregate configuration path");
+  }
+  if (
+    !host.includes("this.#configuration = projectRuntimeConfiguration(") ||
+    !host.includes("input.startup.runtimeConfiguration") ||
+    (host.match(/projectRuntimeConfiguration\s*\(/gu) ?? []).length !== 1 ||
+    !host.includes("this.#configuration.topology.mesh") ||
+    !host.includes("modelConfiguration: this.#configuration.model") ||
+    !host.includes("kernelEnvironmentConfiguration: this.#configuration.kernelEnvironment") ||
+    !host.includes("advancementConfiguration: this.#configuration.advancement") ||
+    !host.includes("mcpConfiguration: this.#configuration.mcp") ||
+    !host.includes("authorityConfiguration: this.#configuration.authority") ||
+    !host.includes("channelConfiguration: this.#configuration.channel") ||
+    !host.includes("workspaceConfiguration: this.#configuration.workspace") ||
+    !host.includes("this.#configuration.credentialRotation") ||
+    /startup\.config\b|bootstrap\.config\b|loadConfig\s*\(|createRuntimeConfigurationSnapshot\s*\(/u.test(
       host,
     )
   ) {
-    failures.push("ApplicationHost reloads, reconstructs or bypasses the frozen configuration snapshot");
+    failures.push("ApplicationHost does not perform the one purpose-owned projection and static handoff");
   }
 
-  const runtimeConsumers = [
+  const downstreamConsumers = [
     ["Anchor role", anchor],
     ["Executor role", executor],
-    ["transient workspace runtime", workspace],
-  ];
-  for (const [name, source] of runtimeConsumers) {
-    if (
-      /startup\.config|bootstrap\.config|loadConfig\s*\(|ZhixingConfig/u.test(source) ||
-      !source.includes("runtimeConfiguration")
-    ) {
-      failures.push(`${name} does not consume only the frozen runtime configuration snapshot`);
-    }
-  }
-
-  if (
-    !assembly.includes("readonly runtimeConfiguration: RuntimeConfigurationSnapshot;") ||
-    /readonly config: ZhixingConfig/u.test(assembly) ||
-    (surfaces.match(/ctx\.runtimeConfiguration/gu) ?? []).length < 2 ||
-    /ctx\.config/u.test(surfaces)
-  ) {
-    failures.push("Anchor assembly can still reconstruct a raw configuration path");
-  }
-
-  for (const [name, source] of [
+    ["Anchor assembly", assembly],
+    ["Anchor surfaces", surfaces],
     ["Kernel Provider edge", runtimeBindings],
     ["Advancement Provider edge", advancement],
     ["default workspace edge", defaultWorkspace],
     ["Trust Administration edge", trust],
     ["credential rotation edge", rotation],
-  ]) {
+  ];
+  for (const [name, source] of downstreamConsumers) {
     if (
-      !source.includes("RuntimeConfigurationSnapshot") ||
-      /type ZhixingConfig|loadConfig\s*\(/u.test(source)
+      /RuntimeConfigurationSnapshot|runtimeConfiguration|startup\.config\b|bootstrap\.config\b|loadConfig\s*\(|type ZhixingConfig|readonly config:|projectRuntimeConfiguration\s*\(/u.test(
+        source,
+      )
     ) {
-      failures.push(`${name} accepts a raw configuration source instead of the process snapshot`);
+      failures.push(`${name} can still consume or reconstruct aggregate configuration`);
     }
+  }
+
+  if (
+    !assembly.includes("readonly modelConfiguration: RuntimeModelConfigurationProjection;") ||
+    !assembly.includes("readonly advancementConfiguration: RuntimeAdvancementConfigurationProjection;") ||
+    !assembly.includes("readonly channelConfiguration: RuntimeChannelConfigurationProjection;") ||
+    !assembly.includes("readonly authorityConfiguration: RuntimeAuthorityConfigurationProjection;") ||
+    !surfaces.includes("config: ctx.authorityConfiguration") ||
+    !surfaces.includes("modelConfiguration.llm?.main?.model") ||
+    !surfaces.includes("configuration: ctx.advancementConfiguration") ||
+    !surfaces.includes("entries: channelConfiguration.messaging") ||
+    !surfaces.includes("cancelKeywords: channelConfiguration.intent?.cancelKeywords") ||
+    /ctx\.config/u.test(surfaces)
+  ) {
+    failures.push("Anchor assembly purpose projections are incomplete or bypassed");
+  }
+
+  for (const [name, source, expectedType] of [
+    ["Kernel model edge", runtimeBindings, "RuntimeModelConfigurationProjection"],
+    ["Kernel environment edge", runtimeBindings, "RuntimeKernelEnvironmentConfigurationProjection"],
+    ["Advancement edge", advancement, "RuntimeAdvancementConfigurationProjection"],
+    ["default workspace edge", defaultWorkspace, "RuntimeWorkspaceConfigurationProjection"],
+    ["Trust edge", trust, "RuntimeWorkspaceConfigurationProjection"],
+    ["credential rotation edge", rotation, "RuntimeCredentialRotationConfigurationProjection"],
+  ]) {
+    if (!new RegExp(`(?:readonly\\s+)?configuration:\\s*${expectedType}`, "u").test(source)) {
+      failures.push(`${name} misses its finite runtime configuration projection`);
+    }
+  }
+
+  if (
+    (workspace.match(/projectRuntimeConfiguration\s*\(/gu) ?? []).length !== 1 ||
+    (workspace.match(/startup\.runtimeConfiguration/gu) ?? []).length !== 1 ||
+    !workspace.includes("configuration.topology.mesh") ||
+    !workspace.includes("configuration.mcp.mcp") ||
+    !workspace.includes("modelConfiguration: configuration.model") ||
+    !workspace.includes("kernelEnvironmentConfiguration: configuration.kernelEnvironment") ||
+    !workspace.includes("config: configuration.authority") ||
+    /loadConfig\s*\(|createRuntimeConfigurationSnapshot\s*\(/u.test(workspace)
+  ) {
+    failures.push("transient workspace root does not perform one finite configuration projection");
   }
 
   const snapshotConstructors = records.filter((record) =>
@@ -2946,6 +3128,34 @@ export function inspectRuntimeConfigurationSnapshotBoundary(records) {
       record.relative === "packages/cli/src/startup.ts")
   ) {
     failures.push("runtime configuration snapshot has a second constructor or misses the startup edge");
+  }
+
+  const projectionCallers = records.filter((record) =>
+    record.text.includes("projectRuntimeConfiguration("));
+  const expectedProjectionCallers = new Set([
+    "packages/cli/src/runtime/runtime-configuration-projections.ts",
+    "packages/cli/src/runtime/runtime-configuration-provider.ts",
+    "packages/cli/src/runtime/workspace-command.ts",
+    "packages/cli/src/serve/application-host.ts",
+  ]);
+  if (
+    projectionCallers.length !== expectedProjectionCallers.size ||
+    projectionCallers.some((record) => !expectedProjectionCallers.has(record.relative))
+  ) {
+    failures.push("runtime configuration has a second projector or a downstream projection bypass");
+  }
+
+  const snapshotTypeOwners = records.filter((record) =>
+    record.text.includes("RuntimeConfigurationSnapshot"));
+  const expectedSnapshotTypeOwners = new Set([
+    "packages/cli/src/runtime/runtime-configuration-projections.ts",
+    "packages/cli/src/runtime/runtime-configuration-snapshot.ts",
+    "packages/cli/src/startup.ts",
+  ]);
+  if (
+    snapshotTypeOwners.some((record) => !expectedSnapshotTypeOwners.has(record.relative))
+  ) {
+    failures.push("complete runtime configuration snapshot crossed a composition root");
   }
 
   return failures;
@@ -3231,7 +3441,7 @@ export async function validateS7Structure() {
   failures.push(...inspectKernelProviderDependencyInversion(records));
   failures.push(...inspectAdvancementProviderDependencyInversion(records));
   failures.push(...inspectRuntimeSecretProjectionBoundary(records));
-  failures.push(...inspectRuntimeConfigurationSnapshotBoundary(records));
+  failures.push(...inspectRuntimeConfigurationProjectionBoundary(records));
   failures.push(...inspectWorksceneRuntimeProjectionBoundary([
     ...records,
     {
@@ -4911,7 +5121,11 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !composition.includes("ctx.conversations!.runMaintenanceExisting(") ||
     !composition.includes("rubricRevision: advancementDetailController") ||
     !composition.includes("rubricCancellation: {") ||
+    !composition.includes(
+      "advancementDetailController.loadRubricCancellationSession(",
+    ) ||
     !composition.includes("ctx.advancementReviews.cancelSession(input)") ||
+    composition.includes("rubricCancellation: advancementDetailController") ||
     !composition.includes("awaitingRubricAdmission: advancementDetailController") ||
     !composition.includes("rubricConfirmation: advancementDetailController") ||
     !composition.includes("rubricPublication: {") ||

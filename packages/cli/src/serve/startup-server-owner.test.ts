@@ -88,7 +88,23 @@ describe("production startup server ownership", () => {
     expect(source).toContain("newTask: advancementDetailController");
     expect(source).toContain("newTaskConversation: {");
     expect(source).toContain("rubricRevision: advancementDetailController");
-    expect(source).toContain("rubricCancellation: advancementDetailController");
+    const rubricCancellation = location(source, "rubricCancellation: {");
+    const rubricCancellationRead = source.indexOf(
+      "advancementDetailController.loadRubricCancellationSession(",
+      rubricCancellation,
+    );
+    const rubricCancellationPersist = source.indexOf(
+      "ctx.advancementReviews.cancelSession(input)",
+      rubricCancellation,
+    );
+    const awaitingRubricAdmission = location(
+      source,
+      "awaitingRubricAdmission: advancementDetailController",
+    );
+    expect(rubricCancellationRead).toBeGreaterThan(rubricCancellation);
+    expect(rubricCancellationPersist).toBeGreaterThan(rubricCancellationRead);
+    expect(rubricCancellationPersist).toBeLessThan(awaitingRubricAdmission);
+    expect(source).not.toContain("rubricCancellation: advancementDetailController");
     expect(source).toContain("awaitingRubricAdmission: advancementDetailController");
     expect(source).toContain("rubricConfirmation: advancementDetailController");
     expect(source).toContain("rubricPublication: {");

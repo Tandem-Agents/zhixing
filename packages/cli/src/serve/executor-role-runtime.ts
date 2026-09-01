@@ -109,7 +109,10 @@ import {
   throwExecutorRoleFailures,
 } from "./executor-role-lifecycle.js";
 import { ExecutorServerLifecycle } from "./executor-server-lifecycle.js";
-import type { RuntimeConfigurationSnapshot } from "../runtime/runtime-configuration-snapshot.js";
+import type {
+  RuntimeKernelEnvironmentConfigurationProjection,
+  RuntimeModelConfigurationProjection,
+} from "../runtime/runtime-configuration-projections.js";
 
 export async function runExecutorRole(
   options: ServeOptions,
@@ -128,7 +131,12 @@ export async function runExecutorRole(
   }
   const zhixingHome = getZhixingHome();
   const deviceCapacity = bootstrap.deviceCapacity;
-  const runtimeConfiguration = bootstrap.runtimeConfiguration;
+  const modelConfiguration = bootstrap.modelConfiguration;
+  const kernelEnvironmentConfiguration =
+    bootstrap.kernelEnvironmentConfiguration;
+  const advancementConfiguration = bootstrap.advancementConfiguration;
+  const mcpConfiguration = bootstrap.mcpConfiguration;
+  const authorityConfiguration = bootstrap.authorityConfiguration;
   const providerCredentials = bootstrap.providerCredentials;
   const writer = createStdoutWriter();
   const processStartedAt = new Date().toISOString();
@@ -163,8 +171,8 @@ export async function runExecutorRole(
   const executorRoleLifecycle = new ExecutorRoleLifecycle();
   const executorServerLifecycle = new ExecutorServerLifecycle();
   const mcpHub = createMcpHub(
-    parseServerSpecs(runtimeConfiguration.mcp, bootstrap.mcpCredentials.mcp),
-    { networkProxy: runtimeConfiguration.network?.proxy },
+    parseServerSpecs(mcpConfiguration.mcp, bootstrap.mcpCredentials.mcp),
+    { networkProxy: mcpConfiguration.network?.proxy },
   );
   executorRoleLifecycle.acquire("mcpHub.dispose", () => mcpHub.dispose());
 
@@ -236,7 +244,8 @@ export async function runExecutorRole(
     const interactions = new DurableConversationInteractionObserver();
     let authority: AuthorityRuntimeStack | undefined;
     const runtime = new ExecutorRuntimeSubstrate({
-      config: runtimeConfiguration,
+      modelConfiguration,
+      kernelEnvironmentConfiguration,
       credentials: providerCredentials,
       mcpHub,
       systemProtectedPaths: resolveSystemProtectedSecretPaths(),
@@ -259,7 +268,7 @@ export async function runExecutorRole(
       authorizedDeviceIds: bootstrap.mesh.authorizedDeviceIds,
       executorId: executorIdForDevice(bootstrap.mesh.deviceKey.deviceId),
       configurationSnapshot: {
-        config: runtimeConfiguration,
+        config: authorityConfiguration,
         executableVersion: ZHIXING_CLI_VERSION,
       },
       executorReadiness: createExecutorReadinessSource({
@@ -404,7 +413,7 @@ export async function runExecutorRole(
       runtimeFactory,
       interactions,
       advancementModelProvider: createHostAdvancementModelProviderFactory({
-        config: runtimeConfiguration,
+        configuration: advancementConfiguration,
         credentials: providerCredentials,
       }),
       evidence: evidenceHandler,
@@ -952,7 +961,8 @@ export class ExecutorRuntimeSubstrate {
   readonly #runtimeEnvironment: KernelRuntimeEnvironmentFactory;
 
   constructor(private readonly options: {
-    readonly config: RuntimeConfigurationSnapshot;
+    readonly modelConfiguration: RuntimeModelConfigurationProjection;
+    readonly kernelEnvironmentConfiguration: RuntimeKernelEnvironmentConfigurationProjection;
     readonly credentials: ProviderCredentialProjection;
     readonly mcpHub: McpHub;
     readonly systemProtectedPaths: readonly string[];
@@ -964,8 +974,13 @@ export class ExecutorRuntimeSubstrate {
       readonly orchestration: AgentRuntimeCapacityBinding;
     };
   }) {
-    this.#modelProvider = createHostKernelModelProviderFactory(options);
-    this.#runtimeEnvironment = createHostKernelRuntimeEnvironmentFactory(options);
+    this.#modelProvider = createHostKernelModelProviderFactory({
+      configuration: options.modelConfiguration,
+      credentials: options.credentials,
+    });
+    this.#runtimeEnvironment = createHostKernelRuntimeEnvironmentFactory({
+      configuration: options.kernelEnvironmentConfiguration,
+    });
   }
 
   createConversationRuntime(

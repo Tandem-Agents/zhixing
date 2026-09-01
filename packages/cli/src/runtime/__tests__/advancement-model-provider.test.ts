@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { assertAdvancementModelProviderBinding } from "@zhixing/orchestrator/advancement";
 import type { ProviderCredentialProjection, ZhixingConfig } from "@zhixing/providers";
 import { createHostAdvancementModelProviderFactory } from "../advancement-model-provider.js";
+import { projectRuntimeConfiguration } from "../runtime-configuration-projections.js";
+import { createRuntimeConfigurationSnapshot } from "../runtime-configuration-snapshot.js";
 
 const credentials: ProviderCredentialProjection = {
   providers: { deepseek: { apiKey: "test-only" } },
@@ -27,8 +29,11 @@ describe("Host Advancement model provider", () => {
         },
       },
     };
+    const configuration = projectRuntimeConfiguration(
+      createRuntimeConfigurationSnapshot(config),
+    );
     const factory = createHostAdvancementModelProviderFactory({
-      config,
+      configuration: configuration.advancement,
       credentials,
     });
 
@@ -53,8 +58,11 @@ describe("Host Advancement model provider", () => {
   });
 
   it("fails before publishing a binding when required Provider configuration is absent", () => {
+    const configuration = projectRuntimeConfiguration(
+      createRuntimeConfigurationSnapshot({}),
+    );
     const factory = createHostAdvancementModelProviderFactory({
-      config: {},
+      configuration: configuration.advancement,
       credentials,
     });
 

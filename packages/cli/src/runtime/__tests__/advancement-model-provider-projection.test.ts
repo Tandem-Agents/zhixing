@@ -37,6 +37,8 @@ vi.mock("@zhixing/orchestrator/advancement", async (importOriginal) => ({
 
 import type { ZhixingConfig } from "@zhixing/providers";
 import { createHostAdvancementModelProviderFactory } from "../advancement-model-provider.js";
+import { projectRuntimeConfiguration } from "../runtime-configuration-projections.js";
+import { createRuntimeConfigurationSnapshot } from "../runtime-configuration-snapshot.js";
 
 const resourceMeter = {
   reserveUsage: vi.fn(async () => {}),
@@ -108,8 +110,11 @@ describe("Host Advancement model provider projection", () => {
       config: resolvedConfig,
     });
 
+    const configuration = projectRuntimeConfiguration(
+      createRuntimeConfigurationSnapshot(resolvedConfig),
+    );
     const binding = createHostAdvancementModelProviderFactory({
-      config: resolvedConfig,
+      configuration: configuration.advancement,
       credentials: {},
     }).create(Object.freeze({ resourceMeter }));
 

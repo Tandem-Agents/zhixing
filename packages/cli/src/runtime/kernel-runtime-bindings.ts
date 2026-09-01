@@ -24,30 +24,33 @@ import {
   ROLE_SPECS,
   type ProviderCredentialProjection,
 } from "@zhixing/providers";
-import type { RuntimeConfigurationSnapshot } from "./runtime-configuration-snapshot.js";
+import type {
+  RuntimeKernelEnvironmentConfigurationProjection,
+  RuntimeModelConfigurationProjection,
+} from "./runtime-configuration-projections.js";
 
 export function createHostKernelModelProviderFactory(input: {
-  readonly config: RuntimeConfigurationSnapshot;
+  readonly configuration: RuntimeModelConfigurationProjection;
   readonly credentials: ProviderCredentialProjection;
 }): KernelModelProviderFactory {
-  const config = input.config;
+  const configuration = input.configuration;
   const credentials = input.credentials;
   return Object.freeze({
     create(request: Parameters<KernelModelProviderFactory["create"]>[0]) {
-      const effectiveConfig = request.mainModelOverride && config.llm
+      const effectiveConfiguration = request.mainModelOverride && configuration.llm
         ? {
-            ...config,
+            ...configuration,
             llm: {
-              ...config.llm,
+              ...configuration.llm,
               main: {
-                ...config.llm.main,
+                ...configuration.llm.main,
                 model: request.mainModelOverride,
               },
             },
           }
-        : config;
+        : configuration;
       const { roles, resolvedRoles } = createProviderRoles({
-        config: effectiveConfig,
+        config: effectiveConfiguration,
         credentials,
       });
       for (const degradation of resolvedRoles.degradations ?? []) {
@@ -58,9 +61,18 @@ export function createHostKernelModelProviderFactory(input: {
         );
       }
       const roleThinking = {
-        main: resolveRoleThinking(roles.main, effectiveConfig.llm?.main?.thinking),
-        light: resolveRoleThinking(roles.light, effectiveConfig.llm?.light?.thinking),
-        power: resolveRoleThinking(roles.power, effectiveConfig.llm?.power?.thinking),
+        main: resolveRoleThinking(
+          roles.main,
+          effectiveConfiguration.llm?.main?.thinking,
+        ),
+        light: resolveRoleThinking(
+          roles.light,
+          effectiveConfiguration.llm?.light?.thinking,
+        ),
+        power: resolveRoleThinking(
+          roles.power,
+          effectiveConfiguration.llm?.power?.thinking,
+        ),
       };
       const resolvedPrimary = resolvedRoles[request.primaryRole];
       const primaryRole = roles[request.primaryRole];
@@ -78,7 +90,7 @@ export function createHostKernelModelProviderFactory(input: {
       const primaryModelCapability = resolveModelCapability(
         primaryRole.model,
         getModelCapabilityOverride(
-          effectiveConfig.modelCapabilityOverrides,
+          effectiveConfiguration.modelCapabilityOverrides,
           primaryRole.model,
         ),
       );
@@ -115,27 +127,27 @@ export function createHostKernelModelProviderFactory(input: {
 }
 
 export function createHostKernelRuntimeEnvironmentFactory(input: {
-  readonly config: RuntimeConfigurationSnapshot;
+  readonly configuration: RuntimeKernelEnvironmentConfigurationProjection;
 }): KernelRuntimeEnvironmentFactory {
-  const config = input.config;
+  const configuration = input.configuration;
   return Object.freeze({
     create(request: Parameters<KernelRuntimeEnvironmentFactory["create"]>[0]) {
       const sessionType = resolveWorkspaceSessionType();
       const workspace = request.workspace === null
         ? { path: null, source: "none" as const }
-        : resolveWorkspace(config, {
+        : resolveWorkspace(configuration, {
             runtimeWorkspace: request.workspace,
             sessionType,
           });
       ensureWorkspaceDir(workspace);
       return createKernelRuntimeEnvironment({
-        agentIdentity: resolveAgentIdentity(config.agent),
+        agentIdentity: resolveAgentIdentity(configuration.agent),
         sessionType,
         workspace,
         globalConfigPath: getGlobalConfigPath(),
-        ...(config.network?.proxy === undefined
+        ...(configuration.network?.proxy === undefined
           ? {}
-          : { networkProxy: config.network.proxy }),
+          : { networkProxy: configuration.network.proxy }),
       });
     },
   });

@@ -13,7 +13,16 @@ import type {
   CredentialExposureSecretProjection,
   CredentialRotationSecretProjection,
 } from "../runtime/runtime-secret-projections.js";
-import type { RuntimeConfigurationSnapshot } from "../runtime/runtime-configuration-snapshot.js";
+import type {
+  RuntimeAdvancementConfigurationProjection,
+  RuntimeAuthorityConfigurationProjection,
+  RuntimeChannelConfigurationProjection,
+  RuntimeCredentialRotationConfigurationProjection,
+  RuntimeKernelEnvironmentConfigurationProjection,
+  RuntimeMcpConfigurationProjection,
+  RuntimeModelConfigurationProjection,
+  RuntimeWorkspaceConfigurationProjection,
+} from "../runtime/runtime-configuration-projections.js";
 import type {
   ConversationAssignmentLedger,
   AssignmentStreamSpool,
@@ -66,7 +75,11 @@ export interface ServeBootstrapContext {
   readonly mesh: MeshRuntimeBootstrap;
   readonly deviceCapacity: DeviceCapacityRuntime;
   readonly secretStore: SecretStorePort & CredentialStoreCoordinator;
-  readonly runtimeConfiguration: RuntimeConfigurationSnapshot;
+  readonly modelConfiguration: RuntimeModelConfigurationProjection;
+  readonly kernelEnvironmentConfiguration: RuntimeKernelEnvironmentConfigurationProjection;
+  readonly advancementConfiguration: RuntimeAdvancementConfigurationProjection;
+  readonly mcpConfiguration: RuntimeMcpConfigurationProjection;
+  readonly authorityConfiguration: RuntimeAuthorityConfigurationProjection;
   readonly credentialGeneration: string | null;
   readonly localWorkspaceIdentity: LocalWorkspaceAssemblyIdentity;
 }
@@ -75,6 +88,9 @@ export interface AnchorServeBootstrapContext extends ServeBootstrapContext {
   readonly providerCredentials: ProviderCredentialProjection;
   readonly mcpCredentials: McpCredentialProjection;
   readonly channelCredentials: ChannelCredentialProjection;
+  readonly channelConfiguration: RuntimeChannelConfigurationProjection;
+  readonly workspaceConfiguration: RuntimeWorkspaceConfigurationProjection;
+  readonly credentialRotationConfiguration: RuntimeCredentialRotationConfigurationProjection;
   readonly credentialExposureCredentials: CredentialExposureSecretProjection;
   readonly credentialRotationCredentials: CredentialRotationSecretProjection;
 }

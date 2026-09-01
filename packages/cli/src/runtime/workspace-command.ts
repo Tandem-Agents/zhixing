@@ -10,6 +10,7 @@ import { prepareMeshRuntimeBootstrap } from "../serve/mesh-runtime-bootstrap.js"
 import { runStartupCheck } from "../startup.js";
 import { createMcpHub } from "@zhixing/mcp";
 import { parseServerSpecs } from "./mcp-config.js";
+import { projectRuntimeConfiguration } from "./runtime-configuration-projections.js";
 import { resolveSystemProtectedSecretPaths } from "../security/secret-boundary.js";
 import { createExecutorReadinessSource } from "../serve/executor-readiness.js";
 import {
@@ -225,6 +226,9 @@ export async function withLocalWorkspaceClient<T, R = T>(
     if (startup.kind !== "ready") {
       throw new Error("当前配置不足以启动本机工作区管理能力");
     }
+    const configuration = projectRuntimeConfiguration(
+      startup.runtimeConfiguration,
+    );
     const capacity = createDeviceCapacityRuntime(
       path.join(zhixingHome, "distributed-runtime", "capacity"),
     );
@@ -232,8 +236,8 @@ export async function withLocalWorkspaceClient<T, R = T>(
       zhixingHome,
       secretStore,
       storageMaintenance: capacity.storage,
-      ...(startup.runtimeConfiguration.mesh
-        ? { configuration: startup.runtimeConfiguration.mesh }
+      ...(configuration.topology.mesh
+        ? { configuration: configuration.topology.mesh }
         : {}),
     });
     if (!mesh.roles.includes("executor")) {
@@ -255,14 +259,15 @@ export async function withLocalWorkspaceClient<T, R = T>(
       ]);
     mcpHub = createMcpHub(
       parseServerSpecs(
-        startup.runtimeConfiguration.mcp,
+        configuration.mcp.mcp,
         startup.mcpCredentials.mcp,
       ),
-      { networkProxy: startup.runtimeConfiguration.network?.proxy },
+      { networkProxy: configuration.mcp.network?.proxy },
     );
     await mcpHub.connectAll();
     const runtimeSubstrate = new ExecutorRuntimeSubstrate({
-      config: startup.runtimeConfiguration,
+      modelConfiguration: configuration.model,
+      kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: startup.providerCredentials,
       mcpHub,
       systemProtectedPaths: resolveSystemProtectedSecretPaths(),
@@ -285,7 +290,7 @@ export async function withLocalWorkspaceClient<T, R = T>(
       authorizedDeviceIds: mesh.authorizedDeviceIds,
       executorId: executorIdForDevice(mesh.deviceKey.deviceId),
       configurationSnapshot: {
-        config: startup.runtimeConfiguration,
+        config: configuration.authority,
         executableVersion: (await import("../version.js")).ZHIXING_CLI_VERSION,
       },
       executorReadiness: createExecutorReadinessSource({

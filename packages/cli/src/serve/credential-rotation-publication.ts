@@ -10,7 +10,7 @@ import {
 import type { CredentialExposureRecord } from "@zhixing/core/contracts";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import type { CredentialRotationSecretProjection } from "../runtime/runtime-secret-projections.js";
-import type { RuntimeConfigurationSnapshot } from "../runtime/runtime-configuration-snapshot.js";
+import type { RuntimeCredentialRotationConfigurationProjection } from "../runtime/runtime-configuration-projections.js";
 
 type CredentialKind = "provider" | "channel" | "mcp";
 
@@ -26,7 +26,7 @@ interface CurrentCredentialBinding {
 export interface CredentialRotationPublicationOptions {
   readonly authority: CredentialExposureAuthority;
   readonly deviceId: string;
-  readonly config: RuntimeConfigurationSnapshot;
+  readonly configuration: RuntimeCredentialRotationConfigurationProjection;
   readonly credentials: CredentialRotationSecretProjection;
   readonly credentialGeneration: string | null;
   readonly readCredentials: () => Promise<CredentialRotationSecretProjection>;
@@ -38,7 +38,7 @@ export interface CredentialRotationPublicationOptions {
   readonly probeProvider?: (input: {
     readonly providerId: string;
     readonly model: string;
-    readonly config: RuntimeConfigurationSnapshot;
+    readonly configuration: RuntimeCredentialRotationConfigurationProjection;
     readonly credentials: ProviderCredentialProjection;
   }) => Promise<string>;
   readonly now?: () => string;
@@ -125,7 +125,7 @@ function currentCredentialBindings(
     bindings.push(binding("mcp", id, `mcp-${id}`, entry, options.deviceId));
   }
   for (const [id, entry] of Object.entries(options.credentials.channels ?? {})) {
-    if (!options.config.messaging?.[id]) continue;
+    if (!options.configuration.messaging?.[id]) continue;
     if (!Object.values(entry).some((value) => value.trim().length > 0)) continue;
     bindings.push(binding("channel", id, `channel-${id}`, entry, options.deviceId));
   }
@@ -193,7 +193,7 @@ function readinessFor(
 ): { readonly verify: () => Promise<string>; readonly assertCurrent: () => Promise<void> } {
   switch (binding.kind) {
     case "provider": {
-      const model = providerModel(options.config, binding.id);
+      const model = providerModel(options.configuration, binding.id);
       if (!model) throw new Error(`Credential rotation provider is not active: ${binding.id}`);
       let verified = false;
       return {
@@ -206,7 +206,7 @@ function readinessFor(
           }))({
             providerId: binding.id,
             model,
-            config: options.config,
+            configuration: options.configuration,
             credentials: options.credentials.providers
               ? { providers: options.credentials.providers }
               : {},
@@ -215,7 +215,10 @@ function readinessFor(
           return principal;
         },
         assertCurrent: async () => {
-          if (!verified || providerModel(options.config, binding.id) !== model) {
+          if (
+            !verified ||
+            providerModel(options.configuration, binding.id) !== model
+          ) {
             throw new Error("Credential rotation provider readiness changed");
           }
         },
@@ -238,7 +241,8 @@ function readinessFor(
       };
     }
     case "channel": {
-      const adapterId = options.config.messaging?.[binding.id]?.type ?? binding.id;
+      const adapterId = options.configuration.messaging?.[binding.id]?.type ??
+        binding.id;
       const assertConnected = () => {
         const status = options.channelStatuses().find((item) => item.channelId === adapterId);
         if (!status || status.state !== "connected") {
@@ -259,10 +263,14 @@ function readinessFor(
 }
 
 function providerModel(
-  config: RuntimeConfigurationSnapshot,
+  configuration: RuntimeCredentialRotationConfigurationProjection,
   providerId: string,
 ): string | undefined {
-  for (const role of [config.llm?.main, config.llm?.light, config.llm?.power]) {
+  for (const role of [
+    configuration.llm?.main,
+    configuration.llm?.light,
+    configuration.llm?.power,
+  ]) {
     if (role?.provider === providerId) return role.model;
   }
   return undefined;
@@ -271,7 +279,7 @@ function providerModel(
 async function probeProviderCredential(input: {
   readonly providerId: string;
   readonly model: string;
-  readonly config: RuntimeConfigurationSnapshot;
+  readonly configuration: RuntimeCredentialRotationConfigurationProjection;
   readonly credentials: ProviderCredentialProjection;
 }, governProvider: (provider: LLMProvider) => LLMProvider): Promise<string> {
   const credentials = input.credentials.providers
@@ -279,7 +287,7 @@ async function probeProviderCredential(input: {
     : {};
   const resolved = resolveProvider(input.providerId, credentials);
   const provider = governProvider(
-    createProvider(input.config, credentials, input.providerId),
+    createProvider(input.configuration, credentials, input.providerId),
   );
   const abort = new AbortController();
   const timer = setTimeout(
