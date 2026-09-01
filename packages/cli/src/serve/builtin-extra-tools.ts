@@ -24,7 +24,6 @@
  */
 
 import type { SchedulerFacade, ToolDefinition } from "@zhixing/core";
-import { mapServerTools, type McpHub } from "@zhixing/mcp";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import {
   createScheduleTool,
@@ -113,12 +112,6 @@ export interface BuiltinExtraToolsAssembly {
   readonly taskListService: TaskListService;
 
   /**
-   * MCP 连接层 hub（进程级单例）—— assembleTools 从其 catalog 物化 MCP 工具；
-   * 入口退出链调用 hub.dispose() 关闭所有连接 / 子进程。空配置时为 no-op 实例。
-   */
-  readonly mcpHub: McpHub;
-
-  /**
    * 装配某次 runtime 创建用的 extra tools 实例。
    *
    * 每次 runtime 创建（会话 / 场景 / ephemeral 实例发放）调一次，
@@ -140,15 +133,12 @@ export interface BuiltinExtraToolsAssembly {
  */
 export function createBuiltinExtraToolsAssembly(
   taskListStore: TaskListStore,
-  mcpHub: McpHub,
   taskListApplication: ConversationTaskListToolApplication,
 ): BuiltinExtraToolsAssembly {
   const taskListService = new TaskListService(taskListStore);
 
   return {
     taskListService,
-    mcpHub,
-
     assembleTools(ctx: ExtraToolsRuntimeContext): ToolDefinition[] {
       const scheduleTool = createScheduleTool(ctx.scheduler);
 
@@ -161,16 +151,7 @@ export function createBuiltinExtraToolsAssembly(
         taskListApplication,
       );
 
-      const tools: ToolDefinition[] = [scheduleTool, taskListTool];
-
-      // MCP 工具：外部服务能力，与本地文件 / workscene 隔离正交（不属本地文件操作
-      // 面），故 main 与所有 workscene 一律注入。空配置时 catalog() 返回 []，自然
-      // 不注入；catalog 在 connectAll 后已就绪，此处同步物化。
-      for (const { server, tools: descriptors } of mcpHub.catalog()) {
-        tools.push(...mapServerTools(server, descriptors, mcpHub.callTool));
-      }
-
-      return tools;
+      return [scheduleTool, taskListTool];
     },
   };
 }

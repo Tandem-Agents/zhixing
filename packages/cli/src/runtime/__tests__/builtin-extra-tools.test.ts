@@ -15,7 +15,6 @@ import type {
   SchedulerFacade,
 } from "@zhixing/core";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
-import { createMcpHub, type McpHub } from "@zhixing/mcp";
 import { createBuiltinExtraToolsAssembly } from "../../serve/builtin-extra-tools.js";
 import { createAnchorConversationTaskListToolApplication } from "../../serve/conversation-task-list-application.js";
 import { InMemoryTaskListStore } from "../task-list-stores.js";
@@ -28,11 +27,9 @@ function fakeScheduler(): SchedulerFacade {
 
 function createAssembly(
   store = new InMemoryTaskListStore(),
-  hub = createMcpHub([]),
 ) {
   return createBuiltinExtraToolsAssembly(
     store,
-    hub,
     createAnchorConversationTaskListToolApplication(),
   );
 }
@@ -67,24 +64,6 @@ describe("createBuiltinExtraToolsAssembly", () => {
 
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(["schedule", "task_list"].sort());
-  });
-
-  it("MCP 工具经 hub.catalog 物化注入 extraTools", () => {
-    const fakeHub: McpHub = {
-      connectAll: async () => {},
-      catalog: () => [
-        {
-          server: { serverId: "demo", transport: "stdio" },
-          tools: [{ name: "echo", inputSchema: { type: "object" } }],
-        },
-      ],
-      callTool: async () => ({ content: "" }),
-      dispose: async () => {},
-    };
-    const assembly = createAssembly(new InMemoryTaskListStore(), fakeHub);
-
-    const tools = assembly.assembleTools({ scheduler: () => fakeScheduler() });
-    expect(tools.map((t) => t.name)).toContain("mcp__demo__echo");
   });
 
   it("assembleTools 多次调用返回**新的** ToolDefinition 实例（runtime swap 友好）", () => {

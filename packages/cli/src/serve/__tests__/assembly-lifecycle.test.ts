@@ -21,7 +21,7 @@ describe("typed pre-server lifecycle contributions", () => {
       { owner: "anchor-local-executor", role: "runtime", id: "localConversationOwner.close", stage: "foundation" },
       { owner: "anchor-host", role: "common", id: "channels.dispose", stage: "surface" },
       { owner: "anchor-host", role: "common", id: "deliveryStack.stop", stage: "surface" },
-      { owner: "anchor-host", role: "common", id: "mcpHub.dispose", stage: "surface" },
+      { owner: "anchor-host", role: "common", id: "mcpRuntime.close", stage: "surface" },
       { owner: "anchor-host", role: "runtime", id: "meshRuntime.stop", stage: "runtime" },
       { owner: "anchor-local-executor", role: "runtime", id: "executorDataPlane.close", stage: "runtime" },
       { owner: "anchor-host", role: "runtime", id: "jobStatus.dispose", stage: "runtime" },
@@ -35,8 +35,8 @@ describe("typed pre-server lifecycle contributions", () => {
   it("rejects duplicate contribution and transfer ownership", () => {
     const rollback = new StartupRollback();
     const contributions = new AssemblyLifecycleContributions(rollback);
-    contributions.acquire("mcpHub.dispose", () => undefined);
-    expect(() => contributions.acquire("mcpHub.dispose", () => undefined))
+    contributions.acquire("mcpRuntime.close", () => undefined);
+    expect(() => contributions.acquire("mcpRuntime.close", () => undefined))
       .toThrow("already exists");
 
     const foreignRollback = new StartupRollback();
@@ -68,7 +68,7 @@ describe("typed pre-server lifecycle contributions", () => {
     const cleanup = vi.fn(async () => undefined);
     const rollback = new StartupRollback();
     const contributions = new AssemblyLifecycleContributions(rollback);
-    contributions.acquire("mcpHub.dispose", cleanup);
+    contributions.acquire("mcpRuntime.close", cleanup);
     const normal = registry();
     contributions.transferTo(normal, "surface");
     contributions.assertTransferred();
@@ -83,7 +83,7 @@ describe("typed pre-server lifecycle contributions", () => {
     const order: string[] = [];
     const rollback = new StartupRollback();
     const contributions = new AssemblyLifecycleContributions(rollback);
-    contributions.acquire("mcpHub.dispose", () => {
+    contributions.acquire("mcpRuntime.close", () => {
       order.push("mcp");
     });
     contributions.acquire("authorityRuntime.stopStorageMaintenance", () => {
@@ -104,7 +104,7 @@ describe("typed pre-server lifecycle contributions", () => {
     contributions.acquire("authorityRuntime.stopStorageMaintenance", () => {
       order.push("authority");
     });
-    contributions.acquire("mcpHub.dispose", () => {
+    contributions.acquire("mcpRuntime.close", () => {
       order.push("mcp");
     });
     contributions.acquire("assetMaintenance.stop", () => {

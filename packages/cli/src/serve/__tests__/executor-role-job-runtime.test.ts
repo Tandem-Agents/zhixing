@@ -1,5 +1,4 @@
 import type { ArtifactStore, IConfirmationBroker } from "@zhixing/core";
-import type { McpHub } from "@zhixing/mcp";
 import type { AgentRuntime, AgentRuntimeCapacityBinding } from "@zhixing/orchestrator/runtime";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { projectRuntimeConfiguration } from "../../runtime/runtime-configuration-projections.js";
@@ -56,10 +55,7 @@ describe("executor role conversation runtime production assembly", () => {
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: {},
       toolImplementation,
-      mcpHub: {
-        catalog: () => [],
-        callTool: vi.fn(),
-      } as unknown as McpHub,
+      mcpTools: { snapshot: () => ({ tools: [], serverIds: [] }) },
       systemProtectedPaths: ["protected"],
       interactions: {} as never,
       artifactStore: () => ({} as ArtifactStore),
@@ -117,10 +113,7 @@ describe("executor role job runtime production assembly", () => {
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: {},
       toolImplementation,
-      mcpHub: {
-        catalog: () => [],
-        callTool: vi.fn(),
-      } as unknown as McpHub,
+      mcpTools: { snapshot: () => ({ tools: [], serverIds: [] }) },
       systemProtectedPaths: ["protected"],
       interactions: {} as never,
       artifactStore: () => ({} as ArtifactStore),
@@ -154,10 +147,7 @@ describe("executor role job runtime production assembly", () => {
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: {},
       toolImplementation,
-      mcpHub: {
-        catalog: () => [],
-        callTool: vi.fn(),
-      } as unknown as McpHub,
+      mcpTools: { snapshot: () => ({ tools: [], serverIds: [] }) },
       systemProtectedPaths: ["protected"],
       interactions: {} as never,
       artifactStore: () => artifactStore,

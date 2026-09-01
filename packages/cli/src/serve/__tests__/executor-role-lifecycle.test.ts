@@ -15,14 +15,14 @@ describe("ExecutorRoleLifecycle", () => {
       { owner: "executor-role", id: "executorJobOwnerLifecycle.close" },
       { owner: "executor-role", id: "executorDataPlane.close" },
       { owner: "executor-role", id: "authorityRuntime.stopStorageMaintenance" },
-      { owner: "executor-role", id: "mcpHub.dispose" },
+      { owner: "executor-role", id: "mcpRuntime.close" },
     ]);
   });
 
   it("rejects duplicate, missing and late contributions", () => {
     const lifecycle = new ExecutorRoleLifecycle();
-    lifecycle.acquire("mcpHub.dispose", () => undefined);
-    expect(() => lifecycle.acquire("mcpHub.dispose", () => undefined))
+    lifecycle.acquire("mcpRuntime.close", () => undefined);
+    expect(() => lifecycle.acquire("mcpRuntime.close", () => undefined))
       .toThrow("already exists");
     expect(() => lifecycle.seal()).toThrow("contributions are incomplete");
   });
@@ -42,7 +42,7 @@ describe("ExecutorRoleLifecycle", () => {
   it("closes partial startup in the fixed order and continues after failures", async () => {
     const lifecycle = new ExecutorRoleLifecycle();
     const order: string[] = [];
-    lifecycle.acquire("mcpHub.dispose", () => order.push("mcp"));
+    lifecycle.acquire("mcpRuntime.close", () => order.push("mcp"));
     lifecycle.acquire("localWorkspaceHost.close", () => {
       order.push("workspace");
       throw new Error("workspace failed");
@@ -78,7 +78,7 @@ describe("ExecutorRoleLifecycle", () => {
     for (const cleanup of cleanups.values()) {
       expect(cleanup).toHaveBeenCalledTimes(1);
     }
-    expect(() => lifecycle.acquire("mcpHub.dispose", () => undefined))
+    expect(() => lifecycle.acquire("mcpRuntime.close", () => undefined))
       .toThrow("already closing");
   });
 

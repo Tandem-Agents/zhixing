@@ -21,26 +21,25 @@ function scene(
   };
 }
 
-function fixture() {
+function fixture(mcpTools = {
+  snapshot: () => ({
+    tools: [{ name: "mcp__alpha__tool" }],
+    serverIds: ["alpha", "beta"],
+  }),
+} as never) {
   const workscenes = {} as never;
   const extraTools = {
     taskListService: {},
-    mcpHub: {
-      catalog: () => [
-        { server: { serverId: "beta" }, tools: [] },
-        { server: { serverId: "alpha" }, tools: [] },
-      ],
-    },
     assembleTools: () => [
       { name: "schedule" },
       { name: "task_list" },
-      { name: "mcp__alpha__tool" },
     ],
   } as never;
   return createAnchorRuntimeProjectionAssembly({
     workscenes,
     worksceneAssignmentTools: {} as never,
     extraTools,
+    mcpTools,
     scheduler: () => ({}) as never,
   });
 }
@@ -142,6 +141,27 @@ describe("Workscene product runtime projection", () => {
     ]) {
       expect(catalog.tools).toContain(name);
     }
+  });
+
+  it("takes one current MCP snapshot for every runtime projection", () => {
+    const snapshot = vi.fn()
+      .mockReturnValueOnce({
+        tools: [{ name: "mcp__first__tool" }],
+        serverIds: ["first"],
+      })
+      .mockReturnValueOnce({
+        tools: [{ name: "mcp__second__tool" }],
+        serverIds: ["second"],
+      });
+    const assembly = fixture({ snapshot } as never);
+
+    expect(assembly.ephemeral()).toMatchObject({
+      executionMcpServers: ["first"],
+    });
+    expect(assembly.ephemeral()).toMatchObject({
+      executionMcpServers: ["second"],
+    });
+    expect(snapshot).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -262,7 +262,7 @@ describe("production startup server ownership", () => {
       "executorServerLifecycle.acquireBinding(localServerBinding)",
     );
     expect(bindingOwner).toBeGreaterThan(bind);
-    expect(bind).toBeLessThan(location(source, "await mcpHub.connectAll()"));
+    expect(bind).toBeLessThan(location(source, "await mcpRuntime.lifecycle.connect()"));
     expect(bind).toBeLessThan(location(source, "const interactions = new DurableConversationInteractionObserver()"));
     expect(bind).toBeLessThan(location(source, "const stopResume = await stopCoordinator.resumeActive()"));
     const activation = source.slice(location(source, "const localConversationServer = await runServer"));
@@ -307,8 +307,8 @@ describe("production startup server ownership", () => {
     expect(source.match(/executorRoleLifecycle\.adoptAuthority\(/gu)).toHaveLength(1);
     expect(source.match(/executorRoleLifecycle\.seal\(\)/gu)).toHaveLength(1);
     expect(source.match(/await executorRoleLifecycle\.close\(\)/gu)).toHaveLength(1);
-    expect(location(source, 'executorRoleLifecycle.acquire("mcpHub.dispose"'))
-      .toBeLessThan(location(source, "await mcpHub.connectAll()"));
+    expect(location(source, 'executorRoleLifecycle.acquire("mcpRuntime.close"'))
+      .toBeLessThan(location(source, "await mcpRuntime.lifecycle.connect()"));
     const meshConstruction = location(source, "mesh = new MeshRuntimeAssembly({");
     const jobLifecycleConstruction = location(
       source,
@@ -333,7 +333,7 @@ describe("production startup server ownership", () => {
       "await mesh?.stop()",
       "await dataPlane?.close()",
       "await authority?.stopStorageMaintenance()",
-      "await mcpHub.dispose()",
+      "await mcpRuntime.lifecycle.close()",
       "await localServerState?.markStopping",
       "await localConversationServer?.shutdown",
       "await localServerBinding?.close",

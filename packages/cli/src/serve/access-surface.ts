@@ -42,6 +42,10 @@ import type {
   StorageMaintenanceGovernorPort,
 } from "@zhixing/core/resources";
 import type {
+  McpRuntimeLifecyclePort,
+  McpRuntimeStatusProjectionPort,
+} from "../runtime/mcp-runtime-ports.js";
+import type {
   InboundRouter,
   PerspectivesController,
   RunningServer,
@@ -60,7 +64,6 @@ import type {
   AdvancementController,
   AdvancementRecoveryMaintenance,
 } from "@zhixing/owner-services";
-import type { McpHub } from "@zhixing/mcp";
 import type { TaskListService } from "@zhixing/tools-builtin";
 import type {
   AuthorityRuntimeStack,
@@ -143,7 +146,8 @@ export interface AssemblyContext {
 
   // ── 恒定核心（接入面 setup 前已建，供其读） ──
   readonly confirmationHub: ConfirmationHub;
-  readonly mcpHub: McpHub;
+  readonly mcpLifecycle: McpRuntimeLifecyclePort;
+  readonly mcpStatus: McpRuntimeStatusProjectionPort;
   readonly transcript: ShardedTranscriptStore;
   readonly snapshots: SnapshotStore;
   readonly runtimeFactory: RuntimeFactory;

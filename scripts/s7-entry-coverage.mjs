@@ -723,11 +723,13 @@ async function collectProductionConstants() {
   });
   const assembly = createBuiltinExtraToolsAssembly(
     inert,
-    { catalog: () => [], callTool: inert },
+    inert,
   );
   const productAssembly = createAnchorRuntimeProjectionAssembly({
     workscenes: inert,
+    worksceneAssignmentTools: inert,
     extraTools: assembly,
+    mcpTools: { snapshot: () => ({ tools: [], serverIds: [] }) },
     scheduler: () => inert,
   });
   const assembledNames = (kind) => {
@@ -3555,6 +3557,82 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
   return failures;
 }
 
+/** A6 concrete MCP runtime stays behind finite demand-owned Host ports. */
+export function inspectMcpRuntimeBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const source = byPath.get(relative);
+    if (source === undefined) failures.push(`${relative}: MCP runtime boundary source is missing`);
+    return source ?? "";
+  };
+  const ports = required("packages/cli/src/runtime/mcp-runtime-ports.ts");
+  const adapter = required("packages/cli/src/runtime/mcp-runtime-adapter.ts");
+  const command = required("packages/cli/src/serve/command.ts");
+  const access = required("packages/cli/src/serve/access-surface.ts");
+  const surfaces = required("packages/cli/src/serve/access-surfaces.ts");
+  const tools = required("packages/cli/src/serve/builtin-extra-tools.ts");
+  const projection = required("packages/cli/src/serve/workscene-runtime-projection.ts");
+  const executor = required("packages/cli/src/serve/executor-role-runtime.ts");
+  const workspace = required("packages/cli/src/runtime/workspace-command.ts");
+
+  if (
+    !ports.includes("export interface McpRuntimeToolProjectionPort") ||
+    !ports.includes("export interface McpRuntimeStatusProjectionPort") ||
+    !ports.includes("export interface McpRuntimeLifecyclePort") ||
+    !ports.includes("readonly tools: readonly Readonly<ToolDefinition>[]") ||
+    !ports.includes("readonly serverIds: readonly string[]") ||
+    /@zhixing\/mcp|McpHub|catalog\(|applyConfig|Record<string|metadata|\bany\b/u.test(ports)
+  ) {
+    failures.push("MCP demand ports are not finite or leak the concrete implementation");
+  }
+
+  if (
+    !adapter.includes("adaptMcpHub(createMcpHub(specs, options))") ||
+    !adapter.includes("mapServerTools(server, descriptors, hub.callTool)") ||
+    !adapter.includes("const catalog = hub.catalog();") ||
+    !adapter.includes("hub.serverStatuses().map") ||
+    !adapter.includes("connect: () => hub.connectAll()") ||
+    !adapter.includes("close: () => hub.dispose()") ||
+    !adapter.includes(".map((tool) => Object.freeze({ ...tool }))") ||
+    !adapter.includes("Object.freeze(catalog.map(({ server }) => server.serverId).sort())")
+  ) {
+    failures.push("MCP infrastructure adapter does not own one coherent frozen mapping/lifecycle");
+  }
+
+  const concreteLeaks = [command, access, surfaces, tools, projection, executor, workspace]
+    .some((source) => /@zhixing\/mcp|\bMcpHub\b|createMcpHub|mapServerTools|\.catalog\(\)|\.serverStatuses\(\)/u.test(source));
+  if (concreteLeaks) {
+    failures.push("MCP concrete Hub/catalog/mapping leaked past the Host infrastructure adapter");
+  }
+
+  if (
+    !command.includes("mcpTools: mcpRuntime.tools") ||
+    !command.includes("mcpLifecycle: mcpRuntime.lifecycle") ||
+    !command.includes("mcpStatus: mcpRuntime.status") ||
+    !projection.includes("const mcp = input.mcpTools.snapshot();") ||
+    !executor.includes("readonly mcpTools: McpRuntimeToolProjectionPort") ||
+    (executor.match(/this\.options\.mcpTools\.snapshot\(\)/gu)?.length ?? 0) !== 3 ||
+    !workspace.includes("mcpTools: mcpRuntime.tools") ||
+    !surfaces.includes("await ctx.mcpLifecycle.connect()") ||
+    !surfaces.includes("ctx.mcpLifecycle.close()")
+  ) {
+    failures.push("Anchor, Executor or workspace fallback bypasses the finite MCP runtime ports");
+  }
+
+  if (
+    /@zhixing\/mcp|\bMcpHub\b|mcpHub|mcpTools|McpRuntime|mapServerTools|\.catalog\(\)/u.test(
+      tools,
+    ) ||
+    projection.includes(".catalog()") ||
+    executor.includes("mapMcpTools") ||
+    ports.includes("applyConfig")
+  ) {
+    failures.push("MCP runtime consumers regained catalog/configuration ownership");
+  }
+  return failures;
+}
+
 export async function validateS7Structure() {
   const files = await productionTypeScriptFiles(path.join(root, "packages"));
   const records = await Promise.all(files.map(async (absolute) => ({
@@ -3643,6 +3721,7 @@ export async function validateS7Structure() {
       ),
     },
   ]));
+  failures.push(...inspectMcpRuntimeBoundary(records));
   failures.push(...inspectWorkspaceAdministrationOwnership([
     ...records,
     {
@@ -7520,7 +7599,7 @@ export function inspectManagedHostAssembly(records) {
     "localConversationOwner.close",
     "channels.dispose",
     "deliveryStack.stop",
-    "mcpHub.dispose",
+    "mcpRuntime.close",
     "meshRuntime.stop",
     "executorDataPlane.close",
     "jobStatus.dispose",
@@ -7661,7 +7740,7 @@ export function inspectManagedHostAssembly(records) {
     "executorJobOwnerLifecycle.close",
     "executorDataPlane.close",
     "authorityRuntime.stopStorageMaintenance",
-    "mcpHub.dispose",
+    "mcpRuntime.close",
   ];
   const executorLifecyclePositions = executorRoleLifecycleIds.map((identity) =>
     executorRoleLifecycle.indexOf(`{ owner: "executor-role", id: "${identity}" }`)
@@ -7711,7 +7790,7 @@ export function inspectManagedHostAssembly(records) {
       "await mesh?.stop()",
       "await dataPlane?.close()",
       "await authority?.stopStorageMaintenance()",
-      "await mcpHub.dispose()",
+      "await mcpRuntime.lifecycle.close()",
     ].some((token) => executorCleanupTail.includes(token))
   ) failures.push("Executor non-Server lifecycle contribution ownership drifted");
   const executorServerLifecycleIds = [

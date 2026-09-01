@@ -1,7 +1,6 @@
-import { getZhixingHome, type ToolDefinition } from "@zhixing/core";
+import { getZhixingHome } from "@zhixing/core";
 import { DeviceLifecycleJournal, type ArtifactStore } from "@zhixing/core/authority";
 import path from "node:path";
-import { createMcpHub, mapServerTools, type McpHub } from "@zhixing/mcp";
 import {
   createAgentRuntime,
   createKernelRuntimeIdentityContribution,
@@ -15,6 +14,8 @@ import { mainProfile, powerProfile } from "@zhixing/orchestrator/profile";
 import { parseConversationId } from "@zhixing/core";
 import type { ProviderCredentialProjection } from "@zhixing/providers";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
+import { createHostMcpRuntime } from "../runtime/mcp-runtime-adapter.js";
+import type { McpRuntimeToolProjectionPort } from "../runtime/mcp-runtime-ports.js";
 import {
   createHostKernelModelProviderFactory,
   createHostKernelRuntimeEnvironmentFactory,
@@ -172,11 +173,11 @@ export async function runExecutorRole(
   const localServerHost = options.host ?? DEFAULT_SERVER_CONFIG.host;
   const executorRoleLifecycle = new ExecutorRoleLifecycle();
   const executorServerLifecycle = new ExecutorServerLifecycle();
-  const mcpHub = createMcpHub(
+  const mcpRuntime = createHostMcpRuntime(
     parseServerSpecs(mcpConfiguration.mcp, bootstrap.mcpCredentials.mcp),
     { networkProxy: mcpConfiguration.network?.proxy },
   );
-  executorRoleLifecycle.acquire("mcpHub.dispose", () => mcpHub.dispose());
+  executorRoleLifecycle.acquire("mcpRuntime.close", () => mcpRuntime.lifecycle.close());
 
   const initialAnchorDeviceId = bootstrap.mesh.trust.issuer.deviceId;
   let mesh: MeshRuntimeAssembly | undefined;
@@ -242,7 +243,7 @@ export async function runExecutorRole(
           startedAt: processStartedAt,
           endpointLock,
     };
-    await mcpHub.connectAll();
+    await mcpRuntime.lifecycle.connect();
     const interactions = new DurableConversationInteractionObserver();
     let authority: AuthorityRuntimeStack | undefined;
     const runtime = new ExecutorRuntimeSubstrate({
@@ -250,7 +251,7 @@ export async function runExecutorRole(
       kernelEnvironmentConfiguration,
       credentials: providerCredentials,
       toolImplementation: bootstrap.toolImplementation,
-      mcpHub,
+      mcpTools: mcpRuntime.tools,
       systemProtectedPaths: resolveSystemProtectedSecretPaths(),
       interactions,
       artifactStore: () => {
@@ -968,7 +969,7 @@ export class ExecutorRuntimeSubstrate {
     readonly kernelEnvironmentConfiguration: RuntimeKernelEnvironmentConfigurationProjection;
     readonly credentials: ProviderCredentialProjection;
     readonly toolImplementation: KernelToolImplementationPort;
-    readonly mcpHub: McpHub;
+    readonly mcpTools: McpRuntimeToolProjectionPort;
     readonly systemProtectedPaths: readonly string[];
     readonly interactions: DurableConversationInteractionObserver;
     readonly artifactStore: () => ArtifactStore;
@@ -991,7 +992,7 @@ export class ExecutorRuntimeSubstrate {
     workspaceRoot?: string | null,
     sessionId?: string,
   ): Promise<AgentRuntime> {
-    const catalog = this.options.mcpHub.catalog();
+    const mcp = this.options.mcpTools.snapshot();
     const scope = sessionId ? parseConversationId(sessionId).scope : undefined;
     const workscene =
       scope?.kind === "workscene"
@@ -1017,8 +1018,8 @@ export class ExecutorRuntimeSubstrate {
       profile:
         workscene?.profile ??
         mainProfile({ hasWorkspace: workspaceRoot !== null }),
-      extraTools: mapMcpTools(this.options.mcpHub),
-      executionMcpServers: catalog.map(({ server }) => server.serverId).sort(),
+      extraTools: [...mcp.tools],
+      executionMcpServers: mcp.serverIds,
       confirmationLifecycleObserver: this.options.interactions,
       systemProtectedPaths: this.options.systemProtectedPaths,
       runtimeKind: "conversation",
@@ -1037,13 +1038,13 @@ export class ExecutorRuntimeSubstrate {
     instruction: import("@zhixing/core/contracts").JobExecutionInstruction,
     confirmationBroker: import("@zhixing/core").IConfirmationBroker,
   ): Promise<AgentRuntime> {
-    const catalog = this.options.mcpHub.catalog();
+    const mcp = this.options.mcpTools.snapshot();
     const baseProfile = mainProfile();
     const selection = selectJobRuntimeTools({
       instruction,
       baseProfile,
-      extraTools: mapMcpTools(this.options.mcpHub),
-      executionMcpServers: catalog.map(({ server }) => server.serverId).sort(),
+      extraTools: [...mcp.tools],
+      executionMcpServers: mcp.serverIds,
     });
     return createAgentRuntime({
       artifactStore: this.options.artifactStore(),
@@ -1070,26 +1071,20 @@ export class ExecutorRuntimeSubstrate {
     readonly tools: readonly string[];
     readonly mcpServers: readonly string[];
   } {
+    const mcp = this.options.mcpTools.snapshot();
     return {
       tools: [
         ...new Set([
           ...mainProfile().enabledTools,
-          ...mapMcpTools(this.options.mcpHub).map((tool) => tool.name),
+          ...mcp.tools.map((tool) => tool.name),
         ]),
       ].sort(),
-      mcpServers: this.options.mcpHub.catalog()
-        .map(({ server }) => server.serverId)
-        .sort(),
+      mcpServers: mcp.serverIds,
     };
   }
 }
 
 export { ExecutorJobOwnerLifecycle } from "./executor-job-owner.js";
-
-function mapMcpTools(hub: McpHub): ToolDefinition[] {
-  return hub.catalog().flatMap(({ server, tools }) =>
-    mapServerTools(server, tools, hub.callTool));
-}
 
 function assertAcceptedWorkSubset(
   current: readonly HostStopAcceptedWorkItem[],

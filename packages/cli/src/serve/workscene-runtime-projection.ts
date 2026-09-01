@@ -36,6 +36,7 @@ import {
   type WorksceneToolDirectory,
 } from "./workmode-tools.js";
 import { ExecutionSchedulerFacade } from "./execution-scheduler-facade.js";
+import type { McpRuntimeToolProjectionPort } from "../runtime/mcp-runtime-ports.js";
 
 type WorksceneRuntimeSceneIdentity = Extract<
   WorksceneConversationRuntimeProjection,
@@ -90,21 +91,23 @@ export function createAnchorRuntimeProjectionAssembly(input: {
   readonly workscenes: WorksceneToolDirectory;
   readonly worksceneAssignmentTools: WorksceneAssignmentToolApplication;
   readonly extraTools: BuiltinExtraToolsAssembly;
+  readonly mcpTools: McpRuntimeToolProjectionPort;
   readonly scheduler: () => SchedulerFacade;
 }): AnchorRuntimeProjectionAssembly {
   const executionScheduler = new ExecutionSchedulerFacade(input.scheduler);
   const runtimeTools = (
     productTools: readonly ToolDefinition[] = [],
-  ): RuntimeToolProjection =>
-    createRuntimeToolProjection({
+  ): RuntimeToolProjection => {
+    const mcp = input.mcpTools.snapshot();
+    return createRuntimeToolProjection({
       extraTools: [
         ...input.extraTools.assembleTools({ scheduler: () => executionScheduler }),
+        ...mcp.tools,
         ...productTools,
       ],
-      executionMcpServers: input.extraTools.mcpHub.catalog()
-        .map(({ server }) => server.serverId)
-        .sort(),
+      executionMcpServers: mcp.serverIds,
     });
+  };
   const main = (workspace?: string | null): ConversationRuntimeProjection =>
     createConversationRuntimeProjection({
       ...(workspace === undefined ? {} : { workspace }),

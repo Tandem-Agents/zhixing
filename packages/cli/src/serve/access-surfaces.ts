@@ -93,10 +93,10 @@ const mcpSurface: AccessSurface = {
   name: "mcp",
   phase: "pre-server",
   async setup(ctx) {
-    ctx.lifecycleContributions.acquire("mcpHub.dispose", () =>
-      ctx.mcpHub.dispose()
+    ctx.lifecycleContributions.acquire("mcpRuntime.close", () =>
+      ctx.mcpLifecycle.close()
     );
-    await ctx.mcpHub.connectAll();
+    await ctx.mcpLifecycle.connect();
   },
 };
 

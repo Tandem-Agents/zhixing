@@ -1,7 +1,7 @@
 import type { ChannelStatus, LLMProvider, Message } from "@zhixing/core";
 import type { SecretRef } from "@zhixing/core/contracts";
 import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
-import type { McpServerStatus } from "@zhixing/mcp";
+import type { McpRuntimeServerStatus } from "../runtime/mcp-runtime-ports.js";
 import {
   createProvider,
   resolveProvider,
@@ -30,7 +30,7 @@ export interface CredentialRotationPublicationOptions {
   readonly credentials: CredentialRotationSecretProjection;
   readonly credentialGeneration: string | null;
   readonly readCredentials: () => Promise<CredentialRotationSecretProjection>;
-  readonly mcpStatuses: () => readonly McpServerStatus[];
+  readonly mcpStatuses: () => readonly McpRuntimeServerStatus[];
   readonly channelStatuses: () => readonly ChannelStatus[];
   readonly waitForChannels?: () => Promise<void>;
   /** Production provider probes must enter the shared authority control governor. */

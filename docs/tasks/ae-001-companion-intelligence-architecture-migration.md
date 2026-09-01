@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-03b 已通过协调者独立验收，等待提交后进入 MCP 实现边界<br>
+> 当前检查点：A6-04a 已通过协调者独立验收，等待提交后进入 MCP 管理与发现边界<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `93f4ef19`；A6-03a 已由协调者独立复核并提交，Kernel 只声明有限 Tool 需求，CLI Host 唯一选择具体 builtin 实现与权限贡献，全部生产 Runtime 根显式注入 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-03b Tool 家族生产闭包已通过协调者独立复核，等待提交 |
-| 活跃工作包 | 无；`A6-03b-tool-family-production-closure-v1` 已闭合，提交后进入 MCP 实现边界 |
-| 下一责任链 | A6-03b 闭合后独立迁移 MCP 实现边界；不得提前扩入 Channel、Storage、Executor/Mesh 或设备拓扑 |
+| 已接受基线 | `e50cf926`；A6-03b 已由协调者独立复核并提交，Conversation/Workscene 拥有自身工具行为，Anchor/Executor 共用唯一 job 工具选择，工具实现继续服从同一受控效果链 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-04a MCP 运行时有限端口已通过协调者独立复核，等待提交 |
+| 活跃工作包 | 无；`A6-04a-mcp-runtime-boundary-v1` 已闭合，提交后进入 MCP 管理与发现边界 |
+| 下一责任链 | A6-04a 闭合后独立核对 MCP 配置管理、探测与发现边界；不得提前扩入 Channel、Storage、Executor/Mesh 或设备拓扑 |
 | 打开的单向桥 | 无；全部 Kernel Runtime 生产根均已显式消费同一有限端口，不存在默认 concrete fallback、双实现表或只为测试存在的桥 |
-| 已失效证据 | 无当前未恢复证据；A6-03b 相交的 A4 Kernel、A5 Conversation/Workscene/Schedule 与 A6-03a Tool 证据已由直接测试、结构门禁和构建恢复；Provider、配置、秘密、MCP 及其他不相交证据未失效 |
+| 已失效证据 | 无当前未恢复证据；A6-04a 相交的 MCP 目录/调用/状态/生命周期证据已由直接测试、结构门禁和构建恢复，`applyConfig` 的生产 consumer exact-set 仍为空并留待 A6-04b；A6-03b 及其他不相交证据继续有效 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2546,6 +2546,15 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据：Core Conversation/Workscene 应用 2 文件 46/46；tools-builtin task-list 1 文件 33/33；CLI Workscene/extra/Anchor job/Executor job 4 文件 30/30，其中新增“有 conversation 但无 durable assignment”零副作用反例。CLI `tsc --noEmit`、canonical S7 39/39 与 registry golden、`pnpm runtime:package-exports`、全 workspace `pnpm build`、changed-source Biome 与 `git diff --check` 通过；全构建仅输出既有 Core Rollup circular-chunk warnings，没有失败。首次 S7 因新增断言未进入旧最小 fixture、第二次因 task-list 禁令错误覆盖同文件 storage service 而失败；分别补齐真实 fixture/反向 mutation并把禁令收窄到 binding 后，最终完整门禁通过，未放宽生产约束。
 - 协调者独立验收：重新沿领域应用、有限 Correctness adapter、Agent binding、Anchor/Executor Runtime 发放及单一 Kernel 安全/效果链核对，确认三个缺口真实且迁移后无第二写入、第二工具选择或行为回退。独立运行 Core 2 文件 46/46、tools-builtin 1 文件 33/33、CLI 4 文件 30/30、canonical S7 39/39 与 registry golden、`pnpm runtime:package-exports`、CLI typecheck，并按依赖顺序重建 Core、tools-builtin 与 CLI，全部通过；Core 仅输出已登记的既有 circular-chunk warnings，`git diff --check` 通过。
 - 失效与交接：若 Conversation task-list 应用/adapter、Workscene assignment 应用/adapter、Schedule/Task 构造、parent security/confirmation/resource/effect 继承、Host builtin binding、Anchor/Executor job requested-tools selector、Kernel issuance、安全链、S7/package exports 或上述直接测试变化，只恢复本证据和真实相交的 A4/A5/A6-03a 证据。当前无打开桥和未恢复证据，A6 继续 `[ ]`；提交后进入独立 MCP 实现边界，不提前扩入 Channel、Storage、Executor/Mesh 或设备拓扑。
+
+### A6-04a：MCP 运行时实现边界收口
+
+- 基线与生产闭包：以已接受 `HEAD e50cf9260963acfeef339734dcde5fc6fb06f040` 加协调者调度记录为基线，形成待复核证据 `A6-04a-mcp-runtime-boundary-v1`。正向从 Anchor conversation/Workscene/scheduled ephemeral/durable job、Executor-only conversation/job 与本机 workspace fallback 三个组合根追到 MCP 工具发放，反向从 `createMcpHub/mapServerTools/catalog/serverStatuses/connectAll/dispose`、credential rotation、Server status、runtime execution manifest 和 Host cleanup 对账。生产需求 exact-set 恰为“每次 runtime 发放取得一个当前工具/已连接 server 一致快照”“只读运行状态快照”“Host connect/close 生命周期”三项；`McpHub.applyConfig` 在当前基线上没有生产 consumer，不虚构第四个运行时端口，配置编辑、preset、probe、search/source discovery 与未来真实热配置接线仍属于紧邻 A6-04b。
+- 责任迁移与旧路退场：新增需求侧有限 `McpRuntimeToolProjectionPort`、`McpRuntimeStatusProjectionPort`、`McpRuntimeLifecyclePort`，输出只含冻结 `ToolDefinition/serverIds` 或有限状态值；唯一 Host infrastructure adapter 才能构造具体 Hub、读取 catalog/status、调用 `mapServerTools` 并持有 transport lifecycle。Anchor 产品投影、`ExecutorRuntimeSubstrate` 与 workspace fallback 均只取得工具端口且每次发放重新 snapshot；Assembly/credential/status 只取得对应状态或生命周期端口。`BuiltinExtraToolsAssembly.mcpHub`、AssemblyContext concrete Hub、Executor/workspace 的 `createMcpHub/catalog/mapServerTools` 直连和第二工具映射均归零；生命周期 descriptor 同步从实现名 `mcpHub.dispose` 收口为需求语义 `mcpRuntime.close`，仍由既有 Anchor/Executor/command cleanup owner 精确一次关闭。
+- 行为保护与失败边界：MCP 工具名称/同 server 消歧、schema/description、readOnly→query/parallel 与缺省 mutating fail-closed、permission/boundary、stdio/http interrupt、原始工具名调用、AbortSignal、100K 结果上限、独立连接失败、断线重连、状态错误、热配置实现、dispose 与空配置 no-op 均保持。一个 snapshot 从同一 catalog 同时生成工具与 server id，运行发放之间重取当前目录而不跨次缓存；Anchor/Executor 的 main/work、job allowlist、capability catalog、execution MCP manifest、确认/安全/资源/效果链、credential rotation 和 status wire 均未改变。具体 Hub 仍只由 Host 生命周期持有，没有第二 connection/retry/timer owner、动态 service locator、配置兼容桥或 Kernel/RuntimeHost concrete 泄漏。
+- 直接证据、门禁与交接：MCP hub/mapping 2 文件 28/28，CLI adapter、Anchor/Executor 投影、credential/status 与两套生命周期 9 文件 49/49，合计 11 文件 77/77；CLI typecheck、fresh `pnpm cli:build`、fresh `pnpm runtime:package-exports`、20 个 changed-source Biome 检查和 `git diff --check` 均通过。S7 以反向 mutation 拒绝 concrete Hub/catalog/mapping 回流、consumer 绕过 snapshot、需求合同泄漏 concrete/config、第二工具 owner及任一生产根漏改绑。若三个需求合同/输出 exact-set、adapter 映射、Hub catalog/status/lifecycle、Anchor/Executor/workspace 注入、execution manifest、credential/status 消费、Host cleanup identity、S7/package exports 或上述直接测试任一变化，只恢复本证据及真实相交的 A4/A6-03b 证据；`applyConfig` 或配置管理链变化只在其成为真实生产 consumer 时按 A6-04b 精确失效。本轮未进入 A6-04b、Channel、Storage、Executor/Mesh 设备拓扑，A6 继续 `[ ]`，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- Canonical golden 纠正：执行者首次记录把 canonical S7 与 registry golden 误写为已通过；协调者在同一工作区独立复核确认 coverage/mutation 40/40 已通过，但 `s7:registry-golden` 因 lifecycle identity 改名而 stale，该初次结论不作为有效证据。随后仅运行 canonical `pnpm s7:registry-golden:write`：`packages/server/src/__tests__/__goldens__/canonical-registry.golden.json` 的差异严格限于四个 role entryCoverage 与唯一 cleanup descriptor/key 的 `mcpHub.dispose → mcpRuntime.close`，owner=`anchor-host`、role=`common`、category=`cleanup`、source、RPC exact-set、公开入口和其他 registry 成员均未漂移；本包自有 runtime-lifecycle golden 同步表达同一身份且顺序不变。最终重新执行完整 `pnpm s7:lint`，coverage/mutation 40/40 与 canonical registry golden 在当前基线上全部通过；无需重跑且继续复用上述 77 项直接测试、typecheck、build 与 package-export 证据。
+- 协调者独立验收：重新检查三个生产组合根、有限工具/状态/生命周期端口、唯一具体 adapter、目录快照时机、执行 manifest、状态投影和关闭顺序，确认没有 concrete Hub、重复映射或旧 catalog 旁路，当前 MCP 行为无可见回退。独立运行 MCP hub/mapping 28/28、CLI 九文件 49/49、CLI typecheck、package exports 与 `git diff --check` 通过；首次 S7 复核准确发现 stale canonical golden，纠正后的差异仅为同一 lifecycle identity，随后独立重跑完整 S7 40/40 与 registry golden 通过。本证据可以提交，A6 仍保持 `[ ]`。
 
 ## 十、用户提示词
 

@@ -3,7 +3,7 @@
  *
  * 核心宿主 = 恒定核心（runtime + 会话态 owner 位 + Scheduler + RPC server）+ 一组**可挂载的
  * 接入面**（access surface）。装配主干：
- *   1. 备齐恒定核心前置（token / transcript / confirmationHub / mcpHub / builtinExtraTools /
+ *   1. 备齐恒定核心前置（token / transcript / confirmationHub / MCP runtime ports / builtinExtraTools /
  *      runtimeFactory / CleanupRegistry）—— 接入面 setup 从这里读依赖
  *   2. 建 AssemblyContext，`setupAssemblyUnits(pre-server)` 数据驱动装入稳定核心单元与 profile 接入面
  *      （MCP / 会话执行面 / 通道 / 投递栈 / 文本确认渲染器，产物写回 ctx）
@@ -162,8 +162,8 @@ import {
   createBlockedRenderer,
 } from "../security/index.js";
 import { resolveSystemProtectedSecretPaths } from "../security/secret-boundary.js";
-import { createMcpHub } from "@zhixing/mcp";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
+import { createHostMcpRuntime } from "../runtime/mcp-runtime-adapter.js";
 import {
   RoutedConversationRepoTaskListStore,
   type ConversationRepoTaskListRoute,
@@ -573,7 +573,7 @@ async function runServerProcess(
   // 3b. MCP host —— 创建（不 eager 连接）。connectAll 由 mcp 接入面在 pre-server 阶段触发，
   //   故 schedule 档（无 mcp 接入面）省去 eager 连接，仅 hub 对象在位、ephemeral 可用 builtin 工具。
   //   serve 进程内单例，多 session 共享同一批连接。空配置时为 no-op。
-  const mcpHub = createMcpHub(
+  const mcpRuntime = createHostMcpRuntime(
     parseServerSpecs(mcpConfiguration.mcp, mcpCredentials.mcp),
     { networkProxy: mcpConfiguration.network?.proxy },
   );
@@ -584,13 +584,13 @@ async function runServerProcess(
   //   与目录 clear 共用同一 repo 实例，保 meta 写入锁一致。
   const builtinExtraTools = createBuiltinExtraToolsAssembly(
     new RoutedConversationRepoTaskListStore(repoForConversationId),
-    mcpHub,
     createAnchorConversationTaskListToolApplication(),
   );
   const anchorRuntimeProjections = createAnchorRuntimeProjectionAssembly({
     workscenes: worksceneDirectory,
     worksceneAssignmentTools,
     extraTools: builtinExtraTools,
+    mcpTools: mcpRuntime.tools,
     scheduler: getSchedulerFacade,
   });
   // 3c'. 段切换外部依赖 —— serve 全部 runtime（per-session + ephemeral）共享：
@@ -962,7 +962,8 @@ async function runServerProcess(
     storageMaintenance: deviceCapacity.storage,
     localWorkspaceIdentity: bootstrap.localWorkspaceIdentity,
     confirmationHub,
-    mcpHub,
+    mcpLifecycle: mcpRuntime.lifecycle,
+    mcpStatus: mcpRuntime.status,
     transcript,
     snapshots,
     runtimeFactory,
@@ -1037,7 +1038,7 @@ async function runServerProcess(
 
   // ============================================================================
   // 恒定核心后置 —— 须在 pre-server 接入面之后构造。
-  // Anchor 产品投影同步物化 mcpHub.catalog()（MCP 工具目录），而 catalog 由 MCP 接入面
+  // Anchor 产品投影从有限 MCP 端口同步取得当前工具目录，而目录由 MCP 接入面
   // connectAll 填充；故这个 eager runtime 必须排在 mcp 接入面之后，
   // 否则其 system prompt 缺 MCP 工具（runtimeFactory 是 lazy，session 调用时 connectAll 已完成，
   // 不受此序约束、可前置）。
@@ -1093,7 +1094,7 @@ async function runServerProcess(
           },
           provider,
         ),
-      mcpStatuses: () => ctx.mcpHub.serverStatuses(),
+      mcpStatuses: () => ctx.mcpStatus.snapshot(),
       channelStatuses: () => ctx.channels?.listStatuses() ?? [],
       ...(ctx.channelConnections
         ? { waitForChannels: () => ctx.channelConnections!.ready }
@@ -2633,7 +2634,7 @@ async function runServerProcess(
       ? await ctx.authorityCheckpointOwner.status()
       : { state: "not-configured" as const, fullBackupReady: false }),
     // /mcp 状态显示与接入向导的宿主侧数据面(MCP 连接在宿主)
-    mcpStatuses: () => mcpHub.serverStatuses(),
+    mcpStatuses: () => [...mcpRuntime.status.snapshot()],
     // 轻推理通道(llm.complete,仅可信面)——管理流程的单发文本调用；
     // 经 control 治理边界准入计量(用户同步操作,interactive 类)。
     // 生产装配恒有 authorityRuntime(pre-server surface 已断言)——缺失即 fail-closed,不静默绕过治理

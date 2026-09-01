@@ -8,8 +8,9 @@ import { createDeviceCapacityRuntime } from "../serve/device-capacity-runtime.js
 import { executorIdForDevice } from "../serve/mesh-runtime-assembly.js";
 import { prepareMeshRuntimeBootstrap } from "../serve/mesh-runtime-bootstrap.js";
 import { runStartupCheck } from "../startup.js";
-import { createMcpHub } from "@zhixing/mcp";
 import { parseServerSpecs } from "./mcp-config.js";
+import { createHostMcpRuntime } from "./mcp-runtime-adapter.js";
+import type { HostMcpRuntimePorts } from "./mcp-runtime-ports.js";
 import { projectRuntimeConfiguration } from "./runtime-configuration-projections.js";
 import { resolveSystemProtectedSecretPaths } from "../security/secret-boundary.js";
 import { createHostKernelToolImplementation } from "./kernel-tool-implementation.js";
@@ -215,7 +216,7 @@ export async function withLocalWorkspaceClient<T, R = T>(
   let runtime: Awaited<ReturnType<typeof setupAuthorityRuntime>> | undefined;
   let mesh: Awaited<ReturnType<typeof prepareMeshRuntimeBootstrap>> | undefined;
   let host: LocalWorkspaceManagementHost | undefined;
-  let mcpHub: ReturnType<typeof createMcpHub> | undefined;
+  let mcpRuntime: HostMcpRuntimePorts | undefined;
   let owner: Awaited<ReturnType<typeof acquireExecutorLocalWorkspaceOwner>>;
   try {
     const secretStore = createPlatformSecretStore({ homeDir: zhixingHome });
@@ -258,20 +259,20 @@ export async function withLocalWorkspaceClient<T, R = T>(
         import("../serve/executor-role-runtime.js"),
         import("../serve/durable-conversation-interactions.js"),
       ]);
-    mcpHub = createMcpHub(
+    mcpRuntime = createHostMcpRuntime(
       parseServerSpecs(
         configuration.mcp.mcp,
         startup.mcpCredentials.mcp,
       ),
       { networkProxy: configuration.mcp.network?.proxy },
     );
-    await mcpHub.connectAll();
+    await mcpRuntime.lifecycle.connect();
     const runtimeSubstrate = new ExecutorRuntimeSubstrate({
       modelConfiguration: configuration.model,
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: startup.providerCredentials,
       toolImplementation: createHostKernelToolImplementation(),
-      mcpHub,
+      mcpTools: mcpRuntime.tools,
       systemProtectedPaths: resolveSystemProtectedSecretPaths(),
       interactions: new DurableConversationInteractionObserver(),
       artifactStore: () => {
@@ -332,7 +333,7 @@ export async function withLocalWorkspaceClient<T, R = T>(
   } finally {
     await host?.close().catch(() => undefined);
     await runtime?.startupCleanup.run().catch(() => undefined);
-    await mcpHub?.dispose().catch(() => undefined);
+    await mcpRuntime?.lifecycle.close().catch(() => undefined);
     await mesh?.bootstrapStore.stopStorageMaintenance();
     await owner?.release();
   }

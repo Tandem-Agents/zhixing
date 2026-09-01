@@ -53,8 +53,8 @@ describe("runtime lifecycle migration golden", () => {
       stop: () => executed.push("serverLogLifecycle.stop"),
     });
     shell.transferPreparedServer(endpoint as never, registry);
-    lifecycleContributions.acquire("mcpHub.dispose", async () => {
-      executed.push("mcpHub.dispose");
+    lifecycleContributions.acquire("mcpRuntime.close", async () => {
+      executed.push("mcpRuntime.close");
     });
     lifecycleContributions.acquire("channels.dispose", async () => {
       executed.push("channels.dispose");

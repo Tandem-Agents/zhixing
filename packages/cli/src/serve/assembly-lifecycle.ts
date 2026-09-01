@@ -60,7 +60,7 @@ export const ASSEMBLY_LIFECYCLE_DESCRIPTORS = [
   {
     owner: "anchor-host",
     role: "common",
-    id: "mcpHub.dispose",
+    id: "mcpRuntime.close",
     stage: "surface",
   },
   {

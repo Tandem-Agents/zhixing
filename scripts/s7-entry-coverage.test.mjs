@@ -31,6 +31,7 @@ import {
   inspectRuntimeSecretProjectionBoundary,
   inspectRuntimeConfigurationProjectionBoundary,
   inspectWorksceneRuntimeProjectionBoundary,
+  inspectMcpRuntimeBoundary,
   inspectWorkspaceAdministrationOwnership,
   inspectTrustAdministrationOwnership,
   inspectLocalConversationOwnerIsolation,
@@ -3867,6 +3868,57 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
       (text) => `${text}\nvoid createAnchorRuntimeProjectionAssembly;`,
     )).join("\n"),
     /ExecutorRuntimeSubstrate/,
+  );
+});
+
+test("MCP runtime consumers use finite demand-owned ports behind one Host adapter", async () => {
+  const paths = [
+    "packages/cli/src/runtime/mcp-runtime-ports.ts",
+    "packages/cli/src/runtime/mcp-runtime-adapter.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/access-surface.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/builtin-extra-tools.ts",
+    "packages/cli/src/serve/workscene-runtime-projection.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/cli/src/runtime/workspace-command.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectMcpRuntimeBoundary(records), []);
+  assert.match(
+    inspectMcpRuntimeBoundary(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => `${text}\nconst leaked = createMcpHub([]);`,
+    )).join("\n"),
+    /concrete Hub\/catalog\/mapping leaked/,
+  );
+  assert.match(
+    inspectMcpRuntimeBoundary(mutate(
+      "packages/cli/src/serve/workscene-runtime-projection.ts",
+      (text) => text.replace("const mcp = input.mcpTools.snapshot();", "const mcp = { tools: [], serverIds: [] };"),
+    )).join("\n"),
+    /bypasses the finite MCP runtime ports/,
+  );
+  assert.match(
+    inspectMcpRuntimeBoundary(mutate(
+      "packages/cli/src/runtime/mcp-runtime-ports.ts",
+      (text) => `${text}\nexport interface LeakedHub { hub: McpHub; }`,
+    )).join("\n"),
+    /not finite or leak the concrete implementation/,
+  );
+  assert.match(
+    inspectMcpRuntimeBoundary(mutate(
+      "packages/cli/src/serve/builtin-extra-tools.ts",
+      (text) => `${text}\nconst mcpHub = { catalog() { return []; } };`,
+    )).join("\n"),
+    /regained catalog\/configuration ownership/,
   );
 });
 
