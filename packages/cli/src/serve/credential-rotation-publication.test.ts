@@ -4,7 +4,8 @@ import { FileArtifactStore, FileAuthorityCommitLog } from "@zhixing/core/authori
 import type { CredentialExposureRecord, SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { createTempDir } from "@zhixing/test-utils";
 import { createCredentialExposureRecord } from "@zhixing/mesh/credential-exposure";
-import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
+import type { ZhixingConfig } from "@zhixing/providers";
+import type { CredentialRotationSecretProjection } from "../runtime/runtime-secret-projections.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import { publishRequiredCredentialRotations } from "./credential-rotation-publication.js";
 
@@ -138,7 +139,7 @@ async function createFixture(bindings: readonly (readonly [BindingKind, string])
     secretStore,
     now: () => "2026-08-10T00:02:00.000Z",
   });
-  const credentials: ZhixingCredentials = {
+  const credentials: CredentialRotationSecretProjection = {
     providers: { main: { apiKey: "provider-secret" } },
     channels: { chat: { appId: "app-current", appSecret: "channel-secret" } },
     mcp: { docs: { token: "mcp-secret" } },

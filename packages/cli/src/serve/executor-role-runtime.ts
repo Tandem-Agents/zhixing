@@ -40,7 +40,7 @@ import {
 import type { ServeOptions } from "./command.js";
 import type {
   ExecutorRoleModule,
-  ServeBootstrapContext,
+  ExecutorServeBootstrapContext,
 } from "./role-topology.js";
 import { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import { createAgentJobRuntimePort } from "./agent-job-runtime.js";
@@ -112,7 +112,7 @@ import { ExecutorServerLifecycle } from "./executor-server-lifecycle.js";
 
 export async function runExecutorRole(
   options: ServeOptions,
-  bootstrap: ServeBootstrapContext,
+  bootstrap: ExecutorServeBootstrapContext,
   executor?: ExecutorRoleModule,
 ): Promise<void> {
   if (!executor) throw new Error("Executor role module is unavailable");
@@ -125,12 +125,9 @@ export async function runExecutorRole(
   ) {
     throw new Error("Executor-only host received an incompatible role projection");
   }
-  const startup = bootstrap.startup;
   const zhixingHome = getZhixingHome();
   const deviceCapacity = bootstrap.deviceCapacity;
-  const providerCredentials = startup.credentials.providers
-    ? { providers: startup.credentials.providers }
-    : {};
+  const providerCredentials = bootstrap.providerCredentials;
   const writer = createStdoutWriter();
   const processStartedAt = new Date().toISOString();
   const processStartTime = await resolveProcessStartTime(process.pid);
@@ -164,8 +161,8 @@ export async function runExecutorRole(
   const executorRoleLifecycle = new ExecutorRoleLifecycle();
   const executorServerLifecycle = new ExecutorServerLifecycle();
   const mcpHub = createMcpHub(
-    parseServerSpecs(startup.config.mcp, startup.credentials.mcp),
-    { networkProxy: startup.config.network?.proxy },
+    parseServerSpecs(bootstrap.config.mcp, bootstrap.mcpCredentials.mcp),
+    { networkProxy: bootstrap.config.network?.proxy },
   );
   executorRoleLifecycle.acquire("mcpHub.dispose", () => mcpHub.dispose());
 
@@ -237,7 +234,7 @@ export async function runExecutorRole(
     const interactions = new DurableConversationInteractionObserver();
     let authority: AuthorityRuntimeStack | undefined;
     const runtime = new ExecutorRuntimeSubstrate({
-      config: startup.config,
+      config: bootstrap.config,
       credentials: providerCredentials,
       mcpHub,
       systemProtectedPaths: resolveSystemProtectedSecretPaths(),
@@ -260,13 +257,13 @@ export async function runExecutorRole(
       authorizedDeviceIds: bootstrap.mesh.authorizedDeviceIds,
       executorId: executorIdForDevice(bootstrap.mesh.deviceKey.deviceId),
       configurationSnapshot: {
-        config: startup.config,
+        config: bootstrap.config,
         executableVersion: ZHIXING_CLI_VERSION,
       },
       executorReadiness: createExecutorReadinessSource({
         runtime,
-        credentials: startup.credentials,
-        credentialGeneration: startup.credentialGeneration,
+        credentials: bootstrap.credentialExposureCredentials,
+        credentialGeneration: bootstrap.credentialGeneration,
       }),
       enableAnchor: false,
       enableLocalExecutor: true,
@@ -405,7 +402,7 @@ export async function runExecutorRole(
       runtimeFactory,
       interactions,
       advancementModelProvider: createHostAdvancementModelProviderFactory({
-        config: startup.config,
+        config: bootstrap.config,
         credentials: providerCredentials,
       }),
       evidence: evidenceHandler,

@@ -65,9 +65,24 @@ describe("startup SecretStore boundary", () => {
     expect(result).toMatchObject({
       kind: "ready",
       config: { llm: { main: { provider: "deepseek", model: "deepseek-chat" } } },
-      credentials: { providers: { deepseek: { apiKey: "startup-secret" } } },
+      providerCredentials: {
+        providers: { deepseek: { apiKey: "startup-secret" } },
+      },
+      mcpCredentials: {},
+      channelCredentials: {},
+      credentialExposureCredentials: {
+        providers: { deepseek: { apiKey: "startup-secret" } },
+      },
+      credentialRotationCredentials: {
+        providers: { deepseek: { apiKey: "startup-secret" } },
+      },
       secretStore: store,
     });
+    expect(result.kind === "ready" && "credentials" in result).toBe(false);
+    if (result.kind === "ready") {
+      expect(Object.isFrozen(result.providerCredentials)).toBe(true);
+      expect(Object.isFrozen(result.providerCredentials.providers)).toBe(true);
+    }
     expect(result.kind === "ready" ? result.credentialGeneration : null)
       .toMatch(/^[A-Za-z0-9_-]{16,64}$/u);
     await expect(readFile(legacyPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });

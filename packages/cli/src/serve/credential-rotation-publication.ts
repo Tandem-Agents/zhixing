@@ -5,13 +5,12 @@ import type { McpServerStatus } from "@zhixing/mcp";
 import {
   createProvider,
   resolveProvider,
-  type ChannelCredentialProjection,
-  type McpCredentialProjection,
   type ProviderCredentialProjection,
   type ZhixingConfig,
 } from "@zhixing/providers";
 import type { CredentialExposureRecord } from "@zhixing/core/contracts";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
+import type { CredentialRotationSecretProjection } from "../runtime/runtime-secret-projections.js";
 
 type CredentialKind = "provider" | "channel" | "mcp";
 
@@ -24,19 +23,13 @@ interface CurrentCredentialBinding {
   readonly value: unknown;
 }
 
-interface CredentialRotationCredentials {
-  readonly providers?: ProviderCredentialProjection["providers"];
-  readonly channels?: ChannelCredentialProjection["channels"];
-  readonly mcp?: McpCredentialProjection["mcp"];
-}
-
 export interface CredentialRotationPublicationOptions {
   readonly authority: CredentialExposureAuthority;
   readonly deviceId: string;
   readonly config: ZhixingConfig;
-  readonly credentials: CredentialRotationCredentials;
+  readonly credentials: CredentialRotationSecretProjection;
   readonly credentialGeneration: string | null;
-  readonly readCredentials: () => Promise<CredentialRotationCredentials>;
+  readonly readCredentials: () => Promise<CredentialRotationSecretProjection>;
   readonly mcpStatuses: () => readonly McpServerStatus[];
   readonly channelStatuses: () => readonly ChannelStatus[];
   readonly waitForChannels?: () => Promise<void>;
@@ -181,7 +174,7 @@ function nextBindingRevision(
 }
 
 function credentialValue(
-  credentials: CredentialRotationCredentials,
+  credentials: CredentialRotationSecretProjection,
   binding: CurrentCredentialBinding,
 ): unknown {
   switch (binding.kind) {

@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：等待协调者复核 A6-01b Advancement 模型 Provider 需求方边界收口<br>
+> 当前检查点：等待协调者复核 A6-02a 运行时秘密投影与 Host 边界收口<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `eb8dfca4`；A6-01a 已由协调者以 package-local 直达测试反证并纠正后独立复核提交，Intelligence Kernel/Orchestrator 只消费自身有限模型运行合同，具体 Provider 与配置解析留在 Host 边缘；A0～A5 当前证据有效 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；当前沿 Provider 家族闭合 Advancement 模型调用的需求方窄端口，避免 Provider 配置与产品应用装配混杂 |
-| 活跃工作包 | `A6-01b-advancement-provider-boundary-v1` 已完成并等待协调者独立复核：Advancement 准入、草案、修订、收场与裁判只消费需求方拥有的有限不可变模型端口，具体 Provider/配置/凭据/协议解析只在唯一 CLI Host adapter 完成 |
-| 下一责任链 | A6-01b 独立验收后，有限审计 Provider 家族零残留，再沿 Configuration/Secret 的真实生产边界收窄；随后按一个家族一条责任链推进 Tool、MCP、Channel、Storage、Executor/Mesh 与设备拓扑，不提前整包派发 A6 |
-| 打开的单向桥 | 无；A6-01b 必须在同一工作包切换 Advancement 全部模型调用装配点，不允许 raw Provider 配置路径与需求方端口双轨并存 |
-| 已失效证据 | 无当前未恢复证据；A6-01b 已以应用/Host adapter 直接测试、Orchestrator/CLI typecheck 与 build、fresh package exports、canonical S7 及最窄格式检查恢复相交证据，A6-01a 已接受的 Kernel/RuntimeHost/Executor 闭包未被本轮需求方适配扩大失效 |
+| 已接受基线 | `46457897`；A6-01b 已由协调者以 package-local 直达测试独立复核并提交，Advancement 全部模型调用只消费需求方有限合同，具体 Provider/配置/凭据解析仅存在于唯一 Host adapter；A0～A5 与 A6-01a 当前证据有效 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-02a 已闭合 Configuration/Secret 启动边缘中完整凭据聚合对象越过 Host 与角色根的问题，等待协调者独立复核 |
+| 活跃工作包 | `A6-02a-runtime-secret-projections-v1` 已完成并等待协调者独立复核：启动秘密边缘唯一读取完整 `ZhixingCredentials`，向 Host 发布 Provider、MCP、Channel、凭据暴露与轮换五类冻结用途投影；持久 Anchor/Executor 与瞬态 workspace runtime 不再取得或重建完整聚合对象 |
+| 下一责任链 | A6-02a 独立验收后，继续收窄公开配置来源到 Host 冻结投影并有限审计 Configuration/Secret 与 Provider 家族零残留；随后按一个家族一条责任链推进 Tool、MCP、Channel、Storage、Executor/Mesh 与设备拓扑 |
+| 打开的单向桥 | 无；A6-02a 必须同包切换持久 Anchor/Executor 及真实瞬态 workspace runtime 的凭据消费点，不允许完整 credentials 与分用途投影双轨并存 |
+| 已失效证据 | 无当前未恢复证据；startup ready、Host/角色根、Provider/MCP/Channel/暴露/轮换秘密消费与 canonical S7 已由 A6-02a 最窄直接证据恢复；A6-01a/01b 的 Kernel/Advancement 模型行为与应用证据未因本轮用途投影失效 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2494,6 +2494,13 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 旧路与结构门禁：`ServeAdvancementControllerDeps` 和 `LocalConversationOwnerAssemblyOptions` 的 raw `config/credentials` 归零，应用装配不再导入 `@zhixing/providers` 或构造 Provider/reviewer；三个生产组合点均显式注入 Host factory。S7 新增需求方合同、窄导出、唯一 Host owner、三组合点、thinking/protocol budget/workspace/attention/session budget 与旧构造回流检查，并同步修正 local-owner 隔离门禁的过期 `config/credentials` exact-set；反向 mutation 可识别应用恢复 concrete Provider、attention 宽对象透传、local owner 恢复配置依赖、根导出泄漏或第二构造入口。fresh package-export 门验证 runtime value/declaration 只从 advancement 窄 subpath 可达。
 - 直接证据与验证：Orchestrator binding 1 文件 2/2；CLI Host adapter、投影与应用发布 3 文件 5/5，直接锁定真实 fallback 构造、有效/无效 thinking、light/main 协议预算、workspace、attention 两字段、session budget、有限 binding 与缺配置 fail-fast；两个 S7 定向 inspector 2/2。Orchestrator 与 CLI `tsc --noEmit`、fresh Orchestrator build、`pnpm cli:build`、`pnpm runtime:package-exports`、canonical S7 coverage/mutation 36/36 与 registry golden、适用 changed-file Biome 均通过。协调者另以 package-local 直达方式独立重跑上述 2/2、5/5 与两个包的 `tsc --noEmit`，并完整取得 `local-conversation-owner-lifecycle.test.ts` 17/17；未复用执行者此前一次受既有 storage-maintenance governor 背压影响的 16/17 结果。
 - 失效与交接：若 Advancement model request/binding exact-set、冻结/校验规则、completion/reviewer/session budget、main/light fallback、thinking/协议预算/workspace/attention 投影、资源计量、三生产组合点、Orchestrator advancement/root/runtime export、S7/package-export 或上述直接测试任一变化，只恢复本证据及真实相交证据；A6-01a Kernel Provider 证据不因无关 Advancement 应用变化自动失效。A6 继续 `[ ]`；下一检查点仅在协调者独立接受并提交后有限审计 Provider 家族零残留，再进入 Configuration/Secret 的真实交界，不提前推进 Tool、MCP、Channel、Storage、Executor/Mesh 或设备拓扑。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+### A6-02a：运行时秘密投影与 Host 边界收口
+
+- 基线与生产闭包：以已接受 `HEAD 46457897` 加协调者调度记录为基线，形成待复核证据 `A6-02a-runtime-secret-projections-v1`。即时正向闭合 `runStartupCheck` 的 SecretStore snapshot/read-after-edit，经 `PersistentApplicationHost` 到 Anchor、Executor-only 两种 role root，以及本机 workspace management command 的瞬态 Authority runtime；反向从 Provider 构造、MCP config、Channel assembly、Executor readiness/credential exposure、rotation read-back 和全部 `ZhixingCredentials/startup.credentials` 使用点对账。完整凭据聚合只在 startup/config secret edge 解码和编辑，进入 Host 前已投影，不存在 role/workspace 第二切片入口。
+- 用途投影与拓扑隔离：新增唯一 `projectRuntimeSecrets`，从同一原始 snapshot 克隆并深冻结五类有限投影：Provider-only、MCP-only、Channel-only、credential exposure/readiness（Provider+MCP）和 credential rotation（Provider+MCP+Channel）；schema `version` 不进入任何运行投影。`StartupCheckResult.ready` 删除 raw `credentials`，只发布这些投影、公开 config、generation 与 SecretStore mechanism；Host 基础 bootstrap 不含 startup/raw aggregate，Anchor 明确取得五类，Executor 只取得 Provider/MCP/exposure，瞬态 workspace 只取得 Provider/MCP/exposure。Anchor/Executor/Workspace 的本地 `credentials.providers/mcp/channels` 切片归零；SecretStore rotation read-back 也在 startup secret edge helper 上重新投影后才进入轮换用例。
+- 行为保护与旧路退场：公开配置、SecretStore unlock/legacy takeover/generation、配置编辑完成后 reload、Provider main/light/power、MCP transport、Channel 连接、Executor readiness binding、credential exposure/rotation、三种持久角色拓扑和 workspace management fallback 行为保持；rotation 继续允许当前三族的同 generation read-back，全量 credential schema 与 `version` 不越界。SecretStore 仍作为 recovery/mesh/authority 所需 Infrastructure mechanism 显式注入，没有提升为服务定位器；本包未修改公开配置投影、配置 schema、reload 状态机、持久格式或下一包责任。
+- 直接证据、门禁与交接：用途投影/startup/Host/topology/rotation 5 文件 42/42，workspace management 1 文件 3/3，合计 6 文件 45/45；CLI `tsc --noEmit`、`pnpm cli:build`、canonical S7 coverage/mutation 37/37 与 registry golden、changed-source Biome、`git diff --check` 均通过。协调者以 package-local 直达方式独立重跑同一 6 文件并取得 45/45，另独立通过 CLI `tsc --noEmit`、runtime-secret 定向 S7 反向门禁与 `git diff --check`。S7 现反向拒绝 raw ready 字段、Host/role/workspace aggregate 读取或重建、未冻结投影、exposure 越权取得 Channel、Executor 取得 Channel/rotation、用途消费旁路；本包未改变 package manifest/export/build entry，故 package-export 门未失效且未重复运行。若 startup ready/secret snapshot、五类 exact-set/冻结规则、Host role bootstrap、三条生产消费链、rotation read-back、SecretStore generation、S7 或上述直接测试任一变化，只恢复本证据及真实相交的 Provider/MCP/Channel/credential exposure/rotation 证据。A6 继续 `[ ]`；下一检查点仅在协调者独立接受并提交后收窄公开配置来源到 Host 冻结投影。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 

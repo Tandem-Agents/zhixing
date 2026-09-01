@@ -1,9 +1,6 @@
-import type {
-  McpCredentialProjection,
-  ProviderCredentialProjection,
-} from "@zhixing/providers";
 import { compareCanonicalStrings } from "@zhixing/core/protocol";
 import type { ExecutorReadiness } from "../setup-delivery.js";
+import type { CredentialExposureSecretProjection } from "../runtime/runtime-secret-projections.js";
 
 export interface ExecutorCapabilityCatalog {
   capabilityCatalog(): {
@@ -12,15 +9,10 @@ export interface ExecutorCapabilityCatalog {
   };
 }
 
-interface ExecutorReadinessCredentials {
-  readonly providers?: ProviderCredentialProjection["providers"];
-  readonly mcp?: McpCredentialProjection["mcp"];
-}
-
 /** Derives the published executor snapshot from the same runtime assets that execute work. */
 export function createExecutorReadinessSource(input: {
   readonly runtime: ExecutorCapabilityCatalog;
-  readonly credentials: ExecutorReadinessCredentials;
+  readonly credentials: CredentialExposureSecretProjection;
   readonly credentialGeneration: string | null;
 }): () => ExecutorReadiness {
   const credentialBindings = [

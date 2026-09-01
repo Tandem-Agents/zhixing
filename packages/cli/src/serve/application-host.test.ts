@@ -51,6 +51,23 @@ describe("persistent ApplicationHost outer lifecycle", () => {
           expect(harness.rolePlan).toBeUndefined();
         }
         expect(harness.roleBootstrap?.mesh.roles).toEqual(topology.roles);
+        expect(harness.roleBootstrap).not.toHaveProperty("startup");
+        expect(harness.roleBootstrap).toHaveProperty("providerCredentials");
+        expect(harness.roleBootstrap).toHaveProperty("mcpCredentials");
+        expect(harness.roleBootstrap).toHaveProperty(
+          "credentialExposureCredentials",
+        );
+        if (topology.roles.includes("anchor")) {
+          expect(harness.roleBootstrap).toHaveProperty("channelCredentials");
+          expect(harness.roleBootstrap).toHaveProperty(
+            "credentialRotationCredentials",
+          );
+        } else {
+          expect(harness.roleBootstrap).not.toHaveProperty("channelCredentials");
+          expect(harness.roleBootstrap).not.toHaveProperty(
+            "credentialRotationCredentials",
+          );
+        }
         expect(harness.importAnchorRole).toHaveBeenCalledTimes(
           topology.roles.includes("anchor") ? 1 : 0,
         );
@@ -283,7 +300,11 @@ function createInput(
     startup: {
       kind: "ready",
       config: {},
-      credentials: {},
+      providerCredentials: {},
+      mcpCredentials: {},
+      channelCredentials: {},
+      credentialExposureCredentials: {},
+      credentialRotationCredentials: {},
       credentialGeneration: null,
       secretStore: { marker: "secret-store" },
     } as never,
@@ -315,7 +336,9 @@ function createHarness(input: {
     : [createMesh(true)];
   let meshIndex = 0;
   let rolePlan: unknown;
-  let roleBootstrap: { readonly mesh: MeshRuntimeBootstrap } | undefined;
+  let roleBootstrap:
+    | ({ readonly mesh: MeshRuntimeBootstrap } & Record<string, unknown>)
+    | undefined;
 
   const prepareMesh = vi.fn(async () => {
     const index = meshIndex++;

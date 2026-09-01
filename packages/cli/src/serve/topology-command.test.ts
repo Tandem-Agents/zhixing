@@ -62,7 +62,11 @@ describe("serve topology command", () => {
     const startup = {
       kind: "ready",
       config: { mesh: { enabledRoles: ["executor"] } },
-      credentials: {},
+      providerCredentials: {},
+      mcpCredentials: {},
+      channelCredentials: {},
+      credentialExposureCredentials: {},
+      credentialRotationCredentials: {},
       credentialGeneration: null,
       secretStore: harness.secretStore,
     };
@@ -90,7 +94,11 @@ describe("serve topology command", () => {
     harness.startup.mockResolvedValue({
       kind: "ready",
       config: {},
-      credentials: {},
+      providerCredentials: {},
+      mcpCredentials: {},
+      channelCredentials: {},
+      credentialExposureCredentials: {},
+      credentialRotationCredentials: {},
       credentialGeneration: null,
       secretStore: harness.secretStore,
     });

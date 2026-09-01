@@ -27,6 +27,7 @@ import {
   inspectTurnContextProviderAssembly,
   inspectKernelProviderDependencyInversion,
   inspectAdvancementProviderDependencyInversion,
+  inspectRuntimeSecretProjectionBoundary,
   inspectWorksceneRuntimeProjectionBoundary,
   inspectWorkspaceAdministrationOwnership,
   inspectTrustAdministrationOwnership,
@@ -3416,6 +3417,73 @@ test("Advancement model providers are concrete only at the Host edge", async () 
   );
 });
 
+test("runtime secrets cross the Host boundary only as frozen purpose projections", async () => {
+  const paths = [
+    "packages/cli/src/runtime/runtime-secret-projections.ts",
+    "packages/cli/src/startup.ts",
+    "packages/cli/src/serve/role-topology.ts",
+    "packages/cli/src/serve/application-host.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/cli/src/runtime/workspace-command.ts",
+    "packages/cli/src/serve/executor-readiness.ts",
+    "packages/cli/src/serve/credential-rotation-publication.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectRuntimeSecretProjectionBoundary(records), []);
+  assert.match(
+    inspectRuntimeSecretProjectionBoundary(mutate(
+      "packages/cli/src/runtime/runtime-secret-projections.ts",
+      (text) => text.replace(
+        "...(mcp === undefined ? {} : { mcp }),\n    }),\n    credentialRotationCredentials:",
+        "...(mcp === undefined ? {} : { mcp }),\n      ...(channels === undefined ? {} : { channels }),\n    }),\n    credentialRotationCredentials:",
+      ),
+    )).join("\n"),
+    /purpose exact-set/,
+  );
+  assert.match(
+    inspectRuntimeSecretProjectionBoundary(mutate(
+      "packages/cli/src/runtime/runtime-secret-projections.ts",
+      (text) => text.replace("deepFreeze(structuredClone(value))", "value"),
+    )).join("\n"),
+    /frozen purpose exact-set/,
+  );
+  assert.match(
+    inspectRuntimeSecretProjectionBoundary(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => `${text}\nconst leaked = bootstrap.startup.credentials;`,
+    )).join("\n"),
+    /Anchor role reconstructs or consumes aggregate credentials/,
+  );
+  assert.match(
+    inspectRuntimeSecretProjectionBoundary(mutate(
+      "packages/cli/src/serve/role-topology.ts",
+      (text) => text.replace(
+        "readonly credentialExposureCredentials: CredentialExposureSecretProjection;\n}",
+        "readonly credentialExposureCredentials: CredentialExposureSecretProjection;\n  readonly channelCredentials: ChannelCredentialProjection;\n}",
+      ),
+    )).join("\n"),
+    /topology isolation/,
+  );
+  assert.match(
+    inspectRuntimeSecretProjectionBoundary(mutate(
+      "packages/cli/src/serve/role-topology.ts",
+      (text) => text.replace(
+        "readonly config: ZhixingConfig;",
+        "readonly startup: StartupCheckResult;\n  readonly config: ZhixingConfig;",
+      ),
+    )).join("\n"),
+    /topology isolation/,
+  );
+});
+
 test("Anchor tool and MCP projection is outside the one generic RuntimeHost issuance", async () => {
   const paths = [
     "packages/runtime-host/src/runtime-host.ts",
@@ -4692,8 +4760,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "const providerCredentials = credentials.providers",
-        "void worksceneDirectory.get(\"runtime-bypass\");\n  const providerCredentials = credentials.providers",
+        "const config: ZhixingConfig = bootstrap.config;",
+        "const config: ZhixingConfig = bootstrap.config;\n  void worksceneDirectory.get(\"runtime-bypass\");",
       ),
     )).join("\n"),
     /Workscene management and entry lack one domain application and Product API owner/,

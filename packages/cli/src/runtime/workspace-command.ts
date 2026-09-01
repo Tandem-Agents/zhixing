@@ -252,15 +252,13 @@ export async function withLocalWorkspaceClient<T, R = T>(
         import("../serve/durable-conversation-interactions.js"),
       ]);
     mcpHub = createMcpHub(
-      parseServerSpecs(startup.config.mcp, startup.credentials.mcp),
+      parseServerSpecs(startup.config.mcp, startup.mcpCredentials.mcp),
       { networkProxy: startup.config.network?.proxy },
     );
     await mcpHub.connectAll();
     const runtimeSubstrate = new ExecutorRuntimeSubstrate({
       config: startup.config,
-      credentials: startup.credentials.providers
-        ? { providers: startup.credentials.providers }
-        : {},
+      credentials: startup.providerCredentials,
       mcpHub,
       systemProtectedPaths: resolveSystemProtectedSecretPaths(),
       interactions: new DurableConversationInteractionObserver(),
@@ -287,7 +285,7 @@ export async function withLocalWorkspaceClient<T, R = T>(
       },
       executorReadiness: createExecutorReadinessSource({
         runtime: runtimeSubstrate,
-        credentials: startup.credentials,
+        credentials: startup.credentialExposureCredentials,
         credentialGeneration: startup.credentialGeneration,
       }),
       enableAnchor: false,

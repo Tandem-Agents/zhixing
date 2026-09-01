@@ -2704,6 +2704,124 @@ export function inspectAdvancementProviderDependencyInversion(records) {
   return failures;
 }
 
+/** A6 raw startup credentials are projected once into frozen, purpose-owned Host inputs. */
+export function inspectRuntimeSecretProjectionBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const source = byPath.get(relative);
+    if (source === undefined) {
+      failures.push(`${relative}: runtime secret projection source is missing`);
+    }
+    return source ?? "";
+  };
+  const projection = required(
+    "packages/cli/src/runtime/runtime-secret-projections.ts",
+  );
+  const startup = required("packages/cli/src/startup.ts");
+  const topology = required("packages/cli/src/serve/role-topology.ts");
+  const host = required("packages/cli/src/serve/application-host.ts");
+  const anchor = required("packages/cli/src/serve/command.ts");
+  const executor = required("packages/cli/src/serve/executor-role-runtime.ts");
+  const workspace = required("packages/cli/src/runtime/workspace-command.ts");
+  const readiness = required("packages/cli/src/serve/executor-readiness.ts");
+  const rotation = required(
+    "packages/cli/src/serve/credential-rotation-publication.ts",
+  );
+
+  const exposureStart = projection.indexOf(
+    "credentialExposureCredentials: Object.freeze",
+  );
+  const rotationStart = projection.indexOf(
+    "credentialRotationCredentials: Object.freeze",
+  );
+  const exposureShape = exposureStart >= 0 && rotationStart > exposureStart
+    ? projection.slice(exposureStart, rotationStart)
+    : "";
+  if (
+    !projection.includes("export interface RuntimeSecretProjections") ||
+    !projection.includes("export function projectRuntimeSecrets(") ||
+    !projection.includes("credentials: ZhixingCredentials") ||
+    !projection.includes("structuredClone(value)") ||
+    !projection.includes("deepFreeze(structuredClone(value))") ||
+    !projection.includes("return Object.freeze({") ||
+    !projection.includes("providerCredentials: Object.freeze(") ||
+    !projection.includes("mcpCredentials: Object.freeze(") ||
+    !projection.includes("channelCredentials: Object.freeze(") ||
+    !exposureShape.includes("providers") ||
+    !exposureShape.includes("mcp") ||
+    exposureShape.includes("channels") ||
+    !projection.includes("...(channels === undefined ? {} : { channels })") ||
+    projection.includes("credentials.version")
+  ) {
+    failures.push("startup secret edge does not publish the frozen purpose exact-set");
+  }
+
+  if (
+    !startup.includes("} & RuntimeSecretProjections)") ||
+    (startup.match(/\.\.\.projectRuntimeSecrets\s*\(/gu) ?? []).length !== 2 ||
+    /kind: "ready";[\s\S]{0,180}credentials:\s*ZhixingCredentials/u.test(startup)
+  ) {
+    failures.push("StartupCheckResult.ready still exposes raw aggregate credentials");
+  }
+
+  const executorContext = topology.slice(
+    topology.indexOf("export interface ExecutorServeBootstrapContext"),
+    topology.indexOf("export type ServeHostKind"),
+  );
+  if (
+    !topology.includes("export interface AnchorServeBootstrapContext") ||
+    !topology.includes("export interface ExecutorServeBootstrapContext") ||
+    topology.includes("readonly startup:") ||
+    !executorContext.includes("providerCredentials") ||
+    !executorContext.includes("mcpCredentials") ||
+    !executorContext.includes("credentialExposureCredentials") ||
+    /channelCredentials|credentialRotationCredentials/u.test(executorContext)
+  ) {
+    failures.push("role bootstrap contexts do not preserve purpose and topology isolation");
+  }
+
+  if (
+    !host.includes("satisfies AnchorServeBootstrapContext") ||
+    !host.includes("satisfies ExecutorServeBootstrapContext") ||
+    !host.includes("providerCredentials: this.#input.startup.providerCredentials") ||
+    !host.includes("channelCredentials: this.#input.startup.channelCredentials") ||
+    !host.includes("credentialExposureCredentials:") ||
+    !host.includes("credentialRotationCredentials:") ||
+    /startup\.credentials|ZhixingCredentials/u.test(host)
+  ) {
+    failures.push("ApplicationHost does not issue the finite role-specific secret projections");
+  }
+
+  const forbiddenRawConsumers = [
+    ["Anchor role", anchor],
+    ["Executor role", executor],
+    ["transient workspace runtime", workspace],
+  ];
+  for (const [name, source] of forbiddenRawConsumers) {
+    if (
+      /startup\.credentials|bootstrap\.startup|ZhixingCredentials/u.test(source) ||
+      /credentials\.(?:providers|mcp|channels)/u.test(source)
+    ) {
+      failures.push(`${name} reconstructs or consumes aggregate credentials`);
+    }
+  }
+  if (
+    !anchor.includes("credentials: credentialExposureCredentials") ||
+    !anchor.includes("credentials: credentialRotationCredentials") ||
+    !anchor.includes(").credentialRotationCredentials") ||
+    !executor.includes("credentials: bootstrap.credentialExposureCredentials") ||
+    !workspace.includes("credentials: startup.credentialExposureCredentials") ||
+    !workspace.includes("credentials: startup.providerCredentials") ||
+    !readiness.includes("CredentialExposureSecretProjection") ||
+    !rotation.includes("CredentialRotationSecretProjection")
+  ) {
+    failures.push("runtime secret consumers bypass their one purpose-owned projection");
+  }
+
+  return failures;
+}
+
 /** A4 Anchor product tools and MCP inputs are projected before the generic RuntimeHost boundary. */
 export function inspectWorksceneRuntimeProjectionBoundary(records) {
   const failures = [];
@@ -2983,6 +3101,7 @@ export async function validateS7Structure() {
   failures.push(...inspectTurnContextProviderAssembly(records));
   failures.push(...inspectKernelProviderDependencyInversion(records));
   failures.push(...inspectAdvancementProviderDependencyInversion(records));
+  failures.push(...inspectRuntimeSecretProjectionBoundary(records));
   failures.push(...inspectWorksceneRuntimeProjectionBoundary([
     ...records,
     {

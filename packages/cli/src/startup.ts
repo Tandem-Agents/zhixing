@@ -39,6 +39,10 @@ import { createPlatformSecretStore } from "@zhixing/secrets";
 import { FileMeshBootstrapStore } from "./serve/mesh-bootstrap-store.js";
 import { CredentialExposureAuthority } from "./serve/credential-exposure-authority.js";
 import {
+  projectRuntimeSecrets,
+  type RuntimeSecretProjections,
+} from "./runtime/runtime-secret-projections.js";
+import {
   checkModel,
   runConfigEditor,
   type SectionId,
@@ -54,20 +58,19 @@ export type StartupMode = "repl" | "host" | "pairing";
 /**
  * 启动检查结果——caller 据此决定后续动作。
  *
- * - ready：必要字段齐全（编辑器未触发或已完成），返回 config + credentials
+ * - ready：必要字段齐全（编辑器未触发或已完成），返回公开配置与冻结的用途秘密投影
  * - cancelled：用户在编辑器里取消（应正常退出 exit 0）
  * - schema-error：JSON 解析失败（exit 2）
  * - semantic-error：含废弃字段（exit 2）
  * - non-tty：缺字段且非交互终端（exit 2）
  */
 export type StartupCheckResult =
-  | {
+  | ({
       kind: "ready";
       config: ZhixingConfig;
-      credentials: ZhixingCredentials;
       credentialGeneration: string | null;
       secretStore: SecretStorePort & CredentialStoreCoordinator;
-    }
+    } & RuntimeSecretProjections)
   | { kind: "cancelled" }
   | { kind: "schema-error"; filePath: string; message: string }
   | { kind: "secret-store-error"; filePath: string; message: string }
@@ -169,7 +172,13 @@ export async function runStartupCheck(
   }
 
   if (missingSections.length === 0) {
-    return { kind: "ready", config, credentials, credentialGeneration, secretStore };
+    return {
+      kind: "ready",
+      config,
+      ...projectRuntimeSecrets(credentials),
+      credentialGeneration,
+      secretStore,
+    };
   }
 
   // 3. 缺失 + 非 TTY → fail-fast
@@ -221,7 +230,7 @@ export async function runStartupCheck(
     return {
       kind: "ready",
       config: updatedConfig,
-      credentials: updatedCredentialSnapshot.credentials,
+      ...projectRuntimeSecrets(updatedCredentialSnapshot.credentials),
       credentialGeneration: updatedCredentialSnapshot.generation,
       secretStore,
     };

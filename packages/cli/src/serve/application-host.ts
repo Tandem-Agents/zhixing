@@ -17,7 +17,9 @@ import {
 import { runRecoveryRootEstablishmentTopology } from "./recovery-root-establishment-runtime.js";
 import {
   planServeTopology,
+  type AnchorServeBootstrapContext,
   type ExecutorRoleModule,
+  type ExecutorServeBootstrapContext,
   type ServeBootstrapContext,
   type ServeRoleConfiguration,
   type ServeTopologyPlan,
@@ -33,7 +35,7 @@ type LocalWorkspaceOwner = Awaited<
 interface AnchorRoleModule<Options> {
   readonly runServeCommand: (
     options: Options,
-    bootstrap: ServeBootstrapContext,
+    bootstrap: AnchorServeBootstrapContext,
     executor: ExecutorRoleModule | undefined,
     plan: ServeTopologyPlan,
   ) => Promise<void>;
@@ -42,7 +44,7 @@ interface AnchorRoleModule<Options> {
 interface ExecutorRoleRuntimeModule<Options> {
   readonly runExecutorRole: (
     options: Options,
-    bootstrap: ServeBootstrapContext,
+    bootstrap: ExecutorServeBootstrapContext,
     executor?: ExecutorRoleModule,
   ) => Promise<void>;
 }
@@ -170,7 +172,8 @@ export class PersistentApplicationHost<Options> {
       mesh,
       deviceCapacity,
       secretStore: this.#input.secretStore,
-      startup: this.#input.startup,
+      config: this.#input.startup.config,
+      credentialGeneration: this.#input.startup.credentialGeneration,
       localWorkspaceIdentity,
     }) satisfies ServeBootstrapContext;
 
@@ -192,7 +195,16 @@ export class PersistentApplicationHost<Options> {
       ]);
       await anchorRole.runServeCommand(
         this.#input.options,
-        bootstrap,
+        Object.freeze({
+          ...bootstrap,
+          providerCredentials: this.#input.startup.providerCredentials,
+          mcpCredentials: this.#input.startup.mcpCredentials,
+          channelCredentials: this.#input.startup.channelCredentials,
+          credentialExposureCredentials:
+            this.#input.startup.credentialExposureCredentials,
+          credentialRotationCredentials:
+            this.#input.startup.credentialRotationCredentials,
+        }) satisfies AnchorServeBootstrapContext,
         executor,
         plan,
       );
@@ -203,7 +215,17 @@ export class PersistentApplicationHost<Options> {
       this.#dependencies.importExecutorRole(),
       this.#dependencies.importExecutorModule(),
     ]);
-    await executorRole.runExecutorRole(this.#input.options, bootstrap, executor);
+    await executorRole.runExecutorRole(
+      this.#input.options,
+      Object.freeze({
+        ...bootstrap,
+        providerCredentials: this.#input.startup.providerCredentials,
+        mcpCredentials: this.#input.startup.mcpCredentials,
+        credentialExposureCredentials:
+          this.#input.startup.credentialExposureCredentials,
+      }) satisfies ExecutorServeBootstrapContext,
+      executor,
+    );
   }
 
   async #prepareMesh(deviceCapacity: DeviceCapacityRuntime): Promise<MeshRuntimeBootstrap> {

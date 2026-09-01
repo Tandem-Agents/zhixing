@@ -143,7 +143,6 @@ import { renderRecentContextFromMessages } from "@zhixing/owner-services";
 import {
   loadCredentials,
   type ZhixingConfig,
-  type ZhixingCredentials,
 } from "@zhixing/providers";
 import fsp from "node:fs/promises";
 import chalk from "chalk";
@@ -153,10 +152,11 @@ import { createBuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
 import { createTransientSegmentDeps } from "./segment-deps.js";
 import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
 import type {
+  AnchorServeBootstrapContext,
   ExecutorRoleModule,
-  ServeBootstrapContext,
   ServeTopologyPlan,
 } from "./role-topology.js";
+import { projectRuntimeSecrets } from "../runtime/runtime-secret-projections.js";
 import { createRenderSubscribers } from "../render.js";
 import { createStdoutWriter } from "../screen/index.js";
 import {
@@ -292,7 +292,7 @@ export interface ServeOptions {
  */
 export async function runServeCommand(
   opts: ServeOptions,
-  bootstrap: ServeBootstrapContext,
+  bootstrap: AnchorServeBootstrapContext,
   executor: ExecutorRoleModule | undefined,
   plan: ServeTopologyPlan,
 ): Promise<void> {
@@ -301,7 +301,7 @@ export async function runServeCommand(
 
 async function runServerProcess(
   opts: ServeOptions,
-  bootstrap: ServeBootstrapContext,
+  bootstrap: AnchorServeBootstrapContext,
   executor: ExecutorRoleModule | undefined,
   plan: ServeTopologyPlan,
 ): Promise<void> {
@@ -352,11 +352,15 @@ async function runServerProcess(
   const port = opts.port ?? homeToPort(zhixingHome);
   const host = opts.host ?? DEFAULT_SERVER_CONFIG.host;
 
-  const startupResult = bootstrap.startup;
-
-  const config: ZhixingConfig = startupResult.config;
-  const credentials: ZhixingCredentials = startupResult.credentials;
-  const credentialGeneration = startupResult.credentialGeneration;
+  const config: ZhixingConfig = bootstrap.config;
+  const providerCredentials = bootstrap.providerCredentials;
+  const mcpCredentials = bootstrap.mcpCredentials;
+  const channelCredentials = bootstrap.channelCredentials;
+  const credentialExposureCredentials =
+    bootstrap.credentialExposureCredentials;
+  const credentialRotationCredentials =
+    bootstrap.credentialRotationCredentials;
+  const credentialGeneration = bootstrap.credentialGeneration;
   const systemProtectedPaths = resolveSystemProtectedSecretPaths();
   const hostDefaultWorkspace = createHostDefaultWorkspaceProjection(config);
 
@@ -462,9 +466,6 @@ async function runServerProcess(
     worksceneApplicationPorts.entry,
     worksceneApplicationPorts.runtime,
   );
-  const providerCredentials = credentials.providers
-    ? { providers: credentials.providers }
-    : {};
   // Trust Administration owns management semantics; the adapter below only
   // maps its finite repository port to the existing storage mechanism.
   const trustAdministration = createTrustAdministrationApplication({
@@ -556,7 +557,7 @@ async function runServerProcess(
   // 3b. MCP host —— 创建（不 eager 连接）。connectAll 由 mcp 接入面在 pre-server 阶段触发，
   //   故 schedule 档（无 mcp 接入面）省去 eager 连接，仅 hub 对象在位、ephemeral 可用 builtin 工具。
   //   serve 进程内单例，多 session 共享同一批连接。空配置时为 no-op。
-  const mcpHub = createMcpHub(parseServerSpecs(config.mcp, credentials.mcp), {
+  const mcpHub = createMcpHub(parseServerSpecs(config.mcp, mcpCredentials.mcp), {
     networkProxy: config.network?.proxy,
   });
 
@@ -581,9 +582,6 @@ async function runServerProcess(
     taskListService: builtinExtraTools.taskListService,
   });
 
-  const channelCredentials = credentials.channels
-    ? { channels: credentials.channels }
-    : {};
   const durableInteractions = new DurableConversationInteractionObserver();
   const assemblyUnits = createAssemblyUnits(channelCredentials);
   const {
@@ -783,7 +781,7 @@ async function runServerProcess(
     : undefined;
   const executorReadiness = createExecutorReadinessSource({
     runtime: anchorRuntimeProjections,
-    credentials,
+    credentials: credentialExposureCredentials,
     credentialGeneration,
   });
 
@@ -931,7 +929,7 @@ async function runServerProcess(
     config,
     providerCredentials,
     zhixingHome,
-    secretStore: startupResult.secretStore,
+    secretStore: bootstrap.secretStore,
     durableInteractions,
     perspectives: perspectivesController,
     deviceCapacity: deviceCapacity.arbiter,
@@ -1053,10 +1051,12 @@ async function runServerProcess(
       }),
       deviceId: ctx.authorityRuntime.deviceId,
       config,
-      credentials,
+      credentials: credentialRotationCredentials,
       credentialGeneration,
       readCredentials: async () =>
-        loadCredentials({ store: startupResult.secretStore }),
+        projectRuntimeSecrets(
+          await loadCredentials({ store: bootstrap.secretStore }),
+        ).credentialRotationCredentials,
       governProvider: (provider) =>
         governControlProvider(
           {

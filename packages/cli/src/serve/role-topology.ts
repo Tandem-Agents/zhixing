@@ -1,10 +1,19 @@
 import type { DeviceRole, SecretStorePort } from "@zhixing/core/contracts";
-import type { CredentialStoreCoordinator } from "@zhixing/providers";
+import type {
+  ChannelCredentialProjection,
+  CredentialStoreCoordinator,
+  McpCredentialProjection,
+  ProviderCredentialProjection,
+  ZhixingConfig,
+} from "@zhixing/providers";
 import type { CleanupRegistrationOwner } from "@zhixing/server";
-import type { StartupCheckResult } from "../startup.js";
 import type { DeviceCapacityRuntime } from "./device-capacity-runtime.js";
 import type { MeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import type { LocalWorkspaceAssemblyIdentity } from "../runtime/local-workspace-bootstrap.js";
+import type {
+  CredentialExposureSecretProjection,
+  CredentialRotationSecretProjection,
+} from "../runtime/runtime-secret-projections.js";
 import type {
   ConversationAssignmentLedger,
   AssignmentStreamSpool,
@@ -57,8 +66,23 @@ export interface ServeBootstrapContext {
   readonly mesh: MeshRuntimeBootstrap;
   readonly deviceCapacity: DeviceCapacityRuntime;
   readonly secretStore: SecretStorePort & CredentialStoreCoordinator;
-  readonly startup: Extract<StartupCheckResult, { readonly kind: "ready" }>;
+  readonly config: ZhixingConfig;
+  readonly credentialGeneration: string | null;
   readonly localWorkspaceIdentity: LocalWorkspaceAssemblyIdentity;
+}
+
+export interface AnchorServeBootstrapContext extends ServeBootstrapContext {
+  readonly providerCredentials: ProviderCredentialProjection;
+  readonly mcpCredentials: McpCredentialProjection;
+  readonly channelCredentials: ChannelCredentialProjection;
+  readonly credentialExposureCredentials: CredentialExposureSecretProjection;
+  readonly credentialRotationCredentials: CredentialRotationSecretProjection;
+}
+
+export interface ExecutorServeBootstrapContext extends ServeBootstrapContext {
+  readonly providerCredentials: ProviderCredentialProjection;
+  readonly mcpCredentials: McpCredentialProjection;
+  readonly credentialExposureCredentials: CredentialExposureSecretProjection;
 }
 
 export type ServeHostKind = "disabled" | "anchor-host" | "executor-host";
