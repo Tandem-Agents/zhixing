@@ -52,6 +52,8 @@ describe("persistent ApplicationHost outer lifecycle", () => {
         }
         expect(harness.roleBootstrap?.mesh.roles).toEqual(topology.roles);
         expect(harness.roleBootstrap).not.toHaveProperty("startup");
+        expect(harness.roleBootstrap).not.toHaveProperty("config");
+        expect(harness.roleBootstrap).toHaveProperty("runtimeConfiguration");
         expect(harness.roleBootstrap).toHaveProperty("providerCredentials");
         expect(harness.roleBootstrap).toHaveProperty("mcpCredentials");
         expect(harness.roleBootstrap).toHaveProperty(
@@ -299,7 +301,7 @@ function createInput(
     options: {},
     startup: {
       kind: "ready",
-      config: {},
+      runtimeConfiguration: Object.freeze({}),
       providerCredentials: {},
       mcpCredentials: {},
       channelCredentials: {},

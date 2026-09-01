@@ -11,8 +11,8 @@ import {
   resolveWorkspace,
   resolveWorkspaceSessionType,
   type WorkspaceSessionType,
-  type ZhixingConfig,
 } from "@zhixing/providers";
+import type { RuntimeConfigurationSnapshot } from "../runtime/runtime-configuration-snapshot.js";
 
 export function createTrustAdministrationRepository(): TrustAdministrationRepository {
   return createPermissionStoreTrustAdministrationRepository(
@@ -22,7 +22,7 @@ export function createTrustAdministrationRepository(): TrustAdministrationReposi
 
 /** Host composition of the one Trust Administration application. */
 export function createTrustAdministrationApplication(deps: {
-  readonly config: ZhixingConfig;
+  readonly config: RuntimeConfigurationSnapshot;
   readonly sessionType?: WorkspaceSessionType;
 }): TrustAdministrationApplication {
   return new TrustAdministrationApplicationService({

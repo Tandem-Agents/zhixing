@@ -172,7 +172,7 @@ export class PersistentApplicationHost<Options> {
       mesh,
       deviceCapacity,
       secretStore: this.#input.secretStore,
-      config: this.#input.startup.config,
+      runtimeConfiguration: this.#input.startup.runtimeConfiguration,
       credentialGeneration: this.#input.startup.credentialGeneration,
       localWorkspaceIdentity,
     }) satisfies ServeBootstrapContext;
@@ -233,8 +233,8 @@ export class PersistentApplicationHost<Options> {
       zhixingHome: this.#input.zhixingHome,
       secretStore: this.#input.secretStore,
       storageMaintenance: deviceCapacity.storage,
-      ...(this.#input.startup.config.mesh
-        ? { configuration: this.#input.startup.config.mesh }
+      ...(this.#input.startup.runtimeConfiguration.mesh
+        ? { configuration: this.#input.startup.runtimeConfiguration.mesh }
         : {}),
     });
     this.#mesh = own(mesh, () => mesh.bootstrapStore.stopStorageMaintenance());

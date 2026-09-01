@@ -232,7 +232,9 @@ export async function withLocalWorkspaceClient<T, R = T>(
       zhixingHome,
       secretStore,
       storageMaintenance: capacity.storage,
-      ...(startup.config.mesh ? { configuration: startup.config.mesh } : {}),
+      ...(startup.runtimeConfiguration.mesh
+        ? { configuration: startup.runtimeConfiguration.mesh }
+        : {}),
     });
     if (!mesh.roles.includes("executor")) {
       throw new Error("当前设备未启用 executor 角色，本机工作区管理能力不可用");
@@ -252,12 +254,15 @@ export async function withLocalWorkspaceClient<T, R = T>(
         import("../serve/durable-conversation-interactions.js"),
       ]);
     mcpHub = createMcpHub(
-      parseServerSpecs(startup.config.mcp, startup.mcpCredentials.mcp),
-      { networkProxy: startup.config.network?.proxy },
+      parseServerSpecs(
+        startup.runtimeConfiguration.mcp,
+        startup.mcpCredentials.mcp,
+      ),
+      { networkProxy: startup.runtimeConfiguration.network?.proxy },
     );
     await mcpHub.connectAll();
     const runtimeSubstrate = new ExecutorRuntimeSubstrate({
-      config: startup.config,
+      config: startup.runtimeConfiguration,
       credentials: startup.providerCredentials,
       mcpHub,
       systemProtectedPaths: resolveSystemProtectedSecretPaths(),
@@ -280,7 +285,7 @@ export async function withLocalWorkspaceClient<T, R = T>(
       authorizedDeviceIds: mesh.authorizedDeviceIds,
       executorId: executorIdForDevice(mesh.deviceKey.deviceId),
       configurationSnapshot: {
-        config: startup.config,
+        config: startup.runtimeConfiguration,
         executableVersion: (await import("../version.js")).ZHIXING_CLI_VERSION,
       },
       executorReadiness: createExecutorReadinessSource({

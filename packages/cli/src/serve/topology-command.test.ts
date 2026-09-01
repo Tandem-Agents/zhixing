@@ -61,7 +61,9 @@ describe("serve topology command", () => {
   it("performs shared preflight before creating and running the production Host", async () => {
     const startup = {
       kind: "ready",
-      config: { mesh: { enabledRoles: ["executor"] } },
+      runtimeConfiguration: {
+        mesh: { enabledRoles: ["executor"] },
+      },
       providerCredentials: {},
       mcpCredentials: {},
       channelCredentials: {},
@@ -93,7 +95,7 @@ describe("serve topology command", () => {
     const failure = new Error("host failed");
     harness.startup.mockResolvedValue({
       kind: "ready",
-      config: {},
+      runtimeConfiguration: {},
       providerCredentials: {},
       mcpCredentials: {},
       channelCredentials: {},

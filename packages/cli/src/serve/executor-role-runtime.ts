@@ -12,7 +12,7 @@ import {
 } from "@zhixing/orchestrator/runtime";
 import { mainProfile, powerProfile } from "@zhixing/orchestrator/profile";
 import { parseConversationId } from "@zhixing/core";
-import type { ProviderCredentialProjection, ZhixingConfig } from "@zhixing/providers";
+import type { ProviderCredentialProjection } from "@zhixing/providers";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
 import {
   createHostKernelModelProviderFactory,
@@ -109,6 +109,7 @@ import {
   throwExecutorRoleFailures,
 } from "./executor-role-lifecycle.js";
 import { ExecutorServerLifecycle } from "./executor-server-lifecycle.js";
+import type { RuntimeConfigurationSnapshot } from "../runtime/runtime-configuration-snapshot.js";
 
 export async function runExecutorRole(
   options: ServeOptions,
@@ -127,6 +128,7 @@ export async function runExecutorRole(
   }
   const zhixingHome = getZhixingHome();
   const deviceCapacity = bootstrap.deviceCapacity;
+  const runtimeConfiguration = bootstrap.runtimeConfiguration;
   const providerCredentials = bootstrap.providerCredentials;
   const writer = createStdoutWriter();
   const processStartedAt = new Date().toISOString();
@@ -161,8 +163,8 @@ export async function runExecutorRole(
   const executorRoleLifecycle = new ExecutorRoleLifecycle();
   const executorServerLifecycle = new ExecutorServerLifecycle();
   const mcpHub = createMcpHub(
-    parseServerSpecs(bootstrap.config.mcp, bootstrap.mcpCredentials.mcp),
-    { networkProxy: bootstrap.config.network?.proxy },
+    parseServerSpecs(runtimeConfiguration.mcp, bootstrap.mcpCredentials.mcp),
+    { networkProxy: runtimeConfiguration.network?.proxy },
   );
   executorRoleLifecycle.acquire("mcpHub.dispose", () => mcpHub.dispose());
 
@@ -234,7 +236,7 @@ export async function runExecutorRole(
     const interactions = new DurableConversationInteractionObserver();
     let authority: AuthorityRuntimeStack | undefined;
     const runtime = new ExecutorRuntimeSubstrate({
-      config: bootstrap.config,
+      config: runtimeConfiguration,
       credentials: providerCredentials,
       mcpHub,
       systemProtectedPaths: resolveSystemProtectedSecretPaths(),
@@ -257,7 +259,7 @@ export async function runExecutorRole(
       authorizedDeviceIds: bootstrap.mesh.authorizedDeviceIds,
       executorId: executorIdForDevice(bootstrap.mesh.deviceKey.deviceId),
       configurationSnapshot: {
-        config: bootstrap.config,
+        config: runtimeConfiguration,
         executableVersion: ZHIXING_CLI_VERSION,
       },
       executorReadiness: createExecutorReadinessSource({
@@ -402,7 +404,7 @@ export async function runExecutorRole(
       runtimeFactory,
       interactions,
       advancementModelProvider: createHostAdvancementModelProviderFactory({
-        config: bootstrap.config,
+        config: runtimeConfiguration,
         credentials: providerCredentials,
       }),
       evidence: evidenceHandler,
@@ -950,7 +952,7 @@ export class ExecutorRuntimeSubstrate {
   readonly #runtimeEnvironment: KernelRuntimeEnvironmentFactory;
 
   constructor(private readonly options: {
-    readonly config: ZhixingConfig;
+    readonly config: RuntimeConfigurationSnapshot;
     readonly credentials: ProviderCredentialProjection;
     readonly mcpHub: McpHub;
     readonly systemProtectedPaths: readonly string[];

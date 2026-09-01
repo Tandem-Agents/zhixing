@@ -64,7 +64,9 @@ describe("startup SecretStore boundary", () => {
     });
     expect(result).toMatchObject({
       kind: "ready",
-      config: { llm: { main: { provider: "deepseek", model: "deepseek-chat" } } },
+      runtimeConfiguration: {
+        llm: { main: { provider: "deepseek", model: "deepseek-chat" } },
+      },
       providerCredentials: {
         providers: { deepseek: { apiKey: "startup-secret" } },
       },
@@ -80,6 +82,9 @@ describe("startup SecretStore boundary", () => {
     });
     expect(result.kind === "ready" && "credentials" in result).toBe(false);
     if (result.kind === "ready") {
+      expect("config" in result).toBe(false);
+      expect(Object.isFrozen(result.runtimeConfiguration)).toBe(true);
+      expect(Object.isFrozen(result.runtimeConfiguration.llm)).toBe(true);
       expect(Object.isFrozen(result.providerCredentials)).toBe(true);
       expect(Object.isFrozen(result.providerCredentials.providers)).toBe(true);
     }

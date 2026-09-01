@@ -19,7 +19,7 @@
 
 import { PROFILES, type ServerProfile } from "./profile.js";
 import type { SurfaceAssetMaintenance } from "./surface-asset-maintenance.js";
-import type { ZhixingConfig } from "@zhixing/providers";
+import type { RuntimeConfigurationSnapshot } from "../runtime/runtime-configuration-snapshot.js";
 import type {
   ChannelRegistry,
   ConversationRepository,
@@ -112,7 +112,7 @@ export interface AssemblyContext {
   // ── 输入（外层准备） ──
   readonly profile: ServerProfile;
   readonly enabledRoles: readonly DeviceRole[];
-  readonly config: ZhixingConfig;
+  readonly runtimeConfiguration: RuntimeConfigurationSnapshot;
   readonly providerCredentials?: ProviderCredentialProjection;
   readonly zhixingHome: string;
   readonly secretStore: SecretStorePort;

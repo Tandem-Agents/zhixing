@@ -23,11 +23,11 @@ import {
   resolveWorkspaceSessionType,
   ROLE_SPECS,
   type ProviderCredentialProjection,
-  type ZhixingConfig,
 } from "@zhixing/providers";
+import type { RuntimeConfigurationSnapshot } from "./runtime-configuration-snapshot.js";
 
 export function createHostKernelModelProviderFactory(input: {
-  readonly config: ZhixingConfig;
+  readonly config: RuntimeConfigurationSnapshot;
   readonly credentials: ProviderCredentialProjection;
 }): KernelModelProviderFactory {
   const config = input.config;
@@ -115,7 +115,7 @@ export function createHostKernelModelProviderFactory(input: {
 }
 
 export function createHostKernelRuntimeEnvironmentFactory(input: {
-  readonly config: ZhixingConfig;
+  readonly config: RuntimeConfigurationSnapshot;
 }): KernelRuntimeEnvironmentFactory {
   const config = input.config;
   return Object.freeze({

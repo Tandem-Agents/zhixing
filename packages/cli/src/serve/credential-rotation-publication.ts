@@ -6,11 +6,11 @@ import {
   createProvider,
   resolveProvider,
   type ProviderCredentialProjection,
-  type ZhixingConfig,
 } from "@zhixing/providers";
 import type { CredentialExposureRecord } from "@zhixing/core/contracts";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import type { CredentialRotationSecretProjection } from "../runtime/runtime-secret-projections.js";
+import type { RuntimeConfigurationSnapshot } from "../runtime/runtime-configuration-snapshot.js";
 
 type CredentialKind = "provider" | "channel" | "mcp";
 
@@ -26,7 +26,7 @@ interface CurrentCredentialBinding {
 export interface CredentialRotationPublicationOptions {
   readonly authority: CredentialExposureAuthority;
   readonly deviceId: string;
-  readonly config: ZhixingConfig;
+  readonly config: RuntimeConfigurationSnapshot;
   readonly credentials: CredentialRotationSecretProjection;
   readonly credentialGeneration: string | null;
   readonly readCredentials: () => Promise<CredentialRotationSecretProjection>;
@@ -38,7 +38,7 @@ export interface CredentialRotationPublicationOptions {
   readonly probeProvider?: (input: {
     readonly providerId: string;
     readonly model: string;
-    readonly config: ZhixingConfig;
+    readonly config: RuntimeConfigurationSnapshot;
     readonly credentials: ProviderCredentialProjection;
   }) => Promise<string>;
   readonly now?: () => string;
@@ -258,7 +258,10 @@ function readinessFor(
   }
 }
 
-function providerModel(config: ZhixingConfig, providerId: string): string | undefined {
+function providerModel(
+  config: RuntimeConfigurationSnapshot,
+  providerId: string,
+): string | undefined {
   for (const role of [config.llm?.main, config.llm?.light, config.llm?.power]) {
     if (role?.provider === providerId) return role.model;
   }
@@ -268,7 +271,7 @@ function providerModel(config: ZhixingConfig, providerId: string): string | unde
 async function probeProviderCredential(input: {
   readonly providerId: string;
   readonly model: string;
-  readonly config: ZhixingConfig;
+  readonly config: RuntimeConfigurationSnapshot;
   readonly credentials: ProviderCredentialProjection;
 }, governProvider: (provider: LLMProvider) => LLMProvider): Promise<string> {
   const credentials = input.credentials.providers

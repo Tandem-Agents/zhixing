@@ -17,11 +17,11 @@ import {
   resolveWorkspace,
   resolveWorkspaceSessionType,
   type ProviderCredentialProjection,
-  type ZhixingConfig,
 } from "@zhixing/providers";
+import type { RuntimeConfigurationSnapshot } from "./runtime-configuration-snapshot.js";
 
 export function createHostAdvancementModelProviderFactory(input: {
-  readonly config: ZhixingConfig;
+  readonly config: RuntimeConfigurationSnapshot;
   readonly credentials: ProviderCredentialProjection;
 }): AdvancementModelProviderFactory {
   const hostConfig = input.config;

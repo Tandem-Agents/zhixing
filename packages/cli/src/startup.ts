@@ -43,6 +43,10 @@ import {
   type RuntimeSecretProjections,
 } from "./runtime/runtime-secret-projections.js";
 import {
+  createRuntimeConfigurationSnapshot,
+  type RuntimeConfigurationSnapshot,
+} from "./runtime/runtime-configuration-snapshot.js";
+import {
   checkModel,
   runConfigEditor,
   type SectionId,
@@ -58,7 +62,7 @@ export type StartupMode = "repl" | "host" | "pairing";
 /**
  * 启动检查结果——caller 据此决定后续动作。
  *
- * - ready：必要字段齐全（编辑器未触发或已完成），返回公开配置与冻结的用途秘密投影
+ * - ready：必要字段齐全（编辑器未触发或已完成），返回冻结运行配置与用途秘密投影
  * - cancelled：用户在编辑器里取消（应正常退出 exit 0）
  * - schema-error：JSON 解析失败（exit 2）
  * - semantic-error：含废弃字段（exit 2）
@@ -67,7 +71,7 @@ export type StartupMode = "repl" | "host" | "pairing";
 export type StartupCheckResult =
   | ({
       kind: "ready";
-      config: ZhixingConfig;
+      runtimeConfiguration: RuntimeConfigurationSnapshot;
       credentialGeneration: string | null;
       secretStore: SecretStorePort & CredentialStoreCoordinator;
     } & RuntimeSecretProjections)
@@ -174,7 +178,7 @@ export async function runStartupCheck(
   if (missingSections.length === 0) {
     return {
       kind: "ready",
-      config,
+      runtimeConfiguration: createRuntimeConfigurationSnapshot(config),
       ...projectRuntimeSecrets(credentials),
       credentialGeneration,
       secretStore,
@@ -229,7 +233,7 @@ export async function runStartupCheck(
     });
     return {
       kind: "ready",
-      config: updatedConfig,
+      runtimeConfiguration: createRuntimeConfigurationSnapshot(updatedConfig),
       ...projectRuntimeSecrets(updatedCredentialSnapshot.credentials),
       credentialGeneration: updatedCredentialSnapshot.generation,
       secretStore,

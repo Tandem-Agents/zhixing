@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：等待协调者复核 A6-02a 运行时秘密投影与 Host 边界收口<br>
+> 当前检查点：等待协调者复核 A6-02b 公开配置来源与 Host 冻结快照边界<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `46457897`；A6-01b 已由协调者以 package-local 直达测试独立复核并提交，Advancement 全部模型调用只消费需求方有限合同，具体 Provider/配置/凭据解析仅存在于唯一 Host adapter；A0～A5 与 A6-01a 当前证据有效 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-02a 已闭合 Configuration/Secret 启动边缘中完整凭据聚合对象越过 Host 与角色根的问题，等待协调者独立复核 |
-| 活跃工作包 | `A6-02a-runtime-secret-projections-v1` 已完成并等待协调者独立复核：启动秘密边缘唯一读取完整 `ZhixingCredentials`，向 Host 发布 Provider、MCP、Channel、凭据暴露与轮换五类冻结用途投影；持久 Anchor/Executor 与瞬态 workspace runtime 不再取得或重建完整聚合对象 |
-| 下一责任链 | A6-02a 独立验收后，继续收窄公开配置来源到 Host 冻结投影并有限审计 Configuration/Secret 与 Provider 家族零残留；随后按一个家族一条责任链推进 Tool、MCP、Channel、Storage、Executor/Mesh 与设备拓扑 |
-| 打开的单向桥 | 无；A6-02a 必须同包切换持久 Anchor/Executor 及真实瞬态 workspace runtime 的凭据消费点，不允许完整 credentials 与分用途投影双轨并存 |
-| 已失效证据 | 无当前未恢复证据；startup ready、Host/角色根、Provider/MCP/Channel/暴露/轮换秘密消费与 canonical S7 已由 A6-02a 最窄直接证据恢复；A6-01a/01b 的 Kernel/Advancement 模型行为与应用证据未因本轮用途投影失效 |
+| 已接受基线 | `45f1ef4f`；A6-02a 已由协调者独立复核并提交，完整 `ZhixingCredentials` 仅存在于启动/配置秘密边缘，运行 Host、角色根与 workspace runtime 只消费五类用途冻结投影；A0～A5 与 A6-01a/01b 当前证据有效 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-02b 已建立公开配置来源到 ApplicationHost 的单次不可变运行快照边界，等待协调者独立复核 |
+| 活跃工作包 | `A6-02b-runtime-configuration-snapshot-v1` 已完成并等待协调者独立复核：启动配置边缘对已加载、已校验的 `ZhixingConfig` 生成唯一带品牌的深克隆/递归冻结快照，持久 Host、Anchor/Executor 角色根与瞬态 workspace runtime 只消费该快照 |
+| 下一责任链 | A6-02b 独立验收后，按真实消费者把冻结配置进一步收窄为 Provider/Kernel、MCP、Channel、Topology 等用途投影，并有限审计 Configuration/Secret 与 Provider 家族零残留；随后推进其余边缘家族 |
+| 打开的单向桥 | 无；A6-02b 必须同包切换 startup ready、持久 Host/角色根和 workspace runtime，不允许 raw config 与 frozen snapshot 双轨并存 |
+| 已失效证据 | 无当前未恢复证据；startup/config、Host/角色根/workspace、Provider/MCP/Channel/Authority 实际配置消费者与 canonical S7 已由 A6-02b 最窄证据恢复；A6-02a 秘密投影及 A6-01a/01b 模型行为证据未因本轮配置引用隔离失效 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2501,6 +2501,13 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 用途投影与拓扑隔离：新增唯一 `projectRuntimeSecrets`，从同一原始 snapshot 克隆并深冻结五类有限投影：Provider-only、MCP-only、Channel-only、credential exposure/readiness（Provider+MCP）和 credential rotation（Provider+MCP+Channel）；schema `version` 不进入任何运行投影。`StartupCheckResult.ready` 删除 raw `credentials`，只发布这些投影、公开 config、generation 与 SecretStore mechanism；Host 基础 bootstrap 不含 startup/raw aggregate，Anchor 明确取得五类，Executor 只取得 Provider/MCP/exposure，瞬态 workspace 只取得 Provider/MCP/exposure。Anchor/Executor/Workspace 的本地 `credentials.providers/mcp/channels` 切片归零；SecretStore rotation read-back 也在 startup secret edge helper 上重新投影后才进入轮换用例。
 - 行为保护与旧路退场：公开配置、SecretStore unlock/legacy takeover/generation、配置编辑完成后 reload、Provider main/light/power、MCP transport、Channel 连接、Executor readiness binding、credential exposure/rotation、三种持久角色拓扑和 workspace management fallback 行为保持；rotation 继续允许当前三族的同 generation read-back，全量 credential schema 与 `version` 不越界。SecretStore 仍作为 recovery/mesh/authority 所需 Infrastructure mechanism 显式注入，没有提升为服务定位器；本包未修改公开配置投影、配置 schema、reload 状态机、持久格式或下一包责任。
 - 直接证据、门禁与交接：用途投影/startup/Host/topology/rotation 5 文件 42/42，workspace management 1 文件 3/3，合计 6 文件 45/45；CLI `tsc --noEmit`、`pnpm cli:build`、canonical S7 coverage/mutation 37/37 与 registry golden、changed-source Biome、`git diff --check` 均通过。协调者以 package-local 直达方式独立重跑同一 6 文件并取得 45/45，另独立通过 CLI `tsc --noEmit`、runtime-secret 定向 S7 反向门禁与 `git diff --check`。S7 现反向拒绝 raw ready 字段、Host/role/workspace aggregate 读取或重建、未冻结投影、exposure 越权取得 Channel、Executor 取得 Channel/rotation、用途消费旁路；本包未改变 package manifest/export/build entry，故 package-export 门未失效且未重复运行。若 startup ready/secret snapshot、五类 exact-set/冻结规则、Host role bootstrap、三条生产消费链、rotation read-back、SecretStore generation、S7 或上述直接测试任一变化，只恢复本证据及真实相交的 Provider/MCP/Channel/credential exposure/rotation 证据。A6 继续 `[ ]`；下一检查点仅在协调者独立接受并提交后收窄公开配置来源到 Host 冻结投影。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+### A6-02b：公开配置来源与 Host 冻结运行快照边界
+
+- 基线与生产闭包：以已接受 `HEAD 45f1ef4f` 加协调者调度记录为基线，形成待复核证据 `A6-02b-runtime-configuration-snapshot-v1`。即时正向闭合 `loadConfig/runStartupCheck` 的首次加载、现有 semantic/mesh/model 校验和配置编辑完成后的 reload，经 `topology-command/PersistentApplicationHost` 到 Anchor、Executor-only 两种持久 role root及 workspace management command 的瞬态 Authority runtime；反向从 Mesh boot、Provider/Kernel/Advancement、默认 workspace/Trust、MCP/network、Channel/intent、credential rotation 与 Authority configuration snapshot 的全部实际消费点对账。pair/backup/DR/config command、managed-service inspect 等专责可写或管理边缘仍按原 owner 自行加载，不是持久 Host 运行期回查。
+- 唯一快照与旧路退场：新增唯一带私有品牌的 `RuntimeConfigurationSnapshot` 和 `createRuntimeConfigurationSnapshot`；构造器只接收已校验 `ZhixingConfig`，以 `structuredClone` 隔离 loader 原对象并递归 `Object.freeze` 所有对象、数组与记录，不读取路径、环境变量、秘密，不补默认、不规范化或改写字段。`StartupCheckResult.ready.config` 删除并改为 `runtimeConfiguration`，无编辑与 editor reload 两条 ready 路径均只调用同一构造器；`ServeBootstrapContext`、ApplicationHost、AssemblyContext、Anchor/Executor、workspace runtime 及 Host 的 Provider/Advancement/workspace/Trust/rotation consumer 统一改绑该类型。生产链中的 `startup.config/bootstrap.config/ctx.config`、raw `ZhixingConfig` 参数与第二 snapshot 构造归零；Host 只依据快照选择 Mesh role 并原样转交，不 load/reparse 配置。
+- 行为保护：`config.jsonc` schema、首次配置、编辑器写入/reload、missing/non-TTY/semantic error、三种持久拓扑、managed admission、Mesh role、Provider fallback/thinking/model override、MCP transport/network proxy、Channel/intent、默认与显式 workspace、Trust context、credential rotation、Authority configuration snapshot 及瞬态 workspace cleanup/error 语义保持。快照完整覆盖当前正式配置只是本进程冻结事实，不在本包拆分 Provider/MCP/Channel/Topology 用途，不改变 A6-02a 秘密投影或任何持久格式、公开协议与产品能力。
+- 直接证据、门禁与交接：快照/startup/ApplicationHost/topology 4 文件 38/38；Provider、Advancement、MCP、Channel、Authority assembly、credential rotation、default workspace、Trust、Executor runtime 与 workspace command 10 文件 39/39；合计 14 文件 77/77。CLI `tsc -p tsconfig.json --noEmit`、`pnpm cli:build`、canonical S7 coverage/mutation 38/38 与 registry golden、changed-source Biome、`git diff --check` 均通过；首次 canonical S7 仅暴露 Workscene 既有反向 mutation 仍匹配已退场 `bootstrap.config` 文本，按本包真实 production source 更新该 mutation 后定向及完整门禁通过。协调者独立审阅完整变更与生产引用闭包，复跑 11 个直接测试文件 55/55、CLI 类型检查、配置快照定向 mutation 和完整 S7 结构检查均通过。S7 现反向拒绝源引用直通、缺 clone/deep-freeze/品牌、ready/raw config 双轨、Host/role/workspace reload 或旧字段、Assembly raw 参数、用途消费者恢复 `ZhixingConfig` 和第二构造器；本包未改变 manifest/export/build entry，package-export 未失效且未重复运行。若 config loader/validation/reload、快照类型/构造/冻结、startup ready、Host/role/workspace/Assembly、上述真实消费点、S7 或直接测试任一变化，只恢复本证据及真实相交配置证据。A6 继续 `[ ]`；下一检查点仅在协调者独立接受并提交后按需求方收窄冻结配置用途投影。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 

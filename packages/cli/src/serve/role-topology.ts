@@ -4,7 +4,6 @@ import type {
   CredentialStoreCoordinator,
   McpCredentialProjection,
   ProviderCredentialProjection,
-  ZhixingConfig,
 } from "@zhixing/providers";
 import type { CleanupRegistrationOwner } from "@zhixing/server";
 import type { DeviceCapacityRuntime } from "./device-capacity-runtime.js";
@@ -14,6 +13,7 @@ import type {
   CredentialExposureSecretProjection,
   CredentialRotationSecretProjection,
 } from "../runtime/runtime-secret-projections.js";
+import type { RuntimeConfigurationSnapshot } from "../runtime/runtime-configuration-snapshot.js";
 import type {
   ConversationAssignmentLedger,
   AssignmentStreamSpool,
@@ -66,7 +66,7 @@ export interface ServeBootstrapContext {
   readonly mesh: MeshRuntimeBootstrap;
   readonly deviceCapacity: DeviceCapacityRuntime;
   readonly secretStore: SecretStorePort & CredentialStoreCoordinator;
-  readonly config: ZhixingConfig;
+  readonly runtimeConfiguration: RuntimeConfigurationSnapshot;
   readonly credentialGeneration: string | null;
   readonly localWorkspaceIdentity: LocalWorkspaceAssemblyIdentity;
 }

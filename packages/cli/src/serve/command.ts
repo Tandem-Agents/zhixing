@@ -142,7 +142,6 @@ import { AssignmentStreamPathUnavailableError } from "./assignment-stream-path-m
 import { renderRecentContextFromMessages } from "@zhixing/owner-services";
 import {
   loadCredentials,
-  type ZhixingConfig,
 } from "@zhixing/providers";
 import fsp from "node:fs/promises";
 import chalk from "chalk";
@@ -157,6 +156,7 @@ import type {
   ServeTopologyPlan,
 } from "./role-topology.js";
 import { projectRuntimeSecrets } from "../runtime/runtime-secret-projections.js";
+import type { RuntimeConfigurationSnapshot } from "../runtime/runtime-configuration-snapshot.js";
 import { createRenderSubscribers } from "../render.js";
 import { createStdoutWriter } from "../screen/index.js";
 import {
@@ -352,7 +352,7 @@ async function runServerProcess(
   const port = opts.port ?? homeToPort(zhixingHome);
   const host = opts.host ?? DEFAULT_SERVER_CONFIG.host;
 
-  const config: ZhixingConfig = bootstrap.config;
+  const config: RuntimeConfigurationSnapshot = bootstrap.runtimeConfiguration;
   const providerCredentials = bootstrap.providerCredentials;
   const mcpCredentials = bootstrap.mcpCredentials;
   const channelCredentials = bootstrap.channelCredentials;
@@ -926,7 +926,7 @@ async function runServerProcess(
 
   const ctx: AssemblyContext = {
     profile,
-    config,
+    runtimeConfiguration: config,
     providerCredentials,
     zhixingHome,
     secretStore: bootstrap.secretStore,

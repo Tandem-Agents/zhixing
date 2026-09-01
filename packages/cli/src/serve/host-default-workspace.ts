@@ -2,8 +2,8 @@ import {
   resolveWorkspace,
   resolveWorkspaceSessionType,
   type WorkspaceSessionType,
-  type ZhixingConfig,
 } from "@zhixing/providers";
+import type { RuntimeConfigurationSnapshot } from "../runtime/runtime-configuration-snapshot.js";
 
 /**
  * Anchor 宿主对默认运行形态工作区的只读投影。
@@ -18,7 +18,7 @@ export interface HostDefaultWorkspaceProjection {
 }
 
 export function createHostDefaultWorkspaceProjection(
-  config: ZhixingConfig,
+  config: RuntimeConfigurationSnapshot,
   sessionType: WorkspaceSessionType = resolveWorkspaceSessionType(),
 ): HostDefaultWorkspaceProjection {
   const resolved = resolveWorkspace(config, { sessionType });

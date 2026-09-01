@@ -120,7 +120,7 @@ const authorityRuntimeSurface: AccessSurface = {
           }
         : {}),
       configurationSnapshot: {
-        config: ctx.config,
+        config: ctx.runtimeConfiguration,
         executableVersion: ZHIXING_CLI_VERSION,
       },
       executorReadiness: ctx.executorReadiness,
@@ -406,7 +406,7 @@ const conversationSurface: AccessSurface = {
   name: "conversation",
   phase: "pre-server",
   async setup(ctx) {
-    const { transcript, snapshots, config } = ctx;
+    const { transcript, snapshots, runtimeConfiguration: config } = ctx;
     if (!ctx.authorityRuntime) {
       throw new Error("Conversation surface requires the durable authority runtime");
     }
@@ -812,7 +812,7 @@ const localConversationOwnerUnit: CoreAssemblyUnit = {
       runtimeFactory: ctx.assignmentRuntimeFactory,
       interactions: ctx.durableInteractions,
       advancementModelProvider: createHostAdvancementModelProviderFactory({
-        config: ctx.config,
+        config: ctx.runtimeConfiguration,
         credentials: ctx.providerCredentials ?? {},
       }),
       dataPlane: ctx.executorDataPlane,
@@ -969,7 +969,11 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
     name: "channel",
     phase: "pre-server",
     async setup(ctx) {
-      const { conversations, config, losslessDataPlane } = ctx;
+      const {
+        conversations,
+        runtimeConfiguration: config,
+        losslessDataPlane,
+      } = ctx;
       if (
         !conversations ||
         !config.messaging ||
@@ -1072,7 +1076,7 @@ const deliverySurface: AccessSurface = {
   name: "delivery",
   phase: "pre-server",
   async setup(ctx) {
-    const { channels, config, zhixingHome } = ctx;
+    const { channels, runtimeConfiguration: config, zhixingHome } = ctx;
     if (!channels || !config.messaging) return;
     if (!ctx.authorityRuntime) {
       throw new Error("Delivery requires the durable authority runtime");

@@ -28,6 +28,7 @@ import {
   inspectKernelProviderDependencyInversion,
   inspectAdvancementProviderDependencyInversion,
   inspectRuntimeSecretProjectionBoundary,
+  inspectRuntimeConfigurationSnapshotBoundary,
   inspectWorksceneRuntimeProjectionBoundary,
   inspectWorkspaceAdministrationOwnership,
   inspectTrustAdministrationOwnership,
@@ -3476,11 +3477,90 @@ test("runtime secrets cross the Host boundary only as frozen purpose projections
     inspectRuntimeSecretProjectionBoundary(mutate(
       "packages/cli/src/serve/role-topology.ts",
       (text) => text.replace(
-        "readonly config: ZhixingConfig;",
-        "readonly startup: StartupCheckResult;\n  readonly config: ZhixingConfig;",
+        "readonly runtimeConfiguration: RuntimeConfigurationSnapshot;",
+        "readonly startup: StartupCheckResult;\n  readonly runtimeConfiguration: RuntimeConfigurationSnapshot;",
       ),
     )).join("\n"),
     /topology isolation/,
+  );
+});
+
+test("validated configuration crosses the Host edge as one frozen process snapshot", async () => {
+  const paths = [
+    "packages/cli/src/runtime/runtime-configuration-snapshot.ts",
+    "packages/cli/src/startup.ts",
+    "packages/cli/src/serve/role-topology.ts",
+    "packages/cli/src/serve/application-host.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/cli/src/runtime/workspace-command.ts",
+    "packages/cli/src/serve/access-surface.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/runtime/kernel-runtime-bindings.ts",
+    "packages/cli/src/runtime/advancement-model-provider.ts",
+    "packages/cli/src/serve/host-default-workspace.ts",
+    "packages/cli/src/serve/trust-administration-adapter.ts",
+    "packages/cli/src/serve/credential-rotation-publication.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectRuntimeConfigurationSnapshotBoundary(records), []);
+  assert.match(
+    inspectRuntimeConfigurationSnapshotBoundary(mutate(
+      "packages/cli/src/runtime/runtime-configuration-snapshot.ts",
+      (text) => text.replace("structuredClone(configuration)", "configuration"),
+    )).join("\n"),
+    /uniquely cloned, branded and deeply frozen/,
+  );
+  assert.match(
+    inspectRuntimeConfigurationSnapshotBoundary(mutate(
+      "packages/cli/src/startup.ts",
+      (text) => text.replace(
+        "runtimeConfiguration: RuntimeConfigurationSnapshot;",
+        "config: ZhixingConfig;",
+      ),
+    )).join("\n"),
+    /StartupCheckResult\.ready/,
+  );
+  assert.match(
+    inspectRuntimeConfigurationSnapshotBoundary(mutate(
+      "packages/cli/src/serve/application-host.ts",
+      (text) => `${text}\nconst reloaded = loadConfig();`,
+    )).join("\n"),
+    /ApplicationHost reloads/,
+  );
+  assert.match(
+    inspectRuntimeConfigurationSnapshotBoundary(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => `${text}\nconst leaked = bootstrap.config;`,
+    )).join("\n"),
+    /Anchor role does not consume only/,
+  );
+  assert.match(
+    inspectRuntimeConfigurationSnapshotBoundary(mutate(
+      "packages/cli/src/serve/role-topology.ts",
+      (text) => text.replace(
+        "readonly runtimeConfiguration: RuntimeConfigurationSnapshot;",
+        "readonly config: ZhixingConfig;",
+      ),
+    )).join("\n"),
+    /role bootstrap exposes raw configuration/,
+  );
+  assert.match(
+    inspectRuntimeConfigurationSnapshotBoundary(mutate(
+      "packages/cli/src/serve/access-surface.ts",
+      (text) => text.replace(
+        "readonly runtimeConfiguration: RuntimeConfigurationSnapshot;",
+        "readonly config: ZhixingConfig;",
+      ),
+    )).join("\n"),
+    /Anchor assembly/,
   );
 });
 
@@ -4760,8 +4840,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "const config: ZhixingConfig = bootstrap.config;",
-        "const config: ZhixingConfig = bootstrap.config;\n  void worksceneDirectory.get(\"runtime-bypass\");",
+        "const config: RuntimeConfigurationSnapshot = bootstrap.runtimeConfiguration;",
+        "const config: RuntimeConfigurationSnapshot = bootstrap.runtimeConfiguration;\n  void worksceneDirectory.get(\"runtime-bypass\");",
       ),
     )).join("\n"),
     /Workscene management and entry lack one domain application and Product API owner/,

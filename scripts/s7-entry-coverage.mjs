@@ -2822,6 +2822,135 @@ export function inspectRuntimeSecretProjectionBoundary(records) {
   return failures;
 }
 
+/** A6 validated public configuration crosses the Host edge as one frozen process snapshot. */
+export function inspectRuntimeConfigurationSnapshotBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const source = byPath.get(relative);
+    if (source === undefined) {
+      failures.push(`${relative}: runtime configuration snapshot source is missing`);
+    }
+    return source ?? "";
+  };
+  const snapshot = required(
+    "packages/cli/src/runtime/runtime-configuration-snapshot.ts",
+  );
+  const startup = required("packages/cli/src/startup.ts");
+  const topology = required("packages/cli/src/serve/role-topology.ts");
+  const host = required("packages/cli/src/serve/application-host.ts");
+  const anchor = required("packages/cli/src/serve/command.ts");
+  const executor = required("packages/cli/src/serve/executor-role-runtime.ts");
+  const workspace = required("packages/cli/src/runtime/workspace-command.ts");
+  const assembly = required("packages/cli/src/serve/access-surface.ts");
+  const surfaces = required("packages/cli/src/serve/access-surfaces.ts");
+  const runtimeBindings = required(
+    "packages/cli/src/runtime/kernel-runtime-bindings.ts",
+  );
+  const advancement = required(
+    "packages/cli/src/runtime/advancement-model-provider.ts",
+  );
+  const defaultWorkspace = required(
+    "packages/cli/src/serve/host-default-workspace.ts",
+  );
+  const trust = required(
+    "packages/cli/src/serve/trust-administration-adapter.ts",
+  );
+  const rotation = required(
+    "packages/cli/src/serve/credential-rotation-publication.ts",
+  );
+
+  if (
+    !snapshot.includes("declare const runtimeConfigurationSnapshotBrand: unique symbol") ||
+    !snapshot.includes("export type RuntimeConfigurationSnapshot = Readonly<ZhixingConfig>") ||
+    !snapshot.includes("export function createRuntimeConfigurationSnapshot(") ||
+    !snapshot.includes("deepFreeze(") ||
+    !snapshot.includes("structuredClone(configuration)") ||
+    !snapshot.includes("Object.values(value as Record<string, unknown>)") ||
+    !snapshot.includes("return Object.freeze(value)") ||
+    /loadConfig|process\.env|node:path|ZhixingCredentials|SecretStore/u.test(snapshot)
+  ) {
+    failures.push("runtime configuration snapshot is not uniquely cloned, branded and deeply frozen");
+  }
+
+  if (
+    !startup.includes("runtimeConfiguration: RuntimeConfigurationSnapshot;") ||
+    (startup.match(/createRuntimeConfigurationSnapshot\s*\(/gu) ?? []).length !== 2 ||
+    /kind: "ready";[\s\S]{0,180}config:\s*ZhixingConfig/u.test(startup) ||
+    /kind: "ready",\s*config(?:,|:)/u.test(startup)
+  ) {
+    failures.push("StartupCheckResult.ready does not publish only the one runtime configuration snapshot");
+  }
+
+  if (
+    !topology.includes("readonly runtimeConfiguration: RuntimeConfigurationSnapshot;") ||
+    /readonly config:|readonly startup:/u.test(topology)
+  ) {
+    failures.push("role bootstrap exposes raw configuration beside the runtime snapshot");
+  }
+  if (
+    !host.includes("runtimeConfiguration: this.#input.startup.runtimeConfiguration") ||
+    !host.includes("this.#input.startup.runtimeConfiguration.mesh") ||
+    /startup\.config|bootstrap\.config|loadConfig\s*\(|createRuntimeConfigurationSnapshot\s*\(/u.test(
+      host,
+    )
+  ) {
+    failures.push("ApplicationHost reloads, reconstructs or bypasses the frozen configuration snapshot");
+  }
+
+  const runtimeConsumers = [
+    ["Anchor role", anchor],
+    ["Executor role", executor],
+    ["transient workspace runtime", workspace],
+  ];
+  for (const [name, source] of runtimeConsumers) {
+    if (
+      /startup\.config|bootstrap\.config|loadConfig\s*\(|ZhixingConfig/u.test(source) ||
+      !source.includes("runtimeConfiguration")
+    ) {
+      failures.push(`${name} does not consume only the frozen runtime configuration snapshot`);
+    }
+  }
+
+  if (
+    !assembly.includes("readonly runtimeConfiguration: RuntimeConfigurationSnapshot;") ||
+    /readonly config: ZhixingConfig/u.test(assembly) ||
+    (surfaces.match(/ctx\.runtimeConfiguration/gu) ?? []).length < 2 ||
+    /ctx\.config/u.test(surfaces)
+  ) {
+    failures.push("Anchor assembly can still reconstruct a raw configuration path");
+  }
+
+  for (const [name, source] of [
+    ["Kernel Provider edge", runtimeBindings],
+    ["Advancement Provider edge", advancement],
+    ["default workspace edge", defaultWorkspace],
+    ["Trust Administration edge", trust],
+    ["credential rotation edge", rotation],
+  ]) {
+    if (
+      !source.includes("RuntimeConfigurationSnapshot") ||
+      /type ZhixingConfig|loadConfig\s*\(/u.test(source)
+    ) {
+      failures.push(`${name} accepts a raw configuration source instead of the process snapshot`);
+    }
+  }
+
+  const snapshotConstructors = records.filter((record) =>
+    record.text.includes("createRuntimeConfigurationSnapshot("));
+  if (
+    snapshotConstructors.length !== 2 ||
+    !snapshotConstructors.some((record) =>
+      record.relative === "packages/cli/src/runtime/runtime-configuration-snapshot.ts") ||
+    !snapshotConstructors.some((record) =>
+      record.relative === "packages/cli/src/startup.ts")
+  ) {
+    failures.push("runtime configuration snapshot has a second constructor or misses the startup edge");
+  }
+
+  return failures;
+}
+
 /** A4 Anchor product tools and MCP inputs are projected before the generic RuntimeHost boundary. */
 export function inspectWorksceneRuntimeProjectionBoundary(records) {
   const failures = [];
@@ -3102,6 +3231,7 @@ export async function validateS7Structure() {
   failures.push(...inspectKernelProviderDependencyInversion(records));
   failures.push(...inspectAdvancementProviderDependencyInversion(records));
   failures.push(...inspectRuntimeSecretProjectionBoundary(records));
+  failures.push(...inspectRuntimeConfigurationSnapshotBoundary(records));
   failures.push(...inspectWorksceneRuntimeProjectionBoundary([
     ...records,
     {
