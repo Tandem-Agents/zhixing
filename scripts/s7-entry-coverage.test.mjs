@@ -33,6 +33,7 @@ import {
   inspectWorksceneRuntimeProjectionBoundary,
   inspectMcpManagementBoundary,
   inspectMcpRuntimeBoundary,
+  inspectChannelRuntimeBoundary,
   inspectWorkspaceAdministrationOwnership,
   inspectTrustAdministrationOwnership,
   inspectLocalConversationOwnerIsolation,
@@ -2759,6 +2760,78 @@ test("Device Administration reads, paired/current removal and duty migration hav
       (text) => `${text}\nexport * from \"./device-administration/application.js\";`,
     )).join("\n"),
     /narrow export\/build boundary drifted/,
+  );
+});
+
+test("Channel concrete runtime stays behind Host-owned demand ports", async () => {
+  const paths = [
+    "packages/cli/src/serve/channels.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/server/src/context.ts",
+    "packages/server/src/server.ts",
+    "packages/server/src/channels/inbound-router.ts",
+    "packages/server/src/confirmation/text-renderer.ts",
+    "packages/core/src/delivery/channel-effect.ts",
+    "packages/cli/src/serve/lossless-data-plane-runtime.ts",
+    "packages/cli/src/serve/channel-interaction-coordinator.ts",
+    "packages/cli/src/setup-delivery.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  assert.deepEqual(inspectChannelRuntimeBoundary(records), []);
+
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/cli/src/serve/channels.ts",
+      (text) => text.replace(
+        "  readonly delivery: ChannelDeliveryEffectSource;",
+        "  readonly delivery: ChannelDeliveryEffectSource;\n  readonly inbound: InboundChannelPort;",
+      ),
+    )).join("\n"),
+    /SetupChannelsResult exposes an unconsumed Channel capability/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/cli/src/serve/channels.ts",
+      (text) => text.replace("      channels: inbound,", "      channels: missingInbound,"),
+    )).join("\n"),
+    /finite Host port assembly drifted/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/server/src/channels/inbound-router.ts",
+      (text) => `${text}\ntype ChannelRegistry = unknown;\n`,
+    )).join("\n"),
+    /concrete Channel registry or adapter escaped/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "ctx.channelDelivery = result.delivery",
+        "ctx.channelDelivery = result.registry",
+      ),
+    )).join("\n"),
+    /separate finite Channel ports/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/server/src/server.ts",
+      (text) => `${text}\nvoid ctx.channels;\n`,
+    )).join("\n"),
+    /Server status, inbound or confirmation demand boundary drifted/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/cli/src/serve/lossless-data-plane-runtime.ts",
+      (text) => `${text}\ntype ChannelAdapter = unknown;\n`,
+    )).join("\n"),
+    /concrete Channel registry or adapter escaped/u,
   );
 });
 

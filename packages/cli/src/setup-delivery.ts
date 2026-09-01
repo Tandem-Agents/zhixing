@@ -6,14 +6,13 @@
  * - 组装 conversation 使用的权威 delivery 生产链
  * - 两条链路共享 per-target FIFO Outbox
  *
- * 不关心通道具体类型（飞书/Slack/...），只依赖 ChannelRegistry 接口。
+ * 不关心通道具体类型（飞书/Slack/...），只依赖 Delivery 拥有的有限发送效果端口。
  * 不关心运行模式（REPL/serve），两端调用方式一样。
  */
 
 import {
   type RuntimeExecutionProfile,
   createEventBus,
-  type ChannelRegistry,
   type PermissionRule,
 } from "@zhixing/core";
 import {
@@ -27,7 +26,10 @@ import {
   type OutboxEvent,
   type OutboxRegistry,
 } from "@zhixing/core/delivery";
-import { createChannelDeliveryEffect } from "@zhixing/core/delivery/channel-effect";
+import {
+  createChannelDeliveryEffect,
+  type ChannelDeliveryEffectSource,
+} from "@zhixing/core/delivery/channel-effect";
 import type {
   AuthorityError,
   CapabilityDescriptor,
@@ -451,7 +453,7 @@ export interface DeliveryAcceptedWorkLifecyclePort {
 }
 
 export interface SetupDeliveryOptions {
-  channels: ChannelRegistry;
+  channels: ChannelDeliveryEffectSource;
   zhixingHome: string;
   authorityRuntime: AuthorityRuntimeStack;
   logger: {

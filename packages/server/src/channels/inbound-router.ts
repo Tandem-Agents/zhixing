@@ -1,6 +1,6 @@
 import {
+  type ChannelBindingPolicy,
   type ChannelLogger,
-  type ChannelRegistry,
   type DeliveryResult,
   type DeliveryTarget,
   type EmissionSource,
@@ -58,9 +58,19 @@ export const INBOUND_ROUTER_ENTRY_DESCRIPTOR = {
   name: "InboundRouter",
 } as const;
 
+/** Finite Channel effect required by the inbound product surface. */
+export interface InboundChannelPort {
+  has(channelId: string): boolean;
+  bindingPolicy(channelId: string): ChannelBindingPolicy | undefined;
+  send(
+    target: DeliveryTarget,
+    content: OutboundContent,
+  ): Promise<DeliveryResult>;
+}
+
 export interface InboundRouterOptions {
   conversations: ConversationManager;
-  channels: ChannelRegistry;
+  channels: InboundChannelPort;
   logger: ChannelLogger;
   /** Final side-effect gate for channel callbacks racing a current-owner switch. */
   isCurrentOwner?: () => boolean;
@@ -104,7 +114,7 @@ export class InboundRouter {
   static readonly entryDescriptor = INBOUND_ROUTER_ENTRY_DESCRIPTOR;
 
   private readonly conversations: ConversationManager;
-  private readonly channels: ChannelRegistry;
+  private readonly channels: InboundChannelPort;
   private readonly logger: ChannelLogger;
   private readonly isCurrentOwner: () => boolean;
   private outboxRegistry?: OutboxRegistry;
@@ -181,16 +191,15 @@ export class InboundRouter {
       }
       return outbox.post({ target, content, source });
     }
-    const adapter = this.channels.get(target.channelId);
-    if (!adapter) {
+    if (!this.channels.has(target.channelId)) {
       this.logger.warn(`No adapter found for channel: ${target.channelId}`);
       return;
     }
-    return adapter.send(target, content);
+    return this.channels.send(target, content);
   }
 
   /**
-   * 处理入站消息。由 ChannelRegistry 的 onMessage 回调触发。
+   * 处理入站消息。由 Host Channel runtime 的 onMessage 回调触发。
    *
    * 流程：
    * 1. 对话归组 → conversationId
@@ -231,8 +240,7 @@ export class InboundRouter {
       );
       return;
     }
-    const adapter = this.channels.get(msg.channelId);
-    if (!adapter) {
+    if (!this.channels.has(msg.channelId)) {
       this.logger.warn(`No adapter found for channel: ${msg.channelId}`);
       return;
     }
@@ -245,7 +253,7 @@ export class InboundRouter {
         `[拒新] conv shutdown channel=${msg.channelId} from=${msg.from}`,
       );
       const replyTarget = buildReplyTarget(msg);
-      await adapter
+      await this.channels
         .send(replyTarget, { text: SHUTDOWN_REFUSAL_NOTICE_ZH })
         .catch((e) => this.logger.error(`refusal notice send failed: ${errMsg(e)}`));
       return;
@@ -253,7 +261,10 @@ export class InboundRouter {
 
     this.acceptedInFlight += 1;
     try {
-      const conversationId = resolveConversationId(msg, adapter.bindingPolicy);
+      const conversationId = resolveConversationId(
+        msg,
+        this.channels.bindingPolicy(msg.channelId),
+      );
       this.logger.info(`[收到] "${msg.text}" from=${msg.from} conv=${conversationId}`);
 
     // ── 控制意图前置识别(优先于一切其它路径) ──
@@ -420,8 +431,7 @@ export class InboundRouter {
     }
 
     const replyTarget = buildReplyTarget(msg);
-    const adapter = this.channels.get(replyTarget.channelId);
-    if (!adapter) {
+    if (!this.channels.has(replyTarget.channelId)) {
       this.logger.warn(
         `cancel ack: adapter not found for channel ${replyTarget.channelId}`,
       );
@@ -433,7 +443,7 @@ export class InboundRouter {
         ? `已取消队列中的 ${result.cancelledPending} 条待处理消息。`
         : "当前没有正在处理的任务。";
 
-    await adapter
+    await this.channels
       .send(replyTarget, { text })
       .catch((e) => this.logger.error(`cancel ack send failed: ${errMsg(e)}`));
   }
@@ -549,10 +559,9 @@ export class InboundRouter {
     const replyText = resolutionError
       ? `⚠️ 确认结果尚未耐久保存，请重试：${target.request.display.title}`
       : formatResolutionReceipt(target.request, decision, ok);
-    const adapter = this.channels.get(replyTarget.channelId);
-    if (adapter) {
+    if (this.channels.has(replyTarget.channelId)) {
       try {
-        await adapter.send(replyTarget, { text: replyText });
+        await this.channels.send(replyTarget, { text: replyText });
       } catch (e) {
         this.logger.error(`confirmation reply failed: ${errMsg(e)}`);
       }

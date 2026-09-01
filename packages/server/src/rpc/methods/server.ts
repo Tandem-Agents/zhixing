@@ -334,7 +334,7 @@ export function buildServerInfoMethod(): MethodEntry {
         // MCP 连接状态快照——/mcp 管理器的状态显示数据面(未装配为空)
         mcpServers: ctx.server.mcpStatuses?.() ?? [],
         // 社交通道状态快照——核心 ready 与外部通道 ready 分离，接入面据此给出真实反馈。
-        channels: ctx.server.channels?.listStatuses() ?? [],
+        channels: ctx.server.channelStatuses?.() ?? [],
         accessSurfaces: runtimeControl.accessSurfaces,
         activeWork: runtimeControl.activeWork,
         deferredWork: runtimeControl.deferredWork,
@@ -1101,7 +1101,7 @@ function shutdownEstimatedCompleteAt(timeoutMs: number): string {
 async function buildRuntimeControlSnapshot(
   ctx: Parameters<NonNullable<MethodEntry["handler"]>>[1],
 ): Promise<RuntimeControlSnapshot> {
-  const channels = ctx.server.channels?.listStatuses() ?? [];
+  const channels = [...(ctx.server.channelStatuses?.() ?? [])];
   const liveChannels = channels.filter(
     (s) => s.state === "connected" || s.state === "connecting",
   );

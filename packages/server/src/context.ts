@@ -6,7 +6,7 @@
  */
 
 import type {
-  ChannelRegistry,
+  ChannelStatus,
   HttpHandler,
   AuthorityDeliveryStats,
   DeliveryStatusNotice,
@@ -222,8 +222,8 @@ export interface ServerContext {
    * (如 skill.changed);会话域推送走 sessionBroadcast(observer 名册)。
    */
   broadcastAll?: (method: string, params: unknown) => void;
-  /** 通道注册表（不传则不启用通道功能） */
-  channels?: ChannelRegistry;
+  /** 通道运行状态的有限只读快照（不传则不启用通道功能）。 */
+  channelStatuses?: () => readonly Readonly<ChannelStatus>[];
   /** Pre-server channel callback routes, keyed by exact path. */
   channelHttpRoutes?: ReadonlyMap<string, HttpHandler>;
   /**
@@ -269,7 +269,7 @@ export interface CreateContextOptions {
   recoveryBackupStatus?: ServerContext["recoveryBackupStatus"];
   mcpStatuses?: ServerContext["mcpStatuses"];
   llmComplete?: (prompt: string, role?: "main" | "light") => Promise<string>;
-  channels?: ChannelRegistry;
+  channelStatuses?: () => readonly Readonly<ChannelStatus>[];
   channelHttpRoutes?: ReadonlyMap<string, HttpHandler>;
   confirmationHub?: ConfirmationHub;
   runtimeControl?: RuntimeControlAdapter;
@@ -292,7 +292,7 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     recoveryBackupStatus: opts.recoveryBackupStatus,
     mcpStatuses: opts.mcpStatuses,
     llmComplete: opts.llmComplete,
-    channels: opts.channels,
+    channelStatuses: opts.channelStatuses,
     channelHttpRoutes: opts.channelHttpRoutes,
     confirmationHub: opts.confirmationHub,
     runtimeControl: opts.runtimeControl,

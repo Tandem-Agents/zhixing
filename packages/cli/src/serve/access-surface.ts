@@ -26,11 +26,12 @@ import type {
   RuntimeModelConfigurationProjection,
 } from "../runtime/runtime-configuration-projections.js";
 import type {
-  ChannelRegistry,
+  ChannelStatus,
   ConversationRepository,
   ShardedTranscriptStore,
   SnapshotStore,
 } from "@zhixing/core";
+import type { ChannelDeliveryEffectSource } from "@zhixing/core/delivery/channel-effect";
 import type { ConversationClearProjectionPort } from "@zhixing/core/conversation/application";
 import type {
   DeviceRole,
@@ -83,6 +84,7 @@ import type {
   ExecutorJobOwnerAssembly,
 } from "./executor-job-owner.js";
 import type { LosslessDataPlaneRuntime } from "./lossless-data-plane-runtime.js";
+import type { ChannelChallengeDeliveryPort } from "./lossless-data-plane-runtime.js";
 import type {
   ChannelInteractionCoordinator,
   JobRelayObligationDirectory,
@@ -200,7 +202,9 @@ export interface AssemblyContext {
   advancement?: AdvancementController;
   readonly advancementReviews: AdvancementReviewAttemptApplication;
   readonly advancementConversationLifecycle: AdvancementConversationLifecycleApplication;
-  channels?: ChannelRegistry;
+  channelStatuses?: () => readonly Readonly<ChannelStatus>[];
+  channelDelivery?: ChannelDeliveryEffectSource;
+  channelChallenges?: ChannelChallengeDeliveryPort;
   inboundRouter?: InboundRouter | null;
   channelConnections?: {
     readonly ready: Promise<void>;

@@ -5,16 +5,24 @@ import {
   type ChannelConfig,
   type ChannelEventMap,
   type ChannelLogger,
+  type ChannelStatus,
+  type DeliveryResult,
+  type DeliveryTarget,
   type InboundMessage,
   type ChannelChallengeAction,
+  type ChannelChallengeMessage,
   type HttpHandler,
+  type OutboundContent,
+  isChallengeChannel,
 } from "@zhixing/core";
+import type { ChannelDeliveryEffectSource } from "@zhixing/core/delivery/channel-effect";
 import {
   APPROVE_KEYWORDS,
   DENY_KEYWORDS,
   DEFAULT_CANCEL_KEYWORDS,
   InboundRouter,
   createDefaultIntentClassifier,
+  type InboundChannelPort,
 } from "@zhixing/server";
 import type {
   ConfirmationHub,
@@ -28,6 +36,7 @@ import type {
   ChannelCredentialProjection,
   MessagingChannelEntry,
 } from "@zhixing/providers";
+import type { ChannelChallengeDeliveryPort } from "./lossless-data-plane-runtime.js";
 
 // ─── Adapter Factory ───
 
@@ -112,13 +121,16 @@ export interface SetupChannelsOptions {
 }
 
 export interface SetupChannelsResult {
-  registry: ChannelRegistry;
   router: InboundRouter | null;
+  statusSnapshot(): readonly Readonly<ChannelStatus>[];
+  readonly delivery: ChannelDeliveryEffectSource;
+  readonly challenges: ChannelChallengeDeliveryPort;
   connectionTask: Promise<void>;
   connectConfigured(): Promise<void>;
   disconnectConfigured(): Promise<void>;
   suspendConfigured(): Promise<void>;
   resumeConfigured(): Promise<void>;
+  dispose(): Promise<void>;
 }
 
 export async function setupChannels(
@@ -169,6 +181,58 @@ export async function setupChannels(
     onChallengeAction: currentOwnerChallengeAction,
     registerHttpRoute,
   });
+  const statusSnapshot = (): readonly Readonly<ChannelStatus>[] =>
+    Object.freeze(
+      registry.listStatuses().map((status) => Object.freeze({ ...status })),
+    );
+  const delivery = Object.freeze({
+    status(channelId: string) {
+      return registry.getStatus(channelId)?.state;
+    },
+    async send(
+      target: DeliveryTarget,
+      content: OutboundContent,
+      meta?: Parameters<ChannelAdapter["send"]>[2],
+    ): Promise<DeliveryResult | undefined> {
+      const adapter = registry.get(target.channelId);
+      if (!adapter) return undefined;
+      return meta
+        ? adapter.send(target, content, meta)
+        : adapter.send(target, content);
+    },
+  } satisfies ChannelDeliveryEffectSource);
+  const inbound = Object.freeze({
+    has(channelId: string): boolean {
+      return registry.get(channelId) !== undefined;
+    },
+    bindingPolicy(channelId: string) {
+      return registry.get(channelId)?.bindingPolicy;
+    },
+    async send(
+      target: DeliveryTarget,
+      content: OutboundContent,
+    ): Promise<DeliveryResult> {
+      const adapter = registry.get(target.channelId);
+      if (!adapter) {
+        throw new Error(`Channel adapter not found: ${target.channelId}`);
+      }
+      return adapter.send(target, content);
+    },
+  } satisfies InboundChannelPort);
+  const challenges = Object.freeze({
+    supports(channelId: string): boolean {
+      const adapter = registry.get(channelId);
+      return adapter !== undefined && isChallengeChannel(adapter);
+    },
+    async sendChallenge(message: ChannelChallengeMessage): Promise<DeliveryResult> {
+      const channelId = message.token.route.channelId;
+      const adapter = registry.get(channelId);
+      if (!adapter || !isChallengeChannel(adapter)) {
+        throw new Error(`Channel does not support signed challenges: ${channelId}`);
+      }
+      return adapter.sendChallenge(message);
+    },
+  } satisfies ChannelChallengeDeliveryPort);
 
   if (conversations) {
     // 显式构造 IntentClassifier 注入——把 default 关键词与用户配置 append 合并，
@@ -185,7 +249,7 @@ export async function setupChannels(
 
     router = new InboundRouter({
       conversations,
-      channels: registry,
+      channels: inbound,
       logger,
       confirmationHub,
       intentClassifier,
@@ -268,13 +332,16 @@ export async function setupChannels(
     : Promise.resolve();
 
   return {
-    registry,
     router,
+    statusSnapshot,
+    delivery,
+    challenges,
     connectionTask,
     connectConfigured,
     disconnectConfigured,
     suspendConfigured,
     resumeConfigured,
+    dispose: () => registry.dispose(),
   };
 }
 

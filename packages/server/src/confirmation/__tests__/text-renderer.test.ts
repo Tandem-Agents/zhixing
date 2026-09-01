@@ -16,7 +16,6 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ConfirmationBroker,
   type ChannelLogger,
-  type ChannelRegistry,
   type ChannelAdapter,
   type DeliveryTarget,
   type DeliveryResult,
@@ -25,6 +24,7 @@ import {
 import { ConfirmationHub } from "@zhixing/owner-kernel";
 import {
   TextConfirmationRenderer,
+  type ConfirmationChannelPort,
   formatConfirmationMessage,
 } from "../text-renderer.js";
 
@@ -69,13 +69,13 @@ function makeAdapter(
   return { adapter, sentMessages };
 }
 
-/** 一个最小 ChannelRegistry stub——只需要 get(id) 方法 */
-function makeChannelRegistry(
+/** 一个只暴露确认发送效果的有限 port。 */
+function makeChannelPort(
   adapters: Map<string, ChannelAdapter>,
-): ChannelRegistry {
+): ConfirmationChannelPort {
   return {
-    get: (id: string) => adapters.get(id),
-  } as unknown as ChannelRegistry;
+    send: (target, content) => adapters.get(target.channelId)?.send(target, content),
+  };
 }
 
 function makeRequest(
@@ -118,7 +118,7 @@ describe("TextConfirmationRenderer — 基础派发", () => {
     hub.attach("b1", broker, { conversationId: "conv1" });
 
     const { adapter, sentMessages } = makeAdapter("feishu");
-    const channels = makeChannelRegistry(new Map([["feishu", adapter]]));
+    const channels = makeChannelPort(new Map([["feishu", adapter]]));
     const logger = makeLogger();
     const renderer = new TextConfirmationRenderer({ hub, channels, logger });
     renderer.start();
@@ -149,7 +149,7 @@ describe("TextConfirmationRenderer — 基础派发", () => {
     hub.attach("b1", broker);
 
     const { adapter, sentMessages } = makeAdapter("admin-dm");
-    const channels = makeChannelRegistry(new Map([["admin-dm", adapter]]));
+    const channels = makeChannelPort(new Map([["admin-dm", adapter]]));
     const logger = makeLogger();
     const defaultTarget: DeliveryTarget = {
       channelId: "admin-dm",
@@ -181,7 +181,7 @@ describe("TextConfirmationRenderer — 基础派发", () => {
     hub.attach("b1", broker);
 
     const { adapter, sentMessages } = makeAdapter("feishu");
-    const channels = makeChannelRegistry(new Map([["feishu", adapter]]));
+    const channels = makeChannelPort(new Map([["feishu", adapter]]));
     const logger = makeLogger();
     const renderer = new TextConfirmationRenderer({ hub, channels, logger });
     renderer.start();
@@ -209,7 +209,7 @@ describe("TextConfirmationRenderer — 失败路径", () => {
     broker.onRequest(() => {});
     hub.attach("b1", broker);
 
-    const channels = makeChannelRegistry(new Map()); // 空 registry
+    const channels = makeChannelPort(new Map()); // 空 registry
     const logger = makeLogger();
     const renderer = new TextConfirmationRenderer({ hub, channels, logger });
     renderer.start();
@@ -238,7 +238,7 @@ describe("TextConfirmationRenderer — 失败路径", () => {
     hub.attach("b1", broker);
 
     const { adapter } = makeAdapter("feishu", "throw");
-    const channels = makeChannelRegistry(new Map([["feishu", adapter]]));
+    const channels = makeChannelPort(new Map([["feishu", adapter]]));
     const logger = makeLogger();
     const renderer = new TextConfirmationRenderer({ hub, channels, logger });
     renderer.start();
@@ -274,7 +274,7 @@ describe("TextConfirmationRenderer — 事件路由", () => {
     hub.attach("b1", broker);
 
     const { adapter, sentMessages } = makeAdapter("feishu");
-    const channels = makeChannelRegistry(new Map([["feishu", adapter]]));
+    const channels = makeChannelPort(new Map([["feishu", adapter]]));
     const logger = makeLogger();
     const renderer = new TextConfirmationRenderer({ hub, channels, logger });
     renderer.start();
@@ -300,7 +300,7 @@ describe("TextConfirmationRenderer — 事件路由", () => {
     hub.attach("b1", broker);
 
     const { adapter, sentMessages } = makeAdapter("feishu");
-    const channels = makeChannelRegistry(new Map([["feishu", adapter]]));
+    const channels = makeChannelPort(new Map([["feishu", adapter]]));
     const logger = makeLogger();
     const renderer = new TextConfirmationRenderer({ hub, channels, logger });
     renderer.start();

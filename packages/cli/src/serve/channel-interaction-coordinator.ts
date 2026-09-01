@@ -1,8 +1,6 @@
 import type {
   ChannelChallengeAction,
-  ChannelRegistry,
 } from "@zhixing/core";
-import { isChallengeChannel } from "@zhixing/core";
 import type {
   DataPlaneTicket,
   ExecutionRef,
@@ -19,6 +17,7 @@ import type { JobInteractionGrantPort } from "./durable-job-interactions.js";
 import type { JobSubmissionOwner } from "./job-assignment-worker.js";
 import type {
   ConversationChannelSessionInput,
+  ChannelChallengeDeliveryPort,
   LosslessDataPlaneRuntime,
   LosslessDataPlaneSession,
 } from "./lossless-data-plane-runtime.js";
@@ -141,7 +140,7 @@ export interface ChannelInteractionCoordinatorOptions {
     | "createJobOwnerRelay"
     | "handleChallengeAction"
   >;
-  readonly channels: () => ChannelRegistry | undefined;
+  readonly channelChallenges: () => ChannelChallengeDeliveryPort | undefined;
   /** job owner 从耐久 JobJournal 重建并登记的开放义务；不得缺省。 */
   readonly jobRelays: JobRelayObligationDirectory;
   readonly jobStatus: JobStatusDirectory;
@@ -160,7 +159,7 @@ export interface ChannelInteractionCoordinatorOptions {
  */
 export class ChannelInteractionCoordinator {
   readonly #dataPlane: ChannelInteractionCoordinatorOptions["dataPlane"];
-  readonly #channels: ChannelInteractionCoordinatorOptions["channels"];
+  readonly #channelChallenges: ChannelInteractionCoordinatorOptions["channelChallenges"];
   readonly #jobRelays: JobRelayObligationDirectory;
   readonly #jobStatus: JobStatusDirectory;
   readonly #now: () => string;
@@ -179,7 +178,7 @@ export class ChannelInteractionCoordinator {
 
   constructor(options: ChannelInteractionCoordinatorOptions) {
     this.#dataPlane = options.dataPlane;
-    this.#channels = options.channels;
+    this.#channelChallenges = options.channelChallenges;
     this.#jobRelays = options.jobRelays;
     this.#jobStatus = options.jobStatus;
     this.#now = options.now ?? (() => new Date().toISOString());
@@ -294,7 +293,7 @@ export class ChannelInteractionCoordinator {
     const session = new JobChannelSession({
       opening,
       dataPlane: this.#dataPlane,
-      channels: this.#channels,
+      channelChallenges: this.#channelChallenges,
       now: this.#now,
       onClosed: () => {
         this.#jobs.delete(opening.assignmentId);
@@ -430,7 +429,7 @@ export class ChannelInteractionCoordinator {
  */
 class JobChannelSession implements LosslessDataPlaneSession {
   readonly #opening: JobRelayOpening;
-  readonly #channels: ChannelInteractionCoordinatorOptions["channels"];
+  readonly #channelChallenges: ChannelInteractionCoordinatorOptions["channelChallenges"];
   readonly #onClosed: () => void;
   readonly #onError: ((error: Error) => void) | undefined;
   readonly #controller = new AbortController();
@@ -443,14 +442,14 @@ class JobChannelSession implements LosslessDataPlaneSession {
   constructor(options: {
     readonly opening: JobRelayOpening;
     readonly dataPlane: ChannelInteractionCoordinatorOptions["dataPlane"];
-    readonly channels: ChannelInteractionCoordinatorOptions["channels"];
+    readonly channelChallenges: ChannelInteractionCoordinatorOptions["channelChallenges"];
     readonly now: () => string;
     readonly onClosed: () => void;
     readonly onError?: (error: Error) => void;
   }) {
     this.#opening = options.opening;
     this.#dataPlane = options.dataPlane;
-    this.#channels = options.channels;
+    this.#channelChallenges = options.channelChallenges;
     this.#now = options.now;
     this.#onClosed = options.onClosed;
     this.#onError = options.onError;
@@ -514,9 +513,8 @@ class JobChannelSession implements LosslessDataPlaneSession {
       now: this.#now,
       sender: {
         send: async (input) => {
-          const registry = this.#channels();
-          const adapter = registry?.get(input.token.route.channelId);
-          if (!adapter || !isChallengeChannel(adapter)) {
+          const channelChallenges = this.#channelChallenges();
+          if (!channelChallenges?.supports(input.token.route.channelId)) {
             throw new Error(
               `Channel does not support signed challenges: ${input.token.route.channelId}`,
             );
@@ -530,7 +528,7 @@ class JobChannelSession implements LosslessDataPlaneSession {
                   input.display,
                   input.signal,
                 );
-          const result = await adapter.sendChallenge({
+          const result = await channelChallenges.sendChallenge({
             challengeId: input.challengeId,
             token: input.token,
             responder: input.responder,

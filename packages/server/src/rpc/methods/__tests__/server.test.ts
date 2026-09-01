@@ -759,14 +759,12 @@ describe("server.info", () => {
 
   it("叠加通道状态快照", async () => {
     const ctx = mkCtx({
-      channels: {
-        listStatuses: () => [
+      channelStatuses: () => [
           {
             channelId: "feishu",
             state: "connecting",
           },
         ],
-      } as never,
     });
     const result = await buildServerInfoMethod().handler({}, ctx) as any;
     expect(result.channels).toEqual([
@@ -811,12 +809,10 @@ describe("server.info", () => {
             uncertain: 0,
           }),
         },
-        channels: {
-          listStatuses: () => [
+        channelStatuses: () => [
             { channelId: "feishu", state: "connected" },
             { channelId: "slack", state: "disconnected" },
           ],
-        } as never,
         connectionCount: () => 2,
       }),
       connection: { id: 7, authenticated: true } as never,

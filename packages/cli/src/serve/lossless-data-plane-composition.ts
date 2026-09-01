@@ -1,4 +1,3 @@
-import type { ChannelRegistry } from "@zhixing/core";
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 import {
   ChannelInteractionCoordinator,
@@ -9,6 +8,7 @@ import type { ConversationInteractionAnswerPort } from "./durable-conversation-i
 import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import type { JobStatusDirectory } from "./job-status-directory.js";
 import { LosslessDataPlaneRuntime } from "./lossless-data-plane-runtime.js";
+import type { ChannelChallengeDeliveryPort } from "./lossless-data-plane-runtime.js";
 import type { MeshRuntimeAssembly } from "./mesh-runtime-assembly.js";
 
 export interface LosslessDataPlaneCompositionOptions {
@@ -18,7 +18,7 @@ export interface LosslessDataPlaneCompositionOptions {
   readonly interactions: ConversationInteractionAnswerPort;
   readonly jobRelayObligations?: JobRelayObligationDirectory;
   readonly protocol: Pick<ConversationProtocolRuntime, "bindLosslessDataPlane">;
-  readonly channels: () => ChannelRegistry | undefined;
+  readonly channelChallenges: () => ChannelChallengeDeliveryPort | undefined;
   readonly jobStatus: JobStatusDirectory;
   readonly onDataPlaneError?: (error: Error) => void;
   readonly onCoordinatorError?: (error: Error) => void;
@@ -53,7 +53,7 @@ export function createLosslessDataPlaneComposition(
     options.jobRelayObligations ?? new JobRelayObligationDirectory();
   const coordinator = new ChannelInteractionCoordinator({
     dataPlane: runtime,
-    channels: options.channels,
+    channelChallenges: options.channelChallenges,
     jobRelays: jobRelayObligations,
     jobStatus: options.jobStatus,
     ...(options.onCoordinatorError

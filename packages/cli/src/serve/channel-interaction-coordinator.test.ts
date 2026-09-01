@@ -112,7 +112,7 @@ function coordinator(overrides?: {
       createJobOwnerRelay,
       handleChallengeAction,
     } as never,
-    channels: () => undefined,
+    channelChallenges: () => undefined,
     jobRelays: (() => {
       const directory = new JobRelayObligationDirectory();
       if (overrides?.listOpenJobRelays) {
@@ -265,7 +265,7 @@ describe("ChannelInteractionCoordinator", () => {
         createJobOwnerRelay,
         handleChallengeAction: async () => undefined,
       } as never,
-      channels: () => undefined,
+      channelChallenges: () => undefined,
       jobRelays: directory,
       jobStatus: status,
     });

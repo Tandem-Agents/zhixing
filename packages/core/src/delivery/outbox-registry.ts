@@ -6,7 +6,7 @@
  * 职责：
  * - 懒创建：首次访问某 target 时创建 Outbox
  * - 生命周期：空闲回收（reapIdle）+ 全量停机（dispose）
- * - 注入点：doSend 回调由外部提供——registry 不直接依赖 ChannelRegistry
+ * - 注入点：doSend 回调由外部提供——registry 不依赖 Channel runtime
  *
  * 使用模式：
  *   const registry = new OutboxRegistry((target, content) => adapter.send(target, content));

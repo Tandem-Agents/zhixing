@@ -700,6 +700,99 @@ export function validateInboundRouterAssembly(text) {
   }
 }
 
+export function inspectChannelRuntimeBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const channels = byPath.get("packages/cli/src/serve/channels.ts");
+  const access = byPath.get("packages/cli/src/serve/access-surfaces.ts");
+  const context = byPath.get("packages/server/src/context.ts");
+  const server = byPath.get("packages/server/src/server.ts");
+  const inbound = byPath.get("packages/server/src/channels/inbound-router.ts");
+  const confirmation = byPath.get("packages/server/src/confirmation/text-renderer.ts");
+  const delivery = byPath.get("packages/core/src/delivery/channel-effect.ts");
+  const lossless = byPath.get("packages/cli/src/serve/lossless-data-plane-runtime.ts");
+  const coordinator = byPath.get("packages/cli/src/serve/channel-interaction-coordinator.ts");
+  const setupDelivery = byPath.get("packages/cli/src/setup-delivery.ts");
+  if (
+    !channels || !access || !context || !server || !inbound || !confirmation ||
+    !delivery || !lossless || !coordinator || !setupDelivery
+  ) {
+    return ["channel runtime boundary production sources are missing"];
+  }
+  const count = (text, token) => text.split(token).length - 1;
+  const resultContract = channels.match(
+    /export interface SetupChannelsResult\s*\{([\s\S]*?)\n\}/u,
+  )?.[1] ?? "";
+  const returnedResult = channels.match(
+    /\n  return \{\n    router,([\s\S]*?)\n  \};\n\}/u,
+  )?.[1] ?? "";
+  if (
+    count(channels, "new ChannelRegistry({") !== 1 ||
+    count(channels, 'import("@zhixing/channel-feishu")') !== 1 ||
+    !channels.includes("satisfies ChannelDeliveryEffectSource") ||
+    count(channels, "const inbound = Object.freeze({") !== 1 ||
+    count(channels, "satisfies InboundChannelPort") !== 1 ||
+    count(channels, "channels: inbound") !== 1 ||
+    !channels.includes("satisfies ChannelChallengeDeliveryPort") ||
+    !channels.includes("statusSnapshot") ||
+    !channels.includes("dispose: () => registry.dispose()") ||
+    resultContract.includes("ChannelRegistry") ||
+    /\bregistry\s*:/u.test(resultContract)
+  ) {
+    failures.push("channel registry, adapter factory or finite Host port assembly drifted");
+  }
+  if (
+    /\b(?:readonly\s+)?inbound\s*:/u.test(resultContract) ||
+    /\b(?:ChannelRegistry|ChannelAdapter)\b/u.test(resultContract) ||
+    /^\s*inbound,\s*$/mu.test(returnedResult)
+  ) {
+    failures.push("SetupChannelsResult exposes an unconsumed Channel capability");
+  }
+  const concreteForbidden = records.filter((record) =>
+    record.relative !== "packages/cli/src/serve/channels.ts" &&
+    !record.relative.startsWith("packages/core/src/channels/") &&
+    !record.relative.startsWith("packages/channels/feishu/src/") &&
+    /\b(?:ChannelRegistry|ChannelAdapter|isChallengeChannel)\b/u.test(record.text)
+  );
+  if (concreteForbidden.length > 0) {
+    failures.push("concrete Channel registry or adapter escaped the Host infrastructure edge");
+  }
+  if (
+    !access.includes("ctx.channelStatuses = result.statusSnapshot") ||
+    !access.includes("ctx.channelDelivery = result.delivery") ||
+    !access.includes("ctx.channelChallenges = result.challenges") ||
+    !access.includes("losslessDataPlane.bindChannelChallenges(result.challenges)") ||
+    access.includes("result.registry") ||
+    !setupDelivery.includes("channels: ChannelDeliveryEffectSource") ||
+    setupDelivery.includes("ChannelRegistry")
+  ) {
+    failures.push("Host consumers do not receive separate finite Channel ports");
+  }
+  if (
+    !context.includes("channelStatuses?: () => readonly Readonly<ChannelStatus>[]") ||
+    /\bchannels\??:\s*ChannelRegistry/u.test(context) ||
+    server.includes("ctx.channels") ||
+    !inbound.includes("export interface InboundChannelPort") ||
+    inbound.includes("ChannelRegistry") ||
+    !confirmation.includes("export interface ConfirmationChannelPort") ||
+    confirmation.includes("ChannelRegistry")
+  ) {
+    failures.push("Server status, inbound or confirmation demand boundary drifted");
+  }
+  if (
+    !delivery.includes("export interface ChannelDeliveryEffectSource") ||
+    delivery.includes("ChannelAdapter") ||
+    !lossless.includes("export interface ChannelChallengeDeliveryPort") ||
+    lossless.includes("ChannelRegistry") ||
+    lossless.includes("isChallengeChannel") ||
+    coordinator.includes("ChannelRegistry") ||
+    coordinator.includes("isChallengeChannel")
+  ) {
+    failures.push("Delivery or signed-challenge demand boundary drifted");
+  }
+  return failures;
+}
+
 async function collectProductionConstants() {
   validateInboundRouterAssembly(
     await readFile(path.join(root, "packages/cli/src/serve/channels.ts"), "utf8"),
@@ -3818,6 +3911,7 @@ export async function validateS7Structure() {
   ]));
   failures.push(...inspectMcpRuntimeBoundary(records));
   failures.push(...inspectMcpManagementBoundary(records));
+  failures.push(...inspectChannelRuntimeBoundary(records));
   failures.push(...inspectWorkspaceAdministrationOwnership([
     ...records,
     {
@@ -7137,8 +7231,13 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !channelDeliveryEffect.includes('kind: "unverified"') ||
     channelDeliveryEffect.includes('kind: "manual-resolution"') ||
     channelDeliveryEffect.includes('kind: "idempotent-redrive"') ||
-    !channelDeliveryEffect.includes("channels.get(target.channelId)") ||
-    !channelDeliveryEffect.includes('state === "connected"') ||
+    !channelDeliveryEffect.includes("export interface ChannelDeliveryEffectSource") ||
+    !channelDeliveryEffect.includes("channels.send(target, content") ||
+    !channelDeliveryEffect.includes(
+      'channels.status(endpoint.target.channelId) === "connected"',
+    ) ||
+    channelDeliveryEffect.includes("ChannelRegistry") ||
+    channelDeliveryEffect.includes("ChannelAdapter") ||
     channelDeliveryEffect.includes("DeliveryLifecycleApplication") ||
     channelDeliveryEffect.includes("DeliveryAuthority") ||
     channelDeliveryEffect.includes("recordOutcome") ||

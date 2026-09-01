@@ -385,7 +385,7 @@ const losslessDataPlaneSurface: AccessSurface = {
         ? { jobRelayObligations: ctx.jobRelayObligations }
         : {}),
       protocol: ctx.conversationProtocol,
-      channels: () => ctx.channels,
+      channelChallenges: () => ctx.channelChallenges,
       jobStatus: ctx.jobStatus,
       onDataPlaneError: (error) =>
         console.warn(chalk.yellow(`[data-plane] ${error.message}`)),
@@ -1037,10 +1037,12 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
           connectImmediately: isCurrentChannelOwner() && !ctx.startupLifecycle,
         });
         ctx.lifecycleContributions.acquire("channels.dispose", () =>
-          result.registry.dispose()
+          result.dispose()
         );
-        losslessDataPlane.bindChannels(result.registry);
-        ctx.channels = result.registry;
+        losslessDataPlane.bindChannelChallenges(result.challenges);
+        ctx.channelStatuses = result.statusSnapshot;
+        ctx.channelDelivery = result.delivery;
+        ctx.channelChallenges = result.challenges;
         const router = result.router;
         ctx.inboundRouter = router;
         if (router) {
@@ -1078,13 +1080,13 @@ const deliverySurface: AccessSurface = {
   name: "delivery",
   phase: "pre-server",
   async setup(ctx) {
-    const { channels, channelConfiguration, zhixingHome } = ctx;
-    if (!channels || !channelConfiguration.messaging) return;
+    const { channelDelivery, channelConfiguration, zhixingHome } = ctx;
+    if (!channelDelivery || !channelConfiguration.messaging) return;
     if (!ctx.authorityRuntime) {
       throw new Error("Delivery requires the durable authority runtime");
     }
     const deliveryStack = await setupDelivery({
-      channels,
+      channels: channelDelivery,
       zhixingHome,
       authorityRuntime: ctx.authorityRuntime,
       startupRollback: ctx.startupRollback,

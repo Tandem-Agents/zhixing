@@ -1,8 +1,8 @@
 import type {
   ChannelChallengeAction,
-  ChannelRegistry,
+  ChannelChallengeMessage,
+  DeliveryResult,
 } from "@zhixing/core";
-import { isChallengeChannel } from "@zhixing/core";
 import type {
   ConversationChannelChallengeToken,
   DataPlaneTicket,
@@ -72,6 +72,12 @@ export interface FirstPartySurfaceSession extends LosslessDataPlaneSession {
   waitForSeq(seq: number, signal?: AbortSignal): Promise<void>;
 }
 
+/** Finite signed-challenge effect required by the lossless interaction plane. */
+export interface ChannelChallengeDeliveryPort {
+  supports(channelId: string): boolean;
+  sendChallenge(message: ChannelChallengeMessage): Promise<DeliveryResult>;
+}
+
 /**
  * Product composition root for the S6 data plane.
  *
@@ -87,7 +93,7 @@ export class LosslessDataPlaneRuntime {
   readonly #onError: ((error: Error) => void) | undefined;
   readonly #sessions = new Set<LosslessDataPlaneSession>();
   readonly #byChallenge = new Map<string, ConversationChannelSession>();
-  #channels: ChannelRegistry | undefined;
+  #channelChallenges: ChannelChallengeDeliveryPort | undefined;
   #closed = false;
 
   constructor(options: {
@@ -104,18 +110,18 @@ export class LosslessDataPlaneRuntime {
     this.#onError = options.onError;
   }
 
-  bindChannels(channels: ChannelRegistry): void {
-    if (this.#channels && this.#channels !== channels) {
-      throw new Error("Lossless data plane is already bound to another channel registry");
+  bindChannelChallenges(channelChallenges: ChannelChallengeDeliveryPort): void {
+    if (this.#channelChallenges && this.#channelChallenges !== channelChallenges) {
+      throw new Error("Lossless data plane is already bound to another channel challenge port");
     }
-    this.#channels = channels;
+    this.#channelChallenges = channelChallenges;
   }
 
   async openConversationChannel(
     input: ConversationChannelSessionInput,
   ): Promise<LosslessDataPlaneSession> {
     if (this.#closed) throw new Error("Lossless data plane is closed");
-    if (!this.#channels) {
+    if (!this.#channelChallenges) {
       throw new Error("Channel data plane is not fully assembled");
     }
     const endpoint = this.#endpoint(input.executorId);
@@ -157,7 +163,7 @@ export class LosslessDataPlaneRuntime {
           assignmentId: input.assignmentId,
           requestId,
         }),
-      channels: this.#channels,
+      channelChallenges: this.#channelChallenges,
       onChallenge: (challengeId) => {
         const current = this.#byChallenge.get(challengeId);
         if (current && current !== session) {
@@ -490,7 +496,7 @@ class ConversationChannelSession implements LosslessDataPlaneSession {
   readonly #host: ConversationChannelHost;
   readonly #journal: ConversationRunJournal;
   readonly #resolveNoInteractiveSurface: (requestId: string) => Promise<void>;
-  readonly #channels: ChannelRegistry;
+  readonly #channelChallenges: ChannelChallengeDeliveryPort;
   readonly #onChallenge: (challengeId: string) => void;
   readonly #onClosed: (challengeIds: ReadonlySet<string>) => void;
   readonly #onError: ((error: Error) => void) | undefined;
@@ -502,7 +508,7 @@ class ConversationChannelSession implements LosslessDataPlaneSession {
     readonly host: ConversationChannelHost;
     readonly journal: ConversationRunJournal;
     readonly resolveNoInteractiveSurface: (requestId: string) => Promise<void>;
-    readonly channels: ChannelRegistry;
+    readonly channelChallenges: ChannelChallengeDeliveryPort;
     readonly onChallenge: (challengeId: string) => void;
     readonly onClosed: (challengeIds: ReadonlySet<string>) => void;
     readonly onError?: (error: Error) => void;
@@ -510,7 +516,7 @@ class ConversationChannelSession implements LosslessDataPlaneSession {
     this.#host = options.host;
     this.#journal = options.journal;
     this.#resolveNoInteractiveSurface = options.resolveNoInteractiveSurface;
-    this.#channels = options.channels;
+    this.#channelChallenges = options.channelChallenges;
     this.#onChallenge = options.onChallenge;
     this.#onClosed = options.onClosed;
     this.#onError = options.onError;
@@ -568,8 +574,7 @@ class ConversationChannelSession implements LosslessDataPlaneSession {
       store: this.#journal,
       sender: {
         send: async (input) => {
-          const adapter = this.#channels.get(input.token.route.channelId);
-          if (!adapter || !isChallengeChannel(adapter)) {
+          if (!this.#channelChallenges.supports(input.token.route.channelId)) {
             throw new NonInteractiveChannelError(
               `Channel does not support signed challenges: ${input.token.route.channelId}`,
             );
@@ -581,7 +586,7 @@ class ConversationChannelSession implements LosslessDataPlaneSession {
                   input.display,
                   input.signal,
                 );
-          const result = await adapter.sendChallenge({
+          const result = await this.#channelChallenges.sendChallenge({
             challengeId: input.challengeId,
             token: input.token,
             responder: input.responder,

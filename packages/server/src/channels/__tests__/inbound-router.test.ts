@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { InboundRouter } from "../inbound-router.js";
+import {
+  InboundRouter,
+  type InboundChannelPort,
+} from "../inbound-router.js";
 import { ConfirmationHub, ConversationManager } from "@zhixing/owner-kernel";
 import { SESSION_NOTIFICATIONS } from "@zhixing/rpc";
 import type {
@@ -85,6 +88,18 @@ function createMockAdapter(id = "test-ch"): ChannelAdapter {
   };
 }
 
+function createInboundPort(registry: ChannelRegistry): InboundChannelPort {
+  return {
+    has: (channelId) => registry.get(channelId) !== undefined,
+    bindingPolicy: (channelId) => registry.get(channelId)?.bindingPolicy,
+    send: async (target, content) => {
+      const adapter = registry.get(target.channelId);
+      if (!adapter) throw new Error(`Channel adapter not found: ${target.channelId}`);
+      return adapter.send(target, content);
+    },
+  };
+}
+
 function createTestLogger(): ChannelLogger {
   return {
     debug: vi.fn(),
@@ -143,7 +158,7 @@ describe("InboundRouter", () => {
 
     const router = new InboundRouter({
       conversations,
-      channels,
+      channels: createInboundPort(channels),
       logger,
       sessionBroadcast: options?.sessionBroadcast
         ? () => options.sessionBroadcast
@@ -682,7 +697,7 @@ describe("InboundRouter", () => {
 
       const router = new InboundRouter({
         conversations,
-        channels,
+        channels: createInboundPort(channels),
         logger,
         confirmationHub: hub,
       });
@@ -1133,7 +1148,11 @@ describe("InboundRouter", () => {
         onMessage: () => {},
       });
       channels.register(adapter);
-      const router = new InboundRouter({ conversations, channels, logger });
+      const router = new InboundRouter({
+        conversations,
+        channels: createInboundPort(channels),
+        logger,
+      });
 
       await router.handleMessage(dmMessage("test-ch", "user-1", "好"));
 

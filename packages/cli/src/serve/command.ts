@@ -1095,7 +1095,7 @@ async function runServerProcess(
           provider,
         ),
       mcpStatuses: () => ctx.mcpStatus.snapshot(),
-      channelStatuses: () => ctx.channels?.listStatuses() ?? [],
+      channelStatuses: () => ctx.channelStatuses?.() ?? [],
       ...(ctx.channelConnections
         ? { waitForChannels: () => ctx.channelConnections!.ready }
         : {}),
@@ -1469,7 +1469,7 @@ async function runServerProcess(
         left.id.localeCompare(right.id, "en-US"));
     }
     if (owner === "channel") {
-      return (ctx.channels?.listStatuses() ?? [])
+      return (ctx.channelStatuses?.() ?? [])
         .filter((status) => status.state !== "disconnected")
         .map((status) => ({
           id: status.channelId,
@@ -1538,7 +1538,7 @@ async function runServerProcess(
       return;
     }
     if (owner === "channel") {
-      if ((ctx.channels?.listStatuses() ?? []).some((status) => status.state !== "disconnected")) {
+      if ((ctx.channelStatuses?.() ?? []).some((status) => status.state !== "disconnected")) {
         throw new Error("Channel accepted work is not settled");
       }
       return;
@@ -2654,7 +2654,7 @@ async function runServerProcess(
         raw,
       );
     })(),
-    channels: ctx.channels,
+    channelStatuses: ctx.channelStatuses,
     channelHttpRoutes,
     confirmationHub,
     runtimeControl: {
@@ -2888,8 +2888,8 @@ async function runServerProcess(
         console.log(chalk.dim(`  HTTP:      http://${openingRunner.server.host}:${openingRunner.server.port}`));
         console.log(chalk.dim(`  WebSocket: ws://${openingRunner.server.host}:${openingRunner.server.port}/ws`));
         console.log(chalk.dim(`  Token:     ${tokenInfo.path}`));
-        if (ctx.channels) {
-          const statuses = ctx.channels.listStatuses();
+        if (ctx.channelStatuses) {
+          const statuses = ctx.channelStatuses();
           const connected = statuses.filter((s) => s.state === "connected");
           console.log(chalk.dim(`  Channels:  ${connected.length}/${statuses.length} connected`));
           for (const s of statuses) {
@@ -2922,7 +2922,7 @@ async function runServerProcess(
       const exit = shouldIdleExit({
         connectionCount: runner!.server.connections.size,
         channelStates:
-          ctx.channels?.listStatuses().map((s) => s.state) ?? [],
+          ctx.channelStatuses?.().map((s) => s.state) ?? [],
         hasUserPendingWork:
           schedulerApplication.readStatus().enabledUserTaskCount > 0,
       });

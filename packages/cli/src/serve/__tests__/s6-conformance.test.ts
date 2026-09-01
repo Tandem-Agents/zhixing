@@ -3,7 +3,6 @@ import {
   ConfirmationBroker,
   type AgentYield,
   type ChannelChallengeMessage,
-  type ChannelRegistry,
   type Message,
   type RunResult,
 } from "@zhixing/core";
@@ -115,6 +114,7 @@ import {
 } from "../first-party-finality-session.js";
 import { JobStatusDirectory } from "../job-status-directory.js";
 import { createLosslessDataPlaneComposition } from "../lossless-data-plane-composition.js";
+import type { ChannelChallengeDeliveryPort } from "../lossless-data-plane-runtime.js";
 import type { MeshRuntimeAssembly } from "../mesh-runtime-assembly.js";
 import { createOwnerControlAuthorizer } from "../owner-control-authorizer.js";
 
@@ -244,14 +244,11 @@ function authorityWithExecutorId(
   });
 }
 
-function fakeChannels(sendChallenge: ReturnType<typeof vi.fn>): ChannelRegistry {
+function fakeChannels(sendChallenge: ReturnType<typeof vi.fn>): ChannelChallengeDeliveryPort {
   return {
-    get(channelId: string) {
-      return channelId === "feishu"
-        ? { id: "feishu", sendChallenge }
-        : undefined;
-    },
-  } as unknown as ChannelRegistry;
+    supports: (channelId) => channelId === "feishu",
+    sendChallenge,
+  };
 }
 
 function createRuntime(
@@ -831,12 +828,12 @@ async function runConversationScenario(
     mesh: () => remote?.mesh,
     interactions,
     protocol,
-    channels: () => channels,
+    channelChallenges: () => channels,
     jobStatus,
     onDataPlaneError: (error) => conversationBackgroundErrors.push(error),
     onCoordinatorError: (error) => conversationBackgroundErrors.push(error),
   });
-  composition.runtime.bindChannels(channels);
+  composition.runtime.bindChannelChallenges(channels);
 
   const committed = new Map<string, { runIndex: number; shardId: string }>();
   manager = new ConversationManager(runtimeFactory, undefined, {
@@ -1606,12 +1603,12 @@ async function runJobScenario(
     mesh: () => mesh,
     interactions,
     protocol,
-    channels: () => channels,
+    channelChallenges: () => channels,
     jobStatus,
     onDataPlaneError: (error) => backgroundErrors.push(error),
     onCoordinatorError: (error) => backgroundErrors.push(error),
   });
-  composition.runtime.bindChannels(channels);
+  composition.runtime.bindChannelChallenges(channels);
 
   let preparedCursorInterrupted = false;
   if (topology === "remote" && interactive) {

@@ -23,10 +23,11 @@
 
 import type {
   ChannelLogger,
-  ChannelRegistry,
   ConfirmationRequest,
+  DeliveryResult,
   DeliveryTarget,
   DisplayBody,
+  OutboundContent,
 } from "@zhixing/core";
 import type { ConfirmationHub, HubEntry } from "@zhixing/owner-kernel/confirmation-hub";
 
@@ -34,7 +35,7 @@ import type { ConfirmationHub, HubEntry } from "@zhixing/owner-kernel/confirmati
 
 export interface TextRendererOptions {
   hub: ConfirmationHub;
-  channels: ChannelRegistry;
+  channels: ConfirmationChannelPort;
   logger: ChannelLogger;
   /**
    * 当 request.turnOrigin.target 为空时的兜底投递目标。
@@ -44,6 +45,14 @@ export interface TextRendererOptions {
    * 未配置时无 target 的请求仅走 RPC Bridge（由 ConfirmationBridge 定向推送）。
    */
   defaultTarget?: DeliveryTarget;
+}
+
+/** Finite Channel effect required by remote confirmation rendering. */
+export interface ConfirmationChannelPort {
+  send(
+    target: DeliveryTarget,
+    content: OutboundContent,
+  ): Promise<DeliveryResult | undefined>;
 }
 
 // ─── Renderer ───
@@ -81,21 +90,19 @@ export class TextConfirmationRenderer {
       return;
     }
 
-    const adapter = this.opts.channels.get(target.channelId);
-    if (!adapter) {
-      this.opts.logger.warn("confirmation.remote.send-failed", {
-        requestId: entry.request.id,
-        channelId: target.channelId,
-        conversationId: entry.conversationId,
-        error: "adapter-not-found",
-      });
-      return;
-    }
-
     try {
-      await adapter.send(target, {
+      const result = await this.opts.channels.send(target, {
         text: formatConfirmationMessage(entry.request),
       });
+      if (!result) {
+        this.opts.logger.warn("confirmation.remote.send-failed", {
+          requestId: entry.request.id,
+          channelId: target.channelId,
+          conversationId: entry.conversationId,
+          error: "adapter-not-found",
+        });
+        return;
+      }
       this.opts.logger.info("confirmation.remote.sent", {
         requestId: entry.request.id,
         channelId: target.channelId,

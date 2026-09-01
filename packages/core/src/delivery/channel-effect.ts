@@ -1,7 +1,8 @@
 import type {
-  ChannelAdapter,
-  ChannelStatus,
+  ChannelState,
+  DeliveryAdapterSendMeta,
   DeliveryResult,
+  DeliveryTarget,
   OutboundContent,
 } from "../channels/types.js";
 import type { DeliveryEndpointDto } from "../contracts/index.js";
@@ -21,8 +22,12 @@ const SAFE_UNKNOWN_EFFECT = "Authority delivery transport failed";
 
 /** The finite Channel capability observed by the Delivery effect adapter. */
 export interface ChannelDeliveryEffectSource {
-  get(channelId: string): Pick<ChannelAdapter, "send"> | undefined;
-  getStatus(channelId: string): Pick<ChannelStatus, "state"> | undefined;
+  status(channelId: string): ChannelState | undefined;
+  send(
+    target: DeliveryTarget,
+    content: OutboundContent,
+    meta?: DeliveryAdapterSendMeta,
+  ): Promise<DeliveryResult | undefined>;
 }
 
 export interface ChannelDeliveryEffect {
@@ -41,13 +46,17 @@ export function createChannelDeliveryEffect(
 ): ChannelDeliveryEffect {
   const outboxRegistry = new OutboxRegistry(
     async (target, content, meta) => {
-      const adapter = channels.get(target.channelId);
       try {
-        const result = adapter
-          ? meta
-            ? await adapter.send(target, content, meta)
-            : await adapter.send(target, content)
-          : { success: false as const, retryable: true };
+        const result = meta
+          ? await channels.send(target, content, meta)
+          : await channels.send(target, content);
+        if (!result) {
+          return {
+            success: false as const,
+            error: SAFE_REJECTED_EFFECT,
+            retryable: true,
+          };
+        }
         return result.success
           ? result
           : {
@@ -65,8 +74,7 @@ export function createChannelDeliveryEffect(
     endpointKind: "channel" as const,
     isReady(endpoint: DeliveryEndpointDto): boolean {
       return endpoint.kind === "channel" &&
-        channels.get(endpoint.target.channelId) !== undefined &&
-        channels.getStatus(endpoint.target.channelId)?.state === "connected";
+        channels.status(endpoint.target.channelId) === "connected";
     },
     responseLossEvidence(): { readonly kind: "unverified" } {
       return { kind: "unverified" };

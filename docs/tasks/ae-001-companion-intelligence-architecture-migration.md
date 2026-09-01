@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-04b 已通过协调者独立验收，等待提交后进入 Channel 家族边界<br>
+> 当前检查点：A6-05a 已通过协调者独立验收，等待提交后进入 Channel 入站产品绑定<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `97b77c4c`；A6-04a 已由协调者独立复核并提交，三类生产 Runtime 根只消费 MCP 工具、状态和生命周期有限端口，具体 Hub 与目录映射只留在 Host infrastructure adapter |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-04b MCP 管理、探测与发现有限边界已通过协调者独立复核，等待提交 |
-| 活跃工作包 | 无；`A6-04b-mcp-management-discovery-boundary-v1` 已闭合，提交后进入 Channel 家族边界 |
-| 下一责任链 | A6-04b 闭合后进入独立 Channel 家族边界；不得提前扩入 Storage、Executor/Mesh 或设备拓扑 |
+| 已接受基线 | `60564fdf`；A6-04b 已由协调者独立复核并提交，MCP 管理、探测、搜索与来源读取只消费有限需求合同，具体 SDK、spec 与网络实现只留在 Host infrastructure adapter |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-05a 已通过协调者独立复核，等待提交 |
+| 活跃工作包 | 无；`A6-05a-channel-runtime-boundary-v1` 已闭合，提交后进入 A6-05b Channel 入站 Product API/Surface 绑定 |
+| 下一责任链 | A6-05a 闭合后，独立处理 Channel 入站 Product API/Surface 绑定；不得提前扩入 Storage、Executor/Mesh、设备拓扑或 A7 |
 | 打开的单向桥 | 无；全部 Kernel Runtime 生产根均已显式消费同一有限端口，不存在默认 concrete fallback、双实现表或只为测试存在的桥 |
-| 已失效证据 | 无当前未恢复证据；A6-04b 相交的 MCP 管理、探测、搜索、来源读取和配置编辑证据已由直接测试、结构门禁和构建恢复；A6-04a 运行时端口及其他不相交证据继续有效 |
+| 已失效证据 | 无当前未恢复证据；A6-05a 的返回合同反证已纠正并由真实 Router 行为、类型检查与 canonical S7 恢复，其他不相交证据继续有效 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2563,6 +2563,18 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 行为与换代保护：config 列表仍包含 disabled server，运行状态只作 connected/connecting/tool-count/error 叠加且不阻断保存；preset、自定义 URL/stdio command、server id 长度/字符/保留 `__` 拒绝、密钥模板、一次性带密钥 probe、真实 npm 搜索/README、LLM seen-set grounded 选择、AbortSignal、source not-found/error/empty README、候选撞名、取消和原子 config+SecretStore commit 均保持。保存成功后仍先等待 in-flight turn，再走 `HostStopCoordinator` 的 drain shutdown、endpoint turnover/reconnect、refresh 与必要 managed-service reconcile；失败反馈仍区分“已落盘但换代未确认”，本包没有创建或接线热 `applyConfig` 端口。
 - 直接证据、门禁与交接：MCP probe/search/source 3 文件 21/21；config-editor setup/discovery/section/panel 4 文件 85/85；CLI management adapter、config reload 与命令注册 3 文件 18/18，合计 10 文件 124/124。CLI typecheck、fresh `pnpm cli:build`、fresh `pnpm runtime:package-exports`、canonical S7 41/41 与 registry golden、changed-source Biome 和 `git diff --check` 均通过。S7 以反向 mutation 拒绝需求合同泄漏 concrete/network、UI 或产品命令恢复 SDK/spec/search/probe、setup 重新组 spec、第二 concrete import、adapter 缺失 status/spec/network owner 及管理链调用 `applyConfig`。若有限合同 exact-set/readonly、adapter status codec/spec/credential/proxy/AbortSignal、config-editor setup/discovery/panel、`/mcp` status/LLM binding、config/SecretStore commit、Host drain/replacement、A6-04a runtime ports、S7/package exports 或上述直接测试任一变化，只恢复本证据及真实相交证据。A6 继续 `[ ]`；协调者接受后下一检查点固定为独立 Channel 家族边界，不提前进入 Storage、Executor/Mesh、设备拓扑或 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：重新核对 `/mcp` 注册、有限 management contract、唯一 infrastructure adapter、状态 wire 严格解码、带密钥 spec 转换、proxy/AbortSignal、真实搜索与来源读取、grounded LLM 选择、WorkingState 提交及 Host drain/replacement，确认 UI/产品命令已无具体 MCP 依赖，且未引入 `applyConfig` 或第二生效链。独立运行 MCP 三文件 21/21、config-editor 四文件 85/85、CLI adapter/reload/命令三文件 18/18，另加 preset 8/8；CLI typecheck、package exports、canonical S7 41/41 与 registry golden、`git diff --check` 全部通过。A6-04b 可以提交，A6 仍保持 `[ ]`。
+
+### A6-05a：Channel 运行实现与需求方窄端口收口
+
+- 基线与唯一结果：以已接受 `HEAD 60564fdf` 加协调者调度记录为基线，形成待复核证据 `A6-05a-channel-runtime-boundary-v1`。唯一架构结果是让具体 `ChannelRegistry`、`ChannelAdapter` 与飞书实现只存在于 Host infrastructure 边缘；状态观察、连接生命周期、Delivery 发送、入站回复/归组和签名挑战等现有需求方分别只取得自身实际使用的有限只读端口。先沿 `setupChannels`、ApplicationHost、Server/RPC status、Delivery/outbox、lossless data plane、confirmation/challenge 与 credential rotation 双向核实 exact-set，已有证据能裁决后立即实现，不穷举 A6-05b 的产品流程。
+- 边界与保护：保持飞书长连接、配置/秘密投影、非致命连接失败、状态时间、重连、暂停/恢复、当前 owner 守卫、HTTP challenge callback、signed challenge、投递幂等/unknown outcome、关停拒新与排空顺序、Server/info 状态和所有现有错误语义；不得把 Channel 统一成万能 Capability，不得新增第二 registry、第二 adapter factory、动态插件系统、配置热更或兼容壳。`InboundRouter` 当前对 Conversation/intent/confirmation 的产品编排只允许为改绑有限通道端口做行为等价的最窄调整，本包不得重写其 Product API/Surface 责任；该责任固定由紧邻 A6-05b 退场。
+- 完成与安全交接：Host 边缘外的生产代码不再导入、保存或透传具体 `ChannelRegistry`/完整 `ChannelAdapter`；各需求端口输出 exact-set、不可变且不能反向取得 config、凭据、SDK、注册表或其他能力，具体飞书 factory/registry/lifecycle owner 唯一。直接测试覆盖端口适配、注册/连接/断开/暂停恢复、状态、Delivery、challenge、入站回复交界与 Host cleanup；运行最窄受影响测试、CLI/server/core/channel-feishu 类型或构建、changed-source lint、canonical S7/package-export（仅在相交时）及 `git diff --check`，不运行根级全量回归。若预计超过四小时、发现两个独立 owner 转移或不能在可构建且单一事实成立的状态交接，必须停在安全检查点反馈，不得顺带进入 A6-05b、Storage、Executor/Mesh、设备拓扑或 A7。
+- 生产 exact-set 与责任迁移：`setupChannels` 仍是唯一 `ChannelRegistry` 构造、飞书动态 factory 和连接生命周期 owner；最终 `SetupChannelsResult` 只返回真实 Host consumer 使用的 Router、冻结状态快照、既有连接生命周期、Delivery `status/send`、签名 challenge `supports/sendChallenge` 与 Host-owned `dispose`。Inbound `has/bindingPolicy/send` 只在 `setupChannels` 内部构造并直接注入真实 `InboundRouter`，不作为 Host 返回能力；独立 confirmation renderer 的需求合同也只含 `send`，不再认识 registry。`ServerContext` 改为只持有状态快照 reader，Server 的旧 registry dispose 平行 owner 删除；Delivery effect、InboundRouter、confirmation renderer、lossless data plane、interaction coordinator 和 setup-delivery 均只依赖各自需求端口。具体 Channel 基础类型定义、飞书实现与唯一 Host 组合点之外的生产 consumer 已无 `ChannelRegistry`、完整 `ChannelAdapter` 或 `isChallengeChannel` 导入/保存/透传，也没有 config、凭据、SDK、factory 或其他 adapter 能力泄漏。
+- 行为与生命周期保护：飞书长连接、配置/SecretStore 投影、非致命 connect failure、connected/connecting/error 与时间状态、disconnect/reconnect、HostStop pause/resume、当前 owner guard、HTTP challenge callback、signed challenge、Inbound reply/grouping、confirmation 发送、Delivery per-target outbox/idempotency/unknown outcome、credential rotation 后 Host 换代和原有 shutdown 次序均未改。状态快照由 Host 每次从同一 registry 读取并冻结，Delivery readiness 与发送仍绑定同一 adapter，challenge 仅在 adapter 明确实现时可用；缺失 channel、未连接、发送拒绝/异常和 adapter-not-found 的现有安全终态保持。`InboundRouter` 的 Conversation/intent/confirmation 产品编排没有迁移或重写，固定留给 A6-05b；本包没有第二 registry/factory/lifecycle、动态插件、热配置、兼容壳或万能 Channel capability。
+- 直接证据与门禁：Core Delivery effect 1 文件 4/4；Server Inbound/confirmation/status 3 文件 122/122；CLI Channel adapter、interaction/lossless/setup 5 文件 49/49，S6 Host/Channel conformance 1 文件 8/8，ApplicationHost/HostStop/startup owner 3 文件 42/42；飞书 adapter/client 2 文件 26/26，合计 15 文件 251/251。Core、Server、CLI、channel-feishu `tsc --noEmit`，fresh Core→Server→CLI 与 channel-feishu build，canonical S7 42/42 与 registry golden、fresh `runtime:package-exports`、changed-source Biome 均通过；Core build 只有既有 circular-chunk warnings。首次直接调用 S7 测试时遗漏 canonical `tsx` loader，改用仓库入口后执行；首次 canonical S7 又准确暴露新门禁把基础类型定义/飞书实现误当 consumer，收窄为“允许定义与唯一实现、拒绝边缘外 production consumer”并删除 Delivery 注释中的 concrete 知识后，最终完整门禁通过。
+- 失效与交接：若 `setupChannels` factory/registry/result exact-set、任一有限端口及其 readonly 输出、飞书 adapter/client、Server status、Inbound/confirmation、Delivery outbox effect、challenge、credential rotation、Host connection/cleanup owner、S7/package exports 或上述直接测试任一变化，只恢复本证据及真实相交的 A0/A1/A5/A6-04 证据。当前无未恢复证据；A6 继续 `[ ]`，下一检查点仅在协调者接受并提交后进入 A6-05b 的 Channel 入站 Product API/Surface 绑定，不进入 Storage、Executor/Mesh、设备拓扑或 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调纠正（`SetupChannelsResult` exact-set）：协调者独立反查发现初次实现把仅供 `setupChannels → InboundRouter` 内部装配的 `inbound` 也放进返回合同，唯一读取者只是测试，故初次“返回端口 exact-set”结论失效。最终删除接口成员与返回值，测试改为经真实 adapter `onMessage → InboundRouter` 证明 `per-user-in-group` 归组和拒新回复发送，不为测试恢复内部访问；S7 同时要求内部 `InboundChannelPort` 恰一次构造/注入，并以反向 mutation 拒绝 `SetupChannelsResult.inbound`、registry/完整 adapter 等无消费者能力回流。纠正后 channels 1 文件 5/5、CLI `tsc --noEmit`、canonical S7 42/42 与 registry golden、changed-source Biome 和 `git diff --check` 通过；其余未相交的初次直接证据继续有效，A6-05a 恢复为待协调者复核状态，A6 与下一检查点不变。
+- 协调者独立验收：重新反查 `setupChannels`、Host 返回合同与全部生产消费者，确认 `inbound` 只在内部构造并注入真实 Router，返回成员与 Host 消费 exact-set 全等；Host 边缘外 concrete registry/adapter 依赖归零，状态、Delivery、challenge 与生命周期各自保持有限合同。独立运行 Core Delivery 4/4、Server Inbound/confirmation/status 122/122、CLI Channel/interaction/S6/setup 50/50、CLI 类型检查、canonical S7 42/42 与 registry golden、`git diff --check` 全部通过。A6-05a 可以提交，A6 仍保持 `[ ]`。
 
 ## 十、用户提示词
 

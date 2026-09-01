@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
-  ChannelRegistry,
   deliveryRecord,
   prepareDeliveryEnqueues,
 } from "@zhixing/core";
+import type { ChannelDeliveryEffectSource } from "@zhixing/core/delivery/channel-effect";
 import type {
   SecretRef,
   SecretStorePort,
@@ -37,6 +37,13 @@ const TEST_EXECUTOR_READINESS = {
   deviceScopedCredentialBindingIds: [] as string[],
   credentialGeneration: null,
 };
+
+function emptyChannelDelivery(): ChannelDeliveryEffectSource {
+  return {
+    status: () => undefined,
+    send: async () => undefined,
+  };
+}
 
 async function putConversationBundle(
   artifacts: DeliveryStack["artifacts"],
@@ -111,7 +118,7 @@ describe("setupDelivery authority production path", () => {
   });
 
   it("assembles a valid DeliveryStack with an empty channel registry", async () => {
-    const channels = new ChannelRegistry();
+    const channels = emptyChannelDelivery();
     stack = await setupDelivery({
       channels,
       zhixingHome: home,
@@ -132,7 +139,7 @@ describe("setupDelivery authority production path", () => {
   });
 
   it("publishes a revisioned resolved notice through the production control path", async () => {
-    const channels = new ChannelRegistry();
+    const channels = emptyChannelDelivery();
     stack = await setupDelivery({
       channels,
       zhixingHome: home,
@@ -236,7 +243,7 @@ describe("setupDelivery authority production path", () => {
   }, 15_000);
 
   it("rebuilds queued delivery authority from the shared durable log", async () => {
-    const channels = new ChannelRegistry();
+    const channels = emptyChannelDelivery();
     stack = await setupDelivery({
       channels,
       zhixingHome: home,

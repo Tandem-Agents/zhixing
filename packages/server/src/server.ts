@@ -350,10 +350,7 @@ async function startServerWithOwner(
   const cleanupActive = async () => {
     if (activeClosed) return;
     activeClosed = true;
-    // 0. 断开所有通道适配器
-    if (ctx.channels) {
-      await ctx.channels.dispose().catch(() => {});
-    }
+    // Channel connections are owned and closed by the outer Host lifecycle.
     // 1. 释放所有对话运行时（timer 清理 + 资源回收 + 各会话末窗 onWindowClose）
     await ctx.conversations?.disposeAll();
     // 2. 取消事件桥接订阅（否则 scheduler 后续事件还会调 conn.notify）

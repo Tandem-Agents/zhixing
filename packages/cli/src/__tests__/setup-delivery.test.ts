@@ -11,10 +11,10 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   AuthorityDeliveryPipeline,
-  ChannelRegistry,
   OutboxRegistry,
   type PermissionRule,
 } from "@zhixing/core";
+import type { ChannelDeliveryEffectSource } from "@zhixing/core/delivery/channel-effect";
 import { SurfaceAssetCoordinator } from "@zhixing/core/authority";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import {
@@ -63,6 +63,13 @@ const EMPTY_EXECUTION_PROFILE = {
   providerIds: [] as string[],
 };
 
+function emptyChannelDelivery(): ChannelDeliveryEffectSource {
+  return {
+    status: () => undefined,
+    send: async () => undefined,
+  };
+}
+
 function prepareAuthority(
   authority: Awaited<ReturnType<typeof setupAuthorityRuntime>>,
   input: {
@@ -110,7 +117,7 @@ describe("setupDelivery — Channel effect binding", () => {
   });
 
   it("assembles a valid DeliveryStack with an empty channel registry", async () => {
-    const channels = new ChannelRegistry();
+    const channels = emptyChannelDelivery();
     const authorityRuntime = await setupAuthorityRuntime({
       zhixingHome: home,
       secretStore: new MemorySecretStore(),
@@ -345,7 +352,7 @@ describe("setupDelivery — Channel effect binding", () => {
       });
       await expect(
         setupDelivery({
-          channels: new ChannelRegistry(),
+          channels: emptyChannelDelivery(),
           zhixingHome: home,
           authorityRuntime,
           logger: quietLogger,

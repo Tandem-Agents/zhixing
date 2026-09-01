@@ -1,8 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type {
-  ChannelAdapter,
-  DeliveryResult,
-} from "../../channels/types.js";
+import type { DeliveryResult } from "../../channels/types.js";
 import {
   createChannelDeliveryEffect,
   type ChannelDeliveryEffectSource,
@@ -15,12 +12,12 @@ const ENDPOINT = {
 };
 
 function source(input: {
-  readonly adapter?: Pick<ChannelAdapter, "send">;
+  readonly send?: ChannelDeliveryEffectSource["send"];
   readonly state?: "connected" | "connecting" | "disconnected" | "error";
 }): ChannelDeliveryEffectSource {
   return {
-    get: () => input.adapter,
-    getStatus: () => input.state ? { state: input.state } : undefined,
+    status: () => input.state,
+    send: (...args) => input.send?.(...args) ?? Promise.resolve(undefined),
   };
 }
 
@@ -40,14 +37,14 @@ describe("Channel Delivery effect", () => {
       retryable: false,
     }));
     const connected = createChannelDeliveryEffect(source({
-      adapter: { send },
+      send,
       state: "connected",
     }));
     const disconnected = createChannelDeliveryEffect(source({
-      adapter: { send },
+      send,
       state: "connecting",
     }));
-    const missing = createChannelDeliveryEffect(source({ state: "connected" }));
+    const missing = createChannelDeliveryEffect(source({}));
 
     expect(connected.transport.isReady(ENDPOINT)).toBe(true);
     expect(disconnected.transport.isReady(ENDPOINT)).toBe(false);
@@ -65,7 +62,7 @@ describe("Channel Delivery effect", () => {
       messageId: "platform-message-1",
     }));
     const effect = createChannelDeliveryEffect(source({
-      adapter: { send },
+      send,
       state: "connected",
     }), { onEvent: (event) => events.push(event) });
 
@@ -114,7 +111,7 @@ describe("Channel Delivery effect", () => {
       return { success: true, retryable: false };
     });
     const effect = createChannelDeliveryEffect(source({
-      adapter: { send },
+      send,
       state: "connected",
     }));
     const outbox = effect.outboxRegistry.of(ENDPOINT.target);
@@ -144,16 +141,16 @@ describe("Channel Delivery effect", () => {
   });
 
   it("reports a reconnect race as retryable finite effect evidence", async () => {
-    let adapter: Pick<ChannelAdapter, "send"> | undefined = {
-      send: async () => ({ success: true, retryable: false }),
-    };
+    let available = true;
     const channels: ChannelDeliveryEffectSource = {
-      get: () => adapter,
-      getStatus: () => ({ state: "connected" }),
+      status: () => "connected",
+      send: async () => available
+        ? { success: true, retryable: false }
+        : undefined,
     };
     const effect = createChannelDeliveryEffect(channels);
     expect(effect.transport.isReady(ENDPOINT)).toBe(true);
-    adapter = undefined;
+    available = false;
 
     await expect(effect.transport.send(
       ENDPOINT,
