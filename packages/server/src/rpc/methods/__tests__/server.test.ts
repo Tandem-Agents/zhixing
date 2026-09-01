@@ -298,6 +298,10 @@ describe("Device Administration command Product API input", () => {
             fullBackupReady: false,
           }),
         },
+        currentRemovalMigration: {
+          begin: uninstall.beginMigration,
+          resumeActive: async () => [],
+        },
         currentDeviceRemoval: uninstall,
       }),
     });

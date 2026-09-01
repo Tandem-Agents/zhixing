@@ -17,6 +17,7 @@ import {
   DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET,
   DEVICE_ADMINISTRATION_STATUS_QUERY,
   DeviceAdministrationApplicationService,
+  DeviceAdministrationCurrentRemovalMigrationApplicationService,
 } from "./application.js";
 
 function fixture() {
@@ -105,12 +106,15 @@ function fixture() {
       fullBackupReady: false,
     })),
   };
-  const currentDeviceRemoval = {
-    beginMigration: vi.fn(async () => ({
+  const currentRemovalMigration = {
+    begin: vi.fn(async () => ({
       kind: "current-device-removal" as const,
       path: "migration" as const,
       phase: "gate-frozen" as const,
     })),
+    resumeActive: vi.fn(async () => []),
+  };
+  const currentDeviceRemoval = {
     beginRecoveryBackup: vi.fn(async () => ({
       kind: "current-device-removal" as const,
       path: "recovery-backup" as const,
@@ -144,6 +148,7 @@ function fixture() {
     currentRemovalContext,
     currentRemovalMigrationTargets,
     currentRemovalRecoveryBackup,
+    currentRemovalMigration,
     currentDeviceRemoval,
   });
   return {
@@ -159,7 +164,179 @@ function fixture() {
     currentRemovalContext,
     currentRemovalMigrationTargets,
     currentRemovalRecoveryBackup,
+    currentRemovalMigration,
     currentDeviceRemoval,
+  };
+}
+
+describe("DeviceAdministrationCurrentRemovalMigrationApplicationService", () => {
+  it("owns the complete migration phase order for both first execution and durable replay", async () => {
+    const events: string[] = [];
+    const lifecycle = migrationLifecycle(events);
+    const effects = migrationEffects(events);
+    const application = new DeviceAdministrationCurrentRemovalMigrationApplicationService({
+      lifecycle,
+      effects,
+    });
+
+    await expect(application.begin({
+      requestId: "request:migration",
+      operationId: "operation:migration",
+      transferId: "transfer:migration",
+      targetDeviceId: "device:successor",
+    })).resolves.toEqual({
+      kind: "current-device-removal",
+      path: "migration",
+      phase: "terminal",
+    });
+    expect(events).toEqual([
+      "accept",
+      "close-admission",
+      "close-accepted-work",
+      "freeze",
+      "advance:gate-frozen",
+      "settle:drain:30000",
+      "flush",
+      "physical",
+      "commit",
+      "verify",
+      "advance:transfer-committed",
+      "retire",
+      "advance:cleanup-complete",
+      "terminal",
+    ]);
+    expect(lifecycle.advance).toHaveBeenNthCalledWith(1, {
+      operationId: "operation:migration",
+      phase: "gate-frozen",
+      evidence: ["frozen-evidence"],
+    });
+    expect(lifecycle.advance).toHaveBeenNthCalledWith(2, {
+      operationId: "operation:migration",
+      phase: "transfer-committed",
+      evidence: ["flush-evidence", "transfer-evidence"],
+    });
+    expect(lifecycle.advance).toHaveBeenNthCalledWith(3, {
+      operationId: "operation:migration",
+      phase: "cleanup-complete",
+      evidence: ["cleanup-evidence"],
+    });
+  });
+
+  it("resumes every durable phase without repeating effects that the phase already proves", async () => {
+    const cases = [
+      ["gate-frozen", [
+        "settle:drain:30000",
+        "flush",
+        "physical",
+        "commit",
+        "verify",
+        "advance:transfer-committed",
+        "retire",
+        "advance:cleanup-complete",
+        "terminal",
+      ]],
+      ["transfer-committed", ["retire", "advance:cleanup-complete", "terminal"]],
+      ["cleanup-complete", ["terminal"]],
+      ["terminal", []],
+      ["aborted", []],
+    ] as const;
+
+    for (const [phase, expected] of cases) {
+      const events: string[] = [];
+      const lifecycle = migrationLifecycle(events, phase);
+      const application = new DeviceAdministrationCurrentRemovalMigrationApplicationService({
+        lifecycle,
+        effects: migrationEffects(events),
+      });
+      await expect(application.resumeActive()).resolves.toEqual([{
+        kind: "current-device-removal",
+        path: "migration",
+        phase: phase === "aborted" ? "aborted" : "terminal",
+      }]);
+      expect(events).toEqual(["active", ...expected]);
+      expect(events).not.toContain("close-admission");
+      expect(events).not.toContain("freeze");
+    }
+  });
+});
+
+function migrationOperation(
+  phase: "accepted" | "gate-frozen" | "transfer-committed" | "cleanup-complete" |
+    "terminal" | "aborted",
+) {
+  return {
+    kind: "current-device-removal" as const,
+    path: "migration" as const,
+    requestId: "request:migration",
+    operationId: "operation:migration",
+    transferId: "transfer:migration",
+    targetDeviceId: "device:successor",
+    phase,
+  };
+}
+
+function migrationLifecycle(
+  events: string[],
+  activePhase: Parameters<typeof migrationOperation>[0] = "accepted",
+) {
+  return {
+    accept: vi.fn(async () => {
+      events.push("accept");
+      return migrationOperation("accepted");
+    }),
+    active: vi.fn(async () => {
+      events.push("active");
+      return [migrationOperation(activePhase)];
+    }),
+    advance: vi.fn(async (input: {
+      readonly phase: "gate-frozen" | "transfer-committed" | "cleanup-complete";
+    }) => {
+      events.push(`advance:${input.phase}`);
+      return migrationOperation(input.phase);
+    }),
+    terminal: vi.fn(async () => {
+      events.push("terminal");
+      return migrationOperation("terminal");
+    }),
+  };
+}
+
+function migrationEffects(events: string[]) {
+  return {
+    closeAdmission: vi.fn(async () => {
+      events.push("close-admission");
+    }),
+    closeAcceptedWorkAdmission: vi.fn(async () => {
+      events.push("close-accepted-work");
+    }),
+    freezeAcceptedWork: vi.fn(async () => {
+      events.push("freeze");
+      return "frozen-evidence";
+    }),
+    settleAcceptedWork: vi.fn(async (input: {
+      readonly strategy: "drain";
+      readonly timeoutMs: 30_000;
+    }) => {
+      events.push(`settle:${input.strategy}:${input.timeoutMs}`);
+    }),
+    flushDurableState: vi.fn(async () => {
+      events.push("flush");
+      return ["flush-evidence"];
+    }),
+    settlePhysicalSteps: vi.fn(async () => {
+      events.push("physical");
+    }),
+    commitTransfer: vi.fn(async () => {
+      events.push("commit");
+    }),
+    verifyTransfer: vi.fn(async () => {
+      events.push("verify");
+      return "transfer-evidence";
+    }),
+    retireLocalDevice: vi.fn(async () => {
+      events.push("retire");
+      return "cleanup-evidence";
+    }),
   };
 }
 
@@ -339,7 +516,7 @@ describe("DeviceAdministrationApplicationService", () => {
       operationId: "uninstall-backup",
       recoveryPackage: "recovery-package",
     });
-    expect(f.currentDeviceRemoval.beginMigration).toHaveBeenCalledWith({
+    expect(f.currentRemovalMigration.begin).toHaveBeenCalledWith({
       requestId: "request:uninstall-migration",
       operationId: "uninstall-migration",
       transferId: "transfer-1",
@@ -569,7 +746,7 @@ describe("DeviceAdministrationApplicationService", () => {
       transferId: "transfer-ambiguous-target",
       targetName: "同名设备",
     })).rejects.toThrow("More than one ready duty device has that name");
-    expect(f.currentDeviceRemoval.beginMigration).not.toHaveBeenCalled();
+    expect(f.currentRemovalMigration.begin).not.toHaveBeenCalled();
   });
 
   it("fails closed when the current-device removal mechanism is unavailable", async () => {

@@ -79,6 +79,7 @@ import {
   createDeviceAdministrationProductApiContribution,
   DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET,
   DeviceAdministrationApplicationService,
+  DeviceAdministrationCurrentRemovalMigrationApplicationService,
 } from "@zhixing/core/device-administration/application";
 import {
   defineProductApiExactSet,
@@ -94,6 +95,7 @@ import {
 import { DeviceLifecycleJournal } from "@zhixing/core/authority";
 import {
   protocolDigest,
+  type DeviceLifecycleEvidenceRef,
   type StopHostGeneration,
 } from "@zhixing/core/protocol";
 import {
@@ -235,9 +237,11 @@ import { buildManagedHostPublicStatus } from "./status.js";
 import { createHostDefaultWorkspaceProjection } from "./host-default-workspace.js";
 import {
   HostStopCoordinator,
+  freezeHostStopAcceptedWork,
   hostStopAlreadySettled,
   hostStopDeliveryLifecycleSources,
   loadHostStopAcceptedWork,
+  settleHostStopAcceptedWork,
   type HostStopAcceptedWorkItem,
   type HostStopAcceptedWorkPorts,
   type HostStopAcceptedWorkSnapshot,
@@ -1878,6 +1882,53 @@ async function runServerProcess(
     bootstrap.mesh.trust.issuer.deviceId === bootstrap.mesh.deviceKey.deviceId
     ? bootstrap.mesh.anchorIssuerKey ?? bootstrap.mesh.deviceKey
     : undefined;
+  const closeAnchorUninstallAdmission = async () => {
+    ctx.inboundRouter?.refuseNewMessages();
+    await ctx.inboundRouter?.drainAcceptedMessages();
+    await ctx.channelConnections?.disconnectConfigured();
+    await ctx.deliveryStack?.quiesceForAuthorityTransfer();
+    await settleScheduleForTransfer();
+  };
+  const anchorUninstallAcceptedWork = {
+    ports: acceptedWork,
+    artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
+    closeAdmission: async (operationId: string) => {
+      managedHostStopping = true;
+      ctx.inboundRouter?.refuseNewMessages();
+      ctx.executorJobOwner?.pauseAccepting();
+      schedulerApplication.closeAdmission();
+      ctx.deliveryStack?.lifecycle.close();
+      await Promise.all([
+        ctx.localConversationOwner?.closeHostStopAdmission(operationId),
+        ctx.channelConnections?.suspendConfigured(),
+      ]);
+    },
+    onFrozen: async (snapshot: HostStopAcceptedWorkSnapshot) => {
+      const sources = hostStopDeliveryLifecycleSources(snapshot);
+      await ctx.deliveryStack?.lifecycle.install({
+        operationId: snapshot.operationId,
+        sources,
+        deliveries: snapshot.owners.delivery,
+      });
+      await recoverStartupLifecycleAcceptedWork(sources);
+    },
+    flushDurableState: async (): Promise<readonly DeviceLifecycleEvidenceRef[]> => {
+      const [checkpoint, localOwnerDigest] = await Promise.all([
+        lifecycleAuthorityLog.checkpoint(),
+        ctx.localConversationOwner?.checkpointAcceptedWork(),
+      ]);
+      return [{
+        kind: "accepted-work",
+        digest: protocolDigest("AnchorUninstallDurableFlush", 1, {
+          lifecycle: checkpoint.prefixDigest,
+          localOwner: localOwnerDigest ?? null,
+        }),
+      }];
+    },
+    settlePhysicalSteps: async () => {
+      await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
+    },
+  };
   const anchorUninstall = ctx.meshRuntime && uninstallIssuerKey
     ? new AnchorUninstallCoordinator({
         log: lifecycleAuthorityLog,
@@ -1886,32 +1937,10 @@ async function runServerProcess(
         issuerKey: uninstallIssuerKey,
         verifier: ctx.authorityRuntime!.verifier,
         anchorEpoch: () => ctx.authorityRuntime!.anchorEpoch,
-        commitMigration: async (input) => {
-          await ctx.meshRuntime!.preparePlannedAnchorTransfer(input);
-          await ctx.meshRuntime!.commitPlannedAnchorTransfer(input);
-        },
-        verifyMigration: async (targetDeviceId) => {
-          const trust = await bootstrap.mesh.bootstrapStore.loadTrustRecord();
-          if (
-            !trust ||
-            trust.issuer.deviceId !== targetDeviceId ||
-            ctx.meshRuntime!.currentAnchorDeviceId() !== targetDeviceId
-          ) {
-            throw new Error("The new duty device installation is not current");
-          }
-        },
-        retireMigratedDevice: (operationId) =>
-          ctx.meshRuntime!.retireLocalDeviceAfterMigration({ operationId }),
         ...(ctx.authorityCheckpointOwner
           ? { checkpointOwner: ctx.authorityCheckpointOwner }
           : {}),
-        closeAdmission: async () => {
-          ctx.inboundRouter?.refuseNewMessages();
-          await ctx.inboundRouter?.drainAcceptedMessages();
-          await ctx.channelConnections?.disconnectConfigured();
-          await ctx.deliveryStack?.quiesceForAuthorityTransfer();
-          await settleScheduleForTransfer();
-        },
+        closeAdmission: closeAnchorUninstallAdmission,
         releaseAdmission: async (operationId) => {
           await ctx.deliveryStack?.lifecycle.release(operationId);
           await ctx.deliveryStack?.lifecycle.resume();
@@ -1920,51 +1949,91 @@ async function runServerProcess(
           ctx.inboundRouter?.resumeNewMessages();
           await ctx.channelConnections?.connectConfigured();
         },
-        recoveryAcceptedWork: {
-          ports: acceptedWork,
-          artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
-          closeAdmission: async (operationId) => {
-            managedHostStopping = true;
-            ctx.inboundRouter?.refuseNewMessages();
-            ctx.executorJobOwner?.pauseAccepting();
-            schedulerApplication.closeAdmission();
-            ctx.deliveryStack?.lifecycle.close();
-            await Promise.all([
-              ctx.localConversationOwner?.closeHostStopAdmission(operationId),
-              ctx.channelConnections?.suspendConfigured(),
-            ]);
-          },
-          onFrozen: async (snapshot) => {
-            const sources = hostStopDeliveryLifecycleSources(snapshot);
-            await ctx.deliveryStack?.lifecycle.install({
-              operationId: snapshot.operationId,
-              sources,
-              deliveries: snapshot.owners.delivery,
-            });
-            await recoverStartupLifecycleAcceptedWork(sources);
-          },
-          flushDurableState: async () => {
-            const [checkpoint, localOwnerDigest] = await Promise.all([
-              lifecycleAuthorityLog.checkpoint(),
-              ctx.localConversationOwner?.checkpointAcceptedWork(),
-            ]);
-            return [{
-              kind: "accepted-work" as const,
-              digest: protocolDigest("AnchorUninstallDurableFlush", 1, {
-                lifecycle: checkpoint.prefixDigest,
-                localOwner: localOwnerDigest ?? null,
-              }),
-            }];
-          },
-          settlePhysicalSteps: async () => {
-            await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
-          },
-        },
+        recoveryAcceptedWork: anchorUninstallAcceptedWork,
         cleanupRecovery: cleanupLocalDevice,
         onRetired: finishLocalRetirement,
       })
     : undefined;
-  await anchorUninstall?.resumeActive();
+  const currentRemovalMigrationApplication = anchorUninstall && ctx.meshRuntime
+    ? new DeviceAdministrationCurrentRemovalMigrationApplicationService<
+        DeviceLifecycleEvidenceRef
+      >({
+        lifecycle: {
+          accept: (input) => anchorUninstall.acceptMigration(input),
+          active: () => anchorUninstall.activeMigrations(),
+          advance: (input) => anchorUninstall.advanceMigration(input),
+          terminal: (operationId) => anchorUninstall.terminalMigration(operationId),
+        },
+        effects: {
+          closeAdmission: closeAnchorUninstallAdmission,
+          closeAcceptedWorkAdmission: anchorUninstallAcceptedWork.closeAdmission,
+          freezeAcceptedWork: async (operationId) =>
+            (await freezeHostStopAcceptedWork(
+              operationId,
+              anchorUninstallAcceptedWork.ports,
+              anchorUninstallAcceptedWork.artifactStore,
+            )).evidence,
+          settleAcceptedWork: async ({ operationId, strategy, timeoutMs }) => {
+            const operation = await lifecycleJournal.state(operationId);
+            if (
+              !operation ||
+              operation.identity.kind !== "anchor-uninstall" ||
+              operation.identity.path.kind !== "migration"
+            ) {
+              throw new Error("Anchor uninstall migration operation is unknown");
+            }
+            const snapshot = await loadHostStopAcceptedWork(
+              operation,
+              anchorUninstallAcceptedWork.artifactStore,
+            );
+            await anchorUninstallAcceptedWork.onFrozen(snapshot);
+            await settleHostStopAcceptedWork({
+              operationId,
+              strategy,
+              timeoutMs,
+              snapshot,
+              ports: anchorUninstallAcceptedWork.ports,
+            });
+          },
+          flushDurableState: anchorUninstallAcceptedWork.flushDurableState,
+          settlePhysicalSteps: anchorUninstallAcceptedWork.settlePhysicalSteps,
+          commitTransfer: async (input) => {
+            await ctx.meshRuntime!.preparePlannedAnchorTransfer(input);
+            await ctx.meshRuntime!.commitPlannedAnchorTransfer(input);
+          },
+          verifyTransfer: async ({ transferId, targetDeviceId }) => {
+            const trust = await bootstrap.mesh.bootstrapStore.loadTrustRecord();
+            if (
+              !trust ||
+              trust.issuer.deviceId !== targetDeviceId ||
+              ctx.meshRuntime!.currentAnchorDeviceId() !== targetDeviceId
+            ) {
+              throw new Error("The new duty device installation is not current");
+            }
+            return {
+              kind: "authority-transfer",
+              digest: protocolDigest("AnchorUninstallMigration", 1, {
+                kind: "migration",
+                targetDeviceId,
+                transferId,
+              }),
+            };
+          },
+          retireLocalDevice: async ({ operationId, targetDeviceId }) => {
+            await ctx.meshRuntime!.retireLocalDeviceAfterMigration({ operationId });
+            return {
+              kind: "cleanup",
+              digest: protocolDigest("MigratedAnchorCleanup", 1, {
+                operationId,
+                targetDeviceId,
+              }),
+            };
+          },
+        },
+      })
+    : undefined;
+  await currentRemovalMigrationApplication?.resumeActive();
+  await anchorUninstall?.resumeRecoveryActive();
   if (localRetirementCompletedBeforeServerStart) {
     throw new Error("This device has completed local retirement and cannot start normally");
   }
@@ -2226,13 +2295,10 @@ async function runServerProcess(
                         fullBackupReady: false,
                       }),
                 },
+                ...(currentRemovalMigrationApplication
+                  ? { currentRemovalMigration: currentRemovalMigrationApplication }
+                  : {}),
                 currentDeviceRemoval: {
-                  beginMigration: (input: {
-                    readonly requestId: string;
-                    readonly operationId: string;
-                    readonly transferId: string;
-                    readonly targetDeviceId: string;
-                  }) => anchorUninstall.beginMigration(input),
                   beginRecoveryBackup: (input: {
                     readonly requestId: string;
                     readonly operationId: string;

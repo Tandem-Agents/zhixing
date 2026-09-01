@@ -2496,6 +2496,30 @@ test("Device Administration reads, paired/current removal and duty migration hav
   );
   assert.match(
     inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/cli/src/serve/anchor-uninstall.ts",
+      (text) => `${text}\nclass LegacyMigrationDrive { #driveMigration() { return undefined; } }`,
+    )).join("\n"),
+    /migration lifecycle has a second phase owner/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "effects: {\n          closeAdmission: closeAnchorUninstallAdmission,",
+        "effects: {\n          leakedPhase: operation.phase,\n          closeAdmission: closeAnchorUninstallAdmission,",
+      ),
+    )).join("\n"),
+    /migration lifecycle has a second phase owner/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/core/src/device-administration/application.ts",
+      (text) => text.replace('if (operation.phase === "transfer-committed")', "if (false)"),
+    )).join("\n"),
+    /Query\/Product API exact-set drifted/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
       "packages/core/src/device-administration/application.ts",
       (text) => text.replace("assertCurrentRemovalCancellationEligible(lifecycle);", ""),
     )).join("\n"),

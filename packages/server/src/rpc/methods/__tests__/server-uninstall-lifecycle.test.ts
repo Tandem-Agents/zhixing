@@ -17,7 +17,9 @@ import {
 } from "../server.js";
 
 function createProductApi(
-  currentDeviceRemoval?: DeviceAdministrationCurrentRemovalMechanismPort,
+  currentDeviceRemoval?: DeviceAdministrationCurrentRemovalMechanismPort & {
+    readonly beginMigration: ReturnType<typeof vi.fn>;
+  },
 ): ProductApiDispatcher {
   const application = new DeviceAdministrationApplicationService({
     relationships: { list: async () => [] },
@@ -84,6 +86,10 @@ function createProductApi(
               targetId: "backup-target",
               upToLsn: 42,
             }),
+          },
+          currentRemovalMigration: {
+            begin: currentDeviceRemoval.beginMigration,
+            resumeActive: async () => [],
           },
           currentDeviceRemoval,
         }

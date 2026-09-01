@@ -332,12 +332,6 @@ export interface DeviceAdministrationCurrentRemovalRecoveryBackupReadPort {
 
 /** Temporary one-way mechanism bridge to the existing durable uninstall coordinator. */
 export interface DeviceAdministrationCurrentRemovalMechanismPort {
-  beginMigration(input: {
-    readonly requestId: string;
-    readonly operationId: string;
-    readonly transferId: string;
-    readonly targetDeviceId: string;
-  }): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot>;
   beginRecoveryBackup(input: {
     readonly requestId: string;
     readonly operationId: string;
@@ -354,6 +348,163 @@ export interface DeviceAdministrationCurrentRemovalMechanismPort {
   read(input: {
     readonly operationId: string;
   }): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot | undefined>;
+}
+
+export type DeviceAdministrationCurrentRemovalMigrationPhase =
+  | "accepted"
+  | "gate-frozen"
+  | "transfer-committed"
+  | "cleanup-complete"
+  | "terminal"
+  | "aborted";
+
+export interface DeviceAdministrationCurrentRemovalMigrationLifecycleOperation {
+  readonly kind: "current-device-removal";
+  readonly path: "migration";
+  readonly requestId: string;
+  readonly operationId: string;
+  readonly transferId: string;
+  readonly targetDeviceId: string;
+  readonly phase: DeviceAdministrationCurrentRemovalMigrationPhase;
+}
+
+/** Serialized lifecycle facts. Evidence remains opaque to the Device domain. */
+export interface DeviceAdministrationCurrentRemovalMigrationLifecyclePort<Evidence> {
+  accept(input: {
+    readonly requestId: string;
+    readonly operationId: string;
+    readonly transferId: string;
+    readonly targetDeviceId: string;
+  }): Promise<DeviceAdministrationCurrentRemovalMigrationLifecycleOperation>;
+  active(): Promise<readonly DeviceAdministrationCurrentRemovalMigrationLifecycleOperation[]>;
+  advance(input: {
+    readonly operationId: string;
+    readonly phase: "gate-frozen" | "transfer-committed" | "cleanup-complete";
+    readonly evidence: readonly Evidence[];
+  }): Promise<DeviceAdministrationCurrentRemovalMigrationLifecycleOperation>;
+  terminal(
+    operationId: string,
+  ): Promise<DeviceAdministrationCurrentRemovalMigrationLifecycleOperation>;
+}
+
+/** Physical and Correctness effects; this port contains no phase or retry decisions. */
+export interface DeviceAdministrationCurrentRemovalMigrationEffectPort<Evidence> {
+  closeAdmission(): Promise<void>;
+  closeAcceptedWorkAdmission(operationId: string): Promise<void>;
+  freezeAcceptedWork(operationId: string): Promise<Evidence>;
+  settleAcceptedWork(input: {
+    readonly operationId: string;
+    readonly strategy: "drain";
+    readonly timeoutMs: 30_000;
+  }): Promise<void>;
+  flushDurableState(): Promise<readonly Evidence[]>;
+  settlePhysicalSteps(): Promise<void>;
+  commitTransfer(input: {
+    readonly requestId: string;
+    readonly transferId: string;
+    readonly targetDeviceId: string;
+  }): Promise<void>;
+  verifyTransfer(input: {
+    readonly transferId: string;
+    readonly targetDeviceId: string;
+  }): Promise<Evidence>;
+  retireLocalDevice(input: {
+    readonly operationId: string;
+    readonly targetDeviceId: string;
+  }): Promise<Evidence>;
+}
+
+export interface DeviceAdministrationCurrentRemovalMigrationApplication {
+  begin(input: {
+    readonly requestId: string;
+    readonly operationId: string;
+    readonly transferId: string;
+    readonly targetDeviceId: string;
+  }): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot>;
+  resumeActive(): Promise<readonly DeviceAdministrationCurrentRemovalLifecycleSnapshot[]>;
+}
+
+/** Sole owner of migration-path lifecycle progression and terminal ordering. */
+export class DeviceAdministrationCurrentRemovalMigrationApplicationService<Evidence>
+  implements DeviceAdministrationCurrentRemovalMigrationApplication
+{
+  constructor(private readonly options: {
+    readonly lifecycle: DeviceAdministrationCurrentRemovalMigrationLifecyclePort<Evidence>;
+    readonly effects: DeviceAdministrationCurrentRemovalMigrationEffectPort<Evidence>;
+  }) {}
+
+  async begin(input: {
+    readonly requestId: string;
+    readonly operationId: string;
+    readonly transferId: string;
+    readonly targetDeviceId: string;
+  }): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot> {
+    return this.#drive(await this.options.lifecycle.accept(input));
+  }
+
+  async resumeActive(): Promise<readonly DeviceAdministrationCurrentRemovalLifecycleSnapshot[]> {
+    const results: DeviceAdministrationCurrentRemovalLifecycleSnapshot[] = [];
+    for (const operation of await this.options.lifecycle.active()) {
+      results.push(await this.#drive(operation));
+    }
+    return Object.freeze(results);
+  }
+
+  async #drive(
+    initial: DeviceAdministrationCurrentRemovalMigrationLifecycleOperation,
+  ): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot> {
+    let operation = assertCurrentRemovalMigrationOperation(initial);
+    if (operation.phase === "accepted") {
+      await this.options.effects.closeAdmission();
+      await this.options.effects.closeAcceptedWorkAdmission(operation.operationId);
+      const evidence = await this.options.effects.freezeAcceptedWork(operation.operationId);
+      operation = assertCurrentRemovalMigrationOperation(await this.options.lifecycle.advance({
+        operationId: operation.operationId,
+        phase: "gate-frozen",
+        evidence: [evidence],
+      }));
+    }
+    if (operation.phase === "gate-frozen") {
+      await this.options.effects.settleAcceptedWork({
+        operationId: operation.operationId,
+        strategy: "drain",
+        timeoutMs: 30_000,
+      });
+      const flushEvidence = await this.options.effects.flushDurableState();
+      await this.options.effects.settlePhysicalSteps();
+      await this.options.effects.commitTransfer({
+        requestId: operation.requestId,
+        transferId: operation.transferId,
+        targetDeviceId: operation.targetDeviceId,
+      });
+      const transferEvidence = await this.options.effects.verifyTransfer({
+        transferId: operation.transferId,
+        targetDeviceId: operation.targetDeviceId,
+      });
+      operation = assertCurrentRemovalMigrationOperation(await this.options.lifecycle.advance({
+        operationId: operation.operationId,
+        phase: "transfer-committed",
+        evidence: [...flushEvidence, transferEvidence],
+      }));
+    }
+    if (operation.phase === "transfer-committed") {
+      const cleanupEvidence = await this.options.effects.retireLocalDevice({
+        operationId: operation.operationId,
+        targetDeviceId: operation.targetDeviceId,
+      });
+      operation = assertCurrentRemovalMigrationOperation(await this.options.lifecycle.advance({
+        operationId: operation.operationId,
+        phase: "cleanup-complete",
+        evidence: [cleanupEvidence],
+      }));
+    }
+    if (operation.phase === "cleanup-complete") {
+      operation = assertCurrentRemovalMigrationOperation(
+        await this.options.lifecycle.terminal(operation.operationId),
+      );
+    }
+    return currentRemovalMigrationSnapshot(operation);
+  }
 }
 
 export class DeviceAdministrationApplicationError extends Error {
@@ -415,6 +566,7 @@ export interface DeviceAdministrationApplicationOptions<Accepted, Abort> {
   readonly currentRemovalMigrationTargets?:
     DeviceAdministrationCurrentRemovalMigrationTargetReadPort;
   readonly currentRemovalRecoveryBackup?: DeviceAdministrationCurrentRemovalRecoveryBackupReadPort;
+  readonly currentRemovalMigration?: DeviceAdministrationCurrentRemovalMigrationApplication;
   readonly currentDeviceRemoval?: DeviceAdministrationCurrentRemovalMechanismPort;
 }
 
@@ -733,7 +885,6 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
   ): Promise<DeviceAdministrationCurrentRemovalState> {
     const requestId = requireStableText(command.requestId, "Uninstall request id");
     const operationId = requireStableText(command.operationId, "Uninstall operation id");
-    const port = this.#currentDeviceRemoval();
     let lifecycle: DeviceAdministrationCurrentRemovalLifecycleSnapshot;
     if (command.path === "migration") {
       const transferId = requireStableText(command.transferId, "Uninstall transfer id");
@@ -746,14 +897,16 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
           ? "No ready duty device has that name"
           : "More than one ready duty device has that name");
       }
-      lifecycle = await port.beginMigration({
+      const migration = this.options.currentRemovalMigration;
+      if (!migration) throw this.#currentRemovalUnavailable();
+      lifecycle = await migration.begin({
         requestId,
         operationId,
         transferId,
         targetDeviceId: requireStableText(matches[0]!.deviceId, "Duty device id"),
       });
     } else if (command.path === "recovery-backup") {
-      lifecycle = await port.beginRecoveryBackup({
+      lifecycle = await this.#currentDeviceRemoval().beginRecoveryBackup({
         requestId,
         operationId,
         recoveryPackage: requireStableText(command.recoveryPackage, "Recovery package"),
@@ -1123,6 +1276,44 @@ function projectCurrentRemovalState(
         ? Object.freeze({ phase: "moving-duty-device", nextAction: "continue" })
         : Object.freeze({ phase: "choose-safe-path", nextAction: "continue" });
   }
+}
+
+function assertCurrentRemovalMigrationOperation(
+  operation: DeviceAdministrationCurrentRemovalMigrationLifecycleOperation,
+): DeviceAdministrationCurrentRemovalMigrationLifecycleOperation {
+  if (operation.kind !== "current-device-removal" || operation.path !== "migration") {
+    throw new TypeError("Current removal migration lifecycle identity is invalid");
+  }
+  switch (operation.phase) {
+    case "accepted":
+    case "gate-frozen":
+    case "transfer-committed":
+    case "cleanup-complete":
+    case "terminal":
+    case "aborted":
+      break;
+    default:
+      throw new TypeError("Current removal migration lifecycle phase is invalid");
+  }
+  return Object.freeze({
+    kind: "current-device-removal",
+    path: "migration",
+    requestId: requireStableText(operation.requestId, "Uninstall request id"),
+    operationId: requireStableText(operation.operationId, "Uninstall operation id"),
+    transferId: requireStableText(operation.transferId, "Uninstall transfer id"),
+    targetDeviceId: requireStableText(operation.targetDeviceId, "Duty device id"),
+    phase: operation.phase,
+  });
+}
+
+function currentRemovalMigrationSnapshot(
+  operation: DeviceAdministrationCurrentRemovalMigrationLifecycleOperation,
+): DeviceAdministrationCurrentRemovalLifecycleSnapshot {
+  return Object.freeze({
+    kind: "current-device-removal",
+    path: "migration",
+    phase: operation.phase,
+  });
 }
 
 function assertCurrentRemovalLifecycle(

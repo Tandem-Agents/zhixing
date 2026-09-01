@@ -14,9 +14,20 @@ import { activateInitialRecoveryRoot } from "./mesh-pair-command.js";
 import { createCredentialExposureRecord } from "@zhixing/mesh/credential-exposure";
 import {
   HOST_STOP_ACCEPTED_WORK_OWNERS,
+  freezeHostStopAcceptedWork,
+  loadHostStopAcceptedWork,
+  settleHostStopAcceptedWork,
   type HostStopAcceptedWorkPorts,
 } from "./host-stop-lifecycle.js";
-import { protocolDigest, validateDeviceLifecycleRecord } from "@zhixing/core/protocol";
+import {
+  protocolDigest,
+  validateDeviceLifecycleRecord,
+  type DeviceLifecycleEvidenceRef,
+} from "@zhixing/core/protocol";
+import {
+  DeviceAdministrationCurrentRemovalMigrationApplicationService,
+} from "@zhixing/core/device-administration/application";
+import { DeviceLifecycleJournal } from "@zhixing/core/authority";
 
 describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
   it("uses the preselected migration target identity and only reports terminal after transfer verification and local retirement", async () => {
@@ -26,26 +37,53 @@ describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
     const verifyMigration = vi.fn(async () => undefined);
     const retireMigratedDevice = vi.fn(async () => undefined);
     const effects: string[] = [];
+    const acceptedWork = acceptedWorkPorts(effects);
     const coordinator = new AnchorUninstallCoordinator({
       ...fixture.base,
-      commitMigration,
-      verifyMigration,
-      retireMigratedDevice,
       closeAdmission,
       releaseAdmission: async () => undefined,
-      recoveryAcceptedWork: {
-        ports: acceptedWorkPorts(effects),
-        artifactStore: fixture.store.artifactStore(),
-        closeAdmission: async (operationId) => {
+      cleanupRecovery: async () => [],
+      onRetired: async () => undefined,
+    });
+    const journal = new DeviceLifecycleJournal(
+      fixture.store.authorityLog(),
+      fixture.base.verifier,
+    );
+    const migration = new DeviceAdministrationCurrentRemovalMigrationApplicationService<
+      DeviceLifecycleEvidenceRef
+    >({
+      lifecycle: migrationLifecyclePort(coordinator),
+      effects: {
+        closeAdmission,
+        closeAcceptedWorkAdmission: async (operationId) => {
           effects.push(`close:${operationId}`);
         },
-        onFrozen: async (snapshot) => {
+        freezeAcceptedWork: async (operationId) =>
+          (await freezeHostStopAcceptedWork(
+            operationId,
+            acceptedWork,
+            fixture.store.artifactStore(),
+          )).evidence,
+        settleAcceptedWork: async ({ operationId, strategy, timeoutMs }) => {
+          const operation = await journal.state(operationId);
+          if (!operation) throw new Error("expected migration lifecycle operation");
+          const snapshot = await loadHostStopAcceptedWork(
+            operation,
+            fixture.store.artifactStore(),
+          );
           effects.push(`frozen:${snapshot.operationId}`);
+          await settleHostStopAcceptedWork({
+            operationId,
+            strategy,
+            timeoutMs,
+            snapshot,
+            ports: acceptedWork,
+          });
         },
         flushDurableState: async () => {
           effects.push("flush");
           return [{
-            kind: "accepted-work" as const,
+            kind: "accepted-work",
             digest: protocolDigest("TestAnchorMigrationFlush", 1, {
               operationId: "uninstall-migration",
             }),
@@ -54,12 +92,32 @@ describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
         settlePhysicalSteps: async () => {
           effects.push("physical");
         },
+        commitTransfer: commitMigration,
+        verifyTransfer: async ({ transferId, targetDeviceId }) => {
+          await verifyMigration(targetDeviceId);
+          return {
+            kind: "authority-transfer",
+            digest: protocolDigest("AnchorUninstallMigration", 1, {
+              kind: "migration",
+              targetDeviceId,
+              transferId,
+            }),
+          };
+        },
+        retireLocalDevice: async ({ operationId, targetDeviceId }) => {
+          await retireMigratedDevice(operationId);
+          return {
+            kind: "cleanup",
+            digest: protocolDigest("MigratedAnchorCleanup", 1, {
+              operationId,
+              targetDeviceId,
+            }),
+          };
+        },
       },
-      cleanupRecovery: async () => [],
-      onRetired: async () => undefined,
     });
 
-    await expect(coordinator.beginMigration({
+    await expect(migration.begin({
       requestId: "request-migration",
       operationId: "uninstall-migration",
       transferId: "transfer-migration",
@@ -85,6 +143,74 @@ describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
       path: "migration",
       phase: "terminal",
     });
+    const migrationRecords = (await fixture.store.authorityLog()
+      .readStream<unknown>("device-lifecycle"))
+      .map((entry) => validateDeviceLifecycleRecord(entry.body));
+    expect(migrationRecords).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        t: "advanced",
+        operationId: "uninstall-migration",
+        phase: "transfer-committed",
+        evidence: expect.arrayContaining([{
+          kind: "authority-transfer",
+          digest: protocolDigest("AnchorUninstallMigration", 1, {
+            kind: "migration",
+            targetDeviceId: "target-1",
+            transferId: "transfer-migration",
+          }),
+        }]),
+      }),
+      expect.objectContaining({
+        t: "advanced",
+        operationId: "uninstall-migration",
+        phase: "cleanup-complete",
+        evidence: [{
+          kind: "cleanup",
+          digest: protocolDigest("MigratedAnchorCleanup", 1, {
+            operationId: "uninstall-migration",
+            targetDeviceId: "target-1",
+          }),
+        }],
+      }),
+      expect.objectContaining({
+        t: "terminal",
+        operationId: "uninstall-migration",
+        outcome: "retired",
+      }),
+    ]));
+    await expect(migration.begin({
+      requestId: "request-migration",
+      operationId: "uninstall-migration",
+      transferId: "transfer-migration",
+      targetDeviceId: "target-1",
+    })).resolves.toEqual({
+      kind: "current-device-removal",
+      path: "migration",
+      phase: "terminal",
+    });
+    expect(commitMigration).toHaveBeenCalledTimes(1);
+    expect(verifyMigration).toHaveBeenCalledTimes(1);
+    expect(retireMigratedDevice).toHaveBeenCalledTimes(1);
+
+    await coordinator.acceptMigration({
+      requestId: "request-resume",
+      operationId: "uninstall-resume",
+      transferId: "transfer-resume",
+      targetDeviceId: "target-2",
+    });
+    await expect(migration.resumeActive()).resolves.toEqual([{
+      kind: "current-device-removal",
+      path: "migration",
+      phase: "terminal",
+    }]);
+    await expect(coordinator.readLifecycle("uninstall-resume")).resolves.toEqual({
+      kind: "current-device-removal",
+      path: "migration",
+      phase: "terminal",
+    });
+    expect(commitMigration).toHaveBeenCalledTimes(2);
+    expect(verifyMigration).toHaveBeenCalledTimes(2);
+    expect(retireMigratedDevice).toHaveBeenCalledTimes(2);
   });
 
   it("requires a second confirmation after real backup read-back and includes the retirement decision in the final backup", async () => {
@@ -167,9 +293,6 @@ describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
     const onRetired = vi.fn(async () => undefined);
     const coordinator = new AnchorUninstallCoordinator({
       ...fixture.base,
-      commitMigration: async () => undefined,
-      verifyMigration: async () => undefined,
-      retireMigratedDevice: async () => undefined,
       checkpointOwner,
       closeAdmission: async () => undefined,
       releaseAdmission: async () => undefined,
@@ -290,9 +413,6 @@ describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
     const releaseAdmission = vi.fn(async () => undefined);
     const coordinator = new AnchorUninstallCoordinator({
       ...fixture.base,
-      commitMigration: async () => undefined,
-      verifyMigration: async () => undefined,
-      retireMigratedDevice: async () => undefined,
       closeAdmission: async () => undefined,
       releaseAdmission,
       cleanupRecovery: async () => [],
@@ -329,6 +449,24 @@ describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
     );
   });
 });
+
+function migrationLifecyclePort(coordinator: AnchorUninstallCoordinator) {
+  return {
+    accept: (input: {
+      readonly requestId: string;
+      readonly operationId: string;
+      readonly transferId: string;
+      readonly targetDeviceId: string;
+    }) => coordinator.acceptMigration(input),
+    active: () => coordinator.activeMigrations(),
+    advance: (input: {
+      readonly operationId: string;
+      readonly phase: "gate-frozen" | "transfer-committed" | "cleanup-complete";
+      readonly evidence: readonly DeviceLifecycleEvidenceRef[];
+    }) => coordinator.advanceMigration(input),
+    terminal: (operationId: string) => coordinator.terminalMigration(operationId),
+  };
+}
 
 async function createFixture() {
   const home = await createTempDir("anchor-uninstall");

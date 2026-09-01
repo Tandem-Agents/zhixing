@@ -2871,6 +2871,9 @@ export function inspectDeviceAdministrationReadOwnership(records) {
   const currentRemovalAssembly = composition.match(
     /currentRemovalContext:[\s\S]*?removalContext:/u,
   )?.[0] ?? "";
+  const currentRemovalMigrationAssembly = composition.match(
+    /const currentRemovalMigrationApplication[\s\S]*?await currentRemovalMigrationApplication\?\.resumeActive\(\);/u,
+  )?.[0] ?? "";
   const manifest = manifestText ? JSON.parse(manifestText) : {};
   const narrow = manifest.exports?.["./device-administration/application"];
   const applicationOwners = records
@@ -2913,6 +2916,17 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !application.includes("DeviceAdministrationCurrentRemovalRecoveryBackupReadPort") ||
     !application.includes("DeviceAdministrationCurrentRemovalMechanismPort") ||
     !application.includes("DeviceAdministrationCurrentRemovalLifecycleSnapshot") ||
+    !application.includes("class DeviceAdministrationCurrentRemovalMigrationApplicationService") ||
+    !application.includes("DeviceAdministrationCurrentRemovalMigrationLifecyclePort<Evidence>") ||
+    !application.includes("DeviceAdministrationCurrentRemovalMigrationEffectPort<Evidence>") ||
+    !application.includes('if (operation.phase === "accepted")') ||
+    !application.includes('if (operation.phase === "gate-frozen")') ||
+    !application.includes('if (operation.phase === "transfer-committed")') ||
+    !application.includes('if (operation.phase === "cleanup-complete")') ||
+    !application.includes("return this.#drive(await this.options.lifecycle.accept(input));") ||
+    !application.includes("results.push(await this.#drive(operation));") ||
+    !application.includes('strategy: "drain"') ||
+    !application.includes("timeoutMs: 30_000") ||
     !application.includes("projectCurrentRemovalState(") ||
     !application.includes("assertCurrentRemovalCancellationEligible(") ||
     !application.includes("assertCurrentRemovalCancellationEligible(lifecycle);") ||
@@ -2953,12 +2967,12 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !composition.includes("currentRemovalContext: {") ||
     !composition.includes("currentRemovalMigrationTargets: {") ||
     !composition.includes("currentRemovalRecoveryBackup: {") ||
+    !composition.includes("currentRemovalMigration: currentRemovalMigrationApplication") ||
     !composition.includes("currentDeviceRemoval: {") ||
     !composition.includes("bootstrap.mesh.bootstrapStore.loadTrustRecord()") ||
     !composition.includes("lifecycleJournal.active()") ||
     !composition.includes("ctx.authorityCheckpointOwner.status()") ||
     !composition.includes("anchorUninstall.beginRecoveryBackup(input)") ||
-    !composition.includes("anchorUninstall.beginMigration(input)") ||
     !composition.includes("anchorUninstall.confirmRecoveryBackup(") ||
     !composition.includes("anchorUninstall.abort(input.operationId)") ||
     !composition.includes("anchorUninstall.readLifecycle(input.operationId)") ||
@@ -2980,12 +2994,36 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     uninstallCoordinator.includes("async preflight(") ||
     uninstallCoordinator.includes("migrationTargets:") ||
     uninstallCoordinator.includes("readonly targetName: string") ||
-    !uninstallCoordinator.includes("async beginMigration(input:") ||
+    !uninstallCoordinator.includes("async acceptMigration(input:") ||
     !uninstallCoordinator.includes("readonly targetDeviceId: string") ||
     !uninstallCoordinator.includes("targetDeviceId: input.targetDeviceId") ||
     !uninstallCoordinator.includes("const trust = await this.#assertCurrentAuthority();")
   ) {
     failures.push("Anchor uninstall migration mechanism regained product path selection");
+  }
+  if (
+    composition.split("new DeviceAdministrationCurrentRemovalMigrationApplicationService<").length -
+        1 !== 1 ||
+    !composition.includes("accept: (input) => anchorUninstall.acceptMigration(input)") ||
+    !composition.includes("active: () => anchorUninstall.activeMigrations()") ||
+    !composition.includes("advance: (input) => anchorUninstall.advanceMigration(input)") ||
+    !composition.includes("terminal: (operationId) => anchorUninstall.terminalMigration(operationId)") ||
+    !composition.includes("await currentRemovalMigrationApplication?.resumeActive();") ||
+    !composition.includes("await anchorUninstall?.resumeRecoveryActive();") ||
+    currentRemovalMigrationAssembly.includes("operation.phase") ||
+    composition.includes("anchorUninstall.beginMigration(") ||
+    composition.includes("anchorUninstall.resumeActive(") ||
+    uninstallCoordinator.includes("#driveMigration(") ||
+    uninstallCoordinator.includes("async resumeActive(") ||
+    uninstallCoordinator.includes("commitMigration:") ||
+    uninstallCoordinator.includes("verifyMigration:") ||
+    uninstallCoordinator.includes("retireMigratedDevice:") ||
+    !uninstallCoordinator.includes("async activeMigrations()") ||
+    !uninstallCoordinator.includes("async advanceMigration(input:") ||
+    !uninstallCoordinator.includes("async terminalMigration(") ||
+    !uninstallCoordinator.includes("async resumeRecoveryActive()")
+  ) {
+    failures.push("Device Administration migration lifecycle has a second phase owner");
   }
   if (
     uninstallCoordinator.includes("AnchorUninstallPublicState") ||

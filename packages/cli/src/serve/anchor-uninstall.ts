@@ -41,6 +41,8 @@ import type { ArtifactStore } from "@zhixing/core/authority";
 import type {
   DeviceAdministrationCurrentRemovalLifecyclePhase,
   DeviceAdministrationCurrentRemovalLifecycleSnapshot,
+  DeviceAdministrationCurrentRemovalMigrationLifecycleOperation,
+  DeviceAdministrationCurrentRemovalMigrationPhase,
 } from "@zhixing/core/device-administration/application";
 
 interface UninstallProjection {
@@ -59,13 +61,6 @@ export class AnchorUninstallCoordinator {
     readonly issuerKey: DeviceKey;
     readonly verifier: ProtocolSignatureVerifier;
     readonly anchorEpoch: () => number;
-    readonly commitMigration: (input: {
-      readonly requestId: string;
-      readonly transferId: string;
-      readonly targetDeviceId: string;
-    }) => Promise<void>;
-    readonly verifyMigration: (targetDeviceId: string) => Promise<void>;
-    readonly retireMigratedDevice: (operationId: string) => Promise<void>;
     readonly checkpointOwner?: AuthorityCheckpointOwnerPort;
     readonly closeAdmission: () => Promise<void>;
     readonly releaseAdmission: (operationId: string) => void | Promise<void>;
@@ -86,12 +81,12 @@ export class AnchorUninstallCoordinator {
     this.#journal = new DeviceLifecycleJournal(options.log, options.verifier);
   }
 
-  async beginMigration(input: {
+  async acceptMigration(input: {
     readonly requestId: string;
     readonly operationId: string;
     readonly transferId: string;
     readonly targetDeviceId: string;
-  }): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot> {
+  }): Promise<DeviceAdministrationCurrentRemovalMigrationLifecycleOperation> {
     const trust = await this.#assertCurrentAuthority();
     const identity = Object.freeze({
       v: 1,
@@ -108,8 +103,41 @@ export class AnchorUninstallCoordinator {
         transferId: input.transferId,
       }),
     }) satisfies AnchorUninstallLifecycleIdentity;
-    await this.#journal.accept(identity);
-    return this.#driveMigration(identity);
+    return currentRemovalMigrationLifecycleOperation(await this.#journal.accept(identity));
+  }
+
+  async activeMigrations(): Promise<
+    readonly DeviceAdministrationCurrentRemovalMigrationLifecycleOperation[]
+  > {
+    return Object.freeze((await this.#journal.active())
+      .filter((operation) =>
+        operation.identity.kind === "anchor-uninstall" &&
+        operation.identity.path.kind === "migration")
+      .map(currentRemovalMigrationLifecycleOperation));
+  }
+
+  async advanceMigration(input: {
+    readonly operationId: string;
+    readonly phase: "gate-frozen" | "transfer-committed" | "cleanup-complete";
+    readonly evidence: readonly DeviceLifecycleEvidenceRef[];
+  }): Promise<DeviceAdministrationCurrentRemovalMigrationLifecycleOperation> {
+    const operation = await this.#requireMigrationOperation(input.operationId);
+    return currentRemovalMigrationLifecycleOperation(await this.#journal.advance(
+      operation.identity.operationId,
+      input.phase,
+      input.evidence,
+    ));
+  }
+
+  async terminalMigration(
+    operationId: string,
+  ): Promise<DeviceAdministrationCurrentRemovalMigrationLifecycleOperation> {
+    const operation = await this.#requireMigrationOperation(operationId);
+    return currentRemovalMigrationLifecycleOperation(await this.#journal.terminal(
+      operation.identity.operationId,
+      "retired",
+      operation.evidence,
+    ));
   }
 
   async beginRecoveryBackup(input: {
@@ -201,12 +229,10 @@ export class AnchorUninstallCoordinator {
     return currentRemovalLifecycleSnapshot(operation);
   }
 
-  async resumeActive(): Promise<void> {
+  async resumeRecoveryActive(): Promise<void> {
     for (let operation of await this.#journal.active()) {
       if (operation.identity.kind !== "anchor-uninstall") continue;
-      if (operation.identity.path.kind === "migration") {
-        await this.#driveMigration(operation.identity);
-      } else {
+      if (operation.identity.path.kind === "recovery-backup") {
         if (operation.phase === "accepted") {
           await this.options.closeAdmission();
           await this.#journal.advance(operation.identity.operationId, "gate-frozen", [{
@@ -243,76 +269,6 @@ export class AnchorUninstallCoordinator {
         }
       }
     }
-  }
-
-  async #driveMigration(
-    identity: AnchorUninstallLifecycleIdentity,
-  ): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot> {
-    if (identity.path.kind !== "migration") {
-      throw new Error("Anchor uninstall path is not a migration");
-    }
-    const path = identity.path;
-    let operation = await this.#requireOperation(identity.operationId);
-    if (operation.phase === "accepted") {
-      await this.options.closeAdmission();
-      const closure = this.#requireRecoveryAcceptedWork();
-      await closure.closeAdmission(identity.operationId);
-      const frozen = await freezeHostStopAcceptedWork(
-        identity.operationId,
-        closure.ports,
-        closure.artifactStore,
-      );
-      operation = await this.#journal.advance(
-        identity.operationId,
-        "gate-frozen",
-        [frozen.evidence],
-      );
-    }
-    if (operation.phase === "gate-frozen") {
-      const closure = this.#requireRecoveryAcceptedWork();
-      const snapshot = await loadHostStopAcceptedWork(operation, closure.artifactStore);
-      await closure.onFrozen?.(snapshot);
-      await settleHostStopAcceptedWork({
-        operationId: identity.operationId,
-        strategy: "drain",
-        timeoutMs: 30_000,
-        snapshot,
-        ports: closure.ports,
-      });
-      const flushEvidence = await closure.flushDurableState();
-      await closure.settlePhysicalSteps();
-      await this.options.commitMigration({
-        requestId: identity.requestId,
-        transferId: path.transferId,
-        targetDeviceId: path.targetDeviceId,
-      });
-      await this.options.verifyMigration(path.targetDeviceId);
-      operation = await this.#journal.advance(identity.operationId, "transfer-committed", [
-        ...flushEvidence,
-        {
-          kind: "authority-transfer",
-          digest: protocolDigest("AnchorUninstallMigration", 1, path),
-        },
-      ]);
-    }
-    if (operation.phase === "transfer-committed") {
-      await this.options.retireMigratedDevice(identity.operationId);
-      operation = await this.#journal.advance(identity.operationId, "cleanup-complete", [{
-        kind: "cleanup",
-        digest: protocolDigest("MigratedAnchorCleanup", 1, {
-          operationId: identity.operationId,
-          targetDeviceId: path.targetDeviceId,
-        }),
-      }]);
-    }
-    if (operation.phase === "cleanup-complete") {
-      operation = await this.#journal.terminal(
-        identity.operationId,
-        "retired",
-        operation.evidence,
-      );
-    }
-    return currentRemovalLifecycleSnapshot(operation);
   }
 
   async #driveRecovery(
@@ -595,6 +551,53 @@ export class AnchorUninstallCoordinator {
       throw new Error("Anchor uninstall operation is unknown");
     }
     return operation;
+  }
+
+  async #requireMigrationOperation(operationId: string): Promise<DeviceLifecycleOperation> {
+    const operation = await this.#requireOperation(operationId);
+    if (
+      operation.identity.kind !== "anchor-uninstall" ||
+      operation.identity.path.kind !== "migration"
+    ) {
+      throw new Error("Anchor uninstall path is not a migration");
+    }
+    return operation;
+  }
+}
+
+function currentRemovalMigrationLifecycleOperation(
+  operation: DeviceLifecycleOperation,
+): DeviceAdministrationCurrentRemovalMigrationLifecycleOperation {
+  if (
+    operation.identity.kind !== "anchor-uninstall" ||
+    operation.identity.path.kind !== "migration"
+  ) {
+    throw new TypeError("Anchor migration lifecycle requires a migration operation");
+  }
+  return Object.freeze({
+    kind: "current-device-removal",
+    path: "migration",
+    requestId: operation.identity.requestId,
+    operationId: operation.identity.operationId,
+    transferId: operation.identity.path.transferId,
+    targetDeviceId: operation.identity.path.targetDeviceId,
+    phase: currentRemovalMigrationPhase(operation.phase),
+  });
+}
+
+function currentRemovalMigrationPhase(
+  phase: DeviceLifecycleOperation["phase"],
+): DeviceAdministrationCurrentRemovalMigrationPhase {
+  switch (phase) {
+    case "accepted":
+    case "gate-frozen":
+    case "transfer-committed":
+    case "cleanup-complete":
+    case "terminal":
+    case "aborted":
+      return phase;
+    default:
+      throw new TypeError("Anchor migration lifecycle phase is invalid");
   }
 }
 
