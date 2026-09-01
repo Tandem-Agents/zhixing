@@ -12,6 +12,7 @@ import type {
   BackupRecoveryCurrentRemovalPermit,
   BackupRecoveryCurrentRemovalStatus,
 } from "../backup-recovery/application.js";
+import type { CredentialExposureRecord } from "../contracts/index.js";
 
 export interface DeviceAdministrationRelationship {
   readonly displayName: string;
@@ -324,7 +325,24 @@ export interface DeviceAdministrationCurrentRemovalMigrationTargetReadPort {
   list(): Promise<readonly DeviceAdministrationCurrentRemovalMigrationTarget[]>;
 }
 
-/** Temporary one-way mechanism bridge to the existing durable uninstall coordinator. */
+/** Device-owned decision used by the atomic retirement Correctness adapter. */
+export function decideCurrentDeviceRetirementCredentialExposures(input: {
+  readonly records: readonly CredentialExposureRecord[];
+  readonly currentDeviceId: string;
+  readonly markedAt: string;
+}): readonly CredentialExposureRecord[] {
+  return Object.freeze(input.records
+    .filter((record) =>
+      record.deviceId === input.currentDeviceId && record.state === "active")
+    .map((record) => Object.freeze({
+      ...record,
+      state: "compromised" as const,
+      markedAt: input.markedAt,
+      rotationHint: record.rotationHint ?? "Rotate this external account credential",
+    })));
+}
+
+/** Signed journal mechanism. Product cancellation eligibility stays in the application. */
 export interface DeviceAdministrationCurrentRemovalMechanismPort {
   abort(input: {
     readonly operationId: string;

@@ -82,6 +82,11 @@ import {
   DeviceAdministrationCurrentRemovalMigrationApplicationService,
   DeviceAdministrationCurrentRemovalRecoveryApplicationService,
 } from "@zhixing/core/device-administration/application";
+import {
+  createDeviceAdministrationCurrentRemovalMechanismPort,
+  createDeviceAdministrationCurrentRemovalMigrationLifecyclePort,
+  createDeviceAdministrationCurrentRemovalRecoveryLifecyclePort,
+} from "@zhixing/core/device-administration/correctness";
 import { BackupRecoveryCurrentRemovalApplicationService } from "@zhixing/core/backup-recovery/application";
 import {
   defineProductApiExactSet,
@@ -96,6 +101,7 @@ import {
 } from "@zhixing/core/workscene/application";
 import { DeviceLifecycleJournal } from "@zhixing/core/authority";
 import {
+  createSignedDeviceLifecycleAbort,
   protocolDigest,
   type DeviceLifecycleEvidenceRef,
   type StopHostGeneration,
@@ -233,7 +239,10 @@ import {
 } from "./managed-service.js";
 import { cleanupExecutorDeviceLocalState } from "./device-removal-cleanup.js";
 import { loadExecutorRemovalLifecycleDecision } from "./device-removal.js";
-import { AnchorUninstallCoordinator } from "./anchor-uninstall.js";
+import {
+  commitCurrentDeviceRetirementTransaction,
+  readCurrentDeviceRemovalPhaseLsn,
+} from "./current-device-retirement-transaction.js";
 import { createMeshCompatibilityStateProjection } from "./mesh-compatibility-state.js";
 import { buildManagedHostPublicStatus } from "./status.js";
 import { createHostDefaultWorkspaceProjection } from "./host-default-workspace.js";
@@ -253,6 +262,7 @@ import {
   decodeRecoveryPackage,
   requireCurrentRecoveryPackage,
 } from "@zhixing/mesh/recovery-package";
+import { replayTrustChain } from "@zhixing/mesh/trust-chain";
 import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
 import {
   createAnchorInternalStopPort,
@@ -1895,7 +1905,7 @@ async function runServerProcess(
     await ctx.deliveryStack?.quiesceForAuthorityTransfer();
     await settleScheduleForTransfer();
   };
-  const anchorUninstallAcceptedWork = {
+  const currentRemovalAcceptedWork = {
     ports: acceptedWork,
     artifactStore: bootstrap.mesh.bootstrapStore.artifactStore(),
     closeAdmission: async (operationId: string) => {
@@ -1935,14 +1945,57 @@ async function runServerProcess(
       await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
     },
   };
-  const anchorUninstall = ctx.meshRuntime && uninstallIssuerKey
-    ? new AnchorUninstallCoordinator({
-        log: lifecycleAuthorityLog,
-        store: bootstrap.mesh.bootstrapStore,
-        currentDeviceId: bootstrap.mesh.deviceKey.deviceId,
-        issuerKey: uninstallIssuerKey,
-        verifier: ctx.authorityRuntime!.verifier,
-        anchorEpoch: () => ctx.authorityRuntime!.anchorEpoch,
+  const currentRemovalJournal = ctx.meshRuntime && uninstallIssuerKey
+    ? new DeviceLifecycleJournal(lifecycleAuthorityLog, ctx.authorityRuntime!.verifier)
+    : undefined;
+  const readCurrentRemovalAuthority = currentRemovalJournal && uninstallIssuerKey
+    ? async () => {
+        const trust = replayTrustChain(await bootstrap.mesh.bootstrapStore.loadTrustEvents());
+        return Object.freeze({
+          homeId: trust.homeId,
+          localDeviceId: bootstrap.mesh.deviceKey.deviceId,
+          currentDutyDeviceId: trust.issuer.deviceId,
+          localIssuerKeyId: uninstallIssuerKey.deviceId,
+          currentDutyIssuerKeyId: trust.issuer.issuerKeyId,
+          currentDeviceName: trust.members.find((member) =>
+            member.device.deviceId === bootstrap.mesh.deviceKey.deviceId)
+            ?.device.displayName,
+          anchorEpoch: ctx.authorityRuntime!.anchorEpoch,
+          trustHeadDigest: trust.chainHead.eventDigest,
+          executorRemovalInProgress: (await currentRemovalJournal.active())
+            .some((operation) => operation.identity.kind === "executor-removal"),
+        });
+      }
+    : undefined;
+  const currentRemovalMigrationLifecycle = currentRemovalJournal && readCurrentRemovalAuthority
+    ? createDeviceAdministrationCurrentRemovalMigrationLifecyclePort({
+        journal: currentRemovalJournal,
+        readAuthority: readCurrentRemovalAuthority,
+      })
+    : undefined;
+  const currentRemovalRecoveryLifecycle = currentRemovalJournal && readCurrentRemovalAuthority
+    ? createDeviceAdministrationCurrentRemovalRecoveryLifecyclePort({
+        journal: currentRemovalJournal,
+        readAuthority: readCurrentRemovalAuthority,
+        commitRetirement: ({ identity, acceptedWork }) =>
+          commitCurrentDeviceRetirementTransaction({
+            log: lifecycleAuthorityLog,
+            verifier: ctx.authorityRuntime!.verifier,
+            identity,
+            acceptedWork,
+          }),
+        phaseLsn: ({ operationId, phase }) =>
+          readCurrentDeviceRemovalPhaseLsn({
+            log: lifecycleAuthorityLog,
+            operationId,
+            phase,
+          }),
+      })
+    : undefined;
+  const currentDeviceRemoval = currentRemovalJournal && uninstallIssuerKey
+    ? createDeviceAdministrationCurrentRemovalMechanismPort({
+        journal: currentRemovalJournal,
+        signAbort: (input) => createSignedDeviceLifecycleAbort(input, uninstallIssuerKey),
         releaseAdmission: async (operationId) => {
           await ctx.deliveryStack?.lifecycle.release(operationId);
           await ctx.deliveryStack?.lifecycle.resume();
@@ -1953,7 +2006,7 @@ async function runServerProcess(
         },
       })
     : undefined;
-  const currentRemovalRecoveryApplication = anchorUninstall
+  const currentRemovalRecoveryApplication = currentRemovalRecoveryLifecycle
     ? new DeviceAdministrationCurrentRemovalRecoveryApplicationService<
         DeviceLifecycleEvidenceRef
       >({
@@ -2020,17 +2073,7 @@ async function runServerProcess(
             });
           },
         }),
-        lifecycle: {
-          assertBeginAdmission: () => anchorUninstall.assertRecoveryBeginAdmission(),
-          assertCurrentAuthority: () => anchorUninstall.assertCurrentAuthority(),
-          accept: (input) => anchorUninstall.acceptRecovery(input),
-          state: (operationId) => anchorUninstall.recoveryState(operationId),
-          active: () => anchorUninstall.activeRecoveries(),
-          advance: (input) => anchorUninstall.advanceRecovery(input),
-          commitRetirement: (input) => anchorUninstall.commitRecoveryRetirement(input),
-          phaseLsn: (input) => anchorUninstall.recoveryPhaseLsn(input),
-          terminal: (operationId) => anchorUninstall.terminalRecovery(operationId),
-        },
+        lifecycle: currentRemovalRecoveryLifecycle,
         effects: {
           closeAdmission: async (operationId) => {
             await closeAnchorUninstallAdmission();
@@ -2043,12 +2086,12 @@ async function runServerProcess(
               digest: protocolDigest("AnchorUninstallAdmission", 1, operation.identity),
             });
           },
-          closeAcceptedWorkAdmission: anchorUninstallAcceptedWork.closeAdmission,
+          closeAcceptedWorkAdmission: currentRemovalAcceptedWork.closeAdmission,
           freezeAcceptedWork: async (operationId) =>
             (await freezeHostStopAcceptedWork(
               operationId,
-              anchorUninstallAcceptedWork.ports,
-              anchorUninstallAcceptedWork.artifactStore,
+              currentRemovalAcceptedWork.ports,
+              currentRemovalAcceptedWork.artifactStore,
             )).evidence,
           restoreAcceptedWork: async (operationId) => {
             const operation = await lifecycleJournal.state(operationId);
@@ -2059,10 +2102,10 @@ async function runServerProcess(
             ) {
               throw new Error("Anchor uninstall recovery operation is unknown");
             }
-            await anchorUninstallAcceptedWork.onFrozen(
+            await currentRemovalAcceptedWork.onFrozen(
               await loadHostStopAcceptedWork(
                 operation,
-                anchorUninstallAcceptedWork.artifactStore,
+                currentRemovalAcceptedWork.artifactStore,
               ),
             );
           },
@@ -2077,14 +2120,14 @@ async function runServerProcess(
             }
             const snapshot = await loadHostStopAcceptedWork(
               operation,
-              anchorUninstallAcceptedWork.artifactStore,
+              currentRemovalAcceptedWork.artifactStore,
             );
             await settleHostStopAcceptedWork({
               operationId,
               strategy,
               timeoutMs,
               snapshot,
-              ports: anchorUninstallAcceptedWork.ports,
+              ports: currentRemovalAcceptedWork.ports,
             });
             const artifact = operation.evidence.filter((item) =>
               item.kind === "accepted-work" && item.artifact);
@@ -2099,31 +2142,26 @@ async function runServerProcess(
               }),
             });
           },
-          flushDurableState: anchorUninstallAcceptedWork.flushDurableState,
-          settlePhysicalSteps: anchorUninstallAcceptedWork.settlePhysicalSteps,
+          flushDurableState: currentRemovalAcceptedWork.flushDurableState,
+          settlePhysicalSteps: currentRemovalAcceptedWork.settlePhysicalSteps,
           cleanup: cleanupLocalDevice,
           onRetired: finishLocalRetirement,
         },
       })
     : undefined;
-  const currentRemovalMigrationApplication = anchorUninstall && ctx.meshRuntime
+  const currentRemovalMigrationApplication = currentRemovalMigrationLifecycle && ctx.meshRuntime
     ? new DeviceAdministrationCurrentRemovalMigrationApplicationService<
         DeviceLifecycleEvidenceRef
       >({
-        lifecycle: {
-          accept: (input) => anchorUninstall.acceptMigration(input),
-          active: () => anchorUninstall.activeMigrations(),
-          advance: (input) => anchorUninstall.advanceMigration(input),
-          terminal: (operationId) => anchorUninstall.terminalMigration(operationId),
-        },
+        lifecycle: currentRemovalMigrationLifecycle,
         effects: {
           closeAdmission: closeAnchorUninstallAdmission,
-          closeAcceptedWorkAdmission: anchorUninstallAcceptedWork.closeAdmission,
+          closeAcceptedWorkAdmission: currentRemovalAcceptedWork.closeAdmission,
           freezeAcceptedWork: async (operationId) =>
             (await freezeHostStopAcceptedWork(
               operationId,
-              anchorUninstallAcceptedWork.ports,
-              anchorUninstallAcceptedWork.artifactStore,
+              currentRemovalAcceptedWork.ports,
+              currentRemovalAcceptedWork.artifactStore,
             )).evidence,
           settleAcceptedWork: async ({ operationId, strategy, timeoutMs }) => {
             const operation = await lifecycleJournal.state(operationId);
@@ -2136,19 +2174,19 @@ async function runServerProcess(
             }
             const snapshot = await loadHostStopAcceptedWork(
               operation,
-              anchorUninstallAcceptedWork.artifactStore,
+              currentRemovalAcceptedWork.artifactStore,
             );
-            await anchorUninstallAcceptedWork.onFrozen(snapshot);
+            await currentRemovalAcceptedWork.onFrozen(snapshot);
             await settleHostStopAcceptedWork({
               operationId,
               strategy,
               timeoutMs,
               snapshot,
-              ports: anchorUninstallAcceptedWork.ports,
+              ports: currentRemovalAcceptedWork.ports,
             });
           },
-          flushDurableState: anchorUninstallAcceptedWork.flushDurableState,
-          settlePhysicalSteps: anchorUninstallAcceptedWork.settlePhysicalSteps,
+          flushDurableState: currentRemovalAcceptedWork.flushDurableState,
+          settlePhysicalSteps: currentRemovalAcceptedWork.settlePhysicalSteps,
           commitTransfer: async (input) => {
             await ctx.meshRuntime!.preparePlannedAnchorTransfer(input);
             await ctx.meshRuntime!.commitPlannedAnchorTransfer(input);
@@ -2417,22 +2455,20 @@ async function runServerProcess(
               await ctx.meshRuntime!.abortPlannedAnchorTransfer(input);
             },
           },
-          ...(anchorUninstall && uninstallIssuerKey
+          ...(currentDeviceRemoval && readCurrentRemovalAuthority
             ? {
                 currentRemovalContext: {
                   read: async () => {
-                    const trust = await bootstrap.mesh.bootstrapStore.loadTrustRecord();
-                    if (!trust) throw new Error("Current home trust is unavailable");
+                    const authority = await readCurrentRemovalAuthority();
                     return Object.freeze({
-                      localDeviceId: bootstrap.mesh.deviceKey.deviceId,
-                      currentDutyDeviceId: trust.issuer.deviceId,
-                      localIssuerKeyId: uninstallIssuerKey.deviceId,
-                      currentDutyIssuerKeyId: trust.issuer.issuerKeyId,
-                      currentDeviceName: trust.members.find((member) =>
-                        member.device.deviceId === bootstrap.mesh.deviceKey.deviceId)
-                        ?.device.displayName,
-                      executorRemovalInProgress: (await lifecycleJournal.active())
-                        .some((operation) => operation.identity.kind === "executor-removal"),
+                      localDeviceId: authority.localDeviceId,
+                      currentDutyDeviceId: authority.currentDutyDeviceId,
+                      localIssuerKeyId: authority.localIssuerKeyId,
+                      currentDutyIssuerKeyId: authority.currentDutyIssuerKeyId,
+                      ...(authority.currentDeviceName
+                        ? { currentDeviceName: authority.currentDeviceName }
+                        : {}),
+                      executorRemovalInProgress: authority.executorRemovalInProgress,
                     });
                   },
                 },
@@ -2445,12 +2481,7 @@ async function runServerProcess(
                 ...(currentRemovalRecoveryApplication
                   ? { currentRemovalRecovery: currentRemovalRecoveryApplication }
                   : {}),
-                currentDeviceRemoval: {
-                  abort: (input: { readonly operationId: string }) =>
-                    anchorUninstall.abort(input.operationId),
-                  read: (input: { readonly operationId: string }) =>
-                    anchorUninstall.readLifecycle(input.operationId),
-                },
+                currentDeviceRemoval,
               }
             : {}),
           removalContext: {

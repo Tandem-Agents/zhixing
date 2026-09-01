@@ -120,6 +120,10 @@
       "types": "./dist/device-administration/application.d.ts",
       "import": "./dist/device-administration/application.js"
     },
+    "./device-administration/correctness": {
+      "types": "./dist/device-administration/correctness.d.ts",
+      "import": "./dist/device-administration/correctness.js"
+    },
     "./backup-recovery/application": {
       "types": "./dist/backup-recovery/application.d.ts",
       "import": "./dist/backup-recovery/application.js"

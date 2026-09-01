@@ -2380,7 +2380,8 @@ test("Device Administration reads, paired/current removal and duty migration hav
     "packages/server/src/rpc/methods/server.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/mesh-runtime-assembly.ts",
-    "packages/cli/src/serve/anchor-uninstall.ts",
+    "packages/core/src/device-administration/correctness.ts",
+    "packages/cli/src/serve/current-device-retirement-transaction.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -2389,6 +2390,16 @@ test("Device Administration reads, paired/current removal and duty migration hav
   assert.deepEqual(inspectDeviceAdministrationReadOwnership(records), []);
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership([
+      ...records,
+      {
+        relative: "packages/cli/src/serve/anchor-uninstall.ts",
+        text: "export class AnchorUninstallCoordinator {}",
+      },
+    ]).join("\n"),
+    /coordinator or product path selection returned/,
   );
   assert.match(
     inspectDeviceAdministrationReadOwnership(mutate(
@@ -2476,46 +2487,43 @@ test("Device Administration reads, paired/current removal and duty migration hav
   );
   assert.match(
     inspectDeviceAdministrationReadOwnership(mutate(
-      "packages/cli/src/serve/anchor-uninstall.ts",
-      (text) => `${text}\nclass LegacyUninstall { async preflight() {} }`,
+      "packages/core/src/device-administration/correctness.ts",
+      (text) => `${text}\nclass CurrentRemovalCoordinator { async acceptMigration() {} async acceptRecovery() {} }`,
     )).join("\n"),
-    /migration mechanism regained product path selection/,
+    /coordinator or product path selection returned/,
   );
   assert.match(
     inspectDeviceAdministrationReadOwnership(mutate(
-      "packages/cli/src/serve/anchor-uninstall.ts",
+      "packages/core/src/device-administration/correctness.ts",
       (text) => `${text}\ntype LegacyMigrationInput = { readonly targetName: string };`,
     )).join("\n"),
-    /migration mechanism regained product path selection/,
+    /coordinator or product path selection returned/,
   );
   assert.match(
     inspectDeviceAdministrationReadOwnership(mutate(
-      "packages/cli/src/serve/anchor-uninstall.ts",
-      (text) => `${text}\nfunction projectState() { return { phase: "uninstalled" }; }`,
+      "packages/core/src/device-administration/correctness.ts",
+      (text) => `${text}\nfunction projectState() { return { nextAction: "continue" }; }`,
     )).join("\n"),
-    /mechanism regained product state or cancellation decisions/,
+    /correctness regained product state/,
   );
   assert.match(
     inspectDeviceAdministrationReadOwnership(mutate(
-      "packages/cli/src/serve/anchor-uninstall.ts",
+      "packages/core/src/device-administration/correctness.ts",
       (text) => `${text}\nclass LegacyMigrationDrive { #driveMigration() { return undefined; } }`,
     )).join("\n"),
     /migration lifecycle has a second phase owner/,
   );
   assert.match(
     inspectDeviceAdministrationReadOwnership(mutate(
-      "packages/cli/src/serve/anchor-uninstall.ts",
+      "packages/core/src/device-administration/correctness.ts",
       (text) => `${text}\nclass LegacyRecoveryDrive { #driveRecovery() { return undefined; } }`,
     )).join("\n"),
     /recovery ownership drifted/,
   );
   assert.match(
     inspectDeviceAdministrationReadOwnership(mutate(
-      "packages/cli/src/serve/command.ts",
-      (text) => text.replace(
-        "active: () => anchorUninstall.activeRecoveries(),",
-        "active: () => anchorUninstall.activeRecoveries().then((items) => items.filter((operation) => operation.phase !== 'flushed')),",
-      ),
+      "packages/cli/src/serve/current-device-retirement-transaction.ts",
+      (text) => text.replace("decideCurrentDeviceRetirementCredentialExposures({", "legacyExposureDecision({"),
     )).join("\n"),
     /recovery ownership drifted/,
   );
@@ -2564,8 +2572,8 @@ test("Device Administration reads, paired/current removal and duty migration hav
     inspectDeviceAdministrationReadOwnership(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "currentDeviceRemoval: {",
-        'currentDeviceRemoval: { nextAction: "continue",',
+        "currentDeviceRemoval,",
+        'currentDeviceRemoval: { ...currentDeviceRemoval, nextAction: "continue" },',
       ),
     )).join("\n"),
     /unique Host application composition drifted/,

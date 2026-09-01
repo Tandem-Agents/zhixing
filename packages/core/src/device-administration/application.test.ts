@@ -19,7 +19,64 @@ import {
   DeviceAdministrationApplicationService,
   DeviceAdministrationCurrentRemovalMigrationApplicationService,
   DeviceAdministrationCurrentRemovalRecoveryApplicationService,
+  decideCurrentDeviceRetirementCredentialExposures,
 } from "./application.js";
+
+describe("current device retirement credential exposure decision", () => {
+  it("compromises only active exposures owned by the retiring device", () => {
+    const decided = decideCurrentDeviceRetirementCredentialExposures({
+      records: [
+        {
+          deviceId: "device-current",
+          bindingId: "binding-default",
+          service: "provider",
+          state: "active",
+          markedAt: "2026-09-01T00:00:00.000Z",
+        },
+        {
+          deviceId: "device-current",
+          bindingId: "binding-preserved",
+          service: "provider",
+          state: "active",
+          markedAt: "2026-09-01T00:00:00.000Z",
+          rotationHint: "Rotate from the provider console",
+        },
+        {
+          deviceId: "device-other",
+          bindingId: "binding-other",
+          service: "provider",
+          state: "active",
+          markedAt: "2026-09-01T00:00:00.000Z",
+        },
+        {
+          deviceId: "device-current",
+          bindingId: "binding-closed",
+          service: "provider",
+          state: "rotated",
+          markedAt: "2026-09-01T00:00:00.000Z",
+        },
+      ],
+      currentDeviceId: "device-current",
+      markedAt: "2026-09-01T00:01:00.000Z",
+    });
+
+    expect(decided).toEqual([
+      expect.objectContaining({
+        bindingId: "binding-default",
+        state: "compromised",
+        markedAt: "2026-09-01T00:01:00.000Z",
+        rotationHint: "Rotate this external account credential",
+      }),
+      expect.objectContaining({
+        bindingId: "binding-preserved",
+        state: "compromised",
+        rotationHint: "Rotate from the provider console",
+      }),
+    ]);
+    expect(Object.isFrozen(decided)).toBe(true);
+    expect(decided.every(Object.isFrozen)).toBe(true);
+  });
+});
 
 function fixture() {
   const relationships = {

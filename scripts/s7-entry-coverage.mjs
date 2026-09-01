@@ -2860,6 +2860,9 @@ export function inspectDeviceAdministrationReadOwnership(records) {
   const application = required(
     "packages/core/src/device-administration/application.ts",
   );
+  const correctness = required(
+    "packages/core/src/device-administration/correctness.ts",
+  );
   const backupRecovery = required(
     "packages/core/src/backup-recovery/application.ts",
   );
@@ -2870,7 +2873,9 @@ export function inspectDeviceAdministrationReadOwnership(records) {
   const handler = required("packages/server/src/rpc/methods/server.ts");
   const composition = required("packages/cli/src/serve/command.ts");
   const mesh = required("packages/cli/src/serve/mesh-runtime-assembly.ts");
-  const uninstallCoordinator = required("packages/cli/src/serve/anchor-uninstall.ts");
+  const retirementTransaction = required(
+    "packages/cli/src/serve/current-device-retirement-transaction.ts",
+  );
   const currentRemovalAssembly = composition.match(
     /currentRemovalContext:[\s\S]*?removalContext:/u,
   )?.[0] ?? "";
@@ -2882,6 +2887,7 @@ export function inspectDeviceAdministrationReadOwnership(records) {
   )?.[0] ?? "";
   const manifest = manifestText ? JSON.parse(manifestText) : {};
   const narrow = manifest.exports?.["./device-administration/application"];
+  const correctnessNarrow = manifest.exports?.["./device-administration/correctness"];
   const backupNarrow = manifest.exports?.["./backup-recovery/application"];
   const applicationOwners = records
     .filter((record) =>
@@ -2954,7 +2960,9 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !application.includes('backup.state === "recoverable"') ||
     !application.includes("DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET") ||
     !application.includes("createDeviceAdministrationProductApiContribution") ||
-    !application.includes("factEvents: []")
+    !application.includes("factEvents: []") ||
+    !application.includes("decideCurrentDeviceRetirementCredentialExposures") ||
+    !application.includes('rotationHint: record.rotationHint ?? "Rotate this external account credential"')
   ) {
     failures.push("Device Administration Query/Product API exact-set drifted");
   }
@@ -2979,12 +2987,15 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !composition.includes("currentRemovalMigrationTargets: {") ||
     !composition.includes("currentRemovalRecovery: currentRemovalRecoveryApplication") ||
     !composition.includes("currentRemovalMigration: currentRemovalMigrationApplication") ||
-    !composition.includes("currentDeviceRemoval: {") ||
-    !composition.includes("bootstrap.mesh.bootstrapStore.loadTrustRecord()") ||
-    !composition.includes("lifecycleJournal.active()") ||
+    !composition.includes("currentDeviceRemoval,") ||
+    !composition.includes("const readCurrentRemovalAuthority") ||
+    !composition.includes("createDeviceAdministrationCurrentRemovalMechanismPort({") ||
+    !composition.includes("createDeviceAdministrationCurrentRemovalMigrationLifecyclePort({") ||
+    !composition.includes("createDeviceAdministrationCurrentRemovalRecoveryLifecyclePort({") ||
     !composition.includes("ctx.authorityCheckpointOwner.status()") ||
-    !composition.includes("anchorUninstall.abort(input.operationId)") ||
-    !composition.includes("anchorUninstall.readLifecycle(input.operationId)") ||
+    composition.includes("AnchorUninstallCoordinator") ||
+    composition.includes("new CurrentRemovalCoordinator") ||
+    composition.includes("anchorUninstall.") ||
     composition.includes("anchorUninstall: {") ||
     currentRemovalAssembly.includes("recoveryBackupReady:") ||
     currentRemovalAssembly.includes(".filter((candidate)") ||
@@ -3000,36 +3011,29 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     failures.push("Device Administration unique Host application composition drifted");
   }
   if (
-    uninstallCoordinator.includes("async preflight(") ||
-    uninstallCoordinator.includes("migrationTargets:") ||
-    uninstallCoordinator.includes("readonly targetName: string") ||
-    !uninstallCoordinator.includes("async acceptMigration(input:") ||
-    !uninstallCoordinator.includes("readonly targetDeviceId: string") ||
-    !uninstallCoordinator.includes("targetDeviceId: input.targetDeviceId") ||
-    !uninstallCoordinator.includes("const trust = await this.#assertCurrentAuthority();")
+    records.some((record) => record.relative.endsWith("/anchor-uninstall.ts")) ||
+    records.some((record) => /class\s+(?:AnchorUninstall|CurrentRemoval)Coordinator\b/u.test(record.text)) ||
+    correctness.includes("readonly targetName: string") ||
+    correctness.includes("migrationTargets:") ||
+    correctness.includes("projectCurrentRemovalState")
   ) {
-    failures.push("Anchor uninstall migration mechanism regained product path selection");
+    failures.push("Anchor uninstall coordinator or product path selection returned");
   }
   if (
     composition.split("new DeviceAdministrationCurrentRemovalMigrationApplicationService<").length -
         1 !== 1 ||
-    !composition.includes("accept: (input) => anchorUninstall.acceptMigration(input)") ||
-    !composition.includes("active: () => anchorUninstall.activeMigrations()") ||
-    !composition.includes("advance: (input) => anchorUninstall.advanceMigration(input)") ||
-    !composition.includes("terminal: (operationId) => anchorUninstall.terminalMigration(operationId)") ||
+    composition.split("createDeviceAdministrationCurrentRemovalMigrationLifecyclePort({").length -
+        1 !== 1 ||
+    !composition.includes("lifecycle: currentRemovalMigrationLifecycle") ||
     !composition.includes("await currentRemovalMigrationApplication?.resumeActive();") ||
     !composition.includes("await currentRemovalRecoveryApplication?.resumeActive();") ||
     currentRemovalMigrationAssembly.includes("operation.phase") ||
-    composition.includes("anchorUninstall.beginMigration(") ||
-    composition.includes("anchorUninstall.resumeActive(") ||
-    uninstallCoordinator.includes("#driveMigration(") ||
-    uninstallCoordinator.includes("async resumeActive(") ||
-    uninstallCoordinator.includes("commitMigration:") ||
-    uninstallCoordinator.includes("verifyMigration:") ||
-    uninstallCoordinator.includes("retireMigratedDevice:") ||
-    !uninstallCoordinator.includes("async activeMigrations()") ||
-    !uninstallCoordinator.includes("async advanceMigration(input:") ||
-    !uninstallCoordinator.includes("async terminalMigration(")
+    correctness.includes("#driveMigration(") ||
+    correctness.includes("async resumeActive(") ||
+    correctness.includes("commitMigration:") ||
+    correctness.includes("verifyMigration:") ||
+    correctness.includes("retireMigratedDevice:") ||
+    !correctness.includes("createDeviceAdministrationCurrentRemovalMigrationLifecyclePort")
   ) {
     failures.push("Device Administration migration lifecycle has a second phase owner");
   }
@@ -3048,20 +3052,21 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     composition.split("new BackupRecoveryCurrentRemovalApplicationService(").length - 1 !== 1 ||
     composition.split("new DeviceAdministrationCurrentRemovalRecoveryApplicationService<").length -
         1 !== 1 ||
-    !composition.includes("accept: (input) => anchorUninstall.acceptRecovery(input)") ||
-    !composition.includes("active: () => anchorUninstall.activeRecoveries()") ||
-    !composition.includes("commitRetirement: (input) => anchorUninstall.commitRecoveryRetirement(input)") ||
+    composition.split("createDeviceAdministrationCurrentRemovalRecoveryLifecyclePort({").length -
+        1 !== 1 ||
+    !composition.includes("lifecycle: currentRemovalRecoveryLifecycle") ||
     !composition.includes("await currentRemovalRecoveryApplication?.resumeActive();") ||
     currentRemovalRecoveryAssembly.includes("operation.phase") ||
-    uninstallCoordinator.includes("beginRecoveryBackup(") ||
-    uninstallCoordinator.includes("confirmRecoveryBackup(") ||
-    uninstallCoordinator.includes("resumeRecoveryActive(") ||
-    uninstallCoordinator.includes("#driveRecovery(") ||
-    uninstallCoordinator.includes("decodeRecoveryPackage") ||
-    uninstallCoordinator.includes("checkpointOwner") ||
-    !uninstallCoordinator.includes("async acceptRecovery(input:") ||
-    !uninstallCoordinator.includes("async activeRecoveries()") ||
-    !uninstallCoordinator.includes("async commitRecoveryRetirement(input:") ||
+    correctness.includes("beginRecoveryBackup(") ||
+    correctness.includes("confirmRecoveryBackup(") ||
+    correctness.includes("resumeRecoveryActive(") ||
+    correctness.includes("#driveRecovery(") ||
+    correctness.includes("decodeRecoveryPackage") ||
+    correctness.includes("checkpointOwner") ||
+    !correctness.includes("createDeviceAdministrationCurrentRemovalRecoveryLifecyclePort") ||
+    !retirementTransaction.includes("decideCurrentDeviceRetirementCredentialExposures({") ||
+    !retirementTransaction.includes("assertDeviceAdministrationRetirementAuthority({") ||
+    retirementTransaction.includes("Rotate this external account credential") ||
     !application.includes('if (operation.phase === "checkpoint-verified")') ||
     !application.includes('if (operation.phase === "retirement-decided")') ||
     !application.includes('if (operation.phase === "gate-closed")') ||
@@ -3072,19 +3077,14 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     failures.push("Backup/Recovery and Device Administration recovery ownership drifted");
   }
   if (
-    uninstallCoordinator.includes("AnchorUninstallPublicState") ||
-    uninstallCoordinator.includes("function projectState(") ||
-    uninstallCoordinator.includes('phase: "moving-duty-device"') ||
-    uninstallCoordinator.includes('phase: "backup-verified"') ||
-    uninstallCoordinator.includes('phase: "retiring-device"') ||
-    uninstallCoordinator.includes('phase: "ready-to-uninstall"') ||
-    uninstallCoordinator.includes('phase: "uninstalled"') ||
-    uninstallCoordinator.includes('phase: "cancelled"') ||
-    uninstallCoordinator.includes("nextAction:") ||
-    !uninstallCoordinator.includes("currentRemovalLifecycleSnapshot(") ||
-    !uninstallCoordinator.includes("async readLifecycle(")
+    correctness.includes("AnchorUninstallPublicState") ||
+    correctness.includes("function projectState(") ||
+    correctness.includes("nextAction:") ||
+    !correctness.includes("createDeviceAdministrationCurrentRemovalMechanismPort") ||
+    !correctness.includes("createSignedDeviceLifecycleAbort") &&
+      !correctness.includes("signAbort:")
   ) {
-    failures.push("Anchor uninstall mechanism regained product state or cancellation decisions");
+    failures.push("Current-removal correctness regained product state or lost signed mechanism");
   }
   if (
     !handler.includes('from "@zhixing/core/device-administration/application"') ||
@@ -3129,8 +3129,11 @@ export function inspectDeviceAdministrationReadOwnership(records) {
   if (
     narrow?.types !== "./dist/device-administration/application.d.ts" ||
     narrow?.import !== "./dist/device-administration/application.js" ||
+    correctnessNarrow?.types !== "./dist/device-administration/correctness.d.ts" ||
+    correctnessNarrow?.import !== "./dist/device-administration/correctness.js" ||
     duplicateExports.length !== 0 ||
     build.split('"src/device-administration/application.ts"').length - 1 !== 1 ||
+    build.split('"src/device-administration/correctness.ts"').length - 1 !== 1 ||
     /device-administration|DeviceAdministration/u.test(coreIndex)
   ) {
     failures.push("Device Administration narrow export/build boundary drifted");

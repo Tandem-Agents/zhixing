@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A5-16h 迁移 current-removal recovery-backup 协作与剩余 lifecycle drive<br>
+> 当前检查点：等待协调者复核 A5-16i Device Administration 零残留审计与桥退场<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -112,7 +112,7 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
   | Delivery | [x] | “结果需要交付及其终态”归域；Channel 只实现发送效果 |
   | Trust Administration | [x] | 用户可管理的信任规则归域；Security Substrate 只负责执行决定 |
   | Skill Catalog | [x] | 技能资产与生命周期归域；Kernel 只消费不可变能力投影 |
-  | Device Administration | [ ] | 用户可见设备关系、移除和值班迁移归域；Executor/Mesh 只实现物理效果 |
+  | Device Administration | [x] | 用户可见设备关系、移除和值班迁移归域；Executor/Mesh 只实现物理效果 |
   | Backup & Recovery Administration | [ ] | 备份目标、恢复根、checkpoint 选择与灾难恢复产品用例归域；Correctness/Storage/Mesh 只提供签名、冻结、传输、安装与恢复机制 |
 
 - [ ] **A6　收束可替换边缘与设备拓扑。** Provider、Tool、MCP、Storage、Channel、Executor、Mesh 分别实现需求方拥有的窄端口，不统一成万能 Capability，也不生成产品流程、文案或领域决定；同一实现承担多个角色时必须分别实现端口、依赖和生命周期合同。用户设备事实与物理连接、路由、Assignment 和执行位置彻底分开；单机与分布式只在 Host 的适配选择处分叉，领域和 Kernel 不出现 Anchor、epoch、Mesh 或本机/远端条件分支。扩展只能进入可组合区，不能替换权威、安全、恢复、资源和终态。
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `ca0bf531`；A5-16g 已由协调者独立复核并提交，current-removal migration path 的 accept、drive、resume 与 terminal 顺序只归 Device Administration，Coordinator/Host 仅保留耐久与物理机制；A5-16a～A5-16f 继续有效 |
+| 已接受基线 | `b1386f66`；A5-16h 已由协调者独立复核并提交，recovery package/root/checkpoint permission 只归 Backup & Recovery，recovery-backup removal phase drive 只归 Device Administration，旧 Coordinator recovery 产品驱动归零；A5-16a～A5-16g 继续有效 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | `A5-16h-current-removal-recovery-collaboration-v1` 已实施，等待协调者独立复核：Backup & Recovery 现唯一拥有 recovery-package/root/generation/checkpoint permission，Device Administration 现唯一拥有 recovery-backup removal phase drive；Host 只组合有限端口 |
-| 下一责任链 | A5-16h 后对 Device Administration 做有限零残留审计，删除或收窄已无产品决定的 `AnchorUninstallCoordinator` bridge，并裁决该领域行是否闭合 |
-| 打开的单向桥 | `A5-ANCHOR-UNINSTALL-COORDINATOR-01=AnchorUninstallCoordinator` 继续作为 Device Application → 既有 DeviceLifecycle journal/签名 abort/current-authority/atomic retirement Correctness 机制单向桥；migration 与 recovery-backup 两条 phase drive、package/checkpoint 和 accepted-work 产品决定均已退场，下一包做有限零残留审计后裁决桥是否可删/收窄 |
-| 已失效证据 | `A5-16h-current-removal-recovery-collaboration-v1` 为当前待协调者复核证据；A5-16a～A5-16g 与 A5-15a～A5-15m 继续有效，A5-16h 已重取 recovery-backup、共享 current-removal adapter、真实 checkpoint/accepted-work 与启动恢复相交闭包 |
+| 活跃工作包 | `A5-16i-device-administration-zero-residual-v1` 已实施，等待协调者独立复核：Device Administration 全部生产责任已有限审计，旧 Coordinator 与 exposure 产品决定残余已清除，领域行据当前实施结果更新为 `[x]` |
+| 下一责任链 | Device Administration 闭合后进入 Backup & Recovery Administration 剩余命令与灾难恢复责任链；不得提前进入 A6 |
+| 打开的单向桥 | 无；`A5-ANCHOR-UNINSTALL-COORDINATOR-01` 已随 A5-16i 关闭，Device current-removal 只保留领域拥有的有限 lifecycle/abort 合同与 Host/Correctness 原子机制适配 |
+| 已失效证据 | `A5-16i-device-administration-zero-residual-v1` 为当前待协调者复核证据；A5-16a～A5-16h 与 A5-15a～A5-15m 当前继续有效，本包已重取 Coordinator 退场、共享 lifecycle/current-authority/atomic-retirement、recovery consumer 与相交 S7/export 闭包 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2434,6 +2434,13 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - Host、Correctness 与恢复：Host 只组合一个 Backup 应用和一个 Device recovery 应用，把 Coordinator 的 accept/active/advance/retirement/terminal 原语以及 checkpoint、accepted-work、quiesce/flush、清理 effect 适配为有限端口；`AnchorUninstallCoordinator` 的 recovery package、checkpoint、accepted-work 与 `#driveRecovery/beginRecoveryBackup/confirmRecoveryBackup/resumeRecoveryActive` 产品分支已删除，仅保留 DeviceLifecycle journal、current-authority、atomic retirement、签名 abort/read 等 Correctness 机制。确认前只持久到 `checkpoint-verified`；retirement 后恢复全局与 accepted-work closure，`final-checkpoint-verified/cleanup-complete` 可在冷启动继续安全前滚，早期 phase 不虚构丢失的 package/确认。重复 begin/confirm、同 operation 响应丢失与重启按已提交 phase 重放，不产生第二 checkpoint、retirement、settlement、cleanup 或 terminal；final checkpoint 必须证明 `upToLsn` 不低于 flushed phase LSN。
 - 直接证据与构建：Core Backup/Device 应用两个文件 23/23、CLI 真实 Coordinator/journal/checkpoint/accepted-work 1 文件 3/3、Server uninstall/management 两个文件 71/71，合计 5 文件 97/97；覆盖 package/root/generation/checkpoint equivocation、首次与重复 begin/confirm、每个耐久 phase 冷启动、immediate/drain/cancel 结算、uncertain 阻断、final LSN、真实 dispatcher/wire 与 terminal 零双写。Core、Server 与 CLI typecheck 通过；core/server fresh build 与 `pnpm cli:build` 通过；canonical S7 coverage/mutation 34/34 与 registry golden、fresh `pnpm runtime:package-exports`、changed-source Biome 和 `git diff --check` 通过。A5-16a～A5-16g 未改变的直接证据继续复用，没有以根级或全量回归冒充本包证据。
 - 失效与交接：S7 冻结 Backup permission owner、Device recovery phase exact-set/唯一 driver、Host 单次组合、Coordinator 旧 driver/package/checkpoint/accepted-work 分支归零，并以反向 mutation 拒绝旧 recovery driver、Host phase 解释、遗漏 final LSN 绑定、宽根或重复导出。以后若 recovery package/root/generation/checkpoint permission、Device recovery phase/driver、lifecycle/effect port、accepted-work settlement、current-device cleanup、Host composition、Coordinator journal/retirement 原语、启动恢复、core 窄 export/build、S7/package-export 或上述直接测试任一变化，只恢复本证据及真实相交的 A5-16d～A5-16g shared port；无关 A6 变化不自动误伤。Device Administration 行与 A5 继续 `[ ]`；下一检查点只做有限零残留审计并裁决 `A5-ANCHOR-UNINSTALL-COORDINATOR-01` 是否可删或继续收窄。当前停在可构建、可运行、可恢复且 package permission 与 removal lifecycle 各只有一个领域 owner 的检查点等待协调者独立复核，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+### A5-16i：完成 Device Administration 零残留审计与旧桥退场
+
+- 实施基线与审计 exact-set：以已接受 `HEAD b1386f66` 加协调者调度记录为基线，形成待复核证据 `A5-16i-device-administration-zero-residual-v1`。沿 Device list/status、普通设备移除、值班迁移、current-device migration/recovery-backup 的 preflight/begin/continue/status/cancel、启动恢复与 Product API/RPC/Host/Mesh 正向复核，再从五个 Query、八个 Command、DeviceLifecycle journal、accepted-work/planned transfer、签名 abort、current-authority、atomic retirement、S7/export 反向对账；A5-16a～A5-16h 已归位的产品 exact-set 与公开/持久协议无新反证，本包唯一残余是 `AnchorUninstallCoordinator` 聚合机制以及 atomic retirement 内的 current-device credential-exposure 选择规则。
+- 责任归位与旧路清理：Device Administration 现通过唯一窄入口 `@zhixing/core/device-administration/correctness` 提供 migration lifecycle、recovery lifecycle 与签名 abort/read 三个有限 Correctness adapter factory；Host 只读取当前 Authority 原始 facts、组合同一个 `DeviceLifecycleJournal`、注入原子提交与 admission release，不解释 phase、路径选择、公开状态或取消资格。atomic retirement 继续在同一 `trust/exposure/device-lifecycle` 串行事务内验证 accepted-work artifact、current Authority generation、lifecycle fence 并一次提交，但“当前设备全部 active exposure 转为 compromised、保留既有 rotation hint/否则给出默认提示”的选择已由 Device 应用决定；CLI transaction 只投影、校验并提交。旧 `AnchorUninstallCoordinator` 类、构造、方法集、源文件、测试入口、Host bridge 与同责 callback 归零，没有改名 god object、第二 journal、第二 admission state 或兼容旁路；`A5-ANCHOR-UNINSTALL-COORDINATOR-01` 关闭。
+- 行为保护与直接证据：current-removal migration/recovery 的稳定 identity、current-duty/issuer fence、executor-removal conflict、两阶段 checkpoint、drain/immediate accepted-work、final LSN、签名 cancel/release、响应丢失/重启重驱、terminal 与 exposure canonical digest/候选引用保持原格式和顺序。Core Device 应用 1 文件 21/21；CLI 真实 journal/checkpoint/atomic retirement、recovery consumer 与启动恢复 3 文件 11/11；Server uninstall/management binding 2 文件 19/19，合计 6 文件 51/51。Core fresh build、CLI typecheck 与 `pnpm cli:build` 通过；canonical S7 coverage/mutation 34/34 与 registry golden、fresh `pnpm runtime:package-exports`、changed-source Biome 和 `git diff --check` 通过。S7 新增反向 mutation 可识别旧/改名 Coordinator、Host 产品 phase/状态回流、retirement exposure 决定回流 Correctness、窄 export/build 丢失与第二入口。
+- 失效与交接：以后若 Device Administration 5 Query/8 Command、普通移除/值班迁移/current-removal 应用决定、三类 current-removal Correctness port、current-authority fence、DeviceLifecycle journal/signature、atomic retirement/exposure selection、accepted-work/planned transfer、Host composition、Product API/RPC、启动恢复、core 窄 export/build、S7/package-export 或上述直接证据任一变化，只恢复本证据及真实相交的 A5-16 子证据；Backup & Recovery 后续独立命令、无关 Channel/A6 变化不自动误伤。Device Administration 行据当前实施结果更新为 `[x]`，A5 与 Backup & Recovery Administration 继续 `[ ]`；下一检查点固定为 Backup & Recovery Administration，当前停在可构建、可运行、可恢复且无旧桥/双写/双 admission 的安全检查点等待协调者独立复核，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 

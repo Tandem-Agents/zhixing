@@ -9,8 +9,8 @@ const CONSUMER_PATTERN =
 
 const EXPECTED_CONSUMERS = [
   "runtime/anchor-uninstall-command.ts",
-  "serve/anchor-uninstall.ts",
   "serve/backup-command.ts",
+  "serve/command.ts",
   "serve/disaster-recovery-command.ts",
   "serve/mesh-pair-command.ts",
   "serve/recovery-package-input.ts",
@@ -32,10 +32,10 @@ describe("recovery package consumer boundary", () => {
     expect(pairing.match(/decoded\.version === 1/gu)).toHaveLength(1);
     expect(pairing).not.toContain("requireCurrentRecoveryPackage(");
 
-    expect(source("serve/anchor-uninstall.ts").match(
-      /requireCurrentRecoveryPackage\s*\(/gu,
-    )).toHaveLength(2);
     expect(source("runtime/anchor-uninstall-command.ts").match(
+      /requireCurrentRecoveryPackage\s*\(/gu,
+    )).toHaveLength(1);
+    expect(source("serve/command.ts").match(
       /requireCurrentRecoveryPackage\s*\(/gu,
     )).toHaveLength(1);
     expect(source("serve/disaster-recovery-command.ts").match(
