@@ -14,7 +14,6 @@ import {
   assignmentMutationRequestId,
   protocolDigest,
 } from "@zhixing/core/protocol";
-import { BUILTIN_TOOL_FACTORIES } from "@zhixing/tools-builtin";
 import type {
   AssignmentGlobalQueryPort,
   AssignmentMutationOverlayRecord,
@@ -127,7 +126,7 @@ describe("assignment skill ports", () => {
     ).rejects.toThrow("Skill catalog query returned another result type");
   });
 
-  it("binds the real save_skill factory to the domain application and staged update adapter", async () => {
+  it("binds the domain save application to the staged update adapter", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "assignment-skills-"));
     try {
       const overlay: AssignmentMutationOverlayRecord[] = [];
@@ -135,10 +134,6 @@ describe("assignment skill ports", () => {
         new FileArtifactStore(path.join(root, "artifacts")),
         admissionOptions(),
       );
-      const tool = BUILTIN_TOOL_FACTORIES.save_skill!({
-        skillCatalogSave: ports.saveApplication,
-        skillMode: "work",
-      });
       const linkedDisabled = entry({ source: "linked", disabled: true, revision: 4 });
       const result = await runContextStorage.run(
         {
@@ -148,18 +143,18 @@ describe("assignment skill ports", () => {
           assignmentMutations: mutationPort(overlay),
           assignmentIssuedAt: ISSUED_AT,
         },
-        () => tool.call(
+        () => ports.saveApplication.save(
           {
             name: linkedDisabled.name,
             description: "updated",
             body: "updated body",
+            mode: "work",
           },
-          { workingDirectory: root, toolCallId: "tool-production-save" },
+          "tool-production-save",
         ),
       );
 
-      expect(result).toMatchObject({ isError: false });
-      expect(result.content).toContain("本轮成功完成后入库");
+      expect(result).toMatchObject({ outcome: "updated", id: linkedDisabled.id });
       expect(overlay).toHaveLength(1);
       expect(overlay[0]).toMatchObject({
         requestId: assignmentMutationRequestId({
@@ -179,7 +174,7 @@ describe("assignment skill ports", () => {
     }
   });
 
-  it("binds the real admit_skill factory to the domain lifecycle and staged admit adapter", async () => {
+  it("binds the domain admission lifecycle to the staged admit adapter", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "assignment-admit-"));
     const before = await admissionDirectories();
     try {
@@ -199,10 +194,6 @@ describe("assignment skill ports", () => {
           }),
         },
       );
-      const tool = BUILTIN_TOOL_FACTORIES.admit_skill!({
-        skillCatalogAdmission: ports.admissionApplication,
-        skillMode: "work",
-      });
       const result = await runContextStorage.run(
         {
           bus: createEventBus<AgentEventMap>({ lineage: "main" }),
@@ -211,14 +202,14 @@ describe("assignment skill ports", () => {
           assignmentMutations: mutationPort(overlay),
           assignmentIssuedAt: ISSUED_AT,
         },
-        () => tool.call(
-          { path: path.join(source, "SKILL.md") },
-          { workingDirectory: root, toolCallId: "tool-production-admit" },
-        ),
+        () => ports.admissionApplication.admit({
+          source: { kind: "local-path", path: path.join(source, "SKILL.md") },
+          mode: "work",
+          operationId: "tool-production-admit",
+        }),
       );
 
-      expect(result).toMatchObject({ isError: false });
-      expect(result.content).toContain("本轮成功完成后入库");
+      expect(result).toMatchObject({ kind: "admitted" });
       expect(overlay).toHaveLength(1);
       expect(overlay[0]).toMatchObject({
         requestId: assignmentMutationRequestId({

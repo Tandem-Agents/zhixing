@@ -70,6 +70,13 @@ export {
   type KernelWorkspaceSource,
 } from "./kernel-runtime-environment.js";
 export {
+  assembleKernelToolImplementation,
+  type KernelToolImplementationAssembly,
+  type KernelToolImplementationPort,
+  type KernelToolImplementationRequest,
+  type KernelToolPermissionRuleSet,
+} from "./kernel-tool-implementation.js";
+export {
   assertKernelRuntimeIdentityContribution,
   createKernelRuntimeIdentityContribution,
   type KernelRuntimeIdentityContribution,

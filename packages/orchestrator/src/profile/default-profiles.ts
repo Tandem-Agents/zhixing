@@ -34,7 +34,7 @@ export const MAIN_IDENTITY_INSTRUCTIONS = [
  * 主 agent 启用的工具集 —— builtin 与 Task 的权威源。
  *
  * 包含：
- *   - 10 个内置工具（由 BUILTIN_TOOL_FACTORIES 提供实例）
+ *   - 10 个内置工具需求（由 Host Tool implementation 提供实例）
  *   - Task（启用子 agent 派发；create-agent-runtime 后置装配）
  *
  * **不含外部依赖型工具**（如 schedule 需要 scheduler ref，由 cli 通过

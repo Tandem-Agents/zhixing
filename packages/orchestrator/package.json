@@ -53,8 +53,7 @@
   },
   "dependencies": {
     "@zhixing/core": "workspace:*",
-    "@zhixing/network": "workspace:*",
-    "@zhixing/tools-builtin": "workspace:*"
+    "@zhixing/network": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

@@ -29,6 +29,8 @@ import {
   projectRuntimeConfiguration,
   type RuntimeConfigurationProjections,
 } from "../runtime/runtime-configuration-projections.js";
+import type { KernelToolImplementationPort } from "@zhixing/orchestrator/runtime";
+import { createHostKernelToolImplementation } from "../runtime/kernel-tool-implementation.js";
 
 type ReadyStartup = Extract<StartupCheckResult, { readonly kind: "ready" }>;
 type TrustedHomeBootstrap = Extract<MeshRuntimeBootstrap, { readonly mode: "trusted-home" }>;
@@ -63,6 +65,7 @@ export interface PersistentApplicationHostInput<Options> {
 }
 
 export interface PersistentApplicationHostDependencies<Options> {
+  readonly createToolImplementation: () => KernelToolImplementationPort;
   readonly createDeviceCapacity: (temporaryRoot: string) => DeviceCapacityRuntime;
   readonly prepareMesh: typeof prepareMeshRuntimeBootstrap;
   readonly runRecoveryRoot: typeof runRecoveryRootEstablishmentTopology;
@@ -187,6 +190,7 @@ export class PersistentApplicationHost<Options> {
       authorityConfiguration: this.#configuration.authority,
       credentialGeneration: this.#input.startup.credentialGeneration,
       localWorkspaceIdentity,
+      toolImplementation: this.#dependencies.createToolImplementation(),
     }) satisfies ServeBootstrapContext;
 
     await this.#runRoleComponents(plan, bootstrap);
@@ -291,6 +295,7 @@ export function createPersistentApplicationHost(
   input: PersistentApplicationHostInput<ServeOptions>,
 ): PersistentApplicationHost<ServeOptions> {
   return new PersistentApplicationHost(input, {
+    createToolImplementation: createHostKernelToolImplementation,
     createDeviceCapacity: createDeviceCapacityRuntime,
     prepareMesh: prepareMeshRuntimeBootstrap,
     runRecoveryRoot: runRecoveryRootEstablishmentTopology,

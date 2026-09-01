@@ -23,6 +23,7 @@ import type {
   RuntimeModelConfigurationProjection,
   RuntimeWorkspaceConfigurationProjection,
 } from "../runtime/runtime-configuration-projections.js";
+import type { KernelToolImplementationPort } from "@zhixing/orchestrator/runtime";
 import type {
   ConversationAssignmentLedger,
   AssignmentStreamSpool,
@@ -82,6 +83,7 @@ export interface ServeBootstrapContext {
   readonly authorityConfiguration: RuntimeAuthorityConfigurationProjection;
   readonly credentialGeneration: string | null;
   readonly localWorkspaceIdentity: LocalWorkspaceAssemblyIdentity;
+  readonly toolImplementation: KernelToolImplementationPort;
 }
 
 export interface AnchorServeBootstrapContext extends ServeBootstrapContext {

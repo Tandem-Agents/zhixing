@@ -27,7 +27,7 @@ export interface AgentRoleProfile {
   /**
    * 启用的内置工具与派生工具名列表 —— 内置工具装配的权威源。
    *
-   * session 创建时按此列表从 `BUILTIN_TOOL_FACTORIES` 实例化工具，一次 freeze
+   * session 创建时按此列表向 Host Tool implementation 请求工具，一次 freeze
    * 不变。命名约定：与 ToolDefinition.name 一致。
    *
    * 子 agent 装配时按此列表过滤 parent tools[]，未在列表的工具不进入子集；

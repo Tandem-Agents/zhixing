@@ -26,6 +26,7 @@ import {
   inspectAgentRuntimeWorkspaceEncapsulation,
   inspectTurnContextProviderAssembly,
   inspectKernelProviderDependencyInversion,
+  inspectKernelToolImplementationDependencyInversion,
   inspectAdvancementProviderDependencyInversion,
   inspectRuntimeSecretProjectionBoundary,
   inspectRuntimeConfigurationProjectionBoundary,
@@ -3362,6 +3363,57 @@ test("Kernel model providers are concrete only at the Host edge", async () => {
     }).join("\n"),
     /concrete Provider production dependency/,
   );
+});
+
+test("Kernel tool implementations are concrete only at the Host edge", async () => {
+  const paths = [
+    "packages/orchestrator/src/runtime/kernel-tool-implementation.ts",
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+    "packages/orchestrator/src/runtime/index.ts",
+    "packages/orchestrator/src/index.ts",
+    "packages/orchestrator/package.json",
+    "packages/runtime-host/src/runtime-host.ts",
+    "packages/cli/src/runtime/kernel-tool-implementation.ts",
+    "packages/cli/src/serve/application-host.ts",
+    "packages/cli/src/serve/role-topology.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/cli/src/runtime/workspace-command.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectKernelToolImplementationDependencyInversion(records), []);
+  assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+    (text) => `import { BUILTIN_TOOL_FACTORIES } from "@zhixing/tools-builtin";\n${text}`,
+  )).join("\n"), /demand-owned Tool port|concrete Tool package/);
+  assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
+    "packages/runtime-host/src/runtime-host.ts",
+    (text) => text.replace(
+      "toolImplementation: this.opts.toolImplementation,",
+      "toolImplementation: fallbackToolImplementation,",
+    ),
+  )).join("\n"), /RuntimeHost/);
+  assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
+    "packages/cli/src/serve/executor-role-runtime.ts",
+    (text) => text.replace(
+      "toolImplementation: this.options.toolImplementation,",
+      "toolImplementation: createFallback(),",
+    ),
+  )).join("\n"), /Executor runtime issuance/);
+  assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
+    "packages/orchestrator/src/index.ts",
+    (text) => `${text}\nexport type { KernelToolImplementationPort } from "./runtime/index.js";`,
+  )).join("\n"), /runtime-only subpath/);
+  assert.match(inspectProductionManifest("packages/orchestrator/package.json", {
+    dependencies: { "@zhixing/tools-builtin": "workspace:*" },
+  }).join("\n"), /concrete Tool production dependency/);
 });
 
 test("Advancement model providers are concrete only at the Host edge", async () => {

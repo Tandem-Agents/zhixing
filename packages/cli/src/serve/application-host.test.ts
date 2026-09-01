@@ -51,6 +51,9 @@ describe("persistent ApplicationHost outer lifecycle", () => {
           expect(harness.rolePlan).toBeUndefined();
         }
         expect(harness.roleBootstrap?.mesh.roles).toEqual(topology.roles);
+        expect(harness.createToolImplementation).toHaveBeenCalledOnce();
+        expect(harness.roleBootstrap?.toolImplementation)
+          .toBe(harness.toolImplementation);
         expect(harness.roleBootstrap).not.toHaveProperty("startup");
         expect(harness.roleBootstrap).not.toHaveProperty("config");
         expect(harness.roleBootstrap).not.toHaveProperty("runtimeConfiguration");
@@ -403,8 +406,11 @@ function createHarness(input: {
     if (input.moduleFailure === "executor-module") throw input.moduleFailureError;
     return {} as never;
   });
+  const toolImplementation = Object.freeze({ create: vi.fn() }) as never;
+  const createToolImplementation = vi.fn(() => toolImplementation);
 
   const dependencies: PersistentApplicationHostDependencies<Record<string, never>> = {
+    createToolImplementation,
     createDeviceCapacity: () => {
       events.push("capacity");
       return deviceCapacity;
@@ -439,6 +445,8 @@ function createHarness(input: {
     importAnchorRole,
     importExecutorRole,
     importExecutorModule,
+    createToolImplementation,
+    toolImplementation,
     roleInvocations: () => runAnchorRole.mock.calls.length + runExecutorRole.mock.calls.length,
     get rolePlan() {
       return rolePlan;

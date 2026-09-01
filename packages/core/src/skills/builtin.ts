@@ -33,7 +33,8 @@ export interface BuiltinSkillDef {
   /** 适用模式 —— 在哪些模式的索引可见;由能力自身声明,非用户状态。 */
   modes: readonly SkillMode[];
   /**
-   * 能力的配套落地工具引用(工具名,实现经 BUILTIN_TOOL_FACTORIES 装配)。
+   * 能力的配套工具需求(工具名)；Skill/Profile 只声明需求，具体实现由 Host
+   * Tool implementation binding 选择并经 Kernel 端口提供。
    * 红线:每能力 ≤ 1 工具、优先零工具——方法能指导模型用既有工具完成的
    * 不开新工具,只有不变量需要焊接时才开(测试锁此红线;能力增多触发暴露
    * 形态切换为执行网关时,本字段即网关的校验依据,登记零返工)。

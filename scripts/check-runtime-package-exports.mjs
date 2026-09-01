@@ -528,11 +528,16 @@ if (
   !/readonly runtimeEnvironment: KernelRuntimeEnvironment;/u.test(
     createAgentRuntimeOptionsDeclaration,
   ) ||
+  !/readonly toolImplementation: KernelToolImplementationPort;/u.test(
+    createAgentRuntimeOptionsDeclaration,
+  ) ||
   /providerConfiguration|ZhixingConfig|ProviderCredential/u.test(
     createAgentRuntimeOptionsDeclaration,
   ) ||
   !orchestratorRuntimeDeclarations.includes("KernelModelProviderFactory") ||
   !orchestratorRuntimeDeclarations.includes("KernelRuntimeEnvironmentFactory")
+  || !orchestratorRuntimeDeclarations.includes("KernelToolImplementationPort")
+  || orchestratorRootDeclarations.includes("KernelToolImplementationPort")
 ) {
   failures.push("orchestrator-kernel-provider:invalid-declaration-boundary");
 }

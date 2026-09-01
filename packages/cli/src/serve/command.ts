@@ -711,6 +711,7 @@ async function runServerProcess(
     runtimeEnvironment: createHostKernelRuntimeEnvironmentFactory({
       configuration: kernelEnvironmentConfiguration,
     }),
+    toolImplementation: bootstrap.toolImplementation,
     confirmationLifecycleObserver: durableInteractions,
     systemProtectedPaths,
     artifactStore: () => {

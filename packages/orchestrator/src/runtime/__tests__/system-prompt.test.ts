@@ -9,35 +9,41 @@ import {
 } from "../system-prompt.js";
 import { subAgentProfile } from "../../profile/default-profiles.js";
 import type { ToolDefinition } from "@zhixing/core";
-import {
-  createBashTool,
-  createEditTool,
-  createGlobTool,
-  createGrepTool,
-  createReadTool,
-  createWebFetchTool,
-  createWriteTool,
-} from "@zhixing/tools-builtin";
 
 // ─── 工具工厂 ───
 
 function stubTool(name: string, overrides?: Partial<ToolDefinition>): ToolDefinition {
+  const hints: Record<string, readonly string[]> = {
+    read: ["- Use `read` to view file contents, not bash cat/head/tail"],
+    write: ["- Use `write` to create files or overwrite entire content"],
+    edit: ["- Use `edit` for targeted text replacements, not bash sed/awk"],
+    glob: ["- Use `glob` to find files by name pattern, not bash find"],
+    grep: ["- Use `grep` to search file contents by regex, not bash grep/rg"],
+    bash: ["- Use `bash` for system commands, package management, git operations, and tasks not covered by other tools"],
+    web_fetch: [
+      "- Use `web_fetch` to read content from a URL the user provided or that you already know — this tool fetches a URL, it does not search the web",
+      "- For large pages, pass `prompt` so a light LLM extracts only the requested information; omit `prompt` when raw Markdown is needed",
+      "- Do not invent URLs — only fetch what the user gave you or what appeared in prior tool results",
+      "- If the user asks a question without a URL, ask for the URL or suggest a search engine instead of guessing",
+    ],
+  };
   return {
     name,
     description: `stub ${name}`,
     inputSchema: { type: "object" },
     call: async () => ({ content: "" }),
+    ...(hints[name] ? { systemPromptHints: hints[name], isParallelSafe: true } : {}),
     ...overrides,
   };
 }
 
 const defaultTools = [
-  createReadTool(),
-  createWriteTool(),
-  createEditTool(),
-  createGlobTool(),
-  createGrepTool(),
-  createBashTool(),
+  stubTool("read"),
+  stubTool("write"),
+  stubTool("edit"),
+  stubTool("glob"),
+  stubTool("grep"),
+  stubTool("bash"),
 ];
 
 // ─── 测试 ───
@@ -222,7 +228,7 @@ describe("buildSystemPrompt", () => {
 
   describe("工具段动态适应", () => {
     it("仅有 read 工具时，工具段只包含 read", () => {
-      const prompt = buildSystemPrompt({ ...ctx, tools: [createReadTool()] });
+      const prompt = buildSystemPrompt({ ...ctx, tools: [stubTool("read")] });
       expect(prompt).toContain("`read`");
       expect(prompt).not.toContain("`grep`");
       expect(prompt).not.toContain("`bash`");
@@ -241,7 +247,7 @@ describe("buildSystemPrompt", () => {
     });
 
     it("常规装配下输出 hint-list 工具使用段", () => {
-      const prompt = buildSystemPrompt({ ...ctx, tools: [createReadTool()] });
+      const prompt = buildSystemPrompt({ ...ctx, tools: [stubTool("read")] });
       expect(prompt).toContain("Use `read` to view file contents");
     });
 
@@ -254,7 +260,7 @@ describe("buildSystemPrompt", () => {
     it("含 web_fetch(真实工具)时输出 distill / not-search 引导,不输出预批准域名清单", () => {
       const prompt = buildSystemPrompt({
         ...ctx,
-        tools: [createWebFetchTool()],
+        tools: [stubTool("web_fetch")],
       });
       expect(prompt).toContain("`web_fetch`");
       expect(prompt).toMatch(/does not search the web/i);
@@ -266,7 +272,7 @@ describe("buildSystemPrompt", () => {
     });
 
     it("不含 web_fetch 时无 web_fetch 引导段", () => {
-      const prompt = buildSystemPrompt({ ...ctx, tools: [createReadTool()] });
+      const prompt = buildSystemPrompt({ ...ctx, tools: [stubTool("read")] });
       expect(prompt).not.toContain("`web_fetch`");
       expect(prompt).not.toContain("Pre-approved hosts");
     });

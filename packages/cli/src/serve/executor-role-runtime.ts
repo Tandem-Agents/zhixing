@@ -9,6 +9,7 @@ import {
   type AgentRuntimeCapacityBinding,
   type KernelModelProviderFactory,
   type KernelRuntimeEnvironmentFactory,
+  type KernelToolImplementationPort,
 } from "@zhixing/orchestrator/runtime";
 import { mainProfile, powerProfile } from "@zhixing/orchestrator/profile";
 import { parseConversationId } from "@zhixing/core";
@@ -247,6 +248,7 @@ export async function runExecutorRole(
       modelConfiguration,
       kernelEnvironmentConfiguration,
       credentials: providerCredentials,
+      toolImplementation: bootstrap.toolImplementation,
       mcpHub,
       systemProtectedPaths: resolveSystemProtectedSecretPaths(),
       interactions,
@@ -964,6 +966,7 @@ export class ExecutorRuntimeSubstrate {
     readonly modelConfiguration: RuntimeModelConfigurationProjection;
     readonly kernelEnvironmentConfiguration: RuntimeKernelEnvironmentConfigurationProjection;
     readonly credentials: ProviderCredentialProjection;
+    readonly toolImplementation: KernelToolImplementationPort;
     readonly mcpHub: McpHub;
     readonly systemProtectedPaths: readonly string[];
     readonly interactions: DurableConversationInteractionObserver;
@@ -1009,6 +1012,7 @@ export class ExecutorRuntimeSubstrate {
       runtimeEnvironment: this.#runtimeEnvironment.create({
         ...(workspaceRoot === undefined ? {} : { workspace: workspaceRoot }),
       }),
+      toolImplementation: this.options.toolImplementation,
       profile:
         workscene?.profile ??
         mainProfile({ hasWorkspace: workspaceRoot !== null }),
@@ -1062,6 +1066,7 @@ export class ExecutorRuntimeSubstrate {
           : { mainModelOverride: instruction.model }),
       }),
       runtimeEnvironment: this.#runtimeEnvironment.create({}),
+      toolImplementation: this.options.toolImplementation,
       profile: {
         ...baseProfile,
         enabledTools: requested

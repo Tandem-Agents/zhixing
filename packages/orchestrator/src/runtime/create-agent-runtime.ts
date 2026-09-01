@@ -89,11 +89,6 @@ import {
   type TrustAdministrationRepositoryRule,
 } from "@zhixing/core/trust-administration";
 import type { ModelCallResourceMeter } from "@zhixing/core/contracts";
-import {
-  BUILTIN_TOOL_FACTORIES,
-  BUILTIN_TOOL_NAMES,
-  WEB_FETCH_DEFAULT_RULES,
-} from "@zhixing/tools-builtin";
 import { mainProfile, SUB_AGENT_ENABLED_TOOLS } from "../profile/default-profiles.js";
 import type { AgentRoleProfile } from "../profile/agent-role-profile.js";
 import { subscribeSegmentMarkerAccumulator } from "./segment-marker-accumulator.js";
@@ -167,6 +162,10 @@ import {
   assertKernelRuntimeEnvironment,
   type KernelRuntimeEnvironment,
 } from "./kernel-runtime-environment.js";
+import {
+  assembleKernelToolImplementation,
+  type KernelToolImplementationPort,
+} from "./kernel-tool-implementation.js";
 
 /**
  * 注入系统提示词的技能索引上限(按当前模式 top-N)。
@@ -484,6 +483,8 @@ export interface CreateAgentRuntimeOptions {
   readonly modelProvider: KernelModelProviderBinding;
   /** Host-resolved non-secret runtime environment; never a configuration source. */
   readonly runtimeEnvironment: KernelRuntimeEnvironment;
+  /** Host-selected implementation for the finite tool names declared by the profile. */
+  readonly toolImplementation: KernelToolImplementationPort;
   /** 额外工具（如 schedule），在内置工具之后注入 */
   extraTools?: ToolDefinition[];
   /**
@@ -639,8 +640,8 @@ export async function createAgentRuntime(
   // （都在下方装配），需要后置追加。
   //
   // 装配两步走：
-  //   1. profile.enabledTools 中的 builtin 工具名 → BUILTIN_TOOL_FACTORIES 实例化
-  //      （含 "Task" 则跳过本步骤，由后续装配块处理；含未注册 builtin 名 fail-fast）
+  //   1. profile.enabledTools 中除 Task 外的有限工具名由 Host Tool implementation 实例化
+  //      （含 "Task" 则跳过本步骤，由后续装配块处理；未提供实现会 fail-fast）
   //   2. options.extraTools 全部追加（cli 注入的外部依赖工具如 schedule，
   //      由 cli 持有所需 ref 在外部实例化后传入）
   //
@@ -681,25 +682,21 @@ export async function createAgentRuntime(
       })
     : unavailableAssignmentSkillPorts();
 
-  const builtinCtx = {
-    proxy: options.runtimeEnvironment.networkProxy,
+  const requestedToolNames = Object.freeze(
+    profile.enabledTools.filter((name) => name !== "Task"),
+  );
+  const toolAssembly = assembleKernelToolImplementation(
+    options.toolImplementation,
+    Object.freeze({
+    requestedToolNames,
+    networkProxy: options.runtimeEnvironment.networkProxy,
     skillCatalogLoad: skillPorts.loadApplication,
     skillCatalogSave: skillPorts.saveApplication,
     skillCatalogAdmission: skillPorts.admissionApplication,
     skillMode,
-  };
-  const baseTools: ToolDefinition[] = [];
-  for (const name of profile.enabledTools) {
-    if (name === "Task") continue; // 后置装配
-    if (!BUILTIN_TOOL_NAMES.has(name)) {
-      throw new Error(
-        `AgentRoleProfile "${profile.role}" 声明的工具 "${name}" 不在 BUILTIN_TOOL_FACTORIES。` +
-          `profile.enabledTools 仅可声明内置工具名 + "Task"；外部依赖工具（如 schedule）` +
-          `通过 options.extraTools 注入。`,
-      );
-    }
-    baseTools.push(BUILTIN_TOOL_FACTORIES[name]!(builtinCtx));
-  }
+    }),
+  );
+  const baseTools: ToolDefinition[] = [...toolAssembly.tools];
   baseTools.push(...(options.extraTools ?? []));
 
   // 安全管线：会话级单例，跨多次 run() 共享权限规则、确认追踪、频率限制状态。
@@ -728,7 +725,9 @@ export async function createAgentRuntime(
       const fresh = new PermissionStore({
         extractArgument: (req) => toolArgumentExtractor.extract(req),
       });
-      fresh.registerBuiltinRules("web_fetch", [...WEB_FETCH_DEFAULT_RULES]);
+      for (const contribution of toolAssembly.permissionRuleSets) {
+        fresh.registerBuiltinRules(contribution.namespace, [...contribution.rules]);
+      }
       return fresh;
     })();
   const trustAdministration = new TrustAdministrationExecutionApplicationService({

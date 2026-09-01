@@ -1,8 +1,8 @@
 /**
  * WebFetch 工具的内置 PermissionRule —— preapproved 知名文档/参考站。
  *
- * 接入方式: cli/serve 入口在启用 web_fetch 工具时调
- *   `permissionStore.registerBuiltinRules("web_fetch", WEB_FETCH_DEFAULT_RULES)`
+ * 接入方式: Host Tool implementation 将本规则作为有限权限贡献交给 Kernel，
+ * Kernel 创建本次运行的 PermissionStore 时按 namespace 注册。
  * builtin scope 语义:
  *   - in-memory 注册,不写盘
  *   - 让位用户池(session/workspace/global): 用户加 `web_fetch deny *` 任何通配

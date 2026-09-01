@@ -2608,6 +2608,84 @@ export function inspectKernelProviderDependencyInversion(records) {
   return failures;
 }
 
+/** A6 Kernel tool demand is owned by Orchestrator; concrete factories stay at the Host edge. */
+export function inspectKernelToolImplementationDependencyInversion(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const source = byPath.get(relative);
+    if (source === undefined) failures.push(`${relative}: Kernel Tool source is missing`);
+    return source ?? "";
+  };
+  const contract = required("packages/orchestrator/src/runtime/kernel-tool-implementation.ts");
+  const runtime = required("packages/orchestrator/src/runtime/create-agent-runtime.ts");
+  const runtimeIndex = required("packages/orchestrator/src/runtime/index.ts");
+  const rootIndex = required("packages/orchestrator/src/index.ts");
+  const manifest = required("packages/orchestrator/package.json");
+  const runtimeHost = required("packages/runtime-host/src/runtime-host.ts");
+  const edge = required("packages/cli/src/runtime/kernel-tool-implementation.ts");
+  const applicationHost = required("packages/cli/src/serve/application-host.ts");
+  const topology = required("packages/cli/src/serve/role-topology.ts");
+  const command = required("packages/cli/src/serve/command.ts");
+  const executor = required("packages/cli/src/serve/executor-role-runtime.ts");
+  const workspace = required("packages/cli/src/runtime/workspace-command.ts");
+
+  if (
+    !contract.includes("export interface KernelToolImplementationPort") ||
+    !contract.includes("export interface KernelToolImplementationRequest") ||
+    !contract.includes("readonly requestedToolNames: readonly string[];") ||
+    !contract.includes("assembleKernelToolImplementation(") ||
+    !contract.includes("exact requested sequence") ||
+    /@zhixing\/tools-builtin|BUILTIN_TOOL_FACTORIES/u.test(contract)
+  ) failures.push("Kernel Tool demand contract is not finite, exact and concrete-free");
+  if (
+    !runtime.includes("readonly toolImplementation: KernelToolImplementationPort;") ||
+    !runtime.includes("assembleKernelToolImplementation(") ||
+    !runtime.includes("profile.enabledTools.filter((name) => name !== \"Task\")") ||
+    /@zhixing\/tools-builtin|BUILTIN_TOOL_FACTORIES|BUILTIN_TOOL_NAMES|WEB_FETCH_DEFAULT_RULES/u.test(runtime)
+  ) failures.push("AgentRuntime does not consume only the demand-owned Tool port");
+  if (
+    !runtimeIndex.includes('from "./kernel-tool-implementation.js";') ||
+    /KernelToolImplementation/u.test(rootIndex)
+  ) failures.push("Kernel Tool contract escaped its runtime-only subpath");
+  if (manifest.includes('"@zhixing/tools-builtin"')) {
+    failures.push("Orchestrator still declares the concrete Tool implementation package");
+  }
+  if (
+    !runtimeHost.includes("readonly toolImplementation: KernelToolImplementationPort;") ||
+    !runtimeHost.includes("toolImplementation: this.opts.toolImplementation,")
+  ) failures.push("RuntimeHost can publish a runtime without the Host Tool binding");
+  if (
+    !edge.includes("export function createHostKernelToolImplementation()") ||
+    !edge.includes("BUILTIN_TOOL_FACTORIES") ||
+    !edge.includes("WEB_FETCH_DEFAULT_RULES") ||
+    !edge.includes("Object.hasOwn(BUILTIN_TOOL_FACTORIES, name)") ||
+    !edge.includes("tools: Object.freeze(tools)")
+  ) failures.push("CLI Host edge does not uniquely select the concrete Tool implementation");
+  if (
+    !applicationHost.includes("createToolImplementation: () => KernelToolImplementationPort;") ||
+    !applicationHost.includes("toolImplementation: this.#dependencies.createToolImplementation(),") ||
+    !applicationHost.includes("createToolImplementation: createHostKernelToolImplementation,") ||
+    !topology.includes("readonly toolImplementation: KernelToolImplementationPort;") ||
+    !command.includes("toolImplementation: bootstrap.toolImplementation,")
+  ) failures.push("Persistent Host topology does not carry one explicit Tool binding");
+  if (
+    !executor.includes("readonly toolImplementation: KernelToolImplementationPort;") ||
+    (executor.match(/toolImplementation: this\.options\.toolImplementation,/gu) ?? []).length !== 2 ||
+    !executor.includes("toolImplementation: bootstrap.toolImplementation,")
+  ) failures.push("Executor runtime issuance bypasses the explicit Tool binding");
+  if (!workspace.includes("toolImplementation: createHostKernelToolImplementation(),")) {
+    failures.push("Transient workspace runtime lacks the Host Tool binding");
+  }
+  for (const record of records) {
+    if (
+      record.relative.startsWith("packages/orchestrator/src/") &&
+      /(?:from\s+|import\s*\()["']@zhixing\/tools-builtin/u.test(record.text)
+    ) failures.push(`${record.relative}: Orchestrator imports the concrete Tool package`);
+  }
+  return failures;
+}
+
 /** A6 Advancement model calls consume one demand-owned binding; concrete Provider state stays at the Host edge. */
 export function inspectAdvancementProviderDependencyInversion(records) {
   const failures = [];
@@ -3439,6 +3517,13 @@ export async function validateS7Structure() {
   failures.push(...inspectAgentRuntimeWorkspaceEncapsulation(records));
   failures.push(...inspectTurnContextProviderAssembly(records));
   failures.push(...inspectKernelProviderDependencyInversion(records));
+  failures.push(...inspectKernelToolImplementationDependencyInversion([
+    ...records,
+    {
+      relative: "packages/orchestrator/package.json",
+      text: await readFile(path.join(root, "packages/orchestrator/package.json"), "utf8"),
+    },
+  ]));
   failures.push(...inspectAdvancementProviderDependencyInversion(records));
   failures.push(...inspectRuntimeSecretProjectionBoundary(records));
   failures.push(...inspectRuntimeConfigurationProjectionBoundary(records));
@@ -11140,6 +11225,14 @@ export function inspectProductionManifest(relative, manifest) {
   ) {
     failures.push(
       `${relative}: orchestrator declares concrete Provider production dependency`,
+    );
+  }
+  if (
+    relative === "packages/orchestrator/package.json" &&
+    edges.includes("@zhixing/tools-builtin")
+  ) {
+    failures.push(
+      `${relative}: orchestrator declares concrete Tool production dependency`,
     );
   }
   return failures;

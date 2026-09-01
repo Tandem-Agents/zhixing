@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：等待协调者复核 Advancement Rubric cancellation 结构证据修复<br>
+> 当前检查点：A6-03a 已通过协调者独立验收，等待提交后进入 Tool 家族有限审计<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `06411643`；A6-02c 已由协调者独立复核并提交，完整配置仅停留在合法来源与组合根，Host、workspace 和 Surface 只取得九类用途投影或有限显示/拓扑投影；A0～A5 与 A6-01a/01b、A6-02a/02b 当前证据有效 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；Advancement Rubric cancellation 陈旧结构证据已按当前生产 adapter 合同恢复，等待协调者独立复核后进入 Tool 边界 |
-| 活跃工作包 | `A5-evidence-advancement-rubric-cancellation-v1`：已把 `startup-server-owner.test.ts` 改绑当前唯一 Rubric cancellation mechanism adapter 的 read/persist 责任分离，并补齐 S7 对旧 whole-controller 与错误 read/persist owner 回流的识别；等待协调者复核 |
-| 下一责任链 | 当前证据修复独立验收后，审计 Tool 实现边界：从 Kernel 受控效果端口到 `@zhixing/tools-builtin` 的真实构造/消费链裁决下一条最窄可替换家族；不得顺带扩入 MCP、Channel、Storage、Executor/Mesh 或设备拓扑 |
-| 打开的单向桥 | 无；本包只修复失真的结构证据，不建立生产适配或兼容路径 |
-| 已失效证据 | 无当前未恢复证据；A5 Advancement 的陈旧 `rubricCancellation: advancementDetailController` 断言已由 adapter 块内 read/persist owner 断言及三项 S7 反向 mutation 恢复，其余 A5/A6 证据始终未受影响 |
+| 已接受基线 | `e6532a9b`；A6-02c 与 Advancement Rubric cancellation 结构证据均已由协调者独立复核并提交，配置边缘和 A5 既有门禁当前有效 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-03a Intelligence Kernel 内置工具实现依赖反转已通过协调者独立复核，等待提交 |
+| 活跃工作包 | 无；`A6-03a-kernel-builtin-tool-implementation-port-v1` 已闭合，提交后派发 Tool 家族有限零残留审计 |
+| 下一责任链 | A6-03a 独立验收后有限审计 Tool 家族其余生产构造：product/extra/Task 工具、远端 assignment 与权限/效果链是否已经各守窄端口；只在真实缺口上继续拆包，MCP 独立后置 |
+| 打开的单向桥 | 无；全部 Kernel Runtime 生产根均已显式消费同一有限端口，不存在默认 concrete fallback、双实现表或只为测试存在的桥 |
+| 已失效证据 | 无当前未恢复证据；本包已恢复 Orchestrator/CLI Runtime 工具装配、Profile exact-set、权限内置规则、Kernel conformance、package dependency/export 与结构门禁证据。若 Tool request/assembly exact-set、Host binding、Profile 工具需求、权限贡献、任一持久/瞬态 Runtime 根、Orchestrator manifest/export 或对应 S7/直接测试变化，精确恢复本证据；A5 产品工具语义与 A6 Provider/Configuration/Secret 证据不因本次实现边界反转自动失效 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2527,6 +2527,15 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 基线与反证：以已接受 `HEAD 06411643` 加协调者调度记录为基线，恢复证据 `A5-evidence-advancement-rubric-cancellation-v1`。生产 `AdvancementApplicationService` 当前只消费有限 `AdvancementRubricCancellationMechanismPort`；唯一 Anchor 组合根以对象 adapter 绑定读取与持久提交：读取委托 `advancementDetailController.loadRubricCancellationSession`，写入委托 `ctx.advancementReviews.cancelSession`。`startup-server-owner.test.ts` 仍断言旧的 `rubricCancellation: advancementDetailController`，属于已接受生产迁移后的陈旧结构证据，不反证 A5/A6 生产语义。
 - 证据修复与门禁：启动 owner 直接测试现校验同一 adapter 块内 read 先于 persist、两者都位于下一 contribution 前，并显式拒绝 whole-controller 绑定。既有 Advancement S7 已冻结 adapter、persist owner 与应用边界；本轮补齐此前缺失的 read delegation 检查，并新增三项反向 mutation，分别恢复旧 whole-controller、把 read 错绑 reviews persistence owner、把 persist 错绑 controller 时均 fail closed。未修改生产源码、合同、导出、构建或产品行为，也未把宽 controller 重新提升为 cancellation mechanism。
 - 直接证据与交接：`startup-server-owner.test.ts` 1 文件 5/5；Advancement whole-domain 定向 S7 1/1；changed-source Biome 无修复。首次未加载 TS resolver 的原生 Node 定向命令因源码 `.js` specifier 无 fresh dist 而失败，随后按仓库测试入口使用 `tsx/esm` 复取并通过，不构成生产或门禁失败。`git diff --check` 通过；HEAD 保持 `06411643`、索引为空，工作区只有协调者台账与本证据修复的任务文档、直接测试和 S7 文件。本包不修改生产输入，既有构建、完整 canonical S7、package exports 与 A5/A6 其他证据不失效且未重复运行。以后若 Rubric cancellation mechanism port、Anchor read/persist adapter、Advancement controller/reviews owner、startup owner 测试或对应 S7 inspector 变化，只恢复本证据。A6 保持 `[ ]`；下一检查点仍为 Tool 可替换实现边界，当前等待协调者独立复核，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+### A6-03a：Intelligence Kernel 内置工具实现依赖反转
+
+- 基线与生产闭包：以已接受 `HEAD e6532a9bd7216f533081eca6fbd3a4d397daefc8` 加协调者调度记录为基线，形成待复核证据 `A6-03a-kernel-builtin-tool-implementation-port-v1`。正向从 `PersistentApplicationHost` 的唯一 CLI Host factory 进入 Anchor `RuntimeHost` 的 conversation、scheduled ephemeral 与 durable job 发放，以及 Executor-only substrate 的 conversation/job 发放；瞬态 workspace management fallback 也显式构造同一个 Host binding。反向从 `createAgentRuntime`、Profile enabled tools、Task 派生工具、产品 extra tools、Skill save/load/admit、network proxy、permission rules 与全部 `@zhixing/tools-builtin` import/manifest consumer 对账：每个持久 Host 只创建一次 binding 并向所需 role 分发，各 Kernel instance 再按本次不可变 request 取得 fresh 工具实现，不存在按拓扑分叉的第二实现选择者。
+- 合同、责任与行为保护：`@zhixing/orchestrator/runtime` 窄入口唯一拥有有限只读 `KernelToolImplementationPort`，request 只含有序 `requestedToolNames`、proxy、三类 Skill 应用与 mode，assembly 只含 fresh tool definitions 和内置权限规则贡献；边界对 port/request/assembly 冻结、requested exact order/name、重复工具与重复 permission namespace fail closed。唯一 CLI adapter 拥有现有十项 builtin factory table 与 `web_fetch` 默认规则选择；Profile 继续只表达需求，Task 仍由 Orchestrator 按父工具集合派生，产品 extra/MCP/Workscene/Schedule 工具、job allowlist、模型—工具循环、安全准入、Skill main/work 与 proxy 行为均未改变。Orchestrator 生产源码、manifest 与 lock importer 对 `@zhixing/tools-builtin` 的依赖归零，runtime 根导出未新增合同旁路，也未留下 concrete default、第二工厂表、动态插件或服务定位器。
+- 旧路、门禁与直接证据：S7 新增 demand-side 合同、runtime-only export、Profile/port exact-set、唯一 CLI implementation owner、ApplicationHost 单次创建、Anchor/Executor/瞬态 workspace 全根注入、Orchestrator import/manifest 禁令及反向 mutation；runtime package-export 门同时冻结 mandatory port、fresh declaration 与根导出禁令。Orchestrator 直接闭包 5 文件 151/151，CLI Host/Runtime/Executor 直接闭包 4 文件 39/39；Orchestrator 与 CLI `tsc --noEmit`、fresh Orchestrator/RuntimeHost build、`pnpm cli:build`、canonical S7 coverage/mutation 39/39 与 registry golden、`pnpm runtime:package-exports`、changed-source Biome 和 `git diff --check` 均通过。首次 canonical S7 仅暴露 inspector 把 Orchestrator 注释中的包名误判为 import，改为按真实 import syntax 检查后定向反例与完整门禁通过；未据此放宽 concrete import 禁令。
+- 独立复核纠正：协调者确认生产依赖反转成立，但 `orchestrator/src/tools/index.ts` 仍以旧箭头说明 Orchestrator 直接依赖 tools-builtin，`core/src/skills/builtin.ts` 也仍把 Skill 工具需求的实现装配归因于具体 factory table。本轮只把两处说明改为当前单一边界：Orchestrator tools 子树拥有依赖内部模块的派生工具，Skill/Profile 只声明工具名需求，具体 builtin 实现由 Host Tool implementation binding 选择并经 Kernel 端口注入；未修改生产逻辑、合同、测试行为或 Tool 家族其余责任。最窄静态残留扫描、两文件 changed-source Biome 与 `git diff --check` 通过，A6-03a 其余生产与验证证据未失效。
+- 协调者独立验收：从生产根、反向消费者、manifest/lock、runtime-only export 与 concrete exact-set 重新核对后，确认 Host 唯一选择、全部 Runtime 根显式注入、Orchestrator 具体依赖归零且无行为改写。独立运行 Orchestrator 5 文件 151/151、CLI 4 文件 39/39、canonical S7 39/39 与 registry golden、`pnpm runtime:package-exports`，并按上游顺序重新构建 Orchestrator、RuntimeHost、CLI，全部通过；`git diff --check` 通过。
+- 失效与交接：若 Tool port/request/assembly/permission exact-set、冻结或校验规则、Profile enabled tool 语义、CLI builtin factory/rule binding、ApplicationHost 单次 owner、RuntimeHost/Executor/workspace 任一生产注入、Task/extra/Skill/proxy/security 交界、Orchestrator manifest/export、S7/package-export 或上述直接测试任一变化，只恢复本证据及真实相交证据。A6 继续 `[ ]`；提交后只有限审计 Tool 家族其余构造是否已经各守窄端口，不提前进入 MCP、Channel、Storage、Executor/Mesh 或设备拓扑。
 
 ## 十、用户提示词
 

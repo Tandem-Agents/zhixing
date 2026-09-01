@@ -55,6 +55,7 @@ import type {
 import type { KernelRunEnvelope } from "../kernel-run-envelope.js";
 import { createKernelModelProviderBinding } from "../kernel-model-provider.js";
 import { createKernelRuntimeEnvironment } from "../kernel-runtime-environment.js";
+import type { KernelToolImplementationPort } from "../kernel-tool-implementation.js";
 
 // ─── hoisted ref:让 vi.mock 工厂在 import 之前能引用 ───
 
@@ -176,6 +177,37 @@ function createTestRuntimeEnvironment(workspace?: string | null) {
   });
 }
 
+const testToolImplementation: KernelToolImplementationPort = Object.freeze({
+  create: ({ requestedToolNames }) => {
+    const supported = new Set([
+      "read", "write", "edit", "glob", "grep", "bash", "web_fetch",
+      "load_skill", "save_skill", "admit_skill",
+    ]);
+    const unknown = requestedToolNames.find((name) => !supported.has(name));
+    if (unknown) throw new Error(`Kernel Tool implementation does not provide "${unknown}"`);
+    return Object.freeze({
+    tools: Object.freeze(requestedToolNames.map((name): ToolDefinition => ({
+      name,
+      description: `test ${name}`,
+      inputSchema: { type: "object" },
+      call: async () => ({ content: `${name} completed` }),
+    }))),
+    permissionRuleSets: Object.freeze([
+      Object.freeze({
+        namespace: "web_fetch",
+        rules: Object.freeze([
+          PermissionStore.createRule({
+            pattern: { tool: "web_fetch", argument: "https://example.com/**" },
+            decision: "allow",
+            scope: "builtin",
+          }),
+        ]),
+      }),
+    ]),
+    });
+  },
+});
+
 const createAgentRuntime = (options: TestCreateAgentRuntimeOptions = {}) => {
   const { workspace, ...runtimeOptions } = options;
   const primaryRole = runtimeOptions.primaryRole ?? "main";
@@ -184,6 +216,7 @@ const createAgentRuntime = (options: TestCreateAgentRuntimeOptions = {}) => {
     primaryRole,
     modelProvider: createTestModelProvider(primaryRole),
     runtimeEnvironment: createTestRuntimeEnvironment(workspace),
+    toolImplementation: testToolImplementation,
   });
 };
 const { mainProfile } = await import("../../profile/default-profiles.js");
@@ -252,7 +285,7 @@ describe("createAgentRuntime · execution authority facts", () => {
       createAgentRuntime({
         profile: { ...mainProfile(), enabledTools: ["memory"] },
       }),
-    ).rejects.toThrow(/工具 "memory" 不在 BUILTIN_TOOL_FACTORIES/u);
+    ).rejects.toThrow(/Tool implementation does not provide "memory"/u);
   });
 
   it("projects the immutable tools, MCP servers, and resolved provider identities of this runtime", async () => {

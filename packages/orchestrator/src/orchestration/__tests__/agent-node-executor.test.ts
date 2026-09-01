@@ -14,7 +14,6 @@ import {
   type OrchestrationContextSnapshotV1,
   type ToolDefinition,
 } from "@zhixing/core";
-import { createReadTool } from "@zhixing/tools-builtin";
 import {
   createAgentNodeExecutorV1,
   type RunChildAgentForOrchestrationV1,
@@ -195,7 +194,7 @@ describe("ChildAgentNodeExecutorV1", () => {
     expect(called).toBe(false);
   });
 
-  it("runs through the real child-agent path with real lowercase builtin tools", async () => {
+  it("runs through the real child-agent path with a finite lowercase parent tool", async () => {
     const provider = new MockLLMProvider([
       {
         toolCalls: [
@@ -210,7 +209,7 @@ describe("ChildAgentNodeExecutorV1", () => {
     ]);
     const executor = createAgentNodeExecutorV1({
       ...createExecutorOptions(provider),
-      parentTools: [createReadTool()],
+      parentTools: [createTool("read")],
     });
 
     const result = await executor.runAgentNode(

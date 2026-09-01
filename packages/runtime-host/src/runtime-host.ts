@@ -21,6 +21,7 @@ import {
   type CreateAgentRuntimeOptions,
   type KernelModelProviderFactory,
   type KernelRuntimeEnvironmentFactory,
+  type KernelToolImplementationPort,
   type RuntimeKind,
 } from "@zhixing/orchestrator/runtime";
 import type { IConfirmationBroker } from "@zhixing/core";
@@ -56,6 +57,8 @@ export interface RuntimeHostOptions {
   readonly modelProvider: KernelModelProviderFactory;
   /** Host-owned configuration/workspace projection; no source object enters the Kernel. */
   readonly runtimeEnvironment: KernelRuntimeEnvironmentFactory;
+  /** Host-selected concrete implementation of the finite profile tool requirements. */
+  readonly toolImplementation: KernelToolImplementationPort;
   /** Durable interaction observer shared by all conversation runtime trees. */
   confirmationLifecycleObserver?: ConfirmationLifecycleObserverOption;
   /** 产品组合根持有的本机秘密路径，逐实例注入安全管线且不可由用户授权覆盖。 */
@@ -169,6 +172,7 @@ export class RuntimeHost {
         : {}),
       modelProvider,
       runtimeEnvironment,
+      toolImplementation: this.opts.toolImplementation,
       systemProtectedPaths: this.opts.systemProtectedPaths,
       primaryRole,
       runtimeIdentity: conversation?.runtimeIdentity,

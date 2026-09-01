@@ -36,6 +36,8 @@ const {
   ExecutorRuntimeSubstrate,
 } = await import("../executor-role-runtime.js");
 
+const toolImplementation = Object.freeze({ create: vi.fn() }) as never;
+
 beforeEach(() => {
   runtimeMocks.createAgentRuntime.mockReset();
   runtimeMocks.modelProviderCreate.mockClear();
@@ -53,6 +55,7 @@ describe("executor role conversation runtime production assembly", () => {
       modelConfiguration: configuration.model,
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: {},
+      toolImplementation,
       mcpHub: {
         catalog: () => [],
         callTool: vi.fn(),
@@ -113,6 +116,7 @@ describe("executor role job runtime production assembly", () => {
       modelConfiguration: configuration.model,
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: {},
+      toolImplementation,
       mcpHub: {
         catalog: () => [],
         callTool: vi.fn(),
@@ -149,6 +153,7 @@ describe("executor role job runtime production assembly", () => {
       modelConfiguration: configuration.model,
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: {},
+      toolImplementation,
       mcpHub: {
         catalog: () => [],
         callTool: vi.fn(),

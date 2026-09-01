@@ -12,6 +12,7 @@ import { createMcpHub } from "@zhixing/mcp";
 import { parseServerSpecs } from "./mcp-config.js";
 import { projectRuntimeConfiguration } from "./runtime-configuration-projections.js";
 import { resolveSystemProtectedSecretPaths } from "../security/secret-boundary.js";
+import { createHostKernelToolImplementation } from "./kernel-tool-implementation.js";
 import { createExecutorReadinessSource } from "../serve/executor-readiness.js";
 import {
   createLocalWorkspaceClient,
@@ -269,6 +270,7 @@ export async function withLocalWorkspaceClient<T, R = T>(
       modelConfiguration: configuration.model,
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: startup.providerCredentials,
+      toolImplementation: createHostKernelToolImplementation(),
       mcpHub,
       systemProtectedPaths: resolveSystemProtectedSecretPaths(),
       interactions: new DurableConversationInteractionObserver(),
