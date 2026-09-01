@@ -73,7 +73,7 @@ import {
   registerEnvironmentProbeMeshService,
 } from "./environment-probe-mesh.js";
 import { createWorksceneDirectory } from "./workscene-directory.js";
-import { createWorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
+import { createWorksceneStorageCleanupInfrastructure } from "./workscene-storage-cleanup.js";
 
 const TEST_EPOCH = Date.now();
 const NOW = new Date(TEST_EPOCH).toISOString();
@@ -358,12 +358,13 @@ async function runChain(topology: "in-process" | "mesh") {
         idleTimeoutMs: 60_000,
       },
     );
-    const worksceneStorageCleanup = createWorksceneStorageCleanup({
+    const worksceneStorageCleanup = createWorksceneStorageCleanupInfrastructure({
+      zhixingHome: anchorHome,
       storageMaintenance: anchorCapacity.storage,
     });
     const conversationDirectory = createConversationStorageInfrastructure({
       optimalMaxTokens: 20_000,
-      worksceneStorageCleanup,
+      worksceneConversationStorageRemoval: worksceneStorageCleanup.conversations,
     }).directory;
     const worksceneDirectory = createWorksceneDirectory({
       authority: () => anchor,
@@ -373,7 +374,7 @@ async function runChain(topology: "in-process" | "mesh") {
         createAnchorWorksceneConversationStorageProjectionCleanup(
           conversationDirectory,
         ),
-      worksceneStorageCleanup,
+      sceneStorageRemoval: worksceneStorageCleanup.scenes,
       recoverWorksceneState: () => anchor.recoverWorksceneState(),
       replayWorksceneMutation: (requestId) =>
         anchor.replayWorksceneMutation(requestId),

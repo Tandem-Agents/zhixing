@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-06b 已完成，等待协调者独立复核<br>
+> 当前检查点：A6-06c Workscene 物理清理存储边界已完成，等待协调者独立复核<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `7638c0ab`；A6-06a 已由协调者独立复核并提交，Conversation meta/transcript/snapshot 与维护实现只在唯一 Host infrastructure adapter 构造，各需求方只消费有限合同 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-06b 已完成实现与失效闭包验证，等待协调者独立复核 |
-| 活跃工作包 | `A6-06b-permission-storage-boundary-v1`；唯一 Host infrastructure adapter 已拥有 P04 concrete/path/instance 选择，Kernel、Trust 管理与 runtime 发放只消费分离的有限需求合同 |
-| 下一责任链 | A6-06b 闭合后继续选择不与 Executor/Mesh 重叠的下一条 Storage 责任链；不提前进入设备拓扑或 A7 |
-| 打开的单向桥 | 无；全部 Kernel Runtime 生产根均已显式消费同一有限端口，不存在默认 concrete fallback、双实现表或只为测试存在的桥 |
-| 已失效证据 | 无当前未恢复证据；A6-06b 只按真实相交面重取 Permission storage、Security 与 Trust 管理证据，Conversation storage 及其他不相交证据继续有效 |
+| 已接受基线 | `40589d3f`；A6-06b 已由协调者独立复核并提交，P04 concrete、物理根和实例选择只在唯一 Host infrastructure adapter，Kernel、Trust 与 RuntimeHost 只消费分离的有限合同 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；P03 Workscene 物理清理存储边界已完成，等待协调者独立复核 |
+| 活跃工作包 | `A6-06c-workscene-storage-cleanup-boundary-v1` 已完成；cursor、路径和有界物理 walker 只在 Host infrastructure，Workscene/Conversation 责任方只消费分离的有限删除效果 |
+| 下一责任链 | A6-06c 闭合后继续选择不与 Executor/Mesh 重叠的下一条 Storage 责任链；不提前进入设备拓扑或 A7 |
+| 打开的单向桥 | 无；A6-06c 已删除默认路径 fallback、平行 concrete 构造和需求方对 cursor/path/walker 的认知，没有双路清理入口 |
+| 已失效证据 | 无当前未恢复证据；A6-06c 已恢复 P03 cleanup cursor、Workscene/Conversation 删除交界与物理清理证据，A6-06a/06b 及其他不相交证据继续有效 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2604,6 +2604,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 行为保护：P04 global/context `permissions.v2.json` 的 schema/version、workspace hash、原子持久读写、builtin/user 优先级、工具参数 extractor、main/workspace/scene context、session rule 仅限当前 runtime、Trust list/create/revoke/snapshot 与 Security fail-closed 语义保持；本包没有改变权限/确认产品决定、公开 RPC/Event、配置、持久格式、assignment signed permission snapshot 或 Executor/Mesh 拓扑。管理、运行与 workspace identity 是同一具体实现家族的三个有限角色，不共享可变 session pool，也不形成第二权威。
 - 直接证据、门禁与交接：Orchestrator storage boundary/create-runtime 2 文件 73/73，CLI Host adapter/Trust/RuntimeHost/Executor 发放 4 文件 19/19，Core P04 file mechanism/Trust mapping 2 文件 48/48，合计 8 文件 140/140；Orchestrator 与 CLI typecheck、fresh Orchestrator、RuntimeHost 与 CLI build、fresh runtime package exports、16 个 changed-source Biome、canonical S7 43/43 与 registry golden 均通过。S7 反向 mutation 拒绝 concrete store 回流 Kernel/Trust、P04 root 逃逸、runtime/management 角色合并、任一 Anchor/Executor/workspace 生产根漏传 required factory，以及 RuntimeHost 重新选择物理实现。若 PermissionStore constructor/root/schema、builtin/session/user rule、argument extractor、Trust repository/context mapping、Security source、三生产根、RuntimeHost/Executor发放、assignment permission snapshot、S7/package exports 或上述直接测试任一变化，只恢复本证据及真实相交的 A0 P04/A4 Security/A5 Trust 证据。当前无打开桥和未恢复证据；A6 继续 `[ ]`，仅等待协调者复核 A6-06b 后选择不与 Executor/Mesh 重叠的下一条 Storage 责任链，未进入设备拓扑或 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：重新核对 P04 唯一 concrete/root/instance owner、Anchor/Executor/workspace 三个生产根、Kernel 与 Trust 的分离需求合同、运行期 session cache 和管理面 fresh read-through 语义，确认没有具体存储回流、路径泄漏、可选 fallback、第二 selector 或可见行为漂移。独立运行 Orchestrator 73/73、CLI 19/19、Core 48/48、Orchestrator/CLI typecheck、canonical S7 43/43 与 registry golden、runtime package exports 和 `git diff --check` 全部通过；本证据可以提交，A6 仍保持 `[ ]`。
+
+### A6-06c：Workscene 物理清理存储边界收口
+
+- 基线与唯一结果：以已接受 `HEAD 40589d3f` 加协调者调度记录为基线，形成待复核证据 `A6-06c-workscene-storage-cleanup-boundary-v1`。P03 `<home>/workscenes/.cleanup` cursor、Workscene 物理根、固定 64 项分页、文件系统 walker、损坏 cursor 重建、同 scene 串行与 storage-maintenance governor 只由 CLI Host infrastructure adapter 拥有；唯一生产组合根显式传入冻结 home 与 governor，再分别向 Conversation 和 Workscene 责任方发布 `removeConversation(sceneId, localConversationId)` 与 `removeScene(sceneId)` 两个有限效果。需求方不再读取路径、cursor、walker 或 concrete，也没有默认 home、生产 test hook、第二 factory 或可选物理 fallback。
+- 生产与恢复闭包：Conversation 删除仍先完成 durable session Authority delete，再调用 A6-06a 的 committed conversation projection 清理，最后才消费 P03 conversation 物理效果；Workscene 删除仍由领域/Authority 选择 scene 与 conversation exact-set，逐 conversation 完成前述链后才消费 scene 物理效果。启动恢复先安装同一 owner，再由权威 pending-deletion projection 重驱相同 finite effect；P03 cursor 只是可重建派生进度，不会自主扫描或成为第二删除事实。scene 删除会退役该 scene 的 conversation cursor，conversation 删除不触碰 scene-local legacy `me` 或个人 `<home>/me`；获授权的整 scene 删除会连同旧 scene-local Memory 数据移除，symlink 只 unlink 而不遍历外部目标。路径/schema、Windows 原子 cursor 写入、损坏恢复、partial traversal 与响应丢失语义未改变。
+- 旧路、直接证据与门禁：旧 `createWorksceneStorageCleanup()`、Core Workscene path helper 注入、需求方对 concrete 的直接消费和 production page/path/run-step override 已归零。Host walker/cursor 7/7，Workscene/Conversation 删除、目录、Surface、Advancement、Memory 退场与环境 conformance 8 文件 36/36，合计 9 文件 43/43；CLI typecheck、fresh CLI build、fresh runtime package exports、16 个 changed-source Biome、canonical S7 44/44 与 registry golden、`git diff --check` 均通过。S7 反向 mutation 拒绝第二 factory、缺失显式 home/governor、需求方恢复 path/cursor、旧 constructor/fallback、Conversation/Workscene 角色重新合并或任一生产消费端漏接有限效果。
+- 失效与交接：若 P03 cursor schema/root/page bound、walker/rename/remove、storage-maintenance governor、Workscene Authority pending deletion、Conversation committed deletion、scene/conversation 调用次序、legacy Memory/symlink 边界、唯一 Host factory、两个有限效果、S7 或上述直接测试任一变化，只恢复本证据及真实相交的 A0 P03/A6-06a/A5 Workscene/Conversation 证据；P04 与其他不相交证据不失效。当前无打开桥和未恢复证据；A6 继续 `[ ]`，仅等待协调者复核 A6-06c 后选择不与 Executor/Mesh 重叠的下一条 Storage 责任链，未进入设备拓扑或 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：重新沿 Workscene Authority 删除决定、Conversation committed deletion、启动重驱、A6-06a projection cleanup 与 P03 cursor/walker 双向核对，确认业务责任只发布精确 scene/conversation 删除需求，具体 home/path/cursor/page/fs/governor 仅由唯一 Host infrastructure owner 持有，旧默认路径和测试型 production override 已清零。独立运行九个直接测试文件 43/43、CLI typecheck、canonical S7 44/44 与 registry golden、runtime package exports、唯一构造/路径静态反查和 `git diff --check` 全部通过；Memory 退场、symlink 和历史对话保护边界成立，本证据可以提交，A6 仍保持 `[ ]`。
 
 ## 十、用户提示词
 

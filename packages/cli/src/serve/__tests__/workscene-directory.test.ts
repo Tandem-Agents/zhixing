@@ -18,7 +18,7 @@ import type { AuthorityRuntimeStack } from "../../setup-delivery.js";
 import { createConversationStorageInfrastructure } from "../conversation-storage-infrastructure.js";
 import { createAnchorWorksceneConversationStorageProjectionCleanup } from "../workscene-application-adapter.js";
 import { createWorksceneDirectory } from "../workscene-directory.js";
-import { createWorksceneStorageCleanup } from "../workscene-storage-cleanup.js";
+import { createWorksceneStorageCleanupInfrastructure } from "../workscene-storage-cleanup.js";
 
 let originalHome: string | undefined;
 let home: string;
@@ -306,10 +306,12 @@ async function createFixture(
     await globalState.stop();
     await log.stopStorageMaintenance();
   });
-  const worksceneStorageCleanup = createWorksceneStorageCleanup();
+  const worksceneStorageCleanup = createWorksceneStorageCleanupInfrastructure({
+    zhixingHome: home,
+  });
   const conversationDirectory = createConversationStorageInfrastructure({
     optimalMaxTokens: 20_000,
-    worksceneStorageCleanup,
+    worksceneConversationStorageRemoval: worksceneStorageCleanup.conversations,
   }).directory;
   let probe: WorkspaceProbeResult["probe"] = "directory";
   const authority = {
@@ -372,7 +374,7 @@ async function createFixture(
         createAnchorWorksceneConversationStorageProjectionCleanup(
           conversationDirectory,
         ),
-      worksceneStorageCleanup,
+      sceneStorageRemoval: worksceneStorageCleanup.scenes,
       recoverWorksceneState: () => globalState.recoverPendingDeletions(),
       replayWorksceneMutation: (requestId) =>
         globalState.replayMutation(requestId),

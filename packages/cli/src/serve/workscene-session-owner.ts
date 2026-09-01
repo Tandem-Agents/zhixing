@@ -5,7 +5,7 @@ import {
 } from "@zhixing/core";
 import type { WorksceneConversationStorageProjectionCleanupPort } from "@zhixing/core/workscene/application";
 import type { ConversationManager } from "@zhixing/owner-kernel";
-import type { WorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
+import type { WorksceneSceneStorageRemovalPort } from "./workscene-storage-removal.js";
 
 export interface WorksceneSessionOwnerOptions {
   readonly conversations: () => ConversationManager | null;
@@ -28,7 +28,7 @@ export interface WorksceneSessionOwnerOptions {
         >;
       }
     | undefined;
-  readonly storageCleanup: WorksceneStorageCleanup;
+  readonly sceneStorageRemoval: WorksceneSceneStorageRemovalPort;
 }
 
 /**
@@ -42,14 +42,14 @@ export class WorksceneSessionOwner {
   readonly #conversations: () => ConversationManager | null;
   readonly #conversationStorageProjectionCleanup: WorksceneConversationStorageProjectionCleanupPort;
   readonly #authority: WorksceneSessionOwnerOptions["authority"];
-  readonly #storageCleanup: WorksceneStorageCleanup;
+  readonly #sceneStorageRemoval: WorksceneSceneStorageRemovalPort;
 
   constructor(options: WorksceneSessionOwnerOptions) {
     this.#conversations = options.conversations;
     this.#conversationStorageProjectionCleanup =
       options.conversationStorageProjectionCleanup;
     this.#authority = options.authority;
-    this.#storageCleanup = options.storageCleanup;
+    this.#sceneStorageRemoval = options.sceneStorageRemoval;
   }
 
   async enter(
@@ -153,7 +153,7 @@ export class WorksceneSessionOwner {
         conversationId,
       });
     }
-    await this.#storageCleanup.removeScene(sceneId);
+    await this.#sceneStorageRemoval.removeScene(sceneId);
   }
 
   async #recordAuthority(

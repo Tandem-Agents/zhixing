@@ -4,7 +4,7 @@ import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { toSafePathSegment } from "@zhixing/core";
 import { createConversationStorageInfrastructure } from "../conversation-storage-infrastructure.js";
-import { createWorksceneStorageCleanup } from "../workscene-storage-cleanup.js";
+import { createWorksceneStorageCleanupInfrastructure } from "../workscene-storage-cleanup.js";
 
 let oldHome: string | undefined;
 let home: string;
@@ -51,6 +51,8 @@ describe("conversation storage maintenance", () => {
 function createAliveCheck(): (directoryName: string) => Promise<boolean> {
   return createConversationStorageInfrastructure({
     optimalMaxTokens: 20_000,
-    worksceneStorageCleanup: createWorksceneStorageCleanup(),
+    worksceneConversationStorageRemoval:
+      createWorksceneStorageCleanupInfrastructure({ zhixingHome: home })
+        .conversations,
   }).maintenance.isConversationDataAlive;
 }

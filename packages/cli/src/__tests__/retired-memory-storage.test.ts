@@ -82,7 +82,7 @@ import {
 } from "@zhixing/core";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { setupAuthorityRuntime } from "../setup-delivery.js";
-import { createWorksceneStorageCleanup } from "../serve/workscene-storage-cleanup.js";
+import { createWorksceneStorageCleanupInfrastructure } from "../serve/workscene-storage-cleanup.js";
 
 const TEST_EXECUTOR_READINESS = {
   tools: [] as string[],
@@ -129,13 +129,10 @@ describe("retired memory storage remains inert", () => {
       await authority.startupCleanup.run();
       authority = undefined;
 
-      const cleanup = createWorksceneStorageCleanup({
-        sceneDirectory: () => sceneDirectory,
-        conversationDirectory: () => conversationDirectory,
-        cursorDirectory: path.join(home, "workscenes", ".cleanup"),
-        runCleanupStep: (_identity, operation) => operation(),
+      const cleanup = createWorksceneStorageCleanupInfrastructure({
+        zhixingHome: home,
       });
-      await cleanup.removeConversation(sceneId, "conversation-a");
+      await cleanup.conversations.removeConversation(sceneId, "conversation-a");
     } finally {
       fsGuard.forbiddenRoots = [];
       await authority?.startupCleanup.run();

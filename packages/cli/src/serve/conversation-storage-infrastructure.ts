@@ -38,7 +38,7 @@ import type { TaskListStore } from "@zhixing/tools-builtin";
 import { RoutedConversationRepoTaskListStore } from "../runtime/task-list-stores.js";
 import { createConversationDirectory } from "./conversation-directory.js";
 import type { NamerConversationRepo } from "./turn-maintenance.js";
-import type { WorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
+import type { WorksceneConversationStorageRemovalPort } from "./workscene-storage-removal.js";
 
 type ConversationRuntimeStoragePort = Readonly<
   Required<
@@ -80,7 +80,7 @@ interface ScopeStorage {
  */
 export function createConversationStorageInfrastructure(input: Readonly<{
   optimalMaxTokens: number;
-  worksceneStorageCleanup: WorksceneStorageCleanup;
+  worksceneConversationStorageRemoval: WorksceneConversationStorageRemovalPort;
   clearTaskListCache?: (conversationId: string) => void;
 }>): ConversationStorageInfrastructure {
   const user = createScopeStorage({ kind: "user" });
@@ -100,7 +100,8 @@ export function createConversationStorageInfrastructure(input: Readonly<{
   const directory = createConversationDirectory({
     user,
     routeConversation,
-    worksceneStorageCleanup: input.worksceneStorageCleanup,
+    worksceneConversationStorageRemoval:
+      input.worksceneConversationStorageRemoval,
     ...(input.clearTaskListCache
       ? { clearTaskListCache: input.clearTaskListCache }
       : {}),

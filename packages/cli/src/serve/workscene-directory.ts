@@ -14,7 +14,7 @@ import type { ConversationManager } from "@zhixing/owner-kernel";
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 import type { WorksceneConversationStorageProjectionCleanupPort } from "@zhixing/core/workscene/application";
 import { WorksceneSessionOwner } from "./workscene-session-owner.js";
-import type { WorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
+import type { WorksceneSceneStorageRemovalPort } from "./workscene-storage-removal.js";
 
 const CONTROL_BUDGET = { maxCalls: 8 };
 
@@ -84,7 +84,7 @@ export function createWorksceneDirectory(deps: {
   replayWorksceneMutation: (
     requestId: string,
   ) => Promise<WorksceneAppliedResult | null>;
-  worksceneStorageCleanup: WorksceneStorageCleanup;
+  sceneStorageRemoval: WorksceneSceneStorageRemovalPort;
   probeRemote?: (
     deviceId: string,
     request: Parameters<
@@ -113,7 +113,7 @@ export function createWorksceneDirectory(deps: {
       conversationStorageProjectionCleanup:
         deps.conversationStorageProjectionCleanup,
       authority: deps.conversationAuthority,
-      storageCleanup: deps.worksceneStorageCleanup,
+      sceneStorageRemoval: deps.sceneStorageRemoval,
     });
     runtime.installWorksceneCleanup((sceneId, conversationIds) =>
       sessionOwner!.removeScene(sceneId, conversationIds),

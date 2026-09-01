@@ -15,6 +15,7 @@ import {
   inspectCleanupRegistryConstructions,
   inspectConversationAdoptionAssembly,
   inspectConversationStorageBoundary,
+  inspectWorksceneStorageCleanupBoundary,
   inspectDeviceLifecycleAssembly,
   inspectDeviceAdministrationReadOwnership,
   ADVANCEMENT_APPLICATION_OWNER_EXACT_SET,
@@ -7086,5 +7087,66 @@ test("Conversation storage implementations stay behind one finite Host adapter",
       },
     ]).join("\n"),
     /retired physical Conversation liveness bypass returned/,
+  );
+});
+
+test("Workscene cleanup cursor and walker stay behind finite Host effects", async () => {
+  const paths = [
+    "packages/cli/src/serve/workscene-storage-cleanup.ts",
+    "packages/cli/src/serve/workscene-storage-removal.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/conversation-storage-infrastructure.ts",
+    "packages/cli/src/serve/conversation-directory.ts",
+    "packages/cli/src/serve/workscene-directory.ts",
+    "packages/cli/src/serve/workscene-session-owner.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  const mutate = (relative, update) => records.map((record) =>
+    record.relative === relative ? { ...record, text: update(record.text) } : record);
+
+  assert.deepEqual(inspectWorksceneStorageCleanupBoundary(records), []);
+  assert.match(
+    inspectWorksceneStorageCleanupBoundary(mutate(
+      "packages/cli/src/serve/workscene-directory.ts",
+      (text) => `${text}\ncreateWorksceneStorageCleanupInfrastructure({ zhixingHome: "foreign" });`,
+    )).join("\n"),
+    /not constructed once at the Host edge/,
+  );
+  assert.match(
+    inspectWorksceneStorageCleanupBoundary(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "createWorksceneStorageCleanupInfrastructure({\n    zhixingHome,",
+        "createWorksceneStorageCleanupInfrastructure({",
+      ),
+    )).join("\n"),
+    /not constructed once at the Host edge/,
+  );
+  assert.match(
+    inspectWorksceneStorageCleanupBoundary(mutate(
+      "packages/cli/src/serve/workscene-session-owner.ts",
+      (text) => `${text}\nimport path from "node:path"; const cursorDirectory = path.join("workscenes", ".cleanup");`,
+    )).join("\n"),
+    /regained P03 paths, cursor, walker or concrete cleanup/,
+  );
+  assert.match(
+    inspectWorksceneStorageCleanupBoundary(mutate(
+      "packages/cli/src/serve/workscene-session-owner.ts",
+      (text) => `${text}\ncreateWorksceneStorageCleanup({});`,
+    )).join("\n"),
+    /Retired Workscene cleanup constructor or fallback returned/,
+  );
+  assert.match(
+    inspectWorksceneStorageCleanupBoundary(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "sceneStorageRemoval: worksceneStorageCleanup.scenes",
+        "sceneStorageRemoval: undefined",
+      ),
+    )).join("\n"),
+    /not constructed once at the Host edge/,
   );
 });

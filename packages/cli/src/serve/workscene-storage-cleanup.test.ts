@@ -6,74 +6,58 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import type {
+  StorageMaintenanceGovernorPort,
+  StorageMaintenanceRequest,
+} from "@zhixing/core/resources";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
-import { createWorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
+import { createWorksceneStorageCleanupInfrastructure } from "./workscene-storage-cleanup.js";
 
 describe("workscene storage cleanup owner", () => {
   it("removes a large tree through bounded admitted leaves", async () => {
     const root = await createTempDir("workscene-cleanup-pages");
-    const scene = path.join(root, "scenes", "scene-a");
-    const cursorDirectory = path.join(root, "cursors");
-    for (let index = 0; index < 9; index += 1) {
+    const scene = path.join(root, "workscenes", "scene-a");
+    const cursorDirectory = path.join(root, "workscenes", ".cleanup");
+    for (let index = 0; index < 70; index += 1) {
       const directory = path.join(scene, `branch-${index % 3}`);
       await mkdir(directory, { recursive: true });
       await writeFile(path.join(directory, `file-${index}.txt`), `${index}`);
     }
-    const admitted: string[] = [];
-    const cleanup = createWorksceneStorageCleanup({
-      pageSize: 2,
-      sceneDirectory: () => scene,
-      conversationDirectory: () => path.join(scene, "conversations", "unused"),
-      cursorDirectory,
-      async runCleanupStep(identity, operation) {
-        admitted.push(identity);
-        return operation();
-      },
+    const admitted: StorageMaintenanceRequest[] = [];
+    const cleanup = createWorksceneStorageCleanupInfrastructure({
+      zhixingHome: root,
+      storageMaintenance: recordingGovernor(admitted),
     });
 
-    await cleanup.removeScene("scene-a");
+    await cleanup.scenes.removeScene("scene-a");
 
     await expect(lstat(scene)).rejects.toMatchObject({ code: "ENOENT" });
-    expect(admitted.filter((identity) => identity.includes(":leaf")).length)
-      .toBeGreaterThan(9);
-    expect(admitted.some((identity) => identity.includes(":write"))).toBe(true);
+    expect(admitted.length).toBeGreaterThan(70);
+    expect(admitted.every((request) => request.kind === "workscene-cleanup"))
+      .toBe(true);
+    expect(await cursorFiles(cursorDirectory)).toEqual([]);
   });
 
   it("resumes from a durable page cursor after an admitted step fails", async () => {
     const root = await createTempDir("workscene-cleanup-resume");
-    const scene = path.join(root, "scenes", "scene-a");
-    const cursorDirectory = path.join(root, "cursors");
-    await mkdir(path.join(scene, "nested"), { recursive: true });
-    await writeFile(path.join(scene, "nested", "a.txt"), "a");
-    await writeFile(path.join(scene, "nested", "b.txt"), "b");
-    let leaf = 0;
-    const interrupted = createWorksceneStorageCleanup({
-      pageSize: 1,
-      sceneDirectory: () => scene,
-      conversationDirectory: () => path.join(scene, "conversations", "unused"),
-      cursorDirectory,
-      async runCleanupStep(identity, operation) {
-        if (identity.includes(":leaf") && ++leaf === 2) {
-          throw new Error("injected page interruption");
-        }
-        return operation();
-      },
+    const scene = path.join(root, "workscenes", "scene-a");
+    const cursorDirectory = path.join(root, "workscenes", ".cleanup");
+    await createLargeTree(scene);
+    const interrupted = createWorksceneStorageCleanupInfrastructure({
+      zhixingHome: root,
+      storageMaintenance: failingGovernor(67, "injected page interruption"),
     });
 
-    await expect(interrupted.removeScene("scene-a")).rejects.toThrow(
+    await expect(interrupted.scenes.removeScene("scene-a")).rejects.toThrow(
       "injected page interruption",
     );
-    expect(await readdir(cursorDirectory)).toHaveLength(1);
+    expect(await cursorFiles(cursorDirectory)).not.toEqual([]);
 
-    const resumed = createWorksceneStorageCleanup({
-      pageSize: 1,
-      sceneDirectory: () => scene,
-      conversationDirectory: () => path.join(scene, "conversations", "unused"),
-      cursorDirectory,
-      runCleanupStep: (_identity, operation) => operation(),
+    const resumed = createWorksceneStorageCleanupInfrastructure({
+      zhixingHome: root,
     });
-    await resumed.removeScene("scene-a");
+    await resumed.scenes.removeScene("scene-a");
 
     await expect(lstat(scene)).rejects.toMatchObject({ code: "ENOENT" });
     expect(await cursorFiles(cursorDirectory)).toEqual([]);
@@ -81,38 +65,24 @@ describe("workscene storage cleanup owner", () => {
 
   it("rebuilds a corrupt derived cursor without weakening authoritative deletion", async () => {
     const root = await createTempDir("workscene-cleanup-corrupt-cursor");
-    const scene = path.join(root, "scenes", "scene-a");
-    const cursorDirectory = path.join(root, "cursors");
-    await mkdir(path.join(scene, "nested"), { recursive: true });
-    await writeFile(path.join(scene, "nested", "a.txt"), "a");
-    let leaf = 0;
-    const interrupted = createWorksceneStorageCleanup({
-      pageSize: 1,
-      sceneDirectory: () => scene,
-      conversationDirectory: () => path.join(scene, "conversations", "unused"),
-      cursorDirectory,
-      async runCleanupStep(identity, operation) {
-        if (identity.includes(":leaf") && ++leaf === 2) {
-          throw new Error("injected cursor interruption");
-        }
-        return operation();
-      },
+    const scene = path.join(root, "workscenes", "scene-a");
+    const cursorDirectory = path.join(root, "workscenes", ".cleanup");
+    await createLargeTree(scene);
+    const interrupted = createWorksceneStorageCleanupInfrastructure({
+      zhixingHome: root,
+      storageMaintenance: failingGovernor(67, "injected cursor interruption"),
     });
-    await expect(interrupted.removeScene("scene-a")).rejects.toThrow(
+    await expect(interrupted.scenes.removeScene("scene-a")).rejects.toThrow(
       "injected cursor interruption",
     );
     const [cursorPath] = await cursorFiles(cursorDirectory);
     expect(cursorPath).toBeDefined();
     await writeFile(cursorPath!, "{not-json", "utf8");
 
-    const resumed = createWorksceneStorageCleanup({
-      pageSize: 1,
-      sceneDirectory: () => scene,
-      conversationDirectory: () => path.join(scene, "conversations", "unused"),
-      cursorDirectory,
-      runCleanupStep: (_identity, operation) => operation(),
+    const resumed = createWorksceneStorageCleanupInfrastructure({
+      zhixingHome: root,
     });
-    await resumed.removeScene("scene-a");
+    await resumed.scenes.removeScene("scene-a");
 
     await expect(lstat(scene)).rejects.toMatchObject({ code: "ENOENT" });
     expect(await cursorFiles(cursorDirectory)).toEqual([]);
@@ -120,38 +90,27 @@ describe("workscene storage cleanup owner", () => {
 
   it("retires an interrupted conversation cursor before scene deletion completes", async () => {
     const root = await createTempDir("workscene-cleanup-retire-cursor");
-    const scene = path.join(root, "scenes", "scene-a");
+    const scene = path.join(root, "workscenes", "scene-a");
     const conversation = path.join(scene, "conversations", "primary");
-    const cursorDirectory = path.join(root, "cursors");
-    await mkdir(conversation, { recursive: true });
-    await writeFile(path.join(conversation, "meta.json"), "{}");
-    let leaf = 0;
-    const interrupted = createWorksceneStorageCleanup({
-      pageSize: 1,
-      sceneDirectory: () => scene,
-      conversationDirectory: () => conversation,
-      cursorDirectory,
-      async runCleanupStep(identity, operation) {
-        if (identity.includes(":leaf") && ++leaf === 2) {
-          throw new Error("injected conversation interruption");
-        }
-        return operation();
-      },
+    const cursorDirectory = path.join(root, "workscenes", ".cleanup");
+    await createLargeTree(conversation);
+    const interrupted = createWorksceneStorageCleanupInfrastructure({
+      zhixingHome: root,
+      storageMaintenance: failingGovernor(
+        67,
+        "injected conversation interruption",
+      ),
     });
 
     await expect(
-      interrupted.removeConversation("scene-a", "primary"),
+      interrupted.conversations.removeConversation("scene-a", "primary"),
     ).rejects.toThrow("injected conversation interruption");
     expect(await cursorFiles(cursorDirectory)).not.toEqual([]);
 
-    const resumed = createWorksceneStorageCleanup({
-      pageSize: 1,
-      sceneDirectory: () => scene,
-      conversationDirectory: () => conversation,
-      cursorDirectory,
-      runCleanupStep: (_identity, operation) => operation(),
+    const resumed = createWorksceneStorageCleanupInfrastructure({
+      zhixingHome: root,
     });
-    await resumed.removeScene("scene-a");
+    await resumed.scenes.removeScene("scene-a");
 
     await expect(lstat(scene)).rejects.toMatchObject({ code: "ENOENT" });
     expect(await cursorFiles(cursorDirectory)).toEqual([]);
@@ -159,7 +118,7 @@ describe("workscene storage cleanup owner", () => {
 
   it("unlinks a nested symlink without traversing or deleting its target", async () => {
     const root = await createTempDir("workscene-cleanup-symlink");
-    const scene = path.join(root, "scenes", "scene-a");
+    const scene = path.join(root, "workscenes", "scene-a");
     const external = path.join(root, "user-workspace");
     await mkdir(scene, { recursive: true });
     await mkdir(external, { recursive: true });
@@ -169,41 +128,100 @@ describe("workscene storage cleanup owner", () => {
       path.join(scene, "workspace-link"),
       process.platform === "win32" ? "junction" : "dir",
     );
-    const cleanup = createWorksceneStorageCleanup({
-      sceneDirectory: () => scene,
-      conversationDirectory: () => path.join(scene, "conversations", "unused"),
-      cursorDirectory: path.join(root, "cursors"),
-      runCleanupStep: (_identity, operation) => operation(),
+    const cleanup = createWorksceneStorageCleanupInfrastructure({
+      zhixingHome: root,
     });
 
-    await cleanup.removeScene("scene-a");
+    await cleanup.scenes.removeScene("scene-a");
 
     expect(await lstat(path.join(external, "keep.txt"))).toBeDefined();
     await expect(lstat(scene)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("removes legacy scene-local data only with the authorized scene", async () => {
+    const root = await createTempDir("workscene-cleanup-legacy-scene-data");
+    const scene = path.join(root, "workscenes", "scene-a");
+    const otherScene = path.join(root, "workscenes", "scene-b");
+    const personal = path.join(root, "me");
+    await mkdir(path.join(scene, "me"), { recursive: true });
+    await mkdir(otherScene, { recursive: true });
+    await mkdir(personal, { recursive: true });
+    await writeFile(path.join(scene, "me", "legacy.txt"), "delete");
+    await writeFile(path.join(otherScene, "keep.txt"), "keep");
+    await writeFile(path.join(personal, "keep.txt"), "keep");
+    const cleanup = createWorksceneStorageCleanupInfrastructure({
+      zhixingHome: root,
+    });
+
+    await cleanup.scenes.removeScene("scene-a");
+
+    await expect(lstat(scene)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await lstat(path.join(otherScene, "keep.txt"))).toBeDefined();
+    expect(await lstat(path.join(personal, "keep.txt"))).toBeDefined();
+  });
+
   it("serializes conversation and scene cleanup under one scene owner", async () => {
     const root = await createTempDir("workscene-cleanup-owner");
-    const scene = path.join(root, "scenes", "scene-a");
+    const scene = path.join(root, "workscenes", "scene-a");
     const conversation = path.join(scene, "conversations", "primary");
     await mkdir(conversation, { recursive: true });
     await writeFile(path.join(conversation, "meta.json"), "{}");
-    const cleanup = createWorksceneStorageCleanup({
-      pageSize: 1,
-      sceneDirectory: () => scene,
-      conversationDirectory: () => conversation,
-      cursorDirectory: path.join(root, "cursors"),
-      runCleanupStep: (_identity, operation) => operation(),
+    const cleanup = createWorksceneStorageCleanupInfrastructure({
+      zhixingHome: root,
     });
 
     await Promise.all([
-      cleanup.removeConversation("scene-a", "primary"),
-      cleanup.removeScene("scene-a"),
+      cleanup.conversations.removeConversation("scene-a", "primary"),
+      cleanup.scenes.removeScene("scene-a"),
     ]);
 
     await expect(lstat(scene)).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
+
+async function createLargeTree(root: string): Promise<void> {
+  for (let index = 0; index < 70; index += 1) {
+    const directory = path.join(root, `branch-${index % 3}`);
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, `file-${index}.txt`), `${index}`);
+  }
+}
+
+function recordingGovernor(
+  requests: StorageMaintenanceRequest[],
+): StorageMaintenanceGovernorPort {
+  return governor((request) => requests.push(request));
+}
+
+function failingGovernor(
+  failAt: number,
+  message: string,
+): StorageMaintenanceGovernorPort {
+  let count = 0;
+  return governor(() => {
+    count += 1;
+    if (count === failAt) throw new Error(message);
+  });
+}
+
+function governor(
+  onAcquire: (request: StorageMaintenanceRequest) => void,
+): StorageMaintenanceGovernorPort {
+  return {
+    async acquire(request) {
+      onAcquire(request);
+      return {
+        kind: "granted",
+        permit: {
+          granted: request.atomic,
+          tryBegin: () => ({ claim() {}, complete() {} }),
+          release() {},
+        },
+      };
+    },
+    snapshot: () => ({}) as never,
+  };
+}
 
 async function cursorFiles(root: string): Promise<string[]> {
   const files: string[] = [];

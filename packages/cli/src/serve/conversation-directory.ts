@@ -21,7 +21,7 @@ import type {
   ConversationDirectoryStorage,
   ConversationIdentityLifecycleMechanism,
 } from "@zhixing/core/conversation/application";
-import type { WorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
+import type { WorksceneConversationStorageRemovalPort } from "./workscene-storage-removal.js";
 
 interface ConversationDirectoryTranscriptPort extends TranscriptReadSource {
   exists(conversationId: string): Promise<boolean>;
@@ -39,7 +39,7 @@ export function createConversationDirectory(deps: {
   routeConversation(conversationId: string): ScopeHandles & {
     readonly localId: string;
   };
-  worksceneStorageCleanup: WorksceneStorageCleanup;
+  worksceneConversationStorageRemoval: WorksceneConversationStorageRemovalPort;
   /**
    * task_list 进程内 cache 的清理钩子(可选)——clear 抹掉 meta 里的
    * task_list 盘上状态,cache 与盘是同一数据的两层,在同一实现点维护一致性。
@@ -168,7 +168,7 @@ export function createConversationDirectory(deps: {
         (await h.repo.get(h.localId)) !== null ||
         (await h.transcript.exists(h.localId));
       if (scope.kind === "workscene") {
-        await deps.worksceneStorageCleanup.removeConversation(
+        await deps.worksceneConversationStorageRemoval.removeConversation(
           scope.sceneId,
           h.localId,
         );

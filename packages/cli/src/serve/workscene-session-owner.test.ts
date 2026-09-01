@@ -41,7 +41,7 @@ describe("WorksceneSessionOwner cleanup", () => {
           throw new Error("not used");
         },
       }),
-      storageCleanup: unusedStorageCleanup(),
+      sceneStorageRemoval: unusedSceneStorageRemoval(),
     });
 
     await expect(
@@ -74,7 +74,7 @@ describe("WorksceneSessionOwner cleanup", () => {
           throw new Error("not used");
         },
       }),
-      storageCleanup: unusedStorageCleanup(),
+      sceneStorageRemoval: unusedSceneStorageRemoval(),
     });
 
     await owner.exit(
@@ -111,10 +111,7 @@ describe("WorksceneSessionOwner cleanup", () => {
           return { revision: 2, at: input.at };
         },
       }),
-      storageCleanup: {
-        async removeConversation() {
-          throw new Error("conversation cleanup belongs to the directory");
-        },
+      sceneStorageRemoval: {
         async removeScene(sceneId) {
           order.push(`cleanup:${sceneId}`);
         },
@@ -158,10 +155,7 @@ describe("WorksceneSessionOwner cleanup", () => {
           return { revision: 2, at: input.at };
         },
       }),
-      storageCleanup: {
-        async removeConversation() {
-          throw new Error("not used");
-        },
+      sceneStorageRemoval: {
         async removeScene(sceneId) {
           order.push(`scene:${sceneId}`);
         },
@@ -199,8 +193,7 @@ describe("WorksceneSessionOwner cleanup", () => {
         touchWorksceneSession: vi.fn(),
         deleteWorksceneSession,
       }),
-      storageCleanup: {
-        removeConversation: vi.fn(),
+      sceneStorageRemoval: {
         removeScene,
       },
     });
@@ -213,11 +206,8 @@ describe("WorksceneSessionOwner cleanup", () => {
   });
 });
 
-function unusedStorageCleanup() {
+function unusedSceneStorageRemoval() {
   return {
-    async removeConversation() {
-      throw new Error("not used");
-    },
     async removeScene() {
       throw new Error("not used");
     },

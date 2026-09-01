@@ -27,7 +27,7 @@ import {
   DurableConversationInteractionObserver,
 } from "../conversation-protocol-runtime.js";
 import { createConversationStorageInfrastructure } from "../conversation-storage-infrastructure.js";
-import { createWorksceneStorageCleanup } from "../workscene-storage-cleanup.js";
+import { createWorksceneStorageCleanupInfrastructure } from "../workscene-storage-cleanup.js";
 
 const TEST_EXECUTOR_READINESS = {
   tools: [] as string[],
@@ -93,7 +93,9 @@ async function setupCtx() {
   const convDir = path.join(tmp, "conversations");
   const conversationStorage = createConversationStorageInfrastructure({
     optimalMaxTokens: 20_000,
-    worksceneStorageCleanup: createWorksceneStorageCleanup(),
+    worksceneConversationStorageRemoval:
+      createWorksceneStorageCleanupInfrastructure({ zhixingHome: tmp })
+        .conversations,
   });
   const created: string[] = [];
   const runtimeFactory: RuntimeFactory = {

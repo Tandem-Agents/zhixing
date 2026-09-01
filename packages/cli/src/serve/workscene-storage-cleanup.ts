@@ -7,12 +7,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import path from "node:path";
-import {
-  getWorkSceneConversationsRoot,
-  getWorkSceneDir,
-  getWorkScenesRoot,
-  toSafePathSegment,
-} from "@zhixing/core";
+import { toSafePathSegment } from "@zhixing/core";
 import {
   durablyRemoveDirectory,
   durablyRemoveFile,
@@ -26,6 +21,10 @@ import {
   storageMaintenanceRequest,
   type StorageMaintenanceGovernorPort,
 } from "@zhixing/core/resources";
+import type {
+  WorksceneConversationStorageRemovalPort,
+  WorksceneSceneStorageRemovalPort,
+} from "./workscene-storage-removal.js";
 
 const CURSOR_VERSION = 1;
 const DEFAULT_PAGE_SIZE = 64;
@@ -61,21 +60,14 @@ type CleanupStep = <T>(
   operation: () => Promise<T>,
 ) => Promise<T>;
 
-export interface WorksceneStorageCleanup {
-  removeConversation(sceneId: string, localConversationId: string): Promise<void>;
-  removeScene(sceneId: string): Promise<void>;
+interface WorksceneStorageCleanupInfrastructure {
+  readonly conversations: WorksceneConversationStorageRemovalPort;
+  readonly scenes: WorksceneSceneStorageRemovalPort;
 }
 
-export interface WorksceneStorageCleanupOptions {
+interface WorksceneStorageCleanupOptions {
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
-  readonly pageSize?: number;
-  readonly runCleanupStep?: CleanupStep;
-  readonly sceneDirectory?: (sceneId: string) => string;
-  readonly conversationDirectory?: (
-    sceneId: string,
-    localConversationId: string,
-  ) => string;
-  readonly cursorDirectory?: string;
+  readonly workscenesRoot: string;
 }
 
 /**
@@ -85,12 +77,35 @@ export interface WorksceneStorageCleanupOptions {
  * This owner persists only a rebuildable traversal cursor, admits one physical
  * filesystem step at a time, and can resume after any page boundary or crash.
  */
-export function createWorksceneStorageCleanup(
-  options: WorksceneStorageCleanupOptions = {},
-): WorksceneStorageCleanup {
-  const runCleanupStep: CleanupStep =
-    options.runCleanupStep ??
-    ((resourceIdentity, operation) =>
+export function createWorksceneStorageCleanupInfrastructure(input: Readonly<{
+  zhixingHome: string;
+  storageMaintenance?: StorageMaintenanceGovernorPort;
+}>): WorksceneStorageCleanupInfrastructure {
+  if (!input.zhixingHome) {
+    throw new TypeError("Workscene cleanup infrastructure requires a Host home");
+  }
+  const workscenesRoot = path.resolve(input.zhixingHome, "workscenes");
+  const cleanup = createDurableWorksceneStorageCleanup({
+    workscenesRoot,
+    ...(input.storageMaintenance
+      ? { storageMaintenance: input.storageMaintenance }
+      : {}),
+  });
+  return Object.freeze({
+    conversations: Object.freeze({
+      removeConversation: (sceneId: string, localConversationId: string) =>
+        cleanup.removeConversation(sceneId, localConversationId),
+    }),
+    scenes: Object.freeze({
+      removeScene: (sceneId: string) => cleanup.removeScene(sceneId),
+    }),
+  });
+}
+
+function createDurableWorksceneStorageCleanup(
+  options: WorksceneStorageCleanupOptions,
+): WorksceneConversationStorageRemovalPort & WorksceneSceneStorageRemovalPort {
+  const runCleanupStep: CleanupStep = (resourceIdentity, operation) =>
       runStorageMaintenanceStep(
         options.storageMaintenance,
         storageMaintenanceRequest(
@@ -100,24 +115,26 @@ export function createWorksceneStorageCleanup(
           { obligation: "committed" },
         ),
         operation,
-      ));
+      );
+  const sceneDirectory = (sceneId: string) =>
+    path.join(options.workscenesRoot, toSafePathSegment(sceneId));
   return new DurableWorksceneStorageCleanup({
-    pageSize: options.pageSize ?? DEFAULT_PAGE_SIZE,
+    pageSize: DEFAULT_PAGE_SIZE,
     runCleanupStep,
-    sceneDirectory: options.sceneDirectory ?? getWorkSceneDir,
-    conversationDirectory:
-      options.conversationDirectory ??
-      ((sceneId, localConversationId) =>
-        path.join(
-          getWorkSceneConversationsRoot(sceneId),
-          toSafePathSegment(localConversationId),
-        )),
-    cursorDirectory:
-      options.cursorDirectory ?? path.join(getWorkScenesRoot(), ".cleanup"),
+    sceneDirectory,
+    conversationDirectory: (sceneId, localConversationId) =>
+      path.join(
+        sceneDirectory(sceneId),
+        "conversations",
+        toSafePathSegment(localConversationId),
+      ),
+    cursorDirectory: path.join(options.workscenesRoot, ".cleanup"),
   });
 }
 
-class DurableWorksceneStorageCleanup implements WorksceneStorageCleanup {
+class DurableWorksceneStorageCleanup
+  implements WorksceneConversationStorageRemovalPort, WorksceneSceneStorageRemovalPort
+{
   readonly #pageSize: number;
   readonly #runCleanupStep: CleanupStep;
   readonly #sceneDirectory: (sceneId: string) => string;

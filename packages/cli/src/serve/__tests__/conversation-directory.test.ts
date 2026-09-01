@@ -31,7 +31,7 @@ import {
   createAnchorConversationDeleteProjectionPort,
 } from "../conversation-delete-binding.js";
 import { createConversationDirectory } from "../conversation-directory.js";
-import { createWorksceneStorageCleanup } from "../workscene-storage-cleanup.js";
+import { createWorksceneStorageCleanupInfrastructure } from "../workscene-storage-cleanup.js";
 
 let originalHome: string | undefined;
 let directory: ReturnType<typeof createConversationDirectory>;
@@ -51,7 +51,9 @@ beforeEach(async () => {
       transcript,
       localId: parseConversationId(conversationId).localId,
     }),
-    worksceneStorageCleanup: createWorksceneStorageCleanup(),
+    worksceneConversationStorageRemoval:
+      createWorksceneStorageCleanupInfrastructure({ zhixingHome: tmp })
+        .conversations,
   });
 });
 afterEach(() => {
@@ -141,7 +143,10 @@ describe("conversation directory(持久层实现)", () => {
     );
     const routedDirectory = createConversationDirectory({
       user: { repo, transcript },
-      worksceneStorageCleanup: createWorksceneStorageCleanup(),
+      worksceneConversationStorageRemoval:
+        createWorksceneStorageCleanupInfrastructure({
+          zhixingHome: process.env.ZHIXING_HOME!,
+        }).conversations,
       routeConversation: (conversationId) => {
         const { scope, localId } = parseConversationId(conversationId);
         return {
@@ -192,7 +197,10 @@ describe("conversation directory(持久层实现)", () => {
         transcript,
         localId: parseConversationId(conversationId).localId,
       }),
-      worksceneStorageCleanup: createWorksceneStorageCleanup(),
+      worksceneConversationStorageRemoval:
+        createWorksceneStorageCleanupInfrastructure({
+          zhixingHome: process.env.ZHIXING_HOME!,
+        }).conversations,
       clearTaskListCache: (id) => clearedCache.push(id),
     });
 
@@ -401,7 +409,10 @@ describe("conversation directory(持久层实现)", () => {
     const clearedCache: string[] = [];
     const dir = createConversationDirectory({
       user: { repo, transcript },
-      worksceneStorageCleanup: createWorksceneStorageCleanup(),
+      worksceneConversationStorageRemoval:
+        createWorksceneStorageCleanupInfrastructure({
+          zhixingHome: process.env.ZHIXING_HOME!,
+        }).conversations,
       routeConversation: (conversationId) => {
         const { scope, localId } = parseConversationId(conversationId);
         if (scope.kind === "workscene") {

@@ -6,7 +6,7 @@ import {
 } from "@zhixing/core";
 import { createTempDir } from "@zhixing/test-utils";
 import { createConversationStorageInfrastructure } from "../conversation-storage-infrastructure.js";
-import { createWorksceneStorageCleanup } from "../workscene-storage-cleanup.js";
+import { createWorksceneStorageCleanupInfrastructure } from "../workscene-storage-cleanup.js";
 
 let previousHome: string | undefined;
 
@@ -24,7 +24,10 @@ describe("conversation storage infrastructure", () => {
   it("routes user and Workscene through one finite runtime/directory contract", async () => {
     const storage = createConversationStorageInfrastructure({
       optimalMaxTokens: 20_000,
-      worksceneStorageCleanup: createWorksceneStorageCleanup(),
+      worksceneConversationStorageRemoval:
+        createWorksceneStorageCleanupInfrastructure({
+          zhixingHome: process.env.ZHIXING_HOME!,
+        }).conversations,
     });
     const user = await storage.directory.create();
     const workscene = worksceneConversationId("scene-storage", "conversation-1");
@@ -50,7 +53,10 @@ describe("conversation storage infrastructure", () => {
   it("shares committed views, clear/delete, and maintenance routing without exposing stores", async () => {
     const storage = createConversationStorageInfrastructure({
       optimalMaxTokens: 20_000,
-      worksceneStorageCleanup: createWorksceneStorageCleanup(),
+      worksceneConversationStorageRemoval:
+        createWorksceneStorageCleanupInfrastructure({
+          zhixingHome: process.env.ZHIXING_HOME!,
+        }).conversations,
     });
     const conversationId = worksceneConversationId("scene-storage", "conversation-2");
     await storage.directory.ensure(conversationId);

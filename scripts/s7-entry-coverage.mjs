@@ -3923,6 +3923,7 @@ export async function validateS7Structure() {
   failures.push(...inspectLocalConversationOwnerIsolation(records));
   failures.push(...inspectConversationAdoptionAssembly(records));
   failures.push(...inspectConversationStorageBoundary(records));
+  failures.push(...inspectWorksceneStorageCleanupBoundary(records));
   failures.push(...inspectRecoveryBackupAssembly([
     ...records,
     {
@@ -4202,6 +4203,121 @@ export function inspectConversationStorageBoundary(records) {
     failures.push(
       "packages/cli/src/serve/advancement-gc.ts: retired physical Conversation liveness bypass returned",
     );
+  }
+  return failures;
+}
+
+/** A6 keeps P03 cursor/walker mechanics at one Host infrastructure edge. */
+export function inspectWorksceneStorageCleanupBoundary(records) {
+  const failures = [];
+  const count = (text, token) => text.split(token).length - 1;
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const text = byPath.get(relative);
+    if (text === undefined) {
+      failures.push(`${relative}: Workscene cleanup boundary source is missing`);
+    }
+    return text ?? "";
+  };
+  const adapterPath = "packages/cli/src/serve/workscene-storage-cleanup.ts";
+  const adapter = required(adapterPath);
+  const ports = required(
+    "packages/cli/src/serve/workscene-storage-removal.ts",
+  );
+  const command = required("packages/cli/src/serve/command.ts");
+  const conversationInfrastructure = required(
+    "packages/cli/src/serve/conversation-storage-infrastructure.ts",
+  );
+  const conversationDirectory = required(
+    "packages/cli/src/serve/conversation-directory.ts",
+  );
+  const worksceneDirectory = required(
+    "packages/cli/src/serve/workscene-directory.ts",
+  );
+  const worksceneSessionOwner = required(
+    "packages/cli/src/serve/workscene-session-owner.ts",
+  );
+
+  const factoryConsumers = records.filter((record) =>
+    record.relative !== adapterPath &&
+    record.text.includes("createWorksceneStorageCleanupInfrastructure("));
+  if (
+    factoryConsumers.length !== 1 ||
+    factoryConsumers[0]?.relative !== "packages/cli/src/serve/command.ts" ||
+    count(command, "createWorksceneStorageCleanupInfrastructure({") !== 1 ||
+    !/createWorksceneStorageCleanupInfrastructure\(\{\s*zhixingHome,\s*storageMaintenance:\s*deviceCapacity\.storage/u.test(
+      command,
+    ) ||
+    !command.includes(
+      "worksceneConversationStorageRemoval: worksceneStorageCleanup.conversations",
+    ) ||
+    !command.includes("sceneStorageRemoval: worksceneStorageCleanup.scenes")
+  ) {
+    failures.push(
+      "Workscene cleanup concrete mechanism is not constructed once at the Host edge",
+    );
+  }
+  if (
+    !ports.includes("export interface WorksceneConversationStorageRemovalPort") ||
+    !ports.includes("export interface WorksceneSceneStorageRemovalPort") ||
+    /node:(?:fs|fs\/promises|path)|CleanupCursor|DurableWorksceneStorageCleanup/u.test(
+      ports,
+    ) ||
+    !adapter.includes("readonly conversations: WorksceneConversationStorageRemovalPort") ||
+    !adapter.includes("readonly scenes: WorksceneSceneStorageRemovalPort") ||
+    !adapter.includes('path.resolve(input.zhixingHome, "workscenes")') ||
+    !adapter.includes('path.join(options.workscenesRoot, ".cleanup")') ||
+    !adapter.includes("class DurableWorksceneStorageCleanup") ||
+    /createWorksceneStorageCleanupInfrastructure\([^)]*=\s*\{\}/u.test(adapter) ||
+    /getWorkScenesRoot|getWorkSceneDir|getWorkSceneConversationsRoot/u.test(adapter)
+  ) {
+    failures.push(
+      `${adapterPath}: P03 paths, cursor and bounded walker are not uniquely Host-owned`,
+    );
+  }
+  if (
+    !conversationInfrastructure.includes(
+      "worksceneConversationStorageRemoval: WorksceneConversationStorageRemovalPort",
+    ) ||
+    !conversationDirectory.includes(
+      "worksceneConversationStorageRemoval: WorksceneConversationStorageRemovalPort",
+    ) ||
+    !conversationDirectory.includes(
+      "deps.worksceneConversationStorageRemoval.removeConversation(",
+    ) ||
+    !worksceneDirectory.includes(
+      "sceneStorageRemoval: WorksceneSceneStorageRemovalPort",
+    ) ||
+    !worksceneSessionOwner.includes(
+      "sceneStorageRemoval: WorksceneSceneStorageRemovalPort",
+    ) ||
+    !worksceneSessionOwner.includes("this.#sceneStorageRemoval.removeScene(sceneId)")
+  ) {
+    failures.push(
+      "Workscene and Conversation cleanup consumers do not use their finite removal effects",
+    );
+  }
+  const worksceneDemandSources = [worksceneDirectory, worksceneSessionOwner]
+    .join("\n");
+  const demandSources = [conversationInfrastructure, conversationDirectory,
+    worksceneDemandSources].join("\n");
+  if (
+    /CleanupCursor|DurableWorksceneStorageCleanup|cursorDirectory|workscenes\/\.cleanup/u.test(
+      demandSources,
+    ) ||
+    /node:(?:fs|fs\/promises|path)/u.test(worksceneDemandSources) ||
+    /\bWorksceneStorageCleanup(?:Infrastructure|Options)?\b/u.test(demandSources) ||
+    /worksceneStorageCleanup:/u.test(demandSources)
+  ) {
+    failures.push(
+      "Workscene or Conversation demand code regained P03 paths, cursor, walker or concrete cleanup",
+    );
+  }
+  const oldFactoryConsumers = records.filter((record) =>
+    record.relative !== adapterPath &&
+    /createWorksceneStorageCleanup\(/u.test(record.text));
+  if (oldFactoryConsumers.length > 0) {
+    failures.push("Retired Workscene cleanup constructor or fallback returned");
   }
   return failures;
 }
@@ -7072,7 +7188,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     worksceneRemoveScene.indexOf("authority.deleteWorksceneSession({") < 0 ||
     worksceneRemoveScene.indexOf(".removeCommittedProjection({") <
       worksceneRemoveScene.indexOf("authority.deleteWorksceneSession({") ||
-    worksceneRemoveScene.indexOf("this.#storageCleanup.removeScene(sceneId)") <
+    worksceneRemoveScene.indexOf("this.#sceneStorageRemoval.removeScene(sceneId)") <
       worksceneRemoveScene.indexOf(".removeCommittedProjection({") ||
     !conversationStorage.includes("deleteStoredConversation(id)") ||
     /manager\.writeDurableSession\([\s\S]*?mutation: \{ kind: "conversation-delete" \}/u.test(

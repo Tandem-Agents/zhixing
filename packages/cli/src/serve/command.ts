@@ -189,7 +189,7 @@ import {
   createAnchorWorksceneAssignmentToolApplication,
   createAnchorWorksceneConversationStorageProjectionCleanup,
 } from "./workscene-application-adapter.js";
-import { createWorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
+import { createWorksceneStorageCleanupInfrastructure } from "./workscene-storage-cleanup.js";
 import { createTrustAdministrationApplication } from "./trust-administration-adapter.js";
 import { PostAdoptionReviewCoordinator } from "./post-adoption-review.js";
 import { loadOrCreateToken } from "./token.js";
@@ -375,14 +375,15 @@ async function runServerProcess(
     console.log(chalk.dim(`Generated new token: ${tokenInfo.path}`));
   }
 
-  const worksceneStorageCleanup = createWorksceneStorageCleanup({
+  const worksceneStorageCleanup = createWorksceneStorageCleanupInfrastructure({
+    zhixingHome,
     storageMaintenance: deviceCapacity.storage,
   });
   const conversationStorage = createConversationStorageInfrastructure({
     optimalMaxTokens: resolveModelCapability(
       modelConfiguration.llm?.main?.model ?? "",
     ).optimalMaxTokens,
-    worksceneStorageCleanup,
+    worksceneConversationStorageRemoval: worksceneStorageCleanup.conversations,
     clearTaskListCache: (conversationId) =>
       builtinExtraTools.taskListService.clear(conversationId),
   });
@@ -426,7 +427,7 @@ async function runServerProcess(
     conversationAuthority: () => conversationAuthorityRef.current,
     conversationStorageProjectionCleanup:
       worksceneConversationStorageProjectionCleanup,
-    worksceneStorageCleanup,
+    sceneStorageRemoval: worksceneStorageCleanup.scenes,
     recoverWorksceneState: async () => {
       await authorityRuntimeRef.current?.recoverWorksceneState();
     },
