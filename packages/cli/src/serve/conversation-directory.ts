@@ -1,6 +1,6 @@
 /**
- * ConversationDirectory 的持久层实现 —— 包装 ConversationRepository(meta 清单 /
- * 改名 / 删除)与 ShardedTranscriptStore 的倒读通道,供 Anchor Conversation
+ * ConversationDirectory 的持久层适配 —— 包装有限 meta 与 transcript 端口,
+ * 供 Anchor Conversation
  * application、Correctness adapter 与尚待归位的本机 lifecycle 消费。
  *
  * scope 路由:对话归属编码在全域键里(ws: 前缀 = 场景对话)——rename / remove /
@@ -9,15 +9,12 @@
  */
 
 import {
-  ConversationRepository,
-  ShardedTranscriptStore,
-  conversationsDir,
   parseConversationId,
   readRunsReverse,
   type Conversation,
-  type ConversationScope,
   type IConversationRepository,
   type RunRecordWithRef,
+  type TranscriptReadSource,
 } from "@zhixing/core";
 import type {
   ConversationClearProjectionPort,
@@ -26,31 +23,28 @@ import type {
 } from "@zhixing/core/conversation/application";
 import type { WorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
 
-interface ScopeHandles {
-  repo: IConversationRepository;
-  transcript: ShardedTranscriptStore;
+interface ConversationDirectoryTranscriptPort extends TranscriptReadSource {
+  exists(conversationId: string): Promise<boolean>;
+  init(conversationId: string): Promise<void>;
+  appendClear(conversationId: string): Promise<void>;
 }
 
-interface ConversationRepoRoute {
+interface ScopeHandles {
   repo: IConversationRepository;
-  /** scope 库内的 conversation id。 */
-  localId: string;
+  transcript: ConversationDirectoryTranscriptPort;
 }
 
 export function createConversationDirectory(deps: {
-  repo: ConversationRepository;
-  transcript: ShardedTranscriptStore;
+  user: ScopeHandles;
+  routeConversation(conversationId: string): ScopeHandles & {
+    readonly localId: string;
+  };
   worksceneStorageCleanup: WorksceneStorageCleanup;
   /**
    * task_list 进程内 cache 的清理钩子(可选)——clear 抹掉 meta 里的
    * task_list 盘上状态,cache 与盘是同一数据的两层,在同一实现点维护一致性。
    */
   clearTaskListCache?: (conversationId: string) => void;
-  /**
-   * 宿主级 repo 路由(可选)——task_list store 与目录 clear 共用同一 repo 实例,
-   * 保证同一 meta.json 的并发写不会因各自 new repository 绕开 per-id 锁。
-   */
-  repoForConversationId?: (conversationId: string) => ConversationRepoRoute;
 }): ConversationDirectoryStorage &
   Pick<ConversationIdentityLifecycleMechanism, "exists" | "ensureTranscript"> &
   Pick<ConversationClearProjectionPort, "clearStoredView"> & {
@@ -61,28 +55,7 @@ export function createConversationDirectory(deps: {
     readRunsReverse: ConversationDirectoryStorage["readHistory"];
     listForAdvancement(): Promise<readonly Conversation[]>;
   } {
-  const sceneHandles = new Map<string, ScopeHandles>();
-
-  const handlesFor = (conversationId: string): ScopeHandles & { localId: string } => {
-    const routed = deps.repoForConversationId?.(conversationId);
-    const { scope, localId } = parseConversationId(conversationId);
-    if (scope.kind === "workscene") {
-      let entry = sceneHandles.get(scope.sceneId);
-      if (!entry) {
-        entry = {
-          repo: routed?.repo ?? new ConversationRepository(scope as ConversationScope),
-          transcript: new ShardedTranscriptStore(conversationsDir(scope)),
-        };
-        sceneHandles.set(scope.sceneId, entry);
-      }
-      return { ...entry, localId: routed?.localId ?? localId };
-    }
-    return {
-      repo: routed?.repo ?? deps.repo,
-      transcript: deps.transcript,
-      localId: routed?.localId ?? localId,
-    };
-  };
+  const handlesFor = deps.routeConversation;
 
   const readHistory: ConversationDirectoryStorage["readHistory"] = async (
     id,
@@ -106,7 +79,7 @@ export function createConversationDirectory(deps: {
 
   return {
     async list() {
-      return (await deps.repo.list()).map((item) => ({
+      return (await deps.user.repo.list()).map((item) => ({
         conversationId: item.id,
         name: item.name,
         createdAt: item.createdAt,
@@ -114,7 +87,7 @@ export function createConversationDirectory(deps: {
       }));
     },
     listForAdvancement() {
-      return deps.repo.list();
+      return deps.user.repo.list();
     },
 
     async exists(id): Promise<boolean> {
@@ -127,8 +100,8 @@ export function createConversationDirectory(deps: {
 
     async create() {
       // user 域新对话:meta + transcript 壳一并建——身份即刻进列表
-      const created = await deps.repo.create({});
-      await deps.transcript.init(created.id);
+      const created = await deps.user.repo.create({});
+      await deps.user.transcript.init(created.id);
       return {
         conversationId: created.id,
         name: created.name,

@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-05b 已通过协调者独立验收，提交后有限审计 Channel 家族并进入 Storage<br>
+> 当前检查点：A6-06a 已通过协调者独立验收，等待提交后进入 Permission 存储边界<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `0c7bd511`；A6-05a 已由协调者独立复核并提交，具体 Channel registry/adapter 只留在 Host infrastructure 边缘，各需求方仅消费状态、生命周期、Delivery、入站与 challenge 窄端口 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-05b 已通过协调者独立复核，等待提交 |
-| 活跃工作包 | 无；`A6-05b-channel-conversation-product-binding-v1` 已闭合，提交后有限审计 Channel 家族并进入 Storage |
-| 下一责任链 | A6-05b 闭合后有限审计 Channel 家族是否还有产品/实现越界；无遗漏则进入 Storage，不提前进入 Executor/Mesh、设备拓扑或 A7 |
+| 已接受基线 | `5aca9f32`；A6-05b 已由协调者独立复核并提交，Channel 入站只经唯一 Conversation Product API 与有限 Correctness/运行适配，Surface 不再拥有对话状态机或耐久协议 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-06a 已通过协调者独立复核，等待提交 |
+| 活跃工作包 | 无；`A6-06a-conversation-storage-boundary-v1` 已闭合，提交后进入 Permission 存储实现边界 |
+| 下一责任链 | A6-06b 收束 P04 Permission 存储的 Host infrastructure 选择、Security 只读消费与 Trust 管理写入；不提前进入其他 Storage、Executor/Mesh、设备拓扑或 A7 |
 | 打开的单向桥 | 无；全部 Kernel Runtime 生产根均已显式消费同一有限端口，不存在默认 concrete fallback、双实现表或只为测试存在的桥 |
-| 已失效证据 | 无当前未恢复证据；A6-05b 只按真实相交面重取 Channel 入站、Conversation admission/control、运行投影与呈现证据，A6-05a 实现边界及其他不相交证据继续有效 |
+| 已失效证据 | 无当前未恢复证据；A6-06a 只按真实相交面重取 Conversation storage、恢复与维护证据，Channel 及其他不相交证据继续有效 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2587,6 +2587,15 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据：Core Conversation application 1 文件 38/38，覆盖稳定身份、admission、abort identity、空取消拒绝与权威回执效果；Server InboundRouter 1 文件 45/45，覆盖本地/耐久 turn、同 message replay、queue/lifecycle busy、legacy/durable cancel、confirmation、空终态、异常、owner guard 与拒新/drain；CLI Product binding/run-control/channels/startup owner 4 文件 18/18，覆盖唯一 dispatcher、Channel source、真实执行投影、权威 cancel response、foreign effect、缺 contribution、关闭等待、Host composition。Core/Owner/Server/CLI `tsc --noEmit`，fresh Core、Owner、Server 与 CLI build，canonical S7 42/42 与 registry golden、fresh runtime package exports、changed-source Biome 均通过。
 - 失效与交接：若 Conversation prepare/admit/abort command、admission source、run-control effect provenance、Owner queue/terminal、`projectSessionTurn`、Channel grouping/intent/confirmation/outbox/event/activity、Host Product API composition、Inbound/Channel finite ports、S7 或上述直接测试任一变化，只恢复本证据及真实相交的 A0/A3/A5/A6-05a 证据。当前无打开桥和未恢复证据；A6 继续 `[ ]`，仅等待协调者复核 A6-05b 后有限审计 Channel 家族，未进入 Storage、Executor/Mesh、设备拓扑或 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：重新沿真实 `setupChannels → InboundRouter → ProductApiDispatcher → Conversation application/Correctness adapter` 双向核对，确认 Router 与 Server Channel binding 已无 Manager、Owner journal/principal、耐久协议和运行投影旁路，唯一 CLI binding 只在 Host 组合处接入既有三个 Conversation command，并保持 Channel source、权威取消响应、拒新与排空边界。独立运行 Core Conversation 38/38、Server InboundRouter 45/45、CLI binding/run-control/channels/startup owner 18/18、CLI 类型检查、canonical S7 42/42 与 registry golden、runtime package exports 和 `git diff --check` 全部通过。A6-05b 可以提交，A6 仍保持 `[ ]`。
+
+### A6-06a：Conversation 持久存储实现边界收口
+
+- 基线与唯一结果：以已接受 `HEAD 5aca9f32` 加协调者调度记录为基线，形成待复核证据 `A6-06a-conversation-storage-boundary-v1`。唯一 Host infrastructure adapter 现在构造并缓存 user/Workscene 的 `ConversationRepository`、`ShardedTranscriptStore` 与 `SnapshotStore`，再分别只发布目录/历史、Owner runtime persistence、提交后 meta 视图、task-list、自动命名和维护判活/retention 六类有限需求合同；Host 组合根只构造一次该 adapter。Conversation/Context 应用继续拥有创建、清空、删除、历史分页、启动装填、task-list/segment 投影与恢复语义，Owner 只取得既有持久回调，Server、Channel 与只读降级 Surface 均不取得 store、scope root、path、codec 或文件维护实现，没有通用 Storage facade、第二路由或可选 concrete fallback。
+- 实现与旧路退场：`conversation-directory` 改为必须由 Host 注入 user handles 与全域 conversation route，删除其惰性 `new`、可选 repo selector 和同责缓存；Anchor conversation Surface 删除 Workscene transcript/snapshot 复建、物理装填与 meta 直写，统一消费 Host 的有限 runtime/committed-view/naming 端口。`buildStartupBootstrap` 只依赖 transcript read source 与 snapshot list 需求，未改变装填算法。只读降级浏览器只消费 `list/readHistory`，原物理 reader 归入同一 Host adapter；独立 `advancement-gc.ts` 判活旁路退役，Advancement maintenance 与 system retention 共用该 adapter 的 maintenance 角色。生产 concrete store constructor exact-set 仅在 `conversation-storage-infrastructure.ts`，旧 `conversationRepoFor`、`convRepo/transcript/snapshots` Assembly bag 和 command 内 root/retention 拼装归零。
+- 行为保护：P02 已冻结的 user/Workscene 组合根、`meta.json`、transcript index/shard/clear、snapshot、Windows atomic replace、索引自愈、clear 倒读边界、历史分页、提交幂等、启动恢复、task-list/segment 同 meta 锁、Workscene 全域键路由、场景删除、orphan scene retention、Advancement 判活及 read-only degraded acceptance 均继续使用原实现与原调用次序；本包没有改变 schema/version、path、codec、retention/delete policy、公开 RPC/Event、Conversation/Workscene 产品决定或 Authority。A0 P02 与 A5 Conversation 证据未因责任收口失效。
+- 直接证据与门禁：Core startup bootstrap 1 文件 12/12；CLI directory/Host adapter/read-only/maintenance 4 文件 23/23；Workscene directory 1 文件 8/8；Conversation Surface 1 文件 3/3；真实 in-process/Mesh Workscene composition 1 文件 1/1，合计 8 文件 47/47。Core 与 CLI `tsc --noEmit`、fresh Core build、`pnpm cli:build`、fresh runtime package exports、changed-source Biome 均通过；canonical S7 最终 43/43 与 registry golden 通过。S7 反向 mutation 拒绝 concrete store 逃逸到 Surface、目录恢复可选 fallback、只读 Surface 重新读 `node:fs`、第二 Host adapter construction 与旧 Advancement 物理旁路；首次 canonical S7 运行先暴露新增 validator 的局部计数 helper 缺失，修复后又准确指出旧配置门仍要求 Surface 自行解释 model capability，门禁同步改为要求 Host 在构造 storage adapter 时完成有限数值投影，最终完整门禁通过。
+- 失效与交接：若 Conversation meta/transcript/snapshot constructor、scope route、Owner persistence callbacks、committed meta projections、目录/只读历史、startup bootstrap read demand、clear/delete/retention/Advancement maintenance、Workscene storage cleanup、Host composition、S7 或上述直接测试任一变化，只恢复本证据及真实相交的 A0 P02/A5 Conversation 证据。当前无打开桥和未恢复证据；A6 继续 `[ ]`，仅等待协调者复核 A6-06a 后从 P01～P15 的真实需求方边界选择下一条 Storage 责任链，未进入 Executor/Mesh、设备拓扑或 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：重新从唯一生产构造、普通/Workscene 路由、Owner 持久回调、Conversation application、只读降级与维护入口双向核对，确认三个具体 store 只在 `conversation-storage-infrastructure.ts` 构造，Surface、目录和 Advancement 不再选择物理实现；schema、路径、恢复、clear/delete、retention 与 Windows 原子语义未变。独立运行 Core startup bootstrap 12/12、CLI storage/directory/read-only/maintenance/Workscene/Surface/conformance 35/35、CLI 类型检查、canonical S7 43/43 与 registry golden、runtime package exports 和 `git diff --check` 全部通过。A6-06a 可以提交，A6 仍保持 `[ ]`。
 
 ## 十、用户提示词
 

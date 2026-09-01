@@ -3,6 +3,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { renderReadOnlyConversationBrowser } from "../read-only-conversation-browser.js";
 import type { CliWriter } from "../../screen/index.js";
+import { createReadOnlyConversationStorage } from "../../serve/conversation-storage-infrastructure.js";
 
 let oldHome: string | undefined;
 let home: string;
@@ -35,6 +36,7 @@ describe("read-only conversation browser", () => {
     const result = await renderReadOnlyConversationBrowser({
       writer,
       error: new Error("host down"),
+      storage: createReadOnlyConversationStorage(),
       maxConversations: 1,
       width: 100,
     });
@@ -58,6 +60,7 @@ describe("read-only conversation browser", () => {
     const result = await renderReadOnlyConversationBrowser({
       writer,
       error: "offline",
+      storage: createReadOnlyConversationStorage(),
       maxConversations: 1,
       width: 100,
     });
@@ -79,6 +82,7 @@ describe("read-only conversation browser", () => {
     const result = await renderReadOnlyConversationBrowser({
       writer,
       error: "offline",
+      storage: createReadOnlyConversationStorage(),
       maxConversations: 1,
       width: 100,
     });
@@ -101,6 +105,7 @@ describe("read-only conversation browser", () => {
     const result = await renderReadOnlyConversationBrowser({
       writer,
       error: "offline",
+      storage: createReadOnlyConversationStorage(),
       maxConversations: 1,
       width: 100,
     });
@@ -108,6 +113,32 @@ describe("read-only conversation browser", () => {
     expect(result).toEqual({ conversations: 1, renderedRuns: 1 });
     expect(lines.join("\n")).toContain("坏索引也能读");
     expect(lines.join("\n")).toContain("仍走分片");
+  });
+
+  it("保持旧只读入口对缺 createdAt meta 的宽松接受", async () => {
+    await writeConversation("chat-legacy", "旧元数据", "2026-01-02T00:00:00.000Z", [
+      run("仍可浏览", "兼容回复", 0),
+    ]);
+    const metaPath = path.join(home, "conversations", "chat-legacy", "meta.json");
+    const meta = JSON.parse(await fs.readFile(metaPath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    delete meta.createdAt;
+    await fs.writeFile(metaPath, JSON.stringify(meta));
+
+    const { writer, lines } = makeWriter();
+    await expect(
+      renderReadOnlyConversationBrowser({
+        writer,
+        error: "offline",
+        storage: createReadOnlyConversationStorage(),
+        maxConversations: 1,
+        width: 100,
+      }),
+    ).resolves.toEqual({ conversations: 1, renderedRuns: 1 });
+    expect(lines.join("\n")).toContain("旧元数据 (chat-legacy)");
+    expect(lines.join("\n")).toContain("仍可浏览");
   });
 });
 

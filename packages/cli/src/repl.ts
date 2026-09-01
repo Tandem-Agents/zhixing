@@ -117,6 +117,7 @@ import { TerminalConfirmationRenderer } from "./security/index.js";
 import { createReplInterruptRuntime } from "./interrupt/repl-runtime.js";
 import { attachKeyboardSource } from "./interrupt/keyboard-source.js";
 import { renderReadOnlyConversationBrowser } from "./runtime/read-only-conversation-browser.js";
+import { createReadOnlyConversationStorage } from "./serve/conversation-storage-infrastructure.js";
 import { prepareCurrentManagedServiceConfigTurnover } from "./serve/managed-service-runtime.js";
 import {
   createWorksceneCreateSelectionRequest,
@@ -372,7 +373,10 @@ async function resolveAdvancementContractSelection(opts: {
 async function ensureCoreHostWithReadOnlyFallback(
   coreHost: CoreHostConnection,
   writer: CliWriter,
-  opts: { onAttemptFailed?: () => void } = {},
+  opts: {
+    readonly storage: ReturnType<typeof createReadOnlyConversationStorage>;
+    onAttemptFailed?: () => void;
+  },
 ): Promise<boolean> {
   let lastError: unknown;
   while (true) {
@@ -385,7 +389,11 @@ async function ensureCoreHostWithReadOnlyFallback(
     } catch (err) {
       lastError = err;
       opts.onAttemptFailed?.();
-      await renderReadOnlyConversationBrowser({ writer, error: err });
+      await renderReadOnlyConversationBrowser({
+        writer,
+        error: err,
+        storage: opts.storage,
+      });
       if (!process.stdin.isTTY) return false;
 
       const rl = readline.createInterface({
@@ -555,6 +563,7 @@ export async function startRepl(): Promise<void> {
   const startupFallbackWriter = renderScreen ? createStdoutWriter() : cliWriter;
   if (
     !(await ensureCoreHostWithReadOnlyFallback(coreHost, startupFallbackWriter, {
+      storage: createReadOnlyConversationStorage(),
       onAttemptFailed: () => startupProgress?.stop(),
     }))
   ) {

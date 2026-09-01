@@ -12,11 +12,7 @@ import { describe, expect, it, onTestFinished, vi } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
-import {
-  extractFirstText,
-  ShardedTranscriptStore,
-  SnapshotStore,
-} from "@zhixing/core";
+import { extractFirstText } from "@zhixing/core";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import {
   ConversationManager,
@@ -30,6 +26,8 @@ import {
   ConversationProtocolRuntime,
   DurableConversationInteractionObserver,
 } from "../conversation-protocol-runtime.js";
+import { createConversationStorageInfrastructure } from "../conversation-storage-infrastructure.js";
+import { createWorksceneStorageCleanup } from "../workscene-storage-cleanup.js";
 
 const TEST_EXECUTOR_READINESS = {
   tools: [] as string[],
@@ -86,9 +84,17 @@ function stubRuntime(sessionId: string): SessionRuntime {
 
 async function setupCtx() {
   const tmp = await createTempDir("conversation-surface");
+  const previousHome = process.env.ZHIXING_HOME;
+  process.env.ZHIXING_HOME = tmp;
+  onTestFinished(() => {
+    if (previousHome === undefined) delete process.env.ZHIXING_HOME;
+    else process.env.ZHIXING_HOME = previousHome;
+  });
   const convDir = path.join(tmp, "conversations");
-  const transcript = new ShardedTranscriptStore(convDir);
-  const snapshots = new SnapshotStore(convDir);
+  const conversationStorage = createConversationStorageInfrastructure({
+    optimalMaxTokens: 20_000,
+    worksceneStorageCleanup: createWorksceneStorageCleanup(),
+  });
   const created: string[] = [];
   const runtimeFactory: RuntimeFactory = {
     async create(sessionId) {
@@ -100,9 +106,8 @@ async function setupCtx() {
     identityExists: vi.fn(async () => false),
     createIdentity: vi.fn(async () => "created-conversation"),
     ensureShell: vi.fn(async () => {}),
-    initializeRuntimeStorage: vi.fn(async (id: string) => {
-      await transcript.init(id);
-    }),
+    initializeRuntimeStorage: vi.fn((id: string) =>
+      conversationStorage.runtime.initTranscript(id)),
   };
   const secretStore = new MemorySecretStore();
   const authorityRuntime = await setupAuthorityRuntime({
@@ -124,8 +129,9 @@ async function setupCtx() {
       readRunsReverse: vi.fn(async () => ({ runs: [], hasMore: false })),
     },
     conversationAuthorityRef: { current: null },
-    transcript,
-    snapshots,
+    conversationRuntimeStorage: conversationStorage.runtime,
+    conversationCommittedViewStorage: conversationStorage.committedViews,
+    conversationNamingStorage: conversationStorage.naming,
     config: {},
     enabledRoles: [],
     runtimeFactory,
@@ -134,7 +140,13 @@ async function setupCtx() {
     lifecycleContributions: { acquire: vi.fn() },
   } as unknown as AssemblyContext;
   await conversationSurface.setup(ctx);
-  return { transcript, created, ctx, convDir, conversationIdentityLifecycle };
+  return {
+    conversationStorage,
+    created,
+    ctx,
+    convDir,
+    conversationIdentityLifecycle,
+  };
 }
 
 describe("conversation 接入面：历史装载服从持久层不变量", { timeout: 30_000 }, () => {
@@ -178,15 +190,15 @@ describe("conversation 接入面：历史装载服从持久层不变量", { time
   });
 
   it("索引缺失但分片在 → 装填对含完整历史，不丢一轮（倒读自愈贯穿到入口）", async () => {
-    const { transcript, created, ctx, convDir } = await setupCtx();
-    await transcript.appendRunRecord("conv-x", {
+    const { conversationStorage, created, ctx, convDir } = await setupCtx();
+    await conversationStorage.runtime.appendRun("conv-x", {
       timestamp: new Date().toISOString(),
       messages: [
         { role: "user", content: [{ type: "text", text: "一" }] },
         { role: "assistant", content: [{ type: "text", text: "re:一" }] },
       ],
     });
-    await transcript.appendRunRecord("conv-x", {
+    await conversationStorage.runtime.appendRun("conv-x", {
       timestamp: new Date().toISOString(),
       messages: [
         { role: "user", content: [{ type: "text", text: "二" }] },
@@ -211,7 +223,8 @@ describe("conversation 接入面：历史装载服从持久层不变量", { time
   });
 
   it("真·新对话 → 窗口为空、turnCount 0，目录 ensure 建索引", async () => {
-    const { transcript, ctx, conversationIdentityLifecycle } = await setupCtx();
+    const { conversationStorage, ctx, conversationIdentityLifecycle } =
+      await setupCtx();
 
     const ensureSession = vi.spyOn(ctx.conversationProtocol!, "ensureSession");
 
@@ -226,7 +239,7 @@ describe("conversation 接入面：历史装载服从持久层不变量", { time
       conversationIdentityLifecycle.initializeRuntimeStorage.mock
         .invocationCallOrder[0]!,
     );
-    expect(await transcript.exists("fresh")).toBe(true);
+    expect(await conversationStorage.directory.exists("fresh")).toBe(true);
 
     await ctx.conversations!.disposeAll();
   });

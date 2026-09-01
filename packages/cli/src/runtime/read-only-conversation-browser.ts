@@ -1,21 +1,15 @@
 /**
  * 知行无法进入可写对话时的只读事实面。
  *
- * 这里故意不用 ConversationRepository / ShardedTranscriptStore：降级态只能读
- * 磁盘事实，不能持有任何带写能力的实例。列表与尾巴都从文件级 reader 读出，
- * 启动失败时给用户看见最近上下文与修复入口，然后退出写模式。
+ * 降级态只消费 Conversation 拥有的只读目录/历史投影；物理文件 reader 由
+ * 进程组合边界提供。启动失败时给用户看见最近上下文与修复入口，然后退出写模式。
  */
 
-import fs from "node:fs/promises";
-import path from "node:path";
 import chalk from "chalk";
-import {
-  createReadOnlyTranscriptSource,
-  conversationsDir,
-  readRunsReverse,
-  type Conversation,
-  type RunRecord,
-} from "@zhixing/core";
+import type {
+  ConversationDirectoryStorage,
+} from "@zhixing/core/conversation/application";
+import type { RunRecord } from "@zhixing/core/transcript";
 import {
   projectHistoryTail,
   renderHistoryTailLines,
@@ -27,6 +21,7 @@ import { layout } from "../tui/style.js";
 export interface ReadOnlyConversationBrowserOptions {
   readonly writer: CliWriter;
   readonly error: unknown;
+  readonly storage: Pick<ConversationDirectoryStorage, "list" | "readHistory">;
   readonly maxConversations?: number;
   readonly maxRunsPerConversation?: number;
   readonly width?: number;
@@ -49,9 +44,7 @@ export async function renderReadOnlyConversationBrowser(
   opts.writer.line(chalk.dim(`${layout.contentPrefix}对话写入与新请求已暂停；按 Enter 可重试。`));
   opts.writer.line("");
 
-  const root = conversationsDir({ kind: "user" });
-  const transcriptSource = createReadOnlyTranscriptSource(root);
-  const conversations = (await readConversations(root)).slice(0, maxConversations);
+  const conversations = (await opts.storage.list()).slice(0, maxConversations);
   if (conversations.length === 0) {
     opts.writer.line(chalk.dim(`${layout.contentPrefix}没有可显示的本地对话。`));
     renderRepairHint(opts.writer);
@@ -63,14 +56,14 @@ export async function renderReadOnlyConversationBrowser(
     const when = formatMaybeRelative(conversation.lastActiveAt);
     opts.writer.line(
       chalk.cyan(
-        `${layout.contentPrefix}${conversation.name} (${conversation.id})${
+        `${layout.contentPrefix}${conversation.name} (${conversation.conversationId})${
           when ? chalk.dim(` · ${when}`) : ""
         }`,
       ),
     );
     const runs = await readRecentRuns(
-      transcriptSource,
-      conversation.id,
+      opts.storage,
+      conversation.conversationId,
       maxRunsPerConversation,
     );
     renderedRuns += runs.length;
@@ -90,55 +83,14 @@ export async function renderReadOnlyConversationBrowser(
   return { conversations: conversations.length, renderedRuns };
 }
 
-async function readConversations(root: string): Promise<Conversation[]> {
-  let entries: string[];
-  try {
-    entries = await fs.readdir(root);
-  } catch {
-    return [];
-  }
-
-  const conversations: Conversation[] = [];
-  for (const entry of entries) {
-    const meta = await readJson<Conversation>(path.join(root, entry, "meta.json"));
-    if (!meta || meta.archived) continue;
-    if (
-      typeof meta.id !== "string" ||
-      typeof meta.name !== "string" ||
-      typeof meta.lastActiveAt !== "string"
-    ) {
-      continue;
-    }
-    conversations.push(meta);
-  }
-
-  return conversations.sort(
-    (a, b) =>
-      new Date(b.lastActiveAt).getTime() -
-      new Date(a.lastActiveAt).getTime(),
-  );
-}
-
 async function readRecentRuns(
-  transcriptSource: ReturnType<typeof createReadOnlyTranscriptSource>,
+  storage: Pick<ConversationDirectoryStorage, "readHistory">,
   conversationId: string,
   limit: number,
 ): Promise<RunRecord[]> {
   if (limit <= 0) return [];
-  const runs: RunRecord[] = [];
-  for await (const { record } of readRunsReverse(transcriptSource, conversationId)) {
-    runs.push(record);
-    if (runs.length >= limit) break;
-  }
-  return runs;
-}
-
-async function readJson<T>(file: string): Promise<T | null> {
-  try {
-    return JSON.parse(await fs.readFile(file, "utf-8")) as T;
-  } catch {
-    return null;
-  }
+  const page = await storage.readHistory(conversationId, { limit });
+  return page.runs.map(({ record }) => record);
 }
 
 function formatMaybeRelative(iso: string): string | null {

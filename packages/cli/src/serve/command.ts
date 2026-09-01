@@ -27,15 +27,7 @@ import {
   type SchedulerEventMap,
   type SchedulerFacade,
   LocalSchedulerFacade,
-  ConversationRepository,
-  parseConversationId,
   worksceneConversationId,
-  ShardedTranscriptStore,
-  SnapshotStore,
-  conversationsDir,
-  runRetentionSweep,
-  getWorkScenesRoot,
-  getWorkSceneConversationsRoot,
   type DeliveryLifecycleSourcePermit,
 } from "@zhixing/core";
 import {
@@ -140,9 +132,7 @@ import {
 } from "@zhixing/rpc";
 import { AssignmentStreamPathUnavailableError } from "./assignment-stream-path-manager.js";
 import { renderRecentContextFromMessages } from "@zhixing/owner-services";
-import {
-  loadCredentials,
-} from "@zhixing/providers";
+import { loadCredentials, resolveModelCapability } from "@zhixing/providers";
 import fsp from "node:fs/promises";
 import chalk from "chalk";
 import { isProcessAlive } from "@zhixing/server";
@@ -164,10 +154,6 @@ import {
 import { resolveSystemProtectedSecretPaths } from "../security/secret-boundary.js";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
 import { createHostMcpRuntime } from "../runtime/mcp-runtime-adapter.js";
-import {
-  RoutedConversationRepoTaskListStore,
-  type ConversationRepoTaskListRoute,
-} from "../runtime/task-list-stores.js";
 import { createCliTurnContextProviders } from "../runtime/turn-context-providers.js";
 import {
   createHostKernelModelProviderFactory,
@@ -182,8 +168,7 @@ import {
 } from "./advancement-original-task-application.js";
 import { createZhixingGuidanceLifecycle } from "./zhixing-guidance-lifecycle.js";
 import { readGuidanceFile } from "./read-guidance-file.js";
-import { createConversationAliveCheck } from "./advancement-gc.js";
-import { createConversationDirectory } from "./conversation-directory.js";
+import { createConversationStorageInfrastructure } from "./conversation-storage-infrastructure.js";
 import { createAnchorConversationClearCommitPort } from "./conversation-clear-binding.js";
 import { createAnchorConversationResumePort } from "./conversation-resume-binding.js";
 import { createAnchorConversationRunControlPort } from "./conversation-run-control-binding.js";
@@ -388,41 +373,21 @@ async function runServerProcess(
     console.log(chalk.dim(`Generated new token: ${tokenInfo.path}`));
   }
 
-  // 2. 分片 transcript store + 派生摘要快照 —— 会话执行面接入时读写；schedule 档无副作用留位。
-  const convDir = conversationsDir({ kind: "user" });
-  const transcript = new ShardedTranscriptStore(convDir);
-  const snapshots = new SnapshotStore(convDir);
-  // user 域对话 meta 仓——对话目录与 turn 后维护(自动命名)共用同一实例。
-  const convRepo = new ConversationRepository({ kind: "user" });
-  const sceneConversationRepos = new Map<string, ConversationRepository>();
-  const repoForConversationId = (
-    conversationId: string,
-  ): ConversationRepoTaskListRoute => {
-    const { scope, localId } = parseConversationId(conversationId);
-    if (scope.kind === "workscene") {
-      let repo = sceneConversationRepos.get(scope.sceneId);
-      if (!repo) {
-        repo = new ConversationRepository(scope);
-        sceneConversationRepos.set(scope.sceneId, repo);
-      }
-      return { repo, localId };
-    }
-    return { repo: convRepo, localId };
-  };
   const worksceneStorageCleanup = createWorksceneStorageCleanup({
     storageMaintenance: deviceCapacity.storage,
+  });
+  const conversationStorage = createConversationStorageInfrastructure({
+    optimalMaxTokens: resolveModelCapability(
+      modelConfiguration.llm?.main?.model ?? "",
+    ).optimalMaxTokens,
+    worksceneStorageCleanup,
+    clearTaskListCache: (conversationId) =>
+      builtinExtraTools.taskListService.clear(conversationId),
   });
   // 对话目录(盘上事实:清单 / 建删 / 改名 / 清空 / 倒读)——session.* 命令
   // 执行体的持久层,与 REPL 同 scope(同 home 同目录)。task_list cache 清理
   // 经 lazy 闭包接 builtinExtraTools(声明在后,运行期调用时已就位)。
-  const conversationDirectory = createConversationDirectory({
-    repo: convRepo,
-    transcript,
-    worksceneStorageCleanup,
-    repoForConversationId,
-    clearTaskListCache: (conversationId) =>
-      builtinExtraTools.taskListService.clear(conversationId),
-  });
+  const conversationDirectory = conversationStorage.directory;
   const conversationIdentityLifecycle =
     createConversationIdentityLifecycleApplication({
       exists: (conversationId) => conversationDirectory.exists(conversationId),
@@ -583,7 +548,7 @@ async function runServerProcess(
   //   task_list 盘上状态按全域 conversationId 路由到所属 scope repo；user / workscene
   //   与目录 clear 共用同一 repo 实例，保 meta 写入锁一致。
   const builtinExtraTools = createBuiltinExtraToolsAssembly(
-    new RoutedConversationRepoTaskListStore(repoForConversationId),
+    conversationStorage.taskLists,
     createAnchorConversationTaskListToolApplication(),
   );
   const anchorRuntimeProjections = createAnchorRuntimeProjectionAssembly({
@@ -673,7 +638,8 @@ async function runServerProcess(
           ),
       },
       conversationAlive: {
-        isConversationDataAlive: createConversationAliveCheck(),
+        isConversationDataAlive:
+          conversationStorage.maintenance.isConversationDataAlive,
       },
     });
 
@@ -964,18 +930,17 @@ async function runServerProcess(
     confirmationHub,
     mcpLifecycle: mcpRuntime.lifecycle,
     mcpStatus: mcpRuntime.status,
-    transcript,
-    snapshots,
+    conversationRuntimeStorage: conversationStorage.runtime,
+    conversationCommittedViewStorage: conversationStorage.committedViews,
+    conversationNamingStorage: conversationStorage.naming,
     runtimeFactory,
     assignmentRuntimeFactory,
     ...(jobRuntime ? { jobRuntime } : {}),
     executorReadiness,
     ...(executor ? { executorRoleModule: executor } : {}),
-    convRepo,
     conversationIdentityLifecycle,
     conversationClearProjection: conversationDirectory,
     conversationDeleteProjection: conversationDirectory,
-    conversationRepoFor: repoForConversationId,
     taskListService: builtinExtraTools.taskListService,
     conversationAuthorityRef,
     sessionBroadcastRef,
@@ -1106,28 +1071,9 @@ async function runServerProcess(
   // runtime 只服务 llm.complete，不再充当 scheduler runtime 或确认 broker。
   const schedulerEventBus = createEventBus<SchedulerEventMap>();
 
-  // 本 home 全部对话根：用户域 + 各工作场景域。按物理目录枚举——保留清理是
-  // 物理层维护，场景目录存在即纳入，不依赖注册表状态（注册表丢失不该让
-  // 孤儿场景的过期数据永生）。
-  const collectConversationRoots = async (): Promise<string[]> => {
-    const roots = [conversationsDir({ kind: "user" })];
-    try {
-      const entries = await fsp.readdir(getWorkScenesRoot(), {
-        withFileTypes: true,
-      });
-      for (const e of entries) {
-        if (e.isDirectory()) roots.push(getWorkSceneConversationsRoot(e.name));
-      }
-    } catch {
-      // 无工作场景目录——合法空域
-    }
-    return roots;
-  };
-
   const systemHandlers = buildSystemHandlers({
     transcript: {
-      runSweep: async () =>
-        runRetentionSweep({ roots: await collectConversationRoots() }),
+      runSweep: conversationStorage.maintenance.runRetentionSweep,
     },
     advancement: {
       runSweep: () => advancementConversationLifecycle.sweepOrphanData(),

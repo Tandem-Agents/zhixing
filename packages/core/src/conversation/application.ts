@@ -137,6 +137,22 @@ export interface ConversationDirectoryStorage {
   ): Promise<ConversationHistoryPage>;
 }
 
+/**
+ * Conversation-owned demand for committed view persistence. The Host adapter
+ * selects the physical meta implementation; consumers never receive a
+ * repository, scope path, or file codec.
+ */
+export interface ConversationCommittedViewStorage {
+  persistTaskList(
+    conversationId: string,
+    state: TaskListState,
+  ): Promise<void>;
+  appendSegment(
+    conversationId: string,
+    segment: import("./types.js").SegmentMeta,
+  ): Promise<void>;
+}
+
 /** Conversation-owned clear projection; storage/Owner mechanics stay behind it. */
 export interface ConversationClearProjectionPort {
   clearStoredView(conversationId: string): Promise<boolean>;

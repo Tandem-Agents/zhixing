@@ -3,9 +3,6 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   AnchorWorksceneGlobalStateAdapter,
-  ConversationRepository,
-  ShardedTranscriptStore,
-  conversationsDir,
   parseConversationId,
 } from "@zhixing/core";
 import {
@@ -18,7 +15,7 @@ import type {
 import type { ConversationManager } from "@zhixing/owner-kernel";
 import { createTempDir } from "@zhixing/test-utils";
 import type { AuthorityRuntimeStack } from "../../setup-delivery.js";
-import { createConversationDirectory } from "../conversation-directory.js";
+import { createConversationStorageInfrastructure } from "../conversation-storage-infrastructure.js";
 import { createAnchorWorksceneConversationStorageProjectionCleanup } from "../workscene-application-adapter.js";
 import { createWorksceneDirectory } from "../workscene-directory.js";
 import { createWorksceneStorageCleanup } from "../workscene-storage-cleanup.js";
@@ -310,13 +307,10 @@ async function createFixture(
     await log.stopStorageMaintenance();
   });
   const worksceneStorageCleanup = createWorksceneStorageCleanup();
-  const conversationDirectory = createConversationDirectory({
-    repo: new ConversationRepository({ kind: "user" }),
-    transcript: new ShardedTranscriptStore(
-      conversationsDir({ kind: "user" }),
-    ),
+  const conversationDirectory = createConversationStorageInfrastructure({
+    optimalMaxTokens: 20_000,
     worksceneStorageCleanup,
-  });
+  }).directory;
   let probe: WorkspaceProbeResult["probe"] = "directory";
   const authority = {
     anchorEpoch: 1,

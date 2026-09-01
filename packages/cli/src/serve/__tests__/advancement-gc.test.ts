@@ -3,7 +3,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { toSafePathSegment } from "@zhixing/core";
-import { createConversationAliveCheck } from "../advancement-gc.js";
+import { createConversationStorageInfrastructure } from "../conversation-storage-infrastructure.js";
+import { createWorksceneStorageCleanup } from "../workscene-storage-cleanup.js";
 
 let oldHome: string | undefined;
 let home: string;
@@ -19,12 +20,12 @@ afterEach(() => {
   else process.env.ZHIXING_HOME = oldHome;
 });
 
-describe("createConversationAliveCheck", () => {
+describe("conversation storage maintenance", () => {
   it("user 对话按目录段还原判活", async () => {
     await fs.mkdir(path.join(home, "conversations", "chat-1"), {
       recursive: true,
     });
-    const isAlive = createConversationAliveCheck();
+    const isAlive = createAliveCheck();
 
     expect(await isAlive(toSafePathSegment("chat-1"))).toBe(true);
     expect(await isAlive(toSafePathSegment("chat-gone"))).toBe(false);
@@ -36,7 +37,7 @@ describe("createConversationAliveCheck", () => {
       path.join(home, "workscenes", "scene-a", "conversations", "chat-9"),
       { recursive: true },
     );
-    const isAlive = createConversationAliveCheck();
+    const isAlive = createAliveCheck();
 
     // 控制日志目录名是全域键的安全投影（含冒号，编码为 zid-*）
     const advancementDirName = toSafePathSegment("ws:scene-a:chat-9");
@@ -46,3 +47,10 @@ describe("createConversationAliveCheck", () => {
     expect(await isAlive(toSafePathSegment("ws:scene-x:chat-9"))).toBe(false);
   });
 });
+
+function createAliveCheck(): (directoryName: string) => Promise<boolean> {
+  return createConversationStorageInfrastructure({
+    optimalMaxTokens: 20_000,
+    worksceneStorageCleanup: createWorksceneStorageCleanup(),
+  }).maintenance.isConversationDataAlive;
+}

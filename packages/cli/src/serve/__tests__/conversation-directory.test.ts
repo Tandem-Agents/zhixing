@@ -45,8 +45,12 @@ beforeEach(async () => {
   repo = new ConversationRepository({ kind: "user" });
   transcript = new ShardedTranscriptStore(conversationsDir({ kind: "user" }));
   directory = createConversationDirectory({
-    repo,
-    transcript,
+    user: { repo, transcript },
+    routeConversation: (conversationId) => ({
+      repo,
+      transcript,
+      localId: parseConversationId(conversationId).localId,
+    }),
     worksceneStorageCleanup: createWorksceneStorageCleanup(),
   });
 });
@@ -132,14 +136,18 @@ describe("conversation directory(持久层实现)", () => {
       sceneId: "scene-lifecycle",
     };
     const sceneRepo = new ConversationRepository(sceneScope);
+    const sceneTranscript = new ShardedTranscriptStore(
+      conversationsDir(sceneScope),
+    );
     const routedDirectory = createConversationDirectory({
-      repo,
-      transcript,
+      user: { repo, transcript },
       worksceneStorageCleanup: createWorksceneStorageCleanup(),
-      repoForConversationId: (conversationId) => {
+      routeConversation: (conversationId) => {
         const { scope, localId } = parseConversationId(conversationId);
         return {
           repo: scope.kind === "workscene" ? sceneRepo : repo,
+          transcript:
+            scope.kind === "workscene" ? sceneTranscript : transcript,
           localId,
         };
       },
@@ -178,8 +186,12 @@ describe("conversation directory(持久层实现)", () => {
   it("clear:transcript 清空事件落盘(倒读遇之即止)+ task_list cache 钩子;不存在 false", async () => {
     const clearedCache: string[] = [];
     const dir = createConversationDirectory({
-      repo,
-      transcript,
+      user: { repo, transcript },
+      routeConversation: (conversationId) => ({
+        repo,
+        transcript,
+        localId: parseConversationId(conversationId).localId,
+      }),
       worksceneStorageCleanup: createWorksceneStorageCleanup(),
       clearTaskListCache: (id) => clearedCache.push(id),
     });
@@ -388,13 +400,14 @@ describe("conversation directory(持久层实现)", () => {
     });
     const clearedCache: string[] = [];
     const dir = createConversationDirectory({
-      repo,
-      transcript,
+      user: { repo, transcript },
       worksceneStorageCleanup: createWorksceneStorageCleanup(),
-      repoForConversationId: (conversationId) => {
+      routeConversation: (conversationId) => {
         const { scope, localId } = parseConversationId(conversationId);
-        if (scope.kind === "workscene") return { repo: sceneRepo, localId };
-        return { repo, localId };
+        if (scope.kind === "workscene") {
+          return { repo: sceneRepo, transcript: sceneTranscript, localId };
+        }
+        return { repo, transcript, localId };
       },
       clearTaskListCache: (id) => clearedCache.push(id),
     });

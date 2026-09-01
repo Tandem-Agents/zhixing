@@ -8,9 +8,6 @@ import type {
 } from "@zhixing/core/contracts";
 import {
   ConfirmationBroker,
-  ConversationRepository,
-  ShardedTranscriptStore,
-  conversationsDir,
   type Message,
 } from "@zhixing/core";
 import type {
@@ -61,7 +58,7 @@ import {
 } from "../runtime/local-workspace-management-host.js";
 import type { LocalWorkspaceOwnerLease } from "../runtime/local-workspace-owner.js";
 import { setupAuthorityRuntime } from "../setup-delivery.js";
-import { createConversationDirectory } from "./conversation-directory.js";
+import { createConversationStorageInfrastructure } from "./conversation-storage-infrastructure.js";
 import { createAnchorWorksceneConversationStorageProjectionCleanup } from "./workscene-application-adapter.js";
 import {
   ConversationProtocolRuntime,
@@ -364,13 +361,10 @@ async function runChain(topology: "in-process" | "mesh") {
     const worksceneStorageCleanup = createWorksceneStorageCleanup({
       storageMaintenance: anchorCapacity.storage,
     });
-    const conversationDirectory = createConversationDirectory({
-      repo: new ConversationRepository({ kind: "user" }),
-      transcript: new ShardedTranscriptStore(
-        conversationsDir({ kind: "user" }),
-      ),
+    const conversationDirectory = createConversationStorageInfrastructure({
+      optimalMaxTokens: 20_000,
       worksceneStorageCleanup,
-    });
+    }).directory;
     const worksceneDirectory = createWorksceneDirectory({
       authority: () => anchor,
       conversations: () => conversationManager,

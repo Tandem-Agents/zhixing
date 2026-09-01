@@ -25,14 +25,12 @@ import type {
   RuntimeChannelConfigurationProjection,
   RuntimeModelConfigurationProjection,
 } from "../runtime/runtime-configuration-projections.js";
-import type {
-  ChannelStatus,
-  ConversationRepository,
-  ShardedTranscriptStore,
-  SnapshotStore,
-} from "@zhixing/core";
+import type { ChannelStatus } from "@zhixing/core";
 import type { ChannelDeliveryEffectSource } from "@zhixing/core/delivery/channel-effect";
-import type { ConversationClearProjectionPort } from "@zhixing/core/conversation/application";
+import type {
+  ConversationClearProjectionPort,
+  ConversationCommittedViewStorage,
+} from "@zhixing/core/conversation/application";
 import type {
   DeviceRole,
   EvidenceHandlerPort,
@@ -55,6 +53,7 @@ import type { ChannelConversationProductBinding } from "./channel-conversation-p
 import type {
   ConfirmationHub,
   ConversationManager,
+  ConversationManagerCallbacks,
   RuntimeFactory,
 } from "@zhixing/owner-kernel";
 import type {
@@ -108,6 +107,20 @@ import type {
   AdvancementConversationLifecycleApplication,
   AdvancementReviewAttemptApplication,
 } from "@zhixing/core/advancement/application";
+import type { NamerConversationRepo } from "./turn-maintenance.js";
+
+type ConversationRuntimeStoragePort = Readonly<
+  Required<
+    Pick<
+      ConversationManagerCallbacks,
+      | "loadHistory"
+      | "initTranscript"
+      | "appendRun"
+      | "appendCommittedRun"
+      | "writeSnapshot"
+    >
+  >
+>;
 
 /** 接入面装配阶段 —— 适配真实交织（confirmationBridge 依赖 prepared connections）。 */
 export type SurfacePhase = "pre-server" | "post-server";
@@ -151,15 +164,14 @@ export interface AssemblyContext {
   readonly confirmationHub: ConfirmationHub;
   readonly mcpLifecycle: McpRuntimeLifecyclePort;
   readonly mcpStatus: McpRuntimeStatusProjectionPort;
-  readonly transcript: ShardedTranscriptStore;
-  readonly snapshots: SnapshotStore;
+  readonly conversationRuntimeStorage: ConversationRuntimeStoragePort;
+  readonly conversationCommittedViewStorage: ConversationCommittedViewStorage;
+  readonly conversationNamingStorage: NamerConversationRepo;
   readonly runtimeFactory: RuntimeFactory;
   readonly assignmentRuntimeFactory: RuntimeFactory;
   readonly jobRuntime?: JobRuntimePort;
   readonly executorReadiness: () => ExecutorReadiness;
   readonly executorRoleModule?: ExecutorRoleModule;
-  /** user 域对话 meta 仓——turn 后维护(自动命名)与对话目录共用同一实例 */
-  readonly convRepo: ConversationRepository;
   /** Conversation-owned identity/shell lifecycle; no physical storage leaks. */
   readonly conversationIdentityLifecycle: ConversationIdentityLifecycleApplication;
   /** Conversation-owned clear projection; never exposed through ServerContext. */
@@ -170,10 +182,6 @@ export interface AssemblyContext {
   /** Conversation-owned delete projection; never exposed through ServerContext. */
   readonly conversationDeleteProjection: {
     deleteStoredConversation(conversationId: string): Promise<boolean>;
-  };
-  readonly conversationRepoFor: (conversationId: string) => {
-    readonly repo: import("@zhixing/core").IConversationRepository;
-    readonly localId: string;
   };
   readonly taskListService: TaskListService;
   readonly conversationAuthorityRef: {

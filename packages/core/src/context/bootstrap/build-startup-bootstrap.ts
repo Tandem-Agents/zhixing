@@ -19,10 +19,11 @@
  */
 
 import type { Message } from "../../types/messages.js";
-import { readRunsReverse } from "../../transcript/shard/reader.js";
-import type { ShardedTranscriptStore } from "../../transcript/shard/store.js";
+import {
+  readRunsReverse,
+  type TranscriptReadSource,
+} from "../../transcript/shard/reader.js";
 import type { RunRecord } from "../../transcript/shard/types.js";
-import type { SnapshotStore } from "../../transcript/snapshot/store.js";
 import type { SegmentSnapshotFile } from "../../transcript/snapshot/types.js";
 import { buildStartupBootstrapPair } from "../system-meta.js";
 import { estimateTextTokensRaw } from "../token-estimator.js";
@@ -32,15 +33,20 @@ import { estimateTextTokensRaw } from "../token-estimator.js";
 export interface StartupBootstrapDeps {
   readonly conversationId: string;
   /** 持久层原文（倒读原语 + clear 边界的数据源） */
-  readonly store: ShardedTranscriptStore;
+  readonly store: TranscriptReadSource;
   /** 派生摘要快照读端 */
-  readonly snapshots: SnapshotStore;
+  readonly snapshots: StartupSnapshotSource;
   /** 模型注意力能力 —— 预算基准（调用方按当前模型解析后注入数值） */
   readonly capability: { readonly optimalMaxTokens: number };
   /** token 估算（与运行期同一估算器实现） */
   readonly estimator: {
     estimateMessages(messages: readonly Message[]): number;
   };
+}
+
+/** Context-owned read demand; the filesystem snapshot implementation stays at the Host edge. */
+export interface StartupSnapshotSource {
+  list(conversationId: string): Promise<readonly SegmentSnapshotFile[]>;
 }
 
 /** 装填预算的绝对上限 —— 注意力优质区间内为"接续感"付出的最大成本 */
@@ -145,7 +151,7 @@ export async function buildStartupBootstrap(
  */
 async function pickSnapshotSummary(
   candidates: readonly SegmentSnapshotFile[],
-  store: ShardedTranscriptStore,
+  store: TranscriptReadSource,
   conversationId: string,
   earliestLoadedRunIndex: number,
 ): Promise<string | null> {

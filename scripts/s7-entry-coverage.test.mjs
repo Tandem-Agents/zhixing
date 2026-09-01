@@ -14,6 +14,7 @@ import {
   inspectProductionSource,
   inspectCleanupRegistryConstructions,
   inspectConversationAdoptionAssembly,
+  inspectConversationStorageBoundary,
   inspectDeviceLifecycleAssembly,
   inspectDeviceAdministrationReadOwnership,
   ADVANCEMENT_APPLICATION_OWNER_EXACT_SET,
@@ -6994,5 +6995,67 @@ test("scheduler current section freezes old retirement and new AuthorityDelivery
       scheduler.replace("已整体退役", "只允许一次性排空迁移，排空后删除"),
     ),
     /missing retirement fact|stale migration wording/,
+  );
+});
+
+test("Conversation storage implementations stay behind one finite Host adapter", async () => {
+  const paths = [
+    "packages/cli/src/serve/conversation-storage-infrastructure.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/access-surface.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/conversation-directory.ts",
+    "packages/cli/src/runtime/read-only-conversation-browser.ts",
+    "packages/core/src/context/bootstrap/build-startup-bootstrap.ts",
+    "packages/core/src/conversation/application.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  const mutate = (relative, update) => records.map((record) =>
+    record.relative === relative ? { ...record, text: update(record.text) } : record);
+
+  assert.deepEqual(inspectConversationStorageBoundary(records), []);
+  assert.match(
+    inspectConversationStorageBoundary(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => `${text}\nimport { ShardedTranscriptStore } from "@zhixing/core/transcript";`,
+    )).join("\n"),
+    /concrete Conversation storage ShardedTranscriptStore escaped/,
+  );
+  assert.match(
+    inspectConversationStorageBoundary(mutate(
+      "packages/cli/src/serve/conversation-directory.ts",
+      (text) => text.replace(
+        "routeConversation(conversationId: string)",
+        "routeConversation?(conversationId: string)",
+      ),
+    )).join("\n"),
+    /directory routing can recreate a concrete fallback owner/,
+  );
+  assert.match(
+    inspectConversationStorageBoundary(mutate(
+      "packages/cli/src/runtime/read-only-conversation-browser.ts",
+      (text) => `${text}\nimport fs from "node:fs/promises";`,
+    )).join("\n"),
+    /Surface reads concrete storage or physical paths/,
+  );
+  assert.match(
+    inspectConversationStorageBoundary(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => `${text}\ncreateConversationStorageInfrastructure({});`,
+    )).join("\n"),
+    /Host does not compose the single finite Conversation storage boundary/,
+  );
+  assert.match(
+    inspectConversationStorageBoundary([
+      ...records,
+      {
+        relative: "packages/cli/src/serve/advancement-gc.ts",
+        text: "export const revived = true;",
+      },
+    ]).join("\n"),
+    /retired physical Conversation liveness bypass returned/,
   );
 });

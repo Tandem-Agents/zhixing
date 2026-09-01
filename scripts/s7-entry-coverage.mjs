@@ -3430,7 +3430,9 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
     !assembly.includes("readonly channelConfiguration: RuntimeChannelConfigurationProjection;") ||
     !assembly.includes("readonly authorityConfiguration: RuntimeAuthorityConfigurationProjection;") ||
     !surfaces.includes("config: ctx.authorityConfiguration") ||
-    !surfaces.includes("modelConfiguration.llm?.main?.model") ||
+    !anchor.includes("optimalMaxTokens: resolveModelCapability(") ||
+    !anchor.includes("modelConfiguration.llm?.main?.model") ||
+    surfaces.includes("modelConfiguration.llm?.main?.model") ||
     !surfaces.includes("configuration: ctx.advancementConfiguration") ||
     !surfaces.includes("entries: channelConfiguration.messaging") ||
     !surfaces.includes("cancelKeywords: channelConfiguration.intent?.cancelKeywords") ||
@@ -3912,6 +3914,7 @@ export async function validateS7Structure() {
   failures.push(...await inspectCleanupRegistryConstructions(records));
   failures.push(...inspectLocalConversationOwnerIsolation(records));
   failures.push(...inspectConversationAdoptionAssembly(records));
+  failures.push(...inspectConversationStorageBoundary(records));
   failures.push(...inspectRecoveryBackupAssembly([
     ...records,
     {
@@ -4066,6 +4069,133 @@ export async function validateS7Structure() {
     failures.push("current authority delivery entry was removed");
   }
   if (failures.length > 0) throw new Error(`S7 structure gate failed:\n- ${failures.join("\n- ")}`);
+}
+
+/** A6 keeps concrete Conversation file storage at one Host infrastructure edge. */
+export function inspectConversationStorageBoundary(records) {
+  const failures = [];
+  const count = (text, token) => text.split(token).length - 1;
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const text = byPath.get(relative);
+    if (text === undefined) {
+      failures.push(`${relative}: Conversation storage boundary source is missing`);
+    }
+    return text ?? "";
+  };
+  const adapterPath =
+    "packages/cli/src/serve/conversation-storage-infrastructure.ts";
+  const adapter = required(adapterPath);
+  const command = required("packages/cli/src/serve/command.ts");
+  const context = required("packages/cli/src/serve/access-surface.ts");
+  const surfaces = required("packages/cli/src/serve/access-surfaces.ts");
+  const directory = required("packages/cli/src/serve/conversation-directory.ts");
+  const readOnly = required(
+    "packages/cli/src/runtime/read-only-conversation-browser.ts",
+  );
+  const bootstrap = required(
+    "packages/core/src/context/bootstrap/build-startup-bootstrap.ts",
+  );
+  const application = required(
+    "packages/core/src/conversation/application.ts",
+  );
+
+  const concreteSymbols = new Set([
+    "ConversationRepository",
+    "ShardedTranscriptStore",
+    "SnapshotStore",
+  ]);
+  for (const record of records) {
+    if (!record.relative.startsWith("packages/cli/src/") ||
+        record.relative === adapterPath) continue;
+    const source = sourceFile(record.relative, record.text);
+    const visit = (node) => {
+      if (ts.isImportDeclaration(node) && node.importClause) {
+        const bindings = node.importClause.namedBindings;
+        if (bindings && ts.isNamedImports(bindings)) {
+          for (const element of bindings.elements) {
+            const imported = element.propertyName?.text ?? element.name.text;
+            if (concreteSymbols.has(imported)) {
+              failures.push(
+                `${record.relative}: concrete Conversation storage ${imported} escaped the Host infrastructure adapter`,
+              );
+            }
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
+
+  if (
+    !adapter.includes('from "@zhixing/core/conversation"') ||
+    !adapter.includes('from "@zhixing/core/transcript"') ||
+    /ConversationRepository[\s\S]*?from\s+["']@zhixing\/core["']/u.test(adapter) ||
+    count(adapter, "new ConversationRepository(") !== 1 ||
+    count(adapter, "new ShardedTranscriptStore(") !== 1 ||
+    count(adapter, "new SnapshotStore(") !== 1 ||
+    !adapter.includes("readonly runtime: ConversationRuntimeStoragePort") ||
+    !adapter.includes("readonly committedViews: ConversationCommittedViewStorage") ||
+    !adapter.includes("readonly maintenance: Readonly<")
+  ) {
+    failures.push(
+      `${adapterPath}: concrete stores are not uniquely owned behind finite Host storage roles`,
+    );
+  }
+  if (
+    count(command, "createConversationStorageInfrastructure({") !== 1 ||
+    /new\s+(?:ConversationRepository|ShardedTranscriptStore|SnapshotStore)\s*\(/u.test(
+      command,
+    ) ||
+    !command.includes("conversationRuntimeStorage: conversationStorage.runtime") ||
+    !command.includes(
+      "conversationCommittedViewStorage: conversationStorage.committedViews",
+    ) ||
+    !command.includes("runSweep: conversationStorage.maintenance.runRetentionSweep")
+  ) {
+    failures.push(
+      "packages/cli/src/serve/command.ts: Host does not compose the single finite Conversation storage boundary",
+    );
+  }
+  if (
+    /ConversationRepository|ShardedTranscriptStore|SnapshotStore|conversationsDir/u.test(
+      [context, surfaces, readOnly].join("\n"),
+    ) ||
+    /from\s+["']node:(?:fs|fs\/promises|path)["']/u.test(readOnly) ||
+    !readOnly.includes('storage: Pick<ConversationDirectoryStorage, "list" | "readHistory">')
+  ) {
+    failures.push(
+      "Conversation Surface reads concrete storage or physical paths instead of finite projections",
+    );
+  }
+  if (
+    !directory.includes("routeConversation(conversationId: string)") ||
+    /routeConversation\?/u.test(directory) ||
+    /new\s+(?:ConversationRepository|ShardedTranscriptStore|SnapshotStore)\s*\(|conversationsDir/u.test(
+      directory,
+    )
+  ) {
+    failures.push(
+      "packages/cli/src/serve/conversation-directory.ts: directory routing can recreate a concrete fallback owner",
+    );
+  }
+  if (
+    /ShardedTranscriptStore|SnapshotStore/u.test(bootstrap) ||
+    !bootstrap.includes("readonly store: TranscriptReadSource") ||
+    !bootstrap.includes("readonly snapshots: StartupSnapshotSource") ||
+    !application.includes("export interface ConversationCommittedViewStorage")
+  ) {
+    failures.push(
+      "Conversation/Context demand contracts leak concrete transcript or snapshot implementations",
+    );
+  }
+  if (byPath.has("packages/cli/src/serve/advancement-gc.ts")) {
+    failures.push(
+      "packages/cli/src/serve/advancement-gc.ts: retired physical Conversation liveness bypass returned",
+    );
+  }
+  return failures;
 }
 
 /** A5 Device Administration owns finite reads, removal, duty migration and current removal. */
