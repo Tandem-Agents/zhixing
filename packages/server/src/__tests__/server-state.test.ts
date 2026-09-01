@@ -5,6 +5,7 @@ import { createTempDir } from "@zhixing/test-utils";
 import {
   ServerStateFile,
   InvalidPhaseTransitionError,
+  readServerStateSnapshot,
   type ServerStateSnapshot,
 } from "../server-state.js";
 
@@ -34,6 +35,24 @@ describe("ServerStateFile", () => {
   async function readState(): Promise<ServerStateSnapshot> {
     return JSON.parse(await readFile(statePath, "utf-8"));
   }
+
+  it("publishes a read-only state projection without constructing a lifecycle writer", async () => {
+    const previousHome = process.env.ZHIXING_HOME;
+    process.env.ZHIXING_HOME = tempDir;
+    try {
+      await expect(readServerStateSnapshot()).resolves.toBeNull();
+      const f = newFile();
+      await f.markReady({ pid: 123, startedAt: "t", port: 18900 });
+      await expect(readServerStateSnapshot()).resolves.toMatchObject({
+        phase: "ready",
+        pid: 123,
+        port: 18900,
+      });
+    } finally {
+      if (previousHome === undefined) delete process.env.ZHIXING_HOME;
+      else process.env.ZHIXING_HOME = previousHome;
+    }
+  });
 
   describe("phase transitions", () => {
     it("happy path: starting → ready → running → stopping → stopped", async () => {

@@ -20,9 +20,7 @@ import { canonicalize } from "@zhixing/core/protocol";
 import {
   readLock,
   isProcessAlive,
-  ServerStateFile,
-  getDefaultStatePath,
-  getDefaultReadyMarkerPath,
+  readServerStateSnapshot,
   type PidFileContents,
   type ServerStateSnapshot,
   projectManagedHostStatus,
@@ -332,11 +330,7 @@ async function checkHealth(
 }
 
 async function defaultReadState(): Promise<ServerStateSnapshot | null> {
-  const f = new ServerStateFile({
-    statePath: getDefaultStatePath(),
-    readyMarkerPath: getDefaultReadyMarkerPath(),
-  });
-  return f.read();
+  return readServerStateSnapshot();
 }
 
 function defaultHttpGet(url: string, timeoutMs: number): Promise<number> {

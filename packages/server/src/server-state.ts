@@ -57,6 +57,22 @@ export interface ServerStateFileOptions {
   clock?: () => Date;
 }
 
+/** Read-only Infrastructure projection for status/diagnostic consumers. */
+export function readServerStateSnapshot(): Promise<ServerStateSnapshot | null> {
+  return readServerStateSnapshotAt(getDefaultStatePath());
+}
+
+async function readServerStateSnapshotAt(
+  statePath: string,
+): Promise<ServerStateSnapshot | null> {
+  try {
+    const raw = await readFile(statePath, "utf-8");
+    return JSON.parse(raw) as ServerStateSnapshot;
+  } catch {
+    return null;
+  }
+}
+
 /** 合法转换表——尝试非法转换 → 抛 InvalidPhaseTransitionError */
 const VALID_NEXT: Record<ServerPhase, readonly ServerPhase[]> = {
   starting: ["ready", "unhealthy"],
@@ -255,12 +271,7 @@ export class ServerStateFile {
 
   /** 读当前 state 文件快照。失败返回 null，不抛。*/
   async read(): Promise<ServerStateSnapshot | null> {
-    try {
-      const raw = await readFile(this.statePath, "utf-8");
-      return JSON.parse(raw) as ServerStateSnapshot;
-    } catch {
-      return null;
-    }
+    return readServerStateSnapshotAt(this.statePath);
   }
 
   /** 删 .ready marker + state 文件。cleanup 最后一步（PID 文件由 releaseLock 管）。*/

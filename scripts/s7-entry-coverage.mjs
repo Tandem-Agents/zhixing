@@ -3924,6 +3924,7 @@ export async function validateS7Structure() {
   failures.push(...inspectConversationAdoptionAssembly(records));
   failures.push(...inspectConversationStorageBoundary(records));
   failures.push(...inspectWorksceneStorageCleanupBoundary(records));
+  failures.push(...inspectStorageRemainderBoundary(records));
   failures.push(...inspectRecoveryBackupAssembly([
     ...records,
     {
@@ -4318,6 +4319,248 @@ export function inspectWorksceneStorageCleanupBoundary(records) {
     /createWorksceneStorageCleanup\(/u.test(record.text));
   if (oldFactoryConsumers.length > 0) {
     failures.push("Retired Workscene cleanup constructor or fallback returned");
+  }
+  return failures;
+}
+
+/** A6 keeps non-topology P01/P05/P06/P13-P15 mechanisms at finite edges. */
+export function inspectStorageRemainderBoundary(records) {
+  const failures = [];
+  const count = (text, token) => text.split(token).length - 1;
+  const requireMultiplicity = (token, expected, label, excluded = new Set()) => {
+    const actual = records
+      .filter((record) => !excluded.has(record.relative))
+      .map((record) => [record.relative, count(record.text, token)])
+      .filter(([, occurrences]) => occurrences > 0)
+      .sort(([left], [right]) => left.localeCompare(right));
+    const expectedRows = [...expected]
+      .sort(([left], [right]) => left.localeCompare(right));
+    if (JSON.stringify(actual) !== JSON.stringify(expectedRows)) {
+      failures.push(`${label} production multiplicity exact-set drifted`);
+    }
+  };
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const text = byPath.get(relative);
+    if (text === undefined) {
+      failures.push(`${relative}: storage remainder boundary source is missing`);
+    }
+    return text ?? "";
+  };
+
+  const config = required("packages/providers/src/config-loader.ts");
+  const legacyCredentials = required("packages/providers/src/credentials-loader.ts");
+  const platformSecrets = required("packages/secrets/src/platform-secret-store.ts");
+  const vault = required("packages/secrets/src/vault-secret-store.ts");
+  const skillAdapter = required(
+    "packages/orchestrator/src/runtime/assignment-skill-port.ts",
+  );
+  const skillApplication = required(
+    "packages/core/src/skills/catalog-application.ts",
+  );
+  const authoritySetup = required("packages/cli/src/setup-delivery.ts");
+  const artifactStore = required("packages/core/src/authority/artifact-store.ts");
+  const commitLog = required("packages/core/src/authority/commit-log.ts");
+  const projection = required(
+    "packages/core/src/authority/durable-projection-index.ts",
+  );
+  const lifecycleIndex = required(
+    "packages/core/src/authority/artifact-lifecycle-index.ts",
+  );
+  const status = required("packages/cli/src/serve/status.ts");
+  const token = required("packages/cli/src/serve/token.ts");
+  const anchor = required("packages/cli/src/serve/command.ts");
+  const executor = required("packages/cli/src/serve/executor-role-runtime.ts");
+  const anchorShell = required(
+    "packages/cli/src/serve/anchor-host-shell-lifecycle.ts",
+  );
+  const executorShell = required(
+    "packages/cli/src/serve/executor-server-lifecycle.ts",
+  );
+  const serverState = required("packages/server/src/server-state.ts");
+  const processLock = required("packages/server/src/process-lock.ts");
+  const serverLog = required("packages/server/src/server-log-lifecycle.ts");
+  const managedService = required("packages/cli/src/serve/managed-service.ts");
+  const diagnostics = required("packages/cli/src/output/llm-chunk-dump.ts");
+  const keypress = required("packages/cli/src/security/keypress-dump.ts");
+
+  if (
+    !config.includes("export function loadConfig(") ||
+    !config.includes("export async function writeConfig(") ||
+    !legacyCredentials.includes('path.join(homeDir, "credentials.json")') ||
+    count(platformSecrets, "new EncryptedVaultSecretStore({") !== 1 ||
+    !vault.includes("export class EncryptedVaultSecretStore")
+  ) {
+    failures.push("P01 config and SecretStore physical owners drifted");
+  }
+  requireMultiplicity(
+    "createPlatformSecretStore(",
+    [
+      ["packages/cli/src/runtime/config-command.ts", 1],
+      ["packages/cli/src/runtime/surface-core-host-link.ts", 1],
+      ["packages/cli/src/runtime/workspace-command.ts", 1],
+      ["packages/cli/src/serve/backup-command.ts", 2],
+      ["packages/cli/src/serve/disaster-recovery-command.ts", 1],
+      ["packages/cli/src/serve/managed-service-runtime.ts", 1],
+      ["packages/cli/src/serve/mesh-pair-command.ts", 1],
+      ["packages/cli/src/serve/topology-command.ts", 1],
+      ["packages/cli/src/startup.ts", 1],
+    ],
+    "P01 SecretStore concrete factory",
+    new Set(["packages/secrets/src/platform-secret-store.ts"]),
+  );
+
+  if (
+    count(skillAdapter, 'path.join(os.tmpdir(), "zhixing-skill-admission")') !== 1 ||
+    !skillAdapter.includes("implements SkillCatalogAdmissionCorrectnessPort") ||
+    /node:(?:fs|fs\/promises|path|os)|zhixing-skill-admission/u.test(skillApplication)
+  ) {
+    failures.push("P05 admission temp escaped its single Correctness adapter");
+  }
+  requireMultiplicity(
+    "new AssignmentSkillAdmissionCorrectnessPort(",
+    [["packages/orchestrator/src/runtime/assignment-skill-port.ts", 1]],
+    "P05 admission temp adapter",
+  );
+
+  if (
+    !artifactStore.includes("export class FileArtifactStore") ||
+    !commitLog.includes("export class FileAuthorityCommitLog") ||
+    !projection.includes("export class FileDurableProjectionIndex") ||
+    !lifecycleIndex.includes("export class ArtifactLifecycleIndex") ||
+    !authoritySetup.includes('path.join(authorityRoot, "artifacts")') ||
+    !authoritySetup.includes('path.join(authorityRoot, "authority")') ||
+    !authoritySetup.includes('path.join(authorityRoot, "executor-authority")')
+  ) {
+    failures.push("P06 CAS/WAL/projection physical owner exact-set drifted");
+  }
+  requireMultiplicity(
+    "export class FileArtifactStore",
+    [["packages/core/src/authority/artifact-store.ts", 1]],
+    "P06 FileArtifactStore definition",
+  );
+  requireMultiplicity(
+    "export class FileAuthorityCommitLog",
+    [["packages/core/src/authority/commit-log.ts", 1]],
+    "P06 FileAuthorityCommitLog definition",
+  );
+  requireMultiplicity(
+    "export class FileDurableProjectionIndex",
+    [["packages/core/src/authority/durable-projection-index.ts", 1]],
+    "P06 FileDurableProjectionIndex definition",
+  );
+  requireMultiplicity(
+    "export class ArtifactLifecycleIndex",
+    [["packages/core/src/authority/artifact-lifecycle-index.ts", 1]],
+    "P06 ArtifactLifecycleIndex definition",
+  );
+  const p06Concrete = /\b(?:FileArtifactStore|FileAuthorityCommitLog|FileDurableProjectionIndex|ArtifactLifecycleIndex)\b/u;
+  const allowedP06Prefixes = [
+    "packages/core/src/authority/",
+    "packages/cli/src/setup-delivery.ts",
+    "packages/cli/src/serve/",
+    "packages/executor/src/",
+    "packages/owner-kernel/src/conversation-transfer.ts",
+  ];
+  for (const record of records) {
+    if (!p06Concrete.test(record.text)) continue;
+    if (!allowedP06Prefixes.some((prefix) => record.relative.startsWith(prefix))) {
+      failures.push(`${record.relative}: P06 file concrete escaped Correctness/Infrastructure`);
+    }
+  }
+
+  if (
+    !serverState.includes(
+      "export function readServerStateSnapshot(): Promise<ServerStateSnapshot | null>",
+    ) ||
+    !serverState.includes("return readServerStateSnapshotAt(getDefaultStatePath())") ||
+    !status.includes("return readServerStateSnapshot();") ||
+    /\bServerStateFile\b|getDefaultStatePath|getDefaultReadyMarkerPath/u.test(status) ||
+    count(anchor, "await loadOrCreateToken()") !== 1 ||
+    count(executor, "await loadOrCreateToken()") !== 1 ||
+    !token.includes("export async function loadOrCreateToken(") ||
+    !anchorShell.includes("implements ServerLifecycleOwner") ||
+    !executorShell.includes("export class ExecutorServerLifecycle") ||
+    !processLock.includes("export async function acquireLock(") ||
+    !processLock.includes("export async function releaseLock(") ||
+    !serverLog.includes("export class ServerLogLifecycle")
+  ) {
+    failures.push("P13 discovery/auth/state/log ownership or read-only demand boundary drifted");
+  }
+  requireMultiplicity(
+    "new ServerStateFile(",
+    [
+      ["packages/cli/src/serve/command.ts", 1],
+      ["packages/cli/src/serve/executor-role-runtime.ts", 1],
+    ],
+    "P13 ServerStateFile constructor",
+  );
+  requireMultiplicity(
+    "readServerStateSnapshot(",
+    [
+      ["packages/cli/src/serve/status.ts", 1],
+      ["packages/server/src/server-state.ts", 1],
+    ],
+    "P13 read-only state projection definition/consumer",
+  );
+
+  if (
+    !managedService.includes("export function buildManagedServiceSpec(") ||
+    !managedService.includes("managedServiceDefinitionBytes(spec)")
+  ) {
+    failures.push("P14 managed-service file/manager adapter ownership drifted");
+  }
+  requireMultiplicity(
+    "new NodeManagedServiceAdapter(",
+    [["packages/cli/src/serve/managed-service.ts", 1]],
+    "P14 NodeManagedServiceAdapter constructor",
+  );
+
+  if (
+    !diagnostics.includes('"logs", "llm-raw"') ||
+    !diagnostics.includes('"logs", "llm-error"') ||
+    !diagnostics.includes("export function pruneAllLogs()") ||
+    !keypress.includes("export function recordKeypressEvent(") ||
+    !keypress.includes('`keypress-${process.pid}-${ts}.log`')
+  ) {
+    failures.push("P15 diagnostic writer/retention exact-set drifted");
+  }
+  requireMultiplicity(
+    '"logs", "llm-raw"',
+    [["packages/cli/src/output/llm-chunk-dump.ts", 1]],
+    "P15 llm-raw path writer",
+  );
+  requireMultiplicity(
+    '"logs", "llm-error"',
+    [["packages/cli/src/output/llm-chunk-dump.ts", 1]],
+    "P15 llm-error path writer",
+  );
+  requireMultiplicity(
+    '`keypress-${process.pid}-${ts}.log`',
+    [["packages/cli/src/security/keypress-dump.ts", 1]],
+    "P15 keypress path writer",
+  );
+
+  const forbiddenDemandPrefixes = [
+    "packages/core/src/conversation/",
+    "packages/core/src/workscene/",
+    "packages/core/src/schedule/",
+    "packages/core/src/delivery/",
+    "packages/runtime-host/src/",
+    "packages/rpc/src/",
+    "packages/tools-builtin/src/",
+  ];
+  const forbiddenMechanisms = /@zhixing\/secrets|\bEncryptedVaultSecretStore\b|\bNodeManagedServiceAdapter\b|\bServerStateFile\b|zhixing-skill-admission|\b(?:FileArtifactStore|FileAuthorityCommitLog|FileDurableProjectionIndex|ArtifactLifecycleIndex)\b|llm-(?:raw|error)|keypress-\$\{/u;
+  for (const record of records) {
+    if (
+      forbiddenDemandPrefixes.some((prefix) => record.relative.startsWith(prefix)) &&
+      forbiddenMechanisms.test(record.text)
+    ) {
+      failures.push(`${record.relative}: storage/platform mechanism returned to a demand owner`);
+    }
+    if (/\b(?:UniversalStorage|StorageFacade|StorageServiceLocator)\b/u.test(record.text)) {
+      failures.push(`${record.relative}: a unified Storage facade returned`);
+    }
   }
   return failures;
 }

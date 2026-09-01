@@ -16,6 +16,7 @@ import {
   inspectConversationAdoptionAssembly,
   inspectConversationStorageBoundary,
   inspectWorksceneStorageCleanupBoundary,
+  inspectStorageRemainderBoundary,
   inspectDeviceLifecycleAssembly,
   inspectDeviceAdministrationReadOwnership,
   ADVANCEMENT_APPLICATION_OWNER_EXACT_SET,
@@ -7148,5 +7149,143 @@ test("Workscene cleanup cursor and walker stay behind finite Host effects", asyn
       ),
     )).join("\n"),
     /not constructed once at the Host edge/,
+  );
+});
+
+test("non-topology storage mechanisms stay behind finite Infrastructure edges", async () => {
+  const paths = [
+    "packages/providers/src/config-loader.ts",
+    "packages/providers/src/credentials-loader.ts",
+    "packages/secrets/src/platform-secret-store.ts",
+    "packages/secrets/src/vault-secret-store.ts",
+    "packages/orchestrator/src/runtime/assignment-skill-port.ts",
+    "packages/core/src/skills/catalog-application.ts",
+    "packages/cli/src/setup-delivery.ts",
+    "packages/core/src/authority/artifact-store.ts",
+    "packages/core/src/authority/commit-log.ts",
+    "packages/core/src/authority/durable-projection-index.ts",
+    "packages/core/src/authority/artifact-lifecycle-index.ts",
+    "packages/cli/src/serve/status.ts",
+    "packages/cli/src/serve/token.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/cli/src/serve/anchor-host-shell-lifecycle.ts",
+    "packages/cli/src/serve/executor-server-lifecycle.ts",
+    "packages/server/src/server-state.ts",
+    "packages/server/src/process-lock.ts",
+    "packages/server/src/server-log-lifecycle.ts",
+    "packages/cli/src/serve/managed-service.ts",
+    "packages/cli/src/output/llm-chunk-dump.ts",
+    "packages/cli/src/security/keypress-dump.ts",
+    "packages/cli/src/runtime/config-command.ts",
+    "packages/cli/src/runtime/surface-core-host-link.ts",
+    "packages/cli/src/runtime/workspace-command.ts",
+    "packages/cli/src/serve/backup-command.ts",
+    "packages/cli/src/serve/disaster-recovery-command.ts",
+    "packages/cli/src/serve/managed-service-runtime.ts",
+    "packages/cli/src/serve/mesh-pair-command.ts",
+    "packages/cli/src/serve/topology-command.ts",
+    "packages/cli/src/startup.ts",
+    "packages/runtime-host/src/runtime-host.ts",
+    "packages/core/src/conversation/application.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  const mutate = (relative, update) => records.map((record) =>
+    record.relative === relative ? { ...record, text: update(record.text) } : record);
+
+  assert.deepEqual(inspectStorageRemainderBoundary(records), []);
+  assert.match(
+    inspectStorageRemainderBoundary(mutate(
+      "packages/core/src/skills/catalog-application.ts",
+      (text) => `${text}\ncreatePlatformSecretStore({ homeDir: "domain" });`,
+    )).join("\n"),
+    /P01 SecretStore concrete factory production multiplicity|mechanism returned to a demand owner/,
+  );
+  assert.match(
+    inspectStorageRemainderBoundary(mutate(
+      "packages/cli/src/runtime/config-command.ts",
+      (text) => `${text}\ncreatePlatformSecretStore({ homeDir: "duplicate" });`,
+    )).join("\n"),
+    /P01 SecretStore concrete factory production multiplicity/,
+  );
+  assert.match(
+    inspectStorageRemainderBoundary(mutate(
+      "packages/core/src/skills/catalog-application.ts",
+      (text) => `${text}\nconst admissionRoot = "zhixing-skill-admission";`,
+    )).join("\n"),
+    /P05 admission temp escaped|mechanism returned to a demand owner/,
+  );
+  assert.match(
+    inspectStorageRemainderBoundary(mutate(
+      "packages/cli/src/runtime/workspace-command.ts",
+      (text) => `${text}\nnew AssignmentSkillAdmissionCorrectnessPort({});`,
+    )).join("\n"),
+    /P05 admission temp adapter production multiplicity/,
+  );
+  assert.match(
+    inspectStorageRemainderBoundary(mutate(
+      "packages/runtime-host/src/runtime-host.ts",
+      (text) => `${text}\nconst leaked = new FileArtifactStore("authority");`,
+    )).join("\n"),
+    /P06 file concrete escaped|mechanism returned to a demand owner/,
+  );
+  assert.match(
+    inspectStorageRemainderBoundary(mutate(
+      "packages/cli/src/serve/status.ts",
+      (text) => `${text}\nexport class FileArtifactStore {}`,
+    )).join("\n"),
+    /P06 FileArtifactStore definition production multiplicity/,
+  );
+  assert.match(
+    inspectStorageRemainderBoundary(mutate(
+      "packages/cli/src/serve/status.ts",
+      (text) => `${text}\nconst writer = new ServerStateFile();`,
+    )).join("\n"),
+    /P13 discovery\/auth\/state\/log ownership|P13 ServerStateFile constructor production multiplicity/,
+  );
+  assert.match(
+    inspectStorageRemainderBoundary(mutate(
+      "packages/cli/src/runtime/workspace-command.ts",
+      (text) => `${text}\nconst secondWriter = new ServerStateFile();`,
+    )).join("\n"),
+    /P13 ServerStateFile constructor production multiplicity/,
+  );
+  assert.match(
+    inspectStorageRemainderBoundary(mutate(
+      "packages/cli/src/runtime/workspace-command.ts",
+      (text) => `${text}\nvoid readServerStateSnapshot();`,
+    )).join("\n"),
+    /P13 read-only state projection definition\/consumer production multiplicity/,
+  );
+  assert.match(
+    inspectStorageRemainderBoundary(mutate(
+      "packages/cli/src/serve/status.ts",
+      (text) => `${text}\nconst managed = new NodeManagedServiceAdapter({});`,
+    )).join("\n"),
+    /P14 NodeManagedServiceAdapter constructor production multiplicity/,
+  );
+  assert.match(
+    inspectStorageRemainderBoundary(mutate(
+      "packages/core/src/conversation/application.ts",
+      (text) => `${text}\nconst forensic = "llm-error";`,
+    )).join("\n"),
+    /mechanism returned to a demand owner/,
+  );
+  assert.match(
+    inspectStorageRemainderBoundary(mutate(
+      "packages/cli/src/serve/status.ts",
+      (text) => `${text}\nconst duplicateLogRoot = path.join(home, "logs", "llm-error");`,
+    )).join("\n"),
+    /P15 llm-error path writer production multiplicity/,
+  );
+  assert.match(
+    inspectStorageRemainderBoundary(mutate(
+      "packages/core/src/conversation/application.ts",
+      (text) => `${text}\nclass StorageFacade {}`,
+    )).join("\n"),
+    /unified Storage facade returned/,
   );
 });
