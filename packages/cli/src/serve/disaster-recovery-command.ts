@@ -3,6 +3,9 @@ import { getZhixingHome } from "@zhixing/core";
 import {
   BackupRecoveryDisasterAdmissionApplicationService,
   BackupRecoveryDisasterAdmissionError,
+  BackupRecoveryDisasterLifecycleApplicationService,
+  BackupRecoveryDisasterLifecycleError,
+  type BackupRecoveryDisasterCompletion,
   type BackupRecoveryDisasterAdmissionTargetSelection,
   validateBackupRecoveryDisasterAdmissionSelection,
 } from "@zhixing/core/backup-recovery/application";
@@ -57,6 +60,7 @@ import { collectDisasterRecoveryTrustEvidence } from "./disaster-recovery-trust-
 import {
   loadCurrentDisasterRecoveryInstallation,
   waitForDisasterRecoveryPostInstallReceipt,
+  type DisasterInstalledAuthorityGeneration,
 } from "./disaster-recovery-installation.js";
 
 export interface DisasterRecoveryCommandOptions {
@@ -96,88 +100,25 @@ export async function runDisasterRecoveryCommand(
     process.once("SIGINT", onSignal);
     process.once("SIGTERM", onSignal);
   }
-  let evidenceMesh: Awaited<ReturnType<typeof openRecoveryEvidenceMesh>> = {
-    peerIds: [],
-    close: async () => undefined,
-  };
   try {
     signal.throwIfAborted();
-    const context = await openRecoveryContext(options, false);
-    signal.throwIfAborted();
-    if (context.trust.issuer.deviceId === context.key.deviceId) {
-      const installed = await loadCurrentDisasterRecoveryInstallation(context.store.authorityLog());
-      if (!installed || installed.installation.trustRecord.issuer.deviceId !== context.key.deviceId) {
-        throw new Error("当前设备仍在值班，无需执行无源恢复");
-      }
-      await waitForDisasterRecoveryPostInstallReceipt({
-        log: context.store.authorityLog(),
-        generation: installed.generation,
-        timeoutMs: options.postInstallTimeoutMs ?? 30_000,
-        signal,
-      });
-      await reportDisasterRecoveryCompleted(context);
-      return;
-    }
-    evidenceMesh = await openRecoveryEvidenceMesh(context, options, signal);
-    const admission = await admitDisasterRecoveryCandidate(context, selection, options, signal);
-    const trustEvidence = await collectDisasterRecoveryTrustEvidence({
-      store: context.store,
-      localDeviceId: context.key.deviceId,
-      peers: evidenceMesh.peerIds
-        .filter((deviceId) => evidenceMesh.control?.connections.has(deviceId))
-        .map((deviceId) => ({
-          deviceId,
-          client: evidenceMesh.control!.connections.client(deviceId),
-        })),
-      signal,
-    });
-    const target = options.target ?? createRecoveryTarget(context, options);
     try {
-      await target.prepareAndImport({
-        prepare: admission.prepare,
-        checkpoint: admission.checkpoint,
-        recoveryRoot: admission.recoveryRoot,
-        trustEvidence,
+      await createDisasterRecoveryLifecycleApplication(
+        selection,
+        options,
         signal,
-      });
-      context.writeLine("备份验证完成，正在恢复数据并接管值班……");
-      await target.commit({
-        transferId: admission.transferId,
-        recoveryRoot: admission.recoveryRoot,
-        signal,
-      });
-      const installed = await loadCurrentDisasterRecoveryInstallation(context.store.authorityLog());
-      if (!installed || installed.installation.transferId !== admission.transferId) {
-        throw new Error("Disaster recovery installation is not the current authority generation");
-      }
-      await waitForDisasterRecoveryPostInstallReceipt({
-        log: context.store.authorityLog(),
-        generation: installed.generation,
-        timeoutMs: options.postInstallTimeoutMs ?? 30_000,
-        signal,
-      });
+      ).recover();
     } catch (error) {
-      const abort = createSignedDisasterRecoveryAbort({
-        v: 1,
-        mode: "disaster-recovery",
-        requestId: admission.requestId,
-        transferId: admission.transferId,
-        targetDeviceId: context.key.deviceId,
-        checkpointTargetId: admission.checkpointTargetId,
-        checkpointEnvelopeDigest: admission.checkpointEnvelopeDigest,
-        reason: "operator-cancelled",
-        at: new Date(options.now?.() ?? Date.now()).toISOString(),
-      }, admission.recoveryRoot);
-      await target.abort({ abort, recoveryRoot: admission.recoveryRoot }).catch(() => undefined);
+      if (error instanceof BackupRecoveryDisasterLifecycleError) {
+        throw disasterLifecyclePublicError(error);
+      }
       throw error;
     }
-    await reportDisasterRecoveryCompleted(context);
   } finally {
     if (ownedAbort) {
       process.removeListener("SIGINT", onSignal);
       process.removeListener("SIGTERM", onSignal);
     }
-    await evidenceMesh.close();
   }
 }
 
@@ -331,42 +272,200 @@ function disasterAdmissionPublicError(error: BackupRecoveryDisasterAdmissionErro
   return error.errorKind === "type-error" ? new TypeError(message) : new Error(message);
 }
 
-async function reportDisasterRecoveryCompleted(context: RecoveryContext): Promise<void> {
-  context.writeLine("恢复数据已安全提交；旧值班设备已失权。");
-  const affected = await new CredentialExposureAuthority({
-    deviceId: context.key.deviceId,
-    log: context.store.authorityLog(),
-    secretStore: context.secretStore,
-  }).rotationRequired();
-  if (affected.length === 0) {
-    context.writeLine("没有需要立即轮换的第三方账号。");
+type DisasterAdmission = Awaited<ReturnType<typeof admitDisasterRecoveryCandidate>>;
+type DisasterTrustEvidence = Awaited<ReturnType<typeof collectDisasterRecoveryTrustEvidence>>;
+
+function createDisasterRecoveryLifecycleApplication(
+  selection: {
+    readonly directory?: string;
+    readonly pairedDeviceId?: string;
+    readonly pairedDeviceName?: string;
+    readonly backupNumber?: number;
+  },
+  options: DisasterRecoveryCommandOptions,
+  signal: AbortSignal,
+): BackupRecoveryDisasterLifecycleApplicationService<
+  DisasterAdmission,
+  DisasterTrustEvidence,
+  DisasterInstalledAuthorityGeneration
+> {
+  return new BackupRecoveryDisasterLifecycleApplicationService({
+    now: () => new Date(options.now?.() ?? Date.now()).toISOString(),
+    withRecoverySession: async (use) => {
+      signal.throwIfAborted();
+      const context = await openRecoveryContext(options, false);
+      signal.throwIfAborted();
+      const log = context.store.authorityLog();
+      return use({
+        currentDeviceId: context.key.deviceId,
+        issuerDeviceId: context.trust.issuer.deviceId,
+        readCurrentInstallation: async () => {
+          const current = await loadCurrentDisasterRecoveryInstallation(log);
+          return current && {
+            transferId: current.installation.transferId,
+            issuerDeviceId: current.installation.trustRecord.issuer.deviceId,
+            generation: current.generation,
+          };
+        },
+        waitForPostInstallReceipt: async (generation) => {
+          await waitForDisasterRecoveryPostInstallReceipt({
+            log,
+            generation,
+            timeoutMs: options.postInstallTimeoutMs ?? 30_000,
+            signal,
+          });
+        },
+        readCredentialRotationRequirements: async () =>
+          new CredentialExposureAuthority({
+            deviceId: context.key.deviceId,
+            log,
+            secretStore: context.secretStore,
+          }).rotationRequired(),
+        presentProgress: (progress) => {
+          switch (progress) {
+            case "installing":
+              context.writeLine("备份验证完成，正在恢复数据并接管值班……");
+              break;
+            case "recovery-committed":
+              context.writeLine("恢复数据已安全提交；旧值班设备已失权。");
+              break;
+          }
+        },
+        presentCompletion: (completion) => {
+          renderDisasterRecoveryCompletion(completion, context.writeLine);
+        },
+        withFreshInstall: async (useFresh) => {
+          const evidenceMesh = await openRecoveryEvidenceMesh(context, options, signal);
+          const target = options.target ?? createRecoveryTarget(context, options);
+          try {
+            return await useFresh({
+              admit: () => admitDisasterRecoveryCandidate(context, selection, options, signal),
+              collectPrepareEvidence: async () => collectDisasterRecoveryTrustEvidence({
+                store: context.store,
+                localDeviceId: context.key.deviceId,
+                peers: evidenceMesh.peerIds
+                  .filter((deviceId) => evidenceMesh.control?.connections.has(deviceId))
+                  .map((deviceId) => ({
+                    deviceId,
+                    client: evidenceMesh.control!.connections.client(deviceId),
+                  })),
+                signal,
+              }),
+              prepareAndImport: async ({ admission, evidence }) => {
+                await target.prepareAndImport({
+                  prepare: admission.prepare,
+                  checkpoint: admission.checkpoint,
+                  recoveryRoot: admission.recoveryRoot,
+                  trustEvidence: evidence,
+                  signal,
+                });
+              },
+              commit: async (admission) => {
+                await target.commit({
+                  transferId: admission.transferId,
+                  recoveryRoot: admission.recoveryRoot,
+                  signal,
+                });
+              },
+              abort: async (abortIntent) => {
+                const abort = createSignedDisasterRecoveryAbort({
+                  v: 1,
+                  mode: "disaster-recovery",
+                  requestId: abortIntent.requestId,
+                  transferId: abortIntent.transferId,
+                  targetDeviceId: context.key.deviceId,
+                  checkpointTargetId: abortIntent.checkpointTargetId,
+                  checkpointEnvelopeDigest: abortIntent.checkpointEnvelopeDigest,
+                  reason: abortIntent.reason,
+                  at: abortIntent.at,
+                }, abortIntent.admission.recoveryRoot);
+                await target.abort({
+                  abort,
+                  recoveryRoot: abortIntent.admission.recoveryRoot,
+                });
+              },
+            });
+          } finally {
+            await evidenceMesh.close();
+          }
+        },
+      });
+    },
+    withFinishSession: async (use) => {
+      const context = await openRecoveryContext(options, false);
+      const log = context.store.authorityLog();
+      const target = options.target ?? createRecoveryTarget(context, options);
+      return use({
+        readCurrentInstallation: async () => {
+          const current = await loadCurrentDisasterRecoveryInstallation(log);
+          return current && {
+            transferId: current.installation.transferId,
+            issuerDeviceId: current.installation.trustRecord.issuer.deviceId,
+            generation: current.generation,
+          };
+        },
+        readTombstoneDisposition: (transferId) => target.tombstoneDisposition(transferId),
+        tombstone: async (transferId) => {
+          await target.tombstone({
+            transferId,
+            userConfirmedOldDeviceIsolated: true,
+          });
+        },
+      });
+    },
+  });
+}
+
+function renderDisasterRecoveryCompletion(
+  completion: BackupRecoveryDisasterCompletion,
+  writeLine: (line: string) => void,
+): void {
+  if (completion.credentialRotation.state === "not-required") {
+    writeLine("没有需要立即轮换的第三方账号。");
   } else {
-    context.writeLine("请处理以下受旧设备影响的第三方账号：");
-    for (const item of affected) {
-      context.writeLine(`- ${item.service}${item.tenant ? `（${item.tenant}）` : ""}：${
-        item.rotationHint ?? "在对应服务中撤销旧凭据并发布新凭据"
+    writeLine("请处理以下受旧设备影响的第三方账号：");
+    for (const item of completion.credentialRotation.actions) {
+      writeLine(`- ${item.service}${item.tenant ? `（${item.tenant}）` : ""}：${
+        item.instruction
       }`);
     }
   }
-  context.writeLine("确认旧设备已隔离或擦除后，运行 zz backup recover-finish。");
+  switch (completion.nextStep.kind) {
+    case "confirm-old-device-isolated":
+      writeLine("确认旧设备已隔离或擦除后，运行 zz backup recover-finish。");
+      break;
+  }
+}
+
+function disasterLifecyclePublicError(error: BackupRecoveryDisasterLifecycleError): Error {
+  switch (error.code) {
+    case "current-device-not-recovering":
+      return new Error("当前设备仍在值班，无需执行无源恢复");
+    case "installation-generation-mismatch":
+      return new Error("Disaster recovery installation is not the current authority generation");
+    case "finish-confirmation-required":
+      return new Error("请先确认旧值班设备已经隔离或擦除");
+    case "finish-installation-missing":
+      return new Error("当前设备没有待完成的灾难恢复");
+    case "finish-installation-ineligible":
+      return new Error("灾难恢复尚未提交，不能确认旧设备隔离");
+  }
 }
 
 export async function runDisasterRecoveryFinishCommand(
   input: { readonly userConfirmedOldDeviceIsolated: boolean },
   options: DisasterRecoveryCommandOptions = {},
 ): Promise<void> {
-  if (!input.userConfirmedOldDeviceIsolated) {
-    throw new Error("请先确认旧值班设备已经隔离或擦除");
+  try {
+    await createDisasterRecoveryLifecycleApplication({}, options, new AbortController().signal)
+      .finish(input);
+    (options.writeLine ?? createStdoutWriter().line)("旧设备隔离已确认，恢复流程完成。");
+  } catch (error) {
+    if (error instanceof BackupRecoveryDisasterLifecycleError) {
+      throw disasterLifecyclePublicError(error);
+    }
+    throw error;
   }
-  const context = await openRecoveryContext(options, false);
-  const current = await loadCurrentDisasterRecoveryInstallation(context.store.authorityLog());
-  if (!current) throw new Error("当前设备没有待完成的灾难恢复");
-  const target = options.target ?? createRecoveryTarget(context, options);
-  await target.tombstone({
-    transferId: current.installation.transferId,
-    userConfirmedOldDeviceIsolated: true,
-  });
-  context.writeLine("旧设备隔离已确认，恢复流程完成。");
 }
 
 export function disasterRecoveryPublicError(_error: unknown): Error {

@@ -1159,6 +1159,53 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
+      "packages/core/src/backup-recovery/application.ts",
+      (text) => text.replace(
+        "if (currentDeviceId === issuerDeviceId)",
+        "if (false)",
+      ),
+    )).join("\n"),
+    /install, continuation and finish must have one domain application owner/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/core/src/backup-recovery/application.ts",
+      (text) => text.replace(
+        "const disposition = await session.readTombstoneDisposition(transferId)",
+        'const disposition = "eligible" as const',
+      ),
+    )).join("\n"),
+    /install, continuation and finish must have one domain application owner/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/core/src/backup-recovery/application.ts",
+      (text) => text.replace(
+        "await fresh.abort(Object.freeze({",
+        "await Promise.resolve(Object.freeze({",
+      ),
+    )).join("\n"),
+    /install, continuation and finish must have one domain application owner/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/core/src/backup-recovery/application.ts",
+      (text) => text.replace(
+        "if (!input.userConfirmedOldDeviceIsolated)",
+        "if (false)",
+      ),
+    )).join("\n"),
+    /install, continuation and finish must have one domain application owner/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/disaster-recovery-command.ts",
+      (text) => `${text}\nclass BackupRecoveryDisasterLifecycleApplicationService {}`,
+    )).join("\n"),
+    /install, continuation and finish must have one domain application owner/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
       "packages/cli/src/serve/mesh-runtime-assembly.ts",
       (text) => text.replace(
         "registerDisasterRecoveryTrustEvidenceService(",

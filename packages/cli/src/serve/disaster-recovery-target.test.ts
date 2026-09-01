@@ -104,6 +104,8 @@ describe("disaster recovery target", () => {
       transferId: prepare.transferId,
       anchorEpoch: 2,
     });
+    expect(await replayTarget.tombstoneDisposition(prepare.transferId)).toBe("eligible");
+    expect(await replayTarget.tombstoneDisposition("xfer-foreign")).toBe("ineligible");
 
     await expect(replayTarget.tombstone({
       transferId: prepare.transferId,
@@ -115,6 +117,7 @@ describe("disaster recovery target", () => {
       at: "2026-08-10T01:05:00.000Z",
     });
     expect(tombstoned.phase).toBe("tombstoned");
+    expect(await replayTarget.tombstoneDisposition(prepare.transferId)).toBe("terminal");
     expect(await replayTarget.tombstone({
       transferId: prepare.transferId,
       userConfirmedOldDeviceIsolated: true,

@@ -793,6 +793,21 @@ export class DisasterRecoveryTarget {
     });
   }
 
+  async tombstoneDisposition(
+    transferId: string,
+  ): Promise<"eligible" | "terminal" | "ineligible"> {
+    const installed = await loadCurrentDisasterRecoveryInstallation(this.options.authorityLog);
+    if (!installed || installed.installation.transferId !== transferId) return "ineligible";
+    const context = await this.#context(
+      transferId,
+      installed.installation.recoveryRootPublicKey,
+    );
+    const current = await context.journal.state(transferId);
+    if (current?.phase === "tombstoned" && current.commit) return "terminal";
+    if (current?.phase === "committed" && current.commit) return "eligible";
+    return "ineligible";
+  }
+
   async #forwardInstallDecision(input: {
     readonly transferId: string;
     readonly recoveryRoot: RecoveryRoot;

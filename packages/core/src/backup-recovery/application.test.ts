@@ -5,6 +5,8 @@ import {
   BackupRecoveryCurrentRemovalApplicationService,
   BackupRecoveryDisasterAdmissionApplicationService,
   BackupRecoveryDisasterAdmissionError,
+  BackupRecoveryDisasterLifecycleApplicationService,
+  BackupRecoveryDisasterLifecycleError,
   BackupRecoveryRootLifecycleApplicationService,
   BackupRecoveryRootLifecycleError,
 } from "./application.js";
@@ -714,6 +716,285 @@ describe("BackupRecoveryDisasterAdmissionApplicationService", () => {
     expect(replay.transferId).toBe(first.transferId);
     expect(f.mechanism.deriveDiscoveryRequestId).toHaveBeenCalledTimes(2);
     expect(f.mechanism.deriveTransferId).toHaveBeenCalledTimes(2);
+  });
+});
+
+function disasterLifecycleFixture() {
+  const calls: string[] = [];
+  const admission = {
+    requestId: "recover:request",
+    transferId: "xfer-current",
+    checkpointTargetId: "target-1",
+    checkpointEnvelopeDigest: "sha256:checkpoint",
+    recoveryRoot: "root-secret",
+  };
+  let installation: {
+    transferId: string;
+    issuerDeviceId: string;
+    generation: string;
+  } | undefined;
+  const fresh = {
+    admit: vi.fn(async () => {
+      calls.push("admit");
+      return admission;
+    }),
+    collectPrepareEvidence: vi.fn(async () => {
+      calls.push("evidence");
+      return "signed-evidence";
+    }),
+    prepareAndImport: vi.fn(async () => {
+      calls.push("prepare");
+    }),
+    commit: vi.fn(async () => {
+      calls.push("commit");
+      installation = {
+        transferId: admission.transferId,
+        issuerDeviceId: "target",
+        generation: "generation-1",
+      };
+    }),
+    abort: vi.fn(async () => {
+      calls.push("abort");
+    }),
+  };
+  const session = {
+    currentDeviceId: "target",
+    issuerDeviceId: "lost-issuer",
+    readCurrentInstallation: vi.fn(async () => {
+      calls.push("installation");
+      return installation;
+    }),
+    waitForPostInstallReceipt: vi.fn(async (generation: string) => {
+      calls.push(`receipt:${generation}`);
+    }),
+    readCredentialRotationRequirements: vi.fn(async () => {
+      calls.push("credentials");
+      return [{ service: "github", tenant: "work" }, {
+        service: "mail",
+        rotationHint: "rotate-now",
+      }];
+    }),
+    presentProgress: vi.fn((progress: string) => calls.push(`progress:${progress}`)),
+    presentCompletion: vi.fn(() => calls.push("completion")),
+    withFreshInstall: vi.fn(async (use: (port: typeof fresh) => Promise<unknown>) => {
+      calls.push("fresh:open");
+      try {
+        return await use(fresh);
+      } finally {
+        calls.push("fresh:close");
+      }
+    }),
+  };
+  let tombstoneDisposition: "eligible" | "terminal" | "ineligible" = "eligible";
+  const finishSession = {
+    readCurrentInstallation: vi.fn(async () => installation),
+    readTombstoneDisposition: vi.fn(async () => tombstoneDisposition),
+    tombstone: vi.fn(async (transferId: string) => {
+      calls.push(`tombstone:${transferId}`);
+    }),
+  };
+  const mechanism = {
+    now: vi.fn(() => "2026-09-01T00:00:00.000Z"),
+    withRecoverySession: vi.fn(async (
+      use: (value: typeof session) => Promise<unknown>,
+    ) => use(session)),
+    withFinishSession: vi.fn(async (
+      use: (value: typeof finishSession) => Promise<unknown>,
+    ) => use(finishSession)),
+  };
+  return {
+    application: new BackupRecoveryDisasterLifecycleApplicationService<
+      typeof admission,
+      string,
+      string
+    >(mechanism),
+    admission,
+    calls,
+    fresh,
+    finishSession,
+    mechanism,
+    session,
+    setInstallation(value: typeof installation) {
+      installation = value;
+    },
+    setTombstoneDisposition(value: typeof tombstoneDisposition) {
+      tombstoneDisposition = value;
+    },
+  };
+}
+
+describe("BackupRecoveryDisasterLifecycleApplicationService", () => {
+  it("owns fresh prepare, commit, receipt and typed completion in one ordered lifecycle", async () => {
+    const f = disasterLifecycleFixture();
+    const result = await f.application.recover();
+
+    expect(f.calls).toEqual([
+      "fresh:open",
+      "admit",
+      "evidence",
+      "prepare",
+      "progress:installing",
+      "commit",
+      "installation",
+      "receipt:generation-1",
+      "progress:recovery-committed",
+      "credentials",
+      "completion",
+      "fresh:close",
+    ]);
+    expect(result).toEqual({
+      state: "completed",
+      credentialRotation: {
+        state: "required",
+        actions: [
+          {
+            service: "github",
+            tenant: "work",
+            instruction: "在对应服务中撤销旧凭据并发布新凭据",
+          },
+          { service: "mail", instruction: "rotate-now" },
+        ],
+      },
+      nextStep: { kind: "confirm-old-device-isolated" },
+    });
+    expect(f.fresh.abort).not.toHaveBeenCalled();
+  });
+
+  it("continues the installed generation after response loss without reopening admission", async () => {
+    const f = disasterLifecycleFixture();
+    f.session.issuerDeviceId = "target";
+    f.setInstallation({
+      transferId: "xfer-current",
+      issuerDeviceId: "target",
+      generation: "generation-restarted",
+    });
+    f.session.readCredentialRotationRequirements.mockResolvedValue([]);
+
+    await expect(f.application.recover()).resolves.toEqual({
+      state: "completed",
+      credentialRotation: { state: "not-required" },
+      nextStep: { kind: "confirm-old-device-isolated" },
+    });
+    expect(f.session.withFreshInstall).not.toHaveBeenCalled();
+    expect(f.fresh.admit).not.toHaveBeenCalled();
+    expect(f.calls).toEqual([
+      "installation",
+      "receipt:generation-restarted",
+      "progress:recovery-committed",
+      "completion",
+    ]);
+    expect(f.session.readCredentialRotationRequirements).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed when the current issuer has no matching installed generation", async () => {
+    const missing = disasterLifecycleFixture();
+    missing.session.issuerDeviceId = "target";
+    await expect(missing.application.recover()).rejects.toMatchObject<
+      Partial<BackupRecoveryDisasterLifecycleError>
+    >({ code: "current-device-not-recovering" });
+
+    const mismatched = disasterLifecycleFixture();
+    mismatched.session.issuerDeviceId = "target";
+    mismatched.setInstallation({
+      transferId: "xfer-current",
+      issuerDeviceId: "other",
+      generation: "generation-foreign",
+    });
+    await expect(mismatched.application.recover()).rejects.toMatchObject({
+      code: "current-device-not-recovering",
+    });
+    expect(mismatched.session.waitForPostInstallReceipt).not.toHaveBeenCalled();
+  });
+
+  it.each(["prepare", "commit", "receipt"] as const)(
+    "signs one stable abort after %s failure and preserves the primary error",
+    async (stage) => {
+      const f = disasterLifecycleFixture();
+      const primary = new Error(`${stage}-failed`);
+      if (stage === "prepare") f.fresh.prepareAndImport.mockRejectedValueOnce(primary);
+      if (stage === "commit") f.fresh.commit.mockRejectedValueOnce(primary);
+      if (stage === "receipt") {
+        f.session.waitForPostInstallReceipt.mockRejectedValueOnce(primary);
+      }
+      f.fresh.abort.mockRejectedValueOnce(new Error("abort-failed"));
+
+      await expect(f.application.recover()).rejects.toBe(primary);
+      expect(f.fresh.abort).toHaveBeenCalledTimes(1);
+      expect(f.fresh.abort).toHaveBeenCalledWith({
+        admission: f.admission,
+        requestId: "recover:request",
+        transferId: "xfer-current",
+        checkpointTargetId: "target-1",
+        checkpointEnvelopeDigest: "sha256:checkpoint",
+        reason: "operator-cancelled",
+        at: "2026-09-01T00:00:00.000Z",
+      });
+    },
+  );
+
+  it.each([
+    new Error("Current duty runtime has not completed disaster recovery adoption"),
+    Object.assign(new Error("Disaster recovery was cancelled"), { name: "AbortError" }),
+  ])("aborts after receipt timeout or cancellation while preserving %s", async (primary) => {
+    const f = disasterLifecycleFixture();
+    f.session.waitForPostInstallReceipt.mockRejectedValueOnce(primary);
+    await expect(f.application.recover()).rejects.toBe(primary);
+    expect(f.fresh.abort).toHaveBeenCalledTimes(1);
+    expect(f.session.waitForPostInstallReceipt).toHaveBeenCalledWith("generation-1");
+  });
+
+  it("aborts a mismatched installed generation without replacing the mismatch failure", async () => {
+    const f = disasterLifecycleFixture();
+    f.fresh.commit.mockImplementationOnce(async () => {
+      f.calls.push("commit");
+      f.setInstallation({
+        transferId: "xfer-foreign",
+        issuerDeviceId: "target",
+        generation: "generation-foreign",
+      });
+    });
+    await expect(f.application.recover()).rejects.toMatchObject({
+      code: "installation-generation-mismatch",
+    });
+    expect(f.fresh.abort).toHaveBeenCalledTimes(1);
+    expect(f.session.waitForPostInstallReceipt).not.toHaveBeenCalled();
+  });
+
+  it("checks finish confirmation before IO and owns tombstone eligibility and terminal replay", async () => {
+    const f = disasterLifecycleFixture();
+    await expect(f.application.finish({
+      userConfirmedOldDeviceIsolated: false,
+    })).rejects.toMatchObject({ code: "finish-confirmation-required" });
+    expect(f.mechanism.withFinishSession).not.toHaveBeenCalled();
+
+    await expect(f.application.finish({
+      userConfirmedOldDeviceIsolated: true,
+    })).rejects.toMatchObject({ code: "finish-installation-missing" });
+    expect(f.finishSession.tombstone).not.toHaveBeenCalled();
+
+    f.setInstallation({
+      transferId: "xfer-current",
+      issuerDeviceId: "target",
+      generation: "generation-1",
+    });
+    await expect(f.application.finish({
+      userConfirmedOldDeviceIsolated: true,
+    })).resolves.toEqual({ state: "finished" });
+    expect(f.finishSession.readTombstoneDisposition).toHaveBeenCalledWith("xfer-current");
+    expect(f.finishSession.tombstone).toHaveBeenCalledOnce();
+
+    f.setTombstoneDisposition("terminal");
+    await expect(f.application.finish({
+      userConfirmedOldDeviceIsolated: true,
+    })).resolves.toEqual({ state: "finished" });
+    expect(f.finishSession.tombstone).toHaveBeenNthCalledWith(1, "xfer-current");
+    expect(f.finishSession.tombstone).toHaveBeenCalledOnce();
+
+    f.setTombstoneDisposition("ineligible");
+    await expect(f.application.finish({
+      userConfirmedOldDeviceIsolated: true,
+    })).rejects.toMatchObject({ code: "finish-installation-ineligible" });
+    expect(f.finishSession.tombstone).toHaveBeenCalledOnce();
   });
 });
 

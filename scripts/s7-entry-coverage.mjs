@@ -7460,6 +7460,89 @@ export function inspectRecoveryBackupAssembly(records) {
   ) {
     failures.push("disaster recovery candidate discovery and admission must have one domain application owner");
   }
+  const disasterLifecycleOwners = records.filter(({ text }) =>
+    text.includes("class BackupRecoveryDisasterLifecycleApplicationService"));
+  const lifecycleRecover = backupApplication.indexOf(
+    "  recover(): Promise<BackupRecoveryDisasterCompletion>",
+  );
+  const lifecycleCurrent = backupApplication.indexOf(
+    "if (currentDeviceId === issuerDeviceId)",
+    lifecycleRecover,
+  );
+  const lifecycleFresh = backupApplication.indexOf(
+    "return session.withFreshInstall(async (fresh) =>",
+    lifecycleCurrent,
+  );
+  const lifecycleEvidence = backupApplication.indexOf(
+    "const evidence = await fresh.collectPrepareEvidence(admission)",
+    lifecycleFresh,
+  );
+  const lifecycleTry = backupApplication.indexOf("try {", lifecycleEvidence);
+  const lifecyclePrepare = backupApplication.indexOf(
+    "await fresh.prepareAndImport({ admission, evidence })",
+    lifecycleTry,
+  );
+  const lifecycleCommit = backupApplication.indexOf(
+    "await fresh.commit(admission)",
+    lifecyclePrepare,
+  );
+  const lifecycleReceipt = backupApplication.indexOf(
+    "await session.waitForPostInstallReceipt(installed.generation)",
+    lifecycleCommit,
+  );
+  const lifecycleAbort = backupApplication.indexOf(
+    "await fresh.abort(Object.freeze({",
+    lifecycleReceipt,
+  );
+  const lifecycleFinish = backupApplication.indexOf(
+    "  async finish(input:",
+    lifecycleAbort,
+  );
+  const lifecycleConfirmation = backupApplication.indexOf(
+    "if (!input.userConfirmedOldDeviceIsolated)",
+    lifecycleFinish,
+  );
+  const lifecycleFinishSession = backupApplication.indexOf(
+    "return this.mechanism.withFinishSession(async (session) =>",
+    lifecycleConfirmation,
+  );
+  const lifecycleDisposition = backupApplication.indexOf(
+    "const disposition = await session.readTombstoneDisposition(transferId)",
+    lifecycleFinishSession,
+  );
+  const lifecycleTombstone = backupApplication.indexOf(
+    "await session.tombstone(transferId)",
+    lifecycleDisposition,
+  );
+  if (
+    disasterLifecycleOwners.length !== 1 ||
+    disasterLifecycleOwners[0]?.relative !== "packages/core/src/backup-recovery/application.ts" ||
+    count(backupApplication, "class BackupRecoveryDisasterLifecycleApplicationService") !== 1 ||
+    lifecycleRecover < 0 || lifecycleCurrent < lifecycleRecover ||
+    lifecycleFresh < lifecycleCurrent || lifecycleEvidence < lifecycleFresh ||
+    lifecycleTry < lifecycleEvidence || lifecyclePrepare < lifecycleTry ||
+    lifecycleCommit < lifecyclePrepare || lifecycleReceipt < lifecycleCommit ||
+    lifecycleAbort < lifecycleReceipt || lifecycleFinish < lifecycleAbort ||
+    lifecycleConfirmation < lifecycleFinish || lifecycleFinishSession < lifecycleConfirmation ||
+    lifecycleDisposition < lifecycleFinishSession || lifecycleTombstone < lifecycleDisposition ||
+    !backupApplication.includes('reason: "operator-cancelled" as const') ||
+    !backupApplication.includes('nextStep: Object.freeze({ kind: "confirm-old-device-isolated" as const })') ||
+    !backupApplication.includes('session.presentProgress("recovery-committed")') ||
+    !backupApplication.includes("session.presentCompletion(completion)") ||
+    count(disasterCommand, "new BackupRecoveryDisasterLifecycleApplicationService({") !== 1 ||
+    !disasterCommand.includes("withRecoverySession: async (use) =>") ||
+    !disasterCommand.includes("withFreshInstall: async (useFresh) =>") ||
+    !disasterCommand.includes("withFinishSession: async (use) =>") ||
+    !disasterCommand.includes(
+      "readTombstoneDisposition: (transferId) => target.tombstoneDisposition(transferId)",
+    ) ||
+    count(disasterTarget, "async tombstoneDisposition(") !== 1 ||
+    !disasterCommand.includes("renderDisasterRecoveryCompletion(completion, context.writeLine)") ||
+    disasterCommand.includes("reportDisasterRecoveryCompleted(") ||
+    disasterCommand.includes("context.trust.issuer.deviceId === context.key.deviceId")
+  ) {
+    failures.push("disaster recovery install, continuation and finish must have one domain application owner");
+  }
   if (
     count(command, "createConfiguredCheckpointOwner({") !== 1 ||
     count(command, "ctx.authorityCheckpointOwner?.start()") !== 1 ||
@@ -7785,7 +7868,8 @@ export function inspectRecoveryBackupAssembly(records) {
     !disasterCommand.includes("waitForPeer(control, selection.deviceId, 30_000, signal)") ||
     !disasterCommand.includes("return target.read(checkpointId, signal)") ||
     !disasterCommand.includes("createSignedDisasterRecoveryAbort({") ||
-    !disasterCommand.includes("await target.abort({ abort, recoveryRoot: admission.recoveryRoot })") ||
+    !disasterCommand.includes("await target.abort({") ||
+    !disasterCommand.includes("recoveryRoot: abortIntent.admission.recoveryRoot") ||
     abortTerminal < 0 || abortKeyLoad < abortTerminal || abortCleanup < abortKeyLoad ||
     freshKey < 0 || firstCreatorTerminalCheck < freshKey ||
     freshRecordVerified < firstCreatorTerminalCheck ||
@@ -8027,7 +8111,7 @@ export function inspectRecoveryBackupAssembly(records) {
     !disasterInstallation.includes('t: "disaster-post-install-completed"') ||
     !disasterInstallation.includes("input.log.transactProjection<") ||
     count(disasterCommand, "const context = await openRecoveryContext(options, false)") !== 2 ||
-    !disasterCommand.includes("context.trust.issuer.deviceId === context.key.deviceId") ||
+    !backupApplication.includes("if (currentDeviceId === issuerDeviceId)") ||
     !disasterCommand.includes("await waitForDisasterRecoveryPostInstallReceipt({") ||
     synchronousGate < 0 || liveAwait < synchronousGate ||
     disasterCompletion < 0 || disasterFinish < disasterCompletion || surfaceOpen < disasterFinish

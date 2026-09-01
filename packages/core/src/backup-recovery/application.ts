@@ -1189,6 +1189,269 @@ function isCanonicalTime(value: string): boolean {
   }
 }
 
+export interface BackupRecoveryDisasterInstallAdmission {
+  readonly requestId: string;
+  readonly transferId: string;
+  readonly checkpointTargetId: string;
+  readonly checkpointEnvelopeDigest: string;
+}
+
+export interface BackupRecoveryDisasterInstalledGeneration<Generation> {
+  readonly transferId: string;
+  readonly issuerDeviceId: string;
+  readonly generation: Generation;
+}
+
+export interface BackupRecoveryCredentialRotationRequirement {
+  readonly service: string;
+  readonly tenant?: string;
+  readonly rotationHint?: string;
+}
+
+export type BackupRecoveryDisasterProgress = "installing" | "recovery-committed";
+
+export type BackupRecoveryDisasterCompletion = Readonly<{
+  state: "completed";
+  credentialRotation:
+    | Readonly<{ state: "not-required" }>
+    | Readonly<{
+        state: "required";
+        actions: readonly Readonly<{
+          service: string;
+          tenant?: string;
+          instruction: string;
+        }>[];
+      }>;
+  nextStep: Readonly<{ kind: "confirm-old-device-isolated" }>;
+}>;
+
+export type BackupRecoveryDisasterFinish = Readonly<{ state: "finished" }>;
+
+export interface BackupRecoveryDisasterAbortIntent<Admission> {
+  readonly admission: Admission;
+  readonly requestId: string;
+  readonly transferId: string;
+  readonly checkpointTargetId: string;
+  readonly checkpointEnvelopeDigest: string;
+  readonly reason: "operator-cancelled";
+  readonly at: string;
+}
+
+export interface BackupRecoveryDisasterFreshInstallPort<
+  Admission extends BackupRecoveryDisasterInstallAdmission,
+  Evidence,
+> {
+  admit(): Promise<Admission>;
+  collectPrepareEvidence(admission: Admission): Promise<Evidence>;
+  prepareAndImport(input: {
+    readonly admission: Admission;
+    readonly evidence: Evidence;
+  }): Promise<void>;
+  commit(admission: Admission): Promise<void>;
+  abort(input: BackupRecoveryDisasterAbortIntent<Admission>): Promise<void>;
+}
+
+export interface BackupRecoveryDisasterRecoverySession<
+  Admission extends BackupRecoveryDisasterInstallAdmission,
+  Evidence,
+  Generation,
+> {
+  readonly currentDeviceId: string;
+  readonly issuerDeviceId: string;
+  readCurrentInstallation(): Promise<
+    BackupRecoveryDisasterInstalledGeneration<Generation> | undefined
+  >;
+  waitForPostInstallReceipt(generation: Generation): Promise<void>;
+  readCredentialRotationRequirements(): Promise<
+    readonly BackupRecoveryCredentialRotationRequirement[]
+  >;
+  presentProgress(progress: BackupRecoveryDisasterProgress): void;
+  presentCompletion(completion: BackupRecoveryDisasterCompletion): void;
+  withFreshInstall<Result>(
+    use: (
+      port: BackupRecoveryDisasterFreshInstallPort<Admission, Evidence>,
+    ) => Promise<Result>,
+  ): Promise<Result>;
+}
+
+export interface BackupRecoveryDisasterFinishSession<Generation> {
+  readCurrentInstallation(): Promise<
+    BackupRecoveryDisasterInstalledGeneration<Generation> | undefined
+  >;
+  readTombstoneDisposition(
+    transferId: string,
+  ): Promise<"eligible" | "terminal" | "ineligible">;
+  tombstone(transferId: string): Promise<void>;
+}
+
+/**
+ * Backup/Storage mechanisms. They move, sign and persist recovery facts but do
+ * not decide which generation is resumed or when install/finish is complete.
+ */
+export interface BackupRecoveryDisasterLifecycleMechanismPort<
+  Admission extends BackupRecoveryDisasterInstallAdmission,
+  Evidence,
+  Generation,
+> {
+  now(): string;
+  withRecoverySession<Result>(
+    use: (
+      session: BackupRecoveryDisasterRecoverySession<Admission, Evidence, Generation>,
+    ) => Promise<Result>,
+  ): Promise<Result>;
+  withFinishSession<Result>(
+    use: (session: BackupRecoveryDisasterFinishSession<Generation>) => Promise<Result>,
+  ): Promise<Result>;
+}
+
+export interface BackupRecoveryDisasterLifecycleApplication {
+  recover(): Promise<BackupRecoveryDisasterCompletion>;
+  finish(input: {
+    readonly userConfirmedOldDeviceIsolated: boolean;
+  }): Promise<BackupRecoveryDisasterFinish>;
+}
+
+export type BackupRecoveryDisasterLifecycleErrorCode =
+  | "current-device-not-recovering"
+  | "installation-generation-mismatch"
+  | "finish-confirmation-required"
+  | "finish-installation-missing"
+  | "finish-installation-ineligible";
+
+export class BackupRecoveryDisasterLifecycleError extends Error {
+  readonly name = "BackupRecoveryDisasterLifecycleError";
+
+  constructor(readonly code: BackupRecoveryDisasterLifecycleErrorCode) {
+    super(code);
+  }
+}
+
+/** Sole owner of disaster install, response-loss continuation and finish decisions. */
+export class BackupRecoveryDisasterLifecycleApplicationService<
+  Admission extends BackupRecoveryDisasterInstallAdmission,
+  Evidence,
+  Generation,
+> implements BackupRecoveryDisasterLifecycleApplication {
+  constructor(
+    private readonly mechanism: BackupRecoveryDisasterLifecycleMechanismPort<
+      Admission,
+      Evidence,
+      Generation
+    >,
+  ) {}
+
+  recover(): Promise<BackupRecoveryDisasterCompletion> {
+    return this.mechanism.withRecoverySession(async (session) => {
+      const currentDeviceId = requireText(session.currentDeviceId, "Recovery target device id");
+      const issuerDeviceId = requireText(session.issuerDeviceId, "Recovery issuer device id");
+      if (currentDeviceId === issuerDeviceId) {
+        const installed = await session.readCurrentInstallation();
+        if (!installed || installed.issuerDeviceId !== currentDeviceId) {
+          throw new BackupRecoveryDisasterLifecycleError("current-device-not-recovering");
+        }
+        await session.waitForPostInstallReceipt(installed.generation);
+        return this.#completion(session);
+      }
+
+      return session.withFreshInstall(async (fresh) => {
+        const admission = freezeDisasterInstallAdmission(await fresh.admit());
+        const evidence = await fresh.collectPrepareEvidence(admission);
+        try {
+          await fresh.prepareAndImport({ admission, evidence });
+          session.presentProgress("installing");
+          await fresh.commit(admission);
+          const installed = await session.readCurrentInstallation();
+          if (!installed || installed.transferId !== admission.transferId) {
+            throw new BackupRecoveryDisasterLifecycleError(
+              "installation-generation-mismatch",
+            );
+          }
+          await session.waitForPostInstallReceipt(installed.generation);
+        } catch (error) {
+          const at = this.mechanism.now();
+          if (!isCanonicalTime(at)) {
+            throw new TypeError("Disaster recovery abort time is invalid", { cause: error });
+          }
+          await fresh.abort(Object.freeze({
+            admission,
+            requestId: admission.requestId,
+            transferId: admission.transferId,
+            checkpointTargetId: admission.checkpointTargetId,
+            checkpointEnvelopeDigest: admission.checkpointEnvelopeDigest,
+            reason: "operator-cancelled" as const,
+            at,
+          })).catch(() => undefined);
+          throw error;
+        }
+        return this.#completion(session);
+      });
+    });
+  }
+
+  async finish(input: {
+    readonly userConfirmedOldDeviceIsolated: boolean;
+  }): Promise<BackupRecoveryDisasterFinish> {
+    if (!input.userConfirmedOldDeviceIsolated) {
+      throw new BackupRecoveryDisasterLifecycleError("finish-confirmation-required");
+    }
+    return this.mechanism.withFinishSession(async (session) => {
+      const current = await session.readCurrentInstallation();
+      if (!current) {
+        throw new BackupRecoveryDisasterLifecycleError("finish-installation-missing");
+      }
+      const transferId = requireText(current.transferId, "Recovery transfer id");
+      const disposition = await session.readTombstoneDisposition(transferId);
+      switch (disposition) {
+        case "ineligible":
+          throw new BackupRecoveryDisasterLifecycleError("finish-installation-ineligible");
+        case "eligible":
+          await session.tombstone(transferId);
+          break;
+        case "terminal":
+          break;
+        default:
+          throw new TypeError("Disaster recovery tombstone disposition is invalid");
+      }
+      return Object.freeze({ state: "finished" as const });
+    });
+  }
+
+  async #completion(
+    session: BackupRecoveryDisasterRecoverySession<Admission, Evidence, Generation>,
+  ): Promise<BackupRecoveryDisasterCompletion> {
+    session.presentProgress("recovery-committed");
+    const requirements = await session.readCredentialRotationRequirements();
+    const actions = Object.freeze(requirements.map((item) => Object.freeze({
+      service: requireText(item.service, "Credential service"),
+      ...(item.tenant === undefined
+        ? {}
+        : { tenant: requireText(item.tenant, "Credential tenant") }),
+      instruction: item.rotationHint === undefined
+        ? "在对应服务中撤销旧凭据并发布新凭据"
+        : requireText(item.rotationHint, "Credential rotation instruction"),
+    })));
+    const completion = Object.freeze({
+      state: "completed" as const,
+      credentialRotation: actions.length === 0
+        ? Object.freeze({ state: "not-required" as const })
+        : Object.freeze({ state: "required" as const, actions }),
+      nextStep: Object.freeze({ kind: "confirm-old-device-isolated" as const }),
+    });
+    session.presentCompletion(completion);
+    return completion;
+  }
+}
+
+function freezeDisasterInstallAdmission<
+  Admission extends BackupRecoveryDisasterInstallAdmission,
+>(value: Admission): Admission {
+  requireText(value.requestId, "Disaster recovery request id");
+  requireText(value.transferId, "Disaster recovery transfer id");
+  requireText(value.checkpointTargetId, "Disaster recovery checkpoint target id");
+  requireText(value.checkpointEnvelopeDigest, "Disaster recovery checkpoint digest");
+  return Object.freeze(value);
+}
+
 export interface BackupRecoveryCurrentRemovalStatus {
   readonly state: "not-configured" | "pending-verification" | "recoverable" | "unavailable";
   readonly fullBackupReady: boolean;
