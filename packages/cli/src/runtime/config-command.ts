@@ -1,5 +1,5 @@
 /**
- * `/config` 与 `/mcp` 命令 handler——REPL 内打开配置编辑器，保存后触发 hot reload。
+ * `/config` 与 `/mcp` 命令 handler——REPL 内打开配置编辑器，保存后触发 Host 换代。
  *
  * 流程：
  * 0. requireChrome 门禁——编辑器是 alt-screen，无 chrome 终端（非 TTY / 管道）跑不了；
@@ -40,12 +40,7 @@ import type {
   McpSetupLlm,
   SectionId,
 } from "../config-editor/index.js";
-import {
-  fetchMcpServerSource,
-  probeServer,
-  searchMcpServers,
-  type McpServerStatus,
-} from "@zhixing/mcp";
+import { createMcpManagementAdapter } from "./mcp-management-adapter.js";
 import { layout } from "../tui/index.js";
 import type { CliWriter, ScreenController } from "../screen/index.js";
 import { requireChrome } from "../commands/command-visibility.js";
@@ -329,44 +324,54 @@ export async function handleConfigCommand(deps: ConfigCommandDeps): Promise<void
  * `/mcp`——MCP 服务管理 + 接入引导（用户唯一入口）。
  *
  * 注入三件运行态：① serverStatuses（让 section 显示连接状态）；② discovery 探测
- * （probeServer，接入向导验证连接，proxy 与 hub 同源 config.network.proxy）；③ mcpResolve
+ * （一次性 probe，接入向导验证连接，proxy 与 hub 同源 config.network.proxy）；③ mcpResolve
  * （把输入标识解析为候选——事实驱动：查 npm 真实源 + 据源文本提取，面板不感知查源 / LLM）。
  */
 export async function handleMcpCommand(
   deps: ConfigCommandDeps & {
-    /** MCP 连接状态(宿主快照——MCP 连接在核心宿主) */
-    mcpStatuses: () => Promise<McpServerStatus[]>;
+    /** MCP 连接状态 wire（宿主快照——具体结构由 infrastructure adapter 严格解码）。 */
+    readMcpStatusWire: () => Promise<unknown>;
     /** 宿主轻推理通道(llm.complete)——接入向导的源解析 / 提取 */
-    llmComplete: (prompt: string, role?: "main" | "light") => Promise<string>;
+    llmComplete: (
+      prompt: string,
+      role?: "main" | "light",
+      signal?: AbortSignal,
+    ) => Promise<string>;
   },
 ): Promise<void> {
   const proxy = loadConfig().network?.proxy;
+  const management = createMcpManagementAdapter({
+    proxy,
+    readStatusWire: deps.readMcpStatusWire,
+  });
 
   // 接入相关的 LLM——走 main 档：搜索引导的判断 / 从 README 抽启动方式的质量
   // 直接决定接入成败，是质量敏感任务，不用 light。推理在宿主(llm.complete),
   // 面板取消（Esc）放弃等待、后台结果丢弃即可。
-  const inferLlm: McpSetupLlm = (prompt) => deps.llmComplete(prompt, "main");
-
-  // 查源 / 搜索都走 SSRF-safe fetch，proxy 与 hub / probe 同源 config.network.proxy
-  const fetchSource = (name: string, sig?: AbortSignal) =>
-    fetchMcpServerSource(name, { proxy, ...(sig ? { signal: sig } : {}) });
-  const search = (query: string, sig?: AbortSignal) =>
-    searchMcpServers(query, { proxy, ...(sig ? { signal: sig } : {}) });
+  const inferLlm: McpSetupLlm = (prompt, signal) =>
+    deps.llmComplete(prompt, "main", signal);
 
   // 连接状态取进屏时刻的宿主快照——管理屏打开期间不实时刷新(编辑器 runtime
   // 期望同步读;状态权威在宿主,重开 /mcp 即最新)。
-  const statusSnapshot = await deps.mcpStatuses().catch(
-    () => [] as McpServerStatus[],
-  );
+  const statusSnapshot = await management.snapshot().catch(() => []);
 
   const runtime: ConfigEditorRuntime = {
     mcpServerStatuses: () => statusSnapshot,
-    mcpProbe: (spec, signal) => probeServer(spec, { signal, proxy }),
+    mcpProbe: management,
     // 统一输入解析：确定性输入直接出候选，裸输入经搜索引导出 choices（onStep 回报当前步骤）
     mcpResolve: (input, signal, onStep) =>
-      resolveMcpSetup(input, { fetchSource, search, llm: inferLlm }, signal, onStep),
+      resolveMcpSetup(input, {
+        fetchSource: (name, sig) => management.readSource(name, sig),
+        search: (query, sig) => management.search(query, sig),
+        isServerIdValid: management.isServerIdValid,
+        llm: inferLlm,
+      }, signal, onStep),
     // 阶段2：搜索引导选中真实包后，读其 README 提取启动配置（与 mcpResolve 分开）
-    mcpExtract: (name, signal) => extractMcpCandidate(name, { fetchSource, llm: inferLlm }, signal),
+    mcpExtract: (name, signal) => extractMcpCandidate(name, {
+      fetchSource: (packageName, sig) => management.readSource(packageName, sig),
+      isServerIdValid: management.isServerIdValid,
+      llm: inferLlm,
+    }, signal),
   };
   await runEditorCommand(deps, {
     sections: ["mcp"],

@@ -8,7 +8,10 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import type { McpServerStatus, ProbeResult } from "@zhixing/mcp";
+import type {
+  McpManagementProbePort,
+  McpManagementServerStatus,
+} from "../mcp-management-contract.js";
 import { createInitialState, setInputBuffer } from "../state.js";
 import { mcpSection } from "../sections/mcp.js";
 import {
@@ -29,7 +32,7 @@ function stateWith(servers: Record<string, unknown>): WorkingState {
   return createInitialState({ mcp: { servers } } as never, {});
 }
 
-function runtimeOf(statuses: McpServerStatus[]): ConfigEditorRuntime {
+function runtimeOf(statuses: McpManagementServerStatus[]): ConfigEditorRuntime {
   return { mcpServerStatuses: () => statuses };
 }
 
@@ -113,14 +116,14 @@ describe("handleMcpAddPanelKey — 接入向导", () => {
     inputs: {} as Record<string, string>,
     fieldIndex: 0,
   };
-  const okProbe = async (): Promise<ProbeResult> => ({
-    ok: true,
-    tools: [{ name: "x", inputSchema: {} }],
-  });
-  const failProbe = async (): Promise<ProbeResult> => ({
-    ok: false,
-    error: "401 bad token",
-  });
+  const okProbe: McpManagementProbePort = {
+    isServerIdValid: () => true,
+    probe: async () => ({ ok: true }),
+  };
+  const failProbe: McpManagementProbePort = {
+    isServerIdValid: () => true,
+    probe: async () => ({ ok: false, error: "401 bad token" }),
+  };
   function ctxWith(
     mcpProbe?: ConfigEditorRuntime["mcpProbe"],
   ): ConfigEditorContext {

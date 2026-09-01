@@ -9,9 +9,16 @@ import {
   runMcpDiscovery,
   type McpDiscoveryDeps,
 } from "../mcp-discovery.js";
-import type { McpSearchResult, McpSourceResult } from "@zhixing/mcp";
+import type {
+  McpManagementSearchResult,
+  McpManagementSourceResult,
+} from "../mcp-management-contract.js";
 
-function pkg(name: string, downloads = 0, keywords: string[] = ["mcp"]): McpSearchResult {
+function pkg(
+  name: string,
+  downloads = 0,
+  keywords: string[] = ["mcp"],
+): McpManagementSearchResult {
   return { name, description: `${name} desc`, keywords, downloads };
 }
 
@@ -22,7 +29,7 @@ function scripted(...responses: string[]): McpDiscoveryDeps["complete"] {
 }
 
 const noSource: McpDiscoveryDeps["fetchSource"] = async () =>
-  ({ kind: "not-found" }) as McpSourceResult;
+  ({ kind: "not-found" }) as McpManagementSourceResult;
 
 const call = (tool: string, input: Record<string, unknown>) =>
   JSON.stringify({ call: { tool, input } });
@@ -104,7 +111,7 @@ describe("runMcpDiscovery", () => {
   it("read_readme 工具可用（LLM 据此确认用途）", async () => {
     const search = vi.fn(async () => [pkg("foo-mcp", 10)]);
     const fetchSource = vi.fn(
-      async (): Promise<McpSourceResult> => ({ kind: "found", readme: "# foo-mcp\nMCP server" }),
+      async (): Promise<McpManagementSourceResult> => ({ kind: "found", readme: "# foo-mcp\nMCP server" }),
     );
     const complete = scripted(
       call("search_npm", { query: "foo" }),

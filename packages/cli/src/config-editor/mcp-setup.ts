@@ -6,18 +6,15 @@
  *   - 非预设：调注入的 light LLM 从包名 / URL / 命令推断启动方式
  *
  * 纯编排：discovery 探测（probe）与 LLM 都是注入依赖，便于单测、可取消（透传 AbortSignal）。
- * 验证用**带密钥**的 spec（用户填的密钥按 transport 注入，复用 toServerSpec 与运行时同一套
- * 路由），既证启动方式也证鉴权，避免"启动即需密钥"的 server 在引导里走进死路。
+ * 验证用**带密钥**的有限 draft；Host adapter 再按 transport 组装具体 spec，既证启动方式也
+ * 证鉴权，避免"启动即需密钥"的 server 在引导里走进死路。
  */
 
-import { isValidServerId } from "@zhixing/mcp";
 import type {
-  McpSearchResult,
-  McpServerSpec,
-  McpSourceResult,
-  McpToolDescriptor,
-  ProbeResult,
-} from "@zhixing/mcp";
+  McpManagementProbePort,
+  McpManagementSearchResult,
+  McpManagementSourceResult,
+} from "./mcp-management-contract.js";
 import type { McpServerConfigEntry } from "@zhixing/providers";
 import {
   applyMcpSecretFields,
@@ -26,7 +23,6 @@ import {
   type McpPreset,
   type McpSecretFieldSpec,
 } from "../registries/index.js";
-import { toServerSpec } from "../runtime/mcp-config.js";
 import {
   mcpProgressText,
   runMcpDiscovery,
@@ -39,23 +35,20 @@ import {
  */
 export type McpSetupLlm = (prompt: string, signal?: AbortSignal) => Promise<string>;
 
-/** discovery 探测函数 —— 由调用方注入（默认 @zhixing/mcp 的 probeServer），测试注入 mock。 */
-export type McpProbe = (
-  spec: McpServerSpec,
-  signal?: AbortSignal,
-) => Promise<ProbeResult>;
-
-/** 信息源抓取函数 —— 由调用方注入（默认 @zhixing/mcp 的 fetchMcpServerSource），测试注入 mock。 */
+/** 信息源抓取函数 —— 由 Host adapter 注入，管理层只消费有限 source result。 */
 export type McpSourceFetcher = (
   packageName: string,
   signal?: AbortSignal,
-) => Promise<McpSourceResult>;
+) => Promise<McpManagementSourceResult>;
 
 /** resolveMcpSetup 的注入依赖：搜真实包 + 查真实信息源 + 据源文本提取的 LLM。 */
 export interface McpResolveDeps {
   fetchSource: McpSourceFetcher;
-  /** 搜真实 npm 包（裸输入走搜索引导用；注入 @zhixing/mcp 的 searchMcpServers）。 */
-  search: (query: string, signal?: AbortSignal) => Promise<McpSearchResult[]>;
+  search: (
+    query: string,
+    signal?: AbortSignal,
+  ) => Promise<readonly McpManagementSearchResult[]>;
+  isServerIdValid: (serverId: string) => boolean;
   llm: McpSetupLlm;
 }
 
@@ -82,7 +75,7 @@ export type McpResolveResult =
   | { ok: false; error: string };
 
 export type McpValidateResult =
-  | { ok: true; tools: McpToolDescriptor[] }
+  | { ok: true }
   | { ok: false; error: string };
 
 /** 预设 → 候选（深拷贝 entry，避免污染预设常量）。 */
@@ -123,10 +116,14 @@ export async function resolveMcpSetup(
   if (byLabel) return { ok: true, candidate: presetToCandidate(byLabel) };
 
   // URL：远程 server，地址即事实，不经 LLM
-  if (/^https?:\/\//i.test(trimmed)) return buildUrlCandidate(trimmed);
+  if (/^https?:\/\//i.test(trimmed)) {
+    return buildUrlCandidate(trimmed, deps.isServerIdValid);
+  }
 
   // 完整命令（含空格）：用户给出的确切启动命令即事实，按空格拆，不经 LLM
-  if (/\s/.test(trimmed)) return buildCommandCandidate(trimmed);
+  if (/\s/.test(trimmed)) {
+    return buildCommandCandidate(trimmed, deps.isServerIdValid);
+  }
 
   // 裸输入：搜真实 npm 包 + LLM 据真实结果挑出 ≤5 主流候选（编不出不存在的包）
   const discovery = await runMcpDiscovery(
@@ -145,9 +142,12 @@ export async function resolveMcpSetup(
 }
 
 /** URL → http 候选：地址原样，无需 LLM；只兜底 server 名推导。 */
-function buildUrlCandidate(url: string): McpResolveResult {
+function buildUrlCandidate(
+  url: string,
+  isServerIdValid: (serverId: string) => boolean,
+): McpResolveResult {
   const serverId = deriveServerId(url);
-  if (!isValidServerId(serverId)) {
+  if (!isServerIdValid(serverId)) {
     return { ok: false, error: "无法从该 URL 推导合法 server 名，请确认地址是否正确" };
   }
   return {
@@ -157,7 +157,10 @@ function buildUrlCandidate(url: string): McpResolveResult {
 }
 
 /** 完整命令 → stdio 候选：按空格拆 command + args，server 名取最像包名的实参。 */
-function buildCommandCandidate(commandLine: string): McpResolveResult {
+function buildCommandCandidate(
+  commandLine: string,
+  isServerIdValid: (serverId: string) => boolean,
+): McpResolveResult {
   const tokens = commandLine.split(/\s+/).filter(Boolean);
   const command = tokens[0];
   if (command === undefined) return { ok: false, error: "命令为空，请重新输入" };
@@ -166,7 +169,7 @@ function buildCommandCandidate(commandLine: string): McpResolveResult {
   // 路径 / URL 等取值（如 `npx -y @x/fs /some/path` 末参是路径），会推出 "path" 这种错名。
   const pkgish = args.find((t) => !t.startsWith("-")) ?? command;
   const serverId = deriveServerId(pkgish);
-  if (!isValidServerId(serverId)) {
+  if (!isServerIdValid(serverId)) {
     return { ok: false, error: "无法从该命令推导合法 server 名，请检查命令是否正确" };
   }
   return {
@@ -192,11 +195,15 @@ function buildCommandCandidate(commandLine: string): McpResolveResult {
  */
 export async function extractMcpCandidate(
   packageName: string,
-  deps: { fetchSource: McpSourceFetcher; llm: McpSetupLlm },
+  deps: {
+    fetchSource: McpSourceFetcher;
+    isServerIdValid: (serverId: string) => boolean;
+    llm: McpSetupLlm;
+  },
   signal?: AbortSignal,
 ): Promise<McpResolveResult> {
   const serverId = deriveServerId(packageName);
-  if (!isValidServerId(serverId)) {
+  if (!deps.isServerIdValid(serverId)) {
     return {
       ok: false,
       error: `无法从 "${packageName}" 推导合法 server 名，请直接输入完整启动命令或远程 URL`,
@@ -244,20 +251,26 @@ export async function extractMcpCandidate(
 /**
  * discovery 验证：用候选 + 用户已填密钥组装 spec，临时连接 + 列工具，证启动方式 **与鉴权** 都对。
  *
- * 带密钥探测（密钥按 transport 注入，复用 toServerSpec）—— 不要求密钥的 server 传空 inputs 即退化
+ * 带密钥探测——不要求密钥的 server 传空 inputs 即退化
  * 为纯启动验证；要求密钥的 server 则连真实凭证，避免"启动即需密钥"的 server 在引导里走进死路。
  */
 export async function validateMcpSetup(
   candidate: McpSetupCandidate,
   secretInputs: Record<string, string>,
-  probe: McpProbe,
+  probe: McpManagementProbePort,
   signal?: AbortSignal,
 ): Promise<McpValidateResult> {
   const secrets = applyMcpSecretFields(candidate.secretFields, secretInputs);
-  const spec = toServerSpec(candidate.serverId, candidate.entry, secrets);
-  const result = await probe(spec, signal);
+  const result = await probe.probe({
+    serverId: candidate.serverId,
+    transport: candidate.entry.type ?? "stdio",
+    ...(candidate.entry.command === undefined ? {} : { command: candidate.entry.command }),
+    ...(candidate.entry.args === undefined ? {} : { args: [...candidate.entry.args] }),
+    ...(candidate.entry.url === undefined ? {} : { url: candidate.entry.url }),
+    credentials: { ...secrets },
+  }, signal);
   return result.ok
-    ? { ok: true, tools: result.tools }
+    ? { ok: true }
     : { ok: false, error: result.error };
 }
 
@@ -277,7 +290,7 @@ export function applyMcpSetup(
 
 /**
  * 从标识推导一个合法默认 server id —— URL 取 host 主体、包名取末段，消毒成 `[a-z0-9-]`。
- * 推不出合法 id 时返回空串（调用方据 isValidServerId 兜底）。用户可在面板改名。
+ * 推不出合法 id 时返回空串（调用方经 management validation port 兜底）。用户可在面板改名。
  */
 export function deriveServerId(identifier: string): string {
   let base = identifier.trim();

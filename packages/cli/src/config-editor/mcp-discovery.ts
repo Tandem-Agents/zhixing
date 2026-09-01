@@ -9,7 +9,10 @@
  */
 
 import { runToolLoop, type ToolLoopProgress, type ToolLoopSpec, type ToolLoopTool } from "@zhixing/core";
-import type { McpSearchResult, McpSourceResult } from "@zhixing/mcp";
+import type {
+  McpManagementSearchResult,
+  McpManagementSourceResult,
+} from "./mcp-management-contract.js";
 
 /** 一个呈现给用户的候选 —— 真实包名 + LLM 给的一句话用途 / 选它的理由。 */
 export interface McpDiscoveryChoice {
@@ -26,10 +29,10 @@ export type McpDiscoveryResult =
   | { ok: false; error: string };
 
 export interface McpDiscoveryDeps {
-  /** 搜真实 npm 包（注入 @zhixing/mcp 的 searchMcpServers）。 */
-  search: (query: string, signal?: AbortSignal) => Promise<McpSearchResult[]>;
-  /** 读包 README（注入 @zhixing/mcp 的 fetchMcpServerSource）。 */
-  fetchSource: (packageName: string, signal?: AbortSignal) => Promise<McpSourceResult>;
+  /** 搜真实 npm 包（具体 registry/network 实现由 Host adapter 提供）。 */
+  search: (query: string, signal?: AbortSignal) => Promise<readonly McpManagementSearchResult[]>;
+  /** 读包 README（具体 registry/network 实现由 Host adapter 提供）。 */
+  fetchSource: (packageName: string, signal?: AbortSignal) => Promise<McpManagementSourceResult>;
   /** LLM 文本完成（callText 风格，绑 "main" 档）。 */
   complete: (prompt: string, signal?: AbortSignal) => Promise<string>;
   /** 进度观察（可选）——结构化进度，由调用方经 mcpProgressText 翻译成人话。 */
@@ -53,7 +56,7 @@ export async function runMcpDiscovery(
   signal?: AbortSignal,
 ): Promise<McpDiscoveryResult> {
   // seen：本次所有搜索真实返回的包名 → 结果。工具 run 累积，parseFinal 据此校验"不许编造"。
-  const seen = new Map<string, McpSearchResult>();
+  const seen = new Map<string, McpManagementSearchResult>();
 
   const searchTool: ToolLoopTool = {
     name: "search_npm",
@@ -147,7 +150,7 @@ function buildGoal(input: string): string {
 /** parseFinal：提取候选 + 场景护栏（每个 ∈ seen、≤5）。违反则 reject 回灌让 LLM 修正。 */
 function parseChoices(
   payload: unknown,
-  seen: Map<string, McpSearchResult>,
+  seen: Map<string, McpManagementSearchResult>,
 ): { ok: true; result: McpDiscoveryChoice[] } | { ok: false; reason: string } {
   const raw = Array.isArray(payload)
     ? payload

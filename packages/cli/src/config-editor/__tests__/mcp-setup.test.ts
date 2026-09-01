@@ -7,7 +7,11 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import type { McpServerSpec, McpSourceResult, ProbeResult } from "@zhixing/mcp";
+import type {
+  McpManagementProbePort,
+  McpManagementServerDraft,
+  McpManagementSourceResult,
+} from "../mcp-management-contract.js";
 import {
   applyMcpSetup,
   deriveServerId,
@@ -29,13 +33,18 @@ const EXTRACTED = JSON.stringify({
   ],
 });
 
-const found = (readme: string): McpSourceResult => ({ kind: "found", readme });
+const found = (readme: string): McpManagementSourceResult => ({ kind: "found", readme });
+
+const isServerIdValid = (serverId: string): boolean =>
+  serverId.length > 0 && serverId.length <= 40 && !serverId.includes("__") &&
+  /^[a-zA-Z0-9](?:[a-zA-Z0-9_-]*[a-zA-Z0-9])?$/.test(serverId);
 
 /** 组装注入依赖；缺省 search 返回 []、fetchSource 返回 not-found、llm 返回空对象。 */
 function makeDeps(over: Partial<McpResolveDeps> = {}): McpResolveDeps {
   return {
-    fetchSource: over.fetchSource ?? vi.fn(async (): Promise<McpSourceResult> => ({ kind: "not-found" })),
+    fetchSource: over.fetchSource ?? vi.fn(async (): Promise<McpManagementSourceResult> => ({ kind: "not-found" })),
     search: over.search ?? vi.fn(async () => []),
+    isServerIdValid: over.isServerIdValid ?? isServerIdValid,
     llm: over.llm ?? vi.fn(async () => "{}"),
   };
 }
@@ -111,7 +120,7 @@ describe("extractMcpCandidate — 选中真实包后查源 grounded 提取（阶
   const deps = (
     fetchSource: McpResolveDeps["fetchSource"],
     llm: McpResolveDeps["llm"],
-  ) => ({ fetchSource, llm });
+  ) => ({ fetchSource, isServerIdValid, llm });
   // 取候选（extractMcpCandidate 只会返回 candidate / error，断言时收窄）
   const cand = (r: Awaited<ReturnType<typeof extractMcpCandidate>>) =>
     r.ok && "candidate" in r ? r.candidate : undefined;
@@ -153,7 +162,7 @@ describe("extractMcpCandidate — 选中真实包后查源 grounded 提取（阶
   });
 
   it("包确不存在（not-found）→ 诚实报错，不调 LLM", async () => {
-    const fetchSource = vi.fn(async (): Promise<McpSourceResult> => ({ kind: "not-found" }));
+    const fetchSource = vi.fn(async (): Promise<McpManagementSourceResult> => ({ kind: "not-found" }));
     const llm = vi.fn();
     const r = await extractMcpCandidate("@foo/does-not-exist", deps(fetchSource, llm));
     expect(r.ok).toBe(false);
@@ -163,7 +172,7 @@ describe("extractMcpCandidate — 选中真实包后查源 grounded 提取（阶
 
   it("查询失败（error）→ 诚实报错并引导改输命令 / URL，不调 LLM", async () => {
     const fetchSource = vi.fn(
-      async (): Promise<McpSourceResult> => ({ kind: "error", reason: "ECONNRESET" }),
+      async (): Promise<McpManagementSourceResult> => ({ kind: "error", reason: "ECONNRESET" }),
     );
     const llm = vi.fn();
     const r = await extractMcpCandidate("@foo/bar-mcp", deps(fetchSource, llm));
@@ -220,7 +229,7 @@ describe("extractMcpCandidate — 选中真实包后查源 grounded 提取（阶
 
   it("查源带回主页 → 透传到候选（作密钥无 docUrl 时的诚实兜底）", async () => {
     const fetchSource = vi.fn(
-      async (): Promise<McpSourceResult> => ({ kind: "found", readme: "# bar", homepage: "https://bar.dev" }),
+      async (): Promise<McpManagementSourceResult> => ({ kind: "found", readme: "# bar", homepage: "https://bar.dev" }),
     );
     const llm = vi.fn(async () => EXTRACTED);
     const r = await extractMcpCandidate("@foo/bar-mcp", deps(fetchSource, llm));
@@ -285,18 +294,21 @@ describe("validateMcpSetup — discovery 带密钥验证", () => {
     source: "inferred",
   };
 
+  const probePort = (
+    probe: McpManagementProbePort["probe"],
+  ): McpManagementProbePort => ({ isServerIdValid, probe });
+
   it("填了密钥 → 探测 spec 按 transport 注入（stdio→env），既证启动也证鉴权", async () => {
-    let seen: McpServerSpec | undefined;
-    const probe = async (spec: McpServerSpec): Promise<ProbeResult> => {
-      seen = spec;
-      return { ok: true, tools: [{ name: "do", inputSchema: {} }] };
-    };
+    let seen: McpManagementServerDraft | undefined;
+    const probe = probePort(async (draft) => {
+      seen = draft;
+      return { ok: true };
+    });
 
     const result = await validateMcpSetup(candidate, { FOO_TOKEN: "ghp_x" }, probe);
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.tools.map((t) => t.name)).toEqual(["do"]);
-    expect(seen?.env).toEqual({ FOO_TOKEN: "ghp_x" });
-    expect(seen?.headers).toBeUndefined();
+    expect(seen?.credentials).toEqual({ FOO_TOKEN: "ghp_x" });
+    expect(seen?.transport).toBe("stdio");
   });
 
   it("http 候选填密钥 → 探测 spec 注入 headers（GitHub Bearer 同路径）", async () => {
@@ -308,33 +320,32 @@ describe("validateMcpSetup — discovery 带密钥验证", () => {
       ],
       source: "preset",
     };
-    let seen: McpServerSpec | undefined;
-    const probe = async (spec: McpServerSpec): Promise<ProbeResult> => {
-      seen = spec;
-      return { ok: true, tools: [] };
-    };
+    let seen: McpManagementServerDraft | undefined;
+    const probe = probePort(async (draft) => {
+      seen = draft;
+      return { ok: true };
+    });
     await validateMcpSetup(httpCandidate, { Authorization: "ghp_x" }, probe);
-    expect(seen?.headers).toEqual({ Authorization: "Bearer ghp_x" });
-    expect(seen?.env).toBeUndefined();
+    expect(seen?.credentials).toEqual({ Authorization: "Bearer ghp_x" });
+    expect(seen?.transport).toBe("http");
   });
 
   it("空密钥输入 → 退化为纯启动验证（不注入 env / headers）", async () => {
-    let seen: McpServerSpec | undefined;
-    const probe = async (spec: McpServerSpec): Promise<ProbeResult> => {
-      seen = spec;
-      return { ok: true, tools: [] };
-    };
+    let seen: McpManagementServerDraft | undefined;
+    const probe = probePort(async (draft) => {
+      seen = draft;
+      return { ok: true };
+    });
     await validateMcpSetup(candidate, {}, probe);
-    expect(seen?.env).toBeUndefined();
-    expect(seen?.headers).toBeUndefined();
+    expect(seen?.credentials).toEqual({});
   });
 
   it("probe 失败透传明确原因", async () => {
     const github = presetToCandidate(findMcpPreset("github")!);
-    const result = await validateMcpSetup(github, {}, async () => ({
+    const result = await validateMcpSetup(github, {}, probePort(async () => ({
       ok: false,
       error: "spawn npx ENOENT",
-    }));
+    })));
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toContain("ENOENT");
   });

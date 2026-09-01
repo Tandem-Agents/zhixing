@@ -3633,6 +3633,101 @@ export function inspectMcpRuntimeBoundary(records) {
   return failures;
 }
 
+/** A6 MCP management owns finite UI contracts while concrete discovery stays at the Host edge. */
+export function inspectMcpManagementBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const source = byPath.get(relative);
+    if (source === undefined) failures.push(`${relative}: MCP management boundary source is missing`);
+    return source ?? "";
+  };
+  const contract = required("packages/cli/src/config-editor/mcp-management-contract.ts");
+  const adapter = required("packages/cli/src/runtime/mcp-management-adapter.ts");
+  const setup = required("packages/cli/src/config-editor/mcp-setup.ts");
+  const discovery = required("packages/cli/src/config-editor/mcp-discovery.ts");
+  const editorTypes = required("packages/cli/src/config-editor/types.ts");
+  const panel = required("packages/cli/src/config-editor/panels/mcp.ts");
+  const section = required("packages/cli/src/config-editor/sections/mcp.ts");
+  const configCommand = required("packages/cli/src/runtime/config-command.ts");
+  const commandRegistration = required("packages/cli/src/commands/config-commands.ts");
+
+  if (
+    !contract.includes("export interface McpManagementServerDraft") ||
+    !contract.includes("export interface McpManagementServerStatus") ||
+    !contract.includes("export interface McpManagementProbePort") ||
+    !contract.includes("export interface McpManagementDiscoveryPort") ||
+    !contract.includes("export interface McpManagementInfrastructurePort") ||
+    !contract.includes("readonly credentials: Readonly<Record<string, string>>") ||
+    /@zhixing\/mcp|McpServerSpec|McpToolDescriptor|NetworkPolicy|Record<string, unknown>|\bany\b/u.test(contract)
+  ) {
+    failures.push("MCP management demand contract is not finite or leaks infrastructure types");
+  }
+
+  if (
+    !adapter.includes("fetchMcpServerSource") ||
+    !adapter.includes("searchMcpServers") ||
+    !adapter.includes("probeServer") ||
+    !adapter.includes("isValidServerId") ||
+    !adapter.includes("toServerSpec(") ||
+    !adapter.includes("{ ...draft.credentials }") ||
+    !adapter.includes("decodeStatusSnapshot(await options.readStatusWire())") ||
+    !adapter.includes("proxy: options.proxy")
+  ) {
+    failures.push("MCP Host adapter does not own status decoding, spec conversion, probe and discovery");
+  }
+
+  const managementConsumers = [
+    setup,
+    discovery,
+    editorTypes,
+    panel,
+    section,
+    configCommand,
+    commandRegistration,
+  ];
+  if (managementConsumers.some((source) =>
+    /@zhixing\/mcp|McpServerSpec|McpToolDescriptor|McpSearchResult|McpSourceResult|ProbeResult|probeServer|searchMcpServers|fetchMcpServerSource|toServerSpec\(|isValidServerId/u.test(source)
+  )) {
+    failures.push("MCP management UI or product command regained concrete MCP ownership");
+  }
+
+  if (
+    !setup.includes("probe.probe({") ||
+    !setup.includes("credentials: { ...secrets }") ||
+    !configCommand.includes("createMcpManagementAdapter({") ||
+    !configCommand.includes("const statusSnapshot = await management.snapshot()") ||
+    !configCommand.includes("mcpProbe: management") ||
+    !configCommand.includes("management.readSource") ||
+    !configCommand.includes("management.search") ||
+    !configCommand.includes('deps.llmComplete(prompt, "main", signal)') ||
+    !commandRegistration.includes("readMcpStatusWire: async () =>") ||
+    /applyConfig/u.test([setup, discovery, editorTypes, panel, section, configCommand, commandRegistration].join("\n"))
+  ) {
+    failures.push("MCP management production graph bypasses its finite adapter or hot-applies config");
+  }
+
+  const concreteImporters = records
+    .filter((record) => /from\s+["']@zhixing\/mcp["']/u.test(record.text))
+    .map((record) => record.relative)
+    .sort();
+  const allowedConcreteImporters = [
+    "packages/cli/src/runtime/mcp-config.ts",
+    "packages/cli/src/runtime/mcp-management-adapter.ts",
+    "packages/cli/src/runtime/mcp-runtime-adapter.ts",
+  ];
+  const cliConcreteImporters = concreteImporters.filter((relative) =>
+    relative.startsWith("packages/cli/src/"),
+  );
+  if (
+    cliConcreteImporters.length !== allowedConcreteImporters.length ||
+    cliConcreteImporters.some((relative, index) => relative !== allowedConcreteImporters[index])
+  ) {
+    failures.push("Concrete MCP imports escaped the three finite CLI infrastructure adapters");
+  }
+  return failures;
+}
+
 export async function validateS7Structure() {
   const files = await productionTypeScriptFiles(path.join(root, "packages"));
   const records = await Promise.all(files.map(async (absolute) => ({
@@ -3722,6 +3817,7 @@ export async function validateS7Structure() {
     },
   ]));
   failures.push(...inspectMcpRuntimeBoundary(records));
+  failures.push(...inspectMcpManagementBoundary(records));
   failures.push(...inspectWorkspaceAdministrationOwnership([
     ...records,
     {

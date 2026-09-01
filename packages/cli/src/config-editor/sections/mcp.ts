@@ -17,7 +17,7 @@ import type {
   SectionEntry,
   WorkingState,
 } from "../types.js";
-import type { McpServerStatus } from "@zhixing/mcp";
+import type { McpManagementServerStatus } from "../mcp-management-contract.js";
 import { isMcpServerEnabled, listMcpServerIds } from "../state.js";
 import { presetToCandidate } from "../mcp-setup.js";
 import { MCP_PRESETS } from "../../registries/index.js";
@@ -67,7 +67,7 @@ export const mcpSection: Section = {
 function buildEntry(
   state: WorkingState,
   serverId: string,
-  status: McpServerStatus | undefined,
+  status: McpManagementServerStatus | undefined,
 ): SectionEntry {
   return {
     label: serverId,
@@ -82,7 +82,7 @@ function buildEntry(
  */
 function buildEntryState(
   enabled: boolean,
-  status: McpServerStatus | undefined,
+  status: McpManagementServerStatus | undefined,
 ): EntryState {
   if (!enabled) {
     return { kind: "disabled", statusText: "已停用" };

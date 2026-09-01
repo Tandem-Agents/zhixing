@@ -65,6 +65,8 @@ export interface ServerInfoResult {
   activeWork?: ServerActiveWork;
   deferredWork?: RuntimeControlWorkItem[];
   keepAliveWork?: RuntimeControlWorkItem[];
+  /** MCP management adapter owns strict decoding of this server.info projection. */
+  mcpServers?: unknown;
   [key: string]: unknown;
 }
 

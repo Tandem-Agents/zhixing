@@ -11,9 +11,12 @@
  */
 
 import type { RoleId, ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
-import type { McpServerSpec, McpServerStatus, ProbeResult } from "@zhixing/mcp";
 import type { McpSetupCandidate, McpResolveResult } from "./mcp-setup.js";
 import type { McpDiscoveryChoice } from "./mcp-discovery.js";
+import type {
+  McpManagementProbePort,
+  McpManagementServerStatus,
+} from "./mcp-management-contract.js";
 
 // ─── Section（用户视角的配置块） ───
 
@@ -149,12 +152,12 @@ export interface FieldSpec {
  */
 export interface ConfigEditorRuntime {
   /** 全部受管 server 的运行状态（缺省 = 无 hub 注入，section 仅显示配置态）。 */
-  mcpServerStatuses?: () => readonly McpServerStatus[];
+  mcpServerStatuses?: () => readonly McpManagementServerStatus[];
   /**
    * 一次性 discovery 探测（缺省 = 无法验证，接入向导不可用）—— 接入引导验证连接用，
-   * 由 caller 注入（生产注 @zhixing/mcp 的 probeServer，测试注 mock）。
+   * 由 caller 注入需求方有限 probe port；具体 MCP spec/transport 只存在于 Host adapter。
    */
-  mcpProbe?: (spec: McpServerSpec, signal?: AbortSignal) => Promise<ProbeResult>;
+  mcpProbe?: McpManagementProbePort;
   /**
    * 把用户输入（包名 / 关键词 / URL / 命令 / 预设名）解析为接入候选或候选列表（缺省 =
    * 统一输入接入不可用）—— 由 caller 注入（生产经 resolveMcpSetup + main LLM + 搜索，

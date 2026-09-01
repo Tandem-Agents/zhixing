@@ -2,7 +2,7 @@
  * L3 (mcp)：已接入 server 详情面板——查看连接信息 + 启停 / 删除。
  *
  * 全同步：启停 / 删除都是 WorkingState 事务变更（启停经 `setMcpServerEnabled`、删除经
- * `removeMcpServer` 同清 config + 凭证），随编辑器 [完成] 一次落盘 → reload → applyConfig。
+ * `removeMcpServer` 同清 config + 凭证），随编辑器 [完成] 一次落盘 → Host drain/replacement。
  * 连接状态只读展示（来自注入的 runtime）。接入新 server 的引导向导是另一条路径（异步），
  * 不在此面板。
  */
@@ -14,7 +14,7 @@ import type {
   PanelDescriptor,
   WorkingState,
 } from "../types.js";
-import type { McpServerStatus } from "@zhixing/mcp";
+import type { McpManagementServerStatus } from "../mcp-management-contract.js";
 import {
   clearInputBuffer,
   isMcpServerEnabled,
@@ -54,13 +54,13 @@ const ACTION_COUNT = 2;
 function findStatus(
   serverId: string,
   runtime?: ConfigEditorRuntime,
-): McpServerStatus | undefined {
+): McpManagementServerStatus | undefined {
   return runtime?.mcpServerStatuses?.().find((s) => s.serverId === serverId);
 }
 
 function describeStatus(
   enabled: boolean,
-  status: McpServerStatus | undefined,
+  status: McpManagementServerStatus | undefined,
 ): string {
   if (!enabled) return "已停用";
   if (!status) return "已启用（暂无连接信息）";

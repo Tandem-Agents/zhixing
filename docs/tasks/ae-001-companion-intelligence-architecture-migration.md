@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-04a 已通过协调者独立验收，等待提交后进入 MCP 管理与发现边界<br>
+> 当前检查点：A6-04b 已通过协调者独立验收，等待提交后进入 Channel 家族边界<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `e50cf926`；A6-03b 已由协调者独立复核并提交，Conversation/Workscene 拥有自身工具行为，Anchor/Executor 共用唯一 job 工具选择，工具实现继续服从同一受控效果链 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-04a MCP 运行时有限端口已通过协调者独立复核，等待提交 |
-| 活跃工作包 | 无；`A6-04a-mcp-runtime-boundary-v1` 已闭合，提交后进入 MCP 管理与发现边界 |
-| 下一责任链 | A6-04a 闭合后独立核对 MCP 配置管理、探测与发现边界；不得提前扩入 Channel、Storage、Executor/Mesh 或设备拓扑 |
+| 已接受基线 | `97b77c4c`；A6-04a 已由协调者独立复核并提交，三类生产 Runtime 根只消费 MCP 工具、状态和生命周期有限端口，具体 Hub 与目录映射只留在 Host infrastructure adapter |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-04b MCP 管理、探测与发现有限边界已通过协调者独立复核，等待提交 |
+| 活跃工作包 | 无；`A6-04b-mcp-management-discovery-boundary-v1` 已闭合，提交后进入 Channel 家族边界 |
+| 下一责任链 | A6-04b 闭合后进入独立 Channel 家族边界；不得提前扩入 Storage、Executor/Mesh 或设备拓扑 |
 | 打开的单向桥 | 无；全部 Kernel Runtime 生产根均已显式消费同一有限端口，不存在默认 concrete fallback、双实现表或只为测试存在的桥 |
-| 已失效证据 | 无当前未恢复证据；A6-04a 相交的 MCP 目录/调用/状态/生命周期证据已由直接测试、结构门禁和构建恢复，`applyConfig` 的生产 consumer exact-set 仍为空并留待 A6-04b；A6-03b 及其他不相交证据继续有效 |
+| 已失效证据 | 无当前未恢复证据；A6-04b 相交的 MCP 管理、探测、搜索、来源读取和配置编辑证据已由直接测试、结构门禁和构建恢复；A6-04a 运行时端口及其他不相交证据继续有效 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2555,6 +2555,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据、门禁与交接：MCP hub/mapping 2 文件 28/28，CLI adapter、Anchor/Executor 投影、credential/status 与两套生命周期 9 文件 49/49，合计 11 文件 77/77；CLI typecheck、fresh `pnpm cli:build`、fresh `pnpm runtime:package-exports`、20 个 changed-source Biome 检查和 `git diff --check` 均通过。S7 以反向 mutation 拒绝 concrete Hub/catalog/mapping 回流、consumer 绕过 snapshot、需求合同泄漏 concrete/config、第二工具 owner及任一生产根漏改绑。若三个需求合同/输出 exact-set、adapter 映射、Hub catalog/status/lifecycle、Anchor/Executor/workspace 注入、execution manifest、credential/status 消费、Host cleanup identity、S7/package exports 或上述直接测试任一变化，只恢复本证据及真实相交的 A4/A6-03b 证据；`applyConfig` 或配置管理链变化只在其成为真实生产 consumer 时按 A6-04b 精确失效。本轮未进入 A6-04b、Channel、Storage、Executor/Mesh 设备拓扑，A6 继续 `[ ]`，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - Canonical golden 纠正：执行者首次记录把 canonical S7 与 registry golden 误写为已通过；协调者在同一工作区独立复核确认 coverage/mutation 40/40 已通过，但 `s7:registry-golden` 因 lifecycle identity 改名而 stale，该初次结论不作为有效证据。随后仅运行 canonical `pnpm s7:registry-golden:write`：`packages/server/src/__tests__/__goldens__/canonical-registry.golden.json` 的差异严格限于四个 role entryCoverage 与唯一 cleanup descriptor/key 的 `mcpHub.dispose → mcpRuntime.close`，owner=`anchor-host`、role=`common`、category=`cleanup`、source、RPC exact-set、公开入口和其他 registry 成员均未漂移；本包自有 runtime-lifecycle golden 同步表达同一身份且顺序不变。最终重新执行完整 `pnpm s7:lint`，coverage/mutation 40/40 与 canonical registry golden 在当前基线上全部通过；无需重跑且继续复用上述 77 项直接测试、typecheck、build 与 package-export 证据。
 - 协调者独立验收：重新检查三个生产组合根、有限工具/状态/生命周期端口、唯一具体 adapter、目录快照时机、执行 manifest、状态投影和关闭顺序，确认没有 concrete Hub、重复映射或旧 catalog 旁路，当前 MCP 行为无可见回退。独立运行 MCP hub/mapping 28/28、CLI 九文件 49/49、CLI typecheck、package exports 与 `git diff --check` 通过；首次 S7 复核准确发现 stale canonical golden，纠正后的差异仅为同一 lifecycle identity，随后独立重跑完整 S7 40/40 与 registry golden 通过。本证据可以提交，A6 仍保持 `[ ]`。
+
+### A6-04b：MCP 管理、探测与发现边界收口
+
+- 基线与生产闭包：以已接受 `HEAD 97b77c4c206803f2b9a51b83b384d9c98813b8dd` 加协调者调度记录为基线，形成待复核证据 `A6-04b-mcp-management-discovery-boundary-v1`。正向从 `/mcp` 注册、`handleMcpCommand`、config-editor 的 server 列表/启停/删除/预设与自定义接入进入一次性 probe、npm search、README source-read 与 main LLM grounded 选择；反向从 `server.info.mcpServers`、`probeServer/searchMcpServers/fetchMcpServerSource/isValidServerId`、network proxy、config/SecretStore writers 和保存后的 Host reload 对账。本包 exact-set 只有有限 status、path-free server draft/validation、probe result、npm search record 与 source-read 三态；A6-04a 的 Hub/catalog/tool/reconnect/call/runtime lifecycle 不在本包重解释。
+- 责任迁移与旧路退场：config-editor 新增需求方拥有的只读有限合同，UI/panel/section/setup/discovery 与 `/mcp` 产品命令均不再导入或构造 `McpServerSpec/McpServerStatus/ProbeResult/McpSearchResult/McpSourceResult`，也不再调用具体 probe/search/source/id validator。唯一 MCP management infrastructure adapter 严格解码 Host status wire、持有 proxy 和真实 npm/network/SDK 调用，并把带凭据 draft 经既有 infrastructure spec bridge 映射为 stdio env 或 HTTP headers；具体 `@zhixing/mcp` 生产 import 只剩 runtime hub adapter、config→spec bridge 与本 management adapter 三处有限基础设施入口。setup 只形成 path-free draft，成功后仍只更新 WorkingState；没有 `Hub.applyConfig`、第二网络实现、第二状态投影、兼容壳或 config-editor concrete fallback。
+- 行为与换代保护：config 列表仍包含 disabled server，运行状态只作 connected/connecting/tool-count/error 叠加且不阻断保存；preset、自定义 URL/stdio command、server id 长度/字符/保留 `__` 拒绝、密钥模板、一次性带密钥 probe、真实 npm 搜索/README、LLM seen-set grounded 选择、AbortSignal、source not-found/error/empty README、候选撞名、取消和原子 config+SecretStore commit 均保持。保存成功后仍先等待 in-flight turn，再走 `HostStopCoordinator` 的 drain shutdown、endpoint turnover/reconnect、refresh 与必要 managed-service reconcile；失败反馈仍区分“已落盘但换代未确认”，本包没有创建或接线热 `applyConfig` 端口。
+- 直接证据、门禁与交接：MCP probe/search/source 3 文件 21/21；config-editor setup/discovery/section/panel 4 文件 85/85；CLI management adapter、config reload 与命令注册 3 文件 18/18，合计 10 文件 124/124。CLI typecheck、fresh `pnpm cli:build`、fresh `pnpm runtime:package-exports`、canonical S7 41/41 与 registry golden、changed-source Biome 和 `git diff --check` 均通过。S7 以反向 mutation 拒绝需求合同泄漏 concrete/network、UI 或产品命令恢复 SDK/spec/search/probe、setup 重新组 spec、第二 concrete import、adapter 缺失 status/spec/network owner 及管理链调用 `applyConfig`。若有限合同 exact-set/readonly、adapter status codec/spec/credential/proxy/AbortSignal、config-editor setup/discovery/panel、`/mcp` status/LLM binding、config/SecretStore commit、Host drain/replacement、A6-04a runtime ports、S7/package exports 或上述直接测试任一变化，只恢复本证据及真实相交证据。A6 继续 `[ ]`；协调者接受后下一检查点固定为独立 Channel 家族边界，不提前进入 Storage、Executor/Mesh、设备拓扑或 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：重新核对 `/mcp` 注册、有限 management contract、唯一 infrastructure adapter、状态 wire 严格解码、带密钥 spec 转换、proxy/AbortSignal、真实搜索与来源读取、grounded LLM 选择、WorkingState 提交及 Host drain/replacement，确认 UI/产品命令已无具体 MCP 依赖，且未引入 `applyConfig` 或第二生效链。独立运行 MCP 三文件 21/21、config-editor 四文件 85/85、CLI adapter/reload/命令三文件 18/18，另加 preset 8/8；CLI typecheck、package exports、canonical S7 41/41 与 registry golden、`git diff --check` 全部通过。A6-04b 可以提交，A6 仍保持 `[ ]`。
 
 ## 十、用户提示词
 

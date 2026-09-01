@@ -15,7 +15,6 @@ import {
   type CommandHandlerContext,
   type ArgSchema,
 } from "@zhixing/core";
-import type { McpServerStatus } from "@zhixing/mcp";
 import type { CliWriter, ScreenController } from "../screen/index.js";
 import {
   handleConfigCommand,
@@ -93,9 +92,10 @@ export function registerConfigCommands(deps: ConfigCommandsDeps): void {
   dispatcher.registerHandler("mcp:repl", async () => {
     await handleMcpCommand({
       ...editorDeps(),
-      mcpStatuses: async () =>
-        (await deps.management.serverInfo()).mcpServers as McpServerStatus[],
-      llmComplete: (prompt, role) => deps.management.llmComplete(prompt, role),
+      readMcpStatusWire: async () =>
+        (await deps.management.serverInfo()).mcpServers ?? [],
+      llmComplete: (prompt, role, signal) =>
+        deps.management.llmComplete(prompt, role, signal),
     });
     return {};
   });

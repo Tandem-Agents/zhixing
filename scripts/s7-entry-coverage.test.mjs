@@ -31,6 +31,7 @@ import {
   inspectRuntimeSecretProjectionBoundary,
   inspectRuntimeConfigurationProjectionBoundary,
   inspectWorksceneRuntimeProjectionBoundary,
+  inspectMcpManagementBoundary,
   inspectMcpRuntimeBoundary,
   inspectWorkspaceAdministrationOwnership,
   inspectTrustAdministrationOwnership,
@@ -3919,6 +3920,73 @@ test("MCP runtime consumers use finite demand-owned ports behind one Host adapte
       (text) => `${text}\nconst mcpHub = { catalog() { return []; } };`,
     )).join("\n"),
     /regained catalog\/configuration ownership/,
+  );
+});
+
+test("MCP management consumes finite status, probe and discovery contracts behind one Host adapter", async () => {
+  const paths = [
+    "packages/cli/src/config-editor/mcp-management-contract.ts",
+    "packages/cli/src/runtime/mcp-management-adapter.ts",
+    "packages/cli/src/runtime/mcp-config.ts",
+    "packages/cli/src/runtime/mcp-runtime-adapter.ts",
+    "packages/cli/src/config-editor/mcp-setup.ts",
+    "packages/cli/src/config-editor/mcp-discovery.ts",
+    "packages/cli/src/config-editor/types.ts",
+    "packages/cli/src/config-editor/panels/mcp.ts",
+    "packages/cli/src/config-editor/sections/mcp.ts",
+    "packages/cli/src/runtime/config-command.ts",
+    "packages/cli/src/commands/config-commands.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectMcpManagementBoundary(records), []);
+  assert.match(
+    inspectMcpManagementBoundary(mutate(
+      "packages/cli/src/config-editor/mcp-management-contract.ts",
+      (text) => `${text}\nexport interface Leak { spec: McpServerSpec }`,
+    )).join("\n"),
+    /not finite or leaks infrastructure types/,
+  );
+  assert.match(
+    inspectMcpManagementBoundary(mutate(
+      "packages/cli/src/config-editor/panels/mcp.ts",
+      (text) => `${text}\nconst leaked = probeServer;`,
+    )).join("\n"),
+    /regained concrete MCP ownership/,
+  );
+  assert.match(
+    inspectMcpManagementBoundary(mutate(
+      "packages/cli/src/config-editor/mcp-setup.ts",
+      (text) => text.replace("probe.probe({", "probeServer(toServerSpec("),
+    )).join("\n"),
+    /regained concrete MCP ownership|bypasses its finite adapter/,
+  );
+  assert.match(
+    inspectMcpManagementBoundary(mutate(
+      "packages/cli/src/runtime/mcp-management-adapter.ts",
+      (text) => text.replace("{ ...draft.credentials }", "{}"),
+    )).join("\n"),
+    /does not own status decoding, spec conversion, probe and discovery/,
+  );
+  assert.match(
+    inspectMcpManagementBoundary(mutate(
+      "packages/cli/src/runtime/config-command.ts",
+      (text) => `${text}\nvoid hub.applyConfig([]);`,
+    )).join("\n"),
+    /hot-applies config/,
+  );
+  assert.match(
+    inspectMcpManagementBoundary(mutate(
+      "packages/cli/src/config-editor/sections/mcp.ts",
+      (text) => `import type { McpServerStatus } from "@zhixing/mcp";\n${text}`,
+    )).join("\n"),
+    /regained concrete MCP ownership|Concrete MCP imports escaped/,
   );
 });
 
