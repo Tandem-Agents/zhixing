@@ -22,6 +22,7 @@ import {
   CONVERSATION_USAGE_QUERY,
   ConversationApplicationError,
   ConversationDirectoryApplicationService,
+  ConversationTaskListToolApplicationService,
   createConversationIdentityLifecycleApplication,
   createConversationDirectoryProductApiContribution,
   mergeConversationDirectoryViews,
@@ -32,9 +33,47 @@ import {
   type ConversationAgentTurnAdmissionPort,
   type ConversationCompactPort,
   type ConversationTaskListPort,
+  type ConversationTaskListToolStagePort,
   type ConversationUsageProjectionPort,
   type ConversationSecurityProjectionPort,
 } from "./application.js";
+
+describe("Conversation task-list tool application", () => {
+  it("owns deterministic replacement identity and stages through one finite port", async () => {
+    const staged: Parameters<ConversationTaskListToolStagePort["stage"]>[0][] = [];
+    const application = new ConversationTaskListToolApplicationService({
+      stage: async (input) => staged.push(input),
+    });
+    const command = {
+      conversationId: "conversation-1",
+      toolCallId: "tool-call-1",
+      items: [
+        { content: "first", status: "pending" as const },
+        { id: "stable", content: "second", status: "in_progress" as const },
+      ],
+    };
+
+    const first = await application.replace(command);
+    const replay = await application.replace(command);
+
+    expect(first).toEqual(replay);
+    expect(first.operationId).toBe("task-list:tool-call-1");
+    expect(first.taskList.items[0]?.id).toMatch(/^task-/u);
+    expect(first.taskList.items[1]?.id).toBe("stable");
+    expect(Object.isFrozen(first.taskList.items)).toBe(true);
+    expect(staged[1]).toEqual(staged[0]);
+  });
+
+  it("rejects missing durable identity before staging", async () => {
+    const stage: ConversationTaskListToolStagePort["stage"] = vi.fn(async () => {});
+    const application = new ConversationTaskListToolApplicationService({ stage });
+    await expect(application.replace({
+      conversationId: "conversation-1",
+      items: [{ content: "blocked", status: "pending" }],
+    })).rejects.toMatchObject({ reason: "task-list-operation-required" });
+    expect(stage).not.toHaveBeenCalled();
+  });
+});
 
 describe("Conversation identity lifecycle application", () => {
   it("owns shell and scope-sensitive runtime storage initialization", async () => {

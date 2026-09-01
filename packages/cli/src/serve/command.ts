@@ -187,7 +187,10 @@ import { createConversationDirectory } from "./conversation-directory.js";
 import { createAnchorConversationClearCommitPort } from "./conversation-clear-binding.js";
 import { createAnchorConversationResumePort } from "./conversation-resume-binding.js";
 import { createAnchorConversationRunControlPort } from "./conversation-run-control-binding.js";
-import { createAnchorConversationTaskListPort } from "./conversation-task-list-application.js";
+import {
+  createAnchorConversationTaskListPort,
+  createAnchorConversationTaskListToolApplication,
+} from "./conversation-task-list-application.js";
 import { createAnchorConversationCompactPort } from "./conversation-compact-application.js";
 import { createAnchorConversationUsageProjectionPort } from "./conversation-usage-application.js";
 import { createAnchorConversationSecurityProjectionPort } from "./conversation-security-application.js";
@@ -197,6 +200,7 @@ import {
 import { createWorksceneDirectory } from "./workscene-directory.js";
 import {
   createAnchorWorksceneApplicationPorts,
+  createAnchorWorksceneAssignmentToolApplication,
   createAnchorWorksceneConversationStorageProjectionCleanup,
 } from "./workscene-application-adapter.js";
 import { createWorksceneStorageCleanup } from "./workscene-storage-cleanup.js";
@@ -476,6 +480,8 @@ async function runServerProcess(
     worksceneApplicationPorts.entry,
     worksceneApplicationPorts.runtime,
   );
+  const worksceneAssignmentTools =
+    createAnchorWorksceneAssignmentToolApplication();
   // Trust Administration owns management semantics; the adapter below only
   // maps its finite repository port to the existing storage mechanism.
   const trustAdministration = createTrustAdministrationApplication({
@@ -579,9 +585,11 @@ async function runServerProcess(
   const builtinExtraTools = createBuiltinExtraToolsAssembly(
     new RoutedConversationRepoTaskListStore(repoForConversationId),
     mcpHub,
+    createAnchorConversationTaskListToolApplication(),
   );
   const anchorRuntimeProjections = createAnchorRuntimeProjectionAssembly({
     workscenes: worksceneDirectory,
+    worksceneAssignmentTools,
     extraTools: builtinExtraTools,
     scheduler: getSchedulerFacade,
   });

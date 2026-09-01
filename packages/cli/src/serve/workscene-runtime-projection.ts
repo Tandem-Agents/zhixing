@@ -9,6 +9,7 @@ import {
   WorksceneApplicationError,
   type WorksceneConversationRuntimeProjection,
   type WorksceneConversationRuntimeQuery,
+  type WorksceneAssignmentToolApplication,
   type WorksceneWorkspaceReference,
 } from "@zhixing/core/workscene/application";
 import { mainProfile, powerProfile } from "@zhixing/orchestrator/profile";
@@ -23,6 +24,7 @@ import {
   type ConversationRuntimeProjection,
   type RuntimeToolProjection,
 } from "@zhixing/runtime-host/conversation-runtime-projection";
+import { selectJobRuntimeTools } from "./job-runtime-tool-selection.js";
 import {
   createWorkmodeEnterTool,
   createWorkmodeExitTool,
@@ -58,30 +60,35 @@ export interface AnchorRuntimeProjectionAssembly {
   };
 }
 
-function mainProductTools(workscenes: WorksceneToolDirectory): ToolDefinition[] {
+function mainProductTools(
+  application: WorksceneAssignmentToolApplication,
+  workscenes: WorksceneToolDirectory,
+): ToolDefinition[] {
   return [
-    createWorkmodeEnterTool(workscenes),
-    createWorksceneChangeApproveTool(workscenes),
-    createWorksceneListTool(workscenes),
+    createWorkmodeEnterTool(application),
+    createWorksceneChangeApproveTool(application, workscenes),
+    createWorksceneListTool(application, workscenes),
   ];
 }
 
 function sceneProductTools(
+  application: WorksceneAssignmentToolApplication,
   workscenes: WorksceneToolDirectory,
   scene: WorksceneRuntimeSceneIdentity,
 ): ToolDefinition[] {
   const identity = { sceneId: scene.sceneId, sceneName: scene.name };
   return [
     createWorkmodeExitTool(),
-    createWorksceneRenameCurrentTool(identity),
-    createWorksceneSetWorkdirCurrentTool(identity, workscenes),
-    createWorksceneClearWorkdirCurrentTool(identity),
+    createWorksceneRenameCurrentTool(identity, application),
+    createWorksceneSetWorkdirCurrentTool(identity, application, workscenes),
+    createWorksceneClearWorkdirCurrentTool(identity, application),
   ];
 }
 
 /** Anchor product composition; RuntimeHost only sees the frozen output. */
 export function createAnchorRuntimeProjectionAssembly(input: {
   readonly workscenes: WorksceneToolDirectory;
+  readonly worksceneAssignmentTools: WorksceneAssignmentToolApplication;
   readonly extraTools: BuiltinExtraToolsAssembly;
   readonly scheduler: () => SchedulerFacade;
 }): AnchorRuntimeProjectionAssembly {
@@ -103,7 +110,9 @@ export function createAnchorRuntimeProjectionAssembly(input: {
       ...(workspace === undefined ? {} : { workspace }),
       primaryRole: "main",
       profile: mainProfile({ hasWorkspace: workspace !== null }),
-      runtimeTools: runtimeTools(mainProductTools(input.workscenes)),
+      runtimeTools: runtimeTools(
+        mainProductTools(input.worksceneAssignmentTools, input.workscenes),
+      ),
     });
   const scene = (options: {
     readonly scene: WorksceneRuntimeSceneIdentity;
@@ -119,51 +128,22 @@ export function createAnchorRuntimeProjectionAssembly(input: {
       }),
       runtimeIdentity: createKernelRuntimeIdentityContribution(options.scene.sceneId),
       runtimeTools: runtimeTools(
-        sceneProductTools(input.workscenes, options.scene),
+        sceneProductTools(
+          input.worksceneAssignmentTools,
+          input.workscenes,
+          options.scene,
+        ),
       ),
     });
   const ephemeral = (): RuntimeToolProjection => runtimeTools();
   const job = (instruction: JobExecutionInstruction) => {
     const baseProfile = mainProfile();
     const availableTools = runtimeTools();
-    const requestedTools = instruction.tools
-      ? new Set(instruction.tools)
-      : undefined;
-    if (requestedTools) {
-      const available = new Set([
-        ...baseProfile.enabledTools,
-        ...availableTools.extraTools.map((tool) => tool.name),
-      ]);
-      const unknown = [...requestedTools].filter((tool) => !available.has(tool));
-      if (unknown.length > 0) {
-        throw new TypeError(
-          `Job requested unavailable tools: ${unknown.sort().join(", ")}`,
-        );
-      }
-    }
-    const profile = Object.freeze({
-      ...baseProfile,
-      constraints: Object.freeze([...baseProfile.constraints]),
-      enabledTools: Object.freeze(
-        requestedTools
-          ? baseProfile.enabledTools.filter((tool) => requestedTools.has(tool))
-          : [...baseProfile.enabledTools],
-      ),
-      ...(baseProfile.capabilities
-        ? { capabilities: Object.freeze({ ...baseProfile.capabilities }) }
-        : {}),
-    });
-    return Object.freeze({
-      profile,
-      ...(instruction.model ? { modelOverride: instruction.model } : {}),
-      runtimeTools: requestedTools
-        ? createRuntimeToolProjection({
-            extraTools: availableTools.extraTools.filter((tool) =>
-              requestedTools.has(tool.name),
-            ),
-            executionMcpServers: availableTools.executionMcpServers,
-          })
-        : availableTools,
+    return selectJobRuntimeTools({
+      instruction,
+      baseProfile,
+      extraTools: availableTools.extraTools,
+      executionMcpServers: availableTools.executionMcpServers,
     });
   };
 

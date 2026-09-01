@@ -114,6 +114,7 @@ import type {
   RuntimeKernelEnvironmentConfigurationProjection,
   RuntimeModelConfigurationProjection,
 } from "../runtime/runtime-configuration-projections.js";
+import { selectJobRuntimeTools } from "./job-runtime-tool-selection.js";
 
 export async function runExecutorRole(
   options: ServeOptions,
@@ -1037,44 +1038,28 @@ export class ExecutorRuntimeSubstrate {
     confirmationBroker: import("@zhixing/core").IConfirmationBroker,
   ): Promise<AgentRuntime> {
     const catalog = this.options.mcpHub.catalog();
-    let extraTools = mapMcpTools(this.options.mcpHub);
     const baseProfile = mainProfile();
-    const requested = instruction.tools
-      ? new Set(instruction.tools)
-      : undefined;
-    if (requested) {
-      const available = new Set([
-        ...baseProfile.enabledTools,
-        ...extraTools.map((tool) => tool.name),
-      ]);
-      const unknown = [...requested].filter((tool) => !available.has(tool));
-      if (unknown.length > 0) {
-        throw new TypeError(
-          `Job requested unavailable tools: ${unknown.sort().join(", ")}`,
-        );
-      }
-      extraTools = extraTools.filter((tool) => requested.has(tool.name));
-    }
+    const selection = selectJobRuntimeTools({
+      instruction,
+      baseProfile,
+      extraTools: mapMcpTools(this.options.mcpHub),
+      executionMcpServers: catalog.map(({ server }) => server.serverId).sort(),
+    });
     return createAgentRuntime({
       artifactStore: this.options.artifactStore(),
       deviceCapacity: this.options.deviceCapacity.scheduler,
       orchestrationCapacity: this.options.deviceCapacity.orchestration,
       modelProvider: this.#modelProvider.create({
         primaryRole: "main",
-        ...(instruction.model === undefined
+        ...(selection.modelOverride === undefined
           ? {}
-          : { mainModelOverride: instruction.model }),
+          : { mainModelOverride: selection.modelOverride }),
       }),
       runtimeEnvironment: this.#runtimeEnvironment.create({}),
       toolImplementation: this.options.toolImplementation,
-      profile: {
-        ...baseProfile,
-        enabledTools: requested
-          ? baseProfile.enabledTools.filter((tool) => requested.has(tool))
-          : baseProfile.enabledTools,
-      },
-      extraTools,
-      executionMcpServers: catalog.map(({ server }) => server.serverId).sort(),
+      profile: selection.profile,
+      extraTools: [...selection.runtimeTools.extraTools],
+      executionMcpServers: selection.runtimeTools.executionMcpServers,
       confirmationBroker,
       systemProtectedPaths: this.options.systemProtectedPaths,
       runtimeKind: "ephemeral",

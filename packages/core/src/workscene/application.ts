@@ -6,7 +6,10 @@ import {
   defineProductApiQuery,
   type ProductApiContribution,
 } from "../product-api/catalog.js";
-import type { WorksceneDto } from "../contracts/state.js";
+import type {
+  WorksceneDto,
+  WorksceneWriteMutation,
+} from "../contracts/state.js";
 import { parseConversationId } from "../conversation/scope-id.js";
 import { normalizeSceneName } from "./validation.js";
 
@@ -80,6 +83,199 @@ export interface WorksceneEntryPort {
  */
 export interface WorksceneRuntimeProjectionReadPort {
   get(sceneId: string): Promise<WorksceneDto | null>;
+}
+
+export interface WorksceneAssignmentMutationRecord {
+  readonly recordSeq: number;
+  readonly mutation: WorksceneWriteMutation;
+}
+
+/**
+ * Correctness port for Workscene tools running inside one durable assignment.
+ * It exposes only path-free Workscene reads and staged writes; the application
+ * owns overlay folding, revision selection, validation and operation identity.
+ */
+export interface WorksceneAssignmentToolPort {
+  get(sceneId: string): Promise<WorksceneDto | null>;
+  list(): Promise<readonly WorksceneDto[]>;
+  readOverlay(): Promise<readonly WorksceneAssignmentMutationRecord[]>;
+  stage(input: Readonly<{
+    operationId: string;
+    mutation: WorksceneWriteMutation;
+  }>): Promise<void>;
+}
+
+export interface WorksceneAssignmentToolApplication {
+  normalizeName(name: string): string;
+  get(sceneId: string): Promise<WorksceneDto | null>;
+  list(): Promise<readonly WorksceneDto[]>;
+  create(input: Readonly<{
+    name: string;
+    workspace?: WorksceneWorkspaceReference;
+    toolCallId?: string;
+  }>): Promise<Readonly<{ name: string }>>;
+  rename(input: Readonly<{
+    sceneId: string;
+    name: string;
+    toolCallId?: string;
+  }>): Promise<Readonly<{ previous: WorksceneDto; name: string }> | null>;
+  setWorkspace(input: Readonly<{
+    sceneId: string;
+    workspace: WorksceneWorkspaceReference | null;
+    toolCallId?: string;
+  }>): Promise<Readonly<{ previous: WorksceneDto }> | null>;
+  delete(input: Readonly<{
+    sceneId: string;
+    toolCallId?: string;
+  }>): Promise<Readonly<{ previous: WorksceneDto }> | null>;
+}
+
+/** Workscene-owned application behavior for the seven agent-facing tools. */
+export class WorksceneAssignmentToolApplicationService
+  implements WorksceneAssignmentToolApplication
+{
+  constructor(private readonly port: WorksceneAssignmentToolPort) {}
+
+  normalizeName(name: string): string {
+    return normalizeName(name);
+  }
+
+  async get(sceneId: string): Promise<WorksceneDto | null> {
+    const current = await this.port.get(sceneId);
+    return current
+      ? applyAssignmentOverlay(current, await this.port.readOverlay())
+      : null;
+  }
+
+  async list(): Promise<readonly WorksceneDto[]> {
+    const records = await this.port.readOverlay();
+    return Object.freeze(
+      (await this.port.list())
+        .map((scene) => applyAssignmentOverlay(scene, records))
+        .filter((scene): scene is WorksceneDto => scene !== null),
+    );
+  }
+
+  async create(input: Readonly<{
+    name: string;
+    workspace?: WorksceneWorkspaceReference;
+    toolCallId?: string;
+  }>): Promise<Readonly<{ name: string }>> {
+    const name = normalizeName(input.name);
+    await this.port.stage({
+      operationId: assignmentToolOperationId(input.toolCallId, "workscene-create"),
+      mutation: {
+        kind: "workscene-create",
+        name,
+        ...(input.workspace
+          ? { workspace: assertWorkspace(input.workspace) }
+          : {}),
+      },
+    });
+    return Object.freeze({ name });
+  }
+
+  async rename(input: Readonly<{
+    sceneId: string;
+    name: string;
+    toolCallId?: string;
+  }>): Promise<Readonly<{ previous: WorksceneDto; name: string }> | null> {
+    const name = normalizeName(input.name);
+    const previous = await this.get(input.sceneId);
+    if (!previous) return null;
+    await this.port.stage({
+      operationId: assignmentToolOperationId(input.toolCallId, "workscene-rename"),
+      mutation: {
+        kind: "workscene-rename",
+        sceneId: input.sceneId,
+        name,
+        expectedRevision: previous.revision,
+      },
+    });
+    return Object.freeze({ previous, name });
+  }
+
+  async setWorkspace(input: Readonly<{
+    sceneId: string;
+    workspace: WorksceneWorkspaceReference | null;
+    toolCallId?: string;
+  }>): Promise<Readonly<{ previous: WorksceneDto }> | null> {
+    const previous = await this.get(input.sceneId);
+    if (!previous) return null;
+    await this.port.stage({
+      operationId: assignmentToolOperationId(
+        input.toolCallId,
+        "workscene-set-workdir",
+      ),
+      mutation: {
+        kind: "workscene-set-workdir",
+        sceneId: input.sceneId,
+        workspace: input.workspace === null
+          ? null
+          : assertWorkspace(input.workspace),
+        expectedRevision: previous.revision,
+      },
+    });
+    return Object.freeze({ previous });
+  }
+
+  async delete(input: Readonly<{
+    sceneId: string;
+    toolCallId?: string;
+  }>): Promise<Readonly<{ previous: WorksceneDto }> | null> {
+    const previous = await this.get(input.sceneId);
+    if (!previous) return null;
+    await this.port.stage({
+      operationId: assignmentToolOperationId(input.toolCallId, "workscene-delete"),
+      mutation: {
+        kind: "workscene-delete",
+        sceneId: input.sceneId,
+        expectedRevision: previous.revision,
+      },
+    });
+    return Object.freeze({ previous });
+  }
+}
+
+function assignmentToolOperationId(
+  toolCallId: string | undefined,
+  action: WorksceneWriteMutation["kind"],
+): string {
+  if (!toolCallId?.trim()) {
+    throw invalid(`${action} 缺少耐久工具调用身份`);
+  }
+  return `workscene:${toolCallId}`;
+}
+
+function applyAssignmentOverlay(
+  scene: WorksceneDto,
+  records: readonly WorksceneAssignmentMutationRecord[],
+): WorksceneDto | null {
+  let current: WorksceneDto | null = { ...scene };
+  for (const record of [...records].sort(
+    (left, right) => left.recordSeq - right.recordSeq,
+  )) {
+    const mutation = record.mutation;
+    if (!current || mutation.kind === "workscene-create") continue;
+    if (mutation.sceneId !== current.id) continue;
+    if (mutation.expectedRevision !== current.revision) {
+      throw invalid(`工作场景 ${current.id} 的当前任务内版本链不连续`);
+    }
+    if (mutation.kind === "workscene-delete") {
+      current = null;
+      continue;
+    }
+    current = {
+      ...current,
+      revision: current.revision + 1,
+      ...(mutation.kind === "workscene-rename"
+        ? { name: mutation.name }
+        : mutation.workspace
+          ? { workspace: mutation.workspace }
+          : { workspace: undefined }),
+    };
+  }
+  return current;
 }
 
 /**

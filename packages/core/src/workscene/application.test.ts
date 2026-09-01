@@ -10,11 +10,96 @@ import {
   WORKSCENE_PRODUCT_API_EXACT_SET,
   WorksceneApplicationError,
   WorksceneApplicationService,
+  WorksceneAssignmentToolApplicationService,
+  type WorksceneAssignmentToolPort,
   type WorksceneEntryPort,
   type WorksceneManagementPort,
   type WorksceneRuntimeProjectionReadPort,
   type WorksceneWorkspaceAdministrationReadPort,
 } from "./application.js";
+
+describe("Workscene assignment tool application", () => {
+  it("owns overlay folding, revision selection and stable staged identity", async () => {
+    const staged: Parameters<WorksceneAssignmentToolPort["stage"]>[0][] = [];
+    const overlays = [
+      {
+        recordSeq: 2,
+        mutation: {
+          kind: "workscene-set-workdir" as const,
+          sceneId: "scene-a",
+          workspace: null,
+          expectedRevision: 2,
+        },
+      },
+      {
+        recordSeq: 1,
+        mutation: {
+          kind: "workscene-rename" as const,
+          sceneId: "scene-a",
+          name: "重命名",
+          expectedRevision: 1,
+        },
+      },
+    ];
+    const port: WorksceneAssignmentToolPort = {
+      get: async (sceneId) => sceneId === "scene-a"
+        ? scene("scene-a", {
+            name: "原名",
+            workspace: { deviceId: "device-a", bindingRef: "binding-a" },
+          })
+        : null,
+      list: async () => [scene("scene-a", { name: "原名" })],
+      readOverlay: async () => overlays,
+      stage: async (input) => staged.push(input),
+    };
+    const application = new WorksceneAssignmentToolApplicationService(port);
+
+    await expect(application.get("scene-a")).resolves.toMatchObject({
+      name: "重命名",
+      revision: 3,
+      workspace: undefined,
+    });
+    const renamed = await application.rename({
+      sceneId: "scene-a",
+      name: "  最终名称  ",
+      toolCallId: "rename-call",
+    });
+    expect(renamed).toMatchObject({ name: "最终名称" });
+    expect(staged).toEqual([
+      {
+        operationId: "workscene:rename-call",
+        mutation: {
+          kind: "workscene-rename",
+          sceneId: "scene-a",
+          name: "最终名称",
+          expectedRevision: 3,
+        },
+      },
+    ]);
+  });
+
+  it("fails closed on missing identity and a discontinuous overlay", async () => {
+    const stage = vi.fn(async () => {});
+    const application = new WorksceneAssignmentToolApplicationService({
+      get: async () => scene("scene-a"),
+      list: async () => [],
+      readOverlay: async () => [{
+        recordSeq: 1,
+        mutation: {
+          kind: "workscene-delete",
+          sceneId: "scene-a",
+          expectedRevision: 9,
+        },
+      }],
+      stage,
+    });
+    await expect(application.get("scene-a")).rejects.toThrow("版本链不连续");
+    await expect(application.create({ name: "new" })).rejects.toThrow(
+      "缺少耐久工具调用身份",
+    );
+    expect(stage).not.toHaveBeenCalled();
+  });
+});
 
 function scene(
   id: string,

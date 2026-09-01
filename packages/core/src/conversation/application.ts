@@ -7,7 +7,7 @@ import {
   defineProductApiQuery,
   type ProductApiContribution,
 } from "../product-api/catalog.js";
-import { isProtocolIdentifier } from "../protocol/index.js";
+import { isProtocolIdentifier, protocolDigest } from "../protocol/index.js";
 import type { RunRecordWithRef } from "../transcript/shard/reader.js";
 import {
   isNonEmptyUserTurnInput,
@@ -349,6 +349,86 @@ export interface ConversationTaskListPort {
         taskList: TaskListState;
       }>
   >;
+}
+
+/**
+ * Finite Correctness port for the agent-facing task_list replacement command.
+ * The adapter stages one Conversation mutation; it does not decide task
+ * identities, replacement semantics or the user-visible result.
+ */
+export interface ConversationTaskListToolStagePort {
+  stage(input: Readonly<{
+    conversationId: string;
+    operationId: string;
+    taskList: TaskListState;
+  }>): Promise<void>;
+}
+
+export interface ConversationTaskListToolItemDraft {
+  readonly id?: string;
+  readonly content: string;
+  readonly status: TaskItem["status"];
+}
+
+export interface ConversationTaskListToolApplication {
+  replace(input: Readonly<{
+    conversationId: string;
+    toolCallId?: string;
+    items: readonly ConversationTaskListToolItemDraft[];
+  }>): Promise<Readonly<{
+    taskList: TaskListState;
+    operationId: string;
+  }>>;
+}
+
+/** Conversation-owned product decision for the agent-facing task_list tool. */
+export class ConversationTaskListToolApplicationService
+  implements ConversationTaskListToolApplication
+{
+  constructor(private readonly stagePort: ConversationTaskListToolStagePort) {}
+
+  async replace(input: Readonly<{
+    conversationId: string;
+    toolCallId?: string;
+    items: readonly ConversationTaskListToolItemDraft[];
+  }>): Promise<Readonly<{
+    taskList: TaskListState;
+    operationId: string;
+  }>> {
+    if (typeof input.conversationId !== "string" || !input.conversationId) {
+      throw new ConversationApplicationError(
+        "invalid-input",
+        "Task list updates require a conversation identity",
+      );
+    }
+    if (typeof input.toolCallId !== "string" || !input.toolCallId.trim()) {
+      throw new ConversationApplicationError(
+        "invalid-input",
+        "Task list updates require a durable tool call identity.",
+        "task-list-operation-required",
+      );
+    }
+    const taskList = freezeTaskListState({
+      items: input.items.map((item, index) => ({
+        id: item.id && item.id.length > 0
+          ? item.id
+          : `task-${protocolDigest("TaskListItem", 1, {
+              operationId: input.toolCallId,
+              index,
+              content: item.content,
+            }).slice(0, 20)}`,
+        content: item.content,
+        status: item.status,
+      })),
+    });
+    const operationId = `task-list:${input.toolCallId}`;
+    await this.stagePort.stage({
+      conversationId: input.conversationId,
+      operationId,
+      taskList,
+    });
+    return Object.freeze({ taskList, operationId });
+  }
 }
 
 export interface ConversationCompactMechanismOutcome {
@@ -862,6 +942,7 @@ export class ConversationApplicationError extends Error {
       | "turn-lifecycle-busy"
       | "task-list-operation-required"
       | "task-list-operation-invalid"
+      | "task-list-assignment-required"
       | "task-list-conversation-not-found"
       | "task-list-busy"
       | "compact-conversation-not-found"

@@ -28,9 +28,11 @@ import { mapServerTools, type McpHub } from "@zhixing/mcp";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import {
   createScheduleTool,
+  createTaskListTool,
   TaskListService,
   type TaskListStore,
 } from "@zhixing/tools-builtin";
+import type { ConversationTaskListToolApplication } from "@zhixing/core/conversation/application";
 
 export const BUILTIN_EXTRA_TOOL_CAPABILITIES = [
   {
@@ -139,6 +141,7 @@ export interface BuiltinExtraToolsAssembly {
 export function createBuiltinExtraToolsAssembly(
   taskListStore: TaskListStore,
   mcpHub: McpHub,
+  taskListApplication: ConversationTaskListToolApplication,
 ): BuiltinExtraToolsAssembly {
   const taskListService = new TaskListService(taskListStore);
 
@@ -153,9 +156,9 @@ export function createBuiltinExtraToolsAssembly(
       // `runtime.run({ identity: { conversationId } })` 入口在 per-run 范围内注入。ephemeral
       // 路径（定时任务等 ephemeral）未注入时返回 undefined，工具 call 内部检测到
       // 直接 isError 拒绝（不污染任何 conversation 的 cache）。
-      const taskListTool = taskListService.createTool(
+      const taskListTool = createTaskListTool(
         () => runContextStorage.getStore()?.conversationId,
-        () => runContextStorage.getStore()?.assignmentMutations,
+        taskListApplication,
       );
 
       const tools: ToolDefinition[] = [scheduleTool, taskListTool];

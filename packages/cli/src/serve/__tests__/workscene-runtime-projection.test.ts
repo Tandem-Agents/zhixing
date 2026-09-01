@@ -39,6 +39,7 @@ function fixture() {
   } as never;
   return createAnchorRuntimeProjectionAssembly({
     workscenes,
+    worksceneAssignmentTools: {} as never,
     extraTools,
     scheduler: () => ({}) as never,
   });

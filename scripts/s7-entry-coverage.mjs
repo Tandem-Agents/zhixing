@@ -2629,6 +2629,31 @@ export function inspectKernelToolImplementationDependencyInversion(records) {
   const command = required("packages/cli/src/serve/command.ts");
   const executor = required("packages/cli/src/serve/executor-role-runtime.ts");
   const workspace = required("packages/cli/src/runtime/workspace-command.ts");
+  const conversationApplication = required(
+    "packages/core/src/conversation/application.ts",
+  );
+  const worksceneApplication = required(
+    "packages/core/src/workscene/application.ts",
+  );
+  const taskListBinding = required("packages/tools-builtin/src/task-list.ts");
+  const taskListAdapter = required(
+    "packages/cli/src/serve/conversation-task-list-application.ts",
+  );
+  const extraTools = required("packages/cli/src/serve/builtin-extra-tools.ts");
+  const worksceneTools = required("packages/cli/src/serve/workmode-tools.ts");
+  const worksceneAdapter = required(
+    "packages/cli/src/serve/workscene-application-adapter.ts",
+  );
+  const worksceneProjection = required(
+    "packages/cli/src/serve/workscene-runtime-projection.ts",
+  );
+  const jobToolSelection = required(
+    "packages/cli/src/serve/job-runtime-tool-selection.ts",
+  );
+  const taskTool = required("packages/orchestrator/src/tools/task.ts");
+  const taskListToolBinding = taskListBinding.slice(
+    taskListBinding.indexOf("export function createTaskListTool("),
+  );
 
   if (
     !contract.includes("export interface KernelToolImplementationPort") ||
@@ -2676,6 +2701,87 @@ export function inspectKernelToolImplementationDependencyInversion(records) {
   ) failures.push("Executor runtime issuance bypasses the explicit Tool binding");
   if (!workspace.includes("toolImplementation: createHostKernelToolImplementation(),")) {
     failures.push("Transient workspace runtime lacks the Host Tool binding");
+  }
+  if (
+    !conversationApplication.includes(
+      "export interface ConversationTaskListToolStagePort",
+    ) ||
+    !conversationApplication.includes(
+      "export class ConversationTaskListToolApplicationService",
+    ) ||
+    !conversationApplication.includes(
+      "const operationId = `task-list:${input.toolCallId}`",
+    ) ||
+    !taskListBinding.includes("export function createTaskListTool(") ||
+    !taskListToolBinding.includes("application.replace({") ||
+    /runContextStorage|AssignmentMutationPort|protocolDigest|randomUUID|TaskListService\.prototype\.createTool|this\.set\s*\(/u.test(
+      taskListToolBinding,
+    ) ||
+    !taskListAdapter.includes("createAnchorConversationTaskListToolApplication(") ||
+    !taskListAdapter.includes("assignment.stage({") ||
+    !extraTools.includes("createTaskListTool(") ||
+    !command.includes("createAnchorConversationTaskListToolApplication()")
+  ) {
+    failures.push(
+      "task_list does not have one Conversation-owned command and finite Correctness adapter",
+    );
+  }
+  if (
+    !worksceneApplication.includes("export interface WorksceneAssignmentToolPort") ||
+    !worksceneApplication.includes(
+      "export class WorksceneAssignmentToolApplicationService",
+    ) ||
+    !worksceneApplication.includes("applyAssignmentOverlay(") ||
+    !worksceneApplication.includes("expectedRevision: previous.revision") ||
+    !worksceneTools.includes(
+      'from "@zhixing/core/workscene/application"',
+    ) ||
+    /runContextStorage|AssignmentMutation|GlobalStagedMutation|assignmentMutations\.stage/u.test(
+      worksceneTools,
+    ) ||
+    !worksceneAdapter.includes("createAnchorWorksceneAssignmentToolApplication(") ||
+    !worksceneAdapter.includes("assignmentMutations.readOverlay()") ||
+    !worksceneAdapter.includes("assignmentMutations.stage({") ||
+    !worksceneProjection.includes("worksceneAssignmentTools:") ||
+    !command.includes("createAnchorWorksceneAssignmentToolApplication()")
+  ) {
+    failures.push(
+      "Workscene tools do not have one domain application and finite assignment adapter",
+    );
+  }
+  if (
+    !jobToolSelection.includes("export function selectJobRuntimeTools(") ||
+    !jobToolSelection.includes("new Set(input.instruction.tools)") ||
+    !jobToolSelection.includes("Job requested unavailable tools:") ||
+    !worksceneProjection.includes("selectJobRuntimeTools({") ||
+    !executor.includes("selectJobRuntimeTools({") ||
+    /new Set\(instruction\.tools\)|Job requested unavailable tools:/u.test(
+      worksceneProjection,
+    ) ||
+    /new Set\(instruction\.tools\)|Job requested unavailable tools:/u.test(executor)
+  ) {
+    failures.push("Anchor and Executor jobs do not share one requested-tool selector");
+  }
+  const jobPolicyOwners = records.filter((record) =>
+    record.text.includes("Job requested unavailable tools:")
+  );
+  if (
+    jobPolicyOwners.length !== 1 ||
+    jobPolicyOwners[0]?.relative !==
+      "packages/cli/src/serve/job-runtime-tool-selection.ts"
+  ) {
+    failures.push("job requested-tool policy has more than one production owner");
+  }
+  if (
+    !runtime.includes("const taskTool = createTaskTool({") ||
+    !runtime.includes("securityPipeline,") ||
+    !runtime.includes("parentBroker: confirmationBroker,") ||
+    !runtime.includes("parentTools: baseTools,") ||
+    !taskTool.includes("securityPipeline: env.securityPipeline,") ||
+    !taskTool.includes("parentBroker: env.parentBroker,") ||
+    !taskTool.includes("authorizeToolExecution: runCtx.authorizeToolExecution,")
+  ) {
+    failures.push("Task no longer reuses the parent controlled-effect chain");
   }
   for (const record of records) {
     if (
@@ -3405,7 +3511,7 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     !product.includes("profile: powerProfile(") ||
     !product.includes("const ephemeral = (): RuntimeToolProjection => runtimeTools();") ||
     !product.includes("const job = (instruction: JobExecutionInstruction) =>") ||
-    !product.includes("Job requested unavailable tools:") ||
+    !product.includes("selectJobRuntimeTools({") ||
     !product.includes("const mainProjection = main();") ||
     !product.includes("mcpServers: mainProjection.runtimeTools.executionMcpServers") ||
     !product.includes("addProjection(mainProjection);") ||
@@ -5661,10 +5767,12 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     /export interface AnchorWorksceneDirectory\s+extends/u.test(worksceneDirectory) ||
     /\b(?:list|create|rename|setWorkdir|remove)\s*\(/u.test(worksceneToolPort) ||
     worksceneTools.includes('Pick<WorksceneToolDirectory, "rename">') ||
-    !/createWorksceneRenameCurrentTool\(\s*scene:\s*WorksceneCurrentToolContext/u.test(
+    !/createWorksceneRenameCurrentTool\(\s*scene:\s*WorksceneCurrentToolContext,\s*application:/u.test(
       worksceneTools,
     ) ||
-    !worksceneRuntimeProjection.includes("createWorksceneRenameCurrentTool(identity)") ||
+    !worksceneRuntimeProjection.includes(
+      "createWorksceneRenameCurrentTool(identity, application)",
+    ) ||
     !worksceneRuntimeProjection.includes("type WorksceneConversationRuntimeProjection") ||
     worksceneRuntimeProjection.split("input.projectConversationRuntime(").length - 1 !== 2 ||
     worksceneRuntimeProjection.includes("getScene:") ||

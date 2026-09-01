@@ -1,15 +1,79 @@
 import type {
+  WorksceneAssignmentToolApplication,
+  WorksceneAssignmentToolPort,
   WorksceneConversationStorageProjectionCleanupPort,
   WorksceneEntryPort,
   WorksceneManagementPort,
   WorksceneRuntimeProjectionReadPort,
   WorksceneWorkspaceAdministrationReadPort,
 } from "@zhixing/core/workscene/application";
+import { WorksceneAssignmentToolApplicationService } from "@zhixing/core/workscene/application";
+import type { WorksceneWriteMutation } from "@zhixing/core/contracts";
 import { parseConversationId } from "@zhixing/core/conversation";
+import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import type { AnchorWorksceneDirectory } from "./workscene-directory.js";
 
 interface AnchorConversationStorageProjection {
   deleteStoredConversation(conversationId: string): Promise<boolean>;
+}
+
+/** Maps the active assignment mechanisms to the finite Workscene tool port. */
+export function createAnchorWorksceneAssignmentToolApplication(): WorksceneAssignmentToolApplication {
+  const port: WorksceneAssignmentToolPort = {
+    async get(sceneId) {
+      const run = requireWorksceneAssignment();
+      const result = await run.globalQuery.read({ kind: "workscene-get", sceneId });
+      if (result.kind !== "workscene-get") {
+        throw new Error("工作场景查询返回了错误的结果类型");
+      }
+      return result.scene;
+    },
+    async list() {
+      const run = requireWorksceneAssignment();
+      const result = await run.globalQuery.read({ kind: "workscene-list" });
+      if (result.kind !== "workscene-list") {
+        throw new Error("工作场景列表返回了错误的结果类型");
+      }
+      return result.scenes;
+    },
+    async readOverlay() {
+      return (await requireWorksceneAssignment().assignmentMutations.readOverlay())
+        .filter((record) =>
+          record.domain === "global" && isWorksceneMutation(record.mutation)
+        )
+        .map((record) => Object.freeze({
+          recordSeq: record.recordSeq,
+          mutation: record.mutation as WorksceneWriteMutation,
+        }));
+    },
+    async stage(input) {
+      await requireWorksceneAssignment().assignmentMutations.stage({
+        domain: "global",
+        mutation: input.mutation,
+        operationId: input.operationId,
+      });
+    },
+  };
+  return new WorksceneAssignmentToolApplicationService(Object.freeze(port));
+}
+
+function requireWorksceneAssignment() {
+  const run = runContextStorage.getStore();
+  if (!run?.assignmentMutations || !run.globalQuery) {
+    throw new Error("工作场景操作需要处于可耐久提交的当前任务中");
+  }
+  return {
+    assignmentMutations: run.assignmentMutations,
+    globalQuery: run.globalQuery,
+  };
+}
+
+function isWorksceneMutation(value: unknown): value is WorksceneWriteMutation {
+  if (!value || typeof value !== "object" || !("kind" in value)) return false;
+  return value.kind === "workscene-create" ||
+    value.kind === "workscene-rename" ||
+    value.kind === "workscene-set-workdir" ||
+    value.kind === "workscene-delete";
 }
 
 /** Anchor mechanism adapter for the single Workscene-owned cleanup demand. */

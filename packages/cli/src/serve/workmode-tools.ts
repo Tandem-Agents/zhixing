@@ -29,21 +29,16 @@ import {
   getEnabledWorksceneToolActions,
   getWorksceneToolBoundaries,
   getWorksceneToolPostTurnControlKind,
-  normalizeSceneName,
   worksceneToolRequiresExplicitConfirmation,
   type JsonSchema,
   type ToolDefinition,
   type WorksceneManagementToolName,
 } from "@zhixing/core";
-import type {
-  AssignmentMutationOverlayRecord,
-  GlobalStagedMutation,
-  WorksceneDto,
-} from "@zhixing/core/contracts";
+import type { WorksceneDto } from "@zhixing/core/contracts";
+import type { WorksceneAssignmentToolApplication } from "@zhixing/core/workscene/application";
 import {
   emitPostTurnControlIntent,
   hasPostTurnControlCapability,
-  runContextStorage,
 } from "@zhixing/orchestrator/runtime";
 import type { WorksceneToolDirectory } from "./workscene-port.js";
 export type { WorksceneToolDirectory } from "./workscene-port.js";
@@ -51,102 +46,6 @@ export type { WorksceneToolDirectory } from "./workscene-port.js";
 export interface WorksceneCurrentToolContext {
   readonly sceneId: string;
   readonly sceneName: string;
-}
-
-function activeAssignment() {
-  const run = runContextStorage.getStore();
-  if (!run?.assignmentMutations || !run.globalQuery) {
-    throw new Error("工作场景操作需要处于可耐久提交的当前任务中");
-  }
-  return {
-    mutations: run.assignmentMutations,
-    query: run.globalQuery,
-  };
-}
-
-function operationId(toolCallId: string | undefined, action: string): string {
-  if (!toolCallId?.trim()) {
-    throw new Error(`${action} 缺少耐久工具调用身份`);
-  }
-  return `workscene:${toolCallId}`;
-}
-
-async function worksceneOverlayRecords(): Promise<
-  readonly AssignmentMutationOverlayRecord[]
-> {
-  return (await activeAssignment().mutations.readOverlay())
-    .filter((record) => record.domain === "global")
-    .sort((left, right) => left.recordSeq - right.recordSeq);
-}
-
-function applyWorksceneOverlay(
-  scene: WorksceneDto,
-  records: readonly AssignmentMutationOverlayRecord[],
-): WorksceneDto | null {
-  let current: WorksceneDto | null = { ...scene };
-  for (const record of records) {
-    const mutation = record.mutation;
-    if (!current || !("kind" in mutation)) continue;
-    if (
-      mutation.kind !== "workscene-rename" &&
-      mutation.kind !== "workscene-set-workdir" &&
-      mutation.kind !== "workscene-delete"
-    ) {
-      continue;
-    }
-    if (mutation.sceneId !== current.id) continue;
-    if (mutation.expectedRevision !== current.revision) {
-      throw new Error(`工作场景 ${current.id} 的当前任务内版本链不连续`);
-    }
-    if (mutation.kind === "workscene-delete") {
-      current = null;
-      continue;
-    }
-    current = {
-      ...current,
-      revision: current.revision + 1,
-      ...(mutation.kind === "workscene-rename"
-        ? { name: mutation.name }
-        : mutation.workspace
-          ? { workspace: mutation.workspace }
-          : { workspace: undefined }),
-    };
-  }
-  return current;
-}
-
-async function readWorkscene(sceneId: string): Promise<WorksceneDto | null> {
-  const { query } = activeAssignment();
-  const result = await query.read({ kind: "workscene-get", sceneId });
-  if (result.kind !== "workscene-get") {
-    throw new Error("工作场景查询返回了错误的结果类型");
-  }
-  return result.scene
-    ? applyWorksceneOverlay(result.scene, await worksceneOverlayRecords())
-    : null;
-}
-
-async function readWorkscenes(): Promise<WorksceneDto[]> {
-  const { query } = activeAssignment();
-  const result = await query.read({ kind: "workscene-list" });
-  if (result.kind !== "workscene-list") {
-    throw new Error("工作场景列表返回了错误的结果类型");
-  }
-  const records = await worksceneOverlayRecords();
-  return result.scenes
-    .map((scene) => applyWorksceneOverlay(scene, records))
-    .filter((scene): scene is WorksceneDto => scene !== null);
-}
-
-async function stageWorkscene(
-  mutation: GlobalStagedMutation,
-  toolCallId: string | undefined,
-): Promise<void> {
-  await activeAssignment().mutations.stage({
-    domain: "global",
-    mutation,
-    operationId: operationId(toolCallId, mutation.kind),
-  });
 }
 
 function ok(content: string): Promise<{ content: string }> {
@@ -235,7 +134,7 @@ async function selectWorkspace(
  * run 的 bus——与 controller 解耦,宿主侧装配同样可用。
  */
 export function createWorkmodeEnterTool(
-  _workscenes: Pick<WorksceneToolDirectory, "get">,
+  application: Pick<WorksceneAssignmentToolApplication, "get">,
 ): ToolDefinition {
   const inputSchema: JsonSchema = {
     type: "object",
@@ -265,7 +164,7 @@ export function createWorkmodeEnterTool(
       if (!sceneId) return fail("workmode_enter 需要 sceneId");
       const unsupported = assertPostTurnControlSupported("workmode_enter");
       if (unsupported) return unsupported;
-      const scene = await readWorkscene(sceneId);
+      const scene = await application.get(sceneId);
       if (!scene) return fail(`工作场景 "${sceneId}" 不存在，未切换`);
       emitPostTurnControlIntent({ kind: "enter", sceneId });
       return ok(
@@ -314,6 +213,7 @@ export function createWorkmodeExitTool(): ToolDefinition {
  * workscene_change_approve（main-only，needsPermission）—— 用户拍板后改注册表。
  */
 export function createWorksceneChangeApproveTool(
+  application: WorksceneAssignmentToolApplication,
   workscenes: Pick<
     WorksceneToolDirectory,
     "selectWorkspace"
@@ -374,79 +274,55 @@ export function createWorksceneChangeApproveTool(
               ? await selectWorkspace(workscenes, input)
               : undefined;
             if (selected && "error" in selected) return fail(selected.error);
-            await stageWorkscene(
-              {
-                kind: "workscene-create",
-                name: normalizeSceneName(name),
-                ...(selected ? { workspace: selected.workspace } : {}),
-              },
-              context?.toolCallId,
-            );
+            await application.create({
+              name,
+              ...(selected ? { workspace: selected.workspace } : {}),
+              toolCallId: context?.toolCallId,
+            });
             return ok(`已记录创建工作场景「${name}」；本轮成功完成后生效。`);
           }
           case "remove": {
             if (!sceneId) return fail("remove 需要 sceneId");
             // 用户工作区不动——它是用户资产，删除只清理场景系统数据。
-            const scene = await readWorkscene(sceneId);
-            if (!scene) return fail(`工作场景 "${sceneId}" 不存在`);
-            await stageWorkscene(
-              {
-                kind: "workscene-delete",
-                sceneId,
-                expectedRevision: scene.revision,
-              },
-              context?.toolCallId,
-            );
-            return ok(`已记录删除工作场景「${scene.name}」；本轮成功完成后生效。`);
+            const deleted = await application.delete({
+              sceneId,
+              toolCallId: context?.toolCallId,
+            });
+            if (!deleted) return fail(`工作场景 "${sceneId}" 不存在`);
+            return ok(`已记录删除工作场景「${deleted.previous.name}」；本轮成功完成后生效。`);
           }
           case "rename": {
             if (!sceneId || !name)
               return fail("rename 需要 sceneId 与 name");
-            const scene = await readWorkscene(sceneId);
-            if (!scene) return fail(`工作场景 "${sceneId}" 不存在`);
-            const normalized = normalizeSceneName(name);
-            await stageWorkscene(
-              {
-                kind: "workscene-rename",
-                sceneId,
-                name: normalized,
-                expectedRevision: scene.revision,
-              },
-              context?.toolCallId,
-            );
-            return ok(`已记录将工作场景重命名为「${normalized}」；本轮成功完成后生效。`);
+            const renamed = await application.rename({
+              sceneId,
+              name,
+              toolCallId: context?.toolCallId,
+            });
+            if (!renamed) return fail(`工作场景 "${sceneId}" 不存在`);
+            return ok(`已记录将工作场景重命名为「${renamed.name}」；本轮成功完成后生效。`);
           }
           case "set_workdir": {
             if (!sceneId) return fail("set_workdir 需要 sceneId");
             const selected = await selectWorkspace(workscenes, input);
             if ("error" in selected) return fail(selected.error);
-            const scene = await readWorkscene(sceneId);
-            if (!scene) return fail(`工作场景 "${sceneId}" 不存在`);
-            await stageWorkscene(
-              {
-                kind: "workscene-set-workdir",
-                sceneId,
-                workspace: selected.workspace,
-                expectedRevision: scene.revision,
-              },
-              context?.toolCallId,
-            );
-            return ok(`已记录工作场景「${scene.name}」的工作区变更；本轮成功完成后生效。`);
+            const changed = await application.setWorkspace({
+              sceneId,
+              workspace: selected.workspace,
+              toolCallId: context?.toolCallId,
+            });
+            if (!changed) return fail(`工作场景 "${sceneId}" 不存在`);
+            return ok(`已记录工作场景「${changed.previous.name}」的工作区变更；本轮成功完成后生效。`);
           }
           case "clear_workdir": {
             if (!sceneId) return fail("clear_workdir 需要 sceneId");
-            const scene = await readWorkscene(sceneId);
-            if (!scene) return fail(`工作场景 "${sceneId}" 不存在`);
-            await stageWorkscene(
-              {
-                kind: "workscene-set-workdir",
-                sceneId,
-                workspace: null,
-                expectedRevision: scene.revision,
-              },
-              context?.toolCallId,
-            );
-            return ok(`已记录解除工作场景「${scene.name}」的工作区绑定；本轮成功完成后生效。`);
+            const changed = await application.setWorkspace({
+              sceneId,
+              workspace: null,
+              toolCallId: context?.toolCallId,
+            });
+            if (!changed) return fail(`工作场景 "${sceneId}" 不存在`);
+            return ok(`已记录解除工作场景「${changed.previous.name}」的工作区绑定；本轮成功完成后生效。`);
           }
           default:
             return fail(`未知 action: ${action}`);
@@ -464,6 +340,7 @@ export function createWorksceneChangeApproveTool(
  * workscene_list（main-only，只读）—— 查看场景管理元数据。
  */
 export function createWorksceneListTool(
+  application: Pick<WorksceneAssignmentToolApplication, "list">,
   workscenes: Pick<WorksceneToolDirectory, "workspaceCatalog">,
 ): ToolDefinition {
   const inputSchema: JsonSchema = {
@@ -480,7 +357,7 @@ export function createWorksceneListTool(
     needsPermission: false,
     boundaries: getWorksceneToolBoundaries("workscene_list"),
     async call() {
-      const scenes = await readWorkscenes();
+      const scenes = await application.list();
       if (scenes.length === 0) return ok("当前没有任何工作场景");
       const catalog = await workscenes.workspaceCatalog();
       return ok(
@@ -514,6 +391,10 @@ export function createWorksceneListTool(
  */
 export function createWorksceneRenameCurrentTool(
   scene: WorksceneCurrentToolContext,
+  application: Pick<
+    WorksceneAssignmentToolApplication,
+    "normalizeName" | "rename"
+  >,
 ): ToolDefinition {
   const inputSchema: JsonSchema = {
     type: "object",
@@ -541,21 +422,16 @@ export function createWorksceneRenameCurrentTool(
       const rawName = typeof input.name === "string" ? input.name : "";
       let name: string;
       try {
-        name = normalizeSceneName(rawName);
+        name = application.normalizeName(rawName);
       } catch (err) {
         return fail(err instanceof Error ? err.message : String(err));
       }
-      const current = await readWorkscene(scene.sceneId);
-      if (!current) return fail(`当前工作场景 "${scene.sceneId}" 不存在`);
-      await stageWorkscene(
-        {
-          kind: "workscene-rename",
-          sceneId: scene.sceneId,
-          name,
-          expectedRevision: current.revision,
-        },
-        context?.toolCallId,
-      );
+      const renamed = await application.rename({
+        sceneId: scene.sceneId,
+        name,
+        toolCallId: context?.toolCallId,
+      });
+      if (!renamed) return fail(`当前工作场景 "${scene.sceneId}" 不存在`);
       return ok(
         `已记录将当前工作场景重命名为「${name}」；本轮成功完成后生效。当前窗口名称保持不变。`,
       );
@@ -568,6 +444,7 @@ export function createWorksceneRenameCurrentTool(
  */
 export function createWorksceneSetWorkdirCurrentTool(
   scene: WorksceneCurrentToolContext,
+  application: Pick<WorksceneAssignmentToolApplication, "setWorkspace">,
   workscenes: Pick<WorksceneToolDirectory, "selectWorkspace">,
 ): ToolDefinition {
   const inputSchema: JsonSchema = {
@@ -599,17 +476,12 @@ export function createWorksceneSetWorkdirCurrentTool(
     async call(input, context) {
       const selected = await selectWorkspace(workscenes, input);
       if ("error" in selected) return fail(selected.error);
-      const current = await readWorkscene(scene.sceneId);
-      if (!current) return fail(`当前工作场景 "${scene.sceneId}" 不存在`);
-      await stageWorkscene(
-        {
-          kind: "workscene-set-workdir",
-          sceneId: scene.sceneId,
-          workspace: selected.workspace,
-          expectedRevision: current.revision,
-        },
-        context?.toolCallId,
-      );
+      const changed = await application.setWorkspace({
+        sceneId: scene.sceneId,
+        workspace: selected.workspace,
+        toolCallId: context?.toolCallId,
+      });
+      if (!changed) return fail(`当前工作场景 "${scene.sceneId}" 不存在`);
       return ok("已记录当前工作场景的工作区变更；本轮成功完成后生效。");
     },
   };
@@ -620,6 +492,7 @@ export function createWorksceneSetWorkdirCurrentTool(
  */
 export function createWorksceneClearWorkdirCurrentTool(
   scene: WorksceneCurrentToolContext,
+  application: Pick<WorksceneAssignmentToolApplication, "setWorkspace">,
 ): ToolDefinition {
   const inputSchema: JsonSchema = {
     type: "object",
@@ -638,17 +511,12 @@ export function createWorksceneClearWorkdirCurrentTool(
     boundaries: getWorksceneToolBoundaries("workscene_clear_workdir_current"),
     confirmationDisplayContext: currentDisplayContext(scene),
     async call(_input, context) {
-      const current = await readWorkscene(scene.sceneId);
-      if (!current) return fail(`当前工作场景 "${scene.sceneId}" 不存在`);
-      await stageWorkscene(
-        {
-          kind: "workscene-set-workdir",
-          sceneId: scene.sceneId,
-          workspace: null,
-          expectedRevision: current.revision,
-        },
-        context?.toolCallId,
-      );
+      const changed = await application.setWorkspace({
+        sceneId: scene.sceneId,
+        workspace: null,
+        toolCallId: context?.toolCallId,
+      });
+      if (!changed) return fail(`当前工作场景 "${scene.sceneId}" 不存在`);
       return ok("已记录解除当前工作场景的工作区绑定；本轮成功完成后生效。");
     },
   };

@@ -12,9 +12,8 @@
  *
  * 三层分离（顶级架构）：
  *   - Layer 1 持久化（可插拔）：`TaskListStore` 接口
- *   - Layer 2 业务服务：`TaskListService` 提供 per-conversation cache + 原子 set +
- *     工具工厂
- *   - Layer 3 LLM 接口：`service.createTool(getConversationId)` 返回 ToolDefinition
+ *   - Layer 2 存储投影：`TaskListService` 提供 per-conversation cache + 原子 set
+ *   - Layer 3 LLM binding：`createTaskListTool` 只调用 Conversation 应用合同
  *
  * 核心契约：
  *   - **per-conversation 隔离**：state 按 conversationId key in cache，多 conversation
@@ -26,15 +25,17 @@
  *     不可用）
  */
 
-import { randomUUID } from "node:crypto";
 import type {
   TaskItem,
   TaskListState,
   ToolDefinition,
   ToolResult,
 } from "@zhixing/core";
-import type { AssignmentMutationPort } from "@zhixing/core/contracts";
-import { protocolDigest } from "@zhixing/core/protocol";
+import {
+  ConversationApplicationError,
+  type ConversationTaskListToolApplication,
+  type ConversationTaskListToolItemDraft,
+} from "@zhixing/core/conversation/application";
 
 // ─── Layer 1: 持久化抽象 ───
 
@@ -225,88 +226,12 @@ export class TaskListService {
     }
   }
 
-  // ─── 工具工厂 ───
-
-  /**
-   * 创建 LLM 视角的 task_list 工具实例。
-   *
-   * `getConversationId` 是依赖反转的注入点 —— 装配方决定如何取（cli 装配走
-   * `runContextStorage.getStore()?.conversationId` 拿 per-run ALS）。
-   * 返回 undefined 时工具 call 直接 isError 不改 state（ephemeral / scheduled
-   * 路径无 conversation 绑定）。
-   *
-   * 每次调用返回一个新 ToolDefinition 实例（不共享对象引用），但都闭包引用同一
-   * service —— runtime swap 后调用方拿新 ToolDefinition，行为一致。
-   */
-  createTool(
-    getConversationId: () => string | undefined,
-    getAssignmentMutations?: () => AssignmentMutationPort | undefined,
-  ): ToolDefinition {
-    if (getAssignmentMutations) {
-      return createTaskListToolDefinition(
-        getConversationId,
-        async (_conversationId, items, toolCallId) => {
-          if (!toolCallId) {
-            return {
-              content: "Task list updates require a durable tool call identity.",
-              isError: true,
-            };
-          }
-          const assignmentMutations = getAssignmentMutations();
-          if (!assignmentMutations) {
-            return {
-              content: "Task list updates require an active durable turn.",
-              isError: true,
-            };
-          }
-          try {
-            await assignmentMutations.stage({
-              domain: "session",
-              mutation: {
-                kind: "task-list-op",
-                op: { op: "set", state: { items } },
-              },
-              operationId: `task-list:${toolCallId}`,
-            });
-            return {
-              content: `${renderSummary({ items })}\nThis update will take effect when the current turn completes successfully.`,
-            };
-          } catch (err) {
-            return {
-              content: `Failed to prepare task list update: ${err instanceof Error ? err.message : String(err)}.`,
-              isError: true,
-            };
-          }
-        },
-      );
-    }
-
-    return createTaskListToolDefinition(
-      getConversationId,
-      async (conversationId, items) => {
-        try {
-          const updated = await this.set(conversationId, items);
-          return { content: renderSummary(updated) };
-        } catch (err) {
-          return {
-            content:
-              `Failed to persist task list: ${err instanceof Error ? err.message : String(err)}. ` +
-              `Previous state preserved.`,
-            isError: true,
-          };
-        }
-      },
-    );
-  }
 }
 
-function createTaskListToolDefinition(
+/** Agent binding: schema/presentation only; Conversation owns the command. */
+export function createTaskListTool(
   getConversationId: () => string | undefined,
-  apply: (
-    conversationId: string,
-    items: TaskItem[],
-    toolCallId: string | undefined,
-  ) => Promise<ToolResult>,
+  application: ConversationTaskListToolApplication,
 ): ToolDefinition {
   return {
       name: "task_list",
@@ -364,12 +289,33 @@ function createTaskListToolDefinition(
         }
 
         // ─── Step 2: 输入校验 + normalize ───
-        const validated = validateAndNormalize(input, ctx.toolCallId);
+        const validated = validateAndNormalize(input);
         if (!validated.ok) {
           return { content: validated.error, isError: true };
         }
 
-        return apply(conversationId, validated.items, ctx.toolCallId);
+        try {
+          const result = await application.replace({
+            conversationId,
+            toolCallId: ctx.toolCallId,
+            items: validated.items,
+          });
+          return {
+            content: `${renderSummary(result.taskList)}\nThis update will take effect when the current turn completes successfully.`,
+          };
+        } catch (err) {
+          if (
+            err instanceof ConversationApplicationError &&
+            (err.reason === "task-list-operation-required" ||
+              err.reason === "task-list-assignment-required")
+          ) {
+            return { content: err.message, isError: true };
+          }
+          return {
+            content: `Failed to prepare task list update: ${err instanceof Error ? err.message : String(err)}.`,
+            isError: true,
+          };
+        }
       },
     };
 }
@@ -406,19 +352,18 @@ const VALID_STATUSES: ReadonlySet<TaskItem["status"]> = new Set([
 ]);
 
 type ValidationResult =
-  | { ok: true; items: TaskItem[] }
+  | { ok: true; items: ConversationTaskListToolItemDraft[] }
   | { ok: false; error: string };
 
 function validateAndNormalize(
   input: Record<string, unknown>,
-  operationId?: string,
 ): ValidationResult {
   const rawItems = input.items;
   if (!Array.isArray(rawItems)) {
     return { ok: false, error: "Invalid input: 'items' must be an array." };
   }
 
-  const normalized: TaskItem[] = [];
+  const normalized: ConversationTaskListToolItemDraft[] = [];
   for (let i = 0; i < rawItems.length; i++) {
     const raw = rawItems[i] as TaskItemInput | undefined;
     if (!raw || typeof raw !== "object") {
@@ -440,16 +385,9 @@ function validateAndNormalize(
       };
     }
     normalized.push({
-      id:
-        typeof raw.id === "string" && raw.id !== ""
-          ? raw.id
-          : operationId
-            ? `task-${protocolDigest("TaskListItem", 1, {
-                operationId,
-                index: i,
-                content: raw.content,
-              }).slice(0, 20)}`
-            : randomUUID(),
+      ...(typeof raw.id === "string" && raw.id !== ""
+        ? { id: raw.id }
+        : {}),
       content: raw.content,
       status: raw.status,
     });

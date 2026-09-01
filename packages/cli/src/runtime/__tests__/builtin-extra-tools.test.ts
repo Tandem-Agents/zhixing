@@ -17,12 +17,24 @@ import type {
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import { createMcpHub, type McpHub } from "@zhixing/mcp";
 import { createBuiltinExtraToolsAssembly } from "../../serve/builtin-extra-tools.js";
+import { createAnchorConversationTaskListToolApplication } from "../../serve/conversation-task-list-application.js";
 import { InMemoryTaskListStore } from "../task-list-stores.js";
 
 // ─── 测试 fixture ───
 
 function fakeScheduler(): SchedulerFacade {
   return {} as SchedulerFacade;
+}
+
+function createAssembly(
+  store = new InMemoryTaskListStore(),
+  hub = createMcpHub([]),
+) {
+  return createBuiltinExtraToolsAssembly(
+    store,
+    hub,
+    createAnchorConversationTaskListToolApplication(),
+  );
 }
 
 function assignmentMutationFixture(assignmentId: string) {
@@ -48,7 +60,7 @@ function assignmentMutationFixture(assignmentId: string) {
 
 describe("createBuiltinExtraToolsAssembly", () => {
   it("返回的 tools 数组包含 schedule + task_list", () => {
-    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore(), createMcpHub([]));
+    const assembly = createAssembly();
     const tools = assembly.assembleTools({
       scheduler: () => fakeScheduler(),
     });
@@ -69,17 +81,14 @@ describe("createBuiltinExtraToolsAssembly", () => {
       callTool: async () => ({ content: "" }),
       dispose: async () => {},
     };
-    const assembly = createBuiltinExtraToolsAssembly(
-      new InMemoryTaskListStore(),
-      fakeHub,
-    );
+    const assembly = createAssembly(new InMemoryTaskListStore(), fakeHub);
 
     const tools = assembly.assembleTools({ scheduler: () => fakeScheduler() });
     expect(tools.map((t) => t.name)).toContain("mcp__demo__echo");
   });
 
   it("assembleTools 多次调用返回**新的** ToolDefinition 实例（runtime swap 友好）", () => {
-    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore(), createMcpHub([]));
+    const assembly = createAssembly();
 
     const tools1 = assembly.assembleTools({ scheduler: () => fakeScheduler() });
     const tools2 = assembly.assembleTools({ scheduler: () => fakeScheduler() });
@@ -90,7 +99,7 @@ describe("createBuiltinExtraToolsAssembly", () => {
   });
 
   it("多次 assembleTools 共享服务但只向当前 assignment 暂存任务变更", async () => {
-    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore(), createMcpHub([]));
+    const assembly = createAssembly();
 
     const assignment = assignmentMutationFixture("assignment-1");
 
@@ -148,7 +157,7 @@ describe("createBuiltinExtraToolsAssembly", () => {
   });
 
   it("task_list 工具走 ALS 并隔离不同 assignment 的暂存记录", async () => {
-    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore(), createMcpHub([]));
+    const assembly = createAssembly();
     const tools = assembly.assembleTools({ scheduler: () => fakeScheduler() });
     const taskListTool = tools.find((t) => t.name === "task_list")!;
     const assignmentA = assignmentMutationFixture("assignment-A");
@@ -201,7 +210,7 @@ describe("createBuiltinExtraToolsAssembly", () => {
   });
 
   it("无 ALS 上下文（ephemeral 路径）→ task_list 调用 isError 拒绝", async () => {
-    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore(), createMcpHub([]));
+    const assembly = createAssembly();
     const tools = assembly.assembleTools({ scheduler: () => fakeScheduler() });
     const taskListTool = tools.find((t) => t.name === "task_list")!;
 
@@ -216,8 +225,36 @@ describe("createBuiltinExtraToolsAssembly", () => {
     expect(assembly.taskListService.getAllTasks("anything")).toEqual([]);
   });
 
+  it("有 conversation 但无 durable assignment 时保持 fail-closed 且零副作用", async () => {
+    const assembly = createAssembly();
+    const taskListTool = assembly
+      .assembleTools({ scheduler: () => fakeScheduler() })
+      .find((tool) => tool.name === "task_list")!;
+
+    const result = await runContextStorage.run(
+      {
+        bus: {} as never,
+        lineage: "main",
+        conversationId: "conversation-without-assignment",
+      },
+      () =>
+        taskListTool.call(
+          { items: [{ content: "must not persist", status: "pending" }] },
+          { workingDirectory: "/tmp", toolCallId: "call-without-assignment" },
+        ),
+    );
+
+    expect(result).toEqual({
+      content: "Task list updates require an active durable turn.",
+      isError: true,
+    });
+    expect(
+      assembly.taskListService.getAllTasks("conversation-without-assignment"),
+    ).toEqual([]);
+  });
+
   it("scheduler getter 在工具 call 时 lazy 解析（装配期 scheduler 可未就绪）", () => {
-    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore(), createMcpHub([]));
+    const assembly = createAssembly();
     let scheduler: Scheduler | null = null;
     const getter = vi.fn(() => {
       if (!scheduler) throw new Error("not ready");

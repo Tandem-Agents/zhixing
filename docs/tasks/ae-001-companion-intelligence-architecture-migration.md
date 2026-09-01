@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-03a 已通过协调者独立验收，等待提交后进入 Tool 家族有限审计<br>
+> 当前检查点：A6-03b 已通过协调者独立验收，等待提交后进入 MCP 实现边界<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `e6532a9b`；A6-02c 与 Advancement Rubric cancellation 结构证据均已由协调者独立复核并提交，配置边缘和 A5 既有门禁当前有效 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-03a Intelligence Kernel 内置工具实现依赖反转已通过协调者独立复核，等待提交 |
-| 活跃工作包 | 无；`A6-03a-kernel-builtin-tool-implementation-port-v1` 已闭合，提交后派发 Tool 家族有限零残留审计 |
-| 下一责任链 | A6-03a 独立验收后有限审计 Tool 家族其余生产构造：product/extra/Task 工具、远端 assignment 与权限/效果链是否已经各守窄端口；只在真实缺口上继续拆包，MCP 独立后置 |
+| 已接受基线 | `93f4ef19`；A6-03a 已由协调者独立复核并提交，Kernel 只声明有限 Tool 需求，CLI Host 唯一选择具体 builtin 实现与权限贡献，全部生产 Runtime 根显式注入 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-03b Tool 家族生产闭包已通过协调者独立复核，等待提交 |
+| 活跃工作包 | 无；`A6-03b-tool-family-production-closure-v1` 已闭合，提交后进入 MCP 实现边界 |
+| 下一责任链 | A6-03b 闭合后独立迁移 MCP 实现边界；不得提前扩入 Channel、Storage、Executor/Mesh 或设备拓扑 |
 | 打开的单向桥 | 无；全部 Kernel Runtime 生产根均已显式消费同一有限端口，不存在默认 concrete fallback、双实现表或只为测试存在的桥 |
-| 已失效证据 | 无当前未恢复证据；本包已恢复 Orchestrator/CLI Runtime 工具装配、Profile exact-set、权限内置规则、Kernel conformance、package dependency/export 与结构门禁证据。若 Tool request/assembly exact-set、Host binding、Profile 工具需求、权限贡献、任一持久/瞬态 Runtime 根、Orchestrator manifest/export 或对应 S7/直接测试变化，精确恢复本证据；A5 产品工具语义与 A6 Provider/Configuration/Secret 证据不因本次实现边界反转自动失效 |
+| 已失效证据 | 无当前未恢复证据；A6-03b 相交的 A4 Kernel、A5 Conversation/Workscene/Schedule 与 A6-03a Tool 证据已由直接测试、结构门禁和构建恢复；Provider、配置、秘密、MCP 及其他不相交证据未失效 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2536,6 +2536,16 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 独立复核纠正：协调者确认生产依赖反转成立，但 `orchestrator/src/tools/index.ts` 仍以旧箭头说明 Orchestrator 直接依赖 tools-builtin，`core/src/skills/builtin.ts` 也仍把 Skill 工具需求的实现装配归因于具体 factory table。本轮只把两处说明改为当前单一边界：Orchestrator tools 子树拥有依赖内部模块的派生工具，Skill/Profile 只声明工具名需求，具体 builtin 实现由 Host Tool implementation binding 选择并经 Kernel 端口注入；未修改生产逻辑、合同、测试行为或 Tool 家族其余责任。最窄静态残留扫描、两文件 changed-source Biome 与 `git diff --check` 通过，A6-03a 其余生产与验证证据未失效。
 - 协调者独立验收：从生产根、反向消费者、manifest/lock、runtime-only export 与 concrete exact-set 重新核对后，确认 Host 唯一选择、全部 Runtime 根显式注入、Orchestrator 具体依赖归零且无行为改写。独立运行 Orchestrator 5 文件 151/151、CLI 4 文件 39/39、canonical S7 39/39 与 registry golden、`pnpm runtime:package-exports`，并按上游顺序重新构建 Orchestrator、RuntimeHost、CLI，全部通过；`git diff --check` 通过。
 - 失效与交接：若 Tool port/request/assembly/permission exact-set、冻结或校验规则、Profile enabled tool 语义、CLI builtin factory/rule binding、ApplicationHost 单次 owner、RuntimeHost/Executor/workspace 任一生产注入、Task/extra/Skill/proxy/security 交界、Orchestrator manifest/export、S7/package-export 或上述直接测试任一变化，只恢复本证据及真实相交证据。A6 继续 `[ ]`；提交后只有限审计 Tool 家族其余构造是否已经各守窄端口，不提前进入 MCP、Channel、Storage、Executor/Mesh 或设备拓扑。
+
+### A6-03b：Tool 家族生产构造与受控效果链闭包
+
+- 基线与 exact-set：以已接受 `HEAD 93f4ef19df7898d0c208500b59eb0e8ccbe9a1de` 加协调者调度记录为基线，形成待复核证据 `A6-03b-tool-family-production-closure-v1`。正向从 Anchor conversation/Workscene/scheduled ephemeral/durable job、Executor conversation/job 和 transient workspace runtime 发放追到 Kernel Tool issuance，反向从全部生产 `ToolDefinition` 构造、Profile、requested-tools、permission contribution、confirmation broker、resource reservation、durable authorizer 与 effect observer 对账：本包成员为十项 Host builtin（read/write/edit/glob/grep/bash/load_skill/save_skill/admit_skill/web_fetch）、Schedule、task_list、Task 与七项 Workscene 工具；MCP 工具只确认是独立相邻闭包，未在本包解释或迁移。内部 Advancement judge `ToolDefinition` 与 Workscene assist `ToolLoopTool` 不进入 AgentRuntime issued-tool exact-set，未按名称误升为第二生产工具 owner。
+- 真实缺口与迁移：审计确认 base builtin 继续由 A6-03a 唯一 Host implementation binding 选择，Schedule 已只调用 Schedule 应用端口，Task 继续复用父 `SecurityPipeline`、permission/trust、confirmation broker、durable authorizer、resource child lease 与受控效果链；不存在需要改写的第二 Task 或安全链。只修复三处真实编排渗漏：① `task_list` 的 replacement、稳定 item/operation identity 与 staged mutation 归入 Conversation 应用服务，tools-builtin 只保留 schema/校验/文案，Anchor Correctness adapter 只映射当前 durable assignment；旧 direct stage 与直接持久 fallback 从工具 binding 归零。② 七项 Workscene 工具的 normalize、authority/overlay read-own-writes、revision chain、operation identity 与 staged mutation 归入 Workscene 应用服务；CLI binding 只保留产品呈现、post-turn control 与 workspace 选择，通用 ALS/query/stage 仅存在于有限 adapter。③ Anchor 与 Executor durable job 的 requested-tools unknown 拒绝、profile/extra/MCP allowlist 和 model override 合并为唯一 Host-edge `selectJobRuntimeTools`；两拓扑不再复制同一产品选择规则。
+- 行为、拓扑与失败边界：task_list 仍只允许有 conversation 且有 durable assignment 的 run，ephemeral 与缺 assignment 均 fail closed；成功仍仅暂存、待本轮成功提交后生效，stage 失败零 cache/Store fallback。Workscene 的 main/work、七工具 exact-set、confirmation/boundary、中文结果、authority 顺序、同 assignment overlay、expected revision 和 post-turn control 保持不变；缺 assignment/identity、版本不连续与 stage 失败继续拒绝。Anchor/Executor 对相同 job instruction 使用同一选择器，unknown tool、exact allowlist、MCP server 投影与模型覆盖等价。所有最终 issued tools 仍只经同一 Kernel `SecurityPipeline → confirmation → capacity/resource → durable authorization → concrete effect → observer` 链执行；Task 子运行沿父链派生而不创建第二 permission/security/confirmation owner。未修改 MCP、Channel、Storage、Executor/Mesh 物理效果、设备拓扑、公开协议或领域事实。
+- 旧路与结构证据：生产源码中的 `TaskListService.createTool`/通用 Assignment port/direct persist、Workscene tool-side `runContextStorage`/generic mutation/overlay reducer，以及 Anchor/Executor 两份 job selector 均归零；没有兼容壳、双写或第二应用入口。S7 现冻结 Conversation/Workscene 有限应用与 adapter、工具 binding 禁止 generic staged mutation、job selector 唯一 owner、Task 父级受控效果复用及两个拓扑消费，并以反向 mutation 识别 direct stage/ALS 回流、第二 job policy 与独立 Task security chain；A4 Workscene capability 旧 mutation 同步改绑当前双参数生产构造，不再由陈旧 fixture 给出假绿。
+- 直接证据：Core Conversation/Workscene 应用 2 文件 46/46；tools-builtin task-list 1 文件 33/33；CLI Workscene/extra/Anchor job/Executor job 4 文件 30/30，其中新增“有 conversation 但无 durable assignment”零副作用反例。CLI `tsc --noEmit`、canonical S7 39/39 与 registry golden、`pnpm runtime:package-exports`、全 workspace `pnpm build`、changed-source Biome 与 `git diff --check` 通过；全构建仅输出既有 Core Rollup circular-chunk warnings，没有失败。首次 S7 因新增断言未进入旧最小 fixture、第二次因 task-list 禁令错误覆盖同文件 storage service 而失败；分别补齐真实 fixture/反向 mutation并把禁令收窄到 binding 后，最终完整门禁通过，未放宽生产约束。
+- 协调者独立验收：重新沿领域应用、有限 Correctness adapter、Agent binding、Anchor/Executor Runtime 发放及单一 Kernel 安全/效果链核对，确认三个缺口真实且迁移后无第二写入、第二工具选择或行为回退。独立运行 Core 2 文件 46/46、tools-builtin 1 文件 33/33、CLI 4 文件 30/30、canonical S7 39/39 与 registry golden、`pnpm runtime:package-exports`、CLI typecheck，并按依赖顺序重建 Core、tools-builtin 与 CLI，全部通过；Core 仅输出已登记的既有 circular-chunk warnings，`git diff --check` 通过。
+- 失效与交接：若 Conversation task-list 应用/adapter、Workscene assignment 应用/adapter、Schedule/Task 构造、parent security/confirmation/resource/effect 继承、Host builtin binding、Anchor/Executor job requested-tools selector、Kernel issuance、安全链、S7/package exports 或上述直接测试变化，只恢复本证据和真实相交的 A4/A5/A6-03a 证据。当前无打开桥和未恢复证据，A6 继续 `[ ]`；提交后进入独立 MCP 实现边界，不提前扩入 Channel、Storage、Executor/Mesh 或设备拓扑。
 
 ## 十、用户提示词
 

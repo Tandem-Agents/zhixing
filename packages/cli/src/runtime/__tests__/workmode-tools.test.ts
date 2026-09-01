@@ -24,9 +24,11 @@ import {
   createWorksceneSetWorkdirCurrentTool,
   type WorksceneToolDirectory,
 } from "../../serve/workmode-tools.js";
+import { createAnchorWorksceneAssignmentToolApplication } from "../../serve/workscene-application-adapter.js";
 
 const NOW = "2026-08-04T00:00:00.000Z";
 const CTX = { toolCallId: "tool-call-1" } as never;
+const application = createAnchorWorksceneAssignmentToolApplication();
 
 function scene(
   id: string,
@@ -143,7 +145,7 @@ async function callInRun<T>(
 
 describe("workmode enter/exit", () => {
   it("enter 只读权威场景并 emit，缺少 consumer 时在查询前拒绝", async () => {
-    const tool = createWorkmodeEnterTool(makeDirectory());
+    const tool = createWorkmodeEnterTool(application);
     const admitted = await callInRun(
       () => tool.call({ sceneId: "scene-1" }, CTX),
       { scenes: [scene("scene-1", "场景一")] },
@@ -164,7 +166,7 @@ describe("workmode enter/exit", () => {
 
   it("不存在场景不 emit；exit 仍是合法的 turn-boundary 控制", async () => {
     const missing = await callInRun(() =>
-      createWorkmodeEnterTool(makeDirectory()).call({ sceneId: "missing" }, CTX),
+      createWorkmodeEnterTool(application).call({ sceneId: "missing" }, CTX),
     );
     expect(missing.result.isError).toBe(true);
     expect(missing.emitted).toEqual([]);
@@ -188,7 +190,7 @@ describe("workscene staged management", () => {
     const staged: AssignmentMutationOverlayRecord[] = [];
     const renamed = await callInRun(
       () =>
-        createWorksceneRenameCurrentTool(current).call(
+        createWorksceneRenameCurrentTool(current, application).call(
           { name: "新场景名" },
           { toolCallId: "rename-call" } as never,
         ),
@@ -198,7 +200,7 @@ describe("workscene staged management", () => {
 
     const set = await callInRun(
       () =>
-        createWorksceneSetWorkdirCurrentTool(current, directory).call(
+        createWorksceneSetWorkdirCurrentTool(current, application, directory).call(
           { deviceName: "本机", workspaceName: "项目" },
           { toolCallId: "set-call" } as never,
         ),
@@ -206,7 +208,7 @@ describe("workscene staged management", () => {
     );
     const cleared = await callInRun(
       () =>
-        createWorksceneClearWorkdirCurrentTool(current).call(
+        createWorksceneClearWorkdirCurrentTool(current, application).call(
           {},
           { toolCallId: "clear-call" } as never,
         ),
@@ -231,7 +233,7 @@ describe("workscene staged management", () => {
         bindingRef: "binding-a",
       }),
     });
-    const tool = createWorksceneChangeApproveTool(directory);
+    const tool = createWorksceneChangeApproveTool(application, directory);
     expect(tool.inputSchema.properties?.action?.enum).toEqual(
       getEnabledWorksceneToolActions("workscene_change_approve"),
     );
@@ -299,7 +301,7 @@ describe("workscene staged management", () => {
   });
 
   it("缺耐久工具身份或 assignment 上下文时 fail closed", async () => {
-    const tool = createWorksceneChangeApproveTool(makeDirectory());
+    const tool = createWorksceneChangeApproveTool(application, makeDirectory());
     const noIdentity = await callInRun(() =>
       tool.call({ action: "add", name: "新场景" }, {} as never),
     );
@@ -325,7 +327,7 @@ describe("workscene path-free reads", () => {
       ]),
     });
     const result = await callInRun(
-      () => createWorksceneListTool(directory).call({}, CTX),
+      () => createWorksceneListTool(application, directory).call({}, CTX),
       {
         scenes: [
           scene("scene-a", "场景A", {
@@ -344,11 +346,15 @@ describe("workscene path-free reads", () => {
 
   it("声明面仍由共享工具表派生", () => {
     const current = { sceneId: "scene-1", sceneName: "场景" };
-    expect(createWorkmodeEnterTool(makeDirectory()).boundaries).toEqual(
+    expect(createWorkmodeEnterTool(application).boundaries).toEqual(
       getWorksceneToolBoundaries("workmode_enter"),
     );
     expect(
-      createWorksceneSetWorkdirCurrentTool(current, makeDirectory()).boundaries,
+      createWorksceneSetWorkdirCurrentTool(
+        current,
+        application,
+        makeDirectory(),
+      ).boundaries,
     ).toEqual(getWorksceneToolBoundaries("workscene_set_workdir_current"));
   });
 });

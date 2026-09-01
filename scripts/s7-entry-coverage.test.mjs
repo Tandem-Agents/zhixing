@@ -3379,6 +3379,16 @@ test("Kernel tool implementations are concrete only at the Host edge", async () 
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/executor-role-runtime.ts",
     "packages/cli/src/runtime/workspace-command.ts",
+    "packages/core/src/conversation/application.ts",
+    "packages/core/src/workscene/application.ts",
+    "packages/tools-builtin/src/task-list.ts",
+    "packages/cli/src/serve/conversation-task-list-application.ts",
+    "packages/cli/src/serve/builtin-extra-tools.ts",
+    "packages/cli/src/serve/workmode-tools.ts",
+    "packages/cli/src/serve/workscene-application-adapter.ts",
+    "packages/cli/src/serve/workscene-runtime-projection.ts",
+    "packages/cli/src/serve/job-runtime-tool-selection.ts",
+    "packages/orchestrator/src/tools/task.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -3411,6 +3421,25 @@ test("Kernel tool implementations are concrete only at the Host edge", async () 
     "packages/orchestrator/src/index.ts",
     (text) => `${text}\nexport type { KernelToolImplementationPort } from "./runtime/index.js";`,
   )).join("\n"), /runtime-only subpath/);
+  assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
+    "packages/tools-builtin/src/task-list.ts",
+    (text) => `${text}\nconst assignmentMutations = runContextStorage.getStore();`,
+  )).join("\n"), /Conversation-owned command/);
+  assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
+    "packages/cli/src/serve/workmode-tools.ts",
+    (text) => `${text}\nconst assignmentMutations = runContextStorage.getStore();`,
+  )).join("\n"), /Workscene tools/);
+  assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
+    "packages/cli/src/serve/executor-role-runtime.ts",
+    (text) => `${text}\nthrow new Error("Job requested unavailable tools:");`,
+  )).join("\n"), /requested-tool policy/);
+  assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
+    "packages/orchestrator/src/tools/task.ts",
+    (text) => text.replace(
+      "securityPipeline: env.securityPipeline,",
+      "securityPipeline: createIndependentSecurityPipeline(),",
+    ),
+  )).join("\n"), /parent controlled-effect chain/);
   assert.match(inspectProductionManifest("packages/orchestrator/package.json", {
     dependencies: { "@zhixing/tools-builtin": "workspace:*" },
   }).join("\n"), /concrete Tool production dependency/);
@@ -3801,7 +3830,10 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
   assert.match(
     inspectWorksceneRuntimeProjectionBoundary(mutate(
       "packages/cli/src/serve/workscene-runtime-projection.ts",
-      (text) => text.replace("    createWorksceneListTool(workscenes),", ""),
+      (text) => text.replace(
+        "    createWorksceneListTool(application, workscenes),",
+        "",
+      ),
     )).join("\n"),
     /capability exact-set drifted/,
   );

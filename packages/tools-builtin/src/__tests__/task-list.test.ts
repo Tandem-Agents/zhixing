@@ -9,11 +9,15 @@
 
 import { describe, it, expect } from "vitest";
 import type { TaskListState } from "@zhixing/core";
-import type {
-  AssignmentMutationPort,
-  AssignmentMutationRequest,
-} from "@zhixing/core/contracts";
-import { TaskListService, type TaskListStore } from "../task-list.js";
+import {
+  ConversationTaskListToolApplicationService,
+  type ConversationTaskListToolStagePort,
+} from "@zhixing/core/conversation/application";
+import {
+  createTaskListTool,
+  TaskListService,
+  type TaskListStore,
+} from "../task-list.js";
 
 // ─── 内存 store fixture ───
 
@@ -59,6 +63,16 @@ function createStubStore(): StubStore {
       data.delete(id);
     },
   };
+}
+
+function createToolFixture(
+  getConversationId: () => string | undefined,
+  stage: ConversationTaskListToolStagePort["stage"] = async () => {},
+) {
+  return createTaskListTool(
+    getConversationId,
+    new ConversationTaskListToolApplicationService({ stage }),
+  );
 }
 
 // ─── TaskListService 同步查询 ───
@@ -218,7 +232,7 @@ describe("task_list 工具 — ephemeral 拒绝（修复 Bug-1）", () => {
   it("getConversationId 返回 undefined → isError + 不调 store.save", async () => {
     const store = createStubStore();
     const service = new TaskListService(store);
-    const tool = service.createTool(() => undefined);
+    const tool = createToolFixture(() => undefined);
 
     const result = await tool.call(
       { items: [{ content: "should be rejected", status: "pending" }] },
@@ -239,7 +253,7 @@ describe("task_list 工具 — ephemeral 拒绝（修复 Bug-1）", () => {
     const before = service.getCached("main");
 
     // 模拟"定时任务路径"调用（无 conversationId）
-    const tool = service.createTool(() => undefined);
+    const tool = createToolFixture(() => undefined);
     await tool.call(
       { items: [{ content: "定时任务", status: "pending" }] },
       { workingDirectory: "/tmp" },
@@ -254,31 +268,18 @@ describe("task_list 工具 — ephemeral 拒绝（修复 Bug-1）", () => {
 
 describe("task_list 工具 — assignment staged 边界", () => {
   function fixture() {
-    const staged: AssignmentMutationRequest[] = [];
-    const port: AssignmentMutationPort = {
-      assignmentId: "assignment-1",
-      execution: "conversation",
-      async stage(input) {
-        staged.push(input);
-        return {
-          kind: "assignment-mutation-staged",
-          requestId: input.operationId,
-          recordSeq: staged.length,
-          mutationDigest: "a".repeat(64),
-        };
-      },
-      async readOverlay() {
-        return [];
-      },
+    const staged: Parameters<ConversationTaskListToolStagePort["stage"]>[0][] = [];
+    const stage: ConversationTaskListToolStagePort["stage"] = async (input) => {
+      staged.push(input);
     };
-    return { staged, port };
+    return { staged, stage };
   }
 
   it("run 内 set 只追加 task-list-op，commit 前不改 store/cache", async () => {
     const store = createStubStore();
     const service = new TaskListService(store);
-    const { staged, port } = fixture();
-    const tool = service.createTool(() => "conv-1", () => port);
+    const { staged, stage } = fixture();
+    const tool = createToolFixture(() => "conv-1", stage);
 
     const result = await tool.call(
       { items: [{ content: "finish work", status: "in_progress" }] },
@@ -289,18 +290,16 @@ describe("task_list 工具 — assignment staged 边界", () => {
     expect(result.content).toContain("current turn completes successfully");
     expect(staged).toHaveLength(1);
     expect(staged[0]).toMatchObject({
-      domain: "session",
       operationId: "task-list:call-1",
-      mutation: { kind: "task-list-op" },
+      taskList: { items: [{ content: "finish work" }] },
     });
     expect(store.saveCalls).toEqual([]);
     expect(service.getCached("conv-1")).toBeNull();
   });
 
   it("同一 durable toolCall 重放生成全等任务身份与 operationId", async () => {
-    const service = new TaskListService(createStubStore());
-    const { staged, port } = fixture();
-    const tool = service.createTool(() => "conv-1", () => port);
+    const { staged, stage } = fixture();
+    const tool = createToolFixture(() => "conv-1", stage);
     const input = { items: [{ content: "stable", status: "pending" }] };
 
     await tool.call(input, { workingDirectory: "/tmp", toolCallId: "call-stable" });
@@ -311,8 +310,12 @@ describe("task_list 工具 — assignment staged 边界", () => {
 
   it("无 active assignment 时 fail-closed，不降级直写", async () => {
     const store = createStubStore();
-    const service = new TaskListService(store);
-    const tool = service.createTool(() => "conv-1", () => undefined);
+    const tool = createToolFixture(
+      () => "conv-1",
+      async () => {
+        throw new Error("Task list updates require an active durable turn.");
+      },
+    );
     const result = await tool.call(
       { items: [{ content: "blocked", status: "pending" }] },
       { workingDirectory: "/tmp", toolCallId: "call-blocked" },
@@ -326,16 +329,14 @@ describe("task_list 工具 — assignment staged 边界", () => {
 
 describe("task_list 工具 — 输入校验", () => {
   it("items 非数组 → isError", async () => {
-    const service = new TaskListService(createStubStore());
-    const tool = service.createTool(() => "conv-1");
+    const tool = createToolFixture(() => "conv-1");
     const result = await tool.call({ items: "nope" }, { workingDirectory: "/tmp" });
     expect(result.isError).toBe(true);
     expect(result.content).toContain("items");
   });
 
   it("item 缺 content → isError", async () => {
-    const service = new TaskListService(createStubStore());
-    const tool = service.createTool(() => "conv-1");
+    const tool = createToolFixture(() => "conv-1");
     const result = await tool.call(
       { items: [{ status: "pending" }] },
       { workingDirectory: "/tmp" },
@@ -345,8 +346,7 @@ describe("task_list 工具 — 输入校验", () => {
   });
 
   it("status 非法 → isError", async () => {
-    const service = new TaskListService(createStubStore());
-    const tool = service.createTool(() => "conv-1");
+    const tool = createToolFixture(() => "conv-1");
     const result = await tool.call(
       { items: [{ content: "x", status: "bogus" }] },
       { workingDirectory: "/tmp" },
@@ -356,61 +356,15 @@ describe("task_list 工具 — 输入校验", () => {
   });
 });
 
-// ─── 工具行为：原子语义 ───
+// ─── 工具行为：领域应用边界 ───
 
-describe("task_list 工具 — 原子语义", () => {
-  it("set 成功 → 内存与持久化同步更新", async () => {
-    const store = createStubStore();
-    const service = new TaskListService(store);
-    const tool = service.createTool(() => "conv-1");
-
-    const result = await tool.call(
-      {
-        items: [
-          { content: "A", status: "pending" },
-          { content: "B", status: "in_progress" },
-        ],
-      },
-      { workingDirectory: "/tmp" },
+describe("task_list 工具 — 领域应用边界", () => {
+  it("缺省 id 由 durable operation 稳定派生，显式 id 保留", async () => {
+    const staged: Parameters<ConversationTaskListToolStagePort["stage"]>[0][] = [];
+    const tool = createToolFixture(
+      () => "conv-1",
+      async (input) => staged.push(input),
     );
-
-    expect(result.isError).toBeFalsy();
-    expect(service.getCached("conv-1")?.items).toHaveLength(2);
-    expect(store.data.get("conv-1")?.items).toHaveLength(2);
-  });
-
-  it("持久化失败 → isError + cache 保持失败前状态", async () => {
-    const store = createStubStore();
-    const service = new TaskListService(store);
-    const tool = service.createTool(() => "conv-1");
-
-    // 先成功 set 一次建立基线
-    await tool.call(
-      { items: [{ content: "before", status: "pending" }] },
-      { workingDirectory: "/tmp" },
-    );
-    const before = service.getCached("conv-1");
-
-    // 第二次 set 持久化失败
-    store.primeSaveFailure(new Error("disk full"));
-    const result = await tool.call(
-      { items: [{ content: "after", status: "completed" }] },
-      { workingDirectory: "/tmp" },
-    );
-
-    // 工具返回 isError —— LLM 收到明确失败信号
-    expect(result.isError).toBe(true);
-    expect(result.content).toContain("Failed to persist");
-
-    // cache 保持失败前状态 —— store.save throw 时 service 不改 cache
-    expect(service.getCached("conv-1")).toEqual(before);
-    expect(service.getCached("conv-1")?.items[0]?.content).toBe("before");
-  });
-
-  it("id 缺省自动生成（uuid），显式传保留", async () => {
-    const store = createStubStore();
-    const service = new TaskListService(store);
-    const tool = service.createTool(() => "conv-1");
 
     await tool.call(
       {
@@ -419,55 +373,28 @@ describe("task_list 工具 — 原子语义", () => {
           { id: "stable", content: "explicit", status: "pending" },
         ],
       },
-      { workingDirectory: "/tmp" },
+      { workingDirectory: "/tmp", toolCallId: "stable-call" },
     );
 
-    const items = service.getCached("conv-1")?.items;
-    expect(items?.[0]?.id).toBeTruthy();
-    expect(items?.[0]?.id).not.toBe("stable");
-    expect(items?.[1]?.id).toBe("stable");
+    expect(staged[0]?.taskList.items[0]?.id).toMatch(/^task-/u);
+    expect(staged[0]?.taskList.items[1]?.id).toBe("stable");
   });
 
-  it("set 替换语义 —— 第二次 set 完全覆盖第一次", async () => {
+  it("staging 失败可观察且不会回退到 TaskListStore", async () => {
     const store = createStubStore();
-    const service = new TaskListService(store);
-    const tool = service.createTool(() => "conv-1");
-
-    await tool.call(
-      {
-        items: [
-          { content: "old-1", status: "pending" },
-          { content: "old-2", status: "pending" },
-        ],
+    const tool = createToolFixture(
+      () => "conv-1",
+      async () => {
+        throw new Error("stage failed");
       },
-      { workingDirectory: "/tmp" },
     );
-    await tool.call(
-      { items: [{ content: "new", status: "in_progress" }] },
-      { workingDirectory: "/tmp" },
+    const result = await tool.call(
+      { items: [{ content: "blocked", status: "pending" }] },
+      { workingDirectory: "/tmp", toolCallId: "blocked" },
     );
-
-    expect(service.getAllTasks("conv-1")).toHaveLength(1);
-    expect(service.getAllTasks("conv-1")[0]?.content).toBe("new");
-  });
-
-  it("getInProgressTasks 在 set 后立即可见（cache 同步）", async () => {
-    const store = createStubStore();
-    const service = new TaskListService(store);
-    const tool = service.createTool(() => "conv-1");
-
-    await tool.call(
-      {
-        items: [
-          { content: "a", status: "in_progress" },
-          { content: "b", status: "pending" },
-        ],
-      },
-      { workingDirectory: "/tmp" },
-    );
-
-    expect(service.getInProgressTasks("conv-1")).toHaveLength(1);
-    expect(service.getInProgressTasks("conv-1")[0]?.content).toBe("a");
+    expect(result).toMatchObject({ isError: true });
+    expect(result.content).toContain("stage failed");
+    expect(store.saveCalls).toEqual([]);
   });
 });
 
@@ -475,8 +402,7 @@ describe("task_list 工具 — 原子语义", () => {
 
 describe("task_list 工具 — 工具定义", () => {
   it("工具 name + 标志字段", () => {
-    const service = new TaskListService(createStubStore());
-    const tool = service.createTool(() => "conv-1");
+    const tool = createToolFixture(() => "conv-1");
 
     expect(tool.name).toBe("task_list");
     expect(tool.needsPermission).toBe(false);
@@ -485,8 +411,7 @@ describe("task_list 工具 — 工具定义", () => {
   });
 
   it("description 明确 ephemeral 不可用", () => {
-    const service = new TaskListService(createStubStore());
-    const tool = service.createTool(() => "conv-1");
+    const tool = createToolFixture(() => "conv-1");
     expect(tool.description).toContain("persistent conversation");
     expect(tool.description.toLowerCase()).toMatch(
       /unavailable|one-shot|scheduled/,

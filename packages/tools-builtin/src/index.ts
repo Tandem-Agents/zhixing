@@ -6,6 +6,7 @@ export { createGrepTool } from "./grep.js";
 export { createBashTool } from "./bash.js";
 export { createScheduleTool } from "./schedule.js";
 export {
+  createTaskListTool,
   TaskListService,
   type TaskListStore,
   type TaskListStateEvent,
