@@ -174,6 +174,7 @@ import {
   createHostKernelModelProviderFactory,
   createHostKernelRuntimeEnvironmentFactory,
 } from "../runtime/kernel-runtime-bindings.js";
+import { createHostAdvancementModelProviderFactory } from "../runtime/advancement-model-provider.js";
 import { createServeAdvancementApplications } from "./advancement-controller.js";
 import { createAdvancementAcceptanceLifecycle } from "./advancement-acceptance-lifecycle.js";
 import {
@@ -589,8 +590,10 @@ async function runServerProcess(
     controller: advancementController,
     reviews: advancementReviews,
   } = await createServeAdvancementApplications({
-    config,
-    credentials: providerCredentials,
+    modelProvider: createHostAdvancementModelProviderFactory({
+      config,
+      credentials: providerCredentials,
+    }),
     // control 治理端口——authority runtime 在 pre-server surface 装配（晚于此处），
     // 惰性取值；advancement 外调发生在运行期，届时必已就绪
     governor: () => ctx.authorityRuntime?.resourceGovernor,

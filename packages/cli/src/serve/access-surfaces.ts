@@ -84,6 +84,7 @@ import {
   ExecutorEvidenceHandler,
 } from "@zhixing/orchestrator/advancement";
 import { LocalConversationOwnerAssembly } from "./local-conversation-owner.js";
+import { createHostAdvancementModelProviderFactory } from "../runtime/advancement-model-provider.js";
 import { localConversationOwnerRuntime } from "./conversation-owner-runtime.js";
 import { createConversationEvidenceAuthorityVerifier } from "./conversation-evidence-authority.js";
 
@@ -810,8 +811,10 @@ const localConversationOwnerUnit: CoreAssemblyUnit = {
         ctx.executorRoleModule.InProcessAssignmentSubmission,
       runtimeFactory: ctx.assignmentRuntimeFactory,
       interactions: ctx.durableInteractions,
-      config: ctx.config,
-      credentials: ctx.providerCredentials ?? {},
+      advancementModelProvider: createHostAdvancementModelProviderFactory({
+        config: ctx.config,
+        credentials: ctx.providerCredentials ?? {},
+      }),
       dataPlane: ctx.executorDataPlane,
       evidence: ctx.evidenceHandler,
       currentAnchorDeviceId: () =>

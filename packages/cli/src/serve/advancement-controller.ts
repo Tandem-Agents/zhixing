@@ -7,9 +7,6 @@ import {
   RubricContractBuilder,
   type RubricCatalogPort,
   userMessage,
-  validateThinkingConfig,
-  type LLMRole,
-  type ThinkingConfig,
 } from "@zhixing/core";
 import type {
   EvidenceClientPort,
@@ -23,19 +20,9 @@ import type {
   ProtocolSigner,
 } from "@zhixing/core/protocol";
 import {
-  createProviderRoles,
-  getModelCapabilityOverride,
-  resolveModelCapability,
-  resolveWorkspace,
-  resolveWorkspaceSessionType,
-  type ProviderCredentialProjection,
-  type ZhixingConfig,
-} from "@zhixing/providers";
-import {
-  createAdvancementRuntime,
+  assertAdvancementModelProviderBinding,
+  type AdvancementModelProviderFactory,
 } from "@zhixing/orchestrator/advancement";
-import { createControlCompletionPort } from "@zhixing/orchestrator/runtime";
-import { PROTOCOL_BUDGET_DEFAULTS } from "@zhixing/providers";
 import {
   AdvancementController,
   AdvancementEvidenceCoordinator,
@@ -54,8 +41,7 @@ import {
 } from "./advancement-rubric-library.js";
 
 export interface ServeAdvancementControllerDeps {
-  readonly config: ZhixingConfig;
-  readonly credentials: ProviderCredentialProjection;
+  readonly modelProvider: AdvancementModelProviderFactory;
   /**
    * control 资源治理端口（惰性——authority runtime 在 pre-server surface 装配，
    * 晚于本控制器创建；advancement 外调发生在运行期，取值时必须已就绪，
@@ -145,35 +131,19 @@ export interface ServeAdvancementApplications {
 export async function createServeAdvancementApplications(
   deps: ServeAdvancementControllerDeps,
 ): Promise<ServeAdvancementApplications> {
-  const { roles: rawRoles, resolvedRoles, config } = createProviderRoles({
-    config: deps.config,
-    credentials: deps.credentials,
-  });
   // 推进控制智能（准入 / 草案 / 修订 / 收场 / 裁判）的全部真实 LLM 外调只经
   // ControlCompletionPort 与 AdvancementReviewerPort 两条通道：调用方取得
   // control 根租约并在 finally 终结，端口沿租约以稳定 usageId 计量——
   // 通道消费的 provider 保持未治理（裸），杜绝双重租约。
   const governor = lazyResourcePort(deps.governor);
-  const roles = {
-    main: rawRoles.main,
-    light: rawRoles.light,
-  };
-  const mainThinking = resolveConfiguredThinking(
-    roles.main,
-    config.llm?.main?.thinking,
-  );
-  const lightThinking = resolveConfiguredThinking(
-    roles.light,
-    config.llm?.light?.thinking,
-  );
-  const completionPort = createControlCompletionPort({
-    roles,
-    thinking: { main: mainThinking, light: lightThinking },
-    meter: governor,
-    defaultMaxOutputTokens:
-      PROTOCOL_BUDGET_DEFAULTS[resolvedRoles.light.resolved.protocol]
-        .maxOutputTokens,
-  });
+  const evidenceCapabilities = deps.evidenceRuntime
+    ? { independentKinds: ["file-diff", "log", "artifact"] as const }
+    : undefined;
+  const modelProvider = deps.modelProvider.create(Object.freeze({
+    resourceMeter: governor,
+    ...(evidenceCapabilities ? { evidenceCapabilities } : {}),
+  }));
+  assertAdvancementModelProviderBinding(modelProvider);
   const completeViaPort = async (
     role: "main" | "light",
     prompt: string,
@@ -191,7 +161,7 @@ export async function createServeAdvancementApplications(
       ctx,
     );
     try {
-      const result = await completionPort.complete({
+      const result = await modelProvider.completion.complete({
         role,
         messages: [userMessage(prompt)],
         lease,
@@ -207,22 +177,9 @@ export async function createServeAdvancementApplications(
       await governor.release(lease, ctx).catch(() => {});
     }
   };
-  const workspace = resolveWorkspace(config, {
-    sessionType: resolveWorkspaceSessionType(),
-  });
-  const advancementWindowCapability = resolveModelCapability(
-    roles.main.model,
-    getModelCapabilityOverride(config.modelCapabilityOverrides, roles.main.model),
-  );
-
   // 取证能力集是运行时探测的系统事实（git 可用性 / workspace 形态），
   // 传入草案生成——required 只能落在能力集内的 kind 上；无工作区时
   // 无从独立取证，能力集为空、不装取证 provider（安全缺省）。
-  const workspacePath = workspace.path ?? undefined;
-  const evidenceCapabilities = deps.evidenceRuntime
-    ? { independentKinds: ["file-diff", "log", "artifact"] as const }
-    : undefined;
-
   const rubricLibrary = {
     globalState: () => deps.rubricRuntime?.()?.globalState,
     artifacts: () => deps.rubricRuntime?.()?.artifacts,
@@ -285,32 +242,17 @@ export async function createServeAdvancementApplications(
     synthesize: (facts: Parameters<typeof buildClosureSynthesisPrompt>[0]) =>
       completeViaPort("light", buildClosureSynthesisPrompt(facts)),
   };
-  const reviewer = createAdvancementRuntime({
-    provider: roles.main.provider,
-    model: roles.main.model,
-    thinking: mainThinking,
-    lightProvider: roles.light.provider,
-    lightModel: roles.light.model,
-    lightThinking,
-    resourceMeter: governor,
-    defaultMaxOutputTokens:
-      PROTOCOL_BUDGET_DEFAULTS[resolvedRoles.main.resolved.protocol]
-        .maxOutputTokens,
-    workingDirectory: workspacePath,
-    ...(evidenceCapabilities ? { evidenceCapabilities } : {}),
-    contextWindow: {
-      capability: advancementWindowCapability,
-    },
-  });
-
   const reviews = createAdvancementReviewAttemptApplication({
     store,
     resources: governor,
-    mechanism: createAdvancementReviewExternalMechanism({ evidence, reviewer }),
+    mechanism: createAdvancementReviewExternalMechanism({
+      evidence,
+      reviewer: modelProvider.reviewer,
+    }),
     reviewerAvailable: true,
     closureSynthesizer,
-    ...(config.advancement?.sessionTokenBudget !== undefined
-      ? { sessionTokenBudget: config.advancement.sessionTokenBudget }
+    ...(modelProvider.sessionTokenBudget !== undefined
+      ? { sessionTokenBudget: modelProvider.sessionTokenBudget }
       : {}),
   });
   const controller = new AdvancementController({
@@ -334,16 +276,4 @@ export async function createServeAdvancementApplications(
     contractBuilder,
   });
   return Object.freeze({ controller, reviews });
-}
-
-function resolveConfiguredThinking(
-  role: LLMRole,
-  configured: ThinkingConfig | undefined,
-): ThinkingConfig | undefined {
-  if (configured === undefined) return undefined;
-  const modelInfo = role.provider.models.find((m) => m.id === role.model);
-  if (modelInfo === undefined) return configured;
-  const control = modelInfo.thinkingControl ?? { type: "none" };
-  if (validateThinkingConfig(configured, control)) return configured;
-  return undefined;
 }

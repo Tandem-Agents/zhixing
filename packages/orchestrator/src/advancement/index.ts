@@ -22,6 +22,13 @@ export {
   createAdvancementJudgeTool,
 } from "./judge-tool.js";
 export { createAdvancementRuntime } from "./runtime.js";
+export {
+  assertAdvancementModelProviderBinding,
+  createAdvancementModelProviderBinding,
+  type AdvancementModelProviderBinding,
+  type AdvancementModelProviderFactory,
+  type AdvancementModelProviderRequest,
+} from "./model-provider.js";
 export type {
   AdvancementEvidenceCollectionInput,
   AdvancementEvidenceProvider,

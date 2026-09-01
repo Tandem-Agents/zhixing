@@ -2602,6 +2602,108 @@ export function inspectKernelProviderDependencyInversion(records) {
   return failures;
 }
 
+/** A6 Advancement model calls consume one demand-owned binding; concrete Provider state stays at the Host edge. */
+export function inspectAdvancementProviderDependencyInversion(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const source = byPath.get(relative);
+    if (source === undefined) {
+      failures.push(`${relative}: Advancement provider dependency source is missing`);
+    }
+    return source ?? "";
+  };
+  const contract = required(
+    "packages/orchestrator/src/advancement/model-provider.ts",
+  );
+  const advancementIndex = required(
+    "packages/orchestrator/src/advancement/index.ts",
+  );
+  const orchestratorRoot = required("packages/orchestrator/src/index.ts");
+  const edge = required(
+    "packages/cli/src/runtime/advancement-model-provider.ts",
+  );
+  const application = required(
+    "packages/cli/src/serve/advancement-controller.ts",
+  );
+  const command = required("packages/cli/src/serve/command.ts");
+  const localOwner = required(
+    "packages/cli/src/serve/local-conversation-owner.ts",
+  );
+  const surfaces = required("packages/cli/src/serve/access-surfaces.ts");
+  const executor = required("packages/cli/src/serve/executor-role-runtime.ts");
+
+  if (
+    !contract.includes("export interface AdvancementModelProviderBinding") ||
+    !contract.includes("export interface AdvancementModelProviderFactory") ||
+    !contract.includes("createAdvancementModelProviderBinding(") ||
+    !contract.includes("assertAdvancementModelProviderBinding(") ||
+    !contract.includes('"completion", "reviewer", "sessionTokenBudget"') ||
+    /@zhixing\/providers|ZhixingConfig|ProviderCredential|LLMRole|ModelCapability/u.test(
+      contract,
+    )
+  ) {
+    failures.push("Advancement model provider contract is not finite and demand-owned");
+  }
+  if (
+    !advancementIndex.includes('from "./model-provider.js";') ||
+    /AdvancementModelProvider/u.test(orchestratorRoot)
+  ) {
+    failures.push("Advancement model provider contract escaped its narrow subpath");
+  }
+  if (
+    !edge.includes("createHostAdvancementModelProviderFactory(") ||
+    !edge.includes("createProviderRoles({") ||
+    !edge.includes("createControlCompletionPort({") ||
+    !edge.includes("createAdvancementRuntime({") ||
+    (edge.match(/resolveConfiguredThinking\s*\(/gu) ?? []).length < 3 ||
+    !edge.includes("PROTOCOL_BUDGET_DEFAULTS[resolvedRoles.light.resolved.protocol]") ||
+    !edge.includes("PROTOCOL_BUDGET_DEFAULTS[resolvedRoles.main.resolved.protocol]") ||
+    !edge.includes("resolveWorkspace(config, {") ||
+    !edge.includes("workingDirectory: workspace.path ?? undefined") ||
+    !edge.includes("resolveModelCapability(") ||
+    !edge.includes("optimalMaxTokens: resolvedAttention.optimalMaxTokens") ||
+    !edge.includes("riskMaxTokens: resolvedAttention.riskMaxTokens") ||
+    !edge.includes("config.advancement?.sessionTokenBudget") ||
+    edge.includes("capability: resolvedAttention")
+  ) {
+    failures.push("CLI Host edge does not own the finite Advancement Provider projection");
+  }
+  if (
+    !application.includes("readonly modelProvider: AdvancementModelProviderFactory;") ||
+    !application.includes("deps.modelProvider.create(Object.freeze({") ||
+    !application.includes("assertAdvancementModelProviderBinding(modelProvider);") ||
+    !application.includes("modelProvider.completion.complete({") ||
+    !application.includes("reviewer: modelProvider.reviewer") ||
+    !application.includes("modelProvider.sessionTokenBudget") ||
+    /@zhixing\/providers|ZhixingConfig|ProviderCredential|createProviderRoles|resolveModelCapability|resolveWorkspace|createAdvancementRuntime|createControlCompletionPort/u.test(
+      application,
+    )
+  ) {
+    failures.push("Advancement application assembly still owns concrete Provider configuration");
+  }
+  if (
+    (command.match(/createHostAdvancementModelProviderFactory\s*\(/gu) ?? []).length !== 1 ||
+    (surfaces.match(/createHostAdvancementModelProviderFactory\s*\(/gu) ?? []).length !== 1 ||
+    (executor.match(/createHostAdvancementModelProviderFactory\s*\(/gu) ?? []).length !== 1 ||
+    !localOwner.includes("readonly advancementModelProvider: AdvancementModelProviderFactory;") ||
+    !localOwner.includes("modelProvider: options.advancementModelProvider") ||
+    /readonly (?:config|credentials):/u.test(localOwner)
+  ) {
+    failures.push("Advancement production roots do not use the one Host Provider adapter");
+  }
+  for (const record of records) {
+    if (
+      record.relative !== "packages/cli/src/runtime/advancement-model-provider.ts" &&
+      /createProviderRoles\s*\(/u.test(record.text) &&
+      /Advancement|advancement/u.test(record.text)
+    ) {
+      failures.push(`${record.relative}: a second Advancement Provider constructor returned`);
+    }
+  }
+  return failures;
+}
+
 /** A4 Anchor product tools and MCP inputs are projected before the generic RuntimeHost boundary. */
 export function inspectWorksceneRuntimeProjectionBoundary(records) {
   const failures = [];
@@ -2880,6 +2982,7 @@ export async function validateS7Structure() {
   failures.push(...inspectAgentRuntimeWorkspaceEncapsulation(records));
   failures.push(...inspectTurnContextProviderAssembly(records));
   failures.push(...inspectKernelProviderDependencyInversion(records));
+  failures.push(...inspectAdvancementProviderDependencyInversion(records));
   failures.push(...inspectWorksceneRuntimeProjectionBoundary([
     ...records,
     {
@@ -9165,8 +9268,7 @@ export function inspectLocalConversationOwnerIsolation(records) {
     "InProcessAssignmentSubmission",
     "runtimeFactory",
     "interactions",
-    "config",
-    "credentials",
+    "advancementModelProvider",
     "evidence",
     "dataPlane",
     "closeDrainBudgetMs",
@@ -9309,8 +9411,7 @@ export function inspectLocalConversationOwnerIsolation(records) {
             "InProcessAssignmentSubmission",
             "runtimeFactory",
             "interactions",
-            "config",
-            "credentials",
+            "advancementModelProvider",
             "evidence",
             "dataPlane",
           ]) {

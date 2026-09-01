@@ -17,6 +17,7 @@ const [
   coreWorkspaceAdministration,
   orchestratorRoot,
   orchestratorRuntime,
+  orchestratorAdvancement,
   rpcRoot,
   rpcSkillCatalogClient,
   ownerKernel,
@@ -57,6 +58,7 @@ const [
   import("../packages/core/dist/environment/workspace-administration.js"),
   import("../packages/orchestrator/dist/index.js"),
   import("../packages/orchestrator/dist/runtime/index.js"),
+  import("../packages/orchestrator/dist/advancement/index.js"),
   import("../packages/rpc/dist/index.js"),
   import("../packages/rpc/dist/skill-catalog-client.js"),
   import("../packages/owner-kernel/dist/index.js"),
@@ -206,6 +208,18 @@ for (const name of [
 ]) {
   if (typeof orchestratorRuntime[name] !== "function" || name in orchestratorRoot) {
     failures.push(`orchestrator-kernel-provider:${name}:invalid-runtime-boundary`);
+  }
+}
+for (const name of [
+  "createAdvancementModelProviderBinding",
+  "assertAdvancementModelProviderBinding",
+]) {
+  if (
+    typeof orchestratorAdvancement[name] !== "function" ||
+    name in orchestratorRoot ||
+    name in orchestratorRuntime
+  ) {
+    failures.push(`orchestrator-advancement-provider:${name}:invalid-subpath`);
   }
 }
 for (const name of [
@@ -377,7 +391,11 @@ const runtimeHostDeclarations = await Promise.all([
     "utf8",
   ),
 ]);
-const [orchestratorRootDeclarations, orchestratorRuntimeDeclarations] =
+const [
+  orchestratorRootDeclarations,
+  orchestratorRuntimeDeclarations,
+  orchestratorAdvancementDeclarations,
+] =
   await Promise.all([
     readFile(
       new URL("../packages/orchestrator/dist/index.d.ts", import.meta.url),
@@ -386,6 +404,13 @@ const [orchestratorRootDeclarations, orchestratorRuntimeDeclarations] =
     readFile(
       new URL(
         "../packages/orchestrator/dist/runtime/index.d.ts",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    readFile(
+      new URL(
+        "../packages/orchestrator/dist/advancement/index.d.ts",
         import.meta.url,
       ),
       "utf8",
@@ -510,6 +535,18 @@ if (
   !orchestratorRuntimeDeclarations.includes("KernelRuntimeEnvironmentFactory")
 ) {
   failures.push("orchestrator-kernel-provider:invalid-declaration-boundary");
+}
+if (
+  !orchestratorAdvancementDeclarations.includes(
+    "AdvancementModelProviderBinding",
+  ) ||
+  !orchestratorAdvancementDeclarations.includes(
+    "AdvancementModelProviderFactory",
+  ) ||
+  /AdvancementModelProvider/u.test(orchestratorRootDeclarations) ||
+  /AdvancementModelProvider/u.test(orchestratorRuntimeDeclarations)
+) {
+  failures.push("orchestrator-advancement-provider:invalid-declaration-boundary");
 }
 const runtimeHostDeclaration = runtimeHostDeclarations.find((text) =>
   text.includes("declare class RuntimeHost"),

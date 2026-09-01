@@ -18,6 +18,7 @@ import {
   createHostKernelModelProviderFactory,
   createHostKernelRuntimeEnvironmentFactory,
 } from "../runtime/kernel-runtime-bindings.js";
+import { createHostAdvancementModelProviderFactory } from "../runtime/advancement-model-provider.js";
 import { createStdoutWriter } from "../screen/index.js";
 import { resolveSystemProtectedSecretPaths } from "../security/secret-boundary.js";
 import {
@@ -403,8 +404,10 @@ export async function runExecutorRole(
       InProcessAssignmentSubmission: executor.InProcessAssignmentSubmission,
       runtimeFactory,
       interactions,
-      config: startup.config,
-      credentials: providerCredentials,
+      advancementModelProvider: createHostAdvancementModelProviderFactory({
+        config: startup.config,
+        credentials: providerCredentials,
+      }),
       evidence: evidenceHandler,
       currentAnchorDeviceId,
       dataPlane,

@@ -39,6 +39,7 @@ import {
 } from "../local-conversation-owner.js";
 import { createSignedTrustRuleSnapshot, StreamDigestChain } from "@zhixing/core/protocol";
 import { createLocalConversationDirectoryApplication } from "../local-conversation-directory-application.js";
+import { createHostAdvancementModelProviderFactory } from "../../runtime/advancement-model-provider.js";
 
 export const FIXTURE_EXECUTOR_READINESS = {
   tools: [] as string[],
@@ -304,8 +305,12 @@ export async function createLocalOwnerAssemblyFixture(
     InProcessAssignmentSubmission,
     runtimeFactory,
     interactions,
-    config: FIXTURE_CONFIG,
-    credentials: { providers: { deepseek: { apiKey: "fixture-api-key" } } },
+    advancementModelProvider: createHostAdvancementModelProviderFactory({
+      config: FIXTURE_CONFIG,
+      credentials: {
+        providers: { deepseek: { apiKey: "fixture-api-key" } },
+      },
+    }),
     evidence: {
       collect: async () => {
         throw new Error("fixture: evidence unavailable");

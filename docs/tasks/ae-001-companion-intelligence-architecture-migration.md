@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：等待协调者复核 A6-01a Intelligence Kernel 模型 Provider 依赖反转<br>
+> 当前检查点：等待协调者复核 A6-01b Advancement 模型 Provider 需求方边界收口<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `966ea470`；A5-17e 已由协调者独立复核并提交，Backup & Recovery 全域产品状态投影、无消费者/测试旁路和负向门禁均已闭合；A5 全部领域责任及 A0～A5 当前证据有效 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；当前先闭合 Intelligence Kernel 对模型 Provider 家族的需求方端口与依赖反转 |
-| 活跃工作包 | `A6-01a-kernel-provider-dependency-inversion-v1` 已完成协调反证纠正与最窄验证，当前等待协调者独立复核；Kernel/Orchestrator 只消费自身拥有的模型运行合同，具体 Provider 与配置解析只在 Host 边缘严格投影 |
-| 下一责任链 | A6-01a 独立验收后，沿 Provider/Configuration/Secret 的剩余真实交界继续收窄；随后再按一个家族一条责任链推进 Tool、MCP、Channel、Storage、Executor/Mesh 与设备拓扑，不提前整包派发 A6 |
-| 打开的单向桥 | 无；A6-01a 必须在同一工作包切换全部 Agent Runtime 生产组合点，不允许 Kernel 新旧 Provider 构造双轨并存 |
-| 已失效证据 | 无当前未恢复证据；A6-01a 早先由错误解析入口报告的 CLI Host adapter 3/3 已作废，协调者 package-local 直达命令暴露 2 项 exact-set 失败后，本轮以同一有效入口恢复为 3/3，并补齐 attention 两字段反向门禁；A0～A5 的产品语义与事实 owner 证据未被纯适配依赖反转扩大失效 |
+| 已接受基线 | `eb8dfca4`；A6-01a 已由协调者以 package-local 直达测试反证并纠正后独立复核提交，Intelligence Kernel/Orchestrator 只消费自身有限模型运行合同，具体 Provider 与配置解析留在 Host 边缘；A0～A5 当前证据有效 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；当前沿 Provider 家族闭合 Advancement 模型调用的需求方窄端口，避免 Provider 配置与产品应用装配混杂 |
+| 活跃工作包 | `A6-01b-advancement-provider-boundary-v1` 已完成并等待协调者独立复核：Advancement 准入、草案、修订、收场与裁判只消费需求方拥有的有限不可变模型端口，具体 Provider/配置/凭据/协议解析只在唯一 CLI Host adapter 完成 |
+| 下一责任链 | A6-01b 独立验收后，有限审计 Provider 家族零残留，再沿 Configuration/Secret 的真实生产边界收窄；随后按一个家族一条责任链推进 Tool、MCP、Channel、Storage、Executor/Mesh 与设备拓扑，不提前整包派发 A6 |
+| 打开的单向桥 | 无；A6-01b 必须在同一工作包切换 Advancement 全部模型调用装配点，不允许 raw Provider 配置路径与需求方端口双轨并存 |
+| 已失效证据 | 无当前未恢复证据；A6-01b 已以应用/Host adapter 直接测试、Orchestrator/CLI typecheck 与 build、fresh package exports、canonical S7 及最窄格式检查恢复相交证据，A6-01a 已接受的 Kernel/RuntimeHost/Executor 闭包未被本轮需求方适配扩大失效 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2486,6 +2486,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据与门禁：协调者独立复核确认 Orchestrator 两个直接文件 73/73、RuntimeHost 三类发放 8/8、Executor conversation/job 装配 7/7 继续有效，本轮均未重复运行。早先从仓库根经 wrapper 取得的 CLI Host adapter 3/3 被 package-local 直达命令的 16/18 反证，不能作为有效证据；纠正后从 `packages/cli` 直接执行 `node node_modules/vitest/vitest.mjs run src/runtime/__tests__/kernel-runtime-bindings.test.ts`，取得唯一 adapter 文件 3/3，并真实调用 `assertKernelModelProviderBinding` 证明 main override/power degradation 后的 attention exact keys 仅为 `optimalMaxTokens/riskMaxTokens`，没有 `modelId/config/credentials`。此前 `call-llm` 15/15 仅作为未失效行为证据保留，不与上述独立闭包重复相加。本轮没有改动 adapter 以外生产源码，按纠正边界未重跑既有 Orchestrator/RuntimeHost/CLI build、canonical S7 35/35 与 registry golden、fresh package exports 或其他直接测试；新增的 S7 attention 反向 mutation 以唯一 inspector 定向 1/1 通过，能拒绝把完整 Provider capability 直接交给 Kernel。纠正文件的最窄 Biome 与 `git diff --check` 均通过，索引为空。S7/package-export 反向 mutation 现在拒绝 Orchestrator concrete Provider import/manifest 依赖、runtime 根泄漏、RuntimeHost factory 绕过、Host adapter owner 漂移或 attention 宽对象泄漏、Executor 漏绑和旧 `providerConfiguration` 回流。
 - 协调反证与纠正：`resolveModelCapability()` 的 Provider 结果含 `modelId`，旧 Host adapter 曾把它整体赋给 `primary.attention`，因此真正的 Kernel exact-set validator 正确拒绝该 binding；Kernel 两字段合同没有放宽。本轮仅在 Host edge 将 capability 显式投影为 `optimalMaxTokens/riskMaxTokens`，保留 main job override、light/power fallback/degradation 和所有既有 Provider 行为；这是 A6 迁移输入的边缘适配缺口，不是增加 Kernel 能力或协议字段。以后若该投影再次整体透传、attention exact-set 改动、package-local 测试不再经过 fresh Kernel validator，或真实 Host adapter 绕过 `assertKernelModelProviderBinding`，本证据精确失效。
 - 失效与交接：若模型 binding/environment exact-set 或冻结规则、`createAgentRuntime` 输入、RuntimeHost/Executor 任一生产发放、CLI concrete adapter、main/light/power/override/degradation/stream/usage/cancel/error/terminal 语义、Orchestrator manifest/lock/runtime export、S7/package-export 或上述直接测试任一变化，只恢复本证据及真实相交证据。A6 继续 `[ ]`；下一检查点仅在协调者独立接受并提交后沿 Provider/Configuration/Secret 剩余交界继续收窄，不提前进入 Tool、MCP、Channel、Storage、Executor/Mesh 或设备拓扑。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+### A6-01b：Advancement 模型 Provider 需求方边界收口
+
+- 基线与生产闭包：以已接受 `HEAD eb8dfca4` 加协调者调度记录为基线，形成待复核证据 `A6-01b-advancement-provider-boundary-v1`。即时正向闭合 Anchor `command.ts`、Anchor+local Executor `access-surfaces.ts` 与 Executor-only `executor-role-runtime.ts` 三个真实组合点，经 `LocalConversationOwnerAssembly/createServeAdvancementApplications` 到 admission、draft、revision、closure completion 及 review/evidence consumer；反向从全部 `createProviderRoles/createControlCompletionPort/createAdvancementRuntime` 构造、Provider/config/credential import、模型 capability/workspace/thinking/budget 解析、资源计量和 package export 对账。三种拓扑现在只构造同一个 CLI Host adapter 家族，不存在第二 Advancement Provider 构造或旧 config/credential 应用入口。
+- 责任边界与行为保护：`@zhixing/orchestrator/advancement` 窄入口唯一拥有有限只读的 `AdvancementModelProviderFactory/Binding`，request 只含资源计量与可选证据能力，binding exact-set 只含 completion、reviewer 与可选 session token budget；binding 在应用发布前按 exact key、必需方法、正安全整数与冻结状态 fail closed，新合同不从 `@zhixing/orchestrator` 根或 runtime 子路径导出。唯一 `packages/cli/src/runtime/advancement-model-provider.ts` Host adapter 继续执行 main/light fallback、thinking 兼容校验、按生效协议选择 completion/reviewer 输出预算、默认 workspace、模型 attention override，并把 attention 显式缩成 `optimalMaxTokens/riskMaxTokens` 两字段；Provider/config/credential、model id、workspace resolver 与协议表均不越过需求方边界。既有 control root lease、稳定 usage identity、reserve/consume/finally release、独立 evidence、review token fuse、错误传播与三拓扑产品行为未改变，也未新建 Provider 框架、状态、缓存或 fallback 规则。
+- 旧路与结构门禁：`ServeAdvancementControllerDeps` 和 `LocalConversationOwnerAssemblyOptions` 的 raw `config/credentials` 归零，应用装配不再导入 `@zhixing/providers` 或构造 Provider/reviewer；三个生产组合点均显式注入 Host factory。S7 新增需求方合同、窄导出、唯一 Host owner、三组合点、thinking/protocol budget/workspace/attention/session budget 与旧构造回流检查，并同步修正 local-owner 隔离门禁的过期 `config/credentials` exact-set；反向 mutation 可识别应用恢复 concrete Provider、attention 宽对象透传、local owner 恢复配置依赖、根导出泄漏或第二构造入口。fresh package-export 门验证 runtime value/declaration 只从 advancement 窄 subpath 可达。
+- 直接证据与验证：Orchestrator binding 1 文件 2/2；CLI Host adapter、投影与应用发布 3 文件 5/5，直接锁定真实 fallback 构造、有效/无效 thinking、light/main 协议预算、workspace、attention 两字段、session budget、有限 binding 与缺配置 fail-fast；两个 S7 定向 inspector 2/2。Orchestrator 与 CLI `tsc --noEmit`、fresh Orchestrator build、`pnpm cli:build`、`pnpm runtime:package-exports`、canonical S7 coverage/mutation 36/36 与 registry golden、适用 changed-file Biome 均通过。协调者另以 package-local 直达方式独立重跑上述 2/2、5/5 与两个包的 `tsc --noEmit`，并完整取得 `local-conversation-owner-lifecycle.test.ts` 17/17；未复用执行者此前一次受既有 storage-maintenance governor 背压影响的 16/17 结果。
+- 失效与交接：若 Advancement model request/binding exact-set、冻结/校验规则、completion/reviewer/session budget、main/light fallback、thinking/协议预算/workspace/attention 投影、资源计量、三生产组合点、Orchestrator advancement/root/runtime export、S7/package-export 或上述直接测试任一变化，只恢复本证据及真实相交证据；A6-01a Kernel Provider 证据不因无关 Advancement 应用变化自动失效。A6 继续 `[ ]`；下一检查点仅在协调者独立接受并提交后有限审计 Provider 家族零残留，再进入 Configuration/Secret 的真实交界，不提前推进 Tool、MCP、Channel、Storage、Executor/Mesh 或设备拓扑。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 

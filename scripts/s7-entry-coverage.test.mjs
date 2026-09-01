@@ -26,6 +26,7 @@ import {
   inspectAgentRuntimeWorkspaceEncapsulation,
   inspectTurnContextProviderAssembly,
   inspectKernelProviderDependencyInversion,
+  inspectAdvancementProviderDependencyInversion,
   inspectWorksceneRuntimeProjectionBoundary,
   inspectWorkspaceAdministrationOwnership,
   inspectTrustAdministrationOwnership,
@@ -3355,6 +3356,63 @@ test("Kernel model providers are concrete only at the Host edge", async () => {
       dependencies: { "@zhixing/providers": "workspace:*" },
     }).join("\n"),
     /concrete Provider production dependency/,
+  );
+});
+
+test("Advancement model providers are concrete only at the Host edge", async () => {
+  const paths = [
+    "packages/orchestrator/src/advancement/model-provider.ts",
+    "packages/orchestrator/src/advancement/index.ts",
+    "packages/orchestrator/src/index.ts",
+    "packages/cli/src/runtime/advancement-model-provider.ts",
+    "packages/cli/src/serve/advancement-controller.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/local-conversation-owner.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectAdvancementProviderDependencyInversion(records), []);
+  assert.match(
+    inspectAdvancementProviderDependencyInversion(mutate(
+      "packages/cli/src/serve/advancement-controller.ts",
+      (text) => `import { createProviderRoles } from "@zhixing/providers";\n${text}`,
+    )).join("\n"),
+    /concrete Provider configuration/,
+  );
+  assert.match(
+    inspectAdvancementProviderDependencyInversion(mutate(
+      "packages/cli/src/runtime/advancement-model-provider.ts",
+      (text) => text.replace(
+        /capability: \{\s*optimalMaxTokens: resolvedAttention\.optimalMaxTokens,\s*riskMaxTokens: resolvedAttention\.riskMaxTokens,\s*\}/u,
+        "capability: resolvedAttention",
+      ),
+    )).join("\n"),
+    /finite Advancement Provider projection/,
+  );
+  assert.match(
+    inspectAdvancementProviderDependencyInversion(mutate(
+      "packages/cli/src/serve/local-conversation-owner.ts",
+      (text) => text.replace(
+        "readonly advancementModelProvider: AdvancementModelProviderFactory;",
+        "readonly config: ZhixingConfig;",
+      ),
+    )).join("\n"),
+    /production roots/,
+  );
+  assert.match(
+    inspectAdvancementProviderDependencyInversion(mutate(
+      "packages/orchestrator/src/index.ts",
+      (text) => `${text}\nexport { type AdvancementModelProviderBinding } from "./advancement/index.js";`,
+    )).join("\n"),
+    /narrow subpath/,
   );
 });
 

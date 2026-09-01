@@ -63,10 +63,7 @@ import {
   createAdvancementOriginalTaskAdmissionPort,
   createAdvancementProxyTurnPort,
 } from "@zhixing/server";
-import type {
-  ProviderCredentialProjection,
-  ZhixingConfig,
-} from "@zhixing/providers";
+import type { AdvancementModelProviderFactory } from "@zhixing/orchestrator/advancement";
 import type {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
@@ -207,8 +204,7 @@ export interface LocalConversationOwnerAssemblyOptions {
   readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
   readonly runtimeFactory: RuntimeFactory;
   readonly interactions: DurableConversationInteractionObserver;
-  readonly config: ZhixingConfig;
-  readonly credentials: ProviderCredentialProjection;
+  readonly advancementModelProvider: AdvancementModelProviderFactory;
   readonly evidence: EvidenceHandlerPort;
   readonly currentAnchorDeviceId: () => string | undefined;
   readonly dataPlane: Pick<ExecutorDataPlaneRuntime, "tickets" | "createStream">;
@@ -896,8 +892,7 @@ export class LocalConversationOwnerAssembly {
     });
     const { controller: advancement, reviews } =
       await createServeAdvancementApplications({
-      config: options.config,
-      credentials: options.credentials,
+      modelProvider: options.advancementModelProvider,
       governor: () => owner.resources,
       sessionState: () => protocol.sessionState,
       rubricScope: "local",

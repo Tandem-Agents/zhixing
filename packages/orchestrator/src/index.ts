@@ -64,4 +64,25 @@ export * from "./subagent/index.js";
 export * from "./confirmation/index.js";
 export * from "./tools/index.js";
 export * from "./orchestration/index.js";
-export * from "./advancement/index.js";
+export {
+  ADVANCEMENT_SUBMIT_REVIEW_TOOL,
+  completeMissingRequiredEvidence,
+  createAdvancementJudgeTool,
+  createAdvancementRuntime,
+  createFirstPartyEvidenceProvider,
+  detectEvidenceCapabilities,
+  EvidenceJournal,
+  ExecutorEvidenceHandler,
+  requiresIndependentEvidence,
+  summarizeRunRecord,
+  type AdvancementEvidenceCollectionInput,
+  type AdvancementEvidenceProvider,
+  type AdvancementReviewRunInput,
+  type AdvancementReviewRunOutcome,
+  type AdvancementRuntime,
+  type AdvancementRuntimeOptions,
+  type EvidenceJournalOptions,
+  type ExecutorEvidenceHandlerOptions,
+  type FirstPartyEvidenceProviderOptions,
+  type GitExecFn,
+} from "./advancement/index.js";
