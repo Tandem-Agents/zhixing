@@ -79,7 +79,6 @@ export interface DisasterRecoveryCommandOptions {
 export async function runDisasterRecoveryCommand(
   selection: {
     readonly directory?: string;
-    readonly pairedDeviceId?: string;
     readonly pairedDeviceName?: string;
     readonly backupNumber?: number;
   },
@@ -126,7 +125,6 @@ async function admitDisasterRecoveryCandidate(
   context: RecoveryContext,
   selection: {
     readonly directory?: string;
-    readonly pairedDeviceId?: string;
     readonly pairedDeviceName?: string;
     readonly backupNumber?: number;
   },
@@ -278,7 +276,6 @@ type DisasterTrustEvidence = Awaited<ReturnType<typeof collectDisasterRecoveryTr
 function createDisasterRecoveryLifecycleApplication(
   selection: {
     readonly directory?: string;
-    readonly pairedDeviceId?: string;
     readonly pairedDeviceName?: string;
     readonly backupNumber?: number;
   },
@@ -739,8 +736,6 @@ function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void
     signal.addEventListener("abort", onAbort, { once: true });
   });
 }
-
-export type DisasterRecoveryInventoryPort = InventoryRecoveryCheckpointTarget;
 
 function digestUlid(digest: string): string {
   const hex = digest.startsWith("sha256:") ? digest.slice("sha256:".length) : "";

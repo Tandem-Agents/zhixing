@@ -64,41 +64,6 @@ type BackupUnavailableCode =
   | "target-unavailable"
   | "runtime-unavailable";
 
-export interface PublicRecoveryBackupStatus {
-  readonly state: "not-configured" | "pending-verification" | "recoverable" | "unavailable";
-  readonly fullBackupReady: boolean;
-  readonly nextAction?: string;
-}
-
-export function projectRecoveryBackupStatus(status: RecoveryBackupStatus): PublicRecoveryBackupStatus {
-  switch (status.state) {
-    case "recoverable":
-      return { state: "recoverable", fullBackupReady: true };
-    case "pending-verification":
-      return {
-        state: "pending-verification",
-        fullBackupReady: false,
-        nextAction: "run-backup-verify",
-      };
-    case "unavailable":
-      return {
-        state: "unavailable",
-        fullBackupReady: status.fullBackupReady,
-        nextAction: status.code === "configuration-invalid"
-          ? "repair-backup-configuration"
-          : status.code === "runtime-unavailable"
-            ? "start-authenticated-mesh"
-            : "check-backup-target",
-      };
-    case "not-configured":
-      return {
-        state: "not-configured",
-        fullBackupReady: false,
-        nextAction: "run-backup-setup",
-      };
-  }
-}
-
 class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
   #slot: RuntimeSlot = { kind: "disabled" };
   #loading: Promise<RuntimeSlot> | undefined;

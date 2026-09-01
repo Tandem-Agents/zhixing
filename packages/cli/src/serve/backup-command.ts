@@ -97,12 +97,10 @@ export async function runBackupSetupCommand(
   selection: {
     readonly directory?: string;
     readonly pairedDeviceName?: string;
-    /** Internal test/adapter identity; public callers use pairedDeviceName. */
-    readonly pairedDeviceId?: string;
   },
   options: BackupCommandOptions = {},
 ): Promise<void> {
-  const selectedDevice = selection.pairedDeviceName ?? selection.pairedDeviceId;
+  const selectedDevice = selection.pairedDeviceName;
   if ((selection.directory === undefined) === (selectedDevice === undefined)) {
     throw new TypeError("请选择一个独立目录或一台已配对设备作为恢复备份目标");
   }
@@ -112,9 +110,7 @@ export async function runBackupSetupCommand(
     ? { kind: "directory", directory: selection.directory }
     : {
         kind: "paired-device",
-        selector: selection.pairedDeviceId
-          ? { kind: "device-id", value: selectedDevice! }
-          : { kind: "display-name", value: selectedDevice! },
+        displayName: selectedDevice!,
       }));
   renderBackupSetupResult(context, result);
 }

@@ -967,6 +967,30 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "projectBackupRecoveryPublicStatus(ctx.authorityCheckpointOwner",
+        "projectRecoveryBackupStatus(ctx.authorityCheckpointOwner",
+      ),
+    )).join("\n"),
+    /one Backup & Recovery application owner/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/core/src/backup-recovery/application.ts",
+      (text) => `${text}\ntype TestOnlyBackupSelector = { readonly pairedDeviceId?: string };`,
+    )).join("\n"),
+    /one Backup & Recovery application owner|candidate discovery and admission/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/disaster-recovery-command.ts",
+      (text) => `${text}\nexport type DisasterRecoveryInventoryPort = unknown;`,
+    )).join("\n"),
+    /candidate discovery and admission must have one domain application owner/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
       "packages/cli/src/serve/backup-runtime-owner.ts",
       (text) => text.replace("fullBackupReady: status.fullBackupReady", "fullBackupReady: false"),
     )).join("\n"),

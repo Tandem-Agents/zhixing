@@ -9,6 +9,7 @@ import {
   BackupRecoveryDisasterLifecycleError,
   BackupRecoveryRootLifecycleApplicationService,
   BackupRecoveryRootLifecycleError,
+  projectBackupRecoveryPublicStatus,
 } from "./application.js";
 
 function administrationFixture() {
@@ -97,7 +98,7 @@ describe("BackupRecoveryAdministrationApplicationService", () => {
     const replay = administrationFixture();
     await replay.application.setup({
       kind: "paired-device",
-      selector: { kind: "display-name", value: "peer" },
+      displayName: "peer",
     });
     expect(replay.mechanism.replayRootActivation).toHaveBeenCalledBefore(
       replay.mechanism.createCheckpoint,
@@ -112,7 +113,7 @@ describe("BackupRecoveryAdministrationApplicationService", () => {
     initial.mechanism.readRootState.mockResolvedValue({ kind: "missing" });
     await expect(initial.application.setup({
       kind: "paired-device",
-      selector: { kind: "device-id", value: "peer" },
+      displayName: "peer",
     })).resolves.toEqual({ kind: "initial-root-established" });
     expect(initial.mechanism.prepareInitialRoot).toHaveBeenCalledBefore(
       initial.mechanism.selectTarget,
@@ -133,7 +134,7 @@ describe("BackupRecoveryAdministrationApplicationService", () => {
     ]);
     await expect(ambiguous.application.setup({
       kind: "paired-device",
-      selector: { kind: "display-name", value: "peer" },
+      displayName: "peer",
     })).rejects.toMatchObject<Partial<BackupRecoveryAdministrationError>>({
       code: "duplicate-paired-device-name",
     });
@@ -141,7 +142,7 @@ describe("BackupRecoveryAdministrationApplicationService", () => {
     const current = administrationFixture();
     await expect(current.application.setup({
       kind: "paired-device",
-      selector: { kind: "device-id", value: "self" },
+      displayName: "self",
     })).rejects.toMatchObject<Partial<BackupRecoveryAdministrationError>>({
       code: "invalid-paired-device",
     });
@@ -197,6 +198,40 @@ describe("BackupRecoveryAdministrationApplicationService", () => {
     const f = administrationFixture();
     f.mechanism.readStatus.mockResolvedValue(status);
     await expect(f.application.status()).resolves.toEqual(expected);
+  });
+
+  it("owns the exact public status projection shared with host surfaces", () => {
+    expect(projectBackupRecoveryPublicStatus({
+      state: "recoverable",
+      fullBackupReady: true,
+    })).toEqual({ state: "recoverable", fullBackupReady: true });
+    expect(projectBackupRecoveryPublicStatus({
+      state: "pending-verification",
+      fullBackupReady: false,
+    })).toEqual({
+      state: "pending-verification",
+      fullBackupReady: false,
+      nextAction: "run-backup-verify",
+    });
+    expect(projectBackupRecoveryPublicStatus({
+      state: "not-configured",
+      fullBackupReady: false,
+    })).toEqual({
+      state: "not-configured",
+      fullBackupReady: false,
+      nextAction: "run-backup-setup",
+    });
+    for (const [code, nextAction] of [
+      ["configuration-invalid", "repair-backup-configuration"],
+      ["runtime-unavailable", "start-authenticated-mesh"],
+      ["target-unavailable", "check-backup-target"],
+    ] as const) {
+      expect(projectBackupRecoveryPublicStatus({
+        state: "unavailable",
+        fullBackupReady: true,
+        code,
+      })).toEqual({ state: "unavailable", fullBackupReady: true, nextAction });
+    }
   });
 
   it("reports an absent configuration and rejects broken current/candidate bindings", async () => {
@@ -660,7 +695,7 @@ describe("BackupRecoveryDisasterAdmissionApplicationService", () => {
     const conflict = disasterAdmissionFixture();
     await expect(conflict.application.admit({
       directory: "D:/backup",
-      pairedDeviceId: "peer-a",
+      pairedDeviceName: "peer",
     })).rejects.toMatchObject<Partial<BackupRecoveryDisasterAdmissionError>>({
       code: "source-selection-conflict",
       errorKind: "type-error",

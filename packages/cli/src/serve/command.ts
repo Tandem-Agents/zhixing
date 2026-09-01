@@ -87,7 +87,10 @@ import {
   createDeviceAdministrationCurrentRemovalMigrationLifecyclePort,
   createDeviceAdministrationCurrentRemovalRecoveryLifecyclePort,
 } from "@zhixing/core/device-administration/correctness";
-import { BackupRecoveryCurrentRemovalApplicationService } from "@zhixing/core/backup-recovery/application";
+import {
+  BackupRecoveryCurrentRemovalApplicationService,
+  projectBackupRecoveryPublicStatus,
+} from "@zhixing/core/backup-recovery/application";
 import {
   defineProductApiExactSet,
   ProductApiDispatcher,
@@ -211,10 +214,7 @@ import {
 } from "./workscene-runtime-projection.js";
 import { StartupRollback } from "./startup-rollback.js";
 import { AssemblyLifecycleContributions } from "./assembly-lifecycle.js";
-import {
-  createConfiguredCheckpointOwner,
-  projectRecoveryBackupStatus,
-} from "./backup-runtime-owner.js";
+import { createConfiguredCheckpointOwner } from "./backup-runtime-owner.js";
 import {
   governControlProvider,
   governControlTextCall,
@@ -2596,7 +2596,7 @@ async function runServerProcess(
       { status: "running", phase: managedHostStopping ? "stopping" : "running" },
       { readiness: managedHostStopping ? "stopping" : "ready" },
     ),
-    recoveryBackupStatus: async () => projectRecoveryBackupStatus(ctx.authorityCheckpointOwner
+    recoveryBackupStatus: async () => projectBackupRecoveryPublicStatus(ctx.authorityCheckpointOwner
       ? await ctx.authorityCheckpointOwner.status()
       : { state: "not-configured" as const, fullBackupReady: false }),
     // /mcp 状态显示与接入向导的宿主侧数据面(MCP 连接在宿主)

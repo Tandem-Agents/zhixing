@@ -26,7 +26,7 @@ describe("recovery public errors", () => {
   it("rejects conflicting disaster sources through the domain selection contract before IO", async () => {
     await expect(runDisasterRecoveryCommand({
       directory: "D:/backup",
-      pairedDeviceId: "peer",
+      pairedDeviceName: "peer",
     })).rejects.toEqual(new TypeError("恢复时只能选择一个备份目录或一台备份设备"));
   });
 });

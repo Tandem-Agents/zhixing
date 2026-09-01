@@ -2,9 +2,7 @@ export type BackupRecoveryAdministrationTargetSelection =
   | { readonly kind: "directory"; readonly directory: string }
   | {
       readonly kind: "paired-device";
-      readonly selector:
-        | { readonly kind: "display-name"; readonly value: string }
-        | { readonly kind: "device-id"; readonly value: string };
+      readonly displayName: string;
     };
 
 export type BackupRecoveryAdministrationTargetBinding =
@@ -44,7 +42,7 @@ export interface BackupRecoveryAdministrationVerificationCandidate {
   readonly targetId: string;
 }
 
-export type BackupRecoveryAdministrationStatus =
+export type BackupRecoveryPublicStatus =
   | {
       readonly state: "not-configured";
       readonly fullBackupReady: false;
@@ -54,11 +52,6 @@ export type BackupRecoveryAdministrationStatus =
       readonly state: "pending-verification";
       readonly fullBackupReady: false;
       readonly nextAction: "run-backup-verify";
-    }
-  | {
-      readonly state: "configured-empty";
-      readonly fullBackupReady: false;
-      readonly nextAction: "run-backup-setup";
     }
   | {
       readonly state: "recoverable";
@@ -72,6 +65,52 @@ export type BackupRecoveryAdministrationStatus =
         | "start-authenticated-mesh"
         | "check-backup-target";
     };
+
+export type BackupRecoveryAdministrationStatus =
+  | BackupRecoveryPublicStatus
+  | {
+      readonly state: "configured-empty";
+      readonly fullBackupReady: false;
+      readonly nextAction: "run-backup-setup";
+    };
+
+export interface BackupRecoveryPublicStatusSource {
+  readonly state: "not-configured" | "pending-verification" | "recoverable" | "unavailable";
+  readonly fullBackupReady: boolean;
+  readonly code?: "configuration-invalid" | "runtime-unavailable" | "target-unavailable";
+}
+
+/** Domain-owned projection shared by backup status surfaces; mechanisms only report raw state. */
+export function projectBackupRecoveryPublicStatus(
+  status: BackupRecoveryPublicStatusSource,
+): BackupRecoveryPublicStatus {
+  switch (status.state) {
+    case "recoverable":
+      return Object.freeze({ state: "recoverable", fullBackupReady: true });
+    case "pending-verification":
+      return Object.freeze({
+        state: "pending-verification",
+        fullBackupReady: false,
+        nextAction: "run-backup-verify",
+      });
+    case "unavailable":
+      return Object.freeze({
+        state: "unavailable",
+        fullBackupReady: status.fullBackupReady,
+        nextAction: status.code === "configuration-invalid"
+          ? "repair-backup-configuration"
+          : status.code === "runtime-unavailable"
+            ? "start-authenticated-mesh"
+            : "check-backup-target",
+      });
+    case "not-configured":
+      return Object.freeze({
+        state: "not-configured",
+        fullBackupReady: false,
+        nextAction: "run-backup-setup",
+      });
+  }
+}
 
 export type BackupRecoveryAdministrationSetupResult =
   | { readonly kind: "initial-root-established" }
@@ -137,11 +176,7 @@ export interface BackupRecoveryAdministrationMechanismPort<PreparedRoot, Target,
     readonly checkpointId: string;
     readonly recoveryPackage: RecoveryPackage;
   }): Promise<void>;
-  readStatus(targetId: string): Promise<{
-    readonly state: "not-configured" | "pending-verification" | "recoverable" | "unavailable";
-    readonly fullBackupReady: boolean;
-    readonly code?: "configuration-invalid" | "runtime-unavailable" | "target-unavailable";
-  }>;
+  readStatus(targetId: string): Promise<BackupRecoveryPublicStatusSource>;
 }
 
 export interface BackupRecoveryAdministrationApplication {
@@ -251,51 +286,32 @@ export class BackupRecoveryAdministrationApplicationService<PreparedRoot, Target
   async status(): Promise<BackupRecoveryAdministrationStatus> {
     const configured = await this.mechanism.loadTargetConfiguration();
     if (!configured) {
-      return Object.freeze({
-        state: "not-configured" as const,
-        fullBackupReady: false as const,
-        nextAction: "run-backup-setup" as const,
+      return projectBackupRecoveryPublicStatus({
+        state: "not-configured",
+        fullBackupReady: false,
       });
     }
     const binding = requireBinding(configured, configured.currentTargetId, "current");
-    const status = await this.mechanism.readStatus(binding.targetId);
-    switch (status.state) {
-      case "recoverable":
-        return Object.freeze({ state: "recoverable", fullBackupReady: true });
-      case "pending-verification":
-        return Object.freeze({
-          state: "pending-verification",
-          fullBackupReady: false,
-          nextAction: "run-backup-verify",
-        });
-      case "unavailable":
-        return Object.freeze({
-          state: "unavailable",
-          fullBackupReady: status.fullBackupReady,
-          nextAction: status.code === "configuration-invalid"
-            ? "repair-backup-configuration"
-            : status.code === "runtime-unavailable"
-              ? "start-authenticated-mesh"
-              : "check-backup-target",
-        });
-      case "not-configured":
-        return Object.freeze({
-          state: "configured-empty",
-          fullBackupReady: false,
-          nextAction: "run-backup-setup",
-        });
+    const status = projectBackupRecoveryPublicStatus(
+      await this.mechanism.readStatus(binding.targetId),
+    );
+    if (status.state === "not-configured") {
+      return Object.freeze({
+        state: "configured-empty",
+        fullBackupReady: false,
+        nextAction: "run-backup-setup",
+      });
     }
+    return status;
   }
 
   async #resolvePairedTarget(
     selection: Extract<BackupRecoveryAdministrationTargetSelection, { readonly kind: "paired-device" }>,
   ): Promise<Extract<BackupRecoveryAdministrationTargetBinding, { readonly kind: "paired-device" }>> {
-    const value = requireNonEmpty(selection.selector.value, "Paired recovery backup device");
+    const value = requireNonEmpty(selection.displayName, "Paired recovery backup device");
     const devices = await this.mechanism.listPairedDevices();
     const matches = devices.filter((device) =>
-      device.active && (selection.selector.kind === "device-id"
-        ? device.deviceId === value
-        : device.displayName === value));
+      device.active && device.displayName === value);
     if (matches.length > 1) {
       throw new BackupRecoveryAdministrationError("duplicate-paired-device-name");
     }
@@ -770,7 +786,6 @@ function requireNonEmpty(value: string, label: string): string {
 
 export interface BackupRecoveryDisasterAdmissionSelection {
   readonly directory?: string;
-  readonly pairedDeviceId?: string;
   readonly pairedDeviceName?: string;
   readonly backupNumber?: number;
 }
@@ -888,7 +903,7 @@ export class BackupRecoveryDisasterAdmissionError extends Error {
 export function validateBackupRecoveryDisasterAdmissionSelection(
   selection: BackupRecoveryDisasterAdmissionSelection,
 ): void {
-  if ([selection.directory, selection.pairedDeviceId, selection.pairedDeviceName]
+  if ([selection.directory, selection.pairedDeviceName]
     .filter((value) => value !== undefined).length > 1) {
     throw new BackupRecoveryDisasterAdmissionError(
       "source-selection-conflict",
@@ -1052,8 +1067,7 @@ export class BackupRecoveryDisasterAdmissionApplicationService<
     if (selection.pairedDeviceName !== undefined && named.length !== 1) {
       throw new BackupRecoveryDisasterAdmissionError("paired-device-name-not-unique");
     }
-    const deviceId = named[0]?.deviceId ?? selection.pairedDeviceId ??
-      context.configuredPairedDeviceId;
+    const deviceId = named[0]?.deviceId ?? context.configuredPairedDeviceId;
     if (!deviceId) {
       throw new BackupRecoveryDisasterAdmissionError("target-selection-required");
     }

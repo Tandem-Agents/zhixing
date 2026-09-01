@@ -1,8 +1,8 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：等待协调者复核 A5-17d Disaster Recovery 安装、提交与完成终态归域<br>
-> 完成度：5/8<br>
+> 当前检查点：等待协调者复核 A5-17e Backup & Recovery 零残留审计与 A5 退出<br>
+> 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
 
@@ -100,7 +100,7 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 - [x] **A2　用一条真实垂直切片证明领域模型。** 依据 A0 的依赖事实选择边界最小而行为完整的现有领域，先记录选择理由和明确不做；让该领域同时拥有自己的 Command/Query/Event 合同、应用用例、规则与状态机、领域权威适配、面向 Kernel 的 Run Envelope 投影、面向表面的投影和生命周期贡献。至少让一个真实现有表面经进程内或 RPC binding 调用同一应用端口，迁移后立即删除旧写入口。本项不得预建全局领域框架或为了模板美观拆包。
 - [x] **A3　建立组合式 Product API 与纯绑定。** 只从 A2 已证明的领域合同建立 Product API Catalog、dispatcher 和进程内/RPC binding 模式；Catalog 只组合，不拥有业务类型、规则、状态或写入权。Command/Query/Fact Event/Progress Event 的语义与身份清楚，瞬时进展不能成为恢复事实；Progress Event 必须带运行身份与顺序，消费者发现缺口后重新 Query 权威投影。让 A2 领域的全部现有 Server/RPC、CLI、Channel 入口只承担各自实际存在的认证、连接、编解码、调用、订阅、错误映射和呈现；本机路径复用同一应用语义，但不被迫经过网络或无价值序列化。其他领域只能在 A5 完成自身垂直迁移时接入该模式，不得由 A3 先建立空合同或平行入口。
 - [x] **A4　封闭 Intelligence Kernel。** 基于全部现有运行形态冻结最小 Run Envelope / Event / Terminal 合同和 Conformance Suite；收窄 `AgentRuntime` 公共面，隐藏安全管线、权限存储、工作区解析和宿主管理内部对象。产品对象到模型输入、运行事件到产品结果均经显式投影；模型输出只能形成提议、证据和运行终态，必须经领域决定与权威提交后才成为产品事实。A4 只负责 Kernel 合同及其边界：把 Workscene、Schedule 等产品特有装配移出 RuntimeHost，交给当前唯一产品责任者生成信封；尚未完成 A5 的领域可以通过登记退场点的最短单向端口提供投影，但不得在 A4 复制其状态机、权威或 Product API。RuntimeHost 只消费通用运行合同，对话、任务、本机、远端、取消、失败和资源释放行为必须等价。
-- [ ] **A5　逐领域归位全部现有产品责任。** 按 A0 得到的无环依赖顺序迁移其余领域；每次只迁移一个事实所有权，并把合同、应用用例、状态机/Reducer、权威适配、既有 Kernel 投影的最终归属、Product API binding、Surface、生命周期、直接测试和旧入口删除作为同一责任链闭合。A2/A3/A4 已建立的合同、binding 与投影必须迁入最终唯一 owner 或直接复用，不得在 A5 重建第二套。领域只实现 Correctness 端口的业务适配，不得把通用提交、效果、安全、确认、资源、持久化或恢复机制复制进领域；Correctness 实现中的业务 Reducer、状态机和用户语义则必须随本项退出共享机制。A2 选中的领域保留在下表，但只有 A3 完成其 Product API 与全部现有 binding 后才能勾选；登记表所有行均为 `[x]` 后 A5 才能完成。A0 若发现未列出的正式产品事实，只有在生产事实与 AE-001 能唯一确定其窄边界时才可补行；没有独立事实的运行/交互方式应归入既有领域、Kernel 或 Surface，不得为了穷举虚构新领域。只有真正的产品语义歧义才暂停交由用户裁决。
+- [x] **A5　逐领域归位全部现有产品责任。** 按 A0 得到的无环依赖顺序迁移其余领域；每次只迁移一个事实所有权，并把合同、应用用例、状态机/Reducer、权威适配、既有 Kernel 投影的最终归属、Product API binding、Surface、生命周期、直接测试和旧入口删除作为同一责任链闭合。A2/A3/A4 已建立的合同、binding 与投影必须迁入最终唯一 owner 或直接复用，不得在 A5 重建第二套。领域只实现 Correctness 端口的业务适配，不得把通用提交、效果、安全、确认、资源、持久化或恢复机制复制进领域；Correctness 实现中的业务 Reducer、状态机和用户语义则必须随本项退出共享机制。A2 选中的领域保留在下表，但只有 A3 完成其 Product API 与全部现有 binding 后才能勾选；登记表所有行均为 `[x]` 后 A5 才能完成。A0 若发现未列出的正式产品事实，只有在生产事实与 AE-001 能唯一确定其窄边界时才可补行；没有独立事实的运行/交互方式应归入既有领域、Kernel 或 Surface，不得为了穷举虚构新领域。只有真正的产品语义歧义才暂停交由用户裁决。
 
   | 领域或管理责任 | 状态 | 必须成立的目标边界 |
   |---|---|---|
@@ -113,7 +113,7 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
   | Trust Administration | [x] | 用户可管理的信任规则归域；Security Substrate 只负责执行决定 |
   | Skill Catalog | [x] | 技能资产与生命周期归域；Kernel 只消费不可变能力投影 |
   | Device Administration | [x] | 用户可见设备关系、移除和值班迁移归域；Executor/Mesh 只实现物理效果 |
-  | Backup & Recovery Administration | [ ] | 备份目标、恢复根、checkpoint 选择与灾难恢复产品用例归域；Correctness/Storage/Mesh 只提供签名、冻结、传输、安装与恢复机制 |
+  | Backup & Recovery Administration | [x] | 备份目标、恢复根、checkpoint 选择与灾难恢复产品用例归域；Correctness/Storage/Mesh 只提供签名、冻结、传输、安装与恢复机制 |
 
 - [ ] **A6　收束可替换边缘与设备拓扑。** Provider、Tool、MCP、Storage、Channel、Executor、Mesh 分别实现需求方拥有的窄端口，不统一成万能 Capability，也不生成产品流程、文案或领域决定；同一实现承担多个角色时必须分别实现端口、依赖和生命周期合同。用户设备事实与物理连接、路由、Assignment 和执行位置彻底分开；单机与分布式只在 Host 的适配选择处分叉，领域和 Kernel 不出现 Anchor、epoch、Mesh 或本机/远端条件分支。扩展只能进入可组合区，不能替换权威、安全、恢复、资源和终态。
 - [ ] **A7　删除迁移结构并完成同基线终验。** 删除所有旧委托桥、旧业务入口、第二组合根、根级宽泛导出、无主公共接口、可变 lazy ref、服务定位旁路和临时兼容；完成依赖、合同、事实所有权、Host 生命周期、Kernel、Authority/Effect、拓扑透明、变化影响面和产品回归门禁，更新正式架构与模块索引。冻结同一源码、测试、文档、构建产物和验收输入后执行最终门禁与六面对抗；发现真实问题即恢复对应 A 项和退出门为 `[ ]`，修复后重新冻结并重做受影响门禁及整轮对抗。
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `c80d50d5`；A5-17c 已由协调者独立复核并提交，disaster recovery 的恢复源选择、候选发现/选择、恢复包双绑定与稳定 request/transfer 准入已归入唯一 Backup & Recovery 应用，旧 inventory owner 已删除；A5-17a/17b、A5-16a～A5-16i 继续有效 |
-| 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | `A5-17d-disaster-recovery-install-finish-v1` 已实施并等待协调者复核：fresh/current-installed 两路 install continuation、签名 abort、generation receipt、credential outcome 与 recover-finish tombstone 已归入唯一 Backup & Recovery 应用 |
-| 下一责任链 | A5-17d 后有限审计 Backup & Recovery 全域零残留并闭合 A5 登记行，再进入 A6；不得提前扩展全仓或运行最终全量门禁 |
+| 已接受基线 | `7e7a43f7`；A5-17d 已由协调者独立复核并提交，disaster recovery 的 fresh/current-installed、prepare/import/commit/abort/receipt、credential outcome 与 recover-finish 终态已归入唯一 Backup & Recovery 应用，临时 command bridge 已关闭；A5-17a～17c、A5-16a～A5-16i 继续有效 |
+| 当前 A 项 | A5 已在当前工作区闭合，等待协调者独立复核退出；不得在本包进入 A6 |
+| 活跃工作包 | `A5-17e-backup-recovery-zero-residual-audit-v1` 已实施并等待协调者复核：全域 exact-set、产品状态投影、无消费者/测试旁路和负向门禁已闭合 |
+| 下一责任链 | 协调者接受并提交 A5-17e 后，从 A6 选择首条最高依赖的可替换边缘/设备拓扑责任链；若复核发现反证则只恢复真实相交的 Backup & Recovery 子证据与 A5 退出门 |
 | 打开的单向桥 | 无；`A5-DISASTER-RECOVERY-COMMAND-01` 已关闭，`disaster-recovery-command.ts` 仅保留 path/SecretStore/Authority/Target/Mesh/protocol/time/signal 机制适配与中文呈现，不再拥有安装或完成产品状态机 |
-| 已失效证据 | 无当前未恢复证据；A5-17d 已恢复 disaster install/abort/receipt/current-installed/recover-finish、CLI/core、S7/export/build 证据，A5-17c candidate/admission 与独立 trust evidence、A5-17a/17b、A5-16a～A5-16i 继续有效 |
+| 已失效证据 | 无当前未恢复证据；A5-17e 已恢复初次审计发现的 CLI `server.info` 状态决定、test-only stable device-id selector 与无消费者 inventory type 出口，A5-16h、A5-17a～17d 的其余事实继续有效 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2470,6 +2470,13 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 唯一应用与机制边界：`@zhixing/core/backup-recovery/application` 新增有限 `BackupRecoveryDisasterLifecycleApplicationService`，唯一拥有 current-installed response-loss continuation 与 fresh install 分支、prepare/import—commit—current generation 全等—receipt 的顺序、失败后稳定 request/transfer/checkpoint binding 的 `operator-cancelled` abort、abort 失败不覆盖主失败、typed credential rotation/default instruction/next step、以及 recover-finish 的 confirmation-before-I/O 和 tombstone `eligible/terminal/ineligible` 裁决；只有 `eligible` 触发落盘，`terminal` 幂等成功，`ineligible` 保留原拒绝。应用在非 issuer 分支才打开 fresh install scope，admission 后先取得独立 trust evidence 再进入可 abort 的 install 区间；prepare/commit、generation mismatch、receipt timeout/cancel 都保留原错误并尝试同 identity abort，已安装 current generation 则不重开 candidate/admission/Target prepare。领域只消费 path-free mechanism/session，未取得 RecoveryRoot、checkpoint、Authority log、Mesh、SecretStore、Target 或签名实现。
 - CLI 适配、行为保护与旧路退场：`disaster-recovery-command.ts` 现在只打开/关闭 RecoveryContext、evidence Mesh 和 target session，适配 A5-17c admission、trust evidence、Target prepare/commit/abort/tombstone、installation/receipt、CredentialExposure、clock/signal，并把 typed progress/completion/finish 映射为迁移前中文文案。公开 `recover/recover-finish` 命令、参数与通用安全错误，current-duty/current-installed restart、receipt timeout/cancel、两阶段签名/持久 identity、commit 后读回、credential rotation list/default hint、finish confirmation 优先级和 tombstone replay 均保持不变；CLI 中 issuer 分支、prepare/commit/abort try/catch、completion report 与 finish eligibility 状态机归零，`A5-DISASTER-RECOVERY-COMMAND-01` 关闭，没有第二 application、双 install truth 或兼容旁路。
 - 直接证据、失效与交接：Core Backup & Recovery application 1 文件 32/32（既有 22 项加 lifecycle 10 项）、CLI 真实 production adapter 1 文件 4/4、Target 真实持久链 tombstone disposition 定向 1/1，合计 3 文件 37/37；覆盖 fresh/current-installed、foreign/missing generation、prepare/commit/receipt failure、receipt timeout/cancel、稳定 signed abort 与主错误、typed credential action、finish confirmation-before-I/O、eligible 落盘、terminal 幂等与 ineligible 拒绝。Core/CLI typecheck、Core fresh build、`pnpm cli:build`、`pnpm build` 的版本检查与 17 个生产包全依赖构建、fresh `pnpm runtime:package-exports`、canonical S7 coverage/mutation 34/34 与 registry golden、changed-source Biome 和 `git diff --check` 均通过。S7 反向 mutation 现在识别 current-installed/fresh 分支、prepare/commit/receipt/abort 顺序、finish confirmation 优先级、tombstone disposition 旁路、第二 lifecycle owner、CLI 重新解释 issuer 或恢复 completion state machine；以后若 disaster lifecycle application/session/outcome/error、A5-17c admission 交界、CLI context/evidence/Target/protocol/receipt/credential/tombstone adapter、installation codec/Target 持久状态机、core 窄 export/build、S7/package-export 或上述直接测试任一变化，只恢复本证据及真实相交证据。Backup & Recovery Administration 行与 A5 继续 `[ ]`，下一检查点固定为对 Backup & Recovery 做有限零残留审计并裁决登记行，不提前进入 A6；当前停在可构建、可运行、可恢复且 Disaster Recovery post-admission 产品生命周期只有一个领域 owner 的检查点等待协调者独立复核，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+### A5-17e：Backup & Recovery 全域有限零残留审计与 A5 退出
+
+- 实施基线与 exact-set：以已接受 `HEAD 7e7a43f7` 加协调者调度记录为基线，形成待复核证据 `A5-17e-backup-recovery-zero-residual-audit-v1`。从 Commander 的 `backup setup/verify/status/recover/recover-finish/root rotate/invalidate/approve-reset/reset` 九个公开命令、`server.info` 的恢复备份状态投影和 Device Administration current-removal 协作正向追踪，再从五个唯一应用服务、Host 组合、Correctness/Storage/Mesh/Secret/protocol 机制、窄导出/build entry 与全部反向消费者对账。五个产品 owner 固定为 `BackupRecoveryAdministrationApplicationService`、`BackupRecoveryRootLifecycleApplicationService`、`BackupRecoveryDisasterAdmissionApplicationService`、`BackupRecoveryDisasterLifecycleApplicationService`、`BackupRecoveryCurrentRemovalApplicationService`；checkpoint/target/root package/session/signature、disaster candidate/Target/installation/trust evidence、current-removal lifecycle/effects 等继续只提供 codec、存储、签名、传输、fence 与恢复机制，不拥有用户状态、选择、next action 或第二应用决定。
+- 同根纠正与旧路退场：审计发现 `backup-runtime-owner.ts` 仍把 raw durable backup state 映射为公开 `nextAction`，现已把唯一不可变 `BackupRecoveryPublicStatus` 与 `projectBackupRecoveryPublicStatus` 归入 `@zhixing/core/backup-recovery/application`；应用 `status()` 与 `server.info` 共同消费该投影，CLI runtime owner 仅保留 checkpoint 机制。同步删除 backup setup/disaster admission 的 test-only stable device-id selector，生产与测试只消费已注册的 paired display-name 或既有 configured device id；删除无消费者 `DisasterRecoveryInventoryPort` 类型出口。全域反查未发现旧 `completeBackupSetup`、`RecoveryRootLifecycleService`、legacy inventory selector、`reportDisasterRecoveryCompleted`、第二 application/materializer/codec、根 barrel、兼容/deprecated wrapper、双写或未登记 bridge；旧 Skill 目录及 A6 边缘责任未触碰，公开命令、RPC/Server 信息、中文文案、持久格式、签名、重放、恢复和 current-removal 行为不变。
+- 直接证据与验证：Core Backup & Recovery application 1 文件 33/33；CLI 真实 setup/runtime-owner/disaster/public-error 闭包 4 文件 16/16，其中首次下游运行因 stale Core dist 产生 backup-command 6 项失败，完成 Core fresh build 后只重跑该失效文件并取得 8/8，其余 3 文件 8/8 的首次证据继续有效。Core typecheck/build、CLI typecheck 与 `pnpm cli:build`、fresh `pnpm runtime:package-exports`、canonical S7 coverage/mutation 34/34 与 registry golden、changed-source Biome 均通过；S7 现机械冻结九命令、五个应用构造、唯一公开状态投影、paired selector、narrow export/build exact-set，并反向拒绝 CLI 本地 projector、device-id 测试旁路、无消费者 inventory alias、旧 helper/第二应用、根导出和机制层重获产品决定。
+- 失效、阶段裁决与交接：若九个公开命令或 `server.info` 状态消费、五个应用/descriptor、公开状态投影、backup target/root/disaster/current-removal 合同、对应 Host/Correctness/Storage/Mesh/Secret/protocol adapter、core 窄 export/build、S7/package-export 或上述直接测试任一变化，恢复本证据及真实相交的 A5-16h、A5-17a～A5-17d 子证据；无关 A6 适配变化不自动误伤。当前 Backup & Recovery Administration 行与 A5 均更新为 `[x]`，完成度为 `6/8`；A5 全部领域行已闭合且无当前未恢复证据，下一检查点仅在协调者独立接受并提交后进入 A6。本轮未进入 A6，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 

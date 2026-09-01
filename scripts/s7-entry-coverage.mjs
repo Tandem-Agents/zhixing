@@ -7416,6 +7416,7 @@ export function inspectRecoveryBackupAssembly(records) {
     count(backupApplication, "async setup(") !== 1 ||
     count(backupApplication, "async verify()") !== 1 ||
     count(backupApplication, "async status()") !== 1 ||
+    count(backupApplication, "export function projectBackupRecoveryPublicStatus(") !== 1 ||
     count(
       backupApplication,
       "`backup-setup:${binding.targetId}:${root.checkpointRevision}`",
@@ -7428,7 +7429,11 @@ export function inspectRecoveryBackupAssembly(records) {
     count(backup, ".setup(selection.directory !== undefined") !== 1 ||
     count(backup, "createBackupRecoveryAdministration(context, options).verify()") !== 1 ||
     count(backup, "createBackupRecoveryAdministration(context, options).status()") !== 1 ||
-    backup.includes("completeBackupSetup(")
+    !command.includes("projectBackupRecoveryPublicStatus(ctx.authorityCheckpointOwner") ||
+    backup.includes("completeBackupSetup(") ||
+    backup.includes("pairedDeviceId") ||
+    backupApplication.includes('kind: "device-id"') ||
+    owner.includes("projectRecoveryBackupStatus")
   ) {
     failures.push("backup setup, verify and status must have one Backup & Recovery application owner");
   }
@@ -7455,6 +7460,9 @@ export function inspectRecoveryBackupAssembly(records) {
     disasterCommand.includes("selectDisasterRecoveryCandidate") ||
     disasterCommand.includes("selection.pairedDeviceName === undefined") ||
     disasterCommand.includes("selected.entry.recipientKeyId") ||
+    disasterCommand.includes("pairedDeviceId") ||
+    disasterCommand.includes("DisasterRecoveryInventoryPort") ||
+    backupApplication.includes("pairedDeviceId") ||
     records.some(({ relative }) =>
       relative.endsWith("/disaster-recovery-inventory.ts"))
   ) {
@@ -7598,7 +7606,7 @@ export function inspectRecoveryBackupAssembly(records) {
     !checkpointService.includes("canonicalize(record.generation) === canonicalize(generation)") ||
     count(checkpointService, "return projectDurableRecoveryBackupStatus({") !== 1 ||
     !owner.includes("projectDurableRecoveryBackupStatus({") ||
-    count(owner, "fullBackupReady: status.fullBackupReady") !== 2
+    count(owner, "fullBackupReady: status.fullBackupReady") !== 1
   ) {
     failures.push("durable recovery readiness projector or unavailable consumer drifted");
   }

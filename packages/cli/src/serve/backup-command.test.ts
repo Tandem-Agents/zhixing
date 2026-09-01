@@ -54,7 +54,7 @@ describe("paired recovery backup setup", () => {
       try {
         await runtime.start();
         await runBackupSetupCommand(
-          { pairedDeviceId: fixture.targetDeviceId },
+          { pairedDeviceName: "recovery target" },
           {
             zhixingHome: fixture.sourceHome,
             secretStore: fixture.sourceSecrets,
@@ -159,7 +159,7 @@ describe("paired recovery backup setup", () => {
       const active = await startActiveCheckpointReceiver(fixture);
       try {
         await runBackupSetupCommand(
-          { pairedDeviceId: fixture.targetDeviceId },
+          { pairedDeviceName: "recovery target" },
           {
             zhixingHome: fixture.sourceHome,
             secretStore: fixture.sourceSecrets,
@@ -205,7 +205,7 @@ describe("paired recovery backup setup", () => {
           return originalTargetTransaction(...args);
         };
         await expect(runBackupSetupCommand(
-          { pairedDeviceId: fixture.targetDeviceId },
+          { pairedDeviceName: "recovery target" },
           {
             zhixingHome: fixture.sourceHome,
             secretStore: fixture.sourceSecrets,
@@ -282,7 +282,7 @@ describe("paired recovery backup setup", () => {
       try {
         await replayRuntime.start();
         finiteReplay = runBackupSetupCommand(
-          { pairedDeviceId: fixture.targetDeviceId },
+          { pairedDeviceName: "recovery target" },
           {
             zhixingHome: fixture.sourceHome,
             secretStore: fixture.sourceSecrets,
@@ -307,7 +307,7 @@ describe("paired recovery backup setup", () => {
       const active = await startActiveCheckpointReceiver(fixture);
       try {
         await runBackupSetupCommand(
-          { pairedDeviceId: fixture.targetDeviceId },
+          { pairedDeviceName: "recovery target" },
           {
             zhixingHome: fixture.sourceHome,
             secretStore: fixture.sourceSecrets,
@@ -419,7 +419,7 @@ describe("recovery root public lifecycle", () => {
     try {
       await initialRuntime.start();
       await runBackupSetupCommand(
-        { pairedDeviceId: fixture.targetDeviceId },
+        { pairedDeviceName: "recovery target" },
         {
           zhixingHome: fixture.sourceHome,
           secretStore: fixture.sourceSecrets,
@@ -494,7 +494,7 @@ describe("recovery root public lifecycle", () => {
     try {
       await initialRuntime.start();
       await runBackupSetupCommand(
-        { pairedDeviceId: fixture.targetDeviceId },
+        { pairedDeviceName: "recovery target" },
         {
           zhixingHome: fixture.sourceHome,
           secretStore: fixture.sourceSecrets,

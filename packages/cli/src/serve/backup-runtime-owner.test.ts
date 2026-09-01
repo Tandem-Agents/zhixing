@@ -15,47 +15,10 @@ import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { activateInitialRecoveryRoot } from "./mesh-pair-command.js";
 import {
   createConfiguredCheckpointOwner,
-  projectRecoveryBackupStatus,
 } from "./backup-runtime-owner.js";
 import type { MeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 
-describe("public recovery backup status", () => {
-  it("projects exact public keys for every stable status", () => {
-    expect(projectRecoveryBackupStatus({
-      state: "recoverable",
-      fullBackupReady: true,
-      checkpointId: "checkpoint-private",
-      targetId: "target-private",
-      upToLsn: 42,
-    })).toEqual({ state: "recoverable", fullBackupReady: true });
-    expect(projectRecoveryBackupStatus({
-      state: "pending-verification",
-      fullBackupReady: false,
-      checkpointId: "checkpoint-private",
-    })).toEqual({
-      state: "pending-verification",
-      fullBackupReady: false,
-      nextAction: "run-backup-verify",
-    });
-    expect(projectRecoveryBackupStatus({
-      state: "not-configured",
-      fullBackupReady: false,
-    })).toEqual({
-      state: "not-configured",
-      fullBackupReady: false,
-      nextAction: "run-backup-setup",
-    });
-    for (const code of ["configuration-invalid", "runtime-unavailable", "target-unavailable"] as const) {
-      const projected = projectRecoveryBackupStatus({
-        state: "unavailable",
-        fullBackupReady: true,
-        code,
-      });
-      expect(projected.fullBackupReady).toBe(true);
-      expect(Object.keys(projected).sort()).toEqual(["fullBackupReady", "nextAction", "state"]);
-    }
-  });
-
+describe("recovery backup checkpoint owner", () => {
   it("isolates optional configuration and runtime failures and reloads a repaired binding", async () => {
     const home = await createTempDir("recovery-owner-slot");
     const key = await DeviceKey.generate();
