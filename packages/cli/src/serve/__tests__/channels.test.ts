@@ -148,14 +148,22 @@ describe("setupChannels", () => {
 
   it("keeps inbound grouping and replies internal while returning only consumed Host ports", async () => {
     mockFeishu.connect.mockResolvedValue(undefined);
-    const admitTurn = vi.fn(async () => ({ status: "not-found" as const }));
+    const admitTurn = vi.fn(async (input: { conversationId: string }) => ({
+      status: "not-found" as const,
+      conversationId: input.conversationId,
+      turnId: "turn-test",
+    }));
     const result = await setupChannels({
       entries: { feishu: { type: "feishu" } },
       credentials: { channels: { feishu: { appId: "cli_x", appSecret: "s" } } } as never,
       logger,
-      conversations: {
-        usesDurableTurnProtocol: () => false,
-        admitTurn,
+      conversation: {
+        prepareAgentTurn: async () => ({ turnId: "turn-test" }) as never,
+        admitAgentTurn: admitTurn,
+        abort: async () => ({
+          cancelled: true,
+          feedback: { kind: "idle" },
+        }),
       } as never,
     });
     await result.connectionTask;

@@ -2767,6 +2767,11 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
   const paths = [
     "packages/cli/src/serve/channels.ts",
     "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/channel-conversation-product-binding.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/conversation-run-control-binding.ts",
+    "packages/core/src/conversation/application.ts",
+    "packages/owner-kernel/src/conversation-agent-turn-admission.ts",
     "packages/server/src/context.ts",
     "packages/server/src/server.ts",
     "packages/server/src/channels/inbound-router.ts",
@@ -2832,6 +2837,56 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
       (text) => `${text}\ntype ChannelAdapter = unknown;\n`,
     )).join("\n"),
     /concrete Channel registry or adapter escaped/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/server/src/channels/inbound-router.ts",
+      (text) => text.replace(
+        "this.conversation.admitAgentTurn({",
+        "this.conversations.admitTurn({",
+      ),
+    )).join("\n"),
+    /finite Conversation application boundary/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/cli/src/serve/channel-conversation-product-binding.ts",
+      (text) => text.replace(
+        "productApi.command(\n        CONVERSATION_ADMIT_AGENT_TURN_COMMAND,",
+        "this.#manager.admitTurn(\n        CONVERSATION_ADMIT_AGENT_TURN_COMMAND,",
+      ),
+    )).join("\n"),
+    /Product API binding or unique Host composition/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "ctx.channelConversationProduct?.bind(productApi);",
+        "void productApi;",
+      ),
+    )).join("\n"),
+    /Product API binding or unique Host composition/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/owner-kernel/src/conversation-agent-turn-admission.ts",
+      (text) => text.replaceAll(
+        'request.source ?? "interactive"',
+        '"interactive"',
+      ),
+    )).join("\n"),
+    /admission or durable cancellation mechanism binding drifted/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/core/src/conversation/application.ts",
+      (text) => text.replace(
+        '  readonly kind = "authoritative-response" as const;',
+        '  readonly kind = "authoritative-response" as const;\n  readonly replyTarget: unknown;',
+      ),
+    )).join("\n"),
+    /admission or durable cancellation mechanism binding drifted/u,
   );
 });
 

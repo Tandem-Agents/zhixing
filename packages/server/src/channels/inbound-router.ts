@@ -9,22 +9,18 @@ import {
   type OutboxRegistry,
   type TurnContext,
   extractText,
-  generateTurnId,
   isFreeTextDeny,
   type AgentResult,
 } from "@zhixing/core";
+import type { ConfirmationHub } from "@zhixing/owner-kernel";
 import type {
-  ConfirmationHub,
-  ConversationManager,
-  ManagedSession,
-} from "@zhixing/owner-kernel";
-import { channelSurfacePrincipal } from "@zhixing/owner-kernel";
-import { protocolDigest } from "@zhixing/core/protocol";
+  ConversationAbortedResult,
+  ConversationPreparedAgentTurnIdentity,
+} from "@zhixing/core/conversation/application";
 import type {
   SessionActivityBroadcast,
   SessionBroadcast,
 } from "@zhixing/rpc/session-broadcast";
-import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
 import {
   APPROVE_KEYWORDS,
   DENY_KEYWORDS,
@@ -68,8 +64,63 @@ export interface InboundChannelPort {
   ): Promise<DeliveryResult>;
 }
 
+export type InboundConversationTurnOutcome =
+  | Readonly<{ kind: "settled"; result: AgentResult }>
+  | Readonly<{ kind: "aborted" }>
+  | Readonly<{ kind: "error"; error: unknown }>;
+
+/**
+ * Finite Conversation Product API binding consumed by the Channel Surface.
+ * Conversation admission, Owner queues, durable protocol and terminal release
+ * stay behind this port; the router owns only Surface projection and replies.
+ */
+export interface InboundConversationApplicationPort {
+  prepareAgentTurn(input: Readonly<{
+    channelId: string;
+    platformSubject: string;
+    messageId?: string;
+  }>): Promise<ConversationPreparedAgentTurnIdentity>;
+  admitAgentTurn(input: Readonly<{
+    conversationId: string;
+    text: string;
+    turnIdentity: ConversationPreparedAgentTurnIdentity;
+    turnContext: TurnContext;
+    channelId: string;
+    platformSubject: string;
+    onStarted(): void;
+    onPendingCancelled(): void;
+    onProtocolEvent(method: string, params: unknown): void;
+    onCommitFailure(error: unknown): void;
+    onFinalPublishFailure(error: unknown): void;
+    onOutcome(
+      outcome: InboundConversationTurnOutcome,
+      delivery: "authoritative" | "surface",
+    ): Promise<void>;
+    onSettled(delivery: "authoritative" | "surface"): void;
+  }>): Promise<
+    Readonly<{
+      status:
+        | "immediate"
+        | "queued"
+        | "replayed"
+        | "queue-full"
+        | "lifecycle-busy"
+        | "not-found";
+      conversationId: string;
+      turnId: string;
+    }>
+  >;
+  abort(input: Readonly<{
+    conversationId: string;
+    channelId: string;
+    platformSubject: string;
+    messageId?: string;
+    replyTarget: DeliveryTarget;
+  }>): Promise<ConversationAbortedResult>;
+}
+
 export interface InboundRouterOptions {
-  conversations: ConversationManager;
+  conversation: InboundConversationApplicationPort;
   channels: InboundChannelPort;
   logger: ChannelLogger;
   /** Final side-effect gate for channel callbacks racing a current-owner switch. */
@@ -113,7 +164,7 @@ export interface InboundRouterOptions {
 export class InboundRouter {
   static readonly entryDescriptor = INBOUND_ROUTER_ENTRY_DESCRIPTOR;
 
-  private readonly conversations: ConversationManager;
+  private readonly conversation: InboundConversationApplicationPort;
   private readonly channels: InboundChannelPort;
   private readonly logger: ChannelLogger;
   private readonly isCurrentOwner: () => boolean;
@@ -131,7 +182,7 @@ export class InboundRouter {
   private readonly acceptedDrainWaiters = new Set<() => void>();
 
   constructor(options: InboundRouterOptions) {
-    this.conversations = options.conversations;
+    this.conversation = options.conversation;
     this.channels = options.channels;
     this.logger = options.logger;
     this.isCurrentOwner = options.isCurrentOwner ?? (() => true);
@@ -203,9 +254,8 @@ export class InboundRouter {
    *
    * 流程：
    * 1. 对话归组 → conversationId
-   * 2. getOrCreate → ManagedSession
-   * 3. 并发守卫（enqueue / immediate）
-   * 4. Agent 执行 → 结果
+   * 2. Conversation Product API 准入 → durable accepted/queued
+   * 3. 有限 execution mechanism 执行 → 结果投影
    * 5. adapter.send() → 回复到触发通道
    */
   /**
@@ -213,7 +263,7 @@ export class InboundRouter {
    *
    * 调用后,后续 `handleMessage` 直接对每条消息回固定文案 + log + return,
    * 不进 IntentClassifier / confirmation / agent 任何路径(避免在已 drain 的
-   * ConversationManager 上启动新 turn)。反馈走 `adapter.send` 绕过 Outbox
+   * Conversation 应用入口启动新 turn)。反馈走 `adapter.send` 绕过 Outbox
    * (与 `handleControlIntent` 同源 —— 关停期间 Outbox 也在 drain),send 失败
    * try-catch 仅 log,不影响关停链。
    *
@@ -286,14 +336,13 @@ export class InboundRouter {
         if (handled) return;
       }
 
-      if (this.conversations.usesDurableTurnProtocol() && !msg.messageId) {
-        throw new Error("Durable channel admission requires a stable platform message id");
-      }
-
       const replyTarget = buildReplyTarget(msg);
-      const turnId = msg.messageId
-        ? `channel:${msg.channelId}:${msg.messageId}`
-        : generateTurnId();
+      const turnIdentity = await this.conversation.prepareAgentTurn({
+        channelId: msg.channelId,
+        platformSubject: msg.from,
+        ...(msg.messageId ? { messageId: msg.messageId } : {}),
+      });
+      const turnId = turnIdentity.turnId;
       const turnContext = buildChannelTurnContext(
         msg,
         conversationId,
@@ -301,26 +350,63 @@ export class InboundRouter {
         replyTarget,
         this.outboxRegistry,
       );
-      let admission: Awaited<ReturnType<ConversationManager["admitTurn"]>>;
+      let admission: Awaited<
+        ReturnType<InboundConversationApplicationPort["admitAgentTurn"]>
+      >;
       try {
-        admission = await this.conversations.admitTurn({
+        admission = await this.conversation.admitAgentTurn({
           conversationId,
-          source: "channel",
-          beforeEnqueue: (managed) =>
-            this.conversations.admitDurableTurn({
-              conversationId: managed.conversationId,
-              input: msg.text,
-              invocation: { kind: "agent", source: "channel" },
-              options: { turnContext, source: "channel" },
+          text: msg.text,
+          turnIdentity,
+          turnContext,
+          channelId: msg.channelId,
+          platformSubject: msg.from,
+          onStarted: () => {
+            this.logger.info(`[开始处理] conv=${conversationId} text="${msg.text}"`);
+            if (this.outboxRegistry) {
+              this.outboxRegistry.of(replyTarget).openSlot({ slotId: turnId });
+            }
+          },
+          onPendingCancelled: () => {
+            this.logger.info(`[排队取消] conv=${conversationId}`);
+          },
+          onProtocolEvent: (method, params) => {
+            this.sessionBroadcast?.()?.(conversationId, method, params);
+          },
+          onCommitFailure: (error) => {
+            this.logger.warn(
+              `[持久化失败] conv=${conversationId}: ${errMsg(error)} (adapter state 已 rollback)`,
+            );
+          },
+          onFinalPublishFailure: (error) => {
+            this.logger.warn(
+              `[权威投递待重试] conv=${conversationId}: ${errMsg(error)}`,
+            );
+          },
+          onOutcome: (outcome, delivery) =>
+            this.projectExecutionOutcome({
+              outcome,
+              delivery,
+              conversationId,
+              channelId: msg.channelId,
+              replyTarget,
+              turnId,
             }),
-          makeTask: (managed) => ({
-            source: "channel",
-            execute: () =>
-              this.runChannelTurn(managed, msg, { replyTarget, turnId, turnContext }),
-            cancel: () => {
-              this.logger.info(`[排队取消] conv=${conversationId}`);
-            },
-          }),
+          onSettled: (delivery) => {
+            if (this.outboxRegistry && delivery === "surface") {
+              this.outboxRegistry
+                .of(replyTarget)
+                .abandonSlot(turnId, "turn ended without reply emission");
+            }
+            this.logger.info(`[释放] conv=${conversationId} busy=false`);
+            this.sessionActivityBroadcast?.()?.({
+              conversationId,
+              source: msg.channelId,
+              lastActiveAt: new Date().toISOString(),
+              unreadHint: true,
+              listInvalidated: true,
+            });
+          },
         });
       } catch (err) {
         this.logger.error(`Failed to admit conversation ${conversationId}: ${errMsg(err)}`);
@@ -337,7 +423,7 @@ export class InboundRouter {
 
       this.logger.info(`[调度] status=${status} conv=${conversationId}`);
 
-      if (status === "full") {
+      if (status === "queue-full") {
         this.logger.warn(`[丢弃] status=${status} conv=${conversationId}`);
         await this.emitReply(
           replyTarget,
@@ -350,8 +436,12 @@ export class InboundRouter {
         return;
       }
 
-      if (status === "immediate") {
-        void admission.task.execute();
+      if (status === "lifecycle-busy") {
+        await this.emitReply(
+          replyTarget,
+          { text: "场景正在切换或目录变更，请稍后重试。" },
+          { kind: "system", handler: "conversation-admission-failed" },
+        ).catch(() => {});
       }
     } finally {
       this.acceptedInFlight -= 1;
@@ -386,51 +476,21 @@ export class InboundRouter {
       `[控制] cancel keyword="${control.matchedKeyword}" conv=${conversationId} from=${msg.from}`,
     );
 
-    const abortReason = {
-      kind: "user-cancel" as const,
-      source: "rpc" as const,
-      pressedAt: Date.now(),
-    };
-    if (this.conversations.usesDurableTurnProtocol()) {
-      if (!msg.messageId) {
-        throw new Error("Durable channel cancellation requires a stable platform message id");
-      }
-      const surfacePrincipal = channelSurfacePrincipal({
-        channelId: msg.channelId,
-        platformSubject: msg.from,
-      });
-      const replyTarget = buildReplyTarget(msg);
-      await this.conversations.cancelDurableRuns({
-        conversationId,
-        requestId: `cancel:${protocolDigest("ChannelConversationCancel", 1, {
-          channelId: msg.channelId,
-          messageId: msg.messageId,
-        })}`,
-        principal: this.conversations.durableControlPrincipal({
-          surfacePrincipal,
-          connectionId: `channel:${msg.channelId}`,
-        }),
-        reason: abortReason,
-        response: {
-          replyTarget: {
-            channelId: replyTarget.channelId,
-            to: replyTarget.to,
-            ...(replyTarget.threadId !== undefined
-              ? { threadId: replyTarget.threadId }
-              : {}),
-          },
-        },
-      });
-      return;
-    }
-
-    const result = this.conversations.abort(conversationId, abortReason);
-    if (result.abortedInFlight) {
+    const replyTarget = buildReplyTarget(msg);
+    const result = await this.conversation.abort({
+      conversationId,
+      channelId: msg.channelId,
+      platformSubject: msg.from,
+      ...(msg.messageId ? { messageId: msg.messageId } : {}),
+      replyTarget,
+    });
+    if (
+      result.feedback.kind === "authoritative" ||
+      result.feedback.kind === "in-flight"
+    ) {
       // 反馈单源:让 cleanup 路径产出
       return;
     }
-
-    const replyTarget = buildReplyTarget(msg);
     if (!this.channels.has(replyTarget.channelId)) {
       this.logger.warn(
         `cancel ack: adapter not found for channel ${replyTarget.channelId}`,
@@ -439,8 +499,8 @@ export class InboundRouter {
     }
 
     const text =
-      result.cancelledPending > 0
-        ? `已取消队列中的 ${result.cancelledPending} 条待处理消息。`
+      result.feedback.kind === "pending"
+        ? `已取消队列中的 ${result.feedback.count} 条待处理消息。`
         : "当前没有正在处理的任务。";
 
     await this.channels
@@ -574,82 +634,29 @@ export class InboundRouter {
     return true;
   }
 
-  private async runChannelTurn(
-    managed: ManagedSession,
-    msg: InboundMessage,
-    setup: {
-      readonly replyTarget: DeliveryTarget;
-      readonly turnId: string;
-      readonly turnContext: TurnContext;
-    },
-  ): Promise<void> {
-    const conversationId = managed.conversationId;
-    // 旧路径经 emitReply；耐久路径只释放 slot，结果与状态由权威 delivery 流发送。
-    const turnStartedAt = new Date().toISOString();
-    this.logger.info(`[开始处理] conv=${conversationId} text="${msg.text}"`);
-
-    // 构造 turnContext，把 commitToUser 绑定到当前 user target
-    //   - turnId 用于观测 + 作为 Outbox Turn Slot 的 key
-    //   - commitToUser 让工具（如 schedule）可直接发 commitment 消息，不依赖 LLM 叙述
-    //   - outboxRegistry 未绑定时 commitToUser 为 undefined → 工具降级为 LLM 叙述路径
-    const { replyTarget, turnId, turnContext } = setup;
-
-    // turn 启动即 open slot，让本 turn 内工具创建的任务被阻塞到本 turn
-    // 的最终回复之后才发出。TTL 兜底防 slot 泄漏。
-    if (this.outboxRegistry) {
-      this.outboxRegistry.of(replyTarget).openSlot({ slotId: turnId });
-    }
-
+  private async projectExecutionOutcome(input: Readonly<{
+    outcome: InboundConversationTurnOutcome;
+    delivery: "authoritative" | "surface";
+    conversationId: string;
+    channelId: string;
+    replyTarget: DeliveryTarget;
+    turnId: string;
+  }>): Promise<void> {
+    const { outcome, delivery, conversationId, channelId, replyTarget, turnId } = input;
     try {
-      const projection = await projectSessionTurn({
-        manager: this.conversations,
-        managed,
-        text: msg.text,
-        turnId,
-        runOptions: {
-          turnContext,
-          turnIndex: managed.turnCount,
-          source: "channel",
-        },
-        hooks: {
-          onCommitFailure: (err) => {
-            this.logger.warn(
-              `[持久化失败] conv=${conversationId}: ${errMsg(err)} (adapter state 已 rollback)`,
-            );
-          },
-          onFinalPublishFailure: (err) => {
-            this.logger.warn(
-              `[权威投递待重试] conv=${conversationId}: ${errMsg(err)}`,
-            );
-          },
-        },
-        notify: (method, params) => {
-          this.sessionBroadcast?.()?.(conversationId, method, params);
-        },
-      });
+      if (outcome.kind === "error") throw outcome.error;
+      if (outcome.kind === "aborted") return;
 
-      if (projection.kind === "error") {
-        throw projection.error;
-      }
-      if (projection.kind === "aborted") {
-        return;
-      }
-
-      const runResult = projection.runResult;
-      const agentResult = runResult?.agentResult;
+      const agentResult = outcome.result;
       this.logger.info(`[处理完成] conv=${conversationId} reason=${agentResult?.reason ?? "no-result"}`);
 
-      if (runResult && agentResult && agentResult.reason === "completed") {
-        // turnStartedAt 不用作 run record 的 timestamp（buildRunRecord 在 run 结束时
-        // 精确设定）—— 保留变量避免未来诊断字段需要 turn 入口时间时重新加逻辑
-        void turnStartedAt;
-
+      if (agentResult.reason === "completed") {
         const content = buildOutboundContent(agentResult);
         const hasContent = content.text.trim().length > 0;
         this.logger.info(
           `[回复] conv=${conversationId} len=${content.text.length} empty=${!hasContent} text="${content.text}"`,
         );
-        if (this.conversations.usesDurableTurnProtocol()) {
+        if (delivery === "authoritative") {
           // Non-empty finals atomically fill the slot through the authority transport.
           // An empty final has no delivery item, so only that case closes the slot here.
           if (!hasContent && this.outboxRegistry) {
@@ -662,7 +669,7 @@ export class InboundRouter {
             { kind: "llm-reply", conversationId, turnId },
             turnId,
           ).catch((e) =>
-            this.logger.error(`Failed to send reply to ${msg.channelId}: ${errMsg(e)}`),
+            this.logger.error(`Failed to send reply to ${channelId}: ${errMsg(e)}`),
           );
         } else if (this.outboxRegistry) {
           // 协同：LLM 被 commitment 完全抑制（content 空）时，
@@ -676,7 +683,7 @@ export class InboundRouter {
             );
         }
         // 无 outboxRegistry + 空内容：REPL/测试场景，静默不发（channel 路径必有 registry）
-      } else if (agentResult) {
+      } else {
         // 显式 if 分支而非三元链:三元链下 TS 没法把 reason narrow 排除 "completed"
         // (跨分支 narrowing 失效),会让 abortReason 字段访问报 TS2339
         let errorText: string;
@@ -691,7 +698,7 @@ export class InboundRouter {
           errorText = "处理已完成。";
         }
         this.logger.warn(`[错误回复] conv=${conversationId} reason=${agentResult.reason}`);
-        if (!this.conversations.usesDurableTurnProtocol()) {
+        if (delivery === "surface") {
           await this.emitReply(
             replyTarget,
             { text: errorText },
@@ -704,7 +711,7 @@ export class InboundRouter {
       }
     } catch (err) {
       this.logger.error(`[异常] conv=${conversationId}: ${errMsg(err)}`);
-      if (!this.conversations.usesDurableTurnProtocol()) {
+      if (delivery === "surface") {
         await this.emitReply(
           replyTarget,
           { text: "内部错误，请稍后重试。" },
@@ -712,25 +719,6 @@ export class InboundRouter {
           turnId,
         ).catch(() => {});
       }
-    } finally {
-      // Legacy owns the slot until this call returns, so its safety net may
-      // abandon. Durable execution transfers ownership to DeliveryAuthority;
-      // only its final/status item (or the explicit empty-final branch above)
-      // may close the slot.
-      if (this.outboxRegistry && !this.conversations.usesDurableTurnProtocol()) {
-        this.outboxRegistry
-          .of(replyTarget)
-          .abandonSlot(turnId, "turn ended without reply emission");
-      }
-      this.logger.info(`[释放] conv=${conversationId} busy=false`);
-      this.conversations.setBusy(conversationId, false);
-      this.sessionActivityBroadcast?.()?.({
-        conversationId,
-        source: msg.channelId,
-        lastActiveAt: new Date().toISOString(),
-        unreadHint: true,
-        listInvalidated: true,
-      });
     }
   }
 }

@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { ConversationCancellationResponseEffect } from "@zhixing/core/conversation/application";
 import type { ConversationManager } from "@zhixing/owner-kernel";
-import { createAnchorConversationRunControlPort } from "./conversation-run-control-binding.js";
+import {
+  createAnchorConversationRunControlPort,
+  createChannelCancellationResponseEffect,
+} from "./conversation-run-control-binding.js";
 
 const caller = Object.freeze({
   kind: "surface" as const,
@@ -91,6 +95,55 @@ describe("createAnchorConversationRunControlPort", () => {
     });
   });
 
+  it("keeps the Channel reply target opaque to the domain and rejects a foreign response effect", async () => {
+    const cancelDurableRuns = vi.fn(async () => ({ dispositions: [] }));
+    const conversations = {
+      usesDurableTurnProtocol: () => true,
+      cancelDurableRuns,
+      durableControlPrincipal: () => ({ deviceId: "device-1" }),
+    } as unknown as ConversationManager;
+    const port = createAnchorConversationRunControlPort({ conversations });
+    const response = createChannelCancellationResponseEffect({
+      channelId: "feishu",
+      to: "user-1",
+      threadId: "thread-1",
+    });
+
+    await expect(port.cancel({
+      conversationId: "conversation-1",
+      operationId: "cancel-1",
+      caller,
+      occurredAt: 123,
+      response,
+    })).resolves.toEqual({
+      matchedDurableRuns: 0,
+      abortedInFlight: false,
+      cancelledPending: 0,
+      authoritativeResponse: true,
+    });
+    expect(cancelDurableRuns).toHaveBeenCalledWith(expect.objectContaining({
+      response: {
+        replyTarget: {
+          channelId: "feishu",
+          to: "user-1",
+          threadId: "thread-1",
+        },
+      },
+    }));
+
+    cancelDurableRuns.mockClear();
+    await expect(port.cancel({
+      conversationId: "conversation-1",
+      operationId: "cancel-2",
+      caller,
+      occurredAt: 124,
+      response: new ForeignCancellationResponseEffect(),
+    })).rejects.toThrow(
+      "Conversation cancellation response effect is not owned by the Channel binding",
+    );
+    expect(cancelDurableRuns).not.toHaveBeenCalled();
+  });
+
   it("maps uncertain resolution through the authenticated durable principal", async () => {
     const resolveDurableUncertain = vi.fn(async () => ({
       state: "cancelled" as const,
@@ -132,3 +185,10 @@ describe("createAnchorConversationRunControlPort", () => {
     });
   });
 });
+
+class ForeignCancellationResponseEffect extends ConversationCancellationResponseEffect {
+  constructor() {
+    super();
+    Object.freeze(this);
+  }
+}

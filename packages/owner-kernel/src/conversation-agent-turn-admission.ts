@@ -30,12 +30,15 @@ export function createConversationAgentTurnAdmissionPort(input: Readonly<{
               }
             : { createConversation: identity.create }),
           connectionId: request.caller.connectionId,
-          source: "interactive",
+          source: request.source ?? "interactive",
           beforeEnqueue: (managed) =>
             input.manager.admitDurableTurn({
               conversationId: managed.conversationId,
               input: request.input,
-              invocation: { kind: "agent", source: "interactive" },
+              invocation: {
+                kind: "agent",
+                source: request.source ?? "interactive",
+              },
               ...(request.environment
                 ? { environment: structuredClone(request.environment) }
                 : {}),
@@ -46,13 +49,13 @@ export function createConversationAgentTurnAdmissionPort(input: Readonly<{
                     ? { turnOrigin: structuredClone(request.turnOrigin) }
                     : {}),
                 },
-                source: "interactive",
+                source: request.source ?? "interactive",
                 surfacePrincipal: request.caller.surfacePrincipal,
               },
               surfacePrincipal: request.caller.surfacePrincipal,
             }),
           makeTask: (managed) => ({
-            source: "interactive",
+            source: request.source ?? "interactive",
             execute: () =>
               request.execution.execute({
                 conversationId: managed.conversationId,

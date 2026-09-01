@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-05a 已通过协调者独立验收，等待提交后进入 Channel 入站产品绑定<br>
+> 当前检查点：A6-05b 已通过协调者独立验收，提交后有限审计 Channel 家族并进入 Storage<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `60564fdf`；A6-04b 已由协调者独立复核并提交，MCP 管理、探测、搜索与来源读取只消费有限需求合同，具体 SDK、spec 与网络实现只留在 Host infrastructure adapter |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-05a 已通过协调者独立复核，等待提交 |
-| 活跃工作包 | 无；`A6-05a-channel-runtime-boundary-v1` 已闭合，提交后进入 A6-05b Channel 入站 Product API/Surface 绑定 |
-| 下一责任链 | A6-05a 闭合后，独立处理 Channel 入站 Product API/Surface 绑定；不得提前扩入 Storage、Executor/Mesh、设备拓扑或 A7 |
+| 已接受基线 | `0c7bd511`；A6-05a 已由协调者独立复核并提交，具体 Channel registry/adapter 只留在 Host infrastructure 边缘，各需求方仅消费状态、生命周期、Delivery、入站与 challenge 窄端口 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-05b 已通过协调者独立复核，等待提交 |
+| 活跃工作包 | 无；`A6-05b-channel-conversation-product-binding-v1` 已闭合，提交后有限审计 Channel 家族并进入 Storage |
+| 下一责任链 | A6-05b 闭合后有限审计 Channel 家族是否还有产品/实现越界；无遗漏则进入 Storage，不提前进入 Executor/Mesh、设备拓扑或 A7 |
 | 打开的单向桥 | 无；全部 Kernel Runtime 生产根均已显式消费同一有限端口，不存在默认 concrete fallback、双实现表或只为测试存在的桥 |
-| 已失效证据 | 无当前未恢复证据；A6-05a 的返回合同反证已纠正并由真实 Router 行为、类型检查与 canonical S7 恢复，其他不相交证据继续有效 |
+| 已失效证据 | 无当前未恢复证据；A6-05b 只按真实相交面重取 Channel 入站、Conversation admission/control、运行投影与呈现证据，A6-05a 实现边界及其他不相交证据继续有效 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2575,6 +2575,18 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 失效与交接：若 `setupChannels` factory/registry/result exact-set、任一有限端口及其 readonly 输出、飞书 adapter/client、Server status、Inbound/confirmation、Delivery outbox effect、challenge、credential rotation、Host connection/cleanup owner、S7/package exports 或上述直接测试任一变化，只恢复本证据及真实相交的 A0/A1/A5/A6-04 证据。当前无未恢复证据；A6 继续 `[ ]`，下一检查点仅在协调者接受并提交后进入 A6-05b 的 Channel 入站 Product API/Surface 绑定，不进入 Storage、Executor/Mesh、设备拓扑或 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调纠正（`SetupChannelsResult` exact-set）：协调者独立反查发现初次实现把仅供 `setupChannels → InboundRouter` 内部装配的 `inbound` 也放进返回合同，唯一读取者只是测试，故初次“返回端口 exact-set”结论失效。最终删除接口成员与返回值，测试改为经真实 adapter `onMessage → InboundRouter` 证明 `per-user-in-group` 归组和拒新回复发送，不为测试恢复内部访问；S7 同时要求内部 `InboundChannelPort` 恰一次构造/注入，并以反向 mutation 拒绝 `SetupChannelsResult.inbound`、registry/完整 adapter 等无消费者能力回流。纠正后 channels 1 文件 5/5、CLI `tsc --noEmit`、canonical S7 42/42 与 registry golden、changed-source Biome 和 `git diff --check` 通过；其余未相交的初次直接证据继续有效，A6-05a 恢复为待协调者复核状态，A6 与下一检查点不变。
 - 协调者独立验收：重新反查 `setupChannels`、Host 返回合同与全部生产消费者，确认 `inbound` 只在内部构造并注入真实 Router，返回成员与 Host 消费 exact-set 全等；Host 边缘外 concrete registry/adapter 依赖归零，状态、Delivery、challenge 与生命周期各自保持有限合同。独立运行 Core Delivery 4/4、Server Inbound/confirmation/status 122/122、CLI Channel/interaction/S6/setup 50/50、CLI 类型检查、canonical S7 42/42 与 registry golden、`git diff --check` 全部通过。A6-05a 可以提交，A6 仍保持 `[ ]`。
+
+### A6-05b：Channel 入站 Conversation Product API / Surface 纯绑定
+
+- 基线与唯一结果：以已接受 `HEAD 0c7bd511` 加协调者调度记录为基线，形成待复核证据 `A6-05b-channel-conversation-product-binding-v1`。唯一架构结果是让 `InboundRouter` 成为 Channel Surface 的纯绑定：只负责通道消息解析/归组、表面特有 intent 与 confirmation 交互、调用 Conversation 产品应用、错误映射、事件/活动投影和回复呈现；Conversation 的 turn identity、admission、queue、durable cancellation、执行投影、busy/terminal 释放继续由 A5 已建立的 Conversation application/Product API 与有限机制适配拥有。不得新建第二套对话应用合同或把 `ConversationManager` 方法换名包进万能 facade。
+- 生产闭包与保护：正向从飞书 `onMessage → InboundRouter` 追到已有 `CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND`、`CONVERSATION_ADMIT_AGENT_TURN_COMMAND`、`CONVERSATION_ABORT_COMMAND` 和唯一运行投影，反向从 durable/legacy turn、queue full/not-found/lifecycle busy、message-id replay、cancel batch、pending confirmation、outbox slot、session broadcast/activity 与 Host 拒新/排空核对。迁移后 Router 及 Server Channel binding 不得导入、保存或调用 `ConversationManager`、`ManagedSession`、Owner journal/principal、`projectSessionTurn` 或 durable protocol判定；现有 Conversation application 只能按真实缺口增加窄合同/结果，不能把 Channel 文案、target、adapter 或拓扑写入领域。
+- 完成与交接：普通消息、排队/重放、稳定 message identity、完成/空回复/错误/取消、confirmation 发起者校验与即时回执、durable Delivery 单源、观察者通知、当前 owner 守卫、拒新与 drain 的可见行为必须保持。直接测试至少覆盖本地与耐久 turn、同 message replay、queue full/lifecycle busy、legacy/durable cancel、confirmation、空终态、异常和 shutdown race；结构门禁反向拒绝 Manager/Owner/运行投影回流 Surface、第二产品命令或 Router 恢复业务状态机。只运行相交的 Core/Owner/Server/CLI 测试、必要的上游构建、类型检查、canonical S7/package-export（相交时）和 `git diff --check`，不做根级全量回归。预计超过四小时、需要拆成两个可独立失败的应用所有权或不能在单一真相成立状态交接时，停在安全检查点并登记最短单向桥及紧邻退场包；不得进入 Storage、Executor/Mesh、设备拓扑或 A7。
+- 实施与唯一生产链：`setupChannels` 现在只接收有限 `InboundConversationApplicationPort`；`InboundRouter` 经该端口调用既有 prepare/admit/abort 三个 Product API command，保留归组、intent/confirmation、Surface 文案、outbox slot、session broadcast/activity、owner guard 与拒新/drain，不再导入或调用 `ConversationManager`、`ManagedSession`、Owner principal/journal、`projectSessionTurn`、durable 判定或 busy 释放。Anchor 唯一 Host 组合处只构造一个 `ChannelConversationProductBinding`，在唯一 sealed `ProductApiDispatcher` 成立后一次绑定；binding 未成立时调用等待，Host cleanup 会关闭等待者并 fail closed，缺 contribution、重复绑定或关闭后绑定均拒绝。
+- Conversation/Correctness 责任：prepare 继续由 Conversation 应用裁决 stable/legacy turn identity；admit command 新增的有限 `interactive | channel` 来源投影贯穿 Owner admission，因此 durable invocation、queue task 和运行 source 仍保留 Channel 身份。运行机制只在 CLI binding 内取得 `ManagedSession`、调用既有 `projectSessionTurn` 并负责真实 terminal 后 busy/settled 释放，Router 只消费穷尽 outcome 与 authoritative/surface delivery 投影。cancel 继续由同一 abort command 与既有 run-control port 执行；领域只接收不可实例化的 `ConversationCancellationResponseEffect`，具体 Channel reply target 由 CLI 私有 effect subclass 持有并在 Authority 调用前验证 provenance，foreign effect fail closed，因而 batch cancel 与权威回执保持同事务且领域对 Channel target/adapter/拓扑零认知。
+- 行为保护与旧路退场：durable message-id replay、queue full、lifecycle busy、not-found、legacy immediate/queued、完成/空结果/error/max-turns/aborted、durable Delivery 单源、legacy reply、cancel empty/pending/in-flight/authoritative、confirmation、observer、current-owner 与 shutdown race 均沿原投影保留。Router/Server Channel binding 中旧 Manager admission、durable cancellation、运行投影和 `setBusy` 路径已归零；没有第二 Conversation command、第二 dispatcher、第二执行 owner、兼容 facade 或通道 target 领域泄漏。Channel 生命周期关闭会同时拒绝尚未绑定和未来 Product API 调用，不留下悬挂 ingress。
+- 直接证据：Core Conversation application 1 文件 38/38，覆盖稳定身份、admission、abort identity、空取消拒绝与权威回执效果；Server InboundRouter 1 文件 45/45，覆盖本地/耐久 turn、同 message replay、queue/lifecycle busy、legacy/durable cancel、confirmation、空终态、异常、owner guard 与拒新/drain；CLI Product binding/run-control/channels/startup owner 4 文件 18/18，覆盖唯一 dispatcher、Channel source、真实执行投影、权威 cancel response、foreign effect、缺 contribution、关闭等待、Host composition。Core/Owner/Server/CLI `tsc --noEmit`，fresh Core、Owner、Server 与 CLI build，canonical S7 42/42 与 registry golden、fresh runtime package exports、changed-source Biome 均通过。
+- 失效与交接：若 Conversation prepare/admit/abort command、admission source、run-control effect provenance、Owner queue/terminal、`projectSessionTurn`、Channel grouping/intent/confirmation/outbox/event/activity、Host Product API composition、Inbound/Channel finite ports、S7 或上述直接测试任一变化，只恢复本证据及真实相交的 A0/A3/A5/A6-05a 证据。当前无打开桥和未恢复证据；A6 继续 `[ ]`，仅等待协调者复核 A6-05b 后有限审计 Channel 家族，未进入 Storage、Executor/Mesh、设备拓扑或 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：重新沿真实 `setupChannels → InboundRouter → ProductApiDispatcher → Conversation application/Correctness adapter` 双向核对，确认 Router 与 Server Channel binding 已无 Manager、Owner journal/principal、耐久协议和运行投影旁路，唯一 CLI binding 只在 Host 组合处接入既有三个 Conversation command，并保持 Channel source、权威取消响应、拒新与排空边界。独立运行 Core Conversation 38/38、Server InboundRouter 45/45、CLI binding/run-control/channels/startup owner 18/18、CLI 类型检查、canonical S7 42/42 与 registry golden、runtime package exports 和 `git diff --check` 全部通过。A6-05b 可以提交，A6 仍保持 `[ ]`。
 
 ## 十、用户提示词
 

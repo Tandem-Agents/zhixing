@@ -705,6 +705,19 @@ export function inspectChannelRuntimeBoundary(records) {
   const byPath = new Map(records.map((record) => [record.relative, record.text]));
   const channels = byPath.get("packages/cli/src/serve/channels.ts");
   const access = byPath.get("packages/cli/src/serve/access-surfaces.ts");
+  const binding = byPath.get(
+    "packages/cli/src/serve/channel-conversation-product-binding.ts",
+  );
+  const command = byPath.get("packages/cli/src/serve/command.ts");
+  const conversationApplication = byPath.get(
+    "packages/core/src/conversation/application.ts",
+  );
+  const admission = byPath.get(
+    "packages/owner-kernel/src/conversation-agent-turn-admission.ts",
+  );
+  const runControl = byPath.get(
+    "packages/cli/src/serve/conversation-run-control-binding.ts",
+  );
   const context = byPath.get("packages/server/src/context.ts");
   const server = byPath.get("packages/server/src/server.ts");
   const inbound = byPath.get("packages/server/src/channels/inbound-router.ts");
@@ -714,8 +727,9 @@ export function inspectChannelRuntimeBoundary(records) {
   const coordinator = byPath.get("packages/cli/src/serve/channel-interaction-coordinator.ts");
   const setupDelivery = byPath.get("packages/cli/src/setup-delivery.ts");
   if (
-    !channels || !access || !context || !server || !inbound || !confirmation ||
-    !delivery || !lossless || !coordinator || !setupDelivery
+    !channels || !access || !binding || !command || !conversationApplication ||
+    !admission || !runControl || !context || !server || !inbound ||
+    !confirmation || !delivery || !lossless || !coordinator || !setupDelivery
   ) {
     return ["channel runtime boundary production sources are missing"];
   }
@@ -789,6 +803,60 @@ export function inspectChannelRuntimeBoundary(records) {
     coordinator.includes("isChallengeChannel")
   ) {
     failures.push("Delivery or signed-challenge demand boundary drifted");
+  }
+  if (
+    !inbound.includes("export interface InboundConversationApplicationPort") ||
+    !inbound.includes("this.conversation.prepareAgentTurn({") ||
+    !inbound.includes("this.conversation.admitAgentTurn({") ||
+    !inbound.includes("this.conversation.abort({") ||
+    /ConversationManager|ManagedSession|projectSessionTurn|usesDurableTurnProtocol|admitDurableTurn|cancelDurableRuns|durableControlPrincipal|\.setBusy\(/u.test(
+      inbound,
+    ) ||
+    !channels.includes("conversation?: InboundConversationApplicationPort") ||
+    !channels.includes("      conversation,") ||
+    /ConversationManager|ManagedSession|conversations:/u.test(channels)
+  ) {
+    failures.push(
+      "Channel Surface bypasses the finite Conversation application boundary",
+    );
+  }
+  if (
+    count(binding, "export class ChannelConversationProductBinding") !== 1 ||
+    count(binding, "productApi.command(") !== 3 ||
+    !binding.includes("CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND") ||
+    !binding.includes("CONVERSATION_ADMIT_AGENT_TURN_COMMAND") ||
+    !binding.includes("CONVERSATION_ABORT_COMMAND") ||
+    !binding.includes('source: "channel"') ||
+    !binding.includes("projectSessionTurn({") ||
+    !binding.includes("close(): void") ||
+    /\.admitTurn\(|\.admitDurableTurn\(|\.cancelDurableRuns\(/u.test(binding) ||
+    count(access, "new ChannelConversationProductBinding(") !== 1 ||
+    !access.includes("conversation: conversationProduct") ||
+    !access.includes("conversationProduct.close()") ||
+    count(command, "ctx.channelConversationProduct?.bind(productApi)") !== 1
+  ) {
+    failures.push(
+      "Channel Conversation Product API binding or unique Host composition drifted",
+    );
+  }
+  if (
+    !conversationApplication.includes('source?: "interactive" | "channel"') ||
+    !conversationApplication.includes("command.source ?? \"interactive\"") ||
+    !conversationApplication.includes("abstract class ConversationCancellationResponseEffect") ||
+    !conversationApplication.includes('readonly kind = "authoritative-response"') ||
+    /class ConversationCancellationResponseEffect\s*\{[^}]*\b(?:channelId|threadId|replyTarget)\b/u.test(
+      conversationApplication,
+    ) ||
+    !conversationApplication.includes("cancellation.authoritativeResponse") ||
+    !admission.includes('request.source ?? "interactive"') ||
+    !runControl.includes("createChannelCancellationResponseEffect(") ||
+    !runControl.includes("requireChannelCancellationResponse(") ||
+    !runControl.includes("request.response") ||
+    !runControl.includes("authoritativeResponse: true")
+  ) {
+    failures.push(
+      "Conversation admission or durable cancellation mechanism binding drifted",
+    );
   }
   return failures;
 }

@@ -214,6 +214,7 @@ export interface ConversationAgentTurnAdmissionPort {
     identity: ConversationAgentTurnIdentity;
     input: UserTurnInput;
     turnId: string;
+    source?: "interactive" | "channel";
     caller: Extract<ConversationCommandCaller, { readonly kind: "surface" }>;
     turnOrigin?: TurnOrigin;
     environment?: ExplicitEnvironmentSelection;
@@ -659,7 +660,16 @@ export interface ConversationCancellationProjection {
   readonly matchedDurableRuns: number;
   readonly abortedInFlight: boolean;
   readonly cancelledPending: number;
+  /** True only when the mechanism durably owns the user-visible response. */
+  readonly authoritativeResponse?: boolean;
   readonly dependentLifecycleIngressId?: string;
+}
+
+/** Opaque finite effect reference; only the Correctness adapter owns its target. */
+export abstract class ConversationCancellationResponseEffect {
+  readonly kind = "authoritative-response" as const;
+
+  protected constructor() {}
 }
 
 export interface ConversationUncertainResolutionResult {
@@ -679,6 +689,7 @@ export interface ConversationRunControlPort {
     runId?: string;
     caller: ConversationCommandCaller;
     occurredAt: number;
+    response?: ConversationCancellationResponseEffect;
   }>): Promise<ConversationCancellationProjection>;
   settleDependentCancellation?(input: Readonly<{
     conversationId: string;
@@ -771,6 +782,7 @@ export type ConversationDirectoryCommand =
       operationId?: string;
       runId?: string;
       caller: ConversationCommandCaller;
+      response?: ConversationCancellationResponseEffect;
     }>
   | Readonly<{
       kind: "resolve-uncertain";
@@ -794,6 +806,7 @@ export type ConversationDirectoryCommand =
       preallocatedConversationId?: string;
       input: UserTurnInput;
       turnIdentity: ConversationPreparedAgentTurnIdentity;
+      source?: "interactive" | "channel";
       caller: ConversationCommandCaller;
       turnOrigin?: TurnOrigin;
       environment?: ExplicitEnvironmentSelection;
@@ -868,6 +881,11 @@ export interface ConversationDeletedResult {
 
 export interface ConversationAbortedResult {
   readonly cancelled: true;
+  readonly feedback:
+    | Readonly<{ kind: "authoritative" }>
+    | Readonly<{ kind: "in-flight" }>
+    | Readonly<{ kind: "pending"; count: number }>
+    | Readonly<{ kind: "idle" }>;
 }
 
 export interface ConversationAgentTurnAdmissionResult {
@@ -1509,7 +1527,11 @@ export class ConversationDirectoryApplicationService
       }
       operationId = port.createCancellationIdentity();
     }
-    if (port.requiresAuthoritativeRunIdentity && command.runId === undefined) {
+    if (
+      port.requiresAuthoritativeRunIdentity &&
+      command.runId === undefined &&
+      command.response === undefined
+    ) {
       throw new ConversationApplicationError(
         "invalid-input",
         "Conversation abort requires an authoritative run identity",
@@ -1532,6 +1554,7 @@ export class ConversationDirectoryApplicationService
       ...(command.runId ? { runId: command.runId } : {}),
       caller: command.caller,
       occurredAt: (this.input.clock ?? Date.now)(),
+      ...(command.response ? { response: command.response } : {}),
     });
     if (cancellation.dependentLifecycleIngressId) {
       try {
@@ -1547,6 +1570,7 @@ export class ConversationDirectoryApplicationService
     }
     if (
       !port.emptyCancellationIsSuccess &&
+      !cancellation.authoritativeResponse &&
       cancellation.matchedDurableRuns === 0 &&
       !cancellation.abortedInFlight &&
       cancellation.cancelledPending === 0
@@ -1556,7 +1580,17 @@ export class ConversationDirectoryApplicationService
         `Conversation has no cancellable work: ${command.conversationId}`,
       );
     }
-    return Object.freeze({ cancelled: true as const });
+    const feedback = cancellation.authoritativeResponse
+      ? Object.freeze({ kind: "authoritative" as const })
+      : cancellation.abortedInFlight
+        ? Object.freeze({ kind: "in-flight" as const })
+        : cancellation.cancelledPending > 0
+          ? Object.freeze({
+              kind: "pending" as const,
+              count: cancellation.cancelledPending,
+            })
+          : Object.freeze({ kind: "idle" as const });
+    return Object.freeze({ cancelled: true as const, feedback });
   }
 
   async resolveUncertain(
@@ -1829,6 +1863,7 @@ export class ConversationDirectoryApplicationService
       identity: conversationIdentity,
       input: command.input,
       turnId,
+      source: command.source ?? "interactive",
       caller: command.caller,
       ...(command.turnOrigin ? { turnOrigin: command.turnOrigin } : {}),
       ...(command.environment

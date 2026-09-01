@@ -29,6 +29,7 @@ import {
   projectConversationClear,
   projectConversationDelete,
   type ConversationDirectoryRecord,
+  ConversationCancellationResponseEffect,
   type ConversationDirectoryStorage,
   type ConversationAgentTurnAdmissionPort,
   type ConversationCompactPort,
@@ -37,6 +38,13 @@ import {
   type ConversationUsageProjectionPort,
   type ConversationSecurityProjectionPort,
 } from "./application.js";
+
+class TestCancellationResponseEffect extends ConversationCancellationResponseEffect {
+  constructor() {
+    super();
+    Object.freeze(this);
+  }
+}
 
 describe("Conversation task-list tool application", () => {
   it("owns deterministic replacement identity and stages through one finite port", async () => {
@@ -1154,7 +1162,10 @@ describe("ConversationDirectoryApplicationService", () => {
           connectionId: "connection-1",
         },
       }),
-    ).resolves.toEqual({ result: { cancelled: true }, facts: [] });
+    ).resolves.toEqual({
+      result: { cancelled: true, feedback: { kind: "in-flight" } },
+      facts: [],
+    });
     expect(steps).toEqual(["cancel", "settle"]);
     expect(cancel).toHaveBeenCalledWith({
       conversationId: "conversation-1",
@@ -1220,6 +1231,53 @@ describe("ConversationDirectoryApplicationService", () => {
     ).rejects.toMatchObject({ code: "not-found" });
   });
 
+  it("admits a stable conversation-wide cancellation only when the mechanism owns the durable response", async () => {
+    const cancel = vi.fn(async () => ({
+      matchedDurableRuns: 0,
+      abortedInFlight: false,
+      cancelledPending: 0,
+      authoritativeResponse: true,
+    }));
+    const application = new ConversationDirectoryApplicationService({
+      storage: fixture().storage,
+      runControl: {
+        requiresStableCancellationIdentity: true,
+        requiresAuthoritativeRunIdentity: true,
+        emptyCancellationIsSuccess: false,
+        createCancellationIdentity: () => "unused",
+        cancel,
+        resolveUncertain: vi.fn(async () => ({
+          state: "cancelled",
+          factDigest: `sha256:${"b".repeat(64)}`,
+        })),
+      },
+    });
+    const caller = {
+      kind: "surface" as const,
+      surfacePrincipal: "channel:feishu:user-1",
+      connectionId: "channel:feishu",
+    };
+    const response = new TestCancellationResponseEffect();
+
+    await expect(application.abort({
+      kind: "abort",
+      conversationId: "conversation-1",
+      operationId: "abort-operation-1",
+      caller,
+      response,
+    })).resolves.toEqual({
+      cancelled: true,
+      feedback: { kind: "authoritative" },
+    });
+    expect(cancel).toHaveBeenCalledWith({
+      conversationId: "conversation-1",
+      operationId: "abort-operation-1",
+      caller,
+      occurredAt: expect.any(Number),
+      response,
+    });
+  });
+
   it("keeps an authoritative cancellation successful and starts dependent recovery after settlement failure", async () => {
     const recover = vi.fn(async () => {});
     const application = new ConversationDirectoryApplicationService({
@@ -1257,7 +1315,10 @@ describe("ConversationDirectoryApplicationService", () => {
           connectionId: "connection-1",
         },
       }),
-    ).resolves.toEqual({ cancelled: true });
+    ).resolves.toEqual({
+      cancelled: true,
+      feedback: { kind: "in-flight" },
+    });
     await vi.waitFor(() => {
       expect(recover).toHaveBeenCalledWith("conversation-1");
     });

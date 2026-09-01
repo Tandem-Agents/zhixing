@@ -51,6 +51,7 @@ import type {
   PerspectivesController,
   RunningServer,
 } from "@zhixing/server";
+import type { ChannelConversationProductBinding } from "./channel-conversation-product-binding.js";
 import type {
   ConfirmationHub,
   ConversationManager,
@@ -206,6 +207,7 @@ export interface AssemblyContext {
   channelDelivery?: ChannelDeliveryEffectSource;
   channelChallenges?: ChannelChallengeDeliveryPort;
   inboundRouter?: InboundRouter | null;
+  channelConversationProduct?: ChannelConversationProductBinding;
   channelConnections?: {
     readonly ready: Promise<void>;
     connectConfigured(): Promise<void>;

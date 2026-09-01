@@ -23,11 +23,9 @@ import {
   InboundRouter,
   createDefaultIntentClassifier,
   type InboundChannelPort,
+  type InboundConversationApplicationPort,
 } from "@zhixing/server";
-import type {
-  ConfirmationHub,
-  ConversationManager,
-} from "@zhixing/owner-kernel";
+import type { ConfirmationHub } from "@zhixing/owner-kernel";
 import type {
   SessionActivityBroadcast,
   SessionBroadcast,
@@ -94,8 +92,8 @@ export interface SetupChannelsOptions {
    * 形态不变；本接入面从类型层无法接触 provider / MCP 凭据。
    */
   credentials: ChannelCredentialProjection;
-  /** ConversationManager for inbound routing. Omit for outbound-only mode (REPL). */
-  conversations?: ConversationManager;
+  /** Conversation Product API binding for inbound routing. Omit for outbound-only mode. */
+  conversation?: InboundConversationApplicationPort;
   logger: ChannelLogger;
   /**
    * 可选 ConfirmationHub。传入时 InboundRouter 会在 enqueue 之前检查
@@ -139,7 +137,7 @@ export async function setupChannels(
   const {
     entries,
     credentials,
-    conversations,
+    conversation,
     logger,
     confirmationHub,
     cancelKeywords,
@@ -171,7 +169,7 @@ export async function setupChannels(
   const registry = new ChannelRegistry({
     eventBus,
     logger,
-    onMessage: conversations
+    onMessage: conversation
       ? (msg: InboundMessage) => {
           router!.handleMessage(msg).catch((err) => {
             logger.error("Unhandled error in message routing: %s", err instanceof Error ? err.message : String(err));
@@ -234,7 +232,7 @@ export async function setupChannels(
     },
   } satisfies ChannelChallengeDeliveryPort);
 
-  if (conversations) {
+  if (conversation) {
     // 显式构造 IntentClassifier 注入——把 default 关键词与用户配置 append 合并，
     // 启动期 disjoint 校验生效（与 confirmation 词集冲突 fail-fast）。
     const mergedCancelKeywords =
@@ -248,7 +246,7 @@ export async function setupChannels(
     });
 
     router = new InboundRouter({
-      conversations,
+      conversation,
       channels: inbound,
       logger,
       confirmationHub,

@@ -1,7 +1,8 @@
 import { generateTurnId } from "@zhixing/core";
-import type {
-  ConversationRunControlPort,
-  ConversationUncertainResolutionResult,
+import {
+  ConversationCancellationResponseEffect,
+  type ConversationRunControlPort,
+  type ConversationUncertainResolutionResult,
 } from "@zhixing/core/conversation/application";
 import type { ConversationManager } from "@zhixing/owner-kernel";
 
@@ -18,6 +19,39 @@ interface CancelledAdvancementLifecycle {
     ingressId: string;
   }>): Promise<void>;
   recover(conversationId: string): Promise<void>;
+}
+
+type ChannelCancellationReplyTarget = Readonly<{
+  channelId: string;
+  to: string;
+  threadId?: string;
+}>;
+
+class ChannelCancellationResponseEffect extends ConversationCancellationResponseEffect {
+  readonly #replyTarget: ChannelCancellationReplyTarget;
+
+  constructor(replyTarget: ChannelCancellationReplyTarget) {
+    super();
+    this.#replyTarget = Object.freeze({
+      channelId: replyTarget.channelId,
+      to: replyTarget.to,
+      ...(replyTarget.threadId !== undefined
+        ? { threadId: replyTarget.threadId }
+        : {}),
+    });
+    Object.freeze(this);
+  }
+
+  authorityResponse(): Readonly<{ replyTarget: ChannelCancellationReplyTarget }> {
+    return Object.freeze({ replyTarget: this.#replyTarget });
+  }
+}
+
+/** Creates the finite Channel effect consumed only by the Anchor Correctness adapter. */
+export function createChannelCancellationResponseEffect(
+  replyTarget: ChannelCancellationReplyTarget,
+): ConversationCancellationResponseEffect {
+  return new ChannelCancellationResponseEffect(replyTarget);
 }
 
 /** Anchor binding from Conversation run-control demands to Owner mechanisms. */
@@ -64,6 +98,9 @@ export function createAnchorConversationRunControlPort(input: Readonly<{
           surfacePrincipal: caller.surfacePrincipal,
           connectionId: caller.connectionId,
         }),
+        ...(request.response
+          ? { response: requireChannelCancellationResponse(request.response) }
+          : {}),
       });
       const dependentLifecycleIngressId = result.dispositions.find(
         (item) => item.source === "advancement",
@@ -77,6 +114,7 @@ export function createAnchorConversationRunControlPort(input: Readonly<{
           (sum, item) => sum + item.cancelledPending,
           0,
         ),
+        ...(request.response ? { authoritativeResponse: true } : {}),
         ...(dependentLifecycleIngressId
           ? { dependentLifecycleIngressId }
           : {}),
@@ -119,4 +157,13 @@ export function createAnchorConversationRunControlPort(input: Readonly<{
       });
     },
   });
+}
+
+function requireChannelCancellationResponse(
+  effect: ConversationCancellationResponseEffect,
+): Readonly<{ replyTarget: ChannelCancellationReplyTarget }> {
+  if (!(effect instanceof ChannelCancellationResponseEffect)) {
+    throw new Error("Conversation cancellation response effect is not owned by the Channel binding");
+  }
+  return effect.authorityResponse();
 }

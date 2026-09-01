@@ -50,6 +50,7 @@ import {
   type ChannelCredentialProjection,
 } from "@zhixing/providers";
 import { setupChannels } from "./channels.js";
+import { ChannelConversationProductBinding } from "./channel-conversation-product-binding.js";
 import {
   ExecutionStatusHub,
   FirstPartyFinalitySession,
@@ -1007,10 +1008,13 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
         return currentDeviceId === ctx.meshBootstrap.deviceKey.deviceId && ready;
       };
       try {
+        const conversationProduct = new ChannelConversationProductBinding(
+          conversations,
+        );
         const result = await setupChannels({
           entries: channelConfiguration.messaging,
           credentials,
-          conversations,
+          conversation: conversationProduct,
           logger: channelLogger,
           cancelKeywords: channelConfiguration.intent?.cancelKeywords,
           sessionBroadcast: () => ctx.sessionBroadcastRef.current,
@@ -1036,15 +1040,17 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
           isCurrentOwner: isCurrentChannelOwner,
           connectImmediately: isCurrentChannelOwner() && !ctx.startupLifecycle,
         });
-        ctx.lifecycleContributions.acquire("channels.dispose", () =>
-          result.dispose()
-        );
+        ctx.lifecycleContributions.acquire("channels.dispose", async () => {
+          conversationProduct.close();
+          await result.dispose();
+        });
         losslessDataPlane.bindChannelChallenges(result.challenges);
         ctx.channelStatuses = result.statusSnapshot;
         ctx.channelDelivery = result.delivery;
         ctx.channelChallenges = result.challenges;
         const router = result.router;
         ctx.inboundRouter = router;
+        ctx.channelConversationProduct = conversationProduct;
         if (router) {
           ctx.lifecycleContributions.acquire(
             "inboundRouter.refuseNew",

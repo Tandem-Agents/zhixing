@@ -2602,6 +2602,7 @@ async function runServerProcess(
       ...(deviceAdministrationProductApi ? [deviceAdministrationProductApi] : []),
     ],
   );
+  ctx.channelConversationProduct?.bind(productApi);
   let serverCtx: ServerContext;
   serverCtx = createServerContext({
     config: { ...DEFAULT_SERVER_CONFIG, port, host },

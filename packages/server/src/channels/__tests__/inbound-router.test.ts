@@ -2,9 +2,16 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   InboundRouter,
   type InboundChannelPort,
+  type InboundConversationApplicationPort,
 } from "../inbound-router.js";
-import { ConfirmationHub, ConversationManager } from "@zhixing/owner-kernel";
+import {
+  channelSurfacePrincipal,
+  ConfirmationHub,
+  ConversationManager,
+} from "@zhixing/owner-kernel";
 import { SESSION_NOTIFICATIONS } from "@zhixing/rpc";
+import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
+import { protocolDigest } from "@zhixing/core/protocol";
 import type {
   SessionActivityBroadcast,
   SessionBroadcast,
@@ -20,6 +27,7 @@ import {
   type InboundMessage,
   ChannelRegistry,
   DEFAULT_CONVERSATION_ID,
+  generateTurnId,
 } from "@zhixing/core";
 import type {
   DurableConversationTurnExecutor,
@@ -100,6 +108,140 @@ function createInboundPort(registry: ChannelRegistry): InboundChannelPort {
   };
 }
 
+/** Router-unit fixture for the finite binding; production uses the sealed Product API. */
+function createTestConversationPort(
+  manager: ConversationManager,
+): InboundConversationApplicationPort {
+  const authoritative = manager.usesDurableTurnProtocol();
+  return {
+    prepareAgentTurn: async (input) => {
+      if (authoritative && !input.messageId) {
+        throw new Error(
+          "Durable channel admission requires a stable platform message id",
+        );
+      }
+      return {
+        turnId: input.messageId
+          ? `channel:${input.channelId}:${input.messageId}`
+          : generateTurnId(),
+      } as Awaited<
+        ReturnType<InboundConversationApplicationPort["prepareAgentTurn"]>
+      >;
+    },
+    admitAgentTurn: async (input) => {
+      const admitted = await manager.admitTurn({
+        conversationId: input.conversationId,
+        source: "channel",
+        beforeEnqueue: (managed) =>
+          manager.admitDurableTurn({
+            conversationId: managed.conversationId,
+            input: input.text,
+            invocation: { kind: "agent", source: "channel" },
+            options: {
+              turnContext: input.turnContext,
+              source: "channel",
+              surfacePrincipal: channelSurfacePrincipal({
+                channelId: input.channelId,
+                platformSubject: input.platformSubject,
+              }),
+            },
+            surfacePrincipal: channelSurfacePrincipal({
+              channelId: input.channelId,
+              platformSubject: input.platformSubject,
+            }),
+          }),
+        makeTask: (managed) => ({
+          source: "channel",
+          execute: async () => {
+            input.onStarted();
+            try {
+              const projected = await projectSessionTurn({
+                manager,
+                managed,
+                text: input.text,
+                turnId: input.turnIdentity.turnId,
+                runOptions: {
+                  turnContext: input.turnContext,
+                  turnIndex: managed.turnCount,
+                  source: "channel",
+                },
+                hooks: {
+                  onCommitFailure: input.onCommitFailure,
+                  onFinalPublishFailure: input.onFinalPublishFailure,
+                },
+                notify: input.onProtocolEvent,
+              });
+              await input.onOutcome(
+                projected.kind === "settled"
+                  ? { kind: "settled", result: projected.runResult.agentResult }
+                  : projected,
+                authoritative ? "authoritative" : "surface",
+              );
+            } finally {
+              manager.setBusy(managed.conversationId, false);
+              input.onSettled(authoritative ? "authoritative" : "surface");
+            }
+          },
+          cancel: input.onPendingCancelled,
+        }),
+      });
+      const status = admitted.status === "full"
+        ? "queue-full"
+        : admitted.status;
+      if (status === "immediate") void admitted.task.execute();
+      return {
+        status,
+        conversationId:
+          "conversationId" in admitted
+            ? admitted.conversationId
+            : input.conversationId,
+        turnId: input.turnIdentity.turnId,
+      } as Awaited<
+        ReturnType<InboundConversationApplicationPort["admitAgentTurn"]>
+      >;
+    },
+    abort: async (input) => {
+      if (authoritative) {
+        if (!input.messageId) {
+          throw new Error(
+            "Durable channel cancellation requires a stable platform message id",
+          );
+        }
+        await manager.cancelDurableRuns({
+          conversationId: input.conversationId,
+          requestId: `cancel:${protocolDigest("ChannelConversationCancel", 1, {
+            channelId: input.channelId,
+            messageId: input.messageId,
+          })}`,
+          principal: manager.durableControlPrincipal({
+            surfacePrincipal: channelSurfacePrincipal({
+              channelId: input.channelId,
+              platformSubject: input.platformSubject,
+            }),
+            connectionId: `channel:${input.channelId}`,
+          }),
+          reason: { kind: "user-cancel", source: "rpc", pressedAt: Date.now() },
+          response: { replyTarget: input.replyTarget },
+        });
+        return { cancelled: true, feedback: { kind: "authoritative" } };
+      }
+      const cancelled = manager.abort(input.conversationId, {
+        kind: "user-cancel",
+        source: "rpc",
+        pressedAt: Date.now(),
+      });
+      return {
+        cancelled: true,
+        feedback: cancelled.abortedInFlight
+          ? { kind: "in-flight" }
+          : cancelled.cancelledPending > 0
+            ? { kind: "pending", count: cancelled.cancelledPending }
+            : { kind: "idle" },
+      };
+    },
+  };
+}
+
 function createTestLogger(): ChannelLogger {
   return {
     debug: vi.fn(),
@@ -157,7 +299,7 @@ describe("InboundRouter", () => {
     channels.register(adapter);
 
     const router = new InboundRouter({
-      conversations,
+      conversation: createTestConversationPort(conversations),
       channels: createInboundPort(channels),
       logger,
       sessionBroadcast: options?.sessionBroadcast
@@ -696,7 +838,7 @@ describe("InboundRouter", () => {
       channels.register(adapter);
 
       const router = new InboundRouter({
-        conversations,
+        conversation: createTestConversationPort(conversations),
         channels: createInboundPort(channels),
         logger,
         confirmationHub: hub,
@@ -1149,7 +1291,7 @@ describe("InboundRouter", () => {
       });
       channels.register(adapter);
       const router = new InboundRouter({
-        conversations,
+        conversation: createTestConversationPort(conversations),
         channels: createInboundPort(channels),
         logger,
       });
