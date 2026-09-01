@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：等待协调者复核 A5-17e Backup & Recovery 零残留审计与 A5 退出<br>
+> 当前检查点：等待协调者复核 A6-01a Intelligence Kernel 模型 Provider 依赖反转<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `7e7a43f7`；A5-17d 已由协调者独立复核并提交，disaster recovery 的 fresh/current-installed、prepare/import/commit/abort/receipt、credential outcome 与 recover-finish 终态已归入唯一 Backup & Recovery 应用，临时 command bridge 已关闭；A5-17a～17c、A5-16a～A5-16i 继续有效 |
-| 当前 A 项 | A5 已在当前工作区闭合，等待协调者独立复核退出；不得在本包进入 A6 |
-| 活跃工作包 | `A5-17e-backup-recovery-zero-residual-audit-v1` 已实施并等待协调者复核：全域 exact-set、产品状态投影、无消费者/测试旁路和负向门禁已闭合 |
-| 下一责任链 | 协调者接受并提交 A5-17e 后，从 A6 选择首条最高依赖的可替换边缘/设备拓扑责任链；若复核发现反证则只恢复真实相交的 Backup & Recovery 子证据与 A5 退出门 |
-| 打开的单向桥 | 无；`A5-DISASTER-RECOVERY-COMMAND-01` 已关闭，`disaster-recovery-command.ts` 仅保留 path/SecretStore/Authority/Target/Mesh/protocol/time/signal 机制适配与中文呈现，不再拥有安装或完成产品状态机 |
-| 已失效证据 | 无当前未恢复证据；A5-17e 已恢复初次审计发现的 CLI `server.info` 状态决定、test-only stable device-id selector 与无消费者 inventory type 出口，A5-16h、A5-17a～17d 的其余事实继续有效 |
+| 已接受基线 | `966ea470`；A5-17e 已由协调者独立复核并提交，Backup & Recovery 全域产品状态投影、无消费者/测试旁路和负向门禁均已闭合；A5 全部领域责任及 A0～A5 当前证据有效 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；当前先闭合 Intelligence Kernel 对模型 Provider 家族的需求方端口与依赖反转 |
+| 活跃工作包 | `A6-01a-kernel-provider-dependency-inversion-v1` 已完成协调反证纠正与最窄验证，当前等待协调者独立复核；Kernel/Orchestrator 只消费自身拥有的模型运行合同，具体 Provider 与配置解析只在 Host 边缘严格投影 |
+| 下一责任链 | A6-01a 独立验收后，沿 Provider/Configuration/Secret 的剩余真实交界继续收窄；随后再按一个家族一条责任链推进 Tool、MCP、Channel、Storage、Executor/Mesh 与设备拓扑，不提前整包派发 A6 |
+| 打开的单向桥 | 无；A6-01a 必须在同一工作包切换全部 Agent Runtime 生产组合点，不允许 Kernel 新旧 Provider 构造双轨并存 |
+| 已失效证据 | 无当前未恢复证据；A6-01a 早先由错误解析入口报告的 CLI Host adapter 3/3 已作废，协调者 package-local 直达命令暴露 2 项 exact-set 失败后，本轮以同一有效入口恢复为 3/3，并补齐 attention 两字段反向门禁；A0～A5 的产品语义与事实 owner 证据未被纯适配依赖反转扩大失效 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2477,6 +2477,15 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 同根纠正与旧路退场：审计发现 `backup-runtime-owner.ts` 仍把 raw durable backup state 映射为公开 `nextAction`，现已把唯一不可变 `BackupRecoveryPublicStatus` 与 `projectBackupRecoveryPublicStatus` 归入 `@zhixing/core/backup-recovery/application`；应用 `status()` 与 `server.info` 共同消费该投影，CLI runtime owner 仅保留 checkpoint 机制。同步删除 backup setup/disaster admission 的 test-only stable device-id selector，生产与测试只消费已注册的 paired display-name 或既有 configured device id；删除无消费者 `DisasterRecoveryInventoryPort` 类型出口。全域反查未发现旧 `completeBackupSetup`、`RecoveryRootLifecycleService`、legacy inventory selector、`reportDisasterRecoveryCompleted`、第二 application/materializer/codec、根 barrel、兼容/deprecated wrapper、双写或未登记 bridge；旧 Skill 目录及 A6 边缘责任未触碰，公开命令、RPC/Server 信息、中文文案、持久格式、签名、重放、恢复和 current-removal 行为不变。
 - 直接证据与验证：Core Backup & Recovery application 1 文件 33/33；CLI 真实 setup/runtime-owner/disaster/public-error 闭包 4 文件 16/16，其中首次下游运行因 stale Core dist 产生 backup-command 6 项失败，完成 Core fresh build 后只重跑该失效文件并取得 8/8，其余 3 文件 8/8 的首次证据继续有效。Core typecheck/build、CLI typecheck 与 `pnpm cli:build`、fresh `pnpm runtime:package-exports`、canonical S7 coverage/mutation 34/34 与 registry golden、changed-source Biome 均通过；S7 现机械冻结九命令、五个应用构造、唯一公开状态投影、paired selector、narrow export/build exact-set，并反向拒绝 CLI 本地 projector、device-id 测试旁路、无消费者 inventory alias、旧 helper/第二应用、根导出和机制层重获产品决定。
 - 失效、阶段裁决与交接：若九个公开命令或 `server.info` 状态消费、五个应用/descriptor、公开状态投影、backup target/root/disaster/current-removal 合同、对应 Host/Correctness/Storage/Mesh/Secret/protocol adapter、core 窄 export/build、S7/package-export 或上述直接测试任一变化，恢复本证据及真实相交的 A5-16h、A5-17a～A5-17d 子证据；无关 A6 适配变化不自动误伤。当前 Backup & Recovery Administration 行与 A5 均更新为 `[x]`，完成度为 `6/8`；A5 全部领域行已闭合且无当前未恢复证据，下一检查点仅在协调者独立接受并提交后进入 A6。本轮未进入 A6，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+### A6-01a：Intelligence Kernel 模型 Provider 依赖反转
+
+- 基线与生产闭包：以已接受 `HEAD 966ea470` 加协调者调度记录为基线，形成待复核证据 `A6-01a-kernel-provider-dependency-inversion-v1`。即时正向闭合 `command.ts → RuntimeHost → createAgentRuntime` 的 conversation/scheduled-ephemeral/durable-job 三类 Anchor 发放，以及 `ExecutorRuntimeSubstrate → createAgentRuntime` 的 conversation/assignment-job 两类 Executor 发放；反向从 `createAgentRuntime`、`RuntimeHost`、Executor substrate、唯一 CLI Host adapter、package manifest/lock、runtime 窄导出和全部生产调用点对账。`packages/executor/src/runtime-role.ts` 只消费注入的 runtime factory，不是第二 Kernel 构造入口；CLI advancement 独立 Provider 调用不属于本包，保持原状。
+- 责任迁移与旧路退场：`@zhixing/orchestrator/runtime` 现在唯一拥有有限只读的 `KernelModelProviderBinding/Factory` 与 `KernelRuntimeEnvironment/Factory`；模型合同只含 main/light/power 生效角色、thinking、协议输出预算、主角色预算/输入/attention 能力，环境合同只含生效身份、session type、工作区、全局配置路径和网络代理。两者在进入 Kernel 前按 exact key、角色与冻结状态 fail closed；role/thinking/budget/environment 是 fresh immutable value，具体 Provider 实例只作为端口保留内部运行状态。`createAgentRuntime` 不再导入或解释 `ZhixingConfig`、credential、协议、Provider catalog、workspace/config source；`@zhixing/orchestrator` 的 `@zhixing/providers` manifest/lock 生产依赖和测试 mock 归零。唯一 CLI Host adapter 负责 `createProviderRoles`、main job model override、light/power fallback 与 degradation、thinking 校验、协议预算、模型输入/attention 和 workspace/identity/config path/proxy 投影；RuntimeHost 三类发放和 Executor 两类发放均在 runtime 发布前取得完整 binding/environment，失败不发布半装配实例，没有旧 `providerConfiguration`、第二构造路径、根导出或兼容壳。
+- 行为保护与边界：main/light/power 缺省与显式 power 路由、durable job main model override、可选角色降级告警、流式文本/tool/usage、取消 first-wins、结构化错误、Kernel 四终态、资源计量、Task 子运行和 conversation/workscene/ephemeral/job 既有行为保持。Host 只投影本责任链必要的既有配置值；SecretStore 解锁、配置 reload/换代、advancement standalone provider 及 Provider/Configuration/Secret 的其余交界没有迁移，也没有新增通用 Provider 框架、产品状态或公开协议。
+- 直接证据与门禁：协调者独立复核确认 Orchestrator 两个直接文件 73/73、RuntimeHost 三类发放 8/8、Executor conversation/job 装配 7/7 继续有效，本轮均未重复运行。早先从仓库根经 wrapper 取得的 CLI Host adapter 3/3 被 package-local 直达命令的 16/18 反证，不能作为有效证据；纠正后从 `packages/cli` 直接执行 `node node_modules/vitest/vitest.mjs run src/runtime/__tests__/kernel-runtime-bindings.test.ts`，取得唯一 adapter 文件 3/3，并真实调用 `assertKernelModelProviderBinding` 证明 main override/power degradation 后的 attention exact keys 仅为 `optimalMaxTokens/riskMaxTokens`，没有 `modelId/config/credentials`。此前 `call-llm` 15/15 仅作为未失效行为证据保留，不与上述独立闭包重复相加。本轮没有改动 adapter 以外生产源码，按纠正边界未重跑既有 Orchestrator/RuntimeHost/CLI build、canonical S7 35/35 与 registry golden、fresh package exports 或其他直接测试；新增的 S7 attention 反向 mutation 以唯一 inspector 定向 1/1 通过，能拒绝把完整 Provider capability 直接交给 Kernel。纠正文件的最窄 Biome 与 `git diff --check` 均通过，索引为空。S7/package-export 反向 mutation 现在拒绝 Orchestrator concrete Provider import/manifest 依赖、runtime 根泄漏、RuntimeHost factory 绕过、Host adapter owner 漂移或 attention 宽对象泄漏、Executor 漏绑和旧 `providerConfiguration` 回流。
+- 协调反证与纠正：`resolveModelCapability()` 的 Provider 结果含 `modelId`，旧 Host adapter 曾把它整体赋给 `primary.attention`，因此真正的 Kernel exact-set validator 正确拒绝该 binding；Kernel 两字段合同没有放宽。本轮仅在 Host edge 将 capability 显式投影为 `optimalMaxTokens/riskMaxTokens`，保留 main job override、light/power fallback/degradation 和所有既有 Provider 行为；这是 A6 迁移输入的边缘适配缺口，不是增加 Kernel 能力或协议字段。以后若该投影再次整体透传、attention exact-set 改动、package-local 测试不再经过 fresh Kernel validator，或真实 Host adapter 绕过 `assertKernelModelProviderBinding`，本证据精确失效。
+- 失效与交接：若模型 binding/environment exact-set 或冻结规则、`createAgentRuntime` 输入、RuntimeHost/Executor 任一生产发放、CLI concrete adapter、main/light/power/override/degradation/stream/usage/cancel/error/terminal 语义、Orchestrator manifest/lock/runtime export、S7/package-export 或上述直接测试任一变化，只恢复本证据及真实相交证据。A6 继续 `[ ]`；下一检查点仅在协调者独立接受并提交后沿 Provider/Configuration/Secret 剩余交界继续收窄，不提前进入 Tool、MCP、Channel、Storage、Executor/Mesh 或设备拓扑。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 

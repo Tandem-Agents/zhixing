@@ -55,6 +55,21 @@ export {
   type TextCallOptions,
 } from "./create-agent-runtime.js";
 export {
+  assertKernelModelProviderBinding,
+  createKernelModelProviderBinding,
+  type KernelModelAttentionCapability,
+  type KernelModelProviderBinding,
+  type KernelModelProviderFactory,
+  type KernelPrimaryModelRole,
+} from "./kernel-model-provider.js";
+export {
+  assertKernelRuntimeEnvironment,
+  createKernelRuntimeEnvironment,
+  type KernelRuntimeEnvironment,
+  type KernelRuntimeEnvironmentFactory,
+  type KernelWorkspaceSource,
+} from "./kernel-runtime-environment.js";
+export {
   assertKernelRuntimeIdentityContribution,
   createKernelRuntimeIdentityContribution,
   type KernelRuntimeIdentityContribution,

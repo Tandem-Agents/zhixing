@@ -7,11 +7,17 @@ import {
   createKernelRuntimeIdentityContribution,
   type AgentRuntime,
   type AgentRuntimeCapacityBinding,
+  type KernelModelProviderFactory,
+  type KernelRuntimeEnvironmentFactory,
 } from "@zhixing/orchestrator/runtime";
 import { mainProfile, powerProfile } from "@zhixing/orchestrator/profile";
 import { parseConversationId } from "@zhixing/core";
 import type { ProviderCredentialProjection, ZhixingConfig } from "@zhixing/providers";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
+import {
+  createHostKernelModelProviderFactory,
+  createHostKernelRuntimeEnvironmentFactory,
+} from "../runtime/kernel-runtime-bindings.js";
 import { createStdoutWriter } from "../screen/index.js";
 import { resolveSystemProtectedSecretPaths } from "../security/secret-boundary.js";
 import {
@@ -940,6 +946,9 @@ export async function runExecutorRole(
 }
 
 export class ExecutorRuntimeSubstrate {
+  readonly #modelProvider: KernelModelProviderFactory;
+  readonly #runtimeEnvironment: KernelRuntimeEnvironmentFactory;
+
   constructor(private readonly options: {
     readonly config: ZhixingConfig;
     readonly credentials: ProviderCredentialProjection;
@@ -952,7 +961,10 @@ export class ExecutorRuntimeSubstrate {
       readonly scheduler: AgentRuntimeCapacityBinding;
       readonly orchestration: AgentRuntimeCapacityBinding;
     };
-  }) {}
+  }) {
+    this.#modelProvider = createHostKernelModelProviderFactory(options);
+    this.#runtimeEnvironment = createHostKernelRuntimeEnvironmentFactory(options);
+  }
 
   createConversationRuntime(
     workspaceRoot?: string | null,
@@ -971,14 +983,15 @@ export class ExecutorRuntimeSubstrate {
             }),
           }
         : undefined;
+    const primaryRole = workscene ? "power" : "main";
     return createAgentRuntime({
       artifactStore: this.options.artifactStore(),
       deviceCapacity: this.options.deviceCapacity.interactive,
       orchestrationCapacity: this.options.deviceCapacity.orchestration,
-      providerConfiguration: {
-        config: this.options.config,
-        credentials: this.options.credentials,
-      },
+      modelProvider: this.#modelProvider.create({ primaryRole }),
+      runtimeEnvironment: this.#runtimeEnvironment.create({
+        ...(workspaceRoot === undefined ? {} : { workspace: workspaceRoot }),
+      }),
       profile:
         workscene?.profile ??
         mainProfile({ hasWorkspace: workspaceRoot !== null }),
@@ -987,10 +1000,9 @@ export class ExecutorRuntimeSubstrate {
       confirmationLifecycleObserver: this.options.interactions,
       systemProtectedPaths: this.options.systemProtectedPaths,
       runtimeKind: "conversation",
-      ...(workspaceRoot === undefined ? {} : { workspace: workspaceRoot }),
       ...(workscene
         ? {
-            primaryRole: "power",
+            primaryRole,
             runtimeIdentity: createKernelRuntimeIdentityContribution(
               workscene.sceneId,
             ),
@@ -1022,27 +1034,17 @@ export class ExecutorRuntimeSubstrate {
       }
       extraTools = extraTools.filter((tool) => requested.has(tool.name));
     }
-    const config =
-      instruction.model && this.options.config.llm
-        ? {
-            ...this.options.config,
-            llm: {
-              ...this.options.config.llm,
-              main: {
-                ...this.options.config.llm.main,
-                model: instruction.model,
-              },
-            },
-          }
-        : this.options.config;
     return createAgentRuntime({
       artifactStore: this.options.artifactStore(),
       deviceCapacity: this.options.deviceCapacity.scheduler,
       orchestrationCapacity: this.options.deviceCapacity.orchestration,
-      providerConfiguration: {
-        config,
-        credentials: this.options.credentials,
-      },
+      modelProvider: this.#modelProvider.create({
+        primaryRole: "main",
+        ...(instruction.model === undefined
+          ? {}
+          : { mainModelOverride: instruction.model }),
+      }),
+      runtimeEnvironment: this.#runtimeEnvironment.create({}),
       profile: {
         ...baseProfile,
         enabledTools: requested

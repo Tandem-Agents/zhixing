@@ -14,8 +14,7 @@
  *      newMessages / contextEngine / secureExecuteTool 不跨 run 串状态
  *
  * mock 策略:
- *   - vi.mock("@zhixing/providers") 替换 createProviderRoles /
- *     resolveWorkspace / ensureWorkspaceDir,杜绝真实 fs / config 依赖
+ *   - 直接构造 Kernel model/environment 有限输入,不依赖具体 Provider 包
  *   - MockLLMProvider 提供确定性 LLM 响应
  *   - vi.hoisted ref 让每个测试动态注入不同的 provider 响应序列
  */
@@ -47,7 +46,6 @@ import {
   type SkillCatalogEntry,
   type TurnContextProvider,
 } from "@zhixing/core";
-import type { RoleDegradation } from "@zhixing/providers";
 import type {
   AssignmentGlobalQueryPort,
   GlobalQuery,
@@ -55,13 +53,14 @@ import type {
   ModelCallResourceMeter,
 } from "@zhixing/core/contracts";
 import type { KernelRunEnvelope } from "../kernel-run-envelope.js";
+import { createKernelModelProviderBinding } from "../kernel-model-provider.js";
+import { createKernelRuntimeEnvironment } from "../kernel-runtime-environment.js";
 
 // ─── hoisted ref:让 vi.mock 工厂在 import 之前能引用 ───
 
 const {
   providerRef,
   powerRoleRef,
-  degradationsRef,
   decorateCalls,
   decorateDisposes,
   resolveWorkspaceMock,
@@ -74,9 +73,6 @@ const {
     powerRoleRef: {
       current: null as null | { model: string; provider: MockLLMProvider },
     },
-    // opt-in 可选角色降级注入：默认空 = 无降级（既有用例零影响）；设值时
-    // mock 的 resolvedRoles.degradations 返回它，驱动边缘层告警分支可断言。
-    degradationsRef: { current: [] as RoleDegradation[] },
     decorateCalls: [] as Array<IEventBus<AgentEventMap>>,
     decorateDisposes: [] as Array<() => void>,
     resolveWorkspaceMock: vi.fn(() => ({
@@ -126,80 +122,70 @@ function ownSkillEntry(
   };
 }
 
-vi.mock("@zhixing/providers", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@zhixing/providers")>();
-  // 最小 ResolvedProvider 骨架 —— createAgentRuntime 仅读 .protocol,其它字段
-  // 不被 runtime 主流程消费,as 强转换出 typed 实例供 resolveModelInfo 使用
-  const resolvedProvider = {
-    id: "mock",
-    name: "Mock",
-    baseUrl: "http://mock",
-    apiKey: "mock",
-    protocol: "openai-compatible" as const,
-    quirks: {
-      maxTokensField: "max_tokens" as const,
-      supportsStreamUsage: false,
-    },
-  } as never;
-  const resolvedRole = { resolved: resolvedProvider, model: "mock-model" };
-
-  return {
-    ...actual,
-    // mock 关键工厂:返回挂着 MockLLMProvider 的角色对,不触碰 fs / config
-    createProviderRoles: () => {
-      const provider = providerRef.current ?? new MockLLMProvider([{ text: "ok" }]);
-      const mkRole = (p: MockLLMProvider, model: string): LLMRole => ({
-        provider: p,
-        model,
-        chat: (request) => p.chat(request),
-      });
-      const mainRole = mkRole(provider, "mock-model");
-      // powerRoleRef 未设 → power 折叠为 main（fallback 语义，与历史一致）；
-      // 设了 → 独立 model + provider 实例，路由区分可断言。
-      const powerOverride = powerRoleRef.current;
-      const powerRole = powerOverride
-        ? mkRole(powerOverride.provider, powerOverride.model)
-        : mainRole;
-      const roles: LLMRoles = {
-        main: mainRole,
-        light: mainRole,
-        power: powerRole,
-      };
-      const powerResolved = powerOverride
-        ? { resolved: resolvedProvider, model: powerOverride.model }
-        : resolvedRole;
-      return {
-        roles,
-        config: { providers: {} } as never,
-        resolvedRoles: {
-          main: resolvedRole,
-          light: resolvedRole,
-          power: powerResolved,
-          degradations: degradationsRef.current,
-        } as never,
-      };
-    },
-    // workspace 走 cwd-fallback,跳过配置层
-    resolveWorkspace: resolveWorkspaceMock,
-    // 不真的 mkdir
-    ensureWorkspaceDir: ensureWorkspaceDirMock,
-  };
-});
-
-// 必须在 vi.mock 之后 import,确保 createAgentRuntime 拿到的是 mock 后的 providers
 const {
   createAgentRuntime: createAgentRuntimeImpl,
 } = await import("../create-agent-runtime.js");
 const { createKernelRuntimeIdentityContribution } = await import(
   "../kernel-runtime-identity.js"
 );
-const createAgentRuntime = (
-  options: Omit<Parameters<typeof createAgentRuntimeImpl>[0], "providerConfiguration">,
-) =>
-  createAgentRuntimeImpl({
-    providerConfiguration: { config: {}, credentials: {} },
-    ...options,
-  } as Parameters<typeof createAgentRuntimeImpl>[0]);
+type TestCreateAgentRuntimeOptions = Omit<
+  Parameters<typeof createAgentRuntimeImpl>[0],
+  "modelProvider" | "runtimeEnvironment"
+> & { readonly workspace?: string | null };
+
+function createTestModelProvider(primaryRole: "main" | "power") {
+  const provider = providerRef.current ?? new MockLLMProvider([{ text: "ok" }]);
+  const makeRole = (current: MockLLMProvider, model: string): LLMRole => ({
+    provider: current,
+    model,
+    chat: (request) => current.chat(request),
+  });
+  const mainRole = makeRole(provider, "mock-model");
+  const powerOverride = powerRoleRef.current;
+  const powerRole = powerOverride
+    ? makeRole(powerOverride.provider, powerOverride.model)
+    : mainRole;
+  const roles: LLMRoles = {
+    main: mainRole,
+    light: mainRole,
+    power: powerRole,
+  };
+  return createKernelModelProviderBinding({
+    primaryRole,
+    roles,
+    roleThinking: { main: undefined, light: undefined, power: undefined },
+    defaultMaxOutputTokens: { main: 8192, light: 8192, power: 8192 },
+    primary: {
+      budget: { contextWindow: 128_000, maxOutputTokens: 8192 },
+      inputCapabilities: { images: false },
+      attention: { optimalMaxTokens: 64_000, riskMaxTokens: 96_000 },
+    },
+  });
+}
+
+function createTestRuntimeEnvironment(workspace?: string | null) {
+  const resolved = workspace === null
+    ? { path: null, source: "none" as const }
+    : resolveWorkspaceMock();
+  ensureWorkspaceDirMock(resolved);
+  return createKernelRuntimeEnvironment({
+    agentIdentity: { displayName: "知行" },
+    sessionType: "interactive",
+    workspace: resolved,
+    globalConfigPath: "/test/config.jsonc",
+  });
+}
+
+const createAgentRuntime = (options: TestCreateAgentRuntimeOptions = {}) => {
+  const { workspace, ...runtimeOptions } = options;
+  const primaryRole = runtimeOptions.primaryRole ?? "main";
+  return createAgentRuntimeImpl({
+    ...runtimeOptions,
+    primaryRole,
+    modelProvider: createTestModelProvider(primaryRole),
+    runtimeEnvironment: createTestRuntimeEnvironment(workspace),
+  });
+};
 const { mainProfile } = await import("../../profile/default-profiles.js");
 
 // ─── 测试辅助 ───
@@ -214,7 +200,6 @@ function runKernel(
 beforeEach(() => {
   providerRef.current = null;
   powerRoleRef.current = null;
-  degradationsRef.current = [];
   decorateCalls.length = 0;
   decorateDisposes.length = 0;
   resolveWorkspaceMock.mockClear();
@@ -339,14 +324,12 @@ describe("createAgentRuntime · immutable turn-context assembly", () => {
         turnContextProviders: [provider("time", "spoofed-time")],
       }),
     ).rejects.toThrow("Duplicate turn-context provider: time");
-    expect(resolveWorkspaceMock).not.toHaveBeenCalled();
 
     await expect(
       createAgentRuntime({
         turnContextProviders: [undefined as unknown as TurnContextProvider],
       }),
     ).rejects.toThrow("Invalid turn-context provider assembly input");
-    expect(resolveWorkspaceMock).not.toHaveBeenCalled();
   });
 });
 
@@ -1477,45 +1460,6 @@ describe("createAgentRuntime · primaryRole 槽位", () => {
 
     expect(mainProvider.calls.length).toBeGreaterThan(0);
     expect(powerProvider.calls.length).toBe(0);
-  });
-});
-
-// ─── 契约: 可选角色降级 → 边缘层可见非致命告警 ───
-
-describe("createAgentRuntime · 可选角色降级可见告警", () => {
-  it("degradations 非空 → [zhixing] console.warn 含角色中文名 + 原配置，且不抛", async () => {
-    degradationsRef.current = [
-      {
-        role: "light",
-        configured: { provider: "openai", model: "gpt-4o-mini" },
-        reason: "凭证或必要配置缺失",
-      },
-    ];
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      // 降级永不阻断 agent 创建
-      const runtime = await createAgentRuntime({});
-      expect(runtime).toBeDefined();
-
-      const msg = warn.mock.calls.map((c) => String(c[0])).join("\n");
-      expect(msg).toContain("[zhixing]");
-      expect(msg).toContain("轻量模型"); // ROLE_SPECS light.labelZh（单一事实源）
-      expect(msg).toContain("openai · gpt-4o-mini"); // 如实回放用户原配置
-      expect(msg).toContain("已回退主模型");
-    } finally {
-      warn.mockRestore();
-    }
-  });
-
-  it("degradations 为空 → 不产生降级告警", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      await createAgentRuntime({});
-      const msg = warn.mock.calls.map((c) => String(c[0])).join("\n");
-      expect(msg).not.toContain("已回退主模型");
-    } finally {
-      warn.mockRestore();
-    }
   });
 });
 
@@ -2825,8 +2769,6 @@ describe("trustContext 装配分叉", () => {
         runtimeIdentity: Object.freeze({ sceneId: "s1" }) as never,
       }),
     ).rejects.toThrow("Kernel runtime identity contribution is invalid");
-    expect(resolveWorkspaceMock).not.toHaveBeenCalled();
-    expect(ensureWorkspaceDirMock).not.toHaveBeenCalled();
   });
 
   it("非场景实例:无工作区 → global 信任与 main 上下文", async () => {

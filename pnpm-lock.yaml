@@ -258,9 +258,6 @@ importers:
       '@zhixing/network':
         specifier: workspace:*
         version: link:../network
-      '@zhixing/providers':
-        specifier: workspace:*
-        version: link:../providers
       '@zhixing/tools-builtin':
         specifier: workspace:*
         version: link:../tools-builtin

@@ -170,6 +170,10 @@ import {
   type ConversationRepoTaskListRoute,
 } from "../runtime/task-list-stores.js";
 import { createCliTurnContextProviders } from "../runtime/turn-context-providers.js";
+import {
+  createHostKernelModelProviderFactory,
+  createHostKernelRuntimeEnvironmentFactory,
+} from "../runtime/kernel-runtime-bindings.js";
 import { createServeAdvancementApplications } from "./advancement-controller.js";
 import { createAdvancementAcceptanceLifecycle } from "./advancement-acceptance-lifecycle.js";
 import {
@@ -688,10 +692,11 @@ async function runServerProcess(
   };
 
   const runtimeHost = new RuntimeHost({
-    providerConfiguration: {
+    modelProvider: createHostKernelModelProviderFactory({
       config,
       credentials: providerCredentials,
-    },
+    }),
+    runtimeEnvironment: createHostKernelRuntimeEnvironmentFactory({ config }),
     confirmationLifecycleObserver: durableInteractions,
     systemProtectedPaths,
     artifactStore: () => {

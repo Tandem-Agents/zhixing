@@ -6,6 +6,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const runtimeMocks = vi.hoisted(() => ({
   createAgentRuntime: vi.fn(),
+  modelProviderCreate: vi.fn((input) => ({ kind: "model", input })),
+  runtimeEnvironmentCreate: vi.fn((input) => ({ kind: "environment", input })),
 }));
 
 vi.mock("@zhixing/orchestrator/runtime", async () => {
@@ -19,6 +21,15 @@ vi.mock("@zhixing/orchestrator/runtime", async () => {
   };
 });
 
+vi.mock("../../runtime/kernel-runtime-bindings.js", () => ({
+  createHostKernelModelProviderFactory: () => ({
+    create: runtimeMocks.modelProviderCreate,
+  }),
+  createHostKernelRuntimeEnvironmentFactory: () => ({
+    create: runtimeMocks.runtimeEnvironmentCreate,
+  }),
+}));
+
 const {
   ExecutorJobOwnerLifecycle,
   ExecutorRuntimeSubstrate,
@@ -26,6 +37,8 @@ const {
 
 beforeEach(() => {
   runtimeMocks.createAgentRuntime.mockReset();
+  runtimeMocks.modelProviderCreate.mockClear();
+  runtimeMocks.runtimeEnvironmentCreate.mockClear();
 });
 
 describe("executor role conversation runtime production assembly", () => {
@@ -56,10 +69,15 @@ describe("executor role conversation runtime production assembly", () => {
     expect(runtimeMocks.createAgentRuntime).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({
-        workspace: "/scene-workspace",
         primaryRole: "power",
       }),
     );
+    expect(runtimeMocks.modelProviderCreate).toHaveBeenNthCalledWith(1, {
+      primaryRole: "power",
+    });
+    expect(runtimeMocks.runtimeEnvironmentCreate).toHaveBeenNthCalledWith(1, {
+      workspace: "/scene-workspace",
+    });
     const worksceneIdentity = runtimeMocks.createAgentRuntime.mock.calls[0]![0]
       .runtimeIdentity;
     expect(worksceneIdentity).toMatchObject({ sceneId: "scene-a" });
@@ -70,7 +88,12 @@ describe("executor role conversation runtime production assembly", () => {
       "ordinary-conversation",
     );
     const mainParams = runtimeMocks.createAgentRuntime.mock.calls[1]![0];
-    expect(mainParams.workspace).toBe("/ordinary-workspace");
+    expect(runtimeMocks.modelProviderCreate).toHaveBeenNthCalledWith(2, {
+      primaryRole: "main",
+    });
+    expect(runtimeMocks.runtimeEnvironmentCreate).toHaveBeenNthCalledWith(2, {
+      workspace: "/ordinary-workspace",
+    });
     expect(mainParams.runtimeIdentity).toBeUndefined();
     expect(mainParams.primaryRole).toBeUndefined();
   });
@@ -143,6 +166,10 @@ describe("executor role job runtime production assembly", () => {
         systemProtectedPaths: ["protected"],
       }),
     );
+    expect(runtimeMocks.modelProviderCreate).toHaveBeenCalledWith({
+      primaryRole: "main",
+    });
+    expect(runtimeMocks.runtimeEnvironmentCreate).toHaveBeenCalledWith({});
   });
 
   it("starts transport before recovery and closes the owner before transport", async () => {

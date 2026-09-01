@@ -25,6 +25,7 @@ import {
   inspectAgentRuntimeSecurityEncapsulation,
   inspectAgentRuntimeWorkspaceEncapsulation,
   inspectTurnContextProviderAssembly,
+  inspectKernelProviderDependencyInversion,
   inspectWorksceneRuntimeProjectionBoundary,
   inspectWorkspaceAdministrationOwnership,
   inspectTrustAdministrationOwnership,
@@ -3274,6 +3275,86 @@ test("TurnContext providers are fixed assembly input before every RuntimeHost is
       (text) => `${text}\nconst turnContextProviders = [\"scheduler\"];`,
     )).join("\n"),
     /ExecutorRuntimeSubstrate/,
+  );
+});
+
+test("Kernel model providers are concrete only at the Host edge", async () => {
+  const paths = [
+    "packages/orchestrator/src/runtime/kernel-model-provider.ts",
+    "packages/orchestrator/src/runtime/kernel-runtime-environment.ts",
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+    "packages/orchestrator/src/runtime/index.ts",
+    "packages/orchestrator/src/index.ts",
+    "packages/runtime-host/src/runtime-host.ts",
+    "packages/cli/src/runtime/kernel-runtime-bindings.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectKernelProviderDependencyInversion(records), []);
+  assert.match(
+    inspectKernelProviderDependencyInversion(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => `import { createProviderRoles } from "@zhixing/providers";\n${text}`,
+    )).join("\n"),
+    /concrete Provider|concrete Provider\/configuration/,
+  );
+  assert.match(
+    inspectKernelProviderDependencyInversion(mutate(
+      "packages/orchestrator/src/index.ts",
+      (text) => `${text}\nexport * from "./runtime/kernel-model-provider.js";`,
+    )).join("\n"),
+    /runtime subpath/,
+  );
+  assert.match(
+    inspectKernelProviderDependencyInversion(mutate(
+      "packages/runtime-host/src/runtime-host.ts",
+      (text) => text.replace(
+        "const modelProvider = this.opts.modelProvider.create({",
+        "const modelProvider = { roles: {} }; // bypass\n    void ({",
+      ),
+    )).join("\n"),
+    /every runtime through the Host-owned provider factories/,
+  );
+  assert.match(
+    inspectKernelProviderDependencyInversion(mutate(
+      "packages/cli/src/runtime/kernel-runtime-bindings.ts",
+      (text) => text.replace("createProviderRoles({", "resolveProviderRoles({"),
+    )).join("\n"),
+    /concrete Provider\/configuration adapter owner/,
+  );
+  assert.match(
+    inspectKernelProviderDependencyInversion(mutate(
+      "packages/cli/src/runtime/kernel-runtime-bindings.ts",
+      (text) => text.replace(
+        /attention: \{\s*optimalMaxTokens: primaryModelCapability\.optimalMaxTokens,\s*riskMaxTokens: primaryModelCapability\.riskMaxTokens,\s*\}/u,
+        "attention: primaryModelCapability",
+      ),
+    )).join("\n"),
+    /concrete Provider\/configuration adapter owner/,
+  );
+  assert.match(
+    inspectKernelProviderDependencyInversion(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace(
+        "modelProvider: this.#modelProvider.create({ primaryRole }),",
+        "modelProvider: {} as never,",
+      ),
+    )).join("\n"),
+    /Executor production issuance/,
+  );
+  assert.match(
+    inspectProductionManifest("packages/orchestrator/package.json", {
+      dependencies: { "@zhixing/providers": "workspace:*" },
+    }).join("\n"),
+    /concrete Provider production dependency/,
   );
 });
 

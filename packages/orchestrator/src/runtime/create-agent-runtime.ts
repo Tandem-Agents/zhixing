@@ -34,9 +34,7 @@ import {
   type PermissionContextId,
   type PermissionRule,
   type RiskLevel,
-  type ResolvedRoleThinking,
   type SecurityRule,
-  type ThinkingConfig,
   type TextCallLLMResult,
   type ToolDefinition,
   type TurnContext,
@@ -59,14 +57,11 @@ import {
   computeContextTokens,
   toToolSpec,
   DEFAULT_WATCHDOG_POLICY,
-  resolveAgentIdentity,
-  resolveModelInfo,
   SecurityPipeline,
   setAgentIdentity,
   extractText,
   getTotalInputTokens,
   userMessage,
-  validateThinkingConfig,
   withRetry,
   runAgentLoop,
   TurnContextInjector,
@@ -75,7 +70,6 @@ import {
   type RuntimeExecutionProfile,
   type WindowLifecycle,
   type WindowChangeReason,
-  resolveModelInputCapabilities,
   projectSessionEvent,
   type AgentLoopDeps,
 } from "@zhixing/core";
@@ -95,19 +89,6 @@ import {
   type TrustAdministrationRepositoryRule,
 } from "@zhixing/core/trust-administration";
 import type { ModelCallResourceMeter } from "@zhixing/core/contracts";
-import {
-  createProviderRoles,
-  ensureWorkspaceDir,
-  getGlobalConfigPath,
-  PROTOCOL_BUDGET_DEFAULTS,
-  getModelCapabilityOverride,
-  resolveModelCapability,
-  resolveWorkspace,
-  resolveWorkspaceSessionType,
-  ROLE_SPECS,
-  type ProviderCredentialProjection,
-  type ZhixingConfig,
-} from "@zhixing/providers";
 import {
   BUILTIN_TOOL_FACTORIES,
   BUILTIN_TOOL_NAMES,
@@ -178,6 +159,14 @@ import {
   assertKernelRuntimeIdentityContribution,
   type KernelRuntimeIdentityContribution,
 } from "./kernel-runtime-identity.js";
+import {
+  assertKernelModelProviderBinding,
+  type KernelModelProviderBinding,
+} from "./kernel-model-provider.js";
+import {
+  assertKernelRuntimeEnvironment,
+  type KernelRuntimeEnvironment,
+} from "./kernel-runtime-environment.js";
 
 /**
  * 注入系统提示词的技能索引上限(按当前模式 top-N)。
@@ -491,21 +480,10 @@ export interface CreateAgentRuntimeOptions {
   deviceCapacity?: AgentRuntimeCapacityBinding;
   /** Dedicated local capacity class for Task and file-DAG child execution. */
   orchestrationCapacity?: AgentRuntimeCapacityBinding;
-  /** 组合根已从设备本地 SecretStore 解出的配置投影；运行时不得自行触达持久化秘密。 */
-  providerConfiguration: {
-    readonly config: ZhixingConfig;
-    readonly credentials: ProviderCredentialProjection;
-  };
-  /**
-   * 工作区：
-   *   - string   → 运行时显式工作区覆盖(如工作场景 workdir)，经 resolveWorkspace 正常解析
-   *   - undefined → 无运行时覆盖，resolveWorkspace 按配置/兜底
-   *   - null     → **显式无工作区**（无 workdir 的工作场景）：跳过
-   *     resolveWorkspace，直接 { path:null, source:"none" }，且
-   *     workingDirectory 不兜底 cwd —— 与 powerProfile 无文件工具二分
-   *     互为纵深，by-construction 杜绝串到 cwd / 主工作区
-   */
-  workspace?: string | null;
+  /** Host-selected concrete model adapters projected to the finite Kernel contract. */
+  readonly modelProvider: KernelModelProviderBinding;
+  /** Host-resolved non-secret runtime environment; never a configuration source. */
+  readonly runtimeEnvironment: KernelRuntimeEnvironment;
   /** 额外工具（如 schedule），在内置工具之后注入 */
   extraTools?: ToolDefinition[];
   /**
@@ -609,32 +587,6 @@ export interface CreateAgentRuntimeOptions {
   /** 运行体种类。缺省为持久会话运行体；一次性执行体由宿主显式传 ephemeral。 */
   runtimeKind?: RuntimeKind;
 }
-/**
- * 装配期解析某 role 的**生效**思考控制 —— 三条 ChatRequest 构造路径
- * （主对话 / 压缩 flush / 段切换摘要）统一经此注入，杜绝散落分支。
- *
- * 兜底语义（绝不向请求注入无效思考参数）：
- *   - 未配置 → undefined（不发送思考参数，服务端用自身默认，确定安全）
- *   - model 在 catalog 内：按其 thinkingControl（缺省等价 none）校验配置形态，
- *     不相容（如换 model 后旧配置残留）→ warn + undefined
- *   - model 不在 catalog 内（网关型 provider 返回 []，无法证伪）→ 透传，
- *     交由 adapter 的 provider 思考方言作终判（用户主权范畴）
- */
-function resolveRoleThinking(
-  role: LLMRole,
-  configured: ThinkingConfig | undefined,
-): ThinkingConfig | undefined {
-  if (configured === undefined) return undefined;
-  const modelInfo = role.provider.models.find((m) => m.id === role.model);
-  if (modelInfo === undefined) return configured;
-  const control = modelInfo.thinkingControl ?? { type: "none" };
-  if (validateThinkingConfig(configured, control)) return configured;
-  console.warn(
-    `[zhixing] 模型 ${role.model} 不支持所配置的思考控制形态，已忽略该思考配置`,
-  );
-  return undefined;
-}
-
 // ─── 创建运行时 ───
 
 /**
@@ -644,6 +596,9 @@ function resolveRoleThinking(
 export async function createAgentRuntime(
   options: CreateAgentRuntimeOptions,
 ): Promise<AgentRuntime> {
+  const primaryRole = options.primaryRole ?? "main";
+  assertKernelModelProviderBinding(options.modelProvider, primaryRole);
+  assertKernelRuntimeEnvironment(options.runtimeEnvironment);
   if (options.runtimeIdentity !== undefined) {
     assertKernelRuntimeIdentityContribution(options.runtimeIdentity);
   }
@@ -651,23 +606,12 @@ export async function createAgentRuntime(
   const assembledTurnContextProviders = captureTurnContextProviders(
     options.turnContextProviders,
   );
-  const { roles: baseRoles, config, resolvedRoles } = createProviderRoles({
-    config: options.providerConfiguration.config,
-    credentials: options.providerConfiguration.credentials,
-  });
-
-  // 可选角色降级（显式配了 light/power 但其 provider 凭证/配置缺失）——
-  // 已回退 main，不阻断启动；此处打一次可见的非致命告警，保留"不静默掩盖
-  // 用户期望的多 provider 架构"这一关切（与上方思考配置降级同址同范式）。
-  // `?? []` 是刻意的韧性边界：降级告警是最佳努力诊断，绝不能因其缺失/异常
-  // 反过来令 agent 创建崩溃（真实 resolveLLMRoles 恒返回数组，仅测试替身可能省略）。
-  for (const d of resolvedRoles.degradations ?? []) {
-    const label =
-      ROLE_SPECS.find((s) => s.id === d.role)?.labelZh ?? d.role;
-    console.warn(
-      `[zhixing] ${label} 配为 ${d.configured.provider} · ${d.configured.model} 但${d.reason}，已回退主模型（不影响启动；如需该角色请在配置中补全或移除该段）`,
-    );
-  }
+  const {
+    roles: baseRoles,
+    roleThinking,
+    defaultMaxOutputTokens,
+    primary: primaryModelRuntime,
+  } = options.modelProvider;
 
   // 主对话槽位 —— 决定主对话语义六处取哪个 role（capability / Task
   // provider+model / budget resolveModelInfo / 返回 providerId+model /
@@ -675,34 +619,16 @@ export async function createAgentRuntime(
   // （callText main→main / callText 默认档+段切换→light）不跟随、
   // roleThinking 三角色聚合
   // 不跟随（见下）。缺省 main，工作模式装配传 power。
-  const primaryRole = options.primaryRole ?? "main";
-  const roles = resourceAwareRoles(baseRoles, {
-    main: PROTOCOL_BUDGET_DEFAULTS[resolvedRoles.main.resolved.protocol].maxOutputTokens,
-    light: PROTOCOL_BUDGET_DEFAULTS[resolvedRoles.light.resolved.protocol].maxOutputTokens,
-    power: PROTOCOL_BUDGET_DEFAULTS[resolvedRoles.power.resolved.protocol].maxOutputTokens,
-  });
+  const roles = resourceAwareRoles(baseRoles, defaultMaxOutputTokens);
 
   // 应用级身份单例：启动时设一次，后续所有 user-facing 字符串通过
-  // getAgentIdentity() 读取。默认 "知行"，可通过全局 config.jsonc
-  // 的 agent.displayName 覆盖。
-  setAgentIdentity(resolveAgentIdentity(config.agent));
+  // 应用级身份单例：Host 已裁决配置来源并只投影生效名称。
+  setAgentIdentity(options.runtimeEnvironment.agentIdentity);
 
   const cwd = process.cwd();
 
-  // 工作区解析：按优先级链运行时显式覆盖 > 全局配置 > cwd 兜底
-  const sessionType = resolveWorkspaceSessionType();
-  // workspace === null：显式无工作区（无 workdir 工作场景），跳过解析、
-  // 直接 source:"none"；否则按优先级链 resolveWorkspace。
-  const workspace =
-    options.workspace === null
-      ? { path: null, source: "none" as const }
-      : resolveWorkspace(config, {
-          runtimeWorkspace: options.workspace,
-          sessionType,
-        });
-
-  // 确保工作区目录存在（首次启动自动创建，目录被删除则重建）
-  ensureWorkspaceDir(workspace);
+  const workspace = options.runtimeEnvironment.workspace;
+  const sessionType = options.runtimeEnvironment.sessionType;
 
   // 角色 profile —— 决定工具集与身份段。enabledTools 是装配的唯一权威源。
   const profile = options.profile ?? mainProfile();
@@ -736,12 +662,6 @@ export async function createAgentRuntime(
   //     不跟 primaryRole；质量敏感单发（callText main）走 roles.main 用 mainThinking。
   // 构造位置先于 builtinCtx：单发通道（mainCallLLM）要直接注入工具上下文
   // （admit_skill 的独立裁判通道），零 lazy 间接层。
-  const roleThinking: ResolvedRoleThinking = {
-    main: resolveRoleThinking(roles.main, config.llm?.main?.thinking),
-    light: resolveRoleThinking(roles.light, config.llm?.light?.thinking),
-    power: resolveRoleThinking(roles.power, config.llm?.power?.thinking),
-  };
-
   // 单发文本 LLM 调用按档位分流到不同角色——质量敏感单发（callText "main"）
   // 走 main，callText 默认档走 light（I/O 边界结构化数据净化）。
   // 详见 call-llm.ts 的设计注释。
@@ -762,7 +682,7 @@ export async function createAgentRuntime(
     : unavailableAssignmentSkillPorts();
 
   const builtinCtx = {
-    proxy: config.network?.proxy,
+    proxy: options.runtimeEnvironment.networkProxy,
     skillCatalogLoad: skillPorts.loadApplication,
     skillCatalogSave: skillPorts.saveApplication,
     skillCatalogAdmission: skillPorts.admissionApplication,
@@ -865,13 +785,7 @@ export async function createAgentRuntime(
   // ModelCapability 解析 —— Task 工具 + segmentManager 共用同源 capability。
   // 优先级:用户 modelCapabilityOverrides[model] > 内置 MODEL_CAPABILITIES > UNKNOWN 兜底。
   // map key / model ID 双向 normalize(剥 vendor 前缀 + 大小写无关),用户任意形式都命中。
-  const primaryModelCapability = resolveModelCapability(
-    roles[primaryRole].model,
-    getModelCapabilityOverride(
-      config.modelCapabilityOverrides,
-      roles[primaryRole].model,
-    ),
-  );
+  const primaryModelCapability = primaryModelRuntime.attention;
 
   // 思考控制与单发通道已在装配早期构造（builtinCtx 之前,见上）;此处仅派生
   // 主对话档与 light 档别名供下游消费。
@@ -898,7 +812,7 @@ export async function createAgentRuntime(
       trustAdministration,
       workspace: workspace.path,
       workspaceSource: workspace.source,
-      globalConfigPath: getGlobalConfigPath(),
+      globalConfigPath: options.runtimeEnvironment.globalConfigPath,
       parentBroker: confirmationBroker,
       parentTools: baseTools,
       childToolNames,
@@ -948,7 +862,7 @@ export async function createAgentRuntime(
     cwd,
     workspace: workspace.path,
     workspaceSource: workspace.source,
-    globalConfigPath: getGlobalConfigPath(),
+    globalConfigPath: options.runtimeEnvironment.globalConfigPath,
   };
   const buildPrompt = (
     overrides: Partial<Record<SystemPromptSegment, string | null>>,
@@ -1138,30 +1052,10 @@ export async function createAgentRuntime(
     turnContextInjector.register(provider);
   }
 
-  // 解析模型预算信息 —— resolver 保证 info 永不为 undefined。
-  // 数据源四层（高 → 低）：
-  //   1. modelOverrides[model]                — 用户精调
-  //   2. provider.models.find(id===model)     — declared catalog 命中
-  //   3. PROTOCOL_BUDGET_DEFAULTS[protocol]   — 协议族默认（网关型 provider 兜底）
-  //   4. CONSERVATIVE_FALLBACK                — defensive 兜底（生产路径不应触达）
-  // estimator 跨 run() 共享以保持校准状态。
-  const resolvedModel = resolveModelInfo({
-    providerId: roles[primaryRole].provider.id,
-    model: roles[primaryRole].model,
-    providerModels: roles[primaryRole].provider.models,
-    overrides: resolvedRoles[primaryRole].resolved.modelOverrides,
-    protocolDefaults:
-      PROTOCOL_BUDGET_DEFAULTS[resolvedRoles[primaryRole].resolved.protocol],
-  });
-  for (const w of resolvedModel.warnings) {
-    console.warn(`[zhixing] ${w.message}`);
-  }
-  const modelBudgetInfo = resolvedModel.info;
-  const modelInputCapabilities = resolveModelInputCapabilities({
-    model: roles[primaryRole].model,
-    providerModels: roles[primaryRole].provider.models,
-    overrides: resolvedRoles[primaryRole].resolved.modelInputCapabilities,
-  });
+  // Host 的具体 Provider adapter 已把配置、catalog 与协议默认解析为有限模型
+  // 合同；Kernel 只消费生效预算和输入能力。estimator 跨 run() 共享以保持校准。
+  const modelBudgetInfo = primaryModelRuntime.budget;
+  const modelInputCapabilities = primaryModelRuntime.inputCapabilities;
   const estimator = createTokenEstimator();
 
   // 段切换摘要的流装配工厂 —— run 内评估与手动 forceCompact 共用同一条
@@ -1315,7 +1209,7 @@ export async function createAgentRuntime(
         trustAdministration,
         workspace: workspace.path,
         workspaceSource: workspace.source,
-        globalConfigPath: getGlobalConfigPath(),
+        globalConfigPath: options.runtimeEnvironment.globalConfigPath,
         parentBroker: confirmationBroker,
         parentTools: tools,
         riskMaxTokens: primaryModelCapability.riskMaxTokens,

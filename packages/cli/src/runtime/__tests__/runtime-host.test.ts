@@ -34,21 +34,22 @@ function makeHostOptions() {
   const segmentDeps = { marker: "segment-deps" };
   const decorateRunBus = () => () => {};
   const artifactStore = { marker: "artifact-store" };
-  const providerConfiguration = {
-    config: {
-      llm: {
-        main: { provider: "test", model: "base-model" },
-      },
-    },
-    credentials: {},
-  };
+  const modelBinding = Object.freeze({ marker: "model-binding" });
+  const runtimeEnvironment = Object.freeze({ marker: "runtime-environment" });
+  const modelProvider = Object.freeze({
+    create: vi.fn(() => modelBinding),
+  });
+  const runtimeEnvironmentFactory = Object.freeze({
+    create: vi.fn(() => runtimeEnvironment),
+  });
   const deviceCapacity = {
     interactive: { kind: "interactive" },
     scheduler: { kind: "scheduler" },
     orchestration: { kind: "orchestration" },
   };
   const options = {
-    providerConfiguration,
+    modelProvider,
+    runtimeEnvironment: runtimeEnvironmentFactory,
     systemProtectedPaths: ["/host/credentials.json", "/host/secret-vault"],
     artifactStore: () => artifactStore,
     segmentDeps,
@@ -64,7 +65,10 @@ function makeHostOptions() {
     segmentDeps,
     decorateRunBus,
     artifactStore,
-    providerConfiguration,
+    modelBinding,
+    modelProvider,
+    runtimeEnvironment,
+    runtimeEnvironmentFactory,
     deviceCapacity,
   };
 }
@@ -119,7 +123,16 @@ beforeEach(() => {
 
 describe("generic conversation projection", () => {
   it("passes one frozen product projection without interpreting it", async () => {
-    const { options, segmentDeps, decorateRunBus, artifactStore } =
+    const {
+      options,
+      segmentDeps,
+      decorateRunBus,
+      artifactStore,
+      modelBinding,
+      modelProvider,
+      runtimeEnvironment,
+      runtimeEnvironmentFactory,
+    } =
       makeHostOptions();
     const host = new RuntimeHost(options);
     const input = projection({ workspace: "/project", sceneId: "scope-1" });
@@ -130,7 +143,12 @@ describe("generic conversation projection", () => {
     expect(params.segmentDeps).toBe(segmentDeps);
     expect(params.decorateRunBus).toBe(decorateRunBus);
     expect(params.artifactStore).toBe(artifactStore);
-    expect(params.workspace).toBe("/project");
+    expect(modelProvider.create).toHaveBeenCalledWith({ primaryRole: "power" });
+    expect(runtimeEnvironmentFactory.create).toHaveBeenCalledWith({
+      workspace: "/project",
+    });
+    expect(params.modelProvider).toBe(modelBinding);
+    expect(params.runtimeEnvironment).toBe(runtimeEnvironment);
     expect(params.primaryRole).toBe("power");
     expect(params.runtimeIdentity).toBe(input.runtimeIdentity);
     expect(params.runtimeIdentity).toMatchObject({ sceneId: "scope-1" });
@@ -149,8 +167,10 @@ describe("generic conversation projection", () => {
     await host.createConversationRuntime(projection({ workspace: null }));
     await host.createConversationRuntime(projection());
 
-    expect(createAgentRuntimeMock.mock.calls[0]![0].workspace).toBeNull();
-    expect(createAgentRuntimeMock.mock.calls[1]![0].workspace).toBeUndefined();
+    expect(options.runtimeEnvironment.create).toHaveBeenNthCalledWith(1, {
+      workspace: null,
+    });
+    expect(options.runtimeEnvironment.create).toHaveBeenNthCalledWith(2, {});
   });
 
   it("rejects a mutable projection before publishing a runtime", async () => {
@@ -202,7 +222,13 @@ describe("shared assembly inputs", () => {
   });
 
   it("conversation / ephemeral / durable job obtain providers before publication", async () => {
-    const { options, issuedProviderSets, turnContextProviders } = makeHostOptions();
+    const {
+      options,
+      issuedProviderSets,
+      modelProvider,
+      runtimeEnvironmentFactory,
+      turnContextProviders,
+    } = makeHostOptions();
     const host = new RuntimeHost(options);
 
     await host.createConversationRuntime(projection());
@@ -214,6 +240,8 @@ describe("shared assembly inputs", () => {
     });
 
     expect(turnContextProviders).toHaveBeenCalledTimes(3);
+    expect(modelProvider.create).toHaveBeenCalledTimes(3);
+    expect(runtimeEnvironmentFactory.create).toHaveBeenCalledTimes(3);
     expect(issuedProviderSets).toHaveLength(3);
     expect(new Set(issuedProviderSets).size).toBe(3);
     for (const [index, providers] of issuedProviderSets.entries()) {
@@ -229,11 +257,11 @@ describe("shared assembly inputs", () => {
   });
 
   it("provider factory failure does not publish a runtime", async () => {
-    const { options } = makeHostOptions();
+    const { options, modelProvider } = makeHostOptions();
     const failure = new Error("provider assembly failed");
-    options.turnContextProviders = () => {
+    modelProvider.create.mockImplementationOnce(() => {
       throw failure;
-    };
+    });
     const host = new RuntimeHost(options);
 
     await expect(host.createConversationRuntime(projection())).rejects.toBe(failure);
@@ -241,7 +269,8 @@ describe("shared assembly inputs", () => {
   });
 
   it("forwards the product-selected job profile while preserving model and capacity binding", async () => {
-    const { options, deviceCapacity } = makeHostOptions();
+    const { options, deviceCapacity, modelBinding, modelProvider } =
+      makeHostOptions();
     const host = new RuntimeHost(options);
     const profile = runtimeProfile();
 
@@ -254,7 +283,11 @@ describe("shared assembly inputs", () => {
 
     const params = createAgentRuntimeMock.mock.calls[0]![0];
     expect(params.profile).toBe(profile);
-    expect(params.providerConfiguration.config.llm.main.model).toBe("job-model");
+    expect(modelProvider.create).toHaveBeenCalledWith({
+      primaryRole: "main",
+      mainModelOverride: "job-model",
+    });
+    expect(params.modelProvider).toBe(modelBinding);
     expect(params.deviceCapacity).toBe(deviceCapacity.scheduler);
     expect(params.orchestrationCapacity).toBe(deviceCapacity.orchestration);
   });

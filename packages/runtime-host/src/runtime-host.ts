@@ -19,6 +19,8 @@ import {
   type AgentRuntimeCapacityBinding,
   type AgentRuntimeLifecycle,
   type CreateAgentRuntimeOptions,
+  type KernelModelProviderFactory,
+  type KernelRuntimeEnvironmentFactory,
   type RuntimeKind,
 } from "@zhixing/orchestrator/runtime";
 import type { IConfirmationBroker } from "@zhixing/core";
@@ -36,7 +38,6 @@ type OnSecurityBlockedFn = NonNullable<
   CreateAgentRuntimeOptions["onSecurityBlocked"]
 >;
 type SegmentDepsOption = CreateAgentRuntimeOptions["segmentDeps"];
-type ProviderConfigurationOption = CreateAgentRuntimeOptions["providerConfiguration"];
 type ConfirmationLifecycleObserverOption =
   CreateAgentRuntimeOptions["confirmationLifecycleObserver"];
 type TurnContextProvidersOption = NonNullable<
@@ -51,8 +52,10 @@ export interface JobAgentRuntimeOptions {
 }
 
 export interface RuntimeHostOptions {
-  /** 设备本地 SecretStore 的已解密内存投影，由产品组合根持有并注入。 */
-  providerConfiguration: ProviderConfigurationOption;
+  /** Host-owned concrete Provider adapter; RuntimeHost only requests a finite binding. */
+  readonly modelProvider: KernelModelProviderFactory;
+  /** Host-owned configuration/workspace projection; no source object enters the Kernel. */
+  readonly runtimeEnvironment: KernelRuntimeEnvironmentFactory;
   /** Durable interaction observer shared by all conversation runtime trees. */
   confirmationLifecycleObserver?: ConfirmationLifecycleObserverOption;
   /** 产品组合根持有的本机秘密路径，逐实例注入安全管线且不可由用户授权覆盖。 */
@@ -138,22 +141,7 @@ export class RuntimeHost {
     }
     assertRuntimeToolProjection(runtimeTools);
     const profile = job?.profile ?? conversation?.profile;
-    const providerConfiguration =
-      job?.modelOverride && this.opts.providerConfiguration.config.llm
-        ? {
-            ...this.opts.providerConfiguration,
-            config: {
-              ...this.opts.providerConfiguration.config,
-              llm: {
-                ...this.opts.providerConfiguration.config.llm,
-                main: {
-                  ...this.opts.providerConfiguration.config.llm.main,
-                  model: job.modelOverride,
-                },
-              },
-            },
-          }
-        : this.opts.providerConfiguration;
+    const primaryRole = conversation?.primaryRole ?? "main";
     // 临时运行时按调度类计费,常驻会话按交互类:两者的公平份额不同,且容量
     // 绑定必须在构造时就位——工具执行的注入点在运行时内部,事后包装拿不到。
     const capacityBinding =
@@ -162,16 +150,27 @@ export class RuntimeHost {
         : this.opts.deviceCapacity?.interactive;
     // 先取得完整装配输入；factory 抛错时 createAgentRuntime 尚未开始，绝不发布
     // 缺少部分 provider 的运行体。createAgentRuntime 再同步捕获只读序列。
+    const modelProvider = this.opts.modelProvider.create({
+      primaryRole,
+      ...(job?.modelOverride === undefined
+        ? {}
+        : { mainModelOverride: job.modelOverride }),
+    });
+    const runtimeEnvironment = this.opts.runtimeEnvironment.create({
+      ...(conversation && Object.hasOwn(conversation, "workspace")
+        ? { workspace: conversation.workspace }
+        : {}),
+    });
     const turnContextProviders = this.opts.turnContextProviders?.();
     return createAgentRuntime({
       ...(capacityBinding ? { deviceCapacity: capacityBinding } : {}),
       ...(this.opts.deviceCapacity
         ? { orchestrationCapacity: this.opts.deviceCapacity.orchestration }
         : {}),
-      providerConfiguration,
+      modelProvider,
+      runtimeEnvironment,
       systemProtectedPaths: this.opts.systemProtectedPaths,
-      workspace: conversation?.workspace,
-      primaryRole: conversation?.primaryRole,
+      primaryRole,
       runtimeIdentity: conversation?.runtimeIdentity,
       profile,
       extraTools: [...runtimeTools.extraTools],

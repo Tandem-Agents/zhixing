@@ -2408,7 +2408,7 @@ export function inspectTurnContextProviderAssembly(records) {
   const captureIndex = runtime.indexOf(
     "const assembledTurnContextProviders = captureTurnContextProviders(\n    options.turnContextProviders,\n  );",
   );
-  const roleAssemblyIndex = runtime.indexOf("const { roles: baseRoles, config, resolvedRoles }");
+  const roleAssemblyIndex = runtime.indexOf("} = options.modelProvider;");
   const injectorIndex = runtime.indexOf("const turnContextInjector = new TurnContextInjector();");
   const timeIndex = runtime.indexOf("new TimeProvider(", injectorIndex);
   const contributionIndex = runtime.indexOf(
@@ -2476,6 +2476,127 @@ export function inspectTurnContextProviderAssembly(records) {
       record.text.includes("onRuntimeCreated")
     ) {
       failures.push(`${record.relative}: runtime-after-publication turn-context mutation returned`);
+    }
+  }
+  return failures;
+}
+
+/** A6 concrete Provider construction stays at the Host edge, outside Kernel assembly. */
+export function inspectKernelProviderDependencyInversion(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const source = byPath.get(relative);
+    if (source === undefined) {
+      failures.push(`${relative}: Kernel provider dependency source is missing`);
+    }
+    return source ?? "";
+  };
+  const modelContract = required(
+    "packages/orchestrator/src/runtime/kernel-model-provider.ts",
+  );
+  const environmentContract = required(
+    "packages/orchestrator/src/runtime/kernel-runtime-environment.ts",
+  );
+  const runtime = required(
+    "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+  );
+  const runtimeIndex = required("packages/orchestrator/src/runtime/index.ts");
+  const orchestratorRoot = required("packages/orchestrator/src/index.ts");
+  const host = required("packages/runtime-host/src/runtime-host.ts");
+  const edge = required("packages/cli/src/runtime/kernel-runtime-bindings.ts");
+  const command = required("packages/cli/src/serve/command.ts");
+  const executor = required("packages/cli/src/serve/executor-role-runtime.ts");
+
+  if (
+    !modelContract.includes("export interface KernelModelProviderBinding") ||
+    !modelContract.includes("export interface KernelModelProviderFactory") ||
+    !modelContract.includes("createKernelModelProviderBinding(") ||
+    !modelContract.includes("assertKernelModelProviderBinding(") ||
+    !modelContract.includes("Object.isFrozen(binding.roles[roleId])") ||
+    /ZhixingConfig|ProviderCredential|createProviderRoles|@zhixing\/providers/u.test(
+      modelContract,
+    )
+  ) {
+    failures.push("Kernel model provider contract is not finite, immutable and concrete-free");
+  }
+  if (
+    !environmentContract.includes("export interface KernelRuntimeEnvironment") ||
+    !environmentContract.includes("export interface KernelRuntimeEnvironmentFactory") ||
+    !environmentContract.includes("createKernelRuntimeEnvironment(") ||
+    !environmentContract.includes("assertKernelRuntimeEnvironment(") ||
+    /ZhixingConfig|resolveWorkspace|ensureWorkspaceDir|@zhixing\/providers/u.test(
+      environmentContract,
+    )
+  ) {
+    failures.push("Kernel runtime environment contract is not finite, immutable and concrete-free");
+  }
+  if (
+    !runtimeIndex.includes('from "./kernel-model-provider.js";') ||
+    !runtimeIndex.includes('from "./kernel-runtime-environment.js";') ||
+    /kernel-(?:model-provider|runtime-environment)/u.test(orchestratorRoot)
+  ) {
+    failures.push("Kernel provider contracts are not confined to the runtime subpath");
+  }
+  if (
+    !runtime.includes("readonly modelProvider: KernelModelProviderBinding;") ||
+    !runtime.includes("readonly runtimeEnvironment: KernelRuntimeEnvironment;") ||
+    !runtime.includes("assertKernelModelProviderBinding(options.modelProvider, primaryRole);") ||
+    !runtime.includes("assertKernelRuntimeEnvironment(options.runtimeEnvironment);") ||
+    /providerConfiguration|ZhixingConfig|ProviderCredential|createProviderRoles|resolveWorkspace|ensureWorkspaceDir|@zhixing\/providers/u.test(
+      runtime,
+    )
+  ) {
+    failures.push("AgentRuntime still constructs or consumes concrete Provider/configuration state");
+  }
+  if (
+    !host.includes("readonly modelProvider: KernelModelProviderFactory;") ||
+    !host.includes("readonly runtimeEnvironment: KernelRuntimeEnvironmentFactory;") ||
+    !host.includes("const modelProvider = this.opts.modelProvider.create({") ||
+    !host.includes("const runtimeEnvironment = this.opts.runtimeEnvironment.create({") ||
+    !host.includes("modelProvider,") ||
+    !host.includes("runtimeEnvironment,") ||
+    /providerConfiguration|ZhixingConfig|ProviderCredential|@zhixing\/providers/u.test(host) ||
+    (host.match(/return this\.assemble\s*\(/gu) ?? []).length !== 3
+  ) {
+    failures.push("RuntimeHost does not issue every runtime through the Host-owned provider factories");
+  }
+  if (
+    (edge.match(/\bcreateProviderRoles\s*\(/gu) ?? []).length !== 1 ||
+    !edge.includes("createHostKernelModelProviderFactory(") ||
+    !edge.includes("createHostKernelRuntimeEnvironmentFactory(") ||
+    !edge.includes("createKernelModelProviderBinding({") ||
+    !edge.includes("createKernelRuntimeEnvironment({") ||
+    !edge.includes("const primaryModelCapability = resolveModelCapability(") ||
+    !edge.includes("optimalMaxTokens: primaryModelCapability.optimalMaxTokens") ||
+    !edge.includes("riskMaxTokens: primaryModelCapability.riskMaxTokens") ||
+    edge.includes("attention: resolveModelCapability(")
+  ) {
+    failures.push("CLI Host edge is not the concrete Provider/configuration adapter owner");
+  }
+  if (
+    !command.includes("modelProvider: createHostKernelModelProviderFactory({") ||
+    !command.includes("runtimeEnvironment: createHostKernelRuntimeEnvironmentFactory({ config })") ||
+    command.includes("providerConfiguration:")
+  ) {
+    failures.push("Anchor composition does not inject the one concrete Kernel provider edge");
+  }
+  if (
+    !executor.includes("this.#modelProvider = createHostKernelModelProviderFactory(options);") ||
+    !executor.includes("this.#runtimeEnvironment = createHostKernelRuntimeEnvironmentFactory(options);") ||
+    (executor.match(/modelProvider: this\.#modelProvider\.create\s*\(/gu) ?? []).length !== 2 ||
+    (executor.match(/runtimeEnvironment: this\.#runtimeEnvironment\.create\s*\(/gu) ?? []).length !== 2 ||
+    executor.includes("providerConfiguration:") ||
+    executor.includes("createProviderRoles(")
+  ) {
+    failures.push("Executor production issuance bypasses the shared Host provider edge");
+  }
+  for (const record of records) {
+    if (
+      record.relative.startsWith("packages/orchestrator/src/") &&
+      record.text.includes("@zhixing/providers")
+    ) {
+      failures.push(`${record.relative}: Orchestrator imports the concrete Provider package`);
     }
   }
   return failures;
@@ -2758,6 +2879,7 @@ export async function validateS7Structure() {
   failures.push(...inspectAgentRuntimeSecurityEncapsulation(records));
   failures.push(...inspectAgentRuntimeWorkspaceEncapsulation(records));
   failures.push(...inspectTurnContextProviderAssembly(records));
+  failures.push(...inspectKernelProviderDependencyInversion(records));
   failures.push(...inspectWorksceneRuntimeProjectionBoundary([
     ...records,
     {
@@ -10447,6 +10569,14 @@ export function inspectProductionManifest(relative, manifest) {
         failures.push(`${relative}: runtime-host exposes retired product subpath ${subpath}`);
       }
     }
+  }
+  if (
+    relative === "packages/orchestrator/package.json" &&
+    edges.includes("@zhixing/providers")
+  ) {
+    failures.push(
+      `${relative}: orchestrator declares concrete Provider production dependency`,
+    );
   }
   return failures;
 }

@@ -54,7 +54,6 @@
   "dependencies": {
     "@zhixing/core": "workspace:*",
     "@zhixing/network": "workspace:*",
-    "@zhixing/providers": "workspace:*",
     "@zhixing/tools-builtin": "workspace:*"
   },
   "devDependencies": {

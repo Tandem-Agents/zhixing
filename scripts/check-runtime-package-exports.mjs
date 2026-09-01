@@ -199,6 +199,16 @@ if (
   failures.push("orchestrator-kernel-runtime-identity:invalid-runtime-boundary");
 }
 for (const name of [
+  "createKernelModelProviderBinding",
+  "assertKernelModelProviderBinding",
+  "createKernelRuntimeEnvironment",
+  "assertKernelRuntimeEnvironment",
+]) {
+  if (typeof orchestratorRuntime[name] !== "function" || name in orchestratorRoot) {
+    failures.push(`orchestrator-kernel-provider:${name}:invalid-runtime-boundary`);
+  }
+}
+for (const name of [
   "assertConversationRuntimeProjection",
   "createConversationRuntimeProjection",
 ]) {
@@ -411,7 +421,7 @@ const createAgentRuntimeOptionsDeclaration = orchestratorRuntimeDeclarations.mat
 )?.groups?.body;
 if (
   !agentRuntimeDeclaration ||
-  /\b(?:AgentRuntime|createAgentRuntime|KernelRunEnvelope|KernelRunEvent|KernelRunCompletion|KernelTerminal)\b/u.test(
+  /\b(?:AgentRuntime|createAgentRuntime|KernelRunEnvelope|KernelRunEvent|KernelRunCompletion|KernelTerminal|KernelModelProviderBinding|KernelRuntimeEnvironment)\b/u.test(
     orchestratorRootDeclarations,
   )
 ) {
@@ -484,6 +494,22 @@ if (
   )
 ) {
   failures.push("orchestrator-agent-runtime:turn-context-assembly-boundary");
+}
+if (
+  !createAgentRuntimeOptionsDeclaration ||
+  !/readonly modelProvider: KernelModelProviderBinding;/u.test(
+    createAgentRuntimeOptionsDeclaration,
+  ) ||
+  !/readonly runtimeEnvironment: KernelRuntimeEnvironment;/u.test(
+    createAgentRuntimeOptionsDeclaration,
+  ) ||
+  /providerConfiguration|ZhixingConfig|ProviderCredential/u.test(
+    createAgentRuntimeOptionsDeclaration,
+  ) ||
+  !orchestratorRuntimeDeclarations.includes("KernelModelProviderFactory") ||
+  !orchestratorRuntimeDeclarations.includes("KernelRuntimeEnvironmentFactory")
+) {
+  failures.push("orchestrator-kernel-provider:invalid-declaration-boundary");
 }
 const runtimeHostDeclaration = runtimeHostDeclarations.find((text) =>
   text.includes("declare class RuntimeHost"),
