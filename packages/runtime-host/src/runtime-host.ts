@@ -20,6 +20,7 @@ import {
   type AgentRuntimeLifecycle,
   type CreateAgentRuntimeOptions,
   type KernelModelProviderFactory,
+  type KernelPermissionStorageFactory,
   type KernelRuntimeEnvironmentFactory,
   type KernelToolImplementationPort,
   type RuntimeKind,
@@ -59,6 +60,8 @@ export interface RuntimeHostOptions {
   readonly runtimeEnvironment: KernelRuntimeEnvironmentFactory;
   /** Host-selected concrete implementation of the finite profile tool requirements. */
   readonly toolImplementation: KernelToolImplementationPort;
+  /** Host-owned P04 mechanism; RuntimeHost forwards it without selecting storage. */
+  readonly permissionStorage: KernelPermissionStorageFactory;
   /** Durable interaction observer shared by all conversation runtime trees. */
   confirmationLifecycleObserver?: ConfirmationLifecycleObserverOption;
   /** 产品组合根持有的本机秘密路径，逐实例注入安全管线且不可由用户授权覆盖。 */
@@ -173,6 +176,7 @@ export class RuntimeHost {
       modelProvider,
       runtimeEnvironment,
       toolImplementation: this.opts.toolImplementation,
+      permissionStorage: this.opts.permissionStorage,
       systemProtectedPaths: this.opts.systemProtectedPaths,
       primaryRole,
       runtimeIdentity: conversation?.runtimeIdentity,

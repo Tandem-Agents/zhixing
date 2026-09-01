@@ -25,7 +25,6 @@ import {
   type ChatRequest,
   type StreamEvent,
   type ToolResultBlock,
-  type IPermissionStore,
   type IToolArgumentExtractor,
   type LLMProvider,
   type LLMRole,
@@ -35,6 +34,7 @@ import {
   type PermissionRule,
   type RiskLevel,
   type SecurityRule,
+  type SecurityRequest,
   type TextCallLLMResult,
   type ToolDefinition,
   type TurnContext,
@@ -73,12 +73,6 @@ import {
   projectSessionEvent,
   type AgentLoopDeps,
 } from "@zhixing/core";
-import {
-  bindPermissionRuleExecutionSource,
-  createPermissionStoreTrustAdministrationRepository,
-  PermissionStore,
-  toPermissionContext,
-} from "@zhixing/core/security";
 import type { ArtifactStore } from "@zhixing/core/authority";
 import {
   SkillCatalogKernelProjectionApplicationService,
@@ -166,6 +160,11 @@ import {
   assembleKernelToolImplementation,
   type KernelToolImplementationPort,
 } from "./kernel-tool-implementation.js";
+import {
+  assembleKernelPermissionStorage,
+  bindKernelPermissionRuleSource,
+  type KernelPermissionStorageFactory,
+} from "./kernel-permission-storage.js";
 
 /**
  * 注入系统提示词的技能索引上限(按当前模式 top-N)。
@@ -262,13 +261,26 @@ function toPermissionRule(rule: TrustAdministrationRepositoryRule): PermissionRu
     lastMatchedAt: rule.lastMatchedAt,
     matchCount: rule.matchCount,
     ...(rule.contextId
-      ? { contextId: toPermissionContext(rule.contextId) }
+      ? { contextId: toSecurityPermissionContext(rule.contextId) }
       : {}),
     ...(rule.contextPath === undefined ? {} : { contextPath: rule.contextPath }),
     ...(rule.contributors
       ? { contributors: rule.contributors.map((entry) => ({ ...entry })) }
       : {}),
   };
+}
+
+function toSecurityPermissionContext(
+  context: import("@zhixing/core/trust-administration").TrustAdministrationContext,
+): PermissionContextId {
+  switch (context.kind) {
+    case "main":
+      return { kind: "main" };
+    case "workspace":
+      return { kind: "workspace", hash: context.hash };
+    case "scene":
+      return { kind: "scene", sceneId: context.sceneId };
+  }
 }
 
 function captureTurnContextProviders(
@@ -552,16 +564,8 @@ export interface CreateAgentRuntimeOptions {
    * 工作模式装配 power runtime 时传 "power"。
    */
   primaryRole?: "main" | "power";
-  /**
-   * 可选：注入会话级 PermissionStore——跨 hot reload 复用 session scope 授权
-   * （用户的"本次会话允许"不丢）。
-   *
-   * 不传时内部 new 一个新实例（向后兼容现有调用方）。
-   *
-   * 注：装配期 `registerBuiltinRules("web_fetch", ...)` 是幂等的（同 namespace 覆盖式
-   * 注册），同一注入 store 被多次 register 不会累积重复规则。
-   */
-  permissionStore?: IPermissionStore;
+  /** Host-owned finite permission persistence mechanism for this runtime. */
+  permissionStorage: KernelPermissionStorageFactory;
   /** 产品组合根声明的本机秘密路径；所有工具调用都由安全管线旁路免疫地阻断。 */
   systemProtectedPaths?: readonly string[];
   /**
@@ -713,27 +717,19 @@ export async function createAgentRuntime(
   // 字段工具的字段顺序歧义。
   const toolArgumentExtractor: IToolArgumentExtractor =
     ToolArgumentExtractor.fromTools(baseTools);
-  // 注入式优先：caller 跨 reload 复用 session scope 授权（store 已在首次创建时 init
-  // 过 builtin 规则，此处跳过避免重复）；不传时内部 new 一个并 init builtin。
-  //
-  // builtin 规则归属：每工具 namespace 自管，用户池任一命中将完全决定结果
-  // （builtin 不参与），保证用户最终决定权。未来子 agent / MCP 等模块以同样模式扩展：
-  // `store.registerBuiltinRules(ns, rules)`。
-  const persistentStore: IPermissionStore =
-    options.permissionStore ??
-    (() => {
-      const fresh = new PermissionStore({
-        extractArgument: (req) => toolArgumentExtractor.extract(req),
-      });
-      for (const contribution of toolAssembly.permissionRuleSets) {
-        fresh.registerBuiltinRules(contribution.namespace, [...contribution.rules]);
-      }
-      return fresh;
-    })();
+  // Concrete store selection, P04 path ownership and builtin registration stay
+  // at the Host infrastructure edge. The Kernel captures only the finite
+  // repository and context-bound readonly source before publication.
+  const permissionStorage = assembleKernelPermissionStorage(
+    options.permissionStorage,
+    Object.freeze({
+      extractArgument: (request: SecurityRequest) =>
+        toolArgumentExtractor.extract(request),
+      builtinRuleSets: toolAssembly.permissionRuleSets,
+    }),
+  );
   const trustAdministration = new TrustAdministrationExecutionApplicationService({
-    repository: createPermissionStoreTrustAdministrationRepository(
-      () => persistentStore,
-    ),
+    repository: permissionStorage.trustAdministration,
     ...(sceneId === undefined ? {} : { sceneId }),
     workspacePath: workspace.path,
   });
@@ -752,9 +748,9 @@ export async function createAgentRuntime(
           ? { kind: "workspace", dir: workspace.path }
           : { kind: "global" },
     sessionType,
-    permissionRuleSource: bindPermissionRuleExecutionSource(
-      persistentStore,
-      toPermissionContext(trustAdministration.context),
+    permissionRuleSource: bindKernelPermissionRuleSource(
+      permissionStorage,
+      trustAdministration.context,
     ),
     toolBoundaryRegistry: boundaryRegistry,
     ...(options.systemProtectedPaths
@@ -1245,7 +1241,7 @@ export async function createAgentRuntime(
     securitySnapshot(): RuntimeSecuritySnapshot {
       const trust = trustAdministration.securitySnapshot();
       return {
-        contextId: toPermissionContext(trust.context),
+        contextId: toSecurityPermissionContext(trust.context),
         workspacePath: trust.workspacePath,
         permissionRules: trust.userRules.map(toPermissionRule),
         builtinRules: securityPipeline.getPolicyEngine().getActiveRules(),

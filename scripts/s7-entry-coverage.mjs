@@ -2270,6 +2270,10 @@ export function inspectAgentRuntimeSecurityEncapsulation(records) {
     runtimeSource.match(/new SecurityPipeline\s*\(/gu) ?? [];
   const storeConstructions =
     runtimeSource.match(/new PermissionStore\s*\(/gu) ?? [];
+  const permissionStorageAssemblies =
+    runtimeSource.match(/assembleKernelPermissionStorage\s*\(/gu) ?? [];
+  const permissionRuleBindings =
+    runtimeSource.match(/bindKernelPermissionRuleSource\s*\(/gu) ?? [];
   const trustApplicationConstructions =
     runtimeSource.match(
       /new TrustAdministrationExecutionApplicationService\s*\(/gu,
@@ -2321,10 +2325,14 @@ export function inspectAgentRuntimeSecurityEncapsulation(records) {
   visitSecurityBindings(runtimeFile);
   if (
     pipelineConstructions.length !== 1 ||
-    storeConstructions.length !== 1 ||
+    storeConstructions.length !== 0 ||
+    permissionStorageAssemblies.length !== 1 ||
+    permissionRuleBindings.length !== 1 ||
     trustApplicationConstructions.length !== 1 ||
-    !runtimeSource.includes("bindPermissionRuleExecutionSource(") ||
     !runtimeSource.includes("const securityPipeline = new SecurityPipeline({") ||
+    /createPermissionStoreTrustAdministrationRepository|\bIPermissionStore\b/u.test(
+      runtimeSource,
+    ) ||
     [...securityBindings].some(
       ([name, spec]) =>
         JSON.stringify(observedBindings.get(name)) !==
@@ -4807,6 +4815,19 @@ export function inspectTrustAdministrationOwnership(records) {
   const adapter = required(
     "packages/cli/src/serve/trust-administration-adapter.ts",
   );
+  const permissionInfrastructure = required(
+    "packages/cli/src/serve/permission-storage-infrastructure.ts",
+  );
+  const permissionContract = required(
+    "packages/orchestrator/src/runtime/kernel-permission-storage.ts",
+  );
+  const runtimeHost = required("packages/runtime-host/src/runtime-host.ts");
+  const executorRole = required(
+    "packages/cli/src/serve/executor-role-runtime.ts",
+  );
+  const workspaceCommand = required(
+    "packages/cli/src/runtime/workspace-command.ts",
+  );
   const composition = required("packages/cli/src/serve/command.ts");
   const managementFacade = required(
     "packages/cli/src/runtime/rpc-management-facade.ts",
@@ -4891,10 +4912,13 @@ export function inspectTrustAdministrationOwnership(records) {
 
   if (
     !agentRuntime.includes("new TrustAdministrationExecutionApplicationService({") ||
-    !agentRuntime.includes("createPermissionStoreTrustAdministrationRepository(") ||
-    !agentRuntime.includes("bindPermissionRuleExecutionSource(") ||
+    !agentRuntime.includes("assembleKernelPermissionStorage(") ||
+    !agentRuntime.includes("bindKernelPermissionRuleSource(") ||
     !agentRuntime.includes("trustAdministration.securitySnapshot()") ||
-    !agentRuntime.includes("trustAdministration.executionRules()")
+    !agentRuntime.includes("trustAdministration.executionRules()") ||
+    /new PermissionStore|createPermissionStoreTrustAdministrationRepository|\bIPermissionStore\b/u.test(
+      agentRuntime,
+    )
   ) {
     failures.push(
       "Agent runtime does not compose the one Trust application and readonly Security projection",
@@ -4961,14 +4985,75 @@ export function inspectTrustAdministrationOwnership(records) {
 
   if (
     !adapter.includes('from "@zhixing/core/trust-administration"') ||
-    !adapter.includes("createTrustAdministrationRepository") ||
-    !adapter.includes("new PermissionStore()") ||
+    !adapter.includes("repository: deps.repository") ||
+    !adapter.includes("deps.workspaceIdentity(workspace.path)") ||
     !adapter.includes("resolveWorkspace(deps.config") ||
+    /PermissionStore|createPermissionStoreTrustAdministrationRepository|new\s+\w*Store/u.test(
+      adapter,
+    ) ||
     adapter.includes("parseConversationId") ||
     adapter.includes('.filter((rule) => rule.scope !== "builtin")')
   ) {
     failures.push(
       "Trust PermissionStore bridge owns product context or visibility semantics",
+    );
+  }
+
+  const concreteConstructors = records.filter((record) =>
+    /new PermissionStore\s*\(/u.test(record.text),
+  );
+  if (
+    concreteConstructors.length !== 1 ||
+    concreteConstructors[0]?.relative !==
+      "packages/cli/src/serve/permission-storage-infrastructure.ts" ||
+    (permissionInfrastructure.match(/new PermissionStore\s*\(/gu) ?? []).length !==
+      1 ||
+    !permissionInfrastructure.includes('path.join(input.zhixingHome, "permissions")') ||
+    !permissionInfrastructure.includes(
+      "createPermissionStoreTrustAdministrationRepository(",
+    ) ||
+    !permissionInfrastructure.includes("store.registerBuiltinRules(") ||
+    !permissionInfrastructure.includes("bindPermissionRuleExecutionSource(") ||
+    !permissionInfrastructure.includes("toPermissionContext(context)") ||
+    /resolveWorkspace|parseConversationId|SUGGESTION_THRESHOLDS|recordApproval/u.test(
+      permissionInfrastructure,
+    )
+  ) {
+    failures.push(
+      "Permission file mechanism is not confined to the one Host infrastructure adapter",
+    );
+  }
+
+  if (
+    !permissionContract.includes("export interface KernelPermissionStorageFactory") ||
+    !permissionContract.includes("export interface KernelPermissionStorageBinding") ||
+    !permissionContract.includes("TrustAdministrationExecutionRepository") ||
+    !permissionContract.includes("PermissionRuleExecutionSource") ||
+    /PermissionStore|rootDir|node:path|node:fs/u.test(permissionContract)
+  ) {
+    failures.push(
+      "Kernel permission storage contract exposes a concrete store or physical path",
+    );
+  }
+
+  if (
+    (composition.match(/createPermissionStorageInfrastructure\s*\(/gu) ?? [])
+      .length !== 1 ||
+    !composition.includes("repository: permissionStorage.management") ||
+    !composition.includes("permissionStorage: permissionStorage.runtime") ||
+    !runtimeHost.includes("permissionStorage: this.opts.permissionStorage") ||
+    (executorRole.match(/createPermissionStorageInfrastructure\s*\(/gu) ?? [])
+      .length !== 1 ||
+    !executorRole.includes("permissionStorage: permissionStorage.runtime") ||
+    !executorRole.includes("permissionStorage: this.options.permissionStorage") ||
+    (workspaceCommand.match(/createPermissionStorageInfrastructure\s*\(/gu) ?? [])
+      .length !== 1 ||
+    !workspaceCommand.includes(
+      "createPermissionStorageInfrastructure({ zhixingHome }).runtime",
+    )
+  ) {
+    failures.push(
+      "Anchor, Executor or workspace fallback bypasses the one Host permission storage adapter",
     );
   }
 

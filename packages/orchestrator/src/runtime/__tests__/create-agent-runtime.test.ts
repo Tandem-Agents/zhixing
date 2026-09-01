@@ -56,6 +56,12 @@ import type { KernelRunEnvelope } from "../kernel-run-envelope.js";
 import { createKernelModelProviderBinding } from "../kernel-model-provider.js";
 import { createKernelRuntimeEnvironment } from "../kernel-runtime-environment.js";
 import type { KernelToolImplementationPort } from "../kernel-tool-implementation.js";
+import type { KernelPermissionStorageFactory } from "../kernel-permission-storage.js";
+import {
+  bindPermissionRuleExecutionSource,
+  createPermissionStoreTrustAdministrationRepository,
+  toPermissionContext,
+} from "@zhixing/core/security";
 
 // ─── hoisted ref:让 vi.mock 工厂在 import 之前能引用 ───
 
@@ -131,8 +137,11 @@ const { createKernelRuntimeIdentityContribution } = await import(
 );
 type TestCreateAgentRuntimeOptions = Omit<
   Parameters<typeof createAgentRuntimeImpl>[0],
-  "modelProvider" | "runtimeEnvironment"
-> & { readonly workspace?: string | null };
+  "modelProvider" | "runtimeEnvironment" | "permissionStorage"
+> & {
+  readonly workspace?: string | null;
+  readonly permissionStorage?: KernelPermissionStorageFactory;
+};
 
 function createTestModelProvider(primaryRole: "main" | "power") {
   const provider = providerRef.current ?? new MockLLMProvider([{ text: "ok" }]);
@@ -208,8 +217,35 @@ const testToolImplementation: KernelToolImplementationPort = Object.freeze({
   },
 });
 
+function createTestPermissionStorage(
+  injectedStore?: PermissionStore,
+): KernelPermissionStorageFactory {
+  return Object.freeze({
+    create(request) {
+      const store =
+        injectedStore ??
+        new PermissionStore({
+          rootDir: null,
+          extractArgument: request.extractArgument,
+        });
+      for (const contribution of request.builtinRuleSets) {
+        store.registerBuiltinRules(
+          contribution.namespace,
+          [...contribution.rules],
+        );
+      }
+      return Object.freeze({
+        trustAdministration:
+          createPermissionStoreTrustAdministrationRepository(() => store),
+        rulesFor: (context) =>
+          bindPermissionRuleExecutionSource(store, toPermissionContext(context)),
+      });
+    },
+  });
+}
+
 const createAgentRuntime = (options: TestCreateAgentRuntimeOptions = {}) => {
-  const { workspace, ...runtimeOptions } = options;
+  const { workspace, permissionStorage, ...runtimeOptions } = options;
   const primaryRole = runtimeOptions.primaryRole ?? "main";
   return createAgentRuntimeImpl({
     ...runtimeOptions,
@@ -217,6 +253,8 @@ const createAgentRuntime = (options: TestCreateAgentRuntimeOptions = {}) => {
     modelProvider: createTestModelProvider(primaryRole),
     runtimeEnvironment: createTestRuntimeEnvironment(workspace),
     toolImplementation: testToolImplementation,
+    permissionStorage:
+      permissionStorage ?? createTestPermissionStorage(),
   });
 };
 const { mainProfile } = await import("../../profile/default-profiles.js");
@@ -2845,7 +2883,7 @@ describe("trustContext 装配分叉", () => {
     store.create({ kind: "main" }, userRule);
     const runtime = await createAgentRuntime({
       workspace: null,
-      permissionStore: store,
+      permissionStorage: createTestPermissionStorage(store),
     });
 
     expect(runtime.securitySnapshot().permissionRules).toMatchObject([

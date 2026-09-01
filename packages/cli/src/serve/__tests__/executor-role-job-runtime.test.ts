@@ -36,6 +36,7 @@ const {
 } = await import("../executor-role-runtime.js");
 
 const toolImplementation = Object.freeze({ create: vi.fn() }) as never;
+const permissionStorage = Object.freeze({ create: vi.fn() }) as never;
 
 beforeEach(() => {
   runtimeMocks.createAgentRuntime.mockReset();
@@ -55,6 +56,7 @@ describe("executor role conversation runtime production assembly", () => {
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: {},
       toolImplementation,
+      permissionStorage,
       mcpTools: { snapshot: () => ({ tools: [], serverIds: [] }) },
       systemProtectedPaths: ["protected"],
       interactions: {} as never,
@@ -113,6 +115,7 @@ describe("executor role job runtime production assembly", () => {
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: {},
       toolImplementation,
+      permissionStorage,
       mcpTools: { snapshot: () => ({ tools: [], serverIds: [] }) },
       systemProtectedPaths: ["protected"],
       interactions: {} as never,
@@ -147,6 +150,7 @@ describe("executor role job runtime production assembly", () => {
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: {},
       toolImplementation,
+      permissionStorage,
       mcpTools: { snapshot: () => ({ tools: [], serverIds: [] }) },
       systemProtectedPaths: ["protected"],
       interactions: {} as never,

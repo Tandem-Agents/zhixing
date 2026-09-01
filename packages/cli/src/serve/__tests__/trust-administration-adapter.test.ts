@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  PermissionStore,
   worksceneConversationId,
-  type PermissionRule,
 } from "@zhixing/core";
+import type { TrustAdministrationRepositoryRule } from "@zhixing/core/trust-administration";
 import { createTempDir } from "@zhixing/test-utils";
 import { createTrustAdministrationApplication } from "../trust-administration-adapter.js";
 import { projectRuntimeConfiguration } from "../../runtime/runtime-configuration-projections.js";
 import { createRuntimeConfigurationSnapshot } from "../../runtime/runtime-configuration-snapshot.js";
+import { createPermissionStorageInfrastructure } from "../permission-storage-infrastructure.js";
 
 let originalHome: string | undefined;
 
@@ -24,9 +24,9 @@ afterEach(() => {
 
 function makeRule(
   id: string,
-  scope: PermissionRule["scope"],
-  contextId?: PermissionRule["contextId"],
-): PermissionRule {
+  scope: TrustAdministrationRepositoryRule["scope"],
+  contextId?: TrustAdministrationRepositoryRule["contextId"],
+): TrustAdministrationRepositoryRule {
   return {
     id,
     scope,
@@ -39,6 +39,21 @@ function makeRule(
   };
 }
 
+function permissionStorage() {
+  return createPermissionStorageInfrastructure({
+    zhixingHome: process.env.ZHIXING_HOME!,
+  });
+}
+
+function runtimeRepository() {
+  return permissionStorage().runtime.create(
+    Object.freeze({
+      extractArgument: () => "",
+      builtinRuleSets: Object.freeze([]),
+    }),
+  ).trustAdministration;
+}
+
 function workspaceConfiguration(
   configuration: Parameters<typeof createRuntimeConfigurationSnapshot>[0],
 ) {
@@ -49,14 +64,20 @@ function workspaceConfiguration(
 
 describe("Trust Administration PermissionStore adapter", () => {
   it("projects scene/global rules and preserves same-context durable revoke", async () => {
-    const seed = new PermissionStore();
-    seed.create(
+    const seed = runtimeRepository();
+    seed.createExecutionRule(
       { kind: "scene", sceneId: "s1" },
       makeRule("rule-scene", "context", { kind: "scene", sceneId: "s1" }),
     );
-    seed.create({ kind: "main" }, makeRule("rule-global", "global"));
+    seed.createExecutionRule(
+      { kind: "main" },
+      makeRule("rule-global", "global"),
+    );
+    const storage = permissionStorage();
     const application = createTrustAdministrationApplication({
       configuration: workspaceConfiguration({}),
+      repository: storage.management,
+      workspaceIdentity: storage.workspaceIdentity,
       sessionType: "ci",
     });
     const sceneConversation = worksceneConversationId("s1", "conversation-1");
@@ -79,28 +100,33 @@ describe("Trust Administration PermissionStore adapter", () => {
   });
 
   it("uses the same configured and cwd workspace projections as runtime assembly", async () => {
-    const configuredHash = PermissionStore.workspaceHashFromPath("/proj");
-    const cwdHash = PermissionStore.workspaceHashFromPath(process.cwd());
-    const seed = new PermissionStore();
-    seed.create(
+    const storage = permissionStorage();
+    const configuredHash = storage.workspaceIdentity("/proj");
+    const cwdHash = storage.workspaceIdentity(process.cwd());
+    const seed = runtimeRepository();
+    seed.createExecutionRule(
       { kind: "workspace", hash: configuredHash },
       makeRule("configured", "context", {
         kind: "workspace",
         hash: configuredHash,
       }),
     );
-    seed.create(
+    seed.createExecutionRule(
       { kind: "workspace", hash: cwdHash },
       makeRule("cwd", "context", { kind: "workspace", hash: cwdHash }),
     );
 
     await expect(createTrustAdministrationApplication({
       configuration: workspaceConfiguration({ workspace: { root: "/proj" } }),
+      repository: storage.management,
+      workspaceIdentity: storage.workspaceIdentity,
     }).query({ kind: "list" })).resolves.toMatchObject({
       rules: [{ id: "configured" }],
     });
     await expect(createTrustAdministrationApplication({
       configuration: workspaceConfiguration({}),
+      repository: storage.management,
+      workspaceIdentity: storage.workspaceIdentity,
       sessionType: "interactive",
     }).query({ kind: "list" })).resolves.toMatchObject({
       rules: [{ id: "cwd" }],

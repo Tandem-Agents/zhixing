@@ -77,6 +77,13 @@ export {
   type KernelToolPermissionRuleSet,
 } from "./kernel-tool-implementation.js";
 export {
+  assembleKernelPermissionStorage,
+  bindKernelPermissionRuleSource,
+  type KernelPermissionStorageBinding,
+  type KernelPermissionStorageFactory,
+  type KernelPermissionStorageRequest,
+} from "./kernel-permission-storage.js";
+export {
   assertKernelRuntimeIdentityContribution,
   createKernelRuntimeIdentityContribution,
   type KernelRuntimeIdentityContribution,

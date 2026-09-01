@@ -169,6 +169,7 @@ import {
 import { createZhixingGuidanceLifecycle } from "./zhixing-guidance-lifecycle.js";
 import { readGuidanceFile } from "./read-guidance-file.js";
 import { createConversationStorageInfrastructure } from "./conversation-storage-infrastructure.js";
+import { createPermissionStorageInfrastructure } from "./permission-storage-infrastructure.js";
 import { createAnchorConversationClearCommitPort } from "./conversation-clear-binding.js";
 import { createAnchorConversationResumePort } from "./conversation-resume-binding.js";
 import { createAnchorConversationRunControlPort } from "./conversation-run-control-binding.js";
@@ -362,6 +363,7 @@ async function runServerProcess(
   const hostDefaultWorkspace = createHostDefaultWorkspaceProjection(
     workspaceConfiguration,
   );
+  const permissionStorage = createPermissionStorageInfrastructure({ zhixingHome });
 
   // ============================================================================
   // 恒定核心前置 —— 接入面 setup 从这里读依赖。
@@ -451,6 +453,8 @@ async function runServerProcess(
   // maps its finite repository port to the existing storage mechanism.
   const trustAdministration = createTrustAdministrationApplication({
     configuration: workspaceConfiguration,
+    repository: permissionStorage.management,
+    workspaceIdentity: permissionStorage.workspaceIdentity,
   });
   // 3. Schedule domain lazy projection —— generation 安装后只切换 Correctness
   // mechanism；产品可见状态、事件与 lifecycle 语义均由领域应用持有。
@@ -686,6 +690,7 @@ async function runServerProcess(
       configuration: kernelEnvironmentConfiguration,
     }),
     toolImplementation: bootstrap.toolImplementation,
+    permissionStorage: permissionStorage.runtime,
     confirmationLifecycleObserver: durableInteractions,
     systemProtectedPaths,
     artifactStore: () => {

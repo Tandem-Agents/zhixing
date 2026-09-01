@@ -1,8 +1,4 @@
 import {
-  createPermissionStoreTrustAdministrationRepository,
-  PermissionStore,
-} from "@zhixing/core/security";
-import {
   TrustAdministrationApplicationService,
   type TrustAdministrationApplication,
   type TrustAdministrationRepository,
@@ -14,26 +10,22 @@ import {
 } from "@zhixing/providers";
 import type { RuntimeWorkspaceConfigurationProjection } from "../runtime/runtime-configuration-projections.js";
 
-export function createTrustAdministrationRepository(): TrustAdministrationRepository {
-  return createPermissionStoreTrustAdministrationRepository(
-    () => new PermissionStore(),
-  );
-}
-
 /** Host composition of the one Trust Administration application. */
 export function createTrustAdministrationApplication(deps: {
   readonly configuration: RuntimeWorkspaceConfigurationProjection;
+  readonly repository: TrustAdministrationRepository;
+  readonly workspaceIdentity: (workspacePath: string) => string;
   readonly sessionType?: WorkspaceSessionType;
 }): TrustAdministrationApplication {
   return new TrustAdministrationApplicationService({
-    repository: createTrustAdministrationRepository(),
+    repository: deps.repository,
     defaultContext: () => {
       const sessionType = deps.sessionType ?? resolveWorkspaceSessionType();
       const workspace = resolveWorkspace(deps.configuration, { sessionType });
       return workspace.path
         ? {
             kind: "workspace",
-            hash: PermissionStore.workspaceHashFromPath(workspace.path),
+            hash: deps.workspaceIdentity(workspace.path),
           }
         : { kind: "main" };
     },

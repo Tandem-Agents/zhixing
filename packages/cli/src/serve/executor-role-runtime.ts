@@ -7,6 +7,7 @@ import {
   type AgentRuntime,
   type AgentRuntimeCapacityBinding,
   type KernelModelProviderFactory,
+  type KernelPermissionStorageFactory,
   type KernelRuntimeEnvironmentFactory,
   type KernelToolImplementationPort,
 } from "@zhixing/orchestrator/runtime";
@@ -116,6 +117,7 @@ import type {
   RuntimeModelConfigurationProjection,
 } from "../runtime/runtime-configuration-projections.js";
 import { selectJobRuntimeTools } from "./job-runtime-tool-selection.js";
+import { createPermissionStorageInfrastructure } from "./permission-storage-infrastructure.js";
 
 export async function runExecutorRole(
   options: ServeOptions,
@@ -173,6 +175,7 @@ export async function runExecutorRole(
   const localServerHost = options.host ?? DEFAULT_SERVER_CONFIG.host;
   const executorRoleLifecycle = new ExecutorRoleLifecycle();
   const executorServerLifecycle = new ExecutorServerLifecycle();
+  const permissionStorage = createPermissionStorageInfrastructure({ zhixingHome });
   const mcpRuntime = createHostMcpRuntime(
     parseServerSpecs(mcpConfiguration.mcp, bootstrap.mcpCredentials.mcp),
     { networkProxy: mcpConfiguration.network?.proxy },
@@ -251,6 +254,7 @@ export async function runExecutorRole(
       kernelEnvironmentConfiguration,
       credentials: providerCredentials,
       toolImplementation: bootstrap.toolImplementation,
+      permissionStorage: permissionStorage.runtime,
       mcpTools: mcpRuntime.tools,
       systemProtectedPaths: resolveSystemProtectedSecretPaths(),
       interactions,
@@ -969,6 +973,7 @@ export class ExecutorRuntimeSubstrate {
     readonly kernelEnvironmentConfiguration: RuntimeKernelEnvironmentConfigurationProjection;
     readonly credentials: ProviderCredentialProjection;
     readonly toolImplementation: KernelToolImplementationPort;
+    readonly permissionStorage: KernelPermissionStorageFactory;
     readonly mcpTools: McpRuntimeToolProjectionPort;
     readonly systemProtectedPaths: readonly string[];
     readonly interactions: DurableConversationInteractionObserver;
@@ -1015,6 +1020,7 @@ export class ExecutorRuntimeSubstrate {
         ...(workspaceRoot === undefined ? {} : { workspace: workspaceRoot }),
       }),
       toolImplementation: this.options.toolImplementation,
+      permissionStorage: this.options.permissionStorage,
       profile:
         workscene?.profile ??
         mainProfile({ hasWorkspace: workspaceRoot !== null }),
@@ -1058,6 +1064,7 @@ export class ExecutorRuntimeSubstrate {
       }),
       runtimeEnvironment: this.#runtimeEnvironment.create({}),
       toolImplementation: this.options.toolImplementation,
+      permissionStorage: this.options.permissionStorage,
       profile: selection.profile,
       extraTools: [...selection.runtimeTools.extraTools],
       executionMcpServers: selection.runtimeTools.executionMcpServers,

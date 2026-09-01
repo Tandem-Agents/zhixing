@@ -43,6 +43,7 @@ function makeHostOptions() {
     create: vi.fn(() => runtimeEnvironment),
   });
   const toolImplementation = Object.freeze({ create: vi.fn() });
+  const permissionStorage = Object.freeze({ create: vi.fn() });
   const deviceCapacity = {
     interactive: { kind: "interactive" },
     scheduler: { kind: "scheduler" },
@@ -52,6 +53,7 @@ function makeHostOptions() {
     modelProvider,
     runtimeEnvironment: runtimeEnvironmentFactory,
     toolImplementation,
+    permissionStorage,
     systemProtectedPaths: ["/host/credentials.json", "/host/secret-vault"],
     artifactStore: () => artifactStore,
     segmentDeps,
@@ -72,6 +74,7 @@ function makeHostOptions() {
     runtimeEnvironment,
     runtimeEnvironmentFactory,
     toolImplementation,
+    permissionStorage,
     deviceCapacity,
   };
 }
@@ -136,6 +139,7 @@ describe("generic conversation projection", () => {
       runtimeEnvironment,
       runtimeEnvironmentFactory,
       toolImplementation,
+      permissionStorage,
     } =
       makeHostOptions();
     const host = new RuntimeHost(options);
@@ -148,6 +152,7 @@ describe("generic conversation projection", () => {
     expect(params.decorateRunBus).toBe(decorateRunBus);
     expect(params.artifactStore).toBe(artifactStore);
     expect(params.toolImplementation).toBe(toolImplementation);
+    expect(params.permissionStorage).toBe(permissionStorage);
     expect(modelProvider.create).toHaveBeenCalledWith({ primaryRole: "power" });
     expect(runtimeEnvironmentFactory.create).toHaveBeenCalledWith({
       workspace: "/project",

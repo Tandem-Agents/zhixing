@@ -14,6 +14,7 @@ import type { HostMcpRuntimePorts } from "./mcp-runtime-ports.js";
 import { projectRuntimeConfiguration } from "./runtime-configuration-projections.js";
 import { resolveSystemProtectedSecretPaths } from "../security/secret-boundary.js";
 import { createHostKernelToolImplementation } from "./kernel-tool-implementation.js";
+import { createPermissionStorageInfrastructure } from "../serve/permission-storage-infrastructure.js";
 import { createExecutorReadinessSource } from "../serve/executor-readiness.js";
 import {
   createLocalWorkspaceClient,
@@ -272,6 +273,8 @@ export async function withLocalWorkspaceClient<T, R = T>(
       kernelEnvironmentConfiguration: configuration.kernelEnvironment,
       credentials: startup.providerCredentials,
       toolImplementation: createHostKernelToolImplementation(),
+      permissionStorage:
+        createPermissionStorageInfrastructure({ zhixingHome }).runtime,
       mcpTools: mcpRuntime.tools,
       systemProtectedPaths: resolveSystemProtectedSecretPaths(),
       interactions: new DurableConversationInteractionObserver(),

@@ -3247,7 +3247,7 @@ test("AgentRuntime keeps one internal security chain behind finite public ports"
       "packages/orchestrator/src/runtime/create-agent-runtime.ts",
       (text) => text.replace(
         "    confirmationBroker,",
-        "    permissionStore: persistentStore,\n    confirmationBroker,",
+        "    permissionStore: permissionStorage,\n    confirmationBroker,",
       ),
     )).join("\n"),
     /returns a security implementation/,
@@ -4356,12 +4356,17 @@ test("Trust Administration management has one domain application and Product API
     "packages/server/src/context.ts",
     "packages/server/src/index.ts",
     "packages/cli/src/serve/trust-administration-adapter.ts",
+    "packages/cli/src/serve/permission-storage-infrastructure.ts",
     "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/cli/src/runtime/workspace-command.ts",
+    "packages/runtime-host/src/runtime-host.ts",
     "packages/cli/src/runtime/rpc-management-facade.ts",
     "packages/cli/src/security/commands.ts",
     "packages/cli/src/security/trust-rule-arg-provider.ts",
     "packages/orchestrator/src/security/secure-executor.ts",
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+    "packages/orchestrator/src/runtime/kernel-permission-storage.ts",
     "packages/orchestrator/src/tools/task.ts",
     "packages/orchestrator/src/subagent/factory.ts",
     "packages/orchestrator/src/subagent/loop-runner.ts",
@@ -4409,6 +4414,30 @@ test("Trust Administration management has one domain application and Product API
       (text) => `${text}\nconst leakedDecision = rules.filter((rule) => rule.scope !== "builtin");`,
     )).join("\n"),
     /bridge owns product context or visibility semantics/,
+  );
+  assert.match(
+    inspectTrustAdministrationOwnership(mutate(
+      "packages/cli/src/serve/trust-administration-adapter.ts",
+      (text) => `${text}\nconst leakedStore = new PermissionStore();`,
+    )).join("\n"),
+    /bridge owns product context|not confined to the one Host infrastructure adapter/,
+  );
+  assert.match(
+    inspectTrustAdministrationOwnership(mutate(
+      "packages/orchestrator/src/runtime/create-agent-runtime.ts",
+      (text) => `${text}\nconst fallbackStore = new PermissionStore();`,
+    )).join("\n"),
+    /internal security chain|not confined to the one Host infrastructure adapter/,
+  );
+  assert.match(
+    inspectTrustAdministrationOwnership(mutate(
+      "packages/runtime-host/src/runtime-host.ts",
+      (text) => text.replace(
+        "      permissionStorage: this.opts.permissionStorage,",
+        "",
+      ),
+    )).join("\n"),
+    /bypasses the one Host permission storage adapter/,
   );
   assert.match(
     inspectTrustAdministrationOwnership(mutate(

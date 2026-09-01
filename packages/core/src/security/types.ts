@@ -382,7 +382,7 @@ export interface PermissionRuleExecutionSource {
  * 注：`registerBuiltinRules(namespace, rules)` 是 `PermissionStore` 类的具体能力，
  * 不在 `IPermissionStore` 接口上——builtin 规则池是该实现的特定职责，不属于
  * "权限存储"通用契约（其他实现/mock 不必负担）。caller (cli run-agent) 持有
- * `new PermissionStore(...)` 具体类，能正常调用该方法。
+ * Host infrastructure adapter 持有具体实现并在 runtime 发布前完成注册。
  */
 
 // ─── 匹配规格（判别联合） ───

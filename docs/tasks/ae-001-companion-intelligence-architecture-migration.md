@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-06a 已通过协调者独立验收，等待提交后进入 Permission 存储边界<br>
+> 当前检查点：A6-06b 已完成，等待协调者独立复核<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `5aca9f32`；A6-05b 已由协调者独立复核并提交，Channel 入站只经唯一 Conversation Product API 与有限 Correctness/运行适配，Surface 不再拥有对话状态机或耐久协议 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-06a 已通过协调者独立复核，等待提交 |
-| 活跃工作包 | 无；`A6-06a-conversation-storage-boundary-v1` 已闭合，提交后进入 Permission 存储实现边界 |
-| 下一责任链 | A6-06b 收束 P04 Permission 存储的 Host infrastructure 选择、Security 只读消费与 Trust 管理写入；不提前进入其他 Storage、Executor/Mesh、设备拓扑或 A7 |
+| 已接受基线 | `7638c0ab`；A6-06a 已由协调者独立复核并提交，Conversation meta/transcript/snapshot 与维护实现只在唯一 Host infrastructure adapter 构造，各需求方只消费有限合同 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-06b 已完成实现与失效闭包验证，等待协调者独立复核 |
+| 活跃工作包 | `A6-06b-permission-storage-boundary-v1`；唯一 Host infrastructure adapter 已拥有 P04 concrete/path/instance 选择，Kernel、Trust 管理与 runtime 发放只消费分离的有限需求合同 |
+| 下一责任链 | A6-06b 闭合后继续选择不与 Executor/Mesh 重叠的下一条 Storage 责任链；不提前进入设备拓扑或 A7 |
 | 打开的单向桥 | 无；全部 Kernel Runtime 生产根均已显式消费同一有限端口，不存在默认 concrete fallback、双实现表或只为测试存在的桥 |
-| 已失效证据 | 无当前未恢复证据；A6-06a 只按真实相交面重取 Conversation storage、恢复与维护证据，Channel 及其他不相交证据继续有效 |
+| 已失效证据 | 无当前未恢复证据；A6-06b 只按真实相交面重取 Permission storage、Security 与 Trust 管理证据，Conversation storage 及其他不相交证据继续有效 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2596,6 +2596,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据与门禁：Core startup bootstrap 1 文件 12/12；CLI directory/Host adapter/read-only/maintenance 4 文件 23/23；Workscene directory 1 文件 8/8；Conversation Surface 1 文件 3/3；真实 in-process/Mesh Workscene composition 1 文件 1/1，合计 8 文件 47/47。Core 与 CLI `tsc --noEmit`、fresh Core build、`pnpm cli:build`、fresh runtime package exports、changed-source Biome 均通过；canonical S7 最终 43/43 与 registry golden 通过。S7 反向 mutation 拒绝 concrete store 逃逸到 Surface、目录恢复可选 fallback、只读 Surface 重新读 `node:fs`、第二 Host adapter construction 与旧 Advancement 物理旁路；首次 canonical S7 运行先暴露新增 validator 的局部计数 helper 缺失，修复后又准确指出旧配置门仍要求 Surface 自行解释 model capability，门禁同步改为要求 Host 在构造 storage adapter 时完成有限数值投影，最终完整门禁通过。
 - 失效与交接：若 Conversation meta/transcript/snapshot constructor、scope route、Owner persistence callbacks、committed meta projections、目录/只读历史、startup bootstrap read demand、clear/delete/retention/Advancement maintenance、Workscene storage cleanup、Host composition、S7 或上述直接测试任一变化，只恢复本证据及真实相交的 A0 P02/A5 Conversation 证据。当前无打开桥和未恢复证据；A6 继续 `[ ]`，仅等待协调者复核 A6-06a 后从 P01～P15 的真实需求方边界选择下一条 Storage 责任链，未进入 Executor/Mesh、设备拓扑或 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：重新从唯一生产构造、普通/Workscene 路由、Owner 持久回调、Conversation application、只读降级与维护入口双向核对，确认三个具体 store 只在 `conversation-storage-infrastructure.ts` 构造，Surface、目录和 Advancement 不再选择物理实现；schema、路径、恢复、clear/delete、retention 与 Windows 原子语义未变。独立运行 Core startup bootstrap 12/12、CLI storage/directory/read-only/maintenance/Workscene/Surface/conformance 35/35、CLI 类型检查、canonical S7 43/43 与 registry golden、runtime package exports 和 `git diff --check` 全部通过。A6-06a 可以提交，A6 仍保持 `[ ]`。
+
+### A6-06b：Permission 持久存储实现边界收口
+
+- 基线与唯一结果：以已接受 `HEAD 7638c0ab` 加协调者调度记录为基线，形成待复核证据 `A6-06b-permission-storage-boundary-v1`。P04 concrete `PermissionStore`、`<home>/permissions` 物理根和实例策略现在只由 CLI Host infrastructure adapter 选择；Kernel Security/Trust execution、Trust Administration 管理面、RuntimeHost 与 Executor substrate 分别只取得 runtime-scoped repository/read-only rule source、fresh read-through management repository、稳定 workspace identity 或 required factory。有限合同按需求角色分离，没有万能 Storage facade、路径/codec 泄漏、第二 store 选择器或可选 concrete fallback。
+- 生产闭包与旧路退场：Anchor 唯一 Host、Executor-only role 和瞬态 workspace fallback 三个正式组合根均显式构造同一个 `createPermissionStorageInfrastructure` adapter 家族，再将 `permissionStorage` 必选输入传入全部 `createAgentRuntime` 发放；Orchestrator 内部默认 `new PermissionStore`、可选 `permissionStore` 注入和 Trust adapter 的平行 concrete constructor 已删除。每个 AgentRuntime 取得自己完整生命周期内唯一的 store，先按真实工具集合注册 builtin rule namespace，再把同一 store 同时投影为 Trust execution repository 与 context-bound Security rule source；管理应用使用同一 P04 根的 fresh read-through repository，撤销不会被另一 runtime 的 session cache 掩盖。生产 `new PermissionStore` exact-set 仅剩 Host adapter 一处。
+- 行为保护：P04 global/context `permissions.v2.json` 的 schema/version、workspace hash、原子持久读写、builtin/user 优先级、工具参数 extractor、main/workspace/scene context、session rule 仅限当前 runtime、Trust list/create/revoke/snapshot 与 Security fail-closed 语义保持；本包没有改变权限/确认产品决定、公开 RPC/Event、配置、持久格式、assignment signed permission snapshot 或 Executor/Mesh 拓扑。管理、运行与 workspace identity 是同一具体实现家族的三个有限角色，不共享可变 session pool，也不形成第二权威。
+- 直接证据、门禁与交接：Orchestrator storage boundary/create-runtime 2 文件 73/73，CLI Host adapter/Trust/RuntimeHost/Executor 发放 4 文件 19/19，Core P04 file mechanism/Trust mapping 2 文件 48/48，合计 8 文件 140/140；Orchestrator 与 CLI typecheck、fresh Orchestrator、RuntimeHost 与 CLI build、fresh runtime package exports、16 个 changed-source Biome、canonical S7 43/43 与 registry golden 均通过。S7 反向 mutation 拒绝 concrete store 回流 Kernel/Trust、P04 root 逃逸、runtime/management 角色合并、任一 Anchor/Executor/workspace 生产根漏传 required factory，以及 RuntimeHost 重新选择物理实现。若 PermissionStore constructor/root/schema、builtin/session/user rule、argument extractor、Trust repository/context mapping、Security source、三生产根、RuntimeHost/Executor发放、assignment permission snapshot、S7/package exports 或上述直接测试任一变化，只恢复本证据及真实相交的 A0 P04/A4 Security/A5 Trust 证据。当前无打开桥和未恢复证据；A6 继续 `[ ]`，仅等待协调者复核 A6-06b 后选择不与 Executor/Mesh 重叠的下一条 Storage 责任链，未进入设备拓扑或 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：重新核对 P04 唯一 concrete/root/instance owner、Anchor/Executor/workspace 三个生产根、Kernel 与 Trust 的分离需求合同、运行期 session cache 和管理面 fresh read-through 语义，确认没有具体存储回流、路径泄漏、可选 fallback、第二 selector 或可见行为漂移。独立运行 Orchestrator 73/73、CLI 19/19、Core 48/48、Orchestrator/CLI typecheck、canonical S7 43/43 与 registry golden、runtime package exports 和 `git diff --check` 全部通过；本证据可以提交，A6 仍保持 `[ ]`。
 
 ## 十、用户提示词
 
