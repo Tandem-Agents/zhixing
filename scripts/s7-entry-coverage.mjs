@@ -7432,6 +7432,34 @@ export function inspectRecoveryBackupAssembly(records) {
   ) {
     failures.push("backup setup, verify and status must have one Backup & Recovery application owner");
   }
+  const disasterAdmissionOwners = records.filter(({ text }) =>
+    text.includes("class BackupRecoveryDisasterAdmissionApplicationService"));
+  if (
+    disasterAdmissionOwners.length !== 1 ||
+    disasterAdmissionOwners[0]?.relative !== "packages/core/src/backup-recovery/application.ts" ||
+    count(backupApplication, "class BackupRecoveryDisasterAdmissionApplicationService") !== 1 ||
+    !backupApplication.includes("#resolveTarget(") ||
+    !backupApplication.includes("async #discover(") ||
+    !backupApplication.includes("#select(") ||
+    count(backupApplication, "validateBackupRecoveryDisasterAdmissionSelection(selection)") !== 1 ||
+    !backupApplication.includes("selected.entry.recipientKeyId !== backupKeyId") ||
+    !backupApplication.includes("selected.entry.envelopeIdentity.recipientKeyId !== backupKeyId") ||
+    !backupApplication.includes("checkpointEnvelopeDigest: selected.entry.envelopeIdentity.digest") ||
+    !backupApplication.includes("const transferId = this.mechanism.deriveTransferId(transferInput)") ||
+    !backupApplication.includes("const prepare = this.mechanism.signPrepare(intent, recovered.root)") ||
+    !disasterCommand.includes('from "@zhixing/core/backup-recovery/application"') ||
+    count(disasterCommand, "new BackupRecoveryDisasterAdmissionApplicationService<") !== 1 ||
+    count(disasterCommand, "validateBackupRecoveryDisasterAdmissionSelection(selection)") !== 1 ||
+    count(disasterCommand, "return await application.admit(selection)") !== 1 ||
+    disasterCommand.includes("discoverDisasterRecoveryCandidates") ||
+    disasterCommand.includes("selectDisasterRecoveryCandidate") ||
+    disasterCommand.includes("selection.pairedDeviceName === undefined") ||
+    disasterCommand.includes("selected.entry.recipientKeyId") ||
+    records.some(({ relative }) =>
+      relative.endsWith("/disaster-recovery-inventory.ts"))
+  ) {
+    failures.push("disaster recovery candidate discovery and admission must have one domain application owner");
+  }
   if (
     count(command, "createConfiguredCheckpointOwner({") !== 1 ||
     count(command, "ctx.authorityCheckpointOwner?.start()") !== 1 ||
@@ -7692,9 +7720,10 @@ export function inspectRecoveryBackupAssembly(records) {
     count(disasterTarget, "async abort(") !== 1 ||
     count(disasterTarget, "async tombstone(") !== 1 ||
     count(disasterCommand, "new DisasterRecoveryTarget({") !== 1 ||
-    !disasterCommand.includes("discoverDisasterRecoveryCandidates({") ||
+    !disasterCommand.includes("admitDisasterRecoveryCandidate(context, selection, options, signal)") ||
     !disasterCommand.includes("await target.prepareAndImport({") ||
-    !disasterCommand.includes("await target.commit({ transferId, recoveryRoot: decoded.root, signal })") ||
+    !disasterCommand.includes("transferId: admission.transferId") ||
+    !disasterCommand.includes("recoveryRoot: admission.recoveryRoot") ||
     !disasterCommand.includes("await target.tombstone({")
   ) {
     failures.push("disaster recovery target owner, inventory, phase or public journey exact-set drifted");
@@ -7752,12 +7781,11 @@ export function inspectRecoveryBackupAssembly(records) {
   );
   if (
     !disasterCommand.includes("const ownedAbort = options.signal ? undefined : new AbortController()") ||
-    !disasterCommand.includes("discoverDisasterRecoveryCandidates({") ||
-    !disasterCommand.includes("openInventoryTargets(context, selection, signal)") ||
-    !disasterCommand.includes("waitForPeer(control, pairedDeviceId, 30_000, signal)") ||
-    !disasterCommand.includes("selected.target.read(selected.entry.checkpointId, signal)") ||
+    !disasterCommand.includes("openInventoryTargets(context, targetSelection, signal)") ||
+    !disasterCommand.includes("waitForPeer(control, selection.deviceId, 30_000, signal)") ||
+    !disasterCommand.includes("return target.read(checkpointId, signal)") ||
     !disasterCommand.includes("createSignedDisasterRecoveryAbort({") ||
-    !disasterCommand.includes("await target.abort({ abort, recoveryRoot: decoded.root })") ||
+    !disasterCommand.includes("await target.abort({ abort, recoveryRoot: admission.recoveryRoot })") ||
     abortTerminal < 0 || abortKeyLoad < abortTerminal || abortCleanup < abortKeyLoad ||
     freshKey < 0 || firstCreatorTerminalCheck < freshKey ||
     freshRecordVerified < firstCreatorTerminalCheck ||

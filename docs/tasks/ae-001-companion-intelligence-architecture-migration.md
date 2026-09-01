@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：等待协调者复核 A5-17b Backup & Recovery 恢复根生命周期归域<br>
+> 当前检查点：等待协调者复核 A5-17c Disaster Recovery 候选发现与恢复准入归域<br>
 > 完成度：5/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `036c90ac`；A5-17a 已由协调者独立复核并提交，backup setup/verify/status 的目标选择、备份创建、验证与状态下一步已归入唯一 Backup & Recovery 应用，CLI 只保留机制资源生命周期、安全输入和呈现；A5-16a～A5-16i 继续有效 |
+| 已接受基线 | `604e1c88`；A5-17b 已由协调者独立复核并提交，recovery-root rotate/invalidate/approve-reset/reset 的产品状态机、确认顺序、双密钥/co-signer 约束和 activation 选择已归入唯一 Backup & Recovery 应用，旧 lifecycle service 与桥归零；A5-17a、A5-16a～A5-16i 继续有效 |
 | 当前 A 项 | A5：按无环依赖顺序逐领域归位现有产品责任 |
-| 活跃工作包 | `A5-17b-recovery-root-lifecycle-v1` 已实施，等待协调者独立复核：recovery-root rotate/invalidate/approve-reset/reset 的产品状态机、双密钥/co-signer 约束、activation 选择与 typed outcome 已归入唯一 Backup & Recovery 应用；CLI 只保留严格 codec、机制资源适配和中文呈现 |
-| 下一责任链 | A5-17b 后迁移 disaster recovery recover/recover-finish，并有限审计 Backup & Recovery 全域零残留；不得提前进入 A6 |
-| 打开的单向桥 | 无；`A5-BACKUP-COMMAND-01` 已关闭，`serve/backup-command.ts` 只组合 Backup & Recovery 应用所需的文件/Mesh/checkpoint/root crypto/activation 机制并呈现结果，不再拥有 setup/verify/status 或 root lifecycle 产品决定。disaster recovery 是下一条独立责任链，不借旧桥回流 |
-| 已失效证据 | `A5-17b-recovery-root-lifecycle-v1` 为当前待协调者复核证据；A5-17a 与 A5-16a～A5-16i、A5-15a～A5-15m 当前均有效，本包已恢复 recovery-root lifecycle、CLI/core、checkpoint/root、S7/export 的真实相交闭包 |
+| 活跃工作包 | `A5-17c-disaster-recovery-admission-v1` 已实施并等待协调者复核：recover 的选择互斥、non-duty eligibility、候选发现/选择、恢复包匹配与稳定 request/transfer 准入已归入唯一 Backup & Recovery 应用；安装提交与 recover-finish 未迁移 |
+| 下一责任链 | A5-17c 后迁移 disaster recovery prepare/import/commit/abort/receipt 与 recover-finish 终态，再有限审计 Backup & Recovery 全域零残留；不得提前进入 A6 |
+| 打开的单向桥 | `A5-DISASTER-RECOVERY-COMMAND-01=serve/disaster-recovery-command.ts` 暂时承接已归域准入的机制适配和尚未迁移的安装/完成产品状态机；固定由紧邻 A5-17d 退场，A5-17a/17b 产品决定不得回流 |
+| 已失效证据 | 无当前未恢复证据；A5-17c 已恢复 disaster candidate/inventory、recovery-package consumer、protocol prepare、CLI/core、S7/export/build 证据，未改动的 trust evidence 与 install/receipt 证据继续有效；A5-17a、A5-17b 与 A5-16a～A5-16i、A5-15a～A5-15m 当前均有效 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2456,6 +2456,13 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 应用责任与机制边界：唯一窄入口 `@zhixing/core/backup-recovery/application` 新增有限 `BackupRecoveryRootLifecycleApplicationService` 及 `rotate/invalidate/approve-reset/reset` descriptor。应用独占确认资格、current issuer/root 绑定、replacement 双密钥全等、active 且非 issuer 的 co-signer、approval generation、rotate 与 domain-reset-establish activation 选择/进度和 typed outcome；CLI 适配只提供 root package/签名会话、密钥生成与回读、checkpoint target 生命周期、activation transaction 等 path-free 机制。四命令均先由应用拒绝未确认输入，再允许 session、秘密读取或其他机制副作用；reset 的严格 wire approval codec 通过单一应用调用中的惰性 `decodeApproval` 端口触发，损坏 approval 不得抢先于确认门。领域错误由 CLI 精确映射回既有英文错误和中文成功呈现，不引入第二 admission、root owner 或状态机。
 - 旧路退场与行为保护：旧 `RecoveryRootLifecycleService` 源文件、构造、生产导入和同责测试入口已删除；`backup-command.ts` 不再判断 distinct co-signer、active 状态、current root/issuer、双密钥一致性或 activation plan，只负责严格 approval codec、安全输入、资源 `finally` 释放和结果呈现。四个公开命令/参数/确认、v1/v2 recovery package、root 双 key binding、issuer 不得自确认、签名与 checkpoint/retention/target read-back、verified-before-activate、supersede、replay/restart/cleanup、setup/verify/status 及 current-removal 行为保持不变；`A5-BACKUP-COMMAND-01` 因全部已登记产品决定退场而关闭，后续 disaster recovery 不复用该产品桥。
 - 纠正、直接证据与交接：独立复核发现初次实现由 CLI 在应用调用前 eager decode reset approval，已改为应用确认后的惰性 codec 调用；新增生产适配反例锁定 `userConfirmed=false + malformed approval` 必须返回既有确认错误，且 decoder、SecretStore/issuer session、target/checkpoint/activation 与输出均零调用。Core Backup & Recovery application 1 文件 18/18（含 root lifecycle 6 项）、CLI 真实 backup command 1 文件 8/8、Mesh pairing/trust/checkpoint 定向 4/4；覆盖 rotate progression、invalidate、distinct active co-signer、domain-reset-establish、generation/read-back 拒绝、公开 reset 经真实 approval/target activation，以及 checkpoint crash/ack-loss/replay。纠正后 Core fresh build、CLI typecheck 与 `pnpm cli:build` 通过；初次全依赖构建、未变的 fresh `pnpm runtime:package-exports` 与 Mesh 证据继续有效；canonical S7 coverage/mutation 34/34 与 registry golden、changed-source Biome 和 `git diff --check` 通过。S7 现冻结四命令 exact-set、Core 唯一应用 owner、reset confirmation-before-codec/session 顺序、CLI 惰性机制绑定、旧 service/source/import 归零及 co-signer 决定不得回流；以后若 root lifecycle descriptor/application、确认/root/co-signer/generation 约束、approval codec 顺序、package/session/crypto/checkpoint/activation adapter、CLI 呈现、相邻 setup/verify/status/current-removal、S7/package-export 或上述直接测试任一变化，只恢复本证据及真实相交证据。Backup & Recovery Administration 行与 A5 继续 `[ ]`；下一检查点固定为 disaster recovery recover/recover-finish，当前停在可构建、可运行、可恢复且 recovery-root lifecycle 只有一个产品应用 owner 的检查点等待协调者独立复核，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+
+### A5-17c：归位 Disaster Recovery 候选发现与恢复准入
+
+- 实施基线与生产闭包：以已接受 `HEAD 604e1c88` 加协调者调度记录为基线，形成待复核证据 `A5-17c-disaster-recovery-admission-v1`。即时沿 `zz backup recover → RecoveryContext/trust/target configuration → directory/paired inventory → recovery package → signed prepare → DisasterRecoveryTarget` 正向追踪，并从 source selector、paired member/config binding、inventory envelope、candidate display/choice、request/transfer digest、checkpoint read 和后续 abort identity 反向对账；本包只迁移 pre-install candidate/admission，`prepareAndImport/commit/abort/receipt` 与已安装 generation 的 continuation、`recover-finish` 保持原链并固定由 A5-17d 退场。
+- 唯一应用与机制边界：`@zhixing/core/backup-recovery/application` 新增有限 `BackupRecoveryDisasterAdmissionApplicationService`，唯一拥有 source 参数互斥、non-duty eligibility、configured/default paired 解析、active/non-current/name-unique 资格、候选 location 校验与 created-at/target/checkpoint 稳定排序、1-based 编号/单候选默认/显式选择、recovery package 双 recipient binding、稳定 discovery request/transfer 输入和 typed prepare intent/admission。CLI 只投影 trust/config，打开并关闭目录或 paired Mesh target，执行 inventory/checkpoint bytes、严格 recovery package codec、protocol digest/ULID、签名和既有中文呈现；领域不取得路径 target、Mesh、SecretStore、CAS、Authority 或 transport 实现。互斥输入继续在任何 secret/context/mesh IO 前由同一领域 validator fail closed；所有后续失败均通过 mechanism scope 关闭 inventory target。
+- 旧路退场与行为保护：旧 `disaster-recovery-inventory.ts` 及其 candidate/select 业务测试删除，`disaster-recovery-command.ts` 不再排序、编号、选择、匹配 recipient 或组装 request/transfer/prepare 决定，paired target opener 只消费已裁决 binding；没有 test-only inventory bypass、第二 application、兼容壳或 core 根导出。公开 Commander 参数、目录/配对默认与错误、候选行和恢复包提示、同 identity deterministic bytes、checkpoint read、signal/evidence Mesh、trust evidence、安装/abort/receipt 与用户完成文案保持不变。进场时 `recovery-package-consumer-boundary` 仍把 A5-17b 后 `backup-command.ts` 的真实 3 个 strict consumer 写成 4，已只按当前生产 exact-set 修正为 3；允许 legacy 的入口集合未改变。
+- 直接证据、失效与交接：Core Backup & Recovery application + disaster protocol 2 文件 32/32（application 22/22 中新增 admission 4 项），CLI source-conflict-before-IO 与 strict recovery-package consumer 2 文件 3/3；覆盖 source/paired/default、候选排序/选择/空与多候选、package mismatch、invalid envelope、stable replay identity、prepare intent、真实 protocol 签名和 strict package consumption。`pnpm build` 的版本检查与 17 个生产包全依赖构建、CLI typecheck、fresh `pnpm runtime:package-exports`、canonical S7 coverage/mutation 34/34 与 registry golden、changed-source Biome 均通过；S7 反向 mutation 可识别 stable transfer/binding 回流、CLI 第二 application/selector、旧 inventory source 和 core 根导出回流。以后若 disaster admission context/selection/candidate/prepare contract、CLI target/package/protocol adapter、inventory/checkpoint codec、后续 install/abort 对 admission 的消费、core 窄 export/build、S7/package-export 或上述直接测试任一变化，本证据精确失效；独立 trust evidence、DisasterRecoveryTarget install state machine 与 A5-17a/17b 不自动误伤。Backup & Recovery Administration 行与 A5 继续 `[ ]`，`A5-DISASTER-RECOVERY-COMMAND-01` 仅为 A5-17d 的 install/finish 状态机继续打开；当前停在可构建、可运行、可恢复且 candidate/admission 只有一个领域 owner 的检查点等待协调者独立复核，未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 
 ## 十、用户提示词
 

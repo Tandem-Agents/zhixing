@@ -25,7 +25,7 @@ describe("recovery package consumer boundary", () => {
     expect(consumers).toEqual([...EXPECTED_CONSUMERS]);
 
     const backup = source("serve/backup-command.ts");
-    expect(backup.match(/requireCurrentRecoveryPackage\s*\(/gu)).toHaveLength(4);
+    expect(backup.match(/requireCurrentRecoveryPackage\s*\(/gu)).toHaveLength(3);
     expect(backup.match(/decoded\.version === 1/gu)).toHaveLength(1);
 
     const pairing = source("serve/mesh-pair-command.ts");

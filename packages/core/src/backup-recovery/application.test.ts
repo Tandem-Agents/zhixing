@@ -3,6 +3,8 @@ import {
   BackupRecoveryAdministrationApplicationService,
   BackupRecoveryAdministrationError,
   BackupRecoveryCurrentRemovalApplicationService,
+  BackupRecoveryDisasterAdmissionApplicationService,
+  BackupRecoveryDisasterAdmissionError,
   BackupRecoveryRootLifecycleApplicationService,
   BackupRecoveryRootLifecycleError,
 } from "./application.js";
@@ -497,6 +499,221 @@ describe("BackupRecoveryRootLifecycleApplicationService", () => {
     });
     expect(decodeApproval).not.toHaveBeenCalled();
     expect(f.mechanism.withIssuerSession).not.toHaveBeenCalled();
+  });
+});
+
+interface DisasterEnvelope {
+  readonly checkpointId: string;
+  readonly createdAt: string;
+  readonly recipientKeyId: string;
+  readonly digest: string;
+}
+
+function disasterAdmissionFixture() {
+  const older = Object.freeze({
+    checkpointId: "checkpoint-older",
+    targetId: "target-b",
+    recipientKeyId: "backup-key",
+    envelope: Object.freeze({
+      checkpointId: "checkpoint-older",
+      createdAt: "2026-08-30T00:00:00.000Z",
+      recipientKeyId: "backup-key",
+      digest: "sha256:older",
+    }),
+    envelopeIdentity: Object.freeze({
+      checkpointId: "checkpoint-older",
+      createdAt: "2026-08-30T00:00:00.000Z",
+      recipientKeyId: "backup-key",
+      digest: "sha256:older",
+    }),
+  });
+  const newer = Object.freeze({
+    checkpointId: "checkpoint-newer",
+    targetId: "target-a",
+    recipientKeyId: "backup-key",
+    envelope: Object.freeze({
+      checkpointId: "checkpoint-newer",
+      createdAt: "2026-08-31T00:00:00.000Z",
+      recipientKeyId: "backup-key",
+      digest: "sha256:newer",
+    }),
+    envelopeIdentity: Object.freeze({
+      checkpointId: "checkpoint-newer",
+      createdAt: "2026-08-31T00:00:00.000Z",
+      recipientKeyId: "backup-key",
+      digest: "sha256:newer",
+    }),
+  });
+  const mechanism = {
+    deriveDiscoveryRequestId: vi.fn(() => `recover:${"a".repeat(64)}`),
+    withInventorySources: vi.fn(async (
+      _selection: unknown,
+      use: (sources: readonly { readonly displayName: string; readonly target: string }[]) =>
+        Promise<unknown>,
+    ) => use([
+      { displayName: " peer-b ", target: "peer-b" },
+      { displayName: "peer-a", target: "peer-a" },
+    ])),
+    inventory: vi.fn(async (target: string) => target === "peer-b" ? [older] : [newer]),
+    presentCandidates: vi.fn(),
+    readRecoveryRoot: vi.fn(async () => ({
+      root: "recovery-root",
+      identity: { rootKeyId: "root-key", backupKeyId: "backup-key" },
+    })),
+    deriveTransferId: vi.fn(() => "xfer-00000000000000000000000000"),
+    signPrepare: vi.fn((intent: unknown) => `signed:${JSON.stringify(intent)}`),
+    readCheckpoint: vi.fn(async (_target: string, checkpointId: string) =>
+      `bytes:${checkpointId}`),
+  };
+  const context = {
+    homeId: "home-1",
+    currentDeviceId: "self",
+    issuerDeviceId: "issuer",
+    pairedDevices: [
+      { deviceId: "self", displayName: "self", active: true, current: true },
+      { deviceId: "peer-a", displayName: "peer", active: true, current: false },
+      { deviceId: "peer-b", displayName: "other", active: true, current: false },
+    ],
+    configuredPairedDeviceId: "peer-a",
+    recoveryBackupRecipientKeyId: "backup-key",
+  };
+  return {
+    application: new BackupRecoveryDisasterAdmissionApplicationService<
+      string,
+      DisasterEnvelope,
+      string,
+      string,
+      string
+    >(context, mechanism),
+    context,
+    mechanism,
+    newer,
+    older,
+  };
+}
+
+describe("BackupRecoveryDisasterAdmissionApplicationService", () => {
+  it("owns deterministic discovery, candidate order, selection, package binding and prepare intent", async () => {
+    const f = disasterAdmissionFixture();
+    const admitted = await f.application.admit({ backupNumber: 1 });
+
+    expect(f.mechanism.withInventorySources).toHaveBeenCalledWith(
+      {
+        kind: "paired-device",
+        deviceId: "peer-a",
+        displayName: "peer",
+        recipientKeyId: "backup-key",
+      },
+      expect.any(Function),
+    );
+    expect(f.mechanism.deriveDiscoveryRequestId).toHaveBeenCalledWith({
+      homeId: "home-1",
+      targetDeviceId: "self",
+    });
+    expect(f.mechanism.presentCandidates).toHaveBeenCalledWith([
+      {
+        number: 1,
+        location: "peer-a",
+        backedUpAt: "2026-08-31T00:00:00.000Z",
+        state: "pending-verification",
+      },
+      {
+        number: 2,
+        location: "peer-b",
+        backedUpAt: "2026-08-30T00:00:00.000Z",
+        state: "pending-verification",
+      },
+    ]);
+    expect(f.mechanism.deriveTransferId).toHaveBeenCalledWith({
+      requestId: `recover:${"a".repeat(64)}`,
+      targetDeviceId: "self",
+      checkpointTargetId: "target-a",
+      checkpointEnvelopeDigest: "sha256:newer",
+    });
+    expect(f.mechanism.signPrepare).toHaveBeenCalledWith({
+      v: 1,
+      op: "prepare",
+      requestId: `recover:${"a".repeat(64)}`,
+      transferId: "xfer-00000000000000000000000000",
+      targetDeviceId: "self",
+      checkpointTargetId: "target-a",
+      recoveryRoot: {
+        homeId: "home-1",
+        rootKeyId: "root-key",
+        recipientKeyId: "backup-key",
+      },
+      checkpointEnvelope: f.newer.envelope,
+    }, "recovery-root");
+    expect(admitted).toMatchObject({
+      requestId: `recover:${"a".repeat(64)}`,
+      transferId: "xfer-00000000000000000000000000",
+      checkpointTargetId: "target-a",
+      checkpointEnvelopeDigest: "sha256:newer",
+      recoveryRoot: "recovery-root",
+      checkpoint: "bytes:checkpoint-newer",
+    });
+  });
+
+  it("owns source exclusivity, paired eligibility and candidate selection", async () => {
+    const conflict = disasterAdmissionFixture();
+    await expect(conflict.application.admit({
+      directory: "D:/backup",
+      pairedDeviceId: "peer-a",
+    })).rejects.toMatchObject<Partial<BackupRecoveryDisasterAdmissionError>>({
+      code: "source-selection-conflict",
+      errorKind: "type-error",
+    });
+    expect(conflict.mechanism.withInventorySources).not.toHaveBeenCalled();
+
+    const named = disasterAdmissionFixture();
+    named.context.pairedDevices[2]!.displayName = "peer";
+    await expect(named.application.admit({ pairedDeviceName: "peer" }))
+      .rejects.toMatchObject({ code: "paired-device-name-not-unique" });
+
+    const multiple = disasterAdmissionFixture();
+    await expect(multiple.application.admit({}))
+      .rejects.toMatchObject({ code: "candidate-selection-required" });
+
+    const invalid = disasterAdmissionFixture();
+    await expect(invalid.application.admit({ backupNumber: 3 }))
+      .rejects.toMatchObject({ code: "invalid-candidate-number", errorKind: "type-error" });
+  });
+
+  it("fails closed before signing or reading bytes on duty, bad package binding and bad envelope", async () => {
+    const duty = disasterAdmissionFixture();
+    duty.context.issuerDeviceId = "self";
+    await expect(duty.application.admit({ backupNumber: 1 }))
+      .rejects.toMatchObject({ code: "current-issuer" });
+    expect(duty.mechanism.inventory).not.toHaveBeenCalled();
+
+    const packageMismatch = disasterAdmissionFixture();
+    packageMismatch.mechanism.readRecoveryRoot.mockResolvedValue({
+      root: "foreign-root",
+      identity: { rootKeyId: "foreign-root-key", backupKeyId: "foreign-backup-key" },
+    });
+    await expect(packageMismatch.application.admit({ backupNumber: 1 }))
+      .rejects.toMatchObject({ code: "recovery-package-mismatch" });
+    expect(packageMismatch.mechanism.signPrepare).not.toHaveBeenCalled();
+    expect(packageMismatch.mechanism.readCheckpoint).not.toHaveBeenCalled();
+
+    const envelope = disasterAdmissionFixture();
+    envelope.mechanism.inventory.mockResolvedValue([{
+      ...envelope.newer,
+      envelopeIdentity: { ...envelope.newer.envelopeIdentity, checkpointId: "other" },
+    }]);
+    await expect(envelope.application.admit({ backupNumber: 1 }))
+      .rejects.toMatchObject({ code: "invalid-candidate-envelope" });
+    expect(envelope.mechanism.presentCandidates).not.toHaveBeenCalled();
+  });
+
+  it("reconstructs stable request and transfer identities on exact replay", async () => {
+    const f = disasterAdmissionFixture();
+    const first = await f.application.admit({ backupNumber: 1 });
+    const replay = await f.application.admit({ backupNumber: 1 });
+    expect(replay.requestId).toBe(first.requestId);
+    expect(replay.transferId).toBe(first.transferId);
+    expect(f.mechanism.deriveDiscoveryRequestId).toHaveBeenCalledTimes(2);
+    expect(f.mechanism.deriveTransferId).toHaveBeenCalledTimes(2);
   });
 });
 

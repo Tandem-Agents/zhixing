@@ -768,6 +768,427 @@ function requireNonEmpty(value: string, label: string): string {
   return value;
 }
 
+export interface BackupRecoveryDisasterAdmissionSelection {
+  readonly directory?: string;
+  readonly pairedDeviceId?: string;
+  readonly pairedDeviceName?: string;
+  readonly backupNumber?: number;
+}
+
+export interface BackupRecoveryDisasterAdmissionPairedDevice {
+  readonly deviceId: string;
+  readonly displayName: string;
+  readonly active: boolean;
+  readonly current: boolean;
+}
+
+export interface BackupRecoveryDisasterAdmissionContext {
+  readonly homeId: string;
+  readonly currentDeviceId: string;
+  readonly issuerDeviceId: string;
+  readonly pairedDevices: readonly BackupRecoveryDisasterAdmissionPairedDevice[];
+  readonly configuredPairedDeviceId?: string;
+  readonly recoveryBackupRecipientKeyId?: string;
+}
+
+export type BackupRecoveryDisasterAdmissionTargetSelection =
+  | { readonly kind: "directory"; readonly directory: string }
+  | {
+      readonly kind: "paired-device";
+      readonly deviceId: string;
+      readonly displayName: string;
+      readonly recipientKeyId: string;
+    };
+
+export interface BackupRecoveryDisasterAdmissionInventorySource<Target> {
+  readonly displayName: string;
+  readonly target: Target;
+}
+
+export interface BackupRecoveryDisasterAdmissionInventoryEntry<Envelope> {
+  readonly checkpointId: string;
+  readonly targetId: string;
+  readonly recipientKeyId: string;
+  readonly envelope: Envelope;
+  readonly envelopeIdentity: {
+    readonly checkpointId: string;
+    readonly createdAt: string;
+    readonly recipientKeyId: string;
+    readonly digest: string;
+  };
+}
+
+export interface BackupRecoveryDisasterAdmissionCandidate {
+  readonly number: number;
+  readonly location: string;
+  readonly backedUpAt: string;
+  readonly state: "pending-verification";
+}
+
+export interface BackupRecoveryDisasterRecoveryRoot<Root> {
+  readonly root: Root;
+  readonly identity: {
+    readonly rootKeyId: string;
+    readonly backupKeyId: string;
+  };
+}
+
+export interface BackupRecoveryDisasterPrepareIntent<Envelope> {
+  readonly v: 1;
+  readonly op: "prepare";
+  readonly requestId: string;
+  readonly transferId: string;
+  readonly targetDeviceId: string;
+  readonly checkpointTargetId: string;
+  readonly recoveryRoot: {
+    readonly homeId: string;
+    readonly rootKeyId: string;
+    readonly recipientKeyId: string;
+  };
+  readonly checkpointEnvelope: Envelope;
+}
+
+export interface BackupRecoveryDisasterAdmission<Root, Checkpoint, Prepare> {
+  readonly requestId: string;
+  readonly transferId: string;
+  readonly checkpointTargetId: string;
+  readonly checkpointEnvelopeDigest: string;
+  readonly recoveryRoot: Root;
+  readonly checkpoint: Checkpoint;
+  readonly prepare: Prepare;
+}
+
+export type BackupRecoveryDisasterAdmissionErrorCode =
+  | "source-selection-conflict"
+  | "current-issuer"
+  | "paired-device-name-not-unique"
+  | "target-selection-required"
+  | "paired-device-ineligible"
+  | "recovery-root-missing"
+  | "invalid-discovery-request-id"
+  | "invalid-candidate-location"
+  | "invalid-candidate-envelope"
+  | "candidate-not-found"
+  | "candidate-selection-required"
+  | "invalid-candidate-number"
+  | "recovery-package-mismatch"
+  | "invalid-transfer-id";
+
+export class BackupRecoveryDisasterAdmissionError extends Error {
+  readonly name = "BackupRecoveryDisasterAdmissionError";
+
+  constructor(
+    readonly code: BackupRecoveryDisasterAdmissionErrorCode,
+    readonly errorKind: "error" | "type-error" = "error",
+  ) {
+    super(code);
+  }
+}
+
+export function validateBackupRecoveryDisasterAdmissionSelection(
+  selection: BackupRecoveryDisasterAdmissionSelection,
+): void {
+  if ([selection.directory, selection.pairedDeviceId, selection.pairedDeviceName]
+    .filter((value) => value !== undefined).length > 1) {
+    throw new BackupRecoveryDisasterAdmissionError(
+      "source-selection-conflict",
+      "type-error",
+    );
+  }
+}
+
+/** Mechanism-only port. It opens resources and moves/signs bytes but makes no admission decision. */
+export interface BackupRecoveryDisasterAdmissionMechanismPort<
+  Target,
+  Envelope,
+  Root,
+  Checkpoint,
+  Prepare,
+> {
+  deriveDiscoveryRequestId(input: {
+    readonly homeId: string;
+    readonly targetDeviceId: string;
+  }): string;
+  withInventorySources<Result>(
+    selection: BackupRecoveryDisasterAdmissionTargetSelection,
+    use: (
+      sources: readonly BackupRecoveryDisasterAdmissionInventorySource<Target>[],
+    ) => Promise<Result>,
+  ): Promise<Result>;
+  inventory(
+    target: Target,
+    requestId: string,
+  ): Promise<readonly BackupRecoveryDisasterAdmissionInventoryEntry<Envelope>[]>;
+  presentCandidates(candidates: readonly BackupRecoveryDisasterAdmissionCandidate[]): void;
+  readRecoveryRoot(): Promise<BackupRecoveryDisasterRecoveryRoot<Root>>;
+  deriveTransferId(input: {
+    readonly requestId: string;
+    readonly targetDeviceId: string;
+    readonly checkpointTargetId: string;
+    readonly checkpointEnvelopeDigest: string;
+  }): string;
+  signPrepare(intent: BackupRecoveryDisasterPrepareIntent<Envelope>, root: Root): Prepare;
+  readCheckpoint(target: Target, checkpointId: string): Promise<Checkpoint>;
+}
+
+export interface BackupRecoveryDisasterAdmissionApplication<Root, Checkpoint, Prepare> {
+  admit(
+    selection: BackupRecoveryDisasterAdmissionSelection,
+  ): Promise<BackupRecoveryDisasterAdmission<Root, Checkpoint, Prepare>>;
+}
+
+interface BackupRecoveryDisasterCandidateRecord<Target, Envelope> {
+  readonly public: BackupRecoveryDisasterAdmissionCandidate;
+  readonly target: Target;
+  readonly entry: BackupRecoveryDisasterAdmissionInventoryEntry<Envelope>;
+}
+
+/** Sole owner of disaster-recovery source, candidate and pre-install admission decisions. */
+export class BackupRecoveryDisasterAdmissionApplicationService<
+  Target,
+  Envelope,
+  Root,
+  Checkpoint,
+  Prepare,
+> implements BackupRecoveryDisasterAdmissionApplication<Root, Checkpoint, Prepare> {
+  constructor(
+    private readonly context: BackupRecoveryDisasterAdmissionContext,
+    private readonly mechanism: BackupRecoveryDisasterAdmissionMechanismPort<
+      Target,
+      Envelope,
+      Root,
+      Checkpoint,
+      Prepare
+    >,
+  ) {}
+
+  async admit(
+    selection: BackupRecoveryDisasterAdmissionSelection,
+  ): Promise<BackupRecoveryDisasterAdmission<Root, Checkpoint, Prepare>> {
+    const context = freezeDisasterAdmissionContext(this.context);
+    if (context.currentDeviceId === context.issuerDeviceId) {
+      throw new BackupRecoveryDisasterAdmissionError("current-issuer");
+    }
+    const targetSelection = this.#resolveTarget(selection, context);
+    const requestId = this.mechanism.deriveDiscoveryRequestId({
+      homeId: context.homeId,
+      targetDeviceId: context.currentDeviceId,
+    });
+    if (!/^recover:[a-f0-9]{64}$/u.test(requestId)) {
+      throw new BackupRecoveryDisasterAdmissionError(
+        "invalid-discovery-request-id",
+        "type-error",
+      );
+    }
+    return this.mechanism.withInventorySources(targetSelection, async (sources) => {
+      const candidates = await this.#discover(requestId, sources);
+      this.mechanism.presentCandidates(candidates.map((candidate) => candidate.public));
+      const selected = this.#select(candidates, selection.backupNumber);
+      const recovered = await this.mechanism.readRecoveryRoot();
+      const rootKeyId = requireText(recovered.identity.rootKeyId, "Recovery root key id");
+      const backupKeyId = requireText(recovered.identity.backupKeyId, "Recovery backup key id");
+      if (
+        selected.entry.recipientKeyId !== backupKeyId ||
+        selected.entry.envelopeIdentity.recipientKeyId !== backupKeyId
+      ) {
+        throw new BackupRecoveryDisasterAdmissionError("recovery-package-mismatch");
+      }
+      const transferInput = Object.freeze({
+        requestId,
+        targetDeviceId: context.currentDeviceId,
+        checkpointTargetId: selected.entry.targetId,
+        checkpointEnvelopeDigest: selected.entry.envelopeIdentity.digest,
+      });
+      const transferId = this.mechanism.deriveTransferId(transferInput);
+      if (!/^xfer-[0-9A-HJKMNP-TV-Z]{26}$/u.test(transferId)) {
+        throw new BackupRecoveryDisasterAdmissionError("invalid-transfer-id", "type-error");
+      }
+      const intent = Object.freeze({
+        v: 1 as const,
+        op: "prepare" as const,
+        requestId,
+        transferId,
+        targetDeviceId: context.currentDeviceId,
+        checkpointTargetId: selected.entry.targetId,
+        recoveryRoot: Object.freeze({
+          homeId: context.homeId,
+          rootKeyId,
+          recipientKeyId: backupKeyId,
+        }),
+        checkpointEnvelope: selected.entry.envelope,
+      });
+      const prepare = this.mechanism.signPrepare(intent, recovered.root);
+      const checkpoint = await this.mechanism.readCheckpoint(
+        selected.target,
+        selected.entry.checkpointId,
+      );
+      return Object.freeze({
+        requestId,
+        transferId,
+        checkpointTargetId: selected.entry.targetId,
+        checkpointEnvelopeDigest: selected.entry.envelopeIdentity.digest,
+        recoveryRoot: recovered.root,
+        checkpoint,
+        prepare,
+      });
+    });
+  }
+
+  #resolveTarget(
+    selection: BackupRecoveryDisasterAdmissionSelection,
+    context: BackupRecoveryDisasterAdmissionContext,
+  ): BackupRecoveryDisasterAdmissionTargetSelection {
+    validateBackupRecoveryDisasterAdmissionSelection(selection);
+    if (selection.directory) {
+      return Object.freeze({
+        kind: "directory" as const,
+        directory: requireText(selection.directory, "Recovery backup directory"),
+      });
+    }
+    const named = selection.pairedDeviceName === undefined
+      ? []
+      : context.pairedDevices.filter((device) =>
+          device.active && !device.current && device.displayName === selection.pairedDeviceName);
+    if (selection.pairedDeviceName !== undefined && named.length !== 1) {
+      throw new BackupRecoveryDisasterAdmissionError("paired-device-name-not-unique");
+    }
+    const deviceId = named[0]?.deviceId ?? selection.pairedDeviceId ??
+      context.configuredPairedDeviceId;
+    if (!deviceId) {
+      throw new BackupRecoveryDisasterAdmissionError("target-selection-required");
+    }
+    const device = context.pairedDevices.find((candidate) =>
+      candidate.deviceId === deviceId && candidate.active);
+    if (!device || device.current) {
+      throw new BackupRecoveryDisasterAdmissionError("paired-device-ineligible");
+    }
+    if (!context.recoveryBackupRecipientKeyId) {
+      throw new BackupRecoveryDisasterAdmissionError("recovery-root-missing");
+    }
+    return Object.freeze({
+      kind: "paired-device" as const,
+      deviceId,
+      displayName: device.displayName,
+      recipientKeyId: context.recoveryBackupRecipientKeyId,
+    });
+  }
+
+  async #discover(
+    requestId: string,
+    sources: readonly BackupRecoveryDisasterAdmissionInventorySource<Target>[],
+  ): Promise<readonly BackupRecoveryDisasterCandidateRecord<Target, Envelope>[]> {
+    const records: Array<{
+      readonly displayName: string;
+      readonly target: Target;
+      readonly entry: BackupRecoveryDisasterAdmissionInventoryEntry<Envelope>;
+    }> = [];
+    for (const source of sources) {
+      const displayName = normalizeDisasterCandidateLocation(source.displayName);
+      for (const entry of await this.mechanism.inventory(source.target, requestId)) {
+        const identity = entry.envelopeIdentity;
+        if (
+          !entry.checkpointId ||
+          !entry.targetId ||
+          entry.checkpointId !== identity.checkpointId ||
+          !identity.recipientKeyId ||
+          !identity.digest ||
+          !isCanonicalTime(identity.createdAt)
+        ) {
+          throw new BackupRecoveryDisasterAdmissionError(
+            "invalid-candidate-envelope",
+            "type-error",
+          );
+        }
+        records.push({ displayName, target: source.target, entry });
+      }
+    }
+    return Object.freeze(records
+      .sort((left, right) =>
+        right.entry.envelopeIdentity.createdAt.localeCompare(left.entry.envelopeIdentity.createdAt) ||
+        left.entry.targetId.localeCompare(right.entry.targetId) ||
+        left.entry.checkpointId.localeCompare(right.entry.checkpointId))
+      .map((record, index) => Object.freeze({
+        target: record.target,
+        entry: record.entry,
+        public: Object.freeze({
+          number: index + 1,
+          location: record.displayName,
+          backedUpAt: record.entry.envelopeIdentity.createdAt,
+          state: "pending-verification" as const,
+        }),
+      })));
+  }
+
+  #select(
+    candidates: readonly BackupRecoveryDisasterCandidateRecord<Target, Envelope>[],
+    number?: number,
+  ): BackupRecoveryDisasterCandidateRecord<Target, Envelope> {
+    if (candidates.length === 0) {
+      throw new BackupRecoveryDisasterAdmissionError("candidate-not-found");
+    }
+    if (number === undefined) {
+      if (candidates.length !== 1) {
+        throw new BackupRecoveryDisasterAdmissionError("candidate-selection-required");
+      }
+      return candidates[0]!;
+    }
+    if (!Number.isSafeInteger(number) || number < 1 || number > candidates.length) {
+      throw new BackupRecoveryDisasterAdmissionError(
+        "invalid-candidate-number",
+        "type-error",
+      );
+    }
+    return candidates[number - 1]!;
+  }
+}
+
+function freezeDisasterAdmissionContext(
+  value: BackupRecoveryDisasterAdmissionContext,
+): BackupRecoveryDisasterAdmissionContext {
+  return Object.freeze({
+    homeId: requireText(value.homeId, "Recovery home id"),
+    currentDeviceId: requireText(value.currentDeviceId, "Recovery target device id"),
+    issuerDeviceId: requireText(value.issuerDeviceId, "Recovery issuer device id"),
+    pairedDevices: Object.freeze(value.pairedDevices.map((device) => Object.freeze({
+      deviceId: requireText(device.deviceId, "Paired device id"),
+      displayName: requireText(device.displayName, "Paired device display name"),
+      active: device.active,
+      current: device.current,
+    }))),
+    ...(value.configuredPairedDeviceId === undefined
+      ? {}
+      : { configuredPairedDeviceId: requireText(
+          value.configuredPairedDeviceId,
+          "Configured recovery device id",
+        ) }),
+    ...(value.recoveryBackupRecipientKeyId === undefined
+      ? {}
+      : { recoveryBackupRecipientKeyId: requireText(
+          value.recoveryBackupRecipientKeyId,
+          "Recovery backup recipient key id",
+        ) }),
+  });
+}
+
+function normalizeDisasterCandidateLocation(value: string): string {
+  const normalized = value.trim();
+  if (normalized.length === 0 || normalized.length > 120 || /[\r\n\0]/u.test(normalized)) {
+    throw new BackupRecoveryDisasterAdmissionError(
+      "invalid-candidate-location",
+      "type-error",
+    );
+  }
+  return normalized;
+}
+
+function isCanonicalTime(value: string): boolean {
+  try {
+    return new Date(value).toISOString() === value;
+  } catch {
+    return false;
+  }
+}
+
 export interface BackupRecoveryCurrentRemovalStatus {
   readonly state: "not-configured" | "pending-verification" | "recoverable" | "unavailable";
   readonly fullBackupReady: boolean;

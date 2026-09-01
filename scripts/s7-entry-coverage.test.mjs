@@ -1122,6 +1122,43 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
+      "packages/core/src/backup-recovery/application.ts",
+      (text) => text.replace(
+        "const transferId = this.mechanism.deriveTransferId(transferInput)",
+        'const transferId = "xfer-latest"',
+      ),
+    )).join("\n"),
+    /candidate discovery and admission must have one domain application owner/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/disaster-recovery-command.ts",
+      (text) => `${text}\nclass BackupRecoveryDisasterAdmissionApplicationService {}`,
+    )).join("\n"),
+    /candidate discovery and admission must have one domain application owner/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly([
+      ...records,
+      {
+        relative: "packages/cli/src/serve/disaster-recovery-inventory.ts",
+        text: "export function selectDisasterRecoveryCandidate() {}",
+      },
+    ]).join("\n"),
+    /candidate discovery and admission must have one domain application owner/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/disaster-recovery-command.ts",
+      (text) => text.replace(
+        "return await application.admit(selection)",
+        "return await selectDisasterRecoveryCandidate(selection)",
+      ),
+    )).join("\n"),
+    /candidate discovery and admission must have one domain application owner/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
       "packages/cli/src/serve/mesh-runtime-assembly.ts",
       (text) => text.replace(
         "registerDisasterRecoveryTrustEvidenceService(",
@@ -1154,8 +1191,8 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     inspectRecoveryBackupAssembly(mutate(
       "packages/cli/src/serve/disaster-recovery-command.ts",
       (text) => text.replace(
-        "openInventoryTargets(context, selection, signal)",
-        "openInventoryTargets(context, selection)",
+        "openInventoryTargets(context, targetSelection, signal)",
+        "openInventoryTargets(context, targetSelection)",
       ),
     )).join("\n"),
     /pre-commit signal or authenticated candidate terminal order drifted/,
