@@ -292,17 +292,23 @@ describe("Device Administration command Product API input", () => {
           }),
         },
         currentRemovalMigrationTargets: { list: async () => [] },
-        currentRemovalRecoveryBackup: {
-          read: async () => ({
+        currentRemovalRecovery: {
+          readiness: async () => ({
             state: "not-configured",
             fullBackupReady: false,
           }),
+          begin: uninstall.beginRecoveryBackup,
+          confirm: uninstall.continue,
+          resumeActive: async () => [],
         },
         currentRemovalMigration: {
           begin: uninstall.beginMigration,
           resumeActive: async () => [],
         },
-        currentDeviceRemoval: uninstall,
+        currentDeviceRemoval: {
+          abort: uninstall.abort,
+          read: uninstall.read,
+        },
       }),
     });
     ctx.connection.loopback = true;

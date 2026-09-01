@@ -2,7 +2,6 @@ import {
   createDeviceAdministrationProductApiContribution,
   DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET,
   DeviceAdministrationApplicationService,
-  type DeviceAdministrationCurrentRemovalMechanismPort,
 } from "@zhixing/core/device-administration/application";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import { describe, expect, it, vi } from "vitest";
@@ -17,9 +16,7 @@ import {
 } from "../server.js";
 
 function createProductApi(
-  currentDeviceRemoval?: DeviceAdministrationCurrentRemovalMechanismPort & {
-    readonly beginMigration: ReturnType<typeof vi.fn>;
-  },
+  currentDeviceRemoval?: ReturnType<typeof currentRemovalPort>,
 ): ProductApiDispatcher {
   const application = new DeviceAdministrationApplicationService({
     relationships: { list: async () => [] },
@@ -78,20 +75,26 @@ function createProductApi(
               ready: true,
             }],
           },
-          currentRemovalRecoveryBackup: {
-            read: async () => ({
+          currentRemovalRecovery: {
+            readiness: async () => ({
               state: "recoverable" as const,
               fullBackupReady: true,
               checkpointId: "checkpoint-1",
               targetId: "backup-target",
               upToLsn: 42,
             }),
+            begin: currentDeviceRemoval.beginRecoveryBackup,
+            confirm: currentDeviceRemoval.continue,
+            resumeActive: async () => [],
           },
           currentRemovalMigration: {
             begin: currentDeviceRemoval.beginMigration,
             resumeActive: async () => [],
           },
-          currentDeviceRemoval,
+          currentDeviceRemoval: {
+            abort: currentDeviceRemoval.abort,
+            read: currentDeviceRemoval.read,
+          },
         }
       : {}),
   });
@@ -116,7 +119,7 @@ function context(input: {
   };
 }
 
-function currentRemovalPort(): DeviceAdministrationCurrentRemovalMechanismPort & {
+function currentRemovalPort(): {
   readonly beginMigration: ReturnType<typeof vi.fn>;
   readonly beginRecoveryBackup: ReturnType<typeof vi.fn>;
   readonly continue: ReturnType<typeof vi.fn>;
@@ -208,7 +211,6 @@ describe("anchor uninstall local lifecycle RPC", () => {
     });
     expect(port.continue).toHaveBeenCalledWith({
       operationId: "uninstall-local",
-      confirmBackup: true,
       recoveryPackage: "recovery-package",
     });
     expect(port.abort).toHaveBeenCalledWith({ operationId: "uninstall-local" });

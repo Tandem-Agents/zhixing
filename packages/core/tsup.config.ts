@@ -33,6 +33,7 @@ export default defineConfig({
     "src/delivery/application.ts",
     "src/delivery/channel-effect.ts",
     "src/device-administration/application.ts",
+    "src/backup-recovery/application.ts",
     "src/environment/index.ts",
     "src/environment/workspace-administration.ts",
     "src/test-support/s7-durable.ts",

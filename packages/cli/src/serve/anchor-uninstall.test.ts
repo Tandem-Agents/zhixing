@@ -26,7 +26,9 @@ import {
 } from "@zhixing/core/protocol";
 import {
   DeviceAdministrationCurrentRemovalMigrationApplicationService,
+  DeviceAdministrationCurrentRemovalRecoveryApplicationService,
 } from "@zhixing/core/device-administration/application";
+import { BackupRecoveryCurrentRemovalApplicationService } from "@zhixing/core/backup-recovery/application";
 import { DeviceLifecycleJournal } from "@zhixing/core/authority";
 
 describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
@@ -40,10 +42,7 @@ describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
     const acceptedWork = acceptedWorkPorts(effects);
     const coordinator = new AnchorUninstallCoordinator({
       ...fixture.base,
-      closeAdmission,
       releaseAdmission: async () => undefined,
-      cleanupRecovery: async () => [],
-      onRetired: async () => undefined,
     });
     const journal = new DeviceLifecycleJournal(
       fixture.store.authorityLog(),
@@ -293,17 +292,118 @@ describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
     const onRetired = vi.fn(async () => undefined);
     const coordinator = new AnchorUninstallCoordinator({
       ...fixture.base,
-      checkpointOwner,
-      closeAdmission: async () => undefined,
       releaseAdmission: async () => undefined,
-      recoveryAcceptedWork: {
-        ports: acceptedWork,
-        artifactStore: fixture.store.artifactStore(),
+    });
+    const journal = new DeviceLifecycleJournal(
+      fixture.store.authorityLog(),
+      fixture.base.verifier,
+    );
+    const backup = new BackupRecoveryCurrentRemovalApplicationService({
+      hasCheckpointOwner: () => true,
+      readStatus: () => checkpointOwner.status(),
+      readContext: async () => {
+        const current = await fixture.store.loadTrustRecord();
+        if (!current?.recoveryRootPublicKey || !current.recoveryBackupPublicKey) {
+          throw new Error("expected current recovery root");
+        }
+        return {
+          homeId: current.homeId,
+          anchorEpoch: 1,
+          trustHeadDigest: current.chainHead.eventDigest,
+          recoveryRootPublicKey: current.recoveryRootPublicKey,
+          recoveryBackupPublicKey: current.recoveryBackupPublicKey,
+        };
+      },
+      decodeCurrentPackage: (value: string) => {
+        const decoded = decodeRecoveryPackage(value);
+        if (decoded.version !== 2) throw new Error("expected current recovery package");
+        return { package: decoded.root, identity: decoded.root.publicIdentity() };
+      },
+      bindingDigest: (input) =>
+        protocolDigest("AnchorUninstallCheckpointGeneration", 1, input),
+      forceCheckpoint: async (requestId: string) => {
+        const checkpoint = await checkpointOwner.force(requestId);
+        return {
+          checkpoint,
+          checkpointId: checkpoint.envelope.checkpointId,
+          envelopeDigest: checkpoint.envelope.digest,
+          upToLsn: checkpoint.envelope.manifest.upToLsn,
+        };
+      },
+      verifyCheckpoint: async ({ checkpoint, recoveryPackage }) => {
+        const verification = await checkpointOwner.verify(
+          checkpoint.envelope.checkpointId,
+          recoveryPackage,
+        );
+        return {
+          targetId: verification.targetId,
+          checkpointId: verification.checkpointId,
+          envelopeDigest: verification.envelopeDigest,
+          evidence: {
+            kind: "checkpoint" as const,
+            digest: protocolDigest("RecoveryCheckpointVerification", 1, verification),
+          },
+        };
+      },
+    });
+    const recovery = new DeviceAdministrationCurrentRemovalRecoveryApplicationService<
+      DeviceLifecycleEvidenceRef
+    >({
+      backup,
+      lifecycle: recoveryLifecyclePort(coordinator),
+      effects: {
         closeAdmission: async (operationId) => {
+          const operation = await journal.state(operationId);
+          if (!operation || operation.identity.kind !== "anchor-uninstall") {
+            throw new Error("expected recovery lifecycle operation");
+          }
+          return {
+            kind: "accepted-work",
+            digest: protocolDigest("AnchorUninstallAdmission", 1, operation.identity),
+          };
+        },
+        closeAcceptedWorkAdmission: async (operationId) => {
           effects.push(`close:${operationId}`);
         },
-        onFrozen: async (snapshot) => {
+        freezeAcceptedWork: async (operationId) =>
+          (await freezeHostStopAcceptedWork(
+            operationId,
+            acceptedWork,
+            fixture.store.artifactStore(),
+          )).evidence,
+        restoreAcceptedWork: async (operationId) => {
+          const operation = await journal.state(operationId);
+          if (!operation) throw new Error("expected recovery lifecycle operation");
+          const snapshot = await loadHostStopAcceptedWork(
+            operation,
+            fixture.store.artifactStore(),
+          );
           effects.push(`frozen:${snapshot.operationId}`);
+        },
+        settleAcceptedWork: async ({ operationId, strategy, timeoutMs }) => {
+          const operation = await journal.state(operationId);
+          if (!operation) throw new Error("expected recovery lifecycle operation");
+          const snapshot = await loadHostStopAcceptedWork(
+            operation,
+            fixture.store.artifactStore(),
+          );
+          await settleHostStopAcceptedWork({
+            operationId,
+            strategy,
+            timeoutMs,
+            snapshot,
+            ports: acceptedWork,
+          });
+          const artifact = operation.evidence.find((item) =>
+            item.kind === "accepted-work" && item.artifact);
+          if (!artifact) throw new Error("expected accepted-work artifact");
+          return {
+            kind: "accepted-work",
+            digest: protocolDigest("AnchorUninstallAcceptedWorkSettlement", 1, {
+              operationId,
+              artifactDigest: artifact.digest,
+            }),
+          };
         },
         flushDurableState: async () => {
           effects.push("flush");
@@ -326,12 +426,12 @@ describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
         settlePhysicalSteps: async () => {
           effects.push("physical");
         },
+        cleanup: cleanupRecovery,
+        onRetired,
       },
-      cleanupRecovery,
-      onRetired,
     });
 
-    await expect(coordinator.beginRecoveryBackup({
+    await expect(recovery.begin({
       requestId: "request-backup",
       operationId: "uninstall-backup",
       recoveryPackage: encodeRecoveryPackage(root),
@@ -340,8 +440,21 @@ describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
       path: "recovery-backup",
       phase: "checkpoint-verified",
     });
+    await expect(recovery.begin({
+      requestId: "request-backup",
+      operationId: "uninstall-backup",
+      recoveryPackage: encodeRecoveryPackage(root),
+    })).resolves.toEqual({
+      kind: "current-device-removal",
+      path: "recovery-backup",
+      phase: "checkpoint-verified",
+    });
+    expect(verify).toHaveBeenCalledTimes(1);
     expect(cleanupRecovery).not.toHaveBeenCalled();
-    await expect(coordinator.confirmRecoveryBackup("uninstall-backup", encodeRecoveryPackage(root)))
+    await expect(recovery.confirm({
+      operationId: "uninstall-backup",
+      recoveryPackage: encodeRecoveryPackage(root),
+    }))
       .resolves.toEqual({
         kind: "current-device-removal",
         path: "recovery-backup",
@@ -373,6 +486,17 @@ describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
       ]),
     });
     expect(finalUpToLsn).toBeGreaterThanOrEqual(flushed!.lsn);
+    expect(cleanupRecovery).toHaveBeenCalledTimes(1);
+    expect(onRetired).toHaveBeenCalledTimes(1);
+    await expect(recovery.confirm({
+      operationId: "uninstall-backup",
+      recoveryPackage: encodeRecoveryPackage(root),
+    })).resolves.toEqual({
+      kind: "current-device-removal",
+      path: "recovery-backup",
+      phase: "terminal",
+    });
+    expect(verify).toHaveBeenCalledTimes(2);
     expect(cleanupRecovery).toHaveBeenCalledTimes(1);
     expect(onRetired).toHaveBeenCalledTimes(1);
     await expect(coordinator.readLifecycle("uninstall-backup")).resolves.toEqual({
@@ -413,10 +537,7 @@ describe("anchor uninstall coordinator", { timeout: 30_000 }, () => {
     const releaseAdmission = vi.fn(async () => undefined);
     const coordinator = new AnchorUninstallCoordinator({
       ...fixture.base,
-      closeAdmission: async () => undefined,
       releaseAdmission,
-      cleanupRecovery: async () => [],
-      onRetired: async () => undefined,
     });
 
     await expect(coordinator.readLifecycle("uninstall-missing")).resolves.toBeUndefined();
@@ -465,6 +586,34 @@ function migrationLifecyclePort(coordinator: AnchorUninstallCoordinator) {
       readonly evidence: readonly DeviceLifecycleEvidenceRef[];
     }) => coordinator.advanceMigration(input),
     terminal: (operationId: string) => coordinator.terminalMigration(operationId),
+  };
+}
+
+function recoveryLifecyclePort(coordinator: AnchorUninstallCoordinator) {
+  return {
+    assertBeginAdmission: () => coordinator.assertRecoveryBeginAdmission(),
+    assertCurrentAuthority: () => coordinator.assertCurrentAuthority(),
+    accept: (input: {
+      readonly requestId: string;
+      readonly operationId: string;
+      readonly binding: {
+        readonly homeId: string;
+        readonly anchorEpoch: number;
+        readonly trustHeadDigest: string;
+        readonly checkpointTargetId: string;
+        readonly checkpointGeneration: string;
+      };
+    }) => coordinator.acceptRecovery(input),
+    state: (operationId: string) => coordinator.recoveryState(operationId),
+    active: () => coordinator.activeRecoveries(),
+    advance: (input: Parameters<AnchorUninstallCoordinator["advanceRecovery"]>[0]) =>
+      coordinator.advanceRecovery(input),
+    commitRetirement: (
+      input: Parameters<AnchorUninstallCoordinator["commitRecoveryRetirement"]>[0],
+    ) => coordinator.commitRecoveryRetirement(input),
+    phaseLsn: (input: Parameters<AnchorUninstallCoordinator["recoveryPhaseLsn"]>[0]) =>
+      coordinator.recoveryPhaseLsn(input),
+    terminal: (operationId: string) => coordinator.terminalRecovery(operationId),
   };
 }
 

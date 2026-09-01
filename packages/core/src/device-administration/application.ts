@@ -6,6 +6,12 @@ import {
   defineProductApiQuery,
   type ProductApiContribution,
 } from "../product-api/catalog.js";
+import type {
+  BackupRecoveryCurrentRemovalApplication,
+  BackupRecoveryCurrentRemovalBinding,
+  BackupRecoveryCurrentRemovalPermit,
+  BackupRecoveryCurrentRemovalStatus,
+} from "../backup-recovery/application.js";
 
 export interface DeviceAdministrationRelationship {
   readonly displayName: string;
@@ -318,30 +324,8 @@ export interface DeviceAdministrationCurrentRemovalMigrationTargetReadPort {
   list(): Promise<readonly DeviceAdministrationCurrentRemovalMigrationTarget[]>;
 }
 
-export interface DeviceAdministrationCurrentRemovalRecoveryBackupStatus {
-  readonly state: "not-configured" | "pending-verification" | "recoverable" | "unavailable";
-  readonly fullBackupReady: boolean;
-  readonly checkpointId?: string;
-  readonly targetId?: string;
-  readonly upToLsn?: number;
-}
-
-export interface DeviceAdministrationCurrentRemovalRecoveryBackupReadPort {
-  read(): Promise<DeviceAdministrationCurrentRemovalRecoveryBackupStatus>;
-}
-
 /** Temporary one-way mechanism bridge to the existing durable uninstall coordinator. */
 export interface DeviceAdministrationCurrentRemovalMechanismPort {
-  beginRecoveryBackup(input: {
-    readonly requestId: string;
-    readonly operationId: string;
-    readonly recoveryPackage: string;
-  }): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot>;
-  continue(input: {
-    readonly operationId: string;
-    readonly confirmBackup: true;
-    readonly recoveryPackage: string;
-  }): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot>;
   abort(input: {
     readonly operationId: string;
   }): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot>;
@@ -507,6 +491,269 @@ export class DeviceAdministrationCurrentRemovalMigrationApplicationService<Evide
   }
 }
 
+export type DeviceAdministrationCurrentRemovalRecoveryPhase =
+  | "accepted"
+  | "gate-frozen"
+  | "checkpoint-verified"
+  | "retirement-decided"
+  | "gate-closed"
+  | "work-settled"
+  | "flushed"
+  | "final-checkpoint-verified"
+  | "cleanup-complete"
+  | "terminal"
+  | "aborted";
+
+export interface DeviceAdministrationCurrentRemovalRecoveryLifecycleOperation {
+  readonly kind: "current-device-removal";
+  readonly path: "recovery-backup";
+  readonly requestId: string;
+  readonly operationId: string;
+  readonly binding: BackupRecoveryCurrentRemovalBinding;
+  readonly phase: DeviceAdministrationCurrentRemovalRecoveryPhase;
+}
+
+/** Serialized lifecycle and atomic retirement primitives; no method chooses the next phase. */
+export interface DeviceAdministrationCurrentRemovalRecoveryLifecyclePort<Evidence> {
+  assertBeginAdmission(): Promise<void>;
+  assertCurrentAuthority(): Promise<void>;
+  accept(input: {
+    readonly requestId: string;
+    readonly operationId: string;
+    readonly binding: BackupRecoveryCurrentRemovalBinding;
+  }): Promise<DeviceAdministrationCurrentRemovalRecoveryLifecycleOperation>;
+  state(
+    operationId: string,
+  ): Promise<DeviceAdministrationCurrentRemovalRecoveryLifecycleOperation | undefined>;
+  active(): Promise<readonly DeviceAdministrationCurrentRemovalRecoveryLifecycleOperation[]>;
+  advance(input: {
+    readonly operationId: string;
+    readonly phase:
+      | "gate-frozen"
+      | "checkpoint-verified"
+      | "gate-closed"
+      | "work-settled"
+      | "flushed"
+      | "final-checkpoint-verified"
+      | "cleanup-complete";
+    readonly evidence: readonly Evidence[];
+  }): Promise<DeviceAdministrationCurrentRemovalRecoveryLifecycleOperation>;
+  commitRetirement(input: {
+    readonly operationId: string;
+    readonly acceptedWork: Evidence;
+  }): Promise<DeviceAdministrationCurrentRemovalRecoveryLifecycleOperation>;
+  phaseLsn(input: {
+    readonly operationId: string;
+    readonly phase: "flushed";
+  }): Promise<number>;
+  terminal(
+    operationId: string,
+  ): Promise<DeviceAdministrationCurrentRemovalRecoveryLifecycleOperation>;
+}
+
+/** Host/Correctness effects. Evidence is opaque and phase progression stays in the application. */
+export interface DeviceAdministrationCurrentRemovalRecoveryEffectPort<Evidence> {
+  closeAdmission(operationId: string): Promise<Evidence>;
+  closeAcceptedWorkAdmission(operationId: string): Promise<void>;
+  freezeAcceptedWork(operationId: string): Promise<Evidence>;
+  restoreAcceptedWork(operationId: string): Promise<void>;
+  settleAcceptedWork(input: {
+    readonly operationId: string;
+    readonly strategy: "immediate";
+    readonly timeoutMs: 30_000;
+  }): Promise<Evidence>;
+  flushDurableState(): Promise<readonly Evidence[]>;
+  settlePhysicalSteps(): Promise<void>;
+  cleanup(operationId: string): Promise<readonly Evidence[]>;
+  onRetired(operationId: string): void | Promise<void>;
+}
+
+export interface DeviceAdministrationCurrentRemovalRecoveryApplication {
+  readiness(): Promise<BackupRecoveryCurrentRemovalStatus>;
+  begin(input: {
+    readonly requestId: string;
+    readonly operationId: string;
+    readonly recoveryPackage: string;
+  }): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot>;
+  confirm(input: {
+    readonly operationId: string;
+    readonly recoveryPackage: string;
+  }): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot>;
+  resumeActive(): Promise<readonly DeviceAdministrationCurrentRemovalLifecycleSnapshot[]>;
+}
+
+/** Sole owner of recovery-backup removal phase progression and terminal ordering. */
+export class DeviceAdministrationCurrentRemovalRecoveryApplicationService<Evidence>
+  implements DeviceAdministrationCurrentRemovalRecoveryApplication
+{
+  constructor(private readonly options: {
+    readonly backup: BackupRecoveryCurrentRemovalApplication<Evidence>;
+    readonly lifecycle: DeviceAdministrationCurrentRemovalRecoveryLifecyclePort<Evidence>;
+    readonly effects: DeviceAdministrationCurrentRemovalRecoveryEffectPort<Evidence>;
+  }) {}
+
+  readiness(): Promise<BackupRecoveryCurrentRemovalStatus> {
+    return this.options.backup.readiness();
+  }
+
+  async begin(input: {
+    readonly requestId: string;
+    readonly operationId: string;
+    readonly recoveryPackage: string;
+  }): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot> {
+    await this.options.lifecycle.assertBeginAdmission();
+    const permit = await this.options.backup.prepareBegin({
+      recoveryPackage: input.recoveryPackage,
+    });
+    return this.#drive(
+      await this.options.lifecycle.accept({
+        requestId: input.requestId,
+        operationId: input.operationId,
+        binding: permit.binding,
+      }),
+      { confirmed: false, permit, resume: false },
+    );
+  }
+
+  async confirm(input: {
+    readonly operationId: string;
+    readonly recoveryPackage: string;
+  }): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot> {
+    const operation = await this.options.lifecycle.state(input.operationId);
+    if (!operation) throw new Error("Recovery-backup uninstall operation is unknown");
+    await this.options.lifecycle.assertCurrentAuthority();
+    const permit = await this.options.backup.prepareConfirm({
+      recoveryPackage: input.recoveryPackage,
+      binding: operation.binding,
+    });
+    return this.#drive(operation, { confirmed: true, permit, resume: false });
+  }
+
+  async resumeActive(): Promise<readonly DeviceAdministrationCurrentRemovalLifecycleSnapshot[]> {
+    const results: DeviceAdministrationCurrentRemovalLifecycleSnapshot[] = [];
+    for (const operation of await this.options.lifecycle.active()) {
+      results.push(await this.#drive(operation, { confirmed: false, resume: true }));
+    }
+    return Object.freeze(results);
+  }
+
+  async #drive(
+    initial: DeviceAdministrationCurrentRemovalRecoveryLifecycleOperation,
+    input: {
+      readonly confirmed: boolean;
+      readonly permit?: BackupRecoveryCurrentRemovalPermit<Evidence>;
+      readonly resume: boolean;
+    },
+  ): Promise<DeviceAdministrationCurrentRemovalLifecycleSnapshot> {
+    let operation = assertCurrentRemovalRecoveryOperation(initial);
+    let acceptedWorkAdmissionClosed = false;
+    if (operation.phase === "accepted") {
+      const admissionEvidence = await this.options.effects.closeAdmission(operation.operationId);
+      operation = assertCurrentRemovalRecoveryOperation(await this.options.lifecycle.advance({
+        operationId: operation.operationId,
+        phase: "gate-frozen",
+        evidence: [admissionEvidence],
+      }));
+    } else if (input.resume && operation.phase !== "terminal" && operation.phase !== "aborted") {
+      await this.options.effects.closeAdmission(operation.operationId);
+    }
+    if (operation.phase === "gate-frozen") {
+      if (!input.permit) return currentRemovalRecoverySnapshot(operation);
+      const checkpointEvidence = await input.permit.verifyCheckpoint({
+        requestId: `${operation.operationId}:pre-retirement`,
+      });
+      operation = assertCurrentRemovalRecoveryOperation(await this.options.lifecycle.advance({
+        operationId: operation.operationId,
+        phase: "checkpoint-verified",
+        evidence: [checkpointEvidence],
+      }));
+    }
+    if (operation.phase === "checkpoint-verified" && !input.confirmed) {
+      return currentRemovalRecoverySnapshot(operation);
+    }
+    if (operation.phase === "checkpoint-verified") {
+      await this.options.effects.closeAcceptedWorkAdmission(operation.operationId);
+      acceptedWorkAdmissionClosed = true;
+      const acceptedWork = await this.options.effects.freezeAcceptedWork(operation.operationId);
+      operation = assertCurrentRemovalRecoveryOperation(
+        await this.options.lifecycle.commitRetirement({
+          operationId: operation.operationId,
+          acceptedWork,
+        }),
+      );
+    }
+    if (recoveryAcceptedWorkStarted(operation.phase)) {
+      if (!acceptedWorkAdmissionClosed) {
+        await this.options.effects.closeAcceptedWorkAdmission(operation.operationId);
+      }
+      await this.options.effects.restoreAcceptedWork(operation.operationId);
+    }
+    if (input.resume && operation.phase !== "final-checkpoint-verified" &&
+      operation.phase !== "cleanup-complete") {
+      return currentRemovalRecoverySnapshot(operation);
+    }
+    if (operation.phase === "retirement-decided") {
+      operation = assertCurrentRemovalRecoveryOperation(await this.options.lifecycle.advance({
+        operationId: operation.operationId,
+        phase: "gate-closed",
+        evidence: [],
+      }));
+    }
+    if (operation.phase === "gate-closed") {
+      const settlementEvidence = await this.options.effects.settleAcceptedWork({
+        operationId: operation.operationId,
+        strategy: "immediate",
+        timeoutMs: 30_000,
+      });
+      operation = assertCurrentRemovalRecoveryOperation(await this.options.lifecycle.advance({
+        operationId: operation.operationId,
+        phase: "work-settled",
+        evidence: [settlementEvidence],
+      }));
+    }
+    if (operation.phase === "work-settled") {
+      const evidence = await this.options.effects.flushDurableState();
+      await this.options.effects.settlePhysicalSteps();
+      operation = assertCurrentRemovalRecoveryOperation(await this.options.lifecycle.advance({
+        operationId: operation.operationId,
+        phase: "flushed",
+        evidence,
+      }));
+    }
+    if (operation.phase === "flushed") {
+      if (!input.permit) return currentRemovalRecoverySnapshot(operation);
+      const flushedLsn = await this.options.lifecycle.phaseLsn({
+        operationId: operation.operationId,
+        phase: "flushed",
+      });
+      const checkpointEvidence = await input.permit.verifyCheckpoint({
+        requestId: `${operation.operationId}:final-retirement`,
+        minimumUpToLsn: flushedLsn,
+      });
+      operation = assertCurrentRemovalRecoveryOperation(await this.options.lifecycle.advance({
+        operationId: operation.operationId,
+        phase: "final-checkpoint-verified",
+        evidence: [checkpointEvidence],
+      }));
+    }
+    if (operation.phase === "final-checkpoint-verified") {
+      const evidence = await this.options.effects.cleanup(operation.operationId);
+      operation = assertCurrentRemovalRecoveryOperation(await this.options.lifecycle.advance({
+        operationId: operation.operationId,
+        phase: "cleanup-complete",
+        evidence,
+      }));
+    }
+    if (operation.phase === "cleanup-complete") {
+      operation = assertCurrentRemovalRecoveryOperation(
+        await this.options.lifecycle.terminal(operation.operationId),
+      );
+      await this.options.effects.onRetired(operation.operationId);
+    }
+    return currentRemovalRecoverySnapshot(operation);
+  }
+}
+
 export class DeviceAdministrationApplicationError extends Error {
   readonly name = "DeviceAdministrationApplicationError";
 
@@ -565,8 +812,8 @@ export interface DeviceAdministrationApplicationOptions<Accepted, Abort> {
   readonly currentRemovalContext?: DeviceAdministrationCurrentRemovalContextReadPort;
   readonly currentRemovalMigrationTargets?:
     DeviceAdministrationCurrentRemovalMigrationTargetReadPort;
-  readonly currentRemovalRecoveryBackup?: DeviceAdministrationCurrentRemovalRecoveryBackupReadPort;
   readonly currentRemovalMigration?: DeviceAdministrationCurrentRemovalMigrationApplication;
+  readonly currentRemovalRecovery?: DeviceAdministrationCurrentRemovalRecoveryApplication;
   readonly currentDeviceRemoval?: DeviceAdministrationCurrentRemovalMechanismPort;
 }
 
@@ -906,7 +1153,7 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
         targetDeviceId: requireStableText(matches[0]!.deviceId, "Duty device id"),
       });
     } else if (command.path === "recovery-backup") {
-      lifecycle = await this.#currentDeviceRemoval().beginRecoveryBackup({
+      lifecycle = await this.#currentRemovalRecovery().begin({
         requestId,
         operationId,
         recoveryPackage: requireStableText(command.recoveryPackage, "Recovery package"),
@@ -923,8 +1170,8 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
   }> {
     const contextPort = this.options.currentRemovalContext;
     const migrationTargetsPort = this.options.currentRemovalMigrationTargets;
-    const recoveryBackupPort = this.options.currentRemovalRecoveryBackup;
-    if (!contextPort || !migrationTargetsPort || !recoveryBackupPort) {
+    const recovery = this.options.currentRemovalRecovery;
+    if (!contextPort || !migrationTargetsPort || !recovery) {
       throw this.#currentRemovalUnavailable();
     }
     const context = await contextPort.read();
@@ -944,7 +1191,7 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
         ready: target.ready,
       })),
     );
-    const backup = await recoveryBackupPort.read();
+    const backup = await recovery.readiness();
     return Object.freeze({
       preflight: freezeCurrentRemovalPreflight({
         currentDeviceName: context.currentDeviceName ?? "当前设备",
@@ -966,9 +1213,8 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
     if (command.confirmBackup !== true) {
       throw new TypeError("Recovery-backup uninstall requires explicit confirmation");
     }
-    return projectCurrentRemovalState(await this.#currentDeviceRemoval().continue({
+    return projectCurrentRemovalState(await this.#currentRemovalRecovery().confirm({
       operationId: requireStableText(command.operationId, "Uninstall operation id"),
-      confirmBackup: true,
       recoveryPackage: requireStableText(command.recoveryPackage, "Recovery package"),
     }));
   }
@@ -990,6 +1236,12 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
       throw this.#currentRemovalUnavailable();
     }
     return port;
+  }
+
+  #currentRemovalRecovery(): DeviceAdministrationCurrentRemovalRecoveryApplication {
+    const application = this.options.currentRemovalRecovery;
+    if (!application) throw this.#currentRemovalUnavailable();
+    return application;
   }
 
   #currentRemovalUnavailable(): DeviceAdministrationApplicationError {
@@ -1314,6 +1566,77 @@ function currentRemovalMigrationSnapshot(
     path: "migration",
     phase: operation.phase,
   });
+}
+
+function assertCurrentRemovalRecoveryOperation(
+  operation: DeviceAdministrationCurrentRemovalRecoveryLifecycleOperation,
+): DeviceAdministrationCurrentRemovalRecoveryLifecycleOperation {
+  if (operation.kind !== "current-device-removal" || operation.path !== "recovery-backup") {
+    throw new TypeError("Current removal recovery lifecycle identity is invalid");
+  }
+  switch (operation.phase) {
+    case "accepted":
+    case "gate-frozen":
+    case "checkpoint-verified":
+    case "retirement-decided":
+    case "gate-closed":
+    case "work-settled":
+    case "flushed":
+    case "final-checkpoint-verified":
+    case "cleanup-complete":
+    case "terminal":
+    case "aborted":
+      break;
+    default:
+      throw new TypeError("Current removal recovery lifecycle phase is invalid");
+  }
+  const binding = operation.binding;
+  if (!Number.isSafeInteger(binding.anchorEpoch) || binding.anchorEpoch < 0) {
+    throw new TypeError("Current removal recovery anchor epoch is invalid");
+  }
+  return Object.freeze({
+    kind: "current-device-removal",
+    path: "recovery-backup",
+    requestId: requireStableText(operation.requestId, "Uninstall request id"),
+    operationId: requireStableText(operation.operationId, "Uninstall operation id"),
+    binding: Object.freeze({
+      homeId: requireStableText(binding.homeId, "Recovery home id"),
+      anchorEpoch: binding.anchorEpoch,
+      trustHeadDigest: requireStableText(binding.trustHeadDigest, "Recovery trust head"),
+      checkpointTargetId: requireStableText(
+        binding.checkpointTargetId,
+        "Recovery checkpoint target id",
+      ),
+      checkpointGeneration: requireStableText(
+        binding.checkpointGeneration,
+        "Recovery checkpoint generation",
+      ),
+    }),
+    phase: operation.phase,
+  });
+}
+
+function currentRemovalRecoverySnapshot(
+  operation: DeviceAdministrationCurrentRemovalRecoveryLifecycleOperation,
+): DeviceAdministrationCurrentRemovalLifecycleSnapshot {
+  return Object.freeze({
+    kind: "current-device-removal",
+    path: "recovery-backup",
+    phase: operation.phase,
+  });
+}
+
+function recoveryAcceptedWorkStarted(
+  phase: DeviceAdministrationCurrentRemovalRecoveryPhase,
+): boolean {
+  return new Set<DeviceAdministrationCurrentRemovalRecoveryPhase>([
+    "retirement-decided",
+    "gate-closed",
+    "work-settled",
+    "flushed",
+    "final-checkpoint-verified",
+    "cleanup-complete",
+  ]).has(phase);
 }
 
 function assertCurrentRemovalLifecycle(

@@ -80,7 +80,9 @@ import {
   DEVICE_ADMINISTRATION_PRODUCT_API_EXACT_SET,
   DeviceAdministrationApplicationService,
   DeviceAdministrationCurrentRemovalMigrationApplicationService,
+  DeviceAdministrationCurrentRemovalRecoveryApplicationService,
 } from "@zhixing/core/device-administration/application";
+import { BackupRecoveryCurrentRemovalApplicationService } from "@zhixing/core/backup-recovery/application";
 import {
   defineProductApiExactSet,
   ProductApiDispatcher,
@@ -247,6 +249,10 @@ import {
   type HostStopAcceptedWorkSnapshot,
 } from "./host-stop-lifecycle.js";
 import { deleteDeviceKey, deleteDeviceKeyExact } from "@zhixing/mesh/device-key-store";
+import {
+  decodeRecoveryPackage,
+  requireCurrentRecoveryPackage,
+} from "@zhixing/mesh/recovery-package";
 import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
 import {
   createAnchorInternalStopPort,
@@ -1937,10 +1943,6 @@ async function runServerProcess(
         issuerKey: uninstallIssuerKey,
         verifier: ctx.authorityRuntime!.verifier,
         anchorEpoch: () => ctx.authorityRuntime!.anchorEpoch,
-        ...(ctx.authorityCheckpointOwner
-          ? { checkpointOwner: ctx.authorityCheckpointOwner }
-          : {}),
-        closeAdmission: closeAnchorUninstallAdmission,
         releaseAdmission: async (operationId) => {
           await ctx.deliveryStack?.lifecycle.release(operationId);
           await ctx.deliveryStack?.lifecycle.resume();
@@ -1949,9 +1951,159 @@ async function runServerProcess(
           ctx.inboundRouter?.resumeNewMessages();
           await ctx.channelConnections?.connectConfigured();
         },
-        recoveryAcceptedWork: anchorUninstallAcceptedWork,
-        cleanupRecovery: cleanupLocalDevice,
-        onRetired: finishLocalRetirement,
+      })
+    : undefined;
+  const currentRemovalRecoveryApplication = anchorUninstall
+    ? new DeviceAdministrationCurrentRemovalRecoveryApplicationService<
+        DeviceLifecycleEvidenceRef
+      >({
+        backup: new BackupRecoveryCurrentRemovalApplicationService({
+          hasCheckpointOwner: () => ctx.authorityCheckpointOwner !== undefined,
+          readStatus: () => ctx.authorityCheckpointOwner
+            ? ctx.authorityCheckpointOwner.status()
+            : Promise.resolve({
+                state: "not-configured" as const,
+                fullBackupReady: false,
+              }),
+          readContext: async () => {
+            const trust = await bootstrap.mesh.bootstrapStore.loadTrustRecord();
+            if (
+              !trust ||
+              !trust.recoveryRootPublicKey ||
+              !trust.recoveryBackupPublicKey
+            ) {
+              throw new Error("Current home recovery root is unavailable");
+            }
+            return Object.freeze({
+              homeId: trust.homeId,
+              anchorEpoch: ctx.authorityRuntime!.anchorEpoch,
+              trustHeadDigest: trust.chainHead.eventDigest,
+              recoveryRootPublicKey: trust.recoveryRootPublicKey,
+              recoveryBackupPublicKey: trust.recoveryBackupPublicKey,
+            });
+          },
+          decodeCurrentPackage: (value: string) => {
+            const decoded = requireCurrentRecoveryPackage(decodeRecoveryPackage(value));
+            return Object.freeze({
+              package: decoded.root,
+              identity: Object.freeze(decoded.root.publicIdentity()),
+            });
+          },
+          bindingDigest: (input) =>
+            protocolDigest("AnchorUninstallCheckpointGeneration", 1, input),
+          forceCheckpoint: async (requestId: string) => {
+            const checkpoint = await ctx.authorityCheckpointOwner!.force(requestId);
+            return Object.freeze({
+              checkpoint,
+              checkpointId: checkpoint.envelope.checkpointId,
+              envelopeDigest: checkpoint.envelope.digest,
+              upToLsn: checkpoint.envelope.manifest.upToLsn,
+            });
+          },
+          verifyCheckpoint: async ({ checkpoint, recoveryPackage }) => {
+            const verification = await ctx.authorityCheckpointOwner!.verify(
+              checkpoint.envelope.checkpointId,
+              recoveryPackage,
+            );
+            return Object.freeze({
+              targetId: verification.targetId,
+              checkpointId: verification.checkpointId,
+              envelopeDigest: verification.envelopeDigest,
+              evidence: Object.freeze({
+                kind: "checkpoint" as const,
+                digest: protocolDigest(
+                  "RecoveryCheckpointVerification",
+                  1,
+                  verification,
+                ),
+              }),
+            });
+          },
+        }),
+        lifecycle: {
+          assertBeginAdmission: () => anchorUninstall.assertRecoveryBeginAdmission(),
+          assertCurrentAuthority: () => anchorUninstall.assertCurrentAuthority(),
+          accept: (input) => anchorUninstall.acceptRecovery(input),
+          state: (operationId) => anchorUninstall.recoveryState(operationId),
+          active: () => anchorUninstall.activeRecoveries(),
+          advance: (input) => anchorUninstall.advanceRecovery(input),
+          commitRetirement: (input) => anchorUninstall.commitRecoveryRetirement(input),
+          phaseLsn: (input) => anchorUninstall.recoveryPhaseLsn(input),
+          terminal: (operationId) => anchorUninstall.terminalRecovery(operationId),
+        },
+        effects: {
+          closeAdmission: async (operationId) => {
+            await closeAnchorUninstallAdmission();
+            const operation = await lifecycleJournal.state(operationId);
+            if (!operation || operation.identity.kind !== "anchor-uninstall") {
+              throw new Error("Anchor uninstall recovery operation is unknown");
+            }
+            return Object.freeze({
+              kind: "accepted-work" as const,
+              digest: protocolDigest("AnchorUninstallAdmission", 1, operation.identity),
+            });
+          },
+          closeAcceptedWorkAdmission: anchorUninstallAcceptedWork.closeAdmission,
+          freezeAcceptedWork: async (operationId) =>
+            (await freezeHostStopAcceptedWork(
+              operationId,
+              anchorUninstallAcceptedWork.ports,
+              anchorUninstallAcceptedWork.artifactStore,
+            )).evidence,
+          restoreAcceptedWork: async (operationId) => {
+            const operation = await lifecycleJournal.state(operationId);
+            if (
+              !operation ||
+              operation.identity.kind !== "anchor-uninstall" ||
+              operation.identity.path.kind !== "recovery-backup"
+            ) {
+              throw new Error("Anchor uninstall recovery operation is unknown");
+            }
+            await anchorUninstallAcceptedWork.onFrozen(
+              await loadHostStopAcceptedWork(
+                operation,
+                anchorUninstallAcceptedWork.artifactStore,
+              ),
+            );
+          },
+          settleAcceptedWork: async ({ operationId, strategy, timeoutMs }) => {
+            const operation = await lifecycleJournal.state(operationId);
+            if (
+              !operation ||
+              operation.identity.kind !== "anchor-uninstall" ||
+              operation.identity.path.kind !== "recovery-backup"
+            ) {
+              throw new Error("Anchor uninstall recovery operation is unknown");
+            }
+            const snapshot = await loadHostStopAcceptedWork(
+              operation,
+              anchorUninstallAcceptedWork.artifactStore,
+            );
+            await settleHostStopAcceptedWork({
+              operationId,
+              strategy,
+              timeoutMs,
+              snapshot,
+              ports: anchorUninstallAcceptedWork.ports,
+            });
+            const artifact = operation.evidence.filter((item) =>
+              item.kind === "accepted-work" && item.artifact);
+            if (artifact.length !== 1) {
+              throw new Error("Anchor uninstall accepted-work artifact is missing or ambiguous");
+            }
+            return Object.freeze({
+              kind: "accepted-work" as const,
+              digest: protocolDigest("AnchorUninstallAcceptedWorkSettlement", 1, {
+                operationId,
+                artifactDigest: artifact[0]!.digest,
+              }),
+            });
+          },
+          flushDurableState: anchorUninstallAcceptedWork.flushDurableState,
+          settlePhysicalSteps: anchorUninstallAcceptedWork.settlePhysicalSteps,
+          cleanup: cleanupLocalDevice,
+          onRetired: finishLocalRetirement,
+        },
       })
     : undefined;
   const currentRemovalMigrationApplication = anchorUninstall && ctx.meshRuntime
@@ -2033,7 +2185,7 @@ async function runServerProcess(
       })
     : undefined;
   await currentRemovalMigrationApplication?.resumeActive();
-  await anchorUninstall?.resumeRecoveryActive();
+  await currentRemovalRecoveryApplication?.resumeActive();
   if (localRetirementCompletedBeforeServerStart) {
     throw new Error("This device has completed local retirement and cannot start normally");
   }
@@ -2287,31 +2439,13 @@ async function runServerProcess(
                 currentRemovalMigrationTargets: {
                   list: () => ctx.meshRuntime!.plannedAnchorTargets(),
                 },
-                currentRemovalRecoveryBackup: {
-                  read: () => ctx.authorityCheckpointOwner
-                    ? ctx.authorityCheckpointOwner.status()
-                    : Promise.resolve({
-                        state: "not-configured" as const,
-                        fullBackupReady: false,
-                      }),
-                },
                 ...(currentRemovalMigrationApplication
                   ? { currentRemovalMigration: currentRemovalMigrationApplication }
                   : {}),
+                ...(currentRemovalRecoveryApplication
+                  ? { currentRemovalRecovery: currentRemovalRecoveryApplication }
+                  : {}),
                 currentDeviceRemoval: {
-                  beginRecoveryBackup: (input: {
-                    readonly requestId: string;
-                    readonly operationId: string;
-                    readonly recoveryPackage: string;
-                  }) => anchorUninstall.beginRecoveryBackup(input),
-                  continue: (input: {
-                    readonly operationId: string;
-                    readonly confirmBackup: true;
-                    readonly recoveryPackage: string;
-                  }) => anchorUninstall.confirmRecoveryBackup(
-                    input.operationId,
-                    input.recoveryPackage,
-                  ),
                   abort: (input: { readonly operationId: string }) =>
                     anchorUninstall.abort(input.operationId),
                   read: (input: { readonly operationId: string }) =>

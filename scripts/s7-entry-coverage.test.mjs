@@ -2372,6 +2372,7 @@ test("retired entry, live writable Store and reverse package dependency mutation
 test("Device Administration reads, paired/current removal and duty migration have one application and pure RPC bindings", async () => {
   const paths = [
     "packages/core/src/device-administration/application.ts",
+    "packages/core/src/backup-recovery/application.ts",
     "packages/core/src/index.ts",
     "packages/core/package.json",
     "packages/core/tsup.config.ts",
@@ -2500,6 +2501,30 @@ test("Device Administration reads, paired/current removal and duty migration hav
       (text) => `${text}\nclass LegacyMigrationDrive { #driveMigration() { return undefined; } }`,
     )).join("\n"),
     /migration lifecycle has a second phase owner/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/cli/src/serve/anchor-uninstall.ts",
+      (text) => `${text}\nclass LegacyRecoveryDrive { #driveRecovery() { return undefined; } }`,
+    )).join("\n"),
+    /recovery ownership drifted/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "active: () => anchorUninstall.activeRecoveries(),",
+        "active: () => anchorUninstall.activeRecoveries().then((items) => items.filter((operation) => operation.phase !== 'flushed')),",
+      ),
+    )).join("\n"),
+    /recovery ownership drifted/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/core/src/backup-recovery/application.ts",
+      (text) => text.replaceAll("minimumUpToLsn?: number", "minimumLsn?: number"),
+    )).join("\n"),
+    /recovery ownership drifted/,
   );
   assert.match(
     inspectDeviceAdministrationReadOwnership(mutate(

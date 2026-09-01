@@ -18,6 +18,7 @@ import {
   DEVICE_ADMINISTRATION_STATUS_QUERY,
   DeviceAdministrationApplicationService,
   DeviceAdministrationCurrentRemovalMigrationApplicationService,
+  DeviceAdministrationCurrentRemovalRecoveryApplicationService,
 } from "./application.js";
 
 function fixture() {
@@ -100,11 +101,22 @@ function fixture() {
       { deviceId: "device-backup", displayName: "备用设备", ready: true },
     ]),
   };
-  const currentRemovalRecoveryBackup = {
-    read: vi.fn(async () => ({
+  const currentRemovalRecovery = {
+    readiness: vi.fn(async () => ({
       state: "pending-verification" as const,
       fullBackupReady: false,
     })),
+    begin: vi.fn(async () => ({
+      kind: "current-device-removal" as const,
+      path: "recovery-backup" as const,
+      phase: "checkpoint-verified" as const,
+    })),
+    confirm: vi.fn(async () => ({
+      kind: "current-device-removal" as const,
+      path: "recovery-backup" as const,
+      phase: "retirement-decided" as const,
+    })),
+    resumeActive: vi.fn(async () => []),
   };
   const currentRemovalMigration = {
     begin: vi.fn(async () => ({
@@ -115,16 +127,6 @@ function fixture() {
     resumeActive: vi.fn(async () => []),
   };
   const currentDeviceRemoval = {
-    beginRecoveryBackup: vi.fn(async () => ({
-      kind: "current-device-removal" as const,
-      path: "recovery-backup" as const,
-      phase: "checkpoint-verified" as const,
-    })),
-    continue: vi.fn(async () => ({
-      kind: "current-device-removal" as const,
-      path: "recovery-backup" as const,
-      phase: "retirement-decided" as const,
-    })),
     abort: vi.fn(async () => ({
       kind: "current-device-removal" as const,
       path: "recovery-backup" as const,
@@ -147,7 +149,7 @@ function fixture() {
     dutyMigration,
     currentRemovalContext,
     currentRemovalMigrationTargets,
-    currentRemovalRecoveryBackup,
+    currentRemovalRecovery,
     currentRemovalMigration,
     currentDeviceRemoval,
   });
@@ -163,7 +165,7 @@ function fixture() {
     dutyMigration,
     currentRemovalContext,
     currentRemovalMigrationTargets,
-    currentRemovalRecoveryBackup,
+    currentRemovalRecovery,
     currentRemovalMigration,
     currentDeviceRemoval,
   };
@@ -337,6 +339,250 @@ function migrationEffects(events: string[]) {
       events.push("retire");
       return "cleanup-evidence";
     }),
+  };
+}
+
+describe("DeviceAdministrationCurrentRemovalRecoveryApplicationService", () => {
+  it("owns begin, confirmation and the complete recovery-removal phase order", async () => {
+    const events: string[] = [];
+    const fixture = recoveryFixture(events);
+
+    await expect(fixture.application.begin({
+      requestId: "request:recovery",
+      operationId: "operation:recovery",
+      recoveryPackage: "package",
+    })).resolves.toEqual({
+      kind: "current-device-removal",
+      path: "recovery-backup",
+      phase: "checkpoint-verified",
+    });
+    expect(events).toEqual([
+      "assert-begin",
+      "backup-begin",
+      "accept",
+      "close-admission",
+      "advance:gate-frozen",
+      "checkpoint:operation:recovery:pre-retirement:initial",
+      "advance:checkpoint-verified",
+    ]);
+
+    events.length = 0;
+    await expect(fixture.application.confirm({
+      operationId: "operation:recovery",
+      recoveryPackage: "package",
+    })).resolves.toEqual({
+      kind: "current-device-removal",
+      path: "recovery-backup",
+      phase: "terminal",
+    });
+    expect(events).toEqual([
+      "state",
+      "assert-authority",
+      "backup-confirm",
+      "close-accepted-work",
+      "freeze",
+      "retirement",
+      "restore",
+      "advance:gate-closed",
+      "settle:immediate:30000",
+      "advance:work-settled",
+      "flush",
+      "physical",
+      "advance:flushed",
+      "phase-lsn",
+      "checkpoint:operation:recovery:final-retirement:17",
+      "advance:final-checkpoint-verified",
+      "cleanup",
+      "advance:cleanup-complete",
+      "terminal",
+      "retired",
+    ]);
+    expect(fixture.lifecycle.commitRetirement).toHaveBeenCalledWith({
+      operationId: "operation:recovery",
+      acceptedWork: "accepted-work",
+    });
+  });
+
+  it("restores gates at every durable phase but only resumes automatic cleanup terminals", async () => {
+    const cases = [
+      ["accepted", ["active", "close-admission", "advance:gate-frozen"]],
+      ["gate-frozen", ["active", "close-admission"]],
+      ["checkpoint-verified", ["active", "close-admission"]],
+      ["retirement-decided", [
+        "active", "close-admission", "close-accepted-work", "restore",
+      ]],
+      ["gate-closed", ["active", "close-admission", "close-accepted-work", "restore"]],
+      ["work-settled", ["active", "close-admission", "close-accepted-work", "restore"]],
+      ["flushed", ["active", "close-admission", "close-accepted-work", "restore"]],
+      ["final-checkpoint-verified", [
+        "active",
+        "close-admission",
+        "close-accepted-work",
+        "restore",
+        "cleanup",
+        "advance:cleanup-complete",
+        "terminal",
+        "retired",
+      ]],
+      ["cleanup-complete", [
+        "active",
+        "close-admission",
+        "close-accepted-work",
+        "restore",
+        "terminal",
+        "retired",
+      ]],
+    ] as const;
+    for (const [phase, expected] of cases) {
+      const events: string[] = [];
+      const fixture = recoveryFixture(events, phase);
+      await fixture.application.resumeActive();
+      expect(events).toEqual(expected);
+      expect(events.some((event) => event.startsWith("checkpoint:"))).toBe(false);
+    }
+  });
+});
+
+type RecoveryPhase = ReturnType<typeof recoveryOperation>["phase"];
+
+function recoveryOperation(phase:
+  | "accepted"
+  | "gate-frozen"
+  | "checkpoint-verified"
+  | "retirement-decided"
+  | "gate-closed"
+  | "work-settled"
+  | "flushed"
+  | "final-checkpoint-verified"
+  | "cleanup-complete"
+  | "terminal"
+  | "aborted") {
+  return {
+    kind: "current-device-removal" as const,
+    path: "recovery-backup" as const,
+    requestId: "request:recovery",
+    operationId: "operation:recovery",
+    binding: {
+      homeId: "home",
+      anchorEpoch: 1,
+      trustHeadDigest: "trust",
+      checkpointTargetId: "target",
+      checkpointGeneration: "generation",
+    },
+    phase,
+  };
+}
+
+function recoveryFixture(events: string[], initial: RecoveryPhase = "accepted") {
+  let operation = recoveryOperation(initial);
+  const permit = {
+    binding: operation.binding,
+    verifyCheckpoint: vi.fn(async (input: {
+      readonly requestId: string;
+      readonly minimumUpToLsn?: number;
+    }) => {
+      events.push(`checkpoint:${input.requestId}:${input.minimumUpToLsn ?? "initial"}`);
+      return "checkpoint-evidence";
+    }),
+  };
+  const backup = {
+    readiness: vi.fn(async () => ({
+      state: "recoverable" as const,
+      fullBackupReady: true,
+    })),
+    prepareBegin: vi.fn(async () => {
+      events.push("backup-begin");
+      return permit;
+    }),
+    prepareConfirm: vi.fn(async () => {
+      events.push("backup-confirm");
+      return permit;
+    }),
+  };
+  const lifecycle = {
+    assertBeginAdmission: vi.fn(async () => {
+      events.push("assert-begin");
+    }),
+    assertCurrentAuthority: vi.fn(async () => {
+      events.push("assert-authority");
+    }),
+    accept: vi.fn(async () => {
+      events.push("accept");
+      operation = recoveryOperation("accepted");
+      return operation;
+    }),
+    state: vi.fn(async () => {
+      events.push("state");
+      return operation;
+    }),
+    active: vi.fn(async () => {
+      events.push("active");
+      return [operation];
+    }),
+    advance: vi.fn(async (input: { readonly phase: RecoveryPhase }) => {
+      events.push(`advance:${input.phase}`);
+      operation = recoveryOperation(input.phase);
+      return operation;
+    }),
+    commitRetirement: vi.fn(async () => {
+      events.push("retirement");
+      operation = recoveryOperation("retirement-decided");
+      return operation;
+    }),
+    phaseLsn: vi.fn(async () => {
+      events.push("phase-lsn");
+      return 17;
+    }),
+    terminal: vi.fn(async () => {
+      events.push("terminal");
+      operation = recoveryOperation("terminal");
+      return operation;
+    }),
+  };
+  const effects = {
+    closeAdmission: vi.fn(async () => {
+      events.push("close-admission");
+      return "admission-evidence";
+    }),
+    closeAcceptedWorkAdmission: vi.fn(async () => {
+      events.push("close-accepted-work");
+    }),
+    freezeAcceptedWork: vi.fn(async () => {
+      events.push("freeze");
+      return "accepted-work";
+    }),
+    restoreAcceptedWork: vi.fn(async () => {
+      events.push("restore");
+    }),
+    settleAcceptedWork: vi.fn(async (input: {
+      readonly strategy: "immediate";
+      readonly timeoutMs: 30_000;
+    }) => {
+      events.push(`settle:${input.strategy}:${input.timeoutMs}`);
+      return "settlement-evidence";
+    }),
+    flushDurableState: vi.fn(async () => {
+      events.push("flush");
+      return ["flush-evidence"];
+    }),
+    settlePhysicalSteps: vi.fn(async () => {
+      events.push("physical");
+    }),
+    cleanup: vi.fn(async () => {
+      events.push("cleanup");
+      return ["cleanup-evidence"];
+    }),
+    onRetired: vi.fn(async () => {
+      events.push("retired");
+    }),
+  };
+  return {
+    application: new DeviceAdministrationCurrentRemovalRecoveryApplicationService({
+      backup,
+      lifecycle,
+      effects,
+    }),
+    lifecycle,
   };
 }
 
@@ -522,7 +768,7 @@ describe("DeviceAdministrationApplicationService", () => {
       transferId: "transfer-1",
       targetDeviceId: "device-backup",
     });
-    expect(f.currentDeviceRemoval.beginRecoveryBackup).toHaveBeenCalledWith({
+    expect(f.currentRemovalRecovery.begin).toHaveBeenCalledWith({
       requestId: "request:uninstall-backup",
       operationId: "uninstall-backup",
       recoveryPackage: "recovery-package",
@@ -672,7 +918,7 @@ describe("DeviceAdministrationApplicationService", () => {
 
   it("owns current authority, removal conflict, backup readiness and unique ready target selection", async () => {
     const f = fixture();
-    f.currentRemovalRecoveryBackup.read.mockResolvedValueOnce({
+    f.currentRemovalRecovery.readiness.mockResolvedValueOnce({
       state: "recoverable",
       fullBackupReady: true,
       checkpointId: "checkpoint-1",
