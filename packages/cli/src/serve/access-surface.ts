@@ -73,6 +73,12 @@ import type {
 } from "../setup-delivery.js";
 import type { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
 import type { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
+import type {
+  ConversationAssignmentStagingPort,
+  ConversationExecutorDispatchApplication,
+  ConversationExecutorTopologyAdapter,
+} from "./conversation-executor-dispatch.js";
+import type { ConversationAssignmentLedger } from "@zhixing/executor";
 import type { MeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import type { MeshRuntimeAssembly } from "./mesh-runtime-assembly.js";
 import type { ExecutorRoleModule } from "./role-topology.js";
@@ -239,6 +245,10 @@ export interface AssemblyContext {
   ) => FirstPartyFinalitySession;
   assetMaintenance?: SurfaceAssetMaintenance;
   conversationProtocol?: ConversationProtocolRuntime;
+  conversationExecutorDispatch?: ConversationExecutorDispatchApplication;
+  conversationExecutorTopology?: ConversationExecutorTopologyAdapter;
+  conversationAssignmentStaging?: ConversationAssignmentStagingPort;
+  conversationExecutorLedger?: ConversationAssignmentLedger;
   localConversationOwner?: LocalConversationOwnerAssembly;
   jobStatus?: JobStatusDirectory;
   deliveryStack?: DeliveryStack;

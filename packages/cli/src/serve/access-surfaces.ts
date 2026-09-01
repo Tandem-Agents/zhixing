@@ -55,6 +55,7 @@ import { createAnchorConversationDeleteProjectionPort } from "./conversation-del
 import { createTurnMaintenance } from "./turn-maintenance.js";
 import { governControlTextCall } from "./governed-control-llm.js";
 import { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
+import { createConversationExecutorHostBoundary } from "./conversation-executor-dispatch.js";
 import type {
   AccessSurface,
   AssemblyUnit,
@@ -76,7 +77,10 @@ import {
 } from "@zhixing/orchestrator/advancement";
 import { LocalConversationOwnerAssembly } from "./local-conversation-owner.js";
 import { createHostAdvancementModelProviderFactory } from "../runtime/advancement-model-provider.js";
-import { localConversationOwnerRuntime } from "./conversation-owner-runtime.js";
+import {
+  anchorConversationOwnerRuntime,
+  localConversationOwnerRuntime,
+} from "./conversation-owner-runtime.js";
 import { createConversationEvidenceAuthorityVerifier } from "./conversation-evidence-authority.js";
 
 /** MCP —— eager 连接外部 server，使工具目录进入 system prompt。 */
@@ -304,6 +308,7 @@ const meshSurface: AccessSurface = {
         : {}),
       authority: ctx.authorityRuntime,
       protocol: ctx.conversationProtocol,
+      executorTopology: ctx.conversationExecutorTopology!,
       ...(ctx.localConversationOwner
         ? { localConversationOwner: ctx.localConversationOwner }
         : {}),
@@ -313,7 +318,7 @@ const meshSurface: AccessSurface = {
       ...(ctx.enabledRoles.includes("executor")
         ? {
             executor: {
-              ledger: ctx.conversationProtocol.executorLedger(),
+              ledger: ctx.conversationExecutorLedger!,
               runtimeFactory: ctx.assignmentRuntimeFactory,
               interactions: ctx.durableInteractions,
               dataPlane: ctx.executorDataPlane!,
@@ -368,7 +373,7 @@ const losslessDataPlaneSurface: AccessSurface = {
       ...(ctx.executorDataPlane ? { local: ctx.executorDataPlane } : {}),
       mesh: () => ctx.meshRuntime,
       interactions: new AssignmentInteractionRouter({
-        ledger: ctx.conversationProtocol.executorLedger(),
+        ledger: ctx.conversationExecutorLedger!,
         conversation: ctx.durableInteractions,
         ...(ctx.executorJobOwner ? { job: ctx.executorJobOwner } : {}),
       }),
@@ -430,21 +435,31 @@ const conversationSurface: AccessSurface = {
     if (ctx.enabledRoles.includes("executor") && !ctx.executorDataPlane) {
       throw new Error("Conversation executor requires its durable data plane");
     }
-    const protocol = new ConversationProtocolRuntime({
-      authority: ctx.authorityRuntime,
+    const executorBoundary = createConversationExecutorHostBoundary({
+      authority: anchorConversationOwnerRuntime(ctx.authorityRuntime),
+      clock: () => new Date().toISOString(),
       ...(ctx.executorRoleModule
         ? {
-            localExecutor: {
+            local: {
               ConversationAssignmentLedger:
                 ctx.executorRoleModule.ConversationAssignmentLedger,
               InProcessAssignmentSubmission:
                 ctx.executorRoleModule.InProcessAssignmentSubmission,
               dataPlaneTickets: ctx.executorDataPlane!.tickets,
               runtimeFactory: ctx.assignmentRuntimeFactory,
-              createStream: (input) =>
-                ctx.executorDataPlane!.createStream(input),
+              createStream: (input: {
+                readonly assignmentId: string;
+                readonly ref: import("@zhixing/core/contracts").ExecutionRef;
+              }) => ctx.executorDataPlane!.createStream(input),
             },
           }
+        : {}),
+    });
+    const protocol = new ConversationProtocolRuntime({
+      authority: ctx.authorityRuntime,
+      executorDispatch: executorBoundary.application,
+      ...(executorBoundary.staging
+        ? { assignmentStaging: executorBoundary.staging }
         : {}),
       interactions: ctx.durableInteractions,
       executeRecoveredPerspective: async (input) => {
@@ -684,12 +699,19 @@ const conversationSurface: AccessSurface = {
       ).then(() => undefined),
     );
     if (ctx.executorDataPlane) {
-      ctx.executorDataPlane.bindLedger(protocol.executorLedger());
+      if (!executorBoundary.localLedger) {
+        throw new Error("Conversation executor boundary did not provide its local ledger");
+      }
+      ctx.executorDataPlane.bindLedger(executorBoundary.localLedger);
       await ctx.executorDataPlane.start();
     }
     await protocol.recoverReadinessProjections();
     ctx.conversations = manager;
     ctx.conversationProtocol = protocol;
+    ctx.conversationExecutorDispatch = executorBoundary.application;
+    ctx.conversationExecutorTopology = executorBoundary.topology;
+    ctx.conversationAssignmentStaging = executorBoundary.staging;
+    ctx.conversationExecutorLedger = executorBoundary.localLedger;
     ctx.conversationAuthorityRef.current = protocol;
   },
 };
@@ -714,45 +736,59 @@ const localConversationOwnerUnit: CoreAssemblyUnit = {
     if (ctx.localConversationOwner) {
       throw new Error("Local conversation owner is already assembled");
     }
+    const localOwner = localConversationOwnerRuntime({
+      artifacts: ctx.authorityRuntime.artifacts,
+      deviceId: ctx.authorityRuntime.deviceId,
+      executorCapabilities: ctx.authorityRuntime.executorCapabilities,
+      executorId: ctx.authorityRuntime.executorId,
+      executorLog: ctx.authorityRuntime.executorLog,
+      executorResourceGovernor: ctx.authorityRuntime.executorResourceGovernor,
+      executionAssetCatalog: ctx.authorityRuntime.executionAssetCatalog,
+      localControlAdmission: ctx.authorityRuntime.localControlAdmission,
+      localDomainId: ctx.authorityRuntime.localDomainId,
+      localGovernorEpoch: ctx.authorityRuntime.localGovernorEpoch,
+      localOwnerEpoch: ctx.authorityRuntime.localOwnerEpoch,
+      permissionSnapshotFor: ctx.authorityRuntime.permissionSnapshotFor,
+      preflightLocalConversationEnvironment:
+        ctx.authorityRuntime.preflightLocalConversationEnvironment,
+      prepareLocalConversationAssignment:
+        ctx.authorityRuntime.prepareLocalConversationAssignment,
+      releaseLocalConversationEnvironmentPreflight:
+        ctx.authorityRuntime.releaseLocalConversationEnvironmentPreflight,
+      signer: ctx.authorityRuntime.signer,
+      storageMaintenance: ctx.authorityRuntime.storageMaintenance,
+      validateConversationRuntimeBinding:
+        ctx.authorityRuntime.validateConversationRuntimeBinding,
+      validateLocalConversationManifest:
+        ctx.authorityRuntime.validateLocalConversationManifest,
+      verifier: ctx.authorityRuntime.verifier,
+    });
+    const localExecutorBoundary = createConversationExecutorHostBoundary({
+      authority: localOwner,
+      clock: () => new Date().toISOString(),
+      local: {
+        ConversationAssignmentLedger:
+          ctx.executorRoleModule.ConversationAssignmentLedger,
+        InProcessAssignmentSubmission:
+          ctx.executorRoleModule.InProcessAssignmentSubmission,
+        runtimeFactory: ctx.assignmentRuntimeFactory,
+        dataPlaneTickets: ctx.executorDataPlane.tickets,
+        createStream: (input) => ctx.executorDataPlane!.createStream(input),
+      },
+    });
+    if (!localExecutorBoundary.staging) {
+      throw new Error("Local Conversation owner requires assignment staging");
+    }
     const assembly = await LocalConversationOwnerAssembly.create({
-      owner: localConversationOwnerRuntime({
-        artifacts: ctx.authorityRuntime.artifacts,
-        deviceId: ctx.authorityRuntime.deviceId,
-        executorCapabilities: ctx.authorityRuntime.executorCapabilities,
-        executorId: ctx.authorityRuntime.executorId,
-        executorLog: ctx.authorityRuntime.executorLog,
-        executorResourceGovernor: ctx.authorityRuntime.executorResourceGovernor,
-        executionAssetCatalog: ctx.authorityRuntime.executionAssetCatalog,
-        localControlAdmission: ctx.authorityRuntime.localControlAdmission,
-        localDomainId: ctx.authorityRuntime.localDomainId,
-        localGovernorEpoch: ctx.authorityRuntime.localGovernorEpoch,
-        localOwnerEpoch: ctx.authorityRuntime.localOwnerEpoch,
-        permissionSnapshotFor: ctx.authorityRuntime.permissionSnapshotFor,
-        preflightLocalConversationEnvironment:
-          ctx.authorityRuntime.preflightLocalConversationEnvironment,
-        prepareLocalConversationAssignment:
-          ctx.authorityRuntime.prepareLocalConversationAssignment,
-        releaseLocalConversationEnvironmentPreflight:
-          ctx.authorityRuntime.releaseLocalConversationEnvironmentPreflight,
-        signer: ctx.authorityRuntime.signer,
-        storageMaintenance: ctx.authorityRuntime.storageMaintenance,
-        validateConversationRuntimeBinding:
-          ctx.authorityRuntime.validateConversationRuntimeBinding,
-        validateLocalConversationManifest:
-          ctx.authorityRuntime.validateLocalConversationManifest,
-        verifier: ctx.authorityRuntime.verifier,
-      }),
-      ConversationAssignmentLedger:
-        ctx.executorRoleModule.ConversationAssignmentLedger,
-      InProcessAssignmentSubmission:
-        ctx.executorRoleModule.InProcessAssignmentSubmission,
+      owner: localOwner,
+      executorDispatch: localExecutorBoundary.application,
+      assignmentStaging: localExecutorBoundary.staging,
       runtimeFactory: ctx.assignmentRuntimeFactory,
       interactions: ctx.durableInteractions,
       advancementModelProvider: createHostAdvancementModelProviderFactory({
         configuration: ctx.advancementConfiguration,
         credentials: ctx.providerCredentials ?? {},
       }),
-      dataPlane: ctx.executorDataPlane,
       evidence: ctx.evidenceHandler,
       currentAnchorDeviceId: () =>
         ctx.meshBootstrap.mode === "trusted-home"
@@ -807,7 +843,7 @@ const executorJobOwnerUnit: CoreAssemblyUnit = {
       ctx.jobRelayObligations ??= new JobRelayObligationDirectory();
     }
     const assembly = new ExecutorJobOwnerAssembly({
-      ledger: ctx.conversationProtocol.executorLedger(),
+      ledger: ctx.conversationExecutorLedger!,
       runtime: ctx.jobRuntime,
       submissionFor: (envelope, signal) => {
         const local =

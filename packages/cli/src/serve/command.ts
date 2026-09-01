@@ -1132,6 +1132,9 @@ async function runServerProcess(
     const createSchedulerRuntime = () => AnchorSchedulerRuntime.create({
       authority: ctx.authorityRuntime!,
       protocol: ctx.conversationProtocol!,
+      ...(ctx.enabledRoles.includes("executor") && ctx.conversationExecutorLedger
+        ? { localExecutor: ctx.conversationExecutorLedger }
+        : {}),
       eventBus: schedulerEventBus,
       jobStatus: ctx.jobStatus!,
       jobRelays: ctx.jobRelayObligations!,

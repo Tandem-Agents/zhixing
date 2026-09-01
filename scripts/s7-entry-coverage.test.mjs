@@ -14,6 +14,7 @@ import {
   inspectProductionSource,
   inspectCleanupRegistryConstructions,
   inspectConversationAdoptionAssembly,
+  inspectConversationExecutorDispatchBoundary,
   inspectConversationStorageBoundary,
   inspectWorksceneStorageCleanupBoundary,
   inspectStorageRemainderBoundary,
@@ -514,8 +515,8 @@ test("local conversation owner remains isolated from anchor capabilities by cons
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "      ConversationAssignmentLedger:\n        ctx.executorRoleModule.ConversationAssignmentLedger,",
-        "      globalState: ctx.authorityRuntime.globalState,\n      ConversationAssignmentLedger:\n        ctx.executorRoleModule.ConversationAssignmentLedger,",
+        "      executorDispatch: localExecutorBoundary.application,",
+        "      globalState: ctx.authorityRuntime.globalState,\n      executorDispatch: localExecutorBoundary.application,",
       ),
     )).join("\n"),
     /forbidden or duplicate capability globalState/,
@@ -561,8 +562,8 @@ test("local conversation owner remains isolated from anchor capabilities by cons
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "        verifier: ctx.authorityRuntime.verifier,\n      }),",
-        "        verifier: ctx.authorityRuntime.verifier,\n        globalState: ctx.authorityRuntime.globalState,\n      }),",
+        "      verifier: ctx.authorityRuntime.verifier,\n    });",
+        "      verifier: ctx.authorityRuntime.verifier,\n      globalState: ctx.authorityRuntime.globalState,\n    });",
       ),
     )).join("\n"),
     /forbidden or duplicate dependency globalState/,
@@ -570,7 +571,7 @@ test("local conversation owner remains isolated from anchor capabilities by cons
   assert.match(
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
-      (text) => text.replace("        verifier: ctx.authorityRuntime.verifier,\n", ""),
+      (text) => text.replace("      verifier: ctx.authorityRuntime.verifier,\n", ""),
     )).join("\n"),
     /missing dependency verifier/,
   );
@@ -578,8 +579,8 @@ test("local conversation owner remains isolated from anchor capabilities by cons
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "        deviceId: ctx.authorityRuntime.deviceId,",
-        "        deviceId: ctx.authorityRuntime.executorId,",
+        "      deviceId: ctx.authorityRuntime.deviceId,",
+        "      deviceId: ctx.authorityRuntime.executorId,",
       ),
     )).join("\n"),
     /dependency deviceId must bind ctx\.authorityRuntime\.deviceId/,
@@ -598,8 +599,8 @@ test("local conversation owner remains isolated from anchor capabilities by cons
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "      owner: localConversationOwnerRuntime({\n",
-        "      owner: localConversationOwnerRuntime({\n        ...ctx.authorityRuntime,\n",
+        "    const localOwner = localConversationOwnerRuntime({\n",
+        "    const localOwner = localConversationOwnerRuntime({\n      ...ctx.authorityRuntime,\n",
       ),
     )).join("\n"),
     /spread or shorthand/,
@@ -609,12 +610,12 @@ test("local conversation owner remains isolated from anchor capabilities by cons
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text
         .replace(
-          "      owner: localConversationOwnerRuntime({\n",
-          "      owner: localConversationOwnerRuntime(Object.assign(ctx.authorityRuntime, {\n",
+          "    const localOwner = localConversationOwnerRuntime({\n",
+          "    const localOwner = localConversationOwnerRuntime(Object.assign(ctx.authorityRuntime, {\n",
         )
         .replace(
-          "        verifier: ctx.authorityRuntime.verifier,\n      }),",
-          "        verifier: ctx.authorityRuntime.verifier,\n      })),",
+          "      verifier: ctx.authorityRuntime.verifier,\n    });",
+          "      verifier: ctx.authorityRuntime.verifier,\n    }));",
         ),
     )).join("\n"),
     /must receive one explicit dependency object literal/,
@@ -719,6 +720,101 @@ test("local conversation owner remains isolated from anchor capabilities by cons
       (text) => `${text}\nconst publicDeferredIntent = deferSchedule;\n`,
     )).join("\n"),
     /deferred intent capability is exposed outside its internal owner seam/,
+  );
+});
+
+test("conversation dispatch application stays separate from the Host topology mechanism", async () => {
+  const paths = [
+    "packages/cli/src/serve/conversation-executor-dispatch.ts",
+    "packages/cli/src/serve/conversation-protocol-runtime.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/cli/src/serve/local-conversation-owner.ts",
+    "packages/cli/src/serve/mesh-runtime-assembly.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/anchor-scheduler-runtime.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: (await readFile(relative, "utf8")).replaceAll("\r\n", "\n"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.deepEqual(inspectConversationExecutorDispatchBoundary(records), []);
+  assert.match(
+    inspectConversationExecutorDispatchBoundary(mutate(
+      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      (text) => text.replace(
+        "readonly executorDispatch: ConversationExecutorDispatchApplication;",
+        "readonly executorDispatch?: ConversationExecutorDispatchApplication;",
+      ),
+    )).join("\n"),
+    /must be the required ConversationExecutorDispatchApplication/,
+  );
+  assert.match(
+    inspectConversationExecutorDispatchBoundary(mutate(
+      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      (text) => `${text}\nconst leaked = bindRemoteExecution;\n`,
+    )).join("\n"),
+    /topology\/transport responsibility leaked/,
+  );
+  assert.match(
+    inspectConversationExecutorDispatchBoundary(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "const localExecutorBoundary = createConversationExecutorHostBoundary({",
+        "const localExecutorBoundary = createConversationExecutorDispatch({",
+      ),
+    )).join("\n"),
+    /Host boundary construction exact-set drifted/,
+  );
+  assert.match(
+    inspectConversationExecutorDispatchBoundary(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "options.executorTopology!.bindDirectory(this.#remoteDirectory())",
+        "options.protocol!.bindRemoteExecution(this.#remoteDirectory())",
+      ),
+    )).join("\n"),
+    /product policy\/application ownership drifted/,
+  );
+  assert.match(
+    inspectConversationExecutorDispatchBoundary(mutate(
+      "packages/cli/src/serve/local-conversation-owner.ts",
+      (text) => text.replace(
+        "executorDispatch: options.executorDispatch",
+        "executorDispatch: createConversationExecutorHostBoundary({}).application",
+      ),
+    )).join("\n"),
+    /application\/staging Host injection drifted/,
+  );
+  assert.match(
+    inspectConversationExecutorDispatchBoundary(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => `${text}\nconst leakedLedger = conversationProtocol.executorLedger();\n`,
+    )).join("\n"),
+    /ledger escaped through a demand or dispatch accessor/,
+  );
+  assert.match(
+    inspectConversationExecutorDispatchBoundary(mutate(
+      "packages/cli/src/serve/conversation-executor-dispatch.ts",
+      (text) => text.replace(
+        "export class ConversationExecutorTopologyAdapter {",
+        "export class ConversationExecutorTopologyAdapter {\n  localLedger() { return undefined; }",
+      ),
+    )).join("\n"),
+    /service-locator owner|dispatch accessor/,
+  );
+  assert.match(
+    inspectConversationExecutorDispatchBoundary(mutate(
+      "packages/cli/src/serve/conversation-executor-dispatch.ts",
+      (text) => text.replace(
+        "export interface ConversationExecutorExecutionEffect {",
+        "export interface ConversationExecutorExecutionEffect {\n  readonly ledger: ConversationAssignmentLedger;",
+      ),
+    )).join("\n"),
+    /demand contract leaked concrete Executor implementation/,
   );
 });
 

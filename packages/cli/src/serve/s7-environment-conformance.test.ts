@@ -64,6 +64,12 @@ import {
   ConversationProtocolRuntime,
   DurableConversationInteractionObserver,
 } from "./conversation-protocol-runtime.js";
+import { createConversationExecutorHostBoundary } from "./conversation-executor-dispatch.js";
+import { anchorConversationOwnerRuntime } from "./conversation-owner-runtime.js";
+import {
+  ConversationAssignmentLedger,
+  InProcessAssignmentSubmission,
+} from "@zhixing/executor";
 import {
   MeshExecutionSnapshotClient,
   registerExecutionSnapshotMeshService,
@@ -343,9 +349,20 @@ async function runChain(topology: "in-process" | "mesh") {
     const ownerRuntimeFactory = createInProcessRuntimeFactory(executorRole);
     const assignmentRuntimeFactory =
       createInProcessAssignmentRuntimeFactory(executorRole);
+    const executorBoundary = createConversationExecutorHostBoundary({
+      authority: anchorConversationOwnerRuntime(anchor),
+      clock: () => NOW,
+      local: {
+        ConversationAssignmentLedger,
+        InProcessAssignmentSubmission,
+        runtimeFactory: assignmentRuntimeFactory,
+      },
+    });
     let conversationManager: ConversationManager;
     const conversationProtocol = new ConversationProtocolRuntime({
       authority: anchor,
+      executorDispatch: executorBoundary.application,
+      assignmentStaging: executorBoundary.staging!,
       manager: () => conversationManager,
       interactions: new DurableConversationInteractionObserver(),
       clock: () => NOW,

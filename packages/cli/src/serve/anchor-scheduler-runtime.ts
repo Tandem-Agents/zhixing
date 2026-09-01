@@ -12,6 +12,7 @@ import type {
   JobOccurrence,
   JobExecutionInstruction,
   OwnerControlGrant,
+  RunExecutorPort,
   TaskDefinition,
 } from "@zhixing/core/contracts";
 import {
@@ -71,6 +72,7 @@ const TERMINAL_JOB_STATES = new Set([
 export interface AnchorSchedulerRuntimeOptions {
   readonly authority: AuthorityRuntimeStack;
   readonly protocol: ConversationProtocolRuntime;
+  readonly localExecutor?: RunExecutorPort;
   readonly eventBus: IEventBus<SchedulerEventMap>;
   readonly jobStatus: JobStatusDirectory;
   readonly jobRelays: JobRelayObligationDirectory;
@@ -620,15 +622,17 @@ export class AnchorSchedulerRuntime implements ScheduleLifecycleMechanismPort {
     const current = this.#dispatchers.get(key);
     if (current) return current;
     const local = pending.envelope.executorId === this.#options.authority.executorId;
+    const executor = local
+      ? this.#options.localExecutor
+      : this.#requiredMesh().jobExecutorFor(
+          pending.envelope.executorId,
+          (assignmentId) => this.#artifactAuthority(assignmentId),
+        );
+    if (!executor) throw new Error("Local executor role is not enabled on this device");
     const dispatcher = new InProcessJobDispatcher({
       enabled: true,
       journal,
-      executor: local
-        ? this.#options.protocol.executorLedger()
-        : this.#requiredMesh().jobExecutorFor(
-            pending.envelope.executorId,
-            (assignmentId) => this.#artifactAuthority(assignmentId),
-          ),
+      executor,
       contexts: jobDispatchContexts({
         signer: this.#options.authority.signer,
         ownerDeviceId: this.#options.authority.deviceId,

@@ -55,11 +55,12 @@ import { createAssignmentGlobalQueryPort } from "./assignment-schedule-stager.js
 import type { AssignmentArtifactAuthority } from "./assignment-mesh-adapter.js";
 import { fulfillConnectionLifetimeObligation } from "./connection-lifetime-obligation.js";
 import { ConversationAssignmentWorker } from "./conversation-assignment-worker.js";
+import type { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
 import type {
-  ConversationProtocolRuntime,
-  RemoteConversationExecutionDirectory,
-  RemoteConversationExecutionTarget,
-} from "./conversation-protocol-runtime.js";
+  ConversationExecutorTopologyAdapter,
+  ConversationExecutorTopologyDirectory,
+  ConversationExecutorTopologyTarget,
+} from "./conversation-executor-dispatch.js";
 import type { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
 import {
   MeshExecutionSnapshotClient,
@@ -317,6 +318,7 @@ export interface MeshRuntimeAssemblyOptions {
   readonly plannedAnchorPostInstall?: AnchorPostInstallDescriptor;
   readonly authority: AuthorityRuntimeStack;
   readonly protocol?: ConversationProtocolRuntime;
+  readonly executorTopology?: ConversationExecutorTopologyAdapter;
   readonly localConversationOwner?: LocalConversationOwnerAssembly;
   readonly jobRelays?: JobRelayObligationDirectory;
   readonly executor?: {
@@ -405,6 +407,9 @@ export class MeshRuntimeAssembly {
     const roles = new Set(options.configuration.enabledRoles);
     if (roles.has("anchor") && !options.protocol) {
       throw new Error("Anchor mesh role requires the conversation owner protocol");
+    }
+    if (roles.has("anchor") && !options.executorTopology) {
+      throw new Error("Anchor mesh role requires the conversation executor topology adapter");
     }
     if (roles.has("executor") && !options.executor) {
       throw new Error("Executor mesh role requires the executor runtime substrate");
@@ -973,7 +978,7 @@ export class MeshRuntimeAssembly {
 
     if (roles.has("anchor")) {
       this.#installInitialPlannedAnchorRole(options.trust);
-      options.protocol!.bindRemoteExecution(this.#remoteDirectory());
+      options.executorTopology!.bindDirectory(this.#remoteDirectory());
     }
   }
 
@@ -1547,7 +1552,7 @@ export class MeshRuntimeAssembly {
   async jobExecutionTargets(): Promise<readonly {
     readonly executorId: string;
     readonly deviceId: string;
-    readonly synchronizePermission: RemoteConversationExecutionTarget["synchronizePermission"];
+    readonly synchronizePermission: ConversationExecutorTopologyTarget["synchronizePermission"];
   }[]> {
     const directory = this.#remoteDirectory();
     return (await directory.candidates()).map((target) => ({
@@ -1600,9 +1605,9 @@ export class MeshRuntimeAssembly {
     );
   }
 
-  #remoteDirectory(): RemoteConversationExecutionDirectory {
-    const targets = new Map<string, RemoteConversationExecutionTarget>();
-    const targetFor = (deviceId: string): RemoteConversationExecutionTarget => {
+  #remoteDirectory(): ConversationExecutorTopologyDirectory {
+    const targets = new Map<string, ConversationExecutorTopologyTarget>();
+    const targetFor = (deviceId: string): ConversationExecutorTopologyTarget => {
       const executorId = executorIdForDevice(deviceId);
       const existing = targets.get(executorId);
       if (existing) return existing;
@@ -1620,7 +1625,7 @@ export class MeshRuntimeAssembly {
         }),
         synchronizePermission: (snapshot, executionAssets) =>
           snapshots.installPermission(snapshot, executionAssets),
-      } satisfies RemoteConversationExecutionTarget;
+      } satisfies ConversationExecutorTopologyTarget;
       targets.set(executorId, target);
       return target;
     };

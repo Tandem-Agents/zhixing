@@ -64,10 +64,6 @@ import {
   createAdvancementProxyTurnPort,
 } from "@zhixing/server";
 import type { AdvancementModelProviderFactory } from "@zhixing/orchestrator/advancement";
-import type {
-  ConversationAssignmentLedger,
-  InProcessAssignmentSubmission,
-} from "@zhixing/executor";
 import {
   projectSessionTurn,
   type ProjectedSessionTurnResult,
@@ -75,9 +71,12 @@ import {
 } from "@zhixing/rpc";
 import { createServeAdvancementApplications } from "./advancement-controller.js";
 import { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
-import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import type { LocalConversationOwnerRuntimeStack } from "./conversation-owner-runtime.js";
 import { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
+import type {
+  ConversationAssignmentStagingPort,
+  ConversationExecutorDispatchApplication,
+} from "./conversation-executor-dispatch.js";
 import { GlobalRubricCatalog } from "./advancement-rubric-library.js";
 import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
 
@@ -194,20 +193,13 @@ export interface LocalConversationRemovalSnapshot {
 
 export interface LocalConversationOwnerAssemblyOptions {
   readonly owner: LocalConversationOwnerRuntimeStack;
-  /**
-   * Executor-only composition may pass its existing device-log ledger. An
-   * anchor+executor host omits it so the local owner creates a ledger on the
-   * executor authority log instead of reusing the anchor-domain ledger.
-   */
-  readonly ledger?: ConversationAssignmentLedger;
-  readonly ConversationAssignmentLedger: typeof ConversationAssignmentLedger;
-  readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
+  readonly executorDispatch: ConversationExecutorDispatchApplication;
+  readonly assignmentStaging: ConversationAssignmentStagingPort;
   readonly runtimeFactory: RuntimeFactory;
   readonly interactions: DurableConversationInteractionObserver;
   readonly advancementModelProvider: AdvancementModelProviderFactory;
   readonly evidence: EvidenceHandlerPort;
   readonly currentAnchorDeviceId: () => string | undefined;
-  readonly dataPlane: Pick<ExecutorDataPlaneRuntime, "tickets" | "createStream">;
   /** 关闭时 drain 的判定预算;默认 30s,只在无法证明收束时决定失败收场时机。 */
   readonly closeDrainBudgetMs?: number;
 }
@@ -777,14 +769,8 @@ export class LocalConversationOwnerAssembly {
     protocol = new ConversationProtocolRuntime({
       owner,
       interactions: options.interactions,
-      localExecutor: {
-        ...(options.ledger ? { ledger: options.ledger } : {}),
-        ConversationAssignmentLedger: options.ConversationAssignmentLedger,
-        InProcessAssignmentSubmission: options.InProcessAssignmentSubmission,
-        runtimeFactory: options.runtimeFactory,
-        dataPlaneTickets: options.dataPlane.tickets,
-        createStream: (input) => options.dataPlane.createStream(input),
-      },
+      executorDispatch: options.executorDispatch,
+      assignmentStaging: options.assignmentStaging,
       onFinal: (frame) => verifyLocalConversationFinal(protocol, frame),
       projectLifecycle: async ({ conversationId, mutation, requestId }) => {
         if (mutation === "clear") {

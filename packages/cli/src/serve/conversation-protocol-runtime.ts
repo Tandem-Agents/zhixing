@@ -24,15 +24,8 @@ import type {
   PublishResultNotice,
   ConversationInvocation,
   AssignmentResourceLease,
-  DispatchResult,
-  ExecutionAssetBundle,
-  LedgerEvidencePage,
-  LedgerSnapshot,
-  RunDispatchArguments,
   RunExecutorPort,
   RunSubmissionPort,
-  SupersedeProof,
-  TrustRuleSnapshot,
   ReservationOrigin,
   StreamFrame,
   TranscriptRunRecord,
@@ -45,12 +38,10 @@ import {
   dispatchEnvelopeDigest,
   ownerControlRequestDigest,
   protocolDigest,
-  StreamDigestChain,
   validateAuthorityCapability,
   type ConversationInteractionMirrorBatch,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
-  type StreamFrameProducer,
 } from "@zhixing/core/protocol";
 import {
   ConversationRunJournal,
@@ -70,7 +61,6 @@ import {
   type ManagedSession,
   type PendingConversationInput,
   type SessionRuntime,
-  type RuntimeFactory,
   type DurableConversationAdmissionInput,
   type DurableConversationAdmissionResult,
   type DurableConversationCancelInput,
@@ -95,36 +85,20 @@ import {
 } from "@zhixing/owner-kernel/run-turn";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 import type {
-  ConversationAssignmentLedger,
-  InProcessAssignmentSubmission,
-} from "@zhixing/executor";
-import type {
   AuthorityRuntimeStack,
-  ConversationRuntimeBinding,
 } from "../setup-delivery.js";
 import {
   anchorConversationOwnerRuntime,
   type ConversationOwnerRuntimeStack,
 } from "./conversation-owner-runtime.js";
-import type { ExecutorCapabilitySnapshot } from "@zhixing/core/protocol";
 import type { SessionStatePort } from "@zhixing/core/contracts";
 import {
   DurableConversationInteractionObserver,
-  type DurableInteractionBinding,
 } from "./durable-conversation-interactions.js";
-import {
-  ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
-  createConversationExecutorLedger,
-} from "./conversation-executor-ledger.js";
-import {
-  isRetryableMeshFailure,
-} from "./remote-obligation-failure.js";
 import { retryDurableObligation } from "./durable-obligation-retry.js";
 import {
   assignmentGlobalCapability,
   createAssignmentGlobalQueryPort,
-  createAssignmentMutationPort,
-  createAssignmentScheduleStager,
 } from "./assignment-schedule-stager.js";
 import type {
   FirstPartySurfaceSession,
@@ -135,26 +109,16 @@ import type {
   FirstPartyFinalitySession,
   FirstPartyFinalitySessionOptions,
 } from "./first-party-finality-session.js";
+import type {
+  ConversationAssignmentStagingPort,
+  ConversationExecutorDispatchApplication,
+  ConversationExecutorExecutionEffect,
+} from "./conversation-executor-dispatch.js";
 
 export { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
 
 const CONTEXT_TTL_MS = MAX_CONTROL_LEASE_TTL_MS;
 const CONTROL_RENEWAL_INTERVAL_MS = Math.floor(CONTEXT_TTL_MS / 3);
-
-export interface RemoteConversationExecutionTarget {
-  readonly executorId: string;
-  readonly deviceId: string;
-  readonly executor: RunExecutorPort;
-  synchronizePermission(
-    snapshot: TrustRuleSnapshot,
-    executionAssets?: ExecutionAssetBundle,
-  ): Promise<ExecutorCapabilitySnapshot>;
-}
-
-export interface RemoteConversationExecutionDirectory {
-  candidates(): Promise<readonly RemoteConversationExecutionTarget[]>;
-  forExecutor(executorId: string): RemoteConversationExecutionTarget | undefined;
-}
 
 export interface ConversationProtocolRuntimeOptions {
   readonly authority?: AuthorityRuntimeStack;
@@ -165,21 +129,9 @@ export interface ConversationProtocolRuntimeOptions {
    */
   readonly manager?: () => ConversationManager;
   readonly clock?: () => string;
-  readonly maxPendingInteractions?: number;
   readonly interactions: DurableConversationInteractionObserver;
-  readonly localExecutor?: {
-    readonly ledger?: ConversationAssignmentLedger;
-    readonly ConversationAssignmentLedger: typeof ConversationAssignmentLedger;
-    readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
-    readonly dataPlaneTickets?: ConstructorParameters<
-      typeof ConversationAssignmentLedger
-    >[0]["dataPlaneTickets"];
-    readonly createStream?: (input: {
-      readonly assignmentId: string;
-      readonly ref: import("@zhixing/core/contracts").ExecutionRef;
-    }) => Promise<DurableAssignmentRunStream>;
-    readonly runtimeFactory: RuntimeFactory;
-  };
+  readonly executorDispatch: ConversationExecutorDispatchApplication;
+  readonly assignmentStaging?: ConversationAssignmentStagingPort;
   readonly executeRecoveredPerspective?: (input: {
     readonly manager: ConversationManager;
     readonly managed: ManagedSession;
@@ -230,10 +182,6 @@ interface PreparedConversationAdmission {
   readonly environment?: import("@zhixing/core/contracts").ExplicitEnvironmentSelection;
 }
 
-interface DurableAssignmentRunStream extends StreamFrameProducer {
-  markTerminal?(): Promise<unknown>;
-}
-
 type ConversationLosslessDataPlane = Pick<
   LosslessDataPlaneRuntime,
   "openConversationChannel" | "openFirstPartySurfaceSession"
@@ -247,19 +195,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   #manager: (() => ConversationManager) | undefined;
   readonly #clock: () => string;
   #sessionState: SessionStatePort | undefined;
-  readonly #ledger: ConversationAssignmentLedger | undefined;
-  readonly #InProcessAssignmentSubmission:
-    | typeof InProcessAssignmentSubmission
-    | undefined;
-  readonly #createStream:
-    | ((
-        input: {
-          readonly assignmentId: string;
-          readonly ref: import("@zhixing/core/contracts").ExecutionRef;
-        },
-      ) => Promise<DurableAssignmentRunStream>)
-    | undefined;
-  readonly #localRuntimeFactory: RuntimeFactory | undefined;
+  readonly #executorDispatch: ConversationExecutorDispatchApplication;
+  readonly #assignmentStaging: ConversationAssignmentStagingPort | undefined;
   readonly #issuer: ConversationAssignmentAuthority;
   readonly #journals = new Map<string, ConversationRunJournal>();
   readonly #adoptedConversations = new Map<string, {
@@ -277,7 +214,6 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     AssignmentActivationProof<"conversation">
   >();
   readonly #assignmentIngress = new Map<string, IngressContext>();
-  readonly #assignmentRuntimeBindings = new Map<string, ConversationRuntimeBinding>();
   readonly #schedulingRuns = new Set<string>();
   readonly #scheduledRuns = new Set<string>();
   readonly #firstPartyPublishedFinals = new Set<string>();
@@ -318,7 +254,6 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   #recoveryGeneration = 0;
   readonly #recoveryConversations = new Map<string, number>();
   readonly #sessionIdentities = new Map<string, Promise<void>>();
-  #remoteExecution: RemoteConversationExecutionDirectory | undefined;
   #losslessDataPlane:
     | ConversationLosslessDataPlane
     | undefined;
@@ -355,6 +290,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       },
     });
     this.#clock = options.clock ?? (() => new Date().toISOString());
+    if (!options.executorDispatch) {
+      throw new Error("Conversation protocol requires the executor dispatch application");
+    }
+    this.#executorDispatch = options.executorDispatch;
+    this.#assignmentStaging = options.assignmentStaging;
     this.#interactions = options.interactions;
     this.#executeRecoveredPerspective = options.executeRecoveredPerspective;
     this.#onStatus = options.onStatus;
@@ -364,54 +304,6 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#createFirstPartyFinality = options.createFirstPartyFinality;
     this.#projectLifecycle = options.projectLifecycle;
     this.#recoverAuxiliary = options.recoverAuxiliary;
-    this.#InProcessAssignmentSubmission =
-      options.localExecutor?.InProcessAssignmentSubmission;
-    this.#createStream = options.localExecutor?.createStream;
-    this.#localRuntimeFactory = options.localExecutor?.runtimeFactory;
-    const executorAuthority = authority.executorLog && authority.executorResources
-      ? authority as ConversationOwnerRuntimeStack & {
-          readonly executorLog: NonNullable<ConversationOwnerRuntimeStack["executorLog"]>;
-          readonly executorResources: NonNullable<
-            ConversationOwnerRuntimeStack["executorResources"]
-          >;
-        }
-      : undefined;
-    if (options.localExecutor?.ConversationAssignmentLedger && !executorAuthority) {
-      throw new Error(
-        "Local executor ledger requires executor authority log and resources",
-      );
-    }
-    this.#ledger = options.localExecutor?.ledger ?? (options.localExecutor?.ConversationAssignmentLedger
-      ? createConversationExecutorLedger({
-      Constructor: options.localExecutor.ConversationAssignmentLedger,
-      authority: executorAuthority!,
-      assignmentRecordV2Writes: ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
-      usageFinal: (assignmentId) =>
-        authority.finalizeUsage(
-          assignmentId,
-          (report) =>
-            usageReporterContext(report.reporterId, report.digest, this.#clock()),
-        ),
-      runtimeBindingGuard: ({ assignmentId, manifest }) => {
-        const binding = this.#assignmentRuntimeBindings.get(assignmentId);
-        if (binding === undefined) {
-          return authority.validateLocalConversationManifest(manifest);
-        }
-        return authority.validateConversationRuntimeBinding({
-          assignmentId,
-          manifest,
-          binding,
-        });
-      },
-      clock: this.#clock,
-      ...(options.localExecutor.dataPlaneTickets === undefined
-        ? {}
-        : { dataPlaneTickets: options.localExecutor.dataPlaneTickets }),
-      ...(options.maxPendingInteractions === undefined
-        ? {}
-        : { maxPendingInteractions: options.maxPendingInteractions }),
-        })
-      : undefined);
     this.#issuer = new ConversationAssignmentAuthority({
       signer: authority.signer,
       verifier: authority.verifier,
@@ -457,16 +349,6 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     if (!this.#manager) {
       throw new Error("Conversation protocol manager is not bound");
     }
-  }
-
-  bindRemoteExecution(directory: RemoteConversationExecutionDirectory): void {
-    if (this.#authority.domain.kind !== "anchor") {
-      throw new Error("Local conversation owners cannot bind remote execution");
-    }
-    if (this.#remoteExecution && this.#remoteExecution !== directory) {
-      throw new Error("Remote conversation execution is already bound");
-    }
-    this.#remoteExecution = directory;
   }
 
   bindLosslessDataPlane(
@@ -552,18 +434,6 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
 
   conversationIdForAssignment(assignmentId: string): string {
     return this.#conversationForAssignment(assignmentId);
-  }
-
-  executorMeshRole(): {
-    readonly port: RunExecutorPort;
-    readonly guard: import("@zhixing/executor").OwnerControlPreflightPort;
-  } {
-    const ledger = this.#requireLocalLedger();
-    return { port: ledger, guard: ledger };
-  }
-
-  executorLedger(): ConversationAssignmentLedger {
-    return this.#requireLocalLedger();
   }
 
   assignmentCapability(assignmentId: string): AuthorityCapability {
@@ -689,7 +559,6 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     for (const assignmentId of [...this.#assignmentConversations.keys()]) {
       this.#forgetAssignment(assignmentId);
     }
-    this.#assignmentRuntimeBindings.clear();
     this.#schedulingRuns.clear();
     this.#scheduledRuns.clear();
     this.#firstPartyPublishedFinals.clear();
@@ -1194,12 +1063,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     let channelSession: LosslessDataPlaneSession | undefined;
     let firstPartySurfaceSession: FirstPartySurfaceSession | undefined;
     let firstPartyFinalitySession: FirstPartyFinalitySession | undefined;
-    let localBaseRuntime: SessionRuntime | undefined;
-    let localExecutionRuntime: SessionRuntime | undefined;
-    let localRuntimePromoted = false;
-    let localPreflightManifest:
-      | import("@zhixing/core/contracts").ExecutionManifest<"conversation">
-      | undefined;
+    let executorPlan: Awaited<
+      ReturnType<ConversationExecutorDispatchApplication["plan"]>
+    > | undefined;
     try {
       const authority = await journal.authorityState();
       if (authority.deleted) {
@@ -1212,40 +1078,22 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           "Durable conversation runtime must expose execution and permission snapshots",
         );
       }
-      const remoteTargets = this.#remoteExecution &&
-          supportsRemoteConversationExecution(input.invocation, executionIngress)
-        ? await this.#remoteExecution.candidates()
-        : [];
-      const localLedger = this.#ledger;
-      if (remoteTargets.length === 0 && !localLedger) {
-        throw new Error("No authorized conversation executor is currently available");
-      }
       const recentExecutorId = await journal.recentExecutorAffinity();
-      const preparedAuthority = await this.#authority.prepareConversationAssignment({
+      executorPlan = await this.#executorDispatch.plan({
         conversationId: input.conversationId,
+        requirement: conversationExecutorRequirement(
+          input.invocation,
+          executionIngress,
+        ),
         executionProfile,
         permissionRules,
         ...(recentExecutorId ? { recentExecutorId } : {}),
         ...(appliedAdmission.environment
           ? { environment: appliedAdmission.environment }
           : {}),
-        targets: remoteTargets.map((target) => ({
-          executorId: target.executorId,
-          deviceId: target.deviceId,
-          synchronizePermission: (snapshot, executionAssets) =>
-            target.synchronizePermission(snapshot, executionAssets),
-        })),
       });
+      const preparedAuthority = executorPlan.assignment;
       const targetExecutorId = preparedAuthority.executorId;
-      const remoteTarget = targetExecutorId === this.#authority.executorId
-        ? undefined
-        : remoteTargets.find((target) => target.executorId === targetExecutorId);
-      if (!remoteTarget && targetExecutorId !== this.#authority.executorId) {
-        throw new Error("Selected remote executor disappeared from the candidate set");
-      }
-      if (remoteTarget && input.adaptLocalRuntime) {
-        throw new Error("A local invocation runtime adapter cannot execute remotely");
-      }
       const origin = reservationOriginForSource(input.options?.source);
       const resourceContext = resourceHostContext(
         "reservation.prepareAssignmentRoot",
@@ -1289,52 +1137,17 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         policy: preparedAuthority.policy,
         environment: preparedAuthority.environment,
       });
-      if (!remoteTarget) {
-        localPreflightManifest = unsigned.manifest;
-        const preflight =
-          await this.#authority.preflightLocalConversationEnvironment(
-            unsigned.manifest,
-            assignmentId,
-          );
-        if (preflight.error) throw new Error(preflight.error.message);
-        const runtimeFactory = this.#localRuntimeFactory;
-        if (!runtimeFactory) {
-          throw new Error("Local assignment runtime factory is unavailable");
-        }
-        localBaseRuntime = await runtimeFactory.create(
-          input.conversationId,
-          { workspaceRoot: preflight.workspaceRoot },
-        );
-        localExecutionRuntime = input.adaptLocalRuntime?.(localBaseRuntime) ??
-          localBaseRuntime;
-        const actualProfile = requireRuntimeExecutionProfile(
-          localExecutionRuntime,
-        );
-        if (
-          canonicalize(actualProfile) !==
-          canonicalize(preparedAuthority.binding.executionProfile)
-        ) {
-          throw new Error(
-            "Local assignment runtime does not match the frozen execution profile",
-          );
-        }
-      }
-      const dispatch = await journal.assign(unsigned);
-      localRuntimePromoted = true;
-      this.#rememberAssignment(dispatch.envelope, dispatch.activation);
-      this.#assignmentRuntimeBindings.set(
+      await executorPlan.prepare({
         assignmentId,
-        localExecutionRuntime
-          ? {
-              ...preparedAuthority.binding,
-              executionProfile:
-                requireRuntimeExecutionProfile(localExecutionRuntime),
-            }
-          : preparedAuthority.binding,
-      );
-      const submission = remoteTarget
-        ? undefined
-        : this.#createLocalSubmission(journal);
+        manifest: unsigned.manifest,
+        ...(input.adaptLocalRuntime
+          ? { adaptRuntime: input.adaptLocalRuntime }
+          : {}),
+      });
+      const dispatch = await journal.assign(unsigned);
+      executorPlan.markPromoted();
+      this.#rememberAssignment(dispatch.envelope, dispatch.activation);
+      executorPlan.bindRuntime(preparedAuthority.binding);
       const submissionContext = assignmentContext(dispatch.envelope);
       const resourceSubmissionContext = assignmentResourceContext(dispatch.envelope);
       const flushResourceUsage = () =>
@@ -1342,61 +1155,12 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           assignmentId,
           (report) => usageReporterContext(report.reporterId, report.digest, this.#clock()),
         );
-      const dispatcher = new InProcessConversationDispatcher({
-        enabled: true,
+      await executorPlan.dispatch({
         journal,
-        executor: remoteTarget?.executor ?? localLedger!,
+        envelope: dispatch.envelope,
         contexts: this.#contexts,
-        cancellationSubmission: {
-          submitCancellation: submission
-            ? (id: string) => submission.submitCancellation(
-                id,
-                assignmentContext(dispatch.envelope),
-              )
-            : async (id: string) => {
-                const snapshot = await remoteTarget!.executor.queryLedger(
-                  id,
-                  this.#contexts.create(id, "executor.queryLedger", {
-                    requestId: `ledger:${id}:cancel-proof`,
-                    body: { range: null },
-                  }),
-                );
-                if (!("phase" in snapshot) || !snapshot.cancelProof) return false;
-                await journal.submitCancelProof(
-                  id,
-                  snapshot.cancelProof,
-                  assignmentContext(dispatch.envelope),
-                );
-                return true;
-              },
-        },
-        bundleSubmission: {
-          submitSealedBundle: submission
-            ? (id: string) => submission.submitSealedBundle(
-                id,
-                assignmentContext(dispatch.envelope),
-              )
-            : async () => remoteBundleSubmissionDeferred(),
-        },
+        submissionContext,
       });
-      let dispatchResults: readonly DispatchResult[] | undefined;
-      try {
-        dispatchResults = await dispatcher.dispatchPending();
-      } catch (error) {
-        if (!remoteTarget || !isRetryableMeshFailure(error)) throw error;
-      } finally {
-        this.#assignmentRuntimeBindings.delete(assignmentId);
-      }
-      if (dispatchResults && (
-        dispatchResults.length !== 1 || !dispatchResults[0]!.accepted
-      )) {
-        const rejection = dispatchResults[0];
-        throw new Error(
-          rejection && !rejection.accepted
-            ? `${remoteTarget ? "Remote" : "Local"} executor rejected a freshly issued assignment: ${rejection.error.message}`
-            : `${remoteTarget ? "Remote" : "Local"} executor did not return exactly one dispatch result`,
-        );
-      }
       const streamRef = {
         execution: "conversation",
         conversationId: input.conversationId,
@@ -1493,24 +1257,15 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
             },
           });
       }
-      if (remoteTarget) {
-        firstPartySurfaceSession?.start();
-        return await this.#awaitRemoteConversationRun({
-          journal,
-          dispatcher,
-          executor: remoteTarget.executor,
-          conversationId: input.conversationId,
-          runId,
-          assignmentId,
-        });
-      }
-      if (!submission) throw new Error("Local assignment submission is unavailable");
-      await submission.startAndReport(assignmentId, submissionContext);
-
-      const stream: DurableAssignmentRunStream = this.#createStream
-        ? await this.#createStream({ assignmentId, ref: streamRef })
-        : new StreamDigestChain(assignmentId);
       firstPartySurfaceSession?.start();
+      const executeLocal = (async function* (
+        this: ConversationProtocolRuntime,
+        effect: ConversationExecutorExecutionEffect,
+      ): AsyncGenerator<AgentYield, RunResult> {
+      const executionRuntime = effect.runtime;
+      await effect.startAndReport(submissionContext);
+
+      const stream = await effect.createStream({ assignmentId, ref: streamRef });
       const streamMeta = executionIngress.turnOrigin
         ? { turnOrigin: executionIngress.turnOrigin }
         : {};
@@ -1526,20 +1281,18 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         return true;
       };
       let toolCalls = 0;
-      const interactionBinding: DurableInteractionBinding = {
-        assignmentId,
-        ledger: localLedger!,
-        submission,
+      const interactionScope = effect.createInteractionScope({
+        interactions: this.#interactions,
         context: submissionContext,
         surfacePrincipal: executionIngress.surfacePrincipal,
-        broker: localExecutionRuntime!.confirmationBroker,
+        broker: executionRuntime.confirmationBroker,
         stream,
         streamMeta,
-      };
-      const controlHeartbeat = this.#startControlHeartbeat(assignmentId);
+      });
+      const controlHeartbeat = effect.startHeartbeat();
       let runResult: RunResult;
       try {
-        const generator = localExecutionRuntime!.run(input.messages, {
+        const generator = executionRuntime.run(input.messages, {
           ...input.options,
           onProtocolEvent: async (event, meta) => {
             await stream.append(
@@ -1553,22 +1306,17 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           toolSideEffectObserver: this.#interactions,
           ...(this.#authority.globalPublishing
             ? {
-                stageScheduleMutation: createAssignmentScheduleStager(
-                  localLedger!,
+              stageScheduleMutation: effect.scheduleMutations({
+                anchorEpoch: this.#authority.ownerEpoch,
+                capability: assignmentGlobalCapability({
                   assignmentId,
-                  this.#authority.ownerEpoch,
-                  "conversation",
-                  assignmentGlobalCapability({
-                    assignmentId,
-                    execution: "conversation",
-                    capabilities: dispatch.envelope.capabilities,
-                  }),
-                ),
-              }
+                  execution: "conversation",
+                  capabilities: dispatch.envelope.capabilities,
+                }),
+              }),
+            }
             : {}),
-          assignmentMutations: createAssignmentMutationPort({
-            ledger: localLedger!,
-            assignmentId,
+          assignmentMutations: effect.assignmentMutations({
             execution: "conversation",
             anchorEpoch: this.#authority.ownerEpoch,
             allowGlobal: this.#authority.globalPublishing,
@@ -1598,10 +1346,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
               ? { globalQuery: this.#authority.executionAssetCatalog }
               : {}),
           authorizeToolExecution: () =>
-            localLedger!.authorizeToolExecution(
-              assignmentId,
-              dispatch.envelope.permissionLease,
-            ),
+            effect.authorizeToolExecution(dispatch.envelope.permissionLease),
           modelCallResourceMeter: {
             reserve: async ({ callIndex, tokenUpperBound }) => {
               const usageId = `usage:${assignmentId}:model:${callIndex}`;
@@ -1622,10 +1367,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           },
         });
         while (true) {
-          const item = await this.#interactions.withBinding(
-            interactionBinding,
-            () => generator.next(),
-          );
+          const item = await interactionScope.run(() => generator.next());
           if (item.done) {
             runResult = item.value;
             break;
@@ -1643,17 +1385,16 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           await this.#terminalOperations.run(async () => {
             if (await yieldToDurableCancellation()) return;
             const usageFinal = await flushResourceUsage();
-            if (await localLedger!.hasOpenSideEffects(assignmentId)) {
+            if (await effect.hasOpenSideEffects()) {
               await journal.markAssignmentUncertain(assignmentId, "ledger-unknown");
             } else {
               await this.#prepareRunEndUntilAvailable(
-                assignmentId,
-                submission,
+                effect,
                 submissionContext,
-                interactionBinding,
+                interactionScope,
               );
               await stream.final(streamMeta);
-              const failure = await localLedger!.failExecution(assignmentId, {
+              const failure = await effect.failExecution({
                 reason: executionFailureReason(error),
                 usageFinal,
               });
@@ -1686,17 +1427,16 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         const cancelled = await this.#terminalOperations.run(async () => {
           if (await yieldToDurableCancellation()) return true;
           const usageFinal = await flushResourceUsage();
-          if (await localLedger!.hasOpenSideEffects(assignmentId)) {
+          if (await effect.hasOpenSideEffects()) {
             await journal.markAssignmentUncertain(assignmentId, "ledger-unknown");
           } else {
             await this.#prepareRunEndUntilAvailable(
-              assignmentId,
-              submission,
+              effect,
               submissionContext,
-              interactionBinding,
+              interactionScope,
             );
             await stream.final(streamMeta);
-            const failure = await localLedger!.failExecution(assignmentId, {
+            const failure = await effect.failExecution({
               reason: runFailureReason(runResult.agentResult),
               usageFinal,
             });
@@ -1728,10 +1468,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           return { kind: "cancelled" as const };
         }
         await this.#prepareRunEndUntilAvailable(
-          assignmentId,
-          submission,
+          effect,
           submissionContext,
-          interactionBinding,
+          interactionScope,
         );
         const sourceValue = runResult.runRecord.source ?? input.options?.source;
         const advancement =
@@ -1745,7 +1484,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           ...(advancement ? { advancement } : {}),
         };
         const usageFinal = await flushResourceUsage();
-        const bundle = await localLedger!.sealConversationBundle(assignmentId, {
+        const bundle = await effect.sealConversationBundle({
           runRecord: transcriptRun,
           ...(runResult.windowCompact
             ? { windowCompact: runResult.windowCompact }
@@ -1759,10 +1498,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           },
           usageFinal,
         });
-        const committed = await submission.submitSealedBundle(
-          assignmentId,
-          submissionContext,
-        );
+        const committed = await effect.submitSealedBundle(submissionContext);
         if (!committed.committed) {
           const error = new Error(
             `Conversation commit rejected: ${committed.error.message}`,
@@ -1815,6 +1551,16 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       this.#markRecovery(input.conversationId);
       this.#kickDelivery(input.hooks?.onFinalPublishFailure, runResult);
       return runResult;
+      }).bind(this);
+      return yield* executorPlan.run({
+        execute: executeLocal,
+        onCommitted: (committed) =>
+          replayCommittedRun(committed.runRecord, committed.windowCompact),
+        onRemoteSettled: () => {
+          this.#markRecovery(input.conversationId);
+          this.#kickDelivery();
+        },
+      });
     } catch (error) {
       this.#markRecovery(input.conversationId);
       throw error;
@@ -1822,33 +1568,20 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       await channelSession?.close();
       firstPartyFinalitySession?.close();
       await firstPartySurfaceSession?.close();
-      const disposeReason = localRuntimePromoted
-        ? "assignment-dispose"
-        : "assembly-rollback";
-      await localExecutionRuntime?.dispose(disposeReason);
-      if (localBaseRuntime && localBaseRuntime !== localExecutionRuntime) {
-        await localBaseRuntime.dispose(disposeReason);
-      }
-      if (localPreflightManifest) {
-        this.#authority.releaseLocalConversationEnvironmentPreflight(
-          localPreflightManifest,
-          assignmentId,
-        );
-      }
+      await executorPlan?.dispose();
       this.#clearRunClaims(runId);
       this.#forgetAssignment(assignmentId);
     }
   }
 
   async #prepareRunEndUntilAvailable(
-    assignmentId: string,
-    submission: InProcessAssignmentSubmission,
+    effect: ConversationExecutorExecutionEffect,
     context: AuthorityCallContext,
-    interactionBinding: DurableInteractionBinding,
+    interactionScope: import("./conversation-executor-dispatch.js").ConversationExecutorInteractionScope,
   ): Promise<void> {
     await retryDurableObligation(async () => {
-      await submission.prepareForRunEnd(assignmentId, context);
-      await this.#interactions.drainAssignment(interactionBinding);
+      await effect.prepareForRunEnd(context);
+      await interactionScope.drain();
     });
   }
 
@@ -2204,13 +1937,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     if (this.#recoveryStopped) return 0;
     const queue = [...this.#recoveryConversations.entries()];
     let recovered = await this.#authority.resourceGovernor.reclaimExpired();
-    if (this.#ledger) {
-      if (
-        this.#authority.executorResourceGovernor &&
-        this.#authority.executorResourceGovernor !== this.#authority.resourceGovernor
-      ) {
-        recovered += await this.#authority.executorResourceGovernor.reclaimExpired();
-      }
+    if (
+      this.#authority.executorResourceGovernor &&
+      this.#authority.executorResourceGovernor !== this.#authority.resourceGovernor
+    ) {
+      recovered += await this.#authority.executorResourceGovernor.reclaimExpired();
     }
     const recoverConversation = async (conversationId: string): Promise<number> =>
       this.#withRecoveryClaim(conversationId, async () => {
@@ -2227,8 +1958,15 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           return 0;
         }
         await this.#primeAssignmentRouting(journal);
-        const routedExecutor = this.#routedExecutor();
-        const dispatcher = this.#recoveryDispatcher(journal, routedExecutor);
+        const recovery = this.#executorDispatch.recoveryDispatcher({
+          journal,
+          contexts: this.#contexts,
+          executorIdForAssignment: (assignmentId) =>
+            this.#executorIdForAssignment(assignmentId),
+          submissionContext: (assignmentId) =>
+            this.#submissionContext(assignmentId),
+        });
+        const { dispatcher, executor: routedExecutor } = recovery;
         if (this.#recoveryStopped) return count;
         count += await journal.resumeCommittedProjections();
         if (this.#recoveryStopped) return count;
@@ -2354,7 +2092,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       }
       for (const assignment of await journal.assignmentsAwaitingRecovery()) {
         assignments.push({
-          id: `${assignment.dispatch.envelope.executorId === this.#authority.executorId ? "local" : "relay"}:${assignment.assignmentId}`,
+          id: `${
+            assignment.dispatch.envelope.executorId === this.#authority.executorId
+              ? "local"
+              : "relay"
+          }:${assignment.assignmentId}`,
           revision: dispatchEnvelopeDigest(assignment.dispatch.envelope),
         });
       }
@@ -2552,10 +2294,13 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           ) {
             throw new Error("Assignment capability does not authorize this session mutation");
           }
-          const staged = await this.#requireLocalLedger().stageMutation(
+          const staging = this.#assignmentStaging;
+          if (!staging) {
+            throw new Error("Local assignment staging is unavailable in this owner topology");
+          }
+          const staged = await staging.stageSession(
             capability.assignmentId,
             {
-              domain: "session",
               mutation,
               requestId: ctx.requestId,
             },
@@ -2696,28 +2441,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
 
   #conversationForAssignment(assignmentId: string): string {
     const conversationId = this.#assignmentConversations.get(assignmentId);
-    if (!conversationId) throw new Error(`Unknown local assignment ${assignmentId}`);
+    if (!conversationId) throw new Error(`Unknown conversation assignment ${assignmentId}`);
     return conversationId;
-  }
-
-  #requireLocalLedger(): ConversationAssignmentLedger {
-    if (!this.#ledger) {
-      throw new Error("Local executor role is not enabled on this device");
-    }
-    return this.#ledger;
-  }
-
-  #createLocalSubmission(
-    owner: ConversationRunJournal,
-  ): InProcessAssignmentSubmission {
-    const Constructor = this.#InProcessAssignmentSubmission;
-    if (!Constructor) {
-      throw new Error("Local executor submission adapter is unavailable");
-    }
-    return new Constructor({
-      ledger: this.#requireLocalLedger(),
-      owner,
-    });
   }
 
   async #primeAssignmentRouting(journal: ConversationRunJournal): Promise<void> {
@@ -2732,103 +2457,35 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     }
   }
 
-  #routedExecutor(): RoutedRunExecutorPort {
-    return new RoutedRunExecutorPort(
-      (executorId) => this.#executorFor(executorId),
-      (assignmentId) => this.#executorForAssignment(assignmentId),
-    );
-  }
-
-  #recoveryDispatcher(
-    journal: ConversationRunJournal,
-    routedExecutor = this.#routedExecutor(),
-  ): InProcessConversationDispatcher {
-    const submission = this.#ledger
-      ? this.#createLocalSubmission(journal)
-      : undefined;
-    return new InProcessConversationDispatcher({
-      enabled: true,
-      journal,
-      executor: routedExecutor,
-      contexts: this.#contexts,
-      cancellationSubmission: {
-        submitCancellation: async (assignmentId) => {
-          if (this.#isLocalAssignment(assignmentId)) {
-            if (!submission) return false;
-            return submission.submitCancellation(
-              assignmentId,
-              this.#submissionContext(assignmentId),
-            );
-          }
-          const snapshot = await routedExecutor.queryLedger(
-            assignmentId,
-            this.#contexts.create(assignmentId, "executor.queryLedger", {
-              requestId: `ledger:${assignmentId}:cancel-proof`,
-              body: { range: null },
-            }),
-          );
-          if (!("phase" in snapshot) || !snapshot.cancelProof) return false;
-          await journal.submitCancelProof(
-            assignmentId,
-            snapshot.cancelProof,
-            this.#submissionContext(assignmentId),
-          );
-          return true;
-        },
-      },
-      bundleSubmission: {
-        submitSealedBundle: (assignmentId) => {
-          if (!this.#isLocalAssignment(assignmentId)) {
-            return Promise.resolve(remoteBundleSubmissionDeferred());
-          }
-          if (!submission) {
-            throw new Error("Local assignment submission is unavailable");
-          }
-          return submission.submitSealedBundle(
-            assignmentId,
-            this.#submissionContext(assignmentId),
-          );
-        },
-      },
-    });
-  }
-
   async #driveCancellation(
     journal: ConversationRunJournal,
     request: Parameters<InProcessConversationDispatcher["cancelRun"]>[0],
   ): Promise<void> {
     await this.#primeAssignmentRouting(journal);
-    await this.#recoveryDispatcher(journal).cancelRun(request);
+    await this.#createRecoveryDispatcher(journal).dispatcher.cancelRun(request);
   }
 
   async #drivePendingCancellations(
     journal: ConversationRunJournal,
   ): Promise<number> {
     await this.#primeAssignmentRouting(journal);
-    return this.#recoveryDispatcher(journal).recoverCancellations();
+    return this.#createRecoveryDispatcher(journal).dispatcher.recoverCancellations();
   }
 
-  #executorFor(executorId: string): RunExecutorPort {
-    if (executorId === this.#authority.executorId) {
-      return this.#requireLocalLedger();
-    }
-    const remote = this.#remoteExecution?.forExecutor(executorId);
-    if (!remote) {
-      throw new Error(`Remote conversation executor is unavailable: ${executorId}`);
-    }
-    return remote.executor;
-  }
-
-  #executorForAssignment(assignmentId: string): RunExecutorPort {
+  #executorIdForAssignment(assignmentId: string): string {
     const capability = this.#assignmentCapabilities.get(assignmentId);
     if (!capability) throw new Error(`Unknown conversation assignment ${assignmentId}`);
-    return this.#executorFor(capability.executorId);
+    return capability.executorId;
   }
 
-  #isLocalAssignment(assignmentId: string): boolean {
-    const capability = this.#assignmentCapabilities.get(assignmentId);
-    if (!capability) throw new Error(`Unknown conversation assignment ${assignmentId}`);
-    return capability.executorId === this.#authority.executorId;
+  #createRecoveryDispatcher(journal: ConversationRunJournal) {
+    return this.#executorDispatch.recoveryDispatcher({
+      journal,
+      contexts: this.#contexts,
+      executorIdForAssignment: (assignmentId) =>
+        this.#executorIdForAssignment(assignmentId),
+      submissionContext: (assignmentId) => this.#submissionContext(assignmentId),
+    });
   }
 
   #submissionContext(assignmentId: string): AuthorityCallContext {
@@ -2840,70 +2497,6 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       principal: { kind: "assignment", capability },
       requestId: `submission:${assignmentId}`,
       deadlineAt: capability.expiry,
-    };
-  }
-
-  async #awaitRemoteConversationRun(input: {
-    readonly journal: ConversationRunJournal;
-    readonly dispatcher: InProcessConversationDispatcher;
-    readonly executor: RunExecutorPort;
-    readonly conversationId: string;
-    readonly runId: string;
-    readonly assignmentId: string;
-  }): Promise<RunResult> {
-    const heartbeat = this.#startControlHeartbeat(input.assignmentId, input.executor);
-    try {
-      while (true) {
-        const committed = await input.journal.committedRun(input.runId);
-        if (committed) {
-          this.#markRecovery(input.conversationId);
-          this.#kickDelivery();
-          return replayCommittedRun(committed.runRecord, committed.windowCompact);
-        }
-        const state = await input.journal.runState(input.runId);
-        if (state === "failed" || state === "cancelled") {
-          throw new Error(`Remote conversation run terminated in state ${state}`);
-        }
-        try {
-          await input.dispatcher.recoverStarted();
-          await input.dispatcher.recoverAssignments();
-        } catch (error) {
-          if (!isRetryableMeshFailure(error)) throw error;
-          // Durable owner and executor outboxes retain every fact while the peer is offline.
-        }
-        await delay(100);
-      }
-    } finally {
-      await heartbeat.stop();
-    }
-  }
-
-  #startControlHeartbeat(assignmentId: string, executor?: RunExecutorPort): {
-    stop(): Promise<void>;
-  } {
-    let inFlight: Promise<void> | undefined;
-    const timer = setInterval(() => {
-      if (inFlight) return;
-      inFlight = (executor ?? this.#requireLocalLedger())
-        .queryLedger(
-          assignmentId,
-          this.#contexts.create(assignmentId, "executor.queryLedger", {
-            requestId: `ledger:${assignmentId}:snapshot`,
-            body: { range: null },
-          }),
-        )
-        .then(() => undefined)
-        .catch(() => undefined)
-        .finally(() => {
-          inFlight = undefined;
-        });
-    }, CONTROL_RENEWAL_INTERVAL_MS);
-    timer.unref?.();
-    return {
-      async stop() {
-        clearInterval(timer);
-        await inFlight;
-      },
     };
   }
 
@@ -3371,59 +2964,6 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     }
     return this.#mutationPublisher;
   }
-}
-
-class RoutedRunExecutorPort implements RunExecutorPort {
-  constructor(
-    private readonly forExecutor: (executorId: string) => RunExecutorPort,
-    private readonly forAssignment: (assignmentId: string) => RunExecutorPort,
-  ) {}
-
-  dispatch(...args: RunDispatchArguments): Promise<DispatchResult> {
-    return this.forExecutor(args[0].executorId).dispatch(...args);
-  }
-
-  cancel(
-    assignmentId: string,
-    fence: { fenceSeq: number; requestId: string },
-    context: AuthorityCallContext,
-  ): Promise<void> {
-    return this.forAssignment(assignmentId).cancel(assignmentId, fence, context);
-  }
-
-  supersede(
-    assignmentId: string,
-    fence: { fenceSeq: number; requestId: string },
-    context: AuthorityCallContext,
-  ): Promise<SupersedeProof> {
-    return this.forAssignment(assignmentId).supersede(assignmentId, fence, context);
-  }
-
-  queryLedger(
-    assignmentId: string,
-    context: AuthorityCallContext,
-    range?: { fromSeq: number; limit: number },
-  ): Promise<LedgerSnapshot | LedgerEvidencePage> {
-    return this.forAssignment(assignmentId).queryLedger(
-      assignmentId,
-      context,
-      range,
-    );
-  }
-}
-
-function remoteBundleSubmissionDeferred(): {
-  readonly committed: false;
-  readonly error: import("@zhixing/core/contracts").AuthorityError;
-} {
-  return {
-    committed: false,
-    error: {
-      code: "unavailable-offline",
-      message: "Remote executor owns durable bundle redelivery",
-      retryable: true,
-    },
-  };
 }
 
 function ingressForTurn(
@@ -3989,18 +3529,6 @@ function requireRuntimeExecutionPermissionRules(
   return rules;
 }
 
-function supportsRemoteConversationExecution(
-  invocation: ConversationInvocation,
-  ingress: IngressContext,
-): boolean {
-  // Specialized control and orchestration invocations retain their dedicated local
-  // runtime until those modules bind an equivalent remote execution contract.
-  return invocation.kind === "agent" &&
-    invocation.advancement === undefined &&
-    ((invocation.source === "interactive" && ingress.kind === "first-party") ||
-      (invocation.source === "channel" && ingress.kind === "channel"));
-}
-
 function conversationIdFromSubmissionContext(context: AuthorityCallContext): string {
   const principal = context.principal;
   if (
@@ -4026,6 +3554,16 @@ function asConversationMirrorBatch(
   return batch as ConversationInteractionMirrorBatch;
 }
 
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+function conversationExecutorRequirement(
+  invocation: ConversationInvocation,
+  ingress: IngressContext,
+): import("./conversation-executor-dispatch.js").ConversationExecutorRequirement {
+  // Conversation owns portability policy. The Host sees only the already
+  // decided placement requirement and never interprets invocation or ingress.
+  return invocation.kind === "agent" &&
+      invocation.advancement === undefined &&
+      ((invocation.source === "interactive" && ingress.kind === "first-party") ||
+        (invocation.source === "channel" && ingress.kind === "channel"))
+    ? { placement: "authorized-device" }
+    : { placement: "current-device" };
 }

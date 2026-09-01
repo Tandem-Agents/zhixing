@@ -32,7 +32,7 @@ import {
 import {
   DurableConversationInteractionObserver,
 } from "../conversation-protocol-runtime.js";
-import type { ExecutorDataPlaneRuntime } from "../executor-data-plane-runtime.js";
+import { createConversationExecutorHostBoundary } from "../conversation-executor-dispatch.js";
 import {
   LocalConversationOwnerAssembly,
   type LocalConversationOwnerPort,
@@ -303,11 +303,21 @@ export async function createLocalOwnerAssemblyFixture(
           ).finalizeLocalAssignment(assignmentId),
       })
     : undefined;
+  const executorBoundary = createConversationExecutorHostBoundary({
+    authority: owner,
+    clock: () => new Date().toISOString(),
+    local: {
+      ...(ledger ? { ledger } : {}),
+      ConversationAssignmentLedger,
+      InProcessAssignmentSubmission,
+      runtimeFactory,
+      createStream: async ({ assignmentId }) => new StreamDigestChain(assignmentId),
+    },
+  });
   const assembly = await LocalConversationOwnerAssembly.create({
     owner,
-    ...(ledger ? { ledger } : {}),
-    ConversationAssignmentLedger,
-    InProcessAssignmentSubmission,
+    executorDispatch: executorBoundary.application,
+    assignmentStaging: executorBoundary.staging!,
     runtimeFactory,
     interactions,
     advancementModelProvider: createHostAdvancementModelProviderFactory({
@@ -322,10 +332,6 @@ export async function createLocalOwnerAssemblyFixture(
       },
     },
     currentAnchorDeviceId: () => authority.deviceId,
-    dataPlane: {
-      createStream: async ({ assignmentId }: { readonly assignmentId: string }) =>
-        new StreamDigestChain(assignmentId),
-    } as unknown as Pick<ExecutorDataPlaneRuntime, "tickets" | "createStream">,
     ...(options.closeDrainBudgetMs === undefined
       ? {}
       : { closeDrainBudgetMs: options.closeDrainBudgetMs }),

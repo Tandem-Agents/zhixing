@@ -40,7 +40,16 @@ import {
   ConversationProtocolRuntime,
   DurableConversationInteractionObserver,
 } from "../conversation-protocol-runtime.js";
-import { localConversationOwnerRuntime } from "../conversation-owner-runtime.js";
+import {
+  anchorConversationOwnerRuntime,
+  localConversationOwnerRuntime,
+} from "../conversation-owner-runtime.js";
+import {
+  createConversationExecutorHostBoundary,
+  ConversationExecutorTopologyAdapter,
+  type ConversationExecutorDispatchApplication,
+  type ConversationExecutorTopologyDirectory,
+} from "../conversation-executor-dispatch.js";
 
 const TEST_EXECUTOR_READINESS = {
   tools: [] as string[],
@@ -92,7 +101,19 @@ function setupAuthorityRuntime(
 }
 
 function createProtocol(
-  options: ConstructorParameters<typeof ConversationProtocolRuntime>[0],
+  options: Omit<
+    ConstructorParameters<typeof ConversationProtocolRuntime>[0],
+    "executorDispatch"
+  > & {
+    readonly executorDispatch?: ConversationExecutorDispatchApplication;
+    readonly maxPendingInteractions?: number;
+    readonly localExecutor?: {
+      readonly ledger?: ConversationAssignmentLedger;
+      readonly ConversationAssignmentLedger: typeof ConversationAssignmentLedger;
+      readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
+      readonly runtimeFactory: RuntimeFactory;
+    };
+  },
 ): ConversationProtocolRuntime {
   const localExecutor = options.localExecutor ?? {
     ...TEST_LOCAL_EXECUTOR,
@@ -106,9 +127,28 @@ function createProtocol(
       },
     },
   };
+  const owner = options.owner ?? anchorConversationOwnerRuntime(options.authority!);
+  const executorBoundary = options.executorDispatch
+    ? undefined
+    : createConversationExecutorHostBoundary({
+      authority: owner,
+      clock: () => new Date().toISOString(),
+      ...(options.maxPendingInteractions === undefined
+        ? {}
+        : { maxPendingInteractions: options.maxPendingInteractions }),
+      local: localExecutor,
+    });
+  const {
+    localExecutor: _localExecutor,
+    maxPendingInteractions: _maxPendingInteractions,
+    ...protocolOptions
+  } = options;
   return new ConversationProtocolRuntime({
-    ...options,
-    localExecutor,
+    ...protocolOptions,
+    executorDispatch: options.executorDispatch ?? executorBoundary!.application,
+    ...(executorBoundary?.staging
+      ? { assignmentStaging: executorBoundary.staging }
+      : {}),
   });
 }
 
@@ -239,6 +279,39 @@ async function seedPendingConversation(label: string) {
 }
 
 describe("ConversationProtocolRuntime", () => {
+  it("requires one executor dispatch application and rejects Host topology rebinding", async () => {
+    const home = await createTempDir("conversation-protocol-dispatch-owner");
+    const authority = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: new MemorySecretStore(),
+    });
+    expect(() =>
+      new ConversationProtocolRuntime({
+        authority,
+        manager: () => {
+          throw new Error("test manager is unavailable");
+        },
+        interactions: new DurableConversationInteractionObserver(),
+        executorDispatch: undefined as never,
+      })
+    ).toThrow("Conversation protocol requires the executor dispatch application");
+
+    const topology = new ConversationExecutorTopologyAdapter();
+    const first: ConversationExecutorTopologyDirectory = {
+      candidates: async () => [],
+      forExecutor: () => undefined,
+    };
+    const second: ConversationExecutorTopologyDirectory = {
+      candidates: async () => [],
+      forExecutor: () => undefined,
+    };
+    topology.bindDirectory(first);
+    topology.bindDirectory(first);
+    expect(() => topology.bindDirectory(second)).toThrow(
+      "Conversation executor topology directory is already bound",
+    );
+  });
+
   it("runs and recovers a device-local conversation entirely on the executor authority domain", async () => {
     const home = await createTempDir("conversation-protocol-local-owner");
     const secretStore = new MemorySecretStore();

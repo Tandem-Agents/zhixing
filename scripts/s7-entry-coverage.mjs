@@ -3921,6 +3921,7 @@ export async function validateS7Structure() {
   }
   failures.push(...await inspectCleanupRegistryConstructions(records));
   failures.push(...inspectLocalConversationOwnerIsolation(records));
+  failures.push(...inspectConversationExecutorDispatchBoundary(records));
   failures.push(...inspectConversationAdoptionAssembly(records));
   failures.push(...inspectConversationStorageBoundary(records));
   failures.push(...inspectWorksceneStorageCleanupBoundary(records));
@@ -10349,6 +10350,170 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   return failures;
 }
 
+/** A6 Conversation application owns dispatch policy/state; Host owns topology mechanisms only. */
+export function inspectConversationExecutorDispatchBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const text = byPath.get(relative);
+    if (text === undefined) {
+      failures.push(`${relative}: Conversation executor dispatch boundary source is missing`);
+    }
+    return text ?? "";
+  };
+  const dispatchPath = "packages/cli/src/serve/conversation-executor-dispatch.ts";
+  const protocolPath = "packages/cli/src/serve/conversation-protocol-runtime.ts";
+  const accessPath = "packages/cli/src/serve/access-surfaces.ts";
+  const executorPath = "packages/cli/src/serve/executor-role-runtime.ts";
+  const localOwnerPath = "packages/cli/src/serve/local-conversation-owner.ts";
+  const meshPath = "packages/cli/src/serve/mesh-runtime-assembly.ts";
+  const commandPath = "packages/cli/src/serve/command.ts";
+  const schedulerPath = "packages/cli/src/serve/anchor-scheduler-runtime.ts";
+  const dispatch = required(dispatchPath);
+  const protocol = required(protocolPath);
+  const access = required(accessPath);
+  const executor = required(executorPath);
+  const localOwner = required(localOwnerPath);
+  const mesh = required(meshPath);
+  const command = required(commandPath);
+  const scheduler = required(schedulerPath);
+  const count = (text, token) => text.split(token).length - 1;
+
+  const requiredPort = (relative, text, interfaceName, propertyName, typeName) => {
+    const source = sourceFile(relative, text);
+    const declaration = source.statements.find((statement) =>
+      ts.isInterfaceDeclaration(statement) && statement.name.text === interfaceName
+    );
+    const property = declaration?.members.find((member) =>
+      ts.isPropertySignature(member) &&
+      ts.isIdentifier(member.name) && member.name.text === propertyName
+    );
+    if (
+      !property || !ts.isPropertySignature(property) || property.questionToken ||
+      property.type?.getText(source) !== typeName
+    ) {
+      failures.push(
+        `${relative}: ${interfaceName}.${propertyName} must be the required ${typeName}`,
+      );
+    }
+  };
+  requiredPort(
+    protocolPath,
+    protocol,
+    "ConversationProtocolRuntimeOptions",
+    "executorDispatch",
+    "ConversationExecutorDispatchApplication",
+  );
+  requiredPort(
+    localOwnerPath,
+    localOwner,
+    "LocalConversationOwnerAssemblyOptions",
+    "executorDispatch",
+    "ConversationExecutorDispatchApplication",
+  );
+  requiredPort(
+    localOwnerPath,
+    localOwner,
+    "LocalConversationOwnerAssemblyOptions",
+    "assignmentStaging",
+    "ConversationAssignmentStagingPort",
+  );
+
+  const forbiddenProtocolTokens = [
+    "RemoteConversationExecution",
+    "bindRemoteExecution",
+    "localExecutor?:",
+    "executorLedger()",
+    "ConversationAssignmentLedger",
+    "InProcessAssignmentSubmission",
+    "MeshRuntimeAssembly",
+    "isRetryableMeshFailure",
+    "#remoteExecution",
+    "#localRuntimeFactory",
+  ];
+  for (const token of forbiddenProtocolTokens) {
+    if (protocol.includes(token)) {
+      failures.push(`${protocolPath}: topology/transport responsibility leaked through ${token}`);
+    }
+  }
+  if (
+    count(protocol, "this.#executorDispatch.plan({") !== 1 ||
+    count(protocol, "executorPlan.run({") !== 1 ||
+    count(protocol, "requirement: conversationExecutorRequirement(") !== 1 ||
+    !protocol.includes("Conversation protocol requires the executor dispatch application")
+  ) {
+    failures.push(`${protocolPath}: one product-owned requirement/application result chain drifted`);
+  }
+
+  const hostBoundaryConstructions = records.filter(({ text }) =>
+    text.includes("createConversationExecutorHostBoundary({")
+  );
+  if (
+    hostBoundaryConstructions.length !== 2 ||
+    count(access, "createConversationExecutorHostBoundary({") !== 2 ||
+    count(executor, "createConversationExecutorHostBoundary({") !== 1 ||
+    hostBoundaryConstructions.some(({ relative }) => ![accessPath, executorPath].includes(relative))
+  ) {
+    failures.push("Conversation executor Host boundary construction exact-set drifted");
+  }
+  if (
+    count(access, "executorDispatch: executorBoundary.application") !== 1 ||
+    count(access, "executorDispatch: localExecutorBoundary.application") !== 1 ||
+    count(executor, "executorDispatch: conversationExecutorBoundary.application") !== 1 ||
+    count(localOwner, "executorDispatch: options.executorDispatch") !== 1 ||
+    localOwner.includes("createConversationExecutorHostBoundary({")
+  ) {
+    failures.push("Conversation executor application/staging Host injection drifted");
+  }
+  if (
+    count(mesh, "options.executorTopology!.bindDirectory(this.#remoteDirectory())") !== 1 ||
+    mesh.includes("bindRemoteExecution") ||
+    count(dispatch, "this.#authority.prepareConversationAssignment({") !== 1 ||
+    dispatch.includes("supportsOffDeviceExecution") ||
+    dispatch.includes("readonly ingress: IngressContext") ||
+    dispatch.includes("readonly invocation: ConversationInvocation")
+  ) {
+    failures.push("Conversation executor product policy/application ownership drifted");
+  }
+  const topology = dispatch.slice(
+    dispatch.indexOf("export class ConversationExecutorTopologyAdapter"),
+    dispatch.indexOf("export interface ConversationExecutorHostBoundary"),
+  );
+  if (
+    topology.includes("prepareConversationAssignment") ||
+    topology.includes("ConversationInvocation") ||
+    topology.includes("IngressContext") ||
+    topology.includes("localLedger()") ||
+    topology.includes("runtimeFactory()") ||
+    topology.includes("authority()")
+  ) {
+    failures.push("Host topology adapter became a product-policy or service-locator owner");
+  }
+  const demand = dispatch.slice(
+    dispatch.indexOf("export interface ConversationExecutorExecutionEffect"),
+    dispatch.indexOf("export interface ConversationExecutorHostBoundaryOptions"),
+  );
+  if (
+    demand.includes("ConversationAssignmentLedger") ||
+    demand.includes("InProcessAssignmentSubmission") ||
+    demand.includes("RuntimeFactory") ||
+    demand.includes("localLedger")
+  ) {
+    failures.push("Conversation executor demand contract leaked concrete Executor implementation");
+  }
+  if (
+    command.includes("conversationProtocol.executorLedger()") ||
+    scheduler.includes("conversationProtocol.executorLedger()") ||
+    access.includes("conversationProtocol.executorLedger()") ||
+    dispatch.includes("localLedger()") ||
+    command.includes("conversationExecutorDispatch.localLedger()") ||
+    access.includes("conversationExecutorDispatch!.localLedger()")
+  ) {
+    failures.push("Conversation executor ledger escaped through a demand or dispatch accessor");
+  }
+  return failures;
+}
+
 export function inspectLocalConversationOwnerIsolation(records) {
   const failures = [];
   const runtimeRecord = records.find(
@@ -10835,14 +11000,12 @@ export function inspectLocalConversationOwnerIsolation(records) {
   ]);
   const allowedCreateProperties = new Set([
     "owner",
-    "ledger",
-    "ConversationAssignmentLedger",
-    "InProcessAssignmentSubmission",
+    "executorDispatch",
+    "assignmentStaging",
     "runtimeFactory",
     "interactions",
     "advancementModelProvider",
     "evidence",
-    "dataPlane",
     "closeDrainBudgetMs",
     "currentAnchorDeviceId",
   ]);
@@ -10979,13 +11142,12 @@ export function inspectLocalConversationOwnerIsolation(records) {
           }
           for (const required of [
             "owner",
-            "ConversationAssignmentLedger",
-            "InProcessAssignmentSubmission",
+            "executorDispatch",
+            "assignmentStaging",
             "runtimeFactory",
             "interactions",
             "advancementModelProvider",
             "evidence",
-            "dataPlane",
           ]) {
             if (!properties.has(required)) {
               failures.push(`${record.relative}: local owner construction is missing ${required}`);

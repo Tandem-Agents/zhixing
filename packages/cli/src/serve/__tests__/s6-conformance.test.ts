@@ -90,8 +90,12 @@ import { ASSIGNMENT_RECORD_V2_WRITES_ENABLED } from "../conversation-executor-le
 import {
   ConversationProtocolRuntime,
   DurableConversationInteractionObserver,
-  type RemoteConversationExecutionDirectory,
 } from "../conversation-protocol-runtime.js";
+import {
+  createConversationExecutorHostBoundary,
+  type ConversationExecutorTopologyDirectory,
+} from "../conversation-executor-dispatch.js";
+import { anchorConversationOwnerRuntime } from "../conversation-owner-runtime.js";
 import {
   DATA_PLANE_TICKET_SERVICE,
   DataPlaneTicketMeshClient,
@@ -391,7 +395,7 @@ interface RemoteExecutorHarness {
   readonly authorityView: AuthorityRuntimeStack;
   readonly dataPlane: ExecutorDataPlaneRuntime;
   readonly ledger: ConversationAssignmentLedger;
-  readonly directory: RemoteConversationExecutionDirectory;
+  readonly directory: ConversationExecutorTopologyDirectory;
   readonly mesh: MeshRuntimeAssembly;
   /** 远端 executor worker 的失败出口:静默会让 owner 侧只表现为挂起。 */
   readonly workerErrors: readonly Error[];
@@ -654,7 +658,7 @@ async function createRemoteConversationExecutor(input: {
       };
     },
   } as MeshRuntimeAssembly;
-  const directory: RemoteConversationExecutionDirectory = {
+  const directory: ConversationExecutorTopologyDirectory = {
     async candidates() {
       return [{
         executorId,
@@ -767,14 +771,12 @@ async function runConversationScenario(
     deliveryHistory: async () => [],
   });
   jobStatus.onStatus((notice) => statusHub.publish(notice));
-  protocol = new ConversationProtocolRuntime({
-    authority,
-    manager: () => manager,
-    interactions,
+  const executorBoundary = createConversationExecutorHostBoundary({
+    authority: anchorConversationOwnerRuntime(authority),
     clock: () => new Date().toISOString(),
     ...(topology === "local"
       ? {
-          localExecutor: {
+          local: {
             ConversationAssignmentLedger,
             InProcessAssignmentSubmission,
             dataPlaneTickets: localDataPlane!.tickets,
@@ -786,6 +788,16 @@ async function runConversationScenario(
           },
         }
       : {}),
+  });
+  protocol = new ConversationProtocolRuntime({
+    authority,
+    executorDispatch: executorBoundary.application,
+    ...(executorBoundary.staging
+      ? { assignmentStaging: executorBoundary.staging }
+      : {}),
+    manager: () => manager,
+    interactions,
+    clock: () => new Date().toISOString(),
     onStatus: (notice) => {
       statuses.push(notice);
       statusHub.publish(notice);
@@ -801,7 +813,7 @@ async function runConversationScenario(
   });
   let remote: RemoteExecutorHarness | undefined;
   if (topology === "local") {
-    localDataPlane!.bindLedger(protocol.executorLedger());
+    localDataPlane!.bindLedger(executorBoundary.localLedger!);
     await localDataPlane!.start();
   } else {
     remote = await createRemoteConversationExecutor({
@@ -812,7 +824,7 @@ async function runConversationScenario(
       interactions,
       executorKey: remoteExecutorKey!,
     });
-    protocol.bindRemoteExecution(remote.directory);
+    executorBoundary.topology.bindDirectory(remote.directory);
   }
 
   let challenge: ChannelChallengeMessage | undefined;
@@ -1563,6 +1575,10 @@ async function runJobScenario(
   const interactions = new DurableConversationInteractionObserver();
   const protocol = new ConversationProtocolRuntime({
     authority,
+    executorDispatch: createConversationExecutorHostBoundary({
+      authority: anchorConversationOwnerRuntime(authority),
+      clock: () => new Date().toISOString(),
+    }).application,
     manager: () => {
       throw new Error("Job-only S6 scenario has no conversation manager");
     },

@@ -7,6 +7,10 @@ import { describe, expect, it } from "vitest";
 import { setupAuthorityRuntime } from "../../setup-delivery.js";
 import { localConversationOwnerRuntime } from "../conversation-owner-runtime.js";
 import {
+  anchorConversationOwnerRuntime,
+} from "../conversation-owner-runtime.js";
+import { createConversationExecutorHostBoundary } from "../conversation-executor-dispatch.js";
+import {
   ConversationProtocolRuntime,
   DurableConversationInteractionObserver,
 } from "../conversation-protocol-runtime.js";
@@ -51,10 +55,15 @@ describe("conversation owner domain conformance", () => {
           throw new Error("shared owner conformance does not execute a model");
         },
       });
+      const owner = configuration.domain === "local"
+        ? localConversationOwnerRuntime(authority)
+        : anchorConversationOwnerRuntime(authority);
       const protocol = new ConversationProtocolRuntime({
-        ...(configuration.domain === "local"
-          ? { owner: localConversationOwnerRuntime(authority) }
-          : { authority }),
+        ...(configuration.domain === "local" ? { owner } : { authority }),
+        executorDispatch: createConversationExecutorHostBoundary({
+          authority: owner,
+          clock: () => new Date().toISOString(),
+        }).application,
         manager: () => manager,
         interactions: new DurableConversationInteractionObserver(),
       });

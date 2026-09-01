@@ -33,6 +33,7 @@ import {
   ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
   createConversationExecutorLedger,
 } from "./conversation-executor-ledger.js";
+import { createConversationExecutorHostBoundary } from "./conversation-executor-dispatch.js";
 import { localConversationOwnerRuntime } from "./conversation-owner-runtime.js";
 import { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
 import { createExecutorReadinessSource } from "./executor-readiness.js";
@@ -413,11 +414,25 @@ export async function runExecutorRole(
     });
     const runtimeFactory =
       executor.createInProcessAssignmentRuntimeFactory(role);
+    const conversationExecutorBoundary = createConversationExecutorHostBoundary({
+      authority: localOwnerRuntime,
+      clock: () => new Date().toISOString(),
+      local: {
+        ledger,
+        ConversationAssignmentLedger: executor.ConversationAssignmentLedger,
+        InProcessAssignmentSubmission: executor.InProcessAssignmentSubmission,
+        runtimeFactory,
+        dataPlaneTickets: dataPlane.tickets,
+        createStream: (input) => dataPlane.createStream(input),
+      },
+    });
+    if (!conversationExecutorBoundary.staging) {
+      throw new Error("Executor-only Conversation owner requires assignment staging");
+    }
     const localConversationOwner = await LocalConversationOwnerAssembly.create({
       owner: localOwnerRuntime,
-      ledger,
-      ConversationAssignmentLedger: executor.ConversationAssignmentLedger,
-      InProcessAssignmentSubmission: executor.InProcessAssignmentSubmission,
+      executorDispatch: conversationExecutorBoundary.application,
+      assignmentStaging: conversationExecutorBoundary.staging,
       runtimeFactory,
       interactions,
       advancementModelProvider: createHostAdvancementModelProviderFactory({
@@ -426,7 +441,6 @@ export async function runExecutorRole(
       }),
       evidence: evidenceHandler,
       currentAnchorDeviceId,
-      dataPlane,
     });
     executorRoleLifecycle.acquire(
       "localConversationOwner.close",
