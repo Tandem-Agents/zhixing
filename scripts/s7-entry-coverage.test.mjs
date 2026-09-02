@@ -1807,6 +1807,8 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     "packages/cli/src/serve/recovery-root-establishment-runtime.ts",
     "packages/cli/src/serve/recovery-root-activation.ts",
     "packages/cli/src/serve/paired-checkpoint-incoming-infrastructure.ts",
+    "packages/cli/src/serve/paired-checkpoint-target.ts",
+    "packages/cli/src/serve/paired-checkpoint-target-infrastructure.ts",
     "packages/cli/src/serve/published-checkpoint-target.ts",
     "packages/cli/src/serve/published-checkpoint-target-infrastructure.ts",
     "packages/cli/src/serve/access-surfaces.ts",
@@ -2015,26 +2017,36 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
       "packages/cli/src/serve/backup-command.ts",
-      (text) => text.replace(
-        /(transport: new MeshPairedCheckpointTransport\(control\.connections\.client\(targetDeviceId\)\),\r?\n\s*)storageMaintenance: context\.capacity\.storage/u,
-        "$1storageMaintenance: undefined",
-      ),
+      (text) => `${text}\nconst forbidden = "PairedRecoveryCheckpointTarget";`,
     )).join("\n"),
-    /backup-command\.ts: paired checkpoint client must use the device storage governor/,
+    /paired checkpoint target finite Infrastructure or lifecycle boundary drifted/,
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
-      "packages/cli/src/serve/mesh-pair-command.ts",
-      (text) => text.replace("storageMaintenance: input.storageMaintenance", "storageMaintenance: undefined"),
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace('kind: "runtime-unavailable"', 'kind: "available"'),
     )).join("\n"),
-    /mesh-pair-command\.ts: paired checkpoint client must use the device storage governor/,
+    /paired checkpoint target finite Infrastructure or lifecycle boundary drifted/,
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
       "packages/cli/src/serve/backup-runtime-owner.ts",
-      (text) => text.replace("storageMaintenance: input.storageMaintenance", "storageMaintenance: undefined"),
+      (text) => text.replace(
+        "readonly pairedTargets: BorrowedPairedCheckpointTargetSessions;",
+        "readonly pairedTargets?: BorrowedPairedCheckpointTargetSessions;",
+      ),
     )).join("\n"),
-    /backup-runtime-owner\.ts: paired checkpoint client must use the device storage governor/,
+    /paired checkpoint target finite Infrastructure or lifecycle boundary drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/paired-checkpoint-target-infrastructure.ts",
+      (text) => text.replace(
+        "close: once(input.closeControlPlane)",
+        "close: input.closeControlPlane",
+      ),
+    )).join("\n"),
+    /paired checkpoint target finite Infrastructure or lifecycle boundary drifted/,
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
@@ -2100,7 +2112,10 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
       "packages/cli/src/serve/mesh-pair-command.ts",
-      (text) => text.replace("return new PairedRecoveryCheckpointTarget({", "return new UnboundedTarget({"),
+      (text) => text.replace(
+        "return createPairingSocketPublishedCheckpointTarget({",
+        "return createUnboundedPairingTarget({",
+      ),
     )).join("\n"),
     /onboarding checkpoint must precede business enrollment/,
   );

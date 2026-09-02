@@ -210,6 +210,7 @@ import {
 import { StartupRollback } from "./startup-rollback.js";
 import { AssemblyLifecycleContributions } from "./assembly-lifecycle.js";
 import { createConfiguredCheckpointOwner } from "./backup-runtime-owner.js";
+import { createBorrowedMeshPairedCheckpointTargetSessions } from "./paired-checkpoint-target-infrastructure.js";
 import { createPublishedCheckpointTargetInfrastructure } from "./published-checkpoint-target-infrastructure.js";
 import { createBackupTargetConfigurationInfrastructure } from "./backup-target-config-infrastructure.js";
 import {
@@ -968,7 +969,18 @@ async function runServerProcess(
       storageMaintenance: ctx.storageMaintenance,
     }).directory,
     mesh: ctx.meshBootstrap,
-    ...(ctx.meshRuntime ? { meshRuntime: ctx.meshRuntime } : {}),
+    pairedTargets: createBorrowedMeshPairedCheckpointTargetSessions(
+      ctx.meshRuntime
+        ? {
+            kind: "available",
+            connections: ctx.meshRuntime.connections,
+            storageMaintenance: ctx.storageMaintenance,
+          }
+        : {
+            kind: "runtime-unavailable",
+            storageMaintenance: ctx.storageMaintenance,
+          },
+    ),
     storageMaintenance: ctx.storageMaintenance,
     ...(ctx.authorityRuntime
       ? {

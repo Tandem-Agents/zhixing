@@ -566,7 +566,9 @@ async function openRootLifecycleTarget(
   fixture: Awaited<ReturnType<typeof pairedHomeWithoutRecoveryRoot>>,
   recipientKeyId: string,
 ): Promise<{
+  readonly kind: "paired-device";
   readonly target: PairedRecoveryCheckpointTarget;
+  readonly rootActivation: PairedRecoveryCheckpointTarget;
   readonly close: () => Promise<void>;
 }> {
   const targetTrust = await fixture.targetBootstrap.bootstrapStore.loadTrustRecord();
@@ -582,15 +584,18 @@ async function openRootLifecycleTarget(
     storageMaintenance: fixture.targetStorage,
   });
   if (!receiver) throw new Error("root lifecycle receiver is not active");
+  const target = new PairedRecoveryCheckpointTarget({
+    homeId: sourceTrust.homeId,
+    sourceDeviceId: fixture.sourceBootstrap.deviceKey.deviceId,
+    targetDeviceId: fixture.targetDeviceId,
+    recipientKeyId,
+    transport: receiver,
+    storageMaintenance: fixture.sourceStorage,
+  });
   return {
-    target: new PairedRecoveryCheckpointTarget({
-      homeId: sourceTrust.homeId,
-      sourceDeviceId: fixture.sourceBootstrap.deviceKey.deviceId,
-      targetDeviceId: fixture.targetDeviceId,
-      recipientKeyId,
-      transport: receiver,
-      storageMaintenance: fixture.sourceStorage,
-    }),
+    kind: "paired-device",
+    target,
+    rootActivation: target,
     close: async () => undefined,
   };
 }

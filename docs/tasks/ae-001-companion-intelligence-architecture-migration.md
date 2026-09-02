@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-10c P11 published filesystem checkpoint target 边界已通过协调者独立验收，等待提交<br>
+> 当前检查点：A6-10d P11 paired network checkpoint target 边界已通过协调者独立验收，等待提交<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,10 +202,10 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `37296e00`；A6-10b 已提交，P11 backup target configuration 边界已闭合 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；P11 published filesystem checkpoint target 已通过独立验收 |
-| 活跃工作包 | `A6-10c-p11-published-filesystem-target-v1` 已通过协调者独立验收，等待提交 |
-| 下一责任链 | A6-10c 闭合后独立迁移 paired network target 与 Mesh client；P12 保持独立 |
+| 已接受基线 | `1042ee00`；A6-10c 已提交，P11 published filesystem checkpoint target 边界已闭合 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；P11 paired network checkpoint target 已通过独立验收 |
+| 活跃工作包 | `A6-10d-p11-paired-network-target-v1` 已通过协调者独立验收，等待提交 |
+| 下一责任链 | A6-10d 闭合后独立裁决并迁移 P12 transfer staging/CAS/Mesh 适配；随后审计 A6 exact-set，不提前进入 A7 |
 | 打开的单向桥 | 无；P07 四条物理持久边界、P09 D03/D04 与 D05 的 Surface/assignment 有限端口均已单向接管，需求侧无 File concrete、`Pick<concrete>`、optional fallback 或第二 staging root |
 | 已失效证据 | 无当前未恢复架构证据；A6-01～09c 继续有效，A6-09d 的有限 receiver、双 Host 注入、传输/续传与清理证据已独立恢复 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
@@ -2813,6 +2813,19 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据：published target/owner 2 文件 4/4，backup/DR/pair 3 文件 19/19，Mesh full checkpoint 1 文件 17/17，recovery-root incoming 1 文件 1/1，合计 7 文件 41/41；其中 bounded historical session 直接断言 recover/verify/retire 三次 close，factory 直接断言有限 exact-set、frozen projection、canonical paired identity 与重复 close。Mesh 与 CLI package-filtered TypeScript检查、Mesh build、fresh `pnpm cli:build`、`pnpm runtime:package-exports`均通过。canonical S7 production coverage、56/56 mutation 与 registry golden 通过；反向 mutation可拒绝需求侧 File concrete、optional Host port、canonical root漂移、paired network target越界、无 bounded resolver及 device-removal误删。changed-source Biome与`git diff --check`通过。
 - 失效与交接：若 finite target/session exact-set、唯一 File factory/canonical roots、五类生产消费边界、历史 target resolver、directory/paired/deferred close、checkpoint publish/read/inventory/retire、incoming receiver、device-removal cleanup、S7或上述直接测试任一变化，只恢复本证据及真实相交的A0 P11/A6-10a/10b证据；P06、P12与paired network transport不因本包失效。当前无打开桥和未恢复证据；A6继续`[ ]`，等待协调者独立复核，下一检查点仅允许 paired network target与Mesh client，不进入P12/A7。本轮未执行Git暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：确认 backup、常驻 checkpoint owner、DR、pair onboarding 与 paired incoming 只消费 required 的有限 target/session，`FileRecoveryCheckpointTarget`、canonical roots、create/open/close 与 deferred operation 生命周期仅存在于唯一 Infrastructure factory；历史 target verify/retention/pending replay 均以 bounded session 收口，需求侧无 File/path、optional fallback、第二 factory 或 paired network client 越界。独立重建 Mesh 后运行 full checkpoint 17/17、CLI 六个相交文件 24/24、Mesh/CLI typecheck、canonical S7 56/56 与 registry golden、runtime package exports、concrete/path 反查及 `git diff --check` 均通过；执行者的 fresh CLI build 与 changed-source 格式证据有效。A6-10c 可以提交，A6继续 `[ ]`。
+
+### A6-10d：P11 paired network checkpoint target 边界收口
+
+- 派发基线与唯一结果：以已接受 `HEAD 1042ee00` 加本文调度记录为基线，只迁移 P11 paired network checkpoint target 的构造与传输适配责任。backup 命令、常驻 checkpoint owner、灾难恢复和首次配对开箱只消费 required、readonly、有限的 paired target/session/activation 角色；`PairedRecoveryCheckpointTarget`、`MeshPairedCheckpointTransport`、Mesh service client 与 pairing socket command transport 只存在于明确的 Infrastructure/Host/命令边缘。不得改变 checkpoint、恢复根或配对产品流程。
+- 生产闭包与生命周期：覆盖 backup setup/verify/root lifecycle 的临时认证连接、常驻 Anchor owner 的既有 Mesh connection、DR inventory/restore 的临时 control plane，以及首次 pairing socket 上的 root activation 与响应重放。保留 control plane start→peer ready→use→stop、常驻 Mesh 生命周期、AbortSignal、target identity/independence、home/source/target/recipient 绑定、storage governor、checkpoint begin/progress/append/commit/get/inventory/range/retire/activate-root、canonical Mesh 编解码和 pairing frame 次序；有限 session 必须准确表达谁关闭 control plane、谁只借用 Host-owned connection，不产生双 close 或泄漏。
+- 旧路与明确不做：上述需求与状态机不得继续导入、声明、构造、`instanceof` 判断或以类型推导依赖 `PairedRecoveryCheckpointTarget`、`MeshPairedCheckpointTransport`、`MeshServiceClient` 或 pairing socket transport，不得直接把 `connections.client(deviceId)` 变成业务合同、使用 cast/optional fallback/第二 target factory。不得迁移 A6-10a incoming receiver、A6-10b configuration、A6-10c filesystem target、P06 checkpoint/Trust/crypto、Mesh control-plane 拓扑、协议 schema、retention、P12 或新增 target 类型/产品能力。
+- 最窄证据与完成条件：直接测试覆盖 paired finite contract exact-set/frozen projection、两类 transport adapter、四类生产消费者、temporary/borrowed 生命周期及全部适用的上传、读取、inventory、retire、root activation、响应丢失和错误关闭路径；结构门禁拒绝需求侧 concrete/client/connection 回流、Host 漏绑定、第二构造、optional role、文件 target 或 incoming receiver 越界。按验证手册只运行 paired checkpoint target、backup owner/command、DR、pair onboarding 与真实 Mesh 连接相交测试、Mesh/CLI typecheck和必要 build、canonical S7、相交 exports、changed-source 格式与 `git diff --check`；不重复 filesystem/config/incoming、P09、P12、根级回归或制品验收。
+- 安全交接：只有 paired network target 由唯一有限机制边界形成，四类需求消费者不再认识 concrete transport/client，临时与常驻连接生命周期、产品行为及异常重放均闭合且无第二入口时才结束；A6继续 `[ ]`。约四小时仍未闭合、发现必须改 Mesh control plane 或 checkpoint/配对产品合同、影响扩入 P12，或两种 transport 无法维持单一 paired target 责任时，停在可构建、可运行且单一 target 真相成立的检查点反馈，不得执行任何 Git 写操作。
+- 实施与唯一责任：以已接受 `HEAD 1042ee00` 加协调者调度记录为基线，形成待复核证据 `A6-10d-p11-paired-network-target-v1`。新增 demand-owned `paired-checkpoint-target`，只公开冻结的 paired binding、retirable/inventory session、recovery-root activation 与 required borrowed session 角色；唯一 `paired-checkpoint-target-infrastructure` 封装 `PairedRecoveryCheckpointTarget`、`MeshPairedCheckpointTransport`、`MeshServiceClient` 取得和 pairing socket command/result transport。backup、常驻 checkpoint owner、DR 与 pair onboarding 四类需求侧均改绑有限角色，concrete 构造各只剩 Infrastructure 一处；需求侧的 concrete/client、`instanceof`、动态 `activateRoot` 推断、optional borrowed runtime 与 pairing transport class 均归零。
+- 生命周期与行为保护：backup 与 DR 的临时 control plane 仍严格 start→peer ready→target use→幂等 stop，构造 target 后由 owned session 接管关闭，构造前失败仍由原命令补偿；常驻 owner 由 Host 显式注入 `available/runtime-unavailable` borrowed 角色，available 只借用 Host Mesh connection 且 close 为 no-op，runtime unavailable 继续投影原状态并在历史 target 重取时 fail closed。pairing socket target 只暴露基础 publish/read 能力，root activation 由独立有限角色提供；checkpoint begin/progress/append/commit/get/inventory/range/retire/activate-root、canonical codec、home/source/target/recipient、target identity/independence、AbortSignal、storage governor、响应丢失重放及 pairing frame 顺序均复用原 Mesh 实现，未改变 schema、P06/P12 或 control-plane 拓扑。
+- 直接证据与门禁：最终定向运行 paired target、backup owner/command、DR 与 pair onboarding 五文件 24/24；其中新 adapter 3 项直接锁定 frozen exact-set、owned close 恰一次、borrowed no-close/required unavailable 分支、pairing frame exact wrapper 与 malformed result fail-closed，既有真实 Mesh 测试继续覆盖上传/读取/retire/root activation、响应丢失和恢复。Mesh 与 CLI package-filtered TypeScript检查、Mesh build及 fresh `pnpm cli:build`通过；canonical S7 最终 56/56 且 registry golden通过，反向 mutation拒绝 concrete/client回流、第二构造、optional borrowed role、Host漏掉显式 unavailable 分支、owned close非幂等或 pairing transport回流。changed-source Biome 11文件通过；本包没有修改 package manifest、tsup entry或正式导出，故无相交 package-export输入、未重复运行未失效门禁。
+- 失效与交接：若 finite paired role exact-set、唯一 Infrastructure concrete/transport owner、四类生产消费端、temporary/borrowed close语义、Host available/unavailable注入、pairing frame adapter、checkpoint codec/identity/AbortSignal/storage governor、S7或上述直接测试任一变化，只恢复本证据及真实相交的A0 P11/A6-10a～10c证据；P06、P09与P12不因无关变化自动失效。当前无打开桥和未恢复证据；A6继续`[ ]`，等待协调者独立复核，下一检查点只允许独立P12 transfer staging/CAS/Mesh适配，不进入A7。本轮未执行Git暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：确认 backup、常驻 checkpoint owner、DR 与首次 pairing 只消费 required 的有限 paired target/session/activation 角色，paired concrete、Mesh client transport 与 pairing frame transport 仅存在于唯一 Infrastructure adapter；临时 control plane 由 owned session 幂等关闭，常驻 Host connection 以 required available/unavailable 借用角色表达且无双 close。独立运行五个相交测试文件 24/24、CLI typecheck、canonical S7 56/56 与 registry golden、concrete/client/connection 反查及 `git diff --check` 均通过；执行者的 Mesh build、fresh CLI build 与 changed-source 格式证据有效，本包没有 package-export 输入变化。A6-10d 可以提交，A6继续 `[ ]`。
 
 ## 十、用户提示词
 

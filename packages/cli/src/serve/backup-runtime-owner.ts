@@ -14,17 +14,13 @@ import {
   projectDurableRecoveryBackupStatus,
   type RecoveryBackupStatus,
 } from "@zhixing/mesh/checkpoint-service";
-import {
-  MeshPairedCheckpointTransport,
-  PairedRecoveryCheckpointTarget,
-} from "@zhixing/mesh/paired-checkpoint-target";
 import { keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
 import type {
   BackupTargetBinding,
   BackupTargetConfigurationRepository,
 } from "./backup-target-config.js";
 import type { MeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
-import type { MeshRuntimeAssembly } from "./mesh-runtime-assembly.js";
+import type { BorrowedPairedCheckpointTargetSessions } from "./paired-checkpoint-target.js";
 import type {
   ExistingPublishedCheckpointDirectorySessions,
   PublishedRecoveryCheckpointTargetSession,
@@ -36,7 +32,7 @@ const TURN_MS = 60 * 60 * 1000;
 export async function createConfiguredCheckpointOwner(input: {
   readonly backupTargets: BackupTargetConfigurationRepository;
   readonly mesh: MeshRuntimeBootstrap;
-  readonly meshRuntime?: MeshRuntimeAssembly;
+  readonly pairedTargets: BorrowedPairedCheckpointTargetSessions;
   readonly storageMaintenance: StorageMaintenanceGovernorPort;
   readonly publishedDirectoryTargets: ExistingPublishedCheckpointDirectorySessions;
   readonly checkpointRetention?: ArtifactCheckpointRetentionPort;
@@ -77,7 +73,7 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
   constructor(private readonly input: {
     readonly backupTargets: BackupTargetConfigurationRepository;
     readonly mesh: MeshRuntimeBootstrap;
-    readonly meshRuntime?: MeshRuntimeAssembly;
+    readonly pairedTargets: BorrowedPairedCheckpointTargetSessions;
     readonly storageMaintenance: StorageMaintenanceGovernorPort;
     readonly publishedDirectoryTargets: ExistingPublishedCheckpointDirectorySessions;
     readonly checkpointRetention?: ArtifactCheckpointRetentionPort;
@@ -176,18 +172,21 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
     const recipientKeyId = keyIdForPublicKey(trust.recoveryBackupPublicKey);
     let targetSession: PublishedRecoveryCheckpointTargetSession<RetirablePublishedRecoveryCheckpointTarget>;
     try {
-      targetSession = await targetSessionForBinding(
+      const targetResult = await targetSessionForBinding(
         binding,
         this.input,
         trust,
         recipientKeyId,
       );
+      if (targetResult.kind === "runtime-unavailable") {
+        return this.#replace(
+          await this.#unavailable("runtime-unavailable", binding, trust),
+        );
+      }
+      targetSession = targetResult.session;
     } catch (error) {
-      const code: BackupUnavailableCode = binding.kind === "paired-device" && !this.input.meshRuntime
-        ? "runtime-unavailable"
-        : "target-unavailable";
       this.input.onError?.(error);
-      return this.#replace(await this.#unavailable(code, binding, trust));
+      return this.#replace(await this.#unavailable("target-unavailable", binding, trust));
     }
     const fingerprint = canonicalize({
       binding,
@@ -206,7 +205,16 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
       const latest = await this.input.backupTargets.load();
       const historical = latest?.bindings.find((candidate) => candidate.targetId === targetId);
       if (!historical) throw new Error("Recovery checkpoint target binding is unavailable");
-      return targetSessionForBinding(historical, this.input, trust, targetRecipientKeyId);
+      const result = await targetSessionForBinding(
+        historical,
+        this.input,
+        trust,
+        targetRecipientKeyId,
+      );
+      if (result.kind === "runtime-unavailable") {
+        throw new Error("Paired recovery target requires an authenticated mesh runtime");
+      }
+      return result.session;
     };
     const service = new AuthorityCheckpointService({
       log: this.input.mesh.bootstrapStore.authorityLog(),
@@ -288,25 +296,24 @@ async function targetSessionForBinding(
   binding: BackupTargetBinding,
   input: {
     readonly mesh: MeshRuntimeBootstrap;
-    readonly meshRuntime?: MeshRuntimeAssembly;
-    readonly storageMaintenance: StorageMaintenanceGovernorPort;
+    readonly pairedTargets: BorrowedPairedCheckpointTargetSessions;
     readonly publishedDirectoryTargets: ExistingPublishedCheckpointDirectorySessions;
   },
   trust: HomeTrustRecord,
   recipientKeyId: string,
-): Promise<PublishedRecoveryCheckpointTargetSession<RetirablePublishedRecoveryCheckpointTarget>> {
+): Promise<
+  | {
+      readonly kind: "available";
+      readonly session: PublishedRecoveryCheckpointTargetSession<RetirablePublishedRecoveryCheckpointTarget>;
+    }
+  | { readonly kind: "runtime-unavailable" }
+> {
   if (binding.kind === "paired-device") {
-    if (!input.meshRuntime) throw new Error("Paired recovery target requires an authenticated mesh runtime");
-    return Object.freeze({
-      target: new PairedRecoveryCheckpointTarget({
-        homeId: trust.homeId,
-        sourceDeviceId: input.mesh.deviceKey.deviceId,
-        targetDeviceId: binding.deviceId,
-        recipientKeyId,
-        transport: new MeshPairedCheckpointTransport(input.meshRuntime.connections.client(binding.deviceId)),
-        storageMaintenance: input.storageMaintenance,
-      }),
-      close: async () => undefined,
+    return input.pairedTargets.open({
+      homeId: trust.homeId,
+      sourceDeviceId: input.mesh.deviceKey.deviceId,
+      targetDeviceId: binding.deviceId,
+      recipientKeyId,
     });
   }
   const targetSession = await input.publishedDirectoryTargets.openExisting(binding.directory);
@@ -314,7 +321,7 @@ async function targetSessionForBinding(
     await targetSession.close();
     throw new Error("Recovery backup target physical identity changed");
   }
-  return targetSession;
+  return Object.freeze({ kind: "available", session: targetSession });
 }
 
 function assertHomeAuthority(trust: HomeTrustRecord, deviceId: string): void {

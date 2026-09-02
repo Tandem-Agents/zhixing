@@ -82,13 +82,10 @@ export interface PublishedCheckpointTargetInfrastructure {
   readonly deferredPaired: DeferredPublishedCheckpointPairedTargets;
 }
 
-export function projectRetirablePublishedRecoveryCheckpointTarget(
-  target: RetirablePublishedRecoveryCheckpointTarget,
-): RetirablePublishedRecoveryCheckpointTarget {
+export function projectPublishedRecoveryCheckpointTarget(
+  target: PublishedRecoveryCheckpointTarget,
+): PublishedRecoveryCheckpointTarget {
   assertTarget(target);
-  if (typeof target.retire !== "function") {
-    throw new TypeError("Published recovery checkpoint target requires retire");
-  }
   return Object.freeze({
     targetId: target.targetId,
     independenceDomain: target.independenceDomain,
@@ -98,6 +95,18 @@ export function projectRetirablePublishedRecoveryCheckpointTarget(
     ) => target.writeDurable(checkpoint, signal),
     read: (checkpointId: string, signal?: AbortSignal) =>
       target.read(checkpointId, signal),
+  });
+}
+
+export function projectRetirablePublishedRecoveryCheckpointTarget(
+  target: RetirablePublishedRecoveryCheckpointTarget,
+): RetirablePublishedRecoveryCheckpointTarget {
+  if (typeof target.retire !== "function") {
+    throw new TypeError("Published recovery checkpoint target requires retire");
+  }
+  const published = projectPublishedRecoveryCheckpointTarget(target);
+  return Object.freeze({
+    ...published,
     retire: (
       checkpointId: string,
       supersededBy: string,

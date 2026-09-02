@@ -9253,6 +9253,12 @@ export function inspectRecoveryBackupAssembly(records) {
   const pairedIncomingInfrastructure = byPath.get(
     "packages/cli/src/serve/paired-checkpoint-incoming-infrastructure.ts",
   );
+  const pairedCheckpointTarget = byPath.get(
+    "packages/cli/src/serve/paired-checkpoint-target.ts",
+  );
+  const pairedCheckpointTargetInfrastructure = byPath.get(
+    "packages/cli/src/serve/paired-checkpoint-target-infrastructure.ts",
+  );
   const publishedCheckpointTarget = byPath.get(
     "packages/cli/src/serve/published-checkpoint-target.ts",
   );
@@ -9286,7 +9292,8 @@ export function inspectRecoveryBackupAssembly(records) {
     !command || !owner || !backup || !backupTargetContract || !backupTargetInfrastructure ||
     !doctor || !cliIndex || !backupApplication || !coreIndex || !coreManifestText || !coreBuild ||
     !bootstrapStore || !bootstrap || !topology || !applicationHost || !rootEstablishment ||
-    !rootActivation || !pairedIncomingInfrastructure || !publishedCheckpointTarget ||
+    !rootActivation || !pairedIncomingInfrastructure || !pairedCheckpointTarget ||
+    !pairedCheckpointTargetInfrastructure || !publishedCheckpointTarget ||
     !publishedCheckpointTargetInfrastructure || !accessRoot || !executorRoot ||
     !deviceRemovalCleanup || !controlPlane ||
     !runtime || !pairing || !disasterCommand || !disasterCandidate || !disasterEvidence ||
@@ -9557,31 +9564,52 @@ export function inspectRecoveryBackupAssembly(records) {
   const pairedClientConstructions = records.filter(({ text }) =>
     text.includes("new PairedRecoveryCheckpointTarget({")
   );
-  const expectedPairedClientOwners = new Map([
-    ["packages/cli/src/serve/backup-command.ts", "context.capacity.storage"],
-    ["packages/cli/src/serve/backup-runtime-owner.ts", "input.storageMaintenance"],
-    ["packages/cli/src/serve/mesh-pair-command.ts", "input.storageMaintenance"],
-    ["packages/cli/src/serve/disaster-recovery-command.ts", "context.storageMaintenance"],
-  ]);
+  const pairedMeshTransportConstructions = records.filter(({ text }) =>
+    text.includes("new MeshPairedCheckpointTransport("));
+  const pairedDemandSources = [owner, backup, disasterCommand, pairing];
+  const borrowedPairedTargetStart = command.indexOf(
+    "pairedTargets: createBorrowedMeshPairedCheckpointTargetSessions(",
+  );
+  const borrowedPairedTargetConstruction = borrowedPairedTargetStart < 0
+    ? ""
+    : command.slice(borrowedPairedTargetStart, borrowedPairedTargetStart + 700);
   if (
-    pairedClientConstructions.length !== expectedPairedClientOwners.size ||
-    pairedClientConstructions.some(({ relative }) => !expectedPairedClientOwners.has(relative))
+    pairedClientConstructions.length !== 1 ||
+    pairedClientConstructions[0]?.relative !==
+      "packages/cli/src/serve/paired-checkpoint-target-infrastructure.ts" ||
+    pairedMeshTransportConstructions.length !== 1 ||
+    pairedMeshTransportConstructions[0]?.relative !==
+      "packages/cli/src/serve/paired-checkpoint-target-infrastructure.ts" ||
+    count(pairedCheckpointTargetInfrastructure, "class PairingSocketCheckpointTransport") !== 1 ||
+    !pairedCheckpointTarget.includes("export interface PairedRecoveryRootActivation") ||
+    !pairedCheckpointTarget.includes("export interface BorrowedPairedCheckpointTargetSessions") ||
+    !pairedCheckpointTarget.includes("projectPairedRecoveryRootActivation(") ||
+    count(pairedCheckpointTargetInfrastructure, "close: once(input.closeControlPlane)") !== 2 ||
+    count(pairedCheckpointTargetInfrastructure, "input.connections.client(input.binding.targetDeviceId)") !== 1 ||
+    !pairedCheckpointTargetInfrastructure.includes('t: "recovery-onboarding-command"') ||
+    !pairedCheckpointTargetInfrastructure.includes('frame.t !== "recovery-onboarding-result"') ||
+    pairedCheckpointTargetInfrastructure.includes("closeControlPlane?:") ||
+    !owner.includes("readonly pairedTargets: BorrowedPairedCheckpointTargetSessions") ||
+    owner.includes("meshRuntime") ||
+    !borrowedPairedTargetConstruction.includes('kind: "available"') ||
+    !borrowedPairedTargetConstruction.includes('kind: "runtime-unavailable"') ||
+    !borrowedPairedTargetConstruction.includes("connections: ctx.meshRuntime.connections") ||
+    !backup.includes("createOwnedMeshPairedCheckpointTargetSession({") ||
+    !disasterCommand.includes("createOwnedMeshPairedCheckpointInventorySession({") ||
+    !pairing.includes("createPairingSocketPublishedCheckpointTarget({") ||
+    !backup.includes("storageMaintenance: context.capacity.storage") ||
+    !command.includes("storageMaintenance: ctx.storageMaintenance") ||
+    !disasterCommand.includes("storageMaintenance: context.storageMaintenance") ||
+    !pairing.includes("storageMaintenance: input.storageMaintenance") ||
+    pairedDemandSources.some((text) =>
+      text.includes("PairedRecoveryCheckpointTarget") ||
+      text.includes("MeshPairedCheckpointTransport") ||
+      text.includes("MeshServiceClient") ||
+      text.includes("PairingSocketCheckpointTransport") ||
+      text.includes("pairedTargets?:") ||
+      text.includes("pairedTargets?."))
   ) {
-    failures.push("paired checkpoint client production owner exact-set drifted");
-  }
-  for (const [relative, governorBinding] of expectedPairedClientOwners) {
-    const text = byPath.get(relative);
-    if (
-      !text ||
-      JSON.stringify(newExpressionPropertyBindings(
-        relative,
-        text,
-        "PairedRecoveryCheckpointTarget",
-        "storageMaintenance",
-      )) !== JSON.stringify([governorBinding])
-    ) {
-      failures.push(`${relative}: paired checkpoint client must use the device storage governor`);
-    }
+    failures.push("paired checkpoint target finite Infrastructure or lifecycle boundary drifted");
   }
   if (
     !checkpointService.includes("export async function projectDurableRecoveryBackupStatus(") ||
@@ -9667,8 +9695,8 @@ export function inspectRecoveryBackupAssembly(records) {
     !pairedTarget.includes("root-establishment.pending.json") ||
     !pairedTarget.includes("assertRootEstablishment(") ||
     !pairedTarget.includes('t: "checkpoint.activate-root"') ||
-    !backup.includes("await session.paired.activateRoot(replay)") ||
-    !backup.includes("await session.paired.activateRoot({") ||
+    !backup.includes("await session.rootActivation.activateRoot(replay)") ||
+    !backup.includes("await session.rootActivation.activateRoot({") ||
     !pairedIncomingInfrastructure.includes("rootLifecycle: true") ||
     !pairedIncomingInfrastructure.includes("rootEstablishment: true") ||
     count(pairedIncomingInfrastructure, "commitRootActivation:") !== 2 ||
@@ -10122,7 +10150,10 @@ export function inspectRecoveryBackupAssembly(records) {
     failures.push("disaster installation completion, consumer recovery or public-open order drifted");
   }
   const onboardingStart = pairing.indexOf('t: "recovery-onboarding-start"');
-  const onboardingTarget = pairing.indexOf("return new PairedRecoveryCheckpointTarget({", onboardingStart);
+  const onboardingTarget = pairing.indexOf(
+    "return createPairingSocketPublishedCheckpointTarget({",
+    onboardingStart,
+  );
   const enrollment = pairing.indexOf("const trustEvent = createPairingTrustEvent", onboardingTarget);
   if (
     onboardingStart < 0 ||

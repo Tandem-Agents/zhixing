@@ -28,10 +28,6 @@ import {
   type CredentialStoreCoordinator,
 } from "@zhixing/providers";
 import type { CheckpointPackage } from "@zhixing/mesh/checkpoint";
-import {
-  MeshPairedCheckpointTransport,
-  PairedRecoveryCheckpointTarget,
-} from "@zhixing/mesh/paired-checkpoint-target";
 import { keyIdForPublicKey, type RecoveryRoot } from "@zhixing/mesh/recovery-root";
 import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
 import { createStdoutWriter } from "../screen/index.js";
@@ -59,6 +55,7 @@ import {
   type DisasterInstalledAuthorityGeneration,
 } from "./disaster-recovery-installation.js";
 import { createPublishedCheckpointTargetInfrastructure } from "./published-checkpoint-target-infrastructure.js";
+import { createOwnedMeshPairedCheckpointInventorySession } from "./paired-checkpoint-target-infrastructure.js";
 import type {
   InventoryPublishedRecoveryCheckpointTarget,
   PublishedCheckpointDirectoryInventorySessions,
@@ -652,17 +649,20 @@ async function openInventoryTargets(
   try {
     signal.throwIfAborted();
     await waitForPeer(control, selection.deviceId, 30_000, signal);
-    const target = new PairedRecoveryCheckpointTarget({
-      homeId: context.trust.homeId,
-      sourceDeviceId: context.key.deviceId,
-      targetDeviceId: selection.deviceId,
-      recipientKeyId: selection.recipientKeyId,
-      transport: new MeshPairedCheckpointTransport(control.connections.client(selection.deviceId)),
+    const targetSession = createOwnedMeshPairedCheckpointInventorySession({
+      connections: control.connections,
+      binding: {
+        homeId: context.trust.homeId,
+        sourceDeviceId: context.key.deviceId,
+        targetDeviceId: selection.deviceId,
+        recipientKeyId: selection.recipientKeyId,
+      },
       storageMaintenance: context.storageMaintenance,
+      closeControlPlane: () => control.stop(),
     });
     return {
-      targets: [{ displayName: selection.displayName, target }],
-      close: () => control.stop(),
+      targets: [{ displayName: selection.displayName, target: targetSession.target }],
+      close: targetSession.close,
     };
   } catch (error) {
     await control.stop().catch(() => undefined);

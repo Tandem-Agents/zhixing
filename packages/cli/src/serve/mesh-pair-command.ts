@@ -38,11 +38,8 @@ import {
 } from "@zhixing/mesh/checkpoint";
 import { captureFullAuthorityCheckpoint } from "@zhixing/mesh/full-checkpoint";
 import {
-  decodePairedCheckpointResult,
-  PairedRecoveryCheckpointTarget,
   type PairedCheckpointCommand,
   type PairedCheckpointResult,
-  type PairedCheckpointTransport,
 } from "@zhixing/mesh/paired-checkpoint-target";
 import {
   decodeRecoveryPackage,
@@ -75,6 +72,7 @@ import {
 } from "@zhixing/mesh/trust-chain";
 import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
 import { createPairedCheckpointCommandReceiverInfrastructure } from "./paired-checkpoint-incoming-infrastructure.js";
+import { createPairingSocketPublishedCheckpointTarget } from "./paired-checkpoint-target-infrastructure.js";
 import { createPublishedCheckpointTargetInfrastructure } from "./published-checkpoint-target-infrastructure.js";
 import type { PublishedCheckpointPairedSessions } from "./published-checkpoint-target.js";
 import { createPlatformSecretStore } from "@zhixing/secrets";
@@ -208,11 +206,6 @@ interface RecoveryOnboardingStartMessage {
   readonly targetDeviceId: string;
   readonly checkpointId: string;
   readonly recipientKeyId: string;
-}
-
-interface RecoveryOnboardingCommandMessage {
-  readonly t: "recovery-onboarding-command";
-  readonly command: PairedCheckpointCommand;
 }
 
 interface RecoveryOnboardingResultMessage {
@@ -728,12 +721,17 @@ async function issuePairing(input: PairingIssuerRuntimeInput): Promise<void> {
             checkpointId,
             recipientKeyId,
           } satisfies RecoveryOnboardingStartMessage);
-          return new PairedRecoveryCheckpointTarget({
-            homeId,
-            sourceDeviceId: identity.deviceId,
-            targetDeviceId,
-            recipientKeyId,
-            transport: new PairingSocketCheckpointTransport(transport!),
+          return createPairingSocketPublishedCheckpointTarget({
+            binding: {
+              homeId,
+              sourceDeviceId: identity.deviceId,
+              targetDeviceId,
+              recipientKeyId,
+            },
+            exchange: {
+              send: (frame) => sendPairingFrame(transport!, frame),
+              receive: () => receivePairingFrame(transport!),
+            },
             storageMaintenance: input.storageMaintenance,
           });
         },
@@ -1451,23 +1449,6 @@ async function selectInitialPairingBackupTarget(input: {
     targetId,
     deviceId: input.targetDeviceId,
   });
-}
-
-class PairingSocketCheckpointTransport implements PairedCheckpointTransport {
-  constructor(private readonly socket: Socket) {}
-
-  async request(command: PairedCheckpointCommand): Promise<PairedCheckpointResult> {
-    await sendPairingFrame(this.socket, {
-      t: "recovery-onboarding-command",
-      command,
-    } satisfies RecoveryOnboardingCommandMessage);
-    const frame = await receivePairingFrame(this.socket);
-    if (!isRecord(frame) || frame.t !== "recovery-onboarding-result" || !isRecord(frame.result)) {
-      throw new Error("Pairing target returned an invalid recovery checkpoint result");
-    }
-    assertObjectKeys(frame, ["result", "t"], "Recovery onboarding result");
-    return decodePairedCheckpointResult(frame.result);
-  }
 }
 
 async function receiveChallengeAfterRecoveryOnboarding(input: {

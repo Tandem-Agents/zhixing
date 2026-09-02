@@ -11,6 +11,7 @@ import { RecoveryRoot, keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import { createBackupTargetConfigurationInfrastructure } from "./backup-target-config-infrastructure.js";
+import { createBorrowedMeshPairedCheckpointTargetSessions } from "./paired-checkpoint-target-infrastructure.js";
 import { createPublishedCheckpointTargetInfrastructure } from "./published-checkpoint-target-infrastructure.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { activateInitialRecoveryRoot } from "./mesh-pair-command.js";
@@ -61,7 +62,11 @@ describe("recovery backup checkpoint owner", () => {
     const owner = await createConfiguredCheckpointOwner({
       backupTargets: createBackupTargetConfigurationInfrastructure(home),
       mesh,
-      meshRuntime: runtime as never,
+      pairedTargets: createBorrowedMeshPairedCheckpointTargetSessions({
+        kind: "available",
+        connections: runtime.connections,
+        storageMaintenance: maintenance,
+      }),
       storageMaintenance: maintenance,
       publishedDirectoryTargets: createPublishedCheckpointTargetInfrastructure({
         zhixingHome: home,
@@ -97,6 +102,10 @@ describe("recovery backup checkpoint owner", () => {
     const withoutRuntime = await createConfiguredCheckpointOwner({
       backupTargets: noRuntimeTargets,
       mesh,
+      pairedTargets: createBorrowedMeshPairedCheckpointTargetSessions({
+        kind: "runtime-unavailable",
+        storageMaintenance: maintenance,
+      }),
       storageMaintenance: maintenance,
       publishedDirectoryTargets: createPublishedCheckpointTargetInfrastructure({
         zhixingHome: noRuntimeHome,
@@ -193,6 +202,10 @@ describe("recovery backup checkpoint owner", () => {
     const owner = await createConfiguredCheckpointOwner({
       backupTargets,
       mesh,
+      pairedTargets: createBorrowedMeshPairedCheckpointTargetSessions({
+        kind: "runtime-unavailable",
+        storageMaintenance: allowMaintenance(),
+      }),
       storageMaintenance: allowMaintenance(),
       publishedDirectoryTargets: createPublishedCheckpointTargetInfrastructure({
         zhixingHome: home,

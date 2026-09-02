@@ -47,10 +47,6 @@ import {
 import { RecoveryRoot, keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
 import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
 import {
-  MeshPairedCheckpointTransport,
-  PairedRecoveryCheckpointTarget,
-} from "@zhixing/mesh/paired-checkpoint-target";
-import {
   applyTrustEvent,
   buildHomeTrustRecord,
   createDomainResetApproval,
@@ -73,6 +69,8 @@ import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import { readRecoveryPackageFromTty } from "./recovery-package-input.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
+import { createOwnedMeshPairedCheckpointTargetSession } from "./paired-checkpoint-target-infrastructure.js";
+import type { PairedRecoveryRootActivation } from "./paired-checkpoint-target.js";
 import { createPublishedCheckpointTargetInfrastructure } from "./published-checkpoint-target-infrastructure.js";
 import type {
   PublishedCheckpointDirectorySessions,
@@ -89,10 +87,7 @@ export interface BackupCommandOptions {
   readonly openRecoveryTarget?: (
     binding: BackupTargetBinding,
     recipientKeyId: string,
-  ) => Promise<{
-    readonly target: RetirablePublishedRecoveryCheckpointTarget;
-    readonly close: () => Promise<void>;
-  }>;
+  ) => Promise<BackupTargetConnection>;
 }
 
 export async function runBackupSetupCommand(
@@ -243,10 +238,20 @@ interface BackupContext {
   readonly now: () => string;
 }
 
-interface BackupAdministrationTargetSession {
-  readonly target: RetirablePublishedRecoveryCheckpointTarget;
-  readonly paired?: PairedRecoveryCheckpointTarget;
-}
+type BackupAdministrationTargetSession =
+  | {
+      readonly kind: "directory";
+      readonly target: RetirablePublishedRecoveryCheckpointTarget;
+    }
+  | {
+      readonly kind: "paired-device";
+      readonly target: RetirablePublishedRecoveryCheckpointTarget;
+      readonly rootActivation: PairedRecoveryRootActivation;
+    };
+
+type BackupTargetConnection = BackupAdministrationTargetSession & {
+  readonly close: () => Promise<void>;
+};
 
 function createBackupRecoveryAdministration(
   context: BackupContext,
@@ -282,7 +287,7 @@ function createBackupRecoveryAdministration(
         directory: path.resolve(directory),
       };
       try {
-        return await use(binding, { target: targetSession.target });
+        return await use(binding, { kind: "directory", target: targetSession.target });
       } finally {
         await targetSession.close();
       }
@@ -294,21 +299,21 @@ function createBackupRecoveryAdministration(
         recipientKeyId,
       );
       try {
-        return await use({
-          target: connection.target,
-          ...(connection.target instanceof PairedRecoveryCheckpointTarget
-            ? { paired: connection.target }
-            : {}),
-        });
+        if (connection.kind !== binding.kind) {
+          throw new Error("恢复备份目标连接类型与当前绑定不一致");
+        }
+        return await use(connection);
       } finally {
         await connection.close();
       }
     },
     replayRootActivation: async (binding, session) => {
       if (binding.kind !== "paired-device") return;
-      if (!session.paired) throw new Error("配对恢复备份目标没有建立认证传输");
+      if (session.kind !== "paired-device") {
+        throw new Error("配对恢复备份目标没有建立认证传输");
+      }
       const replay = await currentPairedRootActivation(context, binding.targetId);
-      if (replay) await session.paired.activateRoot(replay);
+      if (replay) await session.rootActivation.activateRoot(replay);
     },
     establishInitialRoot: async (prepared, session) => {
       const established = await establishInitialRoot(
@@ -321,12 +326,14 @@ function createBackupRecoveryAdministration(
     },
     activateInitialRoot: async (binding, prepared, session) => {
       if (binding.kind !== "paired-device") return;
-      if (!session.paired) throw new Error("配对恢复备份目标没有建立认证传输");
+      if (session.kind !== "paired-device") {
+        throw new Error("配对恢复备份目标没有建立认证传输");
+      }
       const record = await context.store.loadTrustRecord();
       if (!record || prepared.plan.kind !== "establish") {
         throw new Error("恢复根激活后缺少可提交的 current-issuer 信任事实");
       }
-      await session.paired.activateRoot({
+      await session.rootActivation.activateRoot({
         checkpointId: prepared.checkpoint.envelope.checkpointId,
         event: prepared.plan.rootEvent,
         record,
@@ -416,7 +423,7 @@ function createBackupRecoveryRootLifecycleApplication(
   RecoveryRoot,
   RecoveryRootLifecycleTrustEvent,
   CheckpointPackage,
-  RetirablePublishedRecoveryCheckpointTarget,
+  BackupAdministrationTargetSession,
   RecoveryRootResetSignature
 > {
   return new BackupRecoveryRootLifecycleApplicationService({
@@ -471,12 +478,12 @@ function createBackupRecoveryRootLifecycleApplication(
         withCurrentTarget: async (candidateRoot, useTarget) => {
           const connection = await openCurrentTarget(context, candidateRoot, options);
           try {
-            return await useTarget(connection.target);
+            return await useTarget(connection);
           } finally {
             await connection.close();
           }
         },
-        targetId: (target) => target.targetId,
+        targetId: (target) => target.target.targetId,
         captureCheckpoint: ({ plan, candidateRoot, createdAt }) =>
           captureRootLifecycleCheckpoint(
             context,
@@ -505,12 +512,12 @@ function createBackupRecoveryRootLifecycleApplication(
             checkpoint,
             candidateRoot,
             issuerIdentity: currentIssuerIdentity(context),
-            target,
+            target: target.target,
             sourceIndependenceDomain: `filesystem:${await sourceDevice(context.store)}`,
             now: context.now,
             onStep: async (step) => {
-              if (step === "verified") {
-                await activateIndependentRootTarget(target, {
+              if (step === "verified" && target.kind === "paired-device") {
+                await target.rootActivation.activateRoot({
                   checkpointId: checkpoint.envelope.checkpointId,
                   event: activationPlan.rootEvent,
                   record: targetRecord,
@@ -623,18 +630,6 @@ function isRecoveryRootResetEvent(
   event: RecoveryRootLifecycleTrustEvent,
 ): event is RecoveryRootResetEvent {
   return event.body.t === "domain-reset";
-}
-
-async function activateIndependentRootTarget(
-  target: RetirablePublishedRecoveryCheckpointTarget,
-  input: {
-    readonly checkpointId: string;
-    readonly event: HomeTrustEvent;
-    readonly record: HomeTrustRecord;
-  },
-): Promise<void> {
-  if (!("activateRoot" in target) || typeof target.activateRoot !== "function") return;
-  await (target.activateRoot as (value: typeof input) => Promise<void>)(input);
 }
 
 async function mapRootLifecycleError<Result>(
@@ -888,7 +883,9 @@ async function connectPairedTarget(
     ? keyIdForPublicKey(context.trust.recoveryBackupPublicKey)
     : undefined,
 ): Promise<{
-  readonly target: PairedRecoveryCheckpointTarget;
+  readonly kind: "paired-device";
+  readonly target: RetirablePublishedRecoveryCheckpointTarget;
+  readonly rootActivation: PairedRecoveryRootActivation;
   readonly close: () => Promise<void>;
 }> {
   const member = context.trust.members.find((candidate) =>
@@ -931,17 +928,20 @@ async function connectPairedTarget(
     await control.start();
     context.writeLine("正在通过认证连接等待配对备份设备……");
     await waitForPeer(control, targetDeviceId, 30_000);
-    return {
-      target: new PairedRecoveryCheckpointTarget({
-        homeId: context.trust.homeId,
-        sourceDeviceId: context.key.deviceId,
-        targetDeviceId,
-        recipientKeyId,
-        transport: new MeshPairedCheckpointTransport(control.connections.client(targetDeviceId)),
+    return Object.freeze({
+      kind: "paired-device" as const,
+      ...createOwnedMeshPairedCheckpointTargetSession({
+        connections: control.connections,
+        binding: {
+          homeId: context.trust.homeId,
+          sourceDeviceId: context.key.deviceId,
+          targetDeviceId,
+          recipientKeyId,
+        },
         storageMaintenance: context.capacity.storage,
+        closeControlPlane: () => control.stop(),
       }),
-      close: () => control.stop(),
-    };
+    });
   } catch (error) {
     await control.stop().catch(() => undefined);
     throw error;
@@ -953,7 +953,7 @@ async function currentPairedRootActivation(
   targetId: string,
 ): Promise<{
   readonly checkpointId: string;
-  readonly event: Parameters<PairedRecoveryCheckpointTarget["activateRoot"]>[0]["event"];
+  readonly event: Parameters<PairedRecoveryRootActivation["activateRoot"]>[0]["event"];
   readonly record: HomeTrustRecord;
 } | undefined> {
   if (!context.projection.recoveryActivationDigest) return undefined;
@@ -967,7 +967,7 @@ async function openTargetBinding(
   context: BackupContext,
   binding: BackupTargetBinding,
   recipientKeyId?: string,
-): Promise<{ readonly target: RetirablePublishedRecoveryCheckpointTarget; readonly close: () => Promise<void> }> {
+): Promise<BackupTargetConnection> {
   if (binding.kind === "paired-device") {
     return connectPairedTarget(context, binding.deviceId, recipientKeyId);
   }
@@ -976,7 +976,11 @@ async function openTargetBinding(
     await targetSession.close();
     throw new Error("恢复备份目标的物理身份已改变");
   }
-  return targetSession;
+  return Object.freeze({
+    kind: "directory",
+    target: targetSession.target,
+    close: targetSession.close,
+  });
 }
 
 async function waitForPeer(
@@ -1053,15 +1057,21 @@ async function openCurrentTarget(
   context: BackupContext,
   recipient: RecoveryRoot,
   options: BackupCommandOptions,
-): Promise<{ readonly target: RetirablePublishedRecoveryCheckpointTarget; readonly close: () => Promise<void> }> {
+): Promise<BackupTargetConnection> {
   const configured = await context.backupTargets.load();
   if (!configured) throw new Error("尚未配置独立恢复备份目标");
   const binding = configured.bindings.find((candidate) =>
     candidate.targetId === configured.currentTargetId);
   if (!binding) throw new Error("恢复备份目标配置缺少当前绑定");
   const recipientKeyId = keyIdForPublicKey(recipient.backupPublicKey);
-  if (options.openRecoveryTarget) return options.openRecoveryTarget(binding, recipientKeyId);
-  return openTargetBinding(context, binding, recipientKeyId);
+  const connection = options.openRecoveryTarget
+    ? await options.openRecoveryTarget(binding, recipientKeyId)
+    : await openTargetBinding(context, binding, recipientKeyId);
+  if (connection.kind !== binding.kind) {
+    await connection.close();
+    throw new Error("恢复备份目标连接类型与当前绑定不一致");
+  }
+  return connection;
 }
 
 async function captureRootLifecycleCheckpoint(
