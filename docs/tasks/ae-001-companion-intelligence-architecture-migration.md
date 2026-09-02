@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-16 Delivery topology fence 边界已通过协调者独立验收，等待提交；A6 仍有 Schedule 与 Backup/Device 同根泄漏待逐条处理<br>
+> 当前检查点：A6-17 Schedule lifecycle topology generation 边界已通过协调者独立验收，等待提交<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `5627c9c1`；A6-14 Backup & Recovery 产品行动拓扑透明收口已提交 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；Delivery 子闭包已完成待复核，A6 退出审计仍未通过 |
-| 活跃工作包 | `A6-16-delivery-topology-fence-boundary-v1` 已通过协调者独立验收，等待提交 |
-| 下一责任链 | 独立验收 A6-16 后，继续逐条清除 Schedule 与 Backup/Device 交界的同根泄漏，再重做 A6 退出审计 |
+| 已接受基线 | `dab790e0`；A6-16 Delivery topology fence 边界收口已提交 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；Schedule 生命周期 topology generation 子证据已恢复待复核 |
+| 活跃工作包 | `A6-17-schedule-lifecycle-topology-generation-boundary-v1` 已通过协调者独立验收，等待提交 |
+| 下一责任链 | 独立验收 A6-17 后，处理 Backup/Device 当前移除链的同根泄漏，再重做 A6 退出审计 |
 | 打开的单向桥 | 无；P06 Rubric 已恢复为 required `readByDigest/put` 有限端口，P07、P09、P11 及 P12 三类 staging 的既有有限 Infrastructure 接管继续有效 |
-| 已失效证据 | `A6-15-replaceable-edges-topology-final-exit-audit-v1` 的 E05 与 A6 聚合结论仍失效；Delivery 子证据已由 A6-16 恢复待复核，Schedule 与 Backup/Device 交界仍待独立收口 |
+| 已失效证据 | `A6-15-replaceable-edges-topology-final-exit-audit-v1` 的 E05 与 A6 聚合结论仍失效；Delivery 子证据已接受，Schedule 子证据已恢复待复核，Backup/Device 交界仍待收口 |
 | 阻塞/用户决策 | 无用户决策阻塞；完整 distributed-runtime structure 测试仍被既有 A4-10 `runtime-host` 依赖断言阻断，属于 A7 零残留与终验输入 |
 
 ### A0 基线索引
@@ -2926,6 +2926,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据与门禁：Core Delivery application 5/5、Authority/pipeline 79/79，owner-kernel control/participant 18/18，Server RPC 65/65，CLI production setup/control 3/3，共 7 文件 170/170；直接覆盖 topology-neutral command/projection、uncertain/status 分层、stale epoch、open-fact mismatch、同 request replay、observer failure、attempt/retry/terminal及真实 wire 映射。core、owner-kernel、server、CLI `tsc --noEmit` 与依赖顺序 build、`pnpm cli:build`、fresh `pnpm runtime:package-exports` 均通过；canonical `pnpm s7:lint` 为 57/57 且 registry golden 通过。新增 S7 反向 mutation 可拒绝领域重新声明 epoch、Correctness 丢失 current-epoch fence、RPC 把数值 epoch 直接送入领域、pipeline/Authority topology 决定回流。
 - 失效与下一检查点：若 Delivery application command/context、公开 item/open-fact/resolution 投影、不透明 fence codec、owner-kernel current-epoch 校验、Authority record binding/status projection、pipeline notice读取、`delivery.resolve` wire/错误/重放、S7 mutation 或上述直接测试任一变化，只恢复本证据与 A6-15 E05 的 Delivery 子结论；A5 Delivery 的业务 owner、record schema、其他 A6 边缘和 Conversation/Backup 行动证据不因本包失效。A6 与完成度继续 `[ ]`/`6/8`，交接为完成并等待协调者独立复核；复核接受后只能按既定顺序分别收口 Schedule 与 Backup/Device 同根泄漏，再重做 A6 退出审计，不得进入 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：沿 Server wire、Product API command、Delivery 应用决定、owner-kernel Correctness、Authority 提交与状态投影双向核对，确认领域只持不透明 `DeliveryResolutionFence` 且不解析、比较或投影 epoch；数值 epoch 的解码、当前代际校验与持久 fact 绑定均留在同一权威事务和 Authority 机制内，RPC exact-set 与持久 record schema未改变。独立取得 Core application/Authority 47/47、owner-kernel control 8/8、Server RPC 65/65、CLI production setup 3/3、canonical S7 57/57、registry golden 与 `git diff --check` 通过；接受 `A6-16-delivery-topology-fence-boundary-v1`。A6 继续 `[ ]`，下一责任链只处理 Schedule 的同根泄漏。
+
+### A6-17：Schedule lifecycle topology generation 边界收口
+
+- 基线与唯一结果：以已接受 `HEAD dab790e073cb502253519288775c587a15fe21c8` 加协调者调度记录为基线，形成待复核证据 `A6-17-schedule-lifecycle-topology-generation-boundary-v1`。`ScheduleLifecycleMechanismPort`、`ScheduleLifecycleApplication` 与 `ScheduleApplicationService` 已删除 `anchorEpoch/currentAnchorEpoch`；Schedule 领域继续只按具体 mechanism 对象 identity 执行 install/release、启动/停止、准入、冻结 accepted-work、三种 settle、恢复与 manual surface 生命周期，不读取、解析或比较物理代际。
+- Host/Infrastructure 责任与恢复顺序：CLI Infrastructure 中的 `AnchorSchedulerRuntime.installedAnchorEpoch` 是构造时冻结的实际 Authority generation；`AnchorSchedulerHostLifecycle` 唯一持有当前具体 runtime，并在 installed-authority recovery 中先比较该快照与 Host 当前 Authority epoch。相同 generation 只重驱既有 mechanism recovery；真实变化严格按 stop old → release exact old → clear slot → create replacement → 验证 replacement generation → install exact replacement → initialize/recover surfaces 推进。create 失败后 slot 保持空且不重复 release 旧实例，错误 generation 的新 runtime 在安装前停止并 fail closed，initialize 失败则新实例继续由同一 Host slot 持有并在既有 startup/normal cleanup 中释放；`command.ts` 不再经领域 getter 判断拓扑，也不保留平行 runtime 引用或 release 旁路。
+- 行为、证据与门禁：Authority rebind 后的 conversation generation 通知顺序、Scheduler accepted-work exact-set、`immediate/drain/cancel` settle、admission close/resume、manual surface resume、job/assignment recovery、entry-last 与 cleanup contribution 均未改变。Core Schedule application 13/13，CLI Host generation lifecycle 5/5，共 2 文件 18/18；直接覆盖 same-generation recovery、换代 stop/release/install 顺序、accepted-work 由新实例继续承载、replacement create/identity/initialize 三类失败补偿与最终精确释放。core、CLI `tsc --noEmit`、core build 与 `pnpm cli:build`、fresh runtime package exports、canonical S7 57/57 与 registry golden、changed-source Biome 和 `git diff --check` 均通过。S7 反向 mutation 可拒绝领域 epoch 回流、Host 跳过 generation compare、release 后未清空旧实例、生产 root 绕过 Host lifecycle 或使用常量/领域 getter决定换代。
+- 失效、状态与下一检查点：若 Schedule lifecycle application/port、accepted-work/settle/recovery 合同、`AnchorSchedulerRuntime` generation 快照、Host slot 的比较/stop/release/create/install 顺序、installed-authority post-install consumer、startup cleanup contribution、S7 mutation 或上述直接测试任一变化，只恢复本证据及 A6-15 E05 的 Schedule 子结论；A5 Schedule 产品事实、Job/Assignment 持久格式、Delivery 和其他 A6 边缘不因此失效。A6 与完成度继续 `[ ]`/`6/8`，当前只等待协调者独立复核；接受后下一责任链仍是 Backup/Device current-removal 同根泄漏，再重做 A6 退出审计。本轮未进入该责任链或 A7，也未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：沿 Schedule lifecycle port、应用 mechanism identity、CLI `AnchorSchedulerHostLifecycle`、installed-authority post-install consumer 和 cleanup contribution 双向核对，确认领域合同与实现中的 Anchor/epoch 为零，Host 以冻结 concrete runtime generation 唯一决定同代重驱或异代替换。独立取得 Core Schedule 13/13、CLI Host generation lifecycle 5/5、canonical S7 57/57、registry golden 与 `git diff --check` 通过；same-generation、stop/release/create/install、错误 generation、create/initialize 失败和最终释放均有可识别反例。接受 `A6-17-schedule-lifecycle-topology-generation-boundary-v1`；A6 继续 `[ ]`，下一责任链只处理 Backup/Device current-removal 的同根泄漏。
 
 ## 十、用户提示词
 

@@ -569,7 +569,6 @@ describe("Schedule runtime application boundaries", () => {
       let current = [{ id: "run-1", revision: "rev-1" }];
       const settledExactSets: Array<readonly { readonly id: string; readonly revision: string }[]> = [];
       const mechanism: ScheduleLifecycleMechanismPort = {
-        anchorEpoch: 7,
         start: vi.fn(async () => undefined),
         stop: vi.fn(async () => undefined),
         activate: vi.fn(),
@@ -603,10 +602,9 @@ describe("Schedule runtime application boundaries", () => {
     },
   );
 
-  it("owns frozen accepted-work settlement and rejects foreign generations", async () => {
+  it("owns frozen accepted-work settlement and rejects foreign mechanisms", async () => {
     let current = [{ id: "run-1", revision: "rev-1" }];
     const mechanism: ScheduleLifecycleMechanismPort = {
-      anchorEpoch: 7,
       start: vi.fn(async () => undefined),
       stop: vi.fn(async () => undefined),
       activate: vi.fn(),
@@ -629,9 +627,8 @@ describe("Schedule runtime application boundaries", () => {
       onEvent: () => () => undefined,
     });
     lifecycle.install(mechanism);
-    expect(lifecycle.currentAnchorEpoch).toBe(7);
     expect(() => lifecycle.install({ ...mechanism })).toThrow(
-      "Schedule lifecycle generation is already installed",
+      "Schedule lifecycle mechanism is already installed",
     );
     const frozen = await lifecycle.captureAcceptedWork();
     expect(Object.isFrozen(frozen)).toBe(true);
@@ -641,13 +638,15 @@ describe("Schedule runtime application boundaries", () => {
     await expect(lifecycle.settleAcceptedWork({
       strategy: "drain",
       frozen,
-    })).rejects.toThrow("outside the frozen generation");
+    })).rejects.toThrow("outside the frozen accepted-work set");
     expect(mechanism.pauseAndSettle).not.toHaveBeenCalled();
 
     expect(() => lifecycle.release({ ...mechanism })).toThrow(
-      "Cannot release a foreign Schedule lifecycle generation",
+      "Cannot release a foreign Schedule lifecycle mechanism",
     );
     lifecycle.release(mechanism);
-    expect(lifecycle.currentAnchorEpoch).toBeUndefined();
+    expect(() => lifecycle.release(mechanism)).toThrow(
+      "Cannot release a foreign Schedule lifecycle mechanism",
+    );
   });
 });

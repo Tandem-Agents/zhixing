@@ -220,7 +220,10 @@ import {
 } from "./governed-control-llm.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
 import { createAgentJobRuntimePort } from "./agent-job-runtime.js";
-import { AnchorSchedulerRuntime } from "./anchor-scheduler-runtime.js";
+import {
+  AnchorSchedulerHostLifecycle,
+  AnchorSchedulerRuntime,
+} from "./anchor-scheduler-runtime.js";
 import { CurrentAnchorFirstPartyRpcRouter } from "./first-party-conversation-mesh.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import { publishRequiredCredentialRotations } from "./credential-rotation-publication.js";
@@ -1091,7 +1094,7 @@ async function runServerProcess(
 
   // Anchor 是 scheduler/job 唯一 owner。非 anchor 拓扑不装 timer、journal
   // recovery 或兼容迁移器，schedule 产品入口保持明确不可用。
-  let schedulerRuntime: AnchorSchedulerRuntime | undefined;
+  const schedulerHostLifecycle = new AnchorSchedulerHostLifecycle(schedulerApplication);
   const settleScheduleForTransfer = async (): Promise<void> => {
     await schedulerApplication.settleAcceptedWork({
       strategy: "drain",
@@ -1200,16 +1203,12 @@ async function runServerProcess(
       onError: (error) =>
         console.error(chalk.red(`[scheduler] ${error.message}`)),
     });
-    schedulerRuntime = await createSchedulerRuntime();
+    const schedulerRuntime = await createSchedulerRuntime();
     schedulerCleanup = startupRollback.register(
       "scheduler.stop",
       async () => {
         adoptionReview?.close();
-        await schedulerApplication.stop();
-        if (schedulerRuntime) {
-          schedulerApplication.release(schedulerRuntime);
-          schedulerRuntime = undefined;
-        }
+        await schedulerHostLifecycle.stopAndRelease();
       },
     );
     lifecycleContributions.contribute("scheduler.stop", schedulerCleanup);
@@ -1221,7 +1220,7 @@ async function runServerProcess(
       const schedulerGlobalState = boundary.globalState;
       const schedulerProduct = boundary.product;
       schedulerProductRef = schedulerProduct;
-      schedulerApplication.install(runtime);
+      schedulerHostLifecycle.install(runtime);
       schedulerFacadeRef ??= new LocalSchedulerFacade(
         schedulerManagement,
         schedulerApplication,
@@ -1300,19 +1299,12 @@ async function runServerProcess(
         return receipt;
       },
       recoverScheduler: async (obligations) => {
-        if (schedulerApplication.currentAnchorEpoch !== ctx.authorityRuntime!.anchorEpoch) {
-          const previous = schedulerRuntime;
-          await schedulerApplication.stop();
-          if (!previous) {
-            throw new Error("Schedule lifecycle generation is unavailable");
-          }
-          schedulerApplication.release(previous);
-          const replacement = await createSchedulerRuntime();
-          schedulerRuntime = replacement;
-          await installSchedulerGeneration(replacement, runner !== undefined);
-        } else {
-          await schedulerApplication.recoverInstalledAuthority();
-        }
+        await schedulerHostLifecycle.recoverInstalledAuthority({
+          currentAnchorEpoch: ctx.authorityRuntime!.anchorEpoch,
+          create: createSchedulerRuntime,
+          initialize: (replacement) =>
+            installSchedulerGeneration(replacement, runner !== undefined),
+        });
         return obligations;
       },
       recoverConversation: async (obligations) => {

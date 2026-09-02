@@ -3,7 +3,10 @@ import type {
   SchedulerEventMap,
   SystemHandler,
 } from "@zhixing/core";
-import type { ScheduleLifecycleMechanismPort } from "@zhixing/core/scheduler/application";
+import type {
+  ScheduleLifecycleApplication,
+  ScheduleLifecycleMechanismPort,
+} from "@zhixing/core/scheduler/application";
 import type {
   AuthorityCallContext,
   AuthorityCapability,
@@ -98,13 +101,77 @@ export interface AnchorSchedulerRuntimeOptions {
 }
 
 /**
+ * Concrete Schedule mechanism plus the physical Authority generation captured
+ * when the Host constructed it. The generation never crosses the domain port.
+ */
+export interface AnchorScheduleLifecycleMechanism
+  extends ScheduleLifecycleMechanismPort {
+  readonly installedAnchorEpoch: number;
+}
+
+/**
+ * Host-owned slot for the one concrete Anchor Schedule mechanism. Schedule
+ * owns lifecycle semantics; this boundary alone compares physical generations
+ * and keeps the exact installed instance aligned with those lifecycle calls.
+ */
+export class AnchorSchedulerHostLifecycle {
+  #current: AnchorSchedulerRuntime | undefined;
+
+  constructor(private readonly application: ScheduleLifecycleApplication) {}
+
+  install(mechanism: AnchorSchedulerRuntime): void {
+    if (this.#current === mechanism) return;
+    if (this.#current) {
+      throw new Error("Anchor Schedule runtime generation is already installed");
+    }
+    this.application.install(mechanism);
+    this.#current = mechanism;
+  }
+
+  async stopAndRelease(): Promise<void> {
+    const current = this.#current;
+    await this.application.stop();
+    if (!current) return;
+    this.application.release(current);
+    this.#current = undefined;
+  }
+
+  async recoverInstalledAuthority(input: {
+    readonly currentAnchorEpoch: number;
+    readonly create: () => Promise<AnchorSchedulerRuntime>;
+    readonly initialize: (mechanism: AnchorSchedulerRuntime) => Promise<void>;
+  }): Promise<void> {
+    const current = this.#current;
+    if (!current) {
+      throw new Error("Anchor Schedule runtime generation is unavailable");
+    }
+    if (current.installedAnchorEpoch === input.currentAnchorEpoch) {
+      await this.application.recoverInstalledAuthority();
+      return;
+    }
+
+    await this.application.stop();
+    this.application.release(current);
+    this.#current = undefined;
+
+    const replacement = await input.create();
+    if (replacement.installedAnchorEpoch !== input.currentAnchorEpoch) {
+      await replacement.stop();
+      throw new Error("Anchor Schedule runtime generation does not match current Authority");
+    }
+    this.install(replacement);
+    await input.initialize(replacement);
+  }
+}
+
+/**
  * Product composition for the anchor-owned scheduler and job authority.
  *
  * All execution and projection state comes from the assignment journal,
  * executor job owner and durable submission protocol.
  */
-export class AnchorSchedulerRuntime implements ScheduleLifecycleMechanismPort {
-  readonly anchorEpoch: number;
+export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism {
+  readonly installedAnchorEpoch: number;
   readonly #scheduler: AnchorScheduler;
   readonly schedulerNotices: SchedulerUserNoticeJournal;
   readonly deferredIntents: DeferredGlobalIntentAnchorReviewService;
@@ -131,7 +198,7 @@ export class AnchorSchedulerRuntime implements ScheduleLifecycleMechanismPort {
 
   private constructor(options: AnchorSchedulerRuntimeOptions) {
     this.#options = options;
-    this.anchorEpoch = options.authority.anchorEpoch;
+    this.installedAnchorEpoch = options.authority.anchorEpoch;
     this.#clock = () => (options.now?.() ?? new Date()).toISOString();
     this.#manualSurfaces = new ManualJobSurfaceLifecycle({
       ...(options.onError ? { onError: options.onError } : {}),
@@ -250,14 +317,14 @@ export class AnchorSchedulerRuntime implements ScheduleLifecycleMechanismPort {
   } {
     const globalState = new AnchorSchedulerGlobalStateAdapter(
       this.#scheduler,
-      this.anchorEpoch,
+      this.installedAnchorEpoch,
     );
     return Object.freeze({
       globalState,
       product: new AnchorSchedulerProductPort(
         this.#scheduler,
         globalState,
-        this.anchorEpoch,
+        this.installedAnchorEpoch,
         this.#options.eventBus,
       ),
     });

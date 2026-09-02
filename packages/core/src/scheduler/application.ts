@@ -169,7 +169,7 @@ export interface ScheduleRuntimeStatusView {
   readonly turnContext: TaskStatusSummary;
 }
 
-/** Path-free runtime facts supplied by the current durable Schedule generation. */
+/** Path-free runtime facts supplied by the current durable Schedule mechanism. */
 export interface ScheduleRuntimeProjectionPort {
   snapshot(): {
     readonly tasks: readonly TaskView[];
@@ -223,7 +223,6 @@ export interface ScheduleAcceptedWorkItem {
 
 /** Correctness mechanism required by the Schedule lifecycle application. */
 export interface ScheduleLifecycleMechanismPort {
-  readonly anchorEpoch: number;
   start(): Promise<void>;
   stop(): Promise<void>;
   activate(): void;
@@ -238,7 +237,6 @@ export interface ScheduleLifecycleMechanismPort {
 
 /** Host-facing, finite lifecycle application owned by Schedule. */
 export interface ScheduleLifecycleApplication {
-  readonly currentAnchorEpoch: number | undefined;
   install(mechanism: ScheduleLifecycleMechanismPort): void;
   release(mechanism: ScheduleLifecycleMechanismPort): void;
   start(): Promise<void>;
@@ -266,21 +264,17 @@ export class ScheduleApplicationService implements ScheduleApplication {
 
   constructor(private readonly runtime: ScheduleRuntimeApplication) {}
 
-  get currentAnchorEpoch(): number | undefined {
-    return this.#mechanism?.anchorEpoch;
-  }
-
   install(mechanism: ScheduleLifecycleMechanismPort): void {
     if (this.#mechanism === mechanism) return;
     if (this.#mechanism) {
-      throw new Error("Schedule lifecycle generation is already installed");
+      throw new Error("Schedule lifecycle mechanism is already installed");
     }
     this.#mechanism = mechanism;
   }
 
   release(mechanism: ScheduleLifecycleMechanismPort): void {
     if (this.#mechanism !== mechanism) {
-      throw new Error("Cannot release a foreign Schedule lifecycle generation");
+      throw new Error("Cannot release a foreign Schedule lifecycle mechanism");
     }
     this.#mechanism = undefined;
   }
@@ -357,7 +351,7 @@ export class ScheduleApplicationService implements ScheduleApplication {
 
   #requireMechanism(): ScheduleLifecycleMechanismPort {
     if (!this.#mechanism) {
-      throw new Error("Schedule lifecycle generation is not installed");
+      throw new Error("Schedule lifecycle mechanism is not installed");
     }
     return this.#mechanism;
   }
@@ -725,7 +719,7 @@ function assertAcceptedWorkSubset(
   const expected = new Map(frozen.map((item) => [item.id, item.revision]));
   for (const item of current) {
     if (expected.get(item.id) !== item.revision) {
-      throw new Error("Schedule lifecycle observed work outside the frozen generation");
+      throw new Error("Schedule lifecycle observed work outside the frozen accepted-work set");
     }
   }
 }

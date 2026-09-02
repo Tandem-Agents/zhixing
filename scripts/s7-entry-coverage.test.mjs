@@ -7140,6 +7140,30 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/core/src/scheduler/application.ts",
+      (text) => `${text}\ninterface LeakedScheduleTopology { readonly anchorEpoch: number }`,
+    )).join("\n"),
+    /Schedule runtime and lifecycle lack one finite domain application boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/anchor-scheduler-runtime.ts",
+      (text) => text.replace(
+        "current.installedAnchorEpoch === input.currentAnchorEpoch",
+        "true",
+      ),
+    )).join("\n"),
+    /Schedule physical generation replacement escaped its Host boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/anchor-scheduler-runtime.ts",
+      (text) => text.replaceAll("this.#current = undefined;", "void this.#current;"),
+    )).join("\n"),
+    /Schedule physical generation replacement escaped its Host boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/scheduler/application.ts",
       (text) => text.replace(
         "await mechanism.pauseAndSettle();",
         'if (input.strategy !== "immediate") await mechanism.pauseAndSettle();',
@@ -7185,8 +7209,28 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "schedulerApplication.install(runtime);",
+        "schedulerHostLifecycle.install(runtime);",
         "void runtime;",
+      ),
+    )).join("\n"),
+    /Schedule runtime and lifecycle lack one finite domain application boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "schedulerHostLifecycle.recoverInstalledAuthority({",
+        "schedulerApplication.recoverInstalledAuthority();\n        void ({",
+      ),
+    )).join("\n"),
+    /Schedule runtime and lifecycle lack one finite domain application boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "currentAnchorEpoch: ctx.authorityRuntime!.anchorEpoch",
+        "currentAnchorEpoch: 1",
       ),
     )).join("\n"),
     /Schedule runtime and lifecycle lack one finite domain application boundary/,

@@ -6943,6 +6943,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !scheduleApplication.includes("class ScheduleApplicationService") ||
     !scheduleApplication.includes("interface ScheduleRuntimeProjectionPort") ||
     !scheduleApplication.includes("interface ScheduleLifecycleMechanismPort") ||
+    /\b(?:anchorEpoch|currentAnchorEpoch)\b/u.test(scheduleApplication) ||
     !scheduleApplication.includes("projectScheduleRuntimeEvent(signal)") ||
     !scheduleApplication.includes("freezeStatusSummary(computeStatusSummary") ||
     !scheduleApplication.includes("return freezeAcceptedWork(await") ||
@@ -6950,22 +6951,78 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !scheduleApplication.includes("assertSettlementStrategy(input.strategy);") ||
     scheduleApplication.split("await mechanism.pauseAndSettle();").length - 1 !== 1 ||
     /switch\s*\(input\.strategy\)|input\.strategy\s*[!=]==?/u.test(scheduleApplication) ||
-    !scheduleApplication.includes("Schedule lifecycle generation is already installed") ||
-    !scheduleRuntimeMechanism.includes("implements ScheduleLifecycleMechanismPort") ||
+    !scheduleApplication.includes("Schedule lifecycle mechanism is already installed") ||
+    !scheduleRuntimeMechanism.includes("implements AnchorScheduleLifecycleMechanism") ||
+    !scheduleRuntimeMechanism.includes("interface AnchorScheduleLifecycleMechanism") ||
+    !scheduleRuntimeMechanism.includes("class AnchorSchedulerHostLifecycle") ||
+    !scheduleRuntimeMechanism.includes("readonly installedAnchorEpoch: number") ||
     !scheduleRuntimeMechanism.includes("createProductBoundary()") ||
     !scheduleRuntimeMechanism.includes("return this.#scheduler.acceptedWorkItems()") ||
     !scheduleRuntimeMechanism.includes("return this.#scheduler.pauseForAuthorityTransfer()") ||
     /readonly scheduler: AnchorScheduler/u.test(scheduleRuntimeMechanism) ||
     !composition.includes("const schedulerApplication = new ScheduleApplicationService(") ||
     composition.split("new ScheduleApplicationService(").length - 1 !== 1 ||
-    !composition.includes("schedulerApplication.install(runtime)") ||
-    !composition.includes("schedulerApplication.release(previous)") ||
+    !composition.includes("const schedulerHostLifecycle = new AnchorSchedulerHostLifecycle(") ||
+    !composition.includes("schedulerHostLifecycle.install(runtime)") ||
+    !composition.includes("schedulerHostLifecycle.stopAndRelease()") ||
+    !composition.includes("schedulerHostLifecycle.recoverInstalledAuthority({") ||
+    !composition.includes("currentAnchorEpoch: ctx.authorityRuntime!.anchorEpoch") ||
+    /schedulerApplication\.currentAnchorEpoch/u.test(composition) ||
     !composition.includes("createScheduleRuntimeProductApiContribution(schedulerApplication)") ||
     !composition.includes("scheduleRuntimeEvents: schedulerApplication") ||
     /schedulerLifecycle|ScheduleLifecycleApplicationService/u.test(composition) ||
     /schedulerRuntime\??\.activate\(/u.test(composition)
   ) {
     failures.push("Schedule runtime and lifecycle lack one finite domain application boundary");
+  }
+  const scheduleGenerationRecovery = scheduleRuntimeMechanism.indexOf(
+    "async recoverInstalledAuthority(input:",
+  );
+  const scheduleGenerationCompare = scheduleRuntimeMechanism.indexOf(
+    "current.installedAnchorEpoch === input.currentAnchorEpoch",
+    scheduleGenerationRecovery,
+  );
+  const scheduleGenerationStop = scheduleRuntimeMechanism.indexOf(
+    "await this.application.stop();",
+    scheduleGenerationCompare,
+  );
+  const scheduleGenerationRelease = scheduleRuntimeMechanism.indexOf(
+    "this.application.release(current);",
+    scheduleGenerationStop,
+  );
+  const scheduleGenerationClear = scheduleRuntimeMechanism.indexOf(
+    "this.#current = undefined;",
+    scheduleGenerationRelease,
+  );
+  const scheduleGenerationCreate = scheduleRuntimeMechanism.indexOf(
+    "const replacement = await input.create();",
+    scheduleGenerationClear,
+  );
+  const scheduleGenerationValidate = scheduleRuntimeMechanism.indexOf(
+    "replacement.installedAnchorEpoch !== input.currentAnchorEpoch",
+    scheduleGenerationCreate,
+  );
+  const scheduleGenerationInstall = scheduleRuntimeMechanism.indexOf(
+    "this.install(replacement);",
+    scheduleGenerationValidate,
+  );
+  const scheduleGenerationInitialize = scheduleRuntimeMechanism.indexOf(
+    "await input.initialize(replacement);",
+    scheduleGenerationInstall,
+  );
+  if (
+    scheduleGenerationRecovery < 0 ||
+    scheduleGenerationCompare < scheduleGenerationRecovery ||
+    scheduleGenerationStop < scheduleGenerationCompare ||
+    scheduleGenerationRelease < scheduleGenerationStop ||
+    scheduleGenerationClear < scheduleGenerationRelease ||
+    scheduleGenerationCreate < scheduleGenerationClear ||
+    scheduleGenerationValidate < scheduleGenerationCreate ||
+    scheduleGenerationInstall < scheduleGenerationValidate ||
+    scheduleGenerationInitialize < scheduleGenerationInstall ||
+    !scheduleRuntimeMechanism.includes("await replacement.stop();")
+  ) {
+    failures.push("Schedule physical generation replacement escaped its Host boundary");
   }
   if (
     /SchedulerBackend|schedulerEventBus|SchedulerEventMap|isInternal/u.test(context) ||
