@@ -46,6 +46,7 @@ import {
 } from "./mesh-runtime-assembly.js";
 import { createFileMeshPairingContinuationRepository } from "./mesh-pairing-continuation.js";
 import type { ServeOptions } from "./command.js";
+import { createAssignmentArtifactReceiverInfrastructure } from "./assignment-artifact-receiver-infrastructure.js";
 import type {
   ExecutorRoleModule,
   ExecutorServeBootstrapContext,
@@ -525,6 +526,10 @@ export async function runExecutorRole(
         : {}),
       authority,
       localConversationOwner,
+      assignmentArtifactReceiver: createAssignmentArtifactReceiverInfrastructure({
+        zhixingHome,
+        artifacts: authority.artifacts,
+      }),
       executor: {
         ledger,
         runtimeFactory,

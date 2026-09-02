@@ -1,4 +1,4 @@
-import type { ArtifactStore, FileResumableArtifactReceiver } from "@zhixing/core/authority";
+import type { ArtifactStore } from "@zhixing/core/authority";
 import type {
   AuthorityCallContext,
   AuthorityCapability,
@@ -30,6 +30,7 @@ import {
   type AnyAssignmentActivationProof,
   type AssignmentArtifactAuthorization,
 } from "./assignment-mesh-adapter.js";
+import type { AssignmentArtifactReceiverPort } from "./assignment-artifact-receiver.js";
 import {
   MeshAssignmentGlobalQueryPort,
   registerGlobalQueryMeshService,
@@ -37,7 +38,7 @@ import {
 
 export interface AssignmentMeshStorage {
   readonly artifacts: ArtifactStore;
-  readonly receiver: FileResumableArtifactReceiver;
+  readonly receiver: AssignmentArtifactReceiverPort;
 }
 
 export interface AssignmentMeshIdentity {

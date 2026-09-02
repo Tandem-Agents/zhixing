@@ -24,6 +24,7 @@ import {
   inspectMeshBootstrapProjectionBoundary,
   inspectMeshPairingContinuationPersistenceBoundary,
   inspectSurfaceAssetStagingPersistenceBoundary,
+  inspectAssignmentArtifactReceiverBoundary,
   inspectConversationStorageBoundary,
   inspectWorksceneStorageCleanupBoundary,
   inspectStorageRemainderBoundary,
@@ -1524,6 +1525,78 @@ test("P09 Surface asset staging stays finite and physical only at two compositio
       },
     ]).join("\n"),
     /second physical root/u,
+  );
+});
+
+test("P09 assignment artifact partial receiver stays finite and Host-composed", async () => {
+  const paths = [
+    "packages/cli/src/serve/assignment-artifact-receiver.ts",
+    "packages/cli/src/serve/assignment-artifact-receiver-infrastructure.ts",
+    "packages/cli/src/serve/assignment-mesh-adapter.ts",
+    "packages/cli/src/serve/assignment-mesh-composition.ts",
+    "packages/cli/src/serve/mesh-runtime-assembly.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/cli/src/serve/device-removal-cleanup.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: (await readFile(relative, "utf8")).replaceAll("\r\n", "\n"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectAssignmentArtifactReceiverBoundary(records), []);
+  assert.match(
+    inspectAssignmentArtifactReceiverBoundary(mutate(
+      "packages/cli/src/serve/assignment-mesh-adapter.ts",
+      (text) => text.replace(
+        "readonly receiver: AssignmentArtifactReceiverPort;",
+        "readonly receiver: FileResumableArtifactReceiver;",
+      ),
+    )).join("\n"),
+    /concrete, broad, or optional receiver/u,
+  );
+  assert.match(
+    inspectAssignmentArtifactReceiverBoundary(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "readonly assignmentArtifactReceiver: AssignmentArtifactReceiverPort;",
+        "readonly assignmentArtifactReceiver?: AssignmentArtifactReceiverPort;",
+      ),
+    )).join("\n"),
+    /concrete, broad, or optional receiver/u,
+  );
+  assert.match(
+    inspectAssignmentArtifactReceiverBoundary(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "assignmentArtifactReceiver: createAssignmentArtifactReceiverInfrastructure({",
+        "assignmentArtifactReceiver: missingAssignmentArtifactReceiver({",
+      ),
+    )).join("\n"),
+    /Anchor Host|second Host entry/u,
+  );
+  assert.match(
+    inspectAssignmentArtifactReceiverBoundary(mutate(
+      "packages/cli/src/serve/device-removal-cleanup.ts",
+      (text) => text.replace(
+        'path.join(distributed, "mesh-artifact-partials"),',
+        "",
+      ),
+    )).join("\n"),
+    /current-device cleanup exact-set|second Host entry/u,
+  );
+  assert.match(
+    inspectAssignmentArtifactReceiverBoundary([
+      ...records,
+      {
+        relative: "packages/cli/src/serve/duplicate-assignment-receiver.ts",
+        text: 'void "mesh-artifact-partials";',
+      },
+    ]).join("\n"),
+    /second Host entry or physical root/u,
   );
 });
 

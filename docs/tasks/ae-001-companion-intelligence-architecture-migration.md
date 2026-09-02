@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-09c P09 Surface asset 临时存储边界已闭合；准备迁移 P09 mesh artifact partial 边界<br>
+> 当前检查点：A6-09d P09 Mesh assignment artifact partial 边界已闭合；准备裁决 P11 recovery 边界<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `cd6262d0 + A6-09c 当前工作区差异`；A6-09c 已由协调者独立复核接受，待随本记录提交 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；P09 D05 Surface asset 临时存储边界已闭合 |
-| 活跃工作包 | 无；协调者准备派发 P09 `mesh-artifact-partials` 的有限 receiver 边界 |
-| 下一责任链 | 只收口 Mesh assignment artifact 的 partial receiver/Host 物理边界；不扩入 P11/P12 的独立 transfer/checkpoint receiver |
-| 打开的单向桥 | 无；P07 四条物理持久边界、P09 D03/D04 与 D05 的有限端口均已单向接管，需求侧无 File concrete、`Pick<concrete>`、optional fallback 或第二 Surface staging root |
-| 已失效证据 | 无当前未恢复架构证据；A6-01～09b 继续有效，A6-09c 的有限端口、两个组合入口和行为证据已独立重取 |
+| 已接受基线 | `1e97da46 + A6-09d 当前工作区差异`；A6-09d 已由协调者独立复核接受，待随本记录提交 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；P09 D05 两类临时资产边界均已闭合 |
+| 活跃工作包 | 无；协调者正在裁决 P11 recovery staging/target 的真实需求侧物理泄漏 |
+| 下一责任链 | 只为生产事实成立的 P11 recovery 边界生成工作包；P12 保持独立，不预先合并 |
+| 打开的单向桥 | 无；P07 四条物理持久边界、P09 D03/D04 与 D05 的 Surface/assignment 有限端口均已单向接管，需求侧无 File concrete、`Pick<concrete>`、optional fallback 或第二 staging root |
+| 已失效证据 | 无当前未恢复架构证据；A6-01～09c 继续有效，A6-09d 的有限 receiver、双 Host 注入、传输/续传与清理证据已独立恢复 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2761,6 +2761,20 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据与门禁：新增 Core finite projection 2/2 与 CLI 真实物理/command-only composition 2/2；Core coordinator/lifecycle 相交恢复、presence、legacy、response-loss、adopt/reclaim/cleanup 15/15，CLI 完整 Authority 与 in-process/Mesh conformance 19/19。首次 CLI infrastructure 验证准确命中未重建 Core dist 导致新 projection export 不可见，按验证手册完成 Core typecheck/build 后重取；随后新增两项最终 2/2。Core 与 CLI `tsc --noEmit`、Core build、`pnpm cli:build`、`pnpm runtime:package-exports`、changed-source Biome 与 `git diff --check` 通过；Core build 仅有既有 circular-chunk warning。canonical `pnpm s7:lint` 为 55/55 且 registry golden 通过，新 inspector/mutation 冻结三角色 exact-set、两个 factory consumer、唯一物理 root owner、command-only 窄返回、Core concrete/`Pick` 归零及 current-device cleanup exact-set。
 - 失效与安全交接：若三项 port/exact-set/frozen projection、`SurfaceAssetCoordinatorOptions`/`ArtifactLifecycleIndexOptions`、唯一 CLI physical factory、full Authority 或 `FileMeshBootstrapStore.checkpointRetention()` 任一组合、temporary/presence/partial root、upload/recovery/adopt/reclaim/maintenance、device-removal 两项清理、authority export、S7 mutation 或上述直接测试变化，恢复 `A6-09c-p09-surface-asset-staging-boundary-v1` 并只重验本闭包；A6-09a/09b 只有其各自 D03/D04 输入真实变化时才失效。当前完成并等待协调者独立复核，A6继续 `[ ]`；下一检查点只允许独立裁决 `mesh-artifact-partials`，不得进入 P11/P12、A7 或通用 receiver/storage 重写。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：确认 Core 的上传、生命周期恢复和 presence 三类需求只取得冻结的 required 有限端口，`SurfaceAssetCoordinator`/`ArtifactLifecycleIndex` 不再引用 File receiver、具体 presence 或 `Pick<concrete>`；CLI 唯一物理 factory 由完整 Authority 与 command-only bootstrap 两个入口复用，canonical roots、temporary→P06 单向提升、恢复/legacy/reclaim/maintenance 和 device-removal 集合均未改变。独立运行 Core staging/coordinator/lifecycle 73/73、CLI staging/Authority/双 binding conformance 21/21、Core 与 CLI typecheck、canonical S7 55/55 与 registry golden、concrete/path 反查及 `git diff --check` 均通过；执行者的 Core/CLI build、runtime package exports 与格式证据有效。A6-09c 可以提交，A6仍保持 `[ ]`。
+
+### A6-09d：P09 Mesh assignment artifact partial 边界收口
+
+- 派发基线与唯一结果：以已接受 `HEAD 1e97da46` 加本文调度记录为基线，只收口 P09 D05 `mesh-artifact-partials/` 的 assignment artifact 接收边界。当前 `MeshRuntimeAssembly` 直接选择 physical partial path 并构造 `FileResumableArtifactReceiver`，`AssignmentMeshComposition` 与四类 Mesh adapter options 又直接透传该 concrete。迁移后服务端 probe/append 与客户端下载重驱只消费需求方拥有、required、readonly、exact-set 的有限 receiver；File receiver、home/path 与物理构造只存在于 Anchor/Executor ApplicationHost 组合边缘，Assembly/transport/assignment 逻辑不得取得 concrete 或路径。
+- 生产闭包与行为保护：覆盖 artifact service 的 receive probe/append、Mesh client 的 progress→remote read→append 循环、Run Executor/Submission 两向 attachment closure、Anchor+Executor/Anchor-only/Executor-only 三拓扑及断线/响应丢失重放。保持 authorization/activation proof、peer/signal、range/chunk/total byte bounds、连续 offset、byte-equal durable prefix、digest/length finalize、P06 CAS 目标、missing/corrupt fail closed 和 current-device removal 对该 partial root 的精确清理不变；partial 不得成为 assignment、grant 或 artifact Authority。
+- 旧路与明确不做：`assignment-mesh-adapter`、`AssignmentMeshComposition` 与 `MeshRuntimeAssembly` 不得继续导入、声明、构造或透传 `FileResumableArtifactReceiver`，不得使用 `Pick<concrete>`、cast、optional fallback、第二 receiver 或 runtime path lookup；两个持久 Host 入口分别从自己的现有 P06 artifact store 构造同一有限物理角色。不得迁移 Surface staging、P11 checkpoint、P12 transfer/planned/DR receiver，不改变 Assignment/Run/Resource/Trust 合同，不重写通用 File receiver、Mesh 协议或增加 retention/产品能力。
+- 最窄证据与完成条件：直接测试覆盖有限 receiver exact-set/frozen projection、真实物理 partial 的连续写/byte-equal replay/错 offset/坏 digest/重启续传/完成清理，以及 assignment artifact service/client、Run Executor/Submission 和三拓扑真实装配；结构门禁拒绝 adapter/composition/Assembly concrete 或 path 回流、required Host 漏注入、第二 physical owner、optional fallback 和 device-removal 集合漂移。按验证手册只运行 assignment Mesh artifact/组合/Assembly 与真实 Host 注入的失效闭包、CLI typecheck/必要 build、canonical S7、changed-source 格式和 `git diff --check`；不重复 Surface、D03/D04、P07、P11/P12、根级回归或制品验收。
+- 安全交接：只有 P09 Mesh partial 仍由一个物理机制实现、两个 Host 入口显式投影 required receiver、全部 transport/assignment 消费只见有限合同且传输/恢复/清理行为无回退时才结束；A6继续 `[ ]`。约四小时仍未闭合、发现必须修改 P06/Assignment 产品合同、影响扩入 Surface/P11/P12，或三拓扑不能在单一真相状态安全交接时，停止并记录事实、有效证据和唯一下一步，不得执行任何 Git 写操作。
+- 实施与唯一 owner：新增需求方拥有的 `AssignmentArtifactReceiverPort`，冻结为 required、readonly 的 `progress/append` exact-set，并以冻结 wrapper 隐藏 File receiver 的额外扫描、丢弃、root 与维护能力。唯一 `createAssignmentArtifactReceiverInfrastructure` 继续使用既有 512 MiB 上限，只在 Host/Infrastructure 边缘把各自现有 P06 `ArtifactStore` 与 canonical `<home>/distributed-runtime/mesh-artifact-partials` 组合为物理 receiver；Anchor/Anchor+local Executor 共用 `access-surfaces` 入口，Executor-only 使用 `executor-role-runtime` 入口。两处均在构造 `MeshRuntimeAssembly` 时 required 注入，Assembly、`AssignmentMeshComposition`、artifact service/client 与 Run Executor/Submission adapter 已无 File concrete、path、`Pick`、cast、optional fallback 或第二 receiver。
+- 传输、恢复与清理保护：服务端 receive probe/append 与客户端下载 redrive 仍命中同一有限 receiver，send probe/read 继续只读同一 P06 CAS；Run Executor 的 dispatch closure 上行及 Submission 的 sealed-bundle/result closure 回传仍由既有 assignment capability、activation proof、peer/signal 和 grant expiry 校验保护。range/chunk/declared bytes、连续 offset、byte-equal durable prefix、digest/length finalize、完成后 partial 耐久删除、响应丢失后的 probe/续传、重启后 prefix 重取均未改写；坏 offset、异字节重放和错误 digest 继续 fail closed。current-device removal 的 exact cleanup 仍只保留既有 `mesh-artifact-partials` 一项，P06 正式 CAS 不随 partial 清理删除；Surface staging、P11/P12 与 Assignment/P06 产品合同均未触碰。
+- 直接证据与结构门禁：assignment Mesh adapter 20/20 与有限 receiver/物理重建 2/2，合计 2 文件 22/22，覆盖双向 attachment closure、授权先于 payload、传输中断重驱、已存在 digest/空 artifact、连续 prefix、错 offset、异字节、坏 digest、跨 Host 重建与最终 P06 CAS/partial 零残留。CLI `tsc --noEmit`、`pnpm cli:build`、changed-source Biome 与 `git diff --check` 通过；纠正后的 canonical S7 最终 56/56 与 registry golden 通过，新增反向 mutation 拒绝 adapter/composition/Assembly concrete 或宽端口回流、optional 注入、任一 Host 漏绑、第二 factory/root 与 device-removal cleanup 漂移。
+- 失效与下一检查点：若 `progress/append` exact-set/frozen projection、唯一 physical factory/512 MiB 上限、Anchor 或 Executor Host required 注入、Assembly/composition/四个 adapter options、artifact service/client 的 probe/append/read、Run Executor/Submission attachment closure、authorization/activation/grant、prefix/finalize/replay、P06 destination、current-device cleanup、S7 或上述直接测试任一变化，恢复 `A6-09d-p09-mesh-assignment-artifact-partial-v1` 并只重验本闭包；A6-09a～09c 仅在其各自输入真实变化时失效。当前实施完成并等待协调者独立复核，A6继续 `[ ]`；下一检查点只允许独立裁决 P11 recovery staging/target，不提前进入 P12、A7 或通用 receiver/storage 重写。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调纠正记录：执行者初次把 `assignmentArtifactReceiver` 插在 Executor `MeshRuntimeAssembly` 参数的 `authority` 与 `localConversationOwner` 之间，虽不改变运行值，却破坏既有 S7 对“同一 authority storage governor 同时服务本机 source/target”的结构识别；因此初次“canonical S7 已通过”记录不成立。现已仅调整对象属性顺序为 `authority → localConversationOwner → assignmentArtifactReceiver`，required receiver 仍由同一 Executor Host 显式构造并注入，旧共根证明与本包新有限端口证明同时成立；未修改运行行为、测试逻辑或旧门禁强度。随后只重跑 canonical `pnpm s7:lint`，56/56 与 registry golden 通过，`git diff --check` 通过。
+- 协调者独立验收：确认 receiver exact-set 仅为冻结的 required `progress/append`，唯一 File factory 只在 Anchor/Executor Host 两个互斥生产入口构造，Assembly、composition 与四类 adapter options 均无 concrete、path、`Pick`、optional 或第二 receiver；P06 CAS、授权/传输/续传和 device-removal 集合未改变。独立运行 receiver/真实 Mesh adapter 22/22 与 CLI typecheck；首次 canonical S7 准确暴露 Executor 根对象属性顺序破坏既有共根证明，退回后仅重排属性并独立重跑 canonical S7 56/56 与 registry golden、`git diff --check` 通过。执行者的 CLI build与格式证据有效；A6-09d 可以提交，A6仍保持 `[ ]`。
 
 ## 十、用户提示词
 

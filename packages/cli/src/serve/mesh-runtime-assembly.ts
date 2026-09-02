@@ -3,9 +3,6 @@ import {
   assertLocalConversationIdForDevice,
   parseLocalConversationId,
 } from "@zhixing/core";
-import {
-  FileResumableArtifactReceiver,
-} from "@zhixing/core/authority";
 import type {
   AuthorityCallContext,
   DeviceRole,
@@ -51,6 +48,7 @@ import {
   type InstalledAuthorityGenerationReceipt,
 } from "../setup-delivery.js";
 import { AssignmentMeshComposition } from "./assignment-mesh-composition.js";
+import type { AssignmentArtifactReceiverPort } from "./assignment-artifact-receiver.js";
 import { createAssignmentGlobalQueryPort } from "./assignment-schedule-stager.js";
 import type { AssignmentArtifactAuthority } from "./assignment-mesh-adapter.js";
 import { fulfillConnectionLifetimeObligation } from "./connection-lifetime-obligation.js";
@@ -254,7 +252,6 @@ export function partitionPlannedAnchorPostInstall(
   });
 }
 
-const MAX_ASSIGNMENT_ARTIFACT_BYTES = 512 * 1024 * 1024;
 
 function routedSubmissionMeshRole(
   protocol: ConversationProtocolRuntime,
@@ -325,6 +322,7 @@ export interface MeshRuntimeAssemblyOptions {
   readonly plannedAnchorIssuerKey?: DeviceKey;
   readonly plannedAnchorPostInstall?: AnchorPostInstallDescriptor;
   readonly authority: AuthorityRuntimeStack;
+  readonly assignmentArtifactReceiver: AssignmentArtifactReceiverPort;
   readonly protocol?: ConversationProtocolRuntime;
   readonly executorTopology?: ConversationExecutorTopologyAdapter;
   readonly localConversationOwner?: LocalConversationOwnerAssembly;
@@ -428,11 +426,6 @@ export class MeshRuntimeAssembly
           throw new Error("Anchor mesh role requires the global authority state port");
         })()
       : undefined;
-    const receiver = new FileResumableArtifactReceiver(
-      options.authority.artifacts,
-      path.join(options.zhixingHome, "distributed-runtime", "mesh-artifact-partials"),
-      { maxArtifactBytes: MAX_ASSIGNMENT_ARTIFACT_BYTES },
-    );
     let worker: ConversationAssignmentWorker | undefined;
     const jobOwner = options.executor?.job?.owner;
     const executorPort: RunExecutorPort | undefined = roles.has("executor")
@@ -540,7 +533,10 @@ export class MeshRuntimeAssembly
     this.#composition = new AssignmentMeshComposition({
       services: this.services,
       connections: this.connections,
-      storage: { artifacts: options.authority.artifacts, receiver },
+      storage: {
+        artifacts: options.authority.artifacts,
+        receiver: options.assignmentArtifactReceiver,
+      },
       identity: {
         localDeviceId: options.authority.deviceId,
         signer: options.authority.signer,

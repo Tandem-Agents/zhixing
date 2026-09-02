@@ -3931,6 +3931,7 @@ export async function validateS7Structure() {
   failures.push(...inspectMeshBootstrapProjectionBoundary(records));
   failures.push(...inspectMeshPairingContinuationPersistenceBoundary(records));
   failures.push(...inspectSurfaceAssetStagingPersistenceBoundary(records));
+  failures.push(...inspectAssignmentArtifactReceiverBoundary(records));
   failures.push(...inspectConversationAdoptionAssembly(records));
   failures.push(...inspectConversationStorageBoundary(records));
   failures.push(...inspectWorksceneStorageCleanupBoundary(records));
@@ -11698,6 +11699,113 @@ export function inspectSurfaceAssetStagingPersistenceBoundary(records) {
     count(cleanup, 'path.join(distributed, "surface-asset-temporary")') !== 1
   ) {
     failures.push("Surface asset current-device cleanup exact-set drifted");
+  }
+  return failures;
+}
+
+export function inspectAssignmentArtifactReceiverBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const text = byPath.get(relative);
+    if (text === undefined) failures.push(`${relative}: assignment artifact receiver source is missing`);
+    return text ?? "";
+  };
+  const portPath = "packages/cli/src/serve/assignment-artifact-receiver.ts";
+  const infrastructurePath =
+    "packages/cli/src/serve/assignment-artifact-receiver-infrastructure.ts";
+  const adapterPath = "packages/cli/src/serve/assignment-mesh-adapter.ts";
+  const compositionPath = "packages/cli/src/serve/assignment-mesh-composition.ts";
+  const assemblyPath = "packages/cli/src/serve/mesh-runtime-assembly.ts";
+  const anchorPath = "packages/cli/src/serve/access-surfaces.ts";
+  const executorPath = "packages/cli/src/serve/executor-role-runtime.ts";
+  const cleanupPath = "packages/cli/src/serve/device-removal-cleanup.ts";
+  const port = required(portPath);
+  const infrastructure = required(infrastructurePath);
+  const adapter = required(adapterPath);
+  const composition = required(compositionPath);
+  const assembly = required(assemblyPath);
+  const anchor = required(anchorPath);
+  const executor = required(executorPath);
+  const cleanup = required(cleanupPath);
+  const count = (text, token) => text.split(token).length - 1;
+
+  const interfaceStart = port.indexOf("export interface AssignmentArtifactReceiverPort");
+  const interfaceEnd = port.indexOf("\n}", interfaceStart);
+  const contract = interfaceStart < 0 || interfaceEnd < 0
+    ? ""
+    : port.slice(interfaceStart, interfaceEnd);
+  if (
+    !contract.includes("readonly progress:") ||
+    !contract.includes("readonly append:") ||
+    count(contract, "readonly ") !== 2 ||
+    /discard|cursor|rootDir|path|FileResumableArtifactReceiver|ArtifactStore/u.test(contract) ||
+    count(port, "Object.freeze({") !== 1
+  ) {
+    failures.push("Assignment artifact receiver finite readonly exact-set drifted");
+  }
+
+  if (
+    count(infrastructure, "new FileResumableArtifactReceiver(") !== 1 ||
+    count(infrastructure, '"mesh-artifact-partials"') !== 1 ||
+    count(infrastructure, "projectAssignmentArtifactReceiver(") !== 1 ||
+    !infrastructure.includes("artifacts: ArtifactStore;") ||
+    !infrastructure.includes("maxArtifactBytes: MAX_ASSIGNMENT_ARTIFACT_BYTES")
+  ) {
+    failures.push("Assignment artifact receiver physical composition or limits drifted");
+  }
+
+  if (
+    /FileResumableArtifactReceiver|Pick<File|mesh-artifact-partials/u.test(adapter) ||
+    count(adapter, "readonly receiver: AssignmentArtifactReceiverPort;") !== 4 ||
+    /FileResumableArtifactReceiver|Pick<File|mesh-artifact-partials/u.test(composition) ||
+    count(composition, "readonly receiver: AssignmentArtifactReceiverPort;") !== 1 ||
+    /FileResumableArtifactReceiver|Pick<File|mesh-artifact-partials/u.test(assembly) ||
+    !assembly.includes(
+      "readonly assignmentArtifactReceiver: AssignmentArtifactReceiverPort;",
+    ) ||
+    assembly.includes(
+      "readonly assignmentArtifactReceiver?: AssignmentArtifactReceiverPort;",
+    ) ||
+    !assembly.includes("receiver: options.assignmentArtifactReceiver")
+  ) {
+    failures.push("Assignment Mesh demand regained a concrete, broad, or optional receiver");
+  }
+
+  for (const [label, source] of [["Anchor", anchor], ["Executor", executor]]) {
+    if (
+      count(source, "createAssignmentArtifactReceiverInfrastructure({") !== 1 ||
+      count(source, "assignmentArtifactReceiver: createAssignmentArtifactReceiverInfrastructure({") !== 1 ||
+      source.includes("FileResumableArtifactReceiver") ||
+      source.includes("mesh-artifact-partials")
+    ) {
+      failures.push(`${label} Host did not inject the unique finite assignment receiver`);
+    }
+  }
+
+  const factoryConsumers = records
+    .filter((record) =>
+      record.relative !== infrastructurePath &&
+      record.text.includes("createAssignmentArtifactReceiverInfrastructure({")
+    )
+    .map((record) => record.relative)
+    .sort();
+  const expectedConsumers = [anchorPath, executorPath].sort();
+  const rootOwners = records
+    .filter((record) => record.text.includes('"mesh-artifact-partials"'))
+    .map((record) => record.relative)
+    .sort();
+  const expectedRootOwners = [cleanupPath, infrastructurePath].sort();
+  if (
+    factoryConsumers.length !== expectedConsumers.length ||
+    factoryConsumers.some((relative, index) => relative !== expectedConsumers[index]) ||
+    rootOwners.length !== expectedRootOwners.length ||
+    rootOwners.some((relative, index) => relative !== expectedRootOwners[index])
+  ) {
+    failures.push("Assignment artifact receiver acquired a second Host entry or physical root");
+  }
+  if (count(cleanup, 'path.join(distributed, "mesh-artifact-partials")') !== 1) {
+    failures.push("Assignment artifact current-device cleanup exact-set drifted");
   }
   return failures;
 }

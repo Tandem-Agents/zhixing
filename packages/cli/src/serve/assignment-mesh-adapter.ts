@@ -2,7 +2,6 @@ import { Buffer } from "node:buffer";
 import type { ArtifactStore } from "@zhixing/core/authority";
 import {
   collectArtifactRefs,
-  FileResumableArtifactReceiver,
   describeDispatchArtifactClosure,
   describeSealedBundleArtifactClosure,
   normalizedArtifactRefs,
@@ -78,6 +77,7 @@ import type {
   AssignmentSubmissionIdentity,
   AssignmentSubmissionPreflightPort,
 } from "@zhixing/owner-kernel";
+import type { AssignmentArtifactReceiverPort } from "./assignment-artifact-receiver.js";
 
 export const ASSIGNMENT_ARTIFACT_SERVICE = "assignment.artifacts";
 export const RUN_EXECUTOR_SERVICE = "assignment.executor";
@@ -97,7 +97,7 @@ export interface AssignmentArtifactAuthorization {
 
 export interface AssignmentArtifactServiceOptions {
   readonly artifacts: ArtifactStore;
-  readonly receiver: FileResumableArtifactReceiver;
+  readonly receiver: AssignmentArtifactReceiverPort;
   readonly verifier: ProtocolSignatureVerifier;
   readonly authorize: (
     request: AssignmentArtifactAuthorization,
@@ -109,7 +109,7 @@ export interface AssignmentArtifactServiceOptions {
 export interface AssignmentArtifactClientOptions {
   readonly client: MeshServiceClient;
   readonly artifacts: ArtifactStore;
-  readonly receiver: FileResumableArtifactReceiver;
+  readonly receiver: AssignmentArtifactReceiverPort;
   readonly chunkBytes?: number;
 }
 
@@ -127,7 +127,7 @@ export interface AssignmentArtifactAuthority {
 export interface MeshRunExecutorPortOptions {
   readonly client: MeshServiceClient;
   readonly artifacts: ArtifactStore;
-  readonly receiver: FileResumableArtifactReceiver;
+  readonly receiver: AssignmentArtifactReceiverPort;
   readonly verifier: ProtocolSignatureVerifier;
   readonly signer: ProtocolSigner;
   readonly localDeviceId: string;
@@ -165,7 +165,7 @@ export interface RunExecutorMeshServiceOptions {
 export interface MeshRunSubmissionPortOptions {
   readonly client: MeshServiceClient;
   readonly artifacts: ArtifactStore;
-  readonly receiver: FileResumableArtifactReceiver;
+  readonly receiver: AssignmentArtifactReceiverPort;
   readonly signer: ProtocolSigner;
   readonly localDeviceId: string;
   readonly peerDeviceId: string;

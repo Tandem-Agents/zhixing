@@ -50,6 +50,7 @@ import {
   setupDelivery,
 } from "../setup-delivery.js";
 import { MeshRuntimeAssembly, executorIdForDevice } from "./mesh-runtime-assembly.js";
+import { createAssignmentArtifactReceiverInfrastructure } from "./assignment-artifact-receiver-infrastructure.js";
 import { createFileMeshPairingContinuationRepository } from "./mesh-pairing-continuation.js";
 import { SurfaceAssetMaintenance } from "./surface-asset-maintenance.js";
 import { createAnchorConversationDeleteProjectionPort } from "./conversation-delete-binding.js";
@@ -315,6 +316,10 @@ const meshSurface: AccessSurface = {
         ? { plannedAnchorPostInstall: bootstrap.plannedAnchorPostInstall }
         : {}),
       authority: ctx.authorityRuntime,
+      assignmentArtifactReceiver: createAssignmentArtifactReceiverInfrastructure({
+        zhixingHome: ctx.zhixingHome,
+        artifacts: ctx.authorityRuntime.artifacts,
+      }),
       protocol: ctx.conversationProtocol,
       executorTopology: ctx.conversationExecutorTopology!,
       ...(ctx.localConversationOwner
