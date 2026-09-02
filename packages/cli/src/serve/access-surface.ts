@@ -114,6 +114,7 @@ import type {
   AdvancementReviewAttemptApplication,
 } from "@zhixing/core/advancement/application";
 import type { NamerConversationRepo } from "./turn-maintenance.js";
+import type { AdvancementEvidenceHostBindingPort } from "./advancement-evidence-topology.js";
 
 type ConversationRuntimeStoragePort = Readonly<
   Required<
@@ -204,6 +205,7 @@ export interface AssemblyContext {
    */
   readonly sessionActivityBroadcastRef: { current: SessionActivityBroadcast | null };
   readonly advancementDirectory: AdvancementConversationDirectory;
+  readonly advancementEvidenceRuntime: AdvancementEvidenceHostBindingPort;
   readonly startupRollback: StartupRollback;
   readonly lifecycleContributions: AssemblyLifecycleContributions;
   readonly channelHttpRoutes: Map<

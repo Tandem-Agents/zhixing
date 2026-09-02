@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-07b Assignment data-plane stream/ticket 边界收口等待协调者复核<br>
+> 当前检查点：A6-07c Advancement evidence Executor 拓扑边界收口等待协调者复核<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `55ca4d48`；A6-07a 已由协调者纠正并独立复核后提交，Conversation requirement、application assignment/恢复/终态与 Host 本机/Mesh mechanism 已形成单向分层 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-07b 已形成待协调者复核的 P08 data-plane stream/ticket 需求端口与 Host/Correctness 机制边界 |
-| 活跃工作包 | `A6-07b-assignment-data-plane-boundary-v1` 等待协调者复核；需求消费者只持有限 stream/ticket 端口，Host 组合与 Executor/Mesh 适配持有 ledger、spool、ticket store 和传输机制 |
-| 下一责任链 | A6-07b 闭合后继续核实 Assignment resource/evidence 与 P07/P09～P12 的真实剩余缺口；不并行扩入设备管理、transfer 或 A7 |
-| 打开的单向桥 | 无；A6-07b 如需迁移期适配，必须在同包退场，不得给需求方保留 concrete ledger/data-plane 或 local/Mesh 双入口 |
-| 已失效证据 | 无当前未恢复证据；A6-07a 及 A6-01～06d 继续有效，A6-07b 生产、直接测试、S6 与 S7 证据已恢复并等待协调者复核 |
+| 已接受基线 | `dc2cf305`；A6-07b 已由协调者独立复核后提交，P08 stream/ticket 需求端口与 Executor/Host/Mesh 机制边界已闭合 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-07c 已在当前工作区形成待复核证据，A6 继续未完成 |
+| 活跃工作包 | `A6-07c-advancement-evidence-topology-boundary-v1` 等待协调者独立复核；Advancement 只消费有限 evidence target directory，Host 唯一选择本机或 Mesh handler，Mesh 只提供远端机制 |
+| 下一责任链 | A6-07c 闭合后核实 Assignment resource 与 P07/P09～P12 的真实剩余缺口；不并行扩入设备管理、transfer 或 A7 |
+| 打开的单向桥 | 无；旧 Advancement→AssemblyContext/MeshRuntime concrete 查询、`evidenceForExecutor` local/remote service locator 与平行目标选择入口已在 A6-07c 归零 |
+| 已失效证据 | 无当前未恢复证据；`A6-07c-advancement-evidence-topology-boundary-v1` 待协调者复核，A6-07a、A6-07b 及 A6-01～06d 继续有效 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2650,6 +2650,15 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据与结构门禁：data-plane topology/runtime、Channel 与 Conversation worker 5文件39/39；Mesh/Executor role、job-owner 与 terminal 5文件27/27；真实 S6 本机/远端 first-party、Channel、job、无合法 responder 与跨域拒绝1文件8/8。CLI `tsc --noEmit` 与 `pnpm cli:build`通过；canonical S7最终47/47与registry golden通过，新增反向 mutation可拒绝上层 concrete/storage泄漏、public spool/ticket、Mesh绕过有限service port、Host topology adapter缺失或重建本机/Mesh双入口；既有 local-owner mutation因新增同名 verifier 行产生目标碰撞后已收窄到真实构造点并重新具备识别力。changed-source Biome与`git diff --check`通过；manifest、package export和build entry未改变，既有fresh package-export证据未失效，未重复运行。
 - 失效与交接：若上述有限stream/ticket/target端口、`ExecutorDataPlaneRuntime` concrete owner、Host adapter唯一构造、Mesh service/remote directory、本机transport、Conversation/Channel/job consumer、P08持久/恢复/授权/回收语义、S6生产拓扑、S7或上述直接测试任一变化，只恢复本证据及真实相交的A0/A5/A6证据。当前无打开桥和未恢复证据；A6继续`[ ]`，下一检查点由协调者复核后核实Assignment resource/evidence与P07/P09～P12的真实剩余缺口，不进入设备管理、transfer或A7。本轮未执行Git暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：沿 Host 构造、Executor concrete owner、Mesh service、统一 target 与 Conversation/Channel/Job 消费链复核后，确认 concrete spool、ticket registry、ledger 和 Mesh client/service 未进入需求合同，单机/远端只在 Host topology adapter 分叉，未形成万能 facade 或第二 owner。独立运行 topology、runtime、lossless、Channel、Conversation worker、job-owner 与真实 S6 共 53/53，CLI `tsc --noEmit`、canonical S7 47/47 与 registry golden、runtime package exports 和 `git diff --check` 均通过；A6-07b 可以提交，A6 仍保持 `[ ]`。
+
+### A6-07c：Advancement evidence Executor 拓扑边界收口
+
+- 基线与唯一结果：以已接受 `HEAD dc2cf30506f02f4f4bddc56539775657d4e8d7c2` 加协调者调度记录为基线，形成待复核证据 `A6-07c-advancement-evidence-topology-boundary-v1`。Advancement evidence 应用现在只消费需求方拥有的有限 `AdvancementEvidenceRuntimePort` 与 `AdvancementEvidenceTargetDirectory`：Conversation protocol 继续从已接受 run 裁决 executor target，`AdvancementEvidenceCoordinator` 继续拥有签名请求、capability gap、journal/replay/admission，应用不再读取 `AssemblyContext`、具体 `MeshRuntimeAssembly`、本机 handler 或 local/remote 条件。已有 `ExecutorEvidenceHandler`、Evidence Journal、签名/验证、请求/响应 binding、response-loss 重放与 accepted-work lifecycle 均未迁移或改写。
+- Host、机制与旧路退场：唯一 Anchor Host 在 authority、conversation、executor evidence handler 与 Mesh 都已装配后，通过一次性 `AdvancementEvidenceHostBinding` 绑定 signer/verifier、既有 target resolver 和 `AdvancementEvidenceTopologyAdapter`；adapter 只按 executor identity 选择本机 finite client，否则委托远端 directory。local-only Conversation owner 使用同一 adapter 的纯本机形态。`MeshRuntimeAssembly` 只实现 `AdvancementEvidenceRemoteDirectory.remoteEvidenceClient` 并继续唯一注册既有 evidence Mesh service，不再处理本机选择；旧 `command.ts` 的惰性 `AssemblyContext` service locator、`evidenceForExecutor` 本机/远端双入口和应用侧 concrete 查询全部归零。late binding 未绑定时 fail closed，重复 binding 拒绝，不形成第二 registry、第二 evidence owner 或万能 topology facade。
+- 行为与边界保护：target 的 conversation/run/executor/assignment/operation identity、签名与 verifier、capability-gap、pending/completed journal、response-loss 重放、拒绝与超时、evidence acceptance、Server/Owner 通知和 P08 持久/恢复语义保持原样；本包只移动 topology mechanism 选择，不改变 P06 Authority、Assignment resource、P07 execution assets、P09～P12 Mesh/transfer/recovery、设备管理、公开协议、schema 或持久格式。远端目录仍由既有 active executor/device binding 与 Mesh connection 产生 client，缺失/不可达返回无可用 target，应用沿原 fail-closed 路径处理。
+- 直接证据与结构门禁：Advancement CLI application/topology/evidence Mesh/review 4 文件 14/14，Owner evidence 8/8，Orchestrator executor evidence 10/10；Host/topology 组合批次 44/46 中仅两项受共享 storage-maintenance `backpressured:ioOperations` 竞争影响，两个失败用例在独立 fresh process 各 1/1 通过，证明三拓扑与 local-owner 功能断言完整。最终变更后 topology/controller 子闭包 2 文件 4/4、CLI `tsc --noEmit`、`pnpm cli:build`、changed-source Biome、`pnpm runtime:package-exports` 均通过；canonical `pnpm s7:lint` coverage/mutation 48/48 与 registry golden 通过。新增反向 mutation 拒绝需求合同 concrete 泄漏、应用/command 绕过 directory、Host 构造或顺序漂移、Mesh 恢复本机选择、第二 Mesh client/service owner以及旧 service locator 回流。
+- 失效与交接：若有限 runtime/target/remote directory 合同、Conversation target resolver、Host 一次性 binding/adapter、local handler、Mesh remote client/service、Advancement coordinator/journal/replay、P08 evidence 持久/accepted-work 语义、三个拓扑组合、S7 或上述直接测试任一变化，只恢复本证据及真实相交的 A0/A5/A6 证据；A6-07a/07b 仅在其相交入口真实变化时失效。当前无打开桥和未恢复证据；A6 继续 `[ ]`，下一检查点由协调者复核后核实 Assignment resource 与 P07/P09～P12 的剩余缺口，不进入设备管理、transfer 或 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：确认 Advancement 应用只消费有限 runtime/target directory，Conversation 保留 target 决定，Host 一次性绑定本机或远端机制，Mesh 不再承担本机选择或运行期查询；late binding 只解决既有装配顺序且未扩展为 service locator。独立运行 topology、controller、Evidence Mesh、local-owner 与真实 S6 共 20/20，Orchestrator executor evidence 10/10，CLI `tsc --noEmit`、canonical S7 48/48 与 registry golden、runtime package exports 和 `git diff --check` 均通过；A6-07c 可以提交，A6 仍保持 `[ ]`。
 
 ## 十、用户提示词
 

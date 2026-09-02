@@ -16,6 +16,7 @@ import {
   inspectConversationAdoptionAssembly,
   inspectConversationExecutorDispatchBoundary,
   inspectAssignmentDataPlaneBoundary,
+  inspectAdvancementEvidenceTopologyBoundary,
   inspectConversationStorageBoundary,
   inspectWorksceneStorageCleanupBoundary,
   inspectStorageRemainderBoundary,
@@ -893,6 +894,82 @@ test("assignment data plane exposes finite local and Mesh ports to upper consume
       ),
     )).join("\n"),
     /Host assignment data-plane construction/u,
+  );
+});
+
+test("Advancement evidence selects local or Mesh only through one finite Host directory", async () => {
+  const paths = [
+    "packages/cli/src/serve/advancement-evidence-topology.ts",
+    "packages/cli/src/serve/advancement-controller.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/access-surface.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/local-conversation-owner.ts",
+    "packages/cli/src/serve/mesh-runtime-assembly.ts",
+    "packages/cli/src/serve/evidence-mesh.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: (await readFile(relative, "utf8")).replaceAll("\r\n", "\n"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectAdvancementEvidenceTopologyBoundary(records), []);
+  assert.match(
+    inspectAdvancementEvidenceTopologyBoundary(mutate(
+      "packages/cli/src/serve/advancement-evidence-topology.ts",
+      (text) => `${text}\ntype ConcreteLeak = EvidenceMeshClient;\n`,
+    )).join("\n"),
+    /demand contract leaked a concrete mechanism/u,
+  );
+  assert.match(
+    inspectAdvancementEvidenceTopologyBoundary(mutate(
+      "packages/cli/src/serve/advancement-controller.ts",
+      (text) => text.replace(
+        "evidenceRuntime.targets.clientForExecutor(executorId)",
+        "ctx.meshRuntime.evidenceForExecutor(executorId)",
+      ),
+    )).join("\n"),
+    /application bypassed its finite target directory/u,
+  );
+  assert.match(
+    inspectAdvancementEvidenceTopologyBoundary(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "evidenceRuntime: advancementEvidenceRuntime,",
+        "evidenceRuntime: () => ctx.meshRuntime?.evidenceForExecutor(),",
+      ),
+    )).join("\n"),
+    /command restored an AssemblyContext or Mesh evidence service-locator/u,
+  );
+  assert.match(
+    inspectAdvancementEvidenceTopologyBoundary(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "targets: new AdvancementEvidenceTopologyAdapter({",
+        "targets: ctx.meshRuntime!,",
+      ),
+    )).join("\n"),
+    /Host Advancement evidence topology construction/u,
+  );
+  assert.match(
+    inspectAdvancementEvidenceTopologyBoundary(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "  remoteEvidenceClient(executorId: string): EvidenceHandlerPort | undefined {\n    try {",
+        "  remoteEvidenceClient(executorId: string): EvidenceHandlerPort | undefined {\n    if (executorId === this.options.authority.executorId && this.options.executor?.evidence) return this.options.executor.evidence;\n    try {",
+      ),
+    )).join("\n"),
+    /Mesh evidence mechanism regained local selection/u,
+  );
+  assert.match(
+    inspectAdvancementEvidenceTopologyBoundary(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => `${text}\nconst duplicateEvidenceClient = new EvidenceMeshClient(client, verifier);\n`,
+    )).join("\n"),
+    /Mesh client or service acquired a second production owner/u,
   );
 });
 

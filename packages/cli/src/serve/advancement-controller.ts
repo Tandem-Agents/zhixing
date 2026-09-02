@@ -9,16 +9,11 @@ import {
   userMessage,
 } from "@zhixing/core";
 import type {
-  EvidenceClientPort,
   GlobalStatePort,
   ResourceReservationPort,
   SessionStatePort,
 } from "@zhixing/core/contracts";
 import type { FileArtifactStore } from "@zhixing/core/authority";
-import type {
-  ProtocolSignatureVerifier,
-  ProtocolSigner,
-} from "@zhixing/core/protocol";
 import {
   assertAdvancementModelProviderBinding,
   type AdvancementModelProviderFactory,
@@ -27,7 +22,6 @@ import {
   AdvancementController,
   AdvancementEvidenceCoordinator,
   SessionAdvancementStore,
-  type AdvancementEvidenceTarget,
 } from "@zhixing/owner-services";
 import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
 import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
@@ -39,6 +33,7 @@ import {
   GlobalRubricCatalog,
   GlobalRubricPublication,
 } from "./advancement-rubric-library.js";
+import type { AdvancementEvidenceRuntimePort } from "./advancement-evidence-topology.js";
 
 export interface ServeAdvancementControllerDeps {
   readonly modelProvider: AdvancementModelProviderFactory;
@@ -59,17 +54,7 @@ export interface ServeAdvancementControllerDeps {
   ) => Promise<string | undefined>;
   /** 准入延迟基线观测（诊断日志）。 */
   readonly onAdmissionTiming?: (elapsedMs: number) => void;
-  readonly evidenceRuntime?: () =>
-    | {
-        readonly signer: ProtocolSigner;
-        readonly verifier: ProtocolSignatureVerifier;
-        readonly resolveTarget: (
-          conversationId: string,
-          runId: string,
-        ) => Promise<AdvancementEvidenceTarget | undefined>;
-        readonly clientFor: (executorId: string) => EvidenceClientPort | undefined;
-      }
-    | undefined;
+  readonly evidenceRuntime?: AdvancementEvidenceRuntimePort;
   readonly rubricRuntime?: () =>
     | {
         readonly globalState: GlobalStatePort;
@@ -211,30 +196,27 @@ export async function createServeAdvancementApplications(
         return port;
       },
     });
-  const evidence = deps.evidenceRuntime
+  const evidenceRuntime = deps.evidenceRuntime;
+  const evidence = evidenceRuntime
     ? new AdvancementEvidenceCoordinator({
         store,
         resources: governor,
-        resolveTarget: (conversationId, runId) => {
-          const runtime = deps.evidenceRuntime?.();
-          if (!runtime) return Promise.resolve(undefined);
-          return runtime.resolveTarget(conversationId, runId);
-        },
+        resolveTarget: (conversationId, runId) =>
+          evidenceRuntime.resolveTarget(conversationId, runId),
         clientFor: (executorId) =>
-          deps.evidenceRuntime?.()?.clientFor(executorId),
+          evidenceRuntime.targets.clientForExecutor(executorId),
         signer: {
-          sign: (schemaId, version, payload) => {
-            const runtime = deps.evidenceRuntime?.();
-            if (!runtime) throw new Error("Advancement evidence runtime is unavailable");
-            return runtime.signer.sign(schemaId, version, payload);
-          },
+          sign: (schemaId, version, payload) =>
+            evidenceRuntime.signer.sign(schemaId, version, payload),
         },
         verifier: {
-          verify: (schemaId, version, payload, signature) => {
-            const runtime = deps.evidenceRuntime?.();
-            if (!runtime) throw new Error("Advancement evidence runtime is unavailable");
-            runtime.verifier.verify(schemaId, version, payload, signature);
-          },
+          verify: (schemaId, version, payload, signature) =>
+            evidenceRuntime.verifier.verify(
+              schemaId,
+              version,
+              payload,
+              signature,
+            ),
         },
       })
     : undefined;

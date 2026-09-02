@@ -65,6 +65,7 @@ import { ZHIXING_CLI_VERSION } from "../version.js";
 import { JobStatusDirectory } from "./job-status-directory.js";
 import { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import { AssignmentDataPlaneTopologyAdapter } from "./assignment-data-plane-topology.js";
+import { AdvancementEvidenceTopologyAdapter } from "./advancement-evidence-topology.js";
 import { createLosslessDataPlaneComposition } from "./lossless-data-plane-composition.js";
 import { ExecutorJobOwnerAssembly } from "./executor-job-owner.js";
 import { JobInteractionRuntimeUnavailableError } from "./durable-job-interactions.js";
@@ -350,6 +351,40 @@ const meshSurface: AccessSurface = {
         }
       : {});
     ctx.meshRuntime = mesh;
+  },
+};
+
+/** Host-owned local/Mesh evidence selector installed after every mechanism exists. */
+const advancementEvidenceTopologyUnit: CoreAssemblyUnit = {
+  name: "advancement-evidence-topology",
+  phase: "pre-server",
+  kind: "core",
+  async setup(ctx) {
+    if (!ctx.enabledRoles.includes("anchor")) return;
+    const authority = ctx.authorityRuntime;
+    const protocol = ctx.conversationProtocol;
+    if (!authority || !protocol) {
+      throw new Error(
+        "Advancement evidence topology requires authority and conversation runtimes",
+      );
+    }
+    ctx.advancementEvidenceRuntime.bind({
+      signer: authority.signer,
+      verifier: authority.verifier,
+      resolveTarget: (conversationId, runId) =>
+        protocol.advancementEvidenceTarget(conversationId, runId),
+      targets: new AdvancementEvidenceTopologyAdapter({
+        ...(ctx.evidenceHandler
+          ? {
+              local: {
+                executorId: authority.executorId,
+                client: ctx.evidenceHandler,
+              },
+            }
+          : {}),
+        ...(ctx.meshRuntime ? { remote: ctx.meshRuntime } : {}),
+      }),
+    });
   },
 };
 
@@ -1158,6 +1193,7 @@ export function createAssemblyUnits(
     executorJobOwnerUnit,
     assetMaintenanceSurface,
     meshSurface,
+    advancementEvidenceTopologyUnit,
     losslessDataPlaneSurface,
     executorJobOwnerStartUnit,
     createChannelSurface(channelCredentials),

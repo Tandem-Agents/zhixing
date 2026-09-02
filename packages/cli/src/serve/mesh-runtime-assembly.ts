@@ -82,6 +82,7 @@ import type {
   AssignmentDataPlaneRemoteDirectory,
   AssignmentDataPlaneTarget,
 } from "./assignment-data-plane-topology.js";
+import type { AdvancementEvidenceRemoteDirectory } from "./advancement-evidence-topology.js";
 import type { JobSubmissionOwner } from "./job-assignment-worker.js";
 import type { ExecutorJobOwner } from "./executor-job-owner.js";
 import type { JobRelayObligationDirectory } from "./channel-interaction-coordinator.js";
@@ -341,7 +342,8 @@ export interface MeshRuntimeAssemblyOptions {
 }
 
 /** Production composition for authenticated control services and their durable role owners. */
-export class MeshRuntimeAssembly implements AssignmentDataPlaneRemoteDirectory {
+export class MeshRuntimeAssembly
+  implements AssignmentDataPlaneRemoteDirectory, AdvancementEvidenceRemoteDirectory {
   readonly services = new MeshServiceRegistry();
   readonly #terminalOnlyServices = new MeshServiceRegistry();
   readonly connections: MeshConnectionRegistry;
@@ -1577,19 +1579,17 @@ export class MeshRuntimeAssembly implements AssignmentDataPlaneRemoteDirectory {
     );
   }
 
-  /** local 与 mesh 共用同一 EvidenceHandlerPort 合同和业务实现。 */
-  evidenceForExecutor(executorId: string): EvidenceHandlerPort {
-    if (
-      executorId === this.options.authority.executorId &&
-      this.options.executor?.evidence
-    ) {
-      return this.options.executor.evidence;
+  /** Remote-only evidence mechanism; Host owns local/Mesh selection. */
+  remoteEvidenceClient(executorId: string): EvidenceHandlerPort | undefined {
+    try {
+      const deviceId = this.#activeExecutorDeviceId(executorId);
+      return new EvidenceMeshClient(
+        this.connections.client(deviceId),
+        this.options.authority.verifier,
+      );
+    } catch {
+      return undefined;
     }
-    const deviceId = this.#activeExecutorDeviceId(executorId);
-    return new EvidenceMeshClient(
-      this.connections.client(deviceId),
-      this.options.authority.verifier,
-    );
   }
 
   #remoteDirectory(): ConversationExecutorTopologyDirectory {

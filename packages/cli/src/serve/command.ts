@@ -161,6 +161,7 @@ import {
 } from "../runtime/kernel-runtime-bindings.js";
 import { createHostAdvancementModelProviderFactory } from "../runtime/advancement-model-provider.js";
 import { createServeAdvancementApplications } from "./advancement-controller.js";
+import { AdvancementEvidenceHostBinding } from "./advancement-evidence-topology.js";
 import { createAdvancementAcceptanceLifecycle } from "./advancement-acceptance-lifecycle.js";
 import {
   createAnchorAdvancementConfirmedOriginalTaskAdmissionPort,
@@ -573,6 +574,7 @@ async function runServerProcess(
 
   const durableInteractions = new DurableConversationInteractionObserver();
   const assemblyUnits = createAssemblyUnits(channelCredentials);
+  const advancementEvidenceRuntime = new AdvancementEvidenceHostBinding();
   const {
     controller: advancementController,
     reviews: advancementReviews,
@@ -586,25 +588,7 @@ async function runServerProcess(
     governor: () => ctx.authorityRuntime?.resourceGovernor,
     // 会话状态端口——conversation 权威运行时在 surface 装配期创建，惰性取值
     sessionState: () => ctx.conversationProtocol?.sessionState,
-    evidenceRuntime: () => {
-      const authority = ctx.authorityRuntime;
-      const protocol = ctx.conversationProtocol;
-      if (!authority || !protocol) return undefined;
-      return {
-        signer: authority.signer,
-        verifier: authority.verifier,
-        resolveTarget: (conversationId: string, runId: string) =>
-          protocol.advancementEvidenceTarget(conversationId, runId),
-        clientFor: (executorId: string) => {
-          if (executorId === authority.executorId) return ctx.evidenceHandler;
-          try {
-            return ctx.meshRuntime?.evidenceForExecutor(executorId);
-          } catch {
-            return undefined;
-          }
-        },
-      };
-    },
+    evidenceRuntime: advancementEvidenceRuntime,
     rubricRuntime: () => {
       const authority = ctx.authorityRuntime;
       if (!authority?.globalState) return undefined;
@@ -957,6 +941,7 @@ async function runServerProcess(
       readRunsReverse: (conversationId, options) =>
         conversationDirectory.readRunsReverse(conversationId, options),
     },
+    advancementEvidenceRuntime,
     startupRollback,
     lifecycleContributions,
     channelHttpRoutes,

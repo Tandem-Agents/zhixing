@@ -70,6 +70,10 @@ import {
   type SessionTurnNotify,
 } from "@zhixing/rpc";
 import { createServeAdvancementApplications } from "./advancement-controller.js";
+import {
+  AdvancementEvidenceTopologyAdapter,
+  type AdvancementEvidenceRuntimePort,
+} from "./advancement-evidence-topology.js";
 import { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
 import type { LocalConversationOwnerRuntimeStack } from "./conversation-owner-runtime.js";
 import { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
@@ -886,13 +890,17 @@ export class LocalConversationOwnerAssembly {
       rubricPublication,
       recentContextProvider: async (conversationId) =>
         renderRecentContextFromMessages(manager.getHistory(conversationId, 6)),
-      evidenceRuntime: () => ({
+      evidenceRuntime: Object.freeze<AdvancementEvidenceRuntimePort>({
         signer: owner.signer,
         verifier: owner.verifier,
         resolveTarget: (conversationId, runId) =>
           protocol.advancementEvidenceTarget(conversationId, runId),
-        clientFor: (executorId) =>
-          executorId === owner.executorId ? options.evidence : undefined,
+        targets: new AdvancementEvidenceTopologyAdapter({
+          local: {
+            executorId: owner.executorId,
+            client: options.evidence,
+          },
+        }),
       }),
     });
 

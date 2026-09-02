@@ -3923,6 +3923,7 @@ export async function validateS7Structure() {
   failures.push(...inspectLocalConversationOwnerIsolation(records));
   failures.push(...inspectConversationExecutorDispatchBoundary(records));
   failures.push(...inspectAssignmentDataPlaneBoundary(records));
+  failures.push(...inspectAdvancementEvidenceTopologyBoundary(records));
   failures.push(...inspectConversationAdoptionAssembly(records));
   failures.push(...inspectConversationStorageBoundary(records));
   failures.push(...inspectWorksceneStorageCleanupBoundary(records));
@@ -10607,6 +10608,109 @@ export function inspectAssignmentDataPlaneBoundary(records) {
     count(executorRole, "bindAssignmentAuthority(") !== 1
   ) {
     failures.push("Host assignment data-plane construction and finite injection exact-set drifted");
+  }
+  return failures;
+}
+
+/** A6 Advancement evidence chooses local or Mesh only through one Host adapter. */
+export function inspectAdvancementEvidenceTopologyBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const text = byPath.get(relative);
+    if (text === undefined) failures.push(`${relative}: Advancement evidence source is missing`);
+    return text ?? "";
+  };
+  const topology = required("packages/cli/src/serve/advancement-evidence-topology.ts");
+  const application = required("packages/cli/src/serve/advancement-controller.ts");
+  const command = required("packages/cli/src/serve/command.ts");
+  const context = required("packages/cli/src/serve/access-surface.ts");
+  const access = required("packages/cli/src/serve/access-surfaces.ts");
+  const localOwner = required("packages/cli/src/serve/local-conversation-owner.ts");
+  const mesh = required("packages/cli/src/serve/mesh-runtime-assembly.ts");
+  const evidenceMesh = required("packages/cli/src/serve/evidence-mesh.ts");
+  const count = (text, token) => text.split(token).length - 1;
+
+  if (
+    !topology.includes("export interface AdvancementEvidenceTargetDirectory") ||
+    !topology.includes("export interface AdvancementEvidenceRemoteDirectory") ||
+    !topology.includes("export class AdvancementEvidenceTopologyAdapter") ||
+    !topology.includes("export class AdvancementEvidenceHostBinding") ||
+    [
+      "ExecutorEvidenceHandler",
+      "EvidenceMeshClient",
+      "MeshRuntimeAssembly",
+      "AssemblyContext",
+      "MeshServiceRegistry",
+      "ownerEpoch:",
+      "workspace:",
+      "descriptor:",
+    ].some((token) => topology.includes(token))
+  ) {
+    failures.push("Advancement evidence demand contract leaked a concrete mechanism or target rule");
+  }
+  if (
+    !application.includes("readonly evidenceRuntime?: AdvancementEvidenceRuntimePort") ||
+    !application.includes("evidenceRuntime.targets.clientForExecutor(executorId)") ||
+    [
+      "AssemblyContext",
+      "ExecutorEvidenceHandler",
+      "EvidenceMeshClient",
+      "MeshRuntimeAssembly",
+      "evidenceForExecutor",
+      "executorId ===",
+    ].some((token) => application.includes(token))
+  ) {
+    failures.push("Advancement evidence application bypassed its finite target directory");
+  }
+  if (
+    count(command, "new AdvancementEvidenceHostBinding()") !== 1 ||
+    count(command, "evidenceRuntime: advancementEvidenceRuntime") !== 1 ||
+    command.includes("evidenceRuntime: () =>") ||
+    command.includes("evidenceForExecutor(")
+  ) {
+    failures.push("command restored an AssemblyContext or Mesh evidence service-locator path");
+  }
+  if (
+    !context.includes("readonly advancementEvidenceRuntime: AdvancementEvidenceHostBindingPort") ||
+    count(access, "ctx.advancementEvidenceRuntime.bind({") !== 1 ||
+    count(access, "new AdvancementEvidenceTopologyAdapter({") !== 1 ||
+    !/meshSurface,\r?\n\s+advancementEvidenceTopologyUnit,\r?\n\s+losslessDataPlaneSurface/u.test(
+      access,
+    ) ||
+    count(localOwner, "new AdvancementEvidenceTopologyAdapter({") !== 1
+  ) {
+    failures.push("Host Advancement evidence topology construction exact-set drifted");
+  }
+  if (
+    !mesh.includes("AdvancementEvidenceRemoteDirectory") ||
+    !mesh.includes("remoteEvidenceClient(executorId: string)") ||
+    mesh.includes("evidenceForExecutor(") ||
+    /remoteEvidenceClient\([\s\S]*?this\.options\.executor\?\.evidence/u.test(mesh)
+  ) {
+    failures.push("Mesh evidence mechanism regained local selection or a concrete lookup API");
+  }
+  const meshClientOwners = records
+    .filter((record) => record.text.includes("new EvidenceMeshClient("))
+    .map((record) => record.relative)
+    .sort();
+  const serviceRegistrationOwners = records
+    .filter((record) =>
+      record.relative !== "packages/cli/src/serve/evidence-mesh.ts" &&
+      record.text.includes("registerEvidenceMeshService("),
+    )
+    .map((record) => record.relative)
+    .sort();
+  if (
+    meshClientOwners.length !== 1 ||
+    meshClientOwners[0] !== "packages/cli/src/serve/mesh-runtime-assembly.ts" ||
+    serviceRegistrationOwners.length !== 1 ||
+    serviceRegistrationOwners[0] !== "packages/cli/src/serve/mesh-runtime-assembly.ts" ||
+    count(mesh, "new EvidenceMeshClient(") !== 1 ||
+    count(mesh, "registerEvidenceMeshService(") !== 1 ||
+    !evidenceMesh.includes("export class EvidenceMeshClient implements EvidenceHandlerPort")
+  ) {
+    failures.push("Advancement evidence Mesh client or service acquired a second production owner");
   }
   return failures;
 }
