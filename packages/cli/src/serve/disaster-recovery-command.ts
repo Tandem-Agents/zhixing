@@ -45,7 +45,8 @@ import {
   createProductionAnchorReadySnapshot,
 } from "../setup-delivery.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
-import { FileBackupTargetConfiguration } from "./backup-target-config.js";
+import type { BackupTargetConfigurationRepository } from "./backup-target-config.js";
+import { createBackupTargetConfigurationInfrastructure } from "./backup-target-config-infrastructure.js";
 import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
 import { DisasterRecoveryTarget } from "./disaster-recovery-target.js";
 import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
@@ -131,7 +132,7 @@ async function admitDisasterRecoveryCandidate(
   options: DisasterRecoveryCommandOptions,
   signal: AbortSignal,
 ) {
-  const configured = await new FileBackupTargetConfiguration(context.home).load();
+  const configured = await context.backupTargets.load();
   signal.throwIfAborted();
   const configuredPaired = configured?.bindings.find((binding) =>
     binding.targetId === configured.currentTargetId && binding.kind === "paired-device");
@@ -471,6 +472,7 @@ export function disasterRecoveryPublicError(_error: unknown): Error {
 
 interface RecoveryContext {
   readonly home: string;
+  readonly backupTargets: BackupTargetConfigurationRepository;
   readonly secretStore: SecretStorePort & CredentialStoreCoordinator;
   readonly key: Awaited<ReturnType<typeof loadOrCreateDeviceKey>>;
   readonly identity: DeviceIdentity;
@@ -508,6 +510,7 @@ async function openRecoveryContext(
   const config = loadConfig({ homeDir: home });
   return {
     home,
+    backupTargets: createBackupTargetConfigurationInfrastructure(home),
     secretStore,
     key,
     identity: member.device,

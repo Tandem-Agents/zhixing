@@ -1779,6 +1779,10 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   const paths = [
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/backup-command.ts",
+    "packages/cli/src/serve/backup-target-config.ts",
+    "packages/cli/src/serve/backup-target-config-infrastructure.ts",
+    "packages/cli/src/maintenance/doctor.ts",
+    "packages/cli/src/index.ts",
     "packages/core/src/backup-recovery/application.ts",
     "packages/core/src/index.ts",
     "packages/core/package.json",
@@ -1820,6 +1824,60 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   assert.deepEqual(inspectRecoveryBackupAssembly(records), []);
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/backup-runtime-owner.ts",
+      (text) => text.replace(
+        "readonly backupTargets: BackupTargetConfigurationRepository;",
+        "readonly backupTargets?: BackupTargetConfigurationRepository;",
+      ),
+    )).join("\n"),
+    /backup target configuration finite repository, physical factory or durability boundary drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/backup-target-config-infrastructure.ts",
+      (text) => text.replace('"recovery-backup-targets.json"', '"backup-targets-v2.json"'),
+    )).join("\n"),
+    /backup target configuration finite repository, physical factory or durability boundary drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "backupTargets: createBackupTargetConfigurationInfrastructure(zhixingHome),",
+        "backupTargets: undefined,",
+      ),
+    )).join("\n"),
+    /backup target configuration finite repository, physical factory or durability boundary drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/maintenance/doctor.ts",
+      (text) => text.replace(
+        "readonly backupTargets: BackupTargetConfigurationRepository;",
+        "readonly backupTargets?: BackupTargetConfigurationRepository;",
+      ),
+    )).join("\n"),
+    /backup target configuration finite repository, physical factory or durability boundary drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/backup-target-config-infrastructure.ts",
+      (text) => text.replace("await handle.sync();", "void handle;"),
+    )).join("\n"),
+    /backup target configuration finite repository, physical factory or durability boundary drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly([
+      ...records,
+      {
+        relative: "packages/cli/src/serve/backup-target-config-duplicate.ts",
+        text: "class FileBackupTargetConfiguration {}",
+      },
+    ]).join("\n"),
+    /backup target configuration finite repository, physical factory or durability boundary drifted/,
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(

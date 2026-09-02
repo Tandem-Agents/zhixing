@@ -66,9 +66,10 @@ import {
 } from "@zhixing/mesh/trust-chain";
 import { createStdoutWriter } from "../screen/index.js";
 import {
-  FileBackupTargetConfiguration,
   type BackupTargetBinding,
+  type BackupTargetConfigurationRepository,
 } from "./backup-target-config.js";
+import { createBackupTargetConfigurationInfrastructure } from "./backup-target-config-infrastructure.js";
 import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
 import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
@@ -235,7 +236,7 @@ interface BackupContext {
   readonly projection: TrustProjection;
   readonly store: FileMeshBootstrapStore;
   readonly capacity: { readonly storage: StorageMaintenanceGovernorPort };
-  readonly targets: FileBackupTargetConfiguration;
+  readonly backupTargets: BackupTargetConfigurationRepository;
   readonly writeLine: (line: string) => void;
   readonly now: () => string;
 }
@@ -270,7 +271,7 @@ function createBackupRecoveryAdministration(
         : { kind: "missing" as const },
     prepareInitialRoot: () => prepareInitialRoot(context, options.readRecoveryPackage),
     preparedRootRecipientKeyId: (prepared) => prepared.checkpoint.envelope.recipientKeyId,
-    selectTarget: (binding) => context.targets.select(toBackupTargetBinding(binding)),
+    selectTarget: (binding) => context.backupTargets.select(toBackupTargetBinding(binding)),
     withDirectoryTarget: async (directory, use) => {
       const target = await FileRecoveryCheckpointTarget.open({
         targetRoot: directory,
@@ -338,7 +339,7 @@ function createBackupRecoveryAdministration(
         .createAndReplicate({ request: { kind: "forced", requestId } });
       return { checkpointId: checkpoint.envelope.checkpointId };
     },
-    loadTargetConfiguration: () => context.targets.load(),
+    loadTargetConfiguration: () => context.backupTargets.load(),
     verificationCandidate: (targetId) =>
       createService(context, context.trust, metadataOnlyTarget(targetId))
         .verificationCandidate(),
@@ -767,7 +768,7 @@ async function openContext(
     projection,
     store,
     capacity,
-    targets: new FileBackupTargetConfiguration(home),
+    backupTargets: createBackupTargetConfigurationInfrastructure(home),
     writeLine: options.writeLine ?? createStdoutWriter().line,
     now: options.now ?? (() => new Date().toISOString()),
   };
@@ -1059,7 +1060,7 @@ async function openCurrentTarget(
   recipient: RecoveryRoot,
   options: BackupCommandOptions,
 ): Promise<{ readonly target: RetirableRecoveryCheckpointTarget; readonly close: () => Promise<void> }> {
-  const configured = await context.targets.load();
+  const configured = await context.backupTargets.load();
   if (!configured) throw new Error("尚未配置独立恢复备份目标");
   const binding = configured.bindings.find((candidate) =>
     candidate.targetId === configured.currentTargetId);

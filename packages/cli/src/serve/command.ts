@@ -210,6 +210,7 @@ import {
 import { StartupRollback } from "./startup-rollback.js";
 import { AssemblyLifecycleContributions } from "./assembly-lifecycle.js";
 import { createConfiguredCheckpointOwner } from "./backup-runtime-owner.js";
+import { createBackupTargetConfigurationInfrastructure } from "./backup-target-config-infrastructure.js";
 import {
   governControlProvider,
   governControlTextCall,
@@ -961,6 +962,7 @@ async function runServerProcess(
   await setupAssemblyUnits(assemblyUnits, ctx, "pre-server");
   ctx.authorityCheckpointOwner = await createConfiguredCheckpointOwner({
     zhixingHome,
+    backupTargets: createBackupTargetConfigurationInfrastructure(zhixingHome),
     mesh: ctx.meshBootstrap,
     ...(ctx.meshRuntime ? { meshRuntime: ctx.meshRuntime } : {}),
     storageMaintenance: ctx.storageMaintenance,

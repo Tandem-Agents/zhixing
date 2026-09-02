@@ -159,9 +159,13 @@ describe("production mesh control plane", () => {
       }] } },
     });
     await expect(inspectLocalHealth({
+      homeDir: anchorRoot,
+      backupTargets: {
+        load: vi.fn(async () => undefined),
+        select: vi.fn(async () => undefined),
+      },
       configExists: async () => true,
       inspectConfig: vi.fn(),
-      inspectBackup: vi.fn(async () => undefined),
       inspectManaged: vi.fn(async () => ({ state: "ready" })),
       statusDeps: {
         readLockFn: async () => anchorLock,

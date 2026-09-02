@@ -10,7 +10,7 @@ import { decodeRecoveryPackage } from "@zhixing/mesh/recovery-package";
 import { RecoveryRoot, keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
-import { FileBackupTargetConfiguration } from "./backup-target-config.js";
+import { createBackupTargetConfigurationInfrastructure } from "./backup-target-config-infrastructure.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { activateInitialRecoveryRoot } from "./mesh-pair-command.js";
 import {
@@ -59,6 +59,7 @@ describe("recovery backup checkpoint owner", () => {
     await writeFile(path.join(configDir, "recovery-backup-targets.json"), "not-json");
     const owner = await createConfiguredCheckpointOwner({
       zhixingHome: home,
+      backupTargets: createBackupTargetConfigurationInfrastructure(home),
       mesh,
       meshRuntime: runtime as never,
       storageMaintenance: maintenance,
@@ -83,13 +84,15 @@ describe("recovery backup checkpoint owner", () => {
     });
 
     const noRuntimeHome = await createTempDir("recovery-owner-no-runtime");
-    await new FileBackupTargetConfiguration(noRuntimeHome).select({
+    const noRuntimeTargets = createBackupTargetConfigurationInfrastructure(noRuntimeHome);
+    await noRuntimeTargets.select({
       kind: "paired-device",
       targetId: "backup-device:target",
       deviceId: "target",
     });
     const withoutRuntime = await createConfiguredCheckpointOwner({
       zhixingHome: noRuntimeHome,
+      backupTargets: noRuntimeTargets,
       mesh,
       storageMaintenance: maintenance,
     });
@@ -170,7 +173,8 @@ describe("recovery backup checkpoint owner", () => {
       recoveryRoot,
     });
     await target.close();
-    await new FileBackupTargetConfiguration(home).select({
+    const backupTargets = createBackupTargetConfigurationInfrastructure(home);
+    await backupTargets.select({
       kind: "paired-device",
       targetId: "backup-device:target",
       deviceId: "target",
@@ -181,6 +185,7 @@ describe("recovery backup checkpoint owner", () => {
     } as unknown as MeshRuntimeBootstrap;
     const owner = await createConfiguredCheckpointOwner({
       zhixingHome: home,
+      backupTargets,
       mesh,
       storageMaintenance: allowMaintenance(),
     });

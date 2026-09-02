@@ -16,7 +16,7 @@ import { createTempDir } from "@zhixing/test-utils";
 import { connect, createServer, type Socket } from "node:net";
 import { describe, expect, it, vi } from "vitest";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
-import { FileBackupTargetConfiguration } from "./backup-target-config.js";
+import { createBackupTargetConfigurationInfrastructure } from "./backup-target-config-infrastructure.js";
 import { createFileMeshPairingContinuationRepository } from "./mesh-pairing-continuation.js";
 import { createPairingTrustEvent, runPairCommand } from "./mesh-pair-command.js";
 
@@ -252,7 +252,7 @@ describe("production mesh pairing command", () => {
       expect(dutyIndex).toBeGreaterThan(reconcileIndex);
       expect(migrationIndex).toBeGreaterThan(dutyIndex);
       expect(migrateDutyTo).toHaveBeenCalledOnce();
-      await expect(new FileBackupTargetConfiguration(anchorHome).load()).resolves.toMatchObject({
+      await expect(createBackupTargetConfigurationInfrastructure(anchorHome).load()).resolves.toMatchObject({
         currentTargetId: `backup-device:${executorId}`,
         bindings: [{ kind: "paired-device", deviceId: executorId }],
       });

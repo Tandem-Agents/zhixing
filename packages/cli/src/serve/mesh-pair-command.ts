@@ -85,7 +85,8 @@ import {
   createMeshBootstrapProjectionPorts,
   type MeshBootstrapProjectionPorts,
 } from "./mesh-bootstrap-projection.js";
-import { FileBackupTargetConfiguration } from "./backup-target-config.js";
+import type { BackupTargetConfigurationRepository } from "./backup-target-config.js";
+import { createBackupTargetConfigurationInfrastructure } from "./backup-target-config-infrastructure.js";
 import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
 import { readRecoveryPackageFromTty } from "./recovery-package-input.js";
 import {
@@ -149,6 +150,10 @@ interface PairingRuntimeInput extends PairCommandOptions {
   readonly continuations: MeshPairingContinuationRepository;
   readonly storageMaintenance: StorageMaintenanceGovernorPort;
   readonly writeLine: (line: string) => void;
+}
+
+interface PairingIssuerRuntimeInput extends PairingRuntimeInput {
+  readonly backupTargets: BackupTargetConfigurationRepository;
 }
 
 interface PairingInvitation {
@@ -270,6 +275,7 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
       ...options,
       isolatedComposition: options.secretStore !== undefined,
       zhixingHome,
+      backupTargets: createBackupTargetConfigurationInfrastructure(zhixingHome),
       secretStore: routedSecretStore,
       key,
       store,
@@ -451,7 +457,7 @@ export async function activateInitialRecoveryRoot(input: {
   return next;
 }
 
-async function issuePairing(input: PairingRuntimeInput): Promise<void> {
+async function issuePairing(input: PairingIssuerRuntimeInput): Promise<void> {
   const config = loadConfig({ homeDir: input.zhixingHome });
   let trustRecord = await input.store.loadTrustRecord();
   let projection = await input.store.loadTrustProjection();
@@ -741,7 +747,7 @@ async function issuePairing(input: PairingRuntimeInput): Promise<void> {
       }
     }
     await selectInitialPairingBackupTarget({
-      zhixingHome: input.zhixingHome,
+      backupTargets: input.backupTargets,
       store: input.store,
       targetDeviceId: joinMessage.join.device.deviceId,
     });
@@ -1416,12 +1422,11 @@ async function requestDutyDeviceChoice(
 }
 
 async function selectInitialPairingBackupTarget(input: {
-  readonly zhixingHome: string;
+  readonly backupTargets: BackupTargetConfigurationRepository;
   readonly store: FileMeshBootstrapStore;
   readonly targetDeviceId: string;
 }): Promise<void> {
-  const targets = new FileBackupTargetConfiguration(input.zhixingHome);
-  if (await targets.load()) return;
+  if (await input.backupTargets.load()) return;
   const targetId = `backup-device:${input.targetDeviceId}`;
   const records = await input.store.loadCheckpointRecords();
   const created = [...records].reverse().find((record) =>
@@ -1432,7 +1437,7 @@ async function selectInitialPairingBackupTarget(input: {
     record.t === "checkpoint-verified" &&
     record.checkpointId === created.checkpointId &&
     record.targetId === targetId)) return;
-  await targets.select({
+  await input.backupTargets.select({
     kind: "paired-device",
     targetId,
     deviceId: input.targetDeviceId,

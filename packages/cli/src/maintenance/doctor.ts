@@ -2,7 +2,8 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { getZhixingHome } from "@zhixing/core";
 import { loadConfig } from "@zhixing/providers";
-import { FileBackupTargetConfiguration } from "../serve/backup-target-config.js";
+import type { BackupTargetConfigurationRepository } from "../serve/backup-target-config.js";
+import { createBackupTargetConfigurationInfrastructure } from "../serve/backup-target-config-infrastructure.js";
 import {
   buildManagedHostPublicStatus,
   readOfflineStatusSnapshot,
@@ -24,16 +25,24 @@ export interface DoctorReport {
 }
 
 export interface DoctorDeps {
-  readonly homeDir?: string;
+  readonly homeDir: string;
+  readonly backupTargets: BackupTargetConfigurationRepository;
   readonly statusDeps?: StatusDeps;
   readonly configExists?: () => Promise<boolean>;
   readonly inspectConfig?: () => void;
-  readonly inspectBackup?: () => Promise<void>;
   readonly inspectManaged?: () => Promise<{ readonly state: string; readonly action?: string }>;
 }
 
-export async function inspectLocalHealth(deps: DoctorDeps = {}): Promise<DoctorReport> {
-  const homeDir = path.resolve(deps.homeDir ?? getZhixingHome());
+export function inspectDefaultLocalHealth(): Promise<DoctorReport> {
+  const homeDir = path.resolve(getZhixingHome());
+  return inspectLocalHealth({
+    homeDir,
+    backupTargets: createBackupTargetConfigurationInfrastructure(homeDir),
+  });
+}
+
+export async function inspectLocalHealth(deps: DoctorDeps): Promise<DoctorReport> {
+  const homeDir = path.resolve(deps.homeDir);
   try {
     const configExists = await (deps.configExists ?? (() => fileExists(path.join(homeDir, "config.jsonc"))))();
     if (!configExists) {
@@ -44,9 +53,7 @@ export async function inspectLocalHealth(deps: DoctorDeps = {}): Promise<DoctorR
       };
     }
     (deps.inspectConfig ?? (() => { loadConfig({ homeDir, noAutoCreate: true }); }))();
-    await (deps.inspectBackup ?? (async () => {
-      await new FileBackupTargetConfiguration(homeDir).load();
-    }))();
+    await deps.backupTargets.load();
     const local = await readOfflineStatusSnapshot(deps.statusDeps);
     const managed = await (deps.inspectManaged ?? (async () => {
       return buildManagedHostPublicStatus(local.report);

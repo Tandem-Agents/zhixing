@@ -2,6 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import { inspectLocalHealth } from "./doctor.js";
 
 describe("inspectLocalHealth", () => {
+  const createDeps = () => ({
+    homeDir: "C:/zhixing-doctor-test",
+    backupTargets: {
+      load: vi.fn(async () => undefined),
+      select: vi.fn(async () => undefined),
+    },
+  });
+
   const lock = {
     pidFileVersion: 2,
     pid: 42,
@@ -54,13 +62,13 @@ describe("inspectLocalHealth", () => {
   });
 
   it("does not create config or credentials when setup has not started", async () => {
+    const deps = createDeps();
     const inspectConfig = vi.fn();
-    const inspectBackup = vi.fn();
     const inspectManaged = vi.fn();
     await expect(inspectLocalHealth({
+      ...deps,
       configExists: async () => false,
       inspectConfig,
-      inspectBackup,
       inspectManaged,
     })).resolves.toEqual({
       code: "setup-required",
@@ -68,15 +76,15 @@ describe("inspectLocalHealth", () => {
       action: "运行 zz 完成设置",
     });
     expect(inspectConfig).not.toHaveBeenCalled();
-    expect(inspectBackup).not.toHaveBeenCalled();
+    expect(deps.backupTargets.load).not.toHaveBeenCalled();
     expect(inspectManaged).not.toHaveBeenCalled();
   });
 
   it("projects one managed-service recovery action from existing local facts", async () => {
     await expect(inspectLocalHealth({
+      ...createDeps(),
       configExists: async () => true,
       inspectConfig: vi.fn(),
-      inspectBackup: vi.fn(async () => undefined),
       inspectManaged: vi.fn(async () => ({ state: "needs-attention", action: "运行 zz 恢复托管" })),
     })).resolves.toEqual({
       code: "local-runtime-needs-attention",
@@ -87,6 +95,7 @@ describe("inspectLocalHealth", () => {
 
   it("does not leak raw local-state failures", async () => {
     const report = await inspectLocalHealth({
+      ...createDeps(),
       configExists: async () => true,
       inspectConfig: () => { throw new Error("C:\\secret\\config.jsonc"); },
     });
@@ -96,9 +105,9 @@ describe("inspectLocalHealth", () => {
 
   it("gives the local npm action first when this device is older", async () => {
     const report = await inspectLocalHealth({
+      ...createDeps(),
       configExists: async () => true,
       inspectConfig: vi.fn(),
-      inspectBackup: vi.fn(async () => undefined),
       inspectManaged: vi.fn(async () => ({ state: "ready" })),
       statusDeps: runningStatus(state([
         connection({ id: "peer", name: "书房电脑", local: ["1", "1"], peer: ["2", "2"] }),
@@ -114,9 +123,9 @@ describe("inspectLocalHealth", () => {
 
   it("lists every older peer by public name in stable order", async () => {
     const report = await inspectLocalHealth({
+      ...createDeps(),
       configExists: async () => true,
       inspectConfig: vi.fn(),
-      inspectBackup: vi.fn(async () => undefined),
       inspectManaged: vi.fn(async () => ({ state: "ready" })),
       statusDeps: runningStatus(state([
         connection({ id: "a", name: "客厅电脑", local: ["2", "2"], peer: ["1", "1"] }),
@@ -133,9 +142,9 @@ describe("inspectLocalHealth", () => {
 
   it("gives one older peer the same complete action", async () => {
     const report = await inspectLocalHealth({
+      ...createDeps(),
       configExists: async () => true,
       inspectConfig: vi.fn(),
-      inspectBackup: vi.fn(async () => undefined),
       inspectManaged: vi.fn(async () => ({ state: "ready" })),
       statusDeps: runningStatus(state([
         connection({ id: "a", name: "书房电脑", local: ["2", "2"], peer: ["1", "1"] }),
@@ -152,9 +161,9 @@ describe("inspectLocalHealth", () => {
     const corrupt = state([]);
     corrupt.extensions.meshCompatibility.hostGeneration.pid += 1;
     await expect(inspectLocalHealth({
+      ...createDeps(),
       configExists: async () => true,
       inspectConfig: vi.fn(),
-      inspectBackup: vi.fn(async () => undefined),
       inspectManaged: vi.fn(async () => ({ state: "ready" })),
       statusDeps: runningStatus(corrupt),
     })).resolves.toEqual({
@@ -172,9 +181,9 @@ describe("inspectLocalHealth", () => {
       compatibility: { mode: "read-write", protocolVersion: "2" },
     }]);
     await expect(inspectLocalHealth({
+      ...createDeps(),
       configExists: async () => true,
       inspectConfig: vi.fn(),
-      inspectBackup: vi.fn(async () => undefined),
       inspectManaged: vi.fn(async () => ({ state: "ready" })),
       statusDeps: runningStatus(contradictory),
     })).resolves.toMatchObject({ code: "connection-state-unreadable" });
@@ -182,9 +191,9 @@ describe("inspectLocalHealth", () => {
 
   it("keeps a current no-connection projection quiet", async () => {
     await expect(inspectLocalHealth({
+      ...createDeps(),
       configExists: async () => true,
       inspectConfig: vi.fn(),
-      inspectBackup: vi.fn(async () => undefined),
       inspectManaged: vi.fn(async () => ({ state: "ready" })),
       statusDeps: runningStatus(state([])),
     })).resolves.toEqual({ code: "healthy", message: "知行本机状态正常" });

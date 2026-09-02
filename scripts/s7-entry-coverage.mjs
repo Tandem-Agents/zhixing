@@ -9228,6 +9228,14 @@ export function inspectRecoveryBackupAssembly(records) {
   const command = byPath.get("packages/cli/src/serve/command.ts");
   const owner = byPath.get("packages/cli/src/serve/backup-runtime-owner.ts");
   const backup = byPath.get("packages/cli/src/serve/backup-command.ts");
+  const backupTargetContract = byPath.get(
+    "packages/cli/src/serve/backup-target-config.ts",
+  );
+  const backupTargetInfrastructure = byPath.get(
+    "packages/cli/src/serve/backup-target-config-infrastructure.ts",
+  );
+  const doctor = byPath.get("packages/cli/src/maintenance/doctor.ts");
+  const cliIndex = byPath.get("packages/cli/src/index.ts");
   const backupApplication = byPath.get("packages/core/src/backup-recovery/application.ts");
   const coreIndex = byPath.get("packages/core/src/index.ts");
   const coreManifestText = byPath.get("packages/core/package.json");
@@ -9268,7 +9276,8 @@ export function inspectRecoveryBackupAssembly(records) {
   const checkpointOwner = byPath.get("packages/mesh/src/checkpoint-owner.ts");
   const pairedTarget = byPath.get("packages/mesh/src/paired-checkpoint-target.ts");
   if (
-    !command || !owner || !backup || !backupApplication || !coreIndex || !coreManifestText || !coreBuild ||
+    !command || !owner || !backup || !backupTargetContract || !backupTargetInfrastructure ||
+    !doctor || !cliIndex || !backupApplication || !coreIndex || !coreManifestText || !coreBuild ||
     !bootstrapStore || !bootstrap || !topology || !applicationHost || !rootEstablishment ||
     !rootActivation || !pairedIncomingInfrastructure || !accessRoot || !executorRoot ||
     !deviceRemovalCleanup || !controlPlane ||
@@ -9281,6 +9290,82 @@ export function inspectRecoveryBackupAssembly(records) {
     return ["recovery backup production assembly sources are missing"];
   }
   const count = (text, token) => text.split(token).length - 1;
+  const backupTargetConcreteOwners = records.filter(({ text }) =>
+    text.includes("class FileBackupTargetConfiguration"));
+  const backupTargetPhysicalPaths = records.filter(({ text }) =>
+    text.includes('"recovery-backup-targets.json"'));
+  const backupTargetFactoryConsumers = records
+    .filter(({ text }) => text.includes("createBackupTargetConfigurationInfrastructure("))
+    .map(({ relative }) => relative)
+    .sort();
+  const expectedBackupTargetFactoryConsumers = [
+    "packages/cli/src/maintenance/doctor.ts",
+    "packages/cli/src/serve/backup-command.ts",
+    "packages/cli/src/serve/backup-target-config-infrastructure.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/disaster-recovery-command.ts",
+    "packages/cli/src/serve/mesh-pair-command.ts",
+  ].sort();
+  const backupTargetWrite = backupTargetInfrastructure.indexOf("await writeFile(temporary");
+  const backupTargetFileSync = backupTargetInfrastructure.indexOf("await handle.sync()", backupTargetWrite);
+  const backupTargetRename = backupTargetInfrastructure.indexOf("await rename(temporary", backupTargetFileSync);
+  const backupTargetDirectorySync = backupTargetInfrastructure.indexOf(
+    "await syncDirectory(directory)",
+    backupTargetRename,
+  );
+  if (
+    count(backupTargetContract, "export interface BackupTargetConfigurationRepository") !== 1 ||
+    count(backupTargetContract, "readonly load:") !== 1 ||
+    count(backupTargetContract, "readonly select:") !== 1 ||
+    count(backupTargetContract, "projectBackupTargetConfigurationRepository(") !== 1 ||
+    backupTargetContract.includes("node:fs") ||
+    backupTargetContract.includes("node:path") ||
+    backupTargetContract.includes("recovery-backup-targets.json") ||
+    backupTargetConcreteOwners.length !== 1 ||
+    backupTargetConcreteOwners[0]?.relative !==
+      "packages/cli/src/serve/backup-target-config-infrastructure.ts" ||
+    count(backupTargetInfrastructure, "new FileBackupTargetConfiguration(") !== 1 ||
+    backupTargetPhysicalPaths.length !== 1 ||
+    backupTargetPhysicalPaths[0]?.relative !==
+      "packages/cli/src/serve/backup-target-config-infrastructure.ts" ||
+    JSON.stringify(backupTargetFactoryConsumers) !==
+      JSON.stringify(expectedBackupTargetFactoryConsumers) ||
+    !backupTargetInfrastructure.includes("value.v !== 1") ||
+    !backupTargetInfrastructure.includes("canonicalize(value) !== text") ||
+    !backupTargetInfrastructure.includes('assertExactKeys(value, ["bindings", "currentTargetId", "v"])') ||
+    !backupTargetInfrastructure.includes("new Set(bindings.map((binding) => binding.targetId)).size") ||
+    !backupTargetInfrastructure.includes("path.resolve(value.directory)") ||
+    !backupTargetInfrastructure.includes('localeCompare(right.targetId, "en-US")') ||
+    backupTargetWrite < 0 || backupTargetFileSync < backupTargetWrite ||
+    backupTargetRename < backupTargetFileSync ||
+    backupTargetDirectorySync < backupTargetRename ||
+    backupTargetInfrastructure.includes("unlink(") ||
+    backupTargetInfrastructure.includes("rm(") ||
+    backupTargetInfrastructure.includes("PairedRecoveryCheckpointTarget") ||
+    !backup.includes("readonly backupTargets: BackupTargetConfigurationRepository") ||
+    count(backup, "context.backupTargets.load()") !== 2 ||
+    count(backup, "context.backupTargets.select(") !== 1 ||
+    !owner.includes("readonly backupTargets: BackupTargetConfigurationRepository") ||
+    count(owner, "this.input.backupTargets.load()") !== 2 ||
+    !disasterCommand.includes("readonly backupTargets: BackupTargetConfigurationRepository") ||
+    count(disasterCommand, "context.backupTargets.load()") !== 1 ||
+    count(pairing, "readonly backupTargets: BackupTargetConfigurationRepository") !== 2 ||
+    count(pairing, "input.backupTargets.load()") !== 1 ||
+    count(pairing, "input.backupTargets.select(") !== 1 ||
+    !doctor.includes("readonly backupTargets: BackupTargetConfigurationRepository") ||
+    count(doctor, "await deps.backupTargets.load()") !== 1 ||
+    count(doctor, "createBackupTargetConfigurationInfrastructure(homeDir)") !== 1 ||
+    !cliIndex.includes("inspectDefaultLocalHealth") ||
+    [backup, owner, command, disasterCommand, pairing, doctor].some((text) =>
+      text.includes("backupTargets?:") ||
+      text.includes("backupTargets?.") ||
+      text.includes("FileBackupTargetConfiguration") ||
+      text.includes("recovery-backup-targets.json"))
+  ) {
+    failures.push(
+      "backup target configuration finite repository, physical factory or durability boundary drifted",
+    );
+  }
   let coreManifest;
   try {
     coreManifest = JSON.parse(coreManifestText);

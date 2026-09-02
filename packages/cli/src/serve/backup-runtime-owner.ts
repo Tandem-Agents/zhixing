@@ -24,7 +24,10 @@ import {
   PairedRecoveryCheckpointTarget,
 } from "@zhixing/mesh/paired-checkpoint-target";
 import { keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
-import { FileBackupTargetConfiguration, type BackupTargetBinding } from "./backup-target-config.js";
+import type {
+  BackupTargetBinding,
+  BackupTargetConfigurationRepository,
+} from "./backup-target-config.js";
 import type { MeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import type { MeshRuntimeAssembly } from "./mesh-runtime-assembly.js";
 
@@ -32,6 +35,7 @@ const TURN_MS = 60 * 60 * 1000;
 
 export async function createConfiguredCheckpointOwner(input: {
   readonly zhixingHome: string;
+  readonly backupTargets: BackupTargetConfigurationRepository;
   readonly mesh: MeshRuntimeBootstrap;
   readonly meshRuntime?: MeshRuntimeAssembly;
   readonly storageMaintenance: StorageMaintenanceGovernorPort;
@@ -72,6 +76,7 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
 
   constructor(private readonly input: {
     readonly zhixingHome: string;
+    readonly backupTargets: BackupTargetConfigurationRepository;
     readonly mesh: MeshRuntimeBootstrap;
     readonly meshRuntime?: MeshRuntimeAssembly;
     readonly storageMaintenance: StorageMaintenanceGovernorPort;
@@ -149,10 +154,9 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
     assertHomeAuthority(trust, this.input.mesh.deviceKey.deviceId);
     if (!trust.recoveryBackupPublicKey) return this.#replace({ kind: "disabled" });
 
-    const targets = new FileBackupTargetConfiguration(this.input.zhixingHome);
     let config;
     try {
-      config = await targets.load();
+      config = await this.input.backupTargets.load();
     } catch {
       return this.#replace({
         kind: "unavailable",
@@ -199,7 +203,7 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
     const member = trust.members.find((candidate) =>
       candidate.state === "active" && candidate.device.deviceId === this.input.mesh.deviceKey.deviceId)!;
     const resolveTarget = async (targetId: string, targetRecipientKeyId: string) => {
-      const latest = await targets.load();
+      const latest = await this.input.backupTargets.load();
       const historical = latest?.bindings.find((candidate) => candidate.targetId === targetId);
       if (!historical) throw new Error("Recovery checkpoint target binding is unavailable");
       return targetForBinding(historical, this.input, trust, targetRecipientKeyId);

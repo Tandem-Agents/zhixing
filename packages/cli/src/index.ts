@@ -285,8 +285,8 @@ program
   .description("离线检查本机配置、托管服务和备份设置")
   .action(async () => {
     try {
-      const { inspectLocalHealth, printDoctorReport } = await import("./maintenance/doctor.js");
-      printDoctorReport(await inspectLocalHealth());
+      const { inspectDefaultLocalHealth, printDoctorReport } = await import("./maintenance/doctor.js");
+      printDoctorReport(await inspectDefaultLocalHealth());
       process.exit(0);
     } catch (err) {
       await renderActionError(err);
