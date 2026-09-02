@@ -73,14 +73,15 @@ import { CredentialExposureAuthority } from "./credential-exposure-authority.js"
 import { registerSurfaceAssetMeshService } from "./surface-asset-mesh.js";
 import {
   AssignmentStreamMeshClient,
-  createDataPlaneAssignmentStreamAuthorizer,
-  registerAssignmentStreamService,
 } from "./assignment-stream-mesh.js";
 import {
   DataPlaneTicketMeshClient,
-  registerDataPlaneTicketService,
 } from "./data-plane-ticket-mesh.js";
-import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
+import type {
+  AssignmentDataPlaneMeshPort,
+  AssignmentDataPlaneRemoteDirectory,
+  AssignmentDataPlaneTarget,
+} from "./assignment-data-plane-topology.js";
 import type { JobSubmissionOwner } from "./job-assignment-worker.js";
 import type { ExecutorJobOwner } from "./executor-job-owner.js";
 import type { JobRelayObligationDirectory } from "./channel-interaction-coordinator.js";
@@ -325,7 +326,7 @@ export interface MeshRuntimeAssemblyOptions {
     readonly ledger: ConversationAssignmentLedger;
     readonly runtimeFactory: RuntimeFactory;
     readonly interactions: DurableConversationInteractionObserver;
-    readonly dataPlane: ExecutorDataPlaneRuntime;
+    readonly dataPlane: AssignmentDataPlaneMeshPort;
     readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
     readonly evidence?: EvidenceHandlerPort;
     /** Mesh 只注册 adapter；job worker 由稳定 executor role 组合根持有。 */
@@ -340,7 +341,7 @@ export interface MeshRuntimeAssemblyOptions {
 }
 
 /** Production composition for authenticated control services and their durable role owners. */
-export class MeshRuntimeAssembly {
+export class MeshRuntimeAssembly implements AssignmentDataPlaneRemoteDirectory {
   readonly services = new MeshServiceRegistry();
   readonly #terminalOnlyServices = new MeshServiceRegistry();
   readonly connections: MeshConnectionRegistry;
@@ -614,40 +615,16 @@ export class MeshRuntimeAssembly {
       const surfacePrincipalFor = (connection: import("@zhixing/mesh").SecureMeshConnection) =>
         `surface:device:${connection.peer.deviceId}`;
       this.#disposers.push(
-        registerAssignmentStreamService(this.services, {
-          spool: dataPlane.spool,
-          authorize: createDataPlaneAssignmentStreamAuthorizer({
-            tickets: dataPlane.tickets,
-            surfacePrincipalFor,
-            ownerMayPresentSurfaceTicket: (connection) =>
-              connection.peer.deviceId === this.#currentAnchorDeviceId() &&
-              this.#peerHasRole(connection.peer.deviceId, "anchor"),
-            authorizeOwnerRelay: async (request) => {
-              if (request.consumer.kind !== "owner-relay") {
-                throw new TypeError("Owner relay authorization has the wrong consumer kind");
-              }
-              await options.executor!.dataPlane.authorizeOwnerRelayConsumer({
-                assignmentId: request.assignmentId,
-                consumer: request.consumer,
-                ownerDeviceId: request.connection.peer.deviceId,
-              });
-              return {};
-            },
-          }),
-          authorizePeer: (deviceId) =>
-            this.#peerHasRole(deviceId, "anchor") ||
-            this.#peerHasRole(deviceId, "surface"),
-        }),
-      );
-      this.#disposers.push(
-        registerDataPlaneTicketService(this.services, {
-          tickets: dataPlane.tickets,
-          verifier: options.authority.verifier,
+        dataPlane.registerMeshServices({
+          services: this.services,
           operations,
+          surfacePrincipalFor,
           authorizeOwner: (connection) =>
             connection.peer.deviceId === this.#currentAnchorDeviceId() &&
             this.#peerHasRole(connection.peer.deviceId, "anchor"),
-          surfacePrincipalFor,
+          ownerMayPresentSurfaceTicket: (connection) =>
+            connection.peer.deviceId === this.#currentAnchorDeviceId() &&
+            this.#peerHasRole(connection.peer.deviceId, "anchor"),
           authorizePeer: (deviceId) =>
             this.#peerHasRole(deviceId, "anchor") ||
             this.#peerHasRole(deviceId, "surface"),
@@ -1530,16 +1507,26 @@ export class MeshRuntimeAssembly {
     for (const dispose of this.#disposers.splice(0).reverse()) dispose();
   }
 
-  dataPlaneForExecutor(executorId: string): {
-    readonly stream: AssignmentStreamMeshClient;
-    readonly tickets: DataPlaneTicketMeshClient;
-  } {
+  remoteDataPlaneTarget(executorId: string): AssignmentDataPlaneTarget {
     const deviceId = this.#activeExecutorDeviceId(executorId);
     const client = this.connections.client(deviceId);
-    return {
-      stream: new AssignmentStreamMeshClient(client),
-      tickets: new DataPlaneTicketMeshClient(client),
+    const stream = new AssignmentStreamMeshClient(client);
+    const tickets = new DataPlaneTicketMeshClient(client);
+    const target: AssignmentDataPlaneTarget = {
+      acceptTicket: (ticket) => tickets.accept(ticket),
+      answerChannel: (input) => tickets.answerChannel({
+        assignmentId: input.assignmentId,
+        requestId: input.requestId,
+        ticketId: input.ticketId,
+        surfacePrincipal: input.surfacePrincipal,
+        decision: input.decision,
+      }),
+      resolveNoInteractiveSurface: (input) =>
+        tickets.resolveNoInteractiveSurface(input),
+      ownerStream: () => stream,
+      directSurfaceStream: () => undefined,
     };
+    return Object.freeze(target);
   }
 
   /** owner 侧获取指定 executor 的 job 答复转交客户端(JobRelayOpening.answers)。 */

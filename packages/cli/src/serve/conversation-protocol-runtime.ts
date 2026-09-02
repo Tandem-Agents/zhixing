@@ -101,8 +101,9 @@ import {
   createAssignmentGlobalQueryPort,
 } from "./assignment-schedule-stager.js";
 import type {
+  ConversationChannelSessionInput,
   FirstPartySurfaceSession,
-  LosslessDataPlaneRuntime,
+  FirstPartySurfaceSessionInput,
   LosslessDataPlaneSession,
 } from "./lossless-data-plane-runtime.js";
 import type {
@@ -182,12 +183,15 @@ interface PreparedConversationAdmission {
   readonly environment?: import("@zhixing/core/contracts").ExplicitEnvironmentSelection;
 }
 
-type ConversationLosslessDataPlane = Pick<
-  LosslessDataPlaneRuntime,
-  "openConversationChannel" | "openFirstPartySurfaceSession"
-> & {
+export interface ConversationLosslessDataPlanePort {
+  openConversationChannel(
+    input: ConversationChannelSessionInput,
+  ): Promise<LosslessDataPlaneSession>;
+  openFirstPartySurfaceSession(
+    input: FirstPartySurfaceSessionInput,
+  ): Promise<FirstPartySurfaceSession>;
   recoverConversationChannels(journal: ConversationRunJournal): Promise<number>;
-};
+}
 
 /** Single-process production composition for the durable conversation protocol. */
 export class ConversationProtocolRuntime implements DurableConversationTurnExecutor {
@@ -255,7 +259,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #recoveryConversations = new Map<string, number>();
   readonly #sessionIdentities = new Map<string, Promise<void>>();
   #losslessDataPlane:
-    | ConversationLosslessDataPlane
+    | ConversationLosslessDataPlanePort
     | undefined;
   #mutationPublisher: ConversationMutationPublisher | undefined;
   readonly #mutationPublisherProxy: ConversationMutationPublisher;
@@ -352,7 +356,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }
 
   bindLosslessDataPlane(
-    runtime: ConversationLosslessDataPlane,
+    runtime: ConversationLosslessDataPlanePort,
   ): void {
     if (this.#losslessDataPlane && this.#losslessDataPlane !== runtime) {
       throw new Error("Conversation lossless data plane is already bound");

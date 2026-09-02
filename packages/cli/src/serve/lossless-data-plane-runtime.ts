@@ -10,6 +10,7 @@ import type {
 } from "@zhixing/core/contracts";
 import {
   canonicalize,
+  type ProtocolSignatureVerifier,
   type StreamVerifierCheckpoint,
 } from "@zhixing/core/protocol";
 import {
@@ -31,17 +32,14 @@ import {
 } from "./conversation-channel-confirmation.js";
 import {
   ConversationInteractionRuntimeUnavailableError,
-  type ConversationInteractionAnswerPort,
 } from "./durable-conversation-interactions.js";
-import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import {
   JobOwnerRelay,
   type JobChannelInteractionResolver,
   type JobOwnerRelayJournal,
 } from "./job-owner-relay.js";
-import type { MeshRuntimeAssembly } from "./mesh-runtime-assembly.js";
-import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 import type { AssignmentStreamClient } from "./assignment-stream-mesh.js";
+import type { AssignmentDataPlaneTargetDirectory } from "./assignment-data-plane-topology.js";
 
 const IDLE_POLL_MS = 100;
 
@@ -72,6 +70,28 @@ export interface FirstPartySurfaceSession extends LosslessDataPlaneSession {
   waitForSeq(seq: number, signal?: AbortSignal): Promise<void>;
 }
 
+export interface FirstPartySurfaceSessionInput {
+  readonly executorId: string;
+  readonly assignmentId: string;
+  readonly ref: ExecutionRef;
+  readonly ticket: DataPlaneTicket;
+  readonly surfacePrincipal: string;
+  readonly adoptFrame: AssignmentStreamPathManagerOptions["adoptFrame"];
+  readonly initialCheckpoint?: StreamVerifierCheckpoint;
+  readonly maxPathAttempts?: number;
+  readonly onConsumerDegraded?: AssignmentStreamPathManagerOptions["onConsumerDegraded"];
+  readonly onPathsUnavailable?: AssignmentStreamPathManagerOptions["onPathsUnavailable"];
+}
+
+export interface JobOwnerRelayInput {
+  readonly executorId: string;
+  readonly assignmentId: string;
+  readonly ref: JobRef;
+  readonly controlLeaseId: string;
+  readonly journal: JobOwnerRelayJournal;
+  readonly resolver: JobChannelInteractionResolver;
+}
+
 /** Finite signed-challenge effect required by the lossless interaction plane. */
 export interface ChannelChallengeDeliveryPort {
   supports(channelId: string): boolean;
@@ -86,10 +106,8 @@ export interface ChannelChallengeDeliveryPort {
  * callbacks can only reach the executor through a signed owner-issued ticket.
  */
 export class LosslessDataPlaneRuntime {
-  readonly #authority: AuthorityRuntimeStack;
-  readonly #local: ExecutorDataPlaneRuntime | undefined;
-  readonly #mesh: () => MeshRuntimeAssembly | undefined;
-  readonly #interactions: ConversationInteractionAnswerPort;
+  readonly #verifier: ProtocolSignatureVerifier;
+  readonly #targets: AssignmentDataPlaneTargetDirectory;
   readonly #onError: ((error: Error) => void) | undefined;
   readonly #sessions = new Set<LosslessDataPlaneSession>();
   readonly #byChallenge = new Map<string, ConversationChannelSession>();
@@ -97,16 +115,12 @@ export class LosslessDataPlaneRuntime {
   #closed = false;
 
   constructor(options: {
-    readonly authority: AuthorityRuntimeStack;
-    readonly local?: ExecutorDataPlaneRuntime;
-    readonly mesh: () => MeshRuntimeAssembly | undefined;
-    readonly interactions: ConversationInteractionAnswerPort;
+    readonly verifier: ProtocolSignatureVerifier;
+    readonly targets: AssignmentDataPlaneTargetDirectory;
     readonly onError?: (error: Error) => void;
   }) {
-    this.#authority = options.authority;
-    this.#local = options.local;
-    this.#mesh = options.mesh;
-    this.#interactions = options.interactions;
+    this.#verifier = options.verifier;
+    this.#targets = options.targets;
     this.#onError = options.onError;
   }
 
@@ -124,31 +138,22 @@ export class LosslessDataPlaneRuntime {
     if (!this.#channelChallenges) {
       throw new Error("Channel data plane is not fully assembled");
     }
-    const endpoint = this.#endpoint(input.executorId);
-    await endpoint.accept(input.ticket);
+    const endpoint = this.#targets.targetForExecutor(input.executorId);
+    await endpoint.acceptTicket(input.ticket);
     const host = new ConversationChannelHost({
       assignmentId: input.assignmentId,
       ref: input.ref,
       ticket: input.ticket,
-      verifier: this.#authority.verifier,
+      verifier: this.#verifier,
       journal: input.journal,
       resolver: {
         resolve: async (answer) => {
-          await endpoint.answer({
+          await endpoint.answerChannel({
             assignmentId: answer.assignmentId,
             requestId: answer.requestId,
             ticketId: answer.ticketId,
             surfacePrincipal: answer.surfacePrincipal,
-            decision:
-              answer.decision.kind === "allow-once"
-                ? { allowed: true }
-                : {
-                    allowed: false,
-                    ...("reason" in answer.decision &&
-                    typeof answer.decision.reason === "string"
-                      ? { reason: answer.decision.reason }
-                      : {}),
-                  },
+            decision: answer.decision,
           });
           return true;
         },
@@ -186,14 +191,7 @@ export class LosslessDataPlaneRuntime {
     return session;
   }
 
-  async createJobOwnerRelay(input: {
-    readonly executorId: string;
-    readonly assignmentId: string;
-    readonly ref: JobRef;
-    readonly controlLeaseId: string;
-    readonly journal: JobOwnerRelayJournal;
-    readonly resolver: JobChannelInteractionResolver;
-  }): Promise<JobOwnerRelay> {
+  async createJobOwnerRelay(input: JobOwnerRelayInput): Promise<JobOwnerRelay> {
     if (this.#closed) throw new Error("Lossless data plane is closed");
     return JobOwnerRelay.create({
       assignmentId: input.assignmentId,
@@ -233,75 +231,6 @@ export class LosslessDataPlaneRuntime {
     this.#byChallenge.clear();
   }
 
-  #endpoint(executorId: string): {
-    readonly accept: (ticket: DataPlaneTicket) => Promise<void>;
-    readonly answer: (input: {
-      readonly assignmentId: string;
-      readonly requestId: string;
-      readonly ticketId: string;
-      readonly surfacePrincipal: string;
-      readonly decision: { readonly allowed: boolean; readonly reason?: string };
-    }) => Promise<void>;
-    readonly resolveNoInteractiveSurface: (input: {
-      readonly assignmentId: string;
-      readonly requestId: string;
-    }) => Promise<void>;
-  } {
-    if (executorId === this.#authority.executorId) {
-      const local = this.#local;
-      if (!local) throw new Error("Local executor data plane is unavailable");
-      return {
-        accept: (ticket) => local.tickets.accept(ticket).then(() => undefined),
-        answer: async (input) => {
-          await local.tickets.authorizeOwnerPresentedSurface(
-            input.ticketId,
-            "interact",
-            input.assignmentId,
-          );
-          await this.#interactions.answerInteractionWithTicket({
-            assignmentId: input.assignmentId,
-            requestId: input.requestId,
-            ticketId: input.ticketId,
-            surfacePrincipal: input.surfacePrincipal,
-            decision: input.decision.allowed
-              ? { kind: "allow-once" }
-              : {
-                  kind: "deny",
-                  ...(input.decision.reason
-                    ? { reason: input.decision.reason }
-                    : {}),
-                },
-          });
-        },
-        resolveNoInteractiveSurface: async (input) => {
-          await this.#interactions.resolveNoInteractiveSurface(input);
-        },
-      };
-    }
-    const remote = this.#mesh()?.dataPlaneForExecutor(executorId);
-    if (!remote) throw new Error("Remote executor data plane is unavailable");
-    return {
-      accept: (ticket) => remote.tickets.accept(ticket),
-      answer: (input) =>
-        remote.tickets.answerChannel({
-          assignmentId: input.assignmentId,
-          requestId: input.requestId,
-          ticketId: input.ticketId,
-          surfacePrincipal: input.surfacePrincipal,
-          decision: input.decision.allowed
-            ? { kind: "allow-once" }
-            : {
-                kind: "deny",
-                ...(input.decision.reason
-                  ? { reason: input.decision.reason }
-                  : {}),
-            },
-        }),
-      resolveNoInteractiveSurface: (input) =>
-        remote.tickets.resolveNoInteractiveSurface(input),
-    };
-  }
-
   /**
    * owner/anchor 位置到 executor 的唯一真实路径:本地 executor 走进程内
    * 端点,远程走 owner↔executor 连接;建连与流中传输失败统一映射为
@@ -310,14 +239,7 @@ export class LosslessDataPlaneRuntime {
    */
   #ownerPathConnector(executorId: string): AssignmentStreamPathConnector {
     const resolve = (): AssignmentStreamClient => {
-      if (executorId === this.#authority.executorId) {
-        const local = this.#local;
-        if (!local) throw new Error("Local executor data plane is unavailable");
-        return local.ownerStreamClient(this.#authority.deviceId);
-      }
-      const remote = this.#mesh()?.dataPlaneForExecutor(executorId);
-      if (!remote) throw new Error("Remote executor data plane is unavailable");
-      return remote.stream;
+      return this.#targets.targetForExecutor(executorId).ownerStream();
     };
     return {
       async open() {
@@ -341,26 +263,17 @@ export class LosslessDataPlaneRuntime {
    * 失败与恢复;subscribe/ack/readArtifact 携同一 surface-ticket 消费身份,
    * 授权与水位跨路径不变。
    */
-  async openFirstPartySurfaceSession(input: {
-    readonly executorId: string;
-    readonly assignmentId: string;
-    readonly ref: ExecutionRef;
-    readonly ticket: DataPlaneTicket;
-    readonly surfacePrincipal: string;
-    readonly adoptFrame: AssignmentStreamPathManagerOptions["adoptFrame"];
-    readonly initialCheckpoint?: StreamVerifierCheckpoint;
-    readonly maxPathAttempts?: number;
-    readonly onConsumerDegraded?: AssignmentStreamPathManagerOptions["onConsumerDegraded"];
-    readonly onPathsUnavailable?: AssignmentStreamPathManagerOptions["onPathsUnavailable"];
-  }): Promise<FirstPartySurfaceSession> {
+  async openFirstPartySurfaceSession(
+    input: FirstPartySurfaceSessionInput,
+  ): Promise<FirstPartySurfaceSession> {
     if (this.#closed) throw new Error("Lossless data plane is closed");
     if (input.ticket.surfacePrincipal !== input.surfacePrincipal) {
       throw new TypeError(
         "First-party surface session principal differs from its ticket",
       );
     }
-    const endpoint = this.#endpoint(input.executorId);
-    await endpoint.accept(input.ticket);
+    const endpoint = this.#targets.targetForExecutor(input.executorId);
+    await endpoint.acceptTicket(input.ticket);
     const consumer = {
       kind: "surface-ticket" as const,
       ticketId: input.ticket.ticketId,
@@ -404,27 +317,20 @@ export class LosslessDataPlaneRuntime {
     const runtime = this;
     return {
       async open() {
-        if (executorId !== runtime.#authority.executorId) {
-          // 远程 surface 设备的直连(surface 设备 ↔ executor 设备的 mesh
-          // 连接)随后续 surface 接入规则交付;当前进程拓扑下非本地
-          // executor 即无直连路径,如实回退中继。
-          throw new AssignmentStreamPathUnavailableError(
-            "direct assignment stream path is unavailable for a remote executor",
-          );
-        }
-        const local = runtime.#local;
-        if (!local) {
-          throw new AssignmentStreamPathUnavailableError(
-            "direct assignment stream path is unavailable",
-          );
-        }
-        let client: AssignmentStreamClient;
+        let client: AssignmentStreamClient | undefined;
         try {
-          client = local.surfaceStreamClient(surfacePrincipal);
+          client = runtime.#targets
+            .targetForExecutor(executorId)
+            .directSurfaceStream(surfacePrincipal);
         } catch (error) {
           throw new AssignmentStreamPathUnavailableError(
             "direct assignment stream path is unavailable",
             { cause: error },
+          );
+        }
+        if (!client) {
+          throw new AssignmentStreamPathUnavailableError(
+            "direct assignment stream path is unavailable",
           );
         }
         return mapConnectionTransportFailures(client, "direct");

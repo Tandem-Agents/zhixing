@@ -47,7 +47,7 @@ import {
   ExecutorResourceGovernor,
   InProcessAssignmentSubmission,
 } from "@zhixing/executor";
-import type { SecureMeshConnection } from "@zhixing/mesh";
+import type { MeshServiceRegistry, SecureMeshConnection } from "@zhixing/mesh";
 import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
 import {
   ConversationManager,
@@ -82,8 +82,6 @@ import {
 import {
   ASSIGNMENT_STREAM_SERVICE,
   AssignmentStreamMeshClient,
-  createAssignmentStreamServiceHandler,
-  createDataPlaneAssignmentStreamAuthorizer,
 } from "../assignment-stream-mesh.js";
 import { ConversationAssignmentWorker } from "../conversation-assignment-worker.js";
 import { ASSIGNMENT_RECORD_V2_WRITES_ENABLED } from "../conversation-executor-ledger.js";
@@ -97,9 +95,7 @@ import {
 } from "../conversation-executor-dispatch.js";
 import { anchorConversationOwnerRuntime } from "../conversation-owner-runtime.js";
 import {
-  DATA_PLANE_TICKET_SERVICE,
   DataPlaneTicketMeshClient,
-  createDataPlaneTicketServiceHandler,
 } from "../data-plane-ticket-mesh.js";
 import type { JobInteractionAnswerPort } from "../durable-job-interactions.js";
 import { enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
@@ -119,7 +115,11 @@ import {
 import { JobStatusDirectory } from "../job-status-directory.js";
 import { createLosslessDataPlaneComposition } from "../lossless-data-plane-composition.js";
 import type { ChannelChallengeDeliveryPort } from "../lossless-data-plane-runtime.js";
-import type { MeshRuntimeAssembly } from "../mesh-runtime-assembly.js";
+import {
+  AssignmentDataPlaneTopologyAdapter,
+  type AssignmentDataPlaneRemoteDirectory,
+  type AssignmentDataPlaneTarget,
+} from "../assignment-data-plane-topology.js";
 import { createOwnerControlAuthorizer } from "../owner-control-authorizer.js";
 
 // 场景基准时间取真实当前时刻,且每个场景开跑时刷新:授权物的接受方按
@@ -235,17 +235,48 @@ function serviceClient(
   };
 }
 
-function authorityWithExecutorId(
-  authority: AuthorityRuntimeStack,
-  executorId: string,
-): AuthorityRuntimeStack {
-  return new Proxy(authority, {
-    get(target, property, receiver) {
-      return property === "executorId"
-        ? executorId
-        : Reflect.get(target, property, receiver);
+function captureMeshServices(
+  handlers: Map<string, ServiceHandler>,
+): MeshServiceRegistry {
+  return {
+    register(serviceId, definition) {
+      const handler: ServiceHandler = async (payload, connection, signal) => {
+        if (definition.authorize && !definition.authorize(connection)) {
+          throw new Error(`S6 mesh peer is unauthorized: ${serviceId}`);
+        }
+        return definition.handler(payload, connection, signal);
+      };
+      handlers.set(serviceId, handler);
+      return () => {
+        if (handlers.get(serviceId) === handler) handlers.delete(serviceId);
+      };
     },
-  });
+  } as MeshServiceRegistry;
+}
+
+function remoteDataPlaneDirectory(
+  executorId: string,
+  client: MeshServiceClient,
+): AssignmentDataPlaneRemoteDirectory {
+  return {
+    remoteDataPlaneTarget(candidate): AssignmentDataPlaneTarget {
+      if (candidate !== executorId) {
+        throw new Error("S6 remote data plane selected another executor");
+      }
+      const stream = new AssignmentStreamMeshClient(client);
+      const tickets = new DataPlaneTicketMeshClient(client);
+      return {
+        acceptTicket: (ticket) => tickets.accept(ticket),
+        answerChannel: (input) => tickets.answerChannel({
+          ...input,
+        }),
+        resolveNoInteractiveSurface: (input) =>
+          tickets.resolveNoInteractiveSurface(input),
+        ownerStream: () => stream,
+        directSurfaceStream: () => undefined,
+      };
+    },
+  };
 }
 
 function fakeChannels(sendChallenge: ReturnType<typeof vi.fn>): ChannelChallengeDeliveryPort {
@@ -369,7 +400,7 @@ function createExecutorLedger(input: {
   readonly artifacts: FileArtifactStore;
   readonly snapshotFor: (executorId: string) => ExecutorCapabilitySnapshot | undefined;
   readonly permissionSnapshotFor: (digest: string) => TrustRuleSnapshot | undefined;
-  readonly tickets: DataPlaneTicketRegistry;
+  readonly tickets: Pick<DataPlaneTicketRegistry, "authorize">;
 }): ConversationAssignmentLedger {
   return new ConversationAssignmentLedger({
     log: input.log,
@@ -396,7 +427,7 @@ interface RemoteExecutorHarness {
   readonly dataPlane: ExecutorDataPlaneRuntime;
   readonly ledger: ConversationAssignmentLedger;
   readonly directory: ConversationExecutorTopologyDirectory;
-  readonly mesh: MeshRuntimeAssembly;
+  readonly mesh: AssignmentDataPlaneRemoteDirectory;
   /** 远端 executor worker 的失败出口:静默会让 owner 侧只表现为挂起。 */
   readonly workerErrors: readonly Error[];
   close(): Promise<void>;
@@ -487,9 +518,9 @@ async function createRemoteConversationExecutor(input: {
     artifacts,
     snapshotFor: (candidate) => candidate === executorId ? snapshot : undefined,
     permissionSnapshotFor: (digest) => permissions.get(digest),
-    tickets: dataPlane.tickets,
+    tickets: dataPlane.assignmentTickets,
   });
-  dataPlane.bindLedger(ledger);
+  dataPlane.bindAssignmentAuthority(ledger);
 
   const ownerReceiver = new FileResumableArtifactReceiver(
     input.authority.artifacts,
@@ -599,42 +630,18 @@ async function createRemoteConversationExecutor(input: {
         deviceId === executorDeviceId ? executorId : undefined,
     }),
   );
-  executorHandlers.set(
-    ASSIGNMENT_STREAM_SERVICE,
-    createAssignmentStreamServiceHandler({
-      spool: dataPlane.spool,
-      authorize: createDataPlaneAssignmentStreamAuthorizer({
-        tickets: dataPlane.tickets,
-        surfacePrincipalFor: (connection) =>
-          `surface:device:${connection.peer.deviceId}`,
-        ownerMayPresentSurfaceTicket: (connection) =>
-          connection.peer.deviceId === input.authority.deviceId,
-        authorizeOwnerRelay: async (request) => {
-          await dataPlane.authorizeOwnerRelayConsumer({
-            assignmentId: request.assignmentId,
-            consumer: request.consumer as Extract<
-              typeof request.consumer,
-              { readonly kind: "owner-relay" }
-            >,
-            ownerDeviceId: request.connection.peer.deviceId,
-          });
-          return {};
-        },
-      }),
-    }),
-  );
-  executorHandlers.set(
-    DATA_PLANE_TICKET_SERVICE,
-    createDataPlaneTicketServiceHandler({
-      tickets: dataPlane.tickets,
-      verifier: input.authority.verifier,
-      operations: worker,
-      authorizeOwner: (connection) =>
-        connection.peer.deviceId === input.authority.deviceId,
-      surfacePrincipalFor: (connection) =>
-        `surface:device:${connection.peer.deviceId}`,
-    }),
-  );
+  const dataPlaneServices = captureMeshServices(executorHandlers);
+  dataPlane.registerMeshServices({
+    services: dataPlaneServices,
+    operations: worker,
+    authorizeOwner: (connection) =>
+      connection.peer.deviceId === input.authority.deviceId,
+    surfacePrincipalFor: (connection) =>
+      `surface:device:${connection.peer.deviceId}`,
+    ownerMayPresentSurfaceTicket: (connection) =>
+      connection.peer.deviceId === input.authority.deviceId,
+    authorizePeer: () => true,
+  });
 
   const executor = new MeshRunExecutorPort({
     client: ownerToExecutor,
@@ -647,17 +654,7 @@ async function createRemoteConversationExecutor(input: {
     authorizationFor: authorizationForOwner,
     clock: () => Date.now(),
   });
-  const remoteDataPlane = {
-    dataPlaneForExecutor(candidate: string) {
-      if (candidate !== executorId) {
-        throw new Error("S6 remote data plane selected another executor");
-      }
-      return {
-        stream: new AssignmentStreamMeshClient(ownerToExecutor),
-        tickets: new DataPlaneTicketMeshClient(ownerToExecutor),
-      };
-    },
-  } as MeshRuntimeAssembly;
+  const remoteDataPlane = remoteDataPlaneDirectory(executorId, ownerToExecutor);
   const directory: ConversationExecutorTopologyDirectory = {
     async candidates() {
       return [{
@@ -779,7 +776,7 @@ async function runConversationScenario(
           local: {
             ConversationAssignmentLedger,
             InProcessAssignmentSubmission,
-            dataPlaneTickets: localDataPlane!.tickets,
+            dataPlaneTickets: localDataPlane!.assignmentTickets,
             createStream: (stream: {
               readonly assignmentId: string;
               readonly ref: ExecutionRef;
@@ -813,7 +810,7 @@ async function runConversationScenario(
   });
   let remote: RemoteExecutorHarness | undefined;
   if (topology === "local") {
-    localDataPlane!.bindLedger(executorBoundary.localLedger!);
+    localDataPlane!.bindAssignmentAuthority(executorBoundary.localLedger!);
     await localDataPlane!.start();
   } else {
     remote = await createRemoteConversationExecutor({
@@ -835,10 +832,20 @@ async function runConversationScenario(
   const channels = fakeChannels(sendChallenge);
   const conversationBackgroundErrors: Error[] = [];
   const composition = createLosslessDataPlaneComposition({
-    authority,
-    ...(localDataPlane ? { local: localDataPlane } : {}),
-    mesh: () => remote?.mesh,
-    interactions,
+    verifier: authority.verifier,
+    targets: new AssignmentDataPlaneTopologyAdapter({
+      ...(localDataPlane
+        ? {
+            local: {
+              executorId: authority.executorId,
+              ownerDeviceId: authority.deviceId,
+              transport: localDataPlane.localTransport,
+              interactions,
+            },
+          }
+        : {}),
+      ...(remote ? { remote: remote.mesh } : {}),
+    }),
     protocol,
     channelChallenges: () => channels,
     jobStatus,
@@ -1252,9 +1259,9 @@ async function runJobScenario(
     snapshotFor: (candidate) =>
       candidate === authority.executorId ? snapshot : undefined,
     permissionSnapshotFor: authority.permissionSnapshotFor,
-    tickets: dataPlane.tickets,
+    tickets: dataPlane.assignmentTickets,
   });
-  dataPlane.bindLedger(ledger);
+  dataPlane.bindAssignmentAuthority(ledger);
   await dataPlane.start();
 
   const submissionAuthorizer: AssignmentSubmissionAuthorizer = {
@@ -1389,7 +1396,7 @@ async function runJobScenario(
 
   let ownerSubmission: JobJournal | MeshRunSubmissionPort = journal;
   let executorPort: ConversationAssignmentLedger | MeshRunExecutorPort = ledger;
-  let mesh: MeshRuntimeAssembly | undefined;
+  let mesh: AssignmentDataPlaneRemoteDirectory | undefined;
   let ackInterrupted = false;
   const workerErrors: Error[] = [];
   const jobOwnerAssembly = new ExecutorJobOwnerAssembly({
@@ -1480,28 +1487,22 @@ async function runJobScenario(
         executorIdForPeer: () => authority.executorId,
       }),
     );
-    executorHandlers.set(
-      ASSIGNMENT_STREAM_SERVICE,
-      createAssignmentStreamServiceHandler({
-        spool: dataPlane.spool,
-        authorize: createDataPlaneAssignmentStreamAuthorizer({
-          tickets: dataPlane.tickets,
-          surfacePrincipalFor: () => "surface:device:owner",
-          ownerMayPresentSurfaceTicket: () => true,
-          authorizeOwnerRelay: async (request) => {
-            await dataPlane.authorizeOwnerRelayConsumer({
-              assignmentId: request.assignmentId,
-              consumer: request.consumer as Extract<
-                typeof request.consumer,
-                { readonly kind: "owner-relay" }
-              >,
-              ownerDeviceId: request.connection.peer.deviceId,
-            });
-            return {};
-          },
-        }),
-      }),
-    );
+    const dataPlaneServices = captureMeshServices(executorHandlers);
+    dataPlane.registerMeshServices({
+      services: dataPlaneServices,
+      operations: {
+        answerInteractionWithTicket: (input) =>
+          jobOwner.answerInteractionWithTicket(input),
+        resolveNoInteractiveSurface: (input) =>
+          jobOwner.resolveNoInteractiveSurface(input),
+        abortWithTicket: (request) => jobOwner.abortWithTicket(request),
+      },
+      authorizeOwner: (connection) =>
+        connection.peer.deviceId === authority.deviceId,
+      surfacePrincipalFor: () => "surface:device:owner",
+      ownerMayPresentSurfaceTicket: () => true,
+      authorizePeer: () => true,
+    });
     executorHandlers.set(
       JOB_INTERACTION_SERVICE,
       createJobInteractionServiceHandler({
@@ -1533,17 +1534,7 @@ async function runJobScenario(
       clock: () => Date.now(),
     });
     answers = new JobInteractionMeshClient(ownerToExecutor);
-    mesh = {
-      dataPlaneForExecutor(candidate: string) {
-        if (candidate !== authority.executorId) {
-          throw new Error("S6 job selected another executor");
-        }
-        return {
-          stream: new AssignmentStreamMeshClient(ownerToExecutor),
-          tickets: new DataPlaneTicketMeshClient(ownerToExecutor),
-        };
-      },
-    } as MeshRuntimeAssembly;
+    mesh = remoteDataPlaneDirectory(authority.executorId, ownerToExecutor);
   }
 
   const dispatcher = new InProcessJobDispatcher({
@@ -1611,13 +1602,20 @@ async function runJobScenario(
         }`
       : String(error);
   const composition = createLosslessDataPlaneComposition({
-    authority:
-      topology === "local"
-        ? authority
-        : authorityWithExecutorId(authority, "executor:s6-owner"),
-    ...(topology === "local" ? { local: dataPlane } : {}),
-    mesh: () => mesh,
-    interactions,
+    verifier: authority.verifier,
+    targets: new AssignmentDataPlaneTopologyAdapter({
+      ...(topology === "local"
+        ? {
+            local: {
+              executorId: authority.executorId,
+              ownerDeviceId: authority.deviceId,
+              transport: dataPlane.localTransport,
+              interactions,
+            },
+          }
+        : {}),
+      ...(mesh ? { remote: mesh } : {}),
+    }),
     protocol,
     channelChallenges: () => channels,
     jobStatus,

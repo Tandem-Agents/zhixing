@@ -18,7 +18,9 @@ import type { JobSubmissionOwner } from "./job-assignment-worker.js";
 import type {
   ConversationChannelSessionInput,
   ChannelChallengeDeliveryPort,
-  LosslessDataPlaneRuntime,
+  FirstPartySurfaceSession,
+  FirstPartySurfaceSessionInput,
+  JobOwnerRelayInput,
   LosslessDataPlaneSession,
 } from "./lossless-data-plane-runtime.js";
 import type {
@@ -133,19 +135,25 @@ function abortReason(signal: AbortSignal): unknown {
 }
 
 export interface ChannelInteractionCoordinatorOptions {
-  readonly dataPlane: Pick<
-    LosslessDataPlaneRuntime,
-    | "openConversationChannel"
-    | "openFirstPartySurfaceSession"
-    | "createJobOwnerRelay"
-    | "handleChallengeAction"
-  >;
+  readonly dataPlane: ChannelInteractionDataPlanePort;
   readonly channelChallenges: () => ChannelChallengeDeliveryPort | undefined;
   /** job owner 从耐久 JobJournal 重建并登记的开放义务；不得缺省。 */
   readonly jobRelays: JobRelayObligationDirectory;
   readonly jobStatus: JobStatusDirectory;
   readonly now?: () => string;
   readonly onError?: (error: Error) => void;
+}
+
+/** Finite data-plane use cases required by the Channel/Surface coordinator. */
+export interface ChannelInteractionDataPlanePort {
+  openConversationChannel(
+    input: ConversationChannelSessionInput,
+  ): Promise<LosslessDataPlaneSession>;
+  openFirstPartySurfaceSession(
+    input: FirstPartySurfaceSessionInput,
+  ): Promise<FirstPartySurfaceSession>;
+  createJobOwnerRelay(input: JobOwnerRelayInput): Promise<JobOwnerRelay>;
+  handleChallengeAction(action: ChannelChallengeAction): Promise<void>;
 }
 
 /**
@@ -274,8 +282,8 @@ export class ChannelInteractionCoordinator {
   }
 
   openFirstPartySurfaceSession(
-    input: Parameters<LosslessDataPlaneRuntime["openFirstPartySurfaceSession"]>[0],
-  ): ReturnType<LosslessDataPlaneRuntime["openFirstPartySurfaceSession"]> {
+    input: FirstPartySurfaceSessionInput,
+  ): Promise<FirstPartySurfaceSession> {
     if (this.#closed) {
       return Promise.reject(
         new Error("Channel interaction coordinator is closed"),

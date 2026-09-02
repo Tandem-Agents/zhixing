@@ -8,10 +8,7 @@ import type {
 } from "@zhixing/core/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { LosslessDataPlaneRuntime } from "./lossless-data-plane-runtime.js";
-import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
-import type { MeshRuntimeAssembly } from "./mesh-runtime-assembly.js";
-import type { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
-import type { AuthorityRuntimeStack } from "../setup-delivery.js";
+import type { AssignmentDataPlaneTarget } from "./assignment-data-plane-topology.js";
 
 const ref: ExecutionRef = {
   execution: "conversation",
@@ -94,14 +91,7 @@ describe("LosslessDataPlaneRuntime first-party surface sessions", () => {
     const meshClient = scriptedClient({ frames: [frame(1, 1, "via-mesh")] });
     const { runtime } = createRuntime({
       clients: [],
-      mesh: {
-        dataPlaneForExecutor: () => ({
-          stream: meshClient,
-          tickets: {
-            accept: vi.fn(async () => undefined),
-          },
-        }),
-      } as unknown as MeshRuntimeAssembly,
+      remoteClient: meshClient,
     });
     const session = await runtime.openFirstPartySurfaceSession({
       executorId: "exec-remote",
@@ -234,31 +224,43 @@ function scriptedClient(input: {
 
 function createRuntime(input: {
   readonly clients: readonly ScriptedClient[];
-  readonly mesh?: MeshRuntimeAssembly;
+  readonly remoteClient?: ScriptedClient;
 }): { runtime: LosslessDataPlaneRuntime; accept: ReturnType<typeof vi.fn> } {
   const queue = [...input.clients];
   const accept = vi.fn(async () => undefined);
-  const local = {
-    tickets: { accept },
-    surfaceStreamClient: () => {
+  const local: AssignmentDataPlaneTarget = {
+    acceptTicket: accept,
+    answerChannel: vi.fn(async () => undefined),
+    resolveNoInteractiveSurface: vi.fn(async () => undefined),
+    directSurfaceStream: () => {
       const next = queue.shift();
       if (!next) throw new Error("Local executor stream is unavailable");
       return next;
     },
-    ownerStreamClient: () => {
+    ownerStream: () => {
       const next = queue.shift();
       if (!next) throw new Error("Local executor stream is unavailable");
       return next;
     },
-  } as unknown as ExecutorDataPlaneRuntime;
+  };
+  const remote: AssignmentDataPlaneTarget | undefined = input.remoteClient
+    ? {
+        acceptTicket: vi.fn(async () => undefined),
+        answerChannel: vi.fn(async () => undefined),
+        resolveNoInteractiveSurface: vi.fn(async () => undefined),
+        ownerStream: () => input.remoteClient!,
+        directSurfaceStream: () => undefined,
+      }
+    : undefined;
   const runtime = new LosslessDataPlaneRuntime({
-    authority: {
-      executorId: "exec-local",
-      deviceId: "device-local",
-    } as unknown as AuthorityRuntimeStack,
-    local,
-    mesh: () => input.mesh,
-    interactions: {} as DurableConversationInteractionObserver,
+    verifier: {} as never,
+    targets: {
+      targetForExecutor: (executorId) => {
+        if (executorId === "exec-local") return local;
+        if (remote) return remote;
+        throw new Error("Remote executor data plane is unavailable");
+      },
+    },
   });
   return { runtime, accept };
 }

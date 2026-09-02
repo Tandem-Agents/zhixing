@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { MeshServiceRegistry } from "@zhixing/mesh";
 import { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import type { ExecutorRoleModule } from "./role-topology.js";
 
@@ -39,7 +40,7 @@ describe("ExecutorDataPlaneRuntime", () => {
     const ledger = {
       dataPlaneBinding: vi.fn(),
     };
-    runtime.bindLedger(ledger as never);
+    runtime.bindAssignmentAuthority(ledger as never);
 
     await runtime.start();
     expect(recover).toHaveBeenCalledOnce();
@@ -148,7 +149,7 @@ describe("ExecutorDataPlaneRuntime", () => {
       } as unknown as ExecutorRoleModule,
       storageMaintenance,
     });
-    runtime.bindLedger({ dataPlaneBinding: vi.fn() } as never);
+    runtime.bindAssignmentAuthority({ dataPlaneBinding: vi.fn() } as never);
     expect(spoolOptions?.storageMaintenance).toBe(storageMaintenance);
 
     await runtime.start();
@@ -199,5 +200,48 @@ describe("ExecutorDataPlaneRuntime", () => {
       }),
     ).rejects.toThrow(/no assignment authority/);
     await runtime.close();
+  });
+
+  it("owns concrete spool and tickets while exposing one finite Mesh service lifecycle", () => {
+    class Spool {}
+    class Tickets {}
+    class Writer {}
+    const runtime = new ExecutorDataPlaneRuntime({
+      zhixingHome: "X:/zhixing-home",
+      authority: {
+        artifacts: {},
+        executorLog: {},
+        executorId: "executor-1",
+        verifier: {},
+      } as never,
+      module: {
+        AssignmentStreamSpool: Spool,
+        AssignmentStreamWriter: Writer,
+        DataPlaneTicketRegistry: Tickets,
+      } as unknown as ExecutorRoleModule,
+    });
+    runtime.bindAssignmentAuthority({
+      dataPlaneBinding: vi.fn(),
+      authorizeOwnerRelay: vi.fn(),
+    } as never);
+    const services = new MeshServiceRegistry();
+    const dispose = runtime.registerMeshServices({
+      services,
+      operations: {} as never,
+      authorizeOwner: () => true,
+      surfacePrincipalFor: () => "surface:test",
+      ownerMayPresentSurfaceTicket: () => true,
+      authorizePeer: () => true,
+    });
+
+    expect(services.list()).toEqual([
+      "assignment.data-plane-ticket",
+      "assignment.stream",
+    ]);
+    expect("spool" in runtime).toBe(false);
+    expect("tickets" in runtime).toBe(false);
+    dispose();
+    dispose();
+    expect(services.list()).toEqual([]);
   });
 });

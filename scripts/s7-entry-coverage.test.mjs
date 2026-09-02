@@ -15,6 +15,7 @@ import {
   inspectCleanupRegistryConstructions,
   inspectConversationAdoptionAssembly,
   inspectConversationExecutorDispatchBoundary,
+  inspectAssignmentDataPlaneBoundary,
   inspectConversationStorageBoundary,
   inspectWorksceneStorageCleanupBoundary,
   inspectStorageRemainderBoundary,
@@ -571,7 +572,10 @@ test("local conversation owner remains isolated from anchor capabilities by cons
   assert.match(
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
-      (text) => text.replace("      verifier: ctx.authorityRuntime.verifier,\n", ""),
+      (text) => text.replace(
+        "      validateLocalConversationManifest:\n        ctx.authorityRuntime.validateLocalConversationManifest,\n      verifier: ctx.authorityRuntime.verifier,\n    });\n    const localExecutorBoundary",
+        "      validateLocalConversationManifest:\n        ctx.authorityRuntime.validateLocalConversationManifest,\n    });\n    const localExecutorBoundary",
+      ),
     )).join("\n"),
     /missing dependency verifier/,
   );
@@ -815,6 +819,80 @@ test("conversation dispatch application stays separate from the Host topology me
       ),
     )).join("\n"),
     /demand contract leaked concrete Executor implementation/,
+  );
+});
+
+test("assignment data plane exposes finite local and Mesh ports to upper consumers", async () => {
+  const paths = [
+    "packages/cli/src/serve/executor-data-plane-runtime.ts",
+    "packages/cli/src/serve/assignment-data-plane-topology.ts",
+    "packages/cli/src/serve/lossless-data-plane-runtime.ts",
+    "packages/cli/src/serve/lossless-data-plane-composition.ts",
+    "packages/cli/src/serve/channel-interaction-coordinator.ts",
+    "packages/cli/src/serve/conversation-protocol-runtime.ts",
+    "packages/cli/src/serve/mesh-runtime-assembly.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: (await readFile(relative, "utf8")).replaceAll("\r\n", "\n"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectAssignmentDataPlaneBoundary(records), []);
+  assert.match(
+    inspectAssignmentDataPlaneBoundary(mutate(
+      "packages/cli/src/serve/assignment-data-plane-topology.ts",
+      (text) => `${text}\ntype ConcreteLeak = ExecutorDataPlaneRuntime;\n`,
+    )).join("\n"),
+    /topology contract leaked a concrete mechanism/u,
+  );
+  assert.match(
+    inspectAssignmentDataPlaneBoundary(mutate(
+      "packages/cli/src/serve/lossless-data-plane-runtime.ts",
+      (text) => `${text}\ntype ConcreteLeak = MeshRuntimeAssembly;\n`,
+    )).join("\n"),
+    /consumer bypassed its finite target port/u,
+  );
+  assert.match(
+    inspectAssignmentDataPlaneBoundary(mutate(
+      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      (text) => `${text}\ntype ConcreteLeak = LosslessDataPlaneRuntime;\n`,
+    )).join("\n"),
+    /upper consumers depend on a concrete runtime/u,
+  );
+  assert.match(
+    inspectAssignmentDataPlaneBoundary(mutate(
+      "packages/cli/src/serve/executor-data-plane-runtime.ts",
+      (text) => text.replace(
+        "readonly #spool: AssignmentStreamSpool;",
+        "readonly spool: AssignmentStreamSpool;",
+      ),
+    )).join("\n"),
+    /concrete spool\/ticket ownership escaped/u,
+  );
+  assert.match(
+    inspectAssignmentDataPlaneBoundary(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "dataPlane.registerMeshServices({",
+        "registerAssignmentStreamService(this.services, { spool: dataPlane.spool,",
+      ),
+    )).join("\n"),
+    /Mesh assignment data-plane binding owns concrete storage/u,
+  );
+  assert.match(
+    inspectAssignmentDataPlaneBoundary(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "targets: new AssignmentDataPlaneTopologyAdapter({",
+        "targets: ctx.executorDataPlane,",
+      ),
+    )).join("\n"),
+    /Host assignment data-plane construction/u,
   );
 });
 

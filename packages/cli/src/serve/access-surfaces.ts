@@ -64,6 +64,7 @@ import type {
 import { ZHIXING_CLI_VERSION } from "../version.js";
 import { JobStatusDirectory } from "./job-status-directory.js";
 import { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
+import { AssignmentDataPlaneTopologyAdapter } from "./assignment-data-plane-topology.js";
 import { createLosslessDataPlaneComposition } from "./lossless-data-plane-composition.js";
 import { ExecutorJobOwnerAssembly } from "./executor-job-owner.js";
 import { JobInteractionRuntimeUnavailableError } from "./durable-job-interactions.js";
@@ -369,13 +370,23 @@ const losslessDataPlaneSurface: AccessSurface = {
       );
     }
     const composition = createLosslessDataPlaneComposition({
-      authority: ctx.authorityRuntime,
-      ...(ctx.executorDataPlane ? { local: ctx.executorDataPlane } : {}),
-      mesh: () => ctx.meshRuntime,
-      interactions: new AssignmentInteractionRouter({
-        ledger: ctx.conversationExecutorLedger!,
-        conversation: ctx.durableInteractions,
-        ...(ctx.executorJobOwner ? { job: ctx.executorJobOwner } : {}),
+      verifier: ctx.authorityRuntime.verifier,
+      targets: new AssignmentDataPlaneTopologyAdapter({
+        ...(ctx.executorDataPlane
+          ? {
+              local: {
+                executorId: ctx.authorityRuntime.executorId,
+                ownerDeviceId: ctx.authorityRuntime.deviceId,
+                transport: ctx.executorDataPlane.localTransport,
+                interactions: new AssignmentInteractionRouter({
+                  ledger: ctx.conversationExecutorLedger!,
+                  conversation: ctx.durableInteractions,
+                  ...(ctx.executorJobOwner ? { job: ctx.executorJobOwner } : {}),
+                }),
+              },
+            }
+          : {}),
+        ...(ctx.meshRuntime ? { remote: ctx.meshRuntime } : {}),
       }),
       ...(ctx.jobRelayObligations
         ? { jobRelayObligations: ctx.jobRelayObligations }
@@ -445,7 +456,7 @@ const conversationSurface: AccessSurface = {
                 ctx.executorRoleModule.ConversationAssignmentLedger,
               InProcessAssignmentSubmission:
                 ctx.executorRoleModule.InProcessAssignmentSubmission,
-              dataPlaneTickets: ctx.executorDataPlane!.tickets,
+              dataPlaneTickets: ctx.executorDataPlane!.assignmentTickets,
               runtimeFactory: ctx.assignmentRuntimeFactory,
               createStream: (input: {
                 readonly assignmentId: string;
@@ -702,7 +713,7 @@ const conversationSurface: AccessSurface = {
       if (!executorBoundary.localLedger) {
         throw new Error("Conversation executor boundary did not provide its local ledger");
       }
-      ctx.executorDataPlane.bindLedger(executorBoundary.localLedger);
+      ctx.executorDataPlane.bindAssignmentAuthority(executorBoundary.localLedger);
       await ctx.executorDataPlane.start();
     }
     await protocol.recoverReadinessProjections();
@@ -772,7 +783,7 @@ const localConversationOwnerUnit: CoreAssemblyUnit = {
         InProcessAssignmentSubmission:
           ctx.executorRoleModule.InProcessAssignmentSubmission,
         runtimeFactory: ctx.assignmentRuntimeFactory,
-        dataPlaneTickets: ctx.executorDataPlane.tickets,
+        dataPlaneTickets: ctx.executorDataPlane.assignmentTickets,
         createStream: (input) => ctx.executorDataPlane!.createStream(input),
       },
     });

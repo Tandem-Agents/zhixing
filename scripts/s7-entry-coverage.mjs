@@ -3922,6 +3922,7 @@ export async function validateS7Structure() {
   failures.push(...await inspectCleanupRegistryConstructions(records));
   failures.push(...inspectLocalConversationOwnerIsolation(records));
   failures.push(...inspectConversationExecutorDispatchBoundary(records));
+  failures.push(...inspectAssignmentDataPlaneBoundary(records));
   failures.push(...inspectConversationAdoptionAssembly(records));
   failures.push(...inspectConversationStorageBoundary(records));
   failures.push(...inspectWorksceneStorageCleanupBoundary(records));
@@ -10510,6 +10511,102 @@ export function inspectConversationExecutorDispatchBoundary(records) {
     access.includes("conversationExecutorDispatch!.localLedger()")
   ) {
     failures.push("Conversation executor ledger escaped through a demand or dispatch accessor");
+  }
+  return failures;
+}
+
+/** A6 assignment stream/ticket consumers depend on one topology-neutral finite port. */
+export function inspectAssignmentDataPlaneBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const text = byPath.get(relative);
+    if (text === undefined) failures.push(`${relative}: assignment data-plane source is missing`);
+    return text ?? "";
+  };
+  const executor = required("packages/cli/src/serve/executor-data-plane-runtime.ts");
+  const topology = required("packages/cli/src/serve/assignment-data-plane-topology.ts");
+  const lossless = required("packages/cli/src/serve/lossless-data-plane-runtime.ts");
+  const composition = required("packages/cli/src/serve/lossless-data-plane-composition.ts");
+  const coordinator = required("packages/cli/src/serve/channel-interaction-coordinator.ts");
+  const protocol = required("packages/cli/src/serve/conversation-protocol-runtime.ts");
+  const mesh = required("packages/cli/src/serve/mesh-runtime-assembly.ts");
+  const access = required("packages/cli/src/serve/access-surfaces.ts");
+  const executorRole = required("packages/cli/src/serve/executor-role-runtime.ts");
+  const count = (text, token) => text.split(token).length - 1;
+
+  if (
+    !topology.includes("export interface AssignmentDataPlaneTarget") ||
+    !topology.includes("export interface AssignmentDataPlaneTargetDirectory") ||
+    !topology.includes("export class AssignmentDataPlaneTopologyAdapter") ||
+    topology.includes("ExecutorDataPlaneRuntime") ||
+    topology.includes("ConversationAssignmentLedger") ||
+    topology.includes("AssignmentStreamSpool") ||
+    topology.includes("DataPlaneTicketRegistry") ||
+    topology.includes("MeshRuntimeAssembly")
+  ) {
+    failures.push("assignment data-plane topology contract leaked a concrete mechanism");
+  }
+  if (
+    !lossless.includes("readonly #targets: AssignmentDataPlaneTargetDirectory") ||
+    !lossless.includes("this.#targets.targetForExecutor(") ||
+    [
+      "AuthorityRuntimeStack",
+      "ExecutorDataPlaneRuntime",
+      "MeshRuntimeAssembly",
+      "DurableConversationInteractionObserver",
+      "dataPlaneForExecutor",
+    ].some((token) => lossless.includes(token))
+  ) {
+    failures.push("lossless assignment data-plane consumer bypassed its finite target port");
+  }
+  if (
+    !composition.includes("readonly targets: AssignmentDataPlaneTargetDirectory") ||
+    !composition.includes("targets: options.targets") ||
+    /readonly\s+(?:authority|local|mesh|interactions)\s*:/u.test(composition)
+  ) {
+    failures.push("lossless data-plane composition restored a concrete service-locator input");
+  }
+  if (
+    !coordinator.includes("export interface ChannelInteractionDataPlanePort") ||
+    coordinator.includes("LosslessDataPlaneRuntime") ||
+    !protocol.includes("export interface ConversationLosslessDataPlanePort") ||
+    protocol.includes("LosslessDataPlaneRuntime")
+  ) {
+    failures.push("assignment data-plane upper consumers depend on a concrete runtime");
+  }
+  if (
+    !executor.includes("readonly #spool: AssignmentStreamSpool") ||
+    !executor.includes("readonly #tickets: DataPlaneTicketRegistry") ||
+    /readonly\s+(?:spool|tickets)\s*:/u.test(executor) ||
+    executor.includes("bindLedger(") ||
+    !executor.includes("readonly assignmentTickets: ExecutorDataPlaneTicketAuthorityPort") ||
+    !executor.includes("readonly localTransport: AssignmentDataPlaneLocalTransportPort") ||
+    !executor.includes("registerMeshServices(input: AssignmentDataPlaneMeshServiceInput)")
+  ) {
+    failures.push("executor data-plane concrete spool/ticket ownership escaped its finite ports");
+  }
+  if (
+    !mesh.includes("readonly dataPlane: AssignmentDataPlaneMeshPort") ||
+    count(mesh, "dataPlane.registerMeshServices({") !== 1 ||
+    mesh.includes("dataPlane.spool") ||
+    mesh.includes("dataPlane.tickets") ||
+    mesh.includes("registerAssignmentStreamService(this.services") ||
+    mesh.includes("registerDataPlaneTicketService(this.services") ||
+    !mesh.includes("remoteDataPlaneTarget(executorId: string): AssignmentDataPlaneTarget")
+  ) {
+    failures.push("Mesh assignment data-plane binding owns concrete storage or business selection");
+  }
+  if (
+    count(access, "new AssignmentDataPlaneTopologyAdapter({") !== 1 ||
+    count(access, "new ExecutorDataPlaneRuntime({") !== 1 ||
+    count(executorRole, "new ExecutorDataPlaneRuntime({") !== 1 ||
+    count(access, ".assignmentTickets") !== 2 ||
+    count(executorRole, ".assignmentTickets") !== 2 ||
+    count(access, "bindAssignmentAuthority(") !== 1 ||
+    count(executorRole, "bindAssignmentAuthority(") !== 1
+  ) {
+    failures.push("Host assignment data-plane construction and finite injection exact-set drifted");
   }
   return failures;
 }

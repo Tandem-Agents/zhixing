@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-07a Conversation Executor 派发职责分层纠正等待协调者复核<br>
+> 当前检查点：A6-07b Assignment data-plane stream/ticket 边界收口等待协调者复核<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `1cb84630`；A6-06d 已由协调者纠正并独立复核后提交，P01/P05/P06/P13～P15 的非拓扑存储边界与 production multiplicity exact-set 已闭合 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-07a Conversation assignment 的应用决定/Correctness 编排/Host 拓扑机制分层纠正等待协调者复核 |
-| 活跃工作包 | `A6-07a-conversation-executor-dispatch-boundary-v1` 已恢复待复核结果；Conversation 先裁决拓扑中立 placement，Conversation Executor dispatch application 独占 assignment prepare/recovery/terminal 编排，Host topology adapter 只选择 in-process 或 Mesh 机制且不再充当 service locator |
-| 下一责任链 | A6-07a 闭合后沿同一 Assignment/Execution 链继续收束 stream、ticket、resource/evidence 或核实已合规部分；不并行扩入设备管理与 transfer |
-| 打开的单向桥 | 无；A6-07a 如需迁移期适配，必须是同包退场的最短单向端口，不得保留 local/remote 双入口给需求方 |
-| 已失效证据 | 无当前未恢复证据；A6-07a 初次“Host adapter 同时拥有产品策略、Authority 编排和本机实现出口”的结论已由协调反证作废并在同包纠正，Conversation assignment 派发、local/remote 结果与 P07/P08 相交证据已按新分层恢复，其余 A6-01～06d 继续有效 |
+| 已接受基线 | `55ca4d48`；A6-07a 已由协调者纠正并独立复核后提交，Conversation requirement、application assignment/恢复/终态与 Host 本机/Mesh mechanism 已形成单向分层 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-07b 已形成待协调者复核的 P08 data-plane stream/ticket 需求端口与 Host/Correctness 机制边界 |
+| 活跃工作包 | `A6-07b-assignment-data-plane-boundary-v1` 等待协调者复核；需求消费者只持有限 stream/ticket 端口，Host 组合与 Executor/Mesh 适配持有 ledger、spool、ticket store 和传输机制 |
+| 下一责任链 | A6-07b 闭合后继续核实 Assignment resource/evidence 与 P07/P09～P12 的真实剩余缺口；不并行扩入设备管理、transfer 或 A7 |
+| 打开的单向桥 | 无；A6-07b 如需迁移期适配，必须在同包退场，不得给需求方保留 concrete ledger/data-plane 或 local/Mesh 双入口 |
+| 已失效证据 | 无当前未恢复证据；A6-07a 及 A6-01～06d 继续有效，A6-07b 生产、直接测试、S6 与 S7 证据已恢复并等待协调者复核 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2641,6 +2641,15 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 协调反证与职责纠正：上述初次结果把 `supportsOffDeviceExecution(invocation, ingress)` 的产品裁决、`prepareConversationAssignment`/恢复/终态轮询的应用与 Correctness 编排，以及 local/Mesh 机制选择和本机 ledger/runtime/submission 出口一并塞入 Host adapter；它还让 demand 合同出现具体 `ConversationAssignmentLedger`/`InProcessAssignmentSubmission`，实质形成 service locator，因此初次四条结论及其直接证据整体失效。现由 Conversation protocol 从既有 invocation/ingress 裁决只含 `current-device | authorized-device` 的拓扑中立 requirement；唯一 `DefaultConversationExecutorDispatchApplication` 负责 Authority prepare、恢复路由与 terminal 收敛；`ConversationExecutorTopologyAdapter` 仅绑定授权远端目录并选择 local/Mesh target。Host composition 一次性返回相互独立的 application、topology、staging 与可选 local ledger，job/data-plane 直接取得该 ledger，Mesh 只取得 topology，任何 consumer 都不能再从 adapter 查询 Authority、runtime factory、submission、stream、staging 或 ledger。execution effect/staging 端口只暴露有限函数合同，不含具体 executor class；旧 `localLedger()` getter、invocation/ingress 拓扑判断和 adapter 内 Authority prepare 均归零。
 - 纠正后行为与证据恢复：Conversation protocol 全文件 26/26 通过，覆盖本机重启、真实远端 first-party/Channel、assignment response-loss、remote retry/terminal、interaction backlog 与 lifecycle recovery；协调复核时受存储维护竞争影响的 local-owner 三项关闭用例分别独立重取 1/1、1/1、1/1 通过，既有 S6 远端 2/2 与三 owner-domain 拓扑 3/3 继续有效。CLI `tsc --noEmit`、`pnpm cli:build`、changed-source Biome 通过；canonical S7 production coverage、46/46 mutation 与 registry golden 通过，反向 mutation 现在明确拒绝 topology adapter 恢复产品 requirement/Authority prepare、service-locator getter、demand contract 泄漏 concrete ledger，以及 protocol/local-owner/Mesh 绕过单一 application/topology 分层。若 requirement 裁决、application prepare/recovery/terminal、Host target mechanism、四类 Host composition 输出、side-consumer direct ledger、finite execution/staging ports、三个生产构造、P07/P08 相交入口、S7 或上述直接测试任一变化，只恢复本证据及真实相交的 A0/A5/A6 证据；A6 继续 `[ ]`，未进入设备管理、transfer 或 A7。
 - 协调者独立验收：确认纠正后的生产链不再由 Host topology adapter 裁决产品策略或暴露 service-locator；Conversation requirement、application assignment/恢复/终态与本机/Mesh mechanism 形成单向分层，旧 protocol local/remote 双入口归零。独立运行 Conversation protocol、三拓扑 owner-domain、local-owner lifecycle/surface 与 S6 共 59/59，CLI `tsc --noEmit`、canonical S7 46/46 与 registry golden、runtime package exports 和 `git diff --check` 均通过；A6-07a 可以提交，A6 仍保持 `[ ]`。
+
+### A6-07b：Assignment data-plane stream/ticket 边界收口
+
+- 基线与唯一结果：以已接受 `HEAD 55ca4d48273234610986d8566dc9224a30572a50` 加协调者调度记录为基线，形成待复核证据 `A6-07b-assignment-data-plane-boundary-v1`。P08 assignment data-plane 的上层需求面现在只有有限 `AssignmentDataPlaneStreamPort`、本机 transport、Mesh service/remote directory 与统一 `AssignmentDataPlaneTargetDirectory`；Conversation protocol、Channel interaction、job relay 与 lossless composition 只提交 stream/ticket 需求并消费统一 target，不取得 ledger、spool、ticket registry、Mesh client/service 或 concrete `ExecutorDataPlaneRuntime`，也不再按本机/Mesh 解释产品决定。
+- 机制、组合与旧路退场：`ExecutorDataPlaneRuntime` 在 Infrastructure/Correctness 边界唯一持有 spool、ticket registry、stream client/owner relay 与 service registration，并只公开冻结的 assignment-ticket/local-transport/bind-authority/stream/mesh-service 生命周期端口；`MeshRuntimeAssembly` 只实现远端 target directory 并适配既有 Mesh clients，Host 的 `access-surfaces` 唯一构造 `AssignmentDataPlaneTopologyAdapter` 选择已在场的本机/远端机制。旧 public `spool`/`tickets`、`bindLedger`、`dataPlaneForExecutor`、Mesh 直接注册 stream/ticket storage service、上层 concrete runtime 注入及 side-consumer 经 Conversation demand owner 查询 ledger 的 service-locator 路径归零；Executor job owner 与 local Conversation owner 仍从 Host composition 直接取得其各自既有有限依赖，没有第二 ledger、第二 stream owner或双 service registration。
+- 行为与 P08 保护：本机与远端 first-party、Channel、job 三类 relay 共用同一上层 target/decision 合同；ticket 接受、channel answer、无交互面裁决、owner/direct-surface stream、现有签名验证、assignment/executor/operation binding、frame/tombstone、ACK/reclamation、response-loss redrive、重启恢复及 service authorize/lifecycle 均保留既有机制。P06 Authority、P07 execution assets/workspace、P08 持久 schema、resource/evidence、P09～P12 Mesh/transfer/recovery、设备管理和公开协议均未改变；本包只移动依赖与组合责任，不把 data plane、spool、ticket 或 Mesh 提升为产品 Authority。
+- 直接证据与结构门禁：data-plane topology/runtime、Channel 与 Conversation worker 5文件39/39；Mesh/Executor role、job-owner 与 terminal 5文件27/27；真实 S6 本机/远端 first-party、Channel、job、无合法 responder 与跨域拒绝1文件8/8。CLI `tsc --noEmit` 与 `pnpm cli:build`通过；canonical S7最终47/47与registry golden通过，新增反向 mutation可拒绝上层 concrete/storage泄漏、public spool/ticket、Mesh绕过有限service port、Host topology adapter缺失或重建本机/Mesh双入口；既有 local-owner mutation因新增同名 verifier 行产生目标碰撞后已收窄到真实构造点并重新具备识别力。changed-source Biome与`git diff --check`通过；manifest、package export和build entry未改变，既有fresh package-export证据未失效，未重复运行。
+- 失效与交接：若上述有限stream/ticket/target端口、`ExecutorDataPlaneRuntime` concrete owner、Host adapter唯一构造、Mesh service/remote directory、本机transport、Conversation/Channel/job consumer、P08持久/恢复/授权/回收语义、S6生产拓扑、S7或上述直接测试任一变化，只恢复本证据及真实相交的A0/A5/A6证据。当前无打开桥和未恢复证据；A6继续`[ ]`，下一检查点由协调者复核后核实Assignment resource/evidence与P07/P09～P12的真实剩余缺口，不进入设备管理、transfer或A7。本轮未执行Git暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：沿 Host 构造、Executor concrete owner、Mesh service、统一 target 与 Conversation/Channel/Job 消费链复核后，确认 concrete spool、ticket registry、ledger 和 Mesh client/service 未进入需求合同，单机/远端只在 Host topology adapter 分叉，未形成万能 facade 或第二 owner。独立运行 topology、runtime、lossless、Channel、Conversation worker、job-owner 与真实 S6 共 53/53，CLI `tsc --noEmit`、canonical S7 47/47 与 registry golden、runtime package exports 和 `git diff --check` 均通过；A6-07b 可以提交，A6 仍保持 `[ ]`。
 
 ## 十、用户提示词
 

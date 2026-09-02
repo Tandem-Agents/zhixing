@@ -6,11 +6,19 @@ import {
   storageMaintenanceRequest,
   type StorageMaintenanceGovernorPort,
 } from "@zhixing/core";
-import type { ExecutionRef } from "@zhixing/core/contracts";
+import type {
+  DataPlaneTicket,
+  ExecutionRef,
+  StreamConsumerAuth,
+} from "@zhixing/core/contracts";
+import type {
+  DataPlaneTicketUse,
+  ProtocolSignatureVerifier,
+} from "@zhixing/core/protocol";
 import type {
   AssignmentStreamSpool,
   AssignmentStreamWriter,
-  ConversationAssignmentLedger,
+  DataPlaneAssignmentBinding,
   DataPlaneTicketRegistry,
 } from "@zhixing/executor";
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
@@ -20,8 +28,16 @@ import {
   createAssignmentStreamServiceHandler,
   createDataPlaneAssignmentStreamAuthorizer,
   createInProcessAssignmentStreamClient,
+  registerAssignmentStreamService,
   type AssignmentStreamClient,
 } from "./assignment-stream-mesh.js";
+import {
+  registerDataPlaneTicketService,
+} from "./data-plane-ticket-mesh.js";
+import type {
+  AssignmentDataPlaneLocalTransportPort,
+  AssignmentDataPlaneMeshServiceInput,
+} from "./assignment-data-plane-topology.js";
 
 const MAINTENANCE_INTERVAL_MS = 60_000;
 // 单轮回收批次上界:一轮维护至多触碰这么多 assignment,余量由游标续扫,
@@ -41,20 +57,41 @@ export interface ExecutorDataPlaneRuntimeOptions {
   readonly onError?: (error: Error) => void;
 }
 
+/** Finite assignment authority required by the executor data-plane mechanism. */
+export interface ExecutorDataPlaneAssignmentAuthorityPort {
+  dataPlaneBinding(
+    assignmentId: string,
+    use?: DataPlaneTicketUse,
+  ): Promise<DataPlaneAssignmentBinding | undefined>;
+  authorizeOwnerRelay(input: {
+    readonly assignmentId: string;
+    readonly consumer: Extract<StreamConsumerAuth, { readonly kind: "owner-relay" }>;
+    readonly ownerDeviceId: string;
+  }): Promise<void>;
+}
+
+/** Ticket authority contribution consumed by the assignment ledger at Host assembly. */
+export interface ExecutorDataPlaneTicketAuthorityPort {
+  authorize: DataPlaneTicketRegistry["authorize"];
+}
+
 /**
  * One executor-owned data-plane substrate shared by local and mesh adapters.
  * Assignment authority remains in the ledger; this runtime only owns durable
  * stream bytes, ticket projections and their physical maintenance.
  */
 export class ExecutorDataPlaneRuntime {
-  readonly spool: AssignmentStreamSpool;
-  readonly tickets: DataPlaneTicketRegistry;
+  readonly assignmentTickets: ExecutorDataPlaneTicketAuthorityPort;
+  readonly localTransport: AssignmentDataPlaneLocalTransportPort;
   readonly #AssignmentStreamWriter: typeof AssignmentStreamWriter;
+  readonly #spool: AssignmentStreamSpool;
+  readonly #tickets: DataPlaneTicketRegistry;
   readonly #onError: ((error: Error) => void) | undefined;
   readonly #storageGovernor: StorageMaintenanceGovernorPort | undefined;
   readonly #maintenanceRunner: StorageMaintenanceTaskRunner;
   readonly #executorId: string;
-  #ledger: ConversationAssignmentLedger | undefined;
+  readonly #verifier: ProtocolSignatureVerifier;
+  #assignmentAuthority: ExecutorDataPlaneAssignmentAuthorityPort | undefined;
   #timer: ReturnType<typeof setTimeout> | undefined;
   #maintenance: Promise<number> | undefined;
   #closed = false;
@@ -68,7 +105,8 @@ export class ExecutorDataPlaneRuntime {
       options.storageMaintenance,
     );
     this.#executorId = options.authority.executorId;
-    this.spool = new options.module.AssignmentStreamSpool(
+    this.#verifier = options.authority.verifier;
+    this.#spool = new options.module.AssignmentStreamSpool(
       path.join(
         options.zhixingHome,
         "distributed-runtime",
@@ -80,33 +118,57 @@ export class ExecutorDataPlaneRuntime {
         storageMaintenance: options.storageMaintenance,
       },
     );
-    this.tickets = new options.module.DataPlaneTicketRegistry({
+    this.#tickets = new options.module.DataPlaneTicketRegistry({
       log: options.authority.executorLog,
       executorId: options.authority.executorId,
       verifier: options.authority.verifier,
       assignments: {
         dataPlaneBinding: async (assignmentId, use) =>
-          this.#ledger?.dataPlaneBinding(assignmentId, use),
+          this.#assignmentAuthority?.dataPlaneBinding(assignmentId, use),
       },
-      spool: this.spool,
+      spool: this.#spool,
       clock,
+    });
+    this.assignmentTickets = Object.freeze({
+      authorize: (...args: Parameters<DataPlaneTicketRegistry["authorize"]>) =>
+        this.#tickets.authorize(...args),
+    });
+    this.localTransport = Object.freeze({
+      acceptTicket: async (ticket: DataPlaneTicket) => {
+        await this.#tickets.accept(ticket);
+      },
+      authorizeOwnerPresentedSurface: async (
+        ticketId: string,
+        use: DataPlaneTicketUse,
+        assignmentId: string,
+      ) => {
+        await this.#tickets.authorizeOwnerPresentedSurface(
+          ticketId,
+          use,
+          assignmentId,
+        );
+      },
+      ownerStreamClient: (ownerDeviceId: string) =>
+        this.#ownerStreamClient(ownerDeviceId),
+      surfaceStreamClient: (surfacePrincipal: string) =>
+        this.#surfaceStreamClient(surfacePrincipal),
     });
   }
 
-  bindLedger(ledger: ConversationAssignmentLedger): void {
-    if (this.#ledger && this.#ledger !== ledger) {
-      throw new Error("Executor data plane is already bound to another ledger");
+  bindAssignmentAuthority(authority: ExecutorDataPlaneAssignmentAuthorityPort): void {
+    if (this.#assignmentAuthority && this.#assignmentAuthority !== authority) {
+      throw new Error("Executor data plane is already bound to another assignment authority");
     }
-    this.#ledger = ledger;
+    this.#assignmentAuthority = authority;
   }
 
   async createStream(input: {
     readonly assignmentId: string;
     readonly ref: ExecutionRef;
   }): Promise<AssignmentStreamWriter> {
-    this.#requireLedger();
+    this.#requireAssignmentAuthority();
     return this.#AssignmentStreamWriter.open(
-      this.spool,
+      this.#spool,
       input.assignmentId,
       input.ref,
     );
@@ -118,7 +180,7 @@ export class ExecutorDataPlaneRuntime {
    * 到期),否则订阅会被 spool 以未资格拒绝。local/mesh 装配共用本方法,
    * 不得各自另行拼装。
    */
-  async authorizeOwnerRelayConsumer(input: {
+  async #authorizeOwnerRelayConsumer(input: {
     readonly assignmentId: string;
     readonly consumer: Extract<
       import("@zhixing/core/contracts").StreamConsumerAuth,
@@ -126,28 +188,28 @@ export class ExecutorDataPlaneRuntime {
     >;
     readonly ownerDeviceId: string;
   }): Promise<void> {
-    const ledger = this.#requireLedger();
-    await ledger.authorizeOwnerRelay(input);
-    const binding = await ledger.dataPlaneBinding(input.assignmentId);
+    const authority = this.#requireAssignmentAuthority();
+    await authority.authorizeOwnerRelay(input);
+    const binding = await authority.dataPlaneBinding(input.assignmentId);
     if (!binding) {
       throw new Error("Owner relay authorization has no active assignment binding");
     }
-    await this.spool.qualifyConsumer({
+    await this.#spool.qualifyConsumer({
       assignmentId: input.assignmentId,
       ref: binding.ref,
       consumer: input.consumer,
     });
   }
 
-  ownerStreamClient(ownerDeviceId: string): AssignmentStreamClient {
-    this.#requireLedger();
+  #ownerStreamClient(ownerDeviceId: string): AssignmentStreamClient {
+    this.#requireAssignmentAuthority();
     const connection = {
       peer: { deviceId: ownerDeviceId },
     } as SecureMeshConnection;
     const handler = createAssignmentStreamServiceHandler({
-      spool: this.spool,
+      spool: this.#spool,
       authorize: createDataPlaneAssignmentStreamAuthorizer({
-        tickets: this.tickets,
+        tickets: this.#tickets,
         surfacePrincipalFor: () =>
           `surface:device:${ownerDeviceId}`,
         ownerMayPresentSurfaceTicket: () => true,
@@ -157,7 +219,7 @@ export class ExecutorDataPlaneRuntime {
               "Owner relay authorization has the wrong consumer kind",
             );
           }
-          await this.authorizeOwnerRelayConsumer({
+          await this.#authorizeOwnerRelayConsumer({
             assignmentId: request.assignmentId,
             consumer: request.consumer,
             ownerDeviceId,
@@ -174,15 +236,15 @@ export class ExecutorDataPlaneRuntime {
    * spool 服务，但以票据绑定的 surface principal 独立验权，不能借用
    * owner-presented-ticket 分支。
    */
-  surfaceStreamClient(surfacePrincipal: string): AssignmentStreamClient {
-    this.#requireLedger();
+  #surfaceStreamClient(surfacePrincipal: string): AssignmentStreamClient {
+    this.#requireAssignmentAuthority();
     const connection = {
       peer: { deviceId: this.#executorId },
     } as SecureMeshConnection;
     const handler = createAssignmentStreamServiceHandler({
-      spool: this.spool,
+      spool: this.#spool,
       authorize: createDataPlaneAssignmentStreamAuthorizer({
-        tickets: this.tickets,
+        tickets: this.#tickets,
         surfacePrincipalFor: () => surfacePrincipal,
         authorizeOwnerRelay: async (request) => {
           if (request.consumer.kind !== "owner-relay") {
@@ -190,7 +252,7 @@ export class ExecutorDataPlaneRuntime {
               "Owner relay authorization has the wrong consumer kind",
             );
           }
-          await this.authorizeOwnerRelayConsumer({
+          await this.#authorizeOwnerRelayConsumer({
             assignmentId: request.assignmentId,
             consumer: request.consumer,
             ownerDeviceId: this.#executorId,
@@ -202,10 +264,46 @@ export class ExecutorDataPlaneRuntime {
     return createInProcessAssignmentStreamClient(handler, connection);
   }
 
+  registerMeshServices(input: AssignmentDataPlaneMeshServiceInput): () => void {
+    this.#requireAssignmentAuthority();
+    const disposeStream = registerAssignmentStreamService(input.services, {
+      spool: this.#spool,
+      authorize: createDataPlaneAssignmentStreamAuthorizer({
+        tickets: this.#tickets,
+        surfacePrincipalFor: input.surfacePrincipalFor,
+        ownerMayPresentSurfaceTicket: input.ownerMayPresentSurfaceTicket,
+        authorizeOwnerRelay: async (request) => {
+          if (request.consumer.kind !== "owner-relay") {
+            throw new TypeError("Owner relay authorization has the wrong consumer kind");
+          }
+          await this.#authorizeOwnerRelayConsumer({
+            assignmentId: request.assignmentId,
+            consumer: request.consumer,
+            ownerDeviceId: request.connection.peer.deviceId,
+          });
+          return {};
+        },
+      }),
+      authorizePeer: input.authorizePeer,
+    });
+    const disposeTickets = registerDataPlaneTicketService(input.services, {
+      tickets: this.#tickets,
+      verifier: this.#verifier,
+      operations: input.operations,
+      authorizeOwner: input.authorizeOwner,
+      surfacePrincipalFor: input.surfacePrincipalFor,
+      authorizePeer: input.authorizePeer,
+    });
+    return once(() => {
+      disposeTickets();
+      disposeStream();
+    });
+  }
+
   async start(): Promise<void> {
     if (this.#closed) throw new Error("Executor data plane is closed");
-    this.#requireLedger();
-    await this.tickets.recover();
+    this.#requireAssignmentAuthority();
+    await this.#tickets.recover();
     await this.maintain();
     this.#scheduleMaintenance();
   }
@@ -227,8 +325,8 @@ export class ExecutorDataPlaneRuntime {
     this.#timer = undefined;
     await this.#maintenanceRunner.stop();
     await this.#maintenance?.catch(() => undefined);
-    await this.spool.closeAssignmentScan();
-    await this.spool.stopStorageMaintenance();
+    await this.#spool.closeAssignmentScan();
+    await this.#spool.stopStorageMaintenance();
   }
 
   /**
@@ -245,7 +343,7 @@ export class ExecutorDataPlaneRuntime {
       }),
       abort.signal,
       () =>
-        this.tickets.maintain((operation) =>
+        this.#tickets.maintain((operation) =>
           runStorageMaintenanceStep(
             this.#storageGovernor,
             storageMaintenanceRequest(
@@ -268,7 +366,7 @@ export class ExecutorDataPlaneRuntime {
       ),
       abort.signal,
       () =>
-        this.spool.assignmentIdPage(
+        this.#spool.assignmentIdPage(
           MAINTENANCE_RECLAIM_BATCH_LIMIT,
           (operation) =>
             runStorageMaintenanceStep(
@@ -294,7 +392,7 @@ export class ExecutorDataPlaneRuntime {
         ),
         abort.signal,
         () =>
-          this.spool.reclaimDue(assignmentId, undefined, (operation) =>
+          this.#spool.reclaimDue(assignmentId, undefined, (operation) =>
             runStorageMaintenanceStep(
               this.#storageGovernor,
               storageMaintenanceRequest(
@@ -323,12 +421,21 @@ export class ExecutorDataPlaneRuntime {
     this.#timer.unref?.();
   }
 
-  #requireLedger(): ConversationAssignmentLedger {
-    if (!this.#ledger) {
+  #requireAssignmentAuthority(): ExecutorDataPlaneAssignmentAuthorityPort {
+    if (!this.#assignmentAuthority) {
       throw new Error("Executor data plane has no assignment authority");
     }
-    return this.#ledger;
+    return this.#assignmentAuthority;
   }
+}
+
+function once(action: () => void): () => void {
+  let called = false;
+  return () => {
+    if (called) return;
+    called = true;
+    action();
+  };
 }
 
 function asError(value: unknown): Error {

@@ -388,7 +388,7 @@ export async function runExecutorRole(
     const ledger = createConversationExecutorLedger({
       Constructor: executor.ConversationAssignmentLedger,
       authority: localOwnerRuntime,
-      dataPlaneTickets: dataPlane.tickets,
+      dataPlaneTickets: dataPlane.assignmentTickets,
       assignmentRecordV2Writes: ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
       usageFinal: async (assignmentId) => {
         const domain = await authority!.executorResourceGovernor.assignmentDomain(
@@ -403,7 +403,7 @@ export async function runExecutorRole(
         return mesh.finalizeExecutorUsage(assignmentId);
       },
     });
-    dataPlane.bindLedger(ledger);
+    dataPlane.bindAssignmentAuthority(ledger);
     await dataPlane.start();
     const role = executor.createExecutorRole({
       createAgentRuntime: (sessionId, environment) =>
@@ -422,7 +422,7 @@ export async function runExecutorRole(
         ConversationAssignmentLedger: executor.ConversationAssignmentLedger,
         InProcessAssignmentSubmission: executor.InProcessAssignmentSubmission,
         runtimeFactory,
-        dataPlaneTickets: dataPlane.tickets,
+        dataPlaneTickets: dataPlane.assignmentTickets,
         createStream: (input) => dataPlane.createStream(input),
       },
     });

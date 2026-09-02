@@ -1,21 +1,17 @@
-import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 import {
   ChannelInteractionCoordinator,
   JobRelayObligationDirectory,
 } from "./channel-interaction-coordinator.js";
 import type { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
-import type { ConversationInteractionAnswerPort } from "./durable-conversation-interactions.js";
-import type { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import type { JobStatusDirectory } from "./job-status-directory.js";
 import { LosslessDataPlaneRuntime } from "./lossless-data-plane-runtime.js";
 import type { ChannelChallengeDeliveryPort } from "./lossless-data-plane-runtime.js";
-import type { MeshRuntimeAssembly } from "./mesh-runtime-assembly.js";
+import type { AssignmentDataPlaneTargetDirectory } from "./assignment-data-plane-topology.js";
+import type { ProtocolSignatureVerifier } from "@zhixing/core/protocol";
 
 export interface LosslessDataPlaneCompositionOptions {
-  readonly authority: AuthorityRuntimeStack;
-  readonly local?: ExecutorDataPlaneRuntime;
-  readonly mesh: () => MeshRuntimeAssembly | undefined;
-  readonly interactions: ConversationInteractionAnswerPort;
+  readonly verifier: ProtocolSignatureVerifier;
+  readonly targets: AssignmentDataPlaneTargetDirectory;
   readonly jobRelayObligations?: JobRelayObligationDirectory;
   readonly protocol: Pick<ConversationProtocolRuntime, "bindLosslessDataPlane">;
   readonly channelChallenges: () => ChannelChallengeDeliveryPort | undefined;
@@ -41,10 +37,8 @@ export function createLosslessDataPlaneComposition(
   options: LosslessDataPlaneCompositionOptions,
 ): LosslessDataPlaneComposition {
   const runtime = new LosslessDataPlaneRuntime({
-    authority: options.authority,
-    ...(options.local ? { local: options.local } : {}),
-    mesh: options.mesh,
-    interactions: options.interactions,
+    verifier: options.verifier,
+    targets: options.targets,
     ...(options.onDataPlaneError
       ? { onError: options.onDataPlaneError }
       : {}),

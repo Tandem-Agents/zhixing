@@ -191,9 +191,8 @@ function ownerContext(
     executorRoleModule: {
       InProcessAssignmentSubmission: class {},
     },
-    conversationProtocol: {
-      executorLedger: () => ledger,
-    },
+    conversationProtocol: {},
+    conversationExecutorLedger: ledger,
     jobRuntime: {
       create: vi.fn(),
     },
