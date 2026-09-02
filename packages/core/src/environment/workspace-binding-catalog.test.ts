@@ -30,6 +30,10 @@ import {
 } from "./workspace-binding-catalog.js";
 import { localEnvironmentControlSubject } from "./workspace-bindings.js";
 import type { WorkspaceBindingGenerationPersistencePort } from "./workspace-binding-generation-persistence.js";
+import type {
+  WorkspaceBindingCatalogPersistencePort,
+  WorkspaceBindingCatalogRootCommit,
+} from "./workspace-binding-catalog-persistence.js";
 
 const NOW = "2026-07-30T00:00:00.000Z";
 const EXPIRY = "2026-07-30T01:00:00.000Z";
@@ -49,6 +53,49 @@ const identity: ProtocolSigner & ProtocolSignatureVerifier = {
 };
 
 describe("WorkspaceBindingCatalog", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
+  it("fails closed on corrupt root documents and compare-and-swap conflicts", async () => {
+    const corruptPersistence = new MemoryWorkspaceBindingCatalogPersistence(
+      "{not-json",
+    );
+    const corrupt = await createFixture(
+      undefined,
+      undefined,
+      corruptPersistence,
+    );
+    await expect(corrupt.catalog.initialize()).rejects.toThrow(
+      "root manifest is corrupt",
+    );
+
+    const conflictingPersistence =
+      new MemoryWorkspaceBindingCatalogPersistence();
+    conflictingPersistence.conflictNextCommit = true;
+    const conflicting = await createFixture(
+      undefined,
+      undefined,
+      conflictingPersistence,
+    );
+    await conflicting.catalog.initialize();
+    await expect(conflicting.catalog.status()).resolves.toMatchObject({
+      state: "degraded",
+      reason: "WORKSPACE_CATALOG_INTEGRITY",
+    });
+  });
+
+  it("recovers the committed manifest after the physical CAS response is lost", async () => {
+    const persistence = new MemoryWorkspaceBindingCatalogPersistence();
+    persistence.loseNextCommitResponse = true;
+    const first = await createFixture(undefined, undefined, persistence);
+    await expect(first.catalog.initialize()).rejects.toThrow();
+    await first.catalog.stop();
+
+    const restarted = await createFixture(undefined, first.root, persistence);
+    await restarted.catalog.initialize();
+    await expect(restarted.catalog.status()).resolves.toMatchObject({
+      state: "healthy",
+      catalogGeneration: "catalog-initial",
+    });
+  });
+
   it("withdraws a corrupt catalog and resets through one durable generation reservation", async () => {
     const fixture = await createFixture(corruptLog());
     await fixture.catalog.initialize();
@@ -101,7 +148,11 @@ describe("WorkspaceBindingCatalog", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () 
     );
     await fixture.catalog.stop();
 
-    const restarted = await createFixture(corruptLog(), fixture.root);
+    const restarted = await createFixture(
+      corruptLog(),
+      fixture.root,
+      fixture.rootPersistence,
+    );
     await restarted.catalog.initialize();
     await restarted.catalog.recover();
     expect(await restarted.catalog.status()).toMatchObject({
@@ -225,8 +276,9 @@ function corruptLog(): AuthorityCommitLog {
 }
 
 async function createFixture(
-  initialLog: AuthorityCommitLog,
+  initialLog?: AuthorityCommitLog,
   existingRoot?: string,
+  rootPersistence = new MemoryWorkspaceBindingCatalogPersistence(),
 ) {
   const root =
     existingRoot ?? (await createTempDir("zhixing-workspace-catalog"));
@@ -235,6 +287,11 @@ async function createFixture(
   const published: CapabilityDescriptor["workspaces"][] = [];
   const createdGenerations: string[] = [];
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+  const effectiveInitialLog =
+    initialLog ??
+    new FileAuthorityCommitLog(path.join(root, "initial-log"), artifacts, {
+      clock: () => NOW,
+    });
   const capacity = new DefaultDeviceCapacityArbiter({
     policy: createDefaultDeviceCapacityPolicy({
       memoryBytes: 64 * 1024 * 1024,
@@ -255,22 +312,22 @@ async function createFixture(
     }),
   });
   catalog = new WorkspaceBindingCatalog({
-    rootDir: path.join(root, "catalog"),
+    rootPersistence,
     initialGeneration: {
-      log: initialLog,
+      log: effectiveInitialLog,
       persistence: generationPersistence(),
     },
     createGeneration: (generation) => {
       createdGenerations.push(generation);
       return {
         log: new FileAuthorityCommitLog(
-        path.join(
-          root,
-          "logs",
-          workspaceCatalogGenerationStorageKey(generation),
-        ),
-        artifacts,
-        { clock: () => NOW },
+          path.join(
+            root,
+            "logs",
+            workspaceCatalogGenerationStorageKey(generation),
+          ),
+          artifacts,
+          { clock: () => NOW },
         ),
         persistence: generationPersistence(),
       };
@@ -295,7 +352,61 @@ async function createFixture(
     recoveryRunner: new StorageMaintenanceTaskRunner(),
     clock: () => NOW,
   });
-  return { root, catalog, published, createdGenerations };
+  return { root, catalog, published, createdGenerations, rootPersistence };
+}
+
+class MemoryWorkspaceBindingCatalogPersistence
+  implements WorkspaceBindingCatalogPersistencePort
+{
+  conflictNextCommit = false;
+  loseNextCommitResponse = false;
+  #bytes: string | undefined;
+  #snapshotToken: string | undefined;
+  #revision = 0;
+
+  constructor(initialBytes?: string) {
+    if (initialBytes !== undefined) {
+      this.#bytes = initialBytes;
+      this.#snapshotToken = this.#nextSnapshotToken();
+    }
+  }
+
+  async load() {
+    return this.#bytes === undefined || this.#snapshotToken === undefined
+      ? undefined
+      : {
+          bytes: this.#bytes,
+          snapshotToken: this.#snapshotToken,
+        };
+  }
+
+  async compareAndSwap(input: {
+    readonly expectedSnapshotToken: string | undefined;
+    readonly replacementBytes: string;
+  }): Promise<WorkspaceBindingCatalogRootCommit> {
+    if (this.conflictNextCommit) {
+      this.conflictNextCommit = false;
+      return { kind: "conflict" };
+    }
+    if (input.expectedSnapshotToken !== this.#snapshotToken) {
+      return { kind: "conflict" };
+    }
+    this.#bytes = input.replacementBytes;
+    this.#snapshotToken = this.#nextSnapshotToken();
+    if (this.loseNextCommitResponse) {
+      this.loseNextCommitResponse = false;
+      throw new Error("injected root commit response loss");
+    }
+    return {
+      kind: "committed",
+      snapshotToken: this.#snapshotToken,
+    };
+  }
+
+  #nextSnapshotToken(): string {
+    this.#revision += 1;
+    return `memory-root-${this.#revision}`;
+  }
 }
 
 function generationPersistence(): WorkspaceBindingGenerationPersistencePort {

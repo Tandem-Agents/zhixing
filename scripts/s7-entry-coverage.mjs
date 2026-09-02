@@ -3927,6 +3927,7 @@ export async function validateS7Structure() {
   failures.push(...inspectAssignmentResourcePortBoundary(records));
   failures.push(...inspectWorkspaceProbePersistenceBoundary(records));
   failures.push(...inspectWorkspaceBindingGenerationPersistenceBoundary(records));
+  failures.push(...inspectWorkspaceBindingCatalogPersistenceBoundary(records));
   failures.push(...inspectConversationAdoptionAssembly(records));
   failures.push(...inspectConversationStorageBoundary(records));
   failures.push(...inspectWorksceneStorageCleanupBoundary(records));
@@ -11125,6 +11126,129 @@ export function inspectWorkspaceBindingGenerationPersistenceBoundary(records) {
   ) {
     failures.push(
       "Workspace binding generation persistence acquired a second adapter or factory",
+    );
+  }
+  return failures;
+}
+
+/** A6 keeps the P07 Workspace catalog root manifest at one finite Host CAS edge. */
+export function inspectWorkspaceBindingCatalogPersistenceBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const source = byPath.get(relative);
+    if (source === undefined) {
+      failures.push(`${relative}: workspace binding catalog persistence source is missing`);
+    }
+    return source ?? "";
+  };
+  const catalog = required("packages/core/src/environment/workspace-binding-catalog.ts");
+  const port = required(
+    "packages/core/src/environment/workspace-binding-catalog-persistence.ts",
+  );
+  const environment = required("packages/core/src/environment/index.ts");
+  const coreIndex = required("packages/core/src/index.ts");
+  const coreBuild = required("packages/core/tsup.config.ts");
+  const adapterPath =
+    "packages/cli/src/serve/workspace-binding-catalog-persistence.ts";
+  const adapter = required(adapterPath);
+  const setup = required("packages/cli/src/setup-delivery.ts");
+  const options = catalog.slice(
+    catalog.indexOf("export interface WorkspaceBindingCatalogOptions"),
+    catalog.indexOf("interface WorkspaceBindingGenerationRuntime"),
+  );
+
+  if (
+    !port.includes("export interface WorkspaceBindingCatalogPersistencePort") ||
+    !port.includes("load(): Promise<WorkspaceBindingCatalogRootDocument | undefined>") ||
+    !port.includes("readonly expectedSnapshotToken: string | undefined") ||
+    !port.includes("readonly replacementBytes: string") ||
+    !options.includes(
+      "readonly rootPersistence: WorkspaceBindingCatalogPersistencePort",
+    ) ||
+    options.includes("readonly rootPersistence?:") ||
+    !catalog.includes("this.#rootPersistence.load()") ||
+    !catalog.includes("this.#rootPersistence.compareAndSwap({")
+  ) {
+    failures.push("Workspace binding catalog persistence port exact-set drifted");
+  }
+  if (
+    /WorkspaceBindingCatalogPersistence|workspace-binding-catalog-persistence/u.test(
+      environment,
+    ) ||
+    coreIndex.includes("workspace-binding-catalog-persistence") ||
+    !catalog.includes(
+      'import type { WorkspaceBindingCatalogPersistencePort } from "./workspace-binding-catalog-persistence.js"',
+    ) ||
+    !coreBuild.includes('"src/environment/workspace-binding-catalog-persistence.ts"')
+  ) {
+    failures.push("Workspace binding catalog persistence port export boundary drifted");
+  }
+  if (
+    /node:(?:fs|fs\/promises|path)|acquireFileLock|ensureDurableDirectory|syncDirectory|#rootDir|#manifestPath|\.tmp-|\brename\(/u.test(
+      catalog,
+    ) ||
+    options.includes("readonly rootDir:") ||
+    /as\s+(?:FileWorkspaceBindingCatalogPersistence|WorkspaceBindingCatalogPersistencePort)/u.test(
+      catalog,
+    ) ||
+    !catalog.includes("this.#maintenanceResourceKey()")
+  ) {
+    failures.push(
+      "Core Workspace binding Catalog regained root paths, file CAS or physical maintenance identity",
+    );
+  }
+  if (
+    !adapter.includes(
+      "export class FileWorkspaceBindingCatalogPersistence",
+    ) ||
+    !adapter.includes("implements WorkspaceBindingCatalogPersistencePort") ||
+    !adapter.includes(
+      'from "@zhixing/core/environment/workspace-binding-catalog-persistence"',
+    ) ||
+    !adapter.includes('"distributed-runtime"') ||
+    !adapter.includes('"workspace-bindings"') ||
+    !adapter.includes('path.join(this.#rootDir, "root-manifest.json")') ||
+    !adapter.includes('acquireFileLock(`${this.#manifestPath}.lock`') ||
+    !adapter.includes('open(temp, "w", 0o600)') ||
+    !adapter.includes("await handle.sync()") ||
+    !adapter.includes("await rename(temp, this.#manifestPath)") ||
+    !adapter.includes("await syncDirectory(this.#rootDir)") ||
+    /catalogGeneration|pendingReset|capabilityRevision/u.test(adapter)
+  ) {
+    failures.push(
+      "CLI Workspace binding catalog persistence ownership or durability drifted",
+    );
+  }
+  if (
+    !setup.includes(
+      "rootPersistence: new FileWorkspaceBindingCatalogPersistence({\n            zhixingHome: options.zhixingHome,",
+    ) ||
+    setup.includes("rootDir: bindingRoot")
+  ) {
+    failures.push("setupAuthorityRuntime Workspace binding root CAS binding drifted");
+  }
+
+  const adapterDefinitions = records
+    .filter((record) =>
+      record.text.includes("implements WorkspaceBindingCatalogPersistencePort")
+    )
+    .map((record) => record.relative)
+    .sort();
+  const adapterConstructions = records
+    .filter((record) =>
+      record.text.includes("new FileWorkspaceBindingCatalogPersistence(")
+    )
+    .map((record) => record.relative)
+    .sort();
+  if (
+    adapterDefinitions.length !== 1 ||
+    adapterDefinitions[0] !== adapterPath ||
+    adapterConstructions.length !== 1 ||
+    adapterConstructions[0] !== "packages/cli/src/setup-delivery.ts"
+  ) {
+    failures.push(
+      "Workspace binding catalog persistence acquired a second adapter or constructor",
     );
   }
   return failures;

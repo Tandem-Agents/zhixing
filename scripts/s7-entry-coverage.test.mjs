@@ -20,6 +20,7 @@ import {
   inspectAssignmentResourcePortBoundary,
   inspectWorkspaceProbePersistenceBoundary,
   inspectWorkspaceBindingGenerationPersistenceBoundary,
+  inspectWorkspaceBindingCatalogPersistenceBoundary,
   inspectConversationStorageBoundary,
   inspectWorksceneStorageCleanupBoundary,
   inspectStorageRemainderBoundary,
@@ -1212,6 +1213,81 @@ test("P07 workspace binding generation marker and WAL stay paired at one Host ad
       },
     ]).join("\n"),
     /acquired a second adapter or factory/u,
+  );
+});
+
+test("P07 workspace binding root manifest stays at one Host CAS adapter", async () => {
+  const paths = [
+    "packages/core/src/environment/workspace-binding-catalog.ts",
+    "packages/core/src/environment/workspace-binding-catalog-persistence.ts",
+    "packages/core/src/environment/index.ts",
+    "packages/core/src/index.ts",
+    "packages/core/tsup.config.ts",
+    "packages/cli/src/serve/workspace-binding-catalog-persistence.ts",
+    "packages/cli/src/setup-delivery.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: (await readFile(relative, "utf8")).replaceAll("\r\n", "\n"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(
+    inspectWorkspaceBindingCatalogPersistenceBoundary(records),
+    [],
+  );
+  assert.match(
+    inspectWorkspaceBindingCatalogPersistenceBoundary(mutate(
+      "packages/core/src/environment/workspace-binding-catalog.ts",
+      (text) => text.replace(
+        "readonly rootPersistence: WorkspaceBindingCatalogPersistencePort;",
+        "readonly rootPersistence?: WorkspaceBindingCatalogPersistencePort;",
+      ),
+    )).join("\n"),
+    /persistence port exact-set drifted/u,
+  );
+  assert.match(
+    inspectWorkspaceBindingCatalogPersistenceBoundary(mutate(
+      "packages/core/src/environment/workspace-binding-catalog.ts",
+      (text) => `import path from \"node:path\";\n${text}`,
+    )).join("\n"),
+    /regained root paths, file CAS or physical maintenance identity/u,
+  );
+  assert.match(
+    inspectWorkspaceBindingCatalogPersistenceBoundary(mutate(
+      "packages/core/src/environment/index.ts",
+      (text) => `${text}\nexport * from \"./workspace-binding-catalog-persistence.js\";\n`,
+    )).join("\n"),
+    /export boundary drifted/u,
+  );
+  assert.match(
+    inspectWorkspaceBindingCatalogPersistenceBoundary(mutate(
+      "packages/cli/src/setup-delivery.ts",
+      (text) => text.replace(
+        "rootPersistence: new FileWorkspaceBindingCatalogPersistence({\n            zhixingHome: options.zhixingHome,",
+        "rootPersistence: new FileWorkspaceBindingCatalogPersistence({\n            zhixingHome: bindingRoot,",
+      ),
+    )).join("\n"),
+    /setupAuthorityRuntime Workspace binding root CAS binding drifted/u,
+  );
+  assert.match(
+    inspectWorkspaceBindingCatalogPersistenceBoundary(mutate(
+      "packages/cli/src/serve/workspace-binding-catalog-persistence.ts",
+      (text) => text.replace('"w", 0o600', '"w", 0o644'),
+    )).join("\n"),
+    /ownership or durability drifted/u,
+  );
+  assert.match(
+    inspectWorkspaceBindingCatalogPersistenceBoundary([
+      ...records,
+      {
+        relative: "packages/cli/src/serve/duplicate-workspace-binding-catalog-persistence.ts",
+        text: "class Duplicate implements WorkspaceBindingCatalogPersistencePort {}",
+      },
+    ]).join("\n"),
+    /acquired a second adapter or constructor/u,
   );
 });
 

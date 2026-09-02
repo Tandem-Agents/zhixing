@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-08c P07 Workspace binding generation 持久边界已闭合，正在收束 catalog root manifest/CAS 物理持久边界<br>
+> 当前检查点：A6-08d P07 Workspace binding catalog root manifest/CAS 物理持久边界已闭合，正在裁决 P07 剩余 Infrastructure 泄漏<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,11 +202,11 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `5db248e2` 加当前 A6-08c 待提交差异；A6-08c 已由协调者独立复核，Workspace binding generation marker/WAL 物理持久边界已收归唯一 Host adapter |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-08c 已闭合，正在处理 P07 Workspace binding catalog root manifest/CAS/generation-path 物理持久边界 |
-| 活跃工作包 | 无；协调者正在提交 `A6-08c-p07-workspace-binding-generation-persistence-v1` 并准备下一责任链 |
-| 下一责任链 | 只处理 Workspace binding catalog root manifest/CAS/generation-path 边界；不并行扩入 P09～P12、设备管理、transfer 或 A7 |
-| 打开的单向桥 | 无；binding service 的 generation root/marker/logPath 旧入口已删除，catalog root manifest 留作独立下一包而非兼容桥 |
+| 已接受基线 | `ad262f5a`；A6-08c 已由协调者独立复核后提交，Workspace binding generation marker/WAL 物理持久边界已收归唯一 Host adapter |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-08d 已闭合，正在从现有 P07 事实裁决下一条真实 Infrastructure 泄漏 |
+| 活跃工作包 | 无；协调者正在提交 `A6-08d-p07-workspace-binding-catalog-persistence-v1` 并选择下一条可执行责任链 |
+| 下一责任链 | A6-08d 闭合后重取 P07 剩余 Infrastructure 泄漏 exact-set，再按真实缺口进入 P09～P12；不预先扩面 |
+| 打开的单向桥 | 无；binding generation root/marker/logPath 与 catalog root manifest/CAS 的 Core 物理入口均已删除，未留下 optional fallback、兼容转导或第二 adapter |
 | 已失效证据 | 无当前未恢复架构证据；A6-01～08a 继续有效。三拓扑 owner-domain 的 anchor+executor 既有 storage-maintenance 环境背压不与本包相交且未重复运行 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
@@ -2704,6 +2704,19 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据与门禁：Core binding service/catalog 2 文件 17/17，另因 required constructor 输入真实变化而复取 probe 9/9，合计 3 文件 26/26；覆盖 CRUD/restart、marker-log-fact 缺损、marker publish 响应丢失、initial/successor reset/recovery。CLI 唯一 adapter 2/2 与真实 setup 24/24，合计 2 文件 26/26；覆盖 initial/successor canonical root、各自 concrete WAL presence、marker bytes/mode 与生产 factory 装配。适配器首次测试数据使用无效 Authority stream 而在产品逻辑前失败，改用既有合法 workspace stream 后只隔离复取该文件 2/2。Core fresh build通过（仅既有 circular-chunk warnings），Core/CLI `tsc --noEmit`、fresh `pnpm runtime:package-exports` 与 changed-source Biome 通过；canonical `pnpm s7:lint` 首轮在 production gate 前暴露 inspector 错把未进入 production record 集的 package manifest 当必需输入，移除重复 package 检查后最终 51/51 且 registry golden 通过，独立 package-export gate继续验证 manifest。反向 mutation拒绝 Core marker/logPath/optional/barrel、Catalog generation/WAL 拆分、错误 setup 配对、durability 漂移与第二 adapter/factory。
 - 失效、状态与下一检查点：若窄 persistence 合同、service open/replay/fact→marker 顺序、Catalog generation runtime 配对、CLI canonical root/marker/WAL factory、initial Executor WAL、successor独立 WAL、setup唯一构造、package export/build entry、S7或上述直接测试任一变化，恢复 `A6-08c-p07-workspace-binding-generation-persistence-v1` 并只重验该闭包；root manifest/CAS 下一包变化只有真实穿透本配对时才使本证据失效。A6继续 `[ ]`，当前实施完成并等待协调者独立复核；下一检查点只允许 Workspace binding catalog root manifest/CAS/generation-path 边界。本轮未执行Git暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：确认 Core binding service 只保留 Workspace path 与 establishment/replay 领域规则并强制消费 required generation persistence port；唯一 CLI factory 独占 initial/successor canonical generation root、marker durability 和 concrete WAL presence，Catalog 以不可拆分的 `{log,persistence}` runtime 传递，未形成错配、optional、barrel 或第二入口。独立运行 Core binding service/catalog 17/17、CLI adapter/setup 26/26，Core fresh build、CLI typecheck、canonical S7 51/51 与 registry golden、runtime package exports、Core physical 反查和 `git diff --check` 均通过；既有 Rollup circular-chunk warnings未变化。A6-08c 可以提交，A6仍保持 `[ ]`。
+
+### A6-08d：P07 Workspace binding catalog root manifest/CAS 物理持久边界收口
+
+- 派发基线与唯一结果：以已接受 `HEAD ad262f5a` 加本文调度记录为基线，只迁移 `WorkspaceBindingCatalog` 的 root manifest 物理持久机制。当前 Core catalog 直接拥有 `rootDir`/`manifestPath`、Node `fs/path`、lock/tmp/rename/fsync 与物理 CAS；迁移后 Core 仍唯一拥有 manifest schema/validation、generation 选择、degraded/reset/reservation/recovery、revision 与冲突/完整性产品语义，但只消费 required、需求方定义的有限 persistence port；CLI Host 唯一 adapter 才拥有 canonical root、manifest/lock/temp path 和 durable compare-and-swap。
+- 生产闭包与行为保护：沿 `setupAuthorityRuntime` 唯一生产构造、initial/successor generation runtime、initialize/refresh、degrade、capability revision、begin/complete reset、committed maintenance recovery 与 Host restart 双向迁移全部直接交界。严格保持 manifest v1 bytes 与校验、missing-first-open、corrupt fail closed、expected-value CAS、并发冲突、atomic temp→rename→directory fsync、degraded publication、pending reset 恢复、response loss、resource admission/maintenance obligation、logId/generation/revision 全等，以及 A6-08c 的 `{log,persistence}` 配对；Core 与 adapter 之间不得传递物理路径或 concrete file primitive。
+- 旧路与明确不做：删除 Core catalog 的 `rootDir`/`manifestPath`、`node:fs`/`node:path`、file lock/directory durability import 和物理 temp/CAS 实现；若 generation storage factory 仍只以产品 generation identity 由 Host 投影真实 runtime，可保留其窄合同，不得为了形式统一另建通用 Storage facade。不得移动 manifest 产品状态机到 CLI，不改 Workspace CRUD/raw path、generation establishment、probe、容量算法、公开协议、P09～P12、设备管理或 A7；不得留下 optional fallback、opaque path、第二 adapter/constructor、barrel 导出或双持久入口。
+- 最窄证据与完成条件：Core catalog 直接测试须以 in-memory/fake port 识别 missing/corrupt、CAS conflict、degraded/reset/restart/response-loss 与 generation 配对；CLI adapter/setup 直接测试须识别 canonical root、strict bytes、lock、atomic replace/fsync、并发 CAS 和唯一装配。更新结构门禁，拒绝 Core physical import/root/path/lock/temp 回流、optional port、错误 Host root、第二 adapter/constructor 和绕过 CAS。按验证手册只运行本包失效闭包、必要 Core build、CLI typecheck、canonical S7、fresh package exports、changed-source 格式与 `git diff --check`；不重复 probe、Workspace management、owner-domain、S6、根级回归或制品验收。
+- 安全交接：只有 manifest 产品状态机仍在唯一 Core owner、物理 root/CAS/durability 只在唯一 CLI Host adapter、initial/successor 与重启/并发/异常闭包保持成立且无双入口时才结束；A6继续 `[ ]`。约四小时仍未闭合、需要改变 Workspace 产品或持久合同、发现 generation factory 是独立根因或影响扩入其他家族时，停在可构建、可运行、单一 manifest owner 成立的检查点反馈，不得执行任何 Git 写操作。
+- 实施结果与责任变化：新增 Core-owned required `WorkspaceBindingCatalogPersistencePort`，只暴露 exact bytes/snapshot token 的 `load` 与 expected-token `compareAndSwap`；`WorkspaceBindingCatalog` 继续唯一解析和校验 v1 manifest、选择 active generation、推进 capability revision、degraded/reset/reservation/recovery 与冲突/完整性终态，但 `rootDir`/`manifestPath`、Node `fs/path`、file lock、temp/rename/fsync 已全部退出 Core。唯一 `FileWorkspaceBindingCatalogPersistence` 从冻结 `zhixingHome` 推导 canonical `distributed-runtime/workspace-bindings/root-manifest.json`，在 manifest lock 内比较 exact snapshot、以 mode `0600` temp 写入并 file-sync、rename、directory-sync；`setupAuthorityRuntime` 只构造这一 adapter。Core 的 maintenance admission 改用稳定逻辑 resource identity，不向领域泄漏 Host path；A6-08c initial/successor `{log,persistence}` 配对未改变。
+- 行为、异常与旧路清理：first-missing 仍建立 `catalog-initial`，坏 JSON/未知或缺字段仍由 Core strict validator fail closed；并发 CAS 仍进入既有 catalog integrity/degraded 终态，pending reset、successor receipt、Host restart、response-loss 重驱、revision/logId/generation 与 device-capacity/storage-maintenance admission 保持原链。adapter 不解释任何 manifest 字段，Core 不获得路径或 concrete file primitive；窄 subpath 和 build entry 是唯一合同出口，Core root/environment barrel、optional port、第二 adapter/constructor 与旧物理 CAS 均为零。
+- 直接证据与门禁：Core catalog 1 文件 7/7，以 memory port 覆盖 missing-first-open、corrupt、CAS conflict/degraded、reset/restart 与物理提交后响应丢失；首次 6/7 是测试误把既有 conflict→degraded 语义断言为 reject，纠正该无效断言后隔离复取 7/7。CLI adapter + 真实 setup 2 文件 26/26，覆盖 canonical root/exact bytes、mode、无 lock/temp 残留、并发同 snapshot 一胜一冲突和唯一生产装配。Core fresh build通过（仅既有 circular-chunk warnings），Core/CLI `tsc --noEmit`、changed-source Biome、fresh `pnpm runtime:package-exports` 均通过；canonical `pnpm s7:lint` 52/52 且 registry golden 通过，反向 mutation 拒绝 Core physical import/root/path/lock/temp、optional port、错误 Host root/mode、barrel、第二 adapter/constructor 和 setup 绕过。
+- 失效、状态与下一检查点：若窄 persistence port 的 required/exact-set、Core manifest validator/state machine/expected-token CAS、CLI canonical root/lock/temp/rename/fsync、setup 唯一构造、A6-08c generation runtime 配对、package export/build entry、S7 或上述直接测试任一变化，恢复 `A6-08d-p07-workspace-binding-catalog-persistence-v1` 并只重验该闭包。A6继续 `[ ]`；当前实施完成并等待协调者独立复核，下一检查点仅由协调者从 P07 剩余 Infrastructure 泄漏 exact-set 裁决，不预先进入 P09～P12。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：确认 Core catalog 只保留 v1 manifest 校验、generation/degraded/reset/recovery/revision 与冲突终态，并强制消费 exact-bytes/expected-token CAS 窄端口；唯一 CLI adapter 独占 canonical root、lock/temp、mode `0600`、rename 与 file/directory sync，setup 只构造一次且没有 path、optional、barrel 或第二物理入口。独立运行 Core catalog 7/7、CLI adapter/setup 26/26，CLI typecheck、canonical S7 52/52 与 registry golden、runtime package exports、生产结构反查和 `git diff --check` 均通过；Core fresh build与 changed-source 格式证据有效。A6-08d 可以提交，A6仍保持 `[ ]`。
 
 ## 十、用户提示词
 

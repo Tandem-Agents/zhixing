@@ -144,6 +144,10 @@
       "types": "./dist/environment/workspace-binding-generation-persistence.d.ts",
       "import": "./dist/environment/workspace-binding-generation-persistence.js"
     },
+    "./environment/workspace-binding-catalog-persistence": {
+      "types": "./dist/environment/workspace-binding-catalog-persistence.d.ts",
+      "import": "./dist/environment/workspace-binding-catalog-persistence.js"
+    },
     "./test-support/s7-durable": {
       "types": "./dist/test-support/s7-durable.d.ts",
       "import": "./dist/test-support/s7-durable.js"

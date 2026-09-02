@@ -1,6 +1,3 @@
-import { randomUUID } from "node:crypto";
-import { open, readFile, rename } from "node:fs/promises";
-import path from "node:path";
 import {
   AuthorityStorageError,
   type AuthorityCommitLog,
@@ -20,12 +17,7 @@ import type {
   WorkspaceBindingRootManifest,
 } from "../contracts/index.js";
 import { defineDurableRuntimeContract } from "../contracts/durable-contract.js";
-import {
-  acquireFileLock,
-  ensureDurableDirectory,
-  SerialTaskQueue,
-  syncDirectory,
-} from "../persistence/index.js";
+import { SerialTaskQueue } from "../persistence/index.js";
 import { canonicalize, protocolDigest } from "../protocol/index.js";
 import {
   claimDeviceCapacity,
@@ -48,6 +40,7 @@ import {
   type WorkspaceBindingServiceOptions,
 } from "./workspace-bindings.js";
 import type { WorkspaceBindingGenerationPersistencePort } from "./workspace-binding-generation-persistence.js";
+import type { WorkspaceBindingCatalogPersistencePort } from "./workspace-binding-catalog-persistence.js";
 
 const MANIFEST_VERSION = 1;
 const CONFIRMATION_MAX_AGE_MS = 15 * 60_000;
@@ -69,7 +62,7 @@ interface PersistedRootManifest extends WorkspaceBindingRootManifest {
 }
 
 export interface WorkspaceBindingCatalogOptions {
-  readonly rootDir: string;
+  readonly rootPersistence: WorkspaceBindingCatalogPersistencePort;
   readonly initialGeneration: WorkspaceBindingGenerationRuntime;
   readonly createGeneration: (
     catalogGeneration: string,
@@ -106,8 +99,7 @@ export class WorkspaceBindingCatalog
     WorkspaceBindingMigrationPort,
     WorkspaceBindingRecoveryPort
 {
-  readonly #rootDir: string;
-  readonly #manifestPath: string;
+  readonly #rootPersistence: WorkspaceBindingCatalogPersistencePort;
   readonly #initialGeneration: WorkspaceBindingGenerationRuntime;
   readonly #createGeneration: WorkspaceBindingCatalogOptions["createGeneration"];
   readonly #serviceOptions: WorkspaceBindingCatalogOptions["service"];
@@ -117,6 +109,7 @@ export class WorkspaceBindingCatalog
   readonly #manifestQueue = new SerialTaskQueue();
   readonly #generations = new Map<string, WorkspaceBindingGenerationRuntime>();
   #manifest: PersistedRootManifest | undefined;
+  #manifestSnapshotToken: string | undefined;
   #active: WorkspaceBindingService | undefined;
   #opening: Promise<void> | undefined;
   #recoveryOwner: Promise<void> | undefined;
@@ -124,8 +117,7 @@ export class WorkspaceBindingCatalog
   readonly #recoveryAbort = new AbortController();
 
   constructor(options: WorkspaceBindingCatalogOptions) {
-    this.#rootDir = path.resolve(options.rootDir);
-    this.#manifestPath = path.join(this.#rootDir, "root-manifest.json");
+    this.#rootPersistence = options.rootPersistence;
     this.#initialGeneration = options.initialGeneration;
     this.#createGeneration = options.createGeneration;
     this.#serviceOptions = options.service;
@@ -468,7 +460,7 @@ export class WorkspaceBindingCatalog
   ): Promise<WorkspaceBindingResetReceipt> {
     const request = storageMaintenanceObligation(
       "workspace-catalog-reset",
-      this.#rootDir,
+      this.#maintenanceResourceKey(),
       {
         previousCatalogGeneration: reservation.previousCatalogGeneration,
         catalogGeneration: reservation.catalogGeneration,
@@ -481,7 +473,8 @@ export class WorkspaceBindingCatalog
     return this.#recoveryRunner.run(request, waiterAbort, () =>
       this.#manifestQueue
         .run(async () => {
-          const current = await this.#readManifest();
+          const currentSnapshot = await this.#readManifest();
+          const current = currentSnapshot.manifest;
           if (!current.pendingReset) {
             if (current.catalogGeneration !== reservation.catalogGeneration) {
               throw new WorkspaceBindingCatalogIntegrityError(
@@ -549,7 +542,7 @@ export class WorkspaceBindingCatalog
               catalogGeneration: reservation.catalogGeneration,
               phase: "root-commit",
             },
-          });
+          }, currentSnapshot.snapshotToken);
           this.#manifest = committed;
           this.#active = service;
           return preparedReceipt;
@@ -670,11 +663,9 @@ export class WorkspaceBindingCatalog
   }
 
   async #open(): Promise<void> {
-    await ensureDurableDirectory(this.#rootDir);
-    const persisted = await this.#readManifest().catch((error) => {
-      if (isMissing(error)) return undefined;
-      throw error;
-    });
+    const persistedSnapshot = await this.#loadManifest();
+    const persisted = persistedSnapshot?.manifest;
+    this.#manifestSnapshotToken = persistedSnapshot?.snapshotToken;
     if (!persisted) {
       const generation = "catalog-initial";
       const service = this.#makeService(generation, this.#initialGeneration);
@@ -806,14 +797,23 @@ export class WorkspaceBindingCatalog
     return this.#manifest;
   }
 
-  async #readManifest(): Promise<PersistedRootManifest> {
+  async #loadManifest(): Promise<
+    | {
+        readonly manifest: PersistedRootManifest;
+        readonly snapshotToken: string;
+      }
+    | undefined
+  > {
     try {
-      const parsed = JSON.parse(
-        await readFile(this.#manifestPath, "utf8"),
-      ) as unknown;
-      return validateManifest(parsed);
+      const document = await this.#rootPersistence.load();
+      if (!document) return undefined;
+      const parsed = JSON.parse(document.bytes) as unknown;
+      return {
+        manifest: validateManifest(parsed),
+        snapshotToken: document.snapshotToken,
+      };
     } catch (error) {
-      if (isMissing(error) || error instanceof WorkspaceBindingCatalogIntegrityError) {
+      if (error instanceof WorkspaceBindingCatalogIntegrityError) {
         throw error;
       }
       throw new WorkspaceBindingCatalogIntegrityError(
@@ -823,15 +823,28 @@ export class WorkspaceBindingCatalog
     }
   }
 
-  async #refreshRootFromDisk(): Promise<void> {
-    const current = this.#requireManifest();
-    const persisted = await this.#readManifest();
-    if (canonicalize(current) === canonicalize(persisted)) return;
+  async #readManifest(): Promise<{
+    readonly manifest: PersistedRootManifest;
+    readonly snapshotToken: string;
+  }> {
+    const snapshot = await this.#loadManifest();
+    if (!snapshot) {
+      throw new WorkspaceBindingCatalogIntegrityError(
+        "Workspace catalog root manifest is missing",
+      );
+    }
+    return snapshot;
+  }
 
+  async #refreshRootFromDisk(): Promise<void> {
     await this.#manifestQueue.run(async () => {
       const previous = this.#requireManifest();
-      const latest = await this.#readManifest();
-      if (canonicalize(previous) === canonicalize(latest)) return;
+      const latestSnapshot = await this.#readManifest();
+      const latest = latestSnapshot.manifest;
+      if (canonicalize(previous) === canonicalize(latest)) {
+        this.#manifestSnapshotToken = latestSnapshot.snapshotToken;
+        return;
+      }
 
       let active = this.#active;
       if (
@@ -859,6 +872,7 @@ export class WorkspaceBindingCatalog
         }
       }
       this.#manifest = latest;
+      this.#manifestSnapshotToken = latestSnapshot.snapshotToken;
       this.#active = active;
     });
     if (this.#requireManifest().pendingReset) {
@@ -875,67 +889,54 @@ export class WorkspaceBindingCatalog
           readonly kind: "maintenance";
           readonly identity: unknown;
         },
+    expectedSnapshotToken = this.#manifestSnapshotToken,
   ): Promise<void> {
-    await ensureDurableDirectory(this.#rootDir);
-    const release = await acquireFileLock(`${this.#manifestPath}.lock`, {
-      staleMs: 30_000,
-      waitMs: 10_000,
-      resourceName: "Workspace catalog root manifest",
-    });
-    try {
-      const current = await this.#readManifest().catch((error) => {
-        if (isMissing(error)) return undefined;
-        throw error;
+    const commit = async () => {
+      claimDeviceCapacity("readBytes", 4 * 1024);
+      claimDeviceCapacity("writeBytes", 4 * 1024);
+      claimDeviceCapacity("ioOperations", 2);
+      const result = await this.#rootPersistence.compareAndSwap({
+        expectedSnapshotToken:
+          expected === undefined ? undefined : expectedSnapshotToken,
+        replacementBytes: canonicalize(manifest),
       });
-      if (canonicalize(current ?? null) !== canonicalize(expected ?? null)) {
+      if (result.kind === "conflict") {
         throw new WorkspaceBindingCatalogIntegrityError(
           "Workspace catalog root manifest changed concurrently",
         );
       }
-      const commit = async () => {
-        claimDeviceCapacity("readBytes", 4 * 1024);
-        claimDeviceCapacity("writeBytes", 4 * 1024);
-        claimDeviceCapacity("ioOperations", 2);
-        const temp = `${this.#manifestPath}.tmp-${process.pid}-${randomUUID()}`;
-        const handle = await open(temp, "w", 0o600);
-        try {
-          await handle.writeFile(canonicalize(manifest), "utf8");
-          await handle.sync();
-        } finally {
-          await handle.close();
-        }
-        await rename(temp, this.#manifestPath);
-        await syncDirectory(this.#rootDir);
-      };
-      if (admission?.kind === "interactive") {
-        await runWithDeviceCapacity(
-          this.#serviceOptions.capacity,
-          {
-            serviceClass: "workload-interactive",
-            atomic: RESET_RESERVATION_BUDGET,
-            preferred: RESET_RESERVATION_BUDGET,
-            maxWaitMs: 0,
-          },
-          admission.abort,
-          commit,
-        );
-      } else if (admission?.kind === "maintenance") {
-        await runStorageMaintenanceStep(
-          this.#storageMaintenance,
-          storageMaintenanceRequest(
-            "workspace-catalog-reset",
-            this.#rootDir,
-            admission.identity,
-            { obligation: "committed", maxWaitMs: 0 },
-          ),
-          commit,
-        );
-      } else {
-        await commit();
-      }
-    } finally {
-      await release();
+      this.#manifestSnapshotToken = result.snapshotToken;
+    };
+    if (admission?.kind === "interactive") {
+      await runWithDeviceCapacity(
+        this.#serviceOptions.capacity,
+        {
+          serviceClass: "workload-interactive",
+          atomic: RESET_RESERVATION_BUDGET,
+          preferred: RESET_RESERVATION_BUDGET,
+          maxWaitMs: 0,
+        },
+        admission.abort,
+        commit,
+      );
+    } else if (admission?.kind === "maintenance") {
+      await runStorageMaintenanceStep(
+        this.#storageMaintenance,
+        storageMaintenanceRequest(
+          "workspace-catalog-reset",
+          this.#maintenanceResourceKey(),
+          admission.identity,
+          { obligation: "committed", maxWaitMs: 0 },
+        ),
+        commit,
+      );
+    } else {
+      await commit();
     }
+  }
+
+  #maintenanceResourceKey(): string {
+    return `workspace-binding-catalog:${this.#serviceOptions.deviceId}`;
   }
 }
 
@@ -1247,12 +1248,4 @@ function catalogFailureCode(error: unknown): string {
     return "WORKSPACE_CATALOG_INTEGRITY";
   }
   return errorCode(error);
-}
-
-function isMissing(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    "code" in error &&
-    (error as NodeJS.ErrnoException).code === "ENOENT"
-  );
 }

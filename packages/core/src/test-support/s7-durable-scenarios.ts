@@ -49,6 +49,10 @@ import {
   StorageMaintenanceTaskRunner,
 } from "../resources/index.js";
 import type { WorkspaceBindingGenerationPersistencePort } from "../environment/workspace-binding-generation-persistence.js";
+import type {
+  WorkspaceBindingCatalogPersistencePort,
+  WorkspaceBindingCatalogRootCommit,
+} from "../environment/workspace-binding-catalog-persistence.js";
 
 import {
   assert,
@@ -435,24 +439,31 @@ export async function executeWorkspaceBindingRootCase(
   }
 
   const root = await createS7TempDir(`s7-workspace-root-${caseKey}`);
-  const catalogRoot = path.join(root, "catalog");
-  await mkdir(catalogRoot, { recursive: true });
+  const rootPersistence = new S7WorkspaceBindingCatalogPersistence();
   if (caseKey === "malformed-manifest") {
-    await writeFile(path.join(catalogRoot, "root-manifest.json"), "{bad-json", "utf8");
-    const fixture = await createWorkspaceCatalogFixture(undefined, root);
+    rootPersistence.seed("{bad-json");
+    const fixture = await createWorkspaceCatalogFixture(
+      undefined,
+      root,
+      rootPersistence,
+    );
     await expectInstance(() => fixture.catalog.initialize(), WorkspaceBindingCatalogIntegrityError, {
       kind: "corruption",
       caseKey: "malformed-manifest",
     });
   } else if (caseKey === "missing-active-log") {
-    await writeWorkspaceRootManifest(catalogRoot, {
+    rootPersistence.seedManifest({
       version: 1,
       state: "healthy",
       catalogGeneration: "catalog-initial",
       logId: "missing-log-id",
       capabilityRevision: 1,
     });
-    const fixture = await createWorkspaceCatalogFixture(undefined, root);
+    const fixture = await createWorkspaceCatalogFixture(
+      undefined,
+      root,
+      rootPersistence,
+    );
     await fixture.catalog.initialize();
     const status = await fixture.catalog.status();
     assert(status.state === "degraded", "missing active log did not degrade", {
@@ -471,7 +482,7 @@ export async function executeWorkspaceBindingRootCase(
       previousCatalogGeneration: "catalog-initial",
       confirmationDigest,
     });
-    await writeWorkspaceRootManifest(catalogRoot, {
+    rootPersistence.seedManifest({
       version: 1,
       state: "degraded",
       degradedReason: "commit-log-corrupt",
@@ -493,7 +504,11 @@ export async function executeWorkspaceBindingRootCase(
       { clock: () => NOW },
     );
     await targetLog.append([{ stream: "executor:workspace-bindings", body: { t: "unknown-reset-genesis" } }]);
-    const fixture = await createWorkspaceCatalogFixture(undefined, root);
+    const fixture = await createWorkspaceCatalogFixture(
+      undefined,
+      root,
+      rootPersistence,
+    );
     await fixture.catalog.initialize();
     const status = await fixture.catalog.status();
     assert(status.state === "degraded", "invalid reset genesis escaped fail-closed recovery", {
@@ -502,7 +517,7 @@ export async function executeWorkspaceBindingRootCase(
     });
     observeReasonCode(status.reason ?? "", "catalog status after invalid reset genesis recovery");
   } else if (caseKey === "broken-generation-link") {
-    await writeWorkspaceRootManifest(catalogRoot, {
+    rootPersistence.seedManifest({
       version: 1,
       state: "degraded",
       degradedReason: "commit-log-corrupt",
@@ -517,7 +532,11 @@ export async function executeWorkspaceBindingRootCase(
         preparedAt: NOW,
       },
     });
-    const fixture = await createWorkspaceCatalogFixture(undefined, root);
+    const fixture = await createWorkspaceCatalogFixture(
+      undefined,
+      root,
+      rootPersistence,
+    );
     await expectInstance(() => fixture.catalog.initialize(), WorkspaceBindingCatalogIntegrityError, {
       kind: "corruption",
       caseKey: "broken-generation-link",
@@ -538,6 +557,7 @@ function corruptWorkspaceCatalogLog(): AuthorityCommitLog {
 async function createWorkspaceCatalogFixture(
   initialLog?: AuthorityCommitLog,
   existingRoot?: string,
+  rootPersistence = new S7WorkspaceBindingCatalogPersistence(),
 ) {
   const root = existingRoot ?? await createS7TempDir("s7-workspace-catalog");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
@@ -549,7 +569,7 @@ async function createWorkspaceCatalogFixture(
     { clock: () => NOW },
   );
   const catalog = new WorkspaceBindingCatalog({
-    rootDir: path.join(root, "catalog"),
+    rootPersistence,
     initialGeneration: {
       log,
       persistence: workspaceBindingGenerationPersistence(),
@@ -597,8 +617,44 @@ function workspaceRecoveryControl(requestId: string, catalogGeneration: string) 
   };
 }
 
-async function writeWorkspaceRootManifest(root: string, manifest: unknown): Promise<void> {
-  await writeFile(path.join(root, "root-manifest.json"), `${JSON.stringify(manifest)}\n`, "utf8");
+class S7WorkspaceBindingCatalogPersistence
+  implements WorkspaceBindingCatalogPersistencePort
+{
+  #bytes: string | undefined;
+  #snapshotToken: string | undefined;
+  #revision = 0;
+
+  seed(bytes: string): void {
+    this.#bytes = bytes;
+    this.#snapshotToken = this.#nextSnapshotToken();
+  }
+
+  seedManifest(manifest: unknown): void {
+    this.seed(`${JSON.stringify(manifest)}\n`);
+  }
+
+  async load() {
+    return this.#bytes === undefined || this.#snapshotToken === undefined
+      ? undefined
+      : { bytes: this.#bytes, snapshotToken: this.#snapshotToken };
+  }
+
+  async compareAndSwap(input: {
+    readonly expectedSnapshotToken: string | undefined;
+    readonly replacementBytes: string;
+  }): Promise<WorkspaceBindingCatalogRootCommit> {
+    if (input.expectedSnapshotToken !== this.#snapshotToken) {
+      return { kind: "conflict" };
+    }
+    this.#bytes = input.replacementBytes;
+    this.#snapshotToken = this.#nextSnapshotToken();
+    return { kind: "committed", snapshotToken: this.#snapshotToken };
+  }
+
+  #nextSnapshotToken(): string {
+    this.#revision += 1;
+    return `s7-root-${this.#revision}`;
+  }
 }
 
 export async function executeWorkspaceProbeCase(

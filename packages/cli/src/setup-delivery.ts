@@ -144,6 +144,7 @@ import {
 import type { InstalledAuthorityGeneration } from "./serve/planned-anchor-transfer.js";
 import { FileWorkspaceProbePersistence } from "./serve/workspace-probe-persistence.js";
 import { FileWorkspaceBindingGenerationPersistenceFactory } from "./serve/workspace-binding-generation-persistence.js";
+import { FileWorkspaceBindingCatalogPersistence } from "./serve/workspace-binding-catalog-persistence.js";
 
 export const INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS = Object.freeze([
   "runtime-epoch",
@@ -915,7 +916,9 @@ export async function setupAuthorityRuntime(
           });
         const initialWorkspaceBindingLog = executorLog!;
         workspaceBindings = new WorkspaceBindingCatalog({
-          rootDir: bindingRoot,
+          rootPersistence: new FileWorkspaceBindingCatalogPersistence({
+            zhixingHome: options.zhixingHome,
+          }),
           initialGeneration: {
             log: initialWorkspaceBindingLog,
             persistence: bindingGenerationPersistence.create(
