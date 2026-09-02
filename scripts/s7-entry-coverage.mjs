@@ -3929,6 +3929,7 @@ export async function validateS7Structure() {
   failures.push(...inspectWorkspaceBindingGenerationPersistenceBoundary(records));
   failures.push(...inspectWorkspaceBindingCatalogPersistenceBoundary(records));
   failures.push(...inspectMeshBootstrapProjectionBoundary(records));
+  failures.push(...inspectMeshPairingContinuationPersistenceBoundary(records));
   failures.push(...inspectConversationAdoptionAssembly(records));
   failures.push(...inspectConversationStorageBoundary(records));
   failures.push(...inspectWorksceneStorageCleanupBoundary(records));
@@ -11343,7 +11344,8 @@ export function inspectMeshBootstrapProjectionBoundary(records) {
     ) ||
     !assembly.includes("readonly bootstrapProjection: MeshBootstrapProjectionPorts;") ||
     assembly.includes("readonly bootstrapProjection?:") ||
-    !assembly.includes("options.bootstrapProjection.completions.markBootstrapComplete(") ||
+    !assembly.includes("completions: this.options.bootstrapProjection.completions") ||
+    !assembly.includes("await input.completions.markBootstrapComplete(") ||
     !access.includes("bootstrapProjection: bootstrap.bootstrapProjection") ||
     !executor.includes("bootstrapProjection: bootstrap.mesh.bootstrapProjection")
   ) {
@@ -11401,6 +11403,157 @@ export function inspectMeshBootstrapProjectionBoundary(records) {
     storeOwners[0] !== storePath
   ) {
     failures.push("Mesh bootstrap projection acquired a second factory or physical owner");
+  }
+  return failures;
+}
+
+/** A6 keeps the P09 D04 continuation behind one finite repository at command/Host edges. */
+export function inspectMeshPairingContinuationPersistenceBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const source = byPath.get(relative);
+    if (source === undefined) {
+      failures.push(`${relative}: Mesh pairing continuation source is missing`);
+    }
+    return source ?? "";
+  };
+  const repositoryPath =
+    "packages/cli/src/serve/mesh-pairing-continuation-repository.ts";
+  const storePath = "packages/cli/src/serve/mesh-pairing-continuation.ts";
+  const pairPath = "packages/cli/src/serve/mesh-pair-command.ts";
+  const assemblyPath = "packages/cli/src/serve/mesh-runtime-assembly.ts";
+  const accessPath = "packages/cli/src/serve/access-surfaces.ts";
+  const executorPath = "packages/cli/src/serve/executor-role-runtime.ts";
+  const cleanupPath = "packages/cli/src/serve/device-removal-cleanup.ts";
+  const repository = required(repositoryPath);
+  const store = required(storePath);
+  const pair = required(pairPath);
+  const assembly = required(assemblyPath);
+  const access = required(accessPath);
+  const executor = required(executorPath);
+  const cleanup = required(cleanupPath);
+
+  const contractStart = repository.indexOf(
+    "export interface MeshPairingContinuationRepository",
+  );
+  const contractEnd = repository.indexOf("\n}", contractStart);
+  const contract = contractStart < 0 || contractEnd < 0
+    ? ""
+    : repository.slice(contractStart, contractEnd);
+  if (
+    contractStart < 0 ||
+    !contract.includes("readonly load:") ||
+    !contract.includes("readonly save:") ||
+    !contract.includes("readonly clear:") ||
+    contract.includes("?:") ||
+    /FileMeshPairingContinuationStore|node:fs|node:path|rootDir|filePath/u.test(contract) ||
+    !repository.includes("return Object.freeze({") ||
+    !repository.includes('readonly side: "issuer";') ||
+    !repository.includes('readonly side: "joiner";') ||
+    !repository.includes('readonly phase: "offer-secret-pending" | "offered";') ||
+    !repository.includes('| { readonly phase: "secret-pending" }') ||
+    !repository.includes('| { readonly phase: "commit-ready" }') ||
+    !repository.includes('| { readonly phase: "proof-ready" }') ||
+    !repository.includes('readonly phase: "bootstrap-ready";')
+  ) {
+    failures.push("Mesh pairing continuation finite repository or phase exact-set drifted");
+  }
+
+  if (
+    !store.includes("implements MeshPairingContinuationRepository") ||
+    store.includes("export class FileMeshPairingContinuationStore") ||
+    !store.includes('"mesh-pairing-continuation.json"') ||
+    !store.includes("`${this.#filePath}.lock`") ||
+    (store.match(/acquireFileLock\(this\.#lockPath/gu)?.length ?? 0) !== 3 ||
+    !store.includes("canonicalize(value) !== text") ||
+    !store.includes("assertContinuationShape(value)") ||
+    !store.includes('randomBytes(8).toString("hex")') ||
+    !store.includes('flag: "wx"') ||
+    !store.includes("await handle.sync()") ||
+    !store.includes("await rename(temporary, filePath)") ||
+    !store.includes("await syncDirectory(directory)") ||
+    !store.includes("await rm(temporary, { force: true }).catch(() => undefined)") ||
+    !store.includes("new FileMeshPairingContinuationStore(rootDir)") ||
+    !store.includes("projectMeshPairingContinuationRepository(")
+  ) {
+    failures.push("File Mesh pairing continuation durability contract drifted");
+  }
+
+  const runtimeInputStart = pair.indexOf("interface PairingRuntimeInput");
+  const runtimeInputEnd = pair.indexOf("\n}", runtimeInputStart);
+  const runtimeInput = runtimeInputStart < 0 || runtimeInputEnd < 0
+    ? ""
+    : pair.slice(runtimeInputStart, runtimeInputEnd);
+  if (
+    !runtimeInput.includes(
+      "readonly continuations: MeshPairingContinuationRepository;",
+    ) ||
+    runtimeInput.includes("FileMeshPairingContinuationStore") ||
+    pair.includes("new FileMeshPairingContinuationStore(") ||
+    !pair.includes("createFileMeshPairingContinuationRepository(zhixingHome)") ||
+    !pair.includes("await continuations.load()") ||
+    !pair.includes("await input.continuations.save(") ||
+    !pair.includes("await input.continuations.clear(")
+  ) {
+    failures.push("Pair command bypasses its finite continuation repository");
+  }
+
+  if (
+    !assembly.includes(
+      "readonly pairingContinuations: MeshPairingContinuationRepository;",
+    ) ||
+    assembly.includes("readonly pairingContinuations?:") ||
+    assembly.includes("FileMeshPairingContinuationStore") ||
+    !assembly.includes("continuations: this.options.pairingContinuations") ||
+    !assembly.includes("const continuation = await input.continuations.load()") ||
+    !assembly.includes("await input.continuations.clear(offerId)") ||
+    !access.includes(
+      "pairingContinuations: createFileMeshPairingContinuationRepository(",
+    ) ||
+    !executor.includes(
+      "pairingContinuations: createFileMeshPairingContinuationRepository(",
+    )
+  ) {
+    failures.push("Persistent Mesh Host continuation binding is optional or bypassed");
+  }
+
+  const factoryConsumers = records
+    .filter((record) =>
+      record.relative !== storePath &&
+      record.text.includes("createFileMeshPairingContinuationRepository(")
+    )
+    .map((record) => record.relative)
+    .sort();
+  const expectedFactoryConsumers = [accessPath, executorPath, pairPath].sort();
+  const concreteOwners = records
+    .filter((record) =>
+      record.text.includes("new FileMeshPairingContinuationStore(")
+    )
+    .map((record) => record.relative);
+  const repositoryOwners = records
+    .filter((record) =>
+      record.text.includes("implements MeshPairingContinuationRepository")
+    )
+    .map((record) => record.relative);
+  if (
+    factoryConsumers.length !== expectedFactoryConsumers.length ||
+    factoryConsumers.some((relative, index) =>
+      relative !== expectedFactoryConsumers[index]
+    ) ||
+    concreteOwners.length !== 1 ||
+    concreteOwners[0] !== storePath ||
+    repositoryOwners.length !== 1 ||
+    repositoryOwners[0] !== storePath
+  ) {
+    failures.push("Mesh pairing continuation acquired a second factory or physical owner");
+  }
+  if (
+    cleanup.includes("mesh-pairing-continuation.json") ||
+    cleanup.includes("MeshPairingContinuationRepository") ||
+    cleanup.includes("FileMeshPairingContinuationStore")
+  ) {
+    failures.push("Device removal cleanup took ownership of pairing continuation state");
   }
   return failures;
 }

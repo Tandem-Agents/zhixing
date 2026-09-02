@@ -44,6 +44,7 @@ import {
   executorIdForDevice,
   MeshRuntimeAssembly,
 } from "./mesh-runtime-assembly.js";
+import { createFileMeshPairingContinuationRepository } from "./mesh-pairing-continuation.js";
 import type { ServeOptions } from "./command.js";
 import type {
   ExecutorRoleModule,
@@ -516,6 +517,9 @@ export async function runExecutorRole(
       transportPeers: bootstrap.mesh.transportPeers,
       bootstrapStore: bootstrap.mesh.bootstrapStore,
       bootstrapProjection: bootstrap.mesh.bootstrapProjection,
+      pairingContinuations: createFileMeshPairingContinuationRepository(
+        zhixingHome,
+      ),
       ...(bootstrap.mesh.anchorIssuerKey
         ? { plannedAnchorIssuerKey: bootstrap.mesh.anchorIssuerKey }
         : {}),

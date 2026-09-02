@@ -67,8 +67,11 @@ import {
   registerExecutionSnapshotMeshService,
 } from "./execution-snapshot-mesh.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
-import type { MeshBootstrapProjectionPorts } from "./mesh-bootstrap-projection.js";
-import { FileMeshPairingContinuationStore } from "./mesh-pairing-continuation.js";
+import type {
+  MeshBootstrapCompletionPersistencePort,
+  MeshBootstrapProjectionPorts,
+} from "./mesh-bootstrap-projection.js";
+import type { MeshPairingContinuationRepository } from "./mesh-pairing-continuation-repository.js";
 import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import { registerSurfaceAssetMeshService } from "./surface-asset-mesh.js";
@@ -318,6 +321,7 @@ export interface MeshRuntimeAssemblyOptions {
   readonly localEndpoint?: MeshEndpointDescriptor;
   readonly bootstrapStore: FileMeshBootstrapStore;
   readonly bootstrapProjection: MeshBootstrapProjectionPorts;
+  readonly pairingContinuations: MeshPairingContinuationRepository;
   readonly plannedAnchorIssuerKey?: DeviceKey;
   readonly plannedAnchorPostInstall?: AnchorPostInstallDescriptor;
   readonly authority: AuthorityRuntimeStack;
@@ -2122,27 +2126,12 @@ export class MeshRuntimeAssembly
   }
 
   async #finalizePairingBootstrap(peerDeviceId: string): Promise<void> {
-    const continuations = new FileMeshPairingContinuationStore(
-      this.options.zhixingHome,
-    );
-    const continuation = await continuations.load();
-    if (
-      continuation?.side !== "issuer" ||
-      continuation.phase !== "commit-ready" ||
-      continuation.join.device.deviceId !== peerDeviceId
-    ) {
-      return;
-    }
-    const offerId = continuation.invitation.offer.offerId;
-    await this.options.bootstrapProjection.completions.markBootstrapComplete(
+    await finalizeCommittedPairingBootstrapContinuation({
       peerDeviceId,
-      offerId,
-    );
-    await this.options.secretStore.delete({
-      kind: "rendezvous",
-      bindingId: `pairing:${offerId}`,
+      continuations: this.options.pairingContinuations,
+      completions: this.options.bootstrapProjection.completions,
+      secretStore: this.options.secretStore,
     });
-    await continuations.clear(offerId);
   }
 
   async #restoreCommittedTransfers(): Promise<void> {
@@ -2286,6 +2275,29 @@ export class MeshRuntimeAssembly
       throw new Error("Duty-device migration is unavailable while a paired device is being removed");
     }
   }
+}
+
+export async function finalizeCommittedPairingBootstrapContinuation(input: {
+  readonly peerDeviceId: string;
+  readonly continuations: MeshPairingContinuationRepository;
+  readonly completions: MeshBootstrapCompletionPersistencePort;
+  readonly secretStore: import("@zhixing/core/contracts").SecretStorePort;
+}): Promise<void> {
+  const continuation = await input.continuations.load();
+  if (
+    continuation?.side !== "issuer" ||
+    continuation.phase !== "commit-ready" ||
+    continuation.join.device.deviceId !== input.peerDeviceId
+  ) {
+    return;
+  }
+  const offerId = continuation.invitation.offer.offerId;
+  await input.completions.markBootstrapComplete(input.peerDeviceId, offerId);
+  await input.secretStore.delete({
+    kind: "rendezvous",
+    bindingId: `pairing:${offerId}`,
+  });
+  await input.continuations.clear(offerId);
 }
 
 export async function resolveDeviceRemovalStatus(input: {

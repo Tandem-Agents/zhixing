@@ -17,7 +17,7 @@ import { connect, createServer, type Socket } from "node:net";
 import { describe, expect, it, vi } from "vitest";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { FileBackupTargetConfiguration } from "./backup-target-config.js";
-import { FileMeshPairingContinuationStore } from "./mesh-pairing-continuation.js";
+import { createFileMeshPairingContinuationRepository } from "./mesh-pairing-continuation.js";
 import { createPairingTrustEvent, runPairCommand } from "./mesh-pair-command.js";
 
 const TEST_DURABLE_IO_TIMEOUT_MS = 120_000;
@@ -120,14 +120,14 @@ describe("production mesh pairing command", () => {
     });
 
     await entered.promise;
-    await expect(new FileMeshPairingContinuationStore(home).load()).resolves.toMatchObject({
+    await expect(createFileMeshPairingContinuationRepository(home).load()).resolves.toMatchObject({
       side: "issuer",
       phase: "offer-secret-pending",
     });
     expect(invitationPublished).toBe(false);
     release.resolve(undefined);
     await expect(pairing).rejects.toThrow("simulated secret persistence failure");
-    await expect(new FileMeshPairingContinuationStore(home).load()).resolves.toBeUndefined();
+    await expect(createFileMeshPairingContinuationRepository(home).load()).resolves.toBeUndefined();
     await expect(runPairCommand({
       zhixingHome: home,
       secretStore: secrets,

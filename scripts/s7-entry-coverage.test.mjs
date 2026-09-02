@@ -22,6 +22,7 @@ import {
   inspectWorkspaceBindingGenerationPersistenceBoundary,
   inspectWorkspaceBindingCatalogPersistenceBoundary,
   inspectMeshBootstrapProjectionBoundary,
+  inspectMeshPairingContinuationPersistenceBoundary,
   inspectConversationStorageBoundary,
   inspectWorksceneStorageCleanupBoundary,
   inspectStorageRemainderBoundary,
@@ -1356,6 +1357,84 @@ test("P09 Mesh bootstrap projections stay finite and required at Host edges", as
       {
         relative: "packages/cli/src/serve/duplicate-mesh-bootstrap-projection.ts",
         text: "class Duplicate implements\n    MeshEndpointDirectoryPersistencePort {}",
+      },
+    ]).join("\n"),
+    /second factory or physical owner/u,
+  );
+});
+
+test("P09 pairing continuation stays finite, durable, and required at command/Host edges", async () => {
+  const paths = [
+    "packages/cli/src/serve/mesh-pairing-continuation-repository.ts",
+    "packages/cli/src/serve/mesh-pairing-continuation.ts",
+    "packages/cli/src/serve/mesh-pair-command.ts",
+    "packages/cli/src/serve/mesh-runtime-assembly.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/cli/src/serve/device-removal-cleanup.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: (await readFile(relative, "utf8")).replaceAll("\r\n", "\n"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectMeshPairingContinuationPersistenceBoundary(records), []);
+  assert.match(
+    inspectMeshPairingContinuationPersistenceBoundary(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "readonly pairingContinuations: MeshPairingContinuationRepository;",
+        "readonly pairingContinuations?: MeshPairingContinuationRepository;",
+      ),
+    )).join("\n"),
+    /optional or bypassed/u,
+  );
+  assert.match(
+    inspectMeshPairingContinuationPersistenceBoundary(mutate(
+      "packages/cli/src/serve/mesh-pair-command.ts",
+      (text) => text.replace(
+        "readonly continuations: MeshPairingContinuationRepository;",
+        "readonly continuations: FileMeshPairingContinuationStore;",
+      ),
+    )).join("\n"),
+    /Pair command bypasses/u,
+  );
+  assert.match(
+    inspectMeshPairingContinuationPersistenceBoundary(mutate(
+      "packages/cli/src/serve/mesh-pairing-continuation.ts",
+      (text) => text.replace(
+        "class FileMeshPairingContinuationStore",
+        "export class FileMeshPairingContinuationStore",
+      ),
+    )).join("\n"),
+    /durability contract drifted/u,
+  );
+  assert.match(
+    inspectMeshPairingContinuationPersistenceBoundary(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        /\s*pairingContinuations: createFileMeshPairingContinuationRepository\(\s*ctx\.zhixingHome,?\s*\),/u,
+        "",
+      ),
+    )).join("\n"),
+    /optional or bypassed|second factory/u,
+  );
+  assert.match(
+    inspectMeshPairingContinuationPersistenceBoundary(mutate(
+      "packages/cli/src/serve/device-removal-cleanup.ts",
+      (text) => `${text}\nvoid "mesh-pairing-continuation.json";`,
+    )).join("\n"),
+    /Device removal cleanup took ownership/u,
+  );
+  assert.match(
+    inspectMeshPairingContinuationPersistenceBoundary([
+      ...records,
+      {
+        relative: "packages/cli/src/serve/duplicate-pairing-continuation.ts",
+        text: "class Duplicate implements MeshPairingContinuationRepository {}",
       },
     ]).join("\n"),
     /second factory or physical owner/u,

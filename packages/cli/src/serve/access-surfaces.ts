@@ -50,6 +50,7 @@ import {
   setupDelivery,
 } from "../setup-delivery.js";
 import { MeshRuntimeAssembly, executorIdForDevice } from "./mesh-runtime-assembly.js";
+import { createFileMeshPairingContinuationRepository } from "./mesh-pairing-continuation.js";
 import { SurfaceAssetMaintenance } from "./surface-asset-maintenance.js";
 import { createAnchorConversationDeleteProjectionPort } from "./conversation-delete-binding.js";
 import { createTurnMaintenance } from "./turn-maintenance.js";
@@ -304,6 +305,9 @@ const meshSurface: AccessSurface = {
       transportPeers: bootstrap.transportPeers,
       bootstrapStore: bootstrap.bootstrapStore,
       bootstrapProjection: bootstrap.bootstrapProjection,
+      pairingContinuations: createFileMeshPairingContinuationRepository(
+        ctx.zhixingHome,
+      ),
       ...(bootstrap.anchorIssuerKey
         ? { plannedAnchorIssuerKey: bootstrap.anchorIssuerKey }
         : {}),

@@ -1,88 +1,21 @@
 import { randomBytes } from "node:crypto";
 import { open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type {
-  DeviceIdentity,
-  HomeTrustEvent,
-  HomeTrustRecord,
-  MeshEndpointDescriptor,
-  MeshEndpointTransport,
-  PairingAcceptance,
-  PairingJoin,
-  PairingOffer,
-  PakeRound,
-} from "@zhixing/core/contracts";
 import { canonicalize } from "@zhixing/core/protocol";
 import {
   acquireFileLock,
   ensureDurableDirectory,
   syncDirectory,
 } from "@zhixing/core/persistence";
-import type { PairingAttemptAdmission } from "@zhixing/mesh/bootstrap-authority";
+import {
+  projectMeshPairingContinuationRepository,
+  type MeshPairingContinuationRepository,
+  type PairingContinuation,
+} from "./mesh-pairing-continuation-repository.js";
 
-export interface DurablePairingInvitation {
-  readonly v: 1;
-  readonly offer: PairingOffer;
-  readonly issuer: DeviceIdentity;
-  readonly rendezvousKey: string;
-  readonly transports: readonly MeshEndpointTransport[];
-}
-
-export type PairingIssuerContinuation =
-  | {
-      readonly v: 1;
-      readonly side: "issuer";
-      readonly phase: "offer-secret-pending" | "offered";
-      readonly invitation: DurablePairingInvitation;
-      readonly issuerEndpoint: MeshEndpointDescriptor;
-    }
-  | ({
-      readonly v: 1;
-      readonly side: "issuer";
-      readonly invitation: DurablePairingInvitation;
-      readonly issuerEndpoint: MeshEndpointDescriptor;
-      readonly attempt: PairingAttemptAdmission;
-      readonly join: PairingJoin;
-      readonly joinerRootCertificatePem: string;
-      readonly pakeRounds: readonly PakeRound[];
-      readonly acceptanceBody: Omit<PairingAcceptance, "finished">;
-      readonly issuerProof: PairingAcceptance["finished"]["issuer"];
-      readonly trustEvent: HomeTrustEvent;
-    } & (
-      | { readonly phase: "secret-pending" }
-      | { readonly phase: "commit-ready" }
-    ));
-
-export interface DurablePairingBootstrap {
-  readonly acceptance: PairingAcceptance;
-  readonly trustEvents: readonly HomeTrustEvent[];
-  readonly trustRecord: HomeTrustRecord;
-  readonly issuerRootCertificatePem: string;
-  readonly issuerEndpoint: MeshEndpointDescriptor;
-}
-
-interface PairingJoinerContinuationBase {
-  readonly v: 1;
-  readonly side: "joiner";
-  readonly invitation: DurablePairingInvitation;
-  readonly localDeviceId: string;
-  readonly join: PairingJoin;
-  readonly pakeRounds: readonly PakeRound[];
-  readonly proof: PairingAcceptance["finished"]["joiner"];
-}
-
-export type PairingJoinerContinuation = PairingJoinerContinuationBase & (
-  | { readonly phase: "secret-pending" }
-  | { readonly phase: "proof-ready" }
-  | {
-      readonly phase: "bootstrap-ready";
-      readonly committed: DurablePairingBootstrap;
-    }
-);
-
-export type PairingContinuation = PairingIssuerContinuation | PairingJoinerContinuation;
-
-export class FileMeshPairingContinuationStore {
+class FileMeshPairingContinuationStore
+  implements MeshPairingContinuationRepository
+{
   readonly #filePath: string;
   readonly #lockPath: string;
 
@@ -151,6 +84,14 @@ export class FileMeshPairingContinuationStore {
     assertContinuationShape(value);
     return value;
   }
+}
+
+export function createFileMeshPairingContinuationRepository(
+  rootDir: string,
+): MeshPairingContinuationRepository {
+  return projectMeshPairingContinuationRepository(
+    new FileMeshPairingContinuationStore(rootDir),
+  );
 }
 
 function assertContinuationShape(value: unknown): asserts value is PairingContinuation {

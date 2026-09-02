@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-09a P09 Mesh bootstrap projection 有限 Infrastructure 边界已闭合，正在准备 pairing continuation 持久边界<br>
+> 当前检查点：A6-09b P09 pairing continuation 持久边界已闭合；正在裁决 P09 asset temporary/partial 边界<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `24633da3`；A6-08d 已由协调者独立复核后提交，Workspace binding catalog root manifest/CAS 已收归唯一 Host adapter |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-09a 已闭合，正在准备 P09 D04 pairing continuation 的持久边界 |
-| 活跃工作包 | 无；协调者正在提交 `A6-09a-p09-mesh-bootstrap-projection-boundary-v1` 并准备紧邻下一责任链 |
-| 下一责任链 | 协调者复核 A6-09a 后处理独立 P09 pairing continuation 持久边界；本轮未进入 P11/P12、Device Administration 或 A7 |
-| 打开的单向桥 | 无；P07 四条物理持久边界与 P09 D03 三个有限角色均已单向接管，需求侧无 concrete/`Pick`/optional fallback 或第二 store |
-| 已失效证据 | 无当前未恢复架构证据；A6-01～08d 继续有效。A0 P09 D03 的文件格式、outer-reader 宽度、原子发布和清理事实未改变 |
+| 已接受基线 | `e88a3666 + A6-09b 当前工作区差异`；A6-09b 已由协调者独立复核接受，待随本记录提交 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；P09 D04 pairing continuation 持久边界已闭合 |
+| 活跃工作包 | 无；协调者正在裁决 P09 asset temporary/partial 是否存在必须迁移的真实需求侧物理泄漏 |
+| 下一责任链 | 仅在生产事实成立时迁移 P09 asset temporary/partial 边界；否则直接裁决 P11/P12，不为不存在的问题生成工作包 |
+| 打开的单向桥 | 无；P07 四条物理持久边界、P09 D03 三个有限角色与 D04 continuation repository 均已单向接管，需求侧无 concrete/`Pick`/optional fallback 或第二 store |
+| 已失效证据 | 无当前未恢复架构证据；A6-01～09a 继续有效，A6-09b 的 required repository、物理持久与恢复证据已独立重取 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2735,6 +2735,19 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据：最终串行定向闭包共 12 文件 58/58：projection/store/control-plane 7/7，mesh bootstrap/pairing 14/14，recovery-root/backup/DR command/trust evidence/current-anchor Surface 19/19，Mesh assembly/三拓扑/Executor terminal 18/18；required test fixture 同步改绑后全部通过。CLI `tsc --noEmit` 与 `pnpm cli:build` 通过；canonical `pnpm s7:lint` 53/53 且 registry golden 通过，新增反向 mutation 能拒绝 optional/concrete control-plane、pairing direct store、Host 漏投影与第二 physical owner。未修改 package manifest/export/build entry，故 fresh package-export 门不相交且未重复运行。
 - 失效与交接：若三个有限角色的 required/exact-set、唯一 `FileMeshBootstrapStore` 实现、三处 projection factory、任一 `ProductionMeshControlPlane` 注入、persistent 三拓扑、pairing/current-anchor/backup/DR/recovery-root 消费、D03 codec/原子写/清理、S7 或上述直接测试变化，恢复 `A6-09a-p09-mesh-bootstrap-projection-boundary-v1` 及真实相交的 A0 P09 证据；P06 与 D04/P11/P12 不因无关变化自动失效。A6继续 `[ ]`，当前工作包等待协调者独立复核；下一检查点仅为独立 pairing continuation 边界。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：确认 D03 六个操作在生产消费者中全部经 endpoints/transportPeers/completions 三个 required readonly 角色调用，`ProductionMeshControlPlane` 与恢复根不再导入 concrete store，持久/命令 Host 只投影一次；pair command 仍持有的 concrete store只服务本包明确排除的 P06 Trust/Authority，不再承载 D03 调用。独立运行 projection/control-plane/runtime bootstrap 14/14，CLI typecheck、canonical S7 53/53 与 registry golden、D03 concrete-call 反查和 `git diff --check` 均通过；完整 CLI build及其余 44 项直接证据有效。A6-09a 可以提交，A6仍保持 `[ ]`。
+
+### A6-09b：P09 pairing continuation 持久边界收口
+
+- 派发基线与唯一结果：以已接受 `HEAD e88a3666` 加本文调度记录为基线，只收口 P09 D04 `mesh-pairing-continuation.json` 的需求与物理持久边界。当前 pairing command 的完整 issuer/joiner/resume 子链和 Mesh startup catch-up 直接依赖、构造或透传 `FileMeshPairingContinuationStore`；迁移后产品状态机只依赖 required、需求方拥有的有限 continuation repository（`load/save/clear` 与既有 continuation types），File implementation、home/path/lock/tmp/fsync 只存在于 pair 命令 ApplicationHost 和 persistent Mesh Host 的组合边缘。
+- 生产闭包与行为保护：覆盖 issuer `offer-secret-pending→offered→secret-pending→commit-ready`、joiner `secret-pending→proof-ready→bootstrap-ready`、启动期 rendezvous secret retention catch-up、terminal clear、过期/冲突撤回及响应丢失重放。严格保持 v1/side/phase 当前 shallow shape 与 canonical 校验、同 offer 精确 clear、sibling lock、random tmp `wx`→file sync→rename→directory sync→finally sweep、缺文件为空、坏文件 fail closed，以及 continuation 当前不在 current-device cleanup 集合、只由 pairing 恢复/终态 owner 收口的既有生命周期。
+- 旧路与明确不做：pairing 状态机、helper input、Mesh catch-up 不得继续以 concrete File store 类型取权或通过 cast/optional fallback 绕开 repository；组合边缘可构造唯一 File implementation 并投影。不得重写 pairing 密码学、trust/Authority commit、D03 projection、rendezvous SecretStore、P09 asset temporary/partial、P11/P12、设备清理决定或用户交互；不得趁机把 shallow reader 宣称/改造成 strict codec，不得增加第二 journal、兼容 reader、自动过期策略或通用 persistence facade。
+- 最窄证据与完成条件：直接测试覆盖有限 repository exact-set/frozen 投影、全部七个 phase 的 save/load、canonical/shape corruption、wrong-offer clear、并发锁、物理提交后响应丢失可重放、tmp cleanup，以及 issuer/joiner/catch-up 真实调用链；结构门禁拒绝状态机 concrete import/type/constructor、optional/no-store、第二 File implementation/constructor 与 current-device cleanup 擅自纳入。按验证手册只跑 continuation/pairing/catch-up 失效闭包、CLI typecheck/必要 build、canonical S7、changed-source 格式和 `git diff --check`；不重复 D03、P07、owner-domain、S6、根级回归或制品验收。
+- 安全交接：只有 continuation 产品阶段仍由 pairing owner 持有、物理持久机制只在唯一 File adapter、pair 命令与 persistent Host 均经 required repository、全部恢复/冲突/清理行为不变且无双入口时才结束；A6继续 `[ ]`。约四小时仍未闭合、需要改 pairing/trust 产品合同、发现 D03 或 SecretStore 是独立根因、或影响扩入 P11/P12 时，停在可构建、可运行、单一 continuation 真相成立的检查点反馈，不得执行任何 Git 写操作。
+- 实施结果与唯一边界：新增需求方拥有的 `MeshPairingContinuationRepository`，exact-set 仅为 required readonly `load/save/clear`，既有 issuer/joiner continuation types 与 frozen capability projection 同处该内部合同；pairing 的 first-call/resume/helper input 和 Mesh startup catch-up 均只取得该端口。`FileMeshPairingContinuationStore` 现为物理模块私有实现，唯一 factory 在 pair 命令、Anchor Host 与 Executor Host 三个组合边缘各构造一次；`MeshRuntimeAssemblyOptions.pairingContinuations` 为必需项，运行期不再根据 home 自行构造 store，也没有 concrete type、cast、optional fallback、第二实现或通用 persistence facade。
+- 行为、恢复与清理保护：issuer 四阶段、joiner 三阶段及现有浅层 v1/side/phase reader 未被收紧；missing-empty、noncanonical/unknown phase fail closed、same-offer clear、sibling file lock、random `wx` temp→file sync→rename→directory sync→finally sweep 均由原物理实现保持。startup catch-up 仍只在 matching `commit-ready + peerDeviceId` 时按 completion marker→rendezvous secret→continuation 次序收口，前一步失败保留 continuation 供重驱；pair 命令既有 committed-bootstrap 响应丢失重放、过期/冲突撤回和终态清理继续命中同一 repository。current-device cleanup 未新增 D04 路径，D03/P07/P11/P12、trust/Authority/crypto/SecretStore 产品决定均未改变。
+- 直接证据与门禁：continuation repository/物理 adapter、startup catch-up 与真实 pair command 共 3 文件 16/16，覆盖 frozen exact-set、七阶段 canonical save/load、坏格式/未知阶段、wrong-offer、并发 lock、跨实例 exact replay、tmp 零残留、catch-up 顺序/失败保留，以及真实 issuer/joiner/response-loss 链。CLI `tsc --noEmit` 与 `pnpm cli:build` 通过；canonical S7 最终 54/54 且 registry golden 通过，反向 mutation 拒绝 optional Host port、pair command concrete type、Host 漏绑定、第二 physical owner 和 device-removal cleanup 越权。首次 canonical S7 仅暴露 A6-09a inspector 仍要求 completion 调用内联于 Assembly；本包提取可直接验证的 catch-up 函数后已把该门禁等价绑定到 `bootstrapProjection.completions` 的单向传递与实际调用，最终恢复通过。未改 package manifest/export/build entry，package-export 门不相交且未重复运行。
+- 失效与交接：若 continuation 七阶段合同、required repository exact-set/frozen projection、唯一 File adapter/factory、三处组合边缘、pairing 任一 load/save/clear、startup catch-up 的 matching/收口顺序、物理 canonical/lock/tmp/fsync/clear、device-removal exclusion、S7 或上述直接测试变化，恢复 `A6-09b-p09-pairing-continuation-persistence-v1` 并只重验本闭包；A6-09a 只有 completion 端口传递或 D03 机制真实变化时才失效。A6继续 `[ ]`，当前实施完成并等待协调者独立复核；下一检查点只允许裁决 P09 asset temporary/partial，不提前进入 P11/P12、Device Administration 或 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：确认 continuation 合同只暴露冻结的 required `load/save/clear`，File implementation 为模块私有且仅由 pair 命令、Anchor Host、Executor Host 三个组合边缘通过唯一 factory 构造；pairing 状态机与 startup catch-up 不再持有 concrete、home/path、cast、optional fallback 或第二 store，七阶段、canonical shallow reader、原子持久化、wrong-offer clear、重放与 completion→secret→continuation 收口顺序保持不变。独立运行 continuation/runtime assembly/pair command 16/16、CLI typecheck、canonical S7 54/54 与 registry golden、生产 concrete 反查及 `git diff --check` 均通过；执行者的 CLI build 证据有效且 package exports 不相交。A6-09b 可以提交，A6仍保持 `[ ]`。
 
 ## 十、用户提示词
 

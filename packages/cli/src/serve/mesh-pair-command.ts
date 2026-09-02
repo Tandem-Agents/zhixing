@@ -90,12 +90,15 @@ import { FileBackupTargetConfiguration } from "./backup-target-config.js";
 import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
 import { readRecoveryPackageFromTty } from "./recovery-package-input.js";
 import {
-  FileMeshPairingContinuationStore,
-  type DurablePairingInvitation,
-  type DurablePairingBootstrap,
-  type PairingIssuerContinuation,
-  type PairingJoinerContinuation,
+  createFileMeshPairingContinuationRepository,
 } from "./mesh-pairing-continuation.js";
+import type {
+  DurablePairingInvitation,
+  DurablePairingBootstrap,
+  MeshPairingContinuationRepository,
+  PairingIssuerContinuation,
+  PairingJoinerContinuation,
+} from "./mesh-pairing-continuation-repository.js";
 import {
   CredentialExposureAuthority,
   exposureGuardedSecretStore,
@@ -144,7 +147,7 @@ interface PairingRuntimeInput extends PairCommandOptions {
   readonly key: DeviceKey;
   readonly store: FileMeshBootstrapStore;
   readonly bootstrapProjection: MeshBootstrapProjectionPorts;
-  readonly continuations: FileMeshPairingContinuationStore;
+  readonly continuations: MeshPairingContinuationRepository;
   readonly storageMaintenance: StorageMaintenanceGovernorPort;
   readonly writeLine: (line: string) => void;
 }
@@ -222,7 +225,7 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
   if (options.invitation) {
     assertProductionPairingInvitation(decodeInvitation(options.invitation));
   }
-  const continuations = new FileMeshPairingContinuationStore(zhixingHome);
+  const continuations = createFileMeshPairingContinuationRepository(zhixingHome);
   const continuation = await continuations.load();
   if (continuation) assertProductionPairingOffer(continuation.invitation.offer);
   const secretStore = options.secretStore ?? createPlatformSecretStore({ homeDir: zhixingHome });
