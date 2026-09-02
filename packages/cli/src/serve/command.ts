@@ -597,7 +597,7 @@ async function runServerProcess(
       if (!authority?.globalState) return undefined;
       return {
         globalState: authority.globalState,
-        artifacts: authority.artifacts,
+        artifacts: authority.rubricArtifacts,
         anchorEpoch: authority.anchorEpoch,
       };
     },

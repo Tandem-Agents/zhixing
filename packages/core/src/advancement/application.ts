@@ -44,6 +44,8 @@ import {
 } from "./review-attempt-identity.js";
 import { createAdvancementWindowReviewEntry } from "./window-state.js";
 import type {
+  ArtifactRef,
+  Digest,
   ImmediateRootResourceLease,
   ImmediateRootReservationInspection,
 } from "../contracts/index.js";
@@ -2095,6 +2097,12 @@ export type RubricPublicationOutcome =
   | Readonly<{ kind: "deferred"; message: string }>
   | Readonly<{ kind: "failed"; message: string }>
   | Readonly<{ kind: "unavailable" }>;
+
+/** Finite CAS projection required by the Rubric application adapters. */
+export interface AdvancementRubricArtifactPort {
+  readByDigest(digest: Digest): Promise<Uint8Array | undefined>;
+  put(bytes: Uint8Array): Promise<ArtifactRef>;
+}
 
 /** Optional infrastructure effect. Advancement alone decides when publication applies. */
 export interface RubricPublicationPort {

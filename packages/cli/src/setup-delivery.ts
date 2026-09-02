@@ -93,6 +93,7 @@ import {
   DeliveryUncertainResolutionApplicationService,
   type DeliveryUncertainResolutionApplication,
 } from "@zhixing/core/delivery/application";
+import type { AdvancementRubricArtifactPort } from "@zhixing/core/advancement/application";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
@@ -263,6 +264,7 @@ export interface AuthorityRuntimeStack {
   readonly localExecutorEnabled: boolean;
   readonly executorLog: FileAuthorityCommitLog;
   readonly artifacts: FileArtifactStore;
+  readonly rubricArtifacts: AdvancementRubricArtifactPort;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly surfaceAssets: SurfaceAssetCoordinator;
   readonly checkpointRetention: import("@zhixing/core/authority").ArtifactCheckpointRetentionPort;
@@ -507,6 +509,19 @@ export interface SetupAuthorityRuntimeOptions {
   readonly startupRollback?: StartupRollback;
 }
 
+function projectAdvancementRubricArtifacts(
+  artifacts: FileArtifactStore,
+): AdvancementRubricArtifactPort {
+  const projection: AdvancementRubricArtifactPort = {
+    readByDigest: async (digest) => {
+      const ref = await artifacts.referenceForDigest(digest);
+      return ref ? artifacts.get(ref) : undefined;
+    },
+    put: (bytes) => artifacts.put(bytes),
+  };
+  return Object.freeze(projection);
+}
+
 export async function setupAuthorityRuntime(
   options: SetupAuthorityRuntimeOptions,
 ): Promise<AuthorityRuntimeStack> {
@@ -541,6 +556,7 @@ export async function setupAuthorityRuntime(
     const artifacts = new FileArtifactStore(
       path.join(authorityRoot, "artifacts"),
     );
+    const rubricArtifacts = projectAdvancementRubricArtifacts(artifacts);
     const anchorEnabled = options.enableAnchor ?? true;
     authorityLog = anchorEnabled
       ? new FileAuthorityCommitLog(
@@ -1938,6 +1954,7 @@ export async function setupAuthorityRuntime(
         return executorLog;
       },
       artifacts,
+      rubricArtifacts,
       storageMaintenance: options.storageMaintenance,
       get surfaceAssets() {
         if (!surfaceAssets)

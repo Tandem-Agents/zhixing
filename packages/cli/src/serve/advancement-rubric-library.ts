@@ -7,7 +7,6 @@ import {
   type RubricCatalogPort,
   type RubricIndexEntry,
 } from "@zhixing/core";
-import type { FileArtifactStore } from "@zhixing/core/authority";
 import type {
   AssignmentGlobalQueryPort,
   Digest,
@@ -16,13 +15,14 @@ import type {
   GlobalStatePort,
 } from "@zhixing/core/contracts";
 import type {
+  AdvancementRubricArtifactPort,
   RubricPublicationOutcome,
   RubricPublicationPort,
 } from "@zhixing/core/advancement/application";
 
 export interface AdvancementRubricLibraryOptions {
   readonly globalState: () => GlobalStatePort | undefined;
-  readonly artifacts: () => FileArtifactStore | undefined;
+  readonly artifacts: () => AdvancementRubricArtifactPort | undefined;
   readonly anchorEpoch: () => number | undefined;
   readonly executionAssets?: () =>
     | (AssignmentGlobalQueryPort & {
@@ -109,9 +109,7 @@ export class GlobalRubricCatalog implements RubricCatalogPort {
   }
 
   async #readGlobalArtifact(digest: Digest): Promise<Uint8Array | undefined> {
-    const artifacts = this.#artifacts();
-    const ref = await artifacts.referenceForDigest(digest);
-    return ref ? artifacts.get(ref) : undefined;
+    return this.#artifacts().readByDigest(digest);
   }
 
   #state(): GlobalStatePort {
@@ -120,7 +118,7 @@ export class GlobalRubricCatalog implements RubricCatalogPort {
     return state;
   }
 
-  #artifacts(): FileArtifactStore {
+  #artifacts(): AdvancementRubricArtifactPort {
     const artifacts = this.#options.artifacts();
     if (!artifacts) throw new Error("Global Rubric artifacts are unavailable");
     return artifacts;

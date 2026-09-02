@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-11c P12 disaster-recovery staging 物理边界已通过协调者独立验收，等待提交<br>
+> 当前检查点：A6-12 P06 Rubric 存储边界已通过协调者独立验收，等待提交；两条独立拓扑透明残余待后续收口<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,13 +202,13 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `49fb7696` + A6-11c 当前已验收工作区；P12 三类 staging 边界均已闭合，等待提交 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；P12 disaster-recovery staging 已通过独立验收 |
-| 活跃工作包 | `A6-11c-p12-disaster-recovery-staging-v1` 已通过协调者独立验收，等待提交 |
-| 下一责任链 | 提交 A6-11c 后冷启动审计 A6 可替换边缘与设备拓扑 exact-set；无真实遗漏则进入 A7 |
-| 打开的单向桥 | 无；P07、P09、P11 及 P12 conversation/planned-anchor/disaster-recovery staging 均已单向接管，需求侧无 File concrete、`Pick<concrete>`、optional fallback 或第二物理 owner |
-| 已失效证据 | 无当前未恢复架构证据；A6-01～11c 继续有效 |
-| 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
+| 已接受基线 | `dceef07d`；A6-11c 已提交，P12 三类 staging 边界均已闭合 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-12 冷启动审计已发现两条独立拓扑透明残余，A6 保持未完成 |
+| 活跃工作包 | `A6-12-replaceable-edges-topology-exact-set-audit-v1` 已停在可构建、单一存储责任成立的安全交接点，等待协调者复核 |
+| 下一责任链 | 先以独立工作包移除 Conversation Surface/wire 对 `anchor/local-only` 物理拓扑的判断并保留既有显式继续语义；随后另包把 Backup & Recovery 的 `start-authenticated-mesh` 产品行动改由拓扑中性的领域语义表达；两项均闭合后重新执行 A6 退出审计，不得直接进入 A7 |
+| 打开的单向桥 | 无已登记单向桥；P07、P09、P11 及 P12 三类 staging 的既有有限 Infrastructure 接管继续有效。本轮另将 Advancement Rubric 的 P06 CAS 需求收窄为 required `readByDigest/put` 端口；其恢复证据随本工作区等待复核 |
+| 已失效证据 | A6 聚合退出证据尚未形成。已接受 `A6-06d` 对 P06 需求侧无 File concrete 的结论被 Rubric 生产链反证，本工作区已作候选恢复；A6-01～06c、A6-07a～11c 的各自局部 owner/机制证据继续有效，但 A6-07a 与既有 Conversation、Backup & Recovery 证据不得再被外推为“领域和 Surface 已完全拓扑透明” |
+| 阻塞/用户决策 | 无用户决策阻塞；两个残余均可由 AE-001 唯一裁决，但属于相互独立的责任链，按工作包止损规则不得在 A6-12 合并实施 |
 
 ### A0 基线索引
 
@@ -2867,6 +2867,24 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据与门禁：DR target、installation、command、device cleanup、bootstrap、ApplicationHost和真实Infrastructure相交闭包7文件46/46通过；最终改动的target+Infrastructure闭包2文件11/11与device cleanup 1/1复取通过，paired backup真实bootstrap另2/2通过。CLI package-filtered TypeScript检查、fresh `pnpm cli:build`、`pnpm runtime:package-exports`通过；canonical S7最终57/57且registry golden通过。结构门禁新增反向mutation，拒绝需求侧path/File concrete、第二root/factory、Host重建或optional实例、恢复命令换实例、旧physical owner和cleanup集合漂移；首次S7只暴露既有recovery/planned inspector及其mutation仍匹配旧Host调用，更新为同一planned+DR实例的新生产图后不再改变生产实现。
 - 失效与下一检查点：若有限DR staging角色exact-set/frozen projection、唯一factory/canonical root、candidate/shared与private backing、512 GiB/1 MiB、transfer-id校验、Host/bootstrap/Assembly或恢复命令同实例传递与关闭、checkpoint import/promotion、P06 install/Trust/Secret/readiness/generation/receipt绑定、abort/post-install/current-device三类cleanup任一变化，只恢复本证据及真实相交的A0 D11/P12、A1 outer lifecycle或Device cleanup证据；A6-01～11b、P12 conversation/planned与其他P族不因无关变化自动失效。当前实施完成并等待协调者独立复核，A6继续`[ ]`；下一检查点仅冷启动审计A6可替换边缘与设备拓扑exact-set，不提前进入A7。本轮未执行Git暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：沿 recovery command、持久 ApplicationHost、recovery-root 前后 bootstrap、Anchor/Executor Assembly、DR target、checkpoint 私有导入、启动前 completion、post-install receipt 与 current-device cleanup 双向反查，确认需求侧只消费 required 的有限 staging 角色；canonical root、File WAL/CAS/receiver、路径校验、物理缓存、transfer 删除和整族有界删除仅存在于唯一 CLI Infrastructure adapter，同一实例由各生命周期持有并幂等关闭。独立运行 DR target/installation/command/device cleanup/bootstrap/ApplicationHost/Infrastructure 共 7 文件 46/46、paired backup bootstrap 2/2，CLI typecheck、fresh CLI build、canonical S7 57/57 与 registry golden、runtime package exports、concrete/path 反查及 `git diff --check` 均通过；P06 shared/private backing、512 GiB/1 MiB、checkpoint import、promotion、安装线性化、Trust/issuer key/readiness/generation/receipt、abort/post-install/current-device cleanup 语义无回退。A6-11c 可以提交，A6继续 `[ ]`。
+
+### A6-12：可替换边缘与设备拓扑 exact-set 冷启动收口审计
+
+- 基线、方法与裁决：以已接受 `HEAD dceef07d` 加协调者调度记录为基线，形成安全交接证据 `A6-12-replaceable-edges-topology-exact-set-audit-v1(partial)`。审计完整重读 AE-001 的 ApplicationHost、Infrastructure/Topology、Domain/Kernel 与 Device Administration 边界，并复用 A6-01～11c 已接受证据；只对 package 生产依赖、具体实现 import、Host 构造/同实例传递、领域/Surface 拓扑判别和 P01～P15 需求端反向消费者执行高信号静态回扫。结果不是“无遗漏”：E03 暴露一条同根 P06 具体实现泄漏并已在本工作区收口，E05 又暴露两条相互独立的现存产品拓扑残余，触发工作包止损规则，因此不得勾选 A6 或进入 A7。
+
+| AE-001 A6 退出要求 | 当前 owner / 组合事实 | 反向检查与直接证据 | 结论 |
+|---|---|---|---|
+| E01 Provider、Tool、MCP、Channel/Delivery effect 只在 Host/Infrastructure 边缘组合 | 具体 LLM Provider、内置工具、MCP host 与 Feishu runtime 仍只由 CLI Host 组合；Kernel/Advancement、产品工具投影、MCP demand 与 Channel/Delivery 分别消费 A6-01、03～05 形成的有限端口 | 从生产 package imports、四类 runtime 发放、Channel assembly 与 Delivery sender 反扫，未发现上层重新构造具体实现、反向 package 依赖或第二 effect owner；既有 S7 对应 mutation 仍覆盖 | 通过；既有证据未失效 |
+| E02 配置与秘密只形成用途明确、有限、冻结投影 | CLI Host 仍唯一读取完整 validated config/SecretStore，并按 Kernel、Provider、MCP、Surface 等用途投影；消费端不持来源、reload 或 backend 实现 | 反扫 config/secret aggregate、Provider credential 与 reload 消费，未发现 aggregate、具体 vault/backend 或可变共享投影逃出 A6-02 边界 | 通过；既有证据未失效 |
+| E03 P01～P15 物理持久机制只有唯一 Infrastructure owner，需求端只见 required readonly 有限端口 | A6-06、08～11 的 File/path/codec/lock/fsync/delete owner 继续成立；但 accepted baseline 上 Advancement Rubric demand 仍直接持有 `FileArtifactStore` 并调用 `referenceForDigest/get/put` | 本轮新增领域拥有的 `AdvancementRubricArtifactPort { readByDigest, put }`；唯一 CLI Authority 组合处从同一 CAS 构造冻结投影并 required 注入 Rubric reader/writer，controller/command 不再取得 File concrete。2 个 Rubric 直接测试 5/5、对应 S7 反向 mutation 1/1、canonical S7 57/57 与 registry golden、fresh package exports和全依赖 `pnpm build`通过 | 同根反证已形成待复核恢复；`A6-06d` 仅此结论在 accepted baseline 失效，其他 P01～P15 局部证据不受影响 |
+| E04 Executor/Mesh assignment、assets、checkpoint、pairing 与三类 staging 只经有限 Host 部署适配 | A6-07～11c 的 assignment data plane、workspace、Mesh bootstrap/pairing/assets、checkpoint 与 conversation/planned/DR staging 均由 CLI Host 创建并传递有限角色；Domain/Kernel 不掌握 File root、transport client 或物理删除 | 从 factory、constructor、same-instance handoff、close/cleanup 与需求端 import 反扫，未发现第二 factory、optional fallback、`Pick<concrete>`、路径推导或本机/远端第二业务实现 | 通过；既有证据未失效 |
+| E05 Domain、Kernel、Surface 不按 local/remote、Anchor/Executor、epoch/Mesh 决定产品语义；Device Administration 与连接/路由/执行分离 | Device Administration 与 Executor/Mesh mechanism 的既有 owner 分离成立，但聚合要求存在两条独立反证 | ① `ConversationAvailability` 仍公开 `anchor/local-only`，local directory 写入 `local-only`，CLI facade据此维护 `#localOnly/#localContinuation`、改写多个 RPC 的 `continueLocally`，controller 还据此决定继续确认；Surface 与 wire 因物理拓扑分支。② Backup & Recovery 领域把 `runtime-unavailable` 投影为产品行动 `start-authenticated-mesh`，领域公开结果直接使用 Mesh 部署术语。两项均为当前生产可达，不是命名推断 | **不通过**；两项是独立责任链，A6-12 不得合并修复。A6-07a 的 dispatch/mechanism owner 与 A5 的领域行为证据仍有效，但不能外推为拓扑透明 |
+| E06 唯一组合根、同实例生命周期与失败清理闭合，且无万能 Capability、第二 root 或未登记桥 | 三拓扑仍由唯一 `PersistentApplicationHost` 规划/装入；具体边缘实例在 Host 取得、失败补偿和 close 链有唯一 owner，需求合同保持分族 | 从 production root、role loader、instance handoff、cleanup owner、Capability/Storage 聚合和旧 bridge 名称反扫，未发现第二 Host、运行期服务定位、万能聚合或未登记兼容桥 | 通过；A1 与各 A6 生命周期证据未失效 |
+
+- P06 同根修复与旧路清理：`advancement-rubric-library.ts`、`advancement-controller.ts` 已删除 `FileArtifactStore` 类型依赖，`command.ts` 不再把 Authority stack 的 concrete CAS交给 Rubric；`setup-delivery.ts` 保留唯一物理 CAS owner并只投影当前需要的按 digest 读取与写入。S7 将端口 exact-set、required 注入、唯一投影和三条反向 mutation 绑到真实生产文件，可拒绝 concrete/Authority import、command 回接 `.artifacts` 或 optional port；没有建立第二 CAS、第二 Rubric 应用、根导出或通用 Storage facade。
+- 验证与边界：初次候选虽取得`pnpm build`和`pnpm runtime:package-exports`成功，却未检出`Object.freeze`对象字面量的两个隐式`any`，因此不能据此声称严格类型闭包成立；协调反证后以显式`AdvancementRubricArtifactPort`局部变量恢复上下文类型，未改端口、未使用`any`/断言或放宽配置。本次纠正后`@zhixing/core`与`@zhixing/cli`的`tsc --noEmit`均通过；从`packages/cli`直达运行Rubric测试2文件5/5，canonical `pnpm s7:lint` 57/57且registry golden通过，改动源码的最窄Biome检查与`git diff --check`通过。定向S7 mutation 1/1仍是未失效的前序直接证据；按纠正边界没有重跑build/exports，也没有运行根级test/lint、package check、制品验收或针对已确认静态反证的无价值产品全测；没有进入A7或新增能力。
+- 失效、状态与唯一下一步：若 Rubric artifact端口exact-set、唯一CLI投影/同CAS实例、required注入或S7 mutation变化，只恢复E03及相交的A6-06d；若Conversation availability/local continuation、RPC参数、Backup Recovery status/nextAction或其生产Surface变化，只恢复E05。A6继续`[ ]`、完成度保持`6/8`。下一包先收口Conversation对物理`local-only`的产品/Surface分支并保持现有显式继续行为；Backup Recovery的Mesh命名行动须另包收口。两条均完成后重新执行A6退出审计，不能直接开始A7。本轮未执行Git暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：逐项审阅有限端口、唯一 CAS 投影、Rubric 生产消费者与 S7 反向 mutation，确认 Advancement/Controller 不再取得 `FileArtifactStore`、Authority concrete 或物理引用查找能力，唯一 CLI Infrastructure 投影仍复用同一 CAS 且 required 注入。首次独立 CLI 类型检查准确反证 `Object.freeze` 对象字面量的两个隐式 `any`，退回原包后改为显式局部端口类型；协调者再次取得 CLI typecheck、Rubric 两文件 5/5、canonical S7 57/57、registry golden 与 `git diff --check` 全部通过。接受 A6-12 的 E03 修复和审计安全交接；E05 两条独立反证保持打开，A6 不得关闭。
 
 ## 十、用户提示词
 

@@ -1,11 +1,24 @@
 import { describe, expect, it, vi } from "vitest";
 import { FileArtifactStore } from "@zhixing/core/authority";
+import type { AdvancementRubricArtifactPort } from "@zhixing/core/advancement/application";
 import type { GlobalStatePort } from "@zhixing/core/contracts";
 import { createTempDir } from "@zhixing/test-utils";
 import type { RubricContractDraftSnapshot } from "@zhixing/core";
 import { GlobalRubricCatalog, GlobalRubricPublication } from "./advancement-rubric-library.js";
 
 const NOW = "2026-08-03T12:00:00.000Z";
+
+function projectRubricArtifacts(
+  artifacts: FileArtifactStore,
+): AdvancementRubricArtifactPort {
+  return {
+    readByDigest: async (digest) => {
+      const ref = await artifacts.referenceForDigest(digest);
+      return ref ? artifacts.get(ref) : undefined;
+    },
+    put: (bytes) => artifacts.put(bytes),
+  };
+}
 
 function draft(): RubricContractDraftSnapshot {
   return {
@@ -53,7 +66,7 @@ describe("advancement Rubric global adapters", () => {
     } as unknown as GlobalStatePort;
     const publication = new GlobalRubricPublication({
       globalState: () => state,
-      artifacts: () => artifacts,
+      artifacts: () => projectRubricArtifacts(artifacts),
       anchorEpoch: () => 4,
       now: () => NOW,
     });
@@ -97,7 +110,7 @@ describe("advancement Rubric global adapters", () => {
     } as unknown as GlobalStatePort;
     const catalog = new GlobalRubricCatalog({
       globalState: () => state,
-      artifacts: () => artifacts,
+      artifacts: () => projectRubricArtifacts(artifacts),
       anchorEpoch: () => 1,
       now: () => NOW,
     });

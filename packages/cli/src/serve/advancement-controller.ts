@@ -13,7 +13,6 @@ import type {
   ResourceReservationPort,
   SessionStatePort,
 } from "@zhixing/core/contracts";
-import type { FileArtifactStore } from "@zhixing/core/authority";
 import {
   assertAdvancementModelProviderBinding,
   type AdvancementModelProviderFactory,
@@ -27,6 +26,7 @@ import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-servic
 import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
 import type {
   AdvancementReviewAttemptApplication,
+  AdvancementRubricArtifactPort,
   RubricPublicationPort,
 } from "@zhixing/core/advancement/application";
 import {
@@ -58,7 +58,7 @@ export interface ServeAdvancementControllerDeps {
   readonly rubricRuntime?: () =>
     | {
         readonly globalState: GlobalStatePort;
-        readonly artifacts: FileArtifactStore;
+        readonly artifacts: AdvancementRubricArtifactPort;
         readonly anchorEpoch: number;
       }
     | undefined;

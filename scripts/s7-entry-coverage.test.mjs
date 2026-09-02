@@ -8318,6 +8318,9 @@ test("non-topology storage mechanisms stay behind finite Infrastructure edges", 
     "packages/secrets/src/vault-secret-store.ts",
     "packages/orchestrator/src/runtime/assignment-skill-port.ts",
     "packages/core/src/skills/catalog-application.ts",
+    "packages/core/src/advancement/application.ts",
+    "packages/cli/src/serve/advancement-rubric-library.ts",
+    "packages/cli/src/serve/advancement-controller.ts",
     "packages/cli/src/setup-delivery.ts",
     "packages/core/src/authority/artifact-store.ts",
     "packages/core/src/authority/commit-log.ts",
@@ -8389,6 +8392,33 @@ test("non-topology storage mechanisms stay behind finite Infrastructure edges", 
       (text) => `${text}\nconst leaked = new FileArtifactStore("authority");`,
     )).join("\n"),
     /P06 file concrete escaped|mechanism returned to a demand owner/,
+  );
+  assert.match(
+    inspectStorageRemainderBoundary(mutate(
+      "packages/cli/src/serve/advancement-rubric-library.ts",
+      (text) => `${text}\ntype LeakedRubricArtifacts = FileArtifactStore;`,
+    )).join("\n"),
+    /P06 Advancement Rubric artifact demand boundary drifted/,
+  );
+  assert.match(
+    inspectStorageRemainderBoundary(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "artifacts: authority.rubricArtifacts,",
+        "artifacts: authority.artifacts,",
+      ),
+    )).join("\n"),
+    /P06 Advancement Rubric artifact demand boundary drifted/,
+  );
+  assert.match(
+    inspectStorageRemainderBoundary(mutate(
+      "packages/cli/src/setup-delivery.ts",
+      (text) => text.replace(
+        "readonly rubricArtifacts: AdvancementRubricArtifactPort;",
+        "readonly rubricArtifacts?: AdvancementRubricArtifactPort;",
+      ),
+    )).join("\n"),
+    /P06 Advancement Rubric artifact demand boundary drifted/,
   );
   assert.match(
     inspectStorageRemainderBoundary(mutate(

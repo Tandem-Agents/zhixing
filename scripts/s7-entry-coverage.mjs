@@ -4371,6 +4371,15 @@ export function inspectStorageRemainderBoundary(records) {
     "packages/core/src/skills/catalog-application.ts",
   );
   const authoritySetup = required("packages/cli/src/setup-delivery.ts");
+  const advancementApplication = required(
+    "packages/core/src/advancement/application.ts",
+  );
+  const advancementRubricLibrary = required(
+    "packages/cli/src/serve/advancement-rubric-library.ts",
+  );
+  const advancementController = required(
+    "packages/cli/src/serve/advancement-controller.ts",
+  );
   const artifactStore = required("packages/core/src/authority/artifact-store.ts");
   const commitLog = required("packages/core/src/authority/commit-log.ts");
   const projection = required(
@@ -4466,6 +4475,42 @@ export function inspectStorageRemainderBoundary(records) {
     [["packages/core/src/authority/artifact-lifecycle-index.ts", 1]],
     "P06 ArtifactLifecycleIndex definition",
   );
+  const rubricPortStart = advancementApplication.indexOf(
+    "export interface AdvancementRubricArtifactPort",
+  );
+  const rubricPortEnd = advancementApplication.indexOf("\n}", rubricPortStart);
+  const rubricPort = rubricPortStart < 0 || rubricPortEnd < 0
+    ? ""
+    : advancementApplication.slice(rubricPortStart, rubricPortEnd);
+  if (
+    !rubricPort.includes(
+      "readByDigest(digest: Digest): Promise<Uint8Array | undefined>;",
+    ) ||
+    !rubricPort.includes("put(bytes: Uint8Array): Promise<ArtifactRef>;") ||
+    /FileArtifactStore|ArtifactStore|referenceForDigest|readRange|rootDir|path|\?:/u.test(
+      rubricPort,
+    ) ||
+    /FileArtifactStore|@zhixing\/core\/authority|referenceForDigest|Pick\s*</u.test(
+      `${advancementRubricLibrary}\n${advancementController}`,
+    ) ||
+    !advancementRubricLibrary.includes(
+      "readonly artifacts: () => AdvancementRubricArtifactPort | undefined;",
+    ) ||
+    !advancementRubricLibrary.includes(
+      "return this.#artifacts().readByDigest(digest);",
+    ) ||
+    !advancementController.includes(
+      "readonly artifacts: AdvancementRubricArtifactPort;",
+    ) ||
+    !authoritySetup.includes(
+      "readonly rubricArtifacts: AdvancementRubricArtifactPort;",
+    ) ||
+    count(authoritySetup, "projectAdvancementRubricArtifacts(") !== 2 ||
+    !authoritySetup.includes("const ref = await artifacts.referenceForDigest(digest);") ||
+    !anchor.includes("artifacts: authority.rubricArtifacts,")
+  ) {
+    failures.push("P06 Advancement Rubric artifact demand boundary drifted");
+  }
   const p06Concrete = /\b(?:FileArtifactStore|FileAuthorityCommitLog|FileDurableProjectionIndex|ArtifactLifecycleIndex)\b/u;
   const allowedP06Prefixes = [
     "packages/core/src/authority/",
