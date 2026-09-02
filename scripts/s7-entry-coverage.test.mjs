@@ -53,6 +53,7 @@ import {
   inspectLocalConversationOwnerIsolation,
   inspectManagedHostAssembly,
   inspectPlannedAnchorTransferAssembly,
+  inspectDisasterRecoveryStagingBoundary,
   inspectRecoveryBackupAssembly,
   inspectSkillCatalogApplicationOwnership,
   parseLandingRowIds,
@@ -2625,8 +2626,8 @@ test("planned duty migration stays bound to two production roots and a finite ow
     inspectPlannedAnchorTransferAssembly(mutate(
       "packages/cli/src/serve/application-host.ts",
       (text) => text.replace(
-        "#prepareMesh(deviceCapacity, plannedAnchorTransferStaging)",
-        "#prepareMesh(deviceCapacity, this.#dependencies.createPlannedAnchorTransferStaging({ zhixingHome: this.#input.zhixingHome }))",
+        "plannedAnchorTransferStaging,\n      disasterRecoveryStaging,",
+        "this.#dependencies.createPlannedAnchorTransferStaging({ zhixingHome: this.#input.zhixingHome }),\n      disasterRecoveryStaging,",
       ),
     )).join("\n"),
     /Host\/bootstrap required instance flow drifted/,
@@ -8444,5 +8445,82 @@ test("non-topology storage mechanisms stay behind finite Infrastructure edges", 
       (text) => `${text}\nclass StorageFacade {}`,
     )).join("\n"),
     /unified Storage facade returned/,
+  );
+});
+
+test("disaster-recovery staging keeps one physical adapter and required Host flow", async () => {
+  const paths = [
+    "packages/cli/src/serve/disaster-recovery-staging.ts",
+    "packages/cli/src/serve/disaster-recovery-staging-infrastructure.ts",
+    "packages/cli/src/serve/disaster-recovery-target.ts",
+    "packages/cli/src/serve/disaster-recovery-authority.ts",
+    "packages/cli/src/serve/disaster-recovery-candidate.ts",
+    "packages/cli/src/serve/disaster-recovery-installation.ts",
+    "packages/cli/src/serve/disaster-recovery-command.ts",
+    "packages/cli/src/serve/mesh-runtime-bootstrap.ts",
+    "packages/cli/src/serve/mesh-runtime-assembly.ts",
+    "packages/cli/src/serve/application-host.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/cli/src/serve/device-removal-cleanup.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: (await readFile(relative, "utf8")).replaceAll("\r\n", "\n"),
+  })));
+  assert.deepEqual(inspectDisasterRecoveryStagingBoundary(records), []);
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectDisasterRecoveryStagingBoundary(mutate(
+      "packages/cli/src/serve/disaster-recovery-target.ts",
+      (text) => `import path from "node:path";\n${text}`,
+    )).join("\n"),
+    /demand-side finite staging boundary drifted/,
+  );
+  assert.match(
+    inspectDisasterRecoveryStagingBoundary(mutate(
+      "packages/cli/src/serve/disaster-recovery-staging-infrastructure.ts",
+      (text) => text.replace('"disaster-recovery-staging"', '"anchor-transfer-staging"'),
+    )).join("\n"),
+    /unique physical ownership drifted/,
+  );
+  assert.match(
+    inspectDisasterRecoveryStagingBoundary(mutate(
+      "packages/cli/src/serve/application-host.ts",
+      (text) => text.replace(
+        "disasterRecoveryStaging,\n    );",
+        "this.#dependencies.createDisasterRecoveryStaging({ zhixingHome: this.#input.zhixingHome }),\n    );",
+      ),
+    )).join("\n"),
+    /Host\/bootstrap required instance flow drifted/,
+  );
+  assert.match(
+    inspectDisasterRecoveryStagingBoundary(mutate(
+      "packages/cli/src/serve/mesh-runtime-bootstrap.ts",
+      (text) => text.replace(
+        "readonly disasterRecoveryStaging: DisasterRecoveryStagingArea;",
+        "readonly disasterRecoveryStaging?: DisasterRecoveryStagingArea;",
+      ),
+    )).join("\n"),
+    /demand-side finite staging boundary drifted|Host\/bootstrap required instance flow drifted/,
+  );
+  assert.match(
+    inspectDisasterRecoveryStagingBoundary(mutate(
+      "packages/cli/src/serve/disaster-recovery-target.ts",
+      (text) => text.replace("await context.cleanupTransfer();", "await context.close();"),
+    )).join("\n"),
+    /demand-side finite staging boundary drifted|exact cleanup ownership drifted/,
+  );
+  assert.match(
+    inspectDisasterRecoveryStagingBoundary(mutate(
+      "packages/cli/src/serve/device-removal-cleanup.ts",
+      (text) => text.replace(
+        "await input.disasterRecoveryStaging.cleanupCurrentDevice(input.signal);",
+        "await input.disasterRecoveryStaging.close();",
+      ),
+    )).join("\n"),
+    /exact cleanup ownership drifted/,
   );
 });

@@ -1,4 +1,3 @@
-import path from "node:path";
 import type {
   ArtifactRef,
   AuthorityCatalog,
@@ -13,8 +12,7 @@ import type {
 } from "@zhixing/core/contracts";
 import {
   decodeCommitEnvelope,
-  FileArtifactStore,
-  FileResumableArtifactReceiver,
+  type ArtifactStore,
 } from "@zhixing/core/authority";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import {
@@ -41,9 +39,8 @@ import {
   type TrustProjection,
 } from "@zhixing/mesh/trust-chain";
 import { PendingObligationTracker } from "./planned-anchor-transfer.js";
+import type { DisasterRecoveryStagingReceiver } from "./disaster-recovery-staging.js";
 
-const PRIVATE_CHUNK_BYTES = 1024 * 1024;
-const PRIVATE_MAX_ARTIFACT_BYTES = 512 * 1024 * 1024 * 1024;
 const COVERAGE: AuthorityCatalog["coverage"] = Object.freeze([
   "conversation-authority",
   "conversation-content",
@@ -85,8 +82,8 @@ export async function verifyAndStageDisasterRecoveryAuthority(input: {
   readonly checkpoint: CheckpointPackage;
   readonly recoveryRoot: RecoveryRoot;
   readonly trustEvidence: readonly (readonly HomeTrustEvent[])[];
-  readonly privateArtifacts: FileArtifactStore;
-  readonly privatePartialsRoot?: string;
+  readonly privateArtifacts: ArtifactStore;
+  readonly privateReceiver: DisasterRecoveryStagingReceiver;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly signal?: AbortSignal;
   readonly now?: number;
@@ -96,14 +93,6 @@ export async function verifyAndStageDisasterRecoveryAuthority(input: {
   assertIdentity(input.targetDeviceId, "Recovery target device");
   assertIdentity(input.checkpointTargetId, "Recovery checkpoint target");
   const issuer = checkpointIssuer(input.checkpoint.envelope, input.trustEvidence);
-  const receiver = new FileResumableArtifactReceiver(
-    input.privateArtifacts,
-    input.privatePartialsRoot ?? path.join(input.privateArtifacts.rootDir, ".checkpoint-partials"),
-    {
-      maxArtifactBytes: PRIVATE_MAX_ARTIFACT_BYTES,
-      maxChunkBytes: PRIVATE_CHUNK_BYTES,
-    },
-  );
   const staged = await verifyStoredFullAuthorityCheckpoint({
     package: input.checkpoint,
     recoveryRoot: input.recoveryRoot,
@@ -112,7 +101,7 @@ export async function verifyAndStageDisasterRecoveryAuthority(input: {
       write: async (content, offset, bytes, signal) => {
         if (signal?.aborted) throw signal.reason ?? new Error("Recovery import was cancelled");
         if (await input.privateArtifacts.has(content.ref)) return;
-        await receiver.append(
+        await input.privateReceiver.append(
           content.ref,
           offset,
           bytes,
@@ -258,7 +247,7 @@ export async function buildDisasterRecoveryCatalog(input: {
   readonly baselineEvents: readonly HomeTrustEvent[];
   readonly trust: TrustProjection;
   readonly payload: FullAuthorityCheckpointPayload;
-  readonly privateArtifacts: FileArtifactStore;
+  readonly privateArtifacts: ArtifactStore;
 }): Promise<{
   readonly authorityRecords: DisasterAuthorityRecordSet;
   readonly authorityRecordsRef: ArtifactRef;
@@ -365,7 +354,7 @@ export async function buildDisasterRecoveryCatalog(input: {
 }
 
 export async function* disasterAuthorityEnvelopes(
-  artifacts: FileArtifactStore,
+  artifacts: ArtifactStore,
   records: DisasterAuthorityRecordSet,
 ): AsyncGenerator<CommitEnvelope<unknown>> {
   let expectedLsn = 1;
@@ -415,7 +404,7 @@ export function parseDisasterAuthorityRecordSet(
 }
 
 async function readAuthorityPage(
-  artifacts: FileArtifactStore,
+  artifacts: ArtifactStore,
   ref: ArtifactRef,
 ): Promise<readonly CommitEnvelope<unknown>[]> {
   const bytes = await artifacts.get(ref);
@@ -429,7 +418,7 @@ async function readAuthorityPage(
 }
 
 async function readCheckpointTrustEvents(
-  artifacts: FileArtifactStore,
+  artifacts: ArtifactStore,
   payload: FullAuthorityCheckpointPayload,
 ): Promise<readonly HomeTrustEvent[]> {
   const events: HomeTrustEvent[] = [];

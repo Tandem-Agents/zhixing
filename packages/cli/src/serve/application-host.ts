@@ -21,6 +21,10 @@ import {
 } from "./planned-anchor-transfer-staging-infrastructure.js";
 import type { PlannedAnchorTransferStagingArea } from "./planned-anchor-transfer.js";
 import {
+  createDisasterRecoveryStagingInfrastructure,
+} from "./disaster-recovery-staging-infrastructure.js";
+import type { DisasterRecoveryStagingArea } from "./disaster-recovery-staging.js";
+import {
   planServeTopology,
   type AnchorServeBootstrapContext,
   type ExecutorRoleModule,
@@ -75,6 +79,8 @@ export interface PersistentApplicationHostDependencies<Options> {
   readonly prepareMesh: typeof prepareMeshRuntimeBootstrap;
   readonly createPlannedAnchorTransferStaging:
     typeof createPlannedAnchorTransferStagingInfrastructure;
+  readonly createDisasterRecoveryStaging:
+    typeof createDisasterRecoveryStagingInfrastructure;
   readonly createRecoveryRootPairedCheckpointReceiver:
     typeof createRecoveryRootPairedCheckpointCommandReceiverInfrastructure;
   readonly runRecoveryRoot: typeof runRecoveryRootEstablishmentTopology;
@@ -105,6 +111,9 @@ export class PersistentApplicationHost<Options> {
   #mesh: (OwnedResource & { readonly value: MeshRuntimeBootstrap }) | undefined;
   #plannedAnchorTransferStaging:
     | (OwnedResource & { readonly value: PlannedAnchorTransferStagingArea })
+    | undefined;
+  #disasterRecoveryStaging:
+    | (OwnedResource & { readonly value: DisasterRecoveryStagingArea })
     | undefined;
   #localWorkspaceOwner:
     | (OwnedResource & { readonly value: Exclude<LocalWorkspaceOwner, undefined> })
@@ -171,7 +180,19 @@ export class PersistentApplicationHost<Options> {
       plannedAnchorTransferStaging,
       () => plannedAnchorTransferStaging.close(),
     );
-    let mesh = await this.#prepareMesh(deviceCapacity, plannedAnchorTransferStaging);
+    const disasterRecoveryStaging = this.#dependencies.createDisasterRecoveryStaging({
+      zhixingHome: this.#input.zhixingHome,
+      storageMaintenance: deviceCapacity.storage,
+    });
+    this.#disasterRecoveryStaging = own(
+      disasterRecoveryStaging,
+      () => disasterRecoveryStaging.close(),
+    );
+    let mesh = await this.#prepareMesh(
+      deviceCapacity,
+      plannedAnchorTransferStaging,
+      disasterRecoveryStaging,
+    );
 
     if (requiresRecoveryRootEstablishment(mesh)) {
       this.#input.onRecoveryRootRequired();
@@ -189,7 +210,11 @@ export class PersistentApplicationHost<Options> {
         pairedCheckpointReceiver,
       });
       await this.#releaseCurrentMesh();
-      mesh = await this.#prepareMesh(deviceCapacity, plannedAnchorTransferStaging);
+      mesh = await this.#prepareMesh(
+        deviceCapacity,
+        plannedAnchorTransferStaging,
+        disasterRecoveryStaging,
+      );
       if (!hasEstablishedRecoveryRoot(mesh)) {
         throw new Error("恢复根激活后未形成可运行的耐久信任状态");
       }
@@ -279,12 +304,14 @@ export class PersistentApplicationHost<Options> {
   async #prepareMesh(
     deviceCapacity: DeviceCapacityRuntime,
     plannedAnchorTransferStaging: PlannedAnchorTransferStagingArea,
+    disasterRecoveryStaging: DisasterRecoveryStagingArea,
   ): Promise<MeshRuntimeBootstrap> {
     const mesh = await this.#dependencies.prepareMesh({
       zhixingHome: this.#input.zhixingHome,
       secretStore: this.#input.secretStore,
       storageMaintenance: deviceCapacity.storage,
       plannedAnchorTransferStaging,
+      disasterRecoveryStaging,
       ...(this.#configuration.topology.mesh
         ? { configuration: this.#configuration.topology.mesh }
         : {}),
@@ -307,6 +334,11 @@ export class PersistentApplicationHost<Options> {
     const failures: unknown[] = [];
     for (const release of [
       () => this.#releaseCurrentMesh(),
+      async () => {
+        const owner = this.#disasterRecoveryStaging;
+        this.#disasterRecoveryStaging = undefined;
+        if (owner) await releaseOnce(owner);
+      },
       async () => {
         const owner = this.#plannedAnchorTransferStaging;
         this.#plannedAnchorTransferStaging = undefined;
@@ -337,6 +369,8 @@ export function createPersistentApplicationHost(
     prepareMesh: prepareMeshRuntimeBootstrap,
     createPlannedAnchorTransferStaging:
       createPlannedAnchorTransferStagingInfrastructure,
+    createDisasterRecoveryStaging:
+      createDisasterRecoveryStagingInfrastructure,
     createRecoveryRootPairedCheckpointReceiver:
       createRecoveryRootPairedCheckpointCommandReceiverInfrastructure,
     runRecoveryRoot: runRecoveryRootEstablishmentTopology,

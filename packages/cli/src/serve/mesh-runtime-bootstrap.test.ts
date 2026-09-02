@@ -12,17 +12,24 @@ import { describe, expect, it, vi } from "vitest";
 import { prepareMeshRuntimeBootstrap as prepareProductionMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import { activateInitialRecoveryRoot } from "./mesh-pair-command.js";
 import { createPlannedAnchorTransferStagingInfrastructure } from "./planned-anchor-transfer-staging-infrastructure.js";
+import { createDisasterRecoveryStagingInfrastructure } from "./disaster-recovery-staging-infrastructure.js";
 import { createTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";
 
 vi.setConfig({ testTimeout: 30_000 });
 
 function prepareMeshRuntimeBootstrap(
   input: Omit<Parameters<typeof prepareProductionMeshRuntimeBootstrap>[0],
-    "plannedAnchorTransferStaging">,
+    "plannedAnchorTransferStaging" | "disasterRecoveryStaging">,
 ) {
   return prepareProductionMeshRuntimeBootstrap({
     ...input,
     plannedAnchorTransferStaging: createPlannedAnchorTransferStagingInfrastructure({
+      zhixingHome: input.zhixingHome,
+      ...(input.storageMaintenance
+        ? { storageMaintenance: input.storageMaintenance }
+        : {}),
+    }),
+    disasterRecoveryStaging: createDisasterRecoveryStagingInfrastructure({
       zhixingHome: input.zhixingHome,
       ...(input.storageMaintenance
         ? { storageMaintenance: input.storageMaintenance }

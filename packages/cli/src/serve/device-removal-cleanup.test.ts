@@ -6,6 +6,7 @@ import { persistDeviceKey } from "@zhixing/mesh/device-key-store";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { cleanupExecutorDeviceLocalState } from "./device-removal-cleanup.js";
+import { createDisasterRecoveryStagingInfrastructure } from "./disaster-recovery-staging-infrastructure.js";
 
 describe("executor device local cleanup", () => {
   it("removes only the frozen home-local projections and preserves authority, checkpoints and the exact device key", async () => {
@@ -20,6 +21,13 @@ describe("executor device local cleanup", () => {
     }
     await putFile(path.join(home, "runtime", "ephemeral.json"), "remove");
     await putFile(path.join(home, "distributed-runtime", "workspace-bindings", "binding.json"), "remove");
+    await putFile(path.join(
+      home,
+      "distributed-runtime",
+      "disaster-recovery-staging",
+      "candidate-claims",
+      "candidate.json",
+    ), "remove");
     await putFile(path.join(home, "distributed-runtime", "authority", "authority.keep"), "keep");
     await putFile(path.join(home, "recovery-checkpoints", "checkpoint.keep"), "keep");
     await putFile(path.join(home, "workspace", "user.keep"), "keep");
@@ -29,6 +37,9 @@ describe("executor device local cleanup", () => {
       zhixingHome: home,
       secretStore: secrets,
       deviceKey,
+      disasterRecoveryStaging: createDisasterRecoveryStagingInfrastructure({
+        zhixingHome: home,
+      }),
       unregisterFuture,
     });
 
@@ -39,6 +50,13 @@ describe("executor device local cleanup", () => {
       .rejects.toMatchObject({ code: "ENOENT" });
     await expect(readFile(path.join(home, "distributed-runtime", "workspace-bindings", "binding.json")))
       .rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(path.join(
+      home,
+      "distributed-runtime",
+      "disaster-recovery-staging",
+      "candidate-claims",
+      "candidate.json",
+    ))).rejects.toMatchObject({ code: "ENOENT" });
     await expect(readFile(path.join(home, "distributed-runtime", "authority", "authority.keep"), "utf8"))
       .resolves.toBe("keep");
     await expect(readFile(path.join(home, "recovery-checkpoints", "checkpoint.keep"), "utf8"))

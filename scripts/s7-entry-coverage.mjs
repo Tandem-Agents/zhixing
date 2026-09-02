@@ -3948,6 +3948,7 @@ export async function validateS7Structure() {
     },
   ]));
   failures.push(...inspectPlannedAnchorTransferAssembly(records));
+  failures.push(...inspectDisasterRecoveryStagingBoundary(records));
   failures.push(...inspectManagedHostAssembly(records));
   failures.push(...inspectDeviceLifecycleAssembly(records));
   failures.push(...inspectDeviceAdministrationReadOwnership([
@@ -9642,7 +9643,7 @@ export function inspectRecoveryBackupAssembly(records) {
   const limitedBranch = applicationHost.indexOf("await this.#dependencies.runRecoveryRoot({");
   const oldBootstrapStop = applicationHost.indexOf("await this.#releaseCurrentMesh();");
   const residentBootstrap = applicationHost.indexOf(
-    "mesh = await this.#prepareMesh(deviceCapacity, plannedAnchorTransferStaging);",
+    "mesh = await this.#prepareMesh(",
     oldBootstrapStop,
   );
   const workspaceAdmission = applicationHost.indexOf(
@@ -9660,10 +9661,9 @@ export function inspectRecoveryBackupAssembly(records) {
     failures.push("trusted-home root establishment must remain a finite pre-business topology");
   }
   if (
-    count(
-      applicationHost,
-      "await this.#prepareMesh(deviceCapacity, plannedAnchorTransferStaging)",
-    ) !== 2 ||
+    [...applicationHost.matchAll(
+      /await this\.#prepareMesh\(\s*deviceCapacity,\s*plannedAnchorTransferStaging,\s*disasterRecoveryStaging,\s*\)/gu,
+    )].length !== 2 ||
     !rootEstablishment.includes("watchTrust: false") ||
     !backup.includes("watchTrust: false") ||
     !controlPlane.includes("this.options.watchTrust !== false")
@@ -9866,7 +9866,7 @@ export function inspectRecoveryBackupAssembly(records) {
     'candidate.terminal(input.abort.transferId, "aborted", abort)',
   );
   const abortCleanup = disasterTarget.indexOf(
-    'rm(path.join(this.options.stagingRoot, "transfers", input.abort.transferId)',
+    "await context.cleanupTransfer()",
     abortTerminal,
   );
   const abortKeyLoad = disasterTarget.indexOf(
@@ -10252,6 +10252,129 @@ export function inspectRecoveryBackupAssembly(records) {
   return failures;
 }
 
+export function inspectDisasterRecoveryStagingBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const text = byPath.get(relative);
+    if (text === undefined) failures.push(`${relative}: disaster-recovery staging source is missing`);
+    return text ?? "";
+  };
+  const boundary = required("packages/cli/src/serve/disaster-recovery-staging.ts");
+  const infrastructure = required(
+    "packages/cli/src/serve/disaster-recovery-staging-infrastructure.ts",
+  );
+  const target = required("packages/cli/src/serve/disaster-recovery-target.ts");
+  const authority = required("packages/cli/src/serve/disaster-recovery-authority.ts");
+  const candidate = required("packages/cli/src/serve/disaster-recovery-candidate.ts");
+  const installation = required("packages/cli/src/serve/disaster-recovery-installation.ts");
+  const command = required("packages/cli/src/serve/disaster-recovery-command.ts");
+  const bootstrap = required("packages/cli/src/serve/mesh-runtime-bootstrap.ts");
+  const assembly = required("packages/cli/src/serve/mesh-runtime-assembly.ts");
+  const applicationHost = required("packages/cli/src/serve/application-host.ts");
+  const accessRoot = required("packages/cli/src/serve/access-surfaces.ts");
+  const executorRoot = required("packages/cli/src/serve/executor-role-runtime.ts");
+  const cleanup = required("packages/cli/src/serve/device-removal-cleanup.ts");
+  const count = (text, token) => text.split(token).length - 1;
+  if (failures.length > 0) return failures;
+
+  const factories = records.filter(({ text }) =>
+    text.includes("export function createDisasterRecoveryStagingInfrastructure("));
+  if (
+    factories.length !== 1 ||
+    factories[0]?.relative !==
+      "packages/cli/src/serve/disaster-recovery-staging-infrastructure.ts" ||
+    count(infrastructure, '"disaster-recovery-staging"') !== 1 ||
+    count(infrastructure, "new FileArtifactStore(") !== 1 ||
+    count(infrastructure, "new FileAuthorityCommitLog(") !== 2 ||
+    count(infrastructure, "new FileResumableArtifactReceiver(") !== 2 ||
+    count(
+      infrastructure,
+      "MAX_DISASTER_RECOVERY_ARTIFACT_BYTES = 512 * 1024 * 1024 * 1024",
+    ) !== 1 ||
+    count(infrastructure, "DISASTER_RECOVERY_CHUNK_BYTES = 1024 * 1024") !== 1 ||
+    !infrastructure.includes('path.join(root, "candidate-claims")') ||
+    !infrastructure.includes('transferPath(root, "journals", input.transferId)') ||
+    !infrastructure.includes('transferPath(root, "transfers", input.transferId)') ||
+    !infrastructure.includes('path.join(transferRoot, "artifacts")') ||
+    !infrastructure.includes('path.join(transferRoot, "partials")') ||
+    !infrastructure.includes('path.join(transferRoot, "promotion-partials")') ||
+    !infrastructure.includes("await rm(transferRoot, { recursive: true, force: true })") ||
+    !infrastructure.includes("const walker = new BoundedRemovalWalker(root)") ||
+    /anchor-transfer-staging|conversation-transfer-staging/u.test(infrastructure)
+  ) {
+    failures.push("disaster-recovery staging unique physical ownership drifted");
+  }
+
+  const consumers = [target, authority, candidate, installation, bootstrap, assembly, cleanup];
+  if (
+    /from\s+["']node:(?:fs|fs\/promises|path)["']/u.test(
+      [target, authority, candidate, installation].join("\n"),
+    ) ||
+    /FileArtifactStore|FileAuthorityCommitLog|FileResumableArtifactReceiver|stagingRoot|privatePartialsRoot/u.test(
+      [target, authority, candidate, installation].join("\n"),
+    ) ||
+    consumers.some((text) => /readonly disasterRecoveryStaging\?/u.test(text)) ||
+    count(boundary, "export interface DisasterRecoveryStagingArea {") !== 1 ||
+    count(boundary, "cleanupPostInstall(transferId: string): Promise<void>;") !== 1 ||
+    count(boundary, "cleanupCurrentDevice(signal?: AbortSignal): Promise<void>;") !== 1 ||
+    count(target, "readonly staging: DisasterRecoveryStagingArea;") !== 3 ||
+    count(target, "this.#staging = options.staging.openTarget({") !== 1 ||
+    count(target, "privateReceiver: context.privateImport") !== 1 ||
+    count(target, "await context.cleanupTransfer()") !== 1 ||
+    count(target, "await input.staging.cleanupPostInstall(input.transferId)") !== 1
+  ) {
+    failures.push("disaster-recovery demand-side finite staging boundary drifted");
+  }
+
+  if (
+    count(applicationHost, "createDisasterRecoveryStagingInfrastructure,") !== 2 ||
+    count(applicationHost, "createDisasterRecoveryStaging({") !== 1 ||
+    count(applicationHost, "disasterRecoveryStaging,") !== 4 ||
+    count(bootstrap, "readonly disasterRecoveryStaging: DisasterRecoveryStagingArea;") !== 3 ||
+    count(bootstrap, "disasterRecoveryStaging: input.disasterRecoveryStaging") !== 2 ||
+    count(bootstrap, "staging: input.disasterRecoveryStaging") !== 1 ||
+    count(assembly, "readonly disasterRecoveryStaging: DisasterRecoveryStagingArea;") !== 1 ||
+    count(assembly, "staging: this.options.disasterRecoveryStaging") !== 2 ||
+    count(accessRoot, "disasterRecoveryStaging: bootstrap.disasterRecoveryStaging") !== 1 ||
+    count(executorRoot, "disasterRecoveryStaging: bootstrap.mesh.disasterRecoveryStaging") !== 2
+  ) {
+    failures.push("disaster-recovery Host/bootstrap required instance flow drifted");
+  }
+  const meshRelease = applicationHost.indexOf("() => this.#releaseCurrentMesh()");
+  const disasterRelease = applicationHost.indexOf("const owner = this.#disasterRecoveryStaging");
+  const workspaceRelease = applicationHost.indexOf("const owner = this.#localWorkspaceOwner");
+  if (
+    meshRelease < 0 || disasterRelease < meshRelease || workspaceRelease < disasterRelease ||
+    count(applicationHost, "() => disasterRecoveryStaging.close()") !== 1 ||
+    count(command, "createDisasterRecoveryStagingInfrastructure({") !== 1 ||
+    count(command, "disasterRecoveryStaging: context.disasterRecoveryStaging") !== 2 ||
+    count(command, "staging: context.disasterRecoveryStaging") !== 1 ||
+    count(command, "await context.disasterRecoveryStaging.close()") !== 2
+  ) {
+    failures.push("disaster-recovery staging lifecycle or recovery-command identity drifted");
+  }
+
+  if (
+    count(cleanup, "readonly disasterRecoveryStaging: DisasterRecoveryStagingArea;") !== 1 ||
+    count(cleanup, "await input.disasterRecoveryStaging.cleanupCurrentDevice(input.signal)") !== 1 ||
+    count(cleanup, '"distributed-runtime/disaster-recovery-staging"') !== 1 ||
+    cleanup.includes('path.join(distributed, "disaster-recovery-staging")') ||
+    count(infrastructure, "async cleanupPostInstall(transferId: string): Promise<void>") !== 1 ||
+    count(infrastructure, "async cleanupCurrentDevice(signal?: AbortSignal): Promise<void>") !== 1 ||
+    count(target, "await context.cleanupTransfer()") !== 1 ||
+    count(target, "await input.staging.cleanupPostInstall(input.transferId)") !== 1
+  ) {
+    failures.push("disaster-recovery exact cleanup ownership drifted");
+  }
+
+  const retired = /FileDisasterRecoveryCandidateJournal|FileDisasterRecoveryTransferJournal/u;
+  if (records.some(({ text }) => retired.test(text))) {
+    failures.push("disaster-recovery retired physical owner returned");
+  }
+  return failures;
+}
+
 export function inspectPlannedAnchorTransferAssembly(records) {
   const failures = [];
   const byPath = new Map(records.map((record) => [record.relative, record.text]));
@@ -10389,10 +10512,9 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   if (
     count(applicationHost, "createPlannedAnchorTransferStagingInfrastructure,") !== 2 ||
     count(applicationHost, "createPlannedAnchorTransferStaging({") !== 1 ||
-    count(
-      applicationHost,
-      "#prepareMesh(deviceCapacity, plannedAnchorTransferStaging)",
-    ) !== 2 ||
+    [...applicationHost.matchAll(
+      /await this\.#prepareMesh\(\s*deviceCapacity,\s*plannedAnchorTransferStaging,\s*disasterRecoveryStaging,\s*\)/gu,
+    )].length !== 2 ||
     count(applicationHost, "plannedAnchorTransferStaging.close()") !== 1 ||
     count(
       bootstrap,

@@ -55,8 +55,12 @@ describe("persistent ApplicationHost outer lifecycle", () => {
         expect(harness.createToolImplementation).toHaveBeenCalledOnce();
         expect(harness.createPlannedAnchorTransferStaging).toHaveBeenCalledOnce();
         expect(harness.closePlannedAnchorTransferStaging).toHaveBeenCalledOnce();
+        expect(harness.createDisasterRecoveryStaging).toHaveBeenCalledOnce();
+        expect(harness.closeDisasterRecoveryStaging).toHaveBeenCalledOnce();
         expect(harness.prepareMesh.mock.calls[0]?.[0].plannedAnchorTransferStaging)
           .toBe(harness.plannedAnchorTransferStaging);
+        expect(harness.prepareMesh.mock.calls[0]?.[0].disasterRecoveryStaging)
+          .toBe(harness.disasterRecoveryStaging);
         expect(harness.roleBootstrap?.mesh.plannedAnchorTransferStaging)
           .toBe(harness.plannedAnchorTransferStaging);
         expect(harness.roleBootstrap?.toolImplementation)
@@ -157,8 +161,14 @@ describe("persistent ApplicationHost outer lifecycle", () => {
       .toBe(harness.plannedAnchorTransferStaging);
     expect(harness.prepareMesh.mock.calls[1]?.[0].plannedAnchorTransferStaging)
       .toBe(harness.plannedAnchorTransferStaging);
+    expect(harness.prepareMesh.mock.calls[0]?.[0].disasterRecoveryStaging)
+      .toBe(harness.disasterRecoveryStaging);
+    expect(harness.prepareMesh.mock.calls[1]?.[0].disasterRecoveryStaging)
+      .toBe(harness.disasterRecoveryStaging);
     expect(harness.createPlannedAnchorTransferStaging).toHaveBeenCalledOnce();
     expect(harness.closePlannedAnchorTransferStaging).toHaveBeenCalledOnce();
+    expect(harness.createDisasterRecoveryStaging).toHaveBeenCalledOnce();
+    expect(harness.closeDisasterRecoveryStaging).toHaveBeenCalledOnce();
     expect(harness.roleInvocations()).toBe(1);
     expect(harness.meshStops).toHaveLength(2);
     expect(harness.meshStops[0]).toHaveBeenCalledOnce();
@@ -384,6 +394,14 @@ function createHarness(input: {
   } as never;
   const createPlannedAnchorTransferStaging = vi.fn(() =>
     plannedAnchorTransferStaging);
+  const closeDisasterRecoveryStaging = vi.fn(async () => undefined);
+  const disasterRecoveryStaging = {
+    openTarget: vi.fn(),
+    cleanupPostInstall: vi.fn(),
+    cleanupCurrentDevice: vi.fn(),
+    close: closeDisasterRecoveryStaging,
+  } as never;
+  const createDisasterRecoveryStaging = vi.fn(() => disasterRecoveryStaging);
   const meshes = input.recoveryRequired
     ? [createMesh(false), createMesh(true)]
     : [createMesh(true)];
@@ -449,6 +467,7 @@ function createHarness(input: {
     },
     prepareMesh: prepareMesh as never,
     createPlannedAnchorTransferStaging,
+    createDisasterRecoveryStaging,
     createRecoveryRootPairedCheckpointReceiver,
     runRecoveryRoot: runRecoveryRoot as never,
     acquireLocalWorkspaceOwner: (async (_home, roles) => {
@@ -483,6 +502,9 @@ function createHarness(input: {
     importExecutorModule,
     createToolImplementation,
     createPlannedAnchorTransferStaging,
+    createDisasterRecoveryStaging,
+    closeDisasterRecoveryStaging,
+    disasterRecoveryStaging,
     closePlannedAnchorTransferStaging,
     plannedAnchorTransferStaging,
     toolImplementation,
@@ -516,6 +538,7 @@ function createHarness(input: {
       },
       bootstrapStore: { stopStorageMaintenance: stop },
       plannedAnchorTransferStaging,
+      disasterRecoveryStaging,
     } as unknown as MeshRuntimeBootstrap;
   }
 }

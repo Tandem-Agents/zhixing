@@ -1,7 +1,6 @@
-import path from "node:path";
-import { rm } from "node:fs/promises";
 import type {
   ArtifactRef,
+  CommitEnvelope,
   DeviceIdentity,
   DisasterRecoveryCommand,
   CredentialExposureRecord,
@@ -11,10 +10,9 @@ import type {
   SecretStorePort,
   TransferRecord,
 } from "@zhixing/core/contracts";
-import {
-  FileArtifactStore,
-  FileAuthorityCommitLog,
-  FileResumableArtifactReceiver,
+import type {
+  ArtifactStore,
+  PlannedAnchorPrefixInstallation,
 } from "@zhixing/core/authority";
 import {
   runStorageMaintenanceStep,
@@ -73,7 +71,6 @@ import {
   verifyAndStageDisasterRecoveryAuthority,
 } from "./disaster-recovery-authority.js";
 import {
-  FileDisasterRecoveryCandidateJournal,
   type DisasterRecoveryCandidateState,
   type DisasterRecoveryInstallDecision,
   type DisasterRecoveryVerifiedCandidate,
@@ -83,15 +80,21 @@ import {
   loadDisasterRecoveryPostInstallReceipt,
   loadCurrentDisasterRecoveryInstallation,
   recordDisasterRecoveryPostInstallReceipt,
+  type DisasterRecoveryAuthorityProjectionPort,
   type DisasterRecoveryInstallation,
 } from "./disaster-recovery-installation.js";
-import type { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import type { DisasterRecoveryReachabilityEvidence } from
   "./disaster-recovery-trust-evidence.js";
+import type {
+  DisasterRecoveryCandidateJournalPort,
+  DisasterRecoveryJournalStorage,
+  DisasterRecoveryStagingArea,
+  DisasterRecoveryTargetStaging,
+  DisasterRecoveryTransferStagingSession,
+} from "./disaster-recovery-staging.js";
 
 const DISASTER_TRANSFER_STREAM = "transfer:anchor-disaster";
 const TRANSFER_CHUNK_BYTES = 1024 * 1024;
-const MAX_TRANSFER_ARTIFACT_BYTES = 512 * 1024 * 1024 * 1024;
 
 export const DISASTER_RECOVERY_TARGET_DESCRIPTOR = Object.freeze({
   owner: "eligible-recovery-target",
@@ -139,9 +142,9 @@ export interface DisasterRecoveryPostInstallDescriptor {
   readonly requiresPostInstallCompletion: boolean;
 }
 
-export class FileDisasterRecoveryTransferJournal {
+export class DisasterRecoveryTransferJournal {
   constructor(
-    private readonly log: FileAuthorityCommitLog,
+    private readonly log: DisasterRecoveryJournalStorage,
     private readonly verifiers: DisasterRecoveryVerifiers,
     private readonly now: () => number = Date.now,
   ) {}
@@ -210,15 +213,31 @@ export class FileDisasterRecoveryTransferJournal {
   }
 }
 
+export interface DisasterRecoveryInstallAuthorityPort
+  extends DisasterRecoveryAuthorityProjectionPort {
+  installPlannedAnchorPrefix<Body>(
+    input: PlannedAnchorPrefixInstallation<Body>,
+  ): Promise<CommitEnvelope<Body>>;
+}
+
+export interface DisasterRecoveryBootstrapStorePort {
+  authorityLog(): DisasterRecoveryInstallAuthorityPort;
+  artifactStore(): ArtifactStore;
+  loadTrustRecord(): Promise<HomeTrustRecord | undefined>;
+  bindIssuerKey(key: DeviceKey): void;
+}
+
 export class DisasterRecoveryTarget {
+  readonly #staging: DisasterRecoveryTargetStaging;
+
   constructor(private readonly options: {
     readonly deviceId: string;
     readonly identity: DeviceIdentity;
     readonly identityKey: DeviceKey;
     readonly secretStore: SecretStorePort;
-    readonly sharedArtifacts: FileArtifactStore;
-    readonly authorityLog: FileAuthorityCommitLog;
-    readonly stagingRoot: string;
+    readonly sharedArtifacts: ArtifactStore;
+    readonly authorityLog: DisasterRecoveryInstallAuthorityPort;
+    readonly staging: DisasterRecoveryStagingArea;
     readonly readiness: PlannedAnchorReadinessPort;
     readonly storageMaintenance?: StorageMaintenanceGovernorPort;
     readonly now?: () => number;
@@ -229,6 +248,13 @@ export class DisasterRecoveryTarget {
     ) {
       throw new TypeError("Disaster recovery target identity is inconsistent");
     }
+    this.#staging = options.staging.openTarget({
+      sharedArtifacts: options.sharedArtifacts,
+    });
+  }
+
+  close(): Promise<void> {
+    return this.#staging.close();
   }
 
   async prepareAndImport(input: {
@@ -246,7 +272,7 @@ export class DisasterRecoveryTarget {
     if (input.checkpoint.envelope.digest !== input.prepare.checkpointEnvelope.digest) {
       throw new TypeError("Disaster recovery checkpoint changes its originating prepare identity");
     }
-    const candidate = this.#candidateFor(input.recoveryRoot.rootPublicKey);
+    const candidate = this.#staging.candidateFor(input.recoveryRoot.rootPublicKey);
     const claimed = await candidate.claim(input.prepare);
     if (claimed.terminal === "aborted") {
       throw new Error("Disaster recovery candidate was durably aborted");
@@ -282,7 +308,7 @@ export class DisasterRecoveryTarget {
       recoveryRoot: input.recoveryRoot,
       trustEvidence: input.trustEvidence.evidence.map((item) => item.events),
       privateArtifacts: context.artifacts,
-      privatePartialsRoot: path.join(context.root, "partials"),
+      privateReceiver: context.privateImport,
       ...(this.options.storageMaintenance
         ? { storageMaintenance: this.options.storageMaintenance }
         : {}),
@@ -336,9 +362,8 @@ export class DisasterRecoveryTarget {
     readonly prepare: PrepareCommand;
     readonly candidate: DisasterRecoveryCandidateState;
     readonly context: {
-      readonly root: string;
-      readonly artifacts: FileArtifactStore;
-      readonly journal: FileDisasterRecoveryTransferJournal;
+      readonly artifacts: ArtifactStore;
+      readonly journal: DisasterRecoveryTransferStagingSession["journal"];
     };
     readonly recoveryRoot: RecoveryRoot;
   }): Promise<DisasterRecoveryImportedState> {
@@ -456,7 +481,7 @@ export class DisasterRecoveryTarget {
   }
 
   async #readVerifiedCandidateArtifacts(
-    privateArtifacts: FileArtifactStore,
+    privateArtifacts: ArtifactStore,
     verified: DisasterRecoveryVerifiedCandidate,
     allowShared: boolean,
   ): Promise<{ readonly authorityRecords: DisasterAuthorityRecordSet }> {
@@ -501,7 +526,7 @@ export class DisasterRecoveryTarget {
     readonly trustRecord: HomeTrustRecord;
     readonly installation: DisasterRecoveryInstallation;
   }> {
-    const candidate = this.#candidateFor(input.recoveryRoot.rootPublicKey);
+    const candidate = this.#staging.candidateFor(input.recoveryRoot.rootPublicKey);
     const claimed = await candidate.state(input.transferId);
     if (!claimed?.verified) throw new Error("Disaster recovery candidate is not verified");
     assertRecoveryRoot(claimed.prepare, input.recoveryRoot);
@@ -692,7 +717,7 @@ export class DisasterRecoveryTarget {
     readonly abort: import("@zhixing/core/contracts").DisasterRecoveryAbort;
     readonly recoveryRoot: RecoveryRoot;
   }): Promise<DisasterRecoveryAbortState> {
-    const candidate = this.#candidateFor(input.recoveryRoot.rootPublicKey);
+    const candidate = this.#staging.candidateFor(input.recoveryRoot.rootPublicKey);
     const claimed = await candidate.state(input.abort.transferId);
     if (!claimed) throw new Error("Disaster recovery abort has no durable candidate claim");
     assertRecoveryRoot(claimed.prepare, input.recoveryRoot);
@@ -736,16 +761,13 @@ export class DisasterRecoveryTarget {
         transferKey.deviceId,
       );
     }
-    await rm(path.join(this.options.stagingRoot, "transfers", input.abort.transferId), {
-      recursive: true,
-      force: true,
-    });
+    await context.cleanupTransfer();
     await this.options.readiness.release(input.abort.transferId);
     return state;
   }
 
   async #deleteFreshIssuerKeyIfAborted(input: {
-    readonly candidate: FileDisasterRecoveryCandidateJournal;
+    readonly candidate: DisasterRecoveryCandidateJournalPort;
     readonly prepare: Extract<DisasterRecoveryCommand, { readonly op: "prepare" }>;
     readonly issuerKey: DeviceKey;
   }): Promise<void> {
@@ -811,12 +833,12 @@ export class DisasterRecoveryTarget {
   async #forwardInstallDecision(input: {
     readonly transferId: string;
     readonly recoveryRoot: RecoveryRoot;
-    readonly candidate: FileDisasterRecoveryCandidateJournal;
+    readonly candidate: DisasterRecoveryCandidateJournalPort;
     readonly decision: DisasterRecoveryInstallDecision;
     readonly context: {
-      readonly root: string;
-      readonly artifacts: FileArtifactStore;
-      readonly journal: FileDisasterRecoveryTransferJournal;
+      readonly artifacts: ArtifactStore;
+      readonly journal: DisasterRecoveryTransferStagingSession["journal"];
+      readonly promotion: DisasterRecoveryTransferStagingSession["promotion"];
     };
   }): Promise<{
     readonly state: DisasterRecoveryState;
@@ -875,7 +897,7 @@ export class DisasterRecoveryTarget {
     readonly installation: DisasterRecoveryInstallation;
   }> {
     const installation = decision.installation;
-    const candidate = this.#candidateFor(recoveryRoot.rootPublicKey);
+    const candidate = this.#staging.candidateFor(recoveryRoot.rootPublicKey);
     const durableCandidate = await candidate.state(transferId);
     if (
       !durableCandidate?.installDecision ||
@@ -918,17 +940,15 @@ export class DisasterRecoveryTarget {
   }
 
   async #promote(
-    context: { readonly root: string; readonly artifacts: FileArtifactStore },
+    context: Pick<
+      DisasterRecoveryTransferStagingSession,
+      "transferId" | "artifacts" | "promotion"
+    >,
     ref: ArtifactRef,
     signal?: AbortSignal,
   ): Promise<void> {
     if (await this.options.sharedArtifacts.has(ref)) return;
-    const receiver = new FileResumableArtifactReceiver(
-      this.options.sharedArtifacts,
-      path.join(context.root, "promotion-partials"),
-      { maxArtifactBytes: MAX_TRANSFER_ARTIFACT_BYTES, maxChunkBytes: TRANSFER_CHUNK_BYTES },
-    );
-    let progress = await receiver.progress(ref);
+    let progress = await context.promotion.progress(ref);
     while (!progress.complete) {
       if (signal?.aborted) throw signal.reason ?? new Error("Disaster recovery was cancelled");
       const offset = progress.receivedBytes;
@@ -938,12 +958,12 @@ export class DisasterRecoveryTarget {
         storageMaintenanceRequest(
           "authority-checkpoint",
           this.options.deviceId,
-          { transferId: path.basename(context.root), ref, offset, phase: "disaster-promote-read" },
+          { transferId: context.transferId, ref, offset, phase: "disaster-promote-read" },
           { obligation: "committed" },
         ),
         () => context.artifacts.readRange(ref, offset, length),
       );
-      progress = await receiver.append(
+      progress = await context.promotion.append(
         ref,
         offset,
         bytes,
@@ -952,7 +972,7 @@ export class DisasterRecoveryTarget {
           storageMaintenanceRequest(
             "authority-checkpoint",
             this.options.deviceId,
-            { transferId: path.basename(context.root), ref, offset, phase: "disaster-promote-write" },
+            { transferId: context.transferId, ref, offset, phase: "disaster-promote-write" },
             { obligation: "committed" },
           ),
           operation,
@@ -961,47 +981,22 @@ export class DisasterRecoveryTarget {
     }
   }
 
-  #candidateFor(rootPublicKey: string): FileDisasterRecoveryCandidateJournal {
-    return new FileDisasterRecoveryCandidateJournal(
-      new FileAuthorityCommitLog(
-        path.join(this.options.stagingRoot, "candidate-claims"),
-        this.options.sharedArtifacts,
-        { storageMaintenance: this.options.storageMaintenance },
-      ),
-      rootPublicKey,
-    );
-  }
-
   async #context(
     transferId: string,
     rootPublicKey: string,
     issuerKey?: DeviceKey,
-  ): Promise<{
-    readonly root: string;
-    readonly artifacts: FileArtifactStore;
-    readonly journal: FileDisasterRecoveryTransferJournal;
-  }> {
-    const root = path.join(this.options.stagingRoot, "transfers", transferId);
-    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
-    const log = new FileAuthorityCommitLog(
-      path.join(this.options.stagingRoot, "journals", transferId),
-      artifacts,
-      { storageMaintenance: this.options.storageMaintenance },
-    );
-    const targetIssuer = issuerKey ?? (await loadAnchorIssuerKey(
+  ): Promise<DisasterRecoveryTransferStagingSession> {
+    const targetIssuer = issuerKey ?? await loadAnchorIssuerKey(
       this.options.secretStore,
       transferId,
-    ) ?? await loadStoredTargetIssuer(log));
-    const journal = new FileDisasterRecoveryTransferJournal(
-      log,
-      disasterVerifiers(
-        rootPublicKey,
-        this.options.identity,
-        targetIssuer,
-      ),
-      this.options.now ?? Date.now,
-    );
-    return { root, artifacts, journal };
+    ) ?? undefined;
+    return this.#staging.forTransfer({
+      transferId,
+      rootPublicKey,
+      identity: this.options.identity,
+      ...(targetIssuer ? { issuerKey: targetIssuer } : {}),
+      ...(this.options.now ? { now: this.options.now } : {}),
+    });
   }
 }
 
@@ -1024,12 +1019,10 @@ function disasterReadyCandidateDigest(input: {
 }
 
 export async function completeDisasterRecoveryInstallationBeforeBootstrap(input: {
-  readonly zhixingHome: string;
   readonly deviceId: string;
   readonly secretStore: SecretStorePort;
-  readonly bootstrapStore: FileMeshBootstrapStore;
-  readonly storageMaintenance?: StorageMaintenanceGovernorPort;
-  readonly stagingRoot?: string;
+  readonly bootstrapStore: DisasterRecoveryBootstrapStorePort;
+  readonly staging: DisasterRecoveryStagingArea;
   readonly now?: () => number;
 }): Promise<DisasterRecoveryPostInstallDescriptor | undefined> {
   const authorityLog = input.bootstrapStore.authorityLog();
@@ -1050,30 +1043,18 @@ export async function completeDisasterRecoveryInstallationBeforeBootstrap(input:
     log: authorityLog,
     generation: installed.generation,
   });
-  const stagingRoot = input.stagingRoot ?? path.join(
-    input.zhixingHome,
-    "distributed-runtime",
-    "disaster-recovery-staging",
-  );
-  const privateRoot = path.join(stagingRoot, "transfers", installation.transferId);
-  const privateArtifacts = new FileArtifactStore(path.join(privateRoot, "artifacts"));
   const transferKey = await loadAnchorIssuerKey(input.secretStore, installation.transferId);
-  const privateLog = new FileAuthorityCommitLog(
-    path.join(stagingRoot, "journals", installation.transferId),
-    privateArtifacts,
-    { storageMaintenance: input.storageMaintenance },
-  );
-  const storedIssuer = transferKey ?? await loadStoredTargetIssuer(privateLog);
-  const journal = new FileDisasterRecoveryTransferJournal(
-    privateLog,
-    disasterVerifiers(
-      installation.recoveryRootPublicKey,
-      target.device,
-      storedIssuer,
-    ),
-    input.now ?? Date.now,
-  );
-  let state = await journal.state(installation.transferId);
+  const staging = input.staging.openTarget({
+    sharedArtifacts: input.bootstrapStore.artifactStore(),
+  });
+  const transfer = await staging.forTransfer({
+    transferId: installation.transferId,
+    rootPublicKey: installation.recoveryRootPublicKey,
+    identity: target.device,
+    ...(transferKey ? { issuerKey: transferKey } : {}),
+    ...(input.now ? { now: input.now } : {}),
+  });
+  let state = await transfer.journal.state(installation.transferId);
   if (!state) throw new Error("Installed disaster recovery has no exact private replay state");
   if (state.phase === "imported") {
     if (
@@ -1085,7 +1066,7 @@ export async function completeDisasterRecoveryInstallationBeforeBootstrap(input:
       installation.transferId,
       installation.trustRecord.issuer.issuerKeyId,
     );
-    state = await journal.append({
+    state = await transfer.journal.append({
       v: 1,
       mode: "disaster-recovery",
       t: "anchor-committed",
@@ -1096,14 +1077,7 @@ export async function completeDisasterRecoveryInstallationBeforeBootstrap(input:
   if (state.phase !== "committed" && state.phase !== "tombstoned") {
     throw new Error("Installed disaster recovery private journal is not committed");
   }
-  const candidate = new FileDisasterRecoveryCandidateJournal(
-    new FileAuthorityCommitLog(
-      path.join(stagingRoot, "candidate-claims"),
-      input.bootstrapStore.artifactStore(),
-      { storageMaintenance: input.storageMaintenance },
-    ),
-    installation.recoveryRootPublicKey,
-  );
+  const candidate = staging.candidateFor(installation.recoveryRootPublicKey);
   const candidateState = await candidate.state(installation.transferId);
   if (
     !candidateState?.installDecision ||
@@ -1140,10 +1114,10 @@ export async function completeDisasterRecoveryInstallationBeforeBootstrap(input:
 }
 
 export async function finishDisasterRecoveryPostInstall(input: {
-  readonly zhixingHome: string;
   readonly transferId: string;
+  readonly staging: DisasterRecoveryStagingArea;
   readonly readiness: PlannedAnchorReadinessPort;
-  readonly authorityLog: FileAuthorityCommitLog;
+  readonly authorityLog: DisasterRecoveryAuthorityProjectionPort;
   readonly installedGeneration: import("./disaster-recovery-installation.js").DisasterInstalledAuthorityGeneration;
   readonly participants: readonly string[];
   readonly readBack: readonly {
@@ -1158,13 +1132,7 @@ export async function finishDisasterRecoveryPostInstall(input: {
     participants: input.participants,
     readBack: input.readBack,
   });
-  await rm(path.join(
-    input.zhixingHome,
-    "distributed-runtime",
-    "disaster-recovery-staging",
-    "transfers",
-    input.transferId,
-  ), { recursive: true, force: true });
+  await input.staging.cleanupPostInstall(input.transferId);
   await input.readiness.release(input.transferId);
 }
 
@@ -1194,7 +1162,7 @@ function reduceDisasterJournal(
   return updated;
 }
 
-function disasterVerifiers(
+export function disasterVerifiers(
   rootPublicKey: string,
   target: DeviceIdentity,
   targetIssuer?: Pick<DeviceKey, "deviceId" | "publicKey">,
@@ -1226,8 +1194,8 @@ function disasterVerifiers(
   };
 }
 
-async function loadStoredTargetIssuer(
-  log: FileAuthorityCommitLog,
+export async function loadStoredTargetIssuer(
+  log: DisasterRecoveryJournalStorage,
 ): Promise<Pick<DeviceKey, "deviceId" | "publicKey"> | undefined> {
   const entries = await log.readStream<StoredDisasterRecord>(DISASTER_TRANSFER_STREAM);
   for (const entry of entries.toReversed()) {
@@ -1264,7 +1232,7 @@ function assertRecoveryRoot(prepare: PrepareCommand, root: RecoveryRoot): void {
 }
 
 async function readSourceFacts(
-  artifacts: FileArtifactStore,
+  artifacts: ArtifactStore,
   records: DisasterAuthorityRecordSet,
 ): Promise<{
   readonly trustEvents: readonly HomeTrustEvent[];

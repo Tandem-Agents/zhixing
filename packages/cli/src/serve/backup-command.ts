@@ -68,6 +68,7 @@ import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import { createPlannedAnchorTransferStagingInfrastructure } from "./planned-anchor-transfer-staging-infrastructure.js";
+import { createDisasterRecoveryStagingInfrastructure } from "./disaster-recovery-staging-infrastructure.js";
 import { readRecoveryPackageFromTty } from "./recovery-package-input.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import { createOwnedMeshPairedCheckpointTargetSession } from "./paired-checkpoint-target-infrastructure.js";
@@ -895,60 +896,88 @@ async function connectPairedTarget(
     throw new Error("恢复备份目标不再是另一台有效配对设备");
   }
   if (!recipientKeyId) throw new Error("恢复备份目标缺少候选恢复根身份");
-  const bootstrap = await prepareMeshRuntimeBootstrap({
+  const disasterRecoveryStaging = createDisasterRecoveryStagingInfrastructure({
     zhixingHome: context.home,
-    secretStore: context.secretStore,
     storageMaintenance: context.capacity.storage,
-    plannedAnchorTransferStaging: createPlannedAnchorTransferStagingInfrastructure({
-      zhixingHome: context.home,
-      storageMaintenance: context.capacity.storage,
-    }),
-    ...(context.meshConfiguration ? { configuration: context.meshConfiguration } : {}),
   });
-  if (bootstrap.mode !== "trusted-home" || !bootstrap.roles.includes("anchor")) {
-    throw new Error("只有当前主设备可以连接配对设备核对恢复备份");
-  }
-  const control = new ProductionMeshControlPlane({
-    localIdentity: bootstrap.deviceKey,
-    trust: bootstrap.trust,
-    configuration: bootstrap.configuration,
-    endpoints: bootstrap.endpoints,
-    transportPeers: bootstrap.transportPeers,
-    secretStore: context.secretStore,
-    endpointDirectory: bootstrap.bootstrapProjection.endpoints,
-    transportPeerDirectory: bootstrap.bootstrapProjection.transportPeers,
-    trustProjection: Object.freeze({
-      loadTrustRecord: () => bootstrap.bootstrapStore.loadTrustRecord(),
-    }),
-    services: new MeshServiceRegistry(),
-    credentialRouteGuard: new CredentialExposureAuthority({
-      deviceId: context.key.deviceId,
-      log: context.store.authorityLog(),
-      secretStore: context.secretStore,
-    }),
-    watchTrust: false,
-    ...(bootstrap.localEndpoint ? { localEndpoint: bootstrap.localEndpoint } : {}),
-  });
+  let control: ProductionMeshControlPlane | undefined;
   try {
-    await control.start();
+    const bootstrap = await prepareMeshRuntimeBootstrap({
+      zhixingHome: context.home,
+      secretStore: context.secretStore,
+      storageMaintenance: context.capacity.storage,
+      plannedAnchorTransferStaging: createPlannedAnchorTransferStagingInfrastructure({
+        zhixingHome: context.home,
+        storageMaintenance: context.capacity.storage,
+      }),
+      disasterRecoveryStaging,
+      ...(context.meshConfiguration ? { configuration: context.meshConfiguration } : {}),
+    });
+    if (bootstrap.mode !== "trusted-home" || !bootstrap.roles.includes("anchor")) {
+      throw new Error("只有当前主设备可以连接配对设备核对恢复备份");
+    }
+    const activeControl = new ProductionMeshControlPlane({
+      localIdentity: bootstrap.deviceKey,
+      trust: bootstrap.trust,
+      configuration: bootstrap.configuration,
+      endpoints: bootstrap.endpoints,
+      transportPeers: bootstrap.transportPeers,
+      secretStore: context.secretStore,
+      endpointDirectory: bootstrap.bootstrapProjection.endpoints,
+      transportPeerDirectory: bootstrap.bootstrapProjection.transportPeers,
+      trustProjection: Object.freeze({
+        loadTrustRecord: () => bootstrap.bootstrapStore.loadTrustRecord(),
+      }),
+      services: new MeshServiceRegistry(),
+      credentialRouteGuard: new CredentialExposureAuthority({
+        deviceId: context.key.deviceId,
+        log: context.store.authorityLog(),
+        secretStore: context.secretStore,
+      }),
+      watchTrust: false,
+      ...(bootstrap.localEndpoint ? { localEndpoint: bootstrap.localEndpoint } : {}),
+    });
+    control = activeControl;
+    await activeControl.start();
     context.writeLine("正在通过认证连接等待配对备份设备……");
-    await waitForPeer(control, targetDeviceId, 30_000);
+    await waitForPeer(activeControl, targetDeviceId, 30_000);
+    const owned = createOwnedMeshPairedCheckpointTargetSession({
+      connections: activeControl.connections,
+      binding: {
+        homeId: context.trust.homeId,
+        sourceDeviceId: context.key.deviceId,
+        targetDeviceId,
+        recipientKeyId,
+      },
+      storageMaintenance: context.capacity.storage,
+      closeControlPlane: () => activeControl.stop(),
+    });
+    let closed = false;
     return Object.freeze({
       kind: "paired-device" as const,
-      ...createOwnedMeshPairedCheckpointTargetSession({
-        connections: control.connections,
-        binding: {
-          homeId: context.trust.homeId,
-          sourceDeviceId: context.key.deviceId,
-          targetDeviceId,
-          recipientKeyId,
-        },
-        storageMaintenance: context.capacity.storage,
-        closeControlPlane: () => control.stop(),
-      }),
+      target: owned.target,
+      rootActivation: owned.rootActivation,
+      close: async () => {
+        if (closed) return;
+        closed = true;
+        const results = await Promise.allSettled([
+          owned.close(),
+          disasterRecoveryStaging.close(),
+        ]);
+        const failures = results
+          .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+          .map((result) => result.reason);
+        if (failures.length === 1) throw failures[0];
+        if (failures.length > 1) {
+          throw new AggregateError(failures, "Paired backup target cleanup failed");
+        }
+      },
     });
   } catch (error) {
-    await control.stop().catch(() => undefined);
+    await Promise.allSettled([
+      control?.stop() ?? Promise.resolve(),
+      disasterRecoveryStaging.close(),
+    ]);
     throw error;
   }
 }

@@ -335,6 +335,7 @@ const meshSurface: AccessSurface = {
         zhixingHome: ctx.zhixingHome,
       }),
       plannedAnchorTransferStaging: bootstrap.plannedAnchorTransferStaging,
+      disasterRecoveryStaging: bootstrap.disasterRecoveryStaging,
       protocol: ctx.conversationProtocol,
       executorTopology: ctx.conversationExecutorTopology!,
       ...(ctx.localConversationOwner

@@ -11,7 +11,6 @@ import type {
 } from "@zhixing/core/contracts";
 import {
   assertArtifactRef,
-  FileAuthorityCommitLog,
 } from "@zhixing/core/authority";
 import {
   authorityCatalogDigest,
@@ -43,6 +42,7 @@ import {
   createDisasterRecoveryInstallation,
   type DisasterRecoveryInstallation,
 } from "./disaster-recovery-installation.js";
+import type { DisasterRecoveryJournalStorage } from "./disaster-recovery-staging.js";
 
 const DISASTER_CANDIDATE_STREAM = "transfer:anchor-disaster-candidate";
 
@@ -119,9 +119,9 @@ interface CandidateProjection {
   readonly targetWide: ReadonlyMap<string, TargetWideAnchorCandidateState>;
 }
 
-export class FileDisasterRecoveryCandidateJournal {
+export class DisasterRecoveryCandidateJournal {
   constructor(
-    private readonly log: FileAuthorityCommitLog,
+    private readonly log: DisasterRecoveryJournalStorage,
     private readonly recoveryRootPublicKey: string,
   ) {}
 
@@ -361,8 +361,8 @@ export class FileDisasterRecoveryCandidateJournal {
     return this.#hydrateCandidate(stored);
   }
 
-  stopStorageMaintenance(): void {
-    this.log.stopStorageMaintenance();
+  stopStorageMaintenance(): Promise<void> {
+    return this.log.stopStorageMaintenance();
   }
 
   #projection(): Promise<CandidateProjection> {

@@ -45,6 +45,8 @@ import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import { createPlannedAnchorTransferStagingInfrastructure } from "./planned-anchor-transfer-staging-infrastructure.js";
+import { createDisasterRecoveryStagingInfrastructure } from "./disaster-recovery-staging-infrastructure.js";
+import type { DisasterRecoveryStagingArea } from "./disaster-recovery-staging.js";
 import { readRecoveryPackageFromTty } from "./recovery-package-input.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import { FileExecutionAssetCache } from "./execution-asset-cache.js";
@@ -291,9 +293,10 @@ function createDisasterRecoveryLifecycleApplication(
     withRecoverySession: async (use) => {
       signal.throwIfAborted();
       const context = await openRecoveryContext(options, false);
-      signal.throwIfAborted();
-      const log = context.store.authorityLog();
-      return use({
+      try {
+        signal.throwIfAborted();
+        const log = context.store.authorityLog();
+        return await use({
         currentDeviceId: context.key.deviceId,
         issuerDeviceId: context.trust.issuer.deviceId,
         readCurrentInstallation: async () => {
@@ -386,13 +389,17 @@ function createDisasterRecoveryLifecycleApplication(
             await evidenceMesh.close();
           }
         },
-      });
+        });
+      } finally {
+        await context.disasterRecoveryStaging.close();
+      }
     },
     withFinishSession: async (use) => {
       const context = await openRecoveryContext(options, false);
-      const log = context.store.authorityLog();
-      const target = options.target ?? createRecoveryTarget(context, options);
-      return use({
+      try {
+        const log = context.store.authorityLog();
+        const target = options.target ?? createRecoveryTarget(context, options);
+        return await use({
         readCurrentInstallation: async () => {
           const current = await loadCurrentDisasterRecoveryInstallation(log);
           return current && {
@@ -408,7 +415,10 @@ function createDisasterRecoveryLifecycleApplication(
             userConfirmedOldDeviceIsolated: true,
           });
         },
-      });
+        });
+      } finally {
+        await context.disasterRecoveryStaging.close();
+      }
     },
   });
 }
@@ -480,6 +490,7 @@ interface RecoveryContext {
   readonly configuration?: MeshRoleBootConfig;
   readonly config: ReturnType<typeof loadConfig>;
   readonly storageMaintenance: StorageMaintenanceGovernorPort;
+  readonly disasterRecoveryStaging: DisasterRecoveryStagingArea;
   readonly publishedDirectoryInventoryTargets: PublishedCheckpointDirectoryInventorySessions;
   readonly writeLine: (line: string) => void;
 }
@@ -519,6 +530,10 @@ async function openRecoveryContext(
     ...(config.mesh ? { configuration: config.mesh } : {}),
     config,
     storageMaintenance,
+    disasterRecoveryStaging: createDisasterRecoveryStagingInfrastructure({
+      zhixingHome: home,
+      storageMaintenance,
+    }),
     publishedDirectoryInventoryTargets: createPublishedCheckpointTargetInfrastructure({
       zhixingHome: home,
       storageMaintenance,
@@ -548,6 +563,7 @@ async function openRecoveryEvidenceMesh(
       zhixingHome: context.home,
       storageMaintenance: context.storageMaintenance,
     }),
+    disasterRecoveryStaging: context.disasterRecoveryStaging,
   });
   if (bootstrap.mode !== "trusted-home") {
     throw new Error("认证设备网络尚未建立");
@@ -628,6 +644,7 @@ async function openInventoryTargets(
       zhixingHome: context.home,
       storageMaintenance: context.storageMaintenance,
     }),
+    disasterRecoveryStaging: context.disasterRecoveryStaging,
     ...(context.configuration ? { configuration: context.configuration } : {}),
   });
   signal.throwIfAborted();
@@ -690,7 +707,7 @@ function createRecoveryTarget(
     secretStore: context.secretStore,
     sharedArtifacts: context.store.artifactStore(),
     authorityLog: context.store.authorityLog(),
-    stagingRoot: path.join(context.home, "distributed-runtime", "disaster-recovery-staging"),
+    staging: context.disasterRecoveryStaging,
     readiness: productionRecoveryReadiness(context).port,
     storageMaintenance: context.storageMaintenance,
     ...(options.now ? { now: options.now } : {}),

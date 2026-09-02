@@ -11,12 +11,14 @@ import {
 } from "@zhixing/core/resources";
 import type { DeviceKey } from "@zhixing/mesh/device-identity";
 import { cleanupRemovedDeviceSecrets } from "./device-removal.js";
+import type { DisasterRecoveryStagingArea } from "./disaster-recovery-staging.js";
 
 export async function cleanupExecutorDeviceLocalState(input: {
   readonly zhixingHome: string;
   readonly secretStore: SecretStorePort;
   readonly deviceKey: DeviceKey;
   readonly storageGovernor?: StorageMaintenanceGovernorPort;
+  readonly disasterRecoveryStaging: DisasterRecoveryStagingArea;
   readonly signal?: AbortSignal;
   readonly unregisterFuture: () => Promise<void>;
 }): Promise<readonly DeviceLifecycleEvidenceRef[]> {
@@ -26,7 +28,6 @@ export async function cleanupExecutorDeviceLocalState(input: {
     path.join(home, "runtime"),
     path.join(distributed, "capacity"),
     path.join(distributed, "derived"),
-    path.join(distributed, "disaster-recovery-staging"),
     path.join(distributed, "execution-assets.json"),
     path.join(distributed, "executor-capability-directory.json"),
     path.join(distributed, "executor-snapshot-version.json"),
@@ -46,32 +47,35 @@ export async function cleanupExecutorDeviceLocalState(input: {
     () => "recovery",
     input.signal ?? new AbortController().signal,
     async () => {
-    for (const entry of removable) {
-      const walker = new BoundedRemovalWalker(entry);
-      let batchIndex = 0;
-      try {
-        while (true) {
-          const result = await runStorageMaintenanceStep(
-            input.storageGovernor,
-            storageMaintenanceRequest(
-              "device-lifecycle-cleanup",
-              entry,
-              protocolDigest("ExecutorRemovalCleanupPathBatch", 1, {
-                home,
+      for (const [index, entry] of removable.entries()) {
+        const walker = new BoundedRemovalWalker(entry);
+        let batchIndex = 0;
+        try {
+          while (true) {
+            const result = await runStorageMaintenanceStep(
+              input.storageGovernor,
+              storageMaintenanceRequest(
+                "device-lifecycle-cleanup",
                 entry,
-                batchIndex,
-              }),
-              { obligation: "pre-commit", maxWaitMs: 5_000 },
-            ),
-            () => walker.step(128),
-          );
-          if (result.done) break;
-          batchIndex += 1;
+                protocolDigest("ExecutorRemovalCleanupPathBatch", 1, {
+                  home,
+                  entry,
+                  batchIndex,
+                }),
+                { obligation: "pre-commit", maxWaitMs: 5_000 },
+              ),
+              () => walker.step(128),
+            );
+            if (result.done) break;
+            batchIndex += 1;
+          }
+        } finally {
+          await walker.close();
         }
-      } finally {
-        await walker.close();
+        if (index === 2) {
+          await input.disasterRecoveryStaging.cleanupCurrentDevice(input.signal);
+        }
       }
-    }
     },
   );
   await input.unregisterFuture();
@@ -85,7 +89,13 @@ export async function cleanupExecutorDeviceLocalState(input: {
       kind: "cleanup",
       digest: protocolDigest("ExecutorRemovalLocalCleanup", 1, {
         home,
-        removed: removable.map((entry) => path.relative(home, entry).replaceAll("\\", "/")),
+        removed: [
+          ...removable.slice(0, 3)
+            .map((entry) => path.relative(home, entry).replaceAll("\\", "/")),
+          "distributed-runtime/disaster-recovery-staging",
+          ...removable.slice(3)
+            .map((entry) => path.relative(home, entry).replaceAll("\\", "/")),
+        ],
       }),
     },
     ...secretEvidence,

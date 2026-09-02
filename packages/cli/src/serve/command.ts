@@ -1742,6 +1742,7 @@ async function runServerProcess(
       secretStore: bootstrap.secretStore,
       deviceKey: bootstrap.mesh.deviceKey,
       storageGovernor: deviceCapacity.storage,
+      disasterRecoveryStaging: bootstrap.mesh.disasterRecoveryStaging,
       unregisterFuture: async () => {
         if (!current.spec || !adapter || !expected) return;
         await adapter.unregisterFutureExact(

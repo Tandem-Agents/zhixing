@@ -7,7 +7,6 @@ import type {
 } from "@zhixing/core/contracts";
 import type {
   DurableLogCheckpoint,
-  FileAuthorityCommitLog,
 } from "@zhixing/core/authority";
 import {
   anchorTransferCommitDigest,
@@ -15,9 +14,15 @@ import {
   protocolDigest,
 } from "@zhixing/core/protocol";
 import type { AnchorTransferCommit } from "@zhixing/core/contracts";
+import type { DisasterRecoveryJournalStorage } from "./disaster-recovery-staging.js";
 
 type DisasterCommit = Extract<AnchorTransferCommit, { mode: "disaster-recovery" }>;
 const DISASTER_POST_INSTALL_STREAM = "transfer:anchor-disaster-post-install";
+
+export interface DisasterRecoveryAuthorityProjectionPort
+  extends DisasterRecoveryJournalStorage {
+  originCheckpoint(): Promise<DurableLogCheckpoint>;
+}
 
 export interface DisasterRecoveryInstallation {
   readonly v: 1;
@@ -97,7 +102,7 @@ export function isDisasterRecoveryInstallation(
 }
 
 export async function loadCurrentDisasterRecoveryInstallation(
-  log: FileAuthorityCommitLog,
+  log: DisasterRecoveryAuthorityProjectionPort,
 ): Promise<{
   readonly installation: DisasterRecoveryInstallation;
   readonly installLsn: number;
@@ -151,7 +156,7 @@ export async function loadCurrentDisasterRecoveryInstallation(
 }
 
 export async function recordDisasterRecoveryPostInstallReceipt(input: {
-  readonly log: FileAuthorityCommitLog;
+  readonly log: DisasterRecoveryAuthorityProjectionPort;
   readonly generation: DisasterInstalledAuthorityGeneration;
   readonly participants: readonly string[];
   readonly readBack: readonly {
@@ -187,7 +192,7 @@ export async function recordDisasterRecoveryPostInstallReceipt(input: {
 }
 
 export async function loadDisasterRecoveryPostInstallReceipt(input: {
-  readonly log: FileAuthorityCommitLog;
+  readonly log: DisasterRecoveryAuthorityProjectionPort;
   readonly generation: DisasterInstalledAuthorityGeneration;
 }): Promise<DisasterRecoveryPostInstallReceipt | undefined> {
   const receipts = await input.log.rebuildProjection(
@@ -205,7 +210,7 @@ export async function loadDisasterRecoveryPostInstallReceipt(input: {
 }
 
 export async function waitForDisasterRecoveryPostInstallReceipt(input: {
-  readonly log: FileAuthorityCommitLog;
+  readonly log: DisasterRecoveryAuthorityProjectionPort;
   readonly generation: DisasterInstalledAuthorityGeneration;
   readonly timeoutMs: number;
   readonly signal?: AbortSignal;

@@ -8,6 +8,7 @@ import { createDeviceCapacityRuntime } from "../serve/device-capacity-runtime.js
 import { executorIdForDevice } from "../serve/mesh-runtime-assembly.js";
 import { prepareMeshRuntimeBootstrap } from "../serve/mesh-runtime-bootstrap.js";
 import { createPlannedAnchorTransferStagingInfrastructure } from "../serve/planned-anchor-transfer-staging-infrastructure.js";
+import { createDisasterRecoveryStagingInfrastructure } from "../serve/disaster-recovery-staging-infrastructure.js";
 import { runStartupCheck } from "../startup.js";
 import { parseServerSpecs } from "./mcp-config.js";
 import { createHostMcpRuntime } from "./mcp-runtime-adapter.js";
@@ -219,6 +220,9 @@ export async function withLocalWorkspaceClient<T, R = T>(
   let mesh: Awaited<ReturnType<typeof prepareMeshRuntimeBootstrap>> | undefined;
   let host: LocalWorkspaceManagementHost | undefined;
   let mcpRuntime: HostMcpRuntimePorts | undefined;
+  let disasterRecoveryStaging: ReturnType<
+    typeof createDisasterRecoveryStagingInfrastructure
+  > | undefined;
   let owner: Awaited<ReturnType<typeof acquireExecutorLocalWorkspaceOwner>>;
   try {
     const secretStore = createPlatformSecretStore({ homeDir: zhixingHome });
@@ -236,6 +240,10 @@ export async function withLocalWorkspaceClient<T, R = T>(
     const capacity = createDeviceCapacityRuntime(
       path.join(zhixingHome, "distributed-runtime", "capacity"),
     );
+    disasterRecoveryStaging = createDisasterRecoveryStagingInfrastructure({
+      zhixingHome,
+      storageMaintenance: capacity.storage,
+    });
     mesh = await prepareMeshRuntimeBootstrap({
       zhixingHome,
       secretStore,
@@ -244,6 +252,7 @@ export async function withLocalWorkspaceClient<T, R = T>(
         zhixingHome,
         storageMaintenance: capacity.storage,
       }),
+      disasterRecoveryStaging,
       ...(configuration.topology.mesh
         ? { configuration: configuration.topology.mesh }
         : {}),
@@ -343,6 +352,7 @@ export async function withLocalWorkspaceClient<T, R = T>(
     await runtime?.startupCleanup.run().catch(() => undefined);
     await mcpRuntime?.lifecycle.close().catch(() => undefined);
     await mesh?.bootstrapStore.stopStorageMaintenance();
+    await disasterRecoveryStaging?.close();
     await owner?.release();
   }
 }

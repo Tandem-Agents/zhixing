@@ -541,6 +541,7 @@ export async function runExecutorRole(
       }),
       conversationTransferStaging: null,
       plannedAnchorTransferStaging: bootstrap.mesh.plannedAnchorTransferStaging,
+      disasterRecoveryStaging: bootstrap.mesh.disasterRecoveryStaging,
       executor: {
         ledger,
         runtimeFactory,
@@ -625,6 +626,7 @@ export async function runExecutorRole(
           secretStore: bootstrap.secretStore,
           deviceKey: bootstrap.mesh.deviceKey,
           storageGovernor: deviceCapacity.storage,
+          disasterRecoveryStaging: bootstrap.mesh.disasterRecoveryStaging,
           unregisterFuture: async () => {
             if (!current.spec || !adapter || !expected) return;
             await adapter.unregisterFutureExact(

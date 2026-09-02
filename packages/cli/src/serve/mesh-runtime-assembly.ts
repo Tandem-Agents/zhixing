@@ -145,6 +145,7 @@ import {
   finishDisasterRecoveryPostInstall,
   type DisasterRecoveryPostInstallDescriptor,
 } from "./disaster-recovery-target.js";
+import type { DisasterRecoveryStagingArea } from "./disaster-recovery-staging.js";
 import { registerDisasterRecoveryTrustEvidenceService } from "./disaster-recovery-trust-evidence.js";
 import {
   CurrentIssuerDeviceRemovalAuthority,
@@ -322,6 +323,7 @@ export interface MeshRuntimeAssemblyOptions {
   readonly assignmentArtifactReceiver: AssignmentArtifactReceiverPort;
   readonly conversationTransferStaging: ConversationTransferStagingArea | null;
   readonly plannedAnchorTransferStaging: PlannedAnchorTransferStagingArea;
+  readonly disasterRecoveryStaging: DisasterRecoveryStagingArea;
   readonly protocol?: ConversationProtocolRuntime;
   readonly executorTopology?: ConversationExecutorTopologyAdapter;
   readonly localConversationOwner?: LocalConversationOwnerAssembly;
@@ -1973,8 +1975,8 @@ export class MeshRuntimeAssembly
         throw new Error("Disaster installation generation is invalid");
       }
       await finishDisasterRecoveryPostInstall({
-        zhixingHome: this.options.zhixingHome,
         transferId: completion.installation.transferId,
+        staging: this.options.disasterRecoveryStaging,
         readiness: this.options.authority.plannedAnchorReadiness,
         authorityLog: this.options.authority.authorityLog,
         installedGeneration: completion.installedGeneration,
@@ -1996,13 +1998,10 @@ export class MeshRuntimeAssembly
 
   async #loadLiveDisasterPostInstall(record: HomeTrustRecord): Promise<void> {
     const completion = await completeDisasterRecoveryInstallationBeforeBootstrap({
-      zhixingHome: this.options.zhixingHome,
       deviceId: this.options.authority.deviceId,
       secretStore: this.options.secretStore,
       bootstrapStore: this.options.bootstrapStore,
-      ...(this.options.authority.storageMaintenance
-        ? { storageMaintenance: this.options.authority.storageMaintenance }
-        : {}),
+      staging: this.options.disasterRecoveryStaging,
     });
     if (
       !completion ||

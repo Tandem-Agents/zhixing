@@ -1,7 +1,7 @@
 import path from "node:path";
 import { writeFile } from "node:fs/promises";
 import { createTempDir } from "@zhixing/test-utils";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import type {
   ArtifactRef,
   DeviceIdentity,
@@ -25,7 +25,7 @@ import {
 import { createCredentialExposureRecord } from "@zhixing/mesh/credential-exposure";
 import { createPlannedAnchorReadinessCoordinator } from "../setup-delivery.js";
 import {
-  FileDisasterRecoveryCandidateJournal,
+  DisasterRecoveryCandidateJournal,
   type DisasterRecoveryInstallDecision,
 } from "./disaster-recovery-candidate.js";
 import { loadCurrentDisasterRecoveryInstallation } from "./disaster-recovery-installation.js";
@@ -34,13 +34,14 @@ import {
   DisasterRecoveryTarget,
 } from "./disaster-recovery-target.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
+import { createDisasterRecoveryStagingInfrastructure } from "./disaster-recovery-staging-infrastructure.js";
 
 const AT = "2026-08-10T00:00:00.000Z";
 const NOW = Date.parse("2026-08-10T01:00:00.000Z");
 describe("disaster recovery target", () => {
   it("durably single-flights the selected source-less checkpoint before private effects", async () => {
     const fixture = await createFixture();
-    const journal = new FileDisasterRecoveryCandidateJournal(
+    const journal = new DisasterRecoveryCandidateJournal(
       new FileAuthorityCommitLog(
         path.join(fixture.stagingRoot, "candidate-claims"),
         fixture.targetStore.artifactStore(),
@@ -92,11 +93,10 @@ describe("disaster recovery target", () => {
     });
     expect(replay.installation).toEqual(committed.installation);
     const descriptor = await completeDisasterRecoveryInstallationBeforeBootstrap({
-      zhixingHome: fixture.targetRoot,
       deviceId: fixture.targetIdentity.deviceId,
       secretStore: fixture.secrets,
       bootstrapStore: fixture.targetStore,
-      stagingRoot: fixture.stagingRoot,
+      staging: fixture.staging,
       now: () => NOW,
     });
     expect(descriptor?.installedGeneration).toMatchObject({
@@ -128,12 +128,12 @@ describe("disaster recovery target", () => {
     const fixture = await createFixture({ retainedArtifact: true });
     const target = fixture.createTarget();
     const prepare = prepareCommand(fixture, "request-verified-replay", "xfer-01KXPWTM80BYB4SH423EJT1CV7");
-    const originalRecordVerified = FileDisasterRecoveryCandidateJournal.prototype.recordVerified;
+    const originalRecordVerified = DisasterRecoveryCandidateJournal.prototype.recordVerified;
     const verifiedFault = vi.spyOn(
-      FileDisasterRecoveryCandidateJournal.prototype,
+      DisasterRecoveryCandidateJournal.prototype,
       "recordVerified",
     ).mockImplementationOnce(async function(
-      this: FileDisasterRecoveryCandidateJournal,
+      this: DisasterRecoveryCandidateJournal,
       transferId,
       verified,
     ) {
@@ -177,12 +177,12 @@ describe("disaster recovery target", () => {
       "request-oversized-candidate",
       "xfer-01KXPWTM80BYB4SH423EJT1CZA",
     );
-    const originalRecordVerified = FileDisasterRecoveryCandidateJournal.prototype.recordVerified;
+    const originalRecordVerified = DisasterRecoveryCandidateJournal.prototype.recordVerified;
     const verifiedFault = vi.spyOn(
-      FileDisasterRecoveryCandidateJournal.prototype,
+      DisasterRecoveryCandidateJournal.prototype,
       "recordVerified",
     ).mockImplementationOnce(async function(
-      this: FileDisasterRecoveryCandidateJournal,
+      this: DisasterRecoveryCandidateJournal,
       transferId,
       verified,
     ) {
@@ -237,7 +237,7 @@ describe("disaster recovery target", () => {
     });
     let capturedDecision: DisasterRecoveryInstallDecision | undefined;
     const decisionFault = vi.spyOn(
-      FileDisasterRecoveryCandidateJournal.prototype,
+      DisasterRecoveryCandidateJournal.prototype,
       "decideInstall",
     ).mockImplementationOnce(async (_transferId, decision) => {
       capturedDecision = decision;
@@ -342,11 +342,10 @@ describe("disaster recovery target", () => {
     })).rejects.toThrow(/committed disaster recovery cannot be cancelled/i);
 
     const descriptor = await completeDisasterRecoveryInstallationBeforeBootstrap({
-      zhixingHome: fixture.targetRoot,
       deviceId: fixture.targetIdentity.deviceId,
       secretStore: fixture.secrets,
       bootstrapStore: fixture.targetStore,
-      stagingRoot: fixture.stagingRoot,
+      staging: fixture.staging,
       now: fixture.now,
     });
     expect(descriptor?.state?.phase).toBe("committed");
@@ -401,12 +400,12 @@ describe("disaster recovery target", () => {
       "request-verified-abort",
       "xfer-01KXPWTM80BYB4SH423EJT1CZB",
     );
-    const originalRecordVerified = FileDisasterRecoveryCandidateJournal.prototype.recordVerified;
+    const originalRecordVerified = DisasterRecoveryCandidateJournal.prototype.recordVerified;
     const verifiedFault = vi.spyOn(
-      FileDisasterRecoveryCandidateJournal.prototype,
+      DisasterRecoveryCandidateJournal.prototype,
       "recordVerified",
     ).mockImplementationOnce(async function(
-      this: FileDisasterRecoveryCandidateJournal,
+      this: DisasterRecoveryCandidateJournal,
       transferId,
       verified,
     ) {
@@ -464,7 +463,7 @@ describe("disaster recovery target", () => {
 
   it("persists a root-signed claim-only abort before any private phase exists", async () => {
     const fixture = await createFixture();
-    const journal = new FileDisasterRecoveryCandidateJournal(
+    const journal = new DisasterRecoveryCandidateJournal(
       new FileAuthorityCommitLog(
         path.join(fixture.stagingRoot, "candidate-claims"),
         fixture.targetStore.artifactStore(),
@@ -614,7 +613,15 @@ async function createFixture(options: {
     serviceRevision: "services-disaster-v1",
     credentialRevision: "credentials-disaster-v1",
   }));
-  const stagingRoot = path.join(targetRoot, "disaster-recovery-staging");
+  const stagingRoot = path.join(
+    targetRoot,
+    "distributed-runtime",
+    "disaster-recovery-staging",
+  );
+  const staging = createDisasterRecoveryStagingInfrastructure({
+    zhixingHome: targetRoot,
+  });
+  onTestFinished(() => staging.close());
   const targetAuthorityLog = targetStore.authorityLog();
   let now = NOW;
   const createTarget = () => new DisasterRecoveryTarget({
@@ -624,7 +631,7 @@ async function createFixture(options: {
     secretStore: secrets,
     sharedArtifacts: targetStore.artifactStore(),
     authorityLog: targetAuthorityLog,
-    stagingRoot,
+    staging,
     readiness: readiness.port,
     now: () => now,
   });
@@ -639,12 +646,13 @@ async function createFixture(options: {
     checkpoint,
     secrets,
     stagingRoot,
+    staging,
     targetAuthorityLog,
     now: () => now,
     advanceNow: (milliseconds: number) => {
       now += milliseconds;
     },
-    candidateJournal: () => new FileDisasterRecoveryCandidateJournal(
+    candidateJournal: () => new DisasterRecoveryCandidateJournal(
       new FileAuthorityCommitLog(path.join(stagingRoot, "candidate-claims"), targetStore.artifactStore()),
       recoveryRoot.rootPublicKey,
     ),

@@ -37,6 +37,7 @@ import {
   completeDisasterRecoveryInstallationBeforeBootstrap,
   type DisasterRecoveryPostInstallDescriptor,
 } from "./disaster-recovery-target.js";
+import type { DisasterRecoveryStagingArea } from "./disaster-recovery-staging.js";
 
 export type MeshRuntimeBootstrap =
   | {
@@ -46,6 +47,7 @@ export type MeshRuntimeBootstrap =
       readonly bootstrapStore: FileMeshBootstrapStore;
       readonly bootstrapProjection: MeshBootstrapProjectionPorts;
       readonly plannedAnchorTransferStaging: PlannedAnchorTransferStagingArea;
+      readonly disasterRecoveryStaging: DisasterRecoveryStagingArea;
       readonly trustedIdentities: readonly DeviceIdentity[];
       readonly authorizedDeviceIds: readonly string[];
     }
@@ -57,6 +59,7 @@ export type MeshRuntimeBootstrap =
       readonly bootstrapStore: FileMeshBootstrapStore;
       readonly bootstrapProjection: MeshBootstrapProjectionPorts;
       readonly plannedAnchorTransferStaging: PlannedAnchorTransferStagingArea;
+      readonly disasterRecoveryStaging: DisasterRecoveryStagingArea;
       readonly trust: HomeTrustRecord;
       readonly configuration: MeshRoleBootConfig;
       readonly endpoints: MeshEndpointDirectory;
@@ -77,6 +80,7 @@ export async function prepareMeshRuntimeBootstrap(input: {
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly configuration?: MeshRoleBootConfig;
   readonly plannedAnchorTransferStaging: PlannedAnchorTransferStagingArea;
+  readonly disasterRecoveryStaging: DisasterRecoveryStagingArea;
 }): Promise<MeshRuntimeBootstrap> {
   const configuration = input.configuration === undefined
     ? undefined
@@ -161,14 +165,11 @@ export async function prepareMeshRuntimeBootstrap(input: {
   bootstrapStore.bindIssuerKey(deviceKey);
   const trust = preRuntimeTrust;
   const disasterRecoveryPostInstall = trust
-    ? await completeDisasterRecoveryInstallationBeforeBootstrap({
-        zhixingHome: input.zhixingHome,
+      ? await completeDisasterRecoveryInstallationBeforeBootstrap({
         deviceId: deviceKey.deviceId,
         secretStore: input.secretStore,
         bootstrapStore,
-        ...(input.storageMaintenance
-          ? { storageMaintenance: input.storageMaintenance }
-          : {}),
+        staging: input.disasterRecoveryStaging,
       })
     : undefined;
   const plannedAnchorPostInstall = trust && !disasterRecoveryPostInstall
@@ -196,6 +197,7 @@ export async function prepareMeshRuntimeBootstrap(input: {
       bootstrapStore,
       bootstrapProjection,
       plannedAnchorTransferStaging: input.plannedAnchorTransferStaging,
+      disasterRecoveryStaging: input.disasterRecoveryStaging,
       trustedIdentities: [],
       authorizedDeviceIds: [],
     };
@@ -246,6 +248,7 @@ export async function prepareMeshRuntimeBootstrap(input: {
     bootstrapStore,
     bootstrapProjection,
     plannedAnchorTransferStaging: input.plannedAnchorTransferStaging,
+    disasterRecoveryStaging: input.disasterRecoveryStaging,
     trust,
     configuration,
     endpoints,
