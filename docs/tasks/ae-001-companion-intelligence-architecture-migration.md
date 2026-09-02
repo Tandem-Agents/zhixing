@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-07c Advancement evidence Executor 拓扑边界收口等待协调者复核<br>
+> 当前检查点：A6-07d Assignment resource Correctness 端口已闭合，正在选择 A6 下一责任链<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `dc2cf305`；A6-07b 已由协调者独立复核后提交，P08 stream/ticket 需求端口与 Executor/Host/Mesh 机制边界已闭合 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-07c 已在当前工作区形成待复核证据，A6 继续未完成 |
-| 活跃工作包 | `A6-07c-advancement-evidence-topology-boundary-v1` 等待协调者独立复核；Advancement 只消费有限 evidence target directory，Host 唯一选择本机或 Mesh handler，Mesh 只提供远端机制 |
-| 下一责任链 | A6-07c 闭合后核实 Assignment resource 与 P07/P09～P12 的真实剩余缺口；不并行扩入设备管理、transfer 或 A7 |
-| 打开的单向桥 | 无；旧 Advancement→AssemblyContext/MeshRuntime concrete 查询、`evidenceForExecutor` local/remote service locator 与平行目标选择入口已在 A6-07c 归零 |
-| 已失效证据 | 无当前未恢复证据；`A6-07c-advancement-evidence-topology-boundary-v1` 待协调者复核，A6-07a、A6-07b 及 A6-01～06d 继续有效 |
+| 已接受基线 | `318076d7`；A6-07c 已由协调者独立复核后提交，Advancement evidence 的应用 target 与本机/Mesh 机制选择已分离 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-07d Assignment resource 有限端口与 concrete governor 边界已闭合 |
+| 活跃工作包 | 无；协调者正在从 P07/P09～P12 的真实剩余缺口中选择下一条单一责任链 |
+| 下一责任链 | 优先核实 P07 Workspace 资源治理的 concrete Host 边界；不并行扩入 P09～P12、设备管理、transfer 或 A7 |
+| 打开的单向桥 | 无；A6-07d 如需拆分，必须停在单一资源真相成立的可发布检查点，不得保留 concrete governor 与有限端口双入口 |
+| 已失效证据 | 无当前未恢复架构证据；A6-07a～07c 及 A6-01～06d 继续有效。A6-07d 的直接资源闭包已恢复；三拓扑 owner-domain 中 anchor+executor 的共享 storage-maintenance 环境门仍因 `backpressured:ioOperations` 未取得绿灯，须由协调者独立复取但不构成第二资源 owner |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2659,6 +2659,15 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据与结构门禁：Advancement CLI application/topology/evidence Mesh/review 4 文件 14/14，Owner evidence 8/8，Orchestrator executor evidence 10/10；Host/topology 组合批次 44/46 中仅两项受共享 storage-maintenance `backpressured:ioOperations` 竞争影响，两个失败用例在独立 fresh process 各 1/1 通过，证明三拓扑与 local-owner 功能断言完整。最终变更后 topology/controller 子闭包 2 文件 4/4、CLI `tsc --noEmit`、`pnpm cli:build`、changed-source Biome、`pnpm runtime:package-exports` 均通过；canonical `pnpm s7:lint` coverage/mutation 48/48 与 registry golden 通过。新增反向 mutation 拒绝需求合同 concrete 泄漏、应用/command 绕过 directory、Host 构造或顺序漂移、Mesh 恢复本机选择、第二 Mesh client/service owner以及旧 service locator 回流。
 - 失效与交接：若有限 runtime/target/remote directory 合同、Conversation target resolver、Host 一次性 binding/adapter、local handler、Mesh remote client/service、Advancement coordinator/journal/replay、P08 evidence 持久/accepted-work 语义、三个拓扑组合、S7 或上述直接测试任一变化，只恢复本证据及真实相交的 A0/A5/A6 证据；A6-07a/07b 仅在其相交入口真实变化时失效。当前无打开桥和未恢复证据；A6 继续 `[ ]`，下一检查点由协调者复核后核实 Assignment resource 与 P07/P09～P12 的剩余缺口，不进入设备管理、transfer 或 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：确认 Advancement 应用只消费有限 runtime/target directory，Conversation 保留 target 决定，Host 一次性绑定本机或远端机制，Mesh 不再承担本机选择或运行期查询；late binding 只解决既有装配顺序且未扩展为 service locator。独立运行 topology、controller、Evidence Mesh、local-owner 与真实 S6 共 20/20，Orchestrator executor evidence 10/10，CLI `tsc --noEmit`、canonical S7 48/48 与 registry golden、runtime package exports 和 `git diff --check` 均通过；A6-07c 可以提交，A6 仍保持 `[ ]`。
+
+### A6-07d：Assignment resource 有限 Correctness 端口收口
+
+- 基线与唯一结果：以已接受 `HEAD 318076d7eab7d179ab170f47236036b9602ecb57` 加协调者调度记录为基线，形成待复核证据 `A6-07d-assignment-resource-port-boundary-v1`。Conversation owner 运行合同现在把资源需求冻结为四个有限角色：`ConversationOwnerResourceAuthority` 只承载 root admission/reservation 与过期回收，`ResourceReservationPort` 只供本机 Kernel/Conversation/Job 预留和计量，`ExecutorAssignmentResourceCoordinator` 只供 assignment ledger 协调，`ConversationResourceRecoveryPort` 只返回回收计数与冻结的 active conversation reservation 身份；usage finalization 继续是窄函数端口。旧 `resourceGovernor/executorResources/executorResourceGovernor` alias、worker concrete option、ledger concrete cast 与 protocol snapshot 读取均已删除，不存在 concrete 与有限端口双入口。
+- Host/Correctness 投影与行为保护：`setup-delivery.ts` 仍是 concrete `ExecutorResourceGovernor` 的唯一生产构造点；Anchor、Anchor+local Executor 与 Executor-only 组合根只在 Host/Correctness 边缘把同一实例投影为上述有限角色。Anchor root governor 与本机 executor governor 的过期回收仍各执行一次，同一实例不会重复回收；accepted-work lease 仍只来自本机 executor reservation，anchor-only 不虚构 lease。active conversation、owner epoch、reservation id 与 `ActiveLocalLeaseClosure` digest 保持原样。Conversation/Job worker 现在 required 注入 `ResourceReservationPort`，生产构造全量改绑且不再存在 optional 无计量旁路；reserve/consume、parent lease、usage identity、finalize/finality、响应丢失、恢复、冲突与失败传播均未改变。
+- 正反 exact-set 与未迁移边界：正向从 `access-surfaces`、`executor-role-runtime`、`mesh-runtime-assembly` 三个 Host 构造投影到 Conversation protocol、local/remote Conversation worker、Job worker、executor ledger/dispatch；反向从 concrete constructor、`reserveUsage/consume/prepareAssignmentRoot/enqueueRoot/reclaimExpired/snapshot/finalizeLocalAssignment/flushAssignment` 全部生产调用回扫，需求侧不再导入、断言或返回 concrete governor。P07 workspace/capacity、P09～P12 Mesh/transfer/recovery、P08 data-plane/evidence、Authority resource 持久 schema、HostStop/device removal 与 governor 算法本包均未改写；Host/Correctness 内部为 workspace、accepted-work settle 或物理协调保留的 concrete 调用不是第二应用入口。
+- 直接证据与结构门禁：Conversation protocol 26/26、Conversation worker 15/15、Conversation owner port 3/3、Job recovery 4/4，合计 4 文件 48/48；既有 Executor resource governor 22/22、Owner Kernel resource governor 20/20 与真实 S6 8/8 继续通过。CLI `tsc --noEmit`、`pnpm cli:build`、changed-source Biome 与 `pnpm runtime:package-exports` 通过；canonical `pnpm s7:lint` 最终 49/49 与 registry golden 通过，新增反向 mutation 拒绝需求侧 concrete 回流、旧 alias、protocol/ledger/worker 绕过有限端口、Host 投影漂移及第二 concrete constructor。owner-domain 定向复取中 anchor shared 与 executor-only 已通过，anchor+executor 在功能断言前连续被既有 artifact-lifecycle storage maintenance 以 `backpressured:ioOperations` 拒绝；失败栈止于 `runStorageMaintenanceStep → FileDurableProjectionIndex → ArtifactLifecycleIndex`，未修改资源端口、预算或测试来制造绿灯，留给协调者在独立基线复取。
+- 失效与交接：若四个有限角色、usage finalization、Host 三处投影、concrete governor 唯一构造、Conversation/Job worker resource meter、assignment ledger/dispatch、recovery accepted-work lease、P06/P08 resource/finality/replay、三拓扑组合、S7 或上述直接测试任一变化，只恢复本证据及真实相交的 A0/A5/A6 证据；A6-07a～07c 仅在其已冻结入口真实变化时失效。当前无打开桥；A6 继续 `[ ]`，下一检查点仅在协调者独立复核后核实 P07/P09～P12 的真实剩余缺口，不进入设备管理、transfer 或 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：确认 Conversation/Job 协议、worker、ledger 与 dispatch 只消费四个有限资源角色，concrete `ExecutorResourceGovernor` 只在 Host/Correctness 组合边界投影且没有 optional 无计量旁路。独立运行 Conversation owner/protocol/worker、Job recovery 与真实 S6 共 56/56，CLI typecheck、canonical S7 49/49 与 registry golden、runtime package exports 和 `git diff --check` 均通过；三拓扑 owner-domain 的 anchor+executor 唯一失败在业务断言前复现为既有 artifact-lifecycle storage-maintenance `backpressured:ioOperations`，anchor 与 executor-only 均通过且没有资源端口反证。A6-07d 可以提交，A6 仍保持 `[ ]`。
 
 ## 十、用户提示词
 

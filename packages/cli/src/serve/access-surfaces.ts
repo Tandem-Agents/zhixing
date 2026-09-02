@@ -81,6 +81,7 @@ import { LocalConversationOwnerAssembly } from "./local-conversation-owner.js";
 import { createHostAdvancementModelProviderFactory } from "../runtime/advancement-model-provider.js";
 import {
   anchorConversationOwnerRuntime,
+  createConversationResourceRecoveryPort,
   localConversationOwnerRuntime,
 } from "./conversation-owner-runtime.js";
 import { createConversationEvidenceAuthorityVerifier } from "./conversation-evidence-authority.js";
@@ -782,13 +783,22 @@ const localConversationOwnerUnit: CoreAssemblyUnit = {
     if (ctx.localConversationOwner) {
       throw new Error("Local conversation owner is already assembled");
     }
+    const executorResources = ctx.authorityRuntime.executorResourceGovernor;
     const localOwner = localConversationOwnerRuntime({
       artifacts: ctx.authorityRuntime.artifacts,
       deviceId: ctx.authorityRuntime.deviceId,
       executorCapabilities: ctx.authorityRuntime.executorCapabilities,
       executorId: ctx.authorityRuntime.executorId,
       executorLog: ctx.authorityRuntime.executorLog,
-      executorResourceGovernor: ctx.authorityRuntime.executorResourceGovernor,
+      resources: executorResources,
+      executionResources: executorResources,
+      assignmentResources: executorResources,
+      resourceRecovery: createConversationResourceRecoveryPort({
+        primary: executorResources,
+        acceptedWork: executorResources,
+      }),
+      finalizeUsage: (assignmentId) =>
+        executorResources.finalizeLocalAssignment(assignmentId),
       executionAssetCatalog: ctx.authorityRuntime.executionAssetCatalog,
       localControlAdmission: ctx.authorityRuntime.localControlAdmission,
       localDomainId: ctx.authorityRuntime.localDomainId,
@@ -948,7 +958,7 @@ const executorJobOwnerUnit: CoreAssemblyUnit = {
       },
       InProcessAssignmentSubmission:
         ctx.executorRoleModule.InProcessAssignmentSubmission,
-      resourceGovernor: ctx.authorityRuntime.executorResourceGovernor,
+      resources: ctx.authorityRuntime.executorResourceGovernor,
       createStream: (input) => ctx.executorDataPlane!.createStream(input),
       onError: (_assignmentId, error) =>
         console.warn(chalk.yellow(`[job-worker] ${error.message}`)),

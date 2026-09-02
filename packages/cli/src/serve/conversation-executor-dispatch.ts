@@ -701,11 +701,11 @@ function createLocalConversationExecutorMechanism(
   readonly mechanism: LocalConversationExecutorMechanism;
 } {
   const bindings = new Map<string, ConversationRuntimeBinding>();
-  const executorAuthority = options.authority.executorLog && options.authority.executorResources
+  const executorAuthority = options.authority.executorLog && options.authority.assignmentResources
     ? options.authority as ConversationOwnerRuntimeStack & {
         readonly executorLog: NonNullable<ConversationOwnerRuntimeStack["executorLog"]>;
-        readonly executorResources: NonNullable<
-          ConversationOwnerRuntimeStack["executorResources"]
+        readonly assignmentResources: NonNullable<
+          ConversationOwnerRuntimeStack["assignmentResources"]
         >;
       }
     : undefined;

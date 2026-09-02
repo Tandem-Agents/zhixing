@@ -9,6 +9,7 @@ import type {
   DispatchEnvelope,
   ExecutionAbortRequest,
   ExecutionRef,
+  ResourceReservationPort,
   RunSubmissionPort,
   TranscriptRunRecord,
 } from "@zhixing/core/contracts";
@@ -20,7 +21,6 @@ import {
 import type { RuntimeFactory } from "@zhixing/owner-kernel";
 import type {
   ConversationAssignmentLedger,
-  ExecutorResourceGovernor,
   InProcessAssignmentSubmission,
 } from "@zhixing/executor";
 import {
@@ -69,7 +69,7 @@ export interface ConversationAssignmentWorkerOptions {
     readonly assignmentId: string;
     readonly envelope: ConversationEnvelope;
   }) => Promise<{ reportDigest: string; upToUsageSeq: number }>;
-  readonly resourceGovernor?: ExecutorResourceGovernor;
+  readonly resources: ResourceReservationPort;
   readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
   readonly interactions: DurableConversationInteractionObserver;
   readonly createStream?: (input: {
@@ -383,37 +383,33 @@ export class ConversationAssignmentWorker {
               ),
             }
           : {}),
-        ...(this.options.resourceGovernor
-          ? {
-              resourceReservation: {
-                port: this.options.resourceGovernor,
-                parentLease: envelope.resourceLease,
-                contextFor: (requestId: string) =>
-                  assignmentResourceContext(envelope, requestId),
-              },
-              modelCallResourceMeter: {
-                reserve: async ({ callIndex, tokenUpperBound }: {
-                  callIndex: number;
-                  tokenUpperBound: number;
-                }) => {
-                  const usageId = `usage:${assignmentId}:model:${callIndex}`;
-                  await this.options.resourceGovernor!.reserveUsage(
-                    envelope.resourceLease,
-                    { usageId, tokens: tokenUpperBound, calls: 1 },
-                    assignmentResourceContext(envelope, usageId),
-                  );
-                  return { usageId };
-                },
-                consume: async ({ usageId, tokens }: { usageId: string; tokens: number }) => {
-                  await this.options.resourceGovernor!.consume(
-                    envelope.resourceLease,
-                    { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
-                    assignmentResourceContext(envelope, usageId),
-                  );
-                },
-              },
-            }
-          : {}),
+        resourceReservation: {
+          port: this.options.resources,
+          parentLease: envelope.resourceLease,
+          contextFor: (requestId: string) =>
+            assignmentResourceContext(envelope, requestId),
+        },
+        modelCallResourceMeter: {
+          reserve: async ({ callIndex, tokenUpperBound }: {
+            callIndex: number;
+            tokenUpperBound: number;
+          }) => {
+            const usageId = `usage:${assignmentId}:model:${callIndex}`;
+            await this.options.resources.reserveUsage(
+              envelope.resourceLease,
+              { usageId, tokens: tokenUpperBound, calls: 1 },
+              assignmentResourceContext(envelope, usageId),
+            );
+            return { usageId };
+          },
+          consume: async ({ usageId, tokens }: { usageId: string; tokens: number }) => {
+            await this.options.resources.consume(
+              envelope.resourceLease,
+              { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
+              assignmentResourceContext(envelope, usageId),
+            );
+          },
+        },
       });
       while (true) {
         const item = await this.options.interactions.withBinding(

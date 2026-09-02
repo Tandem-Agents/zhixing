@@ -42,8 +42,8 @@ import {
 } from "../conversation-protocol-runtime.js";
 import {
   anchorConversationOwnerRuntime,
-  localConversationOwnerRuntime,
 } from "../conversation-owner-runtime.js";
+import { fixtureLocalOwnerRuntime } from "./local-owner-assembly-fixture.js";
 import {
   createConversationExecutorHostBoundary,
   ConversationExecutorTopologyAdapter,
@@ -362,7 +362,7 @@ describe("ConversationProtocolRuntime", () => {
     const factory: RuntimeFactory = { create: vi.fn(async () => runtime) };
     let manager!: ConversationManager;
     const protocol = createProtocol({
-      owner: localConversationOwnerRuntime(authority),
+      owner: fixtureLocalOwnerRuntime(authority),
       manager: () => manager,
       interactions: new DurableConversationInteractionObserver(),
       localExecutor: {
@@ -419,7 +419,7 @@ describe("ConversationProtocolRuntime", () => {
     });
     let restartedManager!: ConversationManager;
     const restartedProtocol = createProtocol({
-      owner: localConversationOwnerRuntime(restartedAuthority),
+      owner: fixtureLocalOwnerRuntime(restartedAuthority),
       manager: () => restartedManager,
       interactions: new DurableConversationInteractionObserver(),
       localExecutor: {

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 import {
   anchorConversationOwnerRuntime,
+  createConversationResourceRecoveryPort,
   localConversationOwnerRuntime,
 } from "./conversation-owner-runtime.js";
 
@@ -44,7 +45,19 @@ describe("conversation owner domain composition", () => {
       validateLocalConversationManifest: vi.fn(),
     } as unknown as AuthorityRuntimeStack;
 
-    const local = localConversationOwnerRuntime(authority);
+    const executorResources = authority.executorResourceGovernor;
+    const local = localConversationOwnerRuntime({
+      ...authority,
+      resources: executorResources,
+      executionResources: executorResources,
+      assignmentResources: executorResources,
+      resourceRecovery: createConversationResourceRecoveryPort({
+        primary: executorResources,
+        acceptedWork: executorResources,
+      }),
+      finalizeUsage: (assignmentId) =>
+        executorResources.finalizeLocalAssignment(assignmentId),
+    });
     const anchor = anchorConversationOwnerRuntime(authority);
     const localId = "local-device-a-01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
@@ -68,6 +81,11 @@ describe("conversation owner domain composition", () => {
     expect(local.surfaceAssets).toBeUndefined();
     expect(local.delivery).toBeUndefined();
     expect(local.participant).toBeUndefined();
+    expect("resourceGovernor" in local).toBe(false);
+    expect("executorResources" in local).toBe(false);
+    expect("executorResourceGovernor" in local).toBe(false);
+    expect(local.executionResources).toBe(executorResources);
+    expect(local.assignmentResources).toBe(executorResources);
     await expect(local.finalizeUsage("assignment-local", {} as never)).resolves.toEqual({
       reportDigest: "sha256:" + "a".repeat(64),
       upToUsageSeq: 0,
@@ -107,6 +125,85 @@ describe("conversation owner domain composition", () => {
     expect(() => anchorConversationOwnerRuntime(authority)).not.toThrow();
     const runtime = anchorConversationOwnerRuntime(authority);
     expect(runtime.executorLog).toBeUndefined();
-    expect(runtime.executorResourceGovernor).toBeUndefined();
+    expect(runtime.executionResources).toBeUndefined();
+    expect(runtime.assignmentResources).toBeUndefined();
+  });
+
+  it("projects recovery and accepted-work leases without exposing governor state", async () => {
+    const primaryReclaim = vi.fn(async () => 2);
+    const executionReclaim = vi.fn(async () => 3);
+    const executionSnapshot = vi.fn(async () => ({
+      reservations: new Map([
+        [
+          "reservation-active",
+          {
+            state: "active",
+            lease: {
+              scopeBinding: {
+                kind: "conversation",
+                conversationId: "conversation-1",
+                ownerEpoch: 7,
+              },
+            },
+          },
+        ],
+        [
+          "reservation-job",
+          {
+            state: "active",
+            lease: { scopeBinding: { kind: "job", taskId: "task-1" } },
+          },
+        ],
+      ]),
+    }));
+    const recovery = createConversationResourceRecoveryPort({
+      primary: {
+        reclaimExpired: primaryReclaim,
+        snapshot: vi.fn(() => {
+          throw new Error("anchor snapshot must not drive executor accepted work");
+        }),
+      },
+      additionalRecovery: {
+        reclaimExpired: executionReclaim,
+      },
+      acceptedWork: {
+        snapshot: executionSnapshot,
+      },
+    } as never);
+
+    await expect(recovery.reclaimExpired()).resolves.toBe(5);
+    await expect(recovery.activeConversationReservations()).resolves.toEqual([
+      {
+        reservationId: "reservation-active",
+        conversationId: "conversation-1",
+        ownerEpoch: 7,
+        revision: expect.stringMatching(/^sha256:/u),
+      },
+    ]);
+    expect(primaryReclaim).toHaveBeenCalledTimes(1);
+    expect(executionReclaim).toHaveBeenCalledTimes(1);
+    expect(executionSnapshot).toHaveBeenCalledTimes(1);
+    expect("snapshot" in recovery).toBe(false);
+
+    const localReclaim = vi.fn(async () => 1);
+    const localRecovery = {
+      reclaimExpired: localReclaim,
+    };
+    const local = createConversationResourceRecoveryPort({
+      primary: localRecovery,
+      additionalRecovery: localRecovery,
+      acceptedWork: {
+        snapshot: vi.fn(async () => ({ reservations: new Map() })),
+      },
+    } as never);
+    await expect(local.reclaimExpired()).resolves.toBe(1);
+    expect(localReclaim).toHaveBeenCalledTimes(1);
+
+    const anchorOnly = createConversationResourceRecoveryPort({
+      primary: {
+        reclaimExpired: vi.fn(async () => 0),
+      },
+    });
+    await expect(anchorOnly.activeConversationReservations()).resolves.toEqual([]);
   });
 });

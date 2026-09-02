@@ -595,7 +595,7 @@ export class MeshRuntimeAssembly
                 anchorEpoch,
               })
             : this.#composition.globalQueryPort(anchorId(), capability, anchorEpoch),
-        resourceGovernor: options.authority.executorResourceGovernor,
+        resources: options.authority.executorResourceGovernor,
         InProcessAssignmentSubmission:
           options.executor!.InProcessAssignmentSubmission,
         interactions: options.executor!.interactions,

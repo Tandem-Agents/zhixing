@@ -34,7 +34,10 @@ import {
   createConversationExecutorLedger,
 } from "./conversation-executor-ledger.js";
 import { createConversationExecutorHostBoundary } from "./conversation-executor-dispatch.js";
-import { localConversationOwnerRuntime } from "./conversation-owner-runtime.js";
+import {
+  createConversationResourceRecoveryPort,
+  localConversationOwnerRuntime,
+} from "./conversation-owner-runtime.js";
 import { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
 import { createExecutorReadinessSource } from "./executor-readiness.js";
 import {
@@ -358,13 +361,22 @@ export async function runExecutorRole(
       "executorDataPlane.close",
       () => dataPlane.close(),
     );
+    const executorResources = authority.executorResourceGovernor;
     const localOwnerRuntime = localConversationOwnerRuntime({
       artifacts: authority.artifacts,
       deviceId: authority.deviceId,
       executorCapabilities: authority.executorCapabilities,
       executorId: authority.executorId,
       executorLog: authority.executorLog,
-      executorResourceGovernor: authority.executorResourceGovernor,
+      resources: executorResources,
+      executionResources: executorResources,
+      assignmentResources: executorResources,
+      resourceRecovery: createConversationResourceRecoveryPort({
+        primary: executorResources,
+        acceptedWork: executorResources,
+      }),
+      finalizeUsage: (assignmentId) =>
+        executorResources.finalizeLocalAssignment(assignmentId),
       executionAssetCatalog: authority.executionAssetCatalog,
       localControlAdmission: authority.localControlAdmission,
       localDomainId: authority.localDomainId,
@@ -465,7 +477,7 @@ export async function runExecutorRole(
         return mesh.globalQueryForAnchor(capability, anchorEpoch);
       },
       InProcessAssignmentSubmission: executor.InProcessAssignmentSubmission,
-      resourceGovernor: authority.executorResourceGovernor,
+      resources: authority.executorResourceGovernor,
       createStream: (input) => dataPlane!.createStream(input),
       onError: (_assignmentId, error) =>
         writer.notify(`[job-worker] ${error.message}`),

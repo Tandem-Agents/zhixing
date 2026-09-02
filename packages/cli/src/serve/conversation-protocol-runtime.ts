@@ -1104,14 +1104,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         assignmentId,
         this.#clock(),
       );
-      await this.#authority.resourceGovernor.enqueueRoot(
+      await this.#authority.resources.enqueueRoot(
         assignmentReservationId(assignmentId),
         { kind: "run", id: runId, attempt },
         origin,
         resourceContext,
       );
       const resourceLease: AssignmentResourceLease<"conversation"> =
-        await this.#authority.resourceGovernor.prepareAssignmentRoot<"conversation">({
+        await this.#authority.resources.prepareAssignmentRoot<"conversation">({
         assignmentId,
         executorId: targetExecutorId,
         workload: { kind: "run", id: runId, attempt },
@@ -1354,7 +1354,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           modelCallResourceMeter: {
             reserve: async ({ callIndex, tokenUpperBound }) => {
               const usageId = `usage:${assignmentId}:model:${callIndex}`;
-              await this.#requireExecutorResourceGovernor().reserveUsage(
+              await this.#requireExecutionResources().reserveUsage(
                 dispatch.envelope.resourceLease,
                 { usageId, tokens: tokenUpperBound, calls: 1 },
                 resourceSubmissionContext,
@@ -1362,7 +1362,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
               return { usageId };
             },
             consume: async ({ usageId, tokens }) => {
-              await this.#requireExecutorResourceGovernor().consume(
+              await this.#requireExecutionResources().consume(
                 dispatch.envelope.resourceLease,
                 { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
                 resourceSubmissionContext,
@@ -1940,13 +1940,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     await this.recoverReadinessProjections();
     if (this.#recoveryStopped) return 0;
     const queue = [...this.#recoveryConversations.entries()];
-    let recovered = await this.#authority.resourceGovernor.reclaimExpired();
-    if (
-      this.#authority.executorResourceGovernor &&
-      this.#authority.executorResourceGovernor !== this.#authority.resourceGovernor
-    ) {
-      recovered += await this.#authority.executorResourceGovernor.reclaimExpired();
-    }
+    let recovered = await this.#authority.resourceRecovery.reclaimExpired();
     const recoverConversation = async (conversationId: string): Promise<number> =>
       this.#withRecoveryClaim(conversationId, async () => {
         let count = 0;
@@ -2106,23 +2100,18 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       }
     }
     const leases: Array<{ id: string; revision: string }> = [];
-    const governor = this.#authority.executorResourceGovernor;
-    if (governor) {
-      const projection = await governor.snapshot();
-      for (const [reservationId, reservation] of projection.reservations) {
-        const scope = reservation.lease.scopeBinding;
-        if (
-          reservation.state === "active" &&
-          scope.kind === "conversation" &&
-          scope.ownerEpoch === this.#ownerEpochFor(scope.conversationId) &&
-          this.#acceptsConversationId(scope.conversationId) &&
-          (conversationId === undefined || scope.conversationId === conversationId)
-        ) {
-          leases.push({
-            id: reservationId,
-            revision: protocolDigest("ActiveLocalLeaseClosure", 1, reservation),
-          });
-        }
+    for (const reservation of
+      await this.#authority.resourceRecovery.activeConversationReservations()) {
+      if (
+        reservation.ownerEpoch === this.#ownerEpochFor(reservation.conversationId) &&
+        this.#acceptsConversationId(reservation.conversationId) &&
+        (conversationId === undefined ||
+          reservation.conversationId === conversationId)
+      ) {
+        leases.push({
+          id: reservation.reservationId,
+          revision: reservation.revision,
+        });
       }
     }
     const recoveryIds = new Set<string>();
@@ -2409,7 +2398,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       ...(this.#authority.participant
         ? { delivery: this.#authority.participant }
         : {}),
-      resources: this.#authority.resourceGovernor,
+      resources: this.#authority.resources,
       clock: this.#clock,
       currentAuthority: {
         deviceId: this.#authority.deviceId,
@@ -2915,8 +2904,8 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     );
   }
 
-  #requireExecutorResourceGovernor() {
-    const resources = this.#authority.executorResourceGovernor;
+  #requireExecutionResources() {
+    const resources = this.#authority.executionResources;
     if (!resources) {
       throw new Error("Local executor resource authority is unavailable");
     }

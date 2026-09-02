@@ -26,6 +26,7 @@ import {
 } from "../conversation-executor-ledger.js";
 import { createDeviceCapacityRuntime } from "../device-capacity-runtime.js";
 import {
+  createConversationResourceRecoveryPort,
   localConversationOwnerRuntime,
   type LocalConversationOwnerRuntimeStack,
 } from "../conversation-owner-runtime.js";
@@ -97,13 +98,22 @@ const secretStoresByHome = new Map<string, FixtureSecretStore>();
 export function fixtureLocalOwnerRuntime(
   authority: AuthorityRuntimeStack,
 ): LocalConversationOwnerRuntimeStack {
+  const executorResources = authority.executorResourceGovernor;
   return localConversationOwnerRuntime({
     artifacts: authority.artifacts,
     deviceId: authority.deviceId,
     executorCapabilities: authority.executorCapabilities,
     executorId: authority.executorId,
     executorLog: authority.executorLog,
-    executorResourceGovernor: authority.executorResourceGovernor,
+    resources: executorResources,
+    executionResources: executorResources,
+    assignmentResources: executorResources,
+    resourceRecovery: createConversationResourceRecoveryPort({
+      primary: executorResources,
+      acceptedWork: executorResources,
+    }),
+    finalizeUsage: (assignmentId) =>
+      executorResources.finalizeLocalAssignment(assignmentId),
     executionAssetCatalog: authority.executionAssetCatalog,
     localControlAdmission: authority.localControlAdmission,
     localDomainId: authority.localDomainId,

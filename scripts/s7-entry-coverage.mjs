@@ -3924,6 +3924,7 @@ export async function validateS7Structure() {
   failures.push(...inspectConversationExecutorDispatchBoundary(records));
   failures.push(...inspectAssignmentDataPlaneBoundary(records));
   failures.push(...inspectAdvancementEvidenceTopologyBoundary(records));
+  failures.push(...inspectAssignmentResourcePortBoundary(records));
   failures.push(...inspectConversationAdoptionAssembly(records));
   failures.push(...inspectConversationStorageBoundary(records));
   failures.push(...inspectWorksceneStorageCleanupBoundary(records));
@@ -10715,6 +10716,110 @@ export function inspectAdvancementEvidenceTopologyBoundary(records) {
   return failures;
 }
 
+/** A6 Assignment resource needs cross only finite Correctness ports. */
+export function inspectAssignmentResourcePortBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const source = byPath.get(relative);
+    if (source === undefined) failures.push(`${relative}: Assignment resource source is missing`);
+    return source ?? "";
+  };
+  const owner = required("packages/cli/src/serve/conversation-owner-runtime.ts");
+  const protocol = required("packages/cli/src/serve/conversation-protocol-runtime.ts");
+  const dispatch = required("packages/cli/src/serve/conversation-executor-dispatch.ts");
+  const ledger = required("packages/cli/src/serve/conversation-executor-ledger.ts");
+  const conversationWorker = required(
+    "packages/cli/src/serve/conversation-assignment-worker.ts",
+  );
+  const jobWorker = required("packages/cli/src/serve/job-assignment-worker.ts");
+  const access = required("packages/cli/src/serve/access-surfaces.ts");
+  const executorRole = required("packages/cli/src/serve/executor-role-runtime.ts");
+  const mesh = required("packages/cli/src/serve/mesh-runtime-assembly.ts");
+  const setup = required("packages/cli/src/setup-delivery.ts");
+  const ownerContract = owner.slice(
+    owner.indexOf("export interface ConversationOwnerRuntimeStack"),
+    owner.indexOf("export function anchorConversationOwnerRuntime"),
+  );
+  const demandSources = [protocol, dispatch, ledger, conversationWorker, jobWorker];
+
+  if (
+    demandSources.some((source) => source.includes("ExecutorResourceGovernor")) ||
+    owner.includes("import type { ExecutorResourceGovernor") ||
+    owner.includes(" as ExecutorResourceGovernor")
+  ) {
+    failures.push("Assignment resource demand boundary regained the concrete governor");
+  }
+  if (
+    !ownerContract.includes("readonly resources: ConversationOwnerResourceAuthority") ||
+    !ownerContract.includes("readonly executionResources?: ResourceReservationPort") ||
+    !ownerContract.includes(
+      "readonly assignmentResources?: ExecutorAssignmentResourceCoordinator",
+    ) ||
+    !ownerContract.includes("readonly resourceRecovery: ConversationResourceRecoveryPort") ||
+    /readonly\s+(?:resourceGovernor|executorResources|executorResourceGovernor)\b/u.test(
+      ownerContract,
+    )
+  ) {
+    failures.push("Conversation owner resource role exact-set or legacy aliases drifted");
+  }
+  if (
+    !protocol.includes("this.#authority.resources.enqueueRoot(") ||
+    !protocol.includes("this.#authority.resourceRecovery.reclaimExpired()") ||
+    !protocol.includes(
+      "this.#authority.resourceRecovery.activeConversationReservations()",
+    ) ||
+    !protocol.includes("this.#authority.executionResources") ||
+    [
+      "this.#authority.resourceGovernor",
+      "this.#authority.executorResources",
+      "this.#authority.executorResourceGovernor",
+    ].some((token) => protocol.includes(token))
+  ) {
+    failures.push("Conversation protocol bypassed its finite resource roles");
+  }
+  if (
+    !ledger.includes("resources: options.authority.assignmentResources") ||
+    !dispatch.includes("options.authority.assignmentResources") ||
+    ledger.includes(" as ExecutorResourceGovernor") ||
+    dispatch.includes("options.authority.executorResources")
+  ) {
+    failures.push("Assignment ledger or dispatch bypassed its coordinator port");
+  }
+  for (const [name, source] of [
+    ["conversation", conversationWorker],
+    ["job", jobWorker],
+  ]) {
+    if (
+      !source.includes("readonly resources: ResourceReservationPort") ||
+      !source.includes("port: this.options.resources") ||
+      source.includes("resourceGovernor")
+    ) {
+      failures.push(`${name} worker bypassed its ResourceReservationPort`);
+    }
+  }
+  if (
+    !access.includes("createConversationResourceRecoveryPort({") ||
+    !access.includes("resources: ctx.authorityRuntime.executorResourceGovernor") ||
+    !executorRole.includes("createConversationResourceRecoveryPort({") ||
+    !executorRole.includes("resources: authority.executorResourceGovernor") ||
+    !mesh.includes("resources: options.authority.executorResourceGovernor")
+  ) {
+    failures.push("Host Assignment resource role projection exact-set drifted");
+  }
+  const concreteOwners = records
+    .filter((record) => /new\s+executorRuntime!\.ExecutorResourceGovernor\(/u.test(record.text))
+    .map((record) => record.relative);
+  if (
+    concreteOwners.length !== 1 ||
+    concreteOwners[0] !== "packages/cli/src/setup-delivery.ts" ||
+    !setup.includes("new executorRuntime!.ExecutorResourceGovernor({")
+  ) {
+    failures.push("Executor resource governor acquired a second production owner");
+  }
+  return failures;
+}
+
 export function inspectLocalConversationOwnerIsolation(records) {
   const failures = [];
   const runtimeRecord = records.find(
@@ -11108,13 +11213,15 @@ export function inspectLocalConversationOwnerIsolation(records) {
   }
 
   const frozenDependencyKeys = [
+    "assignmentResources",
     "artifacts",
     "deviceId",
+    "executionResources",
     "executorCapabilities",
     "executorId",
     "executorLog",
-    "executorResourceGovernor",
     "executionAssetCatalog",
+    "finalizeUsage",
     "localControlAdmission",
     "localDomainId",
     "localGovernorEpoch",
@@ -11123,6 +11230,8 @@ export function inspectLocalConversationOwnerIsolation(records) {
     "preflightLocalConversationEnvironment",
     "prepareLocalConversationAssignment",
     "releaseLocalConversationEnvironmentPreflight",
+    "resourceRecovery",
+    "resources",
     "signer",
     "storageMaintenance",
     "validateConversationRuntimeBinding",
@@ -11140,6 +11249,10 @@ export function inspectLocalConversationOwnerIsolation(records) {
     const collectContractKeys = (node) => {
       if (ts.isLiteralTypeNode(node) && ts.isStringLiteralLike(node.literal)) {
         contractKeys.add(node.literal.text);
+      }
+      if (ts.isPropertySignature(node) && node.name) {
+        const name = propertyNameText(node.name);
+        if (name) contractKeys.add(name);
       }
       ts.forEachChild(node, collectContractKeys);
     };
@@ -11199,6 +11312,11 @@ export function inspectLocalConversationOwnerIsolation(records) {
     ["packages/cli/src/serve/access-surfaces.ts", "ctx.authorityRuntime"],
     ["packages/cli/src/serve/executor-role-runtime.ts", "authority"],
   ]);
+  const projectedResourceDependencies = new Set([
+    "resources",
+    "executionResources",
+    "assignmentResources",
+  ]);
   const allowedCreateProperties = new Set([
     "owner",
     "executorDispatch",
@@ -11247,6 +11365,37 @@ export function inspectLocalConversationOwnerIsolation(records) {
             continue;
           }
           dependencyKeys.add(name);
+          if (projectedResourceDependencies.has(name)) {
+            if (
+              !ts.isIdentifier(property.initializer) ||
+              property.initializer.text !== "executorResources"
+            ) {
+              failures.push(
+                `${record.relative}: local runtime dependency ${name} must bind the finite executorResources projection`,
+              );
+            }
+            continue;
+          }
+          if (name === "resourceRecovery") {
+            if (
+              !ts.isCallExpression(property.initializer) ||
+              !ts.isIdentifier(property.initializer.expression) ||
+              property.initializer.expression.text !== "createConversationResourceRecoveryPort"
+            ) {
+              failures.push(
+                `${record.relative}: local runtime resourceRecovery must bind the finite recovery adapter`,
+              );
+            }
+            continue;
+          }
+          if (name === "finalizeUsage") {
+            if (!ts.isArrowFunction(property.initializer)) {
+              failures.push(
+                `${record.relative}: local runtime finalizeUsage must bind a finite Host adapter`,
+              );
+            }
+            continue;
+          }
           const initializerOwner = ts.isPropertyAccessExpression(property.initializer)
             ? property.initializer.expression.getText(source)
             : undefined;
@@ -11266,6 +11415,25 @@ export function inspectLocalConversationOwnerIsolation(records) {
           if (!dependencyKeys.has(key)) {
             failures.push(`${record.relative}: local runtime construction is missing dependency ${key}`);
           }
+        }
+        let hasResourceProjection = false;
+        const findResourceProjection = (node) => {
+          if (
+            ts.isVariableDeclaration(node) &&
+            ts.isIdentifier(node.name) &&
+            node.name.text === "executorResources" &&
+            node.initializer?.getText(source) ===
+              `${dependencyOwner}.executorResourceGovernor`
+          ) {
+            hasResourceProjection = true;
+          }
+          ts.forEachChild(node, findResourceProjection);
+        };
+        findResourceProjection(source);
+        if (!hasResourceProjection) {
+          failures.push(
+            `${record.relative}: finite executorResources projection must originate at the Host governor boundary`,
+          );
         }
       }
       const parent = factoryCall.parent;

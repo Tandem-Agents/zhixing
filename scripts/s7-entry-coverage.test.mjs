@@ -17,6 +17,7 @@ import {
   inspectConversationExecutorDispatchBoundary,
   inspectAssignmentDataPlaneBoundary,
   inspectAdvancementEvidenceTopologyBoundary,
+  inspectAssignmentResourcePortBoundary,
   inspectConversationStorageBoundary,
   inspectWorksceneStorageCleanupBoundary,
   inspectStorageRemainderBoundary,
@@ -556,7 +557,7 @@ test("local conversation owner remains isolated from anchor capabilities by cons
   assert.match(
     inspectLocalConversationOwnerIsolation(mutate(
       "packages/cli/src/serve/conversation-owner-runtime.ts",
-      (text) => text.replace('  | "verifier"\n>;', ">;"),
+      (text) => text.replace('  | "verifier"\n> & {', "> & {"),
     )).join("\n"),
     /must be exactly the frozen key set/,
   );
@@ -970,6 +971,97 @@ test("Advancement evidence selects local or Mesh only through one finite Host di
       (text) => `${text}\nconst duplicateEvidenceClient = new EvidenceMeshClient(client, verifier);\n`,
     )).join("\n"),
     /Mesh client or service acquired a second production owner/u,
+  );
+});
+
+test("Assignment resources cross Conversation and Job through finite Correctness roles", async () => {
+  const paths = [
+    "packages/cli/src/serve/conversation-owner-runtime.ts",
+    "packages/cli/src/serve/conversation-protocol-runtime.ts",
+    "packages/cli/src/serve/conversation-executor-dispatch.ts",
+    "packages/cli/src/serve/conversation-executor-ledger.ts",
+    "packages/cli/src/serve/conversation-assignment-worker.ts",
+    "packages/cli/src/serve/job-assignment-worker.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/cli/src/serve/mesh-runtime-assembly.ts",
+    "packages/cli/src/setup-delivery.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: (await readFile(relative, "utf8")).replaceAll("\r\n", "\n"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectAssignmentResourcePortBoundary(records), []);
+  assert.match(
+    inspectAssignmentResourcePortBoundary(mutate(
+      "packages/cli/src/serve/conversation-assignment-worker.ts",
+      (text) => `${text}\ntype ConcreteLeak = ExecutorResourceGovernor;\n`,
+    )).join("\n"),
+    /demand boundary regained the concrete governor/u,
+  );
+  assert.match(
+    inspectAssignmentResourcePortBoundary(mutate(
+      "packages/cli/src/serve/conversation-owner-runtime.ts",
+      (text) => text.replace(
+        "readonly executionResources?: ResourceReservationPort;",
+        "readonly executorResourceGovernor?: ResourceReservationPort;",
+      ),
+    )).join("\n"),
+    /resource role exact-set or legacy aliases drifted/u,
+  );
+  assert.match(
+    inspectAssignmentResourcePortBoundary(mutate(
+      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      (text) => text.replace(
+        "this.#authority.executionResources",
+        "this.#authority.executorResourceGovernor",
+      ),
+    )).join("\n"),
+    /protocol bypassed its finite resource roles/u,
+  );
+  assert.match(
+    inspectAssignmentResourcePortBoundary(mutate(
+      "packages/cli/src/serve/job-assignment-worker.ts",
+      (text) => text.replace(
+        "readonly resources: ResourceReservationPort;",
+        "readonly resourceGovernor: ResourceReservationPort;",
+      ),
+    )).join("\n"),
+    /job worker bypassed its ResourceReservationPort/u,
+  );
+  assert.match(
+    inspectAssignmentResourcePortBoundary(mutate(
+      "packages/cli/src/serve/conversation-executor-ledger.ts",
+      (text) => text.replace(
+        "resources: options.authority.assignmentResources,",
+        "resources: options.authority.assignmentResources as ExecutorResourceGovernor,",
+      ),
+    )).join("\n"),
+    /ledger or dispatch bypassed its coordinator port/u,
+  );
+  assert.match(
+    inspectAssignmentResourcePortBoundary(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "resources: ctx.authorityRuntime.executorResourceGovernor,",
+        "resourceGovernor: ctx.authorityRuntime.executorResourceGovernor,",
+      ),
+    )).join("\n"),
+    /Host Assignment resource role projection exact-set drifted/u,
+  );
+  assert.match(
+    inspectAssignmentResourcePortBoundary([
+      ...records,
+      {
+        relative: "packages/cli/src/serve/duplicate-resource-owner.ts",
+        text: "const duplicate = new executorRuntime!.ExecutorResourceGovernor({});",
+      },
+    ]).join("\n"),
+    /governor acquired a second production owner/u,
   );
 });
 

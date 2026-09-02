@@ -6,7 +6,6 @@ import type {
 import type { ExecutorCapabilitySnapshot } from "@zhixing/core/protocol";
 import type {
   ConversationAssignmentLedger,
-  ExecutorResourceGovernor,
 } from "@zhixing/executor";
 import type { ConversationOwnerRuntimeStack } from "./conversation-owner-runtime.js";
 import { createOwnerControlAuthorizer } from "./owner-control-authorizer.js";
@@ -31,15 +30,15 @@ export interface ConversationExecutorLedgerOptions {
       | "verifier"
       | "executorCapabilities"
       | "permissionSnapshotFor"
-      | "executorResources"
+      | "assignmentResources"
       | "preflightLocalConversationEnvironment"
       | "validateLocalConversationManifest"
     >,
-    "executorLog" | "executorResources"
+    "executorLog" | "assignmentResources"
   > & {
     readonly executorLog: NonNullable<ConversationOwnerRuntimeStack["executorLog"]>;
-    readonly executorResources: NonNullable<
-      ConversationOwnerRuntimeStack["executorResources"]
+    readonly assignmentResources: NonNullable<
+      ConversationOwnerRuntimeStack["assignmentResources"]
     >;
   };
   readonly clock?: () => string;
@@ -69,7 +68,7 @@ export function createConversationExecutorLedger(
     signer: options.authority.signer,
     verifier: options.authority.verifier,
     ownerControl: createOwnerControlAuthorizer(options.authority.verifier, clock),
-    resources: options.authority.executorResources as ExecutorResourceGovernor,
+    resources: options.authority.assignmentResources,
     usageFinal: options.usageFinal,
     snapshotFor: (executorId: string): ExecutorCapabilitySnapshot | undefined =>
       options.authority.executorCapabilities.snapshotFor(executorId),

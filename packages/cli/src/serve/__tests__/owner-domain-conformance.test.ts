@@ -5,7 +5,6 @@ import { ConversationManager } from "@zhixing/owner-kernel";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import { setupAuthorityRuntime } from "../../setup-delivery.js";
-import { localConversationOwnerRuntime } from "../conversation-owner-runtime.js";
 import {
   anchorConversationOwnerRuntime,
 } from "../conversation-owner-runtime.js";
@@ -14,7 +13,10 @@ import {
   ConversationProtocolRuntime,
   DurableConversationInteractionObserver,
 } from "../conversation-protocol-runtime.js";
-import { createLocalOwnerAssemblyFixture } from "./local-owner-assembly-fixture.js";
+import {
+  createLocalOwnerAssemblyFixture,
+  fixtureLocalOwnerRuntime,
+} from "./local-owner-assembly-fixture.js";
 
 const READINESS = {
   tools: [] as string[],
@@ -56,7 +58,7 @@ describe("conversation owner domain conformance", () => {
         },
       });
       const owner = configuration.domain === "local"
-        ? localConversationOwnerRuntime(authority)
+        ? fixtureLocalOwnerRuntime(authority)
         : anchorConversationOwnerRuntime(authority);
       const protocol = new ConversationProtocolRuntime({
         ...(configuration.domain === "local" ? { owner } : { authority }),

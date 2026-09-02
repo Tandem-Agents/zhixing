@@ -25,7 +25,6 @@ import {
 } from "@zhixing/core/protocol";
 import type {
   ConversationAssignmentLedger,
-  ExecutorResourceGovernor,
   InProcessAssignmentSubmission,
   JobRecoveryObligation,
 } from "@zhixing/executor";
@@ -126,7 +125,7 @@ export interface JobAssignmentWorkerOptions {
     readonly envelope: JobEnvelope;
   }) => Promise<{ reportDigest: string; upToUsageSeq: number }>;
   readonly InProcessAssignmentSubmission: typeof InProcessAssignmentSubmission;
-  readonly resourceGovernor?: ExecutorResourceGovernor;
+  readonly resources: ResourceReservationPort;
   readonly globalQueryFor?: (
     capability: import("@zhixing/core/contracts").AuthorityCapability,
     anchorEpoch: number,
@@ -522,37 +521,33 @@ export class JobAssignmentWorker implements JobInteractionAnswerPort {
               ),
             }
           : {}),
-        ...(this.options.resourceGovernor
-          ? {
-              resourceReservation: {
-                port: this.options.resourceGovernor,
-                parentLease: envelope.resourceLease,
-                contextFor: (requestId: string) =>
-                  jobResourceContext(envelope, requestId),
-              },
-              modelCallResourceMeter: {
-                reserve: async ({ callIndex, tokenUpperBound }: {
-                  callIndex: number;
-                  tokenUpperBound: number;
-                }) => {
-                  const usageId = `usage:${assignmentId}:model:${callIndex}`;
-                  await this.options.resourceGovernor!.reserveUsage(
-                    envelope.resourceLease,
-                    { usageId, tokens: tokenUpperBound, calls: 1 },
-                    jobResourceContext(envelope, usageId),
-                  );
-                  return { usageId };
-                },
-                consume: async ({ usageId, tokens }: { usageId: string; tokens: number }) => {
-                  await this.options.resourceGovernor!.consume(
-                    envelope.resourceLease,
-                    { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
-                    jobResourceContext(envelope, usageId),
-                  );
-                },
-              },
-            }
-          : {}),
+        resourceReservation: {
+          port: this.options.resources,
+          parentLease: envelope.resourceLease,
+          contextFor: (requestId: string) =>
+            jobResourceContext(envelope, requestId),
+        },
+        modelCallResourceMeter: {
+          reserve: async ({ callIndex, tokenUpperBound }: {
+            callIndex: number;
+            tokenUpperBound: number;
+          }) => {
+            const usageId = `usage:${assignmentId}:model:${callIndex}`;
+            await this.options.resources.reserveUsage(
+              envelope.resourceLease,
+              { usageId, tokens: tokenUpperBound, calls: 1 },
+              jobResourceContext(envelope, usageId),
+            );
+            return { usageId };
+          },
+          consume: async ({ usageId, tokens }: { usageId: string; tokens: number }) => {
+            await this.options.resources.consume(
+              envelope.resourceLease,
+              { usageId, ...(tokens === 0 ? {} : { tokens }), calls: 1 },
+              jobResourceContext(envelope, usageId),
+            );
+          },
+        },
       });
       while (true) {
         const item = await this.#interactions.withBinding(

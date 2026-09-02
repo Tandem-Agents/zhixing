@@ -3,10 +3,12 @@ import {
   isLocalConversationId,
 } from "@zhixing/core";
 import type {
+  AuthorityCallContext,
   AuthorityError,
   GlobalStatePort,
   ResourceReservationPort,
   TrustRuleSnapshot,
+  UsageReport,
 } from "@zhixing/core/contracts";
 import type {
   ArtifactStore,
@@ -15,11 +17,13 @@ import type {
 } from "@zhixing/core/authority";
 import type {
   ExecutorCapabilityDirectory,
+  GovernorProjection,
   ProtocolSignatureVerifier,
   ProtocolSigner,
 } from "@zhixing/core/protocol";
+import { protocolDigest } from "@zhixing/core/protocol";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
-import type { ExecutorResourceGovernor } from "@zhixing/executor";
+import type { ExecutorAssignmentResourceCoordinator } from "@zhixing/executor";
 import type {
   AssignmentResourceCoordinator,
   ControlAdmissionJournal,
@@ -42,9 +46,63 @@ export type ConversationOwnerDomain =
 
 export type ConversationOwnerResourceAuthority = ResourceReservationPort &
   AssignmentResourceCoordinator & {
-    enqueueRoot: AuthorityRuntimeStack["resourceGovernor"]["enqueueRoot"];
     reclaimExpired(): Promise<number>;
   };
+
+export interface ConversationResourceRecoveryPort {
+  reclaimExpired(): Promise<number>;
+  activeConversationReservations(): Promise<readonly {
+    readonly reservationId: string;
+    readonly conversationId: string;
+    readonly ownerEpoch: number;
+    readonly revision: string;
+  }[]>;
+}
+
+interface ConversationResourceReclaimer {
+  reclaimExpired(): Promise<number>;
+}
+
+interface ConversationResourceReservationReader {
+  snapshot(): Promise<GovernorProjection>;
+}
+
+/** Correctness adapter for owner recovery; consumers never receive a governor snapshot. */
+export function createConversationResourceRecoveryPort(options: {
+  readonly primary: ConversationResourceReclaimer;
+  readonly additionalRecovery?: ConversationResourceReclaimer;
+  readonly acceptedWork?: ConversationResourceReservationReader;
+}): ConversationResourceRecoveryPort {
+  return Object.freeze({
+    reclaimExpired: async () => {
+      const primary = await options.primary.reclaimExpired();
+      return options.additionalRecovery && options.additionalRecovery !== options.primary
+        ? primary + await options.additionalRecovery.reclaimExpired()
+        : primary;
+    },
+    activeConversationReservations: async () => {
+      if (!options.acceptedWork) return [];
+      const projection = await options.acceptedWork.snapshot();
+      return [...projection.reservations.entries()]
+        .filter(([, reservation]) =>
+          reservation.state === "active" &&
+          reservation.lease.scopeBinding.kind === "conversation"
+        )
+        .map(([reservationId, reservation]) => {
+          const scope = reservation.lease.scopeBinding;
+          if (scope.kind !== "conversation") {
+            throw new Error("Conversation resource projection changed during filtering");
+          }
+          return Object.freeze({
+            reservationId,
+            conversationId: scope.conversationId,
+            ownerEpoch: scope.ownerEpoch,
+            revision: protocolDigest("ActiveLocalLeaseClosure", 1, reservation),
+          });
+        });
+    },
+  });
+}
 
 export interface ConversationOwnerRuntimeStack {
   readonly domain: ConversationOwnerDomain;
@@ -61,9 +119,9 @@ export interface ConversationOwnerRuntimeStack {
   readonly controlAdmission: ControlAdmissionJournal;
   readonly executorCapabilities: ExecutorCapabilityDirectory;
   readonly resources: ConversationOwnerResourceAuthority;
-  readonly resourceGovernor: ConversationOwnerResourceAuthority;
-  readonly executorResources?: ExecutorResourceGovernor;
-  readonly executorResourceGovernor?: ExecutorResourceGovernor;
+  readonly executionResources?: ResourceReservationPort;
+  readonly assignmentResources?: ExecutorAssignmentResourceCoordinator;
+  readonly resourceRecovery: ConversationResourceRecoveryPort;
   readonly surfaceAssets?: SurfaceAssetCoordinator;
   readonly delivery?: ConversationDeliveryParticipant;
   readonly participant?: ConversationDeliveryParticipant;
@@ -84,7 +142,7 @@ export interface ConversationOwnerRuntimeStack {
   ): AuthorityError | undefined;
   finalizeUsage(
     assignmentId: string,
-    contextFor: Parameters<ExecutorResourceGovernor["flushAssignment"]>[2],
+    contextFor: (report: UsageReport) => AuthorityCallContext,
   ): Promise<{ readonly reportDigest: string; readonly upToUsageSeq: number }>;
 }
 
@@ -104,8 +162,8 @@ export interface LocalConversationOwnerRuntimeStack
   readonly participant?: never;
   readonly globalState?: never;
   readonly executorLog: AuthorityCommitLog;
-  readonly executorResources: ExecutorResourceGovernor;
-  readonly executorResourceGovernor: ExecutorResourceGovernor;
+  readonly executionResources: ResourceReservationPort;
+  readonly assignmentResources: ExecutorAssignmentResourceCoordinator;
   readonly executionAssetCatalog: ExecutionAssetCatalogPort;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly globalPublishing: false;
@@ -142,15 +200,21 @@ export function anchorConversationOwnerRuntime(
     get resources() {
       return authority.resourceGovernor;
     },
-    get resourceGovernor() {
-      return authority.resourceGovernor;
-    },
     ...(authority.localExecutorEnabled
       ? {
-          executorResources: authority.executorResourceGovernor,
-          executorResourceGovernor: authority.executorResourceGovernor,
+          executionResources: authority.executorResourceGovernor,
+          assignmentResources: authority.executorResourceGovernor,
         }
       : {}),
+    resourceRecovery: createConversationResourceRecoveryPort({
+      primary: authority.resourceGovernor,
+      ...(authority.localExecutorEnabled
+        ? {
+            additionalRecovery: authority.executorResourceGovernor,
+            acceptedWork: authority.executorResourceGovernor,
+          }
+        : {}),
+    }),
     get surfaceAssets() {
       return authority.surfaceAssets;
     },
@@ -204,7 +268,6 @@ export type LocalConversationOwnerRuntimeDependencies = Pick<
   | "executorCapabilities"
   | "executorId"
   | "executorLog"
-  | "executorResourceGovernor"
   | "executionAssetCatalog"
   | "localControlAdmission"
   | "localDomainId"
@@ -219,12 +282,17 @@ export type LocalConversationOwnerRuntimeDependencies = Pick<
   | "validateConversationRuntimeBinding"
   | "validateLocalConversationManifest"
   | "verifier"
->;
+> & {
+  readonly resources: ConversationOwnerResourceAuthority;
+  readonly executionResources: ResourceReservationPort;
+  readonly assignmentResources: ExecutorAssignmentResourceCoordinator;
+  readonly resourceRecovery: ConversationResourceRecoveryPort;
+  readonly finalizeUsage: ConversationOwnerRuntimeStack["finalizeUsage"];
+};
 
 export function localConversationOwnerRuntime(
   deps: LocalConversationOwnerRuntimeDependencies,
 ): LocalConversationOwnerRuntimeStack {
-  const resources = deps.executorResourceGovernor as ConversationOwnerResourceAuthority;
   return {
     domain: {
       kind: "local",
@@ -243,10 +311,10 @@ export function localConversationOwnerRuntime(
     artifacts: deps.artifacts,
     controlAdmission: deps.localControlAdmission,
     executorCapabilities: deps.executorCapabilities,
-    resources,
-    resourceGovernor: resources,
-    executorResources: deps.executorResourceGovernor,
-    executorResourceGovernor: deps.executorResourceGovernor,
+    resources: deps.resources,
+    executionResources: deps.executionResources,
+    assignmentResources: deps.assignmentResources,
+    resourceRecovery: deps.resourceRecovery,
     executionAssetCatalog: deps.executionAssetCatalog,
     storageMaintenance: deps.storageMaintenance,
     globalPublishing: false,
@@ -273,7 +341,6 @@ export function localConversationOwnerRuntime(
     releaseLocalConversationEnvironmentPreflight:
       deps.releaseLocalConversationEnvironmentPreflight,
     validateLocalConversationManifest: deps.validateLocalConversationManifest,
-    finalizeUsage: (assignmentId) =>
-      deps.executorResourceGovernor.finalizeLocalAssignment(assignmentId),
+    finalizeUsage: deps.finalizeUsage,
   };
 }

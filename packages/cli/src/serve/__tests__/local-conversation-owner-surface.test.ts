@@ -121,6 +121,8 @@ function context(
 ): AssemblyContext {
   const executorResources = {
     finalizeLocalAssignment: async () => ({ reportDigest: "sha256:" + "a".repeat(64), upToUsageSeq: 0 }),
+    reclaimExpired: vi.fn(async () => 0),
+    snapshot: vi.fn(async () => ({ reservations: new Map() })),
   };
   return {
     enabledRoles,
