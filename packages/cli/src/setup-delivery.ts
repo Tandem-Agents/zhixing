@@ -142,6 +142,7 @@ import {
   type ExecutionAssetCatalogPort,
 } from "./serve/execution-asset-cache.js";
 import type { InstalledAuthorityGeneration } from "./serve/planned-anchor-transfer.js";
+import { FileWorkspaceProbePersistence } from "./serve/workspace-probe-persistence.js";
 
 export const INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS = Object.freeze([
   "runtime-epoch",
@@ -970,10 +971,13 @@ export async function setupAuthorityRuntime(
         });
         await workspaceBindings.initialize();
         workspaceProbe = new WorkspaceProbeHandler({
-          rootDir: path.join(authorityRoot, "workspace-probes"),
           executorId,
           environment: workspaceBindings,
           log: executorLog!,
+          persistence: new FileWorkspaceProbePersistence({
+            zhixingHome: options.zhixingHome,
+            authorityLog: executorLog!,
+          }),
           signer: key,
           verifier,
           capacity: options.deviceCapacity,

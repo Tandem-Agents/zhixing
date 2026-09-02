@@ -37,6 +37,7 @@ export default defineConfig({
     "src/backup-recovery/application.ts",
     "src/environment/index.ts",
     "src/environment/workspace-administration.ts",
+    "src/environment/workspace-probe-persistence.ts",
     "src/test-support/s7-durable.ts",
     "src/test-support/s7-durable-harness.ts",
   ],

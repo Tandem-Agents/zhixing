@@ -3925,6 +3925,7 @@ export async function validateS7Structure() {
   failures.push(...inspectAssignmentDataPlaneBoundary(records));
   failures.push(...inspectAdvancementEvidenceTopologyBoundary(records));
   failures.push(...inspectAssignmentResourcePortBoundary(records));
+  failures.push(...inspectWorkspaceProbePersistenceBoundary(records));
   failures.push(...inspectConversationAdoptionAssembly(records));
   failures.push(...inspectConversationStorageBoundary(records));
   failures.push(...inspectWorksceneStorageCleanupBoundary(records));
@@ -10888,6 +10889,104 @@ export function inspectAssignmentResourcePortBoundary(records) {
     !setup.includes("new executorRuntime!.ExecutorResourceGovernor({")
   ) {
     failures.push("Executor resource governor acquired a second production owner");
+  }
+  return failures;
+}
+
+/** A6 keeps P07 workspace-probe bytes at one finite Host infrastructure edge. */
+export function inspectWorkspaceProbePersistenceBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const source = byPath.get(relative);
+    if (source === undefined) {
+      failures.push(`${relative}: workspace probe persistence source is missing`);
+    }
+    return source ?? "";
+  };
+  const probe = required("packages/core/src/environment/workspace-probe.ts");
+  const port = required(
+    "packages/core/src/environment/workspace-probe-persistence.ts",
+  );
+  const environment = required("packages/core/src/environment/index.ts");
+  const coreIndex = required("packages/core/src/index.ts");
+  const adapterPath = "packages/cli/src/serve/workspace-probe-persistence.ts";
+  const adapter = required(adapterPath);
+  const setup = required("packages/cli/src/setup-delivery.ts");
+  const options = probe.slice(
+    probe.indexOf("export interface WorkspaceProbeHandlerOptions"),
+    probe.indexOf("export interface WorkspaceProbePort"),
+  );
+
+  if (
+    !port.includes("export interface WorkspaceProbePersistencePort") ||
+    !port.includes("inspectEstablishment(): Promise<WorkspaceProbePersistenceObservation>") ||
+    !port.includes("publishEstablishment(): Promise<void>") ||
+    !options.includes("readonly persistence: WorkspaceProbePersistencePort") ||
+    options.includes("readonly persistence?:") ||
+    !probe.includes("this.#persistence.inspectEstablishment()") ||
+    !probe.includes("this.#persistence.publishEstablishment()")
+  ) {
+    failures.push("Workspace probe demand persistence port exact-set drifted");
+  }
+  if (
+    /WorkspaceProbePersistence|workspace-probe-persistence/u.test(environment) ||
+    coreIndex.includes("workspace-probe-persistence") ||
+    !probe.includes(
+      'import type { WorkspaceProbePersistencePort } from "./workspace-probe-persistence.js"',
+    )
+  ) {
+    failures.push("Workspace probe persistence port leaked through a Core barrel");
+  }
+  if (
+    /node:(?:fs|fs\/promises|path)/u.test(probe) ||
+    /\b(?:ensureDurableDirectory|syncDirectory)\b|#(?:rootDir|markerPath)|\blogPath\b|["']workspace-probes["']/u.test(
+      probe,
+    ) ||
+    /as\s+(?:FileAuthorityCommitLog|WorkspaceProbePersistencePort)/u.test(probe)
+  ) {
+    failures.push("Core workspace probe regained a path, filesystem or concrete log mechanism");
+  }
+  if (
+    !adapter.includes("implements WorkspaceProbePersistencePort") ||
+    !adapter.includes('from "@zhixing/core/environment/workspace-probe-persistence"') ||
+    !adapter.includes("readonly authorityLog: FileAuthorityCommitLog") ||
+    !adapter.includes('"distributed-runtime",\n      "workspace-probes"') ||
+    !adapter.includes('path.join(this.#rootDir, "probe-log-established")') ||
+    !adapter.includes("this.#authorityLogPath = options.authorityLog.logPath") ||
+    !adapter.includes("await ensureDurableDirectory(this.#rootDir)") ||
+    !adapter.includes("await handle.sync()") ||
+    !adapter.includes("await syncDirectory(this.#rootDir)") ||
+    /WorkspaceProbe(?:Request|Result)|probe-(?:started|completed|retired)|ProtocolSign/u.test(
+      adapter,
+    )
+  ) {
+    failures.push("CLI workspace probe persistence adapter ownership or durability drifted");
+  }
+  if (
+    !setup.includes("persistence: new FileWorkspaceProbePersistence({") ||
+    !setup.includes("zhixingHome: options.zhixingHome") ||
+    !setup.includes("authorityLog: executorLog!") ||
+    setup.includes('path.join(authorityRoot, "workspace-probes")')
+  ) {
+    failures.push("setupAuthorityRuntime workspace probe persistence binding drifted");
+  }
+
+  const adapterDefinitions = records
+    .filter((record) => record.text.includes("implements WorkspaceProbePersistencePort"))
+    .map((record) => record.relative)
+    .sort();
+  const adapterConstructions = records
+    .filter((record) => record.text.includes("new FileWorkspaceProbePersistence("))
+    .map((record) => record.relative)
+    .sort();
+  if (
+    adapterDefinitions.length !== 1 ||
+    adapterDefinitions[0] !== adapterPath ||
+    adapterConstructions.length !== 1 ||
+    adapterConstructions[0] !== "packages/cli/src/setup-delivery.ts"
+  ) {
+    failures.push("Workspace probe persistence acquired a second adapter or constructor");
   }
   return failures;
 }

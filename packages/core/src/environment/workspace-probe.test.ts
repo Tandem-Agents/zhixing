@@ -2,10 +2,7 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { createTempDir } from "@zhixing/test-utils";
-import {
-  FileArtifactStore,
-  FileAuthorityCommitLog,
-} from "../authority/index.js";
+import { FileArtifactStore, FileAuthorityCommitLog } from "../authority/index.js";
 import type {
   CapabilityDescriptor,
   ExecutorVersionInventory,
@@ -31,6 +28,10 @@ import {
   MeshWorkspaceProbeAdapter,
   WorkspaceProbeHandler,
 } from "./workspace-probe.js";
+import type {
+  WorkspaceProbePersistenceObservation,
+  WorkspaceProbePersistencePort,
+} from "./workspace-probe-persistence.js";
 
 const NOW = "2026-07-30T00:00:00.000Z";
 const LATER = "2026-07-30T00:10:00.000Z";
@@ -112,6 +113,86 @@ describe("workspace probe conformance", { timeout: DURABLE_IO_TEST_TIMEOUT_MS },
     const first = await fixture.handler.probe(request);
     const restarted = fixture.createHandler(() => LATER);
     await expect(restarted.probe(request)).resolves.toEqual(first);
+    expect(fixture.persistence.publicationCount).toBe(1);
+  });
+
+  it("fails closed when an establishment marker outlives its authority log", async () => {
+    const fixture = await createFixture({
+      persistence: new MemoryWorkspaceProbePersistence({
+        establishmentMarker: "present",
+        authorityLog: "absent",
+      }),
+    });
+    const request = fixture.owner.issue({
+      requestId: "probe-missing-log",
+      deviceId: "device-a",
+      bindingRef: fixture.bindingRef,
+      executorId: "executor-a",
+      resourceLease: probeLease("probe-missing-log"),
+    });
+
+    await expect(fixture.handler.probe(request)).rejects.toMatchObject({
+      name: "AuthorityStorageError",
+      code: "commit-log-corrupt",
+    });
+  });
+
+  it("fails closed when a marker is present without its establishment fact", async () => {
+    const fixture = await createFixture({
+      persistence: new MemoryWorkspaceProbePersistence({
+        establishmentMarker: "present",
+        authorityLog: "present",
+      }),
+    });
+    const request = fixture.owner.issue({
+      requestId: "probe-missing-fact",
+      deviceId: "device-a",
+      bindingRef: fixture.bindingRef,
+      executorId: "executor-a",
+      resourceLease: probeLease("probe-missing-fact"),
+    });
+
+    await expect(fixture.handler.probe(request)).rejects.toMatchObject({
+      name: "AuthorityStorageError",
+      code: "invalid-authority-record",
+    });
+  });
+
+  it("re-publishes a missing marker from the durable establishment fact", async () => {
+    const fixture = await createFixture();
+    const request = fixture.owner.issue({
+      requestId: "probe-republish-marker",
+      deviceId: "device-a",
+      bindingRef: fixture.bindingRef,
+      executorId: "executor-a",
+      resourceLease: probeLease("probe-republish-marker"),
+    });
+    const first = await fixture.handler.probe(request);
+    fixture.persistence.removeMarker();
+
+    await expect(fixture.createHandler().probe(request)).resolves.toEqual(first);
+    expect(fixture.persistence.publicationCount).toBe(2);
+  });
+
+  it("recovers when marker publication fails after the establishment fact", async () => {
+    const persistence = new MemoryWorkspaceProbePersistence();
+    persistence.failNextPublication();
+    const fixture = await createFixture({ persistence });
+    const request = fixture.owner.issue({
+      requestId: "probe-marker-response-loss",
+      deviceId: "device-a",
+      bindingRef: fixture.bindingRef,
+      executorId: "executor-a",
+      resourceLease: probeLease("probe-marker-response-loss"),
+    });
+
+    await expect(fixture.handler.probe(request)).rejects.toThrow(
+      "marker publication failed",
+    );
+    await expect(fixture.createHandler().probe(request)).resolves.toMatchObject({
+      requestId: "probe-marker-response-loss",
+    });
+    expect(persistence.publicationCount).toBe(1);
   });
 
   it("retires completed replay entries without mutating binding revision", async () => {
@@ -134,7 +215,9 @@ describe("workspace probe conformance", { timeout: DURABLE_IO_TEST_TIMEOUT_MS },
   });
 });
 
-async function createFixture() {
+async function createFixture(
+  options: { readonly persistence?: MemoryWorkspaceProbePersistence } = {},
+) {
   const root = await tempRoot();
   const logs = new Set<FileAuthorityCommitLog>();
   onTestFinished(async () => {
@@ -188,12 +271,13 @@ async function createFixture() {
     artifacts,
     { clock: () => NOW },
   ));
+  const persistence = options.persistence ?? new MemoryWorkspaceProbePersistence();
   const createHandler = (clock: () => string = () => NOW) =>
     new WorkspaceProbeHandler({
-      rootDir: path.join(root, "probe-state"),
       executorId: "executor-a",
       environment: bindings,
       log: probeLog,
+      persistence,
       signer: identity,
       verifier: identity,
       capacity,
@@ -204,6 +288,7 @@ async function createFixture() {
     bindingRef: binding.bindingRef,
     handler: createHandler(),
     createHandler,
+    persistence,
     owner: new EnvironmentProbeOwner({
       signer: identity,
       verifier: identity,
@@ -212,6 +297,50 @@ async function createFixture() {
       ttlMs: 60_000,
     }),
   };
+}
+
+class MemoryWorkspaceProbePersistence
+  implements WorkspaceProbePersistencePort
+{
+  #observation: WorkspaceProbePersistenceObservation;
+  #failNextPublication = false;
+  publicationCount = 0;
+
+  constructor(
+    observation: WorkspaceProbePersistenceObservation = {
+      establishmentMarker: "absent",
+      authorityLog: "present",
+    },
+  ) {
+    this.#observation = observation;
+  }
+
+  async inspectEstablishment(): Promise<WorkspaceProbePersistenceObservation> {
+    return this.#observation;
+  }
+
+  async publishEstablishment(): Promise<void> {
+    if (this.#failNextPublication) {
+      this.#failNextPublication = false;
+      throw new Error("marker publication failed");
+    }
+    this.#observation = {
+      establishmentMarker: "present",
+      authorityLog: "present",
+    };
+    this.publicationCount += 1;
+  }
+
+  removeMarker(): void {
+    this.#observation = {
+      establishmentMarker: "absent",
+      authorityLog: this.#observation.authorityLog,
+    };
+  }
+
+  failNextPublication(): void {
+    this.#failNextPublication = true;
+  }
 }
 
 function localControl(requestId: string) {

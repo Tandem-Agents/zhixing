@@ -18,6 +18,7 @@ import {
   inspectAssignmentDataPlaneBoundary,
   inspectAdvancementEvidenceTopologyBoundary,
   inspectAssignmentResourcePortBoundary,
+  inspectWorkspaceProbePersistenceBoundary,
   inspectConversationStorageBoundary,
   inspectWorksceneStorageCleanupBoundary,
   inspectStorageRemainderBoundary,
@@ -1062,6 +1063,77 @@ test("Assignment resources cross Conversation and Job through finite Correctness
       },
     ]).join("\n"),
     /governor acquired a second production owner/u,
+  );
+});
+
+test("P07 workspace probe physical persistence stays at one Host adapter", async () => {
+  const paths = [
+    "packages/core/src/environment/workspace-probe.ts",
+    "packages/core/src/environment/workspace-probe-persistence.ts",
+    "packages/core/src/environment/index.ts",
+    "packages/core/src/index.ts",
+    "packages/cli/src/serve/workspace-probe-persistence.ts",
+    "packages/cli/src/setup-delivery.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: (await readFile(relative, "utf8")).replaceAll("\r\n", "\n"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectWorkspaceProbePersistenceBoundary(records), []);
+  assert.match(
+    inspectWorkspaceProbePersistenceBoundary(mutate(
+      "packages/core/src/environment/workspace-probe.ts",
+      (text) => text.replace(
+        "readonly persistence: WorkspaceProbePersistencePort;",
+        "readonly persistence?: WorkspaceProbePersistencePort;",
+      ),
+    )).join("\n"),
+    /demand persistence port exact-set drifted/u,
+  );
+  assert.match(
+    inspectWorkspaceProbePersistenceBoundary(mutate(
+      "packages/core/src/environment/workspace-probe.ts",
+      (text) => `import path from "node:path";\n${text}`,
+    )).join("\n"),
+    /regained a path, filesystem or concrete log mechanism/u,
+  );
+  assert.match(
+    inspectWorkspaceProbePersistenceBoundary(mutate(
+      "packages/core/src/environment/index.ts",
+      (text) => `${text}\nexport * from "./workspace-probe-persistence.js";\n`,
+    )).join("\n"),
+    /leaked through a Core barrel/u,
+  );
+  assert.match(
+    inspectWorkspaceProbePersistenceBoundary(mutate(
+      "packages/cli/src/setup-delivery.ts",
+      (text) => text.replace(
+        "authorityLog: executorLog!",
+        "authorityLog: authorityLog!",
+      ),
+    )).join("\n"),
+    /setupAuthorityRuntime workspace probe persistence binding drifted/u,
+  );
+  assert.match(
+    inspectWorkspaceProbePersistenceBoundary(mutate(
+      "packages/cli/src/serve/workspace-probe-persistence.ts",
+      (text) => text.replace('"workspace-probes"', '"workspace-probe-cache"'),
+    )).join("\n"),
+    /adapter ownership or durability drifted/u,
+  );
+  assert.match(
+    inspectWorkspaceProbePersistenceBoundary([
+      ...records,
+      {
+        relative: "packages/cli/src/serve/duplicate-workspace-probe-persistence.ts",
+        text: "class Duplicate implements WorkspaceProbePersistencePort {}",
+      },
+    ]).join("\n"),
+    /acquired a second adapter or constructor/u,
   );
 });
 

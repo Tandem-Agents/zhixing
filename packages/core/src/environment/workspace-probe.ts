@@ -1,6 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { open, stat } from "node:fs/promises";
-import path from "node:path";
 import type {
   AuthorityCommitLog,
   ProjectionCursor,
@@ -14,7 +12,6 @@ import type {
   WorkspaceProbeResult,
 } from "../contracts/index.js";
 import { defineDurableRuntimeContract } from "../contracts/durable-contract.js";
-import { ensureDurableDirectory, syncDirectory } from "../persistence/index.js";
 import {
   canonicalize,
   createSignedEnvironmentControlGrant,
@@ -39,6 +36,7 @@ import {
   StorageMaintenanceTaskRunner,
   type StorageMaintenanceGovernorPort,
 } from "../resources/index.js";
+import type { WorkspaceProbePersistencePort } from "./workspace-probe-persistence.js";
 
 const PROBE_STREAM = "executor:workspace-probes";
 const PROBE_STEP_BUDGET: DeviceCapacityBudget = {
@@ -98,10 +96,10 @@ interface ProbeProjection {
 }
 
 export interface WorkspaceProbeHandlerOptions {
-  readonly rootDir: string;
   readonly executorId: string;
   readonly environment: EnvironmentPort;
   readonly log: AuthorityCommitLog;
+  readonly persistence: WorkspaceProbePersistencePort;
   readonly signer: ProtocolSigner;
   readonly verifier: ProtocolSignatureVerifier;
   readonly capacity: DeviceCapacityArbiterPort;
@@ -117,11 +115,10 @@ export interface WorkspaceProbePort {
 }
 
 export class WorkspaceProbeHandler implements WorkspaceProbePort {
-  readonly #rootDir: string;
-  readonly #markerPath: string;
   readonly #executorId: string;
   readonly #environment: EnvironmentPort;
   readonly #log: AuthorityCommitLog;
+  readonly #persistence: WorkspaceProbePersistencePort;
   readonly #signer: ProtocolSigner;
   readonly #verifier: ProtocolSignatureVerifier;
   readonly #capacity: DeviceCapacityArbiterPort;
@@ -140,14 +137,13 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
   #retentionAbort: AbortController | undefined;
 
   constructor(options: WorkspaceProbeHandlerOptions) {
-    this.#rootDir = path.resolve(options.rootDir);
-    this.#markerPath = path.join(this.#rootDir, "probe-log-established");
     this.#executorId = requireIdentifier(
       options.executorId,
       "Workspace probe executorId",
     );
     this.#environment = options.environment;
     this.#log = options.log;
+    this.#persistence = options.persistence;
     this.#signer = options.signer;
     this.#verifier = options.verifier;
     this.#capacity = options.capacity;
@@ -245,7 +241,7 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
         this.#storageMaintenance,
         storageMaintenanceRequest(
           "workspace-probe-retirement",
-          this.#rootDir,
+          workspaceProbeMaintenanceResource(this.#executorId),
           {
             key: candidate.key,
             requestDigest: entry.requestDigest,
@@ -329,7 +325,7 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
           return this.#retentionRunner.run(
             storageMaintenanceObligation(
               "workspace-probe-retirement",
-              this.#rootDir,
+              workspaceProbeMaintenanceResource(this.#executorId),
               { completedBefore: cutoff },
               {
                 owner: "workspace-probe-owner",
@@ -519,16 +515,20 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
   }
 
   async #open(): Promise<void> {
-    await ensureDurableDirectory(this.#rootDir);
-    const markerExists = await exists(this.#markerPath);
-    const logPath =
-      "logPath" in this.#log
-        ? String(
-            (this.#log as AuthorityCommitLog & { logPath: string }).logPath,
-          )
-        : undefined;
-    const logExists = logPath === undefined ? true : await exists(logPath);
-    if (markerExists && !logExists) {
+    const persistence = await this.#persistence.inspectEstablishment();
+    if (
+      (persistence.establishmentMarker !== "absent" &&
+        persistence.establishmentMarker !== "present") ||
+      (persistence.authorityLog !== "absent" &&
+        persistence.authorityLog !== "present")
+    ) {
+      throw new AuthorityStorageError(
+        "commit-log-corrupt",
+        "Workspace probe persistence observation is invalid",
+      );
+    }
+    const markerExists = persistence.establishmentMarker === "present";
+    if (markerExists && persistence.authorityLog === "absent") {
       throw new AuthorityStorageError(
         "commit-log-corrupt",
         "Established workspace probe log is missing",
@@ -589,7 +589,7 @@ export class WorkspaceProbeHandler implements WorkspaceProbePort {
       );
     }
     this.#projection = state;
-    if (!markerExists) await writeMarker(this.#markerPath);
+    if (!markerExists) await this.#persistence.publishEstablishment();
   }
 }
 
@@ -942,37 +942,8 @@ function parseCanonicalTime(value: string, label: string): number {
   return time;
 }
 
-async function exists(target: string): Promise<boolean> {
-  return stat(target).then(
-    () => true,
-    (error: unknown) => {
-      if (isNodeError(error, "ENOENT")) return false;
-      throw error;
-    },
-  );
-}
-
-async function writeMarker(markerPath: string): Promise<void> {
-  const handle = await open(markerPath, "wx", 0o600).catch((error: unknown) => {
-    if (isNodeError(error, "EEXIST")) return undefined;
-    throw error;
-  });
-  if (!handle) return;
-  try {
-    await handle.writeFile("workspace-probe-log-v1\n", "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  await syncDirectory(path.dirname(markerPath));
-}
-
-function isNodeError(error: unknown, code: string): boolean {
-  return (
-    error instanceof Error &&
-    "code" in error &&
-    (error as NodeJS.ErrnoException).code === code
-  );
+function workspaceProbeMaintenanceResource(executorId: string): string {
+  return `workspace-probe:${executorId}`;
 }
 
 function corruptProbeLog(message: string): AuthorityStorageError {

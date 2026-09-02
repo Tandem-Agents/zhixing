@@ -844,10 +844,16 @@ async function createWorkspaceProbeFixture(clock: () => string = () => NOW) {
     { clock: () => NOW },
   );
   const createHandler = () => new WorkspaceProbeHandler({
-    rootDir: path.join(root, "probe-state"),
     executorId: "executor-a",
     environment: bindings,
     log: probeLog,
+    persistence: {
+      inspectEstablishment: async () => ({
+        establishmentMarker: "absent",
+        authorityLog: "present",
+      }),
+      publishEstablishment: async () => undefined,
+    },
     signer: identity,
     verifier: identity,
     capacity: unlimitedCapacity(),

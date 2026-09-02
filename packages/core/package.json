@@ -136,6 +136,10 @@
       "types": "./dist/environment/workspace-administration.d.ts",
       "import": "./dist/environment/workspace-administration.js"
     },
+    "./environment/workspace-probe-persistence": {
+      "types": "./dist/environment/workspace-probe-persistence.d.ts",
+      "import": "./dist/environment/workspace-probe-persistence.js"
+    },
     "./test-support/s7-durable": {
       "types": "./dist/test-support/s7-durable.d.ts",
       "import": "./dist/test-support/s7-durable.js"

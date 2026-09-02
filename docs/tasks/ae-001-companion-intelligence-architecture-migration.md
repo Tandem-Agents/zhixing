@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-08a P07 Workspace 资源治理 Host 边界已闭合，正在选择 A6 下一责任链<br>
+> 当前检查点：A6-08b P07 Workspace probe 物理基础设施边界已闭合，正在选择 A6 下一责任链<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,11 +202,11 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `59f3dbc3`；A6-07d 已由协调者独立复核后提交，Assignment resource concrete governor 已收在 Correctness/Host 边界 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-08a Workspace 管理资源有限端口边界已闭合 |
-| 活跃工作包 | 无；协调者正在核实 P07 其余发布、探测与容量事实的真实缺口 |
-| 下一责任链 | 只在 P07 仍存在真实需求侧 concrete/物理拓扑泄漏时继续；否则进入 P09～P12 中最高价值的单一缺口，不为完成编号制造改动 |
-| 打开的单向桥 | 无；Workspace 需求侧 concrete 类型与有限端口双入口已归零 |
+| 已接受基线 | `522c4155`；A6-08a 已由协调者独立复核后提交，Workspace 资源准入 concrete governor 已收在 Host 边界 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-08b Workspace probe 物理持久边界已闭合 |
+| 活跃工作包 | 无；协调者正在核实 P07 binding catalog 的物理根泄漏与最窄可迁移边界 |
+| 下一责任链 | 若生产事实确认 binding catalog 同时拥有产品规则与物理 root/fs，则只拆其物理持久端口；不并行扩入 P09～P12、设备管理、transfer 或 A7 |
+| 打开的单向桥 | 无；Core probe 的 root/path/fs、commit-log `logPath` 探测和本地 marker helper 已归零，没有双物理入口 |
 | 已失效证据 | 无当前未恢复架构证据；A6-01～08a 继续有效。三拓扑 owner-domain 的 anchor+executor 既有 storage-maintenance 环境背压不与本包相交且未重复运行 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
@@ -2679,6 +2679,18 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 行为、P07 与生产闭包：控制请求仍以 stable requestId 形成 `{kind:"control",attempt:1}` workload、`{maxCalls:8}` 预算、interactive/environment-control origin、当前 executor audience、Host principal 与 30 秒 deadline，并把同一 lease/requestId/AbortSignal 交给 Workspace application；正常与业务失败都严格先 settle 后 release，成功后的 release/settle 失败继续传播，业务失败时 release 失败不覆盖原错误。Durable lifecycle/outbox prepare/commit/replay、owner lease、IPC、Workspace CRUD/reset/result delivery及 P07 binding/schema/generation/probe/capacity、资源算法与 P09～P12 均无生产变化。
 - 直接证据、门禁与交接：Workspace control 3/3、management Host 18/18、role-gated bootstrap 3/3、command binding 3/3，合计 4 文件 27/27；直接断言 required finite mock、完整 lease、exact workload/audience/origin/budget/principal/deadline/abort、settle→release、成功 release failure、业务失败错误优先级与 settle failure 后继续 release。CLI `tsc --noEmit`、`pnpm cli:build`、`pnpm runtime:package-exports`、changed-source Biome 通过；canonical `pnpm s7:lint` 49/49 与 registry golden 通过，新增 AST/反向 mutation 会拒绝 demand concrete import、optional port、任一三根错误投影及第二 control constructor。若三方法有限合同、三个 production root、Host factory/control constructor、identity/audience/origin/budget/deadline、settle/release/error priority、Workspace durable lifecycle/outbox、S7 或上述直接测试任一变化，只恢复 `A6-08a-p07-workspace-resource-host-boundary-v1` 及真实相交证据；A6-01～07d 不因无关 P07 变化自动失效。A6 继续 `[ ]`，下一检查点由协调者独立复核后核实 P07 其余发布/探测/容量事实，再按真实缺口进入 P09～P12；本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：确认 Workspace control 与持久 management Host 只依赖既有三方法有限资源合同，三个生产根仍各自从唯一 concrete governor 一次投影且无 optional、cast、运行期查找或第二 constructor。独立运行 Workspace control/management/bootstrap/command 4 文件 27/27、CLI typecheck、canonical S7 49/49 与 registry golden、runtime package exports、需求侧 concrete 反查和 `git diff --check` 均通过；本包没有改写 P07 持久事实、资源算法或公开行为。A6-08a 可以提交，A6 仍保持 `[ ]`。
+
+### A6-08b：P07 Workspace probe 物理基础设施边界收口
+
+- 派发基线与唯一结果：以已接受 `HEAD 522c4155` 加本文调度记录为基线，只收口 P07 Workspace probe 的物理持久边界。当前 Core `WorkspaceProbeHandler` 直接拥有 `rootDir`、Node `fs/path`、marker 创建与目录 fsync，并通过 duck typing 读取 `AuthorityCommitLog.logPath` 判断物理存在；迁移后 Core probe owner 只消费需求方定义的有限持久基础设施端口，CLI Host 的唯一 adapter 才拥有 `<distributed-runtime>/workspace-probes`、marker/path/fs、log-presence 与 durable publication。不得移动 probe 产品/协议状态机或另建第二 owner。
+- 生产闭包与行为保护：沿 `setupAuthorityRuntime` 唯一生产构造、Workspace probe signed request/result、P07 Executor WAL、`probe-log-established` fact 与 marker、启动恢复、响应丢失重放、retention/retire、storage-maintenance、capacity、关闭和 current-device cleanup 双向迁移全部直接交界。严格保持首次建立顺序、marker/log/fact 三者一致性、缺失或损坏 fail closed、相同 executor 绑定、签名验证、in-flight 合并、分页退役与 27 天/6 小时维护节奏；物理 adapter 不得解释 probe 业务记录或签名语义，Core 不得取得路径或 concrete file log。
+- 明确不做与旧路：不修改 P07 workspace binding catalog/root manifest/generation、execution snapshot/capability/permission/assets、容量算法、公开协议、P09～P12 或 device-removal 产品决定；device cleanup 只需继续删除同一既有物理根。删除 Core probe 的 `node:fs`/`node:path`/目录 persistence import、`rootDir` option、`logPath in log` 探测和本地 marker helper；不得用 opaque path 字符串、cast、optional fallback、通用 Storage facade 或第二 production adapter伪装解耦。
+- 最窄证据与完成条件：Core probe 直接测试覆盖 absent/established/corrupt marker-log-fact 组合、首次发布/重启、签名与响应丢失、retention/close；CLI adapter/真实 setup 测试覆盖 canonical root、原子 marker、log presence 与唯一构造。更新结构门禁，使其拒绝 Core 物理 import/root/logPath 回流、optional port、第二 adapter/constructor 与 setup 错绑。按验证手册只运行 Core probe、CLI adapter/setup 的失效闭包，必要上游 build、Core/CLI typecheck、canonical S7、fresh package exports、changed-source 格式和 `git diff --check`；不重复 Workspace CRUD、owner-domain、S6、根级回归或制品验收。
+- 安全交接：只有 probe 规则/事实仍由唯一 Core owner 持有、物理根与 marker durability 只由唯一 CLI adapter 持有、全部直接消费者和异常组合闭合且无兼容双入口时才结束本包；A6 继续 `[ ]`。约四小时仍未闭合、需要改 P07 持久合同、发现 binding catalog 是独立根因或影响扩入其他家族时，停在可构建、可运行、单一事实 owner 成立的检查点反馈，不得执行任何 Git 写操作。
+- 实施结果与唯一边界：新增只从 `@zhixing/core/environment/workspace-probe-persistence` 窄入口公开的 required `WorkspaceProbePersistencePort`，只交付 marker/WAL 的有限存在观察和 durable establishment publication；Core 根与宽 `environment` barrel 均不转导。`WorkspaceProbeHandler` 保留 signed request/result、executor binding、first establishment fact、replay、in-flight、retire 与 retention 业务规则，但 `rootDir`、`node:fs`、`node:path`、目录 durability import、`logPath` duck typing 和 marker writer 已全部删除；storage-maintenance work key 改由稳定 executor 身份形成，不携带物理路径。唯一 `FileWorkspaceProbePersistence` 位于 CLI Host 边缘，以 `zhixingHome/distributed-runtime/workspace-probes` 和实际 `executorLog.logPath` 形成 canonical 物理绑定，独占目录建立、存在探测、mode `0600` marker 写入、file sync 与 parent directory sync；`setupAuthorityRuntime` 是唯一生产构造点且必定绑定本机 Executor WAL。
+- 行为、异常与范围保护：首次打开仍严格执行 physical observation → WAL replay → 必要时先 append `probe-log-established` fact → 再 durable publish marker；marker 存在而 WAL 缺失以 `commit-log-corrupt` 拒绝，marker 存在而 fact 缺失以 `invalid-authority-record` 拒绝，fact 已提交但 marker 缺失/发布失败则下一 Host generation 从同一 WAL 重建并补发 marker。签名、request/result 全等、相同 executor、响应丢失 replay、并发 single-flight、分页 retire、27 天/6 小时维护、capacity、Host close 与 current-device 整根 cleanup 均未改变。P07 binding catalog/root manifest/generation、execution snapshot/capability/permission/assets、capacity 算法、公开协议、P09～P12 与 device-removal 产品决定未进入本包，物理 adapter 不解释任何 probe record 或签名。
+- 直接证据、门禁与交接：Core probe 9/9、CLI persistence adapter 2/2、真实 executor-only setup 1/1，合计 3 文件 12/12；覆盖 local/Mesh signed contract、identity conflict、durable replay、marker/log/fact 缺损、publication response loss、marker 重建、retire、canonical root、WAL presence、marker bytes/mode 与唯一 setup 装配。Core/CLI `tsc --noEmit`、Core fresh build、`pnpm cli:build`、fresh `pnpm runtime:package-exports` 和 changed-source Biome 通过；canonical `pnpm s7:lint` 最终 50/50 与 registry golden 通过，反向 mutation 拒绝 Core physical import/root/logPath、optional port、barrel 回流、错误 root/WAL binding、第二 adapter/constructor。若窄 persistence 合同、Core open/replay 顺序、CLI root/log binding、marker durability、setup 唯一构造、probe WAL/retention/close、current-device cleanup、S7/package-export 或上述直接测试任一变化，只恢复 `A6-08b-p07-workspace-probe-infrastructure-boundary-v1` 及真实相交证据；A6-01～08a 不因无关 P07 变化自动失效。A6 继续 `[ ]`，下一检查点仍由协调者复核后核实 P07 binding catalog 物理根泄漏；当前无打开桥或未恢复证据，本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：确认 Core probe 只拥有建立、重放、签名、退役与维护业务规则，required persistence port 只返回 marker/WAL 存在性并耐久发布 marker；唯一 CLI adapter 拥有 canonical root、concrete WAL path、fsync 与目录屏障，setup 只构造一次且没有 barrel、optional、cast 或第二物理入口。独立运行 Core probe 9/9、CLI adapter 2/2、真实 executor-only setup 1/1，Core fresh build、CLI typecheck、canonical S7 50/50 与 registry golden、runtime package exports、Core physical 反查和 `git diff --check` 均通过；既有 Rollup circular-chunk warnings 未变化。A6-08b 可以提交，A6 仍保持 `[ ]`。
 
 ## 十、用户提示词
 
