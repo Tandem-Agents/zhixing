@@ -29,7 +29,10 @@ import {
   createDeliveryControlEnvelope,
   type TrustedControlSource,
 } from "../control-admission.js";
-import { createDeliveryResolutionCorrectnessPort } from "../delivery-control.js";
+import {
+  createDeliveryResolutionCorrectnessPort,
+  createDeliveryResolutionFence,
+} from "../delivery-control.js";
 import { createOwnerDeliveryLifecycleBinding } from "../delivery-obligation-correctness.js";
 import {
   DURABLE_IO_TEST_TIMEOUT_MS,
@@ -149,7 +152,7 @@ function commandFromEnvelope(
     requestId: envelope.requestId,
     itemId: envelope.body.itemId,
     attempt: envelope.body.attempt,
-    anchorEpoch: envelope.body.anchorEpoch,
+    resolutionFence: createDeliveryResolutionFence(envelope.body.anchorEpoch),
     openFactDigest: envelope.body.openFactDigest,
     decision: envelope.body.decision,
     principal: envelope.principal,
@@ -262,10 +265,12 @@ describe("delivery resolution control", { timeout: DURABLE_IO_TEST_TIMEOUT_MS },
       result: { status: "ok", body: { t: "delivery-resolve", applied: true } },
     });
     expect(replay).toMatchObject({ kind: "replayed", result: first.result });
-    expect(await fixture.authority.get(fixture.item.id)).toMatchObject({
+    const resolvedItem = await fixture.authority.get(fixture.item.id);
+    expect(resolvedItem).toMatchObject({
       state: "verified-sent",
       resolution: { decision: "user-verified-sent", by: "surface:user-1" },
     });
+    expect(resolvedItem?.resolution).not.toHaveProperty("resolvedAnchorEpoch");
     const commits = await fixture.log.readAll();
     const resolutionCommit = commits.find((commit) =>
       commit.entries.some(

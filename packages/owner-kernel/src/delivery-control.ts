@@ -1,8 +1,10 @@
 import {
   DELIVERY_STREAM,
+  decideDeliveryResolution,
   deliveryResolutionStatusNotice,
   deliveryRecord,
   emptyDeliveryProjection,
+  projectDeliveryApplicationProjection,
   reduceDeliveryAuthorityRecord,
   type DeliveryAuthority,
   type DeliveryProjection,
@@ -11,6 +13,7 @@ import type {
   DeliveryUncertainResolutionCommand,
   DeliveryUncertainResolutionCorrectnessPort,
   DeliveryUncertainResolutionDecide,
+  DeliveryResolutionFence,
 } from "@zhixing/core/delivery/application";
 import type {
   DeliveryStatusNotice,
@@ -35,6 +38,9 @@ export function createDeliveryResolutionCorrectnessPort(input: {
       command: DeliveryUncertainResolutionCommand,
       decide: DeliveryUncertainResolutionDecide,
     ) => {
+      const requestedAnchorEpoch = parseDeliveryResolutionFence(
+        command.resolutionFence,
+      );
       const source = { principal: command.principal };
       const envelope = createDeliveryControlEnvelope({
         requestId: command.requestId,
@@ -43,7 +49,7 @@ export function createDeliveryResolutionCorrectnessPort(input: {
           t: "delivery-resolve",
           itemId: command.itemId,
           attempt: command.attempt,
-          anchorEpoch: command.anchorEpoch,
+          anchorEpoch: requestedAnchorEpoch,
           openFactDigest: command.openFactDigest,
           decision: command.decision,
         },
@@ -65,24 +71,54 @@ export function createDeliveryResolutionCorrectnessPort(input: {
               commit,
             ),
           decide: (state, context) => {
+            if (requestedAnchorEpoch !== input.authority.anchorEpoch) {
+              return {
+                result: {
+                  v: 1,
+                  status: "rejected",
+                  error: {
+                    code: "epoch-stale",
+                    message: "Delivery resolution targets a stale anchor epoch",
+                    retryable: false,
+                  },
+                },
+              };
+            }
             const decision = decide({
-              projection: state,
+              projection: projectDeliveryApplicationProjection(state),
               transactionAt: context.authorityPrefix.at,
-              currentAnchorEpoch: input.authority.anchorEpoch,
             });
             if (!decision.accepted) {
               return {
                 result: { v: 1, status: "rejected", error: decision.error },
               };
             }
-            applied = decision.record;
+            const authorityDecision = decideDeliveryResolution(
+              state,
+              {
+                itemId: command.itemId,
+                attempt: command.attempt,
+                anchorEpoch: requestedAnchorEpoch,
+                openFactDigest: command.openFactDigest,
+                decision: command.decision,
+                by: command.principal.surfacePrincipal,
+              },
+              { at: context.authorityPrefix.at },
+              input.authority.anchorEpoch,
+            );
+            if (!authorityDecision.accepted) {
+              return {
+                result: { v: 1, status: "rejected", error: authorityDecision.error },
+              };
+            }
+            applied = authorityDecision.record;
             return {
               result: {
                 v: 1,
                 status: "ok",
                 body: { t: "delivery-resolve", applied: true },
               },
-              authorityEntries: [deliveryRecord(decision.record)],
+              authorityEntries: [deliveryRecord(authorityDecision.record)],
             };
           },
         })
@@ -98,4 +134,27 @@ export function createDeliveryResolutionCorrectnessPort(input: {
       return outcome;
     },
   });
+}
+
+const DELIVERY_RESOLUTION_FENCE_PREFIX = "delivery-resolution-fence:v1:";
+
+/** Correctness/RPC binding for the legacy numeric wire fence. */
+export function createDeliveryResolutionFence(
+  anchorEpoch: number,
+): DeliveryResolutionFence {
+  if (!Number.isSafeInteger(anchorEpoch) || anchorEpoch <= 0) {
+    throw new TypeError("Delivery resolution anchor epoch must be a positive safe integer");
+  }
+  return `${DELIVERY_RESOLUTION_FENCE_PREFIX}${anchorEpoch}` as DeliveryResolutionFence;
+}
+
+function parseDeliveryResolutionFence(fence: DeliveryResolutionFence): number {
+  if (typeof fence !== "string" || !fence.startsWith(DELIVERY_RESOLUTION_FENCE_PREFIX)) {
+    throw new TypeError("Delivery resolution fence is invalid");
+  }
+  const value = Number(fence.slice(DELIVERY_RESOLUTION_FENCE_PREFIX.length));
+  if (!Number.isSafeInteger(value) || value <= 0 || String(value) !== fence.slice(DELIVERY_RESOLUTION_FENCE_PREFIX.length)) {
+    throw new TypeError("Delivery resolution fence is invalid");
+  }
+  return value;
 }

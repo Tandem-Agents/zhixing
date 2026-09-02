@@ -7933,10 +7933,15 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   if (
     !deliveryApplication.includes('"delivery.command.resolve-uncertain"') ||
     !deliveryApplication.includes("DeliveryUncertainResolutionApplicationService") ||
-    !deliveryApplication.includes("decideDeliveryResolution(") ||
+    !deliveryApplication.includes("decideDeliveryUncertainResolution(") ||
+    !deliveryApplication.includes("readonly resolutionFence: DeliveryResolutionFence") ||
     !deliveryApplication.includes("createDeliveryResolutionProductApiContribution") ||
     !deliveryApplication.includes("DELIVERY_RESOLUTION_PRODUCT_API_EXACT_SET") ||
     !deliveryApplication.includes("facts: []") ||
+    /\b(?:anchorEpoch|currentAnchorEpoch|openedAnchorEpoch|resolvedAnchorEpoch)\b/u.test(
+      deliveryApplication,
+    ) ||
+    /\b(?:openedAnchorEpoch|resolvedAnchorEpoch)\b/u.test(deliveryTypes) ||
     deliveryApplication.includes("DeliveryAuthority") ||
     deliveryApplication.includes("ControlAdmissionJournal")
   ) {
@@ -7964,7 +7969,13 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     deliveryAuthority.includes("function deliveryFailureDisposition(") ||
     deliveryAuthority.includes("function deliveryUnknownOutcomeDisposition(") ||
     !deliveryObligationCorrectness.includes("createOwnerDeliveryLifecycleBinding") ||
-    !deliveryObligationCorrectness.includes("authority.transactDeliveryLifecycle<Value>") ||
+    !deliveryObligationCorrectness.includes(
+      "authority.transactDeliveryLifecycle<DeliveryLifecycleCommit<Value>>",
+    ) ||
+    !deliveryObligationCorrectness.includes("projectDeliveryApplicationProjection(") ||
+    !deliveryObligationCorrectness.includes("bindDeliveryLifecycleDecisionRecords(") ||
+    !deliveryAuthority.includes("projectDeliveryApplicationProjection(") ||
+    !deliveryAuthority.includes("bindDeliveryLifecycleDecisionRecords(") ||
     !deliveryObligationCorrectness.includes("DeliveryProjectionInvariantError") ||
     !deliveryObligationCorrectness.includes(
       'new AuthorityStorageError("commit-log-corrupt", error.message',
@@ -7980,6 +7991,8 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     ) ||
     !deliveryPipeline.includes("readonly application: DeliveryLifecycleApplication") ||
     !deliveryPipeline.includes("readonly projection: DeliveryLifecycleProjectionPort") ||
+    !deliveryPipeline.includes("this.#projection.statusNotice(") ||
+    deliveryPipeline.includes("deliveryProjectionStatusNotice(") ||
     !deliveryPipeline.includes("this.#application.claim(") ||
     !deliveryPipeline.includes("this.#application.recordPreflightFailure(") ||
     !deliveryPipeline.includes("this.#application.recordOutcome(") ||
@@ -8085,8 +8098,12 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !deliveryControl.includes("createDeliveryResolutionCorrectnessPort") ||
     !deliveryControl.includes("input.admission.applyAuthority") ||
     !deliveryControl.includes("input.authority.coordinate") ||
+    !deliveryControl.includes("createDeliveryResolutionFence(") ||
+    !deliveryControl.includes("parseDeliveryResolutionFence(") ||
+    !deliveryControl.includes("requestedAnchorEpoch !== input.authority.anchorEpoch") ||
+    !deliveryControl.includes("projection: projectDeliveryApplicationProjection(state)") ||
+    !deliveryControl.includes("decideDeliveryResolution(") ||
     deliveryControl.includes("applyDeliveryResolutionControl") ||
-    deliveryControl.includes("decideDeliveryResolution") ||
     !setupDelivery.includes("resolutionApplication") ||
     !setupDelivery.includes('await import("@zhixing/owner-kernel/delivery")') ||
     setupDelivery.includes("applyDeliveryResolutionControl") ||
@@ -8150,7 +8167,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   }
   if (
     !deliveryHandler.includes('from "@zhixing/core/delivery/application"') ||
+    !deliveryHandler.includes('from "@zhixing/owner-kernel/delivery"') ||
     !deliveryHandler.includes("productApi.command(DELIVERY_RESOLVE_UNCERTAIN_COMMAND") ||
+    !deliveryHandler.includes("resolutionFence: createDeliveryResolutionFence(params.anchorEpoch)") ||
     !deliveryHandler.includes("productApi?.supports(DELIVERY_RESOLVE_UNCERTAIN_COMMAND)") ||
     deliveryHandler.includes("runtimeControl?.resolveDelivery") ||
     deliveryHandler.includes("deliveryStack.resolve")

@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-14 Backup & Recovery 产品行动拓扑透明收口已通过协调者独立验收，等待提交；尚未执行 A6 退出审计<br>
+> 当前检查点：A6-16 Delivery topology fence 边界已通过协调者独立验收，等待提交；A6 仍有 Schedule 与 Backup/Device 同根泄漏待逐条处理<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,13 +202,13 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `d0ac35f2`；A6-13 Conversation 显式继续语义拓扑透明收口已提交 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；Backup & Recovery 产品行动拓扑透明候选已形成，A6 仍等待独立复核与退出审计 |
-| 活跃工作包 | `A6-14-backup-recovery-action-topology-transparency-v1` 已完成，等待协调者独立复核 |
-| 下一责任链 | 协调者接受 A6-14 后重新执行 A6 退出 exact-set 审计；无其他真实反证才关闭 A6 并进入 A7 |
+| 已接受基线 | `5627c9c1`；A6-14 Backup & Recovery 产品行动拓扑透明收口已提交 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；Delivery 子闭包已完成待复核，A6 退出审计仍未通过 |
+| 活跃工作包 | `A6-16-delivery-topology-fence-boundary-v1` 已通过协调者独立验收，等待提交 |
+| 下一责任链 | 独立验收 A6-16 后，继续逐条清除 Schedule 与 Backup/Device 交界的同根泄漏，再重做 A6 退出审计 |
 | 打开的单向桥 | 无；P06 Rubric 已恢复为 required `readByDigest/put` 有限端口，P07、P09、P11 及 P12 三类 staging 的既有有限 Infrastructure 接管继续有效 |
-| 已失效证据 | A6 聚合退出证据尚未形成；Conversation E05 已接受，Backup & Recovery E05 子证据已形成待复核恢复；其余 A6 局部 owner/机制证据继续有效 |
-| 阻塞/用户决策 | 无用户决策阻塞；完整 distributed-runtime structure 测试仍被既有 A4-10 `runtime-host` 依赖断言阻断，本包不越界修改 |
+| 已失效证据 | `A6-15-replaceable-edges-topology-final-exit-audit-v1` 的 E05 与 A6 聚合结论仍失效；Delivery 子证据已由 A6-16 恢复待复核，Schedule 与 Backup/Device 交界仍待独立收口 |
+| 阻塞/用户决策 | 无用户决策阻塞；完整 distributed-runtime structure 测试仍被既有 A4-10 `runtime-host` 依赖断言阻断，属于 A7 零残留与终验输入 |
 
 ### A0 基线索引
 
@@ -2901,6 +2901,31 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据与结构门禁：Core Backup & Recovery 1 文件 33/33，Server `server.info` 1 文件 65/65，CLI info/owner/backup command 3 文件合计 24/24，合计 5 文件 122/122；其中直接覆盖三原因一对一 action、缺 reason 拒绝、wire 保真与拓扑词归零，并复用真实 paired runtime unavailable 的 durable readiness 2/2。Server 与 CLI `tsc --noEmit`、core→server→CLI 依赖顺序 build、runtime package exports、changed-source Biome 和 `git diff --check` 通过。canonical S7 57/57 与 registry golden 通过；新增反向 mutation 可拒绝旧 action 回流、Server 恢复宽字符串和 CLI 遗漏连接行动。完整 `distributed-runtime-structure.test.ts` 仍在到达 golden 前被进场基线既有 A4-10 断言阻断：测试期待 `@zhixing/runtime-host` 已删除的 `@zhixing/mcp/@zhixing/tools-builtin` 依赖，实际仅为 core/orchestrator/owner-kernel；本包未改变该 scanner 输出、未机械接受 snapshot，也未越界修正。
 - 失效、状态与下一检查点：若 raw unavailable reason exact-set、领域三映射、公开状态类型、Host projector、`server.info` 传输、两个 CLI Surface、S7/package-export 或上述直接测试任一变化，只恢复本证据及 A6-12 E05 的 Backup & Recovery 子结论；A5 Backup & Recovery owner、checkpoint/paired target Infrastructure 与 Conversation E05 不因本包失效。A6 和完成度继续 `[ ]`/`6/8`；下一检查点只能在协调者独立接受本包后执行一次 A6 退出 exact-set 冷启动审计，无其他反证才关闭 A6，当前不得进入 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：沿 raw checkpoint owner status、领域唯一 projector、公开状态类型、`server.info` 和 `zz backup status` / REPL `/status` 两个 Surface 双向核对，确认内部 `runtime-unavailable` 只映射为产品行动 `restore-backup-connection`，公开生产链不存在 Mesh、Runtime 或设备角色行动；配置、连接和目标三类原因继续一一对应且缺失原因 fail closed。独立取得 Core 33/33、Server 65/65、CLI 三文件 24/24，Core/Server/CLI 类型检查、canonical S7 57/57、registry golden 与 `git diff --check` 通过；接受 `A6-14-backup-recovery-action-topology-transparency-v1`。A6 聚合退出证据仍需重新冷启动审计，不能据本包直接关闭。
+
+### A6-15：可替换边缘与设备拓扑最终退出 exact-set 冷启动审计
+
+- 基线、方法与唯一结果：以已接受 `HEAD 5627c9c14a3d9c776ae58bd027915f0598b4bc85` 加协调者调度记录为基线，形成待复核证据 `A6-15-replaceable-edges-topology-final-exit-audit-v1`。本轮重新从 AE-001 的 ApplicationHost、Infrastructure/Topology、Domain/Kernel、Surface 与 Device Administration 边界建立退出要求，只复用 A6-01～A6-14 已接受的行为、类型、构建与 package-export 证据；另以 production manifest/import、constructor/factory、同实例传递与 cleanup owner、P01～P15 需求消费者、拓扑词与产品分支、旧桥/locator/万能聚合和根导出执行高信号静态反查，没有重新枚举已闭合领域或运行高成本终验。
+
+| A6 退出面 | 当前生产 owner / 责任链 | 独立攻击与裁决 | 结论 |
+|---|---|---|---|
+| E01 Provider、Tool、MCP、Channel 可替换边缘 | 具体 Provider、内置工具、MCP host 与 Feishu Channel 只有 `@zhixing/cli` 生产组合依赖；Kernel、RuntimeHost、领域、Server/RPC 分别消费模型、工具、MCP、Channel inbound/outbound 等需求方有限端口 | 反扫生产 package dependency/import、四类 runtime 发放、Channel factory/registry、Delivery effect 与 capability catalog，未发现上层 concrete constructor、反向依赖、第二 effect owner 或跨角色万能端口 | 通过；A6-01、A6-03～A6-05b 继续有效 |
+| E02 配置与秘密有限投影 | CLI Host/命令边缘读取 validated config 与 SecretStore/backend，并按 Provider、Kernel、MCP、Channel、Surface、设备机制用途形成 frozen minimal projection；消费端只见用途合同 | 反扫 aggregate config、reload、credential、vault/backend、concrete provider 与可变共享对象，未发现其进入领域、Kernel、RuntimeHost、Server/RPC 或需求端；Host 所持启动协调端口没有被投影为产品事实 | 通过；A6-02 继续有效 |
+| E03 P01～P15 Storage 需求边界 | 文件/path/codec/lock/fsync/delete 仅留在当前物理机制 owner；需求端使用 required、readonly、有限端口。Advancement Rubric 的 `readByDigest/put` 投影继续来自 Authority root 已创建的同一 CAS，未构造第二 Rubric CAS | 从全部相关 concrete class、path helper、physical operation、`Pick<concrete>`、optional fallback、factory/constructor 与 export 反扫，未发现需求端回流、第二 writer/factory 或新增根入口；Core/Executor/Mesh/Server 内仍存在的 File 实现均是各自已登记的物理机制，不是上层需求 owner | 通过；A6-06、A6-08～A6-12 E03 继续有效 |
+| E04 Executor/Mesh 部署与恢复家族 | assignment/stream/evidence、execution assets、workspace、Mesh bootstrap/pairing/surface assets、checkpoint 与 conversation/planned/DR staging 均由有限 Host/命令 Infrastructure adapter 创建；同一实例沿 bootstrap、role、recovery、install/cleanup 传递并由唯一生命周期关闭 | 反扫唯一 factory、canonical root、shared/private CAS/WAL、role projection、Host handoff、异常补偿、current-device cleanup 与 close；未发现 second factory、optional no-op、跨家族猜删、需求端路径推导、错实例重建或双 lifecycle owner | 通过；A6-07～A6-11c 继续有效 |
+| E05 拓扑透明与 Device Administration 分离 | Conversation 只公开 `complete/limited` 能力后果和明确 consent；Backup & Recovery 只公开修复配置、恢复连接、检查目标三类行动。Device Administration 决定用户设备关系/移除/值班迁移，Host/Correctness 才绑定 physical connection、route、assignment、epoch fence 与 execution mechanism | 重新攻击 A6-13 的 `local-only/continueLocally` 与 A6-14 的 `start-authenticated-mesh`，生产 source/declaration/wire/Surface 均为零；其余 Anchor/Executor/epoch/Mesh 字样仅存在于协议、机制 identity/fence、诊断或 Host adapter，没有在 Domain/Kernel/Surface 形成物理拓扑产品分支，也未发现 Device 应用取得 Mesh/Executor 实现或选择 transport/execution | 通过；A6-13、A6-14 与 Device Administration 既有证据继续有效 |
+| E06 单一 Host、可组合边缘与生命周期 | 所有持久拓扑入口只由 `topology-command` 创建一个 `PersistentApplicationHost`；Host 一次规划拓扑、装入需要的 role component、串行 recovery bootstrap，并唯一持有 outer maintenance/lease/staging 的失败补偿与 close。role 内部资源继续由 A1 类型化 lifecycle owner 管理 | 从 `createPersistentApplicationHost` caller、旧 `runConfiguredServeTopology/ServiceHostModule/runRoleTopology`、role loader、service-locator/万能 Capability、未登记 bridge、optional owner/fallback 与清理顺序反扫，没有第二组合根、改名委托桥、运行期定位器、孤儿生命周期或跨拓扑多装入 | 通过；A1 与 A6 同实例/生命周期证据继续有效 |
+
+- 门禁、已知差异与验证边界：canonical `pnpm s7:lint` 在本基线取得 57/57，全部现有反向 mutation 和 registry golden 通过；其中 Provider/Tool/MCP/Channel、config/secret、各 Storage/Executor/Mesh 家族、A6-13/14 拓扑透明与唯一 Host 的 inspector 均命中当前生产图。本轮未修改源码、测试、manifest、export 或 build input，故 A6 各包已接受的直接测试、typecheck/build 与 fresh package-export 证据未失效，也未重复运行。完整 `distributed-runtime-structure.test.ts` 的 A4-10 `runtime-host` 旧依赖断言仍是已登记 A7 零残留/终验输入；它既不描述当前生产依赖，也未参与本次 A6 裁决，本轮没有越界修正或以其失败推翻 A6。
+- 正反全等、失效与交接：六个退出面在同一未修改生产基线上均无未分类 concrete producer/consumer、第二 owner/factory、拓扑产品分支、错实例或生命周期旁路，A6 因而更新为 `[x]`，完成度更新为 `7/8`。若任一 A6 有限端口或 concrete importer/factory 数量、配置/秘密投影、P01～P15 需求消费、Rubric CAS identity、Executor/Mesh 同实例传递或 cleanup、Conversation/Backup 行动、Device/拓扑分支、PersistentApplicationHost root/role lifecycle、S7 inspector/mutation 发生变化，立即恢复本证据和 A6 为 `[ ]`，并只重验真实相交闭包。当前停在“等待协调者独立复核 A6”；协调者接受并提交后只能规划/派发 A7，本轮没有修改生产代码、运行最终全量门禁、更新正式架构文档或开始 A7，也未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立复核：不接受本轮 A6 聚合结论。AE-001 明确要求领域不知道 Anchor/epoch；生产反查发现 `DeliveryUncertainResolutionCommand`、`DeliveryLifecycleDecisionContext`、`ScheduleLifecycleMechanismPort`、`BackupRecoveryCurrentRemovalContext` 等领域应用合同仍直接携带 `anchorEpoch/currentAnchorEpoch`，且 Delivery 应用把该值用于领域决定与公开状态投影。这不是仅留在 Infrastructure/Correctness 内部的 fence 机制，足以推翻 E05“领域没有物理拓扑泄漏”的判断。A6 与完成度恢复为 `[ ]`/`6/8`，先按独立责任链保留现有行为与 wire exact-set、将物理 fence 收回 Correctness/Infrastructure 边界，再重新执行 A6 退出审计；A7 仍不得开始。
+
+### A6-16：Delivery topology fence 边界收口
+
+- 基线与唯一结果：以已接受 `HEAD 5627c9c14a3d9c776ae58bd027915f0598b4bc85` 加协调者调度记录为基线，形成待复核证据 `A6-16-delivery-topology-fence-boundary-v1`。`DeliveryUncertainResolutionCommand` 只携带不透明 `DeliveryResolutionFence`，Delivery 应用只按 topology-neutral item/open-fact 投影裁决 not-found、open-attempt binding 与三种产品决定；`DeliveryLifecycleDecisionContext`、obligation/admission projection、公开 `AuthorityDeliveryItem.openFact/resolution` 均不再暴露或解释 `anchorEpoch/currentAnchorEpoch/openedAnchorEpoch/resolvedAnchorEpoch`。领域没有读取、解析或比较不透明 fence，也不再构造带 generation 的 status notice。
+- Correctness、Authority 与 wire：`@zhixing/owner-kernel/delivery` 是数值 wire epoch 与不透明 fence 的唯一双向绑定处；它在既有 `ControlAdmissionJournal.applyAuthority` 串行事务内先校验 current Authority epoch，再把 topology-neutral 领域决定交回 `DeliveryAuthority.decideDeliveryResolution` 绑定持久 `opened/resolvedAnchorEpoch`、digest 与原 record schema。Lifecycle 应用只产生 topology-neutral decision record；owner-kernel Correctness 在同一事务中注入 current epoch、生成 open-fact digest并返回已提交的无拓扑投影。pipeline 在提交后经只读 `DeliveryStatusProjectionPort` 取得 Authority 生成的原 `DeliveryStatusNotice`，因此 `delivery.resolve` RPC 的 exact `anchorEpoch`、`epoch-stale/fence-rejected`、状态通知、响应丢失重放、持久 bytes 与单机/分布式行为均保持不变。
+- 直接证据与门禁：Core Delivery application 5/5、Authority/pipeline 79/79，owner-kernel control/participant 18/18，Server RPC 65/65，CLI production setup/control 3/3，共 7 文件 170/170；直接覆盖 topology-neutral command/projection、uncertain/status 分层、stale epoch、open-fact mismatch、同 request replay、observer failure、attempt/retry/terminal及真实 wire 映射。core、owner-kernel、server、CLI `tsc --noEmit` 与依赖顺序 build、`pnpm cli:build`、fresh `pnpm runtime:package-exports` 均通过；canonical `pnpm s7:lint` 为 57/57 且 registry golden 通过。新增 S7 反向 mutation 可拒绝领域重新声明 epoch、Correctness 丢失 current-epoch fence、RPC 把数值 epoch 直接送入领域、pipeline/Authority topology 决定回流。
+- 失效与下一检查点：若 Delivery application command/context、公开 item/open-fact/resolution 投影、不透明 fence codec、owner-kernel current-epoch 校验、Authority record binding/status projection、pipeline notice读取、`delivery.resolve` wire/错误/重放、S7 mutation 或上述直接测试任一变化，只恢复本证据与 A6-15 E05 的 Delivery 子结论；A5 Delivery 的业务 owner、record schema、其他 A6 边缘和 Conversation/Backup 行动证据不因本包失效。A6 与完成度继续 `[ ]`/`6/8`，交接为完成并等待协调者独立复核；复核接受后只能按既定顺序分别收口 Schedule 与 Backup/Device 同根泄漏，再重做 A6 退出审计，不得进入 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：沿 Server wire、Product API command、Delivery 应用决定、owner-kernel Correctness、Authority 提交与状态投影双向核对，确认领域只持不透明 `DeliveryResolutionFence` 且不解析、比较或投影 epoch；数值 epoch 的解码、当前代际校验与持久 fact 绑定均留在同一权威事务和 Authority 机制内，RPC exact-set 与持久 record schema未改变。独立取得 Core application/Authority 47/47、owner-kernel control 8/8、Server RPC 65/65、CLI production setup 3/3、canonical S7 57/57、registry golden 与 `git diff --check` 通过；接受 `A6-16-delivery-topology-fence-boundary-v1`。A6 继续 `[ ]`，下一责任链只处理 Schedule 的同根泄漏。
 
 ## 十、用户提示词
 

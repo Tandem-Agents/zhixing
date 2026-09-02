@@ -25,8 +25,11 @@ import {
 import {
   DeliveryAuthority,
   SCHEDULER_USER_NOTICE_STREAM,
+  bindDeliveryLifecycleDecisionRecords,
   deliveryRecord,
   prepareDeliveryEnqueues,
+  projectDeliveryApplicationProjection,
+  projectDeliveryLifecycleRecords,
   type DeliveryEnqueueInput,
   type DeliveryEnqueueResult,
 } from "../index.js";
@@ -75,9 +78,30 @@ export function createDeliveryLifecycleTestBinding(
     snapshot: () => authority.snapshot(),
     transact: <Value>(decide: Parameters<
       DeliveryLifecycleCorrectnessPort["transact"]
-    >[0]) => authority.transactDeliveryLifecycle<Value>((context) => {
+    >[0]) => authority.transactDeliveryLifecycle((context) => {
       try {
-        return decide(context);
+        const decision = decide({
+          projection: projectDeliveryApplicationProjection(context.projection),
+          transactionAt: context.transactionAt,
+        });
+        const records = bindDeliveryLifecycleDecisionRecords(
+          context.projection,
+          decision.records,
+          context.currentAnchorEpoch,
+        );
+        return {
+          records,
+          value: {
+            value: decision.value,
+            projection: projectDeliveryApplicationProjection(
+              projectDeliveryLifecycleRecords(
+                context.projection,
+                records,
+                context.transactionAt,
+              ),
+            ),
+          },
+        };
       } catch (error) {
         if (error instanceof DeliveryProjectionInvariantError) {
           throw new AuthorityStorageError("commit-log-corrupt", error.message, {
@@ -89,11 +113,19 @@ export function createDeliveryLifecycleTestBinding(
     }),
     transactAdmission: <Value>(decide: Parameters<
       DeliveryLifecycleCorrectnessPort["transactAdmission"]
-    >[0]) => authority.transactDeliveryAdmission<Value>(decide),
+    >[0]) => authority.transactDeliveryAdmission<Value>((context) =>
+      decide({
+        projection: projectDeliveryApplicationProjection(context.projection),
+        admission: context.admission,
+      })),
   };
-  const projection: DeliveryLifecycleProjectionPort = {
+  const projection: DeliveryLifecycleProjectionPort & {
+    statusNotice: DeliveryAuthority["statusNotice"];
+  } = {
     list: () => authority.list(),
     snapshot: () => authority.snapshot(),
+    statusNotice: (itemId, statusRevision) =>
+      authority.statusNotice(itemId, statusRevision),
   };
   return {
     application: new DeliveryLifecycleApplicationService(correctness, options),

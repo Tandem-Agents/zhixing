@@ -7561,6 +7561,33 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/delivery/application.ts",
+      (text) => `${text}\ninterface LeakedTopologyFence { readonly anchorEpoch: number }`,
+    )).join("\n"),
+    /uncertain-resolution application command/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/owner-kernel/src/delivery-control.ts",
+      (text) => text.replace(
+        "requestedAnchorEpoch !== input.authority.anchorEpoch",
+        "false",
+      ),
+    )).join("\n"),
+    /Correctness adapter or application ownership drifted/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/server.ts",
+      (text) => text.replace(
+        "resolutionFence: createDeliveryResolutionFence(params.anchorEpoch)",
+        "anchorEpoch: params.anchorEpoch",
+      ),
+    )).join("\n"),
+    /delivery.resolve bypasses the Product API dispatcher/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
       "packages/core/package.json",
       (text) => text.replaceAll(
         "./dist/delivery/application",
@@ -7679,7 +7706,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/owner-kernel/src/delivery-obligation-correctness.ts",
       (text) => text.replace(
-        "authority.transactDeliveryLifecycle<Value>",
+        "authority.transactDeliveryLifecycle<DeliveryLifecycleCommit<Value>>",
         "authority.claim",
       ),
     )).join("\n"),

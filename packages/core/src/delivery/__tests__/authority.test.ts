@@ -358,16 +358,14 @@ describe(
     expect(uncertain.item).toMatchObject({
       state: "uncertain",
       statusRevision: 3,
-      openFact: { openedAnchorEpoch: 7 },
+      openFact: { openFactDigest: expect.any(String) },
     });
-    expect(uncertain.notice).toMatchObject({
-      state: "delivery-uncertain",
-      openFactDigest: uncertain.item.openFact!.openFactDigest,
-      statusRevision: 3,
-    });
-    await expect(fixture.authority.statusHistory(fixture.itemId, 2)).resolves.toEqual([
+    expect(uncertain.item.openFact).not.toHaveProperty("openedAnchorEpoch");
+    const statusHistory = await fixture.authority.statusHistory(fixture.itemId, 2);
+    expect(statusHistory).toEqual([
       expect.objectContaining({
         state: "delivery-uncertain",
+        anchorEpoch: 7,
         openFactDigest: uncertain.item.openFact!.openFactDigest,
         statusRevision: 3,
       }),

@@ -6,24 +6,16 @@ import type {
   ControlResult,
   DeliveryEnqueueKeyBody,
   DeliveryIntentDto,
-  DeliveryStatusNotice,
   DeliveryStreamRecord,
   LogicalRecord,
 } from "../contracts/index.js";
 import {
-  decideDeliveryResolution,
-  deliveryProjectionStatusNotice,
   deliveryIdempotencyKey,
   deliveryIntentDigest,
   deliveryResponseBindingDigest,
   deliveryRecord,
-  makeDeliveryOpenFact,
-  materializeDeliveryItem,
   prepareDeliveryEnqueues,
-  projectDeliveryLifecycleRecords,
   validateDeliveryFailure,
-  type DeliveryProjection,
-  type DeliveryResolutionDecision,
 } from "./authority.js";
 import {
   assertDeliveryIdentifier,
@@ -38,6 +30,8 @@ import {
 } from "./lifecycle-policy.js";
 import type {
   AuthorityDeliveryItem,
+  DeliveryApplicationProjection,
+  DeliveryApplicationProjectionItem,
   DeliveryEnqueueInput,
   DeliveryEnqueueResult,
   DeliveryLifecycleBinding,
@@ -55,19 +49,24 @@ import {
 } from "../product-api/catalog.js";
 import { canonicalize } from "../protocol/index.js";
 
-export type DeliveryUncertainResolutionDecision =
+export type DeliveryUncertainResolutionChoice =
   | "user-verified-sent"
   | "abandon"
   | "retry-risk-ack";
+
+declare const DELIVERY_RESOLUTION_FENCE: unique symbol;
+export type DeliveryResolutionFence = string & {
+  readonly [DELIVERY_RESOLUTION_FENCE]: "delivery-resolution-fence";
+};
 
 /** Delivery-owned command for resolving one uncertain delivery attempt. */
 export interface DeliveryUncertainResolutionCommand {
   readonly requestId: string;
   readonly itemId: string;
   readonly attempt: number;
-  readonly anchorEpoch: number;
+  readonly resolutionFence: DeliveryResolutionFence;
   readonly openFactDigest: string;
-  readonly decision: DeliveryUncertainResolutionDecision;
+  readonly decision: DeliveryUncertainResolutionChoice;
   readonly principal: Readonly<ControlEnvelope["principal"]>;
 }
 
@@ -86,14 +85,24 @@ export type DeliveryUncertainResolutionOutcome =
     };
 
 export interface DeliveryUncertainResolutionDecisionContext {
-  readonly projection: DeliveryProjection;
+  readonly projection: DeliveryApplicationProjection;
   readonly transactionAt: string;
-  readonly currentAnchorEpoch: number;
 }
+
+export type DeliveryUncertainResolutionDecision =
+  | { readonly accepted: true; readonly state: DeliveryItemState }
+  | {
+      readonly accepted: false;
+      readonly error: {
+        readonly code: "fence-rejected" | "not-found";
+        readonly message: string;
+        readonly retryable: false;
+      };
+    };
 
 export type DeliveryUncertainResolutionDecide = (
   context: DeliveryUncertainResolutionDecisionContext,
-) => DeliveryResolutionDecision;
+) => DeliveryUncertainResolutionDecision;
 
 /** Correctness port: admission, authority coordination and durable commit remain mechanisms. */
 export interface DeliveryUncertainResolutionCorrectnessPort {
@@ -125,20 +134,71 @@ export class DeliveryUncertainResolutionApplicationService
       principal: Object.freeze({ ...command.principal }),
     });
     return await this.correctness.resolve(frozen, (context) =>
-      decideDeliveryResolution(
+      decideDeliveryUncertainResolution(
         context.projection,
         {
           itemId: frozen.itemId,
           attempt: frozen.attempt,
-          anchorEpoch: frozen.anchorEpoch,
           openFactDigest: frozen.openFactDigest,
           decision: frozen.decision,
           by: frozen.principal.surfacePrincipal,
         },
-        { at: context.transactionAt },
-        context.currentAnchorEpoch,
+        context.transactionAt,
       ));
   }
+}
+
+function decideDeliveryUncertainResolution(
+  projection: DeliveryApplicationProjection,
+  input: {
+    readonly itemId: string;
+    readonly attempt: number;
+    readonly openFactDigest: string;
+    readonly decision: DeliveryUncertainResolutionChoice;
+    readonly by: string;
+  },
+  transactionAt: string,
+): DeliveryUncertainResolutionDecision {
+  assertDeliveryItemId(input.itemId);
+  assertDeliveryDigest(input.openFactDigest, "Delivery open fact");
+  assertDeliveryIdentifier(input.by, "Delivery resolution principal");
+  if (!Number.isSafeInteger(input.attempt) || input.attempt <= 0) {
+    throw new TypeError("Delivery resolution attempt must be a positive safe integer");
+  }
+  if (!Number.isFinite(Date.parse(transactionAt))) {
+    throw new TypeError("Delivery resolution time must be canonical");
+  }
+  const item = projection.items.get(input.itemId);
+  if (!item) {
+    return rejectedUncertainResolution("not-found", "Delivery item does not exist");
+  }
+  if (
+    item.state !== "uncertain" ||
+    !item.openFact ||
+    input.attempt !== item.currentAttempt ||
+    input.openFactDigest !== item.openFact.openFactDigest
+  ) {
+    return rejectedUncertainResolution(
+      "fence-rejected",
+      "Delivery resolution does not bind the open attempt",
+    );
+  }
+  return {
+    accepted: true,
+    state:
+      input.decision === "user-verified-sent"
+        ? "verified-sent"
+        : input.decision === "abandon"
+          ? "abandoned"
+          : "queued",
+  };
+}
+
+function rejectedUncertainResolution(
+  code: "fence-rejected" | "not-found",
+  message: string,
+): DeliveryUncertainResolutionDecision {
+  return { accepted: false, error: { code, message, retryable: false } };
 }
 
 /**
@@ -163,7 +223,7 @@ export type DeliveryObligationDecision =
   | { readonly accepted: false; readonly error: AuthorityError };
 
 export interface DeliveryObligationDecisionContext {
-  readonly projection: DeliveryProjection;
+  readonly projection: DeliveryApplicationProjection;
   readonly lifecycleAdmission: DeliveryLifecycleAdmissionState | undefined;
 }
 
@@ -266,7 +326,6 @@ export type DeliveryClaimResult =
   | {
       readonly kind: "uncertain";
       readonly item: AuthorityDeliveryItem;
-      readonly notice: Extract<DeliveryStatusNotice, { state: "delivery-uncertain" }>;
     }
   | { readonly kind: "skip" };
 
@@ -287,7 +346,6 @@ export type DeliveryOutcomeDecision =
       readonly state: DeliveryItemState;
       readonly statusRevision: number;
       readonly retryAt?: string;
-      readonly notice?: DeliveryStatusNotice;
     };
 
 export type DeliveryPreflightFailureDecision =
@@ -296,28 +354,44 @@ export type DeliveryPreflightFailureDecision =
       readonly accepted: true;
       readonly attempt: number;
       readonly statusRevision: number;
-      readonly notice: Extract<DeliveryStatusNotice, { state: "delivery-failed" }>;
     };
 
 export interface DeliveryLifecycleDecisionContext {
-  readonly projection: DeliveryProjection;
+  readonly projection: DeliveryApplicationProjection;
   readonly transactionAt: string;
-  readonly currentAnchorEpoch: number;
 }
 
+export type DeliveryLifecycleDecisionRecord =
+  | Exclude<
+      DeliveryStreamRecord,
+      { readonly t: "delivery-uncertain" | "delivery-resolved" }
+    >
+  | {
+      readonly t: "delivery-uncertain";
+      readonly itemId: string;
+      readonly attempt: number;
+      readonly openedAt: string;
+      readonly statusRevision: number;
+    };
+
 export interface DeliveryLifecycleMutation<Value> {
-  readonly records: readonly DeliveryStreamRecord[];
+  readonly records: readonly DeliveryLifecycleDecisionRecord[];
   readonly value: Value;
 }
 
-/** Correctness supplies one serialized projection transaction, authority time and anchor fence. */
+export interface DeliveryLifecycleCommit<Value> {
+  readonly projection: DeliveryApplicationProjection;
+  readonly value: Value;
+}
+
+/** Correctness supplies one serialized projection transaction and its durable commit result. */
 export interface DeliveryLifecycleCorrectnessPort {
   snapshot(): readonly AuthorityDeliveryItem[];
   transact<Value>(
     decide: (
       context: DeliveryLifecycleDecisionContext,
     ) => DeliveryLifecycleMutation<Value>,
-  ): Promise<Value>;
+  ): Promise<DeliveryLifecycleCommit<Value>>;
   transactAdmission<Value>(
     decide: (
       context: DeliveryLifecycleAdmissionDecisionContext,
@@ -342,7 +416,7 @@ export interface DeliveryLifecycleAdmissionState {
 }
 
 export interface DeliveryLifecycleAdmissionDecisionContext {
-  readonly projection: DeliveryProjection;
+  readonly projection: DeliveryApplicationProjection;
   readonly admission: DeliveryLifecycleAdmissionState | undefined;
 }
 
@@ -538,7 +612,17 @@ export class DeliveryLifecycleApplicationService
   }): Promise<DeliveryClaimResult> {
     assertDeliveryItemId(input.itemId);
     const frozen = structuredClone(input);
-    return await this.correctness.transact<DeliveryClaimResult>((context) => {
+    const committed = await this.correctness.transact<
+      | { readonly kind: "skip" }
+      | {
+          readonly kind: "send";
+          readonly itemId: string;
+          readonly attempt: number;
+          readonly redrive: boolean;
+          readonly responseBindingDigest: string;
+        }
+      | { readonly kind: "uncertain"; readonly itemId: string }
+    >((context) => {
       const item = context.projection.items.get(frozen.itemId);
       if (!item) return noDeliveryMutation({ kind: "skip" });
       if (item.state === "attempting") {
@@ -550,7 +634,7 @@ export class DeliveryLifecycleApplicationService
         ) {
           return noDeliveryMutation({
             kind: "send",
-            item: materializeDeliveryItem(item),
+            itemId: item.id,
             attempt: item.currentAttempt,
             redrive: true,
             responseBindingDigest: deliveryResponseBindingDigest({
@@ -560,37 +644,16 @@ export class DeliveryLifecycleApplicationService
             }),
           });
         }
-        const open = makeDeliveryOpenFact(
-          item,
-          started,
-          context.currentAnchorEpoch,
-        );
-        const uncertain: DeliveryStreamRecord = {
+        const uncertain: DeliveryLifecycleDecisionRecord = {
           t: "delivery-uncertain",
           itemId: item.id,
           attempt: item.currentAttempt,
-          openedAnchorEpoch: context.currentAnchorEpoch,
           openedAt: context.transactionAt,
-          openFactDigest: open.openFactDigest,
           statusRevision: item.statusRevision + 1,
         };
-        const projected = projectDeliveryLifecycleRecords(
-          context.projection,
-          [uncertain],
-          context.transactionAt,
-        );
         return {
           records: [uncertain],
-          value: {
-            kind: "uncertain",
-            item: materializeDeliveryItem(projected.items.get(item.id)!),
-            notice: requireDeliveryStatusNotice(
-              projected,
-              item.id,
-              uncertain.statusRevision,
-              context.currentAnchorEpoch,
-            ) as Extract<DeliveryStatusNotice, { state: "delivery-uncertain" }>,
-          },
+          value: { kind: "uncertain", itemId: item.id },
         };
       }
       if (!isReadyForDeliveryAttempt(item, context.transactionAt)) {
@@ -602,16 +665,11 @@ export class DeliveryLifecycleApplicationService
         context.transactionAt,
         frozen.outcomePolicy,
       );
-      const projected = projectDeliveryLifecycleRecords(
-        context.projection,
-        [started],
-        context.transactionAt,
-      );
       return {
         records: [started],
         value: {
           kind: "send",
-          item: materializeDeliveryItem(projected.items.get(item.id)!),
+          itemId: item.id,
           attempt: started.attempt,
           redrive: false,
           responseBindingDigest: deliveryResponseBindingDigest({
@@ -622,6 +680,15 @@ export class DeliveryLifecycleApplicationService
         },
       };
     });
+    if (committed.value.kind === "skip") return committed.value;
+    const item = committed.projection.items.get(committed.value.itemId);
+    if (!item) throw corruptDeliveryProjection("Committed delivery item is missing");
+    return committed.value.kind === "uncertain"
+      ? { kind: "uncertain", item: publicDeliveryItem(item) }
+      : {
+          ...committed.value,
+          item: publicDeliveryItem(item),
+        };
   }
 
   async recordPreflightFailure(input: {
@@ -635,7 +702,7 @@ export class DeliveryLifecycleApplicationService
     if (frozen.error.retryable) {
       throw new TypeError("Delivery preflight failure must be permanent");
     }
-    return await this.correctness.transact<DeliveryPreflightFailureDecision>((context) => {
+    const committed = await this.correctness.transact<DeliveryPreflightFailureDecision>((context) => {
       const item = context.projection.items.get(frozen.itemId);
       if (!item || !isReadyForDeliveryAttempt(item, context.transactionAt)) {
         return noDeliveryMutation({ accepted: false });
@@ -652,26 +719,16 @@ export class DeliveryLifecycleApplicationService
         error: frozen.error,
         statusRevision: started.statusRevision + 1,
       };
-      const projected = projectDeliveryLifecycleRecords(
-        context.projection,
-        [started, failed],
-        context.transactionAt,
-      );
       return {
         records: [started, failed],
         value: {
           accepted: true,
           attempt: started.attempt,
           statusRevision: failed.statusRevision,
-          notice: requireDeliveryStatusNotice(
-            projected,
-            item.id,
-            failed.statusRevision,
-            context.currentAnchorEpoch,
-          ) as Extract<DeliveryStatusNotice, { state: "delivery-failed" }>,
         },
       };
     });
+    return committed.value;
   }
 
   async recordOutcome(input: {
@@ -682,7 +739,15 @@ export class DeliveryLifecycleApplicationService
   }): Promise<DeliveryOutcomeDecision> {
     assertDeliveryItemId(input.itemId);
     const frozen = structuredClone(input);
-    return await this.correctness.transact<DeliveryOutcomeDecision>((context) => {
+    const committed = await this.correctness.transact<
+      | { readonly accepted: false }
+      | {
+          readonly accepted: true;
+          readonly itemId: string;
+          readonly statusRevision: number;
+          readonly retryAt?: string;
+        }
+    >((context) => {
       const item = context.projection.items.get(frozen.itemId);
       if (
         !item ||
@@ -712,7 +777,10 @@ export class DeliveryLifecycleApplicationService
           ...(frozen.outcome.receipt ? { receipt: frozen.outcome.receipt } : {}),
           statusRevision,
         };
-      } else if (deliveryFailureDisposition(item, frozen.outcome.error) === "retry") {
+      } else if (deliveryFailureDisposition(
+        { ...item, intent: { maxAttempts: item.maxAttempts } },
+        frozen.outcome.error,
+      ) === "retry") {
         const retryAt = deliveryDeadlineAt(
           context.transactionAt,
           this.#baseRetryDelayMs,
@@ -735,34 +803,30 @@ export class DeliveryLifecycleApplicationService
           statusRevision,
         };
       }
-      const projected = projectDeliveryLifecycleRecords(
-        context.projection,
-        [record],
-        context.transactionAt,
-      );
-      const projectedItem = projected.items.get(item.id)!;
-      const notice = deliveryProjectionStatusNotice(
-        projected,
-        item.id,
-        statusRevision,
-        context.currentAnchorEpoch,
-      );
       return {
         records: [record],
         value: {
           accepted: true,
-          state: projectedItem.state,
+          itemId: item.id,
           statusRevision,
           ...(record.t === "retry-scheduled" ? { retryAt: record.retryAt } : {}),
-          ...(notice ? { notice } : {}),
         },
       };
     });
+    if (!committed.value.accepted) return committed.value;
+    const item = committed.projection.items.get(committed.value.itemId);
+    if (!item) throw corruptDeliveryProjection("Committed delivery item is missing");
+    return {
+      accepted: true,
+      state: item.state,
+      statusRevision: committed.value.statusRevision,
+      ...(committed.value.retryAt ? { retryAt: committed.value.retryAt } : {}),
+    };
   }
 }
 
 function decideDeliveryLifecycleBindings(
-  projection: DeliveryProjection,
+  projection: DeliveryApplicationProjection,
   inputs: readonly DeliveryEnqueueInput[],
   admission: DeliveryLifecycleAdmissionState | undefined,
 ): readonly (DeliveryLifecycleBinding | undefined)[] {
@@ -879,7 +943,7 @@ function decideLifecycleAdmissionInstall(
 
 function capturePendingLifecycleDeliveries(
   admission: DeliveryLifecycleAdmissionState,
-  projection: DeliveryProjection,
+  projection: DeliveryApplicationProjection,
 ): DeliveryLifecycleAdmissionState {
   const deliveries = new Map(admission.deliveries.map(({ id, revision }) => [id, revision]));
   for (const item of projection.items.values()) {
@@ -897,7 +961,7 @@ function capturePendingLifecycleDeliveries(
 }
 
 function lifecycleAcceptedDeliveryItems(
-  projection: DeliveryProjection,
+  projection: DeliveryApplicationProjection,
   admission: DeliveryLifecycleAdmissionState,
 ): readonly { readonly id: string; readonly revision: string }[] {
   const frozenDeliveries = new Map(
@@ -989,7 +1053,7 @@ function noDeliveryMutation<Value>(value: Value): DeliveryLifecycleMutation<Valu
 }
 
 function isReadyForDeliveryAttempt(
-  item: DeliveryProjection["items"] extends Map<string, infer Item> ? Item : never,
+  item: DeliveryApplicationProjectionItem,
   at: string,
 ): boolean {
   if (item.state === "queued") return true;
@@ -1001,7 +1065,7 @@ function isReadyForDeliveryAttempt(
 }
 
 function makeAttemptStarted(
-  item: DeliveryProjection["items"] extends Map<string, infer Item> ? Item : never,
+  item: DeliveryApplicationProjectionItem,
   at: string,
   outcomePolicy: DeliveryAttemptOutcomePolicy,
 ): Extract<DeliveryStreamRecord, { readonly t: "attempt-started" }> {
@@ -1012,7 +1076,10 @@ function makeAttemptStarted(
         resolutionFactDigest: item.pendingManualRetryFactDigest,
       } as const)
     : ({ kind: "automatic" } as const);
-  if (!deliveryAttemptAuthorizationMatches(item, authorization)) {
+  if (!deliveryAttemptAuthorizationMatches(
+    { ...item, intent: { maxAttempts: item.maxAttempts } },
+    authorization,
+  )) {
     throw corruptDeliveryProjection("Ready delivery item exceeds its attempt policy");
   }
   const unknownOutcome =
@@ -1036,20 +1103,11 @@ function makeAttemptStarted(
   };
 }
 
-function requireDeliveryStatusNotice(
-  projection: DeliveryProjection,
-  itemId: string,
-  statusRevision: number,
-  anchorEpoch: number,
-): DeliveryStatusNotice {
-  const notice = deliveryProjectionStatusNotice(
-    projection,
-    itemId,
-    statusRevision,
-    anchorEpoch,
-  );
-  if (!notice) throw corruptDeliveryProjection("Delivery status transition has no notice");
-  return notice;
+function publicDeliveryItem(
+  item: DeliveryApplicationProjectionItem,
+): AuthorityDeliveryItem {
+  const { attemptStarted: _attemptStarted, ...projection } = item;
+  return Object.freeze(projection);
 }
 
 function corruptDeliveryProjection(message: string): DeliveryProjectionInvariantError {

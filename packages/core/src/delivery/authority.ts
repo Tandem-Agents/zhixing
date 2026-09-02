@@ -32,12 +32,15 @@ import type {
   DeliveryEnqueueResult,
   AuthorityDeliveryItem,
   DeliveryOpenFact,
+  DeliveryApplicationProjection,
+  DeliveryApplicationProjectionItem,
   DeliveryLifecycleBinding,
   DeliveryLifecycleSourcePermit,
 } from "./types.js";
 import type {
   DeliveryLifecycleAdmissionMutation,
   DeliveryLifecycleAdmissionState,
+  DeliveryLifecycleDecisionRecord,
 } from "./application.js";
 import {
   assertDeliveryDiagnosticText,
@@ -56,6 +59,10 @@ export const DELIVERY_STREAM = "delivery";
 export const SCHEDULER_USER_NOTICE_STREAM = "intent:scheduler-user-notice";
 const deliveryOperationQueues = new WeakMap<AuthorityCommitLog, SerialTaskQueue>();
 
+interface AuthorityDeliveryOpenFact extends DeliveryOpenFact {
+  readonly openedAnchorEpoch: number;
+}
+
 interface MutableDeliveryItem {
   id: string;
   idempotencyKey: string;
@@ -71,7 +78,7 @@ interface MutableDeliveryItem {
   lastError?: DeliveryFailure;
   receiptDigest?: string;
   attemptStarted?: Extract<DeliveryStreamRecord, { t: "attempt-started" }>;
-  openFact?: DeliveryOpenFact;
+  openFact?: AuthorityDeliveryOpenFact;
   resolution?: DeliveryResolutionFact;
   lifecycleBinding?: DeliveryLifecycleBinding;
 }
@@ -208,7 +215,7 @@ export function deliveryResolutionFactDigest(
 }
 
 export function prepareDeliveryEnqueues(
-  projection: DeliveryProjection,
+  projection: DeliveryApplicationProjection,
   inputs: readonly DeliveryEnqueueInput[],
   commitAt: string,
   lifecycleBindings: readonly (DeliveryLifecycleBinding | undefined)[] = [],
@@ -703,6 +710,22 @@ export class DeliveryAuthority {
           : { kind: "append", entries: records, value: decision.value };
       })
     ).value;
+  }
+
+  async statusNotice(
+    itemId: string,
+    statusRevision: number,
+  ): Promise<DeliveryStatusNotice | undefined> {
+    assertDeliveryItemId(itemId);
+    assertPositiveInteger(statusRevision, "Delivery status revision");
+    return this.#select((state) =>
+      deliveryProjectionStatusNotice(
+        state,
+        itemId,
+        statusRevision,
+        this.#anchorEpoch,
+      )
+    );
   }
 
   async #select<Value>(select: (state: DeliveryProjection) => Value): Promise<Value> {
@@ -1539,7 +1562,7 @@ export function makeDeliveryOpenFact(
   item: MutableDeliveryItem,
   started: Extract<DeliveryStreamRecord, { t: "attempt-started" }>,
   openedAnchorEpoch: number,
-): DeliveryOpenFact {
+): AuthorityDeliveryOpenFact {
   const input = {
     itemId: item.id,
     attempt: started.attempt,
@@ -1552,6 +1575,27 @@ export function makeDeliveryOpenFact(
 }
 
 export function materializeDeliveryItem(item: MutableDeliveryItem): AuthorityDeliveryItem {
+  const openFact = item.openFact
+    ? {
+        itemId: item.openFact.itemId,
+        attempt: item.openFact.attempt,
+        startedAt: item.openFact.startedAt,
+        unknownOutcome: item.openFact.unknownOutcome,
+        idempotencyKey: item.openFact.idempotencyKey,
+        openFactDigest: item.openFact.openFactDigest,
+      }
+    : undefined;
+  const resolution = item.resolution
+    ? {
+        itemId: item.resolution.itemId,
+        attempt: item.resolution.attempt,
+        openFactDigest: item.resolution.openFactDigest,
+        decision: item.resolution.decision,
+        by: item.resolution.by,
+        at: item.resolution.at,
+        factDigest: item.resolution.factDigest,
+      }
+    : undefined;
   return snapshot(
     {
       id: item.id,
@@ -1575,8 +1619,8 @@ export function materializeDeliveryItem(item: MutableDeliveryItem): AuthorityDel
       ...(item.nextAttemptAt ? { nextAttemptAt: item.nextAttemptAt } : {}),
       ...(item.lastError ? { lastError: item.lastError } : {}),
       ...(item.receiptDigest ? { receiptDigest: item.receiptDigest } : {}),
-      ...(item.openFact ? { openFact: item.openFact } : {}),
-      ...(item.resolution ? { resolution: item.resolution } : {}),
+      ...(openFact ? { openFact } : {}),
+      ...(resolution ? { resolution } : {}),
       ...(item.lifecycleBinding ? { lifecycleBinding: item.lifecycleBinding } : {}),
     },
     "Delivery item projection",
@@ -1658,6 +1702,55 @@ export function cloneDeliveryProjection(state: DeliveryProjection): DeliveryProj
       ]),
     ),
   };
+}
+
+/** Removes Authority topology fields before a Delivery application decision. */
+export function projectDeliveryApplicationProjection(
+  state: DeliveryProjection,
+): DeliveryApplicationProjection {
+  return {
+    items: new Map(
+      [...state.items].map(([itemId, item]) => {
+        const projection: DeliveryApplicationProjectionItem = {
+          ...materializeDeliveryItem(item),
+          ...(item.attemptStarted
+            ? { attemptStarted: snapshot(item.attemptStarted, "Delivery attempt projection") }
+            : {}),
+        };
+        return [itemId, Object.freeze(projection)];
+      }),
+    ),
+    itemByKey: new Map(state.itemByKey),
+  };
+}
+
+/** Correctness-only binding of topology-neutral lifecycle decisions to this Authority generation. */
+export function bindDeliveryLifecycleDecisionRecords(
+  state: DeliveryProjection,
+  records: readonly DeliveryLifecycleDecisionRecord[],
+  currentAnchorEpoch: number,
+): readonly DeliveryStreamRecord[] {
+  assertPositiveInteger(currentAnchorEpoch, "Delivery authority epoch");
+  return records.map((record) => {
+    if (record.t !== "delivery-uncertain") return record;
+    const item = state.items.get(record.itemId);
+    const started = item?.attemptStarted;
+    if (!item || !started || started.attempt !== record.attempt) {
+      throw corruptDeliveryStream("Delivery uncertainty does not bind the open attempt");
+    }
+    return {
+      ...record,
+      openedAnchorEpoch: currentAnchorEpoch,
+      openFactDigest: deliveryOpenFactDigest({
+        itemId: item.id,
+        attempt: started.attempt,
+        openedAnchorEpoch: currentAnchorEpoch,
+        startedAt: started.startedAt,
+        unknownOutcome: started.unknownOutcome,
+        idempotencyKey: item.idempotencyKey,
+      }),
+    };
+  });
 }
 
 /** Projects candidate lifecycle records without mutating the supplied Authority snapshot. */

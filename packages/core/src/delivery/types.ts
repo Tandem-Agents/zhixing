@@ -91,7 +91,6 @@ export interface DeliveryEventMap extends EventMap {
 export interface DeliveryOpenFact {
   readonly itemId: string;
   readonly attempt: number;
-  readonly openedAnchorEpoch: number;
   readonly startedAt: string;
   readonly unknownOutcome: Extract<
     DeliveryStreamRecord,
@@ -99,6 +98,16 @@ export interface DeliveryOpenFact {
   >["unknownOutcome"];
   readonly idempotencyKey: string;
   readonly openFactDigest: string;
+}
+
+export interface DeliveryResolutionProjection {
+  readonly itemId: string;
+  readonly attempt: number;
+  readonly openFactDigest: string;
+  readonly decision: DeliveryResolutionFact["decision"];
+  readonly by: string;
+  readonly at: string;
+  readonly factDigest: string;
 }
 
 export interface AuthorityDeliveryItem {
@@ -122,8 +131,23 @@ export interface AuthorityDeliveryItem {
   readonly lastError?: DeliveryFailure;
   readonly receiptDigest?: string;
   readonly openFact?: DeliveryOpenFact;
-  readonly resolution?: DeliveryResolutionFact;
+  readonly resolution?: DeliveryResolutionProjection;
   readonly lifecycleBinding?: DeliveryLifecycleBinding;
+}
+
+/** Topology-neutral state supplied to Delivery application decisions. */
+export interface DeliveryApplicationProjectionItem extends AuthorityDeliveryItem {
+  readonly attemptStarted?: Extract<DeliveryStreamRecord, { readonly t: "attempt-started" }>;
+}
+
+export interface DeliveryApplicationProjection {
+  readonly items: ReadonlyMap<string, DeliveryApplicationProjectionItem>;
+  readonly itemByKey: ReadonlyMap<string, string>;
+}
+
+/** Correctness-owned public status projection; Delivery applications do not construct it. */
+export interface DeliveryStatusProjectionPort {
+  statusNotice(itemId: string, statusRevision: number): Promise<DeliveryStatusNotice | undefined>;
 }
 
 export interface AuthorityDeliveryStats {

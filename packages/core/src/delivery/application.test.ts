@@ -10,10 +10,12 @@ import {
   DeliveryUncertainResolutionApplicationService,
   type DeliveryObligation,
   type DeliveryObligationDecide,
+  type DeliveryResolutionFence,
   type DeliveryUncertainResolutionCommand,
 } from "./application.js";
 import {
   emptyDeliveryProjection,
+  projectDeliveryApplicationProjection,
   projectDeliveryLifecycleRecords,
 } from "./authority.js";
 import type { DeliveryEnqueueInput } from "./types.js";
@@ -22,7 +24,7 @@ const COMMAND: DeliveryUncertainResolutionCommand = {
   requestId: "resolution-1",
   itemId: "dlv-01KXPWTM80BYB4SH423EJT1CVN",
   attempt: 1,
-  anchorEpoch: 2,
+  resolutionFence: "opaque-correctness-fence" as DeliveryResolutionFence,
   openFactDigest: `sha256:${"a".repeat(64)}`,
   decision: "abandon",
   principal: {
@@ -61,6 +63,7 @@ describe("Delivery uncertain-resolution application", () => {
     expect(resolve).toHaveBeenCalledOnce();
     const delivered = resolve.mock.calls[0]![0];
     expect(delivered).toEqual(COMMAND);
+    expect(delivered).not.toHaveProperty("anchorEpoch");
     expect(delivered).not.toBe(COMMAND);
     expect(Object.isFrozen(delivered)).toBe(true);
     expect(Object.isFrozen(delivered.principal)).toBe(true);
@@ -177,13 +180,18 @@ describe("Delivery obligation application", () => {
 
     const application = new DeliveryLifecycleApplicationService({
       snapshot: () => [],
-      transact: (decide) => Promise.resolve(decide({
-        projection,
-        transactionAt: NOW,
-        currentAnchorEpoch: 7,
-      }).value),
+      transact: async (decide) => {
+        const decision = decide({
+          projection: projectDeliveryApplicationProjection(projection),
+          transactionAt: NOW,
+        });
+        return {
+          value: decision.value,
+          projection: projectDeliveryApplicationProjection(projection),
+        };
+      },
       transactAdmission: (decide) => Promise.resolve(decide({
-        projection,
+        projection: projectDeliveryApplicationProjection(projection),
         admission: undefined,
       }).value),
     });

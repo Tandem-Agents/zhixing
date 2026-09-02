@@ -12,6 +12,7 @@
 
 import { isDeliveryItemId } from "@zhixing/core/delivery";
 import { DELIVERY_RESOLVE_UNCERTAIN_COMMAND } from "@zhixing/core/delivery/application";
+import { createDeliveryResolutionFence } from "@zhixing/owner-kernel/delivery";
 import {
   DeviceAdministrationApplicationError,
   DEVICE_ADMINISTRATION_BEGIN_CURRENT_REMOVAL_COMMAND,
@@ -378,7 +379,12 @@ export function buildDeliveryResolveMethod(): MethodEntry {
         throw RpcErrors.internal("durable control identity is not available");
       }
       const dispatch = await productApi.command(DELIVERY_RESOLVE_UNCERTAIN_COMMAND, {
-        ...params,
+        requestId: params.requestId,
+        itemId: params.itemId,
+        attempt: params.attempt,
+        resolutionFence: createDeliveryResolutionFence(params.anchorEpoch),
+        openFactDigest: params.openFactDigest,
+        decision: params.decision,
         principal,
       });
       return dispatch.result;

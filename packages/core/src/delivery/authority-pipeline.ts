@@ -21,6 +21,7 @@ import type {
   AuthorityDeliveryLogger,
   DeliveryTransport,
   DeliveryEndpointTransport,
+  DeliveryStatusProjectionPort,
 } from "./types.js";
 import {
   normalizeDeliveryResponseLossEvidence,
@@ -38,7 +39,7 @@ export const DEFAULT_AUTHORITY_DELIVERY_CONFIG: AuthorityDeliveryPipelineConfig 
 
 export interface AuthorityDeliveryPipelineDeps {
   readonly application: DeliveryLifecycleApplication;
-  readonly projection: DeliveryLifecycleProjectionPort;
+  readonly projection: DeliveryLifecycleProjectionPort & DeliveryStatusProjectionPort;
   readonly artifacts: ArtifactStore;
   readonly eventBus: IEventBus<AuthorityDeliveryEventMap>;
   readonly config: AuthorityDeliveryPipelineConfig;
@@ -63,7 +64,7 @@ type PipelineState = "unstarted" | "prepared" | "running" | "quiesced" | "stoppe
 /** Drains authority facts; it cannot create, delete, or rewrite delivery items. */
 export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
   readonly #application: DeliveryLifecycleApplication;
-  readonly #projection: DeliveryLifecycleProjectionPort;
+  readonly #projection: DeliveryLifecycleProjectionPort & DeliveryStatusProjectionPort;
   readonly #artifacts: ArtifactStore;
   readonly #queue: AuthorityDeliveryQueue;
   readonly #transport: DeliveryTransport;
@@ -308,7 +309,7 @@ export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
           attempts: result.attempt,
           statusRevision: result.statusRevision,
         });
-        await this.#eventBus.emit("delivery:notice", { notice: result.notice });
+        await this.#emitStatusNotice(item.id, result.statusRevision);
       }
       return;
     }
@@ -327,7 +328,7 @@ export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
         openFactDigest: open.openFactDigest,
         statusRevision: claim.item.statusRevision,
       });
-      await this.#eventBus.emit("delivery:notice", { notice: claim.notice });
+      await this.#emitStatusNotice(claim.item.id, claim.item.statusRevision);
       return;
     }
     if (!transport) return;
@@ -390,9 +391,7 @@ export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
             endpoint: claim.item.endpoint,
             attempts: claim.attempt,
           });
-          if (decision.notice) {
-            await this.#eventBus.emit("delivery:notice", { notice: decision.notice });
-          }
+          await this.#emitStatusNotice(claim.item.id, decision.statusRevision, true);
         }
         return;
       }
@@ -436,9 +435,24 @@ export class AuthorityDeliveryPipeline implements DeliveryLifecycleEffectPort {
         statusRevision: decision.statusRevision,
       });
     }
-    if (decision.notice) {
-      await this.#eventBus.emit("delivery:notice", { notice: decision.notice });
+    await this.#emitStatusNotice(
+      claim.item.id,
+      decision.statusRevision,
+      decision.retryAt !== undefined,
+    );
+  }
+
+  async #emitStatusNotice(
+    itemId: string,
+    statusRevision: number,
+    optional = false,
+  ): Promise<void> {
+    const notice = await this.#projection.statusNotice(itemId, statusRevision);
+    if (!notice) {
+      if (optional) return;
+      throw new Error("Committed delivery transition has no status notice");
     }
+    await this.#eventBus.emit("delivery:notice", { notice });
   }
 
   #assertRunning(operation: string): void {

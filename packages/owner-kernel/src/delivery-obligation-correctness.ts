@@ -1,4 +1,10 @@
-import type { DeliveryAuthority } from "@zhixing/core/delivery";
+import {
+  bindDeliveryLifecycleDecisionRecords,
+  projectDeliveryApplicationProjection,
+  projectDeliveryLifecycleRecords,
+  type DeliveryAuthority,
+  type DeliveryStatusProjectionPort,
+} from "@zhixing/core/delivery";
 import { AuthorityStorageError } from "@zhixing/core/authority";
 import {
   DeliveryLifecycleApplicationService,
@@ -7,6 +13,7 @@ import {
   type DeliveryLifecycleApplication,
   type DeliveryLifecycleAdmissionDecisionContext,
   type DeliveryLifecycleAdmissionMutation,
+  type DeliveryLifecycleCommit,
   type DeliveryLifecycleCorrectnessPort,
   type DeliveryLifecycleDecisionContext,
   type DeliveryLifecycleMutation,
@@ -28,7 +35,7 @@ export function createDeliveryObligationCorrectnessPort(
         commitAt,
         (projection, _inputs, _commitAt, lifecycleAdmission) =>
           decide({
-            projection,
+            projection: projectDeliveryApplicationProjection(projection),
             lifecycleAdmission,
           }),
       ),
@@ -50,7 +57,7 @@ export function createOwnerDeliveryParticipant(options: {
 
 export interface OwnerDeliveryLifecycleBinding {
   readonly application: DeliveryLifecycleApplication;
-  readonly projection: DeliveryLifecycleProjectionPort;
+  readonly projection: DeliveryLifecycleProjectionPort & DeliveryStatusProjectionPort;
 }
 
 /**
@@ -68,13 +75,29 @@ export function createOwnerDeliveryLifecycleBinding(options: {
         context: DeliveryLifecycleDecisionContext,
       ) => DeliveryLifecycleMutation<Value>,
     ) =>
-      options.authority.transactDeliveryLifecycle<Value>((context) => {
+      options.authority.transactDeliveryLifecycle<DeliveryLifecycleCommit<Value>>((context) => {
         try {
-          return decide({
-            projection: context.projection,
+          const decision = decide({
+            projection: projectDeliveryApplicationProjection(context.projection),
             transactionAt: context.transactionAt,
-            currentAnchorEpoch: context.currentAnchorEpoch,
           });
+          const records = bindDeliveryLifecycleDecisionRecords(
+            context.projection,
+            decision.records,
+            context.currentAnchorEpoch,
+          );
+          const projected = projectDeliveryLifecycleRecords(
+            context.projection,
+            records,
+            context.transactionAt,
+          );
+          return {
+            records,
+            value: {
+              value: decision.value,
+              projection: projectDeliveryApplicationProjection(projected),
+            },
+          };
         } catch (error) {
           if (error instanceof DeliveryProjectionInvariantError) {
             throw new AuthorityStorageError("commit-log-corrupt", error.message, {
@@ -88,11 +111,17 @@ export function createOwnerDeliveryLifecycleBinding(options: {
       decide: (
         context: DeliveryLifecycleAdmissionDecisionContext,
       ) => DeliveryLifecycleAdmissionMutation<Value>,
-    ) => options.authority.transactDeliveryAdmission<Value>(decide),
+    ) => options.authority.transactDeliveryAdmission<Value>((context) =>
+      decide({
+        projection: projectDeliveryApplicationProjection(context.projection),
+        admission: context.admission,
+      })),
   });
-  const projection: DeliveryLifecycleProjectionPort = Object.freeze({
+  const projection: OwnerDeliveryLifecycleBinding["projection"] = Object.freeze({
     list: () => options.authority.list(),
     snapshot: () => options.authority.snapshot(),
+    statusNotice: (itemId: string, statusRevision: number) =>
+      options.authority.statusNotice(itemId, statusRevision),
   });
   const application = new DeliveryLifecycleApplicationService(
     correctness,

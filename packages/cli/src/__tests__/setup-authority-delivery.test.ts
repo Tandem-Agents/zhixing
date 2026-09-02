@@ -4,6 +4,7 @@ import {
   prepareDeliveryEnqueues,
 } from "@zhixing/core";
 import type { ChannelDeliveryEffectSource } from "@zhixing/core/delivery/channel-effect";
+import { createDeliveryResolutionFence } from "@zhixing/owner-kernel/delivery";
 import type {
   SecretRef,
   SecretStorePort,
@@ -223,7 +224,7 @@ describe("setupDelivery authority production path", () => {
       },
       itemId: prepared.value,
       attempt: uncertain!.currentAttempt,
-      anchorEpoch: 1,
+      resolutionFence: createDeliveryResolutionFence(1),
       openFactDigest: uncertain!.openFact!.openFactDigest,
       decision: "abandon",
     });

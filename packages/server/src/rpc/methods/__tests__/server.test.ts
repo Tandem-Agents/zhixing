@@ -1175,7 +1175,12 @@ describe("delivery.resolve", () => {
       authorityRevision: 8,
     });
     expect(execute).toHaveBeenCalledWith({
-      ...params,
+      requestId: params.requestId,
+      itemId: params.itemId,
+      attempt: params.attempt,
+      resolutionFence: "delivery-resolution-fence:v1:2",
+      openFactDigest: params.openFactDigest,
+      decision: params.decision,
       principal: {
         surfacePrincipal: "rpc:desktop",
         deviceId: "anchor-device",
