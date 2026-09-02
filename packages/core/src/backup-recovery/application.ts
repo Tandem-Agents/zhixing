@@ -1486,11 +1486,11 @@ export interface BackupRecoveryCurrentRemovalStatus {
 }
 
 export interface BackupRecoveryCurrentRemovalBinding {
-  readonly homeId: string;
-  readonly anchorEpoch: number;
-  readonly trustHeadDigest: string;
   readonly checkpointTargetId: string;
-  readonly checkpointGeneration: string;
+  /** Opaque binding to the accepted recovery context. Only Correctness may interpret it. */
+  readonly acceptedRecoveryBinding: string;
+  /** Opaque binding to the checkpoint package/target combination. */
+  readonly checkpointBinding: string;
 }
 
 export interface BackupRecoveryCurrentRemovalPackageIdentity {
@@ -1501,9 +1501,6 @@ export interface BackupRecoveryCurrentRemovalPackageIdentity {
 }
 
 export interface BackupRecoveryCurrentRemovalContext {
-  readonly homeId: string;
-  readonly anchorEpoch: number;
-  readonly trustHeadDigest: string;
   readonly recoveryRootPublicKey: string;
   readonly recoveryBackupPublicKey: string;
 }
@@ -1531,16 +1528,20 @@ export interface BackupRecoveryCheckpointVerification<Evidence> {
 export interface BackupRecoveryCurrentRemovalMechanismPort<Package, Checkpoint, Evidence> {
   hasCheckpointOwner(): boolean;
   readStatus(): Promise<BackupRecoveryCurrentRemovalStatus>;
-  readContext(): Promise<BackupRecoveryCurrentRemovalContext>;
   decodeCurrentPackage(value: string): BackupRecoveryDecodedCurrentPackage<Package>;
-  bindingDigest(input: {
-    readonly homeId: string;
-    readonly anchorEpoch: number;
-    readonly trustHeadDigest: string;
-    readonly targetId: string;
+  prepareAcceptedBinding(input: {
+    readonly checkpointTargetId: string;
     readonly rootKeyId: string;
     readonly recipientKeyId: string;
-  }): string;
+  }): Promise<{
+    readonly context: BackupRecoveryCurrentRemovalContext;
+    readonly binding: BackupRecoveryCurrentRemovalBinding;
+  }>;
+  verifyAcceptedBinding(input: {
+    readonly binding: BackupRecoveryCurrentRemovalBinding;
+    readonly rootKeyId: string;
+    readonly recipientKeyId: string;
+  }): Promise<BackupRecoveryCurrentRemovalContext>;
   forceCheckpoint(requestId: string): Promise<BackupRecoveryForcedCheckpoint<Checkpoint>>;
   verifyCheckpoint(input: {
     readonly checkpoint: Checkpoint;
@@ -1568,7 +1569,7 @@ export interface BackupRecoveryCurrentRemovalApplication<Evidence> {
   }): Promise<BackupRecoveryCurrentRemovalPermit<Evidence>>;
 }
 
-/** Sole owner of recovery package/root/generation binding and checkpoint permission. */
+/** Sole owner of recovery package/root binding and checkpoint permission. */
 export class BackupRecoveryCurrentRemovalApplicationService<Package, Checkpoint, Evidence>
   implements BackupRecoveryCurrentRemovalApplication<Evidence>
 {
@@ -1589,26 +1590,23 @@ export class BackupRecoveryCurrentRemovalApplicationService<Package, Checkpoint,
     if (!this.mechanism.hasCheckpointOwner()) {
       throw new Error("No recovery backup target is configured");
     }
-    const [status, context] = await Promise.all([
-      this.mechanism.readStatus(),
-      this.mechanism.readContext(),
-    ]);
+    const status = await this.mechanism.readStatus();
     const checkpointTargetId = requireText(
       status.targetId,
       "Recovery backup target identity",
       "Recovery backup target identity is unavailable",
     );
-    return this.#permit(decoded, context, Object.freeze({
-      homeId: requireText(context.homeId, "Recovery home id"),
-      anchorEpoch: requireEpoch(context.anchorEpoch),
-      trustHeadDigest: requireText(context.trustHeadDigest, "Recovery trust head"),
+    const prepared = await this.mechanism.prepareAcceptedBinding({
       checkpointTargetId,
-      checkpointGeneration: this.#generation({
-        context,
-        targetId: checkpointTargetId,
-        identity: decoded.identity,
-      }),
-    }));
+      rootKeyId: requireText(decoded.identity.rootKeyId, "Recovery root key id"),
+      recipientKeyId: requireText(decoded.identity.backupKeyId, "Recovery recipient key id"),
+    });
+    const binding = freezeBinding(prepared.binding);
+    if (binding.checkpointTargetId !== checkpointTargetId) {
+      throw new Error("Recovery checkpoint binding does not match the configured target");
+    }
+    assertRootBinding(prepared.context, decoded.identity);
+    return this.#permit(decoded, binding);
   }
 
   async prepareConfirm(input: {
@@ -1620,32 +1618,19 @@ export class BackupRecoveryCurrentRemovalApplicationService<Package, Checkpoint,
       "Recovery package",
     ));
     const binding = freezeBinding(input.binding);
-    const context = await this.mechanism.readContext();
-    const generation = this.#generation({
-      context: Object.freeze({
-        ...context,
-        homeId: binding.homeId,
-        anchorEpoch: binding.anchorEpoch,
-        trustHeadDigest: binding.trustHeadDigest,
-      }),
-      targetId: binding.checkpointTargetId,
-      identity: decoded.identity,
+    const context = await this.mechanism.verifyAcceptedBinding({
+      binding,
+      rootKeyId: requireText(decoded.identity.rootKeyId, "Recovery root key id"),
+      recipientKeyId: requireText(decoded.identity.backupKeyId, "Recovery recipient key id"),
     });
-    if (
-      context.homeId !== binding.homeId ||
-      generation !== binding.checkpointGeneration
-    ) {
-      throw new Error("Recovery package changes the accepted uninstall generation");
-    }
-    return this.#permit(decoded, context, binding);
+    assertRootBinding(context, decoded.identity);
+    return this.#permit(decoded, binding);
   }
 
   #permit(
     decoded: BackupRecoveryDecodedCurrentPackage<Package>,
-    context: BackupRecoveryCurrentRemovalContext,
     binding: BackupRecoveryCurrentRemovalBinding,
   ): BackupRecoveryCurrentRemovalPermit<Evidence> {
-    assertRootBinding(context, decoded.identity);
     const frozenBinding = freezeBinding(binding);
     return Object.freeze({
       binding: frozenBinding,
@@ -1684,20 +1669,6 @@ export class BackupRecoveryCurrentRemovalApplicationService<Package, Checkpoint,
     });
   }
 
-  #generation(input: {
-    readonly context: BackupRecoveryCurrentRemovalContext;
-    readonly targetId: string;
-    readonly identity: BackupRecoveryCurrentRemovalPackageIdentity;
-  }): string {
-    return requireText(this.mechanism.bindingDigest({
-      homeId: requireText(input.context.homeId, "Recovery home id"),
-      anchorEpoch: requireEpoch(input.context.anchorEpoch),
-      trustHeadDigest: requireText(input.context.trustHeadDigest, "Recovery trust head"),
-      targetId: requireText(input.targetId, "Recovery checkpoint target id"),
-      rootKeyId: requireText(input.identity.rootKeyId, "Recovery root key id"),
-      recipientKeyId: requireText(input.identity.backupKeyId, "Recovery recipient key id"),
-    }), "Recovery checkpoint generation");
-  }
 }
 
 function assertRootBinding(
@@ -1736,13 +1707,14 @@ function freezeBinding(
   value: BackupRecoveryCurrentRemovalBinding,
 ): BackupRecoveryCurrentRemovalBinding {
   return Object.freeze({
-    homeId: requireText(value.homeId, "Recovery home id"),
-    anchorEpoch: requireEpoch(value.anchorEpoch),
-    trustHeadDigest: requireText(value.trustHeadDigest, "Recovery trust head"),
     checkpointTargetId: requireText(value.checkpointTargetId, "Recovery checkpoint target id"),
-    checkpointGeneration: requireText(
-      value.checkpointGeneration,
-      "Recovery checkpoint generation",
+    acceptedRecoveryBinding: requireText(
+      value.acceptedRecoveryBinding,
+      "Accepted recovery binding",
+    ),
+    checkpointBinding: requireText(
+      value.checkpointBinding,
+      "Recovery checkpoint binding",
     ),
   });
 }

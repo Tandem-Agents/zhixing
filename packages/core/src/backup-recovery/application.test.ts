@@ -1039,11 +1039,13 @@ describe("BackupRecoveryDisasterLifecycleApplicationService", () => {
 
 function fixture() {
   const context = {
-    homeId: "home-1",
-    anchorEpoch: 7,
-    trustHeadDigest: "trust-7",
     recoveryRootPublicKey: "root-public",
     recoveryBackupPublicKey: "backup-public",
+  };
+  const binding = {
+    checkpointTargetId: "target-1",
+    acceptedRecoveryBinding: "accepted-binding-1",
+    checkpointBinding: "checkpoint-binding-1",
   };
   const identity = {
     rootKeyId: "root-key",
@@ -1060,9 +1062,9 @@ function fixture() {
       targetId: "target-1",
       upToLsn: 11,
     })),
-    readContext: vi.fn(async () => context),
     decodeCurrentPackage: vi.fn(() => ({ package: "secret-root", identity })),
-    bindingDigest: vi.fn((input: unknown) => `generation:${JSON.stringify(input)}`),
+    prepareAcceptedBinding: vi.fn(async () => ({ context, binding })),
+    verifyAcceptedBinding: vi.fn(async () => context),
     forceCheckpoint: vi.fn(async (requestId: string) => ({
       checkpoint: `checkpoint:${requestId}`,
       checkpointId: `id:${requestId}`,
@@ -1080,12 +1082,13 @@ function fixture() {
     application: new BackupRecoveryCurrentRemovalApplicationService(mechanism),
     mechanism,
     context,
+    binding,
     identity,
   };
 }
 
 describe("BackupRecoveryCurrentRemovalApplicationService", () => {
-  it("owns package/root/generation binding and both checkpoint permissions", async () => {
+  it("owns package/root binding and both checkpoint permissions", async () => {
     const f = fixture();
     const status = await f.application.readiness();
     expect(Object.isFrozen(status)).toBe(true);
@@ -1109,11 +1112,13 @@ describe("BackupRecoveryCurrentRemovalApplicationService", () => {
       requestId: "operation:final",
       minimumUpToLsn: 40,
     })).resolves.toBe("verified:checkpoint:operation:final");
-    expect(f.mechanism.bindingDigest).toHaveBeenCalledWith({
-      homeId: "home-1",
-      anchorEpoch: 7,
-      trustHeadDigest: "trust-7",
-      targetId: "target-1",
+    expect(f.mechanism.prepareAcceptedBinding).toHaveBeenCalledWith({
+      checkpointTargetId: "target-1",
+      rootKeyId: "root-key",
+      recipientKeyId: "backup-key",
+    });
+    expect(f.mechanism.verifyAcceptedBinding).toHaveBeenCalledWith({
+      binding: f.binding,
       rootKeyId: "root-key",
       recipientKeyId: "backup-key",
     });
@@ -1133,13 +1138,20 @@ describe("BackupRecoveryCurrentRemovalApplicationService", () => {
     await expect(root.application.prepareBegin({ recoveryPackage: "package" }))
       .rejects.toThrow("does not bind the current home recovery root");
 
-    const generation = fixture();
-    const permit = await generation.application.prepareBegin({ recoveryPackage: "package" });
-    generation.mechanism.readContext.mockResolvedValue({
-      ...generation.context,
-      homeId: "foreign-home",
+    const target = fixture();
+    target.mechanism.prepareAcceptedBinding.mockResolvedValue({
+      context: target.context,
+      binding: { ...target.binding, checkpointTargetId: "foreign-target" },
     });
-    await expect(generation.application.prepareConfirm({
+    await expect(target.application.prepareBegin({ recoveryPackage: "package" }))
+      .rejects.toThrow("does not match the configured target");
+
+    const changed = fixture();
+    const permit = await changed.application.prepareBegin({ recoveryPackage: "package" });
+    changed.mechanism.verifyAcceptedBinding.mockRejectedValue(
+      new Error("Recovery package changes the accepted uninstall generation"),
+    );
+    await expect(changed.application.prepareConfirm({
       recoveryPackage: "package",
       binding: permit.binding,
     })).rejects.toThrow("changes the accepted uninstall generation");

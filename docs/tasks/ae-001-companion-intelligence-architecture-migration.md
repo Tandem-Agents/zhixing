@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-17 Schedule lifecycle topology generation 边界已通过协调者独立验收，等待提交<br>
+> 当前检查点：A6-18 已通过协调者独立验收，等待提交<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `dab790e0`；A6-16 Delivery topology fence 边界收口已提交 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；Schedule 生命周期 topology generation 子证据已恢复待复核 |
-| 活跃工作包 | `A6-17-schedule-lifecycle-topology-generation-boundary-v1` 已通过协调者独立验收，等待提交 |
-| 下一责任链 | 独立验收 A6-17 后，处理 Backup/Device 当前移除链的同根泄漏，再重做 A6 退出审计 |
+| 已接受基线 | `31a4581b`；A6-17 Schedule lifecycle topology generation 边界收口已提交 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；Backup/Device 当前设备移除链的物理 epoch 泄漏已收口待复核 |
+| 活跃工作包 | `A6-18-current-device-removal-topology-fence-boundary-v1` 已通过协调者独立验收，等待提交 |
+| 下一责任链 | 独立验收 A6-18 后重新执行 A6 退出 exact-set 冷启动审计；无其他反证才关闭 A6 |
 | 打开的单向桥 | 无；P06 Rubric 已恢复为 required `readByDigest/put` 有限端口，P07、P09、P11 及 P12 三类 staging 的既有有限 Infrastructure 接管继续有效 |
-| 已失效证据 | `A6-15-replaceable-edges-topology-final-exit-audit-v1` 的 E05 与 A6 聚合结论仍失效；Delivery 子证据已接受，Schedule 子证据已恢复待复核，Backup/Device 交界仍待收口 |
+| 已失效证据 | `A6-15-replaceable-edges-topology-final-exit-audit-v1` 的 E05 与 A6 聚合结论仍失效；Delivery、Schedule 子证据已恢复并接受，Backup/Device 子证据已恢复待复核 |
 | 阻塞/用户决策 | 无用户决策阻塞；完整 distributed-runtime structure 测试仍被既有 A4-10 `runtime-host` 依赖断言阻断，属于 A7 零残留与终验输入 |
 
 ### A0 基线索引
@@ -2934,6 +2934,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 行为、证据与门禁：Authority rebind 后的 conversation generation 通知顺序、Scheduler accepted-work exact-set、`immediate/drain/cancel` settle、admission close/resume、manual surface resume、job/assignment recovery、entry-last 与 cleanup contribution 均未改变。Core Schedule application 13/13，CLI Host generation lifecycle 5/5，共 2 文件 18/18；直接覆盖 same-generation recovery、换代 stop/release/install 顺序、accepted-work 由新实例继续承载、replacement create/identity/initialize 三类失败补偿与最终精确释放。core、CLI `tsc --noEmit`、core build 与 `pnpm cli:build`、fresh runtime package exports、canonical S7 57/57 与 registry golden、changed-source Biome 和 `git diff --check` 均通过。S7 反向 mutation 可拒绝领域 epoch 回流、Host 跳过 generation compare、release 后未清空旧实例、生产 root 绕过 Host lifecycle 或使用常量/领域 getter决定换代。
 - 失效、状态与下一检查点：若 Schedule lifecycle application/port、accepted-work/settle/recovery 合同、`AnchorSchedulerRuntime` generation 快照、Host slot 的比较/stop/release/create/install 顺序、installed-authority post-install consumer、startup cleanup contribution、S7 mutation 或上述直接测试任一变化，只恢复本证据及 A6-15 E05 的 Schedule 子结论；A5 Schedule 产品事实、Job/Assignment 持久格式、Delivery 和其他 A6 边缘不因此失效。A6 与完成度继续 `[ ]`/`6/8`，当前只等待协调者独立复核；接受后下一责任链仍是 Backup/Device current-removal 同根泄漏，再重做 A6 退出审计。本轮未进入该责任链或 A7，也未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：沿 Schedule lifecycle port、应用 mechanism identity、CLI `AnchorSchedulerHostLifecycle`、installed-authority post-install consumer 和 cleanup contribution 双向核对，确认领域合同与实现中的 Anchor/epoch 为零，Host 以冻结 concrete runtime generation 唯一决定同代重驱或异代替换。独立取得 Core Schedule 13/13、CLI Host generation lifecycle 5/5、canonical S7 57/57、registry golden 与 `git diff --check` 通过；same-generation、stop/release/create/install、错误 generation、create/initialize 失败和最终释放均有可识别反例。接受 `A6-17-schedule-lifecycle-topology-generation-boundary-v1`；A6 继续 `[ ]`，下一责任链只处理 Backup/Device current-removal 的同根泄漏。
+
+### A6-18：当前设备移除 recovery topology fence 边界收口
+
+- 基线与唯一结果：以已接受 `HEAD 31a4581b02495809e5ad6e5961635f8635bad3e0` 加协调者调度记录为基线，形成待复核证据 `A6-18-current-device-removal-topology-fence-boundary-v1`。`BackupRecoveryCurrentRemovalContext/Binding` 与 `DeviceAdministrationCurrentRemovalRecoveryLifecycleOperation` 已删除 `homeId/anchorEpoch/trustHeadDigest`；Backup & Recovery 领域只校验恢复包/root public identity、已配置 checkpoint target、checkpoint read-back/final LSN，并持有 `acceptedRecoveryBinding/checkpointBinding` 两个不可解释的有限 opaque binding。Device Administration 领域只按该 binding 推进 accept/phase/retirement/terminal，不读取、解析或比较 Anchor、epoch 或 trust-head；两个领域生产 source 与 fresh declaration 中相关拓扑词均为零。
+- Correctness、Host 与旧记录兼容：`DeviceAdministrationCurrentRemovalRecoveryBindingPort` 是物理 current-Authority facts 与领域 opaque binding 的唯一映射处；Host 唯一读取当前 `homeId/anchorEpoch/trustHeadDigest` 及 recovery public keys，Correctness 以 `AnchorUninstallAcceptedRecoveryBinding` 冻结接受代际，并继续按原 `AnchorUninstallCheckpointGeneration` 输入精确生成 checkpoint binding。恢复 lifecycle 在 accept 前校验 current Authority fence，仍把原 `homeId/currentDeviceId/anchorEpoch/trustHeadDigest/checkpointTargetId/checkpointGeneration` 写成完全相同的 v1 `anchor-uninstall` record；`state/active/advance/commitRetirement/terminal` 从该旧 record 机械恢复 opaque binding，因此冷启动、响应丢失和同 operation 重驱不依赖进程内缓存，也没有改 schema/version、Authority retirement transaction 或公开 Server uninstall lifecycle。
+- 直接证据与门禁：Core Backup Recovery/Device Administration 2 文件 54/54、CLI current-device-removal Correctness 1 文件 4/4、Server uninstall lifecycle 1 文件 6/6，合计 4 文件 64/64；直接覆盖 package/root/target 校验、accepted binding 漂移、v1 record bytes 映射、错误 epoch/root/target fail closed、全阶段恢复及新 Correctness 实例重启重建。Core build 与 typecheck、Server typecheck、CLI typecheck 与 `pnpm cli:build`、fresh runtime package exports、changed-source Biome 均通过；canonical S7 为 57/57 且 registry golden 通过。S7 反向 mutation可拒绝 epoch/Anchor 重回任一领域 source、旧 checkpoint generation 映射错误、v1 restore 旁路、Host current-fence 校验遗漏或出现第二 binding 组合处。
+- 失效、状态与下一检查点：若 Backup current-removal context/binding/package 校验、Device current-removal recovery operation、Correctness binding digest/current fence/v1 restore、Host trust/epoch/public-key 投影、device lifecycle v1 codec、retirement transaction、Server uninstall lifecycle、S7 mutation 或上述直接测试任一变化，只恢复本证据及 A6-15 E05 的 Backup/Device 子结论；A5 Backup & Recovery/Device Administration 产品 owner、既有 record schema、Delivery、Schedule 和其他 A6 边缘不因此失效。A6 与完成度继续 `[ ]`/`6/8`，当前只等待协调者独立复核；接受后只能重新执行 A6 退出 exact-set 冷启动审计，无其他反证才关闭 A6，不得进入 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：沿 Backup Recovery binding、Device Administration lifecycle、Correctness v1 record 映射、Host current-Authority 投影和重启恢复双向核对，确认两个领域应用源中 Anchor/epoch 为零；不透明 accepted/checkpoint binding 只由 Correctness 生成和验证，原 `homeId/currentDeviceId/anchorEpoch/trustHeadDigest/checkpointTargetId/checkpointGeneration` 仍按相同 v1 record 写入并从 journal 冷恢复。独立取得 Core Backup/Device 54/54、CLI current-removal Correctness 4/4、canonical S7 57/57、registry golden 与 `git diff --check` 通过；当前代际变化、root/target/package 错配和冷启动重驱均 fail closed。接受 `A6-18-current-device-removal-topology-fence-boundary-v1`；A6 继续 `[ ]`，下一步必须重新冷启动执行完整退出审计。
 
 ## 十、用户提示词
 

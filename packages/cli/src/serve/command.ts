@@ -77,6 +77,7 @@ import {
 import {
   createDeviceAdministrationCurrentRemovalMechanismPort,
   createDeviceAdministrationCurrentRemovalMigrationLifecyclePort,
+  createDeviceAdministrationCurrentRemovalRecoveryBindingPort,
   createDeviceAdministrationCurrentRemovalRecoveryLifecyclePort,
 } from "@zhixing/core/device-administration/correctness";
 import {
@@ -1958,10 +1959,15 @@ async function runServerProcess(
         readAuthority: readCurrentRemovalAuthority,
       })
     : undefined;
+  const currentRemovalRecoveryBinding = currentRemovalJournal && readCurrentRemovalAuthority
+    ? createDeviceAdministrationCurrentRemovalRecoveryBindingPort()
+    : undefined;
   const currentRemovalRecoveryLifecycle = currentRemovalJournal && readCurrentRemovalAuthority
+      && currentRemovalRecoveryBinding
     ? createDeviceAdministrationCurrentRemovalRecoveryLifecyclePort({
         journal: currentRemovalJournal,
         readAuthority: readCurrentRemovalAuthority,
+        binding: currentRemovalRecoveryBinding,
         commitRetirement: ({ identity, acceptedWork }) =>
           commitCurrentDeviceRetirementTransaction({
             log: lifecycleAuthorityLog,
@@ -1991,7 +1997,31 @@ async function runServerProcess(
         },
       })
     : undefined;
-  const currentRemovalRecoveryApplication = currentRemovalRecoveryLifecycle
+  const readCurrentRemovalRecoveryBindingContext = currentRemovalRecoveryBinding
+    ? async () => {
+        const trust = await bootstrap.mesh.bootstrapStore.loadTrustRecord();
+        if (
+          !trust ||
+          !trust.recoveryRootPublicKey ||
+          !trust.recoveryBackupPublicKey
+        ) {
+          throw new Error("Current home recovery root is unavailable");
+        }
+        return Object.freeze({
+          authority: Object.freeze({
+            homeId: trust.homeId,
+            anchorEpoch: ctx.authorityRuntime!.anchorEpoch,
+            trustHeadDigest: trust.chainHead.eventDigest,
+          }),
+          context: Object.freeze({
+            recoveryRootPublicKey: trust.recoveryRootPublicKey,
+            recoveryBackupPublicKey: trust.recoveryBackupPublicKey,
+          }),
+        });
+      }
+    : undefined;
+  const currentRemovalRecoveryApplication = currentRemovalRecoveryLifecycle &&
+      currentRemovalRecoveryBinding && readCurrentRemovalRecoveryBindingContext
     ? new DeviceAdministrationCurrentRemovalRecoveryApplicationService<
         DeviceLifecycleEvidenceRef
       >({
@@ -2003,23 +2033,6 @@ async function runServerProcess(
                 state: "not-configured" as const,
                 fullBackupReady: false,
               }),
-          readContext: async () => {
-            const trust = await bootstrap.mesh.bootstrapStore.loadTrustRecord();
-            if (
-              !trust ||
-              !trust.recoveryRootPublicKey ||
-              !trust.recoveryBackupPublicKey
-            ) {
-              throw new Error("Current home recovery root is unavailable");
-            }
-            return Object.freeze({
-              homeId: trust.homeId,
-              anchorEpoch: ctx.authorityRuntime!.anchorEpoch,
-              trustHeadDigest: trust.chainHead.eventDigest,
-              recoveryRootPublicKey: trust.recoveryRootPublicKey,
-              recoveryBackupPublicKey: trust.recoveryBackupPublicKey,
-            });
-          },
           decodeCurrentPackage: (value: string) => {
             const decoded = requireCurrentRecoveryPackage(decodeRecoveryPackage(value));
             return Object.freeze({
@@ -2027,8 +2040,28 @@ async function runServerProcess(
               identity: Object.freeze(decoded.root.publicIdentity()),
             });
           },
-          bindingDigest: (input) =>
-            protocolDigest("AnchorUninstallCheckpointGeneration", 1, input),
+          prepareAcceptedBinding: async (input) => {
+            const current = await readCurrentRemovalRecoveryBindingContext();
+            return Object.freeze({
+              context: current.context,
+              binding: currentRemovalRecoveryBinding.create({
+                authority: current.authority,
+                checkpointTargetId: input.checkpointTargetId,
+                rootKeyId: input.rootKeyId,
+                recipientKeyId: input.recipientKeyId,
+              }),
+            });
+          },
+          verifyAcceptedBinding: async (input) => {
+            const current = await readCurrentRemovalRecoveryBindingContext();
+            currentRemovalRecoveryBinding.assertCurrent({
+              authority: current.authority,
+              binding: input.binding,
+              rootKeyId: input.rootKeyId,
+              recipientKeyId: input.recipientKeyId,
+            });
+            return current.context;
+          },
           forceCheckpoint: async (requestId: string) => {
             const checkpoint = await ctx.authorityCheckpointOwner!.force(requestId);
             return Object.freeze({

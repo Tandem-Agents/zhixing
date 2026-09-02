@@ -520,11 +520,9 @@ function recoveryOperation(phase:
     requestId: "request:recovery",
     operationId: "operation:recovery",
     binding: {
-      homeId: "home",
-      anchorEpoch: 1,
-      trustHeadDigest: "trust",
       checkpointTargetId: "target",
-      checkpointGeneration: "generation",
+      acceptedRecoveryBinding: "accepted-binding",
+      checkpointBinding: "checkpoint-binding",
     },
     phase,
   };
@@ -916,7 +914,7 @@ describe("DeviceAdministrationApplicationService", () => {
     await expect(f.application.execute({
       kind: "cancel-current-device-removal",
       operationId: "uninstall-unknown",
-    })).rejects.toThrow("Anchor uninstall operation is unknown");
+    })).rejects.toThrow("Current device removal operation is unknown");
 
     for (const [path, phase, message] of [
       ["migration", "aborted", "Lifecycle aborted conflicts with replay"],

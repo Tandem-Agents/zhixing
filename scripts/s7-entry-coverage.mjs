@@ -4725,7 +4725,7 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !application.includes("assertCurrentRemovalCancellationEligible(lifecycle);") ||
     !application.includes("const lifecycle = await port.read({ operationId });") ||
     !application.includes("return projectCurrentRemovalState(await port.abort({ operationId }));") ||
-    !application.includes('throw new Error("Anchor uninstall operation is unknown")') ||
+    !application.includes('throw new Error("Current device removal operation is unknown")') ||
     !application.includes('throw new TypeError("Irreversible lifecycle operation cannot be aborted")') ||
     !application.includes("context.currentDutyDeviceId !== context.localDeviceId") ||
     !application.includes("context.currentDutyIssuerKeyId !== context.localIssuerKeyId") ||
@@ -4741,6 +4741,14 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !application.includes('rotationHint: record.rotationHint ?? "Rotate this external account credential"')
   ) {
     failures.push("Device Administration Query/Product API exact-set drifted");
+  }
+  if (
+    application.includes("anchorEpoch") ||
+    /\bAnchor\b/u.test(application) ||
+    backupRecovery.includes("anchorEpoch") ||
+    /\bAnchor\b/u.test(backupRecovery)
+  ) {
+    failures.push("Backup/Recovery or Device domain regained a physical topology fence");
   }
   if (
     applicationOwners.length !== 1 ||
@@ -4816,10 +4824,13 @@ export function inspectDeviceAdministrationReadOwnership(records) {
   if (
     !backupRecovery.includes("class BackupRecoveryCurrentRemovalApplicationService") ||
     !backupRecovery.includes("decodeCurrentPackage(value: string)") ||
-    !backupRecovery.includes("bindingDigest(input:") ||
+    !backupRecovery.includes("prepareAcceptedBinding(input:") ||
+    !backupRecovery.includes("verifyAcceptedBinding(input:") ||
+    !backupRecovery.includes("acceptedRecoveryBinding: string") ||
+    !backupRecovery.includes("checkpointBinding: string") ||
     !backupRecovery.includes("verifyCheckpoint(input:") ||
     !backupRecovery.includes("minimumUpToLsn?: number") ||
-    !backupRecovery.includes("Recovery package changes the accepted uninstall generation") ||
+    !correctness.includes("Recovery package changes the accepted uninstall generation") ||
     !backupNarrow ||
     backupNarrow.types !== "./dist/backup-recovery/application.d.ts" ||
     backupNarrow.import !== "./dist/backup-recovery/application.js" ||
@@ -4840,6 +4851,12 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     correctness.includes("decodeRecoveryPackage") ||
     correctness.includes("checkpointOwner") ||
     !correctness.includes("createDeviceAdministrationCurrentRemovalRecoveryLifecyclePort") ||
+    !correctness.includes("createDeviceAdministrationCurrentRemovalRecoveryBindingPort") ||
+    !correctness.includes('protocolDigest("AnchorUninstallCheckpointGeneration", 1, {') ||
+    !correctness.includes('protocolDigest("AnchorUninstallAcceptedRecoveryBinding", 1, {') ||
+    !correctness.includes("options.binding.assertAuthorityCurrent({ authority, binding: input.binding })") ||
+    !correctness.includes("checkpointGeneration: input.binding.checkpointBinding") ||
+    !correctness.includes("binding: binding.restore(operation.identity)") ||
     !retirementTransaction.includes("decideCurrentDeviceRetirementCredentialExposures({") ||
     !retirementTransaction.includes("assertDeviceAdministrationRetirementAuthority({") ||
     retirementTransaction.includes("Rotate this external account credential") ||
@@ -4851,6 +4868,16 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !application.includes('if (operation.phase === "final-checkpoint-verified")')
   ) {
     failures.push("Backup/Recovery and Device Administration recovery ownership drifted");
+  }
+  if (
+    !composition.includes("createDeviceAdministrationCurrentRemovalRecoveryBindingPort()") ||
+    !composition.includes("binding: currentRemovalRecoveryBinding") ||
+    !composition.includes("prepareAcceptedBinding: async (input) =>") ||
+    !composition.includes("verifyAcceptedBinding: async (input) =>") ||
+    !composition.includes("currentRemovalRecoveryBinding.assertCurrent({") ||
+    !composition.includes("anchorEpoch: ctx.authorityRuntime!.anchorEpoch")
+  ) {
+    failures.push("Current-removal physical recovery binding is not uniquely Host-composed");
   }
   if (
     correctness.includes("AnchorUninstallPublicState") ||

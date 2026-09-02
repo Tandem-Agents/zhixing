@@ -3923,6 +3923,50 @@ test("Device Administration reads, paired/current removal and duty migration hav
   );
   assert.match(
     inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/core/src/backup-recovery/application.ts",
+      (text) => `${text}\ntype LeakedRecoveryFence = { readonly anchorEpoch: number };`,
+    )).join("\n"),
+    /domain regained a physical topology fence/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/core/src/device-administration/application.ts",
+      (text) => `${text}\ntype LeakedRemovalFence = { readonly anchorEpoch: number };`,
+    )).join("\n"),
+    /domain regained a physical topology fence/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/core/src/device-administration/correctness.ts",
+      (text) => text.replace(
+        "checkpointGeneration: input.binding.checkpointBinding",
+        "checkpointGeneration: input.binding.acceptedRecoveryBinding",
+      ),
+    )).join("\n"),
+    /recovery ownership drifted/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/core/src/device-administration/correctness.ts",
+      (text) => text.replace(
+        "binding: binding.restore(operation.identity)",
+        "binding: operation.identity",
+      ),
+    )).join("\n"),
+    /recovery ownership drifted/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "currentRemovalRecoveryBinding.assertCurrent({",
+        "void currentRemovalRecoveryBinding; acceptChangedRecoveryBinding({",
+      ),
+    )).join("\n"),
+    /physical recovery binding is not uniquely Host-composed/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
       "packages/cli/src/serve/current-device-retirement-transaction.ts",
       (text) => text.replace("decideCurrentDeviceRetirementCredentialExposures({", "legacyExposureDecision({"),
     )).join("\n"),

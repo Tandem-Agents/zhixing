@@ -23,6 +23,7 @@ import {
   createSignedDeviceLifecycleAbort,
   protocolDigest,
   validateDeviceLifecycleRecord,
+  type AnchorUninstallLifecycleIdentity,
   type DeviceLifecycleEvidenceRef,
 } from "@zhixing/core/protocol";
 import {
@@ -32,6 +33,7 @@ import {
 import {
   createDeviceAdministrationCurrentRemovalMechanismPort,
   createDeviceAdministrationCurrentRemovalMigrationLifecyclePort,
+  createDeviceAdministrationCurrentRemovalRecoveryBindingPort,
   createDeviceAdministrationCurrentRemovalRecoveryLifecyclePort,
 } from "@zhixing/core/device-administration/correctness";
 import { BackupRecoveryCurrentRemovalApplicationService } from "@zhixing/core/backup-recovery/application";
@@ -42,6 +44,72 @@ import {
 } from "./current-device-retirement-transaction.js";
 
 describe("current device removal correctness adapters", { timeout: 30_000 }, () => {
+  it("keeps physical authority generations inside one opaque binding adapter and restores v1 records", () => {
+    const port = createDeviceAdministrationCurrentRemovalRecoveryBindingPort();
+    const authority = {
+      homeId: "home-binding",
+      anchorEpoch: 4,
+      trustHeadDigest: `sha256:${"a".repeat(64)}`,
+    };
+    const binding = port.create({
+      authority,
+      checkpointTargetId: "target-binding",
+      rootKeyId: "root-binding",
+      recipientKeyId: "recipient-binding",
+    });
+    expect(Object.keys(binding).sort()).toEqual([
+      "acceptedRecoveryBinding",
+      "checkpointBinding",
+      "checkpointTargetId",
+    ]);
+    expect(binding.checkpointBinding).toBe(protocolDigest(
+      "AnchorUninstallCheckpointGeneration",
+      1,
+      {
+        homeId: authority.homeId,
+        anchorEpoch: authority.anchorEpoch,
+        trustHeadDigest: authority.trustHeadDigest,
+        targetId: "target-binding",
+        rootKeyId: "root-binding",
+        recipientKeyId: "recipient-binding",
+      },
+    ));
+    const persisted: AnchorUninstallLifecycleIdentity = {
+      v: 1,
+      kind: "anchor-uninstall",
+      requestId: "request-binding",
+      operationId: "operation-binding",
+      homeId: authority.homeId,
+      currentDeviceId: "device-binding",
+      anchorEpoch: authority.anchorEpoch,
+      trustHeadDigest: authority.trustHeadDigest,
+      path: {
+        kind: "recovery-backup",
+        checkpointTargetId: binding.checkpointTargetId,
+        checkpointGeneration: binding.checkpointBinding,
+      },
+    };
+    expect(port.restore(persisted)).toEqual(binding);
+    expect(() => port.assertCurrent({
+      authority: { ...authority, anchorEpoch: authority.anchorEpoch + 1 },
+      binding,
+      rootKeyId: "root-binding",
+      recipientKeyId: "recipient-binding",
+    })).toThrow("changes the accepted uninstall generation");
+    expect(() => port.assertCurrent({
+      authority,
+      binding,
+      rootKeyId: "foreign-root",
+      recipientKeyId: "recipient-binding",
+    })).toThrow("changes the accepted uninstall generation");
+    expect(() => port.assertCurrent({
+      authority,
+      binding: { ...binding, checkpointTargetId: "foreign-target" },
+      rootKeyId: "root-binding",
+      recipientKeyId: "recipient-binding",
+    })).toThrow("changes the accepted uninstall generation");
+  });
+
   it("uses the preselected migration target identity and only reports terminal after transfer verification and local retirement", async () => {
     const fixture = await createFixture();
     const closeAdmission = vi.fn(async () => undefined);
@@ -300,29 +368,53 @@ describe("current device removal correctness adapters", { timeout: 30_000 }, () 
     const onRetired = vi.fn(async () => undefined);
     const correctness = createCurrentDeviceRemovalCorrectness(fixture);
     const { journal } = correctness;
-    const backup = new BackupRecoveryCurrentRemovalApplicationService({
-      hasCheckpointOwner: () => true,
-      readStatus: () => checkpointOwner.status(),
-      readContext: async () => {
-        const current = await fixture.store.loadTrustRecord();
-        if (!current?.recoveryRootPublicKey || !current.recoveryBackupPublicKey) {
-          throw new Error("expected current recovery root");
-        }
-        return {
+    const readBindingContext = async () => {
+      const current = await fixture.store.loadTrustRecord();
+      if (!current?.recoveryRootPublicKey || !current.recoveryBackupPublicKey) {
+        throw new Error("expected current recovery root");
+      }
+      return {
+        authority: {
           homeId: current.homeId,
           anchorEpoch: 1,
           trustHeadDigest: current.chainHead.eventDigest,
+        },
+        context: {
           recoveryRootPublicKey: current.recoveryRootPublicKey,
           recoveryBackupPublicKey: current.recoveryBackupPublicKey,
-        };
-      },
+        },
+      };
+    };
+    const backup = new BackupRecoveryCurrentRemovalApplicationService({
+      hasCheckpointOwner: () => true,
+      readStatus: () => checkpointOwner.status(),
       decodeCurrentPackage: (value: string) => {
         const decoded = decodeRecoveryPackage(value);
         if (decoded.version !== 2) throw new Error("expected current recovery package");
         return { package: decoded.root, identity: decoded.root.publicIdentity() };
       },
-      bindingDigest: (input) =>
-        protocolDigest("AnchorUninstallCheckpointGeneration", 1, input),
+      prepareAcceptedBinding: async (input) => {
+        const current = await readBindingContext();
+        return {
+          context: current.context,
+          binding: correctness.recoveryBinding.create({
+            authority: current.authority,
+            checkpointTargetId: input.checkpointTargetId,
+            rootKeyId: input.rootKeyId,
+            recipientKeyId: input.recipientKeyId,
+          }),
+        };
+      },
+      verifyAcceptedBinding: async (input) => {
+        const current = await readBindingContext();
+        correctness.recoveryBinding.assertCurrent({
+          authority: current.authority,
+          binding: input.binding,
+          rootKeyId: input.rootKeyId,
+          recipientKeyId: input.recipientKeyId,
+        });
+        return current.context;
+      },
       forceCheckpoint: async (requestId: string) => {
         const checkpoint = await checkpointOwner.force(requestId);
         return {
@@ -442,6 +534,23 @@ describe("current device removal correctness adapters", { timeout: 30_000 }, () 
       path: "recovery-backup",
       phase: "checkpoint-verified",
     });
+    const accepted = await journal.state("uninstall-backup");
+    expect(accepted?.identity).toMatchObject({
+      kind: "anchor-uninstall",
+      anchorEpoch: 1,
+      path: {
+        kind: "recovery-backup",
+        checkpointTargetId: "backup-device:independent",
+        checkpointGeneration: expect.any(String),
+      },
+    });
+    const restarted = createCurrentDeviceRemovalCorrectness(fixture);
+    const restored = await restarted.recoveryLifecycle.state("uninstall-backup");
+    expect(Object.keys(restored!.binding).sort()).toEqual([
+      "acceptedRecoveryBinding",
+      "checkpointBinding",
+      "checkpointTargetId",
+    ]);
     await expect(recovery.begin({
       requestId: "request-backup",
       operationId: "uninstall-backup",
@@ -600,8 +709,10 @@ function createCurrentDeviceRemovalCorrectness(
         .some((operation) => operation.identity.kind === "executor-removal"),
     });
   };
+  const recoveryBinding = createDeviceAdministrationCurrentRemovalRecoveryBindingPort();
   return Object.freeze({
     journal,
+    recoveryBinding,
     migrationLifecycle: createDeviceAdministrationCurrentRemovalMigrationLifecyclePort({
       journal,
       readAuthority,
@@ -609,6 +720,7 @@ function createCurrentDeviceRemovalCorrectness(
     recoveryLifecycle: createDeviceAdministrationCurrentRemovalRecoveryLifecyclePort({
       journal,
       readAuthority,
+      binding: recoveryBinding,
       commitRetirement: ({ identity, acceptedWork }) =>
         commitCurrentDeviceRetirementTransaction({
           log: fixture.store.authorityLog(),

@@ -1243,7 +1243,7 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
     const operationId = requireStableText(command.operationId, "Uninstall operation id");
     const port = this.#currentDeviceRemoval();
     const lifecycle = await port.read({ operationId });
-    if (!lifecycle) throw new Error("Anchor uninstall operation is unknown");
+    if (!lifecycle) throw new Error("Current device removal operation is unknown");
     assertCurrentRemovalCancellationEligible(lifecycle);
     return projectCurrentRemovalState(await port.abort({ operationId }));
   }
@@ -1609,25 +1609,23 @@ function assertCurrentRemovalRecoveryOperation(
       throw new TypeError("Current removal recovery lifecycle phase is invalid");
   }
   const binding = operation.binding;
-  if (!Number.isSafeInteger(binding.anchorEpoch) || binding.anchorEpoch < 0) {
-    throw new TypeError("Current removal recovery anchor epoch is invalid");
-  }
   return Object.freeze({
     kind: "current-device-removal",
     path: "recovery-backup",
     requestId: requireStableText(operation.requestId, "Uninstall request id"),
     operationId: requireStableText(operation.operationId, "Uninstall operation id"),
     binding: Object.freeze({
-      homeId: requireStableText(binding.homeId, "Recovery home id"),
-      anchorEpoch: binding.anchorEpoch,
-      trustHeadDigest: requireStableText(binding.trustHeadDigest, "Recovery trust head"),
       checkpointTargetId: requireStableText(
         binding.checkpointTargetId,
         "Recovery checkpoint target id",
       ),
-      checkpointGeneration: requireStableText(
-        binding.checkpointGeneration,
-        "Recovery checkpoint generation",
+      acceptedRecoveryBinding: requireStableText(
+        binding.acceptedRecoveryBinding,
+        "Accepted recovery binding",
+      ),
+      checkpointBinding: requireStableText(
+        binding.checkpointBinding,
+        "Recovery checkpoint binding",
       ),
     }),
     phase: operation.phase,

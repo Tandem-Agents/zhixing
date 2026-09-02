@@ -1,4 +1,8 @@
 import type {
+  BackupRecoveryCurrentRemovalBinding,
+} from "../backup-recovery/application.js";
+import { protocolDigest } from "../protocol/index.js";
+import type {
   AnchorUninstallLifecycleIdentity,
   DeviceLifecycleAbort,
   DeviceLifecycleEvidenceRef,
@@ -18,16 +22,85 @@ import type {
   DeviceAdministrationCurrentRemovalRecoveryLifecyclePort,
 } from "./application.js";
 
-export interface DeviceAdministrationCurrentRemovalAuthorityFacts {
+export interface DeviceAdministrationCurrentRemovalAuthorityBindingFacts {
   readonly homeId: string;
+  readonly anchorEpoch: number;
+  readonly trustHeadDigest: string;
+}
+
+export interface DeviceAdministrationCurrentRemovalAuthorityFacts
+  extends DeviceAdministrationCurrentRemovalAuthorityBindingFacts {
   readonly localDeviceId: string;
   readonly currentDutyDeviceId: string;
   readonly localIssuerKeyId: string;
   readonly currentDutyIssuerKeyId: string;
   readonly currentDeviceName?: string;
-  readonly anchorEpoch: number;
-  readonly trustHeadDigest: string;
   readonly executorRemovalInProgress: boolean;
+}
+
+/** Physical current-Authority fence mapped to the opaque binding consumed by both domains. */
+export interface DeviceAdministrationCurrentRemovalRecoveryBindingPort {
+  create(input: {
+    readonly authority: DeviceAdministrationCurrentRemovalAuthorityBindingFacts;
+    readonly checkpointTargetId: string;
+    readonly rootKeyId: string;
+    readonly recipientKeyId: string;
+  }): BackupRecoveryCurrentRemovalBinding;
+  assertCurrent(input: {
+    readonly authority: DeviceAdministrationCurrentRemovalAuthorityBindingFacts;
+    readonly binding: BackupRecoveryCurrentRemovalBinding;
+    readonly rootKeyId: string;
+    readonly recipientKeyId: string;
+  }): void;
+  assertAuthorityCurrent(input: {
+    readonly authority: DeviceAdministrationCurrentRemovalAuthorityBindingFacts;
+    readonly binding: BackupRecoveryCurrentRemovalBinding;
+  }): void;
+  restore(identity: AnchorUninstallLifecycleIdentity): BackupRecoveryCurrentRemovalBinding;
+}
+
+export function createDeviceAdministrationCurrentRemovalRecoveryBindingPort():
+  DeviceAdministrationCurrentRemovalRecoveryBindingPort {
+  const port: DeviceAdministrationCurrentRemovalRecoveryBindingPort = {
+    create: (input) => recoveryBinding({
+      authority: input.authority,
+      checkpointTargetId: input.checkpointTargetId,
+      rootKeyId: input.rootKeyId,
+      recipientKeyId: input.recipientKeyId,
+    }),
+    assertCurrent: (input) => {
+      const expected = recoveryBinding({
+        authority: input.authority,
+        checkpointTargetId: input.binding.checkpointTargetId,
+        rootKeyId: input.rootKeyId,
+        recipientKeyId: input.recipientKeyId,
+      });
+      if (
+        expected.acceptedRecoveryBinding !== input.binding.acceptedRecoveryBinding ||
+        expected.checkpointBinding !== input.binding.checkpointBinding
+      ) {
+        throw new Error("Recovery package changes the accepted uninstall generation");
+      }
+    },
+    assertAuthorityCurrent: (input) => {
+      const authority = input.authority;
+      if (
+        currentAuthorityBinding(authority) !== input.binding.acceptedRecoveryBinding
+      ) {
+        throw new Error("Recovery package changes the accepted uninstall generation");
+      }
+    },
+    restore: (identity) => Object.freeze({
+      checkpointTargetId: identity.path.kind === "recovery-backup"
+        ? identity.path.checkpointTargetId
+        : invalidRecoveryPath(),
+      acceptedRecoveryBinding: currentAuthorityBinding(identity),
+      checkpointBinding: identity.path.kind === "recovery-backup"
+        ? identity.path.checkpointGeneration
+        : invalidRecoveryPath(),
+    }),
+  };
+  return Object.freeze(port);
 }
 
 export interface DeviceAdministrationCurrentRemovalJournalPort {
@@ -98,6 +171,7 @@ export function createDeviceAdministrationCurrentRemovalMigrationLifecyclePort(o
 export function createDeviceAdministrationCurrentRemovalRecoveryLifecyclePort(options: {
   readonly journal: DeviceAdministrationCurrentRemovalJournalPort;
   readonly readAuthority: () => Promise<DeviceAdministrationCurrentRemovalAuthorityFacts>;
+  readonly binding: DeviceAdministrationCurrentRemovalRecoveryBindingPort;
   readonly commitRetirement: (input: {
     readonly identity: AnchorUninstallLifecycleIdentity;
     readonly acceptedWork: DeviceLifecycleEvidenceRef;
@@ -124,13 +198,7 @@ export function createDeviceAdministrationCurrentRemovalRecoveryLifecyclePort(op
       if (authority.executorRemovalInProgress) {
         throw new Error("Finish the current device removal before uninstalling this device");
       }
-      if (
-        input.binding.homeId !== authority.homeId ||
-        input.binding.anchorEpoch !== authority.anchorEpoch ||
-        input.binding.trustHeadDigest !== authority.trustHeadDigest
-      ) {
-        throw new Error("Recovery package changes the accepted uninstall generation");
-      }
+      options.binding.assertAuthorityCurrent({ authority, binding: input.binding });
       return recoveryOperation(await options.journal.accept(Object.freeze({
         v: 1,
         kind: "anchor-uninstall",
@@ -143,43 +211,49 @@ export function createDeviceAdministrationCurrentRemovalRecoveryLifecyclePort(op
         path: Object.freeze({
           kind: "recovery-backup" as const,
           checkpointTargetId: input.binding.checkpointTargetId,
-          checkpointGeneration: input.binding.checkpointGeneration,
+          checkpointGeneration: input.binding.checkpointBinding,
         }),
-      })));
+      })), options.binding);
     },
     state: async (operationId) => {
       const operation = await options.journal.state(operationId);
       return operation && isRecoveryOperation(operation)
-        ? recoveryOperation(operation)
+        ? recoveryOperation(operation, options.binding)
         : undefined;
     },
     active: async () => Object.freeze((await options.journal.active())
       .filter(isRecoveryOperation)
-      .map(recoveryOperation)),
-    advance: async (input) => recoveryOperation(await options.journal.advance(
-      (await requireRecoveryOperation(options.journal, input.operationId)).identity.operationId,
-      input.phase,
-      input.evidence,
-    )),
+      .map((operation) => recoveryOperation(operation, options.binding))),
+    advance: async (input) => recoveryOperation(
+      await options.journal.advance(
+        (await requireRecoveryOperation(options.journal, input.operationId)).identity.operationId,
+        input.phase,
+        input.evidence,
+      ),
+      options.binding,
+    ),
     commitRetirement: async (input) => {
       const operation = await requireRecoveryOperation(options.journal, input.operationId);
       await options.commitRetirement({
         identity: operation.identity,
         acceptedWork: input.acceptedWork,
       });
-      return recoveryOperation(await requireRecoveryOperation(
-        options.journal,
-        input.operationId,
-      ));
+      return recoveryOperation(
+        await requireRecoveryOperation(options.journal, input.operationId),
+        options.binding,
+      );
     },
     phaseLsn: options.phaseLsn,
     terminal: async (operationId) => {
       const operation = await requireRecoveryOperation(options.journal, operationId);
-      return recoveryOperation(await options.journal.terminal(
-        operation.identity.operationId,
-        "retired",
-        operation.evidence,
-      ));
+      return recoveryOperation(
+        await options.journal.terminal(
+          operation.identity.operationId,
+          "retired",
+          operation.evidence,
+        ),
+        options.binding,
+      );
     },
   };
   return Object.freeze(port);
@@ -241,6 +315,44 @@ function assertCurrentAuthority(
     throw new Error("Only the current duty device can uninstall itself");
   }
   return facts;
+}
+
+function recoveryBinding(input: {
+  readonly authority: Pick<
+    DeviceAdministrationCurrentRemovalAuthorityFacts,
+    "homeId" | "anchorEpoch" | "trustHeadDigest"
+  >;
+  readonly checkpointTargetId: string;
+  readonly rootKeyId: string;
+  readonly recipientKeyId: string;
+}): BackupRecoveryCurrentRemovalBinding {
+  return Object.freeze({
+    checkpointTargetId: input.checkpointTargetId,
+    acceptedRecoveryBinding: currentAuthorityBinding(input.authority),
+    checkpointBinding: protocolDigest("AnchorUninstallCheckpointGeneration", 1, {
+      homeId: input.authority.homeId,
+      anchorEpoch: input.authority.anchorEpoch,
+      trustHeadDigest: input.authority.trustHeadDigest,
+      targetId: input.checkpointTargetId,
+      rootKeyId: input.rootKeyId,
+      recipientKeyId: input.recipientKeyId,
+    }),
+  });
+}
+
+function currentAuthorityBinding(authority: Pick<
+  DeviceAdministrationCurrentRemovalAuthorityFacts,
+  "homeId" | "anchorEpoch" | "trustHeadDigest"
+>): string {
+  return protocolDigest("AnchorUninstallAcceptedRecoveryBinding", 1, {
+    homeId: authority.homeId,
+    anchorEpoch: authority.anchorEpoch,
+    trustHeadDigest: authority.trustHeadDigest,
+  });
+}
+
+function invalidRecoveryPath(): never {
+  throw new TypeError("Anchor recovery binding requires a recovery-backup operation");
 }
 
 function isMigrationOperation(operation: DeviceLifecycleOperation): boolean {
@@ -330,6 +442,7 @@ function migrationPhase(
 
 function recoveryOperation(
   operation: DeviceLifecycleOperation,
+  binding: DeviceAdministrationCurrentRemovalRecoveryBindingPort,
 ): DeviceAdministrationCurrentRemovalRecoveryLifecycleOperation {
   if (!isRecoveryOperation(operation) || operation.identity.path.kind !== "recovery-backup") {
     throw new TypeError("Anchor recovery lifecycle requires a recovery-backup operation");
@@ -339,13 +452,7 @@ function recoveryOperation(
     path: "recovery-backup",
     requestId: operation.identity.requestId,
     operationId: operation.identity.operationId,
-    binding: Object.freeze({
-      homeId: operation.identity.homeId,
-      anchorEpoch: operation.identity.anchorEpoch,
-      trustHeadDigest: operation.identity.trustHeadDigest,
-      checkpointTargetId: operation.identity.path.checkpointTargetId,
-      checkpointGeneration: operation.identity.path.checkpointGeneration,
-    }),
+    binding: binding.restore(operation.identity),
     phase: recoveryPhase(operation.phase),
   });
 }
