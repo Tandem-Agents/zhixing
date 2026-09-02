@@ -692,7 +692,16 @@ function renderBackupStatus(context: BackupContext, status: BackupRecoveryAdmini
       context.writeLine("恢复备份：尚无可恢复副本。下一步：重新运行 zz backup setup。");
       return;
     case "unavailable":
-      context.writeLine("恢复备份：尚无可恢复副本。下一步：重新运行 zz backup setup。");
+      switch (status.nextAction) {
+        case "repair-backup-configuration":
+          context.writeLine("恢复备份：配置需要修复。下一步：重新运行 zz backup setup。");
+          return;
+        case "restore-backup-connection":
+          context.writeLine("恢复备份：连接暂不可用。下一步：恢复连接后重试。");
+          return;
+        case "check-backup-target":
+          context.writeLine("恢复备份：目标暂不可用。下一步：检查备份目标后重试。");
+      }
   }
 }
 

@@ -204,6 +204,28 @@ describe("registerInfoCommands", () => {
     expect(text).not.toMatch(/root|LSN|digest/iu);
   });
 
+  it.each([
+    ["repair-backup-configuration", "配置需要修复", "zz backup setup"],
+    ["restore-backup-connection", "连接暂不可用", "恢复连接后重试"],
+    ["check-backup-target", "目标暂不可用", "检查备份目标后重试"],
+  ] as const)("/status 为不可用原因呈现唯一产品行动 %s", async (
+    nextAction,
+    stateText,
+    actionText,
+  ) => {
+    const h = setup();
+    (h.management.serverInfo as any).mockResolvedValueOnce({
+      recoveryBackup: { state: "unavailable", fullBackupReady: false, nextAction },
+    } as never);
+
+    await h.dispatcher.dispatch("/status", RUNTIME);
+
+    const text = stripAnsi(h.writer.text());
+    expect(text).toContain(`恢复备份: ${stateText}`);
+    expect(text).toContain(actionText);
+    expect(text).not.toMatch(/mesh|runtime|anchor|executor/iu);
+  });
+
   it("/stop 经选择服务发出停止请求", async () => {
     const choose = vi.fn(async () => ({ kind: "selected", value: "stop" as const }));
     const requestExit = vi.fn();

@@ -373,7 +373,7 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
             .join("\n    ")}`
         : "";
     const recoveryBackupLine = hostInfo?.recoveryBackup
-      ? `\n  ${chalk.dim("恢复备份:")} ${formatRecoveryBackupState(hostInfo.recoveryBackup.state)}`
+      ? `\n  ${chalk.dim("恢复备份:")} ${formatRecoveryBackupState(hostInfo.recoveryBackup)}`
       : "";
     writer.line(
       `\n  ${chalk.dim("Session:")} ${current.name}${modeText}` +
@@ -543,10 +543,16 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
   });
 }
 
-function formatRecoveryBackupState(
-  state: "not-configured" | "pending-verification" | "recoverable",
-): string {
-  if (state === "recoverable") return "可恢复";
-  if (state === "pending-verification") return "待验证（运行 zz backup verify）";
-  return "未配置（运行 zz backup setup）";
+function formatRecoveryBackupState(status: NonNullable<ServerInfoResult["recoveryBackup"]>): string {
+  if (status.state === "recoverable") return "可恢复";
+  if (status.state === "pending-verification") return "待验证（运行 zz backup verify）";
+  if (status.state === "not-configured") return "未配置（运行 zz backup setup）";
+  switch (status.nextAction) {
+    case "repair-backup-configuration":
+      return "配置需要修复（重新运行 zz backup setup）";
+    case "restore-backup-connection":
+      return "连接暂不可用（恢复连接后重试）";
+    case "check-backup-target":
+      return "目标暂不可用（检查备份目标后重试）";
+  }
 }

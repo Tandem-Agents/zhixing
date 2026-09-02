@@ -1897,6 +1897,8 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     "packages/cli/src/serve/backup-target-config-infrastructure.ts",
     "packages/cli/src/maintenance/doctor.ts",
     "packages/cli/src/index.ts",
+    "packages/cli/src/commands/info-commands.ts",
+    "packages/cli/src/runtime/rpc-management-facade.ts",
     "packages/core/src/backup-recovery/application.ts",
     "packages/core/src/index.ts",
     "packages/core/package.json",
@@ -1935,6 +1937,7 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     "packages/mesh/src/checkpoint-target.ts",
     "packages/mesh/src/checkpoint-owner.ts",
     "packages/mesh/src/paired-checkpoint-target.ts",
+    "packages/server/src/context.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -2048,6 +2051,36 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
       ),
     )).join("\n"),
     /one Backup & Recovery application owner/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/core/src/backup-recovery/application.ts",
+      (text) => text.replaceAll(
+        '"restore-backup-connection"',
+        '"start-authenticated-mesh"',
+      ),
+    )).join("\n"),
+    /public unavailable actions must stay exact and topology-neutral/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/server/src/context.ts",
+      (text) => text.replace(
+        "recoveryBackupStatus?: () => Promise<BackupRecoveryPublicStatus>;",
+        "recoveryBackupStatus?: () => Promise<{ readonly state: string; readonly nextAction?: string }>;",
+      ),
+    )).join("\n"),
+    /public unavailable actions must stay exact and topology-neutral/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/commands/info-commands.ts",
+      (text) => text.replace(
+        'case "restore-backup-connection":',
+        'case "check-backup-target":',
+      ),
+    )).join("\n"),
+    /public unavailable actions must stay exact and topology-neutral/,
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(

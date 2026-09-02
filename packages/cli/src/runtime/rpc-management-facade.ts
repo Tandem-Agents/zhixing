@@ -10,6 +10,7 @@
 import type {
   ChannelStatus,
 } from "@zhixing/core";
+import type { BackupRecoveryPublicStatus } from "@zhixing/core/backup-recovery/application";
 import type { TrustAdministrationRule } from "@zhixing/core/trust-administration";
 import {
   RPC_ERROR_CODES,
@@ -57,9 +58,7 @@ export interface ServerInfoResult {
   memoryRssBytes: number;
   workspace?: string | null;
   logPath?: string;
-  recoveryBackup?: {
-    state: "not-configured" | "pending-verification" | "recoverable";
-  };
+  recoveryBackup?: BackupRecoveryPublicStatus;
   channels?: ChannelStatus[];
   accessSurfaces?: ServerAccessSurfaces;
   activeWork?: ServerActiveWork;

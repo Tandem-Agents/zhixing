@@ -62,7 +62,7 @@ export type BackupRecoveryPublicStatus =
       readonly fullBackupReady: boolean;
       readonly nextAction:
         | "repair-backup-configuration"
-        | "start-authenticated-mesh"
+        | "restore-backup-connection"
         | "check-backup-target";
     };
 
@@ -97,11 +97,7 @@ export function projectBackupRecoveryPublicStatus(
       return Object.freeze({
         state: "unavailable",
         fullBackupReady: status.fullBackupReady,
-        nextAction: status.code === "configuration-invalid"
-          ? "repair-backup-configuration"
-          : status.code === "runtime-unavailable"
-            ? "start-authenticated-mesh"
-            : "check-backup-target",
+        nextAction: projectUnavailableBackupAction(status.code),
       });
     case "not-configured":
       return Object.freeze({
@@ -109,6 +105,21 @@ export function projectBackupRecoveryPublicStatus(
         fullBackupReady: false,
         nextAction: "run-backup-setup",
       });
+  }
+}
+
+function projectUnavailableBackupAction(
+  code: BackupRecoveryPublicStatusSource["code"],
+): Extract<BackupRecoveryPublicStatus, { readonly state: "unavailable" }>["nextAction"] {
+  switch (code) {
+    case "configuration-invalid":
+      return "repair-backup-configuration";
+    case "runtime-unavailable":
+      return "restore-backup-connection";
+    case "target-unavailable":
+      return "check-backup-target";
+    default:
+      throw new TypeError("Backup recovery unavailable reason is invalid");
   }
 }
 

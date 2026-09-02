@@ -9283,6 +9283,9 @@ export function inspectRecoveryBackupAssembly(records) {
   const doctor = byPath.get("packages/cli/src/maintenance/doctor.ts");
   const cliIndex = byPath.get("packages/cli/src/index.ts");
   const backupApplication = byPath.get("packages/core/src/backup-recovery/application.ts");
+  const serverContext = byPath.get("packages/server/src/context.ts");
+  const managementFacade = byPath.get("packages/cli/src/runtime/rpc-management-facade.ts");
+  const infoCommands = byPath.get("packages/cli/src/commands/info-commands.ts");
   const coreIndex = byPath.get("packages/core/src/index.ts");
   const coreManifestText = byPath.get("packages/core/package.json");
   const coreBuild = byPath.get("packages/core/tsup.config.ts");
@@ -9336,7 +9339,8 @@ export function inspectRecoveryBackupAssembly(records) {
   const pairedTarget = byPath.get("packages/mesh/src/paired-checkpoint-target.ts");
   if (
     !command || !owner || !backup || !backupTargetContract || !backupTargetInfrastructure ||
-    !doctor || !cliIndex || !backupApplication || !coreIndex || !coreManifestText || !coreBuild ||
+    !doctor || !cliIndex || !backupApplication || !serverContext || !managementFacade ||
+    !infoCommands || !coreIndex || !coreManifestText || !coreBuild ||
     !bootstrapStore || !bootstrap || !topology || !applicationHost || !rootEstablishment ||
     !rootActivation || !pairedIncomingInfrastructure || !pairedCheckpointTarget ||
     !pairedCheckpointTargetInfrastructure || !publishedCheckpointTarget ||
@@ -9471,6 +9475,34 @@ export function inspectRecoveryBackupAssembly(records) {
     owner.includes("projectRecoveryBackupStatus")
   ) {
     failures.push("backup setup, verify and status must have one Backup & Recovery application owner");
+  }
+  if (
+    count(backupApplication, '"restore-backup-connection"') !== 2 ||
+    !backupApplication.includes('case "configuration-invalid":') ||
+    !backupApplication.includes('return "repair-backup-configuration"') ||
+    !backupApplication.includes('case "runtime-unavailable":') ||
+    !backupApplication.includes('return "restore-backup-connection"') ||
+    !backupApplication.includes('case "target-unavailable":') ||
+    !backupApplication.includes('return "check-backup-target"') ||
+    !backupApplication.includes("Backup recovery unavailable reason is invalid") ||
+    !serverContext.includes(
+      'import type { BackupRecoveryPublicStatus } from "@zhixing/core/backup-recovery/application"',
+    ) ||
+    !serverContext.includes(
+      "recoveryBackupStatus?: () => Promise<BackupRecoveryPublicStatus>;",
+    ) ||
+    serverContext.includes("nextAction?: string") ||
+    !managementFacade.includes(
+      'import type { BackupRecoveryPublicStatus } from "@zhixing/core/backup-recovery/application"',
+    ) ||
+    !managementFacade.includes("recoveryBackup?: BackupRecoveryPublicStatus;") ||
+    !infoCommands.includes('case "restore-backup-connection":') ||
+    !backup.includes('case "restore-backup-connection":') ||
+    records.some(({ text }) => text.includes("start-authenticated-mesh"))
+  ) {
+    failures.push(
+      "backup recovery public unavailable actions must stay exact and topology-neutral",
+    );
   }
   const disasterAdmissionOwners = records.filter(({ text }) =>
     text.includes("class BackupRecoveryDisasterAdmissionApplicationService"));

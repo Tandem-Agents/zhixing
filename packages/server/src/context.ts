@@ -12,6 +12,7 @@ import type {
   DeliveryStatusNotice,
 } from "@zhixing/core";
 import type { ProductApiDispatcher } from "@zhixing/core/product-api";
+import type { BackupRecoveryPublicStatus } from "@zhixing/core/backup-recovery/application";
 import type {
   ConversationStatusNotice,
   ExecutionStatusNotice,
@@ -192,11 +193,7 @@ export interface ServerContext {
   /** 公开的本机运行状态；只允许稳定产品语言和有限动作。 */
   managedHostPublicStatus?: () => ManagedHostPublicStatus | Promise<ManagedHostPublicStatus>;
   /** 用户级恢复备份状态；不暴露 root、日志水位或摘要。 */
-  recoveryBackupStatus?: () => Promise<{
-    state: "not-configured" | "pending-verification" | "recoverable" | "unavailable";
-    fullBackupReady: boolean;
-    nextAction?: string;
-  }>;
+  recoveryBackupStatus?: () => Promise<BackupRecoveryPublicStatus>;
   /**
    * MCP 连接状态快照(server.info 扩展字段,/mcp 状态显示的数据面)。
    * 结构与 MCP hub 的 serverStatuses 兼容(server 不依赖 mcp 包,结构形声明)。

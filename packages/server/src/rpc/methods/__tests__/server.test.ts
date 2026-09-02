@@ -939,11 +939,21 @@ describe("server.info", () => {
 
   it("只投影用户级恢复备份状态", async () => {
     const ctx = mkCtx({
-      recoveryBackupStatus: async () => ({ state: "recoverable", fullBackupReady: true }),
+      recoveryBackupStatus: async () => ({
+        state: "unavailable",
+        fullBackupReady: true,
+        nextAction: "restore-backup-connection",
+      }),
     });
     const result = await buildServerInfoMethod().handler({}, ctx) as any;
-    expect(result.recoveryBackup).toEqual({ state: "recoverable", fullBackupReady: true });
-    expect(JSON.stringify(result.recoveryBackup)).not.toMatch(/root|lsn|digest/iu);
+    expect(result.recoveryBackup).toEqual({
+      state: "unavailable",
+      fullBackupReady: true,
+      nextAction: "restore-backup-connection",
+    });
+    expect(JSON.stringify(result.recoveryBackup)).not.toMatch(
+      /root|lsn|digest|mesh|runtime|anchor|executor/iu,
+    );
   });
 
   it("hands first-party status history over to one live projection per connection", async () => {

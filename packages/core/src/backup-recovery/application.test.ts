@@ -191,7 +191,7 @@ describe("BackupRecoveryAdministrationApplicationService", () => {
       {
         state: "unavailable",
         fullBackupReady: true,
-        nextAction: "start-authenticated-mesh",
+        nextAction: "restore-backup-connection",
       },
     ],
   ])("projects durable status %o to its product next action", async (status, expected) => {
@@ -223,7 +223,7 @@ describe("BackupRecoveryAdministrationApplicationService", () => {
     });
     for (const [code, nextAction] of [
       ["configuration-invalid", "repair-backup-configuration"],
-      ["runtime-unavailable", "start-authenticated-mesh"],
+      ["runtime-unavailable", "restore-backup-connection"],
       ["target-unavailable", "check-backup-target"],
     ] as const) {
       expect(projectBackupRecoveryPublicStatus({
@@ -232,6 +232,10 @@ describe("BackupRecoveryAdministrationApplicationService", () => {
         code,
       })).toEqual({ state: "unavailable", fullBackupReady: true, nextAction });
     }
+    expect(() => projectBackupRecoveryPublicStatus({
+      state: "unavailable",
+      fullBackupReady: false,
+    })).toThrowError("Backup recovery unavailable reason is invalid");
   });
 
   it("reports an absent configuration and rejects broken current/candidate bindings", async () => {
