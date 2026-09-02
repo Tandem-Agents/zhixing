@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-12 P06 Rubric 存储边界已通过协调者独立验收，等待提交；两条独立拓扑透明残余待后续收口<br>
+> 当前检查点：A6-13 Conversation 显式继续语义拓扑透明收口已通过协调者独立验收，等待提交；Backup & Recovery 独立残余仍未处理<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `dceef07d`；A6-11c 已提交，P12 三类 staging 边界均已闭合 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-12 冷启动审计已发现两条独立拓扑透明残余，A6 保持未完成 |
-| 活跃工作包 | `A6-12-replaceable-edges-topology-exact-set-audit-v1` 已停在可构建、单一存储责任成立的安全交接点，等待协调者复核 |
-| 下一责任链 | 先以独立工作包移除 Conversation Surface/wire 对 `anchor/local-only` 物理拓扑的判断并保留既有显式继续语义；随后另包把 Backup & Recovery 的 `start-authenticated-mesh` 产品行动改由拓扑中性的领域语义表达；两项均闭合后重新执行 A6 退出审计，不得直接进入 A7 |
-| 打开的单向桥 | 无已登记单向桥；P07、P09、P11 及 P12 三类 staging 的既有有限 Infrastructure 接管继续有效。本轮另将 Advancement Rubric 的 P06 CAS 需求收窄为 required `readByDigest/put` 端口；其恢复证据随本工作区等待复核 |
-| 已失效证据 | A6 聚合退出证据尚未形成。已接受 `A6-06d` 对 P06 需求侧无 File concrete 的结论被 Rubric 生产链反证，本工作区已作候选恢复；A6-01～06c、A6-07a～11c 的各自局部 owner/机制证据继续有效，但 A6-07a 与既有 Conversation、Backup & Recovery 证据不得再被外推为“领域和 Surface 已完全拓扑透明” |
+| 已接受基线 | `074c889e`；A6-12 的 P06 Rubric 存储边界修复与审计安全交接已提交 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；Conversation 拓扑透明候选已形成，A6 仍因 Backup & Recovery 独立残余保持未完成 |
+| 活跃工作包 | `A6-13-conversation-continuation-topology-transparency-v1` 已完成，等待协调者独立复核 |
+| 下一责任链 | A6-13 闭合后，另包把 Backup & Recovery 的 `start-authenticated-mesh` 产品行动改由拓扑中性的领域语义表达；随后重新执行 A6 退出审计，不得直接进入 A7 |
+| 打开的单向桥 | 无；P06 Rubric 已恢复为 required `readByDigest/put` 有限端口，P07、P09、P11 及 P12 三类 staging 的既有有限 Infrastructure 接管继续有效 |
+| 已失效证据 | A6 聚合退出证据尚未形成；Conversation E05 子证据已形成待复核恢复，Backup & Recovery 的 `start-authenticated-mesh` 产品行动仍使拓扑透明结论失效；其余 A6 局部 owner/机制证据继续有效 |
 | 阻塞/用户决策 | 无用户决策阻塞；两个残余均可由 AE-001 唯一裁决，但属于相互独立的责任链，按工作包止损规则不得在 A6-12 合并实施 |
 
 ### A0 基线索引
@@ -2885,6 +2885,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 验证与边界：初次候选虽取得`pnpm build`和`pnpm runtime:package-exports`成功，却未检出`Object.freeze`对象字面量的两个隐式`any`，因此不能据此声称严格类型闭包成立；协调反证后以显式`AdvancementRubricArtifactPort`局部变量恢复上下文类型，未改端口、未使用`any`/断言或放宽配置。本次纠正后`@zhixing/core`与`@zhixing/cli`的`tsc --noEmit`均通过；从`packages/cli`直达运行Rubric测试2文件5/5，canonical `pnpm s7:lint` 57/57且registry golden通过，改动源码的最窄Biome检查与`git diff --check`通过。定向S7 mutation 1/1仍是未失效的前序直接证据；按纠正边界没有重跑build/exports，也没有运行根级test/lint、package check、制品验收或针对已确认静态反证的无价值产品全测；没有进入A7或新增能力。
 - 失效、状态与唯一下一步：若 Rubric artifact端口exact-set、唯一CLI投影/同CAS实例、required注入或S7 mutation变化，只恢复E03及相交的A6-06d；若Conversation availability/local continuation、RPC参数、Backup Recovery status/nextAction或其生产Surface变化，只恢复E05。A6继续`[ ]`、完成度保持`6/8`。下一包先收口Conversation对物理`local-only`的产品/Surface分支并保持现有显式继续行为；Backup Recovery的Mesh命名行动须另包收口。两条均完成后重新执行A6退出审计，不能直接开始A7。本轮未执行Git暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：逐项审阅有限端口、唯一 CAS 投影、Rubric 生产消费者与 S7 反向 mutation，确认 Advancement/Controller 不再取得 `FileArtifactStore`、Authority concrete 或物理引用查找能力，唯一 CLI Infrastructure 投影仍复用同一 CAS 且 required 注入。首次独立 CLI 类型检查准确反证 `Object.freeze` 对象字面量的两个隐式 `any`，退回原包后改为显式局部端口类型；协调者再次取得 CLI typecheck、Rubric 两文件 5/5、canonical S7 57/57、registry golden 与 `git diff --check` 全部通过。接受 A6-12 的 E03 修复和审计安全交接；E05 两条独立反证保持打开，A6 不得关闭。
+
+### A6-13：Conversation 显式继续语义拓扑透明收口
+
+- 基线与唯一结果：以已接受 `HEAD 074c889e055cd6a62a2c9ab226fd56bf0a1d1aa6` 加协调者调度记录为基线，形成待复核证据 `A6-13-conversation-continuation-topology-transparency-v1`。Conversation 领域的 availability 现只表达 `complete/limited` 能力集合、是否需要继续确认和有限不可用能力；RPC wire 复用该领域类型并以 `acceptLimitedCapabilities: true` 承载一次明确用户决定。`anchor/local-only`、`#localOnly/#localContinuation`、`continueLocally`、`OfflineContinuationDeclinedError` 及相应 Surface 物理部署文案从本责任链生产 source/declaration 归零；Host topology adapter 仍可按真实部署机制选择本机或远端 owner，但只向产品面投影能力后果。
+- 生产链、行为与失败边界：local directory 唯一发布受限能力及三项当前后果；REPL 向用户逐项呈现后果并显式确认，拒绝时不创建、恢复或修改会话。facade 只在受限能力已确认后，把同一 consent fact 附到 `send/rename/delete/abort/new/clear/compact/taskListUpdate/resume` 九项变更；相同后果的连接重放保持同参数，不同后果重新要求确认，完整能力或省略 availability 不弹确认且不发送该字段。local RPC 对九项入口以严格布尔 `true` fail closed，查询/订阅不加无关 gate；`compact` 的旧漏检已收口。现有 Conversation Authority/current-owner/Mesh 路由、创建/恢复/变更、重放、通知、错误类别和持久格式未改，能力受限的公开失败文案改为产品后果，不再暴露值班设备或本机拓扑。
+- 直接证据、门禁与已知基线差异：Core Conversation 应用 38/38；CLI controller/facade/local RPC 三文件 70/70，facade 在后续加入“能力后果变化须重新确认”和“确认 fact 随响应丢失原样重放”后单独复取 17/17。`@zhixing/core`、`@zhixing/rpc`、`@zhixing/server`、`@zhixing/cli` 的 `tsc --noEmit` 均通过，core→rpc→CLI 依赖顺序构建通过；canonical S7 57/57 与 registry golden、runtime package exports、changed-source Biome、`git diff --check` 均通过，索引为空且工作区只有协调者台账与 A6-13 文件。S7 新增反向 mutation 可拒绝物理 availability/consent 回流、Host 投影伪装完整能力、九入口漏 gate、facade 漏携 consent 和 controller 恢复拓扑判断；structure golden 的 `SessionListResult` 与新增 consent 条目已按同一 TypeScript scanner 机械重取，定向 2/2 对账通过。完整 `distributed-runtime-structure.test.ts` 首次执行在到达 golden 前被进场基线既有 A4-10 残余阻断：测试仍期望 `@zhixing/runtime-host` 依赖已删除的 `@zhixing/mcp/@zhixing/tools-builtin`，该失败不由本包输入产生，本包未跨域修改其断言或其余 golden。
+- 失效、状态与下一检查点：若 Conversation availability、不可用能力 producer、继续确认/拒绝 Surface、九项变更 wire/gate、current-owner 路由、session wire/declaration、S7 或上述直接测试任一变化，只恢复本证据及真实相交的 A0/A5/A6 证据；A6-07a 的 dispatch/mechanism owner 未因本包失效。Conversation E05 子证据现恢复为待协调者复核，但 Backup & Recovery 的 `start-authenticated-mesh` 产品行动仍是独立反证，A6 与完成度继续 `[ ]`/`6/8`，下一检查点只能另包收口该行动后再执行 A6 退出审计，不得进入 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：从 Conversation availability producer、Core 应用、session wire、Facade 九项变更、初始选择确认、REPL 文案和 local RPC fail-closed gate 双向核对，确认产品合同只表达 `complete/limited` 能力后果和一次明确同意，生产链不再按 Anchor、本机/远端、Executor 或 Mesh 决定产品行为；旧 `continueLocally` 与本机模式状态归零。独立取得 Core 38/38、CLI 三文件 70/70、四个受影响包类型检查、canonical S7 57/57、registry golden 与 `git diff --check` 通过；完整能力不误确认，受限能力的拒绝、后果变化、九入口携带和响应丢失重放均有直接证据。接受 `A6-13-conversation-continuation-topology-transparency-v1`；已知 A4-10 结构测试残余保留给 A7，Backup & Recovery E05 反证仍打开，A6 继续 `[ ]`。
 
 ## 十、用户提示词
 

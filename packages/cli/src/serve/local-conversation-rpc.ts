@@ -122,7 +122,7 @@ export class LocalConversationRpcRouter
       if (error instanceof RpcAppError) throw error;
       throw new RpcAppError(
         RPC_ERROR_CODES.INTERNAL_ERROR,
-        "这次本机操作没有完成，请稍后重试；重新连接后会继续处理已保存的内容。",
+        "这次操作没有完成，请稍后重试；已保存的内容不会丢失。",
       );
     }
   }
@@ -289,11 +289,11 @@ export class LocalConversationRpcRouter
       case "session.list":
         return this.#list();
       case "session.new": {
-        requireLocalConsent(params);
+        requireContinuationConsent(params);
         return (await this.#application.create()) satisfies SessionNewResult;
       }
       case "session.resume": {
-        requireLocalConsent(params);
+        requireContinuationConsent(params);
         const conversationId = this.#conversationId(params, method);
         const alreadySubscribed =
           this.#observers.get(conversationId)?.has(connection.id) ?? false;
@@ -348,7 +348,7 @@ export class LocalConversationRpcRouter
       case "session.send":
         return this.#send(params, connection);
       case "session.abort": {
-        requireLocalConsent(params);
+        requireContinuationConsent(params);
         const conversationId = this.#conversationId(params, method);
         const requestId = requiredIdentifier(params.requestId, "取消请求");
         try {
@@ -389,7 +389,7 @@ export class LocalConversationRpcRouter
         }
       }
       case "session.rename": {
-        requireLocalConsent(params);
+        requireContinuationConsent(params);
         const conversationId = this.#conversationId(params, method);
         if (typeof params.name !== "string") {
           throw RpcErrors.invalidParams("对话名称不能为空。");
@@ -414,7 +414,7 @@ export class LocalConversationRpcRouter
         }
       }
       case "session.clear": {
-        requireLocalConsent(params);
+        requireContinuationConsent(params);
         const conversationId = this.#conversationId(params, method);
         try {
           const cleared = await this.#application.clear({
@@ -432,7 +432,7 @@ export class LocalConversationRpcRouter
         }
       }
       case "session.delete": {
-        requireLocalConsent(params);
+        requireContinuationConsent(params);
         const conversationId = this.#conversationId(params, method);
         try {
           await this.#application.delete({
@@ -461,7 +461,7 @@ export class LocalConversationRpcRouter
         }
       }
       case "session.taskListUpdate":
-        requireLocalConsent(params);
+        requireContinuationConsent(params);
         return this.#updateTaskList(params);
       case "session.advancementDetail": {
         const conversationId = this.#conversationId(params, method);
@@ -471,9 +471,10 @@ export class LocalConversationRpcRouter
       case "session.advancementConfirm":
       case "session.advancementRevise":
         throw RpcErrors.busy(
-          "这项确认需要连接值班设备；当前对话已保留，可在重新连接后继续。",
+          "这项确认当前暂不可处理；当前对话已保留，完整能力恢复后可继续。",
         );
       case "session.compact": {
+        requireContinuationConsent(params);
         const conversationId = this.#conversationId(params, method);
         try {
           return await this.#application.compact({
@@ -552,7 +553,7 @@ export class LocalConversationRpcRouter
     params: Record<string, unknown>,
     connection: FirstPartyConnection,
   ) {
-    requireLocalConsent(params);
+    requireContinuationConsent(params);
     const conversationId = this.#conversationId(params, "session.send");
     const turnId = requiredIdentifier(params.turnId, "消息");
     const input = normalizeInput(params);
@@ -636,7 +637,7 @@ export class LocalConversationRpcRouter
       assertLocalConversationIdForDevice(value, this.input.deviceId);
     } catch {
       throw RpcErrors.notFound(
-        "这个对话目前无法在这台电脑修改，请连接值班设备后重试。",
+        "这个对话当前不可修改，请从列表中重新选择或在完整能力恢复后重试。",
       );
     }
     return value;
@@ -703,11 +704,9 @@ function objectParams(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function requireLocalConsent(params: Record<string, unknown>): void {
-  if (params.continueLocally !== true) {
-    throw RpcErrors.invalidParams(
-      "继续前请确认使用这台电脑新建或恢复本机对话。",
-    );
+function requireContinuationConsent(params: Record<string, unknown>): void {
+  if (params.acceptLimitedCapabilities !== true) {
+    throw RpcErrors.invalidParams("继续前请先明确接受当前会话能力限制。");
   }
 }
 
@@ -812,7 +811,7 @@ function mapLocalConversationApplicationError(
   if (!(error instanceof ConversationApplicationError)) return error;
   if (error.code === "not-found") {
     return RpcErrors.notFound(
-      "这台电脑上没有这个对话，请从列表中重新选择。",
+      "当前可用会话中没有这个对话，请从列表中重新选择。",
     );
   }
   if (error.code === "busy") {
@@ -822,7 +821,7 @@ function mapLocalConversationApplicationError(
           error.reason === "context-budget-unavailable") ||
         (operation === "usage" && error.reason === "usage-unavailable") ||
         (operation === "security" && error.reason === "security-unavailable"))
-        ? "这项查看或维护暂不可用；你仍可继续本机对话，重新连接后再试。"
+        ? "这项查看或维护暂不可用；你仍可继续当前对话，完整能力恢复后再试。"
         : operation === "send" && error.reason === "turn-queue-full"
           ? "Conversation has too many pending messages"
           : "这个对话正在处理其他操作，请稍后重试。",

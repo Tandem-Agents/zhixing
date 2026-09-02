@@ -1614,11 +1614,16 @@ test("conversation adoption stays bound to the two production roots and ordered 
     "packages/cli/src/serve/conversation-transfer-mesh.ts",
     "packages/cli/src/serve/first-party-conversation-mesh.ts",
     "packages/cli/src/serve/local-conversation-rpc.ts",
+    "packages/cli/src/serve/local-conversation-directory-application.ts",
     "packages/cli/src/serve/post-adoption-review.ts",
     "packages/cli/src/serve/conversation-resume-binding.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/runtime/rpc-confirmation-broker.ts",
+    "packages/cli/src/runtime/rpc-conversation-facade.ts",
+    "packages/cli/src/runtime/conversation-controller.ts",
     "packages/cli/src/repl.ts",
+    "packages/core/src/conversation/application.ts",
+    "packages/rpc/src/session-wire.ts",
     "packages/rpc/src/confirmation-bridge.ts",
     "packages/server/src/context.ts",
     "packages/server/src/rpc/handlers.ts",
@@ -1731,6 +1736,66 @@ test("conversation adoption stays bound to the two production roots and ordered 
       ),
     )).join("\n"),
     /must share current-owner resolution and canonical local dispatch/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/local-conversation-rpc.ts",
+      (text) => text.replace(
+        /(case "session\.compact": \{)\s*requireContinuationConsent\(params\);/u,
+        "$1",
+      ),
+    )).join("\n"),
+    /all limited-capability mutations must require one topology-neutral user decision/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/core/src/conversation/application.ts",
+      (text) => text.replace(
+        'capabilitySet: "complete";',
+        'mode: "anchor";',
+      ),
+    )).join("\n"),
+    /Conversation availability must expose only complete\/limited capabilities/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/rpc/src/session-wire.ts",
+      (text) => text.replace(
+        "readonly acceptLimitedCapabilities: true;",
+        "readonly continueLocally: true;",
+      ),
+    )).join("\n"),
+    /session wire must reuse the domain availability and carry one explicit topology-neutral continuation decision/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/local-conversation-directory-application.ts",
+      (text) => text.replace(
+        'capabilitySet: "limited",',
+        'capabilitySet: "complete",',
+      ),
+    )).join("\n"),
+    /Host topology adapter must project finite capability limits/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/runtime/rpc-conversation-facade.ts",
+      (text) => text.replace(
+        "      ...this.#continuationConsent(),",
+        "      // continuation decision omitted",
+      ),
+    )).join("\n"),
+    /Surface client must apply one capability confirmation fact to the nine mutation requests/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/runtime/conversation-controller.ts",
+      (text) => text.replace(
+        "pendingContinuationConfirmation",
+        "requiresLocalContinuation",
+      ),
+    )).join("\n"),
+    /initial selection must confirm explicit capability consequences/,
   );
   assert.match(
     inspectConversationAdoptionAssembly(mutate(

@@ -794,6 +794,13 @@
     },
     {
       "definition": [
+        "readonly acceptLimitedCapabilities: true;"
+      ],
+      "kind": "interface",
+      "name": "SessionContinuationConsent"
+    },
+    {
+      "definition": [
         "conversationId?: string;",
         "sessionId?: string;",
         "requestId?: unknown;"
@@ -853,7 +860,7 @@
     {
       "definition": [
         "conversations: SessionConversationEntry[];",
-        "availability?: | { mode: \"anchor\" } | { mode: \"local-only\"; unavailableCapabilities: readonly string[]; };"
+        "availability?: ConversationAvailability;"
       ],
       "kind": "interface",
       "name": "SessionListResult"

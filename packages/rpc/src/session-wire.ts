@@ -34,7 +34,10 @@ import type {
 import type {
   RuntimeSubAgentUsageEntry,
 } from "@zhixing/owner-kernel/types";
-import type { ConversationSecurityResult } from "@zhixing/core/conversation/application";
+import type {
+  ConversationAvailability,
+  ConversationSecurityResult,
+} from "@zhixing/core/conversation/application";
 import type {
   WorksceneEntryResult,
   WorksceneManagementSummary,
@@ -282,13 +285,13 @@ export interface SessionConversationEntry {
 
 export interface SessionListResult {
   conversations: SessionConversationEntry[];
-  /** 第一方入口当前可用的会话范围；省略等价于完整值班能力。 */
-  availability?:
-    | { mode: "anchor" }
-    | {
-        mode: "local-only";
-        unavailableCapabilities: readonly string[];
-      };
+  /** 第一方入口当前可用的会话能力；省略等价于无需额外确认。 */
+  availability?: ConversationAvailability;
+}
+
+/** 能力受限时，变更请求必须携带的显式用户决定。 */
+export interface SessionContinuationConsent {
+  readonly acceptLimitedCapabilities: true;
 }
 
 export interface SessionRenameResult {
@@ -314,7 +317,7 @@ export interface SessionNewResult {
 }
 
 /**
- * 本机对话被值班设备接管后的用户可见复核摘要。
+ * 会话归属变更后的用户可见复核摘要。
  * 这里只承载产品语言与计数；可执行确认继续复用 confirmation.* 既有链路。
  */
 export type SessionAdoptionReviewResult =

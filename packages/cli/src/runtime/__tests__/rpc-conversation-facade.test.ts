@@ -93,6 +93,42 @@ describe("RpcConversationFacade · 方法域", () => {
     expect(fake.requests[2]).toEqual(fake.requests[0]);
   });
 
+  it("能力受限确认随响应丢失使用完全相同的请求重放", async () => {
+    const fake = makeFakeHostLink();
+    let sendAttempt = 0;
+    fake.setResponder((method) => {
+      if (method === "session.list") {
+        return {
+          conversations: [],
+          availability: {
+            capabilitySet: "limited",
+            continuationConfirmation: "required",
+            unavailableCapabilities: ["排程暂不可用"],
+          },
+        };
+      }
+      sendAttempt += 1;
+      if (sendAttempt === 1) throw new RpcClientClosedError("response lost");
+      return {
+        conversationId: "conv-1",
+        sessionId: "conv-1",
+        turnId: "turn-stable",
+        runId: "run-authority",
+      };
+    });
+    const facade = new RpcConversationFacade(fake.link);
+
+    await facade.list();
+    facade.confirmContinuation();
+    await facade.send("retry safely", "conv-1", "turn-stable");
+
+    expect(fake.requests).toHaveLength(3);
+    expect(fake.requests[1]?.params).toMatchObject({
+      acceptLimitedCapabilities: true,
+    });
+    expect(fake.requests[2]).toEqual(fake.requests[1]);
+  });
+
   it("response loss reconnect reuses the exact durable abort identity", async () => {
     const fake = makeFakeHostLink();
     let attempt = 0;
@@ -162,6 +198,95 @@ describe("RpcConversationFacade · 方法域", () => {
 
     expect(await facade.list()).toEqual([entry]);
     expect(fake.requests[0]?.method).toBe("session.list");
+  });
+
+  it("能力受限投影只在明确接受后为全部变更请求附加稳定决定", async () => {
+    const fake = makeFakeHostLink();
+    let complete = false;
+    let unavailableCapabilities = ["排程暂不可用"];
+    fake.setResponder((method) => {
+      if (method === "session.list") {
+        return {
+          conversations: [],
+          availability: complete
+            ? {
+                capabilitySet: "complete",
+                continuationConfirmation: "not-required",
+              }
+            : {
+                capabilitySet: "limited",
+                continuationConfirmation: "required",
+                unavailableCapabilities,
+              },
+        };
+      }
+      if (method === "session.send") {
+        return {
+          conversationId: "conv-1",
+          sessionId: "conv-1",
+          turnId: "turn-1",
+        };
+      }
+      if (method === "session.rename") {
+        return { conversationId: "conv-1", name: "新名" };
+      }
+      if (method === "session.new") {
+        return { conversationId: "conv-new", name: "新对话" };
+      }
+      if (method === "session.compact") {
+        return { modified: false, tokensBefore: 0, tokensAfter: 0 };
+      }
+      if (method === "session.taskListUpdate") {
+        return { ok: true, message: "ok", taskList: { items: [] } };
+      }
+      if (method === "session.resume") {
+        return {
+          conversationId: "conv-1",
+          name: "默认对话",
+          active: false,
+          busy: false,
+        };
+      }
+      return {};
+    });
+    const facade = new RpcConversationFacade(fake.link);
+
+    await facade.list();
+    expect(facade.pendingContinuationConfirmation()).toEqual([
+      "排程暂不可用",
+    ]);
+    facade.confirmContinuation();
+    expect(facade.pendingContinuationConfirmation()).toBeNull();
+
+    await facade.send("继续", "conv-1", "turn-1");
+    await facade.rename("conv-1", "新名");
+    await facade.delete("conv-1");
+    await facade.abort("conv-1", "abort-1");
+    await facade.newConversation();
+    await facade.clear("conv-1");
+    await facade.compact("conv-1");
+    await facade.taskListUpdate("conv-1", { kind: "add", content: "x" });
+    await facade.resume("conv-1");
+
+    expect(fake.requests.slice(1)).toHaveLength(9);
+    for (const request of fake.requests.slice(1)) {
+      expect(request.params).toMatchObject({ acceptLimitedCapabilities: true });
+    }
+
+    unavailableCapabilities = ["任务推进确认暂不可处理"];
+    await facade.list();
+    expect(facade.pendingContinuationConfirmation()).toEqual(
+      unavailableCapabilities,
+    );
+
+    complete = true;
+    await facade.list();
+    expect(facade.pendingContinuationConfirmation()).toBeNull();
+    await facade.newConversation();
+    expect(fake.requests.at(-1)).toEqual({
+      method: "session.new",
+      params: {},
+    });
   });
 
   it("history 透传 limit / before 游标", async () => {

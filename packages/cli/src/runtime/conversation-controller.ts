@@ -191,10 +191,10 @@ export interface InitialConversationSelection {
   adoptionReview?: SessionAdoptionReviewResult;
 }
 
-export class OfflineContinuationDeclinedError extends Error {
+export class ConversationContinuationDeclinedError extends Error {
   constructor() {
-    super("已取消在这台电脑继续；连接值班设备后可恢复完整能力。");
-    this.name = "OfflineContinuationDeclinedError";
+    super("已取消使用受限会话能力；完整能力恢复后可继续。");
+    this.name = "ConversationContinuationDeclinedError";
   }
 }
 
@@ -239,18 +239,24 @@ export async function selectInitialConversation(
     Partial<
       Pick<
         RpcConversationFacade,
-        "requiresLocalContinuation" | "enableLocalContinuation"
+        "pendingContinuationConfirmation" | "confirmContinuation"
       >
     >,
   options: {
-    readonly confirmLocalContinuation?: () => boolean | Promise<boolean>;
+    readonly confirmContinuation?: (
+      unavailableCapabilities: readonly string[],
+    ) => boolean | Promise<boolean>;
   } = {},
 ): Promise<InitialConversationSelection> {
   const candidates = await conversation.list();
-  if (conversation.requiresLocalContinuation?.()) {
-    const accepted = await options.confirmLocalContinuation?.();
-    if (accepted !== true) throw new OfflineContinuationDeclinedError();
-    conversation.enableLocalContinuation?.();
+  const unavailableCapabilities =
+    conversation.pendingContinuationConfirmation?.() ?? null;
+  if (unavailableCapabilities) {
+    const accepted = await options.confirmContinuation?.(
+      unavailableCapabilities,
+    );
+    if (accepted !== true) throw new ConversationContinuationDeclinedError();
+    conversation.confirmContinuation?.();
   }
   for (const candidate of candidates) {
     if (!isMainConversationId(candidate.conversationId)) continue;

@@ -109,9 +109,13 @@ export interface ConversationDirectoryEntry extends ConversationDirectoryRecord 
 }
 
 export type ConversationAvailability =
-  | Readonly<{ mode: "anchor" }>
   | Readonly<{
-      mode: "local-only";
+      capabilitySet: "complete";
+      continuationConfirmation: "not-required";
+    }>
+  | Readonly<{
+      capabilitySet: "limited";
+      continuationConfirmation: "required";
       unavailableCapabilities: readonly string[];
     }>;
 
@@ -1783,7 +1787,7 @@ export class ConversationDirectoryApplicationService
       case "unavailable":
         throw new ConversationApplicationError(
           "busy",
-          "这项查看或维护暂不可用；你仍可继续本机对话，重新连接后再试。",
+          "这项查看或维护暂不可用；你仍可继续当前对话，完整能力恢复后再试。",
           "compact-unavailable",
         );
       case "done": {
@@ -2558,7 +2562,7 @@ function throwConversationUsageInspectionError(
   }
   throw new ConversationApplicationError(
     "busy",
-    "这项查看或维护暂不可用；你仍可继续本机对话，重新连接后再试。",
+    "这项查看或维护暂不可用；你仍可继续当前对话，完整能力恢复后再试。",
     `${prefix}-unavailable`,
   );
 }
@@ -2599,7 +2603,7 @@ function throwConversationSecurityInspectionError(
   }
   throw new ConversationApplicationError(
     "busy",
-    "这项查看或维护暂不可用；你仍可继续本机对话，重新连接后再试。",
+    "这项查看或维护暂不可用；你仍可继续当前对话，完整能力恢复后再试。",
     "security-unavailable",
   );
 }

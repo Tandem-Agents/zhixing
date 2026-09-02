@@ -13074,11 +13074,16 @@ export function inspectConversationAdoptionAssembly(records) {
     ["packages/cli/src/serve/conversation-transfer-mesh.ts", undefined],
     ["packages/cli/src/serve/first-party-conversation-mesh.ts", undefined],
     ["packages/cli/src/serve/local-conversation-rpc.ts", undefined],
+    ["packages/cli/src/serve/local-conversation-directory-application.ts", undefined],
     ["packages/cli/src/serve/post-adoption-review.ts", undefined],
     ["packages/cli/src/serve/conversation-resume-binding.ts", undefined],
     ["packages/cli/src/serve/command.ts", undefined],
     ["packages/cli/src/runtime/rpc-confirmation-broker.ts", undefined],
+    ["packages/cli/src/runtime/rpc-conversation-facade.ts", undefined],
+    ["packages/cli/src/runtime/conversation-controller.ts", undefined],
     ["packages/cli/src/repl.ts", undefined],
+    ["packages/core/src/conversation/application.ts", undefined],
+    ["packages/rpc/src/session-wire.ts", undefined],
     ["packages/rpc/src/confirmation-bridge.ts", undefined],
     ["packages/server/src/context.ts", undefined],
     ["packages/server/src/rpc/handlers.ts", undefined],
@@ -13223,8 +13228,78 @@ export function inspectConversationAdoptionAssembly(records) {
   }
 
   const router = required.get("packages/cli/src/serve/local-conversation-rpc.ts");
-  if (!/params\.continueLocally\s*!==\s*true/u.test(router.text) || !/assertLocalConversationIdForDevice\s*\(/u.test(router.text)) {
-    failures.push(`${router.relative}: local session writes must require user consent and a local conversation identity`);
+  if (
+    !/params\.acceptLimitedCapabilities\s*!==\s*true/u.test(router.text) ||
+    count(router.text, /requireContinuationConsent\(params\);/gu) !== 9 ||
+    !/assertLocalConversationIdForDevice\s*\(/u.test(router.text) ||
+    /continueLocally|requireLocalConsent/u.test(router.text)
+  ) {
+    failures.push(`${router.relative}: all limited-capability mutations must require one topology-neutral user decision before local identity routing`);
+  }
+  const conversationDomain = required.get(
+    "packages/core/src/conversation/application.ts",
+  );
+  if (
+    !/type\s+ConversationAvailability\s*=\s*[\s\S]*?capabilitySet:\s*"complete";[\s\S]*?continuationConfirmation:\s*"not-required";[\s\S]*?capabilitySet:\s*"limited";[\s\S]*?continuationConfirmation:\s*"required";[\s\S]*?unavailableCapabilities:\s*readonly\s+string\[\]/u.test(
+      conversationDomain.text,
+    ) ||
+    /mode:\s*"(?:anchor|local-only)"|continueLocally/u.test(
+      conversationDomain.text,
+    )
+  ) {
+    failures.push(`${conversationDomain.relative}: Conversation availability must expose only complete/limited capabilities and explicit confirmation semantics`);
+  }
+  const sessionWire = required.get("packages/rpc/src/session-wire.ts");
+  if (
+    !/availability\?:\s*ConversationAvailability;/u.test(sessionWire.text) ||
+    !/interface\s+SessionContinuationConsent\s*\{[\s\S]*?readonly\s+acceptLimitedCapabilities:\s*true;/u.test(
+      sessionWire.text,
+    ) ||
+    /mode:\s*"(?:anchor|local-only)"|continueLocally/u.test(sessionWire.text)
+  ) {
+    failures.push(`${sessionWire.relative}: session wire must reuse the domain availability and carry one explicit topology-neutral continuation decision`);
+  }
+  const localDirectory = required.get(
+    "packages/cli/src/serve/local-conversation-directory-application.ts",
+  );
+  if (
+    !/availability:\s*\{[\s\S]*?capabilitySet:\s*"limited",[\s\S]*?continuationConfirmation:\s*"required",[\s\S]*?unavailableCapabilities:\s*LIMITED_CONVERSATION_CAPABILITIES/u.test(
+      localDirectory.text,
+    ) ||
+    /LOCAL_ONLY_CAPABILITIES|mode:\s*"local-only"/u.test(localDirectory.text)
+  ) {
+    failures.push(`${localDirectory.relative}: Host topology adapter must project finite capability limits without exposing deployment mode`);
+  }
+  const conversationFacade = required.get(
+    "packages/cli/src/runtime/rpc-conversation-facade.ts",
+  );
+  if (
+    count(
+      conversationFacade.text,
+      /\.\.\.this\.#continuationConsent\(\)/gu,
+    ) !== 9 ||
+    !/pendingContinuationConfirmation\(\):\s*readonly\s+string\[\]\s*\|\s*null/u.test(
+      conversationFacade.text,
+    ) ||
+    !/confirmContinuation\(\):\s*void/u.test(conversationFacade.text) ||
+    /continueLocally|#localOnly|#localContinuation|requiresLocalContinuation|enableLocalContinuation/u.test(
+      conversationFacade.text,
+    )
+  ) {
+    failures.push(`${conversationFacade.relative}: the Surface client must apply one capability confirmation fact to the nine mutation requests without topology state`);
+  }
+  const conversationController = required.get(
+    "packages/cli/src/runtime/conversation-controller.ts",
+  );
+  if (
+    !/pendingContinuationConfirmation\?\.\(\)[\s\S]*?confirmContinuation\?\.[\s\S]*?confirmContinuation\?\.\(\)/u.test(
+      conversationController.text,
+    ) ||
+    /OfflineContinuationDeclined|requiresLocalContinuation|enableLocalContinuation|confirmLocalContinuation/u.test(
+      conversationController.text,
+    )
+  ) {
+    failures.push(`${conversationController.relative}: initial selection must confirm explicit capability consequences without interpreting deployment topology`);
   }
   if (
     !/this\.input\.owner\.currentAuthority\s*\(conversationId\)/u.test(router.text) ||
@@ -13399,6 +13474,14 @@ export function inspectConversationAdoptionAssembly(records) {
   const repl = required.get("packages/cli/src/repl.ts");
   if (!/initialAdoptionReview[\s\S]*?\.message/u.test(repl.text) || !/rpcConfirmationBroker\.refresh\s*\(\s*\)/u.test(repl.text)) {
     failures.push(`${repl.relative}: the first-party REPL must present adoption summaries and recover pending confirmations`);
+  }
+  if (
+    !/confirmContinuation:\s*async\s*\(unavailableCapabilities\)[\s\S]*?unavailableCapabilities\.join\("；"\)[\s\S]*?接受以上限制并继续/u.test(
+      repl.text,
+    ) ||
+    /confirmLocalContinuation/u.test(repl.text)
+  ) {
+    failures.push(`${repl.relative}: the first-party Surface must present exact capability consequences instead of physical topology`);
   }
 
   return failures;

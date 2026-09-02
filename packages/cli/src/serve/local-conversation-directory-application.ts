@@ -7,10 +7,10 @@ import type { AuthorityCallContext } from "@zhixing/core/contracts";
 import { canonicalize } from "@zhixing/core/protocol";
 import type { LocalConversationOwnerPort } from "./local-conversation-owner.js";
 
-const LOCAL_ONLY_CAPABILITIES = Object.freeze([
+const LIMITED_CONVERSATION_CAPABILITIES = Object.freeze([
   "排程暂不可用",
-  "旧设备上的对话暂不可修改",
-  "任务推进确认将在重新连接后处理",
+  "当前列表中的部分既有对话暂不可修改",
+  "任务推进确认暂不可处理",
 ]);
 
 export function createLocalConversationDirectoryApplication(input: {
@@ -158,8 +158,9 @@ export function createLocalConversationDirectoryApplication(input: {
       }),
     },
     availability: {
-      mode: "local-only",
-      unavailableCapabilities: LOCAL_ONLY_CAPABILITIES,
+      capabilitySet: "limited",
+      continuationConfirmation: "required",
+      unavailableCapabilities: LIMITED_CONVERSATION_CAPABILITIES,
     },
   });
 }

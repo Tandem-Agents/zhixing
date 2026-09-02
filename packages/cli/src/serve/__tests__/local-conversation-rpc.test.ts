@@ -14,10 +14,11 @@ const CONVERSATION_ID = localConversationId(
 );
 
 describe("LocalConversationRpcRouter", () => {
-  it("公开本机清单并在用户确认前拒绝写入", async () => {
+  it("公开受限能力并在明确接受前拒绝全部变更入口", async () => {
+    const owner = ownerPort();
     const router = new LocalConversationRpcRouter({
       deviceId: DEVICE_ID,
-      owner: ownerPort(),
+      owner,
       remoteFor: () => { throw new Error("unexpected remote route"); },
     });
     const connection = fakeConnection();
@@ -28,14 +29,40 @@ describe("LocalConversationRpcRouter", () => {
       handled: true,
       result: {
         conversations: [{ conversationId: CONVERSATION_ID }],
-        availability: { mode: "local-only" },
+        availability: {
+          capabilitySet: "limited",
+          continuationConfirmation: "required",
+        },
       },
     });
+    for (const method of [
+      "session.new",
+      "session.resume",
+      "session.send",
+      "session.abort",
+      "session.rename",
+      "session.clear",
+      "session.delete",
+      "session.compact",
+      "session.taskListUpdate",
+    ]) {
+      await expect(
+        router.dispatch({ method, params: {}, connection }),
+      ).rejects.toMatchObject({
+        code: RPC_ERROR_CODES.INVALID_PARAMS,
+        message: "继续前请先明确接受当前会话能力限制。",
+      });
+    }
     await expect(
-      router.dispatch({ method: "session.new", params: {}, connection }),
-    ).rejects.toMatchObject({
-      message: "继续前请确认使用这台电脑新建或恢复本机对话。",
-    });
+      router.dispatch({
+        method: "session.new",
+        params: { acceptLimitedCapabilities: "true" },
+        connection,
+      }),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    expect(owner.createConversation).not.toHaveBeenCalled();
+    expect(owner.agentTurnAdmission.admit).not.toHaveBeenCalled();
+    expect(owner.taskLists.maintain).not.toHaveBeenCalled();
   });
 
   it("仅允许本机身份并复用 session wire 推送 turn", async () => {
@@ -58,7 +85,7 @@ describe("LocalConversationRpcRouter", () => {
         conversationId: CONVERSATION_ID,
         turnId: "turn-local-1",
         text: "继续工作",
-        continueLocally: true,
+        acceptLimitedCapabilities: true,
       },
       connection,
     });
@@ -83,7 +110,7 @@ describe("LocalConversationRpcRouter", () => {
           conversationId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
           turnId: "turn-old-1",
           text: "旧对话",
-          continueLocally: true,
+          acceptLimitedCapabilities: true,
         },
         connection,
       }),
@@ -91,7 +118,7 @@ describe("LocalConversationRpcRouter", () => {
       (error: unknown) =>
         error instanceof RpcAppError &&
         error.message ===
-          "这个对话目前无法在这台电脑修改，请连接值班设备后重试。",
+          "这个对话当前不可修改，请从列表中重新选择或在完整能力恢复后重试。",
     );
   });
 
@@ -123,7 +150,7 @@ describe("LocalConversationRpcRouter", () => {
         conversationId: CONVERSATION_ID,
         requestId: "task-operation-1",
         action: { kind: "add", content: "写周报" },
-        continueLocally: true,
+        acceptLimitedCapabilities: true,
       },
       connection,
     })).resolves.toEqual({
@@ -160,7 +187,7 @@ describe("LocalConversationRpcRouter", () => {
         conversationId: CONVERSATION_ID,
         requestId: "task-operation-2",
         action: { kind: "done", token: "missing" },
-        continueLocally: true,
+        acceptLimitedCapabilities: true,
       },
       connection,
     })).resolves.toEqual({
@@ -194,7 +221,7 @@ describe("LocalConversationRpcRouter", () => {
         conversationId: CONVERSATION_ID,
         requestId,
         action: { kind: "add", content: "写周报" },
-        continueLocally: true,
+        acceptLimitedCapabilities: true,
       },
       connection,
     });
@@ -209,7 +236,7 @@ describe("LocalConversationRpcRouter", () => {
     expect(port.sessionState.readTaskList).not.toHaveBeenCalled();
   });
 
-  it("session.compact 经同一 Conversation 应用保持 local-only BUSY 终态", async () => {
+  it("session.compact 经同一 Conversation 应用保持能力受限 BUSY 终态", async () => {
     const port = ownerPort();
     const router = new LocalConversationRpcRouter({
       deviceId: DEVICE_ID,
@@ -219,20 +246,23 @@ describe("LocalConversationRpcRouter", () => {
 
     await expect(router.dispatch({
       method: "session.compact",
-      params: { conversationId: CONVERSATION_ID },
+      params: {
+        conversationId: CONVERSATION_ID,
+        acceptLimitedCapabilities: true,
+      },
       connection: fakeConnection(),
     })).rejects.toSatisfy(
       (error: unknown) =>
         error instanceof RpcAppError &&
         error.code === RPC_ERROR_CODES.BUSY &&
         error.message ===
-          "这项查看或维护暂不可用；你仍可继续本机对话，重新连接后再试。",
+          "这项查看或维护暂不可用；你仍可继续当前对话，完整能力恢复后再试。",
     );
     expect(port.mutateSession).not.toHaveBeenCalled();
     expect(port.sessionState.readTranscriptTail).not.toHaveBeenCalled();
   });
 
-  it("contextBudget、usage 与 security 经同一 Conversation 应用保持 local-only BUSY 终态", async () => {
+  it("contextBudget、usage 与 security 经同一 Conversation 应用保持能力受限 BUSY 终态", async () => {
     const port = ownerPort();
     const router = new LocalConversationRpcRouter({
       deviceId: DEVICE_ID,
@@ -253,7 +283,7 @@ describe("LocalConversationRpcRouter", () => {
           error instanceof RpcAppError &&
           error.code === RPC_ERROR_CODES.BUSY &&
           error.message ===
-            "这项查看或维护暂不可用；你仍可继续本机对话，重新连接后再试。",
+            "这项查看或维护暂不可用；你仍可继续当前对话，完整能力恢复后再试。",
       );
     }
     expect(port.mutateSession).not.toHaveBeenCalled();
@@ -276,7 +306,7 @@ describe("LocalConversationRpcRouter", () => {
         method: "session.resume",
         params: {
           conversationId: CONVERSATION_ID,
-          continueLocally: true,
+          acceptLimitedCapabilities: true,
         },
         connection,
       }),
@@ -315,12 +345,12 @@ describe("LocalConversationRpcRouter", () => {
         method: "session.resume",
         params: {
           conversationId: CONVERSATION_ID,
-          continueLocally: true,
+          acceptLimitedCapabilities: true,
         },
         connection: missingConnection,
       }),
     ).rejects.toMatchObject({
-      message: "这台电脑上没有这个对话，请从列表中重新选择。",
+      message: "当前可用会话中没有这个对话，请从列表中重新选择。",
     });
     await missingOwner.commitConversationClear({
       conversationId: CONVERSATION_ID,
@@ -348,7 +378,7 @@ describe("LocalConversationRpcRouter", () => {
       params: {
         conversationId: CONVERSATION_ID,
         requestId: "clear-local-1",
-        continueLocally: true,
+        acceptLimitedCapabilities: true,
       },
       connection,
     };
@@ -387,7 +417,7 @@ describe("LocalConversationRpcRouter", () => {
       params: {
         conversationId: CONVERSATION_ID,
         requestId: "delete-local-1",
-        continueLocally: true,
+        acceptLimitedCapabilities: true,
       },
       connection,
     };
@@ -419,7 +449,7 @@ describe("LocalConversationRpcRouter", () => {
       connection,
     });
     await expect(promise).rejects.toMatchObject({
-      message: "这项确认需要连接值班设备；当前对话已保留，可在重新连接后继续。",
+      message: "这项确认当前暂不可处理；当前对话已保留，完整能力恢复后可继续。",
     });
     await expect(promise).rejects.not.toThrow(/anchor|owner|epoch|intent|CAS|stream/iu);
   });
@@ -562,7 +592,7 @@ describe("LocalConversationRpcRouter", () => {
       params: {
         conversationId: CONVERSATION_ID,
         requestId: "cancel-request-1",
-        continueLocally: true,
+        acceptLimitedCapabilities: true,
       },
       connection: fakeConnection(),
     })).resolves.toEqual({ handled: true, result: undefined });

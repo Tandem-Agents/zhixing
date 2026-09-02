@@ -27,6 +27,7 @@ import type {
   SessionContextBudgetResult,
   SessionCompletePayload,
   SessionConversationEntry,
+  SessionContinuationConsent,
   SessionDeltaPayload,
   SessionListResult,
   SessionPostTurnControlIntentPayload,
@@ -71,8 +72,8 @@ export interface ConversationStatusCursor {
 }
 
 export class RpcConversationFacade {
-  #localContinuation = false;
-  #localOnly = false;
+  #continuationRequirement: readonly string[] | null = null;
+  #limitedCapabilitiesAccepted = false;
 
   constructor(private readonly link: CoreHostRpcLink) {}
 
@@ -107,7 +108,7 @@ export class RpcConversationFacade {
       turnId,
       surfaceCapabilities: { postTurnControl: true },
       ...(options.engage ? { engage: options.engage } : {}),
-      ...(this.#localOnly ? { continueLocally: this.#localContinuation } : {}),
+      ...this.#continuationConsent(),
     });
   }
 
@@ -115,16 +116,34 @@ export class RpcConversationFacade {
   async list(): Promise<SessionConversationEntry[]> {
     const client = await this.link.getClient();
     const result = await client.request<SessionListResult>("session.list");
-    this.#localOnly = result.availability?.mode === "local-only";
+    const nextRequirement =
+      result.availability?.capabilitySet === "limited" &&
+      result.availability.continuationConfirmation === "required"
+        ? Object.freeze([...result.availability.unavailableCapabilities])
+        : null;
+    if (!sameCapabilities(this.#continuationRequirement, nextRequirement)) {
+      this.#limitedCapabilitiesAccepted = false;
+    }
+    this.#continuationRequirement = nextRequirement;
     return result.conversations;
   }
 
-  requiresLocalContinuation(): boolean {
-    return this.#localOnly && !this.#localContinuation;
+  pendingContinuationConfirmation(): readonly string[] | null {
+    return this.#continuationRequirement && !this.#limitedCapabilitiesAccepted
+      ? this.#continuationRequirement
+      : null;
   }
 
-  enableLocalContinuation(): void {
-    this.#localContinuation = true;
+  confirmContinuation(): void {
+    if (this.#continuationRequirement) {
+      this.#limitedCapabilitiesAccepted = true;
+    }
+  }
+
+  #continuationConsent(): SessionContinuationConsent | Record<string, never> {
+    return this.#continuationRequirement && this.#limitedCapabilitiesAccepted
+      ? { acceptLimitedCapabilities: true }
+      : {};
   }
 
   /** 倒读落盘事实流(新→旧分页),不要求会话活跃。 */
@@ -146,7 +165,7 @@ export class RpcConversationFacade {
     return client.request<SessionRenameResult>("session.rename", {
       conversationId,
       name,
-      ...(this.#localOnly ? { continueLocally: this.#localContinuation } : {}),
+      ...this.#continuationConsent(),
     });
   }
 
@@ -155,7 +174,7 @@ export class RpcConversationFacade {
     await this.#requestWithReconnect("session.delete", {
       conversationId,
       requestId: `delete:${generateTurnId()}`,
-      ...(this.#localOnly ? { continueLocally: this.#localContinuation } : {}),
+      ...this.#continuationConsent(),
     });
   }
 
@@ -169,7 +188,7 @@ export class RpcConversationFacade {
       conversationId,
       requestId,
       ...(runId ? { runId } : {}),
-      ...(this.#localOnly ? { continueLocally: this.#localContinuation } : {}),
+      ...this.#continuationConsent(),
     });
   }
 
@@ -249,7 +268,7 @@ export class RpcConversationFacade {
   async newConversation(): Promise<SessionNewResult> {
     const client = await this.link.getClient();
     return client.request<SessionNewResult>("session.new", {
-      ...(this.#localOnly ? { continueLocally: this.#localContinuation } : {}),
+      ...this.#continuationConsent(),
     });
   }
 
@@ -258,7 +277,7 @@ export class RpcConversationFacade {
     await this.#requestWithReconnect("session.clear", {
       conversationId,
       requestId: `clear:${generateTurnId()}`,
-      ...(this.#localOnly ? { continueLocally: this.#localContinuation } : {}),
+      ...this.#continuationConsent(),
     });
   }
 
@@ -267,7 +286,7 @@ export class RpcConversationFacade {
     const client = await this.link.getClient();
     return client.request<SessionCompactResult>("session.compact", {
       conversationId,
-      ...(this.#localOnly ? { continueLocally: this.#localContinuation } : {}),
+      ...this.#continuationConsent(),
     });
   }
 
@@ -282,7 +301,7 @@ export class RpcConversationFacade {
         conversationId,
         action,
         requestId: `task-list:${generateTurnId()}`,
-        ...(this.#localOnly ? { continueLocally: this.#localContinuation } : {}),
+        ...this.#continuationConsent(),
       },
     );
   }
@@ -330,7 +349,7 @@ export class RpcConversationFacade {
     const client = await this.link.getClient();
     return client.request<SessionResumeResult>("session.resume", {
       conversationId,
-      ...(this.#localOnly ? { continueLocally: this.#localContinuation } : {}),
+      ...this.#continuationConsent(),
     });
   }
 
@@ -436,5 +455,18 @@ function isRpcNotFound(err: unknown): err is RpcClientError {
   return (
     err instanceof RpcClientError &&
     err.code === RPC_ERROR_CODES.NOT_FOUND
+  );
+}
+
+function sameCapabilities(
+  left: readonly string[] | null,
+  right: readonly string[] | null,
+): boolean {
+  return (
+    left === right ||
+    (left !== null &&
+      right !== null &&
+      left.length === right.length &&
+      left.every((capability, index) => capability === right[index]))
   );
 }

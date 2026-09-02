@@ -653,10 +653,10 @@ export async function startRepl(): Promise<void> {
     advancement: resumedAdvancement,
     adoptionReview: initialAdoptionReview,
   } = await selectInitialConversation(conversationFacade, {
-    confirmLocalContinuation: async () => {
+    confirmContinuation: async (unavailableCapabilities) => {
       cliWriter.line(
         chalk.yellow(
-          `${layout.contentPrefix}值班设备暂时无法连接。排程和旧设备对话暂不可用。`,
+          `${layout.contentPrefix}当前会话能力受限：${unavailableCapabilities.join("；")}。`,
         ),
       );
       if (!process.stdin.isTTY) return false;
@@ -667,7 +667,7 @@ export async function startRepl(): Promise<void> {
       });
       try {
         const answer = await prompt.question(
-          chalk.green(`${layout.contentPrefix}继续在这台电脑工作（新对话）？[y/N] `),
+          chalk.green(`${layout.contentPrefix}接受以上限制并继续？[y/N] `),
         );
         return /^(?:y|yes|是)$/iu.test(answer.trim());
       } finally {

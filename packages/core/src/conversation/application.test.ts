@@ -1748,7 +1748,8 @@ describe("ConversationDirectoryApplicationService", () => {
         {
           conversations: [entry("local", "2026-01-01T00:00:01.000Z")],
           availability: {
-            mode: "local-only",
+            capabilitySet: "limited",
+            continuationConfirmation: "required",
             unavailableCapabilities: ["排程暂不可用"],
           },
         },
@@ -1759,7 +1760,10 @@ describe("ConversationDirectoryApplicationService", () => {
         { conversationId: "remote" },
         { conversationId: "local" },
       ],
-      availability: { mode: "local-only" },
+      availability: {
+        capabilitySet: "limited",
+        continuationConfirmation: "required",
+      },
     });
   });
 });

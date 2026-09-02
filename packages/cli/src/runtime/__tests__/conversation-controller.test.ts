@@ -309,12 +309,15 @@ describe("ConversationController", () => {
     expect(conversation.resumeIfExists).toHaveBeenCalledWith("conv-stale");
   });
 
-  it("selectInitialConversation:本机模式必须先取得一次明确同意", async () => {
+  it("selectInitialConversation:能力受限时必须先取得一次明确同意", async () => {
     let enabled = false;
+    const unavailableCapabilities = ["排程暂不可用"] as const;
     const conversation = {
       list: vi.fn(async () => []),
-      requiresLocalContinuation: vi.fn(() => !enabled),
-      enableLocalContinuation: vi.fn(() => {
+      pendingContinuationConfirmation: vi.fn(() =>
+        enabled ? null : unavailableCapabilities,
+      ),
+      confirmContinuation: vi.fn(() => {
         enabled = true;
       }),
       resumeIfExists: vi.fn(async () => null),
@@ -326,19 +329,25 @@ describe("ConversationController", () => {
 
     await expect(
       selectInitialConversation(conversation, {
-        confirmLocalContinuation: async () => false,
+        confirmContinuation: async (capabilities) => {
+          expect(capabilities).toBe(unavailableCapabilities);
+          return false;
+        },
       }),
-    ).rejects.toThrow("已取消在这台电脑继续");
+    ).rejects.toThrow("已取消使用受限会话能力");
     expect(conversation.newConversation).not.toHaveBeenCalled();
 
     await expect(
       selectInitialConversation(conversation, {
-        confirmLocalContinuation: async () => true,
+        confirmContinuation: async (capabilities) => {
+          expect(capabilities).toBe(unavailableCapabilities);
+          return true;
+        },
       }),
     ).resolves.toMatchObject({
       active: { conversationId: "conv-local" },
     });
-    expect(conversation.enableLocalContinuation).toHaveBeenCalledOnce();
+    expect(conversation.confirmContinuation).toHaveBeenCalledOnce();
     expect(conversation.newConversation).toHaveBeenCalledOnce();
   });
 
