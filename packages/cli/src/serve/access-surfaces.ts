@@ -334,6 +334,7 @@ const meshSurface: AccessSurface = {
       conversationTransferStaging: createConversationTransferStagingInfrastructure({
         zhixingHome: ctx.zhixingHome,
       }),
+      plannedAnchorTransferStaging: bootstrap.plannedAnchorTransferStaging,
       protocol: ctx.conversationProtocol,
       executorTopology: ctx.conversationExecutorTopology!,
       ...(ctx.localConversationOwner

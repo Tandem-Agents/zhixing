@@ -7,6 +7,7 @@ import { setupAuthorityRuntime } from "../setup-delivery.js";
 import { createDeviceCapacityRuntime } from "../serve/device-capacity-runtime.js";
 import { executorIdForDevice } from "../serve/mesh-runtime-assembly.js";
 import { prepareMeshRuntimeBootstrap } from "../serve/mesh-runtime-bootstrap.js";
+import { createPlannedAnchorTransferStagingInfrastructure } from "../serve/planned-anchor-transfer-staging-infrastructure.js";
 import { runStartupCheck } from "../startup.js";
 import { parseServerSpecs } from "./mcp-config.js";
 import { createHostMcpRuntime } from "./mcp-runtime-adapter.js";
@@ -239,6 +240,10 @@ export async function withLocalWorkspaceClient<T, R = T>(
       zhixingHome,
       secretStore,
       storageMaintenance: capacity.storage,
+      plannedAnchorTransferStaging: createPlannedAnchorTransferStagingInfrastructure({
+        zhixingHome,
+        storageMaintenance: capacity.storage,
+      }),
       ...(configuration.topology.mesh
         ? { configuration: configuration.topology.mesh }
         : {}),

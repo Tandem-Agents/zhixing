@@ -540,6 +540,7 @@ export async function runExecutorRole(
         artifacts: authority.artifacts,
       }),
       conversationTransferStaging: null,
+      plannedAnchorTransferStaging: bootstrap.mesh.plannedAnchorTransferStaging,
       executor: {
         ledger,
         runtimeFactory,

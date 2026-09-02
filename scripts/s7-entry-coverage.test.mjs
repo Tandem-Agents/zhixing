@@ -2577,6 +2577,8 @@ test("planned duty migration stays bound to two production roots and a finite ow
     "packages/cli/src/serve/connection-lifetime-obligation.ts",
     "packages/cli/src/serve/local-conversation-rpc.ts",
     "packages/cli/src/serve/mesh-runtime-bootstrap.ts",
+    "packages/cli/src/serve/application-host.ts",
+    "packages/cli/src/serve/planned-anchor-transfer-staging-infrastructure.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/channels.ts",
     "packages/cli/src/serve/conversation-protocol-runtime.ts",
@@ -2604,6 +2606,40 @@ test("planned duty migration stays bound to two production roots and a finite ow
       (text) => text.replace('"anchor-only"', '"executor-only"'),
     )).join("\n"),
     /phase exact-set drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/planned-anchor-transfer.ts",
+      (text) => `import path from "node:path";\n${text}`,
+    )).join("\n"),
+    /staging physical ownership or finite boundary drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/planned-anchor-transfer-staging-infrastructure.ts",
+      (text) => text.replace('"anchor-transfer-staging"', '"disaster-recovery-staging"'),
+    )).join("\n"),
+    /staging physical ownership or finite boundary drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/application-host.ts",
+      (text) => text.replace(
+        "#prepareMesh(deviceCapacity, plannedAnchorTransferStaging)",
+        "#prepareMesh(deviceCapacity, this.#dependencies.createPlannedAnchorTransferStaging({ zhixingHome: this.#input.zhixingHome }))",
+      ),
+    )).join("\n"),
+    /Host\/bootstrap required instance flow drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/planned-anchor-transfer.ts",
+      (text) => text.replace(
+        "await context.cleanupTransfer();",
+        "await context.cleanupTransferAndJournal();",
+      ),
+    )).join("\n"),
+    /cleanup or lifecycle exact-set drifted/,
   );
   assert.match(
     inspectPlannedAnchorTransferAssembly(mutate(

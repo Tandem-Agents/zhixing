@@ -30,6 +30,7 @@ import {
   completePlannedAnchorInstallationBeforeBootstrap,
   type InstalledAuthorityGeneration,
   type PlannedAnchorPostInstallDescriptor,
+  type PlannedAnchorTransferStagingArea,
 } from "./planned-anchor-transfer.js";
 import { createTrustedDeviceProtocolVerifier } from "./trusted-device-protocol-verifier.js";
 import {
@@ -44,6 +45,7 @@ export type MeshRuntimeBootstrap =
       readonly deviceKey: DeviceKey;
       readonly bootstrapStore: FileMeshBootstrapStore;
       readonly bootstrapProjection: MeshBootstrapProjectionPorts;
+      readonly plannedAnchorTransferStaging: PlannedAnchorTransferStagingArea;
       readonly trustedIdentities: readonly DeviceIdentity[];
       readonly authorizedDeviceIds: readonly string[];
     }
@@ -54,6 +56,7 @@ export type MeshRuntimeBootstrap =
       readonly anchorIssuerKey?: DeviceKey;
       readonly bootstrapStore: FileMeshBootstrapStore;
       readonly bootstrapProjection: MeshBootstrapProjectionPorts;
+      readonly plannedAnchorTransferStaging: PlannedAnchorTransferStagingArea;
       readonly trust: HomeTrustRecord;
       readonly configuration: MeshRoleBootConfig;
       readonly endpoints: MeshEndpointDirectory;
@@ -73,6 +76,7 @@ export async function prepareMeshRuntimeBootstrap(input: {
   readonly secretStore: SecretStorePort;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly configuration?: MeshRoleBootConfig;
+  readonly plannedAnchorTransferStaging: PlannedAnchorTransferStagingArea;
 }): Promise<MeshRuntimeBootstrap> {
   const configuration = input.configuration === undefined
     ? undefined
@@ -169,16 +173,13 @@ export async function prepareMeshRuntimeBootstrap(input: {
     : undefined;
   const plannedAnchorPostInstall = trust && !disasterRecoveryPostInstall
     ? await completePlannedAnchorInstallationBeforeBootstrap({
-        zhixingHome: input.zhixingHome,
         deviceId: deviceKey.deviceId,
         secretStore: input.secretStore,
         bootstrapStore,
         verifier: createTrustedDeviceProtocolVerifier(
           trust.members.map((member) => member.device),
         ),
-        ...(input.storageMaintenance
-          ? { storageMaintenance: input.storageMaintenance }
-          : {}),
+        staging: input.plannedAnchorTransferStaging,
       })
     : undefined;
   const anchorPostInstall = disasterRecoveryPostInstall ?? plannedAnchorPostInstall;
@@ -194,6 +195,7 @@ export async function prepareMeshRuntimeBootstrap(input: {
       deviceKey,
       bootstrapStore,
       bootstrapProjection,
+      plannedAnchorTransferStaging: input.plannedAnchorTransferStaging,
       trustedIdentities: [],
       authorizedDeviceIds: [],
     };
@@ -243,6 +245,7 @@ export async function prepareMeshRuntimeBootstrap(input: {
     ...(anchorIssuerKey ? { anchorIssuerKey } : {}),
     bootstrapStore,
     bootstrapProjection,
+    plannedAnchorTransferStaging: input.plannedAnchorTransferStaging,
     trust,
     configuration,
     endpoints,

@@ -33,7 +33,7 @@ import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import {
-  FilePlannedAnchorTransferJournal,
+  PlannedAnchorTransferJournal,
   PlannedAnchorTransferOwner,
   PlannedAnchorTransferRuntimeLifecycle,
   PlannedAnchorTransferTarget,
@@ -41,6 +41,7 @@ import {
   type PlannedAnchorTransferTargetPort,
   type PlannedAnchorCandidateRelease,
 } from "./planned-anchor-transfer.js";
+import { createPlannedAnchorTransferStagingInfrastructure } from "./planned-anchor-transfer-staging-infrastructure.js";
 import {
   PlannedAnchorTransferMeshClient,
   reconcilePlannedAnchorTrustFromPeer,
@@ -885,12 +886,13 @@ describe("planned anchor transfer prepared phase", {
     expect(imported?.phase).toBe("imported");
 
     const complete = () => completePlannedAnchorInstallationBeforeBootstrap({
-      zhixingHome: fixture.targetRoot,
       deviceId: fixture.targetKey.deviceId,
       secretStore: fixture.secrets,
       bootstrapStore: fixture.targetStore,
       verifier: fixture.verifier,
-      stagingRoot: path.join(fixture.targetRoot, "anchor-transfer-staging"),
+      staging: createPlannedAnchorTransferStagingInfrastructure({
+        zhixingHome: fixture.targetRoot,
+      }),
     });
     const recovered = await complete();
     const replay = await complete();
@@ -906,6 +908,7 @@ describe("planned anchor transfer prepared phase", {
     expect(replay).toEqual(recovered);
     await rm(path.join(
       fixture.targetRoot,
+      "distributed-runtime",
       "anchor-transfer-staging",
       "transfers",
       TRANSFER_ID,
@@ -1023,7 +1026,12 @@ async function createFixture(options: {
       bootstrapStore: targetStore,
       authorityLog: targetStore.authorityLog(),
       artifacts: targetStore.artifactStore(),
-      stagingRoot: path.join(targetRoot, "anchor-transfer-staging"),
+      staging: createPlannedAnchorTransferStagingInfrastructure({
+        zhixingHome: targetRoot,
+        ...(options.targetStorageMaintenance
+          ? { storageMaintenance: options.targetStorageMaintenance }
+          : {}),
+      }),
       sourceFor: () => ({
         applyArtifactCommand: (command) => sourceArtifactCommand.current(command),
       }),
@@ -1070,7 +1078,7 @@ async function createFixture(options: {
     owner, createOwner, onDrain, readiness, readinessSnapshot, sourceArtifactCommand,
     target, createTarget,
     verifier,
-    sourceJournal: new FilePlannedAnchorTransferJournal(sourceStore.authorityLog(), verifier),
+    sourceJournal: new PlannedAnchorTransferJournal(sourceStore.authorityLog(), verifier),
     targetJournal: { state: (transferId: string) => target.state(transferId) },
   };
 }

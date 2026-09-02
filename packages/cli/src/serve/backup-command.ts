@@ -67,6 +67,7 @@ import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
+import { createPlannedAnchorTransferStagingInfrastructure } from "./planned-anchor-transfer-staging-infrastructure.js";
 import { readRecoveryPackageFromTty } from "./recovery-package-input.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import { createOwnedMeshPairedCheckpointTargetSession } from "./paired-checkpoint-target-infrastructure.js";
@@ -898,6 +899,10 @@ async function connectPairedTarget(
     zhixingHome: context.home,
     secretStore: context.secretStore,
     storageMaintenance: context.capacity.storage,
+    plannedAnchorTransferStaging: createPlannedAnchorTransferStagingInfrastructure({
+      zhixingHome: context.home,
+      storageMaintenance: context.capacity.storage,
+    }),
     ...(context.meshConfiguration ? { configuration: context.meshConfiguration } : {}),
   });
   if (bootstrap.mode !== "trusted-home" || !bootstrap.roles.includes("anchor")) {

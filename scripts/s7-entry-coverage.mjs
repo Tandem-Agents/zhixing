@@ -9642,7 +9642,7 @@ export function inspectRecoveryBackupAssembly(records) {
   const limitedBranch = applicationHost.indexOf("await this.#dependencies.runRecoveryRoot({");
   const oldBootstrapStop = applicationHost.indexOf("await this.#releaseCurrentMesh();");
   const residentBootstrap = applicationHost.indexOf(
-    "mesh = await this.#prepareMesh(deviceCapacity);",
+    "mesh = await this.#prepareMesh(deviceCapacity, plannedAnchorTransferStaging);",
     oldBootstrapStop,
   );
   const workspaceAdmission = applicationHost.indexOf(
@@ -9660,7 +9660,10 @@ export function inspectRecoveryBackupAssembly(records) {
     failures.push("trusted-home root establishment must remain a finite pre-business topology");
   }
   if (
-    count(applicationHost, "await this.#prepareMesh(deviceCapacity)") !== 2 ||
+    count(
+      applicationHost,
+      "await this.#prepareMesh(deviceCapacity, plannedAnchorTransferStaging)",
+    ) !== 2 ||
     !rootEstablishment.includes("watchTrust: false") ||
     !backup.includes("watchTrust: false") ||
     !controlPlane.includes("this.options.watchTrust !== false")
@@ -10264,6 +10267,10 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   const localRouter = byPath.get("packages/cli/src/serve/local-conversation-rpc.ts");
   const registry = byPath.get("packages/server/src/rpc/methods/index.ts");
   const bootstrap = byPath.get("packages/cli/src/serve/mesh-runtime-bootstrap.ts");
+  const applicationHost = byPath.get("packages/cli/src/serve/application-host.ts");
+  const stagingInfrastructure = byPath.get(
+    "packages/cli/src/serve/planned-anchor-transfer-staging-infrastructure.ts",
+  );
   const accessRoot = byPath.get("packages/cli/src/serve/access-surfaces.ts");
   const executorRoot = byPath.get("packages/cli/src/serve/executor-role-runtime.ts");
   const setup = byPath.get("packages/cli/src/setup-delivery.ts");
@@ -10276,7 +10283,8 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   if (
     !assembly || !mesh || !transfer || !command || !server || !facade || !product ||
     !accessRoot || !executorRoot || !setup || !firstParty || !connectionLifetime || !localRouter ||
-    !registry || !bootstrap || !channels || !inboundRouter || !conversationProtocol ||
+    !registry || !bootstrap || !applicationHost || !stagingInfrastructure ||
+    !channels || !inboundRouter || !conversationProtocol ||
     !deliveryPipeline || !surfaceAssetAuthority || !surfaceAssets
   ) {
     return ["planned anchor transfer production assembly sources are missing"];
@@ -10339,6 +10347,77 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     !assembly.includes('local?.state === "active" && local.roles.includes("anchor")')
   ) {
     failures.push("planned anchor transfer owner/receiver topology exact-set drifted");
+  }
+  const physicalFactoryDefinitions = records.filter(({ text }) =>
+    text.includes("export function createPlannedAnchorTransferStagingInfrastructure("));
+  if (
+    physicalFactoryDefinitions.length !== 1 ||
+    physicalFactoryDefinitions[0]?.relative !==
+      "packages/cli/src/serve/planned-anchor-transfer-staging-infrastructure.ts" ||
+    count(stagingInfrastructure, '"anchor-transfer-staging"') !== 1 ||
+    count(stagingInfrastructure, "new FileArtifactStore(") !== 1 ||
+    count(stagingInfrastructure, "new FileAuthorityCommitLog(") !== 2 ||
+    count(stagingInfrastructure, "new FileResumableArtifactReceiver(") !== 2 ||
+    count(
+      stagingInfrastructure,
+      "MAX_PLANNED_ANCHOR_TRANSFER_ARTIFACT_BYTES = 512 * 1024 * 1024 * 1024",
+    ) !== 1 ||
+    count(
+      stagingInfrastructure,
+      "PLANNED_ANCHOR_TRANSFER_CHUNK_BYTES = 512 * 1024",
+    ) !== 1 ||
+    !stagingInfrastructure.includes('transferPath(root, "transfers", input.transferId)') ||
+    !stagingInfrastructure.includes('transferPath(root, "journals", input.transferId)') ||
+    !stagingInfrastructure.includes('path.join(root, "candidate-claims")') ||
+    !stagingInfrastructure.includes('path.join(transferRoot, "artifacts")') ||
+    !stagingInfrastructure.includes('path.join(transferRoot, "partials")') ||
+    !stagingInfrastructure.includes('path.join(transferRoot, "promotion-partials")') ||
+    !stagingInfrastructure.includes("cleanupTransferAndJournal: async () => {") ||
+    !stagingInfrastructure.includes("cleanupPostInstall(transferId: string): Promise<void>") ||
+    !transfer.includes("interface PlannedAnchorAuthorityReadPort {") ||
+    !transfer.includes("interface PlannedAnchorInstallAuthorityPort extends PlannedAnchorAuthorityReadPort {") ||
+    !transfer.includes("export interface PlannedAnchorJournalStorage {") ||
+    !transfer.includes("interface PlannedAnchorSourceAuthorityPort") ||
+    /conversation-transfer-staging|disaster-recovery-staging/u.test(stagingInfrastructure) ||
+    /from\s+["']node:(?:fs|fs\/promises|path)["']/u.test(transfer) ||
+    /\bAuthorityCommitLog\b|FileArtifactStore|FileAuthorityCommitLog|FileResumableArtifactReceiver|stagingRoot|privateRoot|Pick\s*</u.test(transfer) ||
+    /anchor-transfer-staging|stagingRoot|privateRoot|FileResumableArtifactReceiver/u.test(assembly) ||
+    /anchor-transfer-staging|stagingRoot|privateRoot|FileResumableArtifactReceiver/u.test(bootstrap)
+  ) {
+    failures.push("planned anchor staging physical ownership or finite boundary drifted");
+  }
+  if (
+    count(applicationHost, "createPlannedAnchorTransferStagingInfrastructure,") !== 2 ||
+    count(applicationHost, "createPlannedAnchorTransferStaging({") !== 1 ||
+    count(
+      applicationHost,
+      "#prepareMesh(deviceCapacity, plannedAnchorTransferStaging)",
+    ) !== 2 ||
+    count(applicationHost, "plannedAnchorTransferStaging.close()") !== 1 ||
+    count(
+      bootstrap,
+      "readonly plannedAnchorTransferStaging: PlannedAnchorTransferStagingArea;",
+    ) !== 3 ||
+    count(
+      bootstrap,
+      "plannedAnchorTransferStaging: input.plannedAnchorTransferStaging",
+    ) !== 2 ||
+    count(bootstrap, "staging: input.plannedAnchorTransferStaging") !== 1 ||
+    count(
+      accessRoot,
+      "plannedAnchorTransferStaging: bootstrap.plannedAnchorTransferStaging",
+    ) !== 1 ||
+    count(
+      executorRoot,
+      "plannedAnchorTransferStaging: bootstrap.mesh.plannedAnchorTransferStaging",
+    ) !== 1 ||
+    count(
+      assembly,
+      "readonly plannedAnchorTransferStaging: PlannedAnchorTransferStagingArea;",
+    ) !== 1 ||
+    count(assembly, "staging: this.options.plannedAnchorTransferStaging") !== 3
+  ) {
+    failures.push("planned anchor staging Host/bootstrap required instance flow drifted");
   }
   if (
     count(accessRoot, "ctx.meshRuntime?.currentAnchorDeviceId()") !== 3 ||
@@ -10432,7 +10511,7 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     "for (const candidate of (await this.#candidates.states()).values())",
   );
   const phaseRecovery = transfer.indexOf(
-    "const journalsRoot = path.join(this.options.stagingRoot, \"journals\");",
+    "for (const transferId of await this.#staging.recoverableTransferIds())",
     candidateRecovery,
   );
   if (
@@ -10620,6 +10699,21 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     count(mesh, "options.lifecycle.run(() => target.") !== 4
   ) {
     failures.push("planned anchor transfer readiness reservation assembly drifted");
+  }
+  if (
+    count(transfer, "await context.cleanupTransferAndJournal()") !== 1 ||
+    count(
+      transfer,
+      "await this.#context(candidate.identity.transferId).cleanupTransferAndJournal()",
+    ) !== 1 ||
+    count(transfer, "await context.cleanupTransfer()") !== 2 ||
+    count(transfer, "await input.staging.cleanupPostInstall(input.transferId)") !== 1 ||
+    count(transfer, "input.staging.openTransfer({") !== 1 ||
+    count(transfer, "this.#staging = options.staging.openTarget({") !== 1 ||
+    count(transfer, "await this.#staging.close()") !== 1 ||
+    /readonly staging\?/u.test(transfer)
+  ) {
+    failures.push("planned anchor staging cleanup or lifecycle exact-set drifted");
   }
 
   const publicMethods = [

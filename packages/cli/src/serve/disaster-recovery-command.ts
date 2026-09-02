@@ -44,6 +44,7 @@ import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
+import { createPlannedAnchorTransferStagingInfrastructure } from "./planned-anchor-transfer-staging-infrastructure.js";
 import { readRecoveryPackageFromTty } from "./recovery-package-input.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import { FileExecutionAssetCache } from "./execution-asset-cache.js";
@@ -543,6 +544,10 @@ async function openRecoveryEvidenceMesh(
     secretStore: context.secretStore,
     storageMaintenance: context.storageMaintenance,
     configuration: context.configuration,
+    plannedAnchorTransferStaging: createPlannedAnchorTransferStagingInfrastructure({
+      zhixingHome: context.home,
+      storageMaintenance: context.storageMaintenance,
+    }),
   });
   if (bootstrap.mode !== "trusted-home") {
     throw new Error("认证设备网络尚未建立");
@@ -619,6 +624,10 @@ async function openInventoryTargets(
     zhixingHome: context.home,
     secretStore: context.secretStore,
     storageMaintenance: context.storageMaintenance,
+    plannedAnchorTransferStaging: createPlannedAnchorTransferStagingInfrastructure({
+      zhixingHome: context.home,
+      storageMaintenance: context.storageMaintenance,
+    }),
     ...(context.configuration ? { configuration: context.configuration } : {}),
   });
   signal.throwIfAborted();

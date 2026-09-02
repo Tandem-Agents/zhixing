@@ -1,4 +1,3 @@
-import path from "node:path";
 import {
   assertLocalConversationIdForDevice,
   parseLocalConversationId,
@@ -130,6 +129,7 @@ import {
   PlannedAnchorTransferTarget,
   type PlannedAnchorPostInstallDescriptor,
   type InstalledAuthorityGeneration,
+  type PlannedAnchorTransferStagingArea,
 } from "./planned-anchor-transfer.js";
 import {
   PlannedAnchorTransferMeshClient,
@@ -321,6 +321,7 @@ export interface MeshRuntimeAssemblyOptions {
   readonly authority: AuthorityRuntimeStack;
   readonly assignmentArtifactReceiver: AssignmentArtifactReceiverPort;
   readonly conversationTransferStaging: ConversationTransferStagingArea | null;
+  readonly plannedAnchorTransferStaging: PlannedAnchorTransferStagingArea;
   readonly protocol?: ConversationProtocolRuntime;
   readonly executorTopology?: ConversationExecutorTopologyAdapter;
   readonly localConversationOwner?: LocalConversationOwnerAssembly;
@@ -1861,11 +1862,7 @@ export class MeshRuntimeAssembly
       bootstrapStore: this.options.bootstrapStore,
       authorityLog: this.options.authority.authorityLog,
       artifacts: this.options.authority.artifacts,
-      stagingRoot: path.join(
-        this.options.zhixingHome,
-        "distributed-runtime",
-        "anchor-transfer-staging",
-      ),
+      staging: this.options.plannedAnchorTransferStaging,
       sourceFor: (deviceId) => new PlannedAnchorTransferMeshClient(
         this.connections.client(deviceId),
         this.options.authority.deviceId,
@@ -1878,14 +1875,11 @@ export class MeshRuntimeAssembly
       readiness: this.options.authority.plannedAnchorReadiness,
       onInstalled: async (record) => {
         const completion = await completePlannedAnchorInstallationBeforeBootstrap({
-          zhixingHome: this.options.zhixingHome,
           deviceId: this.options.authority.deviceId,
           secretStore: this.options.secretStore,
           bootstrapStore: this.options.bootstrapStore,
           verifier: this.options.authority.verifier,
-          ...(this.options.authority.storageMaintenance
-            ? { storageMaintenance: this.options.authority.storageMaintenance }
-            : {}),
+          staging: this.options.plannedAnchorTransferStaging,
         });
         if (
           !completion ||
@@ -1989,9 +1983,9 @@ export class MeshRuntimeAssembly
       });
     } else {
       await finishPlannedAnchorPostInstall({
-        zhixingHome: this.options.zhixingHome,
         transferId: completion.installation.transferId,
         readiness: this.options.authority.plannedAnchorReadiness,
+        staging: this.options.plannedAnchorTransferStaging,
       });
     }
     this.#plannedAnchorPostInstall = undefined;

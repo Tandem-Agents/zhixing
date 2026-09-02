@@ -1,6 +1,3 @@
-import path from "node:path";
-import type { Dirent } from "node:fs";
-import { readdir, rm, stat } from "node:fs/promises";
 import type {
   AnchorTransferAbort,
   AnchorTransferCommand,
@@ -19,14 +16,23 @@ import type {
   TransferRecord,
 } from "@zhixing/core/contracts";
 import type {
+  ArtifactReceiveProgress,
+  ArtifactStore,
   ArtifactCheckpointRetentionPort,
+  AuthorityAppendAdmissionGuard,
   DurableLogCheckpoint,
+  IdentifiedPhysicalStepRunner,
+  PhysicalStorageStepRunner,
+  PlannedAnchorPrefixInstallation,
+  ProjectionReducer,
+  ProjectionReplayOptions,
+  ProjectionTransactionContext,
+  ProjectionTransactionDecision,
+  ProjectionTransactionOptions,
+  ProjectionTransactionReducer,
+  ProjectionTransactionResult,
 } from "@zhixing/core/authority";
-import {
-  collectArtifactRefs,
-  FileArtifactStore,
-  FileResumableArtifactReceiver,
-} from "@zhixing/core/authority";
+import { collectArtifactRefs } from "@zhixing/core/authority";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import {
   runStorageMaintenanceStep,
@@ -51,7 +57,6 @@ import {
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
 } from "@zhixing/core/protocol";
-import { FileAuthorityCommitLog } from "@zhixing/core/authority";
 import {
   createAnchorTransferReadyProof,
   validateAnchorTransferReadyProof,
@@ -87,7 +92,6 @@ const ANCHOR_TRANSFER_STREAM = "transfer:anchor";
 const SOURCE_CLOSURE_STREAM = "transfer:anchor-closure";
 const READY_RESERVATION_STREAM = "transfer:anchor-ready-reservation";
 const TRANSFER_CHUNK_BYTES = 512 * 1024;
-const MAX_TRANSFER_ARTIFACT_BYTES = 512 * 1024 * 1024 * 1024;
 const TRANSFER_EXPORT_PAGE_COMMITS = 64;
 const TRANSFER_HEADER_BYTES = 1024 * 1024;
 
@@ -267,6 +271,144 @@ export interface PlannedAnchorTransferArtifactSourcePort {
   applyArtifactCommand(command: AnchorTransferCommand): Promise<AnchorTransferResult>;
 }
 
+export interface PlannedAnchorCandidateJournalPort {
+  state(transferId: string): Promise<PlannedAnchorCandidateState | undefined>;
+  states(): Promise<ReadonlyMap<string, PlannedAnchorCandidateState>>;
+  claimCandidate(
+    identity: PlannedAnchorCandidateIdentity,
+  ): Promise<PlannedAnchorCandidateState>;
+  recordReady(
+    identity: PlannedAnchorCandidateIdentity,
+    readyProof: ReadyProof,
+  ): Promise<PlannedAnchorCandidateState>;
+  markPrepared(
+    identity: PlannedAnchorCandidateIdentity,
+    prepared: PlannedAnchorPreparedRecord,
+  ): Promise<PlannedAnchorCandidateState>;
+  decideRemoteAbort(
+    identity: PlannedAnchorCandidateIdentity,
+    abort: AnchorTransferAbort,
+  ): Promise<PlannedAnchorCandidateState>;
+  terminal(
+    identity: PlannedAnchorCandidateIdentity,
+    terminal: PlannedAnchorCandidateTerminal,
+    abort?: AnchorTransferAbort,
+  ): Promise<PlannedAnchorCandidateState>;
+  releaseUnprepared(
+    identity: PlannedAnchorCandidateIdentity,
+  ): Promise<PlannedAnchorCandidateState>;
+}
+
+export interface PlannedAnchorPrivateJournalPort {
+  state(transferId: string): Promise<PlannedAnchorTransferState | undefined>;
+  append(
+    record: PlannedRecord,
+    extraEntries?: readonly LogicalRecord<unknown>[],
+    beforeAppend?: () => void,
+  ): Promise<PlannedAnchorTransferState>;
+  readyReservation(transferId: string): Promise<ReadyReservation | undefined>;
+  reserveReady(record: ReadyReservation): Promise<ReadyReservation>;
+}
+
+export interface PlannedAnchorStagingArtifacts {
+  get(ref: ArtifactRef): Promise<Uint8Array>;
+  readRange(ref: ArtifactRef, offset: number, limit: number): Promise<Uint8Array>;
+  has(ref: ArtifactRef): Promise<boolean>;
+}
+
+export interface PlannedAnchorStagingReceiver {
+  progress(
+    ref: ArtifactRef,
+    runPhysicalStep?: IdentifiedPhysicalStepRunner,
+  ): Promise<ArtifactReceiveProgress>;
+  append(
+    ref: ArtifactRef,
+    offset: number,
+    bytes: Uint8Array,
+    runPhysicalStep?: IdentifiedPhysicalStepRunner,
+  ): Promise<ArtifactReceiveProgress>;
+}
+
+export interface PlannedAnchorTransferStagingSession {
+  readonly journal: PlannedAnchorPrivateJournalPort;
+  readonly artifacts: PlannedAnchorStagingArtifacts;
+  readonly receiver: PlannedAnchorStagingReceiver;
+  readonly promotion: PlannedAnchorStagingReceiver;
+  exists(): Promise<boolean>;
+  cleanupTransfer(): Promise<void>;
+  cleanupTransferAndJournal(): Promise<void>;
+  close(): Promise<void>;
+}
+
+export interface PlannedAnchorTargetStaging {
+  readonly candidates: PlannedAnchorCandidateJournalPort;
+  recoverableTransferIds(): Promise<readonly string[]>;
+  forTransfer(transferId: string): PlannedAnchorTransferStagingSession;
+  close(): Promise<void>;
+}
+
+export interface PlannedAnchorTransferStagingArea {
+  openTarget(input: Readonly<{
+    artifacts: ArtifactStore;
+    verifier: ProtocolSignatureVerifier;
+  }>): PlannedAnchorTargetStaging;
+  openTransfer(input: Readonly<{
+    transferId: string;
+    artifacts: ArtifactStore;
+    verifier: ProtocolSignatureVerifier;
+  }>): PlannedAnchorTransferStagingSession;
+  cleanupPostInstall(transferId: string): Promise<void>;
+  close(): Promise<void>;
+}
+
+interface PlannedAnchorAuthorityReadPort {
+  readStream<Body = unknown>(
+    stream: string,
+  ): Promise<Array<{ lsn: number; at: string; body: Body }>>;
+  readTail<Body = unknown>(
+    checkpoint: DurableLogCheckpoint,
+    limit: number,
+    runPhysicalStep?: PhysicalStorageStepRunner,
+  ): Promise<{
+    readonly commits: readonly CommitEnvelope<Body>[];
+    readonly checkpoint: DurableLogCheckpoint;
+    readonly hasMore: boolean;
+  }>;
+  originCheckpoint(): Promise<DurableLogCheckpoint>;
+  checkpoint(): Promise<DurableLogCheckpoint>;
+}
+
+interface PlannedAnchorInstallAuthorityPort extends PlannedAnchorAuthorityReadPort {
+  installPlannedAnchorPrefix<Body>(
+    input: PlannedAnchorPrefixInstallation<Body>,
+  ): Promise<CommitEnvelope<Body>>;
+}
+
+export interface PlannedAnchorJournalStorage {
+  rebuildProjection<State, Body = unknown>(
+    initial: State,
+    reducer: ProjectionReducer<State, Body>,
+    options?: ProjectionReplayOptions,
+  ): Promise<State>;
+  transactProjection<State, Body = unknown, Value = void>(
+    initial: State,
+    reducer: ProjectionTransactionReducer<State, Body>,
+    decide: (
+      state: State,
+      context: ProjectionTransactionContext,
+    ) =>
+      | ProjectionTransactionDecision<Body, Value>
+      | Promise<ProjectionTransactionDecision<Body, Value>>,
+    options?: ProjectionTransactionOptions,
+  ): Promise<ProjectionTransactionResult<State, Body, Value>>;
+  stopStorageMaintenance(): Promise<void>;
+}
+
+interface PlannedAnchorSourceAuthorityPort
+  extends PlannedAnchorJournalStorage, PlannedAnchorAuthorityReadPort {
+  installAppendAdmissionGuard(guard: AuthorityAppendAdmissionGuard): Promise<() => void>;
+}
+
 /** Assembly-owned gate for every planned-transfer command and physical step. */
 export class PlannedAnchorTransferRuntimeLifecycle {
   readonly #abort = new AbortController();
@@ -304,9 +446,9 @@ interface PlannedAnchorCandidateProjection {
   readonly installedTransfers: ReadonlySet<string>;
 }
 
-class FilePlannedAnchorCandidateJournal {
+export class PlannedAnchorCandidateJournal implements PlannedAnchorCandidateJournalPort {
   constructor(
-    private readonly log: FileAuthorityCommitLog,
+    private readonly log: PlannedAnchorJournalStorage,
     private readonly verifier: ProtocolSignatureVerifier,
     private readonly includeTransferState: boolean,
   ) {}
@@ -656,14 +798,14 @@ class FilePlannedAnchorCandidateJournal {
   }
 }
 
-export class FilePlannedAnchorTransferJournal {
-  readonly #candidates: FilePlannedAnchorCandidateJournal;
+export class PlannedAnchorTransferJournal implements PlannedAnchorPrivateJournalPort {
+  readonly #candidates: PlannedAnchorCandidateJournal;
 
   constructor(
-    private readonly log: FileAuthorityCommitLog,
+    private readonly log: PlannedAnchorJournalStorage,
     private readonly verifier: ProtocolSignatureVerifier,
   ) {
-    this.#candidates = new FilePlannedAnchorCandidateJournal(log, verifier, true);
+    this.#candidates = new PlannedAnchorCandidateJournal(log, verifier, true);
   }
 
   claimCandidate(identity: PlannedAnchorCandidateIdentity): Promise<PlannedAnchorCandidateState> {
@@ -863,27 +1005,18 @@ export class FilePlannedAnchorTransferJournal {
   }
 }
 
-interface TargetTransferContext {
-  readonly transferId: string;
-  readonly privateRoot: string;
-  readonly artifacts: FileArtifactStore;
-  readonly receiver: FileResumableArtifactReceiver;
-  readonly promotionReceiver: FileResumableArtifactReceiver;
-  readonly journal: FilePlannedAnchorTransferJournal;
-}
-
 export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetPort {
-  readonly #contexts = new Map<string, TargetTransferContext>();
-  readonly #candidates: FilePlannedAnchorCandidateJournal;
+  readonly #staging: PlannedAnchorTargetStaging;
+  readonly #candidates: PlannedAnchorCandidateJournalPort;
 
   constructor(private readonly options: {
     readonly deviceId: string;
     readonly identityKey: DeviceKey;
     readonly secretStore: SecretStorePort;
     readonly bootstrapStore: FileMeshBootstrapStore;
-    readonly authorityLog: FileAuthorityCommitLog;
-    readonly artifacts: FileArtifactStore;
-    readonly stagingRoot: string;
+    readonly authorityLog: PlannedAnchorInstallAuthorityPort;
+    readonly artifacts: ArtifactStore;
+    readonly staging: PlannedAnchorTransferStagingArea;
     readonly sourceFor: (deviceId: string) => PlannedAnchorTransferArtifactSourcePort;
     readonly storageMaintenance?: StorageMaintenanceGovernorPort;
     readonly signer: ProtocolSigner;
@@ -895,15 +1028,11 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
     if (options.identityKey.deviceId !== options.deviceId) {
       throw new TypeError("Migration target identity key belongs to another device");
     }
-    this.#candidates = new FilePlannedAnchorCandidateJournal(
-      new FileAuthorityCommitLog(
-        path.join(options.stagingRoot, "candidate-claims"),
-        options.artifacts,
-        { storageMaintenance: options.storageMaintenance },
-      ),
-      options.verifier,
-      false,
-    );
+    this.#staging = options.staging.openTarget({
+      artifacts: options.artifacts,
+      verifier: options.verifier,
+    });
+    this.#candidates = this.#staging.candidates;
   }
 
   state(transferId: string): Promise<PlannedAnchorTransferState | undefined> {
@@ -927,19 +1056,9 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
         await context.journal.append(candidate.prepared);
       }
     }
-    const journalsRoot = path.join(this.options.stagingRoot, "journals");
-    let entries: Dirent[];
-    try {
-      entries = await readdir(journalsRoot, { withFileTypes: true });
-    } catch (error) {
-      if (isMissingPath(error)) return;
-      throw error;
-    }
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      assertTransferStorageId(entry.name);
-      const context = this.#context(entry.name);
-      const state = await context.journal.state(entry.name);
+    for (const transferId of await this.#staging.recoverableTransferIds()) {
+      const context = this.#context(transferId);
+      const state = await context.journal.state(transferId);
       if (!state) continue;
       const identity = candidateIdentityFromState(state);
       await this.#candidates.claimCandidate(identity);
@@ -951,7 +1070,7 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
         await this.#candidates.terminal(identity, "committed");
         continue;
       }
-      const reservation = await context.journal.readyReservation(entry.name);
+      const reservation = await context.journal.readyReservation(transferId);
       if (!reservation) continue;
       await this.options.readiness.reserve({
         transferId: reservation.transferId,
@@ -1094,16 +1213,7 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
         issuerKey.deviceId,
       );
     }
-    await rm(path.join(
-      this.options.stagingRoot,
-      "transfers",
-      release.identity.transferId,
-    ), { recursive: true, force: true });
-    await rm(path.join(
-      this.options.stagingRoot,
-      "journals",
-      release.identity.transferId,
-    ), { recursive: true, force: true });
+    await context.cleanupTransferAndJournal();
     await this.options.readiness.release(release.identity.transferId);
   }
 
@@ -1286,15 +1396,11 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
         throw new TypeError("Migration commit replay changes the signed decision");
       }
       const completion = await completePlannedAnchorInstallationBeforeBootstrap({
-        zhixingHome: path.resolve(this.options.stagingRoot, "..", ".."),
         deviceId: this.options.deviceId,
         secretStore: this.options.secretStore,
         bootstrapStore: this.options.bootstrapStore,
         verifier: this.options.verifier,
-        stagingRoot: this.options.stagingRoot,
-        ...(this.options.storageMaintenance
-          ? { storageMaintenance: this.options.storageMaintenance }
-          : {}),
+        staging: this.options.staging,
       });
       if (!completion || completion.installation.transferId !== command.transferId) {
         throw new Error("Committed migration has no exact installation completion");
@@ -1386,15 +1492,11 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       candidateReferences: references,
     });
     const completion = await completePlannedAnchorInstallationBeforeBootstrap({
-      zhixingHome: path.resolve(this.options.stagingRoot, "..", ".."),
       deviceId: this.options.deviceId,
       secretStore: this.options.secretStore,
       bootstrapStore: this.options.bootstrapStore,
       verifier: this.options.verifier,
-      stagingRoot: this.options.stagingRoot,
-      ...(this.options.storageMaintenance
-        ? { storageMaintenance: this.options.storageMaintenance }
-        : {}),
+      staging: this.options.staging,
     });
     if (!completion || completion.installation.transferId !== command.transferId) {
       throw new Error("Installed migration completion did not bind the committed transfer");
@@ -1511,42 +1613,25 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
         proof.targetIssuerKeyId,
       );
     }
-    await rm(path.join(
-      this.options.stagingRoot,
-      "transfers",
-      candidate.identity.transferId,
-    ), { recursive: true, force: true });
-    await rm(path.join(
-      this.options.stagingRoot,
-      "journals",
-      candidate.identity.transferId,
-    ), { recursive: true, force: true });
+    await this.#context(candidate.identity.transferId).cleanupTransferAndJournal();
     await this.options.readiness.release(candidate.identity.transferId);
   }
 
   async #cleanupAborted(
-    context: TargetTransferContext,
+    context: PlannedAnchorTransferStagingSession,
     state: PlannedAnchorTransferState,
   ): Promise<void> {
-    const references = uniqueRefs([
-      ...(state.checkpoint ? [state.checkpoint] : []),
-      ...(state.catalogRef ? [state.catalogRef] : []),
-      ...(state.catalog?.retainedArtifacts ?? []),
-    ]);
-    for (const reference of references) {
-      await context.artifacts.delete(reference);
-    }
     await deleteAnchorIssuerKey(
       this.options.secretStore,
       state.identity.transferId,
       state.readyProof.targetIssuerKeyId,
     );
-    await rm(context.privateRoot, { recursive: true, force: true });
+    await context.cleanupTransfer();
     await this.options.readiness.release(state.identity.transferId);
   }
 
   async #completeInstallation(
-    context: TargetTransferContext,
+    context: PlannedAnchorTransferStagingSession,
     state: PlannedAnchorTransferState,
     trustRecord?: HomeTrustRecord,
   ): Promise<HomeTrustRecord> {
@@ -1563,7 +1648,7 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
       record,
     });
     await this.options.onInstalled?.(record);
-    await rm(context.privateRoot, { recursive: true, force: true });
+    await context.cleanupTransfer();
     await this.options.readiness.release(state.identity.transferId);
     return record;
   }
@@ -1589,7 +1674,7 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
   }
 
   async #pull(
-    context: TargetTransferContext,
+    context: PlannedAnchorTransferStagingSession,
     source: PlannedAnchorTransferArtifactSourcePort,
     origin: Extract<AnchorTransferCommand, { op: "freeze" }>,
     ref: ArtifactRef,
@@ -1635,12 +1720,12 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
   }
 
   async #promote(
-    context: TargetTransferContext,
+    context: PlannedAnchorTransferStagingSession,
     ref: ArtifactRef,
     transferId: string,
   ): Promise<void> {
     if (await this.options.artifacts.has(ref)) return;
-    let progress = await context.promotionReceiver.progress(ref);
+    let progress = await context.promotion.progress(ref);
     while (!progress.complete) {
       const offset = progress.receivedBytes;
       const length = Math.min(TRANSFER_CHUNK_BYTES, ref.bytes - offset);
@@ -1654,7 +1739,7 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
         ),
         () => context.artifacts.readRange(ref, offset, length),
       );
-      progress = await context.promotionReceiver.append(
+      progress = await context.promotion.append(
         ref,
         offset,
         bytes,
@@ -1672,57 +1757,18 @@ export class PlannedAnchorTransferTarget implements PlannedAnchorTransferTargetP
     }
   }
 
-  #context(transferId: string): TargetTransferContext {
+  #context(transferId: string): PlannedAnchorTransferStagingSession {
     assertTransferStorageId(transferId);
-    const existing = this.#contexts.get(transferId);
-    if (existing) return existing;
-    const privateRoot = path.join(this.options.stagingRoot, "transfers", transferId);
-    const artifacts = new FileArtifactStore(path.join(privateRoot, "artifacts"));
-    const context: TargetTransferContext = {
-      transferId,
-      privateRoot,
-      artifacts,
-      receiver: new FileResumableArtifactReceiver(
-        artifacts,
-        path.join(privateRoot, "partials"),
-        {
-          maxArtifactBytes: MAX_TRANSFER_ARTIFACT_BYTES,
-          maxChunkBytes: TRANSFER_CHUNK_BYTES,
-        },
-      ),
-      promotionReceiver: new FileResumableArtifactReceiver(
-        this.options.artifacts,
-        path.join(privateRoot, "promotion-partials"),
-        {
-          maxArtifactBytes: MAX_TRANSFER_ARTIFACT_BYTES,
-          maxChunkBytes: TRANSFER_CHUNK_BYTES,
-        },
-      ),
-      journal: new FilePlannedAnchorTransferJournal(
-        new FileAuthorityCommitLog(
-          path.join(this.options.stagingRoot, "journals", transferId),
-          artifacts,
-          { storageMaintenance: this.options.storageMaintenance },
-        ),
-        this.options.verifier,
-      ),
-    };
-    this.#contexts.set(transferId, context);
-    return context;
+    return this.#staging.forTransfer(transferId);
   }
 
   async close(): Promise<void> {
-    await Promise.all([
-      this.#candidates.stopStorageMaintenance(),
-      ...[...this.#contexts.values()].map((context) =>
-        context.journal.stopStorageMaintenance()),
-    ]);
-    this.#contexts.clear();
+    await this.#staging.close();
   }
 }
 
 export class PlannedAnchorTransferOwner {
-  readonly #journal: FilePlannedAnchorTransferJournal;
+  readonly #journal: PlannedAnchorTransferJournal;
   #fencedTransferId: string | undefined;
   #disposeFence: (() => void) | undefined;
   #installingFence: Promise<void> | undefined;
@@ -1732,11 +1778,11 @@ export class PlannedAnchorTransferOwner {
     readonly anchorEpoch: () => number;
     readonly identityKey: DeviceKey;
     readonly bootstrapStore: FileMeshBootstrapStore;
-    readonly log: FileAuthorityCommitLog;
+    readonly log: PlannedAnchorSourceAuthorityPort;
     readonly signer: ProtocolSigner;
     readonly verifier: ProtocolSignatureVerifier;
     readonly targetFor: (deviceId: string) => PlannedAnchorTransferTargetPort;
-    readonly artifacts: FileArtifactStore;
+    readonly artifacts: ArtifactStore;
     readonly retention: ArtifactCheckpointRetentionPort;
     readonly storageMaintenance?: StorageMaintenanceGovernorPort;
     readonly ensureRecoveryCheckpoint: (transferId: string) => Promise<string>;
@@ -1745,7 +1791,7 @@ export class PlannedAnchorTransferOwner {
     readonly onCommitted?: (record: HomeTrustRecord) => void | Promise<void>;
     readonly now?: () => string;
   }) {
-    this.#journal = new FilePlannedAnchorTransferJournal(options.log, options.verifier);
+    this.#journal = new PlannedAnchorTransferJournal(options.log, options.verifier);
   }
 
   /** Reinstalls a durable source fence before any public producer is admitted. */
@@ -2552,7 +2598,7 @@ function plannedAnchorInstallation(input: {
 }
 
 async function loadInstalledAnchorTrustRecord(
-  log: FileAuthorityCommitLog,
+  log: PlannedAnchorAuthorityReadPort,
   transferId: string,
 ): Promise<HomeTrustRecord | undefined> {
   const records = await log.readStream<unknown>("transfer:anchor-current");
@@ -2600,13 +2646,11 @@ export interface InstalledAuthorityGeneration {
  * before current-role composition attempts to load the active issuer key.
  */
 export async function completePlannedAnchorInstallationBeforeBootstrap(input: {
-  readonly zhixingHome: string;
   readonly deviceId: string;
   readonly secretStore: SecretStorePort;
   readonly bootstrapStore: FileMeshBootstrapStore;
   readonly verifier: ProtocolSignatureVerifier;
-  readonly storageMaintenance?: StorageMaintenanceGovernorPort;
-  readonly stagingRoot?: string;
+  readonly staging: PlannedAnchorTransferStagingArea;
 }): Promise<PlannedAnchorPostInstallDescriptor | undefined> {
   const installed = await loadCurrentPlannedAnchorInstallation(
     input.bootstrapStore.authorityLog(),
@@ -2628,128 +2672,116 @@ export async function completePlannedAnchorInstallationBeforeBootstrap(input: {
   ) {
     throw new Error("Installed migration authority base digest is invalid");
   }
-  const stagingRoot = input.stagingRoot ?? path.join(
-    input.zhixingHome,
-    "distributed-runtime",
-    "anchor-transfer-staging",
-  );
-  const privateRoot = path.join(stagingRoot, "transfers", installation.transferId);
-  const privateArtifacts = new FileArtifactStore(path.join(privateRoot, "artifacts"));
-  const journal = new FilePlannedAnchorTransferJournal(
-    new FileAuthorityCommitLog(
-      path.join(stagingRoot, "journals", installation.transferId),
-      privateArtifacts,
-      { storageMaintenance: input.storageMaintenance },
-    ),
-    input.verifier,
-  );
-  let state = await journal.state(installation.transferId);
-  const activeKey = await loadActiveAnchorIssuerKey(
-    input.secretStore,
-    installation.trustRecord.issuer.issuerKeyId,
-  );
-  const activeKeyMatches = activeKey?.publicKey ===
-    installation.trustRecord.issuer.issuerPublicKey;
-  if (!state) {
-    if (!activeKeyMatches || await pathExists(privateRoot)) {
-      throw new Error("Installed migration has no exact private-journal replay state");
-    }
-    throw new Error("Installed migration journal was removed before its durable terminal state");
-  }
-  if (
-    state.identity.transferId !== installation.transferId ||
-    state.identity.targetDeviceId !== input.deviceId ||
-    canonicalize(state.checkpoint) !== canonicalize(installation.checkpoint) ||
-    canonicalize(state.catalogRef) !== canonicalize(installation.catalog) ||
-    (state.commit !== undefined &&
-      canonicalize(state.commit) !== canonicalize(installation.commit))
-  ) {
-    throw new Error("Installed migration does not match its private transfer journal");
-  }
-  if (state.phase === "imported") {
-    const transferKey = await loadAnchorIssuerKey(
+  const staging = input.staging.openTransfer({
+    transferId: installation.transferId,
+    artifacts: input.bootstrapStore.artifactStore(),
+    verifier: input.verifier,
+  });
+  try {
+    let state = await staging.journal.state(installation.transferId);
+    const activeKey = await loadActiveAnchorIssuerKey(
       input.secretStore,
-      installation.transferId,
-    );
-    if (
-      !transferKey ||
-      transferKey.deviceId !== installation.trustRecord.issuer.issuerKeyId ||
-      transferKey.publicKey !== installation.trustRecord.issuer.issuerPublicKey ||
-      transferKey.publicKey !== installation.commit.targetIssuerPublicKey
-    ) {
-      throw new Error("Installed migration is missing its exact transfer issuer key");
-    }
-    await activateAnchorIssuerKey(
-      input.secretStore,
-      installation.transferId,
       installation.trustRecord.issuer.issuerKeyId,
     );
-    state = await journal.append({
-      v: 1,
-      mode: "planned",
-      t: "anchor-committed",
-      transferId: installation.transferId,
-      commit: installation.commit,
+    const activeKeyMatches = activeKey?.publicKey ===
+      installation.trustRecord.issuer.issuerPublicKey;
+    if (!state) {
+      if (!activeKeyMatches || await staging.exists()) {
+        throw new Error("Installed migration has no exact private-journal replay state");
+      }
+      throw new Error("Installed migration journal was removed before its durable terminal state");
+    }
+    if (
+      state.identity.transferId !== installation.transferId ||
+      state.identity.targetDeviceId !== input.deviceId ||
+      canonicalize(state.checkpoint) !== canonicalize(installation.checkpoint) ||
+      canonicalize(state.catalogRef) !== canonicalize(installation.catalog) ||
+      (state.commit !== undefined &&
+        canonicalize(state.commit) !== canonicalize(installation.commit))
+    ) {
+      throw new Error("Installed migration does not match its private transfer journal");
+    }
+    if (state.phase === "imported") {
+      const transferKey = await loadAnchorIssuerKey(
+        input.secretStore,
+        installation.transferId,
+      );
+      if (
+        !transferKey ||
+        transferKey.deviceId !== installation.trustRecord.issuer.issuerKeyId ||
+        transferKey.publicKey !== installation.trustRecord.issuer.issuerPublicKey ||
+        transferKey.publicKey !== installation.commit.targetIssuerPublicKey
+      ) {
+        throw new Error("Installed migration is missing its exact transfer issuer key");
+      }
+      await activateAnchorIssuerKey(
+        input.secretStore,
+        installation.transferId,
+        installation.trustRecord.issuer.issuerKeyId,
+      );
+      state = await staging.journal.append({
+        v: 1,
+        mode: "planned",
+        t: "anchor-committed",
+        transferId: installation.transferId,
+        commit: installation.commit,
+      });
+    } else if (state.phase !== "committed" && state.phase !== "tombstoned") {
+      throw new Error(`Installed migration private journal is not committable from ${state.phase}`);
+    }
+    const exactActiveKey = await loadActiveAnchorIssuerKey(
+      input.secretStore,
+      installation.trustRecord.issuer.issuerKeyId,
+    );
+    if (
+      !exactActiveKey ||
+      exactActiveKey.publicKey !== installation.trustRecord.issuer.issuerPublicKey
+    ) {
+      throw new Error("Installed migration could not activate its exact issuer key");
+    }
+    input.bootstrapStore.bindIssuerKey(exactActiveKey);
+    const catalogBytes = await input.bootstrapStore.artifactStore().get(installation.catalog);
+    const catalog = parseAuthorityCatalog(catalogBytes);
+    if (
+      catalog.transferId !== installation.transferId ||
+      canonicalize(catalog.source) !== canonicalize(installation.sourceHead)
+    ) {
+      throw new Error("Installed migration catalog does not match its authority base");
+    }
+    return Object.freeze({
+      installation,
+      installedGeneration: Object.freeze({
+        transferId: installation.transferId,
+        commitDigest: protocolDigest("PlannedAnchorInstalledCommit", 1, installation.commit),
+        baseDigest: installation.baseDigest,
+        sourceHead: Object.freeze({ ...installation.sourceHead }),
+        targetLogId: (await input.bootstrapStore.authorityLog().originCheckpoint()).logId,
+        installLsn,
+        anchorEpoch: installation.commit.nextAnchorEpoch,
+        trustEpoch: installation.trustRecord.trustEpoch,
+        trustChainHead: Object.freeze({ ...installation.trustRecord.chainHead }),
+      }),
+      state,
+      pendingObligations: catalog.pendingObligations,
+      requiresPostInstallCompletion: await staging.exists(),
     });
-  } else if (state.phase !== "committed" && state.phase !== "tombstoned") {
-    throw new Error(`Installed migration private journal is not committable from ${state.phase}`);
+  } finally {
+    await staging.close();
   }
-  const exactActiveKey = await loadActiveAnchorIssuerKey(
-    input.secretStore,
-    installation.trustRecord.issuer.issuerKeyId,
-  );
-  if (
-    !exactActiveKey ||
-    exactActiveKey.publicKey !== installation.trustRecord.issuer.issuerPublicKey
-  ) {
-    throw new Error("Installed migration could not activate its exact issuer key");
-  }
-  input.bootstrapStore.bindIssuerKey(exactActiveKey);
-  const catalogBytes = await input.bootstrapStore.artifactStore().get(installation.catalog);
-  const catalog = parseAuthorityCatalog(catalogBytes);
-  if (
-    catalog.transferId !== installation.transferId ||
-    canonicalize(catalog.source) !== canonicalize(installation.sourceHead)
-  ) {
-    throw new Error("Installed migration catalog does not match its authority base");
-  }
-  return Object.freeze({
-    installation,
-    installedGeneration: Object.freeze({
-      transferId: installation.transferId,
-      commitDigest: protocolDigest("PlannedAnchorInstalledCommit", 1, installation.commit),
-      baseDigest: installation.baseDigest,
-      sourceHead: Object.freeze({ ...installation.sourceHead }),
-      targetLogId: (await input.bootstrapStore.authorityLog().originCheckpoint()).logId,
-      installLsn,
-      anchorEpoch: installation.commit.nextAnchorEpoch,
-      trustEpoch: installation.trustRecord.trustEpoch,
-      trustChainHead: Object.freeze({ ...installation.trustRecord.chainHead }),
-    }),
-    state,
-    pendingObligations: catalog.pendingObligations,
-    requiresPostInstallCompletion: await pathExists(privateRoot),
-  });
 }
 
 export async function finishPlannedAnchorPostInstall(input: {
-  readonly zhixingHome: string;
   readonly transferId: string;
   readonly readiness: PlannedAnchorReadinessPort;
+  readonly staging: PlannedAnchorTransferStagingArea;
 }): Promise<void> {
   assertTransferStorageId(input.transferId);
-  await rm(path.join(
-    input.zhixingHome,
-    "distributed-runtime",
-    "anchor-transfer-staging",
-    "transfers",
-    input.transferId,
-  ), { recursive: true, force: true });
+  await input.staging.cleanupPostInstall(input.transferId);
   await input.readiness.release(input.transferId);
 }
 
 async function loadCurrentPlannedAnchorInstallation(
-  log: FileAuthorityCommitLog,
+  log: PlannedAnchorAuthorityReadPort,
 ): Promise<{
   readonly installation: PlannedAnchorInstallation;
   readonly installLsn: number;
@@ -2771,16 +2803,6 @@ async function loadCurrentPlannedAnchorInstallation(
     installation: current.body,
     installLsn: current.lsn,
   };
-}
-
-async function pathExists(target: string): Promise<boolean> {
-  try {
-    await stat(target);
-    return true;
-  } catch (error) {
-    if (isMissingPath(error)) return false;
-    throw error;
-  }
 }
 
 function trustEventDigest(event: HomeTrustEvent): string {
@@ -2866,7 +2888,7 @@ function validateAuthorityExportPage(
 }
 
 async function* importedAuthorityEnvelopes(
-  artifacts: FileArtifactStore,
+  artifacts: PlannedAnchorStagingArtifacts,
   exported: PlannedAuthorityExport,
 ): AsyncGenerator<CommitEnvelope<unknown>> {
   let expectedLsn = 1;
@@ -2899,8 +2921,8 @@ function parseAuthorityCatalog(bytes: Uint8Array): AuthorityCatalog {
 }
 
 async function capturePlannedAuthority(input: {
-  readonly log: FileAuthorityCommitLog;
-  readonly artifacts: FileArtifactStore;
+  readonly log: PlannedAnchorSourceAuthorityPort;
+  readonly artifacts: ArtifactStore;
   readonly retention: ArtifactCheckpointRetentionPort;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly deviceId: string;
@@ -3031,7 +3053,7 @@ async function capturePlannedAuthority(input: {
 }
 
 async function projectPendingObligations(
-  log: FileAuthorityCommitLog,
+  log: PlannedAnchorAuthorityReadPort,
   checkpoint: DurableLogCheckpoint,
 ): Promise<AuthorityCatalog["pendingObligations"]> {
   const pending = new PendingObligationTracker();
@@ -3051,7 +3073,7 @@ async function projectPendingObligations(
 }
 
 export async function readBackPlannedAnchorPostInstallObligations(input: {
-  readonly log: FileAuthorityCommitLog;
+  readonly log: PlannedAnchorAuthorityReadPort;
   readonly obligations: AuthorityCatalog["pendingObligations"];
 }): Promise<readonly {
   readonly kind: AuthorityCatalog["pendingObligations"][number]["kind"];
@@ -3081,8 +3103,8 @@ export async function readBackPlannedAnchorPostInstallObligations(input: {
 }
 
 async function loadPlannedSourceClosure(
-  log: FileAuthorityCommitLog,
-  artifacts: FileArtifactStore,
+  log: PlannedAnchorAuthorityReadPort,
+  artifacts: ArtifactStore,
   transferId: string,
 ): Promise<PlannedSourceClosure> {
   const records = await log.readStream<unknown>(SOURCE_CLOSURE_STREAM);
@@ -3323,10 +3345,6 @@ function assertTransferStorageId(transferId: string): void {
   if (!/^xfer-[0-9A-HJKMNP-TV-Z]{26}$/u.test(transferId)) {
     throw new TypeError("Migration transfer id is not safe for private storage");
   }
-}
-
-function isMissingPath(error: unknown): boolean {
-  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 function preparedRecord(

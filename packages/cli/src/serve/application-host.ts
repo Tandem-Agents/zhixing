@@ -17,6 +17,10 @@ import {
 import { runRecoveryRootEstablishmentTopology } from "./recovery-root-establishment-runtime.js";
 import { createRecoveryRootPairedCheckpointCommandReceiverInfrastructure } from "./paired-checkpoint-incoming-infrastructure.js";
 import {
+  createPlannedAnchorTransferStagingInfrastructure,
+} from "./planned-anchor-transfer-staging-infrastructure.js";
+import type { PlannedAnchorTransferStagingArea } from "./planned-anchor-transfer.js";
+import {
   planServeTopology,
   type AnchorServeBootstrapContext,
   type ExecutorRoleModule,
@@ -69,6 +73,8 @@ export interface PersistentApplicationHostDependencies<Options> {
   readonly createToolImplementation: () => KernelToolImplementationPort;
   readonly createDeviceCapacity: (temporaryRoot: string) => DeviceCapacityRuntime;
   readonly prepareMesh: typeof prepareMeshRuntimeBootstrap;
+  readonly createPlannedAnchorTransferStaging:
+    typeof createPlannedAnchorTransferStagingInfrastructure;
   readonly createRecoveryRootPairedCheckpointReceiver:
     typeof createRecoveryRootPairedCheckpointCommandReceiverInfrastructure;
   readonly runRecoveryRoot: typeof runRecoveryRootEstablishmentTopology;
@@ -97,6 +103,9 @@ export class PersistentApplicationHost<Options> {
   readonly #dependencies: PersistentApplicationHostDependencies<Options>;
   readonly #configuration: RuntimeConfigurationProjections;
   #mesh: (OwnedResource & { readonly value: MeshRuntimeBootstrap }) | undefined;
+  #plannedAnchorTransferStaging:
+    | (OwnedResource & { readonly value: PlannedAnchorTransferStagingArea })
+    | undefined;
   #localWorkspaceOwner:
     | (OwnedResource & { readonly value: Exclude<LocalWorkspaceOwner, undefined> })
     | undefined;
@@ -153,7 +162,16 @@ export class PersistentApplicationHost<Options> {
     const deviceCapacity = this.#dependencies.createDeviceCapacity(
       `${this.#input.zhixingHome}/distributed-runtime/capacity`,
     );
-    let mesh = await this.#prepareMesh(deviceCapacity);
+    const plannedAnchorTransferStaging =
+      this.#dependencies.createPlannedAnchorTransferStaging({
+        zhixingHome: this.#input.zhixingHome,
+        storageMaintenance: deviceCapacity.storage,
+      });
+    this.#plannedAnchorTransferStaging = own(
+      plannedAnchorTransferStaging,
+      () => plannedAnchorTransferStaging.close(),
+    );
+    let mesh = await this.#prepareMesh(deviceCapacity, plannedAnchorTransferStaging);
 
     if (requiresRecoveryRootEstablishment(mesh)) {
       this.#input.onRecoveryRootRequired();
@@ -171,7 +189,7 @@ export class PersistentApplicationHost<Options> {
         pairedCheckpointReceiver,
       });
       await this.#releaseCurrentMesh();
-      mesh = await this.#prepareMesh(deviceCapacity);
+      mesh = await this.#prepareMesh(deviceCapacity, plannedAnchorTransferStaging);
       if (!hasEstablishedRecoveryRoot(mesh)) {
         throw new Error("恢复根激活后未形成可运行的耐久信任状态");
       }
@@ -258,11 +276,15 @@ export class PersistentApplicationHost<Options> {
     );
   }
 
-  async #prepareMesh(deviceCapacity: DeviceCapacityRuntime): Promise<MeshRuntimeBootstrap> {
+  async #prepareMesh(
+    deviceCapacity: DeviceCapacityRuntime,
+    plannedAnchorTransferStaging: PlannedAnchorTransferStagingArea,
+  ): Promise<MeshRuntimeBootstrap> {
     const mesh = await this.#dependencies.prepareMesh({
       zhixingHome: this.#input.zhixingHome,
       secretStore: this.#input.secretStore,
       storageMaintenance: deviceCapacity.storage,
+      plannedAnchorTransferStaging,
       ...(this.#configuration.topology.mesh
         ? { configuration: this.#configuration.topology.mesh }
         : {}),
@@ -286,6 +308,11 @@ export class PersistentApplicationHost<Options> {
     for (const release of [
       () => this.#releaseCurrentMesh(),
       async () => {
+        const owner = this.#plannedAnchorTransferStaging;
+        this.#plannedAnchorTransferStaging = undefined;
+        if (owner) await releaseOnce(owner);
+      },
+      async () => {
         const owner = this.#localWorkspaceOwner;
         this.#localWorkspaceOwner = undefined;
         if (owner) await releaseOnce(owner);
@@ -308,6 +335,8 @@ export function createPersistentApplicationHost(
     createToolImplementation: createHostKernelToolImplementation,
     createDeviceCapacity: createDeviceCapacityRuntime,
     prepareMesh: prepareMeshRuntimeBootstrap,
+    createPlannedAnchorTransferStaging:
+      createPlannedAnchorTransferStagingInfrastructure,
     createRecoveryRootPairedCheckpointReceiver:
       createRecoveryRootPairedCheckpointCommandReceiverInfrastructure,
     runRecoveryRoot: runRecoveryRootEstablishmentTopology,

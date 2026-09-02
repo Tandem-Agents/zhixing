@@ -53,6 +53,12 @@ describe("persistent ApplicationHost outer lifecycle", () => {
         }
         expect(harness.roleBootstrap?.mesh.roles).toEqual(topology.roles);
         expect(harness.createToolImplementation).toHaveBeenCalledOnce();
+        expect(harness.createPlannedAnchorTransferStaging).toHaveBeenCalledOnce();
+        expect(harness.closePlannedAnchorTransferStaging).toHaveBeenCalledOnce();
+        expect(harness.prepareMesh.mock.calls[0]?.[0].plannedAnchorTransferStaging)
+          .toBe(harness.plannedAnchorTransferStaging);
+        expect(harness.roleBootstrap?.mesh.plannedAnchorTransferStaging)
+          .toBe(harness.plannedAnchorTransferStaging);
         expect(harness.roleBootstrap?.toolImplementation)
           .toBe(harness.toolImplementation);
         expect(harness.roleBootstrap).not.toHaveProperty("startup");
@@ -147,6 +153,12 @@ describe("persistent ApplicationHost outer lifecycle", () => {
     expect(harness.runRecoveryRoot.mock.calls[0]?.[0].pairedCheckpointReceiver)
       .toBe(harness.pairedCheckpointReceiver);
     expect(harness.prepareMesh).toHaveBeenCalledTimes(2);
+    expect(harness.prepareMesh.mock.calls[0]?.[0].plannedAnchorTransferStaging)
+      .toBe(harness.plannedAnchorTransferStaging);
+    expect(harness.prepareMesh.mock.calls[1]?.[0].plannedAnchorTransferStaging)
+      .toBe(harness.plannedAnchorTransferStaging);
+    expect(harness.createPlannedAnchorTransferStaging).toHaveBeenCalledOnce();
+    expect(harness.closePlannedAnchorTransferStaging).toHaveBeenCalledOnce();
     expect(harness.roleInvocations()).toBe(1);
     expect(harness.meshStops).toHaveLength(2);
     expect(harness.meshStops[0]).toHaveBeenCalledOnce();
@@ -363,6 +375,15 @@ function createHarness(input: {
   const releaseLease = vi.fn(async () => {
     events.push("release-lease");
   });
+  const closePlannedAnchorTransferStaging = vi.fn(async () => undefined);
+  const plannedAnchorTransferStaging = {
+    openTarget: vi.fn(),
+    openTransfer: vi.fn(),
+    cleanupPostInstall: vi.fn(),
+    close: closePlannedAnchorTransferStaging,
+  } as never;
+  const createPlannedAnchorTransferStaging = vi.fn(() =>
+    plannedAnchorTransferStaging);
   const meshes = input.recoveryRequired
     ? [createMesh(false), createMesh(true)]
     : [createMesh(true)];
@@ -427,6 +448,7 @@ function createHarness(input: {
       return deviceCapacity;
     },
     prepareMesh: prepareMesh as never,
+    createPlannedAnchorTransferStaging,
     createRecoveryRootPairedCheckpointReceiver,
     runRecoveryRoot: runRecoveryRoot as never,
     acquireLocalWorkspaceOwner: (async (_home, roles) => {
@@ -460,6 +482,9 @@ function createHarness(input: {
     importExecutorRole,
     importExecutorModule,
     createToolImplementation,
+    createPlannedAnchorTransferStaging,
+    closePlannedAnchorTransferStaging,
+    plannedAnchorTransferStaging,
     toolImplementation,
     roleInvocations: () => runAnchorRole.mock.calls.length + runExecutorRole.mock.calls.length,
     get rolePlan() {
@@ -490,6 +515,7 @@ function createHarness(input: {
           : {}),
       },
       bootstrapStore: { stopStorageMaintenance: stop },
+      plannedAnchorTransferStaging,
     } as unknown as MeshRuntimeBootstrap;
   }
 }
