@@ -28,8 +28,8 @@ import {
 import {
   DEFAULT_ARTIFACT_CHUNK_BYTES,
   type ArtifactReceiveProgress,
-  type FileResumableArtifactReceiver,
 } from "./assignment-artifacts.js";
+import type { SurfaceAssetUploadStagingPort } from "./surface-asset-staging.js";
 import type {
   ArtifactDeletionResult,
   MutableArtifactStore,
@@ -150,7 +150,7 @@ export interface SurfaceAssetCollectionResult {
 export interface SurfaceAssetCoordinatorOptions {
   readonly artifacts: MutableArtifactStore;
   readonly temporaryArtifacts: MutableArtifactStore;
-  readonly receiver: FileResumableArtifactReceiver;
+  readonly receiver: SurfaceAssetUploadStagingPort;
   readonly ledger: SurfaceAssetGrantLedger;
   readonly signer: ProtocolSigner;
   readonly verifier: ProtocolSignatureVerifier;

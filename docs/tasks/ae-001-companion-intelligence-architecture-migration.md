@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-09b P09 pairing continuation 持久边界已闭合；正在裁决 P09 asset temporary/partial 边界<br>
+> 当前检查点：A6-09c P09 Surface asset 临时存储边界已闭合；准备迁移 P09 mesh artifact partial 边界<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `e88a3666 + A6-09b 当前工作区差异`；A6-09b 已由协调者独立复核接受，待随本记录提交 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；P09 D04 pairing continuation 持久边界已闭合 |
-| 活跃工作包 | 无；协调者正在裁决 P09 asset temporary/partial 是否存在必须迁移的真实需求侧物理泄漏 |
-| 下一责任链 | 仅在生产事实成立时迁移 P09 asset temporary/partial 边界；否则直接裁决 P11/P12，不为不存在的问题生成工作包 |
-| 打开的单向桥 | 无；P07 四条物理持久边界、P09 D03 三个有限角色与 D04 continuation repository 均已单向接管，需求侧无 concrete/`Pick`/optional fallback 或第二 store |
-| 已失效证据 | 无当前未恢复架构证据；A6-01～09a 继续有效，A6-09b 的 required repository、物理持久与恢复证据已独立重取 |
+| 已接受基线 | `cd6262d0 + A6-09c 当前工作区差异`；A6-09c 已由协调者独立复核接受，待随本记录提交 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；P09 D05 Surface asset 临时存储边界已闭合 |
+| 活跃工作包 | 无；协调者准备派发 P09 `mesh-artifact-partials` 的有限 receiver 边界 |
+| 下一责任链 | 只收口 Mesh assignment artifact 的 partial receiver/Host 物理边界；不扩入 P11/P12 的独立 transfer/checkpoint receiver |
+| 打开的单向桥 | 无；P07 四条物理持久边界、P09 D03/D04 与 D05 的有限端口均已单向接管，需求侧无 File concrete、`Pick<concrete>`、optional fallback 或第二 Surface staging root |
+| 已失效证据 | 无当前未恢复架构证据；A6-01～09b 继续有效，A6-09c 的有限端口、两个组合入口和行为证据已独立重取 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2748,6 +2748,19 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据与门禁：continuation repository/物理 adapter、startup catch-up 与真实 pair command 共 3 文件 16/16，覆盖 frozen exact-set、七阶段 canonical save/load、坏格式/未知阶段、wrong-offer、并发 lock、跨实例 exact replay、tmp 零残留、catch-up 顺序/失败保留，以及真实 issuer/joiner/response-loss 链。CLI `tsc --noEmit` 与 `pnpm cli:build` 通过；canonical S7 最终 54/54 且 registry golden 通过，反向 mutation 拒绝 optional Host port、pair command concrete type、Host 漏绑定、第二 physical owner 和 device-removal cleanup 越权。首次 canonical S7 仅暴露 A6-09a inspector 仍要求 completion 调用内联于 Assembly；本包提取可直接验证的 catch-up 函数后已把该门禁等价绑定到 `bootstrapProjection.completions` 的单向传递与实际调用，最终恢复通过。未改 package manifest/export/build entry，package-export 门不相交且未重复运行。
 - 失效与交接：若 continuation 七阶段合同、required repository exact-set/frozen projection、唯一 File adapter/factory、三处组合边缘、pairing 任一 load/save/clear、startup catch-up 的 matching/收口顺序、物理 canonical/lock/tmp/fsync/clear、device-removal exclusion、S7 或上述直接测试变化，恢复 `A6-09b-p09-pairing-continuation-persistence-v1` 并只重验本闭包；A6-09a 只有 completion 端口传递或 D03 机制真实变化时才失效。A6继续 `[ ]`，当前实施完成并等待协调者独立复核；下一检查点只允许裁决 P09 asset temporary/partial，不提前进入 P11/P12、Device Administration 或 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：确认 continuation 合同只暴露冻结的 required `load/save/clear`，File implementation 为模块私有且仅由 pair 命令、Anchor Host、Executor Host 三个组合边缘通过唯一 factory 构造；pairing 状态机与 startup catch-up 不再持有 concrete、home/path、cast、optional fallback 或第二 store，七阶段、canonical shallow reader、原子持久化、wrong-offer clear、重放与 completion→secret→continuation 收口顺序保持不变。独立运行 continuation/runtime assembly/pair command 16/16、CLI typecheck、canonical S7 54/54 与 registry golden、生产 concrete 反查及 `git diff --check` 均通过；执行者的 CLI build 证据有效且 package exports 不相交。A6-09b 可以提交，A6仍保持 `[ ]`。
+
+### A6-09c：P09 Surface asset 临时存储边界收口
+
+- 派发基线与唯一结果：以已接受 `HEAD cd6262d0` 加本文调度记录为基线，只收口 P09 D05 `surface-asset-temporary/sha256/.../.presence/...` 与 `surface-asset-partials/` 的需求/物理边界。当前 Core `SurfaceAssetCoordinatorOptions` 与 `ArtifactLifecycleIndexOptions` 仍以 `FileResumableArtifactReceiver` concrete 或 `Pick<concrete,...>` 声明需求，CLI `createSurfaceAssetAuthority` 与 `FileMeshBootstrapStore` 分别直接选择临时 CAS、presence 和 partial 路径。迁移后 Surface asset 协调、恢复与生命周期只消费由需求语义定义的 required、readonly、有限端口；File store/receiver/presence、home/path、目录和文件机制只存在于 Host/Infrastructure 组合边缘，不增加统一 Storage facade。
+- 生产闭包与保护：覆盖 upload progress/append、temporary presence 记账与结算、崩溃重建、partial/reference cursor、临时完成对象向 P06 CAS 单向提升、未采用/释放回收、maintenance stop，以及完整 Authority Host 和 backup/pair 命令通过 `FileMeshBootstrapStore.checkpointRetention()` 使用同一既有物理合同的路径。保持 digest/length/chunk bound、scope/device quota、grant/retained-reference、canonical marker、legacy presence migration、response-loss replay、missing/损坏 fail closed、原子 CAS/partial 删除、storage maintenance 和 current-device cleanup 精确集合不变。
+- 旧路与明确不做：Core 协调器与生命周期不得继续导入、引用或以 `Pick<FileResumableArtifactReceiver,...>` 暴露 File concrete，应用/领域对象不得取得 root/path 或自行构造物理实现；Host 可构造物理机制并按有限角色注入。不得改变 P06 grant/ref/Authority/Checkpoint 语义，不迁移 `mesh-artifact-partials`、P11/P12 transfer/checkpoint receivers，不重写通用 ArtifactStore/File receiver 实现，不增加第二临时 schema、自动 retention、通用 persistence registry 或产品能力。
+- 最窄证据与完成条件：直接测试必须识别有限端口 exact-set/required 注入、upload→临时落地→P06 adopt、七类适用恢复/失败/重放/清理边界以及 full Authority 与 command-only checkpoint-retention 两个真实组合入口；结构门禁拒绝 Core demand 对 File concrete/`Pick` 的回流、Host 漏注入、需求侧 path/construction、第二 P09 Surface physical root/owner 和 device-removal 集合漂移。按验证手册只跑 Surface asset coordinator/lifecycle/authority/bootstrap-store 相交测试、Core/CLI typecheck 与必要 build、canonical S7、真实相交的 package exports、changed-source 格式和 `git diff --check`，不得重复 D03/D04、P07、Mesh assignment、P11/P12、根级回归或制品验收。
+- 安全交接：只有两个生产组合入口仍使用同一 P09 Surface 物理合同，Core/Surface 需求侧只见有限角色，P06 正式事实与既有恢复/回收/清理语义无回退且无 concrete/路径旁路时才结束；A6继续 `[ ]`。约四小时仍未闭合、需要同时迁移 Mesh assignment receiver、发现 P06 grant/checkpoint 产品合同必须改变、或影响扩入 P11/P12 时，停在可构建、可运行、单一 Surface staging 真相成立的检查点反馈，不得执行任何 Git 写操作。
+- 实施结果与唯一物理边界：新增需求方拥有且 required/readonly 的 `SurfaceAssetUploadStagingPort`、`SurfaceAssetTemporaryRecoveryPort`、`SurfaceAssetTemporaryPresencePort`，分别精确暴露 upload 的 `progress/append/discard`、崩溃恢复的 `progress/openPartialReferenceCursor` 与 presence 的八项记账/迁移能力；冻结 projection 不再暴露 receiver 的 `visitPartialReferences`、root 或其他物理能力。`SurfaceAssetCoordinatorOptions` 与 `ArtifactLifecycleIndexOptions` 已改绑对应有限角色，Core demand source 对 `FileResumableArtifactReceiver`、`Pick<File...>` 和具体 presence store 的引用归零；P06 lifecycle index 自身既有 log/projection 机制不属于本包且未改写。
+- 两个组合入口与行为保护：CLI 新增唯一 `createSurfaceAssetStagingInfrastructure`，只在该 Host/Infrastructure 边缘选择 `surface-asset-temporary`、其 `.presence` 与 `surface-asset-partials`，一次构造 File CAS/receiver/presence 后投影三个角色。完整 `createSurfaceAssetAuthority` 同时把 upload 角色交给 coordinator、recovery/presence 角色交给 lifecycle；command-only `FileMeshBootstrapStore` 复用同一 factory，并把 `checkpointRetention()` 返回面收窄为 `ArtifactCheckpointRetentionPort`。digest/length/chunk、grant/quota/presence、partial cursor、legacy migration、temporary→P06 CAS adopt、响应丢失重放、未采用/已释放回收、maintenance stop 与 current-device cleanup 两项路径未改变；`mesh-artifact-partials`、P11/P12 及 P06 产品合同未触碰。
+- 直接证据与门禁：新增 Core finite projection 2/2 与 CLI 真实物理/command-only composition 2/2；Core coordinator/lifecycle 相交恢复、presence、legacy、response-loss、adopt/reclaim/cleanup 15/15，CLI 完整 Authority 与 in-process/Mesh conformance 19/19。首次 CLI infrastructure 验证准确命中未重建 Core dist 导致新 projection export 不可见，按验证手册完成 Core typecheck/build 后重取；随后新增两项最终 2/2。Core 与 CLI `tsc --noEmit`、Core build、`pnpm cli:build`、`pnpm runtime:package-exports`、changed-source Biome 与 `git diff --check` 通过；Core build 仅有既有 circular-chunk warning。canonical `pnpm s7:lint` 为 55/55 且 registry golden 通过，新 inspector/mutation 冻结三角色 exact-set、两个 factory consumer、唯一物理 root owner、command-only 窄返回、Core concrete/`Pick` 归零及 current-device cleanup exact-set。
+- 失效与安全交接：若三项 port/exact-set/frozen projection、`SurfaceAssetCoordinatorOptions`/`ArtifactLifecycleIndexOptions`、唯一 CLI physical factory、full Authority 或 `FileMeshBootstrapStore.checkpointRetention()` 任一组合、temporary/presence/partial root、upload/recovery/adopt/reclaim/maintenance、device-removal 两项清理、authority export、S7 mutation 或上述直接测试变化，恢复 `A6-09c-p09-surface-asset-staging-boundary-v1` 并只重验本闭包；A6-09a/09b 只有其各自 D03/D04 输入真实变化时才失效。当前完成并等待协调者独立复核，A6继续 `[ ]`；下一检查点只允许独立裁决 `mesh-artifact-partials`，不得进入 P11/P12、A7 或通用 receiver/storage 重写。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：确认 Core 的上传、生命周期恢复和 presence 三类需求只取得冻结的 required 有限端口，`SurfaceAssetCoordinator`/`ArtifactLifecycleIndex` 不再引用 File receiver、具体 presence 或 `Pick<concrete>`；CLI 唯一物理 factory 由完整 Authority 与 command-only bootstrap 两个入口复用，canonical roots、temporary→P06 单向提升、恢复/legacy/reclaim/maintenance 和 device-removal 集合均未改变。独立运行 Core staging/coordinator/lifecycle 73/73、CLI staging/Authority/双 binding conformance 21/21、Core 与 CLI typecheck、canonical S7 55/55 与 registry golden、concrete/path 反查及 `git diff --check` 均通过；执行者的 Core/CLI build、runtime package exports 与格式证据有效。A6-09c 可以提交，A6仍保持 `[ ]`。
 
 ## 十、用户提示词
 

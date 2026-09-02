@@ -12,14 +12,12 @@ import type {
   PairingStreamRecord,
   RecoveryActivationPlan,
 } from "@zhixing/core/contracts";
-import { MAX_SURFACE_ASSET_BYTES } from "@zhixing/core/contracts";
 import {
   ArtifactLifecycleIndex,
   collectArtifactRefs,
   FileArtifactStore,
-  FileArtifactTemporaryPresenceStore,
   FileAuthorityCommitLog,
-  FileResumableArtifactReceiver,
+  type ArtifactCheckpointRetentionPort,
 } from "@zhixing/core/authority";
 import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
@@ -67,6 +65,7 @@ import type {
   MeshEndpointDirectoryPersistencePort,
   MeshTransportPeerDirectoryPersistencePort,
 } from "./mesh-bootstrap-projection.js";
+import { createSurfaceAssetStagingInfrastructure } from "./surface-asset-staging-infrastructure.js";
 
 type TrustStreamRecord =
   | { readonly t: "home-trust-event"; readonly event: HomeTrustEvent }
@@ -128,24 +127,17 @@ export class FileMeshBootstrapStore
       this.#artifacts,
       { storageMaintenance: options.storageMaintenance },
     );
-    const temporaryArtifacts = new FileArtifactStore(
-      path.join(distributedRoot, "surface-asset-temporary"),
-    );
-    const receiver = new FileResumableArtifactReceiver(
-      temporaryArtifacts,
-      path.join(distributedRoot, "surface-asset-partials"),
-      { maxArtifactBytes: MAX_SURFACE_ASSET_BYTES },
-    );
+    const staging = createSurfaceAssetStagingInfrastructure({
+      distributedRoot,
+      storageMaintenance: options.storageMaintenance,
+    });
     this.#checkpointLifecycle = new ArtifactLifecycleIndex({
       rootDir: path.join(distributedRoot, "derived"),
       logs: [this.#log],
       artifacts: this.#artifacts,
-      temporaryArtifacts,
-      temporaryPresence: new FileArtifactTemporaryPresenceStore(
-        path.join(temporaryArtifacts.rootDir, ".presence"),
-        { storageMaintenance: options.storageMaintenance },
-      ),
-      receiver,
+      temporaryArtifacts: staging.temporaryArtifacts,
+      temporaryPresence: staging.presence,
+      receiver: staging.recovery,
       storageMaintenance: options.storageMaintenance,
       maintenanceResourceId: this.#artifacts.rootDir,
     });
@@ -173,7 +165,7 @@ export class FileMeshBootstrapStore
     return this.#artifacts;
   }
 
-  checkpointRetention(): ArtifactLifecycleIndex {
+  checkpointRetention(): ArtifactCheckpointRetentionPort {
     return this.#checkpointLifecycle;
   }
 

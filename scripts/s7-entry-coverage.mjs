@@ -3930,6 +3930,7 @@ export async function validateS7Structure() {
   failures.push(...inspectWorkspaceBindingCatalogPersistenceBoundary(records));
   failures.push(...inspectMeshBootstrapProjectionBoundary(records));
   failures.push(...inspectMeshPairingContinuationPersistenceBoundary(records));
+  failures.push(...inspectSurfaceAssetStagingPersistenceBoundary(records));
   failures.push(...inspectConversationAdoptionAssembly(records));
   failures.push(...inspectConversationStorageBoundary(records));
   failures.push(...inspectWorksceneStorageCleanupBoundary(records));
@@ -11554,6 +11555,149 @@ export function inspectMeshPairingContinuationPersistenceBoundary(records) {
     cleanup.includes("FileMeshPairingContinuationStore")
   ) {
     failures.push("Device removal cleanup took ownership of pairing continuation state");
+  }
+  return failures;
+}
+
+export function inspectSurfaceAssetStagingPersistenceBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const text = byPath.get(relative);
+    if (text === undefined) failures.push(`${relative}: Surface asset staging source is missing`);
+    return text ?? "";
+  };
+  const portPath = "packages/core/src/authority/surface-asset-staging.ts";
+  const coordinatorPath = "packages/core/src/authority/surface-assets.ts";
+  const lifecyclePath = "packages/core/src/authority/artifact-lifecycle-index.ts";
+  const infrastructurePath =
+    "packages/cli/src/serve/surface-asset-staging-infrastructure.ts";
+  const authorityPath = "packages/cli/src/serve/surface-asset-authority.ts";
+  const bootstrapPath = "packages/cli/src/serve/mesh-bootstrap-store.ts";
+  const cleanupPath = "packages/cli/src/serve/device-removal-cleanup.ts";
+  const ports = required(portPath);
+  const coordinator = required(coordinatorPath);
+  const lifecycle = required(lifecyclePath);
+  const infrastructure = required(infrastructurePath);
+  const authority = required(authorityPath);
+  const bootstrap = required(bootstrapPath);
+  const cleanup = required(cleanupPath);
+  const count = (text, token) => text.split(token).length - 1;
+
+  const uploadStart = ports.indexOf("export interface SurfaceAssetUploadStagingPort");
+  const uploadEnd = ports.indexOf("\n}", uploadStart);
+  const upload = uploadStart < 0 || uploadEnd < 0
+    ? ""
+    : ports.slice(uploadStart, uploadEnd);
+  const recoveryStart = ports.indexOf(
+    "export interface SurfaceAssetTemporaryRecoveryPort",
+  );
+  const recoveryEnd = ports.indexOf("\n}", recoveryStart);
+  const recovery = recoveryStart < 0 || recoveryEnd < 0
+    ? ""
+    : ports.slice(recoveryStart, recoveryEnd);
+  const presenceStart = ports.indexOf(
+    "export interface SurfaceAssetTemporaryPresencePort",
+  );
+  const presenceEnd = ports.indexOf("\n}", presenceStart);
+  const presence = presenceStart < 0 || presenceEnd < 0
+    ? ""
+    : ports.slice(presenceStart, presenceEnd);
+  if (
+    !upload.includes("readonly progress:") ||
+    !upload.includes("readonly append:") ||
+    !upload.includes("readonly discard:") ||
+    /openPartialReferenceCursor|visitPartialReferences|rootDir|path/u.test(upload) ||
+    !recovery.includes("readonly progress:") ||
+    !recovery.includes("readonly openPartialReferenceCursor:") ||
+    /append|discard|visitPartialReferences|rootDir|path/u.test(recovery) ||
+    !presence.includes("readonly mark:") ||
+    !presence.includes("readonly has:") ||
+    !presence.includes("readonly removeScopes:") ||
+    !presence.includes("readonly remove:") ||
+    !presence.includes("readonly openReconciliationCursor:") ||
+    !presence.includes("readonly hasLegacyMigration:") ||
+    !presence.includes("readonly beginLegacyMigration:") ||
+    !presence.includes("readonly finishLegacyMigration:") ||
+    /visitReferences|visitScopes|removeStagingFiles|rootDir|path/u.test(presence) ||
+    !ports.includes("return Object.freeze({") ||
+    count(ports, "Object.freeze({") !== 4
+  ) {
+    failures.push("Surface asset staging finite readonly port exact-set drifted");
+  }
+
+  if (
+    coordinator.includes("FileResumableArtifactReceiver") ||
+    coordinator.includes("Pick<File") ||
+    !coordinator.includes("readonly receiver: SurfaceAssetUploadStagingPort;") ||
+    lifecycle.includes("FileResumableArtifactReceiver") ||
+    lifecycle.includes("ArtifactTemporaryPresenceStore") ||
+    lifecycle.includes("Pick<File") ||
+    !lifecycle.includes("readonly temporaryPresence: SurfaceAssetTemporaryPresencePort;") ||
+    !lifecycle.includes("readonly receiver: SurfaceAssetTemporaryRecoveryPort;")
+  ) {
+    failures.push("Core Surface asset demand regained a concrete or broad physical mechanism");
+  }
+
+  if (
+    count(infrastructure, "new FileArtifactStore(") !== 1 ||
+    count(infrastructure, "new FileResumableArtifactReceiver(") !== 1 ||
+    count(infrastructure, "new FileArtifactTemporaryPresenceStore(") !== 1 ||
+    count(infrastructure, '"surface-asset-temporary"') !== 1 ||
+    count(infrastructure, '"surface-asset-partials"') !== 1 ||
+    count(infrastructure, '".presence"') !== 1 ||
+    count(infrastructure, "projectSurfaceAssetStagingPorts(receiver, presence)") !== 1 ||
+    !infrastructure.includes("return Object.freeze({")
+  ) {
+    failures.push("Surface asset staging physical composition or root exact-set drifted");
+  }
+
+  if (
+    count(authority, "createSurfaceAssetStagingInfrastructure({") !== 1 ||
+    !authority.includes("temporaryArtifacts: staging.temporaryArtifacts") ||
+    !authority.includes("temporaryPresence: staging.presence") ||
+    !authority.includes("receiver: staging.recovery") ||
+    !authority.includes("receiver: staging.upload") ||
+    /FileResumableArtifactReceiver|FileArtifactTemporaryPresenceStore|surface-asset-partials|surface-asset-temporary/u.test(authority) ||
+    count(bootstrap, "createSurfaceAssetStagingInfrastructure({") !== 1 ||
+    !bootstrap.includes("temporaryArtifacts: staging.temporaryArtifacts") ||
+    !bootstrap.includes("temporaryPresence: staging.presence") ||
+    !bootstrap.includes("receiver: staging.recovery") ||
+    !bootstrap.includes("checkpointRetention(): ArtifactCheckpointRetentionPort") ||
+    /FileResumableArtifactReceiver|FileArtifactTemporaryPresenceStore|surface-asset-partials|surface-asset-temporary/u.test(bootstrap)
+  ) {
+    failures.push("Surface asset full-Host or command-only composition bypassed finite staging roles");
+  }
+
+  const factoryConsumers = records
+    .filter((record) =>
+      record.relative !== infrastructurePath &&
+      record.text.includes("createSurfaceAssetStagingInfrastructure({")
+    )
+    .map((record) => record.relative)
+    .sort();
+  const expectedConsumers = [authorityPath, bootstrapPath].sort();
+  const physicalRootOwners = records
+    .filter((record) =>
+      record.text.includes('"surface-asset-temporary"') ||
+      record.text.includes('"surface-asset-partials"')
+    )
+    .map((record) => record.relative)
+    .sort();
+  const expectedRootOwners = [cleanupPath, infrastructurePath].sort();
+  if (
+    factoryConsumers.length !== expectedConsumers.length ||
+    factoryConsumers.some((relative, index) => relative !== expectedConsumers[index]) ||
+    physicalRootOwners.length !== expectedRootOwners.length ||
+    physicalRootOwners.some((relative, index) => relative !== expectedRootOwners[index])
+  ) {
+    failures.push("Surface asset staging acquired a second physical root or composition entry");
+  }
+  if (
+    count(cleanup, 'path.join(distributed, "surface-asset-partials")') !== 1 ||
+    count(cleanup, 'path.join(distributed, "surface-asset-temporary")') !== 1
+  ) {
+    failures.push("Surface asset current-device cleanup exact-set drifted");
   }
   return failures;
 }

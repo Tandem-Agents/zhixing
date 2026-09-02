@@ -3,8 +3,6 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 import {
   FileArtifactStore,
-  FileArtifactTemporaryPresenceStore,
-  FileResumableArtifactReceiver,
   ArtifactLifecycleIndex,
   AuthorityStorageError,
   DurableProjectionStorageError,
@@ -27,7 +25,6 @@ import {
   type SurfaceAssetGrantLedgerSnapshot,
 } from "@zhixing/core/authority";
 import {
-  MAX_SURFACE_ASSET_BYTES,
   type ArtifactRef,
   type CommitEnvelope,
   type ControlEnvelope,
@@ -45,6 +42,7 @@ import {
   type ProtocolSigner,
 } from "@zhixing/core/protocol";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
+import { createSurfaceAssetStagingInfrastructure } from "./surface-asset-staging-infrastructure.js";
 
 const CROCKFORD_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const SURFACE_ASSET_PROJECTION_ID = "surface-asset-grants";
@@ -100,25 +98,17 @@ function buildSurfaceAssetAuthority(
   readonly coordinatorOptions: SurfaceAssetCoordinatorOptions;
   readonly lifecycle: ArtifactLifecycleIndex;
 } {
-  const temporaryArtifacts = new FileArtifactStore(
-    path.join(options.authorityRoot, "surface-asset-temporary"),
-  );
-  const receiver = new FileResumableArtifactReceiver(
-    temporaryArtifacts,
-    path.join(options.authorityRoot, "surface-asset-partials"),
-    { maxArtifactBytes: MAX_SURFACE_ASSET_BYTES },
-  );
-  const temporaryPresence = new FileArtifactTemporaryPresenceStore(
-    path.join(temporaryArtifacts.rootDir, ".presence"),
-    { storageMaintenance: options.storageMaintenance },
-  );
+  const staging = createSurfaceAssetStagingInfrastructure({
+    distributedRoot: options.authorityRoot,
+    storageMaintenance: options.storageMaintenance,
+  });
   const lifecycle = new ArtifactLifecycleIndex({
     rootDir: path.join(options.authorityRoot, "derived"),
     logs: [options.log, ...options.retentionLogs],
     artifacts: options.artifacts,
-    temporaryArtifacts,
-    temporaryPresence,
-    receiver,
+    temporaryArtifacts: staging.temporaryArtifacts,
+    temporaryPresence: staging.presence,
+    receiver: staging.recovery,
     storageMaintenance: options.storageMaintenance,
     maintenanceResourceId: options.artifacts.rootDir,
   });
@@ -130,8 +120,8 @@ function buildSurfaceAssetAuthority(
   );
   const coordinatorOptions: SurfaceAssetCoordinatorOptions = {
     artifacts: options.artifacts,
-    temporaryArtifacts,
-    receiver,
+    temporaryArtifacts: staging.temporaryArtifacts,
+    receiver: staging.upload,
     ledger: projection,
     signer: options.signer,
     verifier: options.verifier,

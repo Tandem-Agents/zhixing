@@ -40,10 +40,6 @@ import {
 } from "./durable-projection-index.js";
 import { AuthorityStorageError } from "./errors.js";
 import type {
-  ArtifactTemporaryPresenceStore,
-  TemporaryPresenceReconciliationCursor,
-} from "./artifact-temporary-presence.js";
-import type {
   ArtifactReferenceCursor,
   ArtifactStore,
   ArtifactRetentionSnapshot,
@@ -52,7 +48,11 @@ import type {
   PhysicalStorageStepRunner,
 } from "./interfaces.js";
 import type { FileAuthorityCommitLog } from "./commit-log.js";
-import type { FileResumableArtifactReceiver } from "./assignment-artifacts.js";
+import type {
+  SurfaceAssetTemporaryPresenceCursor,
+  SurfaceAssetTemporaryPresencePort,
+  SurfaceAssetTemporaryRecoveryPort,
+} from "./surface-asset-staging.js";
 
 const SOURCE_PAGE_SIZE = 64;
 const RETIREMENT_PAGE_SIZE = 64;
@@ -103,11 +103,8 @@ export interface ArtifactLifecycleIndexOptions {
   readonly logs: readonly FileAuthorityCommitLog[];
   readonly artifacts: ArtifactStore;
   readonly temporaryArtifacts: MutableArtifactStore;
-  readonly temporaryPresence: ArtifactTemporaryPresenceStore;
-  readonly receiver: Pick<
-    FileResumableArtifactReceiver,
-    "progress" | "visitPartialReferences" | "openPartialReferenceCursor"
-  >;
+  readonly temporaryPresence: SurfaceAssetTemporaryPresencePort;
+  readonly receiver: SurfaceAssetTemporaryRecoveryPort;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   /** 规范维护身份中的物理 ArtifactStore 标识；生产装配必须传真实存储根。 */
   readonly maintenanceResourceId?: string;
@@ -251,7 +248,7 @@ interface MutationValue {
 
 interface TemporaryReconciliationSession {
   phase: "presence" | "legacy" | "partial";
-  presence?: TemporaryPresenceReconciliationCursor;
+  presence?: SurfaceAssetTemporaryPresenceCursor;
   references?: ArtifactReferenceCursor;
   readonly queued: ArtifactRef[];
   referencePage: number;
@@ -272,11 +269,8 @@ export class ArtifactLifecycleIndex {
   readonly #records: DurableProjectionReadContext;
   readonly #artifacts: ArtifactStore;
   readonly #temporaryArtifacts: MutableArtifactStore;
-  readonly #temporaryPresence: ArtifactTemporaryPresenceStore;
-  readonly #receiver: Pick<
-    FileResumableArtifactReceiver,
-    "progress" | "visitPartialReferences" | "openPartialReferenceCursor"
-  >;
+  readonly #temporaryPresence: SurfaceAssetTemporaryPresencePort;
+  readonly #receiver: SurfaceAssetTemporaryRecoveryPort;
   readonly #logs: readonly FileAuthorityCommitLog[];
   #sources: readonly LifecycleSource[] | undefined;
   #retentionRebuildRequired = false;

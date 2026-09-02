@@ -85,6 +85,15 @@ export {
   type SurfaceAssetGrantLedgerSnapshot,
 } from "./surface-assets.js";
 export {
+  projectSurfaceAssetStagingPorts,
+  type SurfaceAssetStagingPorts,
+  type SurfaceAssetTemporaryPresenceCursor,
+  type SurfaceAssetTemporaryPresenceEntry,
+  type SurfaceAssetTemporaryPresencePort,
+  type SurfaceAssetTemporaryRecoveryPort,
+  type SurfaceAssetUploadStagingPort,
+} from "./surface-asset-staging.js";
+export {
   decodeCommitEnvelope,
   FileAuthorityCommitLog,
   MAX_INLINE_LOGICAL_RECORD_BYTES,

@@ -23,6 +23,7 @@ import {
   inspectWorkspaceBindingCatalogPersistenceBoundary,
   inspectMeshBootstrapProjectionBoundary,
   inspectMeshPairingContinuationPersistenceBoundary,
+  inspectSurfaceAssetStagingPersistenceBoundary,
   inspectConversationStorageBoundary,
   inspectWorksceneStorageCleanupBoundary,
   inspectStorageRemainderBoundary,
@@ -1438,6 +1439,91 @@ test("P09 pairing continuation stays finite, durable, and required at command/Ho
       },
     ]).join("\n"),
     /second factory or physical owner/u,
+  );
+});
+
+test("P09 Surface asset staging stays finite and physical only at two composition entries", async () => {
+  const paths = [
+    "packages/core/src/authority/surface-asset-staging.ts",
+    "packages/core/src/authority/surface-assets.ts",
+    "packages/core/src/authority/artifact-lifecycle-index.ts",
+    "packages/cli/src/serve/surface-asset-staging-infrastructure.ts",
+    "packages/cli/src/serve/surface-asset-authority.ts",
+    "packages/cli/src/serve/mesh-bootstrap-store.ts",
+    "packages/cli/src/serve/device-removal-cleanup.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: (await readFile(relative, "utf8")).replaceAll("\r\n", "\n"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectSurfaceAssetStagingPersistenceBoundary(records), []);
+  assert.match(
+    inspectSurfaceAssetStagingPersistenceBoundary(mutate(
+      "packages/core/src/authority/surface-assets.ts",
+      (text) => text.replace(
+        "readonly receiver: SurfaceAssetUploadStagingPort;",
+        "readonly receiver: FileResumableArtifactReceiver;",
+      ),
+    )).join("\n"),
+    /concrete or broad physical mechanism/u,
+  );
+  assert.match(
+    inspectSurfaceAssetStagingPersistenceBoundary(mutate(
+      "packages/core/src/authority/artifact-lifecycle-index.ts",
+      (text) => text.replace(
+        "readonly receiver: SurfaceAssetTemporaryRecoveryPort;",
+        'readonly receiver: Pick<FileResumableArtifactReceiver, "progress">;',
+      ),
+    )).join("\n"),
+    /concrete or broad physical mechanism/u,
+  );
+  assert.match(
+    inspectSurfaceAssetStagingPersistenceBoundary(mutate(
+      "packages/cli/src/serve/mesh-bootstrap-store.ts",
+      (text) => text.replace("createSurfaceAssetStagingInfrastructure({", "missingStaging({"),
+    )).join("\n"),
+    /command-only composition|second physical root/u,
+  );
+  assert.match(
+    inspectSurfaceAssetStagingPersistenceBoundary(mutate(
+      "packages/cli/src/serve/mesh-bootstrap-store.ts",
+      (text) => text.replace(
+        "checkpointRetention(): ArtifactCheckpointRetentionPort",
+        "checkpointRetention(): ArtifactLifecycleIndex",
+      ),
+    )).join("\n"),
+    /command-only composition/u,
+  );
+  assert.match(
+    inspectSurfaceAssetStagingPersistenceBoundary(mutate(
+      "packages/cli/src/serve/surface-asset-authority.ts",
+      (text) => `${text}\nvoid new FileResumableArtifactReceiver();`,
+    )).join("\n"),
+    /bypassed finite staging roles/u,
+  );
+  assert.match(
+    inspectSurfaceAssetStagingPersistenceBoundary(mutate(
+      "packages/cli/src/serve/device-removal-cleanup.ts",
+      (text) => text.replace(
+        'path.join(distributed, "surface-asset-partials"),',
+        "",
+      ),
+    )).join("\n"),
+    /current-device cleanup exact-set/u,
+  );
+  assert.match(
+    inspectSurfaceAssetStagingPersistenceBoundary([
+      ...records,
+      {
+        relative: "packages/cli/src/serve/duplicate-surface-staging.ts",
+        text: 'void "surface-asset-temporary";',
+      },
+    ]).join("\n"),
+    /second physical root/u,
   );
 });
 
