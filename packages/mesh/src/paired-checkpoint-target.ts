@@ -130,6 +130,25 @@ export interface PairedCheckpointTransport {
   request(command: PairedCheckpointCommand, signal?: AbortSignal): Promise<PairedCheckpointResult>;
 }
 
+export interface PairedCheckpointCommandReceiver {
+  readonly request: (
+    command: PairedCheckpointCommand,
+    signal?: AbortSignal,
+  ) => Promise<PairedCheckpointResult>;
+}
+
+export function projectPairedCheckpointCommandReceiver(
+  receiver: PairedCheckpointCommandReceiver,
+): PairedCheckpointCommandReceiver {
+  if (!receiver || typeof receiver.request !== "function") {
+    throw new TypeError("Paired checkpoint command receiver must provide request");
+  }
+  return Object.freeze({
+    request: (command: PairedCheckpointCommand, signal?: AbortSignal) =>
+      receiver.request(command, signal),
+  });
+}
+
 interface PairedStagingSession {
   readonly owner: FrozenCheckpointDirectoryIdentity;
   readonly checkpoint: FrozenCheckpointDirectoryIdentity;
@@ -144,11 +163,10 @@ export interface RootEstablishmentCheckpointBinding {
   readonly recipientKeyId: string;
 }
 
-type PairedCheckpointReceiverOptions = {
+export type PairedCheckpointReceiverConfiguration = {
   readonly homeId: string;
   readonly sourceDeviceId: string;
   readonly targetDeviceId: string;
-  readonly staging: FilePairedCheckpointStaging;
 } & (
   | {
       readonly recipientKeyId: string;
@@ -194,6 +212,10 @@ type PairedCheckpointReceiverOptions = {
       readonly replayRootActivation?: never;
     }
 );
+
+type PairedCheckpointReceiverOptions = PairedCheckpointReceiverConfiguration & {
+  readonly staging: FilePairedCheckpointStaging;
+};
 
 export class PairedRecoveryCheckpointTarget implements InventoryRecoveryCheckpointTarget {
   readonly targetId: string;
@@ -847,7 +869,7 @@ export class FilePairedCheckpointStaging {
   }
 }
 
-export class PairedCheckpointReceiver implements PairedCheckpointTransport {
+export class PairedCheckpointReceiver implements PairedCheckpointCommandReceiver {
   constructor(private readonly options: PairedCheckpointReceiverOptions) {}
 
   async request(command: PairedCheckpointCommand, signal?: AbortSignal): Promise<PairedCheckpointResult> {
@@ -1051,7 +1073,7 @@ export class MeshPairedCheckpointTransport implements PairedCheckpointTransport 
 
 export function registerPairedCheckpointMeshService(
   registry: MeshServiceRegistry,
-  receiver: PairedCheckpointReceiver,
+  receiver: PairedCheckpointCommandReceiver,
   authorizePeer: (deviceId: string) => boolean,
 ): () => void {
   return registry.register(PAIRED_CHECKPOINT_SERVICE, {

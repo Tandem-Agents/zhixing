@@ -12,8 +12,6 @@ import { enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
 import { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
 import { RecoveryRoot, keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
 import {
-  FilePairedCheckpointStaging,
-  PairedCheckpointReceiver,
   PairedRecoveryCheckpointTarget,
   registerPairedCheckpointMeshService,
 } from "@zhixing/mesh/paired-checkpoint-target";
@@ -28,13 +26,19 @@ import {
   runRecoveryRootResetCommand,
   runRecoveryRootRotateCommand,
 } from "./backup-command.js";
-import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
+import {
+  prepareMeshRuntimeBootstrap,
+  type MeshRuntimeBootstrap,
+} from "./mesh-runtime-bootstrap.js";
 import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
-import { deferredPairedCheckpointTarget } from "./paired-checkpoint-runtime.js";
 import { RecoveryRootEstablishmentRuntime } from "./recovery-root-establishment-runtime.js";
 import {
+  createPairedCheckpointCommandReceiverInfrastructure,
+  createPersistentPairedCheckpointCommandReceiverInfrastructure,
+  createRecoveryRootPairedCheckpointCommandReceiverInfrastructure,
+} from "./paired-checkpoint-incoming-infrastructure.js";
+import {
   assertRecoveryRootActivationReplay,
-  commitRecoveryRootLifecycleActivation,
 } from "./recovery-root-activation.js";
 
 vi.setConfig({ testTimeout: 120_000 });
@@ -44,7 +48,7 @@ describe("paired recovery backup setup", () => {
     "establishes the first recovery root from a %s package over the restricted production transport",
     async (version) => {
       const fixture = await pairedHomeWithoutRecoveryRoot(version);
-      const runtime = new RecoveryRootEstablishmentRuntime({
+      const runtime = createRecoveryRootEstablishmentRuntime({
         zhixingHome: fixture.targetHome,
         mesh: fixture.targetBootstrap,
         secretStore: fixture.targetSecrets,
@@ -106,26 +110,22 @@ describe("paired recovery backup setup", () => {
             targetId: `backup-device:${fixture.targetDeviceId}`,
           });
         if (!activation) throw new Error("source recovery activation replay was not found");
-        const receiver = new PairedCheckpointReceiver({
-          homeId: sourceTrust!.homeId,
-          sourceDeviceId: sourceTrust!.issuer.deviceId,
-          targetDeviceId: fixture.targetDeviceId,
-          recipientKeyId: keyIdForPublicKey(sourceTrust!.recoveryBackupPublicKey!),
-          replayRootActivation: ({ event: replayEvent, record }) =>
-            assertRecoveryRootActivationReplay(
-              fixture.targetBootstrap.bootstrapStore,
-              replayEvent,
-              record,
-            ),
-          staging: new FilePairedCheckpointStaging({
-            root: path.join(
-              fixture.targetHome,
-              "distributed-runtime",
-              "recovery-checkpoint-incoming",
-            ),
-            target,
-            storageMaintenance: fixture.targetStorage,
-          }),
+        const receiver = createPairedCheckpointCommandReceiverInfrastructure({
+          zhixingHome: fixture.targetHome,
+          target,
+          storageMaintenance: fixture.targetStorage,
+          receiver: {
+            homeId: sourceTrust!.homeId,
+            sourceDeviceId: sourceTrust!.issuer.deviceId,
+            targetDeviceId: fixture.targetDeviceId,
+            recipientKeyId: keyIdForPublicKey(sourceTrust!.recoveryBackupPublicKey!),
+            replayRootActivation: ({ event: replayEvent, record }) =>
+              assertRecoveryRootActivationReplay(
+                fixture.targetBootstrap.bootstrapStore,
+                replayEvent,
+                record,
+              ),
+          },
         });
         const replayTarget = new PairedRecoveryCheckpointTarget({
           homeId: sourceTrust!.homeId,
@@ -181,7 +181,7 @@ describe("paired recovery backup setup", () => {
     "replays the originating %s checkpoint after source trust advances before target commit",
     async (version) => {
       const fixture = await pairedHomeWithoutRecoveryRoot(version);
-      const firstRuntime = new RecoveryRootEstablishmentRuntime({
+      const firstRuntime = createRecoveryRootEstablishmentRuntime({
         zhixingHome: fixture.targetHome,
         mesh: fixture.targetBootstrap,
         secretStore: fixture.targetSecrets,
@@ -271,7 +271,7 @@ describe("paired recovery backup setup", () => {
         configuration: { enabledRoles: ["executor"] },
       });
       if (restartedTarget.mode !== "trusted-home") throw new Error("expected trusted target home");
-      const replayRuntime = new RecoveryRootEstablishmentRuntime({
+      const replayRuntime = createRecoveryRootEstablishmentRuntime({
         zhixingHome: fixture.targetHome,
         mesh: restartedTarget,
         secretStore: fixture.targetSecrets,
@@ -409,7 +409,7 @@ describe("recovery root public lifecycle", () => {
 
   it("rotates through a verified independent checkpoint and can then invalidate the new code", async () => {
     const fixture = await pairedHomeWithoutRecoveryRoot("v2");
-    const initialRuntime = new RecoveryRootEstablishmentRuntime({
+    const initialRuntime = createRecoveryRootEstablishmentRuntime({
       zhixingHome: fixture.targetHome,
       mesh: fixture.targetBootstrap,
       secretStore: fixture.targetSecrets,
@@ -484,7 +484,7 @@ describe("recovery root public lifecycle", () => {
 
   it("resets through a distinct-device approval and one verified domain-reset activation", async () => {
     const fixture = await pairedHomeWithoutRecoveryRoot("v2");
-    const initialRuntime = new RecoveryRootEstablishmentRuntime({
+    const initialRuntime = createRecoveryRootEstablishmentRuntime({
       zhixingHome: fixture.targetHome,
       mesh: fixture.targetBootstrap,
       secretStore: fixture.targetSecrets,
@@ -574,33 +574,14 @@ async function openRootLifecycleTarget(
   if (!targetTrust?.recoveryBackupPublicKey || !sourceTrust) {
     throw new Error("root lifecycle target is not ready");
   }
-  const storedTarget = deferredPairedCheckpointTarget({
+  const receiver = createPersistentPairedCheckpointCommandReceiverInfrastructure({
     zhixingHome: fixture.targetHome,
+    trust: targetTrust,
     deviceId: fixture.targetDeviceId,
+    bootstrapStore: fixture.targetBootstrap.bootstrapStore,
     storageMaintenance: fixture.targetStorage,
   });
-  const receiver = new PairedCheckpointReceiver({
-    homeId: targetTrust.homeId,
-    sourceDeviceId: fixture.sourceBootstrap.deviceKey.deviceId,
-    targetDeviceId: fixture.targetDeviceId,
-    recipientKeyId: keyIdForPublicKey(targetTrust.recoveryBackupPublicKey),
-    rootLifecycle: true,
-    commitRootActivation: ({ plan, record }) =>
-      commitRecoveryRootLifecycleActivation(
-        fixture.targetBootstrap.bootstrapStore,
-        plan,
-        record,
-      ),
-    staging: new FilePairedCheckpointStaging({
-      root: path.join(
-        fixture.targetHome,
-        "distributed-runtime",
-        "recovery-checkpoint-incoming",
-      ),
-      target: storedTarget,
-      storageMaintenance: fixture.targetStorage,
-    }),
-  });
+  if (!receiver) throw new Error("root lifecycle receiver is not active");
   return {
     target: new PairedRecoveryCheckpointTarget({
       homeId: sourceTrust.homeId,
@@ -629,35 +610,14 @@ async function startActiveCheckpointReceiver(
     !mesh.trust.recoveryBackupPublicKey
   ) throw new Error("expected an activated target home");
   const services = new MeshServiceRegistry();
-  const target = deferredPairedCheckpointTarget({
+  const receiver = createPersistentPairedCheckpointCommandReceiverInfrastructure({
     zhixingHome: fixture.targetHome,
+    trust: mesh.trust,
     deviceId: fixture.targetDeviceId,
+    bootstrapStore: mesh.bootstrapStore,
     storageMaintenance: fixture.targetStorage,
   });
-  const receiver = new PairedCheckpointReceiver({
-      homeId: mesh.trust.homeId,
-      sourceDeviceId: mesh.trust.issuer.deviceId,
-      targetDeviceId: fixture.targetDeviceId,
-      recipientKeyId: keyIdForPublicKey(mesh.trust.recoveryBackupPublicKey),
-      rootLifecycle: true,
-      commitRootActivation: async ({ plan, record }) => {
-        try {
-          await commitRecoveryRootLifecycleActivation(mesh.bootstrapStore, plan, record);
-        } catch (error) {
-          onError?.(error instanceof Error ? error : new Error(String(error)));
-          throw error;
-        }
-      },
-      staging: new FilePairedCheckpointStaging({
-        root: path.join(
-          fixture.targetHome,
-          "distributed-runtime",
-          "recovery-checkpoint-incoming",
-        ),
-        target,
-        storageMaintenance: fixture.targetStorage,
-      }),
-    });
+  if (!receiver) throw new Error("active paired checkpoint receiver is unavailable");
   registerPairedCheckpointMeshService(
     services,
     {
@@ -690,6 +650,26 @@ async function startActiveCheckpointReceiver(
   });
   await control.start();
   return control;
+}
+
+function createRecoveryRootEstablishmentRuntime(input: {
+  readonly zhixingHome: string;
+  readonly mesh: Extract<MeshRuntimeBootstrap, { readonly mode: "trusted-home" }>;
+  readonly secretStore: SecretStorePort;
+  readonly storageMaintenance: StorageMaintenanceGovernorPort;
+}): RecoveryRootEstablishmentRuntime {
+  return new RecoveryRootEstablishmentRuntime({
+    mesh: input.mesh,
+    secretStore: input.secretStore,
+    pairedCheckpointReceiver:
+      createRecoveryRootPairedCheckpointCommandReceiverInfrastructure({
+        zhixingHome: input.zhixingHome,
+        trust: input.mesh.trust,
+        deviceId: input.mesh.deviceKey.deviceId,
+        bootstrapStore: input.mesh.bootstrapStore,
+        storageMaintenance: input.storageMaintenance,
+      }),
+  });
 }
 
 async function pairedHomeWithoutRecoveryRoot(version: "v1" | "v2") {

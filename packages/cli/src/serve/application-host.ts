@@ -15,6 +15,7 @@ import {
   type MeshRuntimeBootstrap,
 } from "./mesh-runtime-bootstrap.js";
 import { runRecoveryRootEstablishmentTopology } from "./recovery-root-establishment-runtime.js";
+import { createRecoveryRootPairedCheckpointCommandReceiverInfrastructure } from "./paired-checkpoint-incoming-infrastructure.js";
 import {
   planServeTopology,
   type AnchorServeBootstrapContext,
@@ -68,6 +69,8 @@ export interface PersistentApplicationHostDependencies<Options> {
   readonly createToolImplementation: () => KernelToolImplementationPort;
   readonly createDeviceCapacity: (temporaryRoot: string) => DeviceCapacityRuntime;
   readonly prepareMesh: typeof prepareMeshRuntimeBootstrap;
+  readonly createRecoveryRootPairedCheckpointReceiver:
+    typeof createRecoveryRootPairedCheckpointCommandReceiverInfrastructure;
   readonly runRecoveryRoot: typeof runRecoveryRootEstablishmentTopology;
   readonly acquireLocalWorkspaceOwner: typeof acquireExecutorLocalWorkspaceOwner;
   readonly defineLocalWorkspaceIdentity: typeof defineLocalWorkspaceAssemblyIdentity;
@@ -154,11 +157,18 @@ export class PersistentApplicationHost<Options> {
 
     if (requiresRecoveryRootEstablishment(mesh)) {
       this.#input.onRecoveryRootRequired();
+      const pairedCheckpointReceiver =
+        this.#dependencies.createRecoveryRootPairedCheckpointReceiver({
+          zhixingHome: this.#input.zhixingHome,
+          trust: mesh.trust,
+          deviceId: mesh.deviceKey.deviceId,
+          bootstrapStore: mesh.bootstrapStore,
+          storageMaintenance: deviceCapacity.storage,
+        });
       await this.#dependencies.runRecoveryRoot({
-        zhixingHome: this.#input.zhixingHome,
         mesh,
         secretStore: this.#input.secretStore,
-        storageMaintenance: deviceCapacity.storage,
+        pairedCheckpointReceiver,
       });
       await this.#releaseCurrentMesh();
       mesh = await this.#prepareMesh(deviceCapacity);
@@ -298,6 +308,8 @@ export function createPersistentApplicationHost(
     createToolImplementation: createHostKernelToolImplementation,
     createDeviceCapacity: createDeviceCapacityRuntime,
     prepareMesh: prepareMeshRuntimeBootstrap,
+    createRecoveryRootPairedCheckpointReceiver:
+      createRecoveryRootPairedCheckpointCommandReceiverInfrastructure,
     runRecoveryRoot: runRecoveryRootEstablishmentTopology,
     acquireLocalWorkspaceOwner: acquireExecutorLocalWorkspaceOwner,
     defineLocalWorkspaceIdentity: defineLocalWorkspaceAssemblyIdentity,

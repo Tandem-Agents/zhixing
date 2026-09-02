@@ -1802,6 +1802,10 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     "packages/cli/src/setup-delivery.ts",
     "packages/cli/src/serve/recovery-root-establishment-runtime.ts",
     "packages/cli/src/serve/recovery-root-activation.ts",
+    "packages/cli/src/serve/paired-checkpoint-incoming-infrastructure.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/cli/src/serve/device-removal-cleanup.ts",
     "packages/cli/src/serve/topology-command.ts",
     "packages/cli/src/serve/application-host.ts",
     "packages/cli/src/serve/role-topology.ts",
@@ -1894,10 +1898,10 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
-      "packages/cli/src/serve/recovery-root-establishment-runtime.ts",
+      "packages/cli/src/serve/paired-checkpoint-incoming-infrastructure.ts",
       (text) => text.replace("rootEstablishment: true", "rootEstablishment: false"),
     )).join("\n"),
-    /root-establishment receiver exact-set or current-issuer boundary drifted/,
+    /signed activation replay must remain durably bound/,
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
@@ -1953,6 +1957,46 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/paired-checkpoint-incoming-infrastructure.ts",
+      (text) => text.replace(
+        '"recovery-checkpoint-incoming"',
+        '"recovery-checkpoint-incoming-v2"',
+      ),
+    )).join("\n"),
+    /incoming physical factory, required Host ports or cleanup exact-set drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "createPersistentPairedCheckpointCommandReceiverInfrastructure({",
+        "undefined /* missing paired checkpoint receiver */",
+      ),
+    )).join("\n"),
+    /incoming physical factory, required Host ports or cleanup exact-set drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/mesh/src/paired-checkpoint-target.ts",
+      (text) => text.replaceAll(
+        "receiver: PairedCheckpointCommandReceiver,",
+        "receiver: PairedCheckpointReceiver,",
+      ),
+    )).join("\n"),
+    /incoming physical factory, required Host ports or cleanup exact-set drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/device-removal-cleanup.ts",
+      (text) => text.replace(
+        '"recovery-checkpoint-incoming"',
+        '"recovery-checkpoints"',
+      ),
+    )).join("\n"),
+    /incoming physical factory, required Host ports or cleanup exact-set drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
       "packages/cli/src/serve/mesh-pair-command.ts",
       (text) => text.replace("return new PairedRecoveryCheckpointTarget({", "return new UnboundedTarget({"),
     )).join("\n"),
@@ -1991,7 +2035,7 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(
-      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      "packages/cli/src/serve/paired-checkpoint-incoming-infrastructure.ts",
       (text) => text.replace("commitRootActivation:", "missingRootActivationCommit:"),
     )).join("\n"),
     /signed activation replay must remain durably bound/,

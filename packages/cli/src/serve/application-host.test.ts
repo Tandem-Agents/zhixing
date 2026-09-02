@@ -1,4 +1,5 @@
 import type { DeviceRole } from "@zhixing/core/contracts";
+import type { PairedCheckpointCommandReceiver } from "@zhixing/mesh/paired-checkpoint-target";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   PersistentApplicationHost,
@@ -141,7 +142,10 @@ describe("persistent ApplicationHost outer lifecycle", () => {
     await host.run();
 
     expect(recoveryNotice).toHaveBeenCalledOnce();
+    expect(harness.createRecoveryRootPairedCheckpointReceiver).toHaveBeenCalledOnce();
     expect(harness.runRecoveryRoot).toHaveBeenCalledOnce();
+    expect(harness.runRecoveryRoot.mock.calls[0]?.[0].pairedCheckpointReceiver)
+      .toBe(harness.pairedCheckpointReceiver);
     expect(harness.prepareMesh).toHaveBeenCalledTimes(2);
     expect(harness.roleInvocations()).toBe(1);
     expect(harness.meshStops).toHaveLength(2);
@@ -408,6 +412,13 @@ function createHarness(input: {
   });
   const toolImplementation = Object.freeze({ create: vi.fn() }) as never;
   const createToolImplementation = vi.fn(() => toolImplementation);
+  const pairedCheckpointReceiver: PairedCheckpointCommandReceiver = Object.freeze({
+    request: vi.fn(async () => {
+      throw new Error("unexpected paired checkpoint request");
+    }),
+  });
+  const createRecoveryRootPairedCheckpointReceiver = vi.fn(() =>
+    pairedCheckpointReceiver);
 
   const dependencies: PersistentApplicationHostDependencies<Record<string, never>> = {
     createToolImplementation,
@@ -416,6 +427,7 @@ function createHarness(input: {
       return deviceCapacity;
     },
     prepareMesh: prepareMesh as never,
+    createRecoveryRootPairedCheckpointReceiver,
     runRecoveryRoot: runRecoveryRoot as never,
     acquireLocalWorkspaceOwner: (async (_home, roles) => {
       if (!roles.includes("executor")) return undefined;
@@ -440,6 +452,8 @@ function createHarness(input: {
     events,
     meshStops,
     prepareMesh,
+    createRecoveryRootPairedCheckpointReceiver,
+    pairedCheckpointReceiver,
     releaseLease,
     runRecoveryRoot,
     importAnchorRole,
@@ -466,6 +480,7 @@ function createHarness(input: {
     return {
       mode: "trusted-home",
       roles: input.roles,
+      deviceKey: { deviceId: "target" },
       trust: {
         ...(established
           ? {

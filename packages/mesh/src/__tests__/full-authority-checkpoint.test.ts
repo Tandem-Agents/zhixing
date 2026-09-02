@@ -38,6 +38,7 @@ import {
   PairedCheckpointReceiver,
   PairedRecoveryCheckpointTarget,
   decodePairedCheckpointResult,
+  projectPairedCheckpointCommandReceiver,
   type PairedCheckpointTransport,
 } from "../paired-checkpoint-target.js";
 import {
@@ -58,6 +59,37 @@ import {
 const AT = "2026-08-08T00:00:00.000Z";
 
 describe("full authority recovery checkpoints", () => {
+  it("projects a frozen command-only paired checkpoint receiver", async () => {
+    const calls: unknown[] = [];
+    const receiver = projectPairedCheckpointCommandReceiver({
+      request: async (command, signal) => {
+        calls.push(command, signal);
+        return { t: "checkpoint.begun", checkpointId: command.t === "checkpoint.begin"
+          ? command.envelope.checkpointId
+          : "unexpected" };
+      },
+    });
+    const signal = new AbortController().signal;
+    const command = {
+      v: 1,
+      t: "checkpoint.begin",
+      homeId: "home",
+      sourceDeviceId: "source",
+      targetDeviceId: "target",
+      envelope: { checkpointId: "checkpoint" },
+    } as never;
+
+    expect(Object.keys(receiver)).toEqual(["request"]);
+    expect(Object.isFrozen(receiver)).toBe(true);
+    await expect(receiver.request(command, signal)).resolves.toEqual({
+      t: "checkpoint.begun",
+      checkpointId: "checkpoint",
+    });
+    expect(calls).toEqual([command, signal]);
+    expect(() => projectPairedCheckpointCommandReceiver({} as never))
+      .toThrow("must provide request");
+  });
+
   it("strictly decodes every paired checkpoint result shape", async () => {
     const fixture = await authorityFixture();
     const manifest = await captureFullAuthorityCheckpoint({

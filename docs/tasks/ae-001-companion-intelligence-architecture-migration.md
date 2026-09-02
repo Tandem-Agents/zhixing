@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-09d P09 Mesh assignment artifact partial 边界已闭合；准备裁决 P11 recovery 边界<br>
+> 当前检查点：A6-10a P11 paired checkpoint incoming 边界已闭合；准备迁移 backup target configuration<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,10 +202,10 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `1e97da46 + A6-09d 当前工作区差异`；A6-09d 已由协调者独立复核接受，待随本记录提交 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；P09 D05 两类临时资产边界均已闭合 |
-| 活跃工作包 | 无；协调者正在裁决 P11 recovery staging/target 的真实需求侧物理泄漏 |
-| 下一责任链 | 只为生产事实成立的 P11 recovery 边界生成工作包；P12 保持独立，不预先合并 |
+| 已接受基线 | `98faa933 + A6-10a 当前工作区差异`；P11 D08 incoming receiver 已由协调者独立复核接受，待随本记录提交 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；P11 incoming 物理接收边界已闭合 |
+| 活跃工作包 | 无；协调者正在裁决 P11 backup target configuration 的唯一存储责任链 |
+| 下一责任链 | 先闭合 backup target configuration，再独立裁决 published target/client；P12 保持独立 |
 | 打开的单向桥 | 无；P07 四条物理持久边界、P09 D03/D04 与 D05 的 Surface/assignment 有限端口均已单向接管，需求侧无 File concrete、`Pick<concrete>`、optional fallback 或第二 staging root |
 | 已失效证据 | 无当前未恢复架构证据；A6-01～09c 继续有效，A6-09d 的有限 receiver、双 Host 注入、传输/续传与清理证据已独立恢复 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
@@ -2775,6 +2775,19 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 失效与下一检查点：若 `progress/append` exact-set/frozen projection、唯一 physical factory/512 MiB 上限、Anchor 或 Executor Host required 注入、Assembly/composition/四个 adapter options、artifact service/client 的 probe/append/read、Run Executor/Submission attachment closure、authorization/activation/grant、prefix/finalize/replay、P06 destination、current-device cleanup、S7 或上述直接测试任一变化，恢复 `A6-09d-p09-mesh-assignment-artifact-partial-v1` 并只重验本闭包；A6-09a～09c 仅在其各自输入真实变化时失效。当前实施完成并等待协调者独立复核，A6继续 `[ ]`；下一检查点只允许独立裁决 P11 recovery staging/target，不提前进入 P12、A7 或通用 receiver/storage 重写。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调纠正记录：执行者初次把 `assignmentArtifactReceiver` 插在 Executor `MeshRuntimeAssembly` 参数的 `authority` 与 `localConversationOwner` 之间，虽不改变运行值，却破坏既有 S7 对“同一 authority storage governor 同时服务本机 source/target”的结构识别；因此初次“canonical S7 已通过”记录不成立。现已仅调整对象属性顺序为 `authority → localConversationOwner → assignmentArtifactReceiver`，required receiver 仍由同一 Executor Host 显式构造并注入，旧共根证明与本包新有限端口证明同时成立；未修改运行行为、测试逻辑或旧门禁强度。随后只重跑 canonical `pnpm s7:lint`，56/56 与 registry golden 通过，`git diff --check` 通过。
 - 协调者独立验收：确认 receiver exact-set 仅为冻结的 required `progress/append`，唯一 File factory 只在 Anchor/Executor Host 两个互斥生产入口构造，Assembly、composition 与四类 adapter options 均无 concrete、path、`Pick`、optional 或第二 receiver；P06 CAS、授权/传输/续传和 device-removal 集合未改变。独立运行 receiver/真实 Mesh adapter 22/22 与 CLI typecheck；首次 canonical S7 准确暴露 Executor 根对象属性顺序破坏既有共根证明，退回后仅重排属性并独立重跑 canonical S7 56/56 与 registry golden、`git diff --check` 通过。执行者的 CLI build与格式证据有效；A6-09d 可以提交，A6仍保持 `[ ]`。
+
+### A6-10a：P11 paired checkpoint incoming receiver 边界收口
+
+- 派发基线与唯一结果：以已接受 `HEAD 98faa933` 加本文调度记录为基线，只收口 P11 D08 `recovery-checkpoint-incoming/<checkpoint-id>/...` 及 root-establishment/lifecycle binding 的接收机制边界。当前 `mesh-pair-command`、`MeshRuntimeAssembly` 与 `RecoveryRootEstablishmentRuntime` 分别直接构造 `FilePairedCheckpointStaging` 和 `PairedCheckpointReceiver`，Mesh service 注册又要求 concrete receiver。迁移后三条配对/常驻/恢复根生产入口只向服务与恢复流程提供 required、readonly、有限的 paired checkpoint command receiver；File staging、incoming/binding path 与 receiver 物理装配只存在于明确的 Infrastructure/Host 组合边缘。
+- 生产闭包与行为保护：覆盖 pair bootstrap 临时 socket、常驻 Mesh service、缺恢复根时的 recovery-root 前置 Host，以及 begin/progress/append/commit/inventory/read/retire/activate-root 全部命令、响应丢失与重启重驱。保持 D07 envelope/chunk/manifest strict v1、≤256KiB range、checkpoint/source/target/recipient generation 绑定、同 ID 冲突、partial digest/length、target manifest-last 发布、incoming retired rename/精确删除、root establishment/lifecycle binding 的 pending→rename、storage governor 和 current-device removal 只删 incoming 不删正式 checkpoints 的语义不变。
+- 旧路与明确不做：Mesh service、pairing/恢复状态机、`MeshRuntimeAssembly` 和 `RecoveryRootEstablishmentRuntime` 不得继续以 concrete `PairedCheckpointReceiver`/`FilePairedCheckpointStaging`、path、`Pick`、cast 或 optional fallback 取权；允许三类真实 Host/命令边缘通过唯一物理 factory 构造各自生命周期实例。不得迁移 P11 backup-target config、published checkpoint target 或 paired client，不改变 P06 checkpoint/activation/Trust 产品合同，不扩入 P12、设备管理、协议 schema、retention 或新增能力。
+- 最窄证据与完成条件：直接测试覆盖有限 receiver exact-set/frozen projection、三类生产组合入口、全部 D08 command 分支、任意 chunk/manifest/binding 边界失败后的 durable replay 与精确 cleanup；结构门禁拒绝需求侧 concrete/path、Host 漏绑定、第二 File staging/factory、optional/no-receiver、Mesh service concrete 回流及 device-removal 集合漂移。按验证手册只运行 paired checkpoint receiver/service、pair catch-up、recovery-root 与 Mesh assembly 的相交测试、Mesh/CLI typecheck与必要 build、canonical S7、相交 exports、changed-source 格式和 `git diff --check`；不得重复 P09、P11 client/target、P12、根级回归或制品验收。
+- 安全交接：只有 incoming/binding 物理机制经唯一 factory 被三类真实边缘显式拥有，所有 service/恢复消费者只见有限 command receiver，D07/P06 正式事实及恢复/清理行为无回退且无第二入口时才结束；A6继续 `[ ]`。约四小时仍未闭合、必须同时迁移 client/published target、发现 checkpoint/Trust 产品合同需改变、或影响扩入 P12 时，停在可构建、可运行、单一 D08 真相成立的检查点反馈，不得执行任何 Git 写操作。
+- 实施结果与唯一物理边界：`@zhixing/mesh/paired-checkpoint-target` 新增 required/readonly 的 `PairedCheckpointCommandReceiver`，exact-set 只有 `request(command, signal?)`，冻结 projector 只交付这一能力；Mesh service 注册现只依赖该端口。CLI 新增唯一 `paired-checkpoint-incoming-infrastructure`，只有这里构造 `FilePairedCheckpointStaging`、`PairedCheckpointReceiver` 并选择 canonical `distributed-runtime/recovery-checkpoint-incoming`；pair onboarding command edge、Anchor/Executor 两个常驻 Host 入口和 `PersistentApplicationHost` recovery-root 前置边缘均经该 factory 得到各自生命周期实例。`MeshRuntimeAssemblyOptions` 与 `RecoveryRootEstablishmentRuntime` 只接收 required `PairedCheckpointCommandReceiver | null`，并把 null 与当前拓扑适用性全等校验，缺失、错拓扑或伪 optional 均在服务开放前 fail closed；Assembly、pairing/恢复状态机对 concrete、File/path、`Pick`、cast 与 fallback 的生产依赖归零。
+- 行为、恢复与清理保护：onboarding、常驻 root-lifecycle 与 root-establishment 三种 receiver configuration 仍复用同一 D08 实现；begin/progress/append/commit/get/inventory/range/retire/activate-root、D07 strict v1、256 KiB 界限、source/target/recipient generation、partial digest/length、manifest-last、retired 精确清理、binding pending→rename、storage governor 和响应丢失/跨实例重放均未改写。Recovery-root Host 只有在注入 receiver 实际返回 `checkpoint.root-activated`（其内部 Authority commit 已成功）后才解除 activation 等待；issuer-local 前置拓扑明确要求 null，不伪造空 receiver。current-device removal 仍只删除 incoming，不删除正式 `recovery-checkpoints`；published target/client、P06 activation/Trust、P12、schema/retention 均未触碰。
+- 直接证据与门禁：Mesh full checkpoint/D08 文件最终 17/17，覆盖新增 frozen command-only projection、全部命令、chunk/manifest/binding、replay、restart、retire 与 storage governor；CLI application-host、recovery-root、pair command、backup command 四文件最终合计 38/38，其中 backup harness 改绑真实 generic/persistent/recovery-root factory 后单独重取 8/8，证明三配置、root activation/replay 与临时 pairing 生产闭包。Mesh、CLI typecheck，Mesh build 与 `pnpm cli:build` 通过；`pnpm runtime:package-exports` 通过。canonical S7 最终 56/56 且 registry golden 通过，新增反向 mutation 拒绝 demand concrete/path、service concrete、Host 漏绑、第二 physical owner/root、optional/no-receiver 和 device-removal cleanup 漂移。首次 canonical S7 只暴露新增 Anchor factory 参数文本与既有 local-conversation owner mutation 的同名匹配碰撞；将新绑定改为独立局部 device identity 后，原门禁和本包门禁同时恢复，未改变运行值。changed-source Biome 与最终 `git diff --check` 通过；HEAD 仍为 `98faa933`、索引为空，工作区只含本包实现、定向测试、门禁和本文台账。
+- 失效与下一检查点：若 `request` exact-set/frozen projection、Mesh service port、唯一 physical factory/canonical incoming root、onboarding/常驻/recovery-root 任一 factory config、两个常驻 Host required 注入、recovery-root Host 注入与真实 activation result、D08 命令/校验/重放/清理、storage governor、device-removal incoming-only 集合、S7 或上述直接测试任一变化，恢复 `A6-10a-p11-paired-checkpoint-incoming-v1` 并只重验本闭包；A6-01～09d 仅在各自输入真实变化时失效。当前实施完成并等待协调者独立复核，A6继续 `[ ]`；下一检查点只允许裁决 P11 backup target configuration 与 published target/client，不提前进入 P12、A7 或通用 storage/transport 重写。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：确认 Mesh service、pair onboarding、常驻 Anchor/Executor Host 与 recovery-root 前置 Host 均只消费 required 的冻结 `request` 端口，File staging、canonical incoming root 与 concrete receiver 只在唯一 Infrastructure factory 构造；拓扑与 null 全等检查在服务开放前 fail closed，root activation 只在真实 Authority commit 返回后解除等待，D08、P06、Trust、published target/client 与 device-removal 语义无漂移。独立重建 Mesh 后运行 full checkpoint/D08 17/17、CLI 四个生产交界 38/38、Mesh/CLI typecheck、canonical S7 56/56 与 registry golden、runtime package exports、concrete/path 反查及 `git diff --check` 均通过；执行者的 CLI build与格式证据有效。A6-10a 可以提交，A6继续 `[ ]`。
 
 ## 十、用户提示词
 

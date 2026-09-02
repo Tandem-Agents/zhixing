@@ -38,9 +38,7 @@ import {
 } from "@zhixing/mesh/checkpoint";
 import { captureFullAuthorityCheckpoint } from "@zhixing/mesh/full-checkpoint";
 import {
-  FilePairedCheckpointStaging,
   decodePairedCheckpointResult,
-  PairedCheckpointReceiver,
   PairedRecoveryCheckpointTarget,
   type PairedCheckpointCommand,
   type PairedCheckpointResult,
@@ -77,6 +75,7 @@ import {
 } from "@zhixing/mesh/trust-chain";
 import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
 import { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
+import { createPairedCheckpointCommandReceiverInfrastructure } from "./paired-checkpoint-incoming-infrastructure.js";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import { loadConfig, writeConfig } from "@zhixing/providers";
 import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
@@ -1481,16 +1480,16 @@ async function receiveChallengeAfterRecoveryOnboarding(input: {
     storageMaintenance: input.storageMaintenance,
   });
   try {
-    const receiver = new PairedCheckpointReceiver({
-      homeId: start.homeId,
-      sourceDeviceId: start.sourceDeviceId,
-      targetDeviceId: start.targetDeviceId,
-      recipientKeyId: start.recipientKeyId,
-      staging: new FilePairedCheckpointStaging({
-        root: `${input.zhixingHome}/distributed-runtime/recovery-checkpoint-incoming`,
-        target,
-        storageMaintenance: input.storageMaintenance,
-      }),
+    const receiver = createPairedCheckpointCommandReceiverInfrastructure({
+      zhixingHome: input.zhixingHome,
+      target,
+      storageMaintenance: input.storageMaintenance,
+      receiver: {
+        homeId: start.homeId,
+        sourceDeviceId: start.sourceDeviceId,
+        targetDeviceId: start.targetDeviceId,
+        recipientKeyId: start.recipientKeyId,
+      },
     });
     while (true) {
       const frame = await receivePairingFrame(input.socket);

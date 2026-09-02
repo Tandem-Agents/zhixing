@@ -118,13 +118,9 @@ import {
 } from "./first-party-conversation-mesh.js";
 import type { CanonicalFirstPartyConversationSurface } from "@zhixing/server";
 import {
-  FilePairedCheckpointStaging,
-  PairedCheckpointReceiver,
   registerPairedCheckpointMeshService,
+  type PairedCheckpointCommandReceiver,
 } from "@zhixing/mesh/paired-checkpoint-target";
-import { keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
-import { deferredPairedCheckpointTarget } from "./paired-checkpoint-runtime.js";
-import { commitRecoveryRootLifecycleActivation } from "./recovery-root-activation.js";
 import {
   completePlannedAnchorInstallationBeforeBootstrap,
   finishPlannedAnchorPostInstall,
@@ -319,6 +315,7 @@ export interface MeshRuntimeAssemblyOptions {
   readonly bootstrapStore: FileMeshBootstrapStore;
   readonly bootstrapProjection: MeshBootstrapProjectionPorts;
   readonly pairingContinuations: MeshPairingContinuationRepository;
+  readonly pairedCheckpointReceiver: PairedCheckpointCommandReceiver | null;
   readonly plannedAnchorIssuerKey?: DeviceKey;
   readonly plannedAnchorPostInstall?: AnchorPostInstallDescriptor;
   readonly authority: AuthorityRuntimeStack;
@@ -729,33 +726,18 @@ export class MeshRuntimeAssembly
       ));
     }
 
-    if (
-      options.trust.recoveryBackupPublicKey &&
+    const requiresPairedCheckpointReceiver =
+      !!options.trust.recoveryBackupPublicKey &&
       options.trust.issuer.deviceId !== options.authority.deviceId &&
       options.trust.members.some((member) =>
-        member.device.deviceId === options.authority.deviceId && member.state === "active")
-    ) {
-      const pairedTarget = deferredPairedCheckpointTarget({
-        zhixingHome: options.zhixingHome,
-        deviceId: options.authority.deviceId,
-        storageMaintenance: options.authority.storageMaintenance,
-      });
+        member.device.deviceId === options.authority.deviceId && member.state === "active");
+    if (requiresPairedCheckpointReceiver !== (options.pairedCheckpointReceiver !== null)) {
+      throw new TypeError("Persistent Mesh paired checkpoint receiver does not match this topology");
+    }
+    if (options.pairedCheckpointReceiver) {
       this.#disposers.push(registerPairedCheckpointMeshService(
         this.services,
-        new PairedCheckpointReceiver({
-          homeId: options.trust.homeId,
-          sourceDeviceId: options.trust.issuer.deviceId,
-          targetDeviceId: options.authority.deviceId,
-          recipientKeyId: keyIdForPublicKey(options.trust.recoveryBackupPublicKey),
-          rootLifecycle: true,
-          commitRootActivation: ({ plan, record }) =>
-            commitRecoveryRootLifecycleActivation(options.bootstrapStore, plan, record),
-          staging: new FilePairedCheckpointStaging({
-            root: path.join(options.zhixingHome, "distributed-runtime", "recovery-checkpoint-incoming"),
-            target: pairedTarget,
-            storageMaintenance: options.authority.storageMaintenance,
-          }),
-        }),
+        options.pairedCheckpointReceiver,
         (deviceId) =>
           deviceId === options.trust.issuer.deviceId &&
           this.#peerHasRole(deviceId, "anchor"),

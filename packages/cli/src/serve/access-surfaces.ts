@@ -52,6 +52,7 @@ import {
 import { MeshRuntimeAssembly, executorIdForDevice } from "./mesh-runtime-assembly.js";
 import { createAssignmentArtifactReceiverInfrastructure } from "./assignment-artifact-receiver-infrastructure.js";
 import { createFileMeshPairingContinuationRepository } from "./mesh-pairing-continuation.js";
+import { createPersistentPairedCheckpointCommandReceiverInfrastructure } from "./paired-checkpoint-incoming-infrastructure.js";
 import { SurfaceAssetMaintenance } from "./surface-asset-maintenance.js";
 import { createAnchorConversationDeleteProjectionPort } from "./conversation-delete-binding.js";
 import { createTurnMaintenance } from "./turn-maintenance.js";
@@ -298,6 +299,7 @@ const meshSurface: AccessSurface = {
     if (!ctx.authorityRuntime || !ctx.conversationProtocol) {
       throw new Error("Mesh control requires authority and conversation protocol runtimes");
     }
+    const pairedCheckpointDeviceId = ctx.authorityRuntime.deviceId;
     const mesh = new MeshRuntimeAssembly({
       zhixingHome: ctx.zhixingHome,
       trust: bootstrap.trust,
@@ -309,6 +311,14 @@ const meshSurface: AccessSurface = {
       pairingContinuations: createFileMeshPairingContinuationRepository(
         ctx.zhixingHome,
       ),
+      pairedCheckpointReceiver:
+        createPersistentPairedCheckpointCommandReceiverInfrastructure({
+          zhixingHome: ctx.zhixingHome,
+          trust: bootstrap.trust,
+          deviceId: pairedCheckpointDeviceId,
+          bootstrapStore: bootstrap.bootstrapStore,
+          storageMaintenance: ctx.authorityRuntime.storageMaintenance,
+        }),
       ...(bootstrap.anchorIssuerKey
         ? { plannedAnchorIssuerKey: bootstrap.anchorIssuerKey }
         : {}),

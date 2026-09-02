@@ -45,6 +45,7 @@ import {
   MeshRuntimeAssembly,
 } from "./mesh-runtime-assembly.js";
 import { createFileMeshPairingContinuationRepository } from "./mesh-pairing-continuation.js";
+import { createPersistentPairedCheckpointCommandReceiverInfrastructure } from "./paired-checkpoint-incoming-infrastructure.js";
 import type { ServeOptions } from "./command.js";
 import { createAssignmentArtifactReceiverInfrastructure } from "./assignment-artifact-receiver-infrastructure.js";
 import type {
@@ -521,6 +522,14 @@ export async function runExecutorRole(
       pairingContinuations: createFileMeshPairingContinuationRepository(
         zhixingHome,
       ),
+      pairedCheckpointReceiver:
+        createPersistentPairedCheckpointCommandReceiverInfrastructure({
+          zhixingHome,
+          trust: bootstrap.mesh.trust,
+          deviceId: authority.deviceId,
+          bootstrapStore: bootstrap.mesh.bootstrapStore,
+          storageMaintenance: authority.storageMaintenance,
+        }),
       ...(bootstrap.mesh.anchorIssuerKey
         ? { plannedAnchorIssuerKey: bootstrap.mesh.anchorIssuerKey }
         : {}),

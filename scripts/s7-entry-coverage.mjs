@@ -9242,6 +9242,14 @@ export function inspectRecoveryBackupAssembly(records) {
   const rootActivation = byPath.get(
     "packages/cli/src/serve/recovery-root-activation.ts",
   );
+  const pairedIncomingInfrastructure = byPath.get(
+    "packages/cli/src/serve/paired-checkpoint-incoming-infrastructure.ts",
+  );
+  const accessRoot = byPath.get("packages/cli/src/serve/access-surfaces.ts");
+  const executorRoot = byPath.get("packages/cli/src/serve/executor-role-runtime.ts");
+  const deviceRemovalCleanup = byPath.get(
+    "packages/cli/src/serve/device-removal-cleanup.ts",
+  );
   const controlPlane = byPath.get("packages/cli/src/serve/mesh-control-plane.ts");
   const runtime = byPath.get("packages/cli/src/serve/mesh-runtime-assembly.ts");
   const pairing = byPath.get("packages/cli/src/serve/mesh-pair-command.ts");
@@ -9262,7 +9270,8 @@ export function inspectRecoveryBackupAssembly(records) {
   if (
     !command || !owner || !backup || !backupApplication || !coreIndex || !coreManifestText || !coreBuild ||
     !bootstrapStore || !bootstrap || !topology || !applicationHost || !rootEstablishment ||
-    !rootActivation || !controlPlane ||
+    !rootActivation || !pairedIncomingInfrastructure || !accessRoot || !executorRoot ||
+    !deviceRemovalCleanup || !controlPlane ||
     !runtime || !pairing || !disasterCommand || !disasterCandidate || !disasterEvidence ||
     !disasterInstallation || !disasterTarget || !artifactRetention || !authorityCommitLog ||
     !exposureAuthority ||
@@ -9548,9 +9557,13 @@ export function inspectRecoveryBackupAssembly(records) {
       "recovery.checkpoint",
     ]) ||
     count(rootEstablishment, "registerPairedCheckpointMeshService(") !== 1 ||
-    count(rootEstablishment, "new PairedCheckpointReceiver({") !== 1 ||
-    !rootEstablishment.includes("rootEstablishment: true") ||
-    !rootEstablishment.includes("commitRootActivation:") ||
+    !rootEstablishment.includes(
+      "readonly pairedCheckpointReceiver: PairedCheckpointCommandReceiver | null",
+    ) ||
+    rootEstablishment.includes("FilePairedCheckpointStaging") ||
+    rootEstablishment.includes("PairedCheckpointReceiver,") ||
+    rootEstablishment.includes("recovery-checkpoint-incoming") ||
+    !rootEstablishment.includes('result.t === "checkpoint.root-activated"') ||
     !rootEstablishment.includes("deviceId === input.mesh.trust.issuer.deviceId") ||
     rootEstablishment.includes("new MeshRuntimeAssembly(")
   ) {
@@ -9563,8 +9576,9 @@ export function inspectRecoveryBackupAssembly(records) {
     !pairedTarget.includes('t: "checkpoint.activate-root"') ||
     !backup.includes("await session.paired.activateRoot(replay)") ||
     !backup.includes("await session.paired.activateRoot({") ||
-    !runtime.includes("rootLifecycle: true") ||
-    !runtime.includes("commitRootActivation:") ||
+    !pairedIncomingInfrastructure.includes("rootLifecycle: true") ||
+    !pairedIncomingInfrastructure.includes("rootEstablishment: true") ||
+    count(pairedIncomingInfrastructure, "commitRootActivation:") !== 2 ||
     !rootActivation.includes("appendTrustEvent({ event, record })") ||
     !rootActivation.includes("isExactRecoveryRootActivationReplay(")
   ) {
@@ -9903,9 +9917,17 @@ export function inspectRecoveryBackupAssembly(records) {
   }
   if (
     count(runtime, "registerPairedCheckpointMeshService(") !== 1 ||
-    count(runtime, "new PairedCheckpointReceiver({") !== 1 ||
+    !runtime.includes(
+      "readonly pairedCheckpointReceiver: PairedCheckpointCommandReceiver | null",
+    ) ||
+    runtime.includes("FilePairedCheckpointStaging") ||
+    runtime.includes("PairedCheckpointReceiver,") ||
+    runtime.includes("recovery-checkpoint-incoming") ||
     !runtime.includes('member.device.deviceId === options.authority.deviceId') ||
-    !runtime.includes('member.state === "active"')
+    !runtime.includes('member.state === "active"') ||
+    !runtime.includes(
+      "requiresPairedCheckpointReceiver !== (options.pairedCheckpointReceiver !== null)",
+    )
   ) {
     failures.push("packages/cli/src/serve/mesh-runtime-assembly.ts: active paired backup receiver boundary drifted");
   }
@@ -10013,9 +10035,38 @@ export function inspectRecoveryBackupAssembly(records) {
     onboardingStart < 0 ||
     onboardingTarget < onboardingStart ||
     enrollment < onboardingTarget ||
-    count(pairing, "new PairedCheckpointReceiver({") !== 1
+    count(pairing, "createPairedCheckpointCommandReceiverInfrastructure({") !== 1 ||
+    pairing.includes("FilePairedCheckpointStaging") ||
+    pairing.includes("PairedCheckpointReceiver,") ||
+    pairing.includes("recovery-checkpoint-incoming")
   ) {
     failures.push("packages/cli/src/serve/mesh-pair-command.ts: authenticated onboarding checkpoint must precede business enrollment");
+  }
+  const concreteReceiverOwners = records.filter(({ text }) =>
+    text.includes("new PairedCheckpointReceiver({"));
+  const stagingOwners = records.filter(({ text }) =>
+    text.includes("new FilePairedCheckpointStaging({"));
+  if (
+    concreteReceiverOwners.length !== 1 ||
+    concreteReceiverOwners[0]?.relative !==
+      "packages/cli/src/serve/paired-checkpoint-incoming-infrastructure.ts" ||
+    stagingOwners.length !== 1 ||
+    stagingOwners[0]?.relative !==
+      "packages/cli/src/serve/paired-checkpoint-incoming-infrastructure.ts" ||
+    count(pairedIncomingInfrastructure, "new PairedCheckpointReceiver({") !== 1 ||
+    count(pairedIncomingInfrastructure, "new FilePairedCheckpointStaging({") !== 1 ||
+    count(pairedIncomingInfrastructure, '"recovery-checkpoint-incoming"') !== 1 ||
+    count(accessRoot, "createPersistentPairedCheckpointCommandReceiverInfrastructure({") !== 1 ||
+    !accessRoot.includes("const pairedCheckpointDeviceId = ctx.authorityRuntime.deviceId") ||
+    !accessRoot.includes("deviceId: pairedCheckpointDeviceId") ||
+    count(executorRoot, "createPersistentPairedCheckpointCommandReceiverInfrastructure({") !== 1 ||
+    count(applicationHost, "createRecoveryRootPairedCheckpointReceiver") !== 3 ||
+    !pairedTarget.includes("export interface PairedCheckpointCommandReceiver") ||
+    !pairedTarget.includes("projectPairedCheckpointCommandReceiver(") ||
+    !pairedTarget.includes("receiver: PairedCheckpointCommandReceiver,") ||
+    count(deviceRemovalCleanup, '"recovery-checkpoint-incoming"') !== 1
+  ) {
+    failures.push("paired checkpoint incoming physical factory, required Host ports or cleanup exact-set drifted");
   }
   return failures;
 }

@@ -11,28 +11,59 @@ import {
   RecoveryRootEstablishmentRuntime,
   ROOT_ESTABLISHMENT_SERVICE_EXACT_SET,
 } from "./recovery-root-establishment-runtime.js";
+import { createRecoveryRootPairedCheckpointCommandReceiverInfrastructure } from "./paired-checkpoint-incoming-infrastructure.js";
 
 describe("recovery root establishment runtime", () => {
   it("keeps ordinary business services closed and exposes the strict receiver only on the target", async () => {
     const root = await createTempDir("recovery-root-establishment-runtime");
-    const targetMesh = bootstrap("target", ["executor"], path.join(root, "target"));
-    const target = new RecoveryRootEstablishmentRuntime({
-      zhixingHome: path.join(root, "target"),
+    const targetHome = path.join(root, "target");
+    const targetMesh = bootstrap("target", ["executor"], targetHome);
+    const targetMaintenance = maintenance();
+    expect(() => new RecoveryRootEstablishmentRuntime({
       mesh: targetMesh,
       secretStore: secretStore(),
-      storageMaintenance: maintenance(),
+      pairedCheckpointReceiver: null,
+    })).toThrow("does not match this topology");
+    const target = new RecoveryRootEstablishmentRuntime({
+      mesh: targetMesh,
+      secretStore: secretStore(),
+      pairedCheckpointReceiver:
+        createRecoveryRootPairedCheckpointCommandReceiverInfrastructure({
+          zhixingHome: targetHome,
+          trust: targetMesh.trust,
+          deviceId: targetMesh.deviceKey.deviceId,
+          bootstrapStore: targetMesh.bootstrapStore,
+          storageMaintenance: targetMaintenance,
+        }),
     });
     expect(target.services.list()).toEqual([...ROOT_ESTABLISHMENT_SERVICE_EXACT_SET]);
     await target.stop();
     await targetMesh.bootstrapStore.stopStorageMaintenance();
     expect(target.services.list()).toEqual([]);
 
-    const issuerMesh = bootstrap("issuer", ["anchor"], path.join(root, "issuer"));
-    const issuer = new RecoveryRootEstablishmentRuntime({
-      zhixingHome: path.join(root, "issuer"),
+    const issuerHome = path.join(root, "issuer");
+    const issuerMesh = bootstrap("issuer", ["anchor"], issuerHome);
+    const issuerMaintenance = maintenance();
+    expect(() => new RecoveryRootEstablishmentRuntime({
       mesh: issuerMesh,
       secretStore: secretStore(),
-      storageMaintenance: maintenance(),
+      pairedCheckpointReceiver: Object.freeze({
+        request: async () => {
+          throw new Error("unexpected request");
+        },
+      }),
+    })).toThrow("does not match this topology");
+    const issuer = new RecoveryRootEstablishmentRuntime({
+      mesh: issuerMesh,
+      secretStore: secretStore(),
+      pairedCheckpointReceiver:
+        createRecoveryRootPairedCheckpointCommandReceiverInfrastructure({
+          zhixingHome: issuerHome,
+          trust: issuerMesh.trust,
+          deviceId: issuerMesh.deviceKey.deviceId,
+          bootstrapStore: issuerMesh.bootstrapStore,
+          storageMaintenance: issuerMaintenance,
+        }),
     });
     expect(issuer.services.list()).toEqual([MESH_ENDPOINT_SERVICE_ID]);
     await issuer.stop();

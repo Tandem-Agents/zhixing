@@ -1,17 +1,13 @@
-import path from "node:path";
 import type { SecretStorePort } from "@zhixing/core/contracts";
-import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import {
-  FilePairedCheckpointStaging,
-  PairedCheckpointReceiver,
   registerPairedCheckpointMeshService,
+  type PairedCheckpointCommand,
+  type PairedCheckpointCommandReceiver,
 } from "@zhixing/mesh/paired-checkpoint-target";
 import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
 import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
 import type { MeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
-import { deferredPairedCheckpointTarget } from "./paired-checkpoint-runtime.js";
-import { commitRecoveryRootActivation } from "./recovery-root-activation.js";
 
 type TrustedHomeBootstrap = Extract<MeshRuntimeBootstrap, { mode: "trusted-home" }>;
 
@@ -24,51 +20,39 @@ export class RecoveryRootEstablishmentRuntime {
   #started = false;
 
   constructor(input: {
-    readonly zhixingHome: string;
     readonly mesh: TrustedHomeBootstrap;
     readonly secretStore: SecretStorePort;
-    readonly storageMaintenance: StorageMaintenanceGovernorPort;
+    readonly pairedCheckpointReceiver: PairedCheckpointCommandReceiver | null;
     readonly onError?: (error: Error) => void;
   }) {
+    this.#activated = new Promise<void>((resolve) => {
+      this.#resolveActivated = resolve;
+    });
     if (input.mesh.trust.recoveryRootPublicKey || input.mesh.trust.recoveryBackupPublicKey) {
       throw new TypeError("Root-establishment runtime requires an unactivated recovery root");
     }
     const local = input.mesh.trust.members.find((member) =>
       member.device.deviceId === input.mesh.deviceKey.deviceId && member.state === "active");
     if (!local) throw new Error("Root-establishment runtime requires an active local member");
-    if (local.device.deviceId !== input.mesh.trust.issuer.deviceId) {
-      const target = deferredPairedCheckpointTarget({
-        zhixingHome: input.zhixingHome,
-        deviceId: local.device.deviceId,
-        storageMaintenance: input.storageMaintenance,
-      });
+    const requiresPairedCheckpointReceiver =
+      local.device.deviceId !== input.mesh.trust.issuer.deviceId;
+    if (requiresPairedCheckpointReceiver !== (input.pairedCheckpointReceiver !== null)) {
+      throw new TypeError("Root-establishment paired checkpoint receiver does not match this topology");
+    }
+    const pairedCheckpointReceiver = input.pairedCheckpointReceiver;
+    if (pairedCheckpointReceiver) {
       this.#disposeReceiver = registerPairedCheckpointMeshService(
         this.services,
-        new PairedCheckpointReceiver({
-          homeId: input.mesh.trust.homeId,
-          sourceDeviceId: input.mesh.trust.issuer.deviceId,
-          targetDeviceId: local.device.deviceId,
-          rootEstablishment: true,
-          commitRootActivation: async ({ event, record }) => {
-            await commitRecoveryRootActivation(input.mesh.bootstrapStore, event, record);
-            this.#resolveActivated();
+        Object.freeze({
+          request: async (command: PairedCheckpointCommand, signal?: AbortSignal) => {
+            const result = await pairedCheckpointReceiver.request(command, signal);
+            if (result.t === "checkpoint.root-activated") this.#resolveActivated();
+            return result;
           },
-          staging: new FilePairedCheckpointStaging({
-            root: path.join(
-              input.zhixingHome,
-              "distributed-runtime",
-              "recovery-checkpoint-incoming",
-            ),
-            target,
-            storageMaintenance: input.storageMaintenance,
-          }),
         }),
         (deviceId) => deviceId === input.mesh.trust.issuer.deviceId,
       );
     }
-    this.#activated = new Promise<void>((resolve) => {
-      this.#resolveActivated = resolve;
-    });
     this.#control = new ProductionMeshControlPlane({
       localIdentity: input.mesh.deviceKey,
       trust: input.mesh.trust,
@@ -136,10 +120,9 @@ export class RecoveryRootEstablishmentRuntime {
 }
 
 export async function runRecoveryRootEstablishmentTopology(input: {
-  readonly zhixingHome: string;
   readonly mesh: TrustedHomeBootstrap;
   readonly secretStore: SecretStorePort;
-  readonly storageMaintenance: StorageMaintenanceGovernorPort;
+  readonly pairedCheckpointReceiver: PairedCheckpointCommandReceiver | null;
   readonly signal?: AbortSignal;
   readonly onError?: (error: Error) => void;
 }): Promise<void> {
