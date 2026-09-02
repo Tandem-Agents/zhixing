@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-07d Assignment resource Correctness 端口已闭合，正在选择 A6 下一责任链<br>
+> 当前检查点：A6-08a P07 Workspace 资源治理 Host 边界已闭合，正在选择 A6 下一责任链<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `318076d7`；A6-07c 已由协调者独立复核后提交，Advancement evidence 的应用 target 与本机/Mesh 机制选择已分离 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-07d Assignment resource 有限端口与 concrete governor 边界已闭合 |
-| 活跃工作包 | 无；协调者正在从 P07/P09～P12 的真实剩余缺口中选择下一条单一责任链 |
-| 下一责任链 | 优先核实 P07 Workspace 资源治理的 concrete Host 边界；不并行扩入 P09～P12、设备管理、transfer 或 A7 |
-| 打开的单向桥 | 无；A6-07d 如需拆分，必须停在单一资源真相成立的可发布检查点，不得保留 concrete governor 与有限端口双入口 |
-| 已失效证据 | 无当前未恢复架构证据；A6-07a～07c 及 A6-01～06d 继续有效。A6-07d 的直接资源闭包已恢复；三拓扑 owner-domain 中 anchor+executor 的共享 storage-maintenance 环境门仍因 `backpressured:ioOperations` 未取得绿灯，须由协调者独立复取但不构成第二资源 owner |
+| 已接受基线 | `59f3dbc3`；A6-07d 已由协调者独立复核后提交，Assignment resource concrete governor 已收在 Correctness/Host 边界 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-08a Workspace 管理资源有限端口边界已闭合 |
+| 活跃工作包 | 无；协调者正在核实 P07 其余发布、探测与容量事实的真实缺口 |
+| 下一责任链 | 只在 P07 仍存在真实需求侧 concrete/物理拓扑泄漏时继续；否则进入 P09～P12 中最高价值的单一缺口，不为完成编号制造改动 |
+| 打开的单向桥 | 无；Workspace 需求侧 concrete 类型与有限端口双入口已归零 |
+| 已失效证据 | 无当前未恢复架构证据；A6-01～08a 继续有效。三拓扑 owner-domain 的 anchor+executor 既有 storage-maintenance 环境背压不与本包相交且未重复运行 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2668,6 +2668,17 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据与结构门禁：Conversation protocol 26/26、Conversation worker 15/15、Conversation owner port 3/3、Job recovery 4/4，合计 4 文件 48/48；既有 Executor resource governor 22/22、Owner Kernel resource governor 20/20 与真实 S6 8/8 继续通过。CLI `tsc --noEmit`、`pnpm cli:build`、changed-source Biome 与 `pnpm runtime:package-exports` 通过；canonical `pnpm s7:lint` 最终 49/49 与 registry golden 通过，新增反向 mutation 拒绝需求侧 concrete 回流、旧 alias、protocol/ledger/worker 绕过有限端口、Host 投影漂移及第二 concrete constructor。owner-domain 定向复取中 anchor shared 与 executor-only 已通过，anchor+executor 在功能断言前连续被既有 artifact-lifecycle storage maintenance 以 `backpressured:ioOperations` 拒绝；失败栈止于 `runStorageMaintenanceStep → FileDurableProjectionIndex → ArtifactLifecycleIndex`，未修改资源端口、预算或测试来制造绿灯，留给协调者在独立基线复取。
 - 失效与交接：若四个有限角色、usage finalization、Host 三处投影、concrete governor 唯一构造、Conversation/Job worker resource meter、assignment ledger/dispatch、recovery accepted-work lease、P06/P08 resource/finality/replay、三拓扑组合、S7 或上述直接测试任一变化，只恢复本证据及真实相交的 A0/A5/A6 证据；A6-07a～07c 仅在其已冻结入口真实变化时失效。当前无打开桥；A6 继续 `[ ]`，下一检查点仅在协调者独立复核后核实 P07/P09～P12 的真实剩余缺口，不进入设备管理、transfer 或 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：确认 Conversation/Job 协议、worker、ledger 与 dispatch 只消费四个有限资源角色，concrete `ExecutorResourceGovernor` 只在 Host/Correctness 组合边界投影且没有 optional 无计量旁路。独立运行 Conversation owner/protocol/worker、Job recovery 与真实 S6 共 56/56，CLI typecheck、canonical S7 49/49 与 registry golden、runtime package exports 和 `git diff --check` 均通过；三拓扑 owner-domain 的 anchor+executor 唯一失败在业务断言前复现为既有 artifact-lifecycle storage-maintenance `backpressured:ioOperations`，anchor 与 executor-only 均通过且没有资源端口反证。A6-07d 可以提交，A6 仍保持 `[ ]`。
+
+### A6-08a：P07 Workspace 资源治理 Host 边界收口
+
+- 派发基线与唯一结果：以已接受 `HEAD 59f3dbc3` 加本文调度记录为基线，只收口本机 Workspace Administration 控制操作的资源准入依赖。`ExecutorWorkspaceAdministrationControl` 与 `createLocalWorkspaceManagementHost` 必须只消费能够表达 `acquireRoot/settle/release` 的现有有限资源端口；concrete `ExecutorResourceGovernor` 只允许在 `workspace-command` 等外层 Host/Correctness 组合根构造并一次性投影，不得进入 Workspace 应用、持久 Host 合同、测试 cast 或运行期查找。
+- 生产闭包与行为保护：沿 fallback workspace command → Authority runtime → local workspace management Host → durable lifecycle → Workspace application → control effect 双向迁移全部直接构造与消费端，保持同一 executor audience、`control` workload identity、8 calls 预算、interactive/environment-control origin、30 秒 deadline、成功/业务失败时 settle 后 release、成功后的 release 失败传播、业务失败时 release 失败不覆盖原错误、abort、outbox prepare/commit/replay、owner lease 与 IPC 生命周期完全不变。不得修改 P07 workspace binding/schema/generation/probe/capacity 事实、资源算法、公开 CLI/RPC 行为或其他 P09～P12 链路。
+- 旧路、证据与完成条件：删除需求侧 `ExecutorResourceGovernor` import/type/cast 和任何 optional/no-resource 旁路；若现有 `ResourceReservationPort` 已完整覆盖所需操作则直接复用，不得新增同义端口、通用 facade 或第二 adapter。直接测试必须识别 required finite injection、exact audience/origin/budget/context、settle/release 次序及错误优先级，并以结构门禁拒绝需求侧 concrete 回流和第二生产构造。只运行本包失效的 Workspace control/management/command 最窄测试、CLI typecheck、canonical S7、fresh package exports、changed-source 格式与 `git diff --check`；不得重复 owner-domain、S6、根级回归或制品验收。
+- 安全交接：只有外层 Host 仍持有唯一 concrete governor、Workspace 全部需求侧只见有限端口、行为与直接证据闭合且无兼容双入口时才结束本包；A6 继续 `[ ]`。约四小时仍未闭合、发现需要改变资源或 Workspace 产品合同、影响扩入 P07 其他持久家族或存在两个独立根因时，停在可构建、可运行且单一资源真相成立的检查点反馈，不得执行任何 Git 写操作。
+- 实施结果与旧路退场：`ExecutorWorkspaceAdministrationControl` 与 `createLocalWorkspaceManagementHost` 的 required `resources` 合同现在直接复用 `Pick<ResourceReservationPort,"acquireRoot"|"settle"|"release">`，没有新增同义端口或 facade；两处 production source 及 bootstrap 对 `@zhixing/executor`/`ExecutorResourceGovernor` 的 import、inline type 与测试 concrete cast 已归零。唯一 `ExecutorWorkspaceAdministrationControl` 仍由 shared management Host factory 构造；Anchor+Executor `access-surfaces`、Executor-only `executor-role-runtime` 与 workspace fallback `workspace-command` 三个外层 Host 根分别把其已拥有的同一 concrete governor 一次性投影给 factory，需求侧没有 optional/no-resource 分支、运行期查询、第二 adapter 或第二 constructor。
+- 行为、P07 与生产闭包：控制请求仍以 stable requestId 形成 `{kind:"control",attempt:1}` workload、`{maxCalls:8}` 预算、interactive/environment-control origin、当前 executor audience、Host principal 与 30 秒 deadline，并把同一 lease/requestId/AbortSignal 交给 Workspace application；正常与业务失败都严格先 settle 后 release，成功后的 release/settle 失败继续传播，业务失败时 release 失败不覆盖原错误。Durable lifecycle/outbox prepare/commit/replay、owner lease、IPC、Workspace CRUD/reset/result delivery及 P07 binding/schema/generation/probe/capacity、资源算法与 P09～P12 均无生产变化。
+- 直接证据、门禁与交接：Workspace control 3/3、management Host 18/18、role-gated bootstrap 3/3、command binding 3/3，合计 4 文件 27/27；直接断言 required finite mock、完整 lease、exact workload/audience/origin/budget/principal/deadline/abort、settle→release、成功 release failure、业务失败错误优先级与 settle failure 后继续 release。CLI `tsc --noEmit`、`pnpm cli:build`、`pnpm runtime:package-exports`、changed-source Biome 通过；canonical `pnpm s7:lint` 49/49 与 registry golden 通过，新增 AST/反向 mutation 会拒绝 demand concrete import、optional port、任一三根错误投影及第二 control constructor。若三方法有限合同、三个 production root、Host factory/control constructor、identity/audience/origin/budget/deadline、settle/release/error priority、Workspace durable lifecycle/outbox、S7 或上述直接测试任一变化，只恢复 `A6-08a-p07-workspace-resource-host-boundary-v1` 及真实相交证据；A6-01～07d 不因无关 P07 变化自动失效。A6 继续 `[ ]`，下一检查点由协调者独立复核后核实 P07 其余发布/探测/容量事实，再按真实缺口进入 P09～P12；本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：确认 Workspace control 与持久 management Host 只依赖既有三方法有限资源合同，三个生产根仍各自从唯一 concrete governor 一次投影且无 optional、cast、运行期查找或第二 constructor。独立运行 Workspace control/management/bootstrap/command 4 文件 27/27、CLI typecheck、canonical S7 49/49 与 registry golden、runtime package exports、需求侧 concrete 反查和 `git diff --check` 均通过；本包没有改写 P07 持久事实、资源算法或公开行为。A6-08a 可以提交，A6 仍保持 `[ ]`。
 
 ## 十、用户提示词
 

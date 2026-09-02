@@ -4905,6 +4905,78 @@ export function inspectWorkspaceAdministrationOwnership(records) {
   const repl = required("packages/cli/src/repl.ts");
   const manifest = manifestText ? JSON.parse(manifestText) : {};
 
+  const finiteWorkspaceResourcePort =
+    /Pick<\s*ResourceReservationPort,\s*"acquireRoot"\s*\|\s*"settle"\s*\|\s*"release"\s*>/u;
+  const workspaceResourceDemandSources = [control, host, bootstrap];
+  const controlOwners = records
+    .filter((record) => record.text.includes("new ExecutorWorkspaceAdministrationControl("))
+    .map((record) => record.relative);
+  if (
+    workspaceResourceDemandSources.some((source) =>
+      /ExecutorResourceGovernor|@zhixing\/executor/u.test(source)
+    ) ||
+    !finiteWorkspaceResourcePort.test(control) ||
+    !finiteWorkspaceResourcePort.test(host) ||
+    /readonly\s+resources\s*\?/u.test(control) ||
+    /readonly\s+resources\s*\?/u.test(host) ||
+    controlOwners.length !== 1 ||
+    controlOwners[0] !==
+      "packages/cli/src/runtime/local-workspace-management-host.ts"
+  ) {
+    failures.push(
+      "Workspace resource admission escaped its required finite Host projection",
+    );
+  }
+
+  const resourceRoots = new Map([
+    ["packages/cli/src/serve/access-surfaces.ts", "authorityRuntime.executorResourceGovernor"],
+    ["packages/cli/src/serve/executor-role-runtime.ts", "authority.executorResourceGovernor"],
+    ["packages/cli/src/runtime/workspace-command.ts", "runtime.executorResourceGovernor"],
+  ]);
+  for (const [relative, expected] of resourceRoots) {
+    const text = required(relative);
+    const source = sourceFile(relative, text);
+    const calls = [];
+    const collectCalls = (node) => {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === "createExecutorLocalWorkspaceHost"
+      ) {
+        calls.push(node);
+      }
+      ts.forEachChild(node, collectCalls);
+    };
+    collectCalls(source);
+    const input = calls[0]?.arguments[0];
+    const property = (object, name) => object?.properties.find((candidate) =>
+      ts.isPropertyAssignment(candidate) &&
+      candidate.name &&
+      propertyNameText(candidate.name) === name
+    );
+    const hostProperty = input && ts.isObjectLiteralExpression(input)
+      ? property(input, "host")
+      : undefined;
+    const hostInput = hostProperty && ts.isPropertyAssignment(hostProperty) &&
+      ts.isObjectLiteralExpression(hostProperty.initializer)
+      ? hostProperty.initializer
+      : undefined;
+    const managementProperty = property(hostInput, "management");
+    const management = managementProperty && ts.isPropertyAssignment(managementProperty) &&
+      ts.isObjectLiteralExpression(managementProperty.initializer)
+      ? managementProperty.initializer
+      : undefined;
+    const resourcesProperty = property(management, "resources");
+    const actual = resourcesProperty && ts.isPropertyAssignment(resourcesProperty)
+      ? resourcesProperty.initializer.getText(source)
+      : undefined;
+    if (calls.length !== 1 || actual !== expected) {
+      failures.push(
+        `${relative}: Workspace resource port must be projected once from ${expected}`,
+      );
+    }
+  }
+
   const constructionOwners = records
     .filter((record) => record.text.includes("new WorkspaceAdministrationApplicationService("))
     .map((record) => record.relative);

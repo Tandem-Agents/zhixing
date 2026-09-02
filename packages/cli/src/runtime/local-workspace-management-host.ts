@@ -23,7 +23,10 @@ import {
   workspaceAdministrationResultValue,
 } from "@zhixing/core/environment/workspace-administration";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
-import type { WorkspaceBindingResetReceipt } from "@zhixing/core/contracts";
+import type {
+  ResourceReservationPort,
+  WorkspaceBindingResetReceipt,
+} from "@zhixing/core/contracts";
 import {
   LocalWorkspaceOperationOutbox,
   validateLocalWorkspaceOperation,
@@ -203,7 +206,10 @@ export function createLocalWorkspaceManagementHost(input: {
     readonly executorId: string;
     readonly admin: import("@zhixing/core/contracts").WorkspaceBindingAdminPort;
     readonly recovery: import("@zhixing/core/contracts").WorkspaceBindingRecoveryPort;
-    readonly resources: import("@zhixing/executor").ExecutorResourceGovernor;
+    readonly resources: Pick<
+      ResourceReservationPort,
+      "acquireRoot" | "settle" | "release"
+    >;
   };
   readonly storageMaintenance: StorageMaintenanceGovernorPort;
 }): LocalWorkspaceManagementHost {

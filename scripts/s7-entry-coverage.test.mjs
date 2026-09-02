@@ -4685,6 +4685,40 @@ test("Workspace Administration CRUD, reset, durable lifecycle and result deliver
     )).join("\n"),
     /still interprets Workspace Administration facts/,
   );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/cli/src/runtime/local-workspace-control.ts",
+      (text) => `import type { ExecutorResourceGovernor } from "@zhixing/executor";\n${text}`,
+    )).join("\n"),
+    /resource admission escaped its required finite Host projection/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/cli/src/runtime/local-workspace-management-host.ts",
+      (text) => text.replace(
+        "readonly resources: Pick<",
+        "readonly resources?: Pick<",
+      ),
+    )).join("\n"),
+    /resource admission escaped its required finite Host projection/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "resources: authorityRuntime.executorResourceGovernor,",
+        "resources: authorityRuntime.resourceGovernor,",
+      ),
+    )).join("\n"),
+    /Workspace resource port must be projected once/,
+  );
+  assert.match(
+    inspectWorkspaceAdministrationOwnership(mutate(
+      "packages/cli/src/runtime/workspace-command.ts",
+      (text) => `${text}\nnew ExecutorWorkspaceAdministrationControl({});`,
+    )).join("\n"),
+    /resource admission escaped its required finite Host projection/,
+  );
 });
 
 test("Trust Administration management has one domain application and Product API boundary", async () => {

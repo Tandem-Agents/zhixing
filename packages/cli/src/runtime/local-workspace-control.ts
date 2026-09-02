@@ -1,9 +1,9 @@
 import type {
   AuthorityCallContext,
   LocalEnvironmentControlContext,
+  ResourceReservationPort,
 } from "@zhixing/core/contracts";
 import type { WorkspaceAdministrationControlPort } from "@zhixing/core/environment/workspace-administration";
-import type { ExecutorResourceGovernor } from "@zhixing/executor";
 
 const CONTROL_BUDGET = { maxCalls: 8 };
 
@@ -12,11 +12,17 @@ export class ExecutorWorkspaceAdministrationControl
   implements WorkspaceAdministrationControlPort
 {
   readonly #executorId: string;
-  readonly #resources: ExecutorResourceGovernor;
+  readonly #resources: Pick<
+    ResourceReservationPort,
+    "acquireRoot" | "settle" | "release"
+  >;
 
   constructor(input: {
     readonly executorId: string;
-    readonly resources: ExecutorResourceGovernor;
+    readonly resources: Pick<
+      ResourceReservationPort,
+      "acquireRoot" | "settle" | "release"
+    >;
   }) {
     this.#executorId = input.executorId;
     this.#resources = input.resources;
