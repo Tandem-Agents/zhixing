@@ -3926,6 +3926,7 @@ export async function validateS7Structure() {
   failures.push(...inspectAdvancementEvidenceTopologyBoundary(records));
   failures.push(...inspectAssignmentResourcePortBoundary(records));
   failures.push(...inspectWorkspaceProbePersistenceBoundary(records));
+  failures.push(...inspectWorkspaceBindingGenerationPersistenceBoundary(records));
   failures.push(...inspectConversationAdoptionAssembly(records));
   failures.push(...inspectConversationStorageBoundary(records));
   failures.push(...inspectWorksceneStorageCleanupBoundary(records));
@@ -10987,6 +10988,144 @@ export function inspectWorkspaceProbePersistenceBoundary(records) {
     adapterConstructions[0] !== "packages/cli/src/setup-delivery.ts"
   ) {
     failures.push("Workspace probe persistence acquired a second adapter or constructor");
+  }
+  return failures;
+}
+
+/** A6 keeps each P07 workspace-binding generation marker/WAL pair at one Host edge. */
+export function inspectWorkspaceBindingGenerationPersistenceBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const source = byPath.get(relative);
+    if (source === undefined) {
+      failures.push(`${relative}: workspace binding generation persistence source is missing`);
+    }
+    return source ?? "";
+  };
+  const service = required("packages/core/src/environment/workspace-bindings.ts");
+  const catalog = required("packages/core/src/environment/workspace-binding-catalog.ts");
+  const port = required(
+    "packages/core/src/environment/workspace-binding-generation-persistence.ts",
+  );
+  const environment = required("packages/core/src/environment/index.ts");
+  const coreIndex = required("packages/core/src/index.ts");
+  const coreBuild = required("packages/core/tsup.config.ts");
+  const adapterPath =
+    "packages/cli/src/serve/workspace-binding-generation-persistence.ts";
+  const adapter = required(adapterPath);
+  const setup = required("packages/cli/src/setup-delivery.ts");
+  const options = service.slice(
+    service.indexOf("export interface WorkspaceBindingServiceOptions"),
+    service.indexOf("export interface WorkspaceCapabilityPublication"),
+  );
+
+  if (
+    !port.includes("export interface WorkspaceBindingGenerationPersistencePort") ||
+    !port.includes(
+      "inspectEstablishment(): Promise<WorkspaceBindingGenerationPersistenceObservation>",
+    ) ||
+    !port.includes("publishEstablishment(): Promise<void>") ||
+    !options.includes(
+      "readonly persistence: WorkspaceBindingGenerationPersistencePort",
+    ) ||
+    options.includes("readonly persistence?:") ||
+    !service.includes("this.#persistence.inspectEstablishment()") ||
+    !service.includes("this.#persistence.publishEstablishment()")
+  ) {
+    failures.push("Workspace binding generation persistence port exact-set drifted");
+  }
+  if (
+    /WorkspaceBindingGenerationPersistence|workspace-binding-generation-persistence/u.test(
+      environment,
+    ) ||
+    coreIndex.includes("workspace-binding-generation-persistence") ||
+    !service.includes(
+      'import type { WorkspaceBindingGenerationPersistencePort } from "./workspace-binding-generation-persistence.js"',
+    ) ||
+    !coreBuild.includes('"src/environment/workspace-binding-generation-persistence.ts"')
+  ) {
+    failures.push("Workspace binding generation persistence port export boundary drifted");
+  }
+  if (
+    /#markerPath|\blogPath\b|writeEstablishmentMarker|ensureDurableDirectory|syncDirectory/u.test(
+      service,
+    ) ||
+    options.includes("readonly rootDir:") ||
+    /as\s+(?:FileAuthorityCommitLog|WorkspaceBindingGenerationPersistencePort)/u.test(
+      service,
+    )
+  ) {
+    failures.push(
+      "Core workspace binding service regained generation paths, marker I/O or concrete WAL access",
+    );
+  }
+  if (
+    !catalog.includes("readonly initialGeneration: WorkspaceBindingGenerationRuntime") ||
+    !catalog.includes("readonly createGeneration:") ||
+    !catalog.includes("readonly persistence: WorkspaceBindingGenerationPersistencePort") ||
+    !catalog.includes("persistence: runtime.persistence") ||
+    /initialLog|createGenerationLog|#generationLogs/u.test(catalog) ||
+    catalog.includes('path.join(\n        this.#rootDir,\n        "generations"')
+  ) {
+    failures.push("Workspace binding Catalog generation/WAL pairing drifted");
+  }
+  if (
+    !adapter.includes("class FileWorkspaceBindingGenerationPersistence") ||
+    !adapter.includes("implements WorkspaceBindingGenerationPersistencePort") ||
+    !adapter.includes(
+      "export class FileWorkspaceBindingGenerationPersistenceFactory",
+    ) ||
+    !adapter.includes(
+      'from "@zhixing/core/environment/workspace-binding-generation-persistence"',
+    ) ||
+    !adapter.includes('"workspace-bindings"') ||
+    !adapter.includes('"generations"') ||
+    !adapter.includes('path.join(this.#rootDir, "directory-established")') ||
+    !adapter.includes("authorityLogPath: authorityLog.logPath") ||
+    !adapter.includes('open(this.#markerPath, "wx", 0o600)') ||
+    !adapter.includes("await handle.sync()") ||
+    !adapter.includes("await syncDirectory(this.#rootDir)") ||
+    /WorkspaceBindingRecord|directory-established.*deviceId/u.test(adapter)
+  ) {
+    failures.push(
+      "CLI workspace binding generation persistence ownership or durability drifted",
+    );
+  }
+  if (
+    !setup.includes("new FileWorkspaceBindingGenerationPersistenceFactory({") ||
+    !setup.includes("initialGeneration: {") ||
+    !setup.includes("log: initialWorkspaceBindingLog") ||
+    !setup.includes(
+      'bindingGenerationPersistence.create(\n              "catalog-initial",\n              initialWorkspaceBindingLog',
+    ) ||
+    !setup.includes("createGeneration: (generation) => {") ||
+    !setup.includes("bindingGenerationPersistence.create(\n                generation,\n                log")
+  ) {
+    failures.push("setupAuthorityRuntime workspace binding generation pairing drifted");
+  }
+
+  const adapterDefinitions = records
+    .filter((record) =>
+      record.text.includes("implements WorkspaceBindingGenerationPersistencePort")
+    )
+    .map((record) => record.relative)
+    .sort();
+  const factoryConstructions = records
+    .filter((record) =>
+      record.text.includes("new FileWorkspaceBindingGenerationPersistenceFactory(")
+    )
+    .map((record) => record.relative)
+    .sort();
+  if (
+    adapterDefinitions.length !== 1 ||
+    adapterDefinitions[0] !== adapterPath ||
+    factoryConstructions.length !== 1 ||
+    factoryConstructions[0] !== "packages/cli/src/setup-delivery.ts"
+  ) {
+    failures.push(
+      "Workspace binding generation persistence acquired a second adapter or factory",
+    );
   }
   return failures;
 }

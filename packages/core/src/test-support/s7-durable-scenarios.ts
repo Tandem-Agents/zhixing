@@ -48,6 +48,7 @@ import {
   DefaultDeviceCapacityArbiter,
   StorageMaintenanceTaskRunner,
 } from "../resources/index.js";
+import type { WorkspaceBindingGenerationPersistencePort } from "../environment/workspace-binding-generation-persistence.js";
 
 import {
   assert,
@@ -549,12 +550,18 @@ async function createWorkspaceCatalogFixture(
   );
   const catalog = new WorkspaceBindingCatalog({
     rootDir: path.join(root, "catalog"),
-    initialLog: log,
-    createGenerationLog: (generation) => new FileAuthorityCommitLog(
-      path.join(root, "logs", workspaceCatalogGenerationStorageKey(generation)),
-      artifacts,
-      { clock: () => NOW },
-    ),
+    initialGeneration: {
+      log,
+      persistence: workspaceBindingGenerationPersistence(),
+    },
+    createGeneration: (generation) => ({
+      log: new FileAuthorityCommitLog(
+        path.join(root, "logs", workspaceCatalogGenerationStorageKey(generation)),
+        artifacts,
+        { clock: () => NOW },
+      ),
+      persistence: workspaceBindingGenerationPersistence(),
+    }),
     service: {
       deviceId: "device-a",
       executorId: "executor-a",
@@ -820,11 +827,11 @@ async function createWorkspaceProbeFixture(clock: () => string = () => NOW) {
     { clock: () => NOW },
   );
   const bindings = new WorkspaceBindingService({
-    rootDir: path.join(root, "binding-state"),
     catalogGeneration: "catalog-initial",
     deviceId: "device-a",
     executorId: "executor-a",
     log: bindingLog,
+    persistence: workspaceBindingGenerationPersistence(),
     verifier: identity,
     capacity: unlimitedCapacity(),
     capabilitySnapshot: async (publication) => descriptor(publication.workspaces),
@@ -1011,11 +1018,11 @@ async function createWorkspaceBindingService(options: {
   );
   const capacity = unlimitedCapacity();
   const service = new WorkspaceBindingService({
-    rootDir: path.join(root, "binding-state"),
     catalogGeneration: options.resetGenesis?.catalogGeneration ?? "catalog-initial",
     deviceId: "device-a",
     executorId: "executor-a",
     log,
+    persistence: workspaceBindingGenerationPersistence(),
     verifier: identity,
     capacity,
     capabilitySnapshot: async (publication) => descriptor(publication.workspaces),
@@ -1025,6 +1032,21 @@ async function createWorkspaceBindingService(options: {
     ...(options.resetGenesis ? { resetGenesis: options.resetGenesis } : {}),
   });
   return service;
+}
+
+function workspaceBindingGenerationPersistence(): WorkspaceBindingGenerationPersistencePort {
+  let marker = false;
+  return {
+    async inspectEstablishment() {
+      return {
+        establishmentMarker: marker ? "present" : "absent",
+        authorityLog: "present",
+      };
+    },
+    async publishEstablishment() {
+      marker = true;
+    },
+  };
 }
 
 function unlimitedCapacity(): DefaultDeviceCapacityArbiter {

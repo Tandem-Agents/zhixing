@@ -247,11 +247,19 @@ async function createFixture(
     { clock: () => NOW },
   ));
   const bindings = new WorkspaceBindingService({
-    rootDir: path.join(root, "binding-state"),
     catalogGeneration: "catalog-initial",
     deviceId: "device-a",
     executorId: "executor-a",
     log: bindingLog,
+    persistence: {
+      async inspectEstablishment() {
+        return {
+          establishmentMarker: "absent",
+          authorityLog: "present",
+        };
+      },
+      async publishEstablishment() {},
+    },
     verifier: identity,
     capacity,
     capabilitySnapshot: async (publication) =>

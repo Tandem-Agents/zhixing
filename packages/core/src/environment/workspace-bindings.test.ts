@@ -27,6 +27,7 @@ import {
   WorkspaceBindingRevisionError,
   localEnvironmentControlSubject,
 } from "./workspace-bindings.js";
+import type { WorkspaceBindingGenerationPersistencePort } from "./workspace-binding-generation-persistence.js";
 
 const NOW = "2026-07-30T00:00:00.000Z";
 const EXPIRY = "2026-07-30T01:00:00.000Z";
@@ -45,6 +46,48 @@ const identity: ProtocolSigner & ProtocolSignatureVerifier = {
 };
 
 describe("WorkspaceBindingService", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
+  it("publishes the generation marker only after its Authority fact and recovers response loss", async () => {
+    const root = await tempRoot();
+    const state = {
+      marker: false,
+      authorityLog: true,
+      publishAttempts: 0,
+    };
+    const persistence = generationPersistence(state, true);
+    await expect(
+      createServiceAt(root, undefined, persistence).list(
+        control("establish-response-lost"),
+      ),
+    ).rejects.toThrow("injected marker response loss");
+    expect(state.marker).toBe(true);
+
+    const restarted = createServiceAt(root, undefined, persistence);
+    await expect(
+      restarted.list(control("establish-replay")),
+    ).resolves.toEqual([]);
+    expect(state).toMatchObject({ marker: true, publishAttempts: 1 });
+  });
+
+  it("fails closed when marker, WAL presence and establishment fact disagree", async () => {
+    const missingLog = generationPersistence({
+      marker: true,
+      authorityLog: false,
+      publishAttempts: 0,
+    });
+    await expect(
+      createServiceAt(await tempRoot(), undefined, missingLog).initialize(),
+    ).rejects.toThrow("log is missing");
+
+    const missingFact = generationPersistence({
+      marker: true,
+      authorityLog: true,
+      publishAttempts: 0,
+    });
+    await expect(
+      createServiceAt(await tempRoot(), undefined, missingFact).initialize(),
+    ).rejects.toThrow("lacks its establishment fact");
+  });
+
   it("owns CRUD, CAS, name uniqueness and execution revisions in one log", async () => {
     const service = await createService();
     const created = await service.create(
@@ -296,6 +339,12 @@ async function createService(): Promise<WorkspaceBindingService> {
 function createServiceAt(
   root: string,
   bindingRefFactory?: () => string,
+  persistence: WorkspaceBindingGenerationPersistencePort =
+    generationPersistence({
+      marker: false,
+      authorityLog: true,
+      publishAttempts: 0,
+    }),
 ): WorkspaceBindingService {
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
   const log = new FileAuthorityCommitLog(
@@ -314,11 +363,11 @@ function createServiceAt(
     }),
   });
   return new WorkspaceBindingService({
-    rootDir: path.join(root, "binding-state"),
     catalogGeneration: "catalog-initial",
     deviceId: "device-a",
     executorId: "executor-a",
     log,
+    persistence,
     verifier: identity,
     capacity,
     capabilitySnapshot: async (publication) =>
@@ -327,6 +376,31 @@ function createServiceAt(
     clock: () => NOW,
     ...(bindingRefFactory ? { bindingRefFactory } : {}),
   });
+}
+
+function generationPersistence(
+  state: {
+    marker: boolean;
+    authorityLog: boolean;
+    publishAttempts: number;
+  },
+  loseFirstPublishResponse = false,
+): WorkspaceBindingGenerationPersistencePort {
+  return {
+    async inspectEstablishment() {
+      return {
+        establishmentMarker: state.marker ? "present" : "absent",
+        authorityLog: state.authorityLog ? "present" : "absent",
+      };
+    },
+    async publishEstablishment() {
+      state.publishAttempts += 1;
+      state.marker = true;
+      if (loseFirstPublishResponse && state.publishAttempts === 1) {
+        throw new Error("injected marker response loss");
+      }
+    },
+  };
 }
 
 function descriptor(

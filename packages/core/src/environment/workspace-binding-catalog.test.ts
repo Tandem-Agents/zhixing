@@ -29,6 +29,7 @@ import {
   workspaceCatalogGenerationStorageKey,
 } from "./workspace-binding-catalog.js";
 import { localEnvironmentControlSubject } from "./workspace-bindings.js";
+import type { WorkspaceBindingGenerationPersistencePort } from "./workspace-binding-generation-persistence.js";
 
 const NOW = "2026-07-30T00:00:00.000Z";
 const EXPIRY = "2026-07-30T01:00:00.000Z";
@@ -255,10 +256,14 @@ async function createFixture(
   });
   catalog = new WorkspaceBindingCatalog({
     rootDir: path.join(root, "catalog"),
-    initialLog,
-    createGenerationLog: (generation) => {
+    initialGeneration: {
+      log: initialLog,
+      persistence: generationPersistence(),
+    },
+    createGeneration: (generation) => {
       createdGenerations.push(generation);
-      return new FileAuthorityCommitLog(
+      return {
+        log: new FileAuthorityCommitLog(
         path.join(
           root,
           "logs",
@@ -266,7 +271,9 @@ async function createFixture(
         ),
         artifacts,
         { clock: () => NOW },
-      );
+        ),
+        persistence: generationPersistence(),
+      };
     },
     service: {
       deviceId: "device-a",
@@ -289,6 +296,21 @@ async function createFixture(
     clock: () => NOW,
   });
   return { root, catalog, published, createdGenerations };
+}
+
+function generationPersistence(): WorkspaceBindingGenerationPersistencePort {
+  let marker = false;
+  return {
+    async inspectEstablishment() {
+      return {
+        establishmentMarker: marker ? "present" : "absent",
+        authorityLog: "present",
+      };
+    },
+    async publishEstablishment() {
+      marker = true;
+    },
+  };
 }
 
 function recoveryControl(requestId: string, catalogGeneration: string) {

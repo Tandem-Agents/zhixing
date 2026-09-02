@@ -47,6 +47,7 @@ import {
   type WorkspaceCapabilityPublication,
   type WorkspaceBindingServiceOptions,
 } from "./workspace-bindings.js";
+import type { WorkspaceBindingGenerationPersistencePort } from "./workspace-binding-generation-persistence.js";
 
 const MANIFEST_VERSION = 1;
 const CONFIRMATION_MAX_AGE_MS = 15 * 60_000;
@@ -69,21 +70,26 @@ interface PersistedRootManifest extends WorkspaceBindingRootManifest {
 
 export interface WorkspaceBindingCatalogOptions {
   readonly rootDir: string;
-  readonly initialLog: AuthorityCommitLog;
-  readonly createGenerationLog: (
+  readonly initialGeneration: WorkspaceBindingGenerationRuntime;
+  readonly createGeneration: (
     catalogGeneration: string,
-  ) => AuthorityCommitLog;
+  ) => WorkspaceBindingGenerationRuntime;
   readonly service: Omit<
     WorkspaceBindingServiceOptions,
     | "catalogGeneration"
     | "log"
-    | "rootDir"
+    | "persistence"
     | "resetGenesis"
     | "storageMaintenance"
   >;
   readonly recoveryRunner: StorageMaintenanceTaskRunner;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly clock?: () => string;
+}
+
+interface WorkspaceBindingGenerationRuntime {
+  readonly log: AuthorityCommitLog;
+  readonly persistence: WorkspaceBindingGenerationPersistencePort;
 }
 
 /**
@@ -102,14 +108,14 @@ export class WorkspaceBindingCatalog
 {
   readonly #rootDir: string;
   readonly #manifestPath: string;
-  readonly #initialLog: AuthorityCommitLog;
-  readonly #createGenerationLog: WorkspaceBindingCatalogOptions["createGenerationLog"];
+  readonly #initialGeneration: WorkspaceBindingGenerationRuntime;
+  readonly #createGeneration: WorkspaceBindingCatalogOptions["createGeneration"];
   readonly #serviceOptions: WorkspaceBindingCatalogOptions["service"];
   readonly #recoveryRunner: StorageMaintenanceTaskRunner;
   readonly #storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly #clock: () => string;
   readonly #manifestQueue = new SerialTaskQueue();
-  readonly #generationLogs = new Map<string, AuthorityCommitLog>();
+  readonly #generations = new Map<string, WorkspaceBindingGenerationRuntime>();
   #manifest: PersistedRootManifest | undefined;
   #active: WorkspaceBindingService | undefined;
   #opening: Promise<void> | undefined;
@@ -120,8 +126,8 @@ export class WorkspaceBindingCatalog
   constructor(options: WorkspaceBindingCatalogOptions) {
     this.#rootDir = path.resolve(options.rootDir);
     this.#manifestPath = path.join(this.#rootDir, "root-manifest.json");
-    this.#initialLog = options.initialLog;
-    this.#createGenerationLog = options.createGenerationLog;
+    this.#initialGeneration = options.initialGeneration;
+    this.#createGeneration = options.createGeneration;
     this.#serviceOptions = options.service;
     this.#recoveryRunner = options.recoveryRunner;
     this.#storageMaintenance = options.storageMaintenance;
@@ -407,14 +413,14 @@ export class WorkspaceBindingCatalog
     this.#recoveryAbort.abort();
     await this.#recoveryRunner.stop();
     await this.#recoveryOwner;
-    for (const log of this.#generationLogs.values()) {
+    for (const generation of this.#generations.values()) {
       await (
-        log as AuthorityCommitLog & {
+        generation.log as AuthorityCommitLog & {
           stopStorageMaintenance?: () => void | Promise<void>;
         }
       ).stopStorageMaintenance?.();
     }
-    this.#generationLogs.clear();
+    this.#generations.clear();
   }
 
   #startRecoveryOwner(): void {
@@ -492,8 +498,10 @@ export class WorkspaceBindingCatalog
             return replay;
           }
           assertSameReservation(current.pendingReset, reservation);
-          const log = this.#logForGeneration(reservation.catalogGeneration);
-          const preparedCheckpoint = await log.checkpoint();
+          const generation = this.#runtimeForGeneration(
+            reservation.catalogGeneration,
+          );
+          const preparedCheckpoint = await generation.log.checkpoint();
           const preparedReceipt: WorkspaceBindingResetReceipt = {
             requestId: reservation.requestId,
             confirmationDigest: reservation.confirmationDigest,
@@ -505,7 +513,7 @@ export class WorkspaceBindingCatalog
           };
           const service = this.#makeService(
             reservation.catalogGeneration,
-            log,
+            generation,
             preparedReceipt,
           );
           await service.initialize();
@@ -521,7 +529,7 @@ export class WorkspaceBindingCatalog
               "Workspace catalog reset target receipt changed",
             );
           }
-          const checkpoint = await log.checkpoint();
+          const checkpoint = await generation.log.checkpoint();
           if (checkpoint.logId !== preparedReceipt.logId) {
             throw new WorkspaceBindingCatalogIntegrityError(
               "Workspace catalog reset target log identity changed",
@@ -569,10 +577,11 @@ export class WorkspaceBindingCatalog
       let log: AuthorityCommitLog;
       if (generation === this.#manifest?.catalogGeneration && this.#active) {
         service = this.#active;
-        log = this.#logForGeneration(generation);
+        log = this.#runtimeForGeneration(generation).log;
       } else {
-        log = this.#logForGeneration(generation);
-        service = this.#makeService(generation, log);
+        const runtime = this.#runtimeForGeneration(generation);
+        log = runtime.log;
+        service = this.#makeService(generation, runtime);
         await service.initialize();
       }
       const receipt = await service.resetReceipt();
@@ -596,12 +605,14 @@ export class WorkspaceBindingCatalog
     return undefined;
   }
 
-  #logForGeneration(generation: string): AuthorityCommitLog {
-    if (generation === "catalog-initial") return this.#initialLog;
-    const existing = this.#generationLogs.get(generation);
+  #runtimeForGeneration(
+    generation: string,
+  ): WorkspaceBindingGenerationRuntime {
+    if (generation === "catalog-initial") return this.#initialGeneration;
+    const existing = this.#generations.get(generation);
     if (existing) return existing;
-    const created = this.#createGenerationLog(generation);
-    this.#generationLogs.set(generation, created);
+    const created = this.#createGeneration(generation);
+    this.#generations.set(generation, created);
     return created;
   }
 
@@ -666,10 +677,10 @@ export class WorkspaceBindingCatalog
     });
     if (!persisted) {
       const generation = "catalog-initial";
-      const service = this.#makeService(generation, this.#initialLog);
+      const service = this.#makeService(generation, this.#initialGeneration);
       try {
         await service.initialize();
-        const checkpoint = await this.#initialLog.checkpoint();
+        const checkpoint = await this.#initialGeneration.log.checkpoint();
         const manifest: PersistedRootManifest = {
           version: MANIFEST_VERSION,
           state: "healthy",
@@ -709,11 +720,13 @@ export class WorkspaceBindingCatalog
       });
       return;
     }
-    const log = this.#logForGeneration(persisted.catalogGeneration);
-    const service = this.#makeService(persisted.catalogGeneration, log);
+    const generation = this.#runtimeForGeneration(
+      persisted.catalogGeneration,
+    );
+    const service = this.#makeService(persisted.catalogGeneration, generation);
     try {
       await service.initialize();
-      const checkpoint = await log.checkpoint();
+      const checkpoint = await generation.log.checkpoint();
       if (checkpoint.logId !== persisted.logId) {
         throw new WorkspaceBindingCatalogIntegrityError(
           "Workspace catalog root log identity changed",
@@ -738,7 +751,7 @@ export class WorkspaceBindingCatalog
 
   #makeService(
     generation: string,
-    log: AuthorityCommitLog,
+    runtime: WorkspaceBindingGenerationRuntime,
     resetGenesis?: WorkspaceBindingServiceOptions["resetGenesis"],
   ): WorkspaceBindingService {
     return new WorkspaceBindingService({
@@ -746,12 +759,8 @@ export class WorkspaceBindingCatalog
       catalogGeneration: generation,
       capabilitySnapshot: (publication) =>
         this.#publishCatalogState(publication),
-      rootDir: path.join(
-        this.#rootDir,
-        "generations",
-        workspaceCatalogGenerationStorageKey(generation),
-      ),
-      log,
+      log: runtime.log,
+      persistence: runtime.persistence,
       storageMaintenance: this.#storageMaintenance,
       ...(resetGenesis ? { resetGenesis } : {}),
     });
@@ -832,10 +841,15 @@ export class WorkspaceBindingCatalog
       ) {
         active = undefined;
         if (latest.state === "healthy") {
-          const log = this.#logForGeneration(latest.catalogGeneration);
-          const service = this.#makeService(latest.catalogGeneration, log);
+          const generation = this.#runtimeForGeneration(
+            latest.catalogGeneration,
+          );
+          const service = this.#makeService(
+            latest.catalogGeneration,
+            generation,
+          );
           await service.initialize();
-          const checkpoint = await log.checkpoint();
+          const checkpoint = await generation.log.checkpoint();
           if (checkpoint.logId !== latest.logId) {
             throw new WorkspaceBindingCatalogIntegrityError(
               "Workspace catalog root points to another log",

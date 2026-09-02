@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-08b P07 Workspace probe 物理基础设施边界已闭合，正在选择 A6 下一责任链<br>
+> 当前检查点：A6-08c P07 Workspace binding generation 持久边界已闭合，正在收束 catalog root manifest/CAS 物理持久边界<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,11 +202,11 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `522c4155`；A6-08a 已由协调者独立复核后提交，Workspace 资源准入 concrete governor 已收在 Host 边界 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-08b Workspace probe 物理持久边界已闭合 |
-| 活跃工作包 | 无；协调者正在核实 P07 binding catalog 的物理根泄漏与最窄可迁移边界 |
-| 下一责任链 | 若生产事实确认 binding catalog 同时拥有产品规则与物理 root/fs，则只拆其物理持久端口；不并行扩入 P09～P12、设备管理、transfer 或 A7 |
-| 打开的单向桥 | 无；Core probe 的 root/path/fs、commit-log `logPath` 探测和本地 marker helper 已归零，没有双物理入口 |
+| 已接受基线 | `5db248e2` 加当前 A6-08c 待提交差异；A6-08c 已由协调者独立复核，Workspace binding generation marker/WAL 物理持久边界已收归唯一 Host adapter |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-08c 已闭合，正在处理 P07 Workspace binding catalog root manifest/CAS/generation-path 物理持久边界 |
+| 活跃工作包 | 无；协调者正在提交 `A6-08c-p07-workspace-binding-generation-persistence-v1` 并准备下一责任链 |
+| 下一责任链 | 只处理 Workspace binding catalog root manifest/CAS/generation-path 边界；不并行扩入 P09～P12、设备管理、transfer 或 A7 |
+| 打开的单向桥 | 无；binding service 的 generation root/marker/logPath 旧入口已删除，catalog root manifest 留作独立下一包而非兼容桥 |
 | 已失效证据 | 无当前未恢复架构证据；A6-01～08a 继续有效。三拓扑 owner-domain 的 anchor+executor 既有 storage-maintenance 环境背压不与本包相交且未重复运行 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
@@ -2691,6 +2691,19 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 行为、异常与范围保护：首次打开仍严格执行 physical observation → WAL replay → 必要时先 append `probe-log-established` fact → 再 durable publish marker；marker 存在而 WAL 缺失以 `commit-log-corrupt` 拒绝，marker 存在而 fact 缺失以 `invalid-authority-record` 拒绝，fact 已提交但 marker 缺失/发布失败则下一 Host generation 从同一 WAL 重建并补发 marker。签名、request/result 全等、相同 executor、响应丢失 replay、并发 single-flight、分页 retire、27 天/6 小时维护、capacity、Host close 与 current-device 整根 cleanup 均未改变。P07 binding catalog/root manifest/generation、execution snapshot/capability/permission/assets、capacity 算法、公开协议、P09～P12 与 device-removal 产品决定未进入本包，物理 adapter 不解释任何 probe record 或签名。
 - 直接证据、门禁与交接：Core probe 9/9、CLI persistence adapter 2/2、真实 executor-only setup 1/1，合计 3 文件 12/12；覆盖 local/Mesh signed contract、identity conflict、durable replay、marker/log/fact 缺损、publication response loss、marker 重建、retire、canonical root、WAL presence、marker bytes/mode 与唯一 setup 装配。Core/CLI `tsc --noEmit`、Core fresh build、`pnpm cli:build`、fresh `pnpm runtime:package-exports` 和 changed-source Biome 通过；canonical `pnpm s7:lint` 最终 50/50 与 registry golden 通过，反向 mutation 拒绝 Core physical import/root/logPath、optional port、barrel 回流、错误 root/WAL binding、第二 adapter/constructor。若窄 persistence 合同、Core open/replay 顺序、CLI root/log binding、marker durability、setup 唯一构造、probe WAL/retention/close、current-device cleanup、S7/package-export 或上述直接测试任一变化，只恢复 `A6-08b-p07-workspace-probe-infrastructure-boundary-v1` 及真实相交证据；A6-01～08a 不因无关 P07 变化自动失效。A6 继续 `[ ]`，下一检查点仍由协调者复核后核实 P07 binding catalog 物理根泄漏；当前无打开桥或未恢复证据，本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：确认 Core probe 只拥有建立、重放、签名、退役与维护业务规则，required persistence port 只返回 marker/WAL 存在性并耐久发布 marker；唯一 CLI adapter 拥有 canonical root、concrete WAL path、fsync 与目录屏障，setup 只构造一次且没有 barrel、optional、cast 或第二物理入口。独立运行 Core probe 9/9、CLI adapter 2/2、真实 executor-only setup 1/1，Core fresh build、CLI typecheck、canonical S7 50/50 与 registry golden、runtime package exports、Core physical 反查和 `git diff --check` 均通过；既有 Rollup circular-chunk warnings 未变化。A6-08b 可以提交，A6 仍保持 `[ ]`。
+
+### A6-08c：P07 Workspace binding generation 持久边界收口
+
+- 派发基线与唯一结果：以已接受 `HEAD 5db248e2` 加本文调度记录为基线，只收口每个 Workspace binding catalog generation 的 establishment marker 与 concrete WAL presence。当前 Core `WorkspaceBindingService` 同时拥有 generation `rootDir`、marker path、目录创建/fsync 和对 `AuthorityCommitLog.logPath` 的 duck typing；迁移后它只消费 required、需求方拥有的 generation persistence port，CLI Host 唯一 adapter/factory 才拥有 generation 物理目录、marker bytes/mode/durability 与该 generation concrete WAL path。Workspace binding 产品规则、raw workspace path 规范化和 append-only fact owner 继续留在 Core。
+- 生产闭包与行为保护：沿 `setupAuthorityRuntime` → `WorkspaceBindingCatalog` initial/successor generation → `WorkspaceBindingService` 双向迁移全部构造与恢复端，覆盖 initial generation 复用 Executor WAL、successor generation 独立 WAL、`directory-established` fact、`catalog-reset` genesis、marker/WAL/fact 三者一致性、响应丢失重放、reset 前滚及 Host 重启。严格保持 marker 存在而 WAL 缺失 fail closed、marker/既有记录存在而 establishment fact 缺失 fail closed、fact 已提交但 marker 缺失时耐久补发，以及 device/executor/generation/logId/capability revision 全等；不改变 create/update/remove/import、用户 raw path 语义、资源与维护算法。
+- 明确不做与边界：不迁移 `WorkspaceBindingCatalog` 的 root manifest、CAS/lock/tmp/rename、generation 选择与 degraded/reset 状态机；这些是紧邻下一包的独立物理根。Core 可继续因 workspace absolute-path 规范化使用 `node:path`，但 binding service 不得再拥有 generation root、marker fs、目录 persistence 或 `logPath` cast。不得扩入 probe、snapshot/capability/permission/assets、P09～P12、设备管理或 A7，不得创建通用 Storage facade、optional fallback、第二 adapter/constructor 或 barrel 导出。
+- 最窄证据与完成条件：Core binding service/catalog 直接测试覆盖 initial/successor、marker-log-fact 缺损、publication response loss、reset/restart 与主要 CRUD 不回退；CLI adapter/setup 测试覆盖 canonical initial/successor root、对应 WAL presence、0600 marker 与唯一 factory binding。结构门禁须拒绝 service 物理 fs/root/logPath 回流、optional port、barrel、错误 generation/log 绑定和第二 adapter/factory。按验证手册只运行该闭包、必要 Core build、Core/CLI typecheck、canonical S7、fresh package exports、changed-source 格式和 `git diff --check`；不重复 probe、Workspace management Host、owner-domain、S6、根级回归或制品验收。
+- 安全交接：只有 binding service 仍唯一拥有领域事实、CLI adapter 唯一拥有 generation 物理建立、initial/successor 全部构造与异常组合闭合且无双入口时才结束；A6 继续 `[ ]`。约四小时仍未闭合、必须同时改 root manifest/CAS、发现两个独立根因或需改变 Workspace 产品/持久合同，停在可构建、可运行、单一 generation owner 成立的检查点反馈，不得执行任何 Git 写操作。
+- 实施结果与生产闭包：Core 新增 required `WorkspaceBindingGenerationPersistencePort` 窄合同，`WorkspaceBindingService` 只根据 marker/WAL observation 决定 replay、建立与 fail-closed，仍唯一拥有 `directory-established`/`catalog-reset` 与 binding 领域事实；generation `rootDir`、marker path/I/O、目录 durability 和对 `AuthorityCommitLog.logPath` 的 duck typing全部退出。`WorkspaceBindingCatalog` 继续拥有 root manifest、generation 选择与 reset 状态机，但 initial/successor 现在始终以不可拆分的 `{log,persistence}` runtime 传递和缓存，避免 generation 与物理 WAL 错配。唯一 CLI `FileWorkspaceBindingGenerationPersistenceFactory` 在 `setupAuthorityRuntime` 把 `catalog-initial` 配到本机 Executor WAL、successor 配到该 generation 独立 catalog WAL，并独占 canonical generation root、固定 marker bytes、`0600`、file sync 与 directory sync；无 optional、cast、barrel、第二 adapter/factory 或兼容入口。
+- 行为、异常与范围保护：首次打开仍为 physical observation → WAL replay → 缺 fact 时先 append establishment（successor 同提交包含 reset genesis）→ read-back → durable marker publish；marker+missing WAL、marker/既有 stream+missing fact 继续 fail closed，fact/marker 已提交但调用边界丢失可由同一 WAL/marker 重放。Catalog reset reservation、successor logId/capability revision、Host restart、CRUD/import、raw path、资源/维护、公开协议与持久 record bytes 未改变。root manifest/CAS/lock/tmp/rename、generation 选择/degraded-reset 状态机仍在 Core Catalog，明确留给紧邻下一包；probe、snapshot/capability/permission/assets、P09～P12、设备管理和 A7 未进入本包。
+- 直接证据与门禁：Core binding service/catalog 2 文件 17/17，另因 required constructor 输入真实变化而复取 probe 9/9，合计 3 文件 26/26；覆盖 CRUD/restart、marker-log-fact 缺损、marker publish 响应丢失、initial/successor reset/recovery。CLI 唯一 adapter 2/2 与真实 setup 24/24，合计 2 文件 26/26；覆盖 initial/successor canonical root、各自 concrete WAL presence、marker bytes/mode 与生产 factory 装配。适配器首次测试数据使用无效 Authority stream 而在产品逻辑前失败，改用既有合法 workspace stream 后只隔离复取该文件 2/2。Core fresh build通过（仅既有 circular-chunk warnings），Core/CLI `tsc --noEmit`、fresh `pnpm runtime:package-exports` 与 changed-source Biome 通过；canonical `pnpm s7:lint` 首轮在 production gate 前暴露 inspector 错把未进入 production record 集的 package manifest 当必需输入，移除重复 package 检查后最终 51/51 且 registry golden 通过，独立 package-export gate继续验证 manifest。反向 mutation拒绝 Core marker/logPath/optional/barrel、Catalog generation/WAL 拆分、错误 setup 配对、durability 漂移与第二 adapter/factory。
+- 失效、状态与下一检查点：若窄 persistence 合同、service open/replay/fact→marker 顺序、Catalog generation runtime 配对、CLI canonical root/marker/WAL factory、initial Executor WAL、successor独立 WAL、setup唯一构造、package export/build entry、S7或上述直接测试任一变化，恢复 `A6-08c-p07-workspace-binding-generation-persistence-v1` 并只重验该闭包；root manifest/CAS 下一包变化只有真实穿透本配对时才使本证据失效。A6继续 `[ ]`，当前实施完成并等待协调者独立复核；下一检查点只允许 Workspace binding catalog root manifest/CAS/generation-path 边界。本轮未执行Git暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：确认 Core binding service 只保留 Workspace path 与 establishment/replay 领域规则并强制消费 required generation persistence port；唯一 CLI factory 独占 initial/successor canonical generation root、marker durability 和 concrete WAL presence，Catalog 以不可拆分的 `{log,persistence}` runtime 传递，未形成错配、optional、barrel 或第二入口。独立运行 Core binding service/catalog 17/17、CLI adapter/setup 26/26，Core fresh build、CLI typecheck、canonical S7 51/51 与 registry golden、runtime package exports、Core physical 反查和 `git diff --check` 均通过；既有 Rollup circular-chunk warnings未变化。A6-08c 可以提交，A6仍保持 `[ ]`。
 
 ## 十、用户提示词
 

@@ -19,6 +19,7 @@ import {
   inspectAdvancementEvidenceTopologyBoundary,
   inspectAssignmentResourcePortBoundary,
   inspectWorkspaceProbePersistenceBoundary,
+  inspectWorkspaceBindingGenerationPersistenceBoundary,
   inspectConversationStorageBoundary,
   inspectWorksceneStorageCleanupBoundary,
   inspectStorageRemainderBoundary,
@@ -1134,6 +1135,83 @@ test("P07 workspace probe physical persistence stays at one Host adapter", async
       },
     ]).join("\n"),
     /acquired a second adapter or constructor/u,
+  );
+});
+
+test("P07 workspace binding generation marker and WAL stay paired at one Host adapter", async () => {
+  const paths = [
+    "packages/core/src/environment/workspace-bindings.ts",
+    "packages/core/src/environment/workspace-binding-catalog.ts",
+    "packages/core/src/environment/workspace-binding-generation-persistence.ts",
+    "packages/core/src/environment/index.ts",
+    "packages/core/src/index.ts",
+    "packages/core/package.json",
+    "packages/core/tsup.config.ts",
+    "packages/cli/src/serve/workspace-binding-generation-persistence.ts",
+    "packages/cli/src/setup-delivery.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: (await readFile(relative, "utf8")).replaceAll("\r\n", "\n"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(
+    inspectWorkspaceBindingGenerationPersistenceBoundary(records),
+    [],
+  );
+  assert.match(
+    inspectWorkspaceBindingGenerationPersistenceBoundary(mutate(
+      "packages/core/src/environment/workspace-bindings.ts",
+      (text) => text.replace(
+        "readonly persistence: WorkspaceBindingGenerationPersistencePort;",
+        "readonly persistence?: WorkspaceBindingGenerationPersistencePort;",
+      ),
+    )).join("\n"),
+    /persistence port exact-set drifted/u,
+  );
+  assert.match(
+    inspectWorkspaceBindingGenerationPersistenceBoundary(mutate(
+      "packages/core/src/environment/workspace-bindings.ts",
+      (text) => `${text}\nconst logPath = \"hidden\";\n`,
+    )).join("\n"),
+    /regained generation paths, marker I\/O or concrete WAL access/u,
+  );
+  assert.match(
+    inspectWorkspaceBindingGenerationPersistenceBoundary(mutate(
+      "packages/core/src/environment/index.ts",
+      (text) => `${text}\nexport * from \"./workspace-binding-generation-persistence.js\";\n`,
+    )).join("\n"),
+    /export boundary drifted/u,
+  );
+  assert.match(
+    inspectWorkspaceBindingGenerationPersistenceBoundary(mutate(
+      "packages/cli/src/setup-delivery.ts",
+      (text) => text.replace(
+        "generation,\n                log",
+        "generation,\n                initialWorkspaceBindingLog",
+      ),
+    )).join("\n"),
+    /setupAuthorityRuntime workspace binding generation pairing drifted/u,
+  );
+  assert.match(
+    inspectWorkspaceBindingGenerationPersistenceBoundary(mutate(
+      "packages/cli/src/serve/workspace-binding-generation-persistence.ts",
+      (text) => text.replace('"wx", 0o600', '"wx", 0o644'),
+    )).join("\n"),
+    /ownership or durability drifted/u,
+  );
+  assert.match(
+    inspectWorkspaceBindingGenerationPersistenceBoundary([
+      ...records,
+      {
+        relative: "packages/cli/src/serve/duplicate-workspace-binding-generation-persistence.ts",
+        text: "class Duplicate implements WorkspaceBindingGenerationPersistencePort {}",
+      },
+    ]).join("\n"),
+    /acquired a second adapter or factory/u,
   );
 });
 

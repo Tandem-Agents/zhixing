@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { access, open, stat } from "node:fs/promises";
+import { access, stat } from "node:fs/promises";
 import path from "node:path";
 import type {
   AuthorityCommitLog,
@@ -21,11 +21,7 @@ import type {
   WorkspaceBindingResetReceipt,
 } from "../contracts/index.js";
 import { defineDurableRuntimeContract } from "../contracts/durable-contract.js";
-import {
-  ensureDurableDirectory,
-  SerialTaskQueue,
-  syncDirectory,
-} from "../persistence/index.js";
+import { SerialTaskQueue } from "../persistence/index.js";
 import {
   assertResourceLeaseActiveAt,
   protocolDigest,
@@ -41,6 +37,7 @@ import {
   type DeviceCapacityBudget,
   type StorageMaintenanceGovernorPort,
 } from "../resources/index.js";
+import type { WorkspaceBindingGenerationPersistencePort } from "./workspace-binding-generation-persistence.js";
 
 const DIRECTORY_STREAM = "executor:workspace-bindings";
 const ADMIN_STEP_BUDGET: DeviceCapacityBudget = {
@@ -183,11 +180,11 @@ interface WorkspaceBindingProjection {
 }
 
 export interface WorkspaceBindingServiceOptions {
-  readonly rootDir: string;
   readonly catalogGeneration: string;
   readonly deviceId: string;
   readonly executorId: string;
   readonly log: AuthorityCommitLog;
+  readonly persistence: WorkspaceBindingGenerationPersistencePort;
   readonly verifier: ProtocolSignatureVerifier;
   readonly capacity: DeviceCapacityArbiterPort;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
@@ -227,12 +224,11 @@ export class WorkspaceBindingService
     WorkspaceBindingAdminPort,
     WorkspaceBindingMigrationPort
 {
-  readonly #rootDir: string;
-  readonly #markerPath: string;
   readonly #catalogGeneration: string;
   readonly #deviceId: string;
   readonly #executorId: string;
   readonly #log: AuthorityCommitLog;
+  readonly #persistence: WorkspaceBindingGenerationPersistencePort;
   readonly #verifier: ProtocolSignatureVerifier;
   readonly #capacity: DeviceCapacityArbiterPort;
   readonly #storageMaintenance: StorageMaintenanceGovernorPort | undefined;
@@ -247,8 +243,6 @@ export class WorkspaceBindingService
   #opening: Promise<void> | undefined;
 
   constructor(options: WorkspaceBindingServiceOptions) {
-    this.#rootDir = path.resolve(options.rootDir);
-    this.#markerPath = path.join(this.#rootDir, "directory-established");
     this.#catalogGeneration = requireIdentifier(
       options.catalogGeneration,
       "Workspace catalog generation",
@@ -259,6 +253,7 @@ export class WorkspaceBindingService
       "Workspace executorId",
     );
     this.#log = options.log;
+    this.#persistence = options.persistence;
     this.#verifier = options.verifier;
     this.#capacity = options.capacity;
     this.#storageMaintenance = options.storageMaintenance;
@@ -913,16 +908,9 @@ export class WorkspaceBindingService
   }
 
   async #open(): Promise<void> {
-    await ensureDurableDirectory(this.#rootDir);
-    const markerExists = await exists(this.#markerPath);
-    const logPath =
-      "logPath" in this.#log
-        ? String(
-            (this.#log as AuthorityCommitLog & { logPath: string }).logPath,
-          )
-        : undefined;
-    const logExists = logPath === undefined ? true : await exists(logPath);
-    if (markerExists && !logExists) {
+    const persistence = await this.#persistence.inspectEstablishment();
+    const markerExists = persistence.establishmentMarker === "present";
+    if (markerExists && persistence.authorityLog === "absent") {
       throw new AuthorityStorageError(
         "commit-log-corrupt",
         "Established workspace binding log is missing",
@@ -987,7 +975,7 @@ export class WorkspaceBindingService
         "Workspace binding directory belongs to another device",
       );
     }
-    if (!markerExists) await writeEstablishmentMarker(this.#markerPath);
+    if (!markerExists) await this.#persistence.publishEstablishment();
   }
 }
 
@@ -1945,33 +1933,6 @@ function requirePositiveRevision(value: unknown, label: string): number {
     throw new TypeError(`${label} must be a positive safe integer`);
   }
   return value as number;
-}
-
-async function writeEstablishmentMarker(markerPath: string): Promise<void> {
-  const handle = await open(markerPath, "wx", 0o600).catch(
-    async (error: unknown) => {
-      if (isNodeError(error, "EEXIST")) return undefined;
-      throw error;
-    },
-  );
-  if (!handle) return;
-  try {
-    await handle.writeFile("workspace-binding-directory-v1\n", "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  await syncDirectory(path.dirname(markerPath));
-}
-
-async function exists(target: string): Promise<boolean> {
-  return stat(target).then(
-    () => true,
-    (error: unknown) => {
-      if (isNodeError(error, "ENOENT")) return false;
-      throw error;
-    },
-  );
 }
 
 function isNodeError(error: unknown, code: string): boolean {

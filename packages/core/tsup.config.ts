@@ -38,6 +38,7 @@ export default defineConfig({
     "src/environment/index.ts",
     "src/environment/workspace-administration.ts",
     "src/environment/workspace-probe-persistence.ts",
+    "src/environment/workspace-binding-generation-persistence.ts",
     "src/test-support/s7-durable.ts",
     "src/test-support/s7-durable-harness.ts",
   ],

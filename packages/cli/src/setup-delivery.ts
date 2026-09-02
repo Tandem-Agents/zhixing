@@ -143,6 +143,7 @@ import {
 } from "./serve/execution-asset-cache.js";
 import type { InstalledAuthorityGeneration } from "./serve/planned-anchor-transfer.js";
 import { FileWorkspaceProbePersistence } from "./serve/workspace-probe-persistence.js";
+import { FileWorkspaceBindingGenerationPersistenceFactory } from "./serve/workspace-binding-generation-persistence.js";
 
 export const INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS = Object.freeze([
   "runtime-epoch",
@@ -908,11 +909,22 @@ export async function setupAuthorityRuntime(
         const bindingArtifacts = new FileArtifactStore(
           path.join(bindingRoot, "artifacts"),
         );
+        const bindingGenerationPersistence =
+          new FileWorkspaceBindingGenerationPersistenceFactory({
+            zhixingHome: options.zhixingHome,
+          });
+        const initialWorkspaceBindingLog = executorLog!;
         workspaceBindings = new WorkspaceBindingCatalog({
           rootDir: bindingRoot,
-          initialLog: executorLog!,
-          createGenerationLog: (generation) =>
-            new FileAuthorityCommitLog(
+          initialGeneration: {
+            log: initialWorkspaceBindingLog,
+            persistence: bindingGenerationPersistence.create(
+              "catalog-initial",
+              initialWorkspaceBindingLog,
+            ),
+          },
+          createGeneration: (generation) => {
+            const log = new FileAuthorityCommitLog(
               path.join(
                 bindingRoot,
                 "catalogs",
@@ -923,7 +935,15 @@ export async function setupAuthorityRuntime(
                 storageMaintenance: options.storageMaintenance,
                 clock,
               },
-            ),
+            );
+            return {
+              log,
+              persistence: bindingGenerationPersistence.create(
+                generation,
+                log,
+              ),
+            };
+          },
           service: {
             deviceId: key.deviceId,
             executorId,
