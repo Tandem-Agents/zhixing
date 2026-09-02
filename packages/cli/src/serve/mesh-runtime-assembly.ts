@@ -34,9 +34,9 @@ import type {
   RuntimeFactory,
 } from "@zhixing/owner-kernel";
 import {
-  FileConversationTransferStagingArea,
   ConversationTransferTarget,
   listConversationTransferStates,
+  type ConversationTransferStagingArea,
 } from "@zhixing/owner-kernel";
 import type {
   ConversationAssignmentLedger,
@@ -320,6 +320,7 @@ export interface MeshRuntimeAssemblyOptions {
   readonly plannedAnchorPostInstall?: AnchorPostInstallDescriptor;
   readonly authority: AuthorityRuntimeStack;
   readonly assignmentArtifactReceiver: AssignmentArtifactReceiverPort;
+  readonly conversationTransferStaging: ConversationTransferStagingArea | null;
   readonly protocol?: ConversationProtocolRuntime;
   readonly executorTopology?: ConversationExecutorTopologyAdapter;
   readonly localConversationOwner?: LocalConversationOwnerAssembly;
@@ -415,6 +416,9 @@ export class MeshRuntimeAssembly
     if (roles.has("anchor") && !options.executorTopology) {
       throw new Error("Anchor mesh role requires the conversation executor topology adapter");
     }
+    if (roles.has("anchor") && !options.conversationTransferStaging) {
+      throw new Error("Anchor mesh role requires conversation transfer staging");
+    }
     if (roles.has("executor") && !options.executor) {
       throw new Error("Executor mesh role requires the executor runtime substrate");
     }
@@ -498,14 +502,12 @@ export class MeshRuntimeAssembly
           globalState: anchorGlobalState!,
         }
       : undefined;
-    this.#transferTarget = roles.has("anchor")
+    this.#transferTarget = roles.has("anchor") && options.conversationTransferStaging
       ? new ConversationTransferTarget({
           deviceId: options.authority.deviceId,
           log: options.authority.authorityLog,
           artifacts: options.authority.artifacts,
-          staging: new FileConversationTransferStagingArea(
-            path.join(path.dirname(options.authority.artifacts.rootDir), "conversation-transfer-staging"),
-          ),
+          staging: options.conversationTransferStaging,
           storageMaintenance: options.authority.storageMaintenance,
           abortSignal: () => this.#transferAbort.signal,
           signer: options.authority.signer,

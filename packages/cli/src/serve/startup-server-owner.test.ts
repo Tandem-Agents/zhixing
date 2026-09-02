@@ -129,6 +129,11 @@ describe("production startup server ownership", () => {
   it("keeps the anchor endpoint inactive until every open prerequisite has one cleanup owner", async () => {
     const source = await readSource("command.ts");
     const surfaces = await readSource("access-surfaces.ts");
+    expect(
+      surfaces.match(/conversationTransferStaging:\s*createConversationTransferStagingInfrastructure\(/gu),
+    ).toHaveLength(1);
+    expect(location(surfaces, "conversationTransferStaging: createConversationTransferStagingInfrastructure({"))
+      .toBeGreaterThan(location(surfaces, "const mesh = new MeshRuntimeAssembly({"));
     const bind = location(source, "const serverBinding = await bindServer");
     expect(bind).toBeLessThan(location(source, "await setupAssemblyUnits(assemblyUnits, ctx, \"pre-server\")"));
     expect(bind).toBeLessThan(location(source, "const stopResume = await stopCoordinator.resumeActive()"));
@@ -256,6 +261,8 @@ describe("production startup server ownership", () => {
 
   it("keeps the executor endpoint inactive through stop ownership and final admission", async () => {
     const source = await readSource("executor-role-runtime.ts");
+    expect(source.match(/conversationTransferStaging:\s*null/gu)).toHaveLength(1);
+    expect(source).not.toContain("createConversationTransferStagingInfrastructure");
     const bind = location(source, "const localServerBinding = await bindServer");
     const bindingOwner = location(
       source,

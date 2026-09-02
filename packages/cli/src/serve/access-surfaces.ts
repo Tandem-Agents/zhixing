@@ -51,6 +51,7 @@ import {
 } from "../setup-delivery.js";
 import { MeshRuntimeAssembly, executorIdForDevice } from "./mesh-runtime-assembly.js";
 import { createAssignmentArtifactReceiverInfrastructure } from "./assignment-artifact-receiver-infrastructure.js";
+import { createConversationTransferStagingInfrastructure } from "./conversation-transfer-staging-infrastructure.js";
 import { createFileMeshPairingContinuationRepository } from "./mesh-pairing-continuation.js";
 import { createPersistentPairedCheckpointCommandReceiverInfrastructure } from "./paired-checkpoint-incoming-infrastructure.js";
 import { SurfaceAssetMaintenance } from "./surface-asset-maintenance.js";
@@ -329,6 +330,9 @@ const meshSurface: AccessSurface = {
       assignmentArtifactReceiver: createAssignmentArtifactReceiverInfrastructure({
         zhixingHome: ctx.zhixingHome,
         artifacts: ctx.authorityRuntime.artifacts,
+      }),
+      conversationTransferStaging: createConversationTransferStagingInfrastructure({
+        zhixingHome: ctx.zhixingHome,
       }),
       protocol: ctx.conversationProtocol,
       executorTopology: ctx.conversationExecutorTopology!,

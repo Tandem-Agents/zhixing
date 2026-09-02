@@ -3,7 +3,7 @@ import {
   FileArtifactStore,
   FileAuthorityCommitLog,
 } from "@zhixing/core/authority";
-import type { Signature, TransferRecord } from "@zhixing/core/contracts";
+import type { ArtifactRef, Signature, TransferRecord } from "@zhixing/core/contracts";
 import {
   protocolDigest,
   type ProtocolSignatureVerifier,
@@ -19,9 +19,10 @@ import {
   CONVERSATION_TRANSFER_PROJECTION_ID,
   ConversationTransferSource,
   ConversationTransferTarget,
-  FileConversationTransferStagingArea,
   assertConversationTransferWriteAuthority,
   readConversationTransferState,
+  type ConversationTransferStaging,
+  type ConversationTransferStagingArea,
   type ConversationTransferSourceOptions,
 } from "../conversation-transfer.js";
 import {
@@ -201,11 +202,12 @@ describe("conversation transfer source and target", { timeout: DURABLE_IO_TEST_T
     const prepared = prepareRecord();
     await source.source.prepare(prepared);
     const frozen = await source.source.freeze(TRANSFER_ID);
+    const targetStaging = memoryStagingArea();
     const target = new ConversationTransferTarget({
       deviceId: "device-target",
       log: targetLog,
       artifacts: targetArtifacts,
-      staging: new FileConversationTransferStagingArea(path.join(targetRoot, "staging")),
+      staging: targetStaging.port,
       signer: targetSigner,
       verifier,
       isActiveSource: (deviceId) => deviceId === "device-source",
@@ -272,12 +274,14 @@ describe("conversation transfer source and target", { timeout: DURABLE_IO_TEST_T
       commit: committed.commit,
       state: { phase: "committed" },
     });
+    expect(targetStaging.count(TRANSFER_ID)).toBeGreaterThan(0);
 
+    const staleStaging = memoryStagingArea();
     const staleTarget = new ConversationTransferTarget({
       deviceId: "device-target",
       log: targetLog,
       artifacts: targetArtifacts,
-      staging: new FileConversationTransferStagingArea(path.join(targetRoot, "stale-staging")),
+      staging: staleStaging.port,
       signer: targetSigner,
       verifier,
       isActiveSource: () => true,
@@ -303,9 +307,7 @@ describe("conversation transfer source and target", { timeout: DURABLE_IO_TEST_T
       targetArtifacts,
       { clock: () => NOW, lockWaitMs: 2_000 },
     ));
-    const staging = new FileConversationTransferStagingArea(
-      path.join(targetRoot, "transfer-staging"),
-    );
+    const staging = memoryStagingArea();
     const shared = await source.artifacts.put(Buffer.from("shared-attachment", "utf8"));
     await source.log.append([
       {
@@ -325,7 +327,7 @@ describe("conversation transfer source and target", { timeout: DURABLE_IO_TEST_T
       deviceId: "device-target",
       log: targetLog,
       artifacts: targetArtifacts,
-      staging,
+      staging: staging.port,
       storageMaintenance: maintenance.port,
       signer: targetSigner,
       verifier,
@@ -348,7 +350,7 @@ describe("conversation transfer source and target", { timeout: DURABLE_IO_TEST_T
     await expect(target.cleanupAborted(TRANSFER_ID)).resolves.toBeGreaterThan(0);
 
     await expect(targetArtifacts.has(shared)).resolves.toBe(true);
-    await expect(staging.storeFor(TRANSFER_ID).list()).resolves.toEqual([]);
+    expect(staging.count(TRANSFER_ID)).toBe(0);
     expect(maintenance.requests.length).toBeGreaterThan(0);
     expect(maintenance.requests.every((request) => request.kind === "conversation-transfer"))
       .toBe(true);
@@ -356,6 +358,84 @@ describe("conversation transfer source and target", { timeout: DURABLE_IO_TEST_T
       .toBeGreaterThan(1);
   });
 });
+
+function memoryStagingArea(): {
+  readonly port: ConversationTransferStagingArea;
+  readonly count: (transferId: string) => number;
+} {
+  const sessions = new Map<string, {
+    readonly artifacts: Map<string, Uint8Array>;
+    readonly partials: Map<string, Uint8Array>;
+    readonly projection: ConversationTransferStaging;
+  }>();
+  const keyFor = (ref: ArtifactRef) => `${ref.digest}:${ref.bytes}`;
+  const forTransfer = (transferId: string): ConversationTransferStaging => {
+    const current = sessions.get(transferId);
+    if (current) return current.projection;
+    const artifacts = new Map<string, Uint8Array>();
+    const partials = new Map<string, Uint8Array>();
+    const projection = Object.freeze({
+      artifacts: Object.freeze({
+        get: async (ref: ArtifactRef) => {
+          const value = artifacts.get(keyFor(ref));
+          if (!value) throw new Error("Artifact does not exist");
+          return value.slice();
+        },
+        readRange: async (ref: ArtifactRef, offset: number, limit: number) => {
+          const value = artifacts.get(keyFor(ref));
+          if (!value) throw new Error("Artifact does not exist");
+          return value.slice(offset, offset + limit);
+        },
+        has: async (ref: ArtifactRef) => artifacts.has(keyFor(ref)),
+      }),
+      receiver: Object.freeze({
+        progress: async (ref: ArtifactRef, runPhysicalStep = (_identity, operation) => operation()) =>
+          runPhysicalStep({ step: "progress", digest: ref.digest }, async () => {
+            const complete = artifacts.has(keyFor(ref));
+            return {
+              receivedBytes: complete ? ref.bytes : (partials.get(keyFor(ref))?.byteLength ?? 0),
+              complete,
+            };
+          }),
+        append: async (
+          ref: ArtifactRef,
+          offset: number,
+          bytes: Uint8Array,
+          runPhysicalStep = (_identity, operation) => operation(),
+        ) => runPhysicalStep({ step: "append", digest: ref.digest }, async () => {
+          const key = keyFor(ref);
+          if (artifacts.has(key)) return { receivedBytes: ref.bytes, complete: true };
+          const prefix = partials.get(key) ?? new Uint8Array();
+          if (offset !== prefix.byteLength) {
+            throw new RangeError("Artifact chunk does not continue the durable prefix");
+          }
+          const next = Buffer.concat([prefix, bytes]);
+          if (next.byteLength > ref.bytes) {
+            throw new RangeError("Artifact chunk exceeds the declared byte length");
+          }
+          if (next.byteLength === ref.bytes) {
+            artifacts.set(key, next);
+            partials.delete(key);
+            return { receivedBytes: ref.bytes, complete: true };
+          }
+          partials.set(key, next);
+          return { receivedBytes: next.byteLength, complete: false };
+        }),
+      }),
+      cleanup: async () => {
+        const removed = artifacts.size;
+        sessions.delete(transferId);
+        return removed;
+      },
+    }) satisfies ConversationTransferStaging;
+    sessions.set(transferId, { artifacts, partials, projection });
+    return projection;
+  };
+  return {
+    port: Object.freeze({ forTransfer }),
+    count: (transferId) => sessions.get(transferId)?.artifacts.size ?? 0,
+  };
+}
 
 async function sourceHarness(options: {
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;

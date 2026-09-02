@@ -12803,8 +12803,12 @@ export function inspectConversationAdoptionAssembly(records) {
   const failures = [];
   const required = new Map([
     ["packages/cli/src/serve/mesh-runtime-assembly.ts", undefined],
+    ["packages/cli/src/serve/conversation-transfer-staging-infrastructure.ts", undefined],
     ["packages/cli/src/serve/access-surfaces.ts", undefined],
     ["packages/cli/src/serve/executor-role-runtime.ts", undefined],
+    ["packages/cli/src/serve/planned-anchor-transfer.ts", undefined],
+    ["packages/cli/src/serve/disaster-recovery-target.ts", undefined],
+    ["packages/cli/src/serve/device-removal-cleanup.ts", undefined],
     ["packages/cli/src/serve/conversation-evidence-authority.ts", undefined],
     ["packages/cli/src/serve/conversation-transfer-mesh.ts", undefined],
     ["packages/cli/src/serve/first-party-conversation-mesh.ts", undefined],
@@ -12840,17 +12844,39 @@ export function inspectConversationAdoptionAssembly(records) {
   };
 
   const mesh = required.get("packages/cli/src/serve/mesh-runtime-assembly.ts");
+  const stagingInfrastructure = required.get(
+    "packages/cli/src/serve/conversation-transfer-staging-infrastructure.ts",
+  );
   requireCount(mesh, /new\s+ConversationTransferTarget\s*\(/gu, 1, "anchor transfer target construction");
   requireCount(mesh, /registerConversationTransferMeshService\s*\(/gu, 1, "conversation transfer mesh registration");
   requireCount(mesh, /options\.localConversationOwner\.transferSource\s*\(\s*\)/gu, 1, "local transfer source binding");
   requireCount(mesh, /afterCommit\s*:\s*async\s*\(base\)[\s\S]*?this\.#installCommittedTransfer\s*\(base\)/gu, 1, "post-commit authority installation");
-  if (!/this\.#transferTarget\s*=\s*roles\.has\("anchor"\)\s*\?[\s\S]*?new\s+ConversationTransferTarget\s*\(/u.test(mesh.text)) {
+  if (!/this\.#transferTarget\s*=\s*roles\.has\("anchor"\)\s*&&\s*options\.conversationTransferStaging\s*\?[\s\S]*?new\s+ConversationTransferTarget\s*\(/u.test(mesh.text)) {
     failures.push(`${mesh.relative}: transfer target must be owned only by the active anchor role`);
   }
   if (
-    !/staging:\s*new\s+FileConversationTransferStagingArea\s*\([\s\S]*?storageMaintenance:\s*options\.authority\.storageMaintenance,[\s\S]*?abortSignal:\s*\(\)\s*=>\s*this\.#transferAbort\.signal/u.test(mesh.text)
+    !/readonly\s+conversationTransferStaging:\s*ConversationTransferStagingArea\s*\|\s*null/u.test(mesh.text) ||
+    /conversationTransferStaging\?/u.test(mesh.text) ||
+    !/roles\.has\("anchor"\)\s*&&\s*!options\.conversationTransferStaging/u.test(mesh.text) ||
+    !/staging:\s*options\.conversationTransferStaging,[\s\S]*?storageMaintenance:\s*options\.authority\.storageMaintenance,[\s\S]*?abortSignal:\s*\(\)\s*=>\s*this\.#transferAbort\.signal/u.test(mesh.text) ||
+    /FileConversationTransferStagingArea|FileResumableArtifactReceiver|conversation-transfer-staging/u.test(mesh.text)
   ) {
     failures.push(`${mesh.relative}: anchor transfer target must use private staging and the authority governor/lifecycle abort`);
+  }
+  if (
+    count(stagingInfrastructure.text, /new\s+FileArtifactStore\s*\(/gu) !== 1 ||
+    count(stagingInfrastructure.text, /new\s+FileResumableArtifactReceiver\s*\(/gu) !== 1 ||
+    count(stagingInfrastructure.text, /conversation-transfer-staging/gu) !== 1 ||
+    !/MAX_CONVERSATION_TRANSFER_ARTIFACT_BYTES\s*=\s*512\s*\*\s*1024\s*\*\s*1024/u.test(stagingInfrastructure.text) ||
+    !/CONVERSATION_TRANSFER_CHUNK_BYTES\s*=\s*256\s*\*\s*1024/u.test(stagingInfrastructure.text) ||
+    count(stagingInfrastructure.text, /rm\(transferRoot,\s*\{\s*recursive:\s*true,\s*force:\s*true\s*\}\)/gu) !== 1 ||
+    !/path\.resolve\([\s\S]*?options\.zhixingHome[\s\S]*?"distributed-runtime"[\s\S]*?"conversation-transfer-staging"/u.test(stagingInfrastructure.text) ||
+    !/path\.dirname\(transferRoot\)\s*!==\s*root/u.test(stagingInfrastructure.text) ||
+    !/return\s+Object\.freeze\(\{[\s\S]*?forTransfer/u.test(stagingInfrastructure.text) ||
+    !/artifacts:\s*Object\.freeze\(\{[\s\S]*?get:[\s\S]*?readRange:[\s\S]*?has:/u.test(stagingInfrastructure.text) ||
+    !/receiver:\s*Object\.freeze\(\{[\s\S]*?progress:[\s\S]*?append:/u.test(stagingInfrastructure.text)
+  ) {
+    failures.push(`${stagingInfrastructure.relative}: conversation transfer staging physical factory or finite frozen projection drifted`);
   }
   if (
     !/this\.#firstPartyConversationTarget\s*=\s*roles\.has\("anchor"\)[\s\S]*?new\s+FirstPartyConversationMeshTarget\s*\(\s*\{[\s\S]*?isReady:\s*\(\)\s*=>\s*this\.plannedCurrentOwnerReady\(\)/u.test(mesh.text) ||
@@ -12988,6 +13014,24 @@ export function inspectConversationAdoptionAssembly(records) {
   ) {
     failures.push(`${command.relative}: public resume must reuse the authenticated anchor review coordinator`);
   }
+  if (
+    count(accessRoot.text, /conversationTransferStaging:\s*createConversationTransferStagingInfrastructure\s*\(/gu) !== 1 ||
+    count(executorRoot.text, /conversationTransferStaging:\s*null/gu) !== 1 ||
+    count(accessRoot.text, /createConversationTransferStagingInfrastructure\s*\(/gu) !== 1 ||
+    /createConversationTransferStagingInfrastructure|conversation-transfer-staging/u.test(executorRoot.text)
+  ) {
+    failures.push("conversation transfer staging must be required at Mesh composition and physically created only by the Anchor Host");
+  }
+  for (const relative of [
+    "packages/cli/src/serve/planned-anchor-transfer.ts",
+    "packages/cli/src/serve/disaster-recovery-target.ts",
+    "packages/cli/src/serve/device-removal-cleanup.ts",
+  ]) {
+    const record = required.get(relative);
+    if (/createConversationTransferStagingInfrastructure|conversation-transfer-staging/u.test(record.text)) {
+      failures.push(`${record.relative}: conversation transfer staging ownership escaped into another P12 lifecycle`);
+    }
+  }
 
   const review = required.get("packages/cli/src/serve/post-adoption-review.ts");
   if (
@@ -13028,11 +13072,17 @@ export function inspectConversationAdoptionAssembly(records) {
     failures.push(`${transferOwner.relative}: source prepare must revalidate durable identity after settling and before append`);
   }
   if (
-    !/class\s+FileConversationTransferStagingArea[\s\S]*?path\.join\(this\.#rootDir,\s*transferId/u.test(transferOwner.text) ||
+    /FileConversationTransferStagingArea|FileArtifactStore|FileResumableArtifactReceiver|node:path|node:fs\/promises|\brootDir\b|Pick<File/u.test(transferOwner.text) ||
+    !/interface\s+ConversationTransferStagingArtifacts[\s\S]*?readonly\s+get:[\s\S]*?readonly\s+readRange:[\s\S]*?readonly\s+has:/u.test(transferOwner.text) ||
+    !/interface\s+ConversationTransferStagingReceiver[\s\S]*?readonly\s+progress:[\s\S]*?readonly\s+append:/u.test(transferOwner.text) ||
+    !/interface\s+ConversationTransferStaging[\s\S]*?readonly\s+artifacts:[\s\S]*?readonly\s+receiver:[\s\S]*?readonly\s+cleanup:/u.test(transferOwner.text) ||
+    !/interface\s+ConversationTransferStagingArea[\s\S]*?readonly\s+forTransfer:/u.test(transferOwner.text) ||
+    /ConversationTransferStagingArea\s*\|\s*undefined|staging\?\s*:/u.test(transferOwner.text) ||
+    !/const\s+size\s*=\s*256\s*\*\s*1024/u.test(transferOwner.text) ||
     !/promoteTransferClosure\s*\([\s\S]*?putVerifiedStream/u.test(transferOwner.text) ||
-    !/step:\s*"staging-cleanup"[\s\S]*?obligation:\s*"committed"/u.test(transferOwner.text)
+    !/step:\s*"staging-cleanup"[\s\S]*?obligation:\s*"committed"[\s\S]*?forTransfer\(transferId\)\.cleanup\(\)/u.test(transferOwner.text)
   ) {
-    failures.push(`${transferOwner.relative}: transfer-private staging, shared promotion and committed cleanup must remain distinct`);
+    failures.push(`${transferOwner.relative}: transfer staging demand ports, shared promotion and durable-abort cleanup must remain finite and distinct`);
   }
 
   const retiredMemoryOwners = [

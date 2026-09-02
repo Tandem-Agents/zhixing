@@ -1,5 +1,3 @@
-import { rm } from "node:fs/promises";
-import path from "node:path";
 import type {
   ArtifactRef,
   CommitEnvelope,
@@ -12,16 +10,14 @@ import type {
   TransferRecord,
 } from "@zhixing/core/contracts";
 import type {
+  ArtifactReceiveProgress,
   ArtifactStore,
   AuthorityCommitLog,
   DurableProjectionMutation,
   DurableProjectionReadContext,
   IdentifiedPhysicalStepRunner,
-  MutableArtifactStore,
 } from "@zhixing/core/authority";
 import {
-  FileArtifactStore,
-  FileResumableArtifactReceiver,
   validateAdmittedControlEnvelope,
 } from "@zhixing/core/authority";
 import {
@@ -1052,69 +1048,46 @@ function assertRange(ref: ArtifactRef, offset: number, length: number): void {
   }
 }
 
-export interface ConversationTransferStagingStore extends MutableArtifactStore {}
-
-export interface ConversationTransferStagingArea {
-  storeFor(transferId: string): ConversationTransferStagingStore;
-  receiverFor(transferId: string): FileResumableArtifactReceiver;
-  cleanup(transferId: string): Promise<number>;
+/** Transfer-private CAS view required by the conversation transfer application. */
+export interface ConversationTransferStagingArtifacts {
+  readonly get: (ref: ArtifactRef) => Promise<Uint8Array>;
+  readonly readRange: (
+    ref: ArtifactRef,
+    offset: number,
+    limit: number,
+  ) => Promise<Uint8Array>;
+  readonly has: (ref: ArtifactRef) => Promise<boolean>;
 }
 
-/** Transfer-private files are never published through the shared authority CAS. */
-export class FileConversationTransferStagingArea
-  implements ConversationTransferStagingArea
-{
-  readonly #rootDir: string;
-  readonly #stores = new Map<string, FileArtifactStore>();
-  readonly #receivers = new Map<string, FileResumableArtifactReceiver>();
+/** Durable-prefix receiver view required by the conversation transfer application. */
+export interface ConversationTransferStagingReceiver {
+  readonly progress: (
+    ref: ArtifactRef,
+    runPhysicalStep?: IdentifiedPhysicalStepRunner,
+  ) => Promise<ArtifactReceiveProgress>;
+  readonly append: (
+    ref: ArtifactRef,
+    offset: number,
+    bytes: Uint8Array,
+    runPhysicalStep?: IdentifiedPhysicalStepRunner,
+  ) => Promise<ArtifactReceiveProgress>;
+}
 
-  constructor(rootDir: string) {
-    this.#rootDir = path.resolve(rootDir);
-  }
+/** One immutable physical staging projection, scoped to exactly one transfer identity. */
+export interface ConversationTransferStaging {
+  readonly artifacts: ConversationTransferStagingArtifacts;
+  readonly receiver: ConversationTransferStagingReceiver;
+  readonly cleanup: () => Promise<number>;
+}
 
-  storeFor(transferId: string): FileArtifactStore {
-    assertTransferStagingId(transferId);
-    let store = this.#stores.get(transferId);
-    if (!store) {
-      store = new FileArtifactStore(path.join(this.#rootDir, transferId, "artifacts"));
-      this.#stores.set(transferId, store);
-    }
-    return store;
-  }
-
-  receiverFor(transferId: string): FileResumableArtifactReceiver {
-    assertTransferStagingId(transferId);
-    let receiver = this.#receivers.get(transferId);
-    if (!receiver) {
-      receiver = new FileResumableArtifactReceiver(
-        this.storeFor(transferId),
-        path.join(this.#rootDir, transferId, "partials"),
-        { maxArtifactBytes: 512 * 1024 * 1024, maxChunkBytes: 256 * 1024 },
-      );
-      this.#receivers.set(transferId, receiver);
-    }
-    return receiver;
-  }
-
-  async cleanup(transferId: string): Promise<number> {
-    assertTransferStagingId(transferId);
-    const store = this.storeFor(transferId);
-    const removed = (await store.list()).length;
-    const target = path.resolve(this.#rootDir, transferId);
-    if (path.dirname(target) !== this.#rootDir) {
-      throw new TypeError("Conversation transfer staging path escapes its authority root");
-    }
-    await rm(target, { recursive: true, force: true });
-    this.#stores.delete(transferId);
-    this.#receivers.delete(transferId);
-    return removed;
-  }
+export interface ConversationTransferStagingArea {
+  readonly forTransfer: (transferId: string) => ConversationTransferStaging;
 }
 
 export interface ConversationTransferTargetOptions {
   readonly deviceId: string;
   readonly log: AuthorityCommitLog;
-  readonly artifacts: ConversationTransferStagingStore;
+  readonly artifacts: ArtifactStore;
   readonly staging: ConversationTransferStagingArea;
   readonly signer: ProtocolSigner;
   readonly verifier: ProtocolSignatureVerifier;
@@ -1247,7 +1220,7 @@ export class ConversationTransferTarget {
     ) {
       throw new TypeError("Conversation transfer proof does not bind target preparation");
     }
-    const staging = this.#options.staging.storeFor(state.identity.transferId);
+    const staging = this.#options.staging.forTransfer(state.identity.transferId);
     if (state.phase === "frozen") {
       if (
         !state.manifest ||
@@ -1262,29 +1235,35 @@ export class ConversationTransferTarget {
         state.identity.transferId,
         state.identity.targetDeviceId,
         input.source,
-        staging,
+        staging.artifacts,
+        staging.receiver,
         this.#options,
       );
     }
-    const manifest = await loadManifest(staging, input.manifestRef);
+    const manifest = await loadManifest(staging.artifacts, input.manifestRef);
     assertManifestIdentity(manifest, state);
     for (const ref of [
       manifest.authorityBase.records,
       manifest.authorityBase.sessionState,
       ...manifest.contentAssets,
     ]) {
-      if (!(await staging.has(ref))) {
+      if (!(await staging.artifacts.has(ref))) {
         await copyArtifact(
           ref,
           state.identity.transferId,
           state.identity.targetDeviceId,
           input.source,
-          staging,
+          staging.artifacts,
+          staging.receiver,
           this.#options,
         );
       }
     }
-    await verifyImportedAuthorityBase(staging, manifest, this.#options.reducerVersion);
+    await verifyImportedAuthorityBase(
+      staging.artifacts,
+      manifest,
+      this.#options.reducerVersion,
+    );
     await promoteTransferClosure(
       state.identity.transferId,
       [
@@ -1293,7 +1272,7 @@ export class ConversationTransferTarget {
         manifest.authorityBase.sessionState,
         ...manifest.contentAssets,
       ],
-      staging,
+      staging.artifacts,
       this.#options,
     );
     if (state.phase === "prepared") {
@@ -1333,7 +1312,7 @@ export class ConversationTransferTarget {
       this.#publicationTokens.set(
         state.identity.transferId,
         await this.#options.preparePublication(
-          await loadCommittedBase(staging, preview, manifest),
+          await loadCommittedBase(staging.artifacts, preview, manifest),
         ),
       );
     }
@@ -1359,7 +1338,7 @@ export class ConversationTransferTarget {
         storageMaintenanceRequest("conversation-transfer", transferId, {
           step: "staging-cleanup",
         }, { obligation: "committed" }),
-        () => this.#options.staging.cleanup(transferId),
+        () => this.#options.staging.forTransfer(transferId).cleanup(),
       )
     );
   }
@@ -1511,13 +1490,13 @@ async function copyArtifact(
   transferId: string,
   targetDeviceId: string,
   source: ConversationTransferReadPort,
-  staging: ConversationTransferStagingStore,
+  staging: ConversationTransferStagingArtifacts,
+  receiver: ConversationTransferStagingReceiver,
   options: ConversationTransferTargetOptions,
 ): Promise<void> {
   if (!(await source.probe({ transferId, targetDeviceId, ref }))) {
     throw new Error("Conversation transfer source is missing a manifest artifact");
   }
-  const receiver = options.staging.receiverFor(transferId);
   const signal = options.abortSignal?.() ?? new AbortController().signal;
   const capacityStep = identifiedCapacityStep(options, transferId, ref);
   await runWithMaintenanceUrgency(() => "foreground", signal, async () => {
@@ -1543,7 +1522,7 @@ async function copyArtifact(
 async function promoteTransferClosure(
   transferId: string,
   refs: readonly ArtifactRef[],
-  staging: ConversationTransferStagingStore,
+  staging: ConversationTransferStagingArtifacts,
   options: ConversationTransferTargetOptions,
 ): Promise<void> {
   for (const ref of uniqueSortedRefs(refs)) {
@@ -1581,18 +1560,12 @@ function identifiedCapacityStep(
 }
 
 async function* readStoredChunks(
-  store: ArtifactStore,
+  store: ConversationTransferStagingArtifacts,
   ref: ArtifactRef,
 ): AsyncIterable<Uint8Array> {
   const size = 256 * 1024;
   for (let offset = 0; offset < ref.bytes; offset += size) {
     yield await store.readRange(ref, offset, Math.min(size, ref.bytes - offset));
-  }
-}
-
-function assertTransferStagingId(transferId: string): void {
-  if (!/^xfer-[0-9A-HJKMNP-TV-Z]{26}$/u.test(transferId)) {
-    throw new TypeError("Conversation transfer staging id is invalid");
   }
 }
 
@@ -1621,7 +1594,7 @@ async function putTransferArtifact(
 }
 
 async function loadManifest(
-  artifacts: ArtifactStore,
+  artifacts: ConversationTransferStagingArtifacts,
   ref: ArtifactRef,
 ): Promise<ConversationTransferManifest> {
   const bytes = await artifacts.get(ref);
@@ -1633,7 +1606,7 @@ async function loadManifest(
 }
 
 async function loadCommittedBase(
-  artifacts: ArtifactStore,
+  artifacts: ConversationTransferStagingArtifacts,
   state: ConversationTransferState,
   manifest: ConversationTransferManifest,
 ): Promise<ConversationTransferCommittedBase> {
@@ -1672,7 +1645,7 @@ function assertManifestIdentity(
 }
 
 async function verifyImportedAuthorityBase(
-  artifacts: ArtifactStore,
+  artifacts: ConversationTransferStagingArtifacts,
   manifest: ConversationTransferManifest,
   reducerVersion: string,
 ): Promise<void> {

@@ -539,6 +539,7 @@ export async function runExecutorRole(
         zhixingHome,
         artifacts: authority.artifacts,
       }),
+      conversationTransferStaging: null,
       executor: {
         ledger,
         runtimeFactory,

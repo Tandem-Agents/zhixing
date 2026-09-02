@@ -1603,8 +1603,12 @@ test("P09 assignment artifact partial receiver stays finite and Host-composed", 
 test("conversation adoption stays bound to the two production roots and ordered recovery", async () => {
   const paths = [
     "packages/cli/src/serve/mesh-runtime-assembly.ts",
+    "packages/cli/src/serve/conversation-transfer-staging-infrastructure.ts",
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/cli/src/serve/planned-anchor-transfer.ts",
+    "packages/cli/src/serve/disaster-recovery-target.ts",
+    "packages/cli/src/serve/device-removal-cleanup.ts",
     "packages/cli/src/serve/conversation-evidence-authority.ts",
     "packages/cli/src/serve/conversation-transfer-mesh.ts",
     "packages/cli/src/serve/first-party-conversation-mesh.ts",
@@ -1648,6 +1652,50 @@ test("conversation adoption stays bound to the two production roots and ordered 
       ),
     )).join("\n"),
     /must use private staging and the authority governor\/lifecycle abort/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "conversationTransferStaging: createConversationTransferStagingInfrastructure({",
+        "conversationTransferStaging: null ?? createConversationTransferStagingInfrastructure({",
+      ),
+    )).join("\n"),
+    /required at Mesh composition and physically created only by the Anchor Host/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "readonly conversationTransferStaging: ConversationTransferStagingArea | null;",
+        "readonly conversationTransferStaging?: ConversationTransferStagingArea;",
+      ),
+    )).join("\n"),
+    /must use private staging and the authority governor\/lifecycle abort/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/owner-kernel/src/conversation-transfer.ts",
+      (text) => `${text}\nclass FileConversationTransferStagingArea {}`,
+    )).join("\n"),
+    /demand ports, shared promotion and durable-abort cleanup/u,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/conversation-transfer-staging-infrastructure.ts",
+      (text) => text.replace(
+        "new FileResumableArtifactReceiver(",
+        "new FileResumableArtifactReceiver(new FileArtifactStore(\"second\"),",
+      ),
+    )).join("\n"),
+    /physical factory or finite frozen projection/u,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/device-removal-cleanup.ts",
+      (text) => `${text}\nvoid "conversation-transfer-staging";`,
+    )).join("\n"),
+    /ownership escaped into another P12 lifecycle/u,
   );
   assert.match(
     inspectConversationAdoptionAssembly(mutate(
@@ -1715,7 +1763,7 @@ test("conversation adoption stays bound to the two production roots and ordered 
       "packages/owner-kernel/src/conversation-transfer.ts",
       (text) => text.replace('{ obligation: "committed" }', '{ obligation: "cleanup" }'),
     )).join("\n"),
-    /transfer-private staging, shared promotion and committed cleanup/,
+    /demand ports, shared promotion and durable-abort cleanup/,
   );
   assert.match(
     inspectConversationAdoptionAssembly(mutate(
