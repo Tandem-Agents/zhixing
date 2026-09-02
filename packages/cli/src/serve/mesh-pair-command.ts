@@ -74,8 +74,9 @@ import {
   type TrustProjection,
 } from "@zhixing/mesh/trust-chain";
 import { RecoveryRoot } from "@zhixing/mesh/recovery-root";
-import { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
 import { createPairedCheckpointCommandReceiverInfrastructure } from "./paired-checkpoint-incoming-infrastructure.js";
+import { createPublishedCheckpointTargetInfrastructure } from "./published-checkpoint-target-infrastructure.js";
+import type { PublishedCheckpointPairedSessions } from "./published-checkpoint-target.js";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import { loadConfig, writeConfig } from "@zhixing/providers";
 import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
@@ -149,6 +150,7 @@ interface PairingRuntimeInput extends PairCommandOptions {
   readonly bootstrapProjection: MeshBootstrapProjectionPorts;
   readonly continuations: MeshPairingContinuationRepository;
   readonly storageMaintenance: StorageMaintenanceGovernorPort;
+  readonly publishedPairedTargets: PublishedCheckpointPairedSessions;
   readonly writeLine: (line: string) => void;
 }
 
@@ -254,6 +256,10 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
   );
   const writeLine: (line: string) => void =
     options.writeLine ?? createStdoutWriter().line;
+  const publishedPairedTargets = createPublishedCheckpointTargetInfrastructure({
+    zhixingHome,
+    storageMaintenance: deviceCapacity.storage,
+  }).paired;
   try {
     if (options.invitation || continuation?.side === "joiner") {
       await joinPairing({
@@ -267,6 +273,7 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
         bootstrapProjection,
         continuations,
         storageMaintenance: deviceCapacity.storage,
+        publishedPairedTargets,
         writeLine,
       });
       return;
@@ -282,6 +289,7 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
       bootstrapProjection,
       continuations,
       storageMaintenance: deviceCapacity.storage,
+      publishedPairedTargets,
       writeLine,
     });
     await reconcileAfterPairing(options, "pairing-issuer-committed");
@@ -1013,6 +1021,7 @@ async function joinPairing(input: PairingRuntimeInput): Promise<void> {
       identity,
       zhixingHome: input.zhixingHome,
       storageMaintenance: input.storageMaintenance,
+      publishedPairedTargets: input.publishedPairedTargets,
     });
     validateChallenge(invitation, join, pakeRounds, challenge);
     const proof = createPairingAcceptanceProof({
@@ -1468,6 +1477,7 @@ async function receiveChallengeAfterRecoveryOnboarding(input: {
   readonly identity: DeviceIdentity;
   readonly zhixingHome: string;
   readonly storageMaintenance: StorageMaintenanceGovernorPort;
+  readonly publishedPairedTargets: PublishedCheckpointPairedSessions;
 }): Promise<PairingChallengeMessage> {
   if (isRecord(input.first) && input.first.t === "challenge") {
     return asChallenge(input.first);
@@ -1478,16 +1488,11 @@ async function receiveChallengeAfterRecoveryOnboarding(input: {
     start.sourceDeviceId !== input.invitation.issuer.deviceId ||
     start.targetDeviceId !== input.identity.deviceId
   ) throw new Error("Recovery onboarding target does not match this pairing session");
-  const targetRoot = `${input.zhixingHome}/distributed-runtime/recovery-checkpoints`;
-  const target = await FileRecoveryCheckpointTarget.openPaired({
-    targetRoot,
-    targetDeviceId: input.identity.deviceId,
-    storageMaintenance: input.storageMaintenance,
-  });
+  const targetSession = await input.publishedPairedTargets.openPaired(input.identity.deviceId);
   try {
     const receiver = createPairedCheckpointCommandReceiverInfrastructure({
       zhixingHome: input.zhixingHome,
-      target,
+      target: targetSession.target,
       storageMaintenance: input.storageMaintenance,
       receiver: {
         homeId: start.homeId,
@@ -1516,7 +1521,7 @@ async function receiveChallengeAfterRecoveryOnboarding(input: {
       } satisfies RecoveryOnboardingResultMessage);
     }
   } finally {
-    await target.close();
+    await targetSession.close();
   }
 }
 

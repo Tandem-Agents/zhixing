@@ -9253,6 +9253,12 @@ export function inspectRecoveryBackupAssembly(records) {
   const pairedIncomingInfrastructure = byPath.get(
     "packages/cli/src/serve/paired-checkpoint-incoming-infrastructure.ts",
   );
+  const publishedCheckpointTarget = byPath.get(
+    "packages/cli/src/serve/published-checkpoint-target.ts",
+  );
+  const publishedCheckpointTargetInfrastructure = byPath.get(
+    "packages/cli/src/serve/published-checkpoint-target-infrastructure.ts",
+  );
   const accessRoot = byPath.get("packages/cli/src/serve/access-surfaces.ts");
   const executorRoot = byPath.get("packages/cli/src/serve/executor-role-runtime.ts");
   const deviceRemovalCleanup = byPath.get(
@@ -9273,19 +9279,21 @@ export function inspectRecoveryBackupAssembly(records) {
   const startup = byPath.get("packages/cli/src/startup.ts");
   const setupDelivery = byPath.get("packages/cli/src/setup-delivery.ts");
   const checkpointService = byPath.get("packages/mesh/src/checkpoint-service.ts");
+  const checkpointTarget = byPath.get("packages/mesh/src/checkpoint-target.ts");
   const checkpointOwner = byPath.get("packages/mesh/src/checkpoint-owner.ts");
   const pairedTarget = byPath.get("packages/mesh/src/paired-checkpoint-target.ts");
   if (
     !command || !owner || !backup || !backupTargetContract || !backupTargetInfrastructure ||
     !doctor || !cliIndex || !backupApplication || !coreIndex || !coreManifestText || !coreBuild ||
     !bootstrapStore || !bootstrap || !topology || !applicationHost || !rootEstablishment ||
-    !rootActivation || !pairedIncomingInfrastructure || !accessRoot || !executorRoot ||
+    !rootActivation || !pairedIncomingInfrastructure || !publishedCheckpointTarget ||
+    !publishedCheckpointTargetInfrastructure || !accessRoot || !executorRoot ||
     !deviceRemovalCleanup || !controlPlane ||
     !runtime || !pairing || !disasterCommand || !disasterCandidate || !disasterEvidence ||
     !disasterInstallation || !disasterTarget || !artifactRetention || !authorityCommitLog ||
     !exposureAuthority ||
     !credentialRotation || !startup || !setupDelivery || !checkpointService ||
-    !checkpointOwner || !pairedTarget
+    !checkpointOwner || !checkpointTarget || !pairedTarget
   ) {
     return ["recovery backup production assembly sources are missing"];
   }
@@ -10152,6 +10160,60 @@ export function inspectRecoveryBackupAssembly(records) {
     count(deviceRemovalCleanup, '"recovery-checkpoint-incoming"') !== 1
   ) {
     failures.push("paired checkpoint incoming physical factory, required Host ports or cleanup exact-set drifted");
+  }
+  const publishedTargetConcreteImporters = records
+    .filter(({ text }) =>
+      text.includes("FileRecoveryCheckpointTarget") &&
+      text.includes('from "@zhixing/mesh/checkpoint-target"'))
+    .map(({ relative }) => relative)
+    .sort();
+  const publishedTargetFactoryConsumers = records
+    .filter(({ text }) => text.includes("createPublishedCheckpointTargetInfrastructure("))
+    .map(({ relative }) => relative)
+    .sort();
+  const expectedPublishedTargetFactoryConsumers = [
+    "packages/cli/src/serve/backup-command.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/disaster-recovery-command.ts",
+    "packages/cli/src/serve/mesh-pair-command.ts",
+    "packages/cli/src/serve/paired-checkpoint-incoming-infrastructure.ts",
+    "packages/cli/src/serve/published-checkpoint-target-infrastructure.ts",
+  ].sort();
+  if (
+    JSON.stringify(publishedTargetConcreteImporters) !== JSON.stringify([
+      "packages/cli/src/serve/published-checkpoint-target-infrastructure.ts",
+    ]) ||
+    JSON.stringify(publishedTargetFactoryConsumers) !==
+      JSON.stringify(expectedPublishedTargetFactoryConsumers) ||
+    count(publishedCheckpointTargetInfrastructure, "FileRecoveryCheckpointTarget.open({") !== 1 ||
+    count(publishedCheckpointTargetInfrastructure, "FileRecoveryCheckpointTarget.openPaired({") !== 1 ||
+    count(publishedCheckpointTargetInfrastructure, '"recovery-checkpoints"') !== 1 ||
+    count(publishedCheckpointTargetInfrastructure, '"authority"') !== 1 ||
+    publishedCheckpointTargetInfrastructure.includes("PairedRecoveryCheckpointTarget") ||
+    !publishedCheckpointTarget.includes("export interface PublishedRecoveryCheckpointTargetSession") ||
+    !publishedCheckpointTarget.includes("export interface PublishedCheckpointTargetInfrastructure") ||
+    !publishedCheckpointTarget.includes("projectInventoryPublishedRecoveryCheckpointTarget(") ||
+    !owner.includes("readonly publishedDirectoryTargets: ExistingPublishedCheckpointDirectorySessions") ||
+    owner.includes("publishedDirectoryTargets?:") ||
+    !backup.includes("readonly publishedDirectoryTargets: PublishedCheckpointDirectorySessions") ||
+    !disasterCommand.includes(
+      "readonly publishedDirectoryInventoryTargets: PublishedCheckpointDirectoryInventorySessions",
+    ) ||
+    !pairing.includes("readonly publishedPairedTargets: PublishedCheckpointPairedSessions") ||
+    [owner, backup, disasterCommand, pairing, pairedIncomingInfrastructure].some((text) =>
+      text.includes("FileRecoveryCheckpointTarget") ||
+      text.includes("distributed-runtime/recovery-checkpoints")) ||
+    !checkpointService.includes("export interface RecoveryCheckpointTargetSession") ||
+    !checkpointService.includes(") => Promise<RecoveryCheckpointTargetSession>;") ||
+    count(checkpointService, "await targetSession.close()") !== 2 ||
+    count(checkpointService, "await targetSession?.close()") !== 1 ||
+    checkpointService.includes("target.close?.()") ||
+    checkpointTarget.includes("close?(): Promise<void>") ||
+    count(deviceRemovalCleanup, '"recovery-checkpoints"') !== 0
+  ) {
+    failures.push(
+      "published checkpoint filesystem target factory, bounded session or retention boundary drifted",
+    );
   }
   return failures;
 }

@@ -210,6 +210,7 @@ import {
 import { StartupRollback } from "./startup-rollback.js";
 import { AssemblyLifecycleContributions } from "./assembly-lifecycle.js";
 import { createConfiguredCheckpointOwner } from "./backup-runtime-owner.js";
+import { createPublishedCheckpointTargetInfrastructure } from "./published-checkpoint-target-infrastructure.js";
 import { createBackupTargetConfigurationInfrastructure } from "./backup-target-config-infrastructure.js";
 import {
   governControlProvider,
@@ -961,8 +962,11 @@ async function runServerProcess(
   // 产物写回 ctx.conversations / losslessDataPlane / channels / inboundRouter / deliveryStack。
   await setupAssemblyUnits(assemblyUnits, ctx, "pre-server");
   ctx.authorityCheckpointOwner = await createConfiguredCheckpointOwner({
-    zhixingHome,
     backupTargets: createBackupTargetConfigurationInfrastructure(zhixingHome),
+    publishedDirectoryTargets: createPublishedCheckpointTargetInfrastructure({
+      zhixingHome,
+      storageMaintenance: ctx.storageMaintenance,
+    }).directory,
     mesh: ctx.meshBootstrap,
     ...(ctx.meshRuntime ? { meshRuntime: ctx.meshRuntime } : {}),
     storageMaintenance: ctx.storageMaintenance,

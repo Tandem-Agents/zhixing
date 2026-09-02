@@ -1,4 +1,3 @@
-import path from "node:path";
 import { canonicalize } from "@zhixing/core/protocol";
 import type { ArtifactCheckpointRetentionPort } from "@zhixing/core/authority";
 import type { HomeTrustRecord } from "@zhixing/core/contracts";
@@ -16,10 +15,6 @@ import {
   type RecoveryBackupStatus,
 } from "@zhixing/mesh/checkpoint-service";
 import {
-  FileRecoveryCheckpointTarget,
-  type RetirableRecoveryCheckpointTarget,
-} from "@zhixing/mesh/checkpoint-target";
-import {
   MeshPairedCheckpointTransport,
   PairedRecoveryCheckpointTarget,
 } from "@zhixing/mesh/paired-checkpoint-target";
@@ -30,15 +25,20 @@ import type {
 } from "./backup-target-config.js";
 import type { MeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import type { MeshRuntimeAssembly } from "./mesh-runtime-assembly.js";
+import type {
+  ExistingPublishedCheckpointDirectorySessions,
+  PublishedRecoveryCheckpointTargetSession,
+  RetirablePublishedRecoveryCheckpointTarget,
+} from "./published-checkpoint-target.js";
 
 const TURN_MS = 60 * 60 * 1000;
 
 export async function createConfiguredCheckpointOwner(input: {
-  readonly zhixingHome: string;
   readonly backupTargets: BackupTargetConfigurationRepository;
   readonly mesh: MeshRuntimeBootstrap;
   readonly meshRuntime?: MeshRuntimeAssembly;
   readonly storageMaintenance: StorageMaintenanceGovernorPort;
+  readonly publishedDirectoryTargets: ExistingPublishedCheckpointDirectorySessions;
   readonly checkpointRetention?: ArtifactCheckpointRetentionPort;
   readonly onError?: (error: unknown) => void;
 }): Promise<AuthorityCheckpointOwnerPort | undefined> {
@@ -60,7 +60,7 @@ type RuntimeSlot =
       readonly kind: "available";
       readonly fingerprint: string;
       readonly owner: AuthorityCheckpointOwner;
-      readonly target: RetirableRecoveryCheckpointTarget;
+      readonly targetSession: PublishedRecoveryCheckpointTargetSession<RetirablePublishedRecoveryCheckpointTarget>;
     };
 
 type BackupUnavailableCode =
@@ -75,11 +75,11 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
   #started = false;
 
   constructor(private readonly input: {
-    readonly zhixingHome: string;
     readonly backupTargets: BackupTargetConfigurationRepository;
     readonly mesh: MeshRuntimeBootstrap;
     readonly meshRuntime?: MeshRuntimeAssembly;
     readonly storageMaintenance: StorageMaintenanceGovernorPort;
+    readonly publishedDirectoryTargets: ExistingPublishedCheckpointDirectorySessions;
     readonly checkpointRetention?: ArtifactCheckpointRetentionPort;
     readonly onError?: (error: unknown) => void;
   }) {}
@@ -127,7 +127,7 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
       try {
         await this.#slot.owner.stop();
       } finally {
-        await this.#slot.target.close?.();
+        await this.#slot.targetSession.close();
       }
     }
     this.#slot = { kind: "disabled" };
@@ -174,9 +174,9 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
       });
     }
     const recipientKeyId = keyIdForPublicKey(trust.recoveryBackupPublicKey);
-    let target: RetirableRecoveryCheckpointTarget;
+    let targetSession: PublishedRecoveryCheckpointTargetSession<RetirablePublishedRecoveryCheckpointTarget>;
     try {
-      target = await targetForBinding(
+      targetSession = await targetSessionForBinding(
         binding,
         this.input,
         trust,
@@ -196,7 +196,7 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
       recipientKeyId,
     });
     if (this.#slot.kind === "available" && this.#slot.fingerprint === fingerprint) {
-      await target.close?.();
+      await targetSession.close();
       return this.#slot;
     }
 
@@ -206,13 +206,13 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
       const latest = await this.input.backupTargets.load();
       const historical = latest?.bindings.find((candidate) => candidate.targetId === targetId);
       if (!historical) throw new Error("Recovery checkpoint target binding is unavailable");
-      return targetForBinding(historical, this.input, trust, targetRecipientKeyId);
+      return targetSessionForBinding(historical, this.input, trust, targetRecipientKeyId);
     };
     const service = new AuthorityCheckpointService({
       log: this.input.mesh.bootstrapStore.authorityLog(),
       artifacts: this.input.mesh.bootstrapStore.artifactStore(),
       retention: this.input.checkpointRetention ?? this.input.mesh.bootstrapStore.checkpointRetention(),
-      target,
+      target: targetSession.target,
       resolveTarget,
       trust,
       issuer: Object.assign({}, member.device, {
@@ -230,12 +230,12 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
     try {
       await service.recoverPending();
       await owner.start(false);
-      return this.#replace({ kind: "available", fingerprint, owner, target });
+      return this.#replace({ kind: "available", fingerprint, owner, targetSession });
     } catch (error) {
       try {
         await owner.stop();
       } finally {
-        await target.close?.();
+        await targetSession.close();
       }
       if (error instanceof TypeError) throw error;
       this.input.onError?.(error);
@@ -265,7 +265,7 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
       try {
         await this.#slot.owner.stop();
       } finally {
-        await this.#slot.target.close?.();
+        await this.#slot.targetSession.close();
       }
     }
     this.#slot = next;
@@ -284,39 +284,37 @@ class ConfiguredCheckpointOwnerSlot implements AuthorityCheckpointOwnerPort {
   }
 }
 
-async function targetForBinding(
+async function targetSessionForBinding(
   binding: BackupTargetBinding,
   input: {
-    readonly zhixingHome: string;
     readonly mesh: MeshRuntimeBootstrap;
     readonly meshRuntime?: MeshRuntimeAssembly;
     readonly storageMaintenance: StorageMaintenanceGovernorPort;
+    readonly publishedDirectoryTargets: ExistingPublishedCheckpointDirectorySessions;
   },
   trust: HomeTrustRecord,
   recipientKeyId: string,
-): Promise<RetirableRecoveryCheckpointTarget> {
+): Promise<PublishedRecoveryCheckpointTargetSession<RetirablePublishedRecoveryCheckpointTarget>> {
   if (binding.kind === "paired-device") {
     if (!input.meshRuntime) throw new Error("Paired recovery target requires an authenticated mesh runtime");
-    return new PairedRecoveryCheckpointTarget({
-      homeId: trust.homeId,
-      sourceDeviceId: input.mesh.deviceKey.deviceId,
-      targetDeviceId: binding.deviceId,
-      recipientKeyId,
-      transport: new MeshPairedCheckpointTransport(input.meshRuntime.connections.client(binding.deviceId)),
-      storageMaintenance: input.storageMaintenance,
+    return Object.freeze({
+      target: new PairedRecoveryCheckpointTarget({
+        homeId: trust.homeId,
+        sourceDeviceId: input.mesh.deviceKey.deviceId,
+        targetDeviceId: binding.deviceId,
+        recipientKeyId,
+        transport: new MeshPairedCheckpointTransport(input.meshRuntime.connections.client(binding.deviceId)),
+        storageMaintenance: input.storageMaintenance,
+      }),
+      close: async () => undefined,
     });
   }
-  const target = await FileRecoveryCheckpointTarget.open({
-    targetRoot: binding.directory,
-    sourceRoot: path.join(input.zhixingHome, "distributed-runtime", "authority"),
-    create: false,
-    storageMaintenance: input.storageMaintenance,
-  });
-  if (target.targetId !== binding.targetId) {
-    await target.close();
+  const targetSession = await input.publishedDirectoryTargets.openExisting(binding.directory);
+  if (targetSession.target.targetId !== binding.targetId) {
+    await targetSession.close();
     throw new Error("Recovery backup target physical identity changed");
   }
-  return target;
+  return targetSession;
 }
 
 function assertHomeAuthority(trust: HomeTrustRecord, deviceId: string): void {

@@ -1807,6 +1807,8 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     "packages/cli/src/serve/recovery-root-establishment-runtime.ts",
     "packages/cli/src/serve/recovery-root-activation.ts",
     "packages/cli/src/serve/paired-checkpoint-incoming-infrastructure.ts",
+    "packages/cli/src/serve/published-checkpoint-target.ts",
+    "packages/cli/src/serve/published-checkpoint-target-infrastructure.ts",
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/executor-role-runtime.ts",
     "packages/cli/src/serve/device-removal-cleanup.ts",
@@ -1814,6 +1816,7 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     "packages/cli/src/serve/application-host.ts",
     "packages/cli/src/serve/role-topology.ts",
     "packages/mesh/src/checkpoint-service.ts",
+    "packages/mesh/src/checkpoint-target.ts",
     "packages/mesh/src/checkpoint-owner.ts",
     "packages/mesh/src/paired-checkpoint-target.ts",
   ];
@@ -1824,6 +1827,47 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
   assert.deepEqual(inspectRecoveryBackupAssembly(records), []);
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/backup-runtime-owner.ts",
+      (text) => text.replace(
+        "readonly publishedDirectoryTargets: ExistingPublishedCheckpointDirectorySessions;",
+        "readonly publishedDirectoryTargets?: ExistingPublishedCheckpointDirectorySessions;",
+      ),
+    )).join("\n"),
+    /published checkpoint filesystem target factory, bounded session or retention boundary drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/published-checkpoint-target-infrastructure.ts",
+      (text) => text.replace('"recovery-checkpoints"', '"recovery-checkpoints-v2"'),
+    )).join("\n"),
+    /published checkpoint filesystem target factory, bounded session or retention boundary drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/backup-command.ts",
+      (text) => `${text}\nimport { FileRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";`,
+    )).join("\n"),
+    /published checkpoint filesystem target factory, bounded session or retention boundary drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/cli/src/serve/published-checkpoint-target-infrastructure.ts",
+      (text) => `${text}\nconst forbidden = "PairedRecoveryCheckpointTarget";`,
+    )).join("\n"),
+    /published checkpoint filesystem target factory, bounded session or retention boundary drifted/,
+  );
+  assert.match(
+    inspectRecoveryBackupAssembly(mutate(
+      "packages/mesh/src/checkpoint-service.ts",
+      (text) => text.replace(
+        "export interface RecoveryCheckpointTargetSession",
+        "interface UnboundedRecoveryCheckpointTarget",
+      ),
+    )).join("\n"),
+    /published checkpoint filesystem target factory, bounded session or retention boundary drifted/,
   );
   assert.match(
     inspectRecoveryBackupAssembly(mutate(

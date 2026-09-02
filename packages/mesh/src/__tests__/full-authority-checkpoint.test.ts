@@ -549,14 +549,24 @@ describe("full authority recovery checkpoints", () => {
     > => record.t === "checkpoint-created" && record.targetId === oldTarget.targetId)!;
 
     const currentTarget = new MemoryTarget("backup-dir:current", "filesystem:current");
+    let historicalTargetCloses = 0;
     const currentService = new AuthorityCheckpointService({
       log: fixture.log,
       artifacts: fixture.artifacts,
       retention: fixture.lifecycle,
       target: currentTarget,
       resolveTarget: async (targetId) => {
-        if (targetId === oldTarget.targetId) return oldTarget;
-        if (targetId === currentTarget.targetId) return currentTarget;
+        if (targetId === oldTarget.targetId) {
+          return {
+            target: oldTarget,
+            close: async () => {
+              historicalTargetCloses += 1;
+            },
+          };
+        }
+        if (targetId === currentTarget.targetId) {
+          return { target: currentTarget, close: async () => undefined };
+        }
         throw new Error("unknown target binding");
       },
       trust: fixture.trust,
@@ -592,6 +602,7 @@ describe("full authority recovery checkpoints", () => {
     expect(progress.map((record) => record.t === "checkpoint-cleanup-progress" ? record.phase : ""))
       .toEqual(["target-retired"]);
     expect(oldTarget.has(oldCreated.checkpointId)).toBe(false);
+    expect(historicalTargetCloses).toBe(3);
   }, 120_000);
 
   it("resumes bounded paired-device upload and performs byte-exact remote read-back", async () => {

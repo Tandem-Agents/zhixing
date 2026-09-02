@@ -170,13 +170,18 @@ export interface AuthorityCheckpointServiceOptions {
   readonly resolveTarget?: (
     targetId: string,
     recipientKeyId: string,
-  ) => Promise<RetirableRecoveryCheckpointTarget>;
+  ) => Promise<RecoveryCheckpointTargetSession>;
   readonly trust: HomeTrustRecord;
   readonly issuer: DeviceIdentity & CheckpointSigner;
   readonly recipient: CheckpointRecipient;
   readonly currentAnchor: boolean;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly clock?: () => string;
+}
+
+export interface RecoveryCheckpointTargetSession {
+  readonly target: RetirableRecoveryCheckpointTarget;
+  readonly close: () => Promise<void>;
 }
 
 export class AuthorityCheckpointService {
@@ -274,9 +279,10 @@ export class AuthorityCheckpointService {
       { t: "checkpoint-verified" }
     > => record.t === "checkpoint-verified" && record.checkpointId === input.checkpointId);
     let opened: Awaited<ReturnType<typeof verifyStoredFullAuthorityCheckpoint>> | undefined;
-    let target: RetirableRecoveryCheckpointTarget | undefined;
+    let targetSession: RecoveryCheckpointTargetSession | undefined;
     try {
-      target = await this.#target(created.targetId, created.recipientKeyId);
+      targetSession = await this.#target(created.targetId, created.recipientKeyId);
+      const target = targetSession.target;
       const checkpoint = await target.read(input.checkpointId);
       opened = await verifyStoredFullAuthorityCheckpoint({
         package: checkpoint,
@@ -351,7 +357,7 @@ export class AuthorityCheckpointService {
       throw error;
     } finally {
       opened?.verificationNonce.fill(0);
-      if (target && target !== this.options.target) await target.close?.();
+      await targetSession?.close();
     }
   }
 
@@ -412,8 +418,9 @@ export class AuthorityCheckpointService {
         candidate.targetId === created.targetId &&
         candidate.phase === "target-retired");
       if (!targetRetired) {
-        const target = await this.#target(created.targetId, created.recipientKeyId);
+        const targetSession = await this.#target(created.targetId, created.recipientKeyId);
         try {
+          const target = targetSession.target;
           await target.retire(record.checkpointId, record.supersededBy, abort);
           throwIfAborted(abort);
           await appendCheckpointRecords(this.options.log, [{
@@ -425,7 +432,7 @@ export class AuthorityCheckpointService {
             at: now,
           }]);
         } finally {
-          if (target !== this.options.target) await target.close?.();
+          await targetSession.close();
         }
       }
     }
@@ -439,11 +446,11 @@ export class AuthorityCheckpointService {
       if (records.some((record) => record.t === "checkpoint-replicated" &&
         record.checkpointId === created.checkpointId && record.targetId === created.targetId)) continue;
       const checkpoint = await this.#loadLocalPackage(created, abort);
-      const target = await this.#target(created.targetId, created.recipientKeyId);
+      const targetSession = await this.#target(created.targetId, created.recipientKeyId);
       try {
-        await this.#replicate(checkpoint, created, abort, target);
+        await this.#replicate(checkpoint, created, abort, targetSession.target);
       } finally {
-        if (target !== this.options.target) await target.close?.();
+        await targetSession.close();
       }
     }
   }
@@ -626,12 +633,15 @@ export class AuthorityCheckpointService {
     ) throw new TypeError("Checkpoint replay belongs to another recovery root or authority generation");
   }
 
-  #target(targetId: string | undefined, recipientKeyId: string): Promise<RetirableRecoveryCheckpointTarget> {
+  #target(targetId: string | undefined, recipientKeyId: string): Promise<RecoveryCheckpointTargetSession> {
     if (!targetId) return Promise.reject(new TypeError("Checkpoint target binding is missing"));
     if (
       targetId === this.options.target.targetId &&
       recipientKeyId === this.options.recipient.backupKeyId
-    ) return Promise.resolve(this.options.target);
+    ) return Promise.resolve(Object.freeze({
+      target: this.options.target,
+      close: async () => undefined,
+    }));
     if (!this.options.resolveTarget) return Promise.reject(new Error("Recovery checkpoint target binding is unavailable"));
     return this.options.resolveTarget(targetId, recipientKeyId);
   }

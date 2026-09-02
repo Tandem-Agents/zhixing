@@ -11,6 +11,7 @@ import { RecoveryRoot, keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import { createBackupTargetConfigurationInfrastructure } from "./backup-target-config-infrastructure.js";
+import { createPublishedCheckpointTargetInfrastructure } from "./published-checkpoint-target-infrastructure.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import { activateInitialRecoveryRoot } from "./mesh-pair-command.js";
 import {
@@ -58,11 +59,14 @@ describe("recovery backup checkpoint owner", () => {
     await mkdir(configDir, { recursive: true });
     await writeFile(path.join(configDir, "recovery-backup-targets.json"), "not-json");
     const owner = await createConfiguredCheckpointOwner({
-      zhixingHome: home,
       backupTargets: createBackupTargetConfigurationInfrastructure(home),
       mesh,
       meshRuntime: runtime as never,
       storageMaintenance: maintenance,
+      publishedDirectoryTargets: createPublishedCheckpointTargetInfrastructure({
+        zhixingHome: home,
+        storageMaintenance: maintenance,
+      }).directory,
     });
     expect(owner).toBeDefined();
     await owner!.start();
@@ -91,10 +95,13 @@ describe("recovery backup checkpoint owner", () => {
       deviceId: "target",
     });
     const withoutRuntime = await createConfiguredCheckpointOwner({
-      zhixingHome: noRuntimeHome,
       backupTargets: noRuntimeTargets,
       mesh,
       storageMaintenance: maintenance,
+      publishedDirectoryTargets: createPublishedCheckpointTargetInfrastructure({
+        zhixingHome: noRuntimeHome,
+        storageMaintenance: maintenance,
+      }).directory,
     });
     await withoutRuntime!.start();
     await expect(withoutRuntime!.status()).resolves.toEqual({
@@ -184,10 +191,13 @@ describe("recovery backup checkpoint owner", () => {
       bootstrapStore: store,
     } as unknown as MeshRuntimeBootstrap;
     const owner = await createConfiguredCheckpointOwner({
-      zhixingHome: home,
       backupTargets,
       mesh,
       storageMaintenance: allowMaintenance(),
+      publishedDirectoryTargets: createPublishedCheckpointTargetInfrastructure({
+        zhixingHome: home,
+        storageMaintenance: allowMaintenance(),
+      }).directory,
     });
     await owner!.start();
     await expect(owner!.status()).resolves.toEqual({

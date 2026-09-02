@@ -1,7 +1,6 @@
 import path from "node:path";
 import type { HomeTrustRecord } from "@zhixing/core/contracts";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
-import type { InventoryRecoveryCheckpointTarget } from "@zhixing/mesh/checkpoint-target";
 import {
   FilePairedCheckpointStaging,
   PairedCheckpointReceiver,
@@ -11,7 +10,8 @@ import {
 } from "@zhixing/mesh/paired-checkpoint-target";
 import { keyIdForPublicKey } from "@zhixing/mesh/recovery-root";
 import type { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
-import { deferredPairedCheckpointTarget } from "./paired-checkpoint-runtime.js";
+import { createPublishedCheckpointTargetInfrastructure } from "./published-checkpoint-target-infrastructure.js";
+import type { InventoryPublishedRecoveryCheckpointTarget } from "./published-checkpoint-target.js";
 import {
   commitRecoveryRootActivation,
   commitRecoveryRootLifecycleActivation,
@@ -24,7 +24,7 @@ const RECOVERY_CHECKPOINT_INCOMING_SEGMENTS = Object.freeze([
 
 export function createPairedCheckpointCommandReceiverInfrastructure(input: {
   readonly zhixingHome: string;
-  readonly target: InventoryRecoveryCheckpointTarget;
+  readonly target: InventoryPublishedRecoveryCheckpointTarget;
   readonly storageMaintenance?: StorageMaintenanceGovernorPort;
   readonly receiver: PairedCheckpointReceiverConfiguration;
 }): PairedCheckpointCommandReceiver {
@@ -59,13 +59,12 @@ export function createPersistentPairedCheckpointCommandReceiverInfrastructure(in
 
   return createPairedCheckpointCommandReceiverInfrastructure({
     zhixingHome: input.zhixingHome,
-    target: deferredPairedCheckpointTarget({
+    target: createPublishedCheckpointTargetInfrastructure({
       zhixingHome: input.zhixingHome,
-      deviceId: input.deviceId,
       ...(input.storageMaintenance
         ? { storageMaintenance: input.storageMaintenance }
         : {}),
-    }),
+    }).deferredPaired.deferredPaired(input.deviceId),
     ...(input.storageMaintenance
       ? { storageMaintenance: input.storageMaintenance }
       : {}),
@@ -97,11 +96,10 @@ export function createRecoveryRootPairedCheckpointCommandReceiverInfrastructure(
 
   return createPairedCheckpointCommandReceiverInfrastructure({
     zhixingHome: input.zhixingHome,
-    target: deferredPairedCheckpointTarget({
+    target: createPublishedCheckpointTargetInfrastructure({
       zhixingHome: input.zhixingHome,
-      deviceId: local.device.deviceId,
       storageMaintenance: input.storageMaintenance,
-    }),
+    }).deferredPaired.deferredPaired(local.device.deviceId),
     storageMaintenance: input.storageMaintenance,
     receiver: {
       homeId: input.trust.homeId,

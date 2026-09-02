@@ -50,7 +50,6 @@ export interface RecoveryCheckpointInventoryEntry {
 
 export interface RetirableRecoveryCheckpointTarget extends RecoveryCheckpointTarget {
   retire(checkpointId: string, supersededBy: string, signal?: AbortSignal): Promise<void>;
-  close?(): Promise<void>;
 }
 
 export interface InventoryRecoveryCheckpointTarget extends RetirableRecoveryCheckpointTarget {

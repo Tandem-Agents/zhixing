@@ -31,10 +31,6 @@ import {
   type CheckpointSigner,
 } from "@zhixing/mesh/checkpoint";
 import { AuthorityCheckpointService } from "@zhixing/mesh/checkpoint-service";
-import {
-  FileRecoveryCheckpointTarget,
-  type RetirableRecoveryCheckpointTarget,
-} from "@zhixing/mesh/checkpoint-target";
 import { captureFullAuthorityCheckpoint } from "@zhixing/mesh/full-checkpoint";
 import {
   decodeRecoveryPackage,
@@ -77,6 +73,11 @@ import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { prepareMeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import { readRecoveryPackageFromTty } from "./recovery-package-input.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
+import { createPublishedCheckpointTargetInfrastructure } from "./published-checkpoint-target-infrastructure.js";
+import type {
+  PublishedCheckpointDirectorySessions,
+  RetirablePublishedRecoveryCheckpointTarget,
+} from "./published-checkpoint-target.js";
 
 export interface BackupCommandOptions {
   readonly zhixingHome?: string;
@@ -89,7 +90,7 @@ export interface BackupCommandOptions {
     binding: BackupTargetBinding,
     recipientKeyId: string,
   ) => Promise<{
-    readonly target: RetirableRecoveryCheckpointTarget;
+    readonly target: RetirablePublishedRecoveryCheckpointTarget;
     readonly close: () => Promise<void>;
   }>;
 }
@@ -237,12 +238,13 @@ interface BackupContext {
   readonly store: FileMeshBootstrapStore;
   readonly capacity: { readonly storage: StorageMaintenanceGovernorPort };
   readonly backupTargets: BackupTargetConfigurationRepository;
+  readonly publishedDirectoryTargets: PublishedCheckpointDirectorySessions;
   readonly writeLine: (line: string) => void;
   readonly now: () => string;
 }
 
 interface BackupAdministrationTargetSession {
-  readonly target: RetirableRecoveryCheckpointTarget;
+  readonly target: RetirablePublishedRecoveryCheckpointTarget;
   readonly paired?: PairedRecoveryCheckpointTarget;
 }
 
@@ -273,20 +275,16 @@ function createBackupRecoveryAdministration(
     preparedRootRecipientKeyId: (prepared) => prepared.checkpoint.envelope.recipientKeyId,
     selectTarget: (binding) => context.backupTargets.select(toBackupTargetBinding(binding)),
     withDirectoryTarget: async (directory, use) => {
-      const target = await FileRecoveryCheckpointTarget.open({
-        targetRoot: directory,
-        sourceRoot: path.join(context.home, "distributed-runtime", "authority"),
-        storageMaintenance: context.capacity.storage,
-      });
+      const targetSession = await context.publishedDirectoryTargets.create(directory);
       const binding = {
         kind: "directory" as const,
-        targetId: target.targetId,
+        targetId: targetSession.target.targetId,
         directory: path.resolve(directory),
       };
       try {
-        return await use(binding, { target });
+        return await use(binding, { target: targetSession.target });
       } finally {
-        await target.close();
+        await targetSession.close();
       }
     },
     withSelectedTarget: async (binding, recipientKeyId, use) => {
@@ -418,7 +416,7 @@ function createBackupRecoveryRootLifecycleApplication(
   RecoveryRoot,
   RecoveryRootLifecycleTrustEvent,
   CheckpointPackage,
-  RetirableRecoveryCheckpointTarget,
+  RetirablePublishedRecoveryCheckpointTarget,
   RecoveryRootResetSignature
 > {
   return new BackupRecoveryRootLifecycleApplicationService({
@@ -628,7 +626,7 @@ function isRecoveryRootResetEvent(
 }
 
 async function activateIndependentRootTarget(
-  target: RetirableRecoveryCheckpointTarget,
+  target: RetirablePublishedRecoveryCheckpointTarget,
   input: {
     readonly checkpointId: string;
     readonly event: HomeTrustEvent;
@@ -769,6 +767,10 @@ async function openContext(
     store,
     capacity,
     backupTargets: createBackupTargetConfigurationInfrastructure(home),
+    publishedDirectoryTargets: createPublishedCheckpointTargetInfrastructure({
+      zhixingHome: home,
+      storageMaintenance: capacity.storage,
+    }).directory,
     writeLine: options.writeLine ?? createStdoutWriter().line,
     now: options.now ?? (() => new Date().toISOString()),
   };
@@ -838,7 +840,7 @@ async function prepareInitialRoot(
 
 async function establishInitialRoot(
   context: BackupContext,
-  target: RetirableRecoveryCheckpointTarget,
+  target: RetirablePublishedRecoveryCheckpointTarget,
   readRecoveryPackage?: () => Promise<string>,
   prepared?: PreparedInitialRoot,
 ): Promise<PreparedInitialRoot> {
@@ -859,7 +861,7 @@ async function establishInitialRoot(
 function createService(
   context: BackupContext,
   trust: HomeTrustRecord,
-  target: RetirableRecoveryCheckpointTarget,
+  target: RetirablePublishedRecoveryCheckpointTarget,
 ): AuthorityCheckpointService {
   if (!trust.recoveryBackupPublicKey) throw new Error("当前 home 尚未建立恢复根");
   const recipient = {
@@ -965,24 +967,16 @@ async function openTargetBinding(
   context: BackupContext,
   binding: BackupTargetBinding,
   recipientKeyId?: string,
-): Promise<{ readonly target: RetirableRecoveryCheckpointTarget; readonly close: () => Promise<void> }> {
+): Promise<{ readonly target: RetirablePublishedRecoveryCheckpointTarget; readonly close: () => Promise<void> }> {
   if (binding.kind === "paired-device") {
     return connectPairedTarget(context, binding.deviceId, recipientKeyId);
   }
-  const target = await FileRecoveryCheckpointTarget.open({
-    targetRoot: binding.directory,
-    sourceRoot: path.join(context.home, "distributed-runtime", "authority"),
-    create: false,
-    storageMaintenance: context.capacity.storage,
-  });
-  if (target.targetId !== binding.targetId) {
-    await target.close();
+  const targetSession = await context.publishedDirectoryTargets.openExisting(binding.directory);
+  if (targetSession.target.targetId !== binding.targetId) {
+    await targetSession.close();
     throw new Error("恢复备份目标的物理身份已改变");
   }
-  return {
-    target,
-    close: () => target.close(),
-  };
+  return targetSession;
 }
 
 async function waitForPeer(
@@ -999,7 +993,7 @@ async function waitForPeer(
   }
 }
 
-function metadataOnlyTarget(targetId: string): RetirableRecoveryCheckpointTarget {
+function metadataOnlyTarget(targetId: string): RetirablePublishedRecoveryCheckpointTarget {
   const unavailable = async (): Promise<never> => {
     throw new Error("Recovery checkpoint target is not connected");
   };
@@ -1059,7 +1053,7 @@ async function openCurrentTarget(
   context: BackupContext,
   recipient: RecoveryRoot,
   options: BackupCommandOptions,
-): Promise<{ readonly target: RetirableRecoveryCheckpointTarget; readonly close: () => Promise<void> }> {
+): Promise<{ readonly target: RetirablePublishedRecoveryCheckpointTarget; readonly close: () => Promise<void> }> {
   const configured = await context.backupTargets.load();
   if (!configured) throw new Error("尚未配置独立恢复备份目标");
   const binding = configured.bindings.find((candidate) =>

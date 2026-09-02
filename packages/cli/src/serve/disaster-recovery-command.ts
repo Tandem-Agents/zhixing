@@ -27,11 +27,6 @@ import {
   loadCredentialSnapshot,
   type CredentialStoreCoordinator,
 } from "@zhixing/providers";
-import {
-  FileRecoveryCheckpointTarget,
-  type InventoryRecoveryCheckpointTarget,
-  type RecoveryCheckpointInventoryEntry,
-} from "@zhixing/mesh/checkpoint-target";
 import type { CheckpointPackage } from "@zhixing/mesh/checkpoint";
 import {
   MeshPairedCheckpointTransport,
@@ -63,6 +58,12 @@ import {
   waitForDisasterRecoveryPostInstallReceipt,
   type DisasterInstalledAuthorityGeneration,
 } from "./disaster-recovery-installation.js";
+import { createPublishedCheckpointTargetInfrastructure } from "./published-checkpoint-target-infrastructure.js";
+import type {
+  InventoryPublishedRecoveryCheckpointTarget,
+  PublishedCheckpointDirectoryInventorySessions,
+  PublishedRecoveryCheckpointInventoryEntry,
+} from "./published-checkpoint-target.js";
 
 export interface DisasterRecoveryCommandOptions {
   readonly zhixingHome?: string;
@@ -137,8 +138,8 @@ async function admitDisasterRecoveryCandidate(
   const configuredPaired = configured?.bindings.find((binding) =>
     binding.targetId === configured.currentTargetId && binding.kind === "paired-device");
   const application = new BackupRecoveryDisasterAdmissionApplicationService<
-    InventoryRecoveryCheckpointTarget,
-    RecoveryCheckpointInventoryEntry["envelope"],
+    InventoryPublishedRecoveryCheckpointTarget,
+    PublishedRecoveryCheckpointInventoryEntry["envelope"],
     RecoveryRoot,
     CheckpointPackage,
     Extract<DisasterRecoveryCommand, { op: "prepare" }>
@@ -481,6 +482,7 @@ interface RecoveryContext {
   readonly configuration?: MeshRoleBootConfig;
   readonly config: ReturnType<typeof loadConfig>;
   readonly storageMaintenance: StorageMaintenanceGovernorPort;
+  readonly publishedDirectoryInventoryTargets: PublishedCheckpointDirectoryInventorySessions;
   readonly writeLine: (line: string) => void;
 }
 
@@ -519,6 +521,10 @@ async function openRecoveryContext(
     ...(config.mesh ? { configuration: config.mesh } : {}),
     config,
     storageMaintenance,
+    publishedDirectoryInventoryTargets: createPublishedCheckpointTargetInfrastructure({
+      zhixingHome: home,
+      storageMaintenance,
+    }).directoryInventory,
     writeLine: options.writeLine ?? createStdoutWriter().line,
   };
 }
@@ -591,25 +597,25 @@ async function openInventoryTargets(
 ): Promise<{
   readonly targets: readonly {
     readonly displayName: string;
-    readonly target: InventoryRecoveryCheckpointTarget;
+    readonly target: InventoryPublishedRecoveryCheckpointTarget;
   }[];
   readonly close: () => Promise<void>;
 }> {
   signal.throwIfAborted();
   if (selection.kind === "directory") {
-    const target = await FileRecoveryCheckpointTarget.open({
-      targetRoot: selection.directory,
-      sourceRoot: path.join(context.home, "distributed-runtime", "authority"),
-      create: false,
-      storageMaintenance: context.storageMaintenance,
-    });
+    const targetSession = await context.publishedDirectoryInventoryTargets.openInventory(
+      selection.directory,
+    );
     if (signal.aborted) {
-      await target.close();
+      await targetSession.close();
       signal.throwIfAborted();
     }
     return {
-      targets: [{ displayName: path.basename(path.resolve(selection.directory)), target }],
-      close: () => target.close(),
+      targets: [{
+        displayName: path.basename(path.resolve(selection.directory)),
+        target: targetSession.target,
+      }],
+      close: targetSession.close,
     };
   }
   const bootstrap = await prepareMeshRuntimeBootstrap({
