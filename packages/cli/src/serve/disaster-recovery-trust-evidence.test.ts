@@ -16,6 +16,7 @@ import {
   createSignedTrustEvent,
 } from "@zhixing/mesh/trust-chain";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
+import { createMeshBootstrapProjectionPorts } from "./mesh-bootstrap-projection.js";
 import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
 import {
   collectDisasterRecoveryTrustEvidence,
@@ -85,6 +86,8 @@ describe("disaster recovery reachable-peer evidence", { timeout: 30_000 }, () =>
     const localTrust = await fixture.localStore.loadTrustRecord();
     const peerTrust = await fixture.peerStore.loadTrustRecord();
     if (!localTrust || !peerTrust) throw new Error("trust evidence fixture is incomplete");
+    const localProjection = createMeshBootstrapProjectionPorts(fixture.localStore);
+    const peerProjection = createMeshBootstrapProjectionPorts(fixture.peerStore);
     const localControl = new ProductionMeshControlPlane({
       localIdentity: fixture.localKey,
       trust: localTrust,
@@ -98,7 +101,11 @@ describe("disaster recovery reachable-peer evidence", { timeout: 30_000 }, () =>
         rootCertificatePem: fixture.peerKey.rootCertificatePem,
       }],
       secretStore: new MemorySecretStore(),
-      bootstrapStore: fixture.localStore,
+      endpointDirectory: localProjection.endpoints,
+      transportPeerDirectory: localProjection.transportPeers,
+      trustProjection: Object.freeze({
+        loadTrustRecord: () => fixture.localStore.loadTrustRecord(),
+      }),
       services: localServices,
     });
     const peerControl = new ProductionMeshControlPlane({
@@ -117,7 +124,11 @@ describe("disaster recovery reachable-peer evidence", { timeout: 30_000 }, () =>
         rootCertificatePem: fixture.localKey.rootCertificatePem,
       }],
       secretStore: new MemorySecretStore(),
-      bootstrapStore: fixture.peerStore,
+      endpointDirectory: peerProjection.endpoints,
+      transportPeerDirectory: peerProjection.transportPeers,
+      trustProjection: Object.freeze({
+        loadTrustRecord: () => fixture.peerStore.loadTrustRecord(),
+      }),
       services: peerServices,
     });
     controls.push(localControl, peerControl);

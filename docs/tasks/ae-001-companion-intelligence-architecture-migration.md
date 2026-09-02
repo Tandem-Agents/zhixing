@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-08d P07 Workspace binding catalog root manifest/CAS 物理持久边界已闭合，正在裁决 P07 剩余 Infrastructure 泄漏<br>
+> 当前检查点：A6-09a P09 Mesh bootstrap projection 有限 Infrastructure 边界已闭合，正在准备 pairing continuation 持久边界<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `ad262f5a`；A6-08c 已由协调者独立复核后提交，Workspace binding generation marker/WAL 物理持久边界已收归唯一 Host adapter |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-08d 已闭合，正在从现有 P07 事实裁决下一条真实 Infrastructure 泄漏 |
-| 活跃工作包 | 无；协调者正在提交 `A6-08d-p07-workspace-binding-catalog-persistence-v1` 并选择下一条可执行责任链 |
-| 下一责任链 | A6-08d 闭合后重取 P07 剩余 Infrastructure 泄漏 exact-set，再按真实缺口进入 P09～P12；不预先扩面 |
-| 打开的单向桥 | 无；binding generation root/marker/logPath 与 catalog root manifest/CAS 的 Core 物理入口均已删除，未留下 optional fallback、兼容转导或第二 adapter |
-| 已失效证据 | 无当前未恢复架构证据；A6-01～08a 继续有效。三拓扑 owner-domain 的 anchor+executor 既有 storage-maintenance 环境背压不与本包相交且未重复运行 |
+| 已接受基线 | `24633da3`；A6-08d 已由协调者独立复核后提交，Workspace binding catalog root manifest/CAS 已收归唯一 Host adapter |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-09a 已闭合，正在准备 P09 D04 pairing continuation 的持久边界 |
+| 活跃工作包 | 无；协调者正在提交 `A6-09a-p09-mesh-bootstrap-projection-boundary-v1` 并准备紧邻下一责任链 |
+| 下一责任链 | 协调者复核 A6-09a 后处理独立 P09 pairing continuation 持久边界；本轮未进入 P11/P12、Device Administration 或 A7 |
+| 打开的单向桥 | 无；P07 四条物理持久边界与 P09 D03 三个有限角色均已单向接管，需求侧无 concrete/`Pick`/optional fallback 或第二 store |
+| 已失效证据 | 无当前未恢复架构证据；A6-01～08d 继续有效。A0 P09 D03 的文件格式、outer-reader 宽度、原子发布和清理事实未改变 |
 | 阻塞/用户决策 | 无；AE-001 已明确永久设备移除属于 Device Administration，恢复备份则保持独立领域边界 |
 
 ### A0 基线索引
@@ -2717,6 +2717,24 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据与门禁：Core catalog 1 文件 7/7，以 memory port 覆盖 missing-first-open、corrupt、CAS conflict/degraded、reset/restart 与物理提交后响应丢失；首次 6/7 是测试误把既有 conflict→degraded 语义断言为 reject，纠正该无效断言后隔离复取 7/7。CLI adapter + 真实 setup 2 文件 26/26，覆盖 canonical root/exact bytes、mode、无 lock/temp 残留、并发同 snapshot 一胜一冲突和唯一生产装配。Core fresh build通过（仅既有 circular-chunk warnings），Core/CLI `tsc --noEmit`、changed-source Biome、fresh `pnpm runtime:package-exports` 均通过；canonical `pnpm s7:lint` 52/52 且 registry golden 通过，反向 mutation 拒绝 Core physical import/root/path/lock/temp、optional port、错误 Host root/mode、barrel、第二 adapter/constructor 和 setup 绕过。
 - 失效、状态与下一检查点：若窄 persistence port 的 required/exact-set、Core manifest validator/state machine/expected-token CAS、CLI canonical root/lock/temp/rename/fsync、setup 唯一构造、A6-08c generation runtime 配对、package export/build entry、S7 或上述直接测试任一变化，恢复 `A6-08d-p07-workspace-binding-catalog-persistence-v1` 并只重验该闭包。A6继续 `[ ]`；当前实施完成并等待协调者独立复核，下一检查点仅由协调者从 P07 剩余 Infrastructure 泄漏 exact-set 裁决，不预先进入 P09～P12。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：确认 Core catalog 只保留 v1 manifest 校验、generation/degraded/reset/recovery/revision 与冲突终态，并强制消费 exact-bytes/expected-token CAS 窄端口；唯一 CLI adapter 独占 canonical root、lock/temp、mode `0600`、rename 与 file/directory sync，setup 只构造一次且没有 path、optional、barrel 或第二物理入口。独立运行 Core catalog 7/7、CLI adapter/setup 26/26，CLI typecheck、canonical S7 52/52 与 registry golden、runtime package exports、生产结构反查和 `git diff --check` 均通过；Core fresh build与 changed-source 格式证据有效。A6-08d 可以提交，A6仍保持 `[ ]`。
+
+### A6-08e：P07 剩余 Infrastructure exact-set 裁决
+
+- 协调者以 A0 已冻结 P07 E01～E04/W01～W04 与当前生产构造反向对账：E01/E02 已由 CLI `executor-snapshot-version-store` 唯一持有文件机制，E03/E04 已由 CLI permission snapshot 与 execution asset adapter 持有，`capacity/` 只由 ApplicationHost/命令 Host 的 device-capacity runtime 作为 `statfs` 探测落点；空 `workspace-bindings/artifacts` 当前没有 producer，不为不存在的 payload 预建迁移。A6-08a～08d 已分别闭合 Workspace 资源、probe、generation marker/WAL 和 root manifest/CAS，Core 剩余 `node:path` 只解释用户 raw absolute workspace path，不是物理持久根。
+- 正反检索没有发现 P07 需求侧重新取得上述 concrete store/path、第二 production constructor、optional fallback 或未归属 writer；现有 S7 52 项已覆盖 Workspace 三条新边界，E01～E04 的 strict schema/high-water/首次建立、current-device cleanup 和 setup production chain 继续由既有直接测试保护。P07 不再生成独立工作包；未来只有相关入口真实变化时恢复相交证据。A6仍保持 `[ ]`，直接进入已由 A0 证明确实存在 concrete consumer 泄漏的 P09 Mesh bootstrap projection。
+
+### A6-09a：P09 Mesh bootstrap projection 有限 Infrastructure 边界收口
+
+- 派发基线与唯一结果：以已接受 `HEAD 24633da3` 加本文调度记录为基线，只收口 P09 D03 的 `mesh-endpoints.json`、`mesh-peers.json` 与 `mesh-bootstrap-completions.json` 需求边界。当前具体 `FileMeshBootstrapStore` 同时暴露 endpoint directory、transport peer directory、bootstrap completion 与 P06 Authority/CAS/Trust 等大量能力，多个运行、控制、配对与 Surface link 消费者直接以 concrete store 类型取用其中少量方法；迁移后每类需求方只取得具名、required、readonly 的有限角色，具体 store/path/file I/O 只存在于持久 Host 或命令期 ApplicationHost 的组合边缘，不得形成万能 Mesh facade。
+- 生产闭包与行为保护：正向覆盖 startup/managed/current-anchor link、Mesh runtime bootstrap/control-plane/assembly 和 pairing command 对 `loadEndpoints/acceptEndpoint/loadTransportPeers/acceptTransportPeer/markBootstrapComplete/bootstrapCompleted` 的真实调用，反向覆盖三个文件的唯一 reader/writer、原子发布与 current-device cleanup。保持 endpoint/peer canonical 成员 codec、当前 outer-reader 宽度、成员排序/去重、同身份冲突、completion peer→offer 幂等冲突、缺文件为空、坏文件 fail closed、storage maintenance/close、Anchor+Executor/Anchor-only/Executor-only、临时 pairing 与远端连接行为完全不变。
+- 旧路与明确不做：业务/Surface/控制消费者不得继续导入、保存、透传或用 `Pick<FileMeshBootstrapStore,...>` 暴露 concrete store；组合边缘可构造唯一 File store 并投影所需角色。不得迁移 P06 Authority log/artifact/trust/pairing authority、P09 D04 pairing continuation、surface/mesh asset partial、P11/P12、设备管理或用户体验，不得趁机收紧当前 D03 outer schema、改变清理集合、创建动态 Mesh 插件或第二 store/状态机。
+- 最窄证据与完成条件：直接测试覆盖三个有限角色的 required injection、各生产消费者 exact-set、三文件缺失/坏值/冲突/重放/原子发布、三拓扑和 pairing/current-anchor 关键交界；结构门禁拒绝需求侧 concrete import/type/constructor、optional/no-store 旁路、跨角色取权、第二 File store 与 Host 漏投影。按验证手册只运行失效闭包、CLI typecheck/必要 build、canonical S7、fresh package exports（若出口相交）、changed-source 格式和 `git diff --check`，不得重跑 P07、owner-domain、S6、根级回归或制品验收。
+- 安全交接：只有 D03 三类投影仍由唯一物理 store 持有、所有需求方仅见有限角色、P06 Trust/Authority 和 P09 其他家族完全未迁移、拓扑与异常行为无回退且无 concrete 旁路时才结束；A6继续 `[ ]`。约四小时仍未闭合、必须拆分多个独立角色、发现消费者实际需要 P06 Trust/Authority 或影响扩入 D04/P11/P12 时，停在可构建、可运行、单一 D03 真相成立的检查点反馈，不得执行任何 Git 写操作。
+- 实施结果与正反闭包：新增 `MeshEndpointDirectoryPersistencePort`、`MeshTransportPeerDirectoryPersistencePort`、`MeshBootstrapCompletionPersistencePort` 三个 required readonly exact-set 角色及冻结投影；`FileMeshBootstrapStore` 是唯一同时实现三者的物理 owner。`prepareMeshRuntimeBootstrap`、pair command 与 current-anchor Surface command 三个 Host/命令组合边缘各从既有 concrete 实例投影一次；persistent Anchor/Executor、recovery-root、backup/DR 与 control-plane 只接收对应角色。`ProductionMeshControlPlane` 不再导入或取得 concrete store，pairing D03 调用、completion 标记与 current-anchor link 的 `Pick<FileMeshBootstrapStore,...>` 旁路均已退出；P06 trust/Authority/CAS 仍由既有 concrete 责任链承担，没有伪装为本包角色。
+- 行为与异常保护：物理 writer/reader 未改写，endpoint/peer 的 canonical member codec、允许额外 outer key 的既有 reader、排序/去重与 identity conflict，completion 的无版本 peer→offer exact replay/conflict，missing-empty、坏 JSON/noncanonical fail closed、random tmp→fsync→rename→directory sync→finally 清 tmp 及 current-device cleanup 均保持。三拓扑仍从同一 bootstrap 结果取得 roles；pairing、current-anchor、恢复根、备份与灾备连接继续使用原 trust/endpoint/peer/secret 行为。本包没有触碰 D04 continuation、asset partial、P11/P12 或 Device Administration。
+- 直接证据：最终串行定向闭包共 12 文件 58/58：projection/store/control-plane 7/7，mesh bootstrap/pairing 14/14，recovery-root/backup/DR command/trust evidence/current-anchor Surface 19/19，Mesh assembly/三拓扑/Executor terminal 18/18；required test fixture 同步改绑后全部通过。CLI `tsc --noEmit` 与 `pnpm cli:build` 通过；canonical `pnpm s7:lint` 53/53 且 registry golden 通过，新增反向 mutation 能拒绝 optional/concrete control-plane、pairing direct store、Host 漏投影与第二 physical owner。未修改 package manifest/export/build entry，故 fresh package-export 门不相交且未重复运行。
+- 失效与交接：若三个有限角色的 required/exact-set、唯一 `FileMeshBootstrapStore` 实现、三处 projection factory、任一 `ProductionMeshControlPlane` 注入、persistent 三拓扑、pairing/current-anchor/backup/DR/recovery-root 消费、D03 codec/原子写/清理、S7 或上述直接测试变化，恢复 `A6-09a-p09-mesh-bootstrap-projection-boundary-v1` 及真实相交的 A0 P09 证据；P06 与 D04/P11/P12 不因无关变化自动失效。A6继续 `[ ]`，当前工作包等待协调者独立复核；下一检查点仅为独立 pairing continuation 边界。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：确认 D03 六个操作在生产消费者中全部经 endpoints/transportPeers/completions 三个 required readonly 角色调用，`ProductionMeshControlPlane` 与恢复根不再导入 concrete store，持久/命令 Host 只投影一次；pair command 仍持有的 concrete store只服务本包明确排除的 P06 Trust/Authority，不再承载 D03 调用。独立运行 projection/control-plane/runtime bootstrap 14/14，CLI typecheck、canonical S7 53/53 与 registry golden、D03 concrete-call 反查和 `git diff --check` 均通过；完整 CLI build及其余 44 项直接证据有效。A6-09a 可以提交，A6仍保持 `[ ]`。
 
 ## 十、用户提示词
 

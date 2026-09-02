@@ -515,6 +515,7 @@ export async function runExecutorRole(
       endpoints: bootstrap.mesh.endpoints,
       transportPeers: bootstrap.mesh.transportPeers,
       bootstrapStore: bootstrap.mesh.bootstrapStore,
+      bootstrapProjection: bootstrap.mesh.bootstrapProjection,
       ...(bootstrap.mesh.anchorIssuerKey
         ? { plannedAnchorIssuerKey: bootstrap.mesh.anchorIssuerKey }
         : {}),

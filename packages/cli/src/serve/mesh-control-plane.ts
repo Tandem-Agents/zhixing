@@ -33,10 +33,17 @@ import { HandshakeReplayWindow } from "@zhixing/mesh/replay-window";
 import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
 import type { SecureMeshConnection } from "@zhixing/mesh/transport";
 import { fulfillConnectionLifetimeObligation } from "./connection-lifetime-obligation.js";
-import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
+import type {
+  MeshEndpointDirectoryPersistencePort,
+  MeshTransportPeerDirectoryPersistencePort,
+} from "./mesh-bootstrap-projection.js";
 
 const PROTOCOL_RANGE = { min: "1", max: "1" } as const;
 const RELAY_HELLO_TTL_MS = 60_000;
+
+export interface MeshControlPlaneTrustProjectionPort {
+  readonly loadTrustRecord: () => Promise<HomeTrustRecord | undefined>;
+}
 
 export interface ProductionMeshControlPlaneOptions {
   readonly localIdentity: DeviceKey;
@@ -45,7 +52,9 @@ export interface ProductionMeshControlPlaneOptions {
   readonly endpoints: MeshEndpointDirectory;
   readonly transportPeers: readonly TrustedMeshPeer[];
   readonly secretStore: SecretStorePort;
-  readonly bootstrapStore: FileMeshBootstrapStore;
+  readonly endpointDirectory: MeshEndpointDirectoryPersistencePort;
+  readonly transportPeerDirectory: MeshTransportPeerDirectoryPersistencePort;
+  readonly trustProjection: MeshControlPlaneTrustProjectionPort;
   readonly services: MeshServiceRegistry;
   readonly terminalOnly?: {
     readonly services: MeshServiceRegistry;
@@ -100,7 +109,7 @@ export class ProductionMeshControlPlane {
       options.services,
       options.endpoints,
       async (descriptor) => {
-        return await options.bootstrapStore.acceptEndpoint(descriptor);
+        return await options.endpointDirectory.acceptEndpoint(descriptor);
       },
     );
   }
@@ -197,7 +206,7 @@ export class ProductionMeshControlPlane {
       await abortableDelay(1_000, this.#abort.signal).catch(() => undefined);
       if (this.#abort.signal.aborted) return;
       try {
-        const record = await this.options.bootstrapStore.loadTrustRecord();
+        const record = await this.options.trustProjection.loadTrustRecord();
         if (record) await this.reconcileTrust(record);
       } catch (error) {
         const reason = asError(error);
@@ -237,7 +246,7 @@ export class ProductionMeshControlPlane {
 
   async #refreshTransportPeers(): Promise<boolean> {
     let changed = false;
-    for (const peer of await this.options.bootstrapStore.loadTransportPeers()) {
+    for (const peer of await this.options.transportPeerDirectory.loadTransportPeers()) {
       const deviceId = peer.identity.deviceId;
       const current = this.#peers.get(deviceId);
       if (current && canonicalize(current) !== canonicalize(peer)) {

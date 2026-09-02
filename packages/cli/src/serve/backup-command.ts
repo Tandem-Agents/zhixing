@@ -910,7 +910,11 @@ async function connectPairedTarget(
     endpoints: bootstrap.endpoints,
     transportPeers: bootstrap.transportPeers,
     secretStore: context.secretStore,
-    bootstrapStore: bootstrap.bootstrapStore,
+    endpointDirectory: bootstrap.bootstrapProjection.endpoints,
+    transportPeerDirectory: bootstrap.bootstrapProjection.transportPeers,
+    trustProjection: Object.freeze({
+      loadTrustRecord: () => bootstrap.bootstrapStore.loadTrustRecord(),
+    }),
     services: new MeshServiceRegistry(),
     credentialRouteGuard: new CredentialExposureAuthority({
       deviceId: context.key.deviceId,

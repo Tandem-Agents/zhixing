@@ -21,6 +21,7 @@ import { ServerStateFile } from "@zhixing/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { inspectLocalHealth } from "../maintenance/doctor.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
+import { createMeshBootstrapProjectionPorts } from "./mesh-bootstrap-projection.js";
 import { createMeshCompatibilityStateProjection } from "./mesh-compatibility-state.js";
 import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
 
@@ -108,7 +109,7 @@ describe("production mesh control plane", () => {
       endpoints: new MeshEndpointDirectory(),
       transportPeers: [executor.peer],
       secretStore: anchorSecrets,
-      bootstrapStore: new FileMeshBootstrapStore(anchorRoot),
+      ...controlPlanePersistence(new FileMeshBootstrapStore(anchorRoot)),
       services: new MeshServiceRegistry(),
       connections: anchorConnections,
     });
@@ -125,7 +126,7 @@ describe("production mesh control plane", () => {
       }]),
       transportPeers: [anchor.peer],
       secretStore: new MemorySecretStore(),
-      bootstrapStore: new FileMeshBootstrapStore(executorRoot),
+      ...controlPlanePersistence(new FileMeshBootstrapStore(executorRoot)),
       services: new MeshServiceRegistry(),
       connections: executorConnections,
     });
@@ -209,7 +210,7 @@ describe("production mesh control plane", () => {
       endpoints: new MeshEndpointDirectory(),
       transportPeers: [],
       secretStore: new MemorySecretStore(),
-      bootstrapStore: anchorStore,
+      ...controlPlanePersistence(anchorStore),
       services: new MeshServiceRegistry(),
       onTrustReconciled,
     });
@@ -227,9 +228,9 @@ describe("production mesh control plane", () => {
       }]),
       transportPeers: [anchor.peer],
       secretStore: new MemorySecretStore(),
-      bootstrapStore: new FileMeshBootstrapStore(
+      ...controlPlanePersistence(new FileMeshBootstrapStore(
         await createTempDir("mesh-online-executor-control"),
-      ),
+      )),
       services: new MeshServiceRegistry(),
     });
     controls.push(anchorControl, executorControl);
@@ -297,9 +298,9 @@ describe("production mesh control plane", () => {
       endpoints: new MeshEndpointDirectory([newEndpoint]),
       transportPeers: [executor.peer],
       secretStore: new MemorySecretStore(),
-      bootstrapStore: new FileMeshBootstrapStore(
+      ...controlPlanePersistence(new FileMeshBootstrapStore(
         await createTempDir("mesh-endpoint-anchor-control"),
-      ),
+      )),
       services: new MeshServiceRegistry(),
       localEndpoint: newEndpoint,
       onConnectionError: (error) => connectionErrors.push(
@@ -313,7 +314,7 @@ describe("production mesh control plane", () => {
       endpoints: executorEndpoints,
       transportPeers: [anchor.peer],
       secretStore: new MemorySecretStore(),
-      bootstrapStore: executorStore,
+      ...controlPlanePersistence(executorStore),
       services: new MeshServiceRegistry(),
     });
     controls.push(anchorControl, executorControl);
@@ -354,9 +355,9 @@ describe("production mesh control plane", () => {
       endpoints: new MeshEndpointDirectory(),
       transportPeers: [executor.peer],
       secretStore: new MemorySecretStore(),
-      bootstrapStore: new FileMeshBootstrapStore(
+      ...controlPlanePersistence(new FileMeshBootstrapStore(
         await createTempDir("mesh-stop-anchor-control"),
-      ),
+      )),
       services: new MeshServiceRegistry(),
     });
     const executorControl = new ProductionMeshControlPlane({
@@ -372,9 +373,9 @@ describe("production mesh control plane", () => {
       }]),
       transportPeers: [anchor.peer],
       secretStore: new MemorySecretStore(),
-      bootstrapStore: new FileMeshBootstrapStore(
+      ...controlPlanePersistence(new FileMeshBootstrapStore(
         await createTempDir("mesh-stop-executor-control"),
-      ),
+      )),
       services: new MeshServiceRegistry(),
     });
     controls.push(anchorControl, executorControl);
@@ -439,9 +440,9 @@ describe("production mesh control plane", () => {
       endpoints: new MeshEndpointDirectory(),
       transportPeers: [executor.peer],
       secretStore: anchorSecrets,
-      bootstrapStore: new FileMeshBootstrapStore(
+      ...controlPlanePersistence(new FileMeshBootstrapStore(
         await createTempDir("mesh-relay-anchor-control"),
-      ),
+      )),
       services: new MeshServiceRegistry(),
       onConnectionError: (error) => connectionErrors.push(`anchor: ${error.message}`),
     });
@@ -461,9 +462,9 @@ describe("production mesh control plane", () => {
       }]),
       transportPeers: [anchor.peer],
       secretStore: executorSecrets,
-      bootstrapStore: new FileMeshBootstrapStore(
+      ...controlPlanePersistence(new FileMeshBootstrapStore(
         await createTempDir("mesh-relay-executor-control"),
-      ),
+      )),
       services: new MeshServiceRegistry(),
       onConnectionError: (error) => connectionErrors.push(`executor: ${error.message}`),
     });
@@ -550,6 +551,17 @@ async function waitFor(predicate: () => boolean | Promise<boolean>): Promise<voi
     if (Date.now() >= deadline) throw new Error("mesh connection did not converge");
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
+}
+
+function controlPlanePersistence(store: FileMeshBootstrapStore) {
+  const projection = createMeshBootstrapProjectionPorts(store);
+  return {
+    endpointDirectory: projection.endpoints,
+    transportPeerDirectory: projection.transportPeers,
+    trustProjection: Object.freeze({
+      loadTrustRecord: () => store.loadTrustRecord(),
+    }),
+  };
 }
 
 class MemorySecretStore implements SecretStorePort {

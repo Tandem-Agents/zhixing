@@ -3928,6 +3928,7 @@ export async function validateS7Structure() {
   failures.push(...inspectWorkspaceProbePersistenceBoundary(records));
   failures.push(...inspectWorkspaceBindingGenerationPersistenceBoundary(records));
   failures.push(...inspectWorkspaceBindingCatalogPersistenceBoundary(records));
+  failures.push(...inspectMeshBootstrapProjectionBoundary(records));
   failures.push(...inspectConversationAdoptionAssembly(records));
   failures.push(...inspectConversationStorageBoundary(records));
   failures.push(...inspectWorksceneStorageCleanupBoundary(records));
@@ -11250,6 +11251,156 @@ export function inspectWorkspaceBindingCatalogPersistenceBoundary(records) {
     failures.push(
       "Workspace binding catalog persistence acquired a second adapter or constructor",
     );
+  }
+  return failures;
+}
+
+/** A6 keeps the P09 D03 projection behind three finite roles at Host edges. */
+export function inspectMeshBootstrapProjectionBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const source = byPath.get(relative);
+    if (source === undefined) {
+      failures.push(`${relative}: Mesh bootstrap projection source is missing`);
+    }
+    return source ?? "";
+  };
+  const projectionPath = "packages/cli/src/serve/mesh-bootstrap-projection.ts";
+  const storePath = "packages/cli/src/serve/mesh-bootstrap-store.ts";
+  const projection = required(projectionPath);
+  const store = required(storePath);
+  const control = required("packages/cli/src/serve/mesh-control-plane.ts");
+  const bootstrap = required("packages/cli/src/serve/mesh-runtime-bootstrap.ts");
+  const assembly = required("packages/cli/src/serve/mesh-runtime-assembly.ts");
+  const access = required("packages/cli/src/serve/access-surfaces.ts");
+  const executor = required("packages/cli/src/serve/executor-role-runtime.ts");
+  const surface = required("packages/cli/src/runtime/surface-core-host-link.ts");
+  const pairing = required("packages/cli/src/serve/mesh-pair-command.ts");
+
+  for (const [role, methods] of [
+    ["MeshEndpointDirectoryPersistencePort", ["loadEndpoints", "acceptEndpoint"]],
+    ["MeshTransportPeerDirectoryPersistencePort", ["loadTransportPeers", "acceptTransportPeer"]],
+    ["MeshBootstrapCompletionPersistencePort", ["markBootstrapComplete", "bootstrapCompleted"]],
+  ]) {
+    const start = projection.indexOf(`export interface ${role}`);
+    const end = projection.indexOf("\n}", start);
+    const declaration = start < 0 || end < 0 ? "" : projection.slice(start, end);
+    if (
+      start < 0 ||
+      methods.some((method) => !declaration.includes(`readonly ${method}:`)) ||
+      declaration.includes("?:") ||
+      /FileMeshBootstrapStore|node:fs|node:path/u.test(declaration)
+    ) {
+      failures.push(`Mesh bootstrap ${role} exact-set or dependency boundary drifted`);
+    }
+  }
+  if (
+    !projection.includes("return Object.freeze({") ||
+    !projection.includes("endpoints: Object.freeze({") ||
+    !projection.includes("transportPeers: Object.freeze({") ||
+    !projection.includes("completions: Object.freeze({") ||
+    /\b(?:class|interface)\s+(?:MeshStorage|MeshPersistence|MeshBootstrapStorePort)\b/u.test(
+      projection,
+    )
+  ) {
+    failures.push("Mesh bootstrap finite projection construction drifted");
+  }
+  if (
+    !store.includes("MeshEndpointDirectoryPersistencePort,") ||
+    !store.includes("MeshTransportPeerDirectoryPersistencePort,") ||
+    !store.includes("MeshBootstrapCompletionPersistencePort") ||
+    !store.includes("implements\n    MeshEndpointDirectoryPersistencePort") ||
+    !store.includes('"mesh-endpoints.json"') ||
+    !store.includes('"mesh-peers.json"') ||
+    !store.includes('"mesh-bootstrap-completions.json"')
+  ) {
+    failures.push("File Mesh bootstrap projection ownership drifted");
+  }
+
+  const controlOptions = control.slice(
+    control.indexOf("export interface ProductionMeshControlPlaneOptions"),
+    control.indexOf("/** Owns direct listeners"),
+  );
+  if (
+    /FileMeshBootstrapStore|\bbootstrapStore\b|Pick\s*</u.test(control) ||
+    !controlOptions.includes("readonly endpointDirectory: MeshEndpointDirectoryPersistencePort;") ||
+    !controlOptions.includes(
+      "readonly transportPeerDirectory: MeshTransportPeerDirectoryPersistencePort;",
+    ) ||
+    controlOptions.includes("readonly endpointDirectory?:") ||
+    controlOptions.includes("readonly transportPeerDirectory?:") ||
+    !control.includes("options.endpointDirectory.acceptEndpoint(descriptor)") ||
+    !control.includes("this.options.transportPeerDirectory.loadTransportPeers()")
+  ) {
+    failures.push("Mesh control plane regained concrete or optional bootstrap persistence");
+  }
+  if (
+    (bootstrap.match(/readonly bootstrapProjection: MeshBootstrapProjectionPorts;/gu)?.length ?? 0) !== 2 ||
+    !bootstrap.includes("createMeshBootstrapProjectionPorts(bootstrapStore)") ||
+    /bootstrapStore\.(?:loadEndpoints|acceptEndpoint|loadTransportPeers|acceptTransportPeer|markBootstrapComplete|bootstrapCompleted)\b/u.test(
+      bootstrap,
+    ) ||
+    !assembly.includes("readonly bootstrapProjection: MeshBootstrapProjectionPorts;") ||
+    assembly.includes("readonly bootstrapProjection?:") ||
+    !assembly.includes("options.bootstrapProjection.completions.markBootstrapComplete(") ||
+    !access.includes("bootstrapProjection: bootstrap.bootstrapProjection") ||
+    !executor.includes("bootstrapProjection: bootstrap.mesh.bootstrapProjection")
+  ) {
+    failures.push("Persistent Host Mesh bootstrap projection binding drifted");
+  }
+  if (
+    !surface.includes("createMeshBootstrapProjectionPorts(bootstrapStore)") ||
+    surface.includes("Pick<FileMeshBootstrapStore") ||
+    /bootstrapStore\.(?:loadEndpoints|acceptEndpoint|loadTransportPeers|acceptTransportPeer|markBootstrapComplete|bootstrapCompleted)\b/u.test(
+      surface,
+    ) ||
+    !pairing.includes("createMeshBootstrapProjectionPorts(store)") ||
+    /(?:input\.)?(?:store|bootstrapStore)\.(?:loadEndpoints|acceptEndpoint|loadTransportPeers|acceptTransportPeer|markBootstrapComplete|bootstrapCompleted)\b/u.test(
+      pairing,
+    )
+  ) {
+    failures.push("Command Host Mesh bootstrap projection binding drifted");
+  }
+
+  const controlPlaneCallers = records.filter((record) =>
+    record.text.includes("new ProductionMeshControlPlane({")
+  );
+  for (const record of controlPlaneCallers) {
+    const calls = record.text.match(/new ProductionMeshControlPlane\(\{/gu)?.length ?? 0;
+    const endpointBindings = record.text.match(/\bendpointDirectory:/gu)?.length ?? 0;
+    const peerBindings = record.text.match(/\btransportPeerDirectory:/gu)?.length ?? 0;
+    const trustBindings = record.text.match(/\btrustProjection:/gu)?.length ?? 0;
+    if (
+      endpointBindings < calls ||
+      peerBindings < calls ||
+      trustBindings < calls
+    ) {
+      failures.push(`${record.relative}: Mesh control plane finite binding is incomplete`);
+    }
+  }
+  const projectionFactories = records
+    .filter((record) =>
+      record.relative !== projectionPath &&
+      record.text.includes("createMeshBootstrapProjectionPorts(")
+    )
+    .map((record) => record.relative)
+    .sort();
+  const expectedFactories = [
+    "packages/cli/src/runtime/surface-core-host-link.ts",
+    "packages/cli/src/serve/mesh-pair-command.ts",
+    "packages/cli/src/serve/mesh-runtime-bootstrap.ts",
+  ];
+  const storeOwners = records
+    .filter((record) => record.text.includes("implements\n    MeshEndpointDirectoryPersistencePort"))
+    .map((record) => record.relative);
+  if (
+    projectionFactories.length !== expectedFactories.length ||
+    projectionFactories.some((relative, index) => relative !== expectedFactories[index]) ||
+    storeOwners.length !== 1 ||
+    storeOwners[0] !== storePath
+  ) {
+    failures.push("Mesh bootstrap projection acquired a second factory or physical owner");
   }
   return failures;
 }

@@ -21,6 +21,7 @@ import {
   inspectWorkspaceProbePersistenceBoundary,
   inspectWorkspaceBindingGenerationPersistenceBoundary,
   inspectWorkspaceBindingCatalogPersistenceBoundary,
+  inspectMeshBootstrapProjectionBoundary,
   inspectConversationStorageBoundary,
   inspectWorksceneStorageCleanupBoundary,
   inspectStorageRemainderBoundary,
@@ -1288,6 +1289,76 @@ test("P07 workspace binding root manifest stays at one Host CAS adapter", async 
       },
     ]).join("\n"),
     /acquired a second adapter or constructor/u,
+  );
+});
+
+test("P09 Mesh bootstrap projections stay finite and required at Host edges", async () => {
+  const paths = [
+    "packages/cli/src/serve/mesh-bootstrap-projection.ts",
+    "packages/cli/src/serve/mesh-bootstrap-store.ts",
+    "packages/cli/src/serve/mesh-control-plane.ts",
+    "packages/cli/src/serve/mesh-runtime-bootstrap.ts",
+    "packages/cli/src/serve/mesh-runtime-assembly.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/cli/src/runtime/surface-core-host-link.ts",
+    "packages/cli/src/serve/mesh-pair-command.ts",
+    "packages/cli/src/serve/backup-command.ts",
+    "packages/cli/src/serve/disaster-recovery-command.ts",
+    "packages/cli/src/serve/recovery-root-establishment-runtime.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: (await readFile(relative, "utf8")).replaceAll("\r\n", "\n"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectMeshBootstrapProjectionBoundary(records), []);
+  assert.match(
+    inspectMeshBootstrapProjectionBoundary(mutate(
+      "packages/cli/src/serve/mesh-control-plane.ts",
+      (text) => text.replace(
+        "readonly endpointDirectory: MeshEndpointDirectoryPersistencePort;",
+        "readonly endpointDirectory?: MeshEndpointDirectoryPersistencePort;",
+      ),
+    )).join("\n"),
+    /concrete or optional bootstrap persistence/u,
+  );
+  assert.match(
+    inspectMeshBootstrapProjectionBoundary(mutate(
+      "packages/cli/src/serve/mesh-control-plane.ts",
+      (text) => `import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";\n${text}`,
+    )).join("\n"),
+    /concrete or optional bootstrap persistence/u,
+  );
+  assert.match(
+    inspectMeshBootstrapProjectionBoundary(mutate(
+      "packages/cli/src/serve/mesh-pair-command.ts",
+      (text) => `${text}\nvoid input.store.markBootstrapComplete("peer", "offer");`,
+    )).join("\n"),
+    /Command Host Mesh bootstrap projection binding drifted/u,
+  );
+  assert.match(
+    inspectMeshBootstrapProjectionBoundary(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace(
+        "bootstrapProjection: bootstrap.mesh.bootstrapProjection,",
+        "",
+      ),
+    )).join("\n"),
+    /Persistent Host Mesh bootstrap projection binding drifted/u,
+  );
+  assert.match(
+    inspectMeshBootstrapProjectionBoundary([
+      ...records,
+      {
+        relative: "packages/cli/src/serve/duplicate-mesh-bootstrap-projection.ts",
+        text: "class Duplicate implements\n    MeshEndpointDirectoryPersistencePort {}",
+      },
+    ]).join("\n"),
+    /second factory or physical owner/u,
   );
 });
 

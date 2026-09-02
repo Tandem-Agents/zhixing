@@ -303,6 +303,7 @@ const meshSurface: AccessSurface = {
       endpoints: bootstrap.endpoints,
       transportPeers: bootstrap.transportPeers,
       bootstrapStore: bootstrap.bootstrapStore,
+      bootstrapProjection: bootstrap.bootstrapProjection,
       ...(bootstrap.anchorIssuerKey
         ? { plannedAnchorIssuerKey: bootstrap.anchorIssuerKey }
         : {}),

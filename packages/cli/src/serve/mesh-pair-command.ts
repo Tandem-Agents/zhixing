@@ -82,6 +82,10 @@ import { loadConfig, writeConfig } from "@zhixing/providers";
 import { loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { createStdoutWriter } from "../screen/index.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
+import {
+  createMeshBootstrapProjectionPorts,
+  type MeshBootstrapProjectionPorts,
+} from "./mesh-bootstrap-projection.js";
 import { FileBackupTargetConfiguration } from "./backup-target-config.js";
 import { createDeviceCapacityRuntime } from "./device-capacity-runtime.js";
 import { readRecoveryPackageFromTty } from "./recovery-package-input.js";
@@ -131,6 +135,18 @@ export interface PairCommandOptions {
   }) => Promise<"current" | "paired">;
   /** Isolated composition seam for the existing planned migration command. */
   readonly migrateDutyTo?: (deviceName: string) => Promise<void>;
+}
+
+interface PairingRuntimeInput extends PairCommandOptions {
+  readonly isolatedComposition: boolean;
+  readonly zhixingHome: string;
+  readonly secretStore: SecretStorePort;
+  readonly key: DeviceKey;
+  readonly store: FileMeshBootstrapStore;
+  readonly bootstrapProjection: MeshBootstrapProjectionPorts;
+  readonly continuations: FileMeshPairingContinuationStore;
+  readonly storageMaintenance: StorageMaintenanceGovernorPort;
+  readonly writeLine: (line: string) => void;
 }
 
 interface PairingInvitation {
@@ -220,6 +236,7 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
   const store = new FileMeshBootstrapStore(zhixingHome, key, {
     storageMaintenance: deviceCapacity.storage,
   });
+  const bootstrapProjection = createMeshBootstrapProjectionPorts(store);
   const routedSecretStore = exposureGuardedSecretStore(
     secretStore,
     new CredentialExposureAuthority({
@@ -240,6 +257,7 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
         secretStore: routedSecretStore,
         key,
         store,
+        bootstrapProjection,
         continuations,
         storageMaintenance: deviceCapacity.storage,
         writeLine,
@@ -253,6 +271,7 @@ export async function runPairCommand(options: PairCommandOptions = {}): Promise<
       secretStore: routedSecretStore,
       key,
       store,
+      bootstrapProjection,
       continuations,
       storageMaintenance: deviceCapacity.storage,
       writeLine,
@@ -430,16 +449,7 @@ export async function activateInitialRecoveryRoot(input: {
   return next;
 }
 
-async function issuePairing(input: PairCommandOptions & {
-  readonly isolatedComposition: boolean;
-  readonly zhixingHome: string;
-  readonly secretStore: SecretStorePort;
-  readonly key: DeviceKey;
-  readonly store: FileMeshBootstrapStore;
-  readonly continuations: FileMeshPairingContinuationStore;
-  readonly storageMaintenance: StorageMaintenanceGovernorPort;
-  readonly writeLine: (line: string) => void;
-}): Promise<void> {
+async function issuePairing(input: PairingRuntimeInput): Promise<void> {
   const config = loadConfig({ homeDir: input.zhixingHome });
   let trustRecord = await input.store.loadTrustRecord();
   let projection = await input.store.loadTrustProjection();
@@ -489,7 +499,7 @@ async function issuePairing(input: PairCommandOptions & {
     : undefined;
   if (
     continuation?.phase === "commit-ready" &&
-    await input.store.bootstrapCompleted(
+    await input.bootstrapProjection.completions.bootstrapCompleted(
       continuation.join.device.deviceId,
       continuation.invitation.offer.offerId,
     )
@@ -554,7 +564,7 @@ async function issuePairing(input: PairCommandOptions & {
     };
     await writeConfig({ ...config, mesh: meshConfiguration }, { homeDir: input.zhixingHome });
 
-    const endpoints = await input.store.loadEndpoints();
+    const endpoints = await input.bootstrapProjection.endpoints.loadEndpoints();
     const currentEndpoint = endpoints.get(identity.deviceId);
     const candidate = createMeshEndpointDescriptor({
       deviceId: identity.deviceId,
@@ -574,7 +584,9 @@ async function issuePairing(input: PairCommandOptions & {
       if (currentEndpoint && canonicalize(currentEndpoint) !== canonicalize(issuerEndpoint)) {
         throw new Error("Pairing continuation conflicts with the durable endpoint directory");
       }
-      if (!currentEndpoint) await input.store.acceptEndpoint(issuerEndpoint);
+      if (!currentEndpoint) {
+        await input.bootstrapProjection.endpoints.acceptEndpoint(issuerEndpoint);
+      }
       const secret = await loadPairingSecret(
         input.secretStore,
         continuation.invitation.offer.offerId,
@@ -586,7 +598,7 @@ async function issuePairing(input: PairCommandOptions & {
       issuerEndpoint = currentEndpoint &&
         canonicalize(currentEndpoint.transports) === canonicalize(candidate.transports)
         ? currentEndpoint
-        : await input.store.acceptEndpoint(candidate);
+        : await input.bootstrapProjection.endpoints.acceptEndpoint(candidate);
       const issued = new InMemoryPairingOfferRepository();
       material = issued.issueQr({
         homeId: projection.homeId,
@@ -814,7 +826,7 @@ async function issuePairing(input: PairCommandOptions & {
       attempt,
     });
     pairingCommitted = true;
-    await input.store.acceptTransportPeer({
+    await input.bootstrapProjection.transportPeers.acceptTransportPeer({
       identity: joinMessage.join.device,
       rootCertificatePem: joinMessage.rootCertificatePem,
     });
@@ -832,7 +844,10 @@ async function issuePairing(input: PairCommandOptions & {
     if (!isRecord(acknowledged) || acknowledged.t !== "bootstrap-complete") {
       throw new Error("Pairing peer did not acknowledge bootstrap completion");
     }
-    await input.store.markBootstrapComplete(peerDeviceId, material.offer.offerId);
+    await input.bootstrapProjection.completions.markBootstrapComplete(
+      peerDeviceId,
+      material.offer.offerId,
+    );
     await deletePairingSecret(input.secretStore, material.offer.offerId);
     await input.continuations.clear(material.offer.offerId);
     input.writeLine(`已和“${joinMessage.join.device.displayName}”完成配对。`);
@@ -909,16 +924,7 @@ export function createPairingTrustEvent(input: {
   });
 }
 
-async function joinPairing(input: PairCommandOptions & {
-  readonly isolatedComposition: boolean;
-  readonly zhixingHome: string;
-  readonly secretStore: SecretStorePort;
-  readonly key: DeviceKey;
-  readonly store: FileMeshBootstrapStore;
-  readonly continuations: FileMeshPairingContinuationStore;
-  readonly storageMaintenance: StorageMaintenanceGovernorPort;
-  readonly writeLine: (line: string) => void;
-}): Promise<void> {
+async function joinPairing(input: PairingRuntimeInput): Promise<void> {
   let persisted = await input.continuations.load();
   if (persisted?.side === "issuer") {
     throw new Error("A pairing issuer continuation is already active on this device");
@@ -954,7 +960,7 @@ async function joinPairing(input: PairCommandOptions & {
   }
   if (
     persisted?.phase === "bootstrap-ready" &&
-    await input.store.bootstrapCompleted(
+    await input.bootstrapProjection.completions.bootstrapCompleted(
       persisted.invitation.issuer.deviceId,
       persisted.invitation.offer.offerId,
     )
@@ -1053,14 +1059,7 @@ async function joinPairing(input: PairCommandOptions & {
 }
 
 async function resumeIssuerPairing(input: {
-  readonly input: PairCommandOptions & {
-    readonly isolatedComposition: boolean;
-    readonly secretStore: SecretStorePort;
-    readonly key: DeviceKey;
-    readonly store: FileMeshBootstrapStore;
-    readonly continuations: FileMeshPairingContinuationStore;
-    readonly writeLine: (line: string) => void;
-  };
+  readonly input: PairingRuntimeInput;
   readonly transport: Socket;
   readonly continuation: Extract<PairingIssuerContinuation, { phase: "commit-ready" }>;
   readonly resume: PairingResumeMessage;
@@ -1106,7 +1105,7 @@ async function resumeIssuerPairing(input: {
     ...(typeof input.sessionKey === "string" ? {} : { sessionKey: input.sessionKey }),
     attempt: continuation.attempt,
   });
-  await input.input.store.acceptTransportPeer({
+  await input.input.bootstrapProjection.transportPeers.acceptTransportPeer({
     identity: continuation.join.device,
     rootCertificatePem: continuation.joinerRootCertificatePem,
   });
@@ -1125,7 +1124,7 @@ async function resumeIssuerPairing(input: {
   if (!isRecord(acknowledged) || acknowledged.t !== "bootstrap-complete") {
     throw new Error("Pairing peer did not acknowledge bootstrap completion");
   }
-  await input.input.store.markBootstrapComplete(
+  await input.input.bootstrapProjection.completions.markBootstrapComplete(
     peerDeviceId,
     continuation.invitation.offer.offerId,
   );
@@ -1143,15 +1142,7 @@ async function resumeIssuerPairing(input: {
 }
 
 async function resumeJoinerPairing(input: {
-  readonly input: PairCommandOptions & {
-    readonly isolatedComposition: boolean;
-    readonly zhixingHome: string;
-    readonly secretStore: SecretStorePort;
-    readonly key: DeviceKey;
-    readonly store: FileMeshBootstrapStore;
-    readonly continuations: FileMeshPairingContinuationStore;
-    readonly writeLine: (line: string) => void;
-  };
+  readonly input: PairingRuntimeInput;
   readonly invitation: PairingInvitation;
   readonly continuation: PairingJoinerContinuation;
 }): Promise<void> {
@@ -1207,15 +1198,7 @@ async function resumeJoinerPairing(input: {
 }
 
 async function completeJoinerBootstrap(input: {
-  readonly input: PairCommandOptions & {
-    readonly isolatedComposition: boolean;
-    readonly zhixingHome: string;
-    readonly secretStore: SecretStorePort;
-    readonly key: DeviceKey;
-    readonly store: FileMeshBootstrapStore;
-    readonly continuations: FileMeshPairingContinuationStore;
-    readonly writeLine: (line: string) => void;
-  };
+  readonly input: PairingRuntimeInput;
   readonly invitation: PairingInvitation;
   readonly committed: PairingCommittedMessage;
   readonly socket: Socket;
@@ -1225,11 +1208,13 @@ async function completeJoinerBootstrap(input: {
     record: input.committed.trustRecord,
     localDeviceId: input.input.key.deviceId,
   });
-  await input.input.store.acceptTransportPeer({
+  await input.input.bootstrapProjection.transportPeers.acceptTransportPeer({
     identity: input.invitation.issuer,
     rootCertificatePem: input.committed.issuerRootCertificatePem,
   });
-  await input.input.store.acceptEndpoint(input.committed.issuerEndpoint);
+  await input.input.bootstrapProjection.endpoints.acceptEndpoint(
+    input.committed.issuerEndpoint,
+  );
   const local = input.committed.trustRecord.members.find((member) =>
     member.device.deviceId === input.input.key.deviceId && member.state === "active");
   if (!local) throw new Error("Pairing trust projection does not contain the local device");
@@ -1256,7 +1241,7 @@ async function completeJoinerBootstrap(input: {
   }, { homeDir: input.input.zhixingHome });
   await completePairingDeviceConfiguration(input.input);
   await reconcileAfterPairing(input.input, "pairing-joiner-committed");
-  await input.input.store.markBootstrapComplete(
+  await input.input.bootstrapProjection.completions.markBootstrapComplete(
     input.invitation.issuer.deviceId,
     input.invitation.offer.offerId,
   );

@@ -5,6 +5,7 @@ import { MESH_ENDPOINT_SERVICE_ID } from "@zhixing/mesh/bootstrap";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
+import { createMeshBootstrapProjectionPorts } from "./mesh-bootstrap-projection.js";
 import type { MeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
 import {
   RecoveryRootEstablishmentRuntime,
@@ -58,11 +59,13 @@ function bootstrap(
     chainHead: { seq: 1, eventDigest: `sha256:${"1".repeat(64)}` },
     signature: "signature",
   } as unknown as HomeTrustRecord;
+  const bootstrapStore = new FileMeshBootstrapStore(root);
   return {
     mode: "trusted-home",
     roles,
     deviceKey: { deviceId: localDeviceId } as never,
-    bootstrapStore: new FileMeshBootstrapStore(root),
+    bootstrapStore,
+    bootstrapProjection: createMeshBootstrapProjectionPorts(bootstrapStore),
     trust,
     configuration: { enabledRoles: roles } as never,
     endpoints: {} as never,

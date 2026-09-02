@@ -18,6 +18,7 @@ import {
   type FirstPartyIngressConnection,
 } from "../serve/first-party-conversation-mesh.js";
 import { FileMeshBootstrapStore } from "../serve/mesh-bootstrap-store.js";
+import { createMeshBootstrapProjectionPorts } from "../serve/mesh-bootstrap-projection.js";
 import { ProductionMeshControlPlane } from "../serve/mesh-control-plane.js";
 import { loadExistingDeviceKey } from "../serve/mesh-device-key.js";
 import { CoreHostUnavailableError } from "./core-host-connection.js";
@@ -45,6 +46,7 @@ export async function createCurrentAnchorSurfaceRpcClient(options: {
   const deviceKey = await loadExistingDeviceKey(secretStore);
   if (!deviceKey) throw new CoreHostUnavailableError("这台设备尚未完成配对");
   const bootstrapStore = new FileMeshBootstrapStore(homeDir, deviceKey);
+  const bootstrapProjection = createMeshBootstrapProjectionPorts(bootstrapStore);
   const trust = await bootstrapStore.loadTrustRecord();
   if (!trust) {
     await bootstrapStore.stopStorageMaintenance();
@@ -62,10 +64,14 @@ export async function createCurrentAnchorSurfaceRpcClient(options: {
       localIdentity: deviceKey,
       trust,
       configuration: validateMeshRoleBootConfig(configuration),
-      endpoints: await bootstrapStore.loadEndpoints(),
-      transportPeers: await bootstrapStore.loadTransportPeers(),
+      endpoints: await bootstrapProjection.endpoints.loadEndpoints(),
+      transportPeers: await bootstrapProjection.transportPeers.loadTransportPeers(),
       secretStore,
-      bootstrapStore,
+      endpointDirectory: bootstrapProjection.endpoints,
+      transportPeerDirectory: bootstrapProjection.transportPeers,
+      trustProjection: Object.freeze({
+        loadTrustRecord: () => bootstrapStore.loadTrustRecord(),
+      }),
       services,
       onTrustReconciled: (record) => client?.reconcileOwner(record),
     });
@@ -94,7 +100,9 @@ export class CurrentAnchorSurfaceRpcClient implements RpcClient {
       ProductionMeshControlPlane,
       "start" | "stop" | "currentTrust" | "connections"
     >,
-    private readonly bootstrapStore: Pick<FileMeshBootstrapStore, "stopStorageMaintenance">,
+    private readonly bootstrapStore: {
+      readonly stopStorageMaintenance: () => Promise<void>;
+    },
   ) {
     const connectionId = nextSurfaceConnectionId++;
     const owner = this;

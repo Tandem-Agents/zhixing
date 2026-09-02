@@ -67,6 +67,7 @@ import {
   registerExecutionSnapshotMeshService,
 } from "./execution-snapshot-mesh.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
+import type { MeshBootstrapProjectionPorts } from "./mesh-bootstrap-projection.js";
 import { FileMeshPairingContinuationStore } from "./mesh-pairing-continuation.js";
 import { ProductionMeshControlPlane } from "./mesh-control-plane.js";
 import { CredentialExposureAuthority } from "./credential-exposure-authority.js";
@@ -316,6 +317,7 @@ export interface MeshRuntimeAssemblyOptions {
   readonly transportPeers: readonly TrustedMeshPeer[];
   readonly localEndpoint?: MeshEndpointDescriptor;
   readonly bootstrapStore: FileMeshBootstrapStore;
+  readonly bootstrapProjection: MeshBootstrapProjectionPorts;
   readonly plannedAnchorIssuerKey?: DeviceKey;
   readonly plannedAnchorPostInstall?: AnchorPostInstallDescriptor;
   readonly authority: AuthorityRuntimeStack;
@@ -784,7 +786,11 @@ export class MeshRuntimeAssembly
       endpoints: options.endpoints,
       transportPeers: options.transportPeers,
       secretStore: options.secretStore,
-      bootstrapStore: options.bootstrapStore,
+      endpointDirectory: options.bootstrapProjection.endpoints,
+      transportPeerDirectory: options.bootstrapProjection.transportPeers,
+      trustProjection: Object.freeze({
+        loadTrustRecord: () => options.bootstrapStore.loadTrustRecord(),
+      }),
       services: this.services,
       terminalOnly: {
         services: this.#terminalOnlyServices,
@@ -2128,7 +2134,10 @@ export class MeshRuntimeAssembly
       return;
     }
     const offerId = continuation.invitation.offer.offerId;
-    await this.options.bootstrapStore.markBootstrapComplete(peerDeviceId, offerId);
+    await this.options.bootstrapProjection.completions.markBootstrapComplete(
+      peerDeviceId,
+      offerId,
+    );
     await this.options.secretStore.delete({
       kind: "rendezvous",
       bindingId: `pairing:${offerId}`,

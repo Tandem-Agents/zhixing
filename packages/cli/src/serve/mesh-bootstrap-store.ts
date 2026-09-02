@@ -62,6 +62,11 @@ import {
 } from "@zhixing/mesh/checkpoint";
 import { validateRecoveryActivationPlan } from "@zhixing/mesh/bootstrap-authority";
 import { pairingOfferDigest } from "@zhixing/mesh/pairing";
+import type {
+  MeshBootstrapCompletionPersistencePort,
+  MeshEndpointDirectoryPersistencePort,
+  MeshTransportPeerDirectoryPersistencePort,
+} from "./mesh-bootstrap-projection.js";
 
 type TrustStreamRecord =
   | { readonly t: "home-trust-event"; readonly event: HomeTrustEvent }
@@ -96,7 +101,12 @@ export interface RecoveryRootActivationReplay {
 }
 
 /** Durable device-domain bootstrap state sharing the authority log's trust stream. */
-export class FileMeshBootstrapStore {
+export class FileMeshBootstrapStore
+  implements
+    MeshEndpointDirectoryPersistencePort,
+    MeshTransportPeerDirectoryPersistencePort,
+    MeshBootstrapCompletionPersistencePort
+{
   readonly #log: FileAuthorityCommitLog;
   readonly #artifacts: FileArtifactStore;
   readonly #endpointFile: string;

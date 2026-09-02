@@ -23,6 +23,10 @@ import path from "node:path";
 import { loadExistingDeviceKey, loadOrCreateDeviceKey } from "./mesh-device-key.js";
 import { FileMeshBootstrapStore } from "./mesh-bootstrap-store.js";
 import {
+  createMeshBootstrapProjectionPorts,
+  type MeshBootstrapProjectionPorts,
+} from "./mesh-bootstrap-projection.js";
+import {
   completePlannedAnchorInstallationBeforeBootstrap,
   type InstalledAuthorityGeneration,
   type PlannedAnchorPostInstallDescriptor,
@@ -39,6 +43,7 @@ export type MeshRuntimeBootstrap =
       readonly roles: readonly ["anchor", "executor"];
       readonly deviceKey: DeviceKey;
       readonly bootstrapStore: FileMeshBootstrapStore;
+      readonly bootstrapProjection: MeshBootstrapProjectionPorts;
       readonly trustedIdentities: readonly DeviceIdentity[];
       readonly authorizedDeviceIds: readonly string[];
     }
@@ -48,6 +53,7 @@ export type MeshRuntimeBootstrap =
       readonly deviceKey: DeviceKey;
       readonly anchorIssuerKey?: DeviceKey;
       readonly bootstrapStore: FileMeshBootstrapStore;
+      readonly bootstrapProjection: MeshBootstrapProjectionPorts;
       readonly trust: HomeTrustRecord;
       readonly configuration: MeshRoleBootConfig;
       readonly endpoints: MeshEndpointDirectory;
@@ -76,6 +82,7 @@ export async function prepareMeshRuntimeBootstrap(input: {
     undefined,
     { storageMaintenance: input.storageMaintenance },
   );
+  const bootstrapProjection = createMeshBootstrapProjectionPorts(bootstrapStore);
   const trustEvents = await bootstrapStore.loadTrustEvents();
   const preRuntimeTrust = await bootstrapStore.loadTrustRecord();
   const trustedIdentities = new Map(
@@ -186,6 +193,7 @@ export async function prepareMeshRuntimeBootstrap(input: {
       roles: ["anchor", "executor"],
       deviceKey,
       bootstrapStore,
+      bootstrapProjection,
       trustedIdentities: [],
       authorizedDeviceIds: [],
     };
@@ -208,7 +216,7 @@ export async function prepareMeshRuntimeBootstrap(input: {
   if (!!trust.recoveryRootPublicKey !== !!trust.recoveryBackupPublicKey) {
     throw new Error("Trusted-home recovery root identity is inconsistent");
   }
-  let endpoints = await bootstrapStore.loadEndpoints();
+  let endpoints = await bootstrapProjection.endpoints.loadEndpoints();
   let localEndpoint: MeshEndpointDescriptor | undefined;
   if (effective.roles.includes("anchor")) {
     const current = endpoints.get(deviceKey.deviceId);
@@ -224,8 +232,8 @@ export async function prepareMeshRuntimeBootstrap(input: {
       localEndpoint = current;
     } else {
       localEndpoint = candidate;
-      await bootstrapStore.acceptEndpoint(localEndpoint);
-      endpoints = await bootstrapStore.loadEndpoints();
+      await bootstrapProjection.endpoints.acceptEndpoint(localEndpoint);
+      endpoints = await bootstrapProjection.endpoints.loadEndpoints();
     }
   }
   return {
@@ -234,10 +242,11 @@ export async function prepareMeshRuntimeBootstrap(input: {
     deviceKey,
     ...(anchorIssuerKey ? { anchorIssuerKey } : {}),
     bootstrapStore,
+    bootstrapProjection,
     trust,
     configuration,
     endpoints,
-    transportPeers: await bootstrapStore.loadTransportPeers(),
+    transportPeers: await bootstrapProjection.transportPeers.loadTransportPeers(),
     // Historical signatures remain verifiable after revocation; live authorization
     // is carried separately so a revoked peer can never regain an active capability.
     trustedIdentities: trust.members.map((member) => member.device),
