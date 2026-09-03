@@ -299,7 +299,7 @@ const assetMaintenanceSurface: AccessSurface = {
 };
 
 /** Authenticated mesh control plane; absent in the no-genesis single-machine topology. */
-const meshSurface: AccessSurface = {
+const createMeshSurface = (): AccessSurface => ({
   name: "mesh-control",
   phase: "pre-server",
   async setup(ctx) {
@@ -381,16 +381,27 @@ const meshSurface: AccessSurface = {
       onError: (error) => console.warn(chalk.yellow(`[mesh] ${error.message}`)),
       ...(ctx.onTrustApplied ? { onTrustApplied: ctx.onTrustApplied } : {}),
     });
-    ctx.lifecycleContributions.acquire("meshRuntime.stop", () => mesh.stop());
-    await mesh.start(ctx.startupLifecycle
-      ? {
-          lifecycleAdmissionClosed: true,
-          recoverAcceptedWork: ctx.startupLifecycle.recoverAcceptedWork,
-        }
-      : {});
-    ctx.meshRuntime = mesh;
+    const preparation = Object.freeze({
+      connections: mesh.connections,
+      advancementEvidence: mesh,
+      assignmentDataPlane: mesh,
+      currentAnchorDeviceId: () => mesh.currentAnchorDeviceId(),
+      plannedCurrentOwnerReady: () => mesh.plannedCurrentOwnerReady(),
+      bindAuthorityCheckpointOwner: (
+        owner: Parameters<MeshRuntimeAssembly["bindAuthorityCheckpointOwner"]>[0],
+      ) => mesh.bindAuthorityCheckpointOwner(owner),
+      start: async (
+        options: Parameters<MeshRuntimeAssembly["start"]>[0],
+      ) => {
+        await mesh.start(options);
+        return mesh;
+      },
+      stop: () => mesh.stop(),
+    });
+    ctx.lifecycleContributions.acquire("meshRuntime.stop", preparation.stop);
+    ctx.meshRuntimePreparation = preparation;
   },
-};
+});
 
 /** Host-owned local/Mesh evidence selector installed after every mechanism exists. */
 const advancementEvidenceTopologyUnit: CoreAssemblyUnit = {
@@ -420,7 +431,9 @@ const advancementEvidenceTopologyUnit: CoreAssemblyUnit = {
               },
             }
           : {}),
-        ...(ctx.meshRuntime ? { remote: ctx.meshRuntime } : {}),
+        ...(ctx.meshRuntimePreparation
+          ? { remote: ctx.meshRuntimePreparation.advancementEvidence }
+          : {}),
       }),
     });
   },
@@ -459,7 +472,9 @@ const losslessDataPlaneSurface: AccessSurface = {
               },
             }
           : {}),
-        ...(ctx.meshRuntime ? { remote: ctx.meshRuntime } : {}),
+        ...(ctx.meshRuntimePreparation
+          ? { remote: ctx.meshRuntimePreparation.assignmentDataPlane }
+          : {}),
       }),
       ...(ctx.jobRelayObligations
         ? { jobRelayObligations: ctx.jobRelayObligations }
@@ -1045,12 +1060,10 @@ const executorJobOwnerStartUnit: CoreAssemblyUnit = {
     ctx.lifecycleContributions.acquire("executorJobOwner.close", () =>
       assembly.close()
     );
-    await assembly.start(ctx.startupLifecycle
-      ? {
-          admissionClosed: true,
-          recoverAcceptedWork: ctx.startupLifecycle.recoverAcceptedWork,
-        }
-      : {});
+    await assembly.start({
+      admissionClosed: true,
+      recoverAcceptedWork: ctx.startupLifecycle?.recoverAcceptedWork ?? true,
+    });
   },
 };
 
@@ -1126,7 +1139,7 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
             ctx.channelHttpRoutes.set(path, handler);
           },
           isCurrentOwner: isCurrentChannelOwner,
-          connectImmediately: isCurrentChannelOwner() && !ctx.startupLifecycle,
+          connectImmediately: false,
         });
         ctx.lifecycleContributions.acquire("channels.dispose", async () => {
           conversationProduct.close();
@@ -1145,7 +1158,7 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
             () => router.refuseNewMessages(),
           );
         }
-        if (ctx.startupLifecycle) router?.refuseNewMessages();
+        router?.refuseNewMessages();
         ctx.channelConnections = {
           ready: result.connectionTask,
           connectConfigured: result.connectConfigured,
@@ -1197,8 +1210,8 @@ const deliverySurface: AccessSurface = {
     ctx.deliveryStack = deliveryStack;
     if (ctx.startupLifecycle) {
       await deliveryStack.lifecycle.restore(ctx.startupLifecycle.delivery);
-      deliveryStack.lifecycle.close();
     }
+    deliveryStack.lifecycle.close();
     deliveryStack.onStatus((notice) => {
       ctx.executionStatusHub?.publish(notice);
     });
@@ -1264,7 +1277,7 @@ export function createAssemblyUnits(
     localConversationOwnerUnit,
     executorJobOwnerUnit,
     assetMaintenanceSurface,
-    meshSurface,
+    createMeshSurface(),
     advancementEvidenceTopologyUnit,
     losslessDataPlaneSurface,
     executorJobOwnerStartUnit,

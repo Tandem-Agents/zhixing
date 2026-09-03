@@ -91,6 +91,7 @@ import { isDaemonChild, resolveHostProcessMode } from "./self-exec.js";
 import { deleteDeviceKeyExact } from "@zhixing/mesh/device-key-store";
 import { protocolDigest } from "@zhixing/core/protocol";
 import { cleanupExecutorDeviceLocalState } from "./device-removal-cleanup.js";
+import { defineDeviceRemovalLifecycleContribution } from "./device-removal-lifecycle-contribution.js";
 import {
   captureManagedHostAdmission,
   coordinateManagedHostTrustTransition,
@@ -198,7 +199,7 @@ export async function runExecutorRole(
   let mesh: MeshRuntimeAssembly | undefined;
   const currentAnchorDeviceId = () =>
     mesh?.currentAnchorDeviceId() ?? initialAnchorDeviceId;
-  let resolveLifecycleShutdown: (() => void) | undefined;
+  let resolveLifecycleShutdown!: () => void;
   const lifecycleShutdown = new Promise<void>((resolve) => {
     resolveLifecycleShutdown = resolve;
   });
@@ -520,6 +521,97 @@ export async function runExecutorRole(
     const executorMeshTrust = new MeshExecutorTopologyTrustState(
       bootstrap.mesh.trust,
     );
+    let removalAdmissionOperationId: string | undefined;
+    let removalBootstrapAdmissionClosed = true;
+    const deviceRemovalLifecycle = defineDeviceRemovalLifecycleContribution({
+      closeAdmission: async (operationId) => {
+        if (
+          removalAdmissionOperationId !== undefined &&
+          removalAdmissionOperationId !== operationId
+        ) {
+          throw new Error("Another device-removal operation owns executor admission");
+        }
+        removalAdmissionOperationId = operationId;
+        jobOwnerAssembly!.pauseAccepting();
+      },
+      captureAcceptedWork: async () => (await jobOwnerAssembly!.acceptedWorkItems())
+        .map((item) => Object.freeze({
+          owner: "remote" as const,
+          id: item.id,
+          revision: item.revision,
+        })),
+      settleAcceptedWork: async ({ operationId, ownerItems }) => {
+        if (removalAdmissionOperationId !== operationId) {
+          throw new Error("Device-removal settlement does not own executor admission");
+        }
+        const frozen = ownerItems
+          .filter((item) => item.owner === "remote")
+          .map(({ id, revision }) => ({ id, revision }));
+        assertAcceptedWorkSubset(
+          await jobOwnerAssembly!.acceptedWorkItems(),
+          frozen,
+          "executor device-removal settlement",
+        );
+        await jobOwnerAssembly!.drain();
+        const after = await jobOwnerAssembly!.acceptedWorkItems();
+        assertAcceptedWorkSubset(after, frozen, "executor device-removal read-back");
+        if (after.length > 0) {
+          throw new Error("Executor job accepted work is not durably settled");
+        }
+        await authority!.executorResourceGovernor.coordinate(async () => undefined);
+      },
+      releaseAdmission: async (operationId) => {
+        if (removalAdmissionOperationId === undefined) return;
+        if (removalAdmissionOperationId !== operationId) {
+          throw new Error("Device-removal release does not own executor admission");
+        }
+        if (!removalBootstrapAdmissionClosed) {
+          jobOwnerAssembly!.resumeAccepting();
+        }
+        removalAdmissionOperationId = undefined;
+      },
+      cleanup: async () => {
+        const current = await loadCurrentManagedServiceState("activate", zhixingHome);
+        const adapter = current.spec
+          ? createManagedServiceAdapter({ storageGovernor: deviceCapacity.storage })
+          : undefined;
+        const expected = current.spec
+          ? await adapter!.inspect(current.spec, new AbortController().signal)
+          : undefined;
+        return cleanupExecutorDeviceLocalState({
+          zhixingHome,
+          secretStore: bootstrap.secretStore,
+          deviceKey: bootstrap.mesh.deviceKey,
+          storageGovernor: deviceCapacity.storage,
+          disasterRecoveryStaging: bootstrap.mesh.disasterRecoveryStaging,
+          unregisterFuture: async () => {
+            if (!current.spec || !adapter || !expected) return;
+            await adapter.unregisterFutureExact(
+              current.spec,
+              expected,
+              new AbortController().signal,
+            );
+          },
+        });
+      },
+      finalizeDeviceKey: async (operationId, identity) => {
+        if (identity.targetDeviceId !== bootstrap.mesh.deviceKey.deviceId) {
+          throw new Error("Device removal key finalizer does not match this executor");
+        }
+        await deleteDeviceKeyExact(bootstrap.secretStore, bootstrap.mesh.deviceKey);
+        return [{
+          kind: "cleanup" as const,
+          digest: protocolDigest("ExecutorRemovalDeviceKeyDeleted", 1, {
+            operationId,
+            deviceId: identity.targetDeviceId,
+            generation: identity.targetDeviceKeyGeneration,
+          }),
+        }];
+      },
+      onRemoved: async () => {
+        resolveLifecycleShutdown();
+      },
+    });
     mesh = new MeshRuntimeAssembly({
       zhixingHome,
       trust: bootstrap.mesh.trust,
@@ -583,100 +675,6 @@ export async function runExecutorRole(
       () => jobOwnerLifecycle.close(),
     );
     executorRoleLifecycle.seal();
-    let removalAdmissionOperationId: string | undefined;
-    await mesh.bindDeviceRemovalLifecycle({
-      closeAdmission: async (operationId) => {
-        if (
-          removalAdmissionOperationId !== undefined &&
-          removalAdmissionOperationId !== operationId
-        ) {
-          throw new Error("Another device-removal operation owns executor admission");
-        }
-        removalAdmissionOperationId = operationId;
-        jobOwnerAssembly!.pauseAccepting();
-      },
-      captureAcceptedWork: async () => (await jobOwnerAssembly!.acceptedWorkItems())
-        .map((item) => Object.freeze({
-          owner: "remote" as const,
-          id: item.id,
-          revision: item.revision,
-        })),
-      settleAcceptedWork: async ({ operationId, ownerItems }) => {
-        if (removalAdmissionOperationId !== operationId) {
-          throw new Error("Device-removal settlement does not own executor admission");
-        }
-        const frozen = ownerItems
-          .filter((item) => item.owner === "remote")
-          .map(({ id, revision }) => ({ id, revision }));
-        assertAcceptedWorkSubset(
-          await jobOwnerAssembly!.acceptedWorkItems(),
-          frozen,
-          "executor device-removal settlement",
-        );
-        await jobOwnerAssembly!.drain();
-        const after = await jobOwnerAssembly!.acceptedWorkItems();
-        assertAcceptedWorkSubset(after, frozen, "executor device-removal read-back");
-        if (after.length > 0) {
-          throw new Error("Executor job accepted work is not durably settled");
-        }
-        await authority!.executorResourceGovernor.coordinate(async () => undefined);
-      },
-      releaseAdmission: async (operationId) => {
-        if (removalAdmissionOperationId === undefined) return;
-        if (removalAdmissionOperationId !== operationId) {
-          throw new Error("Device-removal release does not own executor admission");
-        }
-        jobOwnerAssembly!.resumeAccepting();
-        removalAdmissionOperationId = undefined;
-      },
-      cleanup: async () => {
-        const current = await loadCurrentManagedServiceState("activate", zhixingHome);
-        const adapter = current.spec
-          ? createManagedServiceAdapter({ storageGovernor: deviceCapacity.storage })
-          : undefined;
-        const expected = current.spec
-          ? await adapter!.inspect(current.spec, new AbortController().signal)
-          : undefined;
-        return cleanupExecutorDeviceLocalState({
-          zhixingHome,
-          secretStore: bootstrap.secretStore,
-          deviceKey: bootstrap.mesh.deviceKey,
-          storageGovernor: deviceCapacity.storage,
-          disasterRecoveryStaging: bootstrap.mesh.disasterRecoveryStaging,
-          unregisterFuture: async () => {
-            if (!current.spec || !adapter || !expected) return;
-            await adapter.unregisterFutureExact(
-              current.spec,
-              expected,
-              new AbortController().signal,
-            );
-          },
-        });
-      },
-      finalizeDeviceKey: async (operationId, identity) => {
-        if (identity.targetDeviceId !== bootstrap.mesh.deviceKey.deviceId) {
-          throw new Error("Device removal key finalizer does not match this executor");
-        }
-        await deleteDeviceKeyExact(bootstrap.secretStore, bootstrap.mesh.deviceKey);
-        return [{
-          kind: "cleanup" as const,
-          digest: protocolDigest("ExecutorRemovalDeviceKeyDeleted", 1, {
-            operationId,
-            deviceId: identity.targetDeviceId,
-            generation: identity.targetDeviceKeyGeneration,
-          }),
-        }];
-      },
-      onRemoved: async () => {
-        resolveLifecycleShutdown?.();
-      },
-    });
-    await jobOwnerLifecycle.start(startupStopOperation
-      ? {
-          admissionClosed: true,
-          recoverAcceptedWork: startupStopRecoverAcceptedWork,
-        }
-      : {});
     await localConversationOwner.start(startupStopOperation
       ? {
           lifecycle: {
@@ -687,6 +685,14 @@ export async function runExecutorRole(
           },
         }
       : {});
+    await jobOwnerLifecycle.start(startupStopOperation
+      ? {
+          deviceRemovalLifecycle,
+          admissionClosed: true,
+          recoverAcceptedWork: startupStopRecoverAcceptedWork,
+        }
+      : { deviceRemovalLifecycle });
+    removalBootstrapAdmissionClosed = false;
     const localOwners = new Set<HostStopAcceptedWorkOwner>([
       "conversation",
       "intent",

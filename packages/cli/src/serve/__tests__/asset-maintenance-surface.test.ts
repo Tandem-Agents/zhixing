@@ -18,7 +18,9 @@ const assetMaintenanceSurface = createAssemblyUnits({}).find(
 describe("asset maintenance surface", () => {
   it("is enabled by the server profile and ordered after the authority runtime", () => {
     expect(PROFILES.full.surfaces).toContain("asset-maintenance");
-    const names = createAssemblyUnits({}).map((surface) => surface.name);
+    const names = createAssemblyUnits({}).map(
+      (surface) => surface.name,
+    );
     expect(names.indexOf("asset-maintenance")).toBeGreaterThan(
       names.indexOf("authority-runtime"),
     );

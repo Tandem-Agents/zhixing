@@ -8926,10 +8926,17 @@ export function inspectDeviceLifecycleAssembly(records) {
   const journal = byPath.get("packages/core/src/authority/device-lifecycle-journal.ts");
   const removal = byPath.get("packages/cli/src/serve/device-removal.ts");
   const assembly = byPath.get("packages/cli/src/serve/mesh-runtime-assembly.ts");
+  const contribution = byPath.get(
+    "packages/cli/src/serve/device-removal-lifecycle-contribution.ts",
+  );
+  const access = byPath.get("packages/cli/src/serve/access-surfaces.ts");
   const command = byPath.get("packages/cli/src/serve/command.ts");
   const executor = byPath.get("packages/cli/src/serve/executor-role-runtime.ts");
   const methods = byPath.get("packages/server/src/rpc/methods/index.ts");
-  if (!protocol || !journal || !removal || !assembly || !command || !executor || !methods) {
+  if (
+    !protocol || !journal || !removal || !assembly || !contribution || !access ||
+    !command || !executor || !methods
+  ) {
     return ["device lifecycle production assembly sources are missing"];
   }
   const count = (text, token) => text.split(token).length - 1;
@@ -8945,15 +8952,101 @@ export function inspectDeviceLifecycleAssembly(records) {
     !removal.includes("ownerItems,") ||
     !removal.includes("async resumeBeforeAdmission(): Promise<void>") ||
     !assembly.includes("await this.#deviceRemovalTarget.restoreLocalAdmissionGate()") ||
-    !assembly.includes("await this.#deviceRemovalTarget.resumeBeforeAdmission()") ||
-    !command.includes("await ctx.meshRuntime?.bindDeviceRemovalLifecycle({") ||
-    !executor.includes("await mesh.bindDeviceRemovalLifecycle({") ||
     !executor.includes("const stopCoordinator = new HostStopCoordinator({") ||
     !executor.includes("lifecycleShutdown: stopCoordinator,") ||
     !executor.includes("await waitForExecutorRoleTerminal({") ||
     !executor.includes("server: localConversationServer,") ||
     !executor.includes("deviceRemoved: lifecycleShutdown,")
   ) failures.push("device removal admission, accepted-work or two-root recovery binding drifted");
+  const lifecycleEffects = [
+    "closeAdmission",
+    "captureAcceptedWork",
+    "settleAcceptedWork",
+    "releaseAdmission",
+    "cleanup",
+    "finalizeDeviceKey",
+    "onRemoved",
+  ];
+  const meshStart = assembly.slice(
+    assembly.indexOf("async start(options:"),
+    assembly.indexOf("async stop():"),
+  );
+  const removalResume = meshStart.indexOf(
+    "await this.#deviceRemovalTarget.resumeBeforeAdmission()",
+  );
+  const startupRecovery = meshStart.indexOf(
+    "await this.#recoverStartupState(options.lifecycleAdmissionClosed === true)",
+  );
+  const controlStart = meshStart.indexOf("await this.#startControl()");
+  const targetInstall = meshStart.indexOf(
+    "this.#installDeviceRemovalTarget(options.deviceRemovalLifecycle)",
+  );
+  const anchorAssembly = command.indexOf(
+    'await setupAssemblyUnits(assemblyUnits, ctx, "pre-server")',
+  );
+  const anchorScheduler = command.indexOf(
+    "await installSchedulerGeneration(schedulerRuntime, false)",
+  );
+  const anchorContribution = command.indexOf(
+    "const deviceRemovalLifecycle = defineDeviceRemovalLifecycleContribution({",
+  );
+  const anchorMeshStart = command.indexOf("await preparedMesh.start({");
+  const anchorMeshPublication = command.indexOf("ctx.meshRuntime = activeMesh;");
+  const anchorContributionBlock = command.slice(anchorContribution, anchorMeshStart);
+  const executorContribution = executor.indexOf(
+    "const deviceRemovalLifecycle = defineDeviceRemovalLifecycleContribution({",
+  );
+  const executorMesh = executor.indexOf("mesh = new MeshRuntimeAssembly({");
+  const executorLocalOwnerStart = executor.indexOf("await localConversationOwner.start(");
+  const executorJobOwnerStart = executor.indexOf("await jobOwnerLifecycle.start(");
+  if (
+    lifecycleEffects.some((effect) =>
+      count(contribution, `\"${effect}\",`) !== 1 ||
+      count(contribution, `readonly ${effect}:`) !== 1
+    ) ||
+    !contribution.includes("return Object.freeze({ ...input })") ||
+    contribution.includes("AssemblyContext") ||
+    contribution.includes("MeshRuntimeAssembly") ||
+    contribution.includes("LocalConversationOwner") ||
+    contribution.includes("DeliveryStack") ||
+    !meshStart.includes("readonly deviceRemovalLifecycle: DeviceRemovalLifecycleContribution;") ||
+    lifecycleEffects.some((effect) =>
+      !assembly.includes(`lifecycle.${effect}`)
+    ) ||
+    targetInstall < 0 || removalResume <= targetInstall ||
+    startupRecovery <= removalResume || controlStart <= startupRecovery ||
+    count(command, "defineDeviceRemovalLifecycleContribution({") !== 1 ||
+    count(executor, "defineDeviceRemovalLifecycleContribution({") !== 1 ||
+    anchorAssembly < 0 || anchorScheduler <= anchorAssembly ||
+    anchorContribution <= anchorScheduler || anchorMeshStart <= anchorContribution ||
+    anchorMeshPublication <= anchorMeshStart ||
+    !command.includes("const assemblyUnits = createAssemblyUnits(channelCredentials)") ||
+    !command.includes("const inbound = ctx.inboundRouter === undefined || ctx.inboundRouter === null") ||
+    !command.includes("const jobOwner = ctx.executorJobOwner === undefined") ||
+    !command.includes("const delivery = ctx.deliveryStack === undefined") ||
+    /ctx\.[A-Za-z]+\?\./u.test(anchorContributionBlock) ||
+    !access.includes("ctx.meshRuntimePreparation = preparation;") ||
+    access.includes("ctx.meshRuntime = mesh;") ||
+    count(access, "await mesh.start(") !== 1 ||
+    !access.includes("await mesh.start(options)") ||
+    !access.includes("connectImmediately: false") ||
+    executorContribution < 0 || executorContribution >= executorMesh ||
+    executorLocalOwnerStart <= executorMesh ||
+    executorJobOwnerStart <= executorLocalOwnerStart ||
+    !executor.slice(executorJobOwnerStart, executorJobOwnerStart + 400)
+      .includes("deviceRemovalLifecycle,") ||
+    executor.slice(executorMesh, executorLocalOwnerStart).includes("deviceRemovalLifecycle,") ||
+    [assembly, command, executor].some((source) =>
+      source.includes("bindDeviceRemovalLifecycle") ||
+      source.includes("#deviceRemovalCleanup") ||
+      source.includes("#deviceRemovalRemoved") ||
+      source.includes("#deviceRemovalFinalizeKey") ||
+      source.includes("#deviceRemovalCloseAdmission") ||
+      source.includes("#deviceRemovalCaptureAcceptedWork") ||
+      source.includes("#deviceRemovalSettleAcceptedWork") ||
+      source.includes("#deviceRemovalReleaseAdmission")
+    )
+  ) failures.push("device removal static lifecycle contribution ownership drifted");
   if (
     !assembly.includes("log: options.bootstrapStore.authorityLog(),") ||
     assembly.includes("log: options.authority.executorLog,") ||
@@ -9178,6 +9271,9 @@ export function inspectManagedHostAssembly(records) {
     executorRoot.indexOf("const cleanupFailures: unknown[] = []"),
   );
   const executorMeshConstruction = executorRoot.indexOf("mesh = new MeshRuntimeAssembly({");
+  const executorRemovalContribution = executorRoot.indexOf(
+    "const deviceRemovalLifecycle = defineDeviceRemovalLifecycleContribution({",
+  );
   const executorJobLifecycleConstruction = executorRoot.indexOf(
     "const jobOwnerLifecycle = new ExecutorJobOwnerLifecycle(",
     executorMeshConstruction,
@@ -9186,7 +9282,18 @@ export function inspectManagedHostAssembly(records) {
     '"executorJobOwnerLifecycle.close"',
     executorJobLifecycleConstruction,
   );
-  const firstAwaitAfterExecutorMesh = executorRoot.indexOf("await ", executorMeshConstruction);
+  const firstAwaitAfterExecutorMesh = executorRoot.indexOf(
+    "await ",
+    executorMeshConstruction,
+  );
+  const executorLocalOwnerStart = executorRoot.indexOf(
+    "await localConversationOwner.start(",
+    executorMeshConstruction,
+  );
+  const executorJobOwnerStart = executorRoot.indexOf(
+    "await jobOwnerLifecycle.start(",
+    executorLocalOwnerStart,
+  );
   if (
     count(executorRoleLifecycle, 'owner: "executor-role"') !==
       executorRoleLifecycleIds.length ||
@@ -9202,11 +9309,16 @@ export function inspectManagedHostAssembly(records) {
     count(executorRoot, "executorRoleLifecycle.adoptAuthority(authority.startupCleanup)") !== 1 ||
     count(executorRoot, "executorRoleLifecycle.seal()") !== 1 ||
     count(executorRoot, "await executorRoleLifecycle.close()") !== 1 ||
+    executorRemovalContribution < 0 ||
+    executorRemovalContribution >= executorMeshConstruction ||
     executorMeshConstruction < 0 ||
     executorJobLifecycleConstruction <= executorMeshConstruction ||
     executorJobLifecycleContribution <= executorJobLifecycleConstruction ||
     firstAwaitAfterExecutorMesh <= executorJobLifecycleContribution ||
-    !executorRoot.slice(firstAwaitAfterExecutorMesh).startsWith("await mesh.bindDeviceRemovalLifecycle({") ||
+    executorLocalOwnerStart <= executorJobLifecycleContribution ||
+    executorJobOwnerStart <= executorLocalOwnerStart ||
+    !executorRoot.slice(executorJobOwnerStart, executorJobOwnerStart + 400)
+      .includes("deviceRemovalLifecycle,") ||
     !executorRoleLifecycle.includes("this.#authorityRollback.owns(handle)") ||
     !executorRoleLifecycle.includes("Executor role lifecycle contributions are incomplete") ||
     !executorRoleLifecycle.includes("for (const { id } of EXECUTOR_ROLE_LIFECYCLE_DESCRIPTORS)") ||
@@ -10134,7 +10246,9 @@ export function inspectRecoveryBackupAssembly(records) {
     owner.includes("meshRuntime") ||
     !borrowedPairedTargetConstruction.includes('kind: "available"') ||
     !borrowedPairedTargetConstruction.includes('kind: "runtime-unavailable"') ||
-    !borrowedPairedTargetConstruction.includes("connections: ctx.meshRuntime.connections") ||
+    !borrowedPairedTargetConstruction.includes(
+      "connections: ctx.meshRuntimePreparation.connections",
+    ) ||
     !backup.includes("createOwnedMeshPairedCheckpointTargetSession({") ||
     !disasterCommand.includes("createOwnedMeshPairedCheckpointInventorySession({") ||
     !pairing.includes("createPairingSocketPublishedCheckpointTarget({") ||
@@ -11305,7 +11419,8 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   }
   if (
     count(accessRoot, "isCurrentOwner: isCurrentChannelOwner") !== 1 ||
-    count(accessRoot, "connectImmediately: isCurrentChannelOwner()") !== 1 ||
+    count(accessRoot, "connectImmediately: false") !== 1 ||
+    !command.includes("await channel.connectConfigured()") ||
     count(accessRoot, "connectConfigured: result.connectConfigured") !== 1 ||
     count(accessRoot, "disconnectConfigured: result.disconnectConfigured") !== 1 ||
     count(channels, "isCurrentOwner,") !== 2 ||
@@ -11846,7 +11961,7 @@ export function inspectAdvancementEvidenceTopologyBoundary(records) {
     !context.includes("readonly advancementEvidenceRuntime: AdvancementEvidenceHostBindingPort") ||
     count(access, "ctx.advancementEvidenceRuntime.bind({") !== 1 ||
     count(access, "new AdvancementEvidenceTopologyAdapter({") !== 1 ||
-    !/meshSurface,\r?\n\s+advancementEvidenceTopologyUnit,\r?\n\s+losslessDataPlaneSurface/u.test(
+    !/createMeshSurface\(\),\r?\n\s+advancementEvidenceTopologyUnit,\r?\n\s+losslessDataPlaneSurface/u.test(
       access,
     ) ||
     count(localOwner, "new AdvancementEvidenceTopologyAdapter({") !== 1

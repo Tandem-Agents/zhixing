@@ -118,6 +118,10 @@ import type {
 } from "@zhixing/core/advancement/application";
 import type { NamerConversationRepo } from "./turn-maintenance.js";
 import type { AdvancementEvidenceHostBindingPort } from "./advancement-evidence-topology.js";
+import type { AdvancementEvidenceRemoteDirectory } from "./advancement-evidence-topology.js";
+import type { AssignmentDataPlaneRemoteDirectory } from "./assignment-data-plane-topology.js";
+import type { DeviceRemovalLifecycleContribution } from "./device-removal-lifecycle-contribution.js";
+import type { AuthorityCheckpointOwnerPort } from "@zhixing/mesh/checkpoint-owner";
 
 type ConversationRuntimeStoragePort = Readonly<
   Required<
@@ -131,6 +135,24 @@ type ConversationRuntimeStoragePort = Readonly<
     >
   >
 >;
+
+/** Closed assembly-only Mesh projection. It cannot expose runtime services before start succeeds. */
+export interface MeshRuntimePreparation {
+  readonly connections: MeshConnectionRegistry;
+  readonly advancementEvidence: AdvancementEvidenceRemoteDirectory;
+  readonly assignmentDataPlane: AssignmentDataPlaneRemoteDirectory;
+  readonly currentAnchorDeviceId: () => string;
+  readonly plannedCurrentOwnerReady: () => boolean;
+  readonly bindAuthorityCheckpointOwner: (
+    owner: AuthorityCheckpointOwnerPort | undefined,
+  ) => void;
+  readonly start: (options: {
+    readonly deviceRemovalLifecycle: DeviceRemovalLifecycleContribution;
+    readonly lifecycleAdmissionClosed?: boolean;
+    readonly recoverAcceptedWork?: boolean;
+  }) => Promise<MeshRuntimeAssembly>;
+  readonly stop: () => Promise<void>;
+}
 
 /** 接入面装配阶段 —— 适配真实交织（confirmationBridge 依赖 prepared connections）。 */
 export type SurfacePhase = "pre-server" | "post-server";
@@ -238,6 +260,8 @@ export interface AssemblyContext {
   executorDataPlane?: ExecutorDataPlaneRuntime;
   evidenceHandler?: EvidenceHandlerPort & { stopAccepting(): void };
   meshBootstrap: MeshRuntimeBootstrap;
+  /** Constructed Mesh used only to wire closed pre-start owners. */
+  meshRuntimePreparation?: MeshRuntimePreparation;
   meshRuntime?: MeshRuntimeAssembly;
   executorJobOwnerAssembly?: ExecutorJobOwnerAssembly;
   executorJobOwner?: ExecutorJobOwner;

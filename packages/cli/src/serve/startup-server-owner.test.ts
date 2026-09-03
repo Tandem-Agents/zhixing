@@ -141,6 +141,45 @@ describe("production startup server ownership", () => {
     ).toHaveLength(1);
     expect(location(surfaces, "conversationTransferStaging: createConversationTransferStagingInfrastructure({"))
       .toBeGreaterThan(location(surfaces, "const mesh = new MeshRuntimeAssembly({"));
+    const removalContribution = location(
+      source,
+      "const deviceRemovalLifecycle = defineDeviceRemovalLifecycleContribution({",
+    );
+    const assemblyUnits = location(
+      source,
+      "const assemblyUnits = createAssemblyUnits(channelCredentials)",
+    );
+    expect(assemblyUnits).toBeGreaterThan(location(source, "assemblyContext = ctx;"));
+    expect(assemblyUnits).toBeLessThan(
+      location(source, 'await setupAssemblyUnits(assemblyUnits, ctx, "pre-server")'),
+    );
+    expect(removalContribution).toBeGreaterThan(
+      location(source, "await installSchedulerGeneration(schedulerRuntime, false)"),
+    );
+    expect(removalContribution).toBeLessThan(
+      location(source, "await preparedMesh.start({"),
+    );
+    expect(location(source, "ctx.meshRuntime = activeMesh")).toBeGreaterThan(
+      location(source, "await preparedMesh.start({"),
+    );
+    expect(surfaces).toContain("ctx.meshRuntimePreparation = preparation;");
+    expect(surfaces.match(/await mesh\.start\(/gu)).toHaveLength(1);
+    expect(surfaces).toContain("await mesh.start(options)");
+    expect(surfaces).toContain("connectImmediately: false");
+    for (const finiteAbsence of [
+      "ctx.inboundRouter === undefined || ctx.inboundRouter === null",
+      "ctx.executorJobOwner === undefined",
+      "ctx.localConversationOwner === undefined",
+      "ctx.deliveryStack === undefined",
+      ": EMPTY_REMOVAL_CHANNEL",
+    ]) {
+      expect(source).toContain(finiteAbsence);
+    }
+    const removalBlock = source.slice(
+      removalContribution,
+      location(source, "await preparedMesh.start({"),
+    );
+    expect(removalBlock).not.toMatch(/ctx\.[A-Za-z]+\?\./u);
     const bind = location(source, "const serverBinding = await bindServer");
     expect(bind).toBeLessThan(location(source, "await setupAssemblyUnits(assemblyUnits, ctx, \"pre-server\")"));
     expect(bind).toBeLessThan(location(source, "const stopResume = await stopCoordinator.resumeActive()"));
@@ -324,6 +363,10 @@ describe("production startup server ownership", () => {
     expect(location(source, 'executorRoleLifecycle.acquire("mcpRuntime.close"'))
       .toBeLessThan(location(source, "await mcpRuntime.lifecycle.connect()"));
     const meshConstruction = location(source, "mesh = new MeshRuntimeAssembly({");
+    const removalContribution = location(
+      source,
+      "const deviceRemovalLifecycle = defineDeviceRemovalLifecycleContribution({",
+    );
     const jobLifecycleConstruction = location(
       source,
       "const jobOwnerLifecycle = new ExecutorJobOwnerLifecycle(",
@@ -332,11 +375,20 @@ describe("production startup server ownership", () => {
       source,
       'executorRoleLifecycle.acquire(\n      "executorJobOwnerLifecycle.close",',
     );
-    const firstAwaitAfterMesh = source.indexOf("await ", meshConstruction);
+    const localOwnerStart = location(source, "await localConversationOwner.start(");
+    const jobOwnerStart = location(source, "await jobOwnerLifecycle.start(");
+    expect(removalContribution).toBeLessThan(meshConstruction);
+    expect(source.slice(meshConstruction, jobLifecycleConstruction)).not.toContain(
+      "deviceRemovalLifecycle,",
+    );
     expect(jobLifecycleConstruction).toBeGreaterThan(meshConstruction);
     expect(jobLifecycleContribution).toBeGreaterThan(jobLifecycleConstruction);
-    expect(jobLifecycleContribution).toBeLessThan(firstAwaitAfterMesh);
-    expect(firstAwaitAfterMesh).toBe(location(source, "await mesh.bindDeviceRemovalLifecycle({"));
+    expect(jobLifecycleContribution).toBeLessThan(localOwnerStart);
+    expect(localOwnerStart).toBeLessThan(jobOwnerStart);
+    expect(source.slice(jobOwnerStart, jobOwnerStart + 400)).toContain(
+      "deviceRemovalLifecycle,",
+    );
+    expect(source).not.toContain("bindDeviceRemovalLifecycle");
     const cleanupTail = source.slice(location(source, "const cleanupFailures: unknown[] = []"));
     for (const directCleanup of [
       "await localConversationOwner?.close()",
@@ -370,6 +422,11 @@ describe("production startup server ownership", () => {
       location(source, "async stop():"),
     );
     const deferredRecovery = location(start, "if (options.recoverAcceptedWork !== false)");
+    const removalRecovery = location(
+      start,
+      "await this.#deviceRemovalTarget.resumeBeforeAdmission()",
+    );
+    expect(removalRecovery).toBeLessThan(deferredRecovery);
     expect(deferredRecovery).toBeLessThan(
       location(start, "await this.#recoverStartupState(options.lifecycleAdmissionClosed === true)"),
     );

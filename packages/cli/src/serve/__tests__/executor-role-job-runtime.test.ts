@@ -37,6 +37,7 @@ const {
 
 const toolImplementation = Object.freeze({ create: vi.fn() }) as never;
 const permissionStorage = Object.freeze({ create: vi.fn() }) as never;
+const deviceRemovalLifecycle = Object.freeze({}) as never;
 
 beforeEach(() => {
   runtimeMocks.createAgentRuntime.mockReset();
@@ -184,11 +185,17 @@ describe("executor role job runtime production assembly", () => {
     expect(runtimeMocks.runtimeEnvironmentCreate).toHaveBeenCalledWith({});
   });
 
-  it("starts transport before recovery and closes the owner before transport", async () => {
+  it("makes the owner ready before transport recovery and closes it before transport", async () => {
     const order: string[] = [];
     const owner = {
       start: vi.fn(async () => {
+        order.push("owner-ready");
+      }),
+      recoverAcceptedWorkForLifecycle: vi.fn(async () => {
         order.push("recover");
+      }),
+      resumeAccepting: vi.fn(() => {
+        order.push("owner-resume");
       }),
       stopAccepting: vi.fn(() => {
         order.push("stop-accepting");
@@ -201,6 +208,9 @@ describe("executor role job runtime production assembly", () => {
       start: vi.fn(async () => {
         order.push("transport-start");
       }),
+      resumeAcceptingAfterLifecycle: vi.fn(() => {
+        order.push("transport-resume");
+      }),
       stop: vi.fn(async () => {
         order.push("transport-stop");
       }),
@@ -210,13 +220,16 @@ describe("executor role job runtime production assembly", () => {
       transport as never,
     );
 
-    await lifecycle.start();
+    await lifecycle.start({ deviceRemovalLifecycle });
     await lifecycle.close();
     await lifecycle.close();
 
     expect(order).toEqual([
+      "owner-ready",
       "transport-start",
       "recover",
+      "owner-resume",
+      "transport-resume",
       "stop-accepting",
       "worker-close",
       "transport-stop",
@@ -228,14 +241,17 @@ describe("executor role job runtime production assembly", () => {
   it("rolls back transport and worker when recovery fails", async () => {
     const failure = new Error("recovery failed");
     const owner = {
-      start: vi.fn(async () => {
+      start: vi.fn(async () => undefined),
+      recoverAcceptedWorkForLifecycle: vi.fn(async () => {
         throw failure;
       }),
+      resumeAccepting: vi.fn(),
       stopAccepting: vi.fn(),
       close: vi.fn(async () => undefined),
     };
     const transport = {
       start: vi.fn(async () => undefined),
+      resumeAcceptingAfterLifecycle: vi.fn(),
       stop: vi.fn(async () => undefined),
     };
     const lifecycle = new ExecutorJobOwnerLifecycle(
@@ -243,7 +259,7 @@ describe("executor role job runtime production assembly", () => {
       transport as never,
     );
 
-    await expect(lifecycle.start()).rejects.toBe(failure);
+    await expect(lifecycle.start({ deviceRemovalLifecycle })).rejects.toBe(failure);
     expect(lifecycle.closed).toBe(true);
     expect(owner.stopAccepting).toHaveBeenCalledTimes(1);
     expect(owner.close).toHaveBeenCalledTimes(1);
@@ -253,22 +269,30 @@ describe("executor role job runtime production assembly", () => {
   it("passes the same closed lifecycle projection to transport and job owner", async () => {
     const owner = {
       start: vi.fn(async () => undefined),
+      recoverAcceptedWorkForLifecycle: vi.fn(async () => undefined),
+      resumeAccepting: vi.fn(),
       stopAccepting: vi.fn(),
       close: vi.fn(async () => undefined),
     };
     const transport = {
       start: vi.fn(async () => undefined),
+      resumeAcceptingAfterLifecycle: vi.fn(),
       stop: vi.fn(async () => undefined),
     };
     const lifecycle = new ExecutorJobOwnerLifecycle(owner as never, transport as never);
 
-    await lifecycle.start({ admissionClosed: true, recoverAcceptedWork: false });
+    await lifecycle.start({
+      deviceRemovalLifecycle,
+      admissionClosed: true,
+      recoverAcceptedWork: false,
+    });
 
     expect(owner.start).toHaveBeenCalledWith({
       admissionClosed: true,
       recoverAcceptedWork: false,
     });
     expect(transport.start).toHaveBeenCalledWith({
+      deviceRemovalLifecycle,
       lifecycleAdmissionClosed: true,
       recoverAcceptedWork: false,
     });
@@ -279,6 +303,8 @@ describe("executor role job runtime production assembly", () => {
     const failure = new Error("transport startup failed");
     const owner = {
       start: vi.fn(async () => undefined),
+      recoverAcceptedWorkForLifecycle: vi.fn(async () => undefined),
+      resumeAccepting: vi.fn(),
       stopAccepting: vi.fn(),
       close: vi.fn(async () => undefined),
     };
@@ -286,6 +312,7 @@ describe("executor role job runtime production assembly", () => {
       start: vi.fn(async () => {
         throw failure;
       }),
+      resumeAcceptingAfterLifecycle: vi.fn(),
       stop: vi.fn(async () => undefined),
     };
     const lifecycle = new ExecutorJobOwnerLifecycle(
@@ -293,8 +320,8 @@ describe("executor role job runtime production assembly", () => {
       transport as never,
     );
 
-    await expect(lifecycle.start()).rejects.toBe(failure);
-    expect(owner.start).not.toHaveBeenCalled();
+    await expect(lifecycle.start({ deviceRemovalLifecycle })).rejects.toBe(failure);
+    expect(owner.start).toHaveBeenCalledOnce();
     expect(owner.stopAccepting).toHaveBeenCalledTimes(1);
     expect(owner.close).toHaveBeenCalledTimes(1);
     expect(transport.stop).toHaveBeenCalledTimes(1);

@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-30 Workscene 远端 workspace probe 构造期静态拓扑端口已通过协调者独立复核，等待提交<br>
+> 当前检查点：A6-31 已按协调者反证完成启动恢复时序纠正并通过独立复核，等待提交<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `dffcf688`；A6-29 Conversation executor topology directory 构造期静态接管已提交 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-30 已通过协调者独立复核并等待提交，A6 不得关闭 |
-| 活跃工作包 | `A6-30-workspace-probe-static-topology-port-v1` 已通过协调者独立复核，等待提交 |
-| 下一责任链 | 接受 A6-30 后继续按独立 owner/lifecycle 拆分 Mesh role/surface/lifecycle `bind*`；再按 C02/C03 收口产品依赖、broadcast 与 internal-stop 回填 |
+| 已接受基线 | `562fcbb9`；A6-30 Workscene remote workspace probe 构造期静态端口已提交 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-31 已通过协调者独立复核、等待提交，A6 不得关闭 |
+| 活跃工作包 | `A6-31-device-removal-static-lifecycle-contribution-v1` 已通过协调者独立复核，等待提交 |
+| 下一责任链 | 接受 A6-31 后继续按独立 owner/lifecycle 拆分其余 Mesh `bind*`；再按 C02/C03 收口产品依赖、broadcast 与 internal-stop 回填 |
 | 打开的单向桥 | 无；P06 Rubric 已恢复为 required `readByDigest/put` 有限端口，P07、P09、P11 及 P12 三类 staging 的既有有限 Infrastructure 接管继续有效 |
-| 已失效证据 | A6-15、A6-19 与 A6-21 的聚合结论均不可作为退出证明；A6-29 与待复核 A6-30 分别只恢复 A6-28 E06-C01 的 Conversation executor directory 和 Workscene remote workspace probe 子链，其余 Mesh `bind*`、C02/C03 仍使 A6-21/E06“可变 lazy ref 为零”结论失效；canonical S7 59/59 已能拒绝这两条子链的构造后回填，但不替代剩余 late-binding 审计 |
+| 已失效证据 | A6-15、A6-19 与 A6-21 的聚合结论均不可作为退出证明；A6-29、A6-30 与待复核 A6-31 只分别恢复 A6-28 E06-C01 的 Conversation executor directory、Workscene remote workspace probe 和设备移除 lifecycle 子链；其余 Mesh `bind*`、C02/C03 仍使 A6-21/E06“可变 lazy ref 为零”结论失效。canonical S7 59/59 已能拒绝这三条子链的构造后回填，但不替代剩余 late-binding 审计 |
 | 阻塞/用户决策 | 无用户决策阻塞；完整 distributed-runtime structure 测试仍被既有 A4-10 `runtime-host` 依赖断言阻断，属于 A7 零残留与终验输入 |
 
 ### A0 基线索引
@@ -3065,6 +3065,17 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 行为、旧路与直接证据：workspace catalog 唯一目标、environment grant、resource lease、request/result identity、签名验证、owner accept、remote unavailable 文案、本机探测以及 Workscene create/set-workdir 终态均未改变。Workscene directory、真实 Ed25519 Mesh adapter、Conversation topology directory 与 startup owner 四文件最终 17/17，直接覆盖本机不调用 remote port、远端成功、连接断开、动态 trust revoke、单机拒绝和 entry-last owner；CLI typecheck 与 fresh `pnpm cli:build` 通过。canonical `pnpm s7:lint` 为 59/59 且 registry golden 通过；新增反向 mutation 拒绝 optional port、`meshRuntimeRef` 回流、Host 漏投影、静态 trust 快照、第二 connection owner及 `workspaceProbeForDevice` 旁路。changed-source Biome 与 `git diff --check` 通过，本包不改变 package export/build entry。
 - 失效、状态与下一检查点：若 Workscene remote probe demand/adapter、本机/远端选择、environment probe codec/signature、workspace catalog/lease/owner accept、A6-29 trust 或 connection projection、Anchor Host 构造顺序、Conversation/Mesh 共用对象、single-machine 拒绝角色、activation gate、S7 inspector/mutation 任一变化，只恢复 `A6-30-workspace-probe-static-topology-port-v1` 与 A6-28 E06-C01 的本子结论；A6-29、A6-28 E01～E05、其余 E06-C01 与 C02/C03 不因本包自动恢复。本证据已完成并等待协调者独立复核；A6 与完成度保持 `[ ]`/`6/8`，接受后下一责任链仍只处理其余 Mesh role/surface/lifecycle `bind*`，不得提前进入 C02/C03 或 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立复核：从 Workscene create/set-workdir 生产入口反查本机/远端 probe、Host 构造顺序、共享 connection/trust 投影与 Mesh 旧公开面，确认 required finite port 在 Workscene 发布前完成注入，`meshRuntimeRef`、optional remote callback 和 `workspaceProbeForDevice()` 均已归零；提前取得的 endpoint 仍保持 inactive，未改变 ready/activation 边界。独立运行四文件 17/17、对应 S7 反向 mutation 1/1、CLI typecheck/build、changed-source Biome 与 `git diff --check` 均通过；接受 A6-30，A6 仍保持 `[ ]`。
+
+### A6-31：设备移除生命周期构造期静态贡献
+
+- 基线与唯一责任变化：以已接受 `HEAD 562fcbb9390dec89f8da6295ba12b8403a42da68` 加协调者本文调度记录为进场基线，只处理 A6-28 E06-C01 的设备移除 lifecycle 子链。新增 topology-neutral `DeviceRemovalLifecycleContribution`，以 required、readonly、运行期 exact-key 校验并冻结的有限合同承载 `closeAdmission / captureAcceptedWork / settleAcceptedWork / releaseAdmission / cleanup / finalizeDeviceKey / onRemoved` 七项效果；合同只暴露 operation、不可变 accepted-work item、移除 identity 与 evidence，不导入 `AssemblyContext`、Mesh、LocalConversationOwner 或 Delivery concrete。
+- 两个生产根与恢复顺序：Anchor 的 pre-server `createMeshSurface` 只构造关闭态 Mesh 并发布能力受限的 `MeshRuntimePreparation`，不启动 control、不发布 active `ctx.meshRuntime`；Channel 固定以 `connectImmediately: false` 建立、inbound router 拒新、Delivery lifecycle 关闭、Executor job owner 关闭准入。待 advancement/lossless、job、Channel、Delivery 和 scheduler generation 的实际 owner 均已建立后，组合根一次性选择直接 owner handle；不适用拓扑使用五份显式、有限且冻结的 empty contribution，不在 callback 执行期读取 optional `ctx`。随后唯一 `preparedMesh.start(...)` 才安装 target，依次完成 `resumeBeforeAdmission → startup recovery → control`，成功后才发布 active Mesh 并按既有条件恢复 ingress。Executor-only 则先建立停止 owner 与 local conversation owner，使 job owner 以 paused/未恢复状态就绪，再由 `ExecutorJobOwnerLifecycle` 传入同一 required contribution 启动 Mesh；设备移除恢复完成后才恢复 job accepted-work，最后按 admission 状态恢复 job/Mesh，保持既有 job lifecycle 顺序。
+- 行为保护与旧路退场：七项回调原有 operation identity、accepted-work freeze/settle/read-back、Delivery/Scheduler/Channel/remote drain、managed unregister、本机数据清理、精确 device-key generation 删除、removed 后唯一 Host stop 触发均保持原实现；Mesh 内部同 operation gate、journal、response-loss 重放和 transfer/destroy 终态未改。`bindDeviceRemovalLifecycle()`、七个可选 mutable callback 字段、构造期即启动、active Mesh 提前发布、callback-time optional `ctx` 读取、未绑定运行期异常/no-op fallback 与 Anchor/Executor 两处 post-construction bind 已从本子链生产源码归零；其他 Mesh `bind*`、C02/C03、领域状态与公开协议未进入本包。
+- 直接证据与门禁：device-removal lifecycle contribution、真实 target durable replay、Anchor/Executor production-order、job lifecycle 与相关 surface 八文件共 41/41，覆盖七项 exact-set/frozen handle、缺失/额外/非函数拒绝、durable active removal 仅在依赖就绪后恢复、Anchor staged preparation/唯一 start/成功后发布、Executor local/job/stop owner 就绪与恢复顺序、显式 absent-profile contribution、旧 bind/optional callback 归零。CLI `tsc --noEmit` 与 fresh `pnpm cli:build` 通过。canonical `pnpm s7:lint` 为 59/59 且 registry golden 通过；反向 mutation 拒绝 effect 漏项、Host concrete 泄漏、恢复次序后移、early start、premature active publication、第二 start owner、callback-time optional/no-op owner、生产根漏注入与旧 mutable field/bind 回流，并保持 Advancement/Executor lifecycle 排序约束。changed-source Biome 与 `git diff --check` 通过；本包不改变 package manifest/export/build entry，故未重跑 package-export 门。
+- 失效、状态与下一检查点：若七效应 exact-set/类型、Anchor restricted preparation、owner 就绪/explicit empty selection、唯一 Mesh start/active publication、Executor local/job/stop owner 就绪、`ExecutorRemovalTarget` 回调映射、`resumeBeforeAdmission → startup recovery → control` 顺序、accepted-work/cleanup/key-finalize/Host-stop 语义、S7 inspector/mutation 或上述直接测试任一变化，只恢复 `A6-31-device-removal-static-lifecycle-contribution-v1` 与 A6-28 E06-C01 的本子结论；A6-29、A6-30、A6-28 E01～E05、其余 E06-C01 及 C02/C03 不因本包自动恢复。当前工作包已按协调者反证完成纠正并等待独立复核；A6 与完成度保持 `[ ]`/`6/8`，接受后仍只按独立 owner/lifecycle 处理其余 Mesh `bind*`，不得提前进入 C02/C03 或 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者复核反证：当前 `createAssemblyUnits` 仍按 Mesh → advancement/lossless → executor job start → Channel → Delivery 排列，而 `createMeshSurface.setup()` 在 Mesh 构造后立即 `await mesh.start()`；未完成设备移除会在此时调用 contribution。Anchor contribution 内 `ctx.inboundRouter/ctx.executorJobOwner/ctx.channelConnections/ctx.deliveryStack` 仍以 optional chaining 读取尚未建立的依赖，导致 close/capture/settle/release 可能静默漏做。该形状只是把“尚未绑定”藏进冻结 callback，未满足静态完整依赖和原恢复语义；A6-31 保持未接受并退回原包纠正。
+- 纠正闭包：保留上述反证作为首次实现历史；当前生产链已以 restricted preparation + late single start 取代 early start，以启动前 direct-handle/explicit-empty 静态选择取代 callback-time optional owner lookup，并以 Executor owner-ready → Mesh device-removal recovery → job accepted-work recovery 的可执行顺序恢复原 lifecycle 语义。直接测试和 S7 反向 mutation 均能在恢复首次实现时失败；本证据因此恢复为等待协调者复核，而不宣称恢复 A6 其余失效结论。
+- 协调者独立复核：重新沿 Anchor pre-server 组合、scheduler generation、设备移除七效应、Mesh target 安装/恢复/发布以及 Executor local/job/stop owner 启动链逐段核对，确认 active Mesh 只在全部实际 owner 就绪且 `resumeBeforeAdmission → startup recovery → control` 成功后发布；不适用职责由组合期显式冻结 empty contribution 表达，callback 执行期不再读取 optional `ctx` 或把未安装伪装成 no-op。独立运行八文件直接回归和 canonical S7，均完整结束，`git diff --check` 通过；接受 A6-31，A6 仍保持 `[ ]`。
 
 ## 十、用户提示词
 

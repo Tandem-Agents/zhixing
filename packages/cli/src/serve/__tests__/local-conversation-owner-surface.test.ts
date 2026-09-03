@@ -19,7 +19,9 @@ afterEach(() => {
 
 describe("local conversation owner production surface", () => {
   it("is an internal core unit immediately after the anchor conversation owner", () => {
-    const names = createAssemblyUnits({}).map((candidate) => candidate.name);
+    const names = createAssemblyUnits({}).map(
+      (candidate) => candidate.name,
+    );
     expect(PROFILES.full.surfaces).not.toContain("local-conversation-owner");
     expect(unit.kind).toBe("core");
     expect(unit.phase).toBe("pre-server");

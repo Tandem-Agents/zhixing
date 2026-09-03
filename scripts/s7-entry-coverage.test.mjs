@@ -3779,7 +3779,9 @@ test("device lifecycle stays on one journal, two production roots and local-only
     "packages/core/src/protocol/device-lifecycle.ts",
     "packages/core/src/authority/device-lifecycle-journal.ts",
     "packages/cli/src/serve/device-removal.ts",
+    "packages/cli/src/serve/device-removal-lifecycle-contribution.ts",
     "packages/cli/src/serve/mesh-runtime-assembly.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/executor-role-runtime.ts",
     "packages/server/src/rpc/methods/index.ts",
@@ -3801,10 +3803,57 @@ test("device lifecycle stays on one journal, two production roots and local-only
   );
   assert.match(
     inspectDeviceLifecycleAssembly(mutate(
-      "packages/cli/src/serve/executor-role-runtime.ts",
-      (text) => text.replace("await mesh.bindDeviceRemovalLifecycle({", "void mesh.bindDeviceRemovalLifecycle({"),
+      "packages/cli/src/serve/device-removal-lifecycle-contribution.ts",
+      (text) => text.replace('  "onRemoved",\n', ""),
     )).join("\n"),
-    /two-root recovery binding drifted/,
+    /static lifecycle contribution ownership drifted/,
+  );
+  assert.match(
+    inspectDeviceLifecycleAssembly(mutate(
+      "packages/cli/src/serve/device-removal-lifecycle-contribution.ts",
+      (text) => `${text}\ntype ConcreteHostLeak = LocalConversationOwnerAssembly;\n`,
+    )).join("\n"),
+    /static lifecycle contribution ownership drifted/,
+  );
+  assert.match(
+    inspectDeviceLifecycleAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "      await this.#deviceRemovalTarget.resumeBeforeAdmission();\n      if (options.recoverAcceptedWork !== false) {",
+        "      if (options.recoverAcceptedWork !== false) {",
+      ),
+    )).join("\n"),
+    /static lifecycle contribution ownership drifted/,
+  );
+  assert.match(
+    inspectDeviceLifecycleAssembly(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "    ctx.meshRuntimePreparation = preparation;",
+        "    ctx.meshRuntime = mesh;",
+      ),
+    )).join("\n"),
+    /static lifecycle contribution ownership drifted/,
+  );
+  assert.match(
+    inspectDeviceLifecycleAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "const inbound = ctx.inboundRouter === undefined || ctx.inboundRouter === null",
+        "const inbound = ctx.inboundRouter === undefined || ctx.inboundRouter === undefined",
+      ),
+    )).join("\n"),
+    /static lifecycle contribution ownership drifted/,
+  );
+  assert.match(
+    inspectDeviceLifecycleAssembly(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "    ctx.meshRuntimePreparation = preparation;",
+        "    ctx.meshRuntimePreparation = preparation;\n    await mesh.start({});",
+      ),
+    )).join("\n"),
+    /static lifecycle contribution ownership drifted/,
   );
   assert.match(
     inspectDeviceLifecycleAssembly(mutate(

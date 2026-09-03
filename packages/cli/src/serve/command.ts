@@ -242,6 +242,7 @@ import {
   managedServiceDefinitionDigest,
 } from "./managed-service.js";
 import { cleanupExecutorDeviceLocalState } from "./device-removal-cleanup.js";
+import { defineDeviceRemovalLifecycleContribution } from "./device-removal-lifecycle-contribution.js";
 import { loadExecutorRemovalLifecycleDecision } from "./device-removal.js";
 import {
   commitCurrentDeviceRetirementTransaction,
@@ -282,6 +283,40 @@ import {
 } from "./workscene-remote-workspace-probe.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
+
+/** Explicit finite contributions for profiles where the corresponding surface is absent. */
+const EMPTY_REMOVAL_INBOUND = Object.freeze({
+  refuseNewMessages: () => undefined,
+  drainAcceptedMessages: async () => undefined,
+  resumeNewMessages: () => undefined,
+});
+const EMPTY_REMOVAL_JOB_OWNER = Object.freeze({
+  pauseAccepting: () => undefined,
+  acceptedWorkItems: async () => [],
+  drain: async () => undefined,
+  recoverAcceptedWorkForLifecycle: async () => undefined,
+  resumeAccepting: () => undefined,
+});
+const EMPTY_REMOVAL_CHANNEL = Object.freeze({
+  statuses: () => [],
+  suspendConfigured: async () => undefined,
+  disconnectConfigured: async () => undefined,
+  resumeConfigured: async () => undefined,
+  connectConfigured: async () => undefined,
+});
+const EMPTY_REMOVAL_DELIVERY = Object.freeze({
+  capture: async () => [],
+  install: async (_input: unknown) => undefined,
+  read: async (_operationId: string) => [],
+  close: () => undefined,
+  seal: async (_operationId: string) => undefined,
+  settle: async (_input: unknown) => undefined,
+  release: async (_operationId: string) => undefined,
+  resume: async () => undefined,
+});
+const EMPTY_REMOVAL_LOCAL_OWNER = Object.freeze({
+  recoverAcceptedWorkForLifecycle: async () => undefined,
+});
 
 export interface ServeOptions {
   port?: number;
@@ -700,7 +735,6 @@ async function runServerProcess(
   });
 
   const durableInteractions = new DurableConversationInteractionObserver();
-  const assemblyUnits = createAssemblyUnits(channelCredentials);
   const advancementEvidenceRuntime = new AdvancementEvidenceHostBinding();
   const {
     controller: advancementController,
@@ -976,6 +1010,11 @@ async function runServerProcess(
     ...(startupLifecycle ? { startupLifecycle } : {}),
   };
   assemblyContext = ctx;
+  let startupLifecycleFrozenRecoveryStarted = startupLifecycle?.recoverAcceptedWork ?? true;
+  let localRetirementCompletedBeforeServerStart = false;
+  let removalAdmissionOperationId: string | undefined;
+  let removalBootstrapAdmissionClosed = true;
+  const assemblyUnits = createAssemblyUnits(channelCredentials);
 
   // pre-server 接入面：MCP（connectAll）/ 会话执行面 / 无损数据面 / 通道门面 / 投递栈。
   // 产物写回 ctx.conversations / losslessDataPlane / channels / inboundRouter / deliveryStack。
@@ -988,10 +1027,10 @@ async function runServerProcess(
     }).directory,
     mesh: ctx.meshBootstrap,
     pairedTargets: createBorrowedMeshPairedCheckpointTargetSessions(
-      ctx.meshRuntime
+      ctx.meshRuntimePreparation
         ? {
             kind: "available",
-            connections: ctx.meshRuntime.connections,
+            connections: ctx.meshRuntimePreparation.connections,
             storageMaintenance: ctx.storageMaintenance,
           }
         : {
@@ -1022,7 +1061,7 @@ async function runServerProcess(
     hostShellLifecycle.acquireCheckpointOwner(ctx.authorityCheckpointOwner);
   }
   await ctx.authorityCheckpointOwner?.start();
-  ctx.meshRuntime?.bindAuthorityCheckpointOwner(ctx.authorityCheckpointOwner);
+  ctx.meshRuntimePreparation?.bindAuthorityCheckpointOwner(ctx.authorityCheckpointOwner);
   authorityRuntimeRef.current = ctx.authorityRuntime;
   conversationsRef.current = ctx.conversations ?? null;
   await worksceneDirectory.recover();
@@ -1109,18 +1148,17 @@ async function runServerProcess(
   // Anchor 是 scheduler/job 唯一 owner。非 anchor 拓扑不装 timer、journal
   // recovery 或兼容迁移器，schedule 产品入口保持明确不可用。
   const schedulerHostLifecycle = new AnchorSchedulerHostLifecycle(schedulerApplication);
-  const settleScheduleForTransfer = async (): Promise<void> => {
+  async function settleScheduleForTransfer(): Promise<void> {
     await schedulerApplication.settleAcceptedWork({
       strategy: "drain",
       frozen: await schedulerApplication.captureAcceptedWork(),
     });
-  };
+  }
   let adoptionReview: PostAdoptionReviewCoordinator | undefined;
   let schedulerCleanup: ReturnType<StartupRollback["register"]> | undefined;
-  let startupLifecycleFrozenRecoveryStarted = startupLifecycle?.recoverAcceptedWork ?? true;
-  const recoverStartupLifecycleAcceptedWork = async (
+  async function recoverStartupLifecycleAcceptedWork(
     sources: readonly DeliveryLifecycleSourcePermit[],
-  ): Promise<void> => {
+  ): Promise<void> {
     if (!startupLifecycle || startupLifecycleFrozenRecoveryStarted) return;
     startupLifecycleFrozenRecoveryStarted = true;
     try {
@@ -1137,7 +1175,7 @@ async function runServerProcess(
       startupLifecycleFrozenRecoveryStarted = false;
       throw error;
     }
-  };
+  }
   if (ctx.enabledRoles.includes("anchor")) {
     if (
       !ctx.authorityRuntime ||
@@ -1263,6 +1301,248 @@ async function runServerProcess(
       });
     };
     await installSchedulerGeneration(schedulerRuntime, false);
+
+    const preparedMesh = ctx.meshRuntimePreparation;
+    if (preparedMesh) {
+      const authority = ctx.authorityRuntime;
+      const channelCoordinator = ctx.channelCoordinator;
+      const jobRelays = ctx.jobRelayObligations;
+      if (!authority || !channelCoordinator || !jobRelays) {
+        throw new Error(
+          "Mesh device-removal recovery requires authority, data-plane, and relay owners",
+        );
+      }
+      const inbound = ctx.inboundRouter === undefined || ctx.inboundRouter === null
+        ? EMPTY_REMOVAL_INBOUND
+        : ctx.inboundRouter;
+      const jobOwner = ctx.executorJobOwner === undefined
+        ? EMPTY_REMOVAL_JOB_OWNER
+        : ctx.executorJobOwner;
+      const localOwner = ctx.localConversationOwner === undefined
+        ? EMPTY_REMOVAL_LOCAL_OWNER
+        : ctx.localConversationOwner;
+      const delivery = ctx.deliveryStack === undefined
+        ? EMPTY_REMOVAL_DELIVERY
+        : ctx.deliveryStack.lifecycle;
+      const channel = ctx.channelConnections && ctx.channelStatuses
+        ? Object.freeze({
+            statuses: ctx.channelStatuses,
+            suspendConfigured: ctx.channelConnections.suspendConfigured,
+            disconnectConfigured: ctx.channelConnections.disconnectConfigured,
+            resumeConfigured: ctx.channelConnections.resumeConfigured,
+            connectConfigured: ctx.channelConnections.connectConfigured,
+          })
+        : EMPTY_REMOVAL_CHANNEL;
+      const captureExternal = async (
+        owner: "remote" | "channel" | "scheduler" | "delivery",
+        _operationId: string,
+      ): Promise<readonly HostStopAcceptedWorkItem[]> => {
+        if (owner === "remote") {
+          const relay = (await jobRelays.listOpen()).map((opening) => ({
+            id: `relay:${opening.assignmentId}`,
+            revision: opening.sourceRevision,
+          }));
+          const local = (await jobOwner.acceptedWorkItems()).map((item) => ({
+            id: `local:${item.id}`,
+            revision: item.revision,
+          }));
+          return [...relay, ...local].sort((left, right) =>
+            left.id.localeCompare(right.id, "en-US"));
+        }
+        if (owner === "channel") {
+          return channel.statuses()
+            .filter((status) => status.state !== "disconnected")
+            .map((status) => ({
+              id: status.channelId,
+              revision: protocolDigest("HostStopChannel", 1, {
+                channelId: status.channelId,
+              }),
+            }));
+        }
+        if (owner === "scheduler") {
+          return schedulerApplication.captureAcceptedWork();
+        }
+        return delivery.capture();
+      };
+      const recoverFrozenOwners = async (
+        sources: readonly DeliveryLifecycleSourcePermit[],
+      ): Promise<void> => {
+        if (!startupLifecycle || startupLifecycleFrozenRecoveryStarted) return;
+        startupLifecycleFrozenRecoveryStarted = true;
+        try {
+          await localOwner.recoverAcceptedWorkForLifecycle();
+          await jobOwner.recoverAcceptedWorkForLifecycle();
+          await channelCoordinator.recover();
+          await schedulerApplication.recoverAcceptedWork(
+            sources
+              .filter((source) => source.owner === "scheduler")
+              .map(({ id, revision }) => ({ id, revision })),
+          );
+        } catch (error) {
+          startupLifecycleFrozenRecoveryStarted = false;
+          throw error;
+        }
+      };
+      const deviceRemovalLifecycle = defineDeviceRemovalLifecycleContribution({
+        closeAdmission: async (operationId) => {
+          if (
+            removalAdmissionOperationId !== undefined &&
+            removalAdmissionOperationId !== operationId
+          ) {
+            throw new Error("Another device-removal operation owns external admission");
+          }
+          removalAdmissionOperationId = operationId;
+          inbound.refuseNewMessages();
+          jobOwner.pauseAccepting();
+          await channel.suspendConfigured();
+          schedulerApplication.closeAdmission();
+          delivery.close();
+        },
+        captureAcceptedWork: async (operationId) => {
+          const items = [] as Array<{
+            owner: "remote" | "channel" | "scheduler" | "delivery";
+            id: string;
+            revision: string;
+          }>;
+          for (const owner of ["remote", "channel", "scheduler", "delivery"] as const) {
+            for (const item of await captureExternal(owner, operationId)) {
+              items.push({ owner, ...item });
+            }
+          }
+          return Object.freeze(items.sort((left, right) =>
+            `${left.owner}:${left.id}`.localeCompare(
+              `${right.owner}:${right.id}`,
+              "en-US",
+            )));
+        },
+        settleAcceptedWork: async ({ operationId, ownerItems }) => {
+          if (removalAdmissionOperationId !== operationId) {
+            throw new Error("Device-removal settlement does not own external admission");
+          }
+          const sources = deliveryLifecycleSourcesFromOwnerItems(ownerItems);
+          await delivery.install({
+            operationId,
+            sources,
+            deliveries: ownerItems
+              .filter((item) => item.owner === "delivery")
+              .map(({ id, revision }) => ({ id, revision })),
+          });
+          await recoverFrozenOwners(sources);
+          for (const owner of ["remote", "channel", "scheduler", "delivery"] as const) {
+            const frozen = ownerItems
+              .filter((item) => item.owner === owner)
+              .map(({ id, revision }) => ({ id, revision }));
+            const current = owner === "delivery"
+              ? await delivery.read(operationId)
+              : await captureExternal(owner, operationId);
+            if (owner !== "delivery") {
+              assertAcceptedWorkSubset(
+                current,
+                frozen,
+                `device-removal ${owner} settlement`,
+              );
+            }
+            if (owner === "remote") {
+              await inbound.drainAcceptedMessages();
+              await jobOwner.drain();
+            } else if (owner === "channel") {
+              await channel.disconnectConfigured();
+            } else if (owner === "scheduler") {
+              await settleScheduleForTransfer();
+            } else {
+              await delivery.seal(operationId);
+              await delivery.settle({
+                operationId,
+                strategy: "drain",
+                timeoutMs: 30_000,
+              });
+            }
+            const after = owner === "delivery"
+              ? await delivery.read(operationId)
+              : await captureExternal(owner, operationId);
+            if (owner !== "delivery") {
+              assertAcceptedWorkSubset(
+                after,
+                frozen,
+                `device-removal ${owner} read-back`,
+              );
+            }
+            if (after.length !== 0) {
+              throw new Error(`Device-removal ${owner} accepted work is not settled`);
+            }
+          }
+          await authority.resourceGovernor.coordinate(async () => undefined);
+        },
+        releaseAdmission: async (operationId) => {
+          if (removalAdmissionOperationId === undefined) return;
+          if (removalAdmissionOperationId !== operationId) {
+            throw new Error("Device-removal release does not own external admission");
+          }
+          await delivery.release(operationId);
+          if (!removalBootstrapAdmissionClosed) {
+            await delivery.resume();
+            schedulerApplication.resumeAdmission();
+            jobOwner.resumeAccepting();
+            inbound.resumeNewMessages();
+            await channel.resumeConfigured();
+          }
+          removalAdmissionOperationId = undefined;
+        },
+        cleanup: cleanupLocalDevice,
+        finalizeDeviceKey: async (operationId, identity) => {
+          const expectedGeneration = protocolDigest("DeviceKeyGeneration", 1, {
+            deviceId: bootstrap.mesh.deviceKey.deviceId,
+            publicKey: bootstrap.mesh.deviceKey.publicKey,
+          });
+          if (
+            identity.targetDeviceId !== bootstrap.mesh.deviceKey.deviceId ||
+            identity.targetDeviceKeyGeneration !== expectedGeneration
+          ) {
+            throw new Error(
+              "Device removal key finalizer does not own the frozen key generation",
+            );
+          }
+          await deleteDeviceKeyExact(bootstrap.secretStore, bootstrap.mesh.deviceKey);
+          return [{
+            kind: "cleanup" as const,
+            digest: protocolDigest("ExecutorRemovalDeviceKeyDeleted", 1, {
+              operationId,
+              targetDeviceId: identity.targetDeviceId,
+              targetDeviceKeyGeneration: identity.targetDeviceKeyGeneration,
+            }),
+          }];
+        },
+        onRemoved: requestRemovedDeviceStop,
+      });
+      const activeMesh = await preparedMesh.start({
+        deviceRemovalLifecycle,
+        lifecycleAdmissionClosed: true,
+        recoverAcceptedWork: startupLifecycle?.recoverAcceptedWork ?? true,
+      });
+      ctx.meshRuntime = activeMesh;
+      delete ctx.meshRuntimePreparation;
+      removalBootstrapAdmissionClosed = false;
+      if (!startupLifecycle) {
+        await delivery.resume();
+        schedulerApplication.resumeAdmission();
+        jobOwner.resumeAccepting();
+        activeMesh.resumeAcceptingAfterLifecycle();
+        inbound.resumeNewMessages();
+        if (
+          activeMesh.currentAnchorDeviceId() === bootstrap.mesh.deviceKey.deviceId &&
+          activeMesh.plannedCurrentOwnerReady()
+        ) {
+          await channel.connectConfigured();
+        }
+      }
+    }
+    if (!preparedMesh && !startupLifecycle) {
+      await ctx.deliveryStack?.lifecycle.resume();
+      schedulerApplication.resumeAdmission();
+      ctx.executorJobOwner?.resumeAccepting();
+      ctx.inboundRouter?.resumeNewMessages();
+      await ctx.channelConnections?.connectConfigured();
+    }
     ctx.meshRuntime?.bindPlannedAnchorLifecycle({
       stopAccepting: async () => {
         ctx.inboundRouter?.refuseNewMessages();
@@ -1400,10 +1680,10 @@ async function runServerProcess(
         startedAt: processStartedAt,
         endpointLock: stopEndpointLock,
       };
-  const captureStopAcceptedWork = async (
+  async function captureStopAcceptedWork(
     owner: keyof HostStopAcceptedWorkPorts,
     operationId: string,
-  ) => {
+  ) {
     const localOwners = new Set(["conversation", "intent", "final", "assignment", "lease", "permit"]);
     if (localOwners.has(owner) && ctx.localConversationOwner) {
       return ctx.localConversationOwner.hostStopAcceptedWorkItems(
@@ -1447,7 +1727,7 @@ async function runServerProcess(
       return ctx.deliveryStack?.lifecycle.capture() ?? [];
     }
     return [];
-  };
+  }
   const assertStopAcceptedWorkSettled = async (
     owner: keyof HostStopAcceptedWorkPorts,
     operationId: string,
@@ -1734,8 +2014,7 @@ async function runServerProcess(
     delete ctx.startupLifecycle;
     managedHostStopping = false;
   }
-  let localRetirementCompletedBeforeServerStart = false;
-  const cleanupLocalDevice = async () => {
+  async function cleanupLocalDevice() {
     const current = await loadCurrentManagedServiceState("activate", zhixingHome);
     const adapter = current.spec
       ? createManagedServiceAdapter({ storageGovernor: deviceCapacity.storage })
@@ -1758,8 +2037,8 @@ async function runServerProcess(
         );
       },
     });
-  };
-  const requestRemovedDeviceStop = async () => {
+  }
+  async function requestRemovedDeviceStop() {
     const stop = anchorInternalStop.current;
     if (stop) {
       await requestAnchorInternalStop({
@@ -1769,130 +2048,11 @@ async function runServerProcess(
       return;
     }
     localRetirementCompletedBeforeServerStart = true;
-  };
+  }
   const finishLocalRetirement = async () => {
     await deleteDeviceKey(bootstrap.secretStore, bootstrap.mesh.deviceKey.deviceId);
     await requestRemovedDeviceStop();
   };
-  const finishRemovedDevice = requestRemovedDeviceStop;
-  let removalAdmissionOperationId: string | undefined;
-  await ctx.meshRuntime?.bindDeviceRemovalLifecycle({
-    closeAdmission: async (operationId) => {
-      if (
-        removalAdmissionOperationId !== undefined &&
-        removalAdmissionOperationId !== operationId
-      ) {
-        throw new Error("Another device-removal operation owns external admission");
-      }
-      removalAdmissionOperationId = operationId;
-      ctx.inboundRouter?.refuseNewMessages();
-      ctx.executorJobOwner?.pauseAccepting();
-      await ctx.channelConnections?.suspendConfigured();
-      schedulerApplication.closeAdmission();
-      ctx.deliveryStack?.lifecycle.close();
-    },
-    captureAcceptedWork: async (operationId) => {
-      const items = [] as Array<{
-        owner: "remote" | "channel" | "scheduler" | "delivery";
-        id: string;
-        revision: string;
-      }>;
-      for (const owner of ["remote", "channel", "scheduler", "delivery"] as const) {
-        for (const item of await captureStopAcceptedWork(owner, operationId)) {
-          items.push({ owner, ...item });
-        }
-      }
-      return Object.freeze(items.sort((left, right) =>
-        `${left.owner}:${left.id}`.localeCompare(`${right.owner}:${right.id}`, "en-US")));
-    },
-    settleAcceptedWork: async ({ operationId, ownerItems }) => {
-      if (removalAdmissionOperationId !== operationId) {
-        throw new Error("Device-removal settlement does not own external admission");
-      }
-      await ctx.deliveryStack?.lifecycle.install({
-        operationId,
-        sources: deliveryLifecycleSourcesFromOwnerItems(ownerItems),
-        deliveries: ownerItems
-          .filter((item) => item.owner === "delivery")
-          .map(({ id, revision }) => ({ id, revision })),
-      });
-      await recoverStartupLifecycleAcceptedWork(
-        deliveryLifecycleSourcesFromOwnerItems(ownerItems),
-      );
-      for (const owner of ["remote", "channel", "scheduler", "delivery"] as const) {
-        const frozen = ownerItems
-          .filter((item) => item.owner === owner)
-          .map(({ id, revision }) => ({ id, revision }));
-        const current = owner === "delivery"
-          ? await ctx.deliveryStack?.lifecycle.read(operationId) ?? []
-          : await captureStopAcceptedWork(owner, operationId);
-        if (owner !== "delivery") {
-          assertAcceptedWorkSubset(current, frozen, `device-removal ${owner} settlement`);
-        }
-        if (owner === "remote") {
-          await ctx.inboundRouter?.drainAcceptedMessages();
-          await ctx.executorJobOwner?.drain();
-        } else if (owner === "channel") {
-          await ctx.channelConnections?.disconnectConfigured();
-        } else if (owner === "scheduler") {
-          await settleScheduleForTransfer();
-        } else {
-          await ctx.deliveryStack?.lifecycle.seal(operationId);
-          await ctx.deliveryStack?.lifecycle.settle({
-            operationId,
-            strategy: "drain",
-            timeoutMs: 30_000,
-          });
-        }
-        const after = owner === "delivery"
-          ? await ctx.deliveryStack?.lifecycle.read(operationId) ?? []
-          : await captureStopAcceptedWork(owner, operationId);
-        if (owner !== "delivery") {
-          assertAcceptedWorkSubset(after, frozen, `device-removal ${owner} read-back`);
-        }
-        if (after.length !== 0) {
-          throw new Error(`Device-removal ${owner} accepted work is not settled`);
-        }
-      }
-      await ctx.authorityRuntime?.resourceGovernor.coordinate(async () => undefined);
-    },
-    releaseAdmission: async (operationId) => {
-      if (removalAdmissionOperationId === undefined) return;
-      if (removalAdmissionOperationId !== operationId) {
-        throw new Error("Device-removal release does not own external admission");
-      }
-      await ctx.deliveryStack?.lifecycle.release(operationId);
-      await ctx.deliveryStack?.lifecycle.resume();
-      schedulerApplication.resumeAdmission();
-      ctx.executorJobOwner?.resumeAccepting();
-      ctx.inboundRouter?.resumeNewMessages();
-      await ctx.channelConnections?.resumeConfigured();
-      removalAdmissionOperationId = undefined;
-    },
-    cleanup: cleanupLocalDevice,
-    finalizeDeviceKey: async (operationId, identity) => {
-      const expectedGeneration = protocolDigest("DeviceKeyGeneration", 1, {
-        deviceId: bootstrap.mesh.deviceKey.deviceId,
-        publicKey: bootstrap.mesh.deviceKey.publicKey,
-      });
-      if (
-        identity.targetDeviceId !== bootstrap.mesh.deviceKey.deviceId ||
-        identity.targetDeviceKeyGeneration !== expectedGeneration
-      ) {
-        throw new Error("Device removal key finalizer does not own the frozen key generation");
-      }
-      await deleteDeviceKeyExact(bootstrap.secretStore, bootstrap.mesh.deviceKey);
-      return [{
-        kind: "cleanup" as const,
-        digest: protocolDigest("ExecutorRemovalDeviceKeyDeleted", 1, {
-          operationId,
-          targetDeviceId: identity.targetDeviceId,
-          targetDeviceKeyGeneration: identity.targetDeviceKeyGeneration,
-        }),
-      }];
-    },
-    onRemoved: finishRemovedDevice,
-  });
   const uninstallIssuerKey = bootstrap.mesh.mode === "trusted-home" &&
     bootstrap.mesh.trust.issuer.deviceId === bootstrap.mesh.deviceKey.deviceId
     ? bootstrap.mesh.anchorIssuerKey ?? bootstrap.mesh.deviceKey

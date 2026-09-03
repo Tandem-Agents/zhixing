@@ -14,7 +14,9 @@ const startUnit = createAssemblyUnits({}).find(
 
 describe("executor job owner production surface", () => {
   it("is a mandatory pre-server composition unit between the ledger and adapters", () => {
-    const names = createAssemblyUnits({}).map((candidate) => candidate.name);
+    const names = createAssemblyUnits({}).map(
+      (candidate) => candidate.name,
+    );
     expect(PROFILES.full.surfaces).not.toContain("executor-job-owner");
     expect(unit.phase).toBe("pre-server");
     expect(unit.kind).toBe("core");
@@ -33,7 +35,7 @@ describe("executor job owner production surface", () => {
     );
   });
 
-  it("creates exactly one recoverable owner for anchor plus executor", async () => {
+  it("creates one recovered owner that remains closed until Mesh lifecycle recovery", async () => {
     const ledger = recoveryLedger();
     const rollback = new StartupRollback();
     const ctx = ownerContext(["anchor", "executor"], ledger, rollback);
@@ -45,7 +47,7 @@ describe("executor job owner production surface", () => {
     expect(ctx.lifecycleContributions.has("executorJobOwner.close")).toBe(false);
     await startUnit.setup(ctx);
     expect(ctx.lifecycleContributions.has("executorJobOwner.close")).toBe(true);
-    expect(ctx.executorJobOwner!.ready).toBe(true);
+    expect(ctx.executorJobOwner!.ready).toBe(false);
     expect(ledger.recoverableJobObligations).toHaveBeenCalledTimes(1);
     await expect(unit.setup(ctx)).rejects.toThrow(/already assembled/u);
 

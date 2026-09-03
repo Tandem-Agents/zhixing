@@ -385,12 +385,18 @@ describe("current issuer device removal", () => {
       digest: accepted.evidenceDigest,
     }]);
     const onRemoved = vi.fn(async () => undefined);
+    let lifecycleOwnersReady = true;
+    const closeAdmission = vi.fn(async () => {
+      if (!lifecycleOwnersReady) {
+        throw new Error("device-removal lifecycle owners are not ready");
+      }
+    });
     const options = {
       log,
       homeId: "home-1",
       deviceKey: fixture.targetKey,
       verifier: fixture.verifier,
-      closeAdmission: async () => undefined,
+      closeAdmission,
       settleAcceptedWork: async () => undefined,
       releaseAdmission: async () => undefined,
       transferToAnchor: async () => undefined,
@@ -411,9 +417,15 @@ describe("current issuer device removal", () => {
     });
     if (decision.kind !== "ready") throw new Error("unexpected preflight drift");
     await authority.commitReady(decision.receipt);
+    closeAdmission.mockClear();
 
+    lifecycleOwnersReady = false;
     const restarted = new ExecutorRemovalTarget(options);
+    expect(closeAdmission).not.toHaveBeenCalled();
+    lifecycleOwnersReady = true;
     await restarted.resumeBeforeAdmission();
+    expect(closeAdmission).toHaveBeenCalledTimes(1);
+    expect(cleanup).not.toHaveBeenCalled();
     await restarted.resumeWithIssuer({
       ready: (receipt) => authority.commitReady(receipt),
       cleanupReady: (receipt) => authority.commitCleanupReady(receipt),

@@ -136,6 +136,7 @@ async function setupCtx() {
     conversationNamingStorage: conversationStorage.naming,
     config: {},
     enabledRoles: [],
+    meshBootstrap: { mode: "single-machine" },
     runtimeFactory,
     confirmationHub: undefined,
     conversationIdentityLifecycle,

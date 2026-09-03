@@ -7,6 +7,7 @@ import {
   JobInteractionRuntimeUnavailableError,
   type JobInteractionAnswerPort,
 } from "./durable-job-interactions.js";
+import type { DeviceRemovalLifecycleContribution } from "./device-removal-lifecycle-contribution.js";
 import {
   JobAssignmentWorker,
   type JobAcceptedWorkItem,
@@ -225,13 +226,19 @@ export class ExecutorJobOwnerLifecycle {
   constructor(
     private readonly owner: Pick<
       ExecutorJobOwnerAssembly,
-      "start" | "stopAccepting" | "close"
+      | "start"
+      | "stopAccepting"
+      | "recoverAcceptedWorkForLifecycle"
+      | "resumeAccepting"
+      | "close"
     >,
     private readonly transport: {
-      start(options?: {
+      start(options: {
+        readonly deviceRemovalLifecycle: DeviceRemovalLifecycleContribution;
         readonly lifecycleAdmissionClosed?: boolean;
         readonly recoverAcceptedWork?: boolean;
       }): Promise<void>;
+      resumeAcceptingAfterLifecycle(): void;
       stop(): Promise<void>;
     },
   ) {}
@@ -241,19 +248,31 @@ export class ExecutorJobOwnerLifecycle {
   }
 
   async start(options: {
+    readonly deviceRemovalLifecycle: DeviceRemovalLifecycleContribution;
     readonly admissionClosed?: boolean;
     readonly recoverAcceptedWork?: boolean;
-  } = {}): Promise<void> {
+  }): Promise<void> {
     if (this.#started || this.#transportAttempted) {
       throw new Error("Executor job owner lifecycle may start only once");
     }
     this.#transportAttempted = true;
     try {
+      await this.owner.start({
+        admissionClosed: true,
+        recoverAcceptedWork: false,
+      });
       await this.transport.start({
-        lifecycleAdmissionClosed: options.admissionClosed,
+        deviceRemovalLifecycle: options.deviceRemovalLifecycle,
+        lifecycleAdmissionClosed: true,
         recoverAcceptedWork: options.recoverAcceptedWork,
       });
-      await this.owner.start(options);
+      if (options.recoverAcceptedWork !== false) {
+        await this.owner.recoverAcceptedWorkForLifecycle();
+      }
+      if (!options.admissionClosed) {
+        this.owner.resumeAccepting();
+        this.transport.resumeAcceptingAfterLifecycle();
+      }
       this.#started = true;
     } catch (error) {
       try {
