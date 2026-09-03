@@ -51,11 +51,9 @@ import {
 } from "../setup-delivery.js";
 import {
   MeshConversationExecutorTopologyDirectory,
-  MeshExecutorTopologyTrustState,
   MeshRuntimeAssembly,
   executorIdForDevice,
 } from "./mesh-runtime-assembly.js";
-import { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
 import { createAssignmentArtifactReceiverInfrastructure } from "./assignment-artifact-receiver-infrastructure.js";
 import { createConversationTransferStagingInfrastructure } from "./conversation-transfer-staging-infrastructure.js";
 import { createFileMeshPairingContinuationRepository } from "./mesh-pairing-continuation.js";
@@ -524,21 +522,16 @@ const conversationSurface: AccessSurface = {
     const assignmentArtifacts = createConversationAssignmentArtifactAuthorityIndex();
     let topologyDirectory = NO_REMOTE_CONVERSATION_EXECUTORS;
     if (ctx.meshBootstrap.mode !== "single-machine") {
+      if (!ctx.meshConnections || !ctx.meshExecutorTopologyTrust) {
+        throw new Error("Conversation executor requires the Host mesh topology ports");
+      }
       const receiver = createAssignmentArtifactReceiverInfrastructure({
         zhixingHome: ctx.zhixingHome,
         artifacts: ctx.authorityRuntime.artifacts,
       });
-      const connections = new MeshConnectionRegistry({
-        ...(ctx.meshConnectionProjection
-          ? { projection: ctx.meshConnectionProjection }
-          : {}),
-        onProjectionError: (error) =>
-          console.warn(chalk.yellow(`[mesh] ${error.message}`)),
-      });
-      const trust = new MeshExecutorTopologyTrustState(ctx.meshBootstrap.trust);
       topologyDirectory = new MeshConversationExecutorTopologyDirectory({
-        trust,
-        connections,
+        trust: ctx.meshExecutorTopologyTrust,
+        connections: ctx.meshConnections,
         localDeviceId: ctx.authorityRuntime.deviceId,
         artifacts: ctx.authorityRuntime.artifacts,
         receiver,
@@ -547,8 +540,6 @@ const conversationSurface: AccessSurface = {
         assignmentArtifacts,
       });
       ctx.assignmentArtifactReceiver = receiver;
-      ctx.meshConnections = connections;
-      ctx.meshExecutorTopologyTrust = trust;
     }
     const executorBoundary = createConversationExecutorHostBoundary({
       authority: anchorConversationOwnerRuntime(ctx.authorityRuntime),

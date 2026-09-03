@@ -15,6 +15,7 @@ import {
   inspectCleanupRegistryConstructions,
   inspectConversationAdoptionAssembly,
   inspectConversationExecutorDispatchBoundary,
+  inspectWorksceneRemoteWorkspaceProbeTopologyBoundary,
   inspectAssignmentDataPlaneBoundary,
   inspectAdvancementEvidenceTopologyBoundary,
   inspectAssignmentResourcePortBoundary,
@@ -847,6 +848,75 @@ test("conversation dispatch application stays separate from the Host topology me
       ),
     )).join("\n"),
     /demand contract leaked concrete Executor implementation/,
+  );
+});
+
+test("Workscene remote workspace probing uses one statically assembled topology port", async () => {
+  const paths = [
+    "packages/cli/src/serve/workscene-directory.ts",
+    "packages/cli/src/serve/workscene-remote-workspace-probe.ts",
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/mesh-runtime-assembly.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: (await readFile(relative, "utf8")).replaceAll("\r\n", "\n"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.deepEqual(inspectWorksceneRemoteWorkspaceProbeTopologyBoundary(records), []);
+  assert.match(
+    inspectWorksceneRemoteWorkspaceProbeTopologyBoundary(mutate(
+      "packages/cli/src/serve/workscene-directory.ts",
+      (text) => text.replace(
+        "remoteWorkspaceProbe: WorksceneRemoteWorkspaceProbePort;",
+        "remoteWorkspaceProbe?: WorksceneRemoteWorkspaceProbePort;",
+      ),
+    )).join("\n"),
+    /not one required topology-neutral port/,
+  );
+  assert.match(
+    inspectWorksceneRemoteWorkspaceProbeTopologyBoundary(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => `${text}\nconst meshRuntimeRef = { current: undefined };`,
+    )).join("\n"),
+    /does not publish one complete static Workscene probe topology/,
+  );
+  assert.match(
+    inspectWorksceneRemoteWorkspaceProbeTopologyBoundary(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "...(meshConnections ? { meshConnections } : {}),",
+        "",
+      ),
+    )).join("\n"),
+    /does not publish one complete static Workscene probe topology/,
+  );
+  assert.match(
+    inspectWorksceneRemoteWorkspaceProbeTopologyBoundary(mutate(
+      "packages/cli/src/serve/workscene-remote-workspace-probe.ts",
+      (text) => text.replace(
+        "this.options.trust.current().members.find(",
+        "this.initialTrust.members.find(",
+      ),
+    )).join("\n"),
+    /lost static wiring or live trust\/connectivity/,
+  );
+  assert.match(
+    inspectWorksceneRemoteWorkspaceProbeTopologyBoundary(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => `${text}\nconst duplicateConnections = new MeshConnectionRegistry({});`,
+    )).join("\n"),
+    /regained a second or late Workscene topology owner/,
+  );
+  assert.match(
+    inspectWorksceneRemoteWorkspaceProbeTopologyBoundary(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => `${text}\nclass Drifted { workspaceProbeForDevice() {} }`,
+    )).join("\n"),
+    /regained a second or late Workscene topology owner/,
   );
 });
 

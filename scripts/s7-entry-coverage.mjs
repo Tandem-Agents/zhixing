@@ -3922,6 +3922,7 @@ export async function validateS7Structure() {
   failures.push(...await inspectCleanupRegistryConstructions(records));
   failures.push(...inspectLocalConversationOwnerIsolation(records));
   failures.push(...inspectConversationExecutorDispatchBoundary(records));
+  failures.push(...inspectWorksceneRemoteWorkspaceProbeTopologyBoundary(records));
   failures.push(...inspectAssignmentDataPlaneBoundary(records));
   failures.push(...inspectAdvancementEvidenceTopologyBoundary(records));
   failures.push(...inspectAssignmentResourcePortBoundary(records));
@@ -11599,6 +11600,89 @@ export function inspectConversationExecutorDispatchBoundary(records) {
     access.includes("conversationExecutorDispatch!.localLedger()")
   ) {
     failures.push("Conversation executor ledger escaped through a demand or dispatch accessor");
+  }
+  return failures;
+}
+
+/** A6 Workscene remote probing consumes one static topology port before publication. */
+export function inspectWorksceneRemoteWorkspaceProbeTopologyBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const text = byPath.get(relative);
+    if (text === undefined) {
+      failures.push(`${relative}: Workscene remote workspace probe topology source is missing`);
+    }
+    return text ?? "";
+  };
+  const directory = required("packages/cli/src/serve/workscene-directory.ts");
+  const topology = required("packages/cli/src/serve/workscene-remote-workspace-probe.ts");
+  const command = required("packages/cli/src/serve/command.ts");
+  const access = required("packages/cli/src/serve/access-surfaces.ts");
+  const mesh = required("packages/cli/src/serve/mesh-runtime-assembly.ts");
+  const count = (text, token) => text.split(token).length - 1;
+
+  if (
+    !directory.includes("export interface WorksceneRemoteWorkspaceProbePort") ||
+    !directory.includes("remoteWorkspaceProbe: WorksceneRemoteWorkspaceProbePort;") ||
+    directory.includes("remoteWorkspaceProbe?:") ||
+    directory.includes("probeRemote") ||
+    count(directory, "deps.remoteWorkspaceProbe.probe(") !== 1 ||
+    /MeshRuntimeAssembly|MeshConnectionRegistry|MeshExecutorTopologyTrustState|EnvironmentProbeMeshClient/u.test(
+      directory,
+    )
+  ) {
+    failures.push("Workscene remote workspace probe demand is not one required topology-neutral port");
+  }
+
+  if (
+    !topology.includes("export const REJECT_REMOTE_WORKSPACE_PROBE") ||
+    !topology.includes("export class MeshWorksceneRemoteWorkspaceProbe") ||
+    !topology.includes("this.options.trust.current().members.find(") ||
+    count(topology, "this.options.trust.current()") < 2 ||
+    !topology.includes('target?.state !== "active"') ||
+    !topology.includes('!target.roles.includes("executor")') ||
+    !topology.includes("!this.options.connections.has(deviceId)") ||
+    !topology.includes("this.options.connections.client(deviceId)") ||
+    /MeshRuntimeAssembly|\b(?:bind|install|set)(?:Remote|Probe|Topology)|\b(?:ref|currentRef|runtimeRef)\b|\bget\s+\w+\s*\(/u.test(
+      topology,
+    )
+  ) {
+    failures.push("Workscene remote workspace probe adapter lost static wiring or live trust/connectivity");
+  }
+
+  const trustIndex = command.indexOf("const meshExecutorTopologyTrust =");
+  const connectionsIndex = command.indexOf("const meshConnections =");
+  const portIndex = command.indexOf("const remoteWorkspaceProbe =");
+  const directoryIndex = command.indexOf("const worksceneDirectory = createWorksceneDirectory({");
+  if (
+    trustIndex < 0 || connectionsIndex < 0 || portIndex < 0 || directoryIndex < 0 ||
+    trustIndex > portIndex || connectionsIndex > portIndex || portIndex > directoryIndex ||
+    count(command, "new MeshConnectionRegistry({") !== 1 ||
+    count(command, "new MeshExecutorTopologyTrustState(") !== 1 ||
+    count(command, "new MeshWorksceneRemoteWorkspaceProbe({") !== 1 ||
+    count(command, "remoteWorkspaceProbe,") !== 1 ||
+    !command.includes("...(meshConnections ? { meshConnections } : {}),") ||
+    !command.includes(
+      "...(meshExecutorTopologyTrust ? { meshExecutorTopologyTrust } : {}),",
+    ) ||
+    /meshRuntimeRef|probeRemote|workspaceProbeForDevice|MeshRuntimeAssembly\s*\|\s*undefined/u.test(
+      command,
+    )
+  ) {
+    failures.push("Anchor Host does not publish one complete static Workscene probe topology");
+  }
+
+  if (
+    access.includes("new MeshConnectionRegistry({") ||
+    access.includes("new MeshExecutorTopologyTrustState(") ||
+    !access.includes("trust: ctx.meshExecutorTopologyTrust") ||
+    !access.includes("connections: ctx.meshConnections") ||
+    access.includes("ctx.meshConnections =") ||
+    access.includes("ctx.meshExecutorTopologyTrust =") ||
+    mesh.includes("workspaceProbeForDevice(")
+  ) {
+    failures.push("Mesh/Conversation assembly regained a second or late Workscene topology owner");
   }
   return failures;
 }

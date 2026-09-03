@@ -267,6 +267,7 @@ import {
   requireCurrentRecoveryPackage,
 } from "@zhixing/mesh/recovery-package";
 import { replayTrustChain } from "@zhixing/mesh/trust-chain";
+import { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
 import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
 import {
   createAnchorInternalStopPort,
@@ -274,6 +275,11 @@ import {
   type AnchorInternalStopRequest,
 } from "./anchor-internal-stop.js";
 import { AnchorHostShellLifecycle } from "./anchor-host-shell-lifecycle.js";
+import { MeshExecutorTopologyTrustState } from "./mesh-runtime-assembly.js";
+import {
+  MeshWorksceneRemoteWorkspaceProbe,
+  REJECT_REMOTE_WORKSPACE_PROBE,
+} from "./workscene-remote-workspace-probe.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
@@ -385,6 +391,125 @@ async function runServerProcess(
     console.log(chalk.dim(`Generated new token: ${tokenInfo.path}`));
   }
 
+  // Device lifecycle admission is reconstructed from the durable operation before
+  // the inactive endpoint or any producer can be acquired. Downstream surfaces
+  // only decide whether frozen work may resume, never whether fresh work may enter.
+  const lifecycleAuthorityLog = bootstrap.mesh.bootstrapStore.authorityLog();
+  const lifecycleHomeId = (await lifecycleAuthorityLog.originCheckpoint()).logId;
+  const lifecycleJournal = new DeviceLifecycleJournal(lifecycleAuthorityLog);
+  const localLifecycleOperations = (await lifecycleJournal.active()).filter((operation) =>
+    (operation.identity.kind === "stop" &&
+      operation.identity.localDeviceId === bootstrap.mesh.deviceKey.deviceId) ||
+    (operation.identity.kind === "executor-removal" &&
+      operation.identity.targetDeviceId === bootstrap.mesh.deviceKey.deviceId) ||
+    (operation.identity.kind === "anchor-uninstall" &&
+      operation.identity.currentDeviceId === bootstrap.mesh.deviceKey.deviceId));
+  if (localLifecycleOperations.length > 1) {
+    throw new Error("More than one local device lifecycle operation owns startup admission");
+  }
+  const startupLifecycleOperation = localLifecycleOperations[0];
+  let startupLifecycle: AssemblyContext["startupLifecycle"];
+  if (startupLifecycleOperation) {
+    let sources: readonly DeliveryLifecycleSourcePermit[] = [];
+    let deliveries: readonly { readonly id: string; readonly revision: string }[] = [];
+    let artifactReady = false;
+    const acceptedWorkArtifact = startupLifecycleOperation.evidence.some((item) =>
+      item.kind === "accepted-work" && item.artifact);
+    if (acceptedWorkArtifact && startupLifecycleOperation.identity.kind !== "executor-removal") {
+      const snapshot = await loadHostStopAcceptedWork(
+        startupLifecycleOperation,
+        bootstrap.mesh.bootstrapStore.artifactStore(),
+      );
+      sources = hostStopDeliveryLifecycleSources(snapshot);
+      deliveries = snapshot.owners.delivery;
+      artifactReady = true;
+    } else if (startupLifecycleOperation.identity.kind === "executor-removal") {
+      const decision = await loadExecutorRemovalLifecycleDecision(
+        lifecycleAuthorityLog,
+        startupLifecycleOperation,
+      );
+      if (decision?.ownerItems) {
+        sources = deliveryLifecycleSourcesFromOwnerItems(decision.ownerItems);
+        deliveries = decision.ownerItems
+          .filter((item) => item.owner === "delivery")
+          .map(({ id, revision }) => ({ id, revision }));
+        artifactReady = true;
+      }
+    }
+    const phase = startupLifecycleOperation.phase;
+    const sealed = startupLifecycleOperation.identity.kind === "stop"
+      ? ["work-settled", "flushed", "ready-to-stop"].includes(phase)
+      : startupLifecycleOperation.identity.kind === "executor-removal"
+        ? ["authority-settled", "revocation-ready", "revoked", "cleanup-complete"].includes(phase)
+        : startupLifecycleOperation.identity.path.kind === "migration"
+          ? ["transfer-committed", "cleanup-complete"].includes(phase)
+          : ["work-settled", "flushed", "final-checkpoint-verified", "cleanup-complete"].includes(phase);
+    startupLifecycle = {
+      kind: startupLifecycleOperation.identity.kind,
+      artifactReady,
+      // A successor must prove the old host stopped before replaying any frozen owner effect.
+      recoverAcceptedWork: startupLifecycleOperation.identity.kind === "stop"
+        ? false
+        : artifactReady,
+      alreadySettled: startupLifecycleOperation.identity.kind === "stop"
+        ? hostStopAlreadySettled(phase)
+        : false,
+      delivery: {
+        operationId: startupLifecycleOperation.identity.operationId,
+        sources,
+        deliveries,
+        sealed,
+      },
+    };
+  }
+
+  // The final home endpoint is acquired inactive. Workscene receives its complete
+  // topology demand only after this same endpoint owns the live connection projection.
+  const serverBinding = await bindServer({
+    config: { ...DEFAULT_SERVER_CONFIG, port, host },
+  });
+  hostShellLifecycle.acquireBinding(serverBinding);
+
+  const registry = new CleanupRegistry({
+    activeOwners: plan.activeCleanupOwners,
+    logger: {
+      info: (msg) => console.log(chalk.dim(`[cleanup] ${msg}`)),
+      error: (msg, err) =>
+        console.error(chalk.red(`[cleanup] ${msg}`), err instanceof Error ? err.message : err),
+    },
+  });
+  startupRegistry = registry;
+
+  const stopEndpointLock = {
+    pid: process.pid,
+    port: serverBinding.port,
+    startTime: processStartTime,
+    startedAt: processStartedAt,
+  } as const;
+  const stateFile = new ServerStateFile({ publishReadyMarker: isBackground });
+  hostShellLifecycle.acquireStateFile(stateFile);
+  const meshConnectionProjection = createMeshCompatibilityStateProjection(stateFile, {
+    ...stopEndpointLock,
+    host: serverBinding.host,
+  });
+  await meshConnectionProjection.replaceCurrent([]);
+  const meshExecutorTopologyTrust = bootstrap.mesh.mode === "trusted-home"
+    ? new MeshExecutorTopologyTrustState(bootstrap.mesh.trust)
+    : undefined;
+  const meshConnections = bootstrap.mesh.mode === "trusted-home"
+    ? new MeshConnectionRegistry({
+        projection: meshConnectionProjection,
+        onProjectionError: (error) =>
+          console.warn(chalk.yellow(`[mesh] ${error.message}`)),
+      })
+    : undefined;
+  const remoteWorkspaceProbe = meshExecutorTopologyTrust && meshConnections
+    ? new MeshWorksceneRemoteWorkspaceProbe({
+        trust: meshExecutorTopologyTrust,
+        connections: meshConnections,
+      })
+    : REJECT_REMOTE_WORKSPACE_PROBE;
+
   const worksceneStorageCleanup = createWorksceneStorageCleanupInfrastructure({
     zhixingHome,
     storageMaintenance: deviceCapacity.storage,
@@ -420,9 +545,6 @@ async function runServerProcess(
   const authorityRuntimeRef: { current: AuthorityRuntimeStack | undefined } = {
     current: undefined,
   };
-  const meshRuntimeRef: {
-    current: import("./mesh-runtime-assembly.js").MeshRuntimeAssembly | undefined;
-  } = { current: undefined };
   const conversationAuthorityRef: {
     current: import("./conversation-protocol-runtime.js").ConversationProtocolRuntime | undefined;
   } = { current: undefined };
@@ -444,11 +566,7 @@ async function runServerProcess(
     replayWorksceneMutation: async (requestId) =>
       (await authorityRuntimeRef.current?.replayWorksceneMutation(requestId)) ??
       null,
-    probeRemote: (deviceId, request) => {
-      const mesh = meshRuntimeRef.current;
-      if (!mesh) throw new Error("目标设备当前不可达，无法确认工作区状态");
-      return mesh.workspaceProbeForDevice(deviceId).probe(request);
-    },
+    remoteWorkspaceProbe,
   });
   const worksceneApplicationPorts =
     createAnchorWorksceneApplicationPorts(worksceneDirectory);
@@ -772,114 +890,6 @@ async function runServerProcess(
     credentialGeneration,
   });
 
-  // Device lifecycle admission is reconstructed from the durable operation before
-  // any access surface can recover a producer. The authority runtime consumes this
-  // projection first; downstream surfaces only decide whether frozen work may be
-  // resumed, never whether fresh work may enter.
-  const lifecycleAuthorityLog = bootstrap.mesh.bootstrapStore.authorityLog();
-  const lifecycleHomeId = (await lifecycleAuthorityLog.originCheckpoint()).logId;
-  const lifecycleJournal = new DeviceLifecycleJournal(lifecycleAuthorityLog);
-  const localLifecycleOperations = (await lifecycleJournal.active()).filter((operation) =>
-    (operation.identity.kind === "stop" &&
-      operation.identity.localDeviceId === bootstrap.mesh.deviceKey.deviceId) ||
-    (operation.identity.kind === "executor-removal" &&
-      operation.identity.targetDeviceId === bootstrap.mesh.deviceKey.deviceId) ||
-    (operation.identity.kind === "anchor-uninstall" &&
-      operation.identity.currentDeviceId === bootstrap.mesh.deviceKey.deviceId));
-  if (localLifecycleOperations.length > 1) {
-    throw new Error("More than one local device lifecycle operation owns startup admission");
-  }
-  const startupLifecycleOperation = localLifecycleOperations[0];
-  let startupLifecycle: AssemblyContext["startupLifecycle"];
-  if (startupLifecycleOperation) {
-    let sources: readonly DeliveryLifecycleSourcePermit[] = [];
-    let deliveries: readonly { readonly id: string; readonly revision: string }[] = [];
-    let artifactReady = false;
-    const acceptedWorkArtifact = startupLifecycleOperation.evidence.some((item) =>
-      item.kind === "accepted-work" && item.artifact);
-    if (acceptedWorkArtifact && startupLifecycleOperation.identity.kind !== "executor-removal") {
-      const snapshot = await loadHostStopAcceptedWork(
-        startupLifecycleOperation,
-        bootstrap.mesh.bootstrapStore.artifactStore(),
-      );
-      sources = hostStopDeliveryLifecycleSources(snapshot);
-      deliveries = snapshot.owners.delivery;
-      artifactReady = true;
-    } else if (startupLifecycleOperation.identity.kind === "executor-removal") {
-      const decision = await loadExecutorRemovalLifecycleDecision(
-        lifecycleAuthorityLog,
-        startupLifecycleOperation,
-      );
-      if (decision?.ownerItems) {
-        sources = deliveryLifecycleSourcesFromOwnerItems(decision.ownerItems);
-        deliveries = decision.ownerItems
-          .filter((item) => item.owner === "delivery")
-          .map(({ id, revision }) => ({ id, revision }));
-        artifactReady = true;
-      }
-    }
-    const phase = startupLifecycleOperation.phase;
-    const sealed = startupLifecycleOperation.identity.kind === "stop"
-      ? ["work-settled", "flushed", "ready-to-stop"].includes(phase)
-      : startupLifecycleOperation.identity.kind === "executor-removal"
-        ? ["authority-settled", "revocation-ready", "revoked", "cleanup-complete"].includes(phase)
-        : startupLifecycleOperation.identity.path.kind === "migration"
-          ? ["transfer-committed", "cleanup-complete"].includes(phase)
-          : ["work-settled", "flushed", "final-checkpoint-verified", "cleanup-complete"].includes(phase);
-    startupLifecycle = {
-      kind: startupLifecycleOperation.identity.kind,
-      artifactReady,
-      // A successor must prove the old host stopped before replaying any frozen owner effect.
-      recoverAcceptedWork: startupLifecycleOperation.identity.kind === "stop"
-        ? false
-        : artifactReady,
-      alreadySettled: startupLifecycleOperation.identity.kind === "stop"
-        ? hostStopAlreadySettled(phase)
-        : false,
-      delivery: {
-        operationId: startupLifecycleOperation.identity.operationId,
-        sources,
-        deliveries,
-        sealed,
-      },
-    };
-  }
-
-  // The final home endpoint is the only cross-process startup owner. Every
-  // production start, including the no-active-operation path, acquires it
-  // before any pre-server owner can recover or publish effects. Until the
-  // existing server object is activated it serves only the stable inactive
-  // response and never dispatches HTTP/WebSocket work.
-  const serverBinding = await bindServer({
-    config: { ...DEFAULT_SERVER_CONFIG, port, host },
-  });
-  hostShellLifecycle.acquireBinding(serverBinding);
-
-  // 4. CleanupRegistry —— 唯一正常关闭出口。Host shell 与 Assembly lifecycle
-  //    各自提供有限类型化贡献，不再由 command 拼装字段式 shutdown chain。
-  const registry = new CleanupRegistry({
-    activeOwners: plan.activeCleanupOwners,
-    logger: {
-      info: (msg) => console.log(chalk.dim(`[cleanup] ${msg}`)),
-      error: (msg, err) =>
-        console.error(chalk.red(`[cleanup] ${msg}`), err instanceof Error ? err.message : err),
-    },
-  });
-  startupRegistry = registry;
-
-  const stopEndpointLock = {
-    pid: process.pid,
-    port: serverBinding.port,
-    startTime: processStartTime,
-    startedAt: processStartedAt,
-  } as const;
-  const stateFile = new ServerStateFile({ publishReadyMarker: isBackground });
-  hostShellLifecycle.acquireStateFile(stateFile);
-  const meshConnectionProjection = createMeshCompatibilityStateProjection(stateFile, {
-    ...stopEndpointLock,
-    host: serverBinding.host,
-  });
-  await meshConnectionProjection.replaceCurrent([]);
   // ============================================================================
   // 有序装配 —— 稳定核心单元恒启用，profile 仅选择可选接入面；setupAssemblyUnits
   // 按依赖拓扑序遍历、各自 setup（产物写回 ctx）。主干不出现任何 `if (profile === ...)`。
@@ -960,6 +970,8 @@ async function runServerProcess(
     enabledRoles: bootstrap.mesh.roles,
     meshBootstrap: bootstrap.mesh,
     meshConnectionProjection,
+    ...(meshConnections ? { meshConnections } : {}),
+    ...(meshExecutorTopologyTrust ? { meshExecutorTopologyTrust } : {}),
     onTrustApplied,
     ...(startupLifecycle ? { startupLifecycle } : {}),
   };
@@ -1012,7 +1024,6 @@ async function runServerProcess(
   await ctx.authorityCheckpointOwner?.start();
   ctx.meshRuntime?.bindAuthorityCheckpointOwner(ctx.authorityCheckpointOwner);
   authorityRuntimeRef.current = ctx.authorityRuntime;
-  meshRuntimeRef.current = ctx.meshRuntime;
   conversationsRef.current = ctx.conversations ?? null;
   await worksceneDirectory.recover();
 

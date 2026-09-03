@@ -103,7 +103,6 @@ import {
   registerJobInteractionService,
 } from "./job-interaction-mesh.js";
 import {
-  EnvironmentProbeMeshClient,
   registerEnvironmentProbeMeshService,
 } from "./environment-probe-mesh.js";
 import {
@@ -1699,19 +1698,6 @@ export class MeshRuntimeAssembly
       verifier: this.options.authority.verifier,
       authorizationFor,
     });
-  }
-
-  workspaceProbeForDevice(deviceId: string): EnvironmentProbeMeshClient {
-    if (
-      !this.#peerHasRole(deviceId, "executor") ||
-      !this.connections.has(deviceId)
-    ) {
-      throw new Error(`Workspace probe executor is unavailable: ${deviceId}`);
-    }
-    return new EnvironmentProbeMeshClient(
-      this.connections.client(deviceId),
-      this.options.authority.verifier,
-    );
   }
 
   /** Remote-only evidence mechanism; Host owns local/Mesh selection. */

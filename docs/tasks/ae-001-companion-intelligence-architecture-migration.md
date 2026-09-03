@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-29 Conversation executor topology directory 构造期静态接管已通过协调者独立复核，等待提交<br>
+> 当前检查点：A6-30 Workscene 远端 workspace probe 构造期静态拓扑端口已通过协调者独立复核，等待提交<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `0bea5b92`；A6-28 cold-start 审计失败证据已提交 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；E06-C01 的 Conversation executor topology directory 子链已通过协调者独立复核，等待提交，A6 不得关闭 |
-| 活跃工作包 | `A6-29-conversation-executor-static-topology-directory-v1` 已通过协调者独立复核，等待提交 |
-| 下一责任链 | 接受 A6-29 后继续拆分 E06-C01 中其余 `meshRuntimeRef` 与 Mesh role/surface/lifecycle `bind*`；再按 C02/C03 收口产品依赖、broadcast 与 internal-stop 回填 |
+| 已接受基线 | `dffcf688`；A6-29 Conversation executor topology directory 构造期静态接管已提交 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-30 已通过协调者独立复核并等待提交，A6 不得关闭 |
+| 活跃工作包 | `A6-30-workspace-probe-static-topology-port-v1` 已通过协调者独立复核，等待提交 |
+| 下一责任链 | 接受 A6-30 后继续按独立 owner/lifecycle 拆分 Mesh role/surface/lifecycle `bind*`；再按 C02/C03 收口产品依赖、broadcast 与 internal-stop 回填 |
 | 打开的单向桥 | 无；P06 Rubric 已恢复为 required `readByDigest/put` 有限端口，P07、P09、P11 及 P12 三类 staging 的既有有限 Infrastructure 接管继续有效 |
-| 已失效证据 | A6-15、A6-19 与 A6-21 的聚合结论均不可作为退出证明；A6-29 只恢复 A6-28 E06-C01 的 Conversation executor directory 子链，`meshRuntimeRef`、其余 Mesh `bind*`、C02/C03 仍使 A6-21/E06“可变 lazy ref 为零”结论失效；canonical S7 58/58 已能拒绝本子链的构造后回填，但不替代剩余 late-binding 审计 |
+| 已失效证据 | A6-15、A6-19 与 A6-21 的聚合结论均不可作为退出证明；A6-29 与待复核 A6-30 分别只恢复 A6-28 E06-C01 的 Conversation executor directory 和 Workscene remote workspace probe 子链，其余 Mesh `bind*`、C02/C03 仍使 A6-21/E06“可变 lazy ref 为零”结论失效；canonical S7 59/59 已能拒绝这两条子链的构造后回填，但不替代剩余 late-binding 审计 |
 | 阻塞/用户决策 | 无用户决策阻塞；完整 distributed-runtime structure 测试仍被既有 A4-10 `runtime-host` 依赖断言阻断，属于 A7 零残留与终验输入 |
 
 ### A0 基线索引
@@ -3057,6 +3057,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 行为、旧路与直接证据：本机与远端 assignment selection、permission/execution-assets 同步、dispatch/取消/恢复/response-loss、local ledger、三 topology 与 job 路由均未改变；原同步 `forExecutor/resolve` 合同保持不变。Conversation protocol、真实静态 Mesh directory、S6 本机/远端 first-party、Channel/job 和 startup owner 共 4 文件 40/40；CLI `tsc --noEmit` 与 `pnpm cli:build`、fresh `pnpm runtime:package-exports`、changed-source Biome 通过。canonical `pnpm s7:lint` 为 58/58 且 registry golden 通过；新增反向 mutation 能拒绝 optional directory、恢复 `bindDirectory`/boundary topology getter、Mesh late backfill、directory 晚于 boundary 构造、生产 topology 漏注入及 assignment receiver 组合漂移。额外扩大执行的 local-owner/owner-domain 回归仍复现既有 artifact-lifecycle storage maintenance `backpressured:ioOperations`，失败发生在本子链业务断言前，未计入本包通过证据，也未据此修改资源治理或放宽断言。
 - 失效、状态与下一检查点：若 Conversation executor directory/target、Host boundary 构造、assignment artifact authority index、trust/connection projection、Mesh target factory、local/no-remote topology、protocol plan/recovery/forget、S6 正式链、S7 inspector/mutation 或 package exports 任一变化，只恢复 `A6-29-conversation-executor-static-topology-directory-v1` 与 A6-28 E06-C01 的本子结论；A6-28 E01～E05、其他 E06-C01 late binding、C02/C03 不因本包自动恢复。本证据已完成并等待协调者独立复核；A6 与完成度保持 `[ ]`/`6/8`，接受后下一责任链仍为 `meshRuntimeRef` 与 Mesh role/surface/lifecycle `bind*`，不得提前进入 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立复核：逐段核对 Conversation/Host/Mesh 生产构造与 assignment artifact 读写链，确认 directory 已作为 required 构造参数在 consumer 发布前建立，单机与 Executor-only 的 no-remote directory 是静态角色选择，trust/connection 变化只更新固定 Infrastructure projection，未以 setter、optional、回调包或第二 owner 复活 late binding。独立运行 Conversation protocol 与 topology directory 27/27、canonical S7 58/58、CLI typecheck/build 和 `git diff --check` 均通过；接受 A6-29，A6 仍保持 `[ ]`，下一包只处理 E06-C01 的下一条独立 late-binding 责任链。
+
+### A6-30：Workscene 远端 workspace probe 构造期静态拓扑端口
+
+- 基线与唯一责任变化：以已接受 `HEAD dffcf6888981db2ca806cfe2323a4376e2ac9b4b` 加协调者本文调度记录为进场基线，只处理 A6-28 E06-C01 的 Workscene remote workspace probe 子链。`createWorksceneDirectory` 现在强制取得有限、拓扑中性的 `WorksceneRemoteWorkspaceProbePort`；远端分支只调用该端口，本机分支继续直接调用同一 Authority generation 的本机 probe。`probeRemote?`、`meshRuntimeRef`、运行期“Mesh 尚未安装”判断与 `MeshRuntimeAssembly.workspaceProbeForDevice()` 已从生产源码归零，Workscene 不再取得 Mesh runtime、连接 registry 或 trust concrete。
+- 静态图与动态数据：Anchor Host 在创建 Workscene directory 前先恢复 durable lifecycle admission、取得同一 inactive endpoint/state compatibility projection，并为 trusted-home 一次性构造 A6-29 已接受的唯一 `MeshConnectionRegistry` 与 `MeshExecutorTopologyTrustState`；同一两个对象同时注入 Conversation executor directory、Mesh runtime 与新的 remote probe adapter，没有第二连接/trust owner。adapter 的依赖图构造后不换代；每次 probe 仍读取当前 active Executor trust member 与当前 authenticated connection，并通过真实 `EnvironmentProbeMeshClient` canonical codec 和 live trusted-device signature verifier 执行。single-machine 显式注入冻结的拒绝实现，不用 optional、noop、ref、setter、getter 或延迟回填表达拓扑；endpoint 始终保持 inactive，既有 activation gate/ready 发布顺序不变。
+- 行为、旧路与直接证据：workspace catalog 唯一目标、environment grant、resource lease、request/result identity、签名验证、owner accept、remote unavailable 文案、本机探测以及 Workscene create/set-workdir 终态均未改变。Workscene directory、真实 Ed25519 Mesh adapter、Conversation topology directory 与 startup owner 四文件最终 17/17，直接覆盖本机不调用 remote port、远端成功、连接断开、动态 trust revoke、单机拒绝和 entry-last owner；CLI typecheck 与 fresh `pnpm cli:build` 通过。canonical `pnpm s7:lint` 为 59/59 且 registry golden 通过；新增反向 mutation 拒绝 optional port、`meshRuntimeRef` 回流、Host 漏投影、静态 trust 快照、第二 connection owner及 `workspaceProbeForDevice` 旁路。changed-source Biome 与 `git diff --check` 通过，本包不改变 package export/build entry。
+- 失效、状态与下一检查点：若 Workscene remote probe demand/adapter、本机/远端选择、environment probe codec/signature、workspace catalog/lease/owner accept、A6-29 trust 或 connection projection、Anchor Host 构造顺序、Conversation/Mesh 共用对象、single-machine 拒绝角色、activation gate、S7 inspector/mutation 任一变化，只恢复 `A6-30-workspace-probe-static-topology-port-v1` 与 A6-28 E06-C01 的本子结论；A6-29、A6-28 E01～E05、其余 E06-C01 与 C02/C03 不因本包自动恢复。本证据已完成并等待协调者独立复核；A6 与完成度保持 `[ ]`/`6/8`，接受后下一责任链仍只处理其余 Mesh role/surface/lifecycle `bind*`，不得提前进入 C02/C03 或 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立复核：从 Workscene create/set-workdir 生产入口反查本机/远端 probe、Host 构造顺序、共享 connection/trust 投影与 Mesh 旧公开面，确认 required finite port 在 Workscene 发布前完成注入，`meshRuntimeRef`、optional remote callback 和 `workspaceProbeForDevice()` 均已归零；提前取得的 endpoint 仍保持 inactive，未改变 ready/activation 边界。独立运行四文件 17/17、对应 S7 反向 mutation 1/1、CLI typecheck/build、changed-source Biome 与 `git diff --check` 均通过；接受 A6-30，A6 仍保持 `[ ]`。
 
 ## 十、用户提示词
 

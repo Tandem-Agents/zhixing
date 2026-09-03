@@ -6,6 +6,7 @@ import type {
   ImmediateRootResourceLease,
   WorksceneAppliedResult,
   WorksceneDto,
+  WorkspaceProbeRequest,
   WorkspaceProbeResult,
 } from "@zhixing/core/contracts";
 import { environmentControlSubject } from "@zhixing/core/protocol";
@@ -58,6 +59,14 @@ export type AnchorWorksceneDirectory = WorksceneToolDirectory & {
   ): Promise<void>;
   };
 
+/** Finite topology-neutral remote probe demand owned by the Workscene binding. */
+export interface WorksceneRemoteWorkspaceProbePort {
+  probe(
+    deviceId: string,
+    request: WorkspaceProbeRequest,
+  ): Promise<WorkspaceProbeResult>;
+}
+
 export function createWorksceneDirectory(deps: {
   authority: () => AuthorityRuntimeStack | undefined;
   conversations?: () => ConversationManager | null;
@@ -85,12 +94,7 @@ export function createWorksceneDirectory(deps: {
     requestId: string,
   ) => Promise<WorksceneAppliedResult | null>;
   sceneStorageRemoval: WorksceneSceneStorageRemovalPort;
-  probeRemote?: (
-    deviceId: string,
-    request: Parameters<
-      NonNullable<AuthorityRuntimeStack["workspaceProbe"]>["probe"]
-    >[0],
-  ) => Promise<WorkspaceProbeResult>;
+  remoteWorkspaceProbe: WorksceneRemoteWorkspaceProbePort;
 }): AnchorWorksceneDirectory {
   const sceneChains = new Map<string, Promise<unknown>>();
   let sessionOwner: WorksceneSessionOwner | undefined;
@@ -246,10 +250,10 @@ export function createWorksceneDirectory(deps: {
           }
           result = await runtime.workspaceProbe.probe(request);
         } else {
-          if (!deps.probeRemote) {
-            throw inputError("目标设备当前不可达，无法确认工作区状态");
-          }
-          result = await deps.probeRemote(workspace.deviceId, request);
+          result = await deps.remoteWorkspaceProbe.probe(
+            workspace.deviceId,
+            request,
+          );
         }
         return owner.accept(request, result, expectedExecutorId);
       },

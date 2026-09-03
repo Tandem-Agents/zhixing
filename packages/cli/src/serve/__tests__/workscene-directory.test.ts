@@ -17,7 +17,11 @@ import { createTempDir } from "@zhixing/test-utils";
 import type { AuthorityRuntimeStack } from "../../setup-delivery.js";
 import { createConversationStorageInfrastructure } from "../conversation-storage-infrastructure.js";
 import { createAnchorWorksceneConversationStorageProjectionCleanup } from "../workscene-application-adapter.js";
-import { createWorksceneDirectory } from "../workscene-directory.js";
+import {
+  createWorksceneDirectory,
+  type WorksceneRemoteWorkspaceProbePort,
+} from "../workscene-directory.js";
+import { REJECT_REMOTE_WORKSPACE_PROBE } from "../workscene-remote-workspace-probe.js";
 import { createWorksceneStorageCleanupInfrastructure } from "../workscene-storage-cleanup.js";
 
 let originalHome: string | undefined;
@@ -136,6 +140,31 @@ describe("workscene directory", { timeout: 30_000 }, () => {
       requestId("clear"),
     );
     expect(cleared?.scene).not.toHaveProperty("workspace");
+  });
+
+  it("uses the required remote probe only for a remote workspace", async () => {
+    const probe = vi.fn(async (deviceId, request) => ({
+      ...request,
+      executorId: "executor-a",
+      workspaceBindingRevision: 1,
+      probe: "directory" as const,
+      signature: { alg: "test", keyId: deviceId, sig: "test" },
+    }));
+    const remoteWorkspaceProbe: WorksceneRemoteWorkspaceProbePort = { probe };
+    const fixture = await createFixture(undefined, undefined, {
+      workspaceDeviceId: "device-b",
+      remoteWorkspaceProbe,
+    });
+
+    await expect(fixture.directory.create({
+      name: "远端工作区",
+      workspace: { deviceId: "device-b", bindingRef: "workspace-a" },
+      requestId: requestId("create"),
+    })).resolves.toMatchObject({
+      scene: { workspace: { deviceId: "device-b", bindingRef: "workspace-a" } },
+    });
+    expect(probe).toHaveBeenCalledOnce();
+    expect(probe.mock.calls[0]?.[0]).toBe("device-b");
   });
 
   it("quiesces set/delete in the per-scene chain and never deletes the user workspace", async () => {
@@ -284,6 +313,10 @@ describe("workscene directory", { timeout: 30_000 }, () => {
 async function createFixture(
   conversations?: ConversationManager,
   removeSceneDirectory?: (sceneId: string) => Promise<void>,
+  options: {
+    readonly workspaceDeviceId?: string;
+    readonly remoteWorkspaceProbe?: WorksceneRemoteWorkspaceProbePort;
+  } = {},
 ) {
   const artifacts = new FileArtifactStore(path.join(home, "authority-artifacts"));
   const log = new FileAuthorityCommitLog(
@@ -334,7 +367,7 @@ async function createFixture(
     },
     workspaceCatalog: () => [{
       executorId: "executor-a",
-      deviceId: "device-a",
+      deviceId: options.workspaceDeviceId ?? "device-a",
       deviceName: "本机",
       bindingRef: "workspace-a",
       displayName: "工作区",
@@ -378,6 +411,8 @@ async function createFixture(
       recoverWorksceneState: () => globalState.recoverPendingDeletions(),
       replayWorksceneMutation: (requestId) =>
         globalState.replayMutation(requestId),
+      remoteWorkspaceProbe:
+        options.remoteWorkspaceProbe ?? REJECT_REMOTE_WORKSPACE_PROBE,
       ...(conversations ? { conversations: () => conversations } : {}),
     }),
     globalState,
