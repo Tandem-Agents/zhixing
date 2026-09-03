@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-27 已通过协调者独立验收，等待提交<br>
+> 当前检查点：A6-28 E06 可变 late-binding 反证已通过协调者独立复核，等待提交<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `aa9b8607`；A6-26 Current-device removal lifecycle admission 边界收口已提交 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-21 E05-C05 已由 A6-27 收口并通过协调者独立验收，等待提交 |
-| 活跃工作包 | `A6-27-conversation-directory-topology-neutral-input-v1` 已通过协调者独立验收，等待提交 |
-| 下一责任链 | 接受 A6-27 后重新执行完整 A6 cold-start 退出审计；不得把局部修复相加冒充 A6 退出证明 |
+| 已接受基线 | `ad9ed649`；A6-27 Conversation directory topology-neutral 输入边界收口已提交 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-28 已从零完成 E01～E06 审计，E01～E05 通过，E06 可变 late-binding 生产反证已通过协调者独立复核，A6 不得关闭 |
+| 活跃工作包 | `A6-28-replaceable-edges-topology-complete-exit-audit-v1` 失败证据已通过协调者独立复核，等待提交 |
+| 下一责任链 | 先移除 A6-28 E06-C01 的 topology/role 必需依赖 late binding，再按 C02/C03 顺序收口其余生产回填；全部接受后重新执行完整 E01～E06 cold-start 审计，仍不得提前进入 A7 |
 | 打开的单向桥 | 无；P06 Rubric 已恢复为 required `readByDigest/put` 有限端口，P07、P09、P11 及 P12 三类 staging 的既有有限 Infrastructure 接管继续有效 |
-| 已失效证据 | A6-15 的 E05/聚合结论与 A6-19 的未完成聚合审计均不可作为退出证明；A6-21 的 E05-C01～C05 已恢复并接受，但五条局部修复不得相加冒充完整 topology transparency，仍须完整冷启动审计 |
+| 已失效证据 | A6-15、A6-19 与 A6-21 的聚合结论均不可作为退出证明；A6-21 E05-C01～C05 已恢复且本轮 E05 重审通过，但 A6-21/E06 的“可变 lazy ref 为零”结论被当前生产源码反证；canonical S7 58/58 尚未覆盖该失败形状 |
 | 阻塞/用户决策 | 无用户决策阻塞；完整 distributed-runtime structure 测试仍被既有 A4-10 `runtime-host` 依赖断言阻断，属于 A7 零残留与终验输入 |
 
 ### A0 基线索引
@@ -3031,6 +3031,24 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据与验证：Core Conversation application 38/38 覆盖同质条目、降序/稳定 tie-break、availability、空输入与外层/数组冻结；CLI Local Conversation RPC 16/16 覆盖本机加两个远端 owner、非 fenced/未授权远端项过滤、每设备一次拉取、相同时间排序、远端 availability 不覆盖本机结果及原有转发行为，合计两个文件 54/54。fresh Core build、CLI `tsc --noEmit`、`pnpm cli:build`、fresh `pnpm runtime:package-exports`、changed-source Biome 通过；canonical `pnpm s7:lint` 为 58/58 且 registry golden 通过，fresh declaration 只公开 topology-neutral helper。
 - 失效、状态与下一检查点：若 Conversation directory entry/view、领域排序或冻结、Local RPC 的本机读取/authority 路由/按设备分组/远端过滤、最终 availability、公开 `session.list` wire、fresh declaration、S7/package-export 或上述直接测试任一变化，只恢复 `A6-27-conversation-directory-topology-neutral-input-v1` 与 A6-21 E05-C05 子结论；A6-21 E05-C01～C04、E01～E04/E06、其他 Conversation 应用和持久协议不因无关变化自动失效。本证据当前完成并等待协调者独立复核；A6 与完成度保持 `[ ]`/`6/8`。接受后必须重新执行完整 A6 cold-start 六面退出审计，不得把五条局部修复相加直接关闭 A6；本轮未进入该聚合审计、A7，也未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：反查 `session.list` 真实入口、`#listAllOwners`、领域 helper、wire/domain 投影与 fresh declaration，确认 Conversation 合同对 local/remote/device/route/Authority 拓扑区分零可达；唯一 Host/Surface collector 仍按 fenced authority route 分组、每设备一次拉取并过滤获准 id，领域只接收同质 entries 与最终 availability，且 CLI 未复制排序。独立取得 Core 38/38、CLI 16/16、canonical S7 58/58 与 registry golden；fresh Core build、CLI typecheck、changed-source Biome、`git diff --check` 和生产旧 helper 反查均通过。排序、重复保留、availability 与公开 wire 未漂移，接受 `A6-27-conversation-directory-topology-neutral-input-v1`；A6 保持 `[ ]`，下一责任链为完整 cold-start 退出审计。
+
+### A6-28：可替换边缘与设备拓扑完整 cold-start 退出审计
+
+- 基线与方法：以已接受 `HEAD ad9ed649eeaf73d72e45432b9c8fe76320357a6e` 加协调者本文调度记录为唯一进场基线，不复用 A6-21 的聚合判断，也不把 A6-22～A6-27 五条局部修复相加。先从生产 package import、Host 构造、P01～P15 物理入口和全部领域 application/Product API/Kernel/RuntimeHost/Surface 正向取得当前集合，再从 concrete constructor、path/File/codec/lock/delete、Executor/Mesh identity、role/topology 分支、运行期回填和公开 export 反向对账；没有修改生产代码、测试、manifest、build 配置或其他文档。
+
+| 审计面 | 本轮 cold-start 生产事实 | 裁决 |
+|---|---|---|
+| E01 Provider / Tool / MCP / Channel / Delivery effect | concrete Provider 与 Tool 构造仍只在 CLI Host/命令边缘；MCP concrete runtime 只经 `mcp-config`、`mcp-runtime-adapter`、`mcp-management-adapter` 三个有限适配面；Feishu 只由 `channels.ts` 按已裁决配置动态装入，Channel/Delivery 上层只消费发送、challenge、status、lifecycle 等需求方端口。反查没有领域、Kernel、RuntimeHost、Server/RPC 取得 concrete edge factory，也没有把多角色实现合并成万能 Capability。 | **通过**；A6-01～A6-05b 当前边缘责任未出现第二 producer/consumer 或反向 concrete import。 |
+| E02 Configuration / Secret | `loadConfig/writeConfig`、validated configuration、platform SecretStore/backend 与 credential generation 的生产读取仍只在 Provider/CLI Host/命令组合边界；Host 通过 frozen purpose projections 向 model、Kernel environment、advancement、MCP、Channel、workspace、authority、credential exposure/rotation 等需求方分发。领域、Kernel、RuntimeHost 与 Server/RPC 不取得 raw config、vault/backend、SecretStore 实现或秘密来源。 | **通过**；A6-02a～A6-02c 的 source/projection 分离仍成立。 |
+| E03 P01～P15 physical storage | 按 A0 冻结的 15 个根族逐族反扫 Node fs/path、codec、lock/fsync/tmp、delete/retention、physical factory 与需求端声明：领域 application、RuntimeHost 与 RPC 对物理 I/O 为零；Conversation/Permission/Workscene cleanup、P01/P05/P06、P07、P08/P09、P10～P15 各自仍只有已登记的 Infrastructure/Correctness owner。Core/Executor/Mesh/Orchestrator/Server 内的文件实现均由有限 adapter 在 CLI Host/命令边缘组合，没有第二 root、第二 writer、需求端路径推导或 optional no-op storage fallback。 | **通过**；A6-06、A6-08～A6-12 的分族责任当前未被反证。 |
+| E04 Executor / Mesh / assignment / assets / checkpoint / pairing / workspace / staging | `ExecutorRuntimeSubstrate` 只在 Executor role 与 workspace local fallback 构造；`ExecutorDataPlaneRuntime`、`MeshRuntimeAssembly` 分别只在 Anchor/Executor role 组合根取得；Conversation executor boundary、execution-asset cache、pairing continuation、checkpoint target/receiver 与 conversation/planned/DR staging 均保持各自有限 constructor exact-set。反向追踪同实例传递、promotion、current-device cleanup、Host/role close 与 recovery-root replace，未发现错实例重建、跨族猜删、partial 当 Authority、local/remote 双写或第二 lifecycle owner。 | **通过**；A6-07～A6-11c 的 identity/lifecycle 边界当前成立。 |
+| E05 Domain / Product API / Kernel / RuntimeHost / Surface topology transparency | 对 Conversation、Workspace、Workscene、Schedule、Advancement、Delivery、Trust、Skill、Device、Backup/Recovery 全部领域 application 与 Product API contribution/dispatcher 重新扫描，再追至 Kernel/RuntimeHost 和正式 Surface/Binding。A6-21 的五种旧形状均为零：Conversation 只收 opaque resolution fence 与同质目录 entries；Advancement 只持 opaque review-root binding；Device removal 只收 effect outcome；duty/current removal 只收 admission outcome；目录领域不再区分 local/remote。设备 id、恢复 approval generation、wire fence 与 Correctness record 内 generation 均只服务既有产品关系或持久校验，没有被误报为 topology selection；本轮未发现第六条领域/Kernel/Surface 产品拓扑决定。 | **通过**；A6-22～A6-27 已接受子边界由本轮独立生产回扫重新成立。 |
+| E06 one Host / static adapters / no locator or mutable late binding | `createPersistentApplicationHost` 仍只有 `topology-command.ts` 一个生产 caller，旧 `runConfiguredServeTopology`、`ServiceHostModule`、`runRoleTopology` 与第二组合根未复活；但 production Anchor/Executor graph 并非静态完成。`command.ts` 仍以 `conversationsRef`、`authorityRuntimeRef`、`meshRuntimeRef`、`conversationAuthorityRef`、`schedulerProductRef`、`schedulerFacadeRef`、`sessionBroadcastRef`、`sessionActivityBroadcastRef` 和 `anchorInternalStop.current` 在取得/发布后回填；Executor 仍以 `executorInternalStop.current` 回填。Topology 链另有 `ConversationExecutorTopologyAdapter.bindDirectory()`，`MeshRuntimeAssembly` 的 `bindAuthorityCheckpointOwner/bindPlannedAnchorLifecycle/bindPostAdoptionReview/bindPlannedAnchorPostInstallConsumers/bindDeviceRemovalLifecycle/bindFirstPartyConversationSurface` 继续在构造后补齐运行期依赖。部分读取用 optional/no-op 或运行期抛错区分“尚未安装”，所以这些不是不可伪造的冻结装配输入；现有 S7 只冻结调用数量和若干先后关系，没有拒绝 ref/bind 回流。 | **失败**；这是真实生产可达的可变 late-binding / service-location 形状，推翻 A6-21 E06“production source 为零”的旧结论。A6 保持 `[ ]`、完成度保持 `6/8`。 |
+
+- 反证去重与最窄修复顺序：E06-C01 先收口直接改变单机/分布式和 role 可达性的 topology 必需依赖，即 `meshRuntimeRef`、Conversation executor directory 后绑定及 Mesh 的 role/surface/lifecycle `bind*` 集合，使同一有限 Host topology contribution 在 consumer 可达前一次性封存；不得用可变 callback bag 或 builder 改名保留。E06-C02 再收口 Anchor 的 authority/conversation/scheduler 产品依赖回填，使每个 generation 经既有类型化 lifecycle owner 原子换代而非共享 ref/optional fallback。E06-C03 最后收口 broadcast 与 Anchor/Executor internal-stop 回填，使 activation gate 发布前得到 required typed ports，失败/终止仍走 A1 已接受的唯一 owner。三组可以独立验证，任一组未接受前不得把剩余组或 A7 的全包 barrel/制品清理混入；全部完成后必须再次从零执行 E01～E06，不能复用本表的局部通过直接勾选 A6。
+- 门禁与证据边界：canonical `pnpm s7:lint` 在当前未修改生产基线上取得 58/58、registry golden 通过；`pnpm runtime:package-exports` 通过；它们继续证明已编码的边缘、存储、同实例、领域 owner 与公开 subpath 约束，但当前没有 mutation 能让上述 late-binding exact-set 或 optional/no-op 未安装分支失败，故不能反证 E06-C01～C03。本文是本轮唯一修改；依照静态审计边界没有运行测试、typecheck、build、根级回归、package check 或制品验收。
+- 失效、状态与交接：`A6-28-replaceable-edges-topology-complete-exit-audit-v1` 形成完整失败证据并停在文档自洽的安全交接点。若 edge package/import、runtime configuration/secret projection、P01～P15 physical factory、Executor/Mesh/staging constructor/lifecycle、任一领域 application/Product API/Kernel/RuntimeHost/Surface binding、上述 late-binding exact-set、S7 inspector/mutation 或 package exports 变化，应恢复本审计对应行；E01～E05 的本轮通过不因 E06 失败而被改写为未知，但也不能单独组成 A6 退出证据。当前等待协调者独立复核后从 E06-C01 派发最窄修复，A6/A7 与最终退出门均保持 `[ ]`，本轮未进入 A7，也未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立复核：从唯一 `createPersistentApplicationHost` 生产 caller 向内追踪 Anchor/Executor 装配，确认第二组合根和旧 Host 名称确实为零，但 `command.ts` 与 Executor role 仍以共享 `current` 引用在取得后回填必需依赖，`ConversationExecutorTopologyAdapter.bindDirectory()` 及 `MeshRuntimeAssembly` 多个 `bind*` 继续在构造后安装跨责任端口，且若干 consumer 以空集合、no-op 或运行期异常表达“尚未安装”。这些路径均为当前生产可达，现有 S7 只冻结调用数和顺序而不能拒绝等价 late binding；AE-001 4.5、反模式清单和检查点 6 对静态类型化图、入口开放前冻结及禁止 mutable lazy ref 有唯一裁决。接受 A6-28 的失败证据；C01 必须继续按独立依赖链拆分，不能作为一个大包处理，A6 保持 `[ ]`。
 
 ## 十、用户提示词
 
