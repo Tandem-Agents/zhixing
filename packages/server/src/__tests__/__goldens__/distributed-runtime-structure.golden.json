@@ -1276,7 +1276,7 @@
     },
     {
       "kind": "import",
-      "references": 193,
+      "references": 195,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1354,7 +1354,7 @@
     },
     {
       "kind": "type-import",
-      "references": 196,
+      "references": 195,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },

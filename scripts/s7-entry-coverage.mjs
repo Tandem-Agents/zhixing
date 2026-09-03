@@ -7342,14 +7342,34 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !scheduleRuntimeMechanism.includes("implements AnchorScheduleLifecycleMechanism") ||
     !scheduleRuntimeMechanism.includes("interface AnchorScheduleLifecycleMechanism") ||
     !scheduleRuntimeMechanism.includes("class AnchorSchedulerHostLifecycle") ||
+    !scheduleRuntimeMechanism.includes("readonly application: ScheduleApplication;") ||
+    !scheduleRuntimeMechanism.includes("readonly management: ScheduleManagementApplication;") ||
+    !scheduleRuntimeMechanism.includes("readonly facade: SchedulerFacade;") ||
+    !scheduleRuntimeMechanism.includes("this.application = new ScheduleApplicationService(") ||
+    !scheduleRuntimeMechanism.includes("this.management = new ScheduleManagementApplicationService(") ||
+    !scheduleRuntimeMechanism.includes("this.facade = new LocalSchedulerFacade(") ||
+    !scheduleRuntimeMechanism.includes("#product: AnchorSchedulerProductPort | undefined;") ||
+    !scheduleRuntimeMechanism.includes("#requireProduct(): AnchorSchedulerProductPort") ||
+    !scheduleRuntimeMechanism.includes("snapshot: () => this.#requireProduct().snapshot()") ||
+    !scheduleRuntimeMechanism.includes("onSignal: (handler) => this.#requireProduct().onSignal(handler)") ||
+    !scheduleRuntimeMechanism.includes("list: () => this.#requireProduct().list()") ||
+    !scheduleRuntimeMechanism.includes("throw new Error(\"Anchor Schedule product generation is unavailable\")") ||
+    /this\.#product\?\.|this\.#product\s*\?\?/u.test(scheduleRuntimeMechanism) ||
     !scheduleRuntimeMechanism.includes("readonly installedAnchorEpoch: number") ||
     !scheduleRuntimeMechanism.includes("createProductBoundary()") ||
     !scheduleRuntimeMechanism.includes("return this.#scheduler.acceptedWorkItems()") ||
     !scheduleRuntimeMechanism.includes("return this.#scheduler.pauseForAuthorityTransfer()") ||
     /readonly scheduler: AnchorScheduler/u.test(scheduleRuntimeMechanism) ||
-    !composition.includes("const schedulerApplication = new ScheduleApplicationService(") ||
-    composition.split("new ScheduleApplicationService(").length - 1 !== 1 ||
     !composition.includes("const schedulerGenerationOwner = new AnchorSchedulerHostLifecycle({") ||
+    !composition.includes("const schedulerApplication = schedulerGenerationOwner.application;") ||
+    !composition.includes("const schedulerManagement = schedulerGenerationOwner.management;") ||
+    !composition.includes("const schedulerFacade = schedulerGenerationOwner.facade;") ||
+    /schedulerProductRef|schedulerFacadeRef|getSchedulerFacade|currentSchedulerProduct/u.test(
+      composition,
+    ) ||
+    /new (?:ScheduleRuntimeApplicationService|ScheduleApplicationService|ScheduleManagementApplicationService|LocalSchedulerFacade)\s*\(/u.test(
+      composition,
+    ) ||
     !composition.includes("await schedulerGenerationOwner.installInitial({") ||
     !composition.includes("schedulerGenerationOwner.stopAndRelease()") ||
     !composition.includes("schedulerGenerationOwner.recoverInstalledAuthority({") ||
@@ -7386,20 +7406,24 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     "await input.prepare(replacement);",
     scheduleGenerationValidate,
   );
+  const scheduleGenerationProductCreate = scheduleRuntimeMechanism.indexOf(
+    "const replacementProductBoundary = replacement.createProductBoundary();",
+    scheduleGenerationPrepare,
+  );
   const scheduleCurrentBindingRelease = scheduleRuntimeMechanism.indexOf(
     "currentBindingRelease();",
-    scheduleGenerationPrepare,
+    scheduleGenerationProductCreate,
   );
   const scheduleGenerationBind = scheduleRuntimeMechanism.indexOf(
     "replacementBindingRelease = input.bind(replacement);",
     scheduleCurrentBindingRelease,
   );
   const scheduleGenerationRelease = scheduleRuntimeMechanism.indexOf(
-    "this.#application.release(current);",
+    "this.application.release(current);",
     scheduleGenerationBind,
   );
   const scheduleGenerationInstall = scheduleRuntimeMechanism.indexOf(
-    "this.#application.install(replacement);",
+    "this.application.install(replacement);",
     scheduleGenerationRelease,
   );
   const scheduleCurrentPublicationRelease = scheduleRuntimeMechanism.indexOf(
@@ -7407,12 +7431,16 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     scheduleGenerationInstall,
   );
   const scheduleGenerationPublish = scheduleRuntimeMechanism.indexOf(
-    "replacementPublicationRelease = input.publish(replacement);",
+    "replacementPublicationRelease = input.publish(",
     scheduleCurrentPublicationRelease,
+  );
+  const scheduleGenerationProductCommit = scheduleRuntimeMechanism.indexOf(
+    "this.#product = replacementProductBoundary.product;",
+    scheduleGenerationPublish,
   );
   const scheduleGenerationCommit = scheduleRuntimeMechanism.indexOf(
     "this.#current = replacement;",
-    scheduleGenerationPublish,
+    scheduleGenerationProductCommit,
   );
   const scheduleGenerationActivate = scheduleRuntimeMechanism.indexOf(
     "input.activate(replacement);",
@@ -7440,22 +7468,26 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     scheduleGenerationCreate < scheduleGenerationCompare ||
     scheduleGenerationValidate < scheduleGenerationCreate ||
     scheduleGenerationPrepare < scheduleGenerationValidate ||
-    scheduleCurrentBindingRelease < scheduleGenerationPrepare ||
+    scheduleGenerationProductCreate < scheduleGenerationPrepare ||
+    scheduleCurrentBindingRelease < scheduleGenerationProductCreate ||
     scheduleGenerationBind < scheduleCurrentBindingRelease ||
     scheduleGenerationRelease < scheduleGenerationBind ||
     scheduleGenerationInstall < scheduleGenerationRelease ||
     scheduleCurrentPublicationRelease < scheduleGenerationInstall ||
     scheduleGenerationPublish < scheduleCurrentPublicationRelease ||
-    scheduleGenerationCommit < scheduleGenerationPublish ||
+    scheduleGenerationProductCommit < scheduleGenerationPublish ||
+    scheduleGenerationCommit < scheduleGenerationProductCommit ||
     scheduleGenerationActivate < scheduleGenerationCommit ||
     scheduleGenerationResume < scheduleGenerationActivate ||
     scheduleGenerationReset < scheduleGenerationResume ||
     scheduleGenerationStop < scheduleGenerationReset ||
-    !scheduleRuntimeMechanism.includes("this.#application.install(current);") ||
+    !scheduleRuntimeMechanism.includes("this.application.install(current);") ||
+    !scheduleRuntimeMechanism.includes("this.#product = currentProduct;") ||
+    !scheduleRuntimeMechanism.includes("this.#product = restoredProductBoundary.product;") ||
     !scheduleRuntimeMechanism.includes("await stopFailedGeneration(replacement, error);") ||
     !scheduleRuntimeMechanism.includes("attemptGenerationRelease(replacementBindingRelease, rollbackFailures)") ||
     !scheduleRuntimeMechanism.includes("this.#bindingRelease = input.bind(current);") ||
-    !scheduleRuntimeMechanism.includes("this.#publicationRelease = input.publish(current);") ||
+    !scheduleRuntimeMechanism.includes("this.#publicationRelease = input.publish(") ||
     !scheduleRuntimeMechanism.includes("bindGeneration(): () => void") ||
     !scheduleRuntimeMechanism.includes("if (this.#generationBound)") ||
     !scheduleRuntimeMechanism.includes("this.#options.protocol.bindMutationPublisher(this.#mutationPublisher)") ||
@@ -7464,10 +7496,10 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     conversationProtocolRuntime.split("bindMutationPublisher(").length - 1 !== 1 ||
     conversationProtocolRuntime.split("this.#mutationPublisher = undefined;").length - 1 !== 1 ||
     composition.includes("conversationProtocol.bindMutationPublisher(") ||
-    !/await input\.prepare\(input\.mechanism\);[\s\S]*?bindingRelease = input\.bind\(input\.mechanism\);[\s\S]*?this\.#application\.install\(input\.mechanism\);[\s\S]*?publicationRelease = input\.publish\(input\.mechanism\);[\s\S]*?this\.#current = input\.mechanism;[\s\S]*?input\.activate\(input\.mechanism\);[\s\S]*?await input\.resume\(input\.mechanism\)/u.test(
+    !/await input\.prepare\(input\.mechanism\);[\s\S]*?const productBoundary = input\.mechanism\.createProductBoundary\(\);[\s\S]*?bindingRelease = input\.bind\(input\.mechanism\);[\s\S]*?this\.application\.install\(input\.mechanism\);[\s\S]*?publicationRelease = input\.publish\([\s\S]*?productBoundary\.globalState[\s\S]*?this\.#product = productBoundary\.product;[\s\S]*?this\.#current = input\.mechanism;[\s\S]*?input\.activate\(input\.mechanism\);[\s\S]*?await input\.resume\(input\.mechanism\)/u.test(
       initialInstall,
     ) ||
-    !/publicationRelease\?\.\(\);[\s\S]*?this\.#application\.release\(input\.mechanism\);[\s\S]*?bindingRelease\?\.\(\);[\s\S]*?stopFailedGeneration\(input\.mechanism, error\)/u.test(
+    !/publicationRelease\?\.\(\);[\s\S]*?this\.application\.release\(input\.mechanism\);[\s\S]*?bindingRelease\?\.\(\);[\s\S]*?stopFailedGeneration\(input\.mechanism, error\)/u.test(
       initialInstall,
     ) ||
     !/installSchedulerGlobalState:\s*\(state:\s*GlobalStatePort\)\s*=>\s*\(\)\s*=>\s*void/u.test(
@@ -7476,7 +7508,10 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !/if\s*\(schedulerGlobalState === state\)\s*schedulerGlobalState = undefined/u.test(
       setupDelivery,
     ) ||
-    !/const releaseGlobalState\s*=\s*[\s\S]*?installSchedulerGlobalState\(boundary\.globalState\);[\s\S]*?if \(schedulerProductRef === product\) schedulerProductRef = undefined;[\s\S]*?releaseGlobalState\(\);/u.test(
+    !/const publishSchedulerGeneration[\s\S]*?globalState:[\s\S]*?createProductBoundary[\s\S]*?installSchedulerGlobalState\(globalState\)/u.test(
+      composition,
+    ) ||
+    !/const schedulerGenerationOwner[\s\S]*?const schedulerFacade = schedulerGenerationOwner\.facade;[\s\S]*?createAnchorRuntimeCapabilityCatalog\([\s\S]*?scheduler: schedulerFacade,[\s\S]*?createAnchorRuntimeProjectionAssembly\([\s\S]*?scheduler: schedulerFacade,/u.test(
       composition,
     ) ||
     !/const activateSchedulerGeneration[\s\S]*?runtime\.activate\(\);/u.test(composition) ||
@@ -7492,7 +7527,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     /jobStatus\.register(?:Scheduler)?\(|executorCapabilities\.onAccepted\(|bindMutationPublisher\(/u.test(
       schedulerMechanismConstructor,
     ) ||
-    /await this\.#application\.stop\(\);[\s\S]*?const replacement = await input\.create\(\)/u.test(
+    /await this\.application\.stop\(\);[\s\S]*?const replacement = await input\.create\(\)/u.test(
       scheduleRuntimeMechanism,
     )
   ) {
@@ -7524,8 +7559,8 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !rpcSchedule.includes("Invalid schedule.completed notification") ||
     !composition.includes("createScheduleManagementProductApiContribution(schedulerManagement)") ||
     composition.split("createScheduleManagementProductApiContribution(").length - 1 !== 1 ||
-    composition.split("new ScheduleManagementApplicationService(").length - 1 !== 1 ||
-    !composition.includes("const schedulerManualExecution: ScheduleManualExecutionPort") ||
+    scheduleRuntimeMechanism.split("new ScheduleManagementApplicationService(").length - 1 !== 1 ||
+    !scheduleRuntimeMechanism.includes("const manualExecution: ScheduleManualExecutionPort") ||
     /schedulerBackend[\s\S]*?(?:runTask|abortRun)\s*:/u.test(composition)
   ) {
     failures.push("Schedule consumers do not converge on the one management application");

@@ -42,7 +42,7 @@ function baseFacade(): SchedulerFacade {
 describe("ExecutionSchedulerFacade", () => {
   it("uses the direct facade outside a durable assignment", async () => {
     const base = baseFacade();
-    const facade = new ExecutionSchedulerFacade(() => base);
+    const facade = new ExecutionSchedulerFacade(base);
     await facade.create(SPEC);
     expect(base.create).toHaveBeenCalledOnce();
   });
@@ -50,7 +50,7 @@ describe("ExecutionSchedulerFacade", () => {
   it("stages writes and exposes read-your-writes without touching direct CRUD", async () => {
     const base = baseFacade();
     const staged: unknown[] = [];
-    const facade = new ExecutionSchedulerFacade(() => base);
+    const facade = new ExecutionSchedulerFacade(base);
     const stage = vi.fn(async (input: unknown) => {
       staged.push(input);
       return { seq: staged.length, taskId: "task-created" };
@@ -103,7 +103,7 @@ describe("ExecutionSchedulerFacade", () => {
     const stage = vi.fn(async () => ({ seq: 1, taskId: "task-created" }));
     const bus = createEventBus<SchedulerEventMap>();
     const direct = baseFacade();
-    const facade = new ExecutionSchedulerFacade(() => direct);
+    const facade = new ExecutionSchedulerFacade(direct);
     await runContextStorage.run(
       { bus, lineage: "main", stageScheduleMutation: stage },
       async () => {
@@ -127,7 +127,7 @@ describe("ExecutionSchedulerFacade", () => {
     system.action = { kind: "system", handler: "__transcript-gc" };
     const systemBase = baseFacade();
     systemBase.list = vi.fn(async () => [system]);
-    const systemFacade = new ExecutionSchedulerFacade(() => systemBase);
+    const systemFacade = new ExecutionSchedulerFacade(systemBase);
     const systemStage = vi.fn();
     await runContextStorage.run(
       { bus, lineage: "main", stageScheduleMutation: systemStage },

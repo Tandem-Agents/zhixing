@@ -25,8 +25,6 @@ import {
   loadLayeredGuidance,
   type AgentEventMap,
   type SchedulerEventMap,
-  type SchedulerFacade,
-  LocalSchedulerFacade,
   worksceneConversationId,
   type DeliveryLifecycleSourcePermit,
 } from "@zhixing/core";
@@ -53,12 +51,6 @@ import {
   createScheduleRuntimeProductApiContribution,
   SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET,
   SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET,
-  ScheduleApplicationService,
-  ScheduleManagementApplicationService,
-  ScheduleRuntimeApplicationService,
-  type ScheduleManualExecutionPort,
-  type ScheduleManagementRepository,
-  type ScheduleRuntimeProjectionPort,
 } from "@zhixing/core/scheduler/application";
 import {
   createTrustAdministrationProductApiContribution,
@@ -123,7 +115,6 @@ import {
   type ServerContext,
 } from "@zhixing/server";
 import {
-  AnchorSchedulerProductPort,
   ConfirmationHub,
 } from "@zhixing/owner-kernel";
 import {
@@ -597,49 +588,6 @@ async function runServerProcess(
     repository: permissionStorage.management,
     workspaceIdentity: permissionStorage.workspaceIdentity,
   });
-  // 3. Schedule domain lazy projection —— generation 安装后只切换 Correctness
-  // mechanism；产品可见状态、事件与 lifecycle 语义均由领域应用持有。
-  let schedulerProductRef: AnchorSchedulerProductPort | undefined;
-  const currentSchedulerProduct = (): AnchorSchedulerProductPort => {
-    if (!schedulerProductRef) throw new Error("Scheduler generation is not installed");
-    return schedulerProductRef;
-  };
-  const schedulerRuntimeProjection: ScheduleRuntimeProjectionPort = {
-    snapshot: () => schedulerProductRef?.snapshot() ?? {
-      tasks: Object.freeze([]),
-      activeRunCount: 0,
-    },
-    onSignal: (handler) => schedulerProductRef?.onSignal(handler) ?? (() => undefined),
-  };
-  const schedulerRuntimeApplication = new ScheduleRuntimeApplicationService(
-    schedulerRuntimeProjection,
-  );
-  const schedulerApplication = new ScheduleApplicationService(
-    schedulerRuntimeApplication,
-  );
-  const schedulerManualExecution: ScheduleManualExecutionPort = {
-    run: (input) => currentSchedulerProduct().run(input),
-    abort: (input) => currentSchedulerProduct().abort(input),
-  };
-  const schedulerManagementRepository: ScheduleManagementRepository = {
-    list: () => currentSchedulerProduct().list(),
-    find: (taskId) => currentSchedulerProduct().find(taskId),
-    commitCreate: (input) => currentSchedulerProduct().commitCreate(input),
-    commitUpdate: (input) => currentSchedulerProduct().commitUpdate(input),
-    commitDelete: (input) => currentSchedulerProduct().commitDelete(input),
-  };
-  const schedulerManagement = new ScheduleManagementApplicationService(
-    schedulerManagementRepository,
-    schedulerManualExecution,
-  );
-  // schedule 工具经门面接入锚点唯一 scheduler 权威。实例化落点在权威创建后；
-  // per-runtime 工具只持 getter，不持第二套 scheduler 状态。
-  let schedulerFacadeRef: LocalSchedulerFacade | null = null;
-  const getSchedulerFacade = (): SchedulerFacade => {
-    if (!schedulerFacadeRef) throw new Error("Scheduler not initialized yet");
-    return schedulerFacadeRef;
-  };
-
   // serve 模式无 spinner —— 不传 renderer,pauseUI 退化为 no-op。
   // 写屏走 stdout writer（后台宿主无 chrome），retry/compact 等事件
   // 直接打到 stdout 日志。工厂结果在多个 runtime 之间共享:每次 runtime.run() 各自
@@ -674,6 +622,15 @@ async function runServerProcess(
   // 3a. ConfirmationHub —— 远程权限确认聚合层（见 remote-confirmation-execution.md）
   //   在会话执行面 / 通道 / ephemeralRuntime / ServerContext 之前创建，以便各组件构造时能接入。
   const confirmationHub = new ConfirmationHub();
+  // Scheduler generation owner 在任何长期消费者之前构造稳定产品端口；
+  // 物理 mechanism/product 只由 owner 在 initial/replacement 事务中原子安装。
+  const schedulerGenerationOwner = new AnchorSchedulerHostLifecycle({
+    confirmationHub,
+    workingDirectory: hostDefaultWorkspace.postAdoptionReviewWorkingDirectory,
+  });
+  const schedulerApplication = schedulerGenerationOwner.application;
+  const schedulerManagement = schedulerGenerationOwner.management;
+  const schedulerFacade = schedulerGenerationOwner.facade;
 
   // 3b. MCP host —— Authority 的 executor readiness 必须读取与实际 runtime 相同的
   //   已连接工具目录，因此连接与唯一 cleanup owner 在 Authority 构造前成立。
@@ -698,7 +655,7 @@ async function runServerProcess(
   const anchorRuntimeCapabilities = createAnchorRuntimeCapabilityCatalog({
     extraTools: builtinExtraTools,
     mcpTools: mcpRuntime.tools,
-    scheduler: getSchedulerFacade,
+    scheduler: schedulerFacade,
   });
   const executorReadiness = createExecutorReadinessSource({
     runtime: anchorRuntimeCapabilities,
@@ -745,7 +702,7 @@ async function runServerProcess(
     worksceneAssignmentTools,
     extraTools: builtinExtraTools,
     mcpTools: mcpRuntime.tools,
-    scheduler: getSchedulerFacade,
+    scheduler: schedulerFacade,
   });
   // 3c'. 段切换外部依赖 —— serve 全部 runtime（per-session + ephemeral）共享：
   //   注意力窗口的段保护对一切运行体生效。persistence 为 no-op（serve 未接
@@ -1153,11 +1110,6 @@ async function runServerProcess(
 
   // Anchor 是 scheduler/job 唯一 owner。非 anchor 拓扑不装 timer、journal
   // recovery 或兼容迁移器，schedule 产品入口保持明确不可用。
-  const schedulerGenerationOwner = new AnchorSchedulerHostLifecycle({
-    application: schedulerApplication,
-    confirmationHub,
-    workingDirectory: hostDefaultWorkspace.postAdoptionReviewWorkingDirectory,
-  });
   async function settleScheduleForTransfer(): Promise<void> {
     await schedulerApplication.settleAcceptedWork({
       strategy: "drain",
@@ -1277,24 +1229,13 @@ async function runServerProcess(
         }
       }
     };
-    const publishSchedulerGeneration = (runtime: AnchorSchedulerRuntime) => {
-      const boundary = runtime.createProductBoundary();
-      const facade = schedulerFacadeRef ?? new LocalSchedulerFacade(
-        schedulerManagement,
-        schedulerApplication,
-      );
+    const publishSchedulerGeneration = (
+      _runtime: AnchorSchedulerRuntime,
+      globalState: ReturnType<AnchorSchedulerRuntime["createProductBoundary"]>["globalState"],
+    ) => {
       const releaseGlobalState =
-        ctx.authorityRuntime!.installSchedulerGlobalState(boundary.globalState);
-      const product = boundary.product;
-      schedulerProductRef = product;
-      schedulerFacadeRef = facade;
-      let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        if (schedulerProductRef === product) schedulerProductRef = undefined;
-        releaseGlobalState();
-      };
+        ctx.authorityRuntime!.installSchedulerGlobalState(globalState);
+      return releaseGlobalState;
     };
     const bindSchedulerGeneration = (runtime: AnchorSchedulerRuntime) => {
       return runtime.bindGeneration();

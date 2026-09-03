@@ -7917,6 +7917,26 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/anchor-scheduler-runtime.ts",
       (text) => text.replace(
+        "this.#product = replacementProductBoundary.product;",
+        "void replacementProductBoundary.product;",
+      ),
+    )).join("\n"),
+    /Schedule physical generation replacement escaped its Host boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/anchor-scheduler-runtime.ts",
+      (text) => text.replace(
+        "const replacementProductBoundary = replacement.createProductBoundary();\n      currentBindingRelease();",
+        "currentBindingRelease();\n      const replacementProductBoundary = replacement.createProductBoundary();",
+      ),
+    )).join("\n"),
+    /Schedule physical generation replacement escaped its Host boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/anchor-scheduler-runtime.ts",
+      (text) => text.replace(
         "input.activate(replacement);",
         "await current.stop();\n      input.activate(replacement);",
       ),
@@ -8016,6 +8036,26 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       ),
     )).join("\n"),
     /Schedule runtime and lifecycle lack one finite domain application boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "const schedulerFacade = schedulerGenerationOwner.facade;",
+        "let schedulerFacadeRef = schedulerGenerationOwner.facade;\n  const schedulerFacade = schedulerFacadeRef;",
+      ),
+    )).join("\n"),
+    /Schedule runtime and lifecycle lack one finite domain application boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "scheduler: schedulerFacade,",
+        "scheduler: () => schedulerGenerationOwner.facade,",
+      ),
+    )).join("\n"),
+    /Schedule physical generation replacement escaped its Host boundary/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(

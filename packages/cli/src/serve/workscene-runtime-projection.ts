@@ -77,7 +77,7 @@ export interface AnchorRuntimeCapabilityCatalog {
 export function createAnchorRuntimeCapabilityCatalog(input: {
   readonly extraTools: BuiltinExtraToolsAssembly;
   readonly mcpTools: McpRuntimeToolProjectionPort;
-  readonly scheduler: () => SchedulerFacade;
+  readonly scheduler: SchedulerFacade;
 }): AnchorRuntimeCapabilityCatalog {
   const executionScheduler = new ExecutionSchedulerFacade(input.scheduler);
   return Object.freeze({
@@ -136,7 +136,7 @@ export function createAnchorRuntimeProjectionAssembly(input: {
   readonly worksceneAssignmentTools: WorksceneAssignmentToolApplication;
   readonly extraTools: BuiltinExtraToolsAssembly;
   readonly mcpTools: McpRuntimeToolProjectionPort;
-  readonly scheduler: () => SchedulerFacade;
+  readonly scheduler: SchedulerFacade;
 }): AnchorRuntimeProjectionAssembly {
   const executionScheduler = new ExecutionSchedulerFacade(input.scheduler);
   const runtimeTools = (

@@ -1,4 +1,3 @@
-import { ScheduleApplicationService } from "@zhixing/core/scheduler/application";
 import type { DeferredGlobalIntent } from "@zhixing/core/contracts";
 import { ConfirmationHub } from "@zhixing/owner-kernel";
 import { describe, expect, it, vi } from "vitest";
@@ -10,8 +9,8 @@ import {
 
 describe("AnchorSchedulerHostLifecycle", () => {
   it("recovers the same physical generation without replacing its mechanism", async () => {
-    const application = scheduleApplication();
-    const lifecycle = generationOwner(application);
+    const lifecycle = generationOwner();
+    const { application } = lifecycle;
     const current = mechanism(7, [{ id: "run-1", revision: "revision-1" }]);
     await installInitial(lifecycle, current.runtime);
 
@@ -34,8 +33,8 @@ describe("AnchorSchedulerHostLifecycle", () => {
 
   it("prepares and publishes a replacement before switching and closing the old generation", async () => {
     const order: string[] = [];
-    const application = scheduleApplication();
-    const lifecycle = generationOwner(application);
+    const lifecycle = generationOwner();
+    const { application } = lifecycle;
     const previous = mechanism(7, [], order, "previous");
     const replacement = mechanism(
       8,
@@ -85,9 +84,47 @@ describe("AnchorSchedulerHostLifecycle", () => {
     await expect(application.captureAcceptedWork()).resolves.toEqual([]);
   });
 
+  it("keeps one stable product surface across generations and a stale release cannot clear its successor", async () => {
+    const lifecycle = generationOwner();
+    const stableApplication = lifecycle.application;
+    const stableManagement = lifecycle.management;
+    const stableFacade = lifecycle.facade;
+    const previous = mechanism(7);
+    const replacement = mechanism(8);
+    const edges = generationEdges();
+
+    expect(() => stableApplication.readStatus()).toThrow(
+      "Anchor Schedule product generation is unavailable",
+    );
+    await installInitial(lifecycle, previous.runtime, edges);
+    const staleRelease = vi.mocked(edges.publish).mock.results[0]!.value;
+    expect(stableApplication.readStatus().activeRunCount).toBe(7);
+    await expect(stableFacade.list()).resolves.toEqual([]);
+    expect(previous.productList).toHaveBeenCalledOnce();
+
+    await lifecycle.recoverInstalledAuthority({
+      currentAnchorEpoch: 8,
+      create: async () => replacement.runtime,
+      prepare: vi.fn(async () => undefined),
+      bind: edges.bind,
+      publish: edges.publish,
+      activate: vi.fn(() => undefined),
+      resume: vi.fn(async () => undefined),
+    });
+    staleRelease();
+
+    expect(lifecycle.application).toBe(stableApplication);
+    expect(lifecycle.management).toBe(stableManagement);
+    expect(lifecycle.facade).toBe(stableFacade);
+    expect(stableApplication.readStatus().activeRunCount).toBe(8);
+    await expect(stableFacade.list()).resolves.toEqual([]);
+    expect(replacement.productList).toHaveBeenCalledOnce();
+    expect(edges.published()).toBe(replacement.runtime);
+  });
+
   it("starts replacement activation work only after every shared edge and stable boundary switched", async () => {
-    const application = scheduleApplication();
-    const lifecycle = generationOwner(application);
+    const lifecycle = generationOwner();
+    const { application } = lifecycle;
     const previous = mechanism(7, [{ id: "old", revision: "r1" }]);
     const replacement = mechanism(8, [{ id: "new", revision: "r2" }]);
     const edges = generationEdges();
@@ -130,8 +167,8 @@ describe("AnchorSchedulerHostLifecycle", () => {
   });
 
   it("preserves the current generation when replacement creation fails", async () => {
-    const application = scheduleApplication();
-    const lifecycle = generationOwner(application);
+    const lifecycle = generationOwner();
+    const { application } = lifecycle;
     const previous = mechanism(7, [{ id: "old", revision: "r1" }]);
     const edges = generationEdges();
     await installInitial(lifecycle, previous.runtime, edges);
@@ -157,8 +194,8 @@ describe("AnchorSchedulerHostLifecycle", () => {
   });
 
   it("rejects and closes a wrong replacement without disturbing the current generation", async () => {
-    const application = scheduleApplication();
-    const lifecycle = generationOwner(application);
+    const lifecycle = generationOwner();
+    const { application } = lifecycle;
     const previous = mechanism(7, [{ id: "old", revision: "r1" }]);
     const wrong = mechanism(9);
     await installInitial(lifecycle, previous.runtime);
@@ -183,8 +220,8 @@ describe("AnchorSchedulerHostLifecycle", () => {
   });
 
   it("preserves the current generation when replacement preparation fails", async () => {
-    const application = scheduleApplication();
-    const lifecycle = generationOwner(application);
+    const lifecycle = generationOwner();
+    const { application } = lifecycle;
     const previous = mechanism(7, [{ id: "old", revision: "r1" }]);
     const replacement = mechanism(8);
     const edges = generationEdges();
@@ -211,10 +248,40 @@ describe("AnchorSchedulerHostLifecycle", () => {
     ]);
   });
 
+  it("preserves the current product when replacement product construction fails", async () => {
+    const lifecycle = generationOwner();
+    const { application, facade } = lifecycle;
+    const previous = mechanism(7, [{ id: "old", revision: "r1" }]);
+    const replacement = mechanism(8);
+    const edges = generationEdges();
+    await installInitial(lifecycle, previous.runtime, edges);
+    vi.spyOn(replacement.runtime, "createProductBoundary").mockImplementation(() => {
+      throw new Error("generation product construction failed");
+    });
+
+    await expect(lifecycle.recoverInstalledAuthority({
+      currentAnchorEpoch: 8,
+      create: async () => replacement.runtime,
+      prepare: vi.fn(async () => undefined),
+      bind: edges.bind,
+      publish: edges.publish,
+      activate: vi.fn(() => undefined),
+      resume: vi.fn(async () => undefined),
+    })).rejects.toThrow("generation product construction failed");
+
+    expect(replacement.stop).toHaveBeenCalledOnce();
+    expect(previous.stop).not.toHaveBeenCalled();
+    expect(edges.bound()).toBe(previous.runtime);
+    expect(edges.published()).toBe(previous.runtime);
+    expect(application.readStatus().activeRunCount).toBe(7);
+    await expect(facade.list()).resolves.toEqual([]);
+    expect(previous.productList).toHaveBeenCalledOnce();
+  });
+
   it("rolls a failed replacement binding back to the complete old generation and retries", async () => {
-    const application = scheduleApplication();
     const confirmationHub = new ConfirmationHub();
-    const lifecycle = generationOwner(application, confirmationHub);
+    const lifecycle = generationOwner(confirmationHub);
+    const { application } = lifecycle;
     const previous = mechanism(7, [{ id: "old", revision: "r1" }]);
     const failed = mechanism(8);
     const replacement = mechanism(8, [{ id: "new", revision: "r2" }]);
@@ -276,9 +343,9 @@ describe("AnchorSchedulerHostLifecycle", () => {
   it.each(["activate", "resume"] as const)(
     "rolls a failed replacement %s back without resetting the stable review generation",
     async (failedStage) => {
-    const application = scheduleApplication();
     const confirmationHub = new ConfirmationHub();
-    const lifecycle = generationOwner(application, confirmationHub);
+    const lifecycle = generationOwner(confirmationHub);
+    const { application } = lifecycle;
     const previous = mechanism(7, [{ id: "old", revision: "r1" }]);
     const failed = mechanism(8);
     const replacement = mechanism(8, [{ id: "new", revision: "r2" }]);
@@ -342,8 +409,8 @@ describe("AnchorSchedulerHostLifecycle", () => {
   );
 
   it("rolls back to the current generation when replacement installation fails", async () => {
-    const application = scheduleApplication();
-    const lifecycle = generationOwner(application);
+    const lifecycle = generationOwner();
+    const { application } = lifecycle;
     const previous = mechanism(7, [{ id: "old", revision: "r1" }]);
     const replacement = mechanism(8);
     await installInitial(lifecycle, previous.runtime);
@@ -363,14 +430,15 @@ describe("AnchorSchedulerHostLifecycle", () => {
 
     expect(replacement.stop).toHaveBeenCalledOnce();
     expect(previous.stop).not.toHaveBeenCalled();
+    expect(application.readStatus().activeRunCount).toBe(7);
     await expect(application.captureAcceptedWork()).resolves.toEqual([
       { id: "old", revision: "r1" },
     ]);
   });
 
   it("rolls back to the current generation when replacement publication fails", async () => {
-    const application = scheduleApplication();
-    const lifecycle = generationOwner(application);
+    const lifecycle = generationOwner();
+    const { application } = lifecycle;
     const previous = mechanism(7, [{ id: "old", revision: "r1" }]);
     const replacement = mechanism(8);
     await installInitial(lifecycle, previous.runtime);
@@ -400,8 +468,8 @@ describe("AnchorSchedulerHostLifecycle", () => {
   it.each(["bind", "activate", "publish"] as const)(
     "cleans an initial %s failure without leaving shared generation edges",
     async (failedStage) => {
-      const application = scheduleApplication();
-      const lifecycle = generationOwner(application);
+      const lifecycle = generationOwner();
+      const { application } = lifecycle;
       const initial = mechanism(7);
       const edges = generationEdges();
       const failureName = failedStage === "bind"
@@ -442,8 +510,8 @@ describe("AnchorSchedulerHostLifecycle", () => {
   );
 
   it("keeps one stable review port across replacement and closes the owner once", async () => {
-    const application = scheduleApplication();
-    const lifecycle = generationOwner(application);
+    const lifecycle = generationOwner();
+    const { application } = lifecycle;
     const previous = mechanism(7);
     const replacement = mechanism(8);
     const stablePort = lifecycle.postAdoptionReview;
@@ -477,11 +545,9 @@ describe("AnchorSchedulerHostLifecycle", () => {
 });
 
 function generationOwner(
-  application: ScheduleApplicationService,
   confirmationHub = new ConfirmationHub(),
 ): AnchorSchedulerHostLifecycle {
   return new AnchorSchedulerHostLifecycle({
-    application,
     confirmationHub,
     workingDirectory: "C:/workspace",
   });
@@ -561,17 +627,6 @@ function generationEdges(): {
   };
 }
 
-function scheduleApplication(): ScheduleApplicationService {
-  return new ScheduleApplicationService({
-    readStatus: () => ({
-      activeRunCount: 0,
-      enabledUserTaskCount: 0,
-      turnContext: { active: [], recentlyCompleted: [], recentlyFailed: [] },
-    }),
-    onEvent: () => () => undefined,
-  });
-}
-
 function mechanism(
   installedAnchorEpoch: number,
   acceptedWork: readonly { readonly id: string; readonly revision: string }[] = [],
@@ -582,12 +637,31 @@ function mechanism(
   readonly stop: ReturnType<typeof vi.fn>;
   readonly recoverInstalledAuthority: ReturnType<typeof vi.fn>;
   readonly reviewList: ReturnType<typeof vi.fn>;
+  readonly productList: ReturnType<typeof vi.fn>;
 } {
   const stop = vi.fn(async () => {
     order.push(`stop:${name}`);
   });
   const recoverInstalledAuthority = vi.fn(async () => undefined);
   const reviewList = vi.fn(async () => []);
+  const productList = vi.fn(async () => []);
+  const product = {
+    snapshot: () => ({ tasks: [], activeRunCount: installedAnchorEpoch }),
+    onSignal: () => () => undefined,
+    list: productList,
+    find: vi.fn(async () => undefined),
+    commitCreate: vi.fn(async () => {
+      throw new Error("not implemented by lifecycle test product");
+    }),
+    commitUpdate: vi.fn(async () => {
+      throw new Error("not implemented by lifecycle test product");
+    }),
+    commitDelete: vi.fn(async () => undefined),
+    run: vi.fn(async () => {
+      throw new Error("not implemented by lifecycle test product");
+    }),
+    abort: vi.fn(async () => undefined),
+  };
   const value: AnchorScheduleLifecycleMechanism & {
     readonly deferredIntents: {
       readonly list: typeof reviewList;
@@ -605,6 +679,10 @@ function mechanism(
     resumeAdmission: vi.fn(),
     recoverInstalledAuthority,
     resumeManualSurfaces: vi.fn(async () => undefined),
+    createProductBoundary: () => ({
+      globalState: {} as never,
+      product: product as never,
+    }),
     deferredIntents: {
       list: reviewList,
       decide: vi.fn(async () => ({ status: "discarded" })),
@@ -615,5 +693,6 @@ function mechanism(
     stop,
     recoverInstalledAuthority,
     reviewList,
+    productList,
   };
 }

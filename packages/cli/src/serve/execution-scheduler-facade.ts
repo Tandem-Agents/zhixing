@@ -25,11 +25,11 @@ interface StagedViewState {
 export class ExecutionSchedulerFacade implements SchedulerFacade {
   readonly #states = new WeakMap<ScheduleMutationStager, StagedViewState>();
 
-  constructor(private readonly base: () => SchedulerFacade) {}
+  constructor(private readonly base: SchedulerFacade) {}
 
   async create(spec: ScheduleTaskDraft, context?: ScheduleMutationContext): Promise<TaskView> {
     const staged = this.#stagedState();
-    if (!staged) return this.base().create(spec, context);
+    if (!staged) return this.base.create(spec, context);
     const result = await this.#application(staged).execute({
       kind: "create",
       draft: spec,
@@ -41,7 +41,7 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
 
   async list(): Promise<TaskView[]> {
     const staged = this.#stagedState();
-    if (!staged) return this.base().list();
+    if (!staged) return this.base.list();
     return [...(await this.#application(staged).query({ kind: "list" })).tasks];
   }
 
@@ -51,7 +51,7 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
     context?: ScheduleMutationContext,
   ): Promise<TaskView> {
     const staged = this.#stagedState();
-    if (!staged) return this.base().update(id, patch, context);
+    if (!staged) return this.base.update(id, patch, context);
     const result = await this.#application(staged).execute({
       kind: "update",
       taskId: id,
@@ -69,7 +69,7 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
 
   async delete(id: string, context?: ScheduleMutationContext): Promise<void> {
     const staged = this.#stagedState();
-    if (!staged) return this.base().delete(id, context);
+    if (!staged) return this.base.delete(id, context);
     const result = await this.#application(staged).execute({
       kind: "delete",
       taskId: id,
@@ -84,15 +84,15 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
   }
 
   run(id: string, context?: ScheduleMutationContext): Promise<AgentTurnResult> {
-    return this.base().run(id, context);
+    return this.base.run(id, context);
   }
 
   onEvent(handler: SchedulerFacadeEventHandler): () => void {
-    return this.base().onEvent(handler);
+    return this.base.onEvent(handler);
   }
 
   async dispose(): Promise<void> {
-    await this.base().dispose?.();
+    await this.base.dispose?.();
   }
 
   #stagedState(): {
@@ -111,7 +111,7 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
 
   async #prime(state: StagedViewState): Promise<void> {
     if (state.primed) return;
-    for (const task of await this.base().list()) {
+    for (const task of await this.base.list()) {
       if (!state.tasks.has(task.id)) {
         state.tasks.set(task.id, structuredClone(task));
       }
@@ -197,7 +197,7 @@ export class ExecutionSchedulerFacade implements SchedulerFacade {
     };
     return new ScheduleManagementApplicationService(repository, {
       run: ({ taskId, operation }) =>
-        this.base().run(taskId, { operationId: operation.operationId }),
+        this.base.run(taskId, { operationId: operation.operationId }),
       abort: async () => {
         throw new Error("Schedule cancellation is unavailable in assignment staging");
       },

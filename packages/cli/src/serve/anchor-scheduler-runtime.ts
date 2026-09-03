@@ -1,11 +1,20 @@
 import type {
   IEventBus,
+  SchedulerFacade,
   SchedulerEventMap,
   SystemHandler,
 } from "@zhixing/core";
-import type {
-  ScheduleLifecycleApplication,
-  ScheduleLifecycleMechanismPort,
+import { LocalSchedulerFacade } from "@zhixing/core";
+import {
+  ScheduleApplicationService,
+  ScheduleManagementApplicationService,
+  ScheduleRuntimeApplicationService,
+  type ScheduleApplication,
+  type ScheduleManagementApplication,
+  type ScheduleManagementRepository,
+  type ScheduleManualExecutionPort,
+  type ScheduleLifecycleMechanismPort,
+  type ScheduleRuntimeProjectionPort,
 } from "@zhixing/core/scheduler/application";
 import type {
   AuthorityCallContext,
@@ -121,20 +130,48 @@ export interface AnchorScheduleLifecycleMechanism
  */
 export class AnchorSchedulerHostLifecycle {
   #current: AnchorSchedulerRuntime | undefined;
+  #product: AnchorSchedulerProductPort | undefined;
   #bindingRelease: (() => void) | undefined;
   #publicationRelease: (() => void) | undefined;
   #closed = false;
   #stopPromise: Promise<void> | undefined;
-  readonly #application: ScheduleLifecycleApplication;
   readonly #postAdoptionReviewCoordinator: PostAdoptionReviewCoordinator;
+  readonly application: ScheduleApplication;
+  readonly management: ScheduleManagementApplication;
+  readonly facade: SchedulerFacade;
   readonly postAdoptionReview: PostAdoptionReviewPort;
 
   constructor(input: Readonly<{
-    application: ScheduleLifecycleApplication;
     confirmationHub: ConfirmationHub;
     workingDirectory: string;
   }>) {
-    this.#application = input.application;
+    const runtimeProjection: ScheduleRuntimeProjectionPort = {
+      snapshot: () => this.#requireProduct().snapshot(),
+      onSignal: (handler) => this.#requireProduct().onSignal(handler),
+    };
+    Object.freeze(runtimeProjection);
+    const runtimeApplication = new ScheduleRuntimeApplicationService(
+      runtimeProjection,
+    );
+    this.application = new ScheduleApplicationService(runtimeApplication);
+    const repository: ScheduleManagementRepository = {
+      list: () => this.#requireProduct().list(),
+      find: (taskId) => this.#requireProduct().find(taskId),
+      commitCreate: (command) => this.#requireProduct().commitCreate(command),
+      commitUpdate: (command) => this.#requireProduct().commitUpdate(command),
+      commitDelete: (command) => this.#requireProduct().commitDelete(command),
+    };
+    Object.freeze(repository);
+    const manualExecution: ScheduleManualExecutionPort = {
+      run: (command) => this.#requireProduct().run(command),
+      abort: (command) => this.#requireProduct().abort(command),
+    };
+    Object.freeze(manualExecution);
+    this.management = new ScheduleManagementApplicationService(
+      repository,
+      manualExecution,
+    );
+    this.facade = new LocalSchedulerFacade(this.management, this.application);
     this.#postAdoptionReviewCoordinator = new PostAdoptionReviewCoordinator({
       review: {
         list: (conversationId, context) =>
@@ -159,7 +196,10 @@ export class AnchorSchedulerHostLifecycle {
     mechanism: AnchorSchedulerRuntime;
     prepare: (mechanism: AnchorSchedulerRuntime) => Promise<void>;
     bind: (mechanism: AnchorSchedulerRuntime) => () => void;
-    publish: (mechanism: AnchorSchedulerRuntime) => () => void;
+    publish: (
+      mechanism: AnchorSchedulerRuntime,
+      globalState: AnchorSchedulerGlobalStateAdapter,
+    ) => () => void;
     activate: (mechanism: AnchorSchedulerRuntime) => void;
     resume: (mechanism: AnchorSchedulerRuntime) => Promise<void>;
   }>): Promise<void> {
@@ -172,24 +212,30 @@ export class AnchorSchedulerHostLifecycle {
     let applicationInstalled = false;
     try {
       await input.prepare(input.mechanism);
+      const productBoundary = input.mechanism.createProductBoundary();
       bindingRelease = input.bind(input.mechanism);
-      this.#application.install(input.mechanism);
+      this.application.install(input.mechanism);
       applicationInstalled = true;
-      publicationRelease = input.publish(input.mechanism);
+      publicationRelease = input.publish(
+        input.mechanism,
+        productBoundary.globalState,
+      );
       this.#bindingRelease = bindingRelease;
       this.#publicationRelease = publicationRelease;
+      this.#product = productBoundary.product;
       this.#current = input.mechanism;
       input.activate(input.mechanism);
       await input.resume(input.mechanism);
     } catch (error) {
       if (this.#current === input.mechanism) {
         this.#current = undefined;
+        this.#product = undefined;
         this.#bindingRelease = undefined;
         this.#publicationRelease = undefined;
       }
       publicationRelease?.();
       if (applicationInstalled) {
-        this.#application.release(input.mechanism);
+        this.application.release(input.mechanism);
       }
       bindingRelease?.();
       await stopFailedGeneration(input.mechanism, error);
@@ -208,7 +254,10 @@ export class AnchorSchedulerHostLifecycle {
     readonly create: () => Promise<AnchorSchedulerRuntime>;
     readonly prepare: (mechanism: AnchorSchedulerRuntime) => Promise<void>;
     readonly bind: (mechanism: AnchorSchedulerRuntime) => () => void;
-    readonly publish: (mechanism: AnchorSchedulerRuntime) => () => void;
+    readonly publish: (
+      mechanism: AnchorSchedulerRuntime,
+      globalState: AnchorSchedulerGlobalStateAdapter,
+    ) => () => void;
     readonly activate: (mechanism: AnchorSchedulerRuntime) => void;
     readonly resume: (mechanism: AnchorSchedulerRuntime) => Promise<void>;
   }): Promise<void> {
@@ -218,12 +267,13 @@ export class AnchorSchedulerHostLifecycle {
       throw new Error("Anchor Schedule runtime generation is unavailable");
     }
     if (current.installedAnchorEpoch === input.currentAnchorEpoch) {
-      await this.#application.recoverInstalledAuthority();
+      await this.application.recoverInstalledAuthority();
       return;
     }
     const currentBindingRelease = this.#bindingRelease;
     const currentPublicationRelease = this.#publicationRelease;
-    if (!currentBindingRelease || !currentPublicationRelease) {
+    const currentProduct = this.#product;
+    if (!currentBindingRelease || !currentPublicationRelease || !currentProduct) {
       throw new Error("Anchor Schedule runtime generation ownership is incomplete");
     }
 
@@ -246,27 +296,32 @@ export class AnchorSchedulerHostLifecycle {
     let currentPublicationReleased = false;
     let applicationSwitched = false;
     try {
+      const replacementProductBoundary = replacement.createProductBoundary();
       currentBindingRelease();
       currentBindingReleased = true;
       replacementBindingRelease = input.bind(replacement);
 
-      this.#application.release(current);
+      this.application.release(current);
       try {
-        this.#application.install(replacement);
+        this.application.install(replacement);
         applicationSwitched = true;
       } catch (error) {
-        this.#application.install(current);
+        this.application.install(current);
         throw error;
       }
 
       currentPublicationRelease();
       currentPublicationReleased = true;
-      replacementPublicationRelease = input.publish(replacement);
+      replacementPublicationRelease = input.publish(
+        replacement,
+        replacementProductBoundary.globalState,
+      );
 
       // Commit point: every fallible generation edge is complete. From here
       // the stable review port and Schedule application move together.
       this.#bindingRelease = replacementBindingRelease;
       this.#publicationRelease = replacementPublicationRelease;
+      this.#product = replacementProductBoundary.product;
       this.#current = replacement;
       // Activation may synchronously start timer/recovery work. Every shared
       // consumer and stable product/review boundary therefore points at the
@@ -275,19 +330,27 @@ export class AnchorSchedulerHostLifecycle {
       await input.resume(replacement);
     } catch (error) {
       const rollbackFailures: unknown[] = [];
-      if (this.#current === replacement) this.#current = current;
+      if (this.#current === replacement) {
+        this.#current = current;
+        this.#product = currentProduct;
+      }
       attemptGenerationRelease(replacementPublicationRelease, rollbackFailures);
       if (applicationSwitched) {
         try {
-          this.#application.release(replacement);
-          this.#application.install(current);
+          this.application.release(replacement);
+          this.application.install(current);
         } catch (rollbackError) {
           rollbackFailures.push(rollbackError);
         }
       }
       if (currentPublicationReleased) {
         try {
-          this.#publicationRelease = input.publish(current);
+          const restoredProductBoundary = current.createProductBoundary();
+          this.#publicationRelease = input.publish(
+            current,
+            restoredProductBoundary.globalState,
+          );
+          this.#product = restoredProductBoundary.product;
         } catch (rollbackError) {
           rollbackFailures.push(rollbackError);
         }
@@ -324,16 +387,25 @@ export class AnchorSchedulerHostLifecycle {
     return current.deferredIntents;
   }
 
+  #requireProduct(): AnchorSchedulerProductPort {
+    const product = this.#product;
+    if (!product) {
+      throw new Error("Anchor Schedule product generation is unavailable");
+    }
+    return product;
+  }
+
   async #stopAndReleaseOnce(): Promise<void> {
     this.#postAdoptionReviewCoordinator.close();
     const current = this.#current;
-    await this.#application.stop();
+    await this.application.stop();
     if (!current) return;
     this.#publicationRelease?.();
     this.#publicationRelease = undefined;
     this.#bindingRelease?.();
     this.#bindingRelease = undefined;
-    this.#application.release(current);
+    this.application.release(current);
+    this.#product = undefined;
     this.#current = undefined;
   }
 }

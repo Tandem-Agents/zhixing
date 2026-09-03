@@ -39,7 +39,7 @@ function fixture(mcpTools = {
   const capabilities = createAnchorRuntimeCapabilityCatalog({
     extraTools,
     mcpTools,
-    scheduler: () => ({}) as never,
+    scheduler: {} as never,
   });
   return createAnchorRuntimeProjectionAssembly({
     capabilities,
@@ -47,7 +47,7 @@ function fixture(mcpTools = {
     worksceneAssignmentTools: {} as never,
     extraTools,
     mcpTools,
-    scheduler: () => ({}) as never,
+    scheduler: {} as never,
   });
 }
 
