@@ -2813,12 +2813,12 @@ function freezeConversationAdoptionReview(
       });
 }
 
-/** Cross-owner list merge remains Conversation-owned; topology supplies inputs only. */
-export function mergeConversationDirectoryViews(
-  local: ConversationDirectoryView,
-  remoteEntries: readonly ConversationDirectoryEntry[],
-): ConversationDirectoryView {
-  const conversations = [...local.conversations, ...remoteEntries];
+/** Directory ordering remains Conversation-owned; collectors supply homogeneous entries. */
+export function mergeConversationDirectoryEntries(input: Readonly<{
+  readonly entries: readonly ConversationDirectoryEntry[];
+  readonly availability?: ConversationAvailability;
+}>): ConversationDirectoryView {
+  const conversations = [...input.entries];
   conversations.sort(
     (left, right) =>
       right.lastActiveAt.localeCompare(left.lastActiveAt, "en-US") ||
@@ -2826,6 +2826,6 @@ export function mergeConversationDirectoryViews(
   );
   return Object.freeze({
     conversations: Object.freeze(conversations),
-    ...(local.availability ? { availability: local.availability } : {}),
+    ...(input.availability ? { availability: input.availability } : {}),
   });
 }

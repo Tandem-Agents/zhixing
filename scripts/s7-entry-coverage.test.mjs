@@ -25,6 +25,7 @@ import {
   inspectMeshPairingContinuationPersistenceBoundary,
   inspectSurfaceAssetStagingPersistenceBoundary,
   inspectAssignmentArtifactReceiverBoundary,
+  inspectConversationDirectoryTopologyBoundary,
   inspectConversationStorageBoundary,
   inspectWorksceneStorageCleanupBoundary,
   inspectStorageRemainderBoundary,
@@ -8638,6 +8639,68 @@ test("scheduler current section freezes old retirement and new AuthorityDelivery
       scheduler.replace("已整体退役", "只允许一次性排空迁移，排空后删除"),
     ),
     /missing retirement fact|stale migration wording/,
+  );
+});
+
+test("Conversation directory ordering stays topology-neutral behind one Host collector", async () => {
+  const paths = [
+    "packages/core/src/conversation/application.ts",
+    "packages/cli/src/serve/local-conversation-rpc.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: await readFile(relative, "utf8"),
+  })));
+  const mutate = (relative, update) => records.map((record) =>
+    record.relative === relative ? { ...record, text: update(record.text) } : record);
+
+  assert.deepEqual(inspectConversationDirectoryTopologyBoundary(records), []);
+  assert.match(
+    inspectConversationDirectoryTopologyBoundary(mutate(
+      "packages/core/src/conversation/application.ts",
+      (text) => `${text}\nexport function mergeConversationDirectoryViews(local, remoteEntries) { return { local, remoteEntries }; }`,
+    )).join("\n"),
+    /topology-shaped Conversation directory helper returned/,
+  );
+  assert.match(
+    inspectConversationDirectoryTopologyBoundary(mutate(
+      "packages/core/src/conversation/application.ts",
+      (text) => text.replace(
+        "readonly entries: readonly ConversationDirectoryEntry[];",
+        "readonly remote: readonly ConversationDirectoryEntry[];",
+      ),
+    )).join("\n"),
+    /input is not one finite homogeneous entry projection|learned Host topology/,
+  );
+  assert.match(
+    inspectConversationDirectoryTopologyBoundary(mutate(
+      "packages/cli/src/serve/local-conversation-rpc.ts",
+      (text) => text.replace(
+        "const merged = mergeConversationDirectoryEntries({",
+        "collectedEntries.sort(() => 0);\n    const merged = mergeConversationDirectoryEntries({",
+      ),
+    )).join("\n"),
+    /copied Conversation directory ordering policy/,
+  );
+  assert.match(
+    inspectConversationDirectoryTopologyBoundary(mutate(
+      "packages/cli/src/serve/local-conversation-rpc.ts",
+      (text) => text.replace(
+        ".filter((item) => ids.has(item.conversationId))",
+        ".filter(() => true)",
+      ),
+    )).join("\n"),
+    /grouping or authority filtering drifted/,
+  );
+  assert.match(
+    inspectConversationDirectoryTopologyBoundary([
+      ...records,
+      {
+        relative: "packages/cli/src/serve/second-directory-owner.ts",
+        text: "mergeConversationDirectoryEntries({ entries: [] });",
+      },
+    ]).join("\n"),
+    /not consumed once by the unique Host collector/,
   );
 });
 

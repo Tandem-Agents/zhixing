@@ -6,7 +6,7 @@ import {
 } from "@zhixing/core";
 import {
   ConversationApplicationError,
-  mergeConversationDirectoryViews,
+  mergeConversationDirectoryEntries,
   type ConversationDirectoryApplication,
   type ConversationDirectoryEntry,
 } from "@zhixing/core/conversation/application";
@@ -208,26 +208,24 @@ export class LocalConversationRpcRouter
       }
       ids.add(route.conversationId);
     }
-    const remoteEntries: ConversationDirectoryEntry[] = [];
+    const collectedEntries: ConversationDirectoryEntry[] =
+      local.conversations.map(projectWireConversationEntry);
     for (const [deviceId, ids] of byDevice) {
       const remote = await this.#remoteFor(deviceId).dispatch(
         "session.list",
         {},
         connection,
       ) as SessionListResult;
-      remoteEntries.push(
+      collectedEntries.push(
         ...remote.conversations
           .filter((item) => ids.has(item.conversationId))
           .map(projectWireConversationEntry),
       );
     }
-    const merged = mergeConversationDirectoryViews(
-      {
-        conversations: local.conversations.map(projectWireConversationEntry),
-        ...(local.availability ? { availability: local.availability } : {}),
-      },
-      remoteEntries,
-    );
+    const merged = mergeConversationDirectoryEntries({
+      entries: collectedEntries,
+      ...(local.availability ? { availability: local.availability } : {}),
+    });
     return {
       conversations: merged.conversations.map(projectDomainConversationEntry),
       ...(merged.availability ? { availability: merged.availability } : {}),

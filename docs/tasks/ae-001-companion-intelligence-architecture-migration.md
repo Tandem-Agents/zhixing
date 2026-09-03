@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-26 已通过协调者独立验收，等待提交<br>
+> 当前检查点：A6-27 已通过协调者独立验收，等待提交<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `0d44578d`；A6-25 Duty Migration lifecycle admission 边界收口已提交 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-21 E05-C04 的 current-device removal 子证据已通过协调者独立验收，等待提交 |
-| 活跃工作包 | `A6-26-current-device-removal-admission-outcome-v1` 已通过协调者独立验收，等待提交 |
-| 下一责任链 | 接受 A6-26 后处理 E05-C05 Conversation directory 的 local/remote 输入形状；随后重新执行完整 A6 cold-start 退出审计 |
+| 已接受基线 | `aa9b8607`；A6-26 Current-device removal lifecycle admission 边界收口已提交 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-21 E05-C05 已由 A6-27 收口并通过协调者独立验收，等待提交 |
+| 活跃工作包 | `A6-27-conversation-directory-topology-neutral-input-v1` 已通过协调者独立验收，等待提交 |
+| 下一责任链 | 接受 A6-27 后重新执行完整 A6 cold-start 退出审计；不得把局部修复相加冒充 A6 退出证明 |
 | 打开的单向桥 | 无；P06 Rubric 已恢复为 required `readByDigest/put` 有限端口，P07、P09、P11 及 P12 三类 staging 的既有有限 Infrastructure 接管继续有效 |
-| 已失效证据 | A6-15 的 E05/聚合结论与 A6-19 的未完成聚合审计均不可作为退出证明；A6-21 的 E05-C01～C03 已恢复并接受，C04 的 Duty Migration 与 current-device removal 子结论分别由 A6-25、A6-26 恢复，C05 仍打开。全部局部修复不得相加冒充完整 topology transparency |
+| 已失效证据 | A6-15 的 E05/聚合结论与 A6-19 的未完成聚合审计均不可作为退出证明；A6-21 的 E05-C01～C05 已恢复并接受，但五条局部修复不得相加冒充完整 topology transparency，仍须完整冷启动审计 |
 | 阻塞/用户决策 | 无用户决策阻塞；完整 distributed-runtime structure 测试仍被既有 A4-10 `runtime-host` 依赖断言阻断，属于 A7 零残留与终验输入 |
 
 ### A0 基线索引
@@ -3022,6 +3022,15 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据与门禁：Core Device Administration application 28/28、CLI 真实 current-device-removal Correctness 5/5、Server uninstall lifecycle 6/6，合计 3 文件 39/39；直接覆盖 allowed、active `executor-removal` conflict、每次调用读取最新 journal、领域 context 无 raw flag且投影冻结、current duty/issuer mismatch、未知 outcome 零后续读取、既有 preflight/begin 与全 lifecycle 装配。Core/CLI `tsc --noEmit`、fresh core build、`pnpm cli:build`、canonical S7 57/57 与 registry golden、fresh `pnpm runtime:package-exports`、changed-source Biome 均通过；fresh application declaration 机械确认只公开有限 admission port/outcome，raw flag只留在 Correctness authority facts。S7 反向 mutation可拒绝领域 raw flag/旧 port/`executor-removal` identity 回流、Host 匿名 passthrough或绕过唯一 adapter、真实 journal producer常量化、第二 journal reader、outcome映射或 unknown fail-closed 漂移。
 - 失效、状态与下一检查点：若 current-removal context/admission outcome、duty/issuer与 conflict 策略、Host authority/journal读取、Correctness outcome adapter或accept竞态复核、唯一组合、preflight/begin顺序、Server wire、fresh declaration、S7/package-export或上述直接测试任一变化，只恢复 `A6-26-current-device-removal-admission-outcome-v1` 及 A6-21 E05-C04 的 current-device removal 子结论；A5 Device Administration 产品 owner、device lifecycle/持久协议、A6-21 E05-C01～C03、A6-25 Duty Migration、E01～E04/E06 与 C05 不因无关变化自动失效。本证据当前完成并等待协调者独立复核；A6 与完成度保持 `[ ]`/`6/8`，接受后下一责任链固定为 E05-C05 Conversation directory local/remote 输入形状，之后必须重新执行完整 A6 cold-start 退出审计。本轮未进入 C05、A7，也未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：反查 current-device removal 领域 preflight/begin、唯一 Host 组合、Authority/Journal producer 与 Correctness 竞态守卫，确认领域 source/fresh contract 对 `executorRemovalInProgress`、`executor-removal` identity 和旧 context read port 零可达；唯一 admission adapter 每次读取最新 Authority/Journal，只冻结不含物理状态的产品 context 与 `allowed/paired-device-removal`，Correctness 内两处 raw lifecycle 复核仍只守持久准入竞态。独立取得 Core 28/28、CLI 5/5、Server 71/71，合计 104/104；canonical S7 57/57、registry golden、Core/CLI typecheck、fresh Core build、changed-source Biome 与 `git diff --check` 通过。现有 preflight/begin、duty/issuer 校验、冲突错误及 Server wire 未漂移，接受 `A6-26-current-device-removal-admission-outcome-v1`；A6 保持 `[ ]`，下一责任链为 E05-C05 Conversation directory 输入形状。
+
+### A6-27：Conversation directory topology-neutral 输入边界收口
+
+- 基线与唯一责任变化：以已接受 `HEAD aa9b8607abd975caaca603d46d22edb88190c1a1` 加协调者本文调度记录为进场基线，只处理 A6-21 E05-C05。Conversation 领域的 `mergeConversationDirectoryViews(local, remoteEntries)` 已退场，唯一 `mergeConversationDirectoryEntries({ entries, availability })` 只接收同质 `ConversationDirectoryEntry[]` 与调用方已裁决的最终 availability；领域仅拥有 `lastActiveAt` 降序、同时间 `conversationId` 升序及返回容器冻结，不再从参数、字段或分支理解 local、remote、device、route 或 Authority 拓扑。
+- Host 收集与行为保护：`LocalConversationRpcRouter.#listAllOwners()` 继续先读取本机目录，再从 owner authority 路由中排除本机与非 `fenced` 项，按远端 `deviceId` 分组且每设备恰一次调用既有 `session.list`，按该设备获准 conversation id 过滤后，把本机和远端结果投影为同一条目数组再交给领域排序。条目不去重，既有重复、名称、时间、active/busy/observer/pending 载荷保持；最终 availability 仍只沿原本机目录结果传递，远端 availability 继续不参与决定，未新增合并、降级或能力承诺。RPC 输出、远端错误传播与公开 wire 均未改变。
+- 旧路退场与结构证据：旧 helper 名称、local/remote 形状和第二合并 owner 已从 production source 与 fresh Core declaration 归零；CLI 没有复制排序规则。新增 `inspectConversationDirectoryTopologyBoundary` 及反向 mutations，机械拒绝旧 helper 回流、领域 helper 学会 local/remote/device/route/authority、非同质输入、排序/冻结漂移、CLI 自行排序、authority 过滤或分组漂移、第二 production consumer。该门禁只约束目录聚合边界，不把合法 Server/RPC route、wire 或 Host device grouping 误报为领域事实。
+- 直接证据与验证：Core Conversation application 38/38 覆盖同质条目、降序/稳定 tie-break、availability、空输入与外层/数组冻结；CLI Local Conversation RPC 16/16 覆盖本机加两个远端 owner、非 fenced/未授权远端项过滤、每设备一次拉取、相同时间排序、远端 availability 不覆盖本机结果及原有转发行为，合计两个文件 54/54。fresh Core build、CLI `tsc --noEmit`、`pnpm cli:build`、fresh `pnpm runtime:package-exports`、changed-source Biome 通过；canonical `pnpm s7:lint` 为 58/58 且 registry golden 通过，fresh declaration 只公开 topology-neutral helper。
+- 失效、状态与下一检查点：若 Conversation directory entry/view、领域排序或冻结、Local RPC 的本机读取/authority 路由/按设备分组/远端过滤、最终 availability、公开 `session.list` wire、fresh declaration、S7/package-export 或上述直接测试任一变化，只恢复 `A6-27-conversation-directory-topology-neutral-input-v1` 与 A6-21 E05-C05 子结论；A6-21 E05-C01～C04、E01～E04/E06、其他 Conversation 应用和持久协议不因无关变化自动失效。本证据当前完成并等待协调者独立复核；A6 与完成度保持 `[ ]`/`6/8`。接受后必须重新执行完整 A6 cold-start 六面退出审计，不得把五条局部修复相加直接关闭 A6；本轮未进入该聚合审计、A7，也未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：反查 `session.list` 真实入口、`#listAllOwners`、领域 helper、wire/domain 投影与 fresh declaration，确认 Conversation 合同对 local/remote/device/route/Authority 拓扑区分零可达；唯一 Host/Surface collector 仍按 fenced authority route 分组、每设备一次拉取并过滤获准 id，领域只接收同质 entries 与最终 availability，且 CLI 未复制排序。独立取得 Core 38/38、CLI 16/16、canonical S7 58/58 与 registry golden；fresh Core build、CLI typecheck、changed-source Biome、`git diff --check` 和生产旧 helper 反查均通过。排序、重复保留、availability 与公开 wire 未漂移，接受 `A6-27-conversation-directory-topology-neutral-input-v1`；A6 保持 `[ ]`，下一责任链为完整 cold-start 退出审计。
 
 ## 十、用户提示词
 

@@ -477,6 +477,97 @@ describe("LocalConversationRpcRouter", () => {
     expect(dispatchCanonical).toHaveBeenCalledTimes(1);
   });
 
+  it("以同质目录条目合并本机与多个远端 owner 并按 authority 过滤", async () => {
+    const owner = ownerPort();
+    const remoteDeviceA = "device-remote-a";
+    const remoteDeviceB = "device-remote-b";
+    const remoteA = localConversationId(
+      DEVICE_ID,
+      "01ARZ3NDEKTSV4RRFFQ69G5FB0",
+    );
+    const remoteASecond = localConversationId(
+      DEVICE_ID,
+      "01ARZ3NDEKTSV4RRFFQ69G5FB1",
+    );
+    const remoteB = localConversationId(
+      DEVICE_ID,
+      "01ARZ3NDEKTSV4RRFFQ69G5FB2",
+    );
+    const notRouted = localConversationId(
+      DEVICE_ID,
+      "01ARZ3NDEKTSV4RRFFQ69G5FB3",
+    );
+    owner.listConversationAuthorities = vi.fn(async () => [
+      fencedRoute(remoteA, remoteDeviceA, 2),
+      fencedRoute(remoteASecond, remoteDeviceA, 2),
+      fencedRoute(remoteB, remoteDeviceB, 3),
+      {
+        conversationId: notRouted,
+        authority: {
+          deviceId: "device-transitioning",
+          ownerEpoch: 4,
+          transferId: "xfer-transitioning",
+          state: "importing" as const,
+        },
+      },
+    ]);
+    const dispatchA = vi.fn(async () => ({
+      conversations: [
+        wireEntry(remoteASecond, "2026-08-08T00:00:00.000Z"),
+        wireEntry(notRouted, "2026-08-10T00:00:00.000Z"),
+        wireEntry(remoteA, "2026-08-08T00:00:00.000Z"),
+      ],
+      availability: {
+        capabilitySet: "complete",
+        continuationConfirmation: "not-required",
+      },
+    }));
+    const dispatchB = vi.fn(async () => ({
+      conversations: [wireEntry(remoteB, "2026-08-09T00:00:00.000Z")],
+    }));
+    const remoteFor = vi.fn((deviceId: string) => ({
+      dispatch: deviceId === remoteDeviceA ? dispatchA : dispatchB,
+      close: vi.fn(),
+    }) as never);
+    const router = new LocalConversationRpcRouter({
+      deviceId: DEVICE_ID,
+      owner,
+      remoteFor,
+    });
+
+    await expect(router.dispatch({
+      method: "session.list",
+      params: {},
+      connection: fakeConnection(),
+    })).resolves.toEqual({
+      handled: true,
+      result: {
+        conversations: [
+          expect.objectContaining({ conversationId: remoteB }),
+          expect.objectContaining({ conversationId: remoteA }),
+          expect.objectContaining({ conversationId: remoteASecond }),
+          expect.objectContaining({ conversationId: CONVERSATION_ID }),
+        ],
+        availability: {
+          capabilitySet: "limited",
+          continuationConfirmation: "required",
+          unavailableCapabilities: [
+            "排程暂不可用",
+            "当前列表中的部分既有对话暂不可修改",
+            "任务推进确认暂不可处理",
+          ],
+        },
+      },
+    });
+    expect(remoteFor).toHaveBeenCalledTimes(2);
+    expect(remoteFor).toHaveBeenCalledWith(remoteDeviceA);
+    expect(remoteFor).toHaveBeenCalledWith(remoteDeviceB);
+    expect(dispatchA).toHaveBeenCalledOnce();
+    expect(dispatchB).toHaveBeenCalledOnce();
+    expect(dispatchA).toHaveBeenCalledWith("session.list", {}, expect.any(Object));
+    expect(dispatchB).toHaveBeenCalledWith("session.list", {}, expect.any(Object));
+  });
+
   it("按耐久 current owner 转发会话与会话绑定确认", async () => {
     const remoteDeviceId = "device-anchor";
     const owner = ownerPort();
@@ -691,6 +782,31 @@ describe("LocalConversationRpcRouter", () => {
     expect(currentAnchor.dispatch).toHaveBeenCalledTimes(1);
   });
 });
+
+function fencedRoute(conversationId: string, deviceId: string, ownerEpoch: number) {
+  return {
+    conversationId,
+    authority: {
+      deviceId,
+      ownerEpoch,
+      transferId: `xfer-${conversationId}`,
+      state: "fenced" as const,
+    },
+  };
+}
+
+function wireEntry(conversationId: string, lastActiveAt: string) {
+  return {
+    conversationId,
+    name: conversationId,
+    createdAt: lastActiveAt,
+    lastActiveAt,
+    active: false,
+    busy: false,
+    observerCount: 0,
+    pendingCount: 0,
+  };
+}
 
 function ownerPort(): LocalConversationOwnerPort {
   const factListeners = new Set<

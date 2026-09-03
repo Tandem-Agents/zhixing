@@ -25,7 +25,7 @@ import {
   ConversationTaskListToolApplicationService,
   createConversationIdentityLifecycleApplication,
   createConversationDirectoryProductApiContribution,
-  mergeConversationDirectoryViews,
+  mergeConversationDirectoryEntries,
   projectConversationClear,
   projectConversationDelete,
   type ConversationDirectoryRecord,
@@ -1737,7 +1737,7 @@ describe("ConversationDirectoryApplicationService", () => {
     expect(steps).toEqual(["delete", "fact", "cancel"]);
   });
 
-  it("owns cross-owner list merge ordering without changing local availability", () => {
+  it("owns topology-neutral directory ordering, availability and immutable containers", () => {
     const entry = (conversationId: string, lastActiveAt: string) => ({
       conversationId,
       name: conversationId,
@@ -1748,27 +1748,37 @@ describe("ConversationDirectoryApplicationService", () => {
       observerCount: 0,
       pendingCount: 0,
     });
-    expect(
-      mergeConversationDirectoryViews(
-        {
-          conversations: [entry("local", "2026-01-01T00:00:01.000Z")],
-          availability: {
-            capabilitySet: "limited",
-            continuationConfirmation: "required",
-            unavailableCapabilities: ["排程暂不可用"],
-          },
-        },
-        [entry("remote", "2026-01-01T00:00:02.000Z")],
-      ),
-    ).toMatchObject({
+    const sameA = entry("same-a", "2026-01-01T00:00:03.000Z");
+    const merged = mergeConversationDirectoryEntries({
+      entries: [
+        entry("same-b", "2026-01-01T00:00:03.000Z"),
+        entry("earlier", "2026-01-01T00:00:01.000Z"),
+        sameA,
+        sameA,
+      ],
+      availability: {
+        capabilitySet: "limited",
+        continuationConfirmation: "required",
+        unavailableCapabilities: ["排程暂不可用"],
+      },
+    });
+    expect(merged).toMatchObject({
       conversations: [
-        { conversationId: "remote" },
-        { conversationId: "local" },
+        { conversationId: "same-a" },
+        { conversationId: "same-a" },
+        { conversationId: "same-b" },
+        { conversationId: "earlier" },
       ],
       availability: {
         capabilitySet: "limited",
         continuationConfirmation: "required",
       },
     });
+    expect(Object.isFrozen(merged)).toBe(true);
+    expect(Object.isFrozen(merged.conversations)).toBe(true);
+    const empty = mergeConversationDirectoryEntries({ entries: [] });
+    expect(empty).toEqual({ conversations: [] });
+    expect(Object.isFrozen(empty)).toBe(true);
+    expect(Object.isFrozen(empty.conversations)).toBe(true);
   });
 });

@@ -3933,6 +3933,7 @@ export async function validateS7Structure() {
   failures.push(...inspectSurfaceAssetStagingPersistenceBoundary(records));
   failures.push(...inspectAssignmentArtifactReceiverBoundary(records));
   failures.push(...inspectConversationAdoptionAssembly(records));
+  failures.push(...inspectConversationDirectoryTopologyBoundary(records));
   failures.push(...inspectConversationStorageBoundary(records));
   failures.push(...inspectWorksceneStorageCleanupBoundary(records));
   failures.push(...inspectStorageRemainderBoundary(records));
@@ -4091,6 +4092,114 @@ export async function validateS7Structure() {
     failures.push("current authority delivery entry was removed");
   }
   if (failures.length > 0) throw new Error(`S7 structure gate failed:\n- ${failures.join("\n- ")}`);
+}
+
+/** Conversation owns directory ordering without learning Host topology. */
+export function inspectConversationDirectoryTopologyBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const applicationPath = "packages/core/src/conversation/application.ts";
+  const collectorPath = "packages/cli/src/serve/local-conversation-rpc.ts";
+  const application = byPath.get(applicationPath) ?? "";
+  const collector = byPath.get(collectorPath) ?? "";
+  if (!application) {
+    failures.push(`${applicationPath}: Conversation directory application source is missing`);
+  }
+  if (!collector) {
+    failures.push(`${collectorPath}: Conversation directory collector source is missing`);
+  }
+
+  for (const record of records) {
+    if (record.text.includes("mergeConversationDirectoryViews")) {
+      failures.push(`${record.relative}: topology-shaped Conversation directory helper returned`);
+    }
+  }
+
+  const applicationSource = sourceFile(applicationPath, application);
+  const directoryFunctions = applicationSource.statements.filter((statement) =>
+    ts.isFunctionDeclaration(statement) &&
+    statement.name?.text === "mergeConversationDirectoryEntries");
+  if (directoryFunctions.length !== 1) {
+    failures.push(`${applicationPath}: topology-neutral directory ordering owner is not unique`);
+  } else {
+    const helper = directoryFunctions[0];
+    const helperText = helper.getText(applicationSource);
+    if (
+      helper.parameters.length !== 1 ||
+      !helperText.includes("readonly entries: readonly ConversationDirectoryEntry[]") ||
+      !helperText.includes("readonly availability?: ConversationAvailability")
+    ) {
+      failures.push(`${applicationPath}: directory ordering input is not one finite homogeneous entry projection`);
+    }
+    if (/\b(?:local|remote|deviceId|route|authority)\b/u.test(helperText)) {
+      failures.push(`${applicationPath}: directory ordering owner learned Host topology`);
+    }
+    if (
+      !helperText.includes("const conversations = [...input.entries]") ||
+      !helperText.includes("right.lastActiveAt.localeCompare(left.lastActiveAt, \"en-US\")") ||
+      !helperText.includes("left.conversationId.localeCompare(right.conversationId, \"en-US\")") ||
+      !helperText.includes("conversations: Object.freeze(conversations)") ||
+      !helperText.includes("return Object.freeze({")
+    ) {
+      failures.push(`${applicationPath}: directory ordering or immutable result contract drifted`);
+    }
+  }
+
+  const consumers = [];
+  for (const record of records) {
+    const source = sourceFile(record.relative, record.text);
+    const visit = (node) => {
+      if (
+        ts.isCallExpression(node) &&
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === "mergeConversationDirectoryEntries"
+      ) {
+        consumers.push(record.relative);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
+  }
+  if (consumers.length !== 1 || consumers[0] !== collectorPath) {
+    failures.push("Conversation directory ordering is not consumed once by the unique Host collector");
+  }
+
+  const collectorSource = sourceFile(collectorPath, collector);
+  let collectorMethod;
+  const findCollector = (node) => {
+    if (
+      ts.isMethodDeclaration(node) &&
+      node.name.getText(collectorSource) === "#listAllOwners"
+    ) {
+      collectorMethod = node;
+      return;
+    }
+    ts.forEachChild(node, findCollector);
+  };
+  findCollector(collectorSource);
+  if (!collectorMethod?.body) {
+    failures.push(`${collectorPath}: unique cross-owner directory collector is missing`);
+  } else {
+    const body = collectorMethod.body.getText(collectorSource);
+    if (
+      !body.includes("const local = await this.#list()") ||
+      !body.includes("this.input.owner.listConversationAuthorities()") ||
+      !body.includes("route.authority.deviceId === this.input.deviceId") ||
+      !body.includes('route.authority.state !== "fenced"') ||
+      !body.includes("const byDevice = new Map<string, Set<string>>()") ||
+      !body.includes("for (const [deviceId, ids] of byDevice)") ||
+      !/\.dispatch\(\s*"session\.list"/u.test(body) ||
+      !body.includes(".filter((item) => ids.has(item.conversationId))") ||
+      !body.includes("const collectedEntries: ConversationDirectoryEntry[]") ||
+      !body.includes("mergeConversationDirectoryEntries({")
+    ) {
+      failures.push(`${collectorPath}: Host topology collection, grouping or authority filtering drifted`);
+    }
+    if (body.includes(".sort(")) {
+      failures.push(`${collectorPath}: Host collector copied Conversation directory ordering policy`);
+    }
+  }
+  return failures;
 }
 
 /** A6 keeps concrete Conversation file storage at one Host infrastructure edge. */
