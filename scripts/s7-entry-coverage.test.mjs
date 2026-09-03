@@ -6472,6 +6472,7 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
 test("Skill Catalog management, load, save, admission and Kernel projection have one domain application boundary", async () => {
   const paths = [
     "packages/core/src/skills/catalog-application.ts",
+    "packages/core/src/skills/catalog-management-correctness.ts",
     "packages/core/src/workscene/application.ts",
     "packages/core/src/conversation/application.ts",
     "packages/core/src/conversation/index.ts",
@@ -7537,11 +7538,58 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/core/src/skills/catalog-application.ts",
       (text) => text.replace(
-        "const committed = await this.#state().mutate(",
-        "const committed = bypassSkillCommit(",
+        "const committed = await this.#correctness.commit(mutation);",
+        "const committed = await bypassSkillCommit(mutation);",
       ),
     )).join("\n"),
     /fact must use the exact revision returned after authority commit/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/skills/catalog-application.ts",
+      (text) => text.replace(
+        "export interface SkillCatalogManagementCorrectnessPort {",
+        "export interface SkillCatalogManagementCorrectnessPort {\n  readonly anchorEpoch: number;",
+      ),
+    )).join("\n"),
+    /management application is not topology-neutral/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/skills/catalog-management-correctness.ts",
+      (text) => text.replace(
+        'typeof options.anchorEpoch === "function"',
+        "false",
+      ),
+    )).join("\n"),
+    /topology fence lacks one current-generation Correctness adapter/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "createAnchorSkillCatalogManagementCorrectnessPort({",
+        "bypassSkillCatalogCorrectness({",
+      ),
+    )).join("\n"),
+    /install one Product API dispatcher with Skill and Delivery contributions/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/skills/index.ts",
+      (text) => `${text}\nexport * from "./catalog-management-correctness.js";`,
+    )).join("\n"),
+    /application contract leaked into the core root barrel/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/package.json",
+      (text) => text.replace(
+        '    "./advancement": {',
+        '    "./skills/catalog-correctness-compat": {\n      "types": "./dist/skills/catalog-management-correctness.d.ts",\n      "import": "./dist/skills/catalog-management-correctness.js"\n    },\n    "./advancement": {',
+      ),
+    )).join("\n"),
+    /Correctness adapter must have one narrow non-root subpath/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(

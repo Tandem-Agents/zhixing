@@ -37,11 +37,17 @@ describe("production startup server ownership", () => {
     expect(source).not.toContain("ConversationWorksceneDeleteProjectionBridge");
     expect(source).not.toContain("createConversationWorksceneDeleteProjectionBridge");
     expect(source.match(/createTrustAdministrationApplication\(\{/gu)).toHaveLength(1);
-    expect(source.match(/new SkillCatalogApplicationService\(\{/gu)).toHaveLength(1);
+    expect(source.match(/new SkillCatalogApplicationService\(/gu)).toHaveLength(1);
+    expect(source.match(/createAnchorSkillCatalogManagementCorrectnessPort\(\{/gu))
+      .toHaveLength(1);
     const context = source.slice(location(source, "serverCtx = createServerContext({"));
     const dispatcher = location(source, "const productApi = new ProductApiDispatcher(");
     const contribution = location(source, "createSkillCatalogProductApiContribution(");
-    const application = location(source, "new SkillCatalogApplicationService({");
+    const application = location(source, "new SkillCatalogApplicationService(");
+    const skillCorrectness = location(
+      source,
+      "createAnchorSkillCatalogManagementCorrectnessPort({",
+    );
     const deliveryContribution = location(
       source,
       "createDeliveryResolutionProductApiContribution(",
@@ -76,6 +82,7 @@ describe("production startup server ownership", () => {
     );
     expect(contribution).toBeGreaterThan(dispatcher);
     expect(application).toBeGreaterThan(contribution);
+    expect(skillCorrectness).toBeGreaterThan(application);
     expect(deliveryContribution).toBeLessThan(dispatcher);
     expect(trustApplication).toBeLessThan(dispatcher);
     expect(trustContribution).toBeGreaterThan(dispatcher);

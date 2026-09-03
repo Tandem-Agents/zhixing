@@ -6502,6 +6502,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   };
 
   const application = required("packages/core/src/skills/catalog-application.ts");
+  const skillManagementCorrectness = required(
+    "packages/core/src/skills/catalog-management-correctness.ts",
+  );
   const worksceneApplication = required(
     "packages/core/src/workscene/application.ts",
   );
@@ -7163,9 +7166,35 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   if (duplicateSkillCatalogExports.length > 0) {
     failures.push("Skill Catalog contract has a second package export entry");
   }
+  const skillCatalogCorrectnessExport =
+    coreManifest?.exports?.["./skills/catalog-correctness"];
+  const duplicateSkillCatalogCorrectnessExports = Object.entries(
+    coreManifest?.exports ?? {},
+  ).filter(([subpath, conditions]) =>
+    subpath !== "./skills/catalog-correctness" &&
+    conditions &&
+    typeof conditions === "object" &&
+    (conditions.types === skillCatalogCorrectnessExport?.types ||
+      conditions.import === skillCatalogCorrectnessExport?.import)
+  );
+  if (
+    skillCatalogCorrectnessExport?.types !==
+      "./dist/skills/catalog-management-correctness.d.ts" ||
+    skillCatalogCorrectnessExport?.import !==
+      "./dist/skills/catalog-management-correctness.js" ||
+    duplicateSkillCatalogCorrectnessExports.length > 0 ||
+    coreBuild.split('"src/skills/catalog-management-correctness.ts"').length - 1 !== 1
+  ) {
+    failures.push(
+      "Skill Catalog management Correctness adapter must have one narrow non-root subpath",
+    );
+  }
   if (
     coreIndex.includes("catalog-application") ||
+    coreIndex.includes("catalog-management-correctness") ||
     skillIndex.includes("catalog-application") ||
+    skillIndex.includes("catalog-management-correctness") ||
+    skillIndex.includes("createAnchorSkillCatalogManagementCorrectnessPort") ||
     skillIndex.includes("SkillCatalogClient") ||
     skillIndex.includes("SkillCatalogApplication") ||
     skillIndex.includes("SkillCatalogAdmissionApplication") ||
@@ -7810,6 +7839,46 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   if (!application.includes("class SkillCatalogApplicationService")) {
     failures.push("Skill Catalog domain application service is missing");
   }
+  const managementStart = application.indexOf(
+    "export type SkillCatalogManagementStatePatch",
+  );
+  const managementEnd = application.indexOf(
+    "function requireSkillId(",
+  );
+  const managementApplication = managementStart >= 0 && managementEnd > managementStart
+    ? application.slice(managementStart, managementEnd)
+    : "";
+  if (
+    !managementApplication.includes("interface SkillCatalogManagementCorrectnessPort") ||
+    !managementApplication.includes("class SkillCatalogApplicationService") ||
+    !managementApplication.includes("this.#correctness.readCatalog({ includeDisabled: true })") ||
+    !managementApplication.includes("this.#correctness.readEntry(skillId)") ||
+    !managementApplication.includes("await this.#correctness.commit(mutation)") ||
+    /\b(?:GlobalStatePort|GlobalControlCallContext|anchorEpoch|SkillMutationConflictError)\b|randomUUID|global-state-adapter/u.test(
+      managementApplication,
+    )
+  ) {
+    failures.push(
+      "Skill Catalog management application is not topology-neutral or lacks one finite Correctness port",
+    );
+  }
+  if (
+    !skillManagementCorrectness.includes(
+      "createAnchorSkillCatalogManagementCorrectnessPort",
+    ) ||
+    !skillManagementCorrectness.includes("GlobalStatePort") ||
+    !skillManagementCorrectness.includes("GlobalControlCallContext") ||
+    !skillManagementCorrectness.includes("typeof options.globalState === \"function\"") ||
+    !skillManagementCorrectness.includes("typeof options.anchorEpoch === \"function\"") ||
+    !skillManagementCorrectness.includes('context("skill-list")') ||
+    !skillManagementCorrectness.includes('context("skill-get")') ||
+    !skillManagementCorrectness.includes("context(`skill-${mutation.kind}`)") ||
+    !skillManagementCorrectness.includes("error instanceof SkillMutationConflictError")
+  ) {
+    failures.push(
+      "Skill Catalog management topology fence lacks one current-generation Correctness adapter",
+    );
+  }
   const projectionStart = application.indexOf(
     "export interface SkillCatalogKernelProjectionSource",
   );
@@ -7948,7 +8017,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   ) {
     failures.push("Skill Catalog save must stage one stable operation only after content artifact creation");
   }
-  const commit = application.indexOf("await this.#state().mutate(");
+  const commit = application.indexOf("await this.#correctness.commit(mutation)");
   const fact = application.lastIndexOf('kind: "skill-catalog-changed"');
   if (
     !(commit >= 0 && fact > commit) ||
@@ -7986,7 +8055,11 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     composition.split("new ProductApiDispatcher(").length - 1 !== 1 ||
     composition.split("createSkillCatalogProductApiContribution(").length - 1 !== 1 ||
     composition.split("createDeliveryResolutionProductApiContribution(").length - 1 !== 1 ||
-    composition.split("new SkillCatalogApplicationService({").length - 1 !== 1
+    composition.split("new SkillCatalogApplicationService(").length - 1 !== 1 ||
+    composition.split("createAnchorSkillCatalogManagementCorrectnessPort({").length - 1 !== 1 ||
+    !composition.includes('from "@zhixing/core/skills/catalog-correctness"') ||
+    !composition.includes("globalState: () => authorityRuntime.globalState!") ||
+    !composition.includes("anchorEpoch: () => authorityRuntime.anchorEpoch")
   ) {
     failures.push(
       "Anchor composition root must install one Product API dispatcher with Skill and Delivery contributions",

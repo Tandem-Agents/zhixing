@@ -5,6 +5,7 @@ const [
   coreConversationApplication,
   coreAdvancementApplication,
   coreSkillCatalog,
+  coreSkillCatalogCorrectness,
   coreScheduleApplication,
   coreDeliveryApplication,
   coreChannelDeliveryEffect,
@@ -46,6 +47,7 @@ const [
   import("../packages/core/dist/conversation/application.js"),
   import("../packages/core/dist/advancement/application.js"),
   import("../packages/core/dist/skills/catalog-application.js"),
+  import("../packages/core/dist/skills/catalog-management-correctness.js"),
   import("../packages/core/dist/scheduler/application.js"),
   import("../packages/core/dist/delivery/application.js"),
   import("../packages/core/dist/delivery/channel-effect.js"),
@@ -718,6 +720,23 @@ async function verifyCorePackageExports(failures) {
   ) {
     failures.push("core-exports:skill-catalog:invalid-canonical-subpath");
   }
+  const skillCatalogCorrectnessConditions =
+    manifest.exports["./skills/catalog-correctness"];
+  if (
+    !skillCatalogCorrectnessConditions ||
+    skillCatalogCorrectnessConditions.types !==
+      "./dist/skills/catalog-management-correctness.d.ts" ||
+    skillCatalogCorrectnessConditions.import !==
+      "./dist/skills/catalog-management-correctness.js" ||
+    typeof coreSkillCatalogCorrectness
+      .createAnchorSkillCatalogManagementCorrectnessPort !== "function" ||
+    "createAnchorSkillCatalogManagementCorrectnessPort" in coreRoot ||
+    "createAnchorSkillCatalogManagementCorrectnessPort" in coreSkillCatalog
+  ) {
+    failures.push(
+      "core-exports:skill-catalog-correctness:invalid-canonical-subpath",
+    );
+  }
   const productApiConditions = manifest.exports["./product-api"];
   if (
     !productApiConditions ||
@@ -970,6 +989,19 @@ async function verifyCorePackageExports(failures) {
       failures.push(`core-exports:${subpath}:duplicate-skill-catalog-entry`);
     }
   }
+  for (const [subpath, conditions] of Object.entries(manifest.exports)) {
+    if (
+      subpath !== "./skills/catalog-correctness" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === skillCatalogCorrectnessConditions?.types ||
+        conditions.import === skillCatalogCorrectnessConditions?.import)
+    ) {
+      failures.push(
+        `core-exports:${subpath}:duplicate-skill-catalog-correctness-entry`,
+      );
+    }
+  }
 
   for (const [subpath, conditions] of Object.entries(manifest.exports)) {
     if (!conditions || typeof conditions !== "object" || Array.isArray(conditions)) {
@@ -1029,6 +1061,14 @@ async function verifyCorePackageExports(failures) {
             failures.push(`core-exports:${subpath}:skill-catalog-runtime-leak`);
           }
           if (
+            subpath !== "./skills/catalog-correctness" &&
+            "createAnchorSkillCatalogManagementCorrectnessPort" in exported
+          ) {
+            failures.push(
+              `core-exports:${subpath}:skill-catalog-correctness-runtime-leak`,
+            );
+          }
+          if (
             subpath !== "./environment/workspace-administration" &&
             ("WorkspaceAdministrationApplicationService" in exported ||
               "WorkspaceAdministrationBusinessError" in exported)
@@ -1049,7 +1089,10 @@ async function verifyCorePackageExports(failures) {
         } catch {
           failures.push(`core-exports:${subpath}:${condition}:unloadable-target`);
         }
-      } else if (subpath !== "./skills/catalog") {
+      } else if (
+        subpath !== "./skills/catalog" &&
+        subpath !== "./skills/catalog-correctness"
+      ) {
         const declaration = await readFile(targetUrl, "utf8");
         if (
           subpath !== "./conversation/application" &&

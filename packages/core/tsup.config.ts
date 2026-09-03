@@ -15,6 +15,7 @@ export default defineConfig({
     "src/workscene/application.ts",
     "src/rubrics/index.ts",
     "src/skills/catalog-application.ts",
+    "src/skills/catalog-management-correctness.ts",
     "src/product-api/catalog.ts",
     "src/trust-administration/application.ts",
     "src/advancement/index.ts",

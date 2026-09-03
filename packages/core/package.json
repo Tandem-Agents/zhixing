@@ -40,6 +40,10 @@
       "types": "./dist/skills/catalog-application.d.ts",
       "import": "./dist/skills/catalog-application.js"
     },
+    "./skills/catalog-correctness": {
+      "types": "./dist/skills/catalog-management-correctness.d.ts",
+      "import": "./dist/skills/catalog-management-correctness.js"
+    },
     "./product-api": {
       "types": "./dist/product-api/catalog.d.ts",
       "import": "./dist/product-api/catalog.js"

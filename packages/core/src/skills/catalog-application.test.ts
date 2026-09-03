@@ -1,8 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import type {
-  GlobalReadResult,
-  GlobalStatePort,
-} from "../contracts/index.js";
 import {
   SkillCatalogApplicationError,
   SkillCatalogApplicationService,
@@ -10,13 +6,13 @@ import {
   SkillCatalogLoadApplicationService,
   SkillCatalogSaveApplicationService,
   type SkillCatalogLoadCorrectnessPort,
+  type SkillCatalogManagementCommitResult,
   type SkillCatalogUsageMutation,
   type SkillCatalogSaveCorrectnessPort,
   type SkillCatalogSaveMutation,
   type SkillCatalogSaveOverlayRecord,
 } from "./catalog-application.js";
 import { builtinIndexEntries } from "./builtin.js";
-import { SkillMutationConflictError } from "./global-state-adapter.js";
 import { skillNameToId } from "./id.js";
 import type { SkillCatalogEntry } from "./types.js";
 
@@ -41,54 +37,44 @@ const entry: SkillCatalogEntry = {
 
 function harness(input?: {
   readonly missing?: boolean;
-  readonly mutationError?: Error;
+  readonly commitResult?: SkillCatalogManagementCommitResult;
+  readonly commitError?: Error;
 }) {
-  const read = vi.fn(async (query: { kind: string }): Promise<GlobalReadResult> => {
-    if (query.kind === "skill-get") {
-      return {
-        kind: "skill-get",
-        catalogRevision: 7,
-        entry: input?.missing ? null : entry,
-      };
-    }
-    return {
-      kind: "skill-catalog",
+  const readCatalog = vi.fn(async () => ({
+    catalogRevision: 7,
+    entries: [entry],
+  }));
+  const readEntry = vi.fn(async () => input?.missing ? null : entry);
+  const commit = vi.fn(async () => {
+    if (input?.commitError) throw input.commitError;
+    return input?.commitResult ?? {
+      kind: "committed" as const,
       catalogRevision: 7,
-      entries: [entry],
     };
   });
-  const mutate = vi.fn(async () => {
-    if (input?.mutationError) throw input.mutationError;
-    return { revision: 5, catalogRevision: 8 };
-  });
   const service = new SkillCatalogApplicationService({
-    globalState: { read, mutate } as unknown as GlobalStatePort,
-    anchorEpoch: 3,
-    requestId: () => "request",
-    now: () => new Date("2026-08-29T00:00:00.000Z"),
+    readCatalog,
+    readEntry,
+    commit,
   });
-  return { service, read, mutate };
+  return { service, readCatalog, readEntry, commit };
 }
 
 describe("SkillCatalogApplicationService", () => {
   it("owns the include-disabled management query and stable projection", async () => {
-    const { service, read } = harness();
+    const { service, readCatalog } = harness();
 
     await expect(service.query({ kind: "list" })).resolves.toEqual({
       entries: [entry],
       catalogRevision: 7,
     });
-    expect(read).toHaveBeenCalledWith(
-      { kind: "skill-catalog", includeDisabled: true },
-      expect.objectContaining({
-        principal: { kind: "host", component: "skill-catalog-application" },
-        authority: { domain: "global", anchorEpoch: 3 },
-      }),
-    );
+    expect(readCatalog).toHaveBeenCalledWith({ includeDisabled: true });
   });
 
   it("derives expected revision and forms one fact from the exact committed catalog revision", async () => {
-    const { service, mutate, read } = harness();
+    const { service, commit, readEntry } = harness({
+      commitResult: { kind: "committed", catalogRevision: 8 },
+    });
 
     await expect(service.execute({
       kind: "set-state",
@@ -97,16 +83,13 @@ describe("SkillCatalogApplicationService", () => {
     })).resolves.toEqual({
       fact: { kind: "skill-catalog-changed", catalogRevision: 8 },
     });
-    expect(mutate).toHaveBeenCalledWith(
-      {
-        kind: "skill-set-state",
-        skillId: "alpha",
-        patch: { mode: "work", pinned: true },
-        expectedRevision: 4,
-      },
-      expect.any(Object),
-    );
-    expect(read.mock.calls.map(([query]) => query.kind)).toEqual(["skill-get"]);
+    expect(commit).toHaveBeenCalledWith({
+      kind: "set-state",
+      skillId: "alpha",
+      patch: { mode: "work", pinned: true },
+      expectedRevision: 4,
+    });
+    expect(readEntry).toHaveBeenCalledWith("alpha");
   });
 
   it("keeps not-found and invalid patches inside the Skill application contract", async () => {
@@ -117,7 +100,7 @@ describe("SkillCatalogApplicationService", () => {
     })).rejects.toMatchObject({
       code: "not-found",
     } satisfies Partial<SkillCatalogApplicationError>);
-    expect(missing.mutate).not.toHaveBeenCalled();
+    expect(missing.commit).not.toHaveBeenCalled();
 
     const invalid = harness();
     await expect(invalid.service.execute({
@@ -125,17 +108,13 @@ describe("SkillCatalogApplicationService", () => {
       skillId: "alpha",
       patch: {},
     })).rejects.toMatchObject({ code: "invalid-command" });
-    expect(invalid.read).not.toHaveBeenCalled();
-    expect(invalid.mutate).not.toHaveBeenCalled();
+    expect(invalid.readEntry).not.toHaveBeenCalled();
+    expect(invalid.commit).not.toHaveBeenCalled();
   });
 
   it("does not return a fact for authority conflict or commit failure", async () => {
     const conflict = harness({
-      mutationError: new SkillMutationConflictError({
-        code: "revision-conflict",
-        message: "Skill changed",
-        retryable: false,
-      }),
+      commitResult: { kind: "conflict", message: "Skill changed" },
     });
     await expect(conflict.service.execute({
       kind: "archive",
@@ -143,7 +122,7 @@ describe("SkillCatalogApplicationService", () => {
     })).rejects.toMatchObject({ code: "conflict" });
 
     const commitFailure = new Error("commit unavailable");
-    const failedCommit = harness({ mutationError: commitFailure });
+    const failedCommit = harness({ commitError: commitFailure });
     await expect(failedCommit.service.execute({
       kind: "archive",
       skillId: "alpha",

@@ -35,6 +35,7 @@ import {
   SKILL_CATALOG_PRODUCT_API_EXACT_SET,
   SkillCatalogApplicationService,
 } from "@zhixing/core/skills/catalog";
+import { createAnchorSkillCatalogManagementCorrectnessPort } from "@zhixing/core/skills/catalog-correctness";
 import {
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
   ConversationDirectoryApplicationService,
@@ -2571,10 +2572,14 @@ async function runServerProcess(
       createConversationDirectoryProductApiContribution(
         conversationApplication,
       ),
-      createSkillCatalogProductApiContribution(new SkillCatalogApplicationService({
-        globalState: () => authorityRuntime.globalState!,
-        anchorEpoch: () => authorityRuntime.anchorEpoch,
-      })),
+      createSkillCatalogProductApiContribution(
+        new SkillCatalogApplicationService(
+          createAnchorSkillCatalogManagementCorrectnessPort({
+            globalState: () => authorityRuntime.globalState!,
+            anchorEpoch: () => authorityRuntime.anchorEpoch,
+          }),
+        ),
+      ),
       createTrustAdministrationProductApiContribution(trustAdministration),
       createScheduleManagementProductApiContribution(schedulerManagement),
       createScheduleRuntimeProductApiContribution(schedulerApplication),

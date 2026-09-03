@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-18 已通过协调者独立验收，等待提交<br>
+> 当前检查点：A6-20 已通过协调者独立验收，等待提交<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `31a4581b`；A6-17 Schedule lifecycle topology generation 边界收口已提交 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；Backup/Device 当前设备移除链的物理 epoch 泄漏已收口待复核 |
-| 活跃工作包 | `A6-18-current-device-removal-topology-fence-boundary-v1` 已通过协调者独立验收，等待提交 |
-| 下一责任链 | 独立验收 A6-18 后重新执行 A6 退出 exact-set 冷启动审计；无其他反证才关闭 A6 |
+| 已接受基线 | `2623f028`；A6-19 cold-start 审计及 Skill Catalog topology fence 反证已提交 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；Skill Catalog 管理应用的 topology fence 子边界已通过协调者独立验收 |
+| 活跃工作包 | `A6-20-skill-catalog-topology-fence-boundary-v1` 已通过协调者独立验收，等待提交 |
+| 下一责任链 | 独立验收 A6-20 后重新执行完整 A6 cold-start exact-set 审计；无其他反证才关闭 A6 |
 | 打开的单向桥 | 无；P06 Rubric 已恢复为 required `readByDigest/put` 有限端口，P07、P09、P11 及 P12 三类 staging 的既有有限 Infrastructure 接管继续有效 |
-| 已失效证据 | `A6-15-replaceable-edges-topology-final-exit-audit-v1` 的 E05 与 A6 聚合结论仍失效；Delivery、Schedule 子证据已恢复并接受，Backup/Device 子证据已恢复待复核 |
+| 已失效证据 | `A6-15-replaceable-edges-topology-final-exit-audit-v1` 的 E05 与 A6 聚合结论仍失效，A6-19 未形成聚合结论；Skill、Delivery、Schedule、Backup/Device 子证据均已恢复并接受，等待完整 cold-start 审计重建聚合结论 |
 | 阻塞/用户决策 | 无用户决策阻塞；完整 distributed-runtime structure 测试仍被既有 A4-10 `runtime-host` 依赖断言阻断，属于 A7 零残留与终验输入 |
 
 ### A0 基线索引
@@ -2942,6 +2942,22 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据与门禁：Core Backup Recovery/Device Administration 2 文件 54/54、CLI current-device-removal Correctness 1 文件 4/4、Server uninstall lifecycle 1 文件 6/6，合计 4 文件 64/64；直接覆盖 package/root/target 校验、accepted binding 漂移、v1 record bytes 映射、错误 epoch/root/target fail closed、全阶段恢复及新 Correctness 实例重启重建。Core build 与 typecheck、Server typecheck、CLI typecheck 与 `pnpm cli:build`、fresh runtime package exports、changed-source Biome 均通过；canonical S7 为 57/57 且 registry golden 通过。S7 反向 mutation可拒绝 epoch/Anchor 重回任一领域 source、旧 checkpoint generation 映射错误、v1 restore 旁路、Host current-fence 校验遗漏或出现第二 binding 组合处。
 - 失效、状态与下一检查点：若 Backup current-removal context/binding/package 校验、Device current-removal recovery operation、Correctness binding digest/current fence/v1 restore、Host trust/epoch/public-key 投影、device lifecycle v1 codec、retirement transaction、Server uninstall lifecycle、S7 mutation 或上述直接测试任一变化，只恢复本证据及 A6-15 E05 的 Backup/Device 子结论；A5 Backup & Recovery/Device Administration 产品 owner、既有 record schema、Delivery、Schedule 和其他 A6 边缘不因此失效。A6 与完成度继续 `[ ]`/`6/8`，当前只等待协调者独立复核；接受后只能重新执行 A6 退出 exact-set 冷启动审计，无其他反证才关闭 A6，不得进入 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：沿 Backup Recovery binding、Device Administration lifecycle、Correctness v1 record 映射、Host current-Authority 投影和重启恢复双向核对，确认两个领域应用源中 Anchor/epoch 为零；不透明 accepted/checkpoint binding 只由 Correctness 生成和验证，原 `homeId/currentDeviceId/anchorEpoch/trustHeadDigest/checkpointTargetId/checkpointGeneration` 仍按相同 v1 record 写入并从 journal 冷恢复。独立取得 Core Backup/Device 54/54、CLI current-removal Correctness 4/4、canonical S7 57/57、registry golden 与 `git diff --check` 通过；当前代际变化、root/target/package 错配和冷启动重驱均 fail closed。接受 `A6-18-current-device-removal-topology-fence-boundary-v1`；A6 继续 `[ ]`，下一步必须重新冷启动执行完整退出审计。
+
+### A6-19：可替换边缘与设备拓扑 cold-start 退出审计
+
+- 基线、方法与权威 exact-set：以已接受 `HEAD 75d32d6f5161995f29694382681f5a89be7a21d9` 加协调者调度记录为基线，抛开 A6-15 的自我描述，重新完整读取 AE-001、A6 契约与验证手册。由 AE-001 直接重建六个相互覆盖的退出面：E01 Provider/Tool/MCP/Channel 七类边缘中的非 Storage 四族只能实现需求方窄端口；E02 Configuration/Secret 只在专责 edge 与 Host 形成用途最小只读投影；E03 P01～P15 Storage 物理机制与需求端分离；E04 Executor/Mesh/传输/恢复实例身份及生命周期唯一；E05 Device Administration、全部领域、Product API、Kernel、RuntimeHost 与 Surface 对 Anchor/epoch/Mesh/Executor/本机远端等物理拓扑透明；E06 单一 `PersistentApplicationHost`、静态适配选择、无万能 Capability/locator/第二组合根/根导出或永久桥。审计从领域应用逐个攻击 E05 时即发现首个足以推翻 A6 的生产反证，按派发止损条件没有继续把其他五面写成未经完整审计的通过结论。
+- 首个真实反证与生产链：`packages/core/src/skills/catalog-application.ts` 中由领域所有的 `SkillCatalogApplicationServiceOptions` 仍公开 `anchorEpoch: number | (() => number)`；`SkillCatalogApplicationService.#context()` 在每次管理 Query/Command 内读取它，并自行构造 `GlobalControlCallContext.authority = { domain: "global", anchorEpoch }`。唯一 Anchor 组合根在 `packages/cli/src/serve/command.ts` 以 `new SkillCatalogApplicationService({ globalState: () => authorityRuntime.globalState!, anchorEpoch: () => authorityRuntime.anchorEpoch })` 注入真实 current Authority generation；随后 `ProductApiDispatcher → skill.list / skill.setState / skill.archive → query/execute → GlobalStatePort.read/mutate` 三条公开生产入口全部命中该分支。它不是协议 record、Correctness 实现或未使用字段，而是领域应用决定每次读写绑定哪一物理 Authority generation 的在用控制流。
+- 权威裁决与受影响证据：AE-001 4.7 和检查点 6 明确要求领域不知道 Anchor/epoch，单机/分布式只在 Host 的适配选择处分叉；5.2 又要求领域只依赖需求方端口、Infrastructure 实现端口。因此该链构成 E05 的直接反证，A6 与完成度保持 `[ ]`/`6/8`，A6-15 的 E05/聚合结论继续失效，A6-19 不生成新的聚合通过证据。A2 Skill Catalog 已接受的单一业务 owner、fact-after-commit、Product API/RPC/Surface 行为证据没有被推翻，但不能据此推导其 topology transparency。当前 S7 Skill inspector只冻结应用 owner、commit-before-fact、Product API 构造与旧路径退场，没有拒绝 `SkillCatalogApplicationServiceOptions.anchorEpoch/#context`；协调者在同源码基线取得的 canonical S7 57/57 与 registry golden 是有效运行结果，但对本反证没有识别力，本轮按审计边界未重复运行。
+- 最窄修复边界与交接：下一包只应把 Skill Catalog management application 的 raw `GlobalStatePort + anchorEpoch + GlobalControlCallContext` 收束为领域拥有、topology-neutral 的有限 Correctness 需求端口；Host/Correctness adapter 唯一取得 current Authority generation、构造 read/mutate call context 并保持现有 request/deadline/principal、revision/conflict、幂等重放、fact-after-commit、三项 Product API/RPC wire 和错误语义。修复必须删除领域 source/fresh declaration 的 `anchorEpoch/GlobalControlCallContext` 与组合根直注，且增加能拒绝两者回流和绕过 adapter 的 S7 反向 mutation；不得重做 Skill 其他用例、改变 GlobalState 持久格式、迁移其他领域或顺带修复本审计未完成部分。接受该修复后必须从本节六面要求重新启动完整 A6 审计，不能把局部修复绿灯相加后直接关闭 A6 或进入 A7。本轮只修改任务文档，没有修改生产代码、测试、AE-001、其他文档、暂存区、提交历史或远程仓库，也没有运行测试、构建、package check 或制品验收。
+- 协调者独立复核：沿 `SkillCatalogApplicationServiceOptions`、`#context()`、唯一 Anchor 组合根及 Product API 三项管理入口反查，确认 `anchorEpoch` 不是历史字段或测试夹具，而是领域应用在每次真实读写中选择物理 Authority generation 的生产控制流；AE-001 4.7、5.2 与检查点 6 对此有唯一裁决。现有 S7 只证明 Skill owner、提交与入口结构，无法拒绝该泄漏。接受 A6-19 的反证与最窄修复边界；A6 保持 `[ ]`，不得进入 A7。
+
+### A6-20：Skill Catalog 管理应用 topology fence 边界收口
+
+- 基线与唯一责任变化：以已接受 `HEAD 2623f0288f3e862817a5ec48068384a09059a84b` 加协调者调度记录为基线，只重取 A6-19 指明的 `skill.list / skill.setState / skill.archive` 生产链。`SkillCatalogApplicationServiceOptions`、领域内 raw `GlobalStatePort`、`GlobalControlCallContext`、`anchorEpoch`、request/deadline 生成和 `SkillMutationConflictError` 实现依赖已删除；Skill 领域新增有限 `SkillCatalogManagementCorrectnessPort`，只表达 `readCatalog/readEntry/commit` 以及 committed/conflict 结果。领域继续唯一拥有 include-disabled 管理视图、命令/patch 校验、not-found、expected revision、set-state/archive 决定和 commit 后 Fact；端口不暴露 Anchor、epoch、Authority context、Store、路径或物理 generation。
+- Correctness、Host 与行为保护：新增唯一窄入口 `@zhixing/core/skills/catalog-correctness`，由 `createAnchorSkillCatalogManagementCorrectnessPort` 在每次调用时重新取得当前 `globalState` 与 `anchorEpoch`，构造与迁移前相同的 host principal、稳定操作前缀、随机 request identity、30 秒 deadline 和 global Authority fence，并把有限领域 mutation 映射为既有 `skill-set-state/skill-archive`；只有该 adapter 识别 `SkillMutationConflictError` 并投影为领域 conflict，其他读取、提交和损坏错误原样传播。Anchor 唯一组合根只构造一个 adapter 并注入一个领域应用；current generation 变化不会复用旧 state/context。`ProductApiDispatcher`、三个 RPC、`skill.changed { structuralVersion }`、CLI manager/动态 slash、Authority record/schema、revision、冲突 wire 与 fact-after-commit 行为均未改变，也没有第二应用、第二写入口、根 barrel 转导或兼容旁路。
+- 直接证据与结构门禁：Core 两文件 22/22 覆盖有限领域端口、include-disabled、expected revision、fact-after-commit、not-found/invalid/conflict/commit failure，以及 Correctness 的动态 state/epoch 重取、精确 context、mutation 映射、错误 family fail-closed；CLI 两文件 12/12 覆盖真实 Authority 查询到动态 slash 和唯一 Anchor Product API 组合；Server management RPC 一文件 13/13 保持真实 dispatcher/wire 行为。Core 与 CLI typecheck、fresh core build、`pnpm cli:build`、fresh `pnpm runtime:package-exports` 通过；canonical `pnpm s7:lint` 为 57/57 且 registry golden 通过。S7 与 package-export 现在会拒绝领域重新出现 `GlobalStatePort/GlobalControlCallContext/anchorEpoch/SkillMutationConflictError`、adapter 不逐调用重取 current generation、Host 绕过 adapter、根 barrel/第二 export、重复组合或 commit-before-fact 回退。
+- 失效、状态与下一检查点：若 Skill 管理领域端口/应用、Anchor Correctness adapter 的 current generation/context/error 映射、唯一 Host 组合、catalog/correctness 窄导出、三个 Product API/RPC 入口、Fact、Authority mutation/record、S7/package-export 或上述直接测试任一变化，只恢复本证据及 A6-19 指向的 Skill topology transparency 子结论；A2 Skill 单一业务 owner与公开行为、其他 Skill save/admit/load/projection、Delivery、Schedule、Backup/Device 和其他 A6 边缘不因无关变化自动失效。`A6-20-skill-catalog-topology-fence-boundary-v1` 当前完成并等待协调者独立复核；A6-15 E05/聚合结论继续失效，A6 与完成度保持 `[ ]`/`6/8`。接受后必须重新冷启动执行完整 A6 exact-set 审计，无其他反证才可关闭 A6，当前未进入 A7，也未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：反查领域端口、Anchor Correctness adapter、唯一生产组合和三项管理入口，确认领域生产源不再可达 `GlobalStatePort`、`GlobalControlCallContext`、`anchorEpoch` 或 conflict 实现类型，current state/generation 只由 adapter 逐调用取得，公开 wire、revision/conflict 与 fact-after-commit 语义未变。独立取得 Core 22/22、CLI 12/12、canonical S7 57/57、registry golden、runtime package exports 与 `git diff --check` 通过；接受 `A6-20-skill-catalog-topology-fence-boundary-v1`。A6 继续 `[ ]`，下一步必须重做完整 cold-start 审计。
 
 ## 十、用户提示词
 

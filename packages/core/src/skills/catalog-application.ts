@@ -1,10 +1,6 @@
-import { randomUUID } from "node:crypto";
 import type {
   ArtifactRef,
   Digest,
-  GlobalControlCallContext,
-  GlobalStatePort,
-  SkillStatePatch,
 } from "../contracts/index.js";
 import { parseFrontmatter, stringifyFrontmatter } from "../frontmatter.js";
 import { scrubSecrets } from "../security/secret-scrubber.js";
@@ -14,7 +10,6 @@ import {
   type AdmissionLlm,
 } from "./admission.js";
 import type { ContentThreat } from "./content-scan.js";
-import { SkillMutationConflictError } from "./global-state-adapter.js";
 import { skillNameToId } from "./id.js";
 import { builtinIndexEntries, getBuiltinSkill } from "./builtin.js";
 import type { SkillCatalogEntry, SkillMode } from "./types.js";
@@ -31,7 +26,7 @@ import {
 
 export type { SkillCatalogEntry, SkillMode } from "./types.js";
 
-/** Skill-owned management query. Runtime and tool catalog reads use GlobalStatePort directly. */
+/** Skill-owned management query. */
 export type SkillCatalogQuery = { readonly kind: "list" };
 
 export type SkillCatalogStatePatch = Readonly<{
@@ -68,6 +63,40 @@ export interface SkillCatalogCommandResult {
 export interface SkillCatalogApplication {
   query(query: SkillCatalogQuery): Promise<SkillCatalogView>;
   execute(command: SkillCatalogCommand): Promise<SkillCatalogCommandResult>;
+}
+
+export type SkillCatalogManagementStatePatch =
+  | Readonly<{ mode: SkillMode; pinned?: boolean; disabled?: boolean }>
+  | Readonly<{ pinned: boolean; mode?: SkillMode; disabled?: boolean }>
+  | Readonly<{ disabled: boolean; mode?: SkillMode; pinned?: boolean }>;
+
+export type SkillCatalogManagementMutation =
+  | Readonly<{
+      kind: "set-state";
+      skillId: string;
+      patch: SkillCatalogManagementStatePatch;
+      expectedRevision: number;
+    }>
+  | Readonly<{
+      kind: "archive";
+      skillId: string;
+      expectedRevision: number;
+    }>;
+
+export type SkillCatalogManagementCommitResult =
+  | Readonly<{ kind: "committed"; catalogRevision: number }>
+  | Readonly<{ kind: "conflict"; message: string }>;
+
+/**
+ * Skill-owned, topology-neutral Correctness port for management reads and commits.
+ * The implementation owns authority generation selection and call fencing.
+ */
+export interface SkillCatalogManagementCorrectnessPort {
+  readCatalog(input: Readonly<{ includeDisabled: boolean }>): Promise<SkillCatalogView>;
+  readEntry(skillId: string): Promise<SkillCatalogEntry | null>;
+  commit(
+    mutation: SkillCatalogManagementMutation,
+  ): Promise<SkillCatalogManagementCommitResult>;
 }
 
 /**
@@ -794,25 +823,17 @@ export class SkillCatalogApplicationError extends Error {
   }
 }
 
-export interface SkillCatalogApplicationServiceOptions {
-  readonly globalState: GlobalStatePort | (() => GlobalStatePort);
-  readonly anchorEpoch: number | (() => number);
-  readonly requestId?: () => string;
-  readonly now?: () => Date;
-}
-
 /**
  * The single application entry for Skill Catalog management.
  *
- * It translates product commands to the existing global correctness port and only
- * creates a fact only after the authoritative mutation returns its exact committed
- * catalog revision.
+ * It owns management rules and only creates a fact after the topology-neutral
+ * Correctness port returns the exact committed catalog revision.
  */
 export class SkillCatalogApplicationService implements SkillCatalogApplication {
-  readonly #options: SkillCatalogApplicationServiceOptions;
+  readonly #correctness: SkillCatalogManagementCorrectnessPort;
 
-  constructor(options: SkillCatalogApplicationServiceOptions) {
-    this.#options = options;
+  constructor(correctness: SkillCatalogManagementCorrectnessPort) {
+    this.#correctness = correctness;
   }
 
   async query(query: SkillCatalogQuery): Promise<SkillCatalogView> {
@@ -822,7 +843,7 @@ export class SkillCatalogApplicationService implements SkillCatalogApplication {
         "Unsupported Skill Catalog query",
       );
     }
-    return await this.#readCatalog("skill-list");
+    return await this.#correctness.readCatalog({ includeDisabled: true });
   }
 
   async execute(command: SkillCatalogCommand): Promise<SkillCatalogCommandResult> {
@@ -832,7 +853,7 @@ export class SkillCatalogApplicationService implements SkillCatalogApplication {
       : command.kind === "archive"
         ? undefined
         : unsupportedCommand(command);
-    const current = await this.#readEntry(skillId);
+    const current = await this.#correctness.readEntry(skillId);
     if (!current) {
       throw new SkillCatalogApplicationError(
         "not-found",
@@ -842,83 +863,31 @@ export class SkillCatalogApplicationService implements SkillCatalogApplication {
 
     const mutation = command.kind === "set-state"
       ? {
-          kind: "skill-set-state" as const,
+          kind: "set-state" as const,
           skillId,
           patch: statePatch!,
           expectedRevision: current.revision,
         }
       : command.kind === "archive"
         ? {
-            kind: "skill-archive" as const,
+          kind: "archive" as const,
             skillId,
             expectedRevision: current.revision,
           }
         : unsupportedCommand(command);
 
-    try {
-      const committed = await this.#state().mutate(
-        mutation,
-        this.#context(`skill-${command.kind}`),
-      );
-      return {
-        fact: {
-          kind: "skill-catalog-changed",
-          catalogRevision: committed.catalogRevision,
-        },
-      };
-    } catch (error) {
-      if (error instanceof SkillMutationConflictError) {
-        throw new SkillCatalogApplicationError(
-          "conflict",
-          error.authorityError.message,
-        );
-      }
-      throw error;
+    const committed = await this.#correctness.commit(mutation);
+    if (committed.kind === "conflict") {
+      throw new SkillCatalogApplicationError("conflict", committed.message);
     }
-
-  }
-
-  async #readCatalog(prefix: string): Promise<SkillCatalogView> {
-    const result = await this.#state().read(
-      { kind: "skill-catalog", includeDisabled: true },
-      this.#context(prefix),
-    );
-    if (result.kind !== "skill-catalog") {
-      throw new TypeError("Skill catalog returned another result type");
+    if (committed.kind !== "committed") {
+      throw new TypeError("Skill catalog commit returned another result type");
     }
     return {
-      entries: result.entries,
-      catalogRevision: result.catalogRevision,
-    };
-  }
-
-  async #readEntry(skillId: string): Promise<SkillCatalogEntry | null> {
-    const result = await this.#state().read(
-      { kind: "skill-get", skillId },
-      this.#context("skill-get"),
-    );
-    if (result.kind !== "skill-get") {
-      throw new TypeError("Skill lookup returned another result type");
-    }
-    return result.entry;
-  }
-
-  #state(): GlobalStatePort {
-    return typeof this.#options.globalState === "function"
-      ? this.#options.globalState()
-      : this.#options.globalState;
-  }
-
-  #context(prefix: string): GlobalControlCallContext {
-    const anchorEpoch = typeof this.#options.anchorEpoch === "function"
-      ? this.#options.anchorEpoch()
-      : this.#options.anchorEpoch;
-    return {
-      principal: { kind: "host", component: "skill-catalog-application" },
-      requestId: `${prefix}:${this.#options.requestId?.() ?? randomUUID()}`,
-      deadlineAt: new Date((this.#options.now?.() ?? new Date()).getTime() + 30_000)
-        .toISOString(),
-      authority: { domain: "global", anchorEpoch },
+      fact: {
+        kind: "skill-catalog-changed",
+        catalogRevision: committed.catalogRevision,
+      },
     };
   }
 }
@@ -933,7 +902,9 @@ function requireSkillId(skillId: string): string {
   return skillId;
 }
 
-function requireStatePatch(patch: SkillCatalogStatePatch): SkillStatePatch {
+function requireStatePatch(
+  patch: SkillCatalogStatePatch,
+): SkillCatalogManagementStatePatch {
   if (!patch || typeof patch !== "object") {
     throw new SkillCatalogApplicationError(
       "invalid-command",

@@ -14,6 +14,7 @@ import {
   type SkillCatalogClient,
   type SkillCatalogEntry,
 } from "@zhixing/core/skills/catalog";
+import { createAnchorSkillCatalogManagementCorrectnessPort } from "@zhixing/core/skills/catalog-correctness";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
@@ -175,12 +176,14 @@ describe("SkillCommandSource · Authority Catalog 集成", () => {
           },
         );
       }
-      const application = new SkillCatalogApplicationService({
-        globalState: state,
-        anchorEpoch: 1,
-        requestId: () => "list",
-        now: () => new Date(NOW),
-      });
+      const application = new SkillCatalogApplicationService(
+        createAnchorSkillCatalogManagementCorrectnessPort({
+          globalState: state,
+          anchorEpoch: 1,
+          requestId: () => "list",
+          now: () => new Date(NOW),
+        }),
+      );
 
       const registry = new DefaultCommandRegistry();
       registry.register({
