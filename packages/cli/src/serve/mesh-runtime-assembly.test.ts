@@ -1,6 +1,10 @@
+import { Buffer } from "node:buffer";
+import { canonicalize } from "@zhixing/core/protocol";
 import { describe, expect, it, vi } from "vitest";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
+import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
 import {
+  DeviceRemovalTargetEffectAdapter,
   finalizeCommittedPairingBootstrapContinuation,
   partitionPlannedAnchorPostInstall,
   resolveDeviceRemovalStatus,
@@ -62,6 +66,96 @@ describe("device removal status projection", () => {
       issuerStatus: issuer,
     })).resolves.toEqual(removalState("needs-conversation-decision"));
     expect(issuer).toHaveBeenCalledOnce();
+  });
+});
+
+describe("device removal target effect adapter", () => {
+  it("returns unavailable without resolving a physical target client", async () => {
+    const client = vi.fn(() => {
+      throw new Error("offline target client must not be resolved");
+    });
+    const adapter = new DeviceRemovalTargetEffectAdapter({
+      has: vi.fn(() => false),
+      client,
+    });
+
+    await expect(adapter.accept({
+      targetDeviceId: "device-target",
+      accepted: {} as never,
+    })).resolves.toEqual({ kind: "unavailable" });
+    await expect(adapter.abort({
+      targetDeviceId: "device-target",
+      operationId: "operation-1",
+      abort: {} as never,
+    })).resolves.toEqual({ kind: "unavailable" });
+    await expect(adapter.decide({
+      targetDeviceId: "device-target",
+      operationId: "operation-1",
+      mode: "destroy",
+      currentDutyDeviceId: "device-duty",
+    })).resolves.toEqual({ kind: "unavailable" });
+    expect(client).not.toHaveBeenCalled();
+  });
+
+  it("returns completed results from the same selected target client", async () => {
+    const state = {
+      phase: "cancelled",
+      conversations: [],
+      localData: "known",
+      credentialActions: [],
+    } as const;
+    const request = vi.fn<MeshServiceClient["request"]>(async (_serviceId, payload) => {
+      const command = JSON.parse(payload.toString("utf8")) as { readonly op: string };
+      return Buffer.from(canonicalize(command.op === "accept"
+        ? { v: 1, conversations: ["conv-main"], hasAcceptedWork: true }
+        : { v: 1, state }), "utf8");
+    });
+    const adapter = new DeviceRemovalTargetEffectAdapter({
+      has: vi.fn(() => true),
+      client: vi.fn(() => ({ request })),
+    });
+
+    const accepted = await adapter.accept({
+      targetDeviceId: "device-target",
+      accepted: {} as never,
+    });
+    const aborted = await adapter.abort({
+      targetDeviceId: "device-target",
+      operationId: "operation-1",
+      abort: {} as never,
+    });
+    const decided = await adapter.decide({
+      targetDeviceId: "device-target",
+      operationId: "operation-1",
+      mode: "transfer",
+      currentDutyDeviceId: "device-duty",
+    });
+
+    expect(accepted).toEqual({
+      kind: "completed",
+      result: { conversations: ["conv-main"], hasAcceptedWork: true },
+    });
+    expect(aborted).toEqual({ kind: "completed", result: state });
+    expect(decided).toEqual({ kind: "completed", result: state });
+    expect(Object.isFrozen(accepted)).toBe(true);
+    expect(Object.isFrozen(aborted)).toBe(true);
+    expect(Object.isFrozen(decided)).toBe(true);
+    expect(request).toHaveBeenCalledTimes(3);
+  });
+
+  it("preserves a selected target client failure", async () => {
+    const failure = new Error("target disconnected during removal effect");
+    const adapter = new DeviceRemovalTargetEffectAdapter({
+      has: vi.fn(() => true),
+      client: vi.fn(() => ({ request: vi.fn(async () => Promise.reject(failure)) })),
+    });
+
+    await expect(adapter.decide({
+      targetDeviceId: "device-target",
+      operationId: "operation-1",
+      mode: "destroy",
+      currentDutyDeviceId: "device-duty",
+    })).rejects.toBe(failure);
   });
 });
 

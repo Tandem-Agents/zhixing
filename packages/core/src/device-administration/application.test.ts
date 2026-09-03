@@ -22,6 +22,12 @@ import {
   decideCurrentDeviceRetirementCredentialExposures,
 } from "./application.js";
 
+function completedRemovalEffect<Result>(result: Result) {
+  return { kind: "completed" as const, result };
+}
+
+const unavailableRemovalEffect = Object.freeze({ kind: "unavailable" as const });
+
 describe("current device retirement credential exposure decision", () => {
   it("compromises only active exposures owned by the retiring device", () => {
     const decided = decideCurrentDeviceRetirementCredentialExposures({
@@ -121,10 +127,11 @@ function fixture() {
     commitLost: vi.fn(async () => undefined),
   };
   const removalEffects = {
-    isConnected: vi.fn(() => true),
-    accept: vi.fn(async () => ({ conversations: ["conv-main"], hasAcceptedWork: true })),
-    abort: vi.fn(async () => removalPublicState("cancelled")),
-    decide: vi.fn(async () => removalPublicState("moving-conversations")),
+    accept: vi.fn(async () =>
+      completedRemovalEffect({ conversations: ["conv-main"], hasAcceptedWork: true })),
+    abort: vi.fn(async () => completedRemovalEffect(removalPublicState("cancelled"))),
+    decide: vi.fn(async () =>
+      completedRemovalEffect(removalPublicState("moving-conversations"))),
   };
   const dutyMigrationContext = {
     read: vi.fn(() => ({
@@ -1074,7 +1081,7 @@ describe("DeviceAdministrationApplicationService", () => {
     })).rejects.toMatchObject({ kind: "current-device-removal-unavailable" });
   });
 
-  it("owns begin selection and only sends an accepted receipt to a connected target", async () => {
+  it("owns begin selection after durable acceptance and maps an unavailable target effect", async () => {
     const f = fixture();
     await expect(f.application.execute({
       kind: "begin-device-removal",
@@ -1091,15 +1098,18 @@ describe("DeviceAdministrationApplicationService", () => {
       targetDeviceId: "device-target",
       accepted: "accepted-token",
     });
+    expect(f.removalAuthority.acceptForTarget.mock.invocationCallOrder[0]).toBeLessThan(
+      f.removalEffects.accept.mock.invocationCallOrder[0]!,
+    );
 
-    f.removalEffects.isConnected.mockReturnValueOnce(false);
+    f.removalEffects.accept.mockResolvedValueOnce(unavailableRemovalEffect);
     await expect(f.application.execute({
       kind: "begin-device-removal",
       requestId: "request-2",
       operationId: "operation-2",
       targetName: "书房设备",
     })).resolves.toEqual({ conversations: [], hasAcceptedWork: false });
-    expect(f.removalEffects.accept).toHaveBeenCalledTimes(1);
+    expect(f.removalEffects.accept).toHaveBeenCalledTimes(2);
   });
 
   it("fails closed for a non-duty caller, unknown target and current-duty self removal", async () => {
@@ -1158,8 +1168,11 @@ describe("DeviceAdministrationApplicationService", () => {
       credentialActions: ["Change credentials for accounts used on this device"],
     });
     expect(f.removalAuthority.commitLost).toHaveBeenCalledWith("operation-1");
+    expect(f.removalEffects.decide).toHaveBeenCalledTimes(1);
+    expect(f.removalEffects.accept).not.toHaveBeenCalled();
+    expect(f.removalEffects.abort).not.toHaveBeenCalled();
 
-    f.removalEffects.isConnected.mockReturnValueOnce(false);
+    f.removalEffects.abort.mockResolvedValueOnce(unavailableRemovalEffect);
     await expect(f.application.execute({
       kind: "continue-device-removal",
       targetName: "书房设备",
@@ -1171,7 +1184,14 @@ describe("DeviceAdministrationApplicationService", () => {
       credentialActions: ["取消已安全记录；目标设备上线后会自动恢复准入"],
     });
     expect(f.removalAuthority.abort).toHaveBeenCalledWith("operation-1");
-    expect(f.removalEffects.abort).not.toHaveBeenCalled();
+    expect(f.removalEffects.abort).toHaveBeenCalledWith({
+      targetDeviceId: "device-target",
+      operationId: "operation-1",
+      abort: "abort-token",
+    });
+    expect(f.removalAuthority.abort.mock.invocationCallOrder[0]).toBeLessThan(
+      f.removalEffects.abort.mock.invocationCallOrder[0]!,
+    );
   });
 
   it("keeps exact cancellation replay and rejects ambiguous or mismatched identities", async () => {
@@ -1209,7 +1229,7 @@ describe("DeviceAdministrationApplicationService", () => {
     })).rejects.toThrow("Removal target name does not match the accepted device");
   });
 
-  it("passes the durable abort token once and refuses inactive or offline transfer", async () => {
+  it("passes the durable abort token once and refuses inactive targets", async () => {
     const f = fixture();
     await expect(f.application.execute({
       kind: "continue-device-removal",
@@ -1238,14 +1258,50 @@ describe("DeviceAdministrationApplicationService", () => {
       targetName: "书房设备",
       mode: "destroy",
     })).rejects.toThrow("Removal target is no longer an active paired device");
+  });
 
-    f.removalEffects.isConnected.mockReturnValueOnce(false);
+  it.each(["transfer", "destroy"] as const)(
+    "keeps the existing offline error when the %s effect is unavailable",
+    async (mode) => {
+      const f = fixture();
+      f.removalEffects.decide.mockResolvedValueOnce(unavailableRemovalEffect);
+      await expect(f.application.execute({
+        kind: "continue-device-removal",
+        targetName: "书房设备",
+        mode,
+      })).rejects.toThrow("The device is offline");
+      expect(f.removalEffects.decide).toHaveBeenCalledTimes(1);
+      expect(f.removalEffects.decide).toHaveBeenCalledWith({
+        targetDeviceId: "device-target",
+        operationId: "operation-1",
+        mode,
+        currentDutyDeviceId: "device-duty",
+      });
+    },
+  );
+
+  it("preserves target effect failures without converting them to unavailable", async () => {
+    const f = fixture();
+    const failure = new Error("target effect failed after connection selection");
+    f.removalEffects.decide.mockRejectedValueOnce(failure);
+
     await expect(f.application.execute({
       kind: "continue-device-removal",
       targetName: "书房设备",
-      mode: "transfer",
-    })).rejects.toThrow("The device is offline");
-    expect(f.removalEffects.decide).not.toHaveBeenCalled();
+      mode: "destroy",
+    })).rejects.toBe(failure);
+  });
+
+  it("fails closed when the physical effect adapter returns an unknown outcome", async () => {
+    const f = fixture();
+    f.removalEffects.accept.mockResolvedValueOnce({ kind: "unknown" } as never);
+
+    await expect(f.application.execute({
+      kind: "begin-device-removal",
+      requestId: "request-invalid-effect",
+      operationId: "operation-invalid-effect",
+      targetName: "书房设备",
+    })).rejects.toThrow("Device removal effect outcome is invalid");
   });
 
   it("owns duty-migration admission, target qualification and stable replay results", async () => {

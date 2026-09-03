@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-23 已通过协调者独立验收，等待提交<br>
+> 当前检查点：A6-24 已通过协调者独立验收，等待提交<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `cefda327`；A6-22 Conversation uncertain-resolution owner fence 边界收口已提交 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-23 Advancement review root opaque binding 已通过协调者独立验收 |
-| 活跃工作包 | `A6-23-advancement-review-root-topology-binding-v1` 已通过协调者独立验收，等待提交 |
-| 下一责任链 | 独立验收 A6-23 后处理 E05-C03 Device removal live connection；其后处理 E05-C04 runtime admission flags 与 E05-C05 Conversation directory 形状 |
+| 已接受基线 | `6b6290a4`；A6-23 Advancement review root topology binding 边界收口已提交 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-21 E05-C03 已恢复并通过协调者独立验收，A6 仍未完成 |
+| 活跃工作包 | `A6-24-device-removal-connectivity-outcome-v1` 已通过协调者独立验收，等待提交 |
+| 下一责任链 | 接受 A6-24 后处理 E05-C04 Device duty/current-removal runtime flags；其后处理 E05-C05 Conversation directory 形状 |
 | 打开的单向桥 | 无；P06 Rubric 已恢复为 required `readByDigest/put` 有限端口，P07、P09、P11 及 P12 三类 staging 的既有有限 Infrastructure 接管继续有效 |
-| 已失效证据 | A6-15 的 E05/聚合结论与 A6-19 的未完成聚合审计均不可作为退出证明；A6-21 的 E05-C01 已恢复并接受，C02 已完成本地纠正并等待独立复核，C03～C05 三条反证仍打开。全部局部修复不得相加冒充完整 topology transparency |
+| 已失效证据 | A6-15 的 E05/聚合结论与 A6-19 的未完成聚合审计均不可作为退出证明；A6-21 的 E05-C01～C03 已恢复并接受，C04～C05 仍打开。全部局部修复不得相加冒充完整 topology transparency |
 | 阻塞/用户决策 | 无用户决策阻塞；完整 distributed-runtime structure 测试仍被既有 A4-10 `runtime-host` 依赖断言阻断，属于 A7 零残留与终验输入 |
 
 ### A0 基线索引
@@ -2998,6 +2998,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据与门禁：Core review application 16/16 覆盖 opaque binding 原样传递、mechanism 物化/匹配、同代 drift 的领域终态、资源 acquire/release、response-loss、terminal winner 与恢复；Server owner-services mechanism 4/4 覆盖并发 request-target 关联、exact persisted root 物化、executor/owner/conversation drift、额外字段、forged binding、carried-outcome 冷重建及 reviewer/evidence 错误；CLI 真实 `AdvancementStore + FileAuthorityCommitLog + AnchorResourceGovernor` 恢复闭包 7/7 覆盖 provider/资源响应丢失、冷恢复、target drift、取消与 terminal 竞态，合计 3 文件 27/27。Core、owner-services、Server 与 CLI 构建及 `tsc --noEmit`、fresh runtime package exports、changed-source Biome 通过；canonical S7 为 57/57 且 registry golden 通过。S7 现在机械拒绝 raw target 类型/字段解释回流、mechanism method exact-set 漂移、领域重新构造/比较 executor/epoch、Correctness 缺少 canonical encoder/materializer/exact matcher 或出现第二 review application owner。
 - 失效、状态与交接：若 Advancement review attempt application/mechanism port、evidence target/carried outcome、root materialization/matching codec、attempt/event schema 或 guard、Resource Governor binding、CLI production composition、cold recovery、fresh declaration、S7/package-export 或上述直接测试任一变化，只恢复本证据与 A6-21 E05-C02 子结论；A5 Advancement 的业务 owner、review 状态机、E01～E04/E06 和 A6-21 E05-C01/C03～C05 不因无关变化自动失效。`A6-23-advancement-review-root-topology-binding-v1` 当前完成并等待协调者独立复核；A6 与完成度保持 `[ ]`/`6/8`，下一责任链固定为 E05-C03 Device removal live connection，本轮未进入其余反证、A7 或 Git 写操作。
 - 协调者独立验收：反查 Advancement review application、外部 mechanism、evidence target、耐久 root 与冷恢复链，确认领域仅创建 workload/budget/request identity 并原样传递 opaque binding，`executorId/ownerEpoch` 的编码、持久 root 物化和 exact matching 唯一留在 Correctness mechanism；request-scoped `WeakMap` 只服务同次取证，冷恢复依赖确定性 binding 重建而不依赖缓存。独立取得 Core review application 16/16、Server owner-services mechanism 4/4、CLI 真实恢复闭包 7/7，通过源码 inspector 与反向 mutation 核验未见 raw target 回流或第二 owner，`git diff --check` 通过；执行者本轮 canonical S7 57/57 与 registry golden 证据继续有效。既有 root schema、资源生命周期、失败/取消/响应丢失与恢复终态未变，接受 `A6-23-advancement-review-root-topology-binding-v1`。A6 保持 `[ ]`，下一责任链为 E05-C03。
+
+### A6-24：Device removal connectivity outcome 边界收口
+
+- 基线与唯一责任变化：以已接受 `HEAD 6b6290a485d10836929c278ca395986dad706139` 加协调者本文调度记录为进场基线，只处理 A6-21 E05-C03。`DeviceAdministrationRemovalEffectPort` 已删除 `isConnected(targetDeviceId)`，领域 source/fresh declaration 不再取得或解释 live connection；有限 `DeviceAdministrationRemovalEffectOutcome<Result>` 只表达 `completed(result) | unavailable`。Device Administration 仍唯一拥有目标/当前值班设备校验、begin/cancel/lost/transfer/destroy 产品决定、用户状态与错误；该 outcome 不暴露 Mesh、connection、route、local/remote、Executor 或物理原因，也没有形成第二状态机或可用性承诺。
+- 唯一物理 adapter 与行为保护：`MeshRuntimeAssembly` 在构造 `MeshConnectionRegistry` 后恰一次创建 `DeviceRemovalTargetEffectAdapter`，该 adapter 唯一对 `accept/abort/decide` 执行 `connections.has(targetDeviceId)` 与对应 `DeviceRemovalTargetMeshClient` 调用；Anchor Host 直接把同一实例注入领域应用，旧 `isDeviceRemovalTargetConnected()`、Host 匿名 probe 和三条平行 effect wrapper 均归零。begin 仍先耐久 `acceptForTarget` 再调用 effect，unavailable 返回空 conversations/无 accepted work；cancel 仍先耐久 `abort`，unavailable 返回既有 `waiting-for-device` 与中文行动；lost 只执行 `commitLost`；transfer/destroy 的 unavailable 仍抛既有 offline 错误并由 Server 映射为原中文 wire。目标 effect 抛错原样传播，用户关系/候选中的 `reachable` 只读投影、Authority record、Mesh wire、持久格式、response-loss/replay 与 C04/C05 均未改变。
+- 直接证据与门禁：Core Device Administration application 25/25、CLI `DeviceRemovalTargetEffectAdapter`/Mesh assembly 7/7、Server management/uninstall 两文件 71/71，合计 4 文件 103/103；直接覆盖 Authority-before-effect、begin/cancel unavailable、lost 零目标 effect、transfer/destroy offline、adapter offline 零 client、completed 三 effect、异常原样传播、未知 outcome fail closed 与既有 RPC wire。Core、Server、CLI `tsc --noEmit`，fresh Core/Server build 与 `pnpm cli:build` 通过；canonical S7 57/57 与 registry golden、fresh runtime package exports、changed-source Biome 和 `git diff --check` 通过。S7 反向 mutation 可拒绝领域/Host 恢复 connectivity probe、任一物理 effect 漏掉同调用内 availability 判定、第二 adapter constructor、Host 绕过唯一实例或 outcome exact-set 漂移。
+- 失效、状态与下一检查点：若 removal effect port/outcome、五种领域映射、Authority-before-effect 顺序、`DeviceRemovalTargetEffectAdapter`/Mesh connection 调用、唯一 Host 组合、关系 `reachable` 只读投影、Server offline error、fresh declaration、S7/package-export 或上述直接测试任一变化，只恢复本证据及 A6-21 E05-C03 子结论；A5 Device Administration 产品 owner、device lifecycle/持久协议、E01～E04/E06 和 A6-21 E05-C01/C02/C04/C05 不因无关变化自动失效。`A6-24-device-removal-connectivity-outcome-v1` 当前完成并等待协调者独立复核；A6 与完成度保持 `[ ]`/`6/8`，接受后下一责任链固定为 E05-C04 Device duty/current-removal runtime flags，其后仍需处理 C05 并重新执行完整 A6 退出审计。本轮未进入 C04/C05、A7，也未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：反查 Device Administration 应用、唯一 Host 组合与 Mesh target client，确认领域 source/fresh contract 已移除 `isConnected`，只解释有限 `completed/unavailable` 结果；三类物理调用均在同一个 `DeviceRemovalTargetEffectAdapter` 内完成 availability 判定和目标效果，旧匿名 probe、平行 wrapper 与 Host 分支归零。独立取得 Core 25/25、CLI adapter/assembly 7/7、Server 两文件 71/71，合计 103/103；源码 inspector 与反向 mutation 能拒绝领域物理连接回流、漏判和组合绕过，执行者 canonical S7 57/57、registry golden、fresh declarations/build 证据继续有效，`git diff --check` 通过。Authority-before-effect、五种业务结果、公开错误文案与既有关系 `reachable` 投影均未漂移，接受 `A6-24-device-removal-connectivity-outcome-v1`。A6 保持 `[ ]`，下一责任链为 E05-C04。
 
 ## 十、用户提示词
 

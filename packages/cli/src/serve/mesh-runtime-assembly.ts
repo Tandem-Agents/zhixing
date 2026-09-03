@@ -3,6 +3,10 @@ import {
   parseLocalConversationId,
 } from "@zhixing/core";
 import type {
+  DeviceAdministrationRemovalEffectOutcome,
+  DeviceAdministrationRemovalEffectPort,
+} from "@zhixing/core/device-administration/application";
+import type {
   AuthorityCallContext,
   DeviceRole,
   HomeTrustRecord,
@@ -346,12 +350,70 @@ export interface MeshRuntimeAssemblyOptions {
   readonly onTrustApplied?: (record: HomeTrustRecord) => void | Promise<void>;
 }
 
+export class DeviceRemovalTargetEffectAdapter
+  implements DeviceAdministrationRemovalEffectPort<ExecutorRemovalReceipt, DeviceLifecycleAbort>
+{
+  constructor(
+    private readonly connections: Pick<MeshConnectionRegistry, "has" | "client">,
+  ) {}
+
+  async accept(input: {
+    readonly targetDeviceId: string;
+    readonly accepted: ExecutorRemovalReceipt;
+  }): Promise<DeviceAdministrationRemovalEffectOutcome<{
+    readonly conversations: readonly string[];
+    readonly hasAcceptedWork: boolean;
+  }>> {
+    if (!this.connections.has(input.targetDeviceId)) {
+      return Object.freeze({ kind: "unavailable" });
+    }
+    const result = await new DeviceRemovalTargetMeshClient(
+      this.connections.client(input.targetDeviceId),
+    ).accept(input.accepted);
+    return Object.freeze({ kind: "completed", result });
+  }
+
+  async abort(input: {
+    readonly targetDeviceId: string;
+    readonly operationId: string;
+    readonly abort: DeviceLifecycleAbort;
+  }): Promise<DeviceAdministrationRemovalEffectOutcome<ExecutorRemovalPublicState>> {
+    if (!this.connections.has(input.targetDeviceId)) {
+      return Object.freeze({ kind: "unavailable" });
+    }
+    const result = await new DeviceRemovalTargetMeshClient(
+      this.connections.client(input.targetDeviceId),
+    ).abort(input.operationId, input.abort);
+    return Object.freeze({ kind: "completed", result });
+  }
+
+  async decide(input: {
+    readonly targetDeviceId: string;
+    readonly operationId: string;
+    readonly mode: "transfer" | "destroy";
+    readonly currentDutyDeviceId: string;
+  }): Promise<DeviceAdministrationRemovalEffectOutcome<ExecutorRemovalPublicState>> {
+    if (!this.connections.has(input.targetDeviceId)) {
+      return Object.freeze({ kind: "unavailable" });
+    }
+    const result = await new DeviceRemovalTargetMeshClient(
+      this.connections.client(input.targetDeviceId),
+    ).decide({
+      operationId: input.operationId,
+      mode: input.mode,
+      currentAnchorDeviceId: input.currentDutyDeviceId,
+    });
+    return Object.freeze({ kind: "completed", result });
+  }
+}
+
 /** Production composition for authenticated control services and their durable role owners. */
 export class MeshRuntimeAssembly
   implements AssignmentDataPlaneRemoteDirectory, AdvancementEvidenceRemoteDirectory {
   readonly services = new MeshServiceRegistry();
   readonly #terminalOnlyServices = new MeshServiceRegistry();
   readonly connections: MeshConnectionRegistry;
+  readonly deviceRemovalTargetEffects: DeviceRemovalTargetEffectAdapter;
   readonly #composition: AssignmentMeshComposition;
   readonly #control: ProductionMeshControlPlane;
   readonly #worker: ConversationAssignmentWorker | undefined;
@@ -409,6 +471,7 @@ export class MeshRuntimeAssembly
       ...(options.connectionProjection ? { projection: options.connectionProjection } : {}),
       onProjectionError: (error) => options.onError?.(error),
     });
+    this.deviceRemovalTargetEffects = new DeviceRemovalTargetEffectAdapter(this.connections);
     this.#observedIssuerDeviceId = options.trust.issuer.deviceId;
     this.#plannedAnchorIssuerKey = options.plannedAnchorIssuerKey;
     this.#plannedAnchorPostInstall = options.plannedAnchorPostInstall;
@@ -1166,47 +1229,6 @@ export class MeshRuntimeAssembly
       throw new Error("Only the current duty device can continue device removal");
     }
     await this.#deviceRemovalAuthority.commitLost(operationId);
-  }
-
-  isDeviceRemovalTargetConnected(targetDeviceId: string): boolean {
-    return this.connections.has(targetDeviceId);
-  }
-
-  acceptDeviceRemovalOnTarget(input: {
-    readonly targetDeviceId: string;
-    readonly accepted: ExecutorRemovalReceipt;
-  }): Promise<{
-    readonly conversations: readonly string[];
-    readonly hasAcceptedWork: boolean;
-  }> {
-    return new DeviceRemovalTargetMeshClient(
-      this.connections.client(input.targetDeviceId),
-    ).accept(input.accepted);
-  }
-
-  abortDeviceRemovalOnTarget(input: {
-    readonly targetDeviceId: string;
-    readonly operationId: string;
-    readonly abort: DeviceLifecycleAbort;
-  }): Promise<ExecutorRemovalPublicState> {
-    return new DeviceRemovalTargetMeshClient(
-      this.connections.client(input.targetDeviceId),
-    ).abort(input.operationId, input.abort);
-  }
-
-  decideDeviceRemovalOnTarget(input: {
-    readonly targetDeviceId: string;
-    readonly operationId: string;
-    readonly mode: "transfer" | "destroy";
-    readonly currentDutyDeviceId: string;
-  }): Promise<ExecutorRemovalPublicState> {
-    return new DeviceRemovalTargetMeshClient(
-      this.connections.client(input.targetDeviceId),
-    ).decide({
-      operationId: input.operationId,
-      mode: input.mode,
-      currentAnchorDeviceId: input.currentDutyDeviceId,
-    });
   }
 
   async deviceRemovalStatus(input: {

@@ -83,19 +83,27 @@ function deviceAdministrationProductApi(
       commitLost: async () => undefined,
     },
     removalEffects: {
-      isConnected: () => true,
-      accept: async () => ({ conversations: [], hasAcceptedWork: false }),
+      accept: async () => ({
+        kind: "completed",
+        result: { conversations: [], hasAcceptedWork: false },
+      }),
       abort: async () => ({
-        phase: "cancelled",
-        conversations: [],
-        localData: "known",
-        credentialActions: [],
+        kind: "completed",
+        result: {
+          phase: "cancelled",
+          conversations: [],
+          localData: "known",
+          credentialActions: [],
+        },
       }),
       decide: async () => ({
-        phase: "removed",
-        conversations: [],
-        localData: "removed",
-        credentialActions: [],
+        kind: "completed",
+        result: {
+          phase: "removed",
+          conversations: [],
+          localData: "removed",
+          credentialActions: [],
+        },
       }),
     },
     dutyMigrationContext: {
@@ -175,8 +183,11 @@ describe("Device Administration command Product API input", () => {
   it("dispatches remove through the shared application and preserves lifecycle errors", async () => {
     const acceptForTarget = vi.fn(async () => "accepted-token");
     const accept = vi.fn(async () => ({
-      conversations: ["conv-main"],
-      hasAcceptedWork: true,
+      kind: "completed" as const,
+      result: {
+        conversations: ["conv-main"],
+        hasAcceptedWork: true,
+      },
     }));
     const ctx = mkCtx({
       productApi: deviceAdministrationProductApi({
@@ -188,7 +199,6 @@ describe("Device Administration command Product API input", () => {
           commitLost: async () => undefined,
         },
         removalEffects: {
-          isConnected: () => true,
           accept,
           abort: async () => {
             throw new Error("unexpected abort");
@@ -223,14 +233,11 @@ describe("Device Administration command Product API input", () => {
     }, mkCtx({
       productApi: deviceAdministrationProductApi({
         removalEffects: {
-          isConnected: () => false,
           accept,
           abort: async () => {
             throw new Error("unexpected abort");
           },
-          decide: async () => {
-            throw new Error("unexpected decide");
-          },
+          decide: async () => ({ kind: "unavailable" }),
         },
       }),
     }))).rejects.toMatchObject({

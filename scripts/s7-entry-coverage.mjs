@@ -4661,6 +4661,9 @@ export function inspectDeviceAdministrationReadOwnership(records) {
   const currentRemovalRecoveryAssembly = composition.match(
     /const currentRemovalRecoveryApplication[\s\S]*?await currentRemovalRecoveryApplication\?\.resumeActive\(\);/u,
   )?.[0] ?? "";
+  const removalTargetEffects = mesh.match(
+    /export class DeviceRemovalTargetEffectAdapter[\s\S]*?\/\*\* Production composition/u,
+  )?.[0] ?? "";
   const manifest = manifestText ? JSON.parse(manifestText) : {};
   const narrow = manifest.exports?.["./device-administration/application"];
   const correctnessNarrow = manifest.exports?.["./device-administration/correctness"];
@@ -4698,6 +4701,7 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !application.includes('"device-administration.command.cancel-current-removal"') ||
     !application.includes("DeviceAdministrationRemovalAuthorityPort<Accepted, Abort>") ||
     !application.includes("DeviceAdministrationRemovalEffectPort<Accepted, Abort>") ||
+    !application.includes("DeviceAdministrationRemovalEffectOutcome<Result>") ||
     !application.includes("DeviceAdministrationDutyMigrationContextReadPort") ||
     !application.includes("DeviceAdministrationDutyMigrationPort") ||
     !application.includes("DeviceAdministrationCurrentRemovalContextReadPort") ||
@@ -4743,6 +4747,12 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     failures.push("Device Administration Query/Product API exact-set drifted");
   }
   if (
+    application.includes("isConnected(") ||
+    application.includes("isDeviceRemovalTargetConnected")
+  ) {
+    failures.push("Device Administration domain regained physical removal connectivity");
+  }
+  if (
     application.includes("anchorEpoch") ||
     /\bAnchor\b/u.test(application) ||
     backupRecovery.includes("anchorEpoch") ||
@@ -4762,7 +4772,7 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !composition.includes("list: () => ctx.meshRuntime!.plannedAnchorTargets()") ||
     !composition.includes("ctx.meshRuntime!.deviceRemovalCommandContext()") ||
     !composition.includes("ctx.meshRuntime!.acceptDeviceRemovalForTarget(input)") ||
-    !composition.includes("ctx.meshRuntime!.decideDeviceRemovalOnTarget(input)") ||
+    !composition.includes("removalEffects: ctx.meshRuntime!.deviceRemovalTargetEffects") ||
     !composition.includes("ctx.meshRuntime!.dutyMigrationCommandContext()") ||
     !composition.includes("ctx.meshRuntime!.preparePlannedAnchorTransfer(input)") ||
     !composition.includes("ctx.meshRuntime!.commitPlannedAnchorTransfer(input)") ||
@@ -4793,6 +4803,16 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     composition.includes("deviceLifecycle:")
   ) {
     failures.push("Device Administration unique Host application composition drifted");
+  }
+  if (
+    composition.includes("isDeviceRemovalTargetConnected") ||
+    mesh.includes("isDeviceRemovalTargetConnected") ||
+    mesh.split("new DeviceRemovalTargetEffectAdapter(this.connections)").length - 1 !== 1 ||
+    removalTargetEffects.split("this.connections.has(input.targetDeviceId)").length - 1 !== 3 ||
+    removalTargetEffects.split('kind: "unavailable"').length - 1 !== 3 ||
+    removalTargetEffects.split('kind: "completed"').length - 1 !== 3
+  ) {
+    failures.push("Device Administration physical removal outcome adapter drifted");
   }
   if (
     records.some((record) => record.relative.endsWith("/anchor-uninstall.ts")) ||
@@ -4922,9 +4942,8 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !mesh.includes("deviceRemovalOperationForTarget(") ||
     !mesh.includes("abortDeviceRemoval(operationId:") ||
     !mesh.includes("commitLostDeviceRemoval(operationId:") ||
-    !mesh.includes("acceptDeviceRemovalOnTarget(input:") ||
-    !mesh.includes("abortDeviceRemovalOnTarget(input:") ||
-    !mesh.includes("decideDeviceRemovalOnTarget(input:")
+    !mesh.includes("class DeviceRemovalTargetEffectAdapter") ||
+    !mesh.includes("readonly deviceRemovalTargetEffects: DeviceRemovalTargetEffectAdapter")
     || !mesh.includes("dutyMigrationCommandContext()")
   ) {
     failures.push("Device Administration decision returned to Mesh runtime");

@@ -2518,16 +2518,7 @@ async function runServerProcess(
             commitLost: (operationId) =>
               ctx.meshRuntime!.commitLostDeviceRemoval(operationId),
           },
-          removalEffects: {
-            isConnected: (targetDeviceId) =>
-              ctx.meshRuntime!.isDeviceRemovalTargetConnected(targetDeviceId),
-            accept: (input) =>
-              ctx.meshRuntime!.acceptDeviceRemovalOnTarget(input),
-            abort: (input) =>
-              ctx.meshRuntime!.abortDeviceRemovalOnTarget(input),
-            decide: (input) =>
-              ctx.meshRuntime!.decideDeviceRemovalOnTarget(input),
-          },
+          removalEffects: ctx.meshRuntime!.deviceRemovalTargetEffects,
         }),
       )
     : undefined;

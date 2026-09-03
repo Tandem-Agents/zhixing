@@ -3888,6 +3888,33 @@ test("Device Administration reads, paired/current removal and duty migration hav
   );
   assert.match(
     inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/core/src/device-administration/application.ts",
+      (text) => text.replace(
+        "export interface DeviceAdministrationRemovalEffectPort<Accepted, Abort> {",
+        "export interface DeviceAdministrationRemovalEffectPort<Accepted, Abort> {\n  isConnected(targetDeviceId: string): boolean;",
+      ),
+    )).join("\n"),
+    /domain regained physical removal connectivity/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace("if (!this.connections.has(input.targetDeviceId)) {", "if (false) {"),
+    )).join("\n"),
+    /physical removal outcome adapter drifted/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "removalEffects: ctx.meshRuntime!.deviceRemovalTargetEffects,",
+        "removalEffects: { isConnected: (targetDeviceId) => ctx.meshRuntime!.isDeviceRemovalTargetConnected(targetDeviceId) },",
+      ),
+    )).join("\n"),
+    /physical removal outcome adapter drifted/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
       "packages/core/src/device-administration/correctness.ts",
       (text) => `${text}\nclass CurrentRemovalCoordinator { async acceptMigration() {} async acceptRecovery() {} }`,
     )).join("\n"),

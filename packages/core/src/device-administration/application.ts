@@ -798,24 +798,27 @@ export interface DeviceAdministrationRemovalAuthorityPort<Accepted, Abort> {
   commitLost(operationId: string): Promise<void>;
 }
 
-/** Physical reachability and target effects; it makes no product decision. */
+export type DeviceAdministrationRemovalEffectOutcome<Result> =
+  | Readonly<{ readonly kind: "completed"; readonly result: Result }>
+  | Readonly<{ readonly kind: "unavailable" }>;
+
+/** Effects report only completed or unavailable; product decisions stay in this application. */
 export interface DeviceAdministrationRemovalEffectPort<Accepted, Abort> {
-  isConnected(targetDeviceId: string): boolean;
   accept(input: {
     readonly targetDeviceId: string;
     readonly accepted: Accepted;
-  }): Promise<DeviceAdministrationBeginRemovalResult>;
+  }): Promise<DeviceAdministrationRemovalEffectOutcome<DeviceAdministrationBeginRemovalResult>>;
   abort(input: {
     readonly targetDeviceId: string;
     readonly operationId: string;
     readonly abort: Abort;
-  }): Promise<DeviceAdministrationRemovalState>;
+  }): Promise<DeviceAdministrationRemovalEffectOutcome<DeviceAdministrationRemovalState>>;
   decide(input: {
     readonly targetDeviceId: string;
     readonly operationId: string;
     readonly mode: "transfer" | "destroy";
     readonly currentDutyDeviceId: string;
-  }): Promise<DeviceAdministrationRemovalState>;
+  }): Promise<DeviceAdministrationRemovalEffectOutcome<DeviceAdministrationRemovalState>>;
 }
 
 export interface DeviceAdministrationApplicationOptions<Accepted, Abort> {
@@ -1000,12 +1003,15 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
       operationId,
       targetDeviceId,
     });
-    if (!this.options.removalEffects.isConnected(targetDeviceId)) {
-      return freezeBeginRemovalResult({ conversations: [], hasAcceptedWork: false });
+    const effect = await this.options.removalEffects.accept({ targetDeviceId, accepted });
+    switch (effect.kind) {
+      case "completed":
+        return freezeBeginRemovalResult(effect.result);
+      case "unavailable":
+        return freezeBeginRemovalResult({ conversations: [], hasAcceptedWork: false });
+      default:
+        throw new TypeError("Device removal effect outcome is invalid");
     }
-    return freezeBeginRemovalResult(
-      await this.options.removalEffects.accept({ targetDeviceId, accepted }),
-    );
   }
 
   async #continueRemoval(
@@ -1051,19 +1057,24 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
     const operationId = operation.operationId;
     if (command.mode === "cancel") {
       const abort = await this.options.removalAuthority.abort(operationId);
-      if (this.options.removalEffects.isConnected(targetDeviceId)) {
-        return freezeRemovalState(await this.options.removalEffects.abort({
-          targetDeviceId,
-          operationId,
-          abort,
-        }));
-      }
-      return freezeRemovalState({
-        phase: "waiting-for-device",
-        conversations: [],
-        localData: "known",
-        credentialActions: ["取消已安全记录；目标设备上线后会自动恢复准入"],
+      const effect = await this.options.removalEffects.abort({
+        targetDeviceId,
+        operationId,
+        abort,
       });
+      switch (effect.kind) {
+        case "completed":
+          return freezeRemovalState(effect.result);
+        case "unavailable":
+          return freezeRemovalState({
+            phase: "waiting-for-device",
+            conversations: [],
+            localData: "known",
+            credentialActions: ["取消已安全记录；目标设备上线后会自动恢复准入"],
+          });
+        default:
+          throw new TypeError("Device removal effect outcome is invalid");
+      }
     }
     if (command.mode === "lost") {
       await this.options.removalAuthority.commitLost(operationId);
@@ -1077,17 +1088,22 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
     if (matches[0]!.state !== "active") {
       throw new Error("Removal target is no longer an active paired device");
     }
-    if (!this.options.removalEffects.isConnected(targetDeviceId)) {
-      throw new Error(
-        "The device is offline; choose lost-device revocation or wait for it to reconnect",
-      );
-    }
-    return freezeRemovalState(await this.options.removalEffects.decide({
+    const effect = await this.options.removalEffects.decide({
       targetDeviceId,
       operationId,
       mode: command.mode,
       currentDutyDeviceId: context.currentDutyDeviceId,
-    }));
+    });
+    switch (effect.kind) {
+      case "completed":
+        return freezeRemovalState(effect.result);
+      case "unavailable":
+        throw new Error(
+          "The device is offline; choose lost-device revocation or wait for it to reconnect",
+        );
+      default:
+        throw new TypeError("Device removal effect outcome is invalid");
+    }
   }
 
   async #prepareDutyMigration(

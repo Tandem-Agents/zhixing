@@ -37,10 +37,9 @@ function createProductApi(
       commitLost: async () => undefined,
     },
     removalEffects: {
-      isConnected: () => false,
-      accept: async () => ({ conversations: [], hasAcceptedWork: false }),
-      abort: async () => removalState("cancelled"),
-      decide: async () => removalState("removed"),
+      accept: async () => ({ kind: "unavailable" }),
+      abort: async () => ({ kind: "completed", result: removalState("cancelled") }),
+      decide: async () => ({ kind: "completed", result: removalState("removed") }),
     },
     dutyMigrationContext: {
       read: () => ({
