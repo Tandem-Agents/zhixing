@@ -6444,8 +6444,32 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
     inspectAdvancementDetailApplicationOwnership(mutate(
       "packages/core/src/advancement/application.ts",
       (text) => text.replace(
-        "  resolveRootTarget(\n",
-        "  prepareEligibility(): Promise<void>;\n  resolveRootTarget(\n",
+        "  resolveRootBinding(\n",
+        "  prepareEligibility(): Promise<void>;\n  resolveRootBinding(\n",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/core/src/advancement/application.ts",
+      (text) => `${text}\nexport interface AdvancementReviewRootTarget { readonly executorId: string; readonly ownerEpoch: number; }`,
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/core/src/advancement/application.ts",
+      (text) => `${text}\nfunction retiredRawRoot(target: { executorId: string; ownerEpoch: number }) { return target.executorId + target.ownerEpoch; }`,
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/owner-services/src/advancement/review-external-mechanism.ts",
+      (text) => text.replace(
+        'isExactRecord(scope, ["conversationId", "kind", "ownerEpoch"])',
+        "Boolean(scope)",
       ),
     )).join("\n"),
     failure,

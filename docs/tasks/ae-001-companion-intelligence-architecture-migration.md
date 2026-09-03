@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-22 已通过协调者独立验收，等待提交<br>
+> 当前检查点：A6-23 已通过协调者独立验收，等待提交<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `60077a36`；A6-21 六面审计与五条剩余 E05 反证已提交 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；Conversation uncertain-resolution owner fence 子边界已通过协调者独立验收 |
-| 活跃工作包 | `A6-22-conversation-uncertain-resolution-owner-fence-v1` 已通过协调者独立验收，等待提交 |
-| 下一责任链 | 处理 E05-C02 Advancement review root 的 executor/owner-epoch binding；其后依次处理两条 Device 泄漏与 Conversation directory 形状 |
+| 已接受基线 | `cefda327`；A6-22 Conversation uncertain-resolution owner fence 边界收口已提交 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-23 Advancement review root opaque binding 已通过协调者独立验收 |
+| 活跃工作包 | `A6-23-advancement-review-root-topology-binding-v1` 已通过协调者独立验收，等待提交 |
+| 下一责任链 | 独立验收 A6-23 后处理 E05-C03 Device removal live connection；其后处理 E05-C04 runtime admission flags 与 E05-C05 Conversation directory 形状 |
 | 打开的单向桥 | 无；P06 Rubric 已恢复为 required `readByDigest/put` 有限端口，P07、P09、P11 及 P12 三类 staging 的既有有限 Infrastructure 接管继续有效 |
-| 已失效证据 | A6-15 的 E05/聚合结论与 A6-19 的未完成聚合审计均不可作为退出证明；A6-21 的 E05-C01 已恢复并接受，C02～C05 四条反证仍打开。全部局部修复不得相加冒充完整 topology transparency |
+| 已失效证据 | A6-15 的 E05/聚合结论与 A6-19 的未完成聚合审计均不可作为退出证明；A6-21 的 E05-C01 已恢复并接受，C02 已完成本地纠正并等待独立复核，C03～C05 三条反证仍打开。全部局部修复不得相加冒充完整 topology transparency |
 | 阻塞/用户决策 | 无用户决策阻塞；完整 distributed-runtime structure 测试仍被既有 A4-10 `runtime-host` 依赖断言阻断，属于 A7 零残留与终验输入 |
 
 ### A0 基线索引
@@ -2990,6 +2990,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据：core Conversation 应用 38/38、owner-kernel fence codec 11/11、CLI Anchor/Local binding 2 文件 19/19、Server 真实 loopback `session-rpc` 94/94 与薄 handler 目标用例 1/1 通过，直接覆盖 opaque 原样传递、0/正数 canonical round-trip、负数/小数/非 canonical 拒绝、Server 与 Local wire 封装、Anchor 解封、forged fence fail-closed、认证 principal 及既有 durable resolution。首次组合运行薄 handler 整文件时，目标用例通过但同文件无关的 legacy send fixture 因缺 `sessionBroadcast` 1 项失败；按验证手册仅隔离重取本包目标 1/1 通过，没有修改或借本包解释该既有 fixture。core、owner-kernel、server、CLI build 与 CLI `tsc --noEmit` 通过；canonical S7 首次取得 production inspector 与 56/57 mutation tests 通过，唯一失败为新增 source 未加入测试 records，修正测试输入后只重取该失效 mutation 1/1，通过并结合未失效 56 项恢复 57/57，registry golden 通过；fresh runtime package exports、changed-source Biome 通过。
 - 失效、状态与交接：S7/package-export 现会拒绝 Conversation 应用 raw epoch 回流、Server/Local wire 绕过 fence、Anchor/Local adapter 绕过严格解析、缺失/重复 subpath、build 漂移或 owner-kernel 根泄漏。若 Conversation resolution command/port、两个 wire parser、两个 adapter、durable resolution input、owner-kernel fence codec/export/build、fresh declaration或这些直接测试任一变化，只恢复本证据与 A6-21 E05-C01 子结论；A6-21 其余四条反证、E01～E04/E06、其他 Conversation generation record 与公开 wire 不因本包自动失效。`A6-22-conversation-uncertain-resolution-owner-fence-v1` 当前等待协调者独立复核；A6 与完成度保持 `[ ]`/`6/8`，下一检查点固定为 E05-C02 Advancement review root binding，本轮未进入其余反证、A7 或 Git 写操作。
 - 协调者独立验收：反查两个 wire producer、Conversation Command/Product API/RunControlPort、Anchor 与 Local 两个解封消费者及 durable resolution 输入，确认领域 raw `ownerEpoch` 归零、legacy wire 与持久 generation 未变且 forged fence 在 Correctness 边界 fail closed。独立取得 Core 38/38、owner-kernel 11/11、CLI 19/19、Server loopback 94/94、目标 handler 1/1、canonical S7 57/57、registry golden、runtime package exports 与 `git diff --check` 通过；接受 `A6-22-conversation-uncertain-resolution-owner-fence-v1`。A6 保持 `[ ]`，下一责任链为 E05-C02。
+
+### A6-23：Advancement review root topology binding 边界收口
+
+- 基线与唯一责任变化：以已接受 `HEAD cefda32732a48e4f4b114aa9d800b9a859cf92f0` 加协调者本文调度记录为进场基线，只处理 A6-21 E05-C02。`AdvancementReviewRootTarget { executorId, ownerEpoch }`、`resolveRootTarget()`、领域 `createReviewRootContract()` 的物理 audience/scope 构造和 `reviewRootTargetMatches()` 逐字段比较已退出；`@zhixing/core/advancement/application` 现在只公开 branded string `AdvancementReviewRootBinding`，领域不能解析它。Advancement 仍唯一拥有 accepted run、lineage/generation、root workload/budget/request identity、started/invoking/terminal 生命周期、资源清理及 binding 不匹配后的 `expired/deferred` 业务决定。
+- Correctness mechanism 与持久兼容：唯一 `createAdvancementReviewExternalMechanism()` 把 `AdvancementEvidenceCoordinator.resolveTarget()` 或 carried outcome 的 `conversationId/executorId/ownerEpoch` 严格编码为 canonical opaque binding，并由同一 mechanism 的 `materializeReviewRoot()` 把它写回既有 `audience { executorId }` 与 `scopeBinding { kind: conversation, conversationId, ownerEpoch }`；`reviewRootMatchesBinding()` 对当前 binding、audience 和 scope 的 exact keys/values 做严格匹配，forged/non-canonical binding fail closed。无 evidence target 时继续省略两字段；冷恢复或 carried outcome 使用当前耐久请求机械重建同一 binding，不依赖进程缓存，完整 evidence target 仍只在 request-scoped `WeakMap` 内供 collect 使用。本包未修改 `AdvancementReviewRootContract`、attempt/event schema、codec/guards、root request/workload/budget、CAS/Authority 或 Resource Governor；新 root 的字段、值与序列化顺序和迁移前一致，旧记录按原 codec 恢复并由 mechanism 比对。
+- 直接证据与门禁：Core review application 16/16 覆盖 opaque binding 原样传递、mechanism 物化/匹配、同代 drift 的领域终态、资源 acquire/release、response-loss、terminal winner 与恢复；Server owner-services mechanism 4/4 覆盖并发 request-target 关联、exact persisted root 物化、executor/owner/conversation drift、额外字段、forged binding、carried-outcome 冷重建及 reviewer/evidence 错误；CLI 真实 `AdvancementStore + FileAuthorityCommitLog + AnchorResourceGovernor` 恢复闭包 7/7 覆盖 provider/资源响应丢失、冷恢复、target drift、取消与 terminal 竞态，合计 3 文件 27/27。Core、owner-services、Server 与 CLI 构建及 `tsc --noEmit`、fresh runtime package exports、changed-source Biome 通过；canonical S7 为 57/57 且 registry golden 通过。S7 现在机械拒绝 raw target 类型/字段解释回流、mechanism method exact-set 漂移、领域重新构造/比较 executor/epoch、Correctness 缺少 canonical encoder/materializer/exact matcher 或出现第二 review application owner。
+- 失效、状态与交接：若 Advancement review attempt application/mechanism port、evidence target/carried outcome、root materialization/matching codec、attempt/event schema 或 guard、Resource Governor binding、CLI production composition、cold recovery、fresh declaration、S7/package-export 或上述直接测试任一变化，只恢复本证据与 A6-21 E05-C02 子结论；A5 Advancement 的业务 owner、review 状态机、E01～E04/E06 和 A6-21 E05-C01/C03～C05 不因无关变化自动失效。`A6-23-advancement-review-root-topology-binding-v1` 当前完成并等待协调者独立复核；A6 与完成度保持 `[ ]`/`6/8`，下一责任链固定为 E05-C03 Device removal live connection，本轮未进入其余反证、A7 或 Git 写操作。
+- 协调者独立验收：反查 Advancement review application、外部 mechanism、evidence target、耐久 root 与冷恢复链，确认领域仅创建 workload/budget/request identity 并原样传递 opaque binding，`executorId/ownerEpoch` 的编码、持久 root 物化和 exact matching 唯一留在 Correctness mechanism；request-scoped `WeakMap` 只服务同次取证，冷恢复依赖确定性 binding 重建而不依赖缓存。独立取得 Core review application 16/16、Server owner-services mechanism 4/4、CLI 真实恢复闭包 7/7，通过源码 inspector 与反向 mutation 核验未见 raw target 回流或第二 owner，`git diff --check` 通过；执行者本轮 canonical S7 57/57 与 registry golden 证据继续有效。既有 root schema、资源生命周期、失败/取消/响应丢失与恢复终态未变，接受 `A6-23-advancement-review-root-topology-binding-v1`。A6 保持 `[ ]`，下一责任链为 E05-C03。
 
 ## 十、用户提示词
 

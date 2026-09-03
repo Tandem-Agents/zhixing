@@ -5889,20 +5889,32 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes("interface AdvancementReviewAttemptStatePort") ||
     !application.includes("interface AdvancementReviewRootLifecyclePort") ||
     !application.includes("interface AdvancementReviewAttemptMechanismPort") ||
+    !application.includes("type AdvancementReviewRootBinding = string &") ||
+    application.includes("AdvancementReviewRootTarget") ||
     JSON.stringify(reviewMechanismMethods) !==
-      JSON.stringify(["resolveRootTarget", "prepareEvidence", "invokeReviewer"]) ||
+      JSON.stringify([
+        "resolveRootBinding",
+        "materializeReviewRoot",
+        "reviewRootMatchesBinding",
+        "prepareEvidence",
+        "invokeReviewer",
+      ]) ||
     !application.includes("class AdvancementReviewAttemptApplicationService") ||
     application.split("class AdvancementReviewAttemptApplicationService").length - 1 !== 1 ||
     !application.includes("readonly #flights = new Map<string, Promise<AdvancementTurnReviewResult>>();") ||
     !application.includes("readonly #mechanism: AdvancementReviewAttemptMechanismPort;") ||
     !application.includes("this.#mechanism = options.mechanism;") ||
-    !application.includes("this.#mechanism.resolveRootTarget(") ||
+    !application.includes("this.#mechanism.resolveRootBinding(") ||
+    !application.includes("this.#mechanism.materializeReviewRoot({") ||
+    !application.includes("this.#mechanism.reviewRootMatchesBinding({") ||
     !application.includes("this.#mechanism.prepareEvidence({") ||
     !application.includes("this.#mechanism.invokeReviewer({") ||
     /reviewAcceptedRun\([\s\S]{0,180}mechanism:/u.test(application) ||
     !application.includes("const legacyGeneration =") ||
     !application.includes('attempt.phase === "invoking"') ||
-    !application.includes("reviewRootTargetMatches(attempt.root, rootTarget)") ||
+    application.includes("reviewRootTargetMatches") ||
+    application.includes("target.executorId") ||
+    application.includes("target.ownerEpoch") ||
     !application.includes("const afterAcquire = await this.#state.loadSession(") ||
     !application.includes("async #cleanupTerminalRoot(") ||
     !application.includes("async reconcileConversation(") ||
@@ -5926,6 +5938,15 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes('status === "closed-run-recovered"') ||
     !reviewExternalMechanism.includes("createAdvancementReviewExternalMechanism(") ||
     !reviewExternalMechanism.includes("new WeakMap<") ||
+    !reviewExternalMechanism.includes("encodeReviewRootBinding(input.conversationId, carried)") ||
+    !reviewExternalMechanism.includes("encodeReviewRootBinding(input.conversationId, target)") ||
+    !reviewExternalMechanism.includes("materializeReviewRoot({ root, binding })") ||
+    !reviewExternalMechanism.includes("reviewRootMatchesBinding({ root, binding })") ||
+    reviewExternalMechanism.split("decodeReviewRootBinding(binding)").length - 1 !== 2 ||
+    !reviewExternalMechanism.includes('isExactRecord(audience, ["executorId"])') ||
+    !reviewExternalMechanism.includes(
+      'isExactRecord(scope, ["conversationId", "kind", "ownerEpoch"])',
+    ) ||
     !reviewExternalMechanism.includes("options.evidence.resolveTarget(") ||
     !reviewExternalMechanism.includes("options.evidence.collect({") ||
     !reviewExternalMechanism.includes("options.reviewer.review(") ||
@@ -5948,7 +5969,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !reviewAttemptCorrectness.includes("options.store.appendRunReviewWithProxyMessage(") ||
     !reviewAttemptCorrectness.includes("options.resources.inspectImmediateRoot(") ||
     !reviewAttemptCorrectness.includes("options.resources.acquireRoot(") ||
-    /generation\s*=|phase\s*===|terminalReviewAttempt|reviewRootTargetMatches/u.test(
+    /generation\s*=|phase\s*===|terminalReviewAttempt|reviewRootMatchesBinding/u.test(
       reviewAttemptCorrectness,
     ) ||
     /afterTurnCommitted|reviewAttemptMechanism|reviewAttempts|AdvancementEvidenceCoordinator|AdvancementReviewerPort|readonly reviewer\?|readonly evidence\?/u.test(

@@ -99,10 +99,11 @@ export type AdvancementTurnReviewResult =
       readonly closure: AdvancementClosureReport;
   };
 
-export interface AdvancementReviewRootTarget {
-  readonly executorId: string;
-  readonly ownerEpoch: number;
-}
+declare const ADVANCEMENT_REVIEW_ROOT_BINDING: unique symbol;
+/** Opaque execution-placement binding; only a Correctness mechanism may inspect it. */
+export type AdvancementReviewRootBinding = string & {
+  readonly [ADVANCEMENT_REVIEW_ROOT_BINDING]: "advancement-review-root-binding";
+};
 
 export interface AdvancementReviewAttemptInput {
   readonly conversationId: string;
@@ -218,10 +219,18 @@ export type AdvancementReviewEvidencePreparationResult =
 
 /** External mechanisms fixed when the review application is assembled. */
 export interface AdvancementReviewAttemptMechanismPort {
-  resolveRootTarget(
+  resolveRootBinding(
     session: AdvancementSession,
     input: AdvancementReviewAttemptInput,
-  ): Promise<AdvancementReviewRootTarget | undefined>;
+  ): Promise<AdvancementReviewRootBinding | undefined>;
+  materializeReviewRoot(input: Readonly<{
+    root: AdvancementReviewRootContract;
+    binding?: AdvancementReviewRootBinding;
+  }>): AdvancementReviewRootContract;
+  reviewRootMatchesBinding(input: Readonly<{
+    root: AdvancementReviewRootContract;
+    binding?: AdvancementReviewRootBinding;
+  }>): boolean;
   prepareEvidence(input: Readonly<{
     session: AdvancementSession;
     request: AdvancementReviewAttemptInput & { readonly runRecordRef: RunRecordRef };
@@ -550,7 +559,7 @@ export class AdvancementReviewAttemptApplicationService
     }
 
     const lineageId = advancementReviewLineageId(session.id, input.runRecordRef);
-    const rootTarget = await this.#mechanism.resolveRootTarget(session, input);
+    const rootBinding = await this.#mechanism.resolveRootBinding(session, input);
     attempt = reviewAttemptForRun(session, input.runRecordRef);
     if (!attempt || isTerminalReviewAttempt(attempt)) {
       const legacyGeneration =
@@ -564,11 +573,9 @@ export class AdvancementReviewAttemptApplicationService
         runIndex: input.runIndex,
         runRecordRef: structuredClone(input.runRecordRef),
         phase: "started",
-        root: createReviewRootContract({
-          lineageId,
-          generation,
-          conversationId: input.conversationId,
-          target: rootTarget,
+        root: this.#mechanism.materializeReviewRoot({
+          root: createReviewRootContract({ lineageId, generation }),
+          ...(rootBinding === undefined ? {} : { binding: rootBinding }),
         }),
       };
       session = await this.#state.transitionReviewAttempt(
@@ -582,7 +589,10 @@ export class AdvancementReviewAttemptApplicationService
     if (attempt.phase !== "started") {
       throw new Error("Advancement review attempt is not restartable");
     }
-    if (!reviewRootTargetMatches(attempt.root, rootTarget)) {
+    if (!this.#mechanism.reviewRootMatchesBinding({
+      root: attempt.root,
+      ...(rootBinding === undefined ? {} : { binding: rootBinding }),
+    })) {
       const expired = terminalReviewAttempt(
         attempt,
         "expired",
@@ -1459,39 +1469,13 @@ function terminalReviewAttempt(
 function createReviewRootContract(input: Readonly<{
   lineageId: string;
   generation: number;
-  conversationId: string;
-  target?: AdvancementReviewRootTarget;
 }>): AdvancementReviewRootContract {
   const id = advancementReviewAttemptId(input.lineageId, input.generation);
   return {
     workload: { kind: "control", id, attempt: 1 },
     budget: { maxCalls: 8, maxTokens: 300_000 },
     requestId: advancementReviewRootRequestId(input.lineageId, input.generation),
-    ...(input.target
-      ? {
-          audience: { executorId: input.target.executorId },
-          scopeBinding: {
-            kind: "conversation" as const,
-            conversationId: input.conversationId,
-            ownerEpoch: input.target.ownerEpoch,
-          },
-        }
-      : {}),
   };
-}
-
-function reviewRootTargetMatches(
-  root: AdvancementReviewRootContract,
-  target: AdvancementReviewRootTarget | undefined,
-): boolean {
-  if (!target) {
-    return root.audience === undefined && root.scopeBinding === undefined;
-  }
-  return (
-    root.audience?.executorId === target.executorId &&
-    root.scopeBinding?.kind === "conversation" &&
-    root.scopeBinding.ownerEpoch === target.ownerEpoch
-  );
 }
 
 function assertFrozenReviewRootLease(

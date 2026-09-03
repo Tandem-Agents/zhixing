@@ -9,6 +9,7 @@ import type {
 import type {
   AdvancementReviewAttemptInput,
   AdvancementReviewAttemptMechanismPort,
+  AdvancementReviewRootBinding,
 } from "@zhixing/core/advancement/application";
 import {
   AdvancementEvidenceDeferredError,
@@ -24,10 +25,12 @@ export interface AdvancementReviewExternalMechanismOptions {
   readonly reviewer?: AdvancementReviewerPort;
 }
 
+const REVIEW_ROOT_BINDING_PREFIX = "advancement-review-root-binding:v1:";
+
 /**
  * Fixed external mechanism for the unique Advancement review application.
  * Full evidence targets remain local to the accepted request that resolved them;
- * the durable application only observes the stable executor/epoch root binding.
+ * the durable application only observes an opaque root binding.
  */
 export function createAdvancementReviewExternalMechanism(
   options: AdvancementReviewExternalMechanismOptions,
@@ -38,16 +41,50 @@ export function createAdvancementReviewExternalMechanism(
   >();
 
   return {
-    async resolveRootTarget(session, input) {
+    async resolveRootBinding(session, input) {
       if (!options.evidence || !input.runId) return undefined;
       const carried = options.evidence.carriedOutcomeRootTarget(session, input.runId);
-      if (carried) return carried;
+      if (carried) return encodeReviewRootBinding(input.conversationId, carried);
       const target = await options.evidence.resolveTarget(
         input.conversationId,
         input.runId,
       );
       if (target) resolvedTargets.set(input, target);
-      return target;
+      return target
+        ? encodeReviewRootBinding(input.conversationId, target)
+        : undefined;
+    },
+    materializeReviewRoot({ root, binding }) {
+      if (root.audience !== undefined || root.scopeBinding !== undefined) {
+        throw new TypeError("Advancement review root is already bound");
+      }
+      if (binding === undefined) return root;
+      const decoded = decodeReviewRootBinding(binding);
+      return {
+        ...root,
+        audience: { executorId: decoded.executorId },
+        scopeBinding: {
+          kind: "conversation",
+          conversationId: decoded.conversationId,
+          ownerEpoch: decoded.ownerEpoch,
+        },
+      };
+    },
+    reviewRootMatchesBinding({ root, binding }) {
+      if (binding === undefined) {
+        return root.audience === undefined && root.scopeBinding === undefined;
+      }
+      const decoded = decodeReviewRootBinding(binding);
+      const audience = root.audience;
+      const scope = root.scopeBinding;
+      return (
+        isExactRecord(audience, ["executorId"]) &&
+        audience.executorId === decoded.executorId &&
+        isExactRecord(scope, ["conversationId", "kind", "ownerEpoch"]) &&
+        scope.kind === "conversation" &&
+        scope.conversationId === decoded.conversationId &&
+        scope.ownerEpoch === decoded.ownerEpoch
+      );
     },
     async prepareEvidence({ session, request, attempt, rootLease }) {
       const target = resolvedTargets.get(request);
@@ -130,6 +167,88 @@ export function createAdvancementReviewExternalMechanism(
       return outcome;
     },
   };
+}
+
+function encodeReviewRootBinding(
+  conversationId: string,
+  target: Readonly<{ executorId: string; ownerEpoch: number }>,
+): AdvancementReviewRootBinding {
+  assertNonEmptyString(conversationId, "conversationId");
+  assertNonEmptyString(target.executorId, "executorId");
+  if (!Number.isSafeInteger(target.ownerEpoch) || target.ownerEpoch <= 0) {
+    throw new TypeError("Advancement review root ownerEpoch must be positive");
+  }
+  return `${REVIEW_ROOT_BINDING_PREFIX}${JSON.stringify([
+    conversationId,
+    target.executorId,
+    target.ownerEpoch,
+  ])}` as AdvancementReviewRootBinding;
+}
+
+function decodeReviewRootBinding(binding: AdvancementReviewRootBinding): Readonly<{
+  conversationId: string;
+  executorId: string;
+  ownerEpoch: number;
+}> {
+  if (
+    typeof binding !== "string" ||
+    !binding.startsWith(REVIEW_ROOT_BINDING_PREFIX)
+  ) {
+    throw new TypeError("Advancement review root binding is invalid");
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(binding.slice(REVIEW_ROOT_BINDING_PREFIX.length));
+  } catch {
+    throw new TypeError("Advancement review root binding is invalid");
+  }
+  if (
+    !Array.isArray(decoded) ||
+    decoded.length !== 3 ||
+    typeof decoded[0] !== "string" ||
+    typeof decoded[1] !== "string" ||
+    typeof decoded[2] !== "number"
+  ) {
+    throw new TypeError("Advancement review root binding is invalid");
+  }
+  const target = {
+    conversationId: decoded[0],
+    executorId: decoded[1],
+    ownerEpoch: decoded[2],
+  };
+  try {
+    assertNonEmptyString(target.conversationId, "conversationId");
+    assertNonEmptyString(target.executorId, "executorId");
+  } catch {
+    throw new TypeError("Advancement review root binding is invalid");
+  }
+  if (
+    !Number.isSafeInteger(target.ownerEpoch) ||
+    target.ownerEpoch <= 0 ||
+    encodeReviewRootBinding(target.conversationId, target) !== binding
+  ) {
+    throw new TypeError("Advancement review root binding is invalid");
+  }
+  return target;
+}
+
+function assertNonEmptyString(value: string, name: string): void {
+  if (value.trim().length === 0) {
+    throw new TypeError(`Advancement review root ${name} must be non-empty`);
+  }
+}
+
+function isExactRecord(
+  value: unknown,
+  expectedKeys: readonly string[],
+): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const keys = Object.keys(value).sort();
+  const expected = [...expectedKeys].sort();
+  return (
+    keys.length === expected.length &&
+    keys.every((key, index) => key === expected[index])
+  );
 }
 
 function assertReviewMatchesAcceptedRun(

@@ -7,9 +7,9 @@ import {
   AdvancementReviewAttemptApplicationService,
   type AdvancementReviewAttemptInput,
   type AdvancementReviewAttemptMechanismPort,
+  type AdvancementReviewRootBinding,
   type AdvancementReviewAttemptStatePort,
   type AdvancementReviewRootLifecyclePort,
-  type AdvancementReviewRootTarget,
   type AdvancementReviewPersistenceDecision,
 } from "../application.js";
 import type {
@@ -126,6 +126,50 @@ describe("AdvancementReviewAttemptApplicationService", () => {
     expect(roots.inspection()).toMatchObject({ state: "released" });
   });
 
+  it("delegates opaque root materialization and recovery matching to the mechanism", async () => {
+    const state = new ReviewAttemptState();
+    const roots = new ReviewRoots();
+    const binding = "opaque-review-root" as AdvancementReviewRootBinding;
+    const materializeReviewRoot = vi.fn<
+      AdvancementReviewAttemptMechanismPort["materializeReviewRoot"]
+    >(({ root }) => ({
+      ...root,
+      audience: { executorId: "executor-a" },
+      scopeBinding: {
+        kind: "conversation",
+        conversationId: "conv-1",
+        ownerEpoch: 7,
+      },
+    }));
+    const reviewRootMatchesBinding = vi.fn<
+      AdvancementReviewAttemptMechanismPort["reviewRootMatchesBinding"]
+    >(() => true);
+
+    await createApplication(state, roots, {
+      mechanism: mechanism(state, {
+        reviewer: async () => reviewedOutcome(),
+        rootBinding: binding,
+        materializeReviewRoot,
+        reviewRootMatchesBinding,
+      }),
+    }).reviewAcceptedRun(request());
+
+    expect(materializeReviewRoot).toHaveBeenCalledWith({
+      root: expect.objectContaining({
+        workload: expect.objectContaining({ kind: "control" }),
+        requestId: expect.any(String),
+      }),
+      binding,
+    });
+    expect(reviewRootMatchesBinding).toHaveBeenCalledWith({
+      root: expect.objectContaining({
+        audience: { executorId: "executor-a" },
+        scopeBinding: expect.objectContaining({ ownerEpoch: 7 }),
+      }),
+      binding,
+    });
+  });
+
   it("never replays an invoking generation and merges the legacy evidence generation", async () => {
     const first = attempt(4, "invoking");
     const state = new ReviewAttemptState(session({
@@ -166,7 +210,8 @@ describe("AdvancementReviewAttemptApplicationService", () => {
       createApplication(state, roots, {
         mechanism: mechanism(state, {
           reviewer,
-          target: { executorId: "executor-a", ownerEpoch: 2 },
+          rootBinding: "drifted-root" as AdvancementReviewRootBinding,
+          reviewRootMatchesBinding: () => false,
         }),
       }).reviewAcceptedRun(request()),
     ).resolves.toMatchObject({ kind: "review-deferred" });
@@ -788,12 +833,17 @@ function mechanism(
   _state: AdvancementReviewAttemptStatePort,
   options: Readonly<{
     reviewer: AdvancementReviewAttemptMechanismPort["invokeReviewer"];
-    target?: AdvancementReviewRootTarget;
+    rootBinding?: AdvancementReviewRootBinding;
+    materializeReviewRoot?: AdvancementReviewAttemptMechanismPort["materializeReviewRoot"];
+    reviewRootMatchesBinding?: AdvancementReviewAttemptMechanismPort["reviewRootMatchesBinding"];
     evidenceRequestId?: string;
   }>,
 ): AdvancementReviewAttemptMechanismPort {
   return {
-    resolveRootTarget: async () => options.target,
+    resolveRootBinding: async () => options.rootBinding,
+    materializeReviewRoot: options.materializeReviewRoot ?? (({ root }) => root),
+    reviewRootMatchesBinding:
+      options.reviewRootMatchesBinding ?? (() => true),
     prepareEvidence: async () => ({
       kind: "ready",
       ...(options.evidenceRequestId
@@ -868,7 +918,7 @@ function session(overrides: Partial<AdvancementSession> = {}): AdvancementSessio
 function attempt(
   generation: number,
   phase: AdvancementReviewAttempt["phase"],
-  target?: AdvancementReviewRootTarget,
+  target?: Readonly<{ executorId: string; ownerEpoch: number }>,
   runRecordRef = RUN_REF,
 ): AdvancementReviewAttempt {
   const lineageId = `advancement-review:adv-1:${runRecordRef.shardId}:${runRecordRef.runIndex}`;
