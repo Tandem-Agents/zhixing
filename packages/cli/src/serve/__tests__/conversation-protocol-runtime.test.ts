@@ -45,8 +45,10 @@ import {
 } from "../conversation-owner-runtime.js";
 import { fixtureLocalOwnerRuntime } from "./local-owner-assembly-fixture.js";
 import {
+  createConversationAssignmentArtifactAuthorityIndex,
   createConversationExecutorHostBoundary,
   ConversationExecutorTopologyAdapter,
+  NO_REMOTE_CONVERSATION_EXECUTORS,
   type ConversationExecutorDispatchApplication,
   type ConversationExecutorTopologyDirectory,
 } from "../conversation-executor-dispatch.js";
@@ -103,7 +105,7 @@ function setupAuthorityRuntime(
 function createProtocol(
   options: Omit<
     ConstructorParameters<typeof ConversationProtocolRuntime>[0],
-    "executorDispatch"
+    "assignmentArtifactAuthority" | "executorDispatch"
   > & {
     readonly executorDispatch?: ConversationExecutorDispatchApplication;
     readonly maxPendingInteractions?: number;
@@ -132,6 +134,7 @@ function createProtocol(
     ? undefined
     : createConversationExecutorHostBoundary({
       authority: owner,
+      directory: NO_REMOTE_CONVERSATION_EXECUTORS,
       clock: () => new Date().toISOString(),
       ...(options.maxPendingInteractions === undefined
         ? {}
@@ -145,6 +148,7 @@ function createProtocol(
   } = options;
   return new ConversationProtocolRuntime({
     ...protocolOptions,
+    assignmentArtifactAuthority: createConversationAssignmentArtifactAuthorityIndex(),
     executorDispatch: options.executorDispatch ?? executorBoundary!.application,
     ...(executorBoundary?.staging
       ? { assignmentStaging: executorBoundary.staging }
@@ -279,7 +283,7 @@ async function seedPendingConversation(label: string) {
 }
 
 describe("ConversationProtocolRuntime", () => {
-  it("requires one executor dispatch application and rejects Host topology rebinding", async () => {
+  it("requires executor dispatch and an immutable Host topology directory", async () => {
     const home = await createTempDir("conversation-protocol-dispatch-owner");
     const authority = await setupAuthorityRuntime({
       zhixingHome: home,
@@ -293,22 +297,18 @@ describe("ConversationProtocolRuntime", () => {
         },
         interactions: new DurableConversationInteractionObserver(),
         executorDispatch: undefined as never,
+        assignmentArtifactAuthority: createConversationAssignmentArtifactAuthorityIndex(),
       })
     ).toThrow("Conversation protocol requires the executor dispatch application");
 
-    const topology = new ConversationExecutorTopologyAdapter();
     const first: ConversationExecutorTopologyDirectory = {
       candidates: async () => [],
       forExecutor: () => undefined,
     };
-    const second: ConversationExecutorTopologyDirectory = {
-      candidates: async () => [],
-      forExecutor: () => undefined,
-    };
-    topology.bindDirectory(first);
-    topology.bindDirectory(first);
-    expect(() => topology.bindDirectory(second)).toThrow(
-      "Conversation executor topology directory is already bound",
+    const topology = new ConversationExecutorTopologyAdapter(first);
+    expect(topology).not.toHaveProperty("bindDirectory");
+    expect(() => new ConversationExecutorTopologyAdapter(undefined as never)).toThrow(
+      "Conversation executor topology directory is required",
     );
   });
 

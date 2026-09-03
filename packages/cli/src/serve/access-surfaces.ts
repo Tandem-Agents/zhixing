@@ -49,7 +49,13 @@ import {
   setupAuthorityRuntime,
   setupDelivery,
 } from "../setup-delivery.js";
-import { MeshRuntimeAssembly, executorIdForDevice } from "./mesh-runtime-assembly.js";
+import {
+  MeshConversationExecutorTopologyDirectory,
+  MeshExecutorTopologyTrustState,
+  MeshRuntimeAssembly,
+  executorIdForDevice,
+} from "./mesh-runtime-assembly.js";
+import { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
 import { createAssignmentArtifactReceiverInfrastructure } from "./assignment-artifact-receiver-infrastructure.js";
 import { createConversationTransferStagingInfrastructure } from "./conversation-transfer-staging-infrastructure.js";
 import { createFileMeshPairingContinuationRepository } from "./mesh-pairing-continuation.js";
@@ -59,7 +65,11 @@ import { createAnchorConversationDeleteProjectionPort } from "./conversation-del
 import { createTurnMaintenance } from "./turn-maintenance.js";
 import { governControlTextCall } from "./governed-control-llm.js";
 import { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
-import { createConversationExecutorHostBoundary } from "./conversation-executor-dispatch.js";
+import {
+  createConversationAssignmentArtifactAuthorityIndex,
+  createConversationExecutorHostBoundary,
+  NO_REMOTE_CONVERSATION_EXECUTORS,
+} from "./conversation-executor-dispatch.js";
 import type {
   AccessSurface,
   AssemblyUnit,
@@ -297,7 +307,14 @@ const meshSurface: AccessSurface = {
   async setup(ctx) {
     const bootstrap = ctx.meshBootstrap;
     if (!bootstrap || bootstrap.mode === "single-machine") return;
-    if (!ctx.authorityRuntime || !ctx.conversationProtocol) {
+    if (
+      !ctx.authorityRuntime ||
+      !ctx.conversationProtocol ||
+      !ctx.meshConnections ||
+      !ctx.meshExecutorTopologyTrust ||
+      !ctx.conversationExecutorTopologyDirectory ||
+      !ctx.assignmentArtifactReceiver
+    ) {
       throw new Error("Mesh control requires authority and conversation protocol runtimes");
     }
     const pairedCheckpointDeviceId = ctx.authorityRuntime.deviceId;
@@ -327,17 +344,16 @@ const meshSurface: AccessSurface = {
         ? { plannedAnchorPostInstall: bootstrap.plannedAnchorPostInstall }
         : {}),
       authority: ctx.authorityRuntime,
-      assignmentArtifactReceiver: createAssignmentArtifactReceiverInfrastructure({
-        zhixingHome: ctx.zhixingHome,
-        artifacts: ctx.authorityRuntime.artifacts,
-      }),
+      assignmentArtifactReceiver: ctx.assignmentArtifactReceiver,
       conversationTransferStaging: createConversationTransferStagingInfrastructure({
         zhixingHome: ctx.zhixingHome,
       }),
       plannedAnchorTransferStaging: bootstrap.plannedAnchorTransferStaging,
       disasterRecoveryStaging: bootstrap.disasterRecoveryStaging,
       protocol: ctx.conversationProtocol,
-      executorTopology: ctx.conversationExecutorTopology!,
+      executorTopologyDirectory: ctx.conversationExecutorTopologyDirectory,
+      executorTopologyTrust: ctx.meshExecutorTopologyTrust,
+      connections: ctx.meshConnections,
       ...(ctx.localConversationOwner
         ? { localConversationOwner: ctx.localConversationOwner }
         : {}),
@@ -363,9 +379,6 @@ const meshSurface: AccessSurface = {
           }
         : {}),
       secretStore: ctx.secretStore,
-      ...(ctx.meshConnectionProjection
-        ? { connectionProjection: ctx.meshConnectionProjection }
-        : {}),
       ...(bootstrap.localEndpoint ? { localEndpoint: bootstrap.localEndpoint } : {}),
       onError: (error) => console.warn(chalk.yellow(`[mesh] ${error.message}`)),
       ...(ctx.onTrustApplied ? { onTrustApplied: ctx.onTrustApplied } : {}),
@@ -508,8 +521,38 @@ const conversationSurface: AccessSurface = {
     if (ctx.enabledRoles.includes("executor") && !ctx.executorDataPlane) {
       throw new Error("Conversation executor requires its durable data plane");
     }
+    const assignmentArtifacts = createConversationAssignmentArtifactAuthorityIndex();
+    let topologyDirectory = NO_REMOTE_CONVERSATION_EXECUTORS;
+    if (ctx.meshBootstrap.mode !== "single-machine") {
+      const receiver = createAssignmentArtifactReceiverInfrastructure({
+        zhixingHome: ctx.zhixingHome,
+        artifacts: ctx.authorityRuntime.artifacts,
+      });
+      const connections = new MeshConnectionRegistry({
+        ...(ctx.meshConnectionProjection
+          ? { projection: ctx.meshConnectionProjection }
+          : {}),
+        onProjectionError: (error) =>
+          console.warn(chalk.yellow(`[mesh] ${error.message}`)),
+      });
+      const trust = new MeshExecutorTopologyTrustState(ctx.meshBootstrap.trust);
+      topologyDirectory = new MeshConversationExecutorTopologyDirectory({
+        trust,
+        connections,
+        localDeviceId: ctx.authorityRuntime.deviceId,
+        artifacts: ctx.authorityRuntime.artifacts,
+        receiver,
+        signer: ctx.authorityRuntime.signer,
+        verifier: ctx.authorityRuntime.verifier,
+        assignmentArtifacts,
+      });
+      ctx.assignmentArtifactReceiver = receiver;
+      ctx.meshConnections = connections;
+      ctx.meshExecutorTopologyTrust = trust;
+    }
     const executorBoundary = createConversationExecutorHostBoundary({
       authority: anchorConversationOwnerRuntime(ctx.authorityRuntime),
+      directory: topologyDirectory,
       clock: () => new Date().toISOString(),
       ...(ctx.executorRoleModule
         ? {
@@ -531,6 +574,7 @@ const conversationSurface: AccessSurface = {
     const protocol = new ConversationProtocolRuntime({
       authority: ctx.authorityRuntime,
       executorDispatch: executorBoundary.application,
+      assignmentArtifactAuthority: assignmentArtifacts,
       ...(executorBoundary.staging
         ? { assignmentStaging: executorBoundary.staging }
         : {}),
@@ -782,7 +826,7 @@ const conversationSurface: AccessSurface = {
     ctx.conversations = manager;
     ctx.conversationProtocol = protocol;
     ctx.conversationExecutorDispatch = executorBoundary.application;
-    ctx.conversationExecutorTopology = executorBoundary.topology;
+    ctx.conversationExecutorTopologyDirectory = topologyDirectory;
     ctx.conversationAssignmentStaging = executorBoundary.staging;
     ctx.conversationExecutorLedger = executorBoundary.localLedger;
     ctx.conversationAuthorityRef.current = protocol;
@@ -847,6 +891,7 @@ const localConversationOwnerUnit: CoreAssemblyUnit = {
     });
     const localExecutorBoundary = createConversationExecutorHostBoundary({
       authority: localOwner,
+      directory: NO_REMOTE_CONVERSATION_EXECUTORS,
       clock: () => new Date().toISOString(),
       local: {
         ConversationAssignmentLedger:

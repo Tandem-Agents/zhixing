@@ -29,7 +29,6 @@ import {
 import {
   MeshConnectionRegistry,
   MeshEndpointDirectory,
-  type MeshConnectionProjectionPort,
 } from "@zhixing/mesh/bootstrap";
 import type { TrustedMeshPeer } from "@zhixing/mesh/handshake";
 import type { DeviceKey } from "@zhixing/mesh/device-identity";
@@ -56,12 +55,15 @@ import {
 import { AssignmentMeshComposition } from "./assignment-mesh-composition.js";
 import type { AssignmentArtifactReceiverPort } from "./assignment-artifact-receiver.js";
 import { createAssignmentGlobalQueryPort } from "./assignment-schedule-stager.js";
-import type { AssignmentArtifactAuthority } from "./assignment-mesh-adapter.js";
+import {
+  MeshRunExecutorPort,
+  type AssignmentArtifactAuthority,
+} from "./assignment-mesh-adapter.js";
 import { fulfillConnectionLifetimeObligation } from "./connection-lifetime-obligation.js";
 import { ConversationAssignmentWorker } from "./conversation-assignment-worker.js";
 import type { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
 import type {
-  ConversationExecutorTopologyAdapter,
+  ConversationAssignmentArtifactAuthorityReader,
   ConversationExecutorTopologyDirectory,
   ConversationExecutorTopologyTarget,
 } from "./conversation-executor-dispatch.js";
@@ -332,7 +334,9 @@ export interface MeshRuntimeAssemblyOptions {
   readonly plannedAnchorTransferStaging: PlannedAnchorTransferStagingArea;
   readonly disasterRecoveryStaging: DisasterRecoveryStagingArea;
   readonly protocol?: ConversationProtocolRuntime;
-  readonly executorTopology?: ConversationExecutorTopologyAdapter;
+  readonly executorTopologyDirectory: ConversationExecutorTopologyDirectory;
+  readonly executorTopologyTrust: MeshExecutorTopologyTrustState;
+  readonly connections: MeshConnectionRegistry;
   readonly localConversationOwner?: LocalConversationOwnerAssembly;
   readonly jobRelays?: JobRelayObligationDirectory;
   readonly executor?: {
@@ -348,9 +352,95 @@ export interface MeshRuntimeAssemblyOptions {
     };
   };
   readonly secretStore: import("@zhixing/core/contracts").SecretStorePort;
-  readonly connectionProjection?: MeshConnectionProjectionPort;
   readonly onError?: (error: Error) => void;
   readonly onTrustApplied?: (record: HomeTrustRecord) => void | Promise<void>;
+}
+
+/** Stable Host topology projection; trust updates change data, never construction wiring. */
+export class MeshExecutorTopologyTrustState {
+  #current: HomeTrustRecord;
+
+  constructor(initial: HomeTrustRecord) {
+    this.#current = initial;
+  }
+
+  current(): HomeTrustRecord {
+    return this.#current;
+  }
+
+  accept(record: HomeTrustRecord): void {
+    this.#current = record;
+  }
+}
+
+export class MeshConversationExecutorTopologyDirectory
+  implements ConversationExecutorTopologyDirectory {
+  readonly #targets = new Map<string, ConversationExecutorTopologyTarget>();
+
+  constructor(private readonly options: {
+    readonly trust: Pick<MeshExecutorTopologyTrustState, "current">;
+    readonly connections: MeshConnectionRegistry;
+    readonly localDeviceId: string;
+    readonly artifacts: AuthorityRuntimeStack["artifacts"];
+    readonly receiver: AssignmentArtifactReceiverPort;
+    readonly signer: AuthorityRuntimeStack["signer"];
+    readonly verifier: AuthorityRuntimeStack["verifier"];
+    readonly assignmentArtifacts: ConversationAssignmentArtifactAuthorityReader;
+  }) {}
+
+  async candidates(): Promise<readonly ConversationExecutorTopologyTarget[]> {
+    return Object.freeze(
+      this.#activeExecutorDeviceIds()
+        .filter((deviceId) => this.options.connections.has(deviceId))
+        .map((deviceId) => this.#targetFor(deviceId)),
+    );
+  }
+
+  forExecutor(
+    executorId: string,
+  ): ConversationExecutorTopologyTarget | undefined {
+    const deviceId = this.#activeExecutorDeviceIds().find((candidate) =>
+      executorIdForDevice(candidate) === executorId
+    );
+    return deviceId ? this.#targetFor(deviceId) : undefined;
+  }
+
+  #targetFor(deviceId: string): ConversationExecutorTopologyTarget {
+    const executorId = executorIdForDevice(deviceId);
+    const existing = this.#targets.get(executorId);
+    if (existing) return existing;
+    const client = this.options.connections.client(deviceId);
+    const snapshots = new MeshExecutionSnapshotClient(client, this.options.verifier);
+    const target = Object.freeze({
+      executorId,
+      deviceId,
+      executor: new MeshRunExecutorPort({
+        artifacts: this.options.artifacts,
+        receiver: this.options.receiver,
+        signer: this.options.signer,
+        verifier: this.options.verifier,
+        localDeviceId: this.options.localDeviceId,
+        peerDeviceId: deviceId,
+        client,
+        authorizationFor: async (assignmentId) =>
+          this.options.assignmentArtifacts.read(assignmentId),
+      }),
+      synchronizePermission: (snapshot, executionAssets) =>
+        snapshots.installPermission(snapshot, executionAssets),
+    } satisfies ConversationExecutorTopologyTarget);
+    this.#targets.set(executorId, target);
+    return target;
+  }
+
+  #activeExecutorDeviceIds(): readonly string[] {
+    return this.options.trust.current().members
+      .filter((member) =>
+        member.state === "active" &&
+        member.device.deviceId !== this.options.localDeviceId &&
+        member.roles.includes("executor"))
+      .map((member) => member.device.deviceId)
+      .sort((left, right) => left.localeCompare(right, "en-US"));
+  }
 }
 
 export class DeviceRemovalTargetEffectAdapter
@@ -499,10 +589,7 @@ export class MeshRuntimeAssembly
   #observedIssuerDeviceId: string;
 
   constructor(private readonly options: MeshRuntimeAssemblyOptions) {
-    this.connections = new MeshConnectionRegistry({
-      ...(options.connectionProjection ? { projection: options.connectionProjection } : {}),
-      onProjectionError: (error) => options.onError?.(error),
-    });
+    this.connections = options.connections;
     this.deviceRemovalTargetEffects = new DeviceRemovalTargetEffectAdapter(this.connections);
     this.dutyMigrationAdmission = new DeviceAdministrationDutyMigrationAdmissionAdapter(
       () => this.#readDutyMigrationPhysicalAdmission(),
@@ -513,9 +600,6 @@ export class MeshRuntimeAssembly
     const roles = new Set(options.configuration.enabledRoles);
     if (roles.has("anchor") && !options.protocol) {
       throw new Error("Anchor mesh role requires the conversation owner protocol");
-    }
-    if (roles.has("anchor") && !options.executorTopology) {
-      throw new Error("Anchor mesh role requires the conversation executor topology adapter");
     }
     if (roles.has("anchor") && !options.conversationTransferStaging) {
       throw new Error("Anchor mesh role requires conversation transfer staging");
@@ -890,6 +974,7 @@ export class MeshRuntimeAssembly
       }),
       ...(options.localEndpoint ? { localEndpoint: options.localEndpoint } : {}),
       onTrustReconciled: async (record) => {
+        options.executorTopologyTrust.accept(record);
         for (const deviceId of this.#deviceRemovalGuards.keys()) {
           if (!record.members.some((member) =>
             member.device.deviceId === deviceId && member.state === "active") &&
@@ -1048,7 +1133,6 @@ export class MeshRuntimeAssembly
 
     if (roles.has("anchor")) {
       this.#installInitialPlannedAnchorRole(options.trust);
-      options.executorTopology!.bindDirectory(this.#remoteDirectory());
     }
   }
 
@@ -1595,8 +1679,7 @@ export class MeshRuntimeAssembly
     readonly deviceId: string;
     readonly synchronizePermission: ConversationExecutorTopologyTarget["synchronizePermission"];
   }[]> {
-    const directory = this.#remoteDirectory();
-    return (await directory.candidates()).map((target) => ({
+    return (await this.options.executorTopologyDirectory.candidates()).map((target) => ({
       executorId: target.executorId,
       deviceId: target.deviceId,
       synchronizePermission: (snapshot, executionAssets) =>
@@ -1642,49 +1725,6 @@ export class MeshRuntimeAssembly
     } catch {
       return undefined;
     }
-  }
-
-  #remoteDirectory(): ConversationExecutorTopologyDirectory {
-    const targets = new Map<string, ConversationExecutorTopologyTarget>();
-    const targetFor = (deviceId: string): ConversationExecutorTopologyTarget => {
-      const executorId = executorIdForDevice(deviceId);
-      const existing = targets.get(executorId);
-      if (existing) return existing;
-      const snapshots = new MeshExecutionSnapshotClient(
-        this.connections.client(deviceId),
-        this.options.authority.verifier,
-      );
-      const target = {
-        executorId,
-        deviceId,
-        executor: this.#composition.executorPort(deviceId, {
-          verifier: this.options.authority.verifier,
-          authorizationFor: (assignmentId) =>
-            this.options.protocol!.assignmentArtifactAuthority(assignmentId),
-        }),
-        synchronizePermission: (snapshot, executionAssets) =>
-          snapshots.installPermission(snapshot, executionAssets),
-      } satisfies ConversationExecutorTopologyTarget;
-      targets.set(executorId, target);
-      return target;
-    };
-    const activeExecutors = () => this.#control.currentTrust().members
-      .filter((member) =>
-        member.state === "active" &&
-        member.device.deviceId !== this.options.authority.deviceId &&
-        member.roles.includes("executor"))
-      .map((member) => member.device.deviceId)
-      .sort((left, right) => left.localeCompare(right, "en-US"));
-    return {
-      candidates: async () => activeExecutors()
-        .filter((deviceId) => this.connections.has(deviceId))
-        .map((deviceId) => targetFor(deviceId)),
-      forExecutor: (executorId) => {
-        const deviceId = activeExecutors().find((candidate) =>
-          executorIdForDevice(candidate) === executorId);
-        return deviceId ? targetFor(deviceId) : undefined;
-      },
-    };
   }
 
   #activeExecutorDeviceId(executorId: string): string {

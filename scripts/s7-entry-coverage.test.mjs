@@ -786,13 +786,30 @@ test("conversation dispatch application stays separate from the Host topology me
   );
   assert.match(
     inspectConversationExecutorDispatchBoundary(mutate(
-      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      "packages/cli/src/serve/conversation-executor-dispatch.ts",
       (text) => text.replace(
-        "options.executorTopology!.bindDirectory(this.#remoteDirectory())",
-        "options.protocol!.bindRemoteExecution(this.#remoteDirectory())",
+        "readonly directory: ConversationExecutorTopologyDirectory;",
+        "readonly directory?: ConversationExecutorTopologyDirectory;",
       ),
     )).join("\n"),
-    /product policy\/application ownership drifted/,
+    /must be the required ConversationExecutorTopologyDirectory/,
+  );
+  assert.match(
+    inspectConversationExecutorDispatchBoundary(mutate(
+      "packages/cli/src/serve/conversation-executor-dispatch.ts",
+      (text) => text.replace(
+        "export class ConversationExecutorTopologyAdapter {",
+        "export class ConversationExecutorTopologyAdapter {\n  bindDirectory() {}",
+      ),
+    )).join("\n"),
+    /static topology\/application ownership drifted|service-locator owner/,
+  );
+  assert.match(
+    inspectConversationExecutorDispatchBoundary(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => `${text}\nconst lateBackfill = topology.bindDirectory(directory);\n`,
+    )).join("\n"),
+    /static topology\/application ownership drifted/,
   );
   assert.match(
     inspectConversationExecutorDispatchBoundary(mutate(
@@ -1574,8 +1591,8 @@ test("P09 assignment artifact partial receiver stays finite and Host-composed", 
     inspectAssignmentArtifactReceiverBoundary(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "assignmentArtifactReceiver: createAssignmentArtifactReceiverInfrastructure({",
-        "assignmentArtifactReceiver: missingAssignmentArtifactReceiver({",
+        "const receiver = createAssignmentArtifactReceiverInfrastructure({",
+        "const receiver = missingAssignmentArtifactReceiver({",
       ),
     )).join("\n"),
     /Anchor Host|second Host entry/u,

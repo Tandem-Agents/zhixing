@@ -73,6 +73,55 @@ export interface ConversationExecutorTopologyDirectory {
   forExecutor(executorId: string): ConversationExecutorTopologyTarget | undefined;
 }
 
+export const NO_REMOTE_CONVERSATION_EXECUTORS: ConversationExecutorTopologyDirectory =
+  Object.freeze({
+    candidates: async () => Object.freeze([]),
+    forExecutor: () => undefined,
+  });
+
+export interface ConversationAssignmentArtifactAuthorityReader {
+  read(assignmentId: string): {
+    readonly capability: import("@zhixing/core/contracts").AuthorityCapability<"conversation">;
+    readonly activation: import("@zhixing/core/contracts").AssignmentActivationProof<"conversation">;
+  };
+}
+
+export interface ConversationAssignmentArtifactAuthorityIndex
+  extends ConversationAssignmentArtifactAuthorityReader {
+  find(assignmentId: string): ReturnType<ConversationAssignmentArtifactAuthorityReader["read"]> | undefined;
+  install(
+    assignmentId: string,
+    capability: import("@zhixing/core/contracts").AuthorityCapability<"conversation">,
+    activation: import("@zhixing/core/contracts").AssignmentActivationProof<"conversation">,
+  ): void;
+  remove(assignmentId: string): void;
+}
+
+export function createConversationAssignmentArtifactAuthorityIndex():
+  ConversationAssignmentArtifactAuthorityIndex {
+  const assignments = new Map<string, {
+    readonly capability: import("@zhixing/core/contracts").AuthorityCapability<"conversation">;
+    readonly activation: import("@zhixing/core/contracts").AssignmentActivationProof<"conversation">;
+  }>();
+  const index: ConversationAssignmentArtifactAuthorityIndex = {
+    install(assignmentId, capability, activation) {
+      assignments.set(assignmentId, Object.freeze({ capability, activation }));
+    },
+    remove(assignmentId) {
+      assignments.delete(assignmentId);
+    },
+    find(assignmentId) {
+      return assignments.get(assignmentId);
+    },
+    read(assignmentId) {
+      const authority = assignments.get(assignmentId);
+      if (!authority) throw new Error(`Unknown conversation assignment ${assignmentId}`);
+      return authority;
+    },
+  };
+  return Object.freeze(index);
+}
+
 export interface ConversationExecutorApplicationPlanInput {
   readonly conversationId: string;
   readonly requirement: ConversationExecutorRequirement;
@@ -230,6 +279,7 @@ export interface ConversationAssignmentStagingPort {
 
 export interface ConversationExecutorHostBoundaryOptions {
   readonly authority: ConversationOwnerRuntimeStack;
+  readonly directory: ConversationExecutorTopologyDirectory;
   readonly clock: () => string;
   readonly maxPendingInteractions?: number;
   readonly local?: {
@@ -322,24 +372,24 @@ type ResolvedConversationExecutorTarget =
 /** Host-owned mechanism selector. It contains no Conversation product policy or Authority decision. */
 export class ConversationExecutorTopologyAdapter {
   readonly #local: LocalConversationExecutorMechanism | undefined;
-  #directory: ConversationExecutorTopologyDirectory | undefined;
+  readonly #directory: ConversationExecutorTopologyDirectory;
 
-  constructor(local?: LocalConversationExecutorMechanism) {
-    this.#local = local;
-  }
-
-  bindDirectory(directory: ConversationExecutorTopologyDirectory): void {
-    if (this.#directory && this.#directory !== directory) {
-      throw new Error("Conversation executor topology directory is already bound");
+  constructor(
+    directory: ConversationExecutorTopologyDirectory,
+    local?: LocalConversationExecutorMechanism,
+  ) {
+    if (!directory) {
+      throw new Error("Conversation executor topology directory is required");
     }
     this.#directory = directory;
+    this.#local = local;
   }
 
   async candidates(
     requirement: ConversationExecutorRequirement,
   ): Promise<readonly ConversationExecutorTopologyTarget[]> {
     return requirement.placement === "authorized-device"
-      ? await this.#directory?.candidates() ?? []
+      ? await this.#directory.candidates()
       : [];
   }
 
@@ -355,7 +405,7 @@ export class ConversationExecutorTopologyAdapter {
       if (!this.#local) throw new Error("Local executor role is not enabled on this device");
       return { kind: "local", executorId, mechanism: this.#local };
     }
-    const target = this.#directory?.forExecutor(executorId);
+    const target = this.#directory.forExecutor(executorId);
     if (!target) throw new Error(`Remote conversation executor is unavailable: ${executorId}`);
     return { kind: "remote", executorId, target };
   }
@@ -363,7 +413,6 @@ export class ConversationExecutorTopologyAdapter {
 
 export interface ConversationExecutorHostBoundary {
   readonly application: ConversationExecutorDispatchApplication;
-  readonly topology: ConversationExecutorTopologyAdapter;
   readonly staging?: ConversationAssignmentStagingPort;
   readonly localLedger?: ConversationAssignmentLedger;
 }
@@ -375,9 +424,11 @@ export function createConversationExecutorHostBoundary(
   const local = options.local
     ? createLocalConversationExecutorMechanism(options, options.local)
     : undefined;
-  const topology = new ConversationExecutorTopologyAdapter(local?.mechanism);
+  const topology = new ConversationExecutorTopologyAdapter(
+    options.directory,
+    local?.mechanism,
+  );
   return {
-    topology,
     application: new DefaultConversationExecutorDispatchApplication({
       authority: options.authority,
       topology,
@@ -458,10 +509,11 @@ class DefaultConversationExecutorDispatchApplication
       this.#topology.resolve(executorId, this.#authority.executorId);
     const executor = new RoutedRunExecutorPort(
       (executorId) => executorPort(resolve(executorId)),
-      (assignmentId) => executorPort(resolve(input.executorIdForAssignment(assignmentId))),
+      (assignmentId) =>
+        executorPort(resolve(input.executorIdForAssignment(assignmentId))),
     );
     const local = this.#topology.hasLocal()
-      ? this.#topology.resolve(this.#authority.executorId, this.#authority.executorId)
+      ? resolve(this.#authority.executorId)
       : undefined;
     const submission = local?.kind === "local"
       ? local.mechanism.createSubmission(input.journal)

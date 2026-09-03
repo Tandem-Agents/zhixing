@@ -1,5 +1,6 @@
 import { getZhixingHome } from "@zhixing/core";
 import { DeviceLifecycleJournal, type ArtifactStore } from "@zhixing/core/authority";
+import { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
 import path from "node:path";
 import {
   createAgentRuntime,
@@ -33,7 +34,10 @@ import {
   ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
   createConversationExecutorLedger,
 } from "./conversation-executor-ledger.js";
-import { createConversationExecutorHostBoundary } from "./conversation-executor-dispatch.js";
+import {
+  createConversationExecutorHostBoundary,
+  NO_REMOTE_CONVERSATION_EXECUTORS,
+} from "./conversation-executor-dispatch.js";
 import {
   createConversationResourceRecoveryPort,
   localConversationOwnerRuntime,
@@ -42,6 +46,7 @@ import { DurableConversationInteractionObserver } from "./durable-conversation-i
 import { createExecutorReadinessSource } from "./executor-readiness.js";
 import {
   executorIdForDevice,
+  MeshExecutorTopologyTrustState,
   MeshRuntimeAssembly,
 } from "./mesh-runtime-assembly.js";
 import { createFileMeshPairingContinuationRepository } from "./mesh-pairing-continuation.js";
@@ -431,6 +436,7 @@ export async function runExecutorRole(
       executor.createInProcessAssignmentRuntimeFactory(role);
     const conversationExecutorBoundary = createConversationExecutorHostBoundary({
       authority: localOwnerRuntime,
+      directory: NO_REMOTE_CONVERSATION_EXECUTORS,
       clock: () => new Date().toISOString(),
       local: {
         ledger,
@@ -511,6 +517,9 @@ export async function runExecutorRole(
         throw new Error("Executor Host admission changed before its stop port was ready");
       }
     };
+    const executorMeshTrust = new MeshExecutorTopologyTrustState(
+      bootstrap.mesh.trust,
+    );
     mesh = new MeshRuntimeAssembly({
       zhixingHome,
       trust: bootstrap.mesh.trust,
@@ -542,6 +551,14 @@ export async function runExecutorRole(
       conversationTransferStaging: null,
       plannedAnchorTransferStaging: bootstrap.mesh.plannedAnchorTransferStaging,
       disasterRecoveryStaging: bootstrap.mesh.disasterRecoveryStaging,
+      executorTopologyDirectory: NO_REMOTE_CONVERSATION_EXECUTORS,
+      executorTopologyTrust: executorMeshTrust,
+      connections: new MeshConnectionRegistry({
+        ...(meshConnectionProjection
+          ? { projection: meshConnectionProjection }
+          : {}),
+        onProjectionError: (error) => writer.notify(`[mesh] ${error.message}`),
+      }),
       executor: {
         ledger,
         runtimeFactory,
@@ -554,7 +571,6 @@ export async function runExecutorRole(
         },
       },
       secretStore: bootstrap.secretStore,
-      connectionProjection: meshConnectionProjection,
       onTrustApplied,
       onError: (error) => writer.notify(`[mesh] ${error.message}`),
     });

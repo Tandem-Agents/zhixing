@@ -78,9 +78,10 @@ import {
 import { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
 import type { LocalConversationOwnerRuntimeStack } from "./conversation-owner-runtime.js";
 import { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
-import type {
-  ConversationAssignmentStagingPort,
-  ConversationExecutorDispatchApplication,
+import {
+  createConversationAssignmentArtifactAuthorityIndex,
+  type ConversationAssignmentStagingPort,
+  type ConversationExecutorDispatchApplication,
 } from "./conversation-executor-dispatch.js";
 import { GlobalRubricCatalog } from "./advancement-rubric-library.js";
 import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
@@ -775,6 +776,7 @@ export class LocalConversationOwnerAssembly {
       owner,
       interactions: options.interactions,
       executorDispatch: options.executorDispatch,
+      assignmentArtifactAuthority: createConversationAssignmentArtifactAuthorityIndex(),
       assignmentStaging: options.assignmentStaging,
       onFinal: (frame) => verifyLocalConversationFinal(protocol, frame),
       projectLifecycle: async ({ conversationId, mutation, requestId }) => {

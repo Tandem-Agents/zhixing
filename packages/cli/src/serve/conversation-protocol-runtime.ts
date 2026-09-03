@@ -111,6 +111,7 @@ import type {
   FirstPartyFinalitySessionOptions,
 } from "./first-party-finality-session.js";
 import type {
+  ConversationAssignmentArtifactAuthorityIndex,
   ConversationAssignmentStagingPort,
   ConversationExecutorDispatchApplication,
   ConversationExecutorExecutionEffect,
@@ -132,6 +133,7 @@ export interface ConversationProtocolRuntimeOptions {
   readonly clock?: () => string;
   readonly interactions: DurableConversationInteractionObserver;
   readonly executorDispatch: ConversationExecutorDispatchApplication;
+  readonly assignmentArtifactAuthority: ConversationAssignmentArtifactAuthorityIndex;
   readonly assignmentStaging?: ConversationAssignmentStagingPort;
   readonly executeRecoveredPerspective?: (input: {
     readonly manager: ConversationManager;
@@ -200,6 +202,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #clock: () => string;
   #sessionState: SessionStatePort | undefined;
   readonly #executorDispatch: ConversationExecutorDispatchApplication;
+  readonly #assignmentArtifactAuthority: ConversationAssignmentArtifactAuthorityIndex;
   readonly #assignmentStaging: ConversationAssignmentStagingPort | undefined;
   readonly #issuer: ConversationAssignmentAuthority;
   readonly #journals = new Map<string, ConversationRunJournal>();
@@ -209,14 +212,6 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     readonly records: readonly ConversationTransferAuthorityRecord[];
   }>();
   readonly #assignmentConversations = new Map<string, string>();
-  readonly #assignmentCapabilities = new Map<
-    string,
-    AuthorityCapability<"conversation">
-  >();
-  readonly #assignmentActivations = new Map<
-    string,
-    AssignmentActivationProof<"conversation">
-  >();
   readonly #assignmentIngress = new Map<string, IngressContext>();
   readonly #schedulingRuns = new Set<string>();
   readonly #scheduledRuns = new Set<string>();
@@ -297,7 +292,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     if (!options.executorDispatch) {
       throw new Error("Conversation protocol requires the executor dispatch application");
     }
+    if (!options.assignmentArtifactAuthority) {
+      throw new Error("Conversation protocol requires assignment artifact authority");
+    }
     this.#executorDispatch = options.executorDispatch;
+    this.#assignmentArtifactAuthority = options.assignmentArtifactAuthority;
     this.#assignmentStaging = options.assignmentStaging;
     this.#interactions = options.interactions;
     this.#executeRecoveredPerspective = options.executeRecoveredPerspective;
@@ -441,21 +440,14 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }
 
   assignmentCapability(assignmentId: string): AuthorityCapability {
-    const capability = this.#assignmentCapabilities.get(assignmentId);
-    if (!capability) throw new Error(`Unknown conversation assignment ${assignmentId}`);
-    return capability;
+    return this.#assignmentArtifactAuthority.read(assignmentId).capability;
   }
 
   async assignmentArtifactAuthority(assignmentId: string): Promise<{
     readonly capability: AuthorityCapability<"conversation">;
     readonly activation: AssignmentActivationProof<"conversation">;
   }> {
-    const capability = this.#assignmentCapabilities.get(assignmentId);
-    const activation = this.#assignmentActivations.get(assignmentId);
-    if (!capability || !activation) {
-      throw new Error(`Unknown conversation assignment ${assignmentId}`);
-    }
-    return { capability, activation };
+    return this.#assignmentArtifactAuthority.read(assignmentId);
   }
 
   submissionMeshRole(): {
@@ -2384,7 +2376,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       verifier: this.#authority.verifier,
       submission: createSubmissionAuthorizer(
         (assignmentId) =>
-          this.#assignmentCapabilities.get(assignmentId)?.executorId ??
+          this.#assignmentArtifactAuthority.find(assignmentId)?.capability.executorId ??
           this.#authority.executorId,
         this.#authority.verifier,
       ),
@@ -2466,9 +2458,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }
 
   #executorIdForAssignment(assignmentId: string): string {
-    const capability = this.#assignmentCapabilities.get(assignmentId);
-    if (!capability) throw new Error(`Unknown conversation assignment ${assignmentId}`);
-    return capability.executorId;
+    return this.#assignmentArtifactAuthority.read(assignmentId).capability.executorId;
   }
 
   #createRecoveryDispatcher(journal: ConversationRunJournal) {
@@ -2482,7 +2472,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }
 
   #submissionContext(assignmentId: string): AuthorityCallContext {
-    const capability = this.#assignmentCapabilities.get(assignmentId);
+    const capability = this.#assignmentArtifactAuthority.find(assignmentId)?.capability;
     if (!capability) {
       throw new Error("Recovered assignment has no durable submission capability");
     }
@@ -2896,8 +2886,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       envelope.assignmentId,
       envelope.work.conversationId,
     );
-    this.#assignmentCapabilities.set(envelope.assignmentId, capability);
-    this.#assignmentActivations.set(envelope.assignmentId, activation);
+    this.#assignmentArtifactAuthority.install(
+      envelope.assignmentId,
+      capability,
+      activation,
+    );
     this.#assignmentIngress.set(
       envelope.assignmentId,
       structuredClone(envelope.work.ingress),
@@ -2937,8 +2930,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
 
   #forgetAssignment(assignmentId: string): void {
     this.#assignmentConversations.delete(assignmentId);
-    this.#assignmentCapabilities.delete(assignmentId);
-    this.#assignmentActivations.delete(assignmentId);
+    this.#assignmentArtifactAuthority.remove(assignmentId);
     this.#assignmentIngress.delete(assignmentId);
     this.#interactions.releaseAssignment(assignmentId);
   }

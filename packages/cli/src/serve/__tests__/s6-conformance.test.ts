@@ -90,7 +90,9 @@ import {
   DurableConversationInteractionObserver,
 } from "../conversation-protocol-runtime.js";
 import {
+  createConversationAssignmentArtifactAuthorityIndex,
   createConversationExecutorHostBoundary,
+  NO_REMOTE_CONVERSATION_EXECUTORS,
   type ConversationExecutorTopologyDirectory,
 } from "../conversation-executor-dispatch.js";
 import { anchorConversationOwnerRuntime } from "../conversation-owner-runtime.js";
@@ -660,6 +662,7 @@ async function createRemoteConversationExecutor(input: {
     async candidates() {
       return [{
         executorId,
+        deviceId: executorDeviceId,
         executor,
         async synchronizePermission(permission) {
           permissions.set(permission.digest, permission);
@@ -676,6 +679,7 @@ async function createRemoteConversationExecutor(input: {
       return candidate === executorId
         ? {
             executorId,
+            deviceId: executorDeviceId,
             executor,
             async synchronizePermission(permission) {
               permissions.set(permission.digest, permission);
@@ -769,8 +773,23 @@ async function runConversationScenario(
     deliveryHistory: async () => [],
   });
   jobStatus.onStatus((notice) => statusHub.publish(notice));
+  let remote: RemoteExecutorHarness | undefined;
+  const assignmentArtifacts = createConversationAssignmentArtifactAuthorityIndex();
+  const topologyDirectory: ConversationExecutorTopologyDirectory = topology === "remote"
+    ? {
+        candidates: async () => {
+          if (!remote) throw new Error("Remote executor harness is not started");
+          return remote.directory.candidates();
+        },
+        forExecutor: (executorId) => {
+          if (!remote) throw new Error("Remote executor harness is not started");
+          return remote.directory.forExecutor(executorId);
+        },
+      }
+    : NO_REMOTE_CONVERSATION_EXECUTORS;
   const executorBoundary = createConversationExecutorHostBoundary({
     authority: anchorConversationOwnerRuntime(authority),
+    directory: topologyDirectory,
     clock: () => new Date().toISOString(),
     ...(topology === "local"
       ? {
@@ -790,6 +809,7 @@ async function runConversationScenario(
   protocol = new ConversationProtocolRuntime({
     authority,
     executorDispatch: executorBoundary.application,
+    assignmentArtifactAuthority: assignmentArtifacts,
     ...(executorBoundary.staging
       ? { assignmentStaging: executorBoundary.staging }
       : {}),
@@ -809,7 +829,6 @@ async function runConversationScenario(
     createFirstPartyFinality: (input) =>
       new FirstPartyFinalitySession({ sources: statusHub, ...input }),
   });
-  let remote: RemoteExecutorHarness | undefined;
   if (topology === "local") {
     localDataPlane!.bindAssignmentAuthority(executorBoundary.localLedger!);
     await localDataPlane!.start();
@@ -822,7 +841,6 @@ async function runConversationScenario(
       interactions,
       executorKey: remoteExecutorKey!,
     });
-    executorBoundary.topology.bindDirectory(remote.directory);
   }
 
   let challenge: ChannelChallengeMessage | undefined;
@@ -1570,8 +1588,10 @@ async function runJobScenario(
     authority,
     executorDispatch: createConversationExecutorHostBoundary({
       authority: anchorConversationOwnerRuntime(authority),
+      directory: NO_REMOTE_CONVERSATION_EXECUTORS,
       clock: () => new Date().toISOString(),
     }).application,
+    assignmentArtifactAuthority: createConversationAssignmentArtifactAuthorityIndex(),
     manager: () => {
       throw new Error("Job-only S6 scenario has no conversation manager");
     },

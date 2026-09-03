@@ -76,7 +76,7 @@ import type { ConversationProtocolRuntime } from "./conversation-protocol-runtim
 import type {
   ConversationAssignmentStagingPort,
   ConversationExecutorDispatchApplication,
-  ConversationExecutorTopologyAdapter,
+  ConversationExecutorTopologyDirectory,
 } from "./conversation-executor-dispatch.js";
 import type { ConversationAssignmentLedger } from "@zhixing/executor";
 import type { MeshRuntimeBootstrap } from "./mesh-runtime-bootstrap.js";
@@ -107,7 +107,10 @@ import type { AgentRuntimeCapacityBinding } from "@zhixing/orchestrator/runtime"
 import type { ProviderCredentialProjection } from "@zhixing/providers";
 import type { LocalConversationOwnerAssembly } from "./local-conversation-owner.js";
 import type { DeliveryLifecycleRestoration } from "@zhixing/core";
-import type { MeshConnectionProjectionPort } from "@zhixing/mesh/bootstrap";
+import type {
+  MeshConnectionProjectionPort,
+  MeshConnectionRegistry,
+} from "@zhixing/mesh/bootstrap";
 import type { ConversationIdentityLifecycleApplication } from "@zhixing/core/conversation/application";
 import type {
   AdvancementConversationLifecycleApplication,
@@ -248,9 +251,12 @@ export interface AssemblyContext {
   assetMaintenance?: SurfaceAssetMaintenance;
   conversationProtocol?: ConversationProtocolRuntime;
   conversationExecutorDispatch?: ConversationExecutorDispatchApplication;
-  conversationExecutorTopology?: ConversationExecutorTopologyAdapter;
+  conversationExecutorTopologyDirectory?: ConversationExecutorTopologyDirectory;
   conversationAssignmentStaging?: ConversationAssignmentStagingPort;
   conversationExecutorLedger?: ConversationAssignmentLedger;
+  meshConnections?: MeshConnectionRegistry;
+  meshExecutorTopologyTrust?: import("./mesh-runtime-assembly.js").MeshExecutorTopologyTrustState;
+  assignmentArtifactReceiver?: import("./assignment-artifact-receiver.js").AssignmentArtifactReceiverPort;
   localConversationOwner?: LocalConversationOwnerAssembly;
   jobStatus?: JobStatusDirectory;
   deliveryStack?: DeliveryStack;

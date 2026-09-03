@@ -64,7 +64,11 @@ import {
   ConversationProtocolRuntime,
   DurableConversationInteractionObserver,
 } from "./conversation-protocol-runtime.js";
-import { createConversationExecutorHostBoundary } from "./conversation-executor-dispatch.js";
+import {
+  createConversationAssignmentArtifactAuthorityIndex,
+  createConversationExecutorHostBoundary,
+  NO_REMOTE_CONVERSATION_EXECUTORS,
+} from "./conversation-executor-dispatch.js";
 import { anchorConversationOwnerRuntime } from "./conversation-owner-runtime.js";
 import {
   ConversationAssignmentLedger,
@@ -351,6 +355,7 @@ async function runChain(topology: "in-process" | "mesh") {
       createInProcessAssignmentRuntimeFactory(executorRole);
     const executorBoundary = createConversationExecutorHostBoundary({
       authority: anchorConversationOwnerRuntime(anchor),
+      directory: NO_REMOTE_CONVERSATION_EXECUTORS,
       clock: () => NOW,
       local: {
         ConversationAssignmentLedger,
@@ -362,6 +367,7 @@ async function runChain(topology: "in-process" | "mesh") {
     const conversationProtocol = new ConversationProtocolRuntime({
       authority: anchor,
       executorDispatch: executorBoundary.application,
+      assignmentArtifactAuthority: createConversationAssignmentArtifactAuthorityIndex(),
       assignmentStaging: executorBoundary.staging!,
       manager: () => conversationManager,
       interactions: new DurableConversationInteractionObserver(),

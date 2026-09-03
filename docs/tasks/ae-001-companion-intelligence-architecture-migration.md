@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-28 E06 可变 late-binding 反证已通过协调者独立复核，等待提交<br>
+> 当前检查点：A6-29 Conversation executor topology directory 构造期静态接管已通过协调者独立复核，等待提交<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `ad9ed649`；A6-27 Conversation directory topology-neutral 输入边界收口已提交 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-28 已从零完成 E01～E06 审计，E01～E05 通过，E06 可变 late-binding 生产反证已通过协调者独立复核，A6 不得关闭 |
-| 活跃工作包 | `A6-28-replaceable-edges-topology-complete-exit-audit-v1` 失败证据已通过协调者独立复核，等待提交 |
-| 下一责任链 | 先移除 A6-28 E06-C01 的 topology/role 必需依赖 late binding，再按 C02/C03 顺序收口其余生产回填；全部接受后重新执行完整 E01～E06 cold-start 审计，仍不得提前进入 A7 |
+| 已接受基线 | `0bea5b92`；A6-28 cold-start 审计失败证据已提交 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；E06-C01 的 Conversation executor topology directory 子链已通过协调者独立复核，等待提交，A6 不得关闭 |
+| 活跃工作包 | `A6-29-conversation-executor-static-topology-directory-v1` 已通过协调者独立复核，等待提交 |
+| 下一责任链 | 接受 A6-29 后继续拆分 E06-C01 中其余 `meshRuntimeRef` 与 Mesh role/surface/lifecycle `bind*`；再按 C02/C03 收口产品依赖、broadcast 与 internal-stop 回填 |
 | 打开的单向桥 | 无；P06 Rubric 已恢复为 required `readByDigest/put` 有限端口，P07、P09、P11 及 P12 三类 staging 的既有有限 Infrastructure 接管继续有效 |
-| 已失效证据 | A6-15、A6-19 与 A6-21 的聚合结论均不可作为退出证明；A6-21 E05-C01～C05 已恢复且本轮 E05 重审通过，但 A6-21/E06 的“可变 lazy ref 为零”结论被当前生产源码反证；canonical S7 58/58 尚未覆盖该失败形状 |
+| 已失效证据 | A6-15、A6-19 与 A6-21 的聚合结论均不可作为退出证明；A6-29 只恢复 A6-28 E06-C01 的 Conversation executor directory 子链，`meshRuntimeRef`、其余 Mesh `bind*`、C02/C03 仍使 A6-21/E06“可变 lazy ref 为零”结论失效；canonical S7 58/58 已能拒绝本子链的构造后回填，但不替代剩余 late-binding 审计 |
 | 阻塞/用户决策 | 无用户决策阻塞；完整 distributed-runtime structure 测试仍被既有 A4-10 `runtime-host` 依赖断言阻断，属于 A7 零残留与终验输入 |
 
 ### A0 基线索引
@@ -3049,6 +3049,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 门禁与证据边界：canonical `pnpm s7:lint` 在当前未修改生产基线上取得 58/58、registry golden 通过；`pnpm runtime:package-exports` 通过；它们继续证明已编码的边缘、存储、同实例、领域 owner 与公开 subpath 约束，但当前没有 mutation 能让上述 late-binding exact-set 或 optional/no-op 未安装分支失败，故不能反证 E06-C01～C03。本文是本轮唯一修改；依照静态审计边界没有运行测试、typecheck、build、根级回归、package check 或制品验收。
 - 失效、状态与交接：`A6-28-replaceable-edges-topology-complete-exit-audit-v1` 形成完整失败证据并停在文档自洽的安全交接点。若 edge package/import、runtime configuration/secret projection、P01～P15 physical factory、Executor/Mesh/staging constructor/lifecycle、任一领域 application/Product API/Kernel/RuntimeHost/Surface binding、上述 late-binding exact-set、S7 inspector/mutation 或 package exports 变化，应恢复本审计对应行；E01～E05 的本轮通过不因 E06 失败而被改写为未知，但也不能单独组成 A6 退出证据。当前等待协调者独立复核后从 E06-C01 派发最窄修复，A6/A7 与最终退出门均保持 `[ ]`，本轮未进入 A7，也未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立复核：从唯一 `createPersistentApplicationHost` 生产 caller 向内追踪 Anchor/Executor 装配，确认第二组合根和旧 Host 名称确实为零，但 `command.ts` 与 Executor role 仍以共享 `current` 引用在取得后回填必需依赖，`ConversationExecutorTopologyAdapter.bindDirectory()` 及 `MeshRuntimeAssembly` 多个 `bind*` 继续在构造后安装跨责任端口，且若干 consumer 以空集合、no-op 或运行期异常表达“尚未安装”。这些路径均为当前生产可达，现有 S7 只冻结调用数和顺序而不能拒绝等价 late binding；AE-001 4.5、反模式清单和检查点 6 对静态类型化图、入口开放前冻结及禁止 mutable lazy ref 有唯一裁决。接受 A6-28 的失败证据；C01 必须继续按独立依赖链拆分，不能作为一个大包处理，A6 保持 `[ ]`。
+
+### A6-29：Conversation executor topology directory 构造期静态接管
+
+- 基线与唯一责任变化：以已接受 `HEAD 0bea5b9212925bb5af4c03fa7ff48dbc33b01c7e` 加协调者本文调度记录为进场基线，只处理 A6-28 E06-C01 的 Conversation executor directory 子链。`ConversationExecutorHostBoundaryOptions.directory` 与 `ConversationExecutorTopologyAdapter` 构造参数现在均为 required；`bindDirectory()`、boundary 的 topology getter、Mesh constructor 内的 directory backfill 和 `#remoteDirectory()` 已从生产源码归零。Anchor 在 Conversation surface 发布 dispatch boundary/protocol 前一次性构造有限 directory；single-machine、local-owner 与 Executor-only 显式使用冻结的 no-remote directory，不以 optional、空 getter 或运行期 setter 表达未装配状态。
+- 静态图与动态数据边界：多机 Anchor 在同一组合点先创建 assignment artifact authority index、assignment partial receiver、`MeshConnectionRegistry` 与 trust projection，再以这些固定依赖构造唯一 `MeshConversationExecutorTopologyDirectory`，随后把同一 directory 注入 Conversation dispatch 和 Mesh job target 消费。directory 对象及依赖图不换代；trust reconcile 和 connection registry 只更新当前授权/连通数据，候选继续按 active remote Executor、当前连接与稳定 device 顺序计算，目标冻结并按 executor identity 复用。Conversation protocol 与 Mesh executor authorization 共享同一个 assignment authority index，使 capability/activation 在 plan、恢复、forget 与远端提交之间保持原 read-own-writes、撤销和 fail-closed 语义；该 index 只是 protocol assignment state 的唯一进程内投影，没有分离的第二身份源、callback bag、第二 directory 或第二 dispatch owner。
+- 行为、旧路与直接证据：本机与远端 assignment selection、permission/execution-assets 同步、dispatch/取消/恢复/response-loss、local ledger、三 topology 与 job 路由均未改变；原同步 `forExecutor/resolve` 合同保持不变。Conversation protocol、真实静态 Mesh directory、S6 本机/远端 first-party、Channel/job 和 startup owner 共 4 文件 40/40；CLI `tsc --noEmit` 与 `pnpm cli:build`、fresh `pnpm runtime:package-exports`、changed-source Biome 通过。canonical `pnpm s7:lint` 为 58/58 且 registry golden 通过；新增反向 mutation 能拒绝 optional directory、恢复 `bindDirectory`/boundary topology getter、Mesh late backfill、directory 晚于 boundary 构造、生产 topology 漏注入及 assignment receiver 组合漂移。额外扩大执行的 local-owner/owner-domain 回归仍复现既有 artifact-lifecycle storage maintenance `backpressured:ioOperations`，失败发生在本子链业务断言前，未计入本包通过证据，也未据此修改资源治理或放宽断言。
+- 失效、状态与下一检查点：若 Conversation executor directory/target、Host boundary 构造、assignment artifact authority index、trust/connection projection、Mesh target factory、local/no-remote topology、protocol plan/recovery/forget、S6 正式链、S7 inspector/mutation 或 package exports 任一变化，只恢复 `A6-29-conversation-executor-static-topology-directory-v1` 与 A6-28 E06-C01 的本子结论；A6-28 E01～E05、其他 E06-C01 late binding、C02/C03 不因本包自动恢复。本证据已完成并等待协调者独立复核；A6 与完成度保持 `[ ]`/`6/8`，接受后下一责任链仍为 `meshRuntimeRef` 与 Mesh role/surface/lifecycle `bind*`，不得提前进入 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立复核：逐段核对 Conversation/Host/Mesh 生产构造与 assignment artifact 读写链，确认 directory 已作为 required 构造参数在 consumer 发布前建立，单机与 Executor-only 的 no-remote directory 是静态角色选择，trust/connection 变化只更新固定 Infrastructure projection，未以 setter、optional、回调包或第二 owner 复活 late binding。独立运行 Conversation protocol 与 topology directory 27/27、canonical S7 58/58、CLI typecheck/build 和 `git diff --check` 均通过；接受 A6-29，A6 仍保持 `[ ]`，下一包只处理 E06-C01 的下一条独立 late-binding 责任链。
 
 ## 十、用户提示词
 

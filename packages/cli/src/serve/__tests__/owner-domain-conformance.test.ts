@@ -8,7 +8,11 @@ import { setupAuthorityRuntime } from "../../setup-delivery.js";
 import {
   anchorConversationOwnerRuntime,
 } from "../conversation-owner-runtime.js";
-import { createConversationExecutorHostBoundary } from "../conversation-executor-dispatch.js";
+import {
+  createConversationAssignmentArtifactAuthorityIndex,
+  createConversationExecutorHostBoundary,
+  NO_REMOTE_CONVERSATION_EXECUTORS,
+} from "../conversation-executor-dispatch.js";
 import {
   ConversationProtocolRuntime,
   DurableConversationInteractionObserver,
@@ -64,8 +68,10 @@ describe("conversation owner domain conformance", () => {
         ...(configuration.domain === "local" ? { owner } : { authority }),
         executorDispatch: createConversationExecutorHostBoundary({
           authority: owner,
+          directory: NO_REMOTE_CONVERSATION_EXECUTORS,
           clock: () => new Date().toISOString(),
         }).application,
+        assignmentArtifactAuthority: createConversationAssignmentArtifactAuthorityIndex(),
         manager: () => manager,
         interactions: new DurableConversationInteractionObserver(),
       });

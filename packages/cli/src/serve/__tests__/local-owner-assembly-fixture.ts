@@ -33,7 +33,10 @@ import {
 import {
   DurableConversationInteractionObserver,
 } from "../conversation-protocol-runtime.js";
-import { createConversationExecutorHostBoundary } from "../conversation-executor-dispatch.js";
+import {
+  createConversationExecutorHostBoundary,
+  NO_REMOTE_CONVERSATION_EXECUTORS,
+} from "../conversation-executor-dispatch.js";
 import {
   LocalConversationOwnerAssembly,
   type LocalConversationOwnerPort,
@@ -315,6 +318,7 @@ export async function createLocalOwnerAssemblyFixture(
     : undefined;
   const executorBoundary = createConversationExecutorHostBoundary({
     authority: owner,
+    directory: NO_REMOTE_CONVERSATION_EXECUTORS,
     clock: () => new Date().toISOString(),
     local: {
       ...(ledger ? { ledger } : {}),

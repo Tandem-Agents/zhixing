@@ -11484,6 +11484,13 @@ export function inspectConversationExecutorDispatchBoundary(records) {
     "assignmentStaging",
     "ConversationAssignmentStagingPort",
   );
+  requiredPort(
+    dispatchPath,
+    dispatch,
+    "ConversationExecutorHostBoundaryOptions",
+    "directory",
+    "ConversationExecutorTopologyDirectory",
+  );
 
   const forbiddenProtocolTokens = [
     "RemoteConversationExecution",
@@ -11532,18 +11539,32 @@ export function inspectConversationExecutorDispatchBoundary(records) {
     failures.push("Conversation executor application/staging Host injection drifted");
   }
   if (
-    count(mesh, "options.executorTopology!.bindDirectory(this.#remoteDirectory())") !== 1 ||
+    dispatch.includes("bindDirectory(") ||
+    dispatch.includes("#directory: ConversationExecutorTopologyDirectory | undefined") ||
+    access.includes("executorBoundary.topology") ||
+    mesh.includes("bindDirectory(") ||
+    mesh.includes("#remoteDirectory()") ||
+    count(mesh, "this.options.executorTopologyDirectory.candidates()") !== 1 ||
+    count(access, "directory: topologyDirectory") !== 1 ||
+    count(access, "directory: NO_REMOTE_CONVERSATION_EXECUTORS") !== 1 ||
+    count(executor, "directory: NO_REMOTE_CONVERSATION_EXECUTORS") !== 1 ||
+    access.indexOf("new MeshConversationExecutorTopologyDirectory({") < 0 ||
+    access.indexOf("new MeshConversationExecutorTopologyDirectory({") >
+      access.indexOf("const executorBoundary = createConversationExecutorHostBoundary({") ||
     mesh.includes("bindRemoteExecution") ||
     count(dispatch, "this.#authority.prepareConversationAssignment({") !== 1 ||
     dispatch.includes("supportsOffDeviceExecution") ||
     dispatch.includes("readonly ingress: IngressContext") ||
     dispatch.includes("readonly invocation: ConversationInvocation")
   ) {
-    failures.push("Conversation executor product policy/application ownership drifted");
+    failures.push("Conversation executor static topology/application ownership drifted");
   }
   const topology = dispatch.slice(
     dispatch.indexOf("export class ConversationExecutorTopologyAdapter"),
-    dispatch.indexOf("export interface ConversationExecutorHostBoundary"),
+    dispatch.indexOf(
+      "export interface ConversationExecutorHostBoundary",
+      dispatch.indexOf("export class ConversationExecutorTopologyAdapter"),
+    ),
   );
   if (
     topology.includes("prepareConversationAssignment") ||
@@ -11551,7 +11572,9 @@ export function inspectConversationExecutorDispatchBoundary(records) {
     topology.includes("IngressContext") ||
     topology.includes("localLedger()") ||
     topology.includes("runtimeFactory()") ||
-    topology.includes("authority()")
+    topology.includes("authority()") ||
+    topology.includes("bindDirectory(") ||
+    !topology.includes("readonly #directory: ConversationExecutorTopologyDirectory")
   ) {
     failures.push("Host topology adapter became a product-policy or service-locator owner");
   }
@@ -12756,15 +12779,22 @@ export function inspectAssignmentArtifactReceiverBoundary(records) {
     failures.push("Assignment Mesh demand regained a concrete, broad, or optional receiver");
   }
 
-  for (const [label, source] of [["Anchor", anchor], ["Executor", executor]]) {
-    if (
-      count(source, "createAssignmentArtifactReceiverInfrastructure({") !== 1 ||
-      count(source, "assignmentArtifactReceiver: createAssignmentArtifactReceiverInfrastructure({") !== 1 ||
-      source.includes("FileResumableArtifactReceiver") ||
-      source.includes("mesh-artifact-partials")
-    ) {
-      failures.push(`${label} Host did not inject the unique finite assignment receiver`);
-    }
+  if (
+    count(anchor, "createAssignmentArtifactReceiverInfrastructure({") !== 1 ||
+    count(anchor, "ctx.assignmentArtifactReceiver = receiver;") !== 1 ||
+    count(anchor, "assignmentArtifactReceiver: ctx.assignmentArtifactReceiver") !== 1 ||
+    anchor.includes("FileResumableArtifactReceiver") ||
+    anchor.includes("mesh-artifact-partials")
+  ) {
+    failures.push("Anchor Host did not inject the unique finite assignment receiver");
+  }
+  if (
+    count(executor, "createAssignmentArtifactReceiverInfrastructure({") !== 1 ||
+    count(executor, "assignmentArtifactReceiver: createAssignmentArtifactReceiverInfrastructure({") !== 1 ||
+    executor.includes("FileResumableArtifactReceiver") ||
+    executor.includes("mesh-artifact-partials")
+  ) {
+    failures.push("Executor Host did not inject the unique finite assignment receiver");
   }
 
   const factoryConsumers = records
