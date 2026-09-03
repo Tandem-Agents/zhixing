@@ -31,6 +31,7 @@ import {
   DeviceAdministrationCurrentRemovalRecoveryApplicationService,
 } from "@zhixing/core/device-administration/application";
 import {
+  createDeviceAdministrationCurrentRemovalAdmissionPort,
   createDeviceAdministrationCurrentRemovalMechanismPort,
   createDeviceAdministrationCurrentRemovalMigrationLifecyclePort,
   createDeviceAdministrationCurrentRemovalRecoveryBindingPort,
@@ -108,6 +109,49 @@ describe("current device removal correctness adapters", { timeout: 30_000 }, () 
       rootKeyId: "root-binding",
       recipientKeyId: "recipient-binding",
     })).toThrow("changes the accepted uninstall generation");
+  });
+
+  it("projects the latest paired-device removal lifecycle as a finite admission outcome", async () => {
+    const fixture = await createFixture();
+    const correctness = createCurrentDeviceRemovalCorrectness(fixture);
+
+    const allowed = await correctness.admission.read();
+    expect(allowed.outcome).toEqual({ kind: "allowed" });
+    expect(Object.keys(allowed.context).sort()).toEqual([
+      "currentDeviceName",
+      "currentDutyDeviceId",
+      "currentDutyIssuerKeyId",
+      "localDeviceId",
+      "localIssuerKeyId",
+    ]);
+    expect("executorRemovalInProgress" in allowed.context).toBe(false);
+    expect(Object.isFrozen(allowed)).toBe(true);
+    expect(Object.isFrozen(allowed.context)).toBe(true);
+    expect(Object.isFrozen(allowed.outcome)).toBe(true);
+
+    await correctness.journal.accept({
+      v: 1,
+      kind: "executor-removal",
+      requestId: "request:paired-removal",
+      operationId: "paired-removal",
+      homeId: fixture.initialProjection.homeId,
+      targetDeviceId: fixture.issuerKey.deviceId,
+      targetMemberPublicKey: fixture.issuerKey.publicKey,
+      targetDeviceKeyGeneration: protocolDigest("DeviceKeyGeneration", 1, {
+        deviceId: fixture.issuerKey.deviceId,
+        publicKey: fixture.issuerKey.publicKey,
+      }),
+      acceptedIssuerDeviceId: "previous-duty-device",
+      acceptedTrustHeadDigest: fixture.initialProjection.chainHead.eventDigest,
+    });
+
+    await expect(correctness.admission.read()).resolves.toMatchObject({
+      context: {
+        localDeviceId: fixture.issuerKey.deviceId,
+        currentDutyDeviceId: fixture.issuerKey.deviceId,
+      },
+      outcome: { kind: "paired-device-removal" },
+    });
   });
 
   it("uses the preselected migration target identity and only reports terminal after transfer verification and local retirement", async () => {
@@ -703,6 +747,9 @@ function createCurrentDeviceRemovalCorrectness(
       currentDutyDeviceId: trust.issuer.deviceId,
       localIssuerKeyId: fixture.issuerKey.deviceId,
       currentDutyIssuerKeyId: trust.issuer.issuerKeyId,
+      currentDeviceName: trust.members.find((member) =>
+        member.device.deviceId === fixture.issuerKey.deviceId)
+        ?.device.displayName,
       anchorEpoch: 1,
       trustHeadDigest: trust.chainHead.eventDigest,
       executorRemovalInProgress: (await journal.active())
@@ -712,6 +759,7 @@ function createCurrentDeviceRemovalCorrectness(
   const recoveryBinding = createDeviceAdministrationCurrentRemovalRecoveryBindingPort();
   return Object.freeze({
     journal,
+    admission: createDeviceAdministrationCurrentRemovalAdmissionPort({ readAuthority }),
     recoveryBinding,
     migrationLifecycle: createDeviceAdministrationCurrentRemovalMigrationLifecyclePort({
       journal,

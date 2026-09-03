@@ -12,6 +12,7 @@ import type {
   UnsignedDeviceLifecycleAbort,
 } from "../protocol/index.js";
 import type {
+  DeviceAdministrationCurrentRemovalAdmissionPort,
   DeviceAdministrationCurrentRemovalLifecyclePhase,
   DeviceAdministrationCurrentRemovalLifecycleSnapshot,
   DeviceAdministrationCurrentRemovalMechanismPort,
@@ -36,6 +37,33 @@ export interface DeviceAdministrationCurrentRemovalAuthorityFacts
   readonly currentDutyIssuerKeyId: string;
   readonly currentDeviceName?: string;
   readonly executorRemovalInProgress: boolean;
+}
+
+/** Maps current physical Authority and lifecycle state to one domain admission snapshot. */
+export function createDeviceAdministrationCurrentRemovalAdmissionPort(options: {
+  readonly readAuthority: () => Promise<DeviceAdministrationCurrentRemovalAuthorityFacts>;
+}): DeviceAdministrationCurrentRemovalAdmissionPort {
+  return Object.freeze({
+    read: async () => {
+      const authority = await options.readAuthority();
+      return Object.freeze({
+        context: Object.freeze({
+          localDeviceId: authority.localDeviceId,
+          currentDutyDeviceId: authority.currentDutyDeviceId,
+          localIssuerKeyId: authority.localIssuerKeyId,
+          currentDutyIssuerKeyId: authority.currentDutyIssuerKeyId,
+          ...(authority.currentDeviceName
+            ? { currentDeviceName: authority.currentDeviceName }
+            : {}),
+        }),
+        outcome: Object.freeze({
+          kind: authority.executorRemovalInProgress
+            ? "paired-device-removal" as const
+            : "allowed" as const,
+        }),
+      });
+    },
+  });
 }
 
 /** Physical current-Authority fence mapped to the opaque binding consumed by both domains. */

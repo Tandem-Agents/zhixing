@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-25 已通过协调者独立验收，等待提交<br>
+> 当前检查点：A6-26 已通过协调者独立验收，等待提交<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `6087d294`；A6-24 Device removal connectivity outcome 边界收口已提交 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-21 E05-C04 的 Duty Migration lifecycle flags 已恢复并通过协调者独立验收，current-device removal `executorRemovalInProgress` 仍打开 |
-| 活跃工作包 | `A6-25-duty-migration-admission-outcome-v1` 已通过协调者独立验收，等待提交 |
-| 下一责任链 | 接受 A6-25 后处理 E05-C04 的 current-device removal `executorRemovalInProgress`；其后处理 E05-C05 Conversation directory 形状 |
+| 已接受基线 | `0d44578d`；A6-25 Duty Migration lifecycle admission 边界收口已提交 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-21 E05-C04 的 current-device removal 子证据已通过协调者独立验收，等待提交 |
+| 活跃工作包 | `A6-26-current-device-removal-admission-outcome-v1` 已通过协调者独立验收，等待提交 |
+| 下一责任链 | 接受 A6-26 后处理 E05-C05 Conversation directory 的 local/remote 输入形状；随后重新执行完整 A6 cold-start 退出审计 |
 | 打开的单向桥 | 无；P06 Rubric 已恢复为 required `readByDigest/put` 有限端口，P07、P09、P11 及 P12 三类 staging 的既有有限 Infrastructure 接管继续有效 |
-| 已失效证据 | A6-15 的 E05/聚合结论与 A6-19 的未完成聚合审计均不可作为退出证明；A6-21 的 E05-C01～C03 已恢复并接受，C04 的 Duty Migration 子结论由 A6-25 恢复、current-device removal 子结论仍打开，C05 仍打开。全部局部修复不得相加冒充完整 topology transparency |
+| 已失效证据 | A6-15 的 E05/聚合结论与 A6-19 的未完成聚合审计均不可作为退出证明；A6-21 的 E05-C01～C03 已恢复并接受，C04 的 Duty Migration 与 current-device removal 子结论分别由 A6-25、A6-26 恢复，C05 仍打开。全部局部修复不得相加冒充完整 topology transparency |
 | 阻塞/用户决策 | 无用户决策阻塞；完整 distributed-runtime structure 测试仍被既有 A4-10 `runtime-host` 依赖断言阻断，属于 A7 零残留与终验输入 |
 
 ### A0 基线索引
@@ -3014,6 +3014,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 直接证据与门禁：Core Device Administration application 28/28、CLI admission/removal adapter assembly 8/8、Server management/uninstall 两文件 71/71，合计 4 文件 107/107；直接覆盖 owner transition 对三命令全拒绝、paired removal 对 prepare/commit 拒绝但 cancel 放行、unknown outcome fail closed、目标/当前 duty 规则、每次读取最新 Host 物理状态且领域 context 无 raw flags，以及既有 RPC/lifecycle 装配。`pnpm contracts:typecheck`、全仓依赖顺序 `pnpm build`、canonical S7 57/57 与 registry golden、fresh `runtime:package-exports`、changed-source Biome 均通过；fresh Core declaration 已机械确认不含两个 raw flags 或旧 context read port。S7 反向 mutation 可拒绝 raw flags/旧 port 回流领域、Host 绕过唯一 adapter、物理来源常量化、cancel 与 prepare/commit admission 策略混同和旧 Mesh decision method 回流。
 - 失效、状态与下一检查点：若 Duty Migration context/admission outcome、三命令策略、当前 duty/目标资格、Host adapter/物理来源、planned Anchor 竞态复核、唯一组合、Server wire、fresh declaration、S7/package-export 或上述直接测试任一变化，只恢复本证据及 A6-21 E05-C04 的 Duty Migration 子结论；A5 Device Administration 业务 owner、设备关系/持久协议、A6-21 E05-C01～C03、E05-C04 current-device removal 半链、C05 与 E01～E04/E06 不因无关变化自动失效。`A6-25-duty-migration-admission-outcome-v1` 当前完成并等待协调者独立复核；A6 与完成度保持 `[ ]`/`6/8`，接受后下一责任链固定为 current-device removal `executorRemovalInProgress`，其后处理 C05。本轮未进入该半链、C05、A7，也未执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立验收：反查 Duty Migration 三命令、Host admission adapter、Mesh lifecycle producer 与唯一 CLI 组合，确认领域 source/fresh contract 对 `currentOwnerReady/deviceRemovalInProgress` 和旧 context port 零可达；唯一 adapter 每次同步读取最新 owner readiness、removal guard 与同一 trust/current-duty context，只返回 `allowed/current-owner-transition/paired-device-removal`，planned Anchor effect 的竞态期物理复核不形成第二产品策略。独立取得 Core 28/28、CLI adapter/assembly 8/8、Server 两文件 71/71，合计 107/107；源码 inspector 与反向 mutation覆盖 raw flag/旧 port 回流、物理来源常量化、Host 绕过和 cancel 策略漂移，执行者全仓 build、canonical S7 57/57、registry golden 与 fresh declarations 证据继续有效，`git diff --check` 通过。接受 `A6-25-duty-migration-admission-outcome-v1`；A6 保持 `[ ]`，下一责任链为 E05-C04 current-device removal 半链。
+
+### A6-26：Current-device removal lifecycle admission outcome 边界收口
+
+- 基线与唯一责任变化：以已接受 `HEAD 0d44578dde0a76715c9aa9ae1e49d65b411377f6` 加协调者本文调度记录为进场基线，只处理 A6-21 E05-C04 的 current-device removal 半链。`DeviceAdministrationCurrentRemovalContext` 及 fresh application declaration 已删除 `executorRemovalInProgress`，旧 `DeviceAdministrationCurrentRemovalContextReadPort` 退场；领域现在只消费同一次读取返回的有限、topology-neutral `DeviceAdministrationCurrentRemovalAdmissionOutcome = allowed | paired-device-removal` 与不含物理状态的本机/当前 duty、issuer 及设备名 context。Device Administration 继续唯一拥有 `currentDutyDeviceId === localDeviceId`、`currentDutyIssuerKeyId === localIssuerKeyId` 的产品校验，并把 conflict 映射为原错误 `Finish the current device removal before uninstalling this device`；未知 outcome 在读取 migration target 或 recovery readiness 前 fail closed。
+- 唯一 Correctness/Host 投影与行为保护：`command.ts` 保留唯一 `readCurrentRemovalAuthority`，每次调用都重新读取最新 trust/current-duty/issuer 与同一个 `DeviceLifecycleJournal.active()`，物理 `executor-removal` identity 只在此 Host/Correctness 边界折叠为 boolean authority fact。唯一 `createDeviceAdministrationCurrentRemovalAdmissionPort` 把一份 authority 快照冻结为 `{ context, outcome }`，Anchor 组合根只注入该 port，不再匿名重组 raw flag。preflight 与 migration begin 继续经同一领域检查；current-device migration/recovery Correctness 在 accept 前对 `authority.executorRemovalInProgress` 的两处既有复核保持不变，作为准入后竞态和持久不变量守卫，不形成第二产品策略。preflight/migration/recovery/cancel、Authority/issuer 校验、backup readiness、target 选择、operation identity、持久格式、响应丢失重放、Server wire 和错误顺序均未改变。
+- 直接证据与门禁：Core Device Administration application 28/28、CLI 真实 current-device-removal Correctness 5/5、Server uninstall lifecycle 6/6，合计 3 文件 39/39；直接覆盖 allowed、active `executor-removal` conflict、每次调用读取最新 journal、领域 context 无 raw flag且投影冻结、current duty/issuer mismatch、未知 outcome 零后续读取、既有 preflight/begin 与全 lifecycle 装配。Core/CLI `tsc --noEmit`、fresh core build、`pnpm cli:build`、canonical S7 57/57 与 registry golden、fresh `pnpm runtime:package-exports`、changed-source Biome 均通过；fresh application declaration 机械确认只公开有限 admission port/outcome，raw flag只留在 Correctness authority facts。S7 反向 mutation可拒绝领域 raw flag/旧 port/`executor-removal` identity 回流、Host 匿名 passthrough或绕过唯一 adapter、真实 journal producer常量化、第二 journal reader、outcome映射或 unknown fail-closed 漂移。
+- 失效、状态与下一检查点：若 current-removal context/admission outcome、duty/issuer与 conflict 策略、Host authority/journal读取、Correctness outcome adapter或accept竞态复核、唯一组合、preflight/begin顺序、Server wire、fresh declaration、S7/package-export或上述直接测试任一变化，只恢复 `A6-26-current-device-removal-admission-outcome-v1` 及 A6-21 E05-C04 的 current-device removal 子结论；A5 Device Administration 产品 owner、device lifecycle/持久协议、A6-21 E05-C01～C03、A6-25 Duty Migration、E01～E04/E06 与 C05 不因无关变化自动失效。本证据当前完成并等待协调者独立复核；A6 与完成度保持 `[ ]`/`6/8`，接受后下一责任链固定为 E05-C05 Conversation directory local/remote 输入形状，之后必须重新执行完整 A6 cold-start 退出审计。本轮未进入 C05、A7，也未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立验收：反查 current-device removal 领域 preflight/begin、唯一 Host 组合、Authority/Journal producer 与 Correctness 竞态守卫，确认领域 source/fresh contract 对 `executorRemovalInProgress`、`executor-removal` identity 和旧 context read port 零可达；唯一 admission adapter 每次读取最新 Authority/Journal，只冻结不含物理状态的产品 context 与 `allowed/paired-device-removal`，Correctness 内两处 raw lifecycle 复核仍只守持久准入竞态。独立取得 Core 28/28、CLI 5/5、Server 71/71，合计 104/104；canonical S7 57/57、registry golden、Core/CLI typecheck、fresh Core build、changed-source Biome 与 `git diff --check` 通过。现有 preflight/begin、duty/issuer 校验、冲突错误及 Server wire 未漂移，接受 `A6-26-current-device-removal-admission-outcome-v1`；A6 保持 `[ ]`，下一责任链为 E05-C05 Conversation directory 输入形状。
 
 ## 十、用户提示词
 

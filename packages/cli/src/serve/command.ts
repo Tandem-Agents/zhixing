@@ -76,6 +76,7 @@ import {
   DeviceAdministrationCurrentRemovalRecoveryApplicationService,
 } from "@zhixing/core/device-administration/application";
 import {
+  createDeviceAdministrationCurrentRemovalAdmissionPort,
   createDeviceAdministrationCurrentRemovalMechanismPort,
   createDeviceAdministrationCurrentRemovalMigrationLifecyclePort,
   createDeviceAdministrationCurrentRemovalRecoveryBindingPort,
@@ -1954,6 +1955,11 @@ async function runServerProcess(
         });
       }
     : undefined;
+  const currentRemovalAdmission = readCurrentRemovalAuthority
+    ? createDeviceAdministrationCurrentRemovalAdmissionPort({
+        readAuthority: readCurrentRemovalAuthority,
+      })
+    : undefined;
   const currentRemovalMigrationLifecycle = currentRemovalJournal && readCurrentRemovalAuthority
     ? createDeviceAdministrationCurrentRemovalMigrationLifecyclePort({
         journal: currentRemovalJournal,
@@ -2472,23 +2478,9 @@ async function runServerProcess(
               await ctx.meshRuntime!.abortPlannedAnchorTransfer(input);
             },
           },
-          ...(currentDeviceRemoval && readCurrentRemovalAuthority
+          ...(currentDeviceRemoval && currentRemovalAdmission
             ? {
-                currentRemovalContext: {
-                  read: async () => {
-                    const authority = await readCurrentRemovalAuthority();
-                    return Object.freeze({
-                      localDeviceId: authority.localDeviceId,
-                      currentDutyDeviceId: authority.currentDutyDeviceId,
-                      localIssuerKeyId: authority.localIssuerKeyId,
-                      currentDutyIssuerKeyId: authority.currentDutyIssuerKeyId,
-                      ...(authority.currentDeviceName
-                        ? { currentDeviceName: authority.currentDeviceName }
-                        : {}),
-                      executorRemovalInProgress: authority.executorRemovalInProgress,
-                    });
-                  },
-                },
+                currentRemovalAdmission,
                 currentRemovalMigrationTargets: {
                   list: () => ctx.meshRuntime!.plannedAnchorTargets(),
                 },

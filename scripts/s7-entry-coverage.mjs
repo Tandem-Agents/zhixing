@@ -4653,7 +4653,13 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     "packages/cli/src/serve/current-device-retirement-transaction.ts",
   );
   const currentRemovalAssembly = composition.match(
-    /currentRemovalContext:[\s\S]*?removalContext:/u,
+    /currentRemovalAdmission,[\s\S]*?removalContext:/u,
+  )?.[0] ?? "";
+  const currentRemovalAuthorityReader = composition.match(
+    /const readCurrentRemovalAuthority[\s\S]*?\n {4}: undefined;/u,
+  )?.[0] ?? "";
+  const currentRemovalAdmissionAdapter = correctness.match(
+    /export function createDeviceAdministrationCurrentRemovalAdmissionPort[\s\S]*?\/\*\* Physical current-Authority/u,
   )?.[0] ?? "";
   const currentRemovalMigrationAssembly = composition.match(
     /const currentRemovalMigrationApplication[\s\S]*?await currentRemovalMigrationApplication\?\.resumeActive\(\);/u,
@@ -4708,7 +4714,8 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !application.includes("DeviceAdministrationDutyMigrationAdmissionPort") ||
     !application.includes("DeviceAdministrationDutyMigrationAdmissionOutcome") ||
     !application.includes("DeviceAdministrationDutyMigrationPort") ||
-    !application.includes("DeviceAdministrationCurrentRemovalContextReadPort") ||
+    !application.includes("DeviceAdministrationCurrentRemovalAdmissionPort") ||
+    !application.includes("DeviceAdministrationCurrentRemovalAdmissionOutcome") ||
     !application.includes("DeviceAdministrationCurrentRemovalMigrationTargetReadPort") ||
     !application.includes("DeviceAdministrationCurrentRemovalRecoveryApplication") ||
     !application.includes("class DeviceAdministrationCurrentRemovalRecoveryApplicationService") ||
@@ -4737,7 +4744,14 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !application.includes('throw new TypeError("Irreversible lifecycle operation cannot be aborted")') ||
     !application.includes("context.currentDutyDeviceId !== context.localDeviceId") ||
     !application.includes("context.currentDutyIssuerKeyId !== context.localIssuerKeyId") ||
-    !application.includes("context.executorRemovalInProgress") ||
+    !application.includes("const admission = await admissionPort.read()") ||
+    !application.includes('case "paired-device-removal":') ||
+    !application.includes(
+      'throw new Error("Finish the current device removal before uninstalling this device")',
+    ) ||
+    !application.includes(
+      'throw new TypeError("Current device removal admission outcome is invalid")',
+    ) ||
     !application.includes("candidate.ready && candidate.displayName === targetName") ||
     !application.includes('"No ready duty device has that name"') ||
     !application.includes('"More than one ready duty device has that name"') ||
@@ -4764,6 +4778,13 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     failures.push("Device Administration duty migration regained physical lifecycle flags");
   }
   if (
+    application.includes("executorRemovalInProgress") ||
+    application.includes("DeviceAdministrationCurrentRemovalContextReadPort") ||
+    application.includes('"executor-removal"')
+  ) {
+    failures.push("Device Administration current-removal regained physical lifecycle facts");
+  }
+  if (
     application.includes("anchorEpoch") ||
     /\bAnchor\b/u.test(application) ||
     backupRecovery.includes("anchorEpoch") ||
@@ -4788,12 +4809,13 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !composition.includes("ctx.meshRuntime!.preparePlannedAnchorTransfer(input)") ||
     !composition.includes("ctx.meshRuntime!.commitPlannedAnchorTransfer(input)") ||
     !composition.includes("ctx.meshRuntime!.abortPlannedAnchorTransfer(input)") ||
-    !composition.includes("currentRemovalContext: {") ||
+    !composition.includes("currentRemovalAdmission,") ||
     !composition.includes("currentRemovalMigrationTargets: {") ||
     !composition.includes("currentRemovalRecovery: currentRemovalRecoveryApplication") ||
     !composition.includes("currentRemovalMigration: currentRemovalMigrationApplication") ||
     !composition.includes("currentDeviceRemoval,") ||
     !composition.includes("const readCurrentRemovalAuthority") ||
+    composition.split("createDeviceAdministrationCurrentRemovalAdmissionPort({").length - 1 !== 1 ||
     !composition.includes("createDeviceAdministrationCurrentRemovalMechanismPort({") ||
     !composition.includes("createDeviceAdministrationCurrentRemovalMigrationLifecyclePort({") ||
     !composition.includes("createDeviceAdministrationCurrentRemovalRecoveryLifecyclePort({") ||
@@ -4808,12 +4830,33 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     currentRemovalAssembly.includes("nextAction:") ||
     currentRemovalAssembly.includes("moving-duty-device") ||
     currentRemovalAssembly.includes("ready-to-uninstall") ||
+    composition.includes("currentRemovalAdmission: {") ||
     composition.includes('return { stage: "ready" as const }') ||
     composition.includes('return { stage: "completed" as const }') ||
     composition.includes('return { stage: "cancelled" as const }') ||
     composition.includes("deviceLifecycle:")
   ) {
     failures.push("Device Administration unique Host application composition drifted");
+  }
+  if (
+    composition.split("currentRemovalJournal.active()").length - 1 !== 1 ||
+    currentRemovalAuthorityReader.split("currentRemovalJournal.active()").length - 1 !== 1 ||
+    currentRemovalAuthorityReader.split('operation.identity.kind === "executor-removal"').length -
+        1 !== 1 ||
+    currentRemovalAdmissionAdapter.split("options.readAuthority()").length - 1 !== 1 ||
+    !currentRemovalAdmissionAdapter.includes(
+      "kind: authority.executorRemovalInProgress",
+    ) ||
+    !currentRemovalAdmissionAdapter.includes('? "paired-device-removal" as const') ||
+    !currentRemovalAdmissionAdapter.includes(': "allowed" as const') ||
+    !currentRemovalAdmissionAdapter.includes("localDeviceId: authority.localDeviceId") ||
+    !currentRemovalAdmissionAdapter.includes(
+      "currentDutyIssuerKeyId: authority.currentDutyIssuerKeyId",
+    ) ||
+    currentRemovalAdmissionAdapter.includes("currentRemovalJournal") ||
+    currentRemovalAdmissionAdapter.includes('"executor-removal"')
+  ) {
+    failures.push("Device Administration current-removal admission adapter drifted");
   }
   if (
     composition.includes("isDeviceRemovalTargetConnected") ||

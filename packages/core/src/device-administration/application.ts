@@ -314,11 +314,17 @@ export interface DeviceAdministrationCurrentRemovalContext {
   readonly localIssuerKeyId: string;
   readonly currentDutyIssuerKeyId: string;
   readonly currentDeviceName?: string;
-  readonly executorRemovalInProgress: boolean;
 }
 
-export interface DeviceAdministrationCurrentRemovalContextReadPort {
-  read(): Promise<DeviceAdministrationCurrentRemovalContext>;
+export type DeviceAdministrationCurrentRemovalAdmissionOutcome =
+  | Readonly<{ readonly kind: "allowed" }>
+  | Readonly<{ readonly kind: "paired-device-removal" }>;
+
+export interface DeviceAdministrationCurrentRemovalAdmissionPort {
+  read(): Promise<Readonly<{
+    readonly context: DeviceAdministrationCurrentRemovalContext;
+    readonly outcome: DeviceAdministrationCurrentRemovalAdmissionOutcome;
+  }>>;
 }
 
 export interface DeviceAdministrationCurrentRemovalMigrationTarget {
@@ -836,7 +842,7 @@ export interface DeviceAdministrationApplicationOptions<Accepted, Abort> {
   readonly removalEffects: DeviceAdministrationRemovalEffectPort<Accepted, Abort>;
   readonly dutyMigrationAdmission: DeviceAdministrationDutyMigrationAdmissionPort;
   readonly dutyMigration: DeviceAdministrationDutyMigrationPort;
-  readonly currentRemovalContext?: DeviceAdministrationCurrentRemovalContextReadPort;
+  readonly currentRemovalAdmission?: DeviceAdministrationCurrentRemovalAdmissionPort;
   readonly currentRemovalMigrationTargets?:
     DeviceAdministrationCurrentRemovalMigrationTargetReadPort;
   readonly currentRemovalMigration?: DeviceAdministrationCurrentRemovalMigrationApplication;
@@ -1217,21 +1223,27 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
     readonly preflight: DeviceAdministrationCurrentRemovalPreflightResult;
     readonly migrationTargets: readonly DeviceAdministrationCurrentRemovalMigrationTarget[];
   }> {
-    const contextPort = this.options.currentRemovalContext;
+    const admissionPort = this.options.currentRemovalAdmission;
     const migrationTargetsPort = this.options.currentRemovalMigrationTargets;
     const recovery = this.options.currentRemovalRecovery;
-    if (!contextPort || !migrationTargetsPort || !recovery) {
+    if (!admissionPort || !migrationTargetsPort || !recovery) {
       throw this.#currentRemovalUnavailable();
     }
-    const context = await contextPort.read();
+    const admission = await admissionPort.read();
+    const context = admission.context;
     if (
       context.currentDutyDeviceId !== context.localDeviceId ||
       context.currentDutyIssuerKeyId !== context.localIssuerKeyId
     ) {
       throw new Error("Only the current duty device can uninstall itself");
     }
-    if (context.executorRemovalInProgress) {
-      throw new Error("Finish the current device removal before uninstalling this device");
+    switch (admission.outcome.kind) {
+      case "allowed":
+        break;
+      case "paired-device-removal":
+        throw new Error("Finish the current device removal before uninstalling this device");
+      default:
+        throw new TypeError("Current device removal admission outcome is invalid");
     }
     const migrationTargets = Object.freeze(
       (await migrationTargetsPort.list()).map((target) => Object.freeze({

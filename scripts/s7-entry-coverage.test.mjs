@@ -4071,11 +4071,58 @@ test("Device Administration reads, paired/current removal and duty migration hav
     inspectDeviceAdministrationReadOwnership(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "currentRemovalContext: {",
-        "currentRemovalContext: { recoveryBackupReady: true,",
+        "currentRemovalAdmission,",
+        "currentRemovalAdmission: { read: async () => ({ recoveryBackupReady: true }) },",
       ),
     )).join("\n"),
     /unique Host application composition drifted/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/core/src/device-administration/application.ts",
+      (text) => text.replace(
+        "export interface DeviceAdministrationCurrentRemovalContext {",
+        "export interface DeviceAdministrationCurrentRemovalContext {\n  readonly executorRemovalInProgress: boolean;",
+      ),
+    )).join("\n"),
+    /current-removal regained physical lifecycle facts/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/core/src/device-administration/application.ts",
+      (text) => text.replace(
+        'throw new TypeError("Current device removal admission outcome is invalid");',
+        "return undefined as never;",
+      ),
+    )).join("\n"),
+    /Query\/Product API exact-set drifted/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/core/src/device-administration/correctness.ts",
+      (text) => text.replace(
+        "kind: authority.executorRemovalInProgress",
+        "kind: false",
+      ),
+    )).join("\n"),
+    /current-removal admission adapter drifted/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "currentRemovalJournal.active()",
+        "Promise.resolve([])",
+      ),
+    )).join("\n"),
+    /current-removal admission adapter drifted/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => `${text}\nconst secondCurrentRemovalReader = () => currentRemovalJournal.active();`,
+    )).join("\n"),
+    /current-removal admission adapter drifted/,
   );
   assert.match(
     inspectDeviceAdministrationReadOwnership(mutate(

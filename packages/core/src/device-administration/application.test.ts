@@ -151,14 +151,16 @@ function fixture() {
     commit: vi.fn(async () => undefined),
     cancel: vi.fn(async () => undefined),
   };
-  const currentRemovalContext = {
+  const currentRemovalAdmission = {
     read: vi.fn(async () => ({
-      localDeviceId: "device-duty",
-      currentDutyDeviceId: "device-duty",
-      localIssuerKeyId: "key-duty",
-      currentDutyIssuerKeyId: "key-duty",
-      currentDeviceName: "当前设备",
-      executorRemovalInProgress: false,
+      context: {
+        localDeviceId: "device-duty",
+        currentDutyDeviceId: "device-duty",
+        localIssuerKeyId: "key-duty",
+        currentDutyIssuerKeyId: "key-duty",
+        currentDeviceName: "当前设备",
+      },
+      outcome: { kind: "allowed" as const },
     })),
   };
   const currentRemovalMigrationTargets = {
@@ -212,7 +214,7 @@ function fixture() {
     removalEffects,
     dutyMigrationAdmission,
     dutyMigration,
-    currentRemovalContext,
+    currentRemovalAdmission,
     currentRemovalMigrationTargets,
     currentRemovalRecovery,
     currentRemovalMigration,
@@ -228,7 +230,7 @@ function fixture() {
     removalEffects,
     dutyMigrationAdmission,
     dutyMigration,
-    currentRemovalContext,
+    currentRemovalAdmission,
     currentRemovalMigrationTargets,
     currentRemovalRecovery,
     currentRemovalMigration,
@@ -991,12 +993,14 @@ describe("DeviceAdministrationApplicationService", () => {
     await expect(f.application.query({ kind: "preflight-current-device-removal" }))
       .resolves.toMatchObject({ recoveryBackupReady: true });
 
-    f.currentRemovalContext.read.mockResolvedValueOnce({
-      localDeviceId: "device-duty",
-      currentDutyDeviceId: "device-duty",
-      localIssuerKeyId: "key-duty",
-      currentDutyIssuerKeyId: "key-duty",
-      executorRemovalInProgress: false,
+    f.currentRemovalAdmission.read.mockResolvedValueOnce({
+      context: {
+        localDeviceId: "device-duty",
+        currentDutyDeviceId: "device-duty",
+        localIssuerKeyId: "key-duty",
+        currentDutyIssuerKeyId: "key-duty",
+      },
+      outcome: { kind: "allowed" },
     });
     f.currentRemovalMigrationTargets.list.mockResolvedValueOnce([
       { deviceId: "device-z", displayName: "后序设备", ready: false },
@@ -1012,26 +1016,58 @@ describe("DeviceAdministrationApplicationService", () => {
         recoveryBackupReady: false,
       });
 
-    f.currentRemovalContext.read.mockResolvedValueOnce({
-      localDeviceId: "device-local",
-      currentDutyDeviceId: "device-other",
-      localIssuerKeyId: "key-local",
-      currentDutyIssuerKeyId: "key-other",
-      executorRemovalInProgress: false,
+    f.currentRemovalAdmission.read.mockResolvedValueOnce({
+      context: {
+        localDeviceId: "device-local",
+        currentDutyDeviceId: "device-other",
+        localIssuerKeyId: "key-local",
+        currentDutyIssuerKeyId: "key-local",
+      },
+      outcome: { kind: "allowed" },
     });
     await expect(f.application.query({ kind: "preflight-current-device-removal" }))
       .rejects.toThrow("Only the current duty device can uninstall itself");
 
-    f.currentRemovalContext.read.mockResolvedValueOnce({
-      localDeviceId: "device-duty",
-      currentDutyDeviceId: "device-duty",
-      localIssuerKeyId: "key-duty",
-      currentDutyIssuerKeyId: "key-duty",
-      currentDeviceName: "当前设备",
-      executorRemovalInProgress: true,
+    f.currentRemovalAdmission.read.mockResolvedValueOnce({
+      context: {
+        localDeviceId: "device-local",
+        currentDutyDeviceId: "device-local",
+        localIssuerKeyId: "key-local",
+        currentDutyIssuerKeyId: "key-other",
+      },
+      outcome: { kind: "allowed" },
+    });
+    await expect(f.application.query({ kind: "preflight-current-device-removal" }))
+      .rejects.toThrow("Only the current duty device can uninstall itself");
+
+    f.currentRemovalAdmission.read.mockResolvedValueOnce({
+      context: {
+        localDeviceId: "device-duty",
+        currentDutyDeviceId: "device-duty",
+        localIssuerKeyId: "key-duty",
+        currentDutyIssuerKeyId: "key-duty",
+        currentDeviceName: "当前设备",
+      },
+      outcome: { kind: "paired-device-removal" },
     });
     await expect(f.application.query({ kind: "preflight-current-device-removal" }))
       .rejects.toThrow("Finish the current device removal before uninstalling this device");
+
+    const targetReadsBeforeInvalidOutcome = f.currentRemovalMigrationTargets.list.mock.calls.length;
+    f.currentRemovalAdmission.read.mockResolvedValueOnce({
+      context: {
+        localDeviceId: "device-duty",
+        currentDutyDeviceId: "device-duty",
+        localIssuerKeyId: "key-duty",
+        currentDutyIssuerKeyId: "key-duty",
+      },
+      outcome: { kind: "future-admission-outcome" },
+    } as never);
+    await expect(f.application.query({ kind: "preflight-current-device-removal" }))
+      .rejects.toThrow("Current device removal admission outcome is invalid");
+    expect(f.currentRemovalMigrationTargets.list).toHaveBeenCalledTimes(
+      targetReadsBeforeInvalidOutcome,
+    );
 
     f.currentRemovalMigrationTargets.list.mockResolvedValueOnce([]);
     await expect(f.application.execute({

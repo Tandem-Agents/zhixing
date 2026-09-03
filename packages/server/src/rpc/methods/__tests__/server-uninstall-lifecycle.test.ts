@@ -58,14 +58,16 @@ function createProductApi(
     },
     ...(currentDeviceRemoval
       ? {
-          currentRemovalContext: {
+          currentRemovalAdmission: {
             read: async () => ({
-              localDeviceId: "device-duty",
-              currentDutyDeviceId: "device-duty",
-              localIssuerKeyId: "key-duty",
-              currentDutyIssuerKeyId: "key-duty",
-              currentDeviceName: "当前设备",
-              executorRemovalInProgress: false,
+              context: {
+                localDeviceId: "device-duty",
+                currentDutyDeviceId: "device-duty",
+                localIssuerKeyId: "key-duty",
+                currentDutyIssuerKeyId: "key-duty",
+                currentDeviceName: "当前设备",
+              },
+              outcome: { kind: "allowed" },
             }),
           },
           currentRemovalMigrationTargets: {
