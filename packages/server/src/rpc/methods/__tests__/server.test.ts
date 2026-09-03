@@ -106,17 +106,18 @@ function deviceAdministrationProductApi(
         },
       }),
     },
-    dutyMigrationContext: {
+    dutyMigrationAdmission: {
       read: () => ({
-        localDeviceId: "device-duty",
-        currentDutyDeviceId: "device-duty",
-        currentOwnerReady: true,
-        deviceRemovalInProgress: false,
-        members: [{
-          deviceId: "device-target",
-          state: "active",
-          dutyCapable: true,
-        }],
+        context: {
+          localDeviceId: "device-duty",
+          currentDutyDeviceId: "device-duty",
+          members: [{
+            deviceId: "device-target",
+            state: "active",
+            dutyCapable: true,
+          }],
+        },
+        outcome: { kind: "allowed" },
       }),
     },
     dutyMigration: {
@@ -568,17 +569,18 @@ describe("dutyMigration.*", () => {
     const ctx = mkCtx({
       productApi: deviceAdministrationProductApi({
         dutyMigrationTargets: { list: targets },
-        dutyMigrationContext: {
+        dutyMigrationAdmission: {
           read: () => ({
-            localDeviceId: "device-duty",
-            currentDutyDeviceId: "device-duty",
-            currentOwnerReady: true,
-            deviceRemovalInProgress: false,
-            members: [{
-              deviceId: "device-ready",
-              state: "active",
-              dutyCapable: true,
-            }],
+            context: {
+              localDeviceId: "device-duty",
+              currentDutyDeviceId: "device-duty",
+              members: [{
+                deviceId: "device-ready",
+                state: "active",
+                dutyCapable: true,
+              }],
+            },
+            outcome: { kind: "allowed" },
           }),
         },
         dutyMigration: { prepare, commit, cancel },
@@ -654,17 +656,18 @@ describe("dutyMigration.*", () => {
   it("把目标缺口、结果不明和提交后取消投影为可行动文案", async () => {
     const ctx = mkCtx({
       productApi: deviceAdministrationProductApi({
-        dutyMigrationContext: {
+        dutyMigrationAdmission: {
           read: () => ({
-            localDeviceId: "device-duty",
-            currentDutyDeviceId: "device-duty",
-            currentOwnerReady: true,
-            deviceRemovalInProgress: false,
-            members: [{
-              deviceId: "device-ready",
-              state: "active",
-              dutyCapable: true,
-            }],
+            context: {
+              localDeviceId: "device-duty",
+              currentDutyDeviceId: "device-duty",
+              members: [{
+                deviceId: "device-ready",
+                state: "active",
+                dutyCapable: true,
+              }],
+            },
+            outcome: { kind: "allowed" },
           }),
         },
         dutyMigration: {

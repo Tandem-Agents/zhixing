@@ -257,10 +257,13 @@ export interface DeviceAdministrationDutyMigrationMember {
 export interface DeviceAdministrationDutyMigrationContext {
   readonly localDeviceId: string;
   readonly currentDutyDeviceId: string;
-  readonly currentOwnerReady: boolean;
-  readonly deviceRemovalInProgress: boolean;
   readonly members: readonly DeviceAdministrationDutyMigrationMember[];
 }
+
+export type DeviceAdministrationDutyMigrationAdmissionOutcome =
+  | Readonly<{ readonly kind: "allowed" }>
+  | Readonly<{ readonly kind: "current-owner-transition" }>
+  | Readonly<{ readonly kind: "paired-device-removal" }>;
 
 /** Existing device relationship mechanism; product visibility stays in the application. */
 export interface DeviceAdministrationRelationshipReadPort {
@@ -281,8 +284,11 @@ export interface DeviceAdministrationRemovalContextReadPort {
   read(): DeviceAdministrationRemovalContext;
 }
 
-export interface DeviceAdministrationDutyMigrationContextReadPort {
-  read(): DeviceAdministrationDutyMigrationContext;
+export interface DeviceAdministrationDutyMigrationAdmissionPort {
+  read(): Readonly<{
+    readonly context: DeviceAdministrationDutyMigrationContext;
+    readonly outcome: DeviceAdministrationDutyMigrationAdmissionOutcome;
+  }>;
 }
 
 /** Durable transfer mechanism; it owns journal, signatures, checkpoints and replay. */
@@ -828,7 +834,7 @@ export interface DeviceAdministrationApplicationOptions<Accepted, Abort> {
   readonly removalContext: DeviceAdministrationRemovalContextReadPort;
   readonly removalAuthority: DeviceAdministrationRemovalAuthorityPort<Accepted, Abort>;
   readonly removalEffects: DeviceAdministrationRemovalEffectPort<Accepted, Abort>;
-  readonly dutyMigrationContext: DeviceAdministrationDutyMigrationContextReadPort;
+  readonly dutyMigrationAdmission: DeviceAdministrationDutyMigrationAdmissionPort;
   readonly dutyMigration: DeviceAdministrationDutyMigrationPort;
   readonly currentRemovalContext?: DeviceAdministrationCurrentRemovalContextReadPort;
   readonly currentRemovalMigrationTargets?:
@@ -1148,12 +1154,21 @@ export class DeviceAdministrationApplicationService<Accepted, Abort>
   #assertDutyMigrationAdmission(
     allowDuringDeviceRemoval: boolean,
   ): DeviceAdministrationDutyMigrationContext {
-    const context = this.options.dutyMigrationContext.read();
-    if (!context.currentOwnerReady) {
-      throw new Error("Current duty device is completing its durable migration consumers");
-    }
-    if (!allowDuringDeviceRemoval && context.deviceRemovalInProgress) {
-      throw new Error("Duty-device migration is unavailable while a paired device is being removed");
+    const { context, outcome } = this.options.dutyMigrationAdmission.read();
+    switch (outcome.kind) {
+      case "allowed":
+        break;
+      case "current-owner-transition":
+        throw new Error("Current duty device is completing its durable migration consumers");
+      case "paired-device-removal":
+        if (!allowDuringDeviceRemoval) {
+          throw new Error(
+            "Duty-device migration is unavailable while a paired device is being removed",
+          );
+        }
+        break;
+      default:
+        throw new TypeError("Duty-device migration admission outcome is invalid");
     }
     if (context.currentDutyDeviceId !== context.localDeviceId) {
       throw new Error("This device is not the current duty device");

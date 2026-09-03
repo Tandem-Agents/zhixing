@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
 import {
+  DeviceAdministrationDutyMigrationAdmissionAdapter,
   DeviceRemovalTargetEffectAdapter,
   finalizeCommittedPairingBootstrapContinuation,
   partitionPlannedAnchorPostInstall,
@@ -156,6 +157,42 @@ describe("device removal target effect adapter", () => {
       mode: "destroy",
       currentDutyDeviceId: "device-duty",
     })).rejects.toBe(failure);
+  });
+});
+
+describe("duty migration admission adapter", () => {
+  it("projects current physical state on every read without leaking raw flags", () => {
+    let currentOwnerReady = true;
+    let deviceRemovalInProgress = false;
+    const readPhysicalSnapshot = vi.fn(() => ({
+      context: {
+        localDeviceId: "device-duty",
+        currentDutyDeviceId: "device-duty",
+        members: [{ deviceId: "device-target", state: "active" as const, dutyCapable: true }],
+      },
+      currentOwnerReady,
+      deviceRemovalInProgress,
+    }));
+    const adapter = new DeviceAdministrationDutyMigrationAdmissionAdapter(readPhysicalSnapshot);
+
+    const allowed = adapter.read();
+    expect(allowed.outcome).toEqual({ kind: "allowed" });
+    expect(Object.keys(allowed.context).sort()).toEqual([
+      "currentDutyDeviceId",
+      "localDeviceId",
+      "members",
+    ]);
+
+    deviceRemovalInProgress = true;
+    expect(adapter.read().outcome).toEqual({ kind: "paired-device-removal" });
+
+    currentOwnerReady = false;
+    expect(adapter.read().outcome).toEqual({ kind: "current-owner-transition" });
+
+    currentOwnerReady = true;
+    deviceRemovalInProgress = false;
+    expect(adapter.read().outcome).toEqual({ kind: "allowed" });
+    expect(readPhysicalSnapshot).toHaveBeenCalledTimes(4);
   });
 });
 

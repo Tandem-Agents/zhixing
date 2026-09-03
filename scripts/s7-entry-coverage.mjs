@@ -4664,6 +4664,9 @@ export function inspectDeviceAdministrationReadOwnership(records) {
   const removalTargetEffects = mesh.match(
     /export class DeviceRemovalTargetEffectAdapter[\s\S]*?\/\*\* Production composition/u,
   )?.[0] ?? "";
+  const dutyMigrationAdmission = mesh.match(
+    /export class DeviceAdministrationDutyMigrationAdmissionAdapter[\s\S]*?\/\*\* Production composition/u,
+  )?.[0] ?? "";
   const manifest = manifestText ? JSON.parse(manifestText) : {};
   const narrow = manifest.exports?.["./device-administration/application"];
   const correctnessNarrow = manifest.exports?.["./device-administration/correctness"];
@@ -4702,7 +4705,8 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !application.includes("DeviceAdministrationRemovalAuthorityPort<Accepted, Abort>") ||
     !application.includes("DeviceAdministrationRemovalEffectPort<Accepted, Abort>") ||
     !application.includes("DeviceAdministrationRemovalEffectOutcome<Result>") ||
-    !application.includes("DeviceAdministrationDutyMigrationContextReadPort") ||
+    !application.includes("DeviceAdministrationDutyMigrationAdmissionPort") ||
+    !application.includes("DeviceAdministrationDutyMigrationAdmissionOutcome") ||
     !application.includes("DeviceAdministrationDutyMigrationPort") ||
     !application.includes("DeviceAdministrationCurrentRemovalContextReadPort") ||
     !application.includes("DeviceAdministrationCurrentRemovalMigrationTargetReadPort") ||
@@ -4753,6 +4757,13 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     failures.push("Device Administration domain regained physical removal connectivity");
   }
   if (
+    application.includes("currentOwnerReady") ||
+    application.includes("deviceRemovalInProgress") ||
+    application.includes("DeviceAdministrationDutyMigrationContextReadPort")
+  ) {
+    failures.push("Device Administration duty migration regained physical lifecycle flags");
+  }
+  if (
     application.includes("anchorEpoch") ||
     /\bAnchor\b/u.test(application) ||
     backupRecovery.includes("anchorEpoch") ||
@@ -4773,7 +4784,7 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !composition.includes("ctx.meshRuntime!.deviceRemovalCommandContext()") ||
     !composition.includes("ctx.meshRuntime!.acceptDeviceRemovalForTarget(input)") ||
     !composition.includes("removalEffects: ctx.meshRuntime!.deviceRemovalTargetEffects") ||
-    !composition.includes("ctx.meshRuntime!.dutyMigrationCommandContext()") ||
+    !composition.includes("dutyMigrationAdmission: ctx.meshRuntime!.dutyMigrationAdmission") ||
     !composition.includes("ctx.meshRuntime!.preparePlannedAnchorTransfer(input)") ||
     !composition.includes("ctx.meshRuntime!.commitPlannedAnchorTransfer(input)") ||
     !composition.includes("ctx.meshRuntime!.abortPlannedAnchorTransfer(input)") ||
@@ -4813,6 +4824,37 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     removalTargetEffects.split('kind: "completed"').length - 1 !== 3
   ) {
     failures.push("Device Administration physical removal outcome adapter drifted");
+  }
+  if (
+    mesh.split("new DeviceAdministrationDutyMigrationAdmissionAdapter(").length - 1 !== 1 ||
+    !mesh.includes(
+      "readonly dutyMigrationAdmission: DeviceAdministrationDutyMigrationAdmissionPort",
+    ) ||
+    !mesh.includes("currentOwnerReady: this.plannedCurrentOwnerReady()") ||
+    !mesh.includes("deviceRemovalInProgress: this.#deviceRemovalGuards.size > 0") ||
+    !dutyMigrationAdmission.includes("!snapshot.currentOwnerReady") ||
+    !dutyMigrationAdmission.includes("snapshot.deviceRemovalInProgress") ||
+    !dutyMigrationAdmission.includes('kind: "current-owner-transition"') ||
+    !dutyMigrationAdmission.includes('kind: "paired-device-removal"') ||
+    !dutyMigrationAdmission.includes('kind: "allowed"') ||
+    mesh.includes("dutyMigrationCommandContext()")
+  ) {
+    failures.push("Device Administration duty migration admission adapter drifted");
+  }
+  if (
+    application.split("#assertDutyMigrationAdmission(false)").length - 1 !== 2 ||
+    application.split("#assertDutyMigrationAdmission(true)").length - 1 !== 1 ||
+    !application.includes('case "current-owner-transition":') ||
+    !application.includes('case "paired-device-removal":') ||
+    !application.includes(
+      'throw new Error("Current duty device is completing its durable migration consumers")',
+    ) ||
+    !application.includes(
+      '"Duty-device migration is unavailable while a paired device is being removed"',
+    ) ||
+    !application.includes('throw new Error("This device is not the current duty device")')
+  ) {
+    failures.push("Device Administration duty migration product admission policy drifted");
   }
   if (
     records.some((record) => record.relative.endsWith("/anchor-uninstall.ts")) ||
@@ -4943,8 +4985,10 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !mesh.includes("abortDeviceRemoval(operationId:") ||
     !mesh.includes("commitLostDeviceRemoval(operationId:") ||
     !mesh.includes("class DeviceRemovalTargetEffectAdapter") ||
-    !mesh.includes("readonly deviceRemovalTargetEffects: DeviceRemovalTargetEffectAdapter")
-    || !mesh.includes("dutyMigrationCommandContext()")
+    !mesh.includes("readonly deviceRemovalTargetEffects: DeviceRemovalTargetEffectAdapter") ||
+    !mesh.includes(
+      "readonly dutyMigrationAdmission: DeviceAdministrationDutyMigrationAdmissionPort",
+    )
   ) {
     failures.push("Device Administration decision returned to Mesh runtime");
   }

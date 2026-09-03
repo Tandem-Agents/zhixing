@@ -41,13 +41,14 @@ function createProductApi(
       abort: async () => ({ kind: "completed", result: removalState("cancelled") }),
       decide: async () => ({ kind: "completed", result: removalState("removed") }),
     },
-    dutyMigrationContext: {
+    dutyMigrationAdmission: {
       read: () => ({
-        localDeviceId: "device-duty",
-        currentDutyDeviceId: "device-duty",
-        currentOwnerReady: true,
-        deviceRemovalInProgress: false,
-        members: [],
+        context: {
+          localDeviceId: "device-duty",
+          currentDutyDeviceId: "device-duty",
+          members: [],
+        },
+        outcome: { kind: "allowed" },
       }),
     },
     dutyMigration: {

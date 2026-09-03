@@ -3905,6 +3905,43 @@ test("Device Administration reads, paired/current removal and duty migration hav
   );
   assert.match(
     inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/core/src/device-administration/application.ts",
+      (text) => text.replace(
+        "readonly currentDutyDeviceId: string;",
+        "readonly currentDutyDeviceId: string;\n  readonly currentOwnerReady: boolean;",
+      ),
+    )).join("\n"),
+    /duty migration regained physical lifecycle flags/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "dutyMigrationAdmission: ctx.meshRuntime!.dutyMigrationAdmission,",
+        "dutyMigrationContext: { read: () => ctx.meshRuntime!.dutyMigrationCommandContext() },",
+      ),
+    )).join("\n"),
+    /unique Host application composition drifted/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "currentOwnerReady: this.plannedCurrentOwnerReady(),",
+        "currentOwnerReady: true,",
+      ),
+    )).join("\n"),
+    /duty migration admission adapter drifted/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
+      "packages/core/src/device-administration/application.ts",
+      (text) => text.replace("#assertDutyMigrationAdmission(true)", "#assertDutyMigrationAdmission(false)"),
+    )).join("\n"),
+    /duty migration product admission policy drifted/,
+  );
+  assert.match(
+    inspectDeviceAdministrationReadOwnership(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
         "removalEffects: ctx.meshRuntime!.deviceRemovalTargetEffects,",

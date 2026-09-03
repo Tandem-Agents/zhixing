@@ -3,6 +3,9 @@ import {
   parseLocalConversationId,
 } from "@zhixing/core";
 import type {
+  DeviceAdministrationDutyMigrationAdmissionOutcome,
+  DeviceAdministrationDutyMigrationAdmissionPort,
+  DeviceAdministrationDutyMigrationContext,
   DeviceAdministrationRemovalEffectOutcome,
   DeviceAdministrationRemovalEffectPort,
 } from "@zhixing/core/device-administration/application";
@@ -407,6 +410,34 @@ export class DeviceRemovalTargetEffectAdapter
   }
 }
 
+interface DutyMigrationPhysicalAdmissionSnapshot {
+  readonly context: DeviceAdministrationDutyMigrationContext;
+  readonly currentOwnerReady: boolean;
+  readonly deviceRemovalInProgress: boolean;
+}
+
+export class DeviceAdministrationDutyMigrationAdmissionAdapter
+  implements DeviceAdministrationDutyMigrationAdmissionPort
+{
+  constructor(
+    private readonly readPhysicalSnapshot: () => DutyMigrationPhysicalAdmissionSnapshot,
+  ) {}
+
+  read() {
+    const snapshot = this.readPhysicalSnapshot();
+    const outcome: DeviceAdministrationDutyMigrationAdmissionOutcome =
+      !snapshot.currentOwnerReady
+        ? Object.freeze({ kind: "current-owner-transition" })
+        : snapshot.deviceRemovalInProgress
+          ? Object.freeze({ kind: "paired-device-removal" })
+          : Object.freeze({ kind: "allowed" });
+    return Object.freeze({
+      context: snapshot.context,
+      outcome,
+    });
+  }
+}
+
 /** Production composition for authenticated control services and their durable role owners. */
 export class MeshRuntimeAssembly
   implements AssignmentDataPlaneRemoteDirectory, AdvancementEvidenceRemoteDirectory {
@@ -414,6 +445,7 @@ export class MeshRuntimeAssembly
   readonly #terminalOnlyServices = new MeshServiceRegistry();
   readonly connections: MeshConnectionRegistry;
   readonly deviceRemovalTargetEffects: DeviceRemovalTargetEffectAdapter;
+  readonly dutyMigrationAdmission: DeviceAdministrationDutyMigrationAdmissionPort;
   readonly #composition: AssignmentMeshComposition;
   readonly #control: ProductionMeshControlPlane;
   readonly #worker: ConversationAssignmentWorker | undefined;
@@ -472,6 +504,9 @@ export class MeshRuntimeAssembly
       onProjectionError: (error) => options.onError?.(error),
     });
     this.deviceRemovalTargetEffects = new DeviceRemovalTargetEffectAdapter(this.connections);
+    this.dutyMigrationAdmission = new DeviceAdministrationDutyMigrationAdmissionAdapter(
+      () => this.#readDutyMigrationPhysicalAdmission(),
+    );
     this.#observedIssuerDeviceId = options.trust.issuer.deviceId;
     this.#plannedAnchorIssuerKey = options.plannedAnchorIssuerKey;
     this.#plannedAnchorPostInstall = options.plannedAnchorPostInstall;
@@ -1337,18 +1372,20 @@ export class MeshRuntimeAssembly
     });
   }
 
-  dutyMigrationCommandContext() {
+  #readDutyMigrationPhysicalAdmission(): DutyMigrationPhysicalAdmissionSnapshot {
     const trust = this.#control.currentTrust();
     return Object.freeze({
-      localDeviceId: this.options.authority.deviceId,
-      currentDutyDeviceId: this.#currentAnchorDeviceId(),
+      context: Object.freeze({
+        localDeviceId: this.options.authority.deviceId,
+        currentDutyDeviceId: this.#currentAnchorDeviceId(),
+        members: Object.freeze(trust.members.map((member) => Object.freeze({
+          deviceId: member.device.deviceId,
+          state: member.state,
+          dutyCapable: member.roles.includes("anchor"),
+        }))),
+      }),
       currentOwnerReady: this.plannedCurrentOwnerReady(),
       deviceRemovalInProgress: this.#deviceRemovalGuards.size > 0,
-      members: Object.freeze(trust.members.map((member) => Object.freeze({
-        deviceId: member.device.deviceId,
-        state: member.state,
-        dutyCapable: member.roles.includes("anchor"),
-      }))),
     });
   }
 

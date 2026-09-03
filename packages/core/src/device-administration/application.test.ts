@@ -133,16 +133,17 @@ function fixture() {
     decide: vi.fn(async () =>
       completedRemovalEffect(removalPublicState("moving-conversations"))),
   };
-  const dutyMigrationContext = {
+  const dutyMigrationAdmission = {
     read: vi.fn(() => ({
-      localDeviceId: "device-duty",
-      currentDutyDeviceId: "device-duty",
-      currentOwnerReady: true,
-      deviceRemovalInProgress: false,
-      members: [
-        { deviceId: "device-duty", state: "active" as const, dutyCapable: true },
-        { deviceId: "device-target", state: "active" as const, dutyCapable: true },
-      ],
+      context: {
+        localDeviceId: "device-duty",
+        currentDutyDeviceId: "device-duty",
+        members: [
+          { deviceId: "device-duty", state: "active" as const, dutyCapable: true },
+          { deviceId: "device-target", state: "active" as const, dutyCapable: true },
+        ],
+      },
+      outcome: { kind: "allowed" as const },
     })),
   };
   const dutyMigration = {
@@ -209,7 +210,7 @@ function fixture() {
     removalContext,
     removalAuthority,
     removalEffects,
-    dutyMigrationContext,
+    dutyMigrationAdmission,
     dutyMigration,
     currentRemovalContext,
     currentRemovalMigrationTargets,
@@ -225,7 +226,7 @@ function fixture() {
     removalContext,
     removalAuthority,
     removalEffects,
-    dutyMigrationContext,
+    dutyMigrationAdmission,
     dutyMigration,
     currentRemovalContext,
     currentRemovalMigrationTargets,
@@ -1066,7 +1067,7 @@ describe("DeviceAdministrationApplicationService", () => {
       removalContext: f.removalContext,
       removalAuthority: f.removalAuthority,
       removalEffects: f.removalEffects,
-      dutyMigrationContext: f.dutyMigrationContext,
+      dutyMigrationAdmission: f.dutyMigrationAdmission,
       dutyMigration: f.dutyMigration,
     });
 
@@ -1354,34 +1355,37 @@ describe("DeviceAdministrationApplicationService", () => {
       targetDeviceId: "device-target",
     };
 
-    f.dutyMigrationContext.read.mockReturnValueOnce({
-      localDeviceId: "device-duty",
-      currentDutyDeviceId: "device-duty",
-      currentOwnerReady: false,
-      deviceRemovalInProgress: false,
-      members: [],
+    f.dutyMigrationAdmission.read.mockReturnValueOnce({
+      context: {
+        localDeviceId: "device-duty",
+        currentDutyDeviceId: "device-duty",
+        members: [],
+      },
+      outcome: { kind: "current-owner-transition" },
     });
     await expect(f.application.execute(prepare)).rejects.toThrow(
       "Current duty device is completing its durable migration consumers",
     );
 
-    f.dutyMigrationContext.read.mockReturnValueOnce({
-      localDeviceId: "device-duty",
-      currentDutyDeviceId: "device-other",
-      currentOwnerReady: true,
-      deviceRemovalInProgress: false,
-      members: [],
+    f.dutyMigrationAdmission.read.mockReturnValueOnce({
+      context: {
+        localDeviceId: "device-duty",
+        currentDutyDeviceId: "device-other",
+        members: [],
+      },
+      outcome: { kind: "allowed" },
     });
     await expect(f.application.execute(prepare)).rejects.toThrow(
       "This device is not the current duty device",
     );
 
-    f.dutyMigrationContext.read.mockReturnValueOnce({
-      localDeviceId: "device-duty",
-      currentDutyDeviceId: "device-duty",
-      currentOwnerReady: true,
-      deviceRemovalInProgress: true,
-      members: [],
+    f.dutyMigrationAdmission.read.mockReturnValueOnce({
+      context: {
+        localDeviceId: "device-duty",
+        currentDutyDeviceId: "device-duty",
+        members: [],
+      },
+      outcome: { kind: "paired-device-removal" },
     });
     await expect(f.application.execute(prepare)).rejects.toThrow(
       "Duty-device migration is unavailable while a paired device is being removed",
@@ -1392,14 +1396,84 @@ describe("DeviceAdministrationApplicationService", () => {
     expect(f.dutyMigration.prepare).not.toHaveBeenCalled();
   });
 
+  it("blocks prepare, commit and cancel while the current owner transition is incomplete", async () => {
+    const f = fixture();
+    f.dutyMigrationAdmission.read.mockReturnValue({
+      context: {
+        localDeviceId: "device-duty",
+        currentDutyDeviceId: "device-duty",
+        members: [{ deviceId: "device-target", state: "active", dutyCapable: true }],
+      },
+      outcome: { kind: "current-owner-transition" },
+    });
+    const commands = [
+      {
+        kind: "prepare-duty-migration" as const,
+        requestId: "request:migration-owner-transition",
+        transferId: "transfer-owner-transition",
+        targetDeviceId: "device-target",
+      },
+      {
+        kind: "commit-duty-migration" as const,
+        requestId: "request:migration-owner-transition",
+        transferId: "transfer-owner-transition",
+      },
+      {
+        kind: "cancel-duty-migration" as const,
+        requestId: "request:migration-owner-transition",
+        transferId: "transfer-owner-transition",
+      },
+    ];
+
+    for (const command of commands) {
+      await expect(f.application.execute(command)).rejects.toThrow(
+        "Current duty device is completing its durable migration consumers",
+      );
+    }
+    expect(f.dutyMigration.prepare).not.toHaveBeenCalled();
+    expect(f.dutyMigration.commit).not.toHaveBeenCalled();
+    expect(f.dutyMigration.cancel).not.toHaveBeenCalled();
+  });
+
+  it("blocks prepare and commit during paired-device removal", async () => {
+    const f = fixture();
+    f.dutyMigrationAdmission.read.mockReturnValue({
+      context: {
+        localDeviceId: "device-duty",
+        currentDutyDeviceId: "device-duty",
+        members: [{ deviceId: "device-target", state: "active", dutyCapable: true }],
+      },
+      outcome: { kind: "paired-device-removal" },
+    });
+
+    await expect(f.application.execute({
+      kind: "prepare-duty-migration",
+      requestId: "request:migration-removal-conflict",
+      transferId: "transfer-removal-conflict",
+      targetDeviceId: "device-target",
+    })).rejects.toThrow(
+      "Duty-device migration is unavailable while a paired device is being removed",
+    );
+    await expect(f.application.execute({
+      kind: "commit-duty-migration",
+      requestId: "request:migration-removal-conflict",
+      transferId: "transfer-removal-conflict",
+    })).rejects.toThrow(
+      "Duty-device migration is unavailable while a paired device is being removed",
+    );
+    expect(f.dutyMigration.prepare).not.toHaveBeenCalled();
+    expect(f.dutyMigration.commit).not.toHaveBeenCalled();
+  });
+
   it("preserves the existing post-commit cancellation boundary during device removal", async () => {
     const f = fixture();
-    f.dutyMigrationContext.read.mockReturnValueOnce({
-      localDeviceId: "device-duty",
-      currentDutyDeviceId: "device-duty",
-      currentOwnerReady: true,
-      deviceRemovalInProgress: true,
-      members: [],
+    f.dutyMigrationAdmission.read.mockReturnValueOnce({
+      context: {
+        localDeviceId: "device-duty",
+        currentDutyDeviceId: "device-duty",
+        members: [],
+      },
+      outcome: { kind: "paired-device-removal" },
     });
     await expect(f.application.execute({
       kind: "cancel-duty-migration",
@@ -1407,6 +1481,25 @@ describe("DeviceAdministrationApplicationService", () => {
       transferId: "transfer-1",
     })).resolves.toEqual({ stage: "cancelled" });
     expect(f.dutyMigration.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed for an unknown duty-migration admission outcome", async () => {
+    const f = fixture();
+    f.dutyMigrationAdmission.read.mockReturnValue({
+      context: {
+        localDeviceId: "device-duty",
+        currentDutyDeviceId: "device-duty",
+        members: [],
+      },
+      outcome: { kind: "unknown" },
+    } as never);
+
+    await expect(f.application.execute({
+      kind: "cancel-duty-migration",
+      requestId: "request:migration-invalid-admission",
+      transferId: "transfer-invalid-admission",
+    })).rejects.toThrow("Duty-device migration admission outcome is invalid");
+    expect(f.dutyMigration.cancel).not.toHaveBeenCalled();
   });
 });
 

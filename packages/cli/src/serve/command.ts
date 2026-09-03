@@ -2460,9 +2460,7 @@ async function runServerProcess(
           dutyMigrationTargets: {
             list: () => ctx.meshRuntime!.plannedAnchorTargets(),
           },
-          dutyMigrationContext: {
-            read: () => ctx.meshRuntime!.dutyMigrationCommandContext(),
-          },
+          dutyMigrationAdmission: ctx.meshRuntime!.dutyMigrationAdmission,
           dutyMigration: {
             prepare: async (input) => {
               await ctx.meshRuntime!.preparePlannedAnchorTransfer(input);
