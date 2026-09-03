@@ -363,7 +363,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#losslessDataPlane = runtime;
   }
 
-  bindMutationPublisher(publisher: ConversationMutationPublisher): void {
+  bindMutationPublisher(publisher: ConversationMutationPublisher): () => void {
     if (!this.#authority.globalPublishing) {
       throw new Error("Local conversation owners cannot bind global mutation publishing");
     }
@@ -371,14 +371,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       throw new Error("Conversation mutation publisher is already bound");
     }
     this.#mutationPublisher = publisher;
-  }
-
-  /** Drops the old scheduler publisher while the planned current-owner gate is closed. */
-  beginInstalledAuthorityGeneration(): void {
-    if (!this.#authority.globalPublishing) {
-      throw new Error("Local conversation owners have no installed authority generation");
-    }
-    this.#mutationPublisher = undefined;
+    return () => {
+      if (this.#mutationPublisher === publisher) {
+        this.#mutationPublisher = undefined;
+      }
+    };
   }
 
   /** Installs a committed immutable source prefix before exposing the adopted session. */

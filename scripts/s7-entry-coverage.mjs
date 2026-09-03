@@ -6839,6 +6839,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const conversationResumeBinding = required(
     "packages/cli/src/serve/conversation-resume-binding.ts",
   );
+  const conversationProtocolRuntime = required(
+    "packages/cli/src/serve/conversation-protocol-runtime.ts",
+  );
   const conversationRunControlBinding = required(
     "packages/cli/src/serve/conversation-run-control-binding.ts",
   );
@@ -7232,10 +7235,11 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     /readonly scheduler: AnchorScheduler/u.test(scheduleRuntimeMechanism) ||
     !composition.includes("const schedulerApplication = new ScheduleApplicationService(") ||
     composition.split("new ScheduleApplicationService(").length - 1 !== 1 ||
-    !composition.includes("const schedulerHostLifecycle = new AnchorSchedulerHostLifecycle(") ||
-    !composition.includes("schedulerHostLifecycle.install(runtime)") ||
-    !composition.includes("schedulerHostLifecycle.stopAndRelease()") ||
-    !composition.includes("schedulerHostLifecycle.recoverInstalledAuthority({") ||
+    !composition.includes("const schedulerGenerationOwner = new AnchorSchedulerHostLifecycle({") ||
+    !composition.includes("await schedulerGenerationOwner.installInitial({") ||
+    !composition.includes("schedulerGenerationOwner.stopAndRelease()") ||
+    !composition.includes("schedulerGenerationOwner.recoverInstalledAuthority({") ||
+    composition.split("bind: bindSchedulerGeneration,").length - 1 !== 2 ||
     !composition.includes("currentAnchorEpoch: authority.anchorEpoch") ||
     /schedulerApplication\.currentAnchorEpoch/u.test(composition) ||
     !composition.includes("createScheduleRuntimeProductApiContribution(schedulerApplication)") ||
@@ -7248,49 +7252,135 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const scheduleGenerationRecovery = scheduleRuntimeMechanism.indexOf(
     "async recoverInstalledAuthority(input:",
   );
+  const schedulerMechanismConstructor = scheduleRuntimeMechanism.slice(
+    scheduleRuntimeMechanism.indexOf("private constructor(options:"),
+    scheduleRuntimeMechanism.indexOf("static async create("),
+  );
   const scheduleGenerationCompare = scheduleRuntimeMechanism.indexOf(
     "current.installedAnchorEpoch === input.currentAnchorEpoch",
     scheduleGenerationRecovery,
   );
-  const scheduleGenerationStop = scheduleRuntimeMechanism.indexOf(
-    "await this.application.stop();",
-    scheduleGenerationCompare,
-  );
-  const scheduleGenerationRelease = scheduleRuntimeMechanism.indexOf(
-    "this.application.release(current);",
-    scheduleGenerationStop,
-  );
-  const scheduleGenerationClear = scheduleRuntimeMechanism.indexOf(
-    "this.#current = undefined;",
-    scheduleGenerationRelease,
-  );
   const scheduleGenerationCreate = scheduleRuntimeMechanism.indexOf(
     "const replacement = await input.create();",
-    scheduleGenerationClear,
+    scheduleGenerationCompare,
   );
   const scheduleGenerationValidate = scheduleRuntimeMechanism.indexOf(
     "replacement.installedAnchorEpoch !== input.currentAnchorEpoch",
     scheduleGenerationCreate,
   );
-  const scheduleGenerationInstall = scheduleRuntimeMechanism.indexOf(
-    "this.install(replacement);",
+  const scheduleGenerationPrepare = scheduleRuntimeMechanism.indexOf(
+    "await input.prepare(replacement);",
     scheduleGenerationValidate,
   );
-  const scheduleGenerationInitialize = scheduleRuntimeMechanism.indexOf(
-    "await input.initialize(replacement);",
+  const scheduleCurrentBindingRelease = scheduleRuntimeMechanism.indexOf(
+    "currentBindingRelease();",
+    scheduleGenerationPrepare,
+  );
+  const scheduleGenerationBind = scheduleRuntimeMechanism.indexOf(
+    "replacementBindingRelease = input.bind(replacement);",
+    scheduleCurrentBindingRelease,
+  );
+  const scheduleGenerationRelease = scheduleRuntimeMechanism.indexOf(
+    "this.#application.release(current);",
+    scheduleGenerationBind,
+  );
+  const scheduleGenerationInstall = scheduleRuntimeMechanism.indexOf(
+    "this.#application.install(replacement);",
+    scheduleGenerationRelease,
+  );
+  const scheduleCurrentPublicationRelease = scheduleRuntimeMechanism.indexOf(
+    "currentPublicationRelease();",
     scheduleGenerationInstall,
+  );
+  const scheduleGenerationPublish = scheduleRuntimeMechanism.indexOf(
+    "replacementPublicationRelease = input.publish(replacement);",
+    scheduleCurrentPublicationRelease,
+  );
+  const scheduleGenerationCommit = scheduleRuntimeMechanism.indexOf(
+    "this.#current = replacement;",
+    scheduleGenerationPublish,
+  );
+  const scheduleGenerationActivate = scheduleRuntimeMechanism.indexOf(
+    "input.activate(replacement);",
+    scheduleGenerationCommit,
+  );
+  const scheduleGenerationResume = scheduleRuntimeMechanism.indexOf(
+    "await input.resume(replacement);",
+    scheduleGenerationActivate,
+  );
+  const scheduleGenerationReset = scheduleRuntimeMechanism.indexOf(
+    "this.#postAdoptionReviewCoordinator.resetForInstalledGeneration();",
+    scheduleGenerationResume,
+  );
+  const scheduleGenerationStop = scheduleRuntimeMechanism.indexOf(
+    "await current.stop();",
+    scheduleGenerationReset,
+  );
+  const initialInstall = scheduleRuntimeMechanism.slice(
+    scheduleRuntimeMechanism.indexOf("async installInitial(input:"),
+    scheduleRuntimeMechanism.indexOf("stopAndRelease(): Promise<void>"),
   );
   if (
     scheduleGenerationRecovery < 0 ||
     scheduleGenerationCompare < scheduleGenerationRecovery ||
-    scheduleGenerationStop < scheduleGenerationCompare ||
-    scheduleGenerationRelease < scheduleGenerationStop ||
-    scheduleGenerationClear < scheduleGenerationRelease ||
-    scheduleGenerationCreate < scheduleGenerationClear ||
+    scheduleGenerationCreate < scheduleGenerationCompare ||
     scheduleGenerationValidate < scheduleGenerationCreate ||
-    scheduleGenerationInstall < scheduleGenerationValidate ||
-    scheduleGenerationInitialize < scheduleGenerationInstall ||
-    !scheduleRuntimeMechanism.includes("await replacement.stop();")
+    scheduleGenerationPrepare < scheduleGenerationValidate ||
+    scheduleCurrentBindingRelease < scheduleGenerationPrepare ||
+    scheduleGenerationBind < scheduleCurrentBindingRelease ||
+    scheduleGenerationRelease < scheduleGenerationBind ||
+    scheduleGenerationInstall < scheduleGenerationRelease ||
+    scheduleCurrentPublicationRelease < scheduleGenerationInstall ||
+    scheduleGenerationPublish < scheduleCurrentPublicationRelease ||
+    scheduleGenerationCommit < scheduleGenerationPublish ||
+    scheduleGenerationActivate < scheduleGenerationCommit ||
+    scheduleGenerationResume < scheduleGenerationActivate ||
+    scheduleGenerationReset < scheduleGenerationResume ||
+    scheduleGenerationStop < scheduleGenerationReset ||
+    !scheduleRuntimeMechanism.includes("this.#application.install(current);") ||
+    !scheduleRuntimeMechanism.includes("await stopFailedGeneration(replacement, error);") ||
+    !scheduleRuntimeMechanism.includes("attemptGenerationRelease(replacementBindingRelease, rollbackFailures)") ||
+    !scheduleRuntimeMechanism.includes("this.#bindingRelease = input.bind(current);") ||
+    !scheduleRuntimeMechanism.includes("this.#publicationRelease = input.publish(current);") ||
+    !scheduleRuntimeMechanism.includes("bindGeneration(): () => void") ||
+    !scheduleRuntimeMechanism.includes("if (this.#generationBound)") ||
+    !scheduleRuntimeMechanism.includes("this.#options.protocol.bindMutationPublisher(this.#mutationPublisher)") ||
+    scheduleRuntimeMechanism.split("bindMutationPublisher(").length - 1 !== 1 ||
+    conversationProtocolRuntime.includes("beginInstalledAuthorityGeneration") ||
+    conversationProtocolRuntime.split("bindMutationPublisher(").length - 1 !== 1 ||
+    conversationProtocolRuntime.split("this.#mutationPublisher = undefined;").length - 1 !== 1 ||
+    composition.includes("conversationProtocol.bindMutationPublisher(") ||
+    !/await input\.prepare\(input\.mechanism\);[\s\S]*?bindingRelease = input\.bind\(input\.mechanism\);[\s\S]*?this\.#application\.install\(input\.mechanism\);[\s\S]*?publicationRelease = input\.publish\(input\.mechanism\);[\s\S]*?this\.#current = input\.mechanism;[\s\S]*?input\.activate\(input\.mechanism\);[\s\S]*?await input\.resume\(input\.mechanism\)/u.test(
+      initialInstall,
+    ) ||
+    !/publicationRelease\?\.\(\);[\s\S]*?this\.#application\.release\(input\.mechanism\);[\s\S]*?bindingRelease\?\.\(\);[\s\S]*?stopFailedGeneration\(input\.mechanism, error\)/u.test(
+      initialInstall,
+    ) ||
+    !/installSchedulerGlobalState:\s*\(state:\s*GlobalStatePort\)\s*=>\s*\(\)\s*=>\s*void/u.test(
+      setupDelivery,
+    ) ||
+    !/if\s*\(schedulerGlobalState === state\)\s*schedulerGlobalState = undefined/u.test(
+      setupDelivery,
+    ) ||
+    !/const releaseGlobalState\s*=\s*[\s\S]*?installSchedulerGlobalState\(boundary\.globalState\);[\s\S]*?if \(schedulerProductRef === product\) schedulerProductRef = undefined;[\s\S]*?releaseGlobalState\(\);/u.test(
+      composition,
+    ) ||
+    !/const activateSchedulerGeneration[\s\S]*?runtime\.activate\(\);/u.test(composition) ||
+    !/const resumeSchedulerGeneration[\s\S]*?await runtime\.resumeManualSurfaces\(\);/u.test(
+      composition,
+    ) ||
+    /input\.activate\(replacement\);/u.test(
+      scheduleRuntimeMechanism.slice(scheduleGenerationPrepare, scheduleGenerationCommit),
+    ) ||
+    /await current\.stop\(\);/u.test(
+      scheduleRuntimeMechanism.slice(scheduleGenerationPrepare, scheduleGenerationReset),
+    ) ||
+    /jobStatus\.register(?:Scheduler)?\(|executorCapabilities\.onAccepted\(|bindMutationPublisher\(/u.test(
+      schedulerMechanismConstructor,
+    ) ||
+    /await this\.#application\.stop\(\);[\s\S]*?const replacement = await input\.create\(\)/u.test(
+      scheduleRuntimeMechanism,
+    )
   ) {
     failures.push("Schedule physical generation replacement escaped its Host boundary");
   }
@@ -8985,7 +9075,7 @@ export function inspectDeviceLifecycleAssembly(records) {
     'await setupAssemblyUnits(assemblyUnits, ctx, "pre-server")',
   );
   const anchorScheduler = command.indexOf(
-    "await installSchedulerGeneration(schedulerRuntime, false)",
+    "await schedulerGenerationOwner.installInitial({",
   );
   const anchorContribution = command.indexOf(
     "const deviceRemovalLifecycle = defineDeviceRemovalLifecycleContribution({",
@@ -13960,10 +14050,18 @@ export function inspectConversationAdoptionAssembly(records) {
       failures.push(`${mesh.relative}: committed transfers must restore before mesh admission opens`);
     }
   }
-  if (!/async\s+bindPostAdoptionReview\s*\([\s\S]*?this\.#postAdoptionReview\s*=\s*port;\s*await\s+this\.#restoreCommittedTransfers\s*\(\s*\)/u.test(mesh.text)) {
-    failures.push(`${mesh.relative}: post-adoption review must bind before replaying durable commits`);
+  if (
+    !/#postAdoptionReviewLifecycle!:\s*PostAdoptionReviewLifecycleContribution/u.test(
+      mesh.text,
+    ) ||
+    !/const postAdoptionReviewLifecycle\s*=\s*definePostAdoptionReviewLifecycleContribution\([\s\S]*?this\.#postAdoptionReviewLifecycle\s*=\s*postAdoptionReviewLifecycle;[\s\S]*?await this\.#recoverStartupState/u.test(
+      mesh.text,
+    ) ||
+    /bindPostAdoptionReview|#postAdoptionReview\s*[?:]/u.test(mesh.text)
+  ) {
+    failures.push(`${mesh.relative}: post-adoption review lifecycle must be installed before replaying durable commits`);
   }
-  if (!/await\s+protocol\.installCommittedConversationTransfer\s*\(base\);[\s\S]*?this\.#postAdoptionReview[\s\S]*?\.reviewAfterAdoption\s*\(/u.test(mesh.text)) {
+  if (!/await\s+protocol\.installCommittedConversationTransfer\s*\(base\);[\s\S]*?lifecycle\.kind\s*!==\s*"anchor"[\s\S]*?lifecycle\.review\.reviewAfterAdoption\s*\(/u.test(mesh.text)) {
     failures.push(`${mesh.relative}: committed authority must install before deferred-intent review`);
   }
 
@@ -14106,14 +14204,26 @@ export function inspectConversationAdoptionAssembly(records) {
   }
 
   const command = required.get("packages/cli/src/serve/command.ts");
-  requireCount(command, /new\s+PostAdoptionReviewCoordinator\s*\(/gu, 1, "anchor post-adoption review construction");
-  requireCount(command, /bindPostAdoptionReview\s*\(/gu, 1, "anchor post-adoption review binding");
-  const reviewBinding = command.text.indexOf("await ctx.meshRuntime.bindPostAdoptionReview(");
+  requireCount(command, /new\s+AnchorSchedulerHostLifecycle\s*\(\{/gu, 1, "anchor Schedule generation owner construction");
+  requireCount(command, /definePostAdoptionReviewLifecycleContribution\s*\(\{/gu, 1, "anchor post-adoption review lifecycle contribution");
+  requireCount(command, /schedulerGenerationOwner\.postAdoptionReview/gu, 2, "shared post-adoption review port consumption");
+  const reviewOwner = command.text.indexOf("const schedulerGenerationOwner = new AnchorSchedulerHostLifecycle({");
+  const reviewInstall = command.text.indexOf("await schedulerGenerationOwner.installInitial({", reviewOwner);
+  const reviewContribution = command.text.indexOf("const postAdoptionReviewLifecycle =", reviewInstall);
+  const meshStart = command.text.indexOf("const activeMesh = await preparedMesh.start({", reviewContribution);
   const publicServer = command.text.indexOf("runner = await runServer(");
   if (
-    reviewBinding < 0 || publicServer < 0 || reviewBinding > publicServer
+    reviewOwner < 0 ||
+    reviewInstall < reviewOwner ||
+    reviewContribution < reviewInstall ||
+    meshStart < reviewContribution ||
+    publicServer < meshStart ||
+    !command.text.slice(meshStart, publicServer).includes("postAdoptionReviewLifecycle,") ||
+    /bindPostAdoptionReview|let adoptionReview|\.\.\.\(adoptionReview\s*\?/u.test(
+      command.text,
+    )
   ) {
-    failures.push(`${command.relative}: adoption review recovery must bind before public server admission`);
+    failures.push(`${command.relative}: the stable adoption review generation owner must precede Mesh recovery and public admission`);
   }
   const resumeBinding = required.get(
     "packages/cli/src/serve/conversation-resume-binding.ts",
@@ -14122,9 +14232,16 @@ export function inspectConversationAdoptionAssembly(records) {
     !/resume:\s*createAnchorConversationResumePort\s*\(\s*\{[\s\S]*?adoptionReview/u.test(
       command.text,
     ) ||
-    !/reviewAdoption:[\s\S]*?input\.adoptionReview!\.reviewForSurface/u.test(
+    !/adoptionReview:\s*AnchorConversationAdoptionReview;[\s\S]*?reviewAdoption:[\s\S]*?input\.adoptionReview\.reviewForSurface/u.test(
       resumeBinding.text,
     ) ||
+    /adoptionReview\?:|input\.adoptionReview!|\.\.\.\(input\.adoptionReview/u.test(
+      resumeBinding.text,
+    ) ||
+    count(
+      executorRoot.text,
+      /postAdoptionReviewLifecycle:\s*EXECUTOR_ONLY_POST_ADOPTION_REVIEW_LIFECYCLE/gu,
+    ) !== 2 ||
     /conversationAdoptionReview/u.test(command.text)
   ) {
     failures.push(`${command.relative}: public resume must reuse the authenticated anchor review coordinator`);

@@ -93,6 +93,7 @@ import { protocolDigest } from "@zhixing/core/protocol";
 import { cleanupExecutorDeviceLocalState } from "./device-removal-cleanup.js";
 import { defineDeviceRemovalLifecycleContribution } from "./device-removal-lifecycle-contribution.js";
 import { EXECUTOR_ONLY_PLANNED_DUTY_MIGRATION_LIFECYCLE } from "./planned-duty-migration-lifecycle-contribution.js";
+import { EXECUTOR_ONLY_POST_ADOPTION_REVIEW_LIFECYCLE } from "./post-adoption-review.js";
 import {
   captureManagedHostAdmission,
   coordinateManagedHostTrustTransition,
@@ -691,6 +692,8 @@ export async function runExecutorRole(
           deviceRemovalLifecycle,
           plannedDutyMigrationLifecycle:
             EXECUTOR_ONLY_PLANNED_DUTY_MIGRATION_LIFECYCLE,
+          postAdoptionReviewLifecycle:
+            EXECUTOR_ONLY_POST_ADOPTION_REVIEW_LIFECYCLE,
           admissionClosed: true,
           recoverAcceptedWork: startupStopRecoverAcceptedWork,
         }
@@ -698,6 +701,8 @@ export async function runExecutorRole(
           deviceRemovalLifecycle,
           plannedDutyMigrationLifecycle:
             EXECUTOR_ONLY_PLANNED_DUTY_MIGRATION_LIFECYCLE,
+          postAdoptionReviewLifecycle:
+            EXECUTOR_ONLY_POST_ADOPTION_REVIEW_LIFECYCLE,
         });
     removalBootstrapAdmissionClosed = false;
     const localOwners = new Set<HostStopAcceptedWorkOwner>([

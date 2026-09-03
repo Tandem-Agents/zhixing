@@ -157,6 +157,10 @@ import {
   type PlannedDutyMigrationLifecycleContribution,
 } from "./planned-duty-migration-lifecycle-contribution.js";
 import {
+  definePostAdoptionReviewLifecycleContribution,
+  type PostAdoptionReviewLifecycleContribution,
+} from "./post-adoption-review.js";
+import {
   CurrentIssuerDeviceRemovalAuthority,
   ExecutorRemovalTarget,
   type ExecutorRemovalPublicState,
@@ -171,10 +175,6 @@ import {
 type AnchorPostInstallDescriptor =
   | PlannedAnchorPostInstallDescriptor
   | DisasterRecoveryPostInstallDescriptor;
-
-export interface PostAdoptionReviewPort {
-  reviewAfterAdoption(conversationId: string): Promise<unknown>;
-}
 
 export interface PlannedAnchorPostInstallGroups {
   readonly scheduler: readonly {
@@ -537,7 +537,7 @@ export class MeshRuntimeAssembly
   #plannedAnchorIssuerKey: DeviceKey | undefined;
   #plannedAnchorPostInstall: AnchorPostInstallDescriptor | undefined;
   #plannedCommittedTargetDeviceId: string | undefined;
-  #postAdoptionReview: PostAdoptionReviewPort | undefined;
+  #postAdoptionReviewLifecycle!: PostAdoptionReviewLifecycleContribution;
   #started = false;
   #controlStarted = false;
   #closed = false;
@@ -1058,18 +1058,6 @@ export class MeshRuntimeAssembly
     );
   }
 
-  /** Binds the anchor review seam and catches up every durable commit. */
-  async bindPostAdoptionReview(port: PostAdoptionReviewPort): Promise<void> {
-    if (!this.#transferTarget || !this.options.protocol) {
-      throw new Error("Post-adoption review requires the anchor transfer target");
-    }
-    if (this.#postAdoptionReview && this.#postAdoptionReview !== port) {
-      throw new Error("Post-adoption review is already bound");
-    }
-    this.#postAdoptionReview = port;
-    await this.#restoreCommittedTransfers();
-  }
-
   bindFirstPartyConversationSurface(surface: CanonicalFirstPartyConversationSurface): void {
     if (!this.#firstPartyConversationTarget) {
       throw new Error("First-party conversation surface requires the anchor transfer target");
@@ -1439,6 +1427,7 @@ export class MeshRuntimeAssembly
   async start(options: {
     readonly deviceRemovalLifecycle: DeviceRemovalLifecycleContribution;
     readonly plannedDutyMigrationLifecycle: PlannedDutyMigrationLifecycleContribution;
+    readonly postAdoptionReviewLifecycle: PostAdoptionReviewLifecycleContribution;
     readonly lifecycleAdmissionClosed?: boolean;
     readonly recoverAcceptedWork?: boolean;
   }): Promise<void> {
@@ -1455,7 +1444,17 @@ export class MeshRuntimeAssembly
           "Planned-duty migration lifecycle contribution does not match the Mesh role",
         );
       }
+      const postAdoptionReviewLifecycle =
+        definePostAdoptionReviewLifecycleContribution(
+          options.postAdoptionReviewLifecycle,
+        );
+      if (anchorEnabled !== (postAdoptionReviewLifecycle.kind === "anchor")) {
+        throw new TypeError(
+          "Post-adoption review lifecycle contribution does not match the Mesh role",
+        );
+      }
       this.#plannedDutyMigrationLifecycle = plannedDutyMigrationLifecycle;
+      this.#postAdoptionReviewLifecycle = postAdoptionReviewLifecycle;
       if (anchorEnabled) this.#installInitialPlannedAnchorRole(this.options.trust);
       this.#installDeviceRemovalTarget(options.deviceRemovalLifecycle);
       await this.#deviceRemovalTarget.resumeBeforeAdmission();
@@ -2123,7 +2122,11 @@ export class MeshRuntimeAssembly
     const protocol = this.options.protocol;
     if (!protocol) throw new Error("Conversation transfer target has no owner protocol");
     await protocol.installCommittedConversationTransfer(base);
-    await this.#postAdoptionReview?.reviewAfterAdoption(base.manifest.conversationId);
+    const lifecycle = this.#postAdoptionReviewLifecycle;
+    if (lifecycle.kind !== "anchor") {
+      throw new TypeError("Executor-only Mesh cannot review an adopted conversation");
+    }
+    await lifecycle.review.reviewAfterAdoption(base.manifest.conversationId);
   }
 
   async #adoptLocalConversations(

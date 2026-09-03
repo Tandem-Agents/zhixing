@@ -283,7 +283,7 @@ export interface AuthorityRuntimeStack {
   readonly globalState?: GlobalStatePort;
   readonly rubricGlobalState?: AnchorRubricGlobalStateAdapter;
   readonly globalMutationParticipants: readonly GlobalMutationCommitParticipant[];
-  readonly installSchedulerGlobalState: (state: GlobalStatePort) => void;
+  readonly installSchedulerGlobalState: (state: GlobalStatePort) => () => void;
   readonly rebindInstalledAuthority: (
     generation: InstalledAuthorityGeneration,
   ) => Promise<InstalledAuthorityGenerationReceipt>;
@@ -2013,6 +2013,9 @@ export async function setupAuthorityRuntime(
           throw new Error("Scheduler global state owner is already installed");
         }
         schedulerGlobalState = state;
+        return () => {
+          if (schedulerGlobalState === state) schedulerGlobalState = undefined;
+        };
       },
       rebindInstalledAuthority,
       recoverWorksceneState: async () => {

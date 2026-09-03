@@ -1936,14 +1936,37 @@ test("conversation adoption stays bound to the two production roots and ordered 
   assert.match(
     inspectConversationAdoptionAssembly(mutate(
       "packages/cli/src/serve/command.ts",
-      (text) => text.replace("await ctx.meshRuntime.bindPostAdoptionReview(", "await Promise.resolve("),
+      (text) => text.replace(
+        "postAdoptionReviewLifecycle,\n        lifecycleAdmissionClosed:",
+        "lifecycleAdmissionClosed:",
+      ),
     )).join("\n"),
-    /anchor post-adoption review binding/,
+    /stable adoption review generation owner must precede Mesh recovery/,
   );
   assert.match(
     inspectConversationAdoptionAssembly(mutate(
       "packages/cli/src/serve/conversation-resume-binding.ts",
-      (text) => text.replace("input.adoptionReview!.reviewForSurface", "Promise.resolve"),
+      (text) => text.replace("input.adoptionReview.reviewForSurface", "Promise.resolve"),
+    )).join("\n"),
+    /public resume must reuse the authenticated anchor review coordinator/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "#postAdoptionReviewLifecycle!: PostAdoptionReviewLifecycleContribution;",
+        "#postAdoptionReviewLifecycle?: PostAdoptionReviewLifecycleContribution;",
+      ),
+    )).join("\n"),
+    /post-adoption review lifecycle must be installed before replaying durable commits/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replaceAll(
+        "EXECUTOR_ONLY_POST_ADOPTION_REVIEW_LIFECYCLE",
+        "undefined as never",
+      ),
     )).join("\n"),
     /public resume must reuse the authenticated anchor review coordinator/,
   );
@@ -6836,6 +6859,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/server/src/lifecycle.ts",
     "packages/rpc/src/event-bridge.ts",
     "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/conversation-protocol-runtime.ts",
     "packages/cli/src/serve/conversation-clear-binding.ts",
     "packages/cli/src/serve/conversation-resume-binding.ts",
     "packages/cli/src/serve/conversation-run-control-binding.ts",
@@ -7586,8 +7610,88 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      (text) => text.replace(
+        "  /** Installs a committed immutable source prefix before exposing the adopted session. */",
+        "  beginInstalledAuthorityGeneration(): void {\n    this.#mutationPublisher = undefined;\n  }\n\n  /** Installs a committed immutable source prefix before exposing the adopted session. */",
+      ),
+    )).join("\n"),
+    /Schedule physical generation replacement escaped its Host boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => `${text}\nconversationProtocol.bindMutationPublisher(replacementPublisher);`,
+    )).join("\n"),
+    /Schedule physical generation replacement escaped its Host boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/anchor-scheduler-runtime.ts",
-      (text) => text.replaceAll("this.#current = undefined;", "void this.#current;"),
+      (text) => text.replace(
+        "await input.prepare(replacement);",
+        "await current.stop();",
+      ),
+    )).join("\n"),
+    /Schedule physical generation replacement escaped its Host boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/anchor-scheduler-runtime.ts",
+      (text) => text.replace(
+        "replacementBindingRelease = input.bind(replacement);",
+        "void replacement;",
+      ),
+    )).join("\n"),
+    /Schedule physical generation replacement escaped its Host boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/anchor-scheduler-runtime.ts",
+      (text) => text.replace(
+        "input.activate(replacement);",
+        "await current.stop();\n      input.activate(replacement);",
+      ),
+    )).join("\n"),
+    /Schedule physical generation replacement escaped its Host boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/anchor-scheduler-runtime.ts",
+      (text) => text.replace(
+        "currentBindingRelease();",
+        "input.activate(replacement);\n      currentBindingRelease();",
+      ),
+    )).join("\n"),
+    /Schedule physical generation replacement escaped its Host boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/anchor-scheduler-runtime.ts",
+      (text) => text.replace(
+        "this.#bindingRelease = input.bind(current);",
+        "void current;",
+      ),
+    )).join("\n"),
+    /Schedule physical generation replacement escaped its Host boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/setup-delivery.ts",
+      (text) => text.replace(
+        "if (schedulerGlobalState === state) schedulerGlobalState = undefined;",
+        "schedulerGlobalState = undefined;",
+      ),
+    )).join("\n"),
+    /Schedule physical generation replacement escaped its Host boundary/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/anchor-scheduler-runtime.ts",
+      (text) => text.replace(
+        "this.#options = options;",
+        "this.#options = options;\n    options.jobStatus.registerScheduler(this.schedulerNotices);",
+      ),
     )).join("\n"),
     /Schedule physical generation replacement escaped its Host boundary/,
   );
@@ -7639,8 +7743,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "schedulerHostLifecycle.install(runtime);",
-        "void runtime;",
+        "await schedulerGenerationOwner.installInitial({",
+        "await Promise.resolve({",
       ),
     )).join("\n"),
     /Schedule runtime and lifecycle lack one finite domain application boundary/,
@@ -7649,7 +7753,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "schedulerHostLifecycle.recoverInstalledAuthority({",
+        "schedulerGenerationOwner.recoverInstalledAuthority({",
         "schedulerApplication.recoverInstalledAuthority();\n        void ({",
       ),
     )).join("\n"),
@@ -7679,8 +7783,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "if (!startupLifecycle) schedulerApplication.activate();",
-        "if (!startupLifecycle) schedulerRuntime?.activate();",
+        "runtime.activate();",
+        "schedulerRuntime?.activate();",
       ),
     )).join("\n"),
     /Schedule runtime and lifecycle lack one finite domain application boundary/,

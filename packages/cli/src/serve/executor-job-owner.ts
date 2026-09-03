@@ -9,6 +9,7 @@ import {
 } from "./durable-job-interactions.js";
 import type { DeviceRemovalLifecycleContribution } from "./device-removal-lifecycle-contribution.js";
 import type { PlannedDutyMigrationLifecycleContribution } from "./planned-duty-migration-lifecycle-contribution.js";
+import type { PostAdoptionReviewLifecycleContribution } from "./post-adoption-review.js";
 import {
   JobAssignmentWorker,
   type JobAcceptedWorkItem,
@@ -237,6 +238,7 @@ export class ExecutorJobOwnerLifecycle {
       start(options: {
         readonly deviceRemovalLifecycle: DeviceRemovalLifecycleContribution;
         readonly plannedDutyMigrationLifecycle: PlannedDutyMigrationLifecycleContribution;
+        readonly postAdoptionReviewLifecycle: PostAdoptionReviewLifecycleContribution;
         readonly lifecycleAdmissionClosed?: boolean;
         readonly recoverAcceptedWork?: boolean;
       }): Promise<void>;
@@ -252,6 +254,7 @@ export class ExecutorJobOwnerLifecycle {
   async start(options: {
     readonly deviceRemovalLifecycle: DeviceRemovalLifecycleContribution;
     readonly plannedDutyMigrationLifecycle: PlannedDutyMigrationLifecycleContribution;
+    readonly postAdoptionReviewLifecycle: PostAdoptionReviewLifecycleContribution;
     readonly admissionClosed?: boolean;
     readonly recoverAcceptedWork?: boolean;
   }): Promise<void> {
@@ -267,6 +270,7 @@ export class ExecutorJobOwnerLifecycle {
       await this.transport.start({
         deviceRemovalLifecycle: options.deviceRemovalLifecycle,
         plannedDutyMigrationLifecycle: options.plannedDutyMigrationLifecycle,
+        postAdoptionReviewLifecycle: options.postAdoptionReviewLifecycle,
         lifecycleAdmissionClosed: true,
         recoverAcceptedWork: options.recoverAcceptedWork,
       });

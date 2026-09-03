@@ -22,6 +22,7 @@ import {
   ConversationRunJournal,
   createInitialControlEnvelope,
   DurableConversationAdmissionRejectedError,
+  type ConversationMutationPublisher,
   type RuntimeFactory,
   type SessionRuntime,
 } from "@zhixing/owner-kernel";
@@ -283,6 +284,39 @@ async function seedPendingConversation(label: string) {
 }
 
 describe("ConversationProtocolRuntime", () => {
+  it("keeps mutation publisher ownership behind provenance binding leases", async () => {
+    const home = await createTempDir("conversation-protocol-publisher-lease");
+    const authority = await setupAuthorityRuntime({
+      zhixingHome: home,
+      secretStore: new MemorySecretStore(),
+    });
+    const protocol = createProtocol({
+      authority,
+      manager: () => {
+        throw new Error("manager is not used by publisher binding");
+      },
+      interactions: new DurableConversationInteractionObserver(),
+    });
+    const oldPublisher = mutationPublisher("old");
+    const replacementPublisher = mutationPublisher("replacement");
+    const foreignPublisher = mutationPublisher("foreign");
+
+    const releaseOld = protocol.bindMutationPublisher(oldPublisher);
+    expect(() => protocol.bindMutationPublisher(replacementPublisher)).toThrow(
+      "Conversation mutation publisher is already bound",
+    );
+
+    releaseOld();
+    const releaseReplacement = protocol.bindMutationPublisher(replacementPublisher);
+    releaseOld();
+    expect(() => protocol.bindMutationPublisher(foreignPublisher)).toThrow(
+      "Conversation mutation publisher is already bound",
+    );
+
+    releaseReplacement();
+    expect(() => protocol.bindMutationPublisher(foreignPublisher)).not.toThrow();
+  });
+
   it("requires executor dispatch and an immutable Host topology directory", async () => {
     const home = await createTempDir("conversation-protocol-dispatch-owner");
     const authority = await setupAuthorityRuntime({
@@ -3176,6 +3210,14 @@ describe("ConversationProtocolRuntime", () => {
     expect(finals).toHaveLength(1);
   }, TEST_DURABLE_IO_TIMEOUT_MS);
 });
+
+function mutationPublisher(label: string): ConversationMutationPublisher {
+  return {
+    readProjectionIds: [label],
+    decideGlobalBatchAtPrefix: vi.fn(() => []),
+    apply: vi.fn(async () => undefined),
+  };
+}
 
 function secretKey(ref: SecretRef): string {
   return `${ref.kind}/${ref.bindingId}`;

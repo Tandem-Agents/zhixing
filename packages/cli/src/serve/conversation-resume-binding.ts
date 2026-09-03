@@ -35,7 +35,7 @@ interface AnchorConversationAdoptionReview {
 export function createAnchorConversationResumePort(input: Readonly<{
   identity: AnchorConversationResumeIdentity;
   recovery?: AnchorConversationResumeRecovery;
-  adoptionReview?: AnchorConversationAdoptionReview;
+  adoptionReview: AnchorConversationAdoptionReview;
 }>): ConversationResumePort {
   return Object.freeze({
     restoreIdentity: async (conversationId: ConversationResumeIdentity) => {
@@ -54,17 +54,13 @@ export function createAnchorConversationResumePort(input: Readonly<{
     ) => {
       await input.recovery?.recoverConversation(conversationId);
     },
-    ...(input.adoptionReview
-      ? {
-          reviewAdoption: async (request: ConversationResumeAdoptionInput) =>
-            request.caller.kind === "surface"
-              ? input.adoptionReview!.reviewForSurface({
-                  conversationId: request.conversationId,
-                  surfacePrincipal: request.caller.surfacePrincipal,
-                  connectionId: request.caller.connectionId,
-                })
-              : undefined,
-        }
-      : {}),
+    reviewAdoption: async (request: ConversationResumeAdoptionInput) =>
+      request.caller.kind === "surface"
+        ? input.adoptionReview.reviewForSurface({
+            conversationId: request.conversationId,
+            surfacePrincipal: request.caller.surfacePrincipal,
+            connectionId: request.caller.connectionId,
+          })
+        : undefined,
   });
 }

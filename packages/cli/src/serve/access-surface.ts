@@ -122,6 +122,7 @@ import type { AdvancementEvidenceRemoteDirectory } from "./advancement-evidence-
 import type { AssignmentDataPlaneRemoteDirectory } from "./assignment-data-plane-topology.js";
 import type { DeviceRemovalLifecycleContribution } from "./device-removal-lifecycle-contribution.js";
 import type { PlannedDutyMigrationLifecycleContribution } from "./planned-duty-migration-lifecycle-contribution.js";
+import type { PostAdoptionReviewLifecycleContribution } from "./post-adoption-review.js";
 
 type ConversationRuntimeStoragePort = Readonly<
   Required<
@@ -146,6 +147,7 @@ export interface MeshRuntimePreparation {
   readonly start: (options: {
     readonly deviceRemovalLifecycle: DeviceRemovalLifecycleContribution;
     readonly plannedDutyMigrationLifecycle: PlannedDutyMigrationLifecycleContribution;
+    readonly postAdoptionReviewLifecycle: PostAdoptionReviewLifecycleContribution;
     readonly lifecycleAdmissionClosed?: boolean;
     readonly recoverAcceptedWork?: boolean;
   }) => Promise<MeshRuntimeAssembly>;

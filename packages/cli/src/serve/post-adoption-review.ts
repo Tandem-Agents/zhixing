@@ -24,6 +24,82 @@ interface DeferredIntentReviewPort {
   ): Promise<DeferredGlobalIntent>;
 }
 
+export interface PostAdoptionReviewPort {
+  readonly reviewAfterAdoption: (
+    conversationId: string,
+  ) => Promise<ConversationAdoptionReviewProjection>;
+  readonly reviewForSurface: (input: Readonly<{
+    conversationId: string;
+    surfacePrincipal: string;
+    connectionId: string;
+  }>) => Promise<ConversationAdoptionReviewProjection | undefined>;
+}
+
+export type PostAdoptionReviewLifecycleContribution =
+  | Readonly<{
+      kind: "anchor";
+      review: PostAdoptionReviewPort;
+    }>
+  | Readonly<{
+      kind: "absent";
+      role: "executor-only";
+    }>;
+
+const ANCHOR_CONTRIBUTION_KEYS = Object.freeze(["kind", "review"] as const);
+const ABSENT_CONTRIBUTION_KEYS = Object.freeze(["kind", "role"] as const);
+const REVIEW_PORT_KEYS = Object.freeze([
+  "reviewAfterAdoption",
+  "reviewForSurface",
+] as const);
+
+function hasExactKeys(value: object, expected: readonly string[]): boolean {
+  const keys = Object.keys(value).sort();
+  return keys.length === expected.length &&
+    keys.every((key, index) => key === expected[index]);
+}
+
+export function definePostAdoptionReviewLifecycleContribution(
+  input: PostAdoptionReviewLifecycleContribution,
+): PostAdoptionReviewLifecycleContribution {
+  if (!input || typeof input !== "object") {
+    throw new TypeError("Post-adoption review lifecycle contribution is required");
+  }
+  if (input.kind === "absent") {
+    if (
+      !hasExactKeys(input, ABSENT_CONTRIBUTION_KEYS) ||
+      input.role !== "executor-only"
+    ) {
+      throw new TypeError("Post-adoption review absent profile is invalid");
+    }
+    return Object.freeze({ kind: "absent", role: input.role });
+  }
+  const review = input.kind === "anchor" ? input.review : undefined;
+  if (
+    input.kind !== "anchor" ||
+    !hasExactKeys(input, ANCHOR_CONTRIBUTION_KEYS) ||
+    !review ||
+    typeof review !== "object" ||
+    !hasExactKeys(review, REVIEW_PORT_KEYS) ||
+    typeof review.reviewAfterAdoption !== "function" ||
+    typeof review.reviewForSurface !== "function"
+  ) {
+    throw new TypeError("Anchor post-adoption review contribution is invalid");
+  }
+  return Object.freeze({
+    kind: "anchor",
+    review: Object.freeze({
+      reviewAfterAdoption: review.reviewAfterAdoption,
+      reviewForSurface: review.reviewForSurface,
+    }),
+  });
+}
+
+export const EXECUTOR_ONLY_POST_ADOPTION_REVIEW_LIFECYCLE =
+  definePostAdoptionReviewLifecycleContribution({
+    kind: "absent",
+    role: "executor-only",
+  });
+
 interface PendingSurfaceDecision {
   readonly intentId: string;
   readonly conversationId: string;
@@ -121,6 +197,17 @@ export class PostAdoptionReviewCoordinator {
       await this.#requestScheduleConfirmation(intent, context);
     }
     return summary;
+  }
+
+  /** Cancels generation-bound confirmations before the owner publishes a replacement. */
+  resetForInstalledGeneration(): void {
+    if (this.#closed) {
+      throw new Error("Post-adoption review coordinator is closed");
+    }
+    this.#broker.cancelAll("session-end");
+    this.#requested.clear();
+    this.#surfaceDecisions.clear();
+    this.#surfaceTransitions.clear();
   }
 
   close(): void {

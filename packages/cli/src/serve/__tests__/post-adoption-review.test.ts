@@ -4,7 +4,11 @@ import type {
   DeferredGlobalIntent,
 } from "@zhixing/core/contracts";
 import { ConfirmationHub } from "@zhixing/owner-kernel";
-import { PostAdoptionReviewCoordinator } from "../post-adoption-review.js";
+import {
+  EXECUTOR_ONLY_POST_ADOPTION_REVIEW_LIFECYCLE,
+  PostAdoptionReviewCoordinator,
+  definePostAdoptionReviewLifecycleContribution,
+} from "../post-adoption-review.js";
 
 const CONVERSATION = "local-12345678-01K1ZZZZZZ0000000000000000";
 
@@ -202,5 +206,47 @@ describe("PostAdoptionReviewCoordinator", () => {
         },
       },
     });
+  });
+});
+
+describe("PostAdoptionReviewLifecycleContribution", () => {
+  it("freezes the finite anchor and executor-only profiles", () => {
+    const review = {
+      reviewAfterAdoption: async () => ({ status: "not-required" as const }),
+      reviewForSurface: async () => undefined,
+    };
+    const anchor = definePostAdoptionReviewLifecycleContribution({
+      kind: "anchor",
+      review,
+    });
+
+    expect(anchor).toEqual({ kind: "anchor", review });
+    expect(Object.isFrozen(anchor)).toBe(true);
+    expect(anchor.kind === "anchor" && Object.isFrozen(anchor.review)).toBe(true);
+    expect(anchor.kind === "anchor" && anchor.review).not.toBe(review);
+    expect(EXECUTOR_ONLY_POST_ADOPTION_REVIEW_LIFECYCLE).toEqual({
+      kind: "absent",
+      role: "executor-only",
+    });
+    expect(Object.isFrozen(EXECUTOR_ONLY_POST_ADOPTION_REVIEW_LIFECYCLE)).toBe(true);
+  });
+
+  it("rejects missing, extra, and incomplete lifecycle profiles", () => {
+    expect(() =>
+      definePostAdoptionReviewLifecycleContribution(undefined as never)
+    ).toThrow("contribution is required");
+    expect(() =>
+      definePostAdoptionReviewLifecycleContribution({
+        kind: "absent",
+        role: "executor-only",
+        extra: true,
+      } as never)
+    ).toThrow("absent profile is invalid");
+    expect(() =>
+      definePostAdoptionReviewLifecycleContribution({
+        kind: "anchor",
+        review: { reviewAfterAdoption: async () => undefined },
+      } as never)
+    ).toThrow("Anchor post-adoption review contribution is invalid");
   });
 });

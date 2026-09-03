@@ -46,6 +46,7 @@ import {
   type JobLifecycleEvent,
   type PendingJobDispatch,
   type SystemJobHandler,
+  type ConfirmationHub,
 } from "@zhixing/owner-kernel";
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 import type {
@@ -62,6 +63,10 @@ import {
   type ManualJobSurfaceSession,
 } from "./manual-job-surface-lifecycle.js";
 import { SchedulerCapabilityGapError } from "./scheduler-capability-gap.js";
+import {
+  PostAdoptionReviewCoordinator,
+  type PostAdoptionReviewPort,
+} from "./post-adoption-review.js";
 
 const OWNER_CONTEXT_RENEWAL_MS = Math.floor(MAX_CONTROL_LEASE_TTL_MS / 3);
 const TERMINAL_JOB_STATES = new Set([
@@ -116,52 +121,260 @@ export interface AnchorScheduleLifecycleMechanism
  */
 export class AnchorSchedulerHostLifecycle {
   #current: AnchorSchedulerRuntime | undefined;
+  #bindingRelease: (() => void) | undefined;
+  #publicationRelease: (() => void) | undefined;
+  #closed = false;
+  #stopPromise: Promise<void> | undefined;
+  readonly #application: ScheduleLifecycleApplication;
+  readonly #postAdoptionReviewCoordinator: PostAdoptionReviewCoordinator;
+  readonly postAdoptionReview: PostAdoptionReviewPort;
 
-  constructor(private readonly application: ScheduleLifecycleApplication) {}
+  constructor(input: Readonly<{
+    application: ScheduleLifecycleApplication;
+    confirmationHub: ConfirmationHub;
+    workingDirectory: string;
+  }>) {
+    this.#application = input.application;
+    this.#postAdoptionReviewCoordinator = new PostAdoptionReviewCoordinator({
+      review: {
+        list: (conversationId, context) =>
+          this.#currentReview().list(conversationId, context),
+        decide: (intentId, decision, context) =>
+          this.#currentReview().decide(intentId, decision, context),
+      },
+      hub: input.confirmationHub,
+      workingDirectory: input.workingDirectory,
+    });
+    this.postAdoptionReview = Object.freeze({
+      reviewAfterAdoption: (conversationId: string) =>
+        this.#postAdoptionReviewCoordinator.reviewAfterAdoption(conversationId),
+      reviewForSurface: (
+        request: Parameters<PostAdoptionReviewPort["reviewForSurface"]>[0],
+      ) =>
+        this.#postAdoptionReviewCoordinator.reviewForSurface(request),
+    });
+  }
 
-  install(mechanism: AnchorSchedulerRuntime): void {
-    if (this.#current === mechanism) return;
+  async installInitial(input: Readonly<{
+    mechanism: AnchorSchedulerRuntime;
+    prepare: (mechanism: AnchorSchedulerRuntime) => Promise<void>;
+    bind: (mechanism: AnchorSchedulerRuntime) => () => void;
+    publish: (mechanism: AnchorSchedulerRuntime) => () => void;
+    activate: (mechanism: AnchorSchedulerRuntime) => void;
+    resume: (mechanism: AnchorSchedulerRuntime) => Promise<void>;
+  }>): Promise<void> {
+    if (this.#closed) throw new Error("Anchor Schedule generation owner is closed");
     if (this.#current) {
       throw new Error("Anchor Schedule runtime generation is already installed");
     }
-    this.application.install(mechanism);
-    this.#current = mechanism;
+    let bindingRelease: (() => void) | undefined;
+    let publicationRelease: (() => void) | undefined;
+    let applicationInstalled = false;
+    try {
+      await input.prepare(input.mechanism);
+      bindingRelease = input.bind(input.mechanism);
+      this.#application.install(input.mechanism);
+      applicationInstalled = true;
+      publicationRelease = input.publish(input.mechanism);
+      this.#bindingRelease = bindingRelease;
+      this.#publicationRelease = publicationRelease;
+      this.#current = input.mechanism;
+      input.activate(input.mechanism);
+      await input.resume(input.mechanism);
+    } catch (error) {
+      if (this.#current === input.mechanism) {
+        this.#current = undefined;
+        this.#bindingRelease = undefined;
+        this.#publicationRelease = undefined;
+      }
+      publicationRelease?.();
+      if (applicationInstalled) {
+        this.#application.release(input.mechanism);
+      }
+      bindingRelease?.();
+      await stopFailedGeneration(input.mechanism, error);
+    }
   }
 
-  async stopAndRelease(): Promise<void> {
-    const current = this.#current;
-    await this.application.stop();
-    if (!current) return;
-    this.application.release(current);
-    this.#current = undefined;
+  stopAndRelease(): Promise<void> {
+    if (this.#stopPromise) return this.#stopPromise;
+    this.#closed = true;
+    this.#stopPromise = this.#stopAndReleaseOnce();
+    return this.#stopPromise;
   }
 
   async recoverInstalledAuthority(input: {
     readonly currentAnchorEpoch: number;
     readonly create: () => Promise<AnchorSchedulerRuntime>;
-    readonly initialize: (mechanism: AnchorSchedulerRuntime) => Promise<void>;
+    readonly prepare: (mechanism: AnchorSchedulerRuntime) => Promise<void>;
+    readonly bind: (mechanism: AnchorSchedulerRuntime) => () => void;
+    readonly publish: (mechanism: AnchorSchedulerRuntime) => () => void;
+    readonly activate: (mechanism: AnchorSchedulerRuntime) => void;
+    readonly resume: (mechanism: AnchorSchedulerRuntime) => Promise<void>;
   }): Promise<void> {
+    if (this.#closed) throw new Error("Anchor Schedule generation owner is closed");
     const current = this.#current;
     if (!current) {
       throw new Error("Anchor Schedule runtime generation is unavailable");
     }
     if (current.installedAnchorEpoch === input.currentAnchorEpoch) {
-      await this.application.recoverInstalledAuthority();
+      await this.#application.recoverInstalledAuthority();
       return;
     }
-
-    await this.application.stop();
-    this.application.release(current);
-    this.#current = undefined;
+    const currentBindingRelease = this.#bindingRelease;
+    const currentPublicationRelease = this.#publicationRelease;
+    if (!currentBindingRelease || !currentPublicationRelease) {
+      throw new Error("Anchor Schedule runtime generation ownership is incomplete");
+    }
 
     const replacement = await input.create();
     if (replacement.installedAnchorEpoch !== input.currentAnchorEpoch) {
-      await replacement.stop();
-      throw new Error("Anchor Schedule runtime generation does not match current Authority");
+      await stopFailedGeneration(
+        replacement,
+        new Error("Anchor Schedule runtime generation does not match current Authority"),
+      );
     }
-    this.install(replacement);
-    await input.initialize(replacement);
+    try {
+      await input.prepare(replacement);
+    } catch (error) {
+      await stopFailedGeneration(replacement, error);
+    }
+
+    let replacementBindingRelease: (() => void) | undefined;
+    let replacementPublicationRelease: (() => void) | undefined;
+    let currentBindingReleased = false;
+    let currentPublicationReleased = false;
+    let applicationSwitched = false;
+    try {
+      currentBindingRelease();
+      currentBindingReleased = true;
+      replacementBindingRelease = input.bind(replacement);
+
+      this.#application.release(current);
+      try {
+        this.#application.install(replacement);
+        applicationSwitched = true;
+      } catch (error) {
+        this.#application.install(current);
+        throw error;
+      }
+
+      currentPublicationRelease();
+      currentPublicationReleased = true;
+      replacementPublicationRelease = input.publish(replacement);
+
+      // Commit point: every fallible generation edge is complete. From here
+      // the stable review port and Schedule application move together.
+      this.#bindingRelease = replacementBindingRelease;
+      this.#publicationRelease = replacementPublicationRelease;
+      this.#current = replacement;
+      // Activation may synchronously start timer/recovery work. Every shared
+      // consumer and stable product/review boundary therefore points at the
+      // replacement before this call; async surface resume is a separate step.
+      input.activate(replacement);
+      await input.resume(replacement);
+    } catch (error) {
+      const rollbackFailures: unknown[] = [];
+      if (this.#current === replacement) this.#current = current;
+      attemptGenerationRelease(replacementPublicationRelease, rollbackFailures);
+      if (applicationSwitched) {
+        try {
+          this.#application.release(replacement);
+          this.#application.install(current);
+        } catch (rollbackError) {
+          rollbackFailures.push(rollbackError);
+        }
+      }
+      if (currentPublicationReleased) {
+        try {
+          this.#publicationRelease = input.publish(current);
+        } catch (rollbackError) {
+          rollbackFailures.push(rollbackError);
+        }
+      }
+      attemptGenerationRelease(replacementBindingRelease, rollbackFailures);
+      if (currentBindingReleased) {
+        try {
+          this.#bindingRelease = input.bind(current);
+        } catch (rollbackError) {
+          rollbackFailures.push(rollbackError);
+        }
+      }
+      try {
+        await replacement.stop();
+      } catch (rollbackError) {
+        rollbackFailures.push(rollbackError);
+      }
+      throwGenerationTransitionFailure(error, rollbackFailures);
+    }
+
+    this.#postAdoptionReviewCoordinator.resetForInstalledGeneration();
+    try {
+      await current.stop();
+    } catch (error) {
+      throw error;
+    }
   }
+
+  #currentReview(): DeferredGlobalIntentAnchorReviewService {
+    const current = this.#current;
+    if (!current) {
+      throw new Error("Post-adoption review generation is unavailable");
+    }
+    return current.deferredIntents;
+  }
+
+  async #stopAndReleaseOnce(): Promise<void> {
+    this.#postAdoptionReviewCoordinator.close();
+    const current = this.#current;
+    await this.#application.stop();
+    if (!current) return;
+    this.#publicationRelease?.();
+    this.#publicationRelease = undefined;
+    this.#bindingRelease?.();
+    this.#bindingRelease = undefined;
+    this.#application.release(current);
+    this.#current = undefined;
+  }
+}
+
+function attemptGenerationRelease(
+  release: (() => void) | undefined,
+  failures: unknown[],
+): void {
+  try {
+    release?.();
+  } catch (error) {
+    failures.push(error);
+  }
+}
+
+function throwGenerationTransitionFailure(
+  cause: unknown,
+  rollbackFailures: readonly unknown[],
+): never {
+  if (rollbackFailures.length === 0) throw cause;
+  throw new AggregateError(
+    [cause, ...rollbackFailures],
+    "Anchor Schedule generation transition and rollback failed",
+    { cause },
+  );
+}
+
+async function stopFailedGeneration(
+  mechanism: AnchorSchedulerRuntime,
+  cause: unknown,
+): Promise<never> {
+  try {
+    await mechanism.stop();
+  } catch (cleanupError) {
+    throw new AggregateError(
+      [cause, cleanupError],
+      "Anchor Schedule generation setup and cleanup failed",
+      { cause },
+    );
+  }
+  throw cause;
 }
 
 /**
@@ -189,8 +402,11 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
   readonly #relayDisposers = new Map<string, () => void>();
   readonly #statusDisposers = new Map<string, () => void>();
   readonly #journalLifecycleDisposers = new Map<string, () => void>();
-  readonly #schedulerNoticeDisposer: () => void;
-  readonly #capabilityReadyDisposer: () => void;
+  readonly #mutationPublisher: SchedulerConversationMutationPublisher;
+  #schedulerNoticeDisposer: (() => void) | undefined;
+  #capabilityReadyDisposer: (() => void) | undefined;
+  #mutationPublisherDisposer: (() => void) | undefined;
+  #generationBound = false;
   readonly #dispatchers = new Map<string, InProcessJobDispatcher>();
   readonly #manualSurfaces: ManualJobSurfaceLifecycle;
   readonly #retirementTasks = new Map<string, Promise<void>>();
@@ -214,9 +430,6 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
       log: options.authority.authorityLog,
       delivery: options.authority.participant,
     });
-    this.#schedulerNoticeDisposer = options.jobStatus.registerScheduler(
-      this.schedulerNotices,
-    );
     this.#scheduler = new AnchorScheduler({
       anchorEpoch: options.authority.anchorEpoch,
       deviceId: options.authority.deviceId,
@@ -233,9 +446,6 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
       ...(options.now ? { now: options.now } : {}),
       ...(options.onError ? { onError: options.onError } : {}),
     });
-    this.#capabilityReadyDisposer = options.authority.executorCapabilities.onAccepted(
-      () => this.#scheduler.wakeQueuedUserJobs(),
-    );
     this.#mutationCoordinator = new GlobalMutationCommitCoordinator({
       log: options.authority.authorityLog,
       artifacts: options.authority.artifacts,
@@ -281,8 +491,7 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
         });
       },
     });
-    options.protocol.bindMutationPublisher(
-      new SchedulerConversationMutationPublisher({
+    this.#mutationPublisher = new SchedulerConversationMutationPublisher({
         anchorEpoch: options.authority.anchorEpoch,
         coordinator: this.#mutationCoordinator,
         sourceForAssignment: (assignmentId) => {
@@ -299,8 +508,7 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
             createdInTurn: ingress.ingressId,
           };
         },
-      }),
-    );
+      });
   }
 
   static async create(
@@ -335,6 +543,40 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
     await this.#scheduler.prepare();
     await this.#mutationCoordinator.recoverDerivedState();
     await this.#commitParticipant.start();
+  }
+
+  /** Publishes generation-scoped shared bindings only after Host selection. */
+  bindGeneration(): () => void {
+    if (this.#generationBound) {
+      throw new Error("Anchor Schedule generation is already bound");
+    }
+    try {
+      this.#schedulerNoticeDisposer = this.#options.jobStatus.registerScheduler(
+        this.schedulerNotices,
+      );
+      this.#capabilityReadyDisposer =
+        this.#options.authority.executorCapabilities.onAccepted(
+          () => this.#scheduler.wakeQueuedUserJobs(),
+        );
+      for (const [taskId, journal] of this.#journals) {
+        this.#statusDisposers.set(
+          taskId,
+          this.#options.jobStatus.register(taskId, journal),
+        );
+      }
+      this.#mutationPublisherDisposer =
+        this.#options.protocol.bindMutationPublisher(this.#mutationPublisher);
+      this.#generationBound = true;
+    } catch (error) {
+      this.#releaseGenerationBindings();
+      throw error;
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.#releaseGenerationBindings();
+    };
   }
 
   async recoverInstalledAuthority(): Promise<void> {
@@ -384,7 +626,8 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
   }
 
   async stop(): Promise<void> {
-    this.#capabilityReadyDisposer();
+    this.#capabilityReadyDisposer?.();
+    this.#capabilityReadyDisposer = undefined;
     let stopFailure: unknown;
     try {
       await this.#scheduler.stop();
@@ -412,7 +655,11 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
     this.#dispatchers.clear();
     this.#executorByAssignment.clear();
     this.#artifactAuthorityByAssignment.clear();
-    this.#schedulerNoticeDisposer();
+    this.#schedulerNoticeDisposer?.();
+    this.#schedulerNoticeDisposer = undefined;
+    this.#mutationPublisherDisposer?.();
+    this.#mutationPublisherDisposer = undefined;
+    this.#generationBound = false;
     if (stopFailure) throw stopFailure;
   }
 
@@ -838,11 +1085,25 @@ export class AnchorSchedulerRuntime implements AnchorScheduleLifecycleMechanism 
         });
       }),
     );
-    this.#statusDisposers.set(
-      taskId,
-      this.#options.jobStatus.register(taskId, journal),
-    );
+    if (this.#generationBound) {
+      this.#statusDisposers.set(
+        taskId,
+        this.#options.jobStatus.register(taskId, journal),
+      );
+    }
     return journal;
+  }
+
+  #releaseGenerationBindings(): void {
+    this.#mutationPublisherDisposer?.();
+    this.#mutationPublisherDisposer = undefined;
+    for (const dispose of this.#statusDisposers.values()) dispose();
+    this.#statusDisposers.clear();
+    this.#capabilityReadyDisposer?.();
+    this.#capabilityReadyDisposer = undefined;
+    this.#schedulerNoticeDisposer?.();
+    this.#schedulerNoticeDisposer = undefined;
+    this.#generationBound = false;
   }
 
   async #listTaskIds(): Promise<readonly string[]> {

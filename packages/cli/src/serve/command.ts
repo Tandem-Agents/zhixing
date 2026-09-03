@@ -195,7 +195,7 @@ import {
 } from "./workscene-application-adapter.js";
 import { createWorksceneStorageCleanupInfrastructure } from "./workscene-storage-cleanup.js";
 import { createTrustAdministrationApplication } from "./trust-administration-adapter.js";
-import { PostAdoptionReviewCoordinator } from "./post-adoption-review.js";
+import { definePostAdoptionReviewLifecycleContribution } from "./post-adoption-review.js";
 import { loadOrCreateToken } from "./token.js";
 import { resolveHostProcessMode } from "./self-exec.js";
 import { homeToPort } from "./host-port.js";
@@ -1160,14 +1160,17 @@ async function runServerProcess(
 
   // Anchor 是 scheduler/job 唯一 owner。非 anchor 拓扑不装 timer、journal
   // recovery 或兼容迁移器，schedule 产品入口保持明确不可用。
-  const schedulerHostLifecycle = new AnchorSchedulerHostLifecycle(schedulerApplication);
+  const schedulerGenerationOwner = new AnchorSchedulerHostLifecycle({
+    application: schedulerApplication,
+    confirmationHub,
+    workingDirectory: hostDefaultWorkspace.postAdoptionReviewWorkingDirectory,
+  });
   async function settleScheduleForTransfer(): Promise<void> {
     await schedulerApplication.settleAcceptedWork({
       strategy: "drain",
       frozen: await schedulerApplication.captureAcceptedWork(),
     });
   }
-  let adoptionReview: PostAdoptionReviewCoordinator | undefined;
   let schedulerCleanup: ReturnType<StartupRollback["register"]> | undefined;
   async function recoverStartupLifecycleAcceptedWork(
     sources: readonly DeliveryLifecycleSourcePermit[],
@@ -1268,52 +1271,71 @@ async function runServerProcess(
       onError: (error) =>
         console.error(chalk.red(`[scheduler] ${error.message}`)),
     });
-    const schedulerRuntime = await createSchedulerRuntime();
-    schedulerCleanup = startupRollback.register(
-      "scheduler.stop",
-      async () => {
-        adoptionReview?.close();
-        await schedulerHostLifecycle.stopAndRelease();
-      },
-    );
-    lifecycleContributions.contribute("scheduler.stop", schedulerCleanup);
-    const installSchedulerGeneration = async (
-      runtime: AnchorSchedulerRuntime,
-      activate: boolean,
-    ) => {
-      const boundary = runtime.createProductBoundary();
-      const schedulerGlobalState = boundary.globalState;
-      const schedulerProduct = boundary.product;
-      schedulerProductRef = schedulerProduct;
-      schedulerHostLifecycle.install(runtime);
-      schedulerFacadeRef ??= new LocalSchedulerFacade(
-        schedulerManagement,
-        schedulerApplication,
-      );
-      ctx.authorityRuntime!.installSchedulerGlobalState(schedulerGlobalState);
-      await schedulerApplication.start();
+    const prepareSchedulerGeneration = async (runtime: AnchorSchedulerRuntime) => {
+      await runtime.start();
       if (startupLifecycle) {
-        schedulerApplication.closeAdmission();
+        runtime.closeAdmission();
         if (startupLifecycle.recoverAcceptedWork) {
-          await schedulerApplication.recoverAcceptedWork(
+          await runtime.recoverAcceptedWork(
             startupLifecycle.delivery.sources
               .filter((source) => source.owner === "scheduler")
               .map(({ id, revision }) => ({ id, revision })),
           );
         }
       }
-      if (activate && !startupLifecycle) {
-        schedulerApplication.activate();
-        await schedulerApplication.resumeManualSurfaces();
-      }
-      adoptionReview?.close();
-      adoptionReview = new PostAdoptionReviewCoordinator({
-        review: runtime.deferredIntents,
-        hub: confirmationHub,
-        workingDirectory: hostDefaultWorkspace.postAdoptionReviewWorkingDirectory,
-      });
     };
-    await installSchedulerGeneration(schedulerRuntime, false);
+    const publishSchedulerGeneration = (runtime: AnchorSchedulerRuntime) => {
+      const boundary = runtime.createProductBoundary();
+      const facade = schedulerFacadeRef ?? new LocalSchedulerFacade(
+        schedulerManagement,
+        schedulerApplication,
+      );
+      const releaseGlobalState =
+        ctx.authorityRuntime!.installSchedulerGlobalState(boundary.globalState);
+      const product = boundary.product;
+      schedulerProductRef = product;
+      schedulerFacadeRef = facade;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        if (schedulerProductRef === product) schedulerProductRef = undefined;
+        releaseGlobalState();
+      };
+    };
+    const bindSchedulerGeneration = (runtime: AnchorSchedulerRuntime) => {
+      return runtime.bindGeneration();
+    };
+    const activateSchedulerGeneration = (
+      runtime: AnchorSchedulerRuntime,
+      activate: boolean,
+    ) => {
+      if (activate && !startupLifecycle) {
+        runtime.activate();
+      }
+    };
+    const resumeSchedulerGeneration = async (
+      runtime: AnchorSchedulerRuntime,
+      activate: boolean,
+    ) => {
+      if (activate && !startupLifecycle) {
+        await runtime.resumeManualSurfaces();
+      }
+    };
+    const schedulerRuntime = await createSchedulerRuntime();
+    schedulerCleanup = startupRollback.register(
+      "scheduler.stop",
+      () => schedulerGenerationOwner.stopAndRelease(),
+    );
+    lifecycleContributions.contribute("scheduler.stop", schedulerCleanup);
+    await schedulerGenerationOwner.installInitial({
+      mechanism: schedulerRuntime,
+      prepare: prepareSchedulerGeneration,
+      bind: bindSchedulerGeneration,
+      publish: publishSchedulerGeneration,
+      activate: (runtime) => activateSchedulerGeneration(runtime, false),
+      resume: (runtime) => resumeSchedulerGeneration(runtime, false),
+    });
 
     const preparedMesh = ctx.meshRuntimePreparation;
     if (preparedMesh) {
@@ -1480,19 +1502,20 @@ async function runServerProcess(
           },
           postInstall: {
             rebindAuthorityGeneration: async (generation) => {
-              const previousAnchorEpoch = authority.anchorEpoch;
               const receipt = await authority.rebindInstalledAuthority(generation);
-              if (previousAnchorEpoch !== receipt.generation.anchorEpoch) {
-                conversationProtocol.beginInstalledAuthorityGeneration();
-              }
               return receipt;
             },
             recoverScheduler: async (obligations) => {
-              await schedulerHostLifecycle.recoverInstalledAuthority({
+              await schedulerGenerationOwner.recoverInstalledAuthority({
                 currentAnchorEpoch: authority.anchorEpoch,
                 create: createSchedulerRuntime,
-                initialize: (replacement) =>
-                  installSchedulerGeneration(replacement, runner !== undefined),
+                prepare: prepareSchedulerGeneration,
+                bind: bindSchedulerGeneration,
+                publish: publishSchedulerGeneration,
+                activate: (replacement) =>
+                  activateSchedulerGeneration(replacement, runner !== undefined),
+                resume: (replacement) =>
+                  resumeSchedulerGeneration(replacement, runner !== undefined),
               });
               return obligations;
             },
@@ -1512,6 +1535,11 @@ async function runServerProcess(
               }
             },
           },
+        });
+      const postAdoptionReviewLifecycle =
+        definePostAdoptionReviewLifecycleContribution({
+          kind: "anchor",
+          review: schedulerGenerationOwner.postAdoptionReview,
         });
       const deviceRemovalLifecycle = defineDeviceRemovalLifecycleContribution({
         closeAdmission: async (operationId) => {
@@ -1647,6 +1675,7 @@ async function runServerProcess(
       const activeMesh = await preparedMesh.start({
         deviceRemovalLifecycle,
         plannedDutyMigrationLifecycle,
+        postAdoptionReviewLifecycle,
         lifecycleAdmissionClosed: true,
         recoverAcceptedWork: startupLifecycle?.recoverAcceptedWork ?? true,
       });
@@ -1673,16 +1702,6 @@ async function runServerProcess(
       ctx.executorJobOwner?.resumeAccepting();
       ctx.inboundRouter?.resumeNewMessages();
       await ctx.channelConnections?.connectConfigured();
-    }
-    if (ctx.meshRuntime) {
-      await ctx.meshRuntime.bindPostAdoptionReview({
-        reviewAfterAdoption: (conversationId) => {
-          if (!adoptionReview) {
-            throw new Error("Post-adoption review generation is unavailable");
-          }
-          return adoptionReview.reviewAfterAdoption(conversationId);
-        },
-      });
     }
   }
   // ============================================================================
@@ -2529,7 +2548,7 @@ async function runServerProcess(
     resume: createAnchorConversationResumePort({
       identity: conversationDirectory,
       ...(advancementRecovery ? { recovery: advancementRecovery } : {}),
-      ...(adoptionReview ? { adoptionReview } : {}),
+      adoptionReview: schedulerGenerationOwner.postAdoptionReview,
     }),
     clear: createAnchorConversationClearCommitPort({
       conversations: ctx.conversations!,

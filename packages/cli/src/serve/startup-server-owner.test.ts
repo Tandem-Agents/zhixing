@@ -136,6 +136,13 @@ describe("production startup server ownership", () => {
   it("keeps the anchor endpoint inactive until every open prerequisite has one cleanup owner", async () => {
     const source = await readSource("command.ts");
     const surfaces = await readSource("access-surfaces.ts");
+    const conversationProtocol = await readSource("conversation-protocol-runtime.ts");
+    const schedulerGenerationOwner = await readSource("anchor-scheduler-runtime.ts");
+    expect(source).not.toContain("beginInstalledAuthorityGeneration");
+    expect(conversationProtocol).not.toContain("beginInstalledAuthorityGeneration");
+    expect(conversationProtocol.match(/bindMutationPublisher\(/gu)).toHaveLength(1);
+    expect(schedulerGenerationOwner.match(/bindMutationPublisher\(/gu)).toHaveLength(1);
+    expect(source).not.toContain("conversationProtocol.bindMutationPublisher(");
     expect(
       surfaces.match(/conversationTransferStaging:\s*createConversationTransferStagingInfrastructure\(/gu),
     ).toHaveLength(1);
@@ -149,6 +156,14 @@ describe("production startup server ownership", () => {
       source,
       "definePlannedDutyMigrationLifecycleContribution({",
     );
+    const schedulerGenerationInstall = location(
+      source,
+      "await schedulerGenerationOwner.installInitial({",
+    );
+    const postAdoptionReviewContribution = location(
+      source,
+      "definePostAdoptionReviewLifecycleContribution({",
+    );
     const assemblyUnits = location(
       source,
       "const assemblyUnits = createAssemblyUnits(channelCredentials)",
@@ -158,11 +173,13 @@ describe("production startup server ownership", () => {
       location(source, 'await setupAssemblyUnits(assemblyUnits, ctx, "pre-server")'),
     );
     expect(removalContribution).toBeGreaterThan(
-      location(source, "await installSchedulerGeneration(schedulerRuntime, false)"),
+      schedulerGenerationInstall,
     );
     expect(plannedDutyContribution).toBeGreaterThan(
-      location(source, "await installSchedulerGeneration(schedulerRuntime, false)"),
+      schedulerGenerationInstall,
     );
+    expect(postAdoptionReviewContribution).toBeGreaterThan(schedulerGenerationInstall);
+    expect(postAdoptionReviewContribution).toBeLessThan(removalContribution);
     expect(plannedDutyContribution).toBeLessThan(removalContribution);
     expect(removalContribution).toBeLessThan(
       location(source, "await preparedMesh.start({"),
@@ -202,8 +219,14 @@ describe("production startup server ownership", () => {
     }
     expect(source.slice(location(source, "await preparedMesh.start({"), location(source, "ctx.meshRuntime = activeMesh")))
       .toContain("plannedDutyMigrationLifecycle,");
+    expect(source.slice(location(source, "await preparedMesh.start({"), location(source, "ctx.meshRuntime = activeMesh")))
+      .toContain("postAdoptionReviewLifecycle,");
     expect(source).not.toContain("bindPlannedAnchorLifecycle");
     expect(source).not.toContain("bindPlannedAnchorPostInstallConsumers");
+    expect(source).not.toContain("bindPostAdoptionReview");
+    expect(source).not.toContain("let adoptionReview");
+    expect(source).not.toContain("...(adoptionReview ?");
+    expect(source.match(/schedulerGenerationOwner\.postAdoptionReview/gu)).toHaveLength(2);
     const bind = location(source, "const serverBinding = await bindServer");
     expect(bind).toBeLessThan(location(source, "await setupAssemblyUnits(assemblyUnits, ctx, \"pre-server\")"));
     expect(bind).toBeLessThan(location(source, "const stopResume = await stopCoordinator.resumeActive()"));
@@ -322,7 +345,7 @@ describe("production startup server ownership", () => {
     );
     expect(schedulerContribution).toBeGreaterThan(schedulerHandle);
     expect(schedulerContribution).toBeLessThan(
-      location(source, "await installSchedulerGeneration(schedulerRuntime, false)"),
+      location(source, "await schedulerGenerationOwner.installInitial({"),
     );
     expect(ready).toBeGreaterThan(publish);
     expect(location(source, "await runner.waitForShutdown()"))
@@ -395,6 +418,10 @@ describe("production startup server ownership", () => {
       source,
       "EXECUTOR_ONLY_PLANNED_DUTY_MIGRATION_LIFECYCLE",
     );
+    const postAdoptionReviewAbsent = location(
+      source,
+      "EXECUTOR_ONLY_POST_ADOPTION_REVIEW_LIFECYCLE",
+    );
     const jobLifecycleConstruction = location(
       source,
       "const jobOwnerLifecycle = new ExecutorJobOwnerLifecycle(",
@@ -407,6 +434,7 @@ describe("production startup server ownership", () => {
     const jobOwnerStart = location(source, "await jobOwnerLifecycle.start(");
     expect(removalContribution).toBeLessThan(meshConstruction);
     expect(plannedDutyAbsent).toBeLessThan(meshConstruction);
+    expect(postAdoptionReviewAbsent).toBeLessThan(meshConstruction);
     expect(source.slice(meshConstruction, jobLifecycleConstruction)).not.toContain(
       "deviceRemovalLifecycle,",
     );
@@ -419,6 +447,9 @@ describe("production startup server ownership", () => {
     );
     expect(source.slice(jobOwnerStart, jobOwnerStart + 500)).toContain(
       "plannedDutyMigrationLifecycle:",
+    );
+    expect(source.slice(jobOwnerStart, jobOwnerStart + 600)).toContain(
+      "postAdoptionReviewLifecycle:",
     );
     expect(source).not.toContain("bindDeviceRemovalLifecycle");
     const cleanupTail = source.slice(location(source, "const cleanupFailures: unknown[] = []"));

@@ -39,6 +39,7 @@ const toolImplementation = Object.freeze({ create: vi.fn() }) as never;
 const permissionStorage = Object.freeze({ create: vi.fn() }) as never;
 const deviceRemovalLifecycle = Object.freeze({}) as never;
 const plannedDutyMigrationLifecycle = Object.freeze({}) as never;
+const postAdoptionReviewLifecycle = Object.freeze({}) as never;
 
 beforeEach(() => {
   runtimeMocks.createAgentRuntime.mockReset();
@@ -221,7 +222,11 @@ describe("executor role job runtime production assembly", () => {
       transport as never,
     );
 
-    await lifecycle.start({ deviceRemovalLifecycle, plannedDutyMigrationLifecycle });
+    await lifecycle.start({
+      deviceRemovalLifecycle,
+      plannedDutyMigrationLifecycle,
+      postAdoptionReviewLifecycle,
+    });
     await lifecycle.close();
     await lifecycle.close();
 
@@ -263,6 +268,7 @@ describe("executor role job runtime production assembly", () => {
     await expect(lifecycle.start({
       deviceRemovalLifecycle,
       plannedDutyMigrationLifecycle,
+      postAdoptionReviewLifecycle,
     })).rejects.toBe(failure);
     expect(lifecycle.closed).toBe(true);
     expect(owner.stopAccepting).toHaveBeenCalledTimes(1);
@@ -288,6 +294,7 @@ describe("executor role job runtime production assembly", () => {
     await lifecycle.start({
       deviceRemovalLifecycle,
       plannedDutyMigrationLifecycle,
+      postAdoptionReviewLifecycle,
       admissionClosed: true,
       recoverAcceptedWork: false,
     });
@@ -299,6 +306,7 @@ describe("executor role job runtime production assembly", () => {
     expect(transport.start).toHaveBeenCalledWith({
       deviceRemovalLifecycle,
       plannedDutyMigrationLifecycle,
+      postAdoptionReviewLifecycle,
       lifecycleAdmissionClosed: true,
       recoverAcceptedWork: false,
     });
@@ -329,6 +337,7 @@ describe("executor role job runtime production assembly", () => {
     await expect(lifecycle.start({
       deviceRemovalLifecycle,
       plannedDutyMigrationLifecycle,
+      postAdoptionReviewLifecycle,
     })).rejects.toBe(failure);
     expect(owner.start).toHaveBeenCalledOnce();
     expect(owner.stopAccepting).toHaveBeenCalledTimes(1);
