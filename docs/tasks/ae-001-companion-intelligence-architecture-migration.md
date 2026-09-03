@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-31 已按协调者反证完成启动恢复时序纠正并通过独立复核，等待提交<br>
+> 当前检查点：A6-32 planned-duty migration lifecycle 构造期静态接管已通过协调者独立复核，等待提交<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `562fcbb9`；A6-30 Workscene remote workspace probe 构造期静态端口已提交 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-31 已通过协调者独立复核、等待提交，A6 不得关闭 |
-| 活跃工作包 | `A6-31-device-removal-static-lifecycle-contribution-v1` 已通过协调者独立复核，等待提交 |
-| 下一责任链 | 接受 A6-31 后继续按独立 owner/lifecycle 拆分其余 Mesh `bind*`；再按 C02/C03 收口产品依赖、broadcast 与 internal-stop 回填 |
+| 已接受基线 | `498af661`；A6-31 设备移除 lifecycle 构造期静态贡献已提交 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；A6-32 已通过协调者独立复核、等待提交，A6 不得关闭 |
+| 活跃工作包 | `A6-32-planned-duty-migration-static-lifecycle-v1` 已通过协调者独立复核，等待提交 |
+| 下一责任链 | 接受 A6-32 后继续按独立 owner/lifecycle 处理 Post-adoption review 与 First-party conversation surface；再按 C02/C03 收口产品依赖、broadcast 与 internal-stop 回填 |
 | 打开的单向桥 | 无；P06 Rubric 已恢复为 required `readByDigest/put` 有限端口，P07、P09、P11 及 P12 三类 staging 的既有有限 Infrastructure 接管继续有效 |
-| 已失效证据 | A6-15、A6-19 与 A6-21 的聚合结论均不可作为退出证明；A6-29、A6-30 与待复核 A6-31 只分别恢复 A6-28 E06-C01 的 Conversation executor directory、Workscene remote workspace probe 和设备移除 lifecycle 子链；其余 Mesh `bind*`、C02/C03 仍使 A6-21/E06“可变 lazy ref 为零”结论失效。canonical S7 59/59 已能拒绝这三条子链的构造后回填，但不替代剩余 late-binding 审计 |
+| 已失效证据 | A6-15、A6-19 与 A6-21 的聚合结论均不可作为退出证明；A6-29～A6-31 已分别恢复 A6-28 E06-C01 的 Conversation executor directory、Workscene remote workspace probe 和设备移除 lifecycle 子链，待复核 A6-32 只恢复 planned-duty migration lifecycle 子链；Post-adoption review、First-party conversation surface、C02/C03 仍使 A6-21/E06“可变 lazy ref 为零”结论失效。当前工作区 canonical S7 59/59 已能拒绝上述四条子链的构造后回填，但不替代协调复核或剩余 late-binding 审计 |
 | 阻塞/用户决策 | 无用户决策阻塞；完整 distributed-runtime structure 测试仍被既有 A4-10 `runtime-host` 依赖断言阻断，属于 A7 零残留与终验输入 |
 
 ### A0 基线索引
@@ -3076,6 +3076,14 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 协调者复核反证：当前 `createAssemblyUnits` 仍按 Mesh → advancement/lossless → executor job start → Channel → Delivery 排列，而 `createMeshSurface.setup()` 在 Mesh 构造后立即 `await mesh.start()`；未完成设备移除会在此时调用 contribution。Anchor contribution 内 `ctx.inboundRouter/ctx.executorJobOwner/ctx.channelConnections/ctx.deliveryStack` 仍以 optional chaining 读取尚未建立的依赖，导致 close/capture/settle/release 可能静默漏做。该形状只是把“尚未绑定”藏进冻结 callback，未满足静态完整依赖和原恢复语义；A6-31 保持未接受并退回原包纠正。
 - 纠正闭包：保留上述反证作为首次实现历史；当前生产链已以 restricted preparation + late single start 取代 early start，以启动前 direct-handle/explicit-empty 静态选择取代 callback-time optional owner lookup，并以 Executor owner-ready → Mesh device-removal recovery → job accepted-work recovery 的可执行顺序恢复原 lifecycle 语义。直接测试和 S7 反向 mutation 均能在恢复首次实现时失败；本证据因此恢复为等待协调者复核，而不宣称恢复 A6 其余失效结论。
 - 协调者独立复核：重新沿 Anchor pre-server 组合、scheduler generation、设备移除七效应、Mesh target 安装/恢复/发布以及 Executor local/job/stop owner 启动链逐段核对，确认 active Mesh 只在全部实际 owner 就绪且 `resumeBeforeAdmission → startup recovery → control` 成功后发布；不适用职责由组合期显式冻结 empty contribution 表达，callback 执行期不再读取 optional `ctx` 或把未安装伪装成 no-op。独立运行八文件直接回归和 canonical S7，均完整结束，`git diff --check` 通过；接受 A6-31，A6 仍保持 `[ ]`。
+
+### A6-32：planned-duty migration lifecycle 构造期静态贡献
+
+- 基线与唯一责任变化：以已接受 `HEAD 498af661c38d0a8ddfb85a76b68f316a05fa72d1` 加协调者本文调度记录为进场基线，只处理 A6-28 E06-C01 的 planned-duty migration checkpoint、source transfer lifecycle 与 installed-generation post-install consumer 子链。新增 topology-neutral `PlannedDutyMigrationLifecycleContribution`：Anchor profile 以 required、readonly、运行期 exact-key 校验并冻结的有限合同一次性携带 checkpoint `available/unavailable`、transfer `stopAccepting/drainAccepted/resumeAfterAbort` 与 post-install `rebindAuthorityGeneration/recoverScheduler/recoverConversation/recoverDelivery/openCurrentOwnerSurfaces`；Executor-only 使用显式冻结的 `{ kind: "absent", role: "executor-only" }`。真正不适用的 Channel、Delivery、job owner 同样在 Anchor 组合点使用有限判别 profile，不以 optional/no-op 或 callback-time `AssemblyContext` 查询表达尚未安装。
+- 静态图、恢复与开放顺序：Anchor 继续复用 A6-31 的 restricted `MeshRuntimePreparation`，待 checkpoint owner、Conversation protocol、inbound、Channel、Delivery、job owner 与 scheduler generation 均已取得后，以这些直接 handle 构造唯一贡献并交给唯一 `preparedMesh.start(...)`。Mesh start 先校验/冻结贡献并按实际角色 fail closed，再安装初始 planned Anchor role、恢复 device-removal target、恢复 transfer/startup state、完成 installed generation 的 Authority rebind 与 Scheduler/Conversation/Delivery read-back、最后开放 current-owner Channel surface；全部完成后才标记 active 并启动 control，组合根随后才发布 `ctx.meshRuntime`。Executor-only 两条生产启动分支都传入同一 absent profile。checkpoint unavailable 继续保留原 `Recovery backup owner is unavailable` 失败语义；transfer quiesce/drain/resume、generation obligations、response-loss/cold replay、entry-last 与公开协议均未改变。
+- 旧路、边界与直接证据：`MeshRuntimeAssembly.bindAuthorityCheckpointOwner/bindPlannedAnchorLifecycle/bindPlannedAnchorPostInstallConsumers`、对应三个可变字段、`MeshRuntimePreparation` checkpoint setter、Anchor 三段 post-construction bind 及 callback-time optional `ctx` owner lookup 已从生产源码归零；本包没有触碰 `bindPostAdoptionReview`、First-party conversation surface、C02/C03、领域状态或持久格式。planned contribution/transfer、Anchor production order、Executor job start、Mesh bootstrap/install/recovery 与 scheduler generation 共八文件 56/56，覆盖合同 exact-set/freeze、缺失/额外/非函数/角色错配拒绝、两生产根静态注入、source drain/resume、installed generation read-back/open、executor absent profile 与旧 bind/optional field 回流。CLI `tsc --noEmit` 与 fresh `pnpm cli:build` 通过；canonical `pnpm s7:lint` 为 59/59 且 registry golden 通过，反向 mutation 能拒绝旧 bind、optional lifecycle field、Host 漏注入、callback-time optional owner、control 早于 post-install、Executor 漏 absent profile、generation rebind 与 source quiesce 漂移。changed-source Biome 与 `git diff --check` 通过；本包没有 package manifest/export/build entry 变化，故未重跑 package-export 门。
+- 失效、状态与下一检查点：若 planned contribution 的判别/exact-set、Anchor direct-handle 选择、Executor absent profile、唯一 Mesh start、初始 role/device/startup/post-install/control 顺序、checkpoint/transfer/generation recovery、current-owner surface 开放、S7 inspector/mutation 或上述直接测试任一变化，只恢复 `A6-32-planned-duty-migration-static-lifecycle-v1` 与 A6-28 E06-C01 的本子结论；A6-29～A6-31、A6-28 E01～E05、Post-adoption review、First-party conversation surface及 C02/C03 不因本包自动恢复或失效。当前工作包完成并等待协调者独立复核；A6 与完成度保持 `[ ]`/`6/8`，接受后下一责任链只处理 Post-adoption review 与 First-party conversation surface，之后再进入 C02/C03，不得提前进入 A7。本轮未执行 Git 暂存、取消暂存、提交、历史改写或推送。
+- 协调者独立复核：从两个生产根重新检查角色选择、checkpoint owner、source transfer、installed-generation consumers、Mesh start/recovery/control 和 current-owner surface 开放顺序，确认 Anchor 全部依赖在唯一 start 前由直接 handle 冻结，Executor-only 只能注入 exact absent profile，三个旧 `bind*`、可变字段和 callback-time optional owner lookup 均已归零。独立运行 planned transfer/assembly/bootstrap、Anchor/Executor startup 与贡献合同六文件 50/50，并执行针对性 S7 反向 mutation 1/1，均通过；`git diff --check` 通过。接受 A6-32，A6 仍保持 `[ ]`。
 
 ## 十、用户提示词
 

@@ -50,7 +50,6 @@ import type {
 import {
   INSTALLED_AUTHORITY_GENERATION_PARTICIPANTS,
   type AuthorityRuntimeStack,
-  type InstalledAuthorityGenerationReceipt,
 } from "../setup-delivery.js";
 import { AssignmentMeshComposition } from "./assignment-mesh-composition.js";
 import type { AssignmentArtifactReceiverPort } from "./assignment-artifact-receiver.js";
@@ -135,7 +134,6 @@ import {
   PlannedAnchorTransferRuntimeLifecycle,
   PlannedAnchorTransferTarget,
   type PlannedAnchorPostInstallDescriptor,
-  type InstalledAuthorityGeneration,
   type PlannedAnchorTransferStagingArea,
 } from "./planned-anchor-transfer.js";
 import {
@@ -145,8 +143,6 @@ import {
   registerPlannedAnchorTransferMeshServices,
   registerPlannedAnchorTransferSourceMeshService,
 } from "./planned-anchor-transfer-mesh.js";
-import type { AuthorityCheckpointOwnerPort } from "@zhixing/mesh/checkpoint-owner";
-import type { PlannedAnchorTransferLifecycle } from "./planned-anchor-transfer.js";
 import {
   completeDisasterRecoveryInstallationBeforeBootstrap,
   finishDisasterRecoveryPostInstall,
@@ -155,6 +151,11 @@ import {
 import type { DisasterRecoveryStagingArea } from "./disaster-recovery-staging.js";
 import { registerDisasterRecoveryTrustEvidenceService } from "./disaster-recovery-trust-evidence.js";
 import type { DeviceRemovalLifecycleContribution } from "./device-removal-lifecycle-contribution.js";
+import {
+  definePlannedDutyMigrationLifecycleContribution,
+  type PlannedDutyMigrationAnchorLifecycleContribution,
+  type PlannedDutyMigrationLifecycleContribution,
+} from "./planned-duty-migration-lifecycle-contribution.js";
 import {
   CurrentIssuerDeviceRemovalAuthority,
   ExecutorRemovalTarget,
@@ -173,28 +174,6 @@ type AnchorPostInstallDescriptor =
 
 export interface PostAdoptionReviewPort {
   reviewAfterAdoption(conversationId: string): Promise<unknown>;
-}
-
-export interface PlannedAnchorPostInstallConsumers {
-  readonly rebindAuthorityGeneration: (
-    generation: InstalledAuthorityGeneration,
-  ) => Promise<InstalledAuthorityGenerationReceipt>;
-  readonly recoverScheduler: (
-    obligations: readonly { readonly kind: "assignment" | "intent"; readonly id: string }[],
-  ) => Promise<readonly { readonly kind: "assignment" | "intent"; readonly id: string }[]>;
-  readonly recoverConversation: (
-    obligations: readonly {
-      readonly kind: "interaction" | "confirmation" | "final";
-      readonly id: string;
-    }[],
-  ) => Promise<readonly {
-    readonly kind: "interaction" | "confirmation" | "final";
-    readonly id: string;
-  }[]>;
-  readonly recoverDelivery: (
-    obligations: readonly { readonly kind: "delivery"; readonly id: string }[],
-  ) => Promise<readonly { readonly kind: "delivery"; readonly id: string }[]>;
-  readonly openCurrentOwnerSurfaces: () => Promise<void>;
 }
 
 export interface PlannedAnchorPostInstallGroups {
@@ -554,11 +533,9 @@ export class MeshRuntimeAssembly
   #disposePlannedAnchorTarget: (() => void) | undefined;
   #disposePlannedAnchorSource: (() => void) | undefined;
   #plannedAnchorRole = "";
-  #plannedAnchorCheckpointOwner: AuthorityCheckpointOwnerPort | undefined;
-  #plannedAnchorLifecycle: PlannedAnchorTransferLifecycle | undefined;
+  #plannedDutyMigrationLifecycle!: PlannedDutyMigrationLifecycleContribution;
   #plannedAnchorIssuerKey: DeviceKey | undefined;
   #plannedAnchorPostInstall: AnchorPostInstallDescriptor | undefined;
-  #plannedAnchorPostInstallConsumers: PlannedAnchorPostInstallConsumers | undefined;
   #plannedCommittedTargetDeviceId: string | undefined;
   #postAdoptionReview: PostAdoptionReviewPort | undefined;
   #started = false;
@@ -1050,9 +1027,6 @@ export class MeshRuntimeAssembly
     this.#installDeviceRemovalIssuer(options.trust, issuerKey);
     this.#disposers.push(() => this.#disposeDeviceRemovalIssuer?.());
 
-    if (roles.has("anchor")) {
-      this.#installInitialPlannedAnchorRole(options.trust);
-    }
   }
 
   finalizeExecutorUsage(
@@ -1462,37 +1436,33 @@ export class MeshRuntimeAssembly
     }
   }
 
-  async bindPlannedAnchorPostInstallConsumers(
-    consumers: PlannedAnchorPostInstallConsumers,
-  ): Promise<void> {
-    if (this.#plannedAnchorPostInstallConsumers) {
-      throw new Error("Planned anchor post-install consumers are already bound");
-    }
-    this.#plannedAnchorPostInstallConsumers = consumers;
-    await this.#completePlannedAnchorPostInstall();
-  }
-
-  bindAuthorityCheckpointOwner(owner: AuthorityCheckpointOwnerPort | undefined): void {
-    this.#plannedAnchorCheckpointOwner = owner;
-  }
-
-  bindPlannedAnchorLifecycle(lifecycle: PlannedAnchorTransferLifecycle): void {
-    this.#plannedAnchorLifecycle = lifecycle;
-  }
-
   async start(options: {
     readonly deviceRemovalLifecycle: DeviceRemovalLifecycleContribution;
+    readonly plannedDutyMigrationLifecycle: PlannedDutyMigrationLifecycleContribution;
     readonly lifecycleAdmissionClosed?: boolean;
     readonly recoverAcceptedWork?: boolean;
   }): Promise<void> {
     if (this.#closed) throw new Error("Mesh runtime assembly is closed");
     if (this.#started) return;
     try {
+      const plannedDutyMigrationLifecycle =
+        definePlannedDutyMigrationLifecycleContribution(
+          options.plannedDutyMigrationLifecycle,
+        );
+      const anchorEnabled = this.options.configuration.enabledRoles.includes("anchor");
+      if (anchorEnabled !== (plannedDutyMigrationLifecycle.kind === "anchor")) {
+        throw new TypeError(
+          "Planned-duty migration lifecycle contribution does not match the Mesh role",
+        );
+      }
+      this.#plannedDutyMigrationLifecycle = plannedDutyMigrationLifecycle;
+      if (anchorEnabled) this.#installInitialPlannedAnchorRole(this.options.trust);
       this.#installDeviceRemovalTarget(options.deviceRemovalLifecycle);
       await this.#deviceRemovalTarget.resumeBeforeAdmission();
       if (options.recoverAcceptedWork !== false) {
         await this.#recoverStartupState(options.lifecycleAdmissionClosed === true);
       }
+      await this.#completePlannedAnchorPostInstall();
       if (options.lifecycleAdmissionClosed) this.#worker?.stopAccepting();
       this.#started = true;
       if (this.#startupRecoveryComplete && !this.#plannedAnchorPostInstall) {
@@ -1759,6 +1729,7 @@ export class MeshRuntimeAssembly
 
   #activatePlannedAnchorRole(role: string): void {
     if (role.startsWith("owner:")) {
+      const lifecycle = this.#anchorPlannedDutyMigrationLifecycle();
       this.#plannedAnchorOwner = new PlannedAnchorTransferOwner({
         deviceId: this.options.authority.deviceId,
         anchorEpoch: () => this.options.authority.anchorEpoch,
@@ -1798,11 +1769,7 @@ export class MeshRuntimeAssembly
         storageMaintenance: this.options.authority.storageMaintenance,
         ensureRecoveryCheckpoint: (transferId) =>
           this.#ensureRecoveryCheckpoint(transferId),
-        lifecycle: {
-          stopAccepting: () => this.#requirePlannedAnchorLifecycle().stopAccepting(),
-          drainAccepted: () => this.#requirePlannedAnchorLifecycle().drainAccepted(),
-          resumeAfterAbort: () => this.#requirePlannedAnchorLifecycle().resumeAfterAbort(),
-        },
+        lifecycle: lifecycle.transfer,
         onSourceCommitted: (targetDeviceId) => {
           this.#plannedCommittedTargetDeviceId = targetDeviceId;
         },
@@ -1900,8 +1867,7 @@ export class MeshRuntimeAssembly
       if (this.#started) await this.#startControl();
       return;
     }
-    const consumers = this.#plannedAnchorPostInstallConsumers;
-    if (!consumers) return;
+    const consumers = this.#anchorPlannedDutyMigrationLifecycle().postInstall;
     const generationReceipt = await consumers.rebindAuthorityGeneration(
       completion.installedGeneration,
     );
@@ -2098,16 +2064,20 @@ export class MeshRuntimeAssembly
     return this.#currentAnchorDeviceId();
   }
 
-  #requirePlannedAnchorLifecycle(): PlannedAnchorTransferLifecycle {
-    if (!this.#plannedAnchorLifecycle) {
-      throw new Error("Duty-device migration lifecycle is not bound");
+  #anchorPlannedDutyMigrationLifecycle(): PlannedDutyMigrationAnchorLifecycleContribution {
+    const lifecycle = this.#plannedDutyMigrationLifecycle;
+    if (lifecycle.kind !== "anchor") {
+      throw new TypeError("Executor-only Mesh cannot own planned-duty migration");
     }
-    return this.#plannedAnchorLifecycle;
+    return lifecycle;
   }
 
   async #ensureRecoveryCheckpoint(transferId: string): Promise<string> {
-    const owner = this.#plannedAnchorCheckpointOwner;
-    if (!owner) throw new Error("Recovery backup owner is unavailable");
+    const checkpoint = this.#anchorPlannedDutyMigrationLifecycle().checkpoint;
+    if (checkpoint.kind === "unavailable") {
+      throw new Error("Recovery backup owner is unavailable");
+    }
+    const owner = checkpoint.owner;
     const status = await owner.status();
     if (status.fullBackupReady && status.checkpointId) {
       const records = await this.options.authority.authorityLog

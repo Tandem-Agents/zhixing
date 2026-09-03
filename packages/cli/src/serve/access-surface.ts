@@ -121,7 +121,7 @@ import type { AdvancementEvidenceHostBindingPort } from "./advancement-evidence-
 import type { AdvancementEvidenceRemoteDirectory } from "./advancement-evidence-topology.js";
 import type { AssignmentDataPlaneRemoteDirectory } from "./assignment-data-plane-topology.js";
 import type { DeviceRemovalLifecycleContribution } from "./device-removal-lifecycle-contribution.js";
-import type { AuthorityCheckpointOwnerPort } from "@zhixing/mesh/checkpoint-owner";
+import type { PlannedDutyMigrationLifecycleContribution } from "./planned-duty-migration-lifecycle-contribution.js";
 
 type ConversationRuntimeStoragePort = Readonly<
   Required<
@@ -143,11 +143,9 @@ export interface MeshRuntimePreparation {
   readonly assignmentDataPlane: AssignmentDataPlaneRemoteDirectory;
   readonly currentAnchorDeviceId: () => string;
   readonly plannedCurrentOwnerReady: () => boolean;
-  readonly bindAuthorityCheckpointOwner: (
-    owner: AuthorityCheckpointOwnerPort | undefined,
-  ) => void;
   readonly start: (options: {
     readonly deviceRemovalLifecycle: DeviceRemovalLifecycleContribution;
+    readonly plannedDutyMigrationLifecycle: PlannedDutyMigrationLifecycleContribution;
     readonly lifecycleAdmissionClosed?: boolean;
     readonly recoverAcceptedWork?: boolean;
   }) => Promise<MeshRuntimeAssembly>;

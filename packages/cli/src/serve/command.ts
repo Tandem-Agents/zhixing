@@ -243,6 +243,7 @@ import {
 } from "./managed-service.js";
 import { cleanupExecutorDeviceLocalState } from "./device-removal-cleanup.js";
 import { defineDeviceRemovalLifecycleContribution } from "./device-removal-lifecycle-contribution.js";
+import { definePlannedDutyMigrationLifecycleContribution } from "./planned-duty-migration-lifecycle-contribution.js";
 import { loadExecutorRemovalLifecycleDecision } from "./device-removal.js";
 import {
   commitCurrentDeviceRetirementTransaction,
@@ -316,6 +317,19 @@ const EMPTY_REMOVAL_DELIVERY = Object.freeze({
 });
 const EMPTY_REMOVAL_LOCAL_OWNER = Object.freeze({
   recoverAcceptedWorkForLifecycle: async () => undefined,
+});
+
+const ABSENT_PLANNED_DUTY_CHANNEL = Object.freeze({
+  kind: "absent" as const,
+  reason: "channel-disabled" as const,
+});
+const ABSENT_PLANNED_DUTY_DELIVERY = Object.freeze({
+  kind: "absent" as const,
+  reason: "channel-disabled" as const,
+});
+const ABSENT_PLANNED_DUTY_JOB_OWNER = Object.freeze({
+  kind: "absent" as const,
+  reason: "anchor-only" as const,
 });
 
 export interface ServeOptions {
@@ -1061,7 +1075,6 @@ async function runServerProcess(
     hostShellLifecycle.acquireCheckpointOwner(ctx.authorityCheckpointOwner);
   }
   await ctx.authorityCheckpointOwner?.start();
-  ctx.meshRuntimePreparation?.bindAuthorityCheckpointOwner(ctx.authorityCheckpointOwner);
   authorityRuntimeRef.current = ctx.authorityRuntime;
   conversationsRef.current = ctx.conversations ?? null;
   await worksceneDirectory.recover();
@@ -1307,9 +1320,19 @@ async function runServerProcess(
       const authority = ctx.authorityRuntime;
       const channelCoordinator = ctx.channelCoordinator;
       const jobRelays = ctx.jobRelayObligations;
-      if (!authority || !channelCoordinator || !jobRelays) {
+      const conversations = ctx.conversations;
+      const conversationProtocol = ctx.conversationProtocol;
+      const plannedInbound = ctx.inboundRouter;
+      if (
+        !authority ||
+        !channelCoordinator ||
+        !jobRelays ||
+        !conversations ||
+        !conversationProtocol ||
+        !plannedInbound
+      ) {
         throw new Error(
-          "Mesh device-removal recovery requires authority, data-plane, and relay owners",
+          "Mesh lifecycle recovery requires authority, conversation, data-plane, and relay owners",
         );
       }
       const inbound = ctx.inboundRouter === undefined || ctx.inboundRouter === null
@@ -1333,6 +1356,24 @@ async function runServerProcess(
             connectConfigured: ctx.channelConnections.connectConfigured,
           })
         : EMPTY_REMOVAL_CHANNEL;
+      const plannedChannel = ctx.channelConnections
+        ? Object.freeze({
+            kind: "available" as const,
+            connections: ctx.channelConnections,
+          })
+        : ABSENT_PLANNED_DUTY_CHANNEL;
+      const plannedDelivery = ctx.deliveryStack
+        ? Object.freeze({
+            kind: "available" as const,
+            stack: ctx.deliveryStack,
+          })
+        : ABSENT_PLANNED_DUTY_DELIVERY;
+      const plannedJobOwner = ctx.executorJobOwner
+        ? Object.freeze({
+            kind: "available" as const,
+            owner: ctx.executorJobOwner,
+          })
+        : ABSENT_PLANNED_DUTY_JOB_OWNER;
       const captureExternal = async (
         owner: "remote" | "channel" | "scheduler" | "delivery",
         _operationId: string,
@@ -1383,6 +1424,95 @@ async function runServerProcess(
           throw error;
         }
       };
+      const plannedDutyMigrationLifecycle =
+        definePlannedDutyMigrationLifecycleContribution({
+          kind: "anchor",
+          checkpoint: ctx.authorityCheckpointOwner
+            ? {
+                kind: "available",
+                owner: ctx.authorityCheckpointOwner,
+              }
+            : {
+                kind: "unavailable",
+                reason: "recovery-backup-unavailable",
+              },
+          transfer: {
+            stopAccepting: async () => {
+              plannedInbound.refuseNewMessages();
+              await plannedInbound.drainAcceptedMessages();
+              if (plannedChannel.kind === "available") {
+                await plannedChannel.connections.disconnectConfigured();
+              }
+              if (plannedDelivery.kind === "available") {
+                await plannedDelivery.stack.quiesceForAuthorityTransfer();
+              }
+              await schedulerApplication.settleAcceptedWork({
+                strategy: "drain",
+                frozen: await schedulerApplication.captureAcceptedWork(),
+              });
+            },
+            drainAccepted: async () => {
+              await conversations.abortAllAndWait(
+                { kind: "external", origin: "planned-duty-migration" },
+                30_000,
+              );
+              if (conversations.hasActiveWork()) {
+                throw new Error(
+                  "Duty-device migration could not drain accepted conversation work",
+                );
+              }
+              if (plannedJobOwner.kind === "available") {
+                await plannedJobOwner.owner.drain();
+              }
+              await conversationProtocol.stopRecoveryLoop();
+            },
+            resumeAfterAbort: async () => {
+              if (plannedDelivery.kind === "available") {
+                await plannedDelivery.stack.resumeAfterAuthorityTransfer();
+              }
+              conversationProtocol.startRecoveryLoop();
+              schedulerApplication.resumeAdmission();
+              plannedInbound.resumeNewMessages();
+              if (plannedChannel.kind === "available") {
+                await plannedChannel.connections.connectConfigured();
+              }
+            },
+          },
+          postInstall: {
+            rebindAuthorityGeneration: async (generation) => {
+              const previousAnchorEpoch = authority.anchorEpoch;
+              const receipt = await authority.rebindInstalledAuthority(generation);
+              if (previousAnchorEpoch !== receipt.generation.anchorEpoch) {
+                conversationProtocol.beginInstalledAuthorityGeneration();
+              }
+              return receipt;
+            },
+            recoverScheduler: async (obligations) => {
+              await schedulerHostLifecycle.recoverInstalledAuthority({
+                currentAnchorEpoch: authority.anchorEpoch,
+                create: createSchedulerRuntime,
+                initialize: (replacement) =>
+                  installSchedulerGeneration(replacement, runner !== undefined),
+              });
+              return obligations;
+            },
+            recoverConversation: async (obligations) => {
+              await conversationProtocol.recoverInstalledAuthority();
+              return obligations;
+            },
+            recoverDelivery: async (obligations) => {
+              if (plannedDelivery.kind === "available") {
+                await plannedDelivery.stack.recoverInstalledAuthority();
+              }
+              return obligations;
+            },
+            openCurrentOwnerSurfaces: async () => {
+              if (plannedChannel.kind === "available") {
+                await plannedChannel.connections.connectConfigured();
+              }
+            },
+          },
+        });
       const deviceRemovalLifecycle = defineDeviceRemovalLifecycleContribution({
         closeAdmission: async (operationId) => {
           if (
@@ -1516,6 +1646,7 @@ async function runServerProcess(
       });
       const activeMesh = await preparedMesh.start({
         deviceRemovalLifecycle,
+        plannedDutyMigrationLifecycle,
         lifecycleAdmissionClosed: true,
         recoverAcceptedWork: startupLifecycle?.recoverAcceptedWork ?? true,
       });
@@ -1543,36 +1674,6 @@ async function runServerProcess(
       ctx.inboundRouter?.resumeNewMessages();
       await ctx.channelConnections?.connectConfigured();
     }
-    ctx.meshRuntime?.bindPlannedAnchorLifecycle({
-      stopAccepting: async () => {
-        ctx.inboundRouter?.refuseNewMessages();
-        await ctx.inboundRouter?.drainAcceptedMessages();
-        await ctx.channelConnections?.disconnectConfigured();
-        await ctx.deliveryStack?.quiesceForAuthorityTransfer();
-        await schedulerApplication.settleAcceptedWork({
-          strategy: "drain",
-          frozen: await schedulerApplication.captureAcceptedWork(),
-        });
-      },
-      drainAccepted: async () => {
-        await ctx.conversations?.abortAllAndWait(
-          { kind: "external", origin: "planned-duty-migration" },
-          30_000,
-        );
-        if (ctx.conversations?.hasActiveWork()) {
-          throw new Error("Duty-device migration could not drain accepted conversation work");
-        }
-        await ctx.executorJobOwner?.drain();
-        await ctx.conversationProtocol?.stopRecoveryLoop();
-      },
-      resumeAfterAbort: async () => {
-        await ctx.deliveryStack?.resumeAfterAuthorityTransfer();
-        ctx.conversationProtocol?.startRecoveryLoop();
-        schedulerApplication.resumeAdmission();
-        ctx.inboundRouter?.resumeNewMessages();
-        await ctx.channelConnections?.connectConfigured();
-      },
-    });
     if (ctx.meshRuntime) {
       await ctx.meshRuntime.bindPostAdoptionReview({
         reviewAfterAdoption: (conversationId) => {
@@ -1583,38 +1684,6 @@ async function runServerProcess(
         },
       });
     }
-    await ctx.meshRuntime?.bindPlannedAnchorPostInstallConsumers({
-      rebindAuthorityGeneration: async (generation) => {
-        const previousAnchorEpoch = ctx.authorityRuntime!.anchorEpoch;
-        const receipt = await ctx.authorityRuntime!.rebindInstalledAuthority(generation);
-        if (previousAnchorEpoch !== receipt.generation.anchorEpoch) {
-          ctx.conversationProtocol!.beginInstalledAuthorityGeneration();
-        }
-        return receipt;
-      },
-      recoverScheduler: async (obligations) => {
-        await schedulerHostLifecycle.recoverInstalledAuthority({
-          currentAnchorEpoch: ctx.authorityRuntime!.anchorEpoch,
-          create: createSchedulerRuntime,
-          initialize: (replacement) =>
-            installSchedulerGeneration(replacement, runner !== undefined),
-        });
-        return obligations;
-      },
-      recoverConversation: async (obligations) => {
-        const protocol = ctx.conversationProtocol;
-        if (!protocol) return obligations;
-        await protocol.recoverInstalledAuthority();
-        return obligations;
-      },
-      recoverDelivery: async (obligations) => {
-        await ctx.deliveryStack?.recoverInstalledAuthority();
-        return obligations;
-      },
-      openCurrentOwnerSurfaces: async () => {
-        await ctx.channelConnections?.connectConfigured();
-      },
-    });
   }
   // ============================================================================
   // ServerContext + runServer —— 读接入面产物（conversations / channels）。

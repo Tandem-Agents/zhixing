@@ -2758,6 +2758,7 @@ test("planned duty migration stays bound to two production roots and a finite ow
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/executor-role-runtime.ts",
     "packages/cli/src/serve/mesh-runtime-assembly.ts",
+    "packages/cli/src/serve/planned-duty-migration-lifecycle-contribution.ts",
     "packages/cli/src/serve/planned-anchor-transfer.ts",
     "packages/cli/src/serve/planned-anchor-transfer-mesh.ts",
     "packages/cli/src/serve/first-party-conversation-mesh.ts",
@@ -2786,6 +2787,60 @@ test("planned duty migration stays bound to two production roots and a finite ow
   assert.deepEqual(inspectPlannedAnchorTransferAssembly(records), []);
   const mutate = (relative, transform) => records.map((record) =>
     record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => `${text}\nfunction bindPlannedAnchorLifecycle() {}`,
+    )).join("\n"),
+    /pre-bootstrap\/post-install completion closure drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "#plannedDutyMigrationLifecycle!: PlannedDutyMigrationLifecycleContribution",
+        "#plannedDutyMigrationLifecycle?: PlannedDutyMigrationLifecycleContribution",
+      ),
+    )).join("\n"),
+    /pre-bootstrap\/post-install completion closure drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace("plannedDutyMigrationLifecycle,", ""),
+    )).join("\n"),
+    /pre-bootstrap\/post-install completion closure drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "plannedInbound.refuseNewMessages()",
+        "ctx.inboundRouter?.refuseNewMessages()",
+      ),
+    )).join("\n"),
+    /source quiesce or installed consumer read-back order drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/mesh-runtime-assembly.ts",
+      (text) => text.replace(
+        "await this.#completePlannedAnchorPostInstall();",
+        "await this.#startControl();\n      await this.#completePlannedAnchorPostInstall();",
+      ),
+    )).join("\n"),
+    /pre-bootstrap\/post-install completion closure drifted/,
+  );
+  assert.match(
+    inspectPlannedAnchorTransferAssembly(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace(
+        "EXECUTOR_ONLY_PLANNED_DUTY_MIGRATION_LIFECYCLE,",
+        "undefined as never,",
+      ),
+    )).join("\n"),
+    /pre-bootstrap\/post-install completion closure drifted/,
   );
   assert.match(
     inspectPlannedAnchorTransferAssembly(mutate(
@@ -3006,7 +3061,7 @@ test("planned duty migration stays bound to two production roots and a finite ow
     inspectPlannedAnchorTransferAssembly(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "const receipt = await ctx.authorityRuntime!.rebindInstalledAuthority(generation);",
+        "const receipt = await authority.rebindInstalledAuthority(generation);",
         "const receipt = { generation };",
       ),
     )).join("\n"),
@@ -3016,8 +3071,8 @@ test("planned duty migration stays bound to two production roots and a finite ow
     inspectPlannedAnchorTransferAssembly(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "await ctx.deliveryStack?.quiesceForAuthorityTransfer();",
-        "await ctx.deliveryStack?.recoverInstalledAuthority();",
+        "await plannedDelivery.stack.quiesceForAuthorityTransfer();",
+        "await plannedDelivery.stack.recoverInstalledAuthority();",
       ),
     )).join("\n"),
     /source quiesce or installed consumer read-back order drifted/,
@@ -7604,7 +7659,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "currentAnchorEpoch: ctx.authorityRuntime!.anchorEpoch",
+        "currentAnchorEpoch: authority.anchorEpoch",
         "currentAnchorEpoch: 1",
       ),
     )).join("\n"),

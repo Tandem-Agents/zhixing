@@ -145,6 +145,10 @@ describe("production startup server ownership", () => {
       source,
       "const deviceRemovalLifecycle = defineDeviceRemovalLifecycleContribution({",
     );
+    const plannedDutyContribution = location(
+      source,
+      "definePlannedDutyMigrationLifecycleContribution({",
+    );
     const assemblyUnits = location(
       source,
       "const assemblyUnits = createAssemblyUnits(channelCredentials)",
@@ -156,6 +160,10 @@ describe("production startup server ownership", () => {
     expect(removalContribution).toBeGreaterThan(
       location(source, "await installSchedulerGeneration(schedulerRuntime, false)"),
     );
+    expect(plannedDutyContribution).toBeGreaterThan(
+      location(source, "await installSchedulerGeneration(schedulerRuntime, false)"),
+    );
+    expect(plannedDutyContribution).toBeLessThan(removalContribution);
     expect(removalContribution).toBeLessThan(
       location(source, "await preparedMesh.start({"),
     );
@@ -163,6 +171,7 @@ describe("production startup server ownership", () => {
       location(source, "await preparedMesh.start({"),
     );
     expect(surfaces).toContain("ctx.meshRuntimePreparation = preparation;");
+    expect(surfaces).not.toContain("bindAuthorityCheckpointOwner");
     expect(surfaces.match(/await mesh\.start\(/gu)).toHaveLength(1);
     expect(surfaces).toContain("await mesh.start(options)");
     expect(surfaces).toContain("connectImmediately: false");
@@ -180,6 +189,21 @@ describe("production startup server ownership", () => {
       location(source, "await preparedMesh.start({"),
     );
     expect(removalBlock).not.toMatch(/ctx\.[A-Za-z]+\?\./u);
+    const plannedDutyBlock = source.slice(plannedDutyContribution, removalContribution);
+    expect(plannedDutyBlock).not.toMatch(/ctx\.[A-Za-z]+\?\./u);
+    for (const explicitProfile of [
+      "ABSENT_PLANNED_DUTY_CHANNEL",
+      "ABSENT_PLANNED_DUTY_DELIVERY",
+      "ABSENT_PLANNED_DUTY_JOB_OWNER",
+      'kind: "unavailable"',
+      'reason: "recovery-backup-unavailable"',
+    ]) {
+      expect(source).toContain(explicitProfile);
+    }
+    expect(source.slice(location(source, "await preparedMesh.start({"), location(source, "ctx.meshRuntime = activeMesh")))
+      .toContain("plannedDutyMigrationLifecycle,");
+    expect(source).not.toContain("bindPlannedAnchorLifecycle");
+    expect(source).not.toContain("bindPlannedAnchorPostInstallConsumers");
     const bind = location(source, "const serverBinding = await bindServer");
     expect(bind).toBeLessThan(location(source, "await setupAssemblyUnits(assemblyUnits, ctx, \"pre-server\")"));
     expect(bind).toBeLessThan(location(source, "const stopResume = await stopCoordinator.resumeActive()"));
@@ -367,6 +391,10 @@ describe("production startup server ownership", () => {
       source,
       "const deviceRemovalLifecycle = defineDeviceRemovalLifecycleContribution({",
     );
+    const plannedDutyAbsent = location(
+      source,
+      "EXECUTOR_ONLY_PLANNED_DUTY_MIGRATION_LIFECYCLE",
+    );
     const jobLifecycleConstruction = location(
       source,
       "const jobOwnerLifecycle = new ExecutorJobOwnerLifecycle(",
@@ -378,6 +406,7 @@ describe("production startup server ownership", () => {
     const localOwnerStart = location(source, "await localConversationOwner.start(");
     const jobOwnerStart = location(source, "await jobOwnerLifecycle.start(");
     expect(removalContribution).toBeLessThan(meshConstruction);
+    expect(plannedDutyAbsent).toBeLessThan(meshConstruction);
     expect(source.slice(meshConstruction, jobLifecycleConstruction)).not.toContain(
       "deviceRemovalLifecycle,",
     );
@@ -387,6 +416,9 @@ describe("production startup server ownership", () => {
     expect(localOwnerStart).toBeLessThan(jobOwnerStart);
     expect(source.slice(jobOwnerStart, jobOwnerStart + 400)).toContain(
       "deviceRemovalLifecycle,",
+    );
+    expect(source.slice(jobOwnerStart, jobOwnerStart + 500)).toContain(
+      "plannedDutyMigrationLifecycle:",
     );
     expect(source).not.toContain("bindDeviceRemovalLifecycle");
     const cleanupTail = source.slice(location(source, "const cleanupFailures: unknown[] = []"));

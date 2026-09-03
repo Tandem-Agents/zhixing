@@ -92,6 +92,7 @@ import { deleteDeviceKeyExact } from "@zhixing/mesh/device-key-store";
 import { protocolDigest } from "@zhixing/core/protocol";
 import { cleanupExecutorDeviceLocalState } from "./device-removal-cleanup.js";
 import { defineDeviceRemovalLifecycleContribution } from "./device-removal-lifecycle-contribution.js";
+import { EXECUTOR_ONLY_PLANNED_DUTY_MIGRATION_LIFECYCLE } from "./planned-duty-migration-lifecycle-contribution.js";
 import {
   captureManagedHostAdmission,
   coordinateManagedHostTrustTransition,
@@ -688,10 +689,16 @@ export async function runExecutorRole(
     await jobOwnerLifecycle.start(startupStopOperation
       ? {
           deviceRemovalLifecycle,
+          plannedDutyMigrationLifecycle:
+            EXECUTOR_ONLY_PLANNED_DUTY_MIGRATION_LIFECYCLE,
           admissionClosed: true,
           recoverAcceptedWork: startupStopRecoverAcceptedWork,
         }
-      : { deviceRemovalLifecycle });
+      : {
+          deviceRemovalLifecycle,
+          plannedDutyMigrationLifecycle:
+            EXECUTOR_ONLY_PLANNED_DUTY_MIGRATION_LIFECYCLE,
+        });
     removalBootstrapAdmissionClosed = false;
     const localOwners = new Set<HostStopAcceptedWorkOwner>([
       "conversation",

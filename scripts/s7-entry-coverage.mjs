@@ -7236,7 +7236,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !composition.includes("schedulerHostLifecycle.install(runtime)") ||
     !composition.includes("schedulerHostLifecycle.stopAndRelease()") ||
     !composition.includes("schedulerHostLifecycle.recoverInstalledAuthority({") ||
-    !composition.includes("currentAnchorEpoch: ctx.authorityRuntime!.anchorEpoch") ||
+    !composition.includes("currentAnchorEpoch: authority.anchorEpoch") ||
     /schedulerApplication\.currentAnchorEpoch/u.test(composition) ||
     !composition.includes("createScheduleRuntimeProductApiContribution(schedulerApplication)") ||
     !composition.includes("scheduleRuntimeEvents: schedulerApplication") ||
@@ -11057,12 +11057,15 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   const deliveryPipeline = byPath.get("packages/core/src/delivery/authority-pipeline.ts");
   const surfaceAssetAuthority = byPath.get("packages/cli/src/serve/surface-asset-authority.ts");
   const surfaceAssets = byPath.get("packages/core/src/authority/surface-assets.ts");
+  const lifecycleContribution = byPath.get(
+    "packages/cli/src/serve/planned-duty-migration-lifecycle-contribution.ts",
+  );
   if (
     !assembly || !mesh || !transfer || !command || !server || !facade || !product ||
     !accessRoot || !executorRoot || !setup || !firstParty || !connectionLifetime || !localRouter ||
     !registry || !bootstrap || !applicationHost || !stagingInfrastructure ||
     !channels || !inboundRouter || !conversationProtocol ||
-    !deliveryPipeline || !surfaceAssetAuthority || !surfaceAssets
+    !deliveryPipeline || !surfaceAssetAuthority || !surfaceAssets || !lifecycleContribution
   ) {
     return ["planned anchor transfer production assembly sources are missing"];
   }
@@ -11311,14 +11314,66 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   const committed = transfer.indexOf('t: "anchor-committed"', completion);
   const bootstrapCompletion = bootstrap.indexOf("completePlannedAnchorInstallationBeforeBootstrap({");
   const activeGate = bootstrap.indexOf("loadActiveAnchorIssuerKey(", bootstrapCompletion);
+  const staticContribution = command.indexOf(
+    "definePlannedDutyMigrationLifecycleContribution({",
+  );
+  const preparedStart = command.indexOf("await preparedMesh.start({", staticContribution);
+  const activePublication = command.indexOf("ctx.meshRuntime = activeMesh", preparedStart);
+  const runtimeStart = assembly.indexOf("  async start(options: {");
+  const runtimeStop = assembly.indexOf("  async stop(): Promise<void>", runtimeStart);
+  const runtimeContribution = assembly.indexOf(
+    "definePlannedDutyMigrationLifecycleContribution(",
+    runtimeStart,
+  );
+  const initialRole = assembly.indexOf(
+    "this.#installInitialPlannedAnchorRole(this.options.trust)",
+    runtimeContribution,
+  );
+  const deviceRecovery = assembly.indexOf(
+    "await this.#deviceRemovalTarget.resumeBeforeAdmission()",
+    initialRole,
+  );
+  const plannedStartupRecovery = assembly.indexOf(
+    "await this.#recoverStartupState(options.lifecycleAdmissionClosed === true)",
+    deviceRecovery,
+  );
+  const postInstallRecovery = assembly.indexOf(
+    "await this.#completePlannedAnchorPostInstall()",
+    plannedStartupRecovery,
+  );
+  const controlStart = assembly.indexOf("await this.#startControl()", postInstallRecovery);
   if (
     completion < 0 || loadInstall < completion || activateKey < loadInstall || committed < activateKey ||
     bootstrapCompletion < 0 || activeGate < bootstrapCompletion ||
-    count(assembly, "bindPlannedAnchorPostInstallConsumers(") !== 1 ||
-    count(command, "bindPlannedAnchorPostInstallConsumers({") !== 1 ||
-    !assembly.includes('kind: "assignment" | "intent"') ||
-    !assembly.includes('kind: "interaction" | "confirmation" | "final"') ||
-    !assembly.includes('kind: "delivery"') ||
+    count(assembly, "bindAuthorityCheckpointOwner(") !== 0 ||
+    count(assembly, "bindPlannedAnchorLifecycle(") !== 0 ||
+    count(assembly, "bindPlannedAnchorPostInstallConsumers(") !== 0 ||
+    count(command, "bindAuthorityCheckpointOwner(") !== 0 ||
+    count(command, "bindPlannedAnchorLifecycle(") !== 0 ||
+    count(command, "bindPlannedAnchorPostInstallConsumers(") !== 0 ||
+    !lifecycleContribution.includes('readonly kind: "anchor"') ||
+    !lifecycleContribution.includes('readonly kind: "absent"') ||
+    !lifecycleContribution.includes('readonly role: "executor-only"') ||
+    !lifecycleContribution.includes('kind: "interaction" | "confirmation" | "final"') ||
+    !lifecycleContribution.includes('kind: "assignment" | "intent"') ||
+    !lifecycleContribution.includes('kind: "delivery"') ||
+    count(lifecycleContribution, "definePlannedDutyMigrationLifecycleContribution(") !== 2 ||
+    staticContribution < 0 || preparedStart < staticContribution ||
+    activePublication < preparedStart || runtimeContribution < runtimeStart ||
+    initialRole < runtimeContribution || deviceRecovery < initialRole ||
+    plannedStartupRecovery < deviceRecovery || postInstallRecovery < plannedStartupRecovery ||
+    controlStart < postInstallRecovery ||
+    runtimeStop < runtimeStart ||
+    count(assembly.slice(runtimeStart, runtimeStop), "await this.#startControl()") !== 1 ||
+    count(command, "definePlannedDutyMigrationLifecycleContribution({") !== 1 ||
+    count(command, "await preparedMesh.start({") !== 1 ||
+    count(command, "plannedDutyMigrationLifecycle,") !== 1 ||
+    count(executorRoot, "EXECUTOR_ONLY_PLANNED_DUTY_MIGRATION_LIFECYCLE") !== 3 ||
+    count(assembly, "#plannedDutyMigrationLifecycle!: PlannedDutyMigrationLifecycleContribution") !== 1 ||
+    count(assembly, "this.#plannedDutyMigrationLifecycle = plannedDutyMigrationLifecycle") !== 1 ||
+    assembly.includes("#plannedAnchorCheckpointOwner") ||
+    assembly.includes("#plannedAnchorLifecycle") ||
+    assembly.includes("#plannedAnchorPostInstallConsumers") ||
     count(assembly, "await finishPlannedAnchorPostInstall({") !== 1 ||
     count(firstParty, "this.input.isReady?.() === false") !== 1
   ) {
@@ -11340,7 +11395,7 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     "rubric-global-state",
   ];
   const generationRebind = command.indexOf(
-    "const receipt = await ctx.authorityRuntime!.rebindInstalledAuthority(generation);",
+    "const receipt = await authority.rebindInstalledAuthority(generation);",
   );
   const schedulerRecovery = command.indexOf("recoverScheduler: async", generationRebind);
   const assemblyGenerationRebind = assembly.indexOf(
@@ -11375,18 +11430,18 @@ export function inspectPlannedAnchorTransferAssembly(records) {
   ) {
     failures.push("planned anchor installed authority generation rebind exact-set drifted");
   }
-  const plannedLifecycle = command.indexOf("ctx.meshRuntime?.bindPlannedAnchorLifecycle({");
-  const stopInbound = command.indexOf("ctx.inboundRouter?.refuseNewMessages()", plannedLifecycle);
+  const plannedLifecycle = command.indexOf("definePlannedDutyMigrationLifecycleContribution({");
+  const stopInbound = command.indexOf("plannedInbound.refuseNewMessages()", plannedLifecycle);
   const drainInbound = command.indexOf(
-    "await ctx.inboundRouter?.drainAcceptedMessages()",
+    "await plannedInbound.drainAcceptedMessages()",
     stopInbound,
   );
   const disconnectChannels = command.indexOf(
-    "await ctx.channelConnections?.disconnectConfigured()",
+    "await plannedChannel.connections.disconnectConfigured()",
     drainInbound,
   );
   const quiesceDelivery = command.indexOf(
-    "await ctx.deliveryStack?.quiesceForAuthorityTransfer()",
+    "await plannedDelivery.stack.quiesceForAuthorityTransfer()",
     disconnectChannels,
   );
   const drainAccepted = command.indexOf("drainAccepted: async () => {", quiesceDelivery);
@@ -11405,10 +11460,11 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     plannedLifecycle < 0 || stopInbound < plannedLifecycle || drainInbound < stopInbound ||
     disconnectChannels < drainInbound || quiesceDelivery < disconnectChannels ||
     drainAccepted < quiesceDelivery ||
-    count(command, "await ctx.deliveryStack?.resumeAfterAuthorityTransfer()") !== 1 ||
+    /ctx\.[A-Za-z]+\?\./u.test(command.slice(plannedLifecycle, preparedStart)) ||
+    count(command, "await plannedDelivery.stack.resumeAfterAuthorityTransfer()") !== 1 ||
     count(command, "await ctx.deliveryStack?.lifecycle.resume()") !== 3 ||
-    count(command, "await protocol.recoverInstalledAuthority()") !== 1 ||
-    count(command, "return obligations;") !== 4 ||
+    count(command, "await conversationProtocol.recoverInstalledAuthority()") !== 1 ||
+    count(command, "return obligations;") !== 3 ||
     count(conversationProtocol, "async recoverInstalledAuthority(): Promise<number>") !== 1 ||
     count(deliveryPipeline, "async quiesceForAuthorityTransfer(): Promise<void>") !== 1 ||
     count(deliveryPipeline, "async resumeAfterAuthorityTransfer(): Promise<void>") !== 1 ||

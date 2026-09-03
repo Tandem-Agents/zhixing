@@ -387,9 +387,6 @@ const createMeshSurface = (): AccessSurface => ({
       assignmentDataPlane: mesh,
       currentAnchorDeviceId: () => mesh.currentAnchorDeviceId(),
       plannedCurrentOwnerReady: () => mesh.plannedCurrentOwnerReady(),
-      bindAuthorityCheckpointOwner: (
-        owner: Parameters<MeshRuntimeAssembly["bindAuthorityCheckpointOwner"]>[0],
-      ) => mesh.bindAuthorityCheckpointOwner(owner),
       start: async (
         options: Parameters<MeshRuntimeAssembly["start"]>[0],
       ) => {
