@@ -6551,6 +6551,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const conversationAgentTurnAdmission = required(
     "packages/owner-kernel/src/conversation-agent-turn-admission.ts",
   );
+  const conversationControl = required(
+    "packages/owner-kernel/src/conversation-control.ts",
+  );
   const ownerKernelManifestText = required(
     "packages/owner-kernel/package.json",
   );
@@ -7130,6 +7133,17 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     (conditions.types === conversationAgentTurnAdmissionExport?.types ||
       conditions.import === conversationAgentTurnAdmissionExport?.import)
   );
+  const conversationControlExport =
+    ownerKernelManifest?.exports?.["./conversation-control"];
+  const duplicateConversationControlExports = Object.entries(
+    ownerKernelManifest?.exports ?? {},
+  ).filter(([subpath, conditions]) =>
+    subpath !== "./conversation-control" &&
+    conditions &&
+    typeof conditions === "object" &&
+    (conditions.types === conversationControlExport?.types ||
+      conditions.import === conversationControlExport?.import)
+  );
   const scheduleApplicationExport = coreManifest?.exports?.["./scheduler/application"];
   const duplicateScheduleApplicationExports = Object.entries(coreManifest?.exports ?? {})
     .filter(([subpath, conditions]) =>
@@ -7345,6 +7359,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     conversationApplication.includes("command.turnIdentitySource") ||
     !conversationApplication.includes("async abort(") ||
     !conversationApplication.includes("async resolveUncertain(") ||
+    conversationApplication.includes("ownerEpoch") ||
+    conversationApplication.split("resolutionFence: ConversationResolutionFence").length - 1 !== 2 ||
+    !conversationApplication.includes("type ConversationResolutionFence = string") ||
     !conversationApplication.includes("HISTORY_DEFAULT_LIMIT = 20") ||
     !conversationApplication.includes("HISTORY_MAX_LIMIT = 200") ||
     conversationApplication.includes('../advancement/') ||
@@ -7396,6 +7413,12 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !sessionHandler.includes("productApi.command(CONVERSATION_ABORT_COMMAND") ||
     !/productApi\.command\(\s*CONVERSATION_RESOLVE_UNCERTAIN_COMMAND/u.test(
       sessionHandler,
+    ) ||
+    !sessionHandler.includes(
+      "resolutionFence: createConversationResolutionFence(params.ownerEpoch)",
+    ) ||
+    !sessionHandler.includes(
+      'from "@zhixing/owner-kernel/conversation-control"',
     ) ||
     /requireConversations\(ctx\.server\)\.(?:cancelDurableRuns|resolveDurableUncertain|abort)\s*\(/u.test(
       sessionHandler,
@@ -7479,6 +7502,12 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !localConversationRpc.includes("this.#application.resume({") ||
     !localConversationRpc.includes("this.#application.abort({") ||
     !localConversationRpc.includes("this.#application.resolveUncertain({") ||
+    !localConversationRpc.includes(
+      "resolutionFence: createConversationResolutionFence(value.ownerEpoch)",
+    ) ||
+    !localConversationRpc.includes(
+      'from "@zhixing/owner-kernel/conversation-control"',
+    ) ||
     !localConversationRpc.includes(
       "this.#application.prepareAgentTurnIdentity({",
     ) ||
@@ -7583,10 +7612,22 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     ) ||
     !conversationRunControlBinding.includes("cancelDurableRuns({") ||
     !conversationRunControlBinding.includes("resolveDurableUncertain({") ||
+    !conversationRunControlBinding.includes(
+      "ownerEpoch: parseConversationResolutionFence(resolutionFence)",
+    ) ||
+    !conversationRunControlBinding.includes(
+      'from "@zhixing/owner-kernel/conversation-control"',
+    ) ||
     !conversationRunControlBinding.includes("durableControlPrincipal({") ||
     !localConversationApplication.includes("runControl: {") ||
     !localConversationOwner.includes("cancelConversationRuns:") ||
     !localConversationOwner.includes("resolveConversationUncertain:") ||
+    !localConversationOwner.includes(
+      "ownerEpoch: parseConversationResolutionFence(input.resolutionFence)",
+    ) ||
+    !localConversationOwner.includes(
+      'from "@zhixing/owner-kernel/conversation-control"',
+    ) ||
     !localConversationOwner.includes("createConversationAgentTurnAdmissionPort({") ||
     !localConversationOwner.includes("createAgentTurnExecution:") ||
     /\b(?:runTurn|admitTurn):/u.test(localConversationOwner) ||
@@ -7714,7 +7755,16 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       'from "@zhixing/owner-kernel/conversation-agent-turn-admission"',
     ) ||
     !composition.includes("agentTurns: createConversationAgentTurnAdmissionPort({") ||
-    !localConversationApplication.includes("agentTurns: input.owner.agentTurnAdmission")
+    !localConversationApplication.includes("agentTurns: input.owner.agentTurnAdmission") ||
+    !conversationControl.includes("createConversationResolutionFence") ||
+    !conversationControl.includes("parseConversationResolutionFence") ||
+    !conversationControl.includes("CONVERSATION_RESOLUTION_FENCE_PREFIX") ||
+    ownerKernelIndex.includes("conversation-control") ||
+    ownerKernelIndex.includes("createConversationResolutionFence") ||
+    conversationControlExport?.types !== "./dist/conversation-control.d.ts" ||
+    conversationControlExport?.import !== "./dist/conversation-control.js" ||
+    duplicateConversationControlExports.length > 0 ||
+    ownerKernelBuild.split('"src/conversation-control.ts"').length - 1 !== 1
   ) {
     failures.push(
       "Conversation directory management lacks one domain application and Product API owner",

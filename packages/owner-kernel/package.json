@@ -25,6 +25,10 @@
       "types": "./dist/conversation-agent-turn-admission.d.ts",
       "import": "./dist/conversation-agent-turn-admission.js"
     },
+    "./conversation-control": {
+      "types": "./dist/conversation-control.d.ts",
+      "import": "./dist/conversation-control.js"
+    },
     "./run-turn": {
       "types": "./dist/run-turn.d.ts",
       "import": "./dist/run-turn.js"

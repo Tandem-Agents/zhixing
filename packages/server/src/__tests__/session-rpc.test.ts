@@ -36,6 +36,7 @@ import {
   DurableConversationAdmissionRejectedError,
 } from "@zhixing/owner-kernel";
 import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
+import { parseConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
 import type {
   ConversationBootstrap,
   DurableConversationTurnExecutor,
@@ -889,7 +890,7 @@ function createConversationProductApi(input: {
         conversationId,
         runId,
         operationId,
-        ownerEpoch,
+        resolutionFence,
         openFactDigest,
         decision,
         caller,
@@ -899,7 +900,7 @@ function createConversationProductApi(input: {
           conversationId,
           runId,
           requestId: operationId,
-          ownerEpoch,
+          ownerEpoch: parseConversationResolutionFence(resolutionFence),
           openFactDigest,
           decision,
           principal: input.conversations.durableControlPrincipal(caller),

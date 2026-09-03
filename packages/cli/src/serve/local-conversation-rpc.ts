@@ -10,6 +10,7 @@ import {
   type ConversationDirectoryApplication,
   type ConversationDirectoryEntry,
 } from "@zhixing/core/conversation/application";
+import { createConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
 import { canonicalize, isProtocolIdentifier } from "@zhixing/core/protocol";
 import type {
   SessionConversationEntry,
@@ -375,7 +376,7 @@ export class LocalConversationRpcRouter
             conversationId: value.conversationId,
             runId: value.runId,
             operationId: value.requestId,
-            ownerEpoch: value.ownerEpoch,
+            resolutionFence: createConversationResolutionFence(value.ownerEpoch),
             openFactDigest: value.openFactDigest,
             decision: value.decision,
             caller: {

@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { ConversationCancellationResponseEffect } from "@zhixing/core/conversation/application";
 import type { ConversationManager } from "@zhixing/owner-kernel";
 import {
+  createConversationResolutionFence,
+} from "@zhixing/owner-kernel/conversation-control";
+import type { ConversationResolutionFence } from "@zhixing/core/conversation/application";
+import {
   createAnchorConversationRunControlPort,
   createChannelCancellationResponseEffect,
 } from "./conversation-run-control-binding.js";
@@ -164,7 +168,7 @@ describe("createAnchorConversationRunControlPort", () => {
         conversationId: "conversation-1",
         runId: "run-1",
         operationId: "resolve-1",
-        ownerEpoch: 2,
+        resolutionFence: createConversationResolutionFence(2),
         openFactDigest: `sha256:${"a".repeat(64)}`,
         decision: "user-abandoned",
         caller,
@@ -183,6 +187,19 @@ describe("createAnchorConversationRunControlPort", () => {
         deviceId: "device-1",
       },
     });
+
+    await expect(
+      port.resolveUncertain({
+        conversationId: "conversation-1",
+        runId: "run-1",
+        operationId: "resolve-forged",
+        resolutionFence: "forged" as ConversationResolutionFence,
+        openFactDigest: `sha256:${"a".repeat(64)}`,
+        decision: "user-abandoned",
+        caller,
+      }),
+    ).rejects.toThrow("Conversation resolution fence is invalid");
+    expect(resolveDurableUncertain).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -6547,6 +6547,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/owner-kernel/src/delivery.ts",
     "packages/owner-kernel/src/index.ts",
     "packages/owner-kernel/src/conversation-agent-turn-admission.ts",
+    "packages/owner-kernel/src/conversation-control.ts",
     "packages/owner-kernel/package.json",
     "packages/owner-kernel/tsup.config.ts",
     "packages/owner-kernel/src/conversation-assignment.ts",
@@ -6684,6 +6685,63 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       "packages/core/src/conversation/application.ts",
       (text) =>
         `import type { AdvancementReviewDecision } from "../advancement/types.js";\n${text}`,
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/conversation/application.ts",
+      (text) => text.replace(
+        "resolutionFence: ConversationResolutionFence;",
+        "ownerEpoch: number;",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace(
+        "resolutionFence: createConversationResolutionFence(params.ownerEpoch)",
+        "ownerEpoch: params.ownerEpoch",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/conversation-run-control-binding.ts",
+      (text) => text.replace(
+        "ownerEpoch: parseConversationResolutionFence(resolutionFence)",
+        "ownerEpoch: 0",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/local-conversation-rpc.ts",
+      (text) => text.replace(
+        "resolutionFence: createConversationResolutionFence(value.ownerEpoch)",
+        "ownerEpoch: value.ownerEpoch",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/local-conversation-owner.ts",
+      (text) => text.replace(
+        "ownerEpoch: parseConversationResolutionFence(input.resolutionFence)",
+        "ownerEpoch: 0",
+      ),
+    )).join("\n"),
+    /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/owner-kernel/src/index.ts",
+      (text) => `${text}\nexport * from "./conversation-control.js";`,
     )).join("\n"),
     /Conversation directory management lacks one domain application/,
   );

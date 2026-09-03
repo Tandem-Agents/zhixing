@@ -25,6 +25,7 @@ import {
 } from "@zhixing/owner-kernel";
 import type { DurableConversationTurnExecutor } from "@zhixing/owner-kernel/run-turn";
 import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
+import { parseConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
 import { stubDurableTurnExecutor } from "../../__tests__/durable-turn-executor-stub.js";
 import {
   buildSessionAbortMethod,
@@ -593,10 +594,16 @@ describe("session durable control 方法", () => {
   });
 
   it("routes an uncertain resolution with the authenticated stable principal", async () => {
-    const resolveDurableUncertain = vi.fn(async () => ({
-      state: "cancelled" as const,
-      factDigest: `sha256:${"b".repeat(64)}`,
-    }));
+    const resolveDurableUncertain = vi.fn(async (
+      input: Parameters<ConversationRunControlPort["resolveUncertain"]>[0],
+    ) => {
+      expect(parseConversationResolutionFence(input.resolutionFence)).toBe(1);
+      expect(input).not.toHaveProperty("ownerEpoch");
+      return {
+        state: "cancelled" as const,
+        factDigest: `sha256:${"b".repeat(64)}`,
+      };
+    });
     const method = buildSessionResolveMethod();
     await expect(
       method.handler(
@@ -620,7 +627,7 @@ describe("session durable control 方法", () => {
     ).resolves.toMatchObject({ state: "cancelled" });
     expect(resolveDurableUncertain).toHaveBeenCalledWith(
       expect.objectContaining({
-        ownerEpoch: 1,
+        resolutionFence: expect.any(String),
         decision: "user-abandoned",
         operationId: "resolve-request-1",
         caller: {

@@ -59,6 +59,7 @@ import {
   type ConversationDirectoryEntry,
   type ConversationPreparedAgentTurnIdentity,
 } from "@zhixing/core/conversation/application";
+import { createConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
 import {
   ADVANCEMENT_ACTIVE_STATE_QUERY,
   ADVANCEMENT_CANCEL_RUBRIC_COMMAND,
@@ -2116,7 +2117,7 @@ export function buildSessionResolveMethod(): MethodEntry {
             conversationId: params.conversationId,
             runId: params.runId,
             operationId: params.requestId,
-            ownerEpoch: params.ownerEpoch,
+            resolutionFence: createConversationResolutionFence(params.ownerEpoch),
             openFactDigest: params.openFactDigest,
             decision: params.decision,
             caller: conversationControlCaller(ctx),

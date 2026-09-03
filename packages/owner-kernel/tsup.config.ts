@@ -7,6 +7,7 @@ export default defineConfig({
     "src/types.ts",
     "src/conversation-manager.ts",
     "src/conversation-agent-turn-admission.ts",
+    "src/conversation-control.ts",
     "src/run-turn.ts",
     "src/ephemeral-run-buffer.ts",
     "src/confirmation-hub.ts",

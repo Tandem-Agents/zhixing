@@ -49,6 +49,7 @@ import {
   type CurrentConversationAuthority,
   type RuntimeFactory,
 } from "@zhixing/owner-kernel";
+import { parseConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
 import {
   createAdvancementRecoveryMaintenance,
   DeferredRubricPublication,
@@ -599,7 +600,7 @@ export class LocalConversationOwnerAssembly {
             conversationId: input.conversationId,
             runId: input.runId,
             requestId: input.operationId,
-            ownerEpoch: input.ownerEpoch,
+            ownerEpoch: parseConversationResolutionFence(input.resolutionFence),
             openFactDigest: input.openFactDigest,
             decision: input.decision,
             principal: this.#manager.durableControlPrincipal({

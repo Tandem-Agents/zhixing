@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { localConversationId, type TaskListState } from "@zhixing/core";
 import { RPC_ERROR_CODES, RpcAppError } from "@zhixing/server";
+import { parseConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
 import {
   ExecutorFirstPartyRpcRouter,
   LocalConversationRpcRouter,
@@ -637,7 +638,7 @@ describe("LocalConversationRpcRouter", () => {
       conversationId: input.conversationId,
       runId: input.runId,
       operationId: input.requestId,
-      ownerEpoch: input.ownerEpoch,
+      resolutionFence: expect.any(String),
       openFactDigest: input.openFactDigest,
       decision: input.decision,
       caller: {
@@ -646,6 +647,11 @@ describe("LocalConversationRpcRouter", () => {
         connectionId: "7",
       },
     });
+    const resolvedInput = vi.mocked(owner.resolveConversationUncertain).mock.calls[0]?.[0];
+    expect(parseConversationResolutionFence(resolvedInput!.resolutionFence)).toBe(
+      input.ownerEpoch,
+    );
+    expect(resolvedInput).not.toHaveProperty("ownerEpoch");
   });
 
   it("executor-only 按 method ownership 二选一且 local false 不串到 current anchor", async () => {

@@ -5,6 +5,7 @@ import {
   type ConversationUncertainResolutionResult,
 } from "@zhixing/core/conversation/application";
 import type { ConversationManager } from "@zhixing/owner-kernel";
+import { parseConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
 
 type ConversationCancellationInput = Parameters<
   ConversationRunControlPort["cancel"]
@@ -133,7 +134,7 @@ export function createAnchorConversationRunControlPort(input: Readonly<{
         conversationId,
         runId,
         operationId,
-        ownerEpoch,
+        resolutionFence,
         openFactDigest,
         decision,
         caller,
@@ -147,7 +148,7 @@ export function createAnchorConversationRunControlPort(input: Readonly<{
         conversationId,
         runId,
         requestId: operationId,
-        ownerEpoch,
+        ownerEpoch: parseConversationResolutionFence(resolutionFence),
         openFactDigest,
         decision,
         principal: input.conversations.durableControlPrincipal({

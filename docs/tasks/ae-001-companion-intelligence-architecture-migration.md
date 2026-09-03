@@ -1,7 +1,7 @@
 # AE-001 伴身智能目标架构迁移
 
 > 状态：执行中<br>
-> 当前检查点：A6-21 的五条 E05 生产反证已通过协调者独立复核，等待提交<br>
+> 当前检查点：A6-22 已通过协调者独立验收，等待提交<br>
 > 完成度：6/8<br>
 > 职责：在保持知行当前全部正式能力与首版发布边界不变的前提下，把生产实现完整迁移到 AE-001 定义的目标架构，并删除全部旧责任路径。
 > 权威设计：[《AE-001：伴身智能架构演进》](../../research/design/architecture/evolutions/AE-001-companion-intelligence.md)
@@ -202,12 +202,12 @@ A0 不要求预先穷举每个产品旅程、错误分支、全部消费者或�
 
 | 项目 | 当前值 |
 |---|---|
-| 已接受基线 | `27a71104`；A6-20 Skill Catalog management topology fence 边界收口已提交 |
-| 当前 A 项 | A6 收束可替换边缘与设备拓扑；E01～E04、E06 未发现新反证，E05 尚有 5 条去重后的生产拓扑泄漏链，A6 保持未完成 |
-| 活跃工作包 | `A6-21-replaceable-edges-topology-complete-exit-audit-v1` 的六面审计与五条 E05 反证已通过协调者独立复核，等待提交 |
-| 下一责任链 | 依次收口：Conversation uncertain-resolution raw owner fence → Advancement review root 的 executor/owner-epoch binding → Device removal live connection → Device duty/current-removal runtime admission flags → Conversation directory 的 local/remote 形状；全部接受后重新执行完整 A6 cold-start 审计，不得进入 A7 |
+| 已接受基线 | `60077a36`；A6-21 六面审计与五条剩余 E05 反证已提交 |
+| 当前 A 项 | A6 收束可替换边缘与设备拓扑；Conversation uncertain-resolution owner fence 子边界已通过协调者独立验收 |
+| 活跃工作包 | `A6-22-conversation-uncertain-resolution-owner-fence-v1` 已通过协调者独立验收，等待提交 |
+| 下一责任链 | 处理 E05-C02 Advancement review root 的 executor/owner-epoch binding；其后依次处理两条 Device 泄漏与 Conversation directory 形状 |
 | 打开的单向桥 | 无；P06 Rubric 已恢复为 required `readByDigest/put` 有限端口，P07、P09、P11 及 P12 三类 staging 的既有有限 Infrastructure 接管继续有效 |
-| 已失效证据 | A6-15 的 E05/聚合结论与 A6-19 的未完成聚合审计均不可作为退出证明；A6-21 已证明 E05 仍有 5 条反证，因而没有生成 A6 聚合通过证据。A6-16、A6-17、A6-18、A6-20 等已接受局部修复继续有效，但不得相加冒充完整 topology transparency |
+| 已失效证据 | A6-15 的 E05/聚合结论与 A6-19 的未完成聚合审计均不可作为退出证明；A6-21 的 E05-C01 已恢复并接受，C02～C05 四条反证仍打开。全部局部修复不得相加冒充完整 topology transparency |
 | 阻塞/用户决策 | 无用户决策阻塞；完整 distributed-runtime structure 测试仍被既有 A4-10 `runtime-host` 依赖断言阻断，属于 A7 零残留与终验输入 |
 
 ### A0 基线索引
@@ -2981,6 +2981,15 @@ A1/A2 实施包不得把以下全仓结果当作局部迁移前置或重复运�
 - 去重、影响与修复顺序：上述集合按“同一领域字段/决定 + 同一生产绑定”去重；协议/Authority record 内用于验证的 epoch、assignment/executor 身份、CLI `CurrentAnchorSurfaceRpcClient` 的具体 transport 适配及用户可见的当前设备身份没有被误报为领域反证。修复必须按独立可验闭包依次推进：①仿照 Delivery 将 Conversation uncertain resolution 的数值 owner epoch 收入 Correctness opaque fence，同时保持 `session.resolve` wire/错误/重放；②把 Advancement review 的 executor/owner-epoch 目标变为 Correctness 拥有的不可解释 root binding，领域只比较有限 binding 结果；③把 Device removal 的 live `isConnected` 查询改为 Infrastructure effect 的 topology-neutral 可用性/执行 outcome，不让领域读取连接；④把 duty/current-removal 的 owner-ready、guard/journal identity 收入 Host/Correctness admission 结果，领域只消费产品可用/冲突裁决；⑤把 Conversation directory 输入统一为不带 local/remote 身份的同质目录视图。五条均接受后必须重新执行六面 cold-start 审计，不能把本节 E01～E04/E06 的通过行与局部修复相加后直接关闭 A6。
 - 门禁、证据状态与交接：当前生产源码、测试、manifest、build/export 输入均未修改；本轮因此按约束复用接受基线 `27a71104` 的 canonical S7 57/57、registry golden 与 runtime package exports，没有运行测试、构建、package check 或制品验收。该绿灯继续证明既有 inspector 所覆盖的边缘、存储、同实例和 Host 结构，但现有 Conversation inspector 未拒绝 raw `ownerEpoch/local/remoteEntries`，Advancement inspector 未拒绝领域 `AdvancementReviewRootTarget`，Device inspector还正向冻结 `executorRemovalInProgress`，故对本轮 E05 反证没有识别力。`A6-21-replaceable-edges-topology-complete-exit-audit-v1` 形成的是完整失败证据而非聚合通过证据；A6 保持 `[ ]`、完成度保持 `6/8`，A7 不得开始。若任一 E01～E06 production import/manifest、领域应用/Product API、Host/adapter constructor、P01～P15 demand/factory、Executor/Mesh identity/lifecycle、S7 inspector 或上述五条生产链变化，应恢复本审计对应行；当前交接为等待协调者独立复核并从修复顺序第一项派发最窄工作包。本轮只修改本文，没有执行 Git 暂存、取消暂存、提交、历史改写或推送。
 - 协调者独立复核：重新反扫全部领域 `application.ts` 与 Product API 中的 topology 控制词，并逐条追到 Server/CLI/Correctness 的在用生产绑定；确认五条反证分别参与领域校验、root 构造/匹配、移除分支、准入拒绝或目录合同形状，不是合法 record/wire、测试夹具、注释或单纯命名。当前生产 exact-set 未发现第六组同类领域控制语义；A6-20 只改变 Skill 边界且对应门禁已通过，故 E01～E04、E06 既有证据未失效。接受 A6-21 的完整失败证据和修复顺序；A6 保持 `[ ]`。
+
+### A6-22：Conversation uncertain-resolution owner fence 边界收口
+
+- 基线与唯一结果：以已接受 `HEAD 60077a36ed81fc55e79815c4bf56a0168dd50071` 加协调者本文调度记录为进场基线，只处理 A6-21 E05-C01。`ConversationDirectoryCommand`、`CONVERSATION_RESOLVE_UNCERTAIN_COMMAND` 与 `ConversationRunControlPort` 的数值 `ownerEpoch` 已由 branded `ConversationResolutionFence` 替代；Conversation 应用仍拥有 conversation/run/operation、digest、decision 与 caller 的业务校验和调用顺序，但不再校验、比较、构造或解释物理 owner generation。core fresh `conversation/application.d.ts` 同步只公开 opaque fence，不含该链的 raw `ownerEpoch`。
+- 生产链与行为保护：既有 Server `session.resolve` 与 Executor-only 本机 RPC 继续严格接受完全相同的 `ownerEpoch` 数值 wire、exact-key、digest、decision、认证 principal 与错误映射，并分别只在 wire binding 调用 `createConversationResolutionFence()`；Anchor `createAnchorConversationRunControlPort` 与 `LocalConversationOwnerAssembly` 分别只在进入现有 `resolveDurableUncertain()` 前调用 `parseConversationResolutionFence()`。Correctness 窄入口使用 canonical `conversation-resolution-fence:v1:<non-negative-safe-integer>` 编解码并拒绝 forged/non-canonical fence；解封后的数值、Authority current-owner 校验、控制 admission、request identity、open-fact、三种 decision、响应丢失重放、持久记录与结果均沿原链不变。没有新增 journal、状态机、缓存、通用 fence 框架或第二 run-control owner。
+- 窄导出与旧路退场：新增唯一非根 `@zhixing/owner-kernel/conversation-control` export/build entry，且 owner-kernel 根不转导；Server、Local RPC、Anchor adapter 与 Local owner 四个 production boundary 全部显式消费该入口。Conversation 领域/Product API 的 `ownerEpoch` 字段、领域数值校验及两条 wire 到领域的 raw 透传已归零；合法 Conversation persistence、ExecutionRef、Assignment 与 Correctness 内部的 generation 字段不属于本次退场集合，未被改写。
+- 直接证据：core Conversation 应用 38/38、owner-kernel fence codec 11/11、CLI Anchor/Local binding 2 文件 19/19、Server 真实 loopback `session-rpc` 94/94 与薄 handler 目标用例 1/1 通过，直接覆盖 opaque 原样传递、0/正数 canonical round-trip、负数/小数/非 canonical 拒绝、Server 与 Local wire 封装、Anchor 解封、forged fence fail-closed、认证 principal 及既有 durable resolution。首次组合运行薄 handler 整文件时，目标用例通过但同文件无关的 legacy send fixture 因缺 `sessionBroadcast` 1 项失败；按验证手册仅隔离重取本包目标 1/1 通过，没有修改或借本包解释该既有 fixture。core、owner-kernel、server、CLI build 与 CLI `tsc --noEmit` 通过；canonical S7 首次取得 production inspector 与 56/57 mutation tests 通过，唯一失败为新增 source 未加入测试 records，修正测试输入后只重取该失效 mutation 1/1，通过并结合未失效 56 项恢复 57/57，registry golden 通过；fresh runtime package exports、changed-source Biome 通过。
+- 失效、状态与交接：S7/package-export 现会拒绝 Conversation 应用 raw epoch 回流、Server/Local wire 绕过 fence、Anchor/Local adapter 绕过严格解析、缺失/重复 subpath、build 漂移或 owner-kernel 根泄漏。若 Conversation resolution command/port、两个 wire parser、两个 adapter、durable resolution input、owner-kernel fence codec/export/build、fresh declaration或这些直接测试任一变化，只恢复本证据与 A6-21 E05-C01 子结论；A6-21 其余四条反证、E01～E04/E06、其他 Conversation generation record 与公开 wire 不因本包自动失效。`A6-22-conversation-uncertain-resolution-owner-fence-v1` 当前等待协调者独立复核；A6 与完成度保持 `[ ]`/`6/8`，下一检查点固定为 E05-C02 Advancement review root binding，本轮未进入其余反证、A7 或 Git 写操作。
+- 协调者独立验收：反查两个 wire producer、Conversation Command/Product API/RunControlPort、Anchor 与 Local 两个解封消费者及 durable resolution 输入，确认领域 raw `ownerEpoch` 归零、legacy wire 与持久 generation 未变且 forged fence 在 Correctness 边界 fail closed。独立取得 Core 38/38、owner-kernel 11/11、CLI 19/19、Server loopback 94/94、目标 handler 1/1、canonical S7 57/57、registry golden、runtime package exports 与 `git diff --check` 通过；接受 `A6-22-conversation-uncertain-resolution-owner-fence-v1`。A6 保持 `[ ]`，下一责任链为 E05-C02。
 
 ## 十、用户提示词
 

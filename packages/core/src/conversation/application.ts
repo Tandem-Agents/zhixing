@@ -697,6 +697,12 @@ export interface ConversationUncertainResolutionResult {
   readonly factDigest: string;
 }
 
+declare const CONVERSATION_RESOLUTION_FENCE: unique symbol;
+/** Opaque owner-generation fence; only a Correctness binding may encode or inspect it. */
+export type ConversationResolutionFence = string & {
+  readonly [CONVERSATION_RESOLUTION_FENCE]: "conversation-resolution-fence";
+};
+
 /** Owner/Authority mechanisms consumed by the Conversation run-control use cases. */
 export interface ConversationRunControlPort {
   readonly requiresStableCancellationIdentity: boolean;
@@ -720,7 +726,7 @@ export interface ConversationRunControlPort {
     conversationId: string;
     runId: string;
     operationId: string;
-    ownerEpoch: number;
+    resolutionFence: ConversationResolutionFence;
     openFactDigest: string;
     decision: ConversationUncertainResolutionDecision;
     caller: ConversationCommandCaller;
@@ -809,7 +815,7 @@ export type ConversationDirectoryCommand =
       conversationId: string;
       runId: string;
       operationId: string;
-      ownerEpoch: number;
+      resolutionFence: ConversationResolutionFence;
       openFactDigest: string;
       decision: ConversationUncertainResolutionDecision;
       caller: ConversationCommandCaller;
@@ -1624,8 +1630,8 @@ export class ConversationDirectoryApplicationService
       !isProtocolIdentifier(command.conversationId) ||
       !isProtocolIdentifier(command.operationId) ||
       !isProtocolIdentifier(command.runId) ||
-      !Number.isSafeInteger(command.ownerEpoch) ||
-      command.ownerEpoch < 0 ||
+      typeof command.resolutionFence !== "string" ||
+      command.resolutionFence.length === 0 ||
       !/^sha256:[a-f0-9]{64}$/u.test(command.openFactDigest) ||
       !isConversationResolutionDecision(command.decision)
     ) {
@@ -1643,7 +1649,7 @@ export class ConversationDirectoryApplicationService
       conversationId: command.conversationId,
       runId: command.runId,
       operationId: command.operationId,
-      ownerEpoch: command.ownerEpoch,
+      resolutionFence: command.resolutionFence,
       openFactDigest: command.openFactDigest,
       decision: command.decision,
       caller: command.caller,

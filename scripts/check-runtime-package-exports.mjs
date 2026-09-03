@@ -23,6 +23,7 @@ const [
   rpcSkillCatalogClient,
   ownerKernel,
   ownerKernelDelivery,
+  ownerKernelConversationControl,
   ownerKernelControlAdmission,
   ownerKernelConversationAssignment,
   server,
@@ -65,6 +66,7 @@ const [
   import("../packages/rpc/dist/skill-catalog-client.js"),
   import("../packages/owner-kernel/dist/index.js"),
   import("../packages/owner-kernel/dist/delivery.js"),
+  import("../packages/owner-kernel/dist/conversation-control.js"),
   import("../packages/owner-kernel/dist/control-admission.js"),
   import("../packages/owner-kernel/dist/conversation-assignment.js"),
   import("../packages/server/dist/index.js"),
@@ -172,6 +174,7 @@ const meshCanonicalValues = {
 
 const failures = [];
 await verifyCorePackageExports(failures);
+await verifyOwnerKernelConversationControlExport(failures);
 await verifyRpcSkillCatalogClientExport(failures);
 await verifyRuntimeHostProductBoundary(failures);
 if (
@@ -179,6 +182,50 @@ if (
   "createAgentRuntime" in orchestratorRoot
 ) {
   failures.push("orchestrator-agent-runtime:invalid-runtime-boundary");
+}
+
+async function verifyOwnerKernelConversationControlExport(failures) {
+  const packageRoot = new URL("../packages/owner-kernel/", import.meta.url);
+  const manifest = JSON.parse(
+    await readFile(new URL("package.json", packageRoot), "utf8"),
+  );
+  const canonical = manifest.exports?.["./conversation-control"];
+  if (
+    canonical?.types !== "./dist/conversation-control.d.ts" ||
+    canonical?.import !== "./dist/conversation-control.js" ||
+    typeof ownerKernelConversationControl.createConversationResolutionFence !==
+      "function" ||
+    typeof ownerKernelConversationControl.parseConversationResolutionFence !==
+      "function" ||
+    "createConversationResolutionFence" in ownerKernel ||
+    "parseConversationResolutionFence" in ownerKernel
+  ) {
+    failures.push(
+      "owner-kernel-exports:conversation-control:invalid-runtime-boundary",
+    );
+  }
+  for (const [subpath, conditions] of Object.entries(manifest.exports ?? {})) {
+    if (
+      subpath !== "./conversation-control" &&
+      conditions &&
+      typeof conditions === "object" &&
+      (conditions.types === canonical?.types || conditions.import === canonical?.import)
+    ) {
+      failures.push(
+        `owner-kernel-exports:${subpath}:duplicate-conversation-control-entry`,
+      );
+    }
+  }
+  const rootDeclaration = await readFile(
+    new URL("dist/index.d.ts", packageRoot),
+    "utf8",
+  );
+  if (
+    rootDeclaration.includes("ConversationResolutionFence") ||
+    rootDeclaration.includes("conversation-control")
+  ) {
+    failures.push("owner-kernel-exports:root:conversation-control-type-leak");
+  }
 }
 if (
   typeof orchestratorRuntime.assertKernelRunEvent !== "function" ||

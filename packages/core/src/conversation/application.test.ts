@@ -37,6 +37,7 @@ import {
   type ConversationTaskListToolStagePort,
   type ConversationUsageProjectionPort,
   type ConversationSecurityProjectionPort,
+  type ConversationResolutionFence,
 } from "./application.js";
 
 class TestCancellationResponseEffect extends ConversationCancellationResponseEffect {
@@ -1325,6 +1326,7 @@ describe("ConversationDirectoryApplicationService", () => {
   });
 
   it("owns uncertain-resolution validation and returns the correctness result unchanged", async () => {
+    const resolutionFence = "opaque-correctness-fence" as ConversationResolutionFence;
     const resolveUncertain = vi.fn(async () => ({
       state: "cancelled" as const,
       factDigest: `sha256:${"b".repeat(64)}`,
@@ -1354,7 +1356,7 @@ describe("ConversationDirectoryApplicationService", () => {
         conversationId: "conversation-1",
         runId: "run-1",
         operationId: "resolve-operation-1",
-        ownerEpoch: 1,
+        resolutionFence,
         openFactDigest: `sha256:${"a".repeat(64)}`,
         decision: "user-abandoned",
         caller: {
@@ -1370,13 +1372,16 @@ describe("ConversationDirectoryApplicationService", () => {
       },
       facts: [],
     });
+    expect(resolveUncertain).toHaveBeenCalledWith(
+      expect.objectContaining({ resolutionFence }),
+    );
     await expect(
       application.resolveUncertain({
         kind: "resolve-uncertain",
         conversationId: "conversation-1",
         runId: "run-1",
         operationId: "resolve-operation-1",
-        ownerEpoch: -1,
+        resolutionFence: "" as ConversationResolutionFence,
         openFactDigest: `sha256:${"a".repeat(64)}`,
         decision: "user-abandoned",
         caller: {
