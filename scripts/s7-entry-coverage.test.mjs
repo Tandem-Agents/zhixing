@@ -5407,9 +5407,18 @@ test("Kernel tool implementations are concrete only at the Host edge", async () 
     "packages/cli/src/serve/executor-role-runtime.ts",
     "packages/cli/src/runtime/workspace-command.ts",
     "packages/core/src/conversation/application.ts",
+    "packages/core/src/conversation/task-list-state.ts",
+    "packages/core/src/conversation/__tests__/task-list-state.test.ts",
     "packages/core/src/workscene/application.ts",
     "packages/tools-builtin/src/task-list.ts",
+    "packages/tools-builtin/src/__tests__/task-list.test.ts",
+    "packages/tools-builtin/src/index.ts",
     "packages/cli/src/serve/conversation-task-list-application.ts",
+    "packages/cli/src/runtime/task-list-stores.ts",
+    "packages/cli/src/serve/conversation-storage-infrastructure.ts",
+    "packages/cli/src/serve/access-surface.ts",
+    "packages/cli/src/runtime/turn-context-providers.ts",
+    "packages/cli/src/serve/segment-deps.ts",
     "packages/cli/src/serve/builtin-extra-tools.ts",
     "packages/cli/src/serve/workmode-tools.ts",
     "packages/cli/src/serve/workscene-application-adapter.ts",
@@ -5452,6 +5461,33 @@ test("Kernel tool implementations are concrete only at the Host edge", async () 
     "packages/tools-builtin/src/task-list.ts",
     (text) => `${text}\nconst assignmentMutations = runContextStorage.getStore();`,
   )).join("\n"), /Conversation-owned command/);
+  assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
+    "packages/core/src/conversation/task-list-state.ts",
+    (text) => text.replace("export class TaskListService", "class TaskListService"),
+  )).join("\n"), /task-list state, cache, subscription and Store port/);
+  assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
+    "packages/tools-builtin/src/task-list.ts",
+    (text) => `${text}\nexport interface TaskListStore { load(): Promise<unknown>; }`,
+  )).join("\n"), /task-list state, cache, subscription and Store port/);
+  assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
+    "packages/tools-builtin/src/index.ts",
+    (text) => `${text}\nexport { TaskListService } from "./task-list.js";`,
+  )).join("\n"), /task-list state, cache, subscription and Store port/);
+  assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
+    "packages/cli/src/runtime/task-list-stores.ts",
+    (text) => text.replace(
+      'from "@zhixing/core/conversation/application"',
+      'from "@zhixing/tools-builtin"',
+    ),
+  )).join("\n"), /task-list state, cache, subscription and Store port/);
+  assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
+    "packages/tools-builtin/src/__tests__/task-list.test.ts",
+    (text) => `${text}\nconst leakedStateOwner: TaskListService | TaskListStore = owner;`,
+  )).join("\n"), /task-list state, cache, subscription and Store port or direct semantic tests/);
+  assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
+    "packages/core/src/conversation/__tests__/task-list-state.test.ts",
+    (text) => text.replace("service.acceptCommitted(", "service.set("),
+  )).join("\n"), /task-list state, cache, subscription and Store port or direct semantic tests/);
   assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
     "packages/cli/src/serve/workmode-tools.ts",
     (text) => `${text}\nconst assignmentMutations = runContextStorage.getStore();`,

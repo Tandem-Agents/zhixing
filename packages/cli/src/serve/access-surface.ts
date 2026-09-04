@@ -30,6 +30,7 @@ import type { ChannelDeliveryEffectSource } from "@zhixing/core/delivery/channel
 import type {
   ConversationClearProjectionPort,
   ConversationCommittedViewStorage,
+  TaskListService,
 } from "@zhixing/core/conversation/application";
 import type {
   DeviceRole,
@@ -66,7 +67,6 @@ import type {
   AdvancementController,
   AdvancementRecoveryMaintenance,
 } from "@zhixing/owner-services";
-import type { TaskListService } from "@zhixing/tools-builtin";
 import type {
   AuthorityRuntimeStack,
   DeliveryStack,

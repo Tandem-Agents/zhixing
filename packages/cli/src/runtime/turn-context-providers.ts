@@ -31,7 +31,7 @@ import {
   type TurnContextProvider,
 } from "@zhixing/core";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
-import type { TaskListService } from "@zhixing/tools-builtin";
+import type { TaskListService } from "@zhixing/core/conversation/application";
 
 /**
  * Scheduler 不可用时的空状态 fallback —— serve 模式 lazy scheduler ref 未就绪时

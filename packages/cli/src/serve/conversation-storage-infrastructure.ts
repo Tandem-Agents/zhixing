@@ -18,6 +18,7 @@ import {
 import type {
   ConversationCommittedViewStorage,
   ConversationDirectoryStorage,
+  TaskListStore,
 } from "@zhixing/core/conversation/application";
 import {
   buildStartupBootstrap,
@@ -34,7 +35,6 @@ import {
   type RunRecordWithRef,
 } from "@zhixing/core/transcript";
 import type { ConversationManagerCallbacks } from "@zhixing/owner-kernel";
-import type { TaskListStore } from "@zhixing/tools-builtin";
 import { RoutedConversationRepoTaskListStore } from "../runtime/task-list-stores.js";
 import { createConversationDirectory } from "./conversation-directory.js";
 import type { NamerConversationRepo } from "./turn-maintenance.js";

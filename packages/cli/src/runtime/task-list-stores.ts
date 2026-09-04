@@ -14,7 +14,7 @@
  */
 
 import type { IConversationRepository, TaskListState } from "@zhixing/core";
-import type { TaskListStore } from "@zhixing/tools-builtin";
+import type { TaskListStore } from "@zhixing/core/conversation/application";
 
 // ─── 持久化 store ───
 

@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { TaskListState } from "@zhixing/core";
+import {
+  TaskListService,
+  type TaskListStore,
+} from "@zhixing/core/conversation/application";
 import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import { TaskListService, type TaskListStore } from "@zhixing/tools-builtin";
 import { createAnchorConversationTaskListPort } from "../conversation-task-list-application.js";
 
 function memoryStore() {

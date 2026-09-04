@@ -7,10 +7,10 @@ import {
   ConversationApplicationError,
   ConversationTaskListToolApplicationService,
   type ConversationTaskListToolApplication,
+  type TaskListService,
 } from "@zhixing/core/conversation/application";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
-import type { TaskListService } from "@zhixing/tools-builtin";
 
 /**
  * Anchor Correctness adapter for the agent-facing replacement command. The

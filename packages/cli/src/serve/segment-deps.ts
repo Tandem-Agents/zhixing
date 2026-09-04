@@ -23,7 +23,7 @@ import {
   type SegmentPersistence,
   type TaskListReader,
 } from "@zhixing/core";
-import type { TaskListService } from "@zhixing/tools-builtin";
+import type { TaskListService } from "@zhixing/core/conversation/application";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 
 export interface RuntimeHostSegmentDeps {

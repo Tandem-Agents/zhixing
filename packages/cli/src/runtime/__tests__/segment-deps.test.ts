@@ -21,8 +21,8 @@ import type {
   AssignmentMutationOverlayRecord,
   AssignmentMutationPort,
 } from "@zhixing/core/contracts";
+import { TaskListService } from "@zhixing/core/conversation/application";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
-import { TaskListService } from "@zhixing/tools-builtin";
 import { InMemoryTaskListStore } from "../task-list-stores.js";
 import {
   createPersistentSegmentDeps,

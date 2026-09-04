@@ -16,8 +16,8 @@ import {
   TaskListProvider,
   type TaskStatusSummary,
 } from "@zhixing/core";
+import { TaskListService } from "@zhixing/core/conversation/application";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
-import { TaskListService } from "@zhixing/tools-builtin";
 import { InMemoryTaskListStore } from "../task-list-stores.js";
 import {
   EMPTY_TASK_STATUS_SUMMARY,

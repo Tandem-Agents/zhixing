@@ -7,7 +7,10 @@
 
 import { describe, it, expect, beforeEach } from "vitest";
 import type { TaskListState } from "@zhixing/core";
-import { TaskListService, type TaskListStore } from "@zhixing/tools-builtin";
+import {
+  TaskListService,
+  type TaskListStore,
+} from "@zhixing/core/conversation/application";
 import { TaskTail } from "../task-tail.js";
 import { stripAnsi } from "../../tui/index.js";
 

@@ -5,13 +5,7 @@ export { createGlobTool } from "./glob.js";
 export { createGrepTool } from "./grep.js";
 export { createBashTool } from "./bash.js";
 export { createScheduleTool } from "./schedule.js";
-export {
-  createTaskListTool,
-  TaskListService,
-  type TaskListStore,
-  type TaskListStateEvent,
-  type TaskListStateListener,
-} from "./task-list.js";
+export { createTaskListTool } from "./task-list.js";
 export { createWebFetchTool } from "./web-fetch.js";
 export { WEB_FETCH_DEFAULT_RULES } from "./web-fetch-rules.js";
 export {

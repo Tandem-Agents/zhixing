@@ -19,6 +19,13 @@ import type { ContextBudget } from "../context/types.js";
 import type { TaskItem, TaskListState } from "./types.js";
 import { parseConversationId } from "./scope-id.js";
 
+export {
+  TaskListService,
+  type TaskListStateEvent,
+  type TaskListStateListener,
+  type TaskListStore,
+} from "./task-list-state.js";
+
 /** Persisted Conversation identity projected by the domain storage port. */
 export interface ConversationDirectoryRecord {
   readonly conversationId: string;

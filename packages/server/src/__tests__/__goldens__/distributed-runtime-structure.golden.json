@@ -1198,7 +1198,7 @@
     },
     {
       "kind": "type-import",
-      "references": 28,
+      "references": 30,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/core"
     },
@@ -1225,12 +1225,6 @@
       "references": 6,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/rpc"
-    },
-    {
-      "kind": "type-import",
-      "references": 2,
-      "sourceZone": "cli/runtime",
-      "target": "package:@zhixing/tools-builtin"
     },
     {
       "kind": "dynamic-import",
@@ -1276,7 +1270,7 @@
     },
     {
       "kind": "import",
-      "references": 195,
+      "references": 196,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1411,12 +1405,6 @@
       "references": 8,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/server"
-    },
-    {
-      "kind": "type-import",
-      "references": 4,
-      "sourceZone": "cli/serve",
-      "target": "package:@zhixing/tools-builtin"
     },
     {
       "kind": "import",

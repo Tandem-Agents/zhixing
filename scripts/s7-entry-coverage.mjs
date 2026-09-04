@@ -2903,13 +2903,34 @@ export function inspectKernelToolImplementationDependencyInversion(records) {
   const conversationApplication = required(
     "packages/core/src/conversation/application.ts",
   );
+  const conversationTaskListState = required(
+    "packages/core/src/conversation/task-list-state.ts",
+  );
+  const conversationTaskListStateTest = required(
+    "packages/core/src/conversation/__tests__/task-list-state.test.ts",
+  );
   const worksceneApplication = required(
     "packages/core/src/workscene/application.ts",
   );
   const taskListBinding = required("packages/tools-builtin/src/task-list.ts");
+  const taskListBindingTest = required(
+    "packages/tools-builtin/src/__tests__/task-list.test.ts",
+  );
+  const toolsIndex = required("packages/tools-builtin/src/index.ts");
   const taskListAdapter = required(
     "packages/cli/src/serve/conversation-task-list-application.ts",
   );
+  const taskListStorage = required(
+    "packages/cli/src/runtime/task-list-stores.ts",
+  );
+  const conversationStorage = required(
+    "packages/cli/src/serve/conversation-storage-infrastructure.ts",
+  );
+  const accessSurface = required("packages/cli/src/serve/access-surface.ts");
+  const turnContextProviders = required(
+    "packages/cli/src/runtime/turn-context-providers.ts",
+  );
+  const segmentDeps = required("packages/cli/src/serve/segment-deps.ts");
   const extraTools = required("packages/cli/src/serve/builtin-extra-tools.ts");
   const worksceneTools = required("packages/cli/src/serve/workmode-tools.ts");
   const worksceneAdapter = required(
@@ -2995,6 +3016,77 @@ export function inspectKernelToolImplementationDependencyInversion(records) {
   ) {
     failures.push(
       "task_list does not have one Conversation-owned command and finite Correctness adapter",
+    );
+  }
+  const taskListDomainConsumers = [
+    ["packages/cli/src/serve/builtin-extra-tools.ts", extraTools],
+    ["packages/cli/src/serve/conversation-task-list-application.ts", taskListAdapter],
+    ["packages/cli/src/runtime/task-list-stores.ts", taskListStorage],
+    ["packages/cli/src/serve/conversation-storage-infrastructure.ts", conversationStorage],
+    ["packages/cli/src/serve/access-surface.ts", accessSurface],
+    ["packages/cli/src/runtime/turn-context-providers.ts", turnContextProviders],
+    ["packages/cli/src/serve/segment-deps.ts", segmentDeps],
+  ];
+  const taskListStateOwners = records.filter(
+    (record) =>
+      !record.relative.includes(".test.") &&
+      /export\s+(?:interface TaskListStore|interface TaskListStateEvent|class TaskListService)\b/u.test(
+        record.text,
+      ),
+  );
+  const taskListToolEdgeLeaks = records.filter(
+    (record) =>
+      !record.relative.includes(".test.") &&
+      /import\s+(?:type\s+)?\{[^}]*\b(?:TaskListService|TaskListStore|TaskListStateEvent|TaskListStateListener)\b[^}]*\}\s+from\s+["']@zhixing\/tools-builtin["']/u.test(
+        record.text,
+      ),
+  );
+  const taskListToolTestStateOwners = records.filter(
+    (record) =>
+      record.relative.startsWith("packages/tools-builtin/src/") &&
+      record.relative.includes(".test.") &&
+      /\b(?:TaskListService|TaskListStore)\b/u.test(record.text),
+  );
+  if (
+    !conversationTaskListState.includes("export interface TaskListStore") ||
+    !conversationTaskListState.includes("export class TaskListService") ||
+    !conversationTaskListState.includes("export interface TaskListStateEvent") ||
+    !conversationTaskListState.includes("private readonly cache = new Map") ||
+    !conversationTaskListState.includes("await this.store.save(conversationId, next)") ||
+    !conversationTaskListState.includes("acceptCommitted(conversationId: string") ||
+    !conversationTaskListState.includes("subscribe(listener: TaskListStateListener)") ||
+    !conversationApplication.includes('from "./task-list-state.js";') ||
+    /\b(?:class TaskListService|interface TaskListStore|interface TaskListStateEvent)\b/u.test(
+      taskListBinding,
+    ) ||
+    /\b(?:TaskListService|TaskListStore|TaskListStateEvent|TaskListStateListener)\b/u.test(
+      toolsIndex,
+    ) ||
+    taskListStateOwners.length !== 1 ||
+    taskListStateOwners[0]?.relative !==
+      "packages/core/src/conversation/task-list-state.ts" ||
+    taskListToolEdgeLeaks.length !== 0 ||
+    taskListToolTestStateOwners.length !== 0 ||
+    !conversationTaskListStateTest.includes("new TaskListService(") ||
+    !conversationTaskListStateTest.includes("service.prime(") ||
+    !conversationTaskListStateTest.includes("service.set(") ||
+    !conversationTaskListStateTest.includes("service.acceptCommitted(") ||
+    !conversationTaskListStateTest.includes("service.clear(") ||
+    !conversationTaskListStateTest.includes("service.mutate(") ||
+    !conversationTaskListStateTest.includes("service.subscribe(") ||
+    !taskListBindingTest.includes("createTaskListTool(") ||
+    !taskListBindingTest.includes("ConversationTaskListToolApplication") ||
+    !taskListBindingTest.includes("observed.calls") ||
+    taskListDomainConsumers.some(
+      ([, source]) =>
+        !source.includes('from "@zhixing/core/conversation/application"') ||
+        /import\s+(?:type\s+)?\{[^}]*\b(?:TaskListService|TaskListStore|TaskListStateEvent|TaskListStateListener)\b[^}]*\}\s+from\s+["']@zhixing\/tools-builtin["']/u.test(
+          source,
+        ),
+    )
+  ) {
+    failures.push(
+      "Conversation task-list state, cache, subscription and Store port or direct semantic tests escaped the domain boundary",
     );
   }
   if (
@@ -4096,6 +4188,26 @@ export async function validateS7Structure() {
     {
       relative: "packages/orchestrator/package.json",
       text: await readFile(path.join(root, "packages/orchestrator/package.json"), "utf8"),
+    },
+    {
+      relative: "packages/core/src/conversation/__tests__/task-list-state.test.ts",
+      text: await readFile(
+        path.join(
+          root,
+          "packages/core/src/conversation/__tests__/task-list-state.test.ts",
+        ),
+        "utf8",
+      ),
+    },
+    {
+      relative: "packages/tools-builtin/src/__tests__/task-list.test.ts",
+      text: await readFile(
+        path.join(
+          root,
+          "packages/tools-builtin/src/__tests__/task-list.test.ts",
+        ),
+        "utf8",
+      ),
     },
   ]));
   failures.push(...inspectAdvancementProviderDependencyInversion(records));
@@ -6809,7 +6921,6 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
       "Advancement application must be statically composed from bound Conversation ports before recovery, ingress, and RuntimeHost publication",
     );
   }
-
   const allowedStoreWriteOwners = new Set([
     "packages/owner-services/src/advancement/controller.ts",
     "packages/owner-services/src/advancement/evidence.ts",
