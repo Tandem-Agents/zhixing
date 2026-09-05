@@ -134,6 +134,54 @@ function deviceAdministrationProductApi(
 
 describe("Device Administration command Product API input", () => {
   it.each([
+    ["device.remove", buildDeviceRemoveMethod, {
+      requestId: "request-1",
+      operationId: "operation-1",
+      targetName: "设备",
+    }],
+    ["device.continue", buildDeviceContinueMethod, {
+      targetName: "设备",
+      operationId: "operation-1",
+      mode: "cancel",
+    }],
+    ["device.status", buildDeviceStatusMethod, { targetName: "设备" }],
+    ["dutyMigration.prepare", buildDutyMigrationPrepareMethod, {
+      requestId: "request:duty-1",
+      transferId: "duty-1",
+      targetDeviceId: "device-target",
+    }],
+    ["dutyMigration.commit", buildDutyMigrationCommitMethod, {
+      requestId: "request:duty-1",
+      transferId: "duty-1",
+    }],
+    ["dutyMigration.cancel", buildDutyMigrationCancelMethod, {
+      requestId: "request:duty-1",
+      transferId: "duty-1",
+    }],
+  ] as const)(
+    "%s preserves service-availability precedence for invalid and valid params",
+    async (name, build, validParams) => {
+      const unavailableMessage = name.startsWith("device.")
+        ? "设备管理当前不可用"
+        : "值班设备迁移当前不可用";
+      for (const params of [{}, validParams]) {
+        await expect(build().handler(params, mkCtx())).rejects.toMatchObject({
+          code: RPC_ERROR_CODES.INTERNAL_ERROR,
+          message: unavailableMessage,
+        });
+      }
+
+      const available = mkCtx({
+        productApi: deviceAdministrationProductApi(),
+      });
+      await expect(build().handler({}, available)).rejects.toMatchObject({
+        code: RPC_ERROR_CODES.INVALID_PARAMS,
+      });
+      await expect(build().handler(validParams, available)).resolves.toBeDefined();
+    },
+  );
+
+  it.each([
     [buildDeviceRemoveMethod, { requestId: "request-1", operationId: "operation-1", targetName: "设备", extra: true }],
     [buildDeviceContinueMethod, { targetName: "设备", mode: "destroy", extra: true }],
     [buildDeviceStatusMethod, { targetName: "设备", extra: true }],
