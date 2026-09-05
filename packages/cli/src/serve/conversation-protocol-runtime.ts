@@ -77,6 +77,7 @@ import {
   type DeferredIntentConversationTransaction,
   type InProcessDispatchContextFactory,
   type ConversationTransferAuthorityRecord,
+  type TurnCommittedInfo,
   ConversationSessionStateAdapter,
 } from "@zhixing/owner-kernel";
 import {
@@ -125,11 +126,8 @@ const CONTROL_RENEWAL_INTERVAL_MS = Math.floor(CONTEXT_TTL_MS / 3);
 export interface ConversationProtocolRuntimeOptions {
   readonly authority?: AuthorityRuntimeStack;
   readonly owner?: ConversationOwnerRuntimeStack;
-  /**
-   * Legacy constructor seam used by isolated protocol tests. Production hosts
-   * bind a constructed manager once through `bindManager` before publication.
-   */
-  readonly manager?: () => ConversationManager;
+  readonly losslessDataPlane: ConversationLosslessDataPlaneTopology;
+  readonly manager: () => ConversationManager;
   readonly clock?: () => string;
   readonly interactions: DurableConversationInteractionObserver;
   readonly executorDispatch: ConversationExecutorDispatchApplication;
@@ -164,7 +162,7 @@ export interface ConversationProtocolRuntimeOptions {
     input: DurableConversationSessionProjectionInput,
   ) => Promise<void>;
   /** Reconciles durable conversation facts with independently persisted auxiliary views. */
-  readonly recoverAuxiliary?: (conversationId: string) => Promise<void>;
+  readonly recoverAuxiliary: (conversationId: string) => Promise<void>;
 }
 
 interface AppliedConversationAdmission {
@@ -195,10 +193,95 @@ export interface ConversationLosslessDataPlanePort {
   recoverConversationChannels(journal: ConversationRunJournal): Promise<number>;
 }
 
+export type ConversationLosslessDataPlaneTopology =
+  | Readonly<{
+      readonly kind: "available";
+      readonly port: ConversationLosslessDataPlanePort;
+    }>
+  | Readonly<{
+      readonly kind: "absent";
+      readonly reason: "executor-only";
+    }>;
+
+/** Private one-shot seam for the protocol/manager construction cycle. */
+export function createConversationManagerAssemblyHandle(): Readonly<{
+  readonly resolve: () => ConversationManager;
+  complete(manager: ConversationManager): void;
+}> {
+  let manager: ConversationManager | undefined;
+  let completed = false;
+  const resolve = (): ConversationManager => {
+    if (!completed || !manager) {
+      throw new Error("Conversation protocol manager is not assembled");
+    }
+    return manager;
+  };
+  return Object.freeze({
+    resolve,
+    complete(candidate: ConversationManager) {
+      if (completed) {
+        throw new Error("Conversation protocol manager is already assembled");
+      }
+      manager = candidate;
+      completed = true;
+    },
+  });
+}
+
+/** Private one-shot seam for the protocol/auxiliary-recovery construction cycle. */
+export function createConversationAuxiliaryRecoveryAssemblyHandle(): Readonly<{
+  readonly resolve: (conversationId: string) => Promise<void>;
+  complete(recover: (conversationId: string) => Promise<void>): void;
+}> {
+  let recovery: ((conversationId: string) => Promise<void>) | undefined;
+  let completed = false;
+  const resolve = (conversationId: string): Promise<void> => {
+    if (!completed || !recovery) {
+      throw new Error("Conversation auxiliary recovery is not assembled");
+    }
+    return recovery(conversationId);
+  };
+  return Object.freeze({
+    resolve,
+    complete(candidate: (conversationId: string) => Promise<void>) {
+      if (completed) {
+        throw new Error("Conversation auxiliary recovery is already assembled");
+      }
+      recovery = candidate;
+      completed = true;
+    },
+  });
+}
+
+/** Private one-shot seam for the committed-turn consumer construction cycle. */
+export function createConversationCommittedTurnListenerAssemblyHandle(): Readonly<{
+  readonly notify: (info: TurnCommittedInfo) => void;
+  complete(listener: (info: TurnCommittedInfo) => void): void;
+}> {
+  let listener: ((info: TurnCommittedInfo) => void) | undefined;
+  let completed = false;
+  const notify = (info: TurnCommittedInfo): void => {
+    if (!completed || !listener) {
+      throw new Error("Conversation committed-turn listener is not assembled");
+    }
+    listener(info);
+  };
+  return Object.freeze({
+    notify,
+    complete(candidate: (info: TurnCommittedInfo) => void) {
+      if (completed) {
+        throw new Error("Conversation committed-turn listener is already assembled");
+      }
+      listener = candidate;
+      completed = true;
+    },
+  });
+}
+
 /** Single-process production composition for the durable conversation protocol. */
 export class ConversationProtocolRuntime implements DurableConversationTurnExecutor {
   readonly #authority: ConversationOwnerRuntimeStack;
-  #manager: (() => ConversationManager) | undefined;
+  readonly #manager: () => ConversationManager;
   readonly #clock: () => string;
   #sessionState: SessionStatePort | undefined;
   readonly #executorDispatch: ConversationExecutorDispatchApplication;
@@ -239,7 +322,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   readonly #projectLifecycle:
     | ((input: DurableConversationSessionProjectionInput) => Promise<void>)
     | undefined;
-  #recoverAuxiliary: ((conversationId: string) => Promise<void>) | undefined;
+  readonly #recoverAuxiliary: (conversationId: string) => Promise<void>;
   readonly #lifecycleProjectionClaims = new Map<string, Promise<number>>();
   readonly #activeRecoveryClaims = new Map<string, number>();
   readonly #pendingConversationRetirements = new Set<string>();
@@ -253,9 +336,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   #recoveryGeneration = 0;
   readonly #recoveryConversations = new Map<string, number>();
   readonly #sessionIdentities = new Map<string, Promise<void>>();
-  #losslessDataPlane:
-    | ConversationLosslessDataPlanePort
-    | undefined;
+  readonly #losslessDataPlane: ConversationLosslessDataPlaneTopology;
   #mutationPublisher: ConversationMutationPublisher | undefined;
   readonly #mutationPublisherProxy: ConversationMutationPublisher;
   readonly deferredIntentAuthority: DeferredIntentConversationAuthority;
@@ -298,6 +379,22 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#executorDispatch = options.executorDispatch;
     this.#assignmentArtifactAuthority = options.assignmentArtifactAuthority;
     this.#assignmentStaging = options.assignmentStaging;
+    if (options.losslessDataPlane.kind === "available") {
+      if (!options.losslessDataPlane.port) {
+        throw new Error("Conversation protocol requires the lossless data plane");
+      }
+      this.#losslessDataPlane = Object.freeze({
+        kind: "available",
+        port: options.losslessDataPlane.port,
+      });
+    } else if (options.losslessDataPlane.reason === "executor-only") {
+      this.#losslessDataPlane = Object.freeze({
+        kind: "absent",
+        reason: "executor-only",
+      });
+    } else {
+      throw new Error("Conversation protocol received an invalid data-plane topology");
+    }
     this.#interactions = options.interactions;
     this.#executeRecoveredPerspective = options.executeRecoveredPerspective;
     this.#onStatus = options.onStatus;
@@ -306,6 +403,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
     this.#onFirstPartyFrame = options.onFirstPartyFrame;
     this.#createFirstPartyFinality = options.createFirstPartyFinality;
     this.#projectLifecycle = options.projectLifecycle;
+    if (!options.recoverAuxiliary) {
+      throw new Error("Conversation protocol requires auxiliary recovery");
+    }
     this.#recoverAuxiliary = options.recoverAuxiliary;
     this.#issuer = new ConversationAssignmentAuthority({
       signer: authority.signer,
@@ -323,44 +423,6 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       conversationIdFor: (assignmentId) =>
         this.#conversationForAssignment(assignmentId),
     });
-  }
-
-  /**
-   * Binds the optional auxiliary recovery participant exactly once during
-   * host assembly. The protocol is not published until this finite seam has
-   * been completed, so no recovery event can observe a late-bound holder.
-   */
-  bindAuxiliaryRecovery(
-    recover: (conversationId: string) => Promise<void>,
-  ): void {
-    if (this.#recoverAuxiliary) {
-      throw new Error("Conversation auxiliary recovery is already bound");
-    }
-    this.#recoverAuxiliary = recover;
-  }
-
-  /** Completes the manager/protocol cycle once, before either side is published. */
-  bindManager(manager: ConversationManager): void {
-    if (this.#manager) {
-      throw new Error("Conversation protocol manager is already bound");
-    }
-    this.#manager = () => manager;
-  }
-
-  /** Fail closed if a host attempts to publish an incomplete protocol graph. */
-  assertManagerBound(): void {
-    if (!this.#manager) {
-      throw new Error("Conversation protocol manager is not bound");
-    }
-  }
-
-  bindLosslessDataPlane(
-    runtime: ConversationLosslessDataPlanePort,
-  ): void {
-    if (this.#losslessDataPlane && this.#losslessDataPlane !== runtime) {
-      throw new Error("Conversation lossless data plane is already bound");
-    }
-    this.#losslessDataPlane = runtime;
   }
 
   bindMutationPublisher(publisher: ConversationMutationPublisher): () => void {
@@ -1162,8 +1224,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       } as const;
       if (
         executionIngress.kind === "channel" &&
-        this.#losslessDataPlane
+        this.#losslessDataPlane.kind === "available"
       ) {
+        const losslessDataPlane = this.#losslessDataPlane.port;
         const ticketId = `ticket:${protocolDigest(
           "ConversationChannelTicketIdentity",
           1,
@@ -1180,7 +1243,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           ttlMs: 24 * 60 * 60 * 1_000,
         });
         channelSession =
-          await this.#losslessDataPlane.openConversationChannel({
+          await losslessDataPlane.openConversationChannel({
             executorId: targetExecutorId,
             assignmentId,
             ref: {
@@ -1194,8 +1257,9 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
           });
       } else if (
         executionIngress.kind === "first-party" &&
-        this.#losslessDataPlane?.openFirstPartySurfaceSession
+        this.#losslessDataPlane.kind === "available"
       ) {
+        const losslessDataPlane = this.#losslessDataPlane.port;
         const ticketId = `ticket:${protocolDigest(
           "ConversationFirstPartyTicketIdentity",
           1,
@@ -1236,7 +1300,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         });
         await firstPartyFinalitySession?.start();
         firstPartySurfaceSession =
-          await this.#losslessDataPlane.openFirstPartySurfaceSession({
+          await losslessDataPlane.openFirstPartySurfaceSession({
             executorId: targetExecutorId,
             assignmentId,
             ref: streamRef,
@@ -1934,10 +1998,11 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
       this.#withRecoveryClaim(conversationId, async () => {
         let count = 0;
         const journal = this.#journal(conversationId);
-        count +=
-          (await this.#losslessDataPlane?.recoverConversationChannels(
+        if (this.#losslessDataPlane.kind === "available") {
+          count += await this.#losslessDataPlane.port.recoverConversationChannels(
             journal,
-          )) ?? 0;
+          );
+        }
         count += await this.#resumeLifecycleProjections(conversationId, journal);
         const authority = await journal.authorityState();
         if (authority.deleted && authority.pendingLifecycleProjections === 0) {
@@ -1981,7 +2046,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
         if (this.#recoveryStopped) return count;
         count += await this.publishPendingFinals(conversationId);
         await this.#retireSettledAssignments(conversationId, journal);
-        await this.#recoverAuxiliary?.(conversationId);
+        await this.#recoverAuxiliary(conversationId);
         return count;
       });
     const workers = Array.from(
@@ -2933,11 +2998,7 @@ export class ConversationProtocolRuntime implements DurableConversationTurnExecu
   }
 
   #requiredManager(): ConversationManager {
-    const manager = this.#manager?.();
-    if (!manager) {
-      throw new Error("Conversation protocol manager is not bound");
-    }
-    return manager;
+    return this.#manager();
   }
 
   #requiredMutationPublisher(): ConversationMutationPublisher {

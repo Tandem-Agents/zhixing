@@ -292,7 +292,10 @@ describe("InboundRouter", () => {
         idleCheckIntervalMs: 100_000,
       },
       options?.durableTurnExecutor
-        ? { durableTurnExecutor: options.durableTurnExecutor }
+        ? {
+            durableTurnExecutor: options.durableTurnExecutor,
+            onTurnCommitted: () => {},
+          }
         : undefined,
     );
     const channels = new ChannelRegistry({

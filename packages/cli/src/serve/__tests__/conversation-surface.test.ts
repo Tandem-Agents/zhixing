@@ -178,34 +178,19 @@ async function setupCtx() {
 }
 
 describe("conversation 接入面：历史装载服从持久层不变量", { timeout: 30_000 }, () => {
-  it("binds and verifies the committed-turn listener before publishing the manager", async () => {
-    const bind = vi.spyOn(
-      ConversationManager.prototype,
-      "bindTurnCommittedListener",
-    );
-    const verify = vi.spyOn(
-      ConversationManager.prototype,
-      "assertTurnCommittedListenerBound",
-    );
-    const bindManager = vi.spyOn(
-      ConversationProtocolRuntime.prototype,
-      "bindManager",
-    );
-    const verifyManager = vi.spyOn(
-      ConversationProtocolRuntime.prototype,
-      "assertManagerBound",
-    );
+  it("publishes a complete protocol/manager pair with an immutable committed-turn listener", async () => {
     const { ctx, advancementConversationComposition } = await setupCtx();
     try {
-      expect(bind).toHaveBeenCalledOnce();
-      expect(verify).toHaveBeenCalledOnce();
-      expect(bindManager).toHaveBeenCalledOnce();
-      expect(verifyManager).toHaveBeenCalledOnce();
-      expect(bindManager.mock.invocationCallOrder[0]).toBeLessThan(
-        bind.mock.invocationCallOrder[0]!,
+      expect(ConversationManager.prototype).not.toHaveProperty(
+        "bindTurnCommittedListener",
       );
-      expect(verifyManager.mock.invocationCallOrder[0]).toBeLessThan(
-        advancementConversationComposition.create.mock.invocationCallOrder[0]!,
+      expect(ConversationManager.prototype).not.toHaveProperty(
+        "assertTurnCommittedListenerBound",
+      );
+      expect(ctx.conversationProtocol).not.toHaveProperty("bindManager");
+      expect(ctx.conversationProtocol).not.toHaveProperty("assertManagerBound");
+      expect(ctx.conversationProtocol).not.toHaveProperty(
+        "bindAuxiliaryRecovery",
       );
       expect(advancementConversationComposition.create).toHaveBeenCalledOnce();
       const compositionInput = advancementConversationComposition.create.mock
@@ -217,16 +202,8 @@ describe("conversation 接入面：历史装载服从持久层不变量", { time
       await expect(compositionInput?.recentContext.read("context-conversation"))
         .resolves.toBeUndefined();
       expect(getHistory).toHaveBeenCalledWith("context-conversation", 6);
-      expect(bind.mock.invocationCallOrder[0]).toBeLessThan(
-        verify.mock.invocationCallOrder[0]!,
-      );
-      expect(() => ctx.conversations!.assertTurnCommittedListenerBound()).not.toThrow();
     } finally {
       await ctx.conversations!.disposeAll();
-      bind.mockRestore();
-      verify.mockRestore();
-      bindManager.mockRestore();
-      verifyManager.mockRestore();
     }
   });
 

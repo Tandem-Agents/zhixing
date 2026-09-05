@@ -16,6 +16,7 @@ import {
 import {
   ConversationProtocolRuntime,
   DurableConversationInteractionObserver,
+  type ConversationLosslessDataPlaneTopology,
 } from "../conversation-protocol-runtime.js";
 import {
   createLocalOwnerAssemblyFixture,
@@ -29,6 +30,19 @@ const READINESS = {
   deviceScopedCredentialBindingIds: [] as string[],
   credentialGeneration: null,
 };
+
+const TEST_ANCHOR_LOSSLESS_DATA_PLANE = Object.freeze({
+  kind: "available" as const,
+  port: Object.freeze({
+    openConversationChannel: async () => {
+      throw new Error("Owner conformance does not execute a Channel turn");
+    },
+    openFirstPartySurfaceSession: async () => {
+      throw new Error("Owner conformance does not execute a first-party turn");
+    },
+    recoverConversationChannels: async () => 0,
+  }),
+}) satisfies ConversationLosslessDataPlaneTopology;
 
 const CONFIGURATIONS = [
   { name: "anchor", enableAnchor: true, enableLocalExecutor: true, domain: "anchor" },
@@ -66,6 +80,7 @@ describe("conversation owner domain conformance", () => {
         : anchorConversationOwnerRuntime(authority);
       const protocol = new ConversationProtocolRuntime({
         ...(configuration.domain === "local" ? { owner } : { authority }),
+        losslessDataPlane: TEST_ANCHOR_LOSSLESS_DATA_PLANE,
         executorDispatch: createConversationExecutorHostBoundary({
           authority: owner,
           directory: NO_REMOTE_CONVERSATION_EXECUTORS,
@@ -73,6 +88,7 @@ describe("conversation owner domain conformance", () => {
         }).application,
         assignmentArtifactAuthority: createConversationAssignmentArtifactAuthorityIndex(),
         manager: () => manager,
+        recoverAuxiliary: async () => {},
         interactions: new DurableConversationInteractionObserver(),
       });
       const context = (requestId: string) => ({

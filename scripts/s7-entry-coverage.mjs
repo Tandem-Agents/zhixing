@@ -730,12 +730,15 @@ export function inspectChannelRuntimeBoundary(records) {
   const delivery = byPath.get("packages/core/src/delivery/channel-effect.ts");
   const lossless = byPath.get("packages/cli/src/serve/lossless-data-plane-runtime.ts");
   const coordinator = byPath.get("packages/cli/src/serve/channel-interaction-coordinator.ts");
+  const protocol = byPath.get("packages/cli/src/serve/conversation-protocol-runtime.ts");
+  const localOwner = byPath.get("packages/cli/src/serve/local-conversation-owner.ts");
   const setupDelivery = byPath.get("packages/cli/src/setup-delivery.ts");
   if (
     !channels || !access || !assemblyContext || !registry || !composition ||
     !binding || !command || !conversationApplication ||
     !admission || !runControl || !context || !server || !inbound ||
-    !confirmation || !delivery || !lossless || !coordinator || !setupDelivery
+    !confirmation || !delivery || !lossless || !coordinator || !protocol ||
+    !localOwner || !setupDelivery
   ) {
     return ["channel runtime boundary production sources are missing"];
   }
@@ -764,16 +767,34 @@ export function inspectChannelRuntimeBoundary(records) {
     access.indexOf("export function createAssemblyUnits("),
     access.indexOf("function usageReporterContext("),
   );
-  const channelPreparation = assemblyOrder.indexOf(
+  const channelPreparation = assemblyOrder.lastIndexOf(
     "createChannelSurface(channelCredentials)",
   );
-  const losslessComposition = assemblyOrder.indexOf("losslessDataPlaneSurface");
-  const jobOwnerRecovery = assemblyOrder.indexOf("executorJobOwnerStartUnit");
-  const interactionRecovery = assemblyOrder.indexOf("channelInteractionRecoveryUnit");
-  const deliveryAssembly = assemblyOrder.indexOf("deliverySurface");
+  const losslessComposition = assemblyOrder.lastIndexOf("losslessDataPlaneSurface");
+  const jobOwnerRecovery = assemblyOrder.lastIndexOf("executorJobOwnerStartUnit");
+  const interactionRecovery = assemblyOrder.lastIndexOf("channelInteractionRecoveryUnit");
+  const deliveryAssembly = assemblyOrder.lastIndexOf("deliverySurface");
   const challengeCallback = composition.indexOf("const onChallengeAction = Object.freeze(");
-  const protocolPublication = composition.indexOf(
-    "options.protocol.bindLosslessDataPlane(coordinator)",
+  const protocolCompletion = access.indexOf(
+    "assembly.complete(composition.coordinator)",
+  );
+  const compositionOptions = composition.match(
+    /export interface LosslessDataPlaneCompositionOptions\s*\{([\s\S]*?)\n\}/u,
+  )?.[1] ?? "";
+  const protocolTopology = protocol.match(
+    /export type ConversationLosslessDataPlaneTopology\s*=([\s\S]*?);\n\n/u,
+  )?.[1] ?? "";
+  const conversationAssembly = access.slice(
+    access.indexOf("createConversationSurface"),
+    access.indexOf("/** Device-local owner:"),
+  );
+  const losslessAssembly = access.slice(
+    access.indexOf("createLosslessDataPlaneSurface"),
+    access.indexOf("/** 会话执行面"),
+  );
+  const recoveryAssembly = access.slice(
+    access.indexOf("createChannelInteractionRecoveryUnit"),
+    access.indexOf("/** 投递栈"),
   );
   if (
     count(channels, "new ChannelRegistry({") !== 1 ||
@@ -909,7 +930,7 @@ export function inspectChannelRuntimeBoundary(records) {
     !registry.includes("isChallengeChannel(adapter) && !connection?.onChallengeAction") ||
     registry.includes("onChallengeAction?: (action: ChannelChallengeAction)") === false ||
     !channels.includes("onChallengeAction,") ||
-    challengeCallback < 0 || protocolPublication <= challengeCallback ||
+    challengeCallback < 0 || protocolCompletion < 0 ||
     !composition.includes("if (!options.isCurrentOwner())") ||
     !composition.includes("await coordinator.handleChallengeAction(action)") ||
     !assemblyContext.includes(
@@ -919,6 +940,46 @@ export function inspectChannelRuntimeBoundary(records) {
     access.includes("await coordinator.handleChallengeAction(action)")
   ) {
     failures.push("signed Channel challenge static composition or physical callback drifted");
+  }
+  if (
+    count(composition, "createConversationLosslessDataPlaneAssemblyHandle") !== 1 ||
+    !/readonly\s+port\s*:\s*ConversationLosslessDataPlanePort/u.test(composition) ||
+    !/\bcomplete\([^)]*ConversationLosslessDataPlanePort[^)]*\)\s*:\s*void/u.test(
+      composition,
+    ) ||
+    !/\bassertComplete\(\)\s*:\s*void/u.test(composition) ||
+    /\bprotocol\s*:/u.test(compositionOptions) ||
+    /\bbindLosslessDataPlane\s*\(/u.test(composition) ||
+    !/readonly\s+losslessDataPlane\s*:\s*ConversationLosslessDataPlaneTopology/u.test(
+      protocol,
+    ) ||
+    !/readonly\s+#losslessDataPlane\s*:\s*ConversationLosslessDataPlaneTopology/u.test(
+      protocol,
+    ) ||
+    !protocolTopology.includes('readonly kind: "available"') ||
+    !protocolTopology.includes('readonly reason: "executor-only"') ||
+    /#losslessDataPlane\s*:[^;]*(?:undefined|\?)/u.test(protocol) ||
+    /#losslessDataPlane\?\.|\bbindLosslessDataPlane\s*\(/u.test(protocol) ||
+    /recoverConversationChannels[\s\S]{0,120}\?\?\s*0/u.test(protocol) ||
+    count(access, "createConversationLosslessDataPlaneAssemblyHandle()") !== 1 ||
+    count(access, "assembly.complete(composition.coordinator)") !== 1 ||
+    !/createConversationSurface\(\s*conversationLosslessDataPlane,?\s*\)/u.test(access) ||
+    !/createLosslessDataPlaneSurface\(\s*conversationLosslessDataPlane,?\s*\)/u.test(
+      access,
+    ) ||
+    !/createChannelInteractionRecoveryUnit\(\s*conversationLosslessDataPlane,?\s*\)/u.test(
+      access,
+    ) ||
+    !conversationAssembly.includes('kind: "available"') ||
+    !conversationAssembly.includes("port: losslessDataPlane.port") ||
+    !losslessAssembly.includes("assembly.complete(composition.coordinator)") ||
+    !recoveryAssembly.includes("assembly.assertComplete()") ||
+    !localOwner.includes('kind: "absent"') ||
+    !localOwner.includes('reason: "executor-only"')
+  ) {
+    failures.push(
+      "Conversation lossless data-plane required static assembly drifted",
+    );
   }
   if (
     count(binding, "export class ChannelConversationProductBinding") !== 1 ||
@@ -6439,54 +6500,96 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !accessSurfaces.includes("new AdvancementAcceptedTurnApplicationService({") ||
     !accessSurfaces.includes("reviews: advancementReviews,") ||
     !accessSurfaces.includes("review: advancementReviews,") ||
+    !accessSurfaces.includes("turnMaintenance(info);") ||
     !accessSurfaces.includes("advancementAcceptedTurns.acceptCommittedTurn(info)") ||
-    !accessSurfaces.includes("manager.bindTurnCommittedListener((info) =>") ||
-    !accessSurfaces.includes("manager.assertTurnCommittedListenerBound()") ||
-    !accessSurfaces.includes("protocol.bindManager(manager)") ||
-    !accessSurfaces.includes("protocol.assertManagerBound()") ||
+    accessSurfaces.split("createConversationCommittedTurnListenerAssemblyHandle()").length - 1 !== 1 ||
+    !accessSurfaces.includes("onTurnCommitted: committedTurnListenerAssembly.notify,") ||
+    !accessSurfaces.includes("committedTurnListenerAssembly.complete((info) =>") ||
+    accessSurfaces.split("createConversationManagerAssemblyHandle()").length - 1 !== 1 ||
+    accessSurfaces.split("createConversationAuxiliaryRecoveryAssemblyHandle()").length - 1 !== 1 ||
+    !accessSurfaces.includes("manager: managerAssembly.resolve,") ||
+    !accessSurfaces.includes("recoverAuxiliary: auxiliaryRecoveryAssembly.resolve,") ||
+    !accessSurfaces.includes("managerAssembly.complete(manager)") ||
+    !accessSurfaces.includes("auxiliaryRecoveryAssembly.complete(async (conversationId) =>") ||
+    accessSurfaces.includes("protocol.bindManager") ||
+    accessSurfaces.includes("protocol.assertManagerBound") ||
     accessSurfaces.includes("manager: () => manager") ||
-    !accessSurfaces.includes("protocol.bindAuxiliaryRecovery(async (conversationId) =>") ||
+    accessSurfaces.includes("protocol.bindAuxiliaryRecovery(") ||
     /createAdvancementProxyTurnPort\(\{[\s\S]*?manager:\s*\(\)\s*=>\s*manager/u.test(
       accessSurfaces,
     ) ||
     /createAdvancementOriginalTaskAdmissionPort\(\s*\(\)\s*=>\s*manager/u.test(
       accessSurfaces,
     ) ||
-    accessSurfaces.indexOf("manager.bindTurnCommittedListener((info) =>") >
+    accessSurfaces.indexOf("committedTurnListenerAssembly.complete((info) =>") >
       accessSurfaces.indexOf("ctx.conversations = manager") ||
+    /bindTurnCommittedListener|assertTurnCommittedListenerBound/u.test(accessSurfaces) ||
     accessSurfaces.includes("createAdvancementReviewMaintenance") ||
     accessSurfaces.includes("advancementRecoveryRef") ||
     !localOwner.includes("new AdvancementAcceptedTurnApplicationService({") ||
     !localOwner.includes("const { controller: advancement, reviews }") ||
     !localOwner.includes("review: reviews,") ||
     !localOwner.includes("acceptedTurns.acceptCommittedTurn(info)") ||
-    !localOwner.includes("manager.bindTurnCommittedListener((info) =>") ||
-    !localOwner.includes("manager.assertTurnCommittedListenerBound()") ||
-    !localOwner.includes("protocol.bindManager(manager)") ||
-    !localOwner.includes("protocol.assertManagerBound()") ||
+    localOwner.split("createConversationCommittedTurnListenerAssemblyHandle()").length - 1 !== 1 ||
+    !localOwner.includes("onTurnCommitted: committedTurnListenerAssembly.notify,") ||
+    !localOwner.includes("committedTurnListenerAssembly.complete((info) =>") ||
+    localOwner.split("createConversationManagerAssemblyHandle()").length - 1 !== 1 ||
+    localOwner.split("createConversationAuxiliaryRecoveryAssemblyHandle()").length - 1 !== 1 ||
+    !localOwner.includes("manager: managerAssembly.resolve,") ||
+    !localOwner.includes("recoverAuxiliary: auxiliaryRecoveryAssembly.resolve,") ||
+    !localOwner.includes("managerAssembly.complete(manager)") ||
+    !localOwner.includes("auxiliaryRecoveryAssembly.complete(async (conversationId) =>") ||
+    localOwner.includes("protocol.bindManager") ||
+    localOwner.includes("protocol.assertManagerBound") ||
     localOwner.includes("manager: () => manager") ||
-    !localOwner.includes("protocol.bindAuxiliaryRecovery(async (conversationId) =>") ||
+    localOwner.indexOf("managerAssembly.complete(manager)") >
+      localOwner.indexOf("return new LocalConversationOwnerAssembly({") ||
+    localOwner.indexOf("auxiliaryRecoveryAssembly.complete(async (conversationId) =>") <
+      localOwner.indexOf("const recovery = createAdvancementRecoveryMaintenance({") ||
+    localOwner.indexOf("auxiliaryRecoveryAssembly.complete(async (conversationId) =>") >
+      localOwner.indexOf("return new LocalConversationOwnerAssembly({") ||
+    localOwner.includes("protocol.bindAuxiliaryRecovery(") ||
     /createAdvancementProxyTurnPort\(\{[\s\S]*?manager:\s*\(\)\s*=>\s*manager/u.test(
       localOwner,
     ) ||
     /createAdvancementOriginalTaskAdmissionPort\(\s*\(\)\s*=>\s*manager/u.test(
       localOwner,
     ) ||
-    localOwner.indexOf("manager.bindTurnCommittedListener((info) =>") >
+    localOwner.indexOf("committedTurnListenerAssembly.complete((info) =>") >
       localOwner.indexOf("return new LocalConversationOwnerAssembly({") ||
+    /bindTurnCommittedListener|assertTurnCommittedListenerBound/u.test(localOwner) ||
     localOwner.includes("reviewCommitted") ||
     localOwner.includes("createAdvancementReviewMaintenance") ||
     !advancementAdapters.includes("readonly manager: ConversationManager;") ||
     advancementAdapters.includes("ConversationManager | (() => ConversationManager)") ||
     advancementAdapters.includes("resolveManager(") ||
-    !conversationManager.includes("bindTurnCommittedListener(") ||
-    !conversationManager.includes("assertTurnCommittedListenerBound()") ||
-    !conversationManager.includes("turn-committed listener is already bound") ||
-    !conversationManager.includes("turn-committed listener is not bound") ||
-    !conversationProtocol.includes("bindAuxiliaryRecovery(") ||
-    !conversationProtocol.includes("bindManager(manager: ConversationManager)") ||
-    !conversationProtocol.includes("assertManagerBound()") ||
-    conversationProtocol.includes("#recoverAuxiliaryRef") ||
+    !conversationManager.includes("private readonly onTurnCommitted?:") ||
+    !conversationManager.includes("if (this.durableTurnExecutorCb && !this.onTurnCommitted)") ||
+    !conversationManager.includes("`onTurnCommitted` callback is required when `durableTurnExecutor` is provided") ||
+    /bindTurnCommittedListener|assertTurnCommittedListenerBound/u.test(conversationManager) ||
+    !conversationProtocol.includes(
+      "readonly recoverAuxiliary: (conversationId: string) => Promise<void>;",
+    ) ||
+    !conversationProtocol.includes(
+      "readonly #recoverAuxiliary: (conversationId: string) => Promise<void>;",
+    ) ||
+    !conversationProtocol.includes("if (!options.recoverAuxiliary)") ||
+    !conversationProtocol.includes("this.#recoverAuxiliary = options.recoverAuxiliary;") ||
+    !conversationProtocol.includes("createConversationAuxiliaryRecoveryAssemblyHandle()") ||
+    !conversationProtocol.includes("createConversationCommittedTurnListenerAssemblyHandle()") ||
+    !conversationProtocol.includes("Conversation committed-turn listener is not assembled") ||
+    !conversationProtocol.includes("Conversation committed-turn listener is already assembled") ||
+    !conversationProtocol.includes("await this.#recoverAuxiliary(conversationId);") ||
+    !conversationProtocol.includes("readonly manager: () => ConversationManager;") ||
+    !conversationProtocol.includes("readonly #manager: () => ConversationManager;") ||
+    !conversationProtocol.includes("createConversationManagerAssemblyHandle()") ||
+    !conversationProtocol.includes("return this.#manager();") ||
+    /readonly manager\?:|bindManager\(|assertManagerBound\(|#manager:\s*\(\(\) => ConversationManager\) \| undefined/u.test(
+      conversationProtocol,
+    ) ||
+    /readonly recoverAuxiliary\?:|bindAuxiliaryRecovery\(|#recoverAuxiliary:\s*\(\(conversationId: string\) => Promise<void>\) \| undefined|#recoverAuxiliary\?\./u.test(
+      conversationProtocol,
+    ) ||
     ownerIndex.includes("dispatchAdvancementReviewResult") ||
     ownerIndex.includes("createAdvancementAcceptedTurnReviewMechanism") ||
     ownerIndex.includes("createAdvancementReviewAttemptApplication") ||
@@ -6865,12 +6968,15 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     );
   }
 
-  const managerBound = accessSurfaces.indexOf("protocol.assertManagerBound();");
+  const managerCompleted = accessSurfaces.indexOf("managerAssembly.complete(manager);");
   const advancementCreated = accessSurfaces.indexOf(
     "await ctx.advancementConversationComposition.create({",
   );
-  const recoveryBound = accessSurfaces.indexOf(
-    "protocol.bindAuxiliaryRecovery(async (conversationId) =>",
+  const advancementRecoveryCreated = accessSurfaces.indexOf(
+    "const advancementRecovery = createAdvancementRecoveryMaintenance({",
+  );
+  const recoveryCompleted = accessSurfaces.indexOf(
+    "auxiliaryRecoveryAssembly.complete(async (conversationId) =>",
   );
   const applicationPublished = accessSurfaces.indexOf(
     "ctx.advancement = advancementController;",
@@ -6908,10 +7014,11 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !accessSurfaces.includes("manager.getHistory(conversationId, 6)") ||
     !localOwner.includes("sessionState: protocol.sessionState,") ||
     localOwner.includes("sessionState: () =>") ||
-    managerBound < 0 ||
-    advancementCreated <= managerBound ||
-    recoveryBound <= advancementCreated ||
-    applicationPublished <= advancementCreated ||
+    managerCompleted < 0 ||
+    advancementCreated <= managerCompleted ||
+    advancementRecoveryCreated <= advancementCreated ||
+    recoveryCompleted <= advancementRecoveryCreated ||
+    applicationPublished <= recoveryCompleted ||
     readinessRecovery <= applicationPublished ||
     firstAssemblyPass < 0 ||
     runtimeHostConstruction <= firstAssemblyPass ||
@@ -8382,8 +8489,8 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       "packages/cli/src/serve/workscene-session-owner.ts" ||
     directConversationStorageDeleteConsumers.length !== 0 ||
     !composition.includes("worksceneConversationStorageProjectionCleanup,") ||
-    !accessSurfaces.includes(
-      "conversationStorageProjectionCleanup:\n        ctx.worksceneConversationStorageProjectionCleanup",
+    !/conversationStorageProjectionCleanup:\s*\n\s*ctx\.worksceneConversationStorageProjectionCleanup/u.test(
+      accessSurfaces,
     ) ||
     !worksceneDirectory.includes(
       "conversationStorageProjectionCleanup: WorksceneConversationStorageProjectionCleanupPort",
@@ -9656,7 +9763,7 @@ export function inspectManagedHostAssembly(records) {
     managerConstruction,
   );
   const managerFirstEffect = accessSurfaces.indexOf(
-    "await ctx.executorDataPlane.start()",
+    "if (dataPlane) await dataPlane.start()",
     managerConstruction,
   );
   const inboundConstruction = accessSurfaces.indexOf(
@@ -12254,7 +12361,7 @@ export function inspectConversationExecutorDispatchBoundary(records) {
   );
   if (
     hostBoundaryConstructions.length !== 2 ||
-    count(access, "createConversationExecutorHostBoundary({") !== 2 ||
+    count(access, "createConversationExecutorHostBoundary({") !== 3 ||
     count(executor, "createConversationExecutorHostBoundary({") !== 1 ||
     hostBoundaryConstructions.some(({ relative }) => ![accessPath, executorPath].includes(relative))
   ) {
@@ -12276,12 +12383,12 @@ export function inspectConversationExecutorDispatchBoundary(records) {
     mesh.includes("bindDirectory(") ||
     mesh.includes("#remoteDirectory()") ||
     count(mesh, "this.options.executorTopologyDirectory.candidates()") !== 1 ||
-    count(access, "directory: topologyDirectory") !== 1 ||
+    count(access, "directory: topologyDirectory") !== 2 ||
     count(access, "directory: NO_REMOTE_CONVERSATION_EXECUTORS") !== 1 ||
     count(executor, "directory: NO_REMOTE_CONVERSATION_EXECUTORS") !== 1 ||
     access.indexOf("new MeshConversationExecutorTopologyDirectory({") < 0 ||
     access.indexOf("new MeshConversationExecutorTopologyDirectory({") >
-      access.indexOf("const executorBoundary = createConversationExecutorHostBoundary({") ||
+      access.indexOf("const executorBoundary = ctx.executorRoleModule") ||
     mesh.includes("bindRemoteExecution") ||
     count(dispatch, "this.#authority.prepareConversationAssignment({") !== 1 ||
     dispatch.includes("supportsOffDeviceExecution") ||
@@ -12480,7 +12587,7 @@ export function inspectWorksceneAnchorProductStaticCompositionBoundary(records) 
     failures.push("Assembly context no longer requires the complete Workscene product projection");
   }
 
-  const bindManager = surfaces.indexOf("protocol.bindManager(manager);");
+  const completeManager = surfaces.indexOf("managerAssembly.complete(manager);");
   const createDirectory = surfaces.indexOf(
     "const worksceneDirectory = createWorksceneDirectory({",
   );
@@ -12492,7 +12599,7 @@ export function inspectWorksceneAnchorProductStaticCompositionBoundary(records) 
   if (
     count(surfaces, "createWorksceneDirectory({") !== 1 ||
     count(surfaces, "new WorksceneApplicationService(") !== 1 ||
-    bindManager < 0 || createDirectory < bindManager ||
+    completeManager < 0 || createDirectory < completeManager ||
     publishManager < createDirectory ||
     !directoryBlock.includes("authority: ctx.worksceneAuthority,") ||
     !directoryBlock.includes("conversations: manager,") ||
@@ -12543,6 +12650,7 @@ export function inspectAssignmentDataPlaneBoundary(records) {
   const mesh = required("packages/cli/src/serve/mesh-runtime-assembly.ts");
   const access = required("packages/cli/src/serve/access-surfaces.ts");
   const executorRole = required("packages/cli/src/serve/executor-role-runtime.ts");
+  const profile = required("packages/cli/src/serve/profile.ts");
   const count = (text, token) => text.split(token).length - 1;
 
   if (
@@ -12597,6 +12705,19 @@ export function inspectAssignmentDataPlaneBoundary(records) {
     failures.push("executor data-plane concrete spool/ticket ownership escaped its finite ports");
   }
   if (
+    !executor.includes("export function createExecutorDataPlaneAssignmentPair<") ||
+    !executor.includes(
+      "readonly #assignmentAuthority: ExecutorDataPlaneAssignmentAuthorityPort;",
+    ) ||
+    count(executor, "new ExecutorDataPlaneRuntime(options, this)") !== 1 ||
+    /#assignmentAuthority\s*:[^;]*(?:undefined|\?)/u.test(executor) ||
+    /#assignmentAuthority\?\.|bindAssignmentAuthority\(|#requireAssignmentAuthority/u.test(
+      executor,
+    )
+  ) {
+    failures.push("executor data-plane restored a mutable or partially bound assignment authority");
+  }
+  if (
     !mesh.includes("readonly dataPlane: AssignmentDataPlaneMeshPort") ||
     count(mesh, "dataPlane.registerMeshServices({") !== 1 ||
     mesh.includes("dataPlane.spool") ||
@@ -12609,14 +12730,22 @@ export function inspectAssignmentDataPlaneBoundary(records) {
   }
   if (
     count(access, "new AssignmentDataPlaneTopologyAdapter({") !== 1 ||
-    count(access, "new ExecutorDataPlaneRuntime({") !== 1 ||
-    count(executorRole, "new ExecutorDataPlaneRuntime({") !== 1 ||
+    count(access, "createExecutorDataPlaneAssignmentPair(") !== 1 ||
+    count(executorRole, "createExecutorDataPlaneAssignmentPair(") !== 1 ||
+    access.includes("const executorDataPlaneSurface") ||
+    profile.includes('"executor-data-plane"') ||
+    count(access, "new ExecutorDataPlaneRuntime(") !== 0 ||
+    count(executorRole, "new ExecutorDataPlaneRuntime(") !== 0 ||
     count(access, ".assignmentTickets") !== 2 ||
     count(executorRole, ".assignmentTickets") !== 2 ||
-    count(access, "bindAssignmentAuthority(") !== 1 ||
-    count(executorRole, "bindAssignmentAuthority(") !== 1
+    /bindAssignmentAuthority\(/u.test(`${access}\n${executorRole}`) ||
+    !access.includes("authority: boundary.localLedger,") ||
+    !executorRole.includes("authority: ledger") ||
+    access.indexOf("if (dataPlane) await dataPlane.start();") < 0 ||
+    access.indexOf("ctx.executorDataPlane = dataPlane;") <
+      access.indexOf("if (dataPlane) await dataPlane.start();")
   ) {
-    failures.push("Host assignment data-plane construction and finite injection exact-set drifted");
+    failures.push("Host assignment/data-plane pair composition or publication order drifted");
   }
   return failures;
 }

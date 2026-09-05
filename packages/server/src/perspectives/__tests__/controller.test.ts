@@ -154,6 +154,7 @@ describe("PerspectivesController", () => {
     const environmentEstimate = vi.fn(() => 7);
     const manager = new ConversationManager(createFactory(), managerConfig, {
       appendRun,
+      onTurnCommitted: () => {},
       durableTurnExecutor: stubDurableTurnExecutor({
         async *run(input) {
           durableInvocations.push(input.invocation);

@@ -31,7 +31,6 @@ export const PROFILES: Record<ServerProfile, ProfileSpec> = {
   full: {
     surfaces: [
       "authority-runtime",
-      "executor-data-plane",
       "conversation",
       "mesh-control",
       "asset-maintenance",

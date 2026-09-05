@@ -75,6 +75,45 @@ export interface ExecutorDataPlaneTicketAuthorityPort {
   authorize: DataPlaneTicketRegistry["authorize"];
 }
 
+/** Finite ports exposed only while the Host composes one assignment/data-plane pair. */
+export interface ExecutorDataPlaneAssignmentAssemblyPort {
+  readonly assignmentTickets: ExecutorDataPlaneTicketAuthorityPort;
+  createStream(input: {
+    readonly assignmentId: string;
+    readonly ref: ExecutionRef;
+  }): Promise<AssignmentStreamWriter>;
+}
+
+export interface ExecutorDataPlaneAssignmentContribution<Assignment> {
+  readonly assignment: Assignment;
+  readonly authority: ExecutorDataPlaneAssignmentAuthorityPort;
+}
+
+export interface ExecutorDataPlaneAssignmentPair<Assignment> {
+  readonly dataPlane: ExecutorDataPlaneRuntime;
+  readonly assignment: Assignment;
+}
+
+/**
+ * Atomically composes the mutually dependent assignment authority and data plane.
+ * Neither side escapes this call before the required, immutable pair is complete.
+ */
+export function createExecutorDataPlaneAssignmentPair<Assignment>(
+  options: ExecutorDataPlaneRuntimeOptions,
+  createAssignment: (
+    dataPlane: ExecutorDataPlaneAssignmentAssemblyPort,
+  ) => ExecutorDataPlaneAssignmentContribution<Assignment>,
+): ExecutorDataPlaneAssignmentPair<Assignment> {
+  const composition = new ExecutorDataPlaneAssignmentComposition(
+    options,
+    createAssignment,
+  );
+  return Object.freeze({
+    dataPlane: composition.dataPlane,
+    assignment: composition.assignment,
+  });
+}
+
 /**
  * One executor-owned data-plane substrate shared by local and mesh adapters.
  * Assignment authority remains in the ledger; this runtime only owns durable
@@ -91,12 +130,15 @@ export class ExecutorDataPlaneRuntime {
   readonly #maintenanceRunner: StorageMaintenanceTaskRunner;
   readonly #executorId: string;
   readonly #verifier: ProtocolSignatureVerifier;
-  #assignmentAuthority: ExecutorDataPlaneAssignmentAuthorityPort | undefined;
+  readonly #assignmentAuthority: ExecutorDataPlaneAssignmentAuthorityPort;
   #timer: ReturnType<typeof setTimeout> | undefined;
   #maintenance: Promise<number> | undefined;
   #closed = false;
 
-  constructor(options: ExecutorDataPlaneRuntimeOptions) {
+  constructor(
+    options: ExecutorDataPlaneRuntimeOptions,
+    assignmentAuthority: ExecutorDataPlaneAssignmentAuthorityPort,
+  ) {
     const clock = options.clock ?? (() => new Date().toISOString());
     this.#AssignmentStreamWriter = options.module.AssignmentStreamWriter;
     this.#onError = options.onError;
@@ -106,6 +148,7 @@ export class ExecutorDataPlaneRuntime {
     );
     this.#executorId = options.authority.executorId;
     this.#verifier = options.authority.verifier;
+    this.#assignmentAuthority = assignmentAuthority;
     this.#spool = new options.module.AssignmentStreamSpool(
       path.join(
         options.zhixingHome,
@@ -124,7 +167,7 @@ export class ExecutorDataPlaneRuntime {
       verifier: options.authority.verifier,
       assignments: {
         dataPlaneBinding: async (assignmentId, use) =>
-          this.#assignmentAuthority?.dataPlaneBinding(assignmentId, use),
+          this.#assignmentAuthority.dataPlaneBinding(assignmentId, use),
       },
       spool: this.#spool,
       clock,
@@ -155,18 +198,10 @@ export class ExecutorDataPlaneRuntime {
     });
   }
 
-  bindAssignmentAuthority(authority: ExecutorDataPlaneAssignmentAuthorityPort): void {
-    if (this.#assignmentAuthority && this.#assignmentAuthority !== authority) {
-      throw new Error("Executor data plane is already bound to another assignment authority");
-    }
-    this.#assignmentAuthority = authority;
-  }
-
   async createStream(input: {
     readonly assignmentId: string;
     readonly ref: ExecutionRef;
   }): Promise<AssignmentStreamWriter> {
-    this.#requireAssignmentAuthority();
     return this.#AssignmentStreamWriter.open(
       this.#spool,
       input.assignmentId,
@@ -188,7 +223,7 @@ export class ExecutorDataPlaneRuntime {
     >;
     readonly ownerDeviceId: string;
   }): Promise<void> {
-    const authority = this.#requireAssignmentAuthority();
+    const authority = this.#assignmentAuthority;
     await authority.authorizeOwnerRelay(input);
     const binding = await authority.dataPlaneBinding(input.assignmentId);
     if (!binding) {
@@ -202,7 +237,6 @@ export class ExecutorDataPlaneRuntime {
   }
 
   #ownerStreamClient(ownerDeviceId: string): AssignmentStreamClient {
-    this.#requireAssignmentAuthority();
     const connection = {
       peer: { deviceId: ownerDeviceId },
     } as SecureMeshConnection;
@@ -237,7 +271,6 @@ export class ExecutorDataPlaneRuntime {
    * owner-presented-ticket 分支。
    */
   #surfaceStreamClient(surfacePrincipal: string): AssignmentStreamClient {
-    this.#requireAssignmentAuthority();
     const connection = {
       peer: { deviceId: this.#executorId },
     } as SecureMeshConnection;
@@ -265,7 +298,6 @@ export class ExecutorDataPlaneRuntime {
   }
 
   registerMeshServices(input: AssignmentDataPlaneMeshServiceInput): () => void {
-    this.#requireAssignmentAuthority();
     const disposeStream = registerAssignmentStreamService(input.services, {
       spool: this.#spool,
       authorize: createDataPlaneAssignmentStreamAuthorizer({
@@ -302,7 +334,6 @@ export class ExecutorDataPlaneRuntime {
 
   async start(): Promise<void> {
     if (this.#closed) throw new Error("Executor data plane is closed");
-    this.#requireAssignmentAuthority();
     await this.#tickets.recover();
     await this.maintain();
     this.#scheduleMaintenance();
@@ -421,11 +452,57 @@ export class ExecutorDataPlaneRuntime {
     this.#timer.unref?.();
   }
 
-  #requireAssignmentAuthority(): ExecutorDataPlaneAssignmentAuthorityPort {
-    if (!this.#assignmentAuthority) {
-      throw new Error("Executor data plane has no assignment authority");
+}
+
+class ExecutorDataPlaneAssignmentComposition<Assignment>
+  implements ExecutorDataPlaneAssignmentAuthorityPort
+{
+  readonly dataPlane: ExecutorDataPlaneRuntime;
+  readonly assignment: Assignment;
+  readonly #authority: ExecutorDataPlaneAssignmentAuthorityPort;
+
+  constructor(
+    options: ExecutorDataPlaneRuntimeOptions,
+    createAssignment: (
+      dataPlane: ExecutorDataPlaneAssignmentAssemblyPort,
+    ) => ExecutorDataPlaneAssignmentContribution<Assignment>,
+  ) {
+    this.dataPlane = new ExecutorDataPlaneRuntime(options, this);
+    const contribution = createAssignment(
+      Object.freeze({
+        assignmentTickets: this.dataPlane.assignmentTickets,
+        createStream: (
+          input: Parameters<ExecutorDataPlaneRuntime["createStream"]>[0],
+        ) => this.dataPlane.createStream(input),
+      }),
+    );
+    if (
+      !contribution?.authority ||
+      typeof contribution.authority.dataPlaneBinding !== "function" ||
+      typeof contribution.authority.authorizeOwnerRelay !== "function"
+    ) {
+      throw new TypeError(
+        "Executor assignment/data-plane composition requires one complete authority",
+      );
     }
-    return this.#assignmentAuthority;
+    this.assignment = contribution.assignment;
+    this.#authority = contribution.authority;
+    Object.freeze(this);
+  }
+
+  dataPlaneBinding(
+    assignmentId: string,
+    use?: DataPlaneTicketUse,
+  ): Promise<DataPlaneAssignmentBinding | undefined> {
+    return this.#authority.dataPlaneBinding(assignmentId, use);
+  }
+
+  authorizeOwnerRelay(
+    input: Parameters<
+      ExecutorDataPlaneAssignmentAuthorityPort["authorizeOwnerRelay"]
+    >[0],
+  ): Promise<void> {
+    return this.#authority.authorizeOwnerRelay(input);
   }
 }
 

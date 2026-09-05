@@ -2,7 +2,7 @@ import {
   ChannelInteractionCoordinator,
   JobRelayObligationDirectory,
 } from "./channel-interaction-coordinator.js";
-import type { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
+import type { ConversationLosslessDataPlanePort } from "./conversation-protocol-runtime.js";
 import type { JobStatusDirectory } from "./job-status-directory.js";
 import { LosslessDataPlaneRuntime } from "./lossless-data-plane-runtime.js";
 import {
@@ -17,7 +17,6 @@ export interface LosslessDataPlaneCompositionOptions {
   readonly verifier: ProtocolSignatureVerifier;
   readonly targets: AssignmentDataPlaneTargetDirectory;
   readonly jobRelayObligations?: JobRelayObligationDirectory;
-  readonly protocol: Pick<ConversationProtocolRuntime, "bindLosslessDataPlane">;
   readonly channelChallenges: ChannelChallengeDeliveryProfile;
   readonly isCurrentOwner: () => boolean;
   readonly jobStatus: JobStatusDirectory;
@@ -31,6 +30,44 @@ export interface LosslessDataPlaneComposition {
   readonly jobRelayObligations: JobRelayObligationDirectory;
   readonly onChallengeAction: (action: ChannelChallengeAction) => Promise<void>;
   close(): Promise<void>;
+}
+
+/** Private one-shot seam for the Conversation/data-plane construction cycle. */
+export interface ConversationLosslessDataPlaneAssemblyHandle {
+  readonly port: ConversationLosslessDataPlanePort;
+  complete(port: ConversationLosslessDataPlanePort): void;
+  assertComplete(): void;
+}
+
+export function createConversationLosslessDataPlaneAssemblyHandle():
+  ConversationLosslessDataPlaneAssemblyHandle {
+  let installed: ConversationLosslessDataPlanePort | undefined;
+  const requireInstalled = (): ConversationLosslessDataPlanePort => {
+    if (!installed) {
+      throw new Error("Conversation lossless data plane is not assembled");
+    }
+    return installed;
+  };
+  const port = Object.freeze({
+    openConversationChannel: (input) =>
+      requireInstalled().openConversationChannel(input),
+    openFirstPartySurfaceSession: (input) =>
+      requireInstalled().openFirstPartySurfaceSession(input),
+    recoverConversationChannels: (journal) =>
+      requireInstalled().recoverConversationChannels(journal),
+  } satisfies ConversationLosslessDataPlanePort);
+  return Object.freeze({
+    port,
+    complete(candidate: ConversationLosslessDataPlanePort) {
+      if (installed) {
+        throw new Error("Conversation lossless data plane is already assembled");
+      }
+      installed = candidate;
+    },
+    assertComplete() {
+      requireInstalled();
+    },
+  });
 }
 
 /**
@@ -70,7 +107,6 @@ export function createLosslessDataPlaneComposition(
     }
     await coordinator.handleChallengeAction(action);
   });
-  options.protocol.bindLosslessDataPlane(coordinator);
   let closing: Promise<void> | undefined;
 
   return {

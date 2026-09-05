@@ -65,7 +65,12 @@ import { SurfaceAssetMaintenance } from "./surface-asset-maintenance.js";
 import { createAnchorConversationDeleteProjectionPort } from "./conversation-delete-binding.js";
 import { createTurnMaintenance } from "./turn-maintenance.js";
 import { governControlTextCall } from "./governed-control-llm.js";
-import { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
+import {
+  ConversationProtocolRuntime,
+  createConversationAuxiliaryRecoveryAssemblyHandle,
+  createConversationCommittedTurnListenerAssemblyHandle,
+  createConversationManagerAssemblyHandle,
+} from "./conversation-protocol-runtime.js";
 import {
   createConversationAssignmentArtifactAuthorityIndex,
   createConversationExecutorHostBoundary,
@@ -78,10 +83,17 @@ import type {
   CoreAssemblyUnit,
 } from "./access-surface.js";
 import { JobStatusDirectory } from "./job-status-directory.js";
-import { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
+import {
+  createExecutorDataPlaneAssignmentPair,
+  type ExecutorDataPlaneRuntime,
+} from "./executor-data-plane-runtime.js";
 import { AssignmentDataPlaneTopologyAdapter } from "./assignment-data-plane-topology.js";
 import { AdvancementEvidenceTopologyAdapter } from "./advancement-evidence-topology.js";
-import { createLosslessDataPlaneComposition } from "./lossless-data-plane-composition.js";
+import {
+  createConversationLosslessDataPlaneAssemblyHandle,
+  createLosslessDataPlaneComposition,
+  type ConversationLosslessDataPlaneAssemblyHandle,
+} from "./lossless-data-plane-composition.js";
 import { ExecutorJobOwnerAssembly } from "./executor-job-owner.js";
 import { JobInteractionRuntimeUnavailableError } from "./durable-job-interactions.js";
 import { JobRelayObligationDirectory } from "./channel-interaction-coordinator.js";
@@ -210,32 +222,6 @@ const authorityRuntimeSurface: AccessSurface = {
       jobStatus.dispose()
     );
     ctx.jobStatus = jobStatus;
-  },
-};
-
-/** Executor-owned durable stream and ticket substrate, shared by local and mesh adapters. */
-const executorDataPlaneSurface: AccessSurface = {
-  name: "executor-data-plane",
-  phase: "pre-server",
-  async setup(ctx) {
-    if (!ctx.enabledRoles.includes("executor")) return;
-    if (!ctx.authorityRuntime || !ctx.executorRoleModule) {
-      throw new Error("Executor data plane requires authority and executor modules");
-    }
-    const dataPlane = new ExecutorDataPlaneRuntime({
-      zhixingHome: ctx.zhixingHome,
-      authority: ctx.authorityRuntime,
-      module: ctx.executorRoleModule,
-      ...(ctx.storageMaintenance
-        ? { storageMaintenance: ctx.storageMaintenance }
-        : {}),
-      onError: (error) =>
-        console.warn(chalk.yellow(`[data-plane] ${error.message}`)),
-    });
-    ctx.lifecycleContributions.acquire("executorDataPlane.close", () =>
-      dataPlane.close()
-    );
-    ctx.executorDataPlane = dataPlane;
   },
 };
 
@@ -413,7 +399,9 @@ const advancementEvidenceTopologyUnit: CoreAssemblyUnit = {
  * Channel mechanism 先以显式 available/absent profile 完成；随后 conversation
  * 协议、executor 端点、mesh adapter 与 challenge effect 一次性形成闭环。
  */
-const losslessDataPlaneSurface: AccessSurface = {
+const createLosslessDataPlaneSurface = (
+  assembly: ConversationLosslessDataPlaneAssemblyHandle,
+): AccessSurface => ({
   name: "lossless-data-plane",
   phase: "pre-server",
   async setup(ctx) {
@@ -454,7 +442,6 @@ const losslessDataPlaneSurface: AccessSurface = {
       ...(ctx.jobRelayObligations
         ? { jobRelayObligations: ctx.jobRelayObligations }
         : {}),
-      protocol: ctx.conversationProtocol,
       channelChallenges,
       isCurrentOwner: () => isCurrentChannelOwner(ctx),
       jobStatus: ctx.jobStatus,
@@ -466,15 +453,18 @@ const losslessDataPlaneSurface: AccessSurface = {
     ctx.lifecycleContributions.acquire("losslessDataPlane.close", () =>
       composition.close()
     );
+    assembly.complete(composition.coordinator);
     ctx.losslessDataPlane = composition.runtime;
     ctx.channelCoordinator = composition.coordinator;
     ctx.channelChallengeAction = composition.onChallengeAction;
     ctx.jobRelayObligations = composition.jobRelayObligations;
   },
-};
+});
 
 /** 会话执行面 —— 持久用户 / channel / 工作场景会话（ConversationManager）。 */
-const conversationSurface: AccessSurface = {
+const createConversationSurface = (
+  losslessDataPlane: ConversationLosslessDataPlaneAssemblyHandle,
+): AccessSurface => ({
   name: "conversation",
   phase: "pre-server",
   async setup(ctx) {
@@ -508,9 +498,11 @@ const conversationSurface: AccessSurface = {
       },
     });
     let manager: ConversationManager;
-    if (ctx.enabledRoles.includes("executor") && !ctx.executorDataPlane) {
-      throw new Error("Conversation executor requires its durable data plane");
-    }
+    const managerAssembly = createConversationManagerAssemblyHandle();
+    const auxiliaryRecoveryAssembly =
+      createConversationAuxiliaryRecoveryAssemblyHandle();
+    const committedTurnListenerAssembly =
+      createConversationCommittedTurnListenerAssemblyHandle();
     const assignmentArtifacts = createConversationAssignmentArtifactAuthorityIndex();
     let topologyDirectory = NO_REMOTE_CONVERSATION_EXECUTORS;
     if (ctx.meshBootstrap.mode !== "single-machine") {
@@ -533,29 +525,66 @@ const conversationSurface: AccessSurface = {
       });
       ctx.assignmentArtifactReceiver = receiver;
     }
-    const executorBoundary = createConversationExecutorHostBoundary({
-      authority: anchorConversationOwnerRuntime(ctx.authorityRuntime),
-      directory: topologyDirectory,
-      clock: () => new Date().toISOString(),
-      ...(ctx.executorRoleModule
-        ? {
-            local: {
-              ConversationAssignmentLedger:
-                ctx.executorRoleModule.ConversationAssignmentLedger,
-              InProcessAssignmentSubmission:
-                ctx.executorRoleModule.InProcessAssignmentSubmission,
-              dataPlaneTickets: ctx.executorDataPlane!.assignmentTickets,
-              runtimeFactory: ctx.assignmentRuntimeFactory,
-              createStream: (input: {
-                readonly assignmentId: string;
-                readonly ref: import("@zhixing/core/contracts").ExecutionRef;
-              }) => ctx.executorDataPlane!.createStream(input),
+    const conversationAuthority = anchorConversationOwnerRuntime(ctx.authorityRuntime);
+    let dataPlane: ExecutorDataPlaneRuntime | undefined;
+    const executorBoundary = ctx.executorRoleModule
+      ? (() => {
+          const pair = createExecutorDataPlaneAssignmentPair(
+            {
+              zhixingHome: ctx.zhixingHome,
+              authority: ctx.authorityRuntime!,
+              module: ctx.executorRoleModule!,
+              ...(ctx.storageMaintenance
+                ? { storageMaintenance: ctx.storageMaintenance }
+                : {}),
+              onError: (error) =>
+                console.warn(chalk.yellow(`[data-plane] ${error.message}`)),
             },
-          }
-        : {}),
-    });
+            (dataPlaneAssembly) => {
+              const boundary = createConversationExecutorHostBoundary({
+                authority: conversationAuthority,
+                directory: topologyDirectory,
+                clock: () => new Date().toISOString(),
+                local: {
+                  ConversationAssignmentLedger:
+                    ctx.executorRoleModule!.ConversationAssignmentLedger,
+                  InProcessAssignmentSubmission:
+                    ctx.executorRoleModule!.InProcessAssignmentSubmission,
+                  dataPlaneTickets: dataPlaneAssembly.assignmentTickets,
+                  runtimeFactory: ctx.assignmentRuntimeFactory,
+                  createStream: dataPlaneAssembly.createStream,
+                },
+              });
+              if (!boundary.localLedger) {
+                throw new Error(
+                  "Conversation executor pair did not provide its local ledger",
+                );
+              }
+              return Object.freeze({
+                assignment: boundary,
+                authority: boundary.localLedger,
+              });
+            },
+          );
+          dataPlane = pair.dataPlane;
+          ctx.lifecycleContributions.acquire("executorDataPlane.close", () =>
+            pair.dataPlane.close()
+          );
+          return pair.assignment;
+        })()
+      : createConversationExecutorHostBoundary({
+          authority: conversationAuthority,
+          directory: topologyDirectory,
+          clock: () => new Date().toISOString(),
+        });
     const protocol = new ConversationProtocolRuntime({
       authority: ctx.authorityRuntime,
+      manager: managerAssembly.resolve,
+      recoverAuxiliary: auxiliaryRecoveryAssembly.resolve,
+      losslessDataPlane: Object.freeze({
+        kind: "available",
+        port: losslessDataPlane.port,
+      }),
       executorDispatch: executorBoundary.application,
       assignmentArtifactAuthority: assignmentArtifacts,
       ...(executorBoundary.staging
@@ -717,9 +746,9 @@ const conversationSurface: AccessSurface = {
       },
       confirmationHub: ctx.confirmationHub,
       durableTurnExecutor: protocol,
+      onTurnCommitted: committedTurnListenerAssembly.notify,
     });
-    protocol.bindManager(manager);
-    protocol.assertManagerBound();
+    managerAssembly.complete(manager);
     const advancementComposition =
       await ctx.advancementConversationComposition.create({
         sessionState: protocol.sessionState,
@@ -768,7 +797,7 @@ const conversationSurface: AccessSurface = {
         review: advancementReviews,
         results: reviewResults,
       });
-    protocol.bindAuxiliaryRecovery(async (conversationId) => {
+    auxiliaryRecoveryAssembly.complete(async (conversationId) => {
       const result = await advancementRecovery.recoverConversation(conversationId);
       if (
         result.status === "failed" ||
@@ -783,13 +812,12 @@ const conversationSurface: AccessSurface = {
         );
       }
     });
-    // All accepted turns share one fire-and-forget listener. Bind and verify it
-    // before the manager becomes reachable through any production ingress.
-    manager.bindTurnCommittedListener((info) => {
+    // Complete the constructor-owned fire-and-forget listener before the
+    // manager becomes reachable through any production ingress.
+    committedTurnListenerAssembly.complete((info) => {
       turnMaintenance(info);
       advancementAcceptedTurns.acceptCommittedTurn(info);
     });
-    manager.assertTurnCommittedListenerBound();
     const worksceneDirectory = createWorksceneDirectory({
       authority: ctx.worksceneAuthority,
       conversations: manager,
@@ -824,13 +852,7 @@ const conversationSurface: AccessSurface = {
         30_000,
       ).then(() => undefined),
     );
-    if (ctx.executorDataPlane) {
-      if (!executorBoundary.localLedger) {
-        throw new Error("Conversation executor boundary did not provide its local ledger");
-      }
-      ctx.executorDataPlane.bindAssignmentAuthority(executorBoundary.localLedger);
-      await ctx.executorDataPlane.start();
-    }
+    if (dataPlane) await dataPlane.start();
     await protocol.recoverReadinessProjections();
     ctx.conversations = manager;
     ctx.conversationProtocol = protocol;
@@ -840,8 +862,9 @@ const conversationSurface: AccessSurface = {
     ctx.conversationExecutorTopologyDirectory = topologyDirectory;
     ctx.conversationAssignmentStaging = executorBoundary.staging;
     ctx.conversationExecutorLedger = executorBoundary.localLedger;
+    ctx.executorDataPlane = dataPlane;
   },
-};
+});
 
 /** Device-local owner: internal-only and present exactly when an executor is loaded. */
 const localConversationOwnerUnit: CoreAssemblyUnit = {
@@ -1156,12 +1179,15 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
 }
 
 /** Recover durable Channel obligations only after S6 and the job owner both exist. */
-const channelInteractionRecoveryUnit: CoreAssemblyUnit = {
+const createChannelInteractionRecoveryUnit = (
+  assembly: ConversationLosslessDataPlaneAssemblyHandle,
+): CoreAssemblyUnit => ({
   name: "channel-interaction-recovery",
   phase: "pre-server",
   kind: "core",
   async setup(ctx) {
     if (!ctx.enabledRoles.includes("anchor")) return;
+    assembly.assertComplete();
     const mechanism = ctx.channelMechanism;
     const coordinator = ctx.channelCoordinator;
     if (!mechanism || !coordinator) {
@@ -1174,7 +1200,7 @@ const channelInteractionRecoveryUnit: CoreAssemblyUnit = {
       await coordinator.recover();
     }
   },
-};
+});
 
 /** 投递栈 —— 取得唯一 Outbox 后才构造、发布并连接 inbound router。 */
 const deliverySurface: AccessSurface = {
@@ -1316,9 +1342,19 @@ const conversationRecoverySurface: AccessSurface = {
 export function createAssemblyUnits(
   channelCredentials: ChannelCredentialProjection,
 ): readonly AssemblyUnit[] {
+  const conversationLosslessDataPlane =
+    createConversationLosslessDataPlaneAssemblyHandle();
+  const conversationSurface = createConversationSurface(
+    conversationLosslessDataPlane,
+  );
+  const losslessDataPlaneSurface = createLosslessDataPlaneSurface(
+    conversationLosslessDataPlane,
+  );
+  const channelInteractionRecoveryUnit = createChannelInteractionRecoveryUnit(
+    conversationLosslessDataPlane,
+  );
   return [
     authorityRuntimeSurface,
-    executorDataPlaneSurface,
     conversationSurface,
     localConversationOwnerUnit,
     executorJobOwnerUnit,

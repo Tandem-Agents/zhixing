@@ -11,6 +11,7 @@ import {
   ConfirmationHub,
   ConversationManager,
   WorksceneBusyError,
+  type DurableConversationTurnExecutor,
   type SessionRuntime,
   type RuntimeFactory,
 } from "@zhixing/owner-kernel";
@@ -2371,23 +2372,31 @@ describe("ConversationManager", () => {
       usage: { inputTokens: 0, outputTokens: 0 },
     });
 
-    it("committed-turn listener must be bound before publication and cannot be rebound", async () => {
-      const mgr = makePersistentManager();
+    it("requires an immutable committed-turn listener for durable execution only", async () => {
+      const durableTurnExecutor = {} as DurableConversationTurnExecutor;
+      expect(
+        () => new ConversationManager(createMockFactory(), undefined, {
+          durableTurnExecutor,
+        }),
+      ).toThrow(
+        "`onTurnCommitted` callback is required when `durableTurnExecutor` is provided",
+      );
+
       const listener = vi.fn();
-
-      expect(() => mgr.assertTurnCommittedListenerBound()).toThrow(
-        "turn-committed listener is not bound",
+      const durable = new ConversationManager(createMockFactory(), undefined, {
+        durableTurnExecutor,
+        onTurnCommitted: listener,
+      });
+      expect(ConversationManager.prototype).not.toHaveProperty(
+        "bindTurnCommittedListener",
       );
-      mgr.bindTurnCommittedListener(listener);
-      expect(() => mgr.assertTurnCommittedListenerBound()).not.toThrow();
-      expect(() => mgr.bindTurnCommittedListener(vi.fn())).toThrow(
-        "turn-committed listener is already bound",
+      expect(ConversationManager.prototype).not.toHaveProperty(
+        "assertTurnCommittedListenerBound",
       );
+      await durable.disposeAll();
 
-      await mgr.getOrCreate("conv-bound-listener");
-      await mgr.recordTurn("conv-bound-listener", runRecord("bound"));
-      expect(listener).toHaveBeenCalledOnce();
-      await mgr.disposeAll();
+      const ephemeral = makePersistentManager();
+      await ephemeral.disposeAll();
     });
 
     it("clear:窗口+turnCount 归零、换窗钩子被调、持久层 persistClear 在临界区调;busy 拒绝;不活跃 persist 即 cleared-inactive", async () => {

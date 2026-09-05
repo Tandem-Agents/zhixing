@@ -123,6 +123,7 @@ describe("projectSessionTurn", () => {
       durationMs: 1,
     };
     const manager = new ConversationManager(createFactory([]), undefined, {
+      onTurnCommitted: () => {},
       durableTurnExecutor: stubDurableTurnExecutor({
         async *run(): AsyncGenerator<AgentYield, RunResult> {
           return result;
@@ -151,6 +152,7 @@ describe("projectSessionTurn", () => {
     const onFinalPublishFailure = vi.fn();
     const notifications: string[] = [];
     const manager = new ConversationManager(createFactory([]), undefined, {
+      onTurnCommitted: () => {},
       durableTurnExecutor: stubDurableTurnExecutor({
         async *run(): AsyncGenerator<AgentYield, RunResult> {
           return {

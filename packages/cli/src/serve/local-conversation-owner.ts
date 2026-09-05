@@ -76,7 +76,12 @@ import {
 } from "./advancement-evidence-topology.js";
 import { DurableConversationInteractionObserver } from "./durable-conversation-interactions.js";
 import type { LocalConversationOwnerRuntimeStack } from "./conversation-owner-runtime.js";
-import { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
+import {
+  ConversationProtocolRuntime,
+  createConversationAuxiliaryRecoveryAssemblyHandle,
+  createConversationCommittedTurnListenerAssemblyHandle,
+  createConversationManagerAssemblyHandle,
+} from "./conversation-protocol-runtime.js";
 import {
   createConversationAssignmentArtifactAuthorityIndex,
   type ConversationAssignmentStagingPort,
@@ -765,6 +770,11 @@ export class LocalConversationOwnerAssembly {
   ): Promise<LocalConversationOwnerAssembly> {
     const owner = options.owner;
     let manager: ConversationManager;
+    const managerAssembly = createConversationManagerAssemblyHandle();
+    const auxiliaryRecoveryAssembly =
+      createConversationAuxiliaryRecoveryAssemblyHandle();
+    const committedTurnListenerAssembly =
+      createConversationCommittedTurnListenerAssemblyHandle();
     const projectedRuns = new Set<string>();
     const conversationFactListeners = new Set<
       (fact: ConversationLifecycleFact) => void
@@ -773,6 +783,12 @@ export class LocalConversationOwnerAssembly {
     let protocol!: ConversationProtocolRuntime;
     protocol = new ConversationProtocolRuntime({
       owner,
+      manager: managerAssembly.resolve,
+      recoverAuxiliary: auxiliaryRecoveryAssembly.resolve,
+      losslessDataPlane: Object.freeze({
+        kind: "absent",
+        reason: "executor-only",
+      }),
       interactions: options.interactions,
       executorDispatch: options.executorDispatch,
       assignmentArtifactAuthority: createConversationAssignmentArtifactAuthorityIndex(),
@@ -852,9 +868,9 @@ export class LocalConversationOwnerAssembly {
       },
       applyCommittedSessionMutations: async () => {},
       durableTurnExecutor: protocol,
+      onTurnCommitted: committedTurnListenerAssembly.notify,
     });
-    protocol.bindManager(manager);
-    protocol.assertManagerBound();
+    managerAssembly.complete(manager);
 
     const rubricCatalog = new GlobalRubricCatalog({
       globalState: () => undefined,
@@ -972,7 +988,7 @@ export class LocalConversationOwnerAssembly {
       results: reviewResults,
     });
 
-    protocol.bindAuxiliaryRecovery(async (conversationId) => {
+    auxiliaryRecoveryAssembly.complete(async (conversationId) => {
       const result = await recovery.recoverConversation(conversationId);
       if (
         result.status === "failed" ||
@@ -984,9 +1000,8 @@ export class LocalConversationOwnerAssembly {
         throw new Error(result.message ?? `Local advancement recovery failed: ${result.status}`);
       }
     });
-    manager.bindTurnCommittedListener((info) =>
+    committedTurnListenerAssembly.complete((info) =>
       acceptedTurns.acceptCommittedTurn(info));
-    manager.assertTurnCommittedListenerBound();
 
     return new LocalConversationOwnerAssembly({
       options,

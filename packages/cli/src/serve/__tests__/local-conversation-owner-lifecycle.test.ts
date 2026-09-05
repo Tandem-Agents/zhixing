@@ -13,41 +13,24 @@ import {
 const LIFECYCLE_TIMEOUT_MS = 60_000;
 
 describe("closed lifecycle startup", () => {
-  it("binds and verifies the committed-turn listener before publishing the local owner", async () => {
-    const bind = vi.spyOn(
-      ConversationManager.prototype,
-      "bindTurnCommittedListener",
-    );
-    const verify = vi.spyOn(
-      ConversationManager.prototype,
-      "assertTurnCommittedListenerBound",
-    );
-    const bindManager = vi.spyOn(
-      ConversationProtocolRuntime.prototype,
-      "bindManager",
-    );
-    const verifyManager = vi.spyOn(
-      ConversationProtocolRuntime.prototype,
-      "assertManagerBound",
-    );
+  it("publishes a complete protocol/manager pair with an immutable committed-turn listener", async () => {
     const fixture = await createLocalOwnerAssemblyFixture({ profile: "executor-only" });
     try {
-      expect(bind).toHaveBeenCalledOnce();
-      expect(verify).toHaveBeenCalledOnce();
-      expect(bindManager).toHaveBeenCalledOnce();
-      expect(verifyManager).toHaveBeenCalledOnce();
-      expect(bindManager.mock.invocationCallOrder[0]).toBeLessThan(
-        bind.mock.invocationCallOrder[0]!,
+      expect(ConversationManager.prototype).not.toHaveProperty(
+        "bindTurnCommittedListener",
       );
-      expect(bind.mock.invocationCallOrder[0]).toBeLessThan(
-        verify.mock.invocationCallOrder[0]!,
+      expect(ConversationManager.prototype).not.toHaveProperty(
+        "assertTurnCommittedListenerBound",
+      );
+      expect(ConversationProtocolRuntime.prototype).not.toHaveProperty("bindManager");
+      expect(ConversationProtocolRuntime.prototype).not.toHaveProperty(
+        "assertManagerBound",
+      );
+      expect(ConversationProtocolRuntime.prototype).not.toHaveProperty(
+        "bindAuxiliaryRecovery",
       );
     } finally {
       await fixture.assembly.close();
-      bind.mockRestore();
-      verify.mockRestore();
-      bindManager.mockRestore();
-      verifyManager.mockRestore();
     }
   }, LIFECYCLE_TIMEOUT_MS);
 

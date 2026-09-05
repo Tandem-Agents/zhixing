@@ -101,7 +101,10 @@ import {
 } from "../data-plane-ticket-mesh.js";
 import type { JobInteractionAnswerPort } from "../durable-job-interactions.js";
 import { enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
-import { ExecutorDataPlaneRuntime } from "../executor-data-plane-runtime.js";
+import {
+  createExecutorDataPlaneAssignmentPair,
+  type ExecutorDataPlaneRuntime,
+} from "../executor-data-plane-runtime.js";
 import { loadOrCreateDeviceKey } from "../mesh-device-key.js";
 import type { JobRuntimePort } from "../job-assignment-worker.js";
 import { ExecutorJobOwnerAssembly } from "../executor-job-owner.js";
@@ -115,7 +118,10 @@ import {
   FirstPartyFinalitySession,
 } from "../first-party-finality-session.js";
 import { JobStatusDirectory } from "../job-status-directory.js";
-import { createLosslessDataPlaneComposition } from "../lossless-data-plane-composition.js";
+import {
+  createConversationLosslessDataPlaneAssemblyHandle,
+  createLosslessDataPlaneComposition,
+} from "../lossless-data-plane-composition.js";
 import type { ChannelChallengeDeliveryPort } from "../lossless-data-plane-runtime.js";
 import {
   AssignmentDataPlaneTopologyAdapter,
@@ -503,26 +509,32 @@ async function createRemoteConversationExecutor(input: {
       return Reflect.get(target, property, receiver);
     },
   }) as AuthorityRuntimeStack;
-  const dataPlane = new ExecutorDataPlaneRuntime({
-    zhixingHome: executorRoot,
-    authority: executorAuthority,
-    module: {
-      AssignmentStreamSpool,
-      AssignmentStreamWriter,
-      DataPlaneTicketRegistry,
+  const pair = createExecutorDataPlaneAssignmentPair(
+    {
+      zhixingHome: executorRoot,
+      authority: executorAuthority,
+      module: {
+        AssignmentStreamSpool,
+        AssignmentStreamWriter,
+        DataPlaneTicketRegistry,
+      },
+      clock: () => new Date().toISOString(),
     },
-    clock: () => new Date().toISOString(),
-  });
-  const ledger = createExecutorLedger({
-    authority: executorAuthority,
-    executorId,
-    log,
-    artifacts,
-    snapshotFor: (candidate) => candidate === executorId ? snapshot : undefined,
-    permissionSnapshotFor: (digest) => permissions.get(digest),
-    tickets: dataPlane.assignmentTickets,
-  });
-  dataPlane.bindAssignmentAuthority(ledger);
+    (dataPlane) => {
+      const ledger = createExecutorLedger({
+        authority: executorAuthority,
+        executorId,
+        log,
+        artifacts,
+        snapshotFor: (candidate) => candidate === executorId ? snapshot : undefined,
+        permissionSnapshotFor: (digest) => permissions.get(digest),
+        tickets: dataPlane.assignmentTickets,
+      });
+      return Object.freeze({ assignment: ledger, authority: ledger });
+    },
+  );
+  const dataPlane = pair.dataPlane;
+  const ledger = pair.assignment;
 
   const ownerReceiver = new FileResumableArtifactReceiver(
     input.authority.artifacts,
@@ -753,18 +765,6 @@ async function runConversationScenario(
   const firstPartyFrames: StreamFrame[] = [];
   let manager!: ConversationManager;
   let localDataPlane: ExecutorDataPlaneRuntime | undefined;
-  if (topology === "local") {
-    localDataPlane = new ExecutorDataPlaneRuntime({
-      zhixingHome: home,
-      authority,
-      module: {
-        AssignmentStreamSpool,
-        AssignmentStreamWriter,
-        DataPlaneTicketRegistry,
-      },
-      clock: () => new Date().toISOString(),
-    });
-  }
   const jobStatus = new JobStatusDirectory();
   let protocol!: ConversationProtocolRuntime;
   const statusHub = new ExecutionStatusHub({
@@ -787,33 +787,62 @@ async function runConversationScenario(
         },
       }
     : NO_REMOTE_CONVERSATION_EXECUTORS;
-  const executorBoundary = createConversationExecutorHostBoundary({
-    authority: anchorConversationOwnerRuntime(authority),
-    directory: topologyDirectory,
-    clock: () => new Date().toISOString(),
-    ...(topology === "local"
-      ? {
-          local: {
-            ConversationAssignmentLedger,
-            InProcessAssignmentSubmission,
-            dataPlaneTickets: localDataPlane!.assignmentTickets,
-            createStream: (stream: {
-              readonly assignmentId: string;
-              readonly ref: ExecutionRef;
-            }) => localDataPlane!.createStream(stream),
-            runtimeFactory,
+  const executorBoundary = topology === "local"
+    ? (() => {
+        const pair = createExecutorDataPlaneAssignmentPair(
+          {
+            zhixingHome: home,
+            authority,
+            module: {
+              AssignmentStreamSpool,
+              AssignmentStreamWriter,
+              DataPlaneTicketRegistry,
+            },
+            clock: () => new Date().toISOString(),
           },
-        }
-      : {}),
-  });
+          (dataPlane) => {
+            const boundary = createConversationExecutorHostBoundary({
+              authority: anchorConversationOwnerRuntime(authority),
+              directory: topologyDirectory,
+              clock: () => new Date().toISOString(),
+              local: {
+                ConversationAssignmentLedger,
+                InProcessAssignmentSubmission,
+                dataPlaneTickets: dataPlane.assignmentTickets,
+                createStream: dataPlane.createStream,
+                runtimeFactory,
+              },
+            });
+            if (!boundary.localLedger) throw new Error("Local ledger is unavailable");
+            return Object.freeze({
+              assignment: boundary,
+              authority: boundary.localLedger,
+            });
+          },
+        );
+        localDataPlane = pair.dataPlane;
+        return pair.assignment;
+      })()
+    : createConversationExecutorHostBoundary({
+        authority: anchorConversationOwnerRuntime(authority),
+        directory: topologyDirectory,
+        clock: () => new Date().toISOString(),
+      });
+  const conversationLosslessDataPlane =
+    createConversationLosslessDataPlaneAssemblyHandle();
   protocol = new ConversationProtocolRuntime({
     authority,
+    losslessDataPlane: Object.freeze({
+      kind: "available",
+      port: conversationLosslessDataPlane.port,
+    }),
     executorDispatch: executorBoundary.application,
     assignmentArtifactAuthority: assignmentArtifacts,
     ...(executorBoundary.staging
       ? { assignmentStaging: executorBoundary.staging }
       : {}),
     manager: () => manager,
+    recoverAuxiliary: async () => {},
     interactions,
     clock: () => new Date().toISOString(),
     onStatus: (notice) => {
@@ -830,7 +859,6 @@ async function runConversationScenario(
       new FirstPartyFinalitySession({ sources: statusHub, ...input }),
   });
   if (topology === "local") {
-    localDataPlane!.bindAssignmentAuthority(executorBoundary.localLedger!);
     await localDataPlane!.start();
   } else {
     remote = await createRemoteConversationExecutor({
@@ -865,13 +893,13 @@ async function runConversationScenario(
         : {}),
       ...(remote ? { remote: remote.mesh } : {}),
     }),
-    protocol,
     channelChallenges: Object.freeze({ kind: "available", delivery: channels }),
     isCurrentOwner: () => true,
     jobStatus,
     onDataPlaneError: (error) => conversationBackgroundErrors.push(error),
     onCoordinatorError: (error) => conversationBackgroundErrors.push(error),
   });
+  conversationLosslessDataPlane.complete(composition.coordinator);
 
   const committed = new Map<string, { runIndex: number; shardId: string }>();
   manager = new ConversationManager(runtimeFactory, undefined, {
@@ -886,6 +914,7 @@ async function runConversationScenario(
       return { ...accepted, appended: true };
     },
     durableTurnExecutor: protocol,
+    onTurnCommitted: () => {},
   });
   const conversationId = `conversation-${surface}-${topology}`;
   const source = {
@@ -1259,28 +1288,34 @@ async function runJobScenario(
     authority.signer,
   );
   await authority.installPermissionSnapshot(permissionSnapshot);
-  const dataPlane = new ExecutorDataPlaneRuntime({
-    zhixingHome: home,
-    authority,
-    module: {
-      AssignmentStreamSpool,
-      AssignmentStreamWriter,
-      DataPlaneTicketRegistry,
-    },
-    clock: () => new Date().toISOString(),
-  });
   const snapshot = await authority.currentExecutorSnapshot();
-  const ledger = createExecutorLedger({
-    authority,
-    executorId: authority.executorId,
-    log: authority.executorLog,
-    artifacts: authority.artifacts,
-    snapshotFor: (candidate) =>
-      candidate === authority.executorId ? snapshot : undefined,
-    permissionSnapshotFor: authority.permissionSnapshotFor,
-    tickets: dataPlane.assignmentTickets,
-  });
-  dataPlane.bindAssignmentAuthority(ledger);
+  const pair = createExecutorDataPlaneAssignmentPair(
+    {
+      zhixingHome: home,
+      authority,
+      module: {
+        AssignmentStreamSpool,
+        AssignmentStreamWriter,
+        DataPlaneTicketRegistry,
+      },
+      clock: () => new Date().toISOString(),
+    },
+    (dataPlane) => {
+      const ledger = createExecutorLedger({
+        authority,
+        executorId: authority.executorId,
+        log: authority.executorLog,
+        artifacts: authority.artifacts,
+        snapshotFor: (candidate) =>
+          candidate === authority.executorId ? snapshot : undefined,
+        permissionSnapshotFor: authority.permissionSnapshotFor,
+        tickets: dataPlane.assignmentTickets,
+      });
+      return Object.freeze({ assignment: ledger, authority: ledger });
+    },
+  );
+  const dataPlane = pair.dataPlane;
+  const ledger = pair.assignment;
   await dataPlane.start();
 
   const submissionAuthorizer: AssignmentSubmissionAuthorizer = {
@@ -1584,8 +1619,14 @@ async function runJobScenario(
   });
 
   const interactions = new DurableConversationInteractionObserver();
+  const conversationLosslessDataPlane =
+    createConversationLosslessDataPlaneAssemblyHandle();
   const protocol = new ConversationProtocolRuntime({
     authority,
+    losslessDataPlane: Object.freeze({
+      kind: "available",
+      port: conversationLosslessDataPlane.port,
+    }),
     executorDispatch: createConversationExecutorHostBoundary({
       authority: anchorConversationOwnerRuntime(authority),
       directory: NO_REMOTE_CONVERSATION_EXECUTORS,
@@ -1595,6 +1636,7 @@ async function runJobScenario(
     manager: () => {
       throw new Error("Job-only S6 scenario has no conversation manager");
     },
+    recoverAuxiliary: async () => {},
     interactions,
     clock: () => new Date().toISOString(),
   });
@@ -1638,13 +1680,13 @@ async function runJobScenario(
         : {}),
       ...(mesh ? { remote: mesh } : {}),
     }),
-    protocol,
     channelChallenges: Object.freeze({ kind: "available", delivery: channels }),
     isCurrentOwner: () => true,
     jobStatus,
     onDataPlaneError: (error) => backgroundErrors.push(error),
     onCoordinatorError: (error) => backgroundErrors.push(error),
   });
+  conversationLosslessDataPlane.complete(composition.coordinator);
 
   let preparedCursorInterrupted = false;
   if (topology === "remote" && interactive) {

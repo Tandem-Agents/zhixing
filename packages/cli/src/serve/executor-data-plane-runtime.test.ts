@@ -1,7 +1,23 @@
 import { describe, expect, it, vi } from "vitest";
 import { MeshServiceRegistry } from "@zhixing/mesh";
-import { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
+import {
+  createExecutorDataPlaneAssignmentPair,
+  type ExecutorDataPlaneAssignmentAuthorityPort,
+  type ExecutorDataPlaneRuntimeOptions,
+} from "./executor-data-plane-runtime.js";
 import type { ExecutorRoleModule } from "./role-topology.js";
+
+function composeRuntime(
+  options: ExecutorDataPlaneRuntimeOptions,
+  authority: ExecutorDataPlaneAssignmentAuthorityPort = {
+    dataPlaneBinding: vi.fn(),
+    authorizeOwnerRelay: vi.fn(),
+  },
+) {
+  return createExecutorDataPlaneAssignmentPair(options, () =>
+    Object.freeze({ assignment: authority, authority })
+  ).dataPlane;
+}
 
 describe("ExecutorDataPlaneRuntime", () => {
   it("recovers tickets, maintains every durable spool, and creates streams through one substrate", async () => {
@@ -23,7 +39,11 @@ describe("ExecutorDataPlaneRuntime", () => {
     class Writer {
       static open = vi.fn(async () => opened);
     }
-    const runtime = new ExecutorDataPlaneRuntime({
+    const ledger = {
+      dataPlaneBinding: vi.fn(),
+      authorizeOwnerRelay: vi.fn(),
+    };
+    const runtime = composeRuntime({
       zhixingHome: "X:/zhixing-home",
       authority: {
         artifacts: {},
@@ -36,11 +56,7 @@ describe("ExecutorDataPlaneRuntime", () => {
         AssignmentStreamWriter: Writer,
         DataPlaneTicketRegistry: Tickets,
       } as unknown as ExecutorRoleModule,
-    });
-    const ledger = {
-      dataPlaneBinding: vi.fn(),
-    };
-    runtime.bindAssignmentAuthority(ledger as never);
+    }, ledger as never);
 
     await runtime.start();
     expect(recover).toHaveBeenCalledOnce();
@@ -134,7 +150,7 @@ describe("ExecutorDataPlaneRuntime", () => {
       },
     }));
     const storageMaintenance = { acquire } as never;
-    const runtime = new ExecutorDataPlaneRuntime({
+    const runtime = composeRuntime({
       zhixingHome: "X:/zhixing-home",
       authority: {
         artifacts: {},
@@ -149,7 +165,6 @@ describe("ExecutorDataPlaneRuntime", () => {
       } as unknown as ExecutorRoleModule,
       storageMaintenance,
     });
-    runtime.bindAssignmentAuthority({ dataPlaneBinding: vi.fn() } as never);
     expect(spoolOptions?.storageMaintenance).toBe(storageMaintenance);
 
     await runtime.start();
@@ -165,48 +180,100 @@ describe("ExecutorDataPlaneRuntime", () => {
     await runtime.close();
   });
 
-  it("cannot start or create a stream before the durable ledger is bound", async () => {
+  it("does not publish a pair when assignment construction fails", () => {
     class Spool {
       closeAssignmentScan = vi.fn(async () => undefined);
       stopStorageMaintenance = vi.fn();
     }
     class Tickets {}
     class Writer {}
-    const runtime = new ExecutorDataPlaneRuntime({
-      zhixingHome: "X:/zhixing-home",
-      authority: {
-        artifacts: {},
-        executorLog: {},
-        executorId: "executor-1",
-        verifier: {},
-      } as never,
-      module: {
-        AssignmentStreamSpool: Spool,
-        AssignmentStreamWriter: Writer,
-        DataPlaneTicketRegistry: Tickets,
-      } as unknown as ExecutorRoleModule,
+    const createAssignment = vi.fn(() => {
+      throw new Error("assignment construction failed");
     });
 
-    await expect(runtime.start()).rejects.toThrow(/no assignment authority/);
-    await expect(
-      runtime.createStream({
-        assignmentId: "assignment-1",
-        ref: {
-          execution: "conversation",
-          conversationId: "conversation-1",
-          runId: "run-1",
-          ownerEpoch: 1,
+    expect(() =>
+      createExecutorDataPlaneAssignmentPair(
+        {
+          zhixingHome: "X:/zhixing-home",
+          authority: {
+            artifacts: {},
+            executorLog: {},
+            executorId: "executor-1",
+            verifier: {},
+          } as never,
+          module: {
+            AssignmentStreamSpool: Spool,
+            AssignmentStreamWriter: Writer,
+            DataPlaneTicketRegistry: Tickets,
+          } as unknown as ExecutorRoleModule,
         },
-      }),
-    ).rejects.toThrow(/no assignment authority/);
-    await runtime.close();
+        createAssignment,
+      )
+    ).toThrow("assignment construction failed");
+    expect(createAssignment).toHaveBeenCalledOnce();
+  });
+
+  it("constructs one frozen pair whose tickets resolve through the same assignment authority", async () => {
+    let ticketAssignments:
+      | {
+        dataPlaneBinding(
+          assignmentId: string,
+          use?: unknown,
+        ): Promise<unknown>;
+      }
+      | undefined;
+    class Spool {}
+    class Tickets {
+      constructor(options: { readonly assignments: typeof ticketAssignments }) {
+        ticketAssignments = options.assignments;
+      }
+    }
+    class Writer {}
+    const binding = Object.freeze({ assignmentId: "assignment-1" });
+    const authority = {
+      dataPlaneBinding: vi.fn(async () => binding),
+      authorizeOwnerRelay: vi.fn(async () => undefined),
+    };
+    let assemblyTickets: unknown;
+    const pair = createExecutorDataPlaneAssignmentPair(
+      {
+        zhixingHome: "X:/zhixing-home",
+        authority: {
+          artifacts: {},
+          executorLog: {},
+          executorId: "executor-1",
+          verifier: {},
+        } as never,
+        module: {
+          AssignmentStreamSpool: Spool,
+          AssignmentStreamWriter: Writer,
+          DataPlaneTicketRegistry: Tickets,
+        } as unknown as ExecutorRoleModule,
+      },
+      (dataPlane) => {
+        assemblyTickets = dataPlane.assignmentTickets;
+        return Object.freeze({ assignment: authority, authority });
+      },
+    );
+
+    expect(Object.isFrozen(pair)).toBe(true);
+    expect(pair.assignment).toBe(authority);
+    expect(assemblyTickets).toBe(pair.dataPlane.assignmentTickets);
+    expect("bindAssignmentAuthority" in pair.dataPlane).toBe(false);
+    await expect(
+      ticketAssignments?.dataPlaneBinding("assignment-1"),
+    ).resolves.toBe(binding);
+    expect(authority.dataPlaneBinding).toHaveBeenCalledWith(
+      "assignment-1",
+      undefined,
+    );
   });
 
   it("owns concrete spool and tickets while exposing one finite Mesh service lifecycle", () => {
     class Spool {}
     class Tickets {}
     class Writer {}
-    const runtime = new ExecutorDataPlaneRuntime({
+    const runtime = composeRuntime({
       zhixingHome: "X:/zhixing-home",
       authority: {
         artifacts: {},
@@ -220,10 +287,6 @@ describe("ExecutorDataPlaneRuntime", () => {
         DataPlaneTicketRegistry: Tickets,
       } as unknown as ExecutorRoleModule,
     });
-    runtime.bindAssignmentAuthority({
-      dataPlaneBinding: vi.fn(),
-      authorizeOwnerRelay: vi.fn(),
-    } as never);
     const services = new MeshServiceRegistry();
     const dispose = runtime.registerMeshServices({
       services,

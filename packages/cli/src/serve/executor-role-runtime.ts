@@ -57,7 +57,7 @@ import type {
   ExecutorRoleModule,
   ExecutorServeBootstrapContext,
 } from "./role-topology.js";
-import { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
+import { createExecutorDataPlaneAssignmentPair } from "./executor-data-plane-runtime.js";
 import { createAgentJobRuntimePort } from "./agent-job-runtime.js";
 import {
   ExecutorJobOwnerAssembly,
@@ -364,17 +364,6 @@ export async function runExecutorRole(
       "evidenceHandler.stopAccepting",
       () => evidenceHandler.stopAccepting(),
     );
-    const dataPlane = new ExecutorDataPlaneRuntime({
-      zhixingHome,
-      authority,
-      module: executor,
-      storageMaintenance: deviceCapacity.storage,
-      onError: (error) => writer.notify(`[data-plane] ${error.message}`),
-    });
-    executorRoleLifecycle.acquire(
-      "executorDataPlane.close",
-      () => dataPlane.close(),
-    );
     const executorResources = authority.executorResourceGovernor;
     const localOwnerRuntime = localConversationOwnerRuntime({
       artifacts: authority.artifacts,
@@ -411,25 +400,42 @@ export async function runExecutorRole(
         authority.validateLocalConversationManifest,
       verifier: authority.verifier,
     });
-    const ledger = createConversationExecutorLedger({
-      Constructor: executor.ConversationAssignmentLedger,
-      authority: localOwnerRuntime,
-      dataPlaneTickets: dataPlane.assignmentTickets,
-      assignmentRecordV2Writes: ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
-      usageFinal: async (assignmentId) => {
-        const domain = await authority!.executorResourceGovernor.assignmentDomain(
-          assignmentId,
-        );
-        if (domain?.kind === "local") {
-          return authority!.executorResourceGovernor.finalizeLocalAssignment(
-            assignmentId,
-          );
-        }
-        if (!mesh) throw new Error("Executor mesh runtime is not ready");
-        return mesh.finalizeExecutorUsage(assignmentId);
+    const pair = createExecutorDataPlaneAssignmentPair(
+      {
+        zhixingHome,
+        authority,
+        module: executor,
+        storageMaintenance: deviceCapacity.storage,
+        onError: (error) => writer.notify(`[data-plane] ${error.message}`),
       },
-    });
-    dataPlane.bindAssignmentAuthority(ledger);
+      (dataPlaneAssembly) => {
+        const ledger = createConversationExecutorLedger({
+          Constructor: executor.ConversationAssignmentLedger,
+          authority: localOwnerRuntime,
+          dataPlaneTickets: dataPlaneAssembly.assignmentTickets,
+          assignmentRecordV2Writes: ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
+          usageFinal: async (assignmentId) => {
+            const domain = await authority!.executorResourceGovernor.assignmentDomain(
+              assignmentId,
+            );
+            if (domain?.kind === "local") {
+              return authority!.executorResourceGovernor.finalizeLocalAssignment(
+                assignmentId,
+              );
+            }
+            if (!mesh) throw new Error("Executor mesh runtime is not ready");
+            return mesh.finalizeExecutorUsage(assignmentId);
+          },
+        });
+        return Object.freeze({ assignment: ledger, authority: ledger });
+      },
+    );
+    const dataPlane = pair.dataPlane;
+    const ledger = pair.assignment;
+    executorRoleLifecycle.acquire(
+      "executorDataPlane.close",
+      () => dataPlane.close(),
+    );
     await dataPlane.start();
     const role = executor.createExecutorRole({
       createAgentRuntime: (sessionId, environment) =>

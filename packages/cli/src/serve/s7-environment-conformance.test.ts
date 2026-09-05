@@ -63,12 +63,17 @@ import { createAnchorWorksceneConversationStorageProjectionCleanup } from "./wor
 import {
   ConversationProtocolRuntime,
   DurableConversationInteractionObserver,
+  type ConversationLosslessDataPlaneTopology,
 } from "./conversation-protocol-runtime.js";
 import {
   createConversationAssignmentArtifactAuthorityIndex,
   createConversationExecutorHostBoundary,
   NO_REMOTE_CONVERSATION_EXECUTORS,
 } from "./conversation-executor-dispatch.js";
+import {
+  ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
+  createConversationExecutorLedger,
+} from "./conversation-executor-ledger.js";
 import { anchorConversationOwnerRuntime } from "./conversation-owner-runtime.js";
 import {
   ConversationAssignmentLedger,
@@ -102,6 +107,18 @@ const READINESS = {
   deviceScopedCredentialBindingIds: [] as string[],
   credentialGeneration: null,
 };
+const TEST_ANCHOR_LOSSLESS_DATA_PLANE = Object.freeze({
+  kind: "available" as const,
+  port: Object.freeze({
+    openConversationChannel: async () => {
+      throw new Error("S7 environment conformance does not execute a Channel turn");
+    },
+    openFirstPartySurfaceSession: async () => {
+      throw new Error("S7 environment conformance does not execute a first-party turn");
+    },
+    recoverConversationChannels: async () => 0,
+  }),
+}) satisfies ConversationLosslessDataPlaneTopology;
 
 describe("S7 environment/workscene production conformance", () => {
   it("drives the same finite chain through real in-process and mesh composition roots", async () => {
@@ -355,11 +372,35 @@ async function runChain(topology: "in-process" | "mesh") {
     const ownerRuntimeFactory = createInProcessRuntimeFactory(executorRole);
     const assignmentRuntimeFactory =
       createInProcessAssignmentRuntimeFactory(executorRole);
+    const localLedger = createConversationExecutorLedger({
+      Constructor: ConversationAssignmentLedger,
+      authority: {
+        artifacts: executor.artifacts,
+        executorCapabilities: executor.executorCapabilities,
+        executorId: executor.executorId,
+        executorLog: executor.executorLog,
+        assignmentResources: executor.executorResourceGovernor,
+        permissionSnapshotFor: executor.permissionSnapshotFor,
+        preflightLocalConversationEnvironment:
+          executor.preflightLocalConversationEnvironment,
+        signer: executor.signer,
+        validateConversationRuntimeBinding:
+          executor.validateConversationRuntimeBinding,
+        validateLocalConversationManifest:
+          executor.validateLocalConversationManifest,
+        verifier: executor.verifier,
+      },
+      clock: () => NOW,
+      assignmentRecordV2Writes: ASSIGNMENT_RECORD_V2_WRITES_ENABLED,
+      usageFinal: (assignmentId) =>
+        executor.executorResourceGovernor.finalizeLocalAssignment(assignmentId),
+    });
     const executorBoundary = createConversationExecutorHostBoundary({
       authority: anchorConversationOwnerRuntime(anchor),
       directory: NO_REMOTE_CONVERSATION_EXECUTORS,
       clock: () => NOW,
       local: {
+        ledger: localLedger,
         ConversationAssignmentLedger,
         InProcessAssignmentSubmission,
         runtimeFactory: assignmentRuntimeFactory,
@@ -368,10 +409,12 @@ async function runChain(topology: "in-process" | "mesh") {
     let conversationManager: ConversationManager;
     const conversationProtocol = new ConversationProtocolRuntime({
       authority: anchor,
+      losslessDataPlane: TEST_ANCHOR_LOSSLESS_DATA_PLANE,
       executorDispatch: executorBoundary.application,
       assignmentArtifactAuthority: createConversationAssignmentArtifactAuthorityIndex(),
       assignmentStaging: executorBoundary.staging!,
       manager: () => conversationManager,
+      recoverAuxiliary: async () => {},
       interactions: new DurableConversationInteractionObserver(),
       clock: () => NOW,
     });

@@ -40,6 +40,10 @@ import {
 import {
   ConversationProtocolRuntime,
   DurableConversationInteractionObserver,
+  createConversationAuxiliaryRecoveryAssemblyHandle,
+  createConversationCommittedTurnListenerAssemblyHandle,
+  createConversationManagerAssemblyHandle,
+  type ConversationLosslessDataPlaneTopology,
 } from "../conversation-protocol-runtime.js";
 import {
   anchorConversationOwnerRuntime,
@@ -64,6 +68,27 @@ const TEST_EXECUTOR_READINESS = {
 
 const TEST_RESOURCE_CANDIDATE_TTL_MS = 60_000;
 const TEST_DURABLE_IO_TIMEOUT_MS = 120_000;
+
+const TEST_ANCHOR_LOSSLESS_DATA_PLANE = Object.freeze({
+  kind: "available" as const,
+  port: Object.freeze({
+    openConversationChannel: async () => ({ close: async () => undefined }),
+    openFirstPartySurfaceSession: async () => ({
+      path: undefined,
+      start: () => undefined,
+      poll: async () => {
+        throw new Error("Test surface session does not poll");
+      },
+      restoreDirect: async () => undefined,
+      checkpoint: () => {
+        throw new Error("Test surface session has no checkpoint");
+      },
+      waitForSeq: async () => undefined,
+      close: async () => undefined,
+    }),
+    recoverConversationChannels: async () => 0,
+  }),
+}) satisfies ConversationLosslessDataPlaneTopology;
 
 const TEST_LOCAL_EXECUTOR = {
   ConversationAssignmentLedger,
@@ -106,8 +131,12 @@ function setupAuthorityRuntime(
 function createProtocol(
   options: Omit<
     ConstructorParameters<typeof ConversationProtocolRuntime>[0],
-    "assignmentArtifactAuthority" | "executorDispatch"
+    | "assignmentArtifactAuthority"
+    | "executorDispatch"
+    | "losslessDataPlane"
+    | "recoverAuxiliary"
   > & {
+    readonly recoverAuxiliary?: (conversationId: string) => Promise<void>;
     readonly executorDispatch?: ConversationExecutorDispatchApplication;
     readonly maxPendingInteractions?: number;
     readonly localExecutor?: {
@@ -149,6 +178,8 @@ function createProtocol(
   } = options;
   return new ConversationProtocolRuntime({
     ...protocolOptions,
+    recoverAuxiliary: options.recoverAuxiliary ?? (async () => {}),
+    losslessDataPlane: TEST_ANCHOR_LOSSLESS_DATA_PLANE,
     assignmentArtifactAuthority: createConversationAssignmentArtifactAuthorityIndex(),
     executorDispatch: options.executorDispatch ?? executorBoundary!.application,
     ...(executorBoundary?.staging
@@ -266,7 +297,7 @@ async function seedPendingConversation(label: string) {
   manager = new ConversationManager(
     { create: vi.fn(async () => runtime) },
     undefined,
-    { durableTurnExecutor: protocol },
+    { durableTurnExecutor: protocol, onTurnCommitted: () => {} },
   );
   const conversationId = `conversation-${label}`;
   await getOrCreateActiveConversation(authority, manager, conversationId);
@@ -284,6 +315,42 @@ async function seedPendingConversation(label: string) {
 }
 
 describe("ConversationProtocolRuntime", () => {
+  it("requires its private manager assembly handle to complete exactly once", () => {
+    const assembly = createConversationManagerAssemblyHandle();
+    const manager = {} as ConversationManager;
+
+    expect(() => assembly.resolve()).toThrow(/not assembled/u);
+    assembly.complete(manager);
+    expect(assembly.resolve()).toBe(manager);
+    expect(() => assembly.complete(manager)).toThrow(/already assembled/u);
+  });
+
+  it("requires its private auxiliary recovery handle to complete exactly once", async () => {
+    const assembly = createConversationAuxiliaryRecoveryAssemblyHandle();
+    const recover = vi.fn(async (_conversationId: string) => {});
+
+    expect(() => assembly.resolve("conversation-before-complete")).toThrow(
+      /not assembled/u,
+    );
+    assembly.complete(recover);
+    await expect(assembly.resolve("conversation-ready")).resolves.toBeUndefined();
+    expect(recover).toHaveBeenCalledWith("conversation-ready");
+    expect(() => assembly.complete(recover)).toThrow(/already assembled/u);
+  });
+
+  it("requires its private committed-turn listener handle to complete exactly once", () => {
+    const assembly = createConversationCommittedTurnListenerAssemblyHandle();
+    const listener = vi.fn();
+    const info = {} as Parameters<typeof assembly.notify>[0];
+
+    expect(() => assembly.notify(info)).toThrow(/not assembled/u);
+    assembly.complete(listener);
+    assembly.notify(info);
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener).toHaveBeenCalledWith(info);
+    expect(() => assembly.complete(listener)).toThrow(/already assembled/u);
+  });
+
   it("keeps mutation publisher ownership behind provenance binding leases", async () => {
     const home = await createTempDir("conversation-protocol-publisher-lease");
     const authority = await setupAuthorityRuntime({
@@ -326,14 +393,34 @@ describe("ConversationProtocolRuntime", () => {
     expect(() =>
       new ConversationProtocolRuntime({
         authority,
+        losslessDataPlane: TEST_ANCHOR_LOSSLESS_DATA_PLANE,
         manager: () => {
           throw new Error("test manager is unavailable");
         },
+        recoverAuxiliary: async () => {},
         interactions: new DurableConversationInteractionObserver(),
         executorDispatch: undefined as never,
         assignmentArtifactAuthority: createConversationAssignmentArtifactAuthorityIndex(),
       })
     ).toThrow("Conversation protocol requires the executor dispatch application");
+
+    expect(() =>
+      new ConversationProtocolRuntime({
+        authority,
+        losslessDataPlane: TEST_ANCHOR_LOSSLESS_DATA_PLANE,
+        manager: () => {
+          throw new Error("test manager is unavailable");
+        },
+        recoverAuxiliary: undefined as never,
+        interactions: new DurableConversationInteractionObserver(),
+        executorDispatch: createConversationExecutorHostBoundary({
+          authority: anchorConversationOwnerRuntime(authority),
+          directory: NO_REMOTE_CONVERSATION_EXECUTORS,
+          clock: () => new Date().toISOString(),
+        }).application,
+        assignmentArtifactAuthority: createConversationAssignmentArtifactAuthorityIndex(),
+      })
+    ).toThrow("Conversation protocol requires auxiliary recovery");
 
     const first: ConversationExecutorTopologyDirectory = {
       candidates: async () => [],
@@ -416,6 +503,7 @@ describe("ConversationProtocolRuntime", () => {
         appended: true,
       }),
       durableTurnExecutor: protocol,
+      onTurnCommitted: () => {},
     });
     await protocol.ensureSession(conversationId);
     const managed = await manager.getOrCreate(conversationId);
@@ -473,6 +561,7 @@ describe("ConversationProtocolRuntime", () => {
         appended: false,
       }),
       durableTurnExecutor: restartedProtocol,
+      onTurnCommitted: () => {},
     });
     await restartedProtocol.recover();
     expect(await restartedProtocol.listSessions()).toEqual([conversationId]);
@@ -675,7 +764,7 @@ describe("ConversationProtocolRuntime", () => {
         })),
       },
       undefined,
-      { durableTurnExecutor: protocol },
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} },
     );
     await getOrCreateActiveConversation(authority, manager, conversationId);
 
@@ -1060,7 +1149,7 @@ describe("ConversationProtocolRuntime", () => {
     manager = new ConversationManager(
       { create: vi.fn(async () => runtime) },
       undefined,
-      { durableTurnExecutor: protocol },
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} },
     );
     const managed = await getOrCreateActiveConversation(
       authority,
@@ -1253,6 +1342,7 @@ describe("ConversationProtocolRuntime", () => {
         return { ...accepted, appended: true };
       },
       durableTurnExecutor: protocol,
+      onTurnCommitted: () => {},
     });
     const managed = await getOrCreateActiveConversation(
       authority,
@@ -1388,6 +1478,7 @@ describe("ConversationProtocolRuntime", () => {
         return { ...accepted, appended: true };
       },
       durableTurnExecutor: restartedProtocol,
+      onTurnCommitted: () => {},
     });
     await restartedProtocol.recover();
     const restartedManaged = await restartedManager.getOrCreate("conversation-1");
@@ -1509,6 +1600,7 @@ describe("ConversationProtocolRuntime", () => {
         appended: true,
       }),
       durableTurnExecutor: protocol,
+      onTurnCommitted: () => {},
     });
     const managed = await getOrCreateActiveConversation(
       authority,
@@ -1657,6 +1749,7 @@ describe("ConversationProtocolRuntime", () => {
     manager = new ConversationManager(factory, undefined, {
       ...managerOptions(),
       durableTurnExecutor: protocol,
+      onTurnCommitted: () => {},
     });
     const managed = await getOrCreateActiveConversation(
       authority,
@@ -1713,6 +1806,7 @@ describe("ConversationProtocolRuntime", () => {
     restartedManager = new ConversationManager(factory, undefined, {
       ...managerOptions(),
       durableTurnExecutor: restartedProtocol,
+      onTurnCommitted: () => {},
     });
     await restartedProtocol.recover();
 
@@ -1836,7 +1930,7 @@ describe("ConversationProtocolRuntime", () => {
     manager = new ConversationManager(
       { create: vi.fn(async () => runtime) },
       undefined,
-      { durableTurnExecutor: protocol },
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} },
     );
     await getOrCreateActiveConversation(
       authority,
@@ -1953,7 +2047,7 @@ describe("ConversationProtocolRuntime", () => {
     manager = new ConversationManager(
       { create: vi.fn(async () => runtime) },
       undefined,
-      { durableTurnExecutor: protocol },
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} },
     );
     await getOrCreateActiveConversation(
       authority,
@@ -2086,6 +2180,7 @@ describe("ConversationProtocolRuntime", () => {
     manager = new ConversationManager(factory, undefined, {
       ...callbacks(),
       durableTurnExecutor: protocol,
+      onTurnCommitted: () => {},
     });
     const managed = await getOrCreateActiveConversation(
       authority,
@@ -2123,6 +2218,7 @@ describe("ConversationProtocolRuntime", () => {
     restartedManager = new ConversationManager(factory, undefined, {
       ...callbacks(),
       durableTurnExecutor: restartedProtocol,
+      onTurnCommitted: () => {},
     });
     const snapshotRead = vi.spyOn(restartedAuthority.authorityLog, "readSnapshot");
     const fullRead = vi.spyOn(restartedAuthority.authorityLog, "readAll");
@@ -2222,6 +2318,7 @@ describe("ConversationProtocolRuntime", () => {
     manager = new ConversationManager(factory, undefined, {
       ...callbacks(),
       durableTurnExecutor: protocol,
+      onTurnCommitted: () => {},
     });
     const managed = await getOrCreateActiveConversation(
       authority,
@@ -2364,6 +2461,7 @@ describe("ConversationProtocolRuntime", () => {
     restartedManager = new ConversationManager(factory, undefined, {
       ...callbacks(),
       durableTurnExecutor: restartedProtocol,
+      onTurnCommitted: () => {},
     });
     await restartedProtocol.recoverReadinessProjections();
     expect(executions).toBe(0);
@@ -2411,7 +2509,7 @@ describe("ConversationProtocolRuntime", () => {
     manager = new ConversationManager(
       { create: vi.fn(async () => { throw new Error("runtime must not be created"); }) },
       undefined,
-      { durableTurnExecutor: protocol },
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} },
     );
     try {
       await registerActiveConversation(
@@ -2484,6 +2582,7 @@ describe("ConversationProtocolRuntime", () => {
     manager = new ConversationManager(factory, undefined, {
       ...callbacks(),
       durableTurnExecutor: protocol,
+      onTurnCommitted: () => {},
     });
     await getOrCreateActiveConversation(
       authority,
@@ -2558,6 +2657,7 @@ describe("ConversationProtocolRuntime", () => {
     restartedManager = new ConversationManager(factory, undefined, {
       ...callbacks(),
       durableTurnExecutor: restartedProtocol,
+      onTurnCommitted: () => {},
     });
     await restartedProtocol.recover();
 
@@ -2606,7 +2706,7 @@ describe("ConversationProtocolRuntime", () => {
     manager = new ConversationManager(
       { create: vi.fn(async () => runtime) },
       undefined,
-      { durableTurnExecutor: protocol },
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} },
     );
     await manager.getOrCreate(seeded.conversationId);
     manager.setBusy(seeded.conversationId, true, "interactive");
@@ -2669,7 +2769,7 @@ describe("ConversationProtocolRuntime", () => {
         throw new Error("runtime must not be created");
       }) },
       undefined,
-      { durableTurnExecutor: protocol },
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} },
     );
     let entered!: () => void;
     const enteredGate = new Promise<void>((resolve) => {
@@ -2723,7 +2823,7 @@ describe("ConversationProtocolRuntime", () => {
     manager = new ConversationManager(
       { create: vi.fn(async () => runtime) },
       undefined,
-      { durableTurnExecutor: protocol },
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} },
     );
     let calls = 0;
     let entered!: () => void;
@@ -2805,7 +2905,7 @@ describe("ConversationProtocolRuntime", () => {
         }),
       },
       undefined,
-      { durableTurnExecutor: protocol },
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} },
     );
     const principal = protocol.controlPrincipal({
       surfacePrincipal: "rpc:owner",
@@ -2888,7 +2988,7 @@ describe("ConversationProtocolRuntime", () => {
     manager = new ConversationManager(
       { create: vi.fn(async () => { throw new Error("runtime must not be created"); }) },
       undefined,
-      { durableTurnExecutor: protocol },
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} },
     );
     const principal = protocol.controlPrincipal({
       surfacePrincipal: "rpc:owner",
@@ -2941,7 +3041,7 @@ describe("ConversationProtocolRuntime", () => {
     restartedManager = new ConversationManager(
       { create: vi.fn(async () => { throw new Error("runtime must not be created"); }) },
       undefined,
-      { durableTurnExecutor: restartedProtocol },
+      { durableTurnExecutor: restartedProtocol, onTurnCommitted: () => {} },
     );
     await restartedProtocol.recoverReadinessProjections();
     expect(projected).toHaveBeenCalledWith({
@@ -3028,7 +3128,7 @@ describe("ConversationProtocolRuntime", () => {
     manager = new ConversationManager(
       { create: vi.fn(async () => { throw new Error("runtime must not be created"); }) },
       undefined,
-      { durableTurnExecutor: protocol },
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} },
     );
     await protocol.recoverReadinessProjections();
 
@@ -3050,7 +3150,7 @@ describe("ConversationProtocolRuntime", () => {
     writerManager = new ConversationManager(
       { create: vi.fn(async () => { throw new Error("runtime must not be created"); }) },
       undefined,
-      { durableTurnExecutor: writer },
+      { durableTurnExecutor: writer, onTurnCommitted: () => {} },
     );
     await writer.writeSession({
       conversationId,
@@ -3092,7 +3192,7 @@ describe("ConversationProtocolRuntime", () => {
     manager = new ConversationManager(
       { create: vi.fn(async () => { throw new Error("runtime must not be created"); }) },
       undefined,
-      { durableTurnExecutor: protocol },
+      { durableTurnExecutor: protocol, onTurnCommitted: () => {} },
     );
     const result = await protocol.writeSession({
       conversationId: "conversation-missing",
@@ -3175,6 +3275,7 @@ describe("ConversationProtocolRuntime", () => {
           return { ...accepted, appended: true };
         },
         durableTurnExecutor: protocol,
+        onTurnCommitted: () => {},
       },
     );
     const managed = await getOrCreateActiveConversation(

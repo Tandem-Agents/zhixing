@@ -973,8 +973,8 @@ test("Workscene product dependencies are statically complete before publication"
     inspectWorksceneAnchorProductStaticCompositionBoundary(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "authority: ctx.worksceneAuthority,\n      conversations: manager,",
-        "authority: ctx.worksceneAuthority,\n      conversations: () => manager,",
+        /authority: ctx\.worksceneAuthority,\n(\s*)conversations: manager,/u,
+        "authority: ctx.worksceneAuthority,\n$1conversations: () => manager,",
       ),
     )).join("\n"),
     /publishes a partial or late-bound Workscene product/,
@@ -1012,6 +1012,7 @@ test("assignment data plane exposes finite local and Mesh ports to upper consume
     "packages/cli/src/serve/mesh-runtime-assembly.ts",
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/executor-role-runtime.ts",
+    "packages/cli/src/serve/profile.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -1071,7 +1072,54 @@ test("assignment data plane exposes finite local and Mesh ports to upper consume
         "targets: ctx.executorDataPlane,",
       ),
     )).join("\n"),
-    /Host assignment data-plane construction/u,
+    /Host assignment\/data-plane pair composition/u,
+  );
+  assert.match(
+    inspectAssignmentDataPlaneBoundary(mutate(
+      "packages/cli/src/serve/executor-data-plane-runtime.ts",
+      (text) => text.replace(
+        "readonly #assignmentAuthority: ExecutorDataPlaneAssignmentAuthorityPort;",
+        "#assignmentAuthority: ExecutorDataPlaneAssignmentAuthorityPort | undefined;",
+      ),
+    )).join("\n"),
+    /mutable or partially bound assignment authority/u,
+  );
+  assert.match(
+    inspectAssignmentDataPlaneBoundary(mutate(
+      "packages/cli/src/serve/executor-data-plane-runtime.ts",
+      (text) => `${text}\nfunction bindAssignmentAuthority() { return undefined; }\n`,
+    )).join("\n"),
+    /mutable or partially bound assignment authority/u,
+  );
+  assert.match(
+    inspectAssignmentDataPlaneBoundary(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace(
+        "createExecutorDataPlaneAssignmentPair(",
+        "new ExecutorDataPlaneRuntime(",
+      ),
+    )).join("\n"),
+    /Host assignment\/data-plane pair composition/u,
+  );
+  assert.match(
+    inspectAssignmentDataPlaneBoundary(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "if (dataPlane) await dataPlane.start();",
+        "ctx.executorDataPlane = dataPlane;\n    if (dataPlane) await dataPlane.start();",
+      ),
+    )).join("\n"),
+    /Host assignment\/data-plane pair composition/u,
+  );
+  assert.match(
+    inspectAssignmentDataPlaneBoundary(mutate(
+      "packages/cli/src/serve/profile.ts",
+      (text) => text.replace(
+        '"conversation",',
+        '"executor-data-plane",\n      "conversation",',
+      ),
+    )).join("\n"),
+    /Host assignment\/data-plane pair composition/u,
   );
 });
 
@@ -4572,6 +4620,8 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
     "packages/core/src/delivery/channel-effect.ts",
     "packages/cli/src/serve/lossless-data-plane-runtime.ts",
     "packages/cli/src/serve/channel-interaction-coordinator.ts",
+    "packages/cli/src/serve/conversation-protocol-runtime.ts",
+    "packages/cli/src/serve/local-conversation-owner.ts",
     "packages/cli/src/setup-delivery.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
@@ -4784,6 +4834,53 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
       ),
     )).join("\n"),
     /challenge static composition or physical callback drifted/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      (text) => text.replace(
+        "readonly #losslessDataPlane: ConversationLosslessDataPlaneTopology;",
+        "readonly #losslessDataPlane: ConversationLosslessDataPlaneTopology | undefined;",
+      ),
+    )).join("\n"),
+    /Conversation lossless data-plane required static assembly drifted/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      (text) => text.replace(
+        "  readonly deferredIntentAuthority: DeferredIntentConversationAuthority;",
+        "  bindLosslessDataPlane(): void {}\n  readonly deferredIntentAuthority: DeferredIntentConversationAuthority;",
+      ),
+    )).join("\n"),
+    /Conversation lossless data-plane required static assembly drifted/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        /(\s*)assembly\.assertComplete\(\);\n\1const mechanism = ctx\.channelMechanism;/u,
+        "$1const mechanism = ctx.channelMechanism;",
+      ),
+    )).join("\n"),
+    /Conversation lossless data-plane required static assembly drifted/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => `${text}\ncreateConversationLosslessDataPlaneAssemblyHandle();\n`,
+    )).join("\n"),
+    /Conversation lossless data-plane required static assembly drifted/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/cli/src/serve/local-conversation-owner.ts",
+      (text) => text.replace(
+        'reason: "executor-only",',
+        'reason: "anchor",',
+      ),
+    )).join("\n"),
+    /Conversation lossless data-plane required static assembly drifted/u,
   );
 });
 
@@ -6662,8 +6759,92 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
     inspectAdvancementDetailApplicationOwnership(mutate(
       "packages/cli/src/serve/local-conversation-owner.ts",
       (text) => text.replace(
-        "protocol.bindManager(manager);",
+        "managerAssembly.complete(manager);",
         "void manager;",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace("turnMaintenance(info);", "void info;"),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      (text) => text.replace(
+        "readonly manager: () => ConversationManager;",
+        "readonly manager?: () => ConversationManager;",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      (text) => text.replace(
+        "  bindMutationPublisher(",
+        "  bindManager(manager: ConversationManager) { void manager; }\n\n  bindMutationPublisher(",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      (text) => text.replace(
+        "readonly recoverAuxiliary: (conversationId: string) => Promise<void>;",
+        "readonly recoverAuxiliary?: (conversationId: string) => Promise<void>;",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      (text) => text.replace(
+        "await this.#recoverAuxiliary(conversationId);",
+        "await this.#recoverAuxiliary?.(conversationId);",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/conversation-protocol-runtime.ts",
+      (text) => text.replace(
+        "  bindMutationPublisher(",
+        "  bindAuxiliaryRecovery(recover: (conversationId: string) => Promise<void>) { void recover; }\n\n  bindMutationPublisher(",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace("manager: managerAssembly.resolve,", ""),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "recoverAuxiliary: auxiliaryRecoveryAssembly.resolve,",
+        "",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/local-conversation-owner.ts",
+      (text) => text.replace(
+        "auxiliaryRecoveryAssembly.complete(async (conversationId) =>",
+        "void (async (conversationId: string) =>",
       ),
     )).join("\n"),
     failure,
@@ -6682,8 +6863,48 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
     inspectAdvancementDetailApplicationOwnership(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "manager.bindTurnCommittedListener((info) =>",
+        "committedTurnListenerAssembly.complete((info) =>",
         "void ((info) =>",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/local-conversation-owner.ts",
+      (text) => text.replace(
+        "onTurnCommitted: committedTurnListenerAssembly.notify,",
+        "",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/owner-kernel/src/conversation-manager.ts",
+      (text) => text.replace(
+        "private readonly onTurnCommitted?:",
+        "private onTurnCommitted?:",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/owner-kernel/src/conversation-manager.ts",
+      (text) => text.replace(
+        "if (this.durableTurnExecutorCb && !this.onTurnCommitted)",
+        "if (false)",
+      ),
+    )).join("\n"),
+    failure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/owner-kernel/src/conversation-manager.ts",
+      (text) => text.replace(
+        "  durableTurnExecutor():",
+        "  bindTurnCommittedListener() {}\n\n  durableTurnExecutor():",
       ),
     )).join("\n"),
     failure,

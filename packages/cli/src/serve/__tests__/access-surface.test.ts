@@ -28,7 +28,6 @@ function mockUnit(
 function allUnits(calls: string[]): AssemblyUnit[] {
   return [
     mockUnit("authority-runtime", "pre-server", calls),
-    mockUnit("executor-data-plane", "pre-server", calls),
     mockUnit("conversation", "pre-server", calls),
     mockUnit("executor-job-owner", "pre-server", calls, true),
     mockUnit("asset-maintenance", "pre-server", calls),
@@ -54,7 +53,6 @@ describe("access-surface 数据驱动装配", () => {
     await setupAssemblyUnits(units, ctx("full"), "pre-server");
     expect(calls).toEqual([
       "authority-runtime",
-      "executor-data-plane",
       "conversation",
       "executor-job-owner",
       "asset-maintenance",
@@ -68,7 +66,6 @@ describe("access-surface 数据驱动装配", () => {
     await setupAssemblyUnits(units, ctx("full"), "post-server");
     expect(calls).toEqual([
       "authority-runtime",
-      "executor-data-plane",
       "conversation",
       "executor-job-owner",
       "asset-maintenance",

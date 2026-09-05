@@ -692,7 +692,7 @@ describe("session durable control 方法", () => {
     const manager = new ConversationManager(
       { create: vi.fn(async () => runtime) },
       undefined,
-      { durableTurnExecutor: durable },
+      { durableTurnExecutor: durable, onTurnCommitted: () => {} },
     );
     await manager.getOrCreate("conversation-1");
     const closeHandlers = new Set<() => void>();

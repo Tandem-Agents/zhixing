@@ -1590,7 +1590,10 @@ describe("session.* RPC (S2.D)", () => {
         return { runIndex: prev.length, shardId: "000001" };
       },
       ...(opts.durableTurnExecutor
-        ? { durableTurnExecutor: opts.durableTurnExecutor }
+        ? {
+            durableTurnExecutor: opts.durableTurnExecutor,
+            onTurnCommitted: () => {},
+          }
         : {}),
     });
     const conversationDirectory = createMemoryDirectory(recordsByConversation);
