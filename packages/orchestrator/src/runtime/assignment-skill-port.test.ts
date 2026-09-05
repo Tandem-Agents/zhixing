@@ -6,7 +6,10 @@ import { ADMISSION_TOKEN_TTL_MS } from "@zhixing/core/skills/admission";
 import { createEventBus } from "@zhixing/core/events";
 import { skillNameToId } from "@zhixing/core/skills/id";
 import { type AgentEventMap } from "@zhixing/core/types";
-import { type SkillCatalogEntry } from "@zhixing/core/skills/catalog";
+import type {
+  SkillCatalogAdmissionApplication,
+  SkillCatalogEntry,
+} from "@zhixing/core/skills/catalog";
 import { FileArtifactStore } from "@zhixing/core/authority";
 import {
   assignmentMutationRequestId,
@@ -295,6 +298,192 @@ describe("assignment skill ports", () => {
     }
   });
 
+  it("rejects a candidate changed between its review document read and tree digest", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "assignment-admit-review-race-"));
+    const before = await admissionDirectories();
+    const reviewedDocument =
+      "---\nname: Review Race\ndescription: reviewed safely\n---\nREVIEWED-BODY";
+    const unreviewedDocument =
+      "---\nname: Review Race\ndescription: changed after review\n---\nUNREVIEWED-BODY";
+    const source = path.join(root, "source");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    const put = vi.spyOn(artifacts, "put");
+    const originalReadFile = fs.readFile.bind(fs);
+    let interposed = false;
+    const readFile = vi.spyOn(fs, "readFile").mockImplementation(
+      (async (file, options) => {
+        const value = await originalReadFile(file, options);
+        if (
+          !interposed &&
+          options === "utf8" &&
+          String(file).includes("zhixing-skill-admission") &&
+          String(value).includes("REVIEWED-BODY")
+        ) {
+          await fs.writeFile(file, unreviewedDocument, "utf8");
+          interposed = true;
+        }
+        return value;
+      }) as typeof fs.readFile,
+    );
+    try {
+      await fs.mkdir(source);
+      await fs.writeFile(path.join(source, "SKILL.md"), reviewedDocument, "utf8");
+      const ports = createAssignmentSkillPorts(artifacts, {
+        admissionLlm: async (prompt) => {
+          expect(prompt).toContain("REVIEWED-BODY");
+          expect(prompt).not.toContain("UNREVIEWED-BODY");
+          return JSON.stringify({ decision: "needs-confirm", reason: "review" });
+        },
+        clock: () => 1_000,
+        randomToken: () => "review-race-token",
+      });
+      const first = await ports.admissionApplication.admit({
+        source: { kind: "local-path", path: source },
+        mode: "main",
+      });
+      if (first.kind !== "needs-confirm") throw new Error("candidate was not retained");
+      const overlay: AssignmentMutationOverlayRecord[] = [];
+
+      await expect(confirmAdmission(
+        ports.admissionApplication,
+        first.admissionToken,
+        overlay,
+        "review-race",
+      )).resolves.toEqual({ kind: "candidate-changed" });
+      expect(interposed).toBe(true);
+      expect(put).not.toHaveBeenCalled();
+      expect(overlay).toEqual([]);
+      expect(await admissionDirectories()).toEqual(before);
+    } finally {
+      readFile.mockRestore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an unreviewed confirmation read even when the tree is restored before digest", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "assignment-admit-confirm-race-"));
+    const before = await admissionDirectories();
+    const reviewedDocument =
+      "---\nname: Confirm Race\ndescription: reviewed safely\n---\nREVIEWED-BODY";
+    const unreviewedDocument =
+      "---\nname: Confirm Race\ndescription: changed before confirmation\n---\nUNREVIEWED-BODY";
+    const source = path.join(root, "source");
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    const put = vi.spyOn(artifacts, "put");
+    let readFile: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      await fs.mkdir(source);
+      await fs.writeFile(path.join(source, "SKILL.md"), reviewedDocument, "utf8");
+      const ports = createAssignmentSkillPorts(artifacts, {
+        admissionLlm: async () =>
+          JSON.stringify({ decision: "needs-confirm", reason: "review" }),
+        clock: () => 1_000,
+        randomToken: () => "confirm-race-token",
+      });
+      const first = await ports.admissionApplication.admit({
+        source: { kind: "local-path", path: source },
+        mode: "main",
+      });
+      if (first.kind !== "needs-confirm") throw new Error("candidate was not retained");
+      const pending = (await admissionDirectories()).filter((name) => !before.includes(name));
+      expect(pending).toHaveLength(1);
+      const candidateDocument = path.join(
+        os.tmpdir(),
+        "zhixing-skill-admission",
+        pending[0]!,
+        "SKILL.md",
+      );
+      await fs.writeFile(candidateDocument, unreviewedDocument, "utf8");
+
+      const originalReadFile = fs.readFile.bind(fs);
+      let interposed = false;
+      readFile = vi.spyOn(fs, "readFile").mockImplementation(
+        (async (file, options) => {
+          const value = await originalReadFile(file, options);
+          if (!interposed && options === "utf8" && String(file) === candidateDocument) {
+            expect(String(value)).toContain("UNREVIEWED-BODY");
+            await fs.writeFile(candidateDocument, reviewedDocument, "utf8");
+            interposed = true;
+          }
+          return value;
+        }) as typeof fs.readFile,
+      );
+      const overlay: AssignmentMutationOverlayRecord[] = [];
+
+      await expect(confirmAdmission(
+        ports.admissionApplication,
+        first.admissionToken,
+        overlay,
+        "confirm-race",
+      )).resolves.toEqual({ kind: "candidate-changed" });
+      expect(interposed).toBe(true);
+      expect(put).not.toHaveBeenCalled();
+      expect(overlay).toEqual([]);
+      expect(await admissionDirectories()).toEqual(before);
+    } finally {
+      readFile?.mockRestore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retains tree-change rejection while admitting one stable confirmed document", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "assignment-admit-tree-bind-"));
+    const before = await admissionDirectories();
+    const source = path.join(root, "source");
+    const document =
+      "---\nname: Tree Bound\ndescription: tree-bound candidate\n---\nStable body.";
+    const artifacts = new FileArtifactStore(path.join(root, "artifacts"));
+    try {
+      await fs.mkdir(source);
+      await fs.writeFile(path.join(source, "SKILL.md"), document, "utf8");
+      await fs.writeFile(path.join(source, "notes.txt"), "reviewed notes", "utf8");
+      const ports = createAssignmentSkillPorts(artifacts, {
+        admissionLlm: async () =>
+          JSON.stringify({ decision: "needs-confirm", reason: "review" }),
+        clock: () => 1_000,
+        randomToken: () => "tree-token",
+      });
+      const changed = await ports.admissionApplication.admit({
+        source: { kind: "local-path", path: source },
+        mode: "main",
+      });
+      if (changed.kind !== "needs-confirm") throw new Error("candidate was not retained");
+      const pending = (await admissionDirectories()).filter((name) => !before.includes(name));
+      expect(pending).toHaveLength(1);
+      await fs.writeFile(
+        path.join(os.tmpdir(), "zhixing-skill-admission", pending[0]!, "notes.txt"),
+        "changed notes",
+        "utf8",
+      );
+      await expect(confirmAdmission(
+        ports.admissionApplication,
+        changed.admissionToken,
+        [],
+        "tree-changed",
+      )).resolves.toEqual({ kind: "candidate-changed" });
+
+      const stable = await ports.admissionApplication.admit({
+        source: { kind: "local-path", path: source },
+        mode: "main",
+      });
+      if (stable.kind !== "needs-confirm") throw new Error("candidate was not retained");
+      const overlay: AssignmentMutationOverlayRecord[] = [];
+      await expect(confirmAdmission(
+        ports.admissionApplication,
+        stable.admissionToken,
+        overlay,
+        "tree-stable",
+      )).resolves.toMatchObject({ kind: "admitted", name: "Tree Bound" });
+      expect(overlay).toHaveLength(1);
+      const mutation = overlay[0]?.mutation;
+      if (mutation?.kind !== "skill-admit") throw new Error("admit was not staged");
+      expect(new TextDecoder().decode(await artifacts.get(mutation.record.content))).toBe(document);
+      expect(await admissionDirectories()).toEqual(before);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("sweeps only expired admission candidates from the real OS-temp workspace", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "assignment-admit-sweep-"));
     const admissionRoot = path.join(os.tmpdir(), "zhixing-skill-admission");
@@ -442,4 +631,26 @@ function admissionOptions() {
 async function admissionDirectories(): Promise<string[]> {
   return await fs.readdir(path.join(os.tmpdir(), "zhixing-skill-admission"))
     .catch(() => []);
+}
+
+function confirmAdmission(
+  application: SkillCatalogAdmissionApplication,
+  admissionToken: string,
+  overlay: AssignmentMutationOverlayRecord[],
+  operationId: string,
+) {
+  return runContextStorage.run(
+    {
+      bus: createEventBus<AgentEventMap>({ lineage: "main" }),
+      lineage: "main",
+      globalQuery: skillQuery([]),
+      assignmentMutations: mutationPort(overlay),
+      assignmentIssuedAt: ISSUED_AT,
+    },
+    () => application.admit({
+      admissionToken,
+      mode: "main",
+      operationId,
+    }),
+  );
 }

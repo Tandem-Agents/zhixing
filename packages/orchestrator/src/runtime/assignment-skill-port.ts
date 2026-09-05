@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   acquireToStaging,
   computeStagingDigest,
@@ -244,10 +244,11 @@ class AssignmentSkillAdmissionCorrectnessPort
     const dir = this.#requireCandidate(candidateId);
     await assertRegularCandidateTree(dir);
     const document = await fs.readFile(path.join(dir, "SKILL.md"), "utf8");
+    const treeDigest = await computeStagingDigest(dir);
     return {
       candidateId,
       document,
-      digest: await computeStagingDigest(dir),
+      digest: bindCandidateDigest(document, treeDigest),
     };
   }
 
@@ -327,4 +328,10 @@ async function assertRegularCandidateTree(root: string): Promise<void> {
     }
   };
   await visit(root);
+}
+
+function bindCandidateDigest(document: string, treeDigest: string): string {
+  return createHash("sha256")
+    .update(JSON.stringify([document, treeDigest]), "utf8")
+    .digest("hex");
 }
