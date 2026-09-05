@@ -157,8 +157,8 @@ async function dispatchScheduleRequest(input: {
         SCHEDULE_MANAGEMENT_PRODUCT_API_EXACT_SET,
         [createScheduleManagementProductApiContribution(input.application)],
       ),
-      conversations: {
-        durableControlPrincipal: () => ({ deviceId: "device-1" }),
+      conversation: {
+        durablePrincipal: () => ({ deviceId: "device-1" }),
       },
     } as unknown as ServerContext,
   });
@@ -574,8 +574,8 @@ describe("schedule management Product API", () => {
     return {
       server: {
         productApi,
-        conversations: {
-          durableControlPrincipal: () => ({ deviceId: "device-1" }),
+        conversation: {
+          durablePrincipal: () => ({ deviceId: "device-1" }),
         },
       } as unknown as ServerContext,
       connection: {

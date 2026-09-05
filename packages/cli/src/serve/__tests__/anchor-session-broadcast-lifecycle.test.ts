@@ -81,12 +81,10 @@ function transport(label: string): {
   return {
     transport: createSessionBroadcastTransport({
       connections: new Set([connection]),
-      manager: {
-        getObserverConnectionIds: (conversationId: string) =>
-          conversationId === "conversation-1"
-            ? new Set([label])
-            : new Set<string>(),
-      } as never,
+      observerConnectionIds: (conversationId: string) =>
+        conversationId === "conversation-1"
+          ? new Set([label])
+          : new Set<string>(),
     }),
     notifications,
   };

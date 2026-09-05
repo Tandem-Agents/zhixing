@@ -135,7 +135,7 @@
     {
       "definition": [
         "readonly server: ServerContext;",
-        "readonly manager: ConversationManager;",
+        "readonly manager: ServerConversationBinding;",
         "readonly conversationId?: string;",
         "readonly preallocatedConversationId?: string;",
         "readonly connectionId: string;",
@@ -445,26 +445,6 @@
     },
     {
       "definition": [
-        "accessSurfaces: { rpcConnections: number; currentConnectionId?: number; otherRpcConnections: number; channels: unknown[]; liveChannels: unknown[]; };",
-        "activeWork: { count: number; cancellableCount: number; drainOnlyCount: number; cancellableWork: RuntimeControlWorkItem[]; drainOnlyWork: RuntimeControlWorkItem[]; };",
-        "deferredWork: RuntimeControlWorkItem[];",
-        "keepAliveWork: RuntimeControlWorkItem[];"
-      ],
-      "kind": "interface",
-      "name": "RuntimeControlSnapshot"
-    },
-    {
-      "definition": [
-        "id: string;",
-        "kind: \"conversation\" | \"scheduler\" | \"delivery\" | \"schedule\";",
-        "label: string;",
-        "count: number;"
-      ],
-      "kind": "interface",
-      "name": "RuntimeControlWorkItem"
-    },
-    {
-      "definition": [
         "requestId?: string;",
         "runId?: string;"
       ],
@@ -514,7 +494,7 @@
     },
     {
       "definition": [
-        "readonly manager: ConversationManager;",
+        "readonly manager: ServerConversationBinding;",
         "readonly conversationId?: string;",
         "readonly preallocatedConversationId?: string;",
         "readonly input: UserTurnInput;",
@@ -536,6 +516,26 @@
       ],
       "kind": "interface",
       "name": "SendUserTurnInput"
+    },
+    {
+      "definition": [
+        "id: string;",
+        "kind: \"conversation\" | \"scheduler\" | \"delivery\" | \"schedule\";",
+        "label: string;",
+        "count: number;"
+      ],
+      "kind": "interface",
+      "name": "ServerInfoWorkItem"
+    },
+    {
+      "definition": [
+        "accessSurfaces: { rpcConnections: number; currentConnectionId?: number; otherRpcConnections: number; channels: unknown[]; liveChannels: unknown[]; };",
+        "activeWork: { count: number; cancellableCount: number; drainOnlyCount: number; cancellableWork: ServerInfoWorkItem[]; drainOnlyWork: ServerInfoWorkItem[]; };",
+        "deferredWork: ServerInfoWorkItem[];",
+        "keepAliveWork: ServerInfoWorkItem[];"
+      ],
+      "kind": "interface",
+      "name": "ServerInfoWorkSnapshot"
     },
     {
       "definition": [
@@ -1304,7 +1304,7 @@
     },
     {
       "kind": "import",
-      "references": 5,
+      "references": 6,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/rpc"
     },
@@ -1364,7 +1364,7 @@
     },
     {
       "kind": "type-import",
-      "references": 24,
+      "references": 25,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/owner-kernel"
     },
@@ -1394,7 +1394,7 @@
     },
     {
       "kind": "type-import",
-      "references": 8,
+      "references": 9,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/server"
     },
@@ -1574,7 +1574,7 @@
     },
     {
       "kind": "type-import",
-      "references": 4,
+      "references": 3,
       "sourceZone": "rpc",
       "target": "package:@zhixing/owner-kernel"
     },
@@ -1670,7 +1670,7 @@
     },
     {
       "kind": "import",
-      "references": 4,
+      "references": 3,
       "sourceZone": "server/rpc",
       "target": "package:@zhixing/rpc"
     },
@@ -1685,12 +1685,6 @@
       "references": 9,
       "sourceZone": "server/rpc",
       "target": "package:@zhixing/core"
-    },
-    {
-      "kind": "type-import",
-      "references": 1,
-      "sourceZone": "server/rpc",
-      "target": "package:@zhixing/owner-kernel"
     },
     {
       "kind": "type-import",

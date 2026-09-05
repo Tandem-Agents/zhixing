@@ -913,15 +913,15 @@ export async function runExecutorRole(
       token: token.token,
       conversationRpc,
       lifecycleShutdown: stopCoordinator,
-      runtimeControl: {
+      serverInfoRuntime: {
         conversationStatus: (after) =>
           localConversationOwner!.port().statusHistory(after),
-        conversationFinalHistory: (conversationId, afterCommitRevision) =>
-          localConversationOwner!.port().finalHistory(
-            conversationId,
-            afterCommitRevision,
-          ),
       },
+      conversationFinalHistory: (conversationId, afterCommitRevision) =>
+        localConversationOwner!.port().finalHistory(
+          conversationId,
+          afterCommitRevision,
+        ),
       hostInfo: { logPath: isDaemonChild() ? getDefaultLogPath() : undefined },
     });
     const localConversationServer = await runServer({

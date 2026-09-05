@@ -14,9 +14,12 @@ import {
 } from "@zhixing/core";
 import { confirmationDecisionDigest } from "@zhixing/core/protocol";
 import { ConfirmationHub } from "@zhixing/owner-kernel";
-import type { ServerContext } from "../../../context.js";
+import type {
+  ServerConfirmationBinding,
+  ServerContext,
+  ServerConversationBinding,
+} from "../../../context.js";
 import type { RpcConnection } from "../../connection.js";
-import type { ConversationManager } from "@zhixing/owner-kernel";
 import type { HandlerContext, MethodEntry } from "../../handlers.js";
 import { RpcAppError } from "../../handlers.js";
 import {
@@ -52,16 +55,24 @@ function makeFakeConversations(
   durable?: {
     outcomes: Map<string, { t: "answered"; decisionDigest: string } | { t: "closed" }>;
   },
-): ConversationManager {
+): ServerConversationBinding {
   return {
+    usesDurableTurnProtocol: () => durable !== undefined,
     getObserverConnectionIds: (conversationId: string) =>
       map.get(conversationId) ?? new Set<string>(),
-    usesDurableTurnProtocol: () => durable !== undefined,
     findDurableInteractionOutcome: async (
       _conversationId: string,
       requestId: string,
     ) => durable?.outcomes.get(requestId),
-  } as unknown as ConversationManager;
+  } as unknown as ServerConversationBinding;
+}
+
+function makeConfirmationBinding(hub: ConfirmationHub): ServerConfirmationBinding {
+  return {
+    listPending: () => hub.listAllPending(),
+    findPending: (requestId) => hub.findEntry(requestId),
+    resolve: (requestId, decision) => hub.resolveDurably(requestId, decision),
+  };
 }
 
 function makeContext(
@@ -129,8 +140,8 @@ describe("confirmation.list", () => {
       ]),
     );
     const server = {
-      confirmationHub: hub,
-      conversations,
+      confirmation: makeConfirmationBinding(hub),
+      conversation: conversations,
     } as unknown as ServerContext;
     const ctx = makeContext(server, makeConnection(1));
 
@@ -163,8 +174,8 @@ describe("confirmation.list", () => {
       new Map([["conv-A", new Set(["99"])]]),
     );
     const server = {
-      confirmationHub: hub,
-      conversations,
+      confirmation: makeConfirmationBinding(hub),
+      conversation: conversations,
     } as unknown as ServerContext;
     const ctx = makeContext(server, makeConnection(1));
 
@@ -191,8 +202,8 @@ describe("confirmation.list", () => {
 
     const conversations = makeFakeConversations(new Map());
     const server = {
-      confirmationHub: hub,
-      conversations,
+      confirmation: makeConfirmationBinding(hub),
+      conversation: conversations,
     } as unknown as ServerContext;
     const ctx = makeContext(server, makeConnection(1));
 
@@ -234,8 +245,8 @@ describe("confirmation.list", () => {
       triggeredBy: "rpc:zhixing-cli:stable",
     }));
     const server = {
-      confirmationHub: hub,
-      conversations: makeFakeConversations(new Map()),
+      confirmation: makeConfirmationBinding(hub),
+      conversation: makeFakeConversations(new Map()),
     } as unknown as ServerContext;
     const connection = makeConnection(77, {
       surfacePrincipal: "rpc:zhixing-cli:stable",
@@ -255,7 +266,7 @@ describe("confirmation.list", () => {
 
   it("hub 未配置 → INTERNAL_ERROR", () => {
     const server = {
-      conversations: makeFakeConversations(new Map()),
+      conversation: makeFakeConversations(new Map()),
     } as unknown as ServerContext;
     const ctx = makeContext(server, makeConnection(1));
 
@@ -277,8 +288,8 @@ describe("confirmation.resolve", () => {
     const p = broker.requestConfirmation(makeRequest("r1"));
 
     const server = {
-      confirmationHub: hub,
-      conversations: makeFakeConversations(
+      confirmation: makeConfirmationBinding(hub),
+      conversation: makeFakeConversations(
         new Map([["conv-A", new Set(["1"])]]),
       ),
     } as unknown as ServerContext;
@@ -307,8 +318,8 @@ describe("confirmation.resolve", () => {
     );
 
     const server = {
-      confirmationHub: hub,
-      conversations: makeFakeConversations(
+      confirmation: makeConfirmationBinding(hub),
+      conversation: makeFakeConversations(
         new Map([["conv-A", new Set(["1", "99"])]]),
       ),
     } as unknown as ServerContext;
@@ -340,8 +351,8 @@ describe("confirmation.resolve", () => {
     );
 
     const server = {
-      confirmationHub: hub,
-      conversations: makeFakeConversations(
+      confirmation: makeConfirmationBinding(hub),
+      conversation: makeFakeConversations(
         new Map([["dm:feishu:u1", new Set(["1"])]]),
       ),
     } as unknown as ServerContext;
@@ -367,8 +378,8 @@ describe("confirmation.resolve", () => {
     const p = broker.requestConfirmation(makeRequest("rE", null));
 
     const server = {
-      confirmationHub: hub,
-      conversations: makeFakeConversations(new Map()),
+      confirmation: makeConfirmationBinding(hub),
+      conversation: makeFakeConversations(new Map()),
     } as unknown as ServerContext;
     const ctx = makeContext(server, makeConnection(1));
 
@@ -387,8 +398,8 @@ describe("confirmation.resolve", () => {
   it("未知 requestId 返回 { ok: false, reason: 'already-resolved-or-not-found' }", async () => {
     const hub = new ConfirmationHub();
     const server = {
-      confirmationHub: hub,
-      conversations: makeFakeConversations(new Map()),
+      confirmation: makeConfirmationBinding(hub),
+      conversation: makeFakeConversations(new Map()),
     } as unknown as ServerContext;
     const ctx = makeContext(server, makeConnection(1));
 
@@ -422,8 +433,8 @@ describe("confirmation.resolve", () => {
       ]),
     };
     const server = {
-      confirmationHub: hub,
-      conversations: makeFakeConversations(
+      confirmation: makeConfirmationBinding(hub),
+      conversation: makeFakeConversations(
         new Map([["conv-A", new Set(["1"])]]),
         durable,
       ),
@@ -502,8 +513,8 @@ describe("confirmation.resolve", () => {
       ]),
     };
     const server = {
-      confirmationHub: hub,
-      conversations: makeFakeConversations(
+      confirmation: makeConfirmationBinding(hub),
+      conversation: makeFakeConversations(
         new Map([["conv-A", new Set(["1"])]]),
         durable,
       ),
@@ -532,8 +543,8 @@ describe("confirmation.resolve", () => {
   ])("非可信面(非 loopback)kind='%s' → invalid params(远程不得沉淀永久规则)", async (kind, extra) => {
     const hub = new ConfirmationHub();
     const server = {
-      confirmationHub: hub,
-      conversations: makeFakeConversations(
+      confirmation: makeConfirmationBinding(hub),
+      conversation: makeFakeConversations(
         new Map([["conv-A", new Set(["1"])]]),
       ),
     } as unknown as ServerContext;
@@ -551,8 +562,8 @@ describe("confirmation.resolve", () => {
   it("可信面 kind='edit-then-allow' 同样拒绝(远程 UX 未设计,两级都不含)", async () => {
     const hub = new ConfirmationHub();
     const server = {
-      confirmationHub: hub,
-      conversations: makeFakeConversations(new Map()),
+      confirmation: makeConfirmationBinding(hub),
+      conversation: makeFakeConversations(new Map()),
     } as unknown as ServerContext;
     const ctx = makeContext(server, makeConnection(1));
 
@@ -572,8 +583,8 @@ describe("confirmation.resolve", () => {
 
     const p = broker.requestConfirmation(makeRequest("rBad"));
     const server = {
-      confirmationHub: hub,
-      conversations: makeFakeConversations(
+      confirmation: makeConfirmationBinding(hub),
+      conversation: makeFakeConversations(
         new Map([["conv-A", new Set(["1"])]]),
       ),
     } as unknown as ServerContext;
@@ -606,8 +617,8 @@ describe("confirmation.resolve", () => {
 
     const p = broker.requestConfirmation(makeRequest("rG"));
     const server = {
-      confirmationHub: hub,
-      conversations: makeFakeConversations(
+      confirmation: makeConfirmationBinding(hub),
+      conversation: makeFakeConversations(
         new Map([["conv-A", new Set(["1"])]]),
       ),
     } as unknown as ServerContext;
@@ -637,8 +648,8 @@ describe("confirmation.resolve", () => {
       const requestId = `empty-${kind}`;
       const pending = broker.requestConfirmation(makeRequest(requestId));
       const server = {
-        confirmationHub: hub,
-        conversations: makeFakeConversations(
+      confirmation: makeConfirmationBinding(hub),
+        conversation: makeFakeConversations(
           new Map([["conv-A", new Set(["1"])]]),
         ),
       } as unknown as ServerContext;
@@ -668,8 +679,8 @@ describe("confirmation.resolve", () => {
     hub.attach("b1", broker, { conversationId: "conv-A" });
 
     const server = {
-      confirmationHub: hub,
-      conversations: makeFakeConversations(
+      confirmation: makeConfirmationBinding(hub),
+      conversation: makeFakeConversations(
         new Map([["conv-A", new Set(["1"])]]),
       ),
     } as unknown as ServerContext;
@@ -697,8 +708,8 @@ describe("confirmation.resolve", () => {
   it("缺少 requestId → invalid params", async () => {
     const hub = new ConfirmationHub();
     const server = {
-      confirmationHub: hub,
-      conversations: makeFakeConversations(new Map()),
+      confirmation: makeConfirmationBinding(hub),
+      conversation: makeFakeConversations(new Map()),
     } as unknown as ServerContext;
     const ctx = makeContext(server, makeConnection(1));
 
@@ -711,8 +722,8 @@ describe("confirmation.resolve", () => {
   it("缺少 decision → invalid params", async () => {
     const hub = new ConfirmationHub();
     const server = {
-      confirmationHub: hub,
-      conversations: makeFakeConversations(new Map()),
+      confirmation: makeConfirmationBinding(hub),
+      conversation: makeFakeConversations(new Map()),
     } as unknown as ServerContext;
     const ctx = makeContext(server, makeConnection(1));
 
@@ -725,8 +736,8 @@ describe("confirmation.resolve", () => {
   it("decision 无 kind → invalid params", async () => {
     const hub = new ConfirmationHub();
     const server = {
-      confirmationHub: hub,
-      conversations: makeFakeConversations(new Map()),
+      confirmation: makeConfirmationBinding(hub),
+      conversation: makeFakeConversations(new Map()),
     } as unknown as ServerContext;
     const ctx = makeContext(server, makeConnection(1));
 

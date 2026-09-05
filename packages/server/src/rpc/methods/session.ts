@@ -87,9 +87,11 @@ import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 import type { RpcConnection } from "../connection.js";
 import { requireRpcSurfacePrincipal } from "../surface-identity.js";
-import type { ServerContext } from "../../context.js";
+import type {
+  ServerContext,
+  ServerConversationBinding,
+} from "../../context.js";
 import type { SessionBroadcast } from "@zhixing/rpc/session-broadcast";
-import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
 import {
   SESSION_NOTIFICATIONS,
   type SessionChangedPayload,
@@ -123,11 +125,7 @@ import {
   type SessionUnsubscribeResult,
 } from "@zhixing/rpc/session-wire";
 import { createControlSessionEventEnvelope } from "@zhixing/rpc/session-events";
-import {
-  generateConversationId,
-  type ConversationManager,
-  type ManagedSession,
-} from "@zhixing/owner-kernel/conversation-manager";
+import { generateConversationId } from "@zhixing/owner-kernel/conversation-manager";
 import { isProtocolIdentifier } from "@zhixing/core/protocol";
 // ─── session.send ───
 
@@ -788,7 +786,7 @@ export function buildSessionAdvancementCancelMethod(): MethodEntry {
 }
 
 function createAdvancementOriginalTaskSurface(input: Readonly<{
-  manager: ConversationManager;
+  manager: ServerConversationBinding;
   connection: RpcConnection;
   broadcast: SessionBroadcast;
 }>): AdvancementOriginalTaskSurfacePort {
@@ -802,14 +800,8 @@ function createAdvancementOriginalTaskSurface(input: Readonly<{
       triggeredBy: String(input.connection.id),
     }),
     execute: async (turn) => {
-      const managed = input.manager.getSession(turn.conversationId);
-      if (!managed) {
-        throw new Error(
-          `Admitted Conversation runtime is missing: ${turn.conversationId}`,
-        );
-      }
       await runManagedTurn(
-        managed,
+        turn.conversationId,
         turn.originalUserTask,
         turn.turnId,
         input.connection,
@@ -908,7 +900,7 @@ function projectAdvancementRubricCancellationResult(
 }
 
 interface SendDirectTurnInput {
-  readonly manager: ConversationManager;
+  readonly manager: ServerConversationBinding;
   readonly conversationId?: string;
   readonly preallocatedConversationId?: string;
   readonly input: UserTurnInput;
@@ -1125,7 +1117,7 @@ async function sendPerspectiveTurn(
 
 interface AdmitAndMaybeStartTurnInput {
   readonly server: ServerContext;
-  readonly manager: ConversationManager;
+  readonly manager: ServerConversationBinding;
   readonly conversationId?: string;
   readonly preallocatedConversationId?: string;
   readonly connectionId: string;
@@ -1184,14 +1176,8 @@ async function admitAndMaybeStartTurn(
           : {}),
         execution: {
           execute: async ({ conversationId, turnId }) => {
-            const managed = input.manager.getSession(conversationId);
-            if (!managed) {
-              throw new Error(
-                `Admitted Conversation runtime is missing: ${conversationId}`,
-              );
-            }
             await runManagedTurn(
-              managed,
+              conversationId,
               input.input,
               turnId,
               input.connection,
@@ -1350,7 +1336,7 @@ function notifyAdvancementEvent(input: {
 }
 
 function notifyLifecycleDiagnostics(input: {
-  readonly manager: ConversationManager;
+  readonly manager: ServerConversationBinding;
   readonly conversationId: string;
   readonly runId?: string;
   readonly connection: RpcConnection;
@@ -1409,18 +1395,17 @@ function notifyLifecycleWarningEvent(input: {
  * 路径仍沿用连接生命周期，显式取消统一由 session.abort 提交。
  */
 async function runManagedTurn(
-  managed: ManagedSession,
+  conversationId: string,
   input: UserTurnInput,
   turnId: string,
   connection: RpcConnection,
-  manager: ConversationManager,
+  manager: ServerConversationBinding,
   broadcast?: SessionBroadcast,
   surfaceCapabilities: SessionSurfaceCapabilities = {
     postTurnControl: false,
   },
   environment?: ExplicitEnvironmentSelection,
 ): Promise<void> {
-  const conversationId = managed.conversationId;
   const push = (method: string, params: unknown): void => {
     if (broadcast) broadcast(conversationId, method, params);
     else connection.notify(method, params);
@@ -1444,21 +1429,15 @@ async function runManagedTurn(
       connection,
       connection.closed ? { postTurnControl: false } : surfaceCapabilities,
     );
-    await projectSessionTurn({
-      manager,
-      managed,
-      input,
+    await manager.executeTurn({
+      conversationId,
+      userInput: input,
       turnId,
-      runOptions: {
-        abortSignal: abortController.signal,
-        turnContext,
-        surfacePrincipal: rpcSurfacePrincipal(connection),
-        turnIndex: managed.turnCount,
-        source: "interactive",
-      },
+      abortSignal: abortController.signal,
+      turnContext,
+      surfacePrincipal: rpcSurfacePrincipal(connection),
       notify: push,
       ...(environment ? { environment } : {}),
-      abortSignal: abortController.signal,
       onPostTurnControlIntent: (control) => {
         // turn 边界控制意图是可执行的控制字段,只定向发起连接——跟随权归发起
         // 接入面由结构保证(旁观端物理收不到),不靠客户端自律。先于 complete
@@ -2209,7 +2188,7 @@ export function buildSessionSubscribeMethod(): MethodEntry {
         { allowInactive: true },
       );
       if (subscribed) {
-        const history = await ctx.server.runtimeControl?.conversationFinalHistory?.(
+        const history = await ctx.server.conversationFinalHistory?.(
           params.conversationId,
           params.afterCommitRevision ?? 0,
         ) ?? [];
@@ -2837,14 +2816,16 @@ function requireConversationId(
   return validateConversationId(params.conversationId, method);
 }
 
-function requireConversations(server: ServerContext): ConversationManager {
-  if (!server.conversations) {
+function requireConversations(
+  server: ServerContext,
+): ServerConversationBinding {
+  if (!server.conversation) {
     throw new RpcAppError(
       RPC_ERROR_CODES.INTERNAL_ERROR,
       "ConversationManager not configured on server",
     );
   }
-  return server.conversations;
+  return server.conversation;
 }
 
 function requireConversationProductApi(

@@ -105,6 +105,7 @@ import {
   defineProductApiExactSet,
   ProductApiDispatcher,
 } from "@zhixing/core/product-api";
+import { bindTestConversationManager } from "./server-conversation-binding-fixture.js";
 
 const TEST_VERSION = "0.1.0-test";
 const TEST_TOKEN = "test-token-session";
@@ -1695,7 +1696,7 @@ describe("session.* RPC (S2.D)", () => {
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
-      conversations,
+      conversation: bindTestConversationManager(conversations),
       productApi,
     });
     server = await startServer({ context: ctx });
@@ -4033,7 +4034,7 @@ describe("session.* RPC (S2.D)", () => {
       },
     });
     const serverCtx = {
-      conversations: {
+      conversation: {
         getObserverConnectionIds: () => new Set<string>(),
         addObserver: () => {
           calls.push("addObserver");
@@ -4105,7 +4106,7 @@ describe("session.* RPC (S2.D)", () => {
       },
     };
     const serverCtx = {
-      conversations: manager,
+      conversation: manager,
       productApi: new ProductApiDispatcher(
         CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
         [createConversationDirectoryProductApiContribution(application)],
@@ -4637,7 +4638,7 @@ describe("session.* RPC (S2.D)", () => {
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
-      conversations,
+      conversation: bindTestConversationManager(conversations),
       productApi: createConversationProductApi({
         directory,
         conversations,
@@ -4722,7 +4723,7 @@ describe("session.* RPC (S2.D)", () => {
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
-      conversations,
+      conversation: bindTestConversationManager(conversations),
       productApi: createConversationProductApi({
         directory,
         conversations,
@@ -5053,7 +5054,7 @@ describe("session.* RPC (S2.D)", () => {
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
-      conversations,
+      conversation: bindTestConversationManager(conversations),
       productApi: createConversationProductApi({
         directory,
         conversations,
@@ -5455,7 +5456,7 @@ describe("session.* RPC (S2.D)", () => {
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
-      conversations,
+      conversation: bindTestConversationManager(conversations),
       productApi: createConversationProductApi({ directory, conversations }),
     });
     server = await startServer({ context: ctx });
@@ -5520,7 +5521,7 @@ describe("session.* RPC (S2.D)", () => {
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
-      conversations,
+      conversation: bindTestConversationManager(conversations),
       productApi: createConversationProductApi({ directory, conversations }),
     });
     server = await startServer({ context: ctx });
@@ -5560,7 +5561,7 @@ describe("session.* RPC (S2.D)", () => {
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
-      conversations,
+      conversation: bindTestConversationManager(conversations),
       productApi: createConversationProductApi({ directory, conversations }),
     });
     server = await startServer({ context: ctx });
@@ -5603,7 +5604,7 @@ describe("session.* RPC (S2.D)", () => {
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
-      conversations,
+      conversation: bindTestConversationManager(conversations),
       productApi: createConversationProductApi({ directory, conversations }),
     });
     server = await startServer({ context: ctx });

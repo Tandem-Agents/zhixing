@@ -179,7 +179,7 @@ describe("HTTP Server (S2.B)", () => {
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
-      conversations: {
+      conversation: {
         getObserverConnectionIds: () => new Set<string>(),
         removeObserverFromAll: () => undefined,
         disposeAll: async () => undefined,

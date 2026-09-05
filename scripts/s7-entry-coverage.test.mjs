@@ -1843,8 +1843,12 @@ test("conversation adoption stays bound to the two production roots and ordered 
     "packages/rpc/src/session-wire.ts",
     "packages/rpc/src/confirmation-bridge.ts",
     "packages/server/src/context.ts",
+    "packages/server/src/server.ts",
     "packages/server/src/rpc/handlers.ts",
     "packages/server/src/rpc/methods/index.ts",
+    "packages/server/src/rpc/methods/auth.ts",
+    "packages/server/src/rpc/methods/schedule.ts",
+    "packages/server/src/rpc/methods/server.ts",
     "packages/server/src/rpc/methods/session.ts",
     "packages/server/src/rpc/methods/confirmation.ts",
     "packages/owner-kernel/src/conversation-run-contracts.ts",
@@ -2130,6 +2134,21 @@ test("conversation adoption stays bound to the two production roots and ordered 
     )).join("\n"),
     /session resume must bind the authenticated observer before adoption review/,
   );
+  for (const [relative, before, after, expected] of [
+    ["packages/server/src/context.ts", "  conversation?: ServerConversationBinding;", "  conversations?: ConversationManager;", /demand must stay finite/],
+    ["packages/server/src/context.ts", "  readonly serverInfoRuntime?: ServerInfoRuntimeBinding;", "  runtimeControl?: RuntimeControlAdapter;", /runtime status and history demand must stay handler-scoped/],
+    ["packages/cli/src/serve/command.ts", "conversation: createServerConversationBinding(ctx.conversations!),", "conversation: ctx.conversations,", /escaped the finite Host bindings/],
+    ["packages/cli/src/serve/executor-role-runtime.ts", "      conversationRpc,", "      conversation: leakedConversationOwner,\n      conversationRpc,", /escaped the finite Host bindings/],
+    ["packages/server/src/rpc/methods/confirmation.ts", "server.confirmation", "server.confirmationHub", /escaped the finite Host bindings/],
+  ]) {
+    assert.match(
+      inspectConversationAdoptionAssembly(mutate(
+        relative,
+        (text) => text.replace(before, after),
+      )).join("\n"),
+      expected,
+    );
+  }
   assert.match(
     inspectConversationAdoptionAssembly(mutate(
       "packages/server/src/rpc/methods/session.ts",
@@ -8849,8 +8868,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/server/src/context.ts",
       (text) => text.replace(
-        "beginDrain?: () => Promise<void>;",
-        "resolveDelivery?: (input: unknown) => Promise<unknown>;\n  beginDrain?: () => Promise<void>;",
+        "productApi?: ProductApiDispatcher;",
+        "resolveDelivery?: (input: unknown) => Promise<unknown>;\n  productApi?: ProductApiDispatcher;",
       ),
     )).join("\n"),
     /expose only the Product API dispatcher binding/,

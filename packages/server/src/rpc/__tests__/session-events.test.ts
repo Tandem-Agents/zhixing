@@ -17,7 +17,6 @@ import {
   type SessionEventEnvelope,
 } from "@zhixing/rpc";
 import type { RpcConnection } from "../connection.js";
-import type { ConversationManager } from "@zhixing/owner-kernel";
 
 function makeBus() {
   return createEventBus<AgentEventMap>({ lineage: "main" });
@@ -219,14 +218,12 @@ describe("createObserverBroadcast", () => {
     const outside = makeConn("3");
     const unauthed = makeConn("4", { authenticated: false });
     const closed = makeConn("5", { closed: true });
-    const manager = {
-      getObserverConnectionIds: (cid: string) =>
-        cid === "c1" ? new Set(["1", "2", "4", "5"]) : new Set(),
-    } as unknown as ConversationManager;
+    const observerConnectionIds = (cid: string) =>
+      cid === "c1" ? new Set(["1", "2", "4", "5"]) : new Set<string>();
 
     const broadcast = createObserverBroadcast({
       connections: new Set([a, b, outside, unauthed, closed]),
-      manager,
+      observerConnectionIds,
     });
     broadcast("c1", "session.delta", { x: 1 });
 
@@ -253,14 +250,12 @@ describe("createActivityBroadcast", () => {
     const otherWorkbench = makeConn("2");
     const unauthed = makeConn("3", { authenticated: false });
     const closed = makeConn("4", { closed: true });
-    const manager = {
-      getObserverConnectionIds: (cid: string) =>
-        cid === "c1" ? new Set(["1"]) : new Set(),
-    } as unknown as ConversationManager;
+    const observerConnectionIds = (cid: string) =>
+      cid === "c1" ? new Set(["1"]) : new Set<string>();
 
     const broadcast = createActivityBroadcast({
       connections: new Set([currentObserver, otherWorkbench, unauthed, closed]),
-      manager,
+      observerConnectionIds,
     });
     const payload = {
       conversationId: "c1",

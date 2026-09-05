@@ -311,7 +311,9 @@ async function startServerWithOwner(
     ws.on("close", () => {
       rpcSurfaces.unbind(connection);
       connections.delete(connection);
-      ctx.conversations?.removeObserverFromAll(String(connection.id));
+      ctx.conversation?.removeObserverFromAll(
+        String(connection.id),
+      );
     });
 
     ws.on("error", (err) => {
@@ -324,10 +326,11 @@ async function startServerWithOwner(
 
   // 回填会话域组播——delta / complete / session.event / session.changed 经
   // observer 名册推送给会话的全部在场接入面(多端同看一个流式 turn 由此成立)。
-  const sessionBroadcastTransport = ctx.conversations
+  const sessionBroadcastTransport = ctx.conversation
     ? createSessionBroadcastTransport({
         connections,
-        manager: ctx.conversations,
+        observerConnectionIds: (conversationId) =>
+          ctx.conversation!.getObserverConnectionIds(conversationId),
       })
     : undefined;
   if (sessionBroadcastTransport) {
@@ -356,7 +359,7 @@ async function startServerWithOwner(
     activeClosed = true;
     // Channel connections are owned and closed by the outer Host lifecycle.
     // 1. 释放所有对话运行时（timer 清理 + 资源回收 + 各会话末窗 onWindowClose）
-    await ctx.conversations?.disposeAll();
+    await ctx.conversation?.disposeAll();
     // 2. 取消事件桥接订阅（否则 scheduler 后续事件还会调 conn.notify）
     disposeBridge();
     // 3. 关闭所有 WebSocket（触发 ws.on("close") → 从 connections 移除）

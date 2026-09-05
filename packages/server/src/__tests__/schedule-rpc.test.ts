@@ -42,8 +42,8 @@ import {
 const TEST_VERSION = "0.1.0-test";
 const TEST_TOKEN = "test-token-schedule";
 let nextClientInstance = 0;
-const conversations = {
-  durableControlPrincipal(input: {
+const conversation = {
+  durablePrincipal(input: {
     readonly surfacePrincipal: string;
     readonly connectionId: string;
   }) {
@@ -272,7 +272,7 @@ describe("schedule.* RPC + event bridge (S2.E)", () => {
       version: TEST_VERSION,
       token: TEST_TOKEN,
       productApi: boundary.productApi,
-      conversations,
+      conversation,
     });
     server = await startServer({ context: ctx, scheduleRuntimeEvents: boundary.runtime });
   });
@@ -535,7 +535,7 @@ describe("schedule.* RPC + event bridge (S2.E)", () => {
         version: TEST_VERSION,
         token: TEST_TOKEN,
         productApi: boundary.productApi,
-        conversations,
+        conversation,
       });
       serverWithReg = await startServer({
         context: ctx,

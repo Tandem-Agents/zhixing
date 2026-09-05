@@ -16,7 +16,7 @@ import {
   SCHEDULE_RUNTIME_PRODUCT_API_EXACT_SET,
 } from "@zhixing/core/scheduler/application";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
-import type { RuntimeControlAdapter } from "../../../context.js";
+import type { ServerInfoRuntimeBinding } from "../../../context.js";
 import {
   buildServerShutdownMethod,
   buildServerInfoMethod,
@@ -733,7 +733,7 @@ describe("server.info", () => {
 
   it("叠加活跃会话 / 连接数 / 宿主装配信息(workspace / logPath)", async () => {
     const ctx = mkCtx({
-      conversations: {
+      conversation: {
         list: () => [{ busy: true }, { busy: false }],
       } as never,
       connectionCount: () => 3,
@@ -790,7 +790,7 @@ describe("server.info", () => {
   it("叠加运行控制投影", async () => {
     const ctx = {
       ...mkCtx({
-        conversations: {
+        conversation: {
           list: () => [
             {
               conversationId: "conv-1",
@@ -810,7 +810,7 @@ describe("server.info", () => {
             onEvent: () => () => undefined,
           })],
         ),
-        runtimeControl: {
+        serverInfoRuntime: {
           deliveryStats: () => ({
             pending: 3,
             queued: 3,
@@ -866,7 +866,7 @@ describe("server.info", () => {
       attempt: 1,
       anchorEpoch: 2,
     }]);
-    const ctx = mkCtx({ runtimeControl: { deliveryStatus } });
+    const ctx = mkCtx({ serverInfoRuntime: { deliveryStatus } });
 
     const result = await buildServerInfoMethod().handler({
       deliveryStatusAfter: { "dlv-01KXPWTM80BYB4SH423EJT1CVN": 3 },
@@ -898,7 +898,7 @@ describe("server.info", () => {
       notices: [notice],
       nextRevision: 9,
     }));
-    const ctx = mkCtx({ runtimeControl: { schedulerNotices } });
+    const ctx = mkCtx({ serverInfoRuntime: { schedulerNotices } });
 
     const result = await buildServerInfoMethod().handler({
       schedulerNoticeAfter: 4,
@@ -931,7 +931,7 @@ describe("server.info", () => {
         afterStatusRevision: 4,
       }],
     }));
-    const ctx = mkCtx({ runtimeControl: { conversationStatus } });
+    const ctx = mkCtx({ serverInfoRuntime: { conversationStatus } });
     const cursor = {
       conversationId: "conversation-1",
       runId: "run-1",
@@ -977,7 +977,7 @@ describe("server.info", () => {
       | undefined;
     const openFirstPartyFinality = vi.fn(async (
       input: Parameters<
-        NonNullable<RuntimeControlAdapter["openFirstPartyFinality"]>
+        NonNullable<ServerInfoRuntimeBinding["openFirstPartyFinality"]>
       >[0],
     ) => {
       publish = input.onStatus;
@@ -1007,7 +1007,7 @@ describe("server.info", () => {
       };
     });
     const ctx = {
-      ...mkCtx({ runtimeControl: { openFirstPartyFinality } }),
+      ...mkCtx({ serverInfoRuntime: { openFirstPartyFinality } }),
       connection: {
         id: 9,
         authenticated: true,
@@ -1075,7 +1075,7 @@ describe("server.info", () => {
         afterStatusRevision: 3,
       }],
     }));
-    const ctx = mkCtx({ runtimeControl: { jobStatus } });
+    const ctx = mkCtx({ serverInfoRuntime: { jobStatus } });
     const cursor = {
       taskId: "task-1",
       jobRunId: "job-run-1",
@@ -1092,7 +1092,7 @@ describe("server.info", () => {
   });
 
   it("rejects a delivery cursor outside the protocol identifier domain", async () => {
-    const ctx = mkCtx({ runtimeControl: { deliveryStatus: vi.fn() } });
+    const ctx = mkCtx({ serverInfoRuntime: { deliveryStatus: vi.fn() } });
     await expect(
       buildServerInfoMethod().handler({
         deliveryStatusAfter: { ["i".repeat(481)]: 0 },
@@ -1101,7 +1101,7 @@ describe("server.info", () => {
   });
 
   it("rejects malformed conversation status cursors", async () => {
-    const ctx = mkCtx({ runtimeControl: { conversationStatus: vi.fn() } });
+    const ctx = mkCtx({ serverInfoRuntime: { conversationStatus: vi.fn() } });
     await expect(
       buildServerInfoMethod().handler({
         conversationStatusAfter: [{
@@ -1114,7 +1114,7 @@ describe("server.info", () => {
   });
 
   it("rejects malformed job status cursors", async () => {
-    const ctx = mkCtx({ runtimeControl: { jobStatus: vi.fn() } });
+    const ctx = mkCtx({ serverInfoRuntime: { jobStatus: vi.fn() } });
     await expect(
       buildServerInfoMethod().handler({
         jobStatusAfter: [{
@@ -1158,8 +1158,8 @@ describe("delivery.resolve", () => {
     const ctx = {
       ...mkCtx({
         productApi: deliveryProductApi(execute),
-        conversations: {
-          durableControlPrincipal: (input: {
+        conversation: {
+          durablePrincipal: (input: {
             surfacePrincipal: string;
             connectionId: string;
           }) => ({ ...input, deviceId: "anchor-device" }),
@@ -1222,8 +1222,8 @@ describe("delivery.resolve", () => {
     const ctx = {
       ...mkCtx({
         productApi: deliveryProductApi(execute),
-        conversations: {
-          durableControlPrincipal: (input: {
+        conversation: {
+          durablePrincipal: (input: {
             surfacePrincipal: string;
             connectionId: string;
           }) => ({ ...input, deviceId: "anchor-device" }),
@@ -1259,8 +1259,8 @@ describe("delivery.resolve", () => {
 
   it("fails closed with the existing wire error when the Host has no Delivery contribution", async () => {
     const ctx = mkCtx({
-      conversations: {
-        durableControlPrincipal: () => ({
+      conversation: {
+        durablePrincipal: () => ({
           surfacePrincipal: "rpc:desktop",
           deviceId: "anchor-device",
           connectionId: "7",
@@ -1297,8 +1297,8 @@ describe("delivery.resolve", () => {
     registry.register(buildDeliveryResolveMethod());
     const server = mkCtx({
       productApi: deliveryProductApi(execute),
-      conversations: {
-        durableControlPrincipal: (input: {
+      conversation: {
+        durablePrincipal: (input: {
           surfacePrincipal: string;
           connectionId: string;
         }) => ({ ...input, deviceId: "anchor-device" }),

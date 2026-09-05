@@ -7,6 +7,8 @@
 
 import type {
   ChannelStatus,
+  ConfirmationDecision,
+  ConfirmationRequest,
   HttpHandler,
   AuthorityDeliveryStats,
   DeliveryStatusNotice,
@@ -15,13 +17,19 @@ import type { ProductApiDispatcher } from "@zhixing/core/product-api";
 import type { BackupRecoveryPublicStatus } from "@zhixing/core/backup-recovery/application";
 import type {
   ConversationStatusNotice,
+  ExplicitEnvironmentSelection,
   ExecutionStatusNotice,
   FinalFrame,
   JobStatusNotice,
   PublishResultNotice,
   SchedulerUserNotice,
 } from "@zhixing/core/contracts";
-import type { ConfirmationHub, ConversationManager } from "@zhixing/owner-kernel";
+import type {
+  AgentEventMap,
+  PostTurnControlOutcome,
+  TurnContext,
+  UserTurnInput,
+} from "@zhixing/core/types";
 import type {
   SessionActivityBroadcast,
   SessionBroadcast,
@@ -82,8 +90,72 @@ export interface CanonicalFirstPartyConversationSurface {
   }): Promise<unknown>;
 }
 
-export interface RuntimeControlAdapter {
-  openFirstPartyFinality?: (input: {
+/** Server's finite Conversation demand; it never exposes an owner object or session. */
+export interface ServerConversationBinding {
+  usesDurableTurnProtocol(): boolean;
+  has(conversationId: string): boolean;
+  addObserver(
+    conversationId: string,
+    connectionId: string,
+    options?: Readonly<{ allowInactive?: boolean }>,
+  ): boolean;
+  removeObserver(conversationId: string, connectionId: string): void;
+  getObserverConnectionIds(conversationId: string): ReadonlySet<string>;
+  drainLifecycleDiagnostics(
+    conversationId: string,
+  ): readonly AgentEventMap["lifecycle:warning"][];
+  setBusy(conversationId: string, busy: boolean): void;
+  findDurableInteractionOutcome(
+    conversationId: string,
+    requestId: string,
+  ): Promise<
+    | Readonly<{ t: "answered"; decisionDigest: string }>
+    | Readonly<{ t: "closed" }>
+    | undefined
+  >;
+  executeTurn(input: Readonly<{
+    conversationId: string;
+    userInput: UserTurnInput;
+    turnId: string;
+    abortSignal: AbortSignal;
+    turnContext: TurnContext;
+    surfacePrincipal: string;
+    environment?: ExplicitEnvironmentSelection;
+    notify(method: string, params: unknown): void;
+    onPostTurnControlIntent(control: PostTurnControlOutcome): void;
+  }>): Promise<void>;
+  list(): readonly Readonly<{
+    conversationId: string;
+    busy: boolean;
+    pendingCount: number;
+  }>[];
+  durablePrincipal(input: Readonly<{
+    surfacePrincipal: string;
+    connectionId: string;
+  }>): Readonly<{
+    surfacePrincipal: string;
+    deviceId: string;
+    connectionId: string;
+  }>;
+  removeObserverFromAll(connectionId: string): void;
+  disposeAll(): Promise<void>;
+}
+
+export interface ServerConfirmationPendingEntry {
+  readonly request: ConfirmationRequest;
+  readonly conversationId?: string;
+}
+
+/** Confirmation RPC's finite pending-query/resolve demand. */
+export interface ServerConfirmationBinding {
+  listPending(): readonly ServerConfirmationPendingEntry[];
+  findPending(requestId: string): ServerConfirmationPendingEntry | undefined;
+  resolve(requestId: string, decision: ConfirmationDecision): Promise<boolean>;
+}
+
+/** The exact runtime status/history demand of the server.info handler. */
+export interface ServerInfoRuntimeBinding {
+  readonly openFirstPartyFinality?: (input: {
     readonly lastSeen: readonly {
       readonly subject:
         | {
@@ -121,11 +193,11 @@ export interface RuntimeControlAdapter {
     }[];
     close(): void;
   }>;
-  deliveryStats?: () => AuthorityDeliveryStats;
-  deliveryStatus?: (
+  readonly deliveryStats?: () => AuthorityDeliveryStats;
+  readonly deliveryStatus?: (
     afterByItem: Readonly<Record<string, number>>,
   ) => Promise<readonly DeliveryStatusNotice[]>;
-  conversationStatus?: (
+  readonly conversationStatus?: (
     after: readonly {
       readonly conversationId: string;
       readonly runId: string;
@@ -139,7 +211,7 @@ export interface RuntimeControlAdapter {
       readonly afterStatusRevision: number;
     }[];
   }>;
-  jobStatus?: (
+  readonly jobStatus?: (
     after: readonly {
       readonly taskId: string;
       readonly jobRunId: string;
@@ -153,20 +225,10 @@ export interface RuntimeControlAdapter {
       readonly afterStatusRevision: number;
     }[];
   }>;
-  schedulerNotices?: (afterRevision: number) => Promise<{
+  readonly schedulerNotices?: (afterRevision: number) => Promise<{
     readonly notices: readonly SchedulerUserNotice[];
     readonly nextRevision: number;
   }>;
-  conversationFinalHistory?: (
-    conversationId: string,
-    afterCommitRevision: number,
-  ) => Promise<readonly {
-    readonly frame: FinalFrame;
-    readonly publishResults: readonly PublishResultNotice[];
-  }[]>;
-  beginDrain?: () => Promise<void>;
-  drainAcceptedWork?: () => Promise<void>;
-  flushDelivery?: () => Promise<void>;
 }
 
 export interface ServerContext {
@@ -178,8 +240,8 @@ export interface ServerContext {
   readonly startedAt: number;
   /** 共享 token（auth 验证用）。由 ServerOrchestrator 注入 */
   readonly token: string;
-  /** 对话运行时管理器（不传则 session.* 方法不可用） */
-  conversations?: ConversationManager;
+  /** Conversation handlers 的有限、构造期只读 binding。 */
+  conversation?: ServerConversationBinding;
   /** Host 组合的传输无关 Product API。不传则相应产品 API 不可用。 */
   productApi?: ProductApiDispatcher;
   /** 宿主装配信息(server.info 的运维字段:工作区 / 日志路径)。 */
@@ -217,13 +279,18 @@ export interface ServerContext {
   channelStatuses?: () => readonly Readonly<ChannelStatus>[];
   /** Pre-server channel callback routes, keyed by exact path. */
   channelHttpRoutes?: ReadonlyMap<string, HttpHandler>;
-  /**
-   * 确认聚合器（不传则远程确认不启用，serve 模式回退到永久 pending → 30min expire → 拒绝）。
-   * 远程权限确认的 owner 聚合入口。
-   */
-  confirmationHub?: ConfirmationHub;
-  /** 运行控制需要的可选事实源与动作钩子，由宿主装配层注入。 */
-  runtimeControl?: RuntimeControlAdapter;
+  /** 远程确认的有限 pending-query/resolve binding。 */
+  confirmation?: ServerConfirmationBinding;
+  /** server.info 唯一消费的运行状态与 finality 查询。 */
+  readonly serverInfoRuntime?: ServerInfoRuntimeBinding;
+  /** session.subscribe 在 observer 建立后回放的 Conversation final history。 */
+  readonly conversationFinalHistory?: (
+    conversationId: string,
+    afterCommitRevision: number,
+  ) => Promise<readonly {
+    readonly frame: FinalFrame;
+    readonly publishResults: readonly PublishResultNotice[];
+  }[]>;
   /** 耐久停机收束点。所有外部停机入口必须先取得 ready-to-stop。 */
   lifecycleShutdown?: LifecycleShutdownAdapter;
   /** executor-only 宿主的有限第一方会话路由；锚点宿主不注入。 */
@@ -251,7 +318,7 @@ export interface CreateContextOptions {
   config: ServerConfig;
   version: string;
   token: string;
-  conversations?: ConversationManager;
+  conversation?: ServerConversationBinding;
   productApi?: ProductApiDispatcher;
   hostInfo?: { workspace?: string; logPath?: string };
   managedHostPublicStatus?: ServerContext["managedHostPublicStatus"];
@@ -260,8 +327,9 @@ export interface CreateContextOptions {
   llmComplete?: (prompt: string, role?: "main" | "light") => Promise<string>;
   channelStatuses?: () => readonly Readonly<ChannelStatus>[];
   channelHttpRoutes?: ReadonlyMap<string, HttpHandler>;
-  confirmationHub?: ConfirmationHub;
-  runtimeControl?: RuntimeControlAdapter;
+  confirmation?: ServerConfirmationBinding;
+  readonly serverInfoRuntime?: ServerInfoRuntimeBinding;
+  readonly conversationFinalHistory?: ServerContext["conversationFinalHistory"];
   lifecycleShutdown?: LifecycleShutdownAdapter;
   conversationRpc?: FirstPartyConversationRpcRouter;
 }
@@ -272,7 +340,7 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     version: opts.version,
     token: opts.token,
     startedAt: Date.now(),
-    conversations: opts.conversations,
+    conversation: opts.conversation,
     productApi: opts.productApi,
     hostInfo: opts.hostInfo,
     managedHostPublicStatus: opts.managedHostPublicStatus,
@@ -281,8 +349,9 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     llmComplete: opts.llmComplete,
     channelStatuses: opts.channelStatuses,
     channelHttpRoutes: opts.channelHttpRoutes,
-    confirmationHub: opts.confirmationHub,
-    runtimeControl: opts.runtimeControl,
+    confirmation: opts.confirmation,
+    serverInfoRuntime: opts.serverInfoRuntime,
+    conversationFinalHistory: opts.conversationFinalHistory,
     lifecycleShutdown: opts.lifecycleShutdown,
     conversationRpc: opts.conversationRpc,
   };

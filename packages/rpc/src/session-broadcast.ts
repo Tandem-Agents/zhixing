@@ -1,13 +1,12 @@
 /**
  * 会话域组播 —— 把通知发给一个会话的全部 observer 连接。
  *
- * observer 名册(ConversationManager 维护,grace 管理与事件分发共用同一名册)
+ * observer 名册由会话 owner 投影,grace 管理与事件分发共用同一名册。
  * 即推送目标:多接入面同看一个对话时,流式 turn(delta / complete)、带外
  * 事件(session.event)与会话级变更(session.changed)对全部在场端一致投影。
  * 确认请求不经此组播——确认按发起接入面定向(Bridge 的 triggeredBy 过滤)。
  */
 
-import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import type { RpcNotificationConnection } from "./connection.js";
 import {
   SESSION_NOTIFICATIONS,
@@ -42,7 +41,7 @@ const SESSION_BROADCAST_TRANSPORTS = new WeakSet<object>();
 
 export function createSessionBroadcastTransport(deps: {
   connections: ReadonlySet<RpcNotificationConnection>;
-  manager: ConversationManager;
+  observerConnectionIds(conversationId: string): ReadonlySet<string>;
 }): SessionBroadcastTransport {
   const transport = Object.freeze({
     session: createObserverBroadcast(deps),
@@ -66,10 +65,10 @@ export function assertSessionBroadcastTransport(
 
 export function createObserverBroadcast(deps: {
   connections: ReadonlySet<RpcNotificationConnection>;
-  manager: ConversationManager;
+  observerConnectionIds(conversationId: string): ReadonlySet<string>;
 }): SessionBroadcast {
   return (conversationId, method, params) => {
-    const observerIds = deps.manager.getObserverConnectionIds(conversationId);
+    const observerIds = deps.observerConnectionIds(conversationId);
     if (observerIds.size === 0) return;
     for (const conn of deps.connections) {
       if (
@@ -85,10 +84,10 @@ export function createObserverBroadcast(deps: {
 
 export function createActivityBroadcast(deps: {
   connections: ReadonlySet<RpcNotificationConnection>;
-  manager: ConversationManager;
+  observerConnectionIds(conversationId: string): ReadonlySet<string>;
 }): SessionActivityBroadcast {
   return (payload) => {
-    const currentObservers = deps.manager.getObserverConnectionIds(
+    const currentObservers = deps.observerConnectionIds(
       payload.conversationId,
     );
     for (const conn of deps.connections) {

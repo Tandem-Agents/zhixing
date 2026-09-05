@@ -129,6 +129,10 @@ import { createBuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
 import { createTransientSegmentDeps } from "./segment-deps.js";
 import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
 import { createConversationPerspectivesCorrectnessPort } from "./conversation-perspectives-correctness.js";
+import {
+  createServerConfirmationBinding,
+  createServerConversationBinding,
+} from "./server-product-bindings.js";
 import type {
   AnchorServeBootstrapContext,
   ExecutorRoleModule,
@@ -2772,7 +2776,7 @@ async function runServerProcess(
           }),
         }
       : {}),
-    conversations: ctx.conversations,
+    conversation: createServerConversationBinding(ctx.conversations!),
     productApi,
     hostInfo: {
       // 宿主单点解析的工作区——接入面 @ 补全 root 取此
@@ -2809,8 +2813,8 @@ async function runServerProcess(
     })(),
     channelStatuses: ctx.channelStatuses,
     channelHttpRoutes,
-    confirmationHub,
-    runtimeControl: {
+    confirmation: createServerConfirmationBinding(confirmationHub),
+    serverInfoRuntime: {
       openFirstPartyFinality: async (input) => {
         const factory = ctx.firstPartyFinality;
         const authority = ctx.authorityRuntime;
@@ -2879,32 +2883,18 @@ async function runServerProcess(
       conversationStatus: (after) =>
         ctx.conversationProtocol?.statusHistory(after) ??
         Promise.resolve({ notices: [], next: [] }),
-      conversationFinalHistory: async (conversationId, afterCommitRevision) =>
-        (await ctx.conversationProtocol?.finalHistory(
-          conversationId,
-          afterCommitRevision,
-        ) ?? []).map(({ frame, publishResults }) => ({ frame, publishResults })),
       jobStatus: (after) =>
         ctx.jobStatus?.statusHistory(after) ??
         Promise.resolve({ notices: [], next: [] }),
       schedulerNotices: (afterRevision) =>
         ctx.jobStatus?.schedulerHistory(afterRevision) ??
         Promise.resolve({ notices: [], nextRevision: afterRevision }),
-      beginDrain: async () => {
-        managedHostStopping = true;
-        ctx.inboundRouter?.refuseNewMessages();
-        await ctx.channelConnections?.disconnectConfigured();
-        await ctx.deliveryStack?.quiesceForAuthorityTransfer();
-        await settleScheduleForTransfer();
-      },
-      drainAcceptedWork: async () => {
-        await ctx.inboundRouter?.drainAcceptedMessages();
-        await ctx.executorJobOwner?.drain();
-      },
-      flushDelivery: async () => {
-        await ctx.deliveryStack?.flush();
-      },
     },
+    conversationFinalHistory: async (conversationId, afterCommitRevision) =>
+      (await ctx.conversationProtocol?.finalHistory(
+        conversationId,
+        afterCommitRevision,
+      ) ?? []).map(({ frame, publishResults }) => ({ frame, publishResults })),
     lifecycleShutdown: stopCoordinator,
   });
   if (ctx.meshRuntime) {

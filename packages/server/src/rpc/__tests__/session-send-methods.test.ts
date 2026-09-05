@@ -27,6 +27,7 @@ import type { DurableConversationTurnExecutor } from "@zhixing/owner-kernel/run-
 import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
 import { parseConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
 import { stubDurableTurnExecutor } from "../../__tests__/durable-turn-executor-stub.js";
+import { bindTestConversationManager } from "../../__tests__/server-conversation-binding-fixture.js";
 import {
   buildSessionAbortMethod,
   buildSessionResolveMethod,
@@ -107,7 +108,7 @@ describe("session.send 方法", () => {
     const method = buildSessionSendMethod();
     const ctx = {
       server: {
-        conversations: {},
+        conversation: {},
         productApi: agentTurnProductApi({
           requiresStableTurnIdentity: true,
           createTurnIdentity: () => "turn-generated",
@@ -140,7 +141,7 @@ describe("session.send 方法", () => {
     const method = buildSessionSendMethod();
     const ctx = {
       server: {
-        conversations: { addObserver, runMaintenanceExisting },
+        conversation: { addObserver, runMaintenanceExisting },
         advancement: { loadActiveSession },
         productApi: agentTurnProductApi({
           requiresStableTurnIdentity: true,
@@ -176,7 +177,7 @@ describe("session.send 方法", () => {
     const method = buildSessionSendMethod();
     const ctx = {
       server: {
-        conversations: {},
+        conversation: {},
         productApi: agentTurnProductApi({
           requiresStableTurnIdentity: true,
           createTurnIdentity: () => "turn-generated",
@@ -252,7 +253,7 @@ describe("session.send 方法", () => {
     };
     const ctx = {
       server: {
-        conversations: {
+        conversation: {
           addObserver,
           runMaintenanceExisting: async (
             _conversationId: string,
@@ -303,7 +304,7 @@ describe("session.send 方法", () => {
     const method = buildSessionSendMethod();
     const ctx = {
       server: {
-        conversations: {},
+        conversation: {},
         productApi: agentTurnProductApi({
           requiresStableTurnIdentity: false,
           createTurnIdentity,
@@ -365,11 +366,11 @@ describe("session.subscribe publish result history", () => {
       { conversationId: "conversation-1", afterCommitRevision: 3 },
       {
         server: {
-          conversations: {
+        conversation: {
             has: () => true,
             addObserver: () => true,
           },
-          runtimeControl: { conversationFinalHistory },
+          conversationFinalHistory,
         } as unknown as ServerContext,
         connection: { id: "connection-1", notify },
       } as never,
@@ -714,7 +715,7 @@ describe("session durable control 方法", () => {
         { text: "keep working", conversationId: "conversation-1", turnId: "turn-1" },
         {
           server: {
-            conversations: manager,
+            conversation: bindTestConversationManager(manager),
             productApi: agentTurnProductApi(
               createConversationAgentTurnAdmissionPort({ manager }),
             ),

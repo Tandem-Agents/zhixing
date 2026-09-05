@@ -1,5 +1,5 @@
 /**
- * confirmation.* RPC 方法 —— RPC 接入面与 ConfirmationHub 的操作入口
+ * confirmation.* RPC 方法 —— RPC 接入面与有限确认 binding 的操作入口
  *
  * 方法：
  *   - `confirmation.list`：列出当前连接可见的 pending（按 observer 过滤）
@@ -16,12 +16,16 @@
 
 import type { ConfirmationDecision, ConfirmationRequest } from "@zhixing/core";
 import { confirmationDecisionDigest } from "@zhixing/core/protocol";
-import type { HubEntry } from "@zhixing/owner-kernel/confirmation-hub";
 import type { MethodEntry } from "../handlers.js";
 import type { RpcConnection } from "../connection.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
-import type { ServerContext } from "../../context.js";
+import type {
+  ServerConfirmationBinding,
+  ServerConfirmationPendingEntry,
+  ServerContext,
+  ServerConversationBinding,
+} from "../../context.js";
 
 /**
  * ConfirmationDecision.kind 白名单——按接入面信任级分级。
@@ -88,8 +92,8 @@ export function buildConfirmationListMethod(): MethodEntry {
       const conversations = requireConversations(ctx.server);
       const connectionId = String(ctx.connection.id);
 
-      const all = hub.listAllPending();
-      let visible: HubEntry[];
+      const all = hub.listPending();
+      let visible: ServerConfirmationPendingEntry[];
 
       if (typeof params.conversationId === "string" && params.conversationId) {
         // 显式指定：仅当 caller 是该会话的 observer 才返回
@@ -180,7 +184,7 @@ export function buildConfirmationResolveMethod(): MethodEntry {
       //   跟随权由结构保证——entry 的 turnOrigin 必须是 RPC 入口且发起连接
       //   就是 caller。渠道(飞书)turn 的确认在渠道侧应答,RPC caller 非
       //   发起面;ephemeral(定时任务)确认无 RPC 发起者,同样拒绝。
-      const entry = hub.findEntry(params.requestId);
+      const entry = hub.findPending(params.requestId);
       if (!entry) {
         return replayDurableOutcome(ctx.server, params);
       }
@@ -192,7 +196,7 @@ export function buildConfirmationResolveMethod(): MethodEntry {
       }
 
       // ── 4. 实际 resolve（race：权限校验后到 resolve 之间可能已被其它路径解决） ──
-      const ok = await hub.resolveDurably(params.requestId, params.decision);
+      const ok = await hub.resolve(params.requestId, params.decision);
       if (!ok) {
         return replayDurableOutcome(ctx.server, params);
       }
@@ -217,7 +221,7 @@ async function replayDurableOutcome(
     ok: false,
     reason: "already-resolved-or-not-found",
   };
-  const conversations = server.conversations;
+  const conversations = server.conversation;
   if (
     !conversations ||
     !conversations.usesDurableTurnProtocol() ||
@@ -280,28 +284,30 @@ function validateDecisionShape(decision: {
   }
 }
 
-function requireHub(server: ServerContext) {
-  if (!server.confirmationHub) {
+function requireHub(server: ServerContext): ServerConfirmationBinding {
+  if (!server.confirmation) {
     throw new RpcAppError(
       RPC_ERROR_CODES.INTERNAL_ERROR,
       "ConfirmationHub not configured on server",
     );
   }
-  return server.confirmationHub;
+  return server.confirmation;
 }
 
-function requireConversations(server: ServerContext) {
-  if (!server.conversations) {
+function requireConversations(
+  server: ServerContext,
+): ServerConversationBinding {
+  if (!server.conversation) {
     throw new RpcAppError(
       RPC_ERROR_CODES.INTERNAL_ERROR,
       "ConversationManager not configured on server",
     );
   }
-  return server.conversations;
+  return server.conversation;
 }
 
 function toListItem(
-  entry: HubEntry,
+  entry: ServerConfirmationPendingEntry,
   connection: RpcConnection,
 ): ConfirmationListItem {
   const req: ConfirmationRequest = entry.request;

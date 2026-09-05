@@ -323,7 +323,7 @@ function scheduleControlSource(
     );
   }
   const connectionId = String(ctx.connection.id);
-  const principal = ctx.server.conversations?.durableControlPrincipal({
+  const principal = ctx.server.conversation?.durablePrincipal({
     surfacePrincipal,
     connectionId,
   });

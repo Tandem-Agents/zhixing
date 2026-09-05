@@ -52,6 +52,7 @@ import {
   type ConversationDirectoryStorage,
 } from "@zhixing/core/conversation/application";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
+import { bindTestConversationManager } from "./server-conversation-binding-fixture.js";
 
 const FIXED_NOW = new Date("2026-07-11T12:00:00.000Z");
 
@@ -185,7 +186,7 @@ async function captureControlAdmissionShadow() {
     config: { ...DEFAULT_SERVER_CONFIG, port: 18900 },
     version: "golden",
     token: "golden-token",
-    conversations,
+    conversation: bindTestConversationManager(conversations),
     productApi: createGoldenConversationProductApi(directory, conversations),
   });
   const context = {
@@ -678,11 +679,6 @@ async function captureShutdownStrategies() {
             phase: "ready-to-stop",
             strategy: input.strategy,
           };
-        },
-      },
-      runtimeControl: {
-        flushDelivery: async () => {
-          calls.push({ action: "flush-delivery" });
         },
       },
     });

@@ -91,10 +91,10 @@ function safeEqual(a: string, b: string): boolean {
 
 function collectCapabilities(server: {
   productApi?: ProductApiDispatcher;
-  conversations?: unknown;
+  conversation?: unknown;
 }): string[] {
   const caps: string[] = [];
-  if (server.conversations) caps.push("session");
+  if (server.conversation) caps.push("session");
   if (server.productApi?.supports(SCHEDULE_MANAGEMENT_LIST_QUERY)) caps.push("schedule");
   return caps;
 }

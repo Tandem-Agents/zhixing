@@ -10222,7 +10222,7 @@ export function inspectManagedHostAssembly(records) {
     !serverShutdown.includes("queueMicrotask(() => trigger(`${reason}:${strategy}`));") ||
     !command.includes("const stopCoordinator = new HostStopCoordinator({") ||
     !command.includes("lifecycleShutdown: stopCoordinator,") ||
-    !command.includes("beginDrain: async () => {") ||
+    !command.includes("runtime: {\n      closeAdmission: async (operationId) => {") ||
     !command.includes("drainAcceptedWork: async () => {") ||
     closeOldClient < 0 || disableFuture < closeOldClient || oldTurnover < disableFuture || successor < oldTurnover
   ) failures.push("managed host accepted-work drain or generation-safe turnover order drifted");
@@ -14716,8 +14716,12 @@ export function inspectConversationAdoptionAssembly(records) {
     ["packages/rpc/src/session-wire.ts", undefined],
     ["packages/rpc/src/confirmation-bridge.ts", undefined],
     ["packages/server/src/context.ts", undefined],
+    ["packages/server/src/server.ts", undefined],
     ["packages/server/src/rpc/handlers.ts", undefined],
     ["packages/server/src/rpc/methods/index.ts", undefined],
+    ["packages/server/src/rpc/methods/auth.ts", undefined],
+    ["packages/server/src/rpc/methods/schedule.ts", undefined],
+    ["packages/server/src/rpc/methods/server.ts", undefined],
     ["packages/server/src/rpc/methods/session.ts", undefined],
     ["packages/server/src/rpc/methods/confirmation.ts", undefined],
     ["packages/owner-kernel/src/conversation-run-contracts.ts", undefined],
@@ -15002,6 +15006,56 @@ export function inspectConversationAdoptionAssembly(records) {
   const context = required.get("packages/server/src/context.ts");
   if (!/conversationRpc\?\s*:\s*FirstPartyConversationRpcRouter/u.test(context.text)) {
     failures.push(`${context.relative}: server context must expose the narrow first-party conversation router`);
+  }
+  if (
+    !/interface\s+ServerConversationBinding\b/u.test(context.text) ||
+    !/interface\s+ServerConfirmationBinding\b/u.test(context.text) ||
+    !/\bconversation\?:\s*ServerConversationBinding/u.test(context.text) ||
+    !/\bconfirmation\?:\s*ServerConfirmationBinding/u.test(context.text) ||
+    /@zhixing\/owner-kernel|\bconversations\??\s*:|\bconfirmationHub\??\s*:/u.test(
+      context.text,
+    )
+  ) {
+    failures.push(`${context.relative}: Server Conversation and Confirmation demand must stay finite and implementation-free`);
+  }
+  if (
+    !/interface\s+ServerInfoRuntimeBinding\b/u.test(context.text) ||
+    !/readonly\s+serverInfoRuntime\?:\s*ServerInfoRuntimeBinding/u.test(context.text) ||
+    !/readonly\s+conversationFinalHistory\?:/u.test(context.text) ||
+    /RuntimeControlAdapter|\bruntimeControl\??\s*:|\bbeginDrain\??\s*:|\bdrainAcceptedWork\??\s*:|\bflushDelivery\??\s*:/u.test(
+      context.text,
+    )
+  ) {
+    failures.push(`${context.relative}: Server runtime status and history demand must stay handler-scoped`);
+  }
+  const serverRuntime = required.get("packages/server/src/server.ts");
+  const serverConsumers = [
+    serverRuntime,
+    required.get("packages/server/src/rpc/methods/auth.ts"),
+    required.get("packages/server/src/rpc/methods/schedule.ts"),
+    required.get("packages/server/src/rpc/methods/server.ts"),
+    required.get("packages/server/src/rpc/methods/session.ts"),
+    required.get("packages/server/src/rpc/methods/confirmation.ts"),
+  ];
+  const executorContextStart = executorRoot.text.indexOf(
+    "const serverContext = createServerContext({",
+  );
+  const executorContextEnd = executorRoot.text.indexOf("    });", executorContextStart);
+  const executorContext = executorContextStart >= 0 && executorContextEnd > executorContextStart
+    ? executorRoot.text.slice(executorContextStart, executorContextEnd)
+    : "";
+  if (
+    count(surfaceComposition.text, /\bconversation:\s*createServerConversationBinding\s*\(/gu) !== 1 ||
+    count(surfaceComposition.text, /\bconfirmation:\s*createServerConfirmationBinding\s*\(/gu) !== 1 ||
+    count(surfaceComposition.text, /\bserverInfoRuntime\s*:/gu) !== 1 ||
+    count(surfaceComposition.text, /\bconversationFinalHistory\s*:/gu) !== 1 ||
+    !executorContext ||
+    /\b(?:conversation|confirmation|runtimeControl)\s*:/u.test(executorContext) ||
+    !/\bserverInfoRuntime\s*:/u.test(executorContext) ||
+    !/\bconversationFinalHistory\s*:/u.test(executorContext) ||
+    serverConsumers.some((record) => /(?:ctx|server)\.(?:conversations|confirmationHub|runtimeControl)\b/u.test(record.text))
+  ) {
+    failures.push("Server Conversation/Confirmation implementations escaped the finite Host bindings");
   }
   const handlers = required.get("packages/server/src/rpc/handlers.ts");
   if (!/ctx\.server\.conversationRpc\?\.dispatch\s*\(/u.test(handlers.text)) {

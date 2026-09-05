@@ -58,14 +58,14 @@ export interface ServerShutdownResult {
   estimatedCompleteAt: string;
 }
 
-interface RuntimeControlWorkItem {
+interface ServerInfoWorkItem {
   id: string;
   kind: "conversation" | "scheduler" | "delivery" | "schedule";
   label: string;
   count: number;
 }
 
-interface RuntimeControlSnapshot {
+interface ServerInfoWorkSnapshot {
   accessSurfaces: {
     rpcConnections: number;
     currentConnectionId?: number;
@@ -77,11 +77,11 @@ interface RuntimeControlSnapshot {
     count: number;
     cancellableCount: number;
     drainOnlyCount: number;
-    cancellableWork: RuntimeControlWorkItem[];
-    drainOnlyWork: RuntimeControlWorkItem[];
+    cancellableWork: ServerInfoWorkItem[];
+    drainOnlyWork: ServerInfoWorkItem[];
   };
-  deferredWork: RuntimeControlWorkItem[];
-  keepAliveWork: RuntimeControlWorkItem[];
+  deferredWork: ServerInfoWorkItem[];
+  keepAliveWork: ServerInfoWorkItem[];
 }
 
 /**
@@ -175,8 +175,8 @@ export function buildServerInfoMethod(): MethodEntry {
     // 握手前的协议兼容判定由 auth 响应自带的 protocol / version 覆盖。
     requiresAuth: true,
     async handler(params, ctx) {
-      const conversations = ctx.server.conversations?.list() ?? [];
-      const runtimeControl = await buildRuntimeControlSnapshot(ctx);
+      const conversations = ctx.server.conversation?.list() ?? [];
+      const serverInfoWork = await buildServerInfoWorkSnapshot(ctx);
       const statusAfter = parseStatusAfter(params);
       let deliveryStatus: ExecutionStatusNotice[] = [];
       let conversationStatus: ExecutionStatusNotice[] = [];
@@ -185,10 +185,12 @@ export function buildServerInfoMethod(): MethodEntry {
       let conversationStatusNext = statusAfter.conversations;
       let jobStatusNext = statusAfter.jobs;
       const schedulerNoticePage =
-        (await ctx.server.runtimeControl?.schedulerNotices?.(statusAfter.scheduler)) ??
+        (await ctx.server.serverInfoRuntime?.schedulerNotices?.(
+          statusAfter.scheduler,
+        )) ??
         { notices: [], nextRevision: statusAfter.scheduler };
       const recoveryBackup = await ctx.server.recoveryBackupStatus?.();
-      const openFinality = ctx.server.runtimeControl?.openFirstPartyFinality;
+      const openFinality = ctx.server.serverInfoRuntime?.openFirstPartyFinality;
       const hasStatusCursors =
         Object.keys(statusAfter.delivery).length > 0 ||
         statusAfter.conversations.length > 0 ||
@@ -296,16 +298,16 @@ export function buildServerInfoMethod(): MethodEntry {
         );
       } else {
         deliveryStatus = [
-          ...((await ctx.server.runtimeControl?.deliveryStatus?.(
+          ...((await ctx.server.serverInfoRuntime?.deliveryStatus?.(
             statusAfter.delivery,
           )) ?? []),
         ];
         const conversationPage =
-          (await ctx.server.runtimeControl?.conversationStatus?.(
+          (await ctx.server.serverInfoRuntime?.conversationStatus?.(
             statusAfter.conversations,
           )) ?? { notices: [], next: [] };
         const jobPage =
-          (await ctx.server.runtimeControl?.jobStatus?.(
+          (await ctx.server.serverInfoRuntime?.jobStatus?.(
             statusAfter.jobs,
           )) ?? { notices: [], next: [] };
         conversationStatus = [...conversationPage.notices];
@@ -336,10 +338,10 @@ export function buildServerInfoMethod(): MethodEntry {
         mcpServers: ctx.server.mcpStatuses?.() ?? [],
         // 社交通道状态快照——核心 ready 与外部通道 ready 分离，接入面据此给出真实反馈。
         channels: ctx.server.channelStatuses?.() ?? [],
-        accessSurfaces: runtimeControl.accessSurfaces,
-        activeWork: runtimeControl.activeWork,
-        deferredWork: runtimeControl.deferredWork,
-        keepAliveWork: runtimeControl.keepAliveWork,
+        accessSurfaces: serverInfoWork.accessSurfaces,
+        activeWork: serverInfoWork.activeWork,
+        deferredWork: serverInfoWork.deferredWork,
+        keepAliveWork: serverInfoWork.keepAliveWork,
         deliveryStatus,
         deliveryStatusNext,
         conversationStatus,
@@ -371,7 +373,7 @@ export function buildDeliveryResolveMethod(): MethodEntry {
       ) {
         throw RpcErrors.invalidParams("authenticated delivery identity is invalid");
       }
-      const principal = ctx.server.conversations?.durableControlPrincipal({
+      const principal = ctx.server.conversation?.durablePrincipal({
         surfacePrincipal,
         connectionId,
       });
@@ -1104,9 +1106,9 @@ function shutdownEstimatedCompleteAt(timeoutMs: number): string {
   return estimated.toISOString();
 }
 
-async function buildRuntimeControlSnapshot(
+async function buildServerInfoWorkSnapshot(
   ctx: Parameters<NonNullable<MethodEntry["handler"]>>[1],
-): Promise<RuntimeControlSnapshot> {
+): Promise<ServerInfoWorkSnapshot> {
   const channels = [...(ctx.server.channelStatuses?.() ?? [])];
   const liveChannels = channels.filter(
     (s) => s.state === "connected" || s.state === "connecting",
@@ -1117,8 +1119,8 @@ async function buildRuntimeControlSnapshot(
   const otherRpcConnections =
     currentConnectionId === undefined ? rpcConnections : Math.max(0, rpcConnections - 1);
 
-  const cancellableWork: RuntimeControlWorkItem[] = [];
-  for (const conversation of ctx.server.conversations?.list() ?? []) {
+  const cancellableWork: ServerInfoWorkItem[] = [];
+  for (const conversation of ctx.server.conversation?.list() ?? []) {
     const pendingCount = Number(conversation.pendingCount ?? 0);
     const count = (conversation.busy ? 1 : 0) + pendingCount;
     if (count <= 0) continue;
@@ -1145,8 +1147,8 @@ async function buildRuntimeControlSnapshot(
     });
   }
 
-  const deferredWork: RuntimeControlWorkItem[] = [];
-  const deliveryStats = ctx.server.runtimeControl?.deliveryStats?.();
+  const deferredWork: ServerInfoWorkItem[] = [];
+  const deliveryStats = ctx.server.serverInfoRuntime?.deliveryStats?.();
   const deferredCount = deliveryStats === undefined ? 0 : Math.max(0, deliveryStats.pending);
   if (deferredCount > 0) {
     deferredWork.push({
@@ -1171,7 +1173,7 @@ async function buildRuntimeControlSnapshot(
       : [];
 
   const cancellableCount = sumCounts(cancellableWork);
-  const drainOnlyWork: RuntimeControlWorkItem[] = [];
+  const drainOnlyWork: ServerInfoWorkItem[] = [];
   const drainOnlyCount = sumCounts(drainOnlyWork);
 
   return {
@@ -1194,7 +1196,7 @@ async function buildRuntimeControlSnapshot(
   };
 }
 
-function sumCounts(items: readonly RuntimeControlWorkItem[]): number {
+function sumCounts(items: readonly ServerInfoWorkItem[]): number {
   return items.reduce((sum, item) => sum + item.count, 0);
 }
 
