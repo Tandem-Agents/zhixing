@@ -1,14 +1,21 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import type {
-  ChannelContext,
-  ChannelChallengeMessage,
-  DeliveryResult,
-  DeliveryTarget,
-  OutboundContent,
+import {
+  OutboxRegistry,
+  type ChannelChallengeMessage,
+  type ChannelContext,
+  type DeliveryResult,
+  type DeliveryTarget,
+  type OutboundContent,
 } from "@zhixing/core";
-import { setupChannels } from "../channels.js";
+import {
+  createInboundChannelRouter,
+  setupChannels,
+} from "../channels.js";
+import { createAssemblyUnits } from "../access-surfaces.js";
+import type { AssemblyContext } from "../access-surface.js";
 
 const mockFeishu = vi.hoisted(() => ({
+  constructorError: undefined as Error | undefined,
   connect: vi.fn<(_: ChannelContext) => Promise<void>>(),
   disconnect: vi.fn<() => Promise<void>>(),
   send: vi.fn<(
@@ -30,6 +37,10 @@ vi.mock("@zhixing/channel-feishu", () => ({
       streaming: false,
     };
     readonly bindingPolicy = { group: "per-user-in-group" as const };
+
+    constructor() {
+      if (mockFeishu.constructorError) throw mockFeishu.constructorError;
+    }
 
     connect(ctx: ChannelContext): Promise<void> {
       return mockFeishu.connect(ctx);
@@ -56,6 +67,14 @@ const logger = {
   error: vi.fn(),
 };
 
+const OUTBOUND_ONLY = Object.freeze({
+  inbound: Object.freeze({
+    kind: "absent" as const,
+    reason: "outbound-only" as const,
+  }),
+  onChallengeAction: async () => undefined,
+});
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -69,12 +88,13 @@ function deferred<T>() {
 describe("setupChannels", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockFeishu.constructorError = undefined;
     mockFeishu.disconnect.mockResolvedValue(undefined);
     mockFeishu.send.mockResolvedValue({ success: true, retryable: false });
     mockFeishu.sendChallenge.mockResolvedValue({ success: true, retryable: false });
   });
 
-  it("先返回稳定有限端口，外部通道连接在后台完成", async () => {
+  it("先返回稳定有限端口，显式 absent profile 才能开放 outbound-only 连接", async () => {
     const gate = deferred<void>();
     mockFeishu.connect.mockReturnValue(gate.promise);
 
@@ -84,20 +104,23 @@ describe("setupChannels", () => {
       logger,
     });
 
-    expect(result.delivery.status("feishu")).toBe("connecting");
+    expect(result.delivery.status("feishu")).toBe("disconnected");
     expect(result.statusSnapshot()).toEqual([
-      { channelId: "feishu", state: "connecting" },
+      { channelId: "feishu", state: "disconnected" },
     ]);
 
+    const connectionTask = result.connectConfigured(OUTBOUND_ONLY);
+    await Promise.resolve();
+    expect(result.delivery.status("feishu")).toBe("connecting");
     let settled = false;
-    result.connectionTask.then(() => {
+    connectionTask.then(() => {
       settled = true;
     });
     await Promise.resolve();
     expect(settled).toBe(false);
 
     gate.resolve();
-    await result.connectionTask;
+    await connectionTask;
 
     expect(result.delivery.status("feishu")).toBe("connected");
     expect(logger.info).toHaveBeenCalledWith("Channel '%s' connected", "feishu");
@@ -111,7 +134,7 @@ describe("setupChannels", () => {
       credentials: { channels: { feishu: { appId: "cli_x", appSecret: "s" } } } as never,
       logger,
     });
-    await result.connectionTask;
+    await result.connectConfigured(OUTBOUND_ONLY);
 
     expect(result.statusSnapshot()[0]).toMatchObject({
       state: "error",
@@ -131,13 +154,11 @@ describe("setupChannels", () => {
       entries: { feishu: { type: "feishu" } },
       credentials: { channels: { feishu: { appId: "cli_x", appSecret: "s" } } } as never,
       logger,
-      connectImmediately: false,
     });
-    await result.connectionTask;
 
     expect(mockFeishu.connect).not.toHaveBeenCalled();
 
-    await result.connectConfigured();
+    await result.connectConfigured(OUTBOUND_ONLY);
     expect(mockFeishu.connect).toHaveBeenCalledOnce();
     expect(result.delivery.status("feishu")).toBe("connected");
 
@@ -157,6 +178,10 @@ describe("setupChannels", () => {
       entries: { feishu: { type: "feishu" } },
       credentials: { channels: { feishu: { appId: "cli_x", appSecret: "s" } } } as never,
       logger,
+    });
+    const outbox = new OutboxRegistry((target, content) =>
+      result.inbound.send(target, content));
+    const router = createInboundChannelRouter({
       conversation: {
         prepareAgentTurn: async () => ({ turnId: "turn-test" }) as never,
         admitAgentTurn: admitTurn,
@@ -165,10 +190,20 @@ describe("setupChannels", () => {
           feedback: { kind: "idle" },
         }),
       } as never,
+      channels: result.inbound,
+      deliveryOutbox: outbox,
+      logger,
       sessionBroadcast: vi.fn(),
       sessionActivityBroadcast: vi.fn(),
+      isCurrentOwner: () => true,
     });
-    await result.connectionTask;
+    await result.connectConfigured(Object.freeze({
+      inbound: Object.freeze({
+        kind: "router",
+        handleMessage: (message) => router.handleMessage(message),
+      }),
+      onChallengeAction: async () => undefined,
+    }));
     const target = { channelId: "feishu", to: "user-1" };
 
     const context = mockFeishu.connect.mock.calls[0]?.[0];
@@ -189,7 +224,7 @@ describe("setupChannels", () => {
       success: true,
       retryable: false,
     });
-    result.router!.refuseNewMessages();
+    router.refuseNewMessages();
     context!.onMessage({
       channelId: "feishu",
       from: "user-1",
@@ -213,11 +248,12 @@ describe("setupChannels", () => {
     expect(mockFeishu.sendChallenge).toHaveBeenCalledOnce();
     expect(Object.isFrozen(result.statusSnapshot())).toBe(true);
     expect(Object.isFrozen(result.statusSnapshot()[0])).toBe(true);
+    await outbox.dispose();
     await result.dispose();
     expect(mockFeishu.disconnect).toHaveBeenCalledOnce();
   });
 
-  it("连接切换竞态中的 confirmation challenge 也在副作用前复核 current owner", async () => {
+  it("物理连接只接收已完成的 challenge action consumer", async () => {
     let current = true;
     const onChallengeAction = vi.fn(async () => {});
     mockFeishu.connect.mockResolvedValue(undefined);
@@ -226,10 +262,16 @@ describe("setupChannels", () => {
       entries: { feishu: { type: "feishu" } },
       credentials: { channels: { feishu: { appId: "cli_x", appSecret: "s" } } } as never,
       logger,
-      isCurrentOwner: () => current,
-      onChallengeAction,
     });
-    await result.connectionTask;
+    await result.connectConfigured(Object.freeze({
+      inbound: OUTBOUND_ONLY.inbound,
+      onChallengeAction: async (action) => {
+        if (!current) {
+          throw new Error("Channel interaction is not owned by this device");
+        }
+        await onChallengeAction(action);
+      },
+    }));
     const context = mockFeishu.connect.mock.calls[0]?.[0];
     expect(context).toBeDefined();
 
@@ -238,5 +280,37 @@ describe("setupChannels", () => {
       "not owned by this device",
     );
     expect(onChallengeAction).not.toHaveBeenCalled();
+  });
+
+  it("把未配置和 adapter 创建失败冻结为显式机制结果", async () => {
+    const surface = createAssemblyUnits({}).find((unit) => unit.name === "channel")!;
+    const absent = {
+      channelConfiguration: {},
+    } as unknown as AssemblyContext;
+    await surface.setup(absent);
+    expect(absent.channelMechanism).toEqual({
+      kind: "absent",
+      reason: "not-configured",
+    });
+    expect(Object.isFrozen(absent.channelMechanism)).toBe(true);
+
+    mockFeishu.constructorError = new Error("adapter unavailable");
+    const configured = {
+      channelConfiguration: {
+        messaging: { feishu: { type: "feishu" } },
+      },
+      conversations: {
+        usesDurableTurnProtocol: () => true,
+      },
+      channelHttpRoutes: new Map(),
+      lifecycleContributions: { acquire: vi.fn() },
+    } as unknown as AssemblyContext;
+    await surface.setup(configured);
+    expect(configured.channelMechanism?.kind).toBe("available");
+    if (configured.channelMechanism?.kind !== "available") {
+      throw new Error("configured Channel mechanism was not published");
+    }
+    expect(configured.channelMechanism.channels.challenges.supports("feishu")).toBe(false);
+    expect(configured.channelMechanism.channels.statusSnapshot()).toEqual([]);
   });
 });

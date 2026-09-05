@@ -3,6 +3,7 @@ import {
   InboundRouter,
   type InboundChannelPort,
   type InboundConversationApplicationPort,
+  type InboundDeliveryOutboxPort,
 } from "../inbound-router.js";
 import {
   channelSurfacePrincipal,
@@ -28,6 +29,7 @@ import {
   ChannelRegistry,
   DEFAULT_CONVERSATION_ID,
   generateTurnId,
+  OutboxRegistry,
 } from "@zhixing/core";
 import type {
   DurableConversationTurnExecutor,
@@ -277,6 +279,8 @@ describe("InboundRouter", () => {
     sessionBroadcast?: SessionBroadcast;
     sessionActivityBroadcast?: SessionActivityBroadcast;
     isCurrentOwner?: () => boolean;
+    deliveryOutbox?: InboundDeliveryOutboxPort;
+    conversation?: InboundConversationApplicationPort;
   }) {
     const adapter = options?.adapter ?? createMockAdapter();
     const factory = createMockRuntimeFactory(options?.runtime);
@@ -297,10 +301,16 @@ describe("InboundRouter", () => {
       onMessage: () => {},
     });
     channels.register(adapter);
+    const inbound = createInboundPort(channels);
+    const deliveryOutbox =
+      options?.deliveryOutbox ??
+      new OutboxRegistry((target, content) => inbound.send(target, content));
 
     const router = new InboundRouter({
-      conversation: createTestConversationPort(conversations),
-      channels: createInboundPort(channels),
+      conversation:
+        options?.conversation ?? createTestConversationPort(conversations),
+      channels: inbound,
+      deliveryOutbox,
       logger,
       sessionBroadcast: options?.sessionBroadcast ?? vi.fn(),
       sessionActivityBroadcast: options?.sessionActivityBroadcast ?? vi.fn(),
@@ -586,7 +596,6 @@ describe("InboundRouter", () => {
   });
 
   it("does not abandon a durable turn slot before authority delivery fills it", async () => {
-    const { OutboxRegistry } = await import("@zhixing/core");
     const durableTurnExecutor: DurableConversationTurnExecutor = stubDurableTurnExecutor({
       async *run(): AsyncGenerator<AgentYield, RunResult> {
         const assistant: Message = {
@@ -609,14 +618,16 @@ describe("InboundRouter", () => {
         };
       },
     });
-    const { conversations, router } = setup({ durableTurnExecutor });
     const registry = new OutboxRegistry(async () => ({
       success: true,
       retryable: false,
     }));
+    const { conversations, router } = setup({
+      durableTurnExecutor,
+      deliveryOutbox: registry,
+    });
     const outbox = registry.of({ channelId: "test-ch", to: "user-1" });
     const abandon = vi.spyOn(outbox, "abandonSlot");
-    router.setOutboxRegistry(registry);
 
     await router.handleMessage({
       ...dmMessage(),
@@ -671,21 +682,62 @@ describe("InboundRouter", () => {
 
   // ─── Outbox 集成（ADR-007 Phase 1） ───
 
-  it("setOutboxRegistry 是 write-once，重复绑定抛异常", async () => {
-    const { OutboxRegistry } = await import("@zhixing/core");
-    const { router } = setup();
+  it("routes standard replies only through the constructor-owned outbox", async () => {
+    const outboxSend = vi.fn(async () => ({
+      success: true,
+      retryable: false,
+    }));
+    const registry = new OutboxRegistry(outboxSend);
+    const { adapter, router } = setup({ deliveryOutbox: registry });
 
-    const registry1 = new OutboxRegistry(async () => ({ success: true, retryable: false }));
-    const registry2 = new OutboxRegistry(async () => ({ success: true, retryable: false }));
+    await router.handleMessage(dmMessage());
+    await vi.waitFor(() => expect(outboxSend).toHaveBeenCalledOnce());
 
-    router.setOutboxRegistry(registry1);
-    expect(() => router.setOutboxRegistry(registry2)).toThrow(/already bound/);
+    expect(adapter.send).not.toHaveBeenCalled();
+    await registry.dispose();
+  });
+
+  it("always exposes tool commitment through the constructor-owned outbox", async () => {
+    const outboxSend = vi.fn(async () => ({
+      success: true,
+      retryable: false,
+    }));
+    const registry = new OutboxRegistry(outboxSend);
+    const conversation: InboundConversationApplicationPort = {
+      prepareAgentTurn: async () => ({ turnId: "turn-commitment" }),
+      admitAgentTurn: async (input) => {
+        expect(input.turnContext.commitToUser).toBeTypeOf("function");
+        await input.turnContext.commitToUser!({ text: "committed" }, {
+          toolName: "write",
+        });
+        return {
+          status: "not-found",
+          conversationId: input.conversationId,
+          turnId: input.turnIdentity.turnId,
+        };
+      },
+      abort: async () => ({
+        cancelled: false,
+        feedback: { kind: "idle" },
+      }),
+    };
+    const { router } = setup({
+      conversation,
+      deliveryOutbox: registry,
+    });
+
+    await router.handleMessage(dmMessage());
+
+    expect(outboxSend).toHaveBeenCalledWith(
+      { channelId: "test-ch", to: "user-1", threadId: undefined },
+      { text: "committed" },
+    );
+    await registry.dispose();
   });
 
   // ─── Turn Slot 生命周期（ADR-007 Phase 3） ───
 
   it("P3d: runChannelTurn 开头 openSlot，成功回复 fillSlot", async () => {
-    const { OutboxRegistry } = await import("@zhixing/core");
     const events: Array<{ type: string; slotId?: string }> = [];
 
     const registry = new OutboxRegistry(
@@ -703,8 +755,7 @@ describe("InboundRouter", () => {
       },
     );
 
-    const { router } = setup();
-    router.setOutboxRegistry(registry);
+    const { router } = setup({ deliveryOutbox: registry });
 
     await router.handleMessage(dmMessage());
 
@@ -724,7 +775,6 @@ describe("InboundRouter", () => {
   });
 
   it("Issue F: LLM 被 commitment 完全抑制（content 为空）→ 只关 slot，不发空 entry", async () => {
-    const { OutboxRegistry } = await import("@zhixing/core");
     const sendCalls: string[] = [];
     const slotEvents: string[] = [];
 
@@ -772,8 +822,10 @@ describe("InboundRouter", () => {
       dispose: vi.fn(),
     };
 
-    const { router } = setup({ runtime: emptyRuntime });
-    router.setOutboxRegistry(registry);
+    const { router } = setup({
+      runtime: emptyRuntime,
+      deliveryOutbox: registry,
+    });
 
     await router.handleMessage(dmMessage());
 
@@ -832,10 +884,14 @@ describe("InboundRouter", () => {
         onMessage: () => {},
       });
       channels.register(adapter);
+      const inbound = createInboundPort(channels);
 
       const router = new InboundRouter({
         conversation: createTestConversationPort(conversations),
-        channels: createInboundPort(channels),
+        channels: inbound,
+        deliveryOutbox: new OutboxRegistry((target, content) =>
+          inbound.send(target, content),
+        ),
         logger,
         confirmationHub: hub,
         sessionBroadcast: vi.fn(),
@@ -1288,9 +1344,13 @@ describe("InboundRouter", () => {
         onMessage: () => {},
       });
       channels.register(adapter);
+      const inbound = createInboundPort(channels);
       const router = new InboundRouter({
         conversation: createTestConversationPort(conversations),
-        channels: createInboundPort(channels),
+        channels: inbound,
+        deliveryOutbox: new OutboxRegistry((target, content) =>
+          inbound.send(target, content),
+        ),
         logger,
         sessionBroadcast: vi.fn(),
         sessionActivityBroadcast: vi.fn(),

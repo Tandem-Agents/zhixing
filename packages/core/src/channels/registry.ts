@@ -10,6 +10,7 @@ import type {
   HttpHandler,
 } from "./types.js";
 import type { IEventBus } from "../events/index.js";
+import { isChallengeChannel } from "./capabilities.js";
 
 // ─── ChannelRegistry ───
 
@@ -17,8 +18,13 @@ export interface ChannelRegistryOptions {
   eventBus: IEventBus<ChannelEventMap>;
   logger: ChannelLogger;
   onMessage?: (msg: InboundMessage) => void;
-  onChallengeAction?: (action: ChannelChallengeAction) => Promise<void>;
   registerHttpRoute?: (path: string, handler: HttpHandler) => void;
+}
+
+/** Per-connection inbound consumer; supplied only when the physical link opens. */
+interface ChannelConnectionOptions {
+  readonly onMessage?: (msg: InboundMessage) => void;
+  readonly onChallengeAction?: (action: ChannelChallengeAction) => Promise<void>;
 }
 
 export class ChannelRegistry {
@@ -60,9 +66,18 @@ export class ChannelRegistry {
     return [...this.statuses.values()];
   }
 
-  async connect(id: string, config: ChannelConfig): Promise<void> {
+  async connect(
+    id: string,
+    config: ChannelConfig,
+    connection?: ChannelConnectionOptions,
+  ): Promise<void> {
     const adapter = this.adapters.get(id);
     if (!adapter) throw new Error(`Channel adapter not found: ${id}`);
+    if (isChallengeChannel(adapter) && !connection?.onChallengeAction) {
+      throw new Error(
+        `Channel challenge action consumer is required before connection: ${id}`,
+      );
+    }
 
     const status = this.statuses.get(id)!;
     if (status.state === "connected" || status.state === "connecting") return;
@@ -71,7 +86,7 @@ export class ChannelRegistry {
 
     const abortController = new AbortController();
     this.abortControllers.set(id, abortController);
-    const ctx = this.createContext(id, config, abortController.signal);
+    const ctx = this.createContext(id, config, abortController.signal, connection);
 
     try {
       await adapter.connect(ctx);
@@ -118,14 +133,16 @@ export class ChannelRegistry {
     channelId: string,
     config: ChannelConfig,
     abortSignal: AbortSignal,
+    connection?: ChannelConnectionOptions,
   ): ChannelContext {
     const {
       eventBus,
       logger,
-      onMessage,
-      onChallengeAction,
+      onMessage: defaultOnMessage,
       registerHttpRoute,
     } = this.options;
+    const onMessage = connection?.onMessage ?? defaultOnMessage;
+    const onChallengeAction = connection?.onChallengeAction;
     return {
       config,
       abortSignal,
@@ -142,7 +159,12 @@ export class ChannelRegistry {
         this.updateStatus(channelId, "connected", {
           lastMessageAt: new Date().toISOString(),
         });
-        await onChallengeAction?.(action);
+        if (!onChallengeAction) {
+          throw new Error(
+            `Channel challenge action consumer is unavailable: ${channelId}`,
+          );
+        }
+        await onChallengeAction(action);
       },
       registerHttpRoute: registerHttpRoute ?? (() => {
         throw new Error("HTTP route registration not available");

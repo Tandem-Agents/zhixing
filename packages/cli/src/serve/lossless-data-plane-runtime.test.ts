@@ -7,7 +7,10 @@ import type {
   StreamSubscribe,
 } from "@zhixing/core/contracts";
 import { describe, expect, it, vi } from "vitest";
-import { LosslessDataPlaneRuntime } from "./lossless-data-plane-runtime.js";
+import {
+  defineChannelChallengeDeliveryProfile,
+  LosslessDataPlaneRuntime,
+} from "./lossless-data-plane-runtime.js";
 import type { AssignmentDataPlaneTarget } from "./assignment-data-plane-topology.js";
 
 const ref: ExecutionRef = {
@@ -28,6 +31,33 @@ const ticket = {
 } as DataPlaneTicket;
 
 const ASSIGNMENT = "assignment-first-party";
+
+describe("Channel challenge delivery profile", () => {
+  it("freezes one finite available mechanism and rejects disguised partial profiles", () => {
+    const delivery = Object.freeze({
+      supports: vi.fn(() => true),
+      sendChallenge: vi.fn(async () => ({ success: true, retryable: false })),
+    });
+    const profile = defineChannelChallengeDeliveryProfile({
+      kind: "available",
+      delivery,
+    });
+
+    expect(profile).toEqual({ kind: "available", delivery });
+    expect(Object.isFrozen(profile)).toBe(true);
+    expect(Object.isFrozen(profile.kind === "available" && profile.delivery)).toBe(true);
+    expect(() => defineChannelChallengeDeliveryProfile({
+      kind: "available",
+      delivery,
+      lateBinding: true,
+    } as never)).toThrow(/invalid/u);
+    expect(() => defineChannelChallengeDeliveryProfile({
+      kind: "absent",
+      reason: "not-configured",
+      delivery,
+    } as never)).toThrow(/invalid/u);
+  });
+});
 
 describe("LosslessDataPlaneRuntime first-party surface sessions", () => {
   it("rejects a surface principal that does not own the ticket before accepting it", async () => {
@@ -254,6 +284,10 @@ function createRuntime(input: {
     : undefined;
   const runtime = new LosslessDataPlaneRuntime({
     verifier: {} as never,
+    channelChallenges: Object.freeze({
+      kind: "absent",
+      reason: "not-configured",
+    }),
     targets: {
       targetForExecutor: (executorId) => {
         if (executorId === "exec-local") return local;

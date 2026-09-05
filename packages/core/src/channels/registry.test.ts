@@ -124,6 +124,28 @@ describe("ChannelRegistry", () => {
       expect(ctx.abortSignal).toBeInstanceOf(AbortSignal);
     });
 
+    it("refuses a challenge-capable adapter until its action consumer is present", async () => {
+      const adapter = {
+        ...createMockAdapter("challenge"),
+        sendChallenge: vi.fn(async (): Promise<DeliveryResult> => ({
+          success: true,
+          retryable: false,
+        })),
+      };
+      registry.register(adapter);
+
+      await expect(registry.connect("challenge", testConfig)).rejects.toThrow(
+        /challenge action consumer is required/u,
+      );
+      expect(adapter.connect).not.toHaveBeenCalled();
+
+      const onChallengeAction = vi.fn(async () => undefined);
+      await registry.connect("challenge", testConfig, { onChallengeAction });
+      const ctx = (adapter.connect as ReturnType<typeof vi.fn>).mock.calls[0][0] as ChannelContext;
+      await ctx.onChallengeAction({} as never);
+      expect(onChallengeAction).toHaveBeenCalledOnce();
+    });
+
     it("emits channel:connected event", async () => {
       const handler = vi.fn();
       options.eventBus.on("channel:connected", handler);
@@ -216,6 +238,33 @@ describe("ChannelRegistry", () => {
   });
 
   describe("onMessage callback", () => {
+    it("binds the explicit consumer supplied with the physical connection", async () => {
+      const adapter = createMockAdapter("bound-consumer");
+      const connectionConsumer = vi.fn();
+      let capturedCtx: ChannelContext | undefined;
+      (adapter.connect as ReturnType<typeof vi.fn>).mockImplementation(
+        async (ctx: ChannelContext) => {
+          capturedCtx = ctx;
+        },
+      );
+
+      registry.register(adapter);
+      await registry.connect("bound-consumer", testConfig, {
+        onMessage: connectionConsumer,
+      });
+      const msg: InboundMessage = {
+        from: "user-1",
+        text: "hello",
+        channelId: "bound-consumer",
+        chatType: "dm",
+      };
+
+      capturedCtx!.onMessage(msg);
+
+      expect(connectionConsumer).toHaveBeenCalledWith(msg);
+      expect(options.onMessage).not.toHaveBeenCalled();
+    });
+
     it("routes inbound messages through the context callback", async () => {
       const adapter = createMockAdapter("msg-test");
       let capturedCtx: ChannelContext | undefined;

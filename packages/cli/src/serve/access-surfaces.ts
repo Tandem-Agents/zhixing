@@ -40,7 +40,10 @@ import {
 import {
   type ChannelCredentialProjection,
 } from "@zhixing/providers";
-import { setupChannels } from "./channels.js";
+import {
+  createInboundChannelRouter,
+  setupChannels,
+} from "./channels.js";
 import { ChannelConversationProductBinding } from "./channel-conversation-product-binding.js";
 import {
   ExecutionStatusHub,
@@ -70,6 +73,7 @@ import {
 } from "./conversation-executor-dispatch.js";
 import type {
   AccessSurface,
+  AssemblyContext,
   AssemblyUnit,
   CoreAssemblyUnit,
 } from "./access-surface.js";
@@ -406,8 +410,8 @@ const advancementEvidenceTopologyUnit: CoreAssemblyUnit = {
 /**
  * S6 无损数据面唯一产品组合根。
  *
- * 该接入面先于渠道装配完成：conversation 协议、executor 端点、mesh adapter 和
- * challenge 回调必须在渠道开始接收消息前形成闭环，避免新旧确认路径半启用。
+ * Channel mechanism 先以显式 available/absent profile 完成；随后 conversation
+ * 协议、executor 端点、mesh adapter 与 challenge effect 一次性形成闭环。
  */
 const losslessDataPlaneSurface: AccessSurface = {
   name: "lossless-data-plane",
@@ -419,6 +423,13 @@ const losslessDataPlaneSurface: AccessSurface = {
         "Lossless data plane requires authority, conversation, and job-status runtimes",
       );
     }
+    const channelMechanism = ctx.channelMechanism;
+    if (!channelMechanism) {
+      throw new Error("Lossless data plane requires a selected Channel mechanism");
+    }
+    const channelChallenges = channelMechanism.kind === "available"
+      ? { kind: "available" as const, delivery: channelMechanism.channels.challenges }
+      : { kind: "absent" as const, reason: channelMechanism.reason };
     const composition = createLosslessDataPlaneComposition({
       verifier: ctx.authorityRuntime.verifier,
       targets: new AssignmentDataPlaneTopologyAdapter({
@@ -444,7 +455,8 @@ const losslessDataPlaneSurface: AccessSurface = {
         ? { jobRelayObligations: ctx.jobRelayObligations }
         : {}),
       protocol: ctx.conversationProtocol,
-      channelChallenges: () => ctx.channelChallenges,
+      channelChallenges,
+      isCurrentOwner: () => isCurrentChannelOwner(ctx),
       jobStatus: ctx.jobStatus,
       onDataPlaneError: (error) =>
         console.warn(chalk.yellow(`[data-plane] ${error.message}`)),
@@ -456,6 +468,7 @@ const losslessDataPlaneSurface: AccessSurface = {
     );
     ctx.losslessDataPlane = composition.runtime;
     ctx.channelCoordinator = composition.coordinator;
+    ctx.channelChallengeAction = composition.onChallengeAction;
     ctx.jobRelayObligations = composition.jobRelayObligations;
   },
 };
@@ -1058,7 +1071,27 @@ const executorJobOwnerStartUnit: CoreAssemblyUnit = {
   },
 };
 
-/** 社交通道 —— 先装稳定门面，外部连接异步进入状态机；setup 失败非致命。 */
+const channelLogger = Object.freeze({
+  debug: (msg: string, ...args: unknown[]) =>
+    console.log(chalk.dim(`[channel] ${msg}`), ...args),
+  info: (msg: string, ...args: unknown[]) =>
+    console.log(chalk.dim(`[channel] ${msg}`), ...args),
+  warn: (msg: string, ...args: unknown[]) =>
+    console.warn(chalk.yellow(`[channel] ${msg}`), ...args),
+  error: (msg: string, ...args: unknown[]) =>
+    console.error(chalk.red(`[channel] ${msg}`), ...args),
+});
+
+function isCurrentChannelOwner(ctx: AssemblyContext): boolean {
+  if (ctx.meshBootstrap.mode === "single-machine") return true;
+  const currentDeviceId = ctx.meshRuntime?.currentAnchorDeviceId() ??
+    ctx.meshBootstrap.trust.issuer.deviceId;
+  const ready = ctx.meshRuntime?.plannedCurrentOwnerReady() ??
+    ctx.meshBootstrap.plannedAnchorPostInstall === undefined;
+  return currentDeviceId === ctx.meshBootstrap.deviceKey.deviceId && ready;
+}
+
+/** 社交通道 —— 只装稳定机制；inbound consumer 与物理连接等待 Delivery Outbox。 */
 function createChannelSurface(credentials: ChannelCredentialProjection): AccessSurface {
   return {
     name: "channel",
@@ -1067,38 +1100,20 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
       const {
         conversations,
         channelConfiguration,
-        losslessDataPlane,
       } = ctx;
       if (
-        !conversations ||
         !channelConfiguration.messaging ||
         Object.keys(channelConfiguration.messaging).length === 0
       ) {
+        ctx.channelMechanism = Object.freeze({
+          kind: "absent",
+          reason: "not-configured",
+        });
         return;
       }
-      if (!losslessDataPlane) {
-        throw new Error(
-          "Channel setup requires the complete S6 lossless data plane",
-        );
+      if (!conversations) {
+        throw new Error("Configured Channel requires Conversation application");
       }
-      const channelLogger = {
-        debug: (msg: string, ...args: unknown[]) =>
-          console.log(chalk.dim(`[channel] ${msg}`), ...args),
-        info: (msg: string, ...args: unknown[]) =>
-          console.log(chalk.dim(`[channel] ${msg}`), ...args),
-        warn: (msg: string, ...args: unknown[]) =>
-          console.warn(chalk.yellow(`[channel] ${msg}`), ...args),
-        error: (msg: string, ...args: unknown[]) =>
-          console.error(chalk.red(`[channel] ${msg}`), ...args),
-      };
-      const isCurrentChannelOwner = () => {
-        if (ctx.meshBootstrap.mode === "single-machine") return true;
-        const currentDeviceId = ctx.meshRuntime?.currentAnchorDeviceId() ??
-          ctx.meshBootstrap.trust.issuer.deviceId;
-        const ready = ctx.meshRuntime?.plannedCurrentOwnerReady() ??
-          ctx.meshBootstrap.plannedAnchorPostInstall === undefined;
-        return currentDeviceId === ctx.meshBootstrap.deviceKey.deviceId && ready;
-      };
       try {
         const conversationProduct = new ChannelConversationProductBinding(
           conversations,
@@ -1106,62 +1121,30 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
         const result = await setupChannels({
           entries: channelConfiguration.messaging,
           credentials,
-          conversation: conversationProduct,
           logger: channelLogger,
-          cancelKeywords: channelConfiguration.intent?.cancelKeywords,
-          sessionBroadcast: ctx.sessionBroadcast,
-          sessionActivityBroadcast: ctx.sessionActivityBroadcast,
-          // callback 可等待:耐久裁决完成才向平台确认;失败上抛让平台重投,
-          // 耐久层同键幂等保证重投只回放原结果——绝不 fire-and-forget。
-          onChallengeAction: (action) => {
-            const coordinator = ctx.channelCoordinator;
-            if (!coordinator) {
-              return Promise.reject(
-                new Error("Channel interaction coordinator is not assembled"),
-              );
-            }
-            return coordinator.handleChallengeAction(action);
-          },
           registerHttpRoute: (path, handler) => {
             if (ctx.channelHttpRoutes.has(path)) {
               throw new Error(`Channel HTTP route already registered: ${path}`);
             }
             ctx.channelHttpRoutes.set(path, handler);
           },
-          isCurrentOwner: isCurrentChannelOwner,
-          connectImmediately: false,
         });
         ctx.lifecycleContributions.acquire("channels.dispose", async () => {
           conversationProduct.close();
           await result.dispose();
         });
-        losslessDataPlane.bindChannelChallenges(result.challenges);
         ctx.channelStatuses = result.statusSnapshot;
         ctx.channelDelivery = result.delivery;
-        ctx.channelChallenges = result.challenges;
-        const router = result.router;
-        ctx.inboundRouter = router;
         ctx.channelConversationProduct = conversationProduct;
-        if (router) {
-          ctx.lifecycleContributions.acquire(
-            "inboundRouter.refuseNew",
-            () => router.refuseNewMessages(),
-          );
-        }
-        router?.refuseNewMessages();
-        ctx.channelConnections = {
-          ready: result.connectionTask,
-          connectConfigured: result.connectConfigured,
-          disconnectConfigured: result.disconnectConfigured,
-          suspendConfigured: result.suspendConfigured,
-          resumeConfigured: result.resumeConfigured,
-        };
-        // 渠道在场后恢复耐久开放义务(job relay 会话按权威日志重建;
-        // conversation 义务由协议恢复循环幂等重开)。
-        if (!ctx.startupLifecycle || ctx.startupLifecycle.recoverAcceptedWork) {
-          await ctx.channelCoordinator?.recover();
-        }
+        ctx.channelMechanism = Object.freeze({
+          kind: "available",
+          channels: result,
+        });
       } catch (err) {
+        ctx.channelMechanism = Object.freeze({
+          kind: "absent",
+          reason: "setup-failed",
+        });
         console.warn(
           chalk.yellow(
             `[channel] Setup failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
@@ -1172,13 +1155,55 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
   };
 }
 
-/** 投递栈 —— 依赖通道；late-bind Outbox 到 inboundRouter。 */
+/** Recover durable Channel obligations only after S6 and the job owner both exist. */
+const channelInteractionRecoveryUnit: CoreAssemblyUnit = {
+  name: "channel-interaction-recovery",
+  phase: "pre-server",
+  kind: "core",
+  async setup(ctx) {
+    if (!ctx.enabledRoles.includes("anchor")) return;
+    const mechanism = ctx.channelMechanism;
+    const coordinator = ctx.channelCoordinator;
+    if (!mechanism || !coordinator) {
+      throw new Error("Channel interaction recovery requires the complete S6 graph");
+    }
+    if (
+      mechanism.kind === "available" &&
+      (!ctx.startupLifecycle || ctx.startupLifecycle.recoverAcceptedWork)
+    ) {
+      await coordinator.recover();
+    }
+  },
+};
+
+/** 投递栈 —— 取得唯一 Outbox 后才构造、发布并连接 inbound router。 */
 const deliverySurface: AccessSurface = {
   name: "delivery",
   phase: "pre-server",
   async setup(ctx) {
-    const { channelDelivery, channelConfiguration, zhixingHome } = ctx;
-    if (!channelDelivery || !channelConfiguration.messaging) return;
+    const {
+      channelDelivery,
+      channelConfiguration,
+      channelConversationProduct,
+      channelChallengeAction,
+      conversations,
+      channelMechanism,
+      zhixingHome,
+    } = ctx;
+    if (!channelConfiguration.messaging) return;
+    if (!channelMechanism) {
+      throw new Error("Delivery requires a selected Channel mechanism");
+    }
+    if (channelMechanism.kind === "absent") return;
+    const preparedChannels = channelMechanism.channels;
+    if (
+      !channelDelivery ||
+      !channelConversationProduct ||
+      !channelChallengeAction ||
+      !conversations
+    ) {
+      throw new Error("Delivery requires the complete prepared Channel surface");
+    }
     if (!ctx.authorityRuntime) {
       throw new Error("Delivery requires the durable authority runtime");
     }
@@ -1197,7 +1222,6 @@ const deliverySurface: AccessSurface = {
       "deliveryStack.stop",
       deliveryStack.startupCleanup,
     );
-    ctx.deliveryStack = deliveryStack;
     if (ctx.startupLifecycle) {
       await deliveryStack.lifecycle.restore(ctx.startupLifecycle.delivery);
     }
@@ -1208,9 +1232,42 @@ const deliverySurface: AccessSurface = {
     ctx.conversationProtocol?.bindDeliveryDrain(() =>
       deliveryStack.flush(),
     );
-    if (ctx.inboundRouter) {
-      ctx.inboundRouter.setOutboxRegistry(deliveryStack.outboxRegistry);
-    }
+    const router = createInboundChannelRouter({
+      conversation: channelConversationProduct,
+      channels: preparedChannels.inbound,
+      deliveryOutbox: deliveryStack.outboxRegistry,
+      logger: channelLogger,
+      confirmationHub: ctx.confirmationHub,
+      cancelKeywords: channelConfiguration.intent?.cancelKeywords,
+      sessionBroadcast: ctx.sessionBroadcast,
+      sessionActivityBroadcast: ctx.sessionActivityBroadcast,
+      isCurrentOwner: () => isCurrentChannelOwner(ctx),
+    });
+    ctx.lifecycleContributions.acquire(
+      "inboundRouter.refuseNew",
+      () => router.refuseNewMessages(),
+    );
+    router.refuseNewMessages();
+    const inbound = Object.freeze({
+      kind: "router" as const,
+      handleMessage: (message: import("@zhixing/core").InboundMessage) =>
+        router.handleMessage(message),
+    });
+    const consumers = Object.freeze({
+      inbound,
+      // 完整 S6 composition 在发布 protocol consumer 前已冻结此 callback。
+      onChallengeAction: channelChallengeAction,
+    });
+    ctx.deliveryStack = deliveryStack;
+    ctx.inboundRouter = router;
+    ctx.channelConnections = Object.freeze({
+      ready: Promise.resolve(),
+      connectConfigured: () => preparedChannels.connectConfigured(consumers),
+      disconnectConfigured: () => preparedChannels.disconnectConfigured(),
+      suspendConfigured: () => preparedChannels.suspendConfigured(),
+      resumeConfigured: () => preparedChannels.resumeConfigured(consumers),
+    });
+    delete ctx.channelMechanism;
   },
 };
 
@@ -1268,9 +1325,10 @@ export function createAssemblyUnits(
     assetMaintenanceSurface,
     createMeshSurface(),
     advancementEvidenceTopologyUnit,
+    createChannelSurface(channelCredentials),
     losslessDataPlaneSurface,
     executorJobOwnerStartUnit,
-    createChannelSurface(channelCredentials),
+    channelInteractionRecoveryUnit,
     deliverySurface,
     confirmationBridgeSurface,
     conversationRecoverySurface,

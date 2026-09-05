@@ -193,7 +193,21 @@ describe("production startup server ownership", () => {
     expect(surfaces).not.toContain("bindAuthorityCheckpointOwner");
     expect(surfaces.match(/await mesh\.start\(/gu)).toHaveLength(1);
     expect(surfaces).toContain("await mesh.start(options)");
-    expect(surfaces).toContain("connectImmediately: false");
+    expect(surfaces).toContain("ctx.channelMechanism = Object.freeze({");
+    expect(surfaces).not.toContain("bindChannelChallenges");
+    expect(surfaces).not.toContain("ctx.channelChallenges");
+    expect(surfaces).toContain("onChallengeAction: channelChallengeAction");
+    const channelPreparation = surfaces.lastIndexOf(
+      "createChannelSurface(channelCredentials),",
+    );
+    const losslessComposition = surfaces.lastIndexOf("losslessDataPlaneSurface,");
+    const jobOwnerRecovery = surfaces.lastIndexOf("executorJobOwnerStartUnit,");
+    const interactionRecovery = surfaces.lastIndexOf(
+      "channelInteractionRecoveryUnit,",
+    );
+    expect(channelPreparation).toBeLessThan(losslessComposition);
+    expect(losslessComposition).toBeLessThan(jobOwnerRecovery);
+    expect(jobOwnerRecovery).toBeLessThan(interactionRecovery);
     for (const finiteAbsence of [
       "ctx.inboundRouter === undefined || ctx.inboundRouter === null",
       "ctx.executorJobOwner === undefined",
@@ -396,8 +410,32 @@ describe("production startup server ownership", () => {
       .toBeGreaterThan(location(surfaces, "const evidenceHandler = new ExecutorEvidenceHandler({"));
     expect(location(surfaces, '"execution.abortAllAndWait",'))
       .toBeGreaterThan(location(surfaces, "manager = new ConversationManager("));
-    expect(location(surfaces, '"inboundRouter.refuseNew",'))
-      .toBeGreaterThan(location(surfaces, "const router = result.router;"));
+    const deliverySetup = location(
+      surfaces,
+      "const deliveryStack = await setupDelivery({",
+    );
+    const routerConstruction = location(
+      surfaces,
+      "const router = createInboundChannelRouter({",
+    );
+    const routerContribution = location(
+      surfaces,
+      '"inboundRouter.refuseNew",',
+    );
+    const connectionPublication = location(
+      surfaces,
+      "ctx.channelConnections = Object.freeze({",
+    );
+    expect(routerConstruction).toBeGreaterThan(deliverySetup);
+    expect(surfaces).toContain(
+      "deliveryOutbox: deliveryStack.outboxRegistry",
+    );
+    expect(routerContribution).toBeGreaterThan(routerConstruction);
+    expect(connectionPublication).toBeGreaterThan(routerContribution);
+    expect(surfaces).toContain(
+      "preparedChannels.connectConfigured(consumers)",
+    );
+    expect(surfaces).not.toContain("setOutboxRegistry");
     expect(location(surfaces, '"confirmationBridge.dispose",'))
       .toBeGreaterThan(location(surfaces, "const confirmationBridge = createConfirmationBridge({"));
     expect(location(surfaces, '"conversationProtocol.stopRecovery",'))

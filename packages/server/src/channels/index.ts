@@ -4,6 +4,7 @@ export {
   type InboundChannelPort,
   type InboundConversationApplicationPort,
   type InboundConversationTurnOutcome,
+  type InboundDeliveryOutboxPort,
   type InboundRouterOptions,
 } from "./inbound-router.js";
 export { formatAbortReasonZh } from "./abort-formatter-zh.js";

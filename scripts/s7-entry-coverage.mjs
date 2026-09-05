@@ -705,6 +705,11 @@ export function inspectChannelRuntimeBoundary(records) {
   const byPath = new Map(records.map((record) => [record.relative, record.text]));
   const channels = byPath.get("packages/cli/src/serve/channels.ts");
   const access = byPath.get("packages/cli/src/serve/access-surfaces.ts");
+  const assemblyContext = byPath.get("packages/cli/src/serve/access-surface.ts");
+  const registry = byPath.get("packages/core/src/channels/registry.ts");
+  const composition = byPath.get(
+    "packages/cli/src/serve/lossless-data-plane-composition.ts",
+  );
   const binding = byPath.get(
     "packages/cli/src/serve/channel-conversation-product-binding.ts",
   );
@@ -727,7 +732,8 @@ export function inspectChannelRuntimeBoundary(records) {
   const coordinator = byPath.get("packages/cli/src/serve/channel-interaction-coordinator.ts");
   const setupDelivery = byPath.get("packages/cli/src/setup-delivery.ts");
   if (
-    !channels || !access || !binding || !command || !conversationApplication ||
+    !channels || !access || !assemblyContext || !registry || !composition ||
+    !binding || !command || !conversationApplication ||
     !admission || !runControl || !context || !server || !inbound ||
     !confirmation || !delivery || !lossless || !coordinator || !setupDelivery
   ) {
@@ -737,16 +743,45 @@ export function inspectChannelRuntimeBoundary(records) {
   const resultContract = channels.match(
     /export interface SetupChannelsResult\s*\{([\s\S]*?)\n\}/u,
   )?.[1] ?? "";
-  const returnedResult = channels.match(
-    /\n  return \{\n    router,([\s\S]*?)\n  \};\n\}/u,
+  const routerOptions = inbound.match(
+    /export interface InboundRouterOptions\s*\{([\s\S]*?)\n\}/u,
   )?.[1] ?? "";
+  const emitReply = inbound.slice(
+    inbound.indexOf("private async emitReply("),
+    inbound.indexOf("  refuseNewMessages(): void"),
+  );
+  const routerConstruction = access.indexOf("const router = createInboundChannelRouter({");
+  const deliveryConstruction = access.indexOf("const deliveryStack = await setupDelivery({");
+  const routerContribution = access.indexOf(
+    '"inboundRouter.refuseNew",',
+    routerConstruction,
+  );
+  const connectionPublication = access.indexOf(
+    "ctx.channelConnections = Object.freeze({",
+    routerContribution,
+  );
+  const assemblyOrder = access.slice(
+    access.indexOf("export function createAssemblyUnits("),
+    access.indexOf("function usageReporterContext("),
+  );
+  const channelPreparation = assemblyOrder.indexOf(
+    "createChannelSurface(channelCredentials)",
+  );
+  const losslessComposition = assemblyOrder.indexOf("losslessDataPlaneSurface");
+  const jobOwnerRecovery = assemblyOrder.indexOf("executorJobOwnerStartUnit");
+  const interactionRecovery = assemblyOrder.indexOf("channelInteractionRecoveryUnit");
+  const deliveryAssembly = assemblyOrder.indexOf("deliverySurface");
+  const challengeCallback = composition.indexOf("const onChallengeAction = Object.freeze(");
+  const protocolPublication = composition.indexOf(
+    "options.protocol.bindLosslessDataPlane(coordinator)",
+  );
   if (
     count(channels, "new ChannelRegistry({") !== 1 ||
     count(channels, 'import("@zhixing/channel-feishu")') !== 1 ||
     !channels.includes("satisfies ChannelDeliveryEffectSource") ||
     count(channels, "const inbound = Object.freeze({") !== 1 ||
     count(channels, "satisfies InboundChannelPort") !== 1 ||
-    count(channels, "channels: inbound") !== 1 ||
+    count(channels, "channels: options.channels") !== 1 ||
     !channels.includes("satisfies ChannelChallengeDeliveryPort") ||
     !channels.includes("statusSnapshot") ||
     !channels.includes("dispose: () => registry.dispose()") ||
@@ -756,11 +791,19 @@ export function inspectChannelRuntimeBoundary(records) {
     failures.push("channel registry, adapter factory or finite Host port assembly drifted");
   }
   if (
-    /\b(?:readonly\s+)?inbound\s*:/u.test(resultContract) ||
+    count(resultContract, "readonly inbound: InboundChannelPort;") !== 1 ||
+    !/connectConfigured\(consumers:\s*ConfiguredChannelConsumers\)/u.test(resultContract) ||
+    !/resumeConfigured\(consumers:\s*ConfiguredChannelConsumers\)/u.test(resultContract) ||
     /\b(?:ChannelRegistry|ChannelAdapter)\b/u.test(resultContract) ||
-    /^\s*inbound,\s*$/mu.test(returnedResult)
+    /\brouter\s*:/u.test(resultContract) ||
+    !channels.includes("export type ConfiguredChannelInbound =") ||
+    !channels.includes('Readonly<{ kind: "absent"; reason: "outbound-only" }>') ||
+    !channels.includes("export interface ConfiguredChannelConsumers") ||
+    !channels.includes(
+      "readonly onChallengeAction: (action: ChannelChallengeAction) => Promise<void>",
+    )
   ) {
-    failures.push("SetupChannelsResult exposes an unconsumed Channel capability");
+    failures.push("configured Channel inbound connection contract drifted");
   }
   const concreteForbidden = records.filter((record) =>
     record.relative !== "packages/cli/src/serve/channels.ts" &&
@@ -774,8 +817,11 @@ export function inspectChannelRuntimeBoundary(records) {
   if (
     !access.includes("ctx.channelStatuses = result.statusSnapshot") ||
     !access.includes("ctx.channelDelivery = result.delivery") ||
-    !access.includes("ctx.channelChallenges = result.challenges") ||
-    !access.includes("losslessDataPlane.bindChannelChallenges(result.challenges)") ||
+    count(access, "ctx.channelMechanism = Object.freeze({") !== 3 ||
+    !assemblyContext.includes("channelMechanism?: PreparedChannelMechanism") ||
+    /channelChallenges\??:/u.test(assemblyContext) ||
+    access.includes("ctx.channelChallenges") ||
+    access.includes("bindChannelChallenges") ||
     access.includes("result.registry") ||
     !setupDelivery.includes("channels: ChannelDeliveryEffectSource") ||
     setupDelivery.includes("ChannelRegistry")
@@ -797,6 +843,13 @@ export function inspectChannelRuntimeBoundary(records) {
     !delivery.includes("export interface ChannelDeliveryEffectSource") ||
     delivery.includes("ChannelAdapter") ||
     !lossless.includes("export interface ChannelChallengeDeliveryPort") ||
+    !lossless.includes("export type ChannelChallengeDeliveryProfile") ||
+    !lossless.includes("readonly #channelChallenges: ChannelChallengeDeliveryProfile") ||
+    !lossless.includes("defineChannelChallengeDeliveryProfile(") ||
+    lossless.includes("bindChannelChallenges") ||
+    /#channelChallenges:\s*ChannelChallengeDeliveryPort\s*\|\s*undefined/u.test(lossless) ||
+    /channelChallenges:\s*\(\)\s*=>/u.test(composition) ||
+    /channelChallenges:\s*\(\)\s*=>/u.test(coordinator) ||
     lossless.includes("ChannelRegistry") ||
     lossless.includes("isChallengeChannel") ||
     coordinator.includes("ChannelRegistry") ||
@@ -812,13 +865,60 @@ export function inspectChannelRuntimeBoundary(records) {
     /ConversationManager|ManagedSession|projectSessionTurn|usesDurableTurnProtocol|admitDurableTurn|cancelDurableRuns|durableControlPrincipal|\.setBusy\(/u.test(
       inbound,
     ) ||
-    !channels.includes("conversation?: InboundConversationApplicationPort") ||
-    !channels.includes("      conversation,") ||
+    !channels.includes("readonly conversation: InboundConversationApplicationPort") ||
+    !channels.includes("conversation: options.conversation") ||
     /ConversationManager|ManagedSession|conversations:/u.test(channels)
   ) {
     failures.push(
       "Channel Surface bypasses the finite Conversation application boundary",
     );
+  }
+  if (
+    !inbound.includes("export interface InboundDeliveryOutboxPort") ||
+    count(routerOptions, "readonly deliveryOutbox: InboundDeliveryOutboxPort;") !== 1 ||
+    inbound.includes("deliveryOutbox?:") ||
+    inbound.includes("setOutboxRegistry") ||
+    inbound.includes("OutboxRegistry") ||
+    !inbound.includes("this.deliveryOutbox = options.deliveryOutbox") ||
+    !emitReply.includes("const outbox = this.deliveryOutbox.of(target)") ||
+    emitReply.includes("this.channels.send(") ||
+    !inbound.includes("commitToUser: (content: OutboundContent") ||
+    !inbound.includes("deliveryOutbox.of(replyTarget).post({") ||
+    !channels.includes("readonly deliveryOutbox: InboundDeliveryOutboxPort") ||
+    !channels.includes("deliveryOutbox: options.deliveryOutbox") ||
+    deliveryConstruction < 0 || routerConstruction <= deliveryConstruction ||
+    routerContribution <= routerConstruction ||
+    connectionPublication <= routerContribution ||
+    !access.includes("deliveryOutbox: deliveryStack.outboxRegistry") ||
+    !access.includes("preparedChannels.connectConfigured(consumers)") ||
+    !access.includes("preparedChannels.resumeConfigured(consumers)") ||
+    access.includes("setOutboxRegistry") ||
+    channels.includes("connectImmediately") ||
+    count(channels, "registry.connect(") !== 1
+  ) {
+    failures.push("Channel Delivery Outbox static construction boundary drifted");
+  }
+  if (
+    channelPreparation < 0 || losslessComposition <= channelPreparation ||
+    jobOwnerRecovery <= losslessComposition || interactionRecovery <= jobOwnerRecovery ||
+    deliveryAssembly <= interactionRecovery ||
+    !access.includes('reason: "not-configured"') ||
+    !access.includes('reason: "setup-failed"') ||
+    !access.includes("await coordinator.recover()") ||
+    access.includes("await ctx.channelCoordinator?.recover()") ||
+    !registry.includes("isChallengeChannel(adapter) && !connection?.onChallengeAction") ||
+    registry.includes("onChallengeAction?: (action: ChannelChallengeAction)") === false ||
+    !channels.includes("onChallengeAction,") ||
+    challengeCallback < 0 || protocolPublication <= challengeCallback ||
+    !composition.includes("if (!options.isCurrentOwner())") ||
+    !composition.includes("await coordinator.handleChallengeAction(action)") ||
+    !assemblyContext.includes(
+      'channelChallengeAction?: LosslessDataPlaneComposition["onChallengeAction"]',
+    ) ||
+    !access.includes("onChallengeAction: channelChallengeAction") ||
+    access.includes("await coordinator.handleChallengeAction(action)")
+  ) {
+    failures.push("signed Channel challenge static composition or physical callback drifted");
   }
   if (
     count(binding, "export class ChannelConversationProductBinding") !== 1 ||
@@ -831,7 +931,7 @@ export function inspectChannelRuntimeBoundary(records) {
     !binding.includes("close(): void") ||
     /\.admitTurn\(|\.admitDurableTurn\(|\.cancelDurableRuns\(/u.test(binding) ||
     count(access, "new ChannelConversationProductBinding(") !== 1 ||
-    !access.includes("conversation: conversationProduct") ||
+    !access.includes("conversation: channelConversationProduct") ||
     !access.includes("conversationProduct.close()") ||
     count(command, "ctx.channelConversationProduct?.bind(productApi)") !== 1
   ) {
@@ -9269,7 +9369,6 @@ export function inspectDeviceLifecycleAssembly(records) {
     access.includes("ctx.meshRuntime = mesh;") ||
     count(access, "await mesh.start(") !== 1 ||
     !access.includes("await mesh.start(options)") ||
-    !access.includes("connectImmediately: false") ||
     executorContribution < 0 || executorContribution >= executorMesh ||
     executorLocalOwnerStart <= executorMesh ||
     executorJobOwnerStart <= executorLocalOwnerStart ||
@@ -9449,7 +9548,9 @@ export function inspectManagedHostAssembly(records) {
     "await ctx.executorDataPlane.start()",
     managerConstruction,
   );
-  const inboundConstruction = accessSurfaces.indexOf("const router = result.router;");
+  const inboundConstruction = accessSurfaces.indexOf(
+    "const router = createInboundChannelRouter({",
+  );
   const inboundContribution = accessSurfaces.indexOf(
     '"inboundRouter.refuseNew",',
     inboundConstruction,
@@ -9519,7 +9620,7 @@ export function inspectManagedHostAssembly(records) {
     managerConstruction < 0 || executionContribution <= managerConstruction ||
     managerFirstEffect < 0 || executionContribution >= managerFirstEffect ||
     inboundConstruction < 0 || inboundContribution <= inboundConstruction ||
-    inboundContribution >= inboundFirstAwait ||
+    (inboundFirstAwait >= 0 && inboundContribution >= inboundFirstAwait) ||
     confirmationConstruction < 0 || confirmationContribution <= confirmationConstruction ||
     recoveryContribution <= confirmationContribution || recoveryStart <= recoveryContribution ||
     count(assemblyLifecycle, "transferExactTo(") !== 1 ||
@@ -9545,7 +9646,8 @@ export function inspectManagedHostAssembly(records) {
     accessSurfaces.includes("() => ctx.sessionBroadcast") ||
     channelSetup.includes("() => SessionBroadcast") ||
     channelSetup.includes("() => SessionActivityBroadcast") ||
-    !channelSetup.includes("Inbound channel routing requires the Host session broadcast ports") ||
+    !channelSetup.includes("sessionBroadcast: options.sessionBroadcast") ||
+    !channelSetup.includes("sessionActivityBroadcast: options.sessionActivityBroadcast") ||
     inboundRouter.includes("() => SessionBroadcast") ||
     inboundRouter.includes("() => SessionActivityBroadcast") ||
     !inboundRouter.includes("sessionBroadcast: SessionBroadcast;") ||
@@ -11820,15 +11922,15 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     failures.push("planned anchor source quiesce or installed consumer read-back order drifted");
   }
   if (
-    count(accessRoot, "isCurrentOwner: isCurrentChannelOwner") !== 1 ||
-    count(accessRoot, "connectImmediately: false") !== 1 ||
+    count(accessRoot, "isCurrentOwner: () => isCurrentChannelOwner(ctx)") !== 2 ||
+    accessRoot.includes("if (!isCurrentChannelOwner(ctx))") ||
     !command.includes("await channel.connectConfigured()") ||
-    count(accessRoot, "connectConfigured: result.connectConfigured") !== 1 ||
-    count(accessRoot, "disconnectConfigured: result.disconnectConfigured") !== 1 ||
-    count(channels, "isCurrentOwner,") !== 2 ||
-    count(channels, "connectImmediately = true") !== 1 ||
-    count(channels, "if (isCurrentOwner?.() === false)") !== 1 ||
-    count(channels, "onChallengeAction: currentOwnerChallengeAction") !== 1 ||
+    count(accessRoot, "preparedChannels.connectConfigured(consumers)") !== 1 ||
+    count(accessRoot, "preparedChannels.disconnectConfigured()") !== 1 ||
+    count(channels, "isCurrentOwner,") !== 1 ||
+    channels.includes("connectImmediately") ||
+    channels.includes("if (isCurrentOwner?.() === false)") ||
+    !channels.includes("onChallengeAction,") ||
     count(channels, "connectConfigured,") !== 2 ||
     count(channels, "disconnectConfigured,") !== 1 ||
     count(inboundRouter, "if (!this.isCurrentOwner())") !== 1 ||
@@ -12471,7 +12573,7 @@ export function inspectAdvancementEvidenceTopologyBoundary(records) {
     !context.includes("readonly advancementEvidenceRuntime: AdvancementEvidenceHostBindingPort") ||
     count(access, "ctx.advancementEvidenceRuntime.bind({") !== 1 ||
     count(access, "new AdvancementEvidenceTopologyAdapter({") !== 1 ||
-    !/createMeshSurface\(\),\r?\n\s+advancementEvidenceTopologyUnit,\r?\n\s+losslessDataPlaneSurface/u.test(
+    !/createMeshSurface\(\),\r?\n\s+advancementEvidenceTopologyUnit,\r?\n\s+createChannelSurface\(channelCredentials\),\r?\n\s+losslessDataPlaneSurface/u.test(
       access,
     ) ||
     count(localOwner, "new AdvancementEvidenceTopologyAdapter({") !== 1

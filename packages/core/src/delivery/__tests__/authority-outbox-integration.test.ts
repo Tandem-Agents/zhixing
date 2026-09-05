@@ -27,8 +27,8 @@ async function integrationHarness(
     baseRetryDelayMs: 1_000,
   });
   const effect = createChannelDeliveryEffect({
-    get: () => ({ send }),
-    getStatus: () => ({ state: "connected" }),
+    status: () => "connected",
+    send,
   }, {
     onEvent: (event) => events.push(event),
     sendTimeoutMs: 0,

@@ -6,7 +6,6 @@ import {
   type EmissionSource,
   type InboundMessage,
   type OutboundContent,
-  type OutboxRegistry,
   type TurnContext,
   extractText,
   isFreeTextDeny,
@@ -62,6 +61,27 @@ export interface InboundChannelPort {
     target: DeliveryTarget,
     content: OutboundContent,
   ): Promise<DeliveryResult>;
+}
+
+type InboundDeliveryOutboxEntry = Readonly<{
+  target: DeliveryTarget;
+  content: OutboundContent;
+  source: EmissionSource;
+}>;
+
+interface InboundDeliveryOutbox {
+  post(input: InboundDeliveryOutboxEntry): Promise<DeliveryResult>;
+  openSlot(input: Readonly<{ slotId: string }>): void;
+  fillSlot(
+    slotId: string,
+    input?: InboundDeliveryOutboxEntry,
+  ): Promise<DeliveryResult | void>;
+  abandonSlot(slotId: string, reason: string): void;
+}
+
+/** Delivery-owned ordering capability required by every inbound router. */
+export interface InboundDeliveryOutboxPort {
+  of(target: DeliveryTarget): InboundDeliveryOutbox;
 }
 
 export type InboundConversationTurnOutcome =
@@ -125,11 +145,8 @@ export interface InboundRouterOptions {
   logger: ChannelLogger;
   /** Final side-effect gate for channel callbacks racing a current-owner switch. */
   isCurrentOwner?: () => boolean;
-  /**
-   * 可选 Outbox 顺序层。提供时，所有发往用户的回复经 Outbox.post 串行化；
-   * 未提供时降级为直接 adapter.send（测试/尚未接入 Outbox 的场景）。
-   */
-  outboxRegistry?: OutboxRegistry;
+  /** Required Delivery ordering and turn-commitment boundary. */
+  readonly deliveryOutbox: InboundDeliveryOutboxPort;
   /**
    * 可选 ConfirmationHub —— 提供时，handleMessage 会在 enqueue 之前检查当前
    * 会话是否有 pending confirmation。有则按词集匹配规则解决（不占队列位、不触发
@@ -165,7 +182,7 @@ export class InboundRouter {
   private readonly channels: InboundChannelPort;
   private readonly logger: ChannelLogger;
   private readonly isCurrentOwner: () => boolean;
-  private outboxRegistry?: OutboxRegistry;
+  private readonly deliveryOutbox: InboundDeliveryOutboxPort;
   private readonly confirmationHub?: ConfirmationHub;
   private readonly intentClassifier: IntentClassifier;
   private readonly sessionBroadcast: SessionBroadcast;
@@ -180,7 +197,7 @@ export class InboundRouter {
     this.channels = options.channels;
     this.logger = options.logger;
     this.isCurrentOwner = options.isCurrentOwner ?? (() => true);
-    this.outboxRegistry = options.outboxRegistry;
+    this.deliveryOutbox = options.deliveryOutbox;
     this.confirmationHub = options.confirmationHub;
     this.sessionBroadcast = options.sessionBroadcast;
     this.sessionActivityBroadcast = options.sessionActivityBroadcast;
@@ -195,31 +212,14 @@ export class InboundRouter {
   }
 
   /**
-   * Late-bind OutboxRegistry（解决 setupChannels → setupDelivery 的初始化顺序）。
-   * 应在任何 inbound 消息到达之前完成。
-   *
-   * Write-once：重复绑定抛异常——防止误配置 / 测试时静默覆盖导致的隐蔽 bug。
-   * 若确需替换（如热更新），应显式先 unset（当前不支持）。
-   */
-  setOutboxRegistry(registry: OutboxRegistry): void {
-    if (this.outboxRegistry) {
-      throw new Error(
-        "InboundRouter.setOutboxRegistry: registry already bound (write-once)",
-      );
-    }
-    this.outboxRegistry = registry;
-  }
-
-  /**
    * 统一出口：所有 user-facing 消息走此方法，保证顺序不变量。
    *
-   * 三种路径按签名自动选择，调用方不需要知道具体走哪一条：
-   *   1. 有 outboxRegistry + 有 turnId（turn 内回复）→
+   * 两种路径按签名自动选择，调用方不需要知道具体走哪一条：
+   *   1. 有 turnId（turn 内回复）→
    *      `outbox.fillSlot(turnId, entry)`：原子地发回复 + 关闭 slot，
    *      让本 turn 内创建的 `afterSlot=turnId` entry（如 task fire）排在回复之后
-   *   2. 有 outboxRegistry + 无 turnId（pre-turn 错误、系统消息）→
+   *   2. 无 turnId（pre-turn 错误、系统消息）→
    *      `outbox.post(entry)`：普通入队，无 slot 语义
-   *   3. 无 outboxRegistry（REPL / 未接入 Outbox 的测试）→ `adapter.send`
    *
    * Caller 按"是否是 turn 内的主回复"决定要不要传 turnId，签名显式表达语义。
    */
@@ -229,18 +229,15 @@ export class InboundRouter {
     source: EmissionSource,
     turnId?: string,
   ): Promise<DeliveryResult | void> {
-    if (this.outboxRegistry) {
-      const outbox = this.outboxRegistry.of(target);
-      if (turnId) {
-        return outbox.fillSlot(turnId, { target, content, source });
-      }
-      return outbox.post({ target, content, source });
-    }
     if (!this.channels.has(target.channelId)) {
       this.logger.warn(`No adapter found for channel: ${target.channelId}`);
       return;
     }
-    return this.channels.send(target, content);
+    const outbox = this.deliveryOutbox.of(target);
+    if (turnId) {
+      return outbox.fillSlot(turnId, { target, content, source });
+    }
+    return outbox.post({ target, content, source });
   }
 
   /**
@@ -342,7 +339,7 @@ export class InboundRouter {
         conversationId,
         turnId,
         replyTarget,
-        this.outboxRegistry,
+        this.deliveryOutbox,
       );
       let admission: Awaited<
         ReturnType<InboundConversationApplicationPort["admitAgentTurn"]>
@@ -357,9 +354,7 @@ export class InboundRouter {
           platformSubject: msg.from,
           onStarted: () => {
             this.logger.info(`[开始处理] conv=${conversationId} text="${msg.text}"`);
-            if (this.outboxRegistry) {
-              this.outboxRegistry.of(replyTarget).openSlot({ slotId: turnId });
-            }
+            this.deliveryOutbox.of(replyTarget).openSlot({ slotId: turnId });
           },
           onPendingCancelled: () => {
             this.logger.info(`[排队取消] conv=${conversationId}`);
@@ -387,8 +382,8 @@ export class InboundRouter {
               turnId,
             }),
           onSettled: (delivery) => {
-            if (this.outboxRegistry && delivery === "surface") {
-              this.outboxRegistry
+            if (delivery === "surface") {
+              this.deliveryOutbox
                 .of(replyTarget)
                 .abandonSlot(turnId, "turn ended without reply emission");
             }
@@ -599,8 +594,8 @@ export class InboundRouter {
 
     // 回执——控制流直接 adapter.send 绕过 Outbox
     //
-    // 为什么不走 this.emitReply：emitReply 在 outboxRegistry 存在时会走
-    //   outbox.post，排在目标 target 已有的 pending entry（如等待 slot fill
+    // 为什么不走 this.emitReply：emitReply 必经 Delivery Outbox，会把回执排在
+    //   目标 target 已有的 pending entry（如等待 slot fill
     //   的 LLM 回复）之后——用户"好"的回执会被延迟到 LLM 回复之后才到达，
     //   违反"控制响应即时反馈"原则。
     // 语义对齐：TextRenderer 发 confirmation 消息就是直接 adapter.send 绕过
@@ -653,8 +648,8 @@ export class InboundRouter {
         if (delivery === "authoritative") {
           // Non-empty finals atomically fill the slot through the authority transport.
           // An empty final has no delivery item, so only that case closes the slot here.
-          if (!hasContent && this.outboxRegistry) {
-            await this.outboxRegistry.of(replyTarget).fillSlot(turnId);
+          if (!hasContent) {
+            await this.deliveryOutbox.of(replyTarget).fillSlot(turnId);
           }
         } else if (hasContent) {
           await this.emitReply(
@@ -665,18 +660,17 @@ export class InboundRouter {
           ).catch((e) =>
             this.logger.error(`Failed to send reply to ${channelId}: ${errMsg(e)}`),
           );
-        } else if (this.outboxRegistry) {
+        } else {
           // 协同：LLM 被 commitment 完全抑制（content 空）时，
           // 不发空 entry（会被 adapter reject 或产生无用告警），仅关 slot
           // 释放等待 afterSlot=turnId 的 task fire。
-          await this.outboxRegistry
+          await this.deliveryOutbox
             .of(replyTarget)
             .fillSlot(turnId)
             .catch((e) =>
               this.logger.error(`Failed to close slot: ${errMsg(e)}`),
             );
         }
-        // 无 outboxRegistry + 空内容：REPL/测试场景，静默不发（channel 路径必有 registry）
       } else {
         // 显式 if 分支而非三元链:三元链下 TS 没法把 reason narrow 排除 "completed"
         // (跨分支 narrowing 失效),会让 abortReason 字段访问报 TS2339
@@ -724,24 +718,22 @@ function buildChannelTurnContext(
   conversationId: string,
   turnId: string,
   replyTarget: DeliveryTarget,
-  outboxRegistry: OutboxRegistry | undefined,
+  deliveryOutbox: InboundDeliveryOutboxPort,
 ): TurnContext {
   return {
     turnId,
     emissionTarget: replyTarget,
-    commitToUser: outboxRegistry
-      ? (content: OutboundContent, meta?: { toolName?: string }) =>
-          outboxRegistry.of(replyTarget).post({
-            target: replyTarget,
-            content,
-            source: {
-              kind: "tool-commitment",
-              conversationId,
-              turnId,
-              toolName: meta?.toolName ?? "unknown",
-            },
-          })
-      : undefined,
+    commitToUser: (content: OutboundContent, meta?: { toolName?: string }) =>
+      deliveryOutbox.of(replyTarget).post({
+        target: replyTarget,
+        content,
+        source: {
+          kind: "tool-commitment",
+          conversationId,
+          turnId,
+          toolName: meta?.toolName ?? "unknown",
+        },
+      }),
     turnOrigin: {
       channel: msg.channelId,
       target: replyTarget,

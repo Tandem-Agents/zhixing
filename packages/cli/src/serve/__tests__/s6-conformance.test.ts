@@ -866,12 +866,12 @@ async function runConversationScenario(
       ...(remote ? { remote: remote.mesh } : {}),
     }),
     protocol,
-    channelChallenges: () => channels,
+    channelChallenges: Object.freeze({ kind: "available", delivery: channels }),
+    isCurrentOwner: () => true,
     jobStatus,
     onDataPlaneError: (error) => conversationBackgroundErrors.push(error),
     onCoordinatorError: (error) => conversationBackgroundErrors.push(error),
   });
-  composition.runtime.bindChannelChallenges(channels);
 
   const committed = new Map<string, { runIndex: number; shardId: string }>();
   manager = new ConversationManager(runtimeFactory, undefined, {
@@ -1639,12 +1639,12 @@ async function runJobScenario(
       ...(mesh ? { remote: mesh } : {}),
     }),
     protocol,
-    channelChallenges: () => channels,
+    channelChallenges: Object.freeze({ kind: "available", delivery: channels }),
+    isCurrentOwner: () => true,
     jobStatus,
     onDataPlaneError: (error) => backgroundErrors.push(error),
     onCoordinatorError: (error) => backgroundErrors.push(error),
   });
-  composition.runtime.bindChannelChallenges(channels);
 
   let preparedCursorInterrupted = false;
   if (topology === "remote" && interactive) {

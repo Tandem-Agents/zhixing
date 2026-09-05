@@ -15,13 +15,14 @@ import {
 import { canonicalize } from "@zhixing/core/protocol";
 import type { JobInteractionGrantPort } from "./durable-job-interactions.js";
 import type { JobSubmissionOwner } from "./job-assignment-worker.js";
-import type {
-  ConversationChannelSessionInput,
-  ChannelChallengeDeliveryPort,
-  FirstPartySurfaceSession,
-  FirstPartySurfaceSessionInput,
-  JobOwnerRelayInput,
-  LosslessDataPlaneSession,
+import {
+  type ConversationChannelSessionInput,
+  defineChannelChallengeDeliveryProfile,
+  type ChannelChallengeDeliveryProfile,
+  type FirstPartySurfaceSession,
+  type FirstPartySurfaceSessionInput,
+  type JobOwnerRelayInput,
+  type LosslessDataPlaneSession,
 } from "./lossless-data-plane-runtime.js";
 import type {
   JobStatusDirectory,
@@ -136,7 +137,7 @@ function abortReason(signal: AbortSignal): unknown {
 
 export interface ChannelInteractionCoordinatorOptions {
   readonly dataPlane: ChannelInteractionDataPlanePort;
-  readonly channelChallenges: () => ChannelChallengeDeliveryPort | undefined;
+  readonly channelChallenges: ChannelChallengeDeliveryProfile;
   /** job owner 从耐久 JobJournal 重建并登记的开放义务；不得缺省。 */
   readonly jobRelays: JobRelayObligationDirectory;
   readonly jobStatus: JobStatusDirectory;
@@ -186,7 +187,9 @@ export class ChannelInteractionCoordinator {
 
   constructor(options: ChannelInteractionCoordinatorOptions) {
     this.#dataPlane = options.dataPlane;
-    this.#channelChallenges = options.channelChallenges;
+    this.#channelChallenges = defineChannelChallengeDeliveryProfile(
+      options.channelChallenges,
+    );
     this.#jobRelays = options.jobRelays;
     this.#jobStatus = options.jobStatus;
     this.#now = options.now ?? (() => new Date().toISOString());
@@ -521,8 +524,11 @@ class JobChannelSession implements LosslessDataPlaneSession {
       now: this.#now,
       sender: {
         send: async (input) => {
-          const channelChallenges = this.#channelChallenges();
-          if (!channelChallenges?.supports(input.token.route.channelId)) {
+          const profile = this.#channelChallenges;
+          if (
+            profile.kind === "absent" ||
+            !profile.delivery.supports(input.token.route.channelId)
+          ) {
             throw new Error(
               `Channel does not support signed challenges: ${input.token.route.channelId}`,
             );
@@ -536,7 +542,7 @@ class JobChannelSession implements LosslessDataPlaneSession {
                   input.display,
                   input.signal,
                 );
-          const result = await channelChallenges.sendChallenge({
+          const result = await profile.delivery.sendChallenge({
             challengeId: input.challengeId,
             token: input.token,
             responder: input.responder,

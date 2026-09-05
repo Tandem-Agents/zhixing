@@ -98,6 +98,68 @@ export interface ChannelChallengeDeliveryPort {
   sendChallenge(message: ChannelChallengeMessage): Promise<DeliveryResult>;
 }
 
+/** Static Channel edge selected before the S6 runtime can be published. */
+export type ChannelChallengeDeliveryProfile =
+  | Readonly<{
+      kind: "available";
+      delivery: ChannelChallengeDeliveryPort;
+    }>
+  | Readonly<{
+      kind: "absent";
+      reason: "not-configured" | "setup-failed";
+    }>;
+
+const AVAILABLE_CHALLENGE_PROFILE_KEYS = Object.freeze([
+  "delivery",
+  "kind",
+] as const);
+const ABSENT_CHALLENGE_PROFILE_KEYS = Object.freeze(["kind", "reason"] as const);
+const CHALLENGE_DELIVERY_KEYS = Object.freeze(["sendChallenge", "supports"] as const);
+
+function hasExactKeys(value: object, expected: readonly string[]): boolean {
+  const keys = Object.keys(value).sort();
+  return keys.length === expected.length &&
+    keys.every((key, index) => key === expected[index]);
+}
+
+/** Validates and freezes the finite challenge effect before any S6 consumer exists. */
+export function defineChannelChallengeDeliveryProfile(
+  input: ChannelChallengeDeliveryProfile,
+): ChannelChallengeDeliveryProfile {
+  if (!input || typeof input !== "object") {
+    throw new TypeError("Channel challenge delivery profile is required");
+  }
+  if (input.kind === "absent") {
+    if (
+      !hasExactKeys(input, ABSENT_CHALLENGE_PROFILE_KEYS) ||
+      (input.reason !== "not-configured" && input.reason !== "setup-failed")
+    ) {
+      throw new TypeError("Absent Channel challenge delivery profile is invalid");
+    }
+    if (Object.isFrozen(input)) return input;
+    return Object.freeze({ kind: "absent", reason: input.reason });
+  }
+  if (
+    input.kind !== "available" ||
+    !hasExactKeys(input, AVAILABLE_CHALLENGE_PROFILE_KEYS) ||
+    !input.delivery ||
+    typeof input.delivery !== "object" ||
+    !hasExactKeys(input.delivery, CHALLENGE_DELIVERY_KEYS) ||
+    typeof input.delivery.supports !== "function" ||
+    typeof input.delivery.sendChallenge !== "function"
+  ) {
+    throw new TypeError("Available Channel challenge delivery profile is invalid");
+  }
+  if (Object.isFrozen(input) && Object.isFrozen(input.delivery)) return input;
+  return Object.freeze({
+    kind: "available",
+    delivery: Object.freeze({
+      supports: input.delivery.supports,
+      sendChallenge: input.delivery.sendChallenge,
+    }),
+  });
+}
+
 /**
  * Product composition root for the S6 data plane.
  *
@@ -111,33 +173,31 @@ export class LosslessDataPlaneRuntime {
   readonly #onError: ((error: Error) => void) | undefined;
   readonly #sessions = new Set<LosslessDataPlaneSession>();
   readonly #byChallenge = new Map<string, ConversationChannelSession>();
-  #channelChallenges: ChannelChallengeDeliveryPort | undefined;
+  readonly #channelChallenges: ChannelChallengeDeliveryProfile;
   #closed = false;
 
   constructor(options: {
     readonly verifier: ProtocolSignatureVerifier;
     readonly targets: AssignmentDataPlaneTargetDirectory;
+    readonly channelChallenges: ChannelChallengeDeliveryProfile;
     readonly onError?: (error: Error) => void;
   }) {
     this.#verifier = options.verifier;
     this.#targets = options.targets;
+    this.#channelChallenges = defineChannelChallengeDeliveryProfile(
+      options.channelChallenges,
+    );
     this.#onError = options.onError;
-  }
-
-  bindChannelChallenges(channelChallenges: ChannelChallengeDeliveryPort): void {
-    if (this.#channelChallenges && this.#channelChallenges !== channelChallenges) {
-      throw new Error("Lossless data plane is already bound to another channel challenge port");
-    }
-    this.#channelChallenges = channelChallenges;
   }
 
   async openConversationChannel(
     input: ConversationChannelSessionInput,
   ): Promise<LosslessDataPlaneSession> {
     if (this.#closed) throw new Error("Lossless data plane is closed");
-    if (!this.#channelChallenges) {
+    if (this.#channelChallenges.kind === "absent") {
       throw new Error("Channel data plane is not fully assembled");
     }
+    const channelChallenges = this.#channelChallenges.delivery;
     const endpoint = this.#targets.targetForExecutor(input.executorId);
     await endpoint.acceptTicket(input.ticket);
     const host = new ConversationChannelHost({
@@ -168,7 +228,7 @@ export class LosslessDataPlaneRuntime {
           assignmentId: input.assignmentId,
           requestId,
         }),
-      channelChallenges: this.#channelChallenges,
+      channelChallenges,
       onChallenge: (challengeId) => {
         const current = this.#byChallenge.get(challengeId);
         if (current && current !== session) {

@@ -24,6 +24,7 @@ import {
   createDefaultIntentClassifier,
   type InboundChannelPort,
   type InboundConversationApplicationPort,
+  type InboundDeliveryOutboxPort,
 } from "@zhixing/server";
 import type { ConfirmationHub } from "@zhixing/owner-kernel";
 import type {
@@ -92,43 +93,72 @@ export interface SetupChannelsOptions {
    * 形态不变；本接入面从类型层无法接触 provider / MCP 凭据。
    */
   credentials: ChannelCredentialProjection;
-  /** Conversation Product API binding for inbound routing. Omit for outbound-only mode. */
-  conversation?: InboundConversationApplicationPort;
   logger: ChannelLogger;
-  /**
-   * 可选 ConfirmationHub。传入时 InboundRouter 会在 enqueue 之前检查
-   * pending confirmation，按词集匹配规则解决。
-   */
-  confirmationHub?: ConfirmationHub;
-  /**
-   * 用户配置的 cancel 关键词扩展（来自 `ZhixingConfig.intent.cancelKeywords`）。
-   * 与 `DEFAULT_CANCEL_KEYWORDS` append 合并后注入 IntentClassifier；启动期
-   * 静态互斥校验生效——配错关键词跟 confirmation 集合冲突会立即 throw。
-   */
-  cancelKeywords?: readonly string[];
-  /** 会话 observer 组播；inbound conversation 模式必须由 Host 静态提供。 */
-  sessionBroadcast?: SessionBroadcast;
-  /** 与会话组播同代的非当前会话活动提示。 */
-  sessionActivityBroadcast?: SessionActivityBroadcast;
-  onChallengeAction?: (action: ChannelChallengeAction) => Promise<void>;
   registerHttpRoute?: (path: string, handler: HttpHandler) => void;
-  /** Final callback guard; defaults to current-owner for non-mesh callers. */
-  isCurrentOwner?: () => boolean;
-  /** Registration is always completed; physical connections may be deferred. */
-  connectImmediately?: boolean;
+}
+
+/** Explicit physical-connection profile; absence is never inferred from a missing router. */
+export type ConfiguredChannelInbound =
+  | Readonly<{
+      kind: "router";
+      handleMessage(message: InboundMessage): Promise<void>;
+    }>
+  | Readonly<{ kind: "absent"; reason: "outbound-only" }>;
+
+/** Complete physical consumers required before any configured adapter connects. */
+export interface ConfiguredChannelConsumers {
+  readonly inbound: ConfiguredChannelInbound;
+  readonly onChallengeAction: (action: ChannelChallengeAction) => Promise<void>;
 }
 
 export interface SetupChannelsResult {
-  router: InboundRouter | null;
   statusSnapshot(): readonly Readonly<ChannelStatus>[];
   readonly delivery: ChannelDeliveryEffectSource;
+  readonly inbound: InboundChannelPort;
   readonly challenges: ChannelChallengeDeliveryPort;
-  connectionTask: Promise<void>;
-  connectConfigured(): Promise<void>;
+  connectConfigured(consumers: ConfiguredChannelConsumers): Promise<void>;
   disconnectConfigured(): Promise<void>;
   suspendConfigured(): Promise<void>;
-  resumeConfigured(): Promise<void>;
+  resumeConfigured(consumers: ConfiguredChannelConsumers): Promise<void>;
   dispose(): Promise<void>;
+}
+
+export interface CreateInboundChannelRouterOptions {
+  readonly conversation: InboundConversationApplicationPort;
+  readonly channels: InboundChannelPort;
+  readonly deliveryOutbox: InboundDeliveryOutboxPort;
+  readonly logger: ChannelLogger;
+  readonly confirmationHub?: ConfirmationHub;
+  readonly cancelKeywords?: readonly string[];
+  readonly sessionBroadcast: SessionBroadcast;
+  readonly sessionActivityBroadcast: SessionActivityBroadcast;
+  readonly isCurrentOwner: () => boolean;
+}
+
+/** Constructs the complete inbound consumer only after Delivery owns its Outbox. */
+export function createInboundChannelRouter(
+  options: CreateInboundChannelRouterOptions,
+): InboundRouter {
+  const mergedCancelKeywords =
+    options.cancelKeywords && options.cancelKeywords.length > 0
+      ? [...DEFAULT_CANCEL_KEYWORDS, ...options.cancelKeywords]
+      : DEFAULT_CANCEL_KEYWORDS;
+  const intentClassifier = createDefaultIntentClassifier({
+    cancelKeywords: mergedCancelKeywords,
+    confirmationApproveKeywords: APPROVE_KEYWORDS,
+    confirmationDenyKeywords: DENY_KEYWORDS,
+  });
+  return new InboundRouter({
+    conversation: options.conversation,
+    channels: options.channels,
+    deliveryOutbox: options.deliveryOutbox,
+    logger: options.logger,
+    confirmationHub: options.confirmationHub,
+    intentClassifier,
+    sessionBroadcast: options.sessionBroadcast,
+    sessionActivityBroadcast: options.sessionActivityBroadcast,
+    isCurrentOwner: options.isCurrentOwner,
+  });
 }
 
 export async function setupChannels(
@@ -137,29 +167,12 @@ export async function setupChannels(
   const {
     entries,
     credentials,
-    conversation,
     logger,
-    confirmationHub,
-    cancelKeywords,
-    sessionBroadcast,
-    sessionActivityBroadcast,
-    onChallengeAction,
     registerHttpRoute,
-    isCurrentOwner,
-    connectImmediately = true,
   } = options;
 
   const eventBus = createEventBus<ChannelEventMap>();
-  const currentOwnerChallengeAction = onChallengeAction
-    ? async (action: ChannelChallengeAction) => {
-        if (isCurrentOwner?.() === false) {
-          throw new Error("Channel interaction is not owned by this device");
-        }
-        await onChallengeAction(action);
-      }
-    : undefined;
 
-  let router: InboundRouter | null = null;
   const connectionJobs: Array<{
     configId: string;
     adapterId: string;
@@ -169,14 +182,6 @@ export async function setupChannels(
   const registry = new ChannelRegistry({
     eventBus,
     logger,
-    onMessage: conversation
-      ? (msg: InboundMessage) => {
-          router!.handleMessage(msg).catch((err) => {
-            logger.error("Unhandled error in message routing: %s", err instanceof Error ? err.message : String(err));
-          });
-        }
-      : undefined,
-    onChallengeAction: currentOwnerChallengeAction,
     registerHttpRoute,
   });
   const statusSnapshot = (): readonly Readonly<ChannelStatus>[] =>
@@ -232,36 +237,6 @@ export async function setupChannels(
     },
   } satisfies ChannelChallengeDeliveryPort);
 
-  if (conversation) {
-    if (!sessionBroadcast || !sessionActivityBroadcast) {
-      throw new TypeError(
-        "Inbound channel routing requires the Host session broadcast ports",
-      );
-    }
-    // 显式构造 IntentClassifier 注入——把 default 关键词与用户配置 append 合并，
-    // 启动期 disjoint 校验生效（与 confirmation 词集冲突 fail-fast）。
-    const mergedCancelKeywords =
-      cancelKeywords && cancelKeywords.length > 0
-        ? [...DEFAULT_CANCEL_KEYWORDS, ...cancelKeywords]
-        : DEFAULT_CANCEL_KEYWORDS;
-    const intentClassifier = createDefaultIntentClassifier({
-      cancelKeywords: mergedCancelKeywords,
-      confirmationApproveKeywords: APPROVE_KEYWORDS,
-      confirmationDenyKeywords: DENY_KEYWORDS,
-    });
-
-    router = new InboundRouter({
-      conversation,
-      channels: inbound,
-      logger,
-      confirmationHub,
-      intentClassifier,
-      sessionBroadcast,
-      sessionActivityBroadcast,
-      isCurrentOwner,
-    });
-  }
-
   for (const [id, entry] of Object.entries(entries)) {
     const type = entry.type ?? id;
     let adapter: ChannelAdapter;
@@ -306,12 +281,13 @@ export async function setupChannels(
     transition = current.catch(() => undefined);
     return current;
   };
-  const connectConfigured = () => serialize(async () => {
+  const connectConfigured = (consumers: ConfiguredChannelConsumers) => serialize(async () => {
     if (suspended) return;
     await connectConfiguredChannels({
       registry,
       jobs: connectionJobs,
       logger,
+      consumers,
     });
   });
   const disconnectConfigured = () => serialize(() => disconnectConfiguredChannels({
@@ -322,24 +298,21 @@ export async function setupChannels(
   const suspendConfigured = () => serialize(async () => {
     suspended = true;
   });
-  const resumeConfigured = () => serialize(async () => {
+  const resumeConfigured = (consumers: ConfiguredChannelConsumers) => serialize(async () => {
     suspended = false;
     await connectConfiguredChannels({
       registry,
       jobs: connectionJobs,
       logger,
+      consumers,
     });
   });
-  const connectionTask = connectImmediately
-    ? connectConfigured()
-    : Promise.resolve();
 
   return {
-    router,
     statusSnapshot,
     delivery,
+    inbound,
     challenges,
-    connectionTask,
     connectConfigured,
     disconnectConfigured,
     suspendConfigured,
@@ -356,12 +329,31 @@ async function connectConfiguredChannels(options: {
     config: ChannelConfig;
   }[];
   logger: ChannelLogger;
+  consumers: ConfiguredChannelConsumers;
 }): Promise<void> {
-  const { registry, jobs, logger } = options;
+  const { registry, jobs, logger, consumers } = options;
+  const { inbound, onChallengeAction } = consumers;
+  const onMessage = inbound.kind === "router"
+    ? (message: InboundMessage) => {
+        inbound.handleMessage(message).catch((error) => {
+          logger.error(
+            "Unhandled error in message routing: %s",
+            error instanceof Error ? error.message : String(error),
+          );
+        });
+      }
+    : undefined;
   await Promise.all(
     jobs.map(async ({ configId, adapterId, config }) => {
       try {
-        await registry.connect(adapterId, config);
+        await registry.connect(
+          adapterId,
+          config,
+          {
+            ...(onMessage ? { onMessage } : {}),
+            onChallengeAction,
+          },
+        );
         logger.info("Channel '%s' connected", configId);
       } catch (err) {
         logger.error(

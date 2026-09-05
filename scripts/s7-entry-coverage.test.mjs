@@ -3226,7 +3226,7 @@ test("planned duty migration stays bound to two production roots and a finite ow
     inspectPlannedAnchorTransferAssembly(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "isCurrentOwner: isCurrentChannelOwner,",
+        "isCurrentOwner: () => isCurrentChannelOwner(ctx),",
         "isCurrentOwner: () => true,",
       ),
     )).join("\n"),
@@ -3246,8 +3246,8 @@ test("planned duty migration stays bound to two production roots and a finite ow
     inspectPlannedAnchorTransferAssembly(mutate(
       "packages/cli/src/serve/channels.ts",
       (text) => text.replace(
-        "if (isCurrentOwner?.() === false)",
-        "if (false)",
+        "            onChallengeAction,",
+        "            onChallengeAction: async () => undefined,",
       ),
     )).join("\n"),
     /channel current-owner connection or final guard drifted/,
@@ -4557,6 +4557,9 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
   const paths = [
     "packages/cli/src/serve/channels.ts",
     "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/access-surface.ts",
+    "packages/core/src/channels/registry.ts",
+    "packages/cli/src/serve/lossless-data-plane-composition.ts",
     "packages/cli/src/serve/channel-conversation-product-binding.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/conversation-run-control-binding.ts",
@@ -4588,12 +4591,15 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
         "  readonly delivery: ChannelDeliveryEffectSource;\n  readonly inbound: InboundChannelPort;",
       ),
     )).join("\n"),
-    /SetupChannelsResult exposes an unconsumed Channel capability/u,
+    /configured Channel inbound connection contract drifted/u,
   );
   assert.match(
     inspectChannelRuntimeBoundary(mutate(
       "packages/cli/src/serve/channels.ts",
-      (text) => text.replace("      channels: inbound,", "      channels: missingInbound,"),
+      (text) => text.replace(
+        "    channels: options.channels,",
+        "    channels: missingInbound,",
+      ),
     )).join("\n"),
     /finite Host port assembly drifted/u,
   );
@@ -4677,6 +4683,107 @@ test("Channel concrete runtime stays behind Host-owned demand ports", async () =
       ),
     )).join("\n"),
     /admission or durable cancellation mechanism binding drifted/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/server/src/channels/inbound-router.ts",
+      (text) => text.replace(
+        "readonly deliveryOutbox: InboundDeliveryOutboxPort;",
+        "deliveryOutbox: InboundDeliveryOutboxPort;",
+      ),
+    )).join("\n"),
+    /Delivery Outbox static construction boundary drifted/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/server/src/channels/inbound-router.ts",
+      (text) => text.replace(
+        "deliveryOutbox: InboundDeliveryOutboxPort;",
+        "deliveryOutbox?: InboundDeliveryOutboxPort;",
+      ),
+    )).join("\n"),
+    /Delivery Outbox static construction boundary drifted/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/server/src/channels/inbound-router.ts",
+      (text) => `${text}\nfunction setOutboxRegistry(): void {}\n`,
+    )).join("\n"),
+    /Delivery Outbox static construction boundary drifted/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/server/src/channels/inbound-router.ts",
+      (text) => text.replace(
+        "const outbox = this.deliveryOutbox.of(target);",
+        "return this.channels.send(target, content);",
+      ),
+    )).join("\n"),
+    /Delivery Outbox static construction boundary drifted/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/server/src/channels/inbound-router.ts",
+      (text) => text.replace("commitToUser:", "missingCommitToUser:"),
+    )).join("\n"),
+    /Delivery Outbox static construction boundary drifted/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "const router = createInboundChannelRouter({",
+        "const router = createLateBoundInboundRouter({",
+      ),
+    )).join("\n"),
+    /Delivery Outbox static construction boundary drifted/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/cli/src/serve/channels.ts",
+      (text) => text.replace(
+        "  const statusSnapshot = ():",
+        '  void registry.connect("unowned", {} as never);\n  const statusSnapshot = ():',
+      ),
+    )).join("\n"),
+    /Delivery Outbox static construction boundary drifted/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/cli/src/serve/lossless-data-plane-runtime.ts",
+      (text) => `${text}\nfunction bindChannelChallenges(): void {}\n`,
+    )).join("\n"),
+    /signed-challenge demand boundary drifted/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/cli/src/serve/lossless-data-plane-composition.ts",
+      (text) => text.replace(
+        "readonly channelChallenges: ChannelChallengeDeliveryProfile;",
+        "readonly channelChallenges: () => ChannelChallengeDeliveryProfile;",
+      ),
+    )).join("\n"),
+    /signed-challenge demand boundary drifted/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "    createChannelSurface(channelCredentials),\n    losslessDataPlaneSurface,",
+        "    losslessDataPlaneSurface,\n    createChannelSurface(channelCredentials),",
+      ),
+    )).join("\n"),
+    /challenge static composition or physical callback drifted/u,
+  );
+  assert.match(
+    inspectChannelRuntimeBoundary(mutate(
+      "packages/core/src/channels/registry.ts",
+      (text) => text.replace(
+        "isChallengeChannel(adapter) && !connection?.onChallengeAction",
+        "false",
+      ),
+    )).join("\n"),
+    /challenge static composition or physical callback drifted/u,
   );
 });
 

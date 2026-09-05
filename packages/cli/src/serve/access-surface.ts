@@ -50,6 +50,7 @@ import type {
   RunningServer,
 } from "@zhixing/server";
 import type { ChannelConversationProductBinding } from "./channel-conversation-product-binding.js";
+import type { SetupChannelsResult } from "./channels.js";
 import type {
   ConfirmationHub,
   ConversationManager,
@@ -95,7 +96,7 @@ import type {
   ExecutorJobOwnerAssembly,
 } from "./executor-job-owner.js";
 import type { LosslessDataPlaneRuntime } from "./lossless-data-plane-runtime.js";
-import type { ChannelChallengeDeliveryPort } from "./lossless-data-plane-runtime.js";
+import type { LosslessDataPlaneComposition } from "./lossless-data-plane-composition.js";
 import type {
   ChannelInteractionCoordinator,
   JobRelayObligationDirectory,
@@ -174,6 +175,17 @@ export interface MeshRuntimePreparation {
 
 /** 接入面装配阶段 —— 适配真实交织（confirmationBridge 依赖 prepared connections）。 */
 export type SurfacePhase = "pre-server" | "post-server";
+
+/** Assembly-stage Channel mechanism selected before the S6 graph is published. */
+export type PreparedChannelMechanism =
+  | Readonly<{
+      kind: "available";
+      channels: SetupChannelsResult;
+    }>
+  | Readonly<{
+      kind: "absent";
+      reason: "not-configured" | "setup-failed";
+    }>;
 
 /**
  * 装配期共享上下文 —— 接入面 setup 从这里读依赖、把产物写回，后续接入面 / 核心再读。
@@ -259,7 +271,8 @@ export interface AssemblyContext {
   advancementConversationLifecycle?: AdvancementConversationLifecycleApplication;
   channelStatuses?: () => readonly Readonly<ChannelStatus>[];
   channelDelivery?: ChannelDeliveryEffectSource;
-  channelChallenges?: ChannelChallengeDeliveryPort;
+  /** Assembly-only discriminated Channel mechanism; never a runtime locator. */
+  channelMechanism?: PreparedChannelMechanism;
   inboundRouter?: InboundRouter | null;
   channelConversationProduct?: ChannelConversationProductBinding;
   channelConnections?: {
@@ -280,6 +293,7 @@ export interface AssemblyContext {
   executorJobOwner?: ExecutorJobOwner;
   losslessDataPlane?: LosslessDataPlaneRuntime;
   channelCoordinator?: ChannelInteractionCoordinator;
+  channelChallengeAction?: LosslessDataPlaneComposition["onChallengeAction"];
   jobRelayObligations?: JobRelayObligationDirectory;
   executionStatusHub?: ExecutionStatusHub;
   firstPartyFinality?: (
