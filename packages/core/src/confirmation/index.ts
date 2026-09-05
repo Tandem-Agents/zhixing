@@ -24,6 +24,7 @@ export type {
   RendererCapabilities,
   RequestListener,
   ResolvedListener,
+  SuggestedPattern,
 } from "./types.js";
 
 export {

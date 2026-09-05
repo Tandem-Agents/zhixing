@@ -30,7 +30,7 @@ import type {
   Unsubscribe,
   WildcardListener,
 } from "@zhixing/core";
-import type { DecorateRunBusFn } from "@zhixing/orchestrator";
+import type { DecorateRunBusFn } from "@zhixing/orchestrator/runtime";
 import { SESSION_NOTIFICATIONS, type SessionEventEnvelope } from "@zhixing/rpc";
 import type { CoreHostNotificationLink } from "./core-host-connection.js";
 

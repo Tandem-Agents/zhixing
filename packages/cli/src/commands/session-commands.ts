@@ -15,16 +15,8 @@
  */
 
 import chalk from "chalk";
-import {
-  type ICommandRegistry,
-  type CommandDispatcher,
-  type CommandHandlerContext,
-  type ArgChoiceProvider,
-  type ArgQueryContext,
-  type ArgChoice,
-  type ArgSchema,
-  type PostTurnControlIntent,
-} from "@zhixing/core";
+import { type ICommandRegistry, type CommandDispatcher, type CommandHandlerContext, type ArgChoiceProvider, type ArgQueryContext, type ArgChoice, type ArgSchema } from "@zhixing/core/typeahead";
+import { type PostTurnControlIntent } from "@zhixing/core";
 import type {
   SessionAdoptionReviewResult,
   SessionAdvancementStateSnapshot,

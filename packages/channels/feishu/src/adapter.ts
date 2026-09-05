@@ -8,7 +8,7 @@ import type {
   DeliveryResult,
   DeliveryTarget,
   OutboundContent,
-} from "@zhixing/core";
+} from "@zhixing/core/channels";
 import { validateChannelChallengeCallback } from "@zhixing/core/protocol";
 import { buildChallengeCard, buildReplyCard } from "./cards.js";
 import { FeishuApiError, FeishuClient, detectReceiveIdType, resolveDomain } from "./client.js";

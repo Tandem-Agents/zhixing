@@ -20,13 +20,8 @@ import type {
   ScheduleManagementOperation,
   ScheduleManagementRepository,
 } from "@zhixing/core/scheduler/application";
-import type {
-  IEventBus,
-  SchedulerEventMap,
-  SchedulerControlSource,
-  TaskSpec,
-  TaskView,
-} from "@zhixing/core";
+import type { IEventBus } from "@zhixing/core";
+import type { SchedulerEventMap, SchedulerControlSource, TaskSpec, TaskView } from "@zhixing/core/scheduler";
 import {
   assertPrincipalAllowsAuthorityMethod,
   AuthorityMethodForbiddenError,

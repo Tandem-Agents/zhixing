@@ -17,7 +17,7 @@ import {
   type Message,
   type StreamEvent,
   userMessage,
-} from "@zhixing/core";
+} from "@zhixing/core/types";
 import {
   createMainCallLLM,
   createMainCallLLMWithUsage,

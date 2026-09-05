@@ -1,6 +1,6 @@
 import { hostname, platform } from "node:os";
 import path from "node:path";
-import { getZhixingHome } from "@zhixing/core";
+import { getZhixingHome } from "@zhixing/core/paths";
 import {
   BackupRecoveryAdministrationApplicationService,
   BackupRecoveryAdministrationError,

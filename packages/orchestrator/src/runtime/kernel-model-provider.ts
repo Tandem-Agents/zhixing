@@ -1,9 +1,5 @@
-import type {
-  LLMRoles,
-  ModelBudgetInfo,
-  ModelInputCapabilities,
-  ResolvedRoleThinking,
-} from "@zhixing/core";
+import type { LLMRoles, ModelInputCapabilities, ResolvedRoleThinking } from "@zhixing/core/types";
+import type { ModelBudgetInfo } from "@zhixing/core/context";
 
 export type KernelPrimaryModelRole = "main" | "power";
 

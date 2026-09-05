@@ -25,7 +25,9 @@ import {
   type KernelToolImplementationPort,
   type RuntimeKind,
 } from "@zhixing/orchestrator/runtime";
-import type { IConfirmationBroker } from "@zhixing/core";
+import type {
+  IConfirmationBroker,
+} from "@zhixing/core/confirmation";
 import type { ArtifactStore } from "@zhixing/core/authority";
 import {
   assertConversationRuntimeProjection,

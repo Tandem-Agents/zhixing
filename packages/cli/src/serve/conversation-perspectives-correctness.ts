@@ -1,7 +1,4 @@
-import type {
-  AgentYield,
-  RunResult,
-} from "@zhixing/core";
+import type { AgentYield, RunResult } from "@zhixing/core/loop";
 import type {
   ConversationPerspectivesCorrectnessPort,
   ConversationPerspectivesDurableExecutionInput,
@@ -10,8 +7,8 @@ import type {
 import type {
   ConversationManager,
   ManagedSession,
-  SessionRuntime,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/conversation-manager";
+import type { SessionRuntime } from "@zhixing/owner-kernel/types";
 
 export function createConversationPerspectivesCorrectnessPort(input: Readonly<{
   manager: () => ConversationManager;

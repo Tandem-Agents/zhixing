@@ -7,7 +7,7 @@ import {
 import type {
   ConversationTransferStaging,
   ConversationTransferStagingArea,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/conversation-transfer";
 
 const MAX_CONVERSATION_TRANSFER_ARTIFACT_BYTES = 512 * 1024 * 1024;
 const CONVERSATION_TRANSFER_CHUNK_BYTES = 256 * 1024;

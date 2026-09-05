@@ -1,10 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  createEventBus,
-  getEnabledWorksceneToolActions,
-  getWorksceneToolBoundaries,
-  type AgentEventMap,
-} from "@zhixing/core";
+import { createEventBus, type AgentEventMap } from "@zhixing/core";
+import { getEnabledWorksceneToolActions, getWorksceneToolBoundaries } from "@zhixing/core/workscene";
 import type {
   AssignmentGlobalQueryPort,
   AssignmentMutationOverlayRecord,

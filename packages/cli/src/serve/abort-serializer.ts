@@ -9,7 +9,7 @@
  * 两个字段职责分离:message 给人看,detail 给程序看。
  */
 
-import type { AbortReason } from "@zhixing/core";
+import type { AbortReason } from "@zhixing/core/interrupt";
 
 function unwrapParentAbort(reason: AbortReason): AbortReason {
   let r: AbortReason = reason;

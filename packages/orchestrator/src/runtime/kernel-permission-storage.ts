@@ -1,7 +1,4 @@
-import type {
-  PermissionRuleExecutionSource,
-  SecurityRequest,
-} from "@zhixing/core";
+import type { PermissionRuleExecutionSource, SecurityRequest } from "@zhixing/core/security";
 import type {
   TrustAdministrationContext,
   TrustAdministrationExecutionRepository,

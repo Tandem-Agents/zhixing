@@ -1,7 +1,7 @@
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import type { AdvancementControlEvent } from "@zhixing/core/advancement";
-import { localConversationId } from "@zhixing/core";
-import { ConversationManager } from "@zhixing/owner-kernel";
+import { localConversationId } from "@zhixing/core/conversation";
+import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import { setupAuthorityRuntime } from "../../setup-delivery.js";

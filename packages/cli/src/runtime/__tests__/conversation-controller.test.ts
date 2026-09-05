@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import type { AgentYield } from "@zhixing/core";
+import type { AgentYield } from "@zhixing/core/loop";
 import { RPC_ERROR_CODES, RpcClientError } from "@zhixing/server";
 import {
   ConversationController,

@@ -30,11 +30,9 @@
  */
 
 import * as os from "node:os";
-import {
-  COMMITMENT_SIGNAL,
-  SYSTEM_META_PROMPT_SECTION,
-  type ToolDefinition,
-} from "@zhixing/core";
+import { COMMITMENT_SIGNAL } from "@zhixing/core/loop";
+import { SYSTEM_META_PROMPT_SECTION } from "@zhixing/core/context";
+import { type ToolDefinition } from "@zhixing/core/types";
 import type { AgentRoleProfile } from "../profile/agent-role-profile.js";
 import { mainProfile } from "../profile/default-profiles.js";
 

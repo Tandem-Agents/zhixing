@@ -14,7 +14,9 @@
  * - __transcript-gc：调用持久层时间窗保留清理（分片 + 摘要快照）
  */
 
-import type { SystemHandler } from "@zhixing/core";
+import type {
+  SystemHandler,
+} from "@zhixing/core/scheduler";
 
 // ─── __health-check ───
 

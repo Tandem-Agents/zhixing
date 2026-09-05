@@ -2,9 +2,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { networkInterfaces, hostname, platform } from "node:os";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import QRCode from "qrcode";
-import {
-  getZhixingHome,
-} from "@zhixing/core";
+import { getZhixingHome } from "@zhixing/core/paths";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import type {
   CheckpointStreamRecord,

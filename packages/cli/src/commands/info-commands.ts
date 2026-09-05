@@ -7,15 +7,9 @@
  */
 
 import chalk from "chalk";
-import {
-  type SchedulerFacade,
-  type ChannelStatus,
-  type ICommandRegistry,
-  type CommandDispatcher,
-  type CommandHandlerContext,
-  type CommandDef,
-  type CommandCategory,
-} from "@zhixing/core";
+import { type SchedulerFacade } from "@zhixing/core/scheduler";
+import { type ChannelStatus } from "@zhixing/core/channels";
+import { type ICommandRegistry, type CommandDispatcher, type CommandHandlerContext, type CommandDef, type CommandCategory } from "@zhixing/core/typeahead";
 import { renderUsageReport, renderContextVisual } from "../render.js";
 import { layout } from "../tui/style.js";
 import type { CliWriter } from "../screen/index.js";

@@ -20,7 +20,8 @@
  */
 
 import { spawn } from "node:child_process";
-import { gracefulKill, type ToolDefinition, type ToolResult } from "@zhixing/core";
+import { gracefulKill } from "@zhixing/core/interrupt";
+import { type ToolDefinition, type ToolResult } from "@zhixing/core";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_RESULT_CHARS = 30_000;

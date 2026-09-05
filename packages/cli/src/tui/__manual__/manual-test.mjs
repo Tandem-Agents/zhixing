@@ -16,7 +16,7 @@
 //   - Ctrl+C 返回 { kind: "cancelled", cause: "ctrl-c" }
 //   - resize 终端不破坏面板
 
-import { getAgentIdentity } from "@zhixing/core";
+import { getAgentIdentity } from "@zhixing/core/identity";
 import { selectWithInput } from "../select-with-input.js";
 
 // 取应用身份（默认 "知行"；被 zhixing.config.json 的 agent.displayName 覆盖时

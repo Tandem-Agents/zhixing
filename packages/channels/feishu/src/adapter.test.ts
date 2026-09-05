@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChannelContext } from "@zhixing/core";
+import type {
+  ChannelContext,
+} from "@zhixing/core/channels";
 
 const {
   mockStart,

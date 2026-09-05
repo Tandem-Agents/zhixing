@@ -8,7 +8,7 @@ import {
   MAX_INLINE_LOGICAL_RECORD_BYTES,
   type ArtifactStore,
 } from "@zhixing/core/authority";
-import { DeliveryAuthority } from "@zhixing/core";
+import { DeliveryAuthority } from "@zhixing/core/delivery";
 import type {
   AssignmentActivationPayload,
   AssignmentActivationProof,
@@ -92,8 +92,10 @@ import {
   createConversationControlEnvelope,
   createInitialControlEnvelope,
 } from "@zhixing/owner-kernel/control-admission";
-import type { OwnerDeliveryParticipant } from "@zhixing/owner-kernel";
-import { createOwnerDeliveryParticipant } from "@zhixing/owner-kernel/delivery";
+import {
+  createOwnerDeliveryParticipant,
+  type OwnerDeliveryParticipant,
+} from "@zhixing/owner-kernel/delivery";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import {

@@ -17,18 +17,17 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
+import { ConfirmationBroker } from "@zhixing/core/confirmation";
+import { createEventBus } from "@zhixing/core/events";
 import {
-  ConfirmationBroker,
-  createEventBus,
   extractFirstText,
-  MockLLMProvider,
-  PermissionStore,
-  SecurityPipeline,
   type AgentEventMap,
   type LLMRole,
   type LLMRoles,
   type ToolDefinition,
-} from "@zhixing/core";
+} from "@zhixing/core/types";
+import { MockLLMProvider } from "@zhixing/core/loop";
+import { PermissionStore, SecurityPipeline } from "@zhixing/core/security";
 import type {
   AssignmentGlobalQueryPort,
   AssignmentMutationPort,

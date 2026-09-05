@@ -1,7 +1,4 @@
-import {
-  assertLocalConversationIdForDevice,
-  parseLocalConversationId,
-} from "@zhixing/core";
+import { assertLocalConversationIdForDevice, parseLocalConversationId } from "@zhixing/core/conversation";
 import type {
   DeviceAdministrationDutyMigrationAdmissionOutcome,
   DeviceAdministrationDutyMigrationAdmissionPort,
@@ -36,13 +33,13 @@ import { loadActiveAnchorIssuerKey } from "@zhixing/mesh/device-key-store";
 import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
 import type {
   AssignmentSubmissionPreflightPort,
-  RuntimeFactory,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/conversation-assignment";
+import type { RuntimeFactory } from "@zhixing/owner-kernel/types";
 import {
   ConversationTransferTarget,
   listConversationTransferStates,
   type ConversationTransferStagingArea,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/conversation-transfer";
 import type {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
@@ -2108,7 +2105,7 @@ export class MeshRuntimeAssembly
 
   async #installCommittedTransfer(base: {
     readonly manifest: import("@zhixing/core/contracts").ConversationTransferManifest;
-    readonly records: readonly import("@zhixing/owner-kernel").ConversationTransferAuthorityRecord[];
+    readonly records: readonly import("@zhixing/owner-kernel/conversation-transfer").ConversationTransferAuthorityRecord[];
   }): Promise<void> {
     const protocol = this.options.protocol;
     if (!protocol) throw new Error("Conversation transfer target has no owner protocol");

@@ -1,5 +1,5 @@
 import type { DeferredGlobalIntent } from "@zhixing/core/contracts";
-import { ConfirmationHub } from "@zhixing/owner-kernel";
+import { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
 import { describe, expect, it, vi } from "vitest";
 import {
   AnchorSchedulerHostLifecycle,

@@ -4,7 +4,7 @@ import {
   validatePublishResultNotice,
 } from "@zhixing/core/protocol";
 import type { PublishResultNotice, WorksceneAppliedResult } from "@zhixing/core/contracts";
-import { publishConflictProductCopy } from "@zhixing/owner-kernel";
+import { publishConflictProductCopy } from "@zhixing/owner-kernel/publish-result-product-language";
 import { SESSION_NOTIFICATIONS, type SessionEventEnvelope } from "@zhixing/rpc";
 import type { CliWriter } from "../screen/index.js";
 import type { CoreHostNotificationLink } from "./core-host-connection.js";

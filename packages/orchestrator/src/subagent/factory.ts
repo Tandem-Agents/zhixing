@@ -20,26 +20,25 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { ConfirmationBroker } from "@zhixing/core/confirmation";
+import { createEventBus, type EventBus } from "@zhixing/core/events";
 import {
-  ConfirmationBroker,
-  createEventBus,
   emptyUsage,
-  TokenEstimator,
   toToolSpec,
-  type AbortReason,
   type AgentErrorType,
   type AgentEventMap,
-  type EventBus,
-  type IConfirmationBroker,
   type LLMProvider,
   type LLMRoles,
   type Message,
   type ResolvedRoleThinking,
-  type SecurityPipeline,
   type ThinkingConfig,
   type TokenUsage,
   type ToolDefinition,
-} from "@zhixing/core";
+} from "@zhixing/core/types";
+import { TokenEstimator } from "@zhixing/core/context";
+import { type AbortReason } from "@zhixing/core/interrupt";
+import { type IConfirmationBroker } from "@zhixing/core/confirmation";
+import { type SecurityPipeline } from "@zhixing/core/security";
 import type { TrustAdministrationExecutionApplication } from "@zhixing/core/trust-administration";
 import { protocolDigest } from "@zhixing/core/protocol";
 import type { ChildResourceLease, ModelCallResourceMeter } from "@zhixing/core/contracts";

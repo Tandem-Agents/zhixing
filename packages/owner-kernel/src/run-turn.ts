@@ -14,15 +14,10 @@
  * （partial 内容已经由 yield 流推给用户，但不成为对话事实）。
  */
 
-import {
-  userMessageFromTurnInput,
-  type AbortReason,
-  type AgentYield,
-  type Message,
-  type RunResult,
-  type TurnSource,
-  type UserTurnInputLike,
-} from "@zhixing/core";
+import { userMessageFromTurnInput, type Message, type UserTurnInputLike } from "@zhixing/core";
+import { type AbortReason } from "@zhixing/core/interrupt";
+import { type AgentYield, type RunResult } from "@zhixing/core/loop";
+import { type TurnSource } from "@zhixing/core/transcript";
 import type { ConversationManager } from "./conversation-manager.js";
 import type { RunTurnOptions, SessionRuntime } from "./types.js";
 import type {

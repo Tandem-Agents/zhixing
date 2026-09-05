@@ -5,7 +5,7 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
-import { createInterruptController, getAbortReason } from "@zhixing/core";
+import { createInterruptController, getAbortReason } from "@zhixing/core/interrupt";
 import { attachSignalSource, createSignalEmitterForTest } from "../signal-source.js";
 
 const cleanups: Array<() => void> = [];

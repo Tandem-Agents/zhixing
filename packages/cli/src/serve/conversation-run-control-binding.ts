@@ -4,7 +4,7 @@ import {
   type ConversationRunControlPort,
   type ConversationUncertainResolutionResult,
 } from "@zhixing/core/conversation/application";
-import type { ConversationManager } from "@zhixing/owner-kernel";
+import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import { parseConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
 
 type ConversationCancellationInput = Parameters<

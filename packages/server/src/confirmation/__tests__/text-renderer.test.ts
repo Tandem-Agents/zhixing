@@ -15,13 +15,15 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   ConfirmationBroker,
-  type ChannelLogger,
-  type ChannelAdapter,
-  type DeliveryTarget,
-  type DeliveryResult,
   type ConfirmationRequest,
-} from "@zhixing/core";
-import { ConfirmationHub } from "@zhixing/owner-kernel";
+} from "@zhixing/core/confirmation";
+import type {
+  ChannelLogger,
+  ChannelAdapter,
+  DeliveryTarget,
+  DeliveryResult,
+} from "@zhixing/core/channels";
+import { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
 import {
   TextConfirmationRenderer,
   type ConfirmationChannelPort,

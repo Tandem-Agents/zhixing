@@ -2,7 +2,7 @@ import { stat } from "node:fs/promises";
 import { userInfo } from "node:os";
 import path from "node:path";
 import { canonicalize } from "@zhixing/core/protocol";
-import { expandUserHome, getZhixingHome } from "@zhixing/core";
+import { expandUserHome, getZhixingHome } from "@zhixing/core/paths";
 import { loadConfig } from "@zhixing/providers";
 import {
   createPlatformSecretStore,

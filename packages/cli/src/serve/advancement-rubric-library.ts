@@ -1,12 +1,6 @@
 import { randomUUID } from "node:crypto";
-import {
-  parseRubricDocument,
-  projectRubricContractDraft,
-  rubricDocumentId,
-  stringifyRubricDraft,
-  type RubricCatalogPort,
-  type RubricIndexEntry,
-} from "@zhixing/core";
+import { parseRubricDocument, rubricDocumentId, stringifyRubricDraft, type RubricIndexEntry } from "@zhixing/core/rubrics";
+import { projectRubricContractDraft, type RubricCatalogPort } from "@zhixing/core/advancement";
 import type {
   AssignmentGlobalQueryPort,
   Digest,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Message } from "@zhixing/core";
+import type { Message } from "@zhixing/core/types";
 import {
   classifyResult,
   extractFinalAssistantText,

@@ -18,7 +18,7 @@ import type { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
 import type { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
 import type {
   AssignmentSubmissionPreflightPort,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/conversation-assignment";
 import {
   MeshResourceUsageIntake,
   MeshRunExecutorPort,

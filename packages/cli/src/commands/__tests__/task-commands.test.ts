@@ -6,12 +6,8 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import {
-  CommandDispatcher,
-  DefaultCommandRegistry,
-  type RuntimeContext,
-  type TaskListState,
-} from "@zhixing/core";
+import { CommandDispatcher, DefaultCommandRegistry, type RuntimeContext } from "@zhixing/core/typeahead";
+import { type TaskListState } from "@zhixing/core/conversation";
 import { registerTaskCommands } from "../task-commands.js";
 import { stripAnsi } from "../../tui/index.js";
 

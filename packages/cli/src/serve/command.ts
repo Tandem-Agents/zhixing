@@ -19,15 +19,12 @@
  * AccessSurface 单元 + 在集合加名字，装配主干一行不改。接入面体系详见 access-surface.ts。
  */
 
-import {
-  createEventBus,
-  getZhixingHome,
-  loadLayeredGuidance,
-  type AgentEventMap,
-  type SchedulerEventMap,
-  worksceneConversationId,
-  type DeliveryLifecycleSourcePermit,
-} from "@zhixing/core";
+import { createEventBus, type AgentEventMap } from "@zhixing/core";
+import { getZhixingHome } from "@zhixing/core/paths";
+import { loadLayeredGuidance } from "@zhixing/core/context";
+import { type SchedulerEventMap } from "@zhixing/core/scheduler";
+import { worksceneConversationId } from "@zhixing/core/conversation";
+import { type DeliveryLifecycleSourcePermit } from "@zhixing/core/delivery";
 import {
   createSkillCatalogProductApiContribution,
   SKILL_CATALOG_PRODUCT_API_EXACT_SET,
@@ -112,9 +109,7 @@ import {
   type RunningServer,
   type ServerContext,
 } from "@zhixing/server";
-import {
-  ConfirmationHub,
-} from "@zhixing/owner-kernel";
+import { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
 import {
   createRunEventForwarder,
   SESSION_NOTIFICATIONS,
@@ -127,7 +122,9 @@ import { isProcessAlive } from "@zhixing/server";
 import { RuntimeHost } from "@zhixing/runtime-host";
 import { createBuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
 import { createTransientSegmentDeps } from "./segment-deps.js";
-import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
+import {
+  createConversationAgentTurnAdmissionPort,
+} from "@zhixing/owner-kernel/conversation-agent-turn-admission";
 import { createConversationPerspectivesCorrectnessPort } from "./conversation-perspectives-correctness.js";
 import {
   createServerConfirmationBinding,

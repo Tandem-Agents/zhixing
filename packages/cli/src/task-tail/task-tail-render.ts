@@ -12,7 +12,7 @@
  * 视觉层级：任务名 default 色（主信息），进度 dim 灰（附加信息）。
  */
 
-import type { TaskListState } from "@zhixing/core";
+import type { TaskListState } from "@zhixing/core/conversation";
 import { tone } from "../tui/index.js";
 
 export function renderTaskTail(state: TaskListState | null): string {

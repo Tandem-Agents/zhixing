@@ -9,11 +9,8 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import type {
-  AssignmentMutationPort,
-  AssignmentMutationRequest,
-  SchedulerFacade,
-} from "@zhixing/core";
+import type { AssignmentMutationPort, AssignmentMutationRequest } from "@zhixing/core/contracts";
+import type { SchedulerFacade } from "@zhixing/core/scheduler";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import { createBuiltinExtraToolsAssembly } from "../../serve/builtin-extra-tools.js";
 import { createAnchorConversationTaskListToolApplication } from "../../serve/conversation-task-list-application.js";

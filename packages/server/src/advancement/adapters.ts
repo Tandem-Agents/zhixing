@@ -1,13 +1,13 @@
+import { DurableConversationAdmissionRejectedError } from "@zhixing/owner-kernel/run-turn";
 import {
-  DurableConversationAdmissionRejectedError,
   WorksceneBusyError,
   type ConversationManager,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/conversation-manager";
 import type {
   AdvancementEventSink,
   AdvancementOriginalTaskAdmissionPort,
   AdvancementProxyTurnPort,
-} from "@zhixing/owner-services";
+} from "@zhixing/owner-services/advancement";
 import { protocolDigest } from "@zhixing/core/protocol";
 import type { SessionBroadcast } from "@zhixing/rpc/session-broadcast";
 import { createControlSessionEventEnvelope } from "@zhixing/rpc/session-events";

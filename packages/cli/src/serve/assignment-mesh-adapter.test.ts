@@ -3,12 +3,9 @@ import { once } from "node:events";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Server as TlsServer } from "node:tls";
-import {
-  DeliveryAuthority,
-  createEventBus,
-  skillNameToId,
-  type AgentEventMap,
-} from "@zhixing/core";
+import { DeliveryAuthority } from "@zhixing/core/delivery";
+import { createEventBus, type AgentEventMap } from "@zhixing/core";
+import { skillNameToId } from "@zhixing/core/skills/id";
 import {
   SkillCatalogSaveApplicationService,
   type SkillCatalogSaveOverlayRecord,
@@ -80,10 +77,12 @@ import {
 import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
 import {
   ConversationRunJournal,
-  OwnerDeliveryParticipant,
   type AssignmentSubmissionAuthorizer,
-} from "@zhixing/owner-kernel";
-import { createOwnerDeliveryParticipant } from "@zhixing/owner-kernel/delivery";
+} from "@zhixing/owner-kernel/conversation-assignment";
+import {
+  createOwnerDeliveryParticipant,
+  OwnerDeliveryParticipant,
+} from "@zhixing/owner-kernel/delivery";
 import {
   JobJournal,
   type JobAssignmentPlan,

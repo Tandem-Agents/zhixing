@@ -1,11 +1,6 @@
-import {
-  resolveAgentIdentity,
-  resolveModelInfo,
-  resolveModelInputCapabilities,
-  validateThinkingConfig,
-  type LLMRole,
-  type ThinkingConfig,
-} from "@zhixing/core";
+import { resolveAgentIdentity } from "@zhixing/core/identity";
+import { resolveModelInfo } from "@zhixing/core/context";
+import { resolveModelInputCapabilities, validateThinkingConfig, type LLMRole, type ThinkingConfig } from "@zhixing/core";
 import {
   createKernelModelProviderBinding,
   createKernelRuntimeEnvironment,

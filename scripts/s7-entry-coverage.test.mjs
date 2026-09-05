@@ -927,6 +927,28 @@ test("Workscene remote workspace probing uses one statically assembled topology 
   );
 });
 
+test("owner-kernel retired session-state compatibility surfaces stay absent", () => {
+  for (const source of [
+    "export class AnchorSessionStateAdapter {}",
+    "export interface AnchorSessionStateAdapterOptions {}",
+  ]) {
+    assert.match(
+      inspectProductionSource(
+        "packages/owner-kernel/src/session-state-adapter.ts",
+        source,
+      ).join("\n"),
+      /retired token AnchorSessionStateAdapter/u,
+    );
+  }
+  assert.match(
+    inspectProductionSource(
+      "packages/owner-kernel/src/types.ts",
+      'export type { ManagedSessionInfo } from "./conversation-manager.js";',
+    ).join("\n"),
+    /duplicate ManagedSessionInfo compatibility export/u,
+  );
+});
+
 test("Workscene product dependencies are statically complete before publication", async () => {
   const paths = [
     "packages/cli/src/serve/command.ts",
@@ -1295,7 +1317,6 @@ test("P07 workspace probe physical persistence stays at one Host adapter", async
     "packages/core/src/environment/workspace-probe.ts",
     "packages/core/src/environment/workspace-probe-persistence.ts",
     "packages/core/src/environment/index.ts",
-    "packages/core/src/index.ts",
     "packages/cli/src/serve/workspace-probe-persistence.ts",
     "packages/cli/src/setup-delivery.ts",
   ];
@@ -1367,9 +1388,6 @@ test("P07 workspace binding generation marker and WAL stay paired at one Host ad
     "packages/core/src/environment/workspace-binding-catalog.ts",
     "packages/core/src/environment/workspace-binding-generation-persistence.ts",
     "packages/core/src/environment/index.ts",
-    "packages/core/src/index.ts",
-    "packages/core/package.json",
-    "packages/core/tsup.config.ts",
     "packages/cli/src/serve/workspace-binding-generation-persistence.ts",
     "packages/cli/src/setup-delivery.ts",
   ];
@@ -1407,7 +1425,7 @@ test("P07 workspace binding generation marker and WAL stay paired at one Host ad
       "packages/core/src/environment/index.ts",
       (text) => `${text}\nexport * from \"./workspace-binding-generation-persistence.js\";\n`,
     )).join("\n"),
-    /export boundary drifted/u,
+    /source boundary drifted/u,
   );
   assert.match(
     inspectWorkspaceBindingGenerationPersistenceBoundary(mutate(
@@ -1443,8 +1461,6 @@ test("P07 workspace binding root manifest stays at one Host CAS adapter", async 
     "packages/core/src/environment/workspace-binding-catalog.ts",
     "packages/core/src/environment/workspace-binding-catalog-persistence.ts",
     "packages/core/src/environment/index.ts",
-    "packages/core/src/index.ts",
-    "packages/core/tsup.config.ts",
     "packages/cli/src/serve/workspace-binding-catalog-persistence.ts",
     "packages/cli/src/setup-delivery.ts",
   ];
@@ -1482,7 +1498,7 @@ test("P07 workspace binding root manifest stays at one Host CAS adapter", async 
       "packages/core/src/environment/index.ts",
       (text) => `${text}\nexport * from \"./workspace-binding-catalog-persistence.js\";\n`,
     )).join("\n"),
-    /export boundary drifted/u,
+    /source boundary drifted/u,
   );
   assert.match(
     inspectWorkspaceBindingCatalogPersistenceBoundary(mutate(
@@ -2183,9 +2199,6 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
     "packages/cli/src/commands/info-commands.ts",
     "packages/cli/src/runtime/rpc-management-facade.ts",
     "packages/core/src/backup-recovery/application.ts",
-    "packages/core/src/index.ts",
-    "packages/core/package.json",
-    "packages/core/tsup.config.ts",
     "packages/cli/src/serve/mesh-bootstrap-store.ts",
     "packages/cli/src/serve/backup-runtime-owner.ts",
     "packages/cli/src/serve/mesh-runtime-bootstrap.ts",
@@ -2382,13 +2395,6 @@ test("recovery backup stays bound to one current-anchor owner and finite paired 
         "createBackupRecoveryAdministration(context, options).verify()",
         "createService(context, context.trust, metadataOnlyTarget(\"latest\")).verify()",
       ),
-    )).join("\n"),
-    /one Backup & Recovery application owner/,
-  );
-  assert.match(
-    inspectRecoveryBackupAssembly(mutate(
-      "packages/core/src/index.ts",
-      (text) => `${text}\nexport * from \"./backup-recovery/application.js\";`,
     )).join("\n"),
     /one Backup & Recovery application owner/,
   );
@@ -4272,9 +4278,6 @@ test("Device Administration reads, paired/current removal and duty migration hav
   const paths = [
     "packages/core/src/device-administration/application.ts",
     "packages/core/src/backup-recovery/application.ts",
-    "packages/core/src/index.ts",
-    "packages/core/package.json",
-    "packages/core/tsup.config.ts",
     "packages/server/src/context.ts",
     "packages/server/src/rpc/methods/server.ts",
     "packages/cli/src/serve/command.ts",
@@ -4631,13 +4634,6 @@ test("Device Administration reads, paired/current removal and duty migration hav
       ),
     )).join("\n"),
     /unique Host application composition drifted/,
-  );
-  assert.match(
-    inspectDeviceAdministrationReadOwnership(mutate(
-      "packages/core/src/index.ts",
-      (text) => `${text}\nexport * from \"./device-administration/application.js\";`,
-    )).join("\n"),
-    /narrow export\/build boundary drifted/,
   );
 });
 
@@ -4999,7 +4995,6 @@ test("Kernel run events have one finite owner and explicit two-sided projections
     "packages/orchestrator/src/runtime/kernel-run-envelope.ts",
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
     "packages/orchestrator/src/runtime/index.ts",
-    "packages/orchestrator/src/index.ts",
     "packages/runtime-host/src/session-adapter.ts",
     "packages/cli/src/serve/ephemeral-executor.ts",
     "packages/cli/src/serve/agent-job-runtime.ts",
@@ -5061,13 +5056,6 @@ test("Kernel run events have one finite owner and explicit two-sided projections
     )).join("\n"),
     /out-of-band protocol projection share an owner/,
   );
-  assert.match(
-    inspectKernelRunEventOwnership(mutate(
-      "packages/orchestrator/src/index.ts",
-      (text) => `${text}\nexport { type KernelRunEvent } from "./runtime/index.js";`,
-    )).join("\n"),
-    /leaked through the orchestrator package root/,
-  );
 });
 
 test("Kernel terminals have one finite owner, zero-copy artifact transfer and three product projections", async () => {
@@ -5075,7 +5063,6 @@ test("Kernel terminals have one finite owner, zero-copy artifact transfer and th
     "packages/orchestrator/src/runtime/kernel-terminal.ts",
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
     "packages/orchestrator/src/runtime/index.ts",
-    "packages/orchestrator/src/index.ts",
     "packages/runtime-host/src/session-adapter.ts",
     "packages/cli/src/serve/ephemeral-executor.ts",
     "packages/cli/src/serve/agent-job-runtime.ts",
@@ -5150,20 +5137,12 @@ test("Kernel terminals have one finite owner, zero-copy artifact transfer and th
     )).join("\n"),
     /second owner/,
   );
-  assert.match(
-    inspectKernelTerminalOwnership(mutate(
-      "packages/orchestrator/src/index.ts",
-      (text) => `${text}\nexport { type KernelTerminal } from "./runtime/index.js";`,
-    )).join("\n"),
-    /leaked through the package root/,
-  );
 });
 
 test("Kernel Conformance covers four production bindings and freezes AgentRuntime API", async () => {
   const paths = [
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
     "packages/orchestrator/src/runtime/index.ts",
-    "packages/orchestrator/src/index.ts",
     "packages/runtime-host/src/session-adapter.ts",
     "packages/cli/src/serve/ephemeral-executor.ts",
     "packages/cli/src/serve/agent-job-runtime.ts",
@@ -5191,13 +5170,6 @@ test("Kernel Conformance covers four production bindings and freezes AgentRuntim
       ),
     )).join("\n"),
     /public member exact-set drifted/,
-  );
-  assert.match(
-    inspectKernelConformanceAndAgentRuntimeBudget(mutate(
-      "packages/orchestrator/src/index.ts",
-      (text) => `${text}\nexport { createAgentRuntime } from "./runtime/index.js";`,
-    )).join("\n"),
-    /not confined to the runtime subpath/,
   );
   assert.match(
     inspectKernelConformanceAndAgentRuntimeBudget(mutate(
@@ -5455,7 +5427,6 @@ test("Kernel model providers are concrete only at the Host edge", async () => {
     "packages/orchestrator/src/runtime/kernel-runtime-environment.ts",
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
     "packages/orchestrator/src/runtime/index.ts",
-    "packages/orchestrator/src/index.ts",
     "packages/runtime-host/src/runtime-host.ts",
     "packages/cli/src/runtime/kernel-runtime-bindings.ts",
     "packages/cli/src/serve/command.ts",
@@ -5476,13 +5447,6 @@ test("Kernel model providers are concrete only at the Host edge", async () => {
       (text) => `import { createProviderRoles } from "@zhixing/providers";\n${text}`,
     )).join("\n"),
     /concrete Provider|concrete Provider\/configuration/,
-  );
-  assert.match(
-    inspectKernelProviderDependencyInversion(mutate(
-      "packages/orchestrator/src/index.ts",
-      (text) => `${text}\nexport * from "./runtime/kernel-model-provider.js";`,
-    )).join("\n"),
-    /runtime subpath/,
   );
   assert.match(
     inspectKernelProviderDependencyInversion(mutate(
@@ -5534,7 +5498,6 @@ test("Kernel tool implementations are concrete only at the Host edge", async () 
     "packages/orchestrator/src/runtime/kernel-tool-implementation.ts",
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
     "packages/orchestrator/src/runtime/index.ts",
-    "packages/orchestrator/src/index.ts",
     "packages/orchestrator/package.json",
     "packages/runtime-host/src/runtime-host.ts",
     "packages/cli/src/runtime/kernel-tool-implementation.ts",
@@ -5591,10 +5554,6 @@ test("Kernel tool implementations are concrete only at the Host edge", async () 
     ),
   )).join("\n"), /Executor runtime issuance/);
   assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
-    "packages/orchestrator/src/index.ts",
-    (text) => `${text}\nexport type { KernelToolImplementationPort } from "./runtime/index.js";`,
-  )).join("\n"), /runtime-only subpath/);
-  assert.match(inspectKernelToolImplementationDependencyInversion(mutate(
     "packages/tools-builtin/src/task-list.ts",
     (text) => `${text}\nconst assignmentMutations = runContextStorage.getStore();`,
   )).join("\n"), /Conversation-owned command/);
@@ -5649,7 +5608,6 @@ test("Advancement model providers are concrete only at the Host edge", async () 
   const paths = [
     "packages/orchestrator/src/advancement/model-provider.ts",
     "packages/orchestrator/src/advancement/index.ts",
-    "packages/orchestrator/src/index.ts",
     "packages/cli/src/runtime/advancement-model-provider.ts",
     "packages/cli/src/serve/advancement-controller.ts",
     "packages/cli/src/serve/command.ts",
@@ -5692,13 +5650,6 @@ test("Advancement model providers are concrete only at the Host edge", async () 
       ),
     )).join("\n"),
     /production roots/,
-  );
-  assert.match(
-    inspectAdvancementProviderDependencyInversion(mutate(
-      "packages/orchestrator/src/index.ts",
-      (text) => `${text}\nexport { type AdvancementModelProviderBinding } from "./advancement/index.js";`,
-    )).join("\n"),
-    /narrow subpath/,
   );
 });
 
@@ -5911,7 +5862,6 @@ test("validated configuration crosses composition roots as finite frozen project
 test("Anchor tool and MCP projection is outside the one generic RuntimeHost issuance", async () => {
   const paths = [
     "packages/runtime-host/src/runtime-host.ts",
-    "packages/runtime-host/src/index.ts",
     "packages/runtime-host/src/conversation-runtime-projection.ts",
     "packages/orchestrator/src/runtime/kernel-runtime-identity.ts",
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
@@ -5919,7 +5869,6 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
     "packages/cli/src/serve/segment-deps.ts",
     "packages/cli/src/serve/workmode-tools.ts",
     "packages/cli/src/serve/workscene-port.ts",
-    "packages/runtime-host/tsup.config.ts",
     "packages/cli/src/serve/execution-scheduler-facade.ts",
     "packages/cli/src/serve/workscene-runtime-projection.ts",
     "packages/cli/src/serve/command.ts",
@@ -5947,13 +5896,6 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
       (text) => text.replace("assertConversationRuntimeProjection(projection);", ""),
     )).join("\n"),
     /can bypass Workscene product projection/,
-  );
-  assert.match(
-    inspectWorksceneRuntimeProjectionBoundary(mutate(
-      "packages/runtime-host/src/index.ts",
-      (text) => `${text}\nexport * from "./conversation-runtime-projection.js";`,
-    )).join("\n"),
-    /leaked through the RuntimeHost package root/,
   );
   assert.match(
     inspectWorksceneRuntimeProjectionBoundary(mutate(
@@ -5987,23 +5929,6 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
     /still owns Anchor Schedule, Task or MCP assembly/,
   );
   assert.match(
-    inspectWorksceneRuntimeProjectionBoundary(mutate(
-      "packages/runtime-host/src/index.ts",
-      (text) => `${text}\nexport * from "./builtin-extra-tools.js";`,
-    )).join("\n"),
-    /retained a product implementation, export, build entry or consumer path/,
-  );
-  assert.match(
-    inspectWorksceneRuntimeProjectionBoundary(mutate(
-      "packages/runtime-host/tsup.config.ts",
-      (text) => text.replace(
-        '    "src/runtime-host.ts",',
-        '    "src/runtime-host.ts",\n    "src/segment-deps.ts",',
-      ),
-    )).join("\n"),
-    /retained a product implementation, export, build entry or consumer path/,
-  );
-  assert.match(
     inspectWorksceneRuntimeProjectionBoundary([
       ...records,
       {
@@ -6011,14 +5936,14 @@ test("Anchor tool and MCP projection is outside the one generic RuntimeHost issu
         text: "export interface WorksceneToolDirectory {}",
       },
     ]).join("\n"),
-    /retained a product implementation, export, build entry or consumer path/,
+    /retained a product implementation or consumer path/,
   );
   assert.match(
     inspectWorksceneRuntimeProjectionBoundary(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => `${text}\nimport "@zhixing/runtime-host/workmode-tools";`,
     )).join("\n"),
-    /retained a product implementation, export, build entry or consumer path/,
+    /retained a product implementation or consumer path/,
   );
   assert.match(
     inspectWorksceneRuntimeProjectionBoundary(mutate(
@@ -6192,9 +6117,6 @@ test("Workspace Administration CRUD, reset, durable lifecycle and result deliver
   const paths = [
     "packages/core/src/environment/workspace-administration.ts",
     "packages/core/src/environment/index.ts",
-    "packages/core/src/index.ts",
-    "packages/core/package.json",
-    "packages/core/tsup.config.ts",
     "packages/cli/src/runtime/local-workspace-management-host.ts",
     "packages/cli/src/runtime/local-workspace-operation-outbox.ts",
     "packages/cli/src/runtime/local-workspace-durable-lifecycle-adapter.ts",
@@ -6238,7 +6160,7 @@ test("Workspace Administration CRUD, reset, durable lifecycle and result deliver
       "packages/core/src/environment/index.ts",
       (text) => `${text}\nexport * from \"./workspace-administration.js\";`,
     )).join("\n"),
-    /one narrow non-root core subpath/,
+    /leaked through the environment source barrel/,
   );
   assert.match(
     inspectWorkspaceAdministrationOwnership(mutate(
@@ -6452,9 +6374,6 @@ test("Trust Administration management has one domain application and Product API
     "packages/core/src/security/trust-administration-adapter.ts",
     "packages/core/src/security/security-pipeline.ts",
     "packages/core/src/product-api/catalog.ts",
-    "packages/core/src/index.ts",
-    "packages/core/package.json",
-    "packages/core/tsup.config.ts",
     "packages/server/src/rpc/methods/trust.ts",
     "packages/server/src/context.ts",
     "packages/server/src/index.ts",
@@ -6611,9 +6530,6 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
     "packages/core/src/advancement/store.ts",
     "packages/core/src/conversation/application.ts",
     "packages/core/src/advancement/index.ts",
-    "packages/core/src/index.ts",
-    "packages/core/package.json",
-    "packages/core/tsup.config.ts",
     "packages/owner-services/src/advancement/controller.ts",
     "packages/owner-services/src/advancement/evidence.ts",
     "packages/owner-services/src/advancement/session-store.ts",
@@ -6622,8 +6538,6 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
     "packages/owner-services/src/advancement/review-attempt-correctness.ts",
     "packages/owner-services/src/advancement/recovery-maintenance.ts",
     "packages/owner-services/src/advancement/index.ts",
-    "packages/owner-services/package.json",
-    "packages/owner-services/tsup.config.ts",
     "packages/server/src/rpc/methods/session.ts",
     "packages/server/src/context.ts",
     "packages/server/src/system-handlers.ts",
@@ -7472,15 +7386,9 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/core/src/delivery/index.ts",
     "packages/core/src/product-api/catalog.ts",
     "packages/core/src/skills/global-state-adapter.ts",
-    "packages/core/src/index.ts",
     "packages/core/src/skills/index.ts",
-    "packages/core/package.json",
-    "packages/core/tsup.config.ts",
-    "packages/rpc/src/index.ts",
     "packages/rpc/src/session-wire.ts",
     "packages/rpc/src/skill-catalog-client.ts",
-    "packages/rpc/package.json",
-    "packages/rpc/tsup.config.ts",
     "packages/server/src/rpc/methods/skill.ts",
     "packages/server/src/rpc/methods/workscene.ts",
     "packages/server/src/index.ts",
@@ -7530,11 +7438,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/owner-kernel/src/delivery-obligation-correctness.ts",
     "packages/owner-kernel/src/delivery-participant.ts",
     "packages/owner-kernel/src/delivery.ts",
-    "packages/owner-kernel/src/index.ts",
     "packages/owner-kernel/src/conversation-agent-turn-admission.ts",
     "packages/owner-kernel/src/conversation-control.ts",
-    "packages/owner-kernel/package.json",
-    "packages/owner-kernel/tsup.config.ts",
     "packages/owner-kernel/src/conversation-assignment.ts",
     "packages/owner-kernel/src/job-assignment.ts",
     "packages/owner-kernel/src/scheduler-user-notices.ts",
@@ -7785,13 +7690,6 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/owner-kernel/src/index.ts",
-      (text) => `${text}\nexport * from "./conversation-control.js";`,
-    )).join("\n"),
-    /Conversation directory management lacks one domain application/,
-  );
-  assert.match(
-    inspectSkillCatalogApplicationOwnership(mutate(
       "packages/core/src/conversation/application.ts",
       (text) => text.replace(
         "readonly taskList: TaskListState;\n}\n\nexport interface ConversationTaskListUpdateOutcome",
@@ -8031,13 +7929,6 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
         "input.manager.admitDurableTurn({",
         "input.manager.writeDurableTurn({",
       ),
-    )).join("\n"),
-    /Conversation directory management lacks one domain application/,
-  );
-  assert.match(
-    inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/owner-kernel/src/index.ts",
-      (text) => `${text}\nexport * from "./conversation-agent-turn-admission.js";`,
     )).join("\n"),
     /Conversation directory management lacks one domain application/,
   );
@@ -8610,16 +8501,6 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/core/package.json",
-      (text) => text.replace(
-        '    "./advancement": {',
-        '    "./scheduler/application-compat": {\n      "types": "./dist/scheduler/application.d.ts",\n      "import": "./dist/scheduler/application.js"\n    },\n    "./advancement": {',
-      ),
-    )).join("\n"),
-    /one narrow non-root core subpath/,
-  );
-  assert.match(
-    inspectSkillCatalogApplicationOwnership(mutate(
       "packages/core/src/skills/catalog-application.ts",
       (text) => text.replace(
         "entry.mode === mode && !entry.disabled",
@@ -8802,17 +8683,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       "packages/core/src/skills/index.ts",
       (text) => `${text}\nexport * from "./catalog-management-correctness.js";`,
     )).join("\n"),
-    /application contract leaked into the core root barrel/,
-  );
-  assert.match(
-    inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/core/package.json",
-      (text) => text.replace(
-        '    "./advancement": {',
-        '    "./skills/catalog-correctness-compat": {\n      "types": "./dist/skills/catalog-management-correctness.d.ts",\n      "import": "./dist/skills/catalog-management-correctness.js"\n    },\n    "./advancement": {',
-      ),
-    )).join("\n"),
-    /Correctness adapter must have one narrow non-root subpath/,
+    /application contract leaked into its source barrel/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
@@ -8889,7 +8760,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       "packages/core/src/delivery/index.ts",
       (text) => `${text}\nexport * from "./application.js";`,
     )).join("\n"),
-    /one narrow non-root core subpath/,
+    /Delivery application source ownership drifted/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership([
@@ -8906,7 +8777,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       "packages/core/src/delivery/application.ts",
       (text) => `${text}\nimport { AuthorityStorageError } from "../authority/index.js";`,
     )).join("\n"),
-    /one narrow non-root core subpath/,
+    /Delivery application source ownership drifted/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
@@ -8944,26 +8815,6 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       ),
     )).join("\n"),
     /delivery.resolve bypasses the Product API dispatcher/,
-  );
-  assert.match(
-    inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/core/package.json",
-      (text) => text.replaceAll(
-        "./dist/delivery/application",
-        "./dist/delivery/resolution-application",
-      ),
-    )).join("\n"),
-    /one narrow non-root core subpath/,
-  );
-  assert.match(
-    inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/core/tsup.config.ts",
-      (text) => text.replace(
-        '"src/delivery/application.ts"',
-        '"src/delivery/resolution-application.ts"',
-      ),
-    )).join("\n"),
-    /one narrow non-root core subpath/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
@@ -9018,7 +8869,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       "packages/core/src/delivery/index.ts",
       (text) => `${text}\nexport * from "./channel-effect.js";`,
     )).join("\n"),
-    /Channel effect must have one narrow non-root adapter subpath/,
+    /Channel effect leaked through the Delivery source barrel/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
@@ -9090,13 +8941,6 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/owner-kernel/src/index.ts",
-      (text) => `${text}\nexport * from "./delivery-obligation-correctness.js";`,
-    )).join("\n"),
-    /one domain decision and one narrow Correctness adapter/,
-  );
-  assert.match(
-    inspectSkillCatalogApplicationOwnership(mutate(
       "packages/owner-kernel/src/scheduler-user-notices.ts",
       (text) => text.replace(
         "prepareSchedulerNotices?.(",
@@ -9114,20 +8958,10 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/core/package.json",
-      (text) => text.replace(
-        '    "./advancement": {',
-        '    "./product-api-compat": {\n      "types": "./dist/product-api/catalog.d.ts",\n      "import": "./dist/product-api/catalog.js"\n    },\n    "./advancement": {',
-      ),
-    )).join("\n"),
-    /one narrow non-root core subpath/,
-  );
-  assert.match(
-    inspectSkillCatalogApplicationOwnership(mutate(
       "packages/core/src/skills/index.ts",
       (text) => `${text}\nexport * from "./catalog-application.js";`,
     )).join("\n"),
-    /leaked into the core root barrel/,
+    /leaked into its source barrel/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
@@ -9138,16 +8972,6 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       ),
     )).join("\n"),
     /expose only the Product API dispatcher binding/,
-  );
-  assert.match(
-    inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/core/package.json",
-      (text) => text.replace(
-        '    "./advancement": {',
-        '    "./skills/catalog-compat": {\n      "types": "./dist/skills/catalog-application.d.ts",\n      "import": "./dist/skills/catalog-application.js"\n    },\n    "./advancement": {',
-      ),
-    )).join("\n"),
-    /second package export entry/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
@@ -9164,12 +8988,12 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       "packages/core/src/skills/index.ts",
       (text) => `${text}\nexport { runSkillSavePipeline } from "./save-pipeline.js";`,
     )).join("\n"),
-    /retired parallel Skill save application owner|leaked into the core root barrel/,
+    /retired parallel Skill save application owner|leaked into its source barrel/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/tools-builtin/src/skill.ts",
-      (text) => text.replace(
+      (text) => text.replaceAll(
         '@zhixing/core/skills/catalog',
         '@zhixing/core',
       ),
@@ -9299,7 +9123,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       "packages/core/src/skills/index.ts",
       (text) => `${text}\nexport { SkillStore } from "./store.js";`,
     )).join("\n"),
-    /root barrel exposes retired filesystem storage/,
+    /source barrel exposes retired filesystem storage/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership([
@@ -9336,23 +9160,6 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       },
     ]).join("\n"),
     /leaked back into the CLI Surface package|wire escaped/,
-  );
-  assert.match(
-    inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/rpc/src/index.ts",
-      (text) => `${text}\nexport * from "./skill-catalog-client.js";`,
-    )).join("\n"),
-    /one narrow non-root RPC subpath/,
-  );
-  assert.match(
-    inspectSkillCatalogApplicationOwnership(mutate(
-      "packages/rpc/package.json",
-      (text) => text.replace(
-        '"./session-wire":',
-        '"./skill-client-alias": { "types": "./dist/skill-catalog-client.d.ts", "import": "./dist/skill-catalog-client.js" },\n    "./session-wire":',
-      ),
-    )).join("\n"),
-    /one narrow non-root RPC subpath/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(
@@ -9435,12 +9242,6 @@ test("finite dependency syntax and manifests cannot bypass owner or role isolati
       dependencies: { "@zhixing/mcp": "workspace:*" },
     }).join("\n"),
     /runtime-host declares product dependency/,
-  );
-  assert.match(
-    inspectProductionManifest("packages/runtime-host/package.json", {
-      exports: { "./workmode-tools": {} },
-    }).join("\n"),
-    /runtime-host exposes retired product subpath/,
   );
 });
 

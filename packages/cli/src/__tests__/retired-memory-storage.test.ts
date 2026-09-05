@@ -76,10 +76,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   };
 });
 
-import {
-  getWorkSceneConversationsRoot,
-  getWorkSceneDir,
-} from "@zhixing/core";
+import { getWorkSceneConversationsRoot, getWorkSceneDir } from "@zhixing/core/workscene";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { setupAuthorityRuntime } from "../setup-delivery.js";
 import { createWorksceneStorageCleanupInfrastructure } from "../serve/workscene-storage-cleanup.js";

@@ -6,7 +6,7 @@ import type {
   InteractionDisplay,
   StreamFrame,
 } from "@zhixing/core/contracts";
-import type { ConfirmationDecision } from "@zhixing/core";
+import type { ConfirmationDecision } from "@zhixing/core/confirmation";
 import {
   assertDataPlaneTicketActiveAt,
   assertDataPlaneTicketBinding,
@@ -19,7 +19,7 @@ import {
 } from "@zhixing/core/protocol";
 import type {
   ConversationChannelFrameAdoption,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/conversation-assignment";
 import {
   AssignmentStreamPathManager,
   type AssignmentStreamPathConnector,

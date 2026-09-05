@@ -25,9 +25,9 @@ import {
   UsageTracker,
   type RuntimeContext,
   type DispatchResult,
-  type PostTurnControlOutcome,
   CommandDispatcher,
-} from "@zhixing/core";
+} from "@zhixing/core/typeahead";
+import { type PostTurnControlOutcome } from "@zhixing/core";
 import { TaskTail } from "./task-tail/index.js";
 import { TaskListViewCache } from "./runtime/task-list-view.js";
 import { registerTaskCommands } from "./commands/task-commands.js";

@@ -1,4 +1,4 @@
-import type { ScheduleMutationStager } from "@zhixing/core";
+import type { ScheduleMutationStager } from "@zhixing/core/scheduler";
 import type {
   AssignmentGlobalQueryPort,
   AssignmentMutationPort,
@@ -12,7 +12,7 @@ import {
   validateGlobalQuery,
   validateGlobalQueryResult,
 } from "@zhixing/core/protocol";
-import { scheduleTaskIdForRequest } from "@zhixing/owner-kernel";
+import { scheduleTaskIdForRequest } from "@zhixing/owner-kernel/scheduler-authority";
 import type { ConversationAssignmentLedger } from "@zhixing/executor";
 
 export function createAssignmentGlobalQueryPort(input: {

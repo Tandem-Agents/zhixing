@@ -27,20 +27,19 @@
  *   - 三态结果都保留结构化 <usage> trailer，让主 LLM 和用量视图读取同一协议
  */
 
+import { type BoundaryCrossing, type SecurityPipeline } from "@zhixing/core/security";
+import { type IConfirmationBroker } from "@zhixing/core/confirmation";
 import {
-  type BoundaryCrossing,
-  type IConfirmationBroker,
   type JsonSchema,
   type LLMProvider,
   type LLMRoles,
   type ResolvedRoleThinking,
   type SubAgentResultPresentationArtifact,
-  type SecurityPipeline,
   type ThinkingConfig,
   type ToolDefinition,
   type ToolExecutionContext,
   type ToolResult,
-} from "@zhixing/core";
+} from "@zhixing/core/types";
 import type { TrustAdministrationExecutionApplication } from "@zhixing/core/trust-administration";
 import { runChildAgent, type ChildAgentResult } from "../subagent/factory.js";
 import { formatAbortReasonForLLM } from "../subagent/abort-format.js";

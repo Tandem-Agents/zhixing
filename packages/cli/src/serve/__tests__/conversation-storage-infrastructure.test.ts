@@ -1,9 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  extractFirstText,
-  toSafePathSegment,
-  worksceneConversationId,
-} from "@zhixing/core";
+import { extractFirstText } from "@zhixing/core";
+import { toSafePathSegment } from "@zhixing/core/paths";
+import { worksceneConversationId } from "@zhixing/core/conversation";
 import { createTempDir } from "@zhixing/test-utils";
 import { createConversationStorageInfrastructure } from "../conversation-storage-infrastructure.js";
 import { createWorksceneStorageCleanupInfrastructure } from "../workscene-storage-cleanup.js";

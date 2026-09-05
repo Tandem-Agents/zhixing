@@ -6,7 +6,7 @@ import {
   type ConversationDeleteProjectionPort,
   type ConversationCommandCaller,
 } from "@zhixing/core/conversation/application";
-import type { ConversationManager } from "@zhixing/owner-kernel";
+import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 
 interface AnchorConversationDeleteStorage {
   exists(conversationId: string): Promise<boolean>;

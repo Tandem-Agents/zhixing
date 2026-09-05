@@ -16,7 +16,7 @@ import {
   type SchedulerFacadeEvent,
   type SchedulerFacadeEventHandler,
   type ScheduleMutationContext,
-} from "@zhixing/core";
+} from "@zhixing/core/scheduler";
 import type { ScheduleTaskDraft } from "@zhixing/core/scheduler/application";
 import type { CoreHostRpcLink } from "./core-host-connection.js";
 

@@ -6,13 +6,8 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import {
-  CommandDispatcher,
-  DefaultCommandRegistry,
-  type RuntimeContext,
-  type SchedulerFacade,
-  type TaskView,
-} from "@zhixing/core";
+import { CommandDispatcher, DefaultCommandRegistry, type RuntimeContext } from "@zhixing/core/typeahead";
+import { type SchedulerFacade, type TaskView } from "@zhixing/core/scheduler";
 import { registerInfoCommands } from "../info-commands.js";
 import { stripAnsi } from "../../tui/index.js";
 import type { CliWriter } from "../../screen/index.js";

@@ -10,11 +10,8 @@
  * 不关心运行模式（REPL/serve），两端调用方式一样。
  */
 
-import {
-  type RuntimeExecutionProfile,
-  createEventBus,
-  type PermissionRule,
-} from "@zhixing/core";
+import { type RuntimeExecutionProfile, createEventBus } from "@zhixing/core";
+import { type PermissionRule } from "@zhixing/core/security";
 import {
   AuthorityDeliveryPipeline,
   DeliveryAuthority,
@@ -83,12 +80,10 @@ import {
   WorkspaceProbeHandler,
   type WorkspaceProbePort,
 } from "@zhixing/core/environment";
-import {
-  AnchorRubricGlobalStateAdapter,
-  AnchorSkillGlobalStateAdapter,
-  AnchorWorksceneGlobalStateAdapter,
-  parseConversationId,
-} from "@zhixing/core";
+import { AnchorRubricGlobalStateAdapter } from "@zhixing/core/rubrics";
+import { AnchorSkillGlobalStateAdapter } from "@zhixing/core/skills/global-state";
+import { AnchorWorksceneGlobalStateAdapter } from "@zhixing/core/workscene";
+import { parseConversationId } from "@zhixing/core/conversation";
 import {
   DeliveryUncertainResolutionApplicationService,
   type DeliveryUncertainResolutionApplication,
@@ -99,18 +94,20 @@ import {
   FileAuthorityCommitLog,
   type SurfaceAssetCoordinator,
 } from "@zhixing/core/authority";
+import type { ControlAdmissionJournal } from "@zhixing/owner-kernel/control-admission";
+import type { AnchorResourceGovernor } from "@zhixing/owner-kernel/resource-governor";
 import type {
-  ControlAdmissionJournal,
-  AnchorResourceGovernor,
-  OwnerDeliveryParticipant,
   ConversationAssignmentCredentialPolicy,
-  JobAssignmentCredentialPolicy,
+} from "@zhixing/owner-kernel/conversation-assignment-authority";
+import type { JobAssignmentCredentialPolicy } from "@zhixing/owner-kernel/job-assignment-authority";
+import type {
   GlobalMutationCommitParticipant,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/global-mutation-participant";
 import {
   createOwnerDeliveryLifecycleBinding,
   createOwnerDeliveryParticipant,
   type OwnerDeliveryLifecycleBinding,
+  type OwnerDeliveryParticipant,
 } from "@zhixing/owner-kernel/delivery";
 import type { ExecutorResourceGovernor } from "@zhixing/executor";
 import {
@@ -441,8 +438,8 @@ export interface DeliveryStack {
 
 export interface DeliveryAcceptedWorkLifecyclePort {
   capture(): readonly { readonly id: string; readonly revision: string }[];
-  install(input: import("@zhixing/core").DeliveryLifecycleAdmission): Promise<void>;
-  restore(input: import("@zhixing/core").DeliveryLifecycleRestoration): Promise<void>;
+  install(input: import("@zhixing/core/delivery").DeliveryLifecycleAdmission): Promise<void>;
+  restore(input: import("@zhixing/core/delivery").DeliveryLifecycleRestoration): Promise<void>;
   seal(operationId: string): Promise<void>;
   release(operationId: string): Promise<void>;
   read(
@@ -572,7 +569,13 @@ export async function setupAuthorityRuntime(
       : undefined;
     const localExecutorEnabled = options.enableLocalExecutor ?? true;
     const ownerRuntime = anchorEnabled || localExecutorEnabled
-      ? await import("@zhixing/owner-kernel")
+      ? await Promise.all([
+          import("@zhixing/owner-kernel/control-admission"),
+          import("@zhixing/owner-kernel/resource-governor"),
+        ]).then(([controlAdmission, resourceGovernor]) => ({
+          ControlAdmissionJournal: controlAdmission.ControlAdmissionJournal,
+          AnchorResourceGovernor: resourceGovernor.AnchorResourceGovernor,
+        }))
       : undefined;
     const executorRuntime = localExecutorEnabled
       ? await import("@zhixing/executor")

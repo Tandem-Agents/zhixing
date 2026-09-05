@@ -3,12 +3,7 @@
   "version": "0.1.0",
   "description": "知行对话 owner 内核 — 会话权威、运行提交与确认聚合",
   "type": "module",
-  "types": "./dist/index.d.ts",
   "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    },
     "./types": {
       "types": "./dist/types.d.ts",
       "import": "./dist/types.js"
@@ -56,6 +51,70 @@
     "./delivery": {
       "types": "./dist/delivery.d.ts",
       "import": "./dist/delivery.js"
+    },
+    "./resource-governor": {
+      "types": "./dist/resource-governor.d.ts",
+      "import": "./dist/resource-governor.js"
+    },
+    "./scheduler-authority": {
+      "types": "./dist/scheduler-authority.d.ts",
+      "import": "./dist/scheduler-authority.js"
+    },
+    "./scheduler-global-state": {
+      "types": "./dist/scheduler-global-state.d.ts",
+      "import": "./dist/scheduler-global-state.js"
+    },
+    "./conversation-assignment-authority": {
+      "types": "./dist/conversation-assignment-authority.d.ts",
+      "import": "./dist/conversation-assignment-authority.js"
+    },
+    "./job-assignment-authority": {
+      "types": "./dist/job-assignment-authority.d.ts",
+      "import": "./dist/job-assignment-authority.js"
+    },
+    "./scheduler-job-commit": {
+      "types": "./dist/scheduler-job-commit.d.ts",
+      "import": "./dist/scheduler-job-commit.js"
+    },
+    "./scheduler-conversation-publisher": {
+      "types": "./dist/scheduler-conversation-publisher.d.ts",
+      "import": "./dist/scheduler-conversation-publisher.js"
+    },
+    "./scheduler-user-notices": {
+      "types": "./dist/scheduler-user-notices.d.ts",
+      "import": "./dist/scheduler-user-notices.js"
+    },
+    "./global-mutation-commit-coordinator": {
+      "types": "./dist/global-mutation-commit-coordinator.d.ts",
+      "import": "./dist/global-mutation-commit-coordinator.js"
+    },
+    "./global-mutation-participant": {
+      "types": "./dist/global-mutation-participant.d.ts",
+      "import": "./dist/global-mutation-participant.js"
+    },
+    "./deferred-global-intent-review": {
+      "types": "./dist/deferred-global-intent-review.d.ts",
+      "import": "./dist/deferred-global-intent-review.js"
+    },
+    "./deferred-global-intents": {
+      "types": "./dist/deferred-global-intents.d.ts",
+      "import": "./dist/deferred-global-intents.js"
+    },
+    "./channel-challenge-outbox": {
+      "types": "./dist/channel-challenge-outbox.d.ts",
+      "import": "./dist/channel-challenge-outbox.js"
+    },
+    "./conversation-transfer": {
+      "types": "./dist/conversation-transfer.d.ts",
+      "import": "./dist/conversation-transfer.js"
+    },
+    "./session-state-adapter": {
+      "types": "./dist/session-state-adapter.d.ts",
+      "import": "./dist/session-state-adapter.js"
+    },
+    "./publish-result-product-language": {
+      "types": "./dist/publish-result-product-language.d.ts",
+      "import": "./dist/publish-result-product-language.js"
     },
     "./test-support/s7-durable": {
       "types": "./dist/test-support/s7-durable.d.ts",

@@ -15,7 +15,7 @@ import {
   extractFirstText,
   findLastUserIndex,
   replaceFirstText,
-} from "@zhixing/core";
+} from "@zhixing/core/types";
 
 const CONTEXT_TAG = "<context>";
 const CONTEXT_TAG_END = "</context>";

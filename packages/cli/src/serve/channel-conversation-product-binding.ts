@@ -9,10 +9,8 @@ import {
 } from "@zhixing/core/conversation/application";
 import { protocolDigest } from "@zhixing/core/protocol";
 import type { ProductApiDispatcher } from "@zhixing/core/product-api";
-import {
-  channelSurfacePrincipal,
-  type ConversationManager,
-} from "@zhixing/owner-kernel";
+import { channelSurfacePrincipal } from "@zhixing/owner-kernel/control-admission";
+import { type ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
 import type {
   InboundConversationApplicationPort,

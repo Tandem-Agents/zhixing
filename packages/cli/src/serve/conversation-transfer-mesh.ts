@@ -21,7 +21,7 @@ import {
   ConversationTransferTarget,
   type ConversationTransferReadPort,
   type FrozenConversationTransfer,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/conversation-transfer";
 
 export const CONVERSATION_TRANSFER_MESH_SERVICE = "conversation.transfer";
 

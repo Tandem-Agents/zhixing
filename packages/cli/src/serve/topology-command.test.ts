@@ -16,8 +16,8 @@ const harness = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("@zhixing/core", async (importOriginal) => ({
-  ...await importOriginal<typeof import("@zhixing/core")>(),
+vi.mock("@zhixing/core/paths", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@zhixing/core/paths")>(),
   getZhixingHome: () => "test-home",
 }));
 vi.mock("@zhixing/secrets", () => ({

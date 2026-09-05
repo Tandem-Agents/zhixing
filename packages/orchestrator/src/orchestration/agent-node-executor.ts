@@ -1,15 +1,17 @@
+import type { IConfirmationBroker } from "@zhixing/core/confirmation";
 import type {
-  IConfirmationBroker,
   LLMProvider,
   LLMRoles,
+  ResolvedRoleThinking,
+  ThinkingConfig,
+  ToolDefinition,
+} from "@zhixing/core/types";
+import type {
   NormalizedOrchestrationNodeV1,
   OrchestrationNodeOutputV1,
   OrchestrationNodeRunResultV1,
-  ResolvedRoleThinking,
-  SecurityPipeline,
-  ThinkingConfig,
-  ToolDefinition,
-} from "@zhixing/core";
+} from "@zhixing/core/orchestration";
+import type { SecurityPipeline } from "@zhixing/core/security";
 import type { TrustAdministrationExecutionApplication } from "@zhixing/core/trust-administration";
 import {
   runChildAgent,

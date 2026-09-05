@@ -6,10 +6,14 @@ import {
   type AdvancementProxyMessage,
   type AdvancementRunReview,
   type ConfirmedRubricSnapshot,
-  type Message,
   type RubricContractDraftSnapshot,
-  type RunRecord,
-} from "@zhixing/core";
+} from "@zhixing/core/advancement";
+import type {
+  Message,
+} from "@zhixing/core/types";
+import type {
+  RunRecord,
+} from "@zhixing/core/transcript";
 import { AdvancementStore } from "../../../../core/src/advancement/store.js";
 import { createTempDir } from "@zhixing/test-utils";
 import {
@@ -18,7 +22,7 @@ import {
   type AdvancementControllerOptions,
   type AdvancementConversationDirectory,
   type AdvancementRecoveryMaintenance,
-} from "@zhixing/owner-services";
+} from "@zhixing/owner-services/advancement";
 import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
 import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
 import type { SessionBroadcast } from "@zhixing/rpc";

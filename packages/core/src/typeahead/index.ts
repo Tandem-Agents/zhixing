@@ -20,6 +20,7 @@ export type {
   ICommandRegistry,
   IUsageTracker,
   NumberArg,
+  PanelMode,
   PathArg,
   RendererTarget,
   RuntimeContext,

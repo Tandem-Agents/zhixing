@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ChannelChallengeAction } from "@zhixing/core";
+import type { ChannelChallengeAction } from "@zhixing/core/channels";
 import type { DataPlaneTicket } from "@zhixing/core/contracts";
-import { channelSurfacePrincipal } from "@zhixing/owner-kernel";
+import { channelSurfacePrincipal } from "@zhixing/owner-kernel/control-admission";
 import {
   ChannelInteractionCoordinator,
   JobRelayObligationDirectory,

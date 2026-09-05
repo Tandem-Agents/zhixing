@@ -1,4 +1,5 @@
-import type { ChannelStatus, LLMProvider, Message } from "@zhixing/core";
+import type { ChannelStatus } from "@zhixing/core/channels";
+import type { LLMProvider, Message } from "@zhixing/core";
 import type { SecretRef } from "@zhixing/core/contracts";
 import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
 import type { McpRuntimeServerStatus } from "../runtime/mcp-runtime-ports.js";

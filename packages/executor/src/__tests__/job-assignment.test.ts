@@ -7,7 +7,7 @@ import {
   MAX_INLINE_LOGICAL_RECORD_BYTES,
   type ArtifactStore,
 } from "@zhixing/core/authority";
-import { DeliveryAuthority } from "@zhixing/core";
+import { DeliveryAuthority } from "@zhixing/core/delivery";
 import type {
   AssignmentEntry,
   AuthorityCallContext,
@@ -66,11 +66,11 @@ import {
   ControlAdmissionJournal,
   createJobControlEnvelope,
 } from "@zhixing/owner-kernel/control-admission";
+import { SchedulerUserNoticeJournal } from "@zhixing/owner-kernel/scheduler-user-notices";
 import {
+  createOwnerDeliveryParticipant,
   OwnerDeliveryParticipant,
-  SchedulerUserNoticeJournal,
-} from "@zhixing/owner-kernel";
-import { createOwnerDeliveryParticipant } from "@zhixing/owner-kernel/delivery";
+} from "@zhixing/owner-kernel/delivery";
 import {
   InProcessJobDispatcher,
   JOB_JOURNAL_RECORD_SHAPES,

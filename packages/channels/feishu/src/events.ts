@@ -1,4 +1,7 @@
-import type { ChatType, InboundMessage } from "@zhixing/core";
+import type {
+  ChatType,
+  InboundMessage,
+} from "@zhixing/core/channels";
 
 export interface FeishuMessageEvent {
   sender: {

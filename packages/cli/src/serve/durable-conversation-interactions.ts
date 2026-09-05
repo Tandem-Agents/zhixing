@@ -6,9 +6,8 @@ import type {
   ConfirmationLifecycleObserver,
   ConfirmationRequest,
   ConfirmationResolutionSource,
-  ToolDefinition,
-  ToolSideEffectObserver,
-} from "@zhixing/core";
+} from "@zhixing/core/confirmation";
+import type { ToolDefinition, ToolSideEffectObserver } from "@zhixing/core";
 import type {
   AuthorityCallContext,
   IngressContext,

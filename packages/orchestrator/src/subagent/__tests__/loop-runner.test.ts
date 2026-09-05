@@ -27,21 +27,18 @@ import {
   vi,
   type MockInstance,
 } from "vitest";
+import { ConfirmationBroker } from "@zhixing/core/confirmation";
+import { createEventBus } from "@zhixing/core/events";
+import { MockLLMProvider } from "@zhixing/core/loop";
+import { PermissionStore, SecurityPipeline } from "@zhixing/core/security";
 import {
-  ConfirmationBroker,
-  createEventBus,
-  MockLLMProvider,
-  PermissionStore,
-  SecurityPipeline,
   type AgentEventMap,
   type LLMRole,
   type LLMRoles,
   type Message,
   type ToolDefinition,
-} from "@zhixing/core";
-import {
-  createWatchdogPolicy,
-} from "@zhixing/core";
+} from "@zhixing/core/types";
+import { createWatchdogPolicy } from "@zhixing/core/interrupt";
 import { deriveBudgetExceededKind, runSubAgentLoop } from "../loop-runner.js";
 
 // ─── 测试辅助 ───

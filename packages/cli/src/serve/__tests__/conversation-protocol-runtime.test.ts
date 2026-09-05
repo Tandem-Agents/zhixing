@@ -3,29 +3,24 @@ import type {
   SecretRef,
   SecretStorePort,
 } from "@zhixing/core/contracts";
-import {
-  ConfirmationBroker,
-  localConversationId,
-  userMessageFromTurnInput,
-  type AgentYield,
-  type Message,
-  type PermissionRule,
-  type RunResult,
-} from "@zhixing/core";
+import { ConfirmationBroker } from "@zhixing/core/confirmation";
+import { localConversationId } from "@zhixing/core/conversation";
+import { userMessageFromTurnInput, type Message } from "@zhixing/core";
+import { type AgentYield, type RunResult } from "@zhixing/core/loop";
+import { type PermissionRule } from "@zhixing/core/security";
 import {
   createSignedTrustRuleSnapshot,
   StreamDigestChain,
   protocolDigest,
 } from "@zhixing/core/protocol";
+import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import {
-  ConversationManager,
   ConversationRunJournal,
-  createInitialControlEnvelope,
-  DurableConversationAdmissionRejectedError,
   type ConversationMutationPublisher,
-  type RuntimeFactory,
-  type SessionRuntime,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/conversation-assignment";
+import { createInitialControlEnvelope } from "@zhixing/owner-kernel/control-admission";
+import { DurableConversationAdmissionRejectedError } from "@zhixing/owner-kernel/run-turn";
+import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
 import {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,

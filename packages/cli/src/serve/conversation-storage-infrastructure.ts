@@ -1,11 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import {
-  fromSafePathSegment,
-  getWorkSceneConversationsRoot,
-  getWorkScenesRoot,
-  toSafePathSegment,
-} from "@zhixing/core";
+import { fromSafePathSegment, toSafePathSegment } from "@zhixing/core/paths";
+import { getWorkSceneConversationsRoot, getWorkScenesRoot } from "@zhixing/core/workscene";
 import {
   ConversationRepository,
   conversationsDir,
@@ -34,7 +30,7 @@ import {
   type RetentionSweepReport,
   type RunRecordWithRef,
 } from "@zhixing/core/transcript";
-import type { ConversationManagerCallbacks } from "@zhixing/owner-kernel";
+import type { ConversationManagerCallbacks } from "@zhixing/owner-kernel/conversation-manager";
 import { RoutedConversationRepoTaskListStore } from "../runtime/task-list-stores.js";
 import { createConversationDirectory } from "./conversation-directory.js";
 import type { NamerConversationRepo } from "./turn-maintenance.js";

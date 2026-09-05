@@ -16,7 +16,7 @@
  * model 元信息已知）；protocol-defaults 是"未声明时的兜底"。两者职责不同。
  */
 
-import type { ModelBudgetInfo } from "@zhixing/core";
+import type { ModelBudgetInfo } from "@zhixing/core/context";
 import type { Protocol } from "./types.js";
 
 /**

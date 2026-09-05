@@ -1,7 +1,4 @@
-import type {
-  RuntimeFactory,
-  SessionRuntime,
-} from "@zhixing/owner-kernel";
+import type { RuntimeFactory, SessionRuntime } from "@zhixing/owner-kernel/types";
 import {
   createAssignmentRuntimeAdapter,
   createOwnerRuntimeAdapter,

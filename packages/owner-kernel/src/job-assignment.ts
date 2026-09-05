@@ -1,8 +1,6 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import {
-  SCHEDULER_USER_NOTICE_STREAM,
-} from "@zhixing/core";
+import { SCHEDULER_USER_NOTICE_STREAM } from "@zhixing/core/delivery";
 import {
   DEFAULT_SCHEDULE_FAILURE_THRESHOLD,
   decideScheduleFailurePolicy,
@@ -138,11 +136,7 @@ import { SerialTaskQueue } from "@zhixing/core/persistence";
 import { ManifestSelectionError } from "./conversation-assignment-authority.js";
 import type { AssignmentResourceCoordinator } from "./resource-governor.js";
 import { publishConflictProductCopy } from "./publish-result-product-language.js";
-import {
-  compileDeliveryContent,
-  DeliveryContentValidationError,
-  type CompiledDeliveryContent,
-} from "@zhixing/core";
+import { compileDeliveryContent, DeliveryContentValidationError, type CompiledDeliveryContent } from "@zhixing/core/delivery";
 import type {
   AssignmentSubmissionAuthorizer,
   AssignmentSubmissionAuthorization,

@@ -1,11 +1,7 @@
 import { randomUUID } from "node:crypto";
-import {
-  normalizeUserTurnInput,
-  parseConversationId,
-  userMessageFromTurnInput,
-  type AgentYield,
-  type RunResult,
-} from "@zhixing/core";
+import { normalizeUserTurnInput, userMessageFromTurnInput } from "@zhixing/core";
+import { parseConversationId } from "@zhixing/core/conversation";
+import { type AgentYield, type RunResult } from "@zhixing/core/loop";
 import type {
   AuthorityLogSnapshot,
 } from "@zhixing/core/authority";
@@ -46,21 +42,41 @@ import {
 import {
   ConversationRunJournal,
   InProcessConversationDispatcher,
-  ConversationAssignmentAuthority,
-  assignmentReservationId,
-  channelSurfacePrincipal,
-  createConversationControlEnvelope,
-  createInitialControlEnvelope,
   type AssignmentSubmissionAuthorizer,
   type AssignmentSubmissionIdentity,
   type AssignmentSubmissionPreflightPort,
   type ConversationCommitAuthority,
   type CommittedConversationResult,
   type ConversationMutationPublisher,
+  type PendingConversationInput,
+  type InProcessDispatchContextFactory,
+} from "@zhixing/owner-kernel/conversation-assignment";
+import {
+  ConversationAssignmentAuthority,
+} from "@zhixing/owner-kernel/conversation-assignment-authority";
+import { assignmentReservationId } from "@zhixing/owner-kernel/resource-governor";
+import type {
+  DeferredIntentConversationAuthority,
+  DeferredIntentConversationTransaction,
+} from "@zhixing/owner-kernel/deferred-global-intents";
+import type {
+  ConversationTransferAuthorityRecord,
+} from "@zhixing/owner-kernel/conversation-transfer";
+import { ConversationSessionStateAdapter } from "@zhixing/owner-kernel/session-state-adapter";
+import {
+  channelSurfacePrincipal,
+  createConversationControlEnvelope,
+  createInitialControlEnvelope,
+} from "@zhixing/owner-kernel/control-admission";
+import {
   type ConversationManager,
   type ManagedSession,
-  type PendingConversationInput,
-  type SessionRuntime,
+  type TurnCommittedInfo,
+} from "@zhixing/owner-kernel/conversation-manager";
+import { type SessionRuntime } from "@zhixing/owner-kernel/types";
+import {
+  DurableConversationAdmissionRejectedError,
+  runTurnWithCommit,
   type DurableConversationAdmissionInput,
   type DurableConversationAdmissionResult,
   type DurableConversationCancelInput,
@@ -73,16 +89,6 @@ import {
   type DurableConversationSessionWriteResult,
   type DurableConversationTurnExecutor,
   type DurableConversationTurnInput,
-  type DeferredIntentConversationAuthority,
-  type DeferredIntentConversationTransaction,
-  type InProcessDispatchContextFactory,
-  type ConversationTransferAuthorityRecord,
-  type TurnCommittedInfo,
-  ConversationSessionStateAdapter,
-} from "@zhixing/owner-kernel";
-import {
-  DurableConversationAdmissionRejectedError,
-  runTurnWithCommit,
 } from "@zhixing/owner-kernel/run-turn";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
 import type {
@@ -141,12 +147,12 @@ export interface ConversationProtocolRuntimeOptions {
     readonly source: "interactive" | "channel";
     readonly abortSignal?: AbortSignal;
     readonly turnContext: NonNullable<
-      import("@zhixing/owner-kernel").RunTurnOptions["turnContext"]
+      import("@zhixing/owner-kernel/types").RunTurnOptions["turnContext"]
     >;
     readonly authorizeToolExecution?: NonNullable<
-      import("@zhixing/owner-kernel").RunTurnOptions["authorizeToolExecution"]
+      import("@zhixing/owner-kernel/types").RunTurnOptions["authorizeToolExecution"]
     >;
-    readonly modelCallMetering?: import("@zhixing/owner-kernel").SessionRuntimeModelCallMetering;
+    readonly modelCallMetering?: import("@zhixing/owner-kernel/types").SessionRuntimeModelCallMetering;
   }) => Promise<RunResult>;
   readonly onStatus?: (notice: ConversationStatusNotice) => void | Promise<void>;
   readonly onFinal?: (frame: FinalFrame) => void | Promise<void>;

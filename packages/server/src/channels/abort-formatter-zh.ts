@@ -10,7 +10,9 @@
  * "用户视角语义表"为单一参考源。
  */
 
-import type { AbortReason } from "@zhixing/core";
+import type {
+  AbortReason,
+} from "@zhixing/core/interrupt";
 
 /**
  * server 路径任意 abort 触发后,经 SessionAdapter outer controller + agent-loop

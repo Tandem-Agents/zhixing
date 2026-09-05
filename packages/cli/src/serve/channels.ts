@@ -1,6 +1,5 @@
 import {
   ChannelRegistry,
-  createEventBus,
   type ChannelAdapter,
   type ChannelConfig,
   type ChannelEventMap,
@@ -14,7 +13,8 @@ import {
   type HttpHandler,
   type OutboundContent,
   isChallengeChannel,
-} from "@zhixing/core";
+} from "@zhixing/core/channels";
+import { createEventBus } from "@zhixing/core";
 import type { ChannelDeliveryEffectSource } from "@zhixing/core/delivery/channel-effect";
 import {
   APPROVE_KEYWORDS,
@@ -26,7 +26,7 @@ import {
   type InboundConversationApplicationPort,
   type InboundDeliveryOutboxPort,
 } from "@zhixing/server";
-import type { ConfirmationHub } from "@zhixing/owner-kernel";
+import type { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
 import type {
   SessionActivityBroadcast,
   SessionBroadcast,

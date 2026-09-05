@@ -15,7 +15,7 @@ import {
 import {
   ConversationTransferSource,
   ConversationTransferTarget,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/conversation-transfer";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import { createConversationTransferStagingInfrastructure } from "./conversation-transfer-staging-infrastructure.js";

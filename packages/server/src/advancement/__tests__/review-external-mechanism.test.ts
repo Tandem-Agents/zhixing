@@ -4,7 +4,7 @@ import type {
   AdvancementReviewRootContract,
   AdvancementRunReview,
   AdvancementSession,
-} from "@zhixing/core";
+} from "@zhixing/core/advancement";
 import type { ImmediateRootResourceLease } from "@zhixing/core/contracts";
 import type {
   AdvancementReviewAttemptInput,
@@ -13,7 +13,7 @@ import type {
 import {
   AdvancementEvidenceDeferredError,
   type AdvancementEvidenceTarget,
-} from "@zhixing/owner-services";
+} from "@zhixing/owner-services/advancement";
 import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
 
 describe("Advancement review external mechanism", () => {

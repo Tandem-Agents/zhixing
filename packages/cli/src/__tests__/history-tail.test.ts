@@ -6,7 +6,8 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { userMessage, type Message, type RunRecord } from "@zhixing/core";
+import { userMessage, type Message } from "@zhixing/core";
+import { type RunRecord } from "@zhixing/core/transcript";
 import {
   projectHistoryTail,
   renderHistoryTailLines,

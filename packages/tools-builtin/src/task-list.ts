@@ -1,11 +1,7 @@
 /** task_list Agent binding: schema, validation and product presentation only. */
 
-import type {
-  TaskItem,
-  TaskListState,
-  ToolDefinition,
-  ToolResult,
-} from "@zhixing/core";
+import type { TaskItem, TaskListState } from "@zhixing/core/conversation";
+import type { ToolDefinition, ToolResult } from "@zhixing/core";
 import {
   ConversationApplicationError,
   type ConversationTaskListToolApplication,

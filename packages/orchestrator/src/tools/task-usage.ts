@@ -6,7 +6,7 @@
  * 接入面各自理解工具私有格式。
  */
 
-import type { Message } from "@zhixing/core";
+import type { Message } from "@zhixing/core/types";
 
 export interface TaskUsageEntry {
   /** Task 工具调用顺序索引(1-based,按消息中出现顺序)。 */

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { RubricContractDraftSnapshot } from "@zhixing/core";
+import type { RubricContractDraftSnapshot } from "@zhixing/core/advancement";
 import type { DeferredGlobalIntentPort } from "@zhixing/core/contracts";
 import { DeferredRubricPublication } from "./deferred-rubric-publication.js";
 

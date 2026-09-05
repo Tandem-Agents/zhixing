@@ -16,7 +16,7 @@ import {
   type ConfirmedRubricSnapshot,
   type CreateAdvancementSessionInput,
   type RubricContractDraftSnapshot,
-} from "@zhixing/core";
+} from "@zhixing/core/advancement";
 import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
 import type {
   AuthorityCallContext,

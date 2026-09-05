@@ -1,6 +1,6 @@
-import { isLocalConversationId } from "@zhixing/core";
+import { isLocalConversationId } from "@zhixing/core/conversation";
 import type { EvidenceRequest } from "@zhixing/core/contracts";
-import { resolveCurrentConversationAuthority } from "@zhixing/owner-kernel";
+import { resolveCurrentConversationAuthority } from "@zhixing/owner-kernel/conversation-transfer";
 import type { AuthorityRuntimeStack } from "../setup-delivery.js";
 
 export function createConversationEvidenceAuthorityVerifier(options: {

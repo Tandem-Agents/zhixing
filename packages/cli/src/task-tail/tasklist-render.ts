@@ -12,7 +12,7 @@
  * 空 / null state 返回友好提示行，引导用户通过 LLM 或 /task new 创建任务。
  */
 
-import type { TaskItem, TaskListState } from "@zhixing/core";
+import type { TaskItem, TaskListState } from "@zhixing/core/conversation";
 import { tone } from "../tui/index.js";
 
 const ICON_IN_PROGRESS = "●";

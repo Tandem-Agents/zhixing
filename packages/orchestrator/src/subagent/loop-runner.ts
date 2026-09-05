@@ -48,26 +48,24 @@
  *   - max_turns 不走 abort 通道(loop 内置 reason="max_turns"),不占用本槽位
  */
 
+import { abortWithReason } from "@zhixing/core/interrupt";
+import { drainAgentLoop, type AgentResult } from "@zhixing/core/loop";
+import { type AbortReason, type WatchdogPolicy } from "@zhixing/core/interrupt";
 import {
-  abortWithReason,
-  drainAgentLoop,
-  type AbortReason,
   type AgentErrorType,
   type AgentEventMap,
-  type AgentResult,
-  type EventBus,
-  type IConfirmationBroker,
   type LLMProvider,
   type LLMRoles,
   type Message,
   type ResolvedRoleThinking,
   type ThinkingConfig,
-  type SecurityPipeline,
   type TokenUsage,
   type ToolDefinition,
   type ToolResultBlock,
-  type WatchdogPolicy,
-} from "@zhixing/core";
+} from "@zhixing/core/types";
+import { type EventBus } from "@zhixing/core/events";
+import { type IConfirmationBroker } from "@zhixing/core/confirmation";
+import { type SecurityPipeline } from "@zhixing/core/security";
 import type { TrustAdministrationExecutionApplication } from "@zhixing/core/trust-administration";
 import { createSecureExecuteTool } from "../security/secure-executor.js";
 import type {

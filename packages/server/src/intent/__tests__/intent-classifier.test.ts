@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import type { InboundMessage } from "@zhixing/core";
+import type {
+  InboundMessage,
+} from "@zhixing/core/channels";
 import {
   APPROVE_KEYWORDS,
   DENY_KEYWORDS,

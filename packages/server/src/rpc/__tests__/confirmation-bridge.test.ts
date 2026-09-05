@@ -14,10 +14,10 @@ import { describe, it, expect, vi } from "vitest";
 import {
   ConfirmationBroker,
   type ConfirmationRequest,
-} from "@zhixing/core";
-import { ConfirmationHub } from "@zhixing/owner-kernel";
+} from "@zhixing/core/confirmation";
+import { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
 import type { RpcConnection } from "../connection.js";
-import type { ConversationManager } from "@zhixing/owner-kernel";
+import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import { createConfirmationBridge } from "@zhixing/rpc";
 
 // ─── 测试辅助 ───

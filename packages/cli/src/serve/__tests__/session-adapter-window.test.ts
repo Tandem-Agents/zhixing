@@ -10,17 +10,11 @@
  */
 
 import { describe, expect, it } from "vitest";
-import {
-  buildCompactSummaryPair,
-  buildStartupBootstrapPair,
-  type Message,
-  type RunRecordInput,
-  type WindowCompact,
-} from "@zhixing/core";
-import {
-  ConversationManager,
-  type RuntimeFactory,
-} from "@zhixing/owner-kernel";
+import { buildCompactSummaryPair, buildStartupBootstrapPair, type WindowCompact } from "@zhixing/core/context";
+import { type Message } from "@zhixing/core";
+import { type RunRecordInput } from "@zhixing/core/transcript";
+import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+import { type RuntimeFactory } from "@zhixing/owner-kernel/types";
 import type { AgentRuntime } from "@zhixing/orchestrator/runtime";
 import { createOwnerRuntimeAdapter } from "@zhixing/runtime-host/session-adapter";
 

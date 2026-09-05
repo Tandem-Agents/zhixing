@@ -12,21 +12,15 @@
  */
 
 import { describe, it, expect } from "vitest";
-import {
-  AgentError,
-  ConfirmationBroker,
-  getAbortReason,
-  type AbortReason,
-  type AgentEventMap,
-  type AgentResult,
-  type AgentYield,
-  type Message,
-} from "@zhixing/core";
+import { AgentError, type AgentEventMap, type Message } from "@zhixing/core";
+import { ConfirmationBroker } from "@zhixing/core/confirmation";
+import { getAbortReason, type AbortReason } from "@zhixing/core/interrupt";
+import { type AgentResult, type AgentYield } from "@zhixing/core/loop";
 import {
   createAssignmentRuntimeAdapter,
   createOwnerRuntimeAdapter,
 } from "@zhixing/runtime-host/session-adapter";
-import type { RunResult } from "@zhixing/core";
+import type { RunResult } from "@zhixing/core/loop";
 import type {
   AgentRuntime,
   KernelRunEnvelope,
@@ -658,7 +652,7 @@ describe("createOwnerRuntimeAdapter", () => {
       await gen.next();
 
       // parent 触发 abort,带 typed reason
-      const { abortWithReason } = await import("@zhixing/core");
+      const { abortWithReason } = await import("@zhixing/core/interrupt");
       abortWithReason(parent, { kind: "user-cancel", source: "rpc", pressedAt: 99 });
 
       let result: RunResult | undefined;

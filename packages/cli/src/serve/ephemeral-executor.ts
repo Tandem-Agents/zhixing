@@ -10,13 +10,9 @@
  *
  * 规格引用：persistent-service.md §4.2 TaskAction（sessionId 未提供时的 ephemeral 模式）
  */
-import {
-  userMessage,
-  type AgentYield,
-  type Message,
-  type TurnContext,
-} from "@zhixing/core";
-import type { AgentTurnResult } from "@zhixing/core";
+import { userMessage, type Message, type TurnContext } from "@zhixing/core";
+import { type AgentYield } from "@zhixing/core/loop";
+import type { AgentTurnResult } from "@zhixing/core/scheduler";
 import {
   assertKernelRunEvent,
   assertKernelTerminal,

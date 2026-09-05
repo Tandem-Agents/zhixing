@@ -9,7 +9,12 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { createEventBus, type AgentEventMap } from "@zhixing/core";
+import {
+  createEventBus,
+} from "@zhixing/core/events";
+import type {
+  AgentEventMap,
+} from "@zhixing/core/types";
 import {
   createRunEventForwarder,
   createActivityBroadcast,

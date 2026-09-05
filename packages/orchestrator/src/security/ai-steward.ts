@@ -14,7 +14,8 @@
  * 管家无权放行 critical 与禁区（bypassImmune）——那些在进入管家前已被排除。
  */
 
-import { userMessage, type LLMRole, type TrustLevel } from "@zhixing/core";
+import { userMessage, type LLMRole } from "@zhixing/core/types";
+import { type TrustLevel } from "@zhixing/core/security";
 
 /** 提交给管家研判的客观操作事实（agent 此刻要做什么，非自述）。 */
 export interface StewardOperation {

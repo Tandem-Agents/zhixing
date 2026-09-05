@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { AgentEventMap } from "@zhixing/core";
-import { EventBus } from "@zhixing/core";
+import type { AgentEventMap } from "@zhixing/core/types";
+import { EventBus } from "@zhixing/core/events";
 import { subscribePostTurnControlAccumulator } from "../post-turn-control-accumulator.js";
 
 function makeBus(): EventBus<AgentEventMap> {

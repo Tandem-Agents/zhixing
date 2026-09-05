@@ -13,12 +13,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import type {
-  SuggestionItem,
-  SuggestionProvider,
-  TriggerMatch,
-  TypeaheadSessionState,
-} from "@zhixing/core";
+import type { SuggestionItem, SuggestionProvider, TriggerMatch, TypeaheadSessionState } from "@zhixing/core/typeahead";
 
 import { stripAnsi } from "../ansi.js";
 import {

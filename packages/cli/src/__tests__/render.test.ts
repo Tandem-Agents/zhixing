@@ -1,19 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import type {
-  AbortReason,
-  AgentEventMap,
-  OrchestrationDefinitionV1,
-  OrchestrationSystemCapsV1,
-} from "@zhixing/core";
-import {
-  createEventBus,
-  emptyUsage,
-  loadOrchestrationDefinitionV1,
-} from "@zhixing/core";
+import type { AbortReason } from "@zhixing/core/interrupt";
+import type { AgentEventMap } from "@zhixing/core";
+import type { OrchestrationDefinitionV1, OrchestrationSystemCapsV1 } from "@zhixing/core/orchestration";
+import { createEventBus, emptyUsage } from "@zhixing/core";
+import { loadOrchestrationDefinitionV1 } from "@zhixing/core/orchestration";
 import {
   OrchestrationRunnerV1,
   type AgentNodeExecutorV1,
-} from "@zhixing/orchestrator";
+} from "@zhixing/orchestrator/orchestration";
 import {
   createRenderSubscribers,
   formatAbortReasonSummary,
@@ -28,8 +22,8 @@ import { stringWidth } from "../tui/line-width.js";
 import {
   PERSPECTIVES_DELIBERATION_DEFINITION_ID,
 } from "@zhixing/core/conversation/application";
-import type { RuntimeSubAgentUsageEntry } from "@zhixing/owner-kernel";
-import type { ContextBudget } from "@zhixing/core";
+import type { RuntimeSubAgentUsageEntry } from "@zhixing/owner-kernel/types";
+import type { ContextBudget } from "@zhixing/core/context";
 import type { CliWriter } from "../screen/index.js";
 
 // ─── CliWriter 测试桩——按段累积 line / notify 调用 ───

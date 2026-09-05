@@ -9,12 +9,7 @@
  */
 
 import type * as readline from "node:readline/promises";
-import {
-  type ICommandRegistry,
-  type CommandDispatcher,
-  type CommandHandlerContext,
-  type ArgSchema,
-} from "@zhixing/core";
+import { type ICommandRegistry, type CommandDispatcher, type CommandHandlerContext, type ArgSchema } from "@zhixing/core/typeahead";
 import type { CliWriter, ScreenController } from "../screen/index.js";
 import {
   handleConfigCommand,

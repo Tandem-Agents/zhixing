@@ -1,19 +1,20 @@
 import { describe, expect, it } from "vitest";
+import { ConfirmationBroker } from "@zhixing/core/confirmation";
+import { createEventBus } from "@zhixing/core/events";
 import {
-  ConfirmationBroker,
-  createEventBus,
   emptyUsage,
-  MockLLMProvider,
-  PermissionStore,
-  SecurityPipeline,
   type AgentEventMap,
   type LLMRole,
   type LLMRoles,
   type Message,
+  type ToolDefinition,
+} from "@zhixing/core/types";
+import { MockLLMProvider } from "@zhixing/core/loop";
+import { PermissionStore, SecurityPipeline } from "@zhixing/core/security";
+import {
   type NormalizedOrchestrationNodeV1,
   type OrchestrationContextSnapshotV1,
-  type ToolDefinition,
-} from "@zhixing/core";
+} from "@zhixing/core/orchestration";
 import {
   createAgentNodeExecutorV1,
   type RunChildAgentForOrchestrationV1,

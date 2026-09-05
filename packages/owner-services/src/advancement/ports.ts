@@ -1,9 +1,6 @@
-import type {
-  RunRecordAdvancementMetadata,
-  TurnContext,
-  UserTurnInput,
-  AdvancementSession,
-} from "@zhixing/core";
+import type { RunRecordAdvancementMetadata } from "@zhixing/core/transcript";
+import type { TurnContext, UserTurnInput } from "@zhixing/core";
+import type { AdvancementSession } from "@zhixing/core/advancement";
 import type { AdvancementReviewPresentationEvent } from "@zhixing/core/advancement/application";
 
 export type AdvancementProxyScheduleResult =

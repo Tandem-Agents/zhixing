@@ -7,7 +7,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import path from "node:path";
-import { toSafePathSegment } from "@zhixing/core";
+import { toSafePathSegment } from "@zhixing/core/paths";
 import {
   durablyRemoveDirectory,
   durablyRemoveFile,

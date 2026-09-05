@@ -15,16 +15,17 @@
 import { describe, it, expect, vi } from "vitest";
 import type {
   AgentYield,
-  Message,
-  RunRecordInput,
   RunResult,
-} from "@zhixing/core";
-import {
-  ConversationManager,
-  runTurnWithCommit,
-  type SessionRuntime,
-  type RuntimeFactory,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/core/loop";
+import type {
+  Message,
+} from "@zhixing/core/types";
+import type {
+  RunRecordInput,
+} from "@zhixing/core/transcript";
+import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+import { runTurnWithCommit } from "@zhixing/owner-kernel/run-turn";
+import { type SessionRuntime, type RuntimeFactory } from "@zhixing/owner-kernel/types";
 
 // ─── 可配置 Mock Runtime ───
 

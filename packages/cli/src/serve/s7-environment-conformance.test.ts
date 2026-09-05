@@ -6,10 +6,8 @@ import type {
   SecretRef,
   SecretStorePort,
 } from "@zhixing/core/contracts";
-import {
-  ConfirmationBroker,
-  type Message,
-} from "@zhixing/core";
+import { ConfirmationBroker } from "@zhixing/core/confirmation";
+import { type Message } from "@zhixing/core";
 import type {
   KernelRunCompletion,
   KernelRunEnvelope,
@@ -36,10 +34,8 @@ import {
 } from "@zhixing/core/resources";
 import type { SecureMeshConnection } from "@zhixing/mesh";
 import { DeviceKey, enrollDeviceIdentity } from "@zhixing/mesh/device-identity";
-import {
-  ConversationManager,
-  runTurnWithCommit,
-} from "@zhixing/owner-kernel";
+import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+import { runTurnWithCommit } from "@zhixing/owner-kernel/run-turn";
 import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
 import type {
   MeshServiceDefinition,

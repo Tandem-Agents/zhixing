@@ -12,7 +12,7 @@
  * 内容稳定不易承载诱导内容。新增 host 应满足同样标准。
  */
 
-import { PermissionStore, type PermissionRule } from "@zhixing/core";
+import { PermissionStore, type PermissionRule } from "@zhixing/core/security";
 
 /**
  * preapproved hosts 单源——供 WEB_FETCH_DEFAULT_RULES 生成权限规则。

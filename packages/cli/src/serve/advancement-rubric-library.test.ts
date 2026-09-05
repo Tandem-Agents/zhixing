@@ -3,7 +3,7 @@ import { FileArtifactStore } from "@zhixing/core/authority";
 import type { AdvancementRubricArtifactPort } from "@zhixing/core/advancement/application";
 import type { GlobalStatePort } from "@zhixing/core/contracts";
 import { createTempDir } from "@zhixing/test-utils";
-import type { RubricContractDraftSnapshot } from "@zhixing/core";
+import type { RubricContractDraftSnapshot } from "@zhixing/core/advancement";
 import { GlobalRubricCatalog, GlobalRubricPublication } from "./advancement-rubric-library.js";
 
 const NOW = "2026-08-03T12:00:00.000Z";

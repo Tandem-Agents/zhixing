@@ -7,7 +7,7 @@
  * (subscribe / getCached),TaskTail 零改挂接。
  */
 
-import type { TaskListState } from "@zhixing/core";
+import type { TaskListState } from "@zhixing/core/conversation";
 
 export interface TaskListViewEvent {
   readonly conversationId: string;

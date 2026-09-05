@@ -16,7 +16,7 @@ import type {
   SchedulerControlSource,
   TaskPatch,
   TaskSpec,
-} from "@zhixing/core";
+} from "@zhixing/core/scheduler";
 import {
   SCHEDULE_MANAGEMENT_CREATE_COMMAND,
   SCHEDULE_MANAGEMENT_DELETE_COMMAND,

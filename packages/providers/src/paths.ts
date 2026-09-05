@@ -18,7 +18,7 @@
 
 import path from "node:path";
 
-import { expandUserHome, getZhixingHome } from "@zhixing/core";
+import { expandUserHome, getZhixingHome } from "@zhixing/core/paths";
 
 /**
  * 文件名常量——内部 path 拼接 + caller 在显式 homeDir 场景拼接时用。

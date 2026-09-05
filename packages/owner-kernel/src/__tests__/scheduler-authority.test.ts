@@ -1,4 +1,4 @@
-import type { SchedulerEventMap } from "@zhixing/core";
+import type { SchedulerEventMap } from "@zhixing/core/scheduler";
 import { createEventBus } from "@zhixing/core";
 import type {
   JobOccurrence,

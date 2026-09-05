@@ -1,4 +1,6 @@
-import type { PermissionRule, SkillMode, ToolDefinition } from "@zhixing/core";
+import type { PermissionRule } from "@zhixing/core/security";
+import type { SkillMode } from "@zhixing/core/skills/catalog";
+import type { ToolDefinition } from "@zhixing/core/types";
 import type {
   SkillCatalogAdmissionApplication,
   SkillCatalogLoadApplication,

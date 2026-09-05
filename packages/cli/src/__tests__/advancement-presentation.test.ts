@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AdvancementRunReview } from "@zhixing/core";
+import type { AdvancementRunReview } from "@zhixing/core/advancement";
 import {
   ADVANCEMENT_TURN_LABEL,
   describeAdvancementExitReason,

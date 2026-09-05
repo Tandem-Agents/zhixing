@@ -23,7 +23,7 @@ import {
 import { scrubSecrets } from "@zhixing/core/security";
 import { runWithDeviceCapacity } from "@zhixing/core/resources";
 import type { EvidenceKind, EvidenceLocator } from "@zhixing/core/advancement";
-import { PathGuard } from "@zhixing/core";
+import { PathGuard } from "@zhixing/core/security";
 import type { AgentRuntimeCapacityBinding } from "../runtime/governed-agent-runtime.js";
 import { EvidenceJournal } from "./evidence-journal.js";
 

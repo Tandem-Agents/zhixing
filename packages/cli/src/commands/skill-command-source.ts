@@ -18,10 +18,7 @@
  * list() 期间旧命令仍在),避免把自己误判成撞名而自抑制。
  */
 
-import type {
-  CommandDef,
-  DynamicCommandSource,
-} from "@zhixing/core";
+import type { CommandDef, DynamicCommandSource } from "@zhixing/core/typeahead";
 import type { SkillCatalogClient } from "@zhixing/core/skills/catalog";
 
 /** 动态技能命令的生产 descriptor；注册源与覆盖门禁共同消费。 */

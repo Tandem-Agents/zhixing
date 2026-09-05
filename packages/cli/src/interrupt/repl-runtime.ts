@@ -19,7 +19,7 @@
  * 避免真听 process.stdin 或真给进程发信号。生产路径默认值不变。
  */
 
-import { createInterruptController } from "@zhixing/core";
+import { createInterruptController } from "@zhixing/core/interrupt";
 import { attachKeyboardSource } from "./keyboard-source.js";
 import { attachSignalSource, type SignalEmitter } from "./signal-source.js";
 

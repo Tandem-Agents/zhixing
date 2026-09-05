@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { AdvancementSession } from "@zhixing/core";
+import type { AdvancementSession } from "@zhixing/core/advancement";
 import type { LifecycleBeforeRunContext } from "@zhixing/orchestrator/runtime";
 import { createAdvancementAcceptanceLifecycle } from "../advancement-acceptance-lifecycle.js";
 

@@ -8,11 +8,9 @@ import {
   type AdvancementOriginalTaskAdmissionIntent,
   type ConfirmedRubricSnapshot,
   type RubricContractDraftSnapshot,
-  type Message,
-  type UserTurnInput,
   type AdvancementClosureReport,
-  extractText,
-} from "@zhixing/core";
+} from "@zhixing/core/advancement";
+import { type Message, type UserTurnInput, extractText } from "@zhixing/core";
 import type {
   AdvancementActiveUserTurnMechanismPort,
   AdvancementAwaitingRubricAdmissionDecision,

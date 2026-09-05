@@ -17,7 +17,7 @@
  *   4. **insertText/replaceRange 是唯一写路径**，所有快捷键最终走这两个方法
  */
 
-import type { RuntimeContext, TriggerContext } from "@zhixing/core";
+import type { RuntimeContext, TriggerContext } from "@zhixing/core/typeahead";
 
 const HISTORY_LIMIT = 100;
 

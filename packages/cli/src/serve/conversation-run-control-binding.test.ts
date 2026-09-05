@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ConversationCancellationResponseEffect } from "@zhixing/core/conversation/application";
-import type { ConversationManager } from "@zhixing/owner-kernel";
+import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import {
   createConversationResolutionFence,
 } from "@zhixing/owner-kernel/conversation-control";

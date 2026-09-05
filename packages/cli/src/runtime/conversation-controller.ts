@@ -17,15 +17,9 @@
  *   模式视图由对话全域键纯函数派生。
  */
 
-import {
-  finalAssistantMessageOf,
-  generateTurnId,
-  parseConversationId,
-  WORKSCENE_CONVERSATION_PREFIX,
-  type AgentYield,
-  type UserTurnInput,
-  type PostTurnControlOutcome,
-} from "@zhixing/core";
+import { finalAssistantMessageOf, type AgentYield } from "@zhixing/core/loop";
+import { generateTurnId, type UserTurnInput, type PostTurnControlOutcome } from "@zhixing/core";
+import { parseConversationId, WORKSCENE_CONVERSATION_PREFIX } from "@zhixing/core/conversation";
 import type {
   ConversationStatusNotice,
   FinalFrame,

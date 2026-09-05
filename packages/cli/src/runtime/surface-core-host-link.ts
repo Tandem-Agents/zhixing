@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { getZhixingHome } from "@zhixing/core";
+import { getZhixingHome } from "@zhixing/core/paths";
 import type { HomeTrustRecord } from "@zhixing/core/contracts";
 import { canonicalize } from "@zhixing/core/protocol";
 import { validateMeshRoleBootConfig } from "@zhixing/mesh/bootstrap";

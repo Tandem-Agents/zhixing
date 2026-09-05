@@ -1,14 +1,13 @@
+import type { DurableToolExecutionAuthorizer } from "@zhixing/core/security";
 import type {
-  DurableToolExecutionAuthorizer,
   Message,
-  RunRecordAdvancementMetadata,
-  ScheduleMutationStager,
   SessionEventProjection,
   ToolSideEffectObserver,
   TurnContext,
-  TurnSource,
-  WatchdogPolicy,
-} from "@zhixing/core";
+} from "@zhixing/core/types";
+import type { RunRecordAdvancementMetadata, TurnSource } from "@zhixing/core/transcript";
+import type { ScheduleMutationStager } from "@zhixing/core/scheduler";
+import type { WatchdogPolicy } from "@zhixing/core/interrupt";
 import type {
   AssignmentGlobalQueryPort,
   AssignmentMutationPort,

@@ -17,20 +17,28 @@
 
 import type {
   AgentResult,
+  AgentYield,
+} from "@zhixing/core/loop";
+import type {
   AdvancementClosureFacts,
   AdvancementExit,
   AdvancementReviewDecision,
   AdvancementRunReview,
   AdvancementSessionStatus,
-  AgentYield,
-  ContextBudget,
   RubricContractDraftSnapshot,
   RubricDraftPersistenceChoice,
+} from "@zhixing/core/advancement";
+import type {
+  ContextBudget,
+} from "@zhixing/core/context";
+import type {
   TaskListState,
+} from "@zhixing/core/conversation";
+import type {
   TokenUsage,
   PostTurnControlIntent,
   PostTurnControlOutcome,
-} from "@zhixing/core";
+} from "@zhixing/core/types";
 import type {
   RuntimeSubAgentUsageEntry,
 } from "@zhixing/owner-kernel/types";

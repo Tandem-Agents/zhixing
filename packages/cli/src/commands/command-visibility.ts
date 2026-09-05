@@ -13,7 +13,7 @@
  * 读取方单点定义，不在多处各写一遍字符串而漂移。
  */
 
-import type { CommandVisibility, RuntimeContext } from "@zhixing/core";
+import type { CommandVisibility, RuntimeContext } from "@zhixing/core/typeahead";
 import chalk from "chalk";
 import { layout } from "../tui/index.js";
 import type { CliWriter, ScreenController } from "../screen/index.js";

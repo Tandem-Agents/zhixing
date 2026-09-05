@@ -1,29 +1,34 @@
 import { randomUUID } from "node:crypto";
 import {
   buildCompactSummaryPair,
-  createAdvancementWindowReviewEntry,
   createSegmentManager,
   createSegmentSummarizeFn,
   createTokenEstimator,
+  type SegmentDecision,
+  type SegmentSummarizeLLMFn,
+  type WindowCompact,
+} from "@zhixing/core/context";
+import {
+  createAdvancementWindowReviewEntry,
   detectStagnation,
-  drainAgentLoop,
-  extractText,
-  extractUserTurnInputText,
-  toToolSpec,
   type AdvancementReviewContextWindowSnapshot,
   type AdvancementRunReview,
   type AdvancementWindowEntry,
   type AdvancementWindowState,
   type ConfirmedRubricSnapshot,
+  type ReviewEvidence,
+} from "@zhixing/core/advancement";
+import { drainAgentLoop } from "@zhixing/core/loop";
+import {
+  extractText,
+  extractUserTurnInputText,
+  toToolSpec,
   type LLMProvider,
   type Message,
-  type ReviewEvidence,
-  type SegmentDecision,
-  type SegmentSummarizeLLMFn,
-  type WindowCompact,
   userMessage,
-} from "@zhixing/core";
-import type { AgentResult, TokenUsage } from "@zhixing/core";
+} from "@zhixing/core/types";
+import type { AgentResult } from "@zhixing/core/loop";
+import type { TokenUsage } from "@zhixing/core/types";
 import type {
   AuthorityCallContext,
   ResourceLease,

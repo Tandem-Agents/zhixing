@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { MockLLMProvider, type LLMRole } from "@zhixing/core";
+import { MockLLMProvider } from "@zhixing/core/loop";
+import { type LLMRole } from "@zhixing/core/types";
 import {
   assertKernelModelProviderBinding,
   createKernelModelProviderBinding,

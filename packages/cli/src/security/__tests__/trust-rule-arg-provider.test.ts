@@ -12,10 +12,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import {
-  type ArgQueryContext,
-  type CommandDef,
-} from "@zhixing/core";
+import { type ArgQueryContext, type CommandDef } from "@zhixing/core/typeahead";
 import type { TrustAdministrationRule } from "@zhixing/core/trust-administration";
 import { createTrustRuleArgProvider } from "../trust-rule-arg-provider.js";
 

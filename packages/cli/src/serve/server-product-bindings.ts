@@ -2,10 +2,8 @@ import type {
   ServerConfirmationBinding,
   ServerConversationBinding,
 } from "@zhixing/server";
-import type {
-  ConfirmationHub,
-  ConversationManager,
-} from "@zhixing/owner-kernel";
+import type { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
+import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
 
 /** Adapts the Conversation owner without exposing ManagedSession or owner internals. */

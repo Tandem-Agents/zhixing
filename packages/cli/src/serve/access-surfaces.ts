@@ -20,11 +20,11 @@ import {
   AdvancementAcceptedTurnApplicationService,
   AdvancementReviewResultProjectionApplicationService,
 } from "@zhixing/core/advancement/application";
-import { ConversationManager } from "@zhixing/owner-kernel";
+import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import {
   createAdvancementRecoveryMaintenance,
   renderRecentContextFromMessages,
-} from "@zhixing/owner-services";
+} from "@zhixing/owner-services/advancement";
 import { createAdvancementReviewProxySchedulePort } from "@zhixing/owner-services/advancement/proxy-scheduler";
 import {
   createAdvancementEventSink,
@@ -1293,7 +1293,7 @@ const deliverySurface: AccessSurface = {
     router.refuseNewMessages();
     const inbound = Object.freeze({
       kind: "router" as const,
-      handleMessage: (message: import("@zhixing/core").InboundMessage) =>
+      handleMessage: (message: import("@zhixing/core/channels").InboundMessage) =>
         router.handleMessage(message),
     });
     const consumers = Object.freeze({

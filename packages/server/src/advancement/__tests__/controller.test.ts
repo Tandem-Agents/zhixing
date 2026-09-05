@@ -6,14 +6,18 @@ import type {
   AdvancementRunReview,
   AdvancementWindowState,
   ConfirmedRubricSnapshot,
-  Message,
   RubricContractDraftSnapshot,
+} from "@zhixing/core/advancement";
+import type {
+  Message,
+} from "@zhixing/core/types";
+import type {
   RunRecordInput,
-} from "@zhixing/core";
+} from "@zhixing/core/transcript";
 import {
   AdvancementController as OwnerAdvancementController,
   type AdvancementControllerOptions,
-} from "@zhixing/owner-services";
+} from "@zhixing/owner-services/advancement";
 import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
 import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
 import type { AdvancementReviewAttemptApplication } from "@zhixing/core/advancement/application";

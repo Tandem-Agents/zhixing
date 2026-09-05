@@ -6,7 +6,7 @@ import {
   acquireToStaging,
   computeStagingDigest,
   type AdmissionLlm,
-} from "@zhixing/core";
+} from "@zhixing/core/skills/admission";
 import {
   SkillCatalogAdmissionApplicationService,
   SkillCatalogLoadApplicationService,

@@ -1,9 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import {
-  type AgentYield,
-  type Message,
-  type RunResult,
-} from "@zhixing/core";
+import { type AgentYield, type RunResult } from "@zhixing/core/loop";
+import { type Message } from "@zhixing/core";
 import {
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
   ConversationDirectoryApplicationService,
@@ -13,12 +10,11 @@ import {
   defineProductApiExactSet,
   ProductApiDispatcher,
 } from "@zhixing/core/product-api";
+import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
 import {
-  ConversationManager,
-  type RuntimeFactory,
-  type SessionRuntime,
-} from "@zhixing/owner-kernel";
-import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
+  createConversationAgentTurnAdmissionPort,
+} from "@zhixing/owner-kernel/conversation-agent-turn-admission";
 import { ChannelConversationProductBinding } from "./channel-conversation-product-binding.js";
 import { createAnchorConversationRunControlPort } from "./conversation-run-control-binding.js";
 

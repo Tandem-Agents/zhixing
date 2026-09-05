@@ -1,4 +1,4 @@
-import type { ConfirmationRequest } from "@zhixing/core";
+import type { ConfirmationRequest } from "@zhixing/core/confirmation";
 import type {
   AuthorityCallContext,
   ChannelInteractionGrant,

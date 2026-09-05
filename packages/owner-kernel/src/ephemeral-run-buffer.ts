@@ -12,7 +12,7 @@
  * 封闭在缓冲内部，非法形态（重号 / 回号 / 序号与条目分离）不可表示。
  */
 
-import type { RunRecordInput } from "@zhixing/core";
+import type { RunRecordInput } from "@zhixing/core/transcript";
 
 /** 缓冲条目 —— record 与其入列时定格的 provisional runIndex 不可分离 */
 export interface PendingRun {

@@ -1,9 +1,6 @@
-import {
-  extractText,
-  finalAssistantMessageOf,
-  type Message,
-  type RunRecordInput,
-} from "@zhixing/core";
+import { extractText, type Message } from "@zhixing/core/types";
+import { finalAssistantMessageOf } from "@zhixing/core/loop";
+import { type RunRecordInput } from "@zhixing/core/transcript";
 import type {
   EvidenceRequirementSpec,
   ObjectiveSignalKind,

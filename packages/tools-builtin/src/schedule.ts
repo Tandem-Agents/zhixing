@@ -18,11 +18,7 @@
  */
 
 import type { ToolDefinition, ToolExecutionContext, ToolResult } from "@zhixing/core";
-import type {
-  SchedulerFacade,
-  ScheduledTask,
-  TaskSchedule,
-} from "@zhixing/core";
+import type { SchedulerFacade, ScheduledTask, TaskSchedule } from "@zhixing/core/scheduler";
 
 const SCHEDULE_SYSTEM_PROMPT_HINTS: readonly string[] = [
   "- Use `schedule` to create, list, update, delete, or run scheduled tasks",

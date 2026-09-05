@@ -1,16 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import type {
-  AgentTurnResult,
-  IEventBus,
-  ScheduledTask,
-  SchedulerEventMap,
-  SchedulerControlSource,
-  SystemHandler,
-  TaskPatch,
-  TaskSpec,
-  TaskPriority,
-  TaskSchedule,
-} from "@zhixing/core";
+import type { AgentTurnResult, ScheduledTask, SchedulerEventMap, SchedulerControlSource, SystemHandler, TaskPatch, TaskSpec, TaskPriority, TaskSchedule } from "@zhixing/core/scheduler";
+import type { IEventBus } from "@zhixing/core";
 import {
   countScheduleConsecutiveFailures,
   decideScheduleTrigger,

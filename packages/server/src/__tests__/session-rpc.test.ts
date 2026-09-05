@@ -9,43 +9,56 @@ import WebSocket from "ws";
 import {
   AgentError,
   assistantMessage,
-  RubricContractBuilder,
-  RubricStore,
   userMessage,
-} from "@zhixing/core";
-import { AdvancementStore } from "../../../core/src/advancement/store.js";
+  type AgentEventMap,
+  type Message,
+} from "@zhixing/core/types";
+import {
+  RubricContractBuilder,
+  type AdvancementAdmissionStrategy,
+  type AdvancementProxyMessage,
+  type AdvancementRunReview,
+  type ConfirmedRubricSnapshot,
+  type RubricContractDraftSnapshot,
+} from "@zhixing/core/advancement";
+import {
+  RubricStore,
+} from "@zhixing/core/rubrics";
 import type {
-  AgentEventMap,
   AgentResult,
   AgentYield,
-  AdvancementAdmissionStrategy,
-  AdvancementProxyMessage,
-  AdvancementRunReview,
-  ConfirmedRubricSnapshot,
-  ContextBudget,
-  Message,
-  OrchestrationRunResultV1,
-  RubricContractDraftSnapshot,
   RunResult,
+} from "@zhixing/core/loop";
+import type {
+  ContextBudget,
+} from "@zhixing/core/context";
+import type {
+  OrchestrationRunResultV1,
+} from "@zhixing/core/orchestration";
+import type {
   TaskListState,
-} from "@zhixing/core";
+} from "@zhixing/core/conversation";
+import { AdvancementStore } from "../../../core/src/advancement/store.js";
+
 import { startServer, type ZhixingServerInstance } from "../server.js";
 import { createServerContext } from "../context.js";
+import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import {
-  ConversationManager,
   DurableConversationAdmissionRejectedError,
-} from "@zhixing/owner-kernel";
-import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
+  type DurableConversationTurnExecutor,
+} from "@zhixing/owner-kernel/run-turn";
+import {
+  createConversationAgentTurnAdmissionPort,
+} from "@zhixing/owner-kernel/conversation-agent-turn-admission";
 import { parseConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
 import type {
   ConversationBootstrap,
-  DurableConversationTurnExecutor,
   RunTurnOptions,
   RuntimeSubAgentUsageEntry,
   RuntimeSecuritySnapshot,
   SessionRuntime,
   RuntimeFactory,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/types";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
 import {
   encodeRequest,
@@ -59,7 +72,7 @@ import {
   AdvancementController as OwnerAdvancementController,
   createAdvancementRecoveryMaintenance,
   type AdvancementControllerOptions,
-} from "@zhixing/owner-services";
+} from "@zhixing/owner-services/advancement";
 import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
 import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
 import {

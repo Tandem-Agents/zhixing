@@ -17,7 +17,7 @@ import {
 import { advancementHeadSession } from "@zhixing/core/advancement";
 import type { ConversationRunJournal } from "./conversation-assignment.js";
 
-export interface AnchorSessionStateAdapterOptions {
+export interface ConversationSessionStateAdapterOptions {
   readonly journalFor: (conversationId: string) => ConversationRunJournal;
   readonly sessionExists?: (conversationId: string) => Promise<boolean>;
   readonly mutateControl?: (
@@ -38,9 +38,9 @@ export interface AnchorSessionStateAdapterOptions {
  * entry points while sharing the same session reducer.
  */
 export class ConversationSessionStateAdapter implements SessionStatePort {
-  readonly #options: AnchorSessionStateAdapterOptions;
+  readonly #options: ConversationSessionStateAdapterOptions;
 
-  constructor(options: AnchorSessionStateAdapterOptions) {
+  constructor(options: ConversationSessionStateAdapterOptions) {
     this.#options = options;
   }
 
@@ -148,9 +148,6 @@ export class ConversationSessionStateAdapter implements SessionStatePort {
     return this.#journal(conversationId).taskList();
   }
 }
-
-/** Backward-compatible name for the anchor composition; behavior is domain-neutral. */
-export class AnchorSessionStateAdapter extends ConversationSessionStateAdapter {}
 
 function unavailable(method: string, conversationId: string): AuthorityError {
   return authorityError(

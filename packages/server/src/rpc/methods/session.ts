@@ -24,16 +24,22 @@
 
 import {
   abortWithReason,
+} from "@zhixing/core/interrupt";
+import {
   assistantMessage,
   emptyUsage,
   isNonEmptyUserTurnInput,
   type AgentEventMap,
-  type AgentYield,
-  type RubricContractDraftSnapshot,
   type TurnContext,
   type UserTurnInput,
   userTurnInputFromText,
-} from "@zhixing/core";
+} from "@zhixing/core/types";
+import type {
+  AgentYield,
+} from "@zhixing/core/loop";
+import type {
+  RubricContractDraftSnapshot,
+} from "@zhixing/core/advancement";
 import type { ExplicitEnvironmentSelection } from "@zhixing/core/contracts";
 import {
   CONVERSATION_CREATE_COMMAND,

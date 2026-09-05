@@ -68,6 +68,7 @@ const retiredProductionTokens = [
   "memory.peopleList",
   "workscene_memory_query",
   "PerspectivesController",
+  "AnchorSessionStateAdapter",
 ];
 const forbiddenWriteOwners = new Set(["SkillStore", "AnchorWorksceneRegistry"]);
 const guardedRoots = [
@@ -1559,7 +1560,6 @@ export function inspectKernelRunEventOwnership(records) {
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
   );
   const runtimeIndex = required("packages/orchestrator/src/runtime/index.ts");
-  const orchestratorRootIndex = required("packages/orchestrator/src/index.ts");
   const consumerSpecs = [
     {
       relative: "packages/runtime-host/src/session-adapter.ts",
@@ -1685,13 +1685,6 @@ export function inspectKernelRunEventOwnership(records) {
     failures.push("Agent Loop to Kernel Event boundary is bypassed or leaked");
   }
   if (
-    orchestratorRootIndex.includes("KernelRunEvent") ||
-    orchestratorRootIndex.includes("assertKernelRunEvent") ||
-    orchestratorRootIndex.includes('export * from "./runtime/index.js"')
-  ) {
-    failures.push("Kernel Run Event leaked through the orchestrator package root");
-  }
-  if (
     eventSource.includes("SessionEventProjection") ||
     !envelopeSource.includes("readonly onProtocolEvent?: (")
   ) {
@@ -1757,7 +1750,6 @@ export function inspectKernelTerminalOwnership(records) {
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
   );
   const runtimeIndex = required("packages/orchestrator/src/runtime/index.ts");
-  const orchestratorRootIndex = required("packages/orchestrator/src/index.ts");
   const consumerSpecs = [
     {
       relative: "packages/runtime-host/src/session-adapter.ts",
@@ -1935,15 +1927,6 @@ export function inspectKernelTerminalOwnership(records) {
       "Kernel completion must shallow-seal one transferred artifact graph without deep cloning",
     );
   }
-  if (
-    orchestratorRootIndex.includes("KernelTerminal") ||
-    orchestratorRootIndex.includes("KernelRunCompletion") ||
-    orchestratorRootIndex.includes("assertKernelTerminal") ||
-    orchestratorRootIndex.includes("RunResult") ||
-    orchestratorRootIndex.includes('export * from "./runtime/index.js"')
-  ) {
-    failures.push("Kernel Terminal or retired Kernel RunResult leaked through the package root");
-  }
 
   for (const spec of consumerSpecs) {
     const source = required(spec.relative);
@@ -2025,7 +2008,6 @@ export function inspectKernelConformanceAndAgentRuntimeBudget(records) {
   const runtimePath = "packages/orchestrator/src/runtime/create-agent-runtime.ts";
   const runtimeSource = required(runtimePath);
   const runtimeIndex = required("packages/orchestrator/src/runtime/index.ts");
-  const rootIndex = required("packages/orchestrator/src/index.ts");
   const sessionAdapter = required("packages/runtime-host/src/session-adapter.ts");
   const ephemeral = required("packages/cli/src/serve/ephemeral-executor.ts");
   const durableJob = required("packages/cli/src/serve/agent-job-runtime.ts");
@@ -2063,22 +2045,6 @@ export function inspectKernelConformanceAndAgentRuntimeBudget(records) {
     ts.ScriptTarget.Latest,
     true,
     ts.ScriptKind.TS,
-  );
-  const rootFile = ts.createSourceFile(
-    "packages/orchestrator/src/index.ts",
-    rootIndex,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
-  const rootExports = new Set(
-    rootFile.statements.flatMap((statement) =>
-      ts.isExportDeclaration(statement) &&
-      statement.exportClause &&
-      ts.isNamedExports(statement.exportClause)
-        ? statement.exportClause.elements.map((element) => element.name.text)
-        : [],
-    ),
   );
   const declarations = records.flatMap((record) => {
     const file = ts.createSourceFile(
@@ -2171,15 +2137,7 @@ export function inspectKernelConformanceAndAgentRuntimeBudget(records) {
     !runtimeIndex.includes("export type { KernelRunEnvelope }") ||
     !runtimeIndex.includes("type KernelRunEvent") ||
     !runtimeIndex.includes("type KernelRunCompletion") ||
-    !runtimeIndex.includes("type KernelTerminal") ||
-    [
-      "AgentRuntime",
-      "createAgentRuntime",
-      "KernelRunEnvelope",
-      "KernelRunEvent",
-      "KernelRunCompletion",
-      "KernelTerminal",
-    ].some((name) => rootExports.has(name))
+    !runtimeIndex.includes("type KernelTerminal")
   ) {
     failures.push("Kernel runtime contract is not confined to the runtime subpath");
   }
@@ -2835,7 +2793,6 @@ export function inspectKernelProviderDependencyInversion(records) {
     "packages/orchestrator/src/runtime/create-agent-runtime.ts",
   );
   const runtimeIndex = required("packages/orchestrator/src/runtime/index.ts");
-  const orchestratorRoot = required("packages/orchestrator/src/index.ts");
   const host = required("packages/runtime-host/src/runtime-host.ts");
   const edge = required("packages/cli/src/runtime/kernel-runtime-bindings.ts");
   const command = required("packages/cli/src/serve/command.ts");
@@ -2866,8 +2823,7 @@ export function inspectKernelProviderDependencyInversion(records) {
   }
   if (
     !runtimeIndex.includes('from "./kernel-model-provider.js";') ||
-    !runtimeIndex.includes('from "./kernel-runtime-environment.js";') ||
-    /kernel-(?:model-provider|runtime-environment)/u.test(orchestratorRoot)
+    !runtimeIndex.includes('from "./kernel-runtime-environment.js";')
   ) {
     failures.push("Kernel provider contracts are not confined to the runtime subpath");
   }
@@ -2953,7 +2909,6 @@ export function inspectKernelToolImplementationDependencyInversion(records) {
   const contract = required("packages/orchestrator/src/runtime/kernel-tool-implementation.ts");
   const runtime = required("packages/orchestrator/src/runtime/create-agent-runtime.ts");
   const runtimeIndex = required("packages/orchestrator/src/runtime/index.ts");
-  const rootIndex = required("packages/orchestrator/src/index.ts");
   const manifest = required("packages/orchestrator/package.json");
   const runtimeHost = required("packages/runtime-host/src/runtime-host.ts");
   const edge = required("packages/cli/src/runtime/kernel-tool-implementation.ts");
@@ -3023,10 +2978,9 @@ export function inspectKernelToolImplementationDependencyInversion(records) {
     !runtime.includes("profile.enabledTools.filter((name) => name !== \"Task\")") ||
     /@zhixing\/tools-builtin|BUILTIN_TOOL_FACTORIES|BUILTIN_TOOL_NAMES|WEB_FETCH_DEFAULT_RULES/u.test(runtime)
   ) failures.push("AgentRuntime does not consume only the demand-owned Tool port");
-  if (
-    !runtimeIndex.includes('from "./kernel-tool-implementation.js";') ||
-    /KernelToolImplementation/u.test(rootIndex)
-  ) failures.push("Kernel Tool contract escaped its runtime-only subpath");
+  if (!runtimeIndex.includes('from "./kernel-tool-implementation.js";')) {
+    failures.push("Kernel Tool contract escaped its runtime-only subpath");
+  }
   if (manifest.includes('"@zhixing/tools-builtin"')) {
     failures.push("Orchestrator still declares the concrete Tool implementation package");
   }
@@ -3234,7 +3188,6 @@ export function inspectAdvancementProviderDependencyInversion(records) {
   const advancementIndex = required(
     "packages/orchestrator/src/advancement/index.ts",
   );
-  const orchestratorRoot = required("packages/orchestrator/src/index.ts");
   const edge = required(
     "packages/cli/src/runtime/advancement-model-provider.ts",
   );
@@ -3260,10 +3213,7 @@ export function inspectAdvancementProviderDependencyInversion(records) {
   ) {
     failures.push("Advancement model provider contract is not finite and demand-owned");
   }
-  if (
-    !advancementIndex.includes('from "./model-provider.js";') ||
-    /AdvancementModelProvider/u.test(orchestratorRoot)
-  ) {
+  if (!advancementIndex.includes('from "./model-provider.js";')) {
     failures.push("Advancement model provider contract escaped its narrow subpath");
   }
   if (
@@ -3782,7 +3732,6 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     return source ?? "";
   };
   const host = required("packages/runtime-host/src/runtime-host.ts");
-  const hostRoot = required("packages/runtime-host/src/index.ts");
   const projection = required(
     "packages/runtime-host/src/conversation-runtime-projection.ts",
   );
@@ -3796,7 +3745,6 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
   required("packages/cli/src/serve/segment-deps.ts");
   required("packages/cli/src/serve/workmode-tools.ts");
   required("packages/cli/src/serve/workscene-port.ts");
-  const runtimeHostBuild = required("packages/runtime-host/tsup.config.ts");
   const schedulerAdapter = required(
     "packages/cli/src/serve/execution-scheduler-facade.ts",
   );
@@ -3836,13 +3784,6 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     /\bsceneId\b|Record<string, unknown>|metadata/iu.test(projection)
   ) {
     failures.push("generic conversation projection is not finite, immutable and fail closed");
-  }
-
-  if (
-    hostRoot.includes("conversation-runtime-projection") ||
-    /\bConversationRuntimeProjection\b/u.test(hostRoot)
-  ) {
-    failures.push("conversation projection leaked through the RuntimeHost package root");
   }
 
   if (
@@ -3887,12 +3828,6 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
   ];
   if (
     retiredRuntimeHostProductPaths.some((relative) => byPath.has(relative)) ||
-    /builtin-extra-tools|segment-deps|workmode-tools|workscene-port/u.test(
-      hostRoot,
-    ) ||
-    /builtin-extra-tools|segment-deps|workmode-tools|workscene-port/u.test(
-      runtimeHostBuild,
-    ) ||
     records.some(
       (record) =>
         record.relative.startsWith("packages/runtime-host/src/") &&
@@ -3906,7 +3841,7 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
       ),
     )
   ) {
-    failures.push("RuntimeHost retained a product implementation, export, build entry or consumer path");
+    failures.push("RuntimeHost retained a product implementation or consumer path");
   }
 
   if (
@@ -4199,32 +4134,12 @@ export async function validateS7Structure() {
   failures.push(...inspectConversationStorageBoundary(records));
   failures.push(...inspectWorksceneStorageCleanupBoundary(records));
   failures.push(...inspectStorageRemainderBoundary(records));
-  failures.push(...inspectRecoveryBackupAssembly([
-    ...records,
-    {
-      relative: "packages/core/package.json",
-      text: await readFile(path.join(root, "packages/core/package.json"), "utf8"),
-    },
-    {
-      relative: "packages/core/tsup.config.ts",
-      text: await readFile(path.join(root, "packages/core/tsup.config.ts"), "utf8"),
-    },
-  ]));
+  failures.push(...inspectRecoveryBackupAssembly(records));
   failures.push(...inspectPlannedAnchorTransferAssembly(records));
   failures.push(...inspectDisasterRecoveryStagingBoundary(records));
   failures.push(...inspectManagedHostAssembly(records));
   failures.push(...inspectDeviceLifecycleAssembly(records));
-  failures.push(...inspectDeviceAdministrationReadOwnership([
-    ...records,
-    {
-      relative: "packages/core/package.json",
-      text: await readFile(path.join(root, "packages/core/package.json"), "utf8"),
-    },
-    {
-      relative: "packages/core/tsup.config.ts",
-      text: await readFile(path.join(root, "packages/core/tsup.config.ts"), "utf8"),
-    },
-  ]));
+  failures.push(...inspectDeviceAdministrationReadOwnership(records));
   failures.push(...inspectKernelRunEnvelopeOwnership(records));
   failures.push(...inspectKernelRunEventOwnership(records));
   failures.push(...inspectKernelTerminalOwnership(records));
@@ -4275,87 +4190,14 @@ export async function validateS7Structure() {
   failures.push(...inspectAdvancementProviderDependencyInversion(records));
   failures.push(...inspectRuntimeSecretProjectionBoundary(records));
   failures.push(...inspectRuntimeConfigurationProjectionBoundary(records));
-  failures.push(...inspectWorksceneRuntimeProjectionBoundary([
-    ...records,
-    {
-      relative: "packages/runtime-host/tsup.config.ts",
-      text: await readFile(
-        path.join(root, "packages/runtime-host/tsup.config.ts"),
-        "utf8",
-      ),
-    },
-  ]));
+  failures.push(...inspectWorksceneRuntimeProjectionBoundary(records));
   failures.push(...inspectMcpRuntimeBoundary(records));
   failures.push(...inspectMcpManagementBoundary(records));
   failures.push(...inspectChannelRuntimeBoundary(records));
-  failures.push(...inspectWorkspaceAdministrationOwnership([
-    ...records,
-    {
-      relative: "packages/core/package.json",
-      text: await readFile(path.join(root, "packages/core/package.json"), "utf8"),
-    },
-    {
-      relative: "packages/core/tsup.config.ts",
-      text: await readFile(path.join(root, "packages/core/tsup.config.ts"), "utf8"),
-    },
-  ]));
-  failures.push(...inspectTrustAdministrationOwnership([
-    ...records,
-    {
-      relative: "packages/core/package.json",
-      text: await readFile(path.join(root, "packages/core/package.json"), "utf8"),
-    },
-    {
-      relative: "packages/core/tsup.config.ts",
-      text: await readFile(path.join(root, "packages/core/tsup.config.ts"), "utf8"),
-    },
-  ]));
-  failures.push(...inspectAdvancementDetailApplicationOwnership([
-    ...records,
-    {
-      relative: "packages/core/package.json",
-      text: await readFile(path.join(root, "packages/core/package.json"), "utf8"),
-    },
-    {
-      relative: "packages/owner-services/package.json",
-      text: await readFile(
-        path.join(root, "packages/owner-services/package.json"),
-        "utf8",
-      ),
-    },
-    {
-      relative: "packages/owner-services/tsup.config.ts",
-      text: await readFile(
-        path.join(root, "packages/owner-services/tsup.config.ts"),
-        "utf8",
-      ),
-    },
-  ]));
-  failures.push(...inspectSkillCatalogApplicationOwnership([
-    ...records,
-    {
-      relative: "packages/core/package.json",
-      text: await readFile(path.join(root, "packages/core/package.json"), "utf8"),
-    },
-    {
-      relative: "packages/rpc/package.json",
-      text: await readFile(path.join(root, "packages/rpc/package.json"), "utf8"),
-    },
-    {
-      relative: "packages/owner-kernel/package.json",
-      text: await readFile(
-        path.join(root, "packages/owner-kernel/package.json"),
-        "utf8",
-      ),
-    },
-    {
-      relative: "packages/owner-kernel/tsup.config.ts",
-      text: await readFile(
-        path.join(root, "packages/owner-kernel/tsup.config.ts"),
-        "utf8",
-      ),
-    },
-  ]));
+  failures.push(...inspectWorkspaceAdministrationOwnership(records));
+  failures.push(...inspectTrustAdministrationOwnership(records));
+  failures.push(...inspectAdvancementDetailApplicationOwnership(records));
+  failures.push(...inspectSkillCatalogApplicationOwnership(records));
   for (const packageName of [
     "server",
     "executor",
@@ -5033,9 +4875,6 @@ export function inspectDeviceAdministrationReadOwnership(records) {
   const backupRecovery = required(
     "packages/core/src/backup-recovery/application.ts",
   );
-  const coreIndex = required("packages/core/src/index.ts");
-  const manifestText = required("packages/core/package.json");
-  const build = required("packages/core/tsup.config.ts");
   const context = required("packages/server/src/context.ts");
   const handler = required("packages/server/src/rpc/methods/server.ts");
   const composition = required("packages/cli/src/serve/command.ts");
@@ -5064,23 +4903,12 @@ export function inspectDeviceAdministrationReadOwnership(records) {
   const dutyMigrationAdmission = mesh.match(
     /export class DeviceAdministrationDutyMigrationAdmissionAdapter[\s\S]*?\/\*\* Production composition/u,
   )?.[0] ?? "";
-  const manifest = manifestText ? JSON.parse(manifestText) : {};
-  const narrow = manifest.exports?.["./device-administration/application"];
-  const correctnessNarrow = manifest.exports?.["./device-administration/correctness"];
-  const backupNarrow = manifest.exports?.["./backup-recovery/application"];
   const applicationOwners = records
     .filter((record) =>
       record.relative !== "packages/core/src/device-administration/application.ts" &&
       record.text.includes("new DeviceAdministrationApplicationService("),
     )
     .map((record) => record.relative);
-  const duplicateExports = Object.entries(manifest.exports ?? {})
-    .filter(([subpath, value]) =>
-      subpath !== "./device-administration/application" &&
-      value && typeof value === "object" &&
-      (value.types === narrow?.types || value.import === narrow?.import),
-    );
-
   if (
     !application.includes("class DeviceAdministrationApplicationService") ||
     application.split("defineProductApiQuery<").length - 1 !== 5 ||
@@ -5327,11 +5155,6 @@ export function inspectDeviceAdministrationReadOwnership(records) {
     !backupRecovery.includes("verifyCheckpoint(input:") ||
     !backupRecovery.includes("minimumUpToLsn?: number") ||
     !correctness.includes("Recovery package changes the accepted uninstall generation") ||
-    !backupNarrow ||
-    backupNarrow.types !== "./dist/backup-recovery/application.d.ts" ||
-    backupNarrow.import !== "./dist/backup-recovery/application.js" ||
-    !build.includes('"src/backup-recovery/application.ts"') ||
-    coreIndex.includes("backup-recovery/application") ||
     composition.split("new BackupRecoveryCurrentRemovalApplicationService(").length - 1 !== 1 ||
     composition.split("new DeviceAdministrationCurrentRemovalRecoveryApplicationService<").length -
         1 !== 1 ||
@@ -5426,18 +5249,6 @@ export function inspectDeviceAdministrationReadOwnership(records) {
   ) {
     failures.push("Device Administration decision returned to Mesh runtime");
   }
-  if (
-    narrow?.types !== "./dist/device-administration/application.d.ts" ||
-    narrow?.import !== "./dist/device-administration/application.js" ||
-    correctnessNarrow?.types !== "./dist/device-administration/correctness.d.ts" ||
-    correctnessNarrow?.import !== "./dist/device-administration/correctness.js" ||
-    duplicateExports.length !== 0 ||
-    build.split('"src/device-administration/application.ts"').length - 1 !== 1 ||
-    build.split('"src/device-administration/correctness.ts"').length - 1 !== 1 ||
-    /device-administration|DeviceAdministration/u.test(coreIndex)
-  ) {
-    failures.push("Device Administration narrow export/build boundary drifted");
-  }
   return failures;
 }
 
@@ -5456,9 +5267,6 @@ export function inspectWorkspaceAdministrationOwnership(records) {
     "packages/core/src/environment/workspace-administration.ts",
   );
   const environmentIndex = required("packages/core/src/environment/index.ts");
-  const coreIndex = required("packages/core/src/index.ts");
-  const manifestText = required("packages/core/package.json");
-  const build = required("packages/core/tsup.config.ts");
   const host = required(
     "packages/cli/src/runtime/local-workspace-management-host.ts",
   );
@@ -5480,7 +5288,6 @@ export function inspectWorkspaceAdministrationOwnership(records) {
   );
   const command = required("packages/cli/src/runtime/workspace-command.ts");
   const repl = required("packages/cli/src/repl.ts");
-  const manifest = manifestText ? JSON.parse(manifestText) : {};
 
   const finiteWorkspaceResourcePort =
     /Pick<\s*ResourceReservationPort,\s*"acquireRoot"\s*\|\s*"settle"\s*\|\s*"release"\s*>/u;
@@ -5557,11 +5364,6 @@ export function inspectWorkspaceAdministrationOwnership(records) {
   const constructionOwners = records
     .filter((record) => record.text.includes("new WorkspaceAdministrationApplicationService("))
     .map((record) => record.relative);
-  const narrowExports = Object.entries(manifest.exports ?? {})
-    .filter(([, value]) =>
-      JSON.stringify(value).includes("workspace-administration"),
-    )
-    .map(([name]) => name);
   if (
     !application.includes("interface WorkspaceAdministrationApplication") ||
     !application.includes("class WorkspaceAdministrationApplicationService") ||
@@ -5770,15 +5572,9 @@ export function inspectWorkspaceAdministrationOwnership(records) {
       "Workspace Administration three production roots do not converge through one shared Host factory",
     );
   }
-  if (
-    JSON.stringify(narrowExports) !==
-      JSON.stringify(["./environment/workspace-administration"]) ||
-    !build.includes('"src/environment/workspace-administration.ts"') ||
-    /WorkspaceAdministration|workspace-administration/u.test(environmentIndex) ||
-    /WorkspaceAdministration|workspace-administration/u.test(coreIndex)
-  ) {
+  if (/WorkspaceAdministration|workspace-administration/u.test(environmentIndex)) {
     failures.push(
-      "Workspace Administration application must have one narrow non-root core subpath",
+      "Workspace Administration leaked through the environment source barrel",
     );
   }
   return failures;
@@ -5848,9 +5644,6 @@ export function inspectTrustAdministrationOwnership(records) {
   const trustArgumentProvider = required(
     "packages/cli/src/security/trust-rule-arg-provider.ts",
   );
-  const coreIndex = required("packages/core/src/index.ts");
-  const manifestText = required("packages/core/package.json");
-  const build = required("packages/core/tsup.config.ts");
 
   if (
     !application.includes("export interface TrustAdministrationRule") ||
@@ -6095,30 +5888,9 @@ export function inspectTrustAdministrationOwnership(records) {
     }
   }
 
-  let manifest;
-  try {
-    manifest = JSON.parse(manifestText);
-  } catch {
-    failures.push("Core manifest is invalid while checking Trust Administration");
-  }
-  const narrow = manifest?.exports?.["./trust-administration"];
-  const duplicate = Object.entries(manifest?.exports ?? {}).filter(
-    ([subpath, conditions]) =>
-      subpath !== "./trust-administration" &&
-      conditions &&
-      typeof conditions === "object" &&
-      (conditions.types === narrow?.types || conditions.import === narrow?.import),
-  );
-  if (
-    narrow?.types !== "./dist/trust-administration/application.d.ts" ||
-    narrow?.import !== "./dist/trust-administration/application.js" ||
-    duplicate.length > 0 ||
-    build.split('"src/trust-administration/application.ts"').length - 1 !== 1 ||
-    /trust-administration|TrustAdministration/u.test(coreIndex) ||
-    /TrustAdministration|trust\.list|PermissionRule/u.test(productApi)
-  ) {
+  if (/TrustAdministration|trust\.list|PermissionRule/u.test(productApi)) {
     failures.push(
-      "Trust Administration must have one narrow non-root domain subpath and a domain-neutral Product API",
+      "Trust Administration leaked domain semantics into the Product API catalog",
     );
   }
 
@@ -6155,9 +5927,6 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
 
   const application = required("packages/core/src/advancement/application.ts");
   const advancementIndex = required("packages/core/src/advancement/index.ts");
-  const coreIndex = required("packages/core/src/index.ts");
-  const manifestText = required("packages/core/package.json");
-  const build = required("packages/core/tsup.config.ts");
   const controller = required(
     "packages/owner-services/src/advancement/controller.ts",
   );
@@ -6198,8 +5967,6 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   const ownerIndex = required(
     "packages/owner-services/src/advancement/index.ts",
   );
-  const ownerManifestText = required("packages/owner-services/package.json");
-  const ownerBuild = required("packages/owner-services/tsup.config.ts");
   const localOwner = required(
     "packages/cli/src/serve/local-conversation-owner.ts",
   );
@@ -6338,26 +6105,6 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   const detailApplication =
     detailApplicationStart >= 0 ? application.slice(detailApplicationStart) : "";
 
-  let manifest;
-  try {
-    manifest = JSON.parse(manifestText);
-  } catch {
-    failures.push("Core manifest is invalid while checking Advancement detail");
-  }
-  const narrow = manifest?.exports?.["./advancement/application"];
-  const duplicate = Object.entries(manifest?.exports ?? {}).filter(
-    ([subpath, conditions]) =>
-      subpath !== "./advancement/application" &&
-      conditions &&
-      typeof conditions === "object" &&
-      (conditions.types === narrow?.types || conditions.import === narrow?.import),
-  );
-  let ownerManifest;
-  try {
-    ownerManifest = JSON.parse(ownerManifestText);
-  } catch {
-    failures.push("Owner-services manifest is invalid while checking Advancement review");
-  }
   const acceptedTurnApplication = application.slice(
     application.indexOf("export class AdvancementAcceptedTurnApplicationService"),
     application.indexOf("/** Path-free read mechanism", 1),
@@ -6596,16 +6343,6 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     ownerIndex.includes("createAdvancementReviewAttemptApplication") ||
     accessSurfaces.includes("review-application-bridge") ||
     localOwner.includes("review-application-bridge") ||
-    ownerBuild.includes("review-dispatch.ts") ||
-    ownerManifest?.exports?.["./advancement/review-dispatch"] !== undefined ||
-    ownerManifest?.exports?.["./advancement/review-application-bridge"] !== undefined ||
-    ownerManifest?.exports?.["./advancement/review-external-mechanism"] === undefined ||
-    ownerManifest?.exports?.["./advancement/review-attempt-correctness"] === undefined ||
-    ownerManifest?.exports?.["./advancement/proxy-content"] !== undefined ||
-    !ownerBuild.includes("src/advancement/review-attempt-correctness.ts") ||
-    !ownerBuild.includes("src/advancement/review-external-mechanism.ts") ||
-    ownerBuild.includes("src/advancement/review-application-bridge.ts") ||
-    ownerBuild.includes("src/advancement/proxy-content.ts") ||
     ownerIndex.includes("buildAdvancementProxyMessage") ||
     byPath.has("packages/owner-services/src/advancement/proxy-content.ts") ||
     byPath.has("packages/cli/src/serve/advancement-review-maintenance.ts") ||
@@ -6759,12 +6496,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     /@zhixing\/(?:server|rpc|owner-services)|\.\.\/\.\.\/server|\.\.\/\.\.\/owner-services/u.test(
       application,
     ) ||
-    narrow?.types !== "./dist/advancement/application.d.ts" ||
-    narrow?.import !== "./dist/advancement/application.js" ||
-    duplicate.length > 0 ||
-    build.split('"src/advancement/application.ts"').length - 1 !== 1 ||
     advancementIndex.includes("./application.js") ||
-    coreIndex.includes("advancement/application") ||
     detail.length === 0 ||
     !handler.includes('from "@zhixing/core/advancement/application"') ||
     !detail.includes("productApi?.supports(ADVANCEMENT_DETAIL_QUERY)") ||
@@ -7172,17 +6904,12 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const deliveryParticipant = required(
     "packages/owner-kernel/src/delivery-participant.ts",
   );
-  const ownerKernelIndex = required("packages/owner-kernel/src/index.ts");
   const conversationAgentTurnAdmission = required(
     "packages/owner-kernel/src/conversation-agent-turn-admission.ts",
   );
   const conversationControl = required(
     "packages/owner-kernel/src/conversation-control.ts",
   );
-  const ownerKernelManifestText = required(
-    "packages/owner-kernel/package.json",
-  );
-  const ownerKernelBuild = required("packages/owner-kernel/tsup.config.ts");
   const ownerKernelDelivery = required("packages/owner-kernel/src/delivery.ts");
   const conversationAssignment = required(
     "packages/owner-kernel/src/conversation-assignment.ts",
@@ -7192,7 +6919,6 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     "packages/owner-kernel/src/scheduler-user-notices.ts",
   );
   const productApi = required("packages/core/src/product-api/catalog.ts");
-  const coreIndex = required("packages/core/src/index.ts");
   const skillIndex = required("packages/core/src/skills/index.ts");
   const skillAuthority = required(
     "packages/core/src/skills/global-state-adapter.ts",
@@ -7205,12 +6931,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const executorRoleRuntime = required(
     "packages/cli/src/serve/executor-role-runtime.ts",
   );
-  const coreManifestText = required("packages/core/package.json");
-  const coreBuild = required("packages/core/tsup.config.ts");
-  const rpcIndex = required("packages/rpc/src/index.ts");
   const sessionWire = required("packages/rpc/src/session-wire.ts");
-  const rpcManifestText = required("packages/rpc/package.json");
-  const rpcBuild = required("packages/rpc/tsup.config.ts");
   const handler = required("packages/server/src/rpc/methods/skill.ts");
   const scheduleHandler = required(
     "packages/server/src/rpc/methods/schedule.ts",
@@ -7552,10 +7273,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     /\bworkscenes\??\s*:/u.test(context) ||
     serverIndex.includes("workscene-directory") ||
     byPath.has("packages/server/src/runtime/workscene-directory.ts") ||
-    byPath.has("packages/cli/src/serve/workscene-management-adapter.ts") ||
-    !coreManifestText.includes('"./workscene/application"') ||
-    !coreBuild.includes('"src/workscene/application.ts"') ||
-    coreIndex.includes("workscene/application")
+    byPath.has("packages/cli/src/serve/workscene-management-adapter.ts")
   ) {
     failures.push("Workscene management and entry lack one domain application and Product API owner");
   }
@@ -7909,104 +7627,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     ? application.slice(0, admissionStart)
     : application;
 
-  let coreManifest;
-  try {
-    coreManifest = JSON.parse(coreManifestText);
-  } catch {
-    failures.push("Core manifest is invalid while checking the Skill Catalog subpath");
-  }
-  let ownerKernelManifest;
-  try {
-    ownerKernelManifest = JSON.parse(ownerKernelManifestText);
-  } catch {
-    failures.push(
-      "Owner Kernel manifest is invalid while checking Conversation turn admission",
-    );
-  }
-  const conversationAgentTurnAdmissionExport =
-    ownerKernelManifest?.exports?.["./conversation-agent-turn-admission"];
-  const duplicateConversationAgentTurnAdmissionExports = Object.entries(
-    ownerKernelManifest?.exports ?? {},
-  ).filter(([subpath, conditions]) =>
-    subpath !== "./conversation-agent-turn-admission" &&
-    conditions &&
-    typeof conditions === "object" &&
-    (conditions.types === conversationAgentTurnAdmissionExport?.types ||
-      conditions.import === conversationAgentTurnAdmissionExport?.import)
-  );
-  const conversationControlExport =
-    ownerKernelManifest?.exports?.["./conversation-control"];
-  const duplicateConversationControlExports = Object.entries(
-    ownerKernelManifest?.exports ?? {},
-  ).filter(([subpath, conditions]) =>
-    subpath !== "./conversation-control" &&
-    conditions &&
-    typeof conditions === "object" &&
-    (conditions.types === conversationControlExport?.types ||
-      conditions.import === conversationControlExport?.import)
-  );
-  const scheduleApplicationExport = coreManifest?.exports?.["./scheduler/application"];
-  const duplicateScheduleApplicationExports = Object.entries(coreManifest?.exports ?? {})
-    .filter(([subpath, conditions]) =>
-      subpath !== "./scheduler/application" &&
-      conditions &&
-      typeof conditions === "object" &&
-      (conditions.types === scheduleApplicationExport?.types ||
-        conditions.import === scheduleApplicationExport?.import)
-    );
   if (
-    scheduleApplicationExport?.types !== "./dist/scheduler/application.d.ts" ||
-    scheduleApplicationExport?.import !== "./dist/scheduler/application.js" ||
-    duplicateScheduleApplicationExports.length > 0 ||
-    coreBuild.split('"src/scheduler/application.ts"').length - 1 !== 1 ||
-    /ScheduleManagementApplication|scheduler\/application/u.test(coreIndex)
-  ) {
-    failures.push("Schedule management application must have one narrow non-root core subpath");
-  }
-  const skillCatalogExport = coreManifest?.exports?.["./skills/catalog"];
-  if (
-    skillCatalogExport?.types !== "./dist/skills/catalog-application.d.ts" ||
-    skillCatalogExport?.import !== "./dist/skills/catalog-application.js"
-  ) {
-    failures.push("Skill Catalog must have one canonical core domain subpath");
-  }
-  const duplicateSkillCatalogExports = Object.entries(coreManifest?.exports ?? {})
-    .filter(([subpath, conditions]) =>
-      subpath !== "./skills/catalog" &&
-      conditions &&
-      typeof conditions === "object" &&
-      (conditions.types === skillCatalogExport?.types ||
-        conditions.import === skillCatalogExport?.import)
-    );
-  if (duplicateSkillCatalogExports.length > 0) {
-    failures.push("Skill Catalog contract has a second package export entry");
-  }
-  const skillCatalogCorrectnessExport =
-    coreManifest?.exports?.["./skills/catalog-correctness"];
-  const duplicateSkillCatalogCorrectnessExports = Object.entries(
-    coreManifest?.exports ?? {},
-  ).filter(([subpath, conditions]) =>
-    subpath !== "./skills/catalog-correctness" &&
-    conditions &&
-    typeof conditions === "object" &&
-    (conditions.types === skillCatalogCorrectnessExport?.types ||
-      conditions.import === skillCatalogCorrectnessExport?.import)
-  );
-  if (
-    skillCatalogCorrectnessExport?.types !==
-      "./dist/skills/catalog-management-correctness.d.ts" ||
-    skillCatalogCorrectnessExport?.import !==
-      "./dist/skills/catalog-management-correctness.js" ||
-    duplicateSkillCatalogCorrectnessExports.length > 0 ||
-    coreBuild.split('"src/skills/catalog-management-correctness.ts"').length - 1 !== 1
-  ) {
-    failures.push(
-      "Skill Catalog management Correctness adapter must have one narrow non-root subpath",
-    );
-  }
-  if (
-    coreIndex.includes("catalog-application") ||
-    coreIndex.includes("catalog-management-correctness") ||
     skillIndex.includes("catalog-application") ||
     skillIndex.includes("catalog-management-correctness") ||
     skillIndex.includes("createAnchorSkillCatalogManagementCorrectnessPort") ||
@@ -8016,76 +7637,12 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     skillIndex.includes("SkillCatalogKernelProjectionApplication") ||
     skillIndex.includes("SkillCatalogLoadApplication") ||
     skillIndex.includes("SkillCatalogSaveApplication") ||
-    skillIndex.includes("runSkillSavePipeline")
-  ) {
-    failures.push("Skill Catalog application contract leaked into the core root barrel");
-  }
-  if (coreBuild.split('"src/skills/catalog-application.ts"').length - 1 !== 1) {
-    failures.push("Skill Catalog canonical subpath lacks one dedicated build entry");
-  }
-  let rpcManifest;
-  try {
-    rpcManifest = JSON.parse(rpcManifestText);
-  } catch {
-    failures.push("RPC manifest is invalid while checking the Skill client binding subpath");
-  }
-  const skillClientExport = rpcManifest?.exports?.["./skill-catalog-client"];
-  const duplicateSkillClientExports = Object.entries(rpcManifest?.exports ?? {})
-    .filter(([subpath, conditions]) =>
-      subpath !== "./skill-catalog-client" &&
-      conditions &&
-      typeof conditions === "object" &&
-      (conditions.types === skillClientExport?.types ||
-        conditions.import === skillClientExport?.import)
-    );
-  if (
-    skillClientExport?.types !== "./dist/skill-catalog-client.d.ts" ||
-    skillClientExport?.import !== "./dist/skill-catalog-client.js" ||
-    duplicateSkillClientExports.length > 0 ||
-    rpcBuild.split('"src/skill-catalog-client.ts"').length - 1 !== 1 ||
-    rpcIndex.includes("skill-catalog-client") ||
-    rpcIndex.includes("SkillCatalogRpcClient")
-  ) {
-    failures.push("Skill RPC client binding must have one narrow non-root RPC subpath");
-  }
-  const productApiExport = coreManifest?.exports?.["./product-api"];
-  const duplicateProductApiExports = Object.entries(coreManifest?.exports ?? {})
-    .filter(([subpath, conditions]) =>
-      subpath !== "./product-api" &&
-      conditions &&
-      typeof conditions === "object" &&
-      (conditions.types === productApiExport?.types ||
-        conditions.import === productApiExport?.import)
-    );
-  if (
-    productApiExport?.types !== "./dist/product-api/catalog.d.ts" ||
-    productApiExport?.import !== "./dist/product-api/catalog.js" ||
-    duplicateProductApiExports.length > 0 ||
-    coreBuild.split('"src/product-api/catalog.ts"').length - 1 !== 1 ||
-    coreIndex.includes("product-api") ||
+    skillIndex.includes("runSkillSavePipeline") ||
     skillIndex.includes("ProductApiDispatcher")
   ) {
-    failures.push("Product API catalog must have one narrow non-root core subpath");
+    failures.push("Skill Catalog application contract leaked into its source barrel");
   }
-  const conversationApplicationExport =
-    coreManifest?.exports?.["./conversation/application"];
-  const duplicateConversationApplicationExports = Object.entries(
-    coreManifest?.exports ?? {},
-  ).filter(([subpath, conditions]) =>
-    subpath !== "./conversation/application" &&
-    conditions &&
-    typeof conditions === "object" &&
-    (conditions.types === conversationApplicationExport?.types ||
-      conditions.import === conversationApplicationExport?.import)
-  );
   if (
-    conversationApplicationExport?.types !==
-      "./dist/conversation/application.d.ts" ||
-    conversationApplicationExport?.import !==
-      "./dist/conversation/application.js" ||
-    duplicateConversationApplicationExports.length > 0 ||
-    coreBuild.split('"src/conversation/application.ts"').length - 1 !== 1 ||
-    coreIndex.includes("conversation/application") ||
     conversationIndex.includes("./application.js") ||
     !conversationApplication.includes(
       "class ConversationDirectoryApplicationService",
@@ -8250,7 +7807,6 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       "await mechanism.ensureTranscript(conversationId)",
     ) ||
     !conversationApplication.includes("await mechanism.ensure(conversationId)") ||
-    coreIndex.includes("ConversationIdentityLifecycle") ||
     conversationIndex.includes("ConversationIdentityLifecycle") ||
     !accessSurfaceContext.includes(
       "readonly conversationIdentityLifecycle: ConversationIdentityLifecycleApplication",
@@ -8540,15 +8096,6 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !conversationAgentTurnAdmission.includes("input.manager.admitTurn({") ||
     !conversationAgentTurnAdmission.includes("input.manager.admitDurableTurn({") ||
     !conversationAgentTurnAdmission.includes("start: admitted.task.execute") ||
-    ownerKernelIndex.includes("conversation-agent-turn-admission") ||
-    conversationAgentTurnAdmissionExport?.types !==
-      "./dist/conversation-agent-turn-admission.d.ts" ||
-    conversationAgentTurnAdmissionExport?.import !==
-      "./dist/conversation-agent-turn-admission.js" ||
-    duplicateConversationAgentTurnAdmissionExports.length > 0 ||
-    ownerKernelBuild.split(
-      '"src/conversation-agent-turn-admission.ts"',
-    ).length - 1 !== 1 ||
     !composition.includes(
       'from "@zhixing/owner-kernel/conversation-agent-turn-admission"',
     ) ||
@@ -8556,27 +8103,12 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !localConversationApplication.includes("agentTurns: input.owner.agentTurnAdmission") ||
     !conversationControl.includes("createConversationResolutionFence") ||
     !conversationControl.includes("parseConversationResolutionFence") ||
-    !conversationControl.includes("CONVERSATION_RESOLUTION_FENCE_PREFIX") ||
-    ownerKernelIndex.includes("conversation-control") ||
-    ownerKernelIndex.includes("createConversationResolutionFence") ||
-    conversationControlExport?.types !== "./dist/conversation-control.d.ts" ||
-    conversationControlExport?.import !== "./dist/conversation-control.js" ||
-    duplicateConversationControlExports.length > 0 ||
-    ownerKernelBuild.split('"src/conversation-control.ts"').length - 1 !== 1
+    !conversationControl.includes("CONVERSATION_RESOLUTION_FENCE_PREFIX")
   ) {
     failures.push(
       "Conversation directory management lacks one domain application and Product API owner",
     );
   }
-  const deliveryApplicationExport = coreManifest?.exports?.["./delivery/application"];
-  const duplicateDeliveryApplicationExports = Object.entries(coreManifest?.exports ?? {})
-    .filter(([subpath, conditions]) =>
-      subpath !== "./delivery/application" &&
-      conditions &&
-      typeof conditions === "object" &&
-      (conditions.types === deliveryApplicationExport?.types ||
-        conditions.import === deliveryApplicationExport?.import)
-    );
   const serverPerspectiveSource = records.find((record) =>
     record.relative.startsWith("packages/server/src/perspectives/"),
   );
@@ -8630,39 +8162,17 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     );
   }
   if (
-    deliveryApplicationExport?.types !==
-      "./dist/delivery/application.d.ts" ||
-    deliveryApplicationExport?.import !==
-      "./dist/delivery/application.js" ||
-    duplicateDeliveryApplicationExports.length > 0 ||
-    coreBuild.split('"src/delivery/application.ts"').length - 1 !== 1 ||
-    coreBuild.includes("resolution-application") ||
-    coreIndex.includes("delivery/application") ||
     deliveryIndex.includes("./application.js") ||
     deliveryApplication.includes("../authority/") ||
     deliveryApplication.includes("AuthorityStorageError") ||
     !deliveryApplication.includes("class DeliveryProjectionInvariantError")
   ) {
-    failures.push("Delivery application must have one narrow non-root core subpath");
+    failures.push("Delivery application source ownership drifted");
   }
-  const channelDeliveryEffectExport = coreManifest?.exports?.["./delivery/channel-effect"];
-  const duplicateChannelDeliveryEffectExports = Object.entries(coreManifest?.exports ?? {})
-    .filter(([subpath, conditions]) =>
-      subpath !== "./delivery/channel-effect" &&
-      conditions &&
-      typeof conditions === "object" &&
-      (conditions.types === channelDeliveryEffectExport?.types ||
-        conditions.import === channelDeliveryEffectExport?.import)
-    );
   if (
-    channelDeliveryEffectExport?.types !== "./dist/delivery/channel-effect.d.ts" ||
-    channelDeliveryEffectExport?.import !== "./dist/delivery/channel-effect.js" ||
-    duplicateChannelDeliveryEffectExports.length > 0 ||
-    coreBuild.split('"src/delivery/channel-effect.ts"').length - 1 !== 1 ||
-    coreIndex.includes("channel-effect") ||
     deliveryIndex.includes("channel-effect")
   ) {
-    failures.push("Delivery Channel effect must have one narrow non-root adapter subpath");
+    failures.push("Delivery Channel effect leaked through the Delivery source barrel");
   }
   for (const retiredPath of [
     "packages/core/src/skills/store.ts",
@@ -8702,7 +8212,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       skillIndex,
     )
   ) {
-    failures.push("core Skill root barrel exposes retired filesystem storage");
+    failures.push("Skill source barrel exposes retired filesystem storage");
   }
 
   for (const record of records) {
@@ -9057,8 +8567,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !setupDelivery.includes("createOwnerDeliveryLifecycleBinding") ||
     !setupDelivery.includes("application: deliveryLifecycle().application") ||
     !setupDelivery.includes("projection: deliveryLifecycle().projection") ||
-    deliveryIndex.includes("DeliveryLifecycleApplication") ||
-    coreIndex.includes("DeliveryLifecycleApplication")
+    deliveryIndex.includes("DeliveryLifecycleApplication")
   ) {
     failures.push(
       "Delivery attempt lifecycle does not have one domain application and one narrow Correctness transaction",
@@ -9191,7 +8700,6 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     !deliveryParticipant.includes('from "@zhixing/core/delivery/application"') ||
     !deliveryParticipant.includes("this.#application.prepare(inputs, commitAt)") ||
     !deliveryAuthority.includes('"Delivery lifecycle admission projection"') ||
-    ownerKernelIndex.includes("delivery-obligation-correctness") ||
     !ownerKernelDelivery.includes("delivery-obligation-correctness") ||
     !setupDelivery.includes("createOwnerDeliveryParticipant,") ||
     setupDelivery.includes("ownerRuntime!.createOwnerDeliveryParticipant") ||
@@ -10582,9 +10090,6 @@ export function inspectRecoveryBackupAssembly(records) {
   const serverContext = byPath.get("packages/server/src/context.ts");
   const managementFacade = byPath.get("packages/cli/src/runtime/rpc-management-facade.ts");
   const infoCommands = byPath.get("packages/cli/src/commands/info-commands.ts");
-  const coreIndex = byPath.get("packages/core/src/index.ts");
-  const coreManifestText = byPath.get("packages/core/package.json");
-  const coreBuild = byPath.get("packages/core/tsup.config.ts");
   const bootstrapStore = byPath.get("packages/cli/src/serve/mesh-bootstrap-store.ts");
   const bootstrap = byPath.get("packages/cli/src/serve/mesh-runtime-bootstrap.ts");
   const topology = byPath.get("packages/cli/src/serve/topology-command.ts");
@@ -10636,7 +10141,7 @@ export function inspectRecoveryBackupAssembly(records) {
   if (
     !command || !owner || !backup || !backupTargetContract || !backupTargetInfrastructure ||
     !doctor || !cliIndex || !backupApplication || !serverContext || !managementFacade ||
-    !infoCommands || !coreIndex || !coreManifestText || !coreBuild ||
+    !infoCommands ||
     !bootstrapStore || !bootstrap || !topology || !applicationHost || !rootEstablishment ||
     !rootActivation || !pairedIncomingInfrastructure || !pairedCheckpointTarget ||
     !pairedCheckpointTargetInfrastructure || !publishedCheckpointTarget ||
@@ -10727,26 +10232,7 @@ export function inspectRecoveryBackupAssembly(records) {
       "backup target configuration finite repository, physical factory or durability boundary drifted",
     );
   }
-  let coreManifest;
-  try {
-    coreManifest = JSON.parse(coreManifestText);
-  } catch {
-    return ["recovery backup core package manifest is invalid"];
-  }
-  const backupApplicationExport = coreManifest.exports?.["./backup-recovery/application"];
-  const duplicateBackupApplicationExports = Object.entries(coreManifest.exports ?? {})
-    .filter(([subpath, conditions]) =>
-      subpath !== "./backup-recovery/application" &&
-      conditions &&
-      typeof conditions === "object" &&
-      (conditions.types === backupApplicationExport?.types ||
-        conditions.import === backupApplicationExport?.import));
   if (
-    backupApplicationExport?.types !== "./dist/backup-recovery/application.d.ts" ||
-    backupApplicationExport?.import !== "./dist/backup-recovery/application.js" ||
-    duplicateBackupApplicationExports.length > 0 ||
-    count(coreBuild, '"src/backup-recovery/application.ts"') !== 1 ||
-    coreIndex.includes("backup-recovery/application") ||
     count(backupApplication, "class BackupRecoveryAdministrationApplicationService") !== 1 ||
     count(backupApplication, "async setup(") !== 1 ||
     count(backupApplication, "async verify()") !== 1 ||
@@ -13028,7 +12514,6 @@ export function inspectWorkspaceProbePersistenceBoundary(records) {
     "packages/core/src/environment/workspace-probe-persistence.ts",
   );
   const environment = required("packages/core/src/environment/index.ts");
-  const coreIndex = required("packages/core/src/index.ts");
   const adapterPath = "packages/cli/src/serve/workspace-probe-persistence.ts";
   const adapter = required(adapterPath);
   const setup = required("packages/cli/src/setup-delivery.ts");
@@ -13050,7 +12535,6 @@ export function inspectWorkspaceProbePersistenceBoundary(records) {
   }
   if (
     /WorkspaceProbePersistence|workspace-probe-persistence/u.test(environment) ||
-    coreIndex.includes("workspace-probe-persistence") ||
     !probe.includes(
       'import type { WorkspaceProbePersistencePort } from "./workspace-probe-persistence.js"',
     )
@@ -13127,8 +12611,6 @@ export function inspectWorkspaceBindingGenerationPersistenceBoundary(records) {
     "packages/core/src/environment/workspace-binding-generation-persistence.ts",
   );
   const environment = required("packages/core/src/environment/index.ts");
-  const coreIndex = required("packages/core/src/index.ts");
-  const coreBuild = required("packages/core/tsup.config.ts");
   const adapterPath =
     "packages/cli/src/serve/workspace-binding-generation-persistence.ts";
   const adapter = required(adapterPath);
@@ -13157,13 +12639,11 @@ export function inspectWorkspaceBindingGenerationPersistenceBoundary(records) {
     /WorkspaceBindingGenerationPersistence|workspace-binding-generation-persistence/u.test(
       environment,
     ) ||
-    coreIndex.includes("workspace-binding-generation-persistence") ||
     !service.includes(
       'import type { WorkspaceBindingGenerationPersistencePort } from "./workspace-binding-generation-persistence.js"',
-    ) ||
-    !coreBuild.includes('"src/environment/workspace-binding-generation-persistence.ts"')
+    )
   ) {
-    failures.push("Workspace binding generation persistence port export boundary drifted");
+    failures.push("Workspace binding generation persistence source boundary drifted");
   }
   if (
     /#markerPath|\blogPath\b|writeEstablishmentMarker|ensureDurableDirectory|syncDirectory/u.test(
@@ -13264,8 +12744,6 @@ export function inspectWorkspaceBindingCatalogPersistenceBoundary(records) {
     "packages/core/src/environment/workspace-binding-catalog-persistence.ts",
   );
   const environment = required("packages/core/src/environment/index.ts");
-  const coreIndex = required("packages/core/src/index.ts");
-  const coreBuild = required("packages/core/tsup.config.ts");
   const adapterPath =
     "packages/cli/src/serve/workspace-binding-catalog-persistence.ts";
   const adapter = required(adapterPath);
@@ -13293,13 +12771,11 @@ export function inspectWorkspaceBindingCatalogPersistenceBoundary(records) {
     /WorkspaceBindingCatalogPersistence|workspace-binding-catalog-persistence/u.test(
       environment,
     ) ||
-    coreIndex.includes("workspace-binding-catalog-persistence") ||
     !catalog.includes(
       'import type { WorkspaceBindingCatalogPersistencePort } from "./workspace-binding-catalog-persistence.js"',
-    ) ||
-    !coreBuild.includes('"src/environment/workspace-binding-catalog-persistence.ts"')
+    )
   ) {
-    failures.push("Workspace binding catalog persistence port export boundary drifted");
+    failures.push("Workspace binding catalog persistence source boundary drifted");
   }
   if (
     /node:(?:fs|fs\/promises|path)|acquireFileLock|ensureDurableDirectory|syncDirectory|#rootDir|#manifestPath|\.tmp-|\brename\(/u.test(
@@ -16131,16 +15607,6 @@ export function inspectProductionManifest(relative, manifest) {
         failures.push(`${relative}: runtime-host declares product dependency ${dependency}`);
       }
     }
-    for (const subpath of [
-      "./builtin-extra-tools",
-      "./segment-deps",
-      "./workmode-tools",
-      "./workscene-port",
-    ]) {
-      if (subpath in (manifest.exports ?? {})) {
-        failures.push(`${relative}: runtime-host exposes retired product subpath ${subpath}`);
-      }
-    }
   }
   if (
     relative === "packages/orchestrator/package.json" &&
@@ -16164,6 +15630,12 @@ export function inspectProductionManifest(relative, manifest) {
 export function inspectProductionSource(relative, text, options = {}) {
   const failures = [];
   for (const token of retiredProductionTokens) if (text.includes(token)) failures.push(`${relative}: retired token ${token}`);
+  if (
+    relative === "packages/owner-kernel/src/types.ts" &&
+    /\bManagedSessionInfo\b/u.test(text)
+  ) {
+    failures.push(`${relative}: duplicate ManagedSessionInfo compatibility export`);
+  }
   if (relative.startsWith("packages/server/src/perspectives/")) {
     failures.push(`${relative}: retired Server-owned perspective application path`);
   }

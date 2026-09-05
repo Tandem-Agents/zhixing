@@ -3,7 +3,7 @@ import type {
   AuthorityCallContext,
   DeferredGlobalIntent,
 } from "@zhixing/core/contracts";
-import { ConfirmationHub } from "@zhixing/owner-kernel";
+import { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
 import {
   EXECUTOR_ONLY_POST_ADOPTION_REVIEW_LIFECYCLE,
   PostAdoptionReviewCoordinator,

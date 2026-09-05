@@ -1,20 +1,25 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   ConfirmationBroker,
-  type AgentYield,
   type IConfirmationBroker,
-  type Message,
-  type RunResult,
-  type TranscriptRunRecord,
-} from "@zhixing/core";
+} from "@zhixing/core/confirmation";
+import type {
+  AgentYield,
+  RunResult,
+} from "@zhixing/core/loop";
+import type {
+  Message,
+} from "@zhixing/core/types";
+import type {
+  TranscriptRunRecord,
+} from "@zhixing/core/transcript";
+import { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
 import {
-  ConfirmationHub,
   ConversationManager,
   WorksceneBusyError,
-  type DurableConversationTurnExecutor,
-  type SessionRuntime,
-  type RuntimeFactory,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/conversation-manager";
+import { type DurableConversationTurnExecutor } from "@zhixing/owner-kernel/run-turn";
+import { type SessionRuntime, type RuntimeFactory } from "@zhixing/owner-kernel/types";
 
 // ─── Mock Runtime ───
 

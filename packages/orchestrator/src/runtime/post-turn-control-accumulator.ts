@@ -8,10 +8,10 @@
 
 import type {
   AgentEventMap,
-  IEventBus,
   PostTurnControlIntent,
   PostTurnControlOutcome,
-} from "@zhixing/core";
+} from "@zhixing/core/types";
+import type { IEventBus } from "@zhixing/core/events";
 
 /**
  * 收集器句柄 —— `subscribePostTurnControlAccumulator` 的返回值。

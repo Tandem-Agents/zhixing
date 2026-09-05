@@ -7,15 +7,7 @@
  * - 用户池(session/workspace/global)规则任一命中击败 builtin(用户最终决定权)
  */
 
-import {
-  BoundaryRegistry,
-  PermissionStore,
-  SecurityPipeline,
-  ToolArgumentExtractor,
-  type IToolArgumentExtractor,
-  type PermissionRule,
-  type SessionType,
-} from "@zhixing/core";
+import { BoundaryRegistry, PermissionStore, SecurityPipeline, ToolArgumentExtractor, type IToolArgumentExtractor, type PermissionRule, type SessionType } from "@zhixing/core/security";
 import { describe, expect, it } from "vitest";
 import { createWebFetchTool, WEB_FETCH_DEFAULT_RULES } from "../index.js";
 

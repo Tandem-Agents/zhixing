@@ -19,7 +19,7 @@
  * broker emit 策略保证 typing 期间零高度跳变（详见 renderActiveChrome docstring）。
  */
 
-import type { SuggestionItem, TypeaheadSessionState } from "@zhixing/core";
+import type { SuggestionItem, TypeaheadSessionState } from "@zhixing/core/typeahead";
 
 import chalk from "chalk";
 import { stripAnsi } from "./ansi.js";

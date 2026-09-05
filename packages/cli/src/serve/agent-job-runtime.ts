@@ -1,9 +1,6 @@
-import {
-  extractText,
-  userMessage,
-  type AgentYield,
-  type IConfirmationBroker,
-} from "@zhixing/core";
+import { extractText, userMessage } from "@zhixing/core";
+import { type AgentYield } from "@zhixing/core/loop";
+import { type IConfirmationBroker } from "@zhixing/core/confirmation";
 import type { JobExecutionInstruction } from "@zhixing/core/contracts";
 import {
   assertKernelRunEvent,

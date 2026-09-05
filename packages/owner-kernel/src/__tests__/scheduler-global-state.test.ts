@@ -1,4 +1,5 @@
-import { createEventBus, type SchedulerEventMap, type TaskView } from "@zhixing/core";
+import { createEventBus } from "@zhixing/core";
+import { type SchedulerEventMap, type TaskView } from "@zhixing/core/scheduler";
 import type { GlobalStatePort } from "@zhixing/core/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {

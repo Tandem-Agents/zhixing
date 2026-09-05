@@ -30,7 +30,8 @@
  * 加新值,本函数补 case 分支即可(TypeScript exhaustive check 强制要求,不会漏)。
  */
 
-import { failToDenyResolver, type NonInteractiveResolver } from "@zhixing/core";
+import { failToDenyResolver } from "@zhixing/core/confirmation";
+import { type NonInteractiveResolver } from "@zhixing/core/confirmation";
 import type { SubAgentConfirmationPolicy } from "../subagent/budget.js";
 
 export function resolveSubAgentResolver(

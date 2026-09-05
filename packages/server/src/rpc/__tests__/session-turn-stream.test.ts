@@ -1,15 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import type {
   AgentYield,
-  Message,
-  RunRecordInput,
   RunResult,
-} from "@zhixing/core";
-import {
-  ConversationManager,
-  type RuntimeFactory,
-  type SessionRuntime,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/core/loop";
+import type {
+  Message,
+} from "@zhixing/core/types";
+import type {
+  RunRecordInput,
+} from "@zhixing/core/transcript";
+import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
 import { projectSessionTurn } from "@zhixing/rpc";
 import { stubDurableTurnExecutor } from "../../__tests__/durable-turn-executor-stub.js";
 

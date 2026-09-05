@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { expandUserHome } from "@zhixing/core";
+import { expandUserHome } from "@zhixing/core/paths";
 
 import {
   InputMaterialRegistry,

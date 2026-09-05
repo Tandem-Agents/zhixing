@@ -1,5 +1,5 @@
 import type { ServeOptions } from "./command.js";
-import { getZhixingHome } from "@zhixing/core";
+import { getZhixingHome } from "@zhixing/core/paths";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import chalk from "chalk";
 import { createStdoutWriter, type CliWriter } from "../screen/index.js";

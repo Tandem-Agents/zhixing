@@ -20,21 +20,8 @@ import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import chalk from "chalk";
 
-import {
-  ArgumentProvider,
-  CommandDispatcher,
-  CommandProvider,
-  DefaultCommandRegistry,
-  DefaultTypeaheadBroker,
-  findTriggerToken,
-} from "@zhixing/core";
-import type {
-  CommandDef,
-  PanelMode,
-  RuntimeContext,
-  SuggestionItem,
-  SuggestionProvider,
-} from "@zhixing/core";
+import { ArgumentProvider, CommandDispatcher, CommandProvider, DefaultCommandRegistry, DefaultTypeaheadBroker, findTriggerToken } from "@zhixing/core/typeahead";
+import type { CommandDef, PanelMode, RuntimeContext, SuggestionItem, SuggestionProvider } from "@zhixing/core/typeahead";
 import {
   _getRawModeRefcount,
   _resetRawModeRefcountForTests,

@@ -5,7 +5,8 @@ import type {
   SecretRef,
   SecretStorePort,
 } from "@zhixing/core/contracts";
-import { ConfirmationBroker, userTurnInputFromText } from "@zhixing/core";
+import { ConfirmationBroker } from "@zhixing/core/confirmation";
+import { userTurnInputFromText } from "@zhixing/core";
 import type { ProjectedSessionTurnResult } from "@zhixing/rpc";
 import type { AuthorityRuntimeStack } from "../../setup-delivery.js";
 import { setupAuthorityRuntime } from "../../setup-delivery.js";
@@ -15,10 +16,7 @@ import {
   InProcessAssignmentSubmission,
   type ExecutorResourceGovernor,
 } from "@zhixing/executor";
-import type {
-  RuntimeFactory,
-  SessionRuntime,
-} from "@zhixing/owner-kernel";
+import type { RuntimeFactory, SessionRuntime } from "@zhixing/owner-kernel/types";
 import { createTempDir } from "@zhixing/test-utils";
 import {
   ASSIGNMENT_RECORD_V2_WRITES_ENABLED,

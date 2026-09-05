@@ -1,8 +1,6 @@
-import { localConversationId } from "@zhixing/core";
-import {
-  ConversationManager,
-  DeferredGlobalIntentRepository,
-} from "@zhixing/owner-kernel";
+import { localConversationId } from "@zhixing/core/conversation";
+import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+import { DeferredGlobalIntentRepository } from "@zhixing/owner-kernel/deferred-global-intents";
 import { describe, expect, it, vi } from "vitest";
 import { ConversationProtocolRuntime } from "../conversation-protocol-runtime.js";
 import {

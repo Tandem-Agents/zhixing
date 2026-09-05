@@ -2,13 +2,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import {
-  ADMISSION_TOKEN_TTL_MS,
-  createEventBus,
-  skillNameToId,
-  type AgentEventMap,
-  type SkillCatalogEntry,
-} from "@zhixing/core";
+import { ADMISSION_TOKEN_TTL_MS } from "@zhixing/core/skills/admission";
+import { createEventBus } from "@zhixing/core/events";
+import { skillNameToId } from "@zhixing/core/skills/id";
+import { type AgentEventMap } from "@zhixing/core/types";
+import { type SkillCatalogEntry } from "@zhixing/core/skills/catalog";
 import { FileArtifactStore } from "@zhixing/core/authority";
 import {
   assignmentMutationRequestId,

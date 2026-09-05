@@ -1,15 +1,15 @@
 import {
   AgentError,
   type AgentErrorType,
-  type AgentResult,
-  type AbortReason,
   type ContentBlock,
   type Message,
   type PostTurnControlOutcome,
-  type RunRecordInput,
   type TokenUsage,
-  type WindowCompact,
-} from "@zhixing/core";
+} from "@zhixing/core/types";
+import { type AgentResult } from "@zhixing/core/loop";
+import { type AbortReason } from "@zhixing/core/interrupt";
+import { type RunRecordInput } from "@zhixing/core/transcript";
+import { type WindowCompact } from "@zhixing/core/context";
 
 /** The finite terminal state of one Intelligence Kernel run. */
 export type KernelTerminal =

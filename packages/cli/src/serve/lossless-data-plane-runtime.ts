@@ -1,8 +1,4 @@
-import type {
-  ChannelChallengeAction,
-  ChannelChallengeMessage,
-  DeliveryResult,
-} from "@zhixing/core";
+import type { ChannelChallengeAction, ChannelChallengeMessage, DeliveryResult } from "@zhixing/core/channels";
 import type {
   ConversationChannelChallengeToken,
   DataPlaneTicket,
@@ -13,10 +9,8 @@ import {
   type ProtocolSignatureVerifier,
   type StreamVerifierCheckpoint,
 } from "@zhixing/core/protocol";
-import {
-  ChannelChallengeOutbox,
-  type ConversationRunJournal,
-} from "@zhixing/owner-kernel";
+import { ChannelChallengeOutbox } from "@zhixing/owner-kernel/channel-challenge-outbox";
+import { type ConversationRunJournal } from "@zhixing/owner-kernel/conversation-assignment";
 import {
   AssignmentStreamPathManager,
   AssignmentStreamPathsUnavailableError,

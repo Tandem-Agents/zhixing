@@ -18,24 +18,28 @@ import {
   SecurityAuditor,
   truncateOutput,
   wrapWithConstraints,
-  buildConfirmationRequest,
-  type AgentEventMap,
-  type ConfirmationDecision,
-  type ConfirmationFallbackStrategy,
   type DurableToolExecutionAuthorizer,
   type ExecutionConstraints,
-  type IConfirmationBroker,
-  type IEventBus,
   type PermissionContextId,
   type SecurityMiddlewareResult,
   type SecurityPipeline,
   type SessionType,
+  type RiskLevel,
+} from "@zhixing/core/security";
+import { buildConfirmationRequest } from "@zhixing/core/confirmation";
+import {
+  type AgentEventMap,
   type ToolDefinition,
   type ToolExecutionContext,
   type ToolResult,
-  type RiskLevel,
   type TurnContext,
-} from "@zhixing/core";
+} from "@zhixing/core/types";
+import {
+  type ConfirmationDecision,
+  type ConfirmationFallbackStrategy,
+  type IConfirmationBroker,
+} from "@zhixing/core/confirmation";
+import { type IEventBus } from "@zhixing/core/events";
 import type {
   TrustAdministrationContext,
   TrustAdministrationExecutionApplication,

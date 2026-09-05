@@ -24,12 +24,8 @@
  *   service 引用——所有 caller 装配代码不动。**杜绝"两入口不对齐"类回归**。
  */
 
-import {
-  SchedulerProvider,
-  TaskListProvider,
-  type TaskStatusSummary,
-  type TurnContextProvider,
-} from "@zhixing/core";
+import { SchedulerProvider, TaskListProvider, type TurnContextProvider } from "@zhixing/core/context";
+import { type TaskStatusSummary } from "@zhixing/core/scheduler";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import type { TaskListService } from "@zhixing/core/conversation/application";
 

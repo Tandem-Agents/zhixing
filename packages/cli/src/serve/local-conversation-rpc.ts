@@ -1,9 +1,5 @@
-import {
-  assertLocalConversationIdForDevice,
-  isNonEmptyUserTurnInput,
-  userTurnInputFromText,
-  type UserTurnInput,
-} from "@zhixing/core";
+import { assertLocalConversationIdForDevice } from "@zhixing/core/conversation";
+import { isNonEmptyUserTurnInput, userTurnInputFromText, type UserTurnInput } from "@zhixing/core";
 import {
   ConversationApplicationError,
   mergeConversationDirectoryEntries,

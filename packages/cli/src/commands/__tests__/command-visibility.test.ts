@@ -8,11 +8,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import {
-  DefaultCommandRegistry,
-  type CommandDef,
-  type RuntimeContext,
-} from "@zhixing/core";
+import { DefaultCommandRegistry, type CommandDef, type RuntimeContext } from "@zhixing/core/typeahead";
 import {
   FEATURE_CHROME,
   chromeOnlyVisibility,

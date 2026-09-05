@@ -1,10 +1,7 @@
-import {
-  ConfirmationBroker,
-  type AgentYield,
-  type IConfirmationBroker,
-  type PermissionRule,
-  type ToolSideEffectObserver,
-} from "@zhixing/core";
+import { ConfirmationBroker, type IConfirmationBroker } from "@zhixing/core/confirmation";
+import { type AgentYield } from "@zhixing/core/loop";
+import { type PermissionRule } from "@zhixing/core/security";
+import { type ToolSideEffectObserver } from "@zhixing/core";
 import type {
   AuthorityCallContext,
   ChannelInteractionGrant,
@@ -75,7 +72,7 @@ export interface JobRuntimeRunOptions {
   ) => Promise<void>;
   readonly authorizeToolExecution: () => Promise<readonly PermissionRule[]>;
   readonly toolSideEffectObserver: ToolSideEffectObserver;
-  readonly stageScheduleMutation: import("@zhixing/core").ScheduleMutationStager;
+  readonly stageScheduleMutation: import("@zhixing/core/scheduler").ScheduleMutationStager;
   readonly assignmentMutations: import("@zhixing/core/contracts").AssignmentMutationPort;
   readonly globalQuery?: import("@zhixing/core/contracts").AssignmentGlobalQueryPort;
   readonly assignmentIssuedAt: string;

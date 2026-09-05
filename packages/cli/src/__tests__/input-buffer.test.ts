@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { RuntimeContext } from "@zhixing/core";
+import type { RuntimeContext } from "@zhixing/core/typeahead";
 import { InputBuffer } from "../input-buffer.js";
 
 function makeRuntime(): RuntimeContext {

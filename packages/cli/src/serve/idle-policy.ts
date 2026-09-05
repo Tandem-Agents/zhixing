@@ -11,7 +11,7 @@
  * 纯函数:command 装配层每 tick 取快照传入,判定逻辑独立可测。
  */
 
-import type { ChannelState } from "@zhixing/core";
+import type { ChannelState } from "@zhixing/core/channels";
 
 export interface IdleSnapshot {
   /** 活跃 RPC 连接数 */

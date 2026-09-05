@@ -12,20 +12,21 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
+import { ConfirmationBroker } from "@zhixing/core/confirmation";
+import { EventBus } from "@zhixing/core/events";
+import { PermissionStore, SecurityPipeline } from "@zhixing/core/security";
 import {
-  ConfirmationBroker,
-  EventBus,
-  PermissionStore,
-  SecurityPipeline,
   type AgentEventMap,
-  type ConfirmationDecision,
-  type ConfirmationRequest,
   type ToolDefinition,
   type LLMRoles,
   type StreamEvent,
   type ToolExecutionContext,
   type ToolResult,
-} from "@zhixing/core";
+} from "@zhixing/core/types";
+import {
+  type ConfirmationDecision,
+  type ConfirmationRequest,
+} from "@zhixing/core/confirmation";
 import {
   bindPermissionRuleExecutionSource,
   createPermissionStoreTrustAdministrationRepository,

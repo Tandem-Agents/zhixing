@@ -1,9 +1,6 @@
-import type {
-  AdvancementProxyMessage,
-  AdvancementSession,
-  RunRecordAdvancementMetadata,
-  TurnContext,
-} from "@zhixing/core";
+import type { AdvancementProxyMessage, AdvancementSession } from "@zhixing/core/advancement";
+import type { RunRecordAdvancementMetadata } from "@zhixing/core/transcript";
+import type { TurnContext } from "@zhixing/core";
 import type {
   AdvancementReviewProxySchedulePort,
 } from "@zhixing/core/advancement/application";

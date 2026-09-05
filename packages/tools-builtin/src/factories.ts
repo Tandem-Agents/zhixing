@@ -11,10 +11,8 @@
  *   3. 在需要启用该工具的 AgentRoleProfile.enabledTools 中加工具名
  */
 
-import type {
-  SkillMode,
-  ToolDefinition,
-} from "@zhixing/core";
+import type { SkillMode } from "@zhixing/core/skills/catalog";
+import type { ToolDefinition } from "@zhixing/core";
 import type {
   SkillCatalogAdmissionApplication,
   SkillCatalogLoadApplication,

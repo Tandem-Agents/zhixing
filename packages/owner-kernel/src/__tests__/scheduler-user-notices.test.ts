@@ -1,8 +1,5 @@
 import path from "node:path";
-import {
-  DeliveryAuthority,
-  SCHEDULER_USER_NOTICE_STREAM,
-} from "@zhixing/core";
+import { DeliveryAuthority, SCHEDULER_USER_NOTICE_STREAM } from "@zhixing/core/delivery";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,

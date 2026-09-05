@@ -1,7 +1,5 @@
-import {
-  type SchedulerFacade,
-  type ToolDefinition,
-} from "@zhixing/core";
+import { type SchedulerFacade } from "@zhixing/core/scheduler";
+import { type ToolDefinition } from "@zhixing/core";
 import type {
   JobExecutionInstruction,
 } from "@zhixing/core/contracts";

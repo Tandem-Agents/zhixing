@@ -36,7 +36,7 @@ import {
 } from "../control-admission.js";
 import { ConversationRunJournal } from "../conversation-assignment.js";
 import { createOwnerDeliveryParticipant } from "../delivery.js";
-import { AnchorSessionStateAdapter } from "../session-state-adapter.js";
+import { ConversationSessionStateAdapter } from "../session-state-adapter.js";
 import {
   DURABLE_IO_TEST_TIMEOUT_MS,
   trackAuthorityLog,
@@ -93,7 +93,7 @@ async function createHarness(conversationId = "conv-1") {
     });
   const journal = makeJournal();
   let directoryExists = true;
-  const adapter = new AnchorSessionStateAdapter({
+  const adapter = new ConversationSessionStateAdapter({
     journalFor: () => journal,
     sessionExists: async () => directoryExists,
   });
@@ -322,7 +322,7 @@ function evidenceRequest(): EvidenceRequest {
   );
 }
 
-describe("AnchorSessionStateAdapter advancement", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
+describe("ConversationSessionStateAdapter advancement", { timeout: DURABLE_IO_TEST_TIMEOUT_MS }, () => {
   it("承载完整推进生命周期并复合原子落盘", async () => {
     const { write, read, log } = await createHarness();
 

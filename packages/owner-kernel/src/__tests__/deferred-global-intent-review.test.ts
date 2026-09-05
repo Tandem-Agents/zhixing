@@ -1,12 +1,7 @@
 import path from "node:path";
 import { Buffer } from "node:buffer";
-import {
-  parseRubricDocument,
-  projectRubricContractDraft,
-  rubricDocumentId,
-  stringifyRubricDraft,
-  type RubricContractDraftSnapshot,
-} from "@zhixing/core";
+import { parseRubricDocument, rubricDocumentId, stringifyRubricDraft } from "@zhixing/core/rubrics";
+import { projectRubricContractDraft, type RubricContractDraftSnapshot } from "@zhixing/core/advancement";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,

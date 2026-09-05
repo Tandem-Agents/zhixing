@@ -3,12 +3,7 @@
   "version": "0.1.0",
   "description": "知行 owner 领域服务 — 推进控制、审查调度与恢复维护",
   "type": "module",
-  "types": "./dist/index.d.ts",
   "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    },
     "./advancement": {
       "types": "./dist/advancement/index.d.ts",
       "import": "./dist/advancement/index.js"
@@ -32,6 +27,10 @@
     "./advancement/review-attempt-correctness": {
       "types": "./dist/advancement/review-attempt-correctness.d.ts",
       "import": "./dist/advancement/review-attempt-correctness.js"
+    },
+    "./deferred-schedule-intent": {
+      "types": "./dist/deferred-schedule-intent.d.ts",
+      "import": "./dist/deferred-schedule-intent.js"
     }
   },
   "files": [

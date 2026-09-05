@@ -29,7 +29,7 @@ import type {
   LLMRoles,
   TokenUsage,
   ThinkingConfig,
-} from "@zhixing/core";
+} from "@zhixing/core/types";
 
 /**
  * 把"消费流式响应 → 拼接 text_delta → 返回完整字符串"的模式抽成内部 helper，

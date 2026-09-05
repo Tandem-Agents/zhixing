@@ -9,17 +9,16 @@ import {
 } from "@zhixing/core/protocol";
 import {
   advancementEvidenceRequestId,
-  extractText,
   isObjectiveEvidenceKind,
   type AdvancementEvidenceOutcome,
   type AdvancementSession,
   type ConfirmedRubricSnapshot,
   type EvidenceKind,
   type EvidenceLocator,
-  type Message,
   type ReviewEvidence,
-  type RunRecordInput,
-} from "@zhixing/core";
+} from "@zhixing/core/advancement";
+import { extractText, type Message } from "@zhixing/core";
+import { type RunRecordInput } from "@zhixing/core/transcript";
 import type {
   AuthorityCallContext,
   CapabilityDescriptor,

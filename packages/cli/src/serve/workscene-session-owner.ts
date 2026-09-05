@@ -1,10 +1,6 @@
-import {
-  parseConversationId,
-  WORKSCENE_CONVERSATION_PREFIX,
-  worksceneConversationId,
-} from "@zhixing/core";
+import { parseConversationId, WORKSCENE_CONVERSATION_PREFIX, worksceneConversationId } from "@zhixing/core/conversation";
 import type { WorksceneConversationStorageProjectionCleanupPort } from "@zhixing/core/workscene/application";
-import type { ConversationManager } from "@zhixing/owner-kernel";
+import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import type { WorksceneSceneStorageRemovalPort } from "./workscene-storage-removal.js";
 
 export interface WorksceneSessionOwnerOptions {

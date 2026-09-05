@@ -18,13 +18,8 @@
 //   8. 终端 resize（拖窗口）时自动 rerender（下次按键触发）
 //   9. Ctrl+C 退出脚本
 
-import {
-  CommandProvider,
-  DefaultCommandRegistry,
-  DefaultTypeaheadBroker,
-  UsageTracker,
-  getAgentIdentity,
-} from "@zhixing/core";
+import { CommandProvider, DefaultCommandRegistry, DefaultTypeaheadBroker, UsageTracker } from "@zhixing/core/typeahead";
+import { getAgentIdentity } from "@zhixing/core/identity";
 import * as readline from "node:readline";
 import { createTerminalTypeaheadRenderer } from "../typeahead-renderer.js";
 

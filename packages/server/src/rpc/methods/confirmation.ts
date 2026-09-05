@@ -14,7 +14,10 @@
  * 的会话；显式传 conversationId 时要求 caller 是该会话的 observer（否则过滤空）。
  */
 
-import type { ConfirmationDecision, ConfirmationRequest } from "@zhixing/core";
+import type {
+  ConfirmationDecision,
+  ConfirmationRequest,
+} from "@zhixing/core/confirmation";
 import { confirmationDecisionDigest } from "@zhixing/core/protocol";
 import type { MethodEntry } from "../handlers.js";
 import type { RpcConnection } from "../connection.js";

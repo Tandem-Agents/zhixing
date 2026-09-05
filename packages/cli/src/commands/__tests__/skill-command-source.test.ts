@@ -2,13 +2,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
-import {
-  AnchorSkillGlobalStateAdapter,
-  CommandDispatcher,
-  DefaultCommandRegistry,
-  type CommandDef,
-  type RuntimeContext,
-} from "@zhixing/core";
+import { AnchorSkillGlobalStateAdapter } from "@zhixing/core/skills/global-state";
+import { CommandDispatcher, DefaultCommandRegistry, type CommandDef, type RuntimeContext } from "@zhixing/core/typeahead";
 import {
   SkillCatalogApplicationService,
   type SkillCatalogClient,

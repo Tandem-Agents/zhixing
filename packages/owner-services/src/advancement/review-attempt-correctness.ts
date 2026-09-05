@@ -1,4 +1,4 @@
-import type { AdvancementReviewRootContract } from "@zhixing/core";
+import type { AdvancementReviewRootContract } from "@zhixing/core/advancement";
 import {
   AdvancementReviewAttemptApplicationService,
   type AdvancementClosureSynthesizer,

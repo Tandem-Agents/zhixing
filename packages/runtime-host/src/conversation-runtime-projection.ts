@@ -1,4 +1,6 @@
-import type { ToolDefinition } from "@zhixing/core";
+import type {
+  ToolDefinition,
+} from "@zhixing/core/types";
 import {
   assertKernelRuntimeIdentityContribution,
   type CreateAgentRuntimeOptions,

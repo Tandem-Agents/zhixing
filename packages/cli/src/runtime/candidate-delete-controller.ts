@@ -7,7 +7,7 @@
  */
 
 import chalk from "chalk";
-import type { SuggestionItem } from "@zhixing/core";
+import type { SuggestionItem } from "@zhixing/core/typeahead";
 import type { CliWriter } from "../screen/index.js";
 import type { ConversationController } from "./conversation-controller.js";
 import type { RpcManagementFacade } from "./rpc-management-facade.js";

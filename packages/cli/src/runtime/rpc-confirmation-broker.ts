@@ -16,12 +16,7 @@
  * 适配器原样转发、不自建队列。
  */
 
-import type {
-  ConfirmationDecision,
-  ConfirmationRendererPort,
-  ConfirmationRequest,
-  RequestListener,
-} from "@zhixing/core";
+import type { ConfirmationDecision, ConfirmationRendererPort, ConfirmationRequest, RequestListener } from "@zhixing/core/confirmation";
 import { CONFIRMATION_NOTIFICATIONS } from "@zhixing/rpc";
 import { RpcClientClosedError } from "@zhixing/server";
 import type { CoreHostRpcLink } from "./core-host-connection.js";

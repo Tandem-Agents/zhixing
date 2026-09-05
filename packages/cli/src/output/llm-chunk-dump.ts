@@ -46,15 +46,8 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import {
-  getZhixingHome,
-  type AgentEventMap,
-  type ContentBlock,
-  type IEventBus,
-  type Message,
-  type StreamEvent,
-  type ToolSpec,
-} from "@zhixing/core";
+import { getZhixingHome } from "@zhixing/core/paths";
+import { type AgentEventMap, type ContentBlock, type IEventBus, type Message, type StreamEvent, type ToolSpec } from "@zhixing/core";
 
 // ─── 日志目录布局与轮转 ───────────────────────────────────────────────
 //

@@ -8,8 +8,9 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import type { TurnCommittedInfo } from "@zhixing/owner-kernel";
-import type { Conversation, Message } from "@zhixing/core";
+import type { TurnCommittedInfo } from "@zhixing/owner-kernel/conversation-manager";
+import type { Conversation } from "@zhixing/core/conversation";
+import type { Message } from "@zhixing/core";
 import { createTurnMaintenance, type NamerConversationRepo } from "../turn-maintenance.js";
 
 const flush = () => new Promise((r) => setTimeout(r, 0));

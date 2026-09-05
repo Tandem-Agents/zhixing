@@ -9,11 +9,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  AuthorityDeliveryPipeline,
-  OutboxRegistry,
-  type PermissionRule,
-} from "@zhixing/core";
+import { AuthorityDeliveryPipeline, OutboxRegistry } from "@zhixing/core/delivery";
+import { type PermissionRule } from "@zhixing/core/security";
 import type { ChannelDeliveryEffectSource } from "@zhixing/core/delivery/channel-effect";
 import { SurfaceAssetCoordinator } from "@zhixing/core/authority";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";

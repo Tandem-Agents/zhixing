@@ -1,5 +1,5 @@
 import path from "node:path";
-import { getZhixingHome } from "@zhixing/core";
+import { getZhixingHome } from "@zhixing/core/paths";
 import { protocolDigest } from "@zhixing/core/protocol";
 import { createPlatformSecretStore } from "@zhixing/secrets";
 import { createStdoutWriter } from "../screen/cli-writer.js";

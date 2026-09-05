@@ -76,7 +76,7 @@ import type {
 import type {
   AssignmentSubmissionIdentity,
   AssignmentSubmissionPreflightPort,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/conversation-assignment";
 import type { AssignmentArtifactReceiverPort } from "./assignment-artifact-receiver.js";
 
 export const ASSIGNMENT_ARTIFACT_SERVICE = "assignment.artifacts";

@@ -1,7 +1,7 @@
 import { open, readFile, readdir, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import type { TrustRuleSnapshot } from "@zhixing/core/contracts";
-import type { PermissionRule } from "@zhixing/core";
+import type { PermissionRule } from "@zhixing/core/security";
 import type {
   ExecutorCapabilityDirectoryState,
   ExecutorCapabilityDirectoryStore,

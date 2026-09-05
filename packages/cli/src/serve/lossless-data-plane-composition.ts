@@ -11,7 +11,7 @@ import {
 } from "./lossless-data-plane-runtime.js";
 import type { AssignmentDataPlaneTargetDirectory } from "./assignment-data-plane-topology.js";
 import type { ProtocolSignatureVerifier } from "@zhixing/core/protocol";
-import type { ChannelChallengeAction } from "@zhixing/core";
+import type { ChannelChallengeAction } from "@zhixing/core/channels";
 
 export interface LosslessDataPlaneCompositionOptions {
   readonly verifier: ProtocolSignatureVerifier;

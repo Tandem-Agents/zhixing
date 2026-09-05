@@ -23,12 +23,14 @@
 
 import type {
   ChannelLogger,
-  ConfirmationRequest,
   DeliveryResult,
   DeliveryTarget,
-  DisplayBody,
   OutboundContent,
-} from "@zhixing/core";
+} from "@zhixing/core/channels";
+import type {
+  ConfirmationRequest,
+  DisplayBody,
+} from "@zhixing/core/confirmation";
 import type { ConfirmationHub, HubEntry } from "@zhixing/owner-kernel/confirmation-hub";
 
 // ─── 选项 ───

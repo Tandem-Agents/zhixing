@@ -12,7 +12,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 import type { EventMeta } from "@zhixing/core";
-import type { RunBusContext } from "@zhixing/orchestrator";
+import type { RunBusContext } from "@zhixing/orchestrator/runtime";
 import type { SessionEventEnvelope } from "@zhixing/rpc";
 import { RpcEventBus } from "../rpc-event-bus.js";
 import { makeFakeHostLink } from "./fake-host-link.js";

@@ -7,7 +7,7 @@
  * 释放这类正常路径必经的旁路能力给安全 no-op 缺省。
  */
 
-import type { DurableConversationTurnExecutor } from "@zhixing/owner-kernel";
+import type { DurableConversationTurnExecutor } from "@zhixing/owner-kernel/run-turn";
 
 let stubRunCounter = 0;
 

@@ -12,7 +12,7 @@ import {
   InProcessAssignmentSubmission,
   type ConversationAssignmentLedger,
 } from "@zhixing/executor";
-import type { RuntimeFactory } from "@zhixing/owner-kernel";
+import type { RuntimeFactory } from "@zhixing/owner-kernel/types";
 import { MeshProtocolError } from "@zhixing/mesh/errors";
 import {
   StreamDigestChain,

@@ -1,4 +1,4 @@
-import { getZhixingHome } from "@zhixing/core";
+import { getZhixingHome } from "@zhixing/core/paths";
 
 /**
  * 由 ZHIXING_HOME 确定性派生核心宿主端口。

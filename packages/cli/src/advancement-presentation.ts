@@ -14,13 +14,7 @@
  */
 
 import chalk from "chalk";
-import {
-  describeClosureVerdict,
-  renderClosureReport,
-  type AdvancementExit,
-  type AdvancementRunReview,
-  type ReviewEvidence,
-} from "@zhixing/core";
+import { describeClosureVerdict, renderClosureReport, type AdvancementExit, type AdvancementRunReview, type ReviewEvidence } from "@zhixing/core/advancement";
 import type { SessionAdvancementDetailResult } from "@zhixing/rpc";
 import { clampLine } from "./tui/line-width.js";
 import { layout } from "./tui/style.js";

@@ -20,12 +20,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // 强制启用 ANSI 染色——vitest non-TTY 下 chalk 默认 level=0，让 tone.error.bold
 // 等染色断言生效（与 block-renderer.test.ts 一致策略）
 chalk.level = 3;
-import {
-  ConfirmationBroker,
-  type ConfirmationOption,
-  type ConfirmationRequest,
-  type SuggestedPattern,
-} from "@zhixing/core";
+import { ConfirmationBroker, type ConfirmationOption, type ConfirmationRequest, type SuggestedPattern } from "@zhixing/core/confirmation";
 import {
   TerminalConfirmationRenderer,
   buildInlinePanelBody,

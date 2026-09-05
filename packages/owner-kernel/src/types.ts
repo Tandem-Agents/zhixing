@@ -7,29 +7,14 @@
  * - 流式输出复用 core 的 AgentYield/AgentResult
  */
 
-import type {
-  AbortReason,
-  AgentEventMap,
-  AgentYield,
-  ContextBudget,
-  DurableToolExecutionAuthorizer,
-  EventBus,
-  IConfirmationBroker,
-  Message,
-  OrchestrationContextSnapshotV1,
-  OrchestrationExecutableV1,
-  OrchestrationRunResultV1,
-  PermissionContextId,
-  PermissionRule,
-  RiskLevel,
-  RunResult,
-  RunRecordAdvancementMetadata,
-  SecurityRule,
-  TextCallLLMResult,
-  TurnContext,
-  TurnSource,
-  WindowCompact,
-} from "@zhixing/core";
+import type { AbortReason } from "@zhixing/core/interrupt";
+import type { AgentEventMap, EventBus, Message, TextCallLLMResult, TurnContext } from "@zhixing/core";
+import type { AgentYield, RunResult } from "@zhixing/core/loop";
+import type { ContextBudget, WindowCompact } from "@zhixing/core/context";
+import type { DurableToolExecutionAuthorizer, PermissionContextId, PermissionRule, RiskLevel, SecurityRule } from "@zhixing/core/security";
+import type { IConfirmationBroker } from "@zhixing/core/confirmation";
+import type { OrchestrationContextSnapshotV1, OrchestrationExecutableV1, OrchestrationRunResultV1 } from "@zhixing/core/orchestration";
+import type { RunRecordAdvancementMetadata, TurnSource } from "@zhixing/core/transcript";
 import type {
   AssignmentGlobalQueryPort,
   AssignmentMutationPort,
@@ -39,7 +24,7 @@ import type {
   ResourceLease,
   ResourceReservationPort,
 } from "@zhixing/core/contracts";
-import type { ScheduleMutationStager } from "@zhixing/core";
+import type { ScheduleMutationStager } from "@zhixing/core/scheduler";
 
 // TurnContext 的唯一定义在 @zhixing/core（types/tools.ts）——此处只做 re-export，
 // 方便 owner-kernel 及其下游从统一入口获取。
@@ -308,9 +293,6 @@ export interface RuntimeFactory {
     },
   ): Promise<SessionRuntime>;
 }
-
-/** @deprecated 使用 ManagedSessionInfo (from conversation-manager) 代替 */
-export type { ManagedSessionInfo } from "./conversation-manager.js";
 
 /**
  * `ConversationManager.abort` 的双维度返回值。

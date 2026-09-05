@@ -1,9 +1,7 @@
 import { Buffer } from "node:buffer";
 import { type ArtifactStore } from "@zhixing/core/authority";
-import {
-  type Message,
-  type RunResult,
-} from "@zhixing/core";
+import { type Message } from "@zhixing/core";
+import { type RunResult } from "@zhixing/core/loop";
 import type {
   AuthorityCallContext,
   DispatchEnvelope,
@@ -18,7 +16,7 @@ import {
   StreamDigestChain,
   type StreamFrameProducer,
 } from "@zhixing/core/protocol";
-import type { RuntimeFactory } from "@zhixing/owner-kernel";
+import type { RuntimeFactory } from "@zhixing/owner-kernel/types";
 import type {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,

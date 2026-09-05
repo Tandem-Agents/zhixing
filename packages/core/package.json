@@ -16,6 +16,10 @@
       "types": "./dist/types/index.d.ts",
       "import": "./dist/types/index.js"
     },
+    "./tool-loop": {
+      "types": "./dist/tool-loop/index.d.ts",
+      "import": "./dist/tool-loop/index.js"
+    },
     "./loop": {
       "types": "./dist/loop/index.d.ts",
       "import": "./dist/loop/index.js"
@@ -27,6 +31,26 @@
     "./context": {
       "types": "./dist/context/index.d.ts",
       "import": "./dist/context/index.js"
+    },
+    "./channels": {
+      "types": "./dist/channels/index.d.ts",
+      "import": "./dist/channels/index.js"
+    },
+    "./confirmation": {
+      "types": "./dist/confirmation/index.d.ts",
+      "import": "./dist/confirmation/index.js"
+    },
+    "./identity": {
+      "types": "./dist/identity/index.d.ts",
+      "import": "./dist/identity/index.js"
+    },
+    "./typeahead": {
+      "types": "./dist/typeahead/index.d.ts",
+      "import": "./dist/typeahead/index.js"
+    },
+    "./interrupt": {
+      "types": "./dist/interrupt/index.d.ts",
+      "import": "./dist/interrupt/index.js"
     },
     "./transcript": {
       "types": "./dist/transcript/index.d.ts",
@@ -43,6 +67,18 @@
     "./skills/catalog-correctness": {
       "types": "./dist/skills/catalog-management-correctness.d.ts",
       "import": "./dist/skills/catalog-management-correctness.js"
+    },
+    "./skills/admission": {
+      "types": "./dist/skills/admission.d.ts",
+      "import": "./dist/skills/admission.js"
+    },
+    "./skills/id": {
+      "types": "./dist/skills/id.d.ts",
+      "import": "./dist/skills/id.js"
+    },
+    "./skills/global-state": {
+      "types": "./dist/skills/global-state-adapter.d.ts",
+      "import": "./dist/skills/global-state-adapter.js"
     },
     "./product-api": {
       "types": "./dist/product-api/catalog.d.ts",
@@ -92,6 +128,14 @@
       "types": "./dist/workscene/application.d.ts",
       "import": "./dist/workscene/application.js"
     },
+    "./workscene/types": {
+      "types": "./dist/workscene/types.d.ts",
+      "import": "./dist/workscene/types.js"
+    },
+    "./workscene": {
+      "types": "./dist/workscene/index.d.ts",
+      "import": "./dist/workscene/index.js"
+    },
     "./contracts": {
       "types": "./dist/contracts/index.d.ts",
       "import": "./dist/contracts/index.js"
@@ -103,6 +147,10 @@
     "./persistence": {
       "types": "./dist/persistence/index.d.ts",
       "import": "./dist/persistence/index.js"
+    },
+    "./paths": {
+      "types": "./dist/paths.d.ts",
+      "import": "./dist/paths.js"
     },
     "./authority": {
       "types": "./dist/authority/index.d.ts",

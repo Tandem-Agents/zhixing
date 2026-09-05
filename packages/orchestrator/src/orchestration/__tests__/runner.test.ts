@@ -1,10 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { createEventBus, type EventMeta } from "@zhixing/core/events";
+import { emptyUsage, type AgentEventMap } from "@zhixing/core/types";
 import {
-  createEventBus,
-  emptyUsage,
   loadOrchestrationDefinitionV1,
-  type AgentEventMap,
-  type EventMeta,
   type NormalizedOrchestrationNodeV1,
   type OrchestrationContextSnapshotV1,
   type OrchestrationDefinitionV1,
@@ -12,7 +10,7 @@ import {
   type OrchestrationNodeOutputV1,
   type OrchestrationNodeRunResultV1,
   type OrchestrationSystemCapsV1,
-} from "@zhixing/core";
+} from "@zhixing/core/orchestration";
 import { OrchestrationRunnerV1 } from "../runner.js";
 import type {
   AgentNodeExecutorV1,

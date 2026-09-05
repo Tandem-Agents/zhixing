@@ -9,7 +9,9 @@
  * 未来扩 help / status 等意图时,所有未覆盖分支编译报错。
  */
 
-import type { InboundMessage } from "@zhixing/core";
+import type {
+  InboundMessage,
+} from "@zhixing/core/channels";
 
 /**
  * 控制意图 — 当前仅 cancel,后续按需扩。

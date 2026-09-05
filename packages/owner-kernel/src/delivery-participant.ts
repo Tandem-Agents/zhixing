@@ -1,9 +1,4 @@
-import {
-  assertDeliveryEnvelopeCompanions,
-  projectDeliveryDisplayText,
-  validateDeliveryStreamRecord,
-  type DeliveryLifecycleSourceRef,
-} from "@zhixing/core";
+import { assertDeliveryEnvelopeCompanions, projectDeliveryDisplayText, validateDeliveryStreamRecord, type DeliveryLifecycleSourceRef } from "@zhixing/core/delivery";
 import type {
   DeliveryObligation,
   DeliveryObligationApplication,

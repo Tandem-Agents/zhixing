@@ -1,4 +1,5 @@
-import type { ArtifactStore, IConfirmationBroker } from "@zhixing/core";
+import type { ArtifactStore } from "@zhixing/core/authority";
+import type { IConfirmationBroker } from "@zhixing/core/confirmation";
 import type { AgentRuntime, AgentRuntimeCapacityBinding } from "@zhixing/orchestrator/runtime";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { projectRuntimeConfiguration } from "../../runtime/runtime-configuration-projections.js";

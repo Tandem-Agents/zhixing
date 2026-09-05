@@ -3,7 +3,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { WorkScene } from "@zhixing/core";
+import type { WorkScene } from "@zhixing/core/workscene/types";
 import {
   MAIN_IDENTITY_INSTRUCTIONS,
   SUB_AGENT_ENABLED_TOOLS,

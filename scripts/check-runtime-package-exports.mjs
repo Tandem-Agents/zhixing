@@ -1,7 +1,21 @@
-import { access, readFile } from "node:fs/promises";
+import { access, glob, readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+
+const requireFromCore = createRequire(
+  new URL("../packages/core/package.json", import.meta.url),
+);
+const {
+  ScriptKind,
+  ScriptTarget,
+  createSourceFile,
+  isExportDeclaration,
+  isStringLiteral,
+} = requireFromCore("typescript");
 
 const [
   coreRoot,
+  coreTypes,
+  coreEvents,
   coreConversationApplication,
   coreAdvancementApplication,
   coreSkillCatalog,
@@ -16,19 +30,16 @@ const [
   corePersistence,
   coreProtocol,
   coreWorkspaceAdministration,
-  orchestratorRoot,
   orchestratorRuntime,
   orchestratorAdvancement,
   rpcRoot,
   rpcSkillCatalogClient,
-  ownerKernel,
   ownerKernelDelivery,
   ownerKernelConversationControl,
   ownerKernelControlAdmission,
   ownerKernelConversationAssignment,
+  ownerKernelSessionStateAdapter,
   server,
-  ownerServices,
-  ownerServicesAdvancement,
   runtimeHost,
   runtimeHostSessionAdapter,
   runtimeHostConversationProjection,
@@ -45,6 +56,8 @@ const [
   secrets,
 ] = await Promise.all([
   import("../packages/core/dist/index.js"),
+  import("../packages/core/dist/types/index.js"),
+  import("../packages/core/dist/events/index.js"),
   import("../packages/core/dist/conversation/application.js"),
   import("../packages/core/dist/advancement/application.js"),
   import("../packages/core/dist/skills/catalog-application.js"),
@@ -59,19 +72,16 @@ const [
   import("../packages/core/dist/persistence/index.js"),
   import("../packages/core/dist/protocol/index.js"),
   import("../packages/core/dist/environment/workspace-administration.js"),
-  import("../packages/orchestrator/dist/index.js"),
   import("../packages/orchestrator/dist/runtime/index.js"),
   import("../packages/orchestrator/dist/advancement/index.js"),
   import("../packages/rpc/dist/index.js"),
   import("../packages/rpc/dist/skill-catalog-client.js"),
-  import("../packages/owner-kernel/dist/index.js"),
   import("../packages/owner-kernel/dist/delivery.js"),
   import("../packages/owner-kernel/dist/conversation-control.js"),
   import("../packages/owner-kernel/dist/control-admission.js"),
   import("../packages/owner-kernel/dist/conversation-assignment.js"),
+  import("../packages/owner-kernel/dist/session-state-adapter.js"),
   import("../packages/server/dist/index.js"),
-  import("../packages/owner-services/dist/index.js"),
-  import("../packages/owner-services/dist/advancement/index.js"),
   import("../packages/runtime-host/dist/index.js"),
   import("../packages/runtime-host/dist/session-adapter.js"),
   import("../packages/runtime-host/dist/conversation-runtime-projection.js"),
@@ -172,16 +182,527 @@ const meshCanonicalValues = {
   projectDeviceCredentialRevocation: meshCredentialExposure,
 };
 
+const migrationPackageSurfaces = [
+  {
+    packageName: "orchestrator",
+    rootAbsent: true,
+    entries: [
+      ["./runtime", "runtime/index", "createAgentRuntime"],
+      ["./security", "security/index", "createSecureExecuteTool"],
+      ["./profile", "profile/index", "mainProfile"],
+      ["./subagent", "subagent/index", "runChildAgent"],
+      ["./confirmation", "confirmation/index", "resolveSubAgentResolver"],
+      ["./tools", "tools/index", "createTaskTool"],
+      ["./orchestration", "orchestration/index", "OrchestrationRunnerV1"],
+      ["./advancement", "advancement/index", "createAdvancementRuntime"],
+    ],
+  },
+  {
+    packageName: "core",
+    retired: [["./delivery/resolution-application", "delivery/resolution-application"]],
+    entries: [
+      ["./skills/catalog", "skills/catalog-application", "SkillCatalogApplicationService"],
+      [
+        "./skills/catalog-correctness",
+        "skills/catalog-management-correctness",
+        "createAnchorSkillCatalogManagementCorrectnessPort",
+      ],
+      ["./product-api", "product-api/catalog", "ProductApiDispatcher"],
+      ["./tool-loop", "tool-loop/index", "runToolLoop"],
+      ["./confirmation", "confirmation/index"],
+      ["./channels", "channels/index"],
+      ["./identity", "identity/index"],
+      ["./interrupt", "interrupt/index"],
+      ["./paths", "paths"],
+      ["./typeahead", "typeahead/index", "DefaultTypeaheadBroker"],
+      ["./skills/admission", "skills/admission"],
+      [
+        "./skills/global-state",
+        "skills/global-state-adapter",
+        "AnchorSkillGlobalStateAdapter",
+      ],
+      ["./skills/id", "skills/id"],
+      ["./workscene", "workscene/index", "AnchorWorksceneGlobalStateAdapter"],
+      ["./workscene/types", "workscene/types"],
+      [
+        "./trust-administration",
+        "trust-administration/application",
+        "TrustAdministrationApplicationService",
+      ],
+      [
+        "./scheduler/application",
+        "scheduler/application",
+        "ScheduleManagementApplicationService",
+      ],
+      [
+        "./conversation/application",
+        "conversation/application",
+        "ConversationDirectoryApplicationService",
+      ],
+      ["./advancement/application", "advancement/application", "AdvancementApplicationService"],
+      ["./workscene/application", "workscene/application", "WorksceneApplicationService"],
+      [
+        "./delivery/application",
+        "delivery/application",
+        "DeliveryUncertainResolutionApplicationService",
+      ],
+      ["./delivery/channel-effect", "delivery/channel-effect", "createChannelDeliveryEffect"],
+      [
+        "./device-administration/application",
+        "device-administration/application",
+        "DeviceAdministrationApplicationService",
+      ],
+      [
+        "./device-administration/correctness",
+        "device-administration/correctness",
+        "createDeviceAdministrationCurrentRemovalAdmissionPort",
+      ],
+      [
+        "./backup-recovery/application",
+        "backup-recovery/application",
+        "BackupRecoveryAdministrationApplicationService",
+      ],
+      [
+        "./environment/workspace-administration",
+        "environment/workspace-administration",
+        "WorkspaceAdministrationApplicationService",
+      ],
+      [
+        "./environment/workspace-probe-persistence",
+        "environment/workspace-probe-persistence",
+        "WorkspaceProbePersistencePort",
+      ],
+      [
+        "./environment/workspace-binding-generation-persistence",
+        "environment/workspace-binding-generation-persistence",
+        "WorkspaceBindingGenerationPersistencePort",
+      ],
+      [
+        "./environment/workspace-binding-catalog-persistence",
+        "environment/workspace-binding-catalog-persistence",
+        "WorkspaceBindingCatalogPersistencePort",
+      ],
+    ],
+  },
+  {
+    packageName: "owner-kernel",
+    rootAbsent: true,
+    entries: [
+      ["./types", "types", "SessionRuntime"],
+      ["./runtime", "runtime", "ConversationManager"],
+      ["./conversation-manager", "conversation-manager", "ConversationManager"],
+      [
+        "./conversation-agent-turn-admission",
+        "conversation-agent-turn-admission",
+        "createConversationAgentTurnAdmissionPort",
+      ],
+      [
+        "./conversation-control",
+        "conversation-control",
+        "createConversationResolutionFence",
+      ],
+      ["./run-turn", "run-turn", "runTurnWithCommit"],
+      ["./ephemeral-run-buffer", "ephemeral-run-buffer", "EphemeralRunBuffer"],
+      ["./confirmation-hub", "confirmation-hub", "ConfirmationHub"],
+      ["./control-admission", "control-admission", "ControlAdmissionJournal"],
+      [
+        "./conversation-assignment",
+        "conversation-assignment",
+        "ConversationRunJournal",
+      ],
+      ["./job-assignment", "job-assignment", "JobJournal"],
+      ["./delivery", "delivery", "createOwnerDeliveryParticipant"],
+      ["./resource-governor", "resource-governor", "AnchorResourceGovernor"],
+      ["./scheduler-authority", "scheduler-authority", "AnchorScheduler"],
+      [
+        "./scheduler-global-state",
+        "scheduler-global-state",
+        "AnchorSchedulerGlobalStateAdapter",
+      ],
+      [
+        "./conversation-assignment-authority",
+        "conversation-assignment-authority",
+        "ConversationAssignmentAuthority",
+      ],
+      [
+        "./job-assignment-authority",
+        "job-assignment-authority",
+        "JobAssignmentAuthority",
+      ],
+      [
+        "./scheduler-job-commit",
+        "scheduler-job-commit",
+        "SchedulerJobCommitParticipant",
+      ],
+      [
+        "./scheduler-conversation-publisher",
+        "scheduler-conversation-publisher",
+        "SchedulerConversationMutationPublisher",
+      ],
+      [
+        "./scheduler-user-notices",
+        "scheduler-user-notices",
+        "SchedulerUserNoticeJournal",
+      ],
+      [
+        "./global-mutation-commit-coordinator",
+        "global-mutation-commit-coordinator",
+        "GlobalMutationCommitCoordinator",
+      ],
+      [
+        "./global-mutation-participant",
+        "global-mutation-participant",
+        "GlobalMutationCommitParticipant",
+      ],
+      [
+        "./deferred-global-intent-review",
+        "deferred-global-intent-review",
+        "DeferredGlobalIntentAnchorReviewService",
+      ],
+      [
+        "./deferred-global-intents",
+        "deferred-global-intents",
+        "DeferredGlobalIntentRepository",
+      ],
+      [
+        "./channel-challenge-outbox",
+        "channel-challenge-outbox",
+        "ChannelChallengeOutbox",
+      ],
+      [
+        "./conversation-transfer",
+        "conversation-transfer",
+        "ConversationTransferSource",
+      ],
+      [
+        "./session-state-adapter",
+        "session-state-adapter",
+        "ConversationSessionStateAdapter",
+      ],
+      [
+        "./publish-result-product-language",
+        "publish-result-product-language",
+        "publishConflictProductCopy",
+      ],
+      [
+        "./test-support/s7-durable",
+        "test-support/s7-durable",
+        "createOwnerKernelS7DurableScenarios",
+      ],
+    ],
+  },
+  {
+    packageName: "owner-services",
+    rootAbsent: true,
+    retired: [
+      ["./advancement/review-dispatch", "advancement/review-dispatch"],
+      [
+        "./advancement/review-application-bridge",
+        "advancement/review-application-bridge",
+      ],
+      ["./advancement/proxy-content", "advancement/proxy-content"],
+    ],
+    entries: [
+      ["./advancement", "advancement/index", "AdvancementController"],
+      [
+        "./advancement/controller",
+        "advancement/controller",
+        "AdvancementController",
+      ],
+      [
+        "./advancement/proxy-scheduler",
+        "advancement/proxy-scheduler",
+        "ProxyMessageScheduler",
+      ],
+      [
+        "./advancement/recovery-maintenance",
+        "advancement/recovery-maintenance",
+        "createAdvancementRecoveryMaintenance",
+      ],
+      [
+        "./advancement/review-external-mechanism",
+        "advancement/review-external-mechanism",
+        "createAdvancementReviewExternalMechanism",
+      ],
+      [
+        "./advancement/review-attempt-correctness",
+        "advancement/review-attempt-correctness",
+        "createAdvancementReviewAttemptApplication",
+      ],
+      [
+        "./deferred-schedule-intent",
+        "deferred-schedule-intent",
+        "DeferredScheduleIntentProducer",
+      ],
+    ],
+  },
+  {
+    packageName: "rpc",
+    entries: [["./skill-catalog-client", "skill-catalog-client", "SkillCatalogRpcClient"]],
+  },
+  {
+    packageName: "runtime-host",
+    entries: [
+      [
+        "./conversation-runtime-projection",
+        "conversation-runtime-projection",
+        "ConversationRuntimeProjection",
+      ],
+    ],
+  },
+];
+
+const CORE_RESTRICTED_ROOT_SOURCES = new Set([
+  "./diagnostics.js",
+  "./events/index.js",
+  "./types/index.js",
+]);
+
 const failures = [];
+await verifyCoreRestrictedRoot(failures);
+await verifyMigrationPackageSurfaces(failures);
 await verifyCorePackageExports(failures);
 await verifyOwnerKernelConversationControlExport(failures);
+await verifyOwnerKernelRetiredCompatibilitySurface(failures);
 await verifyRpcSkillCatalogClientExport(failures);
 await verifyRuntimeHostProductBoundary(failures);
-if (
-  typeof orchestratorRuntime.createAgentRuntime !== "function" ||
-  "createAgentRuntime" in orchestratorRoot
-) {
+if (typeof orchestratorRuntime.createAgentRuntime !== "function") {
   failures.push("orchestrator-agent-runtime:invalid-runtime-boundary");
+}
+
+async function verifyCoreRestrictedRoot(failures) {
+  const packageRoot = new URL("../packages/core/", import.meta.url);
+  const rootSource = await readFile(new URL("src/index.ts", packageRoot), "utf8");
+  if (!isRestrictedCoreRootSource(rootSource)) {
+    failures.push("core-exports:root:invalid-restricted-surface");
+  }
+
+  const expectedRuntime = new Set([
+    ...Object.keys(coreTypes),
+    ...Object.keys(coreEvents),
+    "logDiagnostic",
+    "setDiagnosticLogger",
+  ]);
+  const actualRuntime = Object.keys(coreRoot);
+  if (
+    actualRuntime.length !== expectedRuntime.size ||
+    actualRuntime.some((name) => !expectedRuntime.has(name))
+  ) {
+    failures.push("core-exports:root:runtime-exact-set-drift");
+  }
+
+  const equivalentSourceFixture = `
+// Formatting and comments do not change the restricted export contract.
+export * from './types/index.js'
+export * from "./diagnostics.js";
+export * from './events/index.js';
+`;
+  if (!isRestrictedCoreRootSource(equivalentSourceFixture)) {
+    failures.push("core-exports:root:equivalent-source-counterexample-rejected");
+  }
+  const forbiddenValueFixture = `
+export * from "./diagnostics.js";
+export * from "./events/index.js";
+export * from "./security/index.js";
+`;
+  if (isRestrictedCoreRootSource(forbiddenValueFixture)) {
+    failures.push("core-exports:root:illegal-value-reexport-undetected");
+  }
+  const forbiddenTypeFixture = `
+export * from "./diagnostics.js";
+export * from "./events/index.js";
+export type * from "./security/index.js";
+`;
+  if (isRestrictedCoreRootSource(forbiddenTypeFixture)) {
+    failures.push("core-exports:root:illegal-type-reexport-undetected");
+  }
+}
+
+function isRestrictedCoreRootSource(source) {
+  const sourceFile = createSourceFile(
+    "packages/core/src/index.ts",
+    source,
+    ScriptTarget.ESNext,
+    true,
+    ScriptKind.TS,
+  );
+  if (
+    sourceFile.parseDiagnostics.length > 0 ||
+    sourceFile.statements.length !== CORE_RESTRICTED_ROOT_SOURCES.size
+  ) {
+    return false;
+  }
+
+  const seen = new Set();
+  for (const statement of sourceFile.statements) {
+    if (
+      !isExportDeclaration(statement) ||
+      statement.isTypeOnly ||
+      statement.exportClause !== undefined ||
+      !statement.moduleSpecifier ||
+      !isStringLiteral(statement.moduleSpecifier)
+    ) {
+      return false;
+    }
+    const sourceName = statement.moduleSpecifier.text;
+    if (
+      !CORE_RESTRICTED_ROOT_SOURCES.has(sourceName) ||
+      seen.has(sourceName)
+    ) {
+      return false;
+    }
+    seen.add(sourceName);
+  }
+  return seen.size === CORE_RESTRICTED_ROOT_SOURCES.size;
+}
+
+async function verifyMigrationPackageSurfaces(failures) {
+  const packageRoots = {
+    core: coreRoot,
+    rpc: rpcRoot,
+    "runtime-host": runtimeHost,
+  };
+  for (const {
+    packageName,
+    entries,
+    retired = [],
+    rootAbsent = false,
+  } of migrationPackageSurfaces) {
+    const packageRoot = new URL(`../packages/${packageName}/`, import.meta.url);
+    const [manifestText, build] = await Promise.all([
+      readFile(new URL("package.json", packageRoot), "utf8"),
+      readFile(new URL("tsup.config.ts", packageRoot), "utf8"),
+    ]);
+    const manifest = JSON.parse(manifestText);
+    const rootSource = rootAbsent
+      ? ""
+      : await readFile(new URL("src/index.ts", packageRoot), "utf8");
+    const rootRuntime = packageRoots[packageName] ?? {};
+    if (rootAbsent) {
+      const expectedSubpaths = new Set(entries.map(([subpath]) => subpath));
+      const actualSubpaths = Object.keys(manifest.exports ?? {});
+      if (
+        Object.hasOwn(manifest, "types") ||
+        actualSubpaths.length !== expectedSubpaths.size ||
+        actualSubpaths.some((subpath) => !expectedSubpaths.has(subpath)) ||
+        build.includes('"src/index.ts"')
+      ) {
+        failures.push(`${packageName}-exports:root:retired-surface`);
+      }
+      for (const relative of [
+        "src/index.ts",
+        "dist/index.d.ts",
+        "dist/index.js",
+      ]) {
+        try {
+          await access(new URL(relative, packageRoot));
+          failures.push(`${packageName}-exports:root:retired-target:${relative}`);
+        } catch {
+          // A fresh build must not recreate the retired package root.
+        }
+      }
+      await verifyNoProductionBarePackageImport(
+        `@zhixing/${packageName}`,
+        failures,
+      );
+    }
+    for (const [subpath, target, rootLeakToken] of entries) {
+      const conditions = manifest.exports?.[subpath];
+      const expectedTypes = `./dist/${target}.d.ts`;
+      const expectedImport = `./dist/${target}.js`;
+      if (
+        conditions?.types !== expectedTypes ||
+        conditions?.import !== expectedImport
+      ) {
+        failures.push(
+          `${packageName}-exports:${subpath}:invalid-canonical-subpath`,
+        );
+      }
+      for (const [candidate, candidateConditions] of Object.entries(
+        manifest.exports ?? {},
+      )) {
+        if (
+          candidate !== subpath &&
+          candidateConditions &&
+          typeof candidateConditions === "object" &&
+          (candidateConditions.types === conditions?.types ||
+            candidateConditions.import === conditions?.import)
+        ) {
+          failures.push(`${packageName}-exports:${candidate}:duplicate:${subpath}`);
+        }
+      }
+      const sourceEntry = `"src/${target}.ts"`;
+      if (build.split(sourceEntry).length - 1 !== 1) {
+        failures.push(`${packageName}-exports:${subpath}:invalid-build-entry`);
+      }
+      const rootSourcePath = `./${target}.js`;
+      if (
+        !rootAbsent &&
+        rootLeakToken !== undefined &&
+        (rootSource.includes(rootSourcePath) ||
+          rootSource.includes(rootLeakToken) ||
+          Object.hasOwn(rootRuntime, rootLeakToken))
+      ) {
+        failures.push(`${packageName}-exports:${subpath}:root-leak`);
+      }
+      for (const targetPath of [expectedTypes, expectedImport]) {
+        try {
+          await access(new URL(targetPath.slice(2), packageRoot));
+        } catch {
+          failures.push(
+            `${packageName}-exports:${subpath}:${targetPath}:missing-fresh-target`,
+          );
+        }
+      }
+    }
+    for (const [subpath, target] of retired) {
+      if (
+        subpath in (manifest.exports ?? {}) ||
+        build.includes(`"src/${target}.ts"`) ||
+        rootSource.includes(target)
+      ) {
+        failures.push(`${packageName}-exports:${subpath}:retired-surface`);
+      }
+      for (const suffix of [".d.ts", ".js"]) {
+        try {
+          await access(new URL(`dist/${target}${suffix}`, packageRoot));
+          failures.push(
+            `${packageName}-exports:${subpath}:retired-target:dist/${target}${suffix}`,
+          );
+        } catch {
+          // Fresh builds must not recreate retired package-surface artifacts.
+        }
+      }
+    }
+  }
+}
+
+async function verifyNoProductionBarePackageImport(packageName, failures) {
+  const repositoryRoot = new URL("../", import.meta.url);
+  const escapedPackageName = packageName.replace(
+    /[.*+?^${}()|[\]\\]/gu,
+    "\\$&",
+  );
+  const bareImport = new RegExp(
+    `(?:\\bfrom\\s*|\\bimport\\s*(?:\\(\\s*)?|\\brequire\\s*\\(\\s*)["']${escapedPackageName}["']`,
+    "u",
+  );
+  for await (const relative of glob("packages/**/src/**/*.ts", {
+    cwd: repositoryRoot,
+    exclude: [
+      "packages/**/__tests__/**",
+      "packages/**/*.test.ts",
+      "packages/**/*.spec.ts",
+    ],
+  })) {
+    const source = await readFile(
+      new URL(relative.replaceAll("\\", "/"), repositoryRoot),
+      "utf8",
+    );
+    if (bareImport.test(source)) {
+      failures.push(`${packageName}-exports:root:production-consumer:${relative}`);
+    }
+  }
 }
 
 async function verifyOwnerKernelConversationControlExport(failures) {
@@ -196,9 +717,7 @@ async function verifyOwnerKernelConversationControlExport(failures) {
     typeof ownerKernelConversationControl.createConversationResolutionFence !==
       "function" ||
     typeof ownerKernelConversationControl.parseConversationResolutionFence !==
-      "function" ||
-    "createConversationResolutionFence" in ownerKernel ||
-    "parseConversationResolutionFence" in ownerKernel
+      "function"
   ) {
     failures.push(
       "owner-kernel-exports:conversation-control:invalid-runtime-boundary",
@@ -216,36 +735,63 @@ async function verifyOwnerKernelConversationControlExport(failures) {
       );
     }
   }
-  const rootDeclaration = await readFile(
-    new URL("dist/index.d.ts", packageRoot),
-    "utf8",
-  );
+}
+
+async function verifyOwnerKernelRetiredCompatibilitySurface(failures) {
+  const packageRoot = new URL("../packages/owner-kernel/", import.meta.url);
+  const [
+    sessionStateDeclaration,
+    typesDeclaration,
+    conversationManagerDeclaration,
+    runtimeDeclaration,
+  ] =
+    await Promise.all([
+      readFile(new URL("dist/session-state-adapter.d.ts", packageRoot), "utf8"),
+      readFile(new URL("dist/types.d.ts", packageRoot), "utf8"),
+      readFile(new URL("dist/conversation-manager.d.ts", packageRoot), "utf8"),
+      readFile(new URL("dist/runtime.d.ts", packageRoot), "utf8"),
+    ]);
   if (
-    rootDeclaration.includes("ConversationResolutionFence") ||
-    rootDeclaration.includes("conversation-control")
+    typeof ownerKernelSessionStateAdapter.ConversationSessionStateAdapter !== "function" ||
+    !sessionStateDeclaration.includes("ConversationSessionStateAdapterOptions")
   ) {
-    failures.push("owner-kernel-exports:root:conversation-control-type-leak");
+    failures.push("owner-kernel-exports:session-state-adapter:missing-canonical-surface");
+  }
+  for (const retired of [
+    "AnchorSessionStateAdapter",
+    "AnchorSessionStateAdapterOptions",
+  ]) {
+    if (
+      retired in ownerKernelSessionStateAdapter ||
+      sessionStateDeclaration.includes(retired)
+    ) {
+      failures.push(`owner-kernel-exports:session-state-adapter:retired:${retired}`);
+    }
+  }
+  if (/\bManagedSessionInfo\b/u.test(typesDeclaration)) {
+    failures.push("owner-kernel-exports:types:retired:ManagedSessionInfo");
+  }
+  if (
+    !conversationManagerDeclaration.includes("ManagedSessionInfo") ||
+    !runtimeDeclaration.includes("interface ManagedSessionInfo")
+  ) {
+    failures.push("owner-kernel-exports:conversation-manager:missing:ManagedSessionInfo");
   }
 }
 if (
-  typeof orchestratorRuntime.assertKernelRunEvent !== "function" ||
-  "assertKernelRunEvent" in orchestratorRoot
+  typeof orchestratorRuntime.assertKernelRunEvent !== "function"
 ) {
   failures.push("orchestrator-kernel-run-event:invalid-runtime-boundary");
 }
 if (
   typeof orchestratorRuntime.assertKernelTerminal !== "function" ||
-  typeof orchestratorRuntime.projectAgentResultToKernelTerminal !== "function" ||
-  "assertKernelTerminal" in orchestratorRoot ||
-  "projectAgentResultToKernelTerminal" in orchestratorRoot
+  typeof orchestratorRuntime.projectAgentResultToKernelTerminal !== "function"
 ) {
   failures.push("orchestrator-kernel-terminal:invalid-runtime-boundary");
 }
 if (
   typeof orchestratorRuntime.createKernelRuntimeIdentityContribution !== "function" ||
-  typeof orchestratorRuntime.assertKernelRuntimeIdentityContribution !== "function" ||
-  "createKernelRuntimeIdentityContribution" in orchestratorRoot ||
-  "assertKernelRuntimeIdentityContribution" in orchestratorRoot
+  typeof orchestratorRuntime.assertKernelRuntimeIdentityContribution !== "function"
 ) {
   failures.push("orchestrator-kernel-runtime-identity:invalid-runtime-boundary");
 }
@@ -255,7 +801,7 @@ for (const name of [
   "createKernelRuntimeEnvironment",
   "assertKernelRuntimeEnvironment",
 ]) {
-  if (typeof orchestratorRuntime[name] !== "function" || name in orchestratorRoot) {
+  if (typeof orchestratorRuntime[name] !== "function") {
     failures.push(`orchestrator-kernel-provider:${name}:invalid-runtime-boundary`);
   }
 }
@@ -265,7 +811,6 @@ for (const name of [
 ]) {
   if (
     typeof orchestratorAdvancement[name] !== "function" ||
-    name in orchestratorRoot ||
     name in orchestratorRuntime
   ) {
     failures.push(`orchestrator-advancement-provider:${name}:invalid-subpath`);
@@ -383,18 +928,13 @@ for (const name of [
 ]) {
   if (typeof secrets[name] !== "function") failures.push(`secrets:${name}`);
 }
-for (const name of ownerServiceCanonicalValues) {
-  if (ownerServices[name] !== ownerServicesAdvancement[name]) {
-    failures.push(`owner-services:${name}`);
-  }
-}
 for (const name of ownerKernelControlAdmissionValues) {
-  if (ownerKernel[name] !== ownerKernelControlAdmission[name]) {
+  if (typeof ownerKernelControlAdmission[name] !== "function") {
     failures.push(`owner-kernel-control-admission:${name}`);
   }
 }
 for (const name of ownerKernelConversationAssignmentValues) {
-  if (ownerKernel[name] !== ownerKernelConversationAssignment[name]) {
+  if (typeof ownerKernelConversationAssignment[name] !== "function") {
     failures.push(`owner-kernel-conversation-assignment:${name}`);
   }
 }
@@ -440,16 +980,8 @@ const runtimeHostDeclarations = await Promise.all([
     "utf8",
   ),
 ]);
-const [
-  orchestratorRootDeclarations,
-  orchestratorRuntimeDeclarations,
-  orchestratorAdvancementDeclarations,
-] =
+const [orchestratorRuntimeDeclarations, orchestratorAdvancementDeclarations] =
   await Promise.all([
-    readFile(
-      new URL("../packages/orchestrator/dist/index.d.ts", import.meta.url),
-      "utf8",
-    ),
     readFile(
       new URL(
         "../packages/orchestrator/dist/runtime/index.d.ts",
@@ -467,18 +999,12 @@ const [
   ]);
 const runtimeHostRootDeclaration = runtimeHostDeclarations[0] ?? "";
 if (
-  orchestratorRootDeclarations.includes("KernelRunEvent") ||
-  orchestratorRootDeclarations.includes("assertKernelRunEvent") ||
   !orchestratorRuntimeDeclarations.includes("KernelRunEvent") ||
   !orchestratorRuntimeDeclarations.includes("assertKernelRunEvent")
 ) {
   failures.push("orchestrator-kernel-run-event:invalid-declaration-boundary");
 }
 if (
-  orchestratorRootDeclarations.includes("KernelTerminal") ||
-  orchestratorRootDeclarations.includes("KernelRunCompletion") ||
-  orchestratorRootDeclarations.includes("assertKernelTerminal") ||
-  orchestratorRootDeclarations.includes("projectAgentResultToKernelTerminal") ||
   /\bRunResult\b/u.test(orchestratorRuntimeDeclarations) ||
   !orchestratorRuntimeDeclarations.includes("KernelTerminal") ||
   !orchestratorRuntimeDeclarations.includes("KernelRunCompletion") ||
@@ -495,9 +1021,7 @@ const createAgentRuntimeOptionsDeclaration = orchestratorRuntimeDeclarations.mat
 )?.groups?.body;
 if (
   !agentRuntimeDeclaration ||
-  /\b(?:AgentRuntime|createAgentRuntime|KernelRunEnvelope|KernelRunEvent|KernelRunCompletion|KernelTerminal|KernelModelProviderBinding|KernelRuntimeEnvironment)\b/u.test(
-    orchestratorRootDeclarations,
-  )
+  !orchestratorRuntimeDeclarations.includes("createAgentRuntime")
 ) {
   failures.push("orchestrator-agent-runtime:invalid-declaration-boundary");
 }
@@ -586,7 +1110,6 @@ if (
   !orchestratorRuntimeDeclarations.includes("KernelModelProviderFactory") ||
   !orchestratorRuntimeDeclarations.includes("KernelRuntimeEnvironmentFactory")
   || !orchestratorRuntimeDeclarations.includes("KernelToolImplementationPort")
-  || orchestratorRootDeclarations.includes("KernelToolImplementationPort")
 ) {
   failures.push("orchestrator-kernel-provider:invalid-declaration-boundary");
 }
@@ -597,7 +1120,6 @@ if (
   !orchestratorAdvancementDeclarations.includes(
     "AdvancementModelProviderFactory",
   ) ||
-  /AdvancementModelProvider/u.test(orchestratorRootDeclarations) ||
   /AdvancementModelProvider/u.test(orchestratorRuntimeDeclarations)
 ) {
   failures.push("orchestrator-advancement-provider:invalid-declaration-boundary");
@@ -637,8 +1159,6 @@ if (
   !/runtimeIdentity\?: KernelRuntimeIdentityContribution;/u.test(
     createAgentRuntimeOptionsDeclaration ?? "",
   ) ||
-  orchestratorRootDeclarations.includes("createKernelRuntimeIdentityContribution") ||
-  orchestratorRootDeclarations.includes("assertKernelRuntimeIdentityContribution") ||
   !orchestratorRuntimeDeclarations.includes("createKernelRuntimeIdentityContribution") ||
   !orchestratorRuntimeDeclarations.includes("assertKernelRuntimeIdentityContribution")
 ) {
@@ -912,9 +1432,7 @@ async function verifyCorePackageExports(failures) {
   }
   if (
     typeof ownerKernelDelivery.createOwnerDeliveryParticipant !== "function" ||
-    typeof ownerKernelDelivery.createOwnerDeliveryLifecycleBinding !== "function" ||
-    "createOwnerDeliveryParticipant" in ownerKernel ||
-    "createOwnerDeliveryLifecycleBinding" in ownerKernel
+    typeof ownerKernelDelivery.createOwnerDeliveryLifecycleBinding !== "function"
   ) {
     failures.push("owner-kernel-exports:delivery-obligation:invalid-runtime-boundary");
   }

@@ -4,7 +4,13 @@
 
 import { describe, expect, it, vi } from "vitest";
 import type { ServerContext } from "../../context.js";
-import type { AgentYield, Message, RunResult } from "@zhixing/core";
+import type {
+  AgentYield,
+  RunResult,
+} from "@zhixing/core/loop";
+import type {
+  Message,
+} from "@zhixing/core/types";
 import {
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
   ConversationDirectoryApplicationService,
@@ -19,12 +25,12 @@ import {
   ADVANCEMENT_PREPARE_ACTIVE_USER_TURN_COMMAND,
   ADVANCEMENT_PREPARE_NEW_TASK_COMMAND,
 } from "@zhixing/core/advancement/application";
-import {
-  ConversationManager,
-  type SessionRuntime,
-} from "@zhixing/owner-kernel";
+import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+import { type SessionRuntime } from "@zhixing/owner-kernel/types";
 import type { DurableConversationTurnExecutor } from "@zhixing/owner-kernel/run-turn";
-import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
+import {
+  createConversationAgentTurnAdmissionPort,
+} from "@zhixing/owner-kernel/conversation-agent-turn-admission";
 import { parseConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
 import { stubDurableTurnExecutor } from "../../__tests__/durable-turn-executor-stub.js";
 import { bindTestConversationManager } from "../../__tests__/server-conversation-binding-fixture.js";

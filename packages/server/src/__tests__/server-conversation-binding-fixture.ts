@@ -1,4 +1,4 @@
-import type { ConversationManager } from "@zhixing/owner-kernel";
+import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
 import type { ServerConversationBinding } from "../context.js";
 

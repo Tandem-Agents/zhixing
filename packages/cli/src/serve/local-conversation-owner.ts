@@ -1,18 +1,11 @@
 import { createHash, randomBytes } from "node:crypto";
 import { Buffer } from "node:buffer";
-import {
-  buildStartupBootstrapPair,
-  localConversationId,
-  parseRubricDocument,
-  projectRubricContractDraft,
-  rubricDocumentId,
-  stringifyRubricDraft,
-  type Conversation,
-  type RubricContractDraftSnapshot,
-  type RubricDraftPersistenceChoice,
-  type RunRecordRef,
-  type UserTurnInput,
-} from "@zhixing/core";
+import { buildStartupBootstrapPair } from "@zhixing/core/context";
+import { localConversationId, type Conversation } from "@zhixing/core/conversation";
+import { parseRubricDocument, rubricDocumentId, stringifyRubricDraft } from "@zhixing/core/rubrics";
+import { projectRubricContractDraft, type RubricContractDraftSnapshot, type RubricDraftPersistenceChoice } from "@zhixing/core/advancement";
+import { type RunRecordRef } from "@zhixing/core/transcript";
+import { type UserTurnInput } from "@zhixing/core";
 import type {
   DeferredGlobalIntent,
   EvidenceHandlerPort,
@@ -40,24 +33,26 @@ import {
   type ConversationTaskListMutationDecision,
   type ConversationTaskListPort,
 } from "@zhixing/core/conversation/application";
+import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import {
-  ConversationManager,
   ConversationTransferSource,
-  DeferredGlobalIntentRepository,
   listConversationTransferStates,
   resolveCurrentConversationAuthority,
   type CurrentConversationAuthority,
-  type RuntimeFactory,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/conversation-transfer";
+import { DeferredGlobalIntentRepository } from "@zhixing/owner-kernel/deferred-global-intents";
+import { type RuntimeFactory } from "@zhixing/owner-kernel/types";
 import { parseConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
 import {
   createAdvancementRecoveryMaintenance,
   DeferredRubricPublication,
-  DeferredScheduleIntentProducer,
   renderRecentContextFromMessages,
   type AdvancementRecoveryMaintenance,
+} from "@zhixing/owner-services/advancement";
+import {
+  DeferredScheduleIntentProducer,
   type DeferredScheduleIntentResult,
-} from "@zhixing/owner-services";
+} from "@zhixing/owner-services/deferred-schedule-intent";
 import { createAdvancementReviewProxySchedulePort } from "@zhixing/owner-services/advancement/proxy-scheduler";
 import {
   createAdvancementOriginalTaskAdmissionPort,
@@ -88,7 +83,9 @@ import {
   type ConversationExecutorDispatchApplication,
 } from "./conversation-executor-dispatch.js";
 import { GlobalRubricCatalog } from "./advancement-rubric-library.js";
-import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
+import {
+  createConversationAgentTurnAdmissionPort,
+} from "@zhixing/owner-kernel/conversation-agent-turn-admission";
 
 /** 本地域 port 的会话只读面:冻结读取子集;写入只能经 port 的命令 wrapper。 */
 export type LocalConversationSessionReadPort = Readonly<

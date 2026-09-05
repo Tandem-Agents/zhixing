@@ -1,11 +1,5 @@
 import path from "node:path";
-import {
-  StorageMaintenanceTaskRunner,
-  runStorageMaintenanceStep,
-  storageMaintenanceObligation,
-  storageMaintenanceRequest,
-  type StorageMaintenanceGovernorPort,
-} from "@zhixing/core";
+import { StorageMaintenanceTaskRunner, runStorageMaintenanceStep, storageMaintenanceObligation, storageMaintenanceRequest, type StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import type {
   DataPlaneTicket,
   ExecutionRef,

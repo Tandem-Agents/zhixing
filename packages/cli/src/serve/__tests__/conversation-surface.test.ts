@@ -14,11 +14,8 @@ import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { extractFirstText } from "@zhixing/core";
 import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
-import {
-  ConversationManager,
-  type RuntimeFactory,
-  type SessionRuntime,
-} from "@zhixing/owner-kernel";
+import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
 import { createAssemblyUnits } from "../access-surfaces.js";
 import type { AssemblyContext } from "../access-surface.js";
 import { setupAuthorityRuntime } from "../../setup-delivery.js";

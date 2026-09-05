@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
-import type { AbortReason } from "@zhixing/core";
+import type {
+  AbortReason,
+} from "@zhixing/core/interrupt";
 import { formatAbortReasonZh } from "../abort-formatter-zh.js";
 
 describe("formatAbortReasonZh", () => {

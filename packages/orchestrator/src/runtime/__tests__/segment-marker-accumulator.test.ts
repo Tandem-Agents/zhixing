@@ -8,8 +8,9 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { AgentEventMap, WindowCompact } from "@zhixing/core";
-import { EventBus } from "@zhixing/core";
+import type { AgentEventMap } from "@zhixing/core/types";
+import type { WindowCompact } from "@zhixing/core/context";
+import { EventBus } from "@zhixing/core/events";
 import { subscribeSegmentMarkerAccumulator } from "../segment-marker-accumulator.js";
 
 function makeBus(): EventBus<AgentEventMap> {

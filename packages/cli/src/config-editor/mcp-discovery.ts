@@ -8,7 +8,7 @@
  * 判断（搜什么、换不换词、挑哪几个）全交给 LLM；框架与本层都不替它臆造事实。
  */
 
-import { runToolLoop, type ToolLoopProgress, type ToolLoopSpec, type ToolLoopTool } from "@zhixing/core";
+import { runToolLoop, type ToolLoopProgress, type ToolLoopSpec, type ToolLoopTool } from "@zhixing/core/tool-loop";
 import type {
   McpManagementSearchResult,
   McpManagementSourceResult,

@@ -1,5 +1,5 @@
 import path from "node:path";
-import { getZhixingHome } from "@zhixing/core";
+import { getZhixingHome } from "@zhixing/core/paths";
 import {
   BackupRecoveryDisasterAdmissionApplicationService,
   BackupRecoveryDisasterAdmissionError,

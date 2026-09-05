@@ -13,7 +13,8 @@
 
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { normalizeWorkdir, type SecurityMiddlewareResult } from "@zhixing/core";
+import { normalizeWorkdir } from "@zhixing/core/workscene";
+import { type SecurityMiddlewareResult } from "@zhixing/core/security";
 import {
   buildConfirmationOptions,
   buildConfirmationRequest,

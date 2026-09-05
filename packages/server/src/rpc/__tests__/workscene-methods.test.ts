@@ -8,10 +8,12 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { readFile } from "node:fs/promises";
-import type { WorkScene } from "@zhixing/core";
+import type {
+  WorkScene,
+} from "@zhixing/core/workscene/types";
 import { AdvancementStore } from "../../../../core/src/advancement/store.js";
 import { createTempDir } from "@zhixing/test-utils";
-import { AdvancementController } from "@zhixing/owner-services";
+import { AdvancementController } from "@zhixing/owner-services/advancement";
 import {
   buildWorksceneListMethod,
   buildWorksceneCreateMethod,
@@ -22,7 +24,10 @@ import {
   buildWorksceneExitMethod,
 } from "../methods/workscene.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
-import { WorksceneBusyError } from "@zhixing/owner-kernel";
+import {
+  WorksceneBusyError,
+  type ConversationManager,
+} from "@zhixing/owner-kernel/conversation-manager";
 import {
   AdvancementReviewAttemptApplicationService,
 } from "@zhixing/core/advancement/application";
@@ -33,7 +38,6 @@ import {
 } from "@zhixing/core/workscene/application";
 import { ProductApiDispatcher } from "@zhixing/core/product-api";
 import type { ServerContext } from "../../context.js";
-import type { ConversationManager } from "@zhixing/owner-kernel";
 
 type TestWorksceneMechanism = {
   readonly touched: string[];

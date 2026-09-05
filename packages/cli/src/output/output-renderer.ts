@@ -30,7 +30,8 @@
  */
 
 import chalk from "chalk";
-import type { AgentYield, SubAgentResultPresentationArtifact } from "@zhixing/core";
+import type { AgentYield } from "@zhixing/core/loop";
+import type { SubAgentResultPresentationArtifact } from "@zhixing/core";
 import { getToolRenderStrategy } from "../tool-render-strategy.js";
 import type { CliWriter, ReplaceableSegmentHandle } from "../screen/index.js";
 import { stringWidth, wrapToWidth } from "../tui/line-width.js";

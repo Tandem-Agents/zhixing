@@ -11,9 +11,9 @@ import { describe, it, expect, vi } from "vitest";
 import {
   ConfirmationBroker,
   type ConfirmationRequest,
-} from "@zhixing/core";
+} from "@zhixing/core/confirmation";
 import { confirmationDecisionDigest } from "@zhixing/core/protocol";
-import { ConfirmationHub } from "@zhixing/owner-kernel";
+import { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
 import type {
   ServerConfirmationBinding,
   ServerContext,

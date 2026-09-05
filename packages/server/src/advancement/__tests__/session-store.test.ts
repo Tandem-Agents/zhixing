@@ -15,8 +15,10 @@ import {
   type ConfirmedRubricSnapshot,
   type CreateAdvancementSessionInput,
   type RubricContractDraftSnapshot,
-  type UserTurnInput,
-} from "@zhixing/core";
+} from "@zhixing/core/advancement";
+import type {
+  UserTurnInput,
+} from "@zhixing/core/types";
 import { protocolDigest } from "@zhixing/core/protocol";
 import type {
   AuthorityCallContext,
@@ -27,7 +29,7 @@ import type {
 import {
   SessionAdvancementStore,
   type AdvancementSessionStore,
-} from "@zhixing/owner-services";
+} from "@zhixing/owner-services/advancement";
 
 const NOW = "2026-08-02T00:00:00.000Z";
 

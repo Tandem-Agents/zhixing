@@ -1,12 +1,4 @@
-import type {
-  AgentTurnResult,
-  ScheduleMutationContext,
-  ScheduleMutationStager,
-  SchedulerFacade,
-  SchedulerFacadeEventHandler,
-  TaskPatch,
-  TaskView,
-} from "@zhixing/core";
+import type { AgentTurnResult, ScheduleMutationContext, ScheduleMutationStager, SchedulerFacade, SchedulerFacadeEventHandler, TaskPatch, TaskView } from "@zhixing/core/scheduler";
 import {
   ScheduleManagementApplicationService,
   type ScheduleManagementRepository,

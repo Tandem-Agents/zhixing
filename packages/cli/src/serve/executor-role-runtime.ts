@@ -1,4 +1,4 @@
-import { getZhixingHome } from "@zhixing/core";
+import { getZhixingHome } from "@zhixing/core/paths";
 import { DeviceLifecycleJournal, type ArtifactStore } from "@zhixing/core/authority";
 import { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
 import path from "node:path";
@@ -13,7 +13,7 @@ import {
   type KernelToolImplementationPort,
 } from "@zhixing/orchestrator/runtime";
 import { mainProfile, powerProfile } from "@zhixing/orchestrator/profile";
-import { parseConversationId } from "@zhixing/core";
+import { parseConversationId } from "@zhixing/core/conversation";
 import type { ProviderCredentialProjection } from "@zhixing/providers";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
 import { createHostMcpRuntime } from "../runtime/mcp-runtime-adapter.js";
@@ -1111,7 +1111,7 @@ export class ExecutorRuntimeSubstrate {
 
   createJobRuntime(
     instruction: import("@zhixing/core/contracts").JobExecutionInstruction,
-    confirmationBroker: import("@zhixing/core").IConfirmationBroker,
+    confirmationBroker: import("@zhixing/core/confirmation").IConfirmationBroker,
   ): Promise<AgentRuntime> {
     const mcp = this.options.mcpTools.snapshot();
     const baseProfile = mainProfile();

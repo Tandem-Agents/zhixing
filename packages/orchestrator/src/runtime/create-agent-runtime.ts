@@ -11,68 +11,75 @@
 import { randomUUID } from "node:crypto";
 import {
   type AgentEventMap,
-  type EventBus,
-  type WindowCompact,
-  type ConfirmationFallbackStrategy,
-  type ConfirmationLifecycleObserver,
-  type ContextBudget,
-  type IConfirmationBroker,
-  type IEventBus,
   type Message,
-  type OrchestrationContextSnapshotV1,
-  type OrchestrationExecutableV1,
-  type OrchestrationRunResultV1,
   type ChatRequest,
   type StreamEvent,
   type ToolResultBlock,
-  type IToolArgumentExtractor,
   type LLMProvider,
   type LLMRole,
   type LLMRoles,
-  type MutableToolBoundaryRegistry,
-  type PermissionContextId,
-  type PermissionRule,
-  type RiskLevel,
-  type SecurityRule,
-  type SecurityRequest,
   type TextCallLLMResult,
   type ToolDefinition,
   type TurnContext,
+  toToolSpec,
+  extractText,
+  getTotalInputTokens,
+  userMessage,
+  type RuntimeExecutionProfile,
+  projectSessionEvent,
+} from "@zhixing/core/types";
+import { type EventBus, type IEventBus, createEventBus } from "@zhixing/core/events";
+import {
+  type WindowCompact,
+  type ContextBudget,
   type TurnContextProvider,
-  type WatchdogPolicy,
-  buildRunRecord,
-  BoundaryRegistry,
-  ConfirmationBroker,
-  createEventBus,
   createSegmentManager,
   createSegmentSummarizeFn,
   createTokenEstimator,
   type SegmentPersistence,
   type SegmentStreamFactory,
   type TaskListReader,
-  wrapStreamWithWatchdog,
   wrapWithCalibration,
-  ToolArgumentExtractor,
   calculateBudget,
   computeContextTokens,
-  toToolSpec,
-  DEFAULT_WATCHDOG_POLICY,
-  SecurityPipeline,
-  setAgentIdentity,
-  extractText,
-  getTotalInputTokens,
-  userMessage,
-  withRetry,
-  runAgentLoop,
   TurnContextInjector,
   TimeProvider,
-  type SkillMode,
-  type RuntimeExecutionProfile,
+} from "@zhixing/core/context";
+import {
+  type ConfirmationFallbackStrategy,
+  type ConfirmationLifecycleObserver,
+  type IConfirmationBroker,
+} from "@zhixing/core/confirmation";
+import {
+  type OrchestrationContextSnapshotV1,
+  type OrchestrationExecutableV1,
+  type OrchestrationRunResultV1,
+} from "@zhixing/core/orchestration";
+import {
+  type IToolArgumentExtractor,
+  type MutableToolBoundaryRegistry,
+  type PermissionContextId,
+  type PermissionRule,
+  type RiskLevel,
+  type SecurityRule,
+  type SecurityRequest,
+  BoundaryRegistry,
+  ToolArgumentExtractor,
+  SecurityPipeline,
+} from "@zhixing/core/security";
+import { type WatchdogPolicy, DEFAULT_WATCHDOG_POLICY } from "@zhixing/core/interrupt";
+import {
+  buildRunRecord,
+  runAgentLoop,
   type WindowLifecycle,
   type WindowChangeReason,
-  projectSessionEvent,
   type AgentLoopDeps,
-} from "@zhixing/core";
+} from "@zhixing/core/loop";
+import { ConfirmationBroker } from "@zhixing/core/confirmation";
+import { wrapStreamWithWatchdog } from "@zhixing/core/interrupt";
+import { setAgentIdentity } from "@zhixing/core/identity";
+import { withRetry } from "@zhixing/core/resilience";
+import { type SkillMode } from "@zhixing/core/skills/catalog";
 import type { ArtifactStore } from "@zhixing/core/authority";
 import {
   SkillCatalogKernelProjectionApplicationService,

@@ -17,19 +17,23 @@
 
 import {
   AgentError,
+  type Message,
+} from "@zhixing/core/types";
+import {
   abortWithReason,
   createInterruptController,
   type AbortReason,
-  type AgentResult,
-  type AgentYield,
-  type Message,
-  type RunResult,
-} from "@zhixing/core";
+} from "@zhixing/core/interrupt";
+import type {
+  AgentResult,
+  AgentYield,
+  RunResult,
+} from "@zhixing/core/loop";
 import type {
   RunTurnOptions,
   RuntimeDisposeReason,
   SessionRuntime,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/types";
 import {
   assertKernelRunEvent,
   assertKernelTerminal,

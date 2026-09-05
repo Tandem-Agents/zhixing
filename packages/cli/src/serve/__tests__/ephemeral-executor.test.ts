@@ -3,7 +3,9 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import type { AbortReason, AgentResult, AgentYield, Message } from "@zhixing/core";
+import type { AbortReason } from "@zhixing/core/interrupt";
+import type { AgentResult, AgentYield } from "@zhixing/core/loop";
+import type { Message } from "@zhixing/core";
 import type {
   AgentRuntime,
   KernelRunEnvelope,

@@ -12,7 +12,7 @@
  *   - parent-abort 不展开 parentReason 链:当前只回到第一层 reason 就够主 agent 决策,
  *     v2 引入背景 agent / 多层嵌套时再考虑"reason 链路完整还原"
  */
-import type { AbortReason } from "@zhixing/core";
+import type { AbortReason } from "@zhixing/core/interrupt";
 
 export function formatAbortReasonForLLM(reason: AbortReason): string {
   switch (reason.kind) {

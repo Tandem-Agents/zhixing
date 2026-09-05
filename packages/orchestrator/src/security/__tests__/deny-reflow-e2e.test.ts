@@ -36,18 +36,14 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { ConfirmationBroker } from "@zhixing/core/confirmation";
+import { MockLLMProvider, drainAgentLoop } from "@zhixing/core/loop";
+import { PermissionStore, SecurityPipeline } from "@zhixing/core/security";
+import { userMessage, type Message, type ToolDefinition } from "@zhixing/core/types";
 import {
-  ConfirmationBroker,
-  MockLLMProvider,
-  PermissionStore,
-  SecurityPipeline,
-  drainAgentLoop,
-  userMessage,
   type ConfirmationDecision,
   type ConfirmationRequest,
-  type Message,
-  type ToolDefinition,
-} from "@zhixing/core";
+} from "@zhixing/core/confirmation";
 import {
   bindPermissionRuleExecutionSource,
   createPermissionStoreTrustAdministrationRepository,

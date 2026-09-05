@@ -34,7 +34,7 @@
 
 import { mkdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
-import { getZhixingHome } from "@zhixing/core";
+import { getZhixingHome } from "@zhixing/core/paths";
 
 let pendingEnabled = false;
 let logPath: string | null = null;

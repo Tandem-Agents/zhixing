@@ -6,8 +6,8 @@ import {
   LLMRubricDraftRevisionStrategy,
   RubricContractBuilder,
   type RubricCatalogPort,
-  userMessage,
-} from "@zhixing/core";
+} from "@zhixing/core/advancement";
+import { userMessage } from "@zhixing/core";
 import type {
   GlobalStatePort,
   ResourceReservationPort,
@@ -21,7 +21,7 @@ import {
   AdvancementController,
   AdvancementEvidenceCoordinator,
   SessionAdvancementStore,
-} from "@zhixing/owner-services";
+} from "@zhixing/owner-services/advancement";
 import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
 import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
 import type {

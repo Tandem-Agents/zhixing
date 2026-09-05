@@ -1,9 +1,6 @@
-import type {
-  AgentYield,
-  IConfirmationBroker,
-  RunResult,
-  ScheduleMutationStager,
-} from "@zhixing/core";
+import type { AgentYield, RunResult } from "@zhixing/core/loop";
+import type { IConfirmationBroker } from "@zhixing/core/confirmation";
+import type { ScheduleMutationStager } from "@zhixing/core/scheduler";
 import type {
   AssignmentMutationPort,
   AuthorityCallContext,
@@ -29,9 +26,8 @@ import {
   InProcessConversationDispatcher,
   type InProcessDispatchContextFactory,
   type InProcessBundleSubmission,
-  type RuntimeFactory,
-  type SessionRuntime,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/conversation-assignment";
+import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
 import {
   ConversationAssignmentLedger,
   InProcessAssignmentSubmission,
@@ -176,7 +172,7 @@ export interface ConversationExecutorExecutionEffect {
       DispatchEnvelope,
       { readonly execution: "conversation" }
     >["permissionLease"],
-  ): Promise<readonly import("@zhixing/core").PermissionRule[]>;
+  ): Promise<readonly import("@zhixing/core/security").PermissionRule[]>;
   hasOpenSideEffects(): Promise<boolean>;
   failExecution(input: {
     readonly reason: string;

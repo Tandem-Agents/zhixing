@@ -12,7 +12,9 @@
  *   - 末尾标点/空白允许 trim,与 confirmation `match.ts` 的 IM 习惯对齐
  */
 
-import type { InboundMessage } from "@zhixing/core";
+import type {
+  InboundMessage,
+} from "@zhixing/core/channels";
 import { DEFAULT_CANCEL_KEYWORDS } from "./cancel-keywords.js";
 import type { Intent, IntentClassifier } from "./types.js";
 

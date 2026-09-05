@@ -2,12 +2,8 @@ import type {
   AdvancementReviewAttemptApplication,
   AdvancementReviewResultProjectionApplication,
 } from "@zhixing/core/advancement/application";
-import type {
-  AdvancementProxyMessage,
-  AdvancementSession,
-  RunRecord,
-  RunRecordRef,
-} from "@zhixing/core";
+import type { AdvancementProxyMessage, AdvancementSession } from "@zhixing/core/advancement";
+import type { RunRecord, RunRecordRef } from "@zhixing/core/transcript";
 import type { AdvancementConversationDirectory } from "./conversation-directory-port.js";
 import type { AdvancementController } from "./controller.js";
 import type {

@@ -30,22 +30,19 @@ import {
 } from "vitest";
 import {
   AgentError,
-  buildGuidanceMessagePair,
-  MockLLMProvider,
-  PermissionStore,
-  skillNameToId,
-  deriveToolCalls,
   userMessage,
-  type IEventBus,
   type LLMRole,
   type LLMRoles,
   type AgentEventMap,
   type Message,
-  type PermissionRule,
   type ToolDefinition,
-  type SkillCatalogEntry,
-  type TurnContextProvider,
-} from "@zhixing/core";
+} from "@zhixing/core/types";
+import { buildGuidanceMessagePair, type TurnContextProvider } from "@zhixing/core/context";
+import { MockLLMProvider, deriveToolCalls } from "@zhixing/core/loop";
+import { PermissionStore, type PermissionRule } from "@zhixing/core/security";
+import { skillNameToId } from "@zhixing/core/skills/id";
+import { type IEventBus } from "@zhixing/core/events";
+import { type SkillCatalogEntry } from "@zhixing/core/skills/catalog";
 import type {
   AssignmentGlobalQueryPort,
   GlobalQuery,

@@ -1,8 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import {
-  deliveryRecord,
-  prepareDeliveryEnqueues,
-} from "@zhixing/core";
+import { deliveryRecord, prepareDeliveryEnqueues } from "@zhixing/core/delivery";
 import type { ChannelDeliveryEffectSource } from "@zhixing/core/delivery/channel-effect";
 import { createDeliveryResolutionFence } from "@zhixing/owner-kernel/delivery";
 import type {

@@ -1,15 +1,10 @@
-import {
-  WORKSCENE_ACTIVITY_DURABLE_CONTRACT,
-  WORKSCENE_REGISTRY_DURABLE_CONTRACT,
-  WORKSPACE_BINDING_DURABLE_CONTRACT,
-  WORKSPACE_BINDING_ROOT_DURABLE_CONTRACT,
-  WORKSPACE_PROBE_DURABLE_CONTRACT,
-} from "@zhixing/core";
+import { WORKSCENE_ACTIVITY_DURABLE_CONTRACT, WORKSCENE_REGISTRY_DURABLE_CONTRACT } from "@zhixing/core/workscene";
+import { WORKSPACE_BINDING_DURABLE_CONTRACT, WORKSPACE_BINDING_ROOT_DURABLE_CONTRACT, WORKSPACE_PROBE_DURABLE_CONTRACT } from "@zhixing/core/environment";
 import type { DurableRuntimeContractDescriptor } from "@zhixing/core/contracts";
 import {
   ADVANCEMENT_DURABLE_CONTRACT,
   SESSION_ACTIVITY_DURABLE_CONTRACT,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/conversation-assignment";
 import { LOCAL_WORKSPACE_OPERATION_OUTBOX_DURABLE_CONTRACT } from "../runtime/local-workspace-operation-outbox.js";
 
 export const S7_DURABLE_CONTRACT_LEDGER = [

@@ -3,13 +3,9 @@ import type {
   ConfirmedRubricSnapshot,
   EvidenceCapabilitySet,
 } from "@zhixing/core/advancement";
-import type {
-  LLMProvider,
-  ReviewEvidence,
-  SegmentThresholds,
-  ITokenEstimator,
-  ThinkingConfig,
-} from "@zhixing/core";
+import type { LLMProvider, ThinkingConfig } from "@zhixing/core/types";
+import type { ReviewEvidence } from "@zhixing/core/advancement";
+import type { SegmentThresholds, ITokenEstimator } from "@zhixing/core/context";
 import type {
   AdvancementReviewerPort,
   ResourceReservationPort,

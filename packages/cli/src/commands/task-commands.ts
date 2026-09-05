@@ -14,13 +14,8 @@
  * 失败转 friendly error 文本，不抛错。
  */
 
-import type {
-  CommandDispatcher,
-  CommandHandlerContext,
-  CommandHandlerResult,
-  ICommandRegistry,
-} from "@zhixing/core";
-import type { TaskListState } from "@zhixing/core";
+import type { CommandDispatcher, CommandHandlerContext, CommandHandlerResult, ICommandRegistry } from "@zhixing/core/typeahead";
+import type { TaskListState } from "@zhixing/core/conversation";
 import type {
   SessionTaskListAction,
   SessionTaskListUpdateResult,

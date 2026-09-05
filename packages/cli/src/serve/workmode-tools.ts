@@ -30,10 +30,9 @@ import {
   getWorksceneToolBoundaries,
   getWorksceneToolPostTurnControlKind,
   worksceneToolRequiresExplicitConfirmation,
-  type JsonSchema,
-  type ToolDefinition,
   type WorksceneManagementToolName,
-} from "@zhixing/core";
+} from "@zhixing/core/workscene";
+import { type JsonSchema, type ToolDefinition } from "@zhixing/core";
 import type { WorksceneDto } from "@zhixing/core/contracts";
 import type { WorksceneAssignmentToolApplication } from "@zhixing/core/workscene/application";
 import {

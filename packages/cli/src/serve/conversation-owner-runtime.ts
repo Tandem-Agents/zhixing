@@ -1,7 +1,4 @@
-import {
-  assertLocalConversationIdForDevice,
-  isLocalConversationId,
-} from "@zhixing/core";
+import { assertLocalConversationIdForDevice, isLocalConversationId } from "@zhixing/core/conversation";
 import type {
   AuthorityCallContext,
   AuthorityError,
@@ -24,11 +21,9 @@ import type {
 import { protocolDigest } from "@zhixing/core/protocol";
 import type { StorageMaintenanceGovernorPort } from "@zhixing/core/resources";
 import type { ExecutorAssignmentResourceCoordinator } from "@zhixing/executor";
-import type {
-  AssignmentResourceCoordinator,
-  ControlAdmissionJournal,
-  ConversationDeliveryParticipant,
-} from "@zhixing/owner-kernel";
+import type { AssignmentResourceCoordinator } from "@zhixing/owner-kernel/resource-governor";
+import type { ControlAdmissionJournal } from "@zhixing/owner-kernel/control-admission";
+import type { ConversationDeliveryParticipant } from "@zhixing/owner-kernel/delivery";
 import type {
   AuthorityRuntimeStack,
   PreparedConversationAssignmentAuthority,

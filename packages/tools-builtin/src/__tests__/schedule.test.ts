@@ -12,15 +12,8 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import {
-  createEventBus,
-  InMemoryTaskStore,
-  Scheduler,
-  LocalSchedulerFacade,
-  type SchedulerEventMap,
-  type SchedulerFacade,
-  type ToolExecutionContext,
-} from "@zhixing/core";
+import { createEventBus, type ToolExecutionContext } from "@zhixing/core";
+import { InMemoryTaskStore, Scheduler, LocalSchedulerFacade, type SchedulerEventMap, type SchedulerFacade } from "@zhixing/core/scheduler";
 import {
   ScheduleManagementApplicationService,
   ScheduleRuntimeApplicationService,

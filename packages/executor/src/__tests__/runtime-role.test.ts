@@ -2,7 +2,7 @@ import {
   defineRuntimeFactoryConformance,
   type RuntimeFactoryConformanceHarness,
 } from "@zhixing/test-utils";
-import type { SessionRuntime } from "@zhixing/owner-kernel";
+import type { SessionRuntime } from "@zhixing/owner-kernel/types";
 import { describe, expect, it, vi } from "vitest";
 import {
   createExecutorRole,

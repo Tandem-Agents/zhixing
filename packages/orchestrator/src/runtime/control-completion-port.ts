@@ -5,7 +5,7 @@ import type {
   ControlCompletionPort,
   ResourceReservationPort,
 } from "@zhixing/core/contracts";
-import type { LLMRole, ThinkingConfig } from "@zhixing/core";
+import type { LLMRole, ThinkingConfig } from "@zhixing/core/types";
 import { meteredProviderCall } from "./create-agent-runtime.js";
 
 export interface ControlCompletionPortOptions {

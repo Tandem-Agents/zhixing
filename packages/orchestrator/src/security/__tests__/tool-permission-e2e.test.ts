@@ -11,15 +11,14 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
+import { ConfirmationBroker } from "@zhixing/core/confirmation";
+import { PermissionStore, SecurityPipeline } from "@zhixing/core/security";
+import { type ConfirmationRequest } from "@zhixing/core/confirmation";
 import {
-  ConfirmationBroker,
-  PermissionStore,
-  SecurityPipeline,
-  type ConfirmationRequest,
   type ToolDefinition,
   type ToolExecutionContext,
   type ToolResult,
-} from "@zhixing/core";
+} from "@zhixing/core/types";
 import {
   bindPermissionRuleExecutionSource,
   createPermissionStoreTrustAdministrationRepository,

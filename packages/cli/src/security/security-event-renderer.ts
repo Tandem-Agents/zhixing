@@ -20,7 +20,7 @@
  */
 
 import chalk from "chalk";
-import type { SecurityMiddlewareResult } from "@zhixing/core";
+import type { SecurityMiddlewareResult } from "@zhixing/core/security";
 import type { CliWriter } from "../screen/index.js";
 import { stripAnsi } from "../tui/ansi.js";
 import { stringWidth } from "../tui/line-width.js";

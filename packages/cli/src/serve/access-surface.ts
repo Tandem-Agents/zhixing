@@ -25,7 +25,7 @@ import type {
   RuntimeChannelConfigurationProjection,
   RuntimeModelConfigurationProjection,
 } from "../runtime/runtime-configuration-projections.js";
-import type { ChannelStatus } from "@zhixing/core";
+import type { ChannelStatus } from "@zhixing/core/channels";
 import type { ChannelDeliveryEffectSource } from "@zhixing/core/delivery/channel-effect";
 import type {
   ConversationClearProjectionPort,
@@ -52,12 +52,12 @@ import type {
 } from "@zhixing/server";
 import type { ChannelConversationProductBinding } from "./channel-conversation-product-binding.js";
 import type { SetupChannelsResult } from "./channels.js";
+import type { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
 import type {
-  ConfirmationHub,
   ConversationManager,
   ConversationManagerCallbacks,
-  RuntimeFactory,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/conversation-manager";
+import type { RuntimeFactory } from "@zhixing/owner-kernel/types";
 import type {
   SessionActivityBroadcast,
   SessionBroadcast,
@@ -66,7 +66,7 @@ import type {
   AdvancementConversationDirectory,
   AdvancementController,
   AdvancementRecoveryMaintenance,
-} from "@zhixing/owner-services";
+} from "@zhixing/owner-services/advancement";
 import type {
   AuthorityRuntimeStack,
   DeliveryStack,
@@ -112,7 +112,7 @@ import type { LocalWorkspaceAssemblyIdentity } from "../runtime/local-workspace-
 import type { AgentRuntimeCapacityBinding } from "@zhixing/orchestrator/runtime";
 import type { ProviderCredentialProjection } from "@zhixing/providers";
 import type { LocalConversationOwnerAssembly } from "./local-conversation-owner.js";
-import type { DeliveryLifecycleRestoration } from "@zhixing/core";
+import type { DeliveryLifecycleRestoration } from "@zhixing/core/delivery";
 import type {
   MeshConnectionProjectionPort,
   MeshConnectionRegistry,
@@ -260,7 +260,7 @@ export interface AssemblyContext {
   readonly lifecycleContributions: AssemblyLifecycleContributions;
   readonly channelHttpRoutes: Map<
     string,
-    import("@zhixing/core").HttpHandler
+    import("@zhixing/core/channels").HttpHandler
   >;
 
   // ── 接入面产物（surface.setup 写回） ──

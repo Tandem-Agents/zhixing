@@ -12,7 +12,7 @@
  */
 
 import type * as readline from "node:readline/promises";
-import type { CommandDispatcher, ICommandRegistry } from "@zhixing/core";
+import type { CommandDispatcher, ICommandRegistry } from "@zhixing/core/typeahead";
 import type { SkillCatalogClient } from "@zhixing/core/skills/catalog";
 import type { CliWriter, ScreenController } from "../screen/index.js";
 import { chromeOnlyVisibility, requireChrome } from "../commands/command-visibility.js";

@@ -13,7 +13,9 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { ConfirmationRequest } from "@zhixing/core";
+import type {
+  ConfirmationRequest,
+} from "@zhixing/core/confirmation";
 import {
   MAX_REASON_LENGTH,
   formatResolutionReceipt,

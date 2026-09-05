@@ -1,4 +1,4 @@
-import type { AgentIdentity } from "@zhixing/core";
+import type { AgentIdentity } from "@zhixing/core/identity";
 
 export type KernelWorkspaceSource =
   | "runtime"

@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import { promisify } from "node:util";
-import { PathGuard, type Message } from "@zhixing/core";
+import { PathGuard } from "@zhixing/core/security";
+import { type Message } from "@zhixing/core/types";
 import type {
   EvidenceCapabilitySet,
   EvidenceRequirementSpec,

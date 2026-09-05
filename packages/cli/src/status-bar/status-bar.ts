@@ -25,14 +25,10 @@
  * bus 事件并在 task 状态下嵌套显示。
  */
 
-import type {
-  AbortReason,
-  AgentEventMap,
-  AgentErrorType,
-  EventMeta,
-  IEventBus,
-} from "@zhixing/core";
-import { getTotalInputTokens, estimateTextTokensRaw } from "@zhixing/core";
+import type { AbortReason } from "@zhixing/core/interrupt";
+import type { AgentEventMap, AgentErrorType, EventMeta, IEventBus } from "@zhixing/core";
+import { getTotalInputTokens } from "@zhixing/core";
+import { estimateTextTokensRaw } from "@zhixing/core/context";
 import type { ScreenController } from "../screen/index.js";
 import {
   spinnerFrame,

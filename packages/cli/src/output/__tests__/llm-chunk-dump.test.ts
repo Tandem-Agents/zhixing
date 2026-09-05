@@ -1,12 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import {
-  createEventBus,
-  getZhixingHome,
-  type AgentEventMap,
-  type IEventBus,
-} from "@zhixing/core";
+import { createEventBus, type AgentEventMap, type IEventBus } from "@zhixing/core";
+import { getZhixingHome } from "@zhixing/core/paths";
 import { createDescribeTempDir, createTempDir } from "@zhixing/test-utils";
 import {
   attachChunkDumpToBus,

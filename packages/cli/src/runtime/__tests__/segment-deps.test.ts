@@ -12,10 +12,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import type {
-  IConversationRepository,
-  SegmentMeta,
-} from "@zhixing/core";
+import type { IConversationRepository, SegmentMeta } from "@zhixing/core/conversation";
 import { createEventBus, type AgentEventMap } from "@zhixing/core";
 import type {
   AssignmentMutationOverlayRecord,

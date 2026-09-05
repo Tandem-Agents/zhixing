@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import type { TaskListState } from "@zhixing/core";
+import type { TaskListState } from "@zhixing/core/conversation";
 import { stripAnsi } from "../../tui/index.js";
 import { renderTaskTail } from "../task-tail-render.js";
 

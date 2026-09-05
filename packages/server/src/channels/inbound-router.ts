@@ -1,17 +1,25 @@
+import type {
+  ChannelBindingPolicy,
+  ChannelLogger,
+  DeliveryResult,
+  DeliveryTarget,
+  InboundMessage,
+  OutboundContent,
+} from "@zhixing/core/channels";
+import type {
+  EmissionSource,
+} from "@zhixing/core/delivery";
 import {
-  type ChannelBindingPolicy,
-  type ChannelLogger,
-  type DeliveryResult,
-  type DeliveryTarget,
-  type EmissionSource,
-  type InboundMessage,
-  type OutboundContent,
   type TurnContext,
   extractText,
+} from "@zhixing/core/types";
+import {
   isFreeTextDeny,
-  type AgentResult,
-} from "@zhixing/core";
-import type { ConfirmationHub } from "@zhixing/owner-kernel";
+} from "@zhixing/core/confirmation";
+import type {
+  AgentResult,
+} from "@zhixing/core/loop";
+import type { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
 import type {
   ConversationAbortedResult,
   ConversationPreparedAgentTurnIdentity,

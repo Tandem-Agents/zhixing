@@ -21,7 +21,8 @@
  */
 
 import chalk from "chalk";
-import { extractText, type Message, type RunRecord } from "@zhixing/core";
+import { extractText, type Message } from "@zhixing/core";
+import { type RunRecord } from "@zhixing/core/transcript";
 import { ADVANCEMENT_TURN_LABEL } from "./advancement-presentation.js";
 import { layout } from "./tui/style.js";
 import { clampLine } from "./tui/line-width.js";

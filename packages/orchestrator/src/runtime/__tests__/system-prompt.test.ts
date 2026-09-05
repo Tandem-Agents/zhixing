@@ -8,7 +8,7 @@ import {
   WORKING_MODE_TEXT,
 } from "../system-prompt.js";
 import { subAgentProfile } from "../../profile/default-profiles.js";
-import type { ToolDefinition } from "@zhixing/core";
+import type { ToolDefinition } from "@zhixing/core/types";
 
 // ─── 工具工厂 ───
 
@@ -75,13 +75,13 @@ describe("buildSystemPrompt", () => {
   });
 
   it("默认不包含 Commitment 信号说明(当前无生产内置工具声明会直接确认)", async () => {
-    const { COMMITMENT_SIGNAL } = await import("@zhixing/core");
+    const { COMMITMENT_SIGNAL } = await import("@zhixing/core/loop");
     const prompt = buildSystemPrompt(ctx);
     expect(prompt).not.toContain(COMMITMENT_SIGNAL);
   });
 
   it("工具声明 mayCommitToUser 时才包含 Commitment 信号说明", async () => {
-    const { COMMITMENT_SIGNAL } = await import("@zhixing/core");
+    const { COMMITMENT_SIGNAL } = await import("@zhixing/core/loop");
     const prompt = buildSystemPrompt({
       ...ctx,
       tools: [...defaultTools, stubTool("committer", { mayCommitToUser: true })],

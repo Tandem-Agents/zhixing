@@ -17,7 +17,7 @@
  * 当前活跃 conversationId，仅响应当前对话的变化。
  */
 
-import type { TaskListState } from "@zhixing/core";
+import type { TaskListState } from "@zhixing/core/conversation";
 import { STATUS_TAIL_IDS, type ScreenController } from "../screen/index.js";
 import { renderTaskTail } from "./task-tail-render.js";
 

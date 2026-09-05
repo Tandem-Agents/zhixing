@@ -3,12 +3,7 @@
   "version": "0.1.0",
   "description": "知行编排器 — Agent Runtime 装配 + 子 Agent 生命周期 + Task 工具",
   "type": "module",
-  "types": "./dist/index.d.ts",
   "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    },
     "./runtime": {
       "types": "./dist/runtime/index.d.ts",
       "import": "./dist/runtime/index.js"

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { SuggestionItem } from "@zhixing/core";
+import type { SuggestionItem } from "@zhixing/core/typeahead";
 import { stripAnsi } from "../../tui/index.js";
 import { createCandidateDeleteHandler } from "../candidate-delete-controller.js";
 

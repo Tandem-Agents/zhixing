@@ -9,7 +9,9 @@
  */
 
 import { join } from "node:path";
-import { getZhixingHome } from "@zhixing/core";
+import {
+  getZhixingHome,
+} from "@zhixing/core/paths";
 
 /** ~/.zhixing/server.pid —— 进程锁 + 连接发现 */
 export function getDefaultPidPath(): string {

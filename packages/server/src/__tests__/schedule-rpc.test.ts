@@ -8,12 +8,14 @@ import WebSocket from "ws";
 import {
   Scheduler,
   InMemoryTaskStore,
-  createEventBus,
-  type IEventBus,
   type SchedulerEventMap,
   type AgentTurnResult,
   type ScheduledTask,
-} from "@zhixing/core";
+} from "@zhixing/core/scheduler";
+import {
+  createEventBus,
+  type IEventBus,
+} from "@zhixing/core/events";
 import {
   createScheduleManagementProductApiContribution,
   createScheduleRuntimeProductApiContribution,

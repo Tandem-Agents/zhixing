@@ -19,14 +19,10 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import type {
-  AgentEventMap,
-  DurableToolExecutionAuthorizer,
-  EventBus,
-  PostTurnControlIntent,
-  TurnOrigin,
-  ScheduleMutationStager,
-} from "@zhixing/core";
+import type { AgentEventMap, PostTurnControlIntent, TurnOrigin } from "@zhixing/core/types";
+import type { DurableToolExecutionAuthorizer } from "@zhixing/core/security";
+import type { EventBus } from "@zhixing/core/events";
+import type { ScheduleMutationStager } from "@zhixing/core/scheduler";
 import type {
   AssignmentGlobalQueryPort,
   AssignmentMutationPort,
@@ -40,7 +36,7 @@ import type {
   DeviceCapacityBudget,
 } from "@zhixing/core/resources";
 
-export type { DurableToolExecutionAuthorizer } from "@zhixing/core";
+export type { DurableToolExecutionAuthorizer } from "@zhixing/core/security";
 
 /**
  * Per-run/per-spawn 上下文 —— 跨嵌套异步链路传递的最小集合。

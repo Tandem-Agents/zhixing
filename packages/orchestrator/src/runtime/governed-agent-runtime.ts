@@ -4,7 +4,7 @@ import {
   type DeviceCapacityBudget,
   type DeviceCapacityClass,
 } from "@zhixing/core/resources";
-import type { AgentLoopDeps } from "@zhixing/core";
+import type { AgentLoopDeps } from "@zhixing/core/loop";
 
 export interface AgentRuntimeCapacityBinding {
   readonly arbiter: DeviceCapacityArbiterPort;

@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { PermissionRule } from "@zhixing/core";
+import type { PermissionRule } from "@zhixing/core/security";
 import { createTempDir } from "@zhixing/test-utils";
 import { createPermissionStorageInfrastructure } from "../permission-storage-infrastructure.js";
 

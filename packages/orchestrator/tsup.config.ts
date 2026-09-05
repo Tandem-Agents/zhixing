@@ -2,7 +2,6 @@ import { defineConfig } from "tsup";
 
 export default defineConfig({
   entry: [
-    "src/index.ts",
     "src/runtime/index.ts",
     "src/security/index.ts",
     "src/profile/index.ts",

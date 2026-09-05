@@ -1,15 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   assistantMessage,
-  MockLLMProvider,
-  type AdvancementRunReview,
-  type AdvancementWindowState,
   type ChatRequest,
   type LLMProvider,
-  type RunRecordInput,
   type UserTurnInput,
   userMessage,
-} from "@zhixing/core";
+} from "@zhixing/core/types";
+import { MockLLMProvider } from "@zhixing/core/loop";
+import { type AdvancementRunReview, type AdvancementWindowState } from "@zhixing/core/advancement";
+import { type RunRecordInput } from "@zhixing/core/transcript";
 import type {
   ConfirmedRubricSnapshot,
   ReviewEvidence,

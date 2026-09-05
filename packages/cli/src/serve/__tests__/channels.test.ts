@@ -1,12 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import {
-  OutboxRegistry,
-  type ChannelChallengeMessage,
-  type ChannelContext,
-  type DeliveryResult,
-  type DeliveryTarget,
-  type OutboundContent,
-} from "@zhixing/core";
+import { OutboxRegistry } from "@zhixing/core/delivery";
+import { type ChannelChallengeMessage, type ChannelContext, type DeliveryResult, type DeliveryTarget, type OutboundContent } from "@zhixing/core/channels";
 import {
   createInboundChannelRouter,
   setupChannels,

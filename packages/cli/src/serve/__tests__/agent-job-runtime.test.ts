@@ -1,8 +1,6 @@
-import type {
-  AgentYield,
-  IConfirmationBroker,
-  ToolSideEffectObserver,
-} from "@zhixing/core";
+import type { AgentYield } from "@zhixing/core/loop";
+import type { IConfirmationBroker } from "@zhixing/core/confirmation";
+import type { ToolSideEffectObserver } from "@zhixing/core";
 import type {
   AgentRuntime,
   KernelRunEnvelope,

@@ -1,10 +1,5 @@
-import {
-  createEventBus,
-  type SchedulerFacade,
-  type SchedulerEventMap,
-  type TaskSpec,
-  type TaskView,
-} from "@zhixing/core";
+import { createEventBus } from "@zhixing/core";
+import { type SchedulerFacade, type SchedulerEventMap, type TaskSpec, type TaskView } from "@zhixing/core/scheduler";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import { describe, expect, it, vi } from "vitest";
 import { ExecutionSchedulerFacade } from "../execution-scheduler-facade.js";

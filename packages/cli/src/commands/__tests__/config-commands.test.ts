@@ -7,11 +7,7 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import {
-  CommandDispatcher,
-  DefaultCommandRegistry,
-  type RuntimeContext,
-} from "@zhixing/core";
+import { CommandDispatcher, DefaultCommandRegistry, type RuntimeContext } from "@zhixing/core/typeahead";
 import {
   registerConfigCommands,
   type ConfigCommandsDeps,

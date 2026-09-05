@@ -5,7 +5,7 @@ import type {
   SchedulerUserNotice,
 } from "@zhixing/core/contracts";
 import type { AuthorityCommitLog } from "@zhixing/core/authority";
-import { SCHEDULER_USER_NOTICE_STREAM } from "@zhixing/core";
+import { SCHEDULER_USER_NOTICE_STREAM } from "@zhixing/core/delivery";
 import { canonicalize, protocolDigest } from "@zhixing/core/protocol";
 import type {
   JobDeliveryParticipant,

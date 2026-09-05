@@ -1,10 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
-import {
-  AnchorWorksceneGlobalStateAdapter,
-  parseConversationId,
-} from "@zhixing/core";
+import { AnchorWorksceneGlobalStateAdapter } from "@zhixing/core/workscene";
+import { parseConversationId } from "@zhixing/core/conversation";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
@@ -12,7 +10,7 @@ import {
 import type {
   WorkspaceProbeResult,
 } from "@zhixing/core/contracts";
-import type { ConversationManager } from "@zhixing/owner-kernel";
+import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import { createTempDir } from "@zhixing/test-utils";
 import type { AuthorityRuntimeStack } from "../../setup-delivery.js";
 import { createConversationStorageInfrastructure } from "../conversation-storage-infrastructure.js";

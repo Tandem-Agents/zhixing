@@ -19,18 +19,15 @@
  */
 
 import chalk from "chalk";
-import {
-  type AbortReason,
-  type AgentEventMap,
-  type ContextBudget,
-  type IEventBus,
-} from "@zhixing/core";
+import { type AbortReason } from "@zhixing/core/interrupt";
+import { type AgentEventMap, type IEventBus } from "@zhixing/core";
+import { type ContextBudget } from "@zhixing/core/context";
 import type { DecorateRunBusFn } from "@zhixing/orchestrator/runtime";
 import {
   PERSPECTIVES_CONVERGENCE_NODE_ID,
   PERSPECTIVES_DELIBERATION_DEFINITION_ID,
 } from "@zhixing/core/conversation/application";
-import type { RuntimeSubAgentUsageEntry } from "@zhixing/owner-kernel";
+import type { RuntimeSubAgentUsageEntry } from "@zhixing/owner-kernel/types";
 import type { OutputRenderer } from "./output/index.js";
 import type { CliWriter, ScreenController } from "./screen/index.js";
 import {

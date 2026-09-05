@@ -15,7 +15,7 @@
  */
 
 import { EventEmitter } from "node:events";
-import { abortWithReason } from "@zhixing/core";
+import { abortWithReason } from "@zhixing/core/interrupt";
 
 export interface SignalSourceHandle {
   /** 移除 SIGINT/SIGTERM listener。幂等。 */

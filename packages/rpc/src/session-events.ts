@@ -18,10 +18,12 @@
 
 import type {
   AgentEventMap,
+  TurnContext,
+} from "@zhixing/core/types";
+import type {
   EventMeta,
   IEventBus,
-  TurnContext,
-} from "@zhixing/core";
+} from "@zhixing/core/events";
 
 /**
  * 转发装饰器的入参——与 orchestrator 的 per-run 装饰钩子(RunBusContext)结构

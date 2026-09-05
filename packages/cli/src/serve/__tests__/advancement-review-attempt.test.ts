@@ -1,13 +1,7 @@
 import path from "node:path";
-import {
-  MockLLMProvider,
-  advancementReviewAttemptId,
-  advancementReviewLineageId,
-  advancementReviewRootRequestId,
-  type AdvancementReviewAttempt,
-  type ConfirmedRubricSnapshot,
-  type RunRecordInput,
-} from "@zhixing/core";
+import { MockLLMProvider } from "@zhixing/core/loop";
+import { advancementReviewAttemptId, advancementReviewLineageId, advancementReviewRootRequestId, type AdvancementReviewAttempt, type ConfirmedRubricSnapshot } from "@zhixing/core/advancement";
+import { type RunRecordInput } from "@zhixing/core/transcript";
 import { AdvancementStore } from "../../../../core/src/advancement/store.js";
 import {
   FileArtifactStore,
@@ -28,10 +22,10 @@ import {
   ADVANCEMENT_SUBMIT_REVIEW_TOOL,
   createAdvancementRuntime,
 } from "@zhixing/orchestrator/advancement";
-import { AnchorResourceGovernor } from "@zhixing/owner-kernel";
+import { AnchorResourceGovernor } from "@zhixing/owner-kernel/resource-governor";
 import {
   AdvancementEvidenceCoordinator,
-} from "@zhixing/owner-services";
+} from "@zhixing/owner-services/advancement";
 import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
 import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
 import { createTempDir } from "@zhixing/test-utils";

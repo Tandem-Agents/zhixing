@@ -28,7 +28,7 @@
  *   pause/resume 协议，不必额外判 isTTY。
  */
 
-import { abortWithReason } from "@zhixing/core";
+import { abortWithReason } from "@zhixing/core/interrupt";
 import { acquireStdinOwnership, type StdinOwnershipHandle } from "../tui/_internal/stdin-ownership.js";
 import { recordStdinSnapshot } from "../security/keypress-dump.js";
 

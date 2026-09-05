@@ -17,7 +17,7 @@
 
 import * as readline from "node:readline/promises";
 import chalk from "chalk";
-import type { ChannelStatus } from "@zhixing/core";
+import type { ChannelStatus } from "@zhixing/core/channels";
 import {
   getGlobalConfigPath,
   loadConfig,

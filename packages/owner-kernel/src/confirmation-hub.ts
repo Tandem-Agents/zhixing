@@ -20,13 +20,7 @@
  *     resolved 事件能到达 Hub listener 后再清理，防止客户端 UI 卡在"待确认"
  */
 
-import type {
-  CancelCause,
-  ConfirmationDecision,
-  ConfirmationRequest,
-  ConfirmationRequestId,
-  IConfirmationBroker,
-} from "@zhixing/core";
+import type { CancelCause, ConfirmationDecision, ConfirmationRequest, ConfirmationRequestId, IConfirmationBroker } from "@zhixing/core/confirmation";
 
 // ─── 类型 ───
 

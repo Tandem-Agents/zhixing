@@ -7,12 +7,16 @@
 
 import type {
   ChannelStatus,
+  HttpHandler,
+} from "@zhixing/core/channels";
+import type {
   ConfirmationDecision,
   ConfirmationRequest,
-  HttpHandler,
+} from "@zhixing/core/confirmation";
+import type {
   AuthorityDeliveryStats,
   DeliveryStatusNotice,
-} from "@zhixing/core";
+} from "@zhixing/core/delivery";
 import type { ProductApiDispatcher } from "@zhixing/core/product-api";
 import type { BackupRecoveryPublicStatus } from "@zhixing/core/backup-recovery/application";
 import type {

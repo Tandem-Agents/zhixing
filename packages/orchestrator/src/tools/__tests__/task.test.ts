@@ -22,20 +22,19 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { ConfirmationBroker } from "@zhixing/core/confirmation";
+import { createEventBus } from "@zhixing/core/events";
 import {
-  ConfirmationBroker,
-  createEventBus,
   emptyUsage,
-  MockLLMProvider,
-  PermissionStore,
-  SecurityPipeline,
-  type AbortReason,
   type AgentEventMap,
   type LLMRole,
   type LLMRoles,
   type ToolDefinition,
   type ToolExecutionContext,
-} from "@zhixing/core";
+} from "@zhixing/core/types";
+import { MockLLMProvider } from "@zhixing/core/loop";
+import { PermissionStore, SecurityPipeline } from "@zhixing/core/security";
+import { type AbortReason } from "@zhixing/core/interrupt";
 import {
   buildTaskToolPrompt,
   createTaskTool,

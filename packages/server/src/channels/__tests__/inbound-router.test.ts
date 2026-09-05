@@ -5,11 +5,9 @@ import {
   type InboundConversationApplicationPort,
   type InboundDeliveryOutboxPort,
 } from "../inbound-router.js";
-import {
-  channelSurfacePrincipal,
-  ConfirmationHub,
-  ConversationManager,
-} from "@zhixing/owner-kernel";
+import { channelSurfacePrincipal } from "@zhixing/owner-kernel/control-admission";
+import { ConfirmationHub } from "@zhixing/owner-kernel/confirmation-hub";
+import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 import { SESSION_NOTIFICATIONS } from "@zhixing/rpc";
 import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
 import { protocolDigest } from "@zhixing/core/protocol";
@@ -19,24 +17,36 @@ import type {
 } from "@zhixing/rpc";
 import {
   ConfirmationBroker,
+  type ConfirmationRequest,
+} from "@zhixing/core/confirmation";
+import {
   createEventBus,
+} from "@zhixing/core/events";
+import {
   type ChannelEventMap,
   type ChannelAdapter,
   type ChannelLogger,
-  type ConfirmationRequest,
   type DeliveryResult,
   type InboundMessage,
   ChannelRegistry,
+} from "@zhixing/core/channels";
+import {
   DEFAULT_CONVERSATION_ID,
+} from "@zhixing/core/conversation";
+import {
   generateTurnId,
+  type Message,
+} from "@zhixing/core/types";
+import {
   OutboxRegistry,
-} from "@zhixing/core";
+} from "@zhixing/core/delivery";
 import type {
-  DurableConversationTurnExecutor,
-  SessionRuntime,
-  RuntimeFactory,
-} from "@zhixing/owner-kernel";
-import type { AgentYield, Message, RunResult } from "@zhixing/core";
+  AgentYield,
+  RunResult,
+} from "@zhixing/core/loop";
+import type { DurableConversationTurnExecutor } from "@zhixing/owner-kernel/run-turn";
+import type { SessionRuntime, RuntimeFactory } from "@zhixing/owner-kernel/types";
+
 import { stubDurableTurnExecutor } from "../../__tests__/durable-turn-executor-stub.js";
 
 // ─── Mock 工厂 ───

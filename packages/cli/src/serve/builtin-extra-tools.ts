@@ -23,7 +23,8 @@
  *     维护 cache —— 这是 conversation 边界事件，不在 runtime 边界
  */
 
-import type { SchedulerFacade, ToolDefinition } from "@zhixing/core";
+import type { SchedulerFacade } from "@zhixing/core/scheduler";
+import type { ToolDefinition } from "@zhixing/core";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import { createScheduleTool, createTaskListTool } from "@zhixing/tools-builtin";
 import {

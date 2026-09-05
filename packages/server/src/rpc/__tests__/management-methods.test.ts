@@ -4,7 +4,9 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import type { TaskView } from "@zhixing/core";
+import type {
+  TaskView,
+} from "@zhixing/core/scheduler";
 import {
   createSkillCatalogProductApiContribution,
   SKILL_CATALOG_LIST_QUERY,

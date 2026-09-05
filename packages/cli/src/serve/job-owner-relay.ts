@@ -15,7 +15,7 @@ import {
 import type {
   JobChannelChallengePreparation,
   JobChannelRelayAdoption,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/job-assignment";
 import {
   AssignmentStreamPathManager,
   type AssignmentStreamPathConnector,

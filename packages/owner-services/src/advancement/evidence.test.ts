@@ -1,9 +1,5 @@
-import type {
-  AdvancementEvidenceOutcome,
-  AdvancementSession,
-  ConfirmedRubricSnapshot,
-  RunRecordInput,
-} from "@zhixing/core";
+import type { AdvancementEvidenceOutcome, AdvancementSession, ConfirmedRubricSnapshot } from "@zhixing/core/advancement";
+import type { RunRecordInput } from "@zhixing/core/transcript";
 import type {
   CapabilityDescriptor,
   EvidenceExecutionResult,

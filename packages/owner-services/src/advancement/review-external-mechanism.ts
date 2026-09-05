@@ -1,8 +1,5 @@
-import type {
-  AdvancementReviewRunOutcome,
-  AdvancementRunReview,
-  RunRecordRef,
-} from "@zhixing/core";
+import type { AdvancementReviewRunOutcome, AdvancementRunReview } from "@zhixing/core/advancement";
+import type { RunRecordRef } from "@zhixing/core/transcript";
 import type {
   AdvancementReviewerPort,
 } from "@zhixing/core/contracts";

@@ -16,14 +16,7 @@
 
 import type * as readline from "node:readline";
 
-import {
-  CommandDispatcher,
-  type DispatchResult,
-  type ITypeaheadBroker,
-  type RuntimeContext,
-  type SuggestionItem,
-  type TypeaheadSessionState,
-} from "@zhixing/core";
+import { CommandDispatcher, type DispatchResult, type ITypeaheadBroker, type RuntimeContext, type SuggestionItem, type TypeaheadSessionState } from "@zhixing/core/typeahead";
 
 import {
   ANSI,

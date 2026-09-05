@@ -8,7 +8,7 @@
 
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createInterruptController, getAbortReason } from "@zhixing/core";
+import { createInterruptController, getAbortReason } from "@zhixing/core/interrupt";
 import { attachKeyboardSource } from "../keyboard-source.js";
 
 interface FakeStdin extends PassThrough {

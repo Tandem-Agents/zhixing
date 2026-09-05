@@ -1,11 +1,8 @@
 import path from "node:path";
-import {
-  ConfirmationBroker,
-  type AgentYield,
-  type ChannelChallengeMessage,
-  type Message,
-  type RunResult,
-} from "@zhixing/core";
+import { ConfirmationBroker } from "@zhixing/core/confirmation";
+import { type AgentYield, type RunResult } from "@zhixing/core/loop";
+import { type ChannelChallengeMessage } from "@zhixing/core/channels";
+import { type Message } from "@zhixing/core";
 import {
   FileArtifactStore,
   FileAuthorityCommitLog,
@@ -49,14 +46,13 @@ import {
 } from "@zhixing/executor";
 import type { MeshServiceRegistry, SecureMeshConnection } from "@zhixing/mesh";
 import type { MeshServiceClient } from "@zhixing/mesh/request-channel";
+import { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+import { createInitialControlEnvelope } from "@zhixing/owner-kernel/control-admission";
 import {
-  ConversationManager,
-  createInitialControlEnvelope,
   type AssignmentSubmissionAuthorizer,
   type InProcessDispatchContextFactory,
-  type RuntimeFactory,
-  type SessionRuntime,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/conversation-assignment";
+import { type RuntimeFactory, type SessionRuntime } from "@zhixing/owner-kernel/types";
 import {
   InProcessJobDispatcher,
   JobJournal,

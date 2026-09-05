@@ -16,7 +16,7 @@
 import type {
   ConfirmationDecision,
   ConfirmationRequest,
-} from "@zhixing/core";
+} from "@zhixing/core/confirmation";
 
 // ─── 词集定义 ───
 //

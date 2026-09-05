@@ -3,7 +3,7 @@ import type {
   DeviceCapacityArbiterPort,
   DeviceCapacityBudget,
 } from "@zhixing/core/resources";
-import type { ToolDefinition, ToolExecutionContext } from "@zhixing/core";
+import type { ToolDefinition, ToolExecutionContext } from "@zhixing/core/types";
 import {
   governToolExecution,
   type AgentRuntimeCapacityBinding,

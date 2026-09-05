@@ -9,14 +9,16 @@
 import {
   stripPresentationFromAgentYield,
   type RunResult,
+} from "@zhixing/core/loop";
+import {
   type UserTurnInput,
   userTurnInputFromText,
-} from "@zhixing/core";
+} from "@zhixing/core/types";
 import type {
   ConversationManager,
   ManagedSession,
-  RunTurnOptions,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/conversation-manager";
+import type { RunTurnOptions } from "@zhixing/owner-kernel/types";
 import type { ExplicitEnvironmentSelection } from "@zhixing/core/contracts";
 import { runTurnWithCommit, type RunTurnHooks } from "@zhixing/owner-kernel/run-turn";
 import {

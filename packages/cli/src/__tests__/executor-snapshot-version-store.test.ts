@@ -1,6 +1,6 @@
 import path from "node:path";
 import { writeFile } from "node:fs/promises";
-import type { PermissionRule } from "@zhixing/core";
+import type { PermissionRule } from "@zhixing/core/security";
 import { protocolDigest } from "@zhixing/core/protocol";
 import type {
   ExecutorCapabilityDirectoryState,

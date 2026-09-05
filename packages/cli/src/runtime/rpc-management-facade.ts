@@ -7,9 +7,7 @@
  * 此处按消费面做最小结构声明。
  */
 
-import type {
-  ChannelStatus,
-} from "@zhixing/core";
+import type { ChannelStatus } from "@zhixing/core/channels";
 import type { BackupRecoveryPublicStatus } from "@zhixing/core/backup-recovery/application";
 import type { TrustAdministrationRule } from "@zhixing/core/trust-administration";
 import {

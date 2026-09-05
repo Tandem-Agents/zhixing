@@ -29,10 +29,9 @@ import type {
   ConfirmationRendererPort,
   ConfirmationRequest,
   DisplayBody,
-  PermissionContextId,
   RendererCapabilities,
-  SecurityEventMap,
-} from "@zhixing/core";
+} from "@zhixing/core/confirmation";
+import type { PermissionContextId, SecurityEventMap } from "@zhixing/core/security";
 import { tone } from "../tui/style.js";
 import { wrapAnsiLine } from "../tui/line-width.js";
 import type { SelectOption, SelectResult } from "../tui/select-types.js";

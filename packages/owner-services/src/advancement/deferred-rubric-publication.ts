@@ -1,4 +1,4 @@
-import type { RubricContractDraftSnapshot, RubricDraftPersistenceChoice } from "@zhixing/core";
+import type { RubricContractDraftSnapshot, RubricDraftPersistenceChoice } from "@zhixing/core/advancement";
 import type {
   AuthorityCallContext,
   DeferredGlobalIntent,

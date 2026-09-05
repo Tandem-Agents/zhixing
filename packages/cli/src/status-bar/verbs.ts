@@ -7,7 +7,7 @@
  *   括号  `(<时间> · <↑↓ token> · <可选状态描述>)`
  */
 
-import type { AbortReason } from "@zhixing/core";
+import type { AbortReason } from "@zhixing/core/interrupt";
 import { shortVisibleLabel } from "../subtasks/presentation.js";
 
 /**

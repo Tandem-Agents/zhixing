@@ -1,10 +1,7 @@
-import {
-  userMessage,
-  type AbortReason,
-  type AgentYield,
-  type IConfirmationBroker,
-  type ToolSideEffectObserver,
-} from "@zhixing/core";
+import { userMessage, type ToolSideEffectObserver } from "@zhixing/core";
+import { type AbortReason } from "@zhixing/core/interrupt";
+import { type AgentYield } from "@zhixing/core/loop";
+import { type IConfirmationBroker } from "@zhixing/core/confirmation";
 import { createExecutorRole, createInProcessAssignmentRuntimeFactory } from "@zhixing/executor";
 import type {
   AgentRuntime,
@@ -13,7 +10,7 @@ import type {
   KernelRunEvent,
   KernelTerminal,
 } from "@zhixing/orchestrator/runtime";
-import type { SessionRuntime } from "@zhixing/owner-kernel";
+import type { SessionRuntime } from "@zhixing/owner-kernel/types";
 import { createOwnerRuntimeAdapter } from "@zhixing/runtime-host/session-adapter";
 import { describe, expect, it, vi } from "vitest";
 import { createAgentJobRuntimePort } from "../agent-job-runtime.js";

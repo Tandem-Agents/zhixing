@@ -6,8 +6,8 @@ import type {
 import type {
   ConversationManager,
   ManagedSession,
-  SessionRuntime,
-} from "@zhixing/owner-kernel";
+} from "@zhixing/owner-kernel/conversation-manager";
+import type { SessionRuntime } from "@zhixing/owner-kernel/types";
 import {
   createConversationPerspectivesCorrectnessPort,
   projectConversationPerspectivesRuntime,

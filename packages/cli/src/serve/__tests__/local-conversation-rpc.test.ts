@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { localConversationId, type TaskListState } from "@zhixing/core";
+import { localConversationId, type TaskListState } from "@zhixing/core/conversation";
 import { RPC_ERROR_CODES, RpcAppError } from "@zhixing/server";
 import { parseConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
 import {

@@ -1,7 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  worksceneConversationId,
-} from "@zhixing/core";
+import { worksceneConversationId } from "@zhixing/core/conversation";
 import type { TrustAdministrationRepositoryRule } from "@zhixing/core/trust-administration";
 import { createTempDir } from "@zhixing/test-utils";
 import { createTrustAdministrationApplication } from "../trust-administration-adapter.js";

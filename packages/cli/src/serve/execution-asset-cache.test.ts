@@ -14,12 +14,8 @@ import {
   type ProtocolSigner,
 } from "@zhixing/core/protocol";
 import { SkillCatalogKernelProjectionApplicationService } from "@zhixing/core/skills/catalog";
-import {
-  parseRubricDocument,
-  rubricDocumentId,
-  skillNameToId,
-  stringifyRubricDraft,
-} from "@zhixing/core";
+import { parseRubricDocument, rubricDocumentId, stringifyRubricDraft } from "@zhixing/core/rubrics";
+import { skillNameToId } from "@zhixing/core/skills/id";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
 import { GlobalRubricCatalog } from "./advancement-rubric-library.js";

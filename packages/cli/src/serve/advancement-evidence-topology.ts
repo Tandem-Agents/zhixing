@@ -3,7 +3,7 @@ import type {
   ProtocolSignatureVerifier,
   ProtocolSigner,
 } from "@zhixing/core/protocol";
-import type { AdvancementEvidenceTarget } from "@zhixing/owner-services";
+import type { AdvancementEvidenceTarget } from "@zhixing/owner-services/advancement";
 
 /** Demand-owned evidence mechanism directory consumed by Advancement. */
 export interface AdvancementEvidenceTargetDirectory {

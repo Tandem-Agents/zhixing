@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { AbortReason } from "@zhixing/core";
+import type { AbortReason } from "@zhixing/core/interrupt";
 import { formatAbortReasonEn, serializeAbortReason } from "../abort-serializer.js";
 
 describe("formatAbortReasonEn", () => {

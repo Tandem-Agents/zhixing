@@ -6,7 +6,8 @@
 
 import { describe, expect, it } from "vitest";
 import { trackMessages } from "../track-messages.js";
-import type { AgentYield, Message, ToolResultBlock } from "@zhixing/core";
+import type { AgentYield } from "@zhixing/core/loop";
+import type { Message, ToolResultBlock } from "@zhixing/core/types";
 
 function fresh(): { newMessages: Message[]; pending: ToolResultBlock[] } {
   return { newMessages: [], pending: [] };

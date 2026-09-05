@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { userMessage, assistantMessage, type Message } from "@zhixing/core";
+import { userMessage, assistantMessage, type Message } from "@zhixing/core/types";
 import { prependContextBlock } from "../user-context.js";
 
 const firstText = (m: Message): string =>

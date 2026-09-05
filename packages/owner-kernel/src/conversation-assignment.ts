@@ -132,12 +132,8 @@ import {
   type UnsignedConversationEnvelope,
 } from "@zhixing/core/protocol";
 import { SerialTaskQueue } from "@zhixing/core/persistence";
-import {
-  compileDeliveryContent,
-  DeliveryContentValidationError,
-  parseConversationId,
-  type CompiledDeliveryContent,
-} from "@zhixing/core";
+import { compileDeliveryContent, DeliveryContentValidationError, type CompiledDeliveryContent } from "@zhixing/core/delivery";
+import { parseConversationId } from "@zhixing/core/conversation";
 import { DurableConversationAdmissionRejectedError } from "./run-turn.js";
 import { productizePublishAuthorityError } from "./publish-result-product-language.js";
 import {

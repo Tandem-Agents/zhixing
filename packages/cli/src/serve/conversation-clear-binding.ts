@@ -4,7 +4,7 @@ import {
   type ConversationClearCommitPort,
   type ConversationClearedFact,
 } from "@zhixing/core/conversation/application";
-import type { ConversationManager } from "@zhixing/owner-kernel";
+import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
 
 /** Anchor Correctness binding for the Conversation-owned clear command. */
 export function createAnchorConversationClearCommitPort(input: Readonly<{

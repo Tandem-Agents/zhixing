@@ -8,14 +8,8 @@
  * main 列表不混场景对话)。场景库句柄惰性建、按 sceneId 缓存。
  */
 
-import {
-  parseConversationId,
-  readRunsReverse,
-  type Conversation,
-  type IConversationRepository,
-  type RunRecordWithRef,
-  type TranscriptReadSource,
-} from "@zhixing/core";
+import { parseConversationId, type Conversation, type IConversationRepository } from "@zhixing/core/conversation";
+import { readRunsReverse, type RunRecordWithRef, type TranscriptReadSource } from "@zhixing/core/transcript";
 import type {
   ConversationClearProjectionPort,
   ConversationDirectoryStorage,

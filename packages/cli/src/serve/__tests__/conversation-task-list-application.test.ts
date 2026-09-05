@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { TaskListState } from "@zhixing/core";
+import type { TaskListState } from "@zhixing/core/conversation";
 import {
   TaskListService,
   type TaskListStore,

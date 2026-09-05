@@ -11,11 +11,8 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import {
-  SchedulerProvider,
-  TaskListProvider,
-  type TaskStatusSummary,
-} from "@zhixing/core";
+import { SchedulerProvider, TaskListProvider } from "@zhixing/core/context";
+import { type TaskStatusSummary } from "@zhixing/core/scheduler";
 import { TaskListService } from "@zhixing/core/conversation/application";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import { InMemoryTaskListStore } from "../task-list-stores.js";
