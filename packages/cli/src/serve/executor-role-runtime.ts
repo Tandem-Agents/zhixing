@@ -98,7 +98,6 @@ import {
   captureManagedHostAdmission,
   coordinateManagedHostTrustTransition,
   loadCurrentManagedServiceState,
-  verifyManagedHostAdmission,
 } from "./managed-service-runtime.js";
 import {
   createManagedServiceAdapter,
@@ -117,9 +116,7 @@ import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
 import { createMeshCompatibilityStateProjection } from "./mesh-compatibility-state.js";
 import { waitForExecutorRoleTerminal } from "./executor-role-terminal.js";
 import {
-  createExecutorInternalStopPort,
-  type ExecutorInternalStopPort,
-  type ExecutorInternalStopRequest,
+  ExecutorInternalStopLifecycle,
   shouldExecutorIdleExit,
 } from "./executor-internal-stop.js";
 import {
@@ -189,7 +186,13 @@ export async function runExecutorRole(
   const localServerPort = options.port ?? homeToPort(zhixingHome);
   const localServerHost = options.host ?? DEFAULT_SERVER_CONFIG.host;
   const executorRoleLifecycle = new ExecutorRoleLifecycle();
-  const executorServerLifecycle = new ExecutorServerLifecycle();
+  const executorInternalStopLifecycle = new ExecutorInternalStopLifecycle({
+    notReadyMessage: "Executor Host admission changed before its stop port was ready",
+  });
+  const executorInternalStop = executorInternalStopLifecycle.port;
+  const executorServerLifecycle = new ExecutorServerLifecycle(
+    executorInternalStopLifecycle,
+  );
   const permissionStorage = createPermissionStorageInfrastructure({ zhixingHome });
   const mcpRuntime = createHostMcpRuntime(
     parseServerSpecs(mcpConfiguration.mcp, bootstrap.mcpCredentials.mcp),
@@ -494,31 +497,22 @@ export async function runExecutorRole(
       onError: (_assignmentId, error) =>
         writer.notify(`[job-worker] ${error.message}`),
     });
-    const executorInternalStop = {
-      current: undefined as ExecutorInternalStopPort | undefined,
-    };
-    const requestExecutorInternalStop = (
-      request: ExecutorInternalStopRequest,
-    ): Promise<void> => {
-      const stop = executorInternalStop.current;
-      if (!stop) {
-        return Promise.reject(new Error("Executor internal stop is not ready"));
-      }
-      return stop.requestStop(request);
-    };
-    let coordinateRuntimeTrustTransition: (() => Promise<void>) | undefined;
-    const onTrustApplied = async () => {
-      if (coordinateRuntimeTrustTransition) {
-        await coordinateRuntimeTrustTransition();
-        return;
-      }
-      if (!await verifyManagedHostAdmission(
-        initialManagedHostAdmission,
+    const coordinateRuntimeTrustTransition = async () => {
+      const result = await coordinateManagedHostTrustTransition({
         processMode,
-        zhixingHome,
-      )) {
-        throw new Error("Executor Host admission changed before its stop port was ready");
+        expectedAdmission: initialManagedHostAdmission,
+        refuseNewMessages: () => jobOwnerAssembly.pauseAccepting(),
+        requestShutdown: () => executorInternalStop.requestStop({
+          reason: "managed-role-changed",
+          strategy: "immediate",
+        }),
+      });
+      if (result === "stopped") {
+        throw new Error("Executor Host admission changed and reached its durable terminal");
       }
+    };
+    const onTrustApplied = async () => {
+      await coordinateRuntimeTrustTransition();
     };
     const executorMeshTrust = new MeshExecutorTopologyTrustState(
       bootstrap.mesh.trust,
@@ -947,27 +941,13 @@ export async function runExecutorRole(
       },
       beforeActivate: async (openingRunner) => {
         executorServerLifecycle.transferToRunningServer(openingRunner);
-        executorInternalStop.current = createExecutorInternalStopPort({
+        executorInternalStopLifecycle.install({
           requestId: `executor-internal:${process.pid}:${processStartedAt}`,
           timeoutMs: 30_000,
           prepare: (request) => stopCoordinator.prepare(request),
           shutdown: (reason) => openingRunner.shutdown(reason),
           waitForShutdown: () => openingRunner.waitForShutdown(),
         });
-        coordinateRuntimeTrustTransition = async () => {
-          const result = await coordinateManagedHostTrustTransition({
-            processMode,
-            expectedAdmission: initialManagedHostAdmission,
-            refuseNewMessages: () => jobOwnerAssembly?.pauseAccepting(),
-            requestShutdown: () => requestExecutorInternalStop({
-              reason: "managed-role-changed",
-              strategy: "immediate",
-            }),
-          });
-          if (result === "stopped") {
-            throw new Error("Executor Host admission changed and reached its durable terminal");
-          }
-        };
         await onTrustApplied();
       },
       publishReady: async (openingRunner) => {
@@ -1002,7 +982,7 @@ export async function runExecutorRole(
             hasLocalAcceptedWork,
             hasRemoteAcceptedWork: remoteAcceptedWork.length > 0,
           })) return;
-          await requestExecutorInternalStop({ reason: "idle", strategy: "drain" });
+          await executorInternalStop.requestStop({ reason: "idle", strategy: "drain" });
         },
         (error) => {
           writer.notify(

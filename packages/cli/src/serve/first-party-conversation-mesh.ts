@@ -50,15 +50,20 @@ type Result =
 export class FirstPartyConversationMeshTarget {
   readonly #relays = new Map<string, RelayConnection>();
   readonly #currentByPrincipal = new Map<string, RelayConnection>();
-  #surface: CanonicalFirstPartyConversationSurface | undefined;
+  readonly #surface: CanonicalFirstPartyConversationSurface;
+  readonly #isReady: (() => boolean) | undefined;
 
-  constructor(private readonly input: { readonly isReady?: () => boolean } = {}) {}
-
-  bind(surface: CanonicalFirstPartyConversationSurface): void {
-    if (this.#surface && this.#surface !== surface) {
-      throw new Error("First-party conversation surface is already bound");
+  constructor(input: {
+    readonly surface: CanonicalFirstPartyConversationSurface;
+    readonly isReady?: () => boolean;
+  }) {
+    if (!input?.surface || typeof input.surface.dispatch !== "function") {
+      throw new TypeError("First-party conversation surface is required");
     }
-    this.#surface = surface;
+    this.#surface = Object.freeze({
+      dispatch: input.surface.dispatch.bind(input.surface),
+    });
+    this.#isReady = input.isReady;
   }
 
   async handle(
@@ -68,7 +73,7 @@ export class FirstPartyConversationMeshTarget {
   ): Promise<Uint8Array> {
     try {
       const command = validateCommand(decode(payload), connection.peer.deviceId);
-      if (this.input.isReady?.() === false) {
+      if (this.#isReady?.() === false) {
         throw RpcErrors.busy(
           "The current duty device is completing durable migration recovery",
         );
@@ -87,9 +92,8 @@ export class FirstPartyConversationMeshTarget {
       if (command.op === "poll") {
         return encode({ v: 1, ok: true, notifications: await relay.poll(signal) });
       }
-      if (!this.#surface) throw new Error("First-party conversation surface is not ready");
       if (!METHODS.has(command.method)) throw new TypeError("First-party conversation method is not allowed");
-      const result = await relay.serial(() => this.#surface!.dispatch({
+      const result = await relay.serial(() => this.#surface.dispatch({
         method: command.method,
         params: command.params,
         connection: relay,
@@ -151,6 +155,40 @@ export function registerFirstPartyConversationMeshService(
     authorize: (connection) => authorizePeer(connection.peer.deviceId),
     handler: (payload, connection, signal) => target.handle(payload, connection, signal),
   });
+}
+
+/**
+ * Owns one fully constructed first-party surface and its Mesh registration.
+ * The target cannot become reachable before its required surface exists.
+ */
+export class FirstPartyConversationMeshSurfaceLifecycle {
+  readonly #target: FirstPartyConversationMeshTarget;
+  readonly #unregister: () => void;
+  #closed = false;
+
+  constructor(input: {
+    readonly registry: MeshServiceRegistry;
+    readonly surface: CanonicalFirstPartyConversationSurface;
+    readonly isReady?: () => boolean;
+    readonly authorizePeer: (deviceId: string) => boolean;
+  }) {
+    this.#target = new FirstPartyConversationMeshTarget({
+      surface: input.surface,
+      ...(input.isReady ? { isReady: input.isReady } : {}),
+    });
+    this.#unregister = registerFirstPartyConversationMeshService(
+      input.registry,
+      this.#target,
+      input.authorizePeer,
+    );
+  }
+
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#unregister();
+    this.#target.close();
+  }
 }
 
 export interface FirstPartyIngressConnection {

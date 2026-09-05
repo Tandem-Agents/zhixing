@@ -15,11 +15,11 @@ import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
 import { SESSION_NOTIFICATIONS } from "@zhixing/rpc/session-wire";
 
 export function createAdvancementEventSink(
-  sessionBroadcast: () => SessionBroadcast | null,
+  sessionBroadcast: SessionBroadcast,
 ): AdvancementEventSink {
   return {
     emit(event) {
-      sessionBroadcast()?.(
+      sessionBroadcast(
         event.conversationId,
         SESSION_NOTIFICATIONS.event,
         createControlSessionEventEnvelope(event),
@@ -30,7 +30,7 @@ export function createAdvancementEventSink(
 
 export interface AdvancementProxyTurnAdapterOptions {
   readonly manager: ConversationManager;
-  readonly sessionBroadcast?: () => SessionBroadcast | null;
+  readonly sessionBroadcast?: SessionBroadcast;
   readonly conversationExists?: (conversationId: string) => Promise<boolean>;
 }
 
@@ -107,7 +107,7 @@ export function createAdvancementProxyTurnPort(
                     advancement: request.advancement,
                   },
                   notify: (method, params) =>
-                    options.sessionBroadcast?.()?.(
+                    options.sessionBroadcast?.(
                       conversationId,
                       method,
                       params,

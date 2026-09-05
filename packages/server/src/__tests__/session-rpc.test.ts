@@ -63,7 +63,6 @@ import {
 import { createAdvancementReviewAttemptApplication } from "@zhixing/owner-services/advancement/review-attempt-correctness";
 import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-services/advancement/review-external-mechanism";
 import {
-  createAdvancementEventSink,
   createAdvancementProxyTurnPort,
 } from "../advancement/adapters.js";
 import {
@@ -1621,9 +1620,7 @@ describe("session.* RPC (S2.D)", () => {
               conversationExists: (conversationId) =>
                 conversationDirectory.exists(conversationId),
             }),
-            events: createAdvancementEventSink(() => null),
             reviewResults: new AdvancementReviewResultProjectionApplicationService({
-              events: createAdvancementEventSink(() => null),
             }),
           })
         : undefined;

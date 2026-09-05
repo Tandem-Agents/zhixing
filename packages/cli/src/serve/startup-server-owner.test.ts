@@ -136,6 +136,7 @@ describe("production startup server ownership", () => {
   it("keeps the anchor endpoint inactive until every open prerequisite has one cleanup owner", async () => {
     const source = await readSource("command.ts");
     const surfaces = await readSource("access-surfaces.ts");
+    const mesh = await readSource("mesh-runtime-assembly.ts");
     const conversationProtocol = await readSource("conversation-protocol-runtime.ts");
     const schedulerGenerationOwner = await readSource("anchor-scheduler-runtime.ts");
     expect(source).not.toContain("beginInstalledAuthorityGeneration");
@@ -226,10 +227,34 @@ describe("production startup server ownership", () => {
     expect(source).not.toContain("bindPostAdoptionReview");
     expect(source).not.toContain("let adoptionReview");
     expect(source).not.toContain("...(adoptionReview ?");
+    expect(source).not.toContain("bindFirstPartyConversationSurface");
+    expect(mesh).not.toContain("#firstPartyConversationTarget");
+    const serverContext = location(source, "serverCtx = createServerContext({");
+    const firstPartySurfaceOwner = location(
+      source,
+      "ctx.meshRuntime.createFirstPartyConversationSurfaceLifecycle({",
+    );
+    const firstPartySurfaceCleanup = location(
+      source,
+      'lifecycleContributions.acquire(\n      "firstPartyConversationMeshSurface.close",',
+    );
+    const serverRun = location(source, "runner = await runServer({");
+    expect(firstPartySurfaceOwner).toBeGreaterThan(serverContext);
+    expect(firstPartySurfaceCleanup).toBeGreaterThan(firstPartySurfaceOwner);
+    expect(firstPartySurfaceCleanup).toBeLessThan(serverRun);
     expect(source.match(/schedulerGenerationOwner\.postAdoptionReview/gu)).toHaveLength(2);
     const bind = location(source, "const serverBinding = await bindServer");
     expect(bind).toBeLessThan(location(source, "await setupAssemblyUnits(assemblyUnits, ctx, \"pre-server\")"));
     expect(bind).toBeLessThan(location(source, "const stopResume = await stopCoordinator.resumeActive()"));
+    const broadcastOwner = location(
+      source,
+      "const sessionBroadcastLifecycle = new AnchorSessionBroadcastLifecycle()",
+    );
+    const runEventConsumer = location(
+      source,
+      "const runEventForwarder = createRunEventForwarder(",
+    );
+    expect(broadcastOwner).toBeLessThan(runEventConsumer);
     const activation = source.slice(location(source, "runner = await runServer"));
     expect(activation).toContain("boundServer: serverBinding");
     expect(activation).toContain("config: { ...DEFAULT_SERVER_CONFIG, port, host }");
@@ -244,6 +269,18 @@ describe("production startup server ownership", () => {
     const shellOwner = location(
       activation,
       "hostShellLifecycle.assertActivationOwnership({",
+    );
+    const broadcastCleanup = location(
+      activation,
+      'lifecycleContributions.acquire(\n        "sessionBroadcast.close",',
+    );
+    const broadcastTransport = location(
+      activation,
+      "openingRunner.server.sessionBroadcastTransport",
+    );
+    const broadcastInstall = location(
+      activation,
+      "sessionBroadcastLifecycle.install(sessionTransport)",
     );
     const delivery = location(activation, "ctx.deliveryStack?.activate()");
     const scheduler = location(activation, "schedulerApplication.activate()");
@@ -284,6 +321,9 @@ describe("production startup server ownership", () => {
     const ready = location(activation, "await hostShellLifecycle.markReady({");
     for (const prerequisite of [
       shellOwner,
+      broadcastCleanup,
+      broadcastTransport,
+      broadcastInstall,
       delivery,
       scheduler,
       foundationTransfer,
@@ -295,6 +335,9 @@ describe("production startup server ownership", () => {
       expect(prerequisite).toBeLessThan(publish);
     }
     expect(foundationTransfer).toBeLessThan(surfaceTransfer);
+    expect(broadcastCleanup).toBeLessThan(broadcastTransport);
+    expect(broadcastTransport).toBeLessThan(broadcastInstall);
+    expect(broadcastInstall).toBeLessThan(delivery);
     expect(activeEndpoint).toBeGreaterThan(cleanupCommit);
     expect(activeEndpoint).toBeLessThan(publish);
     expect(postServerTransfer).toBeGreaterThan(contribution);
@@ -308,6 +351,24 @@ describe("production startup server ownership", () => {
     expect(source).not.toContain("registerCoreCleanup");
     expect(source).not.toContain("registerTailCleanup");
     expect(source).not.toContain("shutdown-chain.js");
+    expect(source).not.toContain("sessionBroadcastRef");
+    expect(source).not.toContain("sessionActivityBroadcastRef");
+    expect(source).not.toContain("anchorInternalStop.current");
+    const internalStopOwner = location(
+      source,
+      "const anchorInternalStopLifecycle = new AnchorInternalStopLifecycle()",
+    );
+    const managedStopConsumer = location(
+      source,
+      "requestShutdown: () => anchorInternalStop.requestStop({",
+    );
+    const internalStopInstall = location(
+      activation,
+      "anchorInternalStopLifecycle.install({",
+    );
+    expect(internalStopOwner).toBeLessThan(managedStopConsumer);
+    expect(internalStopInstall).toBeGreaterThan(gate);
+    expect(internalStopInstall).toBeLessThan(publish);
     for (const directOwner of [
       'id: "serverLogLifecycle.stop"',
       'id: "authorityCheckpointOwner.stop"',
@@ -376,20 +437,19 @@ describe("production startup server ownership", () => {
       activation,
       "executorServerLifecycle.transferToRunningServer(openingRunner)",
     );
-    const stopOwner = location(
+    const stopInstall = location(
       activation,
-      "executorInternalStop.current = createExecutorInternalStopPort({",
+      "executorInternalStopLifecycle.install({",
     );
-    const trustBinding = location(activation, "coordinateRuntimeTrustTransition = async () =>");
     const admission = location(activation, "await onTrustApplied();");
     const publish = location(activation, "publishReady: async (openingRunner) =>");
     const ready = location(activation, "await executorServerLifecycle.markReady({");
     const running = location(activation, "await executorServerLifecycle.markRunning();");
-    for (const prerequisite of [endpointTransfer, stopOwner, trustBinding, admission]) {
+    for (const prerequisite of [endpointTransfer, stopInstall, admission]) {
       expect(prerequisite).toBeGreaterThan(gate);
       expect(prerequisite).toBeLessThan(publish);
     }
-    expect(endpointTransfer).toBeLessThan(stopOwner);
+    expect(endpointTransfer).toBeLessThan(stopInstall);
     expect(activation).toContain("shutdown: (reason) => openingRunner.shutdown(reason)");
     expect(activation).toContain("waitForShutdown: () => openingRunner.waitForShutdown()");
     expect(ready).toBeGreaterThan(publish);
@@ -398,8 +458,17 @@ describe("production startup server ownership", () => {
       .toBeGreaterThan(running);
     expect(location(activation, "executorServerLifecycle.startHeartbeat()"))
       .toBeGreaterThan(running);
-    expect(source.indexOf("executorInternalStop.current = createExecutorInternalStopPort({"))
-      .toBe(source.lastIndexOf("executorInternalStop.current = createExecutorInternalStopPort({"));
+    const internalStopOwner = location(
+      source,
+      "const executorInternalStopLifecycle = new ExecutorInternalStopLifecycle({",
+    );
+    const trustBinding = location(source, "const coordinateRuntimeTrustTransition = async () =>");
+    const meshConstruction = location(source, "mesh = new MeshRuntimeAssembly({");
+    expect(internalStopOwner).toBeLessThan(trustBinding);
+    expect(trustBinding).toBeLessThan(meshConstruction);
+    expect(source).not.toContain("executorInternalStop.current");
+    expect(source.indexOf("executorInternalStopLifecycle.install({"))
+      .toBe(source.lastIndexOf("executorInternalStopLifecycle.install({"));
     expect(source.indexOf("await onTrustApplied();")).toBe(source.lastIndexOf("await onTrustApplied();"));
     expect(source.match(/executorRoleLifecycle\.acquire\(/gu)).toHaveLength(6);
     expect(source.match(/executorRoleLifecycle\.authorityStartupRollback\(\)/gu))
@@ -409,7 +478,6 @@ describe("production startup server ownership", () => {
     expect(source.match(/await executorRoleLifecycle\.close\(\)/gu)).toHaveLength(1);
     expect(location(source, 'executorRoleLifecycle.acquire("mcpRuntime.close"'))
       .toBeLessThan(location(source, "await mcpRuntime.lifecycle.connect()"));
-    const meshConstruction = location(source, "mesh = new MeshRuntimeAssembly({");
     const removalContribution = location(
       source,
       "const deviceRemovalLifecycle = defineDeviceRemovalLifecycleContribution({",
@@ -502,7 +570,8 @@ describe("production startup server ownership", () => {
 });
 
 async function readSource(name: string): Promise<string> {
-  return readFile(new URL(`./${name}`, import.meta.url), "utf8");
+  return (await readFile(new URL(`./${name}`, import.meta.url), "utf8"))
+    .replaceAll("\r\n", "\n");
 }
 
 function location(source: string, needle: string): number {

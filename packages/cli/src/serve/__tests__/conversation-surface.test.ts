@@ -124,7 +124,8 @@ async function setupCtx() {
     authorityRuntime,
     durableInteractions: new DurableConversationInteractionObserver(),
     perspectives: { executePerspectiveWork: vi.fn() },
-    sessionBroadcastRef: { current: null },
+    sessionBroadcast: vi.fn(),
+    sessionActivityBroadcast: vi.fn(),
     advancementDirectory: {
       list: vi.fn(async () => []),
       exists: vi.fn(async () => false),

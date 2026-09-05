@@ -6,6 +6,7 @@ import type {
 } from "@zhixing/server";
 
 export const EXECUTOR_SERVER_LIFECYCLE_DESCRIPTORS = [
+  { owner: "executor-server", id: "internalStop.close" },
   { owner: "executor-server", id: "inactiveBinding.close" },
   { owner: "executor-server", id: "runningServer.shutdown" },
   { owner: "executor-server", id: "serverState.lifecycle" },
@@ -25,6 +26,10 @@ type EndpointOwnership =
   | { readonly kind: "server"; readonly server: RunningServer }
   | { readonly kind: "terminal" };
 
+export interface ExecutorInternalStopLifecycleOwner {
+  close(): void;
+}
+
 /**
  * Owns the finite Executor-only Server/state/timer boundary without copying
  * the Server package's CleanupRegistry. The inactive binding stays here until
@@ -39,6 +44,10 @@ export class ExecutorServerLifecycle {
   #idleCheck: Promise<void> | undefined;
   #stopPromise: Promise<void> | undefined;
   #stateCleanupPromise: Promise<void> | undefined;
+
+  constructor(
+    private readonly internalStopLifecycle: ExecutorInternalStopLifecycleOwner,
+  ) {}
 
   acquireBinding(binding: BoundEndpoint): void {
     if (this.#endpoint.kind !== "none") {
@@ -141,6 +150,7 @@ export class ExecutorServerLifecycle {
       clearInterval(this.#idleTimer);
       this.#idleTimer = undefined;
     }
+    await attempt(() => this.internalStopLifecycle.close(), failures);
     await this.#idleCheck?.catch(() => undefined);
     if (this.#heartbeatTimer) {
       clearInterval(this.#heartbeatTimer);

@@ -118,8 +118,7 @@ import {
 } from "./conversation-transfer-mesh.js";
 import {
   FirstPartyConversationMeshClient,
-  FirstPartyConversationMeshTarget,
-  registerFirstPartyConversationMeshService,
+  FirstPartyConversationMeshSurfaceLifecycle,
 } from "./first-party-conversation-mesh.js";
 import type { CanonicalFirstPartyConversationSurface } from "@zhixing/server";
 import {
@@ -518,7 +517,6 @@ export class MeshRuntimeAssembly
   readonly #control: ProductionMeshControlPlane;
   readonly #worker: ConversationAssignmentWorker | undefined;
   readonly #transferTarget: ConversationTransferTarget | undefined;
-  readonly #firstPartyConversationTarget: FirstPartyConversationMeshTarget | undefined;
   readonly #transferAbort = new AbortController();
   readonly #plannedTransferRuntime = new PlannedAnchorTransferRuntimeLifecycle();
   readonly #disposers: Array<() => void> = [];
@@ -665,11 +663,6 @@ export class MeshRuntimeAssembly
           reducerVersion: "conversation-session-state-v1",
           preparePublication: (base) =>
             options.protocol!.prepareCommittedConversationTransfer(base),
-        })
-      : undefined;
-    this.#firstPartyConversationTarget = roles.has("anchor")
-      ? new FirstPartyConversationMeshTarget({
-          isReady: () => this.plannedCurrentOwnerReady(),
         })
       : undefined;
     this.#composition = new AssignmentMeshComposition({
@@ -861,16 +854,6 @@ export class MeshRuntimeAssembly
       );
     }
 
-    if (this.#firstPartyConversationTarget) {
-      this.#disposers.push(registerFirstPartyConversationMeshService(
-        this.services,
-        this.#firstPartyConversationTarget,
-        (deviceId) =>
-          this.#peerHasRole(deviceId, "executor") ||
-          this.#peerHasRole(deviceId, "anchor"),
-      ));
-    }
-
     const requiresPairedCheckpointReceiver =
       !!options.trust.recoveryBackupPublicKey &&
       options.trust.issuer.deviceId !== options.authority.deviceId &&
@@ -1058,11 +1041,20 @@ export class MeshRuntimeAssembly
     );
   }
 
-  bindFirstPartyConversationSurface(surface: CanonicalFirstPartyConversationSurface): void {
-    if (!this.#firstPartyConversationTarget) {
-      throw new Error("First-party conversation surface requires the anchor transfer target");
+  createFirstPartyConversationSurfaceLifecycle(
+    surface: CanonicalFirstPartyConversationSurface,
+  ): FirstPartyConversationMeshSurfaceLifecycle {
+    if (!this.options.configuration.enabledRoles.includes("anchor")) {
+      throw new Error("First-party conversation surface requires the anchor role");
     }
-    this.#firstPartyConversationTarget.bind(surface);
+    return new FirstPartyConversationMeshSurfaceLifecycle({
+      registry: this.services,
+      surface,
+      isReady: () => this.plannedCurrentOwnerReady(),
+      authorizePeer: (deviceId) =>
+        this.#peerHasRole(deviceId, "executor") ||
+        this.#peerHasRole(deviceId, "anchor"),
+    });
   }
 
   firstPartyConversationFor(deviceId: string): FirstPartyConversationMeshClient {
@@ -1490,7 +1482,6 @@ export class MeshRuntimeAssembly
     this.#disposePlannedAnchorSource = undefined;
     this.#plannedAnchorOwner = undefined;
     this.#plannedAnchorTarget = undefined;
-    this.#firstPartyConversationTarget?.close();
     this.#composition.close();
     for (const dispose of this.#disposers.splice(0).reverse()) dispose();
   }

@@ -152,10 +152,10 @@ function createAdvancementRecoveryMaintenance(options: {
   readonly advancement: AdvancementController;
   readonly manager: AdvancementProxyTurnAdapterOptions["manager"];
   readonly directory: AdvancementConversationDirectory;
-  readonly sessionBroadcast?: () => SessionBroadcast | null;
+  readonly sessionBroadcast?: SessionBroadcast;
   readonly logger?: Pick<Console, "warn">;
 }): AdvancementRecoveryMaintenance {
-  const sessionBroadcast = options.sessionBroadcast ?? (() => null);
+  const sessionBroadcast = options.sessionBroadcast;
   return createOwnerAdvancementRecoveryMaintenance({
     advancement: options.advancement,
     reviews: options.advancement.reviews,
@@ -166,9 +166,13 @@ function createAdvancementRecoveryMaintenance(options: {
       conversationExists: (conversationId) =>
         options.directory.exists(conversationId),
     }),
-    events: createAdvancementEventSink(sessionBroadcast),
+    ...(sessionBroadcast
+      ? { events: createAdvancementEventSink(sessionBroadcast) }
+      : {}),
     reviewResults: new AdvancementReviewResultProjectionApplicationService({
-      events: createAdvancementEventSink(sessionBroadcast),
+      ...(sessionBroadcast
+        ? { events: createAdvancementEventSink(sessionBroadcast) }
+        : {}),
     }),
     logger: options.logger,
   });
@@ -387,7 +391,7 @@ describe("AdvancementRecoveryMaintenance", () => {
       advancement: new AdvancementController({ store }),
       manager: mgr as never,
       directory: dir as never,
-      sessionBroadcast: () => (_conversationId, method, payload) => {
+      sessionBroadcast: (_conversationId, method, payload) => {
         expect(method).toBe("session.event");
         events.push(payload);
       },
@@ -701,7 +705,7 @@ describe("AdvancementRecoveryMaintenance", () => {
       advancement: new AdvancementController({ store, reviewer, resources: fakeResources() }),
       manager: mgr as never,
       directory: dir as never,
-      sessionBroadcast: () => (_conversationId, _method, payload) => {
+      sessionBroadcast: (_conversationId, _method, payload) => {
         events.push(payload as { event?: string });
       },
     });
@@ -792,7 +796,7 @@ describe("AdvancementRecoveryMaintenance", () => {
       }),
       manager: mgr as never,
       directory: directory(true, runs) as never,
-      sessionBroadcast: () => (_conversationId, _method, payload) => {
+      sessionBroadcast: (_conversationId, _method, payload) => {
         events.push(payload as { event?: string });
       },
     });
@@ -877,7 +881,7 @@ describe("AdvancementRecoveryMaintenance", () => {
       advancement: new AdvancementController({ store, reviewer, resources: fakeResources() }),
       manager: mgr as never,
       directory: dir as never,
-      sessionBroadcast: () => (_conversationId, _method, payload) => {
+      sessionBroadcast: (_conversationId, _method, payload) => {
         events.push(payload as { event?: string });
       },
     });
@@ -1008,7 +1012,7 @@ describe("AdvancementRecoveryMaintenance", () => {
       advancement: new AdvancementController({ store }),
       manager: mgr as never,
       directory: directory(true) as never,
-      sessionBroadcast: () => (_conversationId, _method, payload) => {
+      sessionBroadcast: (_conversationId, _method, payload) => {
         events.push(payload as { event?: string });
       },
     });
@@ -1067,7 +1071,7 @@ describe("AdvancementRecoveryMaintenance", () => {
       advancement: new AdvancementController({ store, reviewer, resources: fakeResources() }),
       manager: manager() as never,
       directory: directory(true, [run]) as never,
-      sessionBroadcast: () => (_conversationId, _method, payload) => {
+      sessionBroadcast: (_conversationId, _method, payload) => {
         events.push(payload as { event?: string });
       },
     });

@@ -26,6 +26,44 @@ export type SessionActivityBroadcast = (
   payload: SessionActivityPayload,
 ) => void;
 
+/**
+ * The finite broadcast transport owned by one prepared Server generation.
+ *
+ * Consumers must not manufacture this shape from callbacks: the factory below
+ * binds both functions to the same connection set and observer directory, and
+ * the Host lifecycle verifies that provenance before activation.
+ */
+export interface SessionBroadcastTransport {
+  readonly session: SessionBroadcast;
+  readonly activity: SessionActivityBroadcast;
+}
+
+const SESSION_BROADCAST_TRANSPORTS = new WeakSet<object>();
+
+export function createSessionBroadcastTransport(deps: {
+  connections: ReadonlySet<RpcNotificationConnection>;
+  manager: ConversationManager;
+}): SessionBroadcastTransport {
+  const transport = Object.freeze({
+    session: createObserverBroadcast(deps),
+    activity: createActivityBroadcast(deps),
+  });
+  SESSION_BROADCAST_TRANSPORTS.add(transport);
+  return transport;
+}
+
+export function assertSessionBroadcastTransport(
+  value: unknown,
+): asserts value is SessionBroadcastTransport {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !SESSION_BROADCAST_TRANSPORTS.has(value)
+  ) {
+    throw new TypeError("Session broadcast transport has no Server provenance");
+  }
+}
+
 export function createObserverBroadcast(deps: {
   connections: ReadonlySet<RpcNotificationConnection>;
   manager: ConversationManager;

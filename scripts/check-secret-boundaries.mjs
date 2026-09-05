@@ -22,6 +22,7 @@ const fullCredentialProjectionAllowed = new Set([
   "packages/providers/src/index.ts",
   "packages/providers/src/types.ts",
   "packages/cli/src/startup.ts",
+  "packages/cli/src/runtime/runtime-secret-projections.ts",
   "packages/cli/src/serve/command.ts",
 ]);
 

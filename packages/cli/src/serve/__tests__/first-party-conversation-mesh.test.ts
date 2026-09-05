@@ -6,6 +6,7 @@ import {
   type MeshFrameTransport,
   type MeshServiceClient,
 } from "@zhixing/mesh";
+import { MeshServiceRegistry } from "@zhixing/mesh/service-registry";
 import {
   captureCurrentAnchorRelayMethods,
   DEVICE_LOCAL_RPC_METHODS,
@@ -13,8 +14,10 @@ import {
 } from "@zhixing/server";
 import {
   CURRENT_ANCHOR_RELAY_METHODS,
+  FIRST_PARTY_CONVERSATION_MESH_SERVICE,
   CurrentAnchorFirstPartyRpcRouter,
   FirstPartyConversationMeshClient,
+  FirstPartyConversationMeshSurfaceLifecycle,
   FirstPartyConversationMeshTarget,
   isCurrentAnchorRelayMethod,
   registerFirstPartyConversationMeshService,
@@ -22,7 +25,6 @@ import {
 
 describe("first-party conversation mesh", () => {
   it("relays only the finite canonical surface and closes the prior generation", async () => {
-    const target = new FirstPartyConversationMeshTarget();
     let relay: { notify(method: string, params: unknown): void; onClose(handler: () => void): () => void } | undefined;
     const closed = vi.fn();
     const dispatch = vi.fn(async (input: { connection: typeof relay }) => {
@@ -30,7 +32,9 @@ describe("first-party conversation mesh", () => {
       relay!.onClose(closed);
       return { items: [] };
     });
-    target.bind({ dispatch } as never);
+    const target = new FirstPartyConversationMeshTarget({
+      surface: { dispatch } as never,
+    });
     const first = identity(1, "connection-1");
 
     const response = await target.handle(
@@ -73,9 +77,10 @@ describe("first-party conversation mesh", () => {
   });
 
   it("rejects arbitrary RPC and peer identity drift before dispatch", async () => {
-    const target = new FirstPartyConversationMeshTarget();
     const dispatch = vi.fn();
-    target.bind({ dispatch } as never);
+    const target = new FirstPartyConversationMeshTarget({
+      surface: { dispatch } as never,
+    });
     const result = decode(await target.handle(
       encode({
         v: 1,
@@ -148,8 +153,10 @@ describe("first-party conversation mesh", () => {
   it("keeps the target unavailable until planned post-install consumers complete", async () => {
     let ready = false;
     const dispatch = vi.fn(async () => ({ ok: true }));
-    const target = new FirstPartyConversationMeshTarget({ isReady: () => ready });
-    target.bind({ dispatch } as never);
+    const target = new FirstPartyConversationMeshTarget({
+      surface: { dispatch } as never,
+      isReady: () => ready,
+    });
     const request = encode({
       v: 1,
       op: "dispatch",
@@ -173,6 +180,27 @@ describe("first-party conversation mesh", () => {
       new AbortController().signal,
     ))).toMatchObject({ ok: true, result: { ok: true } });
     expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("registers only a complete required surface and closes its owner idempotently", () => {
+    const services = new MeshServiceRegistry();
+    expect(() => new FirstPartyConversationMeshSurfaceLifecycle({
+      registry: services,
+      surface: undefined as never,
+      authorizePeer: () => true,
+    })).toThrow("surface is required");
+    expect(services.list()).toEqual([]);
+
+    const lifecycle = new FirstPartyConversationMeshSurfaceLifecycle({
+      registry: services,
+      surface: { dispatch: vi.fn() } as never,
+      authorizePeer: () => true,
+    });
+    expect(services.list()).toEqual([FIRST_PARTY_CONVERSATION_MESH_SERVICE]);
+
+    lifecycle.close();
+    lifecycle.close();
+    expect(services.list()).toEqual([]);
   });
 
   it("keeps one live poll across a real registry disconnect and reconnect without another dispatch", async () => {
@@ -209,17 +237,18 @@ describe("first-party conversation mesh", () => {
         peer: deviceIdentity("device-source"),
       }), targetServices);
     };
-    const target = new FirstPartyConversationMeshTarget();
     let relay: {
       notify(method: string, params: unknown): void;
       tryNotify(method: string, params: unknown): boolean;
     } | undefined;
-    target.bind({
-      dispatch: async (input: { connection: typeof relay }) => {
-        relay = input.connection;
-        return { items: [] };
-      },
-    } as never);
+    const target = new FirstPartyConversationMeshTarget({
+      surface: {
+        dispatch: async (input: { connection: typeof relay }) => {
+          relay = input.connection;
+          return { items: [] };
+        },
+      } as never,
+    });
     const unregister = registerFirstPartyConversationMeshService(targetServices, target, () => true);
     attach(1);
     const registryClient = sourceRegistry.client("device-target");

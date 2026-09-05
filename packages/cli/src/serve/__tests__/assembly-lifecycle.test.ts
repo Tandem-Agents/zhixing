@@ -1,6 +1,7 @@
 import { CleanupRegistry } from "@zhixing/server";
 import { describe, expect, it, vi } from "vitest";
 import {
+  ANCHOR_RUNTIME_LIFECYCLE_DESCRIPTORS,
   ASSEMBLY_LIFECYCLE_DESCRIPTORS,
   AssemblyLifecycleContributions,
 } from "../assembly-lifecycle.js";
@@ -30,6 +31,12 @@ describe("typed pre-server lifecycle contributions", () => {
       { owner: "anchor-host", role: "runtime", id: "losslessDataPlane.close", stage: "runtime" },
       { owner: "anchor-host", role: "runtime", id: "ephemeralRuntime.dispose", stage: "runtime" },
     ]);
+    expect(ANCHOR_RUNTIME_LIFECYCLE_DESCRIPTORS).toContainEqual({
+      owner: "anchor-host",
+      role: "surface",
+      id: "firstPartyConversationMeshSurface.close",
+      stage: "activation",
+    });
   });
 
   it("rejects duplicate contribution and transfer ownership", () => {

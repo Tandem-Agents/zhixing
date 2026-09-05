@@ -302,12 +302,8 @@ describe("InboundRouter", () => {
       conversation: createTestConversationPort(conversations),
       channels: createInboundPort(channels),
       logger,
-      sessionBroadcast: options?.sessionBroadcast
-        ? () => options.sessionBroadcast
-        : undefined,
-      sessionActivityBroadcast: options?.sessionActivityBroadcast
-        ? () => options.sessionActivityBroadcast
-        : undefined,
+      sessionBroadcast: options?.sessionBroadcast ?? vi.fn(),
+      sessionActivityBroadcast: options?.sessionActivityBroadcast ?? vi.fn(),
       isCurrentOwner: options?.isCurrentOwner,
     });
 
@@ -842,6 +838,8 @@ describe("InboundRouter", () => {
         channels: createInboundPort(channels),
         logger,
         confirmationHub: hub,
+        sessionBroadcast: vi.fn(),
+        sessionActivityBroadcast: vi.fn(),
       });
       return { adapter, hub, conversations, router, factory, brokers };
     }
@@ -1294,6 +1292,8 @@ describe("InboundRouter", () => {
         conversation: createTestConversationPort(conversations),
         channels: createInboundPort(channels),
         logger,
+        sessionBroadcast: vi.fn(),
+        sessionActivityBroadcast: vi.fn(),
       });
 
       await router.handleMessage(dmMessage("test-ch", "user-1", "好"));

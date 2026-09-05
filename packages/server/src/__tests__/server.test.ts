@@ -173,6 +173,49 @@ describe("HTTP Server (S2.B)", () => {
     await client.close();
   });
 
+  it("creates one same-generation session broadcast transport before activation", async () => {
+    await server.close();
+    const ctx = createServerContext({
+      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
+      version: TEST_VERSION,
+      token: TEST_TOKEN,
+      conversations: {
+        getObserverConnectionIds: () => new Set<string>(),
+        removeObserverFromAll: () => undefined,
+        disposeAll: async () => undefined,
+      } as never,
+    });
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    let preparedResolve!: (candidate: ZhixingServerInstance) => void;
+    const prepared = new Promise<ZhixingServerInstance>((resolve) => {
+      preparedResolve = resolve;
+    });
+    const started = startServer({
+      context: ctx,
+      activationGate: async (candidate) => {
+        preparedResolve(candidate);
+        await gate;
+      },
+    });
+    const candidate = await prepared;
+    server = candidate;
+
+    expect(candidate.sessionBroadcastTransport).toBeDefined();
+    expect(candidate.sessionBroadcastTransport?.session).toBe(ctx.sessionBroadcast);
+    expect(candidate.sessionBroadcastTransport?.activity)
+      .toBe(ctx.sessionActivityBroadcast);
+    expect((await fetch(`http://127.0.0.1:${candidate.port}/api/health`)).status)
+      .toBe(503);
+
+    releaseGate();
+    server = await started;
+    expect((await fetch(`http://127.0.0.1:${server.port}/api/health`)).status)
+      .toBe(200);
+  });
+
   it("closes the inactive endpoint when the activation gate fails", async () => {
     await server.close();
     const ctx = createServerContext({

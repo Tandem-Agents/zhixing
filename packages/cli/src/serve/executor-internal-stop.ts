@@ -9,7 +9,7 @@ export interface ExecutorInternalStopPort {
   requestStop(request: ExecutorInternalStopRequest): Promise<void>;
 }
 
-export interface ExecutorInternalStopDependencies {
+export interface ExecutorInternalStopGeneration {
   readonly requestId: string;
   readonly timeoutMs: number;
   readonly prepare: (request: {
@@ -22,47 +22,96 @@ export interface ExecutorInternalStopDependencies {
   readonly waitForShutdown: () => Promise<void>;
 }
 
+export interface ExecutorInternalStopGenerationLease {
+  release(): void;
+}
+
+interface InstalledExecutorInternalStopGeneration {
+  readonly generation: Readonly<ExecutorInternalStopGeneration>;
+  claimed?: Readonly<ExecutorInternalStopRequest>;
+  inFlight?: Promise<void>;
+  terminal: boolean;
+}
+
 /**
  * Joins Executor-internal stop sources at one durable HostStop identity and
  * does not report success until the real Server terminal is observable.
  */
-export function createExecutorInternalStopPort(
-  dependencies: ExecutorInternalStopDependencies,
-): ExecutorInternalStopPort {
-  let claimed: Readonly<ExecutorInternalStopRequest> | undefined;
-  let inFlight: Promise<void> | undefined;
-  let terminal = false;
+export class ExecutorInternalStopLifecycle {
+  readonly port: ExecutorInternalStopPort;
+  readonly #notReadyMessage: string;
+  #current: InstalledExecutorInternalStopGeneration | undefined;
+  #closed = false;
 
-  return Object.freeze({
-    requestStop(request: ExecutorInternalStopRequest): Promise<void> {
-      const frozen = claimed ?? Object.freeze({ ...request });
-      claimed = frozen;
-      if (terminal) return Promise.resolve();
-      if (inFlight) return inFlight;
+  constructor(options: { readonly notReadyMessage?: string } = {}) {
+    this.#notReadyMessage = options.notReadyMessage ?? "Executor internal stop is not ready";
+    this.port = Object.freeze({
+      requestStop: (request: ExecutorInternalStopRequest) => this.#requestStop(request),
+    });
+  }
 
-      const attempt = (async () => {
-        await dependencies.prepare({
-          requestId: dependencies.requestId,
-          reason: frozen.reason,
-          strategy: frozen.strategy,
-          timeoutMs: dependencies.timeoutMs,
-        });
-        await dependencies.shutdown(frozen.reason);
-        await dependencies.waitForShutdown();
-        terminal = true;
-      })();
-      inFlight = attempt;
-      void attempt.then(
-        () => {
-          if (inFlight === attempt) inFlight = undefined;
-        },
-        () => {
-          if (inFlight === attempt) inFlight = undefined;
-        },
-      );
-      return attempt;
-    },
-  });
+  install(
+    generation: ExecutorInternalStopGeneration,
+  ): ExecutorInternalStopGenerationLease {
+    if (this.#closed) throw new Error("Executor internal stop lifecycle is closed");
+    if (this.#current) {
+      throw new Error("Executor internal stop generation is already installed");
+    }
+    const installed: InstalledExecutorInternalStopGeneration = {
+      generation: Object.freeze({ ...generation }),
+      terminal: false,
+    };
+    this.#current = installed;
+    let released = false;
+    return Object.freeze({
+      release: () => {
+        if (released) return;
+        released = true;
+        if (this.#current === installed) this.#current = undefined;
+      },
+    });
+  }
+
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#current = undefined;
+  }
+
+  #requestStop(request: ExecutorInternalStopRequest): Promise<void> {
+    const installed = this.#current;
+    if (!installed) {
+      return Promise.reject(new Error(this.#notReadyMessage));
+    }
+
+    const frozen = installed.claimed ?? Object.freeze({ ...request });
+    installed.claimed = frozen;
+    if (installed.terminal) return Promise.resolve();
+    if (installed.inFlight) return installed.inFlight;
+
+    const attempt = (async () => {
+      const generation = installed.generation;
+      await generation.prepare({
+        requestId: generation.requestId,
+        reason: frozen.reason,
+        strategy: frozen.strategy,
+        timeoutMs: generation.timeoutMs,
+      });
+      await generation.shutdown(frozen.reason);
+      await generation.waitForShutdown();
+      installed.terminal = true;
+    })();
+    installed.inFlight = attempt;
+    void attempt.then(
+      () => {
+        if (installed.inFlight === attempt) installed.inFlight = undefined;
+      },
+      () => {
+        if (installed.inFlight === attempt) installed.inFlight = undefined;
+      },
+    );
+    return attempt;
+  }
 }
 
 export interface ExecutorIdleSnapshot {

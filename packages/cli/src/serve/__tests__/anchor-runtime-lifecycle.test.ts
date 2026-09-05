@@ -13,12 +13,15 @@ const RUNTIME_IDENTITIES = ANCHOR_RUNTIME_LIFECYCLE_DESCRIPTORS.map(
 describe("typed Anchor activation-gate lifecycle contributions", () => {
   it("freezes the runtime identity, owner, stage, and registration exact-set", () => {
     expect(ANCHOR_RUNTIME_LIFECYCLE_DESCRIPTORS).toEqual([
+      { owner: "anchor-host", role: "runtime", id: "anchorInternalStop.close", stage: "activation" },
+      { owner: "anchor-host", role: "surface", id: "sessionBroadcast.close", stage: "activation" },
       { owner: "anchor-host", role: "surface", id: "confirmationBridge.dispose", stage: "post-server" },
       { owner: "anchor-host", role: "runtime", id: "execution.abortAllAndWait", stage: "activation" },
       { owner: "anchor-host", role: "runtime", id: "conversationProtocol.stopRecovery", stage: "activation" },
       { owner: "anchor-host", role: "runtime", id: "scheduler.stop", stage: "activation" },
       { owner: "anchor-host", role: "runtime", id: "inboundRouter.refuseNew", stage: "activation" },
       { owner: "anchor-local-executor", role: "runtime", id: "evidenceHandler.stopAccepting", stage: "activation" },
+      { owner: "anchor-host", role: "surface", id: "firstPartyConversationMeshSurface.close", stage: "activation" },
     ]);
   });
 
@@ -38,21 +41,27 @@ describe("typed Anchor activation-gate lifecycle contributions", () => {
 
     lifecycle.transferExactTo(normal, "post-server", ["confirmationBridge.dispose"]);
     lifecycle.transferExactTo(normal, "activation", [
+      "anchorInternalStop.close",
+      "sessionBroadcast.close",
       "execution.abortAllAndWait",
       "conversationProtocol.stopRecovery",
       "scheduler.stop",
       "inboundRouter.refuseNew",
       "evidenceHandler.stopAccepting",
+      "firstPartyConversationMeshSurface.close",
     ]);
     lifecycle.assertTransferred();
     await normal.runAll("normal-close");
 
     expect(order).toEqual([
+      "firstPartyConversationMeshSurface.close",
       "evidenceHandler.stopAccepting",
       "inboundRouter.refuseNew",
       "scheduler.stop",
       "conversationProtocol.stopRecovery",
       "execution.abortAllAndWait",
+      "sessionBroadcast.close",
+      "anchorInternalStop.close",
       "confirmationBridge.dispose",
     ]);
     expect(logger.error).toHaveBeenCalledTimes(1);

@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { createAnchorInternalStopPort } from "./anchor-internal-stop.js";
+import {
+  AnchorInternalStopLifecycle,
+  type AnchorInternalStopGeneration,
+} from "./anchor-internal-stop.js";
 
-describe("createAnchorInternalStopPort", () => {
+describe("AnchorInternalStopLifecycle", () => {
   it.each([
     ["managed-role-changed", "immediate"],
     ["idle", "drain"],
@@ -10,7 +13,7 @@ describe("createAnchorInternalStopPort", () => {
     "durably prepares %s before triggering Server shutdown",
     async (reason, strategy) => {
       const order: string[] = [];
-      const port = createAnchorInternalStopPort({
+      const { port } = installedLifecycle({
         requestId: "anchor-stop:generation",
         timeoutMs: 30_000,
         prepare: vi.fn(async (request) => {
@@ -36,7 +39,7 @@ describe("createAnchorInternalStopPort", () => {
     const prepared = deferred<void>();
     const prepare = vi.fn(() => prepared.promise);
     const requestShutdown = vi.fn();
-    const port = createAnchorInternalStopPort({
+    const { port } = installedLifecycle({
       requestId: "anchor-stop:generation",
       timeoutMs: 30_000,
       prepare,
@@ -69,7 +72,7 @@ describe("createAnchorInternalStopPort", () => {
       .mockRejectedValueOnce(failure)
       .mockResolvedValueOnce(undefined);
     const requestShutdown = vi.fn();
-    const port = createAnchorInternalStopPort({
+    const { port } = installedLifecycle({
       requestId: "anchor-stop:generation",
       timeoutMs: 30_000,
       prepare,
@@ -103,7 +106,7 @@ describe("createAnchorInternalStopPort", () => {
     const requestShutdown = vi.fn()
       .mockRejectedValueOnce(failure)
       .mockResolvedValueOnce(undefined);
-    const port = createAnchorInternalStopPort({
+    const { port } = installedLifecycle({
       requestId: "anchor-stop:generation",
       timeoutMs: 30_000,
       prepare,
@@ -124,7 +127,84 @@ describe("createAnchorInternalStopPort", () => {
     expect(requestShutdown).toHaveBeenCalledTimes(2);
     expect(requestShutdown).toHaveBeenLastCalledWith("device-removed");
   });
+
+  it("publishes one stable port before activation and fails closed for non-terminal requests", async () => {
+    const lifecycle = new AnchorInternalStopLifecycle();
+    const port = lifecycle.port;
+
+    await expect(port.requestStop({ reason: "idle", strategy: "drain" }))
+      .rejects.toThrow("Anchor internal stop is not ready");
+    expect(lifecycle.port).toBe(port);
+
+    lifecycle.install(generation());
+    await expect(port.requestStop({ reason: "idle", strategy: "drain" }))
+      .resolves.toBeUndefined();
+  });
+
+  it("preserves a completed pre-activation device retirement without caching a stop", async () => {
+    const lifecycle = new AnchorInternalStopLifecycle();
+
+    await expect(lifecycle.port.requestStop({
+      reason: "device-removed",
+      strategy: "immediate",
+    })).resolves.toBeUndefined();
+    expect(() => lifecycle.assertServerStartAllowed()).toThrow(
+      "This device has completed local retirement and cannot start normally",
+    );
+    expect(() => lifecycle.install(generation())).toThrow(
+      "This device has completed local retirement and cannot start normally",
+    );
+  });
+
+  it("rejects duplicate generations and stale releases cannot clear a successor", async () => {
+    const lifecycle = new AnchorInternalStopLifecycle();
+    const first = lifecycle.install(generation({ requestId: "anchor-stop:first" }));
+    expect(() => lifecycle.install(generation({ requestId: "anchor-stop:duplicate" })))
+      .toThrow("already installed");
+
+    first.release();
+    const prepare = vi.fn(async () => undefined);
+    lifecycle.install(generation({ requestId: "anchor-stop:successor", prepare }));
+    first.release();
+    await lifecycle.port.requestStop({ reason: "idle", strategy: "drain" });
+
+    expect(prepare).toHaveBeenCalledWith(expect.objectContaining({
+      requestId: "anchor-stop:successor",
+    }));
+  });
+
+  it("closes idempotently and refuses later generations", async () => {
+    const lifecycle = new AnchorInternalStopLifecycle();
+    lifecycle.install(generation());
+    lifecycle.close();
+    lifecycle.close();
+
+    await expect(lifecycle.port.requestStop({ reason: "idle", strategy: "drain" }))
+      .rejects.toThrow("Anchor internal stop is not ready");
+    expect(() => lifecycle.install(generation())).toThrow("lifecycle is closed");
+  });
 });
+
+function installedLifecycle(generationInput: AnchorInternalStopGeneration): {
+  readonly lifecycle: AnchorInternalStopLifecycle;
+  readonly port: AnchorInternalStopLifecycle["port"];
+} {
+  const lifecycle = new AnchorInternalStopLifecycle();
+  lifecycle.install(generationInput);
+  return { lifecycle, port: lifecycle.port };
+}
+
+function generation(
+  overrides: Partial<AnchorInternalStopGeneration> = {},
+): AnchorInternalStopGeneration {
+  return {
+    requestId: "anchor-stop:generation",
+    timeoutMs: 30_000,
+    prepare: async () => undefined,
+    requestShutdown: () => undefined,
+    ...overrides,
+  };
+}
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;

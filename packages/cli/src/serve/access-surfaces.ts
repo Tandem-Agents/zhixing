@@ -516,7 +516,7 @@ const conversationSurface: AccessSurface = {
           call,
         ),
       onRenamed: (conversationId, name) => {
-        ctx.sessionBroadcastRef.current?.(
+        ctx.sessionBroadcast(
           conversationId,
           SESSION_NOTIFICATIONS.changed,
           {
@@ -587,7 +587,7 @@ const conversationSurface: AccessSurface = {
         return execution.runResult;
       },
       onStatus: (notice) => {
-        ctx.sessionBroadcastRef.current?.(
+        ctx.sessionBroadcast(
           notice.ref.conversationId,
           SESSION_NOTIFICATIONS.status,
           notice,
@@ -595,14 +595,14 @@ const conversationSurface: AccessSurface = {
         ctx.executionStatusHub?.publish(notice);
       },
       onFinal: (frame) => {
-        ctx.sessionBroadcastRef.current?.(
+        ctx.sessionBroadcast(
           frame.conversationId,
           SESSION_NOTIFICATIONS.final,
           frame,
         );
       },
       onPublishResult: (notice) => {
-        ctx.sessionBroadcastRef.current?.(
+        ctx.sessionBroadcast(
           notice.conversationId,
           SESSION_NOTIFICATIONS.event,
           createControlSessionEventEnvelope({
@@ -616,7 +616,7 @@ const conversationSurface: AccessSurface = {
       },
       onFirstPartyFrame: (frame) => {
         if (frame.ref.execution !== "conversation") return;
-        ctx.sessionBroadcastRef.current?.(
+        ctx.sessionBroadcast(
           frame.ref.conversationId,
           SESSION_NOTIFICATIONS.assignmentStream,
           frame,
@@ -647,7 +647,7 @@ const conversationSurface: AccessSurface = {
                 manager.clear(conversationId, persist),
             },
             publishFact: (fact) => {
-              ctx.sessionBroadcastRef.current?.(
+              ctx.sessionBroadcast(
                 fact.conversationId,
                 SESSION_NOTIFICATIONS.changed,
                 { conversationId: fact.conversationId, change: "cleared" },
@@ -685,7 +685,7 @@ const conversationSurface: AccessSurface = {
             },
           }),
           publishFact: (fact) => {
-            ctx.sessionBroadcastRef.current?.(
+            ctx.sessionBroadcast(
               fact.conversationId,
               SESSION_NOTIFICATIONS.changed,
               { conversationId: fact.conversationId, change: "deleted" },
@@ -718,7 +718,7 @@ const conversationSurface: AccessSurface = {
               conversationId,
               record.mutation.op.state,
             );
-            ctx.sessionBroadcastRef.current?.(
+            ctx.sessionBroadcast(
               conversationId,
               SESSION_NOTIFICATIONS.changed,
               {
@@ -744,14 +744,12 @@ const conversationSurface: AccessSurface = {
       ctx.conversationIdentityLifecycle.identityExists(conversationId);
     const proxyTurns = createAdvancementProxyTurnPort({
       manager,
-      sessionBroadcast: () => ctx.sessionBroadcastRef.current,
+      sessionBroadcast: ctx.sessionBroadcast,
       conversationExists,
     });
     const reviewResults = ctx.advancement
       ? new AdvancementReviewResultProjectionApplicationService({
-          events: createAdvancementEventSink(
-            () => ctx.sessionBroadcastRef.current,
-          ),
+          events: createAdvancementEventSink(ctx.sessionBroadcast),
           proxySchedule: createAdvancementReviewProxySchedulePort(proxyTurns),
         })
       : undefined;
@@ -766,9 +764,7 @@ const conversationSurface: AccessSurface = {
               manager,
               { conversationExists },
             ),
-            events: createAdvancementEventSink(
-              () => ctx.sessionBroadcastRef.current,
-            ),
+            events: createAdvancementEventSink(ctx.sessionBroadcast),
             reviewResults,
             logger: console,
           })
@@ -1115,9 +1111,8 @@ function createChannelSurface(credentials: ChannelCredentialProjection): AccessS
           conversation: conversationProduct,
           logger: channelLogger,
           cancelKeywords: channelConfiguration.intent?.cancelKeywords,
-          sessionBroadcast: () => ctx.sessionBroadcastRef.current,
-          sessionActivityBroadcast: () =>
-            ctx.sessionActivityBroadcastRef.current,
+          sessionBroadcast: ctx.sessionBroadcast,
+          sessionActivityBroadcast: ctx.sessionActivityBroadcast,
           // callback 可等待:耐久裁决完成才向平台确认;失败上抛让平台重投,
           // 耐久层同键幂等保证重投只回放原结果——绝不 fire-and-forget。
           onChallengeAction: (action) => {

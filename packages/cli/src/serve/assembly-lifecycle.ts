@@ -116,6 +116,18 @@ export const ASSEMBLY_LIFECYCLE_DESCRIPTORS = [
 export const ANCHOR_RUNTIME_LIFECYCLE_DESCRIPTORS = [
   {
     owner: "anchor-host",
+    role: "runtime",
+    id: "anchorInternalStop.close",
+    stage: "activation",
+  },
+  {
+    owner: "anchor-host",
+    role: "surface",
+    id: "sessionBroadcast.close",
+    stage: "activation",
+  },
+  {
+    owner: "anchor-host",
     role: "surface",
     id: "confirmationBridge.dispose",
     stage: "post-server",
@@ -148,6 +160,12 @@ export const ANCHOR_RUNTIME_LIFECYCLE_DESCRIPTORS = [
     owner: "anchor-local-executor",
     role: "runtime",
     id: "evidenceHandler.stopAccepting",
+    stage: "activation",
+  },
+  {
+    owner: "anchor-host",
+    role: "surface",
+    id: "firstPartyConversationMeshSurface.close",
     stage: "activation",
   },
 ] as const satisfies readonly AssemblyLifecycleDescriptor[];

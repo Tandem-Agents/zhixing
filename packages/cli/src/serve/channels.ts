@@ -106,10 +106,10 @@ export interface SetupChannelsOptions {
    * 静态互斥校验生效——配错关键词跟 confirmation 集合冲突会立即 throw。
    */
   cancelKeywords?: readonly string[];
-  /** 会话 observer 组播 getter；server 启动后才会返回真实函数。 */
-  sessionBroadcast?: () => SessionBroadcast | null;
-  /** 非当前会话活动提示 getter；server 启动后才会返回真实函数。 */
-  sessionActivityBroadcast?: () => SessionActivityBroadcast | null;
+  /** 会话 observer 组播；inbound conversation 模式必须由 Host 静态提供。 */
+  sessionBroadcast?: SessionBroadcast;
+  /** 与会话组播同代的非当前会话活动提示。 */
+  sessionActivityBroadcast?: SessionActivityBroadcast;
   onChallengeAction?: (action: ChannelChallengeAction) => Promise<void>;
   registerHttpRoute?: (path: string, handler: HttpHandler) => void;
   /** Final callback guard; defaults to current-owner for non-mesh callers. */
@@ -233,6 +233,11 @@ export async function setupChannels(
   } satisfies ChannelChallengeDeliveryPort);
 
   if (conversation) {
+    if (!sessionBroadcast || !sessionActivityBroadcast) {
+      throw new TypeError(
+        "Inbound channel routing requires the Host session broadcast ports",
+      );
+    }
     // 显式构造 IntentClassifier 注入——把 default 关键词与用户配置 append 合并，
     // 启动期 disjoint 校验生效（与 confirmation 词集冲突 fail-fast）。
     const mergedCancelKeywords =

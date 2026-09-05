@@ -3904,7 +3904,7 @@ export async function validateS7Structure() {
   const records = await Promise.all(files.map(async (absolute) => ({
     absolute,
     relative: path.relative(root, absolute).replaceAll("\\", "/"),
-    text: await readFile(absolute, "utf8"),
+    text: (await readFile(absolute, "utf8")).replaceAll("\r\n", "\n"),
   })));
   const resolveOwnerExposure = await buildWorkspaceOwnerExposure(records);
   const resolveRpcExposure = await buildWorkspaceSymbolExposure(
@@ -9171,6 +9171,10 @@ export function inspectManagedHostAssembly(records) {
   const accessSurface = byPath.get("packages/cli/src/serve/access-surface.ts");
   const accessSurfaces = byPath.get("packages/cli/src/serve/access-surfaces.ts");
   const assemblyLifecycle = byPath.get("packages/cli/src/serve/assembly-lifecycle.ts");
+  const anchorSessionBroadcast = byPath.get(
+    "packages/cli/src/serve/anchor-session-broadcast-lifecycle.ts",
+  );
+  const channelSetup = byPath.get("packages/cli/src/serve/channels.ts");
   const executorRoleLifecycle = byPath.get("packages/cli/src/serve/executor-role-lifecycle.ts");
   const executorServerLifecycle = byPath.get("packages/cli/src/serve/executor-server-lifecycle.ts");
   const anchorHostShell = byPath.get(
@@ -9195,14 +9199,20 @@ export function inspectManagedHostAssembly(records) {
   const serverShutdown = byPath.get("packages/server/src/rpc/methods/server.ts");
   const serverLifecycle = byPath.get("packages/server/src/lifecycle.ts");
   const server = byPath.get("packages/server/src/server.ts");
+  const inboundRouter = byPath.get("packages/server/src/channels/inbound-router.ts");
+  const advancementAdapters = byPath.get("packages/server/src/advancement/adapters.ts");
   const serverIndex = byPath.get("packages/server/src/index.ts");
+  const sessionBroadcastTransport = byPath.get("packages/rpc/src/session-broadcast.ts");
+  const rpcIndex = byPath.get("packages/rpc/src/index.ts");
   if (
     !reconciler || !service || !serviceRuntime || !bootstrap || !pairing || !config ||
     !command || !accessSurface || !accessSurfaces || !assemblyLifecycle ||
+    !anchorSessionBroadcast || !channelSetup ||
     !executorRoleLifecycle || !executorServerLifecycle || !anchorHostShell ||
     !anchorInternalStop || !executorRoot || !executorInternalStop || !topology || !applicationHost || !roleTopology || !connection || !repl || !surfaceLink || !secrets || !status ||
     !publicStatus || !statusRoute || !scheduler || !manifest || !serverContext || !serverShutdown ||
-    !serverLifecycle || !server || !serverIndex
+    !serverLifecycle || !server || !inboundRouter || !advancementAdapters ||
+    !serverIndex || !sessionBroadcastTransport || !rpcIndex
   ) return ["managed host production assembly sources are missing"];
   const count = (text, token) => text.split(token).length - 1;
   const assemblyLifecycleIds = [
@@ -9221,12 +9231,15 @@ export function inspectManagedHostAssembly(records) {
     "ephemeralRuntime.dispose",
   ];
   const anchorRuntimeLifecycleIds = [
+    "anchorInternalStop.close",
+    "sessionBroadcast.close",
     "confirmationBridge.dispose",
     "execution.abortAllAndWait",
     "conversationProtocol.stopRecovery",
     "scheduler.stop",
     "inboundRouter.refuseNew",
     "evidenceHandler.stopAccepting",
+    "firstPartyConversationMeshSurface.close",
   ];
   const allAnchorLifecycleIds = [
     ...assemblyLifecycleIds,
@@ -9307,6 +9320,27 @@ export function inspectManagedHostAssembly(records) {
     "protocol.startRecoveryLoop();",
     recoveryContribution,
   );
+  const broadcastOwner = command.indexOf(
+    "const sessionBroadcastLifecycle = new AnchorSessionBroadcastLifecycle()",
+  );
+  const broadcastRunEventConsumer = command.indexOf(
+    "const runEventForwarder = createRunEventForwarder(",
+  );
+  const broadcastCleanup = command.indexOf(
+    'lifecycleContributions.acquire(\n        "sessionBroadcast.close",',
+  );
+  const broadcastTransportRead = command.indexOf(
+    "openingRunner.server.sessionBroadcastTransport",
+    broadcastCleanup,
+  );
+  const broadcastInstall = command.indexOf(
+    "sessionBroadcastLifecycle.install(sessionTransport)",
+    broadcastTransportRead,
+  );
+  const broadcastDeliveryActivation = command.indexOf(
+    "ctx.deliveryStack?.activate()",
+    broadcastInstall,
+  );
   if (
     lifecycleDescriptors.length !== allAnchorLifecycleIds.length ||
     lifecycleDescriptors.map(({ id }) => id).join("\n") !== allAnchorLifecycleIds.join("\n") ||
@@ -9345,6 +9379,44 @@ export function inspectManagedHostAssembly(records) {
       accessSurfaces.includes(`id: "${identity}"`)
     )
   ) failures.push("Anchor activation-gate runtime lifecycle contribution ownership drifted");
+  if (
+    broadcastOwner < 0 || broadcastRunEventConsumer <= broadcastOwner ||
+    broadcastCleanup <= broadcastRunEventConsumer ||
+    broadcastTransportRead <= broadcastCleanup || broadcastInstall <= broadcastTransportRead ||
+    broadcastDeliveryActivation <= broadcastInstall || activationTransfer <= broadcastInstall ||
+    !command.includes("const sessionBroadcast = sessionBroadcastLifecycle.port.session") ||
+    !command.includes("const sessionActivityBroadcast = sessionBroadcastLifecycle.port.activity") ||
+    !accessSurface.includes("readonly sessionBroadcast: SessionBroadcast;") ||
+    !accessSurface.includes("readonly sessionActivityBroadcast: SessionActivityBroadcast;") ||
+    [command, accessSurface, accessSurfaces].some((source) =>
+      source.includes("sessionBroadcastRef") ||
+      source.includes("sessionActivityBroadcastRef")
+    ) ||
+    accessSurfaces.includes("() => ctx.sessionBroadcast") ||
+    channelSetup.includes("() => SessionBroadcast") ||
+    channelSetup.includes("() => SessionActivityBroadcast") ||
+    !channelSetup.includes("Inbound channel routing requires the Host session broadcast ports") ||
+    inboundRouter.includes("() => SessionBroadcast") ||
+    inboundRouter.includes("() => SessionActivityBroadcast") ||
+    !inboundRouter.includes("sessionBroadcast: SessionBroadcast;") ||
+    !inboundRouter.includes("sessionActivityBroadcast: SessionActivityBroadcast;") ||
+    advancementAdapters.includes("() => SessionBroadcast") ||
+    !anchorSessionBroadcast.includes("assertSessionBroadcastTransport(transport)") ||
+    !anchorSessionBroadcast.includes("if (this.#current)") ||
+    !anchorSessionBroadcast.includes("if (this.#current === transport) this.#current = undefined") ||
+    !anchorSessionBroadcast.includes("this.#current = undefined") ||
+    count(server, "createSessionBroadcastTransport({") !== 1 ||
+    !server.includes("readonly sessionBroadcastTransport?: SessionBroadcastTransport;") ||
+    !server.includes("ctx.sessionBroadcast = sessionBroadcastTransport.session") ||
+    !server.includes("ctx.sessionActivityBroadcast = sessionBroadcastTransport.activity") ||
+    count(sessionBroadcastTransport, "SESSION_BROADCAST_TRANSPORTS.add(transport)") !== 1 ||
+    !sessionBroadcastTransport.includes("SESSION_BROADCAST_TRANSPORTS.has(value)") ||
+    !sessionBroadcastTransport.includes("session: createObserverBroadcast(deps)") ||
+    !sessionBroadcastTransport.includes("activity: createActivityBroadcast(deps)") ||
+    rpcIndex.includes("SessionBroadcastTransport") ||
+    rpcIndex.includes("createSessionBroadcastTransport") ||
+    rpcIndex.includes("assertSessionBroadcastTransport")
+  ) failures.push("Anchor session broadcast static activation ownership drifted");
   const executorRoleLifecycleIds = [
     "localConversationOwner.close",
     "evidenceHandler.stopAccepting",
@@ -9425,6 +9497,7 @@ export function inspectManagedHostAssembly(records) {
     ].some((token) => executorCleanupTail.includes(token))
   ) failures.push("Executor non-Server lifecycle contribution ownership drifted");
   const executorServerLifecycleIds = [
+    "internalStop.close",
     "inactiveBinding.close",
     "runningServer.shutdown",
     "serverState.lifecycle",
@@ -9460,7 +9533,8 @@ export function inspectManagedHostAssembly(records) {
     executorServerLifecyclePositions.some((position) => position < 0) ||
     executorServerLifecyclePositions.some((position, index) =>
       index > 0 && position <= executorServerLifecyclePositions[index - 1]) ||
-    count(executorRoot, "new ExecutorServerLifecycle()") !== 1 ||
+    count(executorRoot, "new ExecutorServerLifecycle(") !== 1 ||
+    !executorRoot.includes("executorInternalStopLifecycle,") ||
     executorBinding < 0 ||
     executorBindingOwner <= executorBinding ||
     executorBindingOwner >= executorFirstAwaitAfterBinding ||
@@ -9628,62 +9702,87 @@ export function inspectManagedHostAssembly(records) {
     closeOldClient < 0 || disableFuture < closeOldClient || oldTurnover < disableFuture || successor < oldTurnover
   ) failures.push("managed host accepted-work drain or generation-safe turnover order drifted");
   const anchorInternalStopOwner = command.indexOf(
-    "anchorInternalStop.current = createAnchorInternalStopPort({",
+    "const anchorInternalStopLifecycle = new AnchorInternalStopLifecycle();",
+  );
+  const anchorInternalStopInstall = command.indexOf(
+    "anchorInternalStopLifecycle.install({",
+    anchorInternalStopOwner,
   );
   const anchorRoleTerminal = command.indexOf(
     "await runner.waitForShutdown()",
-    anchorInternalStopOwner,
+    anchorInternalStopInstall,
   );
   if (
-    count(command, "createAnchorInternalStopPort({") !== 1 ||
-    count(command, "requestAnchorInternalStop({") !== 3 ||
+    count(command, "new AnchorInternalStopLifecycle()") !== 1 ||
+    count(command, "anchorInternalStopLifecycle.install({") !== 1 ||
+    count(command, "anchorInternalStop.requestStop({") !== 4 ||
     count(command, "serverCtx.requestShutdown") !== 1 ||
-    !command.includes("return stop.requestStop(request);") ||
     !command.includes('reason: "managed-role-changed"') ||
     !command.includes('reason: "device-removed"') ||
-    !command.includes('requestAnchorInternalStop({ reason: "idle", strategy: "drain" })') ||
+    !command.includes('anchorInternalStop.requestStop({ reason: "idle", strategy: "drain" })') ||
     !command.includes('chalk.red("[idle] durable Host stop failed; the same operation will retry")') ||
+    !command.includes("anchorInternalStopLifecycle.assertServerStartAllowed()") ||
+    !command.includes('"anchorInternalStop.close"') ||
     !command.includes("prepare: (request) => stopCoordinator.prepare(request)") ||
     !command.includes("const shutdown = serverCtx.requestShutdown;") ||
+    command.includes("anchorInternalStop.current") ||
+    command.includes("requestAnchorInternalStop") ||
+    command.includes("requestRemovedDeviceStop") ||
     command.includes('serverCtx.requestShutdown?.("managed-role-changed")') ||
     command.includes('serverCtx.requestShutdown?.("device-removed")') ||
     command.includes('serverCtx.requestShutdown?.("idle")') ||
     anchorInternalStopOwner < 0 ||
-    anchorRoleTerminal < anchorInternalStopOwner ||
-    !anchorInternalStop.includes("const frozen = claimed ?? Object.freeze({ ...request });") ||
-    !anchorInternalStop.includes("claimed = frozen;") ||
-    !anchorInternalStop.includes("if (inFlight) return inFlight;") ||
-    !anchorInternalStop.includes("await dependencies.prepare({") ||
-    !anchorInternalStop.includes("await dependencies.requestShutdown(frozen.reason);") ||
-    !anchorInternalStop.includes("shutdownTriggered = true;")
+    anchorInternalStopInstall < anchorInternalStopOwner ||
+    anchorRoleTerminal < anchorInternalStopInstall ||
+    !anchorInternalStop.includes("export class AnchorInternalStopLifecycle") ||
+    !anchorInternalStop.includes("if (this.#current === installed) this.#current = undefined;") ||
+    !anchorInternalStop.includes("const frozen = installed.claimed ?? Object.freeze({ ...request });") ||
+    !anchorInternalStop.includes("if (installed.inFlight) return installed.inFlight;") ||
+    !anchorInternalStop.includes("await generation.prepare({") ||
+    !anchorInternalStop.includes("await generation.requestShutdown(frozen.reason);") ||
+    !anchorInternalStop.includes("installed.shutdownTriggered = true;") ||
+    !anchorInternalStop.includes('request.reason === "device-removed"') ||
+    !anchorInternalStop.includes("this.#retiredBeforeActivation = true;")
   ) failures.push("managed host internal stop durable owner drifted");
   const executorInternalStopOwner = executorRoot.indexOf(
-    "executorInternalStop.current = createExecutorInternalStopPort({",
+    "const executorInternalStopLifecycle = new ExecutorInternalStopLifecycle({",
+  );
+  const executorInternalStopInstall = executorRoot.indexOf(
+    "executorInternalStopLifecycle.install({",
+    executorInternalStopOwner,
   );
   const executorRoleTerminal = executorRoot.indexOf(
     "await waitForExecutorRoleTerminal({",
-    executorInternalStopOwner,
+    executorInternalStopInstall,
   );
   if (
-    count(executorRoot, "createExecutorInternalStopPort({") !== 1 ||
-    count(executorRoot, "requestExecutorInternalStop({") !== 2 ||
+    count(executorRoot, "new ExecutorInternalStopLifecycle({") !== 1 ||
+    count(executorRoot, "executorInternalStopLifecycle.install({") !== 1 ||
+    count(executorRoot, "executorInternalStop.requestStop({") !== 2 ||
     !executorRoot.includes('reason: "managed-role-changed"') ||
-    !executorRoot.includes('requestExecutorInternalStop({ reason: "idle", strategy: "drain" })') ||
+    !executorRoot.includes('executorInternalStop.requestStop({ reason: "idle", strategy: "drain" })') ||
     !executorRoot.includes('processMode === "on-demand"') ||
     !executorRoot.includes("localConversationServer.server.connections.size") ||
     !executorRoot.includes("mesh!.connections.has(anchorDeviceId)") ||
     !executorRoot.includes("localConversationOwner!.hasIdleBlockingWork()") ||
     !executorRoot.includes("jobOwnerAssembly!.acceptedWorkItems()") ||
+    executorRoot.includes("executorInternalStop.current") ||
+    executorRoot.includes("requestExecutorInternalStop") ||
+    !executorServerLifecycle.includes('{ owner: "executor-server", id: "internalStop.close" }') ||
+    !executorServerLifecycle.includes("private readonly internalStopLifecycle") ||
+    !executorServerLifecycle.includes("this.internalStopLifecycle.close()") ||
     !executorServerLifecycle.includes("await this.#idleCheck?.catch(() => undefined)") ||
     executorInternalStopOwner < 0 ||
-    executorRoleTerminal < executorInternalStopOwner ||
-    !executorInternalStop.includes("const frozen = claimed ?? Object.freeze({ ...request });") ||
-    !executorInternalStop.includes("claimed = frozen;") ||
-    !executorInternalStop.includes("if (inFlight) return inFlight;") ||
-    !executorInternalStop.includes("await dependencies.prepare({") ||
-    !executorInternalStop.includes("await dependencies.shutdown(frozen.reason);") ||
-    !executorInternalStop.includes("await dependencies.waitForShutdown();") ||
-    !executorInternalStop.includes("terminal = true;")
+    executorInternalStopInstall < executorInternalStopOwner ||
+    executorRoleTerminal < executorInternalStopInstall ||
+    !executorInternalStop.includes("export class ExecutorInternalStopLifecycle") ||
+    !executorInternalStop.includes("if (this.#current === installed) this.#current = undefined;") ||
+    !executorInternalStop.includes("const frozen = installed.claimed ?? Object.freeze({ ...request });") ||
+    !executorInternalStop.includes("if (installed.inFlight) return installed.inFlight;") ||
+    !executorInternalStop.includes("await generation.prepare({") ||
+    !executorInternalStop.includes("await generation.shutdown(frozen.reason);") ||
+    !executorInternalStop.includes("await generation.waitForShutdown();") ||
+    !executorInternalStop.includes("installed.terminal = true;")
   ) failures.push("Executor trust/idle durable stop owner drifted");
   const anchorRunServer = command.indexOf("runner = await runServer({");
   const anchorOpenGate = command.indexOf("beforeActivate: async (openingRunner) =>", anchorRunServer);
@@ -9718,16 +9817,19 @@ export function inspectManagedHostAssembly(records) {
     executorRunServer,
   );
   const executorTrustBinding = executorRoot.indexOf(
-    "coordinateRuntimeTrustTransition = async () =>",
-    executorOpenGate,
+    "const coordinateRuntimeTrustTransition = async () =>",
   );
   const executorEndpointTransfer = executorRoot.indexOf(
     "executorServerLifecycle.transferToRunningServer(openingRunner)",
     executorOpenGate,
   );
+  const executorStopInstall = executorRoot.indexOf(
+    "executorInternalStopLifecycle.install({",
+    executorEndpointTransfer,
+  );
   const executorFinalAdmission = executorRoot.indexOf(
     "await onTrustApplied();",
-    executorTrustBinding,
+    executorStopInstall,
   );
   const executorReadyPublication = executorRoot.indexOf(
     "publishReady: async (openingRunner) =>",
@@ -9882,9 +9984,13 @@ export function inspectManagedHostAssembly(records) {
     count(executorRoot, "publishReady: async (openingRunner) =>") !== 1 ||
     executorRunServer < 0 ||
     executorOpenGate < executorRunServer ||
-    [executorEndpointTransfer, executorInternalStopOwner, executorTrustBinding, executorFinalAdmission]
+    [executorEndpointTransfer, executorStopInstall, executorFinalAdmission]
       .some((position) => position < executorOpenGate || position >= executorReadyPublication) ||
-    executorEndpointTransfer >= executorInternalStopOwner ||
+    executorInternalStopOwner < 0 ||
+    executorTrustBinding < executorInternalStopOwner ||
+    executorTrustBinding >= executorRunServer ||
+    executorEndpointTransfer >= executorStopInstall ||
+    executorStopInstall >= executorFinalAdmission ||
     executorReadyMarker < executorReadyPublication ||
     !executorRoot.includes("shutdown: (reason) => openingRunner.shutdown(reason)") ||
     !executorRoot.includes("waitForShutdown: () => openingRunner.waitForShutdown()")
@@ -11465,7 +11571,7 @@ export function inspectPlannedAnchorTransferAssembly(records) {
     assembly.includes("#plannedAnchorLifecycle") ||
     assembly.includes("#plannedAnchorPostInstallConsumers") ||
     count(assembly, "await finishPlannedAnchorPostInstall({") !== 1 ||
-    count(firstParty, "this.input.isReady?.() === false") !== 1
+    count(firstParty, "this.#isReady?.() === false") !== 1
   ) {
     failures.push("planned anchor pre-bootstrap/post-install completion closure drifted");
   }
@@ -14013,11 +14119,55 @@ export function inspectConversationAdoptionAssembly(records) {
   ) {
     failures.push(`${stagingInfrastructure.relative}: conversation transfer staging physical factory or finite frozen projection drifted`);
   }
+  const firstPartySurface = required.get(
+    "packages/cli/src/serve/first-party-conversation-mesh.ts",
+  );
+  const surfaceComposition = required.get("packages/cli/src/serve/command.ts");
+  const surfaceContext = surfaceComposition.text.indexOf("serverCtx = createServerContext({");
+  const surfaceOwner = surfaceComposition.text.indexOf(
+    "ctx.meshRuntime.createFirstPartyConversationSurfaceLifecycle({",
+    surfaceContext,
+  );
+  const surfaceCleanup = surfaceComposition.text.indexOf(
+    'lifecycleContributions.acquire(\n      "firstPartyConversationMeshSurface.close",',
+    surfaceOwner,
+  );
+  const surfaceServer = surfaceComposition.text.indexOf("runner = await runServer({", surfaceCleanup);
+  const targetOwners = records.filter(({ text }) =>
+    /new\s+FirstPartyConversationMeshTarget\s*\(/u.test(text)
+  );
+  const lifecycleOwners = records.filter(({ text }) =>
+    /new\s+FirstPartyConversationMeshSurfaceLifecycle\s*\(/u.test(text)
+  );
+  const serviceOwners = records.filter(({ text }) =>
+    /registerFirstPartyConversationMeshService\s*\(/u.test(text)
+  );
   if (
-    !/this\.#firstPartyConversationTarget\s*=\s*roles\.has\("anchor"\)[\s\S]*?new\s+FirstPartyConversationMeshTarget\s*\(\s*\{[\s\S]*?isReady:\s*\(\)\s*=>\s*this\.plannedCurrentOwnerReady\(\)/u.test(mesh.text) ||
-    !/registerFirstPartyConversationMeshService\s*\([\s\S]*?this\.#firstPartyConversationTarget/u.test(mesh.text)
+    count(
+      firstPartySurface.text,
+      /readonly\s+surface:\s*CanonicalFirstPartyConversationSurface;/gu,
+    ) !== 2 ||
+    !/constructor\(input:\s*\{[\s\S]*?readonly\s+surface:\s*CanonicalFirstPartyConversationSurface;/u.test(
+      firstPartySurface.text,
+    ) ||
+    !/this\.#target\s*=\s*new\s+FirstPartyConversationMeshTarget\s*\(\s*\{[\s\S]*?surface:\s*input\.surface[\s\S]*?this\.#unregister\s*=\s*registerFirstPartyConversationMeshService/u.test(
+      firstPartySurface.text,
+    ) ||
+    /readonly\s+surface\?\s*:|#surface:\s*CanonicalFirstPartyConversationSurface\s*\|\s*undefined|\bbind\s*\(\s*surface:\s*CanonicalFirstPartyConversationSurface/u.test(
+      firstPartySurface.text,
+    ) ||
+    /#firstPartyConversationTarget|bindFirstPartyConversationSurface/u.test(mesh.text) ||
+    targetOwners.length !== 1 ||
+    targetOwners[0]?.relative !== "packages/cli/src/serve/first-party-conversation-mesh.ts" ||
+    lifecycleOwners.length !== 1 ||
+    lifecycleOwners[0]?.relative !== "packages/cli/src/serve/mesh-runtime-assembly.ts" ||
+    serviceOwners.length !== 1 ||
+    serviceOwners[0]?.relative !== "packages/cli/src/serve/first-party-conversation-mesh.ts" ||
+    surfaceContext < 0 || surfaceOwner <= surfaceContext || surfaceCleanup <= surfaceOwner ||
+    surfaceServer <= surfaceCleanup ||
+    /bindFirstPartyConversationSurface/u.test(surfaceComposition.text)
   ) {
-    failures.push(`${mesh.relative}: anchor must own the single finite first-party conversation relay target`);
+    failures.push("first-party conversation surface must be required by one registered lifecycle owner before Server activation");
   }
   const startBoundary = mesh.text.search(/  async start\([^)]*\): Promise<void> \{/u);
   const stopBoundary = mesh.text.indexOf("  async stop(): Promise<void> {");

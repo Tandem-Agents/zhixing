@@ -19,8 +19,8 @@ import { WebSocketServer, type WebSocket } from "ws";
 import type { ScheduleRuntimeApplication } from "@zhixing/core/scheduler/application";
 import { createEventBridge, type DisposeBridge } from "@zhixing/rpc/event-bridge";
 import {
-  createActivityBroadcast,
-  createObserverBroadcast,
+  createSessionBroadcastTransport,
+  type SessionBroadcastTransport,
 } from "@zhixing/rpc/session-broadcast";
 import { dispatchRest } from "./routes.js";
 import type { ServerContext } from "./context.js";
@@ -50,6 +50,8 @@ export interface ZhixingServerInstance {
   readonly registry: HandlerRegistry;
   /** 当前活跃的 RPC 连接列表（用于推送事件、强制断开） */
   readonly connections: ReadonlySet<RpcConnection>;
+  /** 同一 prepared Server generation 拥有的会话组播传输。 */
+  readonly sessionBroadcastTransport?: SessionBroadcastTransport;
 }
 
 export interface StartServerOptions {
@@ -322,13 +324,15 @@ async function startServerWithOwner(
 
   // 回填会话域组播——delta / complete / session.event / session.changed 经
   // observer 名册推送给会话的全部在场接入面(多端同看一个流式 turn 由此成立)。
-  if (ctx.conversations) {
-    const manager = ctx.conversations;
-    ctx.sessionBroadcast = createObserverBroadcast({ connections, manager });
-    ctx.sessionActivityBroadcast = createActivityBroadcast({
-      connections,
-      manager,
-    });
+  const sessionBroadcastTransport = ctx.conversations
+    ? createSessionBroadcastTransport({
+        connections,
+        manager: ctx.conversations,
+      })
+    : undefined;
+  if (sessionBroadcastTransport) {
+    ctx.sessionBroadcast = sessionBroadcastTransport.session;
+    ctx.sessionActivityBroadcast = sessionBroadcastTransport.activity;
   }
 
   // 回填全连接广播(全局域变更通知,如 skill.changed)与连接计数(server.info)。
@@ -372,6 +376,7 @@ async function startServerWithOwner(
     context: ctx,
     registry,
     connections,
+    ...(sessionBroadcastTransport ? { sessionBroadcastTransport } : {}),
     async close() {
       await boundServer.close();
     },

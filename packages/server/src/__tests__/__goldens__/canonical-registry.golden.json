@@ -1099,6 +1099,7 @@
           "cleanup:anchor-host:common:channels.dispose",
           "cleanup:anchor-host:common:deliveryStack.stop",
           "cleanup:anchor-host:common:mcpRuntime.close",
+          "cleanup:anchor-host:runtime:anchorInternalStop.close",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
           "cleanup:anchor-host:runtime:ephemeralRuntime.dispose",
@@ -1110,6 +1111,8 @@
           "cleanup:anchor-host:runtime:scheduler.stop",
           "cleanup:anchor-host:server:hostShell.stop",
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
+          "cleanup:anchor-host:surface:firstPartyConversationMeshSurface.close",
+          "cleanup:anchor-host:surface:sessionBroadcast.close",
           "cleanup:anchor-local-executor:common:localWorkspaceHost.close",
           "cleanup:anchor-local-executor:runtime:evidenceHandler.stopAccepting",
           "cleanup:anchor-local-executor:runtime:executorDataPlane.close",
@@ -1279,6 +1282,7 @@
           "cleanup:anchor-host:common:channels.dispose",
           "cleanup:anchor-host:common:deliveryStack.stop",
           "cleanup:anchor-host:common:mcpRuntime.close",
+          "cleanup:anchor-host:runtime:anchorInternalStop.close",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
           "cleanup:anchor-host:runtime:ephemeralRuntime.dispose",
@@ -1290,6 +1294,8 @@
           "cleanup:anchor-host:runtime:scheduler.stop",
           "cleanup:anchor-host:server:hostShell.stop",
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
+          "cleanup:anchor-host:surface:firstPartyConversationMeshSurface.close",
+          "cleanup:anchor-host:surface:sessionBroadcast.close",
           "cleanup:anchor-local-executor:common:localWorkspaceHost.close",
           "cleanup:anchor-local-executor:runtime:evidenceHandler.stopAccepting",
           "cleanup:anchor-local-executor:runtime:executorDataPlane.close",
@@ -1456,6 +1462,7 @@
           "cleanup:anchor-host:common:channels.dispose",
           "cleanup:anchor-host:common:deliveryStack.stop",
           "cleanup:anchor-host:common:mcpRuntime.close",
+          "cleanup:anchor-host:runtime:anchorInternalStop.close",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
           "cleanup:anchor-host:runtime:ephemeralRuntime.dispose",
@@ -1467,6 +1474,8 @@
           "cleanup:anchor-host:runtime:scheduler.stop",
           "cleanup:anchor-host:server:hostShell.stop",
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
+          "cleanup:anchor-host:surface:firstPartyConversationMeshSurface.close",
+          "cleanup:anchor-host:surface:sessionBroadcast.close",
           "cli:zhixing",
           "cli:zhixing app",
           "cli:zhixing app remove",
@@ -1610,6 +1619,7 @@
           "cleanup:anchor-host:common:channels.dispose",
           "cleanup:anchor-host:common:deliveryStack.stop",
           "cleanup:anchor-host:common:mcpRuntime.close",
+          "cleanup:anchor-host:runtime:anchorInternalStop.close",
           "cleanup:anchor-host:runtime:assetMaintenance.stop",
           "cleanup:anchor-host:runtime:conversationProtocol.stopRecovery",
           "cleanup:anchor-host:runtime:ephemeralRuntime.dispose",
@@ -1621,6 +1631,8 @@
           "cleanup:anchor-host:runtime:scheduler.stop",
           "cleanup:anchor-host:server:hostShell.stop",
           "cleanup:anchor-host:surface:confirmationBridge.dispose",
+          "cleanup:anchor-host:surface:firstPartyConversationMeshSurface.close",
+          "cleanup:anchor-host:surface:sessionBroadcast.close",
           "cli:zhixing",
           "cli:zhixing app",
           "cli:zhixing app remove",
@@ -2147,6 +2159,17 @@
       {
         "owner": "anchor-host",
         "role": "runtime",
+        "id": "anchorInternalStop.close",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
+        "key": "cleanup:anchor-host:runtime:anchorInternalStop.close",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "owner": "anchor-host",
+        "role": "runtime",
         "id": "assetMaintenance.stop",
         "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-host:runtime:assetMaintenance.stop",
@@ -2260,6 +2283,28 @@
         "id": "confirmationBridge.dispose",
         "source": "packages/cli/src/serve/assembly-lifecycle.ts",
         "key": "cleanup:anchor-host:surface:confirmationBridge.dispose",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "owner": "anchor-host",
+        "role": "surface",
+        "id": "firstPartyConversationMeshSurface.close",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
+        "key": "cleanup:anchor-host:surface:firstPartyConversationMeshSurface.close",
+        "category": "cleanup",
+        "target": {
+          "rowId": "shutdown"
+        }
+      },
+      {
+        "owner": "anchor-host",
+        "role": "surface",
+        "id": "sessionBroadcast.close",
+        "source": "packages/cli/src/serve/assembly-lifecycle.ts",
+        "key": "cleanup:anchor-host:surface:sessionBroadcast.close",
         "category": "cleanup",
         "target": {
           "rowId": "shutdown"

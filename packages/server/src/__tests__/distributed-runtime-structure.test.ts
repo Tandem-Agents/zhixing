@@ -57,11 +57,15 @@ describe("distributed runtime structural gates", () => {
     ]);
     expect(dependencyGraph.production["@zhixing/runtime-host"]).toEqual([
       "@zhixing/core",
-      "@zhixing/mcp",
       "@zhixing/orchestrator",
       "@zhixing/owner-kernel",
-      "@zhixing/tools-builtin",
     ]);
+    expect(dependencyGraph.production["@zhixing/runtime-host"]).not.toContain(
+      "@zhixing/mcp",
+    );
+    expect(dependencyGraph.production["@zhixing/runtime-host"]).not.toContain(
+      "@zhixing/tools-builtin",
+    );
     expect(dependencyGraph.production["@zhixing/executor"]).toEqual([
       "@zhixing/core",
       "@zhixing/owner-kernel",

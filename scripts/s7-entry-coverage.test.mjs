@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile as readFileRaw } from "node:fs/promises";
 import test from "node:test";
+
+async function readFile(file, encoding) {
+  const value = await readFileRaw(file, encoding);
+  return typeof value === "string" ? value.replaceAll("\r\n", "\n") : value;
+}
 import { captureCliCommandDescriptor } from "../packages/cli/src/index.ts";
 import {
   buildWorkspaceOwnerExposure,
@@ -1817,6 +1822,30 @@ test("conversation adoption stays bound to the two production roots and ordered 
   );
   assert.match(
     inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/first-party-conversation-mesh.ts",
+      (text) => text.replace(
+        "readonly surface: CanonicalFirstPartyConversationSurface;",
+        "readonly surface?: CanonicalFirstPartyConversationSurface;",
+      ),
+    )).join("\n"),
+    /surface must be required by one registered lifecycle owner/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => `${text}\nvoid ctx.meshRuntime?.bindFirstPartyConversationSurface;`,
+    )).join("\n"),
+    /surface must be required by one registered lifecycle owner/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => `${text}\nvoid new FirstPartyConversationMeshTarget({ surface: duplicate });`,
+    )).join("\n"),
+    /surface must be required by one registered lifecycle owner/,
+  );
+  assert.match(
+    inspectConversationAdoptionAssembly(mutate(
       "packages/cli/src/serve/local-conversation-rpc.ts",
       (text) => text.replaceAll(
         "this.input.owner.currentAuthority(conversationId)",
@@ -3275,6 +3304,8 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     "packages/cli/src/serve/access-surface.ts",
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/assembly-lifecycle.ts",
+    "packages/cli/src/serve/anchor-session-broadcast-lifecycle.ts",
+    "packages/cli/src/serve/channels.ts",
     "packages/cli/src/serve/executor-role-lifecycle.ts",
     "packages/cli/src/serve/executor-server-lifecycle.ts",
     "packages/cli/src/serve/anchor-host-shell-lifecycle.ts",
@@ -3297,7 +3328,11 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     "packages/server/src/rpc/methods/server.ts",
     "packages/server/src/lifecycle.ts",
     "packages/server/src/server.ts",
+    "packages/server/src/channels/inbound-router.ts",
+    "packages/server/src/advancement/adapters.ts",
     "packages/server/src/index.ts",
+    "packages/rpc/src/session-broadcast.ts",
+    "packages/rpc/src/index.ts",
   ];
   const records = await Promise.all(paths.map(async (relative) => ({
     relative,
@@ -3373,6 +3408,60 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
       ),
     )).join("\n"),
     /pre-server lifecycle contribution ownership drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/access-surface.ts",
+      (text) => text.replace(
+        "readonly sessionBroadcast: SessionBroadcast;",
+        "readonly sessionBroadcastRef: { current: SessionBroadcast | null };",
+      ),
+    )).join("\n"),
+    /Anchor session broadcast static activation ownership drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/anchor-session-broadcast-lifecycle.ts",
+      (text) => text.replace("    assertSessionBroadcastTransport(transport);\n", ""),
+    )).join("\n"),
+    /Anchor session broadcast static activation ownership drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/anchor-session-broadcast-lifecycle.ts",
+      (text) => text.replace(
+        "if (this.#current === transport) this.#current = undefined",
+        "this.#current = undefined",
+      ),
+    )).join("\n"),
+    /Anchor session broadcast static activation ownership drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "      sessionBroadcastLifecycle.install(sessionTransport);\n\n      // Delivery",
+        "      // Delivery",
+      ),
+    )).join("\n"),
+    /Anchor session broadcast static activation ownership drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/rpc/src/session-broadcast.ts",
+      (text) => text.replace(
+        "activity: createActivityBroadcast(deps)",
+        "activity: createObserverBroadcast(deps)",
+      ),
+    )).join("\n"),
+    /Anchor session broadcast static activation ownership drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/rpc/src/index.ts",
+      (text) => `${text}\nexport { createSessionBroadcastTransport } from "./session-broadcast.js";\n`,
+    )).join("\n"),
+    /Anchor session broadcast static activation ownership drifted/,
   );
   assert.match(
     inspectManagedHostAssembly(mutate(
@@ -3614,8 +3703,8 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
     inspectManagedHostAssembly(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "return stop.requestStop(request);",
-        "serverCtx.requestShutdown?.(request.reason); return Promise.resolve();",
+        "requestShutdown: () => anchorInternalStop.requestStop({",
+        "requestShutdown: () => anchorInternalStop.current?.requestStop({",
       ),
     )).join("\n"),
     /internal stop durable owner drifted/,
@@ -3669,14 +3758,14 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
   assert.match(
     inspectManagedHostAssembly(mutate(
       "packages/cli/src/serve/anchor-internal-stop.ts",
-      (text) => text.replace("await dependencies.prepare({", "void ({"),
+      (text) => text.replace("await generation.prepare({", "void ({"),
     )).join("\n"),
     /internal stop durable owner drifted/,
   );
   assert.match(
     inspectManagedHostAssembly(mutate(
       "packages/cli/src/serve/executor-internal-stop.ts",
-      (text) => text.replace("await dependencies.prepare({", "void ({"),
+      (text) => text.replace("await generation.prepare({", "void ({"),
     )).join("\n"),
     /Executor trust\/idle durable stop owner drifted/,
   );
@@ -3724,9 +3813,39 @@ test("managed host stays bound to the finite launch plans, triggers and one serv
   assert.match(
     inspectManagedHostAssembly(mutate(
       "packages/cli/src/serve/command.ts",
-      (text) => `${text}\ncreateAnchorInternalStopPort({});`,
+      (text) => `${text}\nconst duplicateAnchorInternalStopLifecycle = new AnchorInternalStopLifecycle();`,
     )).join("\n"),
     /internal stop durable owner drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/anchor-internal-stop.ts",
+      (text) => text.replace(
+        "if (this.#current === installed) this.#current = undefined;",
+        "this.#current = undefined;",
+      ),
+    )).join("\n"),
+    /internal stop durable owner drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/executor-role-runtime.ts",
+      (text) => text.replace(
+        "requestShutdown: () => executorInternalStop.requestStop({",
+        "requestShutdown: () => executorInternalStop.current?.requestStop({",
+      ),
+    )).join("\n"),
+    /Executor trust\/idle durable stop owner drifted/,
+  );
+  assert.match(
+    inspectManagedHostAssembly(mutate(
+      "packages/cli/src/serve/executor-server-lifecycle.ts",
+      (text) => text.replace(
+        "await attempt(() => this.internalStopLifecycle.close(), failures);",
+        "void this.internalStopLifecycle;",
+      ),
+    )).join("\n"),
+    /Executor trust\/idle durable stop owner drifted/,
   );
   assert.match(
     inspectManagedHostAssembly(mutate(

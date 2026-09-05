@@ -165,6 +165,8 @@ describe("setupChannels", () => {
           feedback: { kind: "idle" },
         }),
       } as never,
+      sessionBroadcast: vi.fn(),
+      sessionActivityBroadcast: vi.fn(),
     });
     await result.connectionTask;
     const target = { channelId: "feishu", to: "user-1" };

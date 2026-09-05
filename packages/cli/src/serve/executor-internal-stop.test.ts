@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  createExecutorInternalStopPort,
+  ExecutorInternalStopLifecycle,
+  type ExecutorInternalStopGeneration,
   shouldExecutorIdleExit,
 } from "./executor-internal-stop.js";
 
@@ -8,7 +9,7 @@ describe("ExecutorInternalStopPort", () => {
   it("prepares durably before shutdown and waits for the real Server terminal", async () => {
     const order: string[] = [];
     const terminal = deferred<void>();
-    const port = createExecutorInternalStopPort({
+    const { port } = installedLifecycle({
       requestId: "executor-host:generation-1",
       timeoutMs: 30_000,
       prepare: async (request) => {
@@ -44,7 +45,7 @@ describe("ExecutorInternalStopPort", () => {
     const terminal = deferred<void>();
     const prepare = vi.fn(async () => undefined);
     const shutdown = vi.fn(async () => undefined);
-    const port = createExecutorInternalStopPort({
+    const { port } = installedLifecycle({
       requestId: "executor-host:generation-1",
       timeoutMs: 30_000,
       prepare,
@@ -81,7 +82,7 @@ describe("ExecutorInternalStopPort", () => {
       .mockResolvedValue(undefined);
     const shutdown = vi.fn(async () => undefined);
     const waitForShutdown = vi.fn(async () => undefined);
-    const port = createExecutorInternalStopPort({
+    const { port } = installedLifecycle({
       requestId: "executor-host:generation-1",
       timeoutMs: 30_000,
       prepare,
@@ -110,7 +111,7 @@ describe("ExecutorInternalStopPort", () => {
       .mockRejectedValueOnce(new Error("shutdown trigger blocked"))
       .mockResolvedValue(undefined);
     const waitForShutdown = vi.fn(async () => undefined);
-    const port = createExecutorInternalStopPort({
+    const { port } = installedLifecycle({
       requestId: "executor-host:generation-1",
       timeoutMs: 30_000,
       prepare,
@@ -131,6 +132,47 @@ describe("ExecutorInternalStopPort", () => {
     expect(shutdown).toHaveBeenCalledTimes(2);
     expect(shutdown).toHaveBeenLastCalledWith("managed-role-changed");
     expect(waitForShutdown).toHaveBeenCalledOnce();
+  });
+
+  it("publishes one stable port before activation and fails closed until installed", async () => {
+    const lifecycle = new ExecutorInternalStopLifecycle();
+    const port = lifecycle.port;
+
+    await expect(port.requestStop({ reason: "idle", strategy: "drain" }))
+      .rejects.toThrow("Executor internal stop is not ready");
+    expect(lifecycle.port).toBe(port);
+
+    lifecycle.install(generation());
+    await expect(port.requestStop({ reason: "idle", strategy: "drain" }))
+      .resolves.toBeUndefined();
+  });
+
+  it("rejects duplicate generations and stale releases cannot clear a successor", async () => {
+    const lifecycle = new ExecutorInternalStopLifecycle();
+    const first = lifecycle.install(generation({ requestId: "executor-stop:first" }));
+    expect(() => lifecycle.install(generation({ requestId: "executor-stop:duplicate" })))
+      .toThrow("already installed");
+
+    first.release();
+    const prepare = vi.fn(async () => undefined);
+    lifecycle.install(generation({ requestId: "executor-stop:successor", prepare }));
+    first.release();
+    await lifecycle.port.requestStop({ reason: "idle", strategy: "drain" });
+
+    expect(prepare).toHaveBeenCalledWith(expect.objectContaining({
+      requestId: "executor-stop:successor",
+    }));
+  });
+
+  it("closes idempotently and refuses later generations", async () => {
+    const lifecycle = new ExecutorInternalStopLifecycle();
+    lifecycle.install(generation());
+    lifecycle.close();
+    lifecycle.close();
+
+    await expect(lifecycle.port.requestStop({ reason: "idle", strategy: "drain" }))
+      .rejects.toThrow("Executor internal stop is not ready");
+    expect(() => lifecycle.install(generation())).toThrow("lifecycle is closed");
   });
 });
 
@@ -168,4 +210,26 @@ function deferred<T>() {
     reject = rejectPromise;
   });
   return { promise, resolve, reject };
+}
+
+function installedLifecycle(generationInput: ExecutorInternalStopGeneration): {
+  readonly lifecycle: ExecutorInternalStopLifecycle;
+  readonly port: ExecutorInternalStopLifecycle["port"];
+} {
+  const lifecycle = new ExecutorInternalStopLifecycle();
+  lifecycle.install(generationInput);
+  return { lifecycle, port: lifecycle.port };
+}
+
+function generation(
+  overrides: Partial<ExecutorInternalStopGeneration> = {},
+): ExecutorInternalStopGeneration {
+  return {
+    requestId: "executor-stop:generation",
+    timeoutMs: 30_000,
+    prepare: async () => undefined,
+    shutdown: () => undefined,
+    waitForShutdown: async () => undefined,
+    ...overrides,
+  };
 }

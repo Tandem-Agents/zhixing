@@ -47,10 +47,12 @@ const ALLOW_LIST: ReadonlyArray<{ readonly file: string; readonly reason: string
   { file: "serve/stop.ts", reason: "stop 命令——独立子命令" },
   { file: "serve/channels.ts", reason: "channel setup logger——bootstrap 时 chrome 未建立" },
   { file: "serve/ephemeral-executor.ts", reason: "serve 临时执行器——后台路径" },
+  { file: "serve/conversation-delete-binding.ts", reason: "serve 会话删除依赖清理诊断——后台路径无 chrome" },
   { file: "setup-delivery.ts", reason: "delivery 装配 logger——bootstrap 时 chrome 未建立" },
   { file: "runtime/anchor-uninstall-command.ts", reason: "永久卸载独立维护子命令——不建立持久 chrome，命令结束即退出" },
   { file: "runtime/device-removal-command.ts", reason: "设备移除独立维护子命令——不建立持久 chrome，命令结束即退出" },
   { file: "runtime/duty-migration-command.ts", reason: "值班迁移独立维护子命令——不建立持久 chrome，命令结束即退出" },
+  { file: "runtime/kernel-runtime-bindings.ts", reason: "serve Kernel 装配模型降级诊断——由 command.ts 抽出的无 chrome 后台路径" },
   { file: "security/keypress-dump.ts", reason: "诊断通道——`--log` flag 启用时 stderr 提示日志路径；与 llm-chunk-dump 同模式，仅诊断不影响生产路径" },
 ];
 

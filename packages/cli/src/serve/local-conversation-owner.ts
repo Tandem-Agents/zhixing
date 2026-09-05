@@ -60,7 +60,6 @@ import {
 } from "@zhixing/owner-services";
 import { createAdvancementReviewProxySchedulePort } from "@zhixing/owner-services/advancement/proxy-scheduler";
 import {
-  createAdvancementEventSink,
   createAdvancementOriginalTaskAdmissionPort,
   createAdvancementProxyTurnPort,
 } from "@zhixing/server";
@@ -914,7 +913,6 @@ export class LocalConversationOwnerAssembly {
       conversationExists,
     });
     const reviewResults = new AdvancementReviewResultProjectionApplicationService({
-      events: createAdvancementEventSink(() => null),
       proxySchedule: createAdvancementReviewProxySchedulePort(proxyTurns),
     });
     const recovery = createAdvancementRecoveryMaintenance({
@@ -961,7 +959,6 @@ export class LocalConversationOwnerAssembly {
       originalTasks: createAdvancementOriginalTaskAdmissionPort(manager, {
         conversationExists,
       }),
-      events: createAdvancementEventSink(() => null),
       reviewResults,
     });
     const acceptedTurns = new AdvancementAcceptedTurnApplicationService({

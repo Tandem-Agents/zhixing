@@ -150,15 +150,12 @@ export interface InboundRouterOptions {
    * non-control 的 stub)。
    */
   intentClassifier?: IntentClassifier;
-  /**
-   * 会话 observer 组播 getter。channel 消息属于同一 conversation 事实,
-   * 其 assistant 输出也要投影给正在旁观该会话的接入面。
-   */
-  sessionBroadcast?: () => SessionBroadcast | null | undefined;
+  /** 会话 observer 组播。由 Host 在 router 构造前提供稳定端口。 */
+  sessionBroadcast: SessionBroadcast;
   /**
    * 非当前会话活动提示。只面向工作台类接入面,不携带消息内容。
    */
-  sessionActivityBroadcast?: () => SessionActivityBroadcast | null | undefined;
+  sessionActivityBroadcast: SessionActivityBroadcast;
 }
 
 export class InboundRouter {
@@ -171,11 +168,8 @@ export class InboundRouter {
   private outboxRegistry?: OutboxRegistry;
   private readonly confirmationHub?: ConfirmationHub;
   private readonly intentClassifier: IntentClassifier;
-  private readonly sessionBroadcast?: () => SessionBroadcast | null | undefined;
-  private readonly sessionActivityBroadcast?: () =>
-    | SessionActivityBroadcast
-    | null
-    | undefined;
+  private readonly sessionBroadcast: SessionBroadcast;
+  private readonly sessionActivityBroadcast: SessionActivityBroadcast;
   /** graceful shutdown 期间拒新标记 —— `refuseNewMessages()` 置 false */
   private acceptingNew = true;
   private acceptedInFlight = 0;
@@ -371,7 +365,7 @@ export class InboundRouter {
             this.logger.info(`[排队取消] conv=${conversationId}`);
           },
           onProtocolEvent: (method, params) => {
-            this.sessionBroadcast?.()?.(conversationId, method, params);
+            this.sessionBroadcast(conversationId, method, params);
           },
           onCommitFailure: (error) => {
             this.logger.warn(
@@ -399,7 +393,7 @@ export class InboundRouter {
                 .abandonSlot(turnId, "turn ended without reply emission");
             }
             this.logger.info(`[释放] conv=${conversationId} busy=false`);
-            this.sessionActivityBroadcast?.()?.({
+            this.sessionActivityBroadcast({
               conversationId,
               source: msg.channelId,
               lastActiveAt: new Date().toISOString(),

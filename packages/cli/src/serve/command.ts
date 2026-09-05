@@ -130,10 +130,9 @@ import {
 import {
   createRunEventForwarder,
   SESSION_NOTIFICATIONS,
-  type SessionActivityBroadcast,
-  type SessionBroadcast,
 } from "@zhixing/rpc";
 import { AssignmentStreamPathUnavailableError } from "./assignment-stream-path-manager.js";
+import { AnchorSessionBroadcastLifecycle } from "./anchor-session-broadcast-lifecycle.js";
 import { renderRecentContextFromMessages } from "@zhixing/owner-services";
 import { loadCredentials, resolveModelCapability } from "@zhixing/providers";
 import fsp from "node:fs/promises";
@@ -271,11 +270,7 @@ import {
 import { replayTrustChain } from "@zhixing/mesh/trust-chain";
 import { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
 import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
-import {
-  createAnchorInternalStopPort,
-  type AnchorInternalStopPort,
-  type AnchorInternalStopRequest,
-} from "./anchor-internal-stop.js";
+import { AnchorInternalStopLifecycle } from "./anchor-internal-stop.js";
 import { AnchorHostShellLifecycle } from "./anchor-host-shell-lifecycle.js";
 import { MeshExecutorTopologyTrustState } from "./mesh-runtime-assembly.js";
 import {
@@ -684,18 +679,13 @@ async function runServerProcess(
   const serveWriter = createStdoutWriter();
   const renderDecorator = createRenderSubscribers({ writer: serveWriter });
 
-  // 带外事件转发——per-run bus 的 UI 订阅集事件经统一信封组播给会话 observers
-  // (session.event 通知)。组播设施在 runServer 后才回填(connections 那时才有),
-  // 此处经 lazy ref 闭包接线——与 schedulerRef 同构;未就绪时静默丢弃(装配期
-  // 无会话 turn 流动,丢弃面为零)。
-  const sessionBroadcastRef: { current: SessionBroadcast | null } = {
-    current: null,
-  };
-  const sessionActivityBroadcastRef: { current: SessionActivityBroadcast | null } = {
-    current: null,
-  };
+  // 带外事件与活动提示在任何长期消费者之前取得同一稳定 Host port；真实
+  // Server transport 只在 inactive endpoint 的 activation gate 内安装。
+  const sessionBroadcastLifecycle = new AnchorSessionBroadcastLifecycle();
+  const sessionBroadcast = sessionBroadcastLifecycle.port.session;
+  const sessionActivityBroadcast = sessionBroadcastLifecycle.port.activity;
   const runEventForwarder = createRunEventForwarder((conversationId, envelope) =>
-    sessionBroadcastRef.current?.(conversationId, SESSION_NOTIFICATIONS.event, envelope),
+    sessionBroadcast(conversationId, SESSION_NOTIFICATIONS.event, envelope),
   );
   // 单钩子双装饰:本地日志渲染 + 跨进程转发,各自管理自己的订阅与 dispose
   const serveDecorateRunBus: typeof renderDecorator = (ctx) => {
@@ -946,24 +936,14 @@ async function runServerProcess(
     startupRollback,
   );
   const channelHttpRoutes: AssemblyContext["channelHttpRoutes"] = new Map();
-  const anchorInternalStop = {
-    current: undefined as AnchorInternalStopPort | undefined,
-  };
-  const requestAnchorInternalStop = (
-    request: AnchorInternalStopRequest,
-  ): Promise<void> => {
-    const stop = anchorInternalStop.current;
-    if (!stop) {
-      return Promise.reject(new Error("Anchor internal stop is not ready"));
-    }
-    return stop.requestStop(request);
-  };
+  const anchorInternalStopLifecycle = new AnchorInternalStopLifecycle();
+  const anchorInternalStop = anchorInternalStopLifecycle.port;
   let assemblyContext: AssemblyContext | undefined;
   const onTrustApplied = () => coordinateManagedHostTrustTransition({
     processMode,
     expectedAdmission: initialManagedHostAdmission,
     refuseNewMessages: () => assemblyContext?.inboundRouter?.refuseNewMessages(),
-    requestShutdown: () => requestAnchorInternalStop({
+    requestShutdown: () => anchorInternalStop.requestStop({
       reason: "managed-role-changed",
       strategy: "immediate",
     }),
@@ -1000,8 +980,8 @@ async function runServerProcess(
     conversationDeleteProjection: conversationDirectory,
     taskListService: builtinExtraTools.taskListService,
     conversationAuthorityRef,
-    sessionBroadcastRef,
-    sessionActivityBroadcastRef,
+    sessionBroadcast,
+    sessionActivityBroadcast,
     advancementDirectory: {
       list: () => conversationDirectory.listForAdvancement(),
       exists: (conversationId) => conversationDirectory.exists(conversationId),
@@ -1025,7 +1005,6 @@ async function runServerProcess(
   };
   assemblyContext = ctx;
   let startupLifecycleFrozenRecoveryStarted = startupLifecycle?.recoverAcceptedWork ?? true;
-  let localRetirementCompletedBeforeServerStart = false;
   let removalAdmissionOperationId: string | undefined;
   let removalBootstrapAdmissionClosed = true;
   const assemblyUnits = createAssemblyUnits(channelCredentials);
@@ -1670,7 +1649,10 @@ async function runServerProcess(
             }),
           }];
         },
-        onRemoved: requestRemovedDeviceStop,
+        onRemoved: () => anchorInternalStop.requestStop({
+          reason: "device-removed",
+          strategy: "immediate",
+        }),
       });
       const activeMesh = await preparedMesh.start({
         deviceRemovalLifecycle,
@@ -2126,20 +2108,12 @@ async function runServerProcess(
       },
     });
   }
-  async function requestRemovedDeviceStop() {
-    const stop = anchorInternalStop.current;
-    if (stop) {
-      await requestAnchorInternalStop({
-        reason: "device-removed",
-        strategy: "immediate",
-      });
-      return;
-    }
-    localRetirementCompletedBeforeServerStart = true;
-  }
   const finishLocalRetirement = async () => {
     await deleteDeviceKey(bootstrap.secretStore, bootstrap.mesh.deviceKey.deviceId);
-    await requestRemovedDeviceStop();
+    await anchorInternalStop.requestStop({
+      reason: "device-removed",
+      strategy: "immediate",
+    });
   };
   const uninstallIssuerKey = bootstrap.mesh.mode === "trusted-home" &&
     bootstrap.mesh.trust.issuer.deviceId === bootstrap.mesh.deviceKey.deviceId
@@ -2508,9 +2482,7 @@ async function runServerProcess(
     : undefined;
   await currentRemovalMigrationApplication?.resumeActive();
   await currentRemovalRecoveryApplication?.resumeActive();
-  if (localRetirementCompletedBeforeServerStart) {
-    throw new Error("This device has completed local retirement and cannot start normally");
-  }
+  anchorInternalStopLifecycle.assertServerStartAllowed();
   const deliveryProductApi = ctx.deliveryStack
     ? createDeliveryResolutionProductApiContribution(
         ctx.deliveryStack.resolutionApplication,
@@ -2554,7 +2526,7 @@ async function runServerProcess(
       conversations: ctx.conversations!,
       directory: conversationDirectory,
       publishFact: (fact) => {
-        ctx.sessionBroadcastRef.current?.(
+        ctx.sessionBroadcast(
           fact.conversationId,
           SESSION_NOTIFICATIONS.changed,
           { conversationId: fact.conversationId, change: "cleared" },
@@ -2584,7 +2556,7 @@ async function runServerProcess(
           }
         : {}),
       publishFact: (fact) => {
-        ctx.sessionBroadcastRef.current?.(
+        ctx.sessionBroadcast(
           fact.conversationId,
           SESSION_NOTIFICATIONS.changed,
           { conversationId: fact.conversationId, change: "deleted" },
@@ -2985,13 +2957,18 @@ async function runServerProcess(
     lifecycleShutdown: stopCoordinator,
   });
   if (ctx.meshRuntime) {
-    ctx.meshRuntime.bindFirstPartyConversationSurface({
-      dispatch: ({ method, params, connection }) =>
-        serverRegistry.dispatchCanonical(method, params, {
-          connection,
-          server: serverCtx,
-        }),
-    });
+    const firstPartyConversationMeshSurface =
+      ctx.meshRuntime.createFirstPartyConversationSurfaceLifecycle({
+        dispatch: ({ method, params, connection }) =>
+          serverRegistry.dispatchCanonical(method, params, {
+            connection,
+            server: serverCtx,
+          }),
+      });
+    lifecycleContributions.acquire(
+      "firstPartyConversationMeshSurface.close",
+      () => firstPartyConversationMeshSurface.close(),
+    );
   }
 
   ctx.deliveryStack?.onStatus((notice) => {
@@ -3027,7 +3004,11 @@ async function runServerProcess(
         serverLog: !!serverLogLifecycle,
         checkpointOwner: !!ctx.authorityCheckpointOwner,
       });
-      anchorInternalStop.current = createAnchorInternalStopPort({
+      lifecycleContributions.acquire(
+        "anchorInternalStop.close",
+        () => anchorInternalStopLifecycle.close(),
+      );
+      anchorInternalStopLifecycle.install({
         requestId: `anchor-internal-stop:${protocolDigest("AnchorInternalStopRequest", 1, {
           homeId: lifecycleHomeId,
           host: stopHost,
@@ -3041,10 +3022,17 @@ async function runServerProcess(
         },
       });
 
-      // Server 内部设施已准备、公开入口仍为 inactive 503；此时接通带外事件转发引用。
-      sessionBroadcastRef.current = serverCtx.sessionBroadcast ?? null;
-      sessionActivityBroadcastRef.current =
-        serverCtx.sessionActivityBroadcast ?? null;
+      // Server 内部设施已准备、公开入口仍为 inactive 503；同一 provenance
+      // transport 在任何恢复/调度/Channel consumer 可达前原子装入稳定 Host port。
+      lifecycleContributions.acquire(
+        "sessionBroadcast.close",
+        () => sessionBroadcastLifecycle.close(),
+      );
+      const sessionTransport = openingRunner.server.sessionBroadcastTransport;
+      if (!sessionTransport) {
+        throw new Error("Anchor Server did not provide a session broadcast transport");
+      }
+      sessionBroadcastLifecycle.install(sessionTransport);
 
       // Delivery/Scheduler 的既有 activation 是公开入口开放的必要前置。
       ctx.deliveryStack?.activate();
@@ -3077,6 +3065,8 @@ async function runServerProcess(
       lifecycleContributions.transferTo(registry, "runtime");
 
       lifecycleContributions.transferExactTo(registry, "activation", [
+        "anchorInternalStop.close",
+        "sessionBroadcast.close",
         ...(ctx.conversations ? ["execution.abortAllAndWait" as const] : []),
         ...(
           ctx.conversationProtocol && !startupLifecycle
@@ -3090,6 +3080,9 @@ async function runServerProcess(
             ? ["evidenceHandler.stopAccepting" as const]
             : []
         ),
+        ...(ctx.meshRuntime
+          ? ["firstPartyConversationMeshSurface.close" as const]
+          : []),
       ]);
 
       // 正常停机链已经完整接管所有已取得资源；启动补偿事务不再持有独立责任。
@@ -3157,7 +3150,7 @@ async function runServerProcess(
           schedulerApplication.readStatus().enabledUserTaskCount > 0,
       });
       if (exit) {
-        await requestAnchorInternalStop({ reason: "idle", strategy: "drain" });
+        await anchorInternalStop.requestStop({ reason: "idle", strategy: "drain" });
       }
     }, (error) => {
       console.error(

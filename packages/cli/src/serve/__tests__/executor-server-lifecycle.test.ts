@@ -16,8 +16,9 @@ describe("ExecutorServerLifecycle", () => {
     vi.useRealTimers();
   });
 
-  it("freezes the five staged Server/state/timer identities", () => {
+  it("freezes the six staged internal-stop/Server/state/timer identities", () => {
     expect(EXECUTOR_SERVER_LIFECYCLE_DESCRIPTORS).toEqual([
+      { owner: "executor-server", id: "internalStop.close" },
       { owner: "executor-server", id: "inactiveBinding.close" },
       { owner: "executor-server", id: "runningServer.shutdown" },
       { owner: "executor-server", id: "serverState.lifecycle" },
@@ -28,7 +29,7 @@ describe("ExecutorServerLifecycle", () => {
 
   it("owns and closes an inactive binding when setup fails before Server transfer", async () => {
     const order: string[] = [];
-    const lifecycle = new ExecutorServerLifecycle();
+    const lifecycle = createLifecycle();
     const bound = binding(order);
     const state = stateFile(order);
     lifecycle.acquireBinding(bound);
@@ -48,7 +49,7 @@ describe("ExecutorServerLifecycle", () => {
   });
 
   it("closes the real inactive endpoint when setup fails before runServer", async () => {
-    const lifecycle = new ExecutorServerLifecycle();
+    const lifecycle = createLifecycle();
     const bound = await bindServer({
       config: { ...DEFAULT_SERVER_CONFIG, host: "127.0.0.1", port: 0 },
     });
@@ -62,7 +63,7 @@ describe("ExecutorServerLifecycle", () => {
 
   it("transfers only the same bound endpoint and never retains a direct binding owner", async () => {
     const order: string[] = [];
-    const lifecycle = new ExecutorServerLifecycle();
+    const lifecycle = createLifecycle();
     const bound = binding(order);
     const state = stateFile(order);
     const active = runningServer(bound, order);
@@ -123,7 +124,7 @@ describe("ExecutorServerLifecycle", () => {
 
   it("continues through state failures after the endpoint reaches terminal", async () => {
     const order: string[] = [];
-    const lifecycle = new ExecutorServerLifecycle();
+    const lifecycle = createLifecycle();
     const bound = binding(order);
     const state = stateFile(order, {
       markStopping: new Error("stopping failed"),
@@ -152,7 +153,7 @@ describe("ExecutorServerLifecycle", () => {
 
   it("does not publish stopped when an inactive binding fails to close", async () => {
     const order: string[] = [];
-    const lifecycle = new ExecutorServerLifecycle();
+    const lifecycle = createLifecycle();
     const bound = binding(order, new Error("binding failed"));
     const state = stateFile(order);
     lifecycle.acquireBinding(bound);
@@ -172,7 +173,7 @@ describe("ExecutorServerLifecycle", () => {
 
   it("does not publish stopped when RunningServer shutdown fails", async () => {
     const order: string[] = [];
-    const lifecycle = new ExecutorServerLifecycle();
+    const lifecycle = createLifecycle();
     const bound = binding(order);
     const state = stateFile(order);
     const active = runningServer(bound, order, new Error("server failed"));
@@ -193,7 +194,7 @@ describe("ExecutorServerLifecycle", () => {
   });
 
   it("keeps timer admission and state cleanup fail closed", async () => {
-    const lifecycle = new ExecutorServerLifecycle();
+    const lifecycle = createLifecycle();
     expect(() => lifecycle.startHeartbeat()).toThrow("requires a running endpoint");
     await expect(lifecycle.cleanupState()).rejects.toThrow("requires a stop attempt");
 
@@ -209,15 +210,41 @@ describe("ExecutorServerLifecycle", () => {
     expect(() => lifecycle.startIdleTimer(async () => {}, () => {}))
       .toThrow("cannot start during shutdown");
   });
+
+  it("closes the stable internal-stop lifecycle exactly once before endpoint termination", async () => {
+    const order: string[] = [];
+    const close = vi.fn(() => order.push("internalStop.close"));
+    const lifecycle = createLifecycle(close);
+    const bound = binding(order);
+    lifecycle.acquireBinding(bound);
+    lifecycle.acquireStateFile(stateFile(order));
+
+    await lifecycle.stop();
+    await lifecycle.stop();
+
+    expect(close).toHaveBeenCalledOnce();
+    expect(order).toEqual([
+      "internalStop.close",
+      "state.markStopping",
+      "binding.close",
+      "state.markStopped",
+    ]);
+  });
 });
 
 function activeLifecycle(order: string[]): ExecutorServerLifecycle {
-  const lifecycle = new ExecutorServerLifecycle();
+  const lifecycle = createLifecycle();
   const bound = binding(order);
   lifecycle.acquireBinding(bound);
   lifecycle.acquireStateFile(stateFile(order));
   lifecycle.transferToRunningServer(runningServer(bound, order));
   return lifecycle;
+}
+
+function createLifecycle(
+  close: () => void = () => undefined,
+): ExecutorServerLifecycle {
+  return new ExecutorServerLifecycle({ close });
 }
 
 function binding(order: string[], closeFailure?: Error): Pick<
