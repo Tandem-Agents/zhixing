@@ -16,6 +16,7 @@ describe("production startup server ownership", () => {
 
   it("composes one sealed Skill, Delivery, Trust, Schedule, Workscene, and Advancement Product API dispatcher at the Anchor Host boundary", async () => {
     const source = await readSource("command.ts");
+    const surfaces = await readSource("access-surfaces.ts");
     expect(source.match(/new ProductApiDispatcher\(/gu)).toHaveLength(1);
     expect(source.match(/createSkillCatalogProductApiContribution\(/gu)).toHaveLength(1);
     expect(source.match(/createDeliveryResolutionProductApiContribution\(/gu)).toHaveLength(1);
@@ -24,15 +25,20 @@ describe("production startup server ownership", () => {
     expect(source.match(/createWorksceneProductApiContribution\(/gu)).toHaveLength(1);
     expect(source.match(/createAdvancementProductApiContribution\(/gu)).toHaveLength(1);
     expect(source.match(/new AdvancementApplicationService\(/gu)).toHaveLength(1);
-    expect(source.match(/new WorksceneApplicationService\(/gu)).toHaveLength(1);
-    expect(source.match(/createAnchorWorksceneApplicationPorts\(/gu)).toHaveLength(1);
+    expect(source).not.toContain("new WorksceneApplicationService(");
+    expect(source).not.toContain("createAnchorWorksceneApplicationPorts(");
+    expect(surfaces.match(/new WorksceneApplicationService\(/gu)).toHaveLength(1);
+    expect(surfaces.match(/createAnchorWorksceneApplicationPorts\(/gu)).toHaveLength(1);
+    expect(surfaces.match(/createWorksceneDirectory\(/gu)).toHaveLength(1);
     expect(
       source.match(
         /createAnchorWorksceneConversationStorageProjectionCleanup\(/gu,
       ),
     ).toHaveLength(1);
-    expect(source.match(/worksceneApplication\.projectConversationRuntime\(/gu))
+    expect(source.match(/projectWorksceneConversationRuntime\(/gu))
       .toHaveLength(2);
+    expect(source).not.toContain("authorityRuntimeRef");
+    expect(source).not.toContain("conversationAuthorityRef");
     expect(source).not.toContain("worksceneDirectory.get(");
     expect(source).not.toContain("ConversationWorksceneDeleteProjectionBridge");
     expect(source).not.toContain("createConversationWorksceneDeleteProjectionBridge");
@@ -60,10 +66,6 @@ describe("production startup server ownership", () => {
       source,
       "createTrustAdministrationProductApiContribution(trustAdministration)",
     );
-    const worksceneApplication = location(
-      source,
-      "new WorksceneApplicationService(",
-    );
     const worksceneContribution = location(
       source,
       "createWorksceneProductApiContribution(",
@@ -86,7 +88,6 @@ describe("production startup server ownership", () => {
     expect(deliveryContribution).toBeLessThan(dispatcher);
     expect(trustApplication).toBeLessThan(dispatcher);
     expect(trustContribution).toBeGreaterThan(dispatcher);
-    expect(worksceneApplication).toBeLessThan(dispatcher);
     expect(worksceneContribution).toBeGreaterThan(dispatcher);
     expect(advancementApplication).toBeLessThan(dispatcher);
     expect(advancementApplication).toBeGreaterThan(conversationApplication);
@@ -101,7 +102,7 @@ describe("production startup server ownership", () => {
       rubricCancellation,
     );
     const rubricCancellationPersist = source.indexOf(
-      "ctx.advancementReviews.cancelSession(input)",
+      "advancementReviews.cancelSession(input)",
       rubricCancellation,
     );
     const awaitingRubricAdmission = location(
@@ -171,7 +172,7 @@ describe("production startup server ownership", () => {
     );
     expect(assemblyUnits).toBeGreaterThan(location(source, "assemblyContext = ctx;"));
     expect(assemblyUnits).toBeLessThan(
-      location(source, 'await setupAssemblyUnits(assemblyUnits, ctx, "pre-server")'),
+      location(source, "assemblyUnits.slice(0, conversationAssemblyIndex + 1)"),
     );
     expect(removalContribution).toBeGreaterThan(
       schedulerGenerationInstall,
@@ -244,7 +245,9 @@ describe("production startup server ownership", () => {
     expect(firstPartySurfaceCleanup).toBeLessThan(serverRun);
     expect(source.match(/schedulerGenerationOwner\.postAdoptionReview/gu)).toHaveLength(2);
     const bind = location(source, "const serverBinding = await bindServer");
-    expect(bind).toBeLessThan(location(source, "await setupAssemblyUnits(assemblyUnits, ctx, \"pre-server\")"));
+    expect(bind).toBeLessThan(
+      location(source, "assemblyUnits.slice(0, conversationAssemblyIndex + 1)"),
+    );
     expect(bind).toBeLessThan(location(source, "const stopResume = await stopCoordinator.resumeActive()"));
     const broadcastOwner = location(
       source,

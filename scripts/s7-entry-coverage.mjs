@@ -3437,7 +3437,7 @@ export function inspectRuntimeConfigurationProjectionBoundary(records) {
     !assembly.includes("readonly advancementConfiguration: RuntimeAdvancementConfigurationProjection;") ||
     !assembly.includes("readonly channelConfiguration: RuntimeChannelConfigurationProjection;") ||
     !assembly.includes("readonly authorityConfiguration: RuntimeAuthorityConfigurationProjection;") ||
-    !surfaces.includes("config: ctx.authorityConfiguration") ||
+    !anchor.includes("config: authorityConfiguration") ||
     !anchor.includes("optimalMaxTokens: resolveModelCapability(") ||
     !anchor.includes("modelConfiguration.llm?.main?.model") ||
     surfaces.includes("modelConfiguration.llm?.main?.model") ||
@@ -3685,10 +3685,12 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     !product.includes("const ephemeral = (): RuntimeToolProjection => runtimeTools();") ||
     !product.includes("const job = (instruction: JobExecutionInstruction) =>") ||
     !product.includes("selectJobRuntimeTools({") ||
-    !product.includes("const mainProjection = main();") ||
-    !product.includes("mcpServers: mainProjection.runtimeTools.executionMcpServers") ||
-    !product.includes("addProjection(mainProjection);") ||
-    (product.match(/addProjection\(scene\(/gu) ?? []).length !== 2 ||
+    !product.includes("export function createAnchorRuntimeCapabilityCatalog(") ||
+    !product.includes("...mainProfile().enabledTools") ||
+    !product.includes("...powerProfile({") ||
+    !product.includes("...Object.values(WORKSCENE_PRODUCT_TOOL_IDS)") ||
+    !product.includes("mcpServers: mcp.serverIds") ||
+    !product.includes("capabilityCatalog: () => input.capabilities.capabilityCatalog()") ||
     expectedProductTools.some(
       (factory) => (product.match(new RegExp(`\\b${factory}\\s*\\(`, "gu")) ?? []).length !== 1,
     )
@@ -3701,9 +3703,10 @@ export function inspectWorksceneRuntimeProjectionBoundary(records) {
     (command.match(/createWorksceneConversationRuntimeFactory\s*\(/gu) ?? []).length !== 1 ||
     (command.match(/runtimeHost\.createConversationRuntime\s*\(/gu) ?? []).length !== 1 ||
     !command.includes("createAgentRuntime: createConversationAgentRuntime") ||
-    !command.includes("runtime: anchorRuntimeProjections") ||
+    !command.includes("projections: anchorRuntimeProjections") ||
     !command.includes("const projection = anchorRuntimeProjections.job(instruction);") ||
     !command.includes("anchorRuntimeProjections.ephemeral()") ||
+    !command.includes("capabilities: anchorRuntimeCapabilities,") ||
     !command.includes("capabilities: anchorRuntimeProjections.capabilityCatalog()") ||
     /runtimeHost\.(?:createWorksceneRuntime|capabilityCatalog)\s*\(/u.test(command)
   ) {
@@ -3779,14 +3782,17 @@ export function inspectMcpRuntimeBoundary(records) {
 
   if (
     !command.includes("mcpTools: mcpRuntime.tools") ||
-    !command.includes("mcpLifecycle: mcpRuntime.lifecycle") ||
     !command.includes("mcpStatus: mcpRuntime.status") ||
+    access.includes("McpRuntimeLifecyclePort") ||
+    access.includes("readonly mcpLifecycle") ||
     !projection.includes("const mcp = input.mcpTools.snapshot();") ||
     !executor.includes("readonly mcpTools: McpRuntimeToolProjectionPort") ||
     (executor.match(/this\.options\.mcpTools\.snapshot\(\)/gu)?.length ?? 0) !== 3 ||
     !workspace.includes("mcpTools: mcpRuntime.tools") ||
-    !surfaces.includes("await ctx.mcpLifecycle.connect()") ||
-    !surfaces.includes("ctx.mcpLifecycle.close()")
+    !command.includes("await mcpRuntime.lifecycle.connect()") ||
+    !command.includes('lifecycleContributions.acquire("mcpRuntime.close"') ||
+    surfaces.includes("ctx.mcpLifecycle.connect()") ||
+    surfaces.includes("ctx.mcpLifecycle.close()")
   ) {
     failures.push("Anchor, Executor or workspace fallback bypasses the finite MCP runtime ports");
   }
@@ -3923,6 +3929,7 @@ export async function validateS7Structure() {
   failures.push(...inspectLocalConversationOwnerIsolation(records));
   failures.push(...inspectConversationExecutorDispatchBoundary(records));
   failures.push(...inspectWorksceneRemoteWorkspaceProbeTopologyBoundary(records));
+  failures.push(...inspectWorksceneAnchorProductStaticCompositionBoundary(records));
   failures.push(...inspectAssignmentDataPlaneBoundary(records));
   failures.push(...inspectAdvancementEvidenceTopologyBoundary(records));
   failures.push(...inspectAssignmentResourcePortBoundary(records));
@@ -4374,7 +4381,7 @@ export function inspectWorksceneStorageCleanupBoundary(records) {
     !command.includes(
       "worksceneConversationStorageRemoval: worksceneStorageCleanup.conversations",
     ) ||
-    !command.includes("sceneStorageRemoval: worksceneStorageCleanup.scenes")
+    !command.includes("worksceneSceneStorageRemoval: worksceneStorageCleanup.scenes")
   ) {
     failures.push(
       "Workscene cleanup concrete mechanism is not constructed once at the Host edge",
@@ -4617,7 +4624,7 @@ export function inspectStorageRemainderBoundary(records) {
     ) ||
     count(authoritySetup, "projectAdvancementRubricArtifacts(") !== 2 ||
     !authoritySetup.includes("const ref = await artifacts.referenceForDigest(digest);") ||
-    !anchor.includes("artifacts: authority.rubricArtifacts,")
+    !anchor.includes("artifacts: authorityRuntime.rubricArtifacts,")
   ) {
     failures.push("P06 Advancement Rubric artifact demand boundary drifted");
   }
@@ -5893,6 +5900,9 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   const accessSurfaces = required(
     "packages/cli/src/serve/access-surfaces.ts",
   );
+  const assemblyContext = required(
+    "packages/cli/src/serve/access-surface.ts",
+  );
   const deleteBinding = required(
     "packages/cli/src/serve/conversation-delete-binding.ts",
   );
@@ -6211,14 +6221,13 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !recovery.includes("this.options.reviews.reconcileConversation(conversationId)") ||
     !recovery.includes("this.options.reviews.reviewAcceptedRun({") ||
     !recovery.includes("this.options.reviews.rebuildMissingProxyMessage(session)") ||
-    !composition.includes("reviews: advancementReviews,") ||
-    !composition.includes("advancementReviews,") ||
+    !composition.includes("return Object.freeze({ controller, reviews, lifecycle });") ||
     !recovery.includes("this.options.reviewResults.projectReviewResult({") ||
     recovery.includes("dispatchAdvancementReviewResult") ||
     !accessSurfaces.includes("new AdvancementAcceptedTurnApplicationService({") ||
-    !accessSurfaces.includes("reviews: ctx.advancementReviews,") ||
-    !accessSurfaces.includes("review: ctx.advancementReviews,") ||
-    !accessSurfaces.includes("advancementAcceptedTurns?.acceptCommittedTurn(info)") ||
+    !accessSurfaces.includes("reviews: advancementReviews,") ||
+    !accessSurfaces.includes("review: advancementReviews,") ||
+    !accessSurfaces.includes("advancementAcceptedTurns.acceptCommittedTurn(info)") ||
     !accessSurfaces.includes("manager.bindTurnCommittedListener((info) =>") ||
     !accessSurfaces.includes("manager.assertTurnCommittedListenerBound()") ||
     !accessSurfaces.includes("protocol.bindManager(manager)") ||
@@ -6573,10 +6582,10 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     deleteCommit.length === 0 ||
     deleteCommit.includes("cancelDependentLifecycle?.(conversationId)") ||
     !accessSurfaces.includes(
-      "ctx.advancementConversationLifecycle.cancelConversationLifecycle(",
+      "advancementConversationLifecycle.cancelConversationLifecycle(",
     ) ||
     !accessSurfaces.includes(
-      "ctx.advancementConversationLifecycle.removeConversationData(",
+      "advancementConversationLifecycle.removeConversationData(",
     ) ||
     /advancementDetailController\.(?:cancelOpenConversationSession|removeConversationData|sweepOrphanData)/u.test(
       accessSurfaces,
@@ -6619,7 +6628,7 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !composition.includes(
       "advancementDetailController.loadRubricCancellationSession(",
     ) ||
-    !composition.includes("ctx.advancementReviews.cancelSession(input)") ||
+    !composition.includes("advancementReviews.cancelSession(input)") ||
     composition.includes("rubricCancellation: advancementDetailController") ||
     !composition.includes("awaitingRubricAdmission: advancementDetailController") ||
     !composition.includes("rubricConfirmation: advancementDetailController") ||
@@ -6641,6 +6650,63 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
   ) {
     failures.push(
       "Advancement detail/rubric lacks one Product API application or conversation lifecycle lacks one independent application owner",
+    );
+  }
+
+  const managerBound = accessSurfaces.indexOf("protocol.assertManagerBound();");
+  const advancementCreated = accessSurfaces.indexOf(
+    "await ctx.advancementConversationComposition.create({",
+  );
+  const recoveryBound = accessSurfaces.indexOf(
+    "protocol.bindAuxiliaryRecovery(async (conversationId) =>",
+  );
+  const applicationPublished = accessSurfaces.indexOf(
+    "ctx.advancement = advancementController;",
+  );
+  const readinessRecovery = accessSurfaces.indexOf(
+    "await protocol.recoverReadinessProjections();",
+  );
+  const firstAssemblyPass = composition.indexOf(
+    "assemblyUnits.slice(0, conversationAssemblyIndex + 1)",
+  );
+  const runtimeHostConstruction = composition.indexOf(
+    "const runtimeHost = new RuntimeHost({",
+  );
+  const secondAssemblyPass = composition.indexOf(
+    "assemblyUnits.slice(conversationAssemblyIndex + 1)",
+  );
+  if (
+    !assemblyContext.includes(
+      "readonly advancementConversationComposition: AdvancementConversationComposition;",
+    ) ||
+    !assemblyContext.includes("sessionState: SessionStatePort;") ||
+    !assemblyContext.includes("recentContext: AdvancementRecentContextPort;") ||
+    composition.includes("conversationsRef") ||
+    composition.includes("sessionState: () =>") ||
+    composition.includes("recentContextProvider:") ||
+    !composition.includes("sessionState: input.sessionState,") ||
+    !composition.includes("recentContext: input.recentContext,") ||
+    advancementComposition.includes("readonly sessionState: () =>") ||
+    advancementComposition.includes("recentContextProvider?:") ||
+    !advancementComposition.includes("readonly sessionState: SessionStatePort;") ||
+    !advancementComposition.includes("readonly recentContext: AdvancementRecentContextPort;") ||
+    !sessionStore.includes("readonly port: SessionStatePort;") ||
+    sessionStore.includes("readonly port: () => SessionStatePort;") ||
+    !accessSurfaces.includes("sessionState: protocol.sessionState,") ||
+    !accessSurfaces.includes("manager.getHistory(conversationId, 6)") ||
+    !localOwner.includes("sessionState: protocol.sessionState,") ||
+    localOwner.includes("sessionState: () =>") ||
+    managerBound < 0 ||
+    advancementCreated <= managerBound ||
+    recoveryBound <= advancementCreated ||
+    applicationPublished <= advancementCreated ||
+    readinessRecovery <= applicationPublished ||
+    firstAssemblyPass < 0 ||
+    runtimeHostConstruction <= firstAssemblyPass ||
+    secondAssemblyPass <= runtimeHostConstruction
+  ) {
+    failures.push(
+      "Advancement application must be statically composed from bound Conversation ports before recovery, ingress, and RuntimeHost publication",
     );
   }
 
@@ -6699,9 +6765,9 @@ export function inspectAdvancementDetailApplicationOwnership(records) {
     !application.includes("return await this.#activeState.queryActiveState(query.conversationId)") ||
     !application.includes("async settleProxyRun(") ||
     !application.includes("bindProductApiOperation(ADVANCEMENT_ACTIVE_STATE_QUERY") ||
-    !composition.includes("activeState: ctx.advancementReviews") ||
-    !composition.includes("ctx.advancementReviews.queryActiveState(conversationId)") ||
-    !composition.includes("ctx.advancementReviews\n                  .settleProxyRun(") ||
+    !composition.includes("activeState: advancementReviews") ||
+    !composition.includes("advancementReviews.queryActiveState(conversationId)") ||
+    !composition.includes("advancementReviews\n            .settleProxyRun(") ||
     !recovery.includes("this.options.reviews.settleProxyRun({") ||
     recovery.includes("this.options.advancement.settleProxyMessage(") ||
     controller.includes("async settleProxyMessage(") ||
@@ -7054,16 +7120,45 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     worksceneApplicationStart >= 0
       ? worksceneHandler.slice(worksceneApplicationStart)
       : "";
+  const worksceneEnterHandlerStart = worksceneHandler.indexOf(
+    "export function buildWorksceneEnterMethod()",
+  );
+  const worksceneEnterHandlerEnd = worksceneHandler.indexOf(
+    "export function buildWorksceneExitMethod()",
+    worksceneEnterHandlerStart,
+  );
+  const worksceneEnterHandler =
+    worksceneEnterHandlerStart >= 0 &&
+      worksceneEnterHandlerEnd > worksceneEnterHandlerStart
+      ? worksceneHandler.slice(
+          worksceneEnterHandlerStart,
+          worksceneEnterHandlerEnd,
+        )
+      : "";
+  const worksceneEntryCommit = worksceneApplication.indexOf(
+    "const entered = await this.entry.enter({",
+  );
+  const worksceneAdvancementRecovery = worksceneApplication.indexOf(
+    "await this.advancement.recoverConversation(conversationId);",
+  );
+  const worksceneAdvancementRead = worksceneApplication.indexOf(
+    "await this.advancement.queryActiveState(conversationId)",
+  );
   if (
     !worksceneApplication.includes("class WorksceneApplicationService") ||
     !worksceneApplication.includes("interface WorksceneManagementPort") ||
     !worksceneApplication.includes("interface WorksceneEntryPort") ||
+    !worksceneApplication.includes("interface WorksceneAdvancementApplicationPort") ||
     !worksceneApplication.includes("interface WorksceneWorkspaceAdministrationReadPort") ||
     !worksceneApplication.includes("interface WorksceneRuntimeProjectionReadPort") ||
     !worksceneApplication.includes("projectConversationRuntime(") ||
     !worksceneApplication.includes("type WorksceneConversationRuntimeProjection") ||
     !worksceneApplication.includes("WORKSCENE_PRODUCT_API_EXACT_SET") ||
     !worksceneApplication.includes("createWorksceneProductApiContribution") ||
+    worksceneEntryCommit < 0 ||
+    worksceneAdvancementRecovery <= worksceneEntryCommit ||
+    worksceneAdvancementRead <= worksceneAdvancementRecovery ||
+    !worksceneApplication.includes("this.advancement.reportFailure({ conversationId, error })") ||
     worksceneApplication.split("defineProductApiQuery<").length - 1 !== 1 ||
     worksceneApplication.split("defineProductApiCommand<").length - 1 !== 6 ||
     !worksceneApplication.includes("factEvents: []") ||
@@ -7103,13 +7198,32 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     worksceneApplicationHandlers.includes("requireWorkscenes(ctx.server)") ||
     worksceneApplicationHandlers.includes("server.workscenes") ||
     worksceneApplicationHandlers.includes("sceneSummary(") ||
+    /advancementRecovery|loadAdvancementState|ADVANCEMENT_ACTIVE_STATE_QUERY|console\.error/u.test(
+      worksceneEnterHandler,
+    ) ||
     !composition.includes("createWorksceneProductApiContribution(") ||
-    !composition.includes("new WorksceneApplicationService(") ||
-    !composition.includes("createAnchorWorksceneApplicationPorts(") ||
+    !accessSurfaces.includes("new WorksceneApplicationService(") ||
+    !accessSurfaces.includes("createAnchorWorksceneApplicationPorts(") ||
+    !worksceneApplicationAdapter.includes(
+      "createAnchorWorksceneAdvancementApplicationPort",
+    ) ||
+    !worksceneApplicationAdapter.includes(
+      "dependencies.activeState.queryActiveState(conversationId)",
+    ) ||
+    !worksceneApplicationAdapter.includes(
+      "dependencies.recovery.recoverConversation(conversationId)",
+    ) ||
+    !accessSurfaces.includes(
+      "createAnchorWorksceneAdvancementApplicationPort({",
+    ) ||
+    !accessSurfaces.includes("recovery: advancementRecovery") ||
+    !accessSurfaces.includes("activeState: advancementReviews") ||
     composition.includes("worksceneDirectory.get(") ||
-    composition.split("worksceneApplication.projectConversationRuntime(").length - 1 !== 2 ||
+    composition.split("projectWorksceneConversationRuntime(").length - 1 !== 2 ||
     !composition.includes("...WORKSCENE_PRODUCT_API_EXACT_SET.operations") ||
     context.includes("WorksceneDirectory") ||
+    context.includes("AdvancementRecoveryMaintenance") ||
+    /\badvancementRecovery\??\s*:/u.test(context) ||
     /\bworkscenes\??\s*:/u.test(context) ||
     serverIndex.includes("workscene-directory") ||
     byPath.has("packages/server/src/runtime/workscene-directory.ts") ||
@@ -8021,8 +8135,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     worksceneConversationCleanupConsumers[0]?.relative !==
       "packages/cli/src/serve/workscene-session-owner.ts" ||
     directConversationStorageDeleteConsumers.length !== 0 ||
-    !/conversationStorageProjectionCleanup:\s*worksceneConversationStorageProjectionCleanup/u.test(
-      composition,
+    !composition.includes("worksceneConversationStorageProjectionCleanup,") ||
+    !accessSurfaces.includes(
+      "conversationStorageProjectionCleanup:\n        ctx.worksceneConversationStorageProjectionCleanup",
     ) ||
     !worksceneDirectory.includes(
       "conversationStorageProjectionCleanup: WorksceneConversationStorageProjectionCleanupPort",
@@ -8038,9 +8153,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       ),
     ) ||
     worksceneRemoveScene.length === 0 ||
-    worksceneRemoveScene.indexOf("authority.deleteWorksceneSession({") < 0 ||
+    worksceneRemoveScene.indexOf("this.#authority.deleteWorksceneSession({") < 0 ||
     worksceneRemoveScene.indexOf(".removeCommittedProjection({") <
-      worksceneRemoveScene.indexOf("authority.deleteWorksceneSession({") ||
+      worksceneRemoveScene.indexOf("this.#authority.deleteWorksceneSession({") ||
     worksceneRemoveScene.indexOf("this.#sceneStorageRemoval.removeScene(sceneId)") <
       worksceneRemoveScene.indexOf(".removeCommittedProjection({") ||
     !conversationStorage.includes("deleteStoredConversation(id)") ||
@@ -9072,7 +9187,7 @@ export function inspectDeviceLifecycleAssembly(records) {
     "this.#installDeviceRemovalTarget(options.deviceRemovalLifecycle)",
   );
   const anchorAssembly = command.indexOf(
-    'await setupAssemblyUnits(assemblyUnits, ctx, "pre-server")',
+    "assemblyUnits.slice(conversationAssemblyIndex + 1)",
   );
   const anchorScheduler = command.indexOf(
     "await schedulerGenerationOwner.installInitial({",
@@ -11604,8 +11719,8 @@ export function inspectPlannedAnchorTransferAssembly(records) {
       "installedAuthorityGeneration: anchorPostInstall.installedGeneration",
     ) !== 1 ||
     count(
-      accessRoot,
-      "installedAuthorityGeneration: bootstrap.installedAuthorityGeneration",
+      command,
+      "installedAuthorityGeneration:\n            bootstrap.mesh.installedAuthorityGeneration",
     ) !== 1 ||
     count(setup, "const rebindInstalledAuthority = async (") !== 1 ||
     count(setup, "installedAuthorityGeneration = Object.freeze(structuredClone(generation));") !== 1 ||
@@ -11983,6 +12098,9 @@ export function inspectWorksceneRemoteWorkspaceProbeTopologyBoundary(records) {
     return text ?? "";
   };
   const directory = required("packages/cli/src/serve/workscene-directory.ts");
+  const authorityProjection = required(
+    "packages/cli/src/serve/workscene-authority-projection.ts",
+  );
   const topology = required("packages/cli/src/serve/workscene-remote-workspace-probe.ts");
   const command = required("packages/cli/src/serve/command.ts");
   const access = required("packages/cli/src/serve/access-surfaces.ts");
@@ -11991,10 +12109,13 @@ export function inspectWorksceneRemoteWorkspaceProbeTopologyBoundary(records) {
 
   if (
     !directory.includes("export interface WorksceneRemoteWorkspaceProbePort") ||
-    !directory.includes("remoteWorkspaceProbe: WorksceneRemoteWorkspaceProbePort;") ||
-    directory.includes("remoteWorkspaceProbe?:") ||
-    directory.includes("probeRemote") ||
-    count(directory, "deps.remoteWorkspaceProbe.probe(") !== 1 ||
+    !authorityProjection.includes(
+      "readonly remoteWorkspaceProbe: WorksceneRemoteWorkspaceProbePort;",
+    ) ||
+    authorityProjection.includes("remoteWorkspaceProbe?:") ||
+    directory.includes("remoteWorkspaceProbe") ||
+    authorityProjection.includes("probeRemote") ||
+    count(authorityProjection, "input.remoteWorkspaceProbe.probe(") !== 1 ||
     /MeshRuntimeAssembly|MeshConnectionRegistry|MeshExecutorTopologyTrustState|EnvironmentProbeMeshClient/u.test(
       directory,
     )
@@ -12021,10 +12142,12 @@ export function inspectWorksceneRemoteWorkspaceProbeTopologyBoundary(records) {
   const trustIndex = command.indexOf("const meshExecutorTopologyTrust =");
   const connectionsIndex = command.indexOf("const meshConnections =");
   const portIndex = command.indexOf("const remoteWorkspaceProbe =");
-  const directoryIndex = command.indexOf("const worksceneDirectory = createWorksceneDirectory({");
+  const projectionIndex = command.indexOf(
+    "const worksceneAuthority = createAnchorWorksceneAuthorityProjection({",
+  );
   if (
-    trustIndex < 0 || connectionsIndex < 0 || portIndex < 0 || directoryIndex < 0 ||
-    trustIndex > portIndex || connectionsIndex > portIndex || portIndex > directoryIndex ||
+    trustIndex < 0 || connectionsIndex < 0 || portIndex < 0 || projectionIndex < 0 ||
+    trustIndex > portIndex || connectionsIndex > portIndex || portIndex > projectionIndex ||
     count(command, "new MeshConnectionRegistry({") !== 1 ||
     count(command, "new MeshExecutorTopologyTrustState(") !== 1 ||
     count(command, "new MeshWorksceneRemoteWorkspaceProbe({") !== 1 ||
@@ -12050,6 +12173,106 @@ export function inspectWorksceneRemoteWorkspaceProbeTopologyBoundary(records) {
     mesh.includes("workspaceProbeForDevice(")
   ) {
     failures.push("Mesh/Conversation assembly regained a second or late Workscene topology owner");
+  }
+  return failures;
+}
+
+/** A6 Workscene Authority/Conversation product dependencies are complete before publication. */
+export function inspectWorksceneAnchorProductStaticCompositionBoundary(records) {
+  const failures = [];
+  const byPath = new Map(records.map((record) => [record.relative, record.text]));
+  const required = (relative) => {
+    const text = byPath.get(relative);
+    if (text === undefined) {
+      failures.push(`${relative}: Workscene static product composition source is missing`);
+    }
+    return text ?? "";
+  };
+  const command = required("packages/cli/src/serve/command.ts");
+  const context = required("packages/cli/src/serve/access-surface.ts");
+  const surfaces = required("packages/cli/src/serve/access-surfaces.ts");
+  const authority = required(
+    "packages/cli/src/serve/workscene-authority-projection.ts",
+  );
+  const directory = required("packages/cli/src/serve/workscene-directory.ts");
+  const session = required("packages/cli/src/serve/workscene-session-owner.ts");
+  const count = (text, token) => text.split(token).length - 1;
+
+  if (
+    /authorityRuntimeRef|conversationAuthorityRef/u.test(command) ||
+    count(command, "createWorksceneDirectory({") !== 0 ||
+    count(command, "await setupAuthorityRuntime({") !== 1 ||
+    count(command, "createAnchorWorksceneAuthorityProjection({") !== 1 ||
+    count(command, "createAnchorRuntimeCapabilityCatalog({") !== 1 ||
+    command.indexOf("await mcpRuntime.lifecycle.connect();") < 0 ||
+    command.indexOf("await mcpRuntime.lifecycle.connect();") >
+      command.indexOf("await setupAuthorityRuntime({") ||
+    command.indexOf("await setupAuthorityRuntime({") >
+      command.indexOf("createAnchorWorksceneAuthorityProjection({") ||
+    command.indexOf("createAnchorWorksceneAuthorityProjection({") >
+      command.indexOf("createAnchorRuntimeProjectionAssembly({") ||
+    !command.includes("capabilities: anchorRuntimeCapabilities,") ||
+    !command.includes("authorityRuntime,") ||
+    !command.includes("worksceneAuthority,")
+  ) {
+    failures.push("Anchor Host restored a late-bound or second Workscene product owner");
+  }
+
+  if (
+    !context.includes("readonly worksceneAuthority: AnchorWorksceneAuthorityProjection;") ||
+    !context.includes(
+      "readonly worksceneConversationStorageProjectionCleanup: WorksceneConversationStorageProjectionCleanupPort;",
+    ) ||
+    !context.includes(
+      "readonly worksceneSceneStorageRemoval: WorksceneSceneStorageRemovalPort;",
+    ) ||
+    context.includes("conversationAuthorityRef") ||
+    /readonly worksceneAuthority\?:/u.test(context)
+  ) {
+    failures.push("Assembly context no longer requires the complete Workscene product projection");
+  }
+
+  const bindManager = surfaces.indexOf("protocol.bindManager(manager);");
+  const createDirectory = surfaces.indexOf(
+    "const worksceneDirectory = createWorksceneDirectory({",
+  );
+  const directoryBlock = surfaces.slice(
+    createDirectory,
+    surfaces.indexOf("const worksceneApplicationPorts =", createDirectory),
+  );
+  const publishManager = surfaces.indexOf("ctx.conversations = manager;");
+  if (
+    count(surfaces, "createWorksceneDirectory({") !== 1 ||
+    count(surfaces, "new WorksceneApplicationService(") !== 1 ||
+    bindManager < 0 || createDirectory < bindManager ||
+    publishManager < createDirectory ||
+    !directoryBlock.includes("authority: ctx.worksceneAuthority,") ||
+    !directoryBlock.includes("conversations: manager,") ||
+    !directoryBlock.includes("conversationAuthority: protocol,") ||
+    !surfaces.includes("ctx.worksceneDirectory = worksceneDirectory;") ||
+    !surfaces.includes("ctx.worksceneApplication = worksceneApplication;")
+  ) {
+    failures.push("Conversation surface publishes a partial or late-bound Workscene product");
+  }
+
+  if (
+    !authority.includes("readonly authority: AuthorityRuntimeStack;") ||
+    !directory.includes("readonly authority: AnchorWorksceneAuthorityProjection;") ||
+    !directory.includes("readonly conversations: ConversationManager;") ||
+    !directory.includes("conversationAuthority: Pick<") ||
+    /(?:authority|conversations|conversationAuthority)\?:/u.test(directory) ||
+    /(?:authority|conversations|conversationAuthority):\s*\(\)\s*=>/u.test(directory) ||
+    /authorityRuntimeRef|conversationAuthorityRef|conversationsRef/u.test(
+      `${authority}\n${directory}`,
+    ) ||
+    !session.includes("readonly conversations: ConversationManager;") ||
+    !session.includes("readonly #conversations: ConversationManager;") ||
+    /#conversations:\s*\(\)|#authority:\s*\(\)|\?\.(?:addObserver|removeObserver|quiescePrefix)/u.test(
+      session,
+    ) ||
+    /Workscene session authority is unavailable|\(\) => \{\}/u.test(session)
+  ) {
+    failures.push("Workscene directory/session owner regained an optional getter or no-op fallback");
   }
   return failures;
 }

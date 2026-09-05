@@ -153,11 +153,8 @@ export interface AdvancementSessionStore {
 }
 
 export interface SessionAdvancementStoreOptions {
-  /**
-   * 惰性解析的会话状态端口——权威运行时晚于控制器装配，调用时才解析；
-   * 未装配即 fail-closed（不得回退到任何本地文件形态）。
-   */
-  readonly port: () => SessionStatePort;
+  /** Required conversation-owner state port captured before publication. */
+  readonly port: SessionStatePort;
   readonly hostComponent?: string;
   readonly requestIdFor?: () => string;
   readonly now?: () => string;
@@ -169,7 +166,7 @@ export interface SessionAdvancementStoreOptions {
  * 语义和文件控制日志一致，控制器零感知。
  */
 export class SessionAdvancementStore implements AdvancementSessionStore {
-  readonly #port: () => SessionStatePort;
+  readonly #port: SessionStatePort;
   readonly #hostComponent: string;
   readonly #requestIdFor: () => string;
   readonly #now: () => string;
@@ -179,16 +176,6 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
     this.#hostComponent = options.hostComponent ?? "advancement-owner-services";
     this.#requestIdFor = options.requestIdFor ?? (() => randomUUID());
     this.#now = options.now ?? (() => new Date().toISOString());
-  }
-
-  #requirePort(): SessionStatePort {
-    const port = this.#port();
-    if (!port) {
-      throw new Error(
-        "AdvancementStore: session state port is not assembled",
-      );
-    }
-    return port;
   }
 
   async createSession(
@@ -517,7 +504,7 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
   }
 
   async #read(conversationId: string): Promise<AdvancementSession | null> {
-    return await this.#requirePort().readAdvancementState(
+    return await this.#port.readAdvancementState(
       conversationId,
       this.#ctx(this.#requestIdFor()),
     );
@@ -529,7 +516,7 @@ export class SessionAdvancementStore implements AdvancementSessionStore {
     requestId?: string,
   ): Promise<AdvancementSession> {
     try {
-      await this.#requirePort().mutate(
+      await this.#port.mutate(
         conversationId,
         { kind: "advancement-event", events },
         this.#ctx(requestId ?? this.#requestIdFor()),

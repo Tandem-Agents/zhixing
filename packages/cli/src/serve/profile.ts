@@ -30,7 +30,6 @@ export interface ProfileSpec {
 export const PROFILES: Record<ServerProfile, ProfileSpec> = {
   full: {
     surfaces: [
-      "mcp",
       "authority-runtime",
       "executor-data-plane",
       "conversation",

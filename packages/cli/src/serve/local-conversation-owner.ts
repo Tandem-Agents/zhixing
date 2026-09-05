@@ -886,12 +886,14 @@ export class LocalConversationOwnerAssembly {
       await createServeAdvancementApplications({
       modelProvider: options.advancementModelProvider,
       governor: () => owner.resources,
-      sessionState: () => protocol.sessionState,
+      sessionState: protocol.sessionState,
       rubricScope: "local",
       rubricCatalog,
       rubricPublication,
-      recentContextProvider: async (conversationId) =>
-        renderRecentContextFromMessages(manager.getHistory(conversationId, 6)),
+      recentContext: Object.freeze({
+        read: async (conversationId: string) =>
+          renderRecentContextFromMessages(manager.getHistory(conversationId, 6)),
+      }),
       evidenceRuntime: Object.freeze<AdvancementEvidenceRuntimePort>({
         signer: owner.signer,
         verifier: owner.verifier,

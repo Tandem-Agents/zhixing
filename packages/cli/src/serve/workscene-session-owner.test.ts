@@ -30,9 +30,9 @@ describe("WorksceneSessionOwner cleanup", () => {
       },
     };
     const owner = new WorksceneSessionOwner({
-      conversations: () => manager as never,
+      conversations: manager as never,
       conversationStorageProjectionCleanup: {} as never,
-      authority: () => ({
+      authority: {
         async touchWorksceneSession() {
           order.push("activity");
           throw new Error("activity unavailable");
@@ -40,7 +40,7 @@ describe("WorksceneSessionOwner cleanup", () => {
         async deleteWorksceneSession() {
           throw new Error("not used");
         },
-      }),
+      },
       sceneStorageRemoval: unusedSceneStorageRemoval(),
     });
 
@@ -63,9 +63,9 @@ describe("WorksceneSessionOwner cleanup", () => {
       },
     };
     const owner = new WorksceneSessionOwner({
-      conversations: () => manager as never,
+      conversations: manager as never,
       conversationStorageProjectionCleanup: {} as never,
-      authority: () => ({
+      authority: {
         async touchWorksceneSession(input) {
           order.push(`activity:${input.conversationId}:${input.requestId}`);
           return { revision: 2, at: input.at };
@@ -73,7 +73,7 @@ describe("WorksceneSessionOwner cleanup", () => {
         async deleteWorksceneSession() {
           throw new Error("not used");
         },
-      }),
+      },
       sceneStorageRemoval: unusedSceneStorageRemoval(),
     });
 
@@ -100,9 +100,9 @@ describe("WorksceneSessionOwner cleanup", () => {
       }),
     };
     const owner = new WorksceneSessionOwner({
-      conversations: () => null,
+      conversations: {} as never,
       conversationStorageProjectionCleanup,
-      authority: () => ({
+      authority: {
         async touchWorksceneSession() {
           throw new Error("not used");
         },
@@ -110,7 +110,7 @@ describe("WorksceneSessionOwner cleanup", () => {
           order.push(`authority:${input.conversationId}`);
           return { revision: 2, at: input.at };
         },
-      }),
+      },
       sceneStorageRemoval: {
         async removeScene(sceneId) {
           order.push(`cleanup:${sceneId}`);
@@ -136,7 +136,7 @@ describe("WorksceneSessionOwner cleanup", () => {
     const order: string[] = [];
     let failSecond = true;
     const owner = new WorksceneSessionOwner({
-      conversations: () => null,
+      conversations: {} as never,
       conversationStorageProjectionCleanup: {
         async removeCommittedProjection({ conversationId }) {
           order.push(`projection:${conversationId}`);
@@ -146,7 +146,7 @@ describe("WorksceneSessionOwner cleanup", () => {
           }
         },
       },
-      authority: () => ({
+      authority: {
         async touchWorksceneSession() {
           throw new Error("not used");
         },
@@ -154,7 +154,7 @@ describe("WorksceneSessionOwner cleanup", () => {
           order.push(`authority:${input.requestId}`);
           return { revision: 2, at: input.at };
         },
-      }),
+      },
       sceneStorageRemoval: {
         async removeScene(sceneId) {
           order.push(`scene:${sceneId}`);
@@ -187,12 +187,12 @@ describe("WorksceneSessionOwner cleanup", () => {
     const removeCommittedProjection = vi.fn();
     const removeScene = vi.fn();
     const owner = new WorksceneSessionOwner({
-      conversations: () => null,
+      conversations: {} as never,
       conversationStorageProjectionCleanup: { removeCommittedProjection },
-      authority: () => ({
+      authority: {
         touchWorksceneSession: vi.fn(),
         deleteWorksceneSession,
-      }),
+      },
       sceneStorageRemoval: {
         removeScene,
       },

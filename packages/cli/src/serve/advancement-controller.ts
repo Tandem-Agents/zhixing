@@ -35,6 +35,10 @@ import {
 } from "./advancement-rubric-library.js";
 import type { AdvancementEvidenceRuntimePort } from "./advancement-evidence-topology.js";
 
+export interface AdvancementRecentContextPort {
+  read(conversationId: string): Promise<string | undefined>;
+}
+
 export interface ServeAdvancementControllerDeps {
   readonly modelProvider: AdvancementModelProviderFactory;
   /**
@@ -43,15 +47,10 @@ export interface ServeAdvancementControllerDeps {
    * 缺失即 fail-closed，不允许静默绕过治理）。
    */
   readonly governor: () => ResourceReservationPort | undefined;
-  /**
-   * 会话状态端口（惰性）——advancement 权威状态读写经对话 owner 日志，
-   * 无权威运行时即 fail-closed，不回退本地文件形态。
-   */
-  readonly sessionState: () => SessionStatePort | undefined;
-  /** 准入投影来源——活跃会话窗口尾部（经 lazy ref 取，未就绪返回 undefined）。 */
-  readonly recentContextProvider?: (
-    conversationId: string,
-  ) => Promise<string | undefined>;
+  /** Conversation-owner state port captured directly before publication. */
+  readonly sessionState: SessionStatePort;
+  /** Required recent-context reader captured from the bound conversation owner. */
+  readonly recentContext: AdvancementRecentContextPort;
   /** 准入延迟基线观测（诊断日志）。 */
   readonly onAdmissionTiming?: (elapsedMs: number) => void;
   readonly evidenceRuntime?: AdvancementEvidenceRuntimePort;
@@ -116,6 +115,20 @@ export interface ServeAdvancementApplications {
 export async function createServeAdvancementApplications(
   deps: ServeAdvancementControllerDeps,
 ): Promise<ServeAdvancementApplications> {
+  if (
+    !deps.sessionState ||
+    typeof deps.sessionState.readAdvancementState !== "function" ||
+    typeof deps.sessionState.mutate !== "function"
+  ) {
+    throw new TypeError(
+      "Advancement requires a direct conversation session-state port",
+    );
+  }
+  if (!deps.recentContext || typeof deps.recentContext.read !== "function") {
+    throw new TypeError(
+      "Advancement requires a direct recent-context port",
+    );
+  }
   // 推进控制智能（准入 / 草案 / 修订 / 收场 / 裁判）的全部真实 LLM 外调只经
   // ControlCompletionPort 与 AdvancementReviewerPort 两条通道：调用方取得
   // control 根租约并在 finally 终结，端口沿租约以稳定 usageId 计量——
@@ -185,17 +198,7 @@ export async function createServeAdvancementApplications(
     ...(evidenceCapabilities ? { evidenceCapabilities } : {}),
   });
 
-  const store = new SessionAdvancementStore({
-      port: () => {
-        const port = deps.sessionState();
-        if (!port) {
-          throw new Error(
-            "Advancement requires the conversation authority runtime",
-          );
-        }
-        return port;
-      },
-    });
+  const store = new SessionAdvancementStore({ port: deps.sessionState });
   const evidenceRuntime = deps.evidenceRuntime;
   const evidence = evidenceRuntime
     ? new AdvancementEvidenceCoordinator({
@@ -247,9 +250,8 @@ export async function createServeAdvancementApplications(
       : deps.rubricScope === "local"
         ? {}
         : { rubricPublication: new GlobalRubricPublication(rubricLibrary) }),
-    ...(deps.recentContextProvider
-      ? { recentContextProvider: deps.recentContextProvider }
-      : {}),
+    recentContextProvider: (conversationId) =>
+      deps.recentContext.read(conversationId),
     ...(deps.onAdmissionTiming
       ? { onAdmissionTiming: deps.onAdmissionTiming }
       : {}),

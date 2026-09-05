@@ -12,6 +12,7 @@ import {
   WorksceneApplicationService,
   WorksceneAssignmentToolApplicationService,
   type WorksceneAssignmentToolPort,
+  type WorksceneAdvancementApplicationPort,
   type WorksceneEntryPort,
   type WorksceneManagementPort,
   type WorksceneRuntimeProjectionReadPort,
@@ -115,7 +116,10 @@ function scene(
   };
 }
 
-function fixture(overrides: Partial<WorksceneManagementPort> = {}) {
+function fixture(
+  overrides: Partial<WorksceneManagementPort> = {},
+  advancementOverrides: Partial<WorksceneAdvancementApplicationPort> = {},
+) {
   const scenes = new Map<string, WorksceneDto>([
     [
       "scene-a",
@@ -179,13 +183,28 @@ function fixture(overrides: Partial<WorksceneManagementPort> = {}) {
   const runtime: WorksceneRuntimeProjectionReadPort = {
     get: vi.fn(async (sceneId) => scenes.get(sceneId) ?? null),
   };
+  const advancement: WorksceneAdvancementApplicationPort = {
+    recoverConversation: vi.fn(async () => {}),
+    queryActiveState: vi.fn(async () => null),
+    reportFailure: vi.fn(),
+    ...advancementOverrides,
+  };
   const application = new WorksceneApplicationService(
     management,
     workspaces,
     entry,
     runtime,
+    advancement,
   );
-  return { application, management, workspaces, entry, runtime, scenes };
+  return {
+    application,
+    management,
+    workspaces,
+    entry,
+    runtime,
+    advancement,
+    scenes,
+  };
 }
 
 describe("WorksceneApplicationService", () => {
@@ -357,6 +376,12 @@ describe("WorksceneApplicationService", () => {
         },
       },
     });
+    expect(f.advancement.recoverConversation).toHaveBeenCalledWith(
+      "ws:scene-a:conv_main",
+    );
+    expect(f.advancement.queryActiveState).toHaveBeenCalledWith(
+      "ws:scene-a:conv_main",
+    );
 
     await expect(f.application.execute({
       kind: "enter",
@@ -385,6 +410,74 @@ describe("WorksceneApplicationService", () => {
       requestId: "exit:7",
     });
   });
+
+  it("owns commit-first Advancement recovery and includes the active projection", async () => {
+    const recoverConversation = vi.fn(async () => {});
+    const queryActiveState = vi.fn(async () => Object.freeze({
+      advancementSessionId: "adv-scene-a",
+      status: "active" as const,
+      rubricTitle: "交付标准",
+    }));
+    const f = fixture({}, { recoverConversation, queryActiveState });
+
+    await expect(f.application.execute({
+      kind: "enter",
+      sceneId: "scene-a",
+      observerId: "connection:9",
+      requestId: "enter:advancement",
+    })).resolves.toMatchObject({
+      kind: "entered",
+      conversationId: "ws:scene-a:conv_main",
+      advancement: {
+        advancementSessionId: "adv-scene-a",
+        status: "active",
+        rubricTitle: "交付标准",
+      },
+    });
+    expect(
+      vi.mocked(f.entry.enter).mock.invocationCallOrder[0],
+    ).toBeLessThan(recoverConversation.mock.invocationCallOrder[0]!);
+    expect(recoverConversation.mock.invocationCallOrder[0]).toBeLessThan(
+      queryActiveState.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it.each(["recover", "query"] as const)(
+    "soft-degrades and reports an Advancement %s failure after committed entry",
+    async (failureAt) => {
+      const failure = new Error(`${failureAt} failed`);
+      const recoverConversation = vi.fn(async () => {
+        if (failureAt === "recover") throw failure;
+      });
+      const queryActiveState = vi.fn(async () => {
+        if (failureAt === "query") throw failure;
+        return null;
+      });
+      const reportFailure = vi.fn();
+      const f = fixture({}, {
+        recoverConversation,
+        queryActiveState,
+        reportFailure,
+      });
+
+      const result = await f.application.execute({
+        kind: "enter",
+        sceneId: "scene-a",
+        observerId: "connection:10",
+        requestId: `enter:${failureAt}-failure`,
+      });
+      expect(result).toMatchObject({
+        kind: "entered",
+        conversationId: "ws:scene-a:conv_main",
+      });
+      expect(result).not.toHaveProperty("advancement");
+      expect(f.entry.enter).toHaveBeenCalledTimes(1);
+      expect(reportFailure).toHaveBeenCalledWith({
+        conversationId: "ws:scene-a:conv_main",
+        error: failure,
+      });
+    },
+  );
 
   it("contributes exactly one query and six commands with no invented Fact Event", async () => {
     const f = fixture();

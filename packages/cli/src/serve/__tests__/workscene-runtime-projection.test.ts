@@ -4,6 +4,7 @@ import {
   type WorksceneConversationRuntimeProjection,
 } from "@zhixing/core/workscene/application";
 import {
+  createAnchorRuntimeCapabilityCatalog,
   createWorksceneConversationRuntimeFactory,
   createAnchorRuntimeProjectionAssembly,
 } from "../workscene-runtime-projection.js";
@@ -35,7 +36,13 @@ function fixture(mcpTools = {
       { name: "task_list" },
     ],
   } as never;
+  const capabilities = createAnchorRuntimeCapabilityCatalog({
+    extraTools,
+    mcpTools,
+    scheduler: () => ({}) as never,
+  });
   return createAnchorRuntimeProjectionAssembly({
+    capabilities,
     workscenes,
     worksceneAssignmentTools: {} as never,
     extraTools,

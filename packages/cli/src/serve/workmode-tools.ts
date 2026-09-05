@@ -43,6 +43,17 @@ import {
 import type { WorksceneToolDirectory } from "./workscene-port.js";
 export type { WorksceneToolDirectory } from "./workscene-port.js";
 
+/** Canonical product tool identities shared by runtime assembly and readiness. */
+export const WORKSCENE_PRODUCT_TOOL_IDS = Object.freeze({
+  enter: "workmode_enter",
+  exit: "workmode_exit",
+  change: "workscene_change_approve",
+  list: "workscene_list",
+  renameCurrent: "workscene_rename_current",
+  setWorkdirCurrent: "workscene_set_workdir_current",
+  clearWorkdirCurrent: "workscene_clear_workdir_current",
+} as const);
+
 export interface WorksceneCurrentToolContext {
   readonly sceneId: string;
   readonly sceneName: string;
@@ -147,7 +158,7 @@ export function createWorkmodeEnterTool(
     required: ["sceneId"],
   };
   return {
-    name: "workmode_enter",
+    name: WORKSCENE_PRODUCT_TOOL_IDS.enter,
     description:
       "进入一个工作场景：后续对话切到该场景的独立运行态（场景目录 + power 模型）。" +
       "切换在用户确认后、于本 turn 结束的 turn 边界发生——调用本工具后请正常把本轮回复收尾，不要假设已经切换。",
@@ -189,7 +200,7 @@ export function createWorkmodeExitTool(): ToolDefinition {
     properties: {},
   };
   return {
-    name: "workmode_exit",
+    name: WORKSCENE_PRODUCT_TOOL_IDS.exit,
     description:
       "结束当前工作场景、返回主对话。当本场景的工作已告一段落时调用。" +
       "切换在本 turn 结束的 turn 边界发生——调用后请正常把本轮回复收尾。",
@@ -247,7 +258,7 @@ export function createWorksceneChangeApproveTool(
     required: ["action"],
   };
   return {
-    name: "workscene_change_approve",
+    name: WORKSCENE_PRODUCT_TOOL_IDS.change,
     description:
       "增删改工作场景注册表（add/remove/rename/set_workdir/clear_workdir）。远程只按设备名和已授权工作区名选择，需用户确认。",
     inputSchema,
@@ -348,7 +359,7 @@ export function createWorksceneListTool(
     properties: {},
   };
   return {
-    name: "workscene_list",
+    name: WORKSCENE_PRODUCT_TOOL_IDS.list,
     description:
       "只读列出工作场景管理元数据（id、名称、设备工作区、最近使用时间），用于选择目标场景或查看工作区绑定。",
     inputSchema,
@@ -407,7 +418,7 @@ export function createWorksceneRenameCurrentTool(
     required: ["name"],
   };
   return {
-    name: "workscene_rename_current",
+    name: WORKSCENE_PRODUCT_TOOL_IDS.renameCurrent,
     description:
       "重命名当前工作场景。只改当前场景登记名，不退出、不重进；当前窗口里的旧称呼可到下次窗口或重进时自然更新。",
     inputSchema,
@@ -462,7 +473,7 @@ export function createWorksceneSetWorkdirCurrentTool(
     required: ["deviceName", "workspaceName"],
   };
   return {
-    name: "workscene_set_workdir_current",
+    name: WORKSCENE_PRODUCT_TOOL_IDS.setWorkdirCurrent,
     description:
       "更换当前工作场景的设备工作区。变更在本轮成功提交后生效，后续运行使用新工作区。",
     inputSchema,
@@ -499,7 +510,7 @@ export function createWorksceneClearWorkdirCurrentTool(
     properties: {},
   };
   return {
-    name: "workscene_clear_workdir_current",
+    name: WORKSCENE_PRODUCT_TOOL_IDS.clearWorkdirCurrent,
     description:
       "解除当前工作场景的设备工作区绑定。变更在本轮成功提交后生效，后续运行使用无工作区工具面。",
     inputSchema,

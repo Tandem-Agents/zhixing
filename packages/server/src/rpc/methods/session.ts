@@ -2876,7 +2876,7 @@ export async function loadAdvancementState(
   return state ? projectAdvancementState(state) : undefined;
 }
 
-function projectAdvancementState(
+export function projectAdvancementState(
   state: AdvancementActiveStateProjection,
 ): SessionAdvancementStateSnapshot {
   return {

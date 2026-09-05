@@ -28,6 +28,9 @@ import {
 } from "../conversation-protocol-runtime.js";
 import { createConversationStorageInfrastructure } from "../conversation-storage-infrastructure.js";
 import { createWorksceneStorageCleanupInfrastructure } from "../workscene-storage-cleanup.js";
+import { createAnchorWorksceneConversationStorageProjectionCleanup } from "../workscene-application-adapter.js";
+import { createAnchorWorksceneAuthorityProjection } from "../workscene-authority-projection.js";
+import { REJECT_REMOTE_WORKSPACE_PROBE } from "../workscene-remote-workspace-probe.js";
 
 const TEST_EXECUTOR_READINESS = {
   tools: [] as string[],
@@ -91,11 +94,12 @@ async function setupCtx() {
     else process.env.ZHIXING_HOME = previousHome;
   });
   const convDir = path.join(tmp, "conversations");
+  const worksceneStorage = createWorksceneStorageCleanupInfrastructure({
+    zhixingHome: tmp,
+  });
   const conversationStorage = createConversationStorageInfrastructure({
     optimalMaxTokens: 20_000,
-    worksceneConversationStorageRemoval:
-      createWorksceneStorageCleanupInfrastructure({ zhixingHome: tmp })
-        .conversations,
+    worksceneConversationStorageRemoval: worksceneStorage.conversations,
   });
   const created: string[] = [];
   const runtimeFactory: RuntimeFactory = {
@@ -118,6 +122,16 @@ async function setupCtx() {
     executorReadiness: TEST_EXECUTOR_READINESS,
   });
   onTestFinished(() => authorityRuntime.stopStorageMaintenance());
+  const advancementConversationComposition = {
+    create: vi.fn(async () => ({
+      controller: {},
+      reviews: {},
+      lifecycle: {
+        cancelConversationLifecycle: vi.fn(async () => {}),
+        removeConversationData: vi.fn(async () => {}),
+      },
+    }) as never),
+  };
   const ctx = {
     zhixingHome: tmp,
     secretStore,
@@ -131,7 +145,16 @@ async function setupCtx() {
       exists: vi.fn(async () => false),
       readRunsReverse: vi.fn(async () => ({ runs: [], hasMore: false })),
     },
-    conversationAuthorityRef: { current: null },
+    advancementConversationComposition,
+    worksceneAuthority: createAnchorWorksceneAuthorityProjection({
+      authority: authorityRuntime,
+      remoteWorkspaceProbe: REJECT_REMOTE_WORKSPACE_PROBE,
+    }),
+    worksceneConversationStorageProjectionCleanup:
+      createAnchorWorksceneConversationStorageProjectionCleanup(
+        conversationStorage.directory,
+      ),
+    worksceneSceneStorageRemoval: worksceneStorage.scenes,
     conversationRuntimeStorage: conversationStorage.runtime,
     conversationCommittedViewStorage: conversationStorage.committedViews,
     conversationNamingStorage: conversationStorage.naming,
@@ -150,6 +173,7 @@ async function setupCtx() {
     ctx,
     convDir,
     conversationIdentityLifecycle,
+    advancementConversationComposition,
   };
 }
 
@@ -171,7 +195,7 @@ describe("conversation 接入面：历史装载服从持久层不变量", { time
       ConversationProtocolRuntime.prototype,
       "assertManagerBound",
     );
-    const { ctx } = await setupCtx();
+    const { ctx, advancementConversationComposition } = await setupCtx();
     try {
       expect(bind).toHaveBeenCalledOnce();
       expect(verify).toHaveBeenCalledOnce();
@@ -180,6 +204,19 @@ describe("conversation 接入面：历史装载服从持久层不变量", { time
       expect(bindManager.mock.invocationCallOrder[0]).toBeLessThan(
         bind.mock.invocationCallOrder[0]!,
       );
+      expect(verifyManager.mock.invocationCallOrder[0]).toBeLessThan(
+        advancementConversationComposition.create.mock.invocationCallOrder[0]!,
+      );
+      expect(advancementConversationComposition.create).toHaveBeenCalledOnce();
+      const compositionInput = advancementConversationComposition.create.mock
+        .calls[0]?.[0];
+      expect(compositionInput?.sessionState).toBe(
+        ctx.conversationProtocol!.sessionState,
+      );
+      const getHistory = vi.spyOn(ctx.conversations!, "getHistory");
+      await expect(compositionInput?.recentContext.read("context-conversation"))
+        .resolves.toBeUndefined();
+      expect(getHistory).toHaveBeenCalledWith("context-conversation", 6);
       expect(bind.mock.invocationCallOrder[0]).toBeLessThan(
         verify.mock.invocationCallOrder[0]!,
       );

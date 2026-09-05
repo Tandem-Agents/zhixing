@@ -33,6 +33,7 @@ import {
   createWorksceneListTool,
   createWorksceneRenameCurrentTool,
   createWorksceneSetWorkdirCurrentTool,
+  WORKSCENE_PRODUCT_TOOL_IDS,
   type WorksceneToolDirectory,
 } from "./workmode-tools.js";
 import { ExecutionSchedulerFacade } from "./execution-scheduler-facade.js";
@@ -59,6 +60,48 @@ export interface AnchorRuntimeProjectionAssembly {
     readonly tools: readonly string[];
     readonly mcpServers: readonly string[];
   };
+}
+
+export interface AnchorRuntimeCapabilityCatalog {
+  capabilityCatalog(): {
+    readonly tools: readonly string[];
+    readonly mcpServers: readonly string[];
+  };
+}
+
+/**
+ * Static product capability view needed while the Authority generation starts.
+ * Tool identities come from the same canonical definitions used by the live
+ * runtime projection, without manufacturing an unbound Workscene directory.
+ */
+export function createAnchorRuntimeCapabilityCatalog(input: {
+  readonly extraTools: BuiltinExtraToolsAssembly;
+  readonly mcpTools: McpRuntimeToolProjectionPort;
+  readonly scheduler: () => SchedulerFacade;
+}): AnchorRuntimeCapabilityCatalog {
+  const executionScheduler = new ExecutionSchedulerFacade(input.scheduler);
+  return Object.freeze({
+    capabilityCatalog() {
+      const mcp = input.mcpTools.snapshot();
+      const tools = new Set<string>([
+        ...mainProfile().enabledTools,
+        ...powerProfile({
+          id: "capability-catalog",
+          name: "capability-catalog",
+          hasWorkspace: false,
+        }).enabledTools,
+        ...input.extraTools
+          .assembleTools({ scheduler: () => executionScheduler })
+          .map((tool) => tool.name),
+        ...mcp.tools.map((tool) => tool.name),
+        ...Object.values(WORKSCENE_PRODUCT_TOOL_IDS),
+      ]);
+      return Object.freeze({
+        tools: Object.freeze([...tools].sort()),
+        mcpServers: mcp.serverIds,
+      });
+    },
+  });
 }
 
 function mainProductTools(
@@ -88,6 +131,7 @@ function sceneProductTools(
 
 /** Anchor product composition; RuntimeHost only sees the frozen output. */
 export function createAnchorRuntimeProjectionAssembly(input: {
+  readonly capabilities: AnchorRuntimeCapabilityCatalog;
   readonly workscenes: WorksceneToolDirectory;
   readonly worksceneAssignmentTools: WorksceneAssignmentToolApplication;
   readonly extraTools: BuiltinExtraToolsAssembly;
@@ -155,25 +199,7 @@ export function createAnchorRuntimeProjectionAssembly(input: {
     scene,
     ephemeral,
     job,
-    capabilityCatalog() {
-      const tools = new Set<string>();
-      const addProjection = (projection: ConversationRuntimeProjection) => {
-        for (const tool of projection.profile.enabledTools) tools.add(tool);
-        for (const tool of projection.runtimeTools.extraTools) tools.add(tool.name);
-      };
-      const mainProjection = main();
-      addProjection(mainProjection);
-      const catalogScene = {
-        sceneId: "capability-catalog",
-        name: "capability-catalog",
-      };
-      addProjection(scene({ scene: catalogScene, absolutePath: null }));
-      addProjection(scene({ scene: catalogScene, absolutePath: "/capability-catalog" }));
-      return Object.freeze({
-        tools: Object.freeze([...tools].sort()),
-        mcpServers: mainProjection.runtimeTools.executionMcpServers,
-      });
-    },
+    capabilityCatalog: () => input.capabilities.capabilityCatalog(),
   });
 }
 

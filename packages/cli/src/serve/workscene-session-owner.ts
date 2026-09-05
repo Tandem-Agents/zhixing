@@ -8,26 +8,24 @@ import type { ConversationManager } from "@zhixing/owner-kernel";
 import type { WorksceneSceneStorageRemovalPort } from "./workscene-storage-removal.js";
 
 export interface WorksceneSessionOwnerOptions {
-  readonly conversations: () => ConversationManager | null;
+  readonly conversations: ConversationManager;
   readonly conversationStorageProjectionCleanup: WorksceneConversationStorageProjectionCleanupPort;
-  readonly authority: () =>
-    | {
-        touchWorksceneSession(input: {
-          conversationId: string;
-          sceneId: string;
-          requestId: string;
-          at: string;
-        }): Promise<{ readonly revision: number; readonly at: string }>;
-        deleteWorksceneSession(input: {
-          conversationId: string;
-          sceneId: string;
-          requestId: string;
-          at: string;
-        }): Promise<
-          { readonly revision: number; readonly at: string } | undefined
-        >;
-      }
-    | undefined;
+  readonly authority: {
+    touchWorksceneSession(input: {
+      conversationId: string;
+      sceneId: string;
+      requestId: string;
+      at: string;
+    }): Promise<{ readonly revision: number; readonly at: string }>;
+    deleteWorksceneSession(input: {
+      conversationId: string;
+      sceneId: string;
+      requestId: string;
+      at: string;
+    }): Promise<
+      { readonly revision: number; readonly at: string } | undefined
+    >;
+  };
   readonly sceneStorageRemoval: WorksceneSceneStorageRemovalPort;
 }
 
@@ -39,7 +37,7 @@ export interface WorksceneSessionOwnerOptions {
  * making scene ownership immutable after session creation.
  */
 export class WorksceneSessionOwner {
-  readonly #conversations: () => ConversationManager | null;
+  readonly #conversations: ConversationManager;
   readonly #conversationStorageProjectionCleanup: WorksceneConversationStorageProjectionCleanupPort;
   readonly #authority: WorksceneSessionOwnerOptions["authority"];
   readonly #sceneStorageRemoval: WorksceneSceneStorageRemovalPort;
@@ -60,12 +58,11 @@ export class WorksceneSessionOwner {
     const conversationId = worksceneConversationId(sceneId, "primary");
     this.#assertSceneConversation(sceneId, conversationId);
     const at = new Date().toISOString();
-    const manager = this.#conversations();
-    const observerClaimed =
-      manager?.addObserver(conversationId, observerId, {
-        allowInactive: true,
-      }) ?? false;
-    if (manager && !observerClaimed) {
+    const manager = this.#conversations;
+    const observerClaimed = manager.addObserver(conversationId, observerId, {
+      allowInactive: true,
+    });
+    if (!observerClaimed) {
       throw worksceneBusy(
         `Workscene ${sceneId} is being changed; try again later`,
       );
@@ -79,10 +76,10 @@ export class WorksceneSessionOwner {
           at,
         );
       }
-      if (manager) await manager.getOrCreate(conversationId);
+      await manager.getOrCreate(conversationId);
     } catch (error) {
       if (observerClaimed) {
-        manager?.removeObserver(conversationId, observerId);
+        manager.removeObserver(conversationId, observerId);
       }
       throw error;
     }
@@ -112,8 +109,7 @@ export class WorksceneSessionOwner {
     at: string,
   ): Promise<void> {
     this.#assertSceneConversation(sceneId, conversationId);
-    const manager = this.#conversations();
-    manager?.removeObserver(conversationId, observerId);
+    this.#conversations.removeObserver(conversationId, observerId);
     await this.#recordAuthority(
       sceneId,
       conversationId,
@@ -123,12 +119,9 @@ export class WorksceneSessionOwner {
   }
 
   async quiesce(sceneId: string): Promise<() => void> {
-    const manager = this.#conversations();
-    return manager
-      ? manager.quiescePrefix(
-          `${WORKSCENE_CONVERSATION_PREFIX}${sceneId}:`,
-        )
-      : () => {};
+    return this.#conversations.quiescePrefix(
+      `${WORKSCENE_CONVERSATION_PREFIX}${sceneId}:`,
+    );
   }
 
   async removeScene(
@@ -138,11 +131,7 @@ export class WorksceneSessionOwner {
     const at = new Date().toISOString();
     for (const conversationId of conversationIds) {
       this.#assertSceneConversation(sceneId, conversationId);
-      const authority = this.#authority();
-      if (!authority) {
-        throw new Error("Workscene session authority is unavailable");
-      }
-      await authority.deleteWorksceneSession({
+      await this.#authority.deleteWorksceneSession({
         conversationId,
         sceneId,
         requestId: `workscene-delete:${sceneId}:${conversationId}`,
@@ -162,11 +151,7 @@ export class WorksceneSessionOwner {
     requestId: string,
     at: string,
   ): Promise<string> {
-    const authority = this.#authority();
-    if (!authority) {
-      throw new Error("Workscene session authority is unavailable");
-    }
-    const receipt = await authority.touchWorksceneSession({
+    const receipt = await this.#authority.touchWorksceneSession({
       conversationId,
       sceneId,
       requestId,

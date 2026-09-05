@@ -34,6 +34,7 @@ import type {
 import type {
   DeviceRole,
   EvidenceHandlerPort,
+  SessionStatePort,
   SecretStorePort,
 } from "@zhixing/core/contracts";
 import type {
@@ -41,7 +42,6 @@ import type {
   StorageMaintenanceGovernorPort,
 } from "@zhixing/core/resources";
 import type {
-  McpRuntimeLifecyclePort,
   McpRuntimeStatusProjectionPort,
 } from "../runtime/mcp-runtime-ports.js";
 import type {
@@ -73,6 +73,11 @@ import type {
 } from "../setup-delivery.js";
 import type { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
 import type { ConversationProtocolRuntime } from "./conversation-protocol-runtime.js";
+import type { WorksceneApplication } from "@zhixing/core/workscene/application";
+import type { WorksceneConversationStorageProjectionCleanupPort } from "@zhixing/core/workscene/application";
+import type { AnchorWorksceneAuthorityProjection } from "./workscene-authority-projection.js";
+import type { AnchorWorksceneDirectory } from "./workscene-directory.js";
+import type { WorksceneSceneStorageRemovalPort } from "./workscene-storage-removal.js";
 import type {
   ConversationAssignmentStagingPort,
   ConversationExecutorDispatchApplication,
@@ -123,6 +128,7 @@ import type { AssignmentDataPlaneRemoteDirectory } from "./assignment-data-plane
 import type { DeviceRemovalLifecycleContribution } from "./device-removal-lifecycle-contribution.js";
 import type { PlannedDutyMigrationLifecycleContribution } from "./planned-duty-migration-lifecycle-contribution.js";
 import type { PostAdoptionReviewLifecycleContribution } from "./post-adoption-review.js";
+import type { AdvancementRecentContextPort } from "./advancement-controller.js";
 
 type ConversationRuntimeStoragePort = Readonly<
   Required<
@@ -136,6 +142,18 @@ type ConversationRuntimeStoragePort = Readonly<
     >
   >
 >;
+
+/** One construction-only contribution completed after the Conversation owner is bound. */
+export interface AdvancementConversationComposition {
+  create(input: Readonly<{
+    sessionState: SessionStatePort;
+    recentContext: AdvancementRecentContextPort;
+  }>): Promise<Readonly<{
+    controller: AdvancementController;
+    reviews: AdvancementReviewAttemptApplication;
+    lifecycle: AdvancementConversationLifecycleApplication;
+  }>>;
+}
 
 /** Closed assembly-only Mesh projection. It cannot expose runtime services before start succeeds. */
 export interface MeshRuntimePreparation {
@@ -194,7 +212,6 @@ export interface AssemblyContext {
 
   // ── 恒定核心（接入面 setup 前已建，供其读） ──
   readonly confirmationHub: ConfirmationHub;
-  readonly mcpLifecycle: McpRuntimeLifecyclePort;
   readonly mcpStatus: McpRuntimeStatusProjectionPort;
   readonly conversationRuntimeStorage: ConversationRuntimeStoragePort;
   readonly conversationCommittedViewStorage: ConversationCommittedViewStorage;
@@ -216,15 +233,17 @@ export interface AssemblyContext {
     deleteStoredConversation(conversationId: string): Promise<boolean>;
   };
   readonly taskListService: TaskListService;
-  readonly conversationAuthorityRef: {
-    current: ConversationProtocolRuntime | undefined;
-  };
+  /** Complete Authority projection used to assemble the one Workscene product. */
+  readonly worksceneAuthority: AnchorWorksceneAuthorityProjection;
+  readonly worksceneConversationStorageProjectionCleanup: WorksceneConversationStorageProjectionCleanupPort;
+  readonly worksceneSceneStorageRemoval: WorksceneSceneStorageRemovalPort;
   /** Stable fail-closed Host port installed by the Server activation owner. */
   readonly sessionBroadcast: SessionBroadcast;
   /** Stable activity port from the same Server transport generation. */
   readonly sessionActivityBroadcast: SessionActivityBroadcast;
   readonly advancementDirectory: AdvancementConversationDirectory;
   readonly advancementEvidenceRuntime: AdvancementEvidenceHostBindingPort;
+  readonly advancementConversationComposition: AdvancementConversationComposition;
   readonly startupRollback: StartupRollback;
   readonly lifecycleContributions: AssemblyLifecycleContributions;
   readonly channelHttpRoutes: Map<
@@ -236,8 +255,8 @@ export interface AssemblyContext {
   conversations?: ConversationManager;
   advancementRecovery?: AdvancementRecoveryMaintenance;
   advancement?: AdvancementController;
-  readonly advancementReviews: AdvancementReviewAttemptApplication;
-  readonly advancementConversationLifecycle: AdvancementConversationLifecycleApplication;
+  advancementReviews?: AdvancementReviewAttemptApplication;
+  advancementConversationLifecycle?: AdvancementConversationLifecycleApplication;
   channelStatuses?: () => readonly Readonly<ChannelStatus>[];
   channelDelivery?: ChannelDeliveryEffectSource;
   channelChallenges?: ChannelChallengeDeliveryPort;
@@ -268,6 +287,8 @@ export interface AssemblyContext {
   ) => FirstPartyFinalitySession;
   assetMaintenance?: SurfaceAssetMaintenance;
   conversationProtocol?: ConversationProtocolRuntime;
+  worksceneDirectory?: AnchorWorksceneDirectory;
+  worksceneApplication?: WorksceneApplication;
   conversationExecutorDispatch?: ConversationExecutorDispatchApplication;
   conversationExecutorTopologyDirectory?: ConversationExecutorTopologyDirectory;
   conversationAssignmentStaging?: ConversationAssignmentStagingPort;

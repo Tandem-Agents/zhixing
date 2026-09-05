@@ -1,8 +1,57 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  createAnchorWorksceneAdvancementApplicationPort,
   createAnchorWorksceneApplicationPorts,
   createAnchorWorksceneConversationStorageProjectionCleanup,
 } from "./workscene-application-adapter.js";
+
+describe("createAnchorWorksceneAdvancementApplicationPort", () => {
+  it("maps the finite recovery, active-state and diagnostic demands", async () => {
+    const projection = Object.freeze({
+      advancementSessionId: "adv-scene-1",
+      status: "active" as const,
+    });
+    const recovery = {
+      recoverConversation: vi.fn(async () => ({ status: "recovered" })),
+    };
+    const activeState = {
+      queryActiveState: vi.fn(async () => projection),
+    };
+    const logger = { error: vi.fn() };
+    const port = createAnchorWorksceneAdvancementApplicationPort({
+      recovery,
+      activeState,
+      logger,
+    });
+
+    await port.recoverConversation("ws:scene-1:conv_main");
+    await expect(port.queryActiveState("ws:scene-1:conv_main")).resolves.toBe(
+      projection,
+    );
+    const failure = new Error("recovery failed");
+    port.reportFailure({
+      conversationId: "ws:scene-1:conv_main",
+      error: failure,
+    });
+
+    expect(recovery.recoverConversation).toHaveBeenCalledWith(
+      "ws:scene-1:conv_main",
+    );
+    expect(activeState.queryActiveState).toHaveBeenCalledWith(
+      "ws:scene-1:conv_main",
+    );
+    expect(logger.error).toHaveBeenCalledWith(
+      "[workscene.enter] advancement recovery failed:",
+      failure,
+    );
+    expect(Object.keys(port)).toEqual([
+      "recoverConversation",
+      "queryActiveState",
+      "reportFailure",
+    ]);
+    expect(Object.isFrozen(port)).toBe(true);
+  });
+});
 
 describe("createAnchorWorksceneApplicationPorts", () => {
   it("maps management, entry and Workspace Administration to finite ports", async () => {

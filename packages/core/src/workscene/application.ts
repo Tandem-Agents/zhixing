@@ -10,6 +10,7 @@ import type {
   WorksceneDto,
   WorksceneWriteMutation,
 } from "../contracts/state.js";
+import type { AdvancementActiveStateProjection } from "../advancement/application.js";
 import { parseConversationId } from "../conversation/scope-id.js";
 import { normalizeSceneName } from "./validation.js";
 
@@ -317,6 +318,23 @@ export interface WorksceneManagementListResult {
 export interface WorksceneEntryResult {
   readonly conversationId: string;
   readonly scene: WorksceneManagementSummary;
+  readonly advancement?: AdvancementActiveStateProjection;
+}
+
+/**
+ * Workscene-owned demand port for post-entry Advancement collaboration.
+ * Its provider supplies existing Advancement behavior; Workscene owns the
+ * ordering and soft-degradation decision after the entry fact commits.
+ */
+export interface WorksceneAdvancementApplicationPort {
+  recoverConversation(conversationId: string): Promise<void>;
+  queryActiveState(
+    conversationId: string,
+  ): Promise<AdvancementActiveStateProjection | null>;
+  reportFailure(input: Readonly<{
+    conversationId: string;
+    error: unknown;
+  }>): void;
 }
 
 export interface WorksceneConversationRuntimeQuery {
@@ -418,39 +436,13 @@ export class WorksceneApplicationService
     private readonly workspaces: WorksceneWorkspaceAdministrationReadPort,
     private readonly entry: WorksceneEntryPort,
     private readonly runtime: WorksceneRuntimeProjectionReadPort,
+    private readonly advancement: WorksceneAdvancementApplicationPort,
   ) {}
 
   async projectConversationRuntime(
     query: WorksceneConversationRuntimeQuery,
   ): Promise<WorksceneConversationRuntimeProjection> {
-    if (
-      !query ||
-      typeof query !== "object" ||
-      typeof query.conversationId !== "string"
-    ) {
-      throw invalid("Workscene runtime projection requires a conversation identity");
-    }
-    const { scope } = parseConversationId(query.conversationId);
-    if (scope.kind !== "workscene") {
-      return Object.freeze({ kind: "main" as const });
-    }
-    const scene = await this.runtime.get(scope.sceneId);
-    if (!scene) {
-      throw new WorksceneApplicationError(
-        "not-found",
-        `工作场景 "${scope.sceneId}" 不存在,无法装配会话`,
-      );
-    }
-    return Object.freeze({
-      kind: "scene" as const,
-      scene: Object.freeze({ sceneId: scene.id, name: scene.name }),
-      workspace: scene.workspace
-        ? Object.freeze({
-            deviceId: scene.workspace.deviceId,
-            bindingRef: scene.workspace.bindingRef,
-          })
-        : null,
-    });
+    return projectWorksceneConversationRuntime(this.runtime, query);
   }
 
   async query(query: WorksceneManagementQuery): Promise<WorksceneManagementListResult> {
@@ -524,13 +516,29 @@ export class WorksceneApplicationService
             requestId: command.requestId,
           });
           if (!entered) throw notFound(sceneId);
+          const conversationId = assertSceneConversation(
+            sceneId,
+            entered.conversationId,
+          );
+          const scene = await this.project(entered.scene);
+          let advancement: AdvancementActiveStateProjection | undefined;
+          try {
+            await this.advancement.recoverConversation(conversationId);
+            advancement =
+              (await this.advancement.queryActiveState(conversationId)) ??
+              undefined;
+          } catch (error) {
+            try {
+              this.advancement.reportFailure({ conversationId, error });
+            } catch {
+              // Diagnostics cannot roll back or fail an already committed entry.
+            }
+          }
           return Object.freeze({
             kind: "entered" as const,
-            conversationId: assertSceneConversation(
-              sceneId,
-              entered.conversationId,
-            ),
-            scene: await this.project(entered.scene),
+            conversationId,
+            scene,
+            ...(advancement ? { advancement } : {}),
           });
         }
         case "exit": {
@@ -560,6 +568,45 @@ export class WorksceneApplicationService
     const metadata = scene.workspace ? await this.workspaces.list() : [];
     return projectSummary(scene, metadata, workspaceWarning);
   }
+}
+
+/**
+ * The single domain-owned conversation projection rule. The Anchor can use it
+ * while assembling the runtime factory without constructing a second
+ * Workscene application or interpreting Workscene identity itself.
+ */
+export async function projectWorksceneConversationRuntime(
+  runtime: WorksceneRuntimeProjectionReadPort,
+  query: WorksceneConversationRuntimeQuery,
+): Promise<WorksceneConversationRuntimeProjection> {
+    if (
+      !query ||
+      typeof query !== "object" ||
+      typeof query.conversationId !== "string"
+    ) {
+      throw invalid("Workscene runtime projection requires a conversation identity");
+    }
+    const { scope } = parseConversationId(query.conversationId);
+    if (scope.kind !== "workscene") {
+      return Object.freeze({ kind: "main" as const });
+    }
+    const scene = await runtime.get(scope.sceneId);
+    if (!scene) {
+      throw new WorksceneApplicationError(
+        "not-found",
+        `工作场景 "${scope.sceneId}" 不存在,无法装配会话`,
+      );
+    }
+    return Object.freeze({
+      kind: "scene" as const,
+      scene: Object.freeze({ sceneId: scene.id, name: scene.name }),
+      workspace: scene.workspace
+        ? Object.freeze({
+            deviceId: scene.workspace.deviceId,
+            bindingRef: scene.workspace.bindingRef,
+          })
+        : null,
+    });
 }
 
 function normalizeName(name: string): string {

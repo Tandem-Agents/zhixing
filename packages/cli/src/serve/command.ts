@@ -8,7 +8,7 @@
  *   2. 建 AssemblyContext，`setupAssemblyUnits(pre-server)` 数据驱动装入稳定核心单元与 profile 接入面
  *      （MCP / 会话执行面 / 通道 / 投递栈 / 文本确认渲染器，产物写回 ctx）
  *   3. 恒定核心后置（ephemeralRuntime / runAgentTurn / systemHandlers）—— ephemeralRuntime 消费
- *      mcp 接入面 connectAll 后的工具目录，故排在 pre-server 接入面之后构造
+ *      Host 前置阶段 connectAll 后的工具目录，故排在 pre-server 接入面之后构造
  *   4. 构造核心 Scheduler（读 ctx.deliveryStack）+ start + seed 系统任务
  *   5. createServerContext + runServer
  *   6. `setupAssemblyUnits(post-server)`（confirmationBridge，依赖 runServer 后的 connections）
@@ -92,9 +92,9 @@ import {
 } from "@zhixing/core/product-api";
 import {
   createWorksceneProductApiContribution,
+  projectWorksceneConversationRuntime,
   WORKSCENE_PRODUCT_API_EXACT_SET,
   WorksceneApplicationError,
-  WorksceneApplicationService,
   type WorksceneWorkspaceReference,
 } from "@zhixing/core/workscene/application";
 import { DeviceLifecycleJournal } from "@zhixing/core/authority";
@@ -125,7 +125,6 @@ import {
 import {
   AnchorSchedulerProductPort,
   ConfirmationHub,
-  type ConversationManager,
 } from "@zhixing/owner-kernel";
 import {
   createRunEventForwarder,
@@ -133,9 +132,7 @@ import {
 } from "@zhixing/rpc";
 import { AssignmentStreamPathUnavailableError } from "./assignment-stream-path-manager.js";
 import { AnchorSessionBroadcastLifecycle } from "./anchor-session-broadcast-lifecycle.js";
-import { renderRecentContextFromMessages } from "@zhixing/owner-services";
 import { loadCredentials, resolveModelCapability } from "@zhixing/providers";
-import fsp from "node:fs/promises";
 import chalk from "chalk";
 import { isProcessAlive } from "@zhixing/server";
 import { RuntimeHost } from "@zhixing/runtime-host";
@@ -186,9 +183,7 @@ import { createAnchorConversationSecurityProjectionPort } from "./conversation-s
 import {
   createAnchorConversationDeleteCommitPort,
 } from "./conversation-delete-binding.js";
-import { createWorksceneDirectory } from "./workscene-directory.js";
 import {
-  createAnchorWorksceneApplicationPorts,
   createAnchorWorksceneAssignmentToolApplication,
   createAnchorWorksceneConversationStorageProjectionCleanup,
 } from "./workscene-application-adapter.js";
@@ -203,10 +198,11 @@ import { setupAssemblyUnits, type AssemblyContext } from "./access-surface.js";
 import { DEFAULT_PROFILE, type ServerProfile } from "./profile.js";
 import { createAssemblyUnits } from "./access-surfaces.js";
 import { DurableConversationInteractionObserver } from "./conversation-protocol-runtime.js";
-import type { AuthorityRuntimeStack } from "../setup-delivery.js";
+import { setupAuthorityRuntime } from "../setup-delivery.js";
 import { createExecutorReadinessSource } from "./executor-readiness.js";
 import {
   createWorksceneConversationRuntimeFactory,
+  createAnchorRuntimeCapabilityCatalog,
   createAnchorRuntimeProjectionAssembly,
 } from "./workscene-runtime-projection.js";
 import { StartupRollback } from "./startup-rollback.js";
@@ -272,11 +268,15 @@ import { MeshConnectionRegistry } from "@zhixing/mesh/bootstrap";
 import { ownsCurrentSuccessorEndpoint } from "./startup-server-owner.js";
 import { AnchorInternalStopLifecycle } from "./anchor-internal-stop.js";
 import { AnchorHostShellLifecycle } from "./anchor-host-shell-lifecycle.js";
-import { MeshExecutorTopologyTrustState } from "./mesh-runtime-assembly.js";
+import {
+  executorIdForDevice,
+  MeshExecutorTopologyTrustState,
+} from "./mesh-runtime-assembly.js";
 import {
   MeshWorksceneRemoteWorkspaceProbe,
   REJECT_REMOTE_WORKSPACE_PROBE,
 } from "./workscene-remote-workspace-probe.js";
+import { createAnchorWorksceneAuthorityProjection } from "./workscene-authority-projection.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
@@ -355,6 +355,9 @@ async function runServerProcess(
   plan: ServeTopologyPlan,
 ): Promise<void> {
   const startupRollback = new StartupRollback();
+  const lifecycleContributions = new AssemblyLifecycleContributions(
+    startupRollback,
+  );
   let startupRegistry: CleanupRegistry | undefined;
   let runner: RunningServer | undefined;
   try {
@@ -581,45 +584,10 @@ async function runServerProcess(
       ensureTranscript: (conversationId) =>
         conversationDirectory.ensureTranscript(conversationId),
     });
-  // ConversationManager lazy ref——会话执行面(access surface)setup 后回填;
-  // 工作场景领域服务与 workmode 工具删除入口运行期读取。
-  const conversationsRef: { current: ConversationManager | null } = {
-    current: null,
-  };
-  const authorityRuntimeRef: { current: AuthorityRuntimeStack | undefined } = {
-    current: undefined,
-  };
-  const conversationAuthorityRef: {
-    current: import("./conversation-protocol-runtime.js").ConversationProtocolRuntime | undefined;
-  } = { current: undefined };
-  // 工作场景域——注册表单例(管理面 + factory 的场景装配路由共用)与场景对话取建。
   const worksceneConversationStorageProjectionCleanup =
     createAnchorWorksceneConversationStorageProjectionCleanup(
       conversationDirectory,
     );
-  const worksceneDirectory = createWorksceneDirectory({
-    authority: () => authorityRuntimeRef.current,
-    conversations: () => conversationsRef.current,
-    conversationAuthority: () => conversationAuthorityRef.current,
-    conversationStorageProjectionCleanup:
-      worksceneConversationStorageProjectionCleanup,
-    sceneStorageRemoval: worksceneStorageCleanup.scenes,
-    recoverWorksceneState: async () => {
-      await authorityRuntimeRef.current?.recoverWorksceneState();
-    },
-    replayWorksceneMutation: async (requestId) =>
-      (await authorityRuntimeRef.current?.replayWorksceneMutation(requestId)) ??
-      null,
-    remoteWorkspaceProbe,
-  });
-  const worksceneApplicationPorts =
-    createAnchorWorksceneApplicationPorts(worksceneDirectory);
-  const worksceneApplication = new WorksceneApplicationService(
-    worksceneApplicationPorts.management,
-    worksceneApplicationPorts.workspaces,
-    worksceneApplicationPorts.entry,
-    worksceneApplicationPorts.runtime,
-  );
   const worksceneAssignmentTools =
     createAnchorWorksceneAssignmentToolApplication();
   // Trust Administration owns management semantics; the adapter below only
@@ -707,13 +675,17 @@ async function runServerProcess(
   //   在会话执行面 / 通道 / ephemeralRuntime / ServerContext 之前创建，以便各组件构造时能接入。
   const confirmationHub = new ConfirmationHub();
 
-  // 3b. MCP host —— 创建（不 eager 连接）。connectAll 由 mcp 接入面在 pre-server 阶段触发，
-  //   故 schedule 档（无 mcp 接入面）省去 eager 连接，仅 hub 对象在位、ephemeral 可用 builtin 工具。
+  // 3b. MCP host —— Authority 的 executor readiness 必须读取与实际 runtime 相同的
+  //   已连接工具目录，因此连接与唯一 cleanup owner 在 Authority 构造前成立。
   //   serve 进程内单例，多 session 共享同一批连接。空配置时为 no-op。
   const mcpRuntime = createHostMcpRuntime(
     parseServerSpecs(mcpConfiguration.mcp, mcpCredentials.mcp),
     { networkProxy: mcpConfiguration.network?.proxy },
   );
+  lifecycleContributions.acquire("mcpRuntime.close", () =>
+    mcpRuntime.lifecycle.close(),
+  );
+  await mcpRuntime.lifecycle.connect();
 
   // 3c. Builtin extra tools assembly —— task_list / schedule 工具的装配点，所有
   //   per-session runtime 共享同一 service 单例（cache by sessionId/conversationId）。
@@ -723,8 +695,53 @@ async function runServerProcess(
     conversationStorage.taskLists,
     createAnchorConversationTaskListToolApplication(),
   );
+  const anchorRuntimeCapabilities = createAnchorRuntimeCapabilityCatalog({
+    extraTools: builtinExtraTools,
+    mcpTools: mcpRuntime.tools,
+    scheduler: getSchedulerFacade,
+  });
+  const executorReadiness = createExecutorReadinessSource({
+    runtime: anchorRuntimeCapabilities,
+    credentials: credentialExposureCredentials,
+    credentialGeneration,
+  });
+  const authorityRuntime = await setupAuthorityRuntime({
+    zhixingHome,
+    secretStore: bootstrap.secretStore,
+    deviceKey: bootstrap.mesh.deviceKey,
+    trustedIdentities: bootstrap.mesh.trustedIdentities,
+    authorizedDeviceIds: bootstrap.mesh.authorizedDeviceIds,
+    executorId: executorIdForDevice(bootstrap.mesh.deviceKey.deviceId),
+    ...(bootstrap.mesh.mode === "trusted-home" &&
+    bootstrap.mesh.installedAuthorityGeneration
+      ? {
+          anchorEpoch:
+            bootstrap.mesh.installedAuthorityGeneration.anchorEpoch,
+          installedAuthorityGeneration:
+            bootstrap.mesh.installedAuthorityGeneration,
+        }
+      : {}),
+    configurationSnapshot: {
+      config: authorityConfiguration,
+      executableVersion: ZHIXING_CLI_VERSION,
+    },
+    executorReadiness,
+    enableLocalExecutor: bootstrap.mesh.roles.includes("executor"),
+    storageMaintenance: deviceCapacity.storage,
+    deviceCapacity: deviceCapacity.arbiter,
+    startupRollback,
+  });
+  lifecycleContributions.contribute(
+    "authorityRuntime.stopStorageMaintenance",
+    authorityRuntime.startupCleanup,
+  );
+  const worksceneAuthority = createAnchorWorksceneAuthorityProjection({
+    authority: authorityRuntime,
+    remoteWorkspaceProbe,
+  });
   const anchorRuntimeProjections = createAnchorRuntimeProjectionAssembly({
-    workscenes: worksceneDirectory,
+    capabilities: anchorRuntimeCapabilities,
+    workscenes: worksceneAuthority.tools,
     worksceneAssignmentTools,
     extraTools: builtinExtraTools,
     mcpTools: mcpRuntime.tools,
@@ -740,60 +757,53 @@ async function runServerProcess(
 
   const durableInteractions = new DurableConversationInteractionObserver();
   const advancementEvidenceRuntime = new AdvancementEvidenceHostBinding();
-  const {
-    controller: advancementController,
-    reviews: advancementReviews,
-  } = await createServeAdvancementApplications({
-    modelProvider: createHostAdvancementModelProviderFactory({
-      configuration: advancementConfiguration,
-      credentials: providerCredentials,
-    }),
-    // control 治理端口——authority runtime 在 pre-server surface 装配（晚于此处），
-    // 惰性取值；advancement 外调发生在运行期，届时必已就绪
-    governor: () => ctx.authorityRuntime?.resourceGovernor,
-    // 会话状态端口——conversation 权威运行时在 surface 装配期创建，惰性取值
-    sessionState: () => ctx.conversationProtocol?.sessionState,
-    evidenceRuntime: advancementEvidenceRuntime,
-    rubricRuntime: () => {
-      const authority = ctx.authorityRuntime;
-      if (!authority?.globalState) return undefined;
-      return {
-        globalState: authority.globalState,
-        artifacts: authority.rubricArtifacts,
-        anchorEpoch: authority.anchorEpoch,
-      };
-    },
-    // 准入投影：活跃会话窗口尾部（lazy ref，manager 未就绪时无投影）；
-    // 延迟基线进 serve 日志作观测数据。
-    recentContextProvider: async (conversationId) =>
-      renderRecentContextFromMessages(
-        conversationsRef.current?.getHistory(conversationId, 6),
-      ),
-    onAdmissionTiming: (elapsedMs) => {
-      console.log(chalk.dim(`[advancement] admission ${elapsedMs}ms`));
-    },
-  });
-  const advancementConversationLifecycle =
-    new AdvancementConversationLifecycleApplicationService({
-      mechanism: {
-        loadOpenConversationLifecycleSession: (conversationId) =>
-          advancementController.loadOpenConversationLifecycleSession(
-            conversationId,
-          ),
-        persistConversationLifecycleCancellation: (input) =>
-          advancementReviews.cancelSession(input),
-        removeConversationData: (conversationId) =>
-          advancementController.removeConversationLifecycleData(conversationId),
-        listConversationDataCandidates: () =>
-          advancementController.listConversationLifecycleDataCandidates(),
-        removeConversationDataCandidate: (candidateId) =>
-          advancementController.removeConversationLifecycleDataCandidate(
-            candidateId,
-          ),
-      },
-      conversationAlive: {
-        isConversationDataAlive:
-          conversationStorage.maintenance.isConversationDataAlive,
+  const advancementConversationComposition: AssemblyContext["advancementConversationComposition"] =
+    Object.freeze({
+      async create(
+        input: Parameters<
+          AssemblyContext["advancementConversationComposition"]["create"]
+        >[0],
+      ) {
+        const { controller, reviews } = await createServeAdvancementApplications({
+          modelProvider: createHostAdvancementModelProviderFactory({
+            configuration: advancementConfiguration,
+            credentials: providerCredentials,
+          }),
+          // Authority is complete here; the existing generation-aware governor
+          // projection remains intentionally dynamic and is outside this seam.
+          governor: () => authorityRuntime.resourceGovernor,
+          sessionState: input.sessionState,
+          recentContext: input.recentContext,
+          evidenceRuntime: advancementEvidenceRuntime,
+          rubricRuntime: () => ({
+            globalState: authorityRuntime.globalState!,
+            artifacts: authorityRuntime.rubricArtifacts,
+            anchorEpoch: authorityRuntime.anchorEpoch,
+          }),
+          onAdmissionTiming: (elapsedMs) => {
+            console.log(chalk.dim(`[advancement] admission ${elapsedMs}ms`));
+          },
+        });
+        const lifecycle =
+          new AdvancementConversationLifecycleApplicationService({
+            mechanism: {
+              loadOpenConversationLifecycleSession: (conversationId) =>
+                controller.loadOpenConversationLifecycleSession(conversationId),
+              persistConversationLifecycleCancellation: (request) =>
+                reviews.cancelSession(request),
+              removeConversationData: (conversationId) =>
+                controller.removeConversationLifecycleData(conversationId),
+              listConversationDataCandidates: () =>
+                controller.listConversationLifecycleDataCandidates(),
+              removeConversationDataCandidate: (candidateId) =>
+                controller.removeConversationLifecycleDataCandidate(candidateId),
+            },
+            conversationAlive: {
+              isConversationDataAlive:
+                conversationStorage.maintenance.isConversationDataAlive,
+            },
+          });
+        return Object.freeze({ controller, reviews, lifecycle });
       },
     });
 
@@ -803,24 +813,17 @@ async function runServerProcess(
   //   turn-context provider 集合在 runtime 发布前作为固定装配输入建立——scheduler
   //   是 generation-safe 的领域运行投影，LLM 调用时刻权威已就绪；未就绪时
   //   fallback 空状态。
-  const resolveWorksceneWorkspaceRoot = async (
+  const resolveWorksceneWorkspaceRoot = (
     sceneId: string,
     workspace: WorksceneWorkspaceReference,
-  ): Promise<string> => {
-    const runtime = authorityRuntimeRef.current;
-    if (!runtime?.environment || workspace.deviceId !== runtime.deviceId) {
-      throw new Error(`工作场景 "${sceneId}" 的工作区不属于当前 executor`);
-    }
-    const resolved = await runtime.environment.resolveWorkspace(
-      workspace.bindingRef,
-    );
-    return resolved.absolutePath;
-  };
+  ): Promise<string> =>
+    worksceneAuthority.resolveWorkspaceRoot(sceneId, workspace);
   const resolveWorksceneRoot = async (sceneId: string): Promise<string | null> => {
     try {
-      const projection = await worksceneApplication.projectConversationRuntime({
-        conversationId: worksceneConversationId(sceneId, "guidance"),
-      });
+      const projection = await projectWorksceneConversationRuntime(
+        worksceneAuthority.runtime,
+        { conversationId: worksceneConversationId(sceneId, "guidance") },
+      );
       if (projection.kind !== "scene" || !projection.workspace) return null;
       return resolveWorksceneWorkspaceRoot(sceneId, projection.workspace);
     } catch (error) {
@@ -831,72 +834,20 @@ async function runServerProcess(
     }
   };
 
-  const runtimeHost = new RuntimeHost({
-    modelProvider: createHostKernelModelProviderFactory({
-      configuration: modelConfiguration,
-      credentials: providerCredentials,
-    }),
-    runtimeEnvironment: createHostKernelRuntimeEnvironmentFactory({
-      configuration: kernelEnvironmentConfiguration,
-    }),
-    toolImplementation: bootstrap.toolImplementation,
-    permissionStorage: permissionStorage.runtime,
-    confirmationLifecycleObserver: durableInteractions,
-    systemProtectedPaths,
-    artifactStore: () => {
-      const runtime = authorityRuntimeRef.current;
-      if (!runtime) throw new Error("Runtime artifact store is not ready");
-      return runtime.artifacts;
-    },
-    segmentDeps: serveSegmentDeps,
-    deviceCapacity: {
-      interactive: deviceCapacity.workload("workload-interactive"),
-      scheduler: deviceCapacity.workload("workload-scheduler"),
-      orchestration: deviceCapacity.workload("workload-orchestration"),
-    },
-    // 推进闭环 active 期间把契约验收条件注入执行侧发送视图——订阅者按
-    // conversationId 运行期查推进会话状态，装配期不绑定任何对话。
-    lifecycle: [
-      createAdvancementAcceptanceLifecycle(advancementController),
-      createZhixingGuidanceLifecycle({
-        getZhixingHome,
-        resolveWorksceneRoot,
-        readGuidanceFile,
-        loadLayeredGuidance,
-      }),
-    ],
-    // 渠道下游(飞书/RPC)可看到子 agent 冒泡事件,renderDecorator 在非 TTY
-    // 模式下退化为只输出 Task 起止帧(子工具中间事件静默,避免日志爆炸)。
-    decorateRunBus: serveDecorateRunBus,
-    onSecurityBlocked: createBlockedRenderer(serveWriter),
-    turnContextProviders: () =>
-      createCliTurnContextProviders({
-        getSchedulerStatus: () => schedulerApplication.readStatus().turnContext,
-        taskListService: builtinExtraTools.taskListService,
-      }),
-  });
-
   const createConversationAgentRuntime = createWorksceneConversationRuntimeFactory({
     issue: (projection) => runtimeHost.createConversationRuntime(projection),
     projections: anchorRuntimeProjections,
     projectConversationRuntime: (query) =>
-      worksceneApplication.projectConversationRuntime(query),
+      projectWorksceneConversationRuntime(worksceneAuthority.runtime, query),
     resolveWorkspaceRoot: resolveWorksceneWorkspaceRoot,
-    prepareWorkspaceRoot: async (sceneId, absolutePath) => {
-      const runtime = authorityRuntimeRef.current!;
-      const probe = await runtime.environment!.probePath(absolutePath);
-      if (probe === "missing") {
-        await fsp.mkdir(absolutePath, { recursive: true });
-      } else if (probe !== "directory") {
-        throw new Error(`工作场景 "${sceneId}" 的工作区不可用于执行: ${probe}`);
-      }
-    },
+    prepareWorkspaceRoot: (sceneId, absolutePath) =>
+      worksceneAuthority.prepareWorkspaceRoot(sceneId, absolutePath),
   });
 
   // RuntimeFactory —— 会话执行面（接入面）建 per-session runtime 的工厂。schedule 档无
   //   会话执行面，工厂作无副作用留位（不连接、不建目录）。
-  //   注：工厂内实例发放是 lazy（session 调用时才建），那时 mcp 接入面 connectAll
-  //   早已完成（pre-server 阶段），故工厂装配可前置、不受 connectAll 时序约束（与 eager 的
+  //   注：工厂内实例发放是 lazy（session 调用时才建），那时 Host MCP 前置 connectAll
+  //   早已完成，故工厂装配可前置、不受 connectAll 时序约束（与 eager 的
   //   ephemeralRuntime 不同——后者须排在接入面之后，见下）。
   const executorRole = executor?.createExecutorRole({
     createAgentRuntime: createConversationAgentRuntime,
@@ -922,19 +873,10 @@ async function runServerProcess(
         },
       })
     : undefined;
-  const executorReadiness = createExecutorReadinessSource({
-    runtime: anchorRuntimeProjections,
-    credentials: credentialExposureCredentials,
-    credentialGeneration,
-  });
-
   // ============================================================================
   // 有序装配 —— 稳定核心单元恒启用，profile 仅选择可选接入面；setupAssemblyUnits
   // 按依赖拓扑序遍历、各自 setup（产物写回 ctx）。主干不出现任何 `if (profile === ...)`。
   // ============================================================================
-  const lifecycleContributions = new AssemblyLifecycleContributions(
-    startupRollback,
-  );
   const channelHttpRoutes: AssemblyContext["channelHttpRoutes"] = new Map();
   const anchorInternalStopLifecycle = new AnchorInternalStopLifecycle();
   const anchorInternalStop = anchorInternalStopLifecycle.port;
@@ -965,7 +907,6 @@ async function runServerProcess(
     storageMaintenance: deviceCapacity.storage,
     localWorkspaceIdentity: bootstrap.localWorkspaceIdentity,
     confirmationHub,
-    mcpLifecycle: mcpRuntime.lifecycle,
     mcpStatus: mcpRuntime.status,
     conversationRuntimeStorage: conversationStorage.runtime,
     conversationCommittedViewStorage: conversationStorage.committedViews,
@@ -979,7 +920,10 @@ async function runServerProcess(
     conversationClearProjection: conversationDirectory,
     conversationDeleteProjection: conversationDirectory,
     taskListService: builtinExtraTools.taskListService,
-    conversationAuthorityRef,
+    authorityRuntime,
+    worksceneAuthority,
+    worksceneConversationStorageProjectionCleanup,
+    worksceneSceneStorageRemoval: worksceneStorageCleanup.scenes,
     sessionBroadcast,
     sessionActivityBroadcast,
     advancementDirectory: {
@@ -989,12 +933,10 @@ async function runServerProcess(
         conversationDirectory.readRunsReverse(conversationId, options),
     },
     advancementEvidenceRuntime,
+    advancementConversationComposition,
     startupRollback,
     lifecycleContributions,
     channelHttpRoutes,
-    advancement: advancementController,
-    advancementReviews,
-    advancementConversationLifecycle,
     enabledRoles: bootstrap.mesh.roles,
     meshBootstrap: bootstrap.mesh,
     meshConnectionProjection,
@@ -1009,9 +951,78 @@ async function runServerProcess(
   let removalBootstrapAdmissionClosed = true;
   const assemblyUnits = createAssemblyUnits(channelCredentials);
 
-  // pre-server 接入面：MCP（connectAll）/ 会话执行面 / 无损数据面 / 通道门面 / 投递栈。
-  // 产物写回 ctx.conversations / losslessDataPlane / channels / inboundRouter / deliveryStack。
-  await setupAssemblyUnits(assemblyUnits, ctx, "pre-server");
+  // Conversation owner is the construction boundary for Advancement. Assemble
+  // through that unit first, then create the one RuntimeHost from the completed
+  // direct ports before any recovery, ingress, or Product API consumer can run.
+  const conversationAssemblyIndex = assemblyUnits.findIndex(
+    (unit) => unit.name === "conversation",
+  );
+  if (conversationAssemblyIndex < 0) {
+    throw new Error("Conversation assembly unit is required");
+  }
+  await setupAssemblyUnits(
+    assemblyUnits.slice(0, conversationAssemblyIndex + 1),
+    ctx,
+    "pre-server",
+  );
+  const advancementController = ctx.advancement;
+  const advancementReviews = ctx.advancementReviews;
+  const advancementConversationLifecycle =
+    ctx.advancementConversationLifecycle;
+  if (
+    !advancementController ||
+    !advancementReviews ||
+    !advancementConversationLifecycle
+  ) {
+    throw new Error(
+      "Conversation assembly did not publish the Advancement application",
+    );
+  }
+
+  const runtimeHost = new RuntimeHost({
+    modelProvider: createHostKernelModelProviderFactory({
+      configuration: modelConfiguration,
+      credentials: providerCredentials,
+    }),
+    runtimeEnvironment: createHostKernelRuntimeEnvironmentFactory({
+      configuration: kernelEnvironmentConfiguration,
+    }),
+    toolImplementation: bootstrap.toolImplementation,
+    permissionStorage: permissionStorage.runtime,
+    confirmationLifecycleObserver: durableInteractions,
+    systemProtectedPaths,
+    artifactStore: () => authorityRuntime.artifacts,
+    segmentDeps: serveSegmentDeps,
+    deviceCapacity: {
+      interactive: deviceCapacity.workload("workload-interactive"),
+      scheduler: deviceCapacity.workload("workload-scheduler"),
+      orchestration: deviceCapacity.workload("workload-orchestration"),
+    },
+    lifecycle: [
+      createAdvancementAcceptanceLifecycle(advancementController),
+      createZhixingGuidanceLifecycle({
+        getZhixingHome,
+        resolveWorksceneRoot,
+        readGuidanceFile,
+        loadLayeredGuidance,
+      }),
+    ],
+    decorateRunBus: serveDecorateRunBus,
+    onSecurityBlocked: createBlockedRenderer(serveWriter),
+    turnContextProviders: () =>
+      createCliTurnContextProviders({
+        getSchedulerStatus: () => schedulerApplication.readStatus().turnContext,
+        taskListService: builtinExtraTools.taskListService,
+      }),
+  });
+
+  // Finish the pre-server graph only after the immutable Advancement/RuntimeHost
+  // knot is closed. Later units may now publish recovery and ingress consumers.
+  await setupAssemblyUnits(
+    assemblyUnits.slice(conversationAssemblyIndex + 1),
+    ctx,
+    "pre-server",
+  );
   ctx.authorityCheckpointOwner = await createConfiguredCheckpointOwner({
     backupTargets: createBackupTargetConfigurationInfrastructure(zhixingHome),
     publishedDirectoryTargets: createPublishedCheckpointTargetInfrastructure({
@@ -1054,14 +1065,17 @@ async function runServerProcess(
     hostShellLifecycle.acquireCheckpointOwner(ctx.authorityCheckpointOwner);
   }
   await ctx.authorityCheckpointOwner?.start();
-  authorityRuntimeRef.current = ctx.authorityRuntime;
-  conversationsRef.current = ctx.conversations ?? null;
+  const worksceneDirectory = ctx.worksceneDirectory;
+  const worksceneApplication = ctx.worksceneApplication;
+  if (!worksceneDirectory || !worksceneApplication) {
+    throw new Error("Workscene product composition is incomplete");
+  }
   await worksceneDirectory.recover();
 
   // ============================================================================
   // 恒定核心后置 —— 须在 pre-server 接入面之后构造。
-  // Anchor 产品投影从有限 MCP 端口同步取得当前工具目录，而目录由 MCP 接入面
-  // connectAll 填充；故这个 eager runtime 必须排在 mcp 接入面之后，
+  // Anchor 产品投影从有限 MCP 端口同步取得当前工具目录，而目录已在 Authority
+  // readiness 之前 connectAll；故这个 eager runtime 必须排在 Host MCP 前置之后，
   // 否则其 system prompt 缺 MCP 工具（runtimeFactory 是 lazy，session 调用时 connectAll 已完成，
   // 不受此序约束、可前置）。
   // ============================================================================
@@ -1723,8 +1737,7 @@ async function runServerProcess(
     await recoverAdvancementAcceptedWork();
   }
 
-  const authorityRuntime = authorityRuntimeRef.current;
-  if (!authorityRuntime?.globalState) {
+  if (!authorityRuntime.globalState) {
     throw new Error("Skill management requires the anchor global-state authority");
   }
 
@@ -2541,20 +2554,16 @@ async function runServerProcess(
         deleteStoredConversation: (conversationId) =>
           conversationDirectory.deleteStoredConversation(conversationId),
       },
-      ...(ctx.advancement
-        ? {
-            related: {
-              cancelDependentLifecycle: (conversationId) =>
-                advancementConversationLifecycle.cancelConversationLifecycle(
-                  conversationId,
-                ),
-              removeDependentData: (conversationId) =>
-                advancementConversationLifecycle.removeConversationData(
-                  conversationId,
-                ),
-            },
-          }
-        : {}),
+      related: {
+        cancelDependentLifecycle: (conversationId) =>
+          advancementConversationLifecycle.cancelConversationLifecycle(
+            conversationId,
+          ),
+        removeDependentData: (conversationId) =>
+          advancementConversationLifecycle.removeConversationData(
+            conversationId,
+          ),
+      },
       publishFact: (fact) => {
         ctx.sessionBroadcast(
           fact.conversationId,
@@ -2565,19 +2574,15 @@ async function runServerProcess(
     }),
     runControl: createAnchorConversationRunControlPort({
       conversations: ctx.conversations!,
-      ...(ctx.advancement
-        ? {
-            advancement: {
-              settle: ({ conversationId, ingressId }) =>
-                ctx.advancementReviews
-                  .settleProxyRun({ conversationId, proxyMessageId: ingressId })
-                  .then(() => undefined),
-              recover: async (conversationId) => {
-                await advancementRecovery?.recoverConversation(conversationId);
-              },
-            },
-          }
-        : {}),
+      advancement: {
+        settle: ({ conversationId, ingressId }) =>
+          advancementReviews
+            .settleProxyRun({ conversationId, proxyMessageId: ingressId })
+            .then(() => undefined),
+        recover: async (conversationId) => {
+          await advancementRecovery?.recoverConversation(conversationId);
+        },
+      },
     }),
     runtime: {
       read: (conversationId) => {
@@ -2592,18 +2597,14 @@ async function runServerProcess(
         };
       },
     },
-    advancement: ctx.advancement
-      ? {
-          read: async (conversationId) =>
-            (await ctx.advancementReviews.queryActiveState(conversationId)) ??
-            undefined,
-        }
-      : undefined,
+    advancement: {
+      read: async (conversationId) =>
+        (await advancementReviews.queryActiveState(conversationId)) ?? undefined,
+    },
   });
-  const advancementDetailController = ctx.advancement;
-  const advancementApplication = advancementDetailController
-    ? new AdvancementApplicationService({
-          activeState: ctx.advancementReviews,
+  const advancementDetailController = advancementController;
+  const advancementApplication = new AdvancementApplicationService({
+          activeState: advancementReviews,
           detail: {
             loadLatestSession: (conversationId) =>
               advancementDetailController.loadLatestSession(conversationId),
@@ -2663,7 +2664,7 @@ async function runServerProcess(
                 sessionId,
               ),
             persistRubricCancellation: (input) =>
-              ctx.advancementReviews.cancelSession(input),
+              advancementReviews.cancelSession(input),
           },
           awaitingRubricAdmission: advancementDetailController,
           rubricConfirmation: advancementDetailController,
@@ -2679,11 +2680,9 @@ async function runServerProcess(
             createAnchorAdvancementConfirmedOriginalTaskAdmissionPort(
               conversationApplication,
             ),
-        })
-    : undefined;
-  const advancementProductApi = advancementApplication
-    ? createAdvancementProductApiContribution(advancementApplication)
-    : undefined;
+        });
+  const advancementProductApi =
+    createAdvancementProductApiContribution(advancementApplication);
   const deviceAdministrationProductApi = ctx.meshRuntime
     ? createDeviceAdministrationProductApiContribution(
         new DeviceAdministrationApplicationService({
@@ -2820,7 +2819,6 @@ async function runServerProcess(
         }
       : {}),
     conversations: ctx.conversations,
-    advancementRecovery,
     perspectives: perspectivesController,
     productApi,
     hostInfo: {

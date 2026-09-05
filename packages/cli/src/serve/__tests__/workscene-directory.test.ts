@@ -23,6 +23,7 @@ import {
 } from "../workscene-directory.js";
 import { REJECT_REMOTE_WORKSPACE_PROBE } from "../workscene-remote-workspace-probe.js";
 import { createWorksceneStorageCleanupInfrastructure } from "../workscene-storage-cleanup.js";
+import { createAnchorWorksceneAuthorityProjection } from "../workscene-authority-projection.js";
 
 let originalHome: string | undefined;
 let home: string;
@@ -390,10 +391,22 @@ async function createFixture(
       })),
     },
   } as unknown as AuthorityRuntimeStack;
+  const worksceneAuthority = createAnchorWorksceneAuthorityProjection({
+    authority,
+    remoteWorkspaceProbe:
+      options.remoteWorkspaceProbe ?? REJECT_REMOTE_WORKSPACE_PROBE,
+  });
+  const manager = conversations ?? ({
+    addObserver: () => true,
+    removeObserver: () => true,
+    getOrCreate: async () => undefined,
+    quiescePrefix: async () => () => undefined,
+  } as unknown as ConversationManager);
   return {
     directory: createWorksceneDirectory({
-      authority: () => authority,
-      conversationAuthority: () => ({
+      authority: worksceneAuthority,
+      conversations: manager,
+      conversationAuthority: {
         async touchWorksceneSession(input) {
           await appendActivity(log, input, "upsert");
           return { revision: 1, at: input.at };
@@ -402,18 +415,12 @@ async function createFixture(
           await appendActivity(log, input, "delete");
           return { revision: 1, at: input.at };
         },
-      }),
+      },
       conversationStorageProjectionCleanup:
         createAnchorWorksceneConversationStorageProjectionCleanup(
           conversationDirectory,
         ),
       sceneStorageRemoval: worksceneStorageCleanup.scenes,
-      recoverWorksceneState: () => globalState.recoverPendingDeletions(),
-      replayWorksceneMutation: (requestId) =>
-        globalState.replayMutation(requestId),
-      remoteWorkspaceProbe:
-        options.remoteWorkspaceProbe ?? REJECT_REMOTE_WORKSPACE_PROBE,
-      ...(conversations ? { conversations: () => conversations } : {}),
     }),
     globalState,
     setProbe(value: WorkspaceProbeResult["probe"]) {

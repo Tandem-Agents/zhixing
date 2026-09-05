@@ -1,4 +1,5 @@
 import type {
+  WorksceneAdvancementApplicationPort,
   WorksceneAssignmentToolApplication,
   WorksceneAssignmentToolPort,
   WorksceneConversationStorageProjectionCleanupPort,
@@ -7,6 +8,7 @@ import type {
   WorksceneRuntimeProjectionReadPort,
   WorksceneWorkspaceAdministrationReadPort,
 } from "@zhixing/core/workscene/application";
+import type { AdvancementActiveStateProjection } from "@zhixing/core/advancement/application";
 import { WorksceneAssignmentToolApplicationService } from "@zhixing/core/workscene/application";
 import type { WorksceneWriteMutation } from "@zhixing/core/contracts";
 import { parseConversationId } from "@zhixing/core/conversation";
@@ -15,6 +17,38 @@ import type { AnchorWorksceneDirectory } from "./workscene-directory.js";
 
 interface AnchorConversationStorageProjection {
   deleteStoredConversation(conversationId: string): Promise<boolean>;
+}
+
+interface AnchorWorksceneAdvancementDependencies {
+  readonly recovery: Readonly<{
+    recoverConversation(conversationId: string): Promise<unknown>;
+  }>;
+  readonly activeState: Readonly<{
+    queryActiveState(
+      conversationId: string,
+    ): Promise<AdvancementActiveStateProjection | null>;
+  }>;
+  readonly logger: Pick<Console, "error">;
+}
+
+/** Host adapter for Workscene's finite post-entry Advancement demand. */
+export function createAnchorWorksceneAdvancementApplicationPort(
+  dependencies: AnchorWorksceneAdvancementDependencies,
+): WorksceneAdvancementApplicationPort {
+  const port: WorksceneAdvancementApplicationPort = {
+    recoverConversation: async (conversationId) => {
+      await dependencies.recovery.recoverConversation(conversationId);
+    },
+    queryActiveState: (conversationId) =>
+      dependencies.activeState.queryActiveState(conversationId),
+    reportFailure: ({ error }) => {
+      dependencies.logger.error(
+        "[workscene.enter] advancement recovery failed:",
+        error,
+      );
+    },
+  };
+  return Object.freeze(port);
 }
 
 /** Maps the active assignment mechanisms to the finite Workscene tool port. */

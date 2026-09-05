@@ -10,8 +10,8 @@
  *
  * 不设 workscene.status:接入面当前在哪个场景是连接级 UI 态,宿主零知识。
  *
- * 全部业务规则居于 Workscene Product API；RPC 仅处理 authenticated wire，
- * enter 成功后的 Advancement 恢复/读取是独立跨领域响应投影。
+ * 全部业务规则与跨领域协作居于 Workscene Product API；RPC 仅处理
+ * authenticated wire 与结果投影。
  */
 
 import {
@@ -32,7 +32,7 @@ import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 import type { ServerContext } from "../../context.js";
-import { loadAdvancementState } from "./session.js";
+import { projectAdvancementState } from "./session.js";
 
 function requireWorksceneApplication(server: ServerContext) {
   if (
@@ -310,22 +310,12 @@ export function buildWorksceneEnterMethod(): MethodEntry {
         ),
       );
       const entered = dispatch.result;
-      // 场景对话与主对话走同一推进管线——进入场景即恢复停摆的推进并
-      // 呈现推进状态，与 session.resume 同一「打开会话即浮现」裁决：
-      // 入场事实已由领域服务登记 observer;恢复失败不撤销入场事实。
-      let advancement: Awaited<ReturnType<typeof loadAdvancementState>> | undefined;
-      try {
-        await ctx.server.advancementRecovery?.recoverConversation(
-          entered.conversationId,
-        );
-        advancement = await loadAdvancementState(ctx.server, entered.conversationId);
-      } catch (err) {
-        console.error("[workscene.enter] advancement recovery failed:", err);
-      }
       return {
         conversationId: entered.conversationId,
         scene: entered.scene,
-        ...(advancement ? { advancement } : {}),
+        ...(entered.advancement
+          ? { advancement: projectAdvancementState(entered.advancement) }
+          : {}),
       } satisfies WorksceneEnterResult;
     },
   };

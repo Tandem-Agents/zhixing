@@ -194,7 +194,7 @@ function makeStore(): {
 } {
   const { port, writes, failNextResponse } = createFakePort();
   return {
-    store: new SessionAdvancementStore({ port: () => port, now: () => NOW }),
+    store: new SessionAdvancementStore({ port, now: () => NOW }),
     writes,
     failNextResponse,
   };

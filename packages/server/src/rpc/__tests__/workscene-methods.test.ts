@@ -24,14 +24,8 @@ import {
 import { RPC_ERROR_CODES } from "../protocol.js";
 import { WorksceneBusyError } from "@zhixing/owner-kernel";
 import {
-  ADVANCEMENT_ACTIVE_STATE_QUERY,
   AdvancementReviewAttemptApplicationService,
 } from "@zhixing/core/advancement/application";
-import {
-  bindProductApiOperation,
-  defineProductApiContribution,
-  defineProductApiExactSet,
-} from "@zhixing/core/product-api";
 import {
   createWorksceneProductApiContribution,
   WORKSCENE_PRODUCT_API_EXACT_SET,
@@ -162,7 +156,9 @@ function makeCtx(opts: {
   workscenes?: TestWorksceneMechanism;
   activeConversations?: string[];
   advancement?: AdvancementController;
-  advancementRecovery?: ServerContext["advancementRecovery"];
+  advancementRecovery?: Readonly<{
+    recoverConversation(conversationId: string): Promise<unknown>;
+  }>;
 }) {
   const advancementActiveState = opts.advancement
     ? new AdvancementReviewAttemptApplicationService({
@@ -173,22 +169,6 @@ function makeCtx(opts: {
         roots: {} as never,
         mechanism: {} as never,
         reviewerAvailable: false,
-      })
-    : undefined;
-  const advancementContribution = opts.advancement
-    ? defineProductApiContribution({
-        operations: [
-          bindProductApiOperation(
-            ADVANCEMENT_ACTIVE_STATE_QUERY,
-            async (query) => ({
-              result: await advancementActiveState!.queryActiveState(
-                query.conversationId,
-              ),
-              facts: [],
-            }),
-          ),
-        ],
-        factEvents: [],
       })
     : undefined;
   const worksceneContribution = opts.workscenes
@@ -233,27 +213,31 @@ function makeCtx(opts: {
           {
             get: (sceneId) => opts.workscenes!.get(sceneId),
           },
+          {
+            recoverConversation: async (conversationId) => {
+              await opts.advancementRecovery?.recoverConversation(conversationId);
+            },
+            queryActiveState: (conversationId) =>
+              advancementActiveState?.queryActiveState(conversationId) ??
+              Promise.resolve(null),
+            reportFailure: ({ error }) => {
+              console.error(
+                "[workscene.enter] advancement recovery failed:",
+                error,
+              );
+            },
+          },
         ),
       )
     : undefined;
   const productApi = worksceneContribution
     ? new ProductApiDispatcher(
-        defineProductApiExactSet({
-          operations: [
-            ...WORKSCENE_PRODUCT_API_EXACT_SET.operations,
-            ...(advancementContribution ? [ADVANCEMENT_ACTIVE_STATE_QUERY] : []),
-          ],
-          factEvents: [...WORKSCENE_PRODUCT_API_EXACT_SET.factEvents],
-        }),
-        [
-          worksceneContribution,
-          ...(advancementContribution ? [advancementContribution] : []),
-        ],
+        WORKSCENE_PRODUCT_API_EXACT_SET,
+        [worksceneContribution],
       )
     : undefined;
   const server = {
     productApi,
-    advancementRecovery: opts.advancementRecovery,
     conversations: {
       list: () =>
         (opts.activeConversations ?? []).map((conversationId) => ({
@@ -279,6 +263,10 @@ describe("workscene.* 方法", () => {
     expect(source).not.toContain("requireWorkscenes");
     expect(source).not.toContain("sceneSummary(");
     expect(source).not.toContain("server.workscenes");
+    expect(source).not.toContain("advancementRecovery");
+    expect(source).not.toContain("loadAdvancementState");
+    expect(source).not.toContain("ADVANCEMENT_ACTIVE_STATE_QUERY");
+    expect(source).toContain("projectAdvancementState(entered.advancement)");
   });
 
   it("管理面全链:create → list → rename → delete;不存在 NOT_FOUND", async () => {
@@ -560,7 +548,7 @@ describe("workscene.* 方法", () => {
     expect(calls).toEqual(["enterScene", "recoverConversation"]);
   });
 
-  it("enter 链外推进恢复失败不撤销入场结果", async () => {
+  it("enter 应用内推进恢复失败不撤销入场结果", async () => {
     const workscenes = memoryWorkscenes();
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const created = (await call(

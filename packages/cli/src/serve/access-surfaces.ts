@@ -23,6 +23,7 @@ import {
 import { ConversationManager } from "@zhixing/owner-kernel";
 import {
   createAdvancementRecoveryMaintenance,
+  renderRecentContextFromMessages,
 } from "@zhixing/owner-services";
 import { createAdvancementReviewProxySchedulePort } from "@zhixing/owner-services/advancement/proxy-scheduler";
 import {
@@ -46,7 +47,6 @@ import {
   FirstPartyFinalitySession,
 } from "./first-party-finality-session.js";
 import {
-  setupAuthorityRuntime,
   setupDelivery,
 } from "../setup-delivery.js";
 import {
@@ -73,7 +73,6 @@ import type {
   AssemblyUnit,
   CoreAssemblyUnit,
 } from "./access-surface.js";
-import { ZHIXING_CLI_VERSION } from "../version.js";
 import { JobStatusDirectory } from "./job-status-directory.js";
 import { ExecutorDataPlaneRuntime } from "./executor-data-plane-runtime.js";
 import { AssignmentDataPlaneTopologyAdapter } from "./assignment-data-plane-topology.js";
@@ -97,56 +96,24 @@ import {
   localConversationOwnerRuntime,
 } from "./conversation-owner-runtime.js";
 import { createConversationEvidenceAuthorityVerifier } from "./conversation-evidence-authority.js";
-
-/** MCP —— eager 连接外部 server，使工具目录进入 system prompt。 */
-const mcpSurface: AccessSurface = {
-  name: "mcp",
-  phase: "pre-server",
-  async setup(ctx) {
-    ctx.lifecycleContributions.acquire("mcpRuntime.close", () =>
-      ctx.mcpLifecycle.close()
-    );
-    await ctx.mcpLifecycle.connect();
-  },
-};
+import {
+  WorksceneApplicationService,
+} from "@zhixing/core/workscene/application";
+import { createWorksceneDirectory } from "./workscene-directory.js";
+import {
+  createAnchorWorksceneAdvancementApplicationPort,
+  createAnchorWorksceneApplicationPorts,
+} from "./workscene-application-adapter.js";
 
 /** Durable authority substrate shared by conversation and delivery composition. */
 const authorityRuntimeSurface: AccessSurface = {
   name: "authority-runtime",
   phase: "pre-server",
   async setup(ctx) {
-    const bootstrap = ctx.meshBootstrap;
-    const authorityRuntime = await setupAuthorityRuntime({
-      zhixingHome: ctx.zhixingHome,
-      secretStore: ctx.secretStore,
-      deviceKey: bootstrap.deviceKey,
-      trustedIdentities: bootstrap.trustedIdentities,
-      authorizedDeviceIds: bootstrap.authorizedDeviceIds,
-      executorId: executorIdForDevice(bootstrap.deviceKey.deviceId),
-      ...(bootstrap.mode === "trusted-home" && bootstrap.installedAuthorityGeneration
-        ? {
-            anchorEpoch: bootstrap.installedAuthorityGeneration.anchorEpoch,
-            installedAuthorityGeneration: bootstrap.installedAuthorityGeneration,
-          }
-        : {}),
-      configurationSnapshot: {
-        config: ctx.authorityConfiguration,
-        executableVersion: ZHIXING_CLI_VERSION,
-      },
-      executorReadiness: ctx.executorReadiness,
-      enableLocalExecutor: ctx.enabledRoles.includes("executor"),
-      storageMaintenance: ctx.storageMaintenance,
-      deviceCapacity: ctx.deviceCapacity,
-      // 清理所有权在 setupAuthorityRuntime 内部于任何资源取得前注册进同一回滚
-      // 事务;这里只采用返回的 handle,不再事后另建——事后注册会留下"恢复后、
-      // 返回前失败"的无人清理窗口。
-      startupRollback: ctx.startupRollback,
-    });
-    ctx.lifecycleContributions.contribute(
-      "authorityRuntime.stopStorageMaintenance",
-      authorityRuntime.startupCleanup,
-    );
-    ctx.authorityRuntime = authorityRuntime;
+    const authorityRuntime = ctx.authorityRuntime;
+    if (!authorityRuntime) {
+      throw new Error("Authority integration requires the prepared Authority runtime");
+    }
     if (ctx.enabledRoles.includes("anchor")) {
       ctx.jobRelayObligations ??= new JobRelayObligationDirectory();
     }
@@ -675,11 +642,11 @@ const conversationSurface: AccessSurface = {
             },
             related: {
               cancelDependentLifecycle: (conversationId) =>
-                ctx.advancementConversationLifecycle.cancelConversationLifecycle(
+                advancementConversationLifecycle.cancelConversationLifecycle(
                   conversationId,
                 ),
               removeDependentData: (conversationId) =>
-                ctx.advancementConversationLifecycle.removeConversationData(
+                advancementConversationLifecycle.removeConversationData(
                   conversationId,
                 ),
             },
@@ -740,6 +707,19 @@ const conversationSurface: AccessSurface = {
     });
     protocol.bindManager(manager);
     protocol.assertManagerBound();
+    const advancementComposition =
+      await ctx.advancementConversationComposition.create({
+        sessionState: protocol.sessionState,
+        recentContext: Object.freeze({
+          read: async (conversationId: string) =>
+            renderRecentContextFromMessages(
+              manager.getHistory(conversationId, 6),
+            ),
+        }),
+      });
+    const advancementController = advancementComposition.controller;
+    const advancementReviews = advancementComposition.reviews;
+    const advancementConversationLifecycle = advancementComposition.lifecycle;
     const conversationExists = (conversationId: string) =>
       ctx.conversationIdentityLifecycle.identityExists(conversationId);
     const proxyTurns = createAdvancementProxyTurnPort({
@@ -747,66 +727,83 @@ const conversationSurface: AccessSurface = {
       sessionBroadcast: ctx.sessionBroadcast,
       conversationExists,
     });
-    const reviewResults = ctx.advancement
-      ? new AdvancementReviewResultProjectionApplicationService({
-          events: createAdvancementEventSink(ctx.sessionBroadcast),
-          proxySchedule: createAdvancementReviewProxySchedulePort(proxyTurns),
-        })
-      : undefined;
-    const advancementRecovery =
-      ctx.advancement && reviewResults
-          ? createAdvancementRecoveryMaintenance({
-            advancement: ctx.advancement,
-            reviews: ctx.advancementReviews,
-            directory: ctx.advancementDirectory,
-            proxyTurns,
-            originalTasks: createAdvancementOriginalTaskAdmissionPort(
-              manager,
-              { conversationExists },
-            ),
-            events: createAdvancementEventSink(ctx.sessionBroadcast),
-            reviewResults,
-            logger: console,
-          })
-        : undefined;
+    const reviewResults = new AdvancementReviewResultProjectionApplicationService({
+      events: createAdvancementEventSink(ctx.sessionBroadcast),
+      proxySchedule: createAdvancementReviewProxySchedulePort(proxyTurns),
+    });
+    const advancementRecovery = createAdvancementRecoveryMaintenance({
+      advancement: advancementController,
+      reviews: advancementReviews,
+      directory: ctx.advancementDirectory,
+      proxyTurns,
+      originalTasks: createAdvancementOriginalTaskAdmissionPort(
+        manager,
+        { conversationExists },
+      ),
+      events: createAdvancementEventSink(ctx.sessionBroadcast),
+      reviewResults,
+      logger: console,
+    });
     const advancementAcceptedTurns =
-      ctx.advancement && advancementRecovery && reviewResults
-        ? new AdvancementAcceptedTurnApplicationService({
-            catchUp: {
-              catchUpAcceptedTurn: (conversationId, beforeRunIndex) =>
-                advancementRecovery.recoverConversation(conversationId, {
-                  beforeRunIndex,
-                }),
-            },
-            review: ctx.advancementReviews,
-            results: reviewResults,
-          })
-        : undefined;
-    if (advancementRecovery) {
-      protocol.bindAuxiliaryRecovery(async (conversationId) => {
-        const result = await advancementRecovery.recoverConversation(conversationId);
-        if (
-          result.status === "failed" ||
-          result.status === "full" ||
-          result.status === "busy" ||
-          result.status === "not-found" ||
-          result.status === "missing-proxy"
-        ) {
-          throw new Error(
-            result.message ??
-              `Advancement recovery did not converge: ${result.status}`,
-          );
-        }
+      new AdvancementAcceptedTurnApplicationService({
+        catchUp: {
+          catchUpAcceptedTurn: (conversationId, beforeRunIndex) =>
+            advancementRecovery.recoverConversation(conversationId, {
+              beforeRunIndex,
+            }),
+        },
+        review: advancementReviews,
+        results: reviewResults,
       });
-    }
+    protocol.bindAuxiliaryRecovery(async (conversationId) => {
+      const result = await advancementRecovery.recoverConversation(conversationId);
+      if (
+        result.status === "failed" ||
+        result.status === "full" ||
+        result.status === "busy" ||
+        result.status === "not-found" ||
+        result.status === "missing-proxy"
+      ) {
+        throw new Error(
+          result.message ??
+            `Advancement recovery did not converge: ${result.status}`,
+        );
+      }
+    });
     // All accepted turns share one fire-and-forget listener. Bind and verify it
     // before the manager becomes reachable through any production ingress.
     manager.bindTurnCommittedListener((info) => {
       turnMaintenance(info);
-      advancementAcceptedTurns?.acceptCommittedTurn(info);
+      advancementAcceptedTurns.acceptCommittedTurn(info);
     });
     manager.assertTurnCommittedListenerBound();
+    const worksceneDirectory = createWorksceneDirectory({
+      authority: ctx.worksceneAuthority,
+      conversations: manager,
+      conversationAuthority: protocol,
+      conversationStorageProjectionCleanup:
+        ctx.worksceneConversationStorageProjectionCleanup,
+      sceneStorageRemoval: ctx.worksceneSceneStorageRemoval,
+    });
+    const worksceneApplicationPorts =
+      createAnchorWorksceneApplicationPorts(worksceneDirectory);
+    const worksceneAdvancementApplicationPort =
+      createAnchorWorksceneAdvancementApplicationPort({
+        recovery: advancementRecovery,
+        activeState: advancementReviews,
+        logger: console,
+      });
+    const worksceneApplication = new WorksceneApplicationService(
+      worksceneApplicationPorts.management,
+      worksceneApplicationPorts.workspaces,
+      worksceneApplicationPorts.entry,
+      worksceneApplicationPorts.runtime,
+      worksceneAdvancementApplicationPort,
+    );
     ctx.advancementRecovery = advancementRecovery;
+    ctx.advancement = advancementController;
+    ctx.advancementReviews = advancementReviews;
+    ctx.advancementConversationLifecycle = advancementConversationLifecycle;
     ctx.lifecycleContributions.acquire(
       "execution.abortAllAndWait",
       () => manager.abortAllAndWait(
@@ -824,11 +821,12 @@ const conversationSurface: AccessSurface = {
     await protocol.recoverReadinessProjections();
     ctx.conversations = manager;
     ctx.conversationProtocol = protocol;
+    ctx.worksceneDirectory = worksceneDirectory;
+    ctx.worksceneApplication = worksceneApplication;
     ctx.conversationExecutorDispatch = executorBoundary.application;
     ctx.conversationExecutorTopologyDirectory = topologyDirectory;
     ctx.conversationAssignmentStaging = executorBoundary.staging;
     ctx.conversationExecutorLedger = executorBoundary.localLedger;
-    ctx.conversationAuthorityRef.current = protocol;
   },
 };
 
@@ -1262,7 +1260,6 @@ export function createAssemblyUnits(
   channelCredentials: ChannelCredentialProjection,
 ): readonly AssemblyUnit[] {
   return [
-    mcpSurface,
     authorityRuntimeSurface,
     executorDataPlaneSurface,
     conversationSurface,

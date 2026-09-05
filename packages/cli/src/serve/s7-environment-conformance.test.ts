@@ -85,6 +85,7 @@ import {
 import { createWorksceneDirectory } from "./workscene-directory.js";
 import { REJECT_REMOTE_WORKSPACE_PROBE } from "./workscene-remote-workspace-probe.js";
 import { createWorksceneStorageCleanupInfrastructure } from "./workscene-storage-cleanup.js";
+import { createAnchorWorksceneAuthorityProjection } from "./workscene-authority-projection.js";
 
 const TEST_EPOCH = Date.now();
 const NOW = new Date(TEST_EPOCH).toISOString();
@@ -391,18 +392,17 @@ async function runChain(topology: "in-process" | "mesh") {
       worksceneConversationStorageRemoval: worksceneStorageCleanup.conversations,
     }).directory;
     const worksceneDirectory = createWorksceneDirectory({
-      authority: () => anchor,
-      conversations: () => conversationManager,
-      conversationAuthority: () => conversationProtocol,
+      authority: createAnchorWorksceneAuthorityProjection({
+        authority: anchor,
+        remoteWorkspaceProbe: REJECT_REMOTE_WORKSPACE_PROBE,
+      }),
+      conversations: conversationManager,
+      conversationAuthority: conversationProtocol,
       conversationStorageProjectionCleanup:
         createAnchorWorksceneConversationStorageProjectionCleanup(
           conversationDirectory,
         ),
       sceneStorageRemoval: worksceneStorageCleanup.scenes,
-      recoverWorksceneState: () => anchor.recoverWorksceneState(),
-      replayWorksceneMutation: (requestId) =>
-        anchor.replayWorksceneMutation(requestId),
-      remoteWorkspaceProbe: REJECT_REMOTE_WORKSPACE_PROBE,
     });
     await worksceneDirectory.recover();
     const entered = await worksceneDirectory.enterScene(

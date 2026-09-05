@@ -27,7 +27,6 @@ function mockUnit(
 // 数组序仍是统一依赖拓扑序。
 function allUnits(calls: string[]): AssemblyUnit[] {
   return [
-    mockUnit("mcp", "pre-server", calls),
     mockUnit("authority-runtime", "pre-server", calls),
     mockUnit("executor-data-plane", "pre-server", calls),
     mockUnit("conversation", "pre-server", calls),
@@ -54,7 +53,6 @@ describe("access-surface 数据驱动装配", () => {
     const units = allUnits(calls);
     await setupAssemblyUnits(units, ctx("full"), "pre-server");
     expect(calls).toEqual([
-      "mcp",
       "authority-runtime",
       "executor-data-plane",
       "conversation",
@@ -69,7 +67,6 @@ describe("access-surface 数据驱动装配", () => {
 
     await setupAssemblyUnits(units, ctx("full"), "post-server");
     expect(calls).toEqual([
-      "mcp",
       "authority-runtime",
       "executor-data-plane",
       "conversation",

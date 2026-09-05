@@ -21,6 +21,7 @@ import {
   inspectConversationAdoptionAssembly,
   inspectConversationExecutorDispatchBoundary,
   inspectWorksceneRemoteWorkspaceProbeTopologyBoundary,
+  inspectWorksceneAnchorProductStaticCompositionBoundary,
   inspectAssignmentDataPlaneBoundary,
   inspectAdvancementEvidenceTopologyBoundary,
   inspectAssignmentResourcePortBoundary,
@@ -859,6 +860,7 @@ test("conversation dispatch application stays separate from the Host topology me
 test("Workscene remote workspace probing uses one statically assembled topology port", async () => {
   const paths = [
     "packages/cli/src/serve/workscene-directory.ts",
+    "packages/cli/src/serve/workscene-authority-projection.ts",
     "packages/cli/src/serve/workscene-remote-workspace-probe.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/access-surfaces.ts",
@@ -874,10 +876,10 @@ test("Workscene remote workspace probing uses one statically assembled topology 
   assert.deepEqual(inspectWorksceneRemoteWorkspaceProbeTopologyBoundary(records), []);
   assert.match(
     inspectWorksceneRemoteWorkspaceProbeTopologyBoundary(mutate(
-      "packages/cli/src/serve/workscene-directory.ts",
+      "packages/cli/src/serve/workscene-authority-projection.ts",
       (text) => text.replace(
-        "remoteWorkspaceProbe: WorksceneRemoteWorkspaceProbePort;",
-        "remoteWorkspaceProbe?: WorksceneRemoteWorkspaceProbePort;",
+        "readonly remoteWorkspaceProbe: WorksceneRemoteWorkspaceProbePort;",
+        "readonly remoteWorkspaceProbe?: WorksceneRemoteWorkspaceProbePort;",
       ),
     )).join("\n"),
     /not one required topology-neutral port/,
@@ -922,6 +924,80 @@ test("Workscene remote workspace probing uses one statically assembled topology 
       (text) => `${text}\nclass Drifted { workspaceProbeForDevice() {} }`,
     )).join("\n"),
     /regained a second or late Workscene topology owner/,
+  );
+});
+
+test("Workscene product dependencies are statically complete before publication", async () => {
+  const paths = [
+    "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/access-surface.ts",
+    "packages/cli/src/serve/access-surfaces.ts",
+    "packages/cli/src/serve/workscene-authority-projection.ts",
+    "packages/cli/src/serve/workscene-directory.ts",
+    "packages/cli/src/serve/workscene-session-owner.ts",
+  ];
+  const records = await Promise.all(paths.map(async (relative) => ({
+    relative,
+    text: (await readFile(relative, "utf8")).replaceAll("\r\n", "\n"),
+  })));
+  const mutate = (relative, transform) => records.map((record) =>
+    record.relative === relative ? { ...record, text: transform(record.text) } : record
+  );
+
+  assert.deepEqual(inspectWorksceneAnchorProductStaticCompositionBoundary(records), []);
+  assert.match(
+    inspectWorksceneAnchorProductStaticCompositionBoundary(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => `${text}\nconst authorityRuntimeRef = { current: authorityRuntime };`,
+    )).join("\n"),
+    /late-bound or second Workscene product owner/,
+  );
+  assert.match(
+    inspectWorksceneAnchorProductStaticCompositionBoundary(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace("await mcpRuntime.lifecycle.connect();", ""),
+    )).join("\n"),
+    /late-bound or second Workscene product owner/,
+  );
+  assert.match(
+    inspectWorksceneAnchorProductStaticCompositionBoundary(mutate(
+      "packages/cli/src/serve/access-surface.ts",
+      (text) => text.replace(
+        "readonly worksceneAuthority: AnchorWorksceneAuthorityProjection;",
+        "readonly worksceneAuthority?: AnchorWorksceneAuthorityProjection;",
+      ),
+    )).join("\n"),
+    /no longer requires the complete Workscene product projection/,
+  );
+  assert.match(
+    inspectWorksceneAnchorProductStaticCompositionBoundary(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "authority: ctx.worksceneAuthority,\n      conversations: manager,",
+        "authority: ctx.worksceneAuthority,\n      conversations: () => manager,",
+      ),
+    )).join("\n"),
+    /publishes a partial or late-bound Workscene product/,
+  );
+  assert.match(
+    inspectWorksceneAnchorProductStaticCompositionBoundary(mutate(
+      "packages/cli/src/serve/workscene-directory.ts",
+      (text) => text.replace(
+        "readonly conversations: ConversationManager;",
+        "readonly conversations: () => ConversationManager;",
+      ),
+    )).join("\n"),
+    /regained an optional getter or no-op fallback/,
+  );
+  assert.match(
+    inspectWorksceneAnchorProductStaticCompositionBoundary(mutate(
+      "packages/cli/src/serve/workscene-session-owner.ts",
+      (text) => text.replace(
+        "readonly #conversations: ConversationManager;",
+        "readonly #conversations: () => ConversationManager;",
+      ),
+    )).join("\n"),
+    /regained an optional getter or no-op fallback/,
   );
 });
 
@@ -5745,7 +5821,7 @@ test("MCP runtime consumers use finite demand-owned ports behind one Host adapte
   assert.match(
     inspectMcpRuntimeBoundary(mutate(
       "packages/cli/src/serve/workscene-runtime-projection.ts",
-      (text) => text.replace("const mcp = input.mcpTools.snapshot();", "const mcp = { tools: [], serverIds: [] };"),
+      (text) => text.replaceAll("const mcp = input.mcpTools.snapshot();", "const mcp = { tools: [], serverIds: [] };"),
     )).join("\n"),
     /bypasses the finite MCP runtime ports/,
   );
@@ -6272,6 +6348,7 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
     "packages/server/src/context.ts",
     "packages/server/src/system-handlers.ts",
     "packages/cli/src/serve/command.ts",
+    "packages/cli/src/serve/access-surface.ts",
     "packages/cli/src/serve/access-surfaces.ts",
     "packages/cli/src/serve/local-conversation-owner.ts",
     "packages/cli/src/serve/conversation-protocol-runtime.ts",
@@ -6335,7 +6412,7 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
     inspectAdvancementDetailApplicationOwnership(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "ctx.advancementReviews.cancelSession(input)",
+        "advancementReviews.cancelSession(input)",
         "advancementDetailController.persistRubricCancellation(input)",
       ),
     )).join("\n"),
@@ -6345,7 +6422,7 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
   assert.match(
     inspectAdvancementDetailApplicationOwnership(mutate(
       "packages/cli/src/serve/command.ts",
-      (text) => text.replace("activeState: ctx.advancementReviews,", ""),
+      (text) => text.replace("activeState: advancementReviews,", ""),
     )).join("\n"),
     closureFailure,
   );
@@ -6422,7 +6499,7 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
     inspectAdvancementDetailApplicationOwnership(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "review: ctx.advancementReviews,",
+          "review: advancementReviews,",
         "review: createSecondReviewApplication(),",
       ),
     )).join("\n"),
@@ -6432,7 +6509,7 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
     inspectAdvancementDetailApplicationOwnership(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "advancementAcceptedTurns?.acceptCommittedTurn(info)",
+        "advancementAcceptedTurns.acceptCommittedTurn(info)",
         "void ctx.advancement?.afterTurnCommitted(info)",
       ),
     )).join("\n"),
@@ -6838,7 +6915,7 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
     inspectAdvancementDetailApplicationOwnership(mutate(
       "packages/cli/src/serve/access-surfaces.ts",
       (text) => text.replace(
-        "ctx.advancementConversationLifecycle.cancelConversationLifecycle(",
+          "advancementConversationLifecycle.cancelConversationLifecycle(",
         "advancementDetailController.cancelOpenConversationSession(conversationId)",
       ),
     )).join("\n"),
@@ -6935,6 +7012,38 @@ test("Advancement whole-domain exact-set has one application/mechanism owner per
       ),
     )).join("\n"),
     failure,
+  );
+  const compositionFailure =
+    /Advancement application must be statically composed from bound Conversation ports/;
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/command.ts",
+      (text) => text.replace(
+        "sessionState: input.sessionState,",
+        "sessionState: () => ctx.conversationProtocol?.sessionState,",
+      ),
+    )).join("\n"),
+    compositionFailure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/cli/src/serve/access-surfaces.ts",
+      (text) => text.replace(
+        "sessionState: protocol.sessionState,",
+        "sessionState: ctx.conversationProtocol?.sessionState,",
+      ),
+    )).join("\n"),
+    compositionFailure,
+  );
+  assert.match(
+    inspectAdvancementDetailApplicationOwnership(mutate(
+      "packages/owner-services/src/advancement/session-store.ts",
+      (text) => text.replace(
+        "readonly port: SessionStatePort;",
+        "readonly port: () => SessionStatePort;",
+      ),
+    )).join("\n"),
+    compositionFailure,
   );
 });
 
@@ -7052,6 +7161,46 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       (text) => text.replace(
         "requireWorksceneApplication(ctx.server).query(",
         "requireWorkscenes(ctx.server).list(",
+      ),
+    )).join("\n"),
+    /Workscene management and entry lack one domain application and Product API owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/workscene.ts",
+      (text) => text.replace(
+        "const entered = dispatch.result;",
+        "const entered = dispatch.result;\n      await ctx.server.advancementRecovery?.recoverConversation(entered.conversationId);",
+      ),
+    )).join("\n"),
+    /Workscene management and entry lack one domain application and Product API owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/core/src/workscene/application.ts",
+      (text) => text.replace(
+        "await this.advancement.recoverConversation(conversationId);",
+        "void conversationId;",
+      ),
+    )).join("\n"),
+    /Workscene management and entry lack one domain application and Product API owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/cli/src/serve/workscene-application-adapter.ts",
+      (text) => text.replace(
+        "dependencies.recovery.recoverConversation(conversationId)",
+        "Promise.resolve(conversationId)",
+      ),
+    )).join("\n"),
+    /Workscene management and entry lack one domain application and Product API owner/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/context.ts",
+      (text) => text.replace(
+        "export interface ServerContext {",
+        "export interface ServerContext {\n  advancementRecovery?: unknown;",
       ),
     )).join("\n"),
     /Workscene management and entry lack one domain application and Product API owner/,
@@ -7596,8 +7745,8 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     inspectSkillCatalogApplicationOwnership(mutate(
       "packages/cli/src/serve/workscene-session-owner.ts",
       (text) => text.replace(
-        "await authority.deleteWorksceneSession({",
-        "await this.#conversationStorageProjectionCleanup.removeCommittedProjection({ sceneId, conversationId });\n      await authority.deleteWorksceneSession({",
+        "await this.#authority.deleteWorksceneSession({",
+        "await this.#conversationStorageProjectionCleanup.removeCommittedProjection({ sceneId, conversationId });\n      await this.#authority.deleteWorksceneSession({",
       ),
     )).join("\n"),
     /Conversation directory management lacks one domain application/,
@@ -9233,8 +9382,8 @@ test("Workscene cleanup cursor and walker stay behind finite Host effects", asyn
     inspectWorksceneStorageCleanupBoundary(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "sceneStorageRemoval: worksceneStorageCleanup.scenes",
-        "sceneStorageRemoval: undefined",
+        "worksceneSceneStorageRemoval: worksceneStorageCleanup.scenes",
+        "worksceneSceneStorageRemoval: undefined",
       ),
     )).join("\n"),
     /not constructed once at the Host edge/,
@@ -9335,8 +9484,8 @@ test("non-topology storage mechanisms stay behind finite Infrastructure edges", 
     inspectStorageRemainderBoundary(mutate(
       "packages/cli/src/serve/command.ts",
       (text) => text.replace(
-        "artifacts: authority.rubricArtifacts,",
-        "artifacts: authority.artifacts,",
+        "artifacts: authorityRuntime.rubricArtifacts,",
+        "artifacts: authorityRuntime.artifacts,",
       ),
     )).join("\n"),
     /P06 Advancement Rubric artifact demand boundary drifted/,

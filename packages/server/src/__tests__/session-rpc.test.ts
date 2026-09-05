@@ -1648,7 +1648,6 @@ describe("session.* RPC (S2.D)", () => {
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
-      advancementRecovery,
       perspectives: opts.perspectives,
       productApi,
     });
