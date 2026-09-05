@@ -31,9 +31,10 @@ const GOVERNED_CALL_SITES: ReadonlyArray<{
     governance: "assignment meter 经恢复 synthetic runtime 透传（modelCallMetering 共享序列）",
   },
   {
-    file: "server/src/perspectives/controller.ts",
+    file: "cli/src/serve/conversation-perspectives-correctness.ts",
     marker: "const meter = options?.modelCallResourceMeter;",
-    governance: "assignment meter 经 durable synthetic runtime 透传至 allocation 与编排",
+    governance:
+      "Conversation 领域多视角用例经 Host Correctness adapter 把 assignment meter 透传至 allocation 与编排",
   },
   {
     file: "cli/src/serve/command.ts",
@@ -52,7 +53,7 @@ const GOVERNED_CALL_SITES: ReadonlyArray<{
   },
   {
     file: "cli/src/serve/advancement-controller.ts",
-    marker: "completionPort.complete({",
+    marker: "modelProvider.completion.complete({",
     governance: "control 根治理——advancement 准入/草案/修订/收场经 ControlCompletionPort、裁判/窗口经 AdvancementReviewerPort，全部沿调用方租约以稳定 usageId 计量（advancement/advancement-control）",
   },
 ];
@@ -72,7 +73,7 @@ const DEFERRED_CALL_SITES: ReadonlyArray<{
 ];
 
 /** 生产 provider 调用的原始入口指纹（callText 族与 meter 装配点）——扫描面 */
-const SCAN_ROOTS = ["cli/src", "server/src/perspectives"] as const;
+const SCAN_ROOTS = ["cli/src", "core/src/conversation"] as const;
 const CALL_PATTERN_ALL =
   /\b(callText|callTextWithUsage|llmComplete|createMainCallLLM|createLightCallLLM|createMainCallLLMWithUsage|createLightCallLLMWithUsage)\s*[(:]|\.provider\.chat\s*\(|\bprovider\.chat\s*\(/gu;
 
@@ -141,9 +142,16 @@ describe("provider call governance registry", () => {
         nature: "governCallText 透传签名与钩子（实际调用经 access-surfaces 治理注入）",
       },
       {
-        file: "server/src/perspectives/allocation.ts",
+        file: "core/src/conversation/perspectives-application.ts",
+        expected: 2,
+        nature:
+          "Conversation 领域只消费有限 runtime callText 端口（metering 由 Host Correctness adapter 注入）",
+      },
+      {
+        file: "cli/src/serve/conversation-perspectives-correctness.ts",
         expected: 3,
-        nature: "runtime callText 透传（metering 经 PerspectiveAllocationInput 注入）",
+        nature:
+          "Host Correctness adapter 对 callTextWithUsage/callText 的有限委托，并把 durable assignment meter 透传",
       },
       {
         file: "cli/src/runtime/rpc-management-facade.ts",

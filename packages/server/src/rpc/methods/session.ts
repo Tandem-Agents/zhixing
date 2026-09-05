@@ -38,6 +38,7 @@ import type { ExplicitEnvironmentSelection } from "@zhixing/core/contracts";
 import {
   CONVERSATION_CREATE_COMMAND,
   CONVERSATION_ADMIT_AGENT_TURN_COMMAND,
+  CONVERSATION_ADMIT_PERSPECTIVE_TURN_COMMAND,
   CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND,
   CONVERSATION_ABORT_COMMAND,
   CONVERSATION_CLEAR_COMMAND,
@@ -47,7 +48,6 @@ import {
   CONVERSATION_HISTORY_QUERY,
   CONVERSATION_IDENTITY_EXISTS_QUERY,
   CONVERSATION_LIST_QUERY,
-  CONVERSATION_ENSURE_SHELL_COMMAND,
   CONVERSATION_RENAME_COMMAND,
   CONVERSATION_RESUME_COMMAND,
   CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
@@ -58,6 +58,7 @@ import {
   ConversationApplicationError,
   type ConversationDirectoryEntry,
   type ConversationPreparedAgentTurnIdentity,
+  type PerspectivesTurnResult,
 } from "@zhixing/core/conversation/application";
 import { createConversationResolutionFence } from "@zhixing/owner-kernel/conversation-control";
 import {
@@ -124,11 +125,9 @@ import {
 import { createControlSessionEventEnvelope } from "@zhixing/rpc/session-events";
 import {
   generateConversationId,
-  WorksceneBusyError,
   type ConversationManager,
   type ManagedSession,
 } from "@zhixing/owner-kernel/conversation-manager";
-import type { PerspectivesTurnResult } from "../../perspectives/index.js";
 import { isProtocolIdentifier } from "@zhixing/core/protocol";
 // ─── session.send ───
 
@@ -1047,22 +1046,81 @@ async function sendDirectTurn(
 async function sendPerspectiveTurn(
   input: SendDirectTurnInput & { readonly engage: SessionSendEngage },
 ): Promise<SessionSendResult> {
-  const perspectives = input.server.perspectives;
-  if (!perspectives) {
-    throw RpcErrors.internal("Perspective engagement is not available.");
+  try {
+    const productApi = requireConversationProductApi(
+      input.server,
+      CONVERSATION_ADMIT_PERSPECTIVE_TURN_COMMAND,
+    );
+    const dispatch = await productApi.command(
+      CONVERSATION_ADMIT_PERSPECTIVE_TURN_COMMAND,
+      {
+        kind: "admit-perspective-turn",
+        conversationId: input.conversationId,
+        ...(input.preallocatedConversationId
+          ? { preallocatedConversationId: input.preallocatedConversationId }
+          : {}),
+        input: input.input,
+        question: input.engage.question,
+        turnIdentity: input.turnIdentity,
+        source: "channel",
+        caller: {
+          kind: "surface",
+          surfacePrincipal: rpcSurfacePrincipal(input.connection),
+          connectionId: input.connectionId,
+        },
+        turnOrigin: perspectiveTurnContext(
+          input.turnIdentity.turnId,
+          input.connection,
+        ).turnOrigin,
+        ...(input.environment
+          ? { environment: structuredClone(input.environment) }
+          : {}),
+        observer: {
+          onAdmitted: ({ conversationId, runId, turnId }) => {
+            notifyLifecycleDiagnostics({
+              manager: input.manager,
+              conversationId,
+              runId: runId ?? turnId,
+              connection: input.connection,
+              broadcast: input.broadcast,
+            });
+          },
+          onResult: (result) =>
+            notifyPerspectiveTurnResult({
+              ...result,
+              connection: input.connection,
+              broadcast: input.broadcast,
+            }),
+          onPendingCancelled: ({ conversationId, turnId }) =>
+            notifyCancelledPerspectiveTurn({
+              conversationId,
+              turnId,
+              connection: input.connection,
+            }),
+        },
+      },
+    );
+    const admitted = dispatch.result;
+    return {
+      conversationId: admitted.conversationId,
+      sessionId: admitted.conversationId,
+      turnId: admitted.turnId,
+      ...(admitted.runId ? { runId: admitted.runId } : {}),
+    };
+  } catch (error) {
+    const mapped = sessionAgentTurnAdmissionRpcError(
+      error,
+      input.conversationId ?? input.preallocatedConversationId ?? "unknown",
+    );
+    if (mapped) throw mapped;
+    if (
+      error instanceof ConversationApplicationError &&
+      error.reason === "perspectives-unavailable"
+    ) {
+      throw RpcErrors.internal("Perspective engagement is not available.");
+    }
+    throw error;
   }
-
-  const admitted = await admitAndMaybeStartPerspectiveTurn({
-    ...input,
-    question: input.engage.question,
-    perspectives,
-  });
-  return {
-    conversationId: admitted.conversationId,
-    sessionId: admitted.conversationId,
-    turnId: admitted.turnId,
-    ...(admitted.runId ? { runId: admitted.runId } : {}),
-  };
 }
 
 interface AdmitAndMaybeStartTurnInput {
@@ -1080,112 +1138,6 @@ interface AdmitAndMaybeStartTurnInput {
   readonly admissionIdentity?: {
     readonly surfacePrincipal: string;
     readonly turnOrigin: TurnContext["turnOrigin"];
-  };
-}
-
-interface AdmitAndMaybeStartPerspectiveTurnInput extends SendDirectTurnInput {
-  readonly perspectives: NonNullable<ServerContext["perspectives"]>;
-  readonly question: string;
-}
-
-async function admitAndMaybeStartPerspectiveTurn(
-  input: AdmitAndMaybeStartPerspectiveTurnInput,
-): Promise<{
-  conversationId: string;
-  turnId: string;
-  runId?: string;
-  runStatus: "immediate" | "queued";
-}> {
-  let admission: Awaited<ReturnType<ConversationManager["admitTurn"]>>;
-  try {
-    admission = await input.manager.admitTurn({
-      conversationId: input.conversationId,
-      createConversation: createConversationCallback(
-        input.server,
-        input.preallocatedConversationId,
-      ),
-      exists: existingConversationCheck(input.server, input.conversationId),
-      connectionId: input.connectionId,
-      source: "channel",
-      beforeEnqueue: (managed) =>
-        input.manager.admitDurableTurn({
-          conversationId: managed.conversationId,
-          input: input.input,
-          invocation: {
-            kind: "perspectives",
-            source: "channel",
-            question: input.question,
-          },
-          options: {
-            turnContext: perspectiveTurnContext(input.turnId, input.connection),
-            source: "channel",
-            surfacePrincipal: rpcSurfacePrincipal(input.connection),
-          },
-          surfacePrincipal: rpcSurfacePrincipal(input.connection),
-        }),
-      makeTask: (managed) => {
-        const task = input.perspectives.createPendingTask({
-          manager: input.manager,
-          managed,
-          originalInput: input.input,
-          question: input.question,
-          turnContext: perspectiveTurnContext(input.turnId, input.connection),
-          surfacePrincipal: rpcSurfacePrincipal(input.connection),
-          source: "channel",
-          onResult: (result) =>
-            notifyPerspectiveTurnResult({
-              result,
-              conversationId: managed.conversationId,
-              turnId: input.turnId,
-              turnCount: managed.turnCount,
-              connection: input.connection,
-              broadcast: input.broadcast,
-            }),
-        });
-        return {
-          ...task,
-          cancel: () => {
-            task.cancel();
-            notifyCancelledPerspectiveTurn({
-              conversationId: managed.conversationId,
-              turnId: input.turnId,
-              connection: input.connection,
-            });
-          },
-        };
-      },
-    });
-  } catch (err) {
-    throwWorksceneBusyAsRpc(err);
-  }
-
-  if (admission.status === "not-found") {
-    throw RpcErrors.notFound(`Session not found: ${admission.conversationId}`);
-  }
-  if (admission.status === "full") {
-    throw new RpcAppError(
-      RPC_ERROR_CODES.BUSY,
-      "Too many pending messages for this conversation",
-    );
-  }
-
-  notifyLifecycleDiagnostics({
-    manager: input.manager,
-    conversationId: admission.conversationId,
-    runId: admission.runId ?? input.turnId,
-    connection: input.connection,
-    broadcast: input.broadcast,
-  });
-
-  if (admission.status === "immediate") {
-    void admission.task.execute();
-  }
-
-  return {
-    conversationId: admission.conversationId,
-    turnId: input.turnId,
-    ...(admission.runId ? { runId: admission.runId } : {}),
-    runStatus: admission.status === "replayed" ? "queued" : admission.status,
   };
 }
 
@@ -1292,18 +1244,6 @@ async function admitAndMaybeStartTurn(
   }
 }
 
-function throwWorksceneBusyAsRpc(err: unknown): never {
-  if (
-    err instanceof WorksceneBusyError ||
-    (err instanceof Error &&
-      "code" in err &&
-      (err as Error & { code?: unknown }).code === "WORKSCENE_BUSY")
-  ) {
-    throw RpcErrors.busy("场景正在切换或目录变更，请稍后重试。");
-  }
-  throw err;
-}
-
 function publishActiveAdvancementExit(
   fact: AdvancementSessionExitedFact,
   connection: RpcConnection,
@@ -1380,38 +1320,6 @@ function contractFailedResult(
     status: "contract-failed",
     error: { message: error.message },
   };
-}
-
-function createConversationCallback(
-  server: ServerContext,
-  preallocatedConversationId?: string,
-): (() => Promise<string>) | undefined {
-  if (preallocatedConversationId) {
-    return async () => {
-      await ensureConversationShell(server, preallocatedConversationId);
-      return preallocatedConversationId;
-    };
-  }
-  if (!server.productApi?.supports(CONVERSATION_CREATE_COMMAND)) {
-    return undefined;
-  }
-  return async () =>
-    (
-      await server.productApi!.command(CONVERSATION_CREATE_COMMAND, {
-        kind: "create",
-      })
-    ).result.conversationId;
-}
-
-async function ensureConversationShell(
-  server: ServerContext,
-  conversationId: string,
-): Promise<void> {
-  if (!server.productApi?.supports(CONVERSATION_ENSURE_SHELL_COMMAND)) return;
-  await server.productApi.command(CONVERSATION_ENSURE_SHELL_COMMAND, {
-    kind: "ensure-shell",
-    conversationId,
-  });
 }
 
 function notifyAdvancementEvent(input: {
@@ -2927,17 +2835,6 @@ function requireConversationId(
   method: string,
 ): string {
   return validateConversationId(params.conversationId, method);
-}
-
-function existingConversationCheck(
-  server: ServerContext,
-  conversationId: string | undefined,
-): (() => Promise<boolean>) | undefined {
-  if (!conversationId) return undefined;
-  if (!server.productApi?.supports(CONVERSATION_IDENTITY_EXISTS_QUERY)) {
-    return undefined;
-  }
-  return () => queryConversationIdentityExists(server, conversationId);
 }
 
 function requireConversations(server: ServerContext): ConversationManager {

@@ -61,6 +61,7 @@ import { createAssignmentArtifactReceiverInfrastructure } from "./assignment-art
 import { createConversationTransferStagingInfrastructure } from "./conversation-transfer-staging-infrastructure.js";
 import { createFileMeshPairingContinuationRepository } from "./mesh-pairing-continuation.js";
 import { createPersistentPairedCheckpointCommandReceiverInfrastructure } from "./paired-checkpoint-incoming-infrastructure.js";
+import { projectConversationPerspectivesRuntime } from "./conversation-perspectives-correctness.js";
 import { SurfaceAssetMaintenance } from "./surface-asset-maintenance.js";
 import { createAnchorConversationDeleteProjectionPort } from "./conversation-delete-binding.js";
 import { createTurnMaintenance } from "./turn-maintenance.js";
@@ -592,7 +593,23 @@ const createConversationSurface = (
         : {}),
       interactions: ctx.durableInteractions,
       executeRecoveredPerspective: async (input) => {
-        const execution = await ctx.perspectives.executePerspectiveWork(input);
+        const execution = await ctx.conversationPerspectives.executePerspectiveWork({
+          runtime: projectConversationPerspectivesRuntime(
+            input.managed,
+            input.managed.runtime,
+          ),
+          originalInput: input.originalInput,
+          question: input.question,
+          source: input.source,
+          ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+          turnContext: input.turnContext,
+          ...(input.authorizeToolExecution
+            ? { authorizeToolExecution: input.authorizeToolExecution }
+            : {}),
+          ...(input.modelCallMetering
+            ? { modelCallMetering: input.modelCallMetering }
+            : {}),
+        });
         return execution.runResult;
       },
       onStatus: (notice) => {

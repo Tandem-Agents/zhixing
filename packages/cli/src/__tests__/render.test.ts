@@ -27,7 +27,7 @@ import {
 import { stringWidth } from "../tui/line-width.js";
 import {
   PERSPECTIVES_DELIBERATION_DEFINITION_ID,
-} from "@zhixing/server";
+} from "@zhixing/core/conversation/application";
 import type { RuntimeSubAgentUsageEntry } from "@zhixing/owner-kernel";
 import type { ContextBudget } from "@zhixing/core";
 import type { CliWriter } from "../screen/index.js";

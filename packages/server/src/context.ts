@@ -29,7 +29,6 @@ import type {
 import type { ServerConfig } from "./types.js";
 import type { ManagedHostPublicStatus } from "./managed-host-status.js";
 import type { RpcSurfaceRegistry } from "./rpc/surface-identity.js";
-import type { PerspectivesController } from "./perspectives/index.js";
 
 export type ServerShutdownStrategy = "immediate" | "drain" | "cancel";
 
@@ -181,8 +180,6 @@ export interface ServerContext {
   readonly token: string;
   /** 对话运行时管理器（不传则 session.* 方法不可用） */
   conversations?: ConversationManager;
-  /** 多视角发散收敛门面。不传则多视角发起意图不可执行。 */
-  perspectives?: PerspectivesController;
   /** Host 组合的传输无关 Product API。不传则相应产品 API 不可用。 */
   productApi?: ProductApiDispatcher;
   /** 宿主装配信息(server.info 的运维字段:工作区 / 日志路径)。 */
@@ -255,7 +252,6 @@ export interface CreateContextOptions {
   version: string;
   token: string;
   conversations?: ConversationManager;
-  perspectives?: PerspectivesController;
   productApi?: ProductApiDispatcher;
   hostInfo?: { workspace?: string; logPath?: string };
   managedHostPublicStatus?: ServerContext["managedHostPublicStatus"];
@@ -277,7 +273,6 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     token: opts.token,
     startedAt: Date.now(),
     conversations: opts.conversations,
-    perspectives: opts.perspectives,
     productApi: opts.productApi,
     hostInfo: opts.hostInfo,
     managedHostPublicStatus: opts.managedHostPublicStatus,

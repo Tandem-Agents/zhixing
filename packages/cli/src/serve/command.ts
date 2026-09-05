@@ -36,6 +36,7 @@ import {
 import { createAnchorSkillCatalogManagementCorrectnessPort } from "@zhixing/core/skills/catalog-correctness";
 import {
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
+  ConversationPerspectivesApplicationService,
   ConversationDirectoryApplicationService,
   createConversationIdentityLifecycleApplication,
   createConversationDirectoryProductApiContribution,
@@ -106,9 +107,6 @@ import {
   ServerStateFile,
   ServerLogLifecycle,
   CleanupRegistry,
-  LlmPerspectiveAllocationStrategy,
-  PerspectivesController,
-  RuntimePerspectivesOrchestrationExecutor,
   getDefaultLogPath,
   resolveProcessStartTime,
   type RunningServer,
@@ -130,6 +128,7 @@ import { RuntimeHost } from "@zhixing/runtime-host";
 import { createBuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
 import { createTransientSegmentDeps } from "./segment-deps.js";
 import { createConversationAgentTurnAdmissionPort } from "@zhixing/owner-kernel/conversation-agent-turn-admission";
+import { createConversationPerspectivesCorrectnessPort } from "./conversation-perspectives-correctness.js";
 import type {
   AnchorServeBootstrapContext,
   ExecutorRoleModule,
@@ -612,11 +611,25 @@ async function runServerProcess(
       disposeForward();
     };
   };
-  const perspectivesController = new PerspectivesController({
-    allocationStrategy: new LlmPerspectiveAllocationStrategy(),
-    orchestrationExecutor: new RuntimePerspectivesOrchestrationExecutor(),
+  let assemblyContext: AssemblyContext | undefined;
+  const conversationPerspectives = new ConversationPerspectivesApplicationService({
+    correctness: createConversationPerspectivesCorrectnessPort({
+      manager: () => {
+        const manager = assemblyContext?.conversations;
+        if (!manager) {
+          throw new Error("Conversation perspective correctness is not assembled");
+        }
+        return manager;
+      },
+    }),
     createRunEventBus: () => createEventBus<AgentEventMap>(),
     decorateRunBus: serveDecorateRunBus,
+    onDurableFinalPublicationDeferred: (error) => {
+      console.warn(
+        "[perspectives] durable result committed; final publication will be retried",
+        error,
+      );
+    },
   });
 
   // 3a. ConfirmationHub —— 远程权限确认聚合层（见 remote-confirmation-execution.md）
@@ -837,7 +850,6 @@ async function runServerProcess(
   const channelHttpRoutes: AssemblyContext["channelHttpRoutes"] = new Map();
   const anchorInternalStopLifecycle = new AnchorInternalStopLifecycle();
   const anchorInternalStop = anchorInternalStopLifecycle.port;
-  let assemblyContext: AssemblyContext | undefined;
   const onTrustApplied = () => coordinateManagedHostTrustTransition({
     processMode,
     expectedAdmission: initialManagedHostAdmission,
@@ -858,7 +870,7 @@ async function runServerProcess(
     zhixingHome,
     secretStore: bootstrap.secretStore,
     durableInteractions,
-    perspectives: perspectivesController,
+    conversationPerspectives,
     deviceCapacity: deviceCapacity.arbiter,
     advancementCapacity: deviceCapacity.workload("workload-advancement"),
     storageMaintenance: deviceCapacity.storage,
@@ -2542,6 +2554,7 @@ async function runServerProcess(
       read: async (conversationId) =>
         (await advancementReviews.queryActiveState(conversationId)) ?? undefined,
     },
+    perspectives: conversationPerspectives,
   });
   const advancementDetailController = advancementController;
   const advancementApplication = new AdvancementApplicationService({
@@ -2760,7 +2773,6 @@ async function runServerProcess(
         }
       : {}),
     conversations: ctx.conversations,
-    perspectives: perspectivesController,
     productApi,
     hostInfo: {
       // 宿主单点解析的工作区——接入面 @ 补全 root 取此

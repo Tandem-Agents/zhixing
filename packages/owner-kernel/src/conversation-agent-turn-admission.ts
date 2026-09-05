@@ -35,10 +35,17 @@ export function createConversationAgentTurnAdmissionPort(input: Readonly<{
             input.manager.admitDurableTurn({
               conversationId: managed.conversationId,
               input: request.input,
-              invocation: {
-                kind: "agent",
-                source: request.source ?? "interactive",
-              },
+              invocation:
+                request.invocation.kind === "perspectives"
+                  ? {
+                      kind: "perspectives",
+                      source: request.source ?? "interactive",
+                      question: request.invocation.question,
+                    }
+                  : {
+                      kind: "agent",
+                      source: request.source ?? "interactive",
+                    },
               ...(request.environment
                 ? { environment: structuredClone(request.environment) }
                 : {}),
@@ -66,6 +73,9 @@ export function createConversationAgentTurnAdmissionPort(input: Readonly<{
                 conversationId: managed.conversationId,
                 turnId: request.turnId,
               }),
+            ...(request.execution.abort
+              ? { abort: request.execution.abort }
+              : {}),
           }),
         });
       } catch (error) {

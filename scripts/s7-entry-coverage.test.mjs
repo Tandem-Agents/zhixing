@@ -4226,6 +4226,27 @@ test("retired entry, live writable Store and reverse package dependency mutation
     inspectProductionSource("packages/cli/src/bad.ts", 'const name = "LegacyDeliveryDrainer";')[0],
     /retired token LegacyDeliveryDrainer/,
   );
+  assert.match(
+    inspectProductionSource(
+      "packages/server/src/perspectives/controller.ts",
+      "export class ReplacementController {}",
+    )[0],
+    /retired Server-owned perspective application path/,
+  );
+  assert.match(
+    inspectProductionSource(
+      "packages/server/src/rpc/methods/session.ts",
+      "manager.admitDurableTurn(request);",
+    )[0],
+    /Server bypasses Conversation perspective admission application/,
+  );
+  assert.match(
+    inspectProductionSource(
+      "packages/cli/src/serve/perspectives.ts",
+      "assemblePerspectiveExecutable(input);",
+    )[0],
+    /CLI redefines Conversation perspective application policy/,
+  );
 });
 
 test("Device Administration reads, paired/current removal and duty migration have one application and pure RPC bindings", async () => {
@@ -7417,6 +7438,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/core/src/skills/catalog-management-correctness.ts",
     "packages/core/src/workscene/application.ts",
     "packages/core/src/conversation/application.ts",
+    "packages/core/src/conversation/perspectives-application.ts",
     "packages/core/src/conversation/index.ts",
     "packages/core/src/scheduler/application.ts",
     "packages/core/src/scheduler/runtime-policy.ts",
@@ -7452,6 +7474,7 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
     "packages/rpc/src/event-bridge.ts",
     "packages/cli/src/serve/command.ts",
     "packages/cli/src/serve/conversation-protocol-runtime.ts",
+    "packages/cli/src/serve/conversation-perspectives-correctness.ts",
     "packages/cli/src/serve/conversation-clear-binding.ts",
     "packages/cli/src/serve/conversation-resume-binding.ts",
     "packages/cli/src/serve/conversation-run-control-binding.ts",
@@ -7690,6 +7713,26 @@ test("Skill Catalog management, load, save, admission and Kernel projection have
       ),
     )).join("\n"),
     /Conversation directory management lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership(mutate(
+      "packages/server/src/rpc/methods/session.ts",
+      (text) => text.replace(
+        "productApi.command(\n      CONVERSATION_ADMIT_PERSPECTIVE_TURN_COMMAND",
+        "input.manager.admitDurableTurn(\n      CONVERSATION_ADMIT_PERSPECTIVE_TURN_COMMAND",
+      ),
+    )).join("\n"),
+    /Conversation perspectives lacks one domain application/,
+  );
+  assert.match(
+    inspectSkillCatalogApplicationOwnership([
+      ...records,
+      {
+        relative: "packages/server/src/perspectives/controller.ts",
+        text: "export class RenamedPerspectiveApplication {}",
+      },
+    ]).join("\n"),
+    /Conversation perspectives lacks one domain application/,
   );
   assert.match(
     inspectSkillCatalogApplicationOwnership(mutate(

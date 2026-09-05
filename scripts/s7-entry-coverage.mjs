@@ -67,6 +67,7 @@ const retiredProductionTokens = [
   "memory.journalStats",
   "memory.peopleList",
   "workscene_memory_query",
+  "PerspectivesController",
 ];
 const forbiddenWriteOwners = new Set(["SkillStore", "AnchorWorksceneRegistry"]);
 const guardedRoots = [
@@ -7132,6 +7133,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   const conversationApplication = required(
     "packages/core/src/conversation/application.ts",
   );
+  const conversationPerspectivesApplication = required(
+    "packages/core/src/conversation/perspectives-application.ts",
+  );
   const conversationIndex = required(
     "packages/core/src/conversation/index.ts",
   );
@@ -7225,6 +7229,9 @@ export function inspectSkillCatalogApplicationOwnership(records) {
   );
   const conversationProtocolRuntime = required(
     "packages/cli/src/serve/conversation-protocol-runtime.ts",
+  );
+  const conversationPerspectivesCorrectness = required(
+    "packages/cli/src/serve/conversation-perspectives-correctness.ts",
   );
   const conversationRunControlBinding = required(
     "packages/cli/src/serve/conversation-run-control-binding.ts",
@@ -7419,7 +7426,7 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     "async function admitAndMaybeStartTurn(",
   );
   const sessionAgentAdmissionEnd = sessionHandler.indexOf(
-    "function throwWorksceneBusyAsRpc(",
+    "function publishActiveAdvancementExit(",
     sessionAgentAdmissionStart,
   );
   const sessionAgentAdmission =
@@ -8176,7 +8183,6 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       "CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND",
     ) ||
     !sessionHandler.includes("CONVERSATION_IDENTITY_EXISTS_QUERY") ||
-    !sessionHandler.includes("CONVERSATION_ENSURE_SHELL_COMMAND") ||
     !sessionHandler.includes("CONVERSATION_ADMIT_AGENT_TURN_COMMAND") ||
     !sessionHandler.includes("CONVERSATION_TASK_LIST_QUERY") ||
     !sessionHandler.includes("CONVERSATION_UPDATE_TASK_LIST_COMMAND") ||
@@ -8226,9 +8232,6 @@ export function inspectSkillCatalogApplicationOwnership(records) {
     /conversationDirectory\??\s*:/u.test(context) ||
     /ctx\.server\.conversationDirectory|requireDirectory\(/u.test(sessionHandler) ||
     !/productApi\.query\(\s*CONVERSATION_IDENTITY_EXISTS_QUERY/u.test(
-      sessionHandler,
-    ) ||
-    !/productApi\.command\(\s*CONVERSATION_ENSURE_SHELL_COMMAND/u.test(
       sessionHandler,
     ) ||
     byPath.has("packages/server/src/runtime/conversation-directory.ts") ||
@@ -8574,6 +8577,58 @@ export function inspectSkillCatalogApplicationOwnership(records) {
       (conditions.types === deliveryApplicationExport?.types ||
         conditions.import === deliveryApplicationExport?.import)
     );
+  const serverPerspectiveSource = records.find((record) =>
+    record.relative.startsWith("packages/server/src/perspectives/"),
+  );
+  if (
+    !conversationPerspectivesApplication.includes(
+      "class ConversationPerspectivesApplicationService",
+    ) ||
+    !conversationPerspectivesApplication.includes(
+      "PERSPECTIVES_DELIBERATION_TEMPLATE",
+    ) ||
+    !conversationPerspectivesApplication.includes("async runPerspectiveTurn(") ||
+    !conversationPerspectivesApplication.includes(
+      "this.options.correctness.runDurable({",
+    ) ||
+    !conversationPerspectivesApplication.includes(
+      "this.options.correctness.recordLegacyTurn(",
+    ) ||
+    !conversationApplication.includes(
+      '"conversation-run.command.admit-perspective-turn"',
+    ) ||
+    !conversationApplication.includes("async admitPerspectiveTurn(") ||
+    !conversationApplication.includes("return this.admitPreparedTurn(") ||
+    !sessionHandler.includes(
+      "productApi.command(\n      CONVERSATION_ADMIT_PERSPECTIVE_TURN_COMMAND",
+    ) ||
+    /\.(?:admitTurn|admitDurableTurn|createPendingTask)\s*\(/u.test(
+      sessionHandler.slice(
+        sessionHandler.indexOf("async function sendPerspectiveTurn("),
+        sessionHandler.indexOf(
+          "interface AdmitAndMaybeStartTurnInput",
+          sessionHandler.indexOf("async function sendPerspectiveTurn("),
+        ),
+      ),
+    ) ||
+    !conversationPerspectivesCorrectness.includes(
+      "createConversationPerspectivesCorrectnessPort",
+    ) ||
+    !conversationPerspectivesCorrectness.includes("durable.run({") ||
+    !composition.includes(
+      "new ConversationPerspectivesApplicationService({",
+    ) ||
+    !composition.includes(
+      "correctness: createConversationPerspectivesCorrectnessPort({",
+    ) ||
+    !composition.includes("perspectives: conversationPerspectives,") ||
+    /PerspectivesController|readonly perspectives\??:/u.test(context) ||
+    serverPerspectiveSource
+  ) {
+    failures.push(
+      "Conversation perspectives lacks one domain application, shared admission, and pure Server binding",
+    );
+  }
   if (
     deliveryApplicationExport?.types !==
       "./dist/delivery/application.d.ts" ||
@@ -16055,6 +16110,21 @@ export function inspectProductionManifest(relative, manifest) {
 export function inspectProductionSource(relative, text, options = {}) {
   const failures = [];
   for (const token of retiredProductionTokens) if (text.includes(token)) failures.push(`${relative}: retired token ${token}`);
+  if (relative.startsWith("packages/server/src/perspectives/")) {
+    failures.push(`${relative}: retired Server-owned perspective application path`);
+  }
+  if (
+    relative === "packages/server/src/rpc/methods/session.ts" &&
+    /\.(?:admitTurn|admitDurableTurn|createPendingTask)\s*\(/u.test(text)
+  ) {
+    failures.push(`${relative}: Server bypasses Conversation perspective admission application`);
+  }
+  if (
+    relative.startsWith("packages/cli/") &&
+    /\b(?:assemblePerspectiveExecutable|PERSPECTIVES_DELIBERATION_TEMPLATE|parsePerspectiveAllocationText)\b/u.test(text)
+  ) {
+    failures.push(`${relative}: CLI redefines Conversation perspective application policy`);
+  }
   const guarded = guardedRoots.some((prefix) => relative.startsWith(prefix));
   const dependencyGuarded = relative.startsWith("packages/server/") || relative.startsWith("packages/executor/");
   const source = sourceFile(relative, text);

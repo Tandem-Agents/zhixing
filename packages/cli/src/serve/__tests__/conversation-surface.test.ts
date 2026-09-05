@@ -137,7 +137,7 @@ async function setupCtx() {
     secretStore,
     authorityRuntime,
     durableInteractions: new DurableConversationInteractionObserver(),
-    perspectives: { executePerspectiveWork: vi.fn() },
+    conversationPerspectives: { executePerspectiveWork: vi.fn() },
     sessionBroadcast: vi.fn(),
     sessionActivityBroadcast: vi.fn(),
     advancementDirectory: {

@@ -30,6 +30,7 @@ import type { ChannelDeliveryEffectSource } from "@zhixing/core/delivery/channel
 import type {
   ConversationClearProjectionPort,
   ConversationCommittedViewStorage,
+  ConversationPerspectivesApplication,
   TaskListService,
 } from "@zhixing/core/conversation/application";
 import type {
@@ -47,7 +48,6 @@ import type {
 } from "../runtime/mcp-runtime-ports.js";
 import type {
   InboundRouter,
-  PerspectivesController,
   RunningServer,
 } from "@zhixing/server";
 import type { ChannelConversationProductBinding } from "./channel-conversation-product-binding.js";
@@ -206,7 +206,7 @@ export interface AssemblyContext {
   readonly zhixingHome: string;
   readonly secretStore: SecretStorePort;
   readonly durableInteractions: DurableConversationInteractionObserver;
-  readonly perspectives: PerspectivesController;
+  readonly conversationPerspectives: ConversationPerspectivesApplication;
   readonly deviceCapacity: DeviceCapacityArbiterPort;
   readonly advancementCapacity: AgentRuntimeCapacityBinding;
   readonly storageMaintenance: StorageMaintenanceGovernorPort;

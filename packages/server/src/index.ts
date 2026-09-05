@@ -39,5 +39,4 @@ export {
   createAdvancementProxyTurnPort,
   type AdvancementProxyTurnAdapterOptions,
 } from "./advancement/adapters.js";
-export * from "./perspectives/index.js";
 export * from "./intent/index.js";

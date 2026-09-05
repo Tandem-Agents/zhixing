@@ -134,14 +134,6 @@
   "rpcContracts": [
     {
       "definition": [
-        "readonly perspectives: NonNullable<ServerContext[\"perspectives\"]>;",
-        "readonly question: string;"
-      ],
-      "kind": "interface",
-      "name": "AdmitAndMaybeStartPerspectiveTurnInput"
-    },
-    {
-      "definition": [
         "readonly server: ServerContext;",
         "readonly manager: ConversationManager;",
         "readonly conversationId?: string;",
@@ -1348,7 +1340,7 @@
     },
     {
       "kind": "type-import",
-      "references": 196,
+      "references": 198,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
     },
@@ -1372,7 +1364,7 @@
     },
     {
       "kind": "type-import",
-      "references": 23,
+      "references": 24,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/owner-kernel"
     },

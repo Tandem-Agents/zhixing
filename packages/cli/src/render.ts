@@ -29,7 +29,7 @@ import type { DecorateRunBusFn } from "@zhixing/orchestrator/runtime";
 import {
   PERSPECTIVES_CONVERGENCE_NODE_ID,
   PERSPECTIVES_DELIBERATION_DEFINITION_ID,
-} from "@zhixing/server";
+} from "@zhixing/core/conversation/application";
 import type { RuntimeSubAgentUsageEntry } from "@zhixing/owner-kernel";
 import type { OutputRenderer } from "./output/index.js";
 import type { CliWriter, ScreenController } from "./screen/index.js";

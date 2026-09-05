@@ -13,11 +13,16 @@ import {
   isNonEmptyUserTurnInput,
   type UserTurnInput,
 } from "../types/user-input.js";
+import type { AbortReason } from "../interrupt/types.js";
 import type { TurnOrigin } from "../types/tools.js";
 import type { ExplicitEnvironmentSelection } from "../contracts/protocol.js";
 import type { ContextBudget } from "../context/types.js";
 import type { TaskItem, TaskListState } from "./types.js";
 import { parseConversationId } from "./scope-id.js";
+import type {
+  ConversationPerspectivesApplication,
+  ConversationPerspectivesTurnObserver,
+} from "./perspectives-application.js";
 
 export {
   TaskListService,
@@ -25,6 +30,18 @@ export {
   type TaskListStateListener,
   type TaskListStore,
 } from "./task-list-state.js";
+
+export {
+  ConversationPerspectivesApplicationService,
+  PERSPECTIVES_CONVERGENCE_NODE_ID,
+  PERSPECTIVES_DELIBERATION_DEFINITION_ID,
+  type ConversationPerspectivesApplication,
+  type ConversationPerspectivesCorrectnessPort,
+  type ConversationPerspectivesDurableExecutionInput,
+  type ConversationPerspectivesRuntimePort,
+  type ConversationPerspectivesTurnObserver,
+  type PerspectivesTurnResult,
+} from "./perspectives-application.js";
 
 /** Persisted Conversation identity projected by the domain storage port. */
 export interface ConversationDirectoryRecord {
@@ -226,6 +243,7 @@ export interface ConversationAgentTurnExecutionPort {
     conversationId: string;
     turnId: string;
   }>): void;
+  abort?(reason?: AbortReason): boolean;
   onAdmitted?(input: Readonly<{
     conversationId: string;
     turnId: string;
@@ -233,6 +251,10 @@ export interface ConversationAgentTurnExecutionPort {
     status: "immediate" | "queued" | "replayed";
   }>): void;
 }
+
+export type ConversationAgentTurnInvocation =
+  | Readonly<{ kind: "agent" }>
+  | Readonly<{ kind: "perspectives"; question: string }>;
 
 export interface ConversationAgentTurnAdmissionPort {
   readonly requiresStableTurnIdentity: boolean;
@@ -245,6 +267,7 @@ export interface ConversationAgentTurnAdmissionPort {
     caller: Extract<ConversationCommandCaller, { readonly kind: "surface" }>;
     turnOrigin?: TurnOrigin;
     environment?: ExplicitEnvironmentSelection;
+    invocation: ConversationAgentTurnInvocation;
     execution: ConversationAgentTurnExecutionPort;
   }>): Promise<
     | Readonly<{
@@ -846,6 +869,19 @@ export type ConversationDirectoryCommand =
       execution: ConversationAgentTurnExecutionPort;
     }>
   | Readonly<{
+      kind: "admit-perspective-turn";
+      conversationId?: string;
+      preallocatedConversationId?: string;
+      input: UserTurnInput;
+      question: string;
+      turnIdentity: ConversationPreparedAgentTurnIdentity;
+      source?: "interactive" | "channel";
+      caller: ConversationCommandCaller;
+      turnOrigin?: TurnOrigin;
+      environment?: ExplicitEnvironmentSelection;
+      observer: ConversationPerspectivesTurnObserver;
+    }>
+  | Readonly<{
       kind: "update-task-list";
       conversationId: string;
       action: ConversationTaskListAction;
@@ -991,6 +1027,7 @@ export class ConversationApplicationError extends Error {
       | "turn-conversation-not-found"
       | "turn-queue-full"
       | "turn-lifecycle-busy"
+      | "perspectives-unavailable"
       | "task-list-operation-required"
       | "task-list-operation-invalid"
       | "task-list-assignment-required"
@@ -1081,6 +1118,12 @@ export interface ConversationDirectoryApplication {
       { readonly kind: "admit-agent-turn" }
     >,
   ): Promise<ConversationAgentTurnAdmissionResult>;
+  admitPerspectiveTurn(
+    command: Extract<
+      ConversationDirectoryCommand,
+      { readonly kind: "admit-perspective-turn" }
+    >,
+  ): Promise<ConversationAgentTurnAdmissionResult>;
   updateTaskList(
     command: Extract<
       ConversationDirectoryCommand,
@@ -1123,6 +1166,7 @@ export class ConversationDirectoryApplicationService
       runControl?: ConversationRunControlPort;
       agentTurns?: ConversationAgentTurnAdmissionPort;
       agentTurnIdentity?: ConversationAgentTurnIdentityPort;
+      perspectives?: ConversationPerspectivesApplication;
       taskLists?: ConversationTaskListPort;
       compact?: ConversationCompactPort;
       usage?: ConversationUsageProjectionPort;
@@ -1832,6 +1876,69 @@ export class ConversationDirectoryApplicationService
       { readonly kind: "admit-agent-turn" }
     >,
   ): Promise<ConversationAgentTurnAdmissionResult> {
+    return this.admitPreparedTurn(
+      command,
+      Object.freeze({ kind: "agent" }),
+      command.execution,
+    );
+  }
+
+  async admitPerspectiveTurn(
+    command: Extract<
+      ConversationDirectoryCommand,
+      { readonly kind: "admit-perspective-turn" }
+    >,
+  ): Promise<ConversationAgentTurnAdmissionResult> {
+    const perspectives = this.input.perspectives;
+    if (!perspectives) {
+      throw new ConversationApplicationError(
+        "unsupported",
+        "Perspective engagement is not available.",
+        "perspectives-unavailable",
+      );
+    }
+    if (!isPreparedAgentTurnIdentity(command.turnIdentity)) {
+      throw new ConversationApplicationError(
+        "invalid-input",
+        "Conversation turn identity is invalid",
+        "turn-identity-invalid",
+      );
+    }
+    const turnId = command.turnIdentity.turnId;
+    const execution = perspectives.createTurnExecution({
+      originalInput: command.input,
+      question: command.question,
+      turnContext: {
+        turnId,
+        ...(command.turnOrigin ? { turnOrigin: command.turnOrigin } : {}),
+      },
+      surfacePrincipal:
+        command.caller.kind === "surface"
+          ? command.caller.surfacePrincipal
+          : `host:${command.caller.component}`,
+      source: command.source ?? "interactive",
+      observer: command.observer,
+    });
+    return this.admitPreparedTurn(
+      command,
+      Object.freeze({ kind: "perspectives", question: command.question }),
+      execution,
+    );
+  }
+
+  private async admitPreparedTurn(
+    command:
+      | Extract<
+          ConversationDirectoryCommand,
+          { readonly kind: "admit-agent-turn" }
+        >
+      | Extract<
+          ConversationDirectoryCommand,
+          { readonly kind: "admit-perspective-turn" }
+        >,
+    invocation: ConversationAgentTurnInvocation,
+    execution: ConversationAgentTurnExecutionPort,
+  ): Promise<ConversationAgentTurnAdmissionResult> {
     assertConversationControlCaller(command.caller);
     if (!isNonEmptyUserTurnInput(command.input)) {
       throw new ConversationApplicationError(
@@ -1902,7 +2009,8 @@ export class ConversationDirectoryApplicationService
       ...(command.environment
         ? { environment: structuredClone(command.environment) }
         : {}),
-      execution: command.execution,
+      invocation,
+      execution,
     });
     if (outcome.status === "not-found") {
       throw new ConversationApplicationError(
@@ -1925,7 +2033,7 @@ export class ConversationDirectoryApplicationService
         "turn-lifecycle-busy",
       );
     }
-    command.execution.onAdmitted?.({
+    execution.onAdmitted?.({
       conversationId: outcome.conversationId,
       turnId,
       ...(outcome.runId ? { runId: outcome.runId } : {}),
@@ -2351,6 +2459,17 @@ export const CONVERSATION_ADMIT_AGENT_TURN_COMMAND = defineProductApiCommand<
   never
 >("conversation-run.command.admit-agent-turn", []);
 
+export const CONVERSATION_ADMIT_PERSPECTIVE_TURN_COMMAND =
+  defineProductApiCommand<
+    "conversation-run.command.admit-perspective-turn",
+    Extract<
+      ConversationDirectoryCommand,
+      { readonly kind: "admit-perspective-turn" }
+    >,
+    ConversationAgentTurnAdmissionResult,
+    never
+  >("conversation-run.command.admit-perspective-turn", []);
+
 export const CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND =
   defineProductApiCommand<
     "conversation-run.command.prepare-agent-turn-identity",
@@ -2401,6 +2520,7 @@ export const CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET =
       CONVERSATION_RESOLVE_UNCERTAIN_COMMAND,
       CONVERSATION_PREPARE_AGENT_TURN_IDENTITY_COMMAND,
       CONVERSATION_ADMIT_AGENT_TURN_COMMAND,
+      CONVERSATION_ADMIT_PERSPECTIVE_TURN_COMMAND,
       CONVERSATION_UPDATE_TASK_LIST_COMMAND,
       CONVERSATION_COMPACT_COMMAND,
     ],
@@ -2500,6 +2620,13 @@ export function createConversationDirectoryProductApiContribution(
         CONVERSATION_ADMIT_AGENT_TURN_COMMAND,
         async (command) => ({
           result: await application.admitAgentTurn(command),
+          facts: [],
+        }),
+      ),
+      bindProductApiOperation(
+        CONVERSATION_ADMIT_PERSPECTIVE_TURN_COMMAND,
+        async (command) => ({
+          result: await application.admitPerspectiveTurn(command),
           facts: [],
         }),
       ),

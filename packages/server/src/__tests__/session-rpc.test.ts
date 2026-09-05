@@ -65,13 +65,6 @@ import { createAdvancementReviewExternalMechanism } from "@zhixing/owner-service
 import {
   createAdvancementProxyTurnPort,
 } from "../advancement/adapters.js";
-import {
-  PERSPECTIVES_CONVERGENCE_NODE_ID,
-  PERSPECTIVES_DELIBERATION_DEFINITION_ID,
-  PerspectivesController,
-  type PerspectiveAllocationStrategy,
-  type PerspectivesOrchestrationExecutor,
-} from "../perspectives/index.js";
 import { createTempDir } from "@zhixing/test-utils";
 import { protocolDigest } from "@zhixing/core/protocol";
 import {
@@ -82,6 +75,9 @@ import {
   CONVERSATION_DIRECTORY_PRODUCT_API_EXACT_SET,
   ConversationApplicationError,
   ConversationDirectoryApplicationService,
+  ConversationPerspectivesApplicationService,
+  PERSPECTIVES_CONVERGENCE_NODE_ID,
+  PERSPECTIVES_DELIBERATION_DEFINITION_ID,
   createConversationDirectoryProductApiContribution,
   projectConversationClear,
   projectConversationDelete,
@@ -94,6 +90,9 @@ import {
   type ConversationTaskListPort,
   type ConversationUsageProjectionPort,
   type ConversationSecurityProjectionPort,
+  type ConversationPerspectivesApplication,
+  type ConversationPerspectivesCorrectnessPort,
+  type ConversationPerspectivesRuntimePort,
 } from "@zhixing/core/conversation/application";
 import {
   ADVANCEMENT_PRODUCT_API_EXACT_SET,
@@ -341,57 +340,87 @@ function createDurableRejectedExecutor(): DurableConversationTurnExecutor {
   };
 }
 
-function createTestPerspectivesController(
-  finalText = "多视角最终版",
+function createTestPerspectivesApplication(
+  finalText: string,
   observed: {
     readonly allocationQuestions?: string[];
     readonly runInputs?: string[];
-  } = {},
-): PerspectivesController {
-  const allocationStrategy: PerspectiveAllocationStrategy = {
-    async allocate(input) {
-      observed.allocationQuestions?.push(input.question);
-      return {
-        perspectives: [
-          { name: "产品", charge: "判断用户价值" },
-          { name: "架构", charge: "判断工程边界" },
-        ],
-        usage: { inputTokens: 2, outputTokens: 1 },
-      };
-    },
-  };
-  const orchestrationExecutor: PerspectivesOrchestrationExecutor = {
-    async run(input) {
-      if (typeof input.runInput === "string") {
-        observed.runInputs?.push(input.runInput);
-      }
-      await input.eventBus.emit("orchestration:run_start", {
-        runId: "orch-1",
-        definitionId: PERSPECTIVES_DELIBERATION_DEFINITION_ID,
-        nodeCount: input.executable.definition.nodeIds.length,
-        maxParallel: input.executable.definition.policy.maxParallel,
-      });
-      return {
-        runId: "orch-1",
-        definitionId: PERSPECTIVES_DELIBERATION_DEFINITION_ID,
-        status: "completed",
-        outputs: {
-          [PERSPECTIVES_CONVERGENCE_NODE_ID]: {
-            nodeId: PERSPECTIVES_CONVERGENCE_NODE_ID,
-            format: "text",
-            content: finalText,
-          },
+  },
+  conversations: ConversationManager,
+): ConversationPerspectivesApplication {
+  const correctness: ConversationPerspectivesCorrectnessPort = {
+    usesDurableTurnProtocol: () => conversations.usesDurableTurnProtocol(),
+    session: (conversationId) => {
+      const managed = conversations.getSession(conversationId);
+      if (!managed) return undefined;
+      const runtime: ConversationPerspectivesRuntimePort = {
+        conversationId,
+        windowMessages: () => managed.window.getMessages(),
+        turnCount: () => managed.turnCount,
+        estimateMessagesTokens: (messages) =>
+          managed.runtime.estimateMessagesTokens?.(messages) ??
+          Math.max(1, messages.length * 10),
+        callText: async (prompt) => {
+          const question = /<question>\n(?<question>[\s\S]*?)\n<\/question>/u.exec(
+            prompt,
+          )?.groups?.question;
+          if (!question) throw new Error("perspective allocation question missing");
+          observed.allocationQuestions?.push(question);
+          return {
+            text: JSON.stringify({
+              perspectives: [
+                { name: "产品", charge: "判断用户价值" },
+                { name: "架构", charge: "判断工程边界" },
+              ],
+            }),
+            usage: { inputTokens: 2, outputTokens: 1 },
+          };
         },
-        nodeResults: {},
-        errors: { nodes: {} },
-        usage: { inputTokens: 10, outputTokens: 4 },
-        durationMs: 1,
-      } satisfies OrchestrationRunResultV1;
+        runOrchestration: async (input) => {
+          observed.runInputs?.push(input.runInput);
+          await input.eventBus.emit("orchestration:run_start", {
+            runId: "orch-1",
+            definitionId: PERSPECTIVES_DELIBERATION_DEFINITION_ID,
+            nodeCount: input.executable.definition.nodeIds.length,
+            maxParallel: input.executable.definition.policy.maxParallel,
+          });
+          return {
+            runId: "orch-1",
+            definitionId: PERSPECTIVES_DELIBERATION_DEFINITION_ID,
+            status: "completed",
+            outputs: {
+              [PERSPECTIVES_CONVERGENCE_NODE_ID]: {
+                nodeId: PERSPECTIVES_CONVERGENCE_NODE_ID,
+                format: "text",
+                content: finalText,
+              },
+            },
+            nodeResults: {},
+            errors: { nodes: {} },
+            usage: { inputTokens: 10, outputTokens: 4 },
+            durationMs: 1,
+          } satisfies OrchestrationRunResultV1;
+        },
+      };
+      return runtime;
     },
+    runDurable: async () => {
+      throw new Error("durable perspective test adapter is not assembled");
+    },
+    recordLegacyTurn: async (conversationId, record, turnId) => {
+      await conversations.recordTurn(
+        conversationId,
+        record,
+        undefined,
+        turnId ? { turnId } : undefined,
+      );
+    },
+    publishPendingFinals: (conversationId) =>
+      conversations.publishPendingFinals(conversationId),
+    releaseBusy: (conversationId) => conversations.setBusy(conversationId, false),
   };
-  return new PerspectivesController({
-    allocationStrategy,
-    orchestrationExecutor,
+  return new ConversationPerspectivesApplicationService({
+    correctness,
   });
 }
 
@@ -564,6 +593,7 @@ function createConversationProductApi(input: {
   }>) => Promise<ConversationAdoptionReviewProjection | undefined>;
   readonly publishCleared?: (conversationId: string) => void;
   readonly publishDeleted?: (conversationId: string) => void;
+  readonly perspectives?: ConversationPerspectivesApplication;
 }): ProductApiDispatcher {
   const advancement = input.advancement;
   const advancementActiveState = advancement?.reviews;
@@ -926,6 +956,7 @@ function createConversationProductApi(input: {
             undefined,
         }
       : undefined,
+    ...(input.perspectives ? { perspectives: input.perspectives } : {}),
   });
   const advancementApplication = advancement
     ? new AdvancementApplicationService({
@@ -1557,7 +1588,13 @@ describe("session.* RPC (S2.D)", () => {
     factory: RuntimeFactory,
     opts: {
       advancement?: AdvancementController;
-      perspectives?: PerspectivesController;
+      perspectives?: Readonly<{
+        finalText?: string;
+        observed?: Readonly<{
+          allocationQuestions?: string[];
+          runInputs?: string[];
+        }>;
+      }>;
       withAdvancementRecovery?: boolean;
       seedConversations?: readonly string[];
       durableTurnExecutor?: DurableConversationTurnExecutor;
@@ -1628,11 +1665,19 @@ describe("session.* RPC (S2.D)", () => {
           })
         : undefined;
     let ctx!: ReturnType<typeof createServerContext>;
+    const perspectives = opts.perspectives
+      ? createTestPerspectivesApplication(
+          opts.perspectives.finalText ?? "多视角最终版",
+          opts.perspectives.observed ?? {},
+          conversations,
+        )
+      : undefined;
     const productApi = createConversationProductApi({
       directory: conversationDirectory,
       conversations,
       advancement: opts.advancement,
       advancementRecovery,
+      ...(perspectives ? { perspectives } : {}),
       publishCleared: (conversationId) => {
         ctx.sessionBroadcast?.(conversationId, "session.changed", {
           conversationId,
@@ -1651,7 +1696,6 @@ describe("session.* RPC (S2.D)", () => {
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
-      perspectives: opts.perspectives,
       productApi,
     });
     server = await startServer({ context: ctx });
@@ -1805,10 +1849,10 @@ describe("session.* RPC (S2.D)", () => {
     const allocationQuestions: string[] = [];
     const runInputs: string[] = [];
     await startWithFactory(createMockFactory({ deltaCount: 0 }), {
-      perspectives: createTestPerspectivesController("最终收敛答案", {
-        allocationQuestions,
-        runInputs,
-      }),
+      perspectives: {
+        finalText: "最终收敛答案",
+        observed: { allocationQuestions, runInputs },
+      },
     });
     const client = await connect(server.port);
     await client.request("auth", { token: TEST_TOKEN });
@@ -1879,9 +1923,10 @@ describe("session.* RPC (S2.D)", () => {
         abortYieldsAborted: true,
       }),
       {
-        perspectives: createTestPerspectivesController("不应执行", {
-          runInputs,
-        }),
+        perspectives: {
+          finalText: "不应执行",
+          observed: { runInputs },
+        },
       },
     );
     const alice = await connect(server.port);
@@ -2061,7 +2106,7 @@ describe("session.* RPC (S2.D)", () => {
   it("awaiting 期间 engage=perspectives 不绕过 Rubric 确认面", async () => {
     await startWithFactory(createMockFactory(), {
       advancement: await createTestAdvancementController(),
-      perspectives: createTestPerspectivesController("不应执行的多视角答案"),
+      perspectives: { finalText: "不应执行的多视角答案" },
     });
     const client = await connect(server.port);
     await client.request("auth", { token: TEST_TOKEN });

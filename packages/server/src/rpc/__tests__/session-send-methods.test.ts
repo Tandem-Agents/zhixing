@@ -171,18 +171,16 @@ describe("session.send 方法", () => {
   });
 
   it("rejects a missing durable turn identity before Perspectives admission", async () => {
-    const admitTurn = vi.fn();
-    const createPendingTask = vi.fn();
+    const admit = vi.fn();
     const notify = vi.fn();
     const method = buildSessionSendMethod();
     const ctx = {
       server: {
-        conversations: { admitTurn },
-        perspectives: { createPendingTask },
+        conversations: {},
         productApi: agentTurnProductApi({
           requiresStableTurnIdentity: true,
           createTurnIdentity: () => "turn-generated",
-          admit: vi.fn(),
+          admit,
         }),
       } as unknown as ServerContext,
       connection: {
@@ -207,8 +205,7 @@ describe("session.send 方法", () => {
       message:
         "session.send requires a stable 'turnId' while durable execution is enabled",
     });
-    expect(admitTurn).not.toHaveBeenCalled();
-    expect(createPendingTask).not.toHaveBeenCalled();
+    expect(admit).not.toHaveBeenCalled();
     expect(notify).not.toHaveBeenCalled();
   });
 
@@ -267,6 +264,7 @@ describe("session.send 方法", () => {
           loadActiveSession: async () => null,
         },
         productApi,
+        sessionBroadcast: vi.fn(),
       } as unknown as ServerContext,
       connection: {
         id: "conn-1",
