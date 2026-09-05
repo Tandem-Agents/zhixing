@@ -976,7 +976,8 @@ export const WORKSPACE_BINDING_ROOT_DURABLE_CONTRACT = defineDurableRuntimeContr
   cases: [
     ...["healthy", "degraded", "pending-reset"].map((key) => ({ kind: "variant" as const, key })),
     ...["healthy-reset", "confirmation-mismatch", "generation-conflict", "reservation-conflict"].map((key) => ({ kind: "rejection" as const, key, reasonCode: "WORKSPACE_CATALOG_CONFLICT" })),
-    ...["malformed-manifest", "missing-active-log", "invalid-reset-genesis", "broken-generation-link"].map((key) => ({ kind: "corruption" as const, key, reasonCode: "WORKSPACE_CATALOG_INTEGRITY" })),
+    ...["malformed-manifest", "missing-active-log", "broken-generation-link"].map((key) => ({ kind: "corruption" as const, key, reasonCode: "WORKSPACE_CATALOG_INTEGRITY" })),
+    { kind: "corruption", key: "invalid-reset-genesis", reasonCode: "WORKSPACE_CATALOG_DEGRADED" },
   ],
 } as const);
 

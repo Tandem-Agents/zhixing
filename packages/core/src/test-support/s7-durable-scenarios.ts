@@ -3,6 +3,7 @@ import path from "node:path";
 import {
   WorkspaceBindingCatalog,
   WorkspaceBindingCatalogConflictError,
+  WorkspaceBindingCatalogDegradedError,
   WorkspaceBindingCatalogIntegrityError,
   WorkspaceBindingConflictError,
   WorkspaceBindingNotFoundError,
@@ -515,7 +516,12 @@ export async function executeWorkspaceBindingRootCase(
       kind: "corruption",
       caseKey: "invalid-reset-genesis",
     });
-    observeReasonCode(status.reason ?? "", "catalog status after invalid reset genesis recovery");
+    assert(status.reason === "commit-log-corrupt", "invalid reset genesis did not retain its diagnostic");
+    await expectInstance(
+      () => fixture.catalog.list(globalReadContext("invalid-genesis-list")),
+      WorkspaceBindingCatalogDegradedError,
+      { kind: "corruption", caseKey: "invalid-reset-genesis" },
+    );
   } else if (caseKey === "broken-generation-link") {
     rootPersistence.seedManifest({
       version: 1,
